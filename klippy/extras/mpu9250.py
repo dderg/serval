@@ -159,7 +159,7 @@ class MPU9250:
         self.set_reg(
             REG_SMPLRT_DIV,
             SAMPLE_RATE_DIVS[self.data_rate],
-            minclock=self.mcu.print_time_to_clock(next_time),
+            minclock=self.mcu.get_clocksync().print_time_to_clock(next_time),
         )
         self.set_reg(REG_CONFIG, SET_CONFIG)
         self.set_reg(REG_ACCEL_CONFIG, SET_ACCEL_CONFIG)

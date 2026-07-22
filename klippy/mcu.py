@@ -8,7 +8,15 @@ import math
 import os
 import zlib
 
-from . import chelper, clocksync, engine_mcu, msgproto, pins, serialhdl
+from . import (
+    chelper,
+    clocksync,
+    engine_mcu,
+    mcu_hardware_reset,
+    msgproto,
+    pins,
+    serialhdl,
+)
 from .extras.danger_options import get_danger_options
 from .mcu_commands import CommandQueryWrapper, CommandWrapper
 from .mcu_pins import (  # noqa: F401
@@ -132,7 +140,7 @@ class MCU:
                 "restart_method", restart_methods, None
             )
         self._reset_cmd = self._config_reset_cmd = None
-        self._is_mcu_engine = False
+        self._is_canbus_bridge = False
         self._emergency_stop_cmd = None
         self._is_shutdown = self._is_timeout = False
         self._shutdown_clock = 0
@@ -220,7 +228,7 @@ class MCU:
         self._is_shutdown = True
         clock = params.get("clock")
         if clock is not None:
-            self._shutdown_clock = self.clock32_to_clock64(clock)
+            self._shutdown_clock = self._clocksync.clock32_to_clock64(clock)
         msg = params["static_string_id"]
         if msg == "kalico runtime fault" and self._last_runtime_fault:
             msg = "%s — %s" % (msg, self._last_runtime_fault)
@@ -243,47 +251,8 @@ class MCU:
                 "MCU '%s' latched in shutdown state at connect" % (self._name,)
             )
 
-        append_msgs = []
-        if (
-            msg.startswith("ADC out of range")
-            or msg.startswith("Thermocouple reader fault")
-        ) and not get_danger_options().temp_ignore_limits:
-            pheaters = self._printer.lookup_object("heaters")
-            heaters = [
-                pheaters.lookup_heater(n) for n in pheaters.available_heaters
-            ]
-            for heater in heaters:
-                if hasattr(heater, "is_adc_faulty") and heater.is_adc_faulty():
-                    append_msgs.append(
-                        {
-                            "heater": heater.name,
-                            "last_temp": "{:.2f}".format(heater.last_temp),
-                            "min_temp": heater.min_temp,
-                            "max_temp": heater.max_temp,
-                        }
-                    )
-            sensor_names = [
-                sensor
-                for sensor in self._printer.objects
-                if (
-                    sensor.startswith("temperature_sensor")
-                    or sensor.startswith("temperature_fan")
-                )
-            ]
-            for sensor_name in sensor_names:
-                sensor = self._printer.lookup_object(sensor_name)
-                if hasattr(sensor, "is_adc_faulty") and sensor.is_adc_faulty():
-                    append_msgs.append(
-                        {
-                            sensor_name.split(" ")[0]: sensor.name,
-                            "last_temp": "{:.2f}".format(sensor.last_temp),
-                            "min_temp": sensor.min_temp,
-                            "max_temp": sensor.max_temp,
-                        }
-                    )
-
         self._printer.invoke_async_shutdown(
-            prefix + msg + error_help(msg=msg, append_msgs=append_msgs)
+            prefix + msg + shutdown_diagnostics(self._printer, msg)
         )
 
     def _handle_starting(self, params):
@@ -303,29 +272,6 @@ class MCU:
         self._printer.request_exit("firmware_restart")
         self._reactor.pause(self._reactor.monotonic() + 2.000)
         raise error("Attempt MCU '%s' restart failed" % (self._name,))
-
-    def _connect_file(self, pace=False):
-        # In a debugging mode.  Open debug output file and read data dictionary
-        start_args = self._printer.get_start_args()
-        if self._name == "mcu":
-            out_fname = start_args.get("debugoutput")
-            dict_fname = start_args.get("dictionary")
-        else:
-            out_fname = start_args.get("debugoutput") + "-" + self._name
-            dict_fname = start_args.get("dictionary_" + self._name)
-        outfile = open(out_fname, "wb")
-        dfile = open(dict_fname, "rb")
-        dict_data = dfile.read()
-        dfile.close()
-        self._serial.connect_file(outfile, dict_data)
-        self._clocksync.connect_file(self._serial, pace)
-        # Handle pacing
-        if not pace:
-
-            def dummy_estimated_print_time(eventtime):
-                return 0.0
-
-            self.estimated_print_time = dummy_estimated_print_time
 
     def handle_non_critical_disconnect(self):
         self.non_critical_disconnected = True
@@ -380,7 +326,7 @@ class MCU:
             self._check_restart("CRC mismatch")
             raise error("MCU '%s' CRC does not match config" % (self._name,))
         # Transmit config messages (if needed)
-        self.register_response(self._handle_starting, "starting")
+        self._serial.register_response(self._handle_starting, "starting")
         try:
             if prev_crc is None:
                 logging.info(
@@ -432,8 +378,6 @@ class MCU:
             "get_config",
             "config is_config=%c crc=%u is_shutdown=%c move_count=%hu",
         )
-        if self.is_fileoutput():
-            return {"is_config": 0, "move_count": 500, "crc": 0}
         try:
             config_params = get_config_cmd.send()
         except Exception as e:
@@ -468,7 +412,12 @@ class MCU:
             % (
                 self._name,
                 " ".join(
-                    ["%s=%s" % (k, v) for k, v in self.get_constants().items()]
+                    [
+                        "%s=%s" % (k, v)
+                        for k, v in self._serial.get_msgparser()
+                        .get_constants()
+                        .items()
+                    ]
                 ),
             ),
         ]
@@ -507,7 +456,7 @@ class MCU:
             # Not configured - send config and issue get_config again
             self._send_config(None)
             config_params = self._send_get_config()
-            if not config_params["is_config"] and not self.is_fileoutput():
+            if not config_params["is_config"]:
                 raise error("Unable to configure MCU '%s'" % (self._name,))
         else:
             # if the mcu crc match the initial crc, the mcu lost comms but not
@@ -560,37 +509,38 @@ class MCU:
             return True
 
     def _identify_connect_serial(self):
-        if self.is_fileoutput():
-            self._connect_file()
-        else:
-            resmeth = self._restart_method
-            if resmeth == "rpi_usb" and not os.path.exists(self._serialport):
-                # Try toggling usb power
-                self._check_restart("enable power")
-            try:
-                if self._baud:
-                    # Cheetah boards require RTS to be deasserted
-                    # else a reset will trigger the built-in bootloader.
-                    rts = resmeth != "cheetah"
-                    self._serial.connect_uart(self._serialport, self._baud, rts)
-                else:
-                    self._serial.connect_pipe(self._serialport)
-                self._clocksync.connect(self._serial)
-            except serialhdl.error as e:
-                raise error(str(e))
+        resmeth = self._restart_method
+        if resmeth == "rpi_usb" and not os.path.exists(self._serialport):
+            # Try toggling usb power
+            self._check_restart("enable power")
+        try:
+            if self._baud:
+                # Cheetah boards require RTS to be deasserted
+                # else a reset will trigger the built-in bootloader.
+                rts = resmeth != "cheetah"
+                self._serial.connect_uart(self._serialport, self._baud, rts)
+            else:
+                self._serial.connect_pipe(self._serialport)
+            self._clocksync.connect(self._serial)
+        except serialhdl.error as e:
+            raise error(str(e))
 
     def _identify_log_and_reserve_pins(self):
         if get_danger_options().log_startup_info:
             logging.info(self._log_info())
         ppins = self._printer.lookup_object("pins")
         pin_resolver = ppins.get_pin_resolver(self._name)
-        for cname, value in self.get_constants().items():
+        for cname, value in (
+            self._serial.get_msgparser().get_constants().items()
+        ):
             if cname.startswith("RESERVE_PINS_"):
                 for pin in value.split(","):
                     pin_resolver.reserve_pin(pin, cname[13:])
 
     def _identify_set_mcu_freq(self):
-        self._mcu_freq = self.get_constant_float("CLOCK_FREQ")
+        self._mcu_freq = self._serial.get_msgparser().get_constant_float(
+            "CLOCK_FREQ"
+        )
         if MAX_NOMINAL_DURATION * self._mcu_freq > MAX_SCHEDULE_TICKS:
             max_possible = MAX_SCHEDULE_TICKS / self._mcu_freq
             raise error(
@@ -601,7 +551,9 @@ class MCU:
             )
 
     def _identify_lookup_commands_and_restart_method(self):
-        self._stats_sumsq_base = self.get_constant_float("STATS_SUMSQ_BASE")
+        self._stats_sumsq_base = (
+            self._serial.get_msgparser().get_constant_float("STATS_SUMSQ_BASE")
+        )
         self._emergency_stop_cmd = self.lookup_command("emergency_stop")
         self._reset_cmd = self.try_lookup_command("reset")
         self._config_reset_cmd = self.try_lookup_command("config_reset")
@@ -622,9 +574,9 @@ class MCU:
         if self._restart_method is None and mbaud is None and not ext_only:
             self._restart_method = "command"
         if msgparser.get_constant("CANBUS_BRIDGE", 0):
-            self._is_mcu_engine = True
+            self._is_canbus_bridge = True
             self._printer.register_event_handler(
-                "klippy:firmware_restart", self._firmware_restart_engine
+                "klippy:firmware_restart", self._firmware_restart_canbus_bridge
             )
 
     def _identify_record_version_info(self):
@@ -643,10 +595,12 @@ class MCU:
             )
 
     def _identify_register_responses(self):
-        self.register_response(self._handle_shutdown, "shutdown")
-        self.register_response(self._handle_shutdown, "is_shutdown")
-        self.register_response(self._handle_mcu_stats, "stats")
-        self.register_response(self._handle_runtime_fault, "runtime_fault")
+        self._serial.register_response(self._handle_shutdown, "shutdown")
+        self._serial.register_response(self._handle_shutdown, "is_shutdown")
+        self._serial.register_response(self._handle_mcu_stats, "stats")
+        self._serial.register_response(
+            self._handle_runtime_fault, "runtime_fault"
+        )
 
     def _identify_setup_motion_engine(self):
         msgparser = self._serial.get_msgparser()
@@ -678,8 +632,6 @@ class MCU:
             self._clocksync.set_clock_est_callback(_engine_clock_est_cb)
 
     def _ready(self):
-        if self.is_fileoutput():
-            return
         # Check that reported mcu frequency is in range
         mcu_freq = self._mcu_freq
         systime = self._reactor.monotonic()
@@ -726,7 +678,7 @@ class MCU:
     def get_query_slot(self, oid):
         slot = self.seconds_to_clock(oid * 0.01)
         t = int(self.estimated_print_time(self._reactor.monotonic()) + 1.5)
-        return self.print_time_to_clock(t) + slot
+        return self._clocksync.print_time_to_clock(t) + slot
 
     def seconds_to_clock(self, time):
         return int(time * self._mcu_freq)
@@ -737,7 +689,12 @@ class MCU:
     def max_nominal_duration(self):
         return MAX_NOMINAL_DURATION
 
-    # Wrapper functions
+    def get_clocksync(self):
+        return self._clocksync
+
+    def get_command_channel(self):
+        return self._serial
+
     def get_printer(self):
         return self._printer
 
@@ -752,9 +709,6 @@ class MCU:
 
     def get_non_critical_disconnect_event_name(self):
         return self._non_critical_disconnect_event_name
-
-    def register_response(self, cb, msg, oid=None):
-        self._serial.register_response(cb, msg, oid)
 
     def lookup_command(self, msgformat):
         return CommandWrapper(self._serial, msgformat)
@@ -790,29 +744,8 @@ class MCU:
             )
             return None
 
-    def get_enumerations(self):
-        return self._serial.get_msgparser().get_enumerations()
-
-    def get_constants(self):
-        return self._serial.get_msgparser().get_constants()
-
-    def get_constant_float(self, name):
-        return self._serial.get_msgparser().get_constant_float(name)
-
-    def print_time_to_clock(self, print_time):
-        return self._clocksync.print_time_to_clock(print_time)
-
-    def clock_to_print_time(self, clock):
-        return self._clocksync.clock_to_print_time(clock)
-
     def estimated_print_time(self, eventtime):
         return self._clocksync.estimated_print_time(eventtime)
-
-    def clock32_to_clock64(self, clock32):
-        return self._clocksync.clock32_to_clock64(clock32)
-
-    def is_clock_synced(self):
-        return self._clocksync.is_synced()
 
     # Restarts
     def _disconnect(self):
@@ -828,12 +761,12 @@ class MCU:
     def _restart_arduino(self):
         logging.info("Attempting MCU '%s' reset", self._name)
         self._disconnect()
-        serialhdl.arduino_reset(self._serialport, self._reactor)
+        mcu_hardware_reset.arduino_reset(self._serialport, self._reactor)
 
     def _restart_cheetah(self):
         logging.info("Attempting MCU '%s' Cheetah-style reset", self._name)
         self._disconnect()
-        serialhdl.cheetah_reset(self._serialport, self._reactor)
+        mcu_hardware_reset.cheetah_reset(self._serialport, self._reactor)
 
     def _restart_via_command(self):
         if (
@@ -875,19 +808,17 @@ class MCU:
 
     def _firmware_restart(self, force=False):
         if (
-            self._is_mcu_engine and not force
+            self._is_canbus_bridge and not force
         ) or self.non_critical_disconnected:
             return
-        if self._restart_method == "rpi_usb":
-            self._restart_rpi_usb()
-        elif self._restart_method == "command":
-            self._restart_via_command()
-        elif self._restart_method == "cheetah":
-            self._restart_cheetah()
-        else:
-            self._restart_arduino()
+        dispatch = {
+            "rpi_usb": self._restart_rpi_usb,
+            "command": self._restart_via_command,
+            "cheetah": self._restart_cheetah,
+        }
+        dispatch.get(self._restart_method, self._restart_arduino)()
 
-    def _firmware_restart_engine(self):
+    def _firmware_restart_canbus_bridge(self):
         self._firmware_restart(True)
 
     # Move queue tracking
@@ -898,7 +829,7 @@ class MCU:
         self._flush_callbacks.append(callback)
 
     def flush_moves(self, print_time, clear_history_time):
-        clock = self.print_time_to_clock(print_time)
+        clock = self._clocksync.print_time_to_clock(print_time)
         if clock < 0:
             return
         for cb in self._flush_callbacks:
@@ -906,11 +837,7 @@ class MCU:
 
     def check_active(self, print_time, eventtime):
         self._clocksync.calibrate_clock(print_time, eventtime)
-        if (
-            self._clocksync.is_active()
-            or self.is_fileoutput()
-            or self._is_timeout
-        ):
+        if self._clocksync.is_active() or self._is_timeout:
             return
         if self.is_non_critical:
             self.handle_non_critical_disconnect()
@@ -933,7 +860,7 @@ class MCU:
 
     # Misc external commands
     def is_fileoutput(self):
-        return self._printer.get_start_args().get("debugoutput") is not None
+        return False
 
     def is_shutdown(self):
         return self._is_shutdown
@@ -1022,6 +949,48 @@ def error_help(msg, append_msgs=None):
                         help_msg = "\n".join([help_msg, str(line)])
                 return help_msg
     return ""
+
+
+def shutdown_diagnostics(printer, msg):
+    append_msgs = []
+    if (
+        msg.startswith("ADC out of range")
+        or msg.startswith("Thermocouple reader fault")
+    ) and not get_danger_options().temp_ignore_limits:
+        pheaters = printer.lookup_object("heaters")
+        heaters = [
+            pheaters.lookup_heater(n) for n in pheaters.available_heaters
+        ]
+        for heater in heaters:
+            if hasattr(heater, "is_adc_faulty") and heater.is_adc_faulty():
+                append_msgs.append(
+                    {
+                        "heater": heater.name,
+                        "last_temp": "{:.2f}".format(heater.last_temp),
+                        "min_temp": heater.min_temp,
+                        "max_temp": heater.max_temp,
+                    }
+                )
+        sensor_names = [
+            sensor
+            for sensor in printer.objects
+            if (
+                sensor.startswith("temperature_sensor")
+                or sensor.startswith("temperature_fan")
+            )
+        ]
+        for sensor_name in sensor_names:
+            sensor = printer.lookup_object(sensor_name)
+            if hasattr(sensor, "is_adc_faulty") and sensor.is_adc_faulty():
+                append_msgs.append(
+                    {
+                        sensor_name.split(" ")[0]: sensor.name,
+                        "last_temp": "{:.2f}".format(sensor.last_temp),
+                        "min_temp": sensor.min_temp,
+                        "max_temp": sensor.max_temp,
+                    }
+                )
+    return error_help(msg=msg, append_msgs=append_msgs)
 
 
 def add_printer_objects(config):

@@ -52,7 +52,11 @@ class PrinterDotstar:
         # Transmit update
         minclock = 0
         if print_time is not None:
-            minclock = self.spi.get_mcu().print_time_to_clock(print_time)
+            minclock = (
+                self.spi.get_mcu()
+                .get_clocksync()
+                .print_time_to_clock(print_time)
+            )
         for d in [data[i : i + 20] for i in range(0, len(data), 20)]:
             self.spi.spi_send(
                 d, minclock=minclock, reqclock=BACKGROUND_PRIORITY_CLOCK

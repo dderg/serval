@@ -4,8 +4,9 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
-import math
 import traceback
+
+from .motion_engine import native_class
 
 RTT_AGE = 0.000010 / (60.0 * 60.0)
 DECAY = 1.0 / 30.0
@@ -20,25 +21,103 @@ class ClockSync:
         self.get_clock_timer = reactor.register_timer(self._get_clock_event)
         self.queries_pending = 0
         self.mcu_freq = 1.0
-        self.last_clock = 0
         self.clock_est = (0.0, 0.0, 0.0)
-        # Minimum round-trip-time tracking
-        self.min_half_rtt = 999999999.9
-        self.min_rtt_time = 0.0
-        # Linear regression of mcu clock and system sent_time
-        self.time_avg = self.time_variance = 0.0
-        self.clock_avg = self.clock_covariance = 0.0
-        self.prediction_variance = 0.0
-        self.last_prediction_time = 0.0
-        self._sync_stable_count = 0
-        self._synced = False
+        self._est = native_class("ClockSyncEstimator")(
+            DECAY, RTT_AGE, SYNC_STABLE_FREQ_PPM, SYNC_STABLE_SAMPLES
+        )
         self._clock_est_callback = None
 
+    @property
+    def last_clock(self):
+        return self._est.last_clock
+
+    @last_clock.setter
+    def last_clock(self, v):
+        self._est.last_clock = int(v)
+
+    @property
+    def time_avg(self):
+        return self._est.time_avg
+
+    @time_avg.setter
+    def time_avg(self, v):
+        self._est.time_avg = v
+
+    @property
+    def clock_avg(self):
+        return self._est.clock_avg
+
+    @clock_avg.setter
+    def clock_avg(self, v):
+        self._est.clock_avg = v
+
+    @property
+    def time_variance(self):
+        return self._est.time_variance
+
+    @time_variance.setter
+    def time_variance(self, v):
+        self._est.time_variance = v
+
+    @property
+    def clock_covariance(self):
+        return self._est.clock_covariance
+
+    @clock_covariance.setter
+    def clock_covariance(self, v):
+        self._est.clock_covariance = v
+
+    @property
+    def prediction_variance(self):
+        return self._est.prediction_variance
+
+    @prediction_variance.setter
+    def prediction_variance(self, v):
+        self._est.prediction_variance = v
+
+    @property
+    def last_prediction_time(self):
+        return self._est.last_prediction_time
+
+    @last_prediction_time.setter
+    def last_prediction_time(self, v):
+        self._est.last_prediction_time = v
+
+    @property
+    def min_half_rtt(self):
+        return self._est.min_half_rtt
+
+    @min_half_rtt.setter
+    def min_half_rtt(self, v):
+        self._est.min_half_rtt = v
+
+    @property
+    def min_rtt_time(self):
+        return self._est.min_rtt_time
+
+    @min_rtt_time.setter
+    def min_rtt_time(self, v):
+        self._est.min_rtt_time = v
+
+    @property
+    def _sync_stable_count(self):
+        return self._est.sync_stable_count
+
+    @_sync_stable_count.setter
+    def _sync_stable_count(self, v):
+        self._est.sync_stable_count = int(v)
+
+    @property
+    def _synced(self):
+        return self._est.synced
+
+    @_synced.setter
+    def _synced(self, v):
+        self._est.synced = bool(v)
+
     def set_clock_est_callback(self, cb):
-        # cb(freq, offset, last_clock) — invoked from the serial-reader
-        # thread on every regression update.  The callback must be
-        # thread-safe; the motion_engine wrapper hands the values to a
-        # Mutex-guarded Rust router.
+        # cb(freq, offset, last_clock); invoked from the serial-reader thread on
+        # every published regression update.
         self._clock_est_callback = cb
         if cb is not None and self.last_clock:
             try:
@@ -95,104 +174,21 @@ class ClockSync:
 
     def _handle_clock(self, params):
         self.queries_pending = 0
-        last_clock = self.last_clock
-        clock_delta = (params["clock"] - last_clock) & 0xFFFFFFFF
-        clock = last_clock + clock_delta
-        sent_time = params["#sent_time"]
-        if sent_time:
-            exp_clock = (sent_time - self.time_avg) * self.clock_est[
-                2
-            ] + self.clock_avg
-            wraps_lost_to_sample_gap = round((exp_clock - clock) / 2**32)
-            if wraps_lost_to_sample_gap > 0:
-                clock += wraps_lost_to_sample_gap * 2**32
-        self.last_clock = clock
-        if not sent_time:
+        est = self._est.handle_clock(
+            params["clock"] & 0xFFFFFFFF,
+            params["#sent_time"],
+            params["#receive_time"],
+            self.mcu_freq,
+            self.clock_est[2],
+        )
+        if est is None:
             return
-        receive_time = params["#receive_time"]
-        half_rtt = 0.5 * (receive_time - sent_time)
-        aged_rtt = (sent_time - self.min_rtt_time) * RTT_AGE
-        if half_rtt < self.min_half_rtt + aged_rtt:
-            self.min_half_rtt = half_rtt
-            self.min_rtt_time = sent_time
-            logging.debug(
-                "new minimum rtt %.3f: hrtt=%.6f freq=%d",
-                sent_time,
-                half_rtt,
-                self.clock_est[2],
-            )
-        # Filter out samples that are extreme outliers
-        exp_clock = (sent_time - self.time_avg) * self.clock_est[
-            2
-        ] + self.clock_avg
-        clock_diff2 = (clock - exp_clock) ** 2
-        if (
-            clock_diff2 > 25.0 * self.prediction_variance
-            and clock_diff2 > (0.000500 * self.mcu_freq) ** 2
-        ):
-            if (
-                clock > exp_clock
-                and sent_time < self.last_prediction_time + 10.0
-            ):
-                logging.debug(
-                    "Ignoring clock sample %.3f: freq=%d diff=%d stddev=%.3f",
-                    sent_time,
-                    self.clock_est[2],
-                    clock - exp_clock,
-                    math.sqrt(self.prediction_variance),
-                )
-                return
-            logging.info(
-                "Resetting prediction variance %.3f:"
-                " freq=%d diff=%d stddev=%.3f",
-                sent_time,
-                self.clock_est[2],
-                clock - exp_clock,
-                math.sqrt(self.prediction_variance),
-            )
-            self.prediction_variance = (0.001 * self.mcu_freq) ** 2
-        else:
-            self.last_prediction_time = sent_time
-            self.prediction_variance = (1.0 - DECAY) * (
-                self.prediction_variance + clock_diff2 * DECAY
-            )
-        # Add clock and sent_time to linear regression
-        diff_sent_time = sent_time - self.time_avg
-        self.time_avg += DECAY * diff_sent_time
-        self.time_variance = (1.0 - DECAY) * (
-            self.time_variance + diff_sent_time**2 * DECAY
-        )
-        diff_clock = clock - self.clock_avg
-        self.clock_avg += DECAY * diff_clock
-        self.clock_covariance = (1.0 - DECAY) * (
-            self.clock_covariance + diff_sent_time * diff_clock * DECAY
-        )
-        # Update prediction from linear regression
-        new_freq = self.clock_covariance / self.time_variance
-        prev_freq = self.clock_est[2]
-        self.clock_est = (
-            self.time_avg + self.min_half_rtt,
-            self.clock_avg,
-            new_freq,
-        )
-        if not self._synced:
-            if (
-                abs(new_freq - prev_freq)
-                <= SYNC_STABLE_FREQ_PPM * self.mcu_freq
-            ):
-                self._sync_stable_count += 1
-                if self._sync_stable_count >= SYNC_STABLE_SAMPLES:
-                    self._synced = True
-            else:
-                self._sync_stable_count = 0
+        new_freq, offset, clock_avg = est
+        self.clock_est = (offset, clock_avg, new_freq)
         cb = self._clock_est_callback
         if cb is not None:
             try:
-                cb(
-                    new_freq,
-                    self.time_avg + self.min_half_rtt,
-                    int(self.clock_avg),
-                )
+                cb(new_freq, offset, int(clock_avg))
             except Exception:
                 logging.exception("clocksync: set_clock_est callback")
 

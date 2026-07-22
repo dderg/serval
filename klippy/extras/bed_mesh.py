@@ -118,7 +118,6 @@ class BedMesh:
         self.printer.register_event_handler(
             "klippy:connect", self.handle_connect
         )
-        self.last_position = [0.0, 0.0, 0.0, 0.0]
         self.bmc = BedMeshCalibrate(config, self)
         self.z_mesh = None
         self.toolhead = None
@@ -167,9 +166,6 @@ class BedMesh:
             self.cmd_BED_MESH_CHECK,
             desc=self.cmd_BED_MESH_CHECK_help,
         )
-        # Register transform
-        gcode_move = self.printer.load_object(config, "gcode_move")
-        gcode_move.set_move_transform(self)
         # initialize status dict
         self.update_status()
 
@@ -191,6 +187,17 @@ class BedMesh:
             self.bmc.print_generated_points(logging.info, truncate=True)
 
     def set_mesh(self, mesh):
+        self._validate_fade_target(mesh)
+        self.tool_offset = 0.0
+        rebase = self._apply_to_engine(mesh)
+        self.z_mesh = mesh
+        self.toolhead.rebase_gcode_z(rebase)
+        excess = self._z_budget_excess()
+        if excess is not None:
+            self.gcode.respond_raw("!! bed_mesh: %s" % (excess,))
+        self.update_status()
+
+    def _validate_fade_target(self, mesh):
         if mesh is not None and self.fade_end != self.FADE_DISABLE:
             if self.base_fade_target is None:
                 self.fade_target = mesh.get_z_average()
@@ -201,7 +208,6 @@ class BedMesh:
                     not min_z <= self.fade_target <= max_z
                     and self.fade_target != 0.0
                 ):
-                    # fade target is non-zero, out of mesh range
                     err_target = self.fade_target
                     self.z_mesh = None
                     self.fade_target = 0.0
@@ -222,17 +228,6 @@ class BedMesh:
                 )
         else:
             self.fade_target = 0.0
-        self.tool_offset = 0.0
-        rebase = self._apply_to_engine(mesh)
-        self.z_mesh = mesh
-        # The engine re-expressed the machine Z through the new mesh; adopt
-        # the rebased gcode Z so the physical position is invariant across
-        # the swap (this also refreshes gcode_move's cached position).
-        self.toolhead.rebase_gcode_z(rebase)
-        excess = self._z_budget_excess()
-        if excess is not None:
-            self.gcode.respond_raw("!! bed_mesh: %s" % (excess,))
-        self.update_status()
 
     def _z_budget_excess(self):
         if self.z_budget_report is None:
@@ -299,18 +294,6 @@ class BedMesh:
         except ValueError as e:
             self.fade_target = 0.0
             raise self.gcode.error(str(e))
-
-    # The surface-following warp lives in the motion engine's lowerer
-    # (docs/rewrite/toolpath-surface-transforms.md): the Python coordinate
-    # world is entirely gcode space, so the registered transform is the
-    # identity and exists only to keep the gcode_move plumbing uniform.
-    def get_position(self):
-        self.last_position[:] = self.toolhead.get_position()
-        return list(self.last_position)
-
-    def move(self, newpos, speed):
-        self.toolhead.move(newpos, speed)
-        self.last_position[:] = newpos
 
     def get_status(self, eventtime=None):
         return self.status

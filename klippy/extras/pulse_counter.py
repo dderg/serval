@@ -33,7 +33,7 @@ class MCU_counter:
             % (self._oid, clock, self._poll_ticks, sample_ticks),
             is_init=True,
         )
-        self._mcu.register_response(
+        self._mcu.get_command_channel().register_response(
             self._handle_counter_state, "counter_state", self._oid
         )
 
@@ -42,11 +42,17 @@ class MCU_counter:
         self._callback = cb
 
     def _handle_counter_state(self, params):
-        next_clock = self._mcu.clock32_to_clock64(params["next_clock"])
-        time = self._mcu.clock_to_print_time(next_clock - self._poll_ticks)
+        next_clock = self._mcu.get_clocksync().clock32_to_clock64(
+            params["next_clock"]
+        )
+        time = self._mcu.get_clocksync().clock_to_print_time(
+            next_clock - self._poll_ticks
+        )
 
-        count_clock = self._mcu.clock32_to_clock64(params["count_clock"])
-        count_time = self._mcu.clock_to_print_time(count_clock)
+        count_clock = self._mcu.get_clocksync().clock32_to_clock64(
+            params["count_clock"]
+        )
+        count_time = self._mcu.get_clocksync().clock_to_print_time(count_clock)
 
         # handle 32-bit counter overflow
         last_count = self._last_count

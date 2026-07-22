@@ -1,4 +1,5 @@
 pub mod clock;
+pub mod clock_regression;
 mod fault;
 pub mod host_io;
 pub mod mcu_call;

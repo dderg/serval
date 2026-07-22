@@ -104,7 +104,12 @@ class MCU_TMC_uart_bitbang:
 
     def build_config(self):
         baud = TMC_BAUD_RATE
-        mcu_type = self.mcu.get_constants().get("MCU", "")
+        mcu_type = (
+            self.mcu.get_command_channel()
+            .get_msgparser()
+            .get_constants()
+            .get("MCU", "")
+        )
         if mcu_type.startswith("atmega") or mcu_type.startswith("at90usb"):
             baud = TMC_BAUD_RATE_AVR
         bit_ticks = self.mcu.seconds_to_clock(1.0 / baud)
@@ -219,7 +224,7 @@ class MCU_TMC_uart_bitbang:
     def reg_write(self, instance_id, addr, reg, val, print_time=None):
         minclock = 0
         if print_time is not None:
-            minclock = self.mcu.print_time_to_clock(print_time)
+            minclock = self.mcu.get_clocksync().print_time_to_clock(print_time)
         if self.analog_mux is not None:
             self.analog_mux.activate(instance_id)
         msg = self._encode_write(0xF5, addr, reg | 0x80, val)

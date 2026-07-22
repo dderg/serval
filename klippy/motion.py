@@ -376,7 +376,8 @@ class Motion:
             return [
                 m
                 for m in self.all_mcus
-                if not m.non_critical_disconnected and not m.is_clock_synced()
+                if not m.non_critical_disconnected
+                and not m.get_clocksync().is_synced()
             ]
 
         pending = pending_mcus()

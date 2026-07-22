@@ -8,6 +8,18 @@ class _FakeClockSync:
     def dump_debug(self):
         return self._debug
 
+    def print_time_to_clock(self, print_time):
+        return int(print_time * 1_000_000)
+
+    def clock_to_print_time(self, clock):
+        return clock / 1_000_000
+
+    def clock32_to_clock64(self, clock32):
+        return clock32
+
+    def is_synced(self):
+        return True
+
 
 class FakeMcu:
     def __init__(
@@ -44,6 +56,9 @@ class FakeMcu:
     def get_engine_handle(self):
         return self._handle
 
+    def get_clocksync(self):
+        return self._clocksync
+
     def create_oid(self):
         oid = self._oid_count
         self._oid_count += 1
@@ -59,9 +74,6 @@ class FakeMcu:
         if self._est_print_time is not None:
             return self._est_print_time
         return eventtime + self._print_time_offset
-
-    def print_time_to_clock(self, print_time):
-        return int(print_time * 1_000_000)
 
     def seconds_to_clock(self, seconds):
         return int(seconds * 1_000_000)

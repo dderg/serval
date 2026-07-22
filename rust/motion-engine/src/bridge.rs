@@ -21,6 +21,8 @@ use crate::types::mcu_handle_from_raw;
 use crate::worker::{StreamWorkerError, StreamWorkerHandle};
 
 mod attach;
+mod clock_regression;
+pub use clock_regression::{PyClockSyncEstimator, PyDecayRegression};
 mod endstop;
 mod ethercat_endpoint;
 mod homing_api;
