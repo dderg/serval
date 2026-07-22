@@ -747,6 +747,30 @@ class MCU:
     def estimated_print_time(self, eventtime):
         return self._clocksync.estimated_print_time(eventtime)
 
+    def register_response(self, cb, msg, oid=None):
+        self._serial.register_response(cb, msg, oid)
+
+    def get_enumerations(self):
+        return self._serial.get_msgparser().get_enumerations()
+
+    def get_constants(self):
+        return self._serial.get_msgparser().get_constants()
+
+    def get_constant_float(self, name):
+        return self._serial.get_msgparser().get_constant_float(name)
+
+    def print_time_to_clock(self, print_time):
+        return self._clocksync.print_time_to_clock(print_time)
+
+    def clock_to_print_time(self, clock):
+        return self._clocksync.clock_to_print_time(clock)
+
+    def clock32_to_clock64(self, clock32):
+        return self._clocksync.clock32_to_clock64(clock32)
+
+    def is_clock_synced(self):
+        return self._clocksync.is_synced()
+
     # Restarts
     def _disconnect(self):
         self._serial.disconnect()
