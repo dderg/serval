@@ -36,6 +36,29 @@ impl StreamEpoch {
     }
 }
 
+/// The anchor's pure verdict for a segment, separated from its side effects
+/// so the fatal verdicts can be asserted in a unit test without the abort.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AnchorClass {
+    Reposition,
+    Continuation,
+    /// Below the margin floor but the previous segment ended at rest: a
+    /// legitimate idle resume, re-anchored forward with `margin_s` recorded.
+    IdleResume {
+        margin_s: f64,
+    },
+    /// The playhead overran the committed end while mid-motion — fatal.
+    UnderrunFatal {
+        gap_s: f64,
+        t0: f64,
+    },
+    /// Margin below the transport floor while mid-motion — fatal.
+    LowMarginFatal {
+        margin_s: f64,
+        t0: f64,
+    },
+}
+
 pub struct Anchor {
     t0: Option<f64>,
     last_t_end: f64,
@@ -50,6 +73,32 @@ impl Anchor {
             last_t_end: 0.0,
             last_ends_at_rest: true,
             lead_secs: DEFAULT_LEAD_SECS,
+        }
+    }
+
+    /// The anchor's verdict for a segment, before any side effect (logging,
+    /// abort, `t0` update). Kept pure so the fatal verdicts are unit-testable
+    /// without aborting the process — [`anchor_segment`] is the thin wrapper
+    /// that logs, aborts, or updates `t0` from it.
+    fn classify(&self, seg_t_start: f64, host_now: f64) -> AnchorClass {
+        let Some(t0) = self.t0 else {
+            return AnchorClass::Reposition;
+        };
+        if seg_t_start + CONTIGUITY_EPS < self.last_t_end {
+            return AnchorClass::Reposition;
+        }
+        let margin_s = t0 + seg_t_start - host_now;
+        if margin_s >= LOW_MARGIN_WARN_SECS {
+            AnchorClass::Continuation
+        } else if self.last_ends_at_rest {
+            AnchorClass::IdleResume { margin_s }
+        } else if margin_s < 0.0 {
+            AnchorClass::UnderrunFatal {
+                gap_s: -margin_s,
+                t0,
+            }
+        } else {
+            AnchorClass::LowMarginFatal { margin_s, t0 }
         }
     }
 
@@ -78,63 +127,55 @@ impl Anchor {
         host_now: f64,
         ends_at_rest: bool,
     ) -> (f64, StreamEpoch) {
-        let epoch = match self.t0 {
-            None => StreamEpoch::Reposition,
-            Some(t0) => {
-                if seg_t_start + CONTIGUITY_EPS < self.last_t_end {
-                    StreamEpoch::Reposition
-                } else {
-                    let margin_s = t0 + seg_t_start - host_now;
-                    if margin_s >= LOW_MARGIN_WARN_SECS {
-                        StreamEpoch::Continuation
-                    } else if self.last_ends_at_rest {
-                        tracing::info!(
-                            subsystem = "motion",
-                            event = "anchor_idle_resume",
-                            margin_s,
-                            seg_t_start,
-                            "[anchor] resuming from rest across an idle gap — \
-                             re-anchoring forward"
-                        );
-                        StreamEpoch::Reanchor
-                    } else if margin_s < 0.0 {
-                        tracing::error!(
-                            subsystem = "motion",
-                            event = "anchor_underrun",
-                            gap_s = -margin_s,
-                            seg_t_start,
-                            "[anchor-underrun] playhead overran the committed \
-                             end mid-motion — continuous motion is lost"
-                        );
-                        crate::worker::fatal(&format!(
-                            "anchor underrun: playhead overran the committed \
-                             end by {:.6}s at seg_t_start={seg_t_start:.6} \
-                             while the trajectory was mid-motion — the \
-                             producer fell behind playback",
-                            -margin_s
-                        ));
-                    } else {
-                        tracing::error!(
-                            subsystem = "motion",
-                            event = "anchor_low_margin",
-                            margin_s,
-                            host_now,
-                            t0,
-                            seg_t_start,
-                            seg_t_end,
-                            last_t_end = self.last_t_end,
-                            "[anchor] mid-motion continuation margin below the \
-                             transport floor — this piece cannot reliably beat \
-                             its start time to the drive"
-                        );
-                        crate::worker::fatal(&format!(
-                            "anchor low margin: mid-motion continuation margin \
-                             {margin_s:.6}s is below the \
-                             {LOW_MARGIN_WARN_SECS}s transport floor at \
-                             seg_t_start={seg_t_start:.6}"
-                        ));
-                    }
-                }
+        let epoch = match self.classify(seg_t_start, host_now) {
+            AnchorClass::Reposition => StreamEpoch::Reposition,
+            AnchorClass::Continuation => StreamEpoch::Continuation,
+            AnchorClass::IdleResume { margin_s } => {
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "anchor_idle_resume",
+                    margin_s,
+                    seg_t_start,
+                    "[anchor] resuming from rest across an idle gap — \
+                     re-anchoring forward"
+                );
+                StreamEpoch::Reanchor
+            }
+            AnchorClass::UnderrunFatal { gap_s, t0 } => {
+                tracing::error!(
+                    subsystem = "motion",
+                    event = "anchor_underrun",
+                    gap_s,
+                    seg_t_start,
+                    "[anchor-underrun] playhead overran the committed end \
+                     mid-motion — continuous motion is lost"
+                );
+                crate::worker::fatal(&format!(
+                    "anchor underrun: playhead overran the committed end by \
+                     {gap_s:.6}s at seg_t_start={seg_t_start:.6} while the \
+                     trajectory was mid-motion (t0={t0:.6}) — the producer \
+                     fell behind playback"
+                ));
+            }
+            AnchorClass::LowMarginFatal { margin_s, t0 } => {
+                tracing::error!(
+                    subsystem = "motion",
+                    event = "anchor_low_margin",
+                    margin_s,
+                    host_now,
+                    t0,
+                    seg_t_start,
+                    seg_t_end,
+                    last_t_end = self.last_t_end,
+                    "[anchor] mid-motion continuation margin below the \
+                     transport floor — this piece cannot reliably beat \
+                     its start time to the drive"
+                );
+                crate::worker::fatal(&format!(
+                    "anchor low margin: mid-motion continuation margin \
+                     {margin_s:.6}s is below the {LOW_MARGIN_WARN_SECS}s \
+                     transport floor at seg_t_start={seg_t_start:.6}"
+                ));
             }
         };
 

@@ -1,5 +1,68 @@
 use super::*;
 
+// The classifier is the pure verdict behind `anchor_segment`; these assert
+// the fatal branches (which `anchor_segment` turns into a process abort, so
+// they cannot be exercised through the public method) plus the recoverable
+// ones, all without aborting the test process.
+
+fn primed(last_ends_at_rest: bool) -> Anchor {
+    // t0 anchored at 0 with the previous segment ending at stream-t 1.0.
+    let mut a = Anchor::new();
+    a.anchor_segment(0.0, 1.0, 100.0, last_ends_at_rest);
+    a
+}
+
+#[test]
+fn classify_mid_motion_underrun_is_fatal() {
+    let a = primed(false);
+    // t0 = 100 + 0.25 - 0 = 100.25; next seg starts at stream-t 1.0 -> abs
+    // 101.25. Playhead at 101.5 has overrun it by 0.25s, mid-motion.
+    let class = a.classify(1.0, 101.5);
+    assert!(
+        matches!(class, AnchorClass::UnderrunFatal { gap_s, .. } if (gap_s - 0.25).abs() < 1e-9),
+        "mid-motion underrun must be fatal, got {class:?}",
+    );
+}
+
+#[test]
+fn classify_mid_motion_low_margin_is_fatal() {
+    let a = primed(false);
+    // Abs start 101.25; playhead 101.24 leaves a +0.01s margin, under the
+    // 0.02s floor, mid-motion.
+    let class = a.classify(1.0, 101.24);
+    assert!(
+        matches!(class, AnchorClass::LowMarginFatal { margin_s, .. }
+            if margin_s > 0.0 && margin_s < LOW_MARGIN_WARN_SECS),
+        "mid-motion sub-floor margin must be fatal, got {class:?}",
+    );
+}
+
+#[test]
+fn classify_same_starvation_from_rest_is_an_idle_resume() {
+    // Identical geometry to the underrun case, but the previous segment
+    // ended at rest: the very same overrun is a recoverable idle resume.
+    let a = primed(true);
+    let class = a.classify(1.0, 101.5);
+    assert!(
+        matches!(class, AnchorClass::IdleResume { .. }),
+        "an overrun from rest must re-anchor, not fault, got {class:?}",
+    );
+}
+
+#[test]
+fn classify_healthy_margin_is_a_continuation() {
+    let a = primed(false);
+    // Playhead well behind the start (0.25s margin): a healthy continuation.
+    assert_eq!(a.classify(1.0, 101.0), AnchorClass::Continuation);
+}
+
+#[test]
+fn classify_backward_jump_repositions_even_mid_motion() {
+    let a = primed(false);
+    // A start before the last segment's end is an idle restart regardless of
+    // motion state — a clean reposition, never a fault.
+    assert_eq!(a.classify(0.0, 130.0), AnchorClass::Reposition);
+}
 #[test]
 fn first_segment_lands_lead_ahead() {
     let mut a = Anchor::new();
