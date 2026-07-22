@@ -47,6 +47,7 @@ extern "C" {
     pub fn ec_rt_cycle_time_ns() -> u64;
 
     pub fn ec_rt_reanchor_count() -> u32;
+    pub fn ec_rt_last_reanchor_behind_ns() -> i64;
     pub fn ec_rt_cycle_stage_ns(
         wake_late: *mut i64,
         recv: *mut i64,

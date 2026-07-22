@@ -113,3 +113,24 @@ pub fn assume_companion_rt_scheduling(_cpu: usize, _priority: i32) {}
 
 #[cfg(test)]
 mod tests;
+
+/// Nonvoluntary context switches of the calling thread — nonzero deltas on
+/// the DC thread mean something preempted SCHED_FIFO-80, pointing a
+/// frame-timing spike at the kernel (stop_machine, higher-prio kthread)
+/// rather than at any stage of the cycle loop.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+pub fn thread_nonvoluntary_ctx_switches() -> i64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_THREAD, usage.as_mut_ptr()) };
+    if rc == 0 {
+        unsafe { usage.assume_init() }.ru_nivcsw
+    } else {
+        0
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn thread_nonvoluntary_ctx_switches() -> i64 {
+    0
+}

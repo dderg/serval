@@ -273,6 +273,14 @@ fn test_ctx_with_drive(name: &str, drive: impl DriveChain + 'static) -> Endpoint
         recv_max_ns: i64::MIN,
         process_max_ns: i64::MIN,
         send_max_ns: i64::MIN,
+        prev_exchange_return: None,
+        last_pre_cycle_ns: 0,
+        last_post_cycle_ns: 0,
+        last_inter_exchange_ns: 0,
+        pre_cycle_max_ns: i64::MIN,
+        post_cycle_max_ns: i64::MIN,
+        inter_exchange_max_ns: i64::MIN,
+        last_nivcsw: 0,
     }
 }
 

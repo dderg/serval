@@ -17,6 +17,11 @@ pub(crate) trait TrackSignal {
     fn eval(&self, t: f64) -> f64;
     fn deriv(&self, t: f64) -> f64;
     fn second_deriv(&self, t: f64) -> f64;
+    /// `(eval, deriv, second_deriv)` at one `t`; implementations that share
+    /// work across the three (the kernel convolution) override this.
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        (self.eval(t), self.deriv(t), self.second_deriv(t))
+    }
 }
 
 impl TrackSignal for ShapedSignal<'_> {
@@ -31,14 +36,25 @@ impl TrackSignal for ShapedSignal<'_> {
     fn second_deriv(&self, t: f64) -> f64 {
         ShapedSignal::second_deriv(self, t)
     }
+
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        ShapedSignal::eval_pva(self, t)
+    }
 }
 
 pub(crate) const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 
+/// Buffered lowered segments plus the shaped-leader cache: `shaped[i]` is
+/// `segments[i]` with every kerneled non-follower axis already fitted. A
+/// frontier segment's convolution window is fully covered when it is first
+/// fitted, so the fit is final — later emits reuse it bit-identically
+/// instead of re-fitting the whole frontier (the projection cache in
+/// `follower_projection` relies on the same argument).
 #[derive(Default)]
 struct PendingSegments {
     segments: VecDeque<ShapedSegment>,
     rests: VecDeque<bool>,
+    shaped: VecDeque<ShapedSegment>,
 }
 
 impl PendingSegments {
@@ -50,6 +66,7 @@ impl PendingSegments {
     fn clear(&mut self) {
         self.segments.clear();
         self.rests.clear();
+        self.shaped.clear();
     }
 
     fn len(&self) -> usize {
@@ -72,14 +89,17 @@ impl PendingSegments {
         self.segments.iter()
     }
 
-    fn make_contiguous(&mut self) -> &mut [ShapedSegment] {
-        self.segments.make_contiguous()
-    }
-
     fn pop_front(&mut self) -> Option<ShapedSegment> {
         let segment = self.segments.pop_front();
         let rest = self.rests.pop_front();
         assert_eq!(segment.is_some(), rest.is_some());
+        if segment.is_some() && !self.shaped.is_empty() {
+            self.shaped.pop_front();
+        }
+        assert!(
+            self.shaped.len() <= self.segments.len(),
+            "shaped-leader cache ran ahead of the pending segments"
+        );
         segment
     }
 }
@@ -272,7 +292,8 @@ impl Shaper {
                 .count()
                 .max(count)
         };
-        let base = self.pending.make_contiguous();
+        let pending = &mut self.pending;
+        let base: &[ShapedSegment] = pending.segments.make_contiguous();
         let shaped = apply_axis_chains(
             &self.history,
             base,
@@ -283,6 +304,7 @@ impl Shaper {
             &self.chains,
             &mut self.follower_states,
             self.toolhead_tap.as_ref(),
+            &mut pending.shaped,
         )
         .unwrap_or_else(|e| panic!("shaper: {e}"));
         for seg in shaped {
@@ -325,20 +347,22 @@ fn apply_axis_chains(
     chains: &AxisChainSet,
     follower_states: &mut Vec<FollowerState>,
     toolhead_tap: Option<&Sender<ShapedSegment>>,
+    shaped_cache: &mut VecDeque<ShapedSegment>,
 ) -> Result<Vec<ShapedSegment>, PostProcessError> {
-    let mut out: Vec<ShapedSegment> = base
-        .iter()
-        .take(frontier_count.max(commit_count))
-        .cloned()
-        .collect();
     if chains.chains.iter().all(CompiledChain::is_empty)
         && follower_states.iter().all(|s| !s.is_active())
     {
-        out.truncate(commit_count);
+        let out: Vec<ShapedSegment> = base.iter().take(commit_count).cloned().collect();
         send_toolhead(toolhead_tap, &out);
         return Ok(out);
     }
-    let n_axes = out.iter().map(|seg| seg.axes.len()).max().unwrap_or(0);
+    let window = frontier_count.max(commit_count);
+    let n_axes = base
+        .iter()
+        .take(window)
+        .map(|seg| seg.axes.len())
+        .max()
+        .unwrap_or(0);
     let mut prev: Option<&ShapedSegment> = None;
     for seg in history.iter().chain(base.iter()) {
         if seg.axes.len() != n_axes {
@@ -352,24 +376,34 @@ fn apply_axis_chains(
         }
         prev = Some(seg);
     }
-    let default_chain = CompiledChain::default();
-    for axis in 0..n_axes {
-        if chains.is_projected_follower(axis) {
-            continue;
-        }
-        let chain = chains.chains.get(axis).unwrap_or(&default_chain);
-        apply_axis_chain(
+    debug_assert!(
+        shaped_cache.len() <= window,
+        "frontier retreated below the shaped-leader cache"
+    );
+    if window > shaped_cache.len() {
+        let mut fresh: Vec<ShapedSegment> = base[shaped_cache.len()..window].to_vec();
+        fit_leader_axes(
             history,
             base,
-            &mut out,
-            axis,
+            &mut fresh,
+            n_axes,
             force,
             at_stream_boundary,
-            chain,
+            chains,
         )?;
+        shaped_cache.extend(fresh);
     }
-    project_followers(base, &mut out, commit_count, force, chains, follower_states)?;
-    out.truncate(commit_count);
+    let frontier = &shaped_cache.make_contiguous()[..window];
+    let mut out: Vec<ShapedSegment> = frontier.iter().take(commit_count).cloned().collect();
+    project_followers(
+        base,
+        frontier,
+        &mut out,
+        commit_count,
+        force,
+        chains,
+        follower_states,
+    )?;
     send_toolhead(toolhead_tap, &out);
     apply_motor_side_stages(&mut out, chains);
     for seg in &mut out {
@@ -426,21 +460,23 @@ fn pad_segment_axes_to_uniform_degree(seg: &mut ShapedSegment) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn apply_axis_chain(
+/// Fit one kerneled axis over `targets`, returning the shaped column —
+/// `None` when the chain has no kernel. Pure in its inputs, so columns for
+/// different axes run on scoped threads.
+fn fit_axis_column(
     history: &VecDeque<ShapedSegment>,
     base: &[ShapedSegment],
-    out: &mut [ShapedSegment],
+    targets: &[ShapedSegment],
     axis: usize,
     force: bool,
     at_stream_boundary: bool,
     chain: &CompiledChain,
-) -> Result<(), PostProcessError> {
+) -> Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError> {
     let Some(kernel) = chain.stages.iter().find_map(|stage| match stage {
         ChainStage::SmoothKernel(kernel) => Some(kernel),
         ChainStage::DerivativeGains { .. } => None,
     }) else {
-        return Ok(());
+        return Ok(None);
     };
     let (k_lo, k_hi) = kernel.support();
     let first_t = history
@@ -459,7 +495,8 @@ fn apply_axis_chain(
         force,
     );
     let sig = ShapedSignal::new_from_evaluator(kernel, |t| table.eval(t), input_breaks);
-    for seg in out.iter_mut() {
+    let mut column = Vec::with_capacity(targets.len());
+    for seg in targets {
         let need_lo = seg.t_start - k_hi;
         let need_hi = seg.t_end - k_lo;
         if need_lo < first_t && !at_stream_boundary {
@@ -468,16 +505,85 @@ fn apply_axis_chain(
         if need_hi > last_t && !force {
             return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
         }
-        seg.axes[axis] = fit_axis_from_signal(axis, &seg.axes[axis], &sig)?;
-        if !seg.axes[axis]
-            .control_points()
-            .iter()
-            .all(|v| v.is_finite())
-        {
+        let track = fit_axis_from_signal(axis, &seg.axes[axis], &sig)?;
+        if !track.control_points().iter().all(|v| v.is_finite()) {
             return Err(PostProcessError::NonFiniteSample {
                 axis,
                 t: seg.t_start,
             });
+        }
+        column.push(track);
+    }
+    Ok(Some(column))
+}
+
+/// Fit every kerneled non-follower axis over `fresh`, one scoped thread per
+/// axis when more than one needs fitting — the columns are independent and
+/// the merge order is fixed, so the result is bit-identical to the serial
+/// pass.
+fn fit_leader_axes(
+    history: &VecDeque<ShapedSegment>,
+    base: &[ShapedSegment],
+    fresh: &mut [ShapedSegment],
+    n_axes: usize,
+    force: bool,
+    at_stream_boundary: bool,
+    chains: &AxisChainSet,
+) -> Result<(), PostProcessError> {
+    let default_chain = CompiledChain::default();
+    let axis_chains: Vec<(usize, &CompiledChain)> = (0..n_axes)
+        .filter(|&axis| !chains.is_projected_follower(axis))
+        .map(|axis| (axis, chains.chains.get(axis).unwrap_or(&default_chain)))
+        .filter(|(_, chain)| !chain.is_empty())
+        .collect();
+    // Scoped threads only pay off on catch-up bursts; steady-state emits fit
+    // one or two fresh segments and the spawn churn would outweigh the win.
+    const PARALLEL_FIT_MIN_SEGMENTS: usize = 8;
+    let columns: Vec<(
+        usize,
+        Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError>,
+    )> = if axis_chains.len() > 1 && fresh.len() >= PARALLEL_FIT_MIN_SEGMENTS {
+        let fresh_ref: &[ShapedSegment] = fresh;
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = axis_chains
+                .iter()
+                .map(|&(axis, chain)| {
+                    scope.spawn(move || {
+                        (
+                            axis,
+                            fit_axis_column(
+                                history,
+                                base,
+                                fresh_ref,
+                                axis,
+                                force,
+                                at_stream_boundary,
+                                chain,
+                            ),
+                        )
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("axis fit thread panicked"))
+                .collect()
+        })
+    } else {
+        axis_chains
+            .iter()
+            .map(|&(axis, chain)| {
+                (
+                    axis,
+                    fit_axis_column(history, base, fresh, axis, force, at_stream_boundary, chain),
+                )
+            })
+            .collect()
+    };
+    for (axis, column) in columns {
+        let Some(column) = column? else { continue };
+        for (seg, track) in fresh.iter_mut().zip(column) {
+            seg.axes[axis] = track;
         }
     }
     Ok(())
@@ -718,25 +824,28 @@ fn shaped_ladder<S: TrackSignal>(
 ) -> Result<(Vec<f64>, bool), PostProcessError> {
     let h = t1 - t0;
     let t_of = |u: f64| nurbs::fmadd(0.5 * (u + 1.0), h, t0);
-    let p0 = finite_sample(axis, sig, t0)?;
-    let p1 = finite_sample(axis, sig, t1)?;
-    let v0 = exact_value(axis, sig.deriv(t0), t0)?;
-    let v1 = exact_value(axis, sig.deriv(t1), t1)?;
-    let a0 = exact_value(axis, sig.second_deriv(t0), t0)?;
-    let a1 = exact_value(axis, sig.second_deriv(t1), t1)?;
+    let (p0, v0, a0) = sig.eval_pva(t0);
+    let p0 = exact_value(axis, p0, t0)?;
+    let v0 = exact_value(axis, v0, t0)?;
+    let a0 = exact_value(axis, a0, t0)?;
+    let (p1, v1, a1) = sig.eval_pva(t1);
+    let p1 = exact_value(axis, p1, t1)?;
+    let v1 = exact_value(axis, v1, t1)?;
+    let a1 = exact_value(axis, a1, t1)?;
     let base = quintic_in_u((p0, v0, a0), (p1, v1, a1), h);
 
     let mut truth = SpanTruth {
         pos: Vec::with_capacity(LADDER_FIT_NODES_U.len() + LADDER_PROBES_U.len()),
         acc: Vec::with_capacity(LADDER_PROBES_U.len()),
     };
-    for &u in LADDER_FIT_NODES_U.iter().chain(LADDER_PROBES_U.iter()) {
+    for &u in &LADDER_FIT_NODES_U {
         truth.pos.push((u, finite_sample(axis, sig, t_of(u))?));
     }
     for &u in &LADDER_PROBES_U {
-        truth
-            .acc
-            .push((u, exact_value(axis, sig.second_deriv(t_of(u)), t_of(u))?));
+        let t = t_of(u);
+        let (pos, _, acc) = sig.eval_pva(t);
+        truth.pos.push((u, exact_value(axis, pos, t)?));
+        truth.acc.push((u, exact_value(axis, acc, t)?));
     }
 
     let tol = FitTol {

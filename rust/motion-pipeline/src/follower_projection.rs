@@ -45,13 +45,14 @@ const SPAN_LOOKUP_SLACK_MM: f64 = 1e-6;
 /// emit reading bit-identical convolution inputs.
 pub(crate) fn project_followers(
     base: &[ShapedSegment],
+    frontier: &[ShapedSegment],
     out: &mut [ShapedSegment],
     commit_count: usize,
     force: bool,
     chains: &AxisChainSet,
     states: &mut Vec<FollowerState>,
 ) -> Result<(), PostProcessError> {
-    assert!(out.len() >= commit_count);
+    assert!(frontier.len() >= commit_count && out.len() == commit_count);
     if states.len() < chains.n_axes() {
         states.resize_with(chains.n_axes(), FollowerState::default);
     }
@@ -69,11 +70,11 @@ pub(crate) fn project_followers(
         }
         if projecting {
             state.active = true;
-            for (i, shaped) in out.iter().enumerate() {
+            for (i, shaped) in frontier.iter().enumerate() {
                 state.ingest(&base[i], shaped, axis, leaders, &base[i + 1..]);
             }
         }
-        for i in 0..out.len() {
+        for i in 0..frontier.len() {
             let raw = &base[i];
             if axis >= raw.axes.len() {
                 return Err(PostProcessError::AxisCountMismatch {
@@ -100,7 +101,8 @@ pub(crate) fn project_followers(
                 let raw_start = nurbs::eval::eval(raw_track, raw.t_start);
                 let e_start = state.e_end.unwrap_or(raw_start - state.carried_deficit);
                 let (track, s_end, e_end) = {
-                    let sig = FollowerSignal::new(&out[i], raw, axis, leaders, &*state, e_start);
+                    let sig =
+                        FollowerSignal::new(&frontier[i], raw, axis, leaders, &*state, e_start);
                     let track = fit_axis_from_signal(axis, raw_track, &sig)?;
                     (track, sig.s_end(), sig.eval(raw.t_end))
                 };
@@ -629,6 +631,32 @@ impl TrackSignal for FollowerSignal<'_> {
             .as_ref()
             .map_or(0.0, |(_, _, d2, _)| nurbs::eval::eval(d2, t));
         slope * speed * speed + ratio * self.shaped_speed_deriv(t) + raw
+    }
+
+    /// One `s_at` integral (the dominant cost) and one span lookup shared by
+    /// all three derivatives; each component reproduces its standalone
+    /// counterpart bit for bit.
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let t = t.clamp(self.t0, self.t1);
+        let s = self.s_at(t);
+        let speed = self.shaped_speed(t);
+        let (ratio, slope) = self.state.ratio_and_slope(s);
+        let spans = self.state.spans_e(s) - self.e_spans_start;
+        let (raw_p, raw_v, raw_a) =
+            self.raw_delta
+                .as_ref()
+                .map_or((0.0, 0.0, 0.0), |(track, d1, d2, at_start)| {
+                    (
+                        nurbs::eval::eval(track, t) - at_start,
+                        nurbs::eval::eval(d1, t),
+                        nurbs::eval::eval(d2, t),
+                    )
+                });
+        (
+            self.e_start + spans + raw_p,
+            ratio * speed + raw_v,
+            slope * speed * speed + ratio * self.shaped_speed_deriv(t) + raw_a,
+        )
     }
 }
 
