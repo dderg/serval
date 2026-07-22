@@ -219,6 +219,7 @@ fn test_ctx_with_drive(name: &str, drive: impl DriveChain + 'static) -> Endpoint
         group_delay_ns: 0,
         telemetry_period: u64::MAX,
         dynamics: None,
+        pin: super::cycle::PinState::default(),
         run_limits: Vec::new(),
         rings: (0..NUM_SLAVES).map(AxisRing::with_slot).collect(),
         buzz: BuzzOsc::new(),
@@ -860,6 +861,9 @@ fn dynamics_msg(mass0: f32) -> mcu_protocol::messages::SetDynamicsModel {
         viscous: vec![0.004, 0.004],
         coulomb: vec![1.0, 1.0],
         compliance: vec![0.0, 0.0],
+        pin_mass: vec![0.0, 0.0],
+        pin_zeta: vec![0.0, 0.0],
+        pin_lead_us: 0.0,
         pairs: vec![],
     }
 }
@@ -874,6 +878,8 @@ fn set_dynamics_model_installs_wire_pair_and_evaluates_it() {
     msg.viscous = vec![0.0];
     msg.coulomb = vec![0.0];
     msg.compliance = vec![0.0];
+    msg.pin_mass = vec![0.0];
+    msg.pin_zeta = vec![0.0];
     msg.pairs = vec![mcu_protocol::messages::DynamicsPair {
         first: 0,
         second: 1,
@@ -900,6 +906,8 @@ fn set_dynamics_model_rejects_zero_pair_first_column() {
     msg.viscous = vec![0.0];
     msg.coulomb = vec![0.0];
     msg.compliance = vec![0.0];
+    msg.pin_mass = vec![0.0];
+    msg.pin_zeta = vec![0.0];
     msg.pairs = vec![mcu_protocol::messages::DynamicsPair {
         first: 0,
         second: 1,
@@ -1289,4 +1297,268 @@ fn group_delay_leads_curve_sampling_by_one_cycle() {
             "slot {s}: group delay must lead curve sampling by velocity*CYCLE_NS counts"
         );
     }
+}
+
+// ---- pin-rotor (mode A) torque hold -------------------------------------
+
+const PIN_IDENTITY: &str = r#"
+version = 8
+axes = ["x", "y"]
+modes = ["x", "y"]
+frame = [[1.0, 0.0], [0.0, 1.0]]
+mass = [0.020, 0.020]
+viscous = [0.0, 0.0]
+coulomb = [0.0, 0.0]
+compliance = [1.0e-5, 0.0]
+pin_mass = [0.02, 0.0]
+pin_zeta = [0.1, 0.0]
+pin_lead_us = 0.0
+"#;
+
+fn pin_ctx(name: &str, toml: &str) -> EndpointCtx {
+    let mut ctx = test_ctx(name);
+    let model = crate::dynamics::DynamicsModel::from_toml_str(toml).unwrap();
+    ctx.pin = super::cycle::PinState::build(&model, ctx.cycle_ns);
+    ctx.dynamics = Some(model);
+    ctx.torque_clamp_tenths = vec![3000; NUM_SLAVES];
+    ctx
+}
+
+/// Drive one constant-accel (T2) stroke and return slot-0 torque_offset per
+/// cycle. The stroke stays inside the 0.1 s piece for all `cycles`.
+fn run_accel_collect_torque(ctx: &mut EndpointCtx, cycles: u64) -> Vec<i32> {
+    push_all(ctx, piece(1_000_000, 0.1, &[0.0, 0.0, T2_C]));
+    let mut out = Vec::with_capacity(cycles as usize);
+    for c in 0..cycles {
+        compute_motion_targets(ctx, 1_000_000 + c * CYCLE_NS);
+        ctx.drive.cycle();
+        out.push(i32::from(ctx.drive.telemetry(0).torque_offset));
+    }
+    out
+}
+
+/// A pinned mode holds the rotor: the emitted torque_offset carries the
+/// anti-ring pin component (a decaying oscillation at f_b), and the pinned
+/// mode's position lead is suppressed (mode A replaces mode B per mode).
+#[test]
+fn pin_mode_holds_rotor_in_two_mass_sim() {
+    let mut pinned = pin_ctx("pin-hold", PIN_IDENTITY);
+    let mut plain = pin_ctx(
+        "pin-hold-plain",
+        &PIN_IDENTITY
+            .replace("compliance = [1.0e-5, 0.0]", "compliance = [0.0, 0.0]")
+            .replace("pin_mass = [0.02, 0.0]", "pin_mass = [0.0, 0.0]"),
+    );
+    let mut v7 = pin_ctx(
+        "pin-hold-v7",
+        &PIN_IDENTITY.replace("pin_mass = [0.02, 0.0]", "pin_mass = [0.0, 0.0]"),
+    );
+
+    const CYCLES: u64 = 390;
+    let t_pin = run_accel_collect_torque(&mut pinned, CYCLES);
+    let t_plain = run_accel_collect_torque(&mut plain, CYCLES);
+    run_accel_collect_torque(&mut v7, CYCLES);
+
+    // Pin suppresses mode 0's position lead: slot 0 matches the no-compliance
+    // model, while the un-pinned v7 model with the same compliance leads it.
+    assert_eq!(
+        targets(&pinned)[0],
+        targets(&plain)[0],
+        "pinned mode must carry no position lead"
+    );
+    assert_ne!(
+        targets(&v7)[0],
+        targets(&plain)[0],
+        "un-pinned v7 compliance would lead the target"
+    );
+
+    // Pin torque = pinned − plain: a decaying oscillation at f_b.
+    let ring: Vec<i32> = t_pin.iter().zip(&t_plain).map(|(a, b)| a - b).collect();
+    let max_abs = |s: &[i32]| s.iter().map(|v| v.abs()).max().unwrap_or(0);
+    let early = max_abs(&ring[..160]);
+    let late = max_abs(&ring[310..390]);
+    assert!(
+        early >= 8,
+        "pin ring must be present after the transient: {early}"
+    );
+    assert!(
+        late * 2 <= early,
+        "pin ring must decay with zeta: early {early}, late {late}"
+    );
+    let mut sign_changes = 0;
+    let mut last = 0i32;
+    for &x in &ring[..250] {
+        if x != 0 {
+            if last != 0 && (x > 0) != (last > 0) {
+                sign_changes += 1;
+            }
+            last = x;
+        }
+    }
+    assert!(
+        sign_changes >= 3,
+        "pin torque must oscillate at f_b: {sign_changes} sign changes"
+    );
+}
+
+/// Per-mode replacement: a pinned mode drops its position lead while a
+/// compliance-only mode keeps the exact v7 lead behaviour.
+#[test]
+fn pin_replaces_lead_per_mode() {
+    let base = PIN_IDENTITY.replace(
+        "compliance = [1.0e-5, 0.0]",
+        "compliance = [1.0e-5, 1.0e-5]",
+    );
+    let mut pinned = pin_ctx("pin-per-mode", &base);
+    let mut v7 = pin_ctx(
+        "pin-per-mode-v7",
+        &base.replace("pin_mass = [0.02, 0.0]", "pin_mass = [0.0, 0.0]"),
+    );
+    let mut plain = pin_ctx(
+        "pin-per-mode-plain",
+        &base
+            .replace("compliance = [1.0e-5, 1.0e-5]", "compliance = [0.0, 0.0]")
+            .replace("pin_mass = [0.02, 0.0]", "pin_mass = [0.0, 0.0]"),
+    );
+
+    let t_pin = run_accel_collect_torque(&mut pinned, 200);
+    let t_plain = run_accel_collect_torque(&mut plain, 200);
+    run_accel_collect_torque(&mut v7, 200);
+
+    // Mode y (slot 1) is compliance-only: pin keeps the v7 lead there.
+    assert_eq!(
+        targets(&pinned)[1],
+        targets(&v7)[1],
+        "compliance-only mode keeps the v7 position lead"
+    );
+    assert_ne!(
+        targets(&pinned)[1],
+        targets(&plain)[1],
+        "the compliance-only lead is nonzero"
+    );
+    // Mode x (slot 0) is pinned: zero position lead, matching the plain model.
+    assert_eq!(
+        targets(&pinned)[0],
+        targets(&plain)[0],
+        "pinned mode carries no position lead"
+    );
+    assert_ne!(
+        targets(&v7)[0],
+        targets(&plain)[0],
+        "the same compliance un-pinned would lead slot 0"
+    );
+    // ...but the pinned mode injects torque during the accel transient.
+    let max_pin = t_pin
+        .iter()
+        .zip(&t_plain)
+        .map(|(a, b)| (a - b).abs())
+        .max()
+        .unwrap();
+    assert!(
+        max_pin > 3,
+        "pinned mode must inject torque during accel: {max_pin}"
+    );
+}
+
+/// A buzz gates the pin torque off and re-anchors the oscillator, so the
+/// contribution restarts clean once the buzz clears.
+#[test]
+fn pin_state_resets_on_buzz() {
+    let mut ctx = pin_ctx("pin-buzz", PIN_IDENTITY);
+    push_all(&mut ctx, piece(1_000_000, 0.1, &[0.0, 0.0, T2_C]));
+    let mut accel_peak = 0f32;
+    for c in 0..40u64 {
+        compute_motion_targets(&mut ctx, 1_000_000 + c * CYCLE_NS);
+        ctx.drive.cycle();
+        accel_peak = accel_peak.max(ctx.pin.slot_torque_at(0).abs());
+    }
+    assert!(
+        accel_peak > 3.0,
+        "pin torque should be active during accel: {accel_peak}"
+    );
+
+    // Buzz active: pin torque gated off every cycle.
+    for r in &mut ctx.rings {
+        r.reset();
+    }
+    let rc = ctx.buzz.arm(
+        NUM_SLAVES as u8,
+        0b01,
+        0,
+        60_000,
+        60_000,
+        100_000,
+        500,
+        20,
+        [0; crate::buzz::MAX_BUZZ_SLOTS],
+    );
+    assert_eq!(rc, 0);
+    for c in 0..150u64 {
+        compute_motion_targets(&mut ctx, 10_000_000 + c * CYCLE_NS);
+        ctx.drive.cycle();
+        assert_eq!(
+            ctx.pin.slot_torque_at(0),
+            0.0,
+            "pin torque must be zero while buzzing"
+        );
+    }
+
+    // Buzz cleared: the first fresh accel cycle reproduces the from-rest
+    // onset, proving the oscillator restarted clean.
+    ctx.buzz.clear();
+    for r in &mut ctx.rings {
+        r.reset();
+    }
+    for m in &mut ctx.cmaps {
+        *m = None;
+    }
+    push_all(&mut ctx, piece(20_000_000, 0.1, &[0.0, 0.0, T2_C]));
+    compute_motion_targets(&mut ctx, 20_000_000);
+    ctx.drive.cycle();
+    let restart = ctx.pin.slot_torque_at(0);
+
+    let mut fresh = pin_ctx("pin-buzz-fresh", PIN_IDENTITY);
+    push_all(&mut fresh, piece(20_000_000, 0.1, &[0.0, 0.0, T2_C]));
+    compute_motion_targets(&mut fresh, 20_000_000);
+    fresh.drive.cycle();
+    let fresh_onset = fresh.pin.slot_torque_at(0);
+
+    assert!(
+        (restart - fresh_onset).abs() < 1e-3,
+        "post-buzz onset {restart} must match a from-rest onset {fresh_onset}"
+    );
+}
+
+/// A nonzero pin lead advances the torque waveform: its first positive
+/// zero-crossing lands earlier than the unled waveform's.
+#[test]
+fn pin_lead_advances_phase() {
+    let mut unled = pin_ctx("pin-lead-0", PIN_IDENTITY);
+    let mut leaded = pin_ctx(
+        "pin-lead-1000",
+        &PIN_IDENTITY.replace("pin_lead_us = 0.0", "pin_lead_us = 1000.0"),
+    );
+    let collect = |ctx: &mut EndpointCtx| -> Vec<f32> {
+        push_all(ctx, piece(1_000_000, 0.1, &[0.0, 0.0, T2_C]));
+        let mut v = Vec::new();
+        for c in 0..200u64 {
+            compute_motion_targets(ctx, 1_000_000 + c * CYCLE_NS);
+            ctx.drive.cycle();
+            v.push(ctx.pin.slot_torque_at(0));
+        }
+        v
+    };
+    let a = collect(&mut unled);
+    let b = collect(&mut leaded);
+    let first_pos = |s: &[f32]| {
+        s.iter()
+            .position(|&x| x > 1.0)
+            .expect("pin waveform must cross positive")
+    };
+    let cross_unled = first_pos(&a);
+    let cross_leaded = first_pos(&b);
+    assert!(
+        cross_leaded < cross_unled,
+        "pin lead must advance the phase: leaded {cross_leaded} vs unled {cross_unled}"
+    );
 }

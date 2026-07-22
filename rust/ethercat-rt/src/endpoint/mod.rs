@@ -49,6 +49,10 @@ pub struct EndpointCtx {
     group_delay_ns: u64,
     telemetry_period: u64,
     dynamics: Option<DynamicsModel>,
+    /// Per-mode pin-rotor oscillator state + precomputed transition
+    /// coefficients, sized to the installed dynamics model (empty when no
+    /// mode is pinned).
+    pin: cycle::PinState,
     run_limits: Vec<(u32, u16)>,
 
     rings: Vec<AxisRing>,
@@ -182,4 +186,8 @@ pub(super) fn discard_motion(ctx: &mut EndpointCtx) {
         *lc = None;
     }
     ctx.buzz.clear();
+    // A discard re-anchors the commanded frame (homing trip, stop, sensorless
+    // trip), so the pin oscillator's predicted deflection is stale — restart
+    // it clean.
+    ctx.pin.reset();
 }

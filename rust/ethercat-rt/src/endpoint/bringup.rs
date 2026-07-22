@@ -491,6 +491,11 @@ pub fn bringup(args: Args) -> EndpointCtx {
         cycle_ns,
         group_delay_ns,
         telemetry_period,
+        pin: dynamics
+            .as_ref()
+            .map_or_else(super::cycle::PinState::default, |m| {
+                super::cycle::PinState::build(m, cycle_ns)
+            }),
         dynamics,
         run_limits,
         rings,

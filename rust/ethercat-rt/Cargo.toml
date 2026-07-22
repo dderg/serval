@@ -35,6 +35,7 @@ name = "ethercat-rt-stub"
 path = "src/bin/ethercat-rt-stub.rs"
 
 [dependencies]
+libm = { version = "0.2", default-features = false }
 runtime = { path = "../runtime", default-features = false, features = ["host"] }  # servo node: no stepper dispatch
 mcu-protocol = { path = "../mcu-protocol" }
 mcu-transport = { path = "../mcu-transport" }
@@ -52,7 +53,6 @@ cc = "1"                                            # compiles csrc/libecrt_igh.
 
 [dev-dependencies]
 host-rt = { path = "../host-rt" }
-libm = { version = "0.2", default-features = false }
 parking_lot = "0.12"
 
 [lints]

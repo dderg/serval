@@ -24,7 +24,7 @@ pub const CAPTURE_RING_CAPACITY: usize = 65536;
 
 pub const MAX_DRIVES: usize = EC_RT_MAX_SLAVES;
 pub const RECORD_PREFIX_SIZE: usize = 21;
-pub const DRIVE_BLOCK_SIZE: usize = 36;
+pub const DRIVE_BLOCK_SIZE: usize = 44;
 pub const MAX_RECORD_SIZE: usize = RECORD_PREFIX_SIZE + MAX_DRIVES * DRIVE_BLOCK_SIZE;
 
 #[must_use]
@@ -52,6 +52,8 @@ const DOFF_TORQUE_OFFSET: usize = 22;
 const DOFF_VELOCITY_ACTUAL: usize = 24;
 const DOFF_ACCEL_CMD: usize = 28;
 const DOFF_VEL_CMD: usize = 32;
+const DOFF_PIN_RES_RE: usize = 36;
+const DOFF_PIN_RES_IM: usize = 40;
 
 /// Flush to page cache only — live readers tail the file and never need
 /// fsync. A periodic `sync_data` here blocked >16s on SD-card GC and
@@ -74,6 +76,10 @@ pub struct DriveSample {
     pub torque_offset: i16,
     pub accel_cmd: f32,
     pub vel_cmd: f32,
+    /// In-phase / quadrature belt-resonance following-error residual for the
+    /// pinned mode of the same index (0 when the slot's mode is not pinned).
+    pub pin_res_re: f32,
+    pub pin_res_im: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -150,6 +156,8 @@ fn encode_drive(block: &mut [u8], d: &DriveSample) {
         .copy_from_slice(&d.velocity_actual.to_le_bytes());
     block[DOFF_ACCEL_CMD..DOFF_ACCEL_CMD + 4].copy_from_slice(&d.accel_cmd.to_le_bytes());
     block[DOFF_VEL_CMD..DOFF_VEL_CMD + 4].copy_from_slice(&d.vel_cmd.to_le_bytes());
+    block[DOFF_PIN_RES_RE..DOFF_PIN_RES_RE + 4].copy_from_slice(&d.pin_res_re.to_le_bytes());
+    block[DOFF_PIN_RES_IM..DOFF_PIN_RES_IM + 4].copy_from_slice(&d.pin_res_im.to_le_bytes());
 }
 
 pub fn encode_record(r: &CaptureRecord) -> ([u8; MAX_RECORD_SIZE], usize) {
@@ -213,6 +221,8 @@ pub fn header_json(cfg: &CaptureConfig) -> String {
         ("velocity_actual", "i32", p + DOFF_VELOCITY_ACTUAL),
         ("accel_cmd", "f32", p + DOFF_ACCEL_CMD),
         ("vel_cmd", "f32", p + DOFF_VEL_CMD),
+        ("pin_res_re", "f32", p + DOFF_PIN_RES_RE),
+        ("pin_res_im", "f32", p + DOFF_PIN_RES_IM),
     ] {
         if !channels.is_empty() {
             channels.push(',');

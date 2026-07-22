@@ -146,6 +146,9 @@ mass = [0.0123, 0.0119]      # m per mode, (0.1% rated)/(mm/s²)
 viscous = [0.09, 0.11]       # b per mode
 coulomb = [160.0, 175.0]     # c per mode, symmetric magnitude
 compliance = [0.0, 1.76e-5]  # optional (version 7); 1/ω_b² per mode, s²
+pin_mass = [0.0, 0.021]      # optional (version 8); rotor-side pinned inertia per mode, kg; 0 disables
+pin_zeta = [0.0, 0.06]       # per mode; belt damping ratio for the predictor decay, [0, 0.5]
+pin_lead_us = 0.0            # optional (version 8); pin torque phase lead, microseconds [0, 10000]
 fit_rms_residual = [0.8, 0.7, 0.8, 0.9]  # per motor, 0.1% rated — fit quality, informational
 ff_lead_us = 0.0             # optional; dead-time compensation, microseconds [0, 10000], default 0.0
 
@@ -194,6 +197,45 @@ small; with raw trapezoids the jerk impulses would step the target.
 A buzz excitation suppresses the correction for its duration (a buzz has
 no ring piece behind it, so its jerk/snap are undefined).
 
+`pin_mass` (per-mode, kg, version 8; `pin_zeta` and `pin_lead_us` ride
+alongside): the **pin-rotor** alternative to the position-lead correction
+above. A nonzero `pin_mass[k]` switches mode k from mode B (the
+position/velocity/snap lead) to mode A. Instead of leading the rotor along
+the planner path so the belt stretch stays smooth, the endpoint *holds* the
+rotor on the commanded path and cancels the belt's reaction directly. Per
+pinned mode it runs a predicted-deflection oscillator — belt deflection `d`
+with `d̈ = −ω_b²·d − 2ζω_b·ḋ − a_cmd`, driven by the commanded mode accel and
+advanced by the exact damped-oscillator update each 1 ms cycle — and adds a
+mode-space torque `τ_pin = pin_mass·(−ω_b²·d − 2ζω_b·ḋ − a_cmd)` evaluated at
+the lead-advanced state. `τ_pin` cancels the predicted belt reaction, so the
+rotor stays on the planner path; the toolhead, no longer dragged along below
+the coupled frequency, instead rings at the **locked-rotor** frequency
+`f_b = ω_b/2π` — higher than the coupled mode, and now a fixed, rotor-
+independent line a standard input shaper can target. Pin's frequency source
+*is* the mode's `compliance` (`ω_b² = 1/compliance`): it reuses the same
+locked-rotor number mode B needs, so a pinned mode always carries a positive
+compliance.
+
+`pin_zeta` is the belt's damping ratio, in `[0, 0.5]` — it sets how fast the
+predictor's deflection estimate decays between transitions. `pin_lead_us`
+(microseconds, `[0, 10000]`) is a phase lead on the pin torque only,
+advancing `(d, ḋ)` by that time through the same rotation before forming
+`τ_pin`. The lead matters because, unlike mode B's correction (which lives in
+the smooth accel band), the pin torque lives *at* `f_b` itself: at 131 Hz one
+command-to-torque millisecond is about 47° of phase, so a small timing error
+there directly limits how much of the belt reaction the pin actually cancels.
+The residual demodulation telemetry (v1) reports the achieved phase error —
+it demodulates the mode-projected following error against the predictor
+phasor — so the lead is tuned to null it.
+
+Per mode, pin (A) and position-lead (B) are mutually exclusive: a pinned mode
+does *not* apply the compliance position/velocity/snap lead, while a mode with
+compliance but zero `pin_mass` keeps exact mode-B behavior. On a coupled node
+the mode torques project to slot torques through the same frame machinery as
+the base torque FF. A buzz excitation suppresses the pin torque for its
+duration (the same gate as compliance) and resets the predictor state to
+zero — as do a stream anchor/reset, a motion gap, and a model swap.
+
 `ff_lead_us` (float, default `0.0`, range `[0, 10000]`): dead-time
 compensation for the feedforward path, in microseconds. The 60B1h/60B2h
 offsets are sampled this far ahead of the position target, so the torque
@@ -212,8 +254,9 @@ timing-only profile that compensates dead time without contributing any
 meaningful torque feedforward.
 
 Validation rules (any failure = hard claim error):
-- `version` must equal 6 or 7 — older profiles are not supported; refit
-  with `SERVO_FIT_DYNAMICS`. `compliance` requires version 7.
+- `version` must equal 6, 7, or 8 — older profiles are not supported; refit
+  with `SERVO_FIT_DYNAMICS`. `compliance` requires version 7, the `pin_*`
+  arrays version 8.
 - `axes` must contain unique, non-empty strings
 - `frame` must be `n_modes × n_slots` with `n_slots = len(axes)`,
   `n_modes = len(modes)`, `1 ≤ n_modes ≤ n_slots`, every row nonzero, rows
@@ -221,6 +264,12 @@ Validation rules (any failure = hard claim error):
 - `mass` entries > 0; `viscous` and `coulomb` entries ≥ 0; all values finite
 - `compliance` entries, when present, must be finite, ≥ 0, and at most
   `6.4e-4` s² (a mode softer than 20 Hz is a typo, not a belt)
+- `pin_mass` and `pin_zeta` are present together or not at all (per-mode
+  arrays of length `n_modes`); entries finite, `pin_mass ≥ 0`,
+  `pin_zeta ∈ [0, 0.5]`
+- every mode with `pin_mass > 0` must have `compliance > 0` — pin needs the
+  locked-rotor frequency as its source
+- `pin_lead_us`, when present, must be finite and within `[0, 10000]`
 - each optional `pair` names two distinct, otherwise-unused `axes` entries
   with exactly equal or opposite frame columns; `direction_split` is finite
   and has absolute value below `0.5`

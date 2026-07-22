@@ -1,9 +1,5 @@
 #![allow(unsafe_code)]
 
-use core::sync::atomic::Ordering;
-
-use portable_atomic::{AtomicI32, AtomicU8};
-
 use crate::buzz_gen::{ToneCursor, ToneError, ToneParams, next_crossing};
 use crate::buzz_sweep::{SweepCursor, next_crossing_sweep};
 use crate::buzz_xdirect::{XdirectConfig, XdirectCursor, next_update};
@@ -13,33 +9,84 @@ use crate::step_queue::{
     peek as queue_peek, push as queue_push,
 };
 
-static REFILL_FAULT: AtomicI32 = AtomicI32::new(0);
+// On the real target these are single-context process-global atomics. On host
+// (tests / `host` feature) they are thread-local, mirroring the `store::STREAMS`
+// isolation below so parallel tests sharing an axis index do not clobber each
+// other's refill-fault latch or xdirect routing bits.
+#[cfg(not(any(test, feature = "host")))]
+mod flags {
+    use core::sync::atomic::Ordering;
+    use portable_atomic::{AtomicI32, AtomicU8};
+
+    static REFILL_FAULT: AtomicI32 = AtomicI32::new(0);
+    static XDIRECT_MASK: AtomicU8 = AtomicU8::new(0);
+
+    pub(super) fn store_fault(code: i32) {
+        REFILL_FAULT.store(code, Ordering::Release);
+    }
+    pub(super) fn swap_fault() -> i32 {
+        REFILL_FAULT.swap(0, Ordering::AcqRel)
+    }
+    pub(super) fn xdirect_set(bit: u8, on: bool) {
+        if on {
+            XDIRECT_MASK.fetch_or(bit, Ordering::Release);
+        } else {
+            XDIRECT_MASK.fetch_and(!bit, Ordering::Release);
+        }
+    }
+    pub(super) fn xdirect_load() -> u8 {
+        XDIRECT_MASK.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(any(test, feature = "host"))]
+mod flags {
+    use core::cell::Cell;
+
+    std::thread_local! {
+        static REFILL_FAULT: Cell<i32> = const { Cell::new(0) };
+        static XDIRECT_MASK: Cell<u8> = const { Cell::new(0) };
+    }
+
+    pub(super) fn store_fault(code: i32) {
+        REFILL_FAULT.with(|c| c.set(code));
+    }
+    pub(super) fn swap_fault() -> i32 {
+        REFILL_FAULT.with(|c| c.replace(0))
+    }
+    pub(super) fn xdirect_set(bit: u8, on: bool) {
+        XDIRECT_MASK.with(|c| {
+            let v = c.get();
+            c.set(if on { v | bit } else { v & !bit });
+        });
+    }
+    pub(super) fn xdirect_load() -> u8 {
+        XDIRECT_MASK.with(Cell::get)
+    }
+    pub(super) fn clear_all() {
+        REFILL_FAULT.with(|c| c.set(0));
+        XDIRECT_MASK.with(|c| c.set(0));
+    }
+}
 
 pub fn latch_refill_fault(err: RefillError) {
     let code = match err {
         RefillError::QueueFull => FaultCode::StepQueueOverflow,
         RefillError::Solver(e) => e.fault_code().unwrap_or(FaultCode::InternalInvariant),
     };
-    REFILL_FAULT.store(code.as_i32(), Ordering::Release);
+    flags::store_fault(code.as_i32());
 }
 
 #[must_use]
 pub fn take_refill_fault() -> i32 {
-    REFILL_FAULT.swap(0, Ordering::AcqRel)
+    flags::swap_fault()
 }
-
-static XDIRECT_MASK: AtomicU8 = AtomicU8::new(0);
 
 fn set_xdirect_bit(axis_idx: usize, on: bool) {
     if axis_idx >= N_AXIS_STEP_QUEUES {
         return;
     }
-    let bit = 1u8 << axis_idx;
-    if on {
-        XDIRECT_MASK.fetch_or(bit, Ordering::Release);
-    } else {
-        XDIRECT_MASK.fetch_and(!bit, Ordering::Release);
-    }
+    flags::xdirect_set(1u8 << axis_idx, on);
 }
 
 #[cfg(any(test, feature = "host"))]
@@ -52,7 +99,7 @@ pub fn is_xdirect(axis_idx: usize) -> bool {
     if axis_idx >= N_AXIS_STEP_QUEUES {
         return false;
     }
-    XDIRECT_MASK.load(Ordering::Acquire) & (1u8 << axis_idx) != 0
+    flags::xdirect_load() & (1u8 << axis_idx) != 0
 }
 
 const HIGH_WATER: u16 = 24;
@@ -125,6 +172,7 @@ mod store {
         for i in 0..N_AXIS_STEP_QUEUES {
             super::clear_axis(i);
         }
+        super::flags::clear_all();
     }
 }
 

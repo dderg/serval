@@ -573,6 +573,9 @@ fn decodes_set_dynamics_model_command() {
         viscous: vec![0.004, 0.004],
         coulomb: vec![1.0, 1.0],
         compliance: vec![0.0, 0.0],
+        pin_mass: vec![0.0, 0.0],
+        pin_zeta: vec![0.0, 0.0],
+        pin_lead_us: 0.0,
         pairs: vec![mcu_protocol::messages::DynamicsPair {
             first: 0,
             second: 1,

@@ -8,6 +8,8 @@ pub const ERR_DYNAMICS_BAD_DIM: i32 = -861;
 pub const ERR_DYNAMICS_REJECTED: i32 = -862;
 
 const FF_LEAD_US_MAX: f64 = 10_000.0;
+const PIN_LEAD_US_MAX: f64 = 10_000.0;
+const PIN_ZETA_MAX: f64 = 0.5;
 
 /// Compliance ceiling: 1/(2π·20 Hz)² — a mode softer than 20 Hz is not a
 /// belt-stretch correction, it's a typo (units are s², value = 1/ω_b²).
@@ -38,6 +40,12 @@ struct ProfileFile {
     pair: Vec<PairTable>,
     #[serde(default)]
     ff_lead_us: f64,
+    #[serde(default)]
+    pin_mass: Vec<f64>,
+    #[serde(default)]
+    pin_zeta: Vec<f64>,
+    #[serde(default)]
+    pin_lead_us: f64,
     #[serde(flatten)]
     extra: toml::Table,
 }
@@ -66,6 +74,9 @@ pub enum ProfileError {
     NonPositive(&'static str),
     FfLeadOutOfRange(f64),
     ComplianceOutOfRange(f64),
+    PinZetaOutOfRange(f64),
+    PinLeadOutOfRange(f64),
+    PinNeedsCompliance(usize),
     ZeroFrameRow(usize),
     FrameRankDeficient,
     ForbiddenField(&'static str),
@@ -95,18 +106,35 @@ pub struct DynamicsModel {
     /// extra, G·snap the accel extra the torque model must see.
     comp_g: Option<Vec<f32>>,
     ff_lead_us: Vec<f64>,
+    /// Per-mode pin-rotor virtual mass (kg); zeros = pin disabled for that
+    /// mode. A nonzero entry switches the mode from position-lead (B) to
+    /// torque-hold (A): the endpoint cancels the predicted belt reaction
+    /// instead of applying the position/velocity lead.
+    pub pin_mass: Vec<f32>,
+    /// Per-mode pin-rotor damping ratio (dimensionless, [0, 0.5]).
+    pub pin_zeta: Vec<f32>,
+    /// Pin predictor phase lead (µs) broadcast per slot, analogous to
+    /// `ff_lead_us` but applied only to the pin torque.
+    pub pin_lead_us: Vec<f64>,
     pairs: Vec<Pair>,
 }
 
 impl DynamicsModel {
     pub fn from_toml_str(s: &str) -> Result<Self, ProfileError> {
         let f: ProfileFile = toml::from_str(s).map_err(|e| ProfileError::Parse(e.to_string()))?;
-        if f.version != 6 && f.version != 7 {
+        if f.version != 6 && f.version != 7 && f.version != 8 {
             return Err(ProfileError::Version(f.version));
         }
         if f.version == 6 && !f.compliance.is_empty() {
             return Err(ProfileError::ForbiddenField(
                 "compliance requires version 7",
+            ));
+        }
+        if f.version < 8
+            && (!f.pin_mass.is_empty() || !f.pin_zeta.is_empty() || f.pin_lead_us != 0.0)
+        {
+            return Err(ProfileError::ForbiddenField(
+                "pin_* fields require version 8",
             ));
         }
         for field in ["direction_split", "orientation"] {
@@ -160,6 +188,9 @@ impl DynamicsModel {
             f.coulomb,
             f.compliance,
             f.ff_lead_us,
+            f.pin_mass,
+            f.pin_zeta,
+            f.pin_lead_us,
             &pairs,
         )
     }
@@ -172,6 +203,9 @@ impl DynamicsModel {
         viscous: &[f32],
         coulomb: &[f32],
         compliance: &[f32],
+        pin_mass: &[f32],
+        pin_zeta: &[f32],
+        pin_lead_us: f64,
         pairs: &[PairSpec],
     ) -> Result<Self, ProfileError> {
         let axes = (0..n_slots).map(|i| format!("slot{i}")).collect();
@@ -188,6 +222,9 @@ impl DynamicsModel {
             widen(coulomb),
             widen(compliance),
             0.0,
+            widen(pin_mass),
+            widen(pin_zeta),
+            pin_lead_us,
             pairs,
         )
     }
@@ -204,6 +241,9 @@ impl DynamicsModel {
         coulomb: Vec<f64>,
         compliance: Vec<f64>,
         ff_lead_us: f64,
+        pin_mass: Vec<f64>,
+        pin_zeta: Vec<f64>,
+        pin_lead_us: f64,
         pairs: &[PairSpec],
     ) -> Result<Self, ProfileError> {
         if axes.len() != n_slots {
@@ -270,6 +310,48 @@ impl DynamicsModel {
         if !ff_lead_us.is_finite() || !(0.0..=FF_LEAD_US_MAX).contains(&ff_lead_us) {
             return Err(ProfileError::FfLeadOutOfRange(ff_lead_us));
         }
+        if pin_mass.is_empty() != pin_zeta.is_empty() {
+            return Err(ProfileError::Dim(
+                "pin_mass and pin_zeta must both be present",
+            ));
+        }
+        let pin_mass = if pin_mass.is_empty() {
+            vec![0.0f64; n_modes]
+        } else {
+            pin_mass
+        };
+        let pin_zeta = if pin_zeta.is_empty() {
+            vec![0.0f64; n_modes]
+        } else {
+            pin_zeta
+        };
+        if pin_mass.len() != n_modes {
+            return Err(ProfileError::Dim("pin_mass length must equal modes"));
+        }
+        if pin_zeta.len() != n_modes {
+            return Err(ProfileError::Dim("pin_zeta length must equal modes"));
+        }
+        for &pm in &pin_mass {
+            if !pm.is_finite() {
+                return Err(ProfileError::NotFinite("pin_mass must be finite"));
+            }
+            if pm < 0.0 {
+                return Err(ProfileError::NonPositive("pin_mass must be non-negative"));
+            }
+        }
+        for &pz in &pin_zeta {
+            if !pz.is_finite() || !(0.0..=PIN_ZETA_MAX).contains(&pz) {
+                return Err(ProfileError::PinZetaOutOfRange(pz));
+            }
+        }
+        if !pin_lead_us.is_finite() || !(0.0..=PIN_LEAD_US_MAX).contains(&pin_lead_us) {
+            return Err(ProfileError::PinLeadOutOfRange(pin_lead_us));
+        }
+        for k in 0..n_modes {
+            if pin_mass[k] > 0.0 && !(compliance[k] > 0.0) {
+                return Err(ProfileError::PinNeedsCompliance(k));
+            }
+        }
         let pairs = resolve_pairs(&frame, n_slots, n_modes, pairs)?;
         for k in 0..n_modes {
             let row = &frame[k * n_slots..][..n_slots];
@@ -280,7 +362,16 @@ impl DynamicsModel {
         if !frame_rows_independent(&frame, n_modes, n_slots) {
             return Err(ProfileError::FrameRankDeficient);
         }
-        let comp_g = build_comp_g(&frame, &compliance, n_modes, n_slots)
+        // Pin replaces the mode-B position/velocity/snap lead per mode, so a
+        // pinned mode must not also feed the compliance G — zero its
+        // compliance in the G input while keeping the raw vector intact (the
+        // pin oscillator reads ω_b from it).
+        let comp_compliance: Vec<f64> = compliance
+            .iter()
+            .enumerate()
+            .map(|(k, &c)| if pin_mass[k] > 0.0 { 0.0 } else { c })
+            .collect();
+        let comp_g = build_comp_g(&frame, &comp_compliance, n_modes, n_slots)
             .map(|g| g.iter().map(|&v| v as f32).collect());
         let frame: Vec<f32> = frame.iter().map(|&v| v as f32).collect();
         Ok(Self {
@@ -295,6 +386,9 @@ impl DynamicsModel {
             compliance: compliance.iter().map(|&v| v as f32).collect(),
             comp_g,
             ff_lead_us: vec![ff_lead_us; n_slots],
+            pin_mass: pin_mass.iter().map(|&v| v as f32).collect(),
+            pin_zeta: pin_zeta.iter().map(|&v| v as f32).collect(),
+            pin_lead_us: vec![pin_lead_us; n_slots],
             pairs,
         })
     }
@@ -302,6 +396,35 @@ impl DynamicsModel {
     /// True when the profile carries a nonzero belt-compliance term.
     pub fn has_compliance(&self) -> bool {
         self.comp_g.is_some()
+    }
+
+    /// True when mode `k` runs in pin-rotor (torque-hold) mode — its virtual
+    /// pin mass is nonzero, so the endpoint cancels the predicted belt
+    /// reaction instead of applying the position/velocity lead.
+    pub fn pin_active(&self, mode: usize) -> bool {
+        self.pin_mass.get(mode).is_some_and(|&m| m > 0.0)
+    }
+
+    /// Pin predictor phase lead per slot in nanoseconds, mirroring
+    /// `ff_lead_ns`.
+    pub fn pin_lead_ns(&self) -> Vec<u64> {
+        self.pin_lead_us
+            .iter()
+            .map(|&us| (us * 1000.0).round() as u64)
+            .collect()
+    }
+
+    /// Frame row for mode `mode` (length `n_slots`): the per-slot weights
+    /// that project slot kinematics into the mode and lift the mode's torque
+    /// back onto the slots. The pin oscillator uses it for both directions.
+    pub fn frame_row(&self, mode: usize) -> &[f32] {
+        &self.frame[mode * self.n_slots..][..self.n_slots]
+    }
+
+    /// Raw per-mode belt compliance 1/ω_b² (s²); retained even for pinned
+    /// modes so the pin oscillator can read ω_b = 1/√compliance from it.
+    pub fn compliance(&self, mode: usize) -> f32 {
+        self.compliance[mode]
     }
 
     /// `out[s] = (G·input)[s]` — the slot-space compliance correction.
@@ -395,9 +518,12 @@ impl DynamicsModel {
         let mut viscous = Vec::with_capacity(n_modes);
         let mut coulomb = Vec::with_capacity(n_modes);
         let mut compliance = Vec::with_capacity(n_modes);
+        let mut pin_mass = Vec::with_capacity(n_modes);
+        let mut pin_zeta = Vec::with_capacity(n_modes);
         let mut axes = Vec::with_capacity(n_slots);
         let mut modes = Vec::with_capacity(n_modes);
         let mut ff_lead_us = Vec::with_capacity(n_slots);
+        let mut pin_lead_us = Vec::with_capacity(n_slots);
         let mut pairs = Vec::new();
         let mut slot_base = 0usize;
         let mut mode_base = 0usize;
@@ -410,11 +536,14 @@ impl DynamicsModel {
                 viscous.push(p.viscous[k]);
                 coulomb.push(p.coulomb[k]);
                 compliance.push(p.compliance[k]);
+                pin_mass.push(p.pin_mass[k]);
+                pin_zeta.push(p.pin_zeta[k]);
                 modes.push(p.modes[k].clone());
             }
             for s in 0..p.n_slots {
                 axes.push(p.axes[s].clone());
                 ff_lead_us.push(p.ff_lead_us[s]);
+                pin_lead_us.push(p.pin_lead_us[s]);
             }
             for pair in &p.pairs {
                 pairs.push(Pair {
@@ -429,7 +558,12 @@ impl DynamicsModel {
         }
         let frame_f64: Vec<f64> = frame.iter().map(|&v| f64::from(v)).collect();
         let compliance_f64: Vec<f64> = compliance.iter().map(|&v| f64::from(v)).collect();
-        let comp_g = build_comp_g(&frame_f64, &compliance_f64, n_modes, n_slots)
+        let comp_compliance: Vec<f64> = compliance_f64
+            .iter()
+            .enumerate()
+            .map(|(k, &c)| if pin_mass[k] > 0.0 { 0.0 } else { c })
+            .collect();
+        let comp_g = build_comp_g(&frame_f64, &comp_compliance, n_modes, n_slots)
             .map(|g| g.iter().map(|&v| v as f32).collect());
         Ok(Self {
             n_slots,
@@ -443,6 +577,9 @@ impl DynamicsModel {
             compliance,
             comp_g,
             ff_lead_us,
+            pin_mass,
+            pin_zeta,
+            pin_lead_us,
             pairs,
         })
     }

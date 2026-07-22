@@ -16,6 +16,8 @@ fn sample(n: i32) -> DriveSample {
         torque_offset: -7,
         accel_cmd: n as f32 + 0.5,
         vel_cmd: n as f32 - 0.25,
+        pin_res_re: n as f32 + 0.125,
+        pin_res_im: n as f32 - 0.375,
     }
 }
 
@@ -75,6 +77,8 @@ fn distinct_sample(seed: i32) -> DriveSample {
         torque_offset: 250i16.wrapping_add(seed as i16),
         accel_cmd: 1234.5 + seed as f32,
         vel_cmd: -67.25 + seed as f32,
+        pin_res_re: 12.5 + seed as f32,
+        pin_res_im: -8.25 + seed as f32,
     }
 }
 
@@ -90,6 +94,8 @@ fn assert_drive_block(block: &[u8], d: &DriveSample) {
     assert_eq!(&block[24..28], &d.velocity_actual.to_le_bytes());
     assert_eq!(&block[28..32], &d.accel_cmd.to_le_bytes());
     assert_eq!(&block[32..36], &d.vel_cmd.to_le_bytes());
+    assert_eq!(&block[36..40], &d.pin_res_re.to_le_bytes());
+    assert_eq!(&block[40..44], &d.pin_res_im.to_le_bytes());
 }
 
 #[test]
@@ -100,13 +106,13 @@ fn record_encodes_to_fixed_little_endian_layout() {
     r.late_frames = 9;
     r.frame_lateness_ns = -104_000;
     let (b, size) = encode_record(&r);
-    assert_eq!(size, 57);
+    assert_eq!(size, 65);
     assert_eq!(&b[0..8], &0x0102030405060708u64.to_le_bytes());
     assert_eq!(b[8], FLAG_TORQUE_ENABLED | FLAG_MOTION_ACTIVE);
     assert_eq!(&b[9..13], &3u32.to_le_bytes());
     assert_eq!(&b[13..17], &9u32.to_le_bytes());
     assert_eq!(&b[17..21], &(-104_000i32).to_le_bytes());
-    assert_drive_block(&b[21..57], &d);
+    assert_drive_block(&b[21..65], &d);
 }
 
 #[test]
@@ -123,6 +129,8 @@ fn single_drive_record_matches_the_documented_layout() {
         torque_offset: 250,
         accel_cmd: 1234.5,
         vel_cmd: -67.25,
+        pin_res_re: 3.5,
+        pin_res_im: -1.75,
     };
     let mut r = CaptureRecord::new(0x0102030405060708, 0x03);
     r.skip_count = 1;
@@ -131,7 +139,7 @@ fn single_drive_record_matches_the_documented_layout() {
     r.drive_count = 1;
     r.drives[0] = d;
 
-    let mut expected = [0u8; 57];
+    let mut expected = [0u8; 65];
     expected[0..8].copy_from_slice(&0x0102030405060708u64.to_le_bytes());
     expected[8] = 0x03;
     expected[9..13].copy_from_slice(&1u32.to_le_bytes());
@@ -148,9 +156,11 @@ fn single_drive_record_matches_the_documented_layout() {
     expected[45..49].copy_from_slice(&(0x55667788u32 as i32).to_le_bytes());
     expected[49..53].copy_from_slice(&1234.5f32.to_le_bytes());
     expected[53..57].copy_from_slice(&(-67.25f32).to_le_bytes());
+    expected[57..61].copy_from_slice(&3.5f32.to_le_bytes());
+    expected[61..65].copy_from_slice(&(-1.75f32).to_le_bytes());
 
     let (b, size) = encode_record(&r);
-    assert_eq!(size, 57);
+    assert_eq!(size, 65);
     assert_eq!(&b[..size], &expected[..]);
 }
 
@@ -160,10 +170,10 @@ fn two_drive_record_packs_blocks_back_to_back() {
     let d1 = distinct_sample(11);
     let r = record_n(7, &[d0, d1]);
     let (b, size) = encode_record(&r);
-    assert_eq!(size, 21 + 2 * 36);
+    assert_eq!(size, 21 + 2 * 44);
     assert_eq!(&b[0..8], &7u64.to_le_bytes());
-    assert_drive_block(&b[21..57], &d0);
-    assert_drive_block(&b[57..93], &d1);
+    assert_drive_block(&b[21..65], &d0);
+    assert_drive_block(&b[65..109], &d1);
 }
 
 #[test]
@@ -175,7 +185,7 @@ fn header_is_one_json_line_describing_the_record() {
     for needle in [
         "\"version\":2",
         "\"cycle_ns\":1000000",
-        "\"record_size\":57",
+        "\"record_size\":65",
         "\"started_utc\":\"2026-06-10T12:00:00Z\"",
         "\"started_mono_ns\":7",
         "\"name\":\"x\"",
@@ -198,6 +208,8 @@ fn header_is_one_json_line_describing_the_record() {
         "{\"name\":\"velocity_actual\",\"dtype\":\"i32\",\"offset\":45}",
         "{\"name\":\"accel_cmd\",\"dtype\":\"f32\",\"offset\":49}",
         "{\"name\":\"vel_cmd\",\"dtype\":\"f32\",\"offset\":53}",
+        "{\"name\":\"pin_res_re\",\"dtype\":\"f32\",\"offset\":57}",
+        "{\"name\":\"pin_res_im\",\"dtype\":\"f32\",\"offset\":61}",
     ] {
         assert!(h.contains(needle), "header missing {needle}: {h}");
     }
@@ -265,8 +277,8 @@ fn multi_drive_round_trip_writes_two_blocks_per_record() {
     for (i, (a, b)) in samples.iter().enumerate() {
         let rec = &body[i * rsize..(i + 1) * rsize];
         assert_eq!(&rec[0..8], &(i as u64).to_le_bytes());
-        assert_drive_block(&rec[21..57], a);
-        assert_drive_block(&rec[57..93], b);
+        assert_drive_block(&rec[21..65], a);
+        assert_drive_block(&rec[65..109], b);
     }
     std::fs::remove_file(&path).unwrap();
 }
