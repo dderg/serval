@@ -1470,72 +1470,127 @@ fn pin_replaces_lead_per_mode() {
     );
 }
 
-/// A buzz gates the pin torque off and re-anchors the oscillator, so the
-/// contribution restarts clean once the buzz clears.
-#[test]
-fn pin_state_resets_on_buzz() {
-    let mut ctx = pin_ctx("pin-buzz", PIN_IDENTITY);
-    push_all(&mut ctx, piece(1_000_000, 0.1, &[0.0, 0.0, T2_C]));
-    let mut accel_peak = 0f32;
-    for c in 0..40u64 {
-        compute_motion_targets(&mut ctx, 1_000_000 + c * CYCLE_NS);
-        ctx.drive.cycle();
-        accel_peak = accel_peak.max(ctx.pin.slot_torque_at(0).abs());
-    }
-    assert!(
-        accel_peak > 3.0,
-        "pin torque should be active during accel: {accel_peak}"
-    );
+/// Buzz mode A parameters shared by the through-buzz tests: identity frame,
+/// slot 0 driven, no sign flip, 0.1 mm amplitude, long steady tone.
+const BUZZ_AMP_NM: u32 = 100_000; // 0.1 mm
 
-    // Buzz active: pin torque gated off every cycle.
-    for r in &mut ctx.rings {
-        r.reset();
-    }
+/// Arm a single-tone buzz on slot 0 at `freq_millihz` and run it, returning
+/// the per-cycle slot-0 pin torque contribution and target positions.
+fn run_buzz_collect(ctx: &mut EndpointCtx, freq_millihz: u32, cycles: u64) -> (Vec<f32>, Vec<i32>) {
     let rc = ctx.buzz.arm(
         NUM_SLAVES as u8,
         0b01,
         0,
-        60_000,
-        60_000,
-        100_000,
-        500,
+        freq_millihz,
+        freq_millihz,
+        BUZZ_AMP_NM,
+        2000,
         20,
         [0; crate::buzz::MAX_BUZZ_SLOTS],
     );
     assert_eq!(rc, 0);
-    for c in 0..150u64 {
-        compute_motion_targets(&mut ctx, 10_000_000 + c * CYCLE_NS);
+    let mut pin = Vec::with_capacity(cycles as usize);
+    let mut tgt = Vec::with_capacity(cycles as usize);
+    for c in 0..cycles {
+        compute_motion_targets(ctx, 1_000_000 + c * CYCLE_NS);
         ctx.drive.cycle();
-        assert_eq!(
-            ctx.pin.slot_torque_at(0),
-            0.0,
-            "pin torque must be zero while buzzing"
-        );
+        pin.push(ctx.pin.slot_torque_at(0));
+        tgt.push(ctx.drive.telemetry(0).target_position);
     }
+    (pin, tgt)
+}
 
-    // Buzz cleared: the first fresh accel cycle reproduces the from-rest
-    // onset, proving the oscillator restarted clean.
-    ctx.buzz.clear();
-    for r in &mut ctx.rings {
-        r.reset();
-    }
-    for m in &mut ctx.cmaps {
-        *m = None;
-    }
-    push_all(&mut ctx, piece(20_000_000, 0.1, &[0.0, 0.0, T2_C]));
-    compute_motion_targets(&mut ctx, 20_000_000);
-    ctx.drive.cycle();
-    let restart = ctx.pin.slot_torque_at(0);
+/// The pin predictor runs through a buzz: with the buzz tone parked on the
+/// notch the pinned mode integrates the analytic buzz forcing and injects a
+/// live torque bounded by ~Q·m_L·a_buzz (Q = 1/2ζ), while the compliance
+/// position lead (mode B) stays suppressed for that mode.
+#[test]
+fn pin_runs_through_buzz() {
+    let zeta = 0.1f32;
+    let q = 1.0 / (2.0 * zeta);
+    let pin_mass = 0.02f32;
+    // f_b = 1/(2π√compliance) ≈ 50.3 Hz; park the tone on the notch.
+    let f_notch = 50_000u32;
+    let omega_buzz = 2.0 * std::f32::consts::PI * (f_notch as f32 / 1000.0);
+    let amp_mm = BUZZ_AMP_NM as f32 * 1e-6;
+    let a_buzz = omega_buzz * omega_buzz * amp_mm; // |a_buzz| = ω²·A
 
-    let mut fresh = pin_ctx("pin-buzz-fresh", PIN_IDENTITY);
-    push_all(&mut fresh, piece(20_000_000, 0.1, &[0.0, 0.0, T2_C]));
-    compute_motion_targets(&mut fresh, 20_000_000);
-    fresh.drive.cycle();
-    let fresh_onset = fresh.pin.slot_torque_at(0);
+    let mut ctx = pin_ctx("pin-through-buzz", PIN_IDENTITY);
+    let mut plain = pin_ctx(
+        "pin-through-buzz-plain",
+        &PIN_IDENTITY
+            .replace("compliance = [1.0e-5, 0.0]", "compliance = [0.0, 0.0]")
+            .replace("pin_mass = [0.02, 0.0]", "pin_mass = [0.0, 0.0]"),
+    );
+    const CYCLES: u64 = 500;
+    let (pin, tgt) = run_buzz_collect(&mut ctx, f_notch, CYCLES);
+    let (plain_pin, plain_tgt) = run_buzz_collect(&mut plain, f_notch, CYCLES);
 
+    // (c) Compliance position lead stays zero for the pinned mode during the
+    // buzz: slot-0 targets match the no-compliance model exactly (both carry
+    // only the buzz offset, no mode-B lead), and the plain model injects no
+    // pin torque.
+    assert_eq!(
+        tgt, plain_tgt,
+        "pinned mode must carry no compliance position lead during a buzz"
+    );
     assert!(
-        (restart - fresh_onset).abs() < 1e-3,
-        "post-buzz onset {restart} must match a from-rest onset {fresh_onset}"
+        plain_pin.iter().all(|&t| t == 0.0),
+        "the no-pin model must inject no pin torque"
+    );
+
+    // (a) Pinned mode injects a live torque through the buzz.
+    let steady = &pin[200..];
+    let max_pin = steady.iter().fold(0.0f32, |m, &t| m.max(t.abs()));
+    assert!(
+        max_pin > pin_mass * a_buzz,
+        "pin torque must be live and Q-amplified on the notch: \
+         {max_pin} vs m·a_buzz {}",
+        pin_mass * a_buzz
+    );
+    // (b) …bounded by ~Q·m_L·a_buzz with margin.
+    let bound = q * pin_mass * a_buzz;
+    assert!(
+        max_pin < 2.0 * bound,
+        "pin torque must stay within ~Q·m_L·a_buzz: {max_pin} vs bound {bound}"
+    );
+}
+
+/// A buzz well above f_b sees no resonant amplification: the pinned mode
+/// cannot follow, so the injected torque stays far below the on-notch
+/// Q·m_L·a_buzz and never grows cycle-over-cycle (no mode-B-style inversion
+/// divergence).
+#[test]
+fn pin_buzz_above_notch_rolls_off() {
+    let zeta = 0.1f32;
+    let q = 1.0 / (2.0 * zeta);
+    let pin_mass = 0.02f32;
+    // ~5× above the ≈50 Hz notch.
+    let f_hi = 250_000u32;
+    let omega_buzz = 2.0 * std::f32::consts::PI * (f_hi as f32 / 1000.0);
+    let amp_mm = BUZZ_AMP_NM as f32 * 1e-6;
+    let a_buzz = omega_buzz * omega_buzz * amp_mm;
+    let bound = q * pin_mass * a_buzz;
+
+    let mut ctx = pin_ctx("pin-buzz-above", PIN_IDENTITY);
+    const CYCLES: u64 = 500;
+    let (pin, _tgt) = run_buzz_collect(&mut ctx, f_hi, CYCLES);
+
+    // No Q-amplification: the injected torque stays well under the on-notch
+    // bound (the oscillator only sees the direct inertial forcing).
+    let max_pin = pin[200..].iter().fold(0.0f32, |m, &t| m.max(t.abs()));
+    assert!(
+        max_pin < 0.5 * bound,
+        "off-notch buzz must roll off below Q·m_L·a_buzz: {max_pin} vs bound {bound}"
+    );
+    // Non-divergent: the late-window peak does not exceed the earlier steady
+    // peak (a B-style inversion would grow without bound).
+    let peak = |s: &[f32]| s.iter().fold(0.0f32, |m, &t| m.max(t.abs()));
+    let early = peak(&pin[150..300]);
+    let late = peak(&pin[350..500]);
+    assert!(
+        late <= early * 1.1 + 1.0,
+        "pin torque must not grow cycle-over-cycle: early {early}, late {late}"
     );
 }
 

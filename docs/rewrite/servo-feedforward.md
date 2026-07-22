@@ -232,9 +232,16 @@ Per mode, pin (A) and position-lead (B) are mutually exclusive: a pinned mode
 does *not* apply the compliance position/velocity/snap lead, while a mode with
 compliance but zero `pin_mass` keeps exact mode-B behavior. On a coupled node
 the mode torques project to slot torques through the same frame machinery as
-the base torque FF. A buzz excitation suppresses the pin torque for its
-duration (the same gate as compliance) and resets the predictor state to
-zero — as do a stream anchor/reset, a motion gap, and a model swap.
+base torque FF. A buzz excitation suppresses only the position-lead (mode B);
+the pinned modes run *through* the buzz, integrating the analytic buzz forcing
+(`a_buzz = -ω²·x_buzz`, projected to mode space through the same frame/sign
+machinery as the commanded accel) on top of the commanded trajectory accel, so
+a swept-buzz resonance test measures the *pinned* machine. On the notch the
+predictor's worst-case gain is `Q = 1/(2·pin_zeta)`, so the injected torque is
+bounded by `~Q·m_L·a_buzz` and the existing torque clamp guards saturation; the
+residual demodulator keeps accumulating (a steady sine is the best SNR). The
+predictor state resets on a stream anchor/reset, a motion gap, and a model swap
+— but no longer on buzz start/stop.
 
 `ff_lead_us` (float, default `0.0`, range `[0, 10000]`): dead-time
 compensation for the feedforward path, in microseconds. The 60B1h/60B2h
