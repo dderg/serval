@@ -44,13 +44,7 @@ pub fn init_logging(events_dir: &Path) -> Result<(), LogInitError> {
         .lossy(false)
         .finish(rotating);
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"))
-        .add_directive(
-            "motion_core::worker::cpu_watch=info"
-                .parse()
-                .expect("static cpu-watch filter directive"),
-        );
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let subscriber = tracing_subscriber::registry()
         .with(filter)
         .with(JsonlLayer::new(non_blocking));
