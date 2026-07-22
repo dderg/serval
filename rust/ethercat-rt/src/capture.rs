@@ -53,7 +53,11 @@ const DOFF_VELOCITY_ACTUAL: usize = 24;
 const DOFF_ACCEL_CMD: usize = 28;
 const DOFF_VEL_CMD: usize = 32;
 
-const WRITER_SYNC_INTERVAL: Duration = Duration::from_secs(1);
+/// Flush to page cache only — live readers tail the file and never need
+/// fsync. A periodic `sync_data` here blocked >16s on SD-card GC and
+/// overflowed the record ring mid-capture (2026-07-21 bench); the final
+/// fsync at stop still makes completed captures durable.
+const WRITER_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const WRITER_RECV_TIMEOUT: Duration = Duration::from_millis(100);
 const IO_THREAD_STACK: usize = 512 * 1024;
 
@@ -581,7 +585,7 @@ fn run_session(
         }
     }
     let mut written = 0u64;
-    let mut last_sync = Instant::now();
+    let mut last_flush = Instant::now();
     loop {
         match rx.recv_timeout(WRITER_RECV_TIMEOUT) {
             Ok(r) => {
@@ -593,13 +597,10 @@ fn run_session(
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
-        if last_sync.elapsed() >= WRITER_SYNC_INTERVAL {
+        if last_flush.elapsed() >= WRITER_FLUSH_INTERVAL {
             file.flush()
                 .map_err(|e| (written, format!("capture flush: {e}")))?;
-            file.get_ref()
-                .sync_data()
-                .map_err(|e| (written, format!("capture fsync: {e}")))?;
-            last_sync = Instant::now();
+            last_flush = Instant::now();
         }
     }
     file.flush()
