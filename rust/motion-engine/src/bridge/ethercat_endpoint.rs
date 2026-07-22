@@ -153,6 +153,7 @@ pub(crate) fn endpoint_args(
     cycle_us: u32,
     dynamics_profile: Option<&str>,
     late_tolerance_us: Option<f64>,
+    group_delay_us: f64,
     events_dir: Option<&std::path::Path>,
     drives: &[EthercatDrive],
 ) -> Vec<String> {
@@ -171,6 +172,8 @@ pub(crate) fn endpoint_args(
         args.push("--late-tolerance-us".into());
         args.push(tol.to_string());
     }
+    args.push("--group-delay-us".into());
+    args.push(group_delay_us.to_string());
     if let Some(dir) = events_dir {
         args.push("--events-dir".into());
         args.push(dir.to_string_lossy().into_owned());
@@ -196,6 +199,7 @@ pub(crate) fn spawn_ethercat_endpoint(
     cycle_us: u32,
     dynamics_profile: Option<&str>,
     late_tolerance_us: Option<f64>,
+    group_delay_us: f64,
     events_dir: Option<&std::path::Path>,
     drives: &[EthercatDrive],
 ) -> Result<std::process::Child, String> {
@@ -205,6 +209,7 @@ pub(crate) fn spawn_ethercat_endpoint(
         cycle_us,
         dynamics_profile,
         late_tolerance_us,
+        group_delay_us,
         events_dir,
         drives,
     );

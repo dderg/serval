@@ -82,6 +82,9 @@ interface: eth0                     # required; NIC the drive is wired to (raw E
 #   Default: rust/target/release/ethercat-rt (the hw binary). Point this at
 #   the stub for drive-off validation (see below).
 #endpoint: rust/target/release/ethercat-rt-stub
+# group_delay_us: optional. Leads curve sampling to compensate the drive's CSP
+#   group delay; default is one DC cycle (cycle_us).
+#group_delay_us: 250
 
 # A position-commanded servo presented as the X axis. No step/dir, no microsteps.
 [servo_x]

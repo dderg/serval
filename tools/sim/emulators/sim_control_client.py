@@ -83,3 +83,23 @@ class SimControlClient:
         if not r.startswith("value="):
             raise SimControlError(f"unexpected reply: {r}")
         return int(r[len("value=") :])
+
+    def get_step_times(self, line: int) -> dict[str, int]:
+        r = self._send_recv(f"get_step_times line={line}")
+        values = dict(item.split("=", 1) for item in r.split())
+        required = {
+            "count",
+            "first_ns",
+            "last_ns",
+            "sum_ns",
+            "sum_cycles",
+            "sum_index_cycles",
+        }
+        if values.keys() != required:
+            raise SimControlError(f"unexpected reply: {r}")
+        return {name: int(value) for name, value in values.items()}
+
+    def reset_step_times(self, line: int) -> None:
+        r = self._send_recv(f"reset_step_times line={line}")
+        if r.strip() != "ok":
+            raise SimControlError(f"reset_step_times failed: {r}")
