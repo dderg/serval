@@ -48,7 +48,8 @@ pub(super) fn run_cycle(ctx: &mut EndpointCtx) -> ControlFlow<()> {
 
     poll_sensorless(ctx, apply_time);
 
-    let (motion_active, all_acc, all_vel) = compute_motion_targets(ctx, apply_time);
+    let sample_time = apply_time + ctx.group_delay_ns;
+    let (motion_active, all_acc, all_vel) = compute_motion_targets(ctx, sample_time);
 
     ctx.sensorless
         .record_commanded(apply_time, |slot| ctx.last_counts[slot]);
@@ -164,7 +165,7 @@ fn poll_sensorless(ctx: &mut EndpointCtx, apply_time: u64) {
 
 pub(super) fn compute_motion_targets(
     ctx: &mut EndpointCtx,
-    apply_time: u64,
+    sample_time: u64,
 ) -> (bool, Vec<f32>, Vec<f32>) {
     let num_slaves = ctx.num_slaves;
     let mut motion_active = false;
@@ -185,7 +186,7 @@ pub(super) fn compute_motion_targets(
         let mut lane_mm = vec![None; num_slaves];
         let sp_counts = sample_slot_targets(
             ctx,
-            apply_time,
+            sample_time,
             &mut all_acc,
             &mut all_vel,
             &mut all_jrk,
@@ -214,7 +215,7 @@ pub(super) fn compute_motion_targets(
 #[allow(clippy::too_many_arguments)]
 fn sample_slot_targets(
     ctx: &mut EndpointCtx,
-    apply_time: u64,
+    sample_time: u64,
     all_acc: &mut [f32],
     all_vel: &mut [f32],
     all_jrk: &mut [f32],
@@ -225,7 +226,7 @@ fn sample_slot_targets(
     let mut sp_counts: Vec<Option<i32>> = vec![None; num_slaves];
     let buzz_was_active = ctx.buzz.active();
     let buzz_sample = if buzz_was_active {
-        ctx.buzz.eval(apply_time)
+        ctx.buzz.eval(sample_time)
     } else {
         None
     };
@@ -242,7 +243,7 @@ fn sample_slot_targets(
                 ));
                 Some((counts, sign * vel_mm_s, sign * acc_mm_s2))
             })
-        } else if let Some((pos_mm, vel_mm_s, acc_mm_s2)) = ctx.rings[s].sample(apply_time) {
+        } else if let Some((pos_mm, vel_mm_s, acc_mm_s2)) = ctx.rings[s].sample(sample_time) {
             // Streaming is always relative: the stream anchors the host's
             // first commanded mm value onto the drive's commanded-counts
             // frame, so a homing set_position (host frame shift) can never
@@ -279,9 +280,9 @@ fn sample_slot_targets(
             let (ff_vel, ff_acc, ff_jrk, ff_snp) = if buzz_was_active {
                 (vel_mm_s, acc_mm_s2, 0.0, 0.0)
             } else if ctx.ff_lead_ns[s] > 0 {
-                ctx.rings[s].peek_kin(apply_time + ctx.ff_lead_ns[s])
+                ctx.rings[s].peek_kin(sample_time + ctx.ff_lead_ns[s])
             } else {
-                let (jrk, snp) = ctx.rings[s].jerk_snap(apply_time);
+                let (jrk, snp) = ctx.rings[s].jerk_snap(sample_time);
                 (vel_mm_s, acc_mm_s2, jrk, snp)
             };
             all_vel[s] = ff_vel;

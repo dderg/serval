@@ -47,6 +47,7 @@ fn endpoint_args_single_drive_uses_legacy_form() {
         250,
         None,
         None,
+        250.0,
         None,
         &[EthercatDrive {
             chain_index: 1,
@@ -80,6 +81,7 @@ fn endpoint_args_per_drive_ff_flags() {
         250,
         None,
         None,
+        250.0,
         None,
         &[
             EthercatDrive {
@@ -119,6 +121,7 @@ fn endpoint_args_multi_drive_emits_slave_and_axis_groups() {
         250,
         None,
         None,
+        250.0,
         None,
         &[
             EthercatDrive {
@@ -158,6 +161,7 @@ fn endpoint_args_emits_per_slave_dynamics_profile() {
         250,
         None,
         None,
+        250.0,
         None,
         &[
             EthercatDrive {
@@ -193,6 +197,7 @@ fn spawn_nonexistent_binary_errors_with_binary_path() {
         250,
         None,
         None,
+        250.0,
         None,
         &[],
     );

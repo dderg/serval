@@ -73,7 +73,8 @@ runtime_host_widened_clock_now(void)
 #if CONFIG_MCU_SIM
 static const int step_gpio_lines[N_AXIS_STEP_QUEUES] = { 18, 7, 15, 20 };
 
-static void (*sim_notify_step)(int chip, int line, int32_t n_steps);
+static void (*sim_notify_step)(int chip, int line, int32_t n_steps,
+                               uint64_t sched_vtime_ns, uint64_t sched_cycle);
 
 // libvtime pacer API: while registered, virtual time cannot advance past
 // this thread's floor, so no motion sample period is ever skipped.
@@ -194,18 +195,39 @@ host_tick_main(void *arg)
         runtime_tick_sample(runtime_handle);
 
         // Must drain every tick or the queue overflows (StepQueueOverflow).
+        // The shim wants each step's SCHEDULED sub-sample time, not this
+        // drain tick: the sim outputs a whole sample burst at once, so the
+        // dispatch lag lives only in each entry's cycle_abs. Reconstruct the
+        // absolute virtual time from cycle_abs against the current 64-bit
+        // clock and this tick's virtual clock.
+#if CONFIG_MCU_SIM
+        struct timespec sim_vt;
+        clock_gettime(CLOCK_MONOTONIC, &sim_vt);
+        uint64_t sim_vt_ns = (uint64_t)sim_vt.tv_sec * 1000000000ULL
+                             + (uint64_t)sim_vt.tv_nsec;
+        uint64_t sim_now_cyc = timer_read_time_u64();
+        const int64_t sim_ns_per_tick = 1000000000LL / CONFIG_CLOCK_FREQ;
+#endif
         for (int axis = 0; axis < N_AXIS_STEP_QUEUES; axis++) {
             StepQueue *q = &step_queues[axis];
             while (q->head != q->tail) {
 #if CONFIG_MCU_SIM
                 uint16_t idx = q->head & (STEP_QUEUE_DEPTH - 1);
                 int8_t signed_step_delta = q->buf[idx].dir;
+                uint32_t sched_lo = q->buf[idx].cycle_abs;
+                int32_t sched_delta = (int32_t)(sched_lo - (uint32_t)sim_now_cyc);
+                uint64_t sched_vtime_ns =
+                    sim_vt_ns + (uint64_t)((int64_t)sched_delta * sim_ns_per_tick);
 #endif
                 q->head++;
 #if CONFIG_MCU_SIM
-                if (sim_notify_step && step_gpio_lines[axis] >= 0)
+                if (sim_notify_step && step_gpio_lines[axis] >= 0) {
+                    uint64_t sched_cycle =
+                        (uint64_t)((int64_t)sim_now_cyc + sched_delta);
                     sim_notify_step(0, step_gpio_lines[axis],
-                                    signed_step_delta);
+                                    signed_step_delta, sched_vtime_ns,
+                                    sched_cycle);
+                }
 #endif
             }
         }

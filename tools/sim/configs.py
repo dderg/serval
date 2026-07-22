@@ -885,6 +885,94 @@ enable_force_move: True
 """
 
 
+def dual_mcu_alignment_config(
+    h7_pty: str,
+    f4_pty: str,
+    gcode_dir: str,
+) -> str:
+    """Minimal dual-MCU CoreXY: A/B belts on the main (H7) MCU, Z on the
+    bottom (F4) MCU, GPIO endstops, no beacon/probe. Deliberately light so
+    the H7 motion tick paces without the extra emulator processes stealing
+    CPU (which packs virtual-clock catch-up bursts into single samples)."""
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[mcu bottom]
+serial: {f4_pty}
+
+[printer]
+max_velocity: 500
+max_accel: 5000
+max_z_velocity: 50
+max_z_accel: 500
+corner_deviation: 0.023
+
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+
+[axis x]
+position_endstop: 0
+position_max: 300
+endstop_pin: ^gpiochip0/gpio10
+homing_speed: 10
+post_processors: is_xy
+
+[axis y]
+position_endstop: 0
+position_max: 300
+endstop_pin: ^gpiochip0/gpio11
+homing_speed: 10
+post_processors: is_xy
+
+[axis z]
+position_min: -5
+position_max: 250
+endstop_pin: ^bottom:gpiochip0/gpio12
+homing_speed: 5
+
+[motor a]
+drive: stepper
+step_pin: gpiochip0/gpio0
+dir_pin: gpiochip0/gpio1
+enable_pin: !gpiochip0/gpio2
+microsteps: 16
+rotation_distance: 40
+
+[motor b]
+drive: stepper
+step_pin: gpiochip0/gpio3
+dir_pin: gpiochip0/gpio4
+enable_pin: !gpiochip0/gpio5
+microsteps: 16
+rotation_distance: 40
+
+[motor z]
+drive: stepper
+step_pin: bottom:gpiochip0/gpio0
+dir_pin: bottom:gpiochip0/gpio1
+enable_pin: !bottom:gpiochip0/gpio2
+microsteps: 16
+rotation_distance: 4
+
+[post_processor is_xy]
+type: smooth_bell
+smooth_time: 0.019125
+
+[virtual_sdcard]
+path: {gcode_dir}
+
+[force_move]
+enable_force_move: True
+"""
+
+
 PROBE_VARIANTS = (
     "virtual",
     "safe-z",

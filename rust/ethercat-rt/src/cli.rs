@@ -177,6 +177,7 @@ pub struct Args {
     pub mailbox_cpu: Option<usize>,
     pub dynamics: Option<crate::dynamics::DynamicsModel>,
     pub late_tolerance_ns: Option<i64>,
+    pub group_delay_ns: u64,
 }
 
 fn load_dynamics_profile(path: &str) -> crate::dynamics::DynamicsModel {
@@ -282,6 +283,20 @@ impl Args {
             });
             (us * 1000.0).round() as i64
         });
+        let group_delay_ns = match arg_val(&raw, "--group-delay-us") {
+            Some(v) => {
+                let us: f64 = v.parse().unwrap_or_else(|_| {
+                    eprintln!("ec-rt: --group-delay-us {v} is not a number");
+                    std::process::exit(1);
+                });
+                if us < 0.0 {
+                    eprintln!("ec-rt: --group-delay-us {us} must be >= 0");
+                    std::process::exit(1);
+                }
+                (us * 1000.0).round() as u64
+            }
+            None => (cycle_us * 1000) as u64,
+        };
         Args {
             ifname,
             socket,
@@ -292,6 +307,7 @@ impl Args {
             mailbox_cpu,
             dynamics,
             late_tolerance_ns,
+            group_delay_ns,
         }
     }
 }

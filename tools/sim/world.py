@@ -119,6 +119,26 @@ class SimControl:
             f"set_gpio_input chip={chip} line={line} value={value}"
         )
 
+    def get_step_times(self, line: int) -> dict[str, int]:
+        response = self.send(f"get_step_times line={line}")
+        values = dict(item.split("=", 1) for item in response.split())
+        required = {
+            "count",
+            "first_ns",
+            "last_ns",
+            "sum_ns",
+            "sum_cycles",
+            "sum_index_cycles",
+        }
+        if values.keys() != required:
+            raise SimError(f"unexpected get_step_times reply: {response!r}")
+        return {name: int(value) for name, value in values.items()}
+
+    def reset_step_times(self, line: int) -> None:
+        response = self.send(f"reset_step_times line={line}")
+        if response.strip() != "ok":
+            raise SimError(f"reset_step_times failed: {response!r}")
+
 
 class EndstopPulser:
     """Cycles endstop GPIO lines low/high so a homing move always sees a

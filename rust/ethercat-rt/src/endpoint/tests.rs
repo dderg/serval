@@ -29,6 +29,7 @@ use crate::damper::DiffDamperBank;
 use crate::ffi::EcTelemetry;
 use crate::live_tap::LiveTap;
 use crate::mailbox::{MailboxWorker, WorkerScheduling};
+use crate::scale::CountMap;
 use crate::sdo::SdoBus;
 use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
@@ -215,6 +216,7 @@ fn test_ctx_with_drive(name: &str, drive: impl DriveChain + 'static) -> Endpoint
         ff_lead_ns: vec![0; NUM_SLAVES],
         jump_log_counts: vec![1638; NUM_SLAVES],
         cycle_ns: CYCLE_NS as i64,
+        group_delay_ns: 0,
         telemetry_period: u64::MAX,
         dynamics: None,
         run_limits: Vec::new(),
@@ -1237,4 +1239,54 @@ fn compliance_offset_is_zero_at_constant_velocity_and_never_baked_in() {
         on.last_streamed_target, off.last_streamed_target,
         "the lead must live in the offset channel, not the streamed anchor"
     );
+}
+
+#[test]
+fn group_delay_leads_curve_sampling_by_one_cycle() {
+    const APPLY_T: u64 = 1_200_000;
+    let vel_piece = piece(1_000_000, 0.1, &[0.0, 1.0]);
+
+    let mut reference = test_ctx("group-delay-ref");
+    push_all(&mut reference, vel_piece);
+    let (pos_t, _, _) = reference.rings[0].sample(APPLY_T).expect("piece covers T");
+    let (pos_lead, _, _) = reference.rings[0]
+        .sample(APPLY_T + CYCLE_NS)
+        .expect("piece covers T+CYCLE_NS");
+    let fixed_map = CountMap::new(COUNTS_PER_MM, 0, 0.0);
+    let expected_lead_counts =
+        fixed_map.target_counts(f64::from(pos_lead)) - fixed_map.target_counts(f64::from(pos_t));
+    assert!(
+        expected_lead_counts != 0,
+        "constant-velocity piece must advance across one cycle"
+    );
+
+    let seed_fixed_map = |ctx: &mut EndpointCtx| {
+        for s in 0..NUM_SLAVES {
+            ctx.cmaps[s] = Some(fixed_map);
+        }
+    };
+
+    let mut unleaded = test_ctx("group-delay-zero");
+    unleaded.group_delay_ns = 0;
+    push_all(&mut unleaded, vel_piece);
+    seed_fixed_map(&mut unleaded);
+    let unleaded_sample = APPLY_T + unleaded.group_delay_ns;
+    compute_motion_targets(&mut unleaded, unleaded_sample);
+    let unleaded_targets = targets(&unleaded);
+
+    let mut leaded = test_ctx("group-delay-cycle");
+    leaded.group_delay_ns = CYCLE_NS;
+    push_all(&mut leaded, vel_piece);
+    seed_fixed_map(&mut leaded);
+    let leaded_sample = APPLY_T + leaded.group_delay_ns;
+    compute_motion_targets(&mut leaded, leaded_sample);
+    let leaded_targets = targets(&leaded);
+
+    for s in 0..NUM_SLAVES {
+        assert_eq!(
+            leaded_targets[s] - unleaded_targets[s],
+            expected_lead_counts,
+            "slot {s}: group delay must lead curve sampling by velocity*CYCLE_NS counts"
+        );
+    }
 }

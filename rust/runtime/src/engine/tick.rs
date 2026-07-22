@@ -35,11 +35,12 @@ impl Engine {
         let cps = self.cycles_per_second;
         let fault = SharedFaultSink { shared };
         let mut just_armed = false;
+        let window_end = now.wrapping_add(u64::from(self.sample_period_cycles));
         match crate::motion_core::get_position_and_velocity_armed(
             &mut axis.armed,
             &mut axis.ring,
             storage,
-            now,
+            window_end,
             self.sample_period_cycles,
             cps,
             i,
