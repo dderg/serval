@@ -24,6 +24,12 @@ pub(super) trait DriveChain {
         0
     }
 
+    /// How far past the grid deadline the overrunning cycle was when the
+    /// last reanchor skipped forward — the true magnitude of the stall.
+    fn last_reanchor_behind_ns(&self) -> i64 {
+        0
+    }
+
     /// (wake_late_ns, recv_ns, process_ns, send_ns) of the last exchange —
     /// the stage breakdown that attributes a frame-timing spike to kernel
     /// wakeup latency vs the polled bus receive vs domain processing vs the
@@ -61,6 +67,9 @@ impl DriveChain for FfiDriveChain {
 
     fn reanchor_count(&self) -> u32 {
         unsafe { ffi::ec_rt_reanchor_count() }
+    }
+    fn last_reanchor_behind_ns(&self) -> i64 {
+        unsafe { ffi::ec_rt_last_reanchor_behind_ns() }
     }
     fn cycle_stage_ns(&self) -> (i64, i64, i64, i64) {
         let (mut wake_late, mut recv, mut process, mut send) = (0i64, 0i64, 0i64, 0i64);
