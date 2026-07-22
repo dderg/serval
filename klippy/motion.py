@@ -119,6 +119,7 @@ class Motion:
             "buffer_time_low", 1.0, minval=0.0
         )
         self._drip_active = False
+        self._clock_sync_confirmed = False
         self._last_reactor_yield = 0.0
         gcode = printer.lookup_object("gcode")
         self.Coord = gcode.Coord
@@ -362,7 +363,44 @@ class Motion:
         self.set_position(newpos)
         self.kin.clear_parked_dirty(dirty)
 
+    CLOCK_SYNC_TIMEOUT = 60.0
+
+    def _await_clock_sync(self):
+        if self._clock_sync_confirmed:
+            return
+        if self.mcu is None or self.mcu.is_fileoutput():
+            self._clock_sync_confirmed = True
+            return
+
+        def pending_mcus():
+            return [
+                m
+                for m in self.all_mcus
+                if not m.non_critical_disconnected and not m.is_clock_synced()
+            ]
+
+        pending = pending_mcus()
+        if pending:
+            self.printer.lookup_object("gcode").respond_info(
+                "Waiting for MCU clock synchronization..."
+            )
+            deadline = self.reactor.monotonic() + self.CLOCK_SYNC_TIMEOUT
+            while pending:
+                if self.reactor.monotonic() > deadline:
+                    raise self.printer.command_error(
+                        "MCU clock synchronization did not converge"
+                        " within %.0fs (mcu: %s)"
+                        % (
+                            self.CLOCK_SYNC_TIMEOUT,
+                            ", ".join(m.get_name() for m in pending),
+                        )
+                    )
+                self.reactor.pause(self.reactor.monotonic() + 0.100)
+                pending = pending_mcus()
+        self._clock_sync_confirmed = True
+
     def move(self, newpos, speed):
+        self._await_clock_sync()
         self.resync_parked_servos()
         move = Move(self, self.commanded_pos, newpos, speed)
         if not move.move_d:
@@ -381,6 +419,7 @@ class Motion:
         self._sync_print_time()
 
     def move_curve(self, newpos, interior_control_points, submit, speed):
+        self._await_clock_sync()
         self.resync_parked_servos()
         move = Move(self, self.commanded_pos, newpos, speed)
         if move.is_kinematic_move:

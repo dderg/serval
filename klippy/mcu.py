@@ -811,6 +811,9 @@ class MCU:
     def clock32_to_clock64(self, clock32):
         return self._clocksync.clock32_to_clock64(clock32)
 
+    def is_clock_synced(self):
+        return self._clocksync.is_synced()
+
     # Restarts
     def _disconnect(self):
         self._serial.disconnect()
