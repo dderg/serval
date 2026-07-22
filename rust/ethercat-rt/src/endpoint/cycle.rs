@@ -845,7 +845,7 @@ fn emit_periodic_telemetry(ctx: &mut EndpointCtx, wkc: i32, toff: i64) {
             ctx.late_frames = 0;
             ctx.late_max_ns = i64::MIN;
         }
-        let nivcsw = thread_nonvoluntary_ctx_switches();
+        let nivcsw = crate::thread_prio::thread_nonvoluntary_ctx_switches();
         tracing::info!(
             subsystem = "ethercat",
             event = "cycle_stage_max",
@@ -872,25 +872,5 @@ fn emit_periodic_telemetry(ctx: &mut EndpointCtx, wkc: i32, toff: i64) {
             respond_fault_heartbeat(ctx, 0, latched_drive_err);
         }
         crate::obs::emit_dropped_line_report();
-    }
-}
-
-/// Nonvoluntary context switches of the DC thread — nonzero deltas per beat
-/// mean something preempted a SCHED_FIFO-80 thread, which points the spike
-/// hunt at the kernel (stop_machine, higher-prio kthread) rather than at any
-/// stage of this loop.
-fn thread_nonvoluntary_ctx_switches() -> i64 {
-    #[cfg(target_os = "linux")]
-    {
-        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
-        let rc = unsafe { libc::getrusage(libc::RUSAGE_THREAD, usage.as_mut_ptr()) };
-        if rc == 0 {
-            return unsafe { usage.assume_init() }.ru_nivcsw;
-        }
-        0
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        0
     }
 }
