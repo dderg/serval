@@ -50,12 +50,12 @@ impl PumpSink {
             .unwrap_or(0)
     }
 
-    fn anchor(&self, t_start: f64, t_end: f64) -> AnchorPoint {
+    fn anchor(&self, t_start: f64, t_end: f64, ends_at_rest: bool) -> AnchorPoint {
         let host_now = self.host_now();
-        let (t0, epoch) = self
-            .anchor
-            .lock_ok()
-            .anchor_segment(t_start, t_end, host_now);
+        let (t0, epoch) =
+            self.anchor
+                .lock_ok()
+                .anchor_segment(t_start, t_end, host_now, ends_at_rest);
         let drip_active = self.active_drip_cohort.lock_ok().is_some();
         AnchorPoint {
             t0,
@@ -89,7 +89,7 @@ impl SegmentSink for PumpSink {
             "[engine-trace] dispatch entered"
         );
 
-        let at = self.anchor(seg.t_start, seg.t_end);
+        let at = self.anchor(seg.t_start, seg.t_end, segment_ends_at_rest(seg));
 
         let runway_s = at.t0 + seg.t_end - at.host_now;
         if runway_s > 0.0 {
@@ -144,7 +144,7 @@ impl SegmentSink for PumpSink {
             return Err(DispatchError::NudgeTargetMissing { mcu_id, axis });
         }
 
-        let at = self.anchor(np.piece.u_start, np.piece.u_end);
+        let at = self.anchor(np.piece.u_start, np.piece.u_end, true);
 
         if at.epoch.is_fresh() {
             self.log_seg0_lead(std::iter::once(mcu_id), at.t0 + np.piece.u_start, at.t0);
@@ -180,4 +180,23 @@ impl SegmentSink for PumpSink {
         self.counter.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
+}
+
+/// Whether every axis of the segment has zero velocity at its end — the
+/// machine is parked there, so a later resume may re-anchor instead of
+/// faulting. The threshold is physical rest, not float noise: the shaper's
+/// kernel-settle tails end around 3e-5 mm/s (measured at the manual-probe
+/// seam), while genuinely mid-motion seams end at ≥0.5 mm/s. Anything below
+/// 1e-3 mm/s cannot produce a discontinuity a step could express.
+const REST_VELOCITY_EPS: f64 = 1e-3;
+
+pub(super) fn segment_ends_at_rest(seg: &ShapedSegment) -> bool {
+    seg.axes.iter().all(|axis| {
+        let Some(&u_end) = axis.knots().last() else {
+            return true;
+        };
+        nurbs::eval::eval_derivative(axis.control_points(), axis.knots(), axis.degree(), u_end)
+            .abs()
+            < REST_VELOCITY_EPS
+    })
 }

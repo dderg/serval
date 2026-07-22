@@ -97,6 +97,17 @@ pub struct EndpointCtx {
     recv_max_ns: i64,
     process_max_ns: i64,
     send_max_ns: i64,
+    /// Instant the previous DC exchange returned; the span from here to the
+    /// next exchange entry is every non-exchange nanosecond of the loop —
+    /// the region the stage clocks above do not cover.
+    prev_exchange_return: Option<std::time::Instant>,
+    last_pre_cycle_ns: i64,
+    last_post_cycle_ns: i64,
+    last_inter_exchange_ns: i64,
+    pre_cycle_max_ns: i64,
+    post_cycle_max_ns: i64,
+    inter_exchange_max_ns: i64,
+    last_nivcsw: i64,
 }
 
 pub fn run(ctx: &mut EndpointCtx) {
