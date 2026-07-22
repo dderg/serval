@@ -108,6 +108,18 @@ pub struct EndpointCtx {
     post_cycle_max_ns: i64,
     inter_exchange_max_ns: i64,
     last_nivcsw: i64,
+    /// Sub-spans of the post-exchange region — reported on the next cycle's
+    /// fault events so an overrun names the exact call that ate the time.
+    last_fault_ns: i64,
+    last_capture_ns: i64,
+    last_wkc_ns: i64,
+    last_heartbeat_ns: i64,
+    last_telemetry_ns: i64,
+    fault_max_ns: i64,
+    capture_max_ns: i64,
+    wkc_max_ns: i64,
+    heartbeat_max_ns: i64,
+    telemetry_max_ns: i64,
 }
 
 pub fn run(ctx: &mut EndpointCtx) {
