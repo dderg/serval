@@ -59,11 +59,25 @@ enum AnchorClass {
     },
 }
 
+/// The simulator drives the MCU on a virtual clock that legally races ahead
+/// of the host projection (mirrors `pump_past_guard_secs` and the MCU's
+/// `CONFIG_MCU_SIM` timer-in-past gating), so a host-side underrun there is
+/// infrastructure jitter, not a producer that fell behind — recover instead
+/// of aborting. On real hardware there is no such slip and the abort stands.
+fn anchor_faults_recover_in_sim() -> bool {
+    static SIM: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("MCU_SIM_SOCK_DIR").is_some());
+    *SIM
+}
+
 pub struct Anchor {
     t0: Option<f64>,
     last_t_end: f64,
     last_ends_at_rest: bool,
     lead_secs: f64,
+    /// When true, a mid-motion underrun/low-margin re-anchors instead of
+    /// aborting; set only under the simulator's racing virtual clock.
+    recover_faults: bool,
 }
 
 impl Anchor {
@@ -73,6 +87,7 @@ impl Anchor {
             last_t_end: 0.0,
             last_ends_at_rest: true,
             lead_secs: DEFAULT_LEAD_SECS,
+            recover_faults: anchor_faults_recover_in_sim(),
         }
     }
 
@@ -141,6 +156,19 @@ impl Anchor {
                 );
                 StreamEpoch::Reanchor
             }
+            AnchorClass::UnderrunFatal { gap_s, t0 } if self.recover_faults => {
+                tracing::warn!(
+                    subsystem = "motion",
+                    event = "anchor_underrun_sim_recover",
+                    gap_s,
+                    seg_t_start,
+                    t0,
+                    "[anchor-underrun] playhead overran the committed end \
+                     mid-motion — re-anchoring (simulator virtual-clock slip, \
+                     fatal on real hardware)"
+                );
+                StreamEpoch::Reanchor
+            }
             AnchorClass::UnderrunFatal { gap_s, t0 } => {
                 tracing::error!(
                     subsystem = "motion",
@@ -156,6 +184,19 @@ impl Anchor {
                      trajectory was mid-motion (t0={t0:.6}) — the producer \
                      fell behind playback"
                 ));
+            }
+            AnchorClass::LowMarginFatal { margin_s, t0 } if self.recover_faults => {
+                tracing::warn!(
+                    subsystem = "motion",
+                    event = "anchor_low_margin_sim_recover",
+                    margin_s,
+                    seg_t_start,
+                    t0,
+                    "[anchor] mid-motion margin below the transport floor — \
+                     re-anchoring (simulator virtual-clock slip, fatal on real \
+                     hardware)"
+                );
+                StreamEpoch::Reanchor
             }
             AnchorClass::LowMarginFatal { margin_s, t0 } => {
                 tracing::error!(
