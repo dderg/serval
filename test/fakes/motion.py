@@ -450,6 +450,9 @@ class FakeMotion:
     def get_position(self):
         return list(self.commanded_pos)
 
+    def _await_clock_sync(self):
+        pass
+
     def set_position(self, newpos, homing_axes=()):
         self.set_position_calls.append((list(newpos), tuple(homing_axes)))
         self.commanded_pos[:] = newpos

@@ -9,6 +9,8 @@ import traceback
 
 RTT_AGE = 0.000010 / (60.0 * 60.0)
 DECAY = 1.0 / 30.0
+SYNC_STABLE_FREQ_PPM = 5e-6
+SYNC_STABLE_SAMPLES = 3
 
 
 class ClockSync:
@@ -28,6 +30,8 @@ class ClockSync:
         self.clock_avg = self.clock_covariance = 0.0
         self.prediction_variance = 0.0
         self.last_prediction_time = 0.0
+        self._sync_stable_count = 0
+        self._synced = False
         self._clock_est_callback = None
 
     def set_clock_est_callback(self, cb):
@@ -59,6 +63,8 @@ class ClockSync:
         self.time_avg = params["#sent_time"]
         self.clock_est = (self.time_avg, self.clock_avg, self.mcu_freq)
         self.prediction_variance = (0.001 * self.mcu_freq) ** 2
+        self._sync_stable_count = 0
+        self._synced = False
         # Enable periodic get_clock timer
         for i in range(8):
             self.reactor.pause(self.reactor.monotonic() + 0.050)
@@ -66,12 +72,14 @@ class ClockSync:
             params = serial.send_with_response("get_clock", "clock")
             self._handle_clock(params)
         serial.register_response(self._handle_clock, "clock")
+        self._sync_stable_count = 0
         self.reactor.update_timer(self.get_clock_timer, self.reactor.NOW)
 
     def connect_file(self, serial, pace=False):
         self.serial = serial
         self.mcu_freq = serial.msgparser.get_constant_float("CLOCK_FREQ")
         self.clock_est = (0.0, 0.0, self.mcu_freq)
+        self._synced = True
         freq = 1000000000000.0
         if pace:
             freq = self.mcu_freq
@@ -161,11 +169,22 @@ class ClockSync:
         )
         # Update prediction from linear regression
         new_freq = self.clock_covariance / self.time_variance
+        prev_freq = self.clock_est[2]
         self.clock_est = (
             self.time_avg + self.min_half_rtt,
             self.clock_avg,
             new_freq,
         )
+        if not self._synced:
+            if (
+                abs(new_freq - prev_freq)
+                <= SYNC_STABLE_FREQ_PPM * self.mcu_freq
+            ):
+                self._sync_stable_count += 1
+                if self._sync_stable_count >= SYNC_STABLE_SAMPLES:
+                    self._synced = True
+            else:
+                self._sync_stable_count = 0
         cb = self._clock_est_callback
         if cb is not None:
             try:
@@ -205,6 +224,9 @@ class ClockSync:
 
     def is_active(self):
         return self.queries_pending <= 4
+
+    def is_synced(self):
+        return self._synced
 
     def dump_debug(self):
         sample_time, clock, freq = self.clock_est
@@ -258,6 +280,9 @@ class SecondarySync(ClockSync):
     def connect_file(self, serial, pace=False):
         ClockSync.connect_file(self, serial, pace)
         self.clock_adj = (0.0, self.mcu_freq)
+
+    def is_synced(self):
+        return self._synced and self.main_sync.is_synced()
 
     # clock frequency conversions
     def print_time_to_clock(self, print_time):
