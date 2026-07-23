@@ -58,7 +58,7 @@ pub enum Command {
     },
     RestoreDriveLimits {
         correlation_id: u32,
-        slot: u8,
+        slot_mask: u32,
     },
     SeedServoHome {
         correlation_id: u32,
@@ -176,7 +176,7 @@ pub fn decode_command(channel: u8, payload: &[u8]) -> Result<Command, DecodeCmdE
             let msg = RestoreDriveLimits::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
             Ok(Command::RestoreDriveLimits {
                 correlation_id: cid,
-                slot: msg.slot,
+                slot_mask: msg.slot_mask,
             })
         }
         Some(MessageKind::SeedServoHome) => {

@@ -122,19 +122,15 @@ class MotionEngineWrapper:
             ENDPOINT_CALL_DEADLINE_S,
         )
 
-    def set_drive_limits(
-        self, mcu_handle, slot, following_error_counts, max_torque_tenth_pct
-    ):
+    def set_drive_limits(self, mcu_handle, drives):
         self._wait_endpoint_call(
-            self._engine.set_drive_limits_start(
-                mcu_handle, slot, following_error_counts, max_torque_tenth_pct
-            ),
+            self._engine.set_drive_limits_start(mcu_handle, drives),
             "set_drive_limits",
         )
 
-    def restore_drive_limits(self, mcu_handle, slot):
+    def restore_drive_limits(self, mcu_handle, slots):
         self._wait_endpoint_call(
-            self._engine.restore_drive_limits_start(mcu_handle, slot),
+            self._engine.restore_drive_limits_start(mcu_handle, slots),
             "restore_drive_limits",
         )
 

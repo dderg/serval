@@ -286,12 +286,10 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
     SchemaMessage {
         type_tag: 0x0074,
         name: "SetDriveLimits",
-        version: 1,
+        version: 2,
         channel: "control",
         fields: &[
-            SchemaField { name: "slot", ty: "u8" },
-            SchemaField { name: "following_error_counts", ty: "u32" },
-            SchemaField { name: "max_torque_tenth_pct", ty: "u16" },
+            SchemaField { name: "drives", ty: "array<drive_limit{slot:u8,following_error_counts:u32,max_torque_tenth_pct:u16}>" },
         ],
     },
     SchemaMessage {
@@ -306,10 +304,10 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
     SchemaMessage {
         type_tag: 0x0076,
         name: "RestoreDriveLimits",
-        version: 1,
+        version: 2,
         channel: "control",
         fields: &[
-            SchemaField { name: "slot", ty: "u8" },
+            SchemaField { name: "slot_mask", ty: "u32" },
         ],
     },
     SchemaMessage {

@@ -491,31 +491,6 @@ impl Decode for StopResponse {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SetDriveLimits {
-    pub slot: u8,
-    pub following_error_counts: u32,
-    pub max_torque_tenth_pct: u16,
-}
-
-impl Encode for SetDriveLimits {
-    fn encode(&self, out: &mut Vec<u8>) {
-        put_u8(out, self.slot);
-        put_u32(out, self.following_error_counts);
-        put_u16(out, self.max_torque_tenth_pct);
-    }
-}
-
-impl Decode for SetDriveLimits {
-    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        Ok(Self {
-            slot: get_u8(c)?,
-            following_error_counts: get_u32(c)?,
-            max_torque_tenth_pct: get_u16(c)?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetDriveLimitsResponse {
     pub result: i32,
 }
@@ -536,18 +511,20 @@ impl Decode for SetDriveLimitsResponse {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RestoreDriveLimits {
-    pub slot: u8,
+    pub slot_mask: u32,
 }
 
 impl Encode for RestoreDriveLimits {
     fn encode(&self, out: &mut Vec<u8>) {
-        put_u8(out, self.slot);
+        put_u32(out, self.slot_mask);
     }
 }
 
 impl Decode for RestoreDriveLimits {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        Ok(Self { slot: get_u8(c)? })
+        Ok(Self {
+            slot_mask: get_u32(c)?,
+        })
     }
 }
 

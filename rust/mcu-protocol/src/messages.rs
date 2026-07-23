@@ -384,6 +384,51 @@ impl Decode for MotorStateResponse {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DriveLimitEntry {
+    pub slot: u8,
+    pub following_error_counts: u32,
+    pub max_torque_tenth_pct: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetDriveLimits {
+    pub drives: Vec<DriveLimitEntry>,
+}
+
+impl Encode for SetDriveLimits {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_u8(out, self.drives.len() as u8);
+        for d in &self.drives {
+            put_u8(out, d.slot);
+            put_u32(out, d.following_error_counts);
+            put_u16(out, d.max_torque_tenth_pct);
+        }
+    }
+}
+
+impl Decode for SetDriveLimits {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let count = get_u8(c)?;
+        let need = (count as usize) * 7;
+        if need > c.remaining() {
+            return Err(DecodeError::ArrayLengthExceedsBuffer {
+                claimed: u32::from(count),
+                available: c.remaining(),
+            });
+        }
+        let mut drives = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            drives.push(DriveLimitEntry {
+                slot: get_u8(c)?,
+                following_error_counts: get_u32(c)?,
+                max_torque_tenth_pct: get_u16(c)?,
+            });
+        }
+        Ok(Self { drives })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetStrainComp {
     pub slot_a: u8,

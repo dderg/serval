@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use mcu_protocol::messages::{SdoRead, SdoWrite};
 
-use super::{MailboxReply, MailboxRequest, MailboxWorker, WorkerScheduling};
+use super::{LimitEntry, MailboxReply, MailboxRequest, MailboxWorker, WorkerScheduling};
 use crate::sdo::{DictObject, DictSdoBus, SdoBus};
 
 fn dict() -> DictSdoBus {
@@ -147,37 +147,85 @@ fn replies_preserve_submission_order() {
 }
 
 #[test]
-fn write_limits_routes_through_callback_with_restore_flag() {
+fn write_limits_executes_entries_back_to_back_with_restore_flag() {
     let calls = Arc::new(AtomicU32::new(0));
     let seen = calls.clone();
     let worker = MailboxWorker::spawn(
         dict(),
-        move |_slot, ferr, tq| {
-            seen.store(ferr * 10 + u32::from(tq), Ordering::SeqCst);
-            7
+        move |slot, ferr, tq| {
+            seen.fetch_add(
+                u32::from(slot) * 100 + ferr * 10 + u32::from(tq),
+                Ordering::SeqCst,
+            );
+            0
         },
         WorkerScheduling::Normal,
     );
     worker.submit(MailboxRequest::WriteLimits {
         correlation_id: 9,
-        slot: 0,
-        ferr_counts: 4,
-        torque_tenth_pct: 2,
+        entries: vec![
+            LimitEntry {
+                slot: 0,
+                ferr_counts: 4,
+                torque_tenth_pct: 2,
+            },
+            LimitEntry {
+                slot: 1,
+                ferr_counts: 3,
+                torque_tenth_pct: 1,
+            },
+        ],
         restore: true,
     });
     match drain_one(&worker, Duration::from_secs(2)) {
         MailboxReply::WriteLimits {
             correlation_id,
             rc,
-            ferr_counts,
-            torque_tenth_pct,
+            entries,
             restore,
         } => {
             assert_eq!(
-                (correlation_id, rc, ferr_counts, torque_tenth_pct, restore),
-                (9, 7, 4, 2, true)
+                (correlation_id, rc, entries.len(), restore),
+                (9, 0, 2, true)
             );
-            assert_eq!(calls.load(Ordering::SeqCst), 42);
+            assert_eq!(calls.load(Ordering::SeqCst), 42 + 131);
+        }
+        _ => panic!("expected WriteLimits reply"),
+    }
+}
+
+#[test]
+fn write_limits_stops_at_first_failure() {
+    let calls = Arc::new(AtomicU32::new(0));
+    let seen = calls.clone();
+    let worker = MailboxWorker::spawn(
+        dict(),
+        move |_slot, _ferr, _tq| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            7
+        },
+        WorkerScheduling::Normal,
+    );
+    worker.submit(MailboxRequest::WriteLimits {
+        correlation_id: 1,
+        entries: vec![
+            LimitEntry {
+                slot: 0,
+                ferr_counts: 1,
+                torque_tenth_pct: 1,
+            },
+            LimitEntry {
+                slot: 1,
+                ferr_counts: 1,
+                torque_tenth_pct: 1,
+            },
+        ],
+        restore: false,
+    });
+    match drain_one(&worker, Duration::from_secs(2)) {
+        MailboxReply::WriteLimits { rc, .. } => {
+            assert_eq!(rc, 7);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
         }
         _ => panic!("expected WriteLimits reply"),
     }

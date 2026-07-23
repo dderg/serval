@@ -1,9 +1,10 @@
 use super::*;
 use mcu_protocol::messages::{
-    MotorStateResponse, ResonanceBuzz, RestoreDriveLimits, RestoreDriveLimitsResponse,
-    ResumeStreamResponse, SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome,
-    SeedServoHomeResponse, SetDriveLimits, SetDriveLimitsResponse, SetFfLead, SetFfLeadResponse,
-    SlaveState, SlaveStatus, StartCapture, StartCaptureResponse, StopCaptureResponse, StopResponse,
+    DriveLimitEntry, MotorStateResponse, ResonanceBuzz, RestoreDriveLimits,
+    RestoreDriveLimitsResponse, ResumeStreamResponse, SdoRead, SdoReadResponse, SdoWrite,
+    SdoWriteResponse, SeedServoHome, SeedServoHomeResponse, SetDriveLimits, SetDriveLimitsResponse,
+    SetFfLead, SetFfLeadResponse, SlaveState, SlaveStatus, StartCapture, StartCaptureResponse,
+    StopCaptureResponse, StopResponse,
 };
 use mcu_transport::demux::{Demuxer, Frame};
 use mcu_transport::frame::decode_frame;
@@ -324,9 +325,18 @@ fn resume_stream_response_frame_round_trips() {
 #[test]
 fn decodes_set_drive_limits_command() {
     let msg = SetDriveLimits {
-        slot: 0,
-        following_error_counts: 8192,
-        max_torque_tenth_pct: 500,
+        drives: vec![
+            DriveLimitEntry {
+                slot: 0,
+                following_error_counts: 8192,
+                max_torque_tenth_pct: 500,
+            },
+            DriveLimitEntry {
+                slot: 1,
+                following_error_counts: 8192,
+                max_torque_tenth_pct: 500,
+            },
+        ],
     };
     let payload = frame_payload(MessageKind::SetDriveLimits, 3, &msg.encoded_to_vec());
     match decode_command(0, &payload).unwrap() {
@@ -334,8 +344,7 @@ fn decodes_set_drive_limits_command() {
             correlation_id: 3,
             msg: m,
         } => {
-            assert_eq!(m.following_error_counts, 8192);
-            assert_eq!(m.max_torque_tenth_pct, 500);
+            assert_eq!(m, msg);
         }
         other => panic!("expected SetDriveLimits, got {other:?}"),
     }
@@ -346,12 +355,12 @@ fn decodes_restore_drive_limits_command() {
     let payload = frame_payload(
         MessageKind::RestoreDriveLimits,
         4,
-        &RestoreDriveLimits { slot: 0 }.encoded_to_vec(),
+        &RestoreDriveLimits { slot_mask: 0b11 }.encoded_to_vec(),
     );
     match decode_command(0, &payload).unwrap() {
         Command::RestoreDriveLimits {
             correlation_id: 4,
-            slot: 0,
+            slot_mask: 0b11,
         } => {}
         other => panic!("expected RestoreDriveLimits, got {other:?}"),
     }

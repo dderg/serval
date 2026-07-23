@@ -245,11 +245,11 @@ class FakeEngine:
     def set_strain_comp(self, handle, slot_a, slot_b, *args):
         return self._call("set_strain_comp", handle, slot_a, slot_b, *args)
 
-    def set_drive_limits(self, handle, slot, counts, tenth_pct):
-        return self._call("set_drive_limits", handle, slot, counts, tenth_pct)
+    def set_drive_limits(self, handle, drives):
+        return self._call("set_drive_limits", handle, drives)
 
-    def restore_drive_limits(self, handle, slot):
-        return self._call("restore_drive_limits", handle, slot)
+    def restore_drive_limits(self, handle, slots):
+        return self._call("restore_drive_limits", handle, slots)
 
     def take_drive_fault(self, handle):
         return self._call("take_drive_fault", handle)

@@ -25,16 +25,17 @@ def _homing_motor_names(rail):
 
 
 @contextlib.contextmanager
-def _servo_drive_limits(engine, handle, slot, limits):
-    if handle is None or limits is None:
+def _servo_drive_limits(engine, handle, drives):
+    if handle is None or not drives:
         yield
         return
-    engine.set_drive_limits(handle, slot, limits[0], limits[1])
+    slots = [slot for slot, _, _ in drives]
+    engine.set_drive_limits(handle, drives)
     try:
         yield
     except BaseException:
         try:
-            engine.restore_drive_limits(handle, slot)
+            engine.restore_drive_limits(handle, slots)
         except Exception:
             logging.warning(
                 "homing: restore_drive_limits failed while handling a"
@@ -42,7 +43,18 @@ def _servo_drive_limits(engine, handle, slot, limits):
                 exc_info=True,
             )
         raise
-    engine.restore_drive_limits(handle, slot)
+    engine.restore_drive_limits(handle, slots)
+
+
+def _drive_limits_by_handle(servo_rails):
+    grouped = {}
+    for entry in servo_rails:
+        if entry["handle"] is None or entry["limits"] is None:
+            continue
+        grouped.setdefault(entry["handle"], []).append(
+            (entry["slot"], entry["limits"][0], entry["limits"][1])
+        )
+    return grouped
 
 
 def _run_servo_guarded_trip(
@@ -55,15 +67,8 @@ def _run_servo_guarded_trip(
 ):
     try:
         with contextlib.ExitStack() as stack:
-            for entry in servo_rails:
-                stack.enter_context(
-                    _servo_drive_limits(
-                        engine,
-                        entry["handle"],
-                        entry["slot"],
-                        entry["limits"],
-                    )
-                )
+            for handle, drives in _drive_limits_by_handle(servo_rails).items():
+                stack.enter_context(_servo_drive_limits(engine, handle, drives))
             result = trip()
         _check_servo_drive_fault(gcmd, engine, axis, servo_rails)
     except BaseException:

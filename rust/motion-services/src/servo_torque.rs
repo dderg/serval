@@ -3,12 +3,12 @@ use std::time::Duration;
 use host_rt::mcu_serial_conn::McuSerialConn;
 use mcu_protocol::codec::Encode as _;
 use mcu_protocol::messages::{
-    ArmSensorlessEndstop, ArmSensorlessEndstopResponse, MessageKind, ResonanceBuzz,
-    ResonanceBuzzResponse, RestoreDriveLimits, RestoreDriveLimitsResponse, SeedServoHome,
-    SeedServoHomeResponse, SetDiffDamper, SetDiffDamperResponse, SetDiffTrim, SetDiffTrimResponse,
-    SetDriveLimits, SetDriveLimitsResponse, SetDynamicsModel, SetDynamicsModelResponse, SetFfLead,
-    SetFfLeadResponse, SetStrainComp, SetStrainCompResponse, SetTorque, SetTorqueResponse,
-    StopResponse,
+    ArmSensorlessEndstop, ArmSensorlessEndstopResponse, DriveLimitEntry, MessageKind,
+    ResonanceBuzz, ResonanceBuzzResponse, RestoreDriveLimits, RestoreDriveLimitsResponse,
+    SeedServoHome, SeedServoHomeResponse, SetDiffDamper, SetDiffDamperResponse, SetDiffTrim,
+    SetDiffTrimResponse, SetDriveLimits, SetDriveLimitsResponse, SetDynamicsModel,
+    SetDynamicsModelResponse, SetFfLead, SetFfLeadResponse, SetStrainComp, SetStrainCompResponse,
+    SetTorque, SetTorqueResponse, StopResponse,
 };
 
 use crate::servo_call::mcu_typed_call;
@@ -43,16 +43,9 @@ const DRIVE_LIMITS_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub fn send_drive_limits(
     conn: &McuSerialConn,
-    slot: u8,
-    following_error_counts: u32,
-    max_torque_tenth_pct: u16,
+    drives: Vec<DriveLimitEntry>,
 ) -> Result<i32, String> {
-    let body = SetDriveLimits {
-        slot,
-        following_error_counts,
-        max_torque_tenth_pct,
-    }
-    .encoded_to_vec();
+    let body = SetDriveLimits { drives }.encoded_to_vec();
     let r: SetDriveLimitsResponse = mcu_typed_call(
         conn,
         "SetDriveLimits",
@@ -89,8 +82,8 @@ pub fn send_arm_sensorless_endstop(
     Ok(r.result)
 }
 
-pub fn send_restore_drive_limits(conn: &McuSerialConn, slot: u8) -> Result<i32, String> {
-    let body = RestoreDriveLimits { slot }.encoded_to_vec();
+pub fn send_restore_drive_limits(conn: &McuSerialConn, slot_mask: u32) -> Result<i32, String> {
+    let body = RestoreDriveLimits { slot_mask }.encoded_to_vec();
     let r: RestoreDriveLimitsResponse = mcu_typed_call(
         conn,
         "RestoreDriveLimits",
