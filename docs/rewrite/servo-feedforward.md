@@ -147,7 +147,7 @@ viscous = [0.09, 0.11]       # b per mode
 coulomb = [160.0, 175.0]     # c per mode, symmetric magnitude
 compliance = [0.0, 1.76e-5]  # optional (version 7); 1/ω_b² per mode, s²
 pin_mass = [0.0, 0.021]      # optional (version 8); rotor-side pinned inertia per mode, kg; 0 disables
-pin_zeta = [0.0, 0.06]       # per mode; belt damping ratio for the predictor decay, [0, 0.99]
+pin_zeta = [0.0, 0.06]       # per mode; predictor damping ratio, any finite value >= 0
 pin_lead_us = 0.0            # optional (version 8); pin torque phase lead, microseconds [0, 10000]
 fit_rms_residual = [0.8, 0.7, 0.8, 0.9]  # per motor, 0.1% rated — fit quality, informational
 ff_lead_us = 0.0             # optional; dead-time compensation, microseconds [0, 10000], default 0.0
@@ -216,7 +216,7 @@ independent line a standard input shaper can target. Pin's frequency source
 locked-rotor number mode B needs, so a pinned mode always carries a positive
 compliance.
 
-`pin_zeta` is the belt's damping ratio, in `[0, 0.99]` — it sets how fast the
+`pin_zeta` is the predictor's damping ratio, any finite value >= 0 — it sets how fast the
 predictor's deflection estimate decays between transitions. `pin_lead_us`
 (microseconds, `[0, 10000]`) is a phase lead on the pin torque only,
 advancing `(d, ḋ)` by that time through the same rotation before forming
@@ -273,7 +273,9 @@ Validation rules (any failure = hard claim error):
   `6.4e-4` s² (a mode softer than 20 Hz is a typo, not a belt)
 - `pin_mass` and `pin_zeta` are present together or not at all (per-mode
   arrays of length `n_modes`); entries finite, `pin_mass ≥ 0`,
-  `pin_zeta ∈ [0, 0.99] (hard limit: the exact-rotation update needs ζ < 1)`
+  `pin_zeta` finite and >= 0 (no upper cap: the endpoint evaluates the
+  under-, critically-, and overdamped closed forms; ζ ≥ 1 is a legitimate
+  non-ringing hold, and the residual demodulator references ω_b there)
 - every mode with `pin_mass > 0` must have `compliance > 0` — pin needs the
   locked-rotor frequency as its source
 - `pin_lead_us`, when present, must be finite and within `[0, 10000]`

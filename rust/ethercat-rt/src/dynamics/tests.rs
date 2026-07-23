@@ -721,14 +721,25 @@ fn pin_mass_present_without_pin_zeta_is_dim_error() {
 
 #[test]
 fn pin_validation_rejects_out_of_range_values() {
-    // The hard limit is zeta < 1 (omega_d = omega*sqrt(1-zeta^2)); 0.99 is
-    // the numeric-margin cap and heavily damped values below it must pass.
-    let zeta_ok = COREXY_V8.replace("pin_zeta = [0.05, 0.0]", "pin_zeta = [0.8, 0.0]");
-    assert!(DynamicsModel::from_toml_str(&zeta_ok).is_ok());
-    let zeta_hi = COREXY_V8.replace("pin_zeta = [0.05, 0.0]", "pin_zeta = [1.0, 0.0]");
+    // No upper zeta cap: any finite zeta >= 0 is legal (the endpoint
+    // evaluates under-, critically-, and overdamped regimes). The hard
+    // invariants are sign and finiteness only.
+    for ok in ["0.8", "1.0", "1.4", "10.0"] {
+        let toml = COREXY_V8.replace("pin_zeta = [0.05, 0.0]", &format!("pin_zeta = [{ok}, 0.0]"));
+        assert!(
+            DynamicsModel::from_toml_str(&toml).is_ok(),
+            "zeta {ok} must be accepted"
+        );
+    }
+    let zeta_neg = COREXY_V8.replace("pin_zeta = [0.05, 0.0]", "pin_zeta = [-0.1, 0.0]");
     assert!(matches!(
-        DynamicsModel::from_toml_str(&zeta_hi),
+        DynamicsModel::from_toml_str(&zeta_neg),
         Err(ProfileError::PinZetaOutOfRange(_))
+    ));
+    let zeta_nan = COREXY_V8.replace("pin_zeta = [0.05, 0.0]", "pin_zeta = [nan, 0.0]");
+    assert!(matches!(
+        DynamicsModel::from_toml_str(&zeta_nan),
+        Err(ProfileError::PinZetaOutOfRange(_)) | Err(ProfileError::Parse(_))
     ));
     let mass_neg = COREXY_V8.replace("pin_mass = [0.012, 0.0]", "pin_mass = [-0.1, 0.0]");
     assert!(matches!(

@@ -9,11 +9,6 @@ pub const ERR_DYNAMICS_REJECTED: i32 = -862;
 
 const FF_LEAD_US_MAX: f64 = 10_000.0;
 const PIN_LEAD_US_MAX: f64 = 10_000.0;
-/// Hard math limit: the pin predictor's exact-rotation update uses
-/// ω_d = ω·√(1-ζ²) (and divides by it), so ζ must stay strictly below 1.
-/// 0.99 leaves numeric margin; anything under it is a legitimate request —
-/// heavily damped belt modes measure ζ ≥ 0.5 in practice.
-const PIN_ZETA_MAX: f64 = 0.99;
 
 /// Compliance ceiling: 1/(2π·20 Hz)² — a mode softer than 20 Hz is not a
 /// belt-stretch correction, it's a typo (units are s², value = 1/ω_b²).
@@ -313,7 +308,10 @@ impl DynamicsModel {
             return Err(ProfileError::Dim("compliance length must equal modes"));
         }
         for &c in &compliance {
-            if !c.is_finite() || !(0.0..=COMPLIANCE_MAX_S2).contains(&c) {
+            // Values ride the wire as f32: compare at wire precision so the
+            // exact ceiling survives the f32->f64 widening (6.4e-4 is not
+            // f32-exact; the widened value may sit just above the f64 const).
+            if !c.is_finite() || !(0.0..=COMPLIANCE_MAX_S2 as f32).contains(&(c as f32)) {
                 return Err(ProfileError::ComplianceOutOfRange(c));
             }
         }
@@ -350,7 +348,10 @@ impl DynamicsModel {
             }
         }
         for &pz in &pin_zeta {
-            if !pz.is_finite() || !(0.0..=PIN_ZETA_MAX).contains(&pz) {
+            // No upper cap: ζ ≥ 1 is a legitimate (overdamped) predictor —
+            // the endpoint evaluates all three damping regimes. The hard
+            // invariants are finiteness and sign only.
+            if !pz.is_finite() || pz < 0.0 {
                 return Err(ProfileError::PinZetaOutOfRange(pz));
             }
         }
@@ -358,8 +359,16 @@ impl DynamicsModel {
             return Err(ProfileError::PinLeadOutOfRange(pin_lead_us));
         }
         for k in 0..n_modes {
-            if pin_mass[k] > 0.0 && !(compliance[k] > 0.0) {
-                return Err(ProfileError::PinNeedsCompliance(k));
+            if pin_mass[k] > 0.0 {
+                if !(compliance[k] > 0.0) {
+                    return Err(ProfileError::PinNeedsCompliance(k));
+                }
+                // The torque path evaluates 2ζω in f32; a ζ so large the
+                // coefficient overflows f32 is the one genuinely broken case.
+                let omega = 1.0 / compliance[k].sqrt();
+                if !((2.0 * pin_zeta[k] * omega) as f32).is_finite() {
+                    return Err(ProfileError::PinZetaOutOfRange(pin_zeta[k]));
+                }
             }
         }
         let pairs = resolve_pairs(&frame, n_slots, n_modes, pairs)?;

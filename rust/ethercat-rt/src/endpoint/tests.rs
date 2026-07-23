@@ -2024,3 +2024,62 @@ fn pin_corexy_symmetric_cancels_both_modes() {
     let frame = [0.5, 0.5, 0.5, -0.5];
     assert_pin_cancels_every_mode(&frame, 2, 2, &[0.020, 0.020], &[131.5, 131.5], &[0.6, 0.6]);
 }
+
+#[test]
+fn osc_zoh_is_continuous_across_critical_damping() {
+    // The three closed forms (sin/cos, polynomial, sinh/cosh) must agree at
+    // the regime boundary: coefficients just below, at, and just above
+    // zeta = 1 are within numerical noise of each other.
+    let omega = 1.0 / (1.0e-5f64).sqrt();
+    let dt = 250e-6f64;
+    let (lo_a, lo_b) = super::cycle::osc_zoh(omega, 1.0 - 1e-9, dt);
+    let (cr_a, cr_b) = super::cycle::osc_zoh(omega, 1.0, dt);
+    let (hi_a, hi_b) = super::cycle::osc_zoh(omega, 1.0 + 1e-9, dt);
+    for i in 0..4 {
+        assert!(
+            (lo_a[i] - cr_a[i]).abs() < 1e-6,
+            "a[{i}]: {} vs {}",
+            lo_a[i],
+            cr_a[i]
+        );
+        assert!(
+            (hi_a[i] - cr_a[i]).abs() < 1e-6,
+            "a[{i}]: {} vs {}",
+            hi_a[i],
+            cr_a[i]
+        );
+    }
+    for i in 0..2 {
+        let scale = cr_b[i].abs().max(1e-12);
+        assert!((lo_b[i] - cr_b[i]).abs() / scale < 1e-5);
+        assert!((hi_b[i] - cr_b[i]).abs() / scale < 1e-5);
+    }
+}
+
+#[test]
+fn osc_zoh_overdamped_is_finite_and_never_oscillates() {
+    // zeta > 1: released from a deflection, the predictor state must decay
+    // monotonically toward zero (two real poles - no sign changes), and the
+    // coefficients must stay finite even at absurd damping.
+    let omega = 1.0 / (1.0e-5f64).sqrt();
+    let dt = 250e-6f64;
+    for zeta in [1.4f64, 3.0, 50.0, 1e6] {
+        let (a, b) = super::cycle::osc_zoh(omega, zeta, dt);
+        for v in a.iter().chain(b.iter()) {
+            assert!(v.is_finite(), "zeta {zeta}: non-finite coefficient {v}");
+        }
+        let (mut d, mut v) = (1.0f64, 0.0f64);
+        let mut prev = d;
+        for _ in 0..4000 {
+            let (dn, vn) = (a[0] * d + a[1] * v, a[2] * d + a[3] * v);
+            d = dn;
+            v = vn;
+            assert!(d >= -1e-12, "zeta {zeta}: deflection crossed zero: {d}");
+            assert!(
+                d <= prev + 1e-12,
+                "zeta {zeta}: deflection grew: {d} > {prev}"
+            );
+            prev = d;
+        }
+    }
+}

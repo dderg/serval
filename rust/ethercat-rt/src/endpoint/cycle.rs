@@ -1023,20 +1023,38 @@ fn emit_periodic_telemetry(ctx: &mut EndpointCtx, wkc: i32, toff: i64) {
 /// state-transition matrix Ad (row-major `[a11, a12, a21, a22]`) and the
 /// forcing gain Bd = A⁻¹(Ad - I)·[0, -1]ᵀ, so `x' = Ad·x + Bd·u`. `dt <= 0`
 /// yields the identity with zero gain (used for a zero predictor lead).
-fn osc_zoh(omega: f64, zeta: f64, dt: f64) -> ([f64; 4], [f64; 2]) {
+pub(super) fn osc_zoh(omega: f64, zeta: f64, dt: f64) -> ([f64; 4], [f64; 2]) {
     if dt <= 0.0 {
         return ([1.0, 0.0, 0.0, 1.0], [0.0, 0.0]);
     }
     let s = zeta * omega; // decay rate
-    let wd = omega * (1.0 - zeta * zeta).sqrt(); // damped frequency
-    let e = libm::exp(-s * dt);
-    let (sin, cos) = libm::sincos(wd * dt);
-    let a11 = e * (cos + s / wd * sin);
-    let a12 = e * (sin / wd);
-    let a21 = e * (-(omega * omega) / wd * sin);
-    let a22 = e * (cos - s / wd * sin);
+                          // All three damping regimes share the same closed form through the pair
+                          //   eC = e^{-st}·C(t),  eS = e^{-st}·S(t)
+                          // with (C, S) = (cos ω_d t, sin(ω_d t)/ω_d) underdamped, (1, t) critical,
+                          // and (cosh ω_h t, sinh(ω_h t)/ω_h) overdamped (ω_h = ω√(ζ²-1)). The
+                          // overdamped pair is evaluated from the two real poles -s±ω_h directly:
+                          // both exponents are ≤ 0 (ω_h < s), so it cannot overflow at any ζ.
+    let disc = 1.0 - zeta * zeta;
+    let (e_c, e_s) = if disc > 0.0 {
+        let wd = omega * disc.sqrt();
+        let e = libm::exp(-s * dt);
+        let (sin, cos) = libm::sincos(wd * dt);
+        (e * cos, e * sin / wd)
+    } else if disc == 0.0 {
+        let e = libm::exp(-s * dt);
+        (e, e * dt)
+    } else {
+        let wh = omega * (-disc).sqrt();
+        let ep = libm::exp((wh - s) * dt); // slow pole, exponent ≤ 0
+        let em = libm::exp(-(wh + s) * dt); // fast pole
+        ((ep + em) * 0.5, (ep - em) * 0.5 / wh)
+    };
+    let a11 = e_c + s * e_s;
+    let a12 = e_s;
+    let a21 = -(omega * omega) * e_s;
+    let a22 = e_c - s * e_s;
     // Bd = A⁻¹(Ad - I)·B with B = [0, -1]ᵀ and A⁻¹ = [[-2s/ω², -1/ω²], [1, 0]].
-    // (Ad - I)·B = [-a12, 1 - a22]ᵀ.
+    // (Ad - I)·B = [-a12, 1 - a22]ᵀ. Independent of the damping regime.
     let w2 = omega * omega;
     let c1 = -a12;
     let c2 = 1.0 - a22;
@@ -1114,7 +1132,15 @@ impl PinState {
             let zeta = f64::from(model.pin_zeta[k]);
             let (ad, bd) = osc_zoh(omega, zeta, dt);
             let (ld, _) = osc_zoh(omega, zeta, lead_s);
-            let wd = omega * (1.0 - zeta * zeta).sqrt();
+            // Residual demod reference: the ring frequency ω_d while the
+            // predictor actually rings; at ζ ≥ 1 there is no ring, so the
+            // demodulator references ω_b itself (where sweep tones sit).
+            let disc = 1.0 - zeta * zeta;
+            let wd = if disc > 0.0 {
+                omega * disc.sqrt()
+            } else {
+                omega
+            };
             modes.push(PinMode {
                 mode: k,
                 pin_mass: model.pin_mass[k],
