@@ -1600,6 +1600,104 @@ fn pin_buzz_above_notch_rolls_off() {
     );
 }
 
+/// Streaming a new dynamics model while a buzz is live is accepted and
+/// rebuilds the pin-rotor state cleanly: the install succeeds (the new zeta
+/// lands in `ctx.dynamics`), the pin oscillator restarts from a defined zero
+/// state (residual demodulator zeroed), and the pinned mode keeps injecting
+/// torque as the buzz forcing continues to integrate on the fresh state -
+/// now with the new damping (a higher zeta lowers the on-notch Q, so the
+/// steady pin torque settles lower). This is the mid-sweep re-stream that
+/// SERVO_SWEEP_PIN relies on (pin runs THROUGH the buzz, one tone, many
+/// models).
+#[test]
+fn set_dynamics_model_mid_buzz_rebuilds_pin_cleanly() {
+    let mut ctx = pin_ctx("pin-mid-buzz-swap", PIN_IDENTITY);
+    // Park the tone on the notch (f_b ≈ 50.3 Hz) and run it live.
+    let f_notch = 50_000u32;
+    let rc = ctx.buzz.arm(
+        NUM_SLAVES as u8,
+        0b01,
+        0,
+        f_notch,
+        f_notch,
+        BUZZ_AMP_NM,
+        4000,
+        20,
+        [0; crate::buzz::MAX_BUZZ_SLOTS],
+    );
+    assert_eq!(rc, 0);
+    // Run the tone on the original zeta=0.1 model until the pin torque has
+    // built up to its on-notch steady amplitude (Q = 1/2ζ = 5).
+    let mut pin_before = 0.0f32;
+    for c in 0..2000u64 {
+        compute_motion_targets(&mut ctx, 1_000_000 + c * CYCLE_NS);
+        ctx.drive.cycle();
+        if c >= 1600 {
+            pin_before = pin_before.max(ctx.pin.slot_torque_at(0).abs());
+        }
+    }
+    assert!(
+        pin_before > 0.0,
+        "pin torque must be live before the swap: {pin_before}"
+    );
+    assert!(
+        ctx.buzz.active(),
+        "buzz must still be running before the swap"
+    );
+
+    // Swap the model mid-buzz: same pin, larger zeta (0.1 -> 0.3).
+    let mut msg = dynamics_msg(0.020);
+    msg.frame = vec![1.0, 0.0, 0.0, 1.0];
+    msg.mass = vec![0.020, 0.020];
+    msg.viscous = vec![0.0, 0.0];
+    msg.coulomb = vec![0.0, 0.0];
+    msg.compliance = vec![1.0e-5, 0.0];
+    msg.pin_mass = vec![0.02, 0.0];
+    msg.pin_zeta = vec![0.3, 0.0];
+    msg.pin_lead_us = 0.0;
+    super::commands::handle_set_dynamics_model(&mut ctx, 7, msg);
+
+    // Install succeeded (rc==0 path): the new zeta is live, the previous
+    // model was replaced, and the buzz never stopped.
+    let model = ctx.dynamics.as_ref().expect("model still installed");
+    assert!(
+        (model.pin_zeta[0] - 0.3).abs() < 1e-6,
+        "mid-buzz swap must install the new zeta: {}",
+        model.pin_zeta[0]
+    );
+    assert!(ctx.buzz.active(), "buzz keeps running across the swap");
+
+    // The pin state rebuilt: the oscillator + residual demodulator restart
+    // from a defined zero state (no carried-over phasor from the old model).
+    assert_eq!(
+        ctx.pin.residual_for_slot(0),
+        (0.0, 0.0),
+        "residual must restart on the model swap"
+    );
+
+    // Next cycles integrate the buzz forcing on the fresh state: pin torque
+    // re-accumulates and settles at the new, more-damped steady amplitude.
+    let mut pin_after = 0.0f32;
+    for c in 2000..4000u64 {
+        compute_motion_targets(&mut ctx, 1_000_000 + c * CYCLE_NS);
+        ctx.drive.cycle();
+        if c >= 3600 {
+            pin_after = pin_after.max(ctx.pin.slot_torque_at(0).abs());
+        }
+    }
+    assert!(
+        pin_after > 0.0,
+        "pin torque must continue after the mid-buzz swap: {pin_after}"
+    );
+    // Higher damping => lower on-notch Q => lower steady pin torque. This
+    // only holds if the buzz forcing kept integrating on the NEW model.
+    assert!(
+        pin_after < pin_before,
+        "new (higher) zeta must lower the steady pin torque: \
+         before {pin_before} after {pin_after}"
+    );
+}
+
 /// A nonzero pin lead advances the torque waveform: its first positive
 /// zero-crossing lands earlier than the unled waveform's.
 #[test]
