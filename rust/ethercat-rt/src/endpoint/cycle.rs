@@ -191,28 +191,15 @@ pub(super) fn compute_motion_targets(
     // so they outlive the feedforward block to reach the capture record.
     let mut all_acc = vec![0f32; num_slaves];
     let mut all_vel = vec![0f32; num_slaves];
-    // Jerk/snap feed only the compliance correction: the corrected rotor
-    // trajectory x+c·a needs v+c·j on 60B1h and a+c·s in the torque model.
-    let mut all_jrk = vec![0f32; num_slaves];
-    let mut all_snp = vec![0f32; num_slaves];
     if ctx.gate.state() != TorqueState::Enabled && ctx.buzz.active() {
         ctx.buzz.clear();
         crate::rt_eprintln!("ec-rt: buzz cleared — torque gate left Enabled mid-buzz");
     }
     if ctx.gate.state() == TorqueState::Enabled {
         let mut lane_mm = vec![None; num_slaves];
-        let sp_counts = sample_slot_targets(
-            ctx,
-            sample_time,
-            &mut all_acc,
-            &mut all_vel,
-            &mut all_jrk,
-            &mut all_snp,
-            &mut lane_mm,
-        );
-        motion_active = emit_slot_commands(
-            ctx, &sp_counts, &lane_mm, &all_acc, &all_vel, &all_jrk, &all_snp,
-        );
+        let sp_counts =
+            sample_slot_targets(ctx, sample_time, &mut all_acc, &mut all_vel, &mut lane_mm);
+        motion_active = emit_slot_commands(ctx, &sp_counts, &lane_mm, &all_acc, &all_vel);
     } else {
         ctx.damper.reset_filters();
         ctx.trim.reset();
@@ -236,8 +223,6 @@ fn sample_slot_targets(
     sample_time: u64,
     all_acc: &mut [f32],
     all_vel: &mut [f32],
-    all_jrk: &mut [f32],
-    all_snp: &mut [f32],
     lane_mm: &mut [Option<f64>],
 ) -> Vec<Option<i32>> {
     let num_slaves = ctx.num_slaves;
@@ -292,21 +277,16 @@ fn sample_slot_targets(
         };
         if let Some((counts, vel_mm_s, acc_mm_s2)) = sampled {
             sp_counts[s] = Some(counts);
-            // A buzz has no ring piece behind it, so its jerk/snap are
-            // unknown — leave them zero; the compliance correction is
-            // gated off during a buzz anyway.
-            let (ff_vel, ff_acc, ff_jrk, ff_snp) = if buzz_was_active {
-                (vel_mm_s, acc_mm_s2, 0.0, 0.0)
+            let (ff_vel, ff_acc) = if buzz_was_active {
+                (vel_mm_s, acc_mm_s2)
             } else if ctx.ff_lead_ns[s] > 0 {
-                ctx.rings[s].peek_kin(sample_time + ctx.ff_lead_ns[s])
+                let (vel, acc, _, _) = ctx.rings[s].peek_kin(sample_time + ctx.ff_lead_ns[s]);
+                (vel, acc)
             } else {
-                let (jrk, snp) = ctx.rings[s].jerk_snap(sample_time);
-                (vel_mm_s, acc_mm_s2, jrk, snp)
+                (vel_mm_s, acc_mm_s2)
             };
             all_vel[s] = ff_vel;
             all_acc[s] = ff_acc;
-            all_jrk[s] = ff_jrk;
-            all_snp[s] = ff_snp;
         }
     }
     sp_counts
@@ -434,15 +414,12 @@ fn comp_offset_counts(ctx: &mut EndpointCtx, lane_mm: &[Option<f64>]) -> Vec<i32
     counts
 }
 
-#[allow(clippy::too_many_arguments)]
 fn emit_slot_commands(
     ctx: &mut EndpointCtx,
     sp_counts: &[Option<i32>],
     lane_mm: &[Option<f64>],
     all_acc: &[f32],
     all_vel: &[f32],
-    all_jrk: &[f32],
-    all_snp: &[f32],
 ) -> bool {
     let num_slaves = ctx.num_slaves;
     let mut motion_active = false;
@@ -464,49 +441,12 @@ fn emit_slot_commands(
     // of a mode velocity that other slots share; drop Coulomb for every slot
     // whenever the buzz drives any slot this cycle.
     let buzz_active = ctx.buzz.active();
-    // Belt-compliance correction: the rotor leads the trajectory by
-    // G·accel so the carriage — one belt stretch behind — lands exactly
-    // on it. The corrected rotor kinematics are v+G·j and a+G·s, so the
-    // velocity offset and the torque model see the corrected vectors.
-    // Skipped during a buzz: its micrometre excitation has no ring piece
-    // (jerk/snap unknown) and must stay a pure position wiggle.
-    let compliance = ctx
-        .dynamics
-        .as_ref()
-        .filter(|m| m.has_compliance() && !buzz_active)
-        .map(|model| {
-            let jrk_drive = dir_mul(all_jrk);
-            let snp_drive = dir_mul(all_snp);
-            let mut pos_lead = vec![0f32; num_slaves];
-            let mut vel_extra = vec![0f32; num_slaves];
-            let mut acc_extra = vec![0f32; num_slaves];
-            model.compliance_apply(&acc_drive, &mut pos_lead);
-            model.compliance_apply(&jrk_drive, &mut vel_extra);
-            model.compliance_apply(&snp_drive, &mut acc_extra);
-            (pos_lead, vel_extra, acc_extra)
-        });
-    let (acc_ff, vel_ff): (Vec<f32>, Vec<f32>) = match &compliance {
-        Some((_, vel_extra, acc_extra)) => (
-            acc_drive
-                .iter()
-                .zip(acc_extra)
-                .map(|(a, e)| a + e)
-                .collect(),
-            vel_drive
-                .iter()
-                .zip(vel_extra)
-                .map(|(v, e)| v + e)
-                .collect(),
-        ),
-        None => (acc_drive.clone(), vel_drive.clone()),
-    };
     // Pin-rotor (mode A) torque hold: advance each pinned mode's predicted-
     // deflection oscillator once this cycle and refill the slot-torque
     // buffer. Runs through a buzz — the analytic buzz accel already rides in
     // acc_drive (all_acc carries it for every driven slot), so the pinned
     // modes see forcing = trajectory accel + buzz accel and keep the pin
-    // torque and residual demod live; only the compliance position-lead (B)
-    // stays suppressed during a buzz. Re-anchored on the motion-inactive→
+    // torque and residual demod live. Re-anchored on the motion-inactive→
     // active edge; costs nothing when no mode is pinned.
     if ctx.pin.active() {
         let streaming = sp_counts.iter().any(Option::is_some);
@@ -520,21 +460,15 @@ fn emit_slot_commands(
     for s in 0..num_slaves {
         if let Some(counts) = sp_counts[s] {
             let vel_offset = if ctx.velocity_ff[s] {
-                // Drive-frame extra × cmd cpm needs the drive sign folded
-                // back in: extra·dir·cpm = extra·|cpm|.
-                let extra = compliance
-                    .as_ref()
-                    .map_or(0.0, |(_, vel_extra, _)| vel_extra[s] * dirs[s]);
-                ((f64::from(all_vel[s]) + f64::from(extra)) * ctx.cmd_counts_per_mm[s]).round()
-                    as i32
+                (f64::from(all_vel[s]) * ctx.cmd_counts_per_mm[s]).round() as i32
             } else {
                 0
             };
             let raw_ff = ctx.dynamics.as_ref().map(|model| {
                 let base = if buzz_active {
-                    model.torque_ff_without_coulomb(s, &acc_ff, &vel_ff)
+                    model.torque_ff_without_coulomb(s, &acc_drive, &vel_drive)
                 } else {
-                    model.torque_ff(s, &acc_ff, &vel_ff)
+                    model.torque_ff(s, &acc_drive, &vel_drive)
                 };
                 base + ctx.pin.slot_torque_at(s)
             });
@@ -570,18 +504,7 @@ fn emit_slot_commands(
             }
             ctx.last_counts[s] = Some(counts);
             ctx.last_streamed_target[s] = Some(counts);
-            let lead_counts = match &compliance {
-                Some((pos_lead, _, _)) => {
-                    if !pos_lead[s].is_finite() {
-                        fault_non_finite_torque(ctx, s, all_acc[s], all_vel[s]);
-                    }
-                    mm_to_counts(f64::from(pos_lead[s] * dirs[s]), ctx.cmd_counts_per_mm[s])
-                }
-                None => 0i32,
-            };
-            let offset = trim_counts[s]
-                .wrapping_add(comp_counts[s])
-                .wrapping_add(lead_counts);
+            let offset = trim_counts[s].wrapping_add(comp_counts[s]);
             ctx.drive
                 .set_target_position(s, counts.wrapping_add(offset));
             ctx.last_written_offset[s] = offset;
