@@ -78,7 +78,14 @@ class EtherCatNode:
             )
         self.dynamics_profile = servo_axis.read_dynamics_profile_option(config)
         self.live_dynamics_profile = None
-        self.late_tolerance_us = config.getfloat("late_tolerance_us", 0.0)
+        # Default: one cycle period - the hard boundary. Within a cycle a
+        # late frame means the drives latched the previous target once
+        # (bounded, DC sync holds); beyond it the endpoint reanchors and
+        # that faults as a cycle skip regardless. 0 = strict (any lateness
+        # faults); lateness stats stay visible in the heartbeat either way.
+        self.late_tolerance_us = config.getfloat(
+            "late_tolerance_us", default=float(self.cycle_us), minval=0.0
+        )
         self.group_delay_us = config.getfloat(
             "group_delay_us", default=float(self.cycle_us), minval=0.0
         )
@@ -281,10 +288,26 @@ class EtherCatNode:
         fault = engine.take_drive_fault(self.engine_handle)
         if fault is None:
             return eventtime + DRIVE_FAULT_POLL_PERIOD
-        self.printer.invoke_shutdown(
-            "EtherCAT drive fault 0x%04x on node %s — drive parked by the"
-            " realtime endpoint" % (fault, self.name)
-        )
+        if fault == 0xFE10:
+            msg = (
+                "EtherCAT frame-timing fault on node %s: the realtime "
+                "endpoint sent a frame later than late_tolerance_us and "
+                "parked the drives (host CPU stall, not a drive alarm)"
+                % (self.name,)
+            )
+        elif fault == 0xFE11:
+            msg = (
+                "EtherCAT cycle-skip fault on node %s: the realtime "
+                "endpoint overran a full cycle and the drives coasted on "
+                "a stale target (host CPU stall, not a drive alarm)"
+                % (self.name,)
+            )
+        else:
+            msg = (
+                "EtherCAT drive fault 0x%04x on node %s — drive parked by"
+                " the realtime endpoint" % (fault, self.name)
+            )
+        self.printer.invoke_shutdown(msg)
         return self.printer.get_reactor().NEVER
 
     def _push_drive_params(self, motor, slot):
