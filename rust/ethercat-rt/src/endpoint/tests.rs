@@ -1741,10 +1741,11 @@ fn pin_lead_advances_phase() {
 fn pin_residual_demod_converges_and_stays_bounded() {
     let mut ctx = pin_ctx("pin-residual-demod", PIN_IDENTITY);
     let dt = CYCLE_NS as f64 * 1e-9;
-    // Two-mass belt notch from PIN_IDENTITY: ω_b = 1/√compliance, ζ = 0.1.
+    // Two-mass belt notch from PIN_IDENTITY: ω_b = 1/√compliance. The demod
+    // references ω_b (NOT the predictor's ω_d — see the ζ-bias regression
+    // below), so the synthetic ring sits at ω_b too.
     let omega = 1.0 / (1.0e-5f64).sqrt();
-    let zeta = 0.1f64;
-    let wd = omega * (1.0 - zeta * zeta).sqrt();
+    let wd = omega;
     let amp = 0.05f64; // 0.05 mm sub-mm belt ring
     let phi = 0.7f64;
     const CYCLES: usize = 12_000; // 3 s at 250 µs
@@ -2082,4 +2083,34 @@ fn osc_zoh_overdamped_is_finite_and_never_oscillates() {
             prev = d;
         }
     }
+}
+
+#[test]
+fn pin_residual_demod_is_unbiased_by_zeta() {
+    // Regression for the bench cliff (0.03 um at zeta=0.9 vs 5.57 um at
+    // zeta=1.1): the demod used to reference the predictor's ring frequency
+    // omega_d = omega*sqrt(1-zeta^2), which at zeta=0.9 sits 56% below the
+    // mode - the beat against an on-mode ring averaged to zero and sweeps
+    // read "silence". The demodulator must read an omega_b ring at full
+    // magnitude regardless of the predictor's damping.
+    let toml = PIN_IDENTITY.replace("pin_zeta = [0.1, 0.0]", "pin_zeta = [0.9, 0.0]");
+    let mut ctx = pin_ctx("pin-residual-zeta-bias", &toml);
+    let dt = CYCLE_NS as f64 * 1e-9;
+    let omega = 1.0 / (1.0e-5f64).sqrt();
+    let amp = 0.05f64;
+    const CYCLES: usize = 12_000; // 3 s at 250 us
+    let acc = [0.0f32; NUM_SLAVES];
+    let mut last = 0.0f32;
+    for n in 0..CYCLES {
+        let t = n as f64 * dt;
+        let ferr0 = (amp * libm::cos(omega * t + 0.3)) as f32;
+        ctx.pin.step(&acc, &[ferr0, 0.0], true);
+        let (re, im) = ctx.pin.residual_for_slot(0);
+        last = re.hypot(im);
+    }
+    assert!(
+        last > 0.5 * amp as f32,
+        "high-zeta demod must read the on-mode ring, not average it away: \
+         {last} vs ring amplitude {amp}"
+    );
 }

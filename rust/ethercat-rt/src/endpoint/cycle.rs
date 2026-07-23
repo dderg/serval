@@ -1132,15 +1132,13 @@ impl PinState {
             let zeta = f64::from(model.pin_zeta[k]);
             let (ad, bd) = osc_zoh(omega, zeta, dt);
             let (ld, _) = osc_zoh(omega, zeta, lead_s);
-            // Residual demod reference: the ring frequency ω_d while the
-            // predictor actually rings; at ζ ≥ 1 there is no ring, so the
-            // demodulator references ω_b itself (where sweep tones sit).
-            let disc = 1.0 - zeta * zeta;
-            let wd = if disc > 0.0 {
-                omega * disc.sqrt()
-            } else {
-                omega
-            };
+            // Residual demod reference: always ω_b. Referencing the ring
+            // frequency ω_d = ω√(1-ζ²) biases the readout as ζ grows (at
+            // ζ=0.9 the demod would sit at 0.436·ω — 122 Hz off a tone at
+            // f_b — and the low-pass averages the beat to zero, reading
+            // "silence" instead of the surviving ring). Sweep tones and the
+            // physical mode both live at ω_b; the demod must too.
+            let wd = omega;
             modes.push(PinMode {
                 mode: k,
                 pin_mass: model.pin_mass[k],
