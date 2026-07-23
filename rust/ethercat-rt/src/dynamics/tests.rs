@@ -721,7 +721,11 @@ fn pin_mass_present_without_pin_zeta_is_dim_error() {
 
 #[test]
 fn pin_validation_rejects_out_of_range_values() {
-    let zeta_hi = COREXY_V8.replace("pin_zeta = [0.05, 0.0]", "pin_zeta = [0.6, 0.0]");
+    // The hard limit is zeta < 1 (omega_d = omega*sqrt(1-zeta^2)); 0.99 is
+    // the numeric-margin cap and heavily damped values below it must pass.
+    let zeta_ok = COREXY_V8.replace("pin_zeta = [0.05, 0.0]", "pin_zeta = [0.8, 0.0]");
+    assert!(DynamicsModel::from_toml_str(&zeta_ok).is_ok());
+    let zeta_hi = COREXY_V8.replace("pin_zeta = [0.05, 0.0]", "pin_zeta = [1.0, 0.0]");
     assert!(matches!(
         DynamicsModel::from_toml_str(&zeta_hi),
         Err(ProfileError::PinZetaOutOfRange(_))

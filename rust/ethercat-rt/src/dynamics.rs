@@ -9,7 +9,11 @@ pub const ERR_DYNAMICS_REJECTED: i32 = -862;
 
 const FF_LEAD_US_MAX: f64 = 10_000.0;
 const PIN_LEAD_US_MAX: f64 = 10_000.0;
-const PIN_ZETA_MAX: f64 = 0.5;
+/// Hard math limit: the pin predictor's exact-rotation update uses
+/// ω_d = ω·√(1-ζ²) (and divides by it), so ζ must stay strictly below 1.
+/// 0.99 leaves numeric margin; anything under it is a legitimate request —
+/// heavily damped belt modes measure ζ ≥ 0.5 in practice.
+const PIN_ZETA_MAX: f64 = 0.99;
 
 /// Compliance ceiling: 1/(2π·20 Hz)² — a mode softer than 20 Hz is not a
 /// belt-stretch correction, it's a typo (units are s², value = 1/ω_b²).
