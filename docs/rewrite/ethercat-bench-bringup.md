@@ -266,7 +266,7 @@ target to a `(node, slot)` and tells the endpoint which slot to sample.
 already know their axis, so they pass `AXIS=` — nothing depends on the motor being
 named `motor_<axis>`. The `.scap` file holds one drive block per captured drive;
 today the host lists a single slot, but the format and wire message already carry
-N drives time-aligned on the shared 1 kHz DC cycle (a future CoreXY axis expands
+N drives time-aligned on the shared DC cycle (`cycle_us`) (a future CoreXY axis expands
 to multiple slots with no format change). A single-drive capture is byte-identical
 to the pre-multi-drive layout.
 
@@ -282,7 +282,7 @@ C00.06 recommendation needs from the `[motor]` config and passes it to
 
 ## Real-time scheduling — mandatory (the ErC1.1 / "ErC11" trap)
 
-The endpoint's 1 kHz DC loop **must** run `SCHED_FIFO` on an isolated CPU. This
+The endpoint's DC loop (at the configured `cycle_us` rate) **must** run `SCHED_FIFO` on an isolated CPU. This
 is not best-effort. If it runs `SCHED_OTHER`, the loop keeps cadence on a warm,
 idle Pi but misses SYNC0 under boot load — and the drive latches **ErC1.1
 "synchronization loss"** (panel reads `ErC11`; CoE error register `0x8700`;

@@ -16,7 +16,7 @@
 
 IgH ships a `generic` device driver that talks to any NIC through the normal
 Linux network stack. It works, but every EtherCAT frame traverses the kernel net
-path, which adds latency and jitter. For a servo running a **1 kHz distributed-
+path, which adds latency and jitter. For a servo running a **`cycle_us`-rate distributed-
 clock (DC) loop**, that jitter makes the drive miss its SYNC0 window under load
 and latch a **synchronization-loss fault** (CiA `0x8700`, panel `ErC1.1`,
 EtherCAT AL status `0x001a`). Because the drive is usually on its own always-on

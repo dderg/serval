@@ -78,13 +78,11 @@ class EtherCatNode:
             )
         self.dynamics_profile = servo_axis.read_dynamics_profile_option(config)
         self.live_dynamics_profile = None
-        # Default: one cycle period - the hard boundary. Within a cycle a
-        # late frame means the drives latched the previous target once
-        # (bounded, DC sync holds); beyond it the endpoint reanchors and
-        # that faults as a cycle skip regardless. 0 = strict (any lateness
-        # faults); lateness stats stay visible in the heartbeat either way.
+        # Default 0: strict - any late frame faults. Deliberate fail-loud
+        # choice so late cycles are caught, not tolerated; raise it
+        # explicitly per node if a bounded budget is ever wanted.
         self.late_tolerance_us = config.getfloat(
-            "late_tolerance_us", default=float(self.cycle_us), minval=0.0
+            "late_tolerance_us", default=0.0, minval=0.0
         )
         self.group_delay_us = config.getfloat(
             "group_delay_us", default=float(self.cycle_us), minval=0.0
