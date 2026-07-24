@@ -220,6 +220,8 @@ fn test_ctx_with_drive(name: &str, drive: impl DriveChain + 'static) -> Endpoint
         telemetry_period: u64::MAX,
         dynamics: None,
         pin: super::cycle::PinState::default(),
+        drive_dirs: vec![1.0; NUM_SLAVES],
+        drive_scratch: super::cycle::DriveScratch::new(NUM_SLAVES),
         run_limits: Vec::new(),
         rings: (0..NUM_SLAVES).map(AxisRing::with_slot).collect(),
         buzz: BuzzOsc::new(),

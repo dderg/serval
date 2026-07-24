@@ -53,6 +53,12 @@ pub struct EndpointCtx {
     /// coefficients, sized to the installed dynamics model (empty when no
     /// mode is pinned).
     pin: cycle::PinState,
+    /// Drive-frame sign per slot (`cmd_counts_per_mm.signum()`), fixed at
+    /// bringup — the dynamics profile is fitted in the drive frame.
+    drive_dirs: Vec<f32>,
+    /// Drive-frame accel/velocity/following-error scratch, reused every
+    /// cycle (sized at bringup) so the DC path allocates nothing.
+    drive_scratch: cycle::DriveScratch,
     run_limits: Vec<(u32, u16)>,
 
     rings: Vec<AxisRing>,

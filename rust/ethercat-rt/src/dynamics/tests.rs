@@ -606,11 +606,21 @@ fn compliance_validation_rejects_bad_values() {
         "[-1.0e-6, 1.0e-6]",
         "[nan, 1.0e-6]",
         "[1.0e-2, 1.0e-6]",
+        // 1e-4 s² is ω_b/2π ≈ 15.9 Hz — softer than the documented 20 Hz
+        // floor, so the ceiling must reject it.
+        "[1.0e-4, 1.0e-6]",
     ] {
         let s = COREXY_V7.replace("[7.0e-6, 1.76e-5]", bad);
         let r = DynamicsModel::from_toml_str(&s);
         assert!(r.is_err(), "compliance {bad} must be rejected");
     }
+}
+
+#[test]
+fn compliance_ceiling_admits_a_stiff_belt_just_inside_20_hz() {
+    // 6.0e-5 s² is ≈ 20.5 Hz, just stiffer than the floor: accepted.
+    let s = COREXY_V7.replace("[7.0e-6, 1.76e-5]", "[6.0e-5, 1.0e-6]");
+    assert!(DynamicsModel::from_toml_str(&s).is_ok());
 }
 
 #[test]

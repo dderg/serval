@@ -12,7 +12,7 @@ const PIN_LEAD_US_MAX: f64 = 10_000.0;
 
 /// Compliance ceiling: 1/(2π·20 Hz)² — a mode softer than 20 Hz is not a
 /// belt-stretch correction, it's a typo (units are s², value = 1/ω_b²).
-pub const COMPLIANCE_MAX_S2: f64 = 6.4e-4;
+pub const COMPLIANCE_MAX_S2: f64 = 6.34e-5;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

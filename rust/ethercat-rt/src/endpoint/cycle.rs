@@ -430,12 +430,14 @@ fn emit_slot_commands(
     // so the model must be evaluated on drive-frame vectors — flipping
     // only the output torque by the slot's own sign would negate the
     // off-diagonal coupling terms whenever the drives' inverts differ.
-    let dirs: Vec<f32> = (0..num_slaves)
-        .map(|s| ctx.cmd_counts_per_mm.get(s).map_or(1.0, |c| c.signum()) as f32)
-        .collect();
-    let dir_mul = |v: &[f32]| -> Vec<f32> { v.iter().zip(&dirs).map(|(x, d)| x * d).collect() };
-    let acc_drive = dir_mul(all_acc);
-    let vel_drive = dir_mul(all_vel);
+    // Detached from ctx so the pin can borrow it mutably alongside; the
+    // buffers are returned at the end of the cycle, never reallocated.
+    let mut scratch = std::mem::take(&mut ctx.drive_scratch);
+    for s in 0..num_slaves {
+        let dir = ctx.drive_dirs[s];
+        scratch.acc[s] = dir * all_acc[s];
+        scratch.vel[s] = dir * all_vel[s];
+    }
     // Coulomb is a mode-space quantity, so a buzz on any slot flips the sign
     // of a mode velocity that other slots share; drop Coulomb for every slot
     // whenever the buzz drives any slot this cycle.
@@ -449,12 +451,11 @@ fn emit_slot_commands(
     // active edge; costs nothing when no mode is pinned.
     if ctx.pin.active() {
         let streaming = sp_counts.iter().any(Option::is_some);
-        let ferr_drive: Vec<f32> = (0..num_slaves)
-            .map(|s| {
-                (f64::from(ctx.drive.telemetry(s).following_error) / ctx.counts_per_mm[s]) as f32
-            })
-            .collect();
-        ctx.pin.step(&acc_drive, &ferr_drive, streaming);
+        for s in 0..num_slaves {
+            scratch.ferr[s] =
+                (f64::from(ctx.drive.telemetry(s).following_error) / ctx.counts_per_mm[s]) as f32;
+        }
+        ctx.pin.step(&scratch.acc, &scratch.ferr, streaming);
     }
     for s in 0..num_slaves {
         if let Some(counts) = sp_counts[s] {
@@ -465,9 +466,9 @@ fn emit_slot_commands(
             };
             let raw_ff = ctx.dynamics.as_ref().map(|model| {
                 let base = if buzz_active {
-                    model.torque_ff_without_coulomb(s, &acc_drive, &vel_drive)
+                    model.torque_ff_without_coulomb(s, &scratch.acc, &scratch.vel)
                 } else {
-                    model.torque_ff(s, &acc_drive, &vel_drive)
+                    model.torque_ff(s, &scratch.acc, &scratch.vel)
                 };
                 base + ctx.pin.slot_torque_at(s)
             });
@@ -535,7 +536,31 @@ fn emit_slot_commands(
             }
         }
     }
+    ctx.drive_scratch = scratch;
     motion_active
+}
+
+/// Drive-frame per-slot accel/velocity/following-error buffers, sized once
+/// at bringup. `emit_slot_commands` detaches these with `mem::take` so the
+/// pin bank can borrow `ctx` mutably alongside them, then hands them back —
+/// the DC path never allocates.
+#[derive(Default)]
+pub(super) struct DriveScratch {
+    acc: Vec<f32>,
+    vel: Vec<f32>,
+    ferr: Vec<f32>,
+}
+
+impl DriveScratch {
+    /// Only bringup (hw) and the test harness build an `EndpointCtx`.
+    #[cfg(any(feature = "hw", test))]
+    pub(super) fn new(num_slaves: usize) -> Self {
+        Self {
+            acc: vec![0.0; num_slaves],
+            vel: vec![0.0; num_slaves],
+            ferr: vec![0.0; num_slaves],
+        }
+    }
 }
 
 fn fault_non_finite_torque(ctx: &mut EndpointCtx, slot: usize, acc: f32, vel: f32) -> ! {
