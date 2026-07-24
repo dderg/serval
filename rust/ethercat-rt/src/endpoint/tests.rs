@@ -1928,3 +1928,51 @@ fn pin_residual_demod_is_unbiased_by_zeta() {
          {last} vs ring amplitude {amp}"
     );
 }
+
+/// τ_pin is m_L·d̈, so a constant commanded accel must leave the pin
+/// contributing exactly nothing: the belt settles to a static deflection
+/// d = -a/ω² with ḋ = 0 and d̈ = 0, and the rotor already carries that load
+/// through the plain torque feedforward. This has to hold at every phase
+/// lead — advancing the state without the forcing that acts over the lead
+/// window leaks a torque proportional to accel (≈14% of m_L·a at 130 Hz
+/// and 600 µs), worst exactly where the machine accelerates hardest.
+#[test]
+fn pin_torque_vanishes_at_constant_accel_for_every_lead() {
+    use crate::dynamics::DynamicsModel;
+    const A_CMD: f32 = 20_000.0; // mm/s², a hard print acceleration
+    const PIN_MASS: f32 = 0.02;
+    for &f_b in &[100.0f64, 130.0, 160.0] {
+        let compliance = 1.0 / (2.0 * std::f64::consts::PI * f_b).powi(2);
+        for &lead_us in &[0.0f64, 300.0, 600.0, 1200.0] {
+            let model = DynamicsModel::from_parts(
+                1,
+                1,
+                &[1.0],
+                &[0.04],
+                &[0.0],
+                &[0.0],
+                &[compliance as f32],
+                &[PIN_MASS],
+                &[0.02],
+                lead_us,
+                &[],
+            )
+            .unwrap();
+            let mut pin = super::cycle::PinState::build(&model, CYCLE_NS as i64);
+            // Long enough for the ζ=0.02 transient to die: τ ≈ 1/(ζω) is
+            // ~80 ms at 100 Hz, so 4 s is many time constants.
+            for _ in 0..4000 {
+                pin.step(&[A_CMD], &[0.0], true);
+            }
+            let settled = pin.slot_torque_at(0);
+            // Scale against the torque the pin would inject if it wrongly
+            // treated the whole load as unsupported.
+            let leak = settled.abs() / (PIN_MASS * A_CMD);
+            assert!(
+                leak < 1e-3,
+                "f_b={f_b} Hz lead={lead_us} µs: pin leaks {leak:.4} of m_L·a \
+                 at cruise (τ={settled})"
+            );
+        }
+    }
+}

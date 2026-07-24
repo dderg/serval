@@ -1025,11 +1025,15 @@ struct PinMode {
     a22: f32,
     b1: f32,
     b2: f32,
-    // Homogeneous predictor-lead rotation (no forcing over the lead).
+    // Predictor-lead transition over lead_s, same ZOH form as the cycle
+    // advance: dropping the forcing half would leave τ_pin carrying a term
+    // proportional to commanded accel instead of vanishing at cruise.
     l11: f32,
     l12: f32,
     l21: f32,
     l22: f32,
+    lb1: f32,
+    lb2: f32,
     dphase: f32, // ω_d·dt phasor advance per cycle
     // Predicted belt deflection (mm) and its rate (mm/s).
     d: f32,
@@ -1076,7 +1080,7 @@ impl PinState {
             let omega = 1.0 / f64::from(model.compliance(k)).sqrt();
             let zeta = f64::from(model.pin_zeta[k]);
             let (ad, bd) = osc_zoh(omega, zeta, dt);
-            let (ld, _) = osc_zoh(omega, zeta, lead_s);
+            let (ld, lbd) = osc_zoh(omega, zeta, lead_s);
             // Residual demod reference: always ω_b. Referencing the ring
             // frequency ω_d = ω√(1-ζ²) biases the readout as ζ grows (at
             // ζ=0.9 the demod would sit at 0.436·ω — 122 Hz off a tone at
@@ -1101,6 +1105,8 @@ impl PinState {
                 l12: ld[1] as f32,
                 l21: ld[2] as f32,
                 l22: ld[3] as f32,
+                lb1: lbd[0] as f32,
+                lb2: lbd[1] as f32,
                 dphase: (wd * dt) as f32,
                 d: 0.0,
                 v: 0.0,
@@ -1174,9 +1180,15 @@ impl PinState {
             for (f, a) in m.frame_row.iter().zip(acc_drive) {
                 a_cmd += f * a;
             }
-            // Predictor lead: rotate the current state forward, no forcing.
-            let d_lead = m.l11 * m.d + m.l12 * m.v;
-            let v_lead = m.l21 * m.d + m.l22 * m.v;
+            // Predictor lead: advance the state over the lead window with the
+            // same ZOH forcing the cycle advance uses. τ_pin is m_L·d̈, and
+            // under ZOH d̈(t+lead) reads the held a_cmd, so the forcing term
+            // stays unadvanced while the state does not. Dropping Bd here
+            // leaves τ_pin ≈ 0.14·m_L·a at 130 Hz / 600 µs during any
+            // sustained accel, where a statically deflected belt means the
+            // pin must contribute exactly nothing.
+            let d_lead = m.l11 * m.d + m.l12 * m.v + m.lb1 * a_cmd;
+            let v_lead = m.l21 * m.d + m.l22 * m.v + m.lb2 * a_cmd;
             let tau_pin = m.pin_mass * (m.neg_omega2 * d_lead - m.two_zeta_omega * v_lead - a_cmd);
             // Lift the mode torque to slots through F⁺ (lift_row), NOT Fᵀ
             // (frame_row): the pin torque's mode-space effect is F·slot, so a
