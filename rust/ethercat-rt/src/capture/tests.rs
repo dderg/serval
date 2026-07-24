@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::sync_channel;
 
@@ -508,5 +509,127 @@ fn failed_validation_does_not_consume_the_spare_channel() {
     );
     c.push(record(1));
     assert_eq!(c.stop().result, 0);
+    let _ = std::fs::remove_file(&path);
+}
+/// Little-endian bytes of the zstd magic number 0xFD2FB528.
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
+/// The `.scap.zst` sibling of a `tmp_path` tag.
+fn tmp_zst_path(tag: &str) -> PathBuf {
+    tmp_path(tag).with_extension("scap.zst")
+}
+
+/// The exact byte stream today's raw writer would emit for `cfg` + `records`:
+/// the JSON header line followed by each fixed-layout record, back to back.
+fn expected_raw_bytes(cfg: &CaptureConfig, records: &[CaptureRecord]) -> Vec<u8> {
+    let mut want = header_json(cfg).into_bytes();
+    for r in records {
+        let (buf, size) = encode_record(r);
+        want.extend_from_slice(&buf[..size]);
+    }
+    want
+}
+
+/// Drive a full start/push/stop capture and return the on-disk bytes.
+fn capture_to(path: &Path, records: &[CaptureRecord]) -> Vec<u8> {
+    let _ = std::fs::remove_file(path);
+    let mut cap = Capture::new();
+    assert_eq!(cap.start(cfg(path)), 0);
+    for r in records {
+        cap.push(*r);
+    }
+    let out = cap.stop();
+    assert_eq!(out.result, 0);
+    assert_eq!(out.samples, records.len() as u64);
+    let bytes = std::fs::read(path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    bytes
+}
+
+#[test]
+fn raw_scap_is_byte_identical_to_the_documented_writer_format() {
+    let path = tmp_path("raw-identical");
+    let records: Vec<CaptureRecord> = (0..50u64).map(record).collect();
+    let bytes = capture_to(&path, &records);
+    assert_eq!(bytes, expected_raw_bytes(&cfg(&path), &records));
+}
+
+#[test]
+fn zst_scap_decodes_to_exactly_the_raw_writer_bytes() {
+    let records: Vec<CaptureRecord> = (0..50u64).map(record).collect();
+
+    let raw_path = tmp_path("zst-vs-raw");
+    let raw_bytes = capture_to(&raw_path, &records);
+
+    let zst_path = tmp_zst_path("zst-vs-raw");
+    let zbytes = capture_to(&zst_path, &records);
+
+    assert_eq!(
+        &zbytes[..4],
+        &ZSTD_MAGIC,
+        "compressed capture is a zstd frame"
+    );
+    let decoded = zstd::decode_all(&zbytes[..]).expect("valid zstd frame");
+    assert_eq!(
+        decoded, raw_bytes,
+        "zst stream decodes to the raw writer bytes"
+    );
+}
+
+#[test]
+fn failed_capture_on_zst_path_keeps_the_zst_name() {
+    let path = tmp_zst_path("zst-fail");
+    let _ = std::fs::remove_file(&path);
+    let failed = super::failed_capture_path(&path);
+    let _ = std::fs::remove_file(&failed);
+    assert_eq!(
+        failed.file_name().unwrap().to_str().unwrap(),
+        format!(
+            "kalico-capture-zst-fail-{}.failed.scap.zst",
+            std::process::id()
+        ),
+        "renamed capture preserves the .scap.zst suffix"
+    );
+
+    let (gate_tx, gate_rx) = sync_channel::<()>(1);
+    let mut cap = Capture::with_capacity(4);
+    assert_eq!(cap.start_gated(cfg(&path), gate_rx), 0);
+    for i in 0..10u64 {
+        cap.push(record(i));
+    }
+    gate_tx.send(()).unwrap();
+    let out = cap.stop();
+    assert_eq!(out.result, ERR_CAPTURE_OVERFLOW);
+    assert!(!path.exists(), "failed capture must not keep the live name");
+    assert!(
+        failed.exists(),
+        "failed capture renamed with .zst preserved"
+    );
+    std::fs::remove_file(&failed).unwrap();
+}
+
+#[test]
+fn encoder_error_surfaces_as_capture_file_error() {
+    // A read-only handle to the .zst target makes the encoder's underlying
+    // flush fail on finalize; the failure must map to the capture-file path.
+    let path = tmp_zst_path("zst-encerr");
+    let _ = std::fs::remove_file(&path);
+    File::create(&path).unwrap();
+    let ro = File::open(&path).unwrap();
+
+    let (tx, rx) = sync_channel::<CaptureRecord>(4);
+    tx.send(record(0)).unwrap();
+    drop(tx);
+
+    let written = super::run_session(ro, &path, header_json(&cfg(&path)), WriterHook::None, rx);
+    assert!(
+        written.is_err(),
+        "encoder finalize on a read-only file must fail"
+    );
+
+    let outcome = super::compose_outcome(&path, written, None);
+    assert_eq!(outcome.result, ERR_CAPTURE_FILE);
+    let failed = super::failed_capture_path(&path);
+    let _ = std::fs::remove_file(&failed);
     let _ = std::fs::remove_file(&path);
 }

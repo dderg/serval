@@ -47,6 +47,7 @@ time = { version = "0.3", default-features = false, features = ["formatting", "m
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+zstd = "0.13"                                       # inline capture compression (level 3) on the writer thread; no workspace crate uses zstd yet
 
 [build-dependencies]
 cc = "1"                                            # compiles csrc/libecrt_igh.c under `hw`
