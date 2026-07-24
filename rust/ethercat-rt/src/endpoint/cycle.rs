@@ -864,9 +864,6 @@ fn emit_heartbeat(ctx: &mut EndpointCtx) {
         ));
         ctx.last_sent_retired = current_retired;
         ctx.heartbeat_sent = true;
-        if current_retired != 0 {
-            crate::rt_eprintln!("ec-rt: heartbeat retired={retired:?}");
-        }
     }
 }
 
@@ -904,6 +901,7 @@ fn emit_periodic_telemetry(ctx: &mut EndpointCtx, wkc: i32, toff: i64) {
         tracing::info!(
             subsystem = "ethercat",
             event = "cycle_stage_max",
+            retired_total = ctx.last_sent_retired,
             wake_late_max_ns = ctx.wake_late_max_ns,
             recv_max_ns = ctx.recv_max_ns,
             process_max_ns = ctx.process_max_ns,
