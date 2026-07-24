@@ -185,9 +185,7 @@ def test_event_remaps_reserved_logrecord_keys(caplog):
     # Klipper shutdown (observed: SERVO_COMPARE_PIN passing name=...).
     # Reserved keys must be remapped, never raised.
     with caplog.at_level(logging.INFO):
-        sl.event(
-            "calibration", "pin_compare", name="cmp", module="x", axis="y"
-        )
+        sl.event("calibration", "pin_compare", name="cmp", module="x", axis="y")
     (rec,) = caplog.records
     assert rec.field_name == "cmp"
     assert rec.field_module == "x"
