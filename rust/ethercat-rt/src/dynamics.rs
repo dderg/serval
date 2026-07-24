@@ -99,11 +99,6 @@ pub struct DynamicsModel {
     coulomb: Vec<f32>,
     /// Per-mode belt compliance 1/ω_b² (s²); zeros = disabled.
     compliance: Vec<f32>,
-    /// Slot-space correction matrix G = F⁺·diag(compliance)·F (row-major,
-    /// n_slots × n_slots), present only when some compliance is nonzero.
-    /// G·accel is the rotor position lead (mm), G·jerk the velocity-offset
-    /// extra, G·snap the accel extra the torque model must see.
-    comp_g: Option<Vec<f32>>,
     /// Right pseudo-inverse rows `W = (F·Fᵀ)⁻¹·F` (row-major, n_modes ×
     /// n_slots). `F⁺ = Fᵀ(FFᵀ)⁻¹ = Wᵀ`, so the pin lifts a mode torque to
     /// slot torques through `slot[s] = Σ_k W[k][s]·τ_k` — the minimum-norm
@@ -112,11 +107,11 @@ pub struct DynamicsModel {
     pinv: Vec<f32>,
     ff_lead_us: Vec<f64>,
     /// Per-mode pin-rotor virtual mass (kg); zeros = pin disabled for that
-    /// mode. A nonzero entry switches the mode from position-lead (B) to
-    /// torque-hold (A): the endpoint cancels the predicted belt reaction
-    /// instead of applying the position/velocity lead.
+    /// mode. A nonzero entry makes the endpoint cancel the mode's predicted
+    /// belt reaction with a torque hold.
     pub pin_mass: Vec<f32>,
-    /// Per-mode pin-rotor damping ratio (dimensionless, [0, 0.5]).
+    /// Per-mode pin-rotor damping ratio (dimensionless, finite and >= 0 —
+    /// overdamped predictors are legal, so there is no upper cap).
     pub pin_zeta: Vec<f32>,
     /// Pin predictor phase lead (µs) broadcast per slot, analogous to
     /// `ff_lead_us` but applied only to the pin torque.
@@ -381,17 +376,6 @@ impl DynamicsModel {
         if !frame_rows_independent(&frame, n_modes, n_slots) {
             return Err(ProfileError::FrameRankDeficient);
         }
-        // Pin replaces the mode-B position/velocity/snap lead per mode, so a
-        // pinned mode must not also feed the compliance G — zero its
-        // compliance in the G input while keeping the raw vector intact (the
-        // pin oscillator reads ω_b from it).
-        let comp_compliance: Vec<f64> = compliance
-            .iter()
-            .enumerate()
-            .map(|(k, &c)| if pin_mass[k] > 0.0 { 0.0 } else { c })
-            .collect();
-        let comp_g = build_comp_g(&frame, &comp_compliance, n_modes, n_slots)
-            .map(|g| g.iter().map(|&v| v as f32).collect());
         // The pin lifts mode torque to slots through F⁺ = Fᵀ(FFᵀ)⁻¹; a
         // validated full-row-rank frame always yields it.
         let pinv: Vec<f32> = frame_pinv(&frame, n_modes, n_slots)
@@ -408,7 +392,6 @@ impl DynamicsModel {
             viscous: viscous.iter().map(|&v| v as f32).collect(),
             coulomb: coulomb.iter().map(|&v| v as f32).collect(),
             compliance: compliance.iter().map(|&v| v as f32).collect(),
-            comp_g,
             pinv,
             ff_lead_us: vec![ff_lead_us; n_slots],
             pin_mass: pin_mass.iter().map(|&v| v as f32).collect(),
@@ -416,11 +399,6 @@ impl DynamicsModel {
             pin_lead_us: vec![pin_lead_us; n_slots],
             pairs,
         })
-    }
-
-    /// True when the profile carries a nonzero belt-compliance term.
-    pub fn has_compliance(&self) -> bool {
-        self.comp_g.is_some()
     }
 
     /// True when mode `k` runs in pin-rotor (torque-hold) mode — its virtual
@@ -452,7 +430,7 @@ impl DynamicsModel {
     /// via `slot[s] += W[mode][s]·τ` produces the minimum-norm slot torque
     /// whose mode-space effect (`F·slot`) is exactly `τ`. The plain `Fᵀ`
     /// lift is attenuated by `F·Fᵀ` — 0.25·I on the AWD CoreXY frame, i.e.
-    /// 4× under — so the pin must use this, mirroring the compliance G.
+    /// 4× under — so the pin must use this.
     pub fn pin_lift_row(&self, mode: usize) -> &[f32] {
         &self.pinv[mode * self.n_slots..][..self.n_slots]
     }
@@ -461,26 +439,6 @@ impl DynamicsModel {
     /// modes so the pin oscillator can read ω_b = 1/√compliance from it.
     pub fn compliance(&self, mode: usize) -> f32 {
         self.compliance[mode]
-    }
-
-    /// `out[s] = (G·input)[s]` — the slot-space compliance correction.
-    /// Feed drive-frame accel for the position lead (mm), jerk for the
-    /// 60B1h velocity-offset extra (mm/s), snap for the accel extra the
-    /// torque model must see (mm/s²). Zeroes `out` when compliance is off.
-    pub fn compliance_apply(&self, input: &[f32], out: &mut [f32]) {
-        assert_eq!(input.len(), self.n_slots);
-        assert_eq!(out.len(), self.n_slots);
-        let Some(g) = &self.comp_g else {
-            out.fill(0.0);
-            return;
-        };
-        for (s, o) in out.iter_mut().enumerate() {
-            *o = g[s * self.n_slots..][..self.n_slots]
-                .iter()
-                .zip(input)
-                .map(|(gv, x)| gv * x)
-                .sum();
-        }
     }
 
     pub fn torque_ff(&self, slot: usize, acc_mm_s2: &[f32], vel_mm_s: &[f32]) -> f32 {
@@ -593,14 +551,6 @@ impl DynamicsModel {
             mode_base += p.n_modes;
         }
         let frame_f64: Vec<f64> = frame.iter().map(|&v| f64::from(v)).collect();
-        let compliance_f64: Vec<f64> = compliance.iter().map(|&v| f64::from(v)).collect();
-        let comp_compliance: Vec<f64> = compliance_f64
-            .iter()
-            .enumerate()
-            .map(|(k, &c)| if pin_mass[k] > 0.0 { 0.0 } else { c })
-            .collect();
-        let comp_g = build_comp_g(&frame_f64, &comp_compliance, n_modes, n_slots)
-            .map(|g| g.iter().map(|&v| v as f32).collect());
         let pinv: Vec<f32> = frame_pinv(&frame_f64, n_modes, n_slots)
             .map(|w| w.iter().map(|&v| v as f32).collect())
             .unwrap_or_default();
@@ -614,7 +564,6 @@ impl DynamicsModel {
             viscous,
             coulomb,
             compliance,
-            comp_g,
             pinv,
             ff_lead_us,
             pin_mass,
@@ -632,49 +581,11 @@ impl DynamicsModel {
     }
 }
 
-/// `G = F⁺·diag(c)·F` in slot space (row-major n_slots × n_slots), where
-/// `F⁺ = Fᵀ(FFᵀ)⁻¹` is the right pseudo-inverse of the (validated,
-/// full-row-rank) frame. Feeding G a slot kinematics vector projects it into
-/// modes, scales each mode by its compliance, and lifts the result back to
-/// the slots — the minimum-norm slot motion producing exactly the required
-/// per-mode carriage lead. Returns None when every compliance is zero.
-fn build_comp_g(
-    frame: &[f64],
-    compliance: &[f64],
-    n_modes: usize,
-    n_slots: usize,
-) -> Option<Vec<f64>> {
-    if compliance.iter().all(|&c| c == 0.0) {
-        return None;
-    }
-    // W = (FFᵀ)⁻¹·F  (n_modes × n_slots), the right-pseudo-inverse rows.
-    let w = frame_pinv(frame, n_modes, n_slots)?;
-    // G[s][t] = Σ_k F[k][s]·c_k·W[k][t]
-    let mut g = vec![0.0f64; n_slots * n_slots];
-    for k in 0..n_modes {
-        let c = compliance[k];
-        if c == 0.0 {
-            continue;
-        }
-        for s in 0..n_slots {
-            let fks = frame[k * n_slots + s];
-            if fks == 0.0 {
-                continue;
-            }
-            for t in 0..n_slots {
-                g[s * n_slots + t] += fks * c * w[k * n_slots + t];
-            }
-        }
-    }
-    Some(g)
-}
-
 /// Right pseudo-inverse rows `W = (F·Fᵀ)⁻¹·F` (row-major n_modes × n_slots)
 /// of the validated, full-row-rank frame — one Cholesky solve per slot
-/// column against the SPD Gram matrix `F·Fᵀ`. `F⁺ = Fᵀ(FFᵀ)⁻¹ = Wᵀ`; both
-/// the compliance G and the pin torque lift use these rows so a mode
-/// quantity lifts to the minimum-norm slot vector. None on a non-positive
-/// pivot (cannot happen for a rank-validated frame).
+/// column against the SPD Gram matrix `F·Fᵀ`. `F⁺ = Fᵀ(FFᵀ)⁻¹ = Wᵀ`, so the
+/// pin torque lift turns a mode quantity into the minimum-norm slot vector.
+/// None on a non-positive pivot (cannot happen for a rank-validated frame).
 fn frame_pinv(frame: &[f64], n_modes: usize, n_slots: usize) -> Option<Vec<f64>> {
     // gram = F·Fᵀ (n_modes²), SPD by the frame rank validation.
     let mut gram = vec![0.0f64; n_modes * n_modes];

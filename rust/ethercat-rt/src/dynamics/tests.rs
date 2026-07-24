@@ -569,40 +569,25 @@ fit_rms_residual = [0.5, 0.5]
 "#;
 
 #[test]
-fn v7_compliance_parses_and_projects_through_the_frame() {
+fn v7_compliance_is_retained_per_mode() {
     let m = DynamicsModel::from_toml_str(COREXY_V7).unwrap();
-    assert!(m.has_compliance());
-    let (cx, cy) = (7.0e-6f32, 1.76e-5f32);
-    // G = F⁺·diag(c)·F with orthogonal CoreXY rows: a pure slot-a accel
-    // splits evenly into both modes, so the slot leads mix the two
-    // compliances: out = [(cx+cy)/2, (cx-cy)/2] · a.
-    let mut out = [0.0f32; 2];
-    m.compliance_apply(&[1000.0, 0.0], &mut out);
-    let want0 = (cx + cy) / 2.0 * 1000.0;
-    let want1 = (cx - cy) / 2.0 * 1000.0;
-    assert!((out[0] - want0).abs() < 1e-6, "{out:?} vs {want0}");
-    assert!((out[1] - want1).abs() < 1e-6, "{out:?} vs {want1}");
-    // A pure x-mode accel pattern (both slots equal) must lead by exactly
-    // cx·a on both slots — the y mode sees zero of it.
-    m.compliance_apply(&[2000.0, 2000.0], &mut out);
-    assert!((out[0] - cx * 2000.0).abs() < 1e-6, "{out:?}");
-    assert!((out[1] - cx * 2000.0).abs() < 1e-6, "{out:?}");
+    assert!((f64::from(m.compliance(0)) - 7.0e-6).abs() < 1e-12);
+    assert!((f64::from(m.compliance(1)) - 1.76e-5).abs() < 1e-12);
 }
 
 #[test]
-fn v6_still_parses_and_reports_no_compliance() {
+fn v6_defaults_every_mode_compliance_to_zero() {
     let m = DynamicsModel::from_toml_str(COREXY).unwrap();
-    assert!(!m.has_compliance());
-    let mut out = [9.9f32; 2];
-    m.compliance_apply(&[1000.0, 0.0], &mut out);
-    assert_eq!(out, [0.0, 0.0], "no-compliance apply must zero the output");
+    assert_eq!(m.compliance(0), 0.0);
+    assert_eq!(m.compliance(1), 0.0);
 }
 
 #[test]
-fn v7_all_zero_compliance_is_disabled() {
+fn v7_all_zero_compliance_is_accepted() {
     let zeroed = COREXY_V7.replace("compliance = [7.0e-6, 1.76e-5]", "compliance = [0.0, 0.0]");
     let m = DynamicsModel::from_toml_str(&zeroed).unwrap();
-    assert!(!m.has_compliance());
+    assert_eq!(m.compliance(0), 0.0);
+    assert_eq!(m.compliance(1), 0.0);
 }
 
 #[test]
@@ -637,11 +622,8 @@ fn block_diagonal_concatenates_compliance() {
     let y = DynamicsModel::from_toml_str(SCALAR_Y).unwrap();
     let x = DynamicsModel::from_toml_str(&x).unwrap();
     let node = DynamicsModel::block_diagonal(vec![x, y]).unwrap();
-    assert!(node.has_compliance());
-    let mut out = [0.0f32; 2];
-    node.compliance_apply(&[1000.0, 1000.0], &mut out);
-    assert!((out[0] - 1.0e-5 * 1000.0).abs() < 1e-6, "{out:?}");
-    assert_eq!(out[1], 0.0, "y profile has no compliance term");
+    assert!((f64::from(node.compliance(0)) - 1.0e-5).abs() < 1e-12);
+    assert_eq!(node.compliance(1), 0.0, "y profile has no compliance term");
 }
 
 const COREXY_V8: &str = r#"
@@ -662,7 +644,7 @@ fit_rms_residual = [0.5, 0.5]
 #[test]
 fn v8_pin_fields_parse_and_expose_per_mode_state() {
     let m = DynamicsModel::from_toml_str(COREXY_V8).unwrap();
-    assert!(m.has_compliance());
+    assert!((f64::from(m.compliance(0)) - 7.0e-6).abs() < 1e-12);
     assert_eq!(m.pin_mass, [0.012, 0.0]);
     assert_eq!(m.pin_zeta, [0.05, 0.0]);
     assert!(m.pin_active(0), "mode 0 has nonzero pin mass");
@@ -780,31 +762,13 @@ fn v6_and_v7_fixtures_still_report_no_pin() {
 }
 
 #[test]
-fn pinned_mode_is_excluded_from_compliance_g() {
-    // Mode 0 is pinned, so its compliance must not feed the mode-B G matrix;
-    // pin replaces the lead per mode. The resulting G must be identical to
-    // the same profile with mode 0's compliance zeroed and no pin at all,
-    // while mode 1's compliance keeps has_compliance() true and the raw
-    // per-mode compliance the oscillator reads is retained on the model.
+fn pinned_mode_retains_its_raw_compliance() {
+    // The pin oscillator reads ω_b = 1/√compliance for the mode it holds, so
+    // pinning must not consume or zero the per-mode compliance it was
+    // derived from.
     let pinned = DynamicsModel::from_toml_str(COREXY_V8).unwrap();
-    let reference_toml = COREXY_V8
-        .replace(
-            "compliance = [7.0e-6, 1.76e-5]",
-            "compliance = [0.0, 1.76e-5]",
-        )
-        .lines()
-        .filter(|l| !l.starts_with("pin_"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let reference = DynamicsModel::from_toml_str(&reference_toml).unwrap();
-    assert_eq!(
-        pinned.comp_g, reference.comp_g,
-        "pinned mode 0 must be excluded from the compliance G"
-    );
-    assert!(
-        pinned.has_compliance(),
-        "mode 1 still contributes a compliance term"
-    );
+    assert!(pinned.pin_active(0));
     assert!((f64::from(pinned.compliance(0)) - 7.0e-6).abs() < 1e-10);
+    assert!((f64::from(pinned.compliance(1)) - 1.76e-5).abs() < 1e-10);
     assert_eq!(pinned.frame_row(0), &[0.5, 0.5]);
 }

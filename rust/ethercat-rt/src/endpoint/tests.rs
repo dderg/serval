@@ -1232,8 +1232,8 @@ fn run_accel_collect_torque(ctx: &mut EndpointCtx, cycles: u64) -> Vec<i32> {
 }
 
 /// A pinned mode holds the rotor: the emitted torque_offset carries the
-/// anti-ring pin component (a decaying oscillation at f_b), and the pinned
-/// mode's position lead is suppressed (mode A replaces mode B per mode).
+/// anti-ring pin component (a decaying oscillation at f_b), and the pin
+/// never touches the commanded position target.
 #[test]
 fn pin_mode_holds_rotor_in_two_mass_sim() {
     let mut pinned = pin_ctx("pin-hold", PIN_IDENTITY);
@@ -1322,8 +1322,8 @@ fn run_buzz_collect(ctx: &mut EndpointCtx, freq_millihz: u32, cycles: u64) -> (V
 
 /// The pin predictor runs through a buzz: with the buzz tone parked on the
 /// notch the pinned mode integrates the analytic buzz forcing and injects a
-/// live torque bounded by ~Q·m_L·a_buzz (Q = 1/2ζ), while the compliance
-/// position lead (mode B) stays suppressed for that mode.
+/// live torque bounded by ~Q·m_L·a_buzz (Q = 1/2ζ), while the commanded
+/// position target stays untouched.
 #[test]
 fn pin_runs_through_buzz() {
     let zeta = 0.1f32;
@@ -1346,10 +1346,9 @@ fn pin_runs_through_buzz() {
     let (pin, tgt) = run_buzz_collect(&mut ctx, f_notch, CYCLES);
     let (plain_pin, plain_tgt) = run_buzz_collect(&mut plain, f_notch, CYCLES);
 
-    // (c) Compliance position lead stays zero for the pinned mode during the
-    // buzz: slot-0 targets match the no-compliance model exactly (both carry
-    // only the buzz offset, no mode-B lead), and the plain model injects no
-    // pin torque.
+    // (c) The pin stays torque-only through the buzz: slot-0 targets match
+    // the no-pin model exactly (both carry only the buzz offset), and the
+    // plain model injects no pin torque.
     assert_eq!(
         tgt, plain_tgt,
         "pinned mode must carry no compliance position lead during a buzz"
@@ -1378,8 +1377,7 @@ fn pin_runs_through_buzz() {
 
 /// A buzz well above f_b sees no resonant amplification: the pinned mode
 /// cannot follow, so the injected torque stays far below the on-notch
-/// Q·m_L·a_buzz and never grows cycle-over-cycle (no mode-B-style inversion
-/// divergence).
+/// Q·m_L·a_buzz and never grows cycle-over-cycle.
 #[test]
 fn pin_buzz_above_notch_rolls_off() {
     let zeta = 0.1f32;

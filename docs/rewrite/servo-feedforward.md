@@ -189,7 +189,7 @@ smooth, the endpoint *holds* the rotor on the commanded path and cancels
 the belt's reaction directly. Per
 pinned mode it runs a predicted-deflection oscillator — belt deflection `d`
 with `d̈ = −ω_b²·d − 2ζω_b·ḋ − a_cmd`, driven by the commanded mode accel and
-advanced by the exact damped-oscillator update each 1 ms cycle — and adds a
+advanced by the exact damped-oscillator update each DC cycle — and adds a
 mode-space torque `τ_pin = pin_mass·(−ω_b²·d − 2ζω_b·ḋ − a_cmd)` evaluated at
 the lead-advanced state. `τ_pin` cancels the predicted belt reaction, so the
 rotor stays on the planner path; the toolhead, no longer dragged along below

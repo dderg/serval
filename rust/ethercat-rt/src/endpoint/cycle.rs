@@ -280,8 +280,7 @@ fn sample_slot_targets(
             let (ff_vel, ff_acc) = if buzz_was_active {
                 (vel_mm_s, acc_mm_s2)
             } else if ctx.ff_lead_ns[s] > 0 {
-                let (vel, acc, _, _) = ctx.rings[s].peek_kin(sample_time + ctx.ff_lead_ns[s]);
-                (vel, acc)
+                ctx.rings[s].peek_vel_acc(sample_time + ctx.ff_lead_ns[s])
             } else {
                 (vel_mm_s, acc_mm_s2)
             };

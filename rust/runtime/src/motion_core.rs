@@ -2,21 +2,14 @@ use crate::chebyshev::{clenshaw, derivative_series};
 use crate::fault_sink::FaultSink;
 use crate::piece_ring::{MAX_PIECE_COEFFS, PieceEntry, RingDescriptor};
 
-/// A piece armed for the ISR: the Chebyshev position series plus its
-/// derivative series (velocity through snap), computed once at arm. Per tick
-/// the evaluation is `u = elapsed_cycles·inv_scale − 1` and one Clenshaw pass
-/// per series. Jerk and snap exist for the compliance feedforward: the
-/// corrected rotor trajectory `x + c·a` needs `v + c·j` on the velocity
-/// stream and `a + c·s` on the torque stream, and both must be the
-/// trajectory's exact analytic derivatives — finite-differencing the sampled
-/// stream would amplify quantization straight into the torque channel.
+/// A piece armed for the ISR: the Chebyshev position series plus both
+/// derivative series, computed once at arm. Per tick the evaluation is
+/// `u = elapsed_cycles·inv_scale − 1` and one Clenshaw pass per series.
 #[derive(Debug, Clone, Copy)]
 pub struct ArmedPiece {
     pub cheb: [f32; MAX_PIECE_COEFFS],
     pub vel: [f32; MAX_PIECE_COEFFS],
     pub acc: [f32; MAX_PIECE_COEFFS],
-    pub jrk: [f32; MAX_PIECE_COEFFS],
-    pub snp: [f32; MAX_PIECE_COEFFS],
     pub n: u8,
     /// `2 / (duration · cycles_per_second)` — cycles → u without a divide.
     pub inv_scale: f32,
@@ -53,16 +46,6 @@ impl ArmedPiece {
         let u = self.u_at(now);
         let n = self.n as usize;
         clenshaw(Self::series(&self.acc, n.saturating_sub(2)), u)
-    }
-
-    /// Analytic jerk (mm/s³) and snap (mm/s⁴) at `now`.
-    #[inline]
-    pub fn eval_jerk_snap(&self, now: u64) -> (f32, f32) {
-        let u = self.u_at(now);
-        let n = self.n as usize;
-        let jrk = clenshaw(Self::series(&self.jrk, n.saturating_sub(3)), u);
-        let snp = clenshaw(Self::series(&self.snp, n.saturating_sub(4)), u);
-        (jrk, snp)
     }
 }
 
@@ -204,17 +187,11 @@ pub fn arm_piece(entry: &PieceEntry, cycles_per_second: f32) -> ArmedPiece {
         &mut vel,
     );
     let mut acc = [0.0_f32; MAX_PIECE_COEFFS];
-    let na = derivative_series(vel.get(..nv).unwrap_or(&vel), du_dt, &mut acc);
-    let mut jrk = [0.0_f32; MAX_PIECE_COEFFS];
-    let nj = derivative_series(acc.get(..na).unwrap_or(&acc), du_dt, &mut jrk);
-    let mut snp = [0.0_f32; MAX_PIECE_COEFFS];
-    derivative_series(jrk.get(..nj).unwrap_or(&jrk), du_dt, &mut snp);
+    derivative_series(vel.get(..nv).unwrap_or(&vel), du_dt, &mut acc);
     ArmedPiece {
         cheb: entry.coeffs,
         vel,
         acc,
-        jrk,
-        snp,
         n: n as u8,
         inv_scale: 2.0 / (entry.duration * cycles_per_second),
         piece_start_cycles: entry.start_time,
