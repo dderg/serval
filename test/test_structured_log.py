@@ -179,6 +179,21 @@ def test_event_requires_subsystem_and_event():
         sl.event("motion", "")
 
 
+def test_event_remaps_reserved_logrecord_keys(caplog):
+    # logging.makeRecord raises KeyError for extras shadowing built-in
+    # LogRecord attributes; inside a gcode handler that escalated to a full
+    # Klipper shutdown (observed: SERVO_COMPARE_PIN passing name=...).
+    # Reserved keys must be remapped, never raised.
+    with caplog.at_level(logging.INFO):
+        sl.event(
+            "calibration", "pin_compare", name="cmp", module="x", axis="y"
+        )
+    (rec,) = caplog.records
+    assert rec.field_name == "cmp"
+    assert rec.field_module == "x"
+    assert rec.axis == "y"
+
+
 def test_check_log_space_ok_for_tmp(tmp_path):
     free = sl.check_log_space(str(tmp_path), reserve_bytes=1)
     assert free > 1
