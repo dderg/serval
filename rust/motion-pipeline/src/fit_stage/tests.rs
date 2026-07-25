@@ -438,3 +438,83 @@ fn set_mesh_rebases_the_travel_align_anchor() {
         "travel should climb toward the pre-swap z (tail may be blend-trimmed), got {end:?}"
     );
 }
+
+fn cd_ctx(line_no: u32, cd: f64) -> MoveContext {
+    let mut c = ctx(line_no, 80.0);
+    c.limits = VelocityLimits::try_new(300.0, 5000.0, cd, 100_000.0).unwrap();
+    c
+}
+
+/// Facets of a `sweep_deg` arc around `c`, vertices quantized to 1µm the way
+/// slicers emit them.
+fn cd_arc_facets(base: u32, c: [f64; 2], r: f64, n: u32, cd: f64, sweep_deg: f64) -> Vec<Move> {
+    let q = |x: f64| (x * 1000.0).round() / 1000.0;
+    let sweep = sweep_deg.to_radians();
+    let mut prev = [q(c[0] + r), q(c[1]), 0.0];
+    (1..=n)
+        .map(|i| {
+            let a = sweep * f64::from(i) / f64::from(n);
+            let end = [q(c[0] + r * libm::cos(a)), q(c[1] + r * libm::sin(a)), 0.0];
+            let m = line_move(prev, end, 0.3, cd_ctx(base + i, cd)).unwrap();
+            prev = end;
+            m
+        })
+        .collect()
+}
+
+fn travel_between(line_no: u32, from: [f64; 3], to: [f64; 3], cd: f64) -> Move {
+    line_move(from, to, 0.0, cd_ctx(line_no, cd)).unwrap()
+}
+
+fn fitted_arcs(out: &[Move]) -> Vec<&geometry::path::Arc> {
+    out.iter()
+        .filter_map(|m| match &m.segment.spatial {
+            Some(geometry::path::Segment::Arc(a)) => Some(a),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Two concentric arcs faceted from micrometre-quantized G-code vertices
+/// (slicer output precision), joined by a travel, must reconstruct around a
+/// shared center regardless of the corner-deviation budget. Regressions:
+/// anchoring the arc center by intersecting the least-squares radius with
+/// the endpoint bisector amplified quantization noise by r/offset (~75µm of
+/// center drift on a 20mm half-circle at 0.2mm deviation), and near-closed
+/// loops (tiny endpoint chord) swung the center by hundreds of µm until
+/// travel-bounded ends were freed to keep the least-squares circle.
+#[test]
+fn quantized_concentric_arcs_share_a_center_at_high_corner_deviation() {
+    for (cd, n, sweep_deg) in [
+        (0.005, 200u32, 180.0),
+        (0.2, 60, 180.0),
+        (0.2, 200, 180.0),
+        (0.3, 62, 355.0),
+        (0.05, 200, 355.0),
+    ] {
+        let c = [50.0, 50.0];
+        let inner = cd_arc_facets(1, c, 20.0, n, cd, sweep_deg);
+        let outer = cd_arc_facets(301, c, 20.5, n, cd, sweep_deg);
+        let inner_end = *geometry::fitter::spatial_end(inner.last().unwrap())
+            .as_ref()
+            .unwrap();
+        let outer_start = geometry::fitter::spatial_start(&outer[0]).unwrap();
+        let mut moves = inner;
+        moves.push(travel_between(300, inner_end, outer_start, cd));
+        moves.extend(outer);
+        let out = run_fit_stage(&moves, CornerFitConfig::default());
+        let arcs = fitted_arcs(&out);
+        assert_eq!(
+            arcs.len(),
+            2,
+            "n={n} cd={cd} sweep={sweep_deg}: expected both loops to fit"
+        );
+        for a in &arcs {
+            let center_err = libm::hypot(a.origin[0] - c[0], a.origin[1] - c[1]);
+            assert!(
+                center_err < 1e-3,
+                "n={n} cd={cd} sweep={sweep_deg}: center drifted {center_err:.6}mm"
+            );
+        }
+    }
+}

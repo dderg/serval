@@ -589,3 +589,64 @@ fn streaming_partials_carry_toolhead_lanes_when_the_chain_has_motor_side_stages(
     assert!(saw_toolhead_partial);
     assert!(streamed.toolhead_x_pieces.is_some());
 }
+
+/// The playground's stock G-code (Voron cube layer 5) carries three
+/// concentric near-closed circle-wall loops bounded by travels. Their fitted
+/// centers must agree across loops and across corner-deviation budgets:
+/// raising the budget widens which facets join a run, never how well the
+/// shared circle is placed. Regression for the endpoint-anchored fit
+/// scattering the loop centers by ~0.25mm at 0.3mm deviation.
+#[test]
+fn default_gcode_circle_loops_stay_concentric_across_corner_deviation() {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../snapshots/web/static/default.gcode"
+    ))
+    .unwrap();
+    let mut loop_centers = Vec::new();
+    let mut radii_per_cd: Vec<Vec<f64>> = Vec::new();
+    for cd in [0.05, 0.3] {
+        let waypoints = waypoints::parse_gcode(&text, 300.0, 3000.0).unwrap();
+        let limits = geometry::VelocityLimits::try_new(300.0, 3000.0, cd, 2_000_000.0).unwrap();
+        let moves = build_moves(&waypoints, limits).unwrap();
+        let (fitted, _, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
+        let loops: Vec<&geometry::path::Arc> = fitted
+            .iter()
+            .filter_map(|m| match &m.segment.spatial {
+                Some(geometry::path::Segment::Arc(a)) if a.sweep.abs().to_degrees() > 300.0 => {
+                    Some(a)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(loops.len(), 3, "cd={cd}: expected the three wall loops");
+        loop_centers.extend(loops.iter().map(|a| [a.origin[0], a.origin[1]]));
+        let mut radii: Vec<f64> = loops.iter().map(|a| a.radius).collect();
+        radii.sort_by(f64::total_cmp);
+        radii_per_cd.push(radii);
+    }
+    let mean = loop_centers
+        .iter()
+        .fold([0.0, 0.0], |s, c| [s[0] + c[0], s[1] + c[1]])
+        .map(|v| v / loop_centers.len() as f64);
+    for c in &loop_centers {
+        let err = libm::hypot(c[0] - mean[0], c[1] - mean[1]);
+        assert!(
+            err < 0.05,
+            "loop center {c:?} strays {err:.4}mm from the shared center {mean:?}"
+        );
+    }
+    for (lo, hi) in radii_per_cd[0].iter().zip(&radii_per_cd[1]) {
+        assert!(
+            (lo - hi).abs() < 0.025,
+            "loop radius changed with the deviation budget: {lo:.4} vs {hi:.4}"
+        );
+    }
+    for w in radii_per_cd[0].windows(2) {
+        assert!(
+            w[1] - w[0] > 0.3,
+            "adjacent wall loops nearly coincide: {:?}",
+            radii_per_cd[0]
+        );
+    }
+}

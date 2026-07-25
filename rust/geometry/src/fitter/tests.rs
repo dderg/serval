@@ -851,3 +851,29 @@ fn merge_deviation_budget_covers_absorbed_vertices() {
     );
     assert!(joined < 40, "the budget must stop a curve from flattening");
 }
+
+/// Anchoring the circle on a near-half-turn run (endpoint chord ≈ diameter)
+/// must not amplify least-squares noise: a µm-scale perturbation of the LS
+/// center moves the anchored center by the same order, not by
+/// sqrt(2·r·noise) ≈ 100µm as the old fixed-radius intersection did.
+#[test]
+fn endpoint_anchored_center_is_well_conditioned_near_a_half_turn() {
+    let r = 20.0;
+    let (p0, p1) = ([r, 0.0, 0.0], [-r, 0.0, 0.0]);
+    let plane_normal = [0.0, 0.0, 1.0];
+    for noise in [[1e-3, 0.0, 0.0], [0.0, 1e-3, 0.0], [-7e-4, 5e-4, 0.0]] {
+        let ls_origin = [noise[0], noise[1], noise[2]];
+        let (center, radius) =
+            kernels::center_through_endpoints(p0, p1, ls_origin, plane_normal).unwrap();
+        let center_err = dist(center, [0.0, 0.0, 0.0]);
+        assert!(
+            center_err <= 1.1e-3,
+            "center error {center_err} amplifies the {noise:?} LS perturbation"
+        );
+        assert!((radius - r).abs() < 1e-6, "radius drifted to {radius}");
+        assert!(
+            (dist(center, p0) - dist(center, p1)).abs() < 1e-9,
+            "anchored center must be equidistant from both endpoints"
+        );
+    }
+}

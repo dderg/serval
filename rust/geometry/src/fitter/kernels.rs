@@ -11,6 +11,8 @@ mod ease;
 mod follower;
 
 pub(super) use circle::arc_candidate;
+#[cfg(test)]
+pub(super) use circle::center_through_endpoints;
 pub(super) use ease::{ease_run, neighbor};
 pub(super) use follower::arc_len;
 
@@ -30,7 +32,19 @@ pub(super) struct Reconstruction {
     pub tail_line_trim: f64,
 }
 
-pub(super) fn reconstruct(facets: &[Move], tol: f64) -> Result<Option<Reconstruction>, FitError> {
+/// `head_travel_len`/`tail_travel_len`: the length of that end's neighbor
+/// when it is a travel the emission stage re-anchors onto whatever the run
+/// emits (`TravelAligningSender`), so the arc need not pass through the
+/// run's boundary vertex there. Welding moves the vertex by at most the
+/// fit residual, so the travel qualifies only when it is long enough to
+/// absorb that without degenerating. A welded end keeps the least-squares
+/// circle exactly; a bound end anchors it through the vertex.
+pub(super) fn reconstruct(
+    facets: &[Move],
+    tol: f64,
+    head_travel_len: Option<f64>,
+    tail_travel_len: Option<f64>,
+) -> Result<Option<Reconstruction>, FitError> {
     let line_no = facets[0].source.start_line;
     let lines: Vec<&Line> = match facets.iter().map(line_of).collect::<Option<Vec<_>>>() {
         Some(l) => l,
@@ -61,10 +75,17 @@ pub(super) fn reconstruct(facets: &[Move], tol: f64) -> Result<Option<Reconstruc
     }
 
     let last = lines[lines.len() - 1];
+    let p0 = lines[0].start;
     let p1 = last.point_at(last.s_len());
-    let Some((origin, rho)) =
-        circle::center_through_endpoints(lines[0].start, p1, fit.radius, fit.origin, plane_normal)
-    else {
+    let welded =
+        |travel_len: Option<f64>| travel_len.is_some_and(|len| len > fit.residual + BUDGET_EPS_MM);
+    let anchored = match (welded(head_travel_len), welded(tail_travel_len)) {
+        (true, true) => Some((fit.origin, fit.radius)),
+        (false, true) => circle::center_through_vertex(p0, fit.origin, fit.radius),
+        (true, false) => circle::center_through_vertex(p1, fit.origin, fit.radius),
+        (false, false) => circle::center_through_endpoints(p0, p1, fit.origin, plane_normal),
+    };
+    let Some((origin, rho)) = anchored else {
         return Ok(None);
     };
     if circle::max_radial_dev(&lines, origin, rho) > tol {
