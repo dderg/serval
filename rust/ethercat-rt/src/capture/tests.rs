@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::sync_channel;
 
@@ -16,6 +17,8 @@ fn sample(n: i32) -> DriveSample {
         torque_offset: -7,
         accel_cmd: n as f32 + 0.5,
         vel_cmd: n as f32 - 0.25,
+        pin_res_re: n as f32 + 0.125,
+        pin_res_im: n as f32 - 0.375,
     }
 }
 
@@ -75,6 +78,8 @@ fn distinct_sample(seed: i32) -> DriveSample {
         torque_offset: 250i16.wrapping_add(seed as i16),
         accel_cmd: 1234.5 + seed as f32,
         vel_cmd: -67.25 + seed as f32,
+        pin_res_re: 12.5 + seed as f32,
+        pin_res_im: -8.25 + seed as f32,
     }
 }
 
@@ -90,6 +95,8 @@ fn assert_drive_block(block: &[u8], d: &DriveSample) {
     assert_eq!(&block[24..28], &d.velocity_actual.to_le_bytes());
     assert_eq!(&block[28..32], &d.accel_cmd.to_le_bytes());
     assert_eq!(&block[32..36], &d.vel_cmd.to_le_bytes());
+    assert_eq!(&block[36..40], &d.pin_res_re.to_le_bytes());
+    assert_eq!(&block[40..44], &d.pin_res_im.to_le_bytes());
 }
 
 #[test]
@@ -100,13 +107,13 @@ fn record_encodes_to_fixed_little_endian_layout() {
     r.late_frames = 9;
     r.frame_lateness_ns = -104_000;
     let (b, size) = encode_record(&r);
-    assert_eq!(size, 57);
+    assert_eq!(size, 65);
     assert_eq!(&b[0..8], &0x0102030405060708u64.to_le_bytes());
     assert_eq!(b[8], FLAG_TORQUE_ENABLED | FLAG_MOTION_ACTIVE);
     assert_eq!(&b[9..13], &3u32.to_le_bytes());
     assert_eq!(&b[13..17], &9u32.to_le_bytes());
     assert_eq!(&b[17..21], &(-104_000i32).to_le_bytes());
-    assert_drive_block(&b[21..57], &d);
+    assert_drive_block(&b[21..65], &d);
 }
 
 #[test]
@@ -123,6 +130,8 @@ fn single_drive_record_matches_the_documented_layout() {
         torque_offset: 250,
         accel_cmd: 1234.5,
         vel_cmd: -67.25,
+        pin_res_re: 3.5,
+        pin_res_im: -1.75,
     };
     let mut r = CaptureRecord::new(0x0102030405060708, 0x03);
     r.skip_count = 1;
@@ -131,7 +140,7 @@ fn single_drive_record_matches_the_documented_layout() {
     r.drive_count = 1;
     r.drives[0] = d;
 
-    let mut expected = [0u8; 57];
+    let mut expected = [0u8; 65];
     expected[0..8].copy_from_slice(&0x0102030405060708u64.to_le_bytes());
     expected[8] = 0x03;
     expected[9..13].copy_from_slice(&1u32.to_le_bytes());
@@ -148,9 +157,11 @@ fn single_drive_record_matches_the_documented_layout() {
     expected[45..49].copy_from_slice(&(0x55667788u32 as i32).to_le_bytes());
     expected[49..53].copy_from_slice(&1234.5f32.to_le_bytes());
     expected[53..57].copy_from_slice(&(-67.25f32).to_le_bytes());
+    expected[57..61].copy_from_slice(&3.5f32.to_le_bytes());
+    expected[61..65].copy_from_slice(&(-1.75f32).to_le_bytes());
 
     let (b, size) = encode_record(&r);
-    assert_eq!(size, 57);
+    assert_eq!(size, 65);
     assert_eq!(&b[..size], &expected[..]);
 }
 
@@ -160,10 +171,10 @@ fn two_drive_record_packs_blocks_back_to_back() {
     let d1 = distinct_sample(11);
     let r = record_n(7, &[d0, d1]);
     let (b, size) = encode_record(&r);
-    assert_eq!(size, 21 + 2 * 36);
+    assert_eq!(size, 21 + 2 * 44);
     assert_eq!(&b[0..8], &7u64.to_le_bytes());
-    assert_drive_block(&b[21..57], &d0);
-    assert_drive_block(&b[57..93], &d1);
+    assert_drive_block(&b[21..65], &d0);
+    assert_drive_block(&b[65..109], &d1);
 }
 
 #[test]
@@ -175,7 +186,7 @@ fn header_is_one_json_line_describing_the_record() {
     for needle in [
         "\"version\":2",
         "\"cycle_ns\":1000000",
-        "\"record_size\":57",
+        "\"record_size\":65",
         "\"started_utc\":\"2026-06-10T12:00:00Z\"",
         "\"started_mono_ns\":7",
         "\"name\":\"x\"",
@@ -198,6 +209,8 @@ fn header_is_one_json_line_describing_the_record() {
         "{\"name\":\"velocity_actual\",\"dtype\":\"i32\",\"offset\":45}",
         "{\"name\":\"accel_cmd\",\"dtype\":\"f32\",\"offset\":49}",
         "{\"name\":\"vel_cmd\",\"dtype\":\"f32\",\"offset\":53}",
+        "{\"name\":\"pin_res_re\",\"dtype\":\"f32\",\"offset\":57}",
+        "{\"name\":\"pin_res_im\",\"dtype\":\"f32\",\"offset\":61}",
     ] {
         assert!(h.contains(needle), "header missing {needle}: {h}");
     }
@@ -265,8 +278,8 @@ fn multi_drive_round_trip_writes_two_blocks_per_record() {
     for (i, (a, b)) in samples.iter().enumerate() {
         let rec = &body[i * rsize..(i + 1) * rsize];
         assert_eq!(&rec[0..8], &(i as u64).to_le_bytes());
-        assert_drive_block(&rec[21..57], a);
-        assert_drive_block(&rec[57..93], b);
+        assert_drive_block(&rec[21..65], a);
+        assert_drive_block(&rec[65..109], b);
     }
     std::fs::remove_file(&path).unwrap();
 }
@@ -496,5 +509,127 @@ fn failed_validation_does_not_consume_the_spare_channel() {
     );
     c.push(record(1));
     assert_eq!(c.stop().result, 0);
+    let _ = std::fs::remove_file(&path);
+}
+/// Little-endian bytes of the zstd magic number 0xFD2FB528.
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
+/// The `.scap.zst` sibling of a `tmp_path` tag.
+fn tmp_zst_path(tag: &str) -> PathBuf {
+    tmp_path(tag).with_extension("scap.zst")
+}
+
+/// The exact byte stream today's raw writer would emit for `cfg` + `records`:
+/// the JSON header line followed by each fixed-layout record, back to back.
+fn expected_raw_bytes(cfg: &CaptureConfig, records: &[CaptureRecord]) -> Vec<u8> {
+    let mut want = header_json(cfg).into_bytes();
+    for r in records {
+        let (buf, size) = encode_record(r);
+        want.extend_from_slice(&buf[..size]);
+    }
+    want
+}
+
+/// Drive a full start/push/stop capture and return the on-disk bytes.
+fn capture_to(path: &Path, records: &[CaptureRecord]) -> Vec<u8> {
+    let _ = std::fs::remove_file(path);
+    let mut cap = Capture::new();
+    assert_eq!(cap.start(cfg(path)), 0);
+    for r in records {
+        cap.push(*r);
+    }
+    let out = cap.stop();
+    assert_eq!(out.result, 0);
+    assert_eq!(out.samples, records.len() as u64);
+    let bytes = std::fs::read(path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    bytes
+}
+
+#[test]
+fn raw_scap_is_byte_identical_to_the_documented_writer_format() {
+    let path = tmp_path("raw-identical");
+    let records: Vec<CaptureRecord> = (0..50u64).map(record).collect();
+    let bytes = capture_to(&path, &records);
+    assert_eq!(bytes, expected_raw_bytes(&cfg(&path), &records));
+}
+
+#[test]
+fn zst_scap_decodes_to_exactly_the_raw_writer_bytes() {
+    let records: Vec<CaptureRecord> = (0..50u64).map(record).collect();
+
+    let raw_path = tmp_path("zst-vs-raw");
+    let raw_bytes = capture_to(&raw_path, &records);
+
+    let zst_path = tmp_zst_path("zst-vs-raw");
+    let zbytes = capture_to(&zst_path, &records);
+
+    assert_eq!(
+        &zbytes[..4],
+        &ZSTD_MAGIC,
+        "compressed capture is a zstd frame"
+    );
+    let decoded = zstd::decode_all(&zbytes[..]).expect("valid zstd frame");
+    assert_eq!(
+        decoded, raw_bytes,
+        "zst stream decodes to the raw writer bytes"
+    );
+}
+
+#[test]
+fn failed_capture_on_zst_path_keeps_the_zst_name() {
+    let path = tmp_zst_path("zst-fail");
+    let _ = std::fs::remove_file(&path);
+    let failed = super::failed_capture_path(&path);
+    let _ = std::fs::remove_file(&failed);
+    assert_eq!(
+        failed.file_name().unwrap().to_str().unwrap(),
+        format!(
+            "kalico-capture-zst-fail-{}.failed.scap.zst",
+            std::process::id()
+        ),
+        "renamed capture preserves the .scap.zst suffix"
+    );
+
+    let (gate_tx, gate_rx) = sync_channel::<()>(1);
+    let mut cap = Capture::with_capacity(4);
+    assert_eq!(cap.start_gated(cfg(&path), gate_rx), 0);
+    for i in 0..10u64 {
+        cap.push(record(i));
+    }
+    gate_tx.send(()).unwrap();
+    let out = cap.stop();
+    assert_eq!(out.result, ERR_CAPTURE_OVERFLOW);
+    assert!(!path.exists(), "failed capture must not keep the live name");
+    assert!(
+        failed.exists(),
+        "failed capture renamed with .zst preserved"
+    );
+    std::fs::remove_file(&failed).unwrap();
+}
+
+#[test]
+fn encoder_error_surfaces_as_capture_file_error() {
+    // A read-only handle to the .zst target makes the encoder's underlying
+    // flush fail on finalize; the failure must map to the capture-file path.
+    let path = tmp_zst_path("zst-encerr");
+    let _ = std::fs::remove_file(&path);
+    File::create(&path).unwrap();
+    let ro = File::open(&path).unwrap();
+
+    let (tx, rx) = sync_channel::<CaptureRecord>(4);
+    tx.send(record(0)).unwrap();
+    drop(tx);
+
+    let written = super::run_session(ro, &path, header_json(&cfg(&path)), WriterHook::None, rx);
+    assert!(
+        written.is_err(),
+        "encoder finalize on a read-only file must fail"
+    );
+
+    let outcome = super::compose_outcome(&path, written, None);
+    assert_eq!(outcome.result, ERR_CAPTURE_FILE);
+    let failed = super::failed_capture_path(&path);
+    let _ = std::fs::remove_file(&failed);
     let _ = std::fs::remove_file(&path);
 }

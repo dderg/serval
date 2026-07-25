@@ -530,7 +530,7 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
     SchemaMessage {
         type_tag: 0x008C,
         name: "SetDynamicsModel",
-        version: 6,
+        version: 8,
         channel: "control",
         fields: &[
             SchemaField { name: "slots_count", ty: "u8" },
@@ -539,6 +539,10 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
             SchemaField { name: "mass", ty: "array<f32>" },
             SchemaField { name: "viscous", ty: "array<f32>" },
             SchemaField { name: "coulomb", ty: "array<f32>" },
+            SchemaField { name: "compliance", ty: "array<f32>" },
+            SchemaField { name: "pin_mass", ty: "array<f32>" },
+            SchemaField { name: "pin_zeta", ty: "array<f32>" },
+            SchemaField { name: "pin_lead_us", ty: "f32" },
             SchemaField { name: "pairs_count", ty: "u8" },
             SchemaField { name: "pairs", ty: "array<{first:u8,second:u8,direction_split:f32}>" },
         ],

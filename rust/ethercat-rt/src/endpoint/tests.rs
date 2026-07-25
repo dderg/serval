@@ -47,6 +47,7 @@ struct TrackingLagDrive {
     drift_counts_per_cycle: Vec<f64>,
     drifted_counts: Vec<f64>,
     torque_offsets: Vec<i16>,
+    velocity_offsets: Vec<i32>,
     torques: Vec<i16>,
 }
 
@@ -63,6 +64,7 @@ impl TrackingLagDrive {
             drift_counts_per_cycle,
             drifted_counts: vec![0.0; NUM_SLAVES],
             torque_offsets: vec![0; NUM_SLAVES],
+            velocity_offsets: vec![0; NUM_SLAVES],
             torques: vec![0; NUM_SLAVES],
         }
     }
@@ -98,7 +100,9 @@ impl DriveChain for TrackingLagDrive {
     fn set_target_position(&mut self, slot: usize, counts: i32) {
         self.targets[slot] = counts;
     }
-    fn set_velocity_offset(&mut self, _slot: usize, _counts_per_s: i32) {}
+    fn set_velocity_offset(&mut self, slot: usize, counts_per_s: i32) {
+        self.velocity_offsets[slot] = counts_per_s;
+    }
     fn set_torque_offset(&mut self, slot: usize, tenths_pct: i16) {
         self.torque_offsets[slot] = tenths_pct;
     }
@@ -119,6 +123,7 @@ impl DriveChain for TrackingLagDrive {
             target_position: self.targets[slot],
             position_actual: self.position_actual(slot),
             torque_offset: self.torque_offsets[slot],
+            velocity_offset: self.velocity_offsets[slot],
             ..EcTelemetry::default()
         }
     }
@@ -214,6 +219,9 @@ fn test_ctx_with_drive(name: &str, drive: impl DriveChain + 'static) -> Endpoint
         group_delay_ns: 0,
         telemetry_period: u64::MAX,
         dynamics: None,
+        pin: super::cycle::PinState::default(),
+        drive_dirs: vec![1.0; NUM_SLAVES],
+        drive_scratch: super::cycle::DriveScratch::new(NUM_SLAVES),
         run_limits: Vec::new(),
         rings: (0..NUM_SLAVES).map(AxisRing::with_slot).collect(),
         buzz: BuzzOsc::new(),
@@ -864,6 +872,10 @@ fn dynamics_msg(mass0: f32) -> mcu_protocol::messages::SetDynamicsModel {
         mass: vec![mass0, 0.030],
         viscous: vec![0.004, 0.004],
         coulomb: vec![1.0, 1.0],
+        compliance: vec![0.0, 0.0],
+        pin_mass: vec![0.0, 0.0],
+        pin_zeta: vec![0.0, 0.0],
+        pin_lead_us: 0.0,
         pairs: vec![],
     }
 }
@@ -877,6 +889,9 @@ fn set_dynamics_model_installs_wire_pair_and_evaluates_it() {
     msg.mass = vec![0.030];
     msg.viscous = vec![0.0];
     msg.coulomb = vec![0.0];
+    msg.compliance = vec![0.0];
+    msg.pin_mass = vec![0.0];
+    msg.pin_zeta = vec![0.0];
     msg.pairs = vec![mcu_protocol::messages::DynamicsPair {
         first: 0,
         second: 1,
@@ -902,6 +917,9 @@ fn set_dynamics_model_rejects_zero_pair_first_column() {
     msg.mass = vec![0.030];
     msg.viscous = vec![0.0];
     msg.coulomb = vec![0.0];
+    msg.compliance = vec![0.0];
+    msg.pin_mass = vec![0.0];
+    msg.pin_zeta = vec![0.0];
     msg.pairs = vec![mcu_protocol::messages::DynamicsPair {
         first: 0,
         second: 1,
@@ -1123,6 +1141,10 @@ fn cycle_skip_faults_even_when_lateness_is_within_tolerance() {
     assert_eq!(ctx.latched_drive_err, super::cycle::CYCLE_SKIP_FAULT_CODE);
 }
 
+/// A pure-T2 piece has constant accel: d²/du²·T2 = 4, so
+/// accel = 4·C2·(2/duration)².
+const T2_C: f32 = 0.625; // accel = 4·0.625·400 = 1000 mm/s² at d = 0.1 s
+
 #[test]
 fn group_delay_leads_curve_sampling_by_one_cycle() {
     const APPLY_T: u64 = 1_200_000;
@@ -1170,5 +1192,787 @@ fn group_delay_leads_curve_sampling_by_one_cycle() {
             expected_lead_counts,
             "slot {s}: group delay must lead curve sampling by velocity*CYCLE_NS counts"
         );
+    }
+}
+
+// ---- pin-rotor (mode A) torque hold -------------------------------------
+
+const PIN_IDENTITY: &str = r#"
+version = 8
+axes = ["x", "y"]
+modes = ["x", "y"]
+frame = [[1.0, 0.0], [0.0, 1.0]]
+mass = [0.020, 0.020]
+viscous = [0.0, 0.0]
+coulomb = [0.0, 0.0]
+compliance = [1.0e-5, 0.0]
+pin_mass = [0.02, 0.0]
+pin_zeta = [0.1, 0.0]
+pin_lead_us = 0.0
+"#;
+
+fn pin_ctx(name: &str, toml: &str) -> EndpointCtx {
+    let mut ctx = test_ctx(name);
+    let model = crate::dynamics::DynamicsModel::from_toml_str(toml).unwrap();
+    ctx.pin = super::cycle::PinState::build(&model, ctx.cycle_ns);
+    ctx.dynamics = Some(model);
+    ctx.torque_clamp_tenths = vec![3000; NUM_SLAVES];
+    ctx
+}
+
+/// Drive one constant-accel (T2) stroke and return slot-0 torque_offset per
+/// cycle. The stroke stays inside the 0.1 s piece for all `cycles`.
+fn run_accel_collect_torque(ctx: &mut EndpointCtx, cycles: u64) -> Vec<i32> {
+    push_all(ctx, piece(1_000_000, 0.1, &[0.0, 0.0, T2_C]));
+    let mut out = Vec::with_capacity(cycles as usize);
+    for c in 0..cycles {
+        compute_motion_targets(ctx, 1_000_000 + c * CYCLE_NS);
+        ctx.drive.cycle();
+        out.push(i32::from(ctx.drive.telemetry(0).torque_offset));
+    }
+    out
+}
+
+/// A pinned mode holds the rotor: the emitted torque_offset carries the
+/// anti-ring pin component (a decaying oscillation at f_b), and the pin
+/// never touches the commanded position target.
+#[test]
+fn pin_mode_holds_rotor_in_two_mass_sim() {
+    let mut pinned = pin_ctx("pin-hold", PIN_IDENTITY);
+    let mut plain = pin_ctx(
+        "pin-hold-plain",
+        &PIN_IDENTITY
+            .replace("compliance = [1.0e-5, 0.0]", "compliance = [0.0, 0.0]")
+            .replace("pin_mass = [0.02, 0.0]", "pin_mass = [0.0, 0.0]"),
+    );
+
+    const CYCLES: u64 = 390;
+    let t_pin = run_accel_collect_torque(&mut pinned, CYCLES);
+    let t_plain = run_accel_collect_torque(&mut plain, CYCLES);
+
+    // Pin does not move the commanded position target (torque-only hold).
+    assert_eq!(
+        targets(&pinned)[0],
+        targets(&plain)[0],
+        "pinned mode must carry no position lead"
+    );
+
+    // Pin torque = pinned − plain: a decaying oscillation at f_b.
+    let ring: Vec<i32> = t_pin.iter().zip(&t_plain).map(|(a, b)| a - b).collect();
+    let max_abs = |s: &[i32]| s.iter().map(|v| v.abs()).max().unwrap_or(0);
+    let early = max_abs(&ring[..160]);
+    let late = max_abs(&ring[310..390]);
+    assert!(
+        early >= 8,
+        "pin ring must be present after the transient: {early}"
+    );
+    assert!(
+        late * 2 <= early,
+        "pin ring must decay with zeta: early {early}, late {late}"
+    );
+    let mut sign_changes = 0;
+    let mut last = 0i32;
+    for &x in &ring[..250] {
+        if x != 0 {
+            if last != 0 && (x > 0) != (last > 0) {
+                sign_changes += 1;
+            }
+            last = x;
+        }
+    }
+    assert!(
+        sign_changes >= 3,
+        "pin torque must oscillate at f_b: {sign_changes} sign changes"
+    );
+    // The non-pinned mode (slot 1) carries no residual.
+    assert_eq!(
+        pinned.pin.residual_for_slot(1),
+        (0.0, 0.0),
+        "non-pinned mode must carry no residual"
+    );
+}
+
+/// Buzz mode A parameters shared by the through-buzz tests: identity frame,
+/// slot 0 driven, no sign flip, 0.1 mm amplitude, long steady tone.
+const BUZZ_AMP_NM: u32 = 100_000; // 0.1 mm
+
+/// Arm a single-tone buzz on slot 0 at `freq_millihz` and run it, returning
+/// the per-cycle slot-0 pin torque contribution and target positions.
+fn run_buzz_collect(ctx: &mut EndpointCtx, freq_millihz: u32, cycles: u64) -> (Vec<f32>, Vec<i32>) {
+    let rc = ctx.buzz.arm(
+        NUM_SLAVES as u8,
+        0b01,
+        0,
+        freq_millihz,
+        freq_millihz,
+        BUZZ_AMP_NM,
+        2000,
+        20,
+        [0; crate::buzz::MAX_BUZZ_SLOTS],
+    );
+    assert_eq!(rc, 0);
+    let mut pin = Vec::with_capacity(cycles as usize);
+    let mut tgt = Vec::with_capacity(cycles as usize);
+    for c in 0..cycles {
+        compute_motion_targets(ctx, 1_000_000 + c * CYCLE_NS);
+        ctx.drive.cycle();
+        pin.push(ctx.pin.slot_torque_at(0));
+        tgt.push(ctx.drive.telemetry(0).target_position);
+    }
+    (pin, tgt)
+}
+
+/// The pin predictor runs through a buzz: with the buzz tone parked on the
+/// notch the pinned mode integrates the analytic buzz forcing and injects a
+/// live torque bounded by ~Q·m_L·a_buzz (Q = 1/2ζ), while the commanded
+/// position target stays untouched.
+#[test]
+fn pin_runs_through_buzz() {
+    let zeta = 0.1f32;
+    let q = 1.0 / (2.0 * zeta);
+    let pin_mass = 0.02f32;
+    // f_b = 1/(2π√compliance) ≈ 50.3 Hz; park the tone on the notch.
+    let f_notch = 50_000u32;
+    let omega_buzz = 2.0 * std::f32::consts::PI * (f_notch as f32 / 1000.0);
+    let amp_mm = BUZZ_AMP_NM as f32 * 1e-6;
+    let a_buzz = omega_buzz * omega_buzz * amp_mm; // |a_buzz| = ω²·A
+
+    let mut ctx = pin_ctx("pin-through-buzz", PIN_IDENTITY);
+    let mut plain = pin_ctx(
+        "pin-through-buzz-plain",
+        &PIN_IDENTITY
+            .replace("compliance = [1.0e-5, 0.0]", "compliance = [0.0, 0.0]")
+            .replace("pin_mass = [0.02, 0.0]", "pin_mass = [0.0, 0.0]"),
+    );
+    const CYCLES: u64 = 500;
+    let (pin, tgt) = run_buzz_collect(&mut ctx, f_notch, CYCLES);
+    let (plain_pin, plain_tgt) = run_buzz_collect(&mut plain, f_notch, CYCLES);
+
+    // (c) The pin stays torque-only through the buzz: slot-0 targets match
+    // the no-pin model exactly (both carry only the buzz offset), and the
+    // plain model injects no pin torque.
+    assert_eq!(
+        tgt, plain_tgt,
+        "pinned mode must carry no compliance position lead during a buzz"
+    );
+    assert!(
+        plain_pin.iter().all(|&t| t == 0.0),
+        "the no-pin model must inject no pin torque"
+    );
+
+    // (a) Pinned mode injects a live torque through the buzz.
+    let steady = &pin[200..];
+    let max_pin = steady.iter().fold(0.0f32, |m, &t| m.max(t.abs()));
+    assert!(
+        max_pin > pin_mass * a_buzz,
+        "pin torque must be live and Q-amplified on the notch: \
+         {max_pin} vs m·a_buzz {}",
+        pin_mass * a_buzz
+    );
+    // (b) …bounded by ~Q·m_L·a_buzz with margin.
+    let bound = q * pin_mass * a_buzz;
+    assert!(
+        max_pin < 2.0 * bound,
+        "pin torque must stay within ~Q·m_L·a_buzz: {max_pin} vs bound {bound}"
+    );
+}
+
+/// A buzz well above f_b sees no resonant amplification: the pinned mode
+/// cannot follow, so the injected torque stays far below the on-notch
+/// Q·m_L·a_buzz and never grows cycle-over-cycle.
+#[test]
+fn pin_buzz_above_notch_rolls_off() {
+    let zeta = 0.1f32;
+    let q = 1.0 / (2.0 * zeta);
+    let pin_mass = 0.02f32;
+    // ~5× above the ≈50 Hz notch.
+    let f_hi = 250_000u32;
+    let omega_buzz = 2.0 * std::f32::consts::PI * (f_hi as f32 / 1000.0);
+    let amp_mm = BUZZ_AMP_NM as f32 * 1e-6;
+    let a_buzz = omega_buzz * omega_buzz * amp_mm;
+    let bound = q * pin_mass * a_buzz;
+
+    let mut ctx = pin_ctx("pin-buzz-above", PIN_IDENTITY);
+    const CYCLES: u64 = 500;
+    let (pin, _tgt) = run_buzz_collect(&mut ctx, f_hi, CYCLES);
+
+    // No Q-amplification: the injected torque stays well under the on-notch
+    // bound (the oscillator only sees the direct inertial forcing).
+    let max_pin = pin[200..].iter().fold(0.0f32, |m, &t| m.max(t.abs()));
+    assert!(
+        max_pin < 0.5 * bound,
+        "off-notch buzz must roll off below Q·m_L·a_buzz: {max_pin} vs bound {bound}"
+    );
+    // Non-divergent: the late-window peak does not exceed the earlier steady
+    // peak (a B-style inversion would grow without bound).
+    let peak = |s: &[f32]| s.iter().fold(0.0f32, |m, &t| m.max(t.abs()));
+    let early = peak(&pin[150..300]);
+    let late = peak(&pin[350..500]);
+    assert!(
+        late <= early * 1.1 + 1.0,
+        "pin torque must not grow cycle-over-cycle: early {early}, late {late}"
+    );
+}
+
+/// Streaming a new dynamics model while a buzz is live is accepted and
+/// rebuilds the pin-rotor state cleanly: the install succeeds (the new zeta
+/// lands in `ctx.dynamics`), the pin oscillator restarts from a defined zero
+/// state (residual demodulator zeroed), and the pinned mode keeps injecting
+/// torque as the buzz forcing continues to integrate on the fresh state -
+/// now with the new damping (a higher zeta lowers the on-notch Q, so the
+/// steady pin torque settles lower). This is the mid-sweep re-stream that
+/// SERVO_SWEEP_PIN relies on (pin runs THROUGH the buzz, one tone, many
+/// models).
+#[test]
+fn set_dynamics_model_mid_buzz_rebuilds_pin_cleanly() {
+    let mut ctx = pin_ctx("pin-mid-buzz-swap", PIN_IDENTITY);
+    // Park the tone on the notch (f_b ≈ 50.3 Hz) and run it live.
+    let f_notch = 50_000u32;
+    let rc = ctx.buzz.arm(
+        NUM_SLAVES as u8,
+        0b01,
+        0,
+        f_notch,
+        f_notch,
+        BUZZ_AMP_NM,
+        4000,
+        20,
+        [0; crate::buzz::MAX_BUZZ_SLOTS],
+    );
+    assert_eq!(rc, 0);
+    // Run the tone on the original zeta=0.1 model until the pin torque has
+    // built up to its on-notch steady amplitude (Q = 1/2ζ = 5).
+    let mut pin_before = 0.0f32;
+    for c in 0..2000u64 {
+        compute_motion_targets(&mut ctx, 1_000_000 + c * CYCLE_NS);
+        ctx.drive.cycle();
+        if c >= 1600 {
+            pin_before = pin_before.max(ctx.pin.slot_torque_at(0).abs());
+        }
+    }
+    assert!(
+        pin_before > 0.0,
+        "pin torque must be live before the swap: {pin_before}"
+    );
+    assert!(
+        ctx.buzz.active(),
+        "buzz must still be running before the swap"
+    );
+
+    // Swap the model mid-buzz: same pin, larger zeta (0.1 -> 0.3).
+    let mut msg = dynamics_msg(0.020);
+    msg.frame = vec![1.0, 0.0, 0.0, 1.0];
+    msg.mass = vec![0.020, 0.020];
+    msg.viscous = vec![0.0, 0.0];
+    msg.coulomb = vec![0.0, 0.0];
+    msg.compliance = vec![1.0e-5, 0.0];
+    msg.pin_mass = vec![0.02, 0.0];
+    msg.pin_zeta = vec![0.3, 0.0];
+    msg.pin_lead_us = 0.0;
+    super::commands::handle_set_dynamics_model(&mut ctx, 7, msg);
+
+    // Install succeeded (rc==0 path): the new zeta is live, the previous
+    // model was replaced, and the buzz never stopped.
+    let model = ctx.dynamics.as_ref().expect("model still installed");
+    assert!(
+        (model.pin_zeta[0] - 0.3).abs() < 1e-6,
+        "mid-buzz swap must install the new zeta: {}",
+        model.pin_zeta[0]
+    );
+    assert!(ctx.buzz.active(), "buzz keeps running across the swap");
+
+    // The pin state rebuilt: the oscillator + residual demodulator restart
+    // from a defined zero state (no carried-over phasor from the old model).
+    assert_eq!(
+        ctx.pin.residual_for_slot(0),
+        (0.0, 0.0),
+        "residual must restart on the model swap"
+    );
+
+    // Next cycles integrate the buzz forcing on the fresh state: pin torque
+    // re-accumulates and settles at the new, more-damped steady amplitude.
+    let mut pin_after = 0.0f32;
+    for c in 2000..4000u64 {
+        compute_motion_targets(&mut ctx, 1_000_000 + c * CYCLE_NS);
+        ctx.drive.cycle();
+        if c >= 3600 {
+            pin_after = pin_after.max(ctx.pin.slot_torque_at(0).abs());
+        }
+    }
+    assert!(
+        pin_after > 0.0,
+        "pin torque must continue after the mid-buzz swap: {pin_after}"
+    );
+    // Higher damping => lower on-notch Q => lower steady pin torque. This
+    // only holds if the buzz forcing kept integrating on the NEW model.
+    assert!(
+        pin_after < pin_before,
+        "new (higher) zeta must lower the steady pin torque: \
+         before {pin_before} after {pin_after}"
+    );
+}
+
+/// A nonzero pin lead advances the torque waveform: its first positive
+/// zero-crossing lands earlier than the unled waveform's.
+#[test]
+fn pin_lead_advances_phase() {
+    let mut unled = pin_ctx("pin-lead-0", PIN_IDENTITY);
+    let mut leaded = pin_ctx(
+        "pin-lead-1000",
+        &PIN_IDENTITY.replace("pin_lead_us = 0.0", "pin_lead_us = 1000.0"),
+    );
+    let collect = |ctx: &mut EndpointCtx| -> Vec<f32> {
+        push_all(ctx, piece(1_000_000, 0.1, &[0.0, 0.0, T2_C]));
+        let mut v = Vec::new();
+        for c in 0..200u64 {
+            compute_motion_targets(ctx, 1_000_000 + c * CYCLE_NS);
+            ctx.drive.cycle();
+            v.push(ctx.pin.slot_torque_at(0));
+        }
+        v
+    };
+    let a = collect(&mut unled);
+    let b = collect(&mut leaded);
+    let first_pos = |s: &[f32]| {
+        s.iter()
+            .position(|&x| x > 1.0)
+            .expect("pin waveform must cross positive")
+    };
+    let cross_unled = first_pos(&a);
+    let cross_leaded = first_pos(&b);
+    assert!(
+        cross_leaded < cross_unled,
+        "pin lead must advance the phase: leaded {cross_leaded} vs unled {cross_unled}"
+    );
+}
+
+/// Residual demodulator regression: under a sustained on-notch ring in the
+/// pinned mode's following error the demodulated (re, im) phasor must
+/// converge to a steady value bounded by the ring amplitude — never diverge
+/// (the unclamped low-pass coefficient once let α≥2 blow the accumulator up
+/// to ~1e33 with the phase snapping between 0 and −90°).
+#[test]
+fn pin_residual_demod_converges_and_stays_bounded() {
+    let mut ctx = pin_ctx("pin-residual-demod", PIN_IDENTITY);
+    let dt = CYCLE_NS as f64 * 1e-9;
+    // Two-mass belt notch from PIN_IDENTITY: ω_b = 1/√compliance. The demod
+    // references ω_b (NOT the predictor's ω_d — see the ζ-bias regression
+    // below), so the synthetic ring sits at ω_b too.
+    let omega = 1.0 / (1.0e-5f64).sqrt();
+    let wd = omega;
+    let amp = 0.05f64; // 0.05 mm sub-mm belt ring
+    let phi = 0.7f64;
+    const CYCLES: usize = 12_000; // 3 s at 250 µs
+    let acc = [0.0f32; NUM_SLAVES];
+    let mut mag = Vec::with_capacity(CYCLES);
+    let mut peak_ferr = 0.0f32;
+    for n in 0..CYCLES {
+        let t = n as f64 * dt;
+        // Mode x (slot 0, pinned) sees the on-notch ring; slot 1 (non-pinned)
+        // carries a nonzero following error that must never leak to a residual.
+        let ferr0 = (amp * libm::cos(wd * t + phi)) as f32;
+        let ferr1 = (amp * libm::sin(wd * t)) as f32;
+        peak_ferr = peak_ferr.max(ferr0.abs());
+        ctx.pin.step(&acc, &[ferr0, ferr1], true);
+        let (re, im) = ctx.pin.residual_for_slot(0);
+        mag.push(re.hypot(im));
+    }
+    // (iii) nonzero: the on-notch ring demodulates to a steady phasor.
+    let last = *mag.last().unwrap();
+    assert!(last > 0.1 * amp as f32, "residual must be nonzero: {last}");
+    // (i) converges: last-100 mean within 20% of the mean 0.5 s (2000 cy) earlier.
+    let mean = |s: &[f32]| s.iter().sum::<f32>() / s.len() as f32;
+    let late = mean(&mag[CYCLES - 100..]);
+    let early = mean(&mag[CYCLES - 2100..CYCLES - 2000]);
+    assert!(
+        (late - early).abs() <= 0.2 * early,
+        "residual must converge: late {late} vs early {early}"
+    );
+    // (ii) bounded by the ring order: never exceeds 10× the peak following error.
+    let peak_res = mag.iter().fold(0.0f32, |m, &x| m.max(x));
+    assert!(
+        peak_res < 10.0 * peak_ferr,
+        "residual must stay bounded by the ring amplitude: {peak_res} vs peak ferr {peak_ferr}"
+    );
+    // The non-pinned mode carries a nonzero following error but zero residual.
+    assert_eq!(
+        ctx.pin.residual_for_slot(1),
+        (0.0, 0.0),
+        "non-pinned mode must carry no residual"
+    );
+}
+
+// ---- CoreXY frame quantitative cancellation ----------------------------
+//
+// The identity-frame pin tests above cannot detect a frame-normalization
+// error: with F = I both the accel projection (F) and the torque lift round
+// trip to unity. A real CoreXY frame has |F·Fᵀ| < 1 (0.25·I on the bench's
+// 4-slot AWD frame), so a naive Fᵀ torque lift lands 4× short. These tests
+// drive the pin through a real frame and check, per mode, that the emitted
+// slot torque realizes the intended mode-space cancellation (F·slot = τ_pin)
+// — the quantity a downstream two-mass load actually feels.
+
+/// Drive a per-cycle slot-accel sequence `acc_seq` into a pin model built from
+/// an explicit frame, alongside one identity single-mode reference oscillator
+/// per mode (the ground-truth mode torque `τ_pin`). Returns, per mode and per
+/// cycle, the achieved mode-space cancellation `F·slot_torque` and the
+/// reference `τ_pin`. A correct lift makes the two equal; a plain Fᵀ lift
+/// attenuates `F·slot` by `F·Fᵀ`.
+fn pin_frame_cancellation(
+    frame: &[f32],
+    n_modes: usize,
+    n_slots: usize,
+    mass: &[f32],
+    compliance: &[f32],
+    pin_mass: &[f32],
+    pin_zeta: &[f32],
+    acc_seq: &[Vec<f32>],
+) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+    use crate::dynamics::DynamicsModel;
+    let zeros_m = vec![0.0f32; n_modes];
+    let model = DynamicsModel::from_parts(
+        n_slots,
+        n_modes,
+        frame,
+        mass,
+        &zeros_m,
+        &zeros_m,
+        compliance,
+        pin_mass,
+        pin_zeta,
+        0.0,
+        &[],
+    )
+    .unwrap();
+    let mut pin = super::cycle::PinState::build(&model, CYCLE_NS as i64);
+    // One identity (1 slot, 1 mode) reference per mode: its slot torque IS the
+    // mode torque, since the identity lift is unity.
+    let mut refs: Vec<super::cycle::PinState> = (0..n_modes)
+        .map(|k| {
+            let m = DynamicsModel::from_parts(
+                1,
+                1,
+                &[1.0],
+                &[mass[k]],
+                &[0.0],
+                &[0.0],
+                &[compliance[k]],
+                &[pin_mass[k]],
+                &[pin_zeta[k]],
+                0.0,
+                &[],
+            )
+            .unwrap();
+            super::cycle::PinState::build(&m, CYCLE_NS as i64)
+        })
+        .collect();
+    let cycles = acc_seq.len();
+    let mut achieved = vec![Vec::with_capacity(cycles); n_modes];
+    let mut reference = vec![Vec::with_capacity(cycles); n_modes];
+    for acc in acc_seq {
+        pin.step(acc, &vec![0.0f32; n_slots], true);
+        for k in 0..n_modes {
+            // The reference sees the exact mode accel the coupled pin projects.
+            let a_cmd: f32 = model.frame_row(k).iter().zip(acc).map(|(f, a)| f * a).sum();
+            let f_slot: f32 = model
+                .frame_row(k)
+                .iter()
+                .enumerate()
+                .map(|(s, f)| f * pin.slot_torque_at(s))
+                .sum();
+            achieved[k].push(f_slot);
+            refs[k].step(&[a_cmd], &[0.0], true);
+            reference[k].push(refs[k].slot_torque_at(0));
+        }
+    }
+    (achieved, reference)
+}
+
+/// Peak-to-peak of a damped locked-rotor load oscillator (`m_L·ÿ = -k_b·y -
+/// c·ẏ + u`) driven ZOH by the per-cycle residual mode force `u`, measured
+/// over the tail. The pinned load feels the belt reaction the pin fails to
+/// cancel, so a fully-cancelling pin leaves a flat load.
+fn load_ring(force: &[f32], fb: f64, zeta: f64, m_l: f32) -> f32 {
+    let w = 2.0 * std::f64::consts::PI * fb;
+    let dt = CYCLE_NS as f64 * 1e-9;
+    let sub = 40usize;
+    let h = dt / sub as f64;
+    let (mut y, mut v) = (0.0f64, 0.0f64);
+    let (mut lo, mut hi) = (0.0f64, 0.0f64);
+    for (i, &u) in force.iter().enumerate() {
+        for _ in 0..sub {
+            let acc = -w * w * y - 2.0 * zeta * w * v + f64::from(u) / f64::from(m_l);
+            v += acc * h;
+            y += v * h;
+        }
+        if i > force.len() / 3 {
+            lo = lo.min(y);
+            hi = hi.max(y);
+        }
+    }
+    (hi - lo) as f32
+}
+
+/// Assert, for a given frame, that the pin realizes mode-exact cancellation on
+/// EVERY mode: the emitted slot torque maps back (F·slot) to the intended
+/// τ_pin within 10%, and a simulated two-mass load ring drops by >85% versus
+/// pin-off. A frame-normalization error (Fᵀ lift → 4× short on AWD) or a
+/// per-mode sign flip fails both checks.
+fn assert_pin_cancels_every_mode(
+    frame: &[f32],
+    n_modes: usize,
+    n_slots: usize,
+    mass: &[f32],
+    fb: &[f64],
+    pin_frac: &[f32],
+) {
+    let compliance: Vec<f32> = fb
+        .iter()
+        .map(|f| (1.0 / (2.0 * std::f64::consts::PI * f).powi(2)) as f32)
+        .collect();
+    let pin_mass: Vec<f32> = mass.iter().zip(pin_frac).map(|(m, f)| m * f).collect();
+    let pin_zeta = vec![0.08f32; n_modes];
+    // Model handle for the F⁺ excitation columns (min-norm slot accel that
+    // realizes a pure mode-k acceleration).
+    let model = crate::dynamics::DynamicsModel::from_parts(
+        n_slots,
+        n_modes,
+        frame,
+        mass,
+        &vec![0.0f32; n_modes],
+        &vec![0.0f32; n_modes],
+        &compliance,
+        &pin_mass,
+        &pin_zeta,
+        0.0,
+        &[],
+    )
+    .unwrap();
+    let dt = CYCLE_NS as f64 * 1e-9;
+    const CYCLES: usize = 900;
+    let rms = |s: &[f32]| (s.iter().map(|x| x * x).sum::<f32>() / s.len() as f32).sqrt();
+    for k in 0..n_modes {
+        // Sustained on-notch sinusoid confined to mode k: the pinned mode rings
+        // at Q, giving a large τ_pin to test the cancellation against.
+        let wb = 2.0 * std::f64::consts::PI * fb[k];
+        let lift = model.pin_lift_row(k).to_vec();
+        let acc_seq: Vec<Vec<f32>> = (0..CYCLES)
+            .map(|c| {
+                let s = (1000.0 * libm::sin(wb * c as f64 * dt)) as f32;
+                lift.iter().map(|w| w * s).collect()
+            })
+            .collect();
+        let (achieved, reference) = pin_frame_cancellation(
+            frame,
+            n_modes,
+            n_slots,
+            mass,
+            &compliance,
+            &pin_mass,
+            &pin_zeta,
+            &acc_seq,
+        );
+        // Steady-state tail only (skip the ring build-up).
+        let tail = CYCLES / 3;
+        let a = &achieved[k][tail..];
+        let r = &reference[k][tail..];
+        // The driven mode must genuinely ring, else the test proves nothing.
+        let ref_rms = rms(r);
+        assert!(
+            ref_rms > 1.0,
+            "mode {k} reference torque too small: {ref_rms}"
+        );
+        // (1) F·slot == τ_pin within 10% — catches the frame-normalization
+        //     gain deficit (Fᵀ lift → 4× short on AWD) AND a per-mode sign
+        //     flip (which drives the error to ~2× the reference).
+        let err: Vec<f32> = a.iter().zip(r).map(|(x, y)| x - y).collect();
+        let rel = rms(&err) / ref_rms;
+        assert!(
+            rel < 0.10,
+            "mode {k}: emitted slot torque must map to τ_pin within 10%, got {:.1}% \
+             (F·slot RMS {:.3} vs τ_pin RMS {:.3})",
+            rel * 100.0,
+            rms(a),
+            ref_rms
+        );
+        // (2) simulated two-mass load ring: residual = τ_pin − F·slot drives
+        //     the load; pin-off feels the whole belt reaction (τ_pin).
+        let residual: Vec<f32> = r.iter().zip(a).map(|(x, y)| x - y).collect();
+        let ring_off = load_ring(r, fb[k], 0.08, pin_mass[k]);
+        let ring_on = load_ring(&residual, fb[k], 0.08, pin_mass[k]);
+        let reduction = 1.0 - ring_on / ring_off;
+        assert!(
+            reduction > 0.85,
+            "mode {k}: load ring must drop >85% with the pin, got {:.1}% \
+             (off {ring_off:.4} on {ring_on:.4})",
+            reduction * 100.0
+        );
+    }
+}
+
+/// Bench 4-slot AWD CoreXY frame (drive invert signs folded in, hence the
+/// asymmetric per-row signs): F·Fᵀ = 0.25·I, so a naive Fᵀ pin lift lands 4×
+/// short on BOTH modes. The correct F⁺ lift cancels each mode exactly.
+#[test]
+fn pin_corexy_awd_cancels_both_modes() {
+    // frame rows: x = [.25,-.25,-.25,-.25], y = [.25,-.25,.25,.25]
+    let frame = [0.25, -0.25, -0.25, -0.25, 0.25, -0.25, 0.25, 0.25];
+    assert_pin_cancels_every_mode(
+        &frame,
+        2,
+        4,
+        &[0.00453, 0.00747],
+        &[216.8, 131.5],
+        // load fraction 1 − (f_b/f_peak)²
+        &[
+            1.0 - (216.8f32 / 313.5).powi(2),
+            1.0 - (131.5f32 / 215.8).powi(2),
+        ],
+    );
+}
+
+/// Symmetric 2×2 CoreXY frame ([[.5,.5],[.5,-.5]] convention): F·Fᵀ = 0.5·I,
+/// so a naive Fᵀ lift lands 2× short. Transpose-symmetric, so it hides a
+/// pure transpose bug but still exposes the normalization deficit.
+#[test]
+fn pin_corexy_symmetric_cancels_both_modes() {
+    let frame = [0.5, 0.5, 0.5, -0.5];
+    assert_pin_cancels_every_mode(&frame, 2, 2, &[0.020, 0.020], &[131.5, 131.5], &[0.6, 0.6]);
+}
+
+#[test]
+fn osc_zoh_is_continuous_across_critical_damping() {
+    // The three closed forms (sin/cos, polynomial, sinh/cosh) must agree at
+    // the regime boundary: coefficients just below, at, and just above
+    // zeta = 1 are within numerical noise of each other.
+    let omega = 1.0 / (1.0e-5f64).sqrt();
+    let dt = 250e-6f64;
+    let (lo_a, lo_b) = super::cycle::osc_zoh(omega, 1.0 - 1e-9, dt);
+    let (cr_a, cr_b) = super::cycle::osc_zoh(omega, 1.0, dt);
+    let (hi_a, hi_b) = super::cycle::osc_zoh(omega, 1.0 + 1e-9, dt);
+    for i in 0..4 {
+        assert!(
+            (lo_a[i] - cr_a[i]).abs() < 1e-6,
+            "a[{i}]: {} vs {}",
+            lo_a[i],
+            cr_a[i]
+        );
+        assert!(
+            (hi_a[i] - cr_a[i]).abs() < 1e-6,
+            "a[{i}]: {} vs {}",
+            hi_a[i],
+            cr_a[i]
+        );
+    }
+    for i in 0..2 {
+        let scale = cr_b[i].abs().max(1e-12);
+        assert!((lo_b[i] - cr_b[i]).abs() / scale < 1e-5);
+        assert!((hi_b[i] - cr_b[i]).abs() / scale < 1e-5);
+    }
+}
+
+#[test]
+fn osc_zoh_overdamped_is_finite_and_never_oscillates() {
+    // zeta > 1: released from a deflection, the predictor state must decay
+    // monotonically toward zero (two real poles - no sign changes), and the
+    // coefficients must stay finite even at absurd damping.
+    let omega = 1.0 / (1.0e-5f64).sqrt();
+    let dt = 250e-6f64;
+    for zeta in [1.4f64, 3.0, 50.0, 1e6] {
+        let (a, b) = super::cycle::osc_zoh(omega, zeta, dt);
+        for v in a.iter().chain(b.iter()) {
+            assert!(v.is_finite(), "zeta {zeta}: non-finite coefficient {v}");
+        }
+        let (mut d, mut v) = (1.0f64, 0.0f64);
+        let mut prev = d;
+        for _ in 0..4000 {
+            let (dn, vn) = (a[0] * d + a[1] * v, a[2] * d + a[3] * v);
+            d = dn;
+            v = vn;
+            assert!(d >= -1e-12, "zeta {zeta}: deflection crossed zero: {d}");
+            assert!(
+                d <= prev + 1e-12,
+                "zeta {zeta}: deflection grew: {d} > {prev}"
+            );
+            prev = d;
+        }
+    }
+}
+
+#[test]
+fn pin_residual_demod_is_unbiased_by_zeta() {
+    // Regression for the bench cliff (0.03 um at zeta=0.9 vs 5.57 um at
+    // zeta=1.1): the demod used to reference the predictor's ring frequency
+    // omega_d = omega*sqrt(1-zeta^2), which at zeta=0.9 sits 56% below the
+    // mode - the beat against an on-mode ring averaged to zero and sweeps
+    // read "silence". The demodulator must read an omega_b ring at full
+    // magnitude regardless of the predictor's damping.
+    let toml = PIN_IDENTITY.replace("pin_zeta = [0.1, 0.0]", "pin_zeta = [0.9, 0.0]");
+    let mut ctx = pin_ctx("pin-residual-zeta-bias", &toml);
+    let dt = CYCLE_NS as f64 * 1e-9;
+    let omega = 1.0 / (1.0e-5f64).sqrt();
+    let amp = 0.05f64;
+    const CYCLES: usize = 12_000; // 3 s at 250 us
+    let acc = [0.0f32; NUM_SLAVES];
+    let mut last = 0.0f32;
+    for n in 0..CYCLES {
+        let t = n as f64 * dt;
+        let ferr0 = (amp * libm::cos(omega * t + 0.3)) as f32;
+        ctx.pin.step(&acc, &[ferr0, 0.0], true);
+        let (re, im) = ctx.pin.residual_for_slot(0);
+        last = re.hypot(im);
+    }
+    assert!(
+        last > 0.5 * amp as f32,
+        "high-zeta demod must read the on-mode ring, not average it away: \
+         {last} vs ring amplitude {amp}"
+    );
+}
+
+/// τ_pin is m_L·d̈, so a constant commanded accel must leave the pin
+/// contributing exactly nothing: the belt settles to a static deflection
+/// d = -a/ω² with ḋ = 0 and d̈ = 0, and the rotor already carries that load
+/// through the plain torque feedforward. This has to hold at every phase
+/// lead — advancing the state without the forcing that acts over the lead
+/// window leaks a torque proportional to accel (≈14% of m_L·a at 130 Hz
+/// and 600 µs), worst exactly where the machine accelerates hardest.
+#[test]
+fn pin_torque_vanishes_at_constant_accel_for_every_lead() {
+    use crate::dynamics::DynamicsModel;
+    const A_CMD: f32 = 20_000.0; // mm/s², a hard print acceleration
+    const PIN_MASS: f32 = 0.02;
+    for &f_b in &[100.0f64, 130.0, 160.0] {
+        let compliance = 1.0 / (2.0 * std::f64::consts::PI * f_b).powi(2);
+        for &lead_us in &[0.0f64, 300.0, 600.0, 1200.0] {
+            let model = DynamicsModel::from_parts(
+                1,
+                1,
+                &[1.0],
+                &[0.04],
+                &[0.0],
+                &[0.0],
+                &[compliance as f32],
+                &[PIN_MASS],
+                &[0.02],
+                lead_us,
+                &[],
+            )
+            .unwrap();
+            let mut pin = super::cycle::PinState::build(&model, CYCLE_NS as i64);
+            // Long enough for the ζ=0.02 transient to die: τ ≈ 1/(ζω) is
+            // ~80 ms at 100 Hz, so 4 s is many time constants.
+            for _ in 0..4000 {
+                pin.step(&[A_CMD], &[0.0], true);
+            }
+            let settled = pin.slot_torque_at(0);
+            // Scale against the torque the pin would inject if it wrongly
+            // treated the whole load as unsupported.
+            let leak = settled.abs() / (PIN_MASS * A_CMD);
+            assert!(
+                leak < 1e-3,
+                "f_b={f_b} Hz lead={lead_us} µs: pin leaks {leak:.4} of m_L·a \
+                 at cruise (τ={settled})"
+            );
+        }
     }
 }
