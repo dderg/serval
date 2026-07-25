@@ -3,7 +3,7 @@ use crate::path::CurvatureProfile;
 use crate::segment::FollowerDemand;
 
 use super::emit::{SeamSide, blend_followers};
-use super::move_ops::line_of;
+use super::move_ops::{is_travel, line_of};
 use super::{CornerFitConfig, FitError, causal, kernels, overlap, ramps_admitted, span_tolerance};
 
 /// A sealed arc run's reconstruction: the arc, its easing clothoids into the
@@ -37,7 +37,18 @@ impl RunFit {
         if !tol.is_finite() {
             return Ok(None);
         }
-        let Some(mut recon) = kernels::reconstruct(facets, tol)? else {
+        let travel_len = |m: &Move| {
+            is_travel(m)
+                .then(|| line_of(m).map(|l| l.s_len()))
+                .flatten()
+        };
+        let Some(mut recon) = kernels::reconstruct(
+            facets,
+            tol,
+            head.and_then(travel_len),
+            tail.and_then(travel_len),
+        )?
+        else {
             return Ok(None);
         };
         if !construct_admitted(&recon, facets, corner.ramp_accel_budget_mm_s2) {

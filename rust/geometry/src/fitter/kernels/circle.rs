@@ -144,7 +144,7 @@ fn anchored_radial_dev_within(lines: &[&Line], fit: &CircleFit, tol: f64) -> boo
     let last = lines[lines.len() - 1];
     let p1 = last.point_at(last.s_len());
     let Some((origin, rho)) =
-        center_through_endpoints(lines[0].start, p1, fit.radius, fit.origin, plane_normal)
+        center_through_endpoints(lines[0].start, p1, fit.origin, plane_normal)
     else {
         return false;
     };
@@ -239,34 +239,42 @@ pub(super) struct CircleFit {
     pub residual: f64,
 }
 
-/// The circle of (at least) the given radius through both endpoints whose
-/// center is nearest the least-squares fit. The radius grows to the half-chord
-/// when the fit's radius falls short of reaching both endpoints — the caller's
-/// deviation check still gates the enlarged circle against the tolerance.
-pub(super) fn center_through_endpoints(
+/// The circle through both endpoints whose center is nearest the
+/// least-squares fit: the LS center projected onto the endpoints'
+/// perpendicular bisector (within the facet plane), with the radius
+/// recomputed from the anchored center. Intersecting a fixed-radius circle
+/// pair instead would amplify LS radius noise by `r/half` — divergent when
+/// the run spans close to a half turn and the bisector offset vanishes.
+pub(in crate::fitter) fn center_through_endpoints(
     p0: [f64; 3],
     p1: [f64; 3],
-    radius: f64,
     ls_origin: [f64; 3],
     plane_normal: [f64; 3],
 ) -> Option<([f64; 3], f64)> {
     let chord = sub(p1, p0);
-    let c = norm(chord);
-    if c < BUDGET_EPS_MM {
+    if norm(chord) < BUDGET_EPS_MM {
         return None;
     }
-    let radius = radius.max(0.5 * c);
     let mid = scale(add(p0, p1), 0.5);
-    let half = (radius * radius - 0.25 * c * c).max(0.0).sqrt();
     let perp = normalize(cross(plane_normal, chord));
-    let a = madd(mid, half, perp);
-    let b = madd(mid, -half, perp);
-    let center = if norm(sub(a, ls_origin)) <= norm(sub(b, ls_origin)) {
-        a
-    } else {
-        b
-    };
+    let center = madd(mid, dot(sub(ls_origin, mid), perp), perp);
+    let radius = 0.5 * (norm(sub(center, p0)) + norm(sub(center, p1)));
     Some((center, radius))
+}
+
+/// The circle of the least-squares radius anchored to pass exactly through
+/// one boundary vertex: the center slides radially from the vertex toward
+/// the LS center, moving by only the vertex's own radial error.
+pub(super) fn center_through_vertex(
+    p: [f64; 3],
+    ls_origin: [f64; 3],
+    radius: f64,
+) -> Option<([f64; 3], f64)> {
+    let toward = sub(ls_origin, p);
+    if norm(toward) < BUDGET_EPS_MM {
+        return None;
+    }
+    Some((madd(p, radius, normalize(toward)), radius))
 }
 
 pub(super) fn max_radial_dev(lines: &[&Line], origin: [f64; 3], radius: f64) -> f64 {
