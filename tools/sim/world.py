@@ -27,6 +27,7 @@ VTIME_SHM_SIZE = 256
 VTIME_STRUCT_FMT = "<QIIII"
 
 READY_POLL_S = 0.05
+CLOCK_SYNC_BOOT_TIMEOUT = 120.0
 
 _vtime_shm_counter = itertools.count()
 
@@ -278,6 +279,7 @@ class SimWorld:
         if not self._wait_ready(ready_timeout):
             tail = self.klippy_log_text()[-3000:]
             raise SimError(f"klippy failed to become ready:\n{tail}")
+        self._wait_clock_sync(CLOCK_SYNC_BOOT_TIMEOUT)
 
     def _ensure_shims_built(self) -> tuple:
         shim_dir = self.repo_root / "tools" / "sim" / "preload"
@@ -485,6 +487,37 @@ class SimWorld:
                 return False
             time.sleep(READY_POLL_S)
         return False
+
+    def _wait_clock_sync(self, timeout: float) -> None:
+        try:
+            resp = _api_request(
+                self.api_socket, "objects/list", {}, timeout=5.0
+            )
+        except OSError as err:
+            raise SimError(f"objects/list failed after ready: {err}") from err
+        pending = [
+            name
+            for name in resp.get("result", {}).get("objects", [])
+            if name == "mcu" or name.startswith("mcu ")
+        ]
+        deadline = time.monotonic() + timeout
+        while pending:
+            status = self.status({name: None for name in pending})
+            pending = [
+                name
+                for name in pending
+                if not status.get(name, {}).get("clock_sync_converged")
+            ]
+            if not pending:
+                return
+            if self.klippy_proc.poll() is not None:
+                raise SimError("klippy exited while waiting for clock sync")
+            if time.monotonic() > deadline:
+                raise SimError(
+                    f"MCU clock sync did not converge within {timeout:.0f}s"
+                    f" after ready (mcu: {', '.join(pending)})"
+                )
+            time.sleep(READY_POLL_S)
 
     # ------------------------------------------------------------ drive
 
