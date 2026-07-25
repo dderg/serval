@@ -103,6 +103,13 @@ A collection of Kalico-specific system options
 #   Tolerance (in mm) for distance moved in the second homing. Ensures the
 #   second homing distance closely matches the `min_home_dist` when using
 #   sensorless homing. The default is 0.5mm.
+#clock_sync_stable_ppm: 5.0
+#   Frequency stability threshold (in ppm of the MCU clock) for declaring
+#   host/MCU clock synchronization converged. The first motion after boot
+#   waits until the clock regression frequency moves less than this
+#   between consecutive samples for 3 samples in a row. Raise only on
+#   hosts whose timing jitter exceeds real crystal drift (e.g.
+#   virtualized/simulated MCUs). The default is 5.0.
 #temp_ignore_limits: False
 #   When set to true, this parameter ignores the min_value and max_value
 #   limits for temperature sensors. It prevents shutdowns due to

@@ -8,9 +8,9 @@ use host_rt::mcu_call::McuCall;
 use host_rt::mcu_serial_conn::McuSerialConn;
 use mcu_protocol::codec::{Cursor, Decode, Encode};
 use mcu_protocol::messages::{
-    ClaimHandshakeReply, MessageKind, PushPieces, PushPiecesResponse, RestoreDriveLimits,
-    RestoreDriveLimitsResponse, ResumeStreamResponse, SetDriveLimits, SetDriveLimitsResponse,
-    SetTorque, SetTorqueResponse, StopResponse,
+    ClaimHandshakeReply, DriveLimitEntry, MessageKind, PushPieces, PushPiecesResponse,
+    RestoreDriveLimits, RestoreDriveLimitsResponse, ResumeStreamResponse, SetDriveLimits,
+    SetDriveLimitsResponse, SetTorque, SetTorqueResponse, StopResponse,
 };
 use runtime::piece_ring::PieceEntry;
 
@@ -330,9 +330,11 @@ fn stop_while_parked_succeeds_and_keeps_session() {
 
 fn set_drive_limits(conn: &McuSerialConn, counts: u32, tenth_pct: u16) -> i32 {
     let body = SetDriveLimits {
-        slot: 0,
-        following_error_counts: counts,
-        max_torque_tenth_pct: tenth_pct,
+        drives: vec![DriveLimitEntry {
+            slot: 0,
+            following_error_counts: counts,
+            max_torque_tenth_pct: tenth_pct,
+        }],
     }
     .encoded_to_vec();
     let (kind, resp) = conn
@@ -348,7 +350,7 @@ fn restore_drive_limits(conn: &McuSerialConn) -> i32 {
     let (kind, resp) = conn
         .mcu_call(
             MessageKind::RestoreDriveLimits,
-            RestoreDriveLimits { slot: 0 }.encoded_to_vec(),
+            RestoreDriveLimits { slot_mask: 1 }.encoded_to_vec(),
             Duration::from_secs(5),
         )
         .expect("RestoreDriveLimits call must succeed");

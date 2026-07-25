@@ -317,19 +317,20 @@ fn main() {
                     correlation_id,
                     msg,
                 } => {
-                    stored_limits = Some((msg.following_error_counts, msg.max_torque_tenth_pct));
-                    eprintln!(
-                        "ec-rt-stub: SetDriveLimits ferr={} tq={}",
-                        msg.following_error_counts, msg.max_torque_tenth_pct
-                    );
+                    stored_limits = msg
+                        .drives
+                        .last()
+                        .map(|d| (d.following_error_counts, d.max_torque_tenth_pct));
+                    eprintln!("ec-rt-stub: SetDriveLimits drives={:?}", msg.drives);
                     server.respond(&set_drive_limits_response_frame(correlation_id, 0));
                 }
                 Command::RestoreDriveLimits {
                     correlation_id,
-                    slot,
+                    slot_mask,
                 } => {
                     eprintln!(
-                        "ec-rt-stub: RestoreDriveLimits slot={slot} stored={stored_limits:?}"
+                        "ec-rt-stub: RestoreDriveLimits slot_mask={slot_mask:#x} \
+                         stored={stored_limits:?}"
                     );
                     server.respond(&restore_drive_limits_response_frame(correlation_id, 0));
                 }

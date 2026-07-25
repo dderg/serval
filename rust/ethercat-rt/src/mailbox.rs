@@ -34,6 +34,13 @@ pub enum WorkerScheduling {
     Normal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LimitEntry {
+    pub slot: u8,
+    pub ferr_counts: u32,
+    pub torque_tenth_pct: u16,
+}
+
 pub enum MailboxRequest {
     SdoRead {
         correlation_id: u32,
@@ -45,9 +52,7 @@ pub enum MailboxRequest {
     },
     WriteLimits {
         correlation_id: u32,
-        slot: u8,
-        ferr_counts: u32,
-        torque_tenth_pct: u16,
+        entries: Vec<LimitEntry>,
         restore: bool,
     },
 }
@@ -66,8 +71,7 @@ pub enum MailboxReply {
     WriteLimits {
         correlation_id: u32,
         rc: i32,
-        ferr_counts: u32,
-        torque_tenth_pct: u16,
+        entries: Vec<LimitEntry>,
         restore: bool,
     },
 }
@@ -115,17 +119,23 @@ impl MailboxWorker {
                         },
                         MailboxRequest::WriteLimits {
                             correlation_id,
-                            slot,
-                            ferr_counts,
-                            torque_tenth_pct,
+                            entries,
                             restore,
-                        } => MailboxReply::WriteLimits {
-                            correlation_id,
-                            rc: write_limits(slot, ferr_counts, torque_tenth_pct),
-                            ferr_counts,
-                            torque_tenth_pct,
-                            restore,
-                        },
+                        } => {
+                            let mut rc = 0;
+                            for e in &entries {
+                                rc = write_limits(e.slot, e.ferr_counts, e.torque_tenth_pct);
+                                if rc != 0 {
+                                    break;
+                                }
+                            }
+                            MailboxReply::WriteLimits {
+                                correlation_id,
+                                rc,
+                                entries,
+                                restore,
+                            }
+                        }
                     };
                     if rep_tx.send(reply).is_err() {
                         return;

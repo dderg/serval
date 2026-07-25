@@ -644,20 +644,44 @@ fn stop_kinds_have_stable_tags() {
 #[test]
 fn set_drive_limits_round_trips() {
     let msg = SetDriveLimits {
-        slot: 2,
-        following_error_counts: 8192,
-        max_torque_tenth_pct: 500,
+        drives: vec![
+            DriveLimitEntry {
+                slot: 2,
+                following_error_counts: 8192,
+                max_torque_tenth_pct: 500,
+            },
+            DriveLimitEntry {
+                slot: 3,
+                following_error_counts: 4096,
+                max_torque_tenth_pct: 300,
+            },
+        ],
     };
     let bytes = msg.encoded_to_vec();
+    assert_eq!(bytes.len(), 1 + 2 * 7);
     let decoded = SetDriveLimits::decode(&bytes).unwrap();
     assert_eq!(decoded, msg);
 }
 
 #[test]
-fn restore_drive_limits_round_trips_with_slot() {
-    let msg = RestoreDriveLimits { slot: 2 };
+fn set_drive_limits_rejects_truncated_entries() {
+    let msg = SetDriveLimits {
+        drives: vec![DriveLimitEntry {
+            slot: 0,
+            following_error_counts: 1,
+            max_torque_tenth_pct: 2,
+        }],
+    };
+    let mut bytes = msg.encoded_to_vec();
+    bytes.truncate(bytes.len() - 1);
+    assert!(SetDriveLimits::decode(&bytes).is_err());
+}
+
+#[test]
+fn restore_drive_limits_round_trips_with_slot_mask() {
+    let msg = RestoreDriveLimits { slot_mask: 0b1010 };
     let bytes = msg.encoded_to_vec();
-    assert_eq!(bytes.len(), 1);
+    assert_eq!(bytes.len(), 4);
     assert_eq!(RestoreDriveLimits::decode(&bytes).unwrap(), msg);
 }
 

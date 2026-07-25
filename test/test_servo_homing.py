@@ -245,47 +245,47 @@ def test_session_drive_limits_convert_units():
 
 def test_homing_limits_guard_sets_and_restores():
     engine = FakeEngine()
-    with homing_mod._servo_drive_limits(engine, 7, 0, (8192, 500)):
-        assert engine.calls == [("set_drive_limits", 7, 0, 8192, 500)]
+    with homing_mod._servo_drive_limits(engine, 7, [(0, 8192, 500)]):
+        assert engine.calls == [("set_drive_limits", 7, [(0, 8192, 500)])]
     assert engine.calls == [
-        ("set_drive_limits", 7, 0, 8192, 500),
-        ("restore_drive_limits", 7, 0),
+        ("set_drive_limits", 7, [(0, 8192, 500)]),
+        ("restore_drive_limits", 7, [0]),
     ]
 
 
 def test_homing_limits_guard_restores_on_error():
     engine = FakeEngine()
     try:
-        with homing_mod._servo_drive_limits(engine, 7, 0, (8192, 500)):
+        with homing_mod._servo_drive_limits(engine, 7, [(0, 8192, 500)]):
             raise RuntimeError("trip move failed")
     except RuntimeError:
         pass
-    assert engine.calls[-1] == ("restore_drive_limits", 7, 0)
+    assert engine.calls[-1] == ("restore_drive_limits", 7, [0])
 
 
 def test_homing_limits_guard_noop_without_limits():
     engine = FakeEngine()
-    with homing_mod._servo_drive_limits(engine, None, 0, None):
+    with homing_mod._servo_drive_limits(engine, None, []):
         pass
     assert engine.calls == []
 
 
 class FailingRestoreEngine(FakeEngine):
-    def restore_drive_limits(self, handle, slot):
+    def restore_drive_limits(self, handle, slots):
         raise OSError("endpoint gone")
 
 
 def test_homing_limits_guard_restore_failure_raises_on_success_path():
     engine = FailingRestoreEngine()
     with pytest.raises(OSError, match="endpoint gone"):
-        with homing_mod._servo_drive_limits(engine, 7, 0, (8192, 500)):
+        with homing_mod._servo_drive_limits(engine, 7, [(0, 8192, 500)]):
             pass
 
 
 def test_homing_limits_guard_restore_failure_does_not_mask_body_error():
     engine = FailingRestoreEngine()
     with pytest.raises(RuntimeError, match="trip move failed"):
-        with homing_mod._servo_drive_limits(engine, 7, 0, (8192, 500)):
+        with homing_mod._servo_drive_limits(engine, 7, [(0, 8192, 500)]):
             raise RuntimeError("trip move failed")
 
 
@@ -344,11 +344,11 @@ class FakeServoEngine:
         self.calls = []
         self._fault = fault
 
-    def set_drive_limits(self, handle, slot, counts, tenth_pct):
-        self.calls.append(("set", handle, slot, counts, tenth_pct))
+    def set_drive_limits(self, handle, drives):
+        self.calls.append(("set", handle, tuple(drives)))
 
-    def restore_drive_limits(self, handle, slot):
-        self.calls.append(("restore", handle, slot))
+    def restore_drive_limits(self, handle, slots):
+        self.calls.append(("restore", handle, tuple(slots)))
 
     def finalize_homed_axis(self, handle, axis, pos_mm):
         self.calls.append(("finalize", handle, axis, pos_mm))
@@ -586,10 +586,8 @@ def test_guarded_trip_applies_limits_to_every_servo_rail():
         lambda: (1.0, 2.0),
     )
     assert engine.calls == [
-        ("set", 7, 0, 8192, 500),
-        ("set", 7, 1, 4096, 300),
-        ("restore", 7, 1),
-        ("restore", 7, 0),
+        ("set", 7, ((0, 8192, 500), (1, 4096, 300))),
+        ("restore", 7, (0, 1)),
         ("take_fault", 7),
     ]
 
@@ -610,10 +608,8 @@ def test_guarded_trip_failure_disables_every_servo_rail():
         )
     assert se.calls == [("servo_x", False), ("servo_y", False)]
     assert engine.calls == [
-        ("set", 7, 0, 8192, 500),
-        ("set", 7, 1, 4096, 300),
-        ("restore", 7, 1),
-        ("restore", 7, 0),
+        ("set", 7, ((0, 8192, 500), (1, 4096, 300))),
+        ("restore", 7, (0, 1)),
     ]
 
 

@@ -7,7 +7,7 @@ use crate::capture::{
 use crate::clock::monotonic_ns;
 use crate::curves::AXIS_RING_CAPACITY;
 use crate::dynamics::{DynamicsModel, ERR_DYNAMICS_BAD_DIM, ERR_DYNAMICS_REJECTED};
-use crate::mailbox::{MailboxReply, MailboxRequest};
+use crate::mailbox::{LimitEntry, MailboxReply, MailboxRequest};
 use crate::push_plan::plan_bundle;
 use crate::sensorless::{ERR_ARM_SENSORLESS_AMBIGUOUS_PAIR, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
 use crate::strain_comp::ERR_COMP_BAD_LANE;
@@ -164,9 +164,9 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             }
             Command::RestoreDriveLimits {
                 correlation_id,
-                slot,
+                slot_mask,
             } => {
-                handle_restore_drive_limits(ctx, correlation_id, slot);
+                handle_restore_drive_limits(ctx, correlation_id, slot_mask);
             }
             Command::SeedServoHome {
                 correlation_id,
@@ -380,19 +380,25 @@ fn handle_start_capture(ctx: &mut EndpointCtx, correlation_id: u32, msg: StartCa
 
 fn handle_set_drive_limits(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDriveLimits) {
     let num_slaves = ctx.num_slaves;
-    if msg.slot as usize >= num_slaves {
+    if msg.drives.is_empty() || msg.drives.iter().any(|d| d.slot as usize >= num_slaves) {
         crate::rt_eprintln!(
-            "ec-rt: SetDriveLimits for slot {} but only {num_slaves} slave(s)",
-            msg.slot
+            "ec-rt: SetDriveLimits for slots {:?} but only {num_slaves} slave(s)",
+            msg.drives.iter().map(|d| d.slot).collect::<Vec<_>>()
         );
         ctx.server
             .respond(&set_drive_limits_response_frame(correlation_id, -309));
     } else {
         ctx.mailbox.submit(MailboxRequest::WriteLimits {
             correlation_id,
-            slot: msg.slot,
-            ferr_counts: msg.following_error_counts,
-            torque_tenth_pct: msg.max_torque_tenth_pct,
+            entries: msg
+                .drives
+                .iter()
+                .map(|d| LimitEntry {
+                    slot: d.slot,
+                    ferr_counts: d.following_error_counts,
+                    torque_tenth_pct: d.max_torque_tenth_pct,
+                })
+                .collect(),
             restore: false,
         });
     }
@@ -426,26 +432,32 @@ pub(super) fn handle_set_ff_lead(ctx: &mut EndpointCtx, correlation_id: u32, msg
         .respond(&set_ff_lead_response_frame(correlation_id, 0));
 }
 
-fn handle_restore_drive_limits(ctx: &mut EndpointCtx, correlation_id: u32, slot: u8) {
-    match ctx.run_limits.get(slot as usize) {
-        Some(&(ferr_counts, torque_tenth_pct)) => {
-            ctx.mailbox.submit(MailboxRequest::WriteLimits {
-                correlation_id,
-                slot,
-                ferr_counts,
-                torque_tenth_pct,
-                restore: true,
-            });
-        }
-        None => {
-            crate::rt_eprintln!(
-                "ec-rt: RestoreDriveLimits for slot {slot} but only {} slave(s)",
-                ctx.run_limits.len()
-            );
-            ctx.server
-                .respond(&restore_drive_limits_response_frame(correlation_id, -309));
-        }
+fn handle_restore_drive_limits(ctx: &mut EndpointCtx, correlation_id: u32, slot_mask: u32) {
+    let num_slaves = ctx.run_limits.len();
+    if slot_mask == 0 || slot_mask >> num_slaves != 0 {
+        crate::rt_eprintln!(
+            "ec-rt: RestoreDriveLimits slot_mask={slot_mask:#x} but only {num_slaves} slave(s)"
+        );
+        ctx.server
+            .respond(&restore_drive_limits_response_frame(correlation_id, -309));
+        return;
     }
+    let entries = ctx
+        .run_limits
+        .iter()
+        .enumerate()
+        .filter(|(slot, _)| slot_mask & (1 << slot) != 0)
+        .map(|(slot, &(ferr_counts, torque_tenth_pct))| LimitEntry {
+            slot: slot as u8,
+            ferr_counts,
+            torque_tenth_pct,
+        })
+        .collect();
+    ctx.mailbox.submit(MailboxRequest::WriteLimits {
+        correlation_id,
+        entries,
+        restore: true,
+    });
 }
 
 const ERR_SEED_HOME_STREAMING: i32 = -826;
@@ -1012,8 +1024,7 @@ pub(super) fn drain_mailbox_replies(ctx: &mut EndpointCtx) {
             MailboxReply::WriteLimits {
                 correlation_id,
                 rc,
-                ferr_counts,
-                torque_tenth_pct,
+                entries,
                 restore,
             } => {
                 let what = if restore {
@@ -1022,14 +1033,9 @@ pub(super) fn drain_mailbox_replies(ctx: &mut EndpointCtx) {
                     "SetDriveLimits"
                 };
                 if rc != 0 {
-                    crate::rt_eprintln!(
-                        "ec-rt: {what} SDO write failed rc={rc} \
-                             ferr={ferr_counts} tq={torque_tenth_pct}"
-                    );
+                    crate::rt_eprintln!("ec-rt: {what} SDO write failed rc={rc} {entries:?}");
                 } else {
-                    crate::rt_eprintln!(
-                        "ec-rt: {what} applied ferr={ferr_counts} tq={torque_tenth_pct}"
-                    );
+                    crate::rt_eprintln!("ec-rt: {what} applied {entries:?}");
                 }
                 let frame = if restore {
                     restore_drive_limits_response_frame(correlation_id, rc)

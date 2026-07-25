@@ -1,8 +1,19 @@
 import types
 
+import pytest
+
 import klippy.clocksync as clocksync
 
 MCU_FREQ = 400e6
+
+
+@pytest.fixture(autouse=True)
+def _danger_options(monkeypatch):
+    monkeypatch.setattr(
+        clocksync,
+        "get_danger_options",
+        lambda: types.SimpleNamespace(clock_sync_stable_ppm=5.0),
+    )
 
 
 class _FakeReactor:

@@ -11,9 +11,10 @@
 
 use mcu_protocol::Encode;
 use mcu_protocol::messages::{
-    AxisDiag, AxisPieces, CaptureDrive, ClaimHandshakeReply, ConfigureAxes, DynamicsPair, McuLog,
-    MotorSample, MotorStateResponse, PushPieces, PushPiecesResponse, SdoReadResponse, SdoWrite,
-    SetDynamicsModel, SetStrainComp, SlaveState, SlaveStatus, StartCapture, StatusHeartbeat,
+    AxisDiag, AxisPieces, CaptureDrive, ClaimHandshakeReply, ConfigureAxes, DriveLimitEntry,
+    DynamicsPair, McuLog, MotorSample, MotorStateResponse, PushPieces, PushPiecesResponse,
+    SdoReadResponse, SdoWrite, SetDriveLimits, SetDynamicsModel, SetStrainComp, SlaveState,
+    SlaveStatus, StartCapture, StatusHeartbeat,
 };
 
 include!("../schema_def.rs");
@@ -383,6 +384,25 @@ fn motor_state_response_matches_schema_layout() {
         ],
     };
     reference_decode("MotorStateResponse", &msg.encoded_to_vec()).unwrap();
+}
+
+#[test]
+fn set_drive_limits_matches_schema_layout() {
+    let msg = SetDriveLimits {
+        drives: vec![
+            DriveLimitEntry {
+                slot: 0,
+                following_error_counts: 8192,
+                max_torque_tenth_pct: 500,
+            },
+            DriveLimitEntry {
+                slot: 1,
+                following_error_counts: 4096,
+                max_torque_tenth_pct: 300,
+            },
+        ],
+    };
+    reference_decode("SetDriveLimits", &msg.encoded_to_vec()).unwrap();
 }
 
 #[test]

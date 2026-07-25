@@ -130,39 +130,43 @@ impl PyMotionEngine {
     fn set_drive_limits_start(
         &self,
         mcu_handle: u32,
-        slot: u8,
-        following_error_counts: u32,
-        max_torque_tenth_pct: u16,
+        drives: Vec<(u8, u32, u16)>,
     ) -> PyResult<u64> {
         let conn = self.ethercat_conn(mcu_handle, "set_drive_limits")?;
         tracing::info!(
             subsystem = "engine",
             event = "servo_drive_limits",
             mcu_handle,
-            following_error_counts,
-            max_torque_tenth_pct,
+            drives = format!("{drives:?}").as_str(),
             "servo drive limits set"
         );
+        let entries: Vec<mcu_protocol::messages::DriveLimitEntry> = drives
+            .into_iter()
+            .map(|(slot, following_error_counts, max_torque_tenth_pct)| {
+                mcu_protocol::messages::DriveLimitEntry {
+                    slot,
+                    following_error_counts,
+                    max_torque_tenth_pct,
+                }
+            })
+            .collect();
         Ok(self.endpoint_calls.start("set_drive_limits", move || {
-            let result = crate::servo_torque::send_drive_limits(
-                &conn,
-                slot,
-                following_error_counts,
-                max_torque_tenth_pct,
-            )?;
+            let result = crate::servo_torque::send_drive_limits(&conn, entries)?;
             require_endpoint_ok(result, "set_drive_limits: SDO write failed")
         }))
     }
-    fn restore_drive_limits_start(&self, mcu_handle: u32, slot: u8) -> PyResult<u64> {
+    fn restore_drive_limits_start(&self, mcu_handle: u32, slots: Vec<u8>) -> PyResult<u64> {
         let conn = self.ethercat_conn(mcu_handle, "restore_drive_limits")?;
         tracing::info!(
             subsystem = "engine",
             event = "servo_drive_limits",
             mcu_handle,
+            slots = format!("{slots:?}").as_str(),
             "servo drive limits restored"
         );
+        let slot_mask = slots.iter().fold(0u32, |m, &s| m | (1 << s));
         Ok(self.endpoint_calls.start("restore_drive_limits", move || {
-            let result = crate::servo_torque::send_restore_drive_limits(&conn, slot)?;
+            let result = crate::servo_torque::send_restore_drive_limits(&conn, slot_mask)?;
             require_endpoint_ok(result, "restore_drive_limits: SDO write failed")
         }))
     }
