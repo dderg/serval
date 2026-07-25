@@ -43,6 +43,7 @@ pub fn default_stream_config() -> StreamConfig {
 
 fn harness_mcu_configs() -> Vec<McuAxisConfig> {
     vec![McuAxisConfig {
+        ethercat: false,
         mcu_id: HARNESS_MCU_ID,
         axes: vec![0, 1, 2],
         kinematics: 1,

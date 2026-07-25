@@ -4,6 +4,7 @@ use crate::mcu_config::{AXIS_X, AXIS_Y, AXIS_Z, McuAxisConfig, McuCaps};
 fn configs() -> Vec<McuAxisConfig> {
     vec![
         McuAxisConfig {
+            ethercat: false,
             max_motor_velocity: Vec::new(),
             mcu_id: 1,
             axes: vec![AXIS_X, AXIS_Y],
@@ -13,6 +14,7 @@ fn configs() -> Vec<McuAxisConfig> {
             },
         },
         McuAxisConfig {
+            ethercat: false,
             max_motor_velocity: Vec::new(),
             mcu_id: 2,
             axes: vec![AXIS_Z],
@@ -61,6 +63,7 @@ fn axis_not_on_mcu_errors() {
 #[test]
 fn ring_depth_over_u16_is_hard_error_not_clamp() {
     let configs = vec![McuAxisConfig {
+        ethercat: false,
         max_motor_velocity: Vec::new(),
         mcu_id: 0,
         axes: vec![AXIS_X],
