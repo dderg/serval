@@ -505,6 +505,7 @@ mod corexy_reconstruction_tests {
                 total_piece_memory: 4096,
             },
             max_motor_velocity: Vec::new(),
+            ethercat: false,
         }
     }
 
@@ -517,6 +518,7 @@ mod corexy_reconstruction_tests {
                 total_piece_memory: 4096,
             },
             max_motor_velocity: Vec::new(),
+            ethercat: false,
         }
     }
 

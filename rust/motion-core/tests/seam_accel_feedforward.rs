@@ -24,6 +24,7 @@ fn corpus_pieces_per_axis() -> BTreeMap<u8, Vec<(PieceEntry, usize)>> {
     assert!(!segs.is_empty(), "corpus produced no shaped segments");
 
     let mcu_configs = vec![McuAxisConfig {
+        ethercat: false,
         mcu_id: 0,
         axes: vec![0, 1, 2],
         kinematics: 1,

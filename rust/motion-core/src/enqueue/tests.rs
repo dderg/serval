@@ -51,6 +51,7 @@ fn seg_x_move() -> ShapedSegment {
 #[test]
 fn cartesian_x_axis_yields_pieces_with_projected_start_time() {
     let cfg = vec![McuAxisConfig {
+        ethercat: false,
         mcu_id: 7,
         axes: vec![AXIS_X, AXIS_Y, 2],
         kinematics: 1,
@@ -98,9 +99,98 @@ fn cartesian_x_axis_yields_pieces_with_projected_start_time() {
     );
 }
 
+fn ec_cfg() -> Vec<McuAxisConfig> {
+    vec![McuAxisConfig {
+        ethercat: true,
+        mcu_id: 9,
+        axes: vec![AXIS_X, AXIS_Y],
+        kinematics: 1,
+        caps: McuCaps {
+            total_piece_memory: 62 * 1024,
+        },
+        max_motor_velocity: vec![f64::INFINITY; 2],
+    }]
+}
+
+fn test_ctx() -> crate::enqueue::EnqueueCtx<impl Fn(u32, f64) -> u64> {
+    crate::enqueue::EnqueueCtx {
+        t0: 100.0,
+        epoch: crate::anchor::StreamEpoch::Reposition,
+        host_now: 0.0,
+        lead_secs: crate::pump::MAX_LEAD_SECS,
+        project: |_mcu, hs| (hs * 1_000.0) as u64,
+        max_piece_secs: None,
+    }
+}
+
+/// An E-only (or otherwise servo-stationary) segment must enqueue nothing
+/// for an ethercat lane: a parked drive receiving hold pieces trips the
+/// torque gate's pieces-while-parked fault, and an enabled drive already
+/// holds that exact target.
+#[test]
+fn ethercat_pure_hold_lane_is_skipped() {
+    let seg = ShapedSegment {
+        axes: vec![
+            constant_axis(25.0, 3, 0.4),
+            constant_axis(-7.5, 3, 0.4),
+            constant_axis(0.0, 3, 0.4),
+        ],
+        followers: vec![],
+        spatial_path: false,
+        t_start: 0.0,
+        t_end: 1.2,
+        motor_mask: 0,
+        source_line: 0,
+    };
+    let msgs = enqueue_segment(&seg, &ec_cfg(), &test_ctx());
+    assert!(
+        msgs.is_empty(),
+        "constant ethercat lanes must enqueue nothing, got {} msgs",
+        msgs.len()
+    );
+}
+
+#[test]
+fn ethercat_moving_lane_still_streams() {
+    let msgs = enqueue_segment(&seg_x_move(), &ec_cfg(), &test_ctx());
+    assert!(
+        msgs.iter().any(|m| m.key == AxisKey { mcu_id: 9, axis: 0 }),
+        "moving X lane must stream to the ethercat slot"
+    );
+    assert!(
+        !msgs.iter().any(|m| m.key == AxisKey { mcu_id: 9, axis: 1 }),
+        "stationary Y lane must be skipped while X moves"
+    );
+}
+
+#[test]
+fn serial_pure_hold_lane_still_streams() {
+    let mut cfg = ec_cfg();
+    cfg[0].ethercat = false;
+    let seg = ShapedSegment {
+        axes: vec![
+            constant_axis(25.0, 3, 0.4),
+            constant_axis(-7.5, 3, 0.4),
+            constant_axis(0.0, 3, 0.4),
+        ],
+        followers: vec![],
+        spatial_path: false,
+        t_start: 0.0,
+        t_end: 1.2,
+        motor_mask: 0,
+        source_line: 0,
+    };
+    let msgs = enqueue_segment(&seg, &cfg, &test_ctx());
+    assert!(
+        msgs.iter().any(|m| m.key == AxisKey { mcu_id: 9, axis: 0 }),
+        "serial stepper lanes keep their hold pieces byte-for-byte"
+    );
+}
+
 #[test]
 fn corexy_x_slot_is_x_plus_y() {
     let cfg = vec![McuAxisConfig {
+        ethercat: false,
         mcu_id: 1,
         axes: vec![AXIS_X, AXIS_Y],
         kinematics: KINEMATICS_COREXY,
@@ -206,6 +296,7 @@ fn short_pieces_pass_through_unsplit() {
 #[test]
 fn flatten_axis_max_piece_secs_splits_long_piece() {
     let cfg = vec![McuAxisConfig {
+        ethercat: false,
         mcu_id: 7,
         axes: vec![AXIS_X],
         kinematics: 1,
@@ -282,6 +373,7 @@ fn flatten_axis_max_piece_secs_splits_long_piece() {
 
 fn axis_cfg_single(axis: usize) -> Vec<McuAxisConfig> {
     vec![McuAxisConfig {
+        ethercat: false,
         mcu_id: 1,
         axes: vec![axis],
         kinematics: 1,
@@ -703,6 +795,7 @@ fn follower_lanes_never_pass_through_the_spatial_matrix() {
 
 fn test_mcu_configs_one_axis(axis: usize) -> Vec<McuAxisConfig> {
     vec![McuAxisConfig {
+        ethercat: false,
         mcu_id: 1,
         axes: vec![axis],
         kinematics: 1,
@@ -910,6 +1003,7 @@ fn overlay_multi_piece_cumulative_positions_produce_individual_spans() {
 #[test]
 fn step_rate_within_ceiling_enqueues() {
     let cfg = vec![McuAxisConfig {
+        ethercat: false,
         mcu_id: 7,
         axes: vec![AXIS_X, AXIS_Y, 2],
         kinematics: 1,
@@ -938,6 +1032,7 @@ fn step_rate_within_ceiling_enqueues() {
 #[should_panic(expected = "step rate exceeds MCU ceiling (-307)")]
 fn step_rate_over_ceiling_fails_loud() {
     let cfg = vec![McuAxisConfig {
+        ethercat: false,
         mcu_id: 7,
         axes: vec![AXIS_X, AXIS_Y, 2],
         kinematics: 1,

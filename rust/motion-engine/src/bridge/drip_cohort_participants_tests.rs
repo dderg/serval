@@ -13,6 +13,7 @@ fn cfg(mcu_id: u32, axes: Vec<usize>) -> McuAxisConfig {
             total_piece_memory: 0,
         },
         kinematics: 1,
+        ethercat: false,
     }
 }
 

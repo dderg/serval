@@ -838,6 +838,7 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
             // wire-piece build panics on any -307-class overspeed track,
             // exactly like the live dispatch stage.
             let cfg = vec![crate::mcu_config::McuAxisConfig {
+                ethercat: false,
                 mcu_id: 0,
                 axes: vec![0, 1, 2],
                 kinematics: crate::mcu_config::KINEMATICS_COREXY,
