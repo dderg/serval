@@ -71,18 +71,23 @@ def parse_log(logname):
     return calibration_data
 
 
-def parse_accel_per_hz(logname):
+def parse_accel_per_hz(logname, chirp_option=None):
     with open(logname) as f:
         for header in f:
             if not header.startswith("#"):
                 break
-        if not header.startswith("freq,psd_x,psd_y,psd_z,psd_xyz,accel_per_hz"):
-            return None  # TODO
-
-    data = np.loadtxt(
-        logname, skiprows=1, comments="#", delimiter=",", max_rows=2
-    )
-    return data[0][5].item()
+        if header.startswith("freq,psd_x,psd_y,psd_z,psd_xyz,accel_per_hz"):
+            data = np.loadtxt(
+                logname, skiprows=1, comments="#", delimiter=",", max_rows=2
+            )
+            return data[0][5].item()
+    config = resolve_chirp_config(logname, chirp_option)
+    if config is None:
+        raise ValueError(
+            "%s carries no accel_per_hz metadata: neither a PSD header nor "
+            "a '# chirp ...' line (use --chirp to supply it)" % (logname,)
+        )
+    return chirp_aph_eff(config)
 
 
 ######################################################################
@@ -499,6 +504,7 @@ def calibrate_shaper(
     datas,
     csv_output,
     *,
+    accel_per_hz,
     shapers,
     damping_ratio,
     scv,
@@ -535,16 +541,52 @@ def calibrate_shaper(
             "No recommended shaper, possibly invalid value for --shapers=%s"
             % (",".join(shapers))
         )
-        return None, None, None
+        return None, None, None, None
     print("Recommended shaper is %s @ %.1f Hz" % (shaper.name, shaper.freq))
+    band = calibration_data.freq_bins <= max_freq
+    mode_fits = fit_mode_inverse_candidates(
+        calibration_data.freq_bins[band],
+        np.sqrt(calibration_data.psd_sum[band]),
+    )
+    report_mode_fits(mode_fits)
     if csv_output is not None:
-        helper.save_calibration_data(csv_output, calibration_data, all_shapers)
-    return shaper.name, all_shapers, calibration_data
+        helper.save_calibration_data(
+            csv_output, calibration_data, all_shapers, accel_per_hz=accel_per_hz
+        )
+    return shaper.name, all_shapers, calibration_data, mode_fits[0]
 
 
 ######################################################################
 # Plot frequency response and suggested input shapers
 ######################################################################
+
+
+def report_mode_fits(mode_fits):
+    for fn, zeta, gain, err in sorted(mode_fits[1:]):
+        print(
+            "  higher mode: frequency_hz=%.1f damping_ratio=%.3f "
+            "(gain %.2f, rel err %.0f%%)" % (fn, zeta, gain, 100.0 * err)
+        )
+    inv_fn, inv_zeta, inv_gain, inv_err = mode_fits[0]
+    print(
+        "mode_inverse: frequency_hz=%.1f damping_ratio=%.3f "
+        "(lowest significant mode; gain %.2f, rel err %.0f%%)"
+        % (inv_fn, inv_zeta, inv_gain, 100.0 * inv_err)
+    )
+    if inv_err > 0.25:
+        print(
+            "  note: the 2nd-order model fits this response poorly; "
+            "mode_inverse parameters are approximate"
+        )
+
+
+def mode_inverse_label(mode_fit):
+    inv_fn, inv_zeta, inv_gain, inv_err = mode_fit
+    return (
+        "mode_inverse: frequency_hz=%.1f damping_ratio=%.3f\n"
+        "(gain %.2f, rel err %.0f%%)"
+        % (inv_fn, inv_zeta, inv_gain, 100.0 * inv_err)
+    )
 
 
 def plot_freq_response(
@@ -555,6 +597,7 @@ def plot_freq_response(
     max_freq,
     accels_per_hz,
     raw_data=None,
+    mode_fit=None,
 ):
     if raw_data is not None:
         fig, (ax, ax_spec) = matplotlib.pyplot.subplots(
@@ -575,6 +618,7 @@ def plot_freq_response(
         max_freq,
         accels_per_hz,
         raw_data,
+        mode_fit,
     )
     fig.tight_layout()
     return fig
@@ -590,6 +634,7 @@ def draw_freq_response(
     max_freq,
     accels_per_hz,
     raw_data,
+    mode_fit=None,
 ):
     all_freqs = calibration_data.freq_bins
     psd = calibration_data.psd_sum[all_freqs <= max_freq]
@@ -650,6 +695,17 @@ def draw_freq_response(
             label="After\nshaper",
             color="cyan",
         )
+    if mode_fit is not None:
+        inv_fn, inv_zeta, inv_gain, _inv_err = mode_fit
+        ax.plot(
+            freqs,
+            second_order_magnitude(freqs, inv_fn, inv_zeta, inv_gain) ** 2,
+            color="black",
+            linestyle="dotted",
+            linewidth=1.0,
+            label="2nd-order\nfit (PSD)",
+        )
+        ax2.plot([], [], " ", label=mode_inverse_label(mode_fit))
     # A hack to add a human-readable shaper recommendation to legend
     ax2.plot(
         [],
@@ -662,7 +718,8 @@ def draw_freq_response(
         [],
         [],
         " ",
-        label="accels_per_hz: %s" % (", ".join(str(e) for e in accels_per_hz)),
+        label="accels_per_hz: %s"
+        % (", ".join("%.1f" % (e,) for e in accels_per_hz)),
     )
 
     ax.legend(loc="upper left", prop=fontP)
@@ -788,13 +845,7 @@ def draw_chirp_frf(
             linewidth=1.0,
             label="2nd-order\nfit",
         )
-        ax2.plot(
-            [],
-            [],
-            " ",
-            label="mode_inverse: frequency_hz=%.1f damping_ratio=%.3f"
-            % (inv_fn, inv_zeta),
-        )
+        ax2.plot([], [], " ", label=mode_inverse_label(mode_fit))
     ax_h.legend(loc="upper left", prop=fontP)
     ax2.legend(loc="upper right", prop=fontP)
 
@@ -985,23 +1036,8 @@ def run_chirp_mode(
     frf_freqs = response.calibration_data.freq_bins
     frf_mag = np.sqrt(response.calibration_data.psd_sum)
     mode_fits = fit_mode_inverse_candidates(frf_freqs, frf_mag)
-    for fn, zeta, gain, err in sorted(mode_fits[1:]):
-        print(
-            "  higher mode: frequency_hz=%.1f damping_ratio=%.3f "
-            "(gain %.2f, rel err %.0f%%)" % (fn, zeta, gain, 100.0 * err)
-        )
+    report_mode_fits(mode_fits)
     mode_fit = mode_fits[0]
-    inv_fn, inv_zeta, inv_gain, inv_err = mode_fit
-    print(
-        "mode_inverse: frequency_hz=%.1f damping_ratio=%.3f "
-        "(lowest significant mode; gain %.2f, rel err %.0f%%)"
-        % (inv_fn, inv_zeta, inv_gain, 100.0 * inv_err)
-    )
-    if inv_err > 0.25:
-        print(
-            "  note: the 2nd-order model fits this response poorly; "
-            "mode_inverse parameters are approximate"
-        )
     if not response.excitation_reached_toolhead():
         print(
             "  note: excitation warning active; mode_inverse parameters "
@@ -1225,7 +1261,7 @@ def main():
 
     # Parse data
     datas = [parse_log(fn) for fn in args]
-    accels_per_hz = [parse_accel_per_hz(fn) for fn in args]
+    accels_per_hz = [parse_accel_per_hz(fn, options.chirp) for fn in args]
 
     try:
         chirp_config = resolve_chirp_config(args[0], options.chirp)
@@ -1257,9 +1293,10 @@ def main():
             return
 
     # Calibrate shaper and generate outputs
-    selected_shaper, shapers, calibration_data = calibrate_shaper(
+    selected_shaper, shapers, calibration_data, mode_fit = calibrate_shaper(
         datas,
         options.csv,
+        accel_per_hz=accels_per_hz[0],
         shapers=shapers,
         damping_ratio=options.damping_ratio,
         scv=options.scv,
@@ -1288,6 +1325,7 @@ def main():
             max_freq,
             accels_per_hz,
             raw_data=raw_data,
+            mode_fit=mode_fit,
         )
 
         # Show graph

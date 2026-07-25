@@ -300,6 +300,12 @@ pub fn estimate_remaining_vibrations(
     psd: &[f64],
 ) -> (f64, Vec<f64>) {
     let vals = estimate_shaper(shaper, damping_ratio, freq_bins);
+    (remaining_vibrations(&vals, psd), vals)
+}
+
+/// The score core shared by shapers and smoothers: how much of the measured
+/// vibration energy survives the response `vals`, above the tolerance floor.
+pub fn remaining_vibrations(vals: &[f64], psd: &[f64]) -> f64 {
     let psd_max = psd.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let vibr_threshold = psd_max / SHAPER_VIBRATION_REDUCTION;
     let mut remaining = 0.0;
@@ -308,7 +314,7 @@ pub fn estimate_remaining_vibrations(
         remaining += (vals[i] * psd[i] - vibr_threshold).max(0.0);
         all += (psd[i] - vibr_threshold).max(0.0);
     }
-    (remaining / all, vals)
+    remaining / all
 }
 
 /// Port of `_get_shaper_smoothing`.
@@ -483,6 +489,252 @@ fn clone_result(r: &FitResult) -> FitResult {
         score: r.score,
         max_accel: r.max_accel,
     }
+}
+
+/// A candidate input-smoother family: fitted against the exact convolution
+/// kernel the runtime executes (`trajectory::build_smooth_*_kernel`), so the
+/// recommended frequency always refers to a kernel the engine can run.
+pub struct SmootherCfg {
+    pub name: &'static str,
+    pub min_freq: f64,
+    pub build: fn(f64) -> nurbs::algebra::PiecewisePolynomialKernel,
+}
+
+pub const INPUT_SMOOTHERS: [SmootherCfg; 2] = [
+    SmootherCfg {
+        name: "smooth_zv",
+        min_freq: 18.0,
+        build: trajectory::build_smooth_zv_kernel,
+    },
+    SmootherCfg {
+        name: "smooth_mzv",
+        min_freq: 20.0,
+        build: trajectory::build_smooth_mzv_kernel,
+    },
+];
+
+pub fn find_smoother_cfg(name: &str) -> Option<&'static SmootherCfg> {
+    INPUT_SMOOTHERS.iter().find(|c| c.name == name)
+}
+
+fn eval_kernel(kernel: &nurbs::algebra::PiecewisePolynomialKernel, t: f64) -> f64 {
+    let (lo, hi) = kernel.support();
+    if t < lo || t > hi {
+        return 0.0;
+    }
+    for p in &kernel.pieces {
+        if t >= p.u_start - 1e-15 && t <= p.u_end + 1e-15 {
+            return p.evaluate(t);
+        }
+    }
+    panic!("kernel pieces do not cover t={t} within support [{lo}, {hi}]");
+}
+
+/// Port of `estimate_smoother_old` from bleeding-edge-v2: residual vibration
+/// magnitude of a damped oscillator under the smoothing kernel, per frequency.
+/// The kernel is unit-norm, so the response at 0 Hz is 1.
+pub fn estimate_smoother(
+    kernel: &nurbs::algebra::PiecewisePolynomialKernel,
+    damping_ratio: f64,
+    freqs: &[f64],
+) -> Vec<f64> {
+    let (lo, hi) = kernel.support();
+    let span = hi - lo;
+    let f_max = freqs.iter().copied().fold(0.0, f64::max);
+    let n_t = (100.0 * (span * f_max).round()).max(1000.0) as usize;
+    let dt = span / n_t as f64;
+    let w: Vec<f64> = (0..=n_t)
+        .map(|i| eval_kernel(kernel, lo + i as f64 * dt))
+        .collect();
+    let sq = (1.0 - damping_ratio * damping_ratio).sqrt();
+    freqs
+        .iter()
+        .map(|&f| {
+            let omega = 2.0 * PI * f;
+            let damping = damping_ratio * omega;
+            let omega_d = omega * sq;
+            let mut vc = 0.0;
+            let mut vs = 0.0;
+            for (i, &wi) in w.iter().enumerate() {
+                let tau = lo + i as f64 * dt - hi;
+                let e = wi * libm::exp(damping * tau);
+                let trapz = if i == 0 || i == n_t { 0.5 } else { 1.0 };
+                vc += trapz * e * libm::cos(omega_d * tau);
+                vs += trapz * e * libm::sin(omega_d * tau);
+            }
+            (vc * vc + vs * vs).sqrt() * dt
+        })
+        .collect()
+}
+
+/// First and second moments of the mirrored kernel `w(-t)`, split at t = 0.
+/// The mirror matches `_get_smoother_smoothing` in bleeding-edge-v2, which
+/// evaluates the polynomial at `-t` (convolution orientation).
+pub struct SmootherMoments {
+    pub m1_pos: f64,
+    pub m1_neg: f64,
+    pub m2_pos: f64,
+    pub m2_neg: f64,
+}
+
+pub fn smoother_moments(kernel: &nurbs::algebra::PiecewisePolynomialKernel) -> SmootherMoments {
+    let (lo, hi) = kernel.support();
+    let mut m = SmootherMoments {
+        m1_pos: 0.0,
+        m1_neg: 0.0,
+        m2_pos: 0.0,
+        m2_neg: 0.0,
+    };
+    let integrate = |a: f64, b: f64, m1: &mut f64, m2: &mut f64| {
+        const N: usize = 4096;
+        let dt = (b - a) / N as f64;
+        for i in 0..=N {
+            let t = a + i as f64 * dt;
+            let w = eval_kernel(kernel, -t);
+            let trapz = if i == 0 || i == N { 0.5 } else { 1.0 };
+            *m1 += trapz * t * w * dt;
+            *m2 += trapz * t * t * w * dt;
+        }
+    };
+    integrate(-hi, 0.0, &mut m.m1_neg, &mut m.m2_neg);
+    integrate(0.0, -lo, &mut m.m1_pos, &mut m.m2_pos);
+    m
+}
+
+/// Port of `_get_smoother_smoothing`: toolhead offset on 90/180 degree turns.
+/// `inv_freq` rescales the unit-frequency moments (`m1 ~ 1/f`, `m2 ~ 1/f^2`).
+pub fn get_smoother_smoothing(
+    moments: &SmootherMoments,
+    inv_freq: f64,
+    accel: f64,
+    scv: f64,
+) -> f64 {
+    let half_accel = accel * 0.5;
+    let inv_f2 = inv_freq * inv_freq;
+    let offset_90_x = scv * moments.m1_pos * inv_freq + half_accel * moments.m2_pos * inv_f2;
+    let offset_90_y = scv * moments.m1_neg * inv_freq - half_accel * moments.m2_neg * inv_f2;
+    let offset_90 = (offset_90_x * offset_90_x + offset_90_y * offset_90_y).sqrt();
+    let offset_180 = half_accel * (moments.m2_pos + moments.m2_neg) * inv_f2;
+    offset_90.max(offset_180.abs())
+}
+
+pub fn find_smoother_max_accel(moments: &SmootherMoments, inv_freq: f64, scv: f64) -> f64 {
+    const TARGET_SMOOTHING: f64 = 0.12;
+    bisect(|test_accel| {
+        get_smoother_smoothing(moments, inv_freq, test_accel, scv) <= TARGET_SMOOTHING
+    })
+}
+
+const SMOOTHER_NORM_FREQ_MAX: f64 = 10.0;
+const SMOOTHER_NORM_FREQ_STEP: f64 = 0.01;
+
+/// `numpy.interp` with edge clamping on a uniform grid starting at 0.
+fn interp_uniform(vals: &[f64], step: f64, x: f64) -> f64 {
+    if x <= 0.0 {
+        return vals[0];
+    }
+    let pos = x / step;
+    let i = pos as usize;
+    if i + 1 >= vals.len() {
+        return *vals.last().unwrap();
+    }
+    let frac = pos - i as f64;
+    vals[i] + (vals[i + 1] - vals[i]) * frac
+}
+
+/// Fit a smoother family against a PSD, mirroring `fit_shaper`'s sweep and
+/// selection. The kernel scales as `1/freq`, so the vibration response is
+/// computed once on a normalized frequency grid for the 1 Hz kernel and
+/// resampled per test frequency.
+pub fn fit_smoother(
+    cfg: &SmootherCfg,
+    freq_bins_in: &[f64],
+    psd_in: &[f64],
+    shaper_freqs: &ShaperFreqs,
+    scv: f64,
+    max_smoothing: Option<f64>,
+    test_damping_ratios: Option<Vec<f64>>,
+    max_freq: Option<f64>,
+) -> Option<FitResult> {
+    let test_damping_ratios = test_damping_ratios.unwrap_or_else(|| TEST_DAMPING_RATIOS.to_vec());
+
+    let test_freqs: Vec<f64> = match shaper_freqs {
+        ShaperFreqs::List(v) => v.clone(),
+        ShaperFreqs::Range(start, end, step) => {
+            let freq_end = end.unwrap_or(MAX_SHAPER_FREQ);
+            let freq_start = start.unwrap_or(cfg.min_freq).min(freq_end - 1e-7);
+            let freq_step = step.unwrap_or(0.2);
+            arange(freq_start, freq_end, freq_step)
+        }
+    };
+    if test_freqs.is_empty() {
+        return None;
+    }
+    let test_max = test_freqs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let base = max_freq.filter(|&m| m != 0.0).unwrap_or(MAX_FREQ);
+    let max_freq = base.max(test_max);
+
+    let mut freq_bins = Vec::new();
+    let mut psd = Vec::new();
+    for i in 0..freq_bins_in.len() {
+        if freq_bins_in[i] <= max_freq {
+            freq_bins.push(freq_bins_in[i]);
+            psd.push(psd_in[i]);
+        }
+    }
+
+    let unit_kernel = (cfg.build)(1.0);
+    let norm_freqs = arange(0.0, SMOOTHER_NORM_FREQ_MAX, SMOOTHER_NORM_FREQ_STEP);
+    let mut unit_vals = vec![0.0_f64; norm_freqs.len()];
+    for &dr in &test_damping_ratios {
+        let vals = estimate_smoother(&unit_kernel, dr, &norm_freqs);
+        for i in 0..unit_vals.len() {
+            unit_vals[i] = unit_vals[i].max(vals[i]);
+        }
+    }
+    let moments = smoother_moments(&unit_kernel);
+
+    let mut best: Option<FitResult> = None;
+    let mut results: Vec<FitResult> = Vec::new();
+
+    for &test_freq in test_freqs.iter().rev() {
+        let inv_freq = 1.0 / test_freq;
+        let smoothing = get_smoother_smoothing(&moments, inv_freq, 5000.0, scv);
+        if let (Some(ms), Some(_)) = (max_smoothing, best.as_ref()) {
+            if smoothing > ms {
+                return best;
+            }
+        }
+        let vals: Vec<f64> = freq_bins
+            .iter()
+            .map(|&fb| interp_uniform(&unit_vals, SMOOTHER_NORM_FREQ_STEP, fb * inv_freq))
+            .collect();
+        let vibrations = remaining_vibrations(&vals, &psd);
+        let max_accel = find_smoother_max_accel(&moments, inv_freq, scv);
+        let score = smoothing * (libm::pow(vibrations, 1.5) + vibrations * 0.2 + 0.01);
+        results.push(FitResult {
+            name: cfg.name.to_string(),
+            freq: test_freq,
+            vals,
+            vibrs: vibrations,
+            smoothing,
+            score,
+            max_accel,
+        });
+        let last = results.last().unwrap();
+        if best.as_ref().map_or(true, |b| b.vibrs > last.vibrs) {
+            best = Some(clone_result(last));
+        }
+    }
+
+    let best = best?;
+    let mut selected = clone_result(&best);
+    for res in results.iter().rev() {
+        if res.vibrs < best.vibrs * 1.1 && res.score < selected.score {
+            selected = clone_result(res);
+        }
+    }
+    Some(selected)
 }
 
 /// numpy.arange(start, stop, step): half-open, floating accumulation.

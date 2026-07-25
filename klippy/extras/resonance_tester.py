@@ -410,7 +410,6 @@ class ResonanceTester:
         if not self.is_valid_name_suffix(name_suffix):
             raise gcmd.error("Invalid NAME parameter")
 
-        input_shaper = self.printer.lookup_object("input_shaper", None)
         helper = shaper_calibrate.ShaperCalibrate(self.printer)
         sweep = self._parse_sweep(gcmd)
 
@@ -423,7 +422,6 @@ class ResonanceTester:
             capture_name_suffix=name_suffix,
         )
 
-        configfile = self.printer.lookup_object("configfile")
         max_freq = 1.5 * sweep.freq_end
         for axis in calibrate_axes:
             axis_name = axis.get_name()
@@ -443,15 +441,9 @@ class ResonanceTester:
                 logger=gcmd.respond_info,
             )
             gcmd.respond_info(
-                "Recommended shaper_type_%s = %s, shaper_freq_%s = %.1f Hz"
-                % (axis_name, best_shaper.name, axis_name, best_shaper.freq)
-            )
-            if input_shaper is not None:
-                helper.apply_params(
-                    input_shaper, axis_name, best_shaper.name, best_shaper.freq
-                )
-            helper.save_params(
-                configfile, axis_name, best_shaper.name, best_shaper.freq
+                "Recommended [post_processor] for %s axis: "
+                "type = %s, frequency_hz = %.1f"
+                % (axis_name, best_shaper.name, best_shaper.freq)
             )
             csv_name = self.save_calibration_data(
                 "calibration_data",
@@ -467,8 +459,8 @@ class ResonanceTester:
                 "Shaper calibration data written to %s file" % (csv_name,)
             )
         gcmd.respond_info(
-            "The SAVE_CONFIG command will update the printer config file\n"
-            "with these parameters and restart the printer."
+            "Update the [post_processor] sections in the printer config "
+            "file\nwith these parameters and restart the printer."
         )
 
     cmd_MEASURE_AXES_NOISE_help = (

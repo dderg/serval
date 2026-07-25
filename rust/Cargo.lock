@@ -1273,8 +1273,10 @@ name = "shaper-ident"
 version = "0.1.0"
 dependencies = [
  "libm",
+ "nurbs",
  "pyo3",
  "realfft",
+ "trajectory",
 ]
 
 [[package]]
