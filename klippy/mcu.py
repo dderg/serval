@@ -893,7 +893,9 @@ class MCU:
         return self._shutdown_clock
 
     def get_status(self, eventtime=None):
-        return dict(self._get_status_info)
+        status = dict(self._get_status_info)
+        status["clock_sync_converged"] = self._clocksync.is_synced()
+        return status
 
     def dump_debug(self):
         out = []
