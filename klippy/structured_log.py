@@ -160,13 +160,26 @@ def make_print_id():
 _event_logger = logging.getLogger("kalico.event")
 
 
+# logging.Logger.makeRecord raises KeyError for any extra key that shadows
+# a built-in LogRecord attribute — which would escalate to a full Klipper
+# shutdown when the event fires inside a gcode handler. Structured-event
+# fields must never be able to do that: colliding keys are remapped with a
+# "field_" prefix instead.
+_RESERVED_RECORD_KEYS = frozenset(
+    logging.LogRecord("", 0, "", 0, "", (), None).__dict__
+) | {"message", "asctime"}
+
+
 def event(subsystem, event, *, level=logging.INFO, msg=None, **fields):
     if not subsystem or not event:
         raise ValueError(
             "structured_log.event requires non-empty subsystem and event"
         )
     extra = {"subsystem": subsystem, "event": event}
-    extra.update(fields)
+    for key, value in fields.items():
+        if key in _RESERVED_RECORD_KEYS:
+            key = "field_" + key
+        extra[key] = value
     _event_logger.log(level, msg if msg is not None else event, extra=extra)
 
 

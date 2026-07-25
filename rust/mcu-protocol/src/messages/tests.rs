@@ -132,6 +132,10 @@ fn set_dynamics_model_roundtrip() {
         mass: vec![0.0123, 0.0119],
         viscous: vec![0.0045, 0.0044],
         coulomb: vec![1.2, 1.1],
+        compliance: vec![1.76e-5, 7.0e-6],
+        pin_mass: vec![0.02, 0.0],
+        pin_zeta: vec![0.05, 0.0],
+        pin_lead_us: 250.0,
         pairs: vec![DynamicsPair {
             first: 0,
             second: 1,
@@ -139,7 +143,10 @@ fn set_dynamics_model_roundtrip() {
         }],
     };
     assert_eq!(roundtrip(&v), v);
-    assert_eq!(v.encoded_to_vec().len(), 2 + (8 + 2 + 2 + 2) * 4 + 1 + 6);
+    assert_eq!(
+        v.encoded_to_vec().len(),
+        2 + (8 + 2 + 2 + 2 + 2 + 2 + 2) * 4 + 4 + 1 + 6
+    );
     let r = SetDynamicsModelResponse { result: -862 };
     assert_eq!(roundtrip(&r), r);
     assert_eq!(r.encoded_to_vec().len(), 4);
@@ -154,6 +161,10 @@ fn set_dynamics_model_empty_pairs_roundtrip() {
         mass: vec![0.01],
         viscous: vec![0.0],
         coulomb: vec![0.0],
+        compliance: vec![0.0],
+        pin_mass: vec![0.0],
+        pin_zeta: vec![0.0],
+        pin_lead_us: 0.0,
         pairs: vec![],
     };
     assert_eq!(roundtrip(&v), v);
@@ -169,6 +180,10 @@ fn set_dynamics_model_truncated_array_is_decode_error() {
         mass: vec![0.01; 2],
         viscous: vec![0.0; 2],
         coulomb: vec![0.0; 2],
+        compliance: vec![0.0; 2],
+        pin_mass: vec![0.0; 2],
+        pin_zeta: vec![0.0; 2],
+        pin_lead_us: 0.0,
         pairs: vec![],
     };
     let mut bytes = v.encoded_to_vec();
@@ -186,6 +201,10 @@ fn set_dynamics_model_truncated_pair_tail_is_decode_error() {
         mass: vec![0.01],
         viscous: vec![0.0],
         coulomb: vec![0.0],
+        compliance: vec![0.0],
+        pin_mass: vec![0.0],
+        pin_zeta: vec![0.0],
+        pin_lead_us: 0.0,
         pairs: vec![DynamicsPair {
             first: 0,
             second: 1,

@@ -207,6 +207,10 @@ fn from_parts_agrees_with_toml_parse() {
         &[0.004, 0.004],
         &[1.0, 1.0],
         &[],
+        &[],
+        &[],
+        0.0,
+        &[],
     )
     .unwrap();
     assert_eq!(parts.n_slots, 2);
@@ -227,15 +231,39 @@ fn from_parts_rejects_each_invariant_violation() {
     let frame = [0.5, 0.5, 0.5, -0.5];
     let mode2 = [0.004, 0.004];
     assert!(matches!(
-        DynamicsModel::from_parts(0, 0, &[], &[], &[], &[], &[]),
+        DynamicsModel::from_parts(0, 0, &[], &[], &[], &[], &[], &[], &[], 0.0, &[]),
         Err(ProfileError::Dim(_))
     ));
     assert!(matches!(
-        DynamicsModel::from_parts(2, 2, &frame[..3], &[0.04, 0.08], &mode2, &mode2, &[]),
+        DynamicsModel::from_parts(
+            2,
+            2,
+            &frame[..3],
+            &[0.04, 0.08],
+            &mode2,
+            &mode2,
+            &[],
+            &[],
+            &[],
+            0.0,
+            &[]
+        ),
         Err(ProfileError::Dim(_))
     ));
     assert!(matches!(
-        DynamicsModel::from_parts(2, 2, &frame, &[0.04], &mode2, &mode2, &[]),
+        DynamicsModel::from_parts(
+            2,
+            2,
+            &frame,
+            &[0.04],
+            &mode2,
+            &mode2,
+            &[],
+            &[],
+            &[],
+            0.0,
+            &[]
+        ),
         Err(ProfileError::Dim(_))
     ));
     assert!(matches!(
@@ -246,16 +274,44 @@ fn from_parts_rejects_each_invariant_violation() {
             &[0.04, 0.08],
             &mode2,
             &mode2,
+            &[],
+            &[],
+            &[],
+            0.0,
             &[]
         ),
         Err(ProfileError::FrameRankDeficient)
     ));
     assert!(matches!(
-        DynamicsModel::from_parts(2, 2, &frame, &[0.0, 0.08], &mode2, &mode2, &[]),
+        DynamicsModel::from_parts(
+            2,
+            2,
+            &frame,
+            &[0.0, 0.08],
+            &mode2,
+            &mode2,
+            &[],
+            &[],
+            &[],
+            0.0,
+            &[]
+        ),
         Err(ProfileError::NonPositive(_))
     ));
     assert!(matches!(
-        DynamicsModel::from_parts(2, 2, &frame, &[0.04, 0.08], &[f32::NAN, 0.004], &mode2, &[]),
+        DynamicsModel::from_parts(
+            2,
+            2,
+            &frame,
+            &[0.04, 0.08],
+            &[f32::NAN, 0.004],
+            &mode2,
+            &[],
+            &[],
+            &[],
+            0.0,
+            &[]
+        ),
         Err(ProfileError::NotFinite(_))
     ));
 }
@@ -320,8 +376,20 @@ fn opposite_pair_columns_preserve_generalized_force() {
         second: 1,
         direction_split: 0.2,
     };
-    let model =
-        DynamicsModel::from_parts(2, 1, &[0.5, -0.5], &[0.04], &[0.0], &[0.0], &[pair]).unwrap();
+    let model = DynamicsModel::from_parts(
+        2,
+        1,
+        &[0.5, -0.5],
+        &[0.04],
+        &[0.0],
+        &[0.0],
+        &[],
+        &[],
+        &[],
+        0.0,
+        &[pair],
+    )
+    .unwrap();
     let acc = [1000.0, -1000.0];
     let first = model.torque_ff(0, &acc, &[0.0, 0.0]);
     let second = model.torque_ff(1, &acc, &[0.0, 0.0]);
@@ -353,7 +421,11 @@ fn pair_validation_rejects_invalid_contracts() {
             &vectors[..1],
             &[0.0],
             &[0.0],
-            &[spec],
+            &[],
+            &[],
+            &[],
+            0.0,
+            &[spec]
         )
         .is_err());
     }
@@ -365,7 +437,11 @@ fn pair_validation_rejects_invalid_contracts() {
             &vectors[..1],
             &[0.0],
             &[0.0],
-            &[pair(0, 1, 0.1), pair(1, 2, 0.1)],
+            &[],
+            &[],
+            &[],
+            0.0,
+            &[pair(0, 1, 0.1), pair(1, 2, 0.1)]
         ),
         Err(ProfileError::PairSlot(_))
     ));
@@ -377,7 +453,11 @@ fn pair_validation_rejects_invalid_contracts() {
             &vectors[..1],
             &[0.0],
             &[0.0],
-            &[pair(0, 1, 0.1)],
+            &[],
+            &[],
+            &[],
+            0.0,
+            &[pair(0, 1, 0.1)]
         ),
         Err(ProfileError::PairNotParallel(0))
     ));
@@ -436,11 +516,15 @@ fn pair_rejects_zero_first_frame_column() {
             &[0.04],
             &[0.0],
             &[0.0],
+            &[],
+            &[],
+            &[],
+            0.0,
             &[PairSpec {
                 first: 0,
                 second: 1,
                 direction_split: 0.1,
-            }],
+            }]
         ),
         Err(ProfileError::PairFirstColumnZero(0))
     ));
@@ -470,4 +554,231 @@ fn torque_ff_without_coulomb_keeps_the_linear_terms() {
     assert!((linear - expect).abs() < 1e-4, "{linear} vs {expect}");
     let full = m.torque_ff(0, &[1000.0], &[100.0]);
     assert!((full - (expect + 1.2)).abs() < 1e-4, "{full}");
+}
+
+const COREXY_V7: &str = r#"
+version = 7
+axes = ["a", "b"]
+modes = ["x", "y"]
+frame = [[0.5, 0.5], [0.5, -0.5]]
+mass = [0.040, 0.080]
+viscous = [0.004, 0.004]
+coulomb = [1.0, 1.0]
+compliance = [7.0e-6, 1.76e-5]
+fit_rms_residual = [0.5, 0.5]
+"#;
+
+#[test]
+fn v7_compliance_is_retained_per_mode() {
+    let m = DynamicsModel::from_toml_str(COREXY_V7).unwrap();
+    assert!((f64::from(m.compliance(0)) - 7.0e-6).abs() < 1e-12);
+    assert!((f64::from(m.compliance(1)) - 1.76e-5).abs() < 1e-12);
+}
+
+#[test]
+fn v6_defaults_every_mode_compliance_to_zero() {
+    let m = DynamicsModel::from_toml_str(COREXY).unwrap();
+    assert_eq!(m.compliance(0), 0.0);
+    assert_eq!(m.compliance(1), 0.0);
+}
+
+#[test]
+fn v7_all_zero_compliance_is_accepted() {
+    let zeroed = COREXY_V7.replace("compliance = [7.0e-6, 1.76e-5]", "compliance = [0.0, 0.0]");
+    let m = DynamicsModel::from_toml_str(&zeroed).unwrap();
+    assert_eq!(m.compliance(0), 0.0);
+    assert_eq!(m.compliance(1), 0.0);
+}
+
+#[test]
+fn compliance_on_v6_profile_is_rejected() {
+    let v6 = COREXY_V7.replace("version = 7", "version = 6");
+    assert!(matches!(
+        DynamicsModel::from_toml_str(&v6),
+        Err(ProfileError::ForbiddenField(_))
+    ));
+}
+
+#[test]
+fn compliance_validation_rejects_bad_values() {
+    for bad in [
+        "[7.0e-6]",
+        "[-1.0e-6, 1.0e-6]",
+        "[nan, 1.0e-6]",
+        "[1.0e-2, 1.0e-6]",
+        // 1e-4 s² is ω_b/2π ≈ 15.9 Hz — softer than the documented 20 Hz
+        // floor, so the ceiling must reject it.
+        "[1.0e-4, 1.0e-6]",
+    ] {
+        let s = COREXY_V7.replace("[7.0e-6, 1.76e-5]", bad);
+        let r = DynamicsModel::from_toml_str(&s);
+        assert!(r.is_err(), "compliance {bad} must be rejected");
+    }
+}
+
+#[test]
+fn compliance_ceiling_admits_a_stiff_belt_just_inside_20_hz() {
+    // 6.0e-5 s² is ≈ 20.5 Hz, just stiffer than the floor: accepted.
+    let s = COREXY_V7.replace("[7.0e-6, 1.76e-5]", "[6.0e-5, 1.0e-6]");
+    assert!(DynamicsModel::from_toml_str(&s).is_ok());
+}
+
+#[test]
+fn block_diagonal_concatenates_compliance() {
+    let x = format!(
+        "{}\ncompliance = [1.0e-5]\n",
+        SCALAR.replace("version = 6", "version = 7")
+    );
+    let y = DynamicsModel::from_toml_str(SCALAR_Y).unwrap();
+    let x = DynamicsModel::from_toml_str(&x).unwrap();
+    let node = DynamicsModel::block_diagonal(vec![x, y]).unwrap();
+    assert!((f64::from(node.compliance(0)) - 1.0e-5).abs() < 1e-12);
+    assert_eq!(node.compliance(1), 0.0, "y profile has no compliance term");
+}
+
+const COREXY_V8: &str = r#"
+version = 8
+axes = ["a", "b"]
+modes = ["x", "y"]
+frame = [[0.5, 0.5], [0.5, -0.5]]
+mass = [0.040, 0.080]
+viscous = [0.004, 0.004]
+coulomb = [1.0, 1.0]
+compliance = [7.0e-6, 1.76e-5]
+pin_mass = [0.012, 0.0]
+pin_zeta = [0.05, 0.0]
+pin_lead_us = 300.0
+fit_rms_residual = [0.5, 0.5]
+"#;
+
+#[test]
+fn v8_pin_fields_parse_and_expose_per_mode_state() {
+    let m = DynamicsModel::from_toml_str(COREXY_V8).unwrap();
+    assert!((f64::from(m.compliance(0)) - 7.0e-6).abs() < 1e-12);
+    assert_eq!(m.pin_mass, [0.012, 0.0]);
+    assert_eq!(m.pin_zeta, [0.05, 0.0]);
+    assert!(m.pin_active(0), "mode 0 has nonzero pin mass");
+    assert!(!m.pin_active(1), "mode 1 pin mass is zero");
+    assert!(!m.pin_active(9), "out-of-range mode is inactive");
+    assert_eq!(m.pin_lead_ns(), vec![300_000, 300_000]);
+}
+
+#[test]
+fn v8_pin_fields_default_to_disabled_when_absent() {
+    let bare = COREXY_V8
+        .lines()
+        .filter(|l| !l.starts_with("pin_"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let m = DynamicsModel::from_toml_str(&bare).unwrap();
+    assert_eq!(m.pin_mass, [0.0, 0.0]);
+    assert_eq!(m.pin_zeta, [0.0, 0.0]);
+    assert!(!m.pin_active(0));
+    assert_eq!(m.pin_lead_ns(), vec![0, 0]);
+}
+
+#[test]
+fn pin_mass_without_compliance_is_rejected() {
+    let s = COREXY_V8.replace(
+        "compliance = [7.0e-6, 1.76e-5]",
+        "compliance = [0.0, 1.76e-5]",
+    );
+    assert!(matches!(
+        DynamicsModel::from_toml_str(&s),
+        Err(ProfileError::PinNeedsCompliance(0))
+    ));
+}
+
+#[test]
+fn pin_fields_on_version_7_are_rejected() {
+    let s = COREXY_V8.replace("version = 8", "version = 7");
+    assert!(matches!(
+        DynamicsModel::from_toml_str(&s),
+        Err(ProfileError::ForbiddenField(_))
+    ));
+}
+
+#[test]
+fn pin_mass_present_without_pin_zeta_is_dim_error() {
+    let s = COREXY_V8
+        .lines()
+        .filter(|l| !l.starts_with("pin_zeta"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(matches!(
+        DynamicsModel::from_toml_str(&s),
+        Err(ProfileError::Dim(_))
+    ));
+}
+
+#[test]
+fn pin_validation_rejects_out_of_range_values() {
+    // No upper zeta cap: any finite zeta >= 0 is legal (the endpoint
+    // evaluates under-, critically-, and overdamped regimes). The hard
+    // invariants are sign and finiteness only.
+    for ok in ["0.8", "1.0", "1.4", "10.0"] {
+        let toml = COREXY_V8.replace("pin_zeta = [0.05, 0.0]", &format!("pin_zeta = [{ok}, 0.0]"));
+        assert!(
+            DynamicsModel::from_toml_str(&toml).is_ok(),
+            "zeta {ok} must be accepted"
+        );
+    }
+    let zeta_neg = COREXY_V8.replace("pin_zeta = [0.05, 0.0]", "pin_zeta = [-0.1, 0.0]");
+    assert!(matches!(
+        DynamicsModel::from_toml_str(&zeta_neg),
+        Err(ProfileError::PinZetaOutOfRange(_))
+    ));
+    let zeta_nan = COREXY_V8.replace("pin_zeta = [0.05, 0.0]", "pin_zeta = [nan, 0.0]");
+    assert!(matches!(
+        DynamicsModel::from_toml_str(&zeta_nan),
+        Err(ProfileError::PinZetaOutOfRange(_)) | Err(ProfileError::Parse(_))
+    ));
+    let mass_neg = COREXY_V8.replace("pin_mass = [0.012, 0.0]", "pin_mass = [-0.1, 0.0]");
+    assert!(matches!(
+        DynamicsModel::from_toml_str(&mass_neg),
+        Err(ProfileError::NonPositive(_))
+    ));
+    let lead_hi = COREXY_V8.replace("pin_lead_us = 300.0", "pin_lead_us = 20000.0");
+    assert!(matches!(
+        DynamicsModel::from_toml_str(&lead_hi),
+        Err(ProfileError::PinLeadOutOfRange(_))
+    ));
+}
+
+#[test]
+fn block_diagonal_concatenates_pin_fields() {
+    let x = format!(
+        "{}\ncompliance = [1.0e-5]\npin_mass = [0.02]\npin_zeta = [0.04]\npin_lead_us = 120.0\n",
+        SCALAR.replace("version = 6", "version = 8")
+    );
+    let x = DynamicsModel::from_toml_str(&x).unwrap();
+    let y = DynamicsModel::from_toml_str(SCALAR_Y).unwrap();
+    let node = DynamicsModel::block_diagonal(vec![x, y]).unwrap();
+    assert_eq!(node.pin_mass, [0.02, 0.0]);
+    assert_eq!(node.pin_zeta, [0.04, 0.0]);
+    assert!(node.pin_active(0));
+    assert!(!node.pin_active(1));
+    assert_eq!(node.pin_lead_ns(), vec![120_000, 0]);
+}
+
+#[test]
+fn v6_and_v7_fixtures_still_report_no_pin() {
+    let v6 = DynamicsModel::from_toml_str(COREXY).unwrap();
+    assert!(!v6.pin_active(0));
+    assert_eq!(v6.pin_lead_ns(), vec![0, 0]);
+    let v7 = DynamicsModel::from_toml_str(COREXY_V7).unwrap();
+    assert!(!v7.pin_active(0));
+    assert_eq!(v7.pin_mass, [0.0, 0.0]);
+}
+
+#[test]
+fn pinned_mode_retains_its_raw_compliance() {
+    // The pin oscillator reads ω_b = 1/√compliance for the mode it holds, so
+    // pinning must not consume or zero the per-mode compliance it was
+    // derived from.
+    let pinned = DynamicsModel::from_toml_str(COREXY_V8).unwrap();
+    assert!(pinned.pin_active(0));
+    assert!((f64::from(pinned.compliance(0)) - 7.0e-6).abs() < 1e-10);
+    assert!((f64::from(pinned.compliance(1)) - 1.76e-5).abs() < 1e-10);
+    assert_eq!(pinned.frame_row(0), &[0.5, 0.5]);
 }

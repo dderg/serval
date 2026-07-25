@@ -171,9 +171,15 @@ job_watchdog_canary() {
     grep -qF 'runtime_liveness_ok' "$ROOT/src/stm32/watchdog.c"
 }
 
+# Keep in lockstep with .github/workflows/ci-lintformat.yaml: an unpinned
+# ruff drifts to whatever released last, so the local gate and CI disagree
+# the moment a new rule ships. Bump both together.
+RUFF_VERSION="0.15.21"
+
 job_ruff() {
     if command -v uvx >/dev/null 2>&1; then
-        uvx ruff check "$ROOT" && uvx ruff format --check "$ROOT"
+        uvx "ruff@$RUFF_VERSION" check "$ROOT" &&
+            uvx "ruff@$RUFF_VERSION" format --check "$ROOT"
     elif command -v ruff >/dev/null 2>&1; then
         ruff check "$ROOT" && ruff format --check "$ROOT"
     else

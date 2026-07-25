@@ -13,7 +13,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/ruff-action@v3
+      # Pinned: an unpinned ruff-action tracks the latest release, so a new
+      # ruff turning a rule on by default turns this gate red on every open
+      # PR at once, for code none of them touched. Bump deliberately.
       - uses: astral-sh/ruff-action@v3
         with:
+          version: "0.15.21"
+      - uses: astral-sh/ruff-action@v3
+        with:
+          version: "0.15.21"
           args: "format --check --diff"

@@ -49,6 +49,16 @@ pub struct EndpointCtx {
     group_delay_ns: u64,
     telemetry_period: u64,
     dynamics: Option<DynamicsModel>,
+    /// Per-mode pin-rotor oscillator state + precomputed transition
+    /// coefficients, sized to the installed dynamics model (empty when no
+    /// mode is pinned).
+    pin: cycle::PinState,
+    /// Drive-frame sign per slot (`cmd_counts_per_mm.signum()`), fixed at
+    /// bringup — the dynamics profile is fitted in the drive frame.
+    drive_dirs: Vec<f32>,
+    /// Drive-frame accel/velocity/following-error scratch, reused every
+    /// cycle (sized at bringup) so the DC path allocates nothing.
+    drive_scratch: cycle::DriveScratch,
     run_limits: Vec<(u32, u16)>,
 
     rings: Vec<AxisRing>,
@@ -194,4 +204,8 @@ pub(super) fn discard_motion(ctx: &mut EndpointCtx) {
         *lc = None;
     }
     ctx.buzz.clear();
+    // A discard re-anchors the commanded frame (homing trip, stop, sensorless
+    // trip), so the pin oscillator's predicted deflection is stale — restart
+    // it clean.
+    ctx.pin.reset();
 }

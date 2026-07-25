@@ -1,12 +1,12 @@
 # Servo telemetry capture
 
-> User and format reference for the 1 kHz servo capture pipeline. Companion to
+> User and format reference for the DC-cycle-rate servo capture pipeline. Companion to
 > [`ethercat-bench-bringup.md`](ethercat-bench-bringup.md) (getting the
 > drive up in the first place).
 
 ## What it is
 
-Every DC cycle (1 kHz) while a capture is active, the EtherCAT endpoint records
+Every DC cycle (at the configured `cycle_us` rate) while a capture is active, the EtherCAT endpoint records
 the drive's feedback (actual position, internally interpolated demand,
 following error, torque, status/error words) together with the position the
 host commanded that same cycle, into a crash-survivable file on the Pi. This

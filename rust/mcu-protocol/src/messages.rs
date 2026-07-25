@@ -483,6 +483,10 @@ pub struct SetDynamicsModel {
     pub mass: Vec<f32>,
     pub viscous: Vec<f32>,
     pub coulomb: Vec<f32>,
+    pub compliance: Vec<f32>,
+    pub pin_mass: Vec<f32>,
+    pub pin_zeta: Vec<f32>,
+    pub pin_lead_us: f32,
     pub pairs: Vec<DynamicsPair>,
 }
 
@@ -494,13 +498,25 @@ impl Encode for SetDynamicsModel {
         assert_eq!(self.mass.len(), modes);
         assert_eq!(self.viscous.len(), modes);
         assert_eq!(self.coulomb.len(), modes);
+        assert_eq!(self.compliance.len(), modes);
+        assert_eq!(self.pin_mass.len(), modes);
+        assert_eq!(self.pin_zeta.len(), modes);
         put_u8(out, self.slots_count);
         put_u8(out, self.modes_count);
-        for vec in [&self.frame, &self.mass, &self.viscous, &self.coulomb] {
+        for vec in [
+            &self.frame,
+            &self.mass,
+            &self.viscous,
+            &self.coulomb,
+            &self.compliance,
+            &self.pin_mass,
+            &self.pin_zeta,
+        ] {
             for v in vec {
                 put_f32(out, *v);
             }
         }
+        put_f32(out, self.pin_lead_us);
         assert!(u8::try_from(self.pairs.len()).is_ok());
         put_u8(out, self.pairs.len() as u8);
         for pair in &self.pairs {
@@ -541,6 +557,10 @@ impl Decode for SetDynamicsModel {
         let mass = get_f32_vec(c, modes)?;
         let viscous = get_f32_vec(c, modes)?;
         let coulomb = get_f32_vec(c, modes)?;
+        let compliance = get_f32_vec(c, modes)?;
+        let pin_mass = get_f32_vec(c, modes)?;
+        let pin_zeta = get_f32_vec(c, modes)?;
+        let pin_lead_us = get_f32(c)?;
         let pairs_count = get_u8(c)?;
         let mut pairs = Vec::with_capacity(pairs_count as usize);
         for _ in 0..pairs_count {
@@ -557,6 +577,10 @@ impl Decode for SetDynamicsModel {
             mass,
             viscous,
             coulomb,
+            compliance,
+            pin_mass,
+            pin_zeta,
+            pin_lead_us,
             pairs,
         })
     }
