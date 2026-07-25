@@ -945,7 +945,7 @@ export class TrajectoryView {
       }
       return { lo, hi };
     }
-    const visibleRange = (entries) => {
+    const rawExtent = (entries) => {
       let lo = 0, hi = 0;
       for (const s of entries) {
         for (const data of [this.dataAfter, this.dataBefore]) {
@@ -955,20 +955,53 @@ export class TrajectoryView {
           if (e.hi > hi) hi = e.hi;
         }
       }
+      return { lo, hi };
+    };
+    const visibleRange = (entries) => {
+      const { lo, hi } = rawExtent(entries);
       let yMin = lo * 1.15, yMax = hi * 1.15;
       if (yMin === 0 && yMax === 0) yMax = 1;
       return { yMin, yMax };
     };
-    function scaleSeries(series) {
+    // Fraction of the panel height (from the bottom) where a [yMin, yMax]
+    // range's zero line falls.
+    const zeroFrac = (yMin, yMax) => {
+      const span = yMax - yMin;
+      return span > 0 ? -yMin / span : 0;
+    };
+    // Expand a lo <= 0 <= hi range to the smallest [yMin, yMax] whose zero
+    // sits at `frac` of its height. Only ever grows the short side, so the
+    // lane's own data is never clipped — except at the boundary itself
+    // (frac exactly 0 or 1, i.e. the left axes have zero room on that
+    // side): there the alignment necessarily wins over showing the right
+    // lane's opposite-sign excursion, since the left axis's own convention
+    // already leaves no pixel row below/above zero to put it in.
+    const rangeAtZeroFrac = (lo, hi, frac) => {
+      if (frac <= 0) return { yMin: 0, yMax: lo === 0 && hi === 0 ? 1 : hi };
+      if (frac >= 1) return { yMin: lo === 0 && hi === 0 ? -1 : lo, yMax: 0 };
+      const r = lo === 0 && hi === 0 ? 1 : Math.max(hi / (1 - frac), -lo / frac);
+      return { yMin: -frac * r, yMax: (1 - frac) * r };
+    };
+    // The right-axis lane (E) gets its own scale, but its zero is pinned to
+    // land at the same pixel row as the left axes' zero: E's magnitude has
+    // no relation to XYZ's, so an independently-centered right scale drifts
+    // the two zero lines apart, misleading corner-by-corner comparison.
+    const scaleSeries = (series) => {
       const shown = series.filter(s => !s.hidden);
-      const left = visibleRange(shown.filter(s => s.axis !== "right"));
-      const right = visibleRange(shown.filter(s => s.axis === "right"));
+      const leftEntries = shown.filter(s => s.axis !== "right");
+      const rightEntries = shown.filter(s => s.axis === "right");
+      const left = visibleRange(leftEntries);
+      let right = left;
+      if (rightEntries.length > 0) {
+        const { lo, hi } = rawExtent(rightEntries);
+        right = rangeAtZeroFrac(lo * 1.15, hi * 1.15, zeroFrac(left.yMin, left.yMax));
+      }
       for (const s of shown) {
         const r = s.axis === "right" ? right : left;
         s.yMin = r.yMin; s.yMax = r.yMax;
       }
       return { shown, leftMin: left.yMin, leftMax: left.yMax };
-    }
+    };
 
     const velSeries = this._panelSeries("vel", "vx", "vy", "vz", "ve", null, null, "v_scalar");
     const accSeries = this._panelSeries("acc", "ax", "ay", "az", "ae", "a_tang", "a_cent", "a_scalar");
