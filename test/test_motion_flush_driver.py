@@ -13,6 +13,7 @@ class RecordingMcu:
     def __init__(self):
         self._flush_callbacks = []
         self.flush_calls = []
+        self._clocksync = self
 
     def estimated_print_time(self, eventtime):
         return eventtime + 1.0

@@ -7,7 +7,7 @@ use crate::capture::{CaptureRecord, DriveSample, FLAG_MOTION_ACTIVE, FLAG_TORQUE
 use crate::claim::{eval_wkc, WkcDecision};
 use crate::clock::raw_from_monotonic_ns;
 use crate::curves::ENGINE_STATE_FAULT;
-use crate::dynamics::clamp_torque;
+use crate::dynamics::{clamp_torque, DynamicsModel};
 use crate::scale::{mm_to_counts, CountMap};
 use crate::torque::{TickAction, TorqueState};
 use crate::wire::{endstop_trip_frame, status_heartbeat_frame};
@@ -204,6 +204,7 @@ pub(super) fn compute_motion_targets(
         ctx.damper.reset_filters();
         ctx.trim.reset();
         ctx.comp.reset_applied();
+        ctx.pin.reset();
         for lc in &mut ctx.last_counts {
             *lc = None;
         }
@@ -216,6 +217,7 @@ pub(super) fn compute_motion_targets(
 
 // The coupled torque model needs every axis' accel/vel before any
 // one slot's feedforward can be computed, so sample all slots first.
+#[allow(clippy::too_many_arguments)]
 fn sample_slot_targets(
     ctx: &mut EndpointCtx,
     sample_time: u64,
@@ -275,7 +277,9 @@ fn sample_slot_targets(
         };
         if let Some((counts, vel_mm_s, acc_mm_s2)) = sampled {
             sp_counts[s] = Some(counts);
-            let (ff_vel, ff_acc) = if ctx.ff_lead_ns[s] > 0 && !buzz_was_active {
+            let (ff_vel, ff_acc) = if buzz_was_active {
+                (vel_mm_s, acc_mm_s2)
+            } else if ctx.ff_lead_ns[s] > 0 {
                 ctx.rings[s].peek_vel_acc(sample_time + ctx.ff_lead_ns[s])
             } else {
                 (vel_mm_s, acc_mm_s2)
@@ -426,14 +430,33 @@ fn emit_slot_commands(
     // so the model must be evaluated on drive-frame vectors — flipping
     // only the output torque by the slot's own sign would negate the
     // off-diagonal coupling terms whenever the drives' inverts differ.
-    let drive_dir = |s: usize| ctx.cmd_counts_per_mm.get(s).map_or(1.0, |c| c.signum()) as f32;
-    let (acc_drive, vel_drive): (Vec<f32>, Vec<f32>) = (0..num_slaves)
-        .map(|s| (drive_dir(s) * all_acc[s], drive_dir(s) * all_vel[s]))
-        .unzip();
+    // Detached from ctx so the pin can borrow it mutably alongside; the
+    // buffers are returned at the end of the cycle, never reallocated.
+    let mut scratch = std::mem::take(&mut ctx.drive_scratch);
+    for s in 0..num_slaves {
+        let dir = ctx.drive_dirs[s];
+        scratch.acc[s] = dir * all_acc[s];
+        scratch.vel[s] = dir * all_vel[s];
+    }
     // Coulomb is a mode-space quantity, so a buzz on any slot flips the sign
     // of a mode velocity that other slots share; drop Coulomb for every slot
     // whenever the buzz drives any slot this cycle.
     let buzz_active = ctx.buzz.active();
+    // Pin-rotor (mode A) torque hold: advance each pinned mode's predicted-
+    // deflection oscillator once this cycle and refill the slot-torque
+    // buffer. Runs through a buzz — the analytic buzz accel already rides in
+    // acc_drive (all_acc carries it for every driven slot), so the pinned
+    // modes see forcing = trajectory accel + buzz accel and keep the pin
+    // torque and residual demod live. Re-anchored on the motion-inactive→
+    // active edge; costs nothing when no mode is pinned.
+    if ctx.pin.active() {
+        let streaming = sp_counts.iter().any(Option::is_some);
+        for s in 0..num_slaves {
+            scratch.ferr[s] =
+                (f64::from(ctx.drive.telemetry(s).following_error) / ctx.counts_per_mm[s]) as f32;
+        }
+        ctx.pin.step(&scratch.acc, &scratch.ferr, streaming);
+    }
     for s in 0..num_slaves {
         if let Some(counts) = sp_counts[s] {
             let vel_offset = if ctx.velocity_ff[s] {
@@ -442,11 +465,12 @@ fn emit_slot_commands(
                 0
             };
             let raw_ff = ctx.dynamics.as_ref().map(|model| {
-                if buzz_active {
-                    model.torque_ff_without_coulomb(s, &acc_drive, &vel_drive)
+                let base = if buzz_active {
+                    model.torque_ff_without_coulomb(s, &scratch.acc, &scratch.vel)
                 } else {
-                    model.torque_ff(s, &acc_drive, &vel_drive)
-                }
+                    model.torque_ff(s, &scratch.acc, &scratch.vel)
+                };
+                base + ctx.pin.slot_torque_at(s)
             });
             let torque_offset = match raw_ff {
                 Some(raw) => {
@@ -512,7 +536,31 @@ fn emit_slot_commands(
             }
         }
     }
+    ctx.drive_scratch = scratch;
     motion_active
+}
+
+/// Drive-frame per-slot accel/velocity/following-error buffers, sized once
+/// at bringup. `emit_slot_commands` detaches these with `mem::take` so the
+/// pin bank can borrow `ctx` mutably alongside them, then hands them back —
+/// the DC path never allocates.
+#[derive(Default)]
+pub(super) struct DriveScratch {
+    acc: Vec<f32>,
+    vel: Vec<f32>,
+    ferr: Vec<f32>,
+}
+
+impl DriveScratch {
+    /// Only bringup (hw) and the test harness build an `EndpointCtx`.
+    #[cfg(any(feature = "hw", test))]
+    pub(super) fn new(num_slaves: usize) -> Self {
+        Self {
+            acc: vec![0.0; num_slaves],
+            vel: vec![0.0; num_slaves],
+            ferr: vec![0.0; num_slaves],
+        }
+    }
 }
 
 fn fault_non_finite_torque(ctx: &mut EndpointCtx, slot: usize, acc: f32, vel: f32) -> ! {
@@ -744,6 +792,7 @@ fn record_capture_sample(
         capture,
         live_tap,
         cycle_index,
+        pin,
         ..
     } = ctx;
     let build = |slots: &[u8]| {
@@ -772,6 +821,8 @@ fn record_capture_sample(
                 torque_offset: t.torque_offset,
                 accel_cmd: dir * all_acc[usize::from(slot)],
                 vel_cmd: dir * all_vel[usize::from(slot)],
+                pin_res_re: pin.residual_for_slot(usize::from(slot)).0,
+                pin_res_im: pin.residual_for_slot(usize::from(slot)).1,
             };
         }
         record
@@ -837,9 +888,6 @@ fn emit_heartbeat(ctx: &mut EndpointCtx) {
         ));
         ctx.last_sent_retired = current_retired;
         ctx.heartbeat_sent = true;
-        if current_retired != 0 {
-            crate::rt_eprintln!("ec-rt: heartbeat retired={retired:?}");
-        }
     }
 }
 
@@ -877,6 +925,7 @@ fn emit_periodic_telemetry(ctx: &mut EndpointCtx, wkc: i32, toff: i64) {
         tracing::info!(
             subsystem = "ethercat",
             event = "cycle_stage_max",
+            retired_total = ctx.last_sent_retired,
             wake_late_max_ns = ctx.wake_late_max_ns,
             recv_max_ns = ctx.recv_max_ns,
             process_max_ns = ctx.process_max_ns,
@@ -910,5 +959,281 @@ fn emit_periodic_telemetry(ctx: &mut EndpointCtx, wkc: i32, toff: i64) {
             respond_fault_heartbeat(ctx, 0, latched_drive_err);
         }
         crate::obs::emit_dropped_line_report();
+    }
+}
+
+/// Exact discrete transition of the damped-oscillator state x = (d, ḋ) for
+///   d̈ = -ω² d - 2ζω ḋ - u
+/// over `dt` with a zero-order-held forcing `u`. Returns the homogeneous
+/// state-transition matrix Ad (row-major `[a11, a12, a21, a22]`) and the
+/// forcing gain Bd = A⁻¹(Ad - I)·[0, -1]ᵀ, so `x' = Ad·x + Bd·u`. `dt <= 0`
+/// yields the identity with zero gain (used for a zero predictor lead).
+pub(super) fn osc_zoh(omega: f64, zeta: f64, dt: f64) -> ([f64; 4], [f64; 2]) {
+    if dt <= 0.0 {
+        return ([1.0, 0.0, 0.0, 1.0], [0.0, 0.0]);
+    }
+    let s = zeta * omega; // decay rate
+                          // All three damping regimes share the same closed form through the pair
+                          //   eC = e^{-st}·C(t),  eS = e^{-st}·S(t)
+                          // with (C, S) = (cos ω_d t, sin(ω_d t)/ω_d) underdamped, (1, t) critical,
+                          // and (cosh ω_h t, sinh(ω_h t)/ω_h) overdamped (ω_h = ω√(ζ²-1)). The
+                          // overdamped pair is evaluated from the two real poles -s±ω_h directly:
+                          // both exponents are ≤ 0 (ω_h < s), so it cannot overflow at any ζ.
+    let disc = 1.0 - zeta * zeta;
+    let (e_c, e_s) = if disc > 0.0 {
+        let wd = omega * disc.sqrt();
+        let e = libm::exp(-s * dt);
+        let (sin, cos) = libm::sincos(wd * dt);
+        (e * cos, e * sin / wd)
+    } else if disc == 0.0 {
+        let e = libm::exp(-s * dt);
+        (e, e * dt)
+    } else {
+        let wh = omega * (-disc).sqrt();
+        let ep = libm::exp((wh - s) * dt); // slow pole, exponent ≤ 0
+        let em = libm::exp(-(wh + s) * dt); // fast pole
+        ((ep + em) * 0.5, (ep - em) * 0.5 / wh)
+    };
+    let a11 = e_c + s * e_s;
+    let a12 = e_s;
+    let a21 = -(omega * omega) * e_s;
+    let a22 = e_c - s * e_s;
+    // Bd = A⁻¹(Ad - I)·B with B = [0, -1]ᵀ and A⁻¹ = [[-2s/ω², -1/ω²], [1, 0]].
+    // (Ad - I)·B = [-a12, 1 - a22]ᵀ. Independent of the damping regime.
+    let w2 = omega * omega;
+    let c1 = -a12;
+    let c2 = 1.0 - a22;
+    let b1 = (-2.0 * s / w2) * c1 + (-1.0 / w2) * c2;
+    let b2 = c1;
+    ([a11, a12, a21, a22], [b1, b2])
+}
+
+/// One pinned mode's precomputed oscillator and running state.
+struct PinMode {
+    /// Mode index in the dynamics model. The capture block for the slot with
+    /// this index carries the mode's residual (see `residual_for_slot`).
+    mode: usize,
+    pin_mass: f32,
+    neg_omega2: f32,     // -ω_b²
+    two_zeta_omega: f32, // 2ζω_b
+    frame_row: Vec<f32>, // length n_slots: projects slot kinematics → mode
+    lift_row: Vec<f32>,  // length n_slots: F⁺ row lifting mode torque → slots
+    // DC-cycle transition x' = Ad·x + Bd·a_cmd (ZOH forcing).
+    a11: f32,
+    a12: f32,
+    a21: f32,
+    a22: f32,
+    b1: f32,
+    b2: f32,
+    // Predictor-lead transition over lead_s, same ZOH form as the cycle
+    // advance: dropping the forcing half would leave τ_pin carrying a term
+    // proportional to commanded accel instead of vanishing at cruise.
+    l11: f32,
+    l12: f32,
+    l21: f32,
+    l22: f32,
+    lb1: f32,
+    lb2: f32,
+    dphase: f32, // ω_d·dt phasor advance per cycle
+    // Predicted belt deflection (mm) and its rate (mm/s).
+    d: f32,
+    v: f32,
+    // Residual demodulator: predictor phasor angle and the low-passed
+    // in-phase/quadrature components of the mode-projected following error.
+    theta: f32,
+    res_re: f32,
+    res_im: f32,
+}
+
+/// Per-mode pin-rotor (mode A) oscillator bank. All transition coefficients
+/// are precomputed at model install; the hot path only advances the fixed
+/// state and writes into the preallocated slot-torque buffer.
+#[derive(Default)]
+pub(super) struct PinState {
+    modes: Vec<PinMode>,
+    lp_alpha: f32,         // residual low-pass coefficient dt/τ
+    slot_torque: Vec<f32>, // reused each cycle (sized at build)
+    prev_streaming: bool,
+}
+
+impl PinState {
+    /// Residual demodulator low-pass time constant.
+    const RES_TAU_S: f64 = 0.25;
+    /// Physical ceiling on the demodulated residual (mm). The belt-resonance
+    /// following error is a sub-mm ring; anything past this is a numeric
+    /// runaway, so the accumulator saturates here rather than blowing up.
+    const RES_CEIL_MM: f32 = 10.0;
+
+    /// Build the bank for `model`, precomputing every pinned mode's exact
+    /// transition coefficients from ω_b, ζ, the DC cycle, and the lead.
+    pub(super) fn build(model: &DynamicsModel, cycle_ns: i64) -> Self {
+        let n_slots = model.n_slots;
+        let dt = cycle_ns as f64 * 1e-9;
+        // Pin lead is broadcast identically across slots.
+        let lead_s = model.pin_lead_us.first().copied().unwrap_or(0.0) * 1e-6;
+        let mut modes = Vec::new();
+        for k in 0..model.n_modes {
+            if !model.pin_active(k) {
+                continue;
+            }
+            // pin_active(k) guarantees compliance(k) > 0.
+            let omega = 1.0 / f64::from(model.compliance(k)).sqrt();
+            let zeta = f64::from(model.pin_zeta[k]);
+            let (ad, bd) = osc_zoh(omega, zeta, dt);
+            let (ld, lbd) = osc_zoh(omega, zeta, lead_s);
+            // Residual demod reference: always ω_b. Referencing the ring
+            // frequency ω_d = ω√(1-ζ²) biases the readout as ζ grows (at
+            // ζ=0.9 the demod would sit at 0.436·ω — 122 Hz off a tone at
+            // f_b — and the low-pass averages the beat to zero, reading
+            // "silence" instead of the surviving ring). Sweep tones and the
+            // physical mode both live at ω_b; the demod must too.
+            let wd = omega;
+            modes.push(PinMode {
+                mode: k,
+                pin_mass: model.pin_mass[k],
+                neg_omega2: -(omega * omega) as f32,
+                two_zeta_omega: (2.0 * zeta * omega) as f32,
+                frame_row: model.frame_row(k).to_vec(),
+                lift_row: model.pin_lift_row(k).to_vec(),
+                a11: ad[0] as f32,
+                a12: ad[1] as f32,
+                a21: ad[2] as f32,
+                a22: ad[3] as f32,
+                b1: bd[0] as f32,
+                b2: bd[1] as f32,
+                l11: ld[0] as f32,
+                l12: ld[1] as f32,
+                l21: ld[2] as f32,
+                l22: ld[3] as f32,
+                lb1: lbd[0] as f32,
+                lb2: lbd[1] as f32,
+                dphase: (wd * dt) as f32,
+                d: 0.0,
+                v: 0.0,
+                theta: 0.0,
+                res_re: 0.0,
+                res_im: 0.0,
+            });
+        }
+        let lp_alpha = if modes.is_empty() {
+            0.0
+        } else {
+            // Leaky-integrator pole is 1-α; α must stay inside (0,1] or the
+            // accumulator diverges (α≥2 flips sign every cycle and blows up).
+            (dt / Self::RES_TAU_S).clamp(f64::MIN_POSITIVE, 1.0) as f32
+        };
+        Self {
+            modes,
+            lp_alpha,
+            slot_torque: vec![0.0; n_slots],
+            prev_streaming: false,
+        }
+    }
+
+    /// True when at least one mode runs in pin-rotor mode.
+    pub(super) fn active(&self) -> bool {
+        !self.modes.is_empty()
+    }
+
+    /// Restart every oscillator clean — used on a model swap, torque
+    /// disable, or a discard that re-anchors the commanded frame. A buzz no
+    /// longer resets the bank: pinned modes run through it (see `step`).
+    pub(super) fn reset(&mut self) {
+        for m in &mut self.modes {
+            m.d = 0.0;
+            m.v = 0.0;
+            m.theta = 0.0;
+            m.res_re = 0.0;
+            m.res_im = 0.0;
+        }
+        self.prev_streaming = false;
+    }
+
+    /// Advance every pinned mode one DC cycle and refill the slot-torque
+    /// buffer. `acc_drive`/`ferr_drive` are drive-frame per-slot commanded
+    /// acceleration (mm/s²) and following error (mm). During a buzz the
+    /// analytic buzz acceleration already rides in `acc_drive` (the endpoint
+    /// writes the buzz oscillator's exact `accel_rel` sample into the
+    /// commanded-accel regressor for every driven slot). That analytic accel
+    /// is `a_buzz = -ω(t)²·x_buzz` plus the chirp-rate/envelope terms, which
+    /// are negligible for the ≤10 Hz/s sweeps used here — so the pinned modes
+    /// keep integrating with forcing = trajectory accel (zero while buzzing —
+    /// no ring piece) + buzz accel, and the pin torque and residual
+    /// demodulator stay live. The state re-anchors on the
+    /// motion-inactive→active edge (which a buzz onset is, since a buzz only
+    /// arms from standstill).
+    pub(super) fn step(&mut self, acc_drive: &[f32], ferr_drive: &[f32], streaming: bool) {
+        for t in &mut self.slot_torque {
+            *t = 0.0;
+        }
+        if streaming && !self.prev_streaming {
+            for m in &mut self.modes {
+                m.d = 0.0;
+                m.v = 0.0;
+                m.theta = 0.0;
+            }
+        }
+        self.prev_streaming = streaming;
+        let alpha = self.lp_alpha;
+        for m in &mut self.modes {
+            let mut a_cmd = 0.0f32;
+            for (f, a) in m.frame_row.iter().zip(acc_drive) {
+                a_cmd += f * a;
+            }
+            // Predictor lead: advance the state over the lead window with the
+            // same ZOH forcing the cycle advance uses. τ_pin is m_L·d̈, and
+            // under ZOH d̈(t+lead) reads the held a_cmd, so the forcing term
+            // stays unadvanced while the state does not. Dropping Bd here
+            // leaves τ_pin ≈ 0.14·m_L·a at 130 Hz / 600 µs during any
+            // sustained accel, where a statically deflected belt means the
+            // pin must contribute exactly nothing.
+            let d_lead = m.l11 * m.d + m.l12 * m.v + m.lb1 * a_cmd;
+            let v_lead = m.l21 * m.d + m.l22 * m.v + m.lb2 * a_cmd;
+            let tau_pin = m.pin_mass * (m.neg_omega2 * d_lead - m.two_zeta_omega * v_lead - a_cmd);
+            // Lift the mode torque to slots through F⁺ (lift_row), NOT Fᵀ
+            // (frame_row): the pin torque's mode-space effect is F·slot, so a
+            // plain Fᵀ lift is attenuated by F·Fᵀ (0.25·I on the AWD CoreXY
+            // frame ⇒ 4× under). F⁺ = Fᵀ(FFᵀ)⁻¹ makes F·slot = τ_pin exactly.
+            for (t, f) in self.slot_torque.iter_mut().zip(&m.lift_row) {
+                *t += f * tau_pin;
+            }
+            // Residual: mode-projected following error demodulated against the
+            // predictor phasor (cos θ, -sin θ), 1st-order low-pass.
+            let mut ferr_mode = 0.0f32;
+            for (f, e) in m.frame_row.iter().zip(ferr_drive) {
+                ferr_mode += f * e;
+            }
+            let (sin, cos) = m.theta.sin_cos();
+            m.res_re += alpha * (ferr_mode * cos - m.res_re);
+            m.res_im += alpha * (ferr_mode * -sin - m.res_im);
+            m.res_re = m.res_re.clamp(-Self::RES_CEIL_MM, Self::RES_CEIL_MM);
+            m.res_im = m.res_im.clamp(-Self::RES_CEIL_MM, Self::RES_CEIL_MM);
+            // Advance one DC cycle with ZOH forcing, then the phasor.
+            let d_next = m.a11 * m.d + m.a12 * m.v + m.b1 * a_cmd;
+            let v_next = m.a21 * m.d + m.a22 * m.v + m.b2 * a_cmd;
+            m.d = d_next;
+            m.v = v_next;
+            m.theta += m.dphase;
+            if m.theta >= std::f32::consts::TAU {
+                m.theta -= std::f32::consts::TAU;
+            }
+        }
+    }
+
+    /// Pin torque contribution for `slot` (0 when no mode is pinned).
+    pub(super) fn slot_torque_at(&self, slot: usize) -> f32 {
+        self.slot_torque.get(slot).copied().unwrap_or(0.0)
+    }
+
+    /// Residual (in-phase, quadrature) for the pinned mode whose index equals
+    /// `slot`; (0, 0) when that mode is not pinned. The capture stream carries
+    /// each mode's residual on the slot block of the same index.
+    pub(super) fn residual_for_slot(&self, slot: usize) -> (f32, f32) {
+        for m in &self.modes {
+            if m.mode == slot {
+                return (m.res_re, m.res_im);
+            }
+        }
+        (0.0, 0.0)
     }
 }

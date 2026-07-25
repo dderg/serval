@@ -605,6 +605,8 @@ fn main() {
                 torque_offset: 0,
                 accel_cmd: 0.0,
                 vel_cmd: 0.0,
+                pin_res_re: 0.0,
+                pin_res_im: 0.0,
             };
             let mut record = CaptureRecord::new(cycle_index, flags);
             record.drive_count = capture_drive_count as u8;

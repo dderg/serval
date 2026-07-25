@@ -1,9 +1,56 @@
-try:
-    from . import _motion_engine as _native
-except ImportError:
-    _native = None
+import importlib.util
+import os
+import pathlib
+import sys
 
 from . import engine_wait, structured_log
+
+
+def _load_native():
+    """Load the _motion_engine extension. Prefer the sibling build, then
+    $KALICO_NATIVE_DIR by explicit path (the CI image installs natives there
+    while bind-mounting the checkout over the image's tree). Returns None when
+    no build is present so `import klippy` succeeds in a native-less env; use
+    sites fail loudly instead."""
+    try:
+        from . import _motion_engine as native
+
+        return native
+    except ImportError:
+        pass
+    native_dir = os.environ.get("KALICO_NATIVE_DIR")
+    if native_dir:
+        path = pathlib.Path(native_dir) / "_motion_engine.so"
+        if path.is_file():
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    "klippy._motion_engine", path
+                )
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                sys.modules["klippy._motion_engine"] = module
+                return module
+            except ImportError:
+                pass
+    return None
+
+
+_native = _load_native()
+
+NATIVE_BUILD_HINT = "make -f Makefile.rust motion-engine"
+
+
+def native_class(name):
+    """Return a class exported by the native _motion_engine module, failing
+    loudly when the native build is absent so construction (not import) is the
+    point of failure."""
+    if _native is None:
+        raise RuntimeError(
+            "klippy requires the native _motion_engine module for %s; "
+            "build it with '%s'." % (name, NATIVE_BUILD_HINT)
+        )
+    return getattr(_native, name)
+
 
 _PRINT_ACTIVE_EVENTS = (
     "print_stats:start_printing",
@@ -215,7 +262,7 @@ class MotionEngineWrapper:
                 "motion_state_at: specify exactly one of clock= or print_time="
             )
         if print_time is not None:
-            clock = mcu.print_time_to_clock(print_time)
+            clock = mcu.get_clocksync().print_time_to_clock(print_time)
         return self._engine.motion_state_at_clock(
             mcu.get_engine_handle(), int(clock), self._reactor.monotonic()
         )

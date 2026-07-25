@@ -59,7 +59,7 @@ class SimRemoteEndstop:
                     " falling back to the wall clock"
                 )
         self.mcu.register_config_callback(self._build_config)
-        self.mcu.register_response(
+        self.mcu.get_command_channel().register_response(
             self._handle_trsync_state, "trsync_state", self.oid
         )
         self._endstop = RemoteMotionEndstop(

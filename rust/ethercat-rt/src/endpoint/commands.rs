@@ -804,7 +804,10 @@ pub(super) fn handle_set_dynamics_model(
     let dims_consistent = msg.frame.len() == modes * slots
         && msg.mass.len() == modes
         && msg.viscous.len() == modes
-        && msg.coulomb.len() == modes;
+        && msg.coulomb.len() == modes
+        && msg.compliance.len() == modes
+        && msg.pin_mass.len() == modes
+        && msg.pin_zeta.len() == modes;
     let rc = if slots != ctx.num_slaves || !dims_consistent {
         crate::rt_eprintln!(
             "ec-rt: SetDynamicsModel slots_count={} modes_count={} \
@@ -833,9 +836,16 @@ pub(super) fn handle_set_dynamics_model(
             &msg.mass,
             &msg.viscous,
             &msg.coulomb,
+            &msg.compliance,
+            &msg.pin_mass,
+            &msg.pin_zeta,
+            f64::from(msg.pin_lead_us),
             &pairs,
         ) {
             Ok(model) => {
+                // Size and reset the per-mode pin-rotor oscillator state to
+                // the freshly installed model; a model swap re-anchors it.
+                ctx.pin = super::cycle::PinState::build(&model, ctx.cycle_ns);
                 ctx.dynamics = Some(model);
                 0
             }

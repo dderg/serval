@@ -27,11 +27,12 @@ MOTION_ENGINE_DEST = klippy/_motion_engine.so
 # dylib's ad-hoc code signature on macOS and the kernel SIGKILLs every
 # process that imports it; a fresh inode keeps the linker's signature valid.
 motion-engine:
-	cd rust && cargo build -p motion-engine -p config-py --release \
-		--features motion-engine/extension-module,config-py/extension-module
-	rm -f $(MOTION_ENGINE_DEST) $(CONFIG_DOC_DEST)
+	cd rust && cargo build -p motion-engine -p config-py -p shaper-ident --release \
+		--features motion-engine/extension-module,config-py/extension-module,shaper-ident/extension-module
+	rm -f $(MOTION_ENGINE_DEST) $(CONFIG_DOC_DEST) $(SHAPER_IDENT_DEST)
 	cp $(MOTION_ENGINE_SRC) $(MOTION_ENGINE_DEST)
 	cp $(CONFIG_DOC_SRC) $(CONFIG_DOC_DEST)
+	cp $(SHAPER_IDENT_SRC) $(SHAPER_IDENT_DEST)
 
 # Config parser module — klippy/configfile.py refuses to start without it.
 # Small dependency graph (pyo3 + config-doc only), so python-only
@@ -47,6 +48,20 @@ config-doc:
 clean-config-doc:
 	rm -f $(CONFIG_DOC_DEST)
 	cd rust && cargo clean -p config-py
+
+# Resonance-identification numeric core — imported by
+# klippy/extras/shaper_calibrate.py by explicit path.
+SHAPER_IDENT_SRC  = $(CARGO_TARGET_DIR)/release/lib_shaper_ident.$(MOTION_ENGINE_EXT)
+SHAPER_IDENT_DEST = klippy/_shaper_ident.so
+
+shaper-ident:
+	cd rust && cargo build -p shaper-ident --release --features extension-module
+	rm -f $(SHAPER_IDENT_DEST)
+	cp $(SHAPER_IDENT_SRC) $(SHAPER_IDENT_DEST)
+
+clean-shaper-ident:
+	rm -f $(SHAPER_IDENT_DEST)
+	cd rust && cargo clean -p shaper-ident
 
 # Same module under the `snapshot` cargo profile: float-identical output,
 # much faster edit-rebuild cycle (no fat LTO, parallel codegen, incremental).
@@ -81,5 +96,5 @@ ethercat-stub:
 	cd rust && cargo build -p ethercat-rt --bin ethercat-rt-stub --release
 
 .PHONY: motion-engine motion-engine-fast clean-motion-engine \
-	config-doc clean-config-doc \
+	config-doc clean-config-doc shaper-ident clean-shaper-ident \
 	ethercat-endpoint-hw setcap-ethercat ethercat-stub

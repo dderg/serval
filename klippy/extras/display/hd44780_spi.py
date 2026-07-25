@@ -106,7 +106,9 @@ class hd44780_spi:
         # Reset (set positive direction ; enable display and hide cursor)
         init.append([0x06, 0x0C])
         for i, cmds in enumerate(init):
-            minclock = self.mcu.print_time_to_clock(print_time + i * 0.100)
+            minclock = self.mcu.get_clocksync().print_time_to_clock(
+                print_time + i * 0.100
+            )
             self.send(cmds, minclock=minclock)
         self.flush()
 

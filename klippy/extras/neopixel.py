@@ -98,7 +98,7 @@ class PrinterNeoPixel:
         # Instruct mcu to update the LEDs
         minclock = 0
         if print_time is not None:
-            minclock = self.mcu.print_time_to_clock(print_time)
+            minclock = self.mcu.get_clocksync().print_time_to_clock(print_time)
         scmd = self.neopixel_send_cmd.send
         if self.printer.get_start_args().get("debugoutput") is not None:
             return

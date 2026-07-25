@@ -475,6 +475,13 @@ pub fn bringup(args: Args) -> EndpointCtx {
         jump_log_counts,
     } = columns;
 
+    // The dynamics profile is fitted in the drive frame, so the model is
+    // evaluated on drive-frame vectors; the signs never change after bringup.
+    let drive_dirs: Vec<f32> = cmd_counts_per_mm
+        .iter()
+        .map(|c| c.signum() as f32)
+        .collect();
+
     EndpointCtx {
         server,
         drive,
@@ -491,6 +498,13 @@ pub fn bringup(args: Args) -> EndpointCtx {
         cycle_ns,
         group_delay_ns,
         telemetry_period,
+        pin: dynamics
+            .as_ref()
+            .map_or_else(super::cycle::PinState::default, |m| {
+                super::cycle::PinState::build(m, cycle_ns)
+            }),
+        drive_dirs,
+        drive_scratch: super::cycle::DriveScratch::new(num_slaves),
         dynamics,
         run_limits,
         rings,

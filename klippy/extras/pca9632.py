@@ -54,7 +54,11 @@ class PCA9632:
     def update_leds(self, led_state, print_time):
         minclock = 0
         if print_time is not None:
-            minclock = self.i2c.get_mcu().print_time_to_clock(print_time)
+            minclock = (
+                self.i2c.get_mcu()
+                .get_clocksync()
+                .print_time_to_clock(print_time)
+            )
 
         color = [int(v * 255.0 + 0.5) for v in led_state[0]]
         led0, led1, led2, led3 = [color[idx] for idx in self.color_map]

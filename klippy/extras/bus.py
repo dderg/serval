@@ -8,7 +8,7 @@ from klippy import mcu
 
 def resolve_bus_name(mcu, param, bus):
     # Find enumerations for the given bus
-    enumerations = mcu.get_enumerations()
+    enumerations = mcu.get_command_channel().get_msgparser().get_enumerations()
     enums = enumerations.get(param, enumerations.get("bus"))
     if enums is None:
         if bus is None:
@@ -25,7 +25,7 @@ def resolve_bus_name(mcu, param, bus):
     if bus not in enums:
         raise ppins.error("Unknown %s '%s'" % (param, bus))
     # Check for reserved bus pins
-    constants = mcu.get_constants()
+    constants = mcu.get_command_channel().get_msgparser().get_constants()
     reserve_pins = constants.get("BUS_PINS_%s" % (bus,), None)
     pin_resolver = ppins.get_pin_resolver(mcu_name)
     if reserve_pins is not None:

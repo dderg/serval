@@ -19,6 +19,7 @@ members = [
     "mcu-protocol",
     "ethercat-rt",
     "piece-sink-harness",
+    "shaper-ident",
 ]
 exclude = ["gcode/fuzz", "snapshot-viewer", "motion-playground"]
 resolver = "2"

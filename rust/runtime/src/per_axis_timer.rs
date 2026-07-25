@@ -1,7 +1,5 @@
 #![allow(unsafe_code)]
 
-use core::sync::atomic::{AtomicU32, Ordering};
-
 use crate::step_queue::{N_AXIS_STEP_QUEUES, peek as queue_peek, pop as queue_pop};
 
 pub const STEP_OUTPUT_DISABLE: u32 = u32::MAX;
@@ -10,26 +8,80 @@ const DUE_WINDOW_CYCLES: i32 = 0;
 
 pub const MAX_STEPS_PER_EVENT: u32 = 32;
 
-static STEPOUT_MAX_LATE_CYCLES: AtomicU32 = AtomicU32::new(0);
-static STEPOUT_LATE_COUNT: AtomicU32 = AtomicU32::new(0);
-static STEPOUT_MAX_DRAINED: AtomicU32 = AtomicU32::new(0);
+// Late/drain telemetry. Process-global atomics on the real target (single RT
+// context); thread-local on host (tests / `host` feature) so parallel tests
+// stay isolated, mirroring the per-thread `test_hooks` state below.
+#[cfg(not(any(test, feature = "host")))]
+mod stepout {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    static MAX_LATE: AtomicU32 = AtomicU32::new(0);
+    static LATE_COUNT: AtomicU32 = AtomicU32::new(0);
+    static MAX_DRAINED: AtomicU32 = AtomicU32::new(0);
+
+    pub(super) fn max_late() -> u32 {
+        MAX_LATE.load(Ordering::Relaxed)
+    }
+    pub(super) fn set_max_late(v: u32) {
+        MAX_LATE.store(v, Ordering::Relaxed);
+    }
+    pub(super) fn late_count() -> u32 {
+        LATE_COUNT.load(Ordering::Relaxed)
+    }
+    pub(super) fn set_late_count(v: u32) {
+        LATE_COUNT.store(v, Ordering::Relaxed);
+    }
+    pub(super) fn max_drained() -> u32 {
+        MAX_DRAINED.load(Ordering::Relaxed)
+    }
+    pub(super) fn set_max_drained(v: u32) {
+        MAX_DRAINED.store(v, Ordering::Relaxed);
+    }
+}
+
+#[cfg(any(test, feature = "host"))]
+mod stepout {
+    use core::cell::Cell;
+
+    std::thread_local! {
+        static MAX_LATE: Cell<u32> = const { Cell::new(0) };
+        static LATE_COUNT: Cell<u32> = const { Cell::new(0) };
+        static MAX_DRAINED: Cell<u32> = const { Cell::new(0) };
+    }
+
+    pub(super) fn max_late() -> u32 {
+        MAX_LATE.with(Cell::get)
+    }
+    pub(super) fn set_max_late(v: u32) {
+        MAX_LATE.with(|c| c.set(v));
+    }
+    pub(super) fn late_count() -> u32 {
+        LATE_COUNT.with(Cell::get)
+    }
+    pub(super) fn set_late_count(v: u32) {
+        LATE_COUNT.with(|c| c.set(v));
+    }
+    pub(super) fn max_drained() -> u32 {
+        MAX_DRAINED.with(Cell::get)
+    }
+    pub(super) fn set_max_drained(v: u32) {
+        MAX_DRAINED.with(|c| c.set(v));
+    }
+}
 
 fn record_lateness(now: u32, cycle_abs: u32, threshold: u32) {
     let late_cycles = now.wrapping_sub(cycle_abs);
     if late_cycles > threshold {
-        let count = STEPOUT_LATE_COUNT.load(Ordering::Relaxed);
-        STEPOUT_LATE_COUNT.store(count.wrapping_add(1), Ordering::Relaxed);
-        let prev = STEPOUT_MAX_LATE_CYCLES.load(Ordering::Relaxed);
-        if late_cycles > prev {
-            STEPOUT_MAX_LATE_CYCLES.store(late_cycles, Ordering::Relaxed);
+        stepout::set_late_count(stepout::late_count().wrapping_add(1));
+        if late_cycles > stepout::max_late() {
+            stepout::set_max_late(late_cycles);
         }
     }
 }
 
 fn record_drained(count: u32) {
-    let prev = STEPOUT_MAX_DRAINED.load(Ordering::Relaxed);
-    if count > prev {
-        STEPOUT_MAX_DRAINED.store(count, Ordering::Relaxed);
+    if count > stepout::max_drained() {
+        stepout::set_max_drained(count);
     }
 }
 
@@ -52,9 +104,9 @@ pub extern "C" fn kalico_stepout_late_get(
     out_max_drained: *mut u32,
 ) {
     unsafe {
-        *out_max_late = STEPOUT_MAX_LATE_CYCLES.load(Ordering::Relaxed);
-        *out_late_count = STEPOUT_LATE_COUNT.load(Ordering::Relaxed);
-        *out_max_drained = STEPOUT_MAX_DRAINED.load(Ordering::Relaxed);
+        *out_max_late = stepout::max_late();
+        *out_late_count = stepout::late_count();
+        *out_max_drained = stepout::max_drained();
     }
 }
 
@@ -241,11 +293,15 @@ pub mod test_hooks {
         XDIRECT_EMITS.with(|c| core::mem::take(&mut *c.borrow_mut()))
     }
     pub fn take_late_stats() -> (u32, u32, u32) {
-        use core::sync::atomic::Ordering;
-        let max_late = super::STEPOUT_MAX_LATE_CYCLES.swap(0, Ordering::Relaxed);
-        let late_count = super::STEPOUT_LATE_COUNT.swap(0, Ordering::Relaxed);
-        let max_drained = super::STEPOUT_MAX_DRAINED.swap(0, Ordering::Relaxed);
-        (max_late, late_count, max_drained)
+        let stats = (
+            super::stepout::max_late(),
+            super::stepout::late_count(),
+            super::stepout::max_drained(),
+        );
+        super::stepout::set_max_late(0);
+        super::stepout::set_late_count(0);
+        super::stepout::set_max_drained(0);
+        stats
     }
     pub fn reset() {
         set_now(0);

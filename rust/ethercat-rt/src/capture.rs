@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -24,7 +24,7 @@ pub const CAPTURE_RING_CAPACITY: usize = 65536;
 
 pub const MAX_DRIVES: usize = EC_RT_MAX_SLAVES;
 pub const RECORD_PREFIX_SIZE: usize = 21;
-pub const DRIVE_BLOCK_SIZE: usize = 36;
+pub const DRIVE_BLOCK_SIZE: usize = 44;
 pub const MAX_RECORD_SIZE: usize = RECORD_PREFIX_SIZE + MAX_DRIVES * DRIVE_BLOCK_SIZE;
 
 #[must_use]
@@ -52,6 +52,8 @@ const DOFF_TORQUE_OFFSET: usize = 22;
 const DOFF_VELOCITY_ACTUAL: usize = 24;
 const DOFF_ACCEL_CMD: usize = 28;
 const DOFF_VEL_CMD: usize = 32;
+const DOFF_PIN_RES_RE: usize = 36;
+const DOFF_PIN_RES_IM: usize = 40;
 
 /// Flush to page cache only — live readers tail the file and never need
 /// fsync. A periodic `sync_data` here blocked >16s on SD-card GC and
@@ -74,6 +76,10 @@ pub struct DriveSample {
     pub torque_offset: i16,
     pub accel_cmd: f32,
     pub vel_cmd: f32,
+    /// In-phase / quadrature belt-resonance following-error residual for the
+    /// pinned mode of the same index (0 when the slot's mode is not pinned).
+    pub pin_res_re: f32,
+    pub pin_res_im: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -150,6 +156,8 @@ fn encode_drive(block: &mut [u8], d: &DriveSample) {
         .copy_from_slice(&d.velocity_actual.to_le_bytes());
     block[DOFF_ACCEL_CMD..DOFF_ACCEL_CMD + 4].copy_from_slice(&d.accel_cmd.to_le_bytes());
     block[DOFF_VEL_CMD..DOFF_VEL_CMD + 4].copy_from_slice(&d.vel_cmd.to_le_bytes());
+    block[DOFF_PIN_RES_RE..DOFF_PIN_RES_RE + 4].copy_from_slice(&d.pin_res_re.to_le_bytes());
+    block[DOFF_PIN_RES_IM..DOFF_PIN_RES_IM + 4].copy_from_slice(&d.pin_res_im.to_le_bytes());
 }
 
 pub fn encode_record(r: &CaptureRecord) -> ([u8; MAX_RECORD_SIZE], usize) {
@@ -213,6 +221,8 @@ pub fn header_json(cfg: &CaptureConfig) -> String {
         ("velocity_actual", "i32", p + DOFF_VELOCITY_ACTUAL),
         ("accel_cmd", "f32", p + DOFF_ACCEL_CMD),
         ("vel_cmd", "f32", p + DOFF_VEL_CMD),
+        ("pin_res_re", "f32", p + DOFF_PIN_RES_RE),
+        ("pin_res_im", "f32", p + DOFF_PIN_RES_IM),
     ] {
         if !channels.is_empty() {
             channels.push(',');
@@ -528,7 +538,7 @@ fn service_loop(control: Receiver<IoMsg>, spares: &Sender<RecordChannel>, capaci
                 let session = match open_session(&path) {
                     Ok(file) => {
                         let _ = reply.send(0);
-                        Some(run_session(file, header_json(&cfg), hook, records))
+                        Some(run_session(file, &path, header_json(&cfg), hook, records))
                     }
                     Err(rc) => {
                         let _ = reply.send(rc);
@@ -563,14 +573,78 @@ fn open_session(path: &PathBuf) -> Result<File, i32> {
 
 const WRITE_BUFFER_SIZE: usize = 256 * 1024;
 
+/// Write sink for the capture-io thread. A small enum (not `Box<dyn Write>`)
+/// so the per-record `write_all` in `run_session` stays one static code path
+/// with zero allocation per record; the RT thread never touches this.
+///
+/// Buffer placement: the `BufWriter` sits *under* the encoder
+/// (`Encoder<BufWriter<File>>`), never above it. zstd already coalesces the
+/// many tiny per-record inputs into its own block buffer, so a buffer above
+/// the encoder would only add copies without cutting syscalls. What benefits
+/// from buffering is the encoder's *output*: it emits variably-sized
+/// compressed blocks, and the 256 KiB `BufWriter` batches those into few large
+/// writes to the SD card — keeping write amplification sane. The raw path
+/// keeps the identical `BufWriter<File>` it always had, so `.scap` bytes are
+/// unchanged.
+enum Sink {
+    Raw(BufWriter<File>),
+    Zst(zstd::stream::write::Encoder<'static, BufWriter<File>>),
+}
+
+impl Sink {
+    /// A path ending `.zst` gets a zstd level-3 stream encoder; anything else
+    /// (`.scap`) stays a raw buffered file, byte-identical to before.
+    fn new(file: File, path: &Path) -> std::io::Result<Self> {
+        let buf = BufWriter::with_capacity(WRITE_BUFFER_SIZE, file);
+        if path.extension().and_then(|e| e.to_str()) == Some("zst") {
+            Ok(Sink::Zst(zstd::stream::write::Encoder::new(buf, 3)?))
+        } else {
+            Ok(Sink::Raw(buf))
+        }
+    }
+
+    /// Finish compression (zstd frame epilogue; no-op for raw) and flush the
+    /// remaining buffered bytes down to the file, so a following `sync_data`
+    /// makes the complete stream durable.
+    fn finish(self) -> std::io::Result<File> {
+        match self {
+            Sink::Raw(buf) => buf
+                .into_inner()
+                .map_err(std::io::IntoInnerError::into_error),
+            Sink::Zst(enc) => enc
+                .finish()?
+                .into_inner()
+                .map_err(std::io::IntoInnerError::into_error),
+        }
+    }
+}
+
+impl Write for Sink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Sink::Raw(w) => w.write(buf),
+            Sink::Zst(w) => w.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Sink::Raw(w) => w.flush(),
+            Sink::Zst(w) => w.flush(),
+        }
+    }
+}
+
 fn run_session(
     file: File,
+    path: &Path,
     header: String,
     hook: WriterHook,
     rx: Receiver<CaptureRecord>,
 ) -> Result<u64, (u64, String)> {
-    let mut file = BufWriter::with_capacity(WRITE_BUFFER_SIZE, file);
-    file.write_all(header.as_bytes())
+    let mut sink =
+        Sink::new(file, path).map_err(|e| (0u64, format!("capture encoder init: {e}")))?;
+    sink.write_all(header.as_bytes())
         .map_err(|e| (0u64, format!("capture header write: {e}")))?;
     match hook {
         WriterHook::None => {}
@@ -590,7 +664,7 @@ fn run_session(
         match rx.recv_timeout(WRITER_RECV_TIMEOUT) {
             Ok(r) => {
                 let (buf, size) = encode_record(&r);
-                file.write_all(&buf[..size])
+                sink.write_all(&buf[..size])
                     .map_err(|e| (written, format!("capture record write: {e}")))?;
                 written += 1;
             }
@@ -598,15 +672,16 @@ fn run_session(
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
         if last_flush.elapsed() >= WRITER_FLUSH_INTERVAL {
-            file.flush()
+            sink.flush()
                 .map_err(|e| (written, format!("capture flush: {e}")))?;
             last_flush = Instant::now();
         }
     }
-    file.flush()
-        .map_err(|e| (written, format!("capture final flush: {e}")))?;
-    file.get_ref()
-        .sync_data()
+    // finish() flushes the encoder epilogue / BufWriter, then fsync the file.
+    let file = sink
+        .finish()
+        .map_err(|e| (written, format!("capture finalize: {e}")))?;
+    file.sync_data()
         .map_err(|e| (written, format!("capture final fsync: {e}")))?;
     Ok(written)
 }
@@ -630,7 +705,7 @@ fn compose_outcome(
         Err((n, _)) => n,
     };
     if result != 0 {
-        let failed = path.with_extension("failed.scap");
+        let failed = failed_capture_path(path);
         if std::fs::rename(path, &failed).is_err() {
             result = ERR_CAPTURE_FILE;
         }
@@ -639,6 +714,21 @@ fn compose_outcome(
         result,
         samples,
         overflow_cycle,
+    }
+}
+
+/// Rename target for a failed capture, preserving the real extension so a
+/// compressed capture keeps its `.zst` suffix (readers detect compression by
+/// magic, but the name must still round-trip through decompressors and globs):
+/// `foo.scap` -> `foo.failed.scap`, `foo.scap.zst` -> `foo.failed.scap.zst`.
+fn failed_capture_path(path: &Path) -> PathBuf {
+    if path.extension().and_then(|e| e.to_str()) == Some("zst") {
+        let renamed = path.with_extension("").with_extension("failed.scap");
+        let mut name = renamed.into_os_string();
+        name.push(".zst");
+        PathBuf::from(name)
+    } else {
+        path.with_extension("failed.scap")
     }
 }
 
