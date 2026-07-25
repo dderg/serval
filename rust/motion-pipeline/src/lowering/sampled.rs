@@ -255,6 +255,7 @@ impl Sampler<'_> {
         ua: f64,
         ub: f64,
         tol: FitTol,
+        deriv_scale: f64,
     ) -> BezierPiece {
         let h = tb - ta;
         let mono_u = self
@@ -264,7 +265,14 @@ impl Sampler<'_> {
                 let sb = self.axis_state_side(axis, tb, true, KnotSide::End);
                 quintic_in_u(sa, sb, h)
             });
-        truncated_piece(&mono_u, ua, ub, h, FIT_TRUNC_POS_FACTOR * tol.pos_mm)
+        truncated_piece(
+            &mono_u,
+            ua,
+            ub,
+            h,
+            FIT_TRUNC_POS_FACTOR * tol.pos_mm,
+            deriv_scale,
+        )
     }
 }
 

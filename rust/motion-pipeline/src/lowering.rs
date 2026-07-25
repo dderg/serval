@@ -9,7 +9,7 @@ pub(crate) use ladder::{
     FIT_TRUNC_POS_FACTOR, LADDER_PROBES_U, ladder_fit, quintic_in_u, truncated_piece,
 };
 
-use geometry::{Move, MoveVelocity, SurfaceTransform};
+use geometry::{FollowerDemand, Move, MoveVelocity, SurfaceTransform};
 use nurbs::ScalarNurbs;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 #[cfg(test)]
@@ -60,6 +60,33 @@ pub struct FitTol {
     /// planner never asked for. Only accel-feedforward consumers (EtherCAT
     /// servos) can tell; steppers just follow positions.
     pub accel_mm_s2: f64,
+}
+
+/// Fit budgets are sized for the spatial axes. A follower's whole signal is
+/// its ratio times the path profile, so an unscaled budget is `1/r` looser
+/// for it in relative terms — visible as flow ripple once a derivative-gain
+/// stage (pressure advance) turns the tolerated acceleration error into
+/// velocity error. The budget therefore scales with the follower's peak
+/// ratio, floored so a near-zero demand (travel) cannot collapse it and
+/// force bottomless subdivision of an already-trivial track.
+const FOLLOWER_TOL_SCALE_MIN: f64 = 1e-2;
+
+impl FitTol {
+    pub(crate) fn scaled(self, factor: f64) -> Self {
+        Self {
+            pos_mm: self.pos_mm * factor,
+            accel_mm_s2: self.accel_mm_s2 * factor,
+        }
+    }
+}
+
+pub(crate) fn follower_tol_scale(followers: &[FollowerDemand], axis: usize) -> f64 {
+    followers
+        .iter()
+        .find(|f| f.axis_index == axis)
+        .map_or(1.0, |f| {
+            f.max_abs_ratio().clamp(FOLLOWER_TOL_SCALE_MIN, 1.0)
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,21 +235,25 @@ pub fn lower_move_pieces(
     };
     // Each axis refines its own grid: an axis only pays for the knots its own
     // signal needs (a follower is blind to path curvature, z to planar motion),
-    // and the guarantee is unchanged — every piece of every axis is probed
-    // against the same tolerances.
+    // and each axis's pieces are probed against its own ratio-scaled budget.
     let mut axes_pieces: Vec<Vec<BezierPiece>> = vec![Vec::new(); n_axes];
-    let no_knots: Vec<f64> = Vec::new();
     for (axis, pieces) in axes_pieces.iter_mut().enumerate() {
         let driven = [axis];
-        // A follower sees the profile's jerk edges scaled by its ratio, far
-        // below the acceleration budget — seeding them would only cut its
-        // near-linear track into spatial-sized pieces.
-        let axis_knots = if axis < 3 { &knots } else { &no_knots };
+        let axis_scale = if axis < 3 {
+            1.0
+        } else {
+            follower_tol_scale(&gm.segment.followers, axis)
+        };
+        let axis_tol = fit_tol.scaled(axis_scale);
+        // The budget scales with the follower's ratio, so it sees the
+        // profile's jerk edges at the same relative size the spatial axes
+        // do — it needs the same regime knots to keep spans off them.
+        let axis_knots = &knots;
         let mut bounds = vec![0.0];
         let mut prev = 0.0;
         for &k in axis_knots.iter().chain(std::iter::once(&total_t)) {
             if k - prev > MIN_PIECE_DURATION_S {
-                refine_span(&sampler, &driven, fit_tol, prev, k, 0, &mut bounds);
+                refine_span(&sampler, &driven, axis_tol, prev, k, 0, &mut bounds);
                 prev = k;
             }
         }
@@ -232,7 +263,7 @@ pub fn lower_move_pieces(
                 continue;
             }
             let (ua, ub) = (t_start + ta, t_start + tb);
-            pieces.push(sampler.fitted_piece(axis, ta, tb, ua, ub, fit_tol));
+            pieces.push(sampler.fitted_piece(axis, ta, tb, ua, ub, axis_tol, axis_scale));
         }
     }
     pad_to_uniform_degree(&mut axes_pieces);
