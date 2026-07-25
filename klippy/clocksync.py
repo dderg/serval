@@ -6,11 +6,11 @@
 import logging
 import traceback
 
+from .extras.danger_options import get_danger_options
 from .motion_engine import native_class
 
 RTT_AGE = 0.000010 / (60.0 * 60.0)
 DECAY = 1.0 / 30.0
-SYNC_STABLE_FREQ_PPM = 5e-6
 SYNC_STABLE_SAMPLES = 3
 
 
@@ -22,8 +22,9 @@ class ClockSync:
         self.queries_pending = 0
         self.mcu_freq = 1.0
         self.clock_est = (0.0, 0.0, 0.0)
+        stable_ppm = get_danger_options().clock_sync_stable_ppm * 1e-6
         self._est = native_class("ClockSyncEstimator")(
-            DECAY, RTT_AGE, SYNC_STABLE_FREQ_PPM, SYNC_STABLE_SAMPLES
+            DECAY, RTT_AGE, stable_ppm, SYNC_STABLE_SAMPLES
         )
         self._clock_est_callback = None
 
