@@ -28,7 +28,7 @@ class DS18B20:
         )
         self._mcu = mcu.get_printer_mcu(self.printer, config.get("sensor_mcu"))
         self.oid = self._mcu.create_oid()
-        self._mcu.register_response(
+        self._mcu.get_command_channel().register_response(
             self._handle_ds18b20_response, "ds18b20_result", self.oid
         )
         self._mcu.register_config_callback(self._build_config)
@@ -69,9 +69,13 @@ class DS18B20:
             )
             return
 
-        next_clock = self._mcu.clock32_to_clock64(params["next_clock"])
+        next_clock = self._mcu.get_clocksync().clock32_to_clock64(
+            params["next_clock"]
+        )
         last_read_clock = next_clock - self._report_clock
-        last_read_time = self._mcu.clock_to_print_time(last_read_clock)
+        last_read_time = self._mcu.get_clocksync().clock_to_print_time(
+            last_read_clock
+        )
         self._callback(last_read_time, temp)
 
     def setup_minmax(self, min_temp, max_temp):

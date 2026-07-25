@@ -174,12 +174,12 @@ class ResetHelper:
         curtime = mcu.get_printer().get_reactor().monotonic()
         print_time = mcu.estimated_print_time(curtime)
         # Toggle reset
-        minclock = mcu.print_time_to_clock(print_time + 0.100)
+        minclock = mcu.get_clocksync().print_time_to_clock(print_time + 0.100)
         self.mcu_reset.update_digital_out(0, minclock=minclock)
-        minclock = mcu.print_time_to_clock(print_time + 0.200)
+        minclock = mcu.get_clocksync().print_time_to_clock(print_time + 0.200)
         self.mcu_reset.update_digital_out(1, minclock=minclock)
         # Force a delay to any subsequent commands on the command queue
-        minclock = mcu.print_time_to_clock(print_time + 0.300)
+        minclock = mcu.get_clocksync().print_time_to_clock(print_time + 0.300)
         self.mcu_reset.update_digital_out(1, minclock=minclock)
 
 

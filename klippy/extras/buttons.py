@@ -57,7 +57,7 @@ class MCU_buttons:
             % (self.oid, clock, rest_ticks, RETRANSMIT_COUNT, self.invert),
             is_init=True,
         )
-        self.mcu.register_response(
+        self.mcu.get_command_channel().register_response(
             self.handle_buttons_state, "buttons_state", self.oid
         )
 

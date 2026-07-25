@@ -53,8 +53,10 @@ if [ "$FAST" = 1 ]; then
 else
     make -f Makefile.rust motion-engine
 fi
+make -f Makefile.rust shaper-ident
 require klippy/_config_doc.so
 require klippy/_motion_engine.so
+require klippy/_shaper_ident.so
 
 if [ "$BENCH" = 1 ]; then
     if [ "$ETHERCAT" = auto ]; then

@@ -128,7 +128,7 @@ class SX1509(object):
         elif reg in self.reg_i_on_dict:
             # Byte
             data += [self.reg_i_on_dict[reg] & 0xFF]
-        clock = self._mcu.print_time_to_clock(print_time)
+        clock = self._mcu.get_clocksync().print_time_to_clock(print_time)
         self._i2c.i2c_write_noack(
             data, minclock=self._last_clock, reqclock=clock
         )

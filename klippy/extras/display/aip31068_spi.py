@@ -209,7 +209,9 @@ class aip31068_spi:
         curtime = self.printer.get_reactor().monotonic()
         print_time = self.mcu.estimated_print_time(curtime)
         for i, cmds in enumerate(DISPLAY_INIT_CMNDS):
-            minclock = self.mcu.print_time_to_clock(print_time + i * 0.100)
+            minclock = self.mcu.get_clocksync().print_time_to_clock(
+                print_time + i * 0.100
+            )
             self.send([cmds], minclock=minclock)
         self.flush()
 

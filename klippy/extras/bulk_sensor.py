@@ -7,6 +7,8 @@ import logging
 import struct
 import threading
 
+from ..motion_engine import native_class
+
 # This "bulk sensor" module facilitates the processing of sensor chip
 # measurements that do not require the host to respond with low
 # latency.  This module helps collect these measurements into batches
@@ -143,7 +145,9 @@ class BulkDataQueue:
         self.lock = threading.Lock()
         self.raw_samples = []
         # Register callback with mcu
-        mcu.register_response(self._handle_data, msg_name, oid)
+        mcu.get_command_channel().register_response(
+            self._handle_data, msg_name, oid
+        )
 
     def _handle_data(self, params):
         with self.lock:
@@ -183,31 +187,15 @@ class ClockSyncRegression:
     def __init__(self, mcu, chip_clock_smooth, decay=1.0 / 20.0):
         self.mcu = mcu
         self.chip_clock_smooth = chip_clock_smooth
-        self.decay = decay
+        self._reg = native_class("DecayRegression")(decay)
         self.last_chip_clock = self.last_exp_mcu_clock = 0.0
-        self.mcu_clock_avg = self.mcu_clock_variance = 0.0
-        self.chip_clock_avg = self.chip_clock_covariance = 0.0
 
     def reset(self, mcu_clock, chip_clock):
-        self.mcu_clock_avg = self.last_mcu_clock = mcu_clock
-        self.chip_clock_avg = chip_clock
-        self.mcu_clock_variance = self.chip_clock_covariance = 0.0
+        self._reg.reset(mcu_clock, chip_clock)
         self.last_chip_clock = self.last_exp_mcu_clock = 0.0
 
     def update(self, mcu_clock, chip_clock):
-        # Update linear regression
-        decay = self.decay
-        diff_mcu_clock = mcu_clock - self.mcu_clock_avg
-        self.mcu_clock_avg += decay * diff_mcu_clock
-        self.mcu_clock_variance = (1.0 - decay) * (
-            self.mcu_clock_variance + diff_mcu_clock**2 * decay
-        )
-        diff_chip_clock = chip_clock - self.chip_clock_avg
-        self.chip_clock_avg += decay * diff_chip_clock
-        self.chip_clock_covariance = (1.0 - decay) * (
-            self.chip_clock_covariance
-            + diff_mcu_clock * diff_chip_clock * decay
-        )
+        self._reg.update(mcu_clock, chip_clock)
 
     def set_last_chip_clock(self, chip_clock):
         base_mcu, base_chip, inv_cfreq = self.get_clock_translation()
@@ -217,13 +205,15 @@ class ClockSyncRegression:
         )
 
     def get_clock_translation(self):
-        inv_chip_freq = self.mcu_clock_variance / self.chip_clock_covariance
+        mcu_clock_avg = self._reg.x_avg
+        chip_clock_avg = self._reg.y_avg
+        inv_chip_freq = self._reg.x_variance / self._reg.xy_covariance
         if not self.last_chip_clock:
-            return self.mcu_clock_avg, self.chip_clock_avg, inv_chip_freq
+            return mcu_clock_avg, chip_clock_avg, inv_chip_freq
         # Find mcu clock associated with future chip_clock
         s_chip_clock = self.last_chip_clock + self.chip_clock_smooth
-        scdiff = s_chip_clock - self.chip_clock_avg
-        s_mcu_clock = self.mcu_clock_avg + scdiff * inv_chip_freq
+        scdiff = s_chip_clock - chip_clock_avg
+        s_mcu_clock = mcu_clock_avg + scdiff * inv_chip_freq
         # Calculate frequency to converge at future point
         mdiff = s_mcu_clock - self.last_exp_mcu_clock
         s_inv_chip_freq = mdiff / self.chip_clock_smooth
@@ -288,7 +278,7 @@ class FixedFreqReader:
 
     def _update_clock(self, is_reset=False):
         params = self.query_status_cmd.send([self.oid])
-        mcu_clock = self.mcu.clock32_to_clock64(params["clock"])
+        mcu_clock = self.mcu.get_clocksync().clock32_to_clock64(params["clock"])
         seq_diff = (params["next_sequence"] - self.last_sequence) & 0xFFFF
         self.last_sequence += seq_diff
         buffered = params["buffered"]

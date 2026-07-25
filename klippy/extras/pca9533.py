@@ -27,7 +27,11 @@ class PCA9533:
         ls0 = (white << 6) | (blue << 4) | (green << 2) | red
         minclock = 0
         if print_time is not None:
-            minclock = self.i2c.get_mcu().print_time_to_clock(print_time)
+            minclock = (
+                self.i2c.get_mcu()
+                .get_clocksync()
+                .print_time_to_clock(print_time)
+            )
         self.i2c.i2c_write_noack(
             [PCA9533_PLS0, ls0],
             minclock=minclock,

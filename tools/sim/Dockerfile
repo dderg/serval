@@ -68,10 +68,11 @@ COPY rust/ /kalico/rust/
 
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     --mount=type=cache,target=/root/.cargo/git,sharing=shared \
-    cargo build -p motion-engine -p config-py --release && \
+    cargo build -p motion-engine -p config-py -p shaper-ident --release && \
     mkdir -p /artifacts && \
     cp /kalico/rust/target/release/lib_motion_engine.so /artifacts/ && \
-    cp /kalico/rust/target/release/lib_config_doc.so /artifacts/
+    cp /kalico/rust/target/release/lib_config_doc.so /artifacts/ && \
+    cp /kalico/rust/target/release/lib_shaper_ident.so /artifacts/
 
 # --------------------------------------------------------------------
 # Stage 3 — firmware
@@ -185,6 +186,9 @@ COPY --from=rust-build \
 COPY --from=rust-build \
     /artifacts/lib_config_doc.so \
     /kalico/klippy/_config_doc.so
+COPY --from=rust-build \
+    /artifacts/lib_shaper_ident.so \
+    /kalico/klippy/_shaper_ident.so
 
 # Third-party plugins fetched during the firmware stage.
 COPY --from=firmware /kalico/tools/sim/third_party_repos/ \

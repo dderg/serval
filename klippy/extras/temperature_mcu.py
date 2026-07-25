@@ -83,7 +83,12 @@ class PrinterTemperatureMCU:
         self.debug_read_cmd = _mcu.lookup_query_command(
             "debug_read order=%c addr=%u", "debug_result val=%u"
         )
-        self.mcu_type = _mcu.get_constants().get("MCU", "")
+        self.mcu_type = (
+            _mcu.get_command_channel()
+            .get_msgparser()
+            .get_constants()
+            .get("MCU", "")
+        )
         # Run MCU specific configuration
         cfg_funcs = [
             ("rp2", self.config_rp2040),

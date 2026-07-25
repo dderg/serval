@@ -41,6 +41,8 @@ firmware/
 # never checked in. Keep klippy/ clean across macOS/Linux/Pi dev.
 klippy/_motion_engine*.so
 klippy/motion_engine*.dylib
+klippy/_config_doc*.so
+klippy/_shaper_ident*.so
 klippy/chelper/c_helper*.so
 klippy/chelper/c_helper*.so.dSYM/
 klippy/chelper/*.dylib

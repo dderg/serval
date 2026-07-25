@@ -128,10 +128,10 @@ class BLTouchEndstopWrapper:
     def send_cmd(self, cmd, duration=MIN_CMD_TIME):
         # Translate duration to ticks to avoid any secondary mcu clock skew
         mcu = self.mcu_pwm.get_mcu()
-        cmd_clock = mcu.print_time_to_clock(self.next_cmd_time)
+        cmd_clock = mcu.get_clocksync().print_time_to_clock(self.next_cmd_time)
         pulse = int((duration - MIN_CMD_TIME) / SIGNAL_PERIOD) * SIGNAL_PERIOD
         cmd_clock += mcu.seconds_to_clock(max(MIN_CMD_TIME, pulse))
-        end_time = mcu.clock_to_print_time(cmd_clock)
+        end_time = mcu.get_clocksync().clock_to_print_time(cmd_clock)
         # Schedule command followed by PWM disable
         self.mcu_pwm.set_pwm(self.next_cmd_time, Commands[cmd] / SIGNAL_PERIOD)
         self.mcu_pwm.set_pwm(end_time, 0.0)

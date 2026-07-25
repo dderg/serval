@@ -27,7 +27,9 @@ class MCU_pwm_cycle:
     def _build_config(self):
         curtime = self._mcu.get_printer().get_reactor().monotonic()
         printtime = self._mcu.estimated_print_time(curtime)
-        self._last_clock = self._mcu.print_time_to_clock(printtime + 0.200)
+        self._last_clock = self._mcu.get_clocksync().print_time_to_clock(
+            printtime + 0.200
+        )
         cycle_ticks = self._mcu.seconds_to_clock(self._cycle_time)
         if self._shutdown_value not in [0.0, 1.0]:
             raise self._mcu.get_printer().config_error(
@@ -69,7 +71,7 @@ class MCU_pwm_cycle:
         )
 
     def set_pwm_cycle(self, print_time, value, cycle_time):
-        clock = self._mcu.print_time_to_clock(print_time)
+        clock = self._mcu.get_clocksync().print_time_to_clock(print_time)
         minclock = self._last_clock
         # Send updated cycle_time if necessary
         cycle_ticks = self._mcu.seconds_to_clock(cycle_time)

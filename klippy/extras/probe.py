@@ -1,4 +1,5 @@
 import math
+from collections import namedtuple
 
 from klippy import pins
 from klippy.motion_endstop import MotionEndstop, allocate_provider_id
@@ -20,6 +21,54 @@ def calc_probe_z_result(values, method):
     if method != "average":
         raise ValueError("unknown samples_result '%s'" % (method,))
     return sum(values) / len(values)
+
+
+ProbeParams = namedtuple(
+    "ProbeParams",
+    [
+        "speed",
+        "lift_speed",
+        "sample_count",
+        "retract",
+        "tolerance",
+        "max_retries",
+        "method",
+    ],
+)
+
+
+class ProbeSampler:
+    def __init__(self, sample_fn, retract_fn):
+        self._sample = sample_fn
+        self._retract = retract_fn
+
+    def gather(self, gcmd, sample_count, tolerance=None, max_retries=0):
+        retries = 0
+        measured = []
+        while True:
+            z = self._sample()
+            measured.append(z)
+            if (
+                tolerance is not None
+                and max(measured) - min(measured) > tolerance
+            ):
+                if retries >= max_retries:
+                    raise gcmd.error("Probe samples exceed samples_tolerance")
+                gcmd.respond_info("Probe samples exceed tolerance. Retrying...")
+                retries += 1
+                measured = []
+            self._retract(z)
+            if len(measured) >= sample_count:
+                break
+        return measured
+
+    @staticmethod
+    def result(measured, method):
+        return calc_probe_z_result(measured, method)
+
+    @staticmethod
+    def stddev(measured, mean):
+        return (sum((v - mean) ** 2 for v in measured) / len(measured)) ** 0.5
 
 
 def validate_virtual_endstop_request(pin_params, axis):
@@ -184,10 +233,7 @@ class PrinterProbe:
         toolhead.move(newpos, lift_speed)
         toolhead.wait_moves()
 
-    def run_probe(self, gcmd):
-        toolhead = self.printer.lookup_object("toolhead")
-        homing_obj = self.printer.lookup_object("homing")
-        engine = self.printer.lookup_object("motion_engine")
+    def _parse_probe_params(self, gcmd):
         speed = gcmd.get_float("PROBE_SPEED", self.speed, above=0.0)
         lift_speed = gcmd.get_float("LIFT_SPEED", self.lift_speed, above=0.0)
         sample_count = gcmd.get_int("SAMPLES", self.samples, minval=1)
@@ -203,23 +249,40 @@ class PrinterProbe:
         method = gcmd.get("SAMPLES_RESULT", self.samples_result)
         if method not in ("median", "average"):
             raise gcmd.error("SAMPLES_RESULT must be median or average")
-        self._check_homed(gcmd, toolhead)
-        retries = 0
-        measured = []
-        while True:
-            z = self._probe_once(gcmd, toolhead, homing_obj, engine, speed)
-            measured.append(z)
-            if max(measured) - min(measured) > tolerance:
-                if retries >= max_retries:
-                    raise gcmd.error("Probe samples exceed samples_tolerance")
-                gcmd.respond_info("Probe samples exceed tolerance. Retrying...")
-                retries += 1
-                measured = []
+        return ProbeParams(
+            speed,
+            lift_speed,
+            sample_count,
+            retract,
+            tolerance,
+            max_retries,
+            method,
+        )
+
+    def _make_sampler(self, gcmd, toolhead, speed, retract, lift_speed):
+        homing_obj = self.printer.lookup_object("homing")
+        engine = self.printer.lookup_object("motion_engine")
+
+        def sample():
+            return self._probe_once(gcmd, toolhead, homing_obj, engine, speed)
+
+        def retract_move(z):
             self._retract(toolhead, z + retract, lift_speed)
-            if len(measured) >= sample_count:
-                break
+
+        return ProbeSampler(sample, retract_move)
+
+    def run_probe(self, gcmd):
+        toolhead = self.printer.lookup_object("toolhead")
+        params = self._parse_probe_params(gcmd)
+        self._check_homed(gcmd, toolhead)
+        sampler = self._make_sampler(
+            gcmd, toolhead, params.speed, params.retract, params.lift_speed
+        )
+        measured = sampler.gather(
+            gcmd, params.sample_count, params.tolerance, params.max_retries
+        )
         epos = list(toolhead.get_position()[:3])
-        epos[Z_AXIS] = calc_probe_z_result(measured, method)
+        epos[Z_AXIS] = ProbeSampler.result(measured, params.method)
         return epos
 
     def cmd_PROBE(self, gcmd):
@@ -236,8 +299,6 @@ class PrinterProbe:
 
     def cmd_PROBE_ACCURACY(self, gcmd):
         toolhead = self.printer.lookup_object("toolhead")
-        homing_obj = self.printer.lookup_object("homing")
-        engine = self.printer.lookup_object("motion_engine")
         speed = gcmd.get_float("PROBE_SPEED", self.speed, above=0.0)
         lift_speed = gcmd.get_float("LIFT_SPEED", self.lift_speed, above=0.0)
         sample_count = gcmd.get_int(
@@ -253,16 +314,11 @@ class PrinterProbe:
             " (samples=%d retract=%.3f speed=%.1f lift_speed=%.1f)"
             % (pos[0], pos[1], pos[2], sample_count, retract, speed, lift_speed)
         )
-        measured = []
-        for _ in range(sample_count):
-            z = self._probe_once(gcmd, toolhead, homing_obj, engine, speed)
-            measured.append(z)
-            self._retract(toolhead, z + retract, lift_speed)
-        average = calc_probe_z_result(measured, "average")
-        median = calc_probe_z_result(measured, "median")
-        sigma = (
-            sum((v - average) ** 2 for v in measured) / len(measured)
-        ) ** 0.5
+        sampler = self._make_sampler(gcmd, toolhead, speed, retract, lift_speed)
+        measured = sampler.gather(gcmd, sample_count)
+        average = ProbeSampler.result(measured, "average")
+        median = ProbeSampler.result(measured, "median")
+        sigma = ProbeSampler.stddev(measured, average)
         gcmd.respond_info(
             "probe accuracy results: maximum %.6f, minimum %.6f,"
             " range %.6f, average %.6f, median %.6f, standard deviation %.6f"

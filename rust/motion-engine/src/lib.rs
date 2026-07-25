@@ -20,11 +20,13 @@ pub use motion_core::seam_test_harness;
 
 use pyo3::prelude::*;
 
-use bridge::PyMotionEngine;
+use bridge::{PyClockSyncEstimator, PyDecayRegression, PyMotionEngine};
 
 #[pymodule]
 fn _motion_engine(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMotionEngine>()?;
+    m.add_class::<PyClockSyncEstimator>()?;
+    m.add_class::<PyDecayRegression>()?;
     #[cfg(feature = "snapshot")]
     m.add_function(wrap_pyfunction!(viz::pipeline_snapshot, m)?)?;
     Ok(())

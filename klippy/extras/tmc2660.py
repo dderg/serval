@@ -235,7 +235,11 @@ class MCU_TMC2660_SPI:
     def set_register(self, reg_name, val, print_time=None):
         minclock = 0
         if print_time is not None:
-            minclock = self.spi.get_mcu().print_time_to_clock(print_time)
+            minclock = (
+                self.spi.get_mcu()
+                .get_clocksync()
+                .print_time_to_clock(print_time)
+            )
         reg = self.name_to_reg[reg_name]
         msg = [((val >> 16) | reg) & 0xFF, (val >> 8) & 0xFF, val & 0xFF]
         with self.mutex:

@@ -98,7 +98,7 @@ class MCU_digital_out:
                     self._mcu._clocksync.dump_debug(),
                 )
             )
-        clock = self._mcu.print_time_to_clock(print_time)
+        clock = self._mcu.get_clocksync().print_time_to_clock(print_time)
         send_t0 = time.monotonic()
         self._set_cmd.send(
             [self._oid, clock, (not not value) ^ self._invert],
@@ -157,13 +157,19 @@ class MCU_pwm:
             )
         curtime = self._mcu.get_printer().get_reactor().monotonic()
         printtime = self._mcu.estimated_print_time(curtime)
-        self._last_clock = self._mcu.print_time_to_clock(printtime + 0.200)
+        self._last_clock = self._mcu.get_clocksync().print_time_to_clock(
+            printtime + 0.200
+        )
         cycle_ticks = self._mcu.seconds_to_clock(self._cycle_time)
         mdur_ticks = self._mcu.seconds_to_clock(self._max_duration)
         if mdur_ticks > MAX_SCHEDULE_TICKS:
             raise pins.error("PWM pin max duration too large")
         if self._hardware_pwm:
-            self._pwm_max = self._mcu.get_constant_float("PWM_MAX")
+            self._pwm_max = (
+                self._mcu.get_command_channel()
+                .get_msgparser()
+                .get_constant_float("PWM_MAX")
+            )
             self._mcu.request_move_queue_slot()
             self._oid = self._mcu.create_oid()
             self._mcu.add_config_cmd(
@@ -225,7 +231,7 @@ class MCU_pwm:
         if self._invert:
             value = 1.0 - value
         v = int(max(0.0, min(1.0, value)) * self._pwm_max + 0.5)
-        clock = self._mcu.print_time_to_clock(print_time)
+        clock = self._mcu.get_clocksync().print_time_to_clock(print_time)
         self._set_cmd.send(
             [self._oid, clock, v], minclock=self._last_clock, reqclock=clock
         )
@@ -278,7 +284,11 @@ class MCU_adc:
         )
         clock = self._mcu.get_query_slot(self._oid)
         sample_ticks = self._mcu.seconds_to_clock(self._sample_time)
-        mcu_adc_max = self._mcu.get_constant_float("ADC_MAX")
+        mcu_adc_max = (
+            self._mcu.get_command_channel()
+            .get_msgparser()
+            .get_constant_float("ADC_MAX")
+        )
         max_adc = self._sample_count * mcu_adc_max
         self._inv_max_adc = 1.0 / max_adc
         self._report_clock = self._mcu.seconds_to_clock(self._report_time)
@@ -301,15 +311,19 @@ class MCU_adc:
             ),
             is_init=True,
         )
-        self._mcu.register_response(
+        self._mcu.get_command_channel().register_response(
             self._handle_analog_in_state, "analog_in_state", self._oid
         )
 
     def _handle_analog_in_state(self, params):
         last_value = params["value"] * self._inv_max_adc
-        next_clock = self._mcu.clock32_to_clock64(params["next_clock"])
+        next_clock = self._mcu.get_clocksync().clock32_to_clock64(
+            params["next_clock"]
+        )
         last_read_clock = next_clock - self._report_clock
-        last_read_time = self._mcu.clock_to_print_time(last_read_clock)
+        last_read_time = self._mcu.get_clocksync().clock_to_print_time(
+            last_read_clock
+        )
         self._last_state = (last_value, last_read_time)
         if self._callback is not None:
             self._callback(last_read_time, last_value)

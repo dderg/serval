@@ -21,6 +21,14 @@ MULTI_OFF = 0
 MULTI_FIRST = 1
 MULTI_ON = 2
 
+ATTACH_PROBE_SCRIPT = (
+    "MOVE_TO_APPROACH_PROBE\nMOVE_TO_DOCK_PROBE\nMOVE_TO_EXTRACT_PROBE\n"
+)
+
+DETACH_PROBE_SCRIPT = (
+    "MOVE_TO_INSERT_PROBE\nMOVE_TO_DOCK_PROBE\nMOVE_TO_DETACH_PROBE\n"
+)
+
 HINT_VERIFICATION_ERROR = """
 {0}: A probe attachment verification method
 was not provided. A method to verify the probes attachment
@@ -160,6 +168,152 @@ class ProbeState:
         return self.last_verify_state
 
 
+class DockGeometry:
+    def __init__(self, dock_position, safe_dock_distance, error):
+        self.dock_position = dock_position
+        self.safe_dock_distance = safe_dock_distance
+        self.error = error
+
+    @staticmethod
+    def get_point_on_vector(point, angle, magnitude=1):
+        x = point[0] - magnitude * cos(angle)
+        y = point[1] - magnitude * sin(angle)
+        return (x, y)
+
+    @staticmethod
+    def get_distance(point1, point2):
+        x1, y1 = point1[:2]
+        x2, y2 = point2[:2]
+        return hypot(x2 - x1, y2 - y1)
+
+    @staticmethod
+    def get_angle(point1, point2):
+        x1, y1 = point1[:2]
+        x2, y2 = point2[:2]
+        return atan2(y2 - y1, x2 - x1) + pi
+
+    @staticmethod
+    def get_closest_point(target_point, points):
+        if not points:
+            return None
+        x_target, y_target = target_point[:2]
+        distances = [hypot(x - x_target, y - y_target) for x, y in points]
+        index = distances.index(min(distances))
+        return points[index]
+
+    @staticmethod
+    def get_tangent_points(radius, center, point2):
+        cx, cy = center[:2]
+        d = DockGeometry.get_distance(center, point2)
+        angle = DockGeometry.get_angle(center, point2)
+        angle = angle - pi
+        if d < radius:
+            return None
+        dev = acos(radius / d)
+        x_tangent1 = cx + radius * cos(angle + dev)
+        y_tangent1 = cy + radius * sin(angle + dev)
+        x_tangent2 = cx + radius * cos(angle - dev)
+        y_tangent2 = cy + radius * sin(angle - dev)
+        return [(x_tangent1, y_tangent1), (x_tangent2, y_tangent2)]
+
+    @staticmethod
+    def arc_points(point1, point2, center, clockwise):
+        x1, y1 = point1[:2]
+        x2, y2 = point2[:2]
+        cx, cy = center[:2]
+        r_P = x1 - cx
+        r_Q = y1 - cy
+        rt_Alpha = x2 - cx
+        rt_Beta = y2 - cy
+        angular_travel = atan2(
+            r_P * rt_Beta - r_Q * rt_Alpha, r_P * rt_Alpha + r_Q * rt_Beta
+        )
+
+        if angular_travel < 0.0:
+            angular_travel += 2.0 * pi
+        if clockwise:
+            angular_travel -= 2.0 * pi
+        radius = hypot(r_P, r_Q)
+        flat_mm = radius * angular_travel
+
+        mm_of_travel = fabs(flat_mm)
+        segments = max(1.0, floor(mm_of_travel))
+
+        theta_per_segment = angular_travel / segments
+        coords = []
+
+        for i in range(1, int(segments)):
+            cos_Ti = cos(i * theta_per_segment)
+            sin_Ti = sin(i * theta_per_segment)
+            r_P = (x1 - cx) * cos_Ti - (y1 - cy) * sin_Ti
+            r_Q = (x1 - cx) * sin_Ti + (y1 - cy) * cos_Ti
+            coords.append((cx + r_P, cy + r_Q))
+
+        coords.append(point2[:2])
+        return coords
+
+    def get_closest_exitpoint(self, point1, point2):
+        cx, cy = self.dock_position[:2]
+        if point1[:2] != [cx, cy]:
+            dx, dy = point1[0] - cx, point1[1] - cy
+            reference_point = point1[:2]
+        elif point2[:2] != [cx, cy]:
+            dx, dy = point2[0] - cx, point2[1] - cy
+            reference_point = point2[:2]
+        else:
+            raise self.error(
+                "_move_avoiding_dock : Unable to determine exit point"
+            )
+        d = hypot(dx, dy)
+        magnitude = self.safe_dock_distance + 10e-8
+        x1 = cx + magnitude * dx / d
+        y1 = cy + magnitude * dy / d
+        x2 = cx - magnitude * dx / d
+        y2 = cy - magnitude * dy / d
+        return self.get_closest_point(reference_point, [(x1, y1), (x2, y2)])
+
+    def get_intersect_points(self, point1, point2):
+        x1, y1 = point1[:2]
+        x2, y2 = point2[:2]
+        cx, cy = self.dock_position[:2]
+        r = self.safe_dock_distance - 10e-5  # fix floating point issue
+
+        dx, dy = x2 - x1, y2 - y1
+        a = dx**2 + dy**2
+        b = 2 * (dx * (x1 - cx) + dy * (y1 - cy))
+        c = (x1 - cx) ** 2 + (y1 - cy) ** 2 - r**2
+        disc = b**2 - 4 * a * c
+
+        if disc < 0 or a == 0:
+            return []
+
+        t1 = (-b + sqrt(disc)) / (2 * a)
+        t2 = (-b - sqrt(disc)) / (2 * a)
+
+        intersec = []
+        if 0 <= t1 <= 1:
+            intersec.append((x1 + t1 * dx, y1 + t1 * dy))
+        if 0 <= t2 <= 1 and t1 != t2:
+            intersec.append((x1 + t2 * dx, y1 + t2 * dy))
+        return intersec
+
+    def get_rotation_direction(self, point1, point2):
+        angle1 = self.get_angle(point1, self.dock_position)
+        angle2 = self.get_angle(point2, self.dock_position)
+        angle_diff = (angle2 - angle1) % (2 * pi)
+        return angle_diff > pi
+
+    def get_safe_points(self, p1):
+        angle = self.get_angle(self.dock_position, p1)
+        safe_point1 = self.get_point_on_vector(
+            self.dock_position, angle + pi / 4, self.safe_dock_distance
+        )
+        safe_point2 = self.get_point_on_vector(
+            self.dock_position, angle - pi / 4, self.safe_dock_distance
+        )
+        return [safe_point1, safe_point2]
+
+
 class DockableProbe:
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -208,13 +362,13 @@ class DockableProbe:
             or self.dock_position[2] is not None
         )
         # Entry distance
-        self.approach_distance = self._get_distance(
+        self.approach_distance = DockGeometry.get_distance(
             self.dock_position, self.approach_position
         )
-        self.detach_distance = self._get_distance(
+        self.detach_distance = DockGeometry.get_distance(
             self.dock_position, self.detach_position
         )
-        self.insert_distance = self._get_distance(
+        self.insert_distance = DockGeometry.get_distance(
             self.dock_position, self.insert_position
         )
 
@@ -227,10 +381,15 @@ class DockableProbe:
         self.safe_dock_distance = config.getfloat(
             "safe_dock_distance", max_safe_distance, maxval=max_safe_distance
         )
+        self.geometry = DockGeometry(
+            self.dock_position,
+            self.safe_dock_distance,
+            self.printer.command_error,
+        )
         self.safe_position = self._parse_coord(
             config, "safe_position", self.approach_position
         )
-        self.safe_points = self._get_safe_points(self.safe_position)
+        self.safe_points = self.geometry.get_safe_points(self.safe_position)
 
         # Macros to run before attach and after detach
         gcode_macro = self.printer.load_object(config, "gcode_macro")
@@ -393,10 +552,6 @@ class DockableProbe:
         if self in endstops and any(pos[2] is not None for pos in positions):
             raise self.printer.config_error(VIRTUAL_Z_ENDSTOP_ERROR)
 
-    #######################################################################
-    # GCode Commands
-    #######################################################################
-
     cmd_QUERY_DOCKABLE_PROBE_help = (
         "Prints the current probe state,"
         + " valid probe states are UNKNOWN, ATTACHED, and DOCKED"
@@ -523,78 +678,66 @@ class DockableProbe:
         speed = gcmd.get("SPEED", self.travel_speed, parser=float, above=0.0)
         self._move_avoiding_dock([x, y], speed)
 
-    def attach_probe(self, return_pos=None, always_restore_toolhead=False):
-        self._lower_probe()
-
+    def _dock_transition(
+        self,
+        target_state,
+        pre_gcode,
+        script,
+        post_gcode,
+        fail_msg,
+        return_pos,
+        restore_toolhead,
+        require_docked=False,
+        restore_z=False,
+    ):
         retry = 0
         while (
-            self.get_probe_state() != PROBE_ATTACHED
+            self.get_probe_state() != target_state
             and retry < self.dock_retries + 1
         ):
-            if self.get_probe_state() != PROBE_DOCKED:
+            if require_docked and self.get_probe_state() != PROBE_DOCKED:
                 raise self.printer.command_error(
                     "Attach Probe: Probe not detected in dock, aborting"
                 )
-            self.pre_attach_gcode.run_gcode_from_command()
-            # Call these gcodes as a script because we don't have enough
-            # structs/data to call the cmd_...() funcs and supply 'gcmd'.
-            # This method also has the advantage of calling user-written gcodes
-            # if they've been defined.
-            self.gcode.run_script_from_command(
-                """
-                MOVE_TO_APPROACH_PROBE
-                MOVE_TO_DOCK_PROBE
-                MOVE_TO_EXTRACT_PROBE
-            """
-            )
-            self.post_attach_gcode.run_gcode_from_command()
-
+            pre_gcode.run_gcode_from_command()
+            self.gcode.run_script_from_command(script)
+            post_gcode.run_gcode_from_command()
             retry += 1
 
-        if self.get_probe_state() != PROBE_ATTACHED:
-            raise self.printer.command_error("Probe attach failed!")
+        if self.get_probe_state() != target_state:
+            raise self.printer.command_error(fail_msg)
 
-        if return_pos and (self.restore_toolhead or always_restore_toolhead):
-            # return to the original XY position, if inside safe_dock area
-            # move to the closest point
+        if return_pos and restore_toolhead:
             self._move_avoiding_dock(return_pos[:2], self.travel_speed)
-            # Do NOT return to the original Z position after attach
-            # as the probe might crash into the bed.
+            if restore_z:
+                self.toolhead.manual_move(
+                    [None, None, return_pos[2]], self.lift_speed
+                )
+
+    def attach_probe(self, return_pos=None, always_restore_toolhead=False):
+        self._lower_probe()
+        self._dock_transition(
+            PROBE_ATTACHED,
+            self.pre_attach_gcode,
+            ATTACH_PROBE_SCRIPT,
+            self.post_attach_gcode,
+            "Probe attach failed!",
+            return_pos,
+            self.restore_toolhead or always_restore_toolhead,
+            require_docked=True,
+        )
 
     def detach_probe(self, return_pos=None):
-        retry = 0
-        while (
-            self.get_probe_state() != PROBE_DOCKED
-            and retry < self.dock_retries + 1
-        ):
-            self.pre_detach_gcode.run_gcode_from_command()
-            # Call these gcodes as a script because we don't have enough
-            # structs/data to call the cmd_...() funcs and supply 'gcmd'.
-            # This method also has the advantage of calling user-written gcodes
-            # if they've been defined.
-            self.gcode.run_script_from_command(
-                """
-                MOVE_TO_INSERT_PROBE
-                MOVE_TO_DOCK_PROBE
-                MOVE_TO_DETACH_PROBE
-            """
-            )
-            self.post_detach_gcode.run_gcode_from_command()
-
-            retry += 1
-
-        if self.get_probe_state() != PROBE_DOCKED:
-            raise self.printer.command_error("Probe detach failed!")
-
-        if return_pos and self.restore_toolhead:
-            # return to the original XY position, if inside safe_dock area
-            # move to the closest point
-            self._move_avoiding_dock(return_pos[:2], self.travel_speed)
-            # Return to original Z position after detach as
-            # there's no chance of the probe crashing into the bed.
-            self.toolhead.manual_move(
-                [None, None, return_pos[2]], self.lift_speed
-            )
+        self._dock_transition(
+            PROBE_DOCKED,
+            self.pre_detach_gcode,
+            DETACH_PROBE_SCRIPT,
+            self.post_detach_gcode,
+            "Probe detach failed!",
+            return_pos,
+            self.restore_toolhead,
+            restore_z=True,
+        )
         self._raise_probe()
 
     def auto_detach_probe(self, return_pos=None):
@@ -613,11 +756,6 @@ class DockableProbe:
             )
         self.attach_probe(return_pos, always_restore_toolhead)
 
-    #######################################################################
-    # Functions for calculating points and moving the toolhead
-    #######################################################################
-
-    # Move to position avoiding the dock
     def _move_avoiding_dock(self, end_point, speed):
         start_point = self.toolhead.get_position()[:2]
         end_point = end_point[:2]
@@ -629,35 +767,44 @@ class DockableProbe:
             self.toolhead.manual_move([end_point[0], end_point[1], None], speed)
             return
 
-        # redefine start_point outside safe dock area
         coords = []
-        if radius > self._get_distance(dock, start_point):
-            start_point = self._get_closest_exitpoint(start_point, end_point)
+        if radius > self.geometry.get_distance(dock, start_point):
+            start_point = self.geometry.get_closest_exitpoint(
+                start_point, end_point
+            )
             coords.append(start_point)
 
-        # Check if trajectory intersect safe dock area
-        intersect_points = self._get_intersect_points(start_point, end_point)
+        intersect_points = self.geometry.get_intersect_points(
+            start_point, end_point
+        )
 
-        # Define endpoint
         if len(intersect_points) == 1:
             end_point = intersect_points[0]
-        # Calculate trajectory around the dock
         elif intersect_points:
-            # input_tangent point
-            safe_point = self._get_closest_point(end_point, self.safe_points)
-            tangent_points = self._get_tangent_points(
+            safe_point = self.geometry.get_closest_point(
+                end_point, self.safe_points
+            )
+            tangent_points = self.geometry.get_tangent_points(
                 radius - 0.1, dock, start_point
             )
-            arc_input = self._get_closest_point(safe_point, tangent_points)
-            clockwise = self._get_rotation_direction(start_point, arc_input)
+            arc_input = self.geometry.get_closest_point(
+                safe_point, tangent_points
+            )
+            clockwise = self.geometry.get_rotation_direction(
+                start_point, arc_input
+            )
             coords.append(arc_input)
 
-            # output tangent point
-            safe_point = self._get_closest_point(start_point, self.safe_points)
-            tangent_points = self._get_tangent_points(radius, dock, end_point)
-            arc_output = self._get_closest_point(safe_point, tangent_points)
-            # determine arc travel
-            arc_points = self._arc_points(
+            safe_point = self.geometry.get_closest_point(
+                start_point, self.safe_points
+            )
+            tangent_points = self.geometry.get_tangent_points(
+                radius, dock, end_point
+            )
+            arc_output = self.geometry.get_closest_point(
+                safe_point, tangent_points
+            )
+            arc_points = self.geometry.arc_points(
                 arc_input, arc_output, dock, clockwise
             )
             coords.extend(arc_points)
@@ -665,155 +812,6 @@ class DockableProbe:
 
         for x, y in coords:
             self.toolhead.manual_move([x, y, None], speed)
-
-    # Find a point on a vector line at a specific distance
-    def _get_point_on_vector(self, point, angle, magnitude=1):
-        x = point[0] - magnitude * cos(angle)
-        y = point[1] - magnitude * sin(angle)
-        return (x, y)
-
-    # Determine the vector of two points
-    def _get_distance(self, point1, point2):
-        x1, y1 = point1[:2]
-        x2, y2 = point2[:2]
-        return hypot(x2 - x1, y2 - y1)
-
-    def _get_angle(self, point1, point2):
-        x1, y1 = point1[:2]
-        x2, y2 = point2[:2]
-        return atan2(y2 - y1, x2 - x1) + pi
-
-    # Determine tangent points to a circle from external point
-    def _get_tangent_points(self, radius, center, point2):
-        cx, cy = center[:2]
-        d = self._get_distance(center, point2)
-        angle = self._get_angle(center, point2)
-        angle = angle - pi
-        if d < radius:
-            return None
-        dev = acos(radius / d)
-        x_tangent1 = cx + radius * cos(angle + dev)
-        y_tangent1 = cy + radius * sin(angle + dev)
-        x_tangent2 = cx + radius * cos(angle - dev)
-        y_tangent2 = cy + radius * sin(angle - dev)
-        return [(x_tangent1, y_tangent1), (x_tangent2, y_tangent2)]
-
-    # determine closest exit point X or Y while toolhead inside safe_dock_zone
-    def _get_closest_exitpoint(self, point1, point2):
-        cx, cy = self.dock_position[:2]
-        # Choose point2 if point1 is the dock position
-        if point1[:2] != [cx, cy]:
-            dx, dy = point1[0] - cx, point1[1] - cy
-            reference_point = point1[:2]
-        elif point2[:2] != [cx, cy]:
-            dx, dy = point2[0] - cx, point2[1] - cy
-            reference_point = point2[:2]
-        else:
-            raise self.printer.command_error(
-                "_move_avoiding_dock : Unable to determine exit point"
-            )
-        d = hypot(dx, dy)
-        # Ensure exit point is outside dock area.
-        magnitude = self.safe_dock_distance + 10e-8
-        x1 = cx + magnitude * dx / d
-        y1 = cy + magnitude * dy / d
-        x2 = cx - magnitude * dx / d
-        y2 = cy - magnitude * dy / d
-
-        return self._get_closest_point(reference_point, [(x1, y1), (x2, y2)])
-
-    # determine intersect points between a line and a circle
-    def _get_intersect_points(self, point1, point2):
-        x1, y1 = point1[:2]
-        x2, y2 = point2[:2]
-        cx, cy = self.dock_position[:2]
-        r = self.safe_dock_distance - 10e-5  # fix floating point issue
-
-        dx, dy = x2 - x1, y2 - y1
-        a = dx**2 + dy**2
-        b = 2 * (dx * (x1 - cx) + dy * (y1 - cy))
-        c = (x1 - cx) ** 2 + (y1 - cy) ** 2 - r**2
-        disc = b**2 - 4 * a * c
-
-        if disc < 0 or a == 0:
-            return []  # Nothing to return
-
-        t1 = (-b + sqrt(disc)) / (2 * a)
-        t2 = (-b - sqrt(disc)) / (2 * a)
-
-        intersec = []
-        if 0 <= t1 <= 1:
-            intersec.append((x1 + t1 * dx, y1 + t1 * dy))
-        if 0 <= t2 <= 1 and t1 != t2:
-            intersec.append((x1 + t2 * dx, y1 + t2 * dy))
-        return intersec
-
-    # Determine closest point
-    def _get_closest_point(self, target_point, points):
-        if not points:
-            return None
-        x_target, y_target = target_point[:2]
-        distances = [hypot(x - x_target, y - y_target) for x, y in points]
-        # find index of the closest point
-        index = distances.index(min(distances))
-        return points[index]
-
-    # Determine arc points , a simplified version of gcode_arcs
-    def _arc_points(self, point1, point2, center, clockwise):
-        x1, y1 = point1[:2]
-        x2, y2 = point2[:2]
-        cx, cy = center[:2]
-        # Radius vector from center to current location
-        r_P = x1 - cx
-        r_Q = y1 - cy
-        # Determine angular travel
-        rt_Alpha = x2 - cx
-        rt_Beta = y2 - cy
-        angular_travel = atan2(
-            r_P * rt_Beta - r_Q * rt_Alpha, r_P * rt_Alpha + r_Q * rt_Beta
-        )
-
-        if angular_travel < 0.0:
-            angular_travel += 2.0 * pi
-        if clockwise:
-            angular_travel -= 2.0 * pi
-        # Determine number of segments
-        radius = hypot(r_P, r_Q)
-        flat_mm = radius * angular_travel
-
-        mm_of_travel = fabs(flat_mm)
-        segments = max(1.0, floor(mm_of_travel))
-
-        # Generate coordinates
-        theta_per_segment = angular_travel / segments
-        coords = []
-
-        for i in range(1, int(segments)):
-            cos_Ti = cos(i * theta_per_segment)
-            sin_Ti = sin(i * theta_per_segment)
-            r_P = (x1 - cx) * cos_Ti - (y1 - cy) * sin_Ti
-            r_Q = (x1 - cx) * sin_Ti + (y1 - cy) * cos_Ti
-            coords.append((cx + r_P, cy + r_Q))
-
-        coords.append(point2[:2])
-        return coords
-
-    def _get_rotation_direction(self, point1, point2):
-        angle1 = self._get_angle(point1, self.dock_position)
-        angle2 = self._get_angle(point2, self.dock_position)
-        # Direction of rotation
-        angle_diff = (angle2 - angle1) % (2 * pi)
-        return angle_diff > pi
-
-    def _get_safe_points(self, p1):
-        angle = self._get_angle(self.dock_position, p1)
-        safe_point1 = self._get_point_on_vector(
-            self.dock_position, angle + pi / 4, self.safe_dock_distance
-        )
-        safe_point2 = self._get_point_on_vector(
-            self.dock_position, angle - pi / 4, self.safe_dock_distance
-        )
-        return [safe_point1, safe_point2]
 
     # Align z axis to prevent crashes
     def _align_z(self):
@@ -859,9 +857,6 @@ class DockableProbe:
         kin.clear_homing_state([2])
         self.last_z = self.toolhead.get_position()[2]
 
-    #######################################################################
-    # Probe Wrappers
-    #######################################################################
     def _raise_probe(self):
         toolhead = self.printer.lookup_object("toolhead")
         start_pos = toolhead.get_position()

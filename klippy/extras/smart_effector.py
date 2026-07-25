@@ -39,14 +39,14 @@ class ControlPinHelper:
         for b in bit_stream:
             value = (not not b) ^ self._invert
             if value != last_value:
-                clock = self._mcu.print_time_to_clock(bit_time)
+                clock = self._mcu.get_clocksync().print_time_to_clock(bit_time)
                 self._set_cmd.send([self._oid, clock, value])
                 last_value = value
             bit_time += bit_step
         # After the last bit, the signal on the control pin must go back
         # to its start value.
         if value != self._start_value:
-            clock = self._mcu.print_time_to_clock(bit_time)
+            clock = self._mcu.get_clocksync().print_time_to_clock(bit_time)
             self._set_cmd.send([self._oid, clock, self._start_value])
             bit_time += bit_step
         return bit_time
