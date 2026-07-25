@@ -187,7 +187,8 @@ fn extrusion_ratio_step_splits_the_arc() {
 #[test]
 fn small_extrusion_drift_rides_one_arc_with_a_ramp() {
     // A 10% epmm step sits inside the ramp band: one arc absorbs the whole
-    // window and carries a linear extrusion-rate ramp that conserves total E.
+    // window and carries a linear extrusion-rate ramp between the commanded
+    // rates.
     let n = 400;
     let moves = circle_facets(n, |i| if i <= n / 2 { 0.30 } else { 0.33 });
     let streamed = run_fit_stage(&moves, CornerFitConfig::default());
@@ -200,20 +201,13 @@ fn small_extrusion_drift_rides_one_arc_with_a_ramp() {
         arcs[0].segment.followers.iter().any(|f| f.is_ramped()),
         "expected the arc to carry the drift as a ratio ramp"
     );
-    let total_e = |ms: &[Move]| -> f64 {
-        ms.iter()
-            .flat_map(|m| {
-                let len = m.segment.s_len();
-                m.segment.followers.iter().map(move |f| f.delta_over(len))
-            })
-            .sum()
-    };
-    let e_in = total_e(&moves);
-    let e_out = total_e(&streamed);
-    assert!(
-        (e_in - e_out).abs() <= 1e-6 * e_in,
-        "fitted stream must conserve E: in={e_in} out={e_out}"
-    );
+    let (lo, hi) = moves
+        .iter()
+        .flat_map(|m| m.segment.followers.iter())
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), f| {
+            (lo.min(f.ratio.min(f.ratio_end)), hi.max(f.max_abs_ratio()))
+        });
+    assert_rate_band(&streamed, lo, hi);
 }
 
 fn total_e(ms: &[Move]) -> f64 {
@@ -223,6 +217,34 @@ fn total_e(ms: &[Move]) -> f64 {
             m.segment.followers.iter().map(move |f| f.delta_over(len))
         })
         .sum()
+}
+
+/// Every emitted demand stays inside the band of commanded rates — the
+/// fitter reshapes the path, never the flow per millimeter.
+fn assert_rate_band(output: &[Move], lo: f64, hi: f64) {
+    for m in output {
+        for f in &m.segment.followers {
+            for r in [f.ratio, f.ratio_end] {
+                assert!(
+                    (lo - 1e-9..=hi + 1e-9).contains(&r),
+                    "de/ds {r} escapes the commanded band [{lo}, {hi}]: {f:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A uniform-rate stream must come out at exactly that rate over whatever
+/// path the fitter produced.
+fn assert_uniform_rate(output: &[Move], r: f64) {
+    assert_rate_band(output, r, r);
+    let total_len: f64 = output.iter().map(|m| m.segment.s_len()).sum();
+    let e_out = total_e(output);
+    assert!(
+        (e_out - r * total_len).abs() <= 1e-9,
+        "stream must extrude the commanded rate over its actual path: \
+         {e_out} vs {r} × {total_len}"
+    );
 }
 
 fn count_clothoids(ms: &[Move]) -> usize {
@@ -267,11 +289,7 @@ fn squeezed_chamfer_facet_is_consumed_in_the_stream() {
         "one blend (two halves) spans the chamfer"
     );
     assert_no_facet_lines(&streamed, 2..=2);
-    let (e_in, e_out) = (total_e(&moves), total_e(&streamed));
-    assert!(
-        (e_in - e_out).abs() <= 1e-9,
-        "consumption must conserve E: in={e_in} out={e_out}"
-    );
+    assert_uniform_rate(&streamed, 0.1);
 }
 
 #[test]
@@ -291,11 +309,7 @@ fn wide_cluster_is_consumed_by_a_split_blend_in_the_stream() {
         "two pairs hug the cluster — pairwise fallback would emit six"
     );
     assert_no_facet_lines(&streamed, 2..=3);
-    let (e_in, e_out) = (total_e(&moves), total_e(&streamed));
-    assert!(
-        (e_in - e_out).abs() <= 1e-9,
-        "consumption must conserve E: in={e_in} out={e_out}"
-    );
+    assert_uniform_rate(&streamed, 0.1);
 }
 
 #[test]
@@ -314,11 +328,7 @@ fn facet_cluster_is_consumed_in_the_stream() {
         "one pair spans the cluster — pairwise fallback would emit six"
     );
     assert_no_facet_lines(&streamed, 2..=3);
-    let (e_in, e_out) = (total_e(&moves), total_e(&streamed));
-    assert!(
-        (e_in - e_out).abs() <= 1e-9,
-        "consumption must conserve E: in={e_in} out={e_out}"
-    );
+    assert_uniform_rate(&streamed, 0.1);
 }
 
 #[test]
@@ -357,11 +367,7 @@ fn cluster_gate_failure_still_consumes_the_first_facet_alone() {
     // Pairwise fallback could not erase the facet: its exit corner is an
     // extrusion step (sharp), so only consumption removes the line.
     assert_no_facet_lines(&streamed, 2..=2);
-    let (e_in, e_out) = (total_e(&moves), total_e(&streamed));
-    assert!(
-        (e_in - e_out).abs() <= 1e-9,
-        "consumption must conserve E: in={e_in} out={e_out}"
-    );
+    assert_rate_band(&streamed, 0.1, 1.0);
 }
 
 #[test]

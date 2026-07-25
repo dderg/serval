@@ -238,9 +238,28 @@ fn extrusion_lowers_to_a_moving_e_track() {
     }
     let e_start = eval_piece(traj.e.first().unwrap(), traj.e.first().unwrap()[0]);
     let e_end = eval_piece(traj.e.last().unwrap(), traj.e.last().unwrap()[1]);
+    let (t0, t1) = (traj.x.first().unwrap()[0], traj.x.last().unwrap()[1]);
+    let eval_axis = |pieces: &[Vec<f64>], t: f64| {
+        let p = pieces
+            .iter()
+            .find(|p| t >= p[0] && t <= p[1])
+            .expect("t inside trajectory");
+        eval_piece(p, t)
+    };
+    let n = 20_000;
+    let mut path_len = 0.0;
+    let mut prev = (eval_axis(&traj.x, t0), eval_axis(&traj.y, t0));
+    for i in 1..=n {
+        let t = t0 + (t1 - t0) * f64::from(i) / f64::from(n);
+        let cur = (eval_axis(&traj.x, t), eval_axis(&traj.y, t));
+        path_len += libm::hypot(cur.0 - prev.0, cur.1 - prev.1);
+        prev = cur;
+    }
     assert!(
-        (e_end - e_start - 2.0).abs() < 1e-6,
-        "E advances by the total 2 mm extruded"
+        (e_end - e_start - 0.1 * path_len).abs() < 1e-4,
+        "E advances at the commanded 0.1 rate over the actual path: \
+         {} vs 0.1 × {path_len}",
+        e_end - e_start
     );
 }
 

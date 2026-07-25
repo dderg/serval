@@ -238,25 +238,16 @@ impl SeamSide<'_> {
         self.followers.iter().find(|f| f.axis_index == axis)
     }
 
-    /// Ratio at the post-trim end seam, and the E the trimmed tail carried.
-    fn exit_anchor(&self, axis: usize) -> (f64, f64) {
-        let Some(d) = self.demand(axis) else {
-            return (0.0, 0.0);
-        };
-        let seam = self.seg_len - self.trim;
-        let e = d.offset_at(self.seg_len, self.seg_len) - d.offset_at(seam, self.seg_len);
-        (d.ratio_at(seam, self.seg_len), e)
+    /// Ratio at the post-trim end seam.
+    fn exit_anchor(&self, axis: usize) -> f64 {
+        self.demand(axis)
+            .map_or(0.0, |d| d.ratio_at(self.seg_len - self.trim, self.seg_len))
     }
 
-    /// Ratio at the post-trim start seam, and the E the trimmed head carried.
-    fn entry_anchor(&self, axis: usize) -> (f64, f64) {
-        let Some(d) = self.demand(axis) else {
-            return (0.0, 0.0);
-        };
-        (
-            d.ratio_at(self.trim, self.seg_len),
-            d.offset_at(self.trim, self.seg_len),
-        )
+    /// Ratio at the post-trim start seam.
+    fn entry_anchor(&self, axis: usize) -> f64 {
+        self.demand(axis)
+            .map_or(0.0, |d| d.ratio_at(self.trim, self.seg_len))
     }
 }
 
@@ -265,12 +256,7 @@ impl SeamSide<'_> {
 /// ratios *at the trimmed seams* — for a constant neighbor that is its one
 /// ratio, for a ramped neighbor (an arc-run reconstruction) the ratio its
 /// window now starts or ends with — so `ė = r·v` is continuous where the
-/// blend meets the trimmed neighbors. The shared midpoint ratio is then
-/// whatever conserves the E the trimmed material carried across the halves'
-/// actual arc lengths. Anchoring at rescaled ratios instead (the trimmed E
-/// spread uniformly over the shorter half) would conserve E too, but it steps
-/// the extrusion rate by `trim/len` at both outer seams — the very
-/// discontinuity the ramp exists to remove.
+/// blend meets the trimmed neighbors.
 pub(super) fn blend_followers(
     inbound: &SeamSide,
     outbound: &SeamSide,
@@ -284,13 +270,15 @@ pub(super) fn blend_followers(
 }
 
 /// [`blend_followers`] over a chain of blend segments that may also replace
-/// whole moves between its two seams: the consumed demands' full E joins the
-/// conservation target, so the material the swallowed moves would have
-/// extruded still leaves the nozzle across the blend. The ratio profile over
-/// the chain is a tent — linear from the inbound anchor to a peak at the
-/// segment boundary nearest the chain's arclength middle, then linear to the
-/// outbound anchor — sliced at every segment boundary, so each segment
-/// carries a linear ramp and the whole is rate-continuous.
+/// whole moves between its two seams. The ratio profile over the chain is
+/// one linear ramp from the inbound anchor to the outbound anchor, sliced at
+/// every segment boundary, so each segment carries a linear ramp and the
+/// whole is rate-continuous: the chain extrudes the commanded `de/ds` over
+/// the path it actually travels (`ratios_within_ramp_band` gates that the
+/// replaced demands sit inside this ramp). Total E is whatever that rate
+/// integrates to — deliberately NOT the replaced footage's E, which would
+/// deposit the corner-cut length's material as a rate excursion right at the
+/// corner.
 pub(super) fn chain_blend_followers(
     inbound: &SeamSide,
     consumed: &[(&[FollowerDemand], f64)],
@@ -303,14 +291,6 @@ pub(super) fn chain_blend_followers(
         bounds.push(bounds.last().expect("non-empty") + len);
     }
     let total = *bounds.last().expect("non-empty");
-    let peak_idx = (1..seg_lens.len())
-        .min_by(|a, b| {
-            (bounds[*a] - 0.5 * total)
-                .abs()
-                .total_cmp(&(bounds[*b] - 0.5 * total).abs())
-        })
-        .expect("at least two segments");
-    let (len1, len2) = (bounds[peak_idx], total - bounds[peak_idx]);
 
     let mut axes = follower_axes(inbound.followers, outbound.followers);
     for f in consumed.iter().flat_map(|(c, _)| c.iter()) {
@@ -321,25 +301,9 @@ pub(super) fn chain_blend_followers(
 
     let mut out = vec![Vec::with_capacity(axes.len()); seg_lens.len()];
     for axis in axes {
-        let (r_in, e_in) = inbound.exit_anchor(axis);
-        let (r_out, e_out) = outbound.entry_anchor(axis);
-        let e_consumed: f64 = consumed
-            .iter()
-            .filter_map(|(c, len)| {
-                c.iter()
-                    .find(|f| f.axis_index == axis)
-                    .map(|d| d.offset_at(*len, *len))
-            })
-            .sum();
-        let e_target = e_in + e_consumed + e_out;
-        let r_peak = (2.0 * e_target - r_in * len1 - r_out * len2) / (len1 + len2);
-        let ratio_at = |s: f64| {
-            if s <= bounds[peak_idx] {
-                r_in + (r_peak - r_in) * s / len1
-            } else {
-                r_peak + (r_out - r_peak) * (s - bounds[peak_idx]) / len2
-            }
-        };
+        let r_in = inbound.exit_anchor(axis);
+        let r_out = outbound.entry_anchor(axis);
+        let ratio_at = |s: f64| r_in + (r_out - r_in) * s / total;
         for (i, demands) in out.iter_mut().enumerate() {
             let d = FollowerDemand::ramp(axis, ratio_at(bounds[i]), ratio_at(bounds[i + 1]));
             if d.max_abs_ratio() > 0.0 {

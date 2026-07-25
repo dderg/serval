@@ -294,16 +294,23 @@ fn virtual_move_breaks_the_spatial_chain() {
 }
 
 #[test]
-fn extrusion_is_conserved_across_a_blend() {
+fn extrusion_rate_is_conserved_across_a_blend() {
     let moves = right_angle_corner(3000.0, 5.0, 50.0, 5.0);
-    let before = total_extrusion(&moves, E_AXIS);
     let out = fit_corners(&moves, CornerFitConfig::default()).unwrap();
-    let after = total_extrusion(&out.moves, E_AXIS);
-
     assert_eq!(out.report.blended, 1);
+    let total_len: f64 = out.moves.iter().map(|m| m.segment.s_len()).sum();
+    let after = total_extrusion(&out.moves, E_AXIS);
+    for m in &out.moves {
+        let f = e_follower(m);
+        assert!(
+            (f.ratio - 0.1).abs() <= 1e-12 && (f.ratio_end - 0.1).abs() <= 1e-12,
+            "constant commanded rate must pass through unchanged: {f:?}"
+        );
+    }
     assert!(
-        (before - after).abs() <= 1e-9,
-        "before {before} after {after}"
+        (after - 0.1 * total_len).abs() <= 1e-9,
+        "extrusion must ride the actual path at the commanded rate: \
+         {after} vs 0.1 × {total_len}"
     );
 }
 
@@ -318,31 +325,37 @@ fn e_follower(m: &Move) -> FollowerDemand {
 #[test]
 fn modest_ratio_step_blends_with_a_continuous_extrusion_ramp() {
     // Two legs at slightly different extrusion ratios (0.10 vs 0.12, a 16.7%
-    // relative step, under the 25% gate). The corner blends, total E is
-    // conserved, and the two clothoid halves meet at one shared ratio so ė is
-    // continuous across the blend midpoint.
+    // relative step, under the 25% gate). The corner blends with one linear
+    // rate ramp anchored at the legs' commanded rates, and the two clothoid
+    // halves meet at one shared ratio so ė is continuous across the blend
+    // midpoint.
     let moves = vec![
         seg(1, 3000.0, 5.0, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 5.0),
         seg(2, 3000.0, 5.0, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 6.0),
     ];
-    let before = total_extrusion(&moves, E_AXIS);
     let out = fit_corners(&moves, CornerFitConfig::default()).unwrap();
     assert_eq!(out.report.blended, 1);
     assert!(out.report.unblended.is_empty());
-    let after = total_extrusion(&out.moves, E_AXIS);
-    assert!(
-        (before - after).abs() <= 1e-9,
-        "before {before} after {after}"
-    );
 
     let half1 = e_follower(&out.moves[1]);
     let half2 = e_follower(&out.moves[2]);
     assert!(half1.is_ramped() && half2.is_ramped());
     assert!(
+        (half1.ratio - 0.10).abs() <= 1e-12 && (half2.ratio_end - 0.12).abs() <= 1e-12,
+        "ramp must anchor at the legs' commanded rates: {half1:?} .. {half2:?}"
+    );
+    assert!(
         (half1.ratio_end - half2.ratio).abs() <= 1e-12,
         "midpoint ratio discontinuous: {} vs {}",
         half1.ratio_end,
         half2.ratio
+    );
+    let (l1, l2) = (out.moves[1].segment.s_len(), out.moves[2].segment.s_len());
+    let expected_mid = 0.10 + (0.12 - 0.10) * l1 / (l1 + l2);
+    assert!(
+        (half1.ratio_end - expected_mid).abs() <= 1e-12,
+        "midpoint must sit on the single linear rate ramp: {} vs {expected_mid}",
+        half1.ratio_end
     );
 }
 
@@ -364,29 +377,35 @@ fn abrupt_ratio_step_is_left_unblended_as_a_stop() {
 fn travel_to_extrude_corner_still_blends_and_ramps_to_zero() {
     // One side is a travel (ratio 0). The relative step is 1.0, but a ramp to or
     // from zero extrusion is desirable, so the gate exempts it and the corner
-    // blends. Total E (all on the extruding leg) is conserved.
+    // blends: one linear rate ramp from zero to the extruding leg's rate.
     let moves = vec![
         seg(1, 3000.0, 5.0, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0),
         seg(2, 3000.0, 5.0, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 5.0),
     ];
-    let before = total_extrusion(&moves, E_AXIS);
     let out = fit_corners(&moves, CornerFitConfig::default()).unwrap();
     assert_eq!(out.report.blended, 1);
-    let after = total_extrusion(&out.moves, E_AXIS);
-    assert!(
-        (before - after).abs() <= 1e-9,
-        "before {before} after {after}"
-    );
     let half1 = e_follower(&out.moves[1]);
+    let half2 = e_follower(&out.moves[2]);
     assert!(
         half1.ratio.abs() <= 1e-12,
         "half1 must start at zero extrusion, got {}",
         half1.ratio
     );
+    assert!(
+        (half2.ratio_end - 0.1).abs() <= 1e-12,
+        "half2 must end at the extruding leg's rate, got {}",
+        half2.ratio_end
+    );
+    assert!(
+        (half1.ratio_end - half2.ratio).abs() <= 1e-12,
+        "midpoint ratio discontinuous: {} vs {}",
+        half1.ratio_end,
+        half2.ratio
+    );
 }
 
 #[test]
-fn extrusion_conserved_when_short_leg_is_consumed_by_two_blends() {
+fn extrusion_rate_survives_a_short_leg_consumed_by_two_blends() {
     let accel = 1000.0;
     let scv = 30.0;
     let d = 0.05 / SQRT_2;
@@ -395,15 +414,23 @@ fn extrusion_conserved_when_short_leg_is_consumed_by_two_blends() {
         seg(2, accel, scv, [0.0, 0.0, 0.0], [d, d, 0.0], 0.05),
         seg(3, accel, scv, [d, d, 0.0], [d, d + 10.0, 0.0], 10.0),
     ];
-    let before = total_extrusion(&moves, E_AXIS);
     let out = fit_corners(&moves, CornerFitConfig::default()).unwrap();
     let after = total_extrusion(&out.moves, E_AXIS);
+    let total_len: f64 = out.moves.iter().map(|m| m.segment.s_len()).sum();
 
     assert_eq!(out.report.blended, 2);
     assert_eq!(out.report.consumed_legs, 1, "report: {:?}", out.report);
+    for m in &out.moves {
+        let f = e_follower(m);
+        assert!(
+            (f.ratio - 1.0).abs() <= 1e-9 && (f.ratio_end - 1.0).abs() <= 1e-9,
+            "uniform commanded rate must pass through unchanged: {f:?}"
+        );
+    }
     assert!(
-        (before - after).abs() <= 1e-9,
-        "before {before} after {after}"
+        (after - total_len).abs() <= 1e-9,
+        "extrusion must ride the actual path at the commanded rate: \
+         {after} vs {total_len}"
     );
 }
 
@@ -473,7 +500,7 @@ fn run_whose_tail_spiral_overclaims_its_neighbor_still_touches_the_run_endpoints
 }
 
 #[test]
-fn displaced_spiral_keeps_extrusion_rate_continuous_and_conserves_e() {
+fn displaced_spiral_keeps_extrusion_rate_continuous_and_within_commanded_band() {
     // Slicer polyline from neptune_cube/layer_5.gcode around (119.5, 117.7):
     // the anchored one-end easing slides the head spiral ~0.63mm along a
     // 1.27mm neighbor line while the spiral itself is only ~0.14mm long.
@@ -545,14 +572,27 @@ fn displaced_spiral_keeps_extrusion_rate_continuous_and_conserves_e() {
         );
     }
 
-    let before = total_extrusion(&facets, E_AXIS)
-        + total_extrusion(std::slice::from_ref(&head), E_AXIS)
-        + total_extrusion(std::slice::from_ref(&tail), E_AXIS);
-    let after = total_extrusion(&chain, E_AXIS);
-    assert!(
-        (before - after).abs() <= 1e-9,
-        "extrusion not conserved: before {before} after {after}"
-    );
+    let commanded: Vec<f64> = std::iter::once(&head)
+        .chain(&facets)
+        .chain(std::iter::once(&tail))
+        .map(|m| e_rate(m, 0.0))
+        .collect();
+    let (lo, hi) = commanded
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &r| {
+            (lo.min(r), hi.max(r))
+        });
+    for (i, m) in chain.iter().enumerate() {
+        for s in [0.0, m.segment.s_len()] {
+            let r = e_rate(m, s);
+            assert!(
+                (lo - 1e-9..=hi + 1e-9).contains(&r),
+                "move {i}: de/ds {r} escapes the commanded band [{lo}, {hi}] — \
+                 the reconstruction must extrude at commanded rates, never a \
+                 conservation excursion"
+            );
+        }
+    }
 }
 
 #[test]
@@ -570,7 +610,7 @@ fn corner_ramp_beyond_extruder_budget_leaves_the_junction_unblended() {
     ));
 
     let tight = CornerFitConfig {
-        ramp_accel_budget_mm_s2: 20.0,
+        ramp_accel_budget_mm_s2: 1e-3,
         ..CornerFitConfig::default()
     };
     assert!(matches!(
