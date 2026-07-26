@@ -149,6 +149,7 @@ pub fn schedule(
 ) -> Schedule {
     let mut stall_ahead_candidate: Option<AxisKey> = None;
     let mut cap_skipped: BTreeSet<AxisKey> = BTreeSet::new();
+    let mut stall_full_candidate: Option<AxisKey> = None;
 
     let head_key = loop {
         let candidate = queues
@@ -161,6 +162,9 @@ pub fn schedule(
             });
         let (&k, q) = match candidate {
             None => {
+                if let Some(k) = stall_full_candidate {
+                    return Schedule::StallFull(k);
+                }
                 if let Some(k) = stall_ahead_candidate {
                     return Schedule::StallAhead(k);
                 }
@@ -170,7 +174,11 @@ pub fn schedule(
         };
 
         if q.room() == 0 {
-            return Schedule::StallFull(k);
+            if stall_full_candidate.is_none() {
+                stall_full_candidate = Some(k);
+            }
+            cap_skipped.insert(k);
+            continue;
         }
 
         if releasable_cap_of(&k) == 0 {
@@ -184,7 +192,11 @@ pub fn schedule(
         let head_start_ticks = q.pieces.front().unwrap().0.start_time;
         if let Some(horizon) = horizon_of(&k, q) {
             if head_start_ticks > horizon {
-                return Schedule::StallAhead(k);
+                if stall_ahead_candidate.is_none() {
+                    stall_ahead_candidate = Some(k);
+                }
+                cap_skipped.insert(k);
+                continue;
             }
         }
 
