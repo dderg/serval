@@ -697,7 +697,7 @@ class Motion:
                     "(drip move or no mcu)"
                 )
             return
-        now = self._yield_to_reactor_if_due(self.reactor.monotonic())
+        self._yield_to_reactor_if_due(self.reactor.monotonic())
         if submit(*args):
             return
         engine_wait.wait_for(
