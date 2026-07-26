@@ -13,10 +13,9 @@ use super::messages::{
     EnqueueMsg, HeartbeatMsg, HistoryRecorder, PieceSink, PumpCallbacks, PumpMsg, SendError,
 };
 use super::sched::{
-    AxisFrame, AxisQueue, DeferredReason, FramePlan, Schedule, append_pieces_merging_holds,
-    first_start_regression, schedule,
+    AxisFrame, AxisQueue, FramePlan, Schedule, append_pieces_merging_holds, schedule,
 };
-use super::stall::{AheadStallWatch, RetirementStallWatch};
+use super::stall::RetirementStallWatch;
 use crate::types::AxisKey;
 
 // How far ahead of the MCU playhead the pump pushes pieces — the depth of the
@@ -72,8 +71,6 @@ pub(super) const RETIREMENT_STALL_FATAL: Duration = Duration::from_secs(10);
 // 20..=48 B and a count cap is wrong at both ends. send_ready() loops until
 // Idle, so this bounds per-transaction latency, not throughput.
 const BUNDLE_WIRE_BYTE_BUDGET: usize = 1024;
-const AHEAD_STALL_LOG_AFTER: Duration = Duration::from_millis(20);
-const HORIZON_BYPASS_LOG_AFTER: Duration = Duration::from_millis(2);
 
 fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
     let staged: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
@@ -96,26 +93,6 @@ fn pump_past_guard_secs() -> f64 {
     })
 }
 
-struct AheadQueueSnapshot {
-    front_start_time: u64,
-    mcu_now: u64,
-    front_lead_us: f64,
-    horizon_ticks: u64,
-    horizon_lead_us: f64,
-    pending: usize,
-    ring_room: u32,
-    other_pending_queues: usize,
-    other_sendable_queues: usize,
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct HeartbeatTiming {
-    pub(super) received_at: Instant,
-    pub(super) arrival_gap: Duration,
-    pub(super) delivery_delay: Duration,
-    pub(super) last_warning_at: Option<Instant>,
-}
-
 pub(super) struct Pump<S> {
     pub(super) queues: BTreeMap<AxisKey, AxisQueue>,
     pub(super) junctions: JunctionTracker,
@@ -132,12 +109,7 @@ pub(super) struct Pump<S> {
     pub(super) holding_ahead: bool,
     pub(super) data_open: bool,
     pub(super) retirement_stall: RetirementStallWatch,
-    pub(super) ahead_stall: AheadStallWatch,
-    pub(super) deferred_stall: AheadStallWatch,
     pub(super) mem_probe: MemPressureProbe,
-    pub(super) last_iteration_at: Option<Instant>,
-    pub(super) iteration_gap: Duration,
-    pub(super) heartbeat_timing: BTreeMap<u32, HeartbeatTiming>,
 }
 
 impl<S: PieceSink> Pump<S> {
@@ -160,57 +132,7 @@ impl<S: PieceSink> Pump<S> {
             PumpMsg::Heartbeat(HeartbeatMsg {
                 mcu_id,
                 retired_counts,
-                received_at,
             }) => {
-                let handled_at = Instant::now();
-                let prior_timing = self.heartbeat_timing.get(&mcu_id).copied();
-                let arrival_gap = prior_timing
-                    .and_then(|prior| received_at.checked_duration_since(prior.received_at))
-                    .unwrap_or(Duration::ZERO);
-                let delivery_delay = handled_at
-                    .checked_duration_since(received_at)
-                    .unwrap_or(Duration::ZERO);
-                let retirement_advanced =
-                    retired_counts.iter().enumerate().any(|(axis, &retired)| {
-                        let key = AxisKey {
-                            mcu_id,
-                            axis: axis as u8,
-                        };
-                        self.queues.get(&key).is_some_and(|q| q.retired != retired)
-                    });
-                let late = delivery_delay >= Duration::from_millis(5)
-                    || retirement_advanced && arrival_gap >= Duration::from_millis(50);
-                let warning_due = late
-                    && prior_timing
-                        .and_then(|timing| timing.last_warning_at)
-                        .is_none_or(|last| {
-                            handled_at.duration_since(last) >= Duration::from_secs(1)
-                        });
-                let last_warning_at = if warning_due {
-                    Some(handled_at)
-                } else {
-                    prior_timing.and_then(|timing| timing.last_warning_at)
-                };
-                self.heartbeat_timing.insert(
-                    mcu_id,
-                    HeartbeatTiming {
-                        received_at,
-                        arrival_gap,
-                        delivery_delay,
-                        last_warning_at,
-                    },
-                );
-                if warning_due {
-                    tracing::warn!(
-                        subsystem = "motion",
-                        event = "pump_heartbeat_late",
-                        mcu = mcu_id,
-                        arrival_gap_us = arrival_gap.as_micros() as u64,
-                        delivery_delay_us = delivery_delay.as_micros() as u64,
-                        retirement_advanced,
-                        "retirement heartbeat arrived late or waited before pump processing"
-                    );
-                }
                 for (axis, &c) in retired_counts.iter().enumerate() {
                     let key = AxisKey {
                         mcu_id,
@@ -291,6 +213,11 @@ impl<S: PieceSink> Pump<S> {
         if epoch.position_redefined() {
             self.junctions.forget(key);
         }
+        if self.cohort.is_some() && !pieces.is_empty() {
+            if let Some((ack_now, freq)) = (self.callbacks.mcu_clock_of)(key.mcu_id) {
+                diag::log_drip_enqueue_lead(key, &pieces, ack_now, freq);
+            }
+        }
         if !pieces.is_empty() {
             if let Some((_ack_now, freq)) = (self.callbacks.mcu_clock_of)(key.mcu_id) {
                 if let Some(seam) = self.junctions.observe(key, &pieces, source_line, freq) {
@@ -341,44 +268,6 @@ impl<S: PieceSink> Pump<S> {
             .queues
             .entry(key)
             .or_insert_with(|| AxisQueue::new(ring_depth));
-        let queued_tail_start = if epoch.is_fresh() {
-            None
-        } else {
-            q.pieces.back().map(|(piece, _)| piece.start_time)
-        };
-        if let Some((piece_idx, prior_start_time, start_time)) =
-            first_start_regression(queued_tail_start, &pieces)
-        {
-            tracing::error!(
-                subsystem = "motion",
-                event = "pump_enqueue_start_regression",
-                mcu = key.mcu_id,
-                axis = key.axis,
-                piece_idx,
-                prior_start_time,
-                start_time,
-                regression_ticks = prior_start_time - start_time,
-                queue_pending = q.pieces.len(),
-                ?epoch,
-                source_line,
-                "pump enqueue would put an earlier piece behind a later piece"
-            );
-            eprintln!(
-                "pump: enqueue start regression — mcu {} axis {} piece_idx={} \
-                 prior_start_time={} start_time={} regression_ticks={} \
-                 queue_pending={} epoch={epoch:?} source_line={} — aborting host",
-                key.mcu_id,
-                key.axis,
-                piece_idx,
-                prior_start_time,
-                start_time,
-                prior_start_time - start_time,
-                q.pieces.len(),
-                source_line
-            );
-            let _ = std::io::Write::flush(&mut std::io::stderr());
-            std::process::abort();
-        }
         q.lead_secs = lead_secs;
         q.staged_motion += pieces
             .iter()
@@ -522,7 +411,7 @@ impl<S: PieceSink> Pump<S> {
             .observe(stall_key, current_retired, now);
         if observation.log_due {
             let in_flight = q.pushed.wrapping_sub(q.retired);
-            tracing::warn!(
+            tracing::debug!(
                 subsystem = "motion",
                 event = "pump_stall_full",
                 mcu = stall_key.mcu_id,
@@ -589,8 +478,17 @@ impl<S: PieceSink> Pump<S> {
             .collect()
     }
 
+    // Host-side guard: refuse to submit a piece whose start_time is already in
+    // the MCU's past. Catching it here fails loud on the host with the
+    // offending mcu/axis/deficit instead of letting the MCU (or the EtherCAT
+    // endpoint ring) trip a cryptic -308 PieceStartInPast after the fact.
+    // Mirrors the MCU's MAX_START_IN_PAST_SECS=200us threshold with a margin
+    // above host-projection jitter so a healthy print never false-aborts.
     fn guard_pieces_not_in_past(&self, mcu_id: u32, bundle: &[AxisFrame], context: &str) {
         if let Some((mcu_now, freq)) = (self.callbacks.mcu_clock_of)(mcu_id) {
+            if self.cohort.is_some() {
+                diag::log_send_projection(mcu_id, mcu_now, freq, bundle);
+            }
             if freq > 0.0 {
                 let guard_ticks = (pump_past_guard_secs() * freq) as u64;
                 for af in bundle {
@@ -602,50 +500,10 @@ impl<S: PieceSink> Pump<S> {
                                 mcu_id,
                                 axis: af.axis,
                             };
-                            let (
-                                queue_lead_secs,
-                                queue_pending,
-                                queue_staged_motion,
-                                queue_pushed,
-                                queue_retired,
-                                queue_ring_depth,
-                                queue_room,
-                                queue_front_start_time,
-                                queue_tail_start_time,
-                            ) = self.queues.get(&key).map_or(
-                                (f64::NAN, 0, 0, 0, 0, 0, 0, 0, 0),
-                                |q| {
-                                    (
-                                        q.lead_secs,
-                                        q.pieces.len(),
-                                        q.staged_motion,
-                                        q.pushed,
-                                        q.retired,
-                                        q.ring_depth,
-                                        q.room(),
-                                        q.pieces.front().map_or(0, |(front, _)| front.start_time),
-                                        q.pieces.back().map_or(0, |(tail, _)| tail.start_time),
-                                    )
-                                },
-                            );
-                            let (
-                                heartbeat_age_us,
-                                heartbeat_arrival_gap_us,
-                                heartbeat_delivery_delay_us,
-                            ) = self.heartbeat_timing.get(&mcu_id).map_or(
-                                (u64::MAX, u64::MAX, u64::MAX),
-                                |timing| {
-                                    (
-                                        Instant::now()
-                                            .checked_duration_since(timing.received_at)
-                                            .unwrap_or(Duration::ZERO)
-                                            .as_micros()
-                                            as u64,
-                                        timing.arrival_gap.as_micros() as u64,
-                                        timing.delivery_delay.as_micros() as u64,
-                                    )
-                                },
-                            );
+                            let (queue_lead_secs, queue_pending, queue_staged_motion) =
+                                self.queues.get(&key).map_or((f64::NAN, 0, 0), |q| {
+                                    (q.lead_secs, q.pieces.len(), q.staged_motion)
+                                });
                             tracing::error!(
                                 subsystem = "motion",
                                 event = "pump_piece_in_past",
@@ -662,39 +520,12 @@ impl<S: PieceSink> Pump<S> {
                                 queue_lead_secs,
                                 queue_pending,
                                 queue_staged_motion,
-                                queue_pushed,
-                                queue_retired,
-                                queue_ring_depth,
-                                queue_room,
-                                queue_front_start_time,
-                                queue_tail_start_time,
-                                iteration_gap_us = self.iteration_gap.as_micros() as u64,
-                                heartbeat_age_us,
-                                heartbeat_arrival_gap_us,
-                                heartbeat_delivery_delay_us,
                                 cohort_active = self.cohort.is_some(),
                                 "[pump-guard] piece already in the MCU's past {context} — failing loud on host before the MCU/endpoint trips -308"
                             );
                             eprintln!(
-                                "pump: piece in past {context} — mcu {mcu_id} axis {} \
-                                 start_time={} mcu_now={mcu_now} deficit_us={deficit_us} \
-                                 piece_idx={piece_idx} is_hold={} duration_s={} coeff_count={} \
-                                 queue_lead_secs={queue_lead_secs} queue_pending={queue_pending} \
-                                 queue_staged_motion={queue_staged_motion} queue_pushed={queue_pushed} \
-                                 queue_retired={queue_retired} queue_ring_depth={queue_ring_depth} \
-                                 queue_room={queue_room} queue_front_start_time={queue_front_start_time} \
-                                 queue_tail_start_time={queue_tail_start_time} iteration_gap_us={} \
-                                 heartbeat_age_us={heartbeat_age_us} \
-                                 heartbeat_arrival_gap_us={heartbeat_arrival_gap_us} \
-                                 heartbeat_delivery_delay_us={heartbeat_delivery_delay_us} \
-                                 cohort_active={} — aborting host before MCU -308",
-                                af.axis,
-                                piece.start_time,
-                                super::sched::is_hold_piece(piece),
-                                piece.duration,
-                                piece.coeff_count,
-                                self.iteration_gap.as_micros(),
-                                self.cohort.is_some()
+                                "pump: piece in past {context} — mcu {mcu_id} axis {} start_time={} mcu_now={mcu_now} deficit_us={deficit_us} — aborting host before MCU -308",
+                                af.axis, piece.start_time
                             );
                             let _ = std::io::Write::flush(&mut std::io::stderr());
                             std::process::abort();
@@ -777,180 +608,6 @@ impl<S: PieceSink> Pump<S> {
         }
     }
 
-    fn ahead_queue_snapshot(&self, key: AxisKey) -> AheadQueueSnapshot {
-        let q = self.queues.get(&key).expect("stalled-ahead queue exists");
-        let front_start_time = q.pieces.front().map_or(0, |(piece, _)| piece.start_time);
-        let (mcu_now, freq) = (self.callbacks.mcu_clock_of)(key.mcu_id).unwrap_or((0, 0.0));
-        let front_lead_us = if freq > 0.0 {
-            (front_start_time as i64 - mcu_now as i64) as f64 / freq * 1e6
-        } else {
-            f64::NAN
-        };
-        let horizon_ticks = self.horizon_of(&key, q).unwrap_or(0);
-        let other_pending_queues = self
-            .queues
-            .iter()
-            .filter(|(other_key, other_q)| **other_key != key && !other_q.pieces.is_empty())
-            .count();
-        let other_sendable_queues = self
-            .queues
-            .iter()
-            .filter(|(other_key, other_q)| {
-                if **other_key == key || other_q.pieces.is_empty() || other_q.room() == 0 {
-                    return false;
-                }
-                let Some(horizon) = self.horizon_of(other_key, other_q) else {
-                    return true;
-                };
-                other_q
-                    .pieces
-                    .front()
-                    .is_some_and(|(piece, _)| piece.start_time <= horizon)
-            })
-            .count();
-        AheadQueueSnapshot {
-            front_start_time,
-            mcu_now,
-            front_lead_us,
-            horizon_ticks,
-            horizon_lead_us: q.lead_secs * 1e6,
-            pending: q.pieces.len(),
-            ring_room: q.room(),
-            other_pending_queues,
-            other_sendable_queues,
-        }
-    }
-
-    fn observe_stall_ahead(&mut self, key: AxisKey) {
-        let now = Instant::now();
-        let Some(elapsed) = self.ahead_stall.observe(key, now) else {
-            return;
-        };
-        let snapshot = self.ahead_queue_snapshot(key);
-        tracing::warn!(
-            subsystem = "motion",
-            event = "pump_stall_ahead",
-            mcu = key.mcu_id,
-            axis = key.axis,
-            stalled_ms = elapsed.as_millis() as u64,
-            front_start_time = snapshot.front_start_time,
-            mcu_now = snapshot.mcu_now,
-            front_lead_us = snapshot.front_lead_us,
-            horizon_ticks = snapshot.horizon_ticks,
-            horizon_lead_us = snapshot.horizon_lead_us,
-            pending = snapshot.pending,
-            ring_room = snapshot.ring_room,
-            other_pending_queues = snapshot.other_pending_queues,
-            other_sendable_queues = snapshot.other_sendable_queues,
-            "pump remained stalled at the release horizon"
-        );
-    }
-
-    fn reset_ahead_stall(&mut self) {
-        let Some(ended) = self.ahead_stall.reset(Instant::now()) else {
-            return;
-        };
-        tracing::warn!(
-            subsystem = "motion",
-            event = "pump_stall_ahead_end",
-            first_mcu = ended.first_key.mcu_id,
-            first_axis = ended.first_key.axis,
-            last_mcu = ended.last_key.mcu_id,
-            last_axis = ended.last_key.axis,
-            total_ms = ended.elapsed.as_millis() as u64,
-            "pump release-horizon stall ended"
-        );
-    }
-
-    fn observe_deferred_send(&mut self, key: AxisKey, reason: DeferredReason, selected_mcu: u32) {
-        let now = Instant::now();
-        let Some(elapsed) = self.deferred_stall.observe(key, now) else {
-            return;
-        };
-        let snapshot = self.ahead_queue_snapshot(key);
-        tracing::warn!(
-            subsystem = "motion",
-            event = "pump_scheduler_bypass",
-            gating_mcu = key.mcu_id,
-            gating_axis = key.axis,
-            ?reason,
-            selected_mcu,
-            stalled_ms = elapsed.as_millis() as u64,
-            front_start_time = snapshot.front_start_time,
-            mcu_now = snapshot.mcu_now,
-            front_lead_us = snapshot.front_lead_us,
-            horizon_ticks = snapshot.horizon_ticks,
-            horizon_lead_us = snapshot.horizon_lead_us,
-            pending = snapshot.pending,
-            ring_room = snapshot.ring_room,
-            other_pending_queues = snapshot.other_pending_queues,
-            other_sendable_queues = snapshot.other_sendable_queues,
-            "pump bypassed a horizon-blocked global-head queue while sending another MCU"
-        );
-    }
-
-    fn reset_deferred_stall(&mut self) {
-        let Some(ended) = self.deferred_stall.reset(Instant::now()) else {
-            return;
-        };
-        tracing::warn!(
-            subsystem = "motion",
-            event = "pump_scheduler_bypass_end",
-            first_mcu = ended.first_key.mcu_id,
-            first_axis = ended.first_key.axis,
-            last_mcu = ended.last_key.mcu_id,
-            last_axis = ended.last_key.axis,
-            total_ms = ended.elapsed.as_millis() as u64,
-            "pump blocked-head bypass episode ended"
-        );
-    }
-
-    fn send_frames(&mut self, frames: Vec<FramePlan>) -> Result<bool, ()> {
-        let mcu_id = frames
-            .first()
-            .expect("scheduled frame bundle is nonempty")
-            .key
-            .mcu_id;
-        let bundle = self.build_bundle(frames);
-        self.guard_pieces_not_in_past(mcu_id, &bundle, "at send");
-        match self.send_bundle_logged(mcu_id, &bundle) {
-            Ok(()) => {
-                self.commit_sent_bundle(mcu_id, &bundle);
-                Ok(true)
-            }
-            Err(SendError::Fatal(e)) => {
-                tracing::error!(
-                    subsystem = "motion",
-                    event = "send_frame_fatal",
-                    mcu = mcu_id,
-                    error = %e,
-                    "pump send_mcu_frames FATAL transport error — invoking fatal-transport action"
-                );
-                (self.callbacks.on_fatal_transport)(AxisKey {
-                    mcu_id,
-                    axis: bundle.first().map_or(0, |f| f.axis),
-                });
-                Err(())
-            }
-            Err(SendError::Transient(e)) => {
-                tracing::error!(
-                    subsystem = "motion",
-                    event = "send_frame_transient",
-                    mcu = mcu_id,
-                    error = %e,
-                    "pump send_mcu_frames failed"
-                );
-                self.guard_pieces_not_in_past(
-                    mcu_id,
-                    &bundle,
-                    "after a failed send (transport gave no response \
-                     while the piece's scheduling lead ran out)",
-                );
-                Ok(false)
-            }
-        }
-    }
-
     pub(super) fn send_ready(&mut self) -> Result<bool, ()> {
         let mut activity = false;
         loop {
@@ -967,49 +624,62 @@ impl<S: PieceSink> Pump<S> {
             match sched {
                 Schedule::Idle => {
                     self.retirement_stall.reset();
-                    self.reset_ahead_stall();
-                    self.reset_deferred_stall();
                     break;
                 }
                 Schedule::StallFull(stall_key) => {
-                    self.reset_ahead_stall();
-                    self.reset_deferred_stall();
                     self.handle_stall_full(stall_key)?;
                     break;
                 }
-                Schedule::StallAhead(stall_key) => {
+                Schedule::StallAhead(_stall_key) => {
                     self.retirement_stall.reset();
-                    self.reset_deferred_stall();
-                    self.observe_stall_ahead(stall_key);
                     self.holding_ahead = true;
                     break;
                 }
                 Schedule::Send(frames) => {
                     self.retirement_stall.reset();
-                    self.reset_ahead_stall();
-                    self.reset_deferred_stall();
-                    if !self.send_frames(frames)? {
+                    if frames.is_empty() {
                         break;
                     }
                     activity = true;
-                }
-                Schedule::SendDeferred(frames, gating_key, reason) => {
-                    self.retirement_stall.reset();
-                    self.reset_ahead_stall();
-                    if reason != DeferredReason::Horizon {
-                        self.reset_deferred_stall();
-                    } else {
-                        let selected_mcu = frames
-                            .first()
-                            .expect("scheduled deferred frame bundle is nonempty")
-                            .key
-                            .mcu_id;
-                        self.observe_deferred_send(gating_key, reason, selected_mcu);
+                    let mcu_id = frames[0].key.mcu_id;
+                    let bundle = self.build_bundle(frames);
+                    self.guard_pieces_not_in_past(mcu_id, &bundle, "at send");
+                    let send_result = self.send_bundle_logged(mcu_id, &bundle);
+                    match send_result {
+                        Ok(()) => {
+                            self.commit_sent_bundle(mcu_id, &bundle);
+                        }
+                        Err(SendError::Fatal(ref e)) => {
+                            tracing::error!(
+                                subsystem = "motion",
+                                event = "send_frame_fatal",
+                                mcu = mcu_id,
+                                error = %e,
+                                "pump send_mcu_frames FATAL transport error — invoking fatal-transport action"
+                            );
+                            (self.callbacks.on_fatal_transport)(AxisKey {
+                                mcu_id,
+                                axis: bundle.first().map_or(0, |f| f.axis),
+                            });
+                            return Err(());
+                        }
+                        Err(SendError::Transient(ref e)) => {
+                            tracing::error!(
+                                subsystem = "motion",
+                                event = "send_frame_transient",
+                                mcu = mcu_id,
+                                error = %e,
+                                "pump send_mcu_frames failed"
+                            );
+                            self.guard_pieces_not_in_past(
+                                mcu_id,
+                                &bundle,
+                                "after a failed send (transport gave no response \
+                                 while the piece's scheduling lead ran out)",
+                            );
+                            break;
+                        }
                     }
-                    if !self.send_frames(frames)? {
-                        break;
-                    }
-                    activity = true;
                 }
             }
         }
@@ -1082,13 +752,7 @@ impl<S: PieceSink> Pump<S> {
     }
 
     fn run_loop(&mut self, control_rx: &Receiver<PumpMsg>, data_rx: &Receiver<EnqueueMsg>) {
-        self.last_iteration_at = Some(Instant::now());
         loop {
-            let now = Instant::now();
-            self.iteration_gap = self
-                .last_iteration_at
-                .replace(now)
-                .map_or(Duration::ZERO, |prior| now.duration_since(prior));
             let poll_ms = self.poll_ms();
             let mut activity = false;
 
@@ -1148,12 +812,7 @@ pub fn run_pump<S: PieceSink>(
         holding_ahead: false,
         data_open: true,
         retirement_stall: RetirementStallWatch::new(RETIREMENT_STALL_FATAL),
-        ahead_stall: AheadStallWatch::new(AHEAD_STALL_LOG_AFTER),
-        deferred_stall: AheadStallWatch::new(HORIZON_BYPASS_LOG_AFTER),
         mem_probe: MemPressureProbe::new(),
-        last_iteration_at: None,
-        iteration_gap: Duration::ZERO,
-        heartbeat_timing: BTreeMap::new(),
     };
     pump.run(control_rx, data_rx);
 }

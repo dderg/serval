@@ -53,21 +53,6 @@ impl AxisQueue {
     }
 }
 
-pub fn first_start_regression(
-    mut prior_start: Option<u64>,
-    pieces: &[(PieceEntry, f64)],
-) -> Option<(usize, u64, u64)> {
-    for (index, (piece, _)) in pieces.iter().enumerate() {
-        if let Some(prior) = prior_start {
-            if piece.start_time < prior {
-                return Some((index, prior, piece.start_time));
-            }
-        }
-        prior_start = Some(piece.start_time);
-    }
-    None
-}
-
 // Merged holds keep f32 `duration` rounding of `end_time` far inside the
 // walker's 200 µs start-in-past budget (ulp(30 s) ≈ 3.8 µs).
 pub const MAX_MERGED_HOLD_SECS: f64 = 30.0;
@@ -146,17 +131,9 @@ pub struct AxisFrame {
     pub room: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DeferredReason {
-    RingFull,
-    CapExhausted,
-    Horizon,
-}
-
 #[derive(Debug)]
 pub enum Schedule {
     Send(Vec<FramePlan>),
-    SendDeferred(Vec<FramePlan>, AxisKey, DeferredReason),
     StallFull(AxisKey),
     StallAhead(AxisKey),
     Idle,
@@ -171,10 +148,7 @@ pub fn schedule(
     releasable_cap_of: impl Fn(&AxisKey) -> usize,
 ) -> Schedule {
     let mut stall_ahead_candidate: Option<AxisKey> = None;
-    let mut bypassed_ahead_candidate: Option<AxisKey> = None;
     let mut cap_skipped: BTreeSet<AxisKey> = BTreeSet::new();
-    let mut cap_exhausted_candidate: Option<AxisKey> = None;
-    let mut stall_full_candidate: Option<AxisKey> = None;
 
     let head_key = loop {
         let candidate = queues
@@ -187,13 +161,7 @@ pub fn schedule(
             });
         let (&k, q) = match candidate {
             None => {
-                if let Some(k) = stall_full_candidate {
-                    return Schedule::StallFull(k);
-                }
                 if let Some(k) = stall_ahead_candidate {
-                    return Schedule::StallAhead(k);
-                }
-                if let Some(k) = cap_exhausted_candidate {
                     return Schedule::StallAhead(k);
                 }
                 return Schedule::Idle;
@@ -202,16 +170,12 @@ pub fn schedule(
         };
 
         if q.room() == 0 {
-            if stall_full_candidate.is_none() {
-                stall_full_candidate = Some(k);
-            }
-            cap_skipped.insert(k);
-            continue;
+            return Schedule::StallFull(k);
         }
 
         if releasable_cap_of(&k) == 0 {
-            if cap_exhausted_candidate.is_none() {
-                cap_exhausted_candidate = Some(k);
+            if stall_ahead_candidate.is_none() {
+                stall_ahead_candidate = Some(k);
             }
             cap_skipped.insert(k);
             continue;
@@ -220,14 +184,7 @@ pub fn schedule(
         let head_start_ticks = q.pieces.front().unwrap().0.start_time;
         if let Some(horizon) = horizon_of(&k, q) {
             if head_start_ticks > horizon {
-                if stall_ahead_candidate.is_none() {
-                    stall_ahead_candidate = Some(k);
-                }
-                if bypassed_ahead_candidate.is_none() {
-                    bypassed_ahead_candidate = Some(k);
-                }
-                cap_skipped.insert(k);
-                continue;
+                return Schedule::StallAhead(k);
             }
         }
 
@@ -295,13 +252,5 @@ pub fn schedule(
         })
         .collect();
     debug_assert!(!frames.is_empty());
-    if let Some(key) = bypassed_ahead_candidate {
-        Schedule::SendDeferred(frames, key, DeferredReason::Horizon)
-    } else if let Some(key) = stall_full_candidate {
-        Schedule::SendDeferred(frames, key, DeferredReason::RingFull)
-    } else if let Some(key) = cap_exhausted_candidate {
-        Schedule::SendDeferred(frames, key, DeferredReason::CapExhausted)
-    } else {
-        Schedule::Send(frames)
-    }
+    Schedule::Send(frames)
 }

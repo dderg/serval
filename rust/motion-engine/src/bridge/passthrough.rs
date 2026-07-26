@@ -44,8 +44,6 @@ fn params_to_pydict(py: Python<'_>, params: &MessageParams) -> PyResult<Py<PyDic
     }
     if params.sent_time_raw != 0.0 {
         d.set_item("#sent_time_raw", params.sent_time_raw)?;
-    }
-    if params.recv_time_raw != 0.0 {
         d.set_item("#receive_time_raw", params.recv_time_raw)?;
     }
     Ok(d.unbind())
@@ -136,7 +134,7 @@ impl PyMotionEngine {
     fn take_runtime_event(&self, py: Python<'_>, mcu_handle: u32) -> PyResult<Option<Py<PyDict>>> {
         use host_rt::host_io::runtime_events::RuntimeEvent;
 
-        let (event, runtime_lane) = {
+        let event = {
             let mut mcus = self.mcus.lock_ok();
             let conn = mcus.get_mut(&mcu_handle).ok_or_else(|| {
                 PyRuntimeError::new_err(format!(
@@ -144,13 +142,10 @@ impl PyMotionEngine {
                 ))
             })?;
             let mut taken = None;
-            for (lane, rx) in [
-                ("priority", &mut conn.runtime_rx_priority),
-                ("bulk", &mut conn.runtime_rx_bulk),
-            ] {
-                if let Some(rx) = rx.as_mut() {
+            for lane in [&mut conn.runtime_rx_priority, &mut conn.runtime_rx_bulk] {
+                if let Some(rx) = lane.as_mut() {
                     if let Ok(ev) = rx.try_recv() {
-                        taken = Some((ev, lane));
+                        taken = Some(ev);
                         break;
                     }
                 }
@@ -162,7 +157,6 @@ impl PyMotionEngine {
         };
 
         let d = PyDict::new(py);
-        d.set_item("#runtime_lane", runtime_lane)?;
         match event {
             RuntimeEvent::Status(s) => {
                 d.set_item("type", "status")?;

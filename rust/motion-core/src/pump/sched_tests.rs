@@ -1,5 +1,5 @@
 use super::*;
-use crate::pump::sched::{DeferredReason, MAX_MERGED_HOLD_SECS, first_start_regression};
+use crate::pump::sched::MAX_MERGED_HOLD_SECS;
 use runtime::piece_ring::PieceEntry;
 use std::collections::{BTreeMap, VecDeque};
 
@@ -43,37 +43,12 @@ fn idle_when_empty() {
 }
 
 #[test]
-fn full_ring_does_not_block_another_mcu() {
+fn stalls_when_global_head_ring_full() {
     let mut queues = BTreeMap::new();
     let mut a = q_with(2, &[10]);
     a.pushed = 2;
     queues.insert(AxisKey { mcu_id: 1, axis: 0 }, a);
     queues.insert(AxisKey { mcu_id: 2, axis: 0 }, q_with(8, &[20]));
-    match schedule(
-        &queues,
-        255,
-        usize::MAX,
-        |_: &AxisKey, _: &AxisQueue| None,
-        no_cap,
-    ) {
-        Schedule::SendDeferred(frames, gating_key, DeferredReason::RingFull) => {
-            assert_eq!(gating_key, AxisKey { mcu_id: 1, axis: 0 });
-            assert_eq!(frames.len(), 1);
-            assert_eq!(frames[0].key, AxisKey { mcu_id: 2, axis: 0 });
-        }
-        other => panic!("expected ready MCU to send, got {other:?}"),
-    }
-}
-
-#[test]
-fn stalls_when_every_ring_is_full() {
-    let mut queues = BTreeMap::new();
-    let mut a = q_with(2, &[10]);
-    a.pushed = 2;
-    queues.insert(AxisKey { mcu_id: 1, axis: 0 }, a);
-    let mut b = q_with(3, &[20]);
-    b.pushed = 3;
-    queues.insert(AxisKey { mcu_id: 2, axis: 0 }, b);
     assert!(matches!(
         schedule(
             &queues,
@@ -240,69 +215,6 @@ fn all_beyond_horizon_returns_stall_ahead() {
         ),
         "expected StallAhead when sole piece is beyond horizon"
     );
-}
-
-#[test]
-fn horizon_blocked_head_reports_bypass_of_ready_mcu() {
-    let blocked = AxisKey { mcu_id: 1, axis: 0 };
-    let ready = AxisKey { mcu_id: 2, axis: 0 };
-    let mut queues = BTreeMap::new();
-    queues.insert(blocked, q_with_host(8, &[(1_000, 1.0)]));
-    queues.insert(ready, q_with_host(8, &[(100, 2.0)]));
-    match schedule(
-        &queues,
-        255,
-        usize::MAX,
-        |key: &AxisKey, _: &AxisQueue| {
-            if *key == blocked {
-                Some(500)
-            } else {
-                Some(200)
-            }
-        },
-        no_cap,
-    ) {
-        Schedule::SendDeferred(frames, gating_key, DeferredReason::Horizon) => {
-            assert_eq!(gating_key, blocked);
-            assert_eq!(frames.len(), 1);
-            assert_eq!(frames[0].key, ready);
-        }
-        other => panic!("expected horizon bypass, got {other:?}"),
-    }
-}
-
-#[test]
-fn horizon_bypass_takes_priority_over_routine_full_ring() {
-    let full = AxisKey { mcu_id: 0, axis: 0 };
-    let horizon = AxisKey { mcu_id: 1, axis: 0 };
-    let ready = AxisKey { mcu_id: 2, axis: 0 };
-    let mut queues = BTreeMap::new();
-    let mut full_q = q_with_host(1, &[(10, 1.0)]);
-    full_q.pushed = 1;
-    queues.insert(full, full_q);
-    queues.insert(horizon, q_with_host(8, &[(1_000, 2.0)]));
-    queues.insert(ready, q_with_host(8, &[(100, 3.0)]));
-
-    match schedule(
-        &queues,
-        255,
-        usize::MAX,
-        |key: &AxisKey, _: &AxisQueue| {
-            if *key == horizon {
-                Some(500)
-            } else {
-                Some(200)
-            }
-        },
-        no_cap,
-    ) {
-        Schedule::SendDeferred(frames, gating_key, DeferredReason::Horizon) => {
-            assert_eq!(gating_key, horizon);
-            assert_eq!(frames.len(), 1);
-            assert_eq!(frames[0].key, ready);
-        }
-        other => panic!("expected horizon bypass priority, got {other:?}"),
-    }
 }
 
 #[test]
@@ -478,7 +390,7 @@ fn cross_lead_per_queue_horizon_independent() {
 }
 
 #[test]
-fn full_earliest_ring_does_not_starve_later_mcu() {
+fn stall_full_on_globally_earliest_gates_all() {
     let mut queues = BTreeMap::new();
 
     let mut mcu0_q = q_with_host(2, &[(100, 1.0)]);
@@ -487,20 +399,19 @@ fn full_earliest_ring_does_not_starve_later_mcu() {
 
     queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with_host(8, &[(50, 5.0)]));
 
-    match schedule(
-        &queues,
-        255,
-        usize::MAX,
-        |_: &AxisKey, _: &AxisQueue| None,
-        no_cap,
-    ) {
-        Schedule::SendDeferred(frames, gating_key, DeferredReason::RingFull) => {
-            assert_eq!(gating_key, AxisKey { mcu_id: 0, axis: 0 });
-            assert_eq!(frames.len(), 1);
-            assert_eq!(frames[0].key, AxisKey { mcu_id: 1, axis: 0 });
-        }
-        other => panic!("expected later ready MCU to send, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            schedule(
+                &queues,
+                255,
+                usize::MAX,
+                |_: &AxisKey, _: &AxisQueue| None,
+                no_cap
+            ),
+            Schedule::StallFull(AxisKey { mcu_id: 0, axis: 0 })
+        ),
+        "StallFull on the globally host-earliest queue must gate all issuance"
+    );
 }
 
 #[test]
@@ -594,28 +505,6 @@ fn holds_stay_separate_on_value_gap_motion_or_fresh_stream() {
         queue.len(),
         2,
         "fresh stream must not merge into the old tail"
-    );
-}
-
-#[test]
-fn start_regression_identifies_queue_seam_and_incoming_batch() {
-    assert_eq!(
-        first_start_regression(Some(200), &[hold(150, 0.001, 0.0, 0.0)]),
-        Some((0, 200, 150))
-    );
-    assert_eq!(
-        first_start_regression(
-            Some(200),
-            &[hold(250, 0.001, 0.0, 0.0), hold(240, 0.001, 0.0, 0.0)]
-        ),
-        Some((1, 250, 240))
-    );
-    assert_eq!(
-        first_start_regression(
-            None,
-            &[hold(200, 0.001, 0.0, 0.0), hold(250, 0.001, 0.0, 0.0)]
-        ),
-        None
     );
 }
 

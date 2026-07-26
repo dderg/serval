@@ -1,9 +1,5 @@
-import math
 import os
 import sys
-import threading
-from types import SimpleNamespace
-from unittest import mock
 
 sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -71,88 +67,6 @@ def test_engine_get_clock_async_swallows_drop():
     sr = _reader(FakeEngine(raises=TRANSPORT_CLOSED))
     sr.engine_get_clock_async()
     assert sr._engine_detached is True
-
-
-def _response_reader():
-    sr = EngineCommandChannel.__new__(EngineCommandChannel)
-    sr.mcu = SimpleNamespace(get_name=lambda: "bottom")
-    sr.lock = threading.Lock()
-    sr.handlers = {}
-    sr.handle_default = lambda params: None
-    sr.warn_prefix = ""
-    return sr
-
-
-def test_response_dispatch_lag_uses_wire_receive_time():
-    sr = _response_reader()
-    ev = {
-        "name": "analog_in_state",
-        "oid": 7,
-        "type": "response",
-        "#receive_time_raw": 10.0,
-        "#runtime_lane": "bulk",
-    }
-    delayed = sr._engine_handle_response_event(ev, 10.088)
-    assert ev["#sent_time"] == 10.0
-    assert ev["#receive_time"] == 10.0
-    assert delayed["response"] == "analog_in_state"
-    assert delayed["oid"] == 7
-    assert delayed["lane"] == "bulk"
-    assert math.isclose(delayed["lag_s"], 0.088)
-
-
-def test_unstamped_clock_response_remains_invalid():
-    sr = _response_reader()
-    ev = {
-        "name": "clock",
-        "type": "response",
-        "#receive_time_raw": 10.0,
-        "#runtime_lane": "priority",
-    }
-    delayed = sr._engine_handle_response_event(ev, 10.001)
-    assert delayed is None
-    assert ev["#sent_time"] == 0.0
-    assert ev["#receive_time"] == 10.0
-
-
-def test_poller_reports_worst_response_lag_once():
-    sr = _response_reader()
-    sr._poller_expected_wake = 10.0
-    sr._poller_stall_logged = False
-    sr._engine_detached = False
-    sr.reactor = SimpleNamespace(NEVER=999.0)
-    events = iter(
-        [
-            {
-                "name": "analog_in_state",
-                "oid": 6,
-                "type": "response",
-                "#receive_time_raw": 9.95,
-                "#runtime_lane": "bulk",
-            },
-            {
-                "name": "buttons_state",
-                "oid": 3,
-                "type": "response",
-                "#receive_time_raw": 9.97,
-                "#runtime_lane": "bulk",
-            },
-            None,
-        ]
-    )
-    sr.engine_mcu = SimpleNamespace(
-        is_claimed=lambda: True, take_runtime_event=lambda: next(events)
-    )
-    with mock.patch("klippy.serialhdl.structured_log.event") as emit:
-        assert math.isclose(sr._engine_event_poller(10.001), 10.002)
-    emit.assert_called_once()
-    fields = emit.call_args.kwargs
-    assert fields["mcu"] == "bottom"
-    assert fields["response"] == "analog_in_state"
-    assert fields["max_lag_s"] == 0.051
-    assert fields["delayed_count"] == 2
-    assert fields["priority_drained"] == 0
-    assert fields["bulk_drained"] == 2
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -138,7 +138,6 @@ fn run_pump_delivers_piece_despite_retired_over_pushed_inversion() {
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
         retired_counts: vec![2],
-        received_at: std::time::Instant::now(),
     }))
     .unwrap();
     let (ack_tx, ack_rx) = mpsc::sync_channel::<()>(1);
@@ -883,34 +882,8 @@ fn stalled_queue_pump(
         holding_ahead: false,
         data_open: true,
         retirement_stall: super::stall::RetirementStallWatch::new(retirement_stall_fatal),
-        ahead_stall: super::stall::AheadStallWatch::new(Duration::from_millis(20)),
-        deferred_stall: super::stall::AheadStallWatch::new(Duration::from_millis(20)),
         mem_probe: super::memstat::MemPressureProbe::new(),
-        last_iteration_at: None,
-        iteration_gap: Duration::ZERO,
-        heartbeat_timing: BTreeMap::new(),
     }
-}
-#[test]
-fn heartbeat_timing_separates_arrival_gap_from_pump_delivery_delay() {
-    let key = AxisKey { mcu_id: 1, axis: 0 };
-    let mut pump = stalled_queue_pump(key, Duration::from_secs(1), |_| {});
-    let first_received = Instant::now() - Duration::from_millis(100);
-    pump.handle_control_msg(PumpMsg::Heartbeat(HeartbeatMsg {
-        mcu_id: 1,
-        retired_counts: vec![0],
-        received_at: first_received,
-    }));
-    let second_received = first_received + Duration::from_millis(60);
-    pump.handle_control_msg(PumpMsg::Heartbeat(HeartbeatMsg {
-        mcu_id: 1,
-        retired_counts: vec![1],
-        received_at: second_received,
-    }));
-
-    let timing = pump.heartbeat_timing.get(&1).unwrap();
-    assert_eq!(timing.arrival_gap, Duration::from_millis(60));
-    assert!(timing.delivery_delay >= Duration::from_millis(40));
 }
 
 #[test]
@@ -969,7 +942,6 @@ fn retirement_stall_resets_when_heartbeat_advances_retired() {
     pump.handle_control_msg(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
         retired_counts: vec![1],
-        received_at: std::time::Instant::now(),
     }));
     pump.queues.get_mut(&key).unwrap().pushed = 3;
 
@@ -1172,31 +1144,4 @@ mod pushpieces_retransmit_tests {
         );
         assert_eq!(calls, 1, "no retry once the MCU has shut down");
     }
-}
-
-#[test]
-fn ahead_stall_watch_reports_threshold_and_total_episode() {
-    let first = AxisKey { mcu_id: 1, axis: 0 };
-    let last = AxisKey { mcu_id: 2, axis: 1 };
-    let threshold = Duration::from_millis(20);
-    let started = Instant::now();
-    let mut watch = super::stall::AheadStallWatch::new(threshold);
-
-    assert_eq!(watch.observe(first, started), None);
-    assert_eq!(
-        watch.observe(last, started + Duration::from_millis(21)),
-        Some(Duration::from_millis(21))
-    );
-    assert_eq!(
-        watch.observe(first, started + Duration::from_millis(30)),
-        None
-    );
-
-    let ended = watch
-        .reset(started + Duration::from_millis(35))
-        .expect("reported episode must produce an end observation");
-    assert_eq!(ended.first_key, first);
-    assert_eq!(ended.last_key, first);
-    assert_eq!(ended.elapsed, Duration::from_millis(35));
-    assert!(watch.reset(started + Duration::from_millis(40)).is_none());
 }

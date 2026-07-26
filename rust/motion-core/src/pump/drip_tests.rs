@@ -190,7 +190,6 @@ fn fully_executed_cohort_awaiting_trip_is_not_a_stall() {
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 0,
         retired_counts: vec![5, 5, 0, 0],
-        received_at: std::time::Instant::now(),
     }))
     .unwrap();
 
@@ -271,7 +270,6 @@ fn idle_participant_does_not_pin_the_cohort_floor() {
         ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
             mcu_id: 0,
             retired_counts: vec![step + 1, 0, 0, 0],
-            received_at: std::time::Instant::now(),
         }))
         .unwrap();
         std::thread::sleep(Duration::from_millis(40));
@@ -505,14 +503,12 @@ fn retired_regression_triggers_on_drip_stall() {
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 3,
         retired_counts: vec![0, 0, 5],
-        received_at: std::time::Instant::now(),
     }))
     .unwrap();
     std::thread::sleep(Duration::from_millis(50));
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 3,
         retired_counts: vec![0, 0, 3],
-        received_at: std::time::Instant::now(),
     }))
     .unwrap();
     std::thread::sleep(Duration::from_millis(50));
@@ -566,7 +562,6 @@ fn mcu_reboot_retired_to_zero_triggers_regression() {
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
         retired_counts: vec![40],
-        received_at: std::time::Instant::now(),
     }))
     .unwrap();
     std::thread::sleep(Duration::from_millis(30));
@@ -582,7 +577,6 @@ fn mcu_reboot_retired_to_zero_triggers_regression() {
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
         retired_counts: vec![0],
-        received_at: std::time::Instant::now(),
     }))
     .unwrap();
     std::thread::sleep(Duration::from_millis(50));

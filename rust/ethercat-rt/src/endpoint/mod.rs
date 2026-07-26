@@ -9,7 +9,7 @@ use crate::live_tap::LiveTap;
 use crate::mailbox::MailboxWorker;
 use crate::scale::CountMap;
 use crate::sensorless::SensorlessBank;
-use crate::server::{FrameServer, ResponseMetrics};
+use crate::server::FrameServer;
 use crate::strain_comp::StrainCompBank;
 use crate::stream_halt::StreamHalt;
 use crate::torque::TorqueGate;
@@ -99,11 +99,6 @@ pub struct EndpointCtx {
     last_lateness_ns: i64,
     last_dispatch_ns: i64,
     last_pre_work_ns: i64,
-    last_dispatch_pump_ns: u64,
-    last_dispatch_command: &'static str,
-    last_dispatch_command_ns: u64,
-    last_dispatch_command_count: u32,
-    last_response_metrics: ResponseMetrics,
     prev_exchange_ns: i64,
     last_wake_late_ns: i64,
     last_recv_ns: i64,

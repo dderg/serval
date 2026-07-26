@@ -28,8 +28,7 @@ MCU_TIMER_HORIZON = 1 << 30
 # late-arrival crash can be split into generated-late vs delivered-late.
 DEADLINE_MARGIN_WARN = 0.150
 
-RESPONSE_DISPATCH_LAG_WARN_S = 0.020
-REACTOR_STALL_LOG_S = 0.020
+REACTOR_STALL_LOG_S = 0.5
 
 
 class EngineCommandChannel:
@@ -85,26 +84,25 @@ class EngineCommandChannel:
     def _engine_handle_response_event(self, ev, now):
         name = ev.get("name", "")
         ev["#name"] = name
+        # Use CLOCK_MONOTONIC_RAW stamps when the Rust engine supplied
+        # them (non-zero); this happens for "clock" responses dispatched
+        # via engine_get_clock_async so _handle_clock sees honest RTTs.
         sent_raw = ev.get("#sent_time_raw", 0.0)
         recv_raw = ev.get("#receive_time_raw", 0.0)
-        dispatch_lag = now - recv_raw if recv_raw != 0.0 else 0.0
-        lagged_response = None
-        if dispatch_lag > RESPONSE_DISPATCH_LAG_WARN_S:
-            lagged_response = {
-                "lag_s": dispatch_lag,
-                "response": name,
-                "oid": ev.get("oid"),
-                "lane": ev.get("#runtime_lane"),
-            }
         if sent_raw != 0.0 and recv_raw != 0.0:
             ev["#sent_time"] = sent_raw
             ev["#receive_time"] = recv_raw
         elif name == "clock":
+            # A clock sample without wire stamps (missed interception,
+            # duplicate, late arrival) must be DROPPED by clocksync —
+            # fabricating sent==recv here would feed half_rtt=0 into
+            # min_half_rtt and permanently bias the estimate.
+            # _handle_clock's `if not sent_time: return` does the drop.
             ev["#sent_time"] = 0.0
-            ev["#receive_time"] = recv_raw or now
+            ev["#receive_time"] = now
         else:
-            ev["#sent_time"] = recv_raw or now
-            ev["#receive_time"] = recv_raw or now
+            ev["#sent_time"] = now
+            ev["#receive_time"] = now
         oid = ev.get("oid")
         with self.lock:
             hdl = (
@@ -121,7 +119,6 @@ class EngineCommandChannel:
                 name,
                 oid,
             )
-        return lagged_response
 
     def _engine_dispatch_named_event(self, ev, name, now):
         ev["#name"] = name
@@ -151,15 +148,12 @@ class EngineCommandChannel:
                         "mcu-comms",
                         "reactor_poller_late",
                         level=logging.WARNING,
-                        mcu=self.mcu.get_name(),
-                        late_s=round(lateness, 6),
+                        late_s=round(lateness, 3),
                     )
                     self._poller_stall_logged = True
             else:
                 self._poller_stall_logged = False
-        delayed_count = 0
-        max_delayed = None
-        lane_counts = {"priority": 0, "bulk": 0}
+        now = eventtime
         for _ in range(32):
             try:
                 ev = self.engine_mcu.take_runtime_event()
@@ -169,48 +163,25 @@ class EngineCommandChannel:
                 break
             if ev is None:
                 break
-            lane = ev.get("#runtime_lane")
-            if lane in lane_counts:
-                lane_counts[lane] += 1
             ev_type = ev.get("type")
             if ev_type == "status":
                 name = self._engine_handle_status_event(ev)
             elif ev_type == "credit_freed":
+                # Handled directly by Rust EventDispatcher; skip Python routing.
                 continue
             elif ev_type == "fault":
                 name = "runtime_fault"
             elif ev_type == "endstop_tripped":
                 name = "kalico_endstop_tripped"
             elif ev_type == "output":
-                self._engine_handle_output_event(ev, eventtime)
+                self._engine_handle_output_event(ev, now)
                 continue
             elif ev_type == "response":
-                delayed = self._engine_handle_response_event(ev, eventtime)
-                if delayed is not None:
-                    delayed_count += 1
-                    if (
-                        max_delayed is None
-                        or delayed["lag_s"] > max_delayed["lag_s"]
-                    ):
-                        max_delayed = delayed
+                self._engine_handle_response_event(ev, now)
                 continue
             else:
                 continue
-            self._engine_dispatch_named_event(ev, name, eventtime)
-        if max_delayed is not None:
-            structured_log.event(
-                "mcu-comms",
-                "response_dispatch_lag",
-                level=logging.WARNING,
-                mcu=self.mcu.get_name(),
-                response=max_delayed["response"],
-                oid=max_delayed["oid"],
-                lane=max_delayed["lane"],
-                max_lag_s=round(max_delayed["lag_s"], 6),
-                delayed_count=delayed_count,
-                priority_drained=lane_counts["priority"],
-                bulk_drained=lane_counts["bulk"],
-            )
+            self._engine_dispatch_named_event(ev, name, now)
         next_wake = eventtime + 0.001
         self._poller_expected_wake = next_wake
         return next_wake
@@ -400,7 +371,6 @@ class EngineCommandChannel:
                 level=logging.WARNING,
                 msg="engine-path command sent with thin clock margin",
                 command=command_name,
-                mcu=self.mcu.get_name(),
                 margin_s=margin,
             )
 
@@ -444,6 +414,10 @@ class EngineCommandChannel:
         return self._stamp_response_times(params)
 
     def _stamp_response_times(self, params):
+        # Use CLOCK_MONOTONIC_RAW timestamps if the Rust engine supplied them
+        # (non-zero means a real RTT was measured on the wire).  Fall back to
+        # reactor.monotonic() only when both sides stamp the same instant (the
+        # old behaviour, which gives half_rtt=0 and breaks min_half_rtt).
         sent_raw = params.get("#sent_time_raw", 0.0)
         recv_raw = params.get("#receive_time_raw", 0.0)
         if sent_raw != 0.0 and recv_raw != 0.0:

@@ -102,7 +102,6 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
         retired_counts: vec![2],
-        received_at: std::time::Instant::now(),
     }))
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -489,7 +488,6 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
         retired_counts: vec![4],
-        received_at: std::time::Instant::now(),
     }))
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(30));
