@@ -16,6 +16,14 @@ use crate::wire::{decode_command, Command};
 /// side only try_recvs decoded commands and writes responses; the socket
 /// stays nonblocking because reader and writer share the fd and the RT
 /// thread's writes must never block.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResponseMetrics {
+    pub count: u32,
+    pub total_ns: u64,
+    pub max_ns: u64,
+    pub pending_bytes: usize,
+}
+
 pub struct FrameServer {
     cmd_rx: Receiver<Command>,
     writer_rx: Receiver<UnixStream>,
@@ -23,6 +31,9 @@ pub struct FrameServer {
     pending: Vec<u8>,
     pending_since: Option<Instant>,
     pending_max: usize,
+    response_count: u32,
+    response_total_ns: u64,
+    response_max_ns: u64,
     session_ended: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
 }
@@ -95,6 +106,9 @@ impl FrameServer {
             pending: Vec::new(),
             pending_since: None,
             pending_max: 0,
+            response_count: 0,
+            response_total_ns: 0,
+            response_max_ns: 0,
             session_ended,
             closed,
         })
@@ -124,7 +138,31 @@ impl FrameServer {
         cmds
     }
 
+    pub fn reset_response_metrics(&mut self) {
+        self.response_count = 0;
+        self.response_total_ns = 0;
+        self.response_max_ns = 0;
+    }
+
+    pub fn response_metrics(&self) -> ResponseMetrics {
+        ResponseMetrics {
+            count: self.response_count,
+            total_ns: self.response_total_ns,
+            max_ns: self.response_max_ns,
+            pending_bytes: self.pending.len(),
+        }
+    }
+
     pub fn respond(&mut self, frame: &[u8]) {
+        let started = Instant::now();
+        self.respond_inner(frame);
+        let elapsed_ns = started.elapsed().as_nanos() as u64;
+        self.response_count = self.response_count.saturating_add(1);
+        self.response_total_ns = self.response_total_ns.saturating_add(elapsed_ns);
+        self.response_max_ns = self.response_max_ns.max(elapsed_ns);
+    }
+
+    fn respond_inner(&mut self, frame: &[u8]) {
         if self.writer.is_none() {
             return;
         }
@@ -300,6 +338,9 @@ impl FrameServer {
             writer_rx,
             writer: Some(writer),
             pending: Vec::new(),
+            response_count: 0,
+            response_total_ns: 0,
+            response_max_ns: 0,
             pending_since: None,
             pending_max: 0,
             session_ended: Arc::new(AtomicBool::new(false)),

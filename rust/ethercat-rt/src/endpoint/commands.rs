@@ -65,9 +65,13 @@ fn command_name(cmd: &Command) -> &'static str {
 
 pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
     let started = std::time::Instant::now();
+    ctx.server.reset_response_metrics();
     ctx.server.pump();
-    let pump_ns = started.elapsed().as_nanos();
-    if pump_ns > DISPATCH_BUDGET_NS {
+    let pump_ns = started.elapsed().as_nanos() as u64;
+    let mut slowest_command = "none";
+    let mut slowest_command_ns = 0u64;
+    let mut command_count = 0u32;
+    if u128::from(pump_ns) > DISPATCH_BUDGET_NS {
         tracing::warn!(
             subsystem = "ethercat",
             event = "slow_pump",
@@ -236,11 +240,13 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
                 crate::rt_eprintln!("ec-rt: ignoring kind 0x{kind_raw:04x}");
             }
         }
-        let cmd_ns = cmd_started.elapsed().as_nanos();
-        // SetTorque's enable path is the CiA402 walk: hundreds of ms of wall
-        // time, but its internal exchanges stay on the DC grid, so it never
-        // misses a latch — warning on it would bury the real offenders.
-        if cmd_ns > DISPATCH_BUDGET_NS && name != "SetTorque" {
+        let cmd_ns = cmd_started.elapsed().as_nanos() as u64;
+        command_count = command_count.saturating_add(1);
+        if cmd_ns > slowest_command_ns {
+            slowest_command = name;
+            slowest_command_ns = cmd_ns;
+        }
+        if u128::from(cmd_ns) > DISPATCH_BUDGET_NS && name != "SetTorque" {
             tracing::warn!(
                 subsystem = "ethercat",
                 event = "slow_command",
@@ -254,6 +260,11 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             break;
         }
     }
+    ctx.last_dispatch_pump_ns = pump_ns;
+    ctx.last_dispatch_command = slowest_command;
+    ctx.last_dispatch_command_ns = slowest_command_ns;
+    ctx.last_dispatch_command_count = command_count;
+    ctx.last_response_metrics = ctx.server.response_metrics();
     ControlFlow::Continue(())
 }
 

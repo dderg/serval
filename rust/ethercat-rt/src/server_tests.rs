@@ -86,6 +86,29 @@ fn wouldblock_midframe_preserves_byte_exact_ordering() {
 }
 
 #[test]
+fn response_metrics_reset_and_track_backpressure() {
+    let (mut server, _state) = server_with(0);
+
+    server.reset_response_metrics();
+    server.respond(&[1, 2, 3]);
+    server.respond(&[4, 5]);
+
+    let metrics = server.response_metrics();
+    assert_eq!(metrics.count, 2);
+    assert!(metrics.total_ns >= metrics.max_ns);
+    assert_eq!(metrics.pending_bytes, 5);
+
+    server.reset_response_metrics();
+    assert_eq!(
+        server.response_metrics(),
+        super::ResponseMetrics {
+            pending_bytes: 5,
+            ..super::ResponseMetrics::default()
+        }
+    );
+}
+
+#[test]
 fn real_write_error_ends_session_immediately() {
     let (mut server, state) = server_with(usize::MAX);
     state.lock().fail = Some(io::ErrorKind::BrokenPipe);
