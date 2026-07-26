@@ -14,7 +14,7 @@ use super::messages::{
 };
 use super::sched::{
     AxisFrame, AxisQueue, DeferredReason, FramePlan, Schedule, append_pieces_merging_holds,
-    schedule,
+    first_start_regression, schedule,
 };
 use super::stall::{AheadStallWatch, RetirementStallWatch};
 use crate::types::AxisKey;
@@ -127,6 +127,8 @@ pub(super) struct Pump<S> {
     pub(super) ahead_stall: AheadStallWatch,
     pub(super) deferred_stall: AheadStallWatch,
     pub(super) mem_probe: MemPressureProbe,
+    pub(super) last_iteration_at: Option<Instant>,
+    pub(super) iteration_gap: Duration,
 }
 
 impl<S: PieceSink> Pump<S> {
@@ -280,6 +282,44 @@ impl<S: PieceSink> Pump<S> {
             .queues
             .entry(key)
             .or_insert_with(|| AxisQueue::new(ring_depth));
+        let queued_tail_start = if epoch.is_fresh() {
+            None
+        } else {
+            q.pieces.back().map(|(piece, _)| piece.start_time)
+        };
+        if let Some((piece_idx, prior_start_time, start_time)) =
+            first_start_regression(queued_tail_start, &pieces)
+        {
+            tracing::error!(
+                subsystem = "motion",
+                event = "pump_enqueue_start_regression",
+                mcu = key.mcu_id,
+                axis = key.axis,
+                piece_idx,
+                prior_start_time,
+                start_time,
+                regression_ticks = prior_start_time - start_time,
+                queue_pending = q.pieces.len(),
+                ?epoch,
+                source_line,
+                "pump enqueue would put an earlier piece behind a later piece"
+            );
+            eprintln!(
+                "pump: enqueue start regression — mcu {} axis {} piece_idx={} \
+                 prior_start_time={} start_time={} regression_ticks={} \
+                 queue_pending={} epoch={epoch:?} source_line={} — aborting host",
+                key.mcu_id,
+                key.axis,
+                piece_idx,
+                prior_start_time,
+                start_time,
+                prior_start_time - start_time,
+                q.pieces.len(),
+                source_line
+            );
+            let _ = std::io::Write::flush(&mut std::io::stderr());
+            std::process::abort();
+        }
         q.lead_secs = lead_secs;
         q.staged_motion += pieces
             .iter()
@@ -423,7 +463,7 @@ impl<S: PieceSink> Pump<S> {
             .observe(stall_key, current_retired, now);
         if observation.log_due {
             let in_flight = q.pushed.wrapping_sub(q.retired);
-            tracing::debug!(
+            tracing::warn!(
                 subsystem = "motion",
                 event = "pump_stall_full",
                 mcu = stall_key.mcu_id,
@@ -490,12 +530,6 @@ impl<S: PieceSink> Pump<S> {
             .collect()
     }
 
-    // Host-side guard: refuse to submit a piece whose start_time is already in
-    // the MCU's past. Catching it here fails loud on the host with the
-    // offending mcu/axis/deficit instead of letting the MCU (or the EtherCAT
-    // endpoint ring) trip a cryptic -308 PieceStartInPast after the fact.
-    // Mirrors the MCU's MAX_START_IN_PAST_SECS=200us threshold with a margin
-    // above host-projection jitter so a healthy print never false-aborts.
     fn guard_pieces_not_in_past(&self, mcu_id: u32, bundle: &[AxisFrame], context: &str) {
         if let Some((mcu_now, freq)) = (self.callbacks.mcu_clock_of)(mcu_id) {
             if freq > 0.0 {
@@ -509,10 +543,32 @@ impl<S: PieceSink> Pump<S> {
                                 mcu_id,
                                 axis: af.axis,
                             };
-                            let (queue_lead_secs, queue_pending, queue_staged_motion) =
-                                self.queues.get(&key).map_or((f64::NAN, 0, 0), |q| {
-                                    (q.lead_secs, q.pieces.len(), q.staged_motion)
-                                });
+                            let (
+                                queue_lead_secs,
+                                queue_pending,
+                                queue_staged_motion,
+                                queue_pushed,
+                                queue_retired,
+                                queue_ring_depth,
+                                queue_room,
+                                queue_front_start_time,
+                                queue_tail_start_time,
+                            ) = self.queues.get(&key).map_or(
+                                (f64::NAN, 0, 0, 0, 0, 0, 0, 0, 0),
+                                |q| {
+                                    (
+                                        q.lead_secs,
+                                        q.pieces.len(),
+                                        q.staged_motion,
+                                        q.pushed,
+                                        q.retired,
+                                        q.ring_depth,
+                                        q.room(),
+                                        q.pieces.front().map_or(0, |(front, _)| front.start_time),
+                                        q.pieces.back().map_or(0, |(tail, _)| tail.start_time),
+                                    )
+                                },
+                            );
                             tracing::error!(
                                 subsystem = "motion",
                                 event = "pump_piece_in_past",
@@ -529,6 +585,13 @@ impl<S: PieceSink> Pump<S> {
                                 queue_lead_secs,
                                 queue_pending,
                                 queue_staged_motion,
+                                queue_pushed,
+                                queue_retired,
+                                queue_ring_depth,
+                                queue_room,
+                                queue_front_start_time,
+                                queue_tail_start_time,
+                                iteration_gap_us = self.iteration_gap.as_micros() as u64,
                                 cohort_active = self.cohort.is_some(),
                                 "[pump-guard] piece already in the MCU's past {context} — failing loud on host before the MCU/endpoint trips -308"
                             );
@@ -537,13 +600,17 @@ impl<S: PieceSink> Pump<S> {
                                  start_time={} mcu_now={mcu_now} deficit_us={deficit_us} \
                                  piece_idx={piece_idx} is_hold={} duration_s={} coeff_count={} \
                                  queue_lead_secs={queue_lead_secs} queue_pending={queue_pending} \
-                                 queue_staged_motion={queue_staged_motion} cohort_active={} — \
-                                 aborting host before MCU -308",
+                                 queue_staged_motion={queue_staged_motion} queue_pushed={queue_pushed} \
+                                 queue_retired={queue_retired} queue_ring_depth={queue_ring_depth} \
+                                 queue_room={queue_room} queue_front_start_time={queue_front_start_time} \
+                                 queue_tail_start_time={queue_tail_start_time} iteration_gap_us={} \
+                                 cohort_active={} — aborting host before MCU -308",
                                 af.axis,
                                 piece.start_time,
                                 super::sched::is_hold_piece(piece),
                                 piece.duration,
                                 piece.coeff_count,
+                                self.iteration_gap.as_micros(),
                                 self.cohort.is_some()
                             );
                             let _ = std::io::Write::flush(&mut std::io::stderr());
@@ -932,7 +999,13 @@ impl<S: PieceSink> Pump<S> {
     }
 
     fn run_loop(&mut self, control_rx: &Receiver<PumpMsg>, data_rx: &Receiver<EnqueueMsg>) {
+        self.last_iteration_at = Some(Instant::now());
         loop {
+            let now = Instant::now();
+            self.iteration_gap = self
+                .last_iteration_at
+                .replace(now)
+                .map_or(Duration::ZERO, |prior| now.duration_since(prior));
             let poll_ms = self.poll_ms();
             let mut activity = false;
 
@@ -995,6 +1068,8 @@ pub fn run_pump<S: PieceSink>(
         ahead_stall: AheadStallWatch::new(AHEAD_STALL_LOG_AFTER),
         deferred_stall: AheadStallWatch::new(HORIZON_BYPASS_LOG_AFTER),
         mem_probe: MemPressureProbe::new(),
+        last_iteration_at: None,
+        iteration_gap: Duration::ZERO,
     };
     pump.run(control_rx, data_rx);
 }

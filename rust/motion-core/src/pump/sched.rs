@@ -53,6 +53,21 @@ impl AxisQueue {
     }
 }
 
+pub fn first_start_regression(
+    mut prior_start: Option<u64>,
+    pieces: &[(PieceEntry, f64)],
+) -> Option<(usize, u64, u64)> {
+    for (index, (piece, _)) in pieces.iter().enumerate() {
+        if let Some(prior) = prior_start {
+            if piece.start_time < prior {
+                return Some((index, prior, piece.start_time));
+            }
+        }
+        prior_start = Some(piece.start_time);
+    }
+    None
+}
+
 // Merged holds keep f32 `duration` rounding of `end_time` far inside the
 // walker's 200 µs start-in-past budget (ulp(30 s) ≈ 3.8 µs).
 pub const MAX_MERGED_HOLD_SECS: f64 = 30.0;

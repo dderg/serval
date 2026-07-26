@@ -1,5 +1,5 @@
 use super::*;
-use crate::pump::sched::{DeferredReason, MAX_MERGED_HOLD_SECS};
+use crate::pump::sched::{DeferredReason, MAX_MERGED_HOLD_SECS, first_start_regression};
 use runtime::piece_ring::PieceEntry;
 use std::collections::{BTreeMap, VecDeque};
 
@@ -594,6 +594,28 @@ fn holds_stay_separate_on_value_gap_motion_or_fresh_stream() {
         queue.len(),
         2,
         "fresh stream must not merge into the old tail"
+    );
+}
+
+#[test]
+fn start_regression_identifies_queue_seam_and_incoming_batch() {
+    assert_eq!(
+        first_start_regression(Some(200), &[hold(150, 0.001, 0.0, 0.0)]),
+        Some((0, 200, 150))
+    );
+    assert_eq!(
+        first_start_regression(
+            Some(200),
+            &[hold(250, 0.001, 0.0, 0.0), hold(240, 0.001, 0.0, 0.0)]
+        ),
+        Some((1, 250, 240))
+    );
+    assert_eq!(
+        first_start_regression(
+            None,
+            &[hold(200, 0.001, 0.0, 0.0), hold(250, 0.001, 0.0, 0.0)]
+        ),
+        None
     );
 }
 
