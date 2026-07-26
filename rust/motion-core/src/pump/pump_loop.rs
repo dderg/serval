@@ -113,6 +113,7 @@ pub(super) struct HeartbeatTiming {
     pub(super) received_at: Instant,
     pub(super) arrival_gap: Duration,
     pub(super) delivery_delay: Duration,
+    pub(super) last_warning_at: Option<Instant>,
 }
 
 pub(super) struct Pump<S> {
@@ -162,9 +163,8 @@ impl<S: PieceSink> Pump<S> {
                 received_at,
             }) => {
                 let handled_at = Instant::now();
-                let arrival_gap = self
-                    .heartbeat_timing
-                    .get(&mcu_id)
+                let prior_timing = self.heartbeat_timing.get(&mcu_id).copied();
+                let arrival_gap = prior_timing
                     .and_then(|prior| received_at.checked_duration_since(prior.received_at))
                     .unwrap_or(Duration::ZERO);
                 let delivery_delay = handled_at
@@ -178,17 +178,29 @@ impl<S: PieceSink> Pump<S> {
                         };
                         self.queues.get(&key).is_some_and(|q| q.retired != retired)
                     });
+                let late = delivery_delay >= Duration::from_millis(5)
+                    || retirement_advanced && arrival_gap >= Duration::from_millis(50);
+                let warning_due = late
+                    && prior_timing
+                        .and_then(|timing| timing.last_warning_at)
+                        .is_none_or(|last| {
+                            handled_at.duration_since(last) >= Duration::from_secs(1)
+                        });
+                let last_warning_at = if warning_due {
+                    Some(handled_at)
+                } else {
+                    prior_timing.and_then(|timing| timing.last_warning_at)
+                };
                 self.heartbeat_timing.insert(
                     mcu_id,
                     HeartbeatTiming {
                         received_at,
                         arrival_gap,
                         delivery_delay,
+                        last_warning_at,
                     },
                 );
-                if delivery_delay >= Duration::from_millis(5)
-                    || retirement_advanced && arrival_gap >= Duration::from_millis(50)
-                {
+                if warning_due {
                     tracing::warn!(
                         subsystem = "motion",
                         event = "pump_heartbeat_late",

@@ -10,7 +10,8 @@ use crate::config::PlannerConfig;
 use crate::worker::{DispatchError, StreamWorkerHandle};
 use trajectory::ShapedSegment;
 
-use super::{McuConnection, PyMotionEngine};
+use super::pipeline_setup::RetirementForwardGate;
+use super::{Duration, Instant, McuConnection, PyMotionEngine};
 
 fn open_pty() -> (libc::c_int, String) {
     let mut master: libc::c_int = 0;
@@ -280,6 +281,17 @@ fn stream_config_from(cfg: &PlannerConfig) -> (motion_pipeline::StreamConfig, Ve
         limits: test_limits(),
     };
     (sc, vec![0.0; cfg.axis_registry.n_axes().max(3)])
+}
+
+#[test]
+fn retirement_forward_gate_samples_latest_state_at_bounded_cadence() {
+    let interval = Duration::from_millis(5);
+    let gate = RetirementForwardGate::new(interval);
+    let started = Instant::now();
+    assert!(gate.admit(started));
+    assert!(!gate.admit(started + Duration::from_millis(1)));
+    assert!(!gate.admit(started + Duration::from_millis(4)));
+    assert!(gate.admit(started + interval));
 }
 
 #[test]
