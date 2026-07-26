@@ -513,6 +513,7 @@ fn forward_retired_heartbeat(
     let _ = pump_tx.send(crate::pump::PumpMsg::Heartbeat(crate::pump::HeartbeatMsg {
         mcu_id,
         retired_counts,
+        received_at: std::time::Instant::now(),
     }));
 }
 

@@ -195,6 +195,7 @@ fn heartbeat_retirement_drains_pump_ledger() {
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 42,
         retired_counts: vec![1],
+        received_at: std::time::Instant::now(),
     }))
     .unwrap();
     barrier(&ctl);

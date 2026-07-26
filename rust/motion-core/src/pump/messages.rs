@@ -47,6 +47,7 @@ impl HistoryRecorder {
 pub struct HeartbeatMsg {
     pub mcu_id: u32,
     pub retired_counts: Vec<u32>,
+    pub received_at: std::time::Instant,
 }
 
 pub enum PumpMsg {

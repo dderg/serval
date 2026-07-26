@@ -108,6 +108,13 @@ struct AheadQueueSnapshot {
     other_sendable_queues: usize,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct HeartbeatTiming {
+    pub(super) received_at: Instant,
+    pub(super) arrival_gap: Duration,
+    pub(super) delivery_delay: Duration,
+}
+
 pub(super) struct Pump<S> {
     pub(super) queues: BTreeMap<AxisKey, AxisQueue>,
     pub(super) junctions: JunctionTracker,
@@ -129,6 +136,7 @@ pub(super) struct Pump<S> {
     pub(super) mem_probe: MemPressureProbe,
     pub(super) last_iteration_at: Option<Instant>,
     pub(super) iteration_gap: Duration,
+    pub(super) heartbeat_timing: BTreeMap<u32, HeartbeatTiming>,
 }
 
 impl<S: PieceSink> Pump<S> {
@@ -151,7 +159,46 @@ impl<S: PieceSink> Pump<S> {
             PumpMsg::Heartbeat(HeartbeatMsg {
                 mcu_id,
                 retired_counts,
+                received_at,
             }) => {
+                let handled_at = Instant::now();
+                let arrival_gap = self
+                    .heartbeat_timing
+                    .get(&mcu_id)
+                    .and_then(|prior| received_at.checked_duration_since(prior.received_at))
+                    .unwrap_or(Duration::ZERO);
+                let delivery_delay = handled_at
+                    .checked_duration_since(received_at)
+                    .unwrap_or(Duration::ZERO);
+                let retirement_advanced =
+                    retired_counts.iter().enumerate().any(|(axis, &retired)| {
+                        let key = AxisKey {
+                            mcu_id,
+                            axis: axis as u8,
+                        };
+                        self.queues.get(&key).is_some_and(|q| q.retired != retired)
+                    });
+                self.heartbeat_timing.insert(
+                    mcu_id,
+                    HeartbeatTiming {
+                        received_at,
+                        arrival_gap,
+                        delivery_delay,
+                    },
+                );
+                if delivery_delay >= Duration::from_millis(5)
+                    || retirement_advanced && arrival_gap >= Duration::from_millis(50)
+                {
+                    tracing::warn!(
+                        subsystem = "motion",
+                        event = "pump_heartbeat_late",
+                        mcu = mcu_id,
+                        arrival_gap_us = arrival_gap.as_micros() as u64,
+                        delivery_delay_us = delivery_delay.as_micros() as u64,
+                        retirement_advanced,
+                        "retirement heartbeat arrived late or waited before pump processing"
+                    );
+                }
                 for (axis, &c) in retired_counts.iter().enumerate() {
                     let key = AxisKey {
                         mcu_id,
@@ -569,6 +616,24 @@ impl<S: PieceSink> Pump<S> {
                                     )
                                 },
                             );
+                            let (
+                                heartbeat_age_us,
+                                heartbeat_arrival_gap_us,
+                                heartbeat_delivery_delay_us,
+                            ) = self.heartbeat_timing.get(&mcu_id).map_or(
+                                (u64::MAX, u64::MAX, u64::MAX),
+                                |timing| {
+                                    (
+                                        Instant::now()
+                                            .checked_duration_since(timing.received_at)
+                                            .unwrap_or(Duration::ZERO)
+                                            .as_micros()
+                                            as u64,
+                                        timing.arrival_gap.as_micros() as u64,
+                                        timing.delivery_delay.as_micros() as u64,
+                                    )
+                                },
+                            );
                             tracing::error!(
                                 subsystem = "motion",
                                 event = "pump_piece_in_past",
@@ -592,6 +657,9 @@ impl<S: PieceSink> Pump<S> {
                                 queue_front_start_time,
                                 queue_tail_start_time,
                                 iteration_gap_us = self.iteration_gap.as_micros() as u64,
+                                heartbeat_age_us,
+                                heartbeat_arrival_gap_us,
+                                heartbeat_delivery_delay_us,
                                 cohort_active = self.cohort.is_some(),
                                 "[pump-guard] piece already in the MCU's past {context} — failing loud on host before the MCU/endpoint trips -308"
                             );
@@ -604,6 +672,9 @@ impl<S: PieceSink> Pump<S> {
                                  queue_retired={queue_retired} queue_ring_depth={queue_ring_depth} \
                                  queue_room={queue_room} queue_front_start_time={queue_front_start_time} \
                                  queue_tail_start_time={queue_tail_start_time} iteration_gap_us={} \
+                                 heartbeat_age_us={heartbeat_age_us} \
+                                 heartbeat_arrival_gap_us={heartbeat_arrival_gap_us} \
+                                 heartbeat_delivery_delay_us={heartbeat_delivery_delay_us} \
                                  cohort_active={} — aborting host before MCU -308",
                                 af.axis,
                                 piece.start_time,
@@ -1070,6 +1141,7 @@ pub fn run_pump<S: PieceSink>(
         mem_probe: MemPressureProbe::new(),
         last_iteration_at: None,
         iteration_gap: Duration::ZERO,
+        heartbeat_timing: BTreeMap::new(),
     };
     pump.run(control_rx, data_rx);
 }

@@ -326,6 +326,7 @@ fn shutdown_stops_new_dispatch_before_closing_pump() {
         let hb = crate::pump::PumpMsg::Heartbeat(crate::pump::HeartbeatMsg {
             mcu_id: 0,
             retired_counts: Vec::new(),
+            received_at: std::time::Instant::now(),
         });
         if pump_tx.send(hb).is_err() {
             saw_pump_gone_cb.store(true, Ordering::SeqCst);
