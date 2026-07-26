@@ -50,7 +50,8 @@ impl Reactor {
         };
 
         match decoded {
-            crate::host_io::parser::DecodedFrame::Response { name, params } => {
+            crate::host_io::parser::DecodedFrame::Response { name, mut params } => {
+                params.recv_time_raw = crate::clock::monotonic_raw_secs();
                 if name == "shutdown" || name == "is_shutdown" {
                     self.fail_pending_on_mcu_shutdown(&name, &params);
                 }
@@ -96,10 +97,8 @@ impl Reactor {
                     }
                     if name == "clock" {
                         if let Some(sent_raw) = self.pending_clock_sent_raw.take() {
-                            let recv_raw = crate::clock::monotonic_raw_secs();
                             let mut stamped = params.clone();
                             stamped.sent_time_raw = sent_raw;
-                            stamped.recv_time_raw = recv_raw;
                             let event =
                                 crate::host_io::runtime_events::RuntimeEvent::PassthroughResponse {
                                     name,
