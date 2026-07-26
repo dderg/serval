@@ -213,11 +213,6 @@ impl<S: PieceSink> Pump<S> {
         if epoch.position_redefined() {
             self.junctions.forget(key);
         }
-        if self.cohort.is_some() && !pieces.is_empty() {
-            if let Some((ack_now, freq)) = (self.callbacks.mcu_clock_of)(key.mcu_id) {
-                diag::log_drip_enqueue_lead(key, &pieces, ack_now, freq);
-            }
-        }
         if !pieces.is_empty() {
             if let Some((_ack_now, freq)) = (self.callbacks.mcu_clock_of)(key.mcu_id) {
                 if let Some(seam) = self.junctions.observe(key, &pieces, source_line, freq) {
@@ -486,9 +481,6 @@ impl<S: PieceSink> Pump<S> {
     // above host-projection jitter so a healthy print never false-aborts.
     fn guard_pieces_not_in_past(&self, mcu_id: u32, bundle: &[AxisFrame], context: &str) {
         if let Some((mcu_now, freq)) = (self.callbacks.mcu_clock_of)(mcu_id) {
-            if self.cohort.is_some() {
-                diag::log_send_projection(mcu_id, mcu_now, freq, bundle);
-            }
             if freq > 0.0 {
                 let guard_ticks = (pump_past_guard_secs() * freq) as u64;
                 for af in bundle {

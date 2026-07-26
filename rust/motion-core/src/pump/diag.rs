@@ -1,8 +1,6 @@
 use runtime::piece_ring::PieceEntry;
 
-use super::AxisKey;
 use super::junction::{JunctionSeam, junction_jumps};
-use super::sched::AxisFrame;
 
 pub(super) fn log_piece_submit(
     mcu_id: u32,
@@ -31,35 +29,6 @@ pub(super) fn log_piece_submit(
     } else {
         prev_end
     }
-}
-
-/// Drip cohorts release by piece count against a real-time playhead, so the
-/// lead each burst reaches the pump with is the signal for whether the floor
-/// is keeping ahead. Emitted per enqueue while a cohort is armed.
-pub(super) fn log_drip_enqueue_lead(
-    key: AxisKey,
-    pieces: &[(PieceEntry, f64)],
-    ack_now: u64,
-    freq: f64,
-) {
-    let first_start = pieces[0].0.start_time;
-    let produce_lead_us = (first_start as i64 - ack_now as i64) as f64 / freq * 1e6;
-    let durs = pieces.iter().map(|p| p.0.duration);
-    let min_dur = durs.clone().fold(f32::INFINITY, f32::min);
-    let max_dur = durs.clone().fold(0.0_f32, f32::max);
-    let total: f32 = durs.sum();
-    tracing::warn!(
-        subsystem = "motion",
-        event = "drip_enqueue_lead",
-        mcu = key.mcu_id,
-        axis = key.axis,
-        n = pieces.len(),
-        produce_lead_us,
-        min_dur_us = min_dur * 1e6,
-        max_dur_us = max_dur * 1e6,
-        total_secs = total,
-        "[drip-diag] pieces reached pump with this much lead before their start"
-    );
 }
 
 /// Classifies the tick/host jump across a stream seam and logs it. A jump that
@@ -107,23 +76,6 @@ pub(super) fn log_junction_jump(
             prev_source_line = seam.prev_source_line,
             next_source_line = source_line,
             "[junction] anomalous jump"
-        );
-    }
-}
-
-/// The MCU-clock projection of the front piece at send time, logged while a
-/// drip cohort is armed so the release lead can be traced against the
-/// playhead.
-pub(super) fn log_send_projection(mcu_id: u32, mcu_now: u64, freq: f64, bundle: &[AxisFrame]) {
-    if let Some(front) = bundle.first().and_then(|af| af.pieces.first()) {
-        tracing::warn!(
-            subsystem = "motion",
-            event = "pump_send_projection",
-            mcu = mcu_id,
-            projected_now = mcu_now,
-            front_start = front.start_time,
-            release_lead_us = ((front.start_time as i64 - mcu_now as i64) as f64 / freq * 1e6),
-            "[drip-diag] projection at send"
         );
     }
 }
