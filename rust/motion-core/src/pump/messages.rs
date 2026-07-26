@@ -52,6 +52,11 @@ pub struct HeartbeatMsg {
 pub enum PumpMsg {
     Heartbeat(HeartbeatMsg),
     Flush(Vec<AxisKey>),
+    Halt {
+        keys: Vec<AxisKey>,
+        ack: std::sync::mpsc::SyncSender<()>,
+    },
+    Resume(Vec<AxisKey>),
     DripArm(DripArm),
     DripDisarm(u64),
     Barrier(std::sync::mpsc::SyncSender<()>),
@@ -61,14 +66,18 @@ pub enum PumpMsg {
 #[derive(Debug)]
 pub enum SendError {
     Fatal(String),
+    Halted(String),
     Transient(String),
 }
 
 impl SendError {
-    pub(super) fn retryable_mcu_reject(mcu_id: u32, result: i32) -> Self {
-        Self::Transient(format!(
-            "mcu {mcu_id} rejected PushPieces frame: result {result}"
-        ))
+    pub(super) fn mcu_reject(mcu_id: u32, result: i32) -> Self {
+        let message = format!("mcu {mcu_id} rejected PushPieces frame: result {result}");
+        if result == mcu_protocol::result_codes::STREAM_HALTED {
+            Self::Halted(message)
+        } else {
+            Self::Transient(message)
+        }
     }
 }
 
@@ -76,6 +85,7 @@ impl std::fmt::Display for SendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Fatal(s) => write!(f, "fatal: {s}"),
+            Self::Halted(s) => write!(f, "halted: {s}"),
             Self::Transient(s) => write!(f, "transient: {s}"),
         }
     }

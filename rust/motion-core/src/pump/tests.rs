@@ -471,6 +471,21 @@ impl PieceSink for NullSink {
     }
 }
 
+struct HaltedSink;
+
+impl PieceSink for HaltedSink {
+    fn send_frame(
+        &self,
+        _key: AxisKey,
+        _pieces: &[PieceEntry],
+        _start_slot: u16,
+        _new_head: u32,
+        _room: u32,
+    ) -> Result<i32, SendError> {
+        Err(SendError::Halted("endpoint stream halted".into()))
+    }
+}
+
 #[test]
 fn flush_clears_queued_pieces_and_junctions() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
@@ -855,11 +870,12 @@ fn pump_backlog_drains_to_zero_when_pushed() {
     handle.join().unwrap();
 }
 
-fn stalled_queue_pump(
+fn queue_pump<S: PieceSink>(
     key: AxisKey,
     retirement_stall_fatal: Duration,
     on_drip_stall: impl Fn(String) + Send + 'static,
-) -> Pump<NullSink> {
+    sink: S,
+) -> Pump<S> {
     let mut queues = BTreeMap::new();
     let mut q = AxisQueue::new(1);
     q.pushed = 1;
@@ -870,7 +886,8 @@ fn stalled_queue_pump(
         queues,
         junctions: JunctionTracker::default(),
         cohort: None,
-        sink: NullSink,
+        halted: BTreeMap::new(),
+        sink,
         callbacks: PumpCallbacks {
             on_drip_stall: Box::new(on_drip_stall),
             ..PumpCallbacks::noop(1)
@@ -884,6 +901,101 @@ fn stalled_queue_pump(
         retirement_stall: super::stall::RetirementStallWatch::new(retirement_stall_fatal),
         mem_probe: super::memstat::MemPressureProbe::new(),
     }
+}
+
+fn stalled_queue_pump(
+    key: AxisKey,
+    retirement_stall_fatal: Duration,
+    on_drip_stall: impl Fn(String) + Send + 'static,
+) -> Pump<NullSink> {
+    queue_pump(key, retirement_stall_fatal, on_drip_stall, NullSink)
+}
+
+#[test]
+fn halt_drops_queued_and_new_pieces_until_resume() {
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    let (escalated_tx, escalated_rx) = mpsc::channel();
+    let mut pump = stalled_queue_pump(key, Duration::from_secs(1), move |message| {
+        escalated_tx.send(message).unwrap()
+    });
+    let (ack_tx, _ack_rx) = mpsc::sync_channel(1);
+
+    pump.handle_control_msg(PumpMsg::Halt {
+        keys: vec![key],
+        ack: ack_tx,
+    });
+    assert!(pump.halted.contains_key(&key));
+    assert!(pump.queues[&key].pieces.is_empty());
+    pump.enqueue(make_enqueue(
+        key,
+        vec![make_piece(10)],
+        crate::anchor::StreamEpoch::Continuation,
+    ));
+    assert!(pump.queues[&key].pieces.is_empty());
+    assert!(matches!(
+        escalated_rx.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+
+    pump.handle_control_msg(PumpMsg::Resume(vec![key]));
+    pump.enqueue(make_enqueue(
+        key,
+        vec![make_piece(20)],
+        crate::anchor::StreamEpoch::Continuation,
+    ));
+    assert_eq!(pump.queues[&key].pieces.len(), 1);
+}
+
+#[test]
+fn halted_stream_rejection_is_not_retryable() {
+    assert!(matches!(
+        SendError::mcu_reject(2, mcu_protocol::result_codes::STREAM_HALTED),
+        SendError::Halted(_)
+    ));
+    assert!(matches!(
+        SendError::mcu_reject(2, mcu_protocol::result_codes::RING_FULL),
+        SendError::Transient(_)
+    ));
+}
+
+#[test]
+fn send_rejected_while_halted_discards_bundle_and_infers_halt() {
+    let key = AxisKey { mcu_id: 2, axis: 1 };
+    let mut pump = queue_pump(key, Duration::from_secs(1), |_| {}, HaltedSink);
+    let queue = pump.queues.get_mut(&key).unwrap();
+    queue.ring_depth = 4;
+    queue.pushed = 0;
+    let (abandoned_tx, abandoned_rx) = mpsc::channel();
+    pump.callbacks.on_abandon =
+        Box::new(move |abandoned_key, count| abandoned_tx.send((abandoned_key, count)).unwrap());
+
+    assert_eq!(pump.send_ready(), Ok(true));
+
+    assert!(matches!(pump.halted.get(&key), Some(Some(_))));
+    assert!(pump.queues[&key].pieces.is_empty());
+    assert_eq!(abandoned_rx.recv().unwrap(), (key, 1));
+}
+
+#[test]
+fn inferred_halt_without_host_ack_escalates() {
+    let key = AxisKey { mcu_id: 2, axis: 1 };
+    let (escalated_tx, escalated_rx) = mpsc::channel();
+    let mut pump = stalled_queue_pump(key, Duration::from_secs(1), move |message| {
+        escalated_tx.send(message).unwrap()
+    });
+    pump.halted.insert(
+        key,
+        Some(std::time::Instant::now() - Duration::from_secs(2)),
+    );
+
+    pump.enqueue(make_enqueue(
+        key,
+        vec![make_piece(10)],
+        crate::anchor::StreamEpoch::Continuation,
+    ));
+
+    let message = escalated_rx.recv().unwrap();
+    assert!(message.contains("endpoint halt was not acknowledged"));
 }
 
 #[test]

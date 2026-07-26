@@ -324,7 +324,7 @@ impl PieceSink for WireSink {
         }
         if result != mcu_protocol::result_codes::OK {
             super::transit_trace::emit_fault_snapshot("mcu_reject", result);
-            return Err(SendError::retryable_mcu_reject(mcu_id, result));
+            return Err(SendError::mcu_reject(mcu_id, result));
         }
         Ok(())
     }

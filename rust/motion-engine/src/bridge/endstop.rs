@@ -91,8 +91,21 @@ pub(super) fn dispatch_endstop_trip(
                 run.all_axis_keys.iter().map(|k| k.mcu_id).collect();
 
             if let Some(tx) = pump_tx_opt.as_ref() {
-                let _ = tx.send(crate::pump::PumpMsg::Flush(run.all_axis_keys.clone()));
                 let _ = tx.send(crate::pump::PumpMsg::DripDisarm(run.cohort));
+                let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
+                if tx
+                    .send(crate::pump::PumpMsg::Halt {
+                        keys: run.all_axis_keys.clone(),
+                        ack: ack_tx,
+                    })
+                    .is_err()
+                    || ack_rx.recv_timeout(Duration::from_secs(1)).is_err()
+                {
+                    let _ = run.notify.send(Err(
+                        "EndstopTrip: pump did not halt before endpoint Stop".into(),
+                    ));
+                    return;
+                }
             }
 
             use mcu_protocol::codec::Decode as _;
@@ -138,15 +151,6 @@ pub(super) fn dispatch_endstop_trip(
             });
 
             let outcome = outcome.and_then(|positions| {
-                if let Some(tx) = pump_tx_opt.as_ref() {
-                    let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
-                    let _ = tx.send(crate::pump::PumpMsg::Barrier(ack_tx));
-                    if ack_rx.recv_timeout(Duration::from_secs(1)).is_err() {
-                        return Err("EndstopTrip: pump did not acknowledge the flush barrier \
-                                 before stream resume"
-                            .into());
-                    }
-                }
                 for &mcu_id in &stepper_mcu_ids {
                     let transport = transports
                         .get(&mcu_id)
@@ -168,6 +172,16 @@ pub(super) fn dispatch_endstop_trip(
                             resp.result
                         ));
                     }
+                }
+                if let Some(tx) = pump_tx_opt.as_ref() {
+                    tx.send(crate::pump::PumpMsg::Resume(run.all_axis_keys.clone()))
+                        .map_err(|_| "EndstopTrip: pump channel closed before resume")?;
+                    let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
+                    tx.send(crate::pump::PumpMsg::Barrier(ack_tx))
+                        .map_err(|_| "EndstopTrip: pump channel closed before resume barrier")?;
+                    ack_rx.recv_timeout(Duration::from_secs(1)).map_err(|_| {
+                        "EndstopTrip: pump did not acknowledge resume after endpoint ResumeStream"
+                    })?;
                 }
                 Ok(positions)
             });

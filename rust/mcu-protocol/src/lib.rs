@@ -26,6 +26,7 @@ pub const MCU_CHANNEL_PIECES: u8 = 0x02;
 pub mod result_codes {
     pub const OK: i32 = 0;
     pub const RING_FULL: i32 = -309;
+    pub const STREAM_HALTED: i32 = -142;
     pub const INVALID_ARG: i32 = -26;
 }
 

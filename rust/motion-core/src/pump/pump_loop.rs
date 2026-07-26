@@ -71,6 +71,7 @@ pub(super) const RETIREMENT_STALL_FATAL: Duration = Duration::from_secs(10);
 // 20..=48 B and a count cap is wrong at both ends. send_ready() loops until
 // Idle, so this bounds per-transaction latency, not throughput.
 const BUNDLE_WIRE_BYTE_BUDGET: usize = 1024;
+const INFERRED_HALT_FATAL: Duration = Duration::from_secs(1);
 
 fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
     let staged: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
@@ -97,6 +98,7 @@ pub(super) struct Pump<S> {
     pub(super) queues: BTreeMap<AxisKey, AxisQueue>,
     pub(super) junctions: JunctionTracker,
     pub(super) cohort: Option<DripCohort>,
+    pub(super) halted: BTreeMap<AxisKey, Option<Instant>>,
     pub(super) sink: S,
     pub(super) callbacks: PumpCallbacks,
     pub(super) history: Option<HistoryRecorder>,
@@ -113,6 +115,26 @@ pub(super) struct Pump<S> {
 }
 
 impl<S: PieceSink> Pump<S> {
+    fn halt_keys(&mut self, keys: impl IntoIterator<Item = AxisKey>, inferred: bool) {
+        let inferred_at = inferred.then(Instant::now);
+        for key in keys {
+            if inferred {
+                self.halted.entry(key).or_insert(inferred_at);
+            } else {
+                self.halted.insert(key, None);
+            }
+            if let Some(q) = self.queues.get_mut(&key) {
+                let dropped = q.pieces.len() as u32;
+                q.pieces.clear();
+                q.staged_motion = 0;
+                if dropped > 0 {
+                    (self.callbacks.on_abandon)(key, dropped);
+                }
+            }
+            self.junctions.forget(key);
+        }
+    }
+
     pub(super) fn handle_control_msg(&mut self, msg: PumpMsg) -> bool {
         match msg {
             PumpMsg::Shutdown => return false,
@@ -127,6 +149,15 @@ impl<S: PieceSink> Pump<S> {
                         }
                     }
                     self.junctions.forget(key);
+                }
+            }
+            PumpMsg::Halt { keys, ack } => {
+                self.halt_keys(keys, false);
+                self.pending_barrier_acks.push(ack);
+            }
+            PumpMsg::Resume(keys) => {
+                for key in keys {
+                    self.halted.remove(&key);
                 }
             }
             PumpMsg::Heartbeat(HeartbeatMsg {
@@ -197,6 +228,24 @@ impl<S: PieceSink> Pump<S> {
             lead_secs,
             source_line,
         } = msg;
+        if let Some(inferred_at) = self.halted.get(&key).copied() {
+            let dropped = pieces.len() as u32;
+            if dropped > 0 {
+                (self.callbacks.on_abandon)(key, dropped);
+            }
+            self.junctions.forget(key);
+            if let Some(halted_at) = inferred_at {
+                if halted_at.elapsed() >= INFERRED_HALT_FATAL {
+                    (self.callbacks.on_drip_stall)(format!(
+                        "mcu{} axis{} endpoint halt was not acknowledged by the host within {}ms",
+                        key.mcu_id,
+                        key.axis,
+                        halted_at.elapsed().as_millis()
+                    ));
+                }
+            }
+            return;
+        }
         if let Some(co) = self.cohort.as_ref() {
             if !co.participants.contains(&key) {
                 let id = co.id;
@@ -655,6 +704,23 @@ impl<S: PieceSink> Pump<S> {
                             });
                             return Err(());
                         }
+                        Err(SendError::Halted(ref e)) => {
+                            tracing::debug!(
+                                subsystem = "motion",
+                                event = "send_frame_halted",
+                                mcu = mcu_id,
+                                error = %e,
+                                "pump frame met an endpoint halt and was discarded"
+                            );
+                            self.halt_keys(
+                                bundle.iter().map(|frame| AxisKey {
+                                    mcu_id,
+                                    axis: frame.axis,
+                                }),
+                                true,
+                            );
+                            break;
+                        }
                         Err(SendError::Transient(ref e)) => {
                             tracing::error!(
                                 subsystem = "motion",
@@ -795,6 +861,7 @@ pub fn run_pump<S: PieceSink>(
         queues: BTreeMap::new(),
         junctions: JunctionTracker::default(),
         cohort: None,
+        halted: BTreeMap::new(),
         sink,
         callbacks,
         history,
