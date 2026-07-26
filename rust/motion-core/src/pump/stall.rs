@@ -56,3 +56,59 @@ impl RetirementStallWatch {
         self.started
     }
 }
+
+pub(super) struct AheadStallWatch {
+    threshold: Duration,
+    started: Option<(AxisKey, Instant)>,
+    last_key: Option<AxisKey>,
+    reported: bool,
+}
+
+pub(super) struct AheadStallEnd {
+    pub(super) first_key: AxisKey,
+    pub(super) last_key: AxisKey,
+    pub(super) elapsed: Duration,
+}
+
+impl AheadStallWatch {
+    pub(super) fn new(threshold: Duration) -> Self {
+        Self {
+            threshold,
+            started: None,
+            last_key: None,
+            reported: false,
+        }
+    }
+
+    pub(super) fn observe(&mut self, key: AxisKey, now: Instant) -> Option<Duration> {
+        self.last_key = Some(key);
+        let started = match self.started {
+            Some((_, started)) => started,
+            None => {
+                self.started = Some((key, now));
+                self.reported = false;
+                return None;
+            }
+        };
+        let elapsed = now.duration_since(started);
+        if self.reported || elapsed < self.threshold {
+            return None;
+        }
+        self.reported = true;
+        Some(elapsed)
+    }
+
+    pub(super) fn reset(&mut self, now: Instant) -> Option<AheadStallEnd> {
+        let started = self.started.take();
+        let last_key = self.last_key.take();
+        let reported = std::mem::take(&mut self.reported);
+        match (started, last_key, reported) {
+            (Some((first_key, started)), Some(last_key), true) => Some(AheadStallEnd {
+                first_key,
+                last_key,
+                elapsed: now.duration_since(started),
+            }),
+            _ => None,
+        }
+    }
+}

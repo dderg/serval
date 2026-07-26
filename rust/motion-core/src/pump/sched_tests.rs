@@ -1,5 +1,5 @@
 use super::*;
-use crate::pump::sched::MAX_MERGED_HOLD_SECS;
+use crate::pump::sched::{DeferredReason, MAX_MERGED_HOLD_SECS};
 use runtime::piece_ring::PieceEntry;
 use std::collections::{BTreeMap, VecDeque};
 
@@ -56,7 +56,8 @@ fn full_ring_does_not_block_another_mcu() {
         |_: &AxisKey, _: &AxisQueue| None,
         no_cap,
     ) {
-        Schedule::Send(frames) => {
+        Schedule::SendDeferred(frames, gating_key, DeferredReason::RingFull) => {
+            assert_eq!(gating_key, AxisKey { mcu_id: 1, axis: 0 });
             assert_eq!(frames.len(), 1);
             assert_eq!(frames[0].key, AxisKey { mcu_id: 2, axis: 0 });
         }
@@ -239,6 +240,69 @@ fn all_beyond_horizon_returns_stall_ahead() {
         ),
         "expected StallAhead when sole piece is beyond horizon"
     );
+}
+
+#[test]
+fn horizon_blocked_head_reports_bypass_of_ready_mcu() {
+    let blocked = AxisKey { mcu_id: 1, axis: 0 };
+    let ready = AxisKey { mcu_id: 2, axis: 0 };
+    let mut queues = BTreeMap::new();
+    queues.insert(blocked, q_with_host(8, &[(1_000, 1.0)]));
+    queues.insert(ready, q_with_host(8, &[(100, 2.0)]));
+    match schedule(
+        &queues,
+        255,
+        usize::MAX,
+        |key: &AxisKey, _: &AxisQueue| {
+            if *key == blocked {
+                Some(500)
+            } else {
+                Some(200)
+            }
+        },
+        no_cap,
+    ) {
+        Schedule::SendDeferred(frames, gating_key, DeferredReason::Horizon) => {
+            assert_eq!(gating_key, blocked);
+            assert_eq!(frames.len(), 1);
+            assert_eq!(frames[0].key, ready);
+        }
+        other => panic!("expected horizon bypass, got {other:?}"),
+    }
+}
+
+#[test]
+fn horizon_bypass_takes_priority_over_routine_full_ring() {
+    let full = AxisKey { mcu_id: 0, axis: 0 };
+    let horizon = AxisKey { mcu_id: 1, axis: 0 };
+    let ready = AxisKey { mcu_id: 2, axis: 0 };
+    let mut queues = BTreeMap::new();
+    let mut full_q = q_with_host(1, &[(10, 1.0)]);
+    full_q.pushed = 1;
+    queues.insert(full, full_q);
+    queues.insert(horizon, q_with_host(8, &[(1_000, 2.0)]));
+    queues.insert(ready, q_with_host(8, &[(100, 3.0)]));
+
+    match schedule(
+        &queues,
+        255,
+        usize::MAX,
+        |key: &AxisKey, _: &AxisQueue| {
+            if *key == horizon {
+                Some(500)
+            } else {
+                Some(200)
+            }
+        },
+        no_cap,
+    ) {
+        Schedule::SendDeferred(frames, gating_key, DeferredReason::Horizon) => {
+            assert_eq!(gating_key, horizon);
+            assert_eq!(frames.len(), 1);
+            assert_eq!(frames[0].key, ready);
+        }
+        other => panic!("expected horizon bypass priority, got {other:?}"),
+    }
 }
 
 #[test]
@@ -430,7 +494,8 @@ fn full_earliest_ring_does_not_starve_later_mcu() {
         |_: &AxisKey, _: &AxisQueue| None,
         no_cap,
     ) {
-        Schedule::Send(frames) => {
+        Schedule::SendDeferred(frames, gating_key, DeferredReason::RingFull) => {
+            assert_eq!(gating_key, AxisKey { mcu_id: 0, axis: 0 });
             assert_eq!(frames.len(), 1);
             assert_eq!(frames[0].key, AxisKey { mcu_id: 1, axis: 0 });
         }

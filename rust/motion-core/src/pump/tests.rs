@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -882,6 +882,8 @@ fn stalled_queue_pump(
         holding_ahead: false,
         data_open: true,
         retirement_stall: super::stall::RetirementStallWatch::new(retirement_stall_fatal),
+        ahead_stall: super::stall::AheadStallWatch::new(Duration::from_millis(20)),
+        deferred_stall: super::stall::AheadStallWatch::new(Duration::from_millis(20)),
         mem_probe: super::memstat::MemPressureProbe::new(),
     }
 }
@@ -1144,4 +1146,31 @@ mod pushpieces_retransmit_tests {
         );
         assert_eq!(calls, 1, "no retry once the MCU has shut down");
     }
+}
+
+#[test]
+fn ahead_stall_watch_reports_threshold_and_total_episode() {
+    let first = AxisKey { mcu_id: 1, axis: 0 };
+    let last = AxisKey { mcu_id: 2, axis: 1 };
+    let threshold = Duration::from_millis(20);
+    let started = Instant::now();
+    let mut watch = super::stall::AheadStallWatch::new(threshold);
+
+    assert_eq!(watch.observe(first, started), None);
+    assert_eq!(
+        watch.observe(last, started + Duration::from_millis(21)),
+        Some(Duration::from_millis(21))
+    );
+    assert_eq!(
+        watch.observe(first, started + Duration::from_millis(30)),
+        None
+    );
+
+    let ended = watch
+        .reset(started + Duration::from_millis(35))
+        .expect("reported episode must produce an end observation");
+    assert_eq!(ended.first_key, first);
+    assert_eq!(ended.last_key, first);
+    assert_eq!(ended.elapsed, Duration::from_millis(35));
+    assert!(watch.reset(started + Duration::from_millis(40)).is_none());
 }
