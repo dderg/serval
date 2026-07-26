@@ -73,6 +73,7 @@ pub(super) const RETIREMENT_STALL_FATAL: Duration = Duration::from_secs(10);
 // Idle, so this bounds per-transaction latency, not throughput.
 const BUNDLE_WIRE_BYTE_BUDGET: usize = 1024;
 const AHEAD_STALL_LOG_AFTER: Duration = Duration::from_millis(20);
+const HORIZON_BYPASS_LOG_AFTER: Duration = Duration::from_millis(2);
 
 fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
     let staged: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
@@ -992,7 +993,7 @@ pub fn run_pump<S: PieceSink>(
         data_open: true,
         retirement_stall: RetirementStallWatch::new(RETIREMENT_STALL_FATAL),
         ahead_stall: AheadStallWatch::new(AHEAD_STALL_LOG_AFTER),
-        deferred_stall: AheadStallWatch::new(AHEAD_STALL_LOG_AFTER),
+        deferred_stall: AheadStallWatch::new(HORIZON_BYPASS_LOG_AFTER),
         mem_probe: MemPressureProbe::new(),
     };
     pump.run(control_rx, data_rx);
