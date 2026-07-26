@@ -62,9 +62,6 @@ fn fit_shaper(
     test_damping_ratios: Option<Vec<f64>>,
     max_freq: Option<f64>,
 ) -> PyResult<Option<FitResultPy>> {
-    let cfg = core::find_shaper_cfg(name).ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!("unknown shaper '{name}'"))
-    })?;
     let freqs = match shaper_freqs_list {
         Some(list) => ShaperFreqs::List(list),
         None => {
@@ -72,18 +69,35 @@ fn fit_shaper(
             ShaperFreqs::Range(a, b, c)
         }
     };
-    Ok(core::fit_shaper(
-        cfg,
-        &freq_bins,
-        &psd_sum,
-        &freqs,
-        damping_ratio,
-        scv,
-        max_smoothing,
-        test_damping_ratios,
-        max_freq,
-    )
-    .map(|r| {
+    let result = if let Some(cfg) = core::find_shaper_cfg(name) {
+        core::fit_shaper(
+            cfg,
+            &freq_bins,
+            &psd_sum,
+            &freqs,
+            damping_ratio,
+            scv,
+            max_smoothing,
+            test_damping_ratios,
+            max_freq,
+        )
+    } else if let Some(cfg) = core::find_smoother_cfg(name) {
+        core::fit_smoother(
+            cfg,
+            &freq_bins,
+            &psd_sum,
+            &freqs,
+            scv,
+            max_smoothing,
+            test_damping_ratios,
+            max_freq,
+        )
+    } else {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown shaper '{name}'"
+        )));
+    };
+    Ok(result.map(|r| {
         let FitResult {
             name,
             freq,

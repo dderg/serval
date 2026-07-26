@@ -16,8 +16,10 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 libm = { version = "0.2", default-features = false }
+nurbs = { path = "../nurbs" }
 pyo3 = { version = "0.29", features = ["abi3-py39"] }
 realfft = "3"
+trajectory = { path = "../trajectory" }
 
 [features]
 # extension-module leaves libpython symbols undefined (resolved by the host

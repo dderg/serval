@@ -99,6 +99,9 @@ where
                 },
             );
             check_step_rate_ceiling(cfg, axis_idx, &pieces, seg.source_line);
+            if cfg.ethercat && is_pure_hold(&pieces) {
+                continue;
+            }
             if !pieces.is_empty() {
                 out.push(EnqueueMsg {
                     key,
@@ -112,6 +115,23 @@ where
     }
 
     out
+}
+
+/// A lane whose every wire piece is the same constant (to wire position
+/// resolution) commands no motion: an ethercat drive at standstill needs no
+/// pieces (its held target is already that position), and a parked drive
+/// receiving them would trip the torque gate's pieces-while-parked fault.
+/// Any velocity content or a super-resolution constant step between pieces
+/// disqualifies the lane, so real motion always streams.
+fn is_pure_hold(pieces: &[(runtime::piece_ring::PieceEntry, f64)]) -> bool {
+    let Some(((first, _), rest)) = pieces.split_first() else {
+        return true;
+    };
+    first.coeff_count <= 1
+        && rest.iter().all(|(p, _)| {
+            p.coeff_count <= 1
+                && f64::from((p.coeffs[0] - first.coeffs[0]).abs()) <= WIRE_TRUNC_POS_MM
+        })
 }
 
 /// Host-side mirror of the MCU's per-sample step budget (-310) and the

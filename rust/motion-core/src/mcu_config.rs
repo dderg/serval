@@ -34,6 +34,10 @@ pub struct McuAxisConfig {
     /// against it at enqueue so an overspeed track fails loud on the host
     /// instead of latching -310 on the MCU.
     pub max_motor_velocity: Vec<f64>,
+    /// Slots served by the ethercat-rt endpoint: torque-gated drives whose
+    /// rings must stay empty while parked, so pure-hold lanes are never
+    /// enqueued for them.
+    pub ethercat: bool,
 }
 
 impl McuAxisConfig {
@@ -144,6 +148,7 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                 kinematics: topology.kinematics,
                 caps,
                 max_motor_velocity: topology.max_motor_velocity.clone(),
+                ethercat: false,
             })
         })
         .collect()
@@ -367,6 +372,7 @@ mod seed_tests {
 
     fn corexy_cfg() -> McuAxisConfig {
         McuAxisConfig {
+            ethercat: false,
             mcu_id: 1,
             axes: vec![AXIS_X, AXIS_Y, FOLLOWER_E],
             kinematics: KINEMATICS_COREXY,
@@ -378,6 +384,7 @@ mod seed_tests {
     }
     fn cartesian_z_cfg() -> McuAxisConfig {
         McuAxisConfig {
+            ethercat: false,
             mcu_id: 2,
             axes: vec![AXIS_Z],
             kinematics: 1,
@@ -461,6 +468,7 @@ mod seed_tests {
     #[test]
     fn build_serial_seed_sends_skips_ethercat_node() {
         let ec_cfg = McuAxisConfig {
+            ethercat: false,
             mcu_id: 1,
             axes: vec![AXIS_X],
             kinematics: KINEMATICS_COREXY,
@@ -470,6 +478,7 @@ mod seed_tests {
             max_motor_velocity: Vec::new(),
         };
         let serial_cfg = McuAxisConfig {
+            ethercat: false,
             mcu_id: 2,
             axes: vec![AXIS_Y, AXIS_Z],
             kinematics: 1,
@@ -522,6 +531,7 @@ mod seed_tests {
     #[test]
     fn build_serial_seed_sends_all_ethercat_returns_empty() {
         let ec_cfg_1 = McuAxisConfig {
+            ethercat: false,
             mcu_id: 1,
             axes: vec![AXIS_X],
             kinematics: KINEMATICS_COREXY,
@@ -531,6 +541,7 @@ mod seed_tests {
             max_motor_velocity: Vec::new(),
         };
         let ec_cfg_2 = McuAxisConfig {
+            ethercat: false,
             mcu_id: 3,
             axes: vec![AXIS_Y],
             kinematics: 1,

@@ -119,8 +119,11 @@ impl PyMotionEngine {
                 })
                 .collect::<PyResult<_>>()?
         };
-        let mcu_configs = build_mcu_configs(mcus, &caps_by_handle)
+        let mut mcu_configs = build_mcu_configs(mcus, &caps_by_handle)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        for cfg in &mut mcu_configs {
+            cfg.ethercat = ec_conns.contains_key(&cfg.mcu_id);
+        }
         *self.mcu_axis_configs.lock_ok() = mcu_configs.clone();
 
         Ok((ec_conns, mcu_configs))

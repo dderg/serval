@@ -457,11 +457,6 @@ class Motion:
                 owners.extend(rail.get_steppers())
         if abs(de) > 1e-9:
             owners.extend(self.follower_steppers)
-        owners.extend(
-            rail
-            for rail in getattr(self.kin, "rails", ())
-            if isinstance(rail, servo_axis.ServoRail)
-        )
         fired = False
         move_time = None
         deferred = []

@@ -11,12 +11,15 @@ import os
 import pathlib
 import traceback
 
-from . import shaper_defs
-
 MIN_FREQ = 5.0
 MAX_FREQ = 1000.0
 
-AUTOTUNE_SHAPERS = ["zv", "mzv", "ei", "2hump_ei", "3hump_ei"]
+AUTOTUNE_SHAPERS = ["smooth_zv", "smooth_mzv", "zv", "mzv"]
+# Impulse shapers the motion engine does not execute: fitted and plotted for
+# reference, never recommended.
+REFERENCE_SHAPERS = frozenset(
+    ["zv", "mzv", "zvd", "ei", "2hump_ei", "3hump_ei"]
+)
 
 
 def _load_shaper_ident():
@@ -195,7 +198,7 @@ class ShaperCalibrate:
 
     def fit_shaper(
         self,
-        shaper_cfg,
+        shaper_name,
         calibration_data,
         shaper_freqs,
         damping_ratio,
@@ -214,7 +217,7 @@ class ShaperCalibrate:
             shaper_freqs_list = list(shaper_freqs)
 
         result = _shaper_ident.fit_shaper(
-            shaper_cfg.name,
+            shaper_name,
             calibration_data.freq_bins.tolist(),
             calibration_data.psd_sum.tolist(),
             shaper_freqs_range,
@@ -253,13 +256,11 @@ class ShaperCalibrate:
         best_shaper = None
         all_shapers = []
         shapers = shapers or AUTOTUNE_SHAPERS
-        for shaper_cfg in shaper_defs.INPUT_SHAPERS:
-            if shaper_cfg.name not in shapers:
-                continue
+        for shaper_name in shapers:
             shaper = self.background_process_exec(
                 self.fit_shaper,
                 (
-                    shaper_cfg,
+                    shaper_name,
                     calibration_data,
                     shaper_freqs,
                     damping_ratio,
@@ -269,15 +270,21 @@ class ShaperCalibrate:
                     max_freq,
                 ),
             )
+            if shaper is None:
+                raise self.error(
+                    "Shaper '%s' produced no fit result" % (shaper_name,)
+                )
+            reference_only = shaper_name in REFERENCE_SHAPERS
             if logger is not None:
                 logger(
                     "Fitted shaper '%s' frequency = %.1f Hz "
-                    "(vibrations = %.1f%%, smoothing ~= %.3f)"
+                    "(vibrations = %.1f%%, smoothing ~= %.3f)%s"
                     % (
                         shaper.name,
                         shaper.freq,
                         shaper.vibrs * 100.0,
                         shaper.smoothing,
+                        " [reference only]" if reference_only else "",
                     )
                 )
                 logger(
@@ -286,6 +293,8 @@ class ShaperCalibrate:
                     % (shaper.name, round(shaper.max_accel / 100.0) * 100.0)
                 )
             all_shapers.append(shaper)
+            if reference_only:
+                continue
             if (
                 best_shaper is None
                 or shaper.score * 1.2 < best_shaper.score
@@ -298,34 +307,6 @@ class ShaperCalibrate:
                 # or it improves the score and smoothing (by 5% and 10% resp.)
                 best_shaper = shaper
         return best_shaper, all_shapers
-
-    def save_params(self, configfile, axis, shaper_name, shaper_freq):
-        if axis == "xy":
-            self.save_params(configfile, "x", shaper_name, shaper_freq)
-            self.save_params(configfile, "y", shaper_name, shaper_freq)
-        else:
-            configfile.set("input_shaper", "shaper_type_" + axis, shaper_name)
-            configfile.set(
-                "input_shaper", "shaper_freq_" + axis, "%.1f" % (shaper_freq,)
-            )
-
-    def apply_params(self, input_shaper, axis, shaper_name, shaper_freq):
-        if axis == "xy":
-            self.apply_params(input_shaper, "x", shaper_name, shaper_freq)
-            self.apply_params(input_shaper, "y", shaper_name, shaper_freq)
-            return
-        gcode = self.printer.lookup_object("gcode")
-        axis = axis.upper()
-        input_shaper.cmd_SET_INPUT_SHAPER(
-            gcode.create_gcode_command(
-                "SET_INPUT_SHAPER",
-                "SET_INPUT_SHAPER",
-                {
-                    "SHAPER_TYPE_" + axis: shaper_name,
-                    "SHAPER_FREQ_" + axis: shaper_freq,
-                },
-            )
-        )
 
     def save_calibration_data(
         self,

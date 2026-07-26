@@ -157,6 +157,7 @@ fn sample_lane(pieces: &[PieceEntry]) -> Vec<Sample> {
 
 fn corexy_lane_pieces(segs: &[trajectory::ShapedSegment]) -> BTreeMap<u8, Vec<PieceEntry>> {
     let cfgs = vec![McuAxisConfig {
+        ethercat: false,
         mcu_id: 0,
         axes: vec![0, 1],
         kinematics: 0,
