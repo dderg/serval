@@ -206,6 +206,86 @@ fn fully_executed_cohort_awaiting_trip_is_not_a_stall() {
     assert!(stall_msgs.lock().unwrap().is_empty());
 }
 
+/// A parked ethercat lane gets no pieces during another axis's homing drip
+/// (pure-hold lanes are skipped at enqueue), yet it is a cohort participant.
+/// With nothing queued and nothing in flight it cannot execute anything, so
+/// it must not pin the cohort floor at zero — progress on the lanes that do
+/// have work must keep resetting the stall deadline.
+#[test]
+fn idle_participant_does_not_pin_the_cohort_floor() {
+    let active = AxisKey { mcu_id: 0, axis: 0 };
+    let parked = AxisKey { mcu_id: 2, axis: 0 };
+    let sink = CountingSink::new();
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let stall_msgs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let stall_msgs_clone = Arc::clone(&stall_msgs);
+
+    let sink_clone = sink.clone();
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            control_rx,
+            data_rx,
+            sink_clone,
+            PumpCallbacks {
+                mcu_clock_of: Box::new(|_| Some((0u64, 1000.0))),
+                on_drip_stall: Box::new(move |msg: String| {
+                    stall_msgs_clone.lock().unwrap().push(msg);
+                }),
+                ..PumpCallbacks::noop(64)
+            },
+            None,
+            std::sync::Arc::new(crate::drain::DrainLedger::new()),
+            Arc::new(AtomicU64::new(0)),
+        );
+    });
+
+    ctl.send(PumpMsg::DripArm(DripArm {
+        cohort: 88,
+        participants: vec![active, parked],
+        timeout: Duration::from_millis(60),
+    }))
+    .unwrap();
+
+    // Trickle pieces and retirements on the active lane across several
+    // deadline windows; the parked lane never receives anything.
+    for step in 0u32..4 {
+        data.send(EnqueueMsg {
+            key: active,
+            pieces: vec![make_piece(u64::from(step))],
+            epoch: crate::anchor::StreamEpoch::Continuation,
+            lead_secs: MAX_LEAD_SECS,
+            source_line: u32::MAX,
+        })
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while sink.sent().len() < (step + 1) as usize {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pump never sent drip piece {step}; sent: {:?}",
+                sink.sent()
+            );
+            std::thread::yield_now();
+        }
+        ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
+            mcu_id: 0,
+            retired_counts: vec![step + 1, 0, 0, 0],
+        }))
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(40));
+    }
+
+    assert!(
+        stall_msgs.lock().unwrap().is_empty(),
+        "an idle participant must not stall a progressing cohort: {:?}",
+        stall_msgs.lock().unwrap()
+    );
+
+    ctl.send(PumpMsg::DripDisarm(88)).unwrap();
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+}
+
 #[test]
 fn non_participant_enqueue_aborts_cohort_and_drops_pieces() {
     let participant = AxisKey { mcu_id: 0, axis: 0 };

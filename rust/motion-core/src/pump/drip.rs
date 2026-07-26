@@ -27,9 +27,20 @@ impl DripCohort {
         retired.wrapping_sub(baseline)
     }
 
+    /// Progress floor across the lanes that actually have work: a parked
+    /// ethercat lane receives no pieces during another axis's homing drip
+    /// (pure-hold lanes are skipped at enqueue), so a participant with
+    /// nothing queued and nothing in flight cannot execute anything and must
+    /// not pin the floor at zero — that would starve the stall deadline and
+    /// abort every homing run longer than the timeout.
     pub(super) fn floor(&self, queues: &BTreeMap<AxisKey, AxisQueue>) -> u32 {
         self.participants
             .iter()
+            .filter(|k| {
+                queues
+                    .get(k)
+                    .is_some_and(|q| !q.pieces.is_empty() || q.pushed != q.retired)
+            })
             .map(|k| self.executed(k, queues))
             .min()
             .unwrap_or(0)
