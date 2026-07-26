@@ -967,15 +967,11 @@ export class TrajectoryView {
     // range's zero line falls.
     const zeroFrac = (yMin, yMax) => {
       const span = yMax - yMin;
-      return span > 0 ? -yMin / span : 0;
+      return span > 0 ? Math.min(Math.max(-yMin / span, 0), 1) : 0;
     };
-    // Expand a lo <= 0 <= hi range to the smallest [yMin, yMax] whose zero
-    // sits at `frac` of its height. Only ever grows the short side, so the
-    // lane's own data is never clipped — except at the boundary itself
-    // (frac exactly 0 or 1, i.e. the left axes have zero room on that
-    // side): there the alignment necessarily wins over showing the right
-    // lane's opposite-sign excursion, since the left axis's own convention
-    // already leaves no pixel row below/above zero to put it in.
+    // Expand a range to the smallest [yMin, yMax] containing it whose zero
+    // sits at `frac` of its height. Any interior frac fits the data on both
+    // sides; a boundary frac keeps the range single-signed.
     const rangeAtZeroFrac = (lo, hi, frac) => {
       if (frac <= 0) return { yMin: 0, yMax: lo === 0 && hi === 0 ? 1 : hi };
       if (frac >= 1) return { yMin: lo === 0 && hi === 0 ? -1 : lo, yMax: 0 };
@@ -983,18 +979,25 @@ export class TrajectoryView {
       return { yMin: -frac * r, yMax: (1 - frac) * r };
     };
     // The right-axis lane (E) gets its own scale, but its zero is pinned to
-    // land at the same pixel row as the left axes' zero: E's magnitude has
-    // no relation to XYZ's, so an independently-centered right scale drifts
-    // the two zero lines apart, misleading corner-by-corner comparison.
+    // the same pixel row as the left axes' zero: E's magnitude has no
+    // relation to XYZ's, so independently-centered scales drift the zero
+    // lines apart and mislead corner-by-corner comparison. The shared zero
+    // fraction is the deeper of the two lanes' natural ones and BOTH lanes
+    // are re-ranged at it, so whichever lane needs the bigger negative
+    // region sets it and neither lane clips.
     const scaleSeries = (series) => {
       const shown = series.filter(s => !s.hidden);
       const leftEntries = shown.filter(s => s.axis !== "right");
       const rightEntries = shown.filter(s => s.axis === "right");
-      const left = visibleRange(leftEntries);
+      let left = visibleRange(leftEntries);
       let right = left;
       if (rightEntries.length > 0) {
         const { lo, hi } = rawExtent(rightEntries);
-        right = rangeAtZeroFrac(lo * 1.15, hi * 1.15, zeroFrac(left.yMin, left.yMax));
+        const rLo = lo * 1.15, rHi = hi * 1.15;
+        let frac = Math.max(zeroFrac(left.yMin, left.yMax), zeroFrac(rLo, rHi));
+        if (frac >= 1 && (left.yMax > 0 || rHi > 0)) frac = 0.5;
+        left = rangeAtZeroFrac(left.yMin, left.yMax, frac);
+        right = rangeAtZeroFrac(rLo, rHi, frac);
       }
       for (const s of shown) {
         const r = s.axis === "right" ? right : left;
