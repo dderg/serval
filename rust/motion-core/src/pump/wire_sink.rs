@@ -269,10 +269,62 @@ impl PieceSink for WireSink {
             "PushPieces axis block exceeds u8 piece_count; schedule() must cap at MAX_PER_FRAME"
         );
 
-        let resp = self.call_push_pieces(mcu_id, frames)?;
-
-        if resp.result != mcu_protocol::result_codes::OK {
-            return Err(SendError::retryable_mcu_reject(mcu_id, resp.result));
+        let send_started_ns = super::transit_trace::send_started_ns();
+        let send_started_at = Instant::now();
+        let response = self.call_push_pieces(mcu_id, frames);
+        let send_elapsed_ns = send_started_at.elapsed().as_nanos() as u64;
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                for frame in frames {
+                    super::transit_trace::record(super::transit_trace::TransitTraceRecord {
+                        sequence: 0,
+                        mcu_id,
+                        axis: frame.axis,
+                        piece_count: frame.pieces.len() as u32,
+                        room: frame.room,
+                        send_started_ns,
+                        send_elapsed_ns,
+                        host_front_start_time: frame
+                            .pieces
+                            .first()
+                            .map_or(0, |piece| piece.start_time),
+                        mcu_front_start_time: 0,
+                        arrival_clock: 0,
+                        result: super::transit_trace::transport_error_result(),
+                    });
+                }
+                super::transit_trace::emit_fault_snapshot(
+                    "transport_error",
+                    super::transit_trace::transport_error_result(),
+                );
+                return Err(error);
+            }
+        };
+        let result = response.result;
+        for frame in frames {
+            let mcu_front_start_time = response
+                .axes
+                .iter()
+                .find(|axis| axis.axis_idx == frame.axis)
+                .map_or(0, |axis| axis.front_start_time);
+            super::transit_trace::record(super::transit_trace::TransitTraceRecord {
+                sequence: 0,
+                mcu_id,
+                axis: frame.axis,
+                piece_count: frame.pieces.len() as u32,
+                room: frame.room,
+                send_started_ns,
+                send_elapsed_ns,
+                host_front_start_time: frame.pieces.first().map_or(0, |piece| piece.start_time),
+                mcu_front_start_time,
+                arrival_clock: response.arrival_clock,
+                result,
+            });
+        }
+        if result != mcu_protocol::result_codes::OK {
+            super::transit_trace::emit_fault_snapshot("mcu_reject", result);
+            return Err(SendError::retryable_mcu_reject(mcu_id, result));
         }
         Ok(())
     }

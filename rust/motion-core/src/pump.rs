@@ -8,6 +8,7 @@ mod messages;
 mod pump_loop;
 mod sched;
 mod stall;
+mod transit_trace;
 mod wire_sink;
 
 pub use drip::{DRIP_WINDOW_SECS, DripArm};
@@ -32,3 +33,5 @@ mod memstat_tests;
 mod sched_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod transit_trace_tests;
