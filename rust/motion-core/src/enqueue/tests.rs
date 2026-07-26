@@ -113,9 +113,15 @@ fn ec_cfg() -> Vec<McuAxisConfig> {
 }
 
 fn test_ctx() -> crate::enqueue::EnqueueCtx<impl Fn(u32, f64) -> u64> {
+    ctx_with_epoch(crate::anchor::StreamEpoch::Reposition)
+}
+
+fn ctx_with_epoch(
+    epoch: crate::anchor::StreamEpoch,
+) -> crate::enqueue::EnqueueCtx<impl Fn(u32, f64) -> u64> {
     crate::enqueue::EnqueueCtx {
         t0: 100.0,
-        epoch: crate::anchor::StreamEpoch::Reposition,
+        epoch,
         host_now: 0.0,
         lead_secs: crate::pump::MAX_LEAD_SECS,
         project: |_mcu, hs| (hs * 1_000.0) as u64,
@@ -123,7 +129,7 @@ fn test_ctx() -> crate::enqueue::EnqueueCtx<impl Fn(u32, f64) -> u64> {
     }
 }
 
-/// An E-only (or otherwise servo-stationary) segment must enqueue nothing
+/// An E-only (or otherwise servo-stationary) segment must enqueue no pieces
 /// for an ethercat lane: a parked drive receiving hold pieces trips the
 /// torque gate's pieces-while-parked fault, and an enabled drive already
 /// holds that exact target.
@@ -142,17 +148,38 @@ fn ethercat_pure_hold_lane_is_skipped() {
         motor_mask: 0,
         source_line: 0,
     };
-    let msgs = enqueue_segment(&seg, &ec_cfg(), &test_ctx());
+    let msgs = enqueue_segment(
+        &seg,
+        &ec_cfg(),
+        &ctx_with_epoch(crate::anchor::StreamEpoch::Continuation),
+    );
     assert!(
         msgs.is_empty(),
-        "constant ethercat lanes must enqueue nothing, got {} msgs",
+        "constant ethercat lanes must enqueue nothing on a continuation, got {} msgs",
         msgs.len()
+    );
+
+    let msgs = enqueue_segment(&seg, &ec_cfg(), &test_ctx());
+    assert_eq!(
+        msgs.len(),
+        2,
+        "a Reposition must reach every ethercat lane so the pump forgets its junction baseline"
+    );
+    assert!(
+        msgs.iter().all(|m| m.pieces.is_empty()
+            && m.epoch == crate::anchor::StreamEpoch::Reposition
+            && m.key.mcu_id == 9),
+        "pure-hold Reposition carriers must be piece-free epoch markers"
     );
 }
 
 #[test]
 fn ethercat_moving_lane_still_streams() {
-    let msgs = enqueue_segment(&seg_x_move(), &ec_cfg(), &test_ctx());
+    let msgs = enqueue_segment(
+        &seg_x_move(),
+        &ec_cfg(),
+        &ctx_with_epoch(crate::anchor::StreamEpoch::Continuation),
+    );
     assert!(
         msgs.iter().any(|m| m.key == AxisKey { mcu_id: 9, axis: 0 }),
         "moving X lane must stream to the ethercat slot"

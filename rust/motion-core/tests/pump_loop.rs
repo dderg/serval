@@ -324,6 +324,51 @@ fn fresh_stream_resets_junction_position_baseline() {
     handle.join().unwrap();
 }
 
+/// A stationary ethercat lane streams no pieces, so a position redefinition
+/// (post-homing set_position adopting the measured servo position) reaches it
+/// only as a piece-free Reposition carrier — which must still forget the
+/// junction baseline, or the first real move after it panics on the stale
+/// pre-redefinition end position.
+#[test]
+fn empty_reposition_carrier_resets_junction_position_baseline() {
+    let rec = Arc::new(Mutex::new(Vec::new()));
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let handle = run_pump_with_clock(control_rx, data_rx, rec.clone());
+
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    data.send(EnqueueMsg {
+        key,
+        pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
+        epoch: motion_core::anchor::StreamEpoch::Reposition,
+        lead_secs: motion_core::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
+    })
+    .unwrap();
+    data.send(EnqueueMsg {
+        key,
+        pieces: Vec::new(),
+        epoch: motion_core::anchor::StreamEpoch::Reposition,
+        lead_secs: motion_core::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
+    })
+    .unwrap();
+    data.send(EnqueueMsg {
+        key,
+        pieces: vec![piece_at(2000, 0.002, 50.0, 55.0)],
+        epoch: motion_core::anchor::StreamEpoch::Continuation,
+        lead_secs: motion_core::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
+    })
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let sent_pieces: usize = rec.lock().unwrap().iter().map(|(_, n)| n).sum();
+    assert_eq!(sent_pieces, 2);
+
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+}
+
 #[test]
 fn bundles_same_mcu_axes_into_one_transaction() {
     let rec = Arc::new(Mutex::new(Vec::new()));
