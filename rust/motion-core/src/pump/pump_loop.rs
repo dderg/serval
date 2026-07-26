@@ -516,8 +516,18 @@ impl<S: PieceSink> Pump<S> {
                                 "[pump-guard] piece already in the MCU's past {context} — failing loud on host before the MCU/endpoint trips -308"
                             );
                             eprintln!(
-                                "pump: piece in past {context} — mcu {mcu_id} axis {} start_time={} mcu_now={mcu_now} deficit_us={deficit_us} — aborting host before MCU -308",
-                                af.axis, piece.start_time
+                                "pump: piece in past {context} — mcu {mcu_id} axis {} \
+                                 start_time={} mcu_now={mcu_now} deficit_us={deficit_us} \
+                                 piece_idx={piece_idx} is_hold={} duration_s={} coeff_count={} \
+                                 queue_lead_secs={queue_lead_secs} queue_pending={queue_pending} \
+                                 queue_staged_motion={queue_staged_motion} cohort_active={} — \
+                                 aborting host before MCU -308",
+                                af.axis,
+                                piece.start_time,
+                                super::sched::is_hold_piece(piece),
+                                piece.duration,
+                                piece.coeff_count,
+                                self.cohort.is_some()
                             );
                             let _ = std::io::Write::flush(&mut std::io::stderr());
                             std::process::abort();
