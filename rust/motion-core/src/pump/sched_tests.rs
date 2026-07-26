@@ -43,12 +43,36 @@ fn idle_when_empty() {
 }
 
 #[test]
-fn stalls_when_global_head_ring_full() {
+fn full_ring_does_not_block_another_mcu() {
     let mut queues = BTreeMap::new();
     let mut a = q_with(2, &[10]);
     a.pushed = 2;
     queues.insert(AxisKey { mcu_id: 1, axis: 0 }, a);
     queues.insert(AxisKey { mcu_id: 2, axis: 0 }, q_with(8, &[20]));
+    match schedule(
+        &queues,
+        255,
+        usize::MAX,
+        |_: &AxisKey, _: &AxisQueue| None,
+        no_cap,
+    ) {
+        Schedule::Send(frames) => {
+            assert_eq!(frames.len(), 1);
+            assert_eq!(frames[0].key, AxisKey { mcu_id: 2, axis: 0 });
+        }
+        other => panic!("expected ready MCU to send, got {other:?}"),
+    }
+}
+
+#[test]
+fn stalls_when_every_ring_is_full() {
+    let mut queues = BTreeMap::new();
+    let mut a = q_with(2, &[10]);
+    a.pushed = 2;
+    queues.insert(AxisKey { mcu_id: 1, axis: 0 }, a);
+    let mut b = q_with(3, &[20]);
+    b.pushed = 3;
+    queues.insert(AxisKey { mcu_id: 2, axis: 0 }, b);
     assert!(matches!(
         schedule(
             &queues,
@@ -390,7 +414,7 @@ fn cross_lead_per_queue_horizon_independent() {
 }
 
 #[test]
-fn stall_full_on_globally_earliest_gates_all() {
+fn full_earliest_ring_does_not_starve_later_mcu() {
     let mut queues = BTreeMap::new();
 
     let mut mcu0_q = q_with_host(2, &[(100, 1.0)]);
@@ -399,19 +423,19 @@ fn stall_full_on_globally_earliest_gates_all() {
 
     queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with_host(8, &[(50, 5.0)]));
 
-    assert!(
-        matches!(
-            schedule(
-                &queues,
-                255,
-                usize::MAX,
-                |_: &AxisKey, _: &AxisQueue| None,
-                no_cap
-            ),
-            Schedule::StallFull(AxisKey { mcu_id: 0, axis: 0 })
-        ),
-        "StallFull on the globally host-earliest queue must gate all issuance"
-    );
+    match schedule(
+        &queues,
+        255,
+        usize::MAX,
+        |_: &AxisKey, _: &AxisQueue| None,
+        no_cap,
+    ) {
+        Schedule::Send(frames) => {
+            assert_eq!(frames.len(), 1);
+            assert_eq!(frames[0].key, AxisKey { mcu_id: 1, axis: 0 });
+        }
+        other => panic!("expected later ready MCU to send, got {other:?}"),
+    }
 }
 
 #[test]
