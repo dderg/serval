@@ -1094,9 +1094,10 @@ fn assert_extruder_continuous_and_monotone(segs: &[ShapedSegment]) {
     }
 }
 
-/// The follower rides the shaped path's true distance: through a smoothed
-/// corner it extrudes exactly ratio × the (shorter) shaped arc length, so it
-/// ends short of the commanded total by the corner-cut distance.
+/// The follower rides the path's true distance at the commanded rate:
+/// through a blended (and further kernel-smoothed) corner it extrudes
+/// exactly ratio × the (shorter) actual arc length, so it ends short of the
+/// gcode total by the corner-cut distance.
 #[test]
 fn follower_tracks_shaped_path_distance_through_a_corner() {
     let moves = [
@@ -1106,9 +1107,11 @@ fn follower_tracks_shaped_path_distance_through_a_corner() {
     let home = [0.0, 0.0, 0.0, 0.0];
 
     let raw = replay(cfg(), follower_chains_without_kernels(), &home, 0.0, &moves);
+    let raw_len = sampled_planar_path_length(&raw);
     assert!(
-        (extruder_end(&raw) - 3.0).abs() < 1e-9,
-        "without leader kernels the follower passes through: got {}",
+        raw_len < 60.0 && (extruder_end(&raw) - 0.05 * raw_len).abs() < 2e-3,
+        "without leader kernels the follower rides the fitted arc length: \
+         got {} vs 0.05 × {raw_len}",
         extruder_end(&raw)
     );
 
@@ -1288,11 +1291,12 @@ fn assert_extruder_has_no_jumps(segs: &[ShapedSegment]) {
 
 /// With unshaped leaders the projection is a passthrough, so a chain on the
 /// follower must land where the same chain lands on the same axis declared
-/// as a plain non-follower. Kernel-only is bit-identical (identical
-/// convolution inputs); with PA the paths bake it into different fit stages
-/// (the lowerer fits the PA-boosted signal, the projection applies PA
-/// exactly to the fitted raw track), so they agree to k x the fit's
-/// velocity slack, not to bits.
+/// as a plain non-follower. The two declarations convolve identical inputs
+/// but fit with different budgets (a follower's budget is scaled by its
+/// demand ratio, a plain axis has no demand), so they agree to the sum of
+/// the two fit budgets, not to bits; with PA they additionally bake it into
+/// different fit stages (the lowerer fits the PA-boosted signal, the
+/// projection applies PA exactly to the fitted raw track).
 #[test]
 fn follower_kernel_with_unshaped_leaders_matches_direct_convolution() {
     let moves = [
@@ -1300,7 +1304,7 @@ fn follower_kernel_with_unshaped_leaders_matches_direct_convolution() {
         line(2, [30.0, 0.0, 0.0], [30.0, 30.0, 0.0], 1.5),
     ];
     let home = [0.0, 0.0, 0.0, 0.0];
-    for (k, tol) in [(None, 1e-12), (Some(0.04), 2e-2)] {
+    for (k, tol) in [(None, 2e-3), (Some(0.04), 2e-2)] {
         let as_follower = follower_kernel_chains(None, k, 0.02675);
         let mut as_plain_axis = as_follower.clone();
         as_plain_axis.followers.clear();

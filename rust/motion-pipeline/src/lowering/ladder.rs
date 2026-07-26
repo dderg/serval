@@ -169,13 +169,14 @@ pub(crate) fn truncated_piece(
     u_end: f64,
     h: f64,
     pos_budget_mm: f64,
+    deriv_scale: f64,
 ) -> BezierPiece {
     let cheb = truncate_chebyshev_c2_anchored(
         &monomial_u_to_chebyshev(mono_u),
         h,
         pos_budget_mm,
-        FIT_TRUNC_VEL_MM_S,
-        FIT_TRUNC_ACC_MM_S2,
+        FIT_TRUNC_VEL_MM_S * deriv_scale,
+        FIT_TRUNC_ACC_MM_S2 * deriv_scale,
     );
     BezierPiece {
         u_start,

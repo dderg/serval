@@ -220,11 +220,13 @@ fn squeezed_chamfer_is_consumed_within_tolerance() {
         delta_of(ACCEL)
     );
 
-    let expected_e = 0.1 * (fc.trim_in() + mid.segment.s_len() + fc.trim_out());
+    let blend_len: f64 = moves.iter().map(|m| m.segment.s_len()).sum();
+    let expected_e = 0.1 * blend_len;
     let got_e = total_extrusion(&moves);
     assert!(
         (got_e - expected_e).abs() < 1e-9,
-        "blend must carry the replaced spans' extrusion: {got_e} vs {expected_e}"
+        "blend must extrude the commanded rate over its actual arc: \
+         {got_e} vs {expected_e}"
     );
 }
 
@@ -259,12 +261,13 @@ fn wide_cluster_is_consumed_by_a_split_blend() {
         delta_of(ACCEL)
     );
 
-    let consumed_len: f64 = mids.iter().map(|m| m.segment.s_len()).sum();
-    let expected_e = 0.1 * (fc.trim_in() + consumed_len + fc.trim_out());
+    let blend_len: f64 = moves.iter().map(|m| m.segment.s_len()).sum();
+    let expected_e = 0.1 * blend_len;
     let got_e = total_extrusion(&moves);
     assert!(
         (got_e - expected_e).abs() < 1e-9,
-        "blend must carry the replaced spans' extrusion: {got_e} vs {expected_e}"
+        "blend must extrude the commanded rate over its actual arc: \
+         {got_e} vs {expected_e}"
     );
 }
 
@@ -309,12 +312,13 @@ fn facet_cluster_is_consumed_by_one_blend() {
         delta_of(ACCEL)
     );
 
-    let consumed_len: f64 = mids.iter().map(|m| m.segment.s_len()).sum();
-    let expected_e = 0.1 * (fc.trim_in() + consumed_len + fc.trim_out());
+    let blend_len: f64 = moves.iter().map(|m| m.segment.s_len()).sum();
+    let expected_e = 0.1 * blend_len;
     let got_e = total_extrusion(&moves);
     assert!(
         (got_e - expected_e).abs() < 1e-9,
-        "blend must carry the replaced spans' extrusion: {got_e} vs {expected_e}"
+        "blend must extrude the commanded rate over its actual arc: \
+         {got_e} vs {expected_e}"
     );
 }
 

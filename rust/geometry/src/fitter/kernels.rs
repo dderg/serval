@@ -108,16 +108,7 @@ pub(super) fn reconstruct(
 
     let head_consumption = lines[0].s_len();
     let tail_consumption = lines[lines.len() - 1].s_len();
-    let recon_len = arc_len(&arc);
-    let (_, followers, _) = follower::construct_followers(
-        facets,
-        &lines,
-        head_consumption,
-        tail_consumption,
-        recon_len,
-        None,
-        None,
-    );
+    let (_, followers, _) = follower::construct_followers(facets, None, None);
 
     Ok(Some(Reconstruction {
         up: Vec::new(),

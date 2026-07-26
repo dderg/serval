@@ -100,6 +100,15 @@ where
             );
             check_step_rate_ceiling(cfg, axis_idx, &pieces, seg.source_line);
             if cfg.ethercat && is_pure_hold(&pieces) {
+                if ctx.epoch.position_redefined() {
+                    out.push(EnqueueMsg {
+                        key,
+                        pieces: Vec::new(),
+                        epoch: ctx.epoch,
+                        lead_secs: ctx.lead_secs,
+                        source_line: seg.source_line,
+                    });
+                }
                 continue;
             }
             if !pieces.is_empty() {

@@ -505,7 +505,7 @@ fn fit_axis_column(
         if need_hi > last_t && !force {
             return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
         }
-        let track = fit_axis_from_signal(axis, &seg.axes[axis], &sig)?;
+        let track = fit_axis_from_signal(axis, &seg.axes[axis], &sig, 1.0)?;
         if !track.control_points().iter().all(|v| v.is_finite()) {
             return Err(PostProcessError::NonFiniteSample {
                 axis,
@@ -729,6 +729,7 @@ pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
     axis: usize,
     template: &nurbs::ScalarNurbs,
     sig: &S,
+    tol_scale: f64,
 ) -> Result<nurbs::ScalarNurbs, PostProcessError> {
     let template_pieces = extract_bezier_pieces(template);
     if template_pieces.is_empty() {
@@ -769,7 +770,7 @@ pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
     seeds.push(t_hi);
     let mut pieces = Vec::with_capacity(template_pieces.len());
     for w in seeds.windows(2) {
-        refine_shaped_span(axis, sig, w[0], w[1], 0, &mut pieces)?;
+        refine_shaped_span(axis, sig, w[0], w[1], 0, tol_scale, &mut pieces)?;
     }
     let max_len = pieces.iter().map(|p| p.coeffs.len()).max().unwrap_or(1);
     for piece in &mut pieces {
@@ -821,6 +822,7 @@ fn shaped_ladder<S: TrackSignal>(
     sig: &S,
     t0: f64,
     t1: f64,
+    tol_scale: f64,
 ) -> Result<(Vec<f64>, bool), PostProcessError> {
     let h = t1 - t0;
     let t_of = |u: f64| nurbs::fmadd(0.5 * (u + 1.0), h, t0);
@@ -851,7 +853,8 @@ fn shaped_ladder<S: TrackSignal>(
     let tol = FitTol {
         pos_mm: SHAPED_FIT_TOL_MM,
         accel_mm_s2: SHAPED_FIT_TOL_ACCEL_MM_S2,
-    };
+    }
+    .scaled(tol_scale);
     match ladder_fit(&base, h, tol, &|u| truth.pos_at(u), &|u| truth.acc_at(u)) {
         Some(c) => Ok((c, true)),
         None => Ok((base, false)),
@@ -864,22 +867,24 @@ fn refine_shaped_span<S: TrackSignal>(
     t0: f64,
     t1: f64,
     depth: u32,
+    tol_scale: f64,
     out: &mut Vec<BezierPiece>,
 ) -> Result<(), PostProcessError> {
-    let (mono_u, fits) = shaped_ladder(axis, sig, t0, t1)?;
+    let (mono_u, fits) = shaped_ladder(axis, sig, t0, t1, tol_scale)?;
     if fits || depth >= SHAPED_FIT_MAX_DEPTH || (t1 - t0) <= 2.0 * SHAPED_FIT_MIN_SPAN_S {
         out.push(truncated_piece(
             &mono_u,
             t0,
             t1,
             t1 - t0,
-            FIT_TRUNC_POS_FACTOR * SHAPED_FIT_TOL_MM,
+            FIT_TRUNC_POS_FACTOR * SHAPED_FIT_TOL_MM * tol_scale,
+            tol_scale,
         ));
         return Ok(());
     }
     let tm = 0.5 * (t0 + t1);
-    refine_shaped_span(axis, sig, t0, tm, depth + 1, out)?;
-    refine_shaped_span(axis, sig, tm, t1, depth + 1, out)
+    refine_shaped_span(axis, sig, t0, tm, depth + 1, tol_scale, out)?;
+    refine_shaped_span(axis, sig, tm, t1, depth + 1, tol_scale, out)
 }
 
 fn finite_sample<S: TrackSignal>(axis: usize, sig: &S, t: f64) -> Result<f64, PostProcessError> {

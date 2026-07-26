@@ -2,6 +2,7 @@ use nurbs::ScalarNurbs;
 use nurbs::bezier::bezier_pieces_to_nurbs;
 use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
 
+use crate::lowering::follower_tol_scale;
 use crate::shaper::{
     AxisSignalTable, SEGMENT_TIME_EPS_S, TrackSignal, apply_derivative_gains_to_track,
     fit_axis_from_signal,
@@ -103,7 +104,12 @@ pub(crate) fn project_followers(
                 let (track, s_end, e_end) = {
                     let sig =
                         FollowerSignal::new(&frontier[i], raw, axis, leaders, &*state, e_start);
-                    let track = fit_axis_from_signal(axis, raw_track, &sig)?;
+                    let track = fit_axis_from_signal(
+                        axis,
+                        raw_track,
+                        &sig,
+                        follower_tol_scale(&raw.followers, axis),
+                    )?;
                     (track, sig.s_end(), sig.eval(raw.t_end))
                 };
                 state.s_shaped = s_end;
@@ -163,7 +169,12 @@ pub(crate) fn project_followers(
                     if need_hi > *last_t && !force {
                         return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
                     }
-                    let shaped = fit_axis_from_signal(axis, cached, sig)?;
+                    let shaped = fit_axis_from_signal(
+                        axis,
+                        cached,
+                        sig,
+                        follower_tol_scale(&raw.followers, axis),
+                    )?;
                     if !shaped.control_points().iter().all(|v| v.is_finite()) {
                         return Err(PostProcessError::NonFiniteSample {
                             axis,

@@ -9,7 +9,7 @@ use crate::segment::FollowerDemand;
 use super::super::vec3::{add, cross, dot, madd, norm, normalize, scale, signed_angle, sub};
 use super::super::{BUDGET_EPS_MM, FitError, internal, line_of};
 use super::Reconstruction;
-use super::follower::{arc_len, construct_followers};
+use super::follower::construct_followers;
 
 const ANGLE_EPS_RAD: f64 = 1e-9;
 pub(super) const EPMM_MIN: f64 = 1e-9;
@@ -140,30 +140,14 @@ pub(in crate::fitter) fn ease_run(
         recon.down = vec![reversed];
     }
 
-    let lines: Vec<&Line> = facets
-        .iter()
-        .map(line_of)
-        .collect::<Option<Vec<_>>>()
-        .expect("run facets are lines");
-    let head_end = ease.head.as_ref().zip(head).map(|(s, n)| EasedEnd {
+    let head_end = ease.head.as_ref().zip(head).map(|(_, n)| EasedEnd {
         neighbor_followers: &n.followers,
-        spiral_len: s.clo.s_len(),
-        line_trim: s.trim,
     });
-    let tail_end = ease.tail.as_ref().zip(tail).map(|(s, n)| EasedEnd {
+    let tail_end = ease.tail.as_ref().zip(tail).map(|(_, n)| EasedEnd {
         neighbor_followers: &n.followers,
-        spiral_len: s.clo.s_len(),
-        line_trim: s.trim,
     });
-    let (up_followers, arc_followers, down_followers) = construct_followers(
-        facets,
-        &lines,
-        recon.head_consumption,
-        recon.tail_consumption,
-        arc_len(&recon.arc),
-        head_end.as_ref(),
-        tail_end.as_ref(),
-    );
+    let (up_followers, arc_followers, down_followers) =
+        construct_followers(facets, head_end.as_ref(), tail_end.as_ref());
     recon.up_followers = up_followers;
     recon.followers = arc_followers;
     recon.down_followers = down_followers;
@@ -172,12 +156,9 @@ pub(in crate::fitter) fn ease_run(
 }
 
 /// An end of the reconstruction that eases into its neighbor line through a
-/// spiral: the neighbor's demands, the spiral's arc length, and the line
-/// footage the spiral replaced.
+/// spiral: the neighbor's demands the spiral's outer seam anchors to.
 pub(in crate::fitter::kernels) struct EasedEnd<'a> {
     pub neighbor_followers: &'a [FollowerDemand],
-    pub spiral_len: f64,
-    pub line_trim: f64,
 }
 
 #[derive(Clone, Copy)]
