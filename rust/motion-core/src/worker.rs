@@ -14,6 +14,7 @@ use crate::types::AxisKey;
 mod dispatch;
 mod ingress;
 mod pump_sink;
+mod stage_cpu;
 
 #[cfg(test)]
 pub(crate) use ingress::lead_secs;
@@ -217,6 +218,7 @@ pub fn setup_pipeline(
         })
         .expect("spawn push-pieces-pump thread");
     let frontier: Arc<CommittedFrontier> = Arc::default();
+    stage_cpu::spawn_sampler(Arc::downgrade(&frontier));
     let sink = PumpSink {
         router: dispatch.router,
         anchor: dispatch.anchor,
