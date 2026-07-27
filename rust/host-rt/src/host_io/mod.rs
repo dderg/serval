@@ -42,6 +42,7 @@ pub struct McuHostIoConfig {
     pub default_call_timeout: Duration,
     pub identify_timeout: Duration,
     pub default_dispatcher_timeout: Duration,
+    pub mcu_label: Option<String>,
 }
 
 impl Default for McuHostIoConfig {
@@ -53,6 +54,7 @@ impl Default for McuHostIoConfig {
             default_call_timeout: Duration::from_millis(100),
             identify_timeout: Duration::from_millis(15_000),
             default_dispatcher_timeout: Duration::from_secs(30),
+            mcu_label: None,
         }
     }
 }
@@ -195,9 +197,10 @@ impl McuHostIo {
     #[cfg(target_family = "unix")]
     pub fn open_pipe_with_config(
         path: &str,
-        config: McuHostIoConfig,
+        mut config: McuHostIoConfig,
     ) -> Result<Self, TransportError> {
         use std::os::unix::io::FromRawFd;
+        config.mcu_label.get_or_insert_with(|| path.to_owned());
 
         // SAFETY: `libc::open` and `TTYPort::from_raw_fd` are both unsafe FFI
         // boundaries. We check the return value of `open` before using the fd.
@@ -288,8 +291,9 @@ impl McuHostIo {
     pub fn open_with_config(
         path: &str,
         baud: u32,
-        config: McuHostIoConfig,
+        mut config: McuHostIoConfig,
     ) -> Result<Self, TransportError> {
+        config.mcu_label.get_or_insert_with(|| path.to_owned());
         let port_box: Box<dyn serialport::SerialPort> = serialport::new(path, baud)
             .timeout(Duration::from_millis(100))
             .open()
@@ -345,6 +349,7 @@ impl McuHostIo {
                     tracing::warn!(
                         subsystem = "mcu-comms",
                         event = "reactor_exit_non_critical",
+                        mcu = reactor.mcu_label(),
                         thread_id = ?std::thread::current().id(),
                         "transport closed via IO error on NON-CRITICAL MCU; reactor exiting without abort — klippy reconnect path will handle recovery"
                     );
@@ -354,6 +359,7 @@ impl McuHostIo {
                 tracing::error!(
                     subsystem = "mcu-comms",
                     event = "reactor_exit_on_fault",
+                    mcu = reactor.mcu_label(),
                     thread_id = ?std::thread::current().id(),
                     "EXIT_ON_FAULT — transport closed via IO error on CRITICAL MCU; aborting klippy so systemd restarts it"
                 );
