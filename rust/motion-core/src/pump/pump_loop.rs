@@ -669,16 +669,22 @@ impl<S: PieceSink> Pump<S> {
         }
     }
 
-    // One EtherCAT bundle occupies the send path for ~2 ms of synchronous
-    // round-trip, so an unbounded send pass monopolizes the loop for as long
-    // as queues hold sendable pieces (observed: 130 ms), while newly produced
-    // earlier-deadline pieces for another axis wait in the data channel.
-    // Bounding the pass keeps intake and control latency at a few bundles.
-    const SEND_PASS_BUNDLE_BUDGET: usize = 8;
+    // A send pass monopolizes the loop while its synchronous wire round-trips
+    // run (~2 ms per EtherCAT bundle, ~20 ms per 1 KiB serial bundle at
+    // 500 kbaud), while newly produced earlier-deadline pieces for another
+    // axis wait in the data channel (observed: a 130 ms pass aged a z-hop
+    // burst 53 ms into the MCU past). A wall-clock deadline bounds intake and
+    // control latency identically on every transport; the deadline is checked
+    // after each bundle, so every pass sends at least one.
+    const SEND_PASS_BUDGET: Duration = Duration::from_millis(10);
 
     pub(super) fn send_ready(&mut self) -> Result<bool, ()> {
+        self.send_ready_until(Instant::now() + Self::SEND_PASS_BUDGET)
+    }
+
+    pub(super) fn send_ready_until(&mut self, pass_deadline: Instant) -> Result<bool, ()> {
         let mut activity = false;
-        for _ in 0..Self::SEND_PASS_BUNDLE_BUDGET {
+        loop {
             let sched = {
                 let hz_of = |k: &AxisKey, q: &AxisQueue| self.horizon_of(k, q);
                 schedule(
@@ -766,6 +772,9 @@ impl<S: PieceSink> Pump<S> {
                         }
                     }
                 }
+            }
+            if Instant::now() >= pass_deadline {
+                break;
             }
         }
         Ok(activity)

@@ -912,7 +912,7 @@ fn stalled_queue_pump(
 }
 
 #[test]
-fn send_ready_yields_after_bundle_budget_with_work_pending() {
+fn send_pass_deadline_yields_with_work_pending() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let sink = RecordingSink::new();
     let mut pump = queue_pump(key, Duration::from_secs(1), |_| {}, sink.clone());
@@ -926,13 +926,26 @@ fn send_ready_yields_after_bundle_budget_with_work_pending() {
         q.pieces.push_back(make_piece(i * 1_000));
     }
 
-    assert_eq!(pump.send_ready(), Ok(true));
+    assert_eq!(pump.send_ready_until(std::time::Instant::now()), Ok(true));
 
-    assert_eq!(sink.recorded().len(), 8, "one bundle per budget slot");
+    assert_eq!(
+        sink.recorded().len(),
+        1,
+        "an expired pass deadline still sends exactly one bundle"
+    );
     assert_eq!(
         pump.queues[&key].pieces.len() as u64,
-        queued - 8 * pieces_per_bundle,
+        queued - pieces_per_bundle,
         "remaining pieces wait for the next pass so intake can interleave"
+    );
+
+    assert_eq!(
+        pump.send_ready_until(std::time::Instant::now() + Duration::from_secs(60)),
+        Ok(true)
+    );
+    assert!(
+        pump.queues[&key].pieces.is_empty(),
+        "a roomy deadline drains the queue"
     );
 }
 
