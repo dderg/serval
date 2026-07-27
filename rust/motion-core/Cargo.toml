@@ -21,6 +21,9 @@ crossbeam-channel = "0.5"
 tracing = "0.1"
 thiserror = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [features]
 test-support = []
 

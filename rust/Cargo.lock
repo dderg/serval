@@ -670,6 +670,7 @@ dependencies = [
  "gcode",
  "geometry",
  "host-rt",
+ "libc",
  "mcu-protocol",
  "motion-core",
  "motion-pipeline",
