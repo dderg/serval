@@ -525,16 +525,8 @@ fn quantized_concentric_arcs_share_a_center_at_high_corner_deviation() {
     }
 }
 
-/// Repro of a bench crash (Trident, Voron cube, 2026-07-27): the fit stage
-/// itself panicked `discontinuous geometry` with a 0.000337mm seam gap
-/// dominated by Z. Mechanism: `reconstruct` fixes the arc plane from the
-/// first two facet headings only, so a sub-micron Z step at the run entry
-/// tilts the plane, and evaluating the arc endpoint on that tilted circle —
-/// instead of re-anchoring it to the raw seam vertex — levers the tilt by
-/// the radius into a first-order out-of-plane miss at the far seam.
-///
-/// `should_panic` pins the current failure; the fix turns this into a plain
-/// contiguity assertion on the emitted stream.
+// TODO: fix reconstruct() to re-anchor the arc endpoint to the raw seam
+// vertex, then drop should_panic and assert contiguity of the emitted stream.
 #[test]
 #[should_panic(expected = "discontinuous geometry")]
 fn entry_z_step_tilts_arc_plane_and_breaks_seam_contiguity() {
