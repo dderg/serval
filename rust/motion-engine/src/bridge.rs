@@ -464,7 +464,6 @@ impl PyMotionEngine {
         use std::time::{Duration, Instant};
         let deadline = Instant::now() + Duration::from_secs_f64(timeout_s);
         let effective_baud = if baud == 0 { 250_000 } else { baud };
-        let config = McuHostIoConfig::default();
 
         if self.try_reuse_existing_connection(
             mcu_handle,
@@ -485,6 +484,11 @@ impl PyMotionEngine {
                 Ok(conn.label.clone())
             },
         )?;
+
+        let config = McuHostIoConfig {
+            mcu_label: Some(mcu_label.clone()),
+            ..McuHostIoConfig::default()
+        };
 
         let is_pipe = baud == 0
             || serial_path.starts_with("/tmp/")

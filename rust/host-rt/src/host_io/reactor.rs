@@ -58,6 +58,7 @@ pub struct Reactor {
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) transport_state: McuTransportState,
     pub(crate) interceptors: crate::host_io::interceptor::InterceptorTable,
+    pub(crate) mcu_label: Arc<str>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -95,6 +96,7 @@ impl Reactor {
         config: crate::host_io::McuHostIoConfig,
         clock: Arc<dyn Clock>,
     ) -> Self {
+        let mcu_label: Arc<str> = config.mcu_label.as_deref().unwrap_or("unknown").into();
         let event_dispatcher = EventDispatcher::new(
             Arc::clone(&status_snapshot),
             config.trace_capacity,
@@ -121,7 +123,12 @@ impl Reactor {
             clock,
             transport_state: McuTransportState::default(),
             interceptors: crate::host_io::interceptor::InterceptorTable::new(),
+            mcu_label,
         }
+    }
+
+    pub fn mcu_label(&self) -> &str {
+        &self.mcu_label
     }
 
     #[cfg(any(test, feature = "test-harness"))]
