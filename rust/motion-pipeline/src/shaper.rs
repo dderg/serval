@@ -541,28 +541,30 @@ fn fit_leader_axes(
     // pays from the first fresh segment: with the old >=8-segment gate the
     // dense-region steady state (1-2 fresh segments per emit) fitted every
     // axis serially and pegged one core while the rest idled.
-    let columns: Vec<(
+    let fit_started = std::time::Instant::now();
+    type TimedColumn = (
         usize,
         Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError>,
-    )> = if axis_chains.len() > 1 && !fresh.is_empty() {
+        std::time::Duration,
+    );
+    let columns: Vec<TimedColumn> = if axis_chains.len() > 1 && !fresh.is_empty() {
         let fresh_ref: &[ShapedSegment] = fresh;
         std::thread::scope(|scope| {
             let handles: Vec<_> = axis_chains
                 .iter()
                 .map(|&(axis, chain)| {
                     scope.spawn(move || {
-                        (
+                        let column_started = std::time::Instant::now();
+                        let column = fit_axis_column(
+                            history,
+                            base,
+                            fresh_ref,
                             axis,
-                            fit_axis_column(
-                                history,
-                                base,
-                                fresh_ref,
-                                axis,
-                                force,
-                                at_stream_boundary,
-                                chain,
-                            ),
-                        )
+                            force,
+                            at_stream_boundary,
+                            chain,
+                        );
+                        (axis, column, column_started.elapsed())
                     })
                 })
                 .collect();
@@ -575,14 +577,29 @@ fn fit_leader_axes(
         axis_chains
             .iter()
             .map(|&(axis, chain)| {
-                (
-                    axis,
-                    fit_axis_column(history, base, fresh, axis, force, at_stream_boundary, chain),
-                )
+                let column_started = std::time::Instant::now();
+                let column =
+                    fit_axis_column(history, base, fresh, axis, force, at_stream_boundary, chain);
+                (axis, column, column_started.elapsed())
             })
             .collect()
     };
-    for (axis, column) in columns {
+    let fit_elapsed = fit_started.elapsed();
+    if fit_elapsed >= std::time::Duration::from_millis(20) {
+        let per_axis: Vec<String> = columns
+            .iter()
+            .map(|(axis, _, elapsed)| format!("axis{axis}={}us", elapsed.as_micros()))
+            .collect();
+        tracing::warn!(
+            subsystem = "motion",
+            event = "shaper_fit_slow",
+            total_us = fit_elapsed.as_micros() as u64,
+            fresh_segments = fresh.len(),
+            columns = %per_axis.join(" "),
+            "shaper leader fit pass exceeded 20ms"
+        );
+    }
+    for (axis, column, _) in columns {
         let Some(column) = column? else { continue };
         for (seg, track) in fresh.iter_mut().zip(column) {
             seg.axes[axis] = track;

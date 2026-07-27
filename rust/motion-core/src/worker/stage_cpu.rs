@@ -60,12 +60,16 @@ pub(super) fn spawn_sampler(_frontier: Weak<CommittedFrontier>) {}
 #[cfg(target_os = "linux")]
 fn run(frontier: &Weak<CommittedFrontier>) {
     const USER_HZ: u64 = 100;
+    // Scoped fit threads inherit their parent's comm, so a stage can span
+    // several (short-lived) tids; totals are summed per comm each tick and
+    // deltas taken on the sum — per-comm keying across tids reads garbage.
     let mut previous: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     while frontier.upgrade().is_some() {
         std::thread::sleep(SAMPLE_PERIOD);
         let Ok(entries) = std::fs::read_dir("/proc/self/task") else {
             return;
         };
+        let mut totals: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
         for entry in entries.flatten() {
             let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
                 continue;
@@ -76,6 +80,9 @@ fn run(frontier: &Weak<CommittedFrontier>) {
             if !STAGE_PREFIXES.iter().any(|p| comm.starts_with(p)) {
                 continue;
             }
+            *totals.entry(comm).or_insert(0) += ticks;
+        }
+        for (comm, ticks) in totals {
             if let Some(prev) = previous.insert(comm.clone(), ticks) {
                 let busy_ms = (ticks.saturating_sub(prev)) * 1000 / USER_HZ;
                 let busy_pct = busy_ms as f64 / SAMPLE_PERIOD.as_millis() as f64 * 100.0;
