@@ -91,6 +91,8 @@ impl std::fmt::Display for SendError {
     }
 }
 
+pub const SERIAL_BUNDLE_WIRE_BUDGET: usize = 1024;
+
 pub trait PieceSink: Send {
     fn send_frame(
         &self,
@@ -100,6 +102,14 @@ pub trait PieceSink: Send {
         new_head: u32,
         room: u32,
     ) -> Result<i32, SendError>;
+
+    /// Bytes one bundled transaction may carry to `mcu_id`. The conservative
+    /// default suits latency-bound links (a 1 KiB frame is ~20 ms of wire at
+    /// 500 kbaud); transports whose round-trip cost is per-transaction rather
+    /// than per-byte override this to amortize the round trip.
+    fn bundle_wire_budget(&self, _mcu_id: u32) -> usize {
+        SERIAL_BUNDLE_WIRE_BUDGET
+    }
 
     /// Deliver every axis frame destined for `mcu_id` as one bundled
     /// transaction. A whole bundle either lands or it doesn't — the caller

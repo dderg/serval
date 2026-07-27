@@ -88,7 +88,7 @@ fn schedule_resends_orphan_when_retired_overtook_pushed() {
     match schedule(
         &queues,
         MAX_PER_FRAME,
-        usize::MAX,
+        |_| usize::MAX,
         |_, _| None,
         |_| usize::MAX,
     ) {
@@ -919,9 +919,8 @@ fn send_pass_deadline_yields_with_work_pending() {
     let q = pump.queues.get_mut(&key).unwrap();
     q.pushed = 0;
     q.pieces.clear();
-    q.ring_depth = 1_000;
-    let pieces_per_bundle = super::pump_loop::MAX_PER_FRAME as u64;
-    let queued = pieces_per_bundle * 12;
+    q.ring_depth = 4_000;
+    let queued: u64 = 3_000;
     for i in 0..queued {
         q.pieces.push_back(make_piece(i * 1_000));
     }
@@ -933,10 +932,10 @@ fn send_pass_deadline_yields_with_work_pending() {
         1,
         "an expired pass deadline still sends exactly one bundle"
     );
-    assert_eq!(
-        pump.queues[&key].pieces.len() as u64,
-        queued - pieces_per_bundle,
-        "remaining pieces wait for the next pass so intake can interleave"
+    let remaining = pump.queues[&key].pieces.len() as u64;
+    assert!(
+        remaining > 0 && remaining < queued,
+        "one bundle went out, the rest waits so intake can interleave (remaining={remaining})"
     );
 
     assert_eq!(

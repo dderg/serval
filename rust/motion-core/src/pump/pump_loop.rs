@@ -58,19 +58,14 @@ pub const PUMP_DATA_CHANNEL_CAP: usize = 128;
 // typical motion, ~1.5× the two-MCU ring cache.
 const PUMP_INTAKE_BACKLOG_CAP: u64 = 4096;
 
-pub(super) const MAX_PER_FRAME: usize = 32;
+// Per-axis wire cap: the PushPieces frame carries a u8 piece count.
+pub(super) const MAX_PER_FRAME: usize = 255;
 
 // How long an axis ring may sit at room()==0 with `q.retired` frozen before the
 // pump treats it as the MCU having stopped retiring pieces rather than a normal
 // transient full-ring wait.
 pub(super) const RETIREMENT_STALL_FATAL: Duration = Duration::from_secs(10);
 
-// A PushPieces bundle occupies the serial line for its whole wire length
-// (~20 ms/KiB at 500 kbaud) while its front piece's arrival lead keeps
-// draining, so the cap must be in bytes — variable-degree entries span
-// 20..=48 B and a count cap is wrong at both ends. send_ready() loops until
-// Idle, so this bounds per-transaction latency, not throughput.
-const BUNDLE_WIRE_BYTE_BUDGET: usize = 1024;
 const INFERRED_HALT_FATAL: Duration = Duration::from_secs(1);
 
 fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
@@ -690,7 +685,7 @@ impl<S: PieceSink> Pump<S> {
                 schedule(
                     &self.queues,
                     MAX_PER_FRAME,
-                    BUNDLE_WIRE_BYTE_BUDGET,
+                    |mcu_id| self.sink.bundle_wire_budget(mcu_id),
                     hz_of,
                     |_| usize::MAX,
                 )

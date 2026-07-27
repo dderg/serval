@@ -263,6 +263,15 @@ impl PieceSink for WireSink {
             .map(|()| mcu_protocol::result_codes::OK)
     }
 
+    fn bundle_wire_budget(&self, mcu_id: u32) -> usize {
+        match self.transports.get(&mcu_id) {
+            Some(McuTransport::EtherCat(_)) => 8192,
+            Some(McuTransport::Serial(_)) | None => {
+                crate::pump::messages::SERIAL_BUNDLE_WIRE_BUDGET
+            }
+        }
+    }
+
     fn send_mcu_frames(&self, mcu_id: u32, frames: &[AxisFrame]) -> Result<(), SendError> {
         debug_assert!(
             frames.iter().all(|f| f.pieces.len() <= 255),
