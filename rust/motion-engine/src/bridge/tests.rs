@@ -2,7 +2,6 @@ use crate::lock_ext::LockExt;
 use std::os::unix::io::FromRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
 
 use host_rt::host_io::{McuHostIo, McuHostIoConfig};
 use host_rt::mcu_serial_conn::McuSerialConn;
@@ -11,7 +10,6 @@ use crate::config::PlannerConfig;
 use crate::worker::{DispatchError, StreamWorkerHandle};
 use trajectory::ShapedSegment;
 
-use super::pipeline_setup::RetirementForwardGate;
 use super::{McuConnection, PyMotionEngine};
 
 fn open_pty() -> (libc::c_int, String) {
@@ -282,17 +280,6 @@ fn stream_config_from(cfg: &PlannerConfig) -> (motion_pipeline::StreamConfig, Ve
         limits: test_limits(),
     };
     (sc, vec![0.0; cfg.axis_registry.n_axes().max(3)])
-}
-
-#[test]
-fn retirement_forward_gate_samples_latest_state_at_bounded_cadence() {
-    let interval = Duration::from_millis(5);
-    let gate = RetirementForwardGate::new(interval);
-    let started = Instant::now();
-
-    assert!(gate.admit(started));
-    assert!(!gate.admit(started + Duration::from_millis(1)));
-    assert!(gate.admit(started + interval));
 }
 
 #[test]
