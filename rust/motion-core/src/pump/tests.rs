@@ -912,6 +912,31 @@ fn stalled_queue_pump(
 }
 
 #[test]
+fn send_ready_yields_after_bundle_budget_with_work_pending() {
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    let sink = RecordingSink::new();
+    let mut pump = queue_pump(key, Duration::from_secs(1), |_| {}, sink.clone());
+    let q = pump.queues.get_mut(&key).unwrap();
+    q.pushed = 0;
+    q.pieces.clear();
+    q.ring_depth = 1_000;
+    let pieces_per_bundle = super::pump_loop::MAX_PER_FRAME as u64;
+    let queued = pieces_per_bundle * 12;
+    for i in 0..queued {
+        q.pieces.push_back(make_piece(i * 1_000));
+    }
+
+    assert_eq!(pump.send_ready(), Ok(true));
+
+    assert_eq!(sink.recorded().len(), 8, "one bundle per budget slot");
+    assert_eq!(
+        pump.queues[&key].pieces.len() as u64,
+        queued - 8 * pieces_per_bundle,
+        "remaining pieces wait for the next pass so intake can interleave"
+    );
+}
+
+#[test]
 fn halt_drops_queued_and_new_pieces_until_resume() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let (escalated_tx, escalated_rx) = mpsc::channel();

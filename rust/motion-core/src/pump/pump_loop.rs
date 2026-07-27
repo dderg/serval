@@ -669,9 +669,16 @@ impl<S: PieceSink> Pump<S> {
         }
     }
 
+    // One EtherCAT bundle occupies the send path for ~2 ms of synchronous
+    // round-trip, so an unbounded send pass monopolizes the loop for as long
+    // as queues hold sendable pieces (observed: 130 ms), while newly produced
+    // earlier-deadline pieces for another axis wait in the data channel.
+    // Bounding the pass keeps intake and control latency at a few bundles.
+    const SEND_PASS_BUNDLE_BUDGET: usize = 8;
+
     pub(super) fn send_ready(&mut self) -> Result<bool, ()> {
         let mut activity = false;
-        loop {
+        for _ in 0..Self::SEND_PASS_BUNDLE_BUDGET {
             let sched = {
                 let hz_of = |k: &AxisKey, q: &AxisQueue| self.horizon_of(k, q);
                 schedule(
@@ -831,7 +838,6 @@ impl<S: PieceSink> Pump<S> {
 
     fn run_loop(&mut self, control_rx: &Receiver<PumpMsg>, data_rx: &Receiver<EnqueueMsg>) {
         loop {
-            let poll_ms = self.poll_ms();
             let mut activity = false;
 
             match self.drain_control(control_rx) {
@@ -861,7 +867,7 @@ impl<S: PieceSink> Pump<S> {
                 continue;
             }
 
-            if self.idle_wait(control_rx, data_rx, poll_ms).is_err() {
+            if self.idle_wait(control_rx, data_rx, self.poll_ms()).is_err() {
                 return;
             }
         }
