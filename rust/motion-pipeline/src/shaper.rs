@@ -536,13 +536,15 @@ fn fit_leader_axes(
         .map(|axis| (axis, chains.chains.get(axis).unwrap_or(&default_chain)))
         .filter(|(_, chain)| !chain.is_empty())
         .collect();
-    // Scoped threads only pay off on catch-up bursts; steady-state emits fit
-    // one or two fresh segments and the spawn churn would outweigh the win.
-    const PARALLEL_FIT_MIN_SEGMENTS: usize = 8;
+    // A column fit costs milliseconds (ladder fits over the convolution
+    // window) against tens of microseconds per scoped spawn, so parallel
+    // pays from the first fresh segment: with the old >=8-segment gate the
+    // dense-region steady state (1-2 fresh segments per emit) fitted every
+    // axis serially and pegged one core while the rest idled.
     let columns: Vec<(
         usize,
         Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError>,
-    )> = if axis_chains.len() > 1 && fresh.len() >= PARALLEL_FIT_MIN_SEGMENTS {
+    )> = if axis_chains.len() > 1 && !fresh.is_empty() {
         let fresh_ref: &[ShapedSegment] = fresh;
         std::thread::scope(|scope| {
             let handles: Vec<_> = axis_chains
