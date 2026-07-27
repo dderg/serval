@@ -59,7 +59,7 @@ pub(super) fn spawn_sampler(_frontier: Weak<CommittedFrontier>) {}
 
 #[cfg(target_os = "linux")]
 fn run(frontier: &Weak<CommittedFrontier>) {
-    let ticks_per_sec = ticks_per_sec();
+    const USER_HZ: u64 = 100;
     let mut previous: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     while frontier.upgrade().is_some() {
         std::thread::sleep(SAMPLE_PERIOD);
@@ -77,7 +77,7 @@ fn run(frontier: &Weak<CommittedFrontier>) {
                 continue;
             }
             if let Some(prev) = previous.insert(comm.clone(), ticks) {
-                let busy_ms = (ticks.saturating_sub(prev)) * 1000 / ticks_per_sec;
+                let busy_ms = (ticks.saturating_sub(prev)) * 1000 / USER_HZ;
                 let busy_pct = busy_ms as f64 / SAMPLE_PERIOD.as_millis() as f64 * 100.0;
                 tracing::info!(
                     subsystem = "motion",
@@ -90,13 +90,6 @@ fn run(frontier: &Weak<CommittedFrontier>) {
             }
         }
     }
-}
-
-#[cfg(target_os = "linux")]
-fn ticks_per_sec() -> u64 {
-    // SAFETY: sysconf is async-signal-safe and _SC_CLK_TCK is a constant query.
-    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-    if ticks <= 0 { 100 } else { ticks as u64 }
 }
 
 #[cfg(test)]
