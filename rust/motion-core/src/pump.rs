@@ -8,6 +8,7 @@ mod messages;
 mod pump_loop;
 mod sched;
 mod stall;
+mod transit_trace;
 mod wire_sink;
 
 pub use drip::{DRIP_WINDOW_SECS, DripArm};
@@ -16,7 +17,8 @@ pub use junction::{
     junction_jumps,
 };
 pub use messages::{
-    EnqueueMsg, HeartbeatMsg, HistoryRecorder, PieceSink, PumpCallbacks, PumpMsg, SendError,
+    BundleLimits, EnqueueMsg, HeartbeatMsg, HistoryRecorder, PieceSink, PumpCallbacks, PumpMsg,
+    SendError,
 };
 pub use pump_loop::{MAX_LEAD_SECS, PUMP_DATA_CHANNEL_CAP, run_pump};
 pub use sched::{AxisFrame, AxisQueue, FramePlan, Schedule, append_pieces_merging_holds, schedule};
@@ -32,3 +34,5 @@ mod memstat_tests;
 mod sched_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod transit_trace_tests;

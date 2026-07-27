@@ -10,7 +10,6 @@ from . import (
     motion_debug,
     motion_kinematics,
     motion_setup,
-    structured_log,
 )
 from .extras import servo_axis
 from .kinematics import extruder
@@ -698,17 +697,9 @@ class Motion:
                     "(drip move or no mcu)"
                 )
             return
-        now = self._yield_to_reactor_if_due(self.reactor.monotonic())
+        self._yield_to_reactor_if_due(self.reactor.monotonic())
         if submit(*args):
             return
-        wait_start = now
-        structured_log.event(
-            "motion",
-            "feed_throttle_enter",
-            queued_motion=round(self.engine.queued_motion_secs(), 4),
-            dispatched_lead=round(self.engine.dispatched_lead_secs(), 4),
-            engine_frontier=round(self.engine.get_last_move_time(), 4),
-        )
         engine_wait.wait_for(
             self.printer,
             lambda: submit(*args) or None,
@@ -717,13 +708,6 @@ class Motion:
             park=self._engine_wakeup.park if self._engine_wakeup else None,
         )
         self._last_reactor_yield = self.reactor.monotonic()
-        structured_log.event(
-            "motion",
-            "feed_throttle_exit",
-            waited_s=round(self.reactor.monotonic() - wait_start, 4),
-            queued_motion=round(self.engine.queued_motion_secs(), 4),
-            engine_frontier=round(self.engine.get_last_move_time(), 4),
-        )
 
     def check_busy(self, eventtime):
         est_print_time = self.mcu.estimated_print_time(eventtime)

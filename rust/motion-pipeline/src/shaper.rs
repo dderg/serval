@@ -536,31 +536,35 @@ fn fit_leader_axes(
         .map(|axis| (axis, chains.chains.get(axis).unwrap_or(&default_chain)))
         .filter(|(_, chain)| !chain.is_empty())
         .collect();
-    // Scoped threads only pay off on catch-up bursts; steady-state emits fit
-    // one or two fresh segments and the spawn churn would outweigh the win.
-    const PARALLEL_FIT_MIN_SEGMENTS: usize = 8;
-    let columns: Vec<(
+    // A column fit costs milliseconds (ladder fits over the convolution
+    // window) against tens of microseconds per scoped spawn, so parallel
+    // pays from the first fresh segment: with the old >=8-segment gate the
+    // dense-region steady state (1-2 fresh segments per emit) fitted every
+    // axis serially and pegged one core while the rest idled.
+    let fit_started = std::time::Instant::now();
+    type TimedColumn = (
         usize,
         Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError>,
-    )> = if axis_chains.len() > 1 && fresh.len() >= PARALLEL_FIT_MIN_SEGMENTS {
+        std::time::Duration,
+    );
+    let columns: Vec<TimedColumn> = if axis_chains.len() > 1 && !fresh.is_empty() {
         let fresh_ref: &[ShapedSegment] = fresh;
         std::thread::scope(|scope| {
             let handles: Vec<_> = axis_chains
                 .iter()
                 .map(|&(axis, chain)| {
                     scope.spawn(move || {
-                        (
+                        let column_started = std::time::Instant::now();
+                        let column = fit_axis_column(
+                            history,
+                            base,
+                            fresh_ref,
                             axis,
-                            fit_axis_column(
-                                history,
-                                base,
-                                fresh_ref,
-                                axis,
-                                force,
-                                at_stream_boundary,
-                                chain,
-                            ),
-                        )
+                            force,
+                            at_stream_boundary,
+                            chain,
+                        );
+                        (axis, column, column_started.elapsed())
                     })
                 })
                 .collect();
@@ -573,14 +577,29 @@ fn fit_leader_axes(
         axis_chains
             .iter()
             .map(|&(axis, chain)| {
-                (
-                    axis,
-                    fit_axis_column(history, base, fresh, axis, force, at_stream_boundary, chain),
-                )
+                let column_started = std::time::Instant::now();
+                let column =
+                    fit_axis_column(history, base, fresh, axis, force, at_stream_boundary, chain);
+                (axis, column, column_started.elapsed())
             })
             .collect()
     };
-    for (axis, column) in columns {
+    let fit_elapsed = fit_started.elapsed();
+    if fit_elapsed >= std::time::Duration::from_millis(20) {
+        let per_axis: Vec<String> = columns
+            .iter()
+            .map(|(axis, _, elapsed)| format!("axis{axis}={}us", elapsed.as_micros()))
+            .collect();
+        tracing::warn!(
+            subsystem = "motion",
+            event = "shaper_fit_slow",
+            total_us = fit_elapsed.as_micros() as u64,
+            fresh_segments = fresh.len(),
+            columns = %per_axis.join(" "),
+            "shaper leader fit pass exceeded 20ms"
+        );
+    }
+    for (axis, column, _) in columns {
         let Some(column) = column? else { continue };
         for (seg, track) in fresh.iter_mut().zip(column) {
             seg.axes[axis] = track;
@@ -618,6 +637,7 @@ pub(crate) struct AxisSignalTable {
     last_t: f64,
     at_stream_boundary: bool,
     force: bool,
+    cursor: std::cell::Cell<usize>,
 }
 
 impl AxisSignalTable {
@@ -653,6 +673,7 @@ impl AxisSignalTable {
             last_t,
             at_stream_boundary,
             force,
+            cursor: std::cell::Cell::new(0),
         };
         for track in tracks {
             for p in extract_bezier_pieces(track) {
@@ -686,10 +707,14 @@ impl AxisSignalTable {
             }
             return self.piece_at(self.coeffs.len() - 1, self.last_t);
         }
-        let i = self
-            .ends
-            .partition_point(|&e| e + SEGMENT_TIME_EPS_S < t)
-            .min(self.coeffs.len() - 1);
+        let mut i = self.cursor.get().min(self.coeffs.len() - 1);
+        while i > 0 && self.ends[i - 1] + SEGMENT_TIME_EPS_S >= t {
+            i -= 1;
+        }
+        while i + 1 < self.coeffs.len() && self.ends[i] + SEGMENT_TIME_EPS_S < t {
+            i += 1;
+        }
+        self.cursor.set(i);
         if t >= self.starts[i] - SEGMENT_TIME_EPS_S {
             return self.piece_at(i, t);
         }
@@ -841,6 +866,9 @@ fn shaped_ladder<S: TrackSignal>(
         acc: Vec::with_capacity(LADDER_PROBES_U.len()),
     };
     for &u in &LADDER_FIT_NODES_U {
+        if u == 0.0 {
+            continue;
+        }
         truth.pos.push((u, finite_sample(axis, sig, t_of(u))?));
     }
     for &u in &LADDER_PROBES_U {

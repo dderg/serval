@@ -52,6 +52,11 @@ pub struct HeartbeatMsg {
 pub enum PumpMsg {
     Heartbeat(HeartbeatMsg),
     Flush(Vec<AxisKey>),
+    Halt {
+        keys: Vec<AxisKey>,
+        ack: std::sync::mpsc::SyncSender<()>,
+    },
+    Resume(Vec<AxisKey>),
     DripArm(DripArm),
     DripDisarm(u64),
     Barrier(std::sync::mpsc::SyncSender<()>),
@@ -61,14 +66,20 @@ pub enum PumpMsg {
 #[derive(Debug)]
 pub enum SendError {
     Fatal(String),
+    Halted(String),
     Transient(String),
 }
 
 impl SendError {
-    pub(super) fn retryable_mcu_reject(mcu_id: u32, result: i32) -> Self {
-        Self::Transient(format!(
-            "mcu {mcu_id} rejected PushPieces frame: result {result}"
-        ))
+    pub(super) fn mcu_reject(mcu_id: u32, result: i32) -> Self {
+        let message = format!("mcu {mcu_id} rejected PushPieces frame: result {result}");
+        let halted = result == mcu_protocol::result_codes::STREAM_HALTED
+            || result == mcu_protocol::result_codes::EC_PIECES_WHILE_HALTED;
+        if halted {
+            Self::Halted(message)
+        } else {
+            Self::Transient(message)
+        }
     }
 }
 
@@ -76,10 +87,26 @@ impl std::fmt::Display for SendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Fatal(s) => write!(f, "fatal: {s}"),
+            Self::Halted(s) => write!(f, "halted: {s}"),
             Self::Transient(s) => write!(f, "transient: {s}"),
         }
     }
 }
+
+/// Per-transaction limits the scheduler must respect for one MCU's transport.
+#[derive(Clone, Copy, Debug)]
+pub struct BundleLimits {
+    pub wire_budget: usize,
+    pub pieces_per_axis: usize,
+}
+
+/// Conservative default: a 1 KiB frame is ~20 ms of wire at 500 kbaud, and 32
+/// pieces per axis is the largest frame the slowest MCU foreground has proven
+/// to process without tripping its watchdog stall budget.
+pub const SERIAL_BUNDLE_LIMITS: BundleLimits = BundleLimits {
+    wire_budget: 1024,
+    pieces_per_axis: 32,
+};
 
 pub trait PieceSink: Send {
     fn send_frame(
@@ -90,6 +117,14 @@ pub trait PieceSink: Send {
         new_head: u32,
         room: u32,
     ) -> Result<i32, SendError>;
+
+    /// How much one bundled transaction to `mcu_id` may carry. Transports
+    /// whose round-trip cost is per-transaction rather than per-byte (and
+    /// whose receiver is not a watchdog-policed MCU foreground) override this
+    /// to amortize the round trip.
+    fn bundle_limits(&self, _mcu_id: u32) -> BundleLimits {
+        SERIAL_BUNDLE_LIMITS
+    }
 
     /// Deliver every axis frame destined for `mcu_id` as one bundled
     /// transaction. A whole bundle either lands or it doesn't — the caller

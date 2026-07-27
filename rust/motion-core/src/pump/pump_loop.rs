@@ -58,19 +58,12 @@ pub const PUMP_DATA_CHANNEL_CAP: usize = 128;
 // typical motion, ~1.5× the two-MCU ring cache.
 const PUMP_INTAKE_BACKLOG_CAP: u64 = 4096;
 
-pub(super) const MAX_PER_FRAME: usize = 32;
-
 // How long an axis ring may sit at room()==0 with `q.retired` frozen before the
 // pump treats it as the MCU having stopped retiring pieces rather than a normal
 // transient full-ring wait.
 pub(super) const RETIREMENT_STALL_FATAL: Duration = Duration::from_secs(10);
 
-// A PushPieces bundle occupies the serial line for its whole wire length
-// (~20 ms/KiB at 500 kbaud) while its front piece's arrival lead keeps
-// draining, so the cap must be in bytes — variable-degree entries span
-// 20..=48 B and a count cap is wrong at both ends. send_ready() loops until
-// Idle, so this bounds per-transaction latency, not throughput.
-const BUNDLE_WIRE_BYTE_BUDGET: usize = 1024;
+const INFERRED_HALT_FATAL: Duration = Duration::from_secs(1);
 
 fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
     let staged: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
@@ -97,6 +90,7 @@ pub(super) struct Pump<S> {
     pub(super) queues: BTreeMap<AxisKey, AxisQueue>,
     pub(super) junctions: JunctionTracker,
     pub(super) cohort: Option<DripCohort>,
+    pub(super) halted: BTreeMap<AxisKey, Option<Instant>>,
     pub(super) sink: S,
     pub(super) callbacks: PumpCallbacks,
     pub(super) history: Option<HistoryRecorder>,
@@ -113,6 +107,26 @@ pub(super) struct Pump<S> {
 }
 
 impl<S: PieceSink> Pump<S> {
+    fn halt_keys(&mut self, keys: impl IntoIterator<Item = AxisKey>, inferred: bool) {
+        let inferred_at = inferred.then(Instant::now);
+        for key in keys {
+            if inferred {
+                self.halted.entry(key).or_insert(inferred_at);
+            } else {
+                self.halted.insert(key, None);
+            }
+            if let Some(q) = self.queues.get_mut(&key) {
+                let dropped = q.pieces.len() as u32;
+                q.pieces.clear();
+                q.staged_motion = 0;
+                if dropped > 0 {
+                    (self.callbacks.on_abandon)(key, dropped);
+                }
+            }
+            self.junctions.forget(key);
+        }
+    }
+
     pub(super) fn handle_control_msg(&mut self, msg: PumpMsg) -> bool {
         match msg {
             PumpMsg::Shutdown => return false,
@@ -127,6 +141,15 @@ impl<S: PieceSink> Pump<S> {
                         }
                     }
                     self.junctions.forget(key);
+                }
+            }
+            PumpMsg::Halt { keys, ack } => {
+                self.halt_keys(keys, false);
+                self.pending_barrier_acks.push(ack);
+            }
+            PumpMsg::Resume(keys) => {
+                for key in keys {
+                    self.halted.remove(&key);
                 }
             }
             PumpMsg::Heartbeat(HeartbeatMsg {
@@ -197,6 +220,24 @@ impl<S: PieceSink> Pump<S> {
             lead_secs,
             source_line,
         } = msg;
+        if let Some(inferred_at) = self.halted.get(&key).copied() {
+            let dropped = pieces.len() as u32;
+            if dropped > 0 {
+                (self.callbacks.on_abandon)(key, dropped);
+            }
+            self.junctions.forget(key);
+            if let Some(halted_at) = inferred_at {
+                if halted_at.elapsed() >= INFERRED_HALT_FATAL {
+                    (self.callbacks.on_drip_stall)(format!(
+                        "mcu{} axis{} endpoint halt was not acknowledged by the host within {}ms",
+                        key.mcu_id,
+                        key.axis,
+                        halted_at.elapsed().as_millis()
+                    ));
+                }
+            }
+            return;
+        }
         if let Some(co) = self.cohort.as_ref() {
             if !co.participants.contains(&key) {
                 let id = co.id;
@@ -212,11 +253,6 @@ impl<S: PieceSink> Pump<S> {
         }
         if epoch.position_redefined() {
             self.junctions.forget(key);
-        }
-        if self.cohort.is_some() && !pieces.is_empty() {
-            if let Some((ack_now, freq)) = (self.callbacks.mcu_clock_of)(key.mcu_id) {
-                diag::log_drip_enqueue_lead(key, &pieces, ack_now, freq);
-            }
         }
         if !pieces.is_empty() {
             if let Some((_ack_now, freq)) = (self.callbacks.mcu_clock_of)(key.mcu_id) {
@@ -486,9 +522,6 @@ impl<S: PieceSink> Pump<S> {
     // above host-projection jitter so a healthy print never false-aborts.
     fn guard_pieces_not_in_past(&self, mcu_id: u32, bundle: &[AxisFrame], context: &str) {
         if let Some((mcu_now, freq)) = (self.callbacks.mcu_clock_of)(mcu_id) {
-            if self.cohort.is_some() {
-                diag::log_send_projection(mcu_id, mcu_now, freq, bundle);
-            }
             if freq > 0.0 {
                 let guard_ticks = (pump_past_guard_secs() * freq) as u64;
                 for af in bundle {
@@ -524,10 +557,30 @@ impl<S: PieceSink> Pump<S> {
                                 "[pump-guard] piece already in the MCU's past {context} — failing loud on host before the MCU/endpoint trips -308"
                             );
                             eprintln!(
-                                "pump: piece in past {context} — mcu {mcu_id} axis {} start_time={} mcu_now={mcu_now} deficit_us={deficit_us} — aborting host before MCU -308",
-                                af.axis, piece.start_time
+                                "pump: piece in past {context} — mcu {mcu_id} axis {} start_time={} mcu_now={mcu_now} deficit_us={deficit_us} piece_idx={piece_idx} is_hold={} duration_s={} coeff_count={} queue_lead_secs={queue_lead_secs} queue_pending={queue_pending} queue_staged_motion={queue_staged_motion} cohort_active={} — aborting host before MCU -308",
+                                af.axis,
+                                piece.start_time,
+                                super::sched::is_hold_piece(piece),
+                                f64::from(piece.duration),
+                                piece.coeff_count,
+                                self.cohort.is_some(),
                             );
-                            let _ = std::io::Write::flush(&mut std::io::stderr());
+                            for (queue_key, q) in &self.queues {
+                                let head_start =
+                                    q.pieces.front().map_or(0, |(piece, _)| piece.start_time);
+                                eprintln!(
+                                    "pump-queue: mcu{} axis{} pending={} staged_motion={} pushed={} retired={} ring_depth={} lead_secs={} head_start={head_start}",
+                                    queue_key.mcu_id,
+                                    queue_key.axis,
+                                    q.pieces.len(),
+                                    q.staged_motion,
+                                    q.pushed,
+                                    q.retired,
+                                    q.ring_depth,
+                                    q.lead_secs,
+                                );
+                            }
+                            super::transit_trace::dump_last_to_stderr(64);
                             std::process::abort();
                         }
                     }
@@ -608,15 +661,27 @@ impl<S: PieceSink> Pump<S> {
         }
     }
 
+    // A send pass monopolizes the loop while its synchronous wire round-trips
+    // run (~2 ms per EtherCAT bundle, ~20 ms per 1 KiB serial bundle at
+    // 500 kbaud), while newly produced earlier-deadline pieces for another
+    // axis wait in the data channel (observed: a 130 ms pass aged a z-hop
+    // burst 53 ms into the MCU past). A wall-clock deadline bounds intake and
+    // control latency identically on every transport; the deadline is checked
+    // after each bundle, so every pass sends at least one.
+    const SEND_PASS_BUDGET: Duration = Duration::from_millis(10);
+
     pub(super) fn send_ready(&mut self) -> Result<bool, ()> {
+        self.send_ready_until(Instant::now() + Self::SEND_PASS_BUDGET)
+    }
+
+    pub(super) fn send_ready_until(&mut self, pass_deadline: Instant) -> Result<bool, ()> {
         let mut activity = false;
         loop {
             let sched = {
                 let hz_of = |k: &AxisKey, q: &AxisQueue| self.horizon_of(k, q);
                 schedule(
                     &self.queues,
-                    MAX_PER_FRAME,
-                    BUNDLE_WIRE_BYTE_BUDGET,
+                    |mcu_id| self.sink.bundle_limits(mcu_id),
                     hz_of,
                     |_| usize::MAX,
                 )
@@ -663,6 +728,23 @@ impl<S: PieceSink> Pump<S> {
                             });
                             return Err(());
                         }
+                        Err(SendError::Halted(ref e)) => {
+                            tracing::debug!(
+                                subsystem = "motion",
+                                event = "send_frame_halted",
+                                mcu = mcu_id,
+                                error = %e,
+                                "pump frame met an endpoint halt and was discarded"
+                            );
+                            self.halt_keys(
+                                bundle.iter().map(|frame| AxisKey {
+                                    mcu_id,
+                                    axis: frame.axis,
+                                }),
+                                true,
+                            );
+                            break;
+                        }
                         Err(SendError::Transient(ref e)) => {
                             tracing::error!(
                                 subsystem = "motion",
@@ -681,6 +763,9 @@ impl<S: PieceSink> Pump<S> {
                         }
                     }
                 }
+            }
+            if Instant::now() >= pass_deadline {
+                break;
             }
         }
         Ok(activity)
@@ -753,7 +838,6 @@ impl<S: PieceSink> Pump<S> {
 
     fn run_loop(&mut self, control_rx: &Receiver<PumpMsg>, data_rx: &Receiver<EnqueueMsg>) {
         loop {
-            let poll_ms = self.poll_ms();
             let mut activity = false;
 
             match self.drain_control(control_rx) {
@@ -783,7 +867,7 @@ impl<S: PieceSink> Pump<S> {
                 continue;
             }
 
-            if self.idle_wait(control_rx, data_rx, poll_ms).is_err() {
+            if self.idle_wait(control_rx, data_rx, self.poll_ms()).is_err() {
                 return;
             }
         }
@@ -803,6 +887,7 @@ pub fn run_pump<S: PieceSink>(
         queues: BTreeMap::new(),
         junctions: JunctionTracker::default(),
         cohort: None,
+        halted: BTreeMap::new(),
         sink,
         callbacks,
         history,

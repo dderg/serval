@@ -13,9 +13,11 @@ pub use generated::*;
 
 pub const RUNTIME_CAPS_RESPONSE_BODY_LEN: usize = 4;
 
-/// Usable `PushPieces` payload budget — mirrors `MCU_TX_BUF_SIZE` (256) in
-/// `src/mcu_transport_dispatch.c` minus the sync/len/channel/CRC framing. A
-/// single shared constant compiled into every chip's firmware; keep in sync.
+/// Response-side budget — mirrors `MCU_TX_BUF_SIZE` (256) in
+/// `src/mcu_transport_dispatch.c` minus the sync/len/channel/CRC framing.
+/// It bounds what the MCU can *transmit* in one frame; the PushPieces
+/// receive path (`src/piece_sink.c`) parses as a byte stream and accepts up
+/// to 255 pieces per axis regardless. Keep in sync with the firmware.
 pub const PIECE_FRAME_PAYLOAD_MAX: usize = 250;
 
 /// Bytes of one axis block header (`axis_idx + piece_count + start_slot + new_head`).
