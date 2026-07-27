@@ -565,10 +565,30 @@ impl<S: PieceSink> Pump<S> {
                                 "[pump-guard] piece already in the MCU's past {context} — failing loud on host before the MCU/endpoint trips -308"
                             );
                             eprintln!(
-                                "pump: piece in past {context} — mcu {mcu_id} axis {} start_time={} mcu_now={mcu_now} deficit_us={deficit_us} — aborting host before MCU -308",
-                                af.axis, piece.start_time
+                                "pump: piece in past {context} — mcu {mcu_id} axis {} start_time={} mcu_now={mcu_now} deficit_us={deficit_us} piece_idx={piece_idx} is_hold={} duration_s={} coeff_count={} queue_lead_secs={queue_lead_secs} queue_pending={queue_pending} queue_staged_motion={queue_staged_motion} cohort_active={} — aborting host before MCU -308",
+                                af.axis,
+                                piece.start_time,
+                                super::sched::is_hold_piece(piece),
+                                f64::from(piece.duration),
+                                piece.coeff_count,
+                                self.cohort.is_some(),
                             );
-                            let _ = std::io::Write::flush(&mut std::io::stderr());
+                            for (queue_key, q) in &self.queues {
+                                let head_start =
+                                    q.pieces.front().map_or(0, |(piece, _)| piece.start_time);
+                                eprintln!(
+                                    "pump-queue: mcu{} axis{} pending={} staged_motion={} pushed={} retired={} ring_depth={} lead_secs={} head_start={head_start}",
+                                    queue_key.mcu_id,
+                                    queue_key.axis,
+                                    q.pieces.len(),
+                                    q.staged_motion,
+                                    q.pushed,
+                                    q.retired,
+                                    q.ring_depth,
+                                    q.lead_secs,
+                                );
+                            }
+                            super::transit_trace::dump_last_to_stderr(64);
                             std::process::abort();
                         }
                     }

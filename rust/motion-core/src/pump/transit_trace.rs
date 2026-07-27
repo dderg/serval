@@ -121,6 +121,13 @@ pub(super) fn snapshot_last(limit: u64) -> Vec<TransitTraceRecord> {
         .collect()
 }
 
+pub(super) fn dump_last_to_stderr(limit: u64) {
+    for record in snapshot_last(limit) {
+        eprintln!("pump-transit: {record:?}");
+    }
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+}
+
 pub(super) fn transport_error_result() -> i32 {
     TRANSPORT_ERROR_RESULT
 }
