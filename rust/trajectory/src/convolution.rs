@@ -64,6 +64,12 @@ pub struct ShapedSignal<'a> {
     /// Reusable cut buffer for `convolve` — the merge of kernel-piece
     /// boundaries and in-window input breaks, rebuilt on every call.
     cuts: std::cell::RefCell<Vec<f64>>,
+    /// Recent `(t, (p, v, a))` results: adjacent fit spans share boundary
+    /// times (a segment's end is the next segment's start, and bisection
+    /// re-evaluates its parent's endpoints), so a tiny exact-`t` memo removes
+    /// whole convolution passes without changing any computed value.
+    pva_memo: std::cell::RefCell<[Option<(u64, (f64, f64, f64))>; 4]>,
+    pva_memo_next: std::cell::Cell<usize>,
     kernel: &'a PiecewisePolynomialKernel,
     /// `k′` and `k″` as piecewise polynomials over the same support, plus the
     /// jump of `k′` at each internal piece boundary (a delta in `k″` — the
@@ -132,6 +138,8 @@ impl<'a> ShapedSignal<'a> {
             eval_input: Box::new(eval),
             input_breaks,
             cuts: std::cell::RefCell::new(Vec::new()),
+            pva_memo: std::cell::RefCell::new([None; 4]),
+            pva_memo_next: std::cell::Cell::new(0),
             kernel,
             d_kernel,
             dd_kernel,
@@ -168,6 +176,16 @@ impl<'a> ShapedSignal<'a> {
     /// Accumulation mirrors `convolve` op for op, so each component is
     /// bit-identical to the separate `eval`/`deriv`/`second_deriv` calls.
     pub fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let key = t.to_bits();
+        if let Some(hit) = self
+            .pva_memo
+            .borrow()
+            .iter()
+            .flatten()
+            .find(|(bits, _)| *bits == key)
+        {
+            return hit.1;
+        }
         let mut cuts = self.cuts.borrow_mut();
         self.merge_cuts(t, &mut cuts);
 
@@ -202,6 +220,11 @@ impl<'a> ShapedSignal<'a> {
         }
         for &(tau, jump) in &self.d_kernel_jumps {
             a += jump * (self.eval_input)(t - tau);
+        }
+        {
+            let slot = self.pva_memo_next.get();
+            self.pva_memo.borrow_mut()[slot] = Some((key, (p, v, a)));
+            self.pva_memo_next.set((slot + 1) % 4);
         }
         (p, v, a)
     }

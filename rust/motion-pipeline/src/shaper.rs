@@ -637,6 +637,7 @@ pub(crate) struct AxisSignalTable {
     last_t: f64,
     at_stream_boundary: bool,
     force: bool,
+    cursor: std::cell::Cell<usize>,
 }
 
 impl AxisSignalTable {
@@ -672,6 +673,7 @@ impl AxisSignalTable {
             last_t,
             at_stream_boundary,
             force,
+            cursor: std::cell::Cell::new(0),
         };
         for track in tracks {
             for p in extract_bezier_pieces(track) {
@@ -705,10 +707,14 @@ impl AxisSignalTable {
             }
             return self.piece_at(self.coeffs.len() - 1, self.last_t);
         }
-        let i = self
-            .ends
-            .partition_point(|&e| e + SEGMENT_TIME_EPS_S < t)
-            .min(self.coeffs.len() - 1);
+        let mut i = self.cursor.get().min(self.coeffs.len() - 1);
+        while i > 0 && self.ends[i - 1] + SEGMENT_TIME_EPS_S >= t {
+            i -= 1;
+        }
+        while i + 1 < self.coeffs.len() && self.ends[i] + SEGMENT_TIME_EPS_S < t {
+            i += 1;
+        }
+        self.cursor.set(i);
         if t >= self.starts[i] - SEGMENT_TIME_EPS_S {
             return self.piece_at(i, t);
         }
@@ -860,6 +866,9 @@ fn shaped_ladder<S: TrackSignal>(
         acc: Vec::with_capacity(LADDER_PROBES_U.len()),
     };
     for &u in &LADDER_FIT_NODES_U {
+        if u == 0.0 {
+            continue;
+        }
         truth.pos.push((u, finite_sample(axis, sig, t_of(u))?));
     }
     for &u in &LADDER_PROBES_U {
