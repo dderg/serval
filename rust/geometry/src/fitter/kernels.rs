@@ -3,7 +3,7 @@ use crate::path::lowering::PositionProfile;
 use crate::path::{Arc, Clothoid, CurvatureProfile, Line};
 use crate::segment::FollowerDemand;
 
-use super::vec3::{cross, dot, normalize, sub, turn_normal};
+use super::vec3::{cross, dot, norm, normalize, scale, sub, turn_normal};
 use super::{BUDGET_EPS_MM, FitError, internal, line_of};
 
 mod circle;
@@ -79,7 +79,9 @@ pub(super) fn reconstruct(
     let p1 = last.point_at(last.s_len());
     let welded =
         |travel_len: Option<f64>| travel_len.is_some_and(|len| len > fit.residual + BUDGET_EPS_MM);
-    let anchored = match (welded(head_travel_len), welded(tail_travel_len)) {
+    let head_welded = welded(head_travel_len);
+    let tail_welded = welded(tail_travel_len);
+    let anchored = match (head_welded, tail_welded) {
         (true, true) => Some((fit.origin, fit.radius)),
         (false, true) => circle::center_through_vertex(p0, fit.origin, fit.radius),
         (true, false) => circle::center_through_vertex(p1, fit.origin, fit.radius),
@@ -91,8 +93,14 @@ pub(super) fn reconstruct(
     if circle::max_radial_dev(&lines, origin, rho) > tol {
         return Ok(None);
     }
+    let Some(plane_normal) =
+        anchored_plane_normal(plane_normal, origin, p0, p1, head_welded, tail_welded)
+    else {
+        return Ok(None);
+    };
 
-    let u = normalize(sub(lines[0].start, origin));
+    let r0 = sub(p0, origin);
+    let u = normalize(sub(r0, scale(plane_normal, dot(r0, plane_normal))));
     let v = cross(plane_normal, u);
     let mut sweep = 0.0_f64;
     let mut prev = sub(lines[0].start, origin);
@@ -100,6 +108,12 @@ pub(super) fn reconstruct(
         let cur = sub(l.point_at(l.s_len()), origin);
         sweep += libm::atan2(dot(cross(prev, cur), plane_normal), dot(prev, cur));
         prev = cur;
+    }
+    if !tail_welded {
+        let r1 = sub(p1, origin);
+        let theta = libm::atan2(dot(r1, v), dot(r1, u));
+        let tau = 2.0 * std::f64::consts::PI;
+        sweep = theta + tau * libm::round((sweep - theta) / tau);
     }
     if !(sweep.is_finite() && sweep.abs() > ANGLE_EPS_RAD) {
         return Ok(None);
@@ -122,4 +136,34 @@ pub(super) fn reconstruct(
         head_line_trim: 0.0,
         tail_line_trim: 0.0,
     }))
+}
+
+const PLANE_TILT_COS_MIN: f64 = 1.0 - 1e-6;
+
+fn anchored_plane_normal(
+    n: [f64; 3],
+    origin: [f64; 3],
+    p0: [f64; 3],
+    p1: [f64; 3],
+    head_welded: bool,
+    tail_welded: bool,
+) -> Option<[f64; 3]> {
+    let reject = |r: [f64; 3]| {
+        let rr = normalize(r);
+        normalize(sub(n, scale(rr, dot(n, rr))))
+    };
+    let candidate = match (head_welded, tail_welded) {
+        (true, true) => return Some(n),
+        (true, false) => reject(sub(p1, origin)),
+        (false, true) => reject(sub(p0, origin)),
+        (false, false) => {
+            let c = cross(sub(p0, origin), sub(p1, origin));
+            if norm(c) == 0.0 {
+                return None;
+            }
+            let c = normalize(c);
+            if dot(c, n) < 0.0 { scale(c, -1.0) } else { c }
+        }
+    };
+    (dot(candidate, n) > PLANE_TILT_COS_MIN).then_some(candidate)
 }

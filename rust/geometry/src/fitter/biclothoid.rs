@@ -596,6 +596,9 @@ fn hermite_g2_hinted(
                 x[1] * chord,
                 x[2] * chord,
             )?;
+            if dist(pair_end(&pair).0, p_b) > super::SEAM_CLOSURE_EPS_MM {
+                continue;
+            }
             return Some((pair, x));
         }
     }
