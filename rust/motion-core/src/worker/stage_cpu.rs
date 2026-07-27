@@ -79,7 +79,7 @@ fn run(frontier: &Weak<CommittedFrontier>) {
             if let Some(prev) = previous.insert(comm.clone(), ticks) {
                 let busy_ms = (ticks.saturating_sub(prev)) * 1000 / USER_HZ;
                 let busy_pct = busy_ms as f64 / SAMPLE_PERIOD.as_millis() as f64 * 100.0;
-                tracing::info!(
+                tracing::warn!(
                     subsystem = "motion",
                     event = "stage_cpu",
                     stage = %comm,
