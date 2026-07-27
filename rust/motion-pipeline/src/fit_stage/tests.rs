@@ -524,3 +524,47 @@ fn quantized_concentric_arcs_share_a_center_at_high_corner_deviation() {
         }
     }
 }
+
+/// Repro of a bench crash (Trident, Voron cube, 2026-07-27): the fit stage
+/// itself panicked `discontinuous geometry` with a 0.000337mm seam gap
+/// dominated by Z. Mechanism: `reconstruct` fixes the arc plane from the
+/// first two facet headings only, so a sub-micron Z step at the run entry
+/// tilts the plane, and evaluating the arc endpoint on that tilted circle —
+/// instead of re-anchoring it to the raw seam vertex — levers the tilt by
+/// the radius into a first-order out-of-plane miss at the far seam.
+///
+/// `should_panic` pins the current failure; the fix turns this into a plain
+/// contiguity assertion on the emitted stream.
+#[test]
+#[should_panic(expected = "discontinuous geometry")]
+fn entry_z_step_tilts_arc_plane_and_breaks_seam_contiguity() {
+    let (r, c, n) = (20.0_f64, [50.0_f64, 50.0], 400_u32);
+    let (z_layer, z_step) = (38.15, 1e-4);
+    let first_facet_angle = std::f64::consts::PI * (1.0 + 1.5 / f64::from(n));
+    let z_of = |a: f64| {
+        if a < first_facet_angle {
+            z_layer + z_step
+        } else {
+            z_layer
+        }
+    };
+    let mut moves = Vec::new();
+    let mut prev = [10.0, 50.0, z_of(std::f64::consts::PI)];
+    for i in 0..4u32 {
+        let end = [15.0 + 5.0 * f64::from(i), 50.0, prev[2]];
+        moves.push(line(i + 1, prev, end, 0.3));
+        prev = end;
+    }
+    for i in 1..=n {
+        let a = std::f64::consts::PI * (1.0 + f64::from(i) / f64::from(n));
+        let end = [c[0] + r * libm::cos(a), c[1] + r * libm::sin(a), z_of(a)];
+        moves.push(line(4 + i, prev, end, 0.3));
+        prev = end;
+    }
+    for i in 0..4u32 {
+        let end = [prev[0] + 5.0 + 5.0 * f64::from(i), prev[1], prev[2]];
+        moves.push(line(405 + i, prev, end, 0.3));
+        prev = end;
+    }
+    run_fit_stage(&moves, CornerFitConfig::default());
+}
