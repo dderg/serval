@@ -23,7 +23,7 @@ pub use move_ops::{
 };
 pub use runfit::RunFit;
 
-use emit::{BUDGET_EPS_MM, internal};
+use emit::{BUDGET_EPS_MM, SEAM_CLOSURE_EPS_MM, internal};
 use move_ops::line_of;
 
 pub(crate) const TURN_NORMAL_EPS: f64 = 1e-9;

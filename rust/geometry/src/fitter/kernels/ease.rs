@@ -423,6 +423,10 @@ fn build_spiral(
     let a = sub(origin, g.center);
     let b = add(a, g.end);
     let line_trim = dot(sub(p.vertex, a), p.spiral_dir);
+    let off_line = sub(sub(p.vertex, a), scale(p.spiral_dir, line_trim));
+    if norm(off_line) > super::super::SEAM_CLOSURE_EPS_MM {
+        return Ok(None);
+    }
     let clo = Clothoid::try_new(a, p.spiral_dir, g.v, 0.0, g.sigma, g.length)?;
     Ok(Some((clo, b, line_trim)))
 }

@@ -525,11 +525,8 @@ fn quantized_concentric_arcs_share_a_center_at_high_corner_deviation() {
     }
 }
 
-// TODO: fix reconstruct() to re-anchor the arc endpoint to the raw seam
-// vertex, then drop should_panic and assert contiguity of the emitted stream.
 #[test]
-#[should_panic(expected = "discontinuous geometry")]
-fn entry_z_step_tilts_arc_plane_and_breaks_seam_contiguity() {
+fn entry_z_step_keeps_seam_contiguity() {
     let (r, c, n) = (20.0_f64, [50.0_f64, 50.0], 400_u32);
     let (z_layer, z_step) = (38.15, 1e-4);
     let first_facet_angle = std::f64::consts::PI * (1.0 + 1.5 / f64::from(n));

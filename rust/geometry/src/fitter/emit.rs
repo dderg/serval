@@ -9,6 +9,7 @@ use super::move_ops::line_of;
 use super::{FitError, biclothoid, biclothoid_followers};
 
 pub(super) const BUDGET_EPS_MM: f64 = 1e-9;
+pub(super) const SEAM_CLOSURE_EPS_MM: f64 = 1e-7;
 /// Over-trim beyond this is a real overlap of two neighbors' claims, not
 /// floating-point noise — the same order as the pipeline's position-contiguity
 /// tolerance at ingress.
