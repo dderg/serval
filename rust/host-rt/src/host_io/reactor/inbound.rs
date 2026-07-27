@@ -204,6 +204,7 @@ impl Reactor {
                     tracing::warn!(
                         subsystem = "mcu-comms",
                         event = "kalico_stream_error",
+                        mcu = %self.mcu_label,
                         error = %e,
                         "kalico stream error"
                     );
@@ -215,6 +216,7 @@ impl Reactor {
                                 tracing::error!(
                                     subsystem = "mcu-comms",
                                     event = "inbound_frame_fatal",
+                                    mcu = %self.mcu_label,
                                     error = ?e,
                                     "inbound frame handling failed (ack/retransmit write?) — \
                                      closing transport"
@@ -242,6 +244,7 @@ impl Reactor {
                     tracing::warn!(
                         subsystem = "mcu-comms",
                         event = "usb_drop_phantom_zero",
+                        mcu = %self.mcu_label,
                         silence_ms = %silence_ms,
                         since_write_ms = %since_write_ms,
                         consec_zero = self.zero_byte_consec,
@@ -268,6 +271,7 @@ impl Reactor {
                 tracing::warn!(
                     subsystem = "mcu-comms",
                     event = "usb_drop_poll_error",
+                    mcu = %self.mcu_label,
                     silence_ms = %silence_ms,
                     since_write_ms = %since_write_ms,
                     consec_zero = self.zero_byte_consec,

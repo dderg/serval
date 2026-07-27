@@ -8,31 +8,6 @@ use super::{
     report_ethercat_endpoint_death, resolve_motion_caps,
 };
 use crate::lock_ext::LockExt;
-const ETHERCAT_RETIREMENT_FORWARD_INTERVAL: Duration = Duration::from_millis(5);
-
-pub(super) struct RetirementForwardGate {
-    interval: Duration,
-    last_forwarded_at: Mutex<Option<Instant>>,
-}
-
-impl RetirementForwardGate {
-    pub(super) fn new(interval: Duration) -> Self {
-        Self {
-            interval,
-            last_forwarded_at: Mutex::new(None),
-        }
-    }
-
-    pub(super) fn admit(&self, now: Instant) -> bool {
-        let mut last = self.last_forwarded_at.lock_ok();
-        if last.is_some_and(|prior| now.duration_since(prior) < self.interval) {
-            return false;
-        }
-        *last = Some(now);
-        true
-    }
-}
-
 fn escalate_endpoint_death(latch: &Arc<Mutex<HashMap<u32, String>>>, mcu_id: u32, reason: &str) {
     if report_ethercat_endpoint_death(latch, mcu_id, reason) {
         arm_endpoint_death_watchdog(Arc::clone(latch), mcu_id);
@@ -472,7 +447,6 @@ impl PyMotionEngine {
                 latched_drive_fault: Arc::clone(&self.latched.drive),
                 pump_tx: pump_control.clone(),
                 slot_axes,
-                forward_gate: RetirementForwardGate::new(ETHERCAT_RETIREMENT_FORWARD_INTERVAL),
             };
             conn.attach_heartbeat_callback(Arc::new(
                 move |hb: &mcu_protocol::messages::StatusHeartbeat| supervisor.on_heartbeat(hb),
@@ -541,23 +515,19 @@ fn forward_retired_heartbeat(
     }));
 }
 
-struct EthercatHeartbeatSupervisor {
-    mcu_id: u32,
-    mcu_label: String,
-    homing: Arc<HomingState>,
-    latched_drive_fault: Arc<Mutex<HashMap<u32, u16>>>,
-    pump_tx: crossbeam_channel::Sender<crate::pump::PumpMsg>,
-    slot_axes: Vec<usize>,
-    forward_gate: RetirementForwardGate,
+pub(super) struct EthercatHeartbeatSupervisor {
+    pub(super) mcu_id: u32,
+    pub(super) mcu_label: String,
+    pub(super) homing: Arc<HomingState>,
+    pub(super) latched_drive_fault: Arc<Mutex<HashMap<u32, u16>>>,
+    pub(super) pump_tx: crossbeam_channel::Sender<crate::pump::PumpMsg>,
+    pub(super) slot_axes: Vec<usize>,
 }
 
 impl EthercatHeartbeatSupervisor {
-    fn on_heartbeat(&self, hb: &mcu_protocol::messages::StatusHeartbeat) {
+    pub(super) fn on_heartbeat(&self, hb: &mcu_protocol::messages::StatusHeartbeat) {
         if hb.fault_code != 0 {
             self.on_drive_fault(hb.fault_code);
-            return;
-        }
-        if !self.forward_gate.admit(Instant::now()) {
             return;
         }
         forward_retired_heartbeat(

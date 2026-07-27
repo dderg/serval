@@ -2,7 +2,6 @@ use crate::lock_ext::LockExt;
 use std::os::unix::io::FromRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
 
 use host_rt::host_io::{McuHostIo, McuHostIoConfig};
 use host_rt::mcu_serial_conn::McuSerialConn;
@@ -11,7 +10,6 @@ use crate::config::PlannerConfig;
 use crate::worker::{DispatchError, StreamWorkerHandle};
 use trajectory::ShapedSegment;
 
-use super::pipeline_setup::RetirementForwardGate;
 use super::{McuConnection, PyMotionEngine};
 
 fn open_pty() -> (libc::c_int, String) {
@@ -284,15 +282,64 @@ fn stream_config_from(cfg: &PlannerConfig) -> (motion_pipeline::StreamConfig, Ve
     (sc, vec![0.0; cfg.axis_registry.n_axes().max(3)])
 }
 
-#[test]
-fn retirement_forward_gate_samples_latest_state_at_bounded_cadence() {
-    let interval = Duration::from_millis(5);
-    let gate = RetirementForwardGate::new(interval);
-    let started = Instant::now();
+fn heartbeat_supervisor(
+    pump_tx: crossbeam_channel::Sender<crate::pump::PumpMsg>,
+) -> super::pipeline_setup::EthercatHeartbeatSupervisor {
+    super::pipeline_setup::EthercatHeartbeatSupervisor {
+        mcu_id: 2,
+        mcu_label: "drive".into(),
+        homing: Arc::default(),
+        latched_drive_fault: Arc::default(),
+        pump_tx,
+        slot_axes: vec![0, 1],
+    }
+}
 
-    assert!(gate.admit(started));
-    assert!(!gate.admit(started + Duration::from_millis(1)));
-    assert!(gate.admit(started + interval));
+/// The per-cycle heartbeat is the pump loop's pacemaker: coalescing it in
+/// time (87e64bf37's 5ms RetirementForwardGate) reshaped PushPieces sends
+/// into bursts the H723's USB did not survive, crashing every print at
+/// first homing. Back-to-back fault-free heartbeats must forward 1:1.
+#[test]
+fn every_fault_free_retirement_heartbeat_reaches_the_pump() {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let supervisor = heartbeat_supervisor(tx);
+    let heartbeats = 100u32;
+    for i in 0..heartbeats {
+        supervisor.on_heartbeat(&mcu_protocol::messages::StatusHeartbeat {
+            engine_state: 1,
+            fault_code: 0,
+            retired_counts: vec![i, i],
+            ff_saturation_count: 0,
+        });
+    }
+    let forwarded: Vec<_> = rx.try_iter().collect();
+    assert_eq!(
+        forwarded.len() as u32,
+        heartbeats,
+        "heartbeats must forward 1:1 without time-based coalescing"
+    );
+    let crate::pump::PumpMsg::Heartbeat(last) = forwarded.last().unwrap() else {
+        panic!("supervisor forwards PumpMsg::Heartbeat");
+    };
+    assert_eq!(last.mcu_id, 2);
+    assert_eq!(last.retired_counts, vec![heartbeats - 1, heartbeats - 1]);
+}
+
+#[test]
+fn fault_heartbeat_is_latched_not_forwarded() {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let supervisor = heartbeat_supervisor(tx);
+    supervisor.on_heartbeat(&mcu_protocol::messages::StatusHeartbeat {
+        engine_state: 1,
+        fault_code: 314,
+        retired_counts: vec![1, 1],
+        ff_saturation_count: 0,
+    });
+    assert!(rx.try_iter().next().is_none());
+    assert_eq!(
+        supervisor.latched_drive_fault.lock_ok().get(&2).copied(),
+        Some(314)
+    );
 }
 
 #[test]
