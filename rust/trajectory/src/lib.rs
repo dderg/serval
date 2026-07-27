@@ -4,7 +4,7 @@ mod convolution;
 mod kernel;
 
 pub use chain::{
-    AxisChainSet, ChainStage, CompiledChain, NonlinearAdvance, PostProcessorError,
+    AdvanceModel, AxisChainSet, ChainStage, CompiledChain, NonlinearAdvance, PostProcessorError,
     PostProcessorInstance,
 };
 pub use convolution::ShapedSignal;

@@ -409,7 +409,17 @@ fn all_post_processor_types_are_reachable() {
         ("smooth_mzv", [("frequency_hz", 40.0)].as_slice(), "x"),
         ("linear_pressure_advance", [("k", 0.04)].as_slice(), "e"),
         (
-            "nonlinear_pressure_advance",
+            "tanh_pressure_advance",
+            [
+                ("linear_advance", 0.02),
+                ("nonlinear_offset", 0.05),
+                ("linearization_velocity", 20.0),
+            ]
+            .as_slice(),
+            "e",
+        ),
+        (
+            "recipr_pressure_advance",
             [
                 ("linear_advance", 0.02),
                 ("nonlinear_offset", 0.05),
