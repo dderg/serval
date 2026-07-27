@@ -91,7 +91,22 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
                 correlation_id,
                 msg,
             } => {
-                handle_push_pieces(ctx, correlation_id, msg);
+                let spans = handle_push_pieces(ctx, correlation_id, &msg);
+                let free_start = std::time::Instant::now();
+                ctx.reclaim.dispose(msg);
+                let free_ns = free_start.elapsed().as_nanos() as i64;
+                if cmd_started.elapsed().as_nanos() > DISPATCH_BUDGET_NS {
+                    tracing::warn!(
+                        subsystem = "ethercat",
+                        event = "slow_push_pieces",
+                        plan_ns = spans.plan_ns,
+                        copy_ns = spans.copy_ns,
+                        respond_ns = spans.respond_ns,
+                        free_ns,
+                        "PushPieces exceeded the dispatch budget — per-segment \
+                         attribution of the stall"
+                    );
+                }
             }
             Command::QueryRuntimeCaps { correlation_id } => {
                 // Capacity is per distinct axis, not per slave: an AWD axis
@@ -257,8 +272,19 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
     ControlFlow::Continue(())
 }
 
-fn handle_push_pieces(ctx: &mut EndpointCtx, correlation_id: u32, msg: PushPieces) {
+struct PushPiecesSpans {
+    plan_ns: i64,
+    copy_ns: i64,
+    respond_ns: i64,
+}
+
+fn handle_push_pieces(
+    ctx: &mut EndpointCtx,
+    correlation_id: u32,
+    msg: &PushPieces,
+) -> PushPiecesSpans {
     let now_ns = monotonic_ns();
+    let plan_start = std::time::Instant::now();
     let diags: Vec<(u8, u64)> = msg
         .axes
         .iter()
@@ -271,29 +297,38 @@ fn handle_push_pieces(ctx: &mut EndpointCtx, correlation_id: u32, msg: PushPiece
             (a.axis_idx, front_start_time)
         })
         .collect();
-    let result = if ctx.gate.state() == TorqueState::Faulted {
-        ERR_PIECES_WHILE_FAULTED
+    let mut result = 0i32;
+    let mut planned = None;
+    if ctx.gate.state() == TorqueState::Faulted {
+        result = ERR_PIECES_WHILE_FAULTED;
     } else if let Err(code) = ctx.stream_halt.check_push_allowed() {
-        code
+        result = code;
     } else {
         match plan_bundle(&msg.axes, &ctx.slave_axes, |slot| ctx.rings[slot].free()) {
-            Ok(slots) => {
-                for (axis, axis_slots) in msg.axes.iter().zip(slots.iter()) {
-                    for &slot in axis_slots {
-                        ctx.rings[slot].push_from_bytes(axis.piece_count, &axis.pieces_bytes);
-                    }
-                }
-                0
-            }
-            Err(code) => code,
+            Ok(slots) => planned = Some(slots),
+            Err(code) => result = code,
         }
-    };
+    }
+    let copy_start = std::time::Instant::now();
+    if let Some(slots) = planned {
+        for (axis, axis_slots) in msg.axes.iter().zip(slots.iter()) {
+            for &slot in axis_slots {
+                ctx.rings[slot].push_from_bytes(axis.piece_count, &axis.pieces_bytes);
+            }
+        }
+    }
+    let respond_start = std::time::Instant::now();
     ctx.server.respond(&push_pieces_response_frame_multi(
         correlation_id,
         result,
         now_ns,
         &diags,
     ));
+    PushPiecesSpans {
+        plan_ns: (copy_start - plan_start).as_nanos() as i64,
+        copy_ns: (respond_start - copy_start).as_nanos() as i64,
+        respond_ns: respond_start.elapsed().as_nanos() as i64,
+    }
 }
 
 pub(super) fn handle_set_torque(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetTorque) {

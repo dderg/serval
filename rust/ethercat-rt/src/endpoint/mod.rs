@@ -76,6 +76,7 @@ pub struct EndpointCtx {
     gate: TorqueGate,
     capture: Capture,
     live_tap: LiveTap,
+    reclaim: crate::reclaim::Reclaim,
     tap_slots: Vec<u8>,
     cycle_index: u64,
     mailbox: MailboxWorker,

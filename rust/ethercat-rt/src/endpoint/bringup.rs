@@ -303,13 +303,14 @@ pub fn bringup(args: Args) -> EndpointCtx {
     let last_sent_retired: u32 = 0;
     let heartbeat_sent = false;
 
-    // The capture-io and live-tap thread spawns and their record-channel
+    // The capture-io, live-tap, and reclaim thread spawns and their ring
     // buffers are multi-millisecond stalls under mlockall(MCL_FUTURE); they
     // must happen before ec_rt_bringup_preop, while no drive is DC-synced
     // and no park cycle is being pumped on this thread (claim-time
     // Capture::new stalled the park loop past the sync watchdog and halted
     // the bus at every claim, bench 2026-07-06).
     let capture = Capture::new();
+    let reclaim = crate::reclaim::Reclaim::spawn();
     let live_tap = LiveTap::spawn(
         &format!("{socket}.live"),
         live_tap::slot_configs(
@@ -522,6 +523,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
         gate,
         capture,
         live_tap,
+        reclaim,
         tap_slots,
         cycle_index,
         mailbox,
