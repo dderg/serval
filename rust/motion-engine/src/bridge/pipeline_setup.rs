@@ -515,17 +515,17 @@ fn forward_retired_heartbeat(
     }));
 }
 
-struct EthercatHeartbeatSupervisor {
-    mcu_id: u32,
-    mcu_label: String,
-    homing: Arc<HomingState>,
-    latched_drive_fault: Arc<Mutex<HashMap<u32, u16>>>,
-    pump_tx: crossbeam_channel::Sender<crate::pump::PumpMsg>,
-    slot_axes: Vec<usize>,
+pub(super) struct EthercatHeartbeatSupervisor {
+    pub(super) mcu_id: u32,
+    pub(super) mcu_label: String,
+    pub(super) homing: Arc<HomingState>,
+    pub(super) latched_drive_fault: Arc<Mutex<HashMap<u32, u16>>>,
+    pub(super) pump_tx: crossbeam_channel::Sender<crate::pump::PumpMsg>,
+    pub(super) slot_axes: Vec<usize>,
 }
 
 impl EthercatHeartbeatSupervisor {
-    fn on_heartbeat(&self, hb: &mcu_protocol::messages::StatusHeartbeat) {
+    pub(super) fn on_heartbeat(&self, hb: &mcu_protocol::messages::StatusHeartbeat) {
         if hb.fault_code != 0 {
             self.on_drive_fault(hb.fault_code);
             return;
