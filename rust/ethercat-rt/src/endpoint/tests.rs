@@ -249,6 +249,7 @@ fn test_ctx_with_drive(name: &str, drive: impl DriveChain + 'static) -> Endpoint
             CYCLE_NS as i64,
         )
         .expect("bind test tap socket"),
+        reclaim: crate::reclaim::Reclaim::spawn(),
         tap_slots: (0..NUM_SLAVES as u8).collect(),
         cycle_index: 0,
         mailbox: MailboxWorker::spawn(NoSdo, |_, _, _| 0, WorkerScheduling::Normal),

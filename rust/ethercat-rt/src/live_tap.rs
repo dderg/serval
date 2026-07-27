@@ -8,18 +8,20 @@
 //! long as the client stays connected. One client at a time; the next
 //! connect is served after the current one goes away.
 //!
-//! The DC thread pushes through a bounded preallocated channel and never
-//! blocks: when the tap thread or its client can't keep up, records are
-//! dropped and counted, and the stream self-describes the gap through the
-//! `cycle_index` jump — the viewer renders a gap instead of stale data
-//! pretending to be live. A slow client is disconnected by write timeout
-//! rather than allowed to stall the drain.
+//! The DC thread pushes through a bounded preallocated rtrb ring and never
+//! blocks or waits: an mpsc `try_send` takes the receiver-waker mutex while
+//! the tap thread is parked, which stalled the FIFO-80 DC thread for 358 µs
+//! on the 2026-07-27 bench and parked the drives — rtrb push is wait-free.
+//! When the tap thread or its client can't keep up, records are dropped and
+//! counted, and the stream self-describes the gap through the `cycle_index`
+//! jump — the viewer renders a gap instead of stale data pretending to be
+//! live. A slow client is disconnected by write timeout rather than allowed
+//! to stall the drain.
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -35,7 +37,8 @@ use crate::thread_prio::demote_to_normal_scheduling;
 /// is the correct outcome.
 pub const LIVE_TAP_RING_CAPACITY: usize = 4096;
 const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_millis(200);
-const RECV_TIMEOUT: Duration = Duration::from_millis(100);
+const IDLE_POLL: Duration = Duration::from_millis(100);
+const CLIENT_POLL: Duration = Duration::from_millis(1);
 const TAP_THREAD_STACK: usize = 512 * 1024;
 
 /// One tap drive per slave slot, named `slot<N>` — logical motor names
@@ -62,7 +65,7 @@ pub fn slot_configs(
 pub struct LiveTap {
     subscribed: Arc<AtomicBool>,
     dropped: Arc<AtomicU64>,
-    tx: SyncSender<CaptureRecord>,
+    tx: Option<rtrb::Producer<CaptureRecord>>,
     service: Option<JoinHandle<()>>,
 }
 
@@ -83,7 +86,7 @@ impl LiveTap {
         std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o666))?;
         let subscribed = Arc::new(AtomicBool::new(false));
         let dropped = Arc::new(AtomicU64::new(0));
-        let (tx, rx) = sync_channel(LIVE_TAP_RING_CAPACITY);
+        let (tx, mut rx) = rtrb::RingBuffer::new(LIVE_TAP_RING_CAPACITY);
         let thread_subscribed = Arc::clone(&subscribed);
         let thread_dropped = Arc::clone(&dropped);
         let service = std::thread::Builder::new()
@@ -92,7 +95,7 @@ impl LiveTap {
             .spawn(move || {
                 service_loop(
                     &listener,
-                    &rx,
+                    &mut rx,
                     &thread_subscribed,
                     &thread_dropped,
                     &drives,
@@ -102,7 +105,7 @@ impl LiveTap {
         Ok(Self {
             subscribed,
             dropped,
-            tx,
+            tx: Some(tx),
             service: Some(service),
         })
     }
@@ -111,23 +114,22 @@ impl LiveTap {
         self.subscribed.load(Ordering::Relaxed)
     }
 
-    /// DC-thread side: never blocks, never allocates. Full channel means
-    /// the reader is behind; the record is dropped and the gap shows up in
-    /// the client's `cycle_index` sequence.
-    pub fn push(&self, record: CaptureRecord) {
-        match self.tx.try_send(record) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
-            }
+    /// DC-thread side: wait-free, never allocates. Full ring means the
+    /// reader is behind; the record is dropped and the gap shows up in the
+    /// client's `cycle_index` sequence.
+    pub fn push(&mut self, record: CaptureRecord) {
+        let Some(tx) = self.tx.as_mut() else {
+            return;
+        };
+        if tx.push(record).is_err() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
 
 impl Drop for LiveTap {
     fn drop(&mut self) {
-        let (sink, _) = sync_channel(1);
-        let _ = std::mem::replace(&mut self.tx, sink);
+        self.tx = None;
         if let Some(service) = self.service.take() {
             let _ = service.join();
         }
@@ -149,7 +151,7 @@ enum SessionEnd {
 
 fn service_loop(
     listener: &UnixListener,
-    rx: &Receiver<CaptureRecord>,
+    rx: &mut rtrb::Consumer<CaptureRecord>,
     subscribed: &AtomicBool,
     dropped: &AtomicU64,
     drives: &[CaptureDriveConfig],
@@ -166,10 +168,11 @@ fn service_loop(
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                match rx.recv_timeout(RECV_TIMEOUT) {
-                    Ok(_) | Err(RecvTimeoutError::Timeout) => {}
-                    Err(RecvTimeoutError::Disconnected) => return,
+                while rx.pop().is_ok() {}
+                if rx.is_abandoned() && rx.is_empty() {
+                    return;
                 }
+                std::thread::sleep(IDLE_POLL);
             }
             Err(e) => {
                 tracing::error!(
@@ -186,7 +189,7 @@ fn service_loop(
 
 fn serve_client(
     stream: UnixStream,
-    rx: &Receiver<CaptureRecord>,
+    rx: &mut rtrb::Consumer<CaptureRecord>,
     subscribed: &AtomicBool,
     dropped: &AtomicU64,
     drives: &[CaptureDriveConfig],
@@ -204,7 +207,7 @@ fn serve_client(
     if stream.write_all(header.as_bytes()).is_err() {
         return SessionEnd::ClientGone;
     }
-    while rx.try_recv().is_ok() {}
+    while rx.pop().is_ok() {}
     let dropped_before = dropped.load(Ordering::Relaxed);
     subscribed.store(true, Ordering::Release);
     tracing::info!(
@@ -214,7 +217,7 @@ fn serve_client(
     );
     let mut sent = 0u64;
     let end = loop {
-        match rx.recv_timeout(RECV_TIMEOUT) {
+        match rx.pop() {
             Ok(record) => {
                 let (buf, size) = encode_record(&record);
                 if stream.write_all(&buf[..size]).is_err() {
@@ -222,8 +225,12 @@ fn serve_client(
                 }
                 sent += 1;
             }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break SessionEnd::Shutdown,
+            Err(rtrb::PopError::Empty) => {
+                if rx.is_abandoned() && rx.is_empty() {
+                    break SessionEnd::Shutdown;
+                }
+                std::thread::sleep(CLIENT_POLL);
+            }
         }
     };
     subscribed.store(false, Ordering::Release);

@@ -2,7 +2,6 @@ use std::io::{self, ErrorKind, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,12 +12,16 @@ use crate::wire::{decode_command, Command};
 /// Reads and decodes on a companion thread: a single frame's decode is
 /// atomic and a strain-comp map measured 305 us — more than the RT loop's
 /// whole latch margin — so no on-thread byte budget can bound it. The RT
-/// side only try_recvs decoded commands and writes responses; the socket
-/// stays nonblocking because reader and writer share the fd and the RT
-/// thread's writes must never block.
+/// side only pops decoded commands from a wait-free rtrb ring and writes
+/// responses; the socket stays nonblocking because reader and writer share
+/// the fd and the RT thread's writes must never block. The rings are rtrb,
+/// not mpsc: an mpsc `try_recv` spin-waits on a sender caught mid-write, so
+/// a preempted reader thread could stall the FIFO-80 DC thread (802 µs of
+/// `dispatch_ns` on the 2026-07-27 bench) — rtrb pop either sees a published
+/// slot or reports empty, never waits.
 pub struct FrameServer {
-    cmd_rx: Receiver<Command>,
-    writer_rx: Receiver<UnixStream>,
+    cmd_rx: rtrb::Consumer<Command>,
+    writer_rx: rtrb::Consumer<UnixStream>,
     writer: Option<Box<dyn Write + Send>>,
     pending: Vec<u8>,
     pending_since: Option<Instant>,
@@ -36,6 +39,12 @@ impl core::fmt::Debug for FrameServer {
 }
 
 const READER_POLL: Duration = Duration::from_millis(2);
+
+/// Commands the reader may decode ahead of the RT dispatch loop. The
+/// dispatch budget drains every cycle (250 µs), so this only fills when the
+/// RT loop stops dispatching; the reader then stops reading and the socket
+/// backpressures the host.
+const CMD_QUEUE_CAPACITY: usize = 1024;
 
 const MAX_PENDING_BYTES: usize = 2 * 1024 * 1024;
 const PENDING_STALL_DEADLINE: Duration = Duration::from_secs(5);
@@ -61,8 +70,8 @@ fn nb_write_all<W: Write + ?Sized>(writer: &mut W, buf: &[u8]) -> (usize, WriteS
 }
 
 struct ReaderShared {
-    cmd_tx: Sender<Command>,
-    writer_tx: Sender<UnixStream>,
+    cmd_tx: rtrb::Producer<Command>,
+    writer_tx: rtrb::Producer<UnixStream>,
     session_ended: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
 }
@@ -74,8 +83,8 @@ impl FrameServer {
         listener.set_nonblocking(true)?;
         // 0o666: endpoint runs as root; non-root clients (motion-engine) must connect.
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))?;
-        let (cmd_tx, cmd_rx) = channel();
-        let (writer_tx, writer_rx) = channel();
+        let (cmd_tx, cmd_rx) = rtrb::RingBuffer::new(CMD_QUEUE_CAPACITY);
+        let (writer_tx, writer_rx) = rtrb::RingBuffer::new(1);
         let session_ended = Arc::new(AtomicBool::new(false));
         let closed = Arc::new(AtomicBool::new(false));
         let shared = ReaderShared {
@@ -104,7 +113,7 @@ impl FrameServer {
     /// then service any buffered backpressure so a transient host stall drains.
     pub fn pump(&mut self) {
         if self.writer.is_none() {
-            if let Ok(w) = self.writer_rx.try_recv() {
+            if let Ok(w) = self.writer_rx.pop() {
                 self.writer = Some(Box::new(w));
             }
         }
@@ -112,13 +121,13 @@ impl FrameServer {
     }
 
     pub fn pop_command(&mut self) -> Option<Command> {
-        self.cmd_rx.try_recv().ok()
+        self.cmd_rx.pop().ok()
     }
 
     pub fn poll_commands(&mut self) -> Vec<Command> {
         self.pump();
         let mut cmds = Vec::new();
-        while let Ok(cmd) = self.cmd_rx.try_recv() {
+        while let Ok(cmd) = self.cmd_rx.pop() {
             cmds.push(cmd);
         }
         cmds
@@ -293,8 +302,8 @@ impl FrameServer {
 
     #[cfg(test)]
     pub(crate) fn with_writer_for_test(writer: Box<dyn Write + Send>) -> Self {
-        let (_cmd_tx, cmd_rx) = channel();
-        let (_writer_tx, writer_rx) = channel();
+        let (_cmd_tx, cmd_rx) = rtrb::RingBuffer::new(1);
+        let (_writer_tx, writer_rx) = rtrb::RingBuffer::new(1);
         Self {
             cmd_rx,
             writer_rx,
@@ -329,7 +338,7 @@ impl Drop for FrameServer {
     }
 }
 
-fn reader_loop(listener: UnixListener, shared: ReaderShared) {
+fn reader_loop(listener: UnixListener, mut shared: ReaderShared) {
     let stream = loop {
         if shared.closed.load(Ordering::Acquire) || shared.session_ended.load(Ordering::Acquire) {
             return;
@@ -342,7 +351,7 @@ fn reader_loop(listener: UnixListener, shared: ReaderShared) {
                 eprintln!("ec-rt: client connected");
                 match stream.try_clone() {
                     Ok(w) => {
-                        if shared.writer_tx.send(w).is_err() {
+                        if shared.writer_tx.push(w).is_err() {
                             return;
                         }
                     }
@@ -361,10 +370,10 @@ fn reader_loop(listener: UnixListener, shared: ReaderShared) {
             }
         }
     };
-    read_loop(stream, &shared);
+    read_loop(stream, &mut shared);
 }
 
-fn read_loop(mut stream: UnixStream, shared: &ReaderShared) {
+fn read_loop(mut stream: UnixStream, shared: &mut ReaderShared) {
     let mut demux = Demuxer::new();
     let mut buf = [0u8; 4096];
     loop {
@@ -386,7 +395,7 @@ fn read_loop(mut stream: UnixStream, shared: &ReaderShared) {
                     if let Frame::Kalico { channel, payload } = f {
                         match decode_command(channel, &payload) {
                             Ok(cmd) => {
-                                if shared.cmd_tx.send(cmd).is_err() {
+                                if push_command(shared, cmd).is_break() {
                                     return;
                                 }
                             }
@@ -402,6 +411,24 @@ fn read_loop(mut stream: UnixStream, shared: &ReaderShared) {
                 eprintln!("ec-rt: read error: {e}");
                 shared.session_ended.store(true, Ordering::Release);
                 return;
+            }
+        }
+    }
+}
+
+/// Blocks the reader (never the RT thread) when the command ring is full,
+/// re-trying until the RT side drains it or the session ends.
+fn push_command(shared: &mut ReaderShared, cmd: Command) -> std::ops::ControlFlow<()> {
+    let mut cmd = cmd;
+    loop {
+        if shared.cmd_tx.is_abandoned() || shared.closed.load(Ordering::Acquire) {
+            return std::ops::ControlFlow::Break(());
+        }
+        match shared.cmd_tx.push(cmd) {
+            Ok(()) => return std::ops::ControlFlow::Continue(()),
+            Err(rtrb::PushError::Full(returned)) => {
+                cmd = returned;
+                std::thread::sleep(READER_POLL);
             }
         }
     }
