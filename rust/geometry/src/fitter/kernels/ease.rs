@@ -97,6 +97,7 @@ pub(in crate::fitter) fn ease_run(
                 r0,
                 recon.arc.u,
                 recon.arc.v,
+                recon.arc.sweep,
                 &verts,
                 tol,
                 pn,
@@ -113,17 +114,7 @@ pub(in crate::fitter) fn ease_run(
         return Ok(());
     };
 
-    let b_head = match &ease.head {
-        Some(s) => s.b,
-        None => project_to_circle(ease.origin, ease.radius, verts[0]),
-    };
-    let b_tail = match &ease.tail {
-        Some(s) => s.b,
-        None => project_to_circle(ease.origin, ease.radius, *verts.last().unwrap()),
-    };
-
-    recon.arc =
-        build_arc(ease.origin, ease.radius, b_head, b_tail, pn, sgn).map_err(internal(line_no))?;
+    recon.arc = ease.arc;
 
     if let Some(s) = &ease.head {
         recon.head_line_trim = s.trim;
@@ -178,17 +169,17 @@ struct SpiralFit {
 struct EaseFit {
     head: Option<SpiralFit>,
     tail: Option<SpiralFit>,
-    origin: [f64; 3],
-    radius: f64,
+    arc: Arc,
 }
 
 /// Solve one easing configuration end to end: refit the circle for the given
-/// end plans, then build every planned spiral and validate its line trim. A
-/// planned end whose spiral is degenerate or over-claims its neighbor rejects
-/// the whole attempt — the caller retries with a smaller lead angle or fewer
-/// eased ends — because the refit circle is only valid together with the
-/// spirals it was solved for: keeping it while dropping a spiral strands that
-/// arc end off the run's vertex.
+/// end plans, then build every planned spiral and validate its line trim, and
+/// rebuild the residual mid-arc between the spiral contacts. A planned end
+/// whose spiral is degenerate or over-claims its neighbor — or a pair of
+/// spirals that would consume more angle than the arc has, leaving a residual
+/// sweep that runs backward — rejects the whole attempt: the caller retries
+/// with a smaller lead angle or fewer eased ends, because the refit circle is
+/// only valid together with the spirals it was solved for.
 #[allow(clippy::too_many_arguments)]
 fn try_ease(
     hp: Option<&EndPlan>,
@@ -199,10 +190,16 @@ fn try_ease(
     r0: f64,
     u: [f64; 3],
     v: [f64; 3],
+    sweep0: f64,
     verts: &[[f64; 3]],
     tol: f64,
     pn: [f64; 3],
 ) -> Result<Option<EaseFit>, GeometryError> {
+    let consumed = hp.map_or(0.0, |p| p.phi) + tp.map_or(0.0, |p| p.phi);
+    let expected_sweep = sweep0 - sweep0.signum() * consumed;
+    if expected_sweep * sweep0 <= 0.0 {
+        return Ok(None);
+    }
     let Some((origin, radius)) = ease_circle(hp, tp, o0, r0, u, v, verts, tol) else {
         return Ok(None);
     };
@@ -220,12 +217,18 @@ fn try_ease(
         },
         None => None,
     };
-    Ok(Some(EaseFit {
-        head,
-        tail,
-        origin,
-        radius,
-    }))
+    let b_head = match &head {
+        Some(s) => s.b,
+        None => project_to_circle(origin, radius, verts[0]),
+    };
+    let b_tail = match &tail {
+        Some(s) => s.b,
+        None => project_to_circle(origin, radius, *verts.last().expect("run has vertices")),
+    };
+    let Some(arc) = build_arc(origin, radius, b_head, b_tail, pn, expected_sweep)? else {
+        return Ok(None);
+    };
+    Ok(Some(EaseFit { head, tail, arc }))
 }
 
 fn max_ease_angle(radius: f64, neighbor_len: f64) -> f64 {
@@ -444,24 +447,34 @@ fn project_to_circle(origin: [f64; 3], radius: f64, p: [f64; 3]) -> [f64; 3] {
     add(origin, scale(normalize(sub(p, origin)), radius))
 }
 
+/// Rebuild the residual mid-arc between the spiral contacts. The principal
+/// signed angle is unwrapped toward `expected_sweep` — the original sweep
+/// minus the eases' lead angles — not merely toward the original direction:
+/// when the eases consume more angle than the arc has, the residual truly
+/// runs backward, and forcing it to the original sign would emit a
+/// near-full-circle arc (a 35.5mm-radius fitted run traced a 71mm-wide
+/// circle around the part, bench 2026-07-27). A residual whose direction
+/// disagrees with the expectation is rejected instead.
 fn build_arc(
     origin: [f64; 3],
     radius: f64,
     b_head: [f64; 3],
     b_tail: [f64; 3],
     pn: [f64; 3],
-    sgn: f64,
-) -> Result<Arc, GeometryError> {
+    expected_sweep: f64,
+) -> Result<Option<Arc>, GeometryError> {
     let u = normalize(sub(b_head, origin));
     let v = cross(pn, u);
-    let mut sweep = signed_angle(u, normalize(sub(b_tail, origin)), pn);
-    if sgn > 0.0 && sweep < 0.0 {
-        sweep += 2.0 * PI;
+    let principal = signed_angle(u, normalize(sub(b_tail, origin)), pn);
+    let tau = 2.0 * PI;
+    let sweep = principal + tau * ((expected_sweep - principal) / tau).round();
+    if !sweep.is_finite()
+        || sweep.abs() <= ANGLE_EPS_RAD
+        || sweep.signum() != expected_sweep.signum()
+    {
+        return Ok(None);
     }
-    if sgn < 0.0 && sweep > 0.0 {
-        sweep -= 2.0 * PI;
-    }
-    Arc::try_new(origin, u, v, radius, 0.0, sweep)
+    Arc::try_new(origin, u, v, radius, 0.0, sweep).map(Some)
 }
 
 pub(super) fn run_vertices(facets: &[Move]) -> Vec<[f64; 3]> {
