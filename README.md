@@ -103,16 +103,22 @@ follows: x, y, z
 post_processors: pa
 ```
 
-Six types exist today. `smooth_bell` and `smooth_triangle` are plain
+Seven types exist today. `smooth_bell` and `smooth_triangle` are plain
 low-pass kernels parameterized by `smooth_time`. `smooth_zv` and
 `smooth_mzv` are frequency-targeted input smoothers parameterized by
 `frequency_hz`; their kernel duration is derived from the target
 frequency. `linear_pressure_advance` sharpens the extruder signal to
-compensate pressure lag. `mode_inverse` inverts an identified
-second-order resonance (belt compliance, for example) so the toolhead
-follows the nominal path with the residual scaling with model error; it
-must be preceded in the chain by a short smoothing kernel, and the config
-compiler enforces that ordering.
+compensate pressure lag. `nonlinear_pressure_advance`
+(`linear_advance`, `nonlinear_offset`, `linearization_velocity`) does
+the same with a saturating law,
+`linear_advance·v + nonlinear_offset·tanh(v / linearization_velocity)`,
+so the commanded advance stops growing once flow is past the
+linearization velocity — the nozzle pressure response flattens there and
+the purely linear model over-advances. `mode_inverse` inverts an
+identified second-order resonance (belt compliance, for example) so the
+toolhead follows the nominal path with the residual scaling with model
+error; it must be preceded in the chain by a short smoothing kernel, and
+the config compiler enforces that ordering.
 
 Limits apply to the output of the chain — the signal the motor actually
 receives — not to the nominal command. Pressure advance spikes extruder

@@ -5,7 +5,7 @@ use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedS
 use crate::lowering::follower_tol_scale;
 use crate::shaper::{
     AxisSignalTable, SEGMENT_TIME_EPS_S, TrackSignal, apply_derivative_gains_to_track,
-    fit_axis_from_signal,
+    apply_nonlinear_advance_to_track, fit_axis_from_signal,
 };
 use crate::types::PostProcessError;
 
@@ -61,7 +61,7 @@ pub(crate) fn project_followers(
         let chain = &chains.chains[axis];
         let kernel = chain.stages.iter().find_map(|stage| match stage {
             ChainStage::SmoothKernel(kernel) => Some(kernel),
-            ChainStage::DerivativeGains { .. } => None,
+            ChainStage::DerivativeGains { .. } | ChainStage::NonlinearAdvance(_) => None,
         });
         let leaders_shaped = leaders.iter().any(|&l| !chains.chains[l].is_empty());
         let state = &mut states[axis];
@@ -119,7 +119,7 @@ pub(crate) fn project_followers(
             } else {
                 raw_track.clone()
             };
-            let track = apply_leading_stages(chain, projected);
+            let track = apply_leading_stages(chain, axis, projected)?;
             if !track.control_points().iter().all(|v| v.is_finite()) {
                 return Err(PostProcessError::NonFiniteSample {
                     axis,
@@ -201,16 +201,23 @@ pub(crate) fn project_followers(
 /// The chain stages ahead of the follower's kernel (all of them when it has
 /// none), applied to the projected track — the convolution's input, matching
 /// the leader convention where pre-kernel stages bake into the raw track.
-fn apply_leading_stages(chain: &CompiledChain, mut track: ScalarNurbs) -> ScalarNurbs {
+fn apply_leading_stages(
+    chain: &CompiledChain,
+    axis: usize,
+    mut track: ScalarNurbs,
+) -> Result<ScalarNurbs, PostProcessError> {
     for stage in &chain.stages {
         match stage {
             ChainStage::SmoothKernel(_) => break,
             ChainStage::DerivativeGains { k1, k2 } => {
                 track = apply_derivative_gains_to_track(&track, *k1, *k2);
             }
+            ChainStage::NonlinearAdvance(adv) => {
+                track = apply_nonlinear_advance_to_track(axis, &track, *adv)?;
+            }
         }
     }
-    track
+    Ok(track)
 }
 
 /// One raw segment's projected pre-kernel follower track, cached so the

@@ -200,6 +200,12 @@ impl Sampler<'_> {
                             vel = k1.mul_add(accel, vel);
                             accel = 0.0;
                         }
+                        ChainStage::NonlinearAdvance(adv) => {
+                            let slope = adv.slope(vel);
+                            pos += adv.advance(vel);
+                            vel = slope.mul_add(accel, vel);
+                            accel = 0.0;
+                        }
                         ChainStage::SmoothKernel(_) => break,
                     }
                 }

@@ -136,7 +136,10 @@ impl PostProcessorSet {
                     .expect("validated in try_new");
                 match inst.compile_stage() {
                     Some(trajectory::ChainStage::SmoothKernel(_)) => seen_kernel = true,
-                    Some(trajectory::ChainStage::DerivativeGains { .. }) if !seen_kernel => {
+                    Some(
+                        trajectory::ChainStage::DerivativeGains { .. }
+                        | trajectory::ChainStage::NonlinearAdvance(_),
+                    ) if !seen_kernel => {
                         return Err(PostProcessorConfigError::LeaderGainBeforeKernel {
                             axis: registry.axis_name(axis).to_string(),
                             name: name.clone(),

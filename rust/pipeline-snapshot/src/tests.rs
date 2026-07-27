@@ -408,6 +408,16 @@ fn all_post_processor_types_are_reachable() {
         ("smooth_zv", [("frequency_hz", 40.0)].as_slice(), "x"),
         ("smooth_mzv", [("frequency_hz", 40.0)].as_slice(), "x"),
         ("linear_pressure_advance", [("k", 0.04)].as_slice(), "e"),
+        (
+            "nonlinear_pressure_advance",
+            [
+                ("linear_advance", 0.02),
+                ("nonlinear_offset", 0.05),
+                ("linearization_velocity", 20.0),
+            ]
+            .as_slice(),
+            "e",
+        ),
     ] {
         let mut params_snap = default_axis_snapshot_params();
         let mut carrier = match axis_name {

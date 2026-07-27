@@ -1,5 +1,7 @@
 use super::*;
-use crate::algos::{LinearPressureAdvance, ModeInverse, SmoothBell, SmoothTriangle};
+use crate::algos::{
+    LinearPressureAdvance, ModeInverse, NonlinearPressureAdvance, SmoothBell, SmoothTriangle,
+};
 use crate::kernel::build_smooth_bell_kernel;
 
 fn pa(k: f64) -> PostProcessorInstance {
@@ -13,6 +15,60 @@ fn bell(smooth_time: f64) -> PostProcessorInstance {
 }
 fn st(smooth_time: f64) -> PostProcessorInstance {
     PostProcessorInstance::new("st", &SmoothTriangle, vec![smooth_time])
+}
+fn nlpa(
+    linear_advance: f64,
+    nonlinear_offset: f64,
+    linearization_velocity: f64,
+) -> PostProcessorInstance {
+    PostProcessorInstance::new(
+        "nlpa",
+        &NonlinearPressureAdvance,
+        vec![linear_advance, nonlinear_offset, linearization_velocity],
+    )
+}
+
+#[test]
+fn nonlinear_pa_compiles_to_the_advance_stage() {
+    let c = CompiledChain::compile(&[nlpa(0.02, 0.05, 20.0)]).unwrap();
+    assert!(matches!(
+        c.stages[0],
+        ChainStage::NonlinearAdvance(NonlinearAdvance {
+            linear_advance: 0.02,
+            nonlinear_offset: 0.05,
+            linearization_velocity: 20.0,
+        })
+    ));
+    assert_eq!(c.max_input_window(), (0.0, 0.0));
+}
+
+#[test]
+fn nonlinear_pa_without_an_offset_is_the_linear_operator() {
+    let c = CompiledChain::compile(&[nlpa(0.02, 0.0, 20.0)]).unwrap();
+    assert!(matches!(
+        c.stages[0],
+        ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.02
+    ));
+}
+
+#[test]
+fn nonlinear_pa_with_no_advance_at_all_is_a_no_op() {
+    let c = CompiledChain::compile(&[nlpa(0.0, 0.0, 20.0)]).unwrap();
+    assert!(c.stages.is_empty());
+}
+
+#[test]
+fn nonlinear_pa_rejects_a_zero_linearization_velocity() {
+    assert!(nlpa(0.02, 0.05, 0.0).validate().is_err());
+}
+
+#[test]
+fn nonlinear_pa_occupies_the_single_gain_slot() {
+    let err = CompiledChain::compile(&[nlpa(0.02, 0.05, 20.0), pa(0.04)]).unwrap_err();
+    assert!(matches!(
+        err,
+        PostProcessorError::UnsupportedComposition { .. }
+    ));
 }
 
 #[test]

@@ -90,6 +90,18 @@ Roster (`rust/trajectory/src/algos/`):
 - `smooth_triangle` (`smooth_time`) — the classic triangle (double boxcar);
   cheap general smoothing, used e.g. on the extruder.
 - `linear_pressure_advance` (`k`) — `DerivativeGains { k1: k, k2: 0 }`.
+- `nonlinear_pressure_advance` (`linear_advance`, `nonlinear_offset`,
+  `linearization_velocity`) — `NonlinearAdvance`, the operator
+  `y = x + a(ẋ)` with
+  `a(v) = linear_advance·v + nonlinear_offset·tanh(v / linearization_velocity)`.
+  Kalico bleeding_edge_v2's tanh pressure-advance model, ported to the
+  chain. It occupies the same slot as `DerivativeGains` (one gain stage
+  per axis) and degrades to it exactly when `nonlinear_offset = 0`.
+  Because `a` is not polynomial in the track, the stage is applied by
+  re-fitting the transformed signal (`apply_nonlinear_advance_to_track`)
+  under the same ladder budgets the convolution refit uses, and a move
+  carrying one pre-kernel takes the sampled lowering path rather than the
+  closed-form per-piece one.
 - `mode_inverse` (`frequency_hz`, `damping_ratio`) —
   `DerivativeGains { k1: 2ζ/ω, k2: 1/ω² }` with `ω = 2πf`.
 

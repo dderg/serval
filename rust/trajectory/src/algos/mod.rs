@@ -2,6 +2,7 @@ use crate::chain::{ChainStage, PostProcessorError};
 
 mod linear_pressure_advance;
 mod mode_inverse;
+mod nonlinear_pressure_advance;
 mod smooth_bell;
 mod smooth_mzv;
 mod smooth_triangle;
@@ -9,6 +10,7 @@ mod smooth_zv;
 
 pub use linear_pressure_advance::LinearPressureAdvance;
 pub use mode_inverse::ModeInverse;
+pub use nonlinear_pressure_advance::NonlinearPressureAdvance;
 pub use smooth_bell::SmoothBell;
 pub use smooth_mzv::SmoothMzv;
 pub use smooth_triangle::SmoothTriangle;
@@ -20,6 +22,7 @@ pub static REGISTRY: &[&dyn PostProcessorAlgo] = &[
     &SmoothZv,
     &SmoothMzv,
     &LinearPressureAdvance,
+    &NonlinearPressureAdvance,
     &ModeInverse,
 ];
 

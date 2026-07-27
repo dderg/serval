@@ -13,6 +13,45 @@ pub struct PostProcessorInstance {
 pub enum ChainStage {
     SmoothKernel(PiecewisePolynomialKernel),
     DerivativeGains { k1: f64, k2: f64 },
+    NonlinearAdvance(NonlinearAdvance),
+}
+
+/// The operator `y = x + a(ẋ)` with the saturating advance law
+/// `a(v) = linear_advance·v + nonlinear_offset·tanh(v / linearization_velocity)`.
+///
+/// Above `linearization_velocity` the extra term flattens out, so the
+/// commanded advance stops growing with speed the way the purely linear
+/// model does — the nonlinear pressure-advance model.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NonlinearAdvance {
+    pub linear_advance: f64,
+    pub nonlinear_offset: f64,
+    pub linearization_velocity: f64,
+}
+
+impl NonlinearAdvance {
+    #[must_use]
+    pub fn advance(&self, v: f64) -> f64 {
+        let saturating = libm::tanh(v / self.linearization_velocity);
+        self.linear_advance
+            .mul_add(v, self.nonlinear_offset * saturating)
+    }
+
+    /// `da/dv`
+    #[must_use]
+    pub fn slope(&self, v: f64) -> f64 {
+        let saturating = libm::tanh(v / self.linearization_velocity);
+        (self.nonlinear_offset / self.linearization_velocity)
+            .mul_add(saturating.mul_add(-saturating, 1.0), self.linear_advance)
+    }
+
+    /// `d²a/dv²`
+    #[must_use]
+    pub fn curvature(&self, v: f64) -> f64 {
+        let vl = self.linearization_velocity;
+        let saturating = libm::tanh(v / vl);
+        -2.0 * self.nonlinear_offset / (vl * vl) * saturating * saturating.mul_add(-saturating, 1.0)
+    }
 }
 
 impl ChainStage {
@@ -27,7 +66,7 @@ impl ChainStage {
                 let (k_lo, k_hi) = kernel.support();
                 (-k_hi, -k_lo)
             }
-            Self::DerivativeGains { .. } => (0.0, 0.0),
+            Self::DerivativeGains { .. } | Self::NonlinearAdvance(_) => (0.0, 0.0),
         }
     }
 
@@ -35,14 +74,14 @@ impl ChainStage {
     pub fn kernel_variance_s2(&self) -> f64 {
         match self {
             Self::SmoothKernel(kernel) => kernel.second_moment(),
-            Self::DerivativeGains { .. } => 0.0,
+            Self::DerivativeGains { .. } | Self::NonlinearAdvance(_) => 0.0,
         }
     }
 
     fn composition_slot(&self) -> (usize, &'static str) {
         match self {
             Self::SmoothKernel(_) => (0, "kernel"),
-            Self::DerivativeGains { .. } => (1, "derivative-gain"),
+            Self::DerivativeGains { .. } | Self::NonlinearAdvance(_) => (1, "derivative-gain"),
         }
     }
 }
@@ -193,7 +232,7 @@ impl CompiledChain {
                 seen_kernel = true;
                 false
             }
-            ChainStage::DerivativeGains { .. } => seen_kernel,
+            ChainStage::DerivativeGains { .. } | ChainStage::NonlinearAdvance(_) => seen_kernel,
         })
     }
 

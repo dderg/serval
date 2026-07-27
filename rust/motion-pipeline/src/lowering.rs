@@ -20,7 +20,7 @@ use trajectory::{CompiledChain, ShapedSegment};
 
 use profile::{build_profile, profile_from_phases};
 use sampled::{Sampler, ZWarp, phase_knot_times, refine_span, regime_knot_times, z_warp_mode};
-use straight::lower_straight_from_phases;
+use straight::{has_pre_kernel_nonlinear_advance, lower_straight_from_phases};
 
 /// Duplicated from `runtime::piece_ring::MAX_PIECE_COEFFS` (this crate must
 /// not depend on the MCU runtime); equality is enforced by the cross-crate
@@ -188,7 +188,12 @@ pub fn lower_move_pieces(
         use geometry::path::CurvatureProfile;
         seg.kappa_peak().1.abs() <= STRAIGHT_KAPPA_EPS
     });
-    if !vm.phases.is_empty() && straight && !ramped && !matches!(z_warp, ZWarp::Surface(_)) {
+    if !vm.phases.is_empty()
+        && straight
+        && !ramped
+        && !matches!(z_warp, ZWarp::Surface(_))
+        && !has_pre_kernel_nonlinear_advance(axis_chains)
+    {
         let z_offset = match z_warp {
             ZWarp::Constant(c) => c,
             _ => 0.0,
