@@ -27,6 +27,9 @@ pub mod result_codes {
     pub const OK: i32 = 0;
     pub const RING_FULL: i32 = -309;
     pub const STREAM_HALTED: i32 = -142;
+    // Mirrors ERR_PIECES_WHILE_HALTED in rust/ethercat-rt/src/stream_halt.rs —
+    // the EtherCAT endpoint's piece gate, distinct from the MCU runtime's -142.
+    pub const EC_PIECES_WHILE_HALTED: i32 = -315;
     pub const INVALID_ARG: i32 = -26;
 }
 

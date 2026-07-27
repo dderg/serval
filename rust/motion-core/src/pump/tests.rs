@@ -87,8 +87,10 @@ fn schedule_resends_orphan_when_retired_overtook_pushed() {
     const MAX_PER_FRAME: usize = 32;
     match schedule(
         &queues,
-        MAX_PER_FRAME,
-        |_| usize::MAX,
+        |_| crate::pump::BundleLimits {
+            wire_budget: usize::MAX,
+            pieces_per_axis: MAX_PER_FRAME,
+        },
         |_, _| None,
         |_| usize::MAX,
     ) {

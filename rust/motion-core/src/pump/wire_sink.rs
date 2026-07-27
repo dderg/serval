@@ -263,12 +263,13 @@ impl PieceSink for WireSink {
             .map(|()| mcu_protocol::result_codes::OK)
     }
 
-    fn bundle_wire_budget(&self, mcu_id: u32) -> usize {
+    fn bundle_limits(&self, mcu_id: u32) -> super::BundleLimits {
         match self.transports.get(&mcu_id) {
-            Some(McuTransport::EtherCat(_)) => 8192,
-            Some(McuTransport::Serial(_)) | None => {
-                crate::pump::messages::SERIAL_BUNDLE_WIRE_BUDGET
-            }
+            Some(McuTransport::EtherCat(_)) => super::BundleLimits {
+                wire_budget: 8192,
+                pieces_per_axis: 255,
+            },
+            Some(McuTransport::Serial(_)) | None => super::messages::SERIAL_BUNDLE_LIMITS,
         }
     }
 

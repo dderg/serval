@@ -33,8 +33,10 @@ fn idle_when_empty() {
     assert!(matches!(
         schedule(
             &queues,
-            255,
-            |_| usize::MAX,
+            |_| crate::pump::BundleLimits {
+                wire_budget: usize::MAX,
+                pieces_per_axis: 255,
+            },
             |_: &AxisKey, _: &AxisQueue| None,
             no_cap
         ),
@@ -51,8 +53,10 @@ fn full_ring_does_not_block_another_mcu() {
     queues.insert(AxisKey { mcu_id: 2, axis: 0 }, q_with(8, &[20]));
     match schedule(
         &queues,
-        255,
-        |_| usize::MAX,
+        |_| crate::pump::BundleLimits {
+            wire_budget: usize::MAX,
+            pieces_per_axis: 255,
+        },
         |_: &AxisKey, _: &AxisQueue| None,
         no_cap,
     ) {
@@ -76,8 +80,10 @@ fn stalls_when_every_ring_is_full() {
     assert!(matches!(
         schedule(
             &queues,
-            255,
-            |_| usize::MAX,
+            |_| crate::pump::BundleLimits {
+                wire_budget: usize::MAX,
+                pieces_per_axis: 255,
+            },
             |_: &AxisKey, _: &AxisQueue| None,
             no_cap
         ),
@@ -93,8 +99,10 @@ fn batches_head_mcu_past_other_mcu_interleave() {
     queues.insert(AxisKey { mcu_id: 2, axis: 0 }, q_with(8, &[2]));
     let s = schedule(
         &queues,
-        255,
-        |_| usize::MAX,
+        |_| crate::pump::BundleLimits {
+            wire_budget: usize::MAX,
+            pieces_per_axis: 255,
+        },
         |_: &AxisKey, _: &AxisQueue| None,
         no_cap,
     );
@@ -128,8 +136,10 @@ fn fanned_out_trajectory_still_batches_full_frames() {
     }
     let s = schedule(
         &queues,
-        32,
-        |_| usize::MAX,
+        |_| crate::pump::BundleLimits {
+            wire_budget: usize::MAX,
+            pieces_per_axis: 32,
+        },
         |_: &AxisKey, _: &AxisQueue| None,
         no_cap,
     );
@@ -156,8 +166,10 @@ fn frame_cap_splits() {
     queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with(8, &[0, 1, 2, 3]));
     let s = schedule(
         &queues,
-        2,
-        |_| usize::MAX,
+        |_| crate::pump::BundleLimits {
+            wire_budget: usize::MAX,
+            pieces_per_axis: 2,
+        },
         |_: &AxisKey, _: &AxisQueue| None,
         no_cap,
     );
@@ -180,8 +192,10 @@ fn full_axis_does_not_block_same_mcu_sibling() {
     q.insert(AxisKey { mcu_id: 1, axis: 0 }, xq);
     match schedule(
         &q,
-        255,
-        |_| usize::MAX,
+        |_| crate::pump::BundleLimits {
+            wire_budget: usize::MAX,
+            pieces_per_axis: 255,
+        },
         |_: &AxisKey, _: &AxisQueue| None,
         no_cap,
     ) {
@@ -208,8 +222,10 @@ fn time_gate_blocks_piece_beyond_horizon() {
     queues.insert(AxisKey { mcu_id: 1, axis: 1 }, q_with(8, &[200]));
     match schedule(
         &queues,
-        255,
-        |_| usize::MAX,
+        |_| crate::pump::BundleLimits {
+            wire_budget: usize::MAX,
+            pieces_per_axis: 255,
+        },
         |_: &AxisKey, _: &AxisQueue| Some(150),
         no_cap,
     ) {
@@ -230,8 +246,10 @@ fn all_beyond_horizon_returns_stall_ahead() {
         matches!(
             schedule(
                 &queues,
-                255,
-                |_| usize::MAX,
+                |_| crate::pump::BundleLimits {
+                    wire_budget: usize::MAX,
+                    pieces_per_axis: 255,
+                },
                 |_: &AxisKey, _: &AxisQueue| Some(500),
                 no_cap
             ),
@@ -247,8 +265,10 @@ fn no_horizon_none_uses_count_only_gate() {
     queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with(8, &[u64::MAX]));
     match schedule(
         &queues,
-        255,
-        |_| usize::MAX,
+        |_| crate::pump::BundleLimits {
+            wire_budget: usize::MAX,
+            pieces_per_axis: 255,
+        },
         |_: &AxisKey, _: &AxisQueue| None,
         no_cap,
     ) {
@@ -286,7 +306,15 @@ fn cross_mcu_host_time_ordering_bench_regression() {
         }
     };
 
-    match schedule(&queues, 255, |_| usize::MAX, horizon_of, no_cap) {
+    match schedule(
+        &queues,
+        |_| crate::pump::BundleLimits {
+            wire_budget: usize::MAX,
+            pieces_per_axis: 255,
+        },
+        horizon_of,
+        no_cap,
+    ) {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1);
             assert_eq!(
@@ -322,7 +350,15 @@ fn homing_lead_gates_piece_release() {
         }
     };
 
-    match schedule(&queues, 255, |_| usize::MAX, &horizon_of, no_cap) {
+    match schedule(
+        &queues,
+        |_| crate::pump::BundleLimits {
+            wire_budget: usize::MAX,
+            pieces_per_axis: 255,
+        },
+        &horizon_of,
+        no_cap,
+    ) {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1);
             assert_eq!(
@@ -348,7 +384,15 @@ fn homing_lead_gates_piece_release() {
         }
     };
 
-    match schedule(&queues2, 255, |_| usize::MAX, &horizon_of_max, no_cap) {
+    match schedule(
+        &queues2,
+        |_| crate::pump::BundleLimits {
+            wire_budget: usize::MAX,
+            pieces_per_axis: 255,
+        },
+        &horizon_of_max,
+        no_cap,
+    ) {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1);
             assert_eq!(
@@ -383,7 +427,15 @@ fn cross_lead_per_queue_horizon_independent() {
         Some(ack_now + (q.lead_secs * freq) as u64)
     };
 
-    match schedule(&queues, 255, |_| usize::MAX, &horizon_of, no_cap) {
+    match schedule(
+        &queues,
+        |_| crate::pump::BundleLimits {
+            wire_budget: usize::MAX,
+            pieces_per_axis: 255,
+        },
+        &horizon_of,
+        no_cap,
+    ) {
         Schedule::Send(frames) => {
             let a_frame = frames.iter().find(|f| f.key == key_a);
             let b_frame = frames.iter().find(|f| f.key == key_b);
@@ -425,8 +477,10 @@ fn full_earliest_ring_does_not_starve_later_mcu() {
 
     match schedule(
         &queues,
-        255,
-        |_| usize::MAX,
+        |_| crate::pump::BundleLimits {
+            wire_budget: usize::MAX,
+            pieces_per_axis: 255,
+        },
         |_: &AxisKey, _: &AxisQueue| None,
         no_cap,
     ) {
@@ -447,8 +501,10 @@ fn bundle_byte_budget_bounds_the_send() {
     // budget admits three pieces, taken in global start-time order.
     let s = schedule(
         &queues,
-        255,
-        |_| 65,
+        |_| crate::pump::BundleLimits {
+            wire_budget: 65,
+            pieces_per_axis: 255,
+        },
         |_: &AxisKey, _: &AxisQueue| None,
         no_cap,
     );
@@ -469,8 +525,10 @@ fn bundle_byte_budget_always_admits_the_head_piece() {
     queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with(64, &[0, 1]));
     let s = schedule(
         &queues,
-        255,
-        |_| 1,
+        |_| crate::pump::BundleLimits {
+            wire_budget: 1,
+            pieces_per_axis: 255,
+        },
         |_: &AxisKey, _: &AxisQueue| None,
         no_cap,
     );

@@ -58,9 +58,6 @@ pub const PUMP_DATA_CHANNEL_CAP: usize = 128;
 // typical motion, ~1.5× the two-MCU ring cache.
 const PUMP_INTAKE_BACKLOG_CAP: u64 = 4096;
 
-// Per-axis wire cap: the PushPieces frame carries a u8 piece count.
-pub(super) const MAX_PER_FRAME: usize = 255;
-
 // How long an axis ring may sit at room()==0 with `q.retired` frozen before the
 // pump treats it as the MCU having stopped retiring pieces rather than a normal
 // transient full-ring wait.
@@ -684,8 +681,7 @@ impl<S: PieceSink> Pump<S> {
                 let hz_of = |k: &AxisKey, q: &AxisQueue| self.horizon_of(k, q);
                 schedule(
                     &self.queues,
-                    MAX_PER_FRAME,
-                    |mcu_id| self.sink.bundle_wire_budget(mcu_id),
+                    |mcu_id| self.sink.bundle_limits(mcu_id),
                     hz_of,
                     |_| usize::MAX,
                 )

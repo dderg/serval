@@ -142,8 +142,7 @@ pub enum Schedule {
 #[must_use]
 pub fn schedule(
     queues: &BTreeMap<AxisKey, AxisQueue>,
-    max_per_frame: usize,
-    wire_budget_of: impl Fn(u32) -> usize,
+    limits_of: impl Fn(u32) -> super::BundleLimits,
     horizon_of: impl Fn(&AxisKey, &AxisQueue) -> Option<u64>,
     releasable_cap_of: impl Fn(&AxisKey) -> usize,
 ) -> Schedule {
@@ -203,7 +202,11 @@ pub fn schedule(
         break k;
     };
 
-    let bundle_wire_budget = wire_budget_of(head_key.mcu_id);
+    let super::BundleLimits {
+        wire_budget: bundle_wire_budget,
+        pieces_per_axis,
+    } = limits_of(head_key.mcu_id);
+    let max_per_frame = pieces_per_axis.min(u8::MAX as usize);
     let mut taken: BTreeMap<AxisKey, usize> = BTreeMap::new();
     let mut maxed: BTreeSet<AxisKey> = cap_skipped;
     let mut bundle_bytes = 0usize;

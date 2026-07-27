@@ -73,7 +73,9 @@ pub enum SendError {
 impl SendError {
     pub(super) fn mcu_reject(mcu_id: u32, result: i32) -> Self {
         let message = format!("mcu {mcu_id} rejected PushPieces frame: result {result}");
-        if result == mcu_protocol::result_codes::STREAM_HALTED {
+        let halted = result == mcu_protocol::result_codes::STREAM_HALTED
+            || result == mcu_protocol::result_codes::EC_PIECES_WHILE_HALTED;
+        if halted {
             Self::Halted(message)
         } else {
             Self::Transient(message)
@@ -91,7 +93,20 @@ impl std::fmt::Display for SendError {
     }
 }
 
-pub const SERIAL_BUNDLE_WIRE_BUDGET: usize = 1024;
+/// Per-transaction limits the scheduler must respect for one MCU's transport.
+#[derive(Clone, Copy, Debug)]
+pub struct BundleLimits {
+    pub wire_budget: usize,
+    pub pieces_per_axis: usize,
+}
+
+/// Conservative default: a 1 KiB frame is ~20 ms of wire at 500 kbaud, and 32
+/// pieces per axis is the largest frame the slowest MCU foreground has proven
+/// to process without tripping its watchdog stall budget.
+pub const SERIAL_BUNDLE_LIMITS: BundleLimits = BundleLimits {
+    wire_budget: 1024,
+    pieces_per_axis: 32,
+};
 
 pub trait PieceSink: Send {
     fn send_frame(
@@ -103,12 +118,12 @@ pub trait PieceSink: Send {
         room: u32,
     ) -> Result<i32, SendError>;
 
-    /// Bytes one bundled transaction may carry to `mcu_id`. The conservative
-    /// default suits latency-bound links (a 1 KiB frame is ~20 ms of wire at
-    /// 500 kbaud); transports whose round-trip cost is per-transaction rather
-    /// than per-byte override this to amortize the round trip.
-    fn bundle_wire_budget(&self, _mcu_id: u32) -> usize {
-        SERIAL_BUNDLE_WIRE_BUDGET
+    /// How much one bundled transaction to `mcu_id` may carry. Transports
+    /// whose round-trip cost is per-transaction rather than per-byte (and
+    /// whose receiver is not a watchdog-policed MCU foreground) override this
+    /// to amortize the round trip.
+    fn bundle_limits(&self, _mcu_id: u32) -> BundleLimits {
+        SERIAL_BUNDLE_LIMITS
     }
 
     /// Deliver every axis frame destined for `mcu_id` as one bundled
