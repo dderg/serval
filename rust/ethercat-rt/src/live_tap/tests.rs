@@ -90,7 +90,7 @@ fn read_exact_with_deadline(stream: &mut UnixStream, n: usize) -> Vec<u8> {
 #[test]
 fn client_disconnect_stops_the_flow_and_reconnect_gets_a_fresh_header() {
     let path = temp_socket("reconnect");
-    let tap =
+    let mut tap =
         LiveTap::spawn(path.to_str().unwrap(), two_drive_config(), 250_000).expect("spawn tap");
 
     let mut first = UnixStream::connect(&path).expect("connect");
@@ -133,7 +133,7 @@ fn client_disconnect_stops_the_flow_and_reconnect_gets_a_fresh_header() {
 #[test]
 fn overflow_is_dropped_not_blocking() {
     let path = temp_socket("overflow");
-    let tap =
+    let mut tap =
         LiveTap::spawn(path.to_str().unwrap(), two_drive_config(), 250_000).expect("spawn tap");
     let started = Instant::now();
     for i in 0..(LIVE_TAP_RING_CAPACITY as u64 + 500) {

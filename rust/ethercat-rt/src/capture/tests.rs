@@ -617,8 +617,8 @@ fn encoder_error_surfaces_as_capture_file_error() {
     File::create(&path).unwrap();
     let ro = File::open(&path).unwrap();
 
-    let (tx, rx) = sync_channel::<CaptureRecord>(4);
-    tx.send(record(0)).unwrap();
+    let (mut tx, rx) = rtrb::RingBuffer::new(4);
+    tx.push(record(0)).unwrap();
     drop(tx);
 
     let written = super::run_session(ro, &path, header_json(&cfg(&path)), WriterHook::None, rx);

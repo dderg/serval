@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TrySendError};
+use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -60,7 +60,7 @@ const DOFF_PIN_RES_IM: usize = 40;
 /// overflowed the record ring mid-capture (2026-07-21 bench); the final
 /// fsync at stop still makes completed captures durable.
 const WRITER_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
-const WRITER_RECV_TIMEOUT: Duration = Duration::from_millis(100);
+const WRITER_POLL: Duration = Duration::from_millis(1);
 const IO_THREAD_STACK: usize = 512 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -269,7 +269,7 @@ enum IoMsg {
     Open {
         cfg: CaptureConfig,
         hook: WriterHook,
-        records: Receiver<CaptureRecord>,
+        records: rtrb::Consumer<CaptureRecord>,
         reply: SyncSender<i32>,
     },
     Finalize {
@@ -279,11 +279,11 @@ enum IoMsg {
 }
 
 struct ActiveCapture {
-    tx: SyncSender<CaptureRecord>,
+    tx: rtrb::Producer<CaptureRecord>,
     failure: Option<(u64, i32)>,
 }
 
-type RecordChannel = (SyncSender<CaptureRecord>, Receiver<CaptureRecord>);
+type RecordChannel = (rtrb::Producer<CaptureRecord>, rtrb::Consumer<CaptureRecord>);
 
 /// All file I/O runs on one persistent `capture-io` thread, spawned once.
 /// The DC thread's start/push/stop are channel operations only: file opens,
@@ -291,11 +291,18 @@ type RecordChannel = (SyncSender<CaptureRecord>, Receiver<CaptureRecord>);
 /// pause in cyclic frames beyond ~3 ms trips the drive's sync-error counter
 /// (ErC1.1 / AL 0x001a). Thread creation is banned on the DC thread for the
 /// same reason — under mlockall(MCL_FUTURE) a pthread spawn prefaults and
-/// locks the new stack, which is milliseconds by itself. The record channel
+/// locks the new stack, which is milliseconds by itself. The record ring
 /// obeys the same rule: its bounded buffer preallocates ~20 MB at construction
 /// (prefaulted and locked under MCL_FUTURE — 57 of 66 working-counter misses
 /// on the 2026-07-06 bench were capture starts), so the capture-io thread
-/// builds each channel and hands it over; start only try_recv()s a spare.
+/// builds each ring and hands it over; start only try_recv()s a spare.
+///
+/// The record ring is an rtrb SPSC ring, not a `sync_channel`: an mpsc
+/// `try_send` takes the receiver-waker mutex whenever the consumer is parked
+/// in `recv_timeout` (it almost always is), which let this normal-priority
+/// thread stall the FIFO-80 DC thread for 358 µs on the 2026-07-27 bench and
+/// park the drives. rtrb push/pop are wait-free on both ends — no waker, no
+/// futex — so the writer polls instead of parking.
 pub struct Capture {
     control: Sender<IoMsg>,
     spare_channels: Receiver<RecordChannel>,
@@ -318,7 +325,7 @@ impl Capture {
         let (control, control_rx) = channel();
         let (spare_tx, spare_channels) = channel();
         spare_tx
-            .send(sync_channel(capacity))
+            .send(rtrb::RingBuffer::new(capacity))
             .expect("spare receiver held by self");
         let service = std::thread::Builder::new()
             .name("capture-io".into())
@@ -429,14 +436,12 @@ impl Capture {
         if active.failure.is_some() {
             return;
         }
-        match active.tx.try_send(record) {
-            Ok(()) => {}
-            Err(TrySendError::Full(r)) => {
-                active.failure = Some((r.cycle_index, ERR_CAPTURE_OVERFLOW));
-            }
-            Err(TrySendError::Disconnected(r)) => {
-                active.failure = Some((r.cycle_index, ERR_CAPTURE_FILE));
-            }
+        if active.tx.is_abandoned() {
+            active.failure = Some((record.cycle_index, ERR_CAPTURE_FILE));
+            return;
+        }
+        if let Err(rtrb::PushError::Full(r)) = active.tx.push(record) {
+            active.failure = Some((r.cycle_index, ERR_CAPTURE_OVERFLOW));
         }
     }
 
@@ -533,7 +538,7 @@ fn service_loop(control: Receiver<IoMsg>, spares: &Sender<RecordChannel>, capaci
                 records,
                 reply,
             } => {
-                let _ = spares.send(sync_channel(capacity));
+                let _ = spares.send(rtrb::RingBuffer::new(capacity));
                 let path = PathBuf::from(&cfg.path);
                 let session = match open_session(&path) {
                     Ok(file) => {
@@ -640,7 +645,7 @@ fn run_session(
     path: &Path,
     header: String,
     hook: WriterHook,
-    rx: Receiver<CaptureRecord>,
+    mut rx: rtrb::Consumer<CaptureRecord>,
 ) -> Result<u64, (u64, String)> {
     let mut sink =
         Sink::new(file, path).map_err(|e| (0u64, format!("capture encoder init: {e}")))?;
@@ -661,15 +666,19 @@ fn run_session(
     let mut written = 0u64;
     let mut last_flush = Instant::now();
     loop {
-        match rx.recv_timeout(WRITER_RECV_TIMEOUT) {
+        match rx.pop() {
             Ok(r) => {
                 let (buf, size) = encode_record(&r);
                 sink.write_all(&buf[..size])
                     .map_err(|e| (written, format!("capture record write: {e}")))?;
                 written += 1;
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(rtrb::PopError::Empty) => {
+                if rx.is_abandoned() && rx.is_empty() {
+                    break;
+                }
+                std::thread::sleep(WRITER_POLL);
+            }
         }
         if last_flush.elapsed() >= WRITER_FLUSH_INTERVAL {
             sink.flush()

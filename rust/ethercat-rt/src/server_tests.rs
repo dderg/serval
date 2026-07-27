@@ -141,3 +141,54 @@ fn recovery_clears_the_stall_clock() {
     assert!(!server.session_ended());
     assert_eq!(state.lock().sink, vec![0, 1, 2]);
 }
+
+/// The command ring is bounded; when the RT side stops popping, the reader
+/// must block on the full ring (backpressuring the socket) and deliver every
+/// command in order once draining resumes — never drop or reorder.
+#[test]
+fn full_command_ring_backpressures_the_reader_without_losing_commands() {
+    use std::io::Write as _;
+    use std::os::unix::net::UnixStream;
+
+    use super::{Command, CMD_QUEUE_CAPACITY};
+
+    const TOTAL: usize = CMD_QUEUE_CAPACITY + 500;
+    let sock = std::env::temp_dir().join(format!(
+        "ec-rt-cmd-backpressure-{}.sock",
+        std::process::id()
+    ));
+    let mut server = FrameServer::bind(sock.to_str().unwrap()).expect("bind");
+    let mut client = UnixStream::connect(&sock).expect("connect");
+    let sender = std::thread::spawn(move || {
+        for cid in 0..TOTAL {
+            let msg = mcu_transport::bootstrap::encode_identify(cid as u32, 1);
+            let frame =
+                mcu_transport::frame::encode_frame(mcu_transport::frame::CHANNEL_CONTROL, &msg);
+            client.write_all(&frame).expect("client write");
+        }
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut received = 0usize;
+    while received < TOTAL {
+        match server.pop_command() {
+            Some(Command::Identify { correlation_id, .. }) => {
+                assert_eq!(
+                    correlation_id as usize, received,
+                    "commands must arrive in order with none lost"
+                );
+                received += 1;
+            }
+            Some(other) => panic!("unexpected command: {other:?}"),
+            None => {
+                assert!(
+                    Instant::now() < deadline,
+                    "stalled at {received}/{TOTAL} commands"
+                );
+                std::thread::sleep(Duration::from_micros(200));
+            }
+        }
+    }
+    sender.join().expect("sender thread");
+    let _ = std::fs::remove_file(&sock);
+}
