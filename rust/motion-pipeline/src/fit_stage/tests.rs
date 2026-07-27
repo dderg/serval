@@ -557,3 +557,52 @@ fn entry_z_step_keeps_seam_contiguity() {
     }
     run_fit_stage(&moves, CornerFitConfig::default());
 }
+
+/// Six consecutive moves from a Voron-cube top layer (bench 2026-07-27): a
+/// shallow near-collinear run arc-fits at r=35.5mm with only 0.069rad of
+/// sweep, while its 11.7mm tail neighbor lets the easing spirals claim more
+/// lead angle than the whole arc has. The residual mid-arc then truly runs
+/// backward, and unwrapping it toward the original direction emitted a
+/// near-full-circle arc — the toolhead traced a 71mm-wide circle around the
+/// part. Every fitted arc must stay commensurate with the input path.
+#[test]
+fn shallow_arc_ease_never_wraps_into_a_full_circle() {
+    let pts: [[f64; 3]; 6] = [
+        [130.943, 157.408, 37.0],
+        [130.365, 157.407, 37.0],
+        [130.108, 157.406, 37.0],
+        [128.498, 157.345, 37.0],
+        [127.755, 157.302, 37.0],
+        [116.008, 156.626, 37.0],
+    ];
+    let feeds = [175.0, 432.56095, 432.56095, 432.56095, 432.56095];
+    let extrusions = [0.01944, 0.00865, 0.0542, 0.02504, 0.39582];
+    let mut input_len = 0.0;
+    let moves: Vec<Move> = pts
+        .windows(2)
+        .zip(feeds.iter().zip(extrusions.iter()))
+        .enumerate()
+        .map(|(i, (w, (&feed, &e)))| {
+            input_len += (0..3)
+                .map(|k| (w[1][k] - w[0][k]).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let mut c = ctx(1 + i as u32, feed);
+            c.limits = VelocityLimits::try_new(2800.0, 100_000.0, 0.03, f64::INFINITY).unwrap();
+            line_move(w[0], w[1], e, c).unwrap()
+        })
+        .collect();
+    let fitted = run_fit_stage(&moves, CornerFitConfig::default());
+    for m in &fitted {
+        if let Some(geometry::path::Segment::Arc(a)) = &m.segment.spatial {
+            let arc_len = a.radius * a.sweep.abs();
+            assert!(
+                arc_len < input_len,
+                "fitted arc length {arc_len:.3}mm exceeds the whole input path \
+                 ({input_len:.3}mm): sweep wrapped (r={:.3}, sweep={:.4})",
+                a.radius,
+                a.sweep
+            );
+        }
+    }
+}
