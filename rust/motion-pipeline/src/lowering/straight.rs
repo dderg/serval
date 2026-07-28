@@ -38,13 +38,15 @@ fn apply_pre_kernel_stages(
                 }
             }
             ChainStage::NonlinearAdvance(adv) => {
-                pieces = apply_nonlinear_advance_pieces(&pieces, *adv, tol).map_err(|e| {
-                    LoweringError::AdvanceFitUnresolved {
-                        axis,
-                        t: e.u_start,
-                        span_s: e.span_s,
-                    }
-                })?;
+                let width = crate::advance::downstream_kernel_width(chain);
+                pieces =
+                    apply_nonlinear_advance_pieces(&pieces, *adv, tol, width).map_err(|e| {
+                        LoweringError::AdvanceFitUnresolved {
+                            axis,
+                            t: e.u_start,
+                            span_s: e.span_s,
+                        }
+                    })?;
             }
         }
     }

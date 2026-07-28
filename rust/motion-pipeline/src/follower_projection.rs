@@ -218,7 +218,8 @@ fn apply_leading_stages(
                     pos_mm: crate::shaper::SHAPED_FIT_TOL_MM,
                     accel_mm_s2: crate::shaper::SHAPED_FIT_TOL_ACCEL_MM_S2,
                 };
-                let out = crate::advance::apply_nonlinear_advance_pieces(&pieces, *adv, tol)
+                let width = crate::advance::downstream_kernel_width(chain);
+                let out = crate::advance::apply_nonlinear_advance_pieces(&pieces, *adv, tol, width)
                     .map_err(|e| PostProcessError::AdvanceFitUnresolved {
                         axis,
                         t: e.u_start,

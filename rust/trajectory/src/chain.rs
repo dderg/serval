@@ -83,6 +83,32 @@ impl NonlinearAdvance {
         let (_, _, dds) = self.model.shape(v / vl);
         self.nonlinear_offset / (vl * vl) * dds
     }
+
+    /// A global bound on `|d³a/dv³|`: the unit shapes satisfy
+    /// `max|s'''| = 2` (tanh, at 0) and `= 6` (reciprocal, at 0±).
+    #[must_use]
+    pub fn third_derivative_bound(&self) -> f64 {
+        let s3 = match self.model {
+            AdvanceModel::Tanh => 2.0,
+            AdvanceModel::Reciprocal => 6.0,
+        };
+        let vl = self.linearization_velocity;
+        self.nonlinear_offset / (vl * vl * vl) * s3
+    }
+
+    /// The jump of `d²a/dv²` at `v = 0`: zero for tanh (smooth), while the
+    /// reciprocal shape's odd extension is only C¹ there
+    /// (`s''(0±) = ∓2`, a jump of 4).
+    #[must_use]
+    pub fn rest_curvature_jump(&self) -> f64 {
+        match self.model {
+            AdvanceModel::Tanh => 0.0,
+            AdvanceModel::Reciprocal => {
+                let vl = self.linearization_velocity;
+                4.0 * self.nonlinear_offset / (vl * vl)
+            }
+        }
+    }
 }
 
 impl ChainStage {

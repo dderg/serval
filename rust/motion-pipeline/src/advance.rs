@@ -34,6 +34,23 @@ impl std::fmt::Display for AdvanceFitError {
 /// peaks between them.
 const PROBES_U: [f64; 4] = [0.15, 0.38, 0.62, 0.85];
 
+/// Support width of the chain's smoothing kernel — the one the compile rule
+/// (`NonlinearAdvanceNeedsKernel`) guarantees downstream of a pre-kernel
+/// advance stage.
+pub(crate) fn downstream_kernel_width(chain: &trajectory::CompiledChain) -> f64 {
+    chain
+        .stages
+        .iter()
+        .find_map(|stage| match stage {
+            trajectory::ChainStage::SmoothKernel(kernel) => {
+                let (lo, hi) = kernel.support();
+                Some(hi - lo)
+            }
+            _ => None,
+        })
+        .expect("chain with a nonlinear advance must carry a smoothing kernel")
+}
+
 /// `y = x + a(ẋ)` applied in closed form to monomial-in-`τ` pieces.
 ///
 /// Per piece the advance law is expanded to second order about the midpoint
@@ -43,11 +60,22 @@ const PROBES_U: [f64; 4] = [0.15, 0.38, 0.62, 0.85];
 /// remainder against the fit budgets; a piece that misses bisects until it
 /// fits, and errors out loudly at the span floor. Output pieces share one
 /// uniform degree.
+///
+/// `kernel_width_s` is the support width of the downstream smoothing kernel
+/// (`NonlinearAdvanceNeedsKernel` guarantees one behind a pre-kernel
+/// advance); it sizes the acceptance budget for pieces whose composed target
+/// acceleration is too extreme for the absolute budget to be meaningful.
 pub(crate) fn apply_nonlinear_advance_pieces(
     pieces: &[BezierPiece],
     adv: NonlinearAdvance,
     tol: FitTol,
+    kernel_width_s: f64,
 ) -> Result<Vec<BezierPiece>, AdvanceFitError> {
+    assert!(
+        kernel_width_s > 0.0,
+        "nonlinear advance composes pre-kernel; a downstream kernel is guaranteed"
+    );
+    let waiver = AccelWaiver::for_kernel(tol, kernel_width_s);
     let in_len = pieces
         .iter()
         .map(|p| p.coeffs.len())
@@ -70,6 +98,7 @@ pub(crate) fn apply_nonlinear_advance_pieces(
             piece.u_end,
             adv,
             tol,
+            waiver,
             out_len,
             0,
             &mut out,
@@ -77,6 +106,37 @@ pub(crate) fn apply_nonlinear_advance_pieces(
     }
     Ok(out)
 }
+/// Fallback acceptance for pieces whose composed target acceleration dwarfs
+/// the absolute budget (`ÿ = a + a''(v)a² + a'(v)j` reaches 1e8 mm/s² on
+/// jerk-unlimited retract ramps, where ±50 mm/s² absolute means ppb relative
+/// accuracy and bisection runs to the floor). Such a piece is accepted on a
+/// *tightened, analytically bounded* position budget instead: the downstream
+/// kernel turns a position error `e` confined to one piece into at most
+/// `16·max|e|/width²` of smoothed acceleration error (the triangle kernel's
+/// second derivative is four delta taps of weight `(2/width)²`), so holding
+/// `max|e| ≤ accel_budget·width²/64` keeps this piece's contribution under a
+/// quarter of the acceleration budget after smoothing. `max|e|` is bounded
+/// rigorously, not probed: the Taylor remainder is `≤ M₃/6·dv_max³` (plus a
+/// `Δa''/2·dv_max²` term when a reciprocal piece straddles rest, where its
+/// `a''` jumps), and the quintic correction is a polynomial we hold the
+/// coefficients of, so its Bernstein bound is exact.
+#[derive(Clone, Copy)]
+struct AccelWaiver {
+    pos_mm: f64,
+    rel: f64,
+}
+
+const ACCEL_REL_TOL: f64 = 1e-3;
+
+impl AccelWaiver {
+    fn for_kernel(tol: FitTol, kernel_width_s: f64) -> Self {
+        Self {
+            pos_mm: (tol.accel_mm_s2 * kernel_width_s * kernel_width_s / 64.0).min(tol.pos_mm),
+            rel: ACCEL_REL_TOL,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compose_recursive(
     coeffs: &[f64],
@@ -84,6 +144,7 @@ fn compose_recursive(
     u_end: f64,
     adv: NonlinearAdvance,
     tol: FitTol,
+    waiver: AccelWaiver,
     out_len: usize,
     depth: u32,
     out: &mut Vec<BezierPiece>,
@@ -91,11 +152,11 @@ fn compose_recursive(
     let h = u_end - u_start;
     assert!(h > 0.0, "nonlinear advance: non-positive piece span {h}");
     let candidate = composed_candidate(coeffs, h, adv, out_len);
-    if candidate_fits(coeffs, &candidate, h, adv, tol) {
+    if candidate_fits(coeffs, &candidate, h, adv, tol, waiver) {
         out.push(BezierPiece {
             u_start,
             u_end,
-            coeffs: candidate,
+            coeffs: candidate.coeffs,
         });
         return Ok(());
     }
@@ -104,13 +165,43 @@ fn compose_recursive(
     }
     let mid = u_start + 0.5 * h;
     let right = shifted_monomial(coeffs, 0.5 * h);
-    compose_recursive(coeffs, u_start, mid, adv, tol, out_len, depth + 1, out)?;
-    compose_recursive(&right, mid, u_end, adv, tol, out_len, depth + 1, out)
+    compose_recursive(
+        coeffs,
+        u_start,
+        mid,
+        adv,
+        tol,
+        waiver,
+        out_len,
+        depth + 1,
+        out,
+    )?;
+    compose_recursive(
+        &right,
+        mid,
+        u_end,
+        adv,
+        tol,
+        waiver,
+        out_len,
+        depth + 1,
+        out,
+    )
+}
+
+/// The composed candidate plus the ingredients of the rigorous position
+/// residual bound: `dv_max` (Bernstein bound of `v(τ) − v_mid`), the
+/// midpoint velocity, and the Bernstein bound of the quintic correction.
+struct Candidate {
+    coeffs: Vec<f64>,
+    v_mid: f64,
+    dv_max: f64,
+    correction_max: f64,
 }
 
 /// Quadratic Taylor of the advance about the midpoint velocity, plus the
 /// quintic Hermite correction that restores exact endpoint `(y, ẏ, ÿ)`.
-fn composed_candidate(coeffs: &[f64], h: f64, adv: NonlinearAdvance, out_len: usize) -> Vec<f64> {
+fn composed_candidate(coeffs: &[f64], h: f64, adv: NonlinearAdvance, out_len: usize) -> Candidate {
     let (_, v_mid, _, _) = state_at(coeffs, 0.5 * h);
     let a0 = adv.advance(v_mid);
     let a1 = adv.slope(v_mid);
@@ -136,17 +227,47 @@ fn composed_candidate(coeffs: &[f64], h: f64, adv: NonlinearAdvance, out_len: us
 
     let (r0, r0v, r0a) = endpoint_residual(coeffs, &q, 0.0, adv);
     let (r1, r1v, r1a) = endpoint_residual(coeffs, &q, h, adv);
-    q[0] += r0;
-    q[1] += r0v;
-    q[2] += 0.5 * r0a;
+    let mut c = [0.0_f64; 6];
+    c[0] = r0;
+    c[1] = r0v;
+    c[2] = 0.5 * r0a;
     let p_gap = r1 - (r0 + h * (r0v + h * 0.5 * r0a));
     let v_gap = r1v - (r0v + h * r0a);
     let a_gap = r1a - r0a;
     let h2 = h * h;
-    q[3] += (10.0 * p_gap - 4.0 * v_gap * h + 0.5 * a_gap * h2) / (h2 * h);
-    q[4] += (-15.0 * p_gap + 7.0 * v_gap * h - a_gap * h2) / (h2 * h2);
-    q[5] += (6.0 * p_gap - 3.0 * v_gap * h + 0.5 * a_gap * h2) / (h2 * h2 * h);
-    q
+    c[3] = (10.0 * p_gap - 4.0 * v_gap * h + 0.5 * a_gap * h2) / (h2 * h);
+    c[4] = (-15.0 * p_gap + 7.0 * v_gap * h - a_gap * h2) / (h2 * h2);
+    c[5] = (6.0 * p_gap - 3.0 * v_gap * h + 0.5 * a_gap * h2) / (h2 * h2 * h);
+    for (qk, ck) in q.iter_mut().zip(c.iter()) {
+        *qk += ck;
+    }
+    Candidate {
+        coeffs: q,
+        v_mid,
+        dv_max: bernstein_max_abs(&dv, h),
+        correction_max: bernstein_max_abs(&c, h),
+    }
+}
+
+/// Rigorous `max |p(τ)|` bound on `[0, h]`: the Bernstein coefficients of a
+/// polynomial bound it by their convex hull, `b_k = Σ_i C(k,i)/C(n,i)·a_i·hⁱ`.
+fn bernstein_max_abs(coeffs: &[f64], h: f64) -> f64 {
+    let n = coeffs.len() - 1;
+    let mut worst = 0.0_f64;
+    for k in 0..=n {
+        let mut b = 0.0_f64;
+        let mut ratio = 1.0_f64;
+        let mut h_pow = 1.0_f64;
+        for (i, &a) in coeffs.iter().enumerate().take(k + 1) {
+            if i > 0 {
+                ratio *= (k + 1 - i) as f64 / (n + 1 - i) as f64;
+                h_pow *= h;
+            }
+            b = (a * ratio).mul_add(h_pow, b);
+        }
+        worst = worst.max(b.abs());
+    }
+    worst
 }
 
 fn endpoint_residual(
@@ -162,21 +283,39 @@ fn endpoint_residual(
 
 fn candidate_fits(
     coeffs: &[f64],
-    candidate: &[f64],
+    candidate: &Candidate,
     h: f64,
     adv: NonlinearAdvance,
     tol: FitTol,
+    waiver: AccelWaiver,
 ) -> bool {
-    PROBES_U.iter().all(|&u| {
+    let mut plain = true;
+    let mut accel_waivable = true;
+    for &u in &PROBES_U {
         let tau = u * h;
         let (y, _, ya) = exact_output(coeffs, tau, adv);
-        let (qp, _, qa, _) = state_at(candidate, tau);
+        let (qp, _, qa, _) = state_at(&candidate.coeffs, tau);
         assert!(
             y.is_finite() && qp.is_finite(),
             "nonlinear advance: non-finite sample at tau {tau}"
         );
-        (y - qp).abs() <= tol.pos_mm && (ya - qa).abs() <= tol.accel_mm_s2
-    })
+        let pos_err = (y - qp).abs();
+        let acc_err = (ya - qa).abs();
+        plain &= pos_err <= tol.pos_mm && acc_err <= tol.accel_mm_s2;
+        accel_waivable &= acc_err <= waiver.rel.mul_add(ya.abs(), tol.accel_mm_s2);
+    }
+    if plain {
+        return true;
+    }
+    if !accel_waivable {
+        return false;
+    }
+    let dv = candidate.dv_max;
+    let mut remainder = adv.third_derivative_bound() / 6.0 * dv * dv * dv;
+    if candidate.v_mid.abs() <= dv {
+        remainder += 0.5 * adv.rest_curvature_jump() * dv * dv;
+    }
+    remainder + candidate.correction_max <= waiver.pos_mm
 }
 
 /// The advance law's exact `(y, ẏ, ÿ)` from the input piece's state:
