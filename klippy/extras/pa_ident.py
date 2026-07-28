@@ -5,6 +5,15 @@ extruder TMC driver's StallGuard load register, and writes the samples
 plus the commanded schedule to a CSV for offline fitting with
 scripts/fit_pa_from_load.py.
 
+SGT= accepts either one value for the whole capture or a comma list
+with one value per velocity. The list form re-centers every velocity
+step in the middle of the SG scale (the raw reading compresses near
+its ends, which distorts the fitted advance curve) and runs the
+staircase as blocks of constant sgt: motion stops at each sgt change
+(register writes are immediate, never mid-motion), and adjacent blocks
+re-measure each other's boundary velocities so the fitter can solve an
+affine reading map per sgt from the overlaps instead of assuming one.
+
 Copyright (C) 2026  Kalico contributors
 
 This file may be distributed under the terms of the GNU GPLv3 license.
@@ -186,27 +195,64 @@ class PAIdent:
             post += " ADVANCE=%.6f" % (fields["pressure_advance"],)
         return pre, post
 
-    def _build_schedule(self, velocities, dwell, pulse_reps, anchor_time):
-        script = ["SAVE_GCODE_STATE NAME=PA_LOAD_IDENT", "M83"]
+    def _dwell_block(self, velocity_seq, dwell, anchor_time):
+        lines = []
         schedule = []
         current_time = anchor_time
-        staircase = velocities + velocities[-2::-1]
-        v_min = min(velocities)
-        pulses = []
-        for velocity in velocities[len(velocities) // 2 :]:
-            pulses += [velocity, v_min]
-        for velocity in staircase + pulses * pulse_reps:
+        for velocity in velocity_seq:
             total_e = velocity * dwell
             segment_start = current_time
             while total_e > 0.0:
                 chunk = min(total_e, MAX_SEGMENT_E)
-                script.append("G1 E%.4f F%.1f" % (chunk, velocity * 60.0))
+                lines.append("G1 E%.4f F%.1f" % (chunk, velocity * 60.0))
                 total_e -= chunk
             current_time += dwell
             schedule.append((segment_start, current_time, velocity))
-        script.append("M400")
-        script.append("RESTORE_GCODE_STATE NAME=PA_LOAD_IDENT")
-        return script, schedule, current_time
+        return lines, schedule
+
+    def _pulse_sequence(self, velocities, pulse_reps):
+        v_min = min(velocities)
+        pulses = []
+        for velocity in velocities[len(velocities) // 2 :]:
+            pulses += [velocity, v_min]
+        return pulses * pulse_reps
+
+    def _sgt_blocks(self, velocities, sgt_list):
+        groups = []
+        for velocity, sgt in zip(velocities, sgt_list):
+            if groups and groups[-1][0] == sgt:
+                groups[-1][1].append(velocity)
+            else:
+                groups.append((sgt, [velocity]))
+        blocks = []
+        for i, (sgt, vels) in enumerate(groups):
+            seq = list(vels)
+            if i > 0:
+                seq.insert(0, groups[i - 1][1][-1])
+            if i + 1 < len(groups):
+                seq.append(groups[i + 1][1][0])
+            blocks.append((sgt, seq))
+        return blocks
+
+    def _parse_sgt(self, gcmd, velocities):
+        sgt_str = gcmd.get("SGT", None)
+        if sgt_str is None:
+            return None, None
+        try:
+            sgt_values = [int(s) for s in sgt_str.split(",")]
+        except ValueError:
+            raise gcmd.error("Malformed SGT list %r" % (sgt_str,))
+        if any(s < -64 or s > 63 for s in sgt_values):
+            raise gcmd.error("SGT values must be in -64..63")
+        if len(sgt_values) == 1:
+            return sgt_values[0], None
+        if len(sgt_values) != len(velocities):
+            raise gcmd.error(
+                "SGT list has %d values for %d velocities; give one per "
+                "velocity (or a single value)"
+                % (len(sgt_values), len(velocities))
+            )
+        return None, sgt_values
 
     def _poll(self, mcu_tmc, mcu, reg_name, interval, done):
         reactor = self.printer.get_reactor()
@@ -226,19 +272,27 @@ class PAIdent:
             self.poll_error = str(e)
         done.complete(None)
 
-    def _write_csv(self, path, tmc_name, reg_name, schedule, smooth_time):
+    def _write_csv(
+        self, path, tmc_name, reg_name, schedule, smooth_time, sgt=None
+    ):
         with open(path, "w") as f:
-            f.write("# pa_ident v1\n")
+            f.write("# pa_ident v2\n")
             f.write("# tmc=%s reg=%s\n" % (tmc_name, reg_name))
             f.write("# smooth_time=%.6f\n" % (smooth_time,))
-            for start, end, velocity in schedule:
-                f.write("S,%.6f,%.6f,%.4f\n" % (start, end, velocity))
+            if sgt is not None:
+                f.write("# sgt=%d\n" % (sgt,))
+            for row in schedule:
+                if len(row) == 4:
+                    f.write("S,%.6f,%.6f,%.4f,%d\n" % row)
+                else:
+                    f.write("S,%.6f,%.6f,%.4f\n" % row)
             for sample_time, value in self.samples:
                 f.write("D,%.6f,%d\n" % (sample_time, value))
 
     cmd_PA_LOAD_IDENT_help = (
-        "Run an in-air extrusion schedule while sampling extruder TMC "
-        "load telemetry; writes a CSV for fit_pa_from_load.py"
+        "Capture extruder TMC load over a scripted in-air extrusion "
+        "velocity schedule and write a CSV for offline pressure-advance "
+        "fitting"
     )
 
     def cmd_PA_LOAD_IDENT(self, gcmd):
@@ -262,45 +316,56 @@ class PAIdent:
         smooth_time = gcmd.get_float("SMOOTH_TIME", 0.03, minval=0.0)
         interval = gcmd.get_float("INTERVAL", MIN_POLL_PAUSE, minval=0.0)
         out_path = gcmd.get("OUT", "/tmp/pa_ident.csv")
-        sgt = gcmd.get_int("SGT", None, minval=-64, maxval=63)
+        sgt, sgt_list = self._parse_sgt(gcmd, velocities)
+        pulse_sgt = gcmd.get_int("PULSE_SGT", None, minval=-64, maxval=63)
+        if pulse_sgt is not None and sgt_list is None:
+            raise gcmd.error("PULSE_SGT= requires a per-velocity SGT list")
 
         pre_script, post_script = self._smoothing_scripts(
             gcmd, toolhead, smooth_time
         )
-        anchor_time = toolhead.get_last_move_time()
-        script, schedule, end_time = self._build_schedule(
-            velocities, dwell, pulse_reps, anchor_time
-        )
-        if pre_script is not None:
-            script.insert(0, pre_script)
-
-        self.samples = []
-        self.poll_error = None
-        reactor = self.printer.get_reactor()
-        poll_done = reactor.completion()
-        self.poll_deadline = end_time + POLL_TAIL_TIME
-        reactor.register_callback(
-            lambda e: self._poll(mcu_tmc, mcu, reg_name, interval, poll_done)
-        )
-
-        sgt_reg = None
-        if sgt is not None:
-            sgt_reg = self._apply_sgt(gcmd, tmc_object, sgt)
-        try:
-            self.gcode.run_script_from_command("\n".join(script))
-            poll_done.wait()
-        finally:
-            if sgt_reg is not None:
-                self._restore_sgt(tmc_object, sgt_reg)
-            if post_script is not None:
-                self.gcode.run_script_from_command(post_script)
+        if sgt_list is not None:
+            schedule = self._run_stepped(
+                gcmd,
+                tmc_object,
+                mcu_tmc,
+                mcu,
+                toolhead,
+                reg_name,
+                velocities,
+                sgt_list,
+                pulse_sgt if pulse_sgt is not None else sgt_list[0],
+                dwell,
+                pulse_reps,
+                interval,
+                pre_script,
+                post_script,
+            )
+            csv_sgt = None
+        else:
+            schedule = self._run_continuous(
+                gcmd,
+                tmc_object,
+                mcu_tmc,
+                mcu,
+                toolhead,
+                reg_name,
+                velocities,
+                sgt,
+                dwell,
+                pulse_reps,
+                interval,
+                pre_script,
+                post_script,
+            )
+            csv_sgt = sgt
         if self.poll_error is not None:
             raise gcmd.error("TMC load polling failed: %s" % (self.poll_error,))
         if not self.samples:
             raise gcmd.error("No load samples collected")
 
         self._write_csv(
-            out_path, self.tmc_name, reg_name, schedule, smooth_time
+            out_path, self.tmc_name, reg_name, schedule, smooth_time, csv_sgt
         )
         durations = [
             self.samples[i + 1][0] - self.samples[i][0]
@@ -318,6 +383,110 @@ class PAIdent:
                 out_path,
             )
         )
+
+    def _start_poll(self, mcu_tmc, mcu, reg_name, interval):
+        reactor = self.printer.get_reactor()
+        self.samples = []
+        self.poll_error = None
+        poll_done = reactor.completion()
+        reactor.register_callback(
+            lambda e: self._poll(mcu_tmc, mcu, reg_name, interval, poll_done)
+        )
+        return poll_done
+
+    def _run_continuous(
+        self,
+        gcmd,
+        tmc_object,
+        mcu_tmc,
+        mcu,
+        toolhead,
+        reg_name,
+        velocities,
+        sgt,
+        dwell,
+        pulse_reps,
+        interval,
+        pre_script,
+        post_script,
+    ):
+        staircase = velocities + velocities[-2::-1]
+        sequence = staircase + self._pulse_sequence(velocities, pulse_reps)
+        anchor_time = toolhead.get_last_move_time()
+        lines, schedule = self._dwell_block(sequence, dwell, anchor_time)
+        script = ["SAVE_GCODE_STATE NAME=PA_LOAD_IDENT", "M83"]
+        if pre_script is not None:
+            script.insert(0, pre_script)
+        script += lines
+        script.append("M400")
+        script.append("RESTORE_GCODE_STATE NAME=PA_LOAD_IDENT")
+
+        self.poll_deadline = schedule[-1][1] + POLL_TAIL_TIME
+        poll_done = self._start_poll(mcu_tmc, mcu, reg_name, interval)
+        sgt_reg = None
+        if sgt is not None:
+            sgt_reg = self._apply_sgt(gcmd, tmc_object, sgt)
+        try:
+            self.gcode.run_script_from_command("\n".join(script))
+            poll_done.wait()
+        finally:
+            if sgt_reg is not None:
+                self._restore_sgt(tmc_object, sgt_reg)
+            if post_script is not None:
+                self.gcode.run_script_from_command(post_script)
+        return schedule
+
+    def _run_stepped(
+        self,
+        gcmd,
+        tmc_object,
+        mcu_tmc,
+        mcu,
+        toolhead,
+        reg_name,
+        velocities,
+        sgt_list,
+        pulse_sgt,
+        dwell,
+        pulse_reps,
+        interval,
+        pre_script,
+        post_script,
+    ):
+        blocks = self._sgt_blocks(velocities, sgt_list)
+        blocks.append((pulse_sgt, self._pulse_sequence(velocities, pulse_reps)))
+        self.poll_deadline = float("inf")
+        poll_done = self._start_poll(mcu_tmc, mcu, reg_name, interval)
+        schedule = []
+        sgt_reg = None
+        try:
+            preamble = ["SAVE_GCODE_STATE NAME=PA_LOAD_IDENT", "M83"]
+            if pre_script is not None:
+                preamble.insert(0, pre_script)
+            self.gcode.run_script_from_command("\n".join(preamble))
+            for block_sgt, sequence in blocks:
+                sgt_reg = self._apply_sgt(gcmd, tmc_object, block_sgt)
+                anchor_time = toolhead.get_last_move_time()
+                lines, rows = self._dwell_block(sequence, dwell, anchor_time)
+                self.gcode.run_script_from_command("\n".join(lines + ["M400"]))
+                schedule += [
+                    (t0, t1, velocity, block_sgt) for t0, t1, velocity in rows
+                ]
+            self.gcode.run_script_from_command(
+                "RESTORE_GCODE_STATE NAME=PA_LOAD_IDENT"
+            )
+            self.poll_deadline = toolhead.get_last_move_time() + POLL_TAIL_TIME
+            poll_done.wait()
+        except BaseException:
+            self.poll_deadline = 0.0
+            raise
+        finally:
+            poll_done.wait()
+            if sgt_reg is not None:
+                self._restore_sgt(tmc_object, sgt_reg)
+            if post_script is not None:
+                self.gcode.run_script_from_command(post_script)
+        return schedule
 
 
 def load_config(config):
