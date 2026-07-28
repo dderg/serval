@@ -350,3 +350,151 @@ def test_engine_error_becomes_command_error():
     _, gcode, _ = make(DECLARED, engine=RaisingEngine())
     with pytest.raises(CommandError, match="pa"):
         run(gcode, {"EXTRUDER": "extruder", "ADVANCE": "0.1"})
+
+
+NONLINEAR = [
+    axis("e", follows="x,y,z", post_processors="tanh,st"),
+    post_processor(
+        "tanh",
+        type="tanh_pressure_advance",
+        linear_advance="0.011",
+        nonlinear_offset="0.147",
+        linearization_velocity="5.99",
+    ),
+    post_processor("st", type="smooth_triangle", smooth_time="0.013"),
+    extruder(axis="e"),
+]
+
+
+def test_nonlinear_axis_binds_bev2_knobs():
+    obj, _, _ = make(NONLINEAR)
+    targets = obj.extruders["extruder"]
+    assert targets.advance.post_processor == "tanh"
+    assert targets.advance.param_key == "linear_advance"
+    assert targets.offset.param_key == "nonlinear_offset"
+    assert targets.velocity.param_key == "linearization_velocity"
+    assert targets.offset.initial_value == pytest.approx(0.147)
+    assert targets.velocity.initial_value == pytest.approx(5.99)
+
+
+def test_nonlinear_knobs_apply_to_engine():
+    engine = StubEngine()
+    _, gcode, _ = make(NONLINEAR, engine=engine)
+    run(
+        gcode,
+        {
+            "EXTRUDER": "extruder",
+            "ADVANCE": "0.006",
+            "OFFSET": "0.08",
+            "VELOCITY": "7.5",
+        },
+    )
+    assert ("tanh", "linear_advance", 0.006) in engine.calls
+    assert ("tanh", "nonlinear_offset", 0.08) in engine.calls
+    assert ("tanh", "linearization_velocity", 7.5) in engine.calls
+
+
+def test_offset_on_linear_axis_reports_disabled():
+    engine = StubEngine()
+    _, gcode, _ = make(DECLARED, engine=engine)
+    gcmd = run(gcode, {"EXTRUDER": "extruder", "OFFSET": "0.1"})
+    assert engine.calls == []
+    assert any("cannot set OFFSET" in r for r in gcmd.responses)
+
+
+def test_two_advance_family_pps_are_ambiguous():
+    sections = [
+        axis("e", follows="x,y,z", post_processors="pa,tanh"),
+        post_processor("pa", type="linear_pressure_advance", k="0.04"),
+        post_processor(
+            "tanh",
+            type="tanh_pressure_advance",
+            linear_advance="0.01",
+            nonlinear_offset="0.1",
+            linearization_velocity="6",
+        ),
+        extruder(axis="e"),
+    ]
+    obj, _, _ = make(sections)
+    targets = obj.extruders["extruder"]
+    assert not targets.advance.enabled
+    assert "multiple advance-family" in targets.advance.reason
+
+
+def test_status_fields_include_nonlinear_params():
+    engine = StubEngine()
+    obj, _, _ = make(NONLINEAR, engine=engine)
+    fields = obj.get_status_fields("extruder")
+    assert fields["pressure_advance"] == pytest.approx(0.011)
+    assert fields["nonlinear_offset"] == pytest.approx(0.147)
+    assert fields["linearization_velocity"] == pytest.approx(5.99)
+    assert fields["smooth_time"] == pytest.approx(0.013)
+
+
+class StubMoveTransform:
+    def __init__(self):
+        self.moves = []
+
+    def get_position(self):
+        return [0.0, 0.0, 0.0, 0.0]
+
+    def move(self, newpos, speed):
+        self.moves.append(list(newpos))
+
+
+class StubGcodeMove:
+    def __init__(self, normal):
+        self.normal = normal
+        self.z = 0.0
+
+    def set_move_transform(self, transform, force=False):
+        return self.normal
+
+    def get_status(self):
+        import types
+
+        return {"gcode_position": types.SimpleNamespace(z=self.z)}
+
+
+def test_tuning_tower_offset_parameter_reaches_the_engine():
+    from klippy.extras.tuning_tower import TuningTower
+
+    engine = StubEngine()
+    _, gcode, printer = make(
+        NONLINEAR, engine=engine, active_extruder="extruder"
+    )
+    normal = StubMoveTransform()
+    gcode_move = StubGcodeMove(normal)
+    printer.objects["gcode_move"] = gcode_move
+    printer.load_object = lambda config, name: printer.objects[name]
+    gcode.is_traditional_gcode = lambda command: False
+    gcode.respond_info = lambda msg: None
+
+    def run_script_from_command(script):
+        name, rest = script.split(None, 1)
+        params = dict(part.split("=", 1) for part in rest.split())
+        gcode.commands[name](StubGcmd(params))
+
+    gcode.run_script_from_command = run_script_from_command
+
+    tower = TuningTower(StubConfig([], printer))
+    tower.cmd_TUNING_TOWER(
+        StubGcmd(
+            {
+                "COMMAND": "SET_PRESSURE_ADVANCE",
+                "PARAMETER": "OFFSET",
+                "START": "0.0",
+                "STEP_DELTA": "0.02",
+                "STEP_HEIGHT": "5.0",
+            }
+        )
+    )
+    for z, e in ((1.0, 1.0), (6.0, 2.0)):
+        gcode_move.z = z
+        tower.move([10.0 + e, 0.0, z, e], 100.0)
+    offsets = [c for c in engine.calls if c[1] == "nonlinear_offset"]
+    assert offsets == [
+        ("tanh", "nonlinear_offset", 0.0),
+        ("tanh", "nonlinear_offset", 0.02),
+    ]
+    assert len(normal.moves) == 2

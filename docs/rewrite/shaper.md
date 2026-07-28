@@ -327,14 +327,31 @@ visible.
 
 `SET_PRESSURE_ADVANCE` (what the Mainsail/Fluidd UI sends) is served by
 `klippy/extras/pressure_advance_compat.py`, loaded for every config. Per
-extruder it maps `ADVANCE=` onto the `k` of the single
-`linear_pressure_advance` post-processor on that extruder's axis and
-`SMOOTH_TIME=` onto the `smooth_time` of the single `smooth_triangle` one;
+extruder it maps `ADVANCE=` onto the linear coefficient of the single
+advance-family post-processor on that extruder's axis
+(`linear_pressure_advance`'s `k`, or a `tanh_pressure_advance` /
+`recipr_pressure_advance`'s `linear_advance`), `SMOOTH_TIME=` onto the
+`smooth_time` of the single `smooth_triangle` one, and — matching
+bleeding-edge-v2's command surface — `OFFSET=` / `VELOCITY=` onto a
+nonlinear processor's `nonlinear_offset` / `linearization_velocity`;
 the extruder's `get_status` reports the live engine values back as
-`pressure_advance` / `smooth_time`, which is where the frontends read them
-from. If the extruder's axis carries no such post-processor the command
-answers that the knob is disabled instead of erroring, and the status
-fields are omitted. An ambiguous chain (two processors of the same type on
-one axis) also reports as disabled; disambiguate with `post_processor:` /
+`pressure_advance` / `nonlinear_offset` / `linearization_velocity` /
+`smooth_time`, which is where the frontends read them from. If the
+extruder's axis carries no such post-processor the command answers that
+the knob is disabled instead of erroring, and the status fields are
+omitted (`OFFSET`/`VELOCITY` report disabled on a linear-only axis). An
+ambiguous chain (two advance-family processors on one axis) also reports
+as disabled; disambiguate with `post_processor:` /
 `smooth_post_processor:` in an explicit `[pressure_advance_compat]`
 section, or drive the chain directly with `SET_POST_PROCESSOR`.
+
+This makes the classic tower workflow apply to the nonlinear model
+parameter by parameter, exactly as on bleeding-edge-v2:
+
+```
+TUNING_TOWER COMMAND=SET_PRESSURE_ADVANCE PARAMETER=ADVANCE START=0 STEP_DELTA=0.002 STEP_HEIGHT=5
+TUNING_TOWER COMMAND=SET_PRESSURE_ADVANCE PARAMETER=OFFSET START=0 STEP_DELTA=0.02 STEP_HEIGHT=5
+TUNING_TOWER COMMAND=SET_PRESSURE_ADVANCE PARAMETER=VELOCITY START=2 STEP_DELTA=1 STEP_HEIGHT=5
+```
+
+(`VELOCITY` must stay positive — start its tower above zero.)

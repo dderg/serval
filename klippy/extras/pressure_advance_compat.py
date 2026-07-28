@@ -2,6 +2,14 @@ import re
 
 PA_TYPE = "linear_pressure_advance"
 ST_TYPE = "smooth_triangle"
+NONLINEAR_TYPES = ("tanh_pressure_advance", "recipr_pressure_advance")
+ADVANCE_TYPES = (PA_TYPE,) + NONLINEAR_TYPES
+
+ADVANCE_PARAM_KEYS = {
+    PA_TYPE: "k",
+    "tanh_pressure_advance": "linear_advance",
+    "recipr_pressure_advance": "linear_advance",
+}
 
 _EXTRUDER_NAME = re.compile(r"extruder\d*")
 
@@ -23,8 +31,10 @@ class DisabledTarget:
 
 
 class ExtruderTargets:
-    def __init__(self, advance, smooth_time):
+    def __init__(self, advance, offset, velocity, smooth_time):
         self.advance = advance
+        self.offset = offset
+        self.velocity = velocity
         self.smooth_time = smooth_time
 
 
@@ -53,15 +63,15 @@ def _extruder_sections(config):
     ]
 
 
-def _validated_override(config, option, pp_sections, ty):
+def _validated_override(config, option, pp_sections, types):
     name = config.get(option, None)
     if name is None:
         return None
     sc = pp_sections.get(name)
-    if sc is None or sc.get("type", None) != ty:
+    if sc is None or sc.get("type", None) not in types:
         raise config.error(
             "[pressure_advance_compat] %s: '%s' is not a declared "
-            "[post_processor] of type %s" % (option, name, ty)
+            "[post_processor] of type %s" % (option, name, "/".join(types))
         )
     return name
 
@@ -103,30 +113,90 @@ def _resolve_target(
     )
 
 
+def _advance_family_targets(
+    pp_sections, axes, axis_name, override, override_option
+):
+    """bleeding-edge-v2 knob mapping: ADVANCE fits any advance model's
+    linear coefficient; OFFSET/VELOCITY exist only on the nonlinear ones."""
+    if override is not None:
+        name, ty = override, pp_sections[override].get("type", None)
+    else:
+        if axis_name is None or axis_name not in axes:
+            missing = DisabledTarget(
+                "extruder axis '%s' is not a declared [axis] section"
+                % (axis_name,)
+            )
+            return missing, missing, missing
+        references = [
+            p.strip() for p in axes[axis_name].getlist("post_processors", [])
+        ]
+        candidates = [
+            n
+            for n in references
+            if n in pp_sections
+            and pp_sections[n].get("type", None) in ADVANCE_TYPES
+        ]
+        if not candidates:
+            missing = DisabledTarget(
+                "no advance-family [post_processor] (%s) on [axis %s]"
+                % ("/".join(ADVANCE_TYPES), axis_name)
+            )
+            return missing, missing, missing
+        if len(candidates) > 1:
+            ambiguous = DisabledTarget(
+                "multiple advance-family [post_processor]s on [axis %s] "
+                "(%s); use SET_POST_PROCESSOR NAME=... or disambiguate "
+                "with '%s:' in [pressure_advance_compat]"
+                % (axis_name, ", ".join(sorted(candidates)), override_option)
+            )
+            return ambiguous, ambiguous, ambiguous
+        name = candidates[0]
+        ty = pp_sections[name].get("type", None)
+    section = pp_sections[name]
+    advance_key = ADVANCE_PARAM_KEYS[ty]
+    advance = ActiveTarget(
+        name, advance_key, section.getfloat(advance_key, 0.0, minval=0.0)
+    )
+    if ty == PA_TYPE:
+        linear_only = DisabledTarget(
+            "'%s' is a %s; OFFSET/VELOCITY apply to %s"
+            % (name, PA_TYPE, "/".join(NONLINEAR_TYPES))
+        )
+        return advance, linear_only, linear_only
+    offset = ActiveTarget(
+        name,
+        "nonlinear_offset",
+        section.getfloat("nonlinear_offset", 0.0, minval=0.0),
+    )
+    velocity = ActiveTarget(
+        name,
+        "linearization_velocity",
+        section.getfloat("linearization_velocity", 0.0, minval=0.0),
+    )
+    return advance, offset, velocity
+
+
 class PressureAdvanceCompat:
     def __init__(self, config):
         self.printer = config.get_printer()
         pp_sections = _post_processor_sections(config)
         axes = _axis_sections(config)
         pa_override = _validated_override(
-            config, "post_processor", pp_sections, PA_TYPE
+            config, "post_processor", pp_sections, ADVANCE_TYPES
         )
         st_override = _validated_override(
-            config, "smooth_post_processor", pp_sections, ST_TYPE
+            config, "smooth_post_processor", pp_sections, (ST_TYPE,)
         )
         self.extruders = {}
         for sc in _extruder_sections(config):
             axis_name = sc.get("axis", None)
+            advance, offset, velocity = _advance_family_targets(
+                pp_sections, axes, axis_name, pa_override, "post_processor"
+            )
             self.extruders[sc.get_name()] = ExtruderTargets(
-                _resolve_target(
-                    pp_sections,
-                    axes,
-                    axis_name,
-                    PA_TYPE,
-                    "k",
-                    pa_override,
-                    "post_processor",
-                ),
+                advance,
+                offset,
+                velocity,
                 _resolve_target(
                     pp_sections,
                     axes,
@@ -145,30 +215,42 @@ class PressureAdvanceCompat:
         )
 
     cmd_SET_PRESSURE_ADVANCE_help = (
-        "Classic-Klipper shim: set pressure advance / smooth time on the "
-        "extruder axis' post_processors"
+        "Classic-Klipper shim: set pressure advance parameters on the "
+        "extruder axis' post_processors (ADVANCE, OFFSET, VELOCITY, "
+        "SMOOTH_TIME as in bleeding-edge-v2)"
     )
 
     def cmd_SET_PRESSURE_ADVANCE(self, gcmd):
         extruder_name = self._resolve_extruder_name(gcmd)
         targets = self.extruders[extruder_name]
-        advance = gcmd.get_float("ADVANCE", None, minval=0.0)
-        smooth_time = gcmd.get_float("SMOOTH_TIME", None, minval=0.0)
-        if advance is None and smooth_time is None:
-            gcmd.respond_info(self._format_report(extruder_name, targets))
-            return
-        if smooth_time is not None:
-            self._apply(
-                gcmd,
-                extruder_name,
+        updates = [
+            (
                 "SMOOTH_TIME",
                 targets.smooth_time,
-                smooth_time,
-            )
-        if advance is not None:
-            self._apply(
-                gcmd, extruder_name, "ADVANCE", targets.advance, advance
-            )
+                gcmd.get_float("SMOOTH_TIME", None, minval=0.0),
+            ),
+            (
+                "ADVANCE",
+                targets.advance,
+                gcmd.get_float("ADVANCE", None, minval=0.0),
+            ),
+            (
+                "OFFSET",
+                targets.offset,
+                gcmd.get_float("OFFSET", None, minval=0.0),
+            ),
+            (
+                "VELOCITY",
+                targets.velocity,
+                gcmd.get_float("VELOCITY", None, above=0.0),
+            ),
+        ]
+        if all(value is None for _, _, value in updates):
+            gcmd.respond_info(self._format_report(extruder_name, targets))
+            return
+        for param, target, value in updates:
+            if value is not None:
+                self._apply(gcmd, extruder_name, param, target, value)
 
     def _resolve_extruder_name(self, gcmd):
         name = gcmd.get("EXTRUDER", None)
@@ -209,6 +291,8 @@ class PressureAdvanceCompat:
         lines = ["extruder '%s':" % (extruder_name,)]
         for label, target in (
             ("pressure_advance", targets.advance),
+            ("nonlinear_offset", targets.offset),
+            ("linearization_velocity", targets.velocity),
             ("smooth_time", targets.smooth_time),
         ):
             if target.enabled:
@@ -239,10 +323,15 @@ class PressureAdvanceCompat:
         if targets is None:
             return {}
         fields = {}
-        if targets.advance.enabled:
-            fields["pressure_advance"] = self._current_value(targets.advance)
-        if targets.smooth_time.enabled:
-            fields["smooth_time"] = self._current_value(targets.smooth_time)
+        named = (
+            ("pressure_advance", targets.advance),
+            ("nonlinear_offset", targets.offset),
+            ("linearization_velocity", targets.velocity),
+            ("smooth_time", targets.smooth_time),
+        )
+        for key, target in named:
+            if target.enabled:
+                fields[key] = self._current_value(target)
         return fields
 
 

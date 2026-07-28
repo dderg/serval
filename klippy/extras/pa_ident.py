@@ -193,6 +193,9 @@ class PAIdent:
         if "pressure_advance" in fields:
             pre += " ADVANCE=0"
             post += " ADVANCE=%.6f" % (fields["pressure_advance"],)
+        if "nonlinear_offset" in fields:
+            pre += " OFFSET=0"
+            post += " OFFSET=%.6f" % (fields["nonlinear_offset"],)
         return pre, post
 
     def _dwell_block(self, velocity_seq, dwell, anchor_time):
