@@ -545,20 +545,21 @@ fn fit_leader_axes(
     // pays from the first fresh segment: with the old >=8-segment gate the
     // dense-region steady state (1-2 fresh segments per emit) fitted every
     // axis serially and pegged one core while the rest idled.
-    let fit_started = std::time::Instant::now();
+    let fit_started = crate::timing::stopwatch();
     type TimedColumn = (
         usize,
         Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError>,
-        std::time::Duration,
+        u128,
     );
-    let columns: Vec<TimedColumn> = if axis_chains.len() > 1 && !fresh.is_empty() {
+    let parallel = cfg!(not(target_arch = "wasm32")) && axis_chains.len() > 1 && !fresh.is_empty();
+    let columns: Vec<TimedColumn> = if parallel {
         let fresh_ref: &[ShapedSegment] = fresh;
         std::thread::scope(|scope| {
             let handles: Vec<_> = axis_chains
                 .iter()
                 .map(|&(axis, chain)| {
                     scope.spawn(move || {
-                        let column_started = std::time::Instant::now();
+                        let column_started = crate::timing::stopwatch();
                         let column = fit_axis_column(
                             history,
                             base,
@@ -568,7 +569,7 @@ fn fit_leader_axes(
                             at_stream_boundary,
                             chain,
                         );
-                        (axis, column, column_started.elapsed())
+                        (axis, column, column_started.elapsed_us())
                     })
                 })
                 .collect();
@@ -581,23 +582,23 @@ fn fit_leader_axes(
         axis_chains
             .iter()
             .map(|&(axis, chain)| {
-                let column_started = std::time::Instant::now();
+                let column_started = crate::timing::stopwatch();
                 let column =
                     fit_axis_column(history, base, fresh, axis, force, at_stream_boundary, chain);
-                (axis, column, column_started.elapsed())
+                (axis, column, column_started.elapsed_us())
             })
             .collect()
     };
-    let fit_elapsed = fit_started.elapsed();
-    if fit_elapsed >= std::time::Duration::from_millis(20) {
+    let fit_elapsed_us = fit_started.elapsed_us();
+    if fit_elapsed_us >= 20_000 {
         let per_axis: Vec<String> = columns
             .iter()
-            .map(|(axis, _, elapsed)| format!("axis{axis}={}us", elapsed.as_micros()))
+            .map(|(axis, _, elapsed_us)| format!("axis{axis}={elapsed_us}us"))
             .collect();
         tracing::warn!(
             subsystem = "motion",
             event = "shaper_fit_slow",
-            total_us = fit_elapsed.as_micros() as u64,
+            total_us = fit_elapsed_us as u64,
             fresh_segments = fresh.len(),
             columns = %per_axis.join(" "),
             "shaper leader fit pass exceeded 20ms"
