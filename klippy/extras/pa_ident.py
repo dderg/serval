@@ -15,6 +15,7 @@ MAX_SEGMENT_E = 45.0
 TEMP_TOLERANCE = 5.0
 POLL_TAIL_TIME = 3.0
 MIN_POLL_PAUSE = 0.005
+RAMP_STEP_TIME = 0.05
 
 
 class PAIdent:
@@ -37,22 +38,15 @@ class PAIdent:
             return "SG_RESULT"
         return "DRV_STATUS"
 
-    def _enter_stealthchop(self, tmc_object):
+    def _check_load_readable(self, gcmd, tmc_object, reg_name):
         fields = tmc_object.fields
-        if fields.lookup_register("sg_result", None) != "SG_RESULT":
-            return False
-        if fields.get_field("en_spreadcycle") == 0:
-            return False
-        override = fields.override_register
-        mcu_tmc = tmc_object.mcu_tmc
-        mcu_tmc.set_register("TPWMTHRS", override("TPWMTHRS", {"tpwmthrs": 0}))
-        mcu_tmc.set_register("GCONF", override("GCONF", {"en_spreadcycle": 0}))
-        return True
-
-    def _restore_chopper_mode(self, tmc_object):
-        for reg_name in ("TPWMTHRS", "GCONF"):
-            tmc_object.mcu_tmc.set_register(
-                reg_name, tmc_object.fields.registers.get(reg_name, 0)
+        if reg_name != "SG_RESULT":
+            return
+        if fields.get_field("en_spreadcycle"):
+            raise gcmd.error(
+                "%s is in spreadcycle; its SG_RESULT only reports load "
+                "in stealthchop. Use an SG2 driver (e.g. tmc5160) or "
+                "enable stealthchop for the capture" % (self.tmc_name,)
             )
 
     def _check_extruder_temp(self, gcmd, toolhead):
@@ -70,7 +64,16 @@ class PAIdent:
                 % (status["temperature"], status["target"])
             )
 
-    def _build_schedule(self, velocities, dwell, anchor_time):
+    def _ramp_steps(self, v_from, v_to, accel):
+        span = abs(v_to - v_from)
+        count = int(span / (accel * RAMP_STEP_TIME))
+        step_time = span / accel / count if count else 0.0
+        return [
+            (v_from + (v_to - v_from) * (k + 0.5) / count, step_time)
+            for k in range(count)
+        ]
+
+    def _build_schedule(self, velocities, dwell, accel, anchor_time):
         script = ["SAVE_GCODE_STATE NAME=PA_LOAD_IDENT", "M83"]
         schedule = []
         current_time = anchor_time
@@ -79,7 +82,18 @@ class PAIdent:
         pulses = []
         for velocity in velocities[len(velocities) // 2 :]:
             pulses += [velocity, v_min]
+        previous = 0.0
         for velocity in staircase + pulses:
+            for ramp_v, step_time in self._ramp_steps(
+                previous, velocity, accel
+            ):
+                script.append(
+                    "G1 E%.5f F%.1f" % (ramp_v * step_time, ramp_v * 60.0)
+                )
+                schedule.append(
+                    (current_time, current_time + step_time, ramp_v)
+                )
+                current_time += step_time
             total_e = velocity * dwell
             segment_start = current_time
             while total_e > 0.0:
@@ -88,6 +102,7 @@ class PAIdent:
                 total_e -= chunk
             current_time += dwell
             schedule.append((segment_start, current_time, velocity))
+            previous = velocity
         script.append("M400")
         script.append("RESTORE_GCODE_STATE NAME=PA_LOAD_IDENT")
         return script, schedule, current_time
@@ -131,6 +146,7 @@ class PAIdent:
         toolhead = self.printer.lookup_object("toolhead")
         mcu = self.printer.lookup_object("mcu")
         self._check_extruder_temp(gcmd, toolhead)
+        self._check_load_readable(gcmd, tmc_object, reg_name)
 
         velocities_str = gcmd.get("VELOCITIES", DEFAULT_VELOCITIES)
         try:
@@ -140,12 +156,13 @@ class PAIdent:
         if not velocities or any(v <= 0.0 for v in velocities):
             raise gcmd.error("VELOCITIES must be positive")
         dwell = gcmd.get_float("DWELL", 3.0, above=0.0)
+        accel = gcmd.get_float("ACCEL", 25.0, above=0.0)
         interval = gcmd.get_float("INTERVAL", MIN_POLL_PAUSE, minval=0.0)
         out_path = gcmd.get("OUT", "/tmp/pa_ident.csv")
 
         anchor_time = toolhead.get_last_move_time()
         script, schedule, end_time = self._build_schedule(
-            velocities, dwell, anchor_time
+            velocities, dwell, accel, anchor_time
         )
 
         self.samples = []
@@ -157,13 +174,8 @@ class PAIdent:
             lambda e: self._poll(mcu_tmc, mcu, reg_name, interval, poll_done)
         )
 
-        switched = self._enter_stealthchop(tmc_object)
-        try:
-            self.gcode.run_script_from_command("\n".join(script))
-            poll_done.wait()
-        finally:
-            if switched:
-                self._restore_chopper_mode(tmc_object)
+        self.gcode.run_script_from_command("\n".join(script))
+        poll_done.wait()
         if self.poll_error is not None:
             raise gcmd.error("TMC load polling failed: %s" % (self.poll_error,))
         if not self.samples:

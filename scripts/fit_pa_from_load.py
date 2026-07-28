@@ -35,6 +35,7 @@ from scipy.optimize import least_squares
 SG_MASK = 0x3FF
 TAIL_FRACTION = 0.5
 SIM_SUBSTEP = 0.005
+MIN_STEADY_SEGMENT = 1.0
 
 MODEL_SHAPES = {
     "tanh_pressure_advance": np.tanh,
@@ -69,6 +70,8 @@ def parse_capture(path):
 def steady_tails(schedule, times, values):
     by_velocity = {}
     for t0, t1, vel in schedule:
+        if t1 - t0 < MIN_STEADY_SEGMENT:
+            continue
         tail_start = t0 + TAIL_FRACTION * (t1 - t0)
         mask = (times >= tail_start) & (times <= t1)
         if not mask.any():
@@ -135,7 +138,7 @@ def fit_ode(shape, times, values, v_cmd, base_u, v_max, init):
     la0, off0, v_lin0, c0 = init
 
     def unpack(theta):
-        return np.exp(theta[:4]), theta[4]
+        return np.exp(np.clip(theta[:4], -30.0, 10.0)), theta[4]
 
     def residuals(theta):
         (la, off, v_lin, c), db = unpack(theta)
