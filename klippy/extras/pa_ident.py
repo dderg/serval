@@ -27,6 +27,11 @@ class PAIdent:
             self.cmd_PA_LOAD_IDENT,
             desc=self.cmd_PA_LOAD_IDENT_help,
         )
+        self.gcode.register_command(
+            "PA_SGT_SCAN",
+            self.cmd_PA_SGT_SCAN,
+            desc=self.cmd_PA_SGT_SCAN_help,
+        )
         self.samples = []
         self.poll_error = None
         self.poll_deadline = 0.0
@@ -64,6 +69,81 @@ class PAIdent:
     def _restore_sgt(self, tmc_object, reg_name):
         tmc_object.mcu_tmc.set_register(
             reg_name, tmc_object.fields.registers.get(reg_name, 0)
+        )
+
+    cmd_PA_SGT_SCAN_help = (
+        "Sweep the SG2 sgt sensitivity while extruding at a fixed "
+        "velocity and report the load reading per sgt value"
+    )
+
+    def cmd_PA_SGT_SCAN(self, gcmd):
+        tmc_object = self.printer.lookup_object(self.tmc_name)
+        mcu_tmc = tmc_object.mcu_tmc
+        reg_name = self._lookup_load_register(tmc_object)
+        toolhead = self.printer.lookup_object("toolhead")
+        mcu = self.printer.lookup_object("mcu")
+        self._check_extruder_temp(gcmd, toolhead)
+        velocity = gcmd.get_float("VELOCITY", 2.0, above=0.0)
+        seg_time = gcmd.get_float("TIME", 2.0, above=0.5)
+        sgt_lo = gcmd.get_int("FROM", 0, minval=-64, maxval=63)
+        sgt_hi = gcmd.get_int("TO", 40, minval=sgt_lo, maxval=63)
+        sgt_step = gcmd.get_int("STEP", 4, minval=1)
+        interval = gcmd.get_float("INTERVAL", MIN_POLL_PAUSE, minval=0.0)
+
+        reactor = self.printer.get_reactor()
+        report = []
+        sgt_reg = None
+        try:
+            self.gcode.run_script_from_command(
+                "SAVE_GCODE_STATE NAME=PA_SGT_SCAN\nM83"
+            )
+            for sgt in range(sgt_lo, sgt_hi + 1, sgt_step):
+                sgt_reg = self._apply_sgt(gcmd, tmc_object, sgt)
+                self.samples = []
+                self.poll_error = None
+                poll_done = reactor.completion()
+                t_start = toolhead.get_last_move_time()
+                self.poll_deadline = t_start + seg_time
+                reactor.register_callback(
+                    lambda e, done=poll_done: self._poll(
+                        mcu_tmc, mcu, reg_name, interval, done
+                    )
+                )
+                self.gcode.run_script_from_command(
+                    "G1 E%.4f F%.1f\nM400"
+                    % (velocity * seg_time, velocity * 60.0)
+                )
+                poll_done.wait()
+                if self.poll_error is not None:
+                    raise gcmd.error(
+                        "TMC load polling failed: %s" % (self.poll_error,)
+                    )
+                settled = [
+                    value & 0x3FF
+                    for sample_time, value in self.samples
+                    if sample_time >= t_start + 0.5 * seg_time
+                ]
+                if not settled:
+                    raise gcmd.error("no samples for sgt=%d" % (sgt,))
+                settled.sort()
+                report.append(
+                    "sgt=%3d: med=%4d min=%4d max=%4d n=%d"
+                    % (
+                        sgt,
+                        settled[len(settled) // 2],
+                        settled[0],
+                        settled[-1],
+                        len(settled),
+                    )
+                )
+        finally:
+            if sgt_reg is not None:
+                self._restore_sgt(tmc_object, sgt_reg)
+            self.gcode.run_script_from_command(
+                "RESTORE_GCODE_STATE NAME=PA_SGT_SCAN"
+            )
+        gcmd.respond_info(
+            "PA_SGT_SCAN at %.1f mm/s:\n%s" % (velocity, "\n".join(report))
         )
 
     def _check_extruder_temp(self, gcmd, toolhead):
