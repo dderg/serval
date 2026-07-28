@@ -5,7 +5,7 @@ use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedS
 use crate::lowering::follower_tol_scale;
 use crate::shaper::{
     AxisSignalTable, SEGMENT_TIME_EPS_S, TrackSignal, apply_derivative_gains_to_track,
-    apply_nonlinear_advance_to_track, fit_axis_from_signal,
+    fit_axis_from_signal,
 };
 use crate::types::PostProcessError;
 
@@ -213,7 +213,18 @@ fn apply_leading_stages(
                 track = apply_derivative_gains_to_track(&track, *k1, *k2);
             }
             ChainStage::NonlinearAdvance(adv) => {
-                track = apply_nonlinear_advance_to_track(axis, &track, *adv)?;
+                let pieces = nurbs::bezier::extract_bezier_pieces(&track);
+                let tol = crate::lowering::FitTol {
+                    pos_mm: crate::shaper::SHAPED_FIT_TOL_MM,
+                    accel_mm_s2: crate::shaper::SHAPED_FIT_TOL_ACCEL_MM_S2,
+                };
+                let out = crate::advance::apply_nonlinear_advance_pieces(&pieces, *adv, tol)
+                    .map_err(|e| PostProcessError::AdvanceFitUnresolved {
+                        axis,
+                        t: e.u_start,
+                        span_s: e.span_s,
+                    })?;
+                track = nurbs::bezier::bezier_pieces_to_nurbs(&out);
             }
         }
     }

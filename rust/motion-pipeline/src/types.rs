@@ -75,6 +75,10 @@ pub enum PostProcessError {
     MissingLookahead { axis: usize, t: f64 },
     #[error("axis {axis}: shaped sample is non-finite at t={t}")]
     NonFiniteSample { axis: usize, t: f64 },
+    #[error(
+        "axis {axis}: nonlinear advance composition missed the fit budget at t={t} over a {span_s}s span"
+    )]
+    AdvanceFitUnresolved { axis: usize, t: f64, span_s: f64 },
 }
 
 pub struct PlannedMove {

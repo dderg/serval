@@ -3,44 +3,52 @@ use geometry::{Move, MoveVelocity};
 use nurbs::bezier::BezierPiece;
 use trajectory::{ChainStage, CompiledChain};
 
-use super::{LoweringError, MIN_PHASE_PIECE_S, pad_to_uniform_degree};
+use super::{FitTol, LoweringError, MIN_PHASE_PIECE_S, follower_tol_scale, pad_to_uniform_degree};
+use crate::advance::apply_nonlinear_advance_pieces;
 
 /// Derivative gains are `pos += k1·vel + k2·accel`, exact on a polynomial of
-/// any degree: `c′_i = c_i + k1·(i+1)·c_{i+1} + k2·(i+1)·(i+2)·c_{i+2}`
-/// (`SmoothKernel` is a downstream convolution, so it stops the per-piece
-/// transform exactly as the sampled path does). Mirrors the `ChainStage`
-/// semantics in the sampled `axis_state`.
-pub(crate) fn apply_derivative_gains(coeffs: &mut [f64], chain: &CompiledChain) {
-    for stage in &chain.stages {
-        match stage {
-            ChainStage::DerivativeGains { k1, k2 } => {
-                for i in 0..coeffs.len().saturating_sub(1) {
-                    coeffs[i] = k1.mul_add((i + 1) as f64 * coeffs[i + 1], coeffs[i]);
-                    if let Some(&c2) = coeffs.get(i + 2) {
-                        coeffs[i] = k2.mul_add(((i + 1) * (i + 2)) as f64 * c2, coeffs[i]);
-                    }
-                }
-            }
-            ChainStage::SmoothKernel(_) => break,
-            ChainStage::NonlinearAdvance(_) => unreachable!(
-                "a pre-kernel nonlinear advance routes the move through the \
-                 sampled lowering path, which samples the advance law"
-            ),
+/// any degree: `c′_i = c_i + k1·(i+1)·c_{i+1} + k2·(i+1)·(i+2)·c_{i+2}`.
+/// Mirrors the `ChainStage` semantics in the sampled `axis_state`.
+pub(crate) fn gains_transform(coeffs: &mut [f64], k1: f64, k2: f64) {
+    for i in 0..coeffs.len().saturating_sub(1) {
+        coeffs[i] = k1.mul_add((i + 1) as f64 * coeffs[i + 1], coeffs[i]);
+        if let Some(&c2) = coeffs.get(i + 2) {
+            coeffs[i] = k2.mul_add(((i + 1) * (i + 2)) as f64 * c2, coeffs[i]);
         }
     }
 }
 
-/// A nonlinear advance ahead of the kernel is not a per-piece coefficient
-/// transform — the advance law is not polynomial in the track — so a move
-/// carrying one cannot take the closed-form path.
-pub(super) fn has_pre_kernel_nonlinear_advance(chains: &[CompiledChain]) -> bool {
-    chains.iter().any(|chain| {
-        chain
-            .stages
-            .iter()
-            .take_while(|stage| !matches!(stage, ChainStage::SmoothKernel(_)))
-            .any(|stage| matches!(stage, ChainStage::NonlinearAdvance(_)))
-    })
+/// The chain stages ahead of the kernel, applied in order to a lowered piece
+/// list: gains are an exact coefficient transform, a nonlinear advance is the
+/// closed-form Taylor composition (which may split pieces to hold the fit
+/// budget). `SmoothKernel` is a downstream convolution and stops the walk,
+/// exactly as on the sampled path.
+fn apply_pre_kernel_stages(
+    mut pieces: Vec<BezierPiece>,
+    chain: &CompiledChain,
+    axis: usize,
+    tol: FitTol,
+) -> Result<Vec<BezierPiece>, LoweringError> {
+    for stage in &chain.stages {
+        match stage {
+            ChainStage::SmoothKernel(_) => break,
+            ChainStage::DerivativeGains { k1, k2 } => {
+                for piece in &mut pieces {
+                    gains_transform(&mut piece.coeffs, *k1, *k2);
+                }
+            }
+            ChainStage::NonlinearAdvance(adv) => {
+                pieces = apply_nonlinear_advance_pieces(&pieces, *adv, tol).map_err(|e| {
+                    LoweringError::AdvanceFitUnresolved {
+                        axis,
+                        t: e.u_start,
+                        span_s: e.span_s,
+                    }
+                })?;
+            }
+        }
+    }
+    Ok(pieces)
 }
 
 /// Lower a straight constant-ceiling move from its closed-form jerk phases: one
@@ -53,6 +61,7 @@ pub(super) fn lower_straight_from_phases(
     vm: &MoveVelocity,
     t_start: f64,
     start_pos: &[f64],
+    fit_tol: FitTol,
     axis_chains: &[CompiledChain],
     z_offset: f64,
 ) -> Result<(Vec<Vec<BezierPiece>>, f64), LoweringError> {
@@ -147,14 +156,19 @@ pub(super) fn lower_straight_from_phases(
             if p.j != 0.0 {
                 coeffs.push(scale * p.j / 6.0);
             }
-            if let Some(chain) = axis_chains.get(axis) {
-                apply_derivative_gains(&mut coeffs, chain);
-            }
             pieces.push(BezierPiece {
                 u_start: t_start + t0,
                 u_end: t_start + t1,
                 coeffs,
             });
+        }
+        if let Some(chain) = axis_chains.get(axis) {
+            let axis_tol = if axis < 3 {
+                fit_tol
+            } else {
+                fit_tol.scaled(follower_tol_scale(&gm.segment.followers, axis))
+            };
+            *pieces = apply_pre_kernel_stages(std::mem::take(pieces), chain, axis, axis_tol)?;
         }
     }
     pad_to_uniform_degree(&mut axes_pieces);

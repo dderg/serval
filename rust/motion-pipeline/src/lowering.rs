@@ -13,14 +13,12 @@ use geometry::{FollowerDemand, Move, MoveVelocity, SurfaceTransform};
 use nurbs::ScalarNurbs;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 #[cfg(test)]
-pub(crate) use straight::apply_derivative_gains;
-#[cfg(test)]
-use trajectory::ChainStage;
+pub(crate) use straight::gains_transform;
 use trajectory::{CompiledChain, ShapedSegment};
 
 use profile::{build_profile, profile_from_phases};
 use sampled::{Sampler, ZWarp, phase_knot_times, refine_span, regime_knot_times, z_warp_mode};
-use straight::{has_pre_kernel_nonlinear_advance, lower_straight_from_phases};
+use straight::lower_straight_from_phases;
 
 /// Duplicated from `runtime::piece_ring::MAX_PIECE_COEFFS` (this crate must
 /// not depend on the MCU runtime); equality is enforced by the cross-crate
@@ -89,12 +87,13 @@ pub(crate) fn follower_tol_scale(followers: &[FollowerDemand], axis: usize) -> f
         })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LoweringError {
     SourceMismatch,
     EmptyProfile,
     DegeneratePhase,
     FollowerAxisOutOfRange { axis_index: usize },
+    AdvanceFitUnresolved { axis: usize, t: f64, span_s: f64 },
 }
 
 impl std::fmt::Display for LoweringError {
@@ -107,6 +106,13 @@ impl std::fmt::Display for LoweringError {
                 write!(
                     f,
                     "follower axis {axis_index} exceeds the registry start vector"
+                )
+            }
+            Self::AdvanceFitUnresolved { axis, t, span_s } => {
+                write!(
+                    f,
+                    "axis {axis}: nonlinear advance composition missed the fit budget \
+                     at t={t} over a {span_s}s span"
                 )
             }
         }
@@ -188,17 +194,20 @@ pub fn lower_move_pieces(
         use geometry::path::CurvatureProfile;
         seg.kappa_peak().1.abs() <= STRAIGHT_KAPPA_EPS
     });
-    if !vm.phases.is_empty()
-        && straight
-        && !ramped
-        && !matches!(z_warp, ZWarp::Surface(_))
-        && !has_pre_kernel_nonlinear_advance(axis_chains)
-    {
+    if !vm.phases.is_empty() && straight && !ramped && !matches!(z_warp, ZWarp::Surface(_)) {
         let z_offset = match z_warp {
             ZWarp::Constant(c) => c,
             _ => 0.0,
         };
-        return lower_straight_from_phases(gm, vm, t_start, start_pos, axis_chains, z_offset);
+        return lower_straight_from_phases(
+            gm,
+            vm,
+            t_start,
+            start_pos,
+            fit_tol,
+            axis_chains,
+            z_offset,
+        );
     }
     // With phases present the scalar profile is the plan's own closed-form
     // windows; the sampled quintic reconstruction is the fallback for moves

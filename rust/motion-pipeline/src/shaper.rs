@@ -809,10 +809,10 @@ pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
     Ok(bezier_pieces_to_nurbs(&pieces))
 }
 
-const SHAPED_FIT_TOL_MM: f64 = 1e-3;
+pub(crate) const SHAPED_FIT_TOL_MM: f64 = 1e-3;
 const SHAPED_FIT_MAX_DEPTH: u32 = 16;
 const SHAPED_FIT_MIN_SPAN_S: f64 = 5e-5;
-const SHAPED_FIT_TOL_ACCEL_MM_S2: f64 = 50.0;
+pub(crate) const SHAPED_FIT_TOL_ACCEL_MM_S2: f64 = 50.0;
 
 /// Sampled truth for one span, taken up front so stencil errors surface as
 /// `PostProcessError` instead of poisoning the ladder closures.
