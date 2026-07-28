@@ -434,9 +434,18 @@ fn all_post_processor_types_are_reachable() {
             "x" => axis("x", &[]),
             _ => axis("e", &["x", "y", "z"]),
         };
-        carrier.post_processors = vec!["pp".to_string()];
+        let nonlinear = ty.ends_with("_pressure_advance") && ty != "linear_pressure_advance";
+        if nonlinear {
+            carrier.post_processors = vec!["st".to_string(), "pp".to_string()];
+            params_snap.post_processor_decls = vec![
+                pp("st", "smooth_triangle", &[("smooth_time", 0.02)]),
+                pp("pp", ty, params),
+            ];
+        } else {
+            carrier.post_processors = vec!["pp".to_string()];
+            params_snap.post_processor_decls = vec![pp("pp", ty, params)];
+        }
         params_snap.axis_decls = vec![carrier];
-        params_snap.post_processor_decls = vec![pp("pp", ty, params)];
         pipeline_snapshot(&square_waypoints(), params_snap)
             .unwrap_or_else(|e| panic!("post-processor type '{ty}' should compile: {e}"));
     }

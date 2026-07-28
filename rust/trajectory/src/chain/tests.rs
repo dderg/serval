@@ -39,8 +39,8 @@ fn nonlinear_pa_types_compile_to_their_own_model() {
         ),
         (&ReciprPressureAdvance, AdvanceModel::Reciprocal),
     ] {
-        let c = CompiledChain::compile(&[nlpa(algo, 0.02, 0.05, 20.0)]).unwrap();
-        let ChainStage::NonlinearAdvance(adv) = c.stages[0] else {
+        let c = CompiledChain::compile(&[st(0.02), nlpa(algo, 0.02, 0.05, 20.0)]).unwrap();
+        let ChainStage::NonlinearAdvance(adv) = c.stages[1] else {
             panic!("{} must compile to an advance stage", algo.type_name());
         };
         assert_eq!(
@@ -52,7 +52,6 @@ fn nonlinear_pa_types_compile_to_their_own_model() {
                 linearization_velocity: 20.0,
             }
         );
-        assert_eq!(c.max_input_window(), (0.0, 0.0));
     }
 }
 
@@ -348,6 +347,38 @@ fn compile_mode_inverse_after_a_disabled_kernel_rejected() {
     assert!(matches!(
         err,
         PostProcessorError::AccelGainNeedsPrecedingKernel { .. }
+    ));
+}
+
+#[test]
+fn compile_nonlinear_advance_without_kernel_rejected() {
+    for algo in [
+        &TanhPressureAdvance as &'static dyn crate::algos::PostProcessorAlgo,
+        &ReciprPressureAdvance,
+    ] {
+        let err = CompiledChain::compile(&[nlpa(algo, 0.02, 0.05, 20.0)]).unwrap_err();
+        assert!(matches!(
+            err,
+            PostProcessorError::NonlinearAdvanceNeedsKernel { .. }
+        ));
+        assert!(err.to_string().contains("smoothing kernel"), "got: {err}");
+    }
+}
+
+#[test]
+fn compile_nonlinear_advance_with_kernel_either_side_accepted() {
+    let tanh: &'static dyn crate::algos::PostProcessorAlgo = &TanhPressureAdvance;
+    CompiledChain::compile(&[nlpa(tanh, 0.02, 0.05, 20.0), st(0.02)]).unwrap();
+    CompiledChain::compile(&[st(0.02), nlpa(tanh, 0.02, 0.05, 20.0)]).unwrap();
+}
+
+#[test]
+fn compile_nonlinear_advance_with_disabled_kernel_rejected() {
+    let tanh: &'static dyn crate::algos::PostProcessorAlgo = &TanhPressureAdvance;
+    let err = CompiledChain::compile(&[st(0.0), nlpa(tanh, 0.02, 0.05, 20.0)]).unwrap_err();
+    assert!(matches!(
+        err,
+        PostProcessorError::NonlinearAdvanceNeedsKernel { .. }
     ));
 }
 

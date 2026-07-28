@@ -144,6 +144,14 @@ pub enum PostProcessorError {
          no jerk and so cannot form the transformed velocity"
     )]
     AccelGainNeedsPrecedingKernel { name: String, k2: f64 },
+    #[error(
+        "post-processor '{name}' is a nonlinear pressure advance and needs a \
+         smoothing kernel in the same post_processors chain (before or \
+         after): the advance follows the commanded rate instantly, so at \
+         seams where the flow ratio steps it would command a discontinuous \
+         extruder position"
+    )]
+    NonlinearAdvanceNeedsKernel { name: String },
 }
 
 impl PostProcessorInstance {
@@ -215,6 +223,7 @@ impl CompiledChain {
     pub fn compile(chain: &[PostProcessorInstance]) -> Result<Self, PostProcessorError> {
         let mut compiled = Self::default();
         let mut slot_sources: [Option<&str>; 2] = [None, None];
+        let mut advance_name: Option<&str> = None;
         for inst in chain {
             inst.validate()?;
             let Some(stage) = inst.algo.compile(&inst.values) else {
@@ -232,6 +241,9 @@ impl CompiledChain {
                     });
                 }
             }
+            if matches!(stage, ChainStage::NonlinearAdvance(_)) {
+                advance_name = Some(inst.name());
+            }
             let (slot, kind) = stage.composition_slot();
             if let Some(prev) = slot_sources[slot] {
                 return Err(PostProcessorError::UnsupportedComposition {
@@ -243,6 +255,17 @@ impl CompiledChain {
             }
             slot_sources[slot] = Some(inst.name());
             compiled.stages.push(stage);
+        }
+        let has_kernel = compiled
+            .stages
+            .iter()
+            .any(|s| matches!(s, ChainStage::SmoothKernel(_)));
+        if let Some(name) = advance_name {
+            if !has_kernel {
+                return Err(PostProcessorError::NonlinearAdvanceNeedsKernel {
+                    name: name.to_string(),
+                });
+            }
         }
         Ok(compiled)
     }

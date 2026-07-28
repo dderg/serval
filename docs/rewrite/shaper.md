@@ -105,7 +105,11 @@ Roster (`rust/trajectory/src/algos/`):
   transformed signal (`apply_nonlinear_advance_to_track`) under the same
   ladder budgets the convolution refit uses, and a move carrying one
   pre-kernel takes the sampled lowering path rather than the closed-form
-  per-piece one.
+  per-piece one. The chain must also carry a smoothing kernel (either
+  side of the advance): the advance follows the commanded rate
+  instantly, so at seams where the flow ratio steps a bare advance
+  would command a discontinuous extruder position — compilation
+  rejects a kernel-less chain.
 - `mode_inverse` (`frequency_hz`, `damping_ratio`) —
   `DerivativeGains { k1: 2ζ/ω, k2: 1/ω² }` with `ω = 2πf`.
 

@@ -551,9 +551,7 @@ fn fit_leader_axes(
         Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError>,
         u128,
     );
-    let parallel = cfg!(not(target_arch = "wasm32"))
-        && axis_chains.len() > 1
-        && !fresh.is_empty();
+    let parallel = cfg!(not(target_arch = "wasm32")) && axis_chains.len() > 1 && !fresh.is_empty();
     let columns: Vec<TimedColumn> = if parallel {
         let fresh_ref: &[ShapedSegment] = fresh;
         std::thread::scope(|scope| {
