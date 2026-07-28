@@ -186,7 +186,7 @@ class PAIdent:
             post += " ADVANCE=%.6f" % (fields["pressure_advance"],)
         return pre, post
 
-    def _build_schedule(self, velocities, dwell, anchor_time):
+    def _build_schedule(self, velocities, dwell, pulse_reps, anchor_time):
         script = ["SAVE_GCODE_STATE NAME=PA_LOAD_IDENT", "M83"]
         schedule = []
         current_time = anchor_time
@@ -195,7 +195,7 @@ class PAIdent:
         pulses = []
         for velocity in velocities[len(velocities) // 2 :]:
             pulses += [velocity, v_min]
-        for velocity in staircase + pulses:
+        for velocity in staircase + pulses * pulse_reps:
             total_e = velocity * dwell
             segment_start = current_time
             while total_e > 0.0:
@@ -258,6 +258,7 @@ class PAIdent:
         if not velocities or any(v <= 0.0 for v in velocities):
             raise gcmd.error("VELOCITIES must be positive")
         dwell = gcmd.get_float("DWELL", 3.0, above=0.0)
+        pulse_reps = gcmd.get_int("PULSES", 1, minval=1)
         smooth_time = gcmd.get_float("SMOOTH_TIME", 0.03, minval=0.0)
         interval = gcmd.get_float("INTERVAL", MIN_POLL_PAUSE, minval=0.0)
         out_path = gcmd.get("OUT", "/tmp/pa_ident.csv")
@@ -268,7 +269,7 @@ class PAIdent:
         )
         anchor_time = toolhead.get_last_move_time()
         script, schedule, end_time = self._build_schedule(
-            velocities, dwell, anchor_time
+            velocities, dwell, pulse_reps, anchor_time
         )
         if pre_script is not None:
             script.insert(0, pre_script)

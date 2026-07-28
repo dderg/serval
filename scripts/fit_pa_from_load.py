@@ -96,12 +96,16 @@ def steady_tails(schedule, times, values):
 def pressure_curve(tails, baseline_tails):
     velocities = np.array(sorted(tails))
     if baseline_tails is not None:
-        missing = [v for v in velocities if v not in baseline_tails]
-        if missing:
+        b_vs = np.array(sorted(baseline_tails))
+        if velocities[0] < b_vs[0] or velocities[-1] > b_vs[-1]:
             raise ValueError(
-                "baseline capture lacks velocities %s" % (missing,)
+                "capture velocities %s..%s exceed the baseline's range "
+                "%s..%s" % (velocities[0], velocities[-1], b_vs[0], b_vs[-1])
             )
-        pressure = np.array([baseline_tails[v] - tails[v] for v in velocities])
+        b_us = np.array([baseline_tails[v] for v in b_vs])
+        pressure = np.array(
+            [float(np.interp(v, b_vs, b_us)) - tails[v] for v in velocities]
+        )
     else:
         flat = max(tails.values())
         pressure = np.array([flat - tails[v] for v in velocities])
@@ -140,11 +144,8 @@ def command_velocity(schedule, times, smooth_time):
     return v
 
 
-def simulate_advance(shape, params, times, v_cmd, v_max):
-    la, off, v_lin = params
-    v_dense = np.linspace(0.0, 1.5 * v_max, 2000)
-    a_dense = la * v_dense + off * shape(v_dense / v_lin)
-    x = 0.0
+def simulate_pressure(u_dense, v_dense, c, times, v_cmd):
+    p = 0.0
     out = np.empty(len(times))
     prev_t = times[0]
     for i in range(len(times)):
@@ -154,60 +155,130 @@ def simulate_advance(shape, params, times, v_cmd, v_max):
             h = dt / steps
             v = v_cmd[i]
             for _ in range(steps):
-                outflow = np.interp(x, a_dense, v_dense)
-                x += h * (v - outflow)
-                if x < 0.0:
-                    x = 0.0
-        out[i] = x
+                outflow = np.interp(p, u_dense, v_dense)
+                p += h * (v - outflow) / c
+                if p < 0.0:
+                    p = 0.0
+        out[i] = p
         prev_t = times[i]
     return out
 
 
-def fit_ode(shape, times, values, v_cmd, base_u, v_max, init):
-    la0, off0, v_lin0, c0 = init
-
-    def unpack(theta):
-        return np.exp(np.clip(theta[:4], -30.0, 10.0)), theta[4]
-
-    def residuals(theta):
-        (la, off, v_lin, c), db = unpack(theta)
-        x = simulate_advance(shape, (la, off, v_lin), times, v_cmd, v_max)
-        return (base_u + db - x / c) - values
-
-    theta0 = np.array(
-        [math.log(la0), math.log(off0), math.log(v_lin0), math.log(c0), 0.0]
-    )
-    result = least_squares(residuals, theta0, method="lm")
-    (la, off, v_lin, c), db = unpack(result.x)
-    rms = float(np.sqrt(np.mean(result.fun**2)))
-    return {
-        "linear_advance": la,
-        "nonlinear_offset": off,
-        "linearization_velocity": v_lin,
-        "compliance": c,
-        "baseline_offset": db,
-        "rms": rms,
-        "theta": result.x,
-    }
-
-
-def initial_guess(shape, velocities, pressure):
+def fit_steady_shape(shape, velocities, pressure):
     v_lin_grid = np.logspace(
         math.log10(velocities[0] / 4.0),
         math.log10(velocities[-1] * 4.0),
-        100,
+        200,
     )
+    ones = np.ones(len(velocities))
     best = None
     for v_lin in v_lin_grid:
-        basis = np.column_stack([velocities, shape(velocities / v_lin)])
+        basis = np.column_stack([velocities, shape(velocities / v_lin), ones])
         coeffs, _, _, _ = np.linalg.lstsq(basis, pressure, rcond=None)
-        coeffs = np.maximum(coeffs, 1e-9)
+        coeffs[:2] = np.maximum(coeffs[:2], 0.0)
         rms = float(np.sqrt(np.mean((basis @ coeffs - pressure) ** 2)))
         if best is None or rms < best[0]:
-            best = (rms, float(coeffs[0]), float(coeffs[1]), float(v_lin))
+            best = (
+                rms,
+                float(coeffs[0]),
+                float(coeffs[1]),
+                float(v_lin),
+                float(coeffs[2]),
+            )
     assert best is not None
-    _, la_units, off_units, v_lin = best
-    return la_units, off_units, v_lin
+    return best
+
+
+def fit_scale(
+    shape, shape_units, times, values, v_cmd, base_u, v_max, c0, fit_mask
+):
+    la_u, off_u, v_lin = shape_units
+    v_dense = np.linspace(0.0, 1.5 * v_max, 2000)
+    u_dense = la_u * v_dense + off_u * shape(v_dense / v_lin)
+
+    def residuals(theta):
+        c = math.exp(np.clip(theta[0], -30.0, 10.0))
+        db = theta[1]
+        p = simulate_pressure(u_dense, v_dense, c, times, v_cmd)
+        return ((base_u + db - p) - values)[fit_mask]
+
+    result = least_squares(
+        residuals, np.array([math.log(c0), 0.0]), method="lm"
+    )
+    c = math.exp(np.clip(result.x[0], -30.0, 10.0))
+    rms = float(np.sqrt(np.mean(result.fun**2)))
+    return c, float(result.x[1]), rms
+
+
+def fit_scale_fixed_c(
+    shape, shape_units, times, values, v_cmd, base_u, v_max, c, fit_mask
+):
+    la_u, off_u, v_lin = shape_units
+    v_dense = np.linspace(0.0, 1.5 * v_max, 2000)
+    u_dense = la_u * v_dense + off_u * shape(v_dense / v_lin)
+    p = simulate_pressure(u_dense, v_dense, c, times, v_cmd)
+    residual = (base_u - p) - values
+    db = -float(np.mean(residual[fit_mask]))
+    rms = float(np.sqrt(np.mean((residual[fit_mask] + db) ** 2)))
+    return db, rms
+
+
+def rectify_schedule(schedule, times, values, baseline_tails):
+    """Correct the analytic schedule against observed transition times.
+
+    The commanded schedule assumes each segment lasts exactly E/v; the
+    planner's real timing drifts by a few ms per segment. Boundaries
+    whose BASELINE level change is large respond to actual motion (the
+    SG velocity term), not melt pressure, so their observed crossing
+    times give the true transition times without eating the pressure
+    dynamics; a linear time map absorbs drift and constant response lag.
+    """
+    if baseline_tails is None:
+        return schedule, 0.0, 0.0
+    levels = []
+    for t0, t1, vel in schedule:
+        mask = (times >= t0 + 0.5 * (t1 - t0)) & (times <= t1)
+        levels.append(float(np.median(values[mask])) if mask.any() else None)
+    observations = []
+    for i in range(1, len(schedule)):
+        lv_a, lv_b = levels[i - 1], levels[i]
+        v_a, v_b = schedule[i - 1][2], schedule[i][2]
+        if lv_a is None or lv_b is None or abs(lv_b - lv_a) < 30.0:
+            continue
+        b_vs = sorted(baseline_tails)
+        b_us = [baseline_tails[v] for v in b_vs]
+        base_a = float(np.interp(v_a, b_vs, b_us))
+        base_b = float(np.interp(v_b, b_vs, b_us))
+        if abs(base_b - base_a) < 3.0 * abs(lv_b - lv_a - (base_b - base_a)):
+            continue
+        t0 = schedule[i][0]
+        mask = (times >= t0 - 0.5) & (times <= t0 + 1.5)
+        t_win, u_win = times[mask], values[mask]
+        mid = 0.5 * (lv_a + lv_b)
+        sign = 1.0 if lv_b > lv_a else -1.0
+        for k in range(len(t_win) - 1):
+            if (
+                sign * (u_win[k] - mid) > 0.0
+                and sign * (u_win[k + 1] - mid) > 0.0
+            ):
+                observations.append((t0, t_win[k] - t0))
+                break
+    if len(observations) < 3:
+        return schedule, 0.0, 0.0
+    t_obs = np.array([t for t, _ in observations])
+    lags = np.array([lag for _, lag in observations])
+    t_ref = schedule[0][0]
+    coeffs = np.polyfit(t_obs - t_ref, lags, 1)
+    drift, lag0 = float(coeffs[0]), float(coeffs[1])
+    rectified = [
+        (
+            t0 + lag0 + drift * (t0 - t_ref),
+            t1 + lag0 + drift * (t1 - t_ref),
+            vel,
+        )
+        for t0, t1, vel in schedule
+    ]
+    return rectified, lag0, drift
 
 
 def main():
@@ -215,15 +286,28 @@ def main():
     parser.add_argument("capture")
     parser.add_argument("--baseline")
     parser.add_argument("--plot")
+    parser.add_argument(
+        "--anchor",
+        help="pin the scale from a trusted linear PA value, as "
+        "'<velocity>:<k>' (advance k*v mm at that filament velocity)",
+    )
     args = parser.parse_args()
 
     schedule, times, values, smooth_time = parse_capture(args.capture)
-    tails = steady_tails(schedule, times, values)
-    if len(tails) < 3:
-        sys.exit("need steady tails at >=3 distinct velocities")
     baseline_tails = None
     if args.baseline:
         baseline_tails = steady_tails(*parse_capture(args.baseline)[:3])
+    schedule, lag0, drift = rectify_schedule(
+        schedule, times, values, baseline_tails
+    )
+    if lag0 or drift:
+        print(
+            "schedule rectified: lag %.3fs, drift %.2f ms/s"
+            % (lag0, drift * 1000.0)
+        )
+    tails = steady_tails(schedule, times, values)
+    if len(tails) < 3:
+        sys.exit("need steady tails at >=3 distinct velocities")
     velocities, pressure = pressure_curve(tails, baseline_tails)
     if np.max(pressure) <= 0.0:
         sys.exit(
@@ -232,28 +316,81 @@ def main():
         )
 
     v_cmd = command_velocity(schedule, times, smooth_time)
+    moving = v_cmd >= 0.7 * float(velocities[0])
+    times, values, v_cmd = times[moving], values[moving], v_cmd[moving]
     base_u = np.asarray(baseline_of_velocity(tails, baseline_tails)(v_cmd))
     v_max = float(velocities[-1])
+    fit_mask = np.ones(len(times), dtype=bool)
+    half_window = 0.5 * smooth_time + 0.03
+    for t0, _, _ in schedule[1:]:
+        fit_mask &= np.abs(times - t0) > half_window
 
     results = {}
     for name, shape in MODEL_SHAPES.items():
-        la_u, off_u, v_lin0 = initial_guess(shape, velocities, pressure)
+        shape_rms, la_u, off_u, v_lin, drift = fit_steady_shape(
+            shape, velocities, pressure
+        )
+        anchored = None
+        if args.anchor:
+            v_a, _, k_a = args.anchor.partition(":")
+            v_a, k_a = float(v_a), float(k_a)
+            u_at = la_u * v_a + off_u * shape(v_a / v_lin)
+            if u_at <= 0.0:
+                sys.exit("anchor velocity has no measured pressure")
+            anchored = k_a * v_a / u_at
         best = None
-        for c0 in (0.001, 0.003, 0.01, 0.03):
-            init = (max(la_u * c0, 1e-6), max(off_u * c0, 1e-6), v_lin0, c0)
-            fit = fit_ode(shape, times, values, v_cmd, base_u, v_max, init)
-            if best is None or fit["rms"] < best["rms"]:
-                best = fit
+        for c0 in (0.001, 0.003, 0.01, 0.03, 0.1):
+            if anchored is not None:
+                c = anchored
+                db, rms = fit_scale_fixed_c(
+                    shape,
+                    (la_u, off_u, v_lin),
+                    times,
+                    values,
+                    v_cmd,
+                    base_u,
+                    v_max,
+                    c,
+                    fit_mask,
+                )
+            else:
+                c, db, rms = fit_scale(
+                    shape,
+                    (la_u, off_u, v_lin),
+                    times,
+                    values,
+                    v_cmd,
+                    base_u,
+                    v_max,
+                    c0,
+                    fit_mask,
+                )
+            if best is None or rms < best["rms"]:
+                best = {
+                    "linear_advance": c * la_u,
+                    "nonlinear_offset": c * off_u,
+                    "linearization_velocity": v_lin,
+                    "compliance": c,
+                    "baseline_offset": db,
+                    "rms": rms,
+                    "shape_rms": shape_rms,
+                    "drift": drift,
+                }
+            if anchored is not None:
+                break
         results[name] = best
         print(
-            "\n[%s]  rms %.3f SG units  (compliance %.5g mm/unit, "
-            "baseline offset %.2f)\n"
+            "\n[%s]  trace rms %.3f SG units\n"
+            "  steady-shape rms %.3f units, baseline drift %.2f units, "
+            "compliance %.5g mm/unit, offset %.2f\n"
             "linear_advance: %.5f\n"
             "nonlinear_offset: %.5f\n"
             "linearization_velocity: %.3f"
             % (
                 name,
                 best["rms"],
+                best["shape_rms"],
+                best["drift"],
                 best["compliance"],
                 best["baseline_offset"],
                 best["linear_advance"],
@@ -275,18 +412,16 @@ def main():
         for name in results:
             fit = results[name]
             shape = MODEL_SHAPES[name]
-            x = simulate_advance(
-                shape,
-                (
-                    fit["linear_advance"],
-                    fit["nonlinear_offset"],
-                    fit["linearization_velocity"],
-                ),
-                times,
-                v_cmd,
-                v_max,
+            la_u = fit["linear_advance"] / fit["compliance"]
+            off_u = fit["nonlinear_offset"] / fit["compliance"]
+            v_dense = np.linspace(0.0, 1.5 * v_max, 2000)
+            u_dense = la_u * v_dense + off_u * shape(
+                v_dense / fit["linearization_velocity"]
             )
-            pred = base_u + fit["baseline_offset"] - x / fit["compliance"]
+            p = simulate_pressure(
+                u_dense, v_dense, fit["compliance"], times, v_cmd
+            )
+            pred = base_u + fit["baseline_offset"] - p
             ax_raw.plot(times, pred, linewidth=0.8, label=name)
         ax_raw.set_xlabel("print time (s)")
         ax_raw.set_ylabel("SG load (raw)")
