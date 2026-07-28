@@ -178,7 +178,7 @@ class PAIdent:
         if not velocities or any(v <= 0.0 for v in velocities):
             raise gcmd.error("VELOCITIES must be positive")
         dwell = gcmd.get_float("DWELL", 3.0, above=0.0)
-        smooth_time = gcmd.get_float("SMOOTH_TIME", 0.3, minval=0.0)
+        smooth_time = gcmd.get_float("SMOOTH_TIME", 0.03, minval=0.0)
         interval = gcmd.get_float("INTERVAL", MIN_POLL_PAUSE, minval=0.0)
         out_path = gcmd.get("OUT", "/tmp/pa_ident.csv")
         sgt = gcmd.get_int("SGT", None, minval=-64, maxval=63)
