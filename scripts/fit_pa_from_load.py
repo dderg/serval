@@ -47,10 +47,17 @@ def parse_capture(path):
     schedule = []
     times = []
     values = []
+    meta = {}
     with open(path) as f:
         for line in f:
             line = line.strip()
-            if not line or line.startswith("#"):
+            if not line:
+                continue
+            if line.startswith("#"):
+                for token in line[1:].split():
+                    if "=" in token:
+                        key, _, val = token.partition("=")
+                        meta[key] = val
                 continue
             kind, rest = line.split(",", 1)
             if kind == "S":
@@ -64,7 +71,13 @@ def parse_capture(path):
                 raise ValueError("unknown row kind %r in %s" % (kind, path))
     if not schedule or not times:
         raise ValueError("capture %s has no schedule or no samples" % (path,))
-    return schedule, np.asarray(times), np.asarray(values, dtype=float)
+    smooth_time = float(meta.get("smooth_time", 0.0))
+    return (
+        schedule,
+        np.asarray(times),
+        np.asarray(values, dtype=float),
+        smooth_time,
+    )
 
 
 def steady_tails(schedule, times, values):
@@ -104,11 +117,27 @@ def baseline_of_velocity(tails, baseline_tails):
     return lambda v: np.full_like(np.asarray(v, dtype=float), flat)
 
 
-def command_velocity(schedule, times):
-    starts = np.array([t0 for t0, _, _ in schedule])
-    vels = np.array([vel for _, _, vel in schedule])
-    idx = np.clip(np.searchsorted(starts, times, side="right") - 1, 0, None)
-    return vels[idx]
+def triangle_cdf(x, smooth_time):
+    h = 0.5 * smooth_time
+    x = np.clip(x, -h, h)
+    rising = 0.5 * (x + h) ** 2 / (h * h)
+    falling = 1.0 - 0.5 * (h - x) ** 2 / (h * h)
+    return np.where(x < 0.0, rising, falling)
+
+
+def command_velocity(schedule, times, smooth_time):
+    if smooth_time <= 0.0:
+        starts = np.array([t0 for t0, _, _ in schedule])
+        vels = np.array([vel for _, _, vel in schedule])
+        idx = np.clip(np.searchsorted(starts, times, side="right") - 1, 0, None)
+        return vels[idx]
+    v = np.zeros(len(times))
+    for t0, t1, vel in schedule:
+        v += vel * (
+            triangle_cdf(times - t0, smooth_time)
+            - triangle_cdf(times - t1, smooth_time)
+        )
+    return v
 
 
 def simulate_advance(shape, params, times, v_cmd, v_max):
@@ -188,13 +217,13 @@ def main():
     parser.add_argument("--plot")
     args = parser.parse_args()
 
-    schedule, times, values = parse_capture(args.capture)
+    schedule, times, values, smooth_time = parse_capture(args.capture)
     tails = steady_tails(schedule, times, values)
     if len(tails) < 3:
         sys.exit("need steady tails at >=3 distinct velocities")
     baseline_tails = None
     if args.baseline:
-        baseline_tails = steady_tails(*parse_capture(args.baseline))
+        baseline_tails = steady_tails(*parse_capture(args.baseline)[:3])
     velocities, pressure = pressure_curve(tails, baseline_tails)
     if np.max(pressure) <= 0.0:
         sys.exit(
@@ -202,7 +231,7 @@ def main():
             "or baseline mismatched"
         )
 
-    v_cmd = command_velocity(schedule, times)
+    v_cmd = command_velocity(schedule, times, smooth_time)
     base_u = np.asarray(baseline_of_velocity(tails, baseline_tails)(v_cmd))
     v_max = float(velocities[-1])
 

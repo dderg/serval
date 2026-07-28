@@ -15,7 +15,6 @@ MAX_SEGMENT_E = 45.0
 TEMP_TOLERANCE = 5.0
 POLL_TAIL_TIME = 3.0
 MIN_POLL_PAUSE = 0.005
-RAMP_STEP_TIME = 0.05
 
 
 class PAIdent:
@@ -82,16 +81,32 @@ class PAIdent:
                 % (status["temperature"], status["target"])
             )
 
-    def _ramp_steps(self, v_from, v_to, accel):
-        span = abs(v_to - v_from)
-        count = int(span / (accel * RAMP_STEP_TIME))
-        step_time = span / accel / count if count else 0.0
-        return [
-            (v_from + (v_to - v_from) * (k + 0.5) / count, step_time)
-            for k in range(count)
-        ]
+    def _smoothing_scripts(self, gcmd, toolhead, smooth_time):
+        if smooth_time == 0.0:
+            return None, None
+        compat = self.printer.lookup_object("pressure_advance_compat", None)
+        if compat is None:
+            raise gcmd.error(
+                "SMOOTH_TIME shaping needs [pressure_advance_compat]; "
+                "pass SMOOTH_TIME=0 to run raw velocity steps"
+            )
+        extruder_name = toolhead.get_extruder().get_name()
+        fields = compat.get_status_fields(extruder_name)
+        if "smooth_time" not in fields:
+            raise gcmd.error(
+                "extruder '%s' has no smooth_triangle post_processor; "
+                "add one to its axis or pass SMOOTH_TIME=0" % (extruder_name,)
+            )
+        pre = "SET_PRESSURE_ADVANCE SMOOTH_TIME=%.6f" % (smooth_time,)
+        post = "SET_PRESSURE_ADVANCE SMOOTH_TIME=%.6f" % (
+            fields["smooth_time"],
+        )
+        if "pressure_advance" in fields:
+            pre += " ADVANCE=0"
+            post += " ADVANCE=%.6f" % (fields["pressure_advance"],)
+        return pre, post
 
-    def _build_schedule(self, velocities, dwell, accel, anchor_time):
+    def _build_schedule(self, velocities, dwell, anchor_time):
         script = ["SAVE_GCODE_STATE NAME=PA_LOAD_IDENT", "M83"]
         schedule = []
         current_time = anchor_time
@@ -100,18 +115,7 @@ class PAIdent:
         pulses = []
         for velocity in velocities[len(velocities) // 2 :]:
             pulses += [velocity, v_min]
-        previous = 0.0
         for velocity in staircase + pulses:
-            for ramp_v, step_time in self._ramp_steps(
-                previous, velocity, accel
-            ):
-                script.append(
-                    "G1 E%.5f F%.1f" % (ramp_v * step_time, ramp_v * 60.0)
-                )
-                schedule.append(
-                    (current_time, current_time + step_time, ramp_v)
-                )
-                current_time += step_time
             total_e = velocity * dwell
             segment_start = current_time
             while total_e > 0.0:
@@ -120,7 +124,6 @@ class PAIdent:
                 total_e -= chunk
             current_time += dwell
             schedule.append((segment_start, current_time, velocity))
-            previous = velocity
         script.append("M400")
         script.append("RESTORE_GCODE_STATE NAME=PA_LOAD_IDENT")
         return script, schedule, current_time
@@ -143,10 +146,11 @@ class PAIdent:
             self.poll_error = str(e)
         done.complete(None)
 
-    def _write_csv(self, path, tmc_name, reg_name, schedule):
+    def _write_csv(self, path, tmc_name, reg_name, schedule, smooth_time):
         with open(path, "w") as f:
             f.write("# pa_ident v1\n")
             f.write("# tmc=%s reg=%s\n" % (tmc_name, reg_name))
+            f.write("# smooth_time=%.6f\n" % (smooth_time,))
             for start, end, velocity in schedule:
                 f.write("S,%.6f,%.6f,%.4f\n" % (start, end, velocity))
             for sample_time, value in self.samples:
@@ -174,15 +178,20 @@ class PAIdent:
         if not velocities or any(v <= 0.0 for v in velocities):
             raise gcmd.error("VELOCITIES must be positive")
         dwell = gcmd.get_float("DWELL", 3.0, above=0.0)
-        accel = gcmd.get_float("ACCEL", 25.0, above=0.0)
+        smooth_time = gcmd.get_float("SMOOTH_TIME", 0.3, minval=0.0)
         interval = gcmd.get_float("INTERVAL", MIN_POLL_PAUSE, minval=0.0)
         out_path = gcmd.get("OUT", "/tmp/pa_ident.csv")
         sgt = gcmd.get_int("SGT", None, minval=-64, maxval=63)
 
+        pre_script, post_script = self._smoothing_scripts(
+            gcmd, toolhead, smooth_time
+        )
         anchor_time = toolhead.get_last_move_time()
         script, schedule, end_time = self._build_schedule(
-            velocities, dwell, accel, anchor_time
+            velocities, dwell, anchor_time
         )
+        if pre_script is not None:
+            script.insert(0, pre_script)
 
         self.samples = []
         self.poll_error = None
@@ -202,12 +211,16 @@ class PAIdent:
         finally:
             if sgt_reg is not None:
                 self._restore_sgt(tmc_object, sgt_reg)
+            if post_script is not None:
+                self.gcode.run_script_from_command(post_script)
         if self.poll_error is not None:
             raise gcmd.error("TMC load polling failed: %s" % (self.poll_error,))
         if not self.samples:
             raise gcmd.error("No load samples collected")
 
-        self._write_csv(out_path, self.tmc_name, reg_name, schedule)
+        self._write_csv(
+            out_path, self.tmc_name, reg_name, schedule, smooth_time
+        )
         durations = [
             self.samples[i + 1][0] - self.samples[i][0]
             for i in range(len(self.samples) - 1)
