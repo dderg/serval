@@ -49,6 +49,24 @@ class PAIdent:
                 "enable stealthchop for the capture" % (self.tmc_name,)
             )
 
+    def _apply_sgt(self, gcmd, tmc_object, sgt):
+        fields = tmc_object.fields
+        reg_name = fields.lookup_register("sgt", None)
+        if reg_name is None:
+            raise gcmd.error(
+                "%s has no sgt field; SGT= only applies to SG2 drivers"
+                % (self.tmc_name,)
+            )
+        tmc_object.mcu_tmc.set_register(
+            reg_name, fields.override_register(reg_name, {"sgt": sgt})
+        )
+        return reg_name
+
+    def _restore_sgt(self, tmc_object, reg_name):
+        tmc_object.mcu_tmc.set_register(
+            reg_name, tmc_object.fields.registers.get(reg_name, 0)
+        )
+
     def _check_extruder_temp(self, gcmd, toolhead):
         heater = toolhead.get_extruder().get_heater()
         systime = self.printer.get_reactor().monotonic()
@@ -159,6 +177,7 @@ class PAIdent:
         accel = gcmd.get_float("ACCEL", 25.0, above=0.0)
         interval = gcmd.get_float("INTERVAL", MIN_POLL_PAUSE, minval=0.0)
         out_path = gcmd.get("OUT", "/tmp/pa_ident.csv")
+        sgt = gcmd.get_int("SGT", None, minval=-64, maxval=63)
 
         anchor_time = toolhead.get_last_move_time()
         script, schedule, end_time = self._build_schedule(
@@ -174,8 +193,15 @@ class PAIdent:
             lambda e: self._poll(mcu_tmc, mcu, reg_name, interval, poll_done)
         )
 
-        self.gcode.run_script_from_command("\n".join(script))
-        poll_done.wait()
+        sgt_reg = None
+        if sgt is not None:
+            sgt_reg = self._apply_sgt(gcmd, tmc_object, sgt)
+        try:
+            self.gcode.run_script_from_command("\n".join(script))
+            poll_done.wait()
+        finally:
+            if sgt_reg is not None:
+                self._restore_sgt(tmc_object, sgt_reg)
         if self.poll_error is not None:
             raise gcmd.error("TMC load polling failed: %s" % (self.poll_error,))
         if not self.samples:
