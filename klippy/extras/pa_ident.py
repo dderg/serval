@@ -37,6 +37,24 @@ class PAIdent:
             return "SG_RESULT"
         return "DRV_STATUS"
 
+    def _enter_stealthchop(self, tmc_object):
+        fields = tmc_object.fields
+        if fields.lookup_register("sg_result", None) != "SG_RESULT":
+            return False
+        if fields.get_field("en_spreadcycle") == 0:
+            return False
+        override = fields.override_register
+        mcu_tmc = tmc_object.mcu_tmc
+        mcu_tmc.set_register("TPWMTHRS", override("TPWMTHRS", {"tpwmthrs": 0}))
+        mcu_tmc.set_register("GCONF", override("GCONF", {"en_spreadcycle": 0}))
+        return True
+
+    def _restore_chopper_mode(self, tmc_object):
+        for reg_name in ("TPWMTHRS", "GCONF"):
+            tmc_object.mcu_tmc.set_register(
+                reg_name, tmc_object.fields.registers.get(reg_name, 0)
+            )
+
     def _check_extruder_temp(self, gcmd, toolhead):
         heater = toolhead.get_extruder().get_heater()
         systime = self.printer.get_reactor().monotonic()
@@ -139,8 +157,13 @@ class PAIdent:
             lambda e: self._poll(mcu_tmc, mcu, reg_name, interval, poll_done)
         )
 
-        self.gcode.run_script_from_command("\n".join(script))
-        poll_done.wait()
+        switched = self._enter_stealthchop(tmc_object)
+        try:
+            self.gcode.run_script_from_command("\n".join(script))
+            poll_done.wait()
+        finally:
+            if switched:
+                self._restore_chopper_mode(tmc_object)
         if self.poll_error is not None:
             raise gcmd.error("TMC load polling failed: %s" % (self.poll_error,))
         if not self.samples:
