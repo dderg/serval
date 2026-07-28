@@ -1,5 +1,8 @@
 use super::*;
-use crate::algos::{LinearPressureAdvance, ModeInverse, SmoothBell, SmoothTriangle};
+use crate::algos::{
+    LinearPressureAdvance, ModeInverse, ReciprPressureAdvance, SmoothBell, SmoothTriangle,
+    TanhPressureAdvance,
+};
 use crate::kernel::build_smooth_bell_kernel;
 
 fn pa(k: f64) -> PostProcessorInstance {
@@ -13,6 +16,121 @@ fn bell(smooth_time: f64) -> PostProcessorInstance {
 }
 fn st(smooth_time: f64) -> PostProcessorInstance {
     PostProcessorInstance::new("st", &SmoothTriangle, vec![smooth_time])
+}
+fn nlpa(
+    algo: &'static dyn crate::algos::PostProcessorAlgo,
+    linear_advance: f64,
+    nonlinear_offset: f64,
+    linearization_velocity: f64,
+) -> PostProcessorInstance {
+    PostProcessorInstance::new(
+        "nlpa",
+        algo,
+        vec![linear_advance, nonlinear_offset, linearization_velocity],
+    )
+}
+
+#[test]
+fn nonlinear_pa_types_compile_to_their_own_model() {
+    for (algo, model) in [
+        (
+            &TanhPressureAdvance as &'static dyn crate::algos::PostProcessorAlgo,
+            AdvanceModel::Tanh,
+        ),
+        (&ReciprPressureAdvance, AdvanceModel::Reciprocal),
+    ] {
+        let c = CompiledChain::compile(&[nlpa(algo, 0.02, 0.05, 20.0)]).unwrap();
+        let ChainStage::NonlinearAdvance(adv) = c.stages[0] else {
+            panic!("{} must compile to an advance stage", algo.type_name());
+        };
+        assert_eq!(
+            adv,
+            NonlinearAdvance {
+                model,
+                linear_advance: 0.02,
+                nonlinear_offset: 0.05,
+                linearization_velocity: 20.0,
+            }
+        );
+        assert_eq!(c.max_input_window(), (0.0, 0.0));
+    }
+}
+
+#[test]
+fn nonlinear_pa_without_an_offset_is_the_linear_operator() {
+    let c = CompiledChain::compile(&[nlpa(&TanhPressureAdvance, 0.02, 0.0, 20.0)]).unwrap();
+    assert!(matches!(
+        c.stages[0],
+        ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.02
+    ));
+}
+
+#[test]
+fn nonlinear_pa_with_no_advance_at_all_is_a_no_op() {
+    let c = CompiledChain::compile(&[nlpa(&ReciprPressureAdvance, 0.0, 0.0, 20.0)]).unwrap();
+    assert!(c.stages.is_empty());
+}
+
+#[test]
+fn nonlinear_pa_rejects_a_zero_linearization_velocity() {
+    assert!(nlpa(&TanhPressureAdvance, 0.02, 0.05, 0.0)
+        .validate()
+        .is_err());
+}
+
+#[test]
+fn nonlinear_pa_occupies_the_single_gain_slot() {
+    let err = CompiledChain::compile(&[nlpa(&TanhPressureAdvance, 0.02, 0.05, 20.0), pa(0.04)])
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        PostProcessorError::UnsupportedComposition { .. }
+    ));
+}
+
+/// Both shapes are odd, saturate at `nonlinear_offset`, and start with the
+/// same small-signal slope; the reciprocal one rises toward the bound far
+/// more slowly, so it commands less advance everywhere past rest.
+#[test]
+fn the_two_shapes_share_a_slope_at_rest_and_a_bound_at_speed() {
+    let advance = |model| NonlinearAdvance {
+        model,
+        linear_advance: 0.0,
+        nonlinear_offset: 0.05,
+        linearization_velocity: 2.0,
+    };
+    let (tanh, recipr) = (
+        advance(AdvanceModel::Tanh),
+        advance(AdvanceModel::Reciprocal),
+    );
+    assert!((tanh.slope(0.0) - recipr.slope(0.0)).abs() < 1e-12);
+    assert!((tanh.slope(0.0) - 0.025).abs() < 1e-12);
+    for adv in [tanh, recipr] {
+        let far = adv.advance(1e6);
+        assert!(
+            (0.0499..=0.05).contains(&far),
+            "must saturate at 0.05: {far}"
+        );
+        assert!((adv.advance(-3.0) + adv.advance(3.0)).abs() < 1e-12);
+    }
+    assert!(
+        recipr.advance(4.0) < 0.8 * tanh.advance(4.0),
+        "the reciprocal shape must lag tanh well before saturation: {} vs {}",
+        recipr.advance(4.0),
+        tanh.advance(4.0)
+    );
+    for v in [-9.0, -0.4, 0.4, 9.0] {
+        let h = 1e-6;
+        for adv in [tanh, recipr] {
+            let slope = (adv.advance(v + h) - adv.advance(v - h)) / (2.0 * h);
+            let curvature = (adv.slope(v + h) - adv.slope(v - h)) / (2.0 * h);
+            assert!((adv.slope(v) - slope).abs() < 1e-6, "slope at {v}");
+            assert!(
+                (adv.curvature(v) - curvature).abs() < 1e-5,
+                "curvature at {v}"
+            );
+        }
+    }
 }
 
 #[test]

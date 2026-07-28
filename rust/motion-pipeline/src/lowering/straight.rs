@@ -22,8 +22,25 @@ pub(crate) fn apply_derivative_gains(coeffs: &mut [f64], chain: &CompiledChain) 
                 }
             }
             ChainStage::SmoothKernel(_) => break,
+            ChainStage::NonlinearAdvance(_) => unreachable!(
+                "a pre-kernel nonlinear advance routes the move through the \
+                 sampled lowering path, which samples the advance law"
+            ),
         }
     }
+}
+
+/// A nonlinear advance ahead of the kernel is not a per-piece coefficient
+/// transform — the advance law is not polynomial in the track — so a move
+/// carrying one cannot take the closed-form path.
+pub(super) fn has_pre_kernel_nonlinear_advance(chains: &[CompiledChain]) -> bool {
+    chains.iter().any(|chain| {
+        chain
+            .stages
+            .iter()
+            .take_while(|stage| !matches!(stage, ChainStage::SmoothKernel(_)))
+            .any(|stage| matches!(stage, ChainStage::NonlinearAdvance(_)))
+    })
 }
 
 /// Lower a straight constant-ceiling move from its closed-form jerk phases: one

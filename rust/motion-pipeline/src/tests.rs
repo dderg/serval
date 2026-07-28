@@ -1265,6 +1265,28 @@ fn follower_kernel_chains(
     chains
 }
 
+fn nonlinear_e_chain(
+    algo: &'static dyn trajectory::algos::PostProcessorAlgo,
+    linear_advance: f64,
+    nonlinear_offset: f64,
+    linearization_velocity: f64,
+    e_smooth_time: f64,
+) -> trajectory::CompiledChain {
+    let mut instances = vec![PostProcessorInstance::new(
+        "nlpa",
+        algo,
+        vec![linear_advance, nonlinear_offset, linearization_velocity],
+    )];
+    if e_smooth_time > 0.0 {
+        instances.push(PostProcessorInstance::new(
+            "st",
+            &trajectory::algos::SmoothBell,
+            vec![e_smooth_time],
+        ));
+    }
+    trajectory::CompiledChain::compile(&instances).expect("nonlinear pa + kernel compiles")
+}
+
 fn sample_extruder(segs: &[ShapedSegment]) -> Vec<(f64, f64)> {
     let mut samples = Vec::new();
     for seg in segs {
@@ -1387,6 +1409,76 @@ fn smooth_pressure_advance_on_follower_preserves_the_projected_total() {
     );
 }
 
+/// Nonlinear PA on the projected follower: matched to the linear model's
+/// small-signal slope, each saturating model must fall short of the linear
+/// one at cruise while still settling on the same extruded total once the
+/// flow stops. `recipr` rises toward the bound more slowly than `tanh`, so
+/// it must command the least advance of the three.
+#[test]
+fn nonlinear_pressure_advance_saturates_against_the_matched_linear_model() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5),
+        line(2, [30.0, 0.0, 0.0], [30.0, 30.0, 0.0], 1.5),
+        line(3, [30.0, 30.0, 0.0], [0.0, 30.0, 0.0], 0.0),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let (offset, v_lin, smooth) = (0.05, 2.0, 0.02675);
+    let matched_k = offset / v_lin;
+
+    let plain = replay(
+        cfg(),
+        follower_kernel_chains(None, None, smooth),
+        &home,
+        0.0,
+        &moves,
+    );
+    let linear = replay(
+        cfg(),
+        follower_kernel_chains(None, Some(matched_k), smooth),
+        &home,
+        0.0,
+        &moves,
+    );
+    let saturating = |algo: &'static dyn trajectory::algos::PostProcessorAlgo| {
+        let mut chains = follower_kernel_chains(None, None, smooth);
+        chains.chains[3] = nonlinear_e_chain(algo, 0.0, offset, v_lin, smooth);
+        replay(cfg(), chains, &home, 0.0, &moves)
+    };
+    let tanh = saturating(&trajectory::algos::TanhPressureAdvance);
+    let recipr = saturating(&trajectory::algos::ReciprPressureAdvance);
+
+    let lead = |pa: &[ShapedSegment]| {
+        sample_extruder(pa)
+            .iter()
+            .zip(sample_extruder(&plain))
+            .map(|((_, a), (_, b))| a - b)
+            .fold(f64::NEG_INFINITY, f64::max)
+    };
+    let (lead_lin, lead_tanh, lead_recipr) = (lead(&linear), lead(&tanh), lead(&recipr));
+    for (name, segs, lead_nl) in [("tanh", &tanh, lead_tanh), ("recipr", &recipr, lead_recipr)] {
+        assert_extruder_has_no_jumps(segs);
+        assert!(
+            lead_nl > 1e-3,
+            "{name} PA must still advance the extruder, lead {lead_nl}"
+        );
+        assert!(
+            lead_nl < 0.75 * lead_lin,
+            "{name} must advance visibly less than the matched linear model \
+             at cruise: {lead_nl} vs {lead_lin}"
+        );
+        let (e_nl, e_plain) = (extruder_end(segs), extruder_end(&plain));
+        assert!(
+            (e_nl - e_plain).abs() < 1e-4,
+            "{name} PA must not change the settled extruded total: {e_nl} vs {e_plain}"
+        );
+    }
+    assert!(
+        lead_recipr < lead_tanh,
+        "recipr rises toward the bound more slowly than tanh, so it must lead \
+         less: {lead_recipr} vs {lead_tanh}"
+    );
+}
+
 #[test]
 fn derivative_gains_track_transform_matches_analytic_second_derivative() {
     let piece = nurbs::bezier::BezierPiece {
@@ -1428,6 +1520,51 @@ fn derivative_gains_track_transform_combines_both_gains() {
         assert!(
             (eval(&out, t) - expected).abs() < 1e-12,
             "track transform must equal x + k1*x' + k2*x'' at t={t}"
+        );
+    }
+}
+
+#[test]
+fn nonlinear_advance_track_transform_matches_the_advance_law() {
+    let piece = nurbs::bezier::BezierPiece {
+        u_start: 0.0,
+        u_end: 0.1,
+        coeffs: vec![1.0, 2.0, 3.0, 4.0],
+    };
+    let track = nurbs::bezier::bezier_pieces_to_nurbs(&[piece]);
+    for model in [
+        trajectory::AdvanceModel::Tanh,
+        trajectory::AdvanceModel::Reciprocal,
+    ] {
+        let adv = trajectory::NonlinearAdvance {
+            model,
+            linear_advance: 0.03,
+            nonlinear_offset: 0.08,
+            linearization_velocity: 5.0,
+        };
+        let out = crate::shaper::apply_nonlinear_advance_to_track(3, &track, adv)
+            .expect("nonlinear advance refits a polynomial track");
+        let mut worst: f64 = 0.0;
+        let mut worst_offset_term: f64 = 0.0;
+        for i in 0..=20 {
+            let t = 0.1 * i as f64 / 20.0;
+            let pos = 1.0 + 2.0 * t + 3.0 * t * t + 4.0 * t * t * t;
+            let vel = 2.0 + 6.0 * t + 12.0 * t * t;
+            let offset_term = adv.advance(vel) - 0.03 * vel;
+            let expected = pos + 0.03 * vel + offset_term;
+            worst = worst.max((eval(&out, t) - expected).abs());
+            worst_offset_term = worst_offset_term.max(offset_term);
+        }
+        assert!(
+            worst < 1e-4,
+            "{model:?}: refit of x + a(x') must hold the shaper's position \
+             budget, worst {worst}"
+        );
+        assert!(
+            worst_offset_term > 100.0 * worst,
+            "{model:?}: the saturating term ({worst_offset_term}) must dominate \
+             the fit error ({worst}), otherwise this test would pass on the \
+             linear model too"
         );
     }
 }

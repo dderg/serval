@@ -13,6 +13,76 @@ pub struct PostProcessorInstance {
 pub enum ChainStage {
     SmoothKernel(PiecewisePolynomialKernel),
     DerivativeGains { k1: f64, k2: f64 },
+    NonlinearAdvance(NonlinearAdvance),
+}
+
+/// Which saturating shape the nonlinear pressure-advance term uses. Both are
+/// odd, bounded by `nonlinear_offset`, and share the small-signal slope
+/// `nonlinear_offset / linearization_velocity`; `Reciprocal` approaches its
+/// bound far more slowly than `Tanh`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvanceModel {
+    Tanh,
+    Reciprocal,
+}
+
+impl AdvanceModel {
+    /// `s(u)`, `s'(u)`, `s''(u)` of the unit-scaled shape.
+    fn shape(self, u: f64) -> (f64, f64, f64) {
+        match self {
+            Self::Tanh => {
+                let t = libm::tanh(u);
+                let sech2 = t.mul_add(-t, 1.0);
+                (t, sech2, -2.0 * t * sech2)
+            }
+            // `u/(1 + |u|)` is the odd extension of bleeding-edge-v2's
+            // `1 − 1/(1 + u)`: identical for the forward flow the model was
+            // written for, but finite on retraction, where the original is
+            // singular at `u = −1` and sign-flipped past it.
+            Self::Reciprocal => {
+                let d = 1.0 + u.abs();
+                let d2 = d * d;
+                (u / d, 1.0 / d2, -2.0 * u.signum() / (d2 * d))
+            }
+        }
+    }
+}
+
+/// The operator `y = x + a(ẋ)` with the saturating advance law
+/// `a(v) = linear_advance·v + nonlinear_offset·s(v / linearization_velocity)`.
+///
+/// Above `linearization_velocity` the extra term flattens out, so the
+/// commanded advance stops growing with speed the way the purely linear
+/// model does — the nonlinear pressure-advance model.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NonlinearAdvance {
+    pub model: AdvanceModel,
+    pub linear_advance: f64,
+    pub nonlinear_offset: f64,
+    pub linearization_velocity: f64,
+}
+
+impl NonlinearAdvance {
+    #[must_use]
+    pub fn advance(&self, v: f64) -> f64 {
+        let (s, _, _) = self.model.shape(v / self.linearization_velocity);
+        self.linear_advance.mul_add(v, self.nonlinear_offset * s)
+    }
+
+    /// `da/dv`
+    #[must_use]
+    pub fn slope(&self, v: f64) -> f64 {
+        let (_, ds, _) = self.model.shape(v / self.linearization_velocity);
+        (self.nonlinear_offset / self.linearization_velocity).mul_add(ds, self.linear_advance)
+    }
+
+    /// `d²a/dv²`
+    #[must_use]
+    pub fn curvature(&self, v: f64) -> f64 {
+        let vl = self.linearization_velocity;
+        let (_, _, dds) = self.model.shape(v / vl);
+        self.nonlinear_offset / (vl * vl) * dds
+    }
 }
 
 impl ChainStage {
@@ -27,7 +97,7 @@ impl ChainStage {
                 let (k_lo, k_hi) = kernel.support();
                 (-k_hi, -k_lo)
             }
-            Self::DerivativeGains { .. } => (0.0, 0.0),
+            Self::DerivativeGains { .. } | Self::NonlinearAdvance(_) => (0.0, 0.0),
         }
     }
 
@@ -35,14 +105,14 @@ impl ChainStage {
     pub fn kernel_variance_s2(&self) -> f64 {
         match self {
             Self::SmoothKernel(kernel) => kernel.second_moment(),
-            Self::DerivativeGains { .. } => 0.0,
+            Self::DerivativeGains { .. } | Self::NonlinearAdvance(_) => 0.0,
         }
     }
 
     fn composition_slot(&self) -> (usize, &'static str) {
         match self {
             Self::SmoothKernel(_) => (0, "kernel"),
-            Self::DerivativeGains { .. } => (1, "derivative-gain"),
+            Self::DerivativeGains { .. } | Self::NonlinearAdvance(_) => (1, "derivative-gain"),
         }
     }
 }
@@ -193,7 +263,7 @@ impl CompiledChain {
                 seen_kernel = true;
                 false
             }
-            ChainStage::DerivativeGains { .. } => seen_kernel,
+            ChainStage::DerivativeGains { .. } | ChainStage::NonlinearAdvance(_) => seen_kernel,
         })
     }
 

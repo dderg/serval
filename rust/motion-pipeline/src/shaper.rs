@@ -405,7 +405,7 @@ fn apply_axis_chains(
         follower_states,
     )?;
     send_toolhead(toolhead_tap, &out);
-    apply_motor_side_stages(&mut out, chains);
+    apply_motor_side_stages(&mut out, chains)?;
     for seg in &mut out {
         pad_segment_axes_to_uniform_degree(seg);
     }
@@ -424,7 +424,10 @@ fn send_toolhead(tap: Option<&Sender<ShapedSegment>>, out: &[ShapedSegment]) {
 /// mode-inverse counter-drive), which the physical toolhead does not follow —
 /// that is their entire purpose. They are therefore applied only after the
 /// followers have projected onto the toolhead signal.
-fn apply_motor_side_stages(out: &mut [ShapedSegment], chains: &AxisChainSet) {
+fn apply_motor_side_stages(
+    out: &mut [ShapedSegment],
+    chains: &AxisChainSet,
+) -> Result<(), PostProcessError> {
     for seg in out.iter_mut() {
         for axis in 0..seg.axes.len() {
             let Some(chain) = chains.chains.get(axis) else {
@@ -433,9 +436,10 @@ fn apply_motor_side_stages(out: &mut [ShapedSegment], chains: &AxisChainSet) {
             if !chain.has_motor_side_gains() {
                 continue;
             }
-            seg.axes[axis] = apply_trailing_zero_support(chain, seg.axes[axis].clone());
+            seg.axes[axis] = apply_trailing_zero_support(chain, axis, seg.axes[axis].clone())?;
         }
     }
+    Ok(())
 }
 
 /// Refit tracks can come out at different degrees per axis; the kinematics
@@ -474,7 +478,7 @@ fn fit_axis_column(
 ) -> Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError> {
     let Some(kernel) = chain.stages.iter().find_map(|stage| match stage {
         ChainStage::SmoothKernel(kernel) => Some(kernel),
-        ChainStage::DerivativeGains { .. } => None,
+        ChainStage::DerivativeGains { .. } | ChainStage::NonlinearAdvance(_) => None,
     }) else {
         return Ok(None);
     };
@@ -929,8 +933,9 @@ fn exact_value(axis: usize, value: f64, t: f64) -> Result<f64, PostProcessError>
 
 pub(crate) fn apply_trailing_zero_support(
     chain: &CompiledChain,
+    axis: usize,
     mut track: nurbs::ScalarNurbs,
-) -> nurbs::ScalarNurbs {
+) -> Result<nurbs::ScalarNurbs, PostProcessError> {
     let mut seen_kernel = false;
     for stage in &chain.stages {
         match stage {
@@ -938,10 +943,107 @@ pub(crate) fn apply_trailing_zero_support(
             ChainStage::DerivativeGains { k1, k2 } if seen_kernel => {
                 track = apply_derivative_gains_to_track(&track, *k1, *k2);
             }
-            ChainStage::DerivativeGains { .. } => {}
+            ChainStage::NonlinearAdvance(adv) if seen_kernel => {
+                track = apply_nonlinear_advance_to_track(axis, &track, *adv)?;
+            }
+            ChainStage::DerivativeGains { .. } | ChainStage::NonlinearAdvance(_) => {}
         }
     }
-    track
+    Ok(track)
+}
+
+/// `y = x + a(ẋ)` is not polynomial in `x`, so the transformed track is
+/// re-fitted from sampled `(p, v, a)` with the same ladder the convolution
+/// fits use — the input track's own breakpoints seed the partition and each
+/// span refines until it meets the shaper's position/acceleration budgets.
+pub(crate) fn apply_nonlinear_advance_to_track(
+    axis: usize,
+    track: &nurbs::ScalarNurbs,
+    adv: trajectory::NonlinearAdvance,
+) -> Result<nurbs::ScalarNurbs, PostProcessError> {
+    let sig = NonlinearAdvanceSignal::new(track, adv);
+    fit_axis_from_signal(axis, track, &sig, 1.0)
+}
+
+/// The advance law applied to a polynomial track, evaluated as a signal:
+/// `y = x + a(v)`, `ẏ = v + a'(v)·acc`, `ÿ = acc + a''(v)·acc² + a'(v)·jerk`.
+struct NonlinearAdvanceSignal {
+    starts: Vec<f64>,
+    ends: Vec<f64>,
+    coeffs: Vec<Vec<f64>>,
+    adv: trajectory::NonlinearAdvance,
+    cursor: std::cell::Cell<usize>,
+}
+
+impl NonlinearAdvanceSignal {
+    fn new(track: &nurbs::ScalarNurbs, adv: trajectory::NonlinearAdvance) -> Self {
+        let pieces = extract_bezier_pieces(track);
+        assert!(!pieces.is_empty(), "nonlinear advance: empty track");
+        Self {
+            starts: pieces.iter().map(|p| p.u_start).collect(),
+            ends: pieces.iter().map(|p| p.u_end).collect(),
+            coeffs: pieces.into_iter().map(|p| p.coeffs).collect(),
+            adv,
+            cursor: std::cell::Cell::new(0),
+        }
+    }
+
+    fn piece_at(&self, t: f64) -> usize {
+        let mut i = self.cursor.get().min(self.coeffs.len() - 1);
+        while i > 0 && self.starts[i] > t {
+            i -= 1;
+        }
+        while i + 1 < self.coeffs.len() && self.ends[i] < t {
+            i += 1;
+        }
+        self.cursor.set(i);
+        i
+    }
+
+    /// Position and the first three derivatives of the monomial piece
+    /// covering `t`, by synthetic division: the fold yields the Taylor
+    /// coefficients, which scale by `k!` into derivatives.
+    fn input_state(&self, t: f64) -> (f64, f64, f64, f64) {
+        let i = self.piece_at(t);
+        let tau = (t - self.starts[i]).clamp(0.0, self.ends[i] - self.starts[i]);
+        let (mut p, mut v, mut a, mut j) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+        for &c in self.coeffs[i].iter().rev() {
+            j = nurbs::fmadd(j, tau, a);
+            a = nurbs::fmadd(a, tau, v);
+            v = nurbs::fmadd(v, tau, p);
+            p = nurbs::fmadd(p, tau, c);
+        }
+        (p, v, 2.0 * a, 6.0 * j)
+    }
+}
+
+impl TrackSignal for NonlinearAdvanceSignal {
+    fn eval(&self, t: f64) -> f64 {
+        let (p, v, _, _) = self.input_state(t);
+        p + self.adv.advance(v)
+    }
+
+    fn deriv(&self, t: f64) -> f64 {
+        let (_, v, a, _) = self.input_state(t);
+        self.adv.slope(v).mul_add(a, v)
+    }
+
+    fn second_deriv(&self, t: f64) -> f64 {
+        let (_, v, a, j) = self.input_state(t);
+        self.adv
+            .curvature(v)
+            .mul_add(a * a, self.adv.slope(v).mul_add(j, a))
+    }
+
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let (p, v, a, j) = self.input_state(t);
+        let slope = self.adv.slope(v);
+        (
+            p + self.adv.advance(v),
+            slope.mul_add(a, v),
+            self.adv.curvature(v).mul_add(a * a, slope.mul_add(j, a)),
+        )
+    }
 }
 
 pub(crate) fn apply_derivative_gains_to_track(
