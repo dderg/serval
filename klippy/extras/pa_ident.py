@@ -14,6 +14,7 @@ DEFAULT_VELOCITIES = "1,2,3,4,6,8,10,12,15"
 MAX_SEGMENT_E = 45.0
 TEMP_TOLERANCE = 5.0
 POLL_TAIL_TIME = 3.0
+MIN_POLL_PAUSE = 0.005
 
 
 class PAIdent:
@@ -86,8 +87,7 @@ class PAIdent:
                     0.5 * (t_before + t_after)
                 )
                 self.samples.append((sample_time, value))
-                if interval:
-                    reactor.pause(t_after + interval)
+                reactor.pause(t_after + max(interval, MIN_POLL_PAUSE))
         except Exception as e:
             self.poll_error = str(e)
         done.complete(None)
@@ -122,7 +122,7 @@ class PAIdent:
         if not velocities or any(v <= 0.0 for v in velocities):
             raise gcmd.error("VELOCITIES must be positive")
         dwell = gcmd.get_float("DWELL", 3.0, above=0.0)
-        interval = gcmd.get_float("INTERVAL", 0.0, minval=0.0)
+        interval = gcmd.get_float("INTERVAL", MIN_POLL_PAUSE, minval=0.0)
         out_path = gcmd.get("OUT", "/tmp/pa_ident.csv")
 
         anchor_time = toolhead.get_last_move_time()
