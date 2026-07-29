@@ -3,12 +3,7 @@ import types
 
 import pytest
 
-from klippy.extras.pa_test import (
-    CORNER_DIP_FACTOR,
-    DEFAULT_CORNER_SEG_MM,
-    PA_TOWER_FILENAME,
-    PATest,
-)
+from klippy.extras.pa_test import PA_TOWER_FILENAME, PATest
 
 
 class StubConfig:
@@ -181,7 +176,6 @@ def test_tower_gcode_is_wellformed():
             assert 0.0 < e < dist
     feeds = {feed for _, _, _, feed in moves if feed is not None}
     expected = {v * 60.0 for v in (25.0, 50.0, 80.0)}
-    expected.add(round(CORNER_DIP_FACTOR * 5.0 * 60.0))
     assert feeds <= expected
 
 
@@ -223,57 +217,3 @@ def test_busy_sdcard_rejects_new_tower(tmp_path):
     with pytest.raises(CommandError, match="already running"):
         gcode.commands["PRINT_PA_TOWER"](StubGcmd(dict(BASE_PARAMS)))
     assert not (tmp_path / PA_TOWER_FILENAME).exists()
-
-
-def scv_moves(moves):
-    notch_feed = round(CORNER_DIP_FACTOR * 5.0 * 60.0)
-    return [
-        (dist, feed)
-        for _, e, dist, feed in moves
-        if e is not None and feed == pytest.approx(notch_feed)
-    ]
-
-
-def test_corner_seg_defaults_to_the_shortest_practical_segment():
-    obj, _ = make(sdcard=StubSdcard("/tmp"))
-    notches = scv_moves(parse_moves(generate(obj)))
-    assert notches, "tower must contain corner-speed segments"
-    for dist, _ in notches:
-        assert dist == pytest.approx(DEFAULT_CORNER_SEG_MM, abs=2e-3)
-
-
-def test_corner_seg_length_override():
-    obj, _ = make(sdcard=StubSdcard("/tmp"))
-    notches = scv_moves(parse_moves(generate(obj, {"CORNER_SEG_MM": "0.5"})))
-    assert notches
-    for dist, _ in notches:
-        assert dist == pytest.approx(0.5, abs=2e-3)
-
-
-def moves_at_feed(moves, feed):
-    return [
-        (dist, e)
-        for _, e, dist, f in moves
-        if f is not None and f == pytest.approx(feed)
-    ]
-
-
-def test_corner_speed_above_slow_zone_drops_the_spike_there():
-    obj, _ = make(sdcard=StubSdcard("/tmp"))
-    moves = parse_moves(generate(obj, {"CORNER_VELOCITY": "60.0"}))
-    corner_segs = moves_at_feed(moves, 60.0 * 60.0)
-    assert corner_segs, "fast-wall corner segment must remain"
-    assert all(dist < 0.1 for dist, _ in corner_segs)
-    slow_zone_full = [
-        dist
-        for dist, e in moves_at_feed(moves, 25.0 * 60.0)
-        if e is not None and dist == pytest.approx(10.0, abs=1e-2)
-    ]
-    assert slow_zone_full, "slow zone must print as one uninterrupted segment"
-
-
-def test_corner_speed_above_fast_drops_all_corner_segments():
-    obj, _ = make(sdcard=StubSdcard("/tmp"))
-    moves = parse_moves(generate(obj, {"CORNER_VELOCITY": "100.0"}))
-    feeds = {f for _, _, _, f in moves if f is not None}
-    assert feeds <= {v * 60.0 for v in (25.0, 50.0, 80.0)}

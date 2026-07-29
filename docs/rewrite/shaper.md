@@ -368,57 +368,29 @@ directory and starts it through the regular `SDCARD_PRINT_FILE` path, so
 The extruder must already be heated: `TARGET_TEMP` only cross-checks the
 configured target.
 
-Each perimeter face carries two distinct slow features. The 10 mm
-**slow-speed zone** (bev2's `SLOW_NOTCH_SIZE`) is a legible slow-flow
-dwell — overhang/seam-speed emulation, unchanged from upstream. The
-tiny **corner-speed segment** (bev2's `VERY_SLOW_SEG`) is a corner
-stand-in: to the E axis a corner is nothing but a dip in toolhead
-speed, and putting the dip on a flat wall makes the PA transient
-legible. bev2 realizes it with mainline's junction-SCV semantics
-(0.2 mm at the configured `square_corner_velocity`); this planner
-blends corners as clothoids, so the port re-derives both parameters
-from an offline sweep of the real pipeline (90° corner vs straight-line
-segment, accel 20–100k, jerk 5e6–2e7, deviation 0.02–0.1, cruise
-80–300 mm/s):
+What the tower exercises is straight-line flow steps: each perimeter
+alternates fast/medium/slow wall speeds and holds a 10 mm slow-speed
+zone (bev2's `SLOW_NOTCH_SIZE`) plus `G4` dwell-and-resume points —
+the transients of line starts/stops, seams, overhang slowdowns, and
+infill boundaries, printed where they are legible. Bands are read per
+parameter value exactly as on bev2.
 
-- a clothoid corner's minimum speed is `0.863 ×` the formula SCV at the
-  effective limits — constant across the whole sweep — so the segment
-  speed defaults to `0.863 × square_corner_velocity` from live toolhead
-  status (which uses the same effective accel the tower prints under);
-  `CORNER_VELOCITY=` overrides it verbatim;
-- the segment length defaults to the shortest practical value, 0.02 mm
-  (`CORNER_SEG_MM=` overrides). A sharp line-line junction blends as a
-  biclothoid: it trades tangential for centripetal acceleration on the
-  way in and back on the way out, spending zero distance at the
-  minimum — while a straight segment keeps the full budget tangential
-  but must hold the commanded speed across its whole length, so every
-  added millimeter widens the dip beyond any real sharp corner (0.2 mm
-  can pin it for tens of ms). Shorter is monotonically more
-  corner-like, and the residual always errs toward *more* PA stress —
-  the conservative side for a tuning print. Fidelity envelope from the
-  full sweep, measured on the dip-aligned post-kernel post-advance E
-  waveform (extremes match to four digits everywhere): within ≤15%
-  peak / ≤5% rms of the corner's E swing at ≤50k accel with deviation
-  ≥0.05; at 100k accel or shallow deviations the real corner's E
-  transient becomes so small and narrow that the segment over-stresses
-  it by 30–90% of that (shrinking) swing — there it reads as a
-  worst-case corner, not a typical one;
-- a longer `CORNER_SEG_MM` is meaningful for one thing: emulating the
-  planner's clothoid–arc–clothoid runs (faceted curves / rounded
-  corners), which hold constant curvature over the arc portion. Set the
-  speed to `√(a_lat·R)` and the length to the constant-curvature arc
-  distance — the residual arc after the two clothoids' heading changes,
-  not `R ×` the full corner angle — and only when that speed is below
-  cruise: an arc whose curvature doesn't activate the acceleration
-  limit produces no dip at all;
-- a corner-speed segment is emitted only where it actually dips below
-  its surrounding wall speed. With deviation-derived corner speeds this
-  matters: at 50k accel the corner speed (~67 mm/s) exceeds the 25 mm/s
-  slow zone, so bev2's copy inside the slow zone would print as a speed
-  *spike* — a corner approached at 25 mm/s never slows down at all, so
-  the zone prints uninterrupted instead. The copy on the fast wall
-  (the real corner surrogate at wall speed) remains, and disappears too
-  if the corner speed reaches `fast_velocity`.
+bev2's tower additionally carried a 0.2 mm `VERY_SLOW_SEG` at the
+configured `square_corner_velocity` — a corner stand-in under
+mainline's junction-SCV semantics, where a corner *is* a commanded
+speed floor between two segments. This port drops it: our corners are
+clothoid blends, and a held-feedrate straight segment cannot reproduce
+one. A biclothoid junction trades tangential for centripetal
+acceleration on the way in and back on the way out, spending zero
+distance at its minimum speed (which bottoms out at `0.863 ×` the
+formula SCV — constant across accel 20–100k, jerk 5e6–2e7, deviation
+0.02–0.1, cruise 80–300 mm/s, pinned by a pipeline-snapshot regression
+test), while a straight segment keeps the full acceleration budget
+tangential and must hold its commanded speed over its whole length —
+its dip is always wider, diverging outright at high accel. The
+measurement lives in the `corner_vs_held_segment` example. Corner behavior is
+evaluated on the tower's own loop corners (real clothoids), or on a
+real print.
 
 Sample config + helper macros, adapted from bev2's Nonlinear Pressure
 Advance guide (`TESTPARAM`: 0 = ADVANCE, 1 = OFFSET, 2 = VELOCITY — bev2's

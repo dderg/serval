@@ -1,16 +1,9 @@
-//! Evidence base for the PA tower's corner-notch defaults in
-//! `klippy/extras/pa_test.py`: runs a real 90-degree clothoid corner and the
-//! tower's straight-line notch through the actual pipeline and compares
-//! toolhead speed dips and the post-kernel post-advance E signal.
+//! Compares a real 90-degree clothoid corner against a straight line with a
+//! short held-feedrate segment through the actual pipeline: toolhead speed
+//! dips plus the post-kernel post-advance E signal. Findings and their
+//! consequences for the PA tower are in docs/rewrite/shaper.md.
 //!
-//! Two outputs: (a) a limits sweep showing the clothoid dip is a constant
-//! 0.863x of the formula scv (pinned by the pipeline-snapshot regression
-//! test), (b) an E-stress comparison showing the smoothing kernel erases the
-//! notch/corner shape difference (the corner trades tangential for
-//! centripetal accel near the dip; the notch keeps the full tangential
-//! budget - a ~1-2 ms v(t) difference that vanishes under the 13 ms kernel).
-//!
-//! Run: cargo run --release -p pipeline-snapshot --example corner_vs_notch
+//! Run: cargo run --release -p pipeline-snapshot --example corner_vs_held_segment
 
 use pipeline_snapshot::waypoints::Waypoint;
 use pipeline_snapshot::{Snapshot, SnapshotParams, pipeline_snapshot};
@@ -51,14 +44,14 @@ fn corner_path(l: Limits) -> Vec<Waypoint> {
     wp
 }
 
-fn notch_path(l: Limits, notch_mm: f64, notch_v: f64) -> Vec<Waypoint> {
+fn held_segment_path(l: Limits, seg_mm: f64, seg_v: f64) -> Vec<Waypoint> {
     let mut e = 0.0;
     let mut wp = vec![(0.0, 0.0, 0.2, e, l.v_wall, l.accel)];
     e += 30.0 * EXTR_R;
     wp.push((30.0, 0.0, 0.2, e, l.v_wall, l.accel));
-    e += notch_mm * EXTR_R;
-    wp.push((30.0 + notch_mm, 0.0, 0.2, e, notch_v, l.accel));
-    e += (60.0 - notch_mm) * EXTR_R;
+    e += seg_mm * EXTR_R;
+    wp.push((30.0 + seg_mm, 0.0, 0.2, e, seg_v, l.accel));
+    e += (60.0 - seg_mm) * EXTR_R;
     wp.push((90.0, 0.0, 0.2, e, l.v_wall, l.accel));
     wp
 }
@@ -178,9 +171,9 @@ fn ve_around_interior_dip(snap: &Snapshot, dt: f64, cruise: f64, half_window_s: 
         .collect()
 }
 
-fn report_aligned_diff(label: &str, corner: &Snapshot, notch: &Snapshot, cruise: f64, dt: f64) {
+fn report_aligned_diff(label: &str, corner: &Snapshot, held: &Snapshot, cruise: f64, dt: f64) {
     let a = ve_around_interior_dip(corner, dt, cruise, 0.03);
-    let b = ve_around_interior_dip(notch, dt, cruise, 0.03);
+    let b = ve_around_interior_dip(held, dt, cruise, 0.03);
     let swing =
         a.iter().copied().fold(f64::MIN, f64::max) - a.iter().copied().fold(f64::MAX, f64::min);
     let margin = (0.005 / dt) as usize;
@@ -213,7 +206,7 @@ fn report_aligned_diff(label: &str, corner: &Snapshot, notch: &Snapshot, cruise:
     let (ca, cb) = ext(&a);
     let (na, nb) = ext(&b);
     println!(
-        "{label}vE corner [{ca:.3},{cb:.3}] notch [{na:.3},{nb:.3}] swing {swing:.2} | dip-aligned peak {:.1}% rms {:.1}% | best-shift ({:+.2}ms) peak {:.1}% rms {:.1}%",
+        "{label}vE corner [{ca:.3},{cb:.3}] held [{na:.3},{nb:.3}] swing {swing:.2} | dip-aligned peak {:.1}% rms {:.1}% | best-shift ({:+.2}ms) peak {:.1}% rms {:.1}%",
         100.0 * peak0 / swing,
         100.0 * rms0 / swing,
         best.2 as f64 * dt * 1e3,
@@ -225,7 +218,9 @@ fn report_aligned_diff(label: &str, corner: &Snapshot, notch: &Snapshot, cruise:
 fn main() {
     let dt = 2e-5;
     let scv_factor = std::f64::consts::SQRT_2 - 1.0;
-    println!("--- clothoid dip vs 0.02mm notch, full sweep (tanh 0.011/0.147/5.99, st 13ms on E)");
+    println!(
+        "--- clothoid dip vs 0.02mm held segment, full sweep (tanh 0.011/0.147/5.99, st 13ms on E)"
+    );
     for accel in [20_000.0, 50_000.0, 100_000.0] {
         for jerk in [5e6, 2e7] {
             for deviation in [0.02, 0.05, 0.1] {
@@ -243,14 +238,15 @@ fn main() {
                     let corner =
                         pipeline_snapshot(&corner_path(l), advance_params(l)).expect("corner");
                     let c = dip_stats(&speed_profile(&corner, dt), v_wall);
-                    let notch = pipeline_snapshot(&notch_path(l, 0.02, c.v_min), advance_params(l))
-                        .expect("notch");
+                    let held =
+                        pipeline_snapshot(&held_segment_path(l, 0.02, c.v_min), advance_params(l))
+                            .expect("held segment");
                     print!(
                         "a={accel:>6.0} j={jerk:.0e} dev={deviation:.2} v={v_wall:>3.0} | vmin/scv {:.4} dwell {:>5.2}ms | ",
                         c.v_min / scv,
                         c.dwell_ms
                     );
-                    report_aligned_diff("", &corner, &notch, v_wall, dt);
+                    report_aligned_diff("", &corner, &held, v_wall, dt);
                 }
             }
         }
