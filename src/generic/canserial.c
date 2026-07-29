@@ -250,6 +250,7 @@ can_process_set_klipper_nodeid(struct canbus_admin_msg *msg)
         return;
     uint32_t newid = can_decode_nodeid(msg->data[7]);
     if (can_check_uuid(msg)) {
+        CanData.host_fd = 0;
         if (newid != CanData.assigned_id) {
             CanData.assigned_id = newid;
             canbus_set_filter(CanData.assigned_id);
