@@ -10,10 +10,10 @@
 
 - [`[mcu] is_non_critical`](./Config_Reference.md#mcu) enables marking of an mcu as optional - it can be freely disconnected and connected at will. (useful for MCU-based accelerometer boards, mcu-based probes that shut down in hot chambers, etc...)
 - [`[danger_options]`](./Config_Reference.md#danger-options) - New configuration options to adjust Kalico values that were previously hidden
-- Additional kinematics versions enabled per-axis acceleration, see [limited_cartesian](./Config_Reference.md#cartesian-kinematics-with-limits-for-x-and-y-axes) and [limited_corexy](./Config_Reference.md#corexy-kinematics-with-limits-for-x-and-y-axes)
+- Additional kinematics versions enabled per-axis acceleration.
 - `--rotate-log-at-restart` can be added to your Kalico start script or service to force log rotation every restart.
 - [`[virtual_sdcard] with_subdirs`](./Config_Reference.md#virtual_sdcard) enables scanning of subdirectories for .gcode files, for the menu and M20/M23 commands
-- [`[firmware_retraction] z_hop_height`](./Config_Reference.md#firmware_retraction) adds an automatic z hop when using firmware retraction
+- Firmware retraction is not supported by the motion system.
 - [`[constants]` and `${constants.value}`](./Config_Reference.md#configuration-references) allow re-using values in your configuration
 
 ## Enhanced behavior
@@ -31,8 +31,9 @@
 
 - [`[tmcXXXX] home_current`](./Config_Reference.md#tmc-stepper-driver-configuration) automatically sets a different current for homing
 - [`[tmcXXXX] current_change_dwell_time`](./Config_Reference.md#tmc-stepper-driver-configuration) will add a delay before homing
-- [`[stepper_X] homing_retract_dist, homing_retract_speed`](./Config_Reference.md#stepper) add a short retraction and a second homing for better accuracy
-- [`[stepper_X] min_home_dist`](./Config_Reference.md#stepper) will move away from the endstop before homing
+- `[stepper_X] homing_retract_dist, homing_retract_speed` add a short
+  retraction and a second homing for better accuracy
+- `[stepper_X] min_home_dist` will move away from the endstop before homing
 
 ## Probes and Probing
 

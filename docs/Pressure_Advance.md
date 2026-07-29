@@ -1,10 +1,10 @@
 # Pressure advance
 
-This document provides information on tuning the "pressure advance"
-configuration variable for a particular nozzle and filament. The
-pressure advance feature can be helpful in reducing ooze. For more
-information on how pressure advance is implemented see the
-[kinematics](Kinematics.md) document.
+This document provides information on tuning the pressure-advance
+post-processor for a particular filament. Pressure advance can be
+helpful in reducing ooze. See the
+[motion configuration reference](Config_Reference_Motion.md) for the
+current post-processor configuration.
 
 ## Tuning pressure advance
 

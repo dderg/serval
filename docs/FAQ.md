@@ -290,15 +290,8 @@ seconds. If the micro-controller does not receive a confirmation every
 5 seconds it goes into a "shutdown" state which is designed to turn
 off all heaters and stepper motors.
 
-See the "config_digital_out" command in the
-[MCU commands](MCU_Commands.md) document for further details.
-
-In addition, the micro-controller software is configured with a
-minimum and maximum temperature range for each heater at startup (see
-the min_temp and max_temp parameters in the
-[config reference](Config_Reference.md#extruder) for details). If the
-micro-controller detects that the temperature is outside of that range
-then it will also enter a "shutdown" state.
+The MCU's digital-output configuration and heater safety limits are
+described in the [config reference](Config_Reference.md).
 
 Separately, the host software also implements code to check that
 heaters and temperature sensors are functioning correctly. See the
