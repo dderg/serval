@@ -77,3 +77,7 @@ channel: dev
 
 Hotfix releases within the same month use incremented suffixes
 (e.g., `v2026.01.01`, `v2026.01.02`).
+
+## Configuration migration
+
+Switching repositories does not convert an existing motion configuration. See [Config_Migration.md](Config_Migration.md) for the new motion topology and option mapping.

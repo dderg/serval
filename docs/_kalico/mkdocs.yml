@@ -100,16 +100,15 @@ nav:
   - Home: index.md
   - Overview.md
   - Features.md
+  - Feature_Status.md
   - FAQ.md
   - Releases: https://github.com/KalicoCrew/kalico/releases
   - Config_Changes.md
   - Configuration:
     - Config_Reference.md
+    - Config_Reference_Motion.md
     - Kalico_Additions.md
-    - Bleeding Edge:
-      - Bleeding_Edge.md
-      - Config_Reference_Bleeding_Edge.md
-      - Nonlinear_Pressure_Advance.md
+    - Nonlinear_Pressure_Advance.md
     - PID.md
     - MPC.md
     - Dockable_Probe.md
@@ -120,6 +119,7 @@ nav:
     - Status_Reference.md
   - Getting up and running:
     - Migrating_from_Klipper.md
+    - Config_Migration.md
     - Installation.md
     - OctoPrint.md
     - TMC_Drivers.md
@@ -129,9 +129,8 @@ nav:
     - Bed leveling, Probes and Endstops:
       - Z_Calibration.md
       - Bed_Level.md
-      - Delta_Calibrate.md
-      - Probe_Calibrate.md
       - BLTouch.md
+      - Probe_Calibrate.md
       - Manual_Level.md
       - Bed_Mesh.md
       - Axis_Twist_Compensation.md
@@ -145,14 +144,8 @@ nav:
     - Exclude_Object.md
     - Using_PWM_Tools.md
   - Developer Documentation:
-    - Code_Overview.md
-    - Kinematics.md
-    - Protocol.md
     - API_Server.md
-    - MCU_Commands.md
     - CANBUS_protocol.md
-    - Debugging.md
-    - Benchmarks.md
     - CONTRIBUTING.md
     - Packaging.md
   - Device Specific Documents:

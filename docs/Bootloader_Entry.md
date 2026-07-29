@@ -51,8 +51,7 @@ is being used to connect to it), sending the string
 `<FS>` is the ASCII File Separator,
 0x1c.
 
-Note that this is not a valid message as per the
-[MCU Protocol](Protocol.md#micro-controller-interface), but sync characters(`~`)
+Note that this is not a valid MCU protocol message, but sync characters(`~`)
 are still respected.
 
 Because this message must be the only thing in the "block"
