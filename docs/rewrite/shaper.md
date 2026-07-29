@@ -382,10 +382,10 @@ speed floor between two segments. This port drops it: our corners are
 clothoid blends, and a held-feedrate straight segment cannot reproduce
 one. A biclothoid junction trades tangential for centripetal
 acceleration on the way in and back on the way out, spending zero
-distance at its minimum speed (which bottoms out at `0.863 ×` the
-formula SCV — constant across accel 20–100k, jerk 5e6–2e7, deviation
-0.02–0.1, cruise 80–300 mm/s, pinned by a pipeline-snapshot regression
-test), while a straight segment keeps the full acceleration budget
+distance at its minimum speed (measured at ~0.86 × the formula SCV
+across accel 20–100k, jerk 5e6–2e7, deviation 0.02–0.1, cruise
+80–300 mm/s — an incidental property of the blend geometry, not a
+contract), while a straight segment keeps the full acceleration budget
 tangential and must hold its commanded speed over its whole length —
 its dip is always wider, diverging outright at high accel. The
 measurement lives in the `corner_vs_held_segment` example. Corner behavior is
