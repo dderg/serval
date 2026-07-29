@@ -65,11 +65,19 @@ Three tiers, honestly applied:
   its `k2·jerk` motor-accel demand into the accel limits, so at high jerk
   settings the motor command can exceed `max_accel`
   ([docs/rewrite/shaper.md](rewrite/shaper.md)).
-- **CAN bus has not printed anything.** A toolhead micro-controller over
-  CAN is exercised end to end on a bench (identify, config upload, ADC and
-  endstop reads, streamed motion, restart and format-transition
-  regressions, zero bus errors) but no real print has run over it. Treat
-  the first print as a bring-up, not a regression test.
+- **CAN bus has not printed anything.** On a bench a toolhead
+  micro-controller over CAN is exercised end to end: identify, config
+  upload, ADC and endstop reads, streamed motion, restart and
+  format-transition regressions, a multi-micro-controller topology with
+  the machine axes on another micro-controller, and a ten-minute
+  continuous-motion soak with zero bus errors. Never a real print, and
+  never with a heater or a physical endstop trip mid-move. Treat the first
+  print as a bring-up, not a regression test.
+- **A G0 toolhead is a one-axis micro-controller.** At the default 2 kHz
+  sample rate an STM32G0B1 soaked a single streamed axis for ten minutes
+  but faulted within a minute driving three. The failure reproduces over
+  USB, so it bounds the micro-controller, not the transport
+  ([docs/CANBUS.md](CANBUS.md)).
 - **CAN framing is stream-chunked, not block-atomic.** Both ends split the
   byte stream into exact-fit frames, so an FD frame boundary does not
   align with a message block boundary. This halves fragmentation but does

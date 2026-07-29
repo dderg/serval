@@ -108,6 +108,16 @@ micro-controller that drives the motor, and raise
 `CONFIG_MOTION_SAMPLE_RATE_HZ` (menuconfig) only as far as that
 micro-controller's CPU allows.
 
+How many axes the toolhead drives matters as much as the step rate. On a
+bench an STM32G0B1 at the default 2 kHz sustained a single axis of
+continuous streamed motion for ten minutes without a fault, while driving
+three axes from the same micro-controller faulted within a minute with
+`StepQueueOverflow` and `Rescheduled timer in the past`. That failure
+reproduces identically over USB, so it is a limit of the micro-controller
+and its sample rate, not of the CAN link. Keep a G0 toolhead to the axes
+it physically drives - normally just the extruder - and leave the machine
+axes on the main board.
+
 ## CAN-FD
 
 CAN-FD carries up to 64 bytes per frame instead of 8, and switches to a
