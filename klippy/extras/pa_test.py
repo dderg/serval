@@ -11,11 +11,11 @@ FIRST_LAYER_WIDTH_MULTIPLIER = 1.2
 DEFAULT_X_SIZE = 50.0
 DEFAULT_Y_SIZE = 40.0
 MAX_YX_SIZE_RATIO = 0.8
-SLOW_NOTCH_SIZE = 10.0
+SLOW_ZONE_MM = 10.0
 SEAM_GAP_RATIO = 0.10
 SEAM_EXTRA_WIPE_RATIO = 1.1
 CORNER_DIP_FACTOR = 0.863
-DEFAULT_NOTCH_MM = 0.02
+DEFAULT_CORNER_SEG_MM = 0.02
 
 PA_TOWER_FILENAME = "pa_tower.gcode"
 
@@ -27,13 +27,13 @@ class PATest:
         self.size_x = config.getfloat("size_x", 0.0, minval=0.0)
         self.size_y = config.getfloat("size_y", 0.0, minval=0.0)
         if self.size_x or self.size_y:
-            if self.size_x < SLOW_NOTCH_SIZE * 4:
+            if self.size_x < SLOW_ZONE_MM * 4:
                 raise config.error(
-                    "size_x must be at least %.1f" % (SLOW_NOTCH_SIZE * 4,)
+                    "size_x must be at least %.1f" % (SLOW_ZONE_MM * 4,)
                 )
-            if self.size_y < SLOW_NOTCH_SIZE * 3:
+            if self.size_y < SLOW_ZONE_MM * 3:
                 raise config.error(
-                    "size_y must be at least %.1f" % (SLOW_NOTCH_SIZE * 3,)
+                    "size_y must be at least %.1f" % (SLOW_ZONE_MM * 3,)
                 )
             max_size_y = MAX_YX_SIZE_RATIO * self.size_x
             if self.size_y > max_size_y:
@@ -131,13 +131,11 @@ class PATest:
 
         origin_x = gcmd.get_float("ORIGIN_X", self.origin_x)
         origin_y = gcmd.get_float("ORIGIN_Y", self.origin_y)
-        size_x = gcmd.get_float(
-            "SIZE_X", self.size_x, minval=SLOW_NOTCH_SIZE * 4
-        )
+        size_x = gcmd.get_float("SIZE_X", self.size_x, minval=SLOW_ZONE_MM * 4)
         size_y = gcmd.get_float(
             "SIZE_Y",
             self.size_y,
-            minval=SLOW_NOTCH_SIZE * 3,
+            minval=SLOW_ZONE_MM * 3,
             maxval=MAX_YX_SIZE_RATIO * size_x,
         )
         perimeters = gcmd.get_int("PERIMETERS", self.perimeters, minval=1)
@@ -150,16 +148,16 @@ class PATest:
         fast_velocity = gcmd.get_float(
             "FAST_VELOCITY", self.fast_velocity, above=medium_velocity
         )
-        scv_velocity = gcmd.get_float(
-            "SCV_VELOCITY",
+        corner_velocity = gcmd.get_float(
+            "CORNER_VELOCITY",
             CORNER_DIP_FACTOR * toolhead_status["square_corner_velocity"],
             above=0.0,
         )
-        notch_mm = gcmd.get_float(
-            "NOTCH_MM",
-            DEFAULT_NOTCH_MM,
+        corner_seg_mm = gcmd.get_float(
+            "CORNER_SEG_MM",
+            DEFAULT_CORNER_SEG_MM,
             above=0.0,
-            maxval=0.5 * SLOW_NOTCH_SIZE,
+            maxval=0.5 * SLOW_ZONE_MM,
         )
         filament_diameter = gcmd.get_float(
             "FILAMENT_DIAMETER", self.filament_diameter, above=0.0
@@ -243,11 +241,62 @@ class PATest:
                 slow_velocity * 60.0,
             )
 
+        x_switching_pos = size_x / 3.0
+
+        def slow_zone_left(perimeter_x_offset, extr_r):
+            if corner_velocity >= slow_velocity:
+                yield "G1 X%.3f Y%.3f E%.6f F%.f" % (
+                    origin_x - perimeter_x_offset,
+                    origin_y - 0.5 * SLOW_ZONE_MM,
+                    SLOW_ZONE_MM * extr_r,
+                    slow_velocity * 60.0,
+                )
+                return
+            yield "G1 X%.3f Y%.3f E%.6f F%.f" % (
+                origin_x - perimeter_x_offset,
+                origin_y + 0.5 * corner_seg_mm,
+                0.5 * (SLOW_ZONE_MM - corner_seg_mm) * extr_r,
+                slow_velocity * 60.0,
+            )
+            yield "G1 X%.3f Y%.3f E%.6f F%.f" % (
+                origin_x - perimeter_x_offset,
+                origin_y - 0.5 * corner_seg_mm,
+                corner_seg_mm * extr_r,
+                corner_velocity * 60.0,
+            )
+            yield "G1 X%.3f Y%.3f E%.6f F%.f" % (
+                origin_x - perimeter_x_offset,
+                origin_y - 0.5 * SLOW_ZONE_MM,
+                0.5 * (SLOW_ZONE_MM - corner_seg_mm) * extr_r,
+                slow_velocity * 60.0,
+            )
+
+        def fast_wall_right(perimeter_x_offset, perimeter_y_offset, extr_r):
+            if corner_velocity >= fast_velocity:
+                yield "G1 X%.3f Y%.3f E%.6f F%.f" % (
+                    origin_x + perimeter_x_offset,
+                    origin_y - perimeter_y_offset,
+                    (perimeter_x_offset - x_switching_pos) * extr_r,
+                    fast_velocity * 60.0,
+                )
+                return
+            yield "G1 X%.3f Y%.3f E%.6f F%.f" % (
+                origin_x + x_switching_pos + corner_seg_mm,
+                origin_y - perimeter_y_offset,
+                corner_seg_mm * extr_r,
+                corner_velocity * 60.0,
+            )
+            yield "G1 X%.3f Y%.3f E%.6f F%.f" % (
+                origin_x + perimeter_x_offset,
+                origin_y - perimeter_y_offset,
+                (perimeter_x_offset - x_switching_pos - corner_seg_mm) * extr_r,
+                fast_velocity * 60.0,
+            )
+
         def gen_tower():
             last_z = first_layer_height
             z = first_layer_height + layer_height
-            x_switching_pos = size_x / 3.0
-            fast_notch_size = size_y - 2.0 * SLOW_NOTCH_SIZE
+            fast_notch_size = size_y - 2.0 * SLOW_ZONE_MM
             while z < height - 0.00000001:
                 line_width = nozzle
                 perimeter_x_offset = 0.5 * inner_size_x
@@ -286,32 +335,16 @@ class PATest:
                     )
                     yield "G1 X%.3f Y%.3f E%.6f F%.f" % (
                         origin_x - perimeter_x_offset,
-                        origin_y + 0.5 * SLOW_NOTCH_SIZE,
-                        (perimeter_y_offset - 0.5 * SLOW_NOTCH_SIZE) * extr_r,
+                        origin_y + 0.5 * SLOW_ZONE_MM,
+                        (perimeter_y_offset - 0.5 * SLOW_ZONE_MM) * extr_r,
                         medium_velocity * 60.0,
                     )
-                    yield "G1 X%.3f Y%.3f E%.6f F%.f" % (
-                        origin_x - perimeter_x_offset,
-                        origin_y + 0.5 * notch_mm,
-                        0.5 * (SLOW_NOTCH_SIZE - notch_mm) * extr_r,
-                        slow_velocity * 60.0,
-                    )
-                    yield "G1 X%.3f Y%.3f E%.6f F%.f" % (
-                        origin_x - perimeter_x_offset,
-                        origin_y - 0.5 * notch_mm,
-                        notch_mm * extr_r,
-                        scv_velocity * 60.0,
-                    )
-                    yield "G1 X%.3f Y%.3f E%.6f F%.f" % (
-                        origin_x - perimeter_x_offset,
-                        origin_y - 0.5 * SLOW_NOTCH_SIZE,
-                        0.5 * (SLOW_NOTCH_SIZE - notch_mm) * extr_r,
-                        slow_velocity * 60.0,
-                    )
+                    for line in slow_zone_left(perimeter_x_offset, extr_r):
+                        yield line
                     yield "G1 X%.3f Y%.3f E%.6f F%.f" % (
                         origin_x - perimeter_x_offset,
                         origin_y - perimeter_y_offset,
-                        (perimeter_y_offset - 0.5 * SLOW_NOTCH_SIZE) * extr_r,
+                        (perimeter_y_offset - 0.5 * SLOW_ZONE_MM) * extr_r,
                         medium_velocity * 60.0,
                     )
                     yield "G1 X%.3f Y%.3f E%.6f F%.f" % (
@@ -322,36 +355,27 @@ class PATest:
                     )
                     yield "G4 P40"
                     yield "G1 X%.3f Y%.3f E%.6f F%.f" % (
-                        origin_x - 0.5 * SLOW_NOTCH_SIZE,
+                        origin_x - 0.5 * SLOW_ZONE_MM,
                         origin_y - perimeter_y_offset,
-                        (x_switching_pos - 0.5 * SLOW_NOTCH_SIZE) * extr_r,
+                        (x_switching_pos - 0.5 * SLOW_ZONE_MM) * extr_r,
                         fast_velocity * 60.0,
                     )
                     yield "G1 X%.3f Y%.3f E%.6f F%.f" % (
-                        origin_x + 0.5 * SLOW_NOTCH_SIZE,
+                        origin_x + 0.5 * SLOW_ZONE_MM,
                         origin_y - perimeter_y_offset,
-                        SLOW_NOTCH_SIZE * extr_r,
+                        SLOW_ZONE_MM * extr_r,
                         slow_velocity * 60.0,
                     )
                     yield "G1 X%.3f Y%.3f E%.6f F%.f" % (
                         origin_x + x_switching_pos,
                         origin_y - perimeter_y_offset,
-                        (x_switching_pos - 0.5 * SLOW_NOTCH_SIZE) * extr_r,
+                        (x_switching_pos - 0.5 * SLOW_ZONE_MM) * extr_r,
                         fast_velocity * 60.0,
                     )
-                    yield "G1 X%.3f Y%.3f E%.6f F%.f" % (
-                        origin_x + x_switching_pos + notch_mm,
-                        origin_y - perimeter_y_offset,
-                        notch_mm * extr_r,
-                        scv_velocity * 60.0,
-                    )
-                    yield "G1 X%.3f Y%.3f E%.6f F%.f" % (
-                        origin_x + perimeter_x_offset,
-                        origin_y - perimeter_y_offset,
-                        (perimeter_x_offset - x_switching_pos - notch_mm)
-                        * extr_r,
-                        fast_velocity * 60.0,
-                    )
+                    for line in fast_wall_right(
+                        perimeter_x_offset, perimeter_y_offset, extr_r
+                    ):
+                        yield line
                     yield "G1 X%.3f Y%.3f E%.6f F%.f" % (
                         origin_x + perimeter_x_offset,
                         origin_y - 0.5 * fast_notch_size,
