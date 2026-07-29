@@ -91,7 +91,6 @@ fn speed_profile(snap: &Snapshot, dt: f64) -> Vec<(f64, f64)> {
 struct DipStats {
     v_min: f64,
     dwell_ms: f64,
-    transient_ms: f64,
 }
 
 fn dip_stats(profile: &[(f64, f64)], cruise: f64) -> DipStats {
@@ -107,13 +106,7 @@ fn dip_stats(profile: &[(f64, f64)], cruise: f64) -> DipStats {
     let v_min = profile.iter().map(|&(_, v)| v).fold(f64::MAX, f64::min);
     let dt = profile[1].0 - profile[0].0;
     let dwell_ms = profile.iter().filter(|&&(_, v)| v <= 1.05 * v_min).count() as f64 * dt * 1e3;
-    let transient_ms =
-        profile.iter().filter(|&&(_, v)| v <= 0.95 * cruise).count() as f64 * dt * 1e3;
-    DipStats {
-        v_min,
-        dwell_ms,
-        transient_ms,
-    }
+    DipStats { v_min, dwell_ms }
 }
 
 fn advance_params(l: Limits) -> SnapshotParams {
@@ -164,46 +157,6 @@ fn eval_axis_v(pieces: &[Vec<f64>], t: f64) -> f64 {
         .sum()
 }
 
-struct EStats {
-    v_min: f64,
-    v_max: f64,
-    a_max: f64,
-}
-
-fn e_stats(snap: &Snapshot, dt: f64) -> EStats {
-    let pieces = &snap.traj_e_pieces;
-    let mut v_min = f64::MAX;
-    let mut v_max = f64::MIN;
-    let mut a_max: f64 = 0.0;
-    let mut prev_v: Option<f64> = None;
-    let mut t = 0.0;
-    while t <= snap.traj_t_end {
-        let v = eval_axis_v(pieces, t);
-        v_min = v_min.min(v);
-        v_max = v_max.max(v);
-        if let Some(pv) = prev_v {
-            a_max = a_max.max(((v - pv) / dt).abs());
-        }
-        prev_v = Some(v);
-        t += dt;
-    }
-    EStats {
-        v_min,
-        v_max,
-        a_max,
-    }
-}
-
-fn report(label: &str, snap: &Snapshot, cruise: f64, dt: f64) {
-    let profile = speed_profile(snap, dt);
-    let d = dip_stats(&profile, cruise);
-    let e = e_stats(snap, dt);
-    println!(
-        "{label:<22} | v_min {:>6.2} dwell {:>5.2}ms trans {:>6.2}ms | vE min {:>7.3} max {:>7.3} mm/s, |aE| max {:>8.1} mm/s2",
-        d.v_min, d.dwell_ms, d.transient_ms, e.v_min, e.v_max, e.a_max
-    );
-}
-
 fn ve_around_interior_dip(snap: &Snapshot, dt: f64, cruise: f64, half_window_s: f64) -> Vec<f64> {
     let profile = speed_profile(snap, dt);
     let first = profile
@@ -229,7 +182,7 @@ fn report_aligned_diff(label: &str, corner: &Snapshot, notch: &Snapshot, cruise:
     let a = ve_around_interior_dip(corner, dt, cruise, 0.03);
     let b = ve_around_interior_dip(notch, dt, cruise, 0.03);
     let swing =
-        a.iter().cloned().fold(f64::MIN, f64::max) - a.iter().cloned().fold(f64::MAX, f64::min);
+        a.iter().copied().fold(f64::MIN, f64::max) - a.iter().copied().fold(f64::MAX, f64::min);
     let margin = (0.005 / dt) as usize;
     let core = &a[margin..a.len() - margin];
     let stats_at = |shift: i64| {
@@ -251,8 +204,16 @@ fn report_aligned_diff(label: &str, corner: &Snapshot, notch: &Snapshot, cruise:
         }
     }
     let (peak0, rms0) = stats_at(0);
+    let ext = |w: &[f64]| {
+        (
+            w.iter().copied().fold(f64::MAX, f64::min),
+            w.iter().copied().fold(f64::MIN, f64::max),
+        )
+    };
+    let (ca, cb) = ext(&a);
+    let (na, nb) = ext(&b);
     println!(
-        "{label:<14} vE diff over +-25ms vs swing {swing:.2}: dip-aligned peak {:.1}% rms {:.1}% | best-shift ({:+.2}ms) peak {:.1}% rms {:.1}%",
+        "{label}vE corner [{ca:.3},{cb:.3}] notch [{na:.3},{nb:.3}] swing {swing:.2} | dip-aligned peak {:.1}% rms {:.1}% | best-shift ({:+.2}ms) peak {:.1}% rms {:.1}%",
         100.0 * peak0 / swing,
         100.0 * rms0 / swing,
         best.2 as f64 * dt * 1e3,
