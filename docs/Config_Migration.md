@@ -70,7 +70,7 @@ shaper_freq_y: 40
 [printer]
 max_velocity: 300
 max_accel: 3000
-corner_deviation: 0.005
+corner_deviation: 0.04
 max_z_velocity: 20
 max_z_accel: 100
 
@@ -164,7 +164,7 @@ max_extrude_only_velocity: 50
 max_extrude_only_accel: 5000
 ```
 
-`corner_deviation` is the canonical corner budget in mm. `square_corner_velocity` is still accepted as a legacy alias and is converted internally as `scv² · (√2 − 1) / max_accel` (5 mm/s at 3000 mm/s² ≈ 0.0035 mm); set exactly one of the two. `max_z_velocity` and `max_z_accel` must be at most the corresponding global caps and default to them.
+`corner_deviation` is the canonical corner budget in mm; 0.04 is a good starting value. `square_corner_velocity` is still accepted as a legacy alias, converted internally as `scv² · (√2 − 1) / max_accel` — note this maps typical mainline values to a far tighter budget than intended (5 mm/s at 3000 mm/s² ≈ 0.0035 mm), so prefer setting `corner_deviation` directly. Set exactly one of the two. `max_z_velocity` and `max_z_accel` must be at most the corresponding global caps and default to them.
 
 `[motor <name>]` requires `drive`, `step_pin`, `dir_pin`, `microsteps`, and either `rotation_distance` or gear-ratio mode. Enable pins, if needed by the hardware integration, belong to the relevant stepper/driver support rather than the topology declaration above. Axis endstop and homing options belong on `[axis <name>]`, not on `[motor <name>]`.
 

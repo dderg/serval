@@ -18,9 +18,9 @@ max_accel: 3000
 #square_corner_velocity: 5
 #   Optional legacy alias. Default is 5. Must be >= 0. Set this XOR
 #   corner_deviation; it is converted to the corner-deviation budget.
-#corner_deviation:
-#   Optional canonical corner budget in mm. Must be >= 0. Set this XOR
-#   square_corner_velocity.
+#corner_deviation: 0.04
+#   Optional canonical corner budget in mm. Must be >= 0. 0.04 is a good
+#   starting value. Set this XOR square_corner_velocity.
 #max_z_velocity: 300
 #   Optional. Default is max_velocity. Must be > 0 and <= max_velocity.
 #max_z_accel: 3000
