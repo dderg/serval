@@ -1,6 +1,6 @@
 # Feature status
 
-Honest per-feature status for the `sota-motion` fork.
+Honest per-feature status for Serval.
 
 ## Status at a glance
 

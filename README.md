@@ -1,7 +1,8 @@
-# Kalico — `sota-motion`
+# Serval
 
-A fork of [Kalico](https://github.com/KalicoCrew/kalico) that **replaces the motion
-stack** with a streaming, jerk-limited planner written in Rust.
+Serval is a fork of [Kalico](https://github.com/KalicoCrew/kalico) that
+**replaces the motion stack** with a streaming, jerk-limited planner
+written in Rust.
 
 **Why:** print faster without giving up quality, by dropping the
 approximations classical planners are built on — trapezoidal profiles,
