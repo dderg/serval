@@ -71,13 +71,10 @@ Found canbus_uuid=11aa22bb33cc, Application: Kalico, Assigned: 77
 Each device will have a unique identifier. In the above example,
 `11aa22bb33cc` is the micro-controller's "canbus_uuid".
 
-Note that the `canbus_query.py` tool will only report uninitialized
-devices - if Kalico (or a similar tool) configures the device then it
-will no longer appear in the list.
-
-⚠️ Note that only devices flashed with a Kalico firmware will
-respond while assigned a device node ID. Devices using a Klipper firmware
-will no longer appear in the list once configured
+⚠️ Only devices flashed with a Kalico firmware answer the query while
+they already hold a node ID, and they report it (`Assigned: 77` above).
+A device running a Klipper firmware answers only while unassigned, so it
+drops out of the list once Kalico or a similar tool has configured it.
 
 ## Configuring Kalico
 

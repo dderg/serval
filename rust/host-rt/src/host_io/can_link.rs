@@ -203,12 +203,43 @@ pub use linux::CanLink;
 mod linux {
     use super::{
         CANBUS_ID_ADMIN, CANBUS_ID_ADMIN_RESP, CANFD_FRAME_SIZE, FrameFormat, NODEID_FIRST,
-        NodeAssignment, chunk_len, decode_frame, encode_frame, from_mtu, parse_query_response,
-        query_extended_payload, rx_id, set_nodeid_payload, tx_id,
+        NODEID_LAST, NodeAssignment, chunk_len, decode_frame, encode_frame, from_mtu,
+        parse_query_response, query_extended_payload, rx_id, set_nodeid_payload, tx_id,
     };
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
     use std::io;
+    use std::sync::Mutex;
     use std::time::{Duration, Instant};
+
+    static ASSIGNED_NODEIDS: Mutex<Option<HashMap<(String, u64), u8>>> = Mutex::new(None);
+
+    /// One node id per (interface, uuid), stable across re-attach. A second node
+    /// on the same bus must not be handed an id another node already answers on:
+    /// the incumbent would see a foreign uuid claim its id and shut down.
+    fn allocate_nodeid(interface: &str, uuid: u64) -> io::Result<u8> {
+        let mut guard = ASSIGNED_NODEIDS
+            .lock()
+            .map_err(|_| io::Error::other("canbus nodeid registry poisoned"))?;
+        let registry = guard.get_or_insert_with(HashMap::new);
+        let key = (interface.to_owned(), uuid);
+        if let Some(existing) = registry.get(&key) {
+            return Ok(*existing);
+        }
+        let taken: Vec<u8> = registry
+            .iter()
+            .filter(|((iface, _), _)| iface == interface)
+            .map(|(_, id)| *id)
+            .collect();
+        let free = (NODEID_FIRST..=NODEID_LAST).find(|id| !taken.contains(id));
+        let Some(nodeid) = free else {
+            return Err(io::Error::other(format!(
+                "canbus {interface}: no free node id in {NODEID_FIRST:#x}..={NODEID_LAST:#x} \
+                 for uuid {uuid:012x}"
+            )));
+        };
+        registry.insert(key, nodeid);
+        Ok(nodeid)
+    }
 
     const AF_CAN: libc::c_int = 29;
     const CAN_RAW: libc::c_int = 1;
@@ -461,7 +492,7 @@ mod linux {
                 }],
             )?;
 
-            let nodeid = NODEID_FIRST;
+            let nodeid = allocate_nodeid(interface, uuid)?;
             let prior_assignment = discover(fd, uuid, discovery_timeout)?;
             tracing::info!(
                 subsystem = "mcu-comms",

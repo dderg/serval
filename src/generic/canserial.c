@@ -309,8 +309,10 @@ canserial_process_data(struct canbus_msg *msg)
         // Add to incoming data buffer
         receive_pos_t rpos = CanData.receive_pos;
         uint32_t len = CANMSG_DATA_LEN(msg);
-        if (len > sizeof(CanData.receive_buf) - rpos)
-            shutdown("CAN receive buffer overflow: host exceeded RECEIVE_WINDOW");
+        if (len > sizeof(CanData.receive_buf) - rpos) {
+            try_shutdown("CAN receive buffer overflow: host exceeded RECEIVE_WINDOW");
+            return;
+        }
         memcpy(&CanData.receive_buf[rpos], msg->data, len);
         CanData.receive_pos = rpos + len;
         if (CONFIG_CANBUS_DATA_FREQUENCY && len > 8)
@@ -327,7 +329,7 @@ canserial_process_data(struct canbus_msg *msg)
         struct canbus_admin_msg *entry = &CanData.admin_queue[pos];
         uint32_t len = CANMSG_DATA_LEN(msg);
         if (len > CANMSG_ADMIN_DATA_MAX)
-            len = CANMSG_ADMIN_DATA_MAX;
+            return;
         entry->id = id;
         entry->dlc = len;
         memcpy(entry->data, msg->data, len);

@@ -68,6 +68,10 @@ impl SerialFrameIo {
     const WRITE_STALL_LIMIT: Duration = Duration::from_millis(1000);
     const WRITE_POLL: Duration = Duration::from_millis(25);
 
+    fn throttle_retry_for_links_that_never_block() {
+        std::thread::sleep(Self::WRITE_POLL);
+    }
+
     pub fn write_all(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
         let deadline = Instant::now() + Self::WRITE_STALL_LIMIT;
         if let Err(e) = self.link.set_timeout(Self::WRITE_POLL) {
@@ -105,6 +109,7 @@ impl SerialFrameIo {
                             ),
                         )));
                     }
+                    Self::throttle_retry_for_links_that_never_block();
                 }
                 Err(e) => return Err(TransportError::Io(e)),
             }
