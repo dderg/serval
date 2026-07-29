@@ -200,8 +200,7 @@ objects:
 
 ## firmware_retraction
 
-The following information is available in the
-[firmware_retraction](Config_Reference.md#firmware_retraction) object:
+The following information is available in the `firmware_retraction` object:
 - `retract_length`: Current setting for length of filament retract moves.
 - `retract_speed`: Current setting for speed of filament retract moves.
 - `unretract_extra_length`: Current setting for additional length of filament
@@ -394,8 +393,7 @@ The following information is available in the `mixing_extruder` object
 (this object is automatically available if any stepper config section
 is defined):
 
-The following information is available in
-[mixing_extruder](Config_Reference.md#mixing_extruder) objects:
+The following information is available in `mixing_extruder` objects:
 - `<mixing>`: The current mixing weights in percent for the configured
   extruders separated by comma
 - `<ticks>`: A comma separated list of the current mcu position for the
@@ -620,9 +618,8 @@ The following information is available in the `toolhead` object
 
 ## dual_carriage
 
-The following information is available in
-[dual_carriage](Config_Reference.md#dual_carriage)
-on a cartesian, hybrid_corexy or hybrid_corexz robot
+The following information is available in `dual_carriage` objects
+on a cartesian, hybrid_corexy or hybrid_corexz robot.
 - `carriage_0`: The mode of the carriage 0. Possible values are:
   "INACTIVE" and "PRIMARY".
 - `carriage_1`: The mode of the carriage 1. Possible values are:

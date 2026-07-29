@@ -60,7 +60,7 @@ Common things a reviewer will look for:
    is a good place to raise awareness of new work and to find users
    interested in providing real-world feedback.
 
-   Submissions must pass all [regression test cases](Debugging.md).
+   Submissions must pass all regression test cases.
 
    When fixing a defect in the code, submitters should have a general
    understanding of the root cause of that defect, and the fix should
@@ -151,9 +151,9 @@ Common things a reviewer will look for:
 4. Does the submission follow guidelines specified in the Kalico
    documentation?
 
-   In particular, code should follow the guidelines in
-   [Code_Overview.md](Code_Overview.md) and config files should follow
-   the guidelines in [Example_Configs.md](Example_Configs.md).
+   In particular, code should follow the repository's current implementation
+   conventions and config files should follow the guidelines in
+   [Example_Configs.md](Example_Configs.md).
 
 5. Is the Kalico documentation updated to reflect new changes?
 

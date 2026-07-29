@@ -156,9 +156,6 @@ Kalico supports many standard 3d printer features:
 * Support for measuring and recording acceleration using adxl345,
   mpu9250, mpu6050, and lis2dw12 accelerometers.
 
-* Support for limiting the top speed of short "zigzag" moves to reduce
-  printer vibration and noise. See the [kinematics](Kinematics.md)
-  document for more information.
 
 * Sample configuration files are available for many common printers.
   Check the [config directory](../config/) for a list.
@@ -166,38 +163,3 @@ Kalico supports many standard 3d printer features:
 To get started with Kalico, read the [installation](Installation.md)
 guide.
 
-## Step Benchmarks
-
-Below are the results of stepper performance tests. The numbers shown
-represent total number of steps per second on the micro-controller.
-
-| Micro-controller                | 1 stepper active  | 3 steppers active |
-| ------------------------------- | ----------------- | ----------------- |
-| 16Mhz AVR                       | 157K              | 99K               |
-| 20Mhz AVR                       | 196K              | 123K              |
-| SAMD21                          | 686K              | 471K              |
-| STM32F042                       | 814K              | 578K              |
-| Beaglebone PRU                  | 866K              | 708K              |
-| STM32G0B1                       | 1103K             | 790K              |
-| STM32F103                       | 1180K             | 818K              |
-| SAM3X8E                         | 1273K             | 981K              |
-| SAM4S8C                         | 1690K             | 1385K             |
-| LPC1768                         | 1923K             | 1351K             |
-| LPC1769                         | 2353K             | 1622K             |
-| SAM4E8E                         | 2500K             | 1674K             |
-| SAMD51                          | 3077K             | 1885K             |
-| AR100                           | 3529K             | 2507K             |
-| STM32G431                       | 3617K             | 2452K             |
-| STM32F407                       | 3652K             | 2459K             |
-| STM32F446                       | 3913K             | 2634K             |
-| RP2040                          | 4000K             | 2571K             |
-| RP2350                          | 4167K             | 2663K             |
-| SAME70                          | 6667K             | 4737K             |
-| STM32H723                       | 7429K             | 8619K             |
-
-If unsure of the micro-controller on a particular board, find the
-appropriate [config file](../config/), and look for the
-micro-controller name in the comments at the top of that file.
-
-Further details on the benchmarks are available in the
-[Benchmarks document](Benchmarks.md).

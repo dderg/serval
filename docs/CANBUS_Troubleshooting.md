@@ -141,23 +141,21 @@ candump -tz -Ddex can0,#FFFFFFFF > mycanlog
 One can view the resulting log file (`mycanlog` in the example above)
 to see each raw CAN bus message that was sent and received by Kalico.
 Understanding the content of these messages will likely require
-low-level knowledge of Kalico's [CANBUS protocol](CANBUS_protocol.md)
-and Kalico's [MCU commands](MCU_Commands.md).
+low-level knowledge of Kalico's [CANBUS protocol](CANBUS_protocol.md).
 
 ### Parsing Kalico messages in a candump log
 
 One may use the `parsecandump.py` tool to parse the low-level Kalico
-micro-controller messages contained in a candump log. Using this tool
-is an advanced topic that requires knowledge of Kalico
-[MCU commands](MCU_Commands.md). For example:
+micro-controller messages contained in a candump log. This tool is an
+advanced topic; see the [CANBUS protocol](CANBUS_protocol.md) document
+for the message format. For example:
 ```
 ./scripts/parsecandump.py mycanlog 108 ./out/klipper.dict
 ```
 
-This tool produces output similar to the [parsedump
-tool](Debugging.md#translating-gcode-files-to-micro-controller-commands). See
-the documentation for that tool for information on generating the
-Kalico micro-controller data dictionary.
+This tool produces parsed output for the captured CAN messages. See the
+CANBUS protocol document for information on generating the Kalico
+micro-controller data dictionary.
 
 In the above example, `108` is the [CAN bus
 id](CANBUS_protocol.md#micro-controller-id-assignment). It is a
