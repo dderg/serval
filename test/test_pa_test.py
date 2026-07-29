@@ -3,7 +3,13 @@ import types
 
 import pytest
 
-from klippy.extras.pa_test import PA_TOWER_FILENAME, PATest
+from klippy.extras.pa_test import (
+    CORNER_DIP_FACTOR,
+    CORNER_KISS_TIME_S,
+    MIN_NOTCH_MM,
+    PA_TOWER_FILENAME,
+    PATest,
+)
 
 
 class StubConfig:
@@ -175,7 +181,8 @@ def test_tower_gcode_is_wellformed():
         if e is not None:
             assert 0.0 < e < dist
     feeds = {feed for _, _, _, feed in moves if feed is not None}
-    expected = {v * 60.0 for v in (25.0, 50.0, 80.0, 5.0)}
+    expected = {v * 60.0 for v in (25.0, 50.0, 80.0)}
+    expected.add(round(CORNER_DIP_FACTOR * 5.0 * 60.0))
     assert feeds <= expected
 
 
@@ -217,3 +224,31 @@ def test_busy_sdcard_rejects_new_tower(tmp_path):
     with pytest.raises(CommandError, match="already running"):
         gcode.commands["PRINT_PA_TOWER"](StubGcmd(dict(BASE_PARAMS)))
     assert not (tmp_path / PA_TOWER_FILENAME).exists()
+
+
+def scv_moves(moves):
+    notch_feed = round(CORNER_DIP_FACTOR * 5.0 * 60.0)
+    return [
+        (dist, feed)
+        for _, e, dist, feed in moves
+        if e is not None and feed == pytest.approx(notch_feed)
+    ]
+
+
+def test_notch_length_tracks_corner_kiss_time():
+    obj, _ = make(sdcard=StubSdcard("/tmp"))
+    notches = scv_moves(parse_moves(generate(obj)))
+    assert notches, "tower must contain scv notches"
+    for dist, _ in notches:
+        expected = max(
+            MIN_NOTCH_MM, CORNER_DIP_FACTOR * 5.0 * CORNER_KISS_TIME_S
+        )
+        assert dist == pytest.approx(expected, abs=2e-3)
+
+
+def test_notch_length_override():
+    obj, _ = make(sdcard=StubSdcard("/tmp"))
+    notches = scv_moves(parse_moves(generate(obj, {"NOTCH_MM": "0.5"})))
+    assert notches
+    for dist, _ in notches:
+        assert dist == pytest.approx(0.5, abs=2e-3)

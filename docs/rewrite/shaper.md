@@ -368,6 +368,27 @@ directory and starts it through the regular `SDCARD_PRINT_FILE` path, so
 The extruder must already be heated: `TARGET_TEMP` only cross-checks the
 configured target.
 
+The tower's "SCV notch" — a tiny slow segment on each straight face — is
+a corner stand-in: to the E axis a corner is nothing but a dip in
+toolhead speed, and putting the dip on a flat wall makes the PA
+transient legible. bev2 realizes it with mainline's junction-SCV
+semantics (0.2 mm at the configured `square_corner_velocity`); this
+planner blends corners as clothoids, so the port re-derives both notch
+parameters from an offline sweep of the real pipeline (90° corner vs
+straight-line notch, accel 20–100k, jerk 5e6–2e7, deviation 0.02–0.1,
+cruise 80–300 mm/s):
+
+- a clothoid corner's minimum speed is `0.863 ×` the formula SCV at the
+  effective limits — constant across the whole sweep — so the notch
+  speed defaults to `0.863 × square_corner_velocity` from live toolhead
+  status (which uses the same effective accel the tower prints under);
+  `SCV_VELOCITY=` overrides it verbatim;
+- a clothoid only kisses its minimum (0.3–3 ms across the sweep), while
+  a fixed 0.2 mm notch can pin it for tens of ms, so the notch length
+  defaults to `notch speed × 1 ms`, clamped to [0.02, 0.2] mm (≈2–4 ms
+  dwell); `NOTCH_MM=` overrides. The entry/exit ramps need no matching:
+  the same tangential jerk-limited planner shapes them on both paths.
+
 Sample config + helper macros, adapted from bev2's Nonlinear Pressure
 Advance guide (`TESTPARAM`: 0 = ADVANCE, 1 = OFFSET, 2 = VELOCITY — bev2's
 `TIME_OFFSET` parameter has no counterpart in this planner's advance
