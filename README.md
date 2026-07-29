@@ -23,6 +23,9 @@ what is exploratory, and the known limits:
 paste G-code, tweak config, watch it re-plan:
 [dderg.github.io/kalico/playground](https://dderg.github.io/kalico/playground/).
 
+**Try it on your printer** — add a remote, switch the branch, build,
+flash, migrate the config: [docs/Quickstart.md](docs/Quickstart.md).
+
 ---
 
 ## The corner problem

@@ -118,6 +118,7 @@ nav:
     - G-Code_Shell_Command.md
     - Status_Reference.md
   - Getting up and running:
+    - Quickstart.md
     - Migrating_from_Klipper.md
     - Config_Migration.md
     - Installation.md

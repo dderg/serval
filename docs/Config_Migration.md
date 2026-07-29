@@ -70,7 +70,7 @@ shaper_freq_y: 40
 [printer]
 max_velocity: 300
 max_accel: 3000
-square_corner_velocity: 5
+corner_deviation: 0.005
 max_z_velocity: 20
 max_z_accel: 100
 
@@ -133,12 +133,12 @@ homing_speed: 10
 post_processors: z_shaping
 
 [post_processor x_shaping]
-type: smooth_bell
-smooth_time: 0.025
+type: smooth_mzv
+frequency_hz: 40
 
 [post_processor y_shaping]
-type: smooth_bell
-smooth_time: 0.025
+type: smooth_mzv
+frequency_hz: 40
 
 [post_processor z_shaping]
 type: smooth_bell
@@ -164,7 +164,7 @@ max_extrude_only_velocity: 50
 max_extrude_only_accel: 5000
 ```
 
-The fork parser accepts `[printer] square_corner_velocity` as a legacy alias. It also accepts `corner_deviation` instead; set exactly one. `max_z_velocity` and `max_z_accel` must be at most the corresponding global caps, defaulting to those caps when omitted.
+`corner_deviation` is the canonical corner budget in mm. `square_corner_velocity` is still accepted as a legacy alias and is converted internally as `scv² · (√2 − 1) / max_accel` (5 mm/s at 3000 mm/s² ≈ 0.0035 mm); set exactly one of the two. `max_z_velocity` and `max_z_accel` must be at most the corresponding global caps and default to them.
 
 `[motor <name>]` requires `drive`, `step_pin`, `dir_pin`, `microsteps`, and either `rotation_distance` or gear-ratio mode. Enable pins, if needed by the hardware integration, belong to the relevant stepper/driver support rather than the topology declaration above. Axis endstop and homing options belong on `[axis <name>]`, not on `[motor <name>]`.
 
@@ -176,7 +176,7 @@ The fork parser accepts `[printer] square_corner_velocity` as a legacy alias. It
 | `[printer] max_accel` | `[printer] max_accel` |
 | `[printer] max_z_velocity` | `[printer] max_z_velocity` (must be `<= max_velocity`) |
 | `[printer] max_z_accel` | `[printer] max_z_accel` (must be `<= max_accel`) |
-| `[printer] square_corner_velocity` | Same option, converted to the fork's corner-deviation budget; or use `[printer] corner_deviation`. Do not set both. |
+| `[printer] square_corner_velocity` | Still accepted as a legacy alias. The canonical option is `[printer] corner_deviation` (= `scv² · (√2 − 1) / max_accel`). Set exactly one. |
 | `[printer] max_jerk` | `[printer] max_jerk` |
 | `[printer] max_path_deviation` | Same option; fitter path-deviation tolerance. |
 | `[printer] max_accel_deviation` | Same option; fitter acceleration-deviation tolerance. |
@@ -186,7 +186,7 @@ The fork parser accepts `[printer] square_corner_velocity` as a legacy alias. It
 | `[printer] minimum_cruise_ratio` | **No equivalent.** The fork rejects this option loudly. |
 | `[printer] kinematics` | **No equivalent.** Declare `[kinematics] type: cartesian` or `type: corexy` and its role bindings. |
 | `[stepper_x]`, `[stepper_y]`, `[stepper_z]` | **No direct section alias.** Split each into a `[motor <name>]` plus `[axis <name>]`; bind kinematic X/Y/Z motors from `[kinematics]` only. Use `[axis <name>] motors:` for non-kinematic axes such as the extruder. |
-| `[input_shaper] shaper_type*`, `shaper_freq*` | **No direct equivalent.** Use named smoothing post-processors and reference them from `[axis <name>] post_processors`. |
+| `[input_shaper] shaper_type*`, `shaper_freq*` | Named smoothing post-processors on the axis chains. `shaper_type: mzv` + `shaper_freq: F` maps to `type: smooth_mzv` + `frequency_hz: F`. No EI-family kernel exists. |
 | `[extruder] pressure_advance` | `[post_processor <name>] type: linear_pressure_advance`, `k: ...`; put its name in the extruder axis chain. |
 | `[extruder] pressure_advance_smooth_time` | `[post_processor <name>] type: smooth_triangle`, `smooth_time: ...`; put its name in the extruder axis chain. |
 | `max_x_velocity`, `max_y_velocity`, and other old per-axis velocity limits | **No equivalent.** The fork exposes global velocity/acceleration plus Z-only caps, not independent X/Y limits. |
@@ -221,18 +221,21 @@ The `linear_pressure_advance` parameter is named `k` and must be non-negative. F
 
 ## Input shaping and smoothing
 
-The old `[input_shaper]` section (`shaper_type`/`shaper_freq`, including axis-suffixed forms) is rejected. Define a named post-processor and attach it to each axis:
+The old `[input_shaper]` section (`shaper_type`/`shaper_freq`, including axis-suffixed forms) is rejected. The direct replacement for a frequency-tuned shaper is a named `smooth_mzv` post-processor — carry the old `shaper_freq_*` value over as `frequency_hz` — attached to the axis:
 
 ```ini
 [post_processor x_shaping]
-type: smooth_bell
-smooth_time: 0.025
+type: smooth_mzv
+frequency_hz: 40
 
 [axis x]
 post_processors: x_shaping
 ```
 
-The available shaping/smoothing kernels are `smooth_zv` (`frequency_hz`), `smooth_mzv` (`frequency_hz`), `smooth_bell` (`smooth_time`), and `smooth_triangle` (`smooth_time`). There is no EI-family kernel in the registry. The recommended default for a new configuration is `smooth_bell`; choose its `smooth_time` from your tuning measurements.
+The available shaping/smoothing kernels are `smooth_zv` (`frequency_hz`), `smooth_mzv` (`frequency_hz`), `smooth_bell` (`smooth_time`), and `smooth_triangle` (`smooth_time`). There is no EI-family kernel in the registry.
+
+Recommended defaults: `smooth_mzv` at the measured resonance frequency for
+X and Y; `smooth_bell` for Z and for axes without a measured resonance.
 
 ## G-code command differences
 
