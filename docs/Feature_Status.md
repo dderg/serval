@@ -27,6 +27,8 @@ Three tiers, honestly applied:
 | Explicit `max_jerk` as a first-class limit | **exploratory** — enforced, but whether it earns its keep next to smoothing kernels is open |
 | Kinematics beyond cartesian / corexy | **exploratory** |
 | Per-axis-group limit model | **exploratory** |
+| CAN bus micro-controllers | **verified on the test bench (2026-07)**; never driven a real print |
+| CAN-FD data path | **verified on the test bench (2026-07)**; never driven a real print |
 
 ### Drive types
 
@@ -35,6 +37,15 @@ Three tiers, honestly applied:
 | Step/dir | **solid** | classic path |
 | Phase stepping | **verified in sim (2026-07)**; not recently exercised on real hardware | opt in with `phase_stepping: 1` in the stepper's existing section. Switch-endstop homing on a phase-stepped axis is not covered by the sim tests — only sensorless |
 | EtherCAT servo | **solid on the test bench** | industrial servo on X, steppers elsewhere |
+
+### Host to micro-controller transports
+
+| Transport | Status | Notes |
+| --- | --- | --- |
+| USB / serial | **solid** | the daily path |
+| CAN bus (classic, 8-byte frames) | **verified on the test bench (2026-07)**; never driven a real print | `[mcu] canbus_uuid`; default framing |
+| CAN-FD (64-byte frames) | **verified on the test bench (2026-07)**; never driven a real print | opt in with `CONFIG_CANBUS_DATA_FREQUENCY` in menuconfig; negotiated, falls back to classic |
+| EtherCAT | **solid on the test bench** | servo drives, separate endpoint |
 
 ## Known limits
 
@@ -54,3 +65,20 @@ Three tiers, honestly applied:
   its `k2·jerk` motor-accel demand into the accel limits, so at high jerk
   settings the motor command can exceed `max_accel`
   ([docs/rewrite/shaper.md](rewrite/shaper.md)).
+- **CAN bus has not printed anything.** A toolhead micro-controller over
+  CAN is exercised end to end on a bench (identify, config upload, ADC and
+  endstop reads, streamed motion, restart and format-transition
+  regressions, zero bus errors) but no real print has run over it. Treat
+  the first print as a bring-up, not a regression test.
+- **CAN framing is stream-chunked, not block-atomic.** Both ends split the
+  byte stream into exact-fit frames, so an FD frame boundary does not
+  align with a message block boundary. This halves fragmentation but does
+  not deliver "one block, one frame", which is what would remove the
+  message-reordering failure class outright.
+- **Nothing enforces the CAN receive window.** The micro-controller
+  advertises `RECEIVE_WINDOW` and the host does not honour it for the
+  native frame channel; the FD receive buffer is sized for headroom
+  instead. An overflow is a loud shutdown rather than a silent drop.
+- **The USB-to-CAN bridge is classic only.** `src/generic/usb_canbus.c`
+  has no CAN-FD support, so a bridge-mode board cannot carry the FD data
+  path.

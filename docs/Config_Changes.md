@@ -8,6 +8,16 @@ All dates in this document are approximate.
 
 ## Changes
 
+20260729: CAN bus micro-controllers are supported again on this fork.
+`[mcu] canbus_uuid` is accepted instead of `serial`, alongside a new
+optional `canbus_interface` (default `can0`). A CAN micro-controller
+accepts only `restart_method: command`. CAN-FD is available by setting a
+non-zero "CAN-FD data phase speed" (`CONFIG_CANBUS_DATA_FREQUENCY`) when
+building the micro-controller; it is negotiated with the host and falls
+back to classic framing. CAN has been verified on a test bench only and
+has never driven a real print - see [Feature status](Feature_Status.md)
+and [CANBUS](CANBUS.md).
+
 20260121: Kalico now uses automatic monthly release tags in the format
 `vYYYY.MM.NN` (e.g., `v2026.01.00`). Users can configure Moonraker to track
 stable monthly releases instead of the latest commits. See

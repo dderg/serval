@@ -108,6 +108,39 @@ micro-controller that drives the motor, and raise
 `CONFIG_MOTION_SAMPLE_RATE_HZ` (menuconfig) only as far as that
 micro-controller's CPU allows.
 
+## CAN-FD
+
+CAN-FD carries up to 64 bytes per frame instead of 8, and switches to a
+faster bit rate for the data phase. Enable it by setting a non-zero
+"CAN-FD data phase speed" (`CONFIG_CANBUS_DATA_FREQUENCY`) in
+`make menuconfig` when building the micro-controller. Zero, the default,
+is classic CAN.
+
+Requirements: an FDCAN-capable micro-controller (STM32G0B1, G4, H7 - the
+older bxCAN parts such as STM32F4 cannot do FD), a transceiver rated for
+the data bit rate, a host adapter whose firmware advertises FD, and the
+interface brought up in FD mode, for example:
+
+```
+ip link set can0 up type can bitrate 1000000 dbitrate 2000000 fd on
+```
+
+`ip link` control modes are sticky. A `loopback on` left over from a
+previous test survives a `down`/`up` cycle and silently detaches the
+controller from the bus, so clear it explicitly with `loopback off`.
+
+Framing is negotiated, never assumed. The micro-controller reports its
+data phase to the host, the link starts in classic framing, and it moves
+to 64-byte frames only once the host has seen a non-zero data phase from
+the micro-controller and the interface itself is FD-capable. A classic
+micro-controller on an FD-capable bus therefore stays on classic frames
+instead of being flooded with frames it would reject. Messages of eight
+bytes or fewer, including node discovery, stay classic in both
+directions.
+
+All of this is verified on a test bench and has never driven a real
+print. See [Feature status](Feature_Status.md).
+
 ## USB to CAN bus bridge mode
 
 Some micro-controllers support selecting "USB to CAN bus bridge" mode
@@ -120,6 +153,9 @@ bus adapter" under Linux. The "Kalico bridge mcu" itself will appear
 as if it was on this CAN bus - it can be identified via
 `canbus_query.py` and it must be configured like other CAN bus Kalico
 nodes.
+
+Bridge mode is classic CAN only: it has no CAN-FD support, so a bridge
+board cannot carry an FD data path.
 
 Some important notes when using this mode:
 
