@@ -585,8 +585,7 @@ impl PyMotionEngine {
             ..McuHostIoConfig::default()
         };
 
-        let host_io =
-            open_canbus_with_retry(interface, uuid_value, &config, deadline, timeout_s)?;
+        let host_io = open_canbus_with_retry(interface, uuid_value, &config, deadline, timeout_s)?;
 
         self.register_freshly_attached_mcu(
             mcu_handle,

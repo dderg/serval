@@ -62,7 +62,9 @@ serial:
 #   accomplish a micro-controller reset. The 'command' method involves
 #   sending a Kalico command to the micro-controller so that it can
 #   reset itself. The default is 'arduino' if the micro-controller
-#   communicates over a serial port, 'command' otherwise.
+#   communicates over a serial port, 'command' otherwise. A CAN bus
+#   micro-controller accepts only 'command': the others act on a USB or
+#   serial connection that a CAN node does not have.
 #is_non_critical: False
 #   Setting this to True will allow the mcu to be disconnected and
 #   reconnected at will without errors. Helpful for USB-accelerometer boards
