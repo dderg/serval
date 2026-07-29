@@ -355,6 +355,12 @@ impl McuHostIo {
         let (parser_owned, raw_identify_bytes, identify_seq) =
             identify::identify_handshake(&mut io, config.identify_timeout)?;
 
+        let mcu_can_data_rate = parser_owned
+            .numeric_constant("CANBUS_DATA_FREQUENCY")
+            .unwrap_or(0);
+        io.try_enable_fd(u32::try_from(mcu_can_data_rate).unwrap_or(0))
+            .map_err(TransportError::Io)?;
+
         let parser = Arc::new(parser_owned);
         let (submission_tx, submission_rx) = std::sync::mpsc::channel();
         let status_snapshot = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));

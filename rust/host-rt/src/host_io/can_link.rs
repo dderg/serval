@@ -430,6 +430,8 @@ mod linux {
         rx_id: u32,
         nodeid: u8,
         format: FrameFormat,
+        interface_format: FrameFormat,
+        interface: String,
         timeout: Duration,
         pending: VecDeque<u8>,
     }
@@ -440,17 +442,15 @@ mod linux {
             let guard = FdGuard(fd);
             let ifindex = if_index(fd, interface)?;
             let mtu = interface_mtu(interface)?;
-            let format = from_mtu(mtu)?;
-            if format == FrameFormat::Fd {
-                enable_fd_frames(fd)?;
-            }
+            let interface_format = from_mtu(mtu)?;
+            let format = FrameFormat::Classic;
             tracing::info!(
                 subsystem = "mcu-comms",
                 event = "canbus_frame_mode",
                 interface,
                 mtu,
-                fd = format == FrameFormat::Fd,
-                "canbus frame format negotiated from interface MTU"
+                interface_fd_capable = interface_format == FrameFormat::Fd,
+                "canbus opened classic; FD awaits the mcu advertising CANBUS_DATA_FREQUENCY"
             );
             bind_can(fd, ifindex)?;
             set_filters(
@@ -497,6 +497,8 @@ mod linux {
                 rx_id: rx,
                 nodeid,
                 format,
+                interface_format,
+                interface: interface.to_owned(),
                 timeout: Duration::from_millis(100),
                 pending: VecDeque::new(),
             })
@@ -516,6 +518,35 @@ mod linux {
 
         pub fn frame_format(&self) -> FrameFormat {
             self.format
+        }
+
+        pub fn try_enable_fd(&mut self, mcu_data_rate_hz: u32) -> io::Result<bool> {
+            if self.format == FrameFormat::Fd {
+                return Ok(true);
+            }
+            let mcu_capable = mcu_data_rate_hz > 0;
+            let interface_capable = self.interface_format == FrameFormat::Fd;
+            if !mcu_capable || !interface_capable {
+                tracing::info!(
+                    subsystem = "mcu-comms",
+                    event = "canbus_fd_declined",
+                    interface = %self.interface,
+                    mcu_data_rate_hz,
+                    interface_capable,
+                    "staying on classic CAN framing"
+                );
+                return Ok(false);
+            }
+            enable_fd_frames(self.fd)?;
+            self.format = FrameFormat::Fd;
+            tracing::info!(
+                subsystem = "mcu-comms",
+                event = "canbus_fd_enabled",
+                interface = %self.interface,
+                mcu_data_rate_hz,
+                "mcu advertises a CAN-FD data phase; switching to 64-byte framing"
+            );
+            Ok(true)
         }
 
         fn drain_pending(&mut self, buf: &mut [u8]) -> usize {
@@ -638,6 +669,10 @@ mod linux {
 
         fn out_queue(&self) -> io::Result<Option<u32>> {
             Ok(None)
+        }
+
+        fn try_enable_fd(&mut self, mcu_data_rate_hz: u32) -> io::Result<bool> {
+            CanLink::try_enable_fd(self, mcu_data_rate_hz)
         }
     }
 

@@ -121,6 +121,10 @@ impl SerialFrameIo {
             .map_err(TransportError::Io)
     }
 
+    pub fn try_enable_fd(&mut self, mcu_data_rate_hz: u32) -> io::Result<bool> {
+        self.link.try_enable_fd(mcu_data_rate_hz)
+    }
+
     // NOT `self.port.flush()`: that is tcdrain(), whose in-kernel wait sleeps
     // in whole jiffies — 4 ms at HZ=250 — so every frame paid a 4–12 ms stall
     // on a raw tty (and the reactor cannot read while it waits). Polling the
