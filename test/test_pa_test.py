@@ -5,8 +5,7 @@ import pytest
 
 from klippy.extras.pa_test import (
     CORNER_DIP_FACTOR,
-    CORNER_KISS_TIME_S,
-    MIN_NOTCH_MM,
+    DEFAULT_NOTCH_MM,
     PA_TOWER_FILENAME,
     PATest,
 )
@@ -235,15 +234,12 @@ def scv_moves(moves):
     ]
 
 
-def test_notch_length_tracks_corner_kiss_time():
+def test_notch_defaults_to_the_shortest_practical_segment():
     obj, _ = make(sdcard=StubSdcard("/tmp"))
     notches = scv_moves(parse_moves(generate(obj)))
     assert notches, "tower must contain scv notches"
     for dist, _ in notches:
-        expected = max(
-            MIN_NOTCH_MM, CORNER_DIP_FACTOR * 5.0 * CORNER_KISS_TIME_S
-        )
-        assert dist == pytest.approx(expected, abs=2e-3)
+        assert dist == pytest.approx(DEFAULT_NOTCH_MM, abs=2e-3)
 
 
 def test_notch_length_override():

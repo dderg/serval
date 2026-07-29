@@ -383,11 +383,23 @@ cruise 80–300 mm/s):
   speed defaults to `0.863 × square_corner_velocity` from live toolhead
   status (which uses the same effective accel the tower prints under);
   `SCV_VELOCITY=` overrides it verbatim;
-- a clothoid only kisses its minimum (0.3–3 ms across the sweep), while
-  a fixed 0.2 mm notch can pin it for tens of ms, so the notch length
-  defaults to `notch speed × 1 ms`, clamped to [0.02, 0.2] mm (≈2–4 ms
-  dwell); `NOTCH_MM=` overrides. The entry/exit ramps need no matching:
-  the same tangential jerk-limited planner shapes them on both paths.
+- the notch length defaults to the shortest practical segment, 0.02 mm
+  (`NOTCH_MM=` overrides). A straight-line notch can never fully match
+  the clothoid's bottom: through the corner the planner trades
+  tangential for centripetal acceleration and back, so the dip only
+  kisses its minimum (0.3–3 ms across the sweep), while a notch keeps
+  the full budget tangential but must hold the commanded speed across
+  the whole segment — every added length widens the dip (0.2 mm can pin
+  it for tens of ms). Shorter is monotonically more corner-like, and
+  the residual always errs toward *more* PA stress — the conservative
+  side for a tuning print. Fidelity envelope from the full sweep,
+  measured on the dip-aligned post-kernel post-advance E waveform
+  (extremes match to four digits everywhere): within ≤15% peak / ≤5%
+  rms of the corner's E swing at ≤50k accel with deviation ≥0.05; at
+  100k accel or shallow deviations the real corner's E transient
+  becomes so small and narrow that the notch over-stresses it by
+  30–90% of that (shrinking) swing — there the notch reads as a
+  worst-case corner, not a typical one.
 
 Sample config + helper macros, adapted from bev2's Nonlinear Pressure
 Advance guide (`TESTPARAM`: 0 = ADVANCE, 1 = OFFSET, 2 = VELOCITY — bev2's

@@ -1,8 +1,14 @@
-//! Temporary experiment: can a straight-line slow "notch" (the PA tower's
-//! corner stand-in) reproduce the toolhead speed profile of a real clothoid
-//! corner in this planner? Runs a 90-degree corner and straight lines with
-//! notches of several lengths through the real pipeline, then compares dip
-//! depth, dwell near the minimum, and total transient duration.
+//! Evidence base for the PA tower's corner-notch defaults in
+//! `klippy/extras/pa_test.py`: runs a real 90-degree clothoid corner and the
+//! tower's straight-line notch through the actual pipeline and compares
+//! toolhead speed dips and the post-kernel post-advance E signal.
+//!
+//! Two outputs: (a) a limits sweep showing the clothoid dip is a constant
+//! 0.863x of the formula scv (pinned by the pipeline-snapshot regression
+//! test), (b) an E-stress comparison showing the smoothing kernel erases the
+//! notch/corner shape difference (the corner trades tangential for
+//! centripetal accel near the dip; the notch keeps the full tangential
+//! budget - a ~1-2 ms v(t) difference that vanishes under the 13 ms kernel).
 //!
 //! Run: cargo run --release -p pipeline-snapshot --example corner_vs_notch
 
@@ -110,9 +116,155 @@ fn dip_stats(profile: &[(f64, f64)], cruise: f64) -> DipStats {
     }
 }
 
+fn advance_params(l: Limits) -> SnapshotParams {
+    let mut p = params(l);
+    let mut e = planner_config::AxisDecl {
+        name: "e".into(),
+        follows: vec!["x".into(), "y".into(), "z".into()],
+        motors: Vec::new(),
+        post_processors: vec!["tanh".into(), "st".into()],
+    };
+    e.post_processors = vec!["tanh".into(), "st".into()];
+    p.axis_decls = vec![e];
+    p.post_processor_decls = vec![
+        planner_config::PostProcessorDecl {
+            name: "tanh".into(),
+            ty: "tanh_pressure_advance".into(),
+            params: [
+                ("linear_advance".to_string(), 0.011),
+                ("nonlinear_offset".to_string(), 0.147),
+                ("linearization_velocity".to_string(), 5.99),
+            ]
+            .into_iter()
+            .collect(),
+        },
+        planner_config::PostProcessorDecl {
+            name: "st".into(),
+            ty: "smooth_triangle".into(),
+            params: [("smooth_time".to_string(), 0.013)].into_iter().collect(),
+        },
+    ];
+    p
+}
+
+fn eval_axis_v(pieces: &[Vec<f64>], t: f64) -> f64 {
+    let Some(row) = pieces
+        .iter()
+        .find(|r| t >= r[0] && t <= r[1])
+        .or_else(|| pieces.iter().find(|r| t <= r[1]))
+    else {
+        return 0.0;
+    };
+    let tau = t - row[0];
+    row[2..]
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(i, c)| (i as f64) * c * tau.powi(i as i32 - 1))
+        .sum()
+}
+
+struct EStats {
+    v_min: f64,
+    v_max: f64,
+    a_max: f64,
+}
+
+fn e_stats(snap: &Snapshot, dt: f64) -> EStats {
+    let pieces = &snap.traj_e_pieces;
+    let mut v_min = f64::MAX;
+    let mut v_max = f64::MIN;
+    let mut a_max: f64 = 0.0;
+    let mut prev_v: Option<f64> = None;
+    let mut t = 0.0;
+    while t <= snap.traj_t_end {
+        let v = eval_axis_v(pieces, t);
+        v_min = v_min.min(v);
+        v_max = v_max.max(v);
+        if let Some(pv) = prev_v {
+            a_max = a_max.max(((v - pv) / dt).abs());
+        }
+        prev_v = Some(v);
+        t += dt;
+    }
+    EStats {
+        v_min,
+        v_max,
+        a_max,
+    }
+}
+
+fn report(label: &str, snap: &Snapshot, cruise: f64, dt: f64) {
+    let profile = speed_profile(snap, dt);
+    let d = dip_stats(&profile, cruise);
+    let e = e_stats(snap, dt);
+    println!(
+        "{label:<22} | v_min {:>6.2} dwell {:>5.2}ms trans {:>6.2}ms | vE min {:>7.3} max {:>7.3} mm/s, |aE| max {:>8.1} mm/s2",
+        d.v_min, d.dwell_ms, d.transient_ms, e.v_min, e.v_max, e.a_max
+    );
+}
+
+fn ve_around_interior_dip(snap: &Snapshot, dt: f64, cruise: f64, half_window_s: f64) -> Vec<f64> {
+    let profile = speed_profile(snap, dt);
+    let first = profile
+        .iter()
+        .position(|&(_, v)| v >= 0.99 * cruise)
+        .expect("reaches cruise");
+    let last = profile
+        .iter()
+        .rposition(|&(_, v)| v >= 0.99 * cruise)
+        .expect("returns to cruise");
+    let dip_t = profile[first..=last]
+        .iter()
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .expect("non-empty window")
+        .0;
+    let n = (half_window_s / dt) as i64;
+    (-n..=n)
+        .map(|k| eval_axis_v(&snap.traj_e_pieces, dip_t + (k as f64) * dt))
+        .collect()
+}
+
+fn report_aligned_diff(label: &str, corner: &Snapshot, notch: &Snapshot, cruise: f64, dt: f64) {
+    let a = ve_around_interior_dip(corner, dt, cruise, 0.03);
+    let b = ve_around_interior_dip(notch, dt, cruise, 0.03);
+    let swing =
+        a.iter().cloned().fold(f64::MIN, f64::max) - a.iter().cloned().fold(f64::MAX, f64::min);
+    let margin = (0.005 / dt) as usize;
+    let core = &a[margin..a.len() - margin];
+    let stats_at = |shift: i64| {
+        let mut peak: f64 = 0.0;
+        let mut sq = 0.0;
+        for (i, &va) in core.iter().enumerate() {
+            let vb = b[(i + margin).wrapping_add_signed(shift as isize)];
+            let d = (va - vb).abs();
+            peak = peak.max(d);
+            sq += d * d;
+        }
+        (peak, (sq / core.len() as f64).sqrt())
+    };
+    let mut best = (f64::MAX, 0.0_f64, 0_i64);
+    for shift in -(margin as i64)..=(margin as i64) {
+        let (peak, rms) = stats_at(shift);
+        if rms < best.0 {
+            best = (rms, peak, shift);
+        }
+    }
+    let (peak0, rms0) = stats_at(0);
+    println!(
+        "{label:<14} vE diff over +-25ms vs swing {swing:.2}: dip-aligned peak {:.1}% rms {:.1}% | best-shift ({:+.2}ms) peak {:.1}% rms {:.1}%",
+        100.0 * peak0 / swing,
+        100.0 * rms0 / swing,
+        best.2 as f64 * dt * 1e3,
+        100.0 * best.1 / swing,
+        100.0 * best.0 / swing
+    );
+}
+
 fn main() {
     let dt = 2e-5;
     let scv_factor = std::f64::consts::SQRT_2 - 1.0;
+    println!("--- clothoid dip vs 0.02mm notch, full sweep (tanh 0.011/0.147/5.99, st 13ms on E)");
     for accel in [20_000.0, 50_000.0, 100_000.0] {
         for jerk in [5e6, 2e7] {
             for deviation in [0.02, 0.05, 0.1] {
@@ -128,16 +280,16 @@ fn main() {
                         continue;
                     }
                     let corner =
-                        pipeline_snapshot(&corner_path(l), params(l)).expect("corner snapshot");
+                        pipeline_snapshot(&corner_path(l), advance_params(l)).expect("corner");
                     let c = dip_stats(&speed_profile(&corner, dt), v_wall);
-                    let notch_mm = (scv * 0.001).clamp(0.02, 0.2);
-                    let snap = pipeline_snapshot(&notch_path(l, notch_mm, scv), params(l))
-                        .expect("notch snapshot");
-                    let n = dip_stats(&speed_profile(&snap, dt), v_wall);
-                    println!(
-                        "a={accel:>6.0} j={jerk:.0e} dev={deviation:.2} v={v_wall:>3.0} | corner: vmin {:>6.2} (scv {scv:>6.2}) dwell {:>5.2}ms trans {:>6.2}ms | notch {notch_mm:.2}mm: vmin {:>6.2} dwell {:>5.2}ms trans {:>6.2}ms",
-                        c.v_min, c.dwell_ms, c.transient_ms, n.v_min, n.dwell_ms, n.transient_ms
+                    let notch = pipeline_snapshot(&notch_path(l, 0.02, c.v_min), advance_params(l))
+                        .expect("notch");
+                    print!(
+                        "a={accel:>6.0} j={jerk:.0e} dev={deviation:.2} v={v_wall:>3.0} | vmin/scv {:.4} dwell {:>5.2}ms | ",
+                        c.v_min / scv,
+                        c.dwell_ms
                     );
+                    report_aligned_diff("", &corner, &notch, v_wall, dt);
                 }
             }
         }

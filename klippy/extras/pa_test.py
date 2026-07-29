@@ -14,10 +14,8 @@ MAX_YX_SIZE_RATIO = 0.8
 SLOW_NOTCH_SIZE = 10.0
 SEAM_GAP_RATIO = 0.10
 SEAM_EXTRA_WIPE_RATIO = 1.1
-CORNER_KISS_TIME_S = 0.001
 CORNER_DIP_FACTOR = 0.863
-MIN_NOTCH_MM = 0.02
-MAX_NOTCH_MM = 0.2
+DEFAULT_NOTCH_MM = 0.02
 
 PA_TOWER_FILENAME = "pa_tower.gcode"
 
@@ -159,10 +157,7 @@ class PATest:
         )
         notch_mm = gcmd.get_float(
             "NOTCH_MM",
-            min(
-                MAX_NOTCH_MM,
-                max(MIN_NOTCH_MM, scv_velocity * CORNER_KISS_TIME_S),
-            ),
+            DEFAULT_NOTCH_MM,
             above=0.0,
             maxval=0.5 * SLOW_NOTCH_SIZE,
         )
