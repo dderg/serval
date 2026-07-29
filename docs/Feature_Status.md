@@ -67,12 +67,15 @@ Three tiers, honestly applied:
   ([docs/rewrite/shaper.md](rewrite/shaper.md)).
 - **CAN bus has not printed anything.** On a bench a toolhead
   micro-controller over CAN is exercised end to end: identify, config
-  upload, ADC and endstop reads, streamed motion, restart and
-  format-transition regressions, a multi-micro-controller topology with
-  the machine axes on another micro-controller, and a ten-minute
-  continuous-motion soak with zero bus errors. Never a real print, and
-  never with a heater or a physical endstop trip mid-move. Treat the first
-  print as a bring-up, not a regression test.
+  upload, thermistor and internal-sensor ADC reads, endstop reads,
+  streamed motion, an extruder follower axis through its pressure-advance
+  chain, coordinated moves whose machine axes live on a different
+  micro-controller, a heater accepting a target and reporting back,
+  restart and format-transition regressions, and a ten-minute
+  continuous-motion soak with zero bus errors. What is still missing is a
+  real print, a heater with an actual thermal load, and a physical endstop
+  trip mid-move. Treat the first print as a bring-up, not a regression
+  test.
 - **A G0 toolhead is a one-axis micro-controller.** At the default 2 kHz
   sample rate an STM32G0B1 soaked a single streamed axis for ten minutes
   but faulted within a minute driving three. The failure reproduces over
