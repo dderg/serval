@@ -355,3 +355,95 @@ TUNING_TOWER COMMAND=SET_PRESSURE_ADVANCE PARAMETER=VELOCITY START=2 STEP_DELTA=
 ```
 
 (`VELOCITY` must stay positive — start its tower above zero.)
+
+## PA tower test print
+
+`klippy/extras/pa_test.py` (ported from bleeding-edge-v2) prints the PA
+calibration tower directly from the firmware: `[pa_test]` +
+`[virtual_sdcard]` in the config, then `PRINT_PA_TOWER NOZZLE=...
+TARGET_TEMP=...`. Unlike upstream's gcode-provider plumbing, our port
+writes the generated tower to `pa_tower.gcode` in the virtual-sdcard
+directory and starts it through the regular `SDCARD_PRINT_FILE` path, so
+`PAUSE`/`RESUME`/`CANCEL_PRINT` and progress reporting work unchanged.
+The extruder must already be heated: `TARGET_TEMP` only cross-checks the
+configured target.
+
+Sample config + helper macros, adapted from bev2's Nonlinear Pressure
+Advance guide (`TESTPARAM`: 0 = ADVANCE, 1 = OFFSET, 2 = VELOCITY — bev2's
+`TIME_OFFSET` parameter has no counterpart in this planner's advance
+model; `VELOCITY` towers start at 1 because `linearization_velocity`
+must stay positive):
+
+```
+[pa_test]
+size_x: 100
+size_y: 50
+height: 50
+origin_x: 175    # bed center
+origin_y: 175
+layer_height: 0.2
+first_layer_height: 0.24
+perimeters: 2
+brim_width: 6
+slow_velocity: 20
+medium_velocity: 50
+fast_velocity: 150
+filament_diameter: 1.75
+fan_speed: 0.5
+
+[delayed_gcode start_pa_test]
+gcode:
+    {% set vars = printer["gcode_macro RUN_PA_TEST"] %}
+    ; PUT YOUR START GCODE HERE (homing, bed mesh, M190/M109 heating)
+    {% set flow_percent = vars.flow_rate|float * 100.0 %}
+    {% if flow_percent > 0 %}
+        M221 S{flow_percent}
+    {% endif %}
+    {% set height = printer.configfile.settings.pa_test.height %}
+    {% if vars.testparam == 0 %}
+        TUNING_TOWER COMMAND=SET_PRESSURE_ADVANCE PARAMETER=ADVANCE START=0 FACTOR=0.001
+    {% elif vars.testparam == 1 %}
+        TUNING_TOWER COMMAND=SET_PRESSURE_ADVANCE PARAMETER=OFFSET START=0 FACTOR=0.01
+    {% elif vars.testparam == 2 %}
+        TUNING_TOWER COMMAND=SET_PRESSURE_ADVANCE PARAMETER=VELOCITY START=1 FACTOR={vars.velocity_factor}
+    {% endif %}
+    ; PRINT_PA_TOWER must be the last command: it starts the print and returns
+    PRINT_PA_TOWER {vars.rawparams} FINAL_GCODE_ID=end_pa_test
+
+[delayed_gcode end_pa_test]
+gcode:
+    ; PUT YOUR END GCODE HERE (heaters off, present print)
+    RESTORE_GCODE_STATE NAME=PA_TEST_STATE
+
+[gcode_macro RUN_PA_TEST]
+variable_bed_temp: -1
+variable_hotend_temp: -1
+variable_flow_rate: -1
+variable_testparam: 0
+variable_velocity_factor: 0.2
+variable_rawparams: ''
+gcode:
+    {% if params.NOZZLE is not defined %}
+    {action_raise_error('NOZZLE= parameter must be provided')}
+    {% endif %}
+    {% if params.TARGET_TEMP is not defined %}
+    {action_raise_error('TARGET_TEMP= parameter must be provided')}
+    {% endif %}
+    {% if params.TESTPARAM is defined and params.TESTPARAM|int not in (0, 1, 2) %}
+    {action_raise_error('TESTPARAM must be 0 (ADVANCE), 1 (OFFSET) or 2 (VELOCITY)')}
+    {% endif %}
+    SET_GCODE_VARIABLE MACRO=RUN_PA_TEST VARIABLE=bed_temp VALUE={params.BED_TEMP|default(60)}
+    SET_GCODE_VARIABLE MACRO=RUN_PA_TEST VARIABLE=hotend_temp VALUE={params.TARGET_TEMP}
+    SET_GCODE_VARIABLE MACRO=RUN_PA_TEST VARIABLE=flow_rate VALUE={params.FLOW_RATE|default(-1)}
+    SET_GCODE_VARIABLE MACRO=RUN_PA_TEST VARIABLE=testparam VALUE={params.TESTPARAM|default(0)}
+    SET_GCODE_VARIABLE MACRO=RUN_PA_TEST VARIABLE=velocity_factor VALUE={params.VELOCITY_FACTOR|default(0.2)}
+    SET_GCODE_VARIABLE MACRO=RUN_PA_TEST VARIABLE=rawparams VALUE="'{rawparams}'"
+    SAVE_GCODE_STATE NAME=PA_TEST_STATE
+    UPDATE_DELAYED_GCODE ID=start_pa_test DURATION=0.01
+```
+
+bev2's tuning order carries over: tower `TESTPARAM=1` first (pick
+`nonlinear_offset` off the left face's slow transitions), then
+`TESTPARAM=0` (pick `linear_advance` where left and front faces converge
+together, nudging the offset ±10% when they disagree). The tower runs at
+the `[printer]` max accel — set it to what you actually print with.
