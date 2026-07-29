@@ -86,7 +86,27 @@ the CAN bus to communicate with the device - for example:
 ```
 [mcu my_can_mcu]
 canbus_uuid: 11aa22bb33cc
+#canbus_interface: can0
 ```
+
+`restart_method` is always `command` on a CAN micro-controller; the
+`arduino`, `cheetah` and `rpi_usb` methods act on a USB or serial
+connection a CAN node does not have.
+
+### Step-rate ceiling on toolhead boards
+
+The motion engine emits step pulses from its sample ISR, so a single axis
+cannot exceed `CONFIG_MOTION_SAMPLE_RATE_HZ` steps per second. Toolhead
+boards are usually STM32G0, whose default sample rate is 2 kHz - a
+bring-up rate, not a throughput rate. A CAN toolhead configured with a
+desktop microstepping value reaches that ceiling almost immediately: at
+80 steps/mm, 25 mm/s already asks for 2000 steps/s, and the engine faults
+with `StepQueueOverflow` rather than silently dropping steps.
+
+Size `microsteps` and `rotation_distance` against the sample rate of the
+micro-controller that drives the motor, and raise
+`CONFIG_MOTION_SAMPLE_RATE_HZ` (menuconfig) only as far as that
+micro-controller's CPU allows.
 
 ## USB to CAN bus bridge mode
 
