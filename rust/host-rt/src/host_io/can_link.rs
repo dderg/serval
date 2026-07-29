@@ -7,9 +7,12 @@ pub const NODEID_FIRST: u8 = 0x40;
 pub const NODEID_LAST: u8 = 0x7f;
 
 const CANBUS_CMD_QUERY_UNASSIGNED: u8 = 0x00;
+const CANBUS_CMD_QUERY_EXTENDED: u8 = 0x01;
 const CANBUS_CMD_SET_KLIPPER_NODEID: u8 = 0x01;
 const CANBUS_RESP_NEED_NODEID: u8 = 0x20;
+const CANBUS_RESP_HAVE_NODEID: u8 = 0x21;
 const CANBUS_APP_KLIPPER: u8 = 0x01;
+const CANBUS_APP_KALICO: u8 = 0x07;
 
 pub fn tx_id(nodeid: u8) -> u32 {
     u32::from(nodeid) * 2 + CANBUS_ID_DATA_BASE
@@ -19,8 +22,8 @@ pub fn rx_id(nodeid: u8) -> u32 {
     tx_id(nodeid) + 1
 }
 
-pub fn query_unassigned_payload() -> [u8; 1] {
-    [CANBUS_CMD_QUERY_UNASSIGNED]
+pub fn query_extended_payload() -> [u8; 2] {
+    [CANBUS_CMD_QUERY_UNASSIGNED, CANBUS_CMD_QUERY_EXTENDED]
 }
 
 pub fn set_nodeid_payload(uuid: u64, nodeid: u8) -> [u8; 8] {
@@ -39,20 +42,36 @@ pub fn uuid_bytes(uuid: u64) -> [u8; CANBUS_UUID_LEN] {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UnassignedNode {
-    pub uuid: u64,
-    pub klipper_application: bool,
+pub enum NodeAssignment {
+    Unassigned,
+    AlreadyAssigned(u8),
 }
 
-pub fn parse_unassigned_response(data: &[u8]) -> Option<UnassignedNode> {
-    if data.len() < CAN_MAX_DLEN || data[0] != CANBUS_RESP_NEED_NODEID {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiscoveredNode {
+    pub uuid: u64,
+    pub assignment: NodeAssignment,
+}
+
+pub fn parse_query_response(data: &[u8]) -> Option<DiscoveredNode> {
+    if data.len() < CAN_MAX_DLEN {
         return None;
     }
+    let assignment = match data[0] {
+        CANBUS_RESP_NEED_NODEID => {
+            if data[7] != CANBUS_APP_KLIPPER && data[7] != CANBUS_APP_KALICO {
+                return None;
+            }
+            NodeAssignment::Unassigned
+        }
+        CANBUS_RESP_HAVE_NODEID => NodeAssignment::AlreadyAssigned(data[7]),
+        _ => return None,
+    };
     let mut be = [0u8; 8];
     be[8 - CANBUS_UUID_LEN..].copy_from_slice(&data[1..1 + CANBUS_UUID_LEN]);
-    Some(UnassignedNode {
+    Some(DiscoveredNode {
         uuid: u64::from_be_bytes(be),
-        klipper_application: data[7] == CANBUS_APP_KLIPPER,
+        assignment,
     })
 }
 
@@ -66,9 +85,9 @@ pub use linux::CanLink;
 #[cfg(target_os = "linux")]
 mod linux {
     use super::{
-        CAN_MAX_DLEN, CANBUS_ID_ADMIN, CANBUS_ID_ADMIN_RESP, NODEID_FIRST,
-        parse_unassigned_response, payload_chunks, query_unassigned_payload, rx_id,
-        set_nodeid_payload, tx_id,
+        CAN_MAX_DLEN, CANBUS_ID_ADMIN, CANBUS_ID_ADMIN_RESP, NODEID_FIRST, NodeAssignment,
+        parse_query_response, payload_chunks, query_extended_payload, rx_id, set_nodeid_payload,
+        tx_id,
     };
     use std::collections::VecDeque;
     use std::io;
@@ -309,7 +328,16 @@ mod linux {
             )?;
 
             let nodeid = NODEID_FIRST;
-            discover(fd, uuid, discovery_timeout)?;
+            let prior_assignment = discover(fd, uuid, discovery_timeout)?;
+            tracing::info!(
+                subsystem = "mcu-comms",
+                event = "canbus_discovered",
+                interface,
+                uuid = format!("{uuid:012x}"),
+                prior = ?prior_assignment,
+                nodeid,
+                "canbus node answered admin query; assigning nodeid"
+            );
             send_frame(fd, CANBUS_ID_ADMIN, &set_nodeid_payload(uuid, nodeid))?;
 
             let tx = tx_id(nodeid);
@@ -368,10 +396,14 @@ mod linux {
         }
     }
 
-    fn discover(fd: libc::c_int, uuid: u64, discovery_timeout: Duration) -> io::Result<()> {
+    fn discover(
+        fd: libc::c_int,
+        uuid: u64,
+        discovery_timeout: Duration,
+    ) -> io::Result<NodeAssignment> {
         let deadline = Instant::now() + discovery_timeout;
         loop {
-            send_frame(fd, CANBUS_ID_ADMIN, &query_unassigned_payload())?;
+            send_frame(fd, CANBUS_ID_ADMIN, &query_extended_payload())?;
             let window = Instant::now() + DISCOVERY_QUERY_INTERVAL;
             while Instant::now() < window {
                 let remaining = window.saturating_duration_since(Instant::now());
@@ -382,25 +414,21 @@ mod linux {
                 if frame.can_id & CAN_SFF_MASK != CANBUS_ID_ADMIN_RESP {
                     continue;
                 }
-                let Some(node) = parse_unassigned_response(&frame.data[..]) else {
+                let Some(node) = parse_query_response(&frame.data[..]) else {
                     continue;
                 };
                 if node.uuid != uuid {
                     continue;
                 }
-                if !node.klipper_application {
-                    return Err(io::Error::other(format!(
-                        "canbus uuid {uuid:012x} answered with a non-Klipper application marker; \
-                         node is running bootloader or foreign firmware"
-                    )));
-                }
-                return Ok(());
+                return Ok(node.assignment);
             }
             if Instant::now() >= deadline {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
-                        "canbus uuid {uuid:012x} did not answer discovery within {discovery_timeout:?}"
+                        "canbus uuid {uuid:012x} did not answer an extended admin query within \
+                         {discovery_timeout:?}: node absent, powered down, or running firmware \
+                         without the extended-query admin command"
                     ),
                 ));
             }

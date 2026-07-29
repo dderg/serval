@@ -27,8 +27,8 @@ fn payload_chunks_of_empty_slice_yields_nothing() {
 }
 
 #[test]
-fn query_payload_is_single_zero_byte() {
-    assert_eq!(query_unassigned_payload(), [0x00]);
+fn query_payload_requests_the_extended_form() {
+    assert_eq!(query_extended_payload(), [0x00, 0x01]);
 }
 
 #[test]
@@ -42,32 +42,40 @@ fn set_nodeid_payload_matches_wire_layout() {
 }
 
 #[test]
-fn unassigned_response_round_trips_uuid_and_klipper_marker() {
+fn need_nodeid_response_round_trips_uuid_as_unassigned() {
     let data = [0x20, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x01];
-    let node = parse_unassigned_response(&data).expect("need-nodeid response");
+    let node = parse_query_response(&data).expect("need-nodeid response");
     assert_eq!(node.uuid, UUID);
-    assert!(node.klipper_application);
+    assert_eq!(node.assignment, NodeAssignment::Unassigned);
 }
 
 #[test]
-fn unassigned_response_reports_non_klipper_marker() {
-    let data = [0x20, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x00];
-    let node = parse_unassigned_response(&data).expect("need-nodeid response");
-    assert_eq!(node.uuid, UUID);
-    assert!(!node.klipper_application);
+fn kalico_application_marker_is_accepted_as_unassigned() {
+    let data = [0x20, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x07];
+    let node = parse_query_response(&data).expect("kalico need-nodeid response");
+    assert_eq!(node.assignment, NodeAssignment::Unassigned);
 }
 
 #[test]
-fn unassigned_response_uuid_mismatch_is_visible() {
+fn have_nodeid_response_reports_the_existing_assignment() {
+    let data = [0x21, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x40];
+    let node = parse_query_response(&data).expect("have-nodeid response");
+    assert_eq!(node.uuid, UUID);
+    assert_eq!(node.assignment, NodeAssignment::AlreadyAssigned(0x40));
+}
+
+#[test]
+fn foreign_application_marker_and_short_frames_are_rejected() {
+    assert!(parse_query_response(&[0x20, 1, 2, 3, 4, 5, 6, 0x00]).is_none());
+    assert!(parse_query_response(&[0x20, 1, 2, 3, 4, 5, 6]).is_none());
+    assert!(parse_query_response(&[0x99, 1, 2, 3, 4, 5, 6, 1]).is_none());
+}
+
+#[test]
+fn query_response_uuid_mismatch_is_visible() {
     let data = [0x20, 0x11, 0x22, 0x33, 0x44, 0x55, 0x67, 0x01];
-    let node = parse_unassigned_response(&data).expect("need-nodeid response");
+    let node = parse_query_response(&data).expect("need-nodeid response");
     assert_ne!(node.uuid, UUID);
-}
-
-#[test]
-fn non_need_nodeid_and_short_frames_are_rejected() {
-    assert!(parse_unassigned_response(&[0x21, 1, 2, 3, 4, 5, 6, 1]).is_none());
-    assert!(parse_unassigned_response(&[0x20, 1, 2, 3, 4, 5, 6]).is_none());
 }
 
 #[test]
