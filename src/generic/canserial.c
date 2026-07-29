@@ -22,6 +22,14 @@
 
 typedef uint8_t transmit_pos_t;
 
+#define CANMSG_ADMIN_DATA_MAX 8
+
+struct canbus_admin_msg {
+    uint32_t id;
+    uint32_t dlc;
+    uint8_t data[CANMSG_ADMIN_DATA_MAX];
+};
+
 // Global storage
 static struct canbus_data {
     uint32_t assigned_id;
@@ -30,6 +38,7 @@ static struct canbus_data {
     // Tx data
     struct task_wake tx_wake;
     transmit_pos_t transmit_pos, transmit_max;
+    uint8_t host_fd;
 
     // Rx data
     struct task_wake rx_wake;
@@ -37,7 +46,7 @@ static struct canbus_data {
     uint32_t admin_pull_pos, admin_push_pos;
 
     // Transfer buffers
-    struct canbus_msg admin_queue[8];
+    struct canbus_admin_msg admin_queue[8];
     uint8_t transmit_buf[224];
     uint8_t receive_buf[192];
 } CanData;
@@ -55,6 +64,18 @@ canserial_notify_tx(void)
     sched_wake_task(&CanData.tx_wake);
 }
 
+static uint32_t
+canserial_chunk_size(uint32_t avail)
+{
+    if (!CONFIG_CANBUS_DATA_FREQUENCY || !CanData.host_fd || avail <= 8)
+        return avail > 8 ? 8 : avail;
+    static const uint8_t fd_sizes[] = {64, 48, 32, 24, 20, 16, 12};
+    for (uint32_t i = 0; i < ARRAY_SIZE(fd_sizes); i++)
+        if (avail >= fd_sizes[i])
+            return fd_sizes[i];
+    return 8;
+}
+
 void
 canserial_tx_task(void)
 {
@@ -69,9 +90,10 @@ canserial_tx_task(void)
     msg.id = id + 1;
     uint32_t tpos = CanData.transmit_pos, tmax = CanData.transmit_max;
     for (;;) {
-        int avail = tmax - tpos, now = avail > 8 ? 8 : avail;
+        int avail = tmax - tpos;
         if (avail <= 0)
             break;
+        uint32_t now = canserial_chunk_size(avail);
         msg.dlc = now;
         memcpy(msg.data, &CanData.transmit_buf[tpos], now);
         int ret = canbus_send(&msg);
@@ -146,7 +168,7 @@ kalico_console_write_raw(const uint8_t *buf, uint16_t len)
 
 // Helper to verify a UUID in a command matches this chip's UUID
 static int
-can_check_uuid(struct canbus_msg *msg)
+can_check_uuid(struct canbus_admin_msg *msg)
 {
     return (msg->dlc >= 7
             && memcmp(&msg->data[1], CanData.uuid, sizeof(CanData.uuid)) == 0);
@@ -167,7 +189,7 @@ can_decode_nodeid(int nodeid)
 }
 
 static void
-can_process_query_unassigned(struct canbus_msg *msg)
+can_process_query_unassigned(struct canbus_admin_msg *msg)
 {
     uint8_t is_extended_query = // Kalico addition
         msg->dlc > 1
@@ -204,12 +226,13 @@ static void
 can_id_conflict(void)
 {
     CanData.assigned_id = 0;
+    CanData.host_fd = 0;
     canbus_set_filter(CanData.assigned_id);
     shutdown("Another CAN node assigned this ID");
 }
 
 static void
-can_process_set_klipper_nodeid(struct canbus_msg *msg)
+can_process_set_klipper_nodeid(struct canbus_admin_msg *msg)
 {
     if (msg->dlc < 8)
         return;
@@ -225,7 +248,7 @@ can_process_set_klipper_nodeid(struct canbus_msg *msg)
 }
 
 static void
-can_process_request_bootloader(struct canbus_msg *msg)
+can_process_request_bootloader(struct canbus_admin_msg *msg)
 {
     if (!CONFIG_HAVE_BOOTLOADER_REQUEST || !can_check_uuid(msg))
         return;
@@ -234,7 +257,7 @@ can_process_request_bootloader(struct canbus_msg *msg)
 
 // Handle an "admin" command
 static void
-can_process_admin(struct canbus_msg *msg)
+can_process_admin(struct canbus_admin_msg *msg)
 {
     if (!msg->dlc)
         return;
@@ -277,6 +300,8 @@ canserial_process_data(struct canbus_msg *msg)
             return;
         memcpy(&CanData.receive_buf[rpos], msg->data, len);
         CanData.receive_pos = rpos + len;
+        if (CONFIG_CANBUS_DATA_FREQUENCY && len > 8)
+            CanData.host_fd = 1;
         canserial_notify_rx();
     } else if (id == CANBUS_ID_ADMIN
                || (CanData.assigned_id && id == CanData.assigned_id + 1)) {
@@ -286,7 +311,13 @@ canserial_process_data(struct canbus_msg *msg)
             // No space - drop message
             return;
         uint32_t pos = pushp % ARRAY_SIZE(CanData.admin_queue);
-        memcpy(&CanData.admin_queue[pos], msg, sizeof(*msg));
+        struct canbus_admin_msg *entry = &CanData.admin_queue[pos];
+        uint32_t len = CANMSG_DATA_LEN(msg);
+        if (len > CANMSG_ADMIN_DATA_MAX)
+            len = CANMSG_ADMIN_DATA_MAX;
+        entry->id = id;
+        entry->dlc = len;
+        memcpy(entry->data, msg->data, len);
         CanData.admin_push_pos = pushp + 1;
         canserial_notify_rx();
     }
@@ -321,7 +352,7 @@ canserial_rx_task(void)
         if (pushp == pullp)
             break;
         uint32_t pos = pullp % ARRAY_SIZE(CanData.admin_queue);
-        struct canbus_msg *msg = &CanData.admin_queue[pos];
+        struct canbus_admin_msg *msg = &CanData.admin_queue[pos];
         uint32_t id = msg->id;
         if (CanData.assigned_id && id == CanData.assigned_id + 1)
             can_id_conflict();

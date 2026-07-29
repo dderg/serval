@@ -291,6 +291,11 @@ config CANBUS
 config CANBUS_FREQUENCY
     int "CAN bus speed" if LOW_LEVEL_OPTIONS && CANBUS
     default 1000000
+config HAVE_CANFD
+    bool
+config CANBUS_DATA_FREQUENCY
+    int "CAN-FD data phase speed (0 to disable CAN-FD)" if CANBUS && HAVE_CANFD
+    default 0
 config CANBUS_FILTER
     bool
     default y if CANSERIAL

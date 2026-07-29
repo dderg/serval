@@ -75,8 +75,125 @@ pub fn parse_query_response(data: &[u8]) -> Option<DiscoveredNode> {
     })
 }
 
-pub fn payload_chunks(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
-    bytes.chunks(CAN_MAX_DLEN)
+pub const CAN_FRAME_SIZE: usize = 16;
+pub const CANFD_FRAME_SIZE: usize = 72;
+pub const CANFD_MAX_DLEN: usize = 64;
+
+const CANFD_BRS_FLAG: u8 = 0x01;
+const CANFD_PAYLOAD_SIZES: [usize; 7] = [64, 48, 32, 24, 20, 16, 12];
+const CANFD_FLAGS_OFFSET: usize = 5;
+const CAN_DATA_OFFSET: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameFormat {
+    Classic,
+    Fd,
+}
+
+impl FrameFormat {
+    fn frame_size(self) -> usize {
+        match self {
+            Self::Classic => CAN_FRAME_SIZE,
+            Self::Fd => CANFD_FRAME_SIZE,
+        }
+    }
+
+    fn max_dlen(self) -> usize {
+        match self {
+            Self::Classic => CAN_MAX_DLEN,
+            Self::Fd => CANFD_MAX_DLEN,
+        }
+    }
+}
+
+pub fn from_mtu(mtu: usize) -> std::io::Result<FrameFormat> {
+    match mtu {
+        CAN_FRAME_SIZE => Ok(FrameFormat::Classic),
+        CANFD_FRAME_SIZE => Ok(FrameFormat::Fd),
+        other => Err(std::io::Error::other(format!(
+            "canbus interface MTU {other} is neither classic CAN ({CAN_FRAME_SIZE}) nor CAN-FD \
+             ({CANFD_FRAME_SIZE})"
+        ))),
+    }
+}
+
+pub fn fd_chunk_len(available: usize) -> usize {
+    if available <= CAN_MAX_DLEN {
+        return available;
+    }
+    for size in CANFD_PAYLOAD_SIZES {
+        if available >= size {
+            return size;
+        }
+    }
+    CAN_MAX_DLEN
+}
+
+pub fn chunk_len(format: FrameFormat, available: usize) -> usize {
+    match format {
+        FrameFormat::Classic => available.min(CAN_MAX_DLEN),
+        FrameFormat::Fd => fd_chunk_len(available),
+    }
+}
+
+#[derive(Debug)]
+pub struct EncodedFrame {
+    bytes: [u8; CANFD_FRAME_SIZE],
+    format: FrameFormat,
+}
+
+impl EncodedFrame {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.format.frame_size()]
+    }
+
+    pub fn format(&self) -> FrameFormat {
+        self.format
+    }
+}
+
+pub fn encode_frame(can_id: u32, payload: &[u8]) -> std::io::Result<EncodedFrame> {
+    if payload.len() > CANFD_MAX_DLEN {
+        return Err(std::io::Error::other(format!(
+            "CAN payload overflow: {} bytes exceeds the {CANFD_MAX_DLEN}-byte FD limit",
+            payload.len()
+        )));
+    }
+    let format = if payload.len() > CAN_MAX_DLEN {
+        FrameFormat::Fd
+    } else {
+        FrameFormat::Classic
+    };
+    let mut bytes = [0u8; CANFD_FRAME_SIZE];
+    bytes[..4].copy_from_slice(&can_id.to_ne_bytes());
+    bytes[4] = payload.len() as u8;
+    if format == FrameFormat::Fd {
+        bytes[CANFD_FLAGS_OFFSET] = CANFD_BRS_FLAG;
+    }
+    bytes[CAN_DATA_OFFSET..CAN_DATA_OFFSET + payload.len()].copy_from_slice(payload);
+    Ok(EncodedFrame { bytes, format })
+}
+
+pub fn decode_frame(datagram: &[u8]) -> std::io::Result<(u32, &[u8])> {
+    let format = match datagram.len() {
+        CAN_FRAME_SIZE => FrameFormat::Classic,
+        CANFD_FRAME_SIZE => FrameFormat::Fd,
+        other => {
+            return Err(std::io::Error::other(format!(
+                "CAN datagram length {other} is neither a classic frame ({CAN_FRAME_SIZE}) nor an \
+                 FD frame ({CANFD_FRAME_SIZE})"
+            )));
+        }
+    };
+    let can_id = u32::from_ne_bytes([datagram[0], datagram[1], datagram[2], datagram[3]]);
+    let len = usize::from(datagram[4]);
+    if len > format.max_dlen() {
+        return Err(std::io::Error::other(format!(
+            "CAN frame declares {len} payload bytes, above the {} the datagram can hold",
+            format.max_dlen()
+        )));
+    }
+    Ok((can_id, &datagram[CAN_DATA_OFFSET..CAN_DATA_OFFSET + len]))
 }
 
 #[cfg(target_os = "linux")]
@@ -85,9 +202,9 @@ pub use linux::CanLink;
 #[cfg(target_os = "linux")]
 mod linux {
     use super::{
-        CAN_MAX_DLEN, CANBUS_ID_ADMIN, CANBUS_ID_ADMIN_RESP, NODEID_FIRST, NodeAssignment,
-        parse_query_response, payload_chunks, query_extended_payload, rx_id, set_nodeid_payload,
-        tx_id,
+        CANBUS_ID_ADMIN, CANBUS_ID_ADMIN_RESP, CANFD_FRAME_SIZE, FrameFormat, NODEID_FIRST,
+        NodeAssignment, chunk_len, decode_frame, encode_frame, from_mtu, parse_query_response,
+        query_extended_payload, rx_id, set_nodeid_payload, tx_id,
     };
     use std::collections::VecDeque;
     use std::io;
@@ -97,6 +214,7 @@ mod linux {
     const CAN_RAW: libc::c_int = 1;
     const SOL_CAN_RAW: libc::c_int = 100 + CAN_RAW;
     const CAN_RAW_FILTER: libc::c_int = 1;
+    const CAN_RAW_FD_FRAMES: libc::c_int = 5;
     const SIOCGIFINDEX: libc::c_ulong = 0x8933;
     const CAN_SFF_MASK: u32 = 0x7ff;
     const IFREQ_NAME_LEN: usize = 16;
@@ -116,17 +234,6 @@ mod linux {
     struct IfReq {
         name: [u8; IFREQ_NAME_LEN],
         payload: [u8; 24],
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct CanFrame {
-        can_id: u32,
-        can_dlc: u8,
-        pad: u8,
-        res0: u8,
-        res1: u8,
-        data: [u8; CAN_MAX_DLEN],
     }
 
     #[repr(C)]
@@ -174,6 +281,36 @@ mod linux {
             req.payload[2],
             req.payload[3],
         ]))
+    }
+
+    fn interface_mtu(interface: &str) -> io::Result<usize> {
+        let path = format!("/sys/class/net/{interface}/mtu");
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| io::Error::new(e.kind(), format!("read {path}: {e}")))?;
+        raw.trim()
+            .parse::<usize>()
+            .map_err(|e| io::Error::other(format!("parse {path} ({:?}): {e}", raw.trim())))
+    }
+
+    fn enable_fd_frames(fd: libc::c_int) -> io::Result<()> {
+        let enable: libc::c_int = 1;
+        #[allow(unsafe_code)]
+        let rc = unsafe {
+            libc::setsockopt(
+                fd,
+                SOL_CAN_RAW,
+                CAN_RAW_FD_FRAMES,
+                (&raw const enable).cast::<libc::c_void>(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if rc < 0 {
+            return Err(io::Error::new(
+                last_error().kind(),
+                format!("CAN_RAW_FD_FRAMES: {}", last_error()),
+            ));
+        }
+        Ok(())
     }
 
     fn bind_can(fd: libc::c_int, ifindex: libc::c_int) -> io::Result<()> {
@@ -233,65 +370,48 @@ mod linux {
         Ok(rc > 0)
     }
 
-    fn recv_frame(fd: libc::c_int) -> io::Result<CanFrame> {
-        let mut frame = CanFrame {
-            can_id: 0,
-            can_dlc: 0,
-            pad: 0,
-            res0: 0,
-            res1: 0,
-            data: [0u8; CAN_MAX_DLEN],
-        };
+    struct Datagram {
+        bytes: [u8; CANFD_FRAME_SIZE],
+        len: usize,
+    }
+
+    impl Datagram {
+        fn as_bytes(&self) -> &[u8] {
+            &self.bytes[..self.len]
+        }
+    }
+
+    fn recv_datagram(fd: libc::c_int) -> io::Result<Datagram> {
+        let mut bytes = [0u8; CANFD_FRAME_SIZE];
         #[allow(unsafe_code)]
         let n = unsafe {
             libc::read(
                 fd,
-                (&raw mut frame).cast::<libc::c_void>(),
-                std::mem::size_of::<CanFrame>(),
+                bytes.as_mut_ptr().cast::<libc::c_void>(),
+                CANFD_FRAME_SIZE,
             )
         };
         if n < 0 {
             return Err(last_error());
         }
-        if n as usize != std::mem::size_of::<CanFrame>() {
-            return Err(io::Error::other(format!(
-                "short CAN frame read: {n} bytes, expected {}",
-                std::mem::size_of::<CanFrame>()
-            )));
-        }
-        Ok(frame)
+        Ok(Datagram {
+            bytes,
+            len: n as usize,
+        })
     }
 
     fn send_frame(fd: libc::c_int, can_id: u32, payload: &[u8]) -> io::Result<()> {
-        if payload.len() > CAN_MAX_DLEN {
-            return Err(io::Error::other(format!(
-                "classic CAN payload overflow: {} bytes",
-                payload.len()
-            )));
-        }
-        let mut frame = CanFrame {
-            can_id,
-            can_dlc: payload.len() as u8,
-            pad: 0,
-            res0: 0,
-            res1: 0,
-            data: [0u8; CAN_MAX_DLEN],
-        };
-        frame.data[..payload.len()].copy_from_slice(payload);
+        let frame = encode_frame(can_id, payload)?;
+        let wire = frame.as_bytes();
         #[allow(unsafe_code)]
-        let n = unsafe {
-            libc::write(
-                fd,
-                (&raw const frame).cast::<libc::c_void>(),
-                std::mem::size_of::<CanFrame>(),
-            )
-        };
+        let n = unsafe { libc::write(fd, wire.as_ptr().cast::<libc::c_void>(), wire.len()) };
         if n < 0 {
             return Err(last_error());
         }
-        if n as usize != std::mem::size_of::<CanFrame>() {
+        if n as usize != wire.len() {
             return Err(io::Error::other(format!(
-                "short CAN frame write: {n} bytes"
+                "short CAN frame write: {n} bytes, expected {}",
+                wire.len()
             )));
         }
         Ok(())
@@ -309,6 +429,7 @@ mod linux {
         tx_id: u32,
         rx_id: u32,
         nodeid: u8,
+        format: FrameFormat,
         timeout: Duration,
         pending: VecDeque<u8>,
     }
@@ -318,6 +439,19 @@ mod linux {
             let fd = open_can_socket()?;
             let guard = FdGuard(fd);
             let ifindex = if_index(fd, interface)?;
+            let mtu = interface_mtu(interface)?;
+            let format = from_mtu(mtu)?;
+            if format == FrameFormat::Fd {
+                enable_fd_frames(fd)?;
+            }
+            tracing::info!(
+                subsystem = "mcu-comms",
+                event = "canbus_frame_mode",
+                interface,
+                mtu,
+                fd = format == FrameFormat::Fd,
+                "canbus frame format negotiated from interface MTU"
+            );
             bind_can(fd, ifindex)?;
             set_filters(
                 fd,
@@ -362,6 +496,7 @@ mod linux {
                 tx_id: tx,
                 rx_id: rx,
                 nodeid,
+                format,
                 timeout: Duration::from_millis(100),
                 pending: VecDeque::new(),
             })
@@ -377,6 +512,10 @@ mod linux {
 
         pub fn rx_id(&self) -> u32 {
             self.rx_id
+        }
+
+        pub fn frame_format(&self) -> FrameFormat {
+            self.format
         }
 
         fn drain_pending(&mut self, buf: &mut [u8]) -> usize {
@@ -410,11 +549,12 @@ mod linux {
                 if !poll_readable(fd, remaining)? {
                     continue;
                 }
-                let frame = recv_frame(fd)?;
-                if frame.can_id & CAN_SFF_MASK != CANBUS_ID_ADMIN_RESP {
+                let datagram = recv_datagram(fd)?;
+                let (can_id, payload) = decode_frame(datagram.as_bytes())?;
+                if can_id & CAN_SFF_MASK != CANBUS_ID_ADMIN_RESP {
                     continue;
                 }
-                let Some(node) = parse_query_response(&frame.data[..]) else {
+                let Some(node) = parse_query_response(payload) else {
                     continue;
                 };
                 if node.uuid != uuid {
@@ -460,8 +600,9 @@ mod linux {
                     }
                     continue;
                 }
-                let frame = recv_frame(self.fd)?;
-                if frame.can_id & CAN_SFF_MASK != self.rx_id {
+                let datagram = recv_datagram(self.fd)?;
+                let (can_id, payload) = decode_frame(datagram.as_bytes())?;
+                if can_id & CAN_SFF_MASK != self.rx_id {
                     if Instant::now() >= deadline {
                         return Err(io::Error::new(
                             io::ErrorKind::TimedOut,
@@ -470,19 +611,20 @@ mod linux {
                     }
                     continue;
                 }
-                let len = usize::from(frame.can_dlc).min(CAN_MAX_DLEN);
-                let copied = len.min(buf.len());
-                buf[..copied].copy_from_slice(&frame.data[..copied]);
-                self.pending.extend(&frame.data[copied..len]);
+                let copied = payload.len().min(buf.len());
+                buf[..copied].copy_from_slice(&payload[..copied]);
+                self.pending.extend(&payload[copied..]);
                 return Ok(copied);
             }
         }
 
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             let mut sent = 0usize;
-            for chunk in payload_chunks(buf) {
-                match send_frame(self.fd, self.tx_id, chunk) {
-                    Ok(()) => sent += chunk.len(),
+            while sent < buf.len() {
+                let remainder = &buf[sent..];
+                let take = chunk_len(self.format, remainder.len());
+                match send_frame(self.fd, self.tx_id, &remainder[..take]) {
+                    Ok(()) => sent += take,
                     Err(e) => {
                         if sent > 0 {
                             return Ok(sent);
