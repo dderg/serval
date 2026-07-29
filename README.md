@@ -19,6 +19,10 @@ and install instructions: [README_KALICO.md](README_KALICO.md).
 what is exploratory, and the known limits:
 [docs/Feature_Status.md](docs/Feature_Status.md).
 
+**Play with it in your browser** — the actual pipeline compiled to WASM;
+paste G-code, tweak config, watch it re-plan:
+[dderg.github.io/kalico/playground](https://dderg.github.io/kalico/playground/).
+
 ---
 
 ## The corner problem
@@ -63,6 +67,17 @@ between two failure modes.
   for the frame to absorb on the planner's behalf.
 - **Curved input is accepted as-is:** G5 / G5.1 cubic Bézier moves.
 
+Below, the real planner driven over a 40 mm square
+(`tools/plot_pipeline_figures.py`; deviation budget 0.2 mm, exaggerated
+for visibility). The fitter rounds each corner into a blend:
+
+![fitted path vs G-code polyline](docs/img/pipeline-path.svg)
+
+A sharp corner is a curvature impulse; the clothoids ramp κ up and back
+down instead:
+
+![curvature through one corner](docs/img/pipeline-curvature.svg)
+
 ---
 
 ## The planner
@@ -82,6 +97,11 @@ What the planner does with limits:
   limit binds, the profile rides it; where an extruder flow limit takes
   over, it rides that instead.
 - **Jerk is currently a per-axis constraint** like velocity and accel.
+
+The planned profile over the same square — riding `max_velocity`, dipping
+only as far as each blend's curvature requires:
+
+![velocity profile](docs/img/pipeline-velocity.svg)
 
 **On jerk, honestly:** jerk limiting was the initial aspiration for this
 fork. Recent testing suggests it may not be worth it — it only costs print
@@ -134,15 +154,22 @@ linear operator applied to one axis's motion. Declared the same way,
 chainable.
 
 ```
-[post_processor is]
+[post_processor smooth]
 type: smooth_bell
 smooth_time: 0.018
+
+[post_processor is]
+type: smooth_mzv
+frequency_hz: 43
 
 [post_processor pa]
 type: linear_pressure_advance
 k: 0.045
 
 [axis x]
+post_processors: smooth
+
+[axis y]
 post_processors: is
 
 [axis e]
@@ -180,15 +207,19 @@ Eight types exist today (registry: `rust/trajectory/src/algos/mod.rs`):
   chains, revalidates them, and swaps them into the running planner.
   Corner deviation and accel caps change the same way.
 
+The per-axis tracks the executors receive, nominal vs the chain's output
+(`smooth_bell`, 18 ms):
+
+![per-axis velocity and acceleration tracks](docs/img/pipeline-axes.svg)
+
 Design detail: [docs/rewrite/shaper.md](docs/rewrite/shaper.md).
 
 ---
 
 ## The MCU plays trajectory, not steps
 
-**Mainline precompiles a queue of step times. This fork streams the actual
-trajectory and the MCU evaluates it.** That one change is what unlocks the
-two execution paths below.
+**Mainline precompiles a queue of step times. Serval streams the actual
+trajectory, and the executors evaluate it.**
 
 - **The host streams polynomial position pieces** — each axis's final
   motion, planned, followed, and shaped.
@@ -203,48 +234,46 @@ two execution paths below.
 
 Kinematics is where axes meet hardware: axes are what the planner thinks
 in, motors are what the printer is built from, and a kinematics module
-connects the two. Three drive types exist — step/dir, phase stepping, and
-EtherCAT servos. **The planning side does not know which is in use.**
-Per-drive status: [docs/Feature_Status.md](docs/Feature_Status.md).
+connects the two. The planning side does not know what executes the
+trajectory. Per-drive status:
+[docs/Feature_Status.md](docs/Feature_Status.md).
+
+```mermaid
+flowchart TD
+    S["stream: polynomial position pieces"] --> M["MCU<br/>(STM32 H7 / F4 / G0, Linux-process)"]
+    S --> E["ethercat-rt<br/>real-time EtherCAT master"]
+    M --> D1["step/dir"]
+    M --> D2["phase stepping"]
+    E --> D3["CiA 402 servo drives"]
+```
 
 ---
 
 ## EtherCAT servos
 
-**Industrial servo drives as first-class motors.** Because the MCU path
-streams a trajectory rather than steps, the same stream that feeds a
-stepper's phase currents feeds a servo drive its position setpoints. On the
-test bench that is an industrial servo on X with steppers elsewhere.
+**Industrial servo drives as first-class motors.** The same trajectory
+stream that drives a stepper's phase currents feeds servo drives their
+position setpoints — and doing it over EtherCAT buys things step/dir
+cannot express:
 
-```
-[ethercat_node node_x]
-interface: eth0
+- **The drives are synchronized in time.** EtherCAT distributed clocks put
+  every drive on one clock, executing one trajectory time-base. Motors
+  that must agree — two motors on one gantry (AWD), A and B on a CoreXY —
+  are in sync by construction, not by hoping step edges line up.
+- **True physical-model torque feedforward, sent in every frame.** Serval
+  identifies the axis dynamics (inertia, friction) and computes each
+  motor's torque every cycle. On a CoreXY that means A and B receive
+  *different* torque depending on the direction of motion — something a
+  step pulse has no way to say.
+- **Drive tuning is configuration.** Loop gains are written into the
+  drive's object dictionary at startup from the printer config —
+  version-controlled and diffable, not trapped in a vendor GUI. A
+  calibration suite surrounds it: gain and inertia identification,
+  tracking measurement, telemetry capture to file, and a live dashboard.
+- **Sensorless homing** on servo axes via a torque threshold.
 
-[servo_x]
-protocol: ethercat
-node: node_x
-max_torque: 100
-velocity_ff: True
-params:
-  0x2000.0x05: u16 0      # manual gain mode (no auto-tuning)
-  0x2000.0x07: u16 37     # load inertia ratio, % (servo-ident fit)
-  0x2001.0x01: u16 2200   # position gain, 220 rad/s
-  0x2001.0x02: u16 1375   # speed gain, 137.5 Hz
-  0x2001.0x03: u16 909    # integral time, 9.09 ms
-dynamics_profile: servo_dynamics/dynamics_ident_20260611_181313.toml
-```
-
-- **`params:` writes the drive's object dictionary at startup**, so loop
-  gains live in version-controlled config rather than a vendor tuning GUI.
-  The drive's tuning is part of the printer's configuration, and diffable.
-- **`dynamics_profile` is the output of the fork's own identification
-  routine**, which excites the axis, fits its dynamics (including
-  friction), and feeds the result forward as torque on top of velocity
-  feedforward.
-- **A calibration suite surrounds this:** G-code commands for gain and
-  inertia identification and tracking measurement, tuning profiles,
-  telemetry capture to file, and a live dashboard.
-- **Sensorless homing on servo axes** via a torque threshold.
+Built on the standard CiA 402 drive profile; tested so far on
+StepperOnline A6 drives.
 
 **Bring-up** takes a real-time host: the EtherCAT master runs on a
 Raspberry Pi 5 under a PREEMPT_RT kernel with the IgH master and the
@@ -258,51 +287,6 @@ native `ec_macb` driver.
   [docs/rewrite/servo-feedforward.md](docs/rewrite/servo-feedforward.md)
 - Tuning dashboard and the full `SERVO_*` command reference:
   [serval-dashboard](https://github.com/dderg/serval-dashboard)
-
----
-
-## The pipeline, drawn
-
-```mermaid
-flowchart TD
-    G["G-code<br/>straight-line moves,<br/>sharp junctions"] --> F
-    F["<b>Fitter</b><br/>arc + clothoid corner blends<br/>continuous curvature (G2)<br/>inside a deviation budget"] --> P
-    P["<b>Planner</b><br/>jerk-limited velocity profile<br/>riding whichever limit binds"] --> L
-    L["<b>Lowerer</b><br/>per-axis piecewise-polynomial<br/>position tracks"] --> S
-    S["<b>Shaper</b><br/>per-axis post-processor chains<br/>smoothing, pressure advance"] --> M
-    M["<b>Stream to MCUs</b><br/>polynomial pieces, not step times"] --> D1 & D2 & D3
-    D1["step/dir"]
-    D2["phase stepping"]
-    D3["EtherCAT servo"]
-```
-
-The figures below are generated by driving the real planner over a 40 mm
-square — `tools/plot_pipeline_figures.py`, same
-`_motion_engine.pipeline_snapshot` entry point the snapshot harness and the
-playground use.
-
-**1 — the fitter rounds the corners** inside the deviation budget (0.2 mm
-here, exaggerated for visibility):
-
-![fitted path vs G-code polyline](docs/img/pipeline-path.svg)
-
-**2 — curvature is continuous through the blend.** A sharp corner is a
-curvature impulse; the clothoids ramp κ up and back down instead:
-
-![curvature through one corner](docs/img/pipeline-curvature.svg)
-
-**3 — the velocity profile rides the limits**, dipping only as far as the
-blend's curvature requires:
-
-![velocity profile](docs/img/pipeline-velocity.svg)
-
-**4 — lowered per-axis tracks, with a post-processor chain applied**
-(`smooth_bell`, 18 ms) against the nominal:
-
-![per-axis velocity and acceleration tracks](docs/img/pipeline-axes.svg)
-
-Interactive version — paste your own G-code and re-plan live in the
-browser: [dderg.github.io/kalico/playground](https://dderg.github.io/kalico/playground/).
 
 ---
 

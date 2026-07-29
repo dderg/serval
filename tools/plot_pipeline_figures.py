@@ -42,6 +42,8 @@ post_processors: is
 post_processors: is
 """
 
+SMOOTH_TIME = 0.018
+
 SQUARE = [(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0), (0.0, 0.0)]
 
 INK = "#1b1b1b"
@@ -251,6 +253,7 @@ def main():
     stimes = [st_end * i / (n - 1) for i in range(n)]
     _, svx, saxx = sample_axis(shaped["traj_x_pieces"], stimes)
     _, svy, sayy = sample_axis(shaped["traj_y_pieces"], stimes)
+    splot = [t - SMOOTH_TIME / 2.0 for t in stimes]
 
     fig, axes = plt.subplots(2, 1, figsize=(6.4, 4.4), sharex=True)
     axes[0].plot(
@@ -269,8 +272,8 @@ def main():
         linestyle=":",
         label="Y nominal",
     )
-    axes[0].plot(stimes, svx, color=FORK, linewidth=1.3, label="X shaped")
-    axes[0].plot(stimes, svy, color=INK, linewidth=1.3, label="Y shaped")
+    axes[0].plot(splot, svx, color=FORK, linewidth=1.3, label="X shaped")
+    axes[0].plot(splot, svy, color=INK, linewidth=1.3, label="Y shaped")
     style(
         axes[0],
         "4 — lowerer + shaper: per-axis tracks (smooth_bell, 18 ms)",
@@ -286,8 +289,8 @@ def main():
         linestyle="--",
         label="X nominal",
     )
-    axes[1].plot(stimes, saxx, color=FORK, linewidth=1.3, label="X shaped")
-    axes[1].plot(stimes, sayy, color=INK, linewidth=1.3, label="Y shaped")
+    axes[1].plot(splot, saxx, color=FORK, linewidth=1.3, label="X shaped")
+    axes[1].plot(splot, sayy, color=INK, linewidth=1.3, label="Y shaped")
     style(axes[1], "", "time (s)", "acceleration (mm/s²)")
     axes[1].legend(fontsize=7, frameon=False, ncol=3)
     save(fig, "pipeline-axes.svg")
