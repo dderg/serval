@@ -22,6 +22,16 @@
 
 typedef uint8_t transmit_pos_t;
 
+#if CONFIG_CANBUS_DATA_FREQUENCY
+#define CANSERIAL_RECEIVE_BUF_SIZE 768
+typedef uint16_t receive_pos_t;
+#define read_receive_pos(a) readw(a)
+#else
+#define CANSERIAL_RECEIVE_BUF_SIZE 192
+typedef uint8_t receive_pos_t;
+#define read_receive_pos(a) readb(a)
+#endif
+
 #define CANMSG_ADMIN_DATA_MAX 8
 
 struct canbus_admin_msg {
@@ -42,16 +52,18 @@ static struct canbus_data {
 
     // Rx data
     struct task_wake rx_wake;
-    uint8_t receive_pos;
+    receive_pos_t receive_pos;
     uint32_t admin_pull_pos, admin_push_pos;
 
     // Transfer buffers
     struct canbus_admin_msg admin_queue[8];
     uint8_t transmit_buf[224];
-    uint8_t receive_buf[192];
+    uint8_t receive_buf[CANSERIAL_RECEIVE_BUF_SIZE];
 } CanData;
 _Static_assert(sizeof(CanData.transmit_buf) <= (transmit_pos_t)-1,
                "transmit_pos_t cannot index transmit_buf");
+_Static_assert(sizeof(CanData.receive_buf) <= (receive_pos_t)-1,
+               "receive_pos_t cannot index receive_buf");
 
 
 /****************************************************************
@@ -294,10 +306,10 @@ canserial_process_data(struct canbus_msg *msg)
     uint32_t id = msg->id;
     if (CanData.assigned_id && id == CanData.assigned_id) {
         // Add to incoming data buffer
-        int rpos = CanData.receive_pos;
+        receive_pos_t rpos = CanData.receive_pos;
         uint32_t len = CANMSG_DATA_LEN(msg);
         if (len > sizeof(CanData.receive_buf) - rpos)
-            return;
+            shutdown("CAN receive buffer overflow: host exceeded RECEIVE_WINDOW");
         memcpy(&CanData.receive_buf[rpos], msg->data, len);
         CanData.receive_pos = rpos + len;
         if (CONFIG_CANBUS_DATA_FREQUENCY && len > 8)
@@ -324,14 +336,14 @@ canserial_process_data(struct canbus_msg *msg)
 }
 
 static void
-rebase_receive_buf_against_rx_irq(uint_fast8_t consumed)
+rebase_receive_buf_against_rx_irq(receive_pos_t consumed)
 {
     irqstatus_t flag = irq_save();
-    uint_fast8_t now = readb(&CanData.receive_pos);
+    receive_pos_t now = read_receive_pos(&CanData.receive_pos);
     if (now == consumed) {
         CanData.receive_pos = 0;
     } else {
-        uint_fast8_t tail = now - consumed;
+        receive_pos_t tail = now - consumed;
         memmove(CanData.receive_buf, &CanData.receive_buf[consumed], tail);
         CanData.receive_pos = tail;
     }
@@ -361,7 +373,7 @@ canserial_rx_task(void)
         CanData.admin_pull_pos = pullp + 1;
     }
 
-    uint_fast8_t rpos = readb(&CanData.receive_pos);
+    receive_pos_t rpos = read_receive_pos(&CanData.receive_pos);
     mcu_demux_pump(CanData.receive_buf, rpos);
     rebase_receive_buf_against_rx_irq(rpos);
 }
