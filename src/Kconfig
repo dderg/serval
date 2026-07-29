@@ -291,6 +291,19 @@ config CANBUS
 config CANBUS_FREQUENCY
     int "CAN bus speed" if LOW_LEVEL_OPTIONS && CANBUS
     default 1000000
+config HAVE_CANFD
+    bool
+config CANBUS_DATA_FREQUENCY
+    int "CAN-FD data phase speed (0 to disable CAN-FD)" if CANSERIAL && HAVE_CANFD
+    default 0
+    help
+        Non-zero switches the CAN serial transport to CAN-FD, carrying up
+        to 64 bytes per frame with this bit rate during the data phase.
+        The rate must divide the FDCAN kernel clock into a legal quanta
+        split or initialization fails loudly rather than silently running
+        classic frames; 2000000 on a 64 MHz G0B1 is known good.
+        Deliberately unavailable to USB-to-CAN bridge builds, whose frame
+        forwarding is classic-only.
 config CANBUS_FILTER
     bool
     default y if CANSERIAL

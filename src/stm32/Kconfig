@@ -102,6 +102,7 @@ config HAVE_STM32_CANBUS
     default y if MACH_STM32F4x5 || MACH_STM32F446
 config HAVE_STM32_FDCANBUS
     bool
+    select HAVE_CANFD
     default y if MACH_STM32G0B1 || MACH_STM32H7
 config HAVE_STM32_USBCANBUS
     bool
