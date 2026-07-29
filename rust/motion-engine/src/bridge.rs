@@ -81,6 +81,35 @@ fn planner_err(e: StreamWorkerError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
 
+fn open_link_with_retry(
+    what: &str,
+    link_desc: &str,
+    deadline: Instant,
+    timeout_s: f64,
+    mut open: impl FnMut() -> Result<McuHostIo, host_rt::transport::TransportError>,
+) -> PyResult<McuHostIo> {
+    loop {
+        match open() {
+            Ok(io) => return Ok(io),
+            Err(e) => {
+                if Instant::now() >= deadline {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "{what}: could not open {link_desc} within {timeout_s}s: {e}"
+                    )));
+                }
+                tracing::warn!(
+                    subsystem = "mcu-comms",
+                    event = "attach_open_retry",
+                    link = link_desc,
+                    error = %e,
+                    "{what}: retrying open"
+                );
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+}
+
 fn open_serial_with_retry(
     serial_path: &str,
     effective_baud: u32,
@@ -89,8 +118,8 @@ fn open_serial_with_retry(
     deadline: Instant,
     timeout_s: f64,
 ) -> PyResult<McuHostIo> {
-    let host_io = loop {
-        let result = if is_pipe {
+    open_link_with_retry("attach_serial", serial_path, deadline, timeout_s, || {
+        if is_pipe {
             #[cfg(target_family = "unix")]
             {
                 McuHostIo::open_pipe_with_config(serial_path, config.clone())
@@ -101,27 +130,21 @@ fn open_serial_with_retry(
             }
         } else {
             McuHostIo::open_with_config(serial_path, effective_baud, config.clone())
-        };
-        match result {
-            Ok(io) => break io,
-            Err(e) => {
-                if Instant::now() >= deadline {
-                    return Err(PyRuntimeError::new_err(format!(
-                        "attach_serial: could not open {serial_path} within {timeout_s}s: {e}"
-                    )));
-                }
-                tracing::warn!(
-                    subsystem = "mcu-comms",
-                    event = "attach_open_retry",
-                    serial_path,
-                    error = %e,
-                    "attach_serial: retrying open"
-                );
-                std::thread::sleep(Duration::from_millis(500));
-            }
         }
-    };
-    Ok(host_io)
+    })
+}
+
+fn open_canbus_with_retry(
+    interface: &str,
+    uuid: u64,
+    config: &McuHostIoConfig,
+    deadline: Instant,
+    timeout_s: f64,
+) -> PyResult<McuHostIo> {
+    let link_desc = format!("{interface} uuid={uuid:012x}");
+    open_link_with_retry("attach_canbus", &link_desc, deadline, timeout_s, || {
+        McuHostIo::open_canbus_with_config(interface, uuid, config.clone())
+    })
 }
 
 /// Backstop only. The continuity commit drains at every blend, so the buffer
@@ -508,6 +531,66 @@ impl PyMotionEngine {
         self.register_freshly_attached_mcu(
             mcu_handle,
             serial_path,
+            &mcu_label,
+            klippy_non_critical,
+            expect_native,
+            host_io,
+        )
+    }
+
+    #[pyo3(signature = (mcu_handle, interface, uuid, timeout_s = 30.0, klippy_non_critical = false, expect_native = true))]
+    fn attach_canbus(
+        &self,
+        mcu_handle: u32,
+        interface: &str,
+        uuid: &str,
+        timeout_s: f64,
+        klippy_non_critical: bool,
+        expect_native: bool,
+    ) -> PyResult<()> {
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs_f64(timeout_s);
+        let uuid_value = u64::from_str_radix(uuid, 16).map_err(|e| {
+            PyRuntimeError::new_err(format!("attach_canbus: invalid canbus_uuid {uuid:?}: {e}"))
+        })?;
+        if uuid_value > 0xffff_ffff_ffff {
+            return Err(PyRuntimeError::new_err(format!(
+                "attach_canbus: canbus_uuid {uuid:?} exceeds 6 bytes"
+            )));
+        }
+        let link_desc = format!("{interface}:{uuid_value:012x}");
+
+        if self.try_reuse_existing_connection(
+            mcu_handle,
+            &link_desc,
+            klippy_non_critical,
+            expect_native,
+        )? {
+            return Ok(());
+        }
+
+        let mcu_label: String = self.with_mcu(
+            mcu_handle,
+            |h| format!("attach_canbus: unknown mcu_handle {h} (claim_mcu not called)"),
+            |conn| {
+                conn.runtime_rx_priority = None;
+                conn.runtime_rx_bulk = None;
+                conn.host_io = None;
+                Ok(conn.label.clone())
+            },
+        )?;
+
+        let config = McuHostIoConfig {
+            mcu_label: Some(mcu_label.clone()),
+            ..McuHostIoConfig::default()
+        };
+
+        let host_io =
+            open_canbus_with_retry(interface, uuid_value, &config, deadline, timeout_s)?;
+
+        self.register_freshly_attached_mcu(
+            mcu_handle,
+            &link_desc,
             &mcu_label,
             klippy_non_critical,
             expect_native,

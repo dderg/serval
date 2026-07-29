@@ -15,9 +15,12 @@
 #include "canserial.h" // canserial_notify_tx
 #include "command.h" // DECL_CONSTANT
 #include "fasthash.h" // fasthash64
+#include "mcu_demux.h" // mcu_demux_pump
 #include "sched.h" // sched_wake_task
 
 #define CANBUS_UUID_LEN 6
+
+typedef uint8_t transmit_pos_t;
 
 // Global storage
 static struct canbus_data {
@@ -26,7 +29,7 @@ static struct canbus_data {
 
     // Tx data
     struct task_wake tx_wake;
-    uint8_t transmit_pos, transmit_max;
+    transmit_pos_t transmit_pos, transmit_max;
 
     // Rx data
     struct task_wake rx_wake;
@@ -35,9 +38,11 @@ static struct canbus_data {
 
     // Transfer buffers
     struct canbus_msg admin_queue[8];
-    uint8_t transmit_buf[96];
+    uint8_t transmit_buf[224];
     uint8_t receive_buf[192];
 } CanData;
+_Static_assert(sizeof(CanData.transmit_buf) <= (transmit_pos_t)-1,
+               "transmit_pos_t cannot index transmit_buf");
 
 
 /****************************************************************
@@ -104,6 +109,24 @@ console_sendf(const struct command_encoder *ce, va_list args)
     // Start message transmit
     CanData.transmit_max = tmax + msglen;
     canserial_notify_tx();
+}
+
+int
+kalico_console_write_raw(const uint8_t *buf, uint16_t len)
+{
+    transmit_pos_t tpos = CanData.transmit_pos, tmax = CanData.transmit_max;
+    if (tpos && (uint32_t)tmax + (uint32_t)len > sizeof(CanData.transmit_buf)) {
+        tmax -= tpos;
+        memmove(&CanData.transmit_buf[0], &CanData.transmit_buf[tpos], tmax);
+        CanData.transmit_pos = 0;
+        CanData.transmit_max = tmax;
+    }
+    if ((uint32_t)tmax + (uint32_t)len > sizeof(CanData.transmit_buf))
+        return -1;
+    memcpy(&CanData.transmit_buf[tmax], buf, len);
+    CanData.transmit_max = tmax + len;
+    canserial_notify_tx();
+    return len;
 }
 
 /****************************************************************
@@ -269,30 +292,19 @@ canserial_process_data(struct canbus_msg *msg)
     }
 }
 
-// Remove from the receive buffer the given number of bytes
 static void
-console_pop_input(int len)
+rebase_receive_buf_against_rx_irq(uint_fast8_t consumed)
 {
-    int copied = 0;
-    for (;;) {
-        int rpos = readb(&CanData.receive_pos);
-        int needcopy = rpos - len;
-        if (needcopy) {
-            memmove(&CanData.receive_buf[copied]
-                    , &CanData.receive_buf[copied + len], needcopy - copied);
-            copied = needcopy;
-            canserial_notify_rx();
-        }
-        irqstatus_t flag = irq_save();
-        if (rpos != readb(&CanData.receive_pos)) {
-            // Raced with irq handler - retry
-            irq_restore(flag);
-            continue;
-        }
-        CanData.receive_pos = needcopy;
-        irq_restore(flag);
-        break;
+    irqstatus_t flag = irq_save();
+    uint_fast8_t now = readb(&CanData.receive_pos);
+    if (now == consumed) {
+        CanData.receive_pos = 0;
+    } else {
+        uint_fast8_t tail = now - consumed;
+        memmove(CanData.receive_buf, &CanData.receive_buf[consumed], tail);
+        CanData.receive_pos = tail;
     }
+    irq_restore(flag);
 }
 
 // Task to process incoming commands and admin messages
@@ -318,16 +330,9 @@ canserial_rx_task(void)
         CanData.admin_pull_pos = pullp + 1;
     }
 
-    // Check for a complete message block and process it
-    uint_fast8_t rpos = readb(&CanData.receive_pos), pop_count;
-    int ret = command_find_block(CanData.receive_buf, rpos, &pop_count);
-    if (ret > 0)
-        command_dispatch(CanData.receive_buf, pop_count);
-    if (ret) {
-        console_pop_input(pop_count);
-        if (ret > 0)
-            command_send_ack();
-    }
+    uint_fast8_t rpos = readb(&CanData.receive_pos);
+    mcu_demux_pump(CanData.receive_buf, rpos);
+    rebase_receive_buf_against_rx_irq(rpos);
 }
 DECL_TASK(canserial_rx_task);
 

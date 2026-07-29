@@ -1,4 +1,6 @@
+pub mod byte_link;
 pub mod call_handle;
+pub mod can_link;
 pub mod events;
 pub mod identify;
 pub(crate) mod interceptor;
@@ -309,8 +311,46 @@ impl McuHostIo {
         mut port_box: Box<dyn serialport::SerialPort>,
         config: McuHostIoConfig,
     ) -> Result<Self, TransportError> {
-        let _ = port_box.set_timeout(Duration::from_millis(100));
-        let mut io = crate::host_io::serial_frame_io::SerialFrameIo::new(port_box);
+        let _ = serialport::SerialPort::set_timeout(&mut *port_box, Duration::from_millis(100));
+        Self::open_with_link(Box::new(port_box), config)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn open_canbus_with_config(
+        interface: &str,
+        uuid: u64,
+        mut config: McuHostIoConfig,
+    ) -> Result<Self, TransportError> {
+        config
+            .mcu_label
+            .get_or_insert_with(|| format!("{interface}:{uuid:012x}"));
+        let link =
+            crate::host_io::can_link::CanLink::open(interface, uuid, config.identify_timeout)
+                .map_err(|e| {
+                    TransportError::Io(std::io::Error::new(
+                        e.kind(),
+                        format!("canbus open({interface}, uuid={uuid:012x}): {e}"),
+                    ))
+                })?;
+        Self::open_with_link(Box::new(link), config)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn open_canbus_with_config(
+        interface: &str,
+        uuid: u64,
+        _config: McuHostIoConfig,
+    ) -> Result<Self, TransportError> {
+        Err(TransportError::Io(std::io::Error::other(format!(
+            "canbus transport requires SocketCAN (Linux); cannot open {interface} uuid={uuid:012x}"
+        ))))
+    }
+
+    pub fn open_with_link(
+        link: Box<dyn crate::host_io::byte_link::ByteLink>,
+        config: McuHostIoConfig,
+    ) -> Result<Self, TransportError> {
+        let mut io = crate::host_io::serial_frame_io::SerialFrameIo::new_boxed(link);
 
         let (parser_owned, raw_identify_bytes, identify_seq) =
             identify::identify_handshake(&mut io, config.identify_timeout)?;
