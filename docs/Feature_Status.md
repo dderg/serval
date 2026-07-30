@@ -57,21 +57,30 @@ Three tiers, honestly applied:
 - **No per-axis XY limits.** Global limits plus Z-only caps, nothing
   finer.
 - **Kinematics:** cartesian and corexy only.
-- **Boards: STM32 F4, G0, H7, and F1 (unproven).** `src/Kconfig` carries
+- **Boards: STM32 F4, G0, H7, and F1 (partial).** `src/Kconfig` carries
   those four families plus a Linux-process MCU and the host simulator.
   AVR, LPC176x, RP2040, SAMD, HC32 and the STM32 F0/F2/F7/L4/G4 families
   are absent, and since the MCU executes the trajectory there is no
   host-side workaround for an unsupported chip.
-- **The F103 target compiles and nothing more.** High-density F103 builds
-  and links (117 KB flash, ~11 KB left for klipper's C dynamic pool on a
-  48 KB RCT6), and the Rust runtime cross-compiles for Cortex-M3 soft
-  float. It has never been flashed, booted, homed, or printed with. The
-  family was originally dropped because no Rust staticlib was built for
-  its rustc target, not because of a hardware limit — but that limit is
-  now untested rather than disproven. Two structural caveats: TIM5 is
-  required, so medium-density F103 is out, and every F1 timer is 16 bit,
-  so the step-output deadline is chased in <=455 us hops instead of held
-  in one 32-bit compare.
+- **The F103 runs, but does not home reliably.** Bench-tested 2026-07-30
+  on an SKR Mini E3 v2.0 (STM32F103RCT6, 72 MHz, 48 KB SRAM) driving a
+  CoreXY Voron 0: the firmware boots, klippy connects (181 commands), the
+  motion engine binds all three lanes (`configure_axes ... kin=corexy
+  present=0x7 steps_per_mm=[320, 320, 1280]`), streamed moves execute, and
+  one sensorless `G28 X` completed against a TMC2209 StallGuard virtual
+  endstop. Repeated homing then aborts the motion pump with `piece in past
+  at send` (deficits around 1-2 ms) at both 1 and 2 kHz sample rates. The
+  suspected cost is klipper's bit-banged TMC UART: it drives one scheduler
+  timer per bit (25 us at 40000 baud) at the same NVIC priority as the
+  motion tick, and on a soft-float Cortex-M3 the two do not coexist during
+  a homing current switch. Treat the F103 as a bring-up target, not a
+  printing one.
+- **F103 structural caveats.** TIM5 is required, so medium-density F103 is
+  out. Every F1 timer is 16 bit, so the step-output deadline is chased in
+  <=455 us hops instead of held in one 32-bit compare. Flash is 117 KB of
+  256 KB; RAM is the tight one, leaving ~11 KB for klipper's C dynamic
+  pool. The board option `!PA14` is mandatory on the SKR Mini E3 v2.0 —
+  without it USB never enumerates and there is no way in.
 - **Config is not mainline-compatible.** `[kinematics]`, `[motor]`,
   `[axis]`, `[post_processor]` replace the classic sections. This is
   intentional. Migration guide:

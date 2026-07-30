@@ -22,8 +22,8 @@ the host simulator. `make menuconfig` offers exactly:
 - **STM32F4** — F401, F411, F405, F407, F427, F429, F446
 - **STM32G0** — G070, G071, G0B0, G0B1
 - **STM32H7** — H723, H743, H750
-- **STM32F1** — F103, high-density parts only (xC/xD/xE). Builds, but has
-  never been run on hardware — see the caveats below.
+- **STM32F1** — F103, high-density parts only (xC/xD/xE). Boots and moves
+  on hardware, but does not home reliably — see the caveats below.
 
 Everything else mainline supports is absent from `src/Kconfig` on this
 branch: AVR, LPC176x, RP2040, SAMD, HC32, and the STM32 F0/F2/F7/L4/G4
@@ -37,14 +37,22 @@ your board's chip before spending time on the rest of this page.
 
 #### If your board is an F103
 
-The F103 target is new and **unproven on silicon**: it compiles and links,
-and nothing beyond that has been demonstrated. It exists because the
-family was originally dropped for a build-system reason (no Rust staticlib
-for Cortex-M3), not a hardware verdict. Treat it as a bring-up, and expect
-to be the one finding the problems.
+The F103 target is new and only partly proven. It was bench-brought-up on
+2026-07-30 against an SKR Mini E3 v2.0 driving a CoreXY Voron 0: the
+firmware boots, klippy connects, the motion engine binds all three lanes,
+streamed moves execute, and one sensorless `G28 X` succeeded. Repeated
+homing then aborts the motion pump. Treat it as a bring-up target and
+expect to find problems.
 
 What is known:
 
+- **`!PA14` is mandatory on the SKR Mini E3 v2.0.** Select "Enable extra
+  low-level configuration options" and set "GPIO pins to set at
+  micro-controller startup" to `!PA14`, exactly as the stock Klipper
+  config for that board instructs. That pin gates USB: without it the
+  board never enumerates, gives the host no logging whatsoever, and can
+  only be recovered with a physical reset into the bootloader. Start from
+  your board's stock config rather than writing one from the pinout.
 - The part must be high-density (F103xC/xD/xE, e.g. the STM32F103RCT6 on
   an SKR Mini E3 v2). The motion tick needs TIM5, which medium-density
   F103s do not have.
@@ -52,11 +60,12 @@ What is known:
   lands at 117 KB of flash but leaves only ~11 KB for klipper's C dynamic
   pool. A large configuration can exhaust it — that failure is loud, at
   config time.
-- The default sample rate is 2 kHz, which is a 36000-cycle budget per
-  sample at 72 MHz. That is more generous than the STM32G0B1's, on a
-  faster core, and the G0 manages one streamed axis comfortably and faults
-  on three ([Feature_Status](Feature_Status.md)). Do not assume four axes
-  fit.
+- **Homing is the known failure.** Klipper bit-bangs the TMC UART with one
+  scheduler timer per bit (25 us at 40000 baud) at the same NVIC priority
+  as the motion tick. On a soft-float Cortex-M3 the two do not coexist
+  during a homing current switch, and the motion pump aborts with `piece
+  in past at send`, 1-2 ms late. Neither halving the sample rate to 1 kHz
+  nor halving the UART baud fixed it.
 - Every F1 timer is 16 bit, so the step-output compare cannot hold a
   32-bit deadline. It chases far-future targets in hops of at most 455 us,
   which costs interrupts a 32-bit timer would not.

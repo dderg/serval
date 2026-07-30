@@ -401,6 +401,13 @@ DECL_CONSTANT_STR("RESERVE_PINS_USB", "PA11,PA12");
 void
 usb_init(void)
 {
+    if (CONFIG_MACH_STM32F1) {
+        // Pull the D+ pin low briefly to signal a new connection
+        gpio_out_setup(GPIO('A', 12), 0);
+        udelay(5000);
+        gpio_in_setup(GPIO('A', 12), 0);
+    }
+
     // Enable USB clock
     enable_pclock(USB_BASE);
 
@@ -411,13 +418,6 @@ usb_init(void)
 #ifdef USB_BCDR_DPPU
     USB->BCDR = USB_BCDR_DPPU;
 #endif
-
-    if (CONFIG_MACH_STM32F1) {
-        // Pull the D+ pin low briefly to signal a new connection
-        gpio_out_setup(GPIO('A', 12), 0);
-        udelay(5000);
-        gpio_in_setup(GPIO('A', 12), 0);
-    }
 
     // Reset usb controller and enable interrupts
     USB->CNTR = USB_CNTR_FRES;

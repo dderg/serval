@@ -99,6 +99,7 @@ usb-src-$(CONFIG_HAVE_STM32_USBOTG) := stm32/usbotg.c
 src-$(CONFIG_USBSERIAL) += $(usb-src-y) stm32/chipid.c generic/usb_cdc.c
 
 canbus-src-y := generic/canserial.c ../lib/fast-hash/fasthash.c
+
 canbus-src-$(CONFIG_HAVE_STM32_CANBUS) += stm32/can.c
 canbus-src-$(CONFIG_HAVE_STM32_FDCANBUS) += stm32/fdcan.c
 src-$(CONFIG_CANSERIAL) += $(canbus-src-y) generic/canbus.c stm32/chipid.c
@@ -108,6 +109,16 @@ src-$(CONFIG_WANT_HARD_PWM) += stm32/hard_pwm.c
 
 sdio-src-y := stm32/sdio.c
 src-$(CONFIG_HAVE_GPIO_SDIO) += $(sdio-src-y)
+
+# Link runtime_tick.c last on F1 so runtime_init() runs after timer_init()
+# and usb_init(). DECL_INIT order is link order, and the motion runtime
+# otherwise initialises first: it reads DWT->CYCCNT (via timer_read_time)
+# before timer_init() sets DEMCR.TRCENA, and any hang there trips the
+# ~410 ms IWDG before usb_init() ever pulls D+ up — leaving a board with no
+# comms to diagnose through, recoverable only by a physical reset button.
+ifeq ($(CONFIG_MACH_STM32F1),y)
+src-y := $(filter-out runtime_tick.c,$(src-y)) runtime_tick.c
+endif
 
 # Binary output file rules
 target-y += $(OUT)klipper.bin

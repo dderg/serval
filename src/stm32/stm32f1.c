@@ -279,5 +279,15 @@ armcm_main(void)
     stm32f1_alternative_remap(AFIO_MAPR_SWJ_CFG_Msk,
                               AFIO_MAPR_SWJ_CFG_JTAGDISABLE);
 
+    // Enable the DWT cycle counter before anything can read it. On
+    // Cortex-M4/M7 an unclocked DWT read merely returns zero, but on
+    // Cortex-M3 the unit is dark until DEMCR.TRCENA is set and the read
+    // faults. timer_read_time() dereferences DWT->CYCCNT directly, and
+    // runtime_init() (which calls it) is linked ahead of timer_init(),
+    // where TRCENA would otherwise first be set.
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
     sched_main();
 }
