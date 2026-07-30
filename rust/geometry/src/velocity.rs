@@ -645,4 +645,7 @@ fn validate_segment<P: CurvatureProfile>(
 }
 
 #[cfg(test)]
+mod jerk_audit_tests;
+
+#[cfg(test)]
 mod tests;
