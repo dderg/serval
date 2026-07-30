@@ -57,6 +57,12 @@ Three tiers, honestly applied:
 - **No per-axis XY limits.** Global limits plus Z-only caps, nothing
   finer.
 - **Kinematics:** cartesian and corexy only.
+- **Boards: STM32 F4, G0 and H7 only.** `src/Kconfig` carries those three
+  families plus a Linux-process MCU and the host simulator. AVR, LPC176x,
+  RP2040, SAMD, HC32 and the STM32 F0/F1/F7/L4/G4 families are gone, so a
+  board such as the STM32F103-based SKR Mini E3 v2 cannot run this branch
+  at all — the MCU executes the trajectory, so there is no host-side
+  workaround.
 - **Config is not mainline-compatible.** `[kinematics]`, `[motor]`,
   `[axis]`, `[post_processor]` replace the classic sections. This is
   intentional. Migration guide:

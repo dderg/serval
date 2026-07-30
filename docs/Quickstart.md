@@ -14,6 +14,28 @@ Klipper update:
 
 ## 1. Prerequisites
 
+### Check your board first
+
+The firmware only builds for three STM32 families, plus a Linux-process
+MCU and the host simulator. `make menuconfig` offers exactly:
+
+- **STM32F4** — F401, F411, F405, F407, F427, F429, F446
+- **STM32G0** — G070, G071, G0B0, G0B1
+- **STM32H7** — H723, H743, H750
+
+Everything else mainline supports is absent from `src/Kconfig` on this
+branch: AVR, LPC176x, RP2040, SAMD, HC32, and the STM32 F0/F1/F7/L4/G4
+families. Each family needs its own motion-ISR tick path in the firmware
+(`src/stm32/runtime_tick_*.c`), and those three are the ones that exist.
+
+This is a hard gate, not a rough edge. The MCU executes the trajectory,
+so an unsupported chip cannot be worked around from the host side. A
+popular example: the SKR Mini E3 v2 is an STM32F103, so a printer built
+around one cannot run this branch until the board is replaced. Look up
+your board's chip before spending time on the rest of this page.
+
+### On the host
+
 - A working Klipper or Kalico installation (`~/klipper`, klippy virtualenv,
   your web stack of choice).
 - The Rust toolchain manager, [rustup](https://rustup.rs/):
