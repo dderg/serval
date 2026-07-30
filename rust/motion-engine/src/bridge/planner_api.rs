@@ -144,7 +144,7 @@ impl PyMotionEngine {
                 }
             };
             let pos = self.commanded_pos.lock_ok().0;
-            let (max_v, max_a, corner_deviation, jerk) = {
+            let (max_v, max_a, corner_deviation, jerk, corner_accel) = {
                 let cfg = self.planner_config.lock_ok();
                 let (mut v, mut a) = cfg.cartesian.for_move(dx, dy, dz);
                 if let Some(rv) = cfg.runtime_caps.velocity {
@@ -157,9 +157,18 @@ impl PyMotionEngine {
                     .runtime_caps
                     .jerk_override
                     .unwrap_or(cfg.cartesian.max_jerk);
-                (v, a, cfg.corner_deviation(), j)
+                (
+                    v,
+                    a,
+                    cfg.corner_deviation(),
+                    j,
+                    cfg.cartesian.max_corner_accel,
+                )
             };
             let limits = geometry::VelocityLimits::try_new(max_v, max_a, corner_deviation, jerk)
+                // A runtime accel cap lowers the straights; the corner keeps its
+                // own limit, which is what holds its trajectory fixed.
+                .map(|l| l.with_corner_accel(corner_accel))
                 .map_err(PyRuntimeError::new_err)?;
             let line_no = self.move_seq.fetch_add(1, Ordering::Relaxed) as u32;
             let m = classify::build_move(

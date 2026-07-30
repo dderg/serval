@@ -322,6 +322,7 @@ class Motion:
                     corner_deviation, accel
                 ),
                 "corner_deviation": corner_deviation,
+                "max_corner_accel": self._max_corner_accel,
             }
         )
         return res
@@ -735,6 +736,7 @@ class Motion:
                 self.max_z_velocity,
                 self.max_z_accel,
                 self._corner_deviation,
+                self._max_corner_accel,
             ),
             self.axis_sections,
             self.kinematics_decl,

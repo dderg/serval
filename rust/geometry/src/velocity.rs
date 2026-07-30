@@ -259,6 +259,14 @@ fn build_move_caps(
                 let (kappa_start, _) = seg.kappa_endpoints();
                 let sigma = seg.dkappa_ds(0.0);
                 let (_, kappa_peak) = seg.kappa_peak();
+                // A corner's apex speed is `√(a/κ)`, so the acceleration spent
+                // on curved geometry is what fixes the trajectory through it.
+                // Capping it here leaves the straights the full budget: raising
+                // `accel` then buys shorter ramps without ever speeding a corner
+                // up, which is the whole point of having the two limits differ.
+                if kappa_peak > 0.0 {
+                    accel = accel.min(m.limits.corner_accel_mm_s2);
+                }
                 (length, kappa_start, sigma, kappa_peak)
             }
             None => {

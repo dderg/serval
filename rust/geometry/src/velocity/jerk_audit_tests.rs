@@ -13,6 +13,7 @@ const VECTOR_JERK_REL_TOL: f64 = 1e-2;
 struct Machine {
     feed: f64,
     accel: f64,
+    corner_accel: f64,
     deviation: f64,
     jerk: f64,
 }
@@ -22,6 +23,7 @@ impl Machine {
         Self {
             feed: 300.0,
             accel: 60_000.0,
+            corner_accel: f64::INFINITY,
             deviation: 0.05,
             jerk: 1.5e8,
         }
@@ -29,6 +31,13 @@ impl Machine {
 
     fn accel(self, accel: f64) -> Self {
         Self { accel, ..self }
+    }
+
+    fn corner_accel(self, corner_accel: f64) -> Self {
+        Self {
+            corner_accel,
+            ..self
+        }
     }
 
     fn jerk(self, jerk: f64) -> Self {
@@ -40,7 +49,8 @@ impl Machine {
             extruder_axis: EXTRUDER_AXIS,
             feedrate_mm_s: self.feed,
             limits: VelocityLimits::try_new(self.feed, self.accel, self.deviation, self.jerk)
-                .unwrap(),
+                .unwrap()
+                .with_corner_accel(self.corner_accel),
             source: SourceRange {
                 start_line: line_no,
                 end_line: line_no,
@@ -409,5 +419,69 @@ fn blend_jerk_target() {
             );
         }
         prev = Some((accel, a.time_s));
+    }
+}
+
+/// Curved members' `(s, v, a)` samples, keyed by source line.
+fn curve_profiles(fitted: &FitOutcome, profile: &VelocityProfile) -> Vec<(u32, Vec<VelSample>)> {
+    fitted
+        .moves
+        .iter()
+        .zip(&profile.moves)
+        .filter(|(fit, _)| {
+            fit.segment
+                .spatial
+                .as_ref()
+                .is_some_and(|seg| !is_straight(seg))
+        })
+        .map(|(_, vel)| (vel.source.start_line, vel.samples.clone()))
+        .collect()
+}
+
+/// Raising `accel` while `corner_accel` stays put must leave every corner's
+/// trajectory exactly as it was and never lengthen the print: the extra budget
+/// goes to the straights' ramps, which is the only place it can go without
+/// speeding a corner up.
+#[test]
+fn corner_accel_pins_the_corner_trajectory_while_straights_speed_up() {
+    let pinned = 60_000.0;
+    let base = Machine::user().accel(pinned).corner_accel(pinned);
+    let (fit_ref, prof_ref) = plan_for(&square_perimeter(base, 30.0));
+    let reference = curve_profiles(&fit_ref, &prof_ref);
+    assert!(!reference.is_empty());
+
+    let mut previous = prof_ref.report.traversal_time_s;
+    for accel in [80_000.0, 100_000.0, 140_000.0, 200_000.0] {
+        let m = base.accel(accel).corner_accel(pinned);
+        let (fit, prof) = plan_for(&square_perimeter(m, 30.0));
+        let got = curve_profiles(&fit, &prof);
+        assert_eq!(
+            got.len(),
+            reference.len(),
+            "corner count changed at {accel}"
+        );
+        for ((line, want), (_, have)) in reference.iter().zip(&got) {
+            assert_eq!(
+                want.len(),
+                have.len(),
+                "line {line} sample count at {accel}"
+            );
+            for (w, h) in want.iter().zip(have) {
+                assert!(
+                    (w.s - h.s).abs() <= 1e-9 && (w.v - h.v).abs() <= 1e-6 * (1.0 + w.v),
+                    "line {line} corner trajectory moved at accel {accel}: \
+                     s={:.7} v {:.6} -> {:.6}",
+                    w.s,
+                    w.v,
+                    h.v
+                );
+            }
+        }
+        let time = prof.report.traversal_time_s;
+        assert!(
+            time <= previous * (1.0 + 1e-9),
+            "raising accel to {accel} lengthened the print: {previous:.6} -> {time:.6}"
+        );
+        previous = time;
     }
 }

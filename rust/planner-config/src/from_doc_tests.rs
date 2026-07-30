@@ -23,6 +23,7 @@ fn printer_defaults_match_motion_setup() {
     // Default scv = 5 -> deviation = scv^2 * (sqrt(2)-1) / accel.
     let expected = 25.0 * (std::f64::consts::SQRT_2 - 1.0) / 3000.0;
     assert!((c.corner_deviation - expected).abs() < 1e-15);
+    assert_eq!(c.max_corner_accel, 3000.0);
     assert_eq!(c.max_jerk, 6000.0);
     assert_eq!(c.max_z_velocity, 300.0);
     assert_eq!(c.max_z_accel, 3000.0);
@@ -51,6 +52,16 @@ fn scv_converts_via_accel() {
     let s = settings("[printer]\nmax_velocity: 300\nmax_accel: 2000\nsquare_corner_velocity: 8\n");
     let expected = 64.0 * (std::f64::consts::SQRT_2 - 1.0) / 2000.0;
     assert!((s.cartesian.corner_deviation - expected).abs() < 1e-15);
+}
+
+#[test]
+fn max_corner_accel_is_read_and_must_not_exceed_accel() {
+    let s = settings("[printer]\nmax_velocity: 300\nmax_accel: 200000\nmax_corner_accel: 60000\n");
+    assert_eq!(s.cartesian.max_accel, 200_000.0);
+    assert_eq!(s.cartesian.max_corner_accel, 60_000.0);
+
+    let err = read_err("[printer]\nmax_velocity: 300\nmax_accel: 3000\nmax_corner_accel: 9000\n");
+    assert!(err.contains("max_corner_accel"), "{err}");
 }
 
 #[test]

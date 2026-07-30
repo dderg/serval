@@ -12,6 +12,14 @@ max_velocity: 300
 #   Required. Must be above 0. Cartesian velocity limit in mm/s.
 max_accel: 3000
 #   Required. Must be above 0. Cartesian acceleration limit in mm/s^2.
+#max_corner_accel: 3000
+#   Optional. Default is max_accel, and must not exceed it. The
+#   acceleration the planner may spend on curved geometry — corner
+#   blends and arcs. A corner's apex speed is sqrt(a / curvature), so
+#   this is what fixes the trajectory through a corner: leave it at the
+#   highest acceleration that prints ringing-free, then raise max_accel
+#   for the straights. Every corner then keeps the shape it had at
+#   max_corner_accel while the straights get shorter ramps.
 #max_jerk: 6000
 #   Optional. Default is max_accel * 2. Must be >= 0. A value of 0
 #   is converted to an unlimited jerk value.

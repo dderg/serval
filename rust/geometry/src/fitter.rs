@@ -34,7 +34,7 @@ pub(crate) const TURN_NORMAL_EPS: f64 = 1e-9;
 fn worst_case_speed(seg: &impl CurvatureProfile, feedrate: f64, limits: VelocityLimits) -> f64 {
     let (_, kappa_peak) = seg.kappa_peak();
     let curvature_cap = if kappa_peak > 0.0 {
-        (limits.accel_mm_s2 / kappa_peak).sqrt()
+        (limits.corner_accel_mm_s2 / kappa_peak).sqrt()
     } else {
         f64::INFINITY
     };
@@ -496,6 +496,7 @@ fn consumption_limits(
         .reduce(|a, b| VelocityLimits {
             max_velocity_mm_s: a.max_velocity_mm_s.min(b.max_velocity_mm_s),
             accel_mm_s2: a.accel_mm_s2.min(b.accel_mm_s2),
+            corner_accel_mm_s2: a.corner_accel_mm_s2.min(b.corner_accel_mm_s2),
             corner_deviation_mm: a.corner_deviation_mm.min(b.corner_deviation_mm),
             max_jerk_mm_s3: a.max_jerk_mm_s3.min(b.max_jerk_mm_s3),
         })

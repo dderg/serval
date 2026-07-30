@@ -52,6 +52,7 @@ fn build_stream_config(cfg: &config::PlannerConfig) -> PyResult<motion_pipeline:
             cart.corner_deviation,
             cart.max_jerk,
         )
+        .map(|l| l.with_corner_accel(cart.max_corner_accel))
         .map_err(PyRuntimeError::new_err)?,
     })
 }

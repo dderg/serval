@@ -23,6 +23,14 @@ pub fn scv_from_corner_deviation(corner_deviation_mm: f64, accel_mm_s2: f64) -> 
 pub struct VelocityLimits {
     pub max_velocity_mm_s: f64,
     pub accel_mm_s2: f64,
+    /// The acceleration the planner may spend on *curved* geometry. A corner's
+    /// apex speed is `√(a/κ)`, so this — not the jerk limit — is what fixes the
+    /// trajectory through a blend: raising `accel_mm_s2` above it buys faster
+    /// straights while every corner keeps the shape it had at this value.
+    ///
+    /// [`Self::try_new`] leaves it equal to `accel_mm_s2`, which is the
+    /// pre-existing behaviour of one acceleration for everything.
+    pub corner_accel_mm_s2: f64,
     pub corner_deviation_mm: f64,
     pub max_jerk_mm_s3: f64,
 }
@@ -37,11 +45,18 @@ impl VelocityLimits {
         let limits = Self {
             max_velocity_mm_s,
             accel_mm_s2,
+            corner_accel_mm_s2: accel_mm_s2,
             corner_deviation_mm,
             max_jerk_mm_s3,
         };
         limits.check()?;
         Ok(limits)
+    }
+
+    #[must_use]
+    pub fn with_corner_accel(mut self, corner_accel_mm_s2: f64) -> Self {
+        self.corner_accel_mm_s2 = corner_accel_mm_s2.min(self.accel_mm_s2);
+        self
     }
 
     fn check(&self) -> Result<(), &'static str> {
@@ -50,6 +65,12 @@ impl VelocityLimits {
         }
         if !(self.accel_mm_s2.is_finite() && self.accel_mm_s2 > 0.0) {
             return Err("accel must be finite and positive");
+        }
+        if !(self.corner_accel_mm_s2.is_finite() && self.corner_accel_mm_s2 > 0.0) {
+            return Err("corner_accel must be finite and positive");
+        }
+        if self.corner_accel_mm_s2 > self.accel_mm_s2 {
+            return Err("corner_accel must not exceed accel");
         }
         if !(self.corner_deviation_mm.is_finite() && self.corner_deviation_mm >= 0.0) {
             return Err("corner_deviation must be finite and non-negative");

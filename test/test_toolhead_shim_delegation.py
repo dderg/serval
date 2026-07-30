@@ -27,6 +27,7 @@ def toolhead_fixture():
     motion._max_accel = 3000.0
     motion.min_cruise_ratio = 0.0
     motion._corner_deviation = 0.0034517796864424596
+    motion._max_corner_accel = 3000.0
     motion._planner_ready = False
 
     printer.add_object("motion", motion)

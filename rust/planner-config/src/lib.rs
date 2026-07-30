@@ -436,6 +436,9 @@ pub struct RuntimeCaps {
 pub struct CartesianLimits {
     pub max_velocity: f64,
     pub max_accel: f64,
+    /// Acceleration the planner may spend on curved geometry. Never above
+    /// `max_accel`; equal to it means one acceleration for everything.
+    pub max_corner_accel: f64,
     pub max_jerk: f64,
     pub max_z_velocity: f64,
     pub max_z_accel: f64,
@@ -447,6 +450,7 @@ impl Default for CartesianLimits {
         Self {
             max_velocity: 300.0,
             max_accel: 3000.0,
+            max_corner_accel: 3000.0,
             max_jerk: 100_000.0,
             max_z_velocity: 15.0,
             max_z_accel: 100.0,
@@ -463,10 +467,14 @@ impl CartesianLimits {
         let ok = |c: f64| c.is_finite() && c > 0.0;
         if !(ok(self.max_velocity)
             && ok(self.max_accel)
+            && ok(self.max_corner_accel)
             && ok(self.max_z_velocity)
             && ok(self.max_z_accel))
         {
             return Err("[printer] motion limits must be finite and positive");
+        }
+        if self.max_corner_accel > self.max_accel {
+            return Err("[printer] max_corner_accel must not exceed max_accel");
         }
         if !(self.max_jerk > 0.0) {
             return Err("[printer] max_jerk must be positive (infinity disables jerk limiting)");

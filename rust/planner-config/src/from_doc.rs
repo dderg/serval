@@ -365,6 +365,16 @@ impl Reader<'_> {
             f64::INFINITY
         };
 
+        // Curved geometry gets its own acceleration: a corner's apex speed is
+        // `√(a/κ)`, so this is what fixes the trajectory through a blend.
+        // Defaulting it to `max_accel` keeps one acceleration for everything.
+        let max_corner_accel = self.getfloat_or(
+            "printer",
+            "max_corner_accel",
+            max_accel,
+            Bounds::above(0.0).max(max_accel),
+        )?;
+
         let max_z_velocity = self.getfloat_or(
             "printer",
             "max_z_velocity",
@@ -390,6 +400,7 @@ impl Reader<'_> {
             CartesianLimits {
                 max_velocity,
                 max_accel,
+                max_corner_accel,
                 max_jerk,
                 max_z_velocity,
                 max_z_accel,
