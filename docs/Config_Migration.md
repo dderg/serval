@@ -252,8 +252,49 @@ they belong to.
 | `max_x_velocity`, `max_y_velocity`, and other old per-axis velocity limits | **No equivalent.** The fork exposes global velocity/acceleration plus Z-only caps, not independent X/Y limits. |
 | legacy `[servo_x]`, `[servo_y]`, `[servo_z]` | **No direct section alias.** Declare a `[motor <name>]` with `drive: servo` and bind it in `[kinematics]`. |
 | `[firmware_retraction]` | **No equivalent in the motion model;** the section is rejected. |
+| `[gcode_arcs]` | **Rejected.** The motion engine has no native G2/G3 ingestion yet; slice with arcs disabled so the slicer emits G1 segments. |
+| `[resonance_tester] sweeping_period`, `sweeping_accel` | **No equivalent.** Kalico's sweeping vibration test is not here; the rest of the section (`accel_per_hz`, `hz_per_sec`, `min_freq`, `max_freq`, `max_smoothing`, `probe_points`, `accel_chip*`) is unchanged. |
 
 Unknown options normally fail validation: with the default `error_on_unused_config_options: True`, an option not consumed by a registered object errors as an invalid option. The explicitly rejected motion sections/options above fail earlier with a specific error.
+
+## Sections that no longer exist
+
+Beyond the motion model, a set of klippy extras is absent from this
+branch, so their sections stop resolving with `Section '<name>' is not a
+valid config section`. Some were deleted with the old planner, others
+were simply never carried across:
+
+| Section | Note |
+|---|---|
+| `[input_shaper]` | Replaced by `[post_processor]` chains (see above). |
+| `[extruder_smoother]` | Replaced by a `smooth_triangle` post-processor. |
+| `[ringing_test]`, `[pa_test]` | Kalico's calibration-pattern generators. The `RINGING_TEST` / `PA_TEST` commands go with them, so macros that call them break too. |
+| `[manual_stepper]` | Drives a stepper outside the kinematic model, which the motor/axis split has no room for. Mods that depend on it (filament changers, nozzle wipers, `[trad_rack]`) do not load. |
+| `[endstop_phase]` | Incompatible with the new stepper model. |
+| `[pwm_tool]` | Not carried. |
+| `[load_cell]`, `[hx71x]`, `[ads1220]` | Load-cell family, not carried. |
+| `[probe_eddy_current]`, `[ldc1612]` | Eddy-current probing, deleted with the old CAN connect path. |
+
+A configuration that includes any of these has to drop the section
+before klippy will finish parsing. Check your `[include]` files, not just
+`printer.cfg` — on a typical Voron tree these live in separate
+calibration includes.
+
+## The SAVE_CONFIG block
+
+The autosave block at the end of `printer.cfg` is config like any other,
+so it is parsed and rejected on the same rules. A calibrated printer
+usually carries at least these:
+
+```ini
+#*# [stepper_z]
+#*# position_endstop = 116.100
+```
+
+Move that value into `[axis z] position_endstop` by hand and delete the
+stanza; the same goes for a saved `[input_shaper]` result, which becomes
+the `frequency_hz` of a shaping post-processor. Saved heater PID and MPC
+stanzas are untouched by the migration and can stay exactly as they are.
 
 ## Pressure advance
 

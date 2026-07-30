@@ -38,19 +38,25 @@ your board's chip before spending time on the rest of this page.
 
 - A working Klipper or Kalico installation (`~/klipper`, klippy virtualenv,
   your web stack of choice).
+- Native build dependencies. On a fresh image the package index is stale,
+  so update first or the install 404s:
+
+  ```bash
+  sudo apt update
+  sudo apt install pkg-config libudev-dev
+  ```
 - The Rust toolchain manager, [rustup](https://rustup.rs/):
 
   ```bash
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  source "$HOME/.cargo/env"
   ```
 
   The build uses the toolchain pinned in `rust/rust-toolchain.toml`
-  (1.85.0); rustup fetches it automatically on first build.
-- Native build dependencies:
-
-  ```bash
-  sudo apt install pkg-config libudev-dev
-  ```
+  (1.85.0); rustup fetches it automatically on first build. The `source`
+  line matters in the shell you install from — the build calls `cargo`
+  straight off `PATH`, and a fresh rustup install only lands there in
+  later shells.
 
 ## 2. Add the remote and switch branches
 
@@ -75,6 +81,29 @@ This produces `klippy/_config_doc.so`, `klippy/_motion_engine.so`, and
 `klippy/_shaper_ident.so`. Klippy refuses to start without them — a plain
 `git checkout` is never enough after Rust sources change; rerun the script
 when you pull updates.
+
+### On a 1 GB host, cap the build parallelism
+
+Cargo builds one job per core by default. Four concurrent `rustc`
+processes do not fit in 1 GB, and the kernel kills one partway through:
+
+```
+error: could not compile `shaper-ident` (lib)
+Caused by:
+  process didn't exit successfully: `.../rustc ...` (signal: 9, SIGKILL)
+```
+
+That signal 9 is the OOM killer, not a compiler bug — `dmesg` shows
+`Out of memory: Killed process ... (rustc)`. Serialise the build instead:
+
+```bash
+CARGO_BUILD_JOBS=1 ./scripts/build-native.sh
+```
+
+Verified on a 1 GB Raspberry Pi 4 running MainsailOS: the default build
+was OOM-killed after 12 minutes, and `CARGO_BUILD_JOBS=1` completed. Use
+`2` if the host has 2 GB. The three artifacts total about 130 MB on disk,
+most of it debug info that is never mapped into klippy's memory.
 
 ## 4. Rebuild and flash the MCU firmware
 
