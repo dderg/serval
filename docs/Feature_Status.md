@@ -57,12 +57,21 @@ Three tiers, honestly applied:
 - **No per-axis XY limits.** Global limits plus Z-only caps, nothing
   finer.
 - **Kinematics:** cartesian and corexy only.
-- **Boards: STM32 F4, G0 and H7 only.** `src/Kconfig` carries those three
-  families plus a Linux-process MCU and the host simulator. AVR, LPC176x,
-  RP2040, SAMD, HC32 and the STM32 F0/F1/F7/L4/G4 families are gone, so a
-  board such as the STM32F103-based SKR Mini E3 v2 cannot run this branch
-  at all — the MCU executes the trajectory, so there is no host-side
-  workaround.
+- **Boards: STM32 F4, G0, H7, and F1 (unproven).** `src/Kconfig` carries
+  those four families plus a Linux-process MCU and the host simulator.
+  AVR, LPC176x, RP2040, SAMD, HC32 and the STM32 F0/F2/F7/L4/G4 families
+  are absent, and since the MCU executes the trajectory there is no
+  host-side workaround for an unsupported chip.
+- **The F103 target compiles and nothing more.** High-density F103 builds
+  and links (117 KB flash, ~11 KB left for klipper's C dynamic pool on a
+  48 KB RCT6), and the Rust runtime cross-compiles for Cortex-M3 soft
+  float. It has never been flashed, booted, homed, or printed with. The
+  family was originally dropped because no Rust staticlib was built for
+  its rustc target, not because of a hardware limit — but that limit is
+  now untested rather than disproven. Two structural caveats: TIM5 is
+  required, so medium-density F103 is out, and every F1 timer is 16 bit,
+  so the step-output deadline is chased in <=455 us hops instead of held
+  in one 32-bit compare.
 - **Config is not mainline-compatible.** `[kinematics]`, `[motor]`,
   `[axis]`, `[post_processor]` replace the classic sections. This is
   intentional. Migration guide:

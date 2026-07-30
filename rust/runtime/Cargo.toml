@@ -39,6 +39,7 @@ host = []
 mcu-h7 = []
 mcu-f4 = []
 mcu-g0 = []
+mcu-f1 = []
 # Marker feature for real Linux-MCU firmware builds (MACH_LINUX without
 # CONFIG_MCU_SIM).  Implies `host` (f64 numeric profile) and additionally
 # signals that the build links the C step/SPI symbols from

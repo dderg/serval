@@ -10,7 +10,7 @@ config STM32_SELECT
     select HAVE_GPIO_I2C
     select HAVE_GPIO_SPI
     select HAVE_GPIO_SDIO if MACH_STM32F4
-    select HAVE_GPIO_HARD_PWM if MACH_STM32F4 || MACH_STM32G0 || MACH_STM32H7
+    select HAVE_GPIO_HARD_PWM if MACH_STM32F1 || MACH_STM32F4 || MACH_STM32G0 || MACH_STM32H7
     select HAVE_STRICT_TIMING
     select HAVE_CHIPID
     select HAVE_BOOTLOADER_REQUEST
@@ -27,6 +27,9 @@ config BOARD_DIRECTORY
 
 choice
     prompt "Processor model"
+    config MACH_STM32F103
+        bool "STM32F103"
+        select MACH_STM32F1
     config MACH_STM32F401
         bool "STM32F401"
         select MACH_STM32F4
@@ -79,6 +82,8 @@ choice
         select MACH_STM32H7
 endchoice
 
+config MACH_STM32F1
+    bool
 config MACH_STM32F4
     bool
 config MACH_STM32G0
@@ -94,12 +99,13 @@ config MACH_STM32F4x5 # F405, F407, F427, F429 series
 config HAVE_STM32_USBFS
     bool
     default y if MACH_STM32G0Bx
+    default y if MACH_STM32F1 && !STM32_CLOCK_REF_INTERNAL
 config HAVE_STM32_USBOTG
     bool
     default y if MACH_STM32F4 || MACH_STM32H7
 config HAVE_STM32_CANBUS
     bool
-    default y if MACH_STM32F4x5 || MACH_STM32F446
+    default y if MACH_STM32F1 || MACH_STM32F4x5 || MACH_STM32F446
 config HAVE_STM32_FDCANBUS
     bool
     select HAVE_CANFD
@@ -108,10 +114,12 @@ config HAVE_STM32_USBCANBUS
     bool
     depends on HAVE_STM32_USBFS || HAVE_STM32_USBOTG
     depends on HAVE_STM32_CANBUS || HAVE_STM32_FDCANBUS
+    depends on !MACH_STM32F1
     default y
 
 config MCU
     string
+    default "stm32f103xe" if MACH_STM32F103
     default "stm32f401xc" if MACH_STM32F401
     default "stm32f411xe" if MACH_STM32F411
     default "stm32f405xx" if MACH_STM32F405
@@ -129,6 +137,8 @@ config MCU
 
 config CLOCK_FREQ
     int
+    default 64000000 if MACH_STM32F103 && STM32_CLOCK_REF_INTERNAL
+    default 72000000 if MACH_STM32F103
     default 84000000 if MACH_STM32F401
     default 96000000 if MACH_STM32F411
     default 168000000 if MACH_STM32F4x5
@@ -139,6 +149,7 @@ config CLOCK_FREQ
 
 config FLASH_SIZE
     hex
+    default 0x40000 if MACH_STM32F103 # stm32f103xc high-density (256KiB)
     default 0x40000 if MACH_STM32F401 || MACH_STM32H723
     default 0x80000 if MACH_STM32F4x5 || MACH_STM32F446 || MACH_STM32F411
     default 0x20000 if MACH_STM32G0
@@ -155,6 +166,7 @@ config RAM_START
 
 config RAM_SIZE
     hex
+    default 0xc000 if MACH_STM32F103 # stm32f103xc high-density (48KiB)
     default 0x10000 if MACH_STM32F401
     default 0x20000 if MACH_STM32F411
     default 0x20000 if MACH_STM32F4x5 || MACH_STM32F446
@@ -187,17 +199,29 @@ config STM32_DFU_ROM_ADDRESS
 
 choice
     prompt "Bootloader offset"
+    config STM32_FLASH_START_800
+        bool "2KiB bootloader" if MACH_STM32F103
+    config STM32_FLASH_START_1000
+        bool "4KiB bootloader" if MACH_STM32F1
     config STM32_FLASH_START_2000
-        bool "8KiB bootloader" if MACH_STM32G0
+        bool "8KiB bootloader" if MACH_STM32F1 || MACH_STM32G0
+    config STM32_FLASH_START_5000
+        bool "20KiB bootloader" if MACH_STM32F103
+    config STM32_FLASH_START_7000
+        bool "28KiB bootloader" if MACH_STM32F1
     config STM32_FLASH_START_8000
-        bool "32KiB bootloader" if MACH_STM32F4
+        bool "32KiB bootloader" if MACH_STM32F1 || MACH_STM32F4
+    config STM32_FLASH_START_8800
+        bool "34KiB bootloader" if MACH_STM32F103
+    config STM32_FLASH_START_9000
+        bool "36KiB bootloader" if MACH_STM32F1
     config STM32_FLASH_START_C000
         bool "48KiB bootloader" if MACH_STM32F4x5 || MACH_STM32F401 || MACH_STM32F411
     config STM32_FLASH_START_10000
-        bool "64KiB bootloader" if MACH_STM32F4
+        bool "64KiB bootloader" if MACH_STM32F103 || MACH_STM32F4
 
     config STM32_FLASH_START_4000
-        bool "16KiB bootloader" if MACH_STM32F401 || MACH_STM32F4x5 || MACH_STM32F411
+        bool "16KiB bootloader" if MACH_STM32F103 || MACH_STM32F401 || MACH_STM32F4x5 || MACH_STM32F411
     config STM32_FLASH_START_20000
         bool "128KiB bootloader" if MACH_STM32H743 || MACH_STM32H723
     config STM32_FLASH_START_20200
@@ -208,9 +232,15 @@ choice
 endchoice
 config FLASH_APPLICATION_ADDRESS
     hex
+    default 0x8000800 if STM32_FLASH_START_800
+    default 0x8001000 if STM32_FLASH_START_1000
     default 0x8002000 if STM32_FLASH_START_2000
     default 0x8004000 if STM32_FLASH_START_4000
+    default 0x8005000 if STM32_FLASH_START_5000
+    default 0x8007000 if STM32_FLASH_START_7000
     default 0x8008000 if STM32_FLASH_START_8000
+    default 0x8008800 if STM32_FLASH_START_8800
+    default 0x8009000 if STM32_FLASH_START_9000
     default 0x800C000 if STM32_FLASH_START_C000
     default 0x8010000 if STM32_FLASH_START_10000
     default 0x8020000 if STM32_FLASH_START_20000

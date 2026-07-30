@@ -4,7 +4,7 @@
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
-#include "autoconf.h" // CONFIG_MACH_STM32F4
+#include "autoconf.h" // CONFIG_MACH_STM32F1
 #include "board/misc.h" // timer_is_before
 #include "command.h" // shutdown
 #include "gpio.h" // i2c_setup
@@ -51,6 +51,20 @@ static const struct i2c_info i2c_bus[] = {
 #endif
 };
 
+// Work around stm32 errata causing busy bit to be stuck
+static void
+i2c_busy_errata(uint8_t scl_pin, uint8_t sda_pin)
+{
+    if (! CONFIG_MACH_STM32F1)
+        return;
+    gpio_peripheral(scl_pin, GPIO_OUTPUT | GPIO_OPEN_DRAIN, 1);
+    gpio_peripheral(sda_pin, GPIO_OUTPUT | GPIO_OPEN_DRAIN, 1);
+    gpio_peripheral(sda_pin, GPIO_OUTPUT | GPIO_OPEN_DRAIN, -1);
+    gpio_peripheral(scl_pin, GPIO_OUTPUT | GPIO_OPEN_DRAIN, -1);
+    gpio_peripheral(scl_pin, GPIO_OUTPUT | GPIO_OPEN_DRAIN, 1);
+    gpio_peripheral(sda_pin, GPIO_OUTPUT | GPIO_OPEN_DRAIN, 1);
+}
+
 struct i2c_config
 i2c_setup(uint32_t bus, uint32_t rate, uint8_t addr)
 {
@@ -63,6 +77,7 @@ i2c_setup(uint32_t bus, uint32_t rate, uint8_t addr)
     if (!is_enabled_pclock((uint32_t)i2c)) {
         // Enable i2c clock and gpio
         enable_pclock((uint32_t)i2c);
+        i2c_busy_errata(ii->scl_pin, ii->sda_pin);
         gpio_peripheral(ii->scl_pin, GPIO_FUNCTION(4) | GPIO_OPEN_DRAIN, 1);
         gpio_peripheral(ii->sda_pin, GPIO_FUNCTION(4) | GPIO_OPEN_DRAIN, 1);
         i2c->CR1 = I2C_CR1_SWRST;
