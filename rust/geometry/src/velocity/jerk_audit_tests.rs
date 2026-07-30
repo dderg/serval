@@ -485,3 +485,22 @@ fn corner_accel_pins_the_corner_trajectory_while_straights_speed_up() {
         previous = time;
     }
 }
+
+#[test]
+fn extreme_corner_accel_still_plans_promptly() {
+    // A corner acceleration far below the straights' is an ordinary slow-corner
+    // config, not a new regime — but it is the one knob a user can wind to an
+    // extreme, so it gets a terminating-and-bounded check of its own.
+    for corner_accel in [60_000.0, 1_000.0, 50.0, 1.0] {
+        let m = Machine::user().accel(200_000.0).corner_accel(corner_accel);
+        let (fitted, profile) = plan_for(&square_perimeter(m, 30.0));
+        let phases: usize = profile.moves.iter().map(|v| v.phases.len()).sum();
+        let samples: usize = profile.moves.iter().map(|v| v.samples.len()).sum();
+        assert!(
+            phases < 100_000 && samples < 1_000_000,
+            "corner_accel {corner_accel}: profile blew up to {phases} phases / {samples} samples"
+        );
+        assert!(profile.report.traversal_time_s.is_finite());
+        let _ = fitted;
+    }
+}
