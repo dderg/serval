@@ -60,12 +60,15 @@ What is known:
   lands at 117 KB of flash but leaves only ~11 KB for klipper's C dynamic
   pool. A large configuration can exhaust it — that failure is loud, at
   config time.
-- **Homing is the known failure.** Klipper bit-bangs the TMC UART with one
-  scheduler timer per bit (25 us at 40000 baud) at the same NVIC priority
-  as the motion tick. On a soft-float Cortex-M3 the two do not coexist
-  during a homing current switch, and the motion pump aborts with `piece
-  in past at send`, 1-2 ms late. Neither halving the sample rate to 1 kHz
-  nor halving the UART baud fixed it.
+- **Homing is the known failure, and the budget is ~100 ms.** Streamed
+  moves get 2 s of scheduling lead, but homing drips with a 100 ms window
+  and the serial retry burst is sized at ~90 ms to fit inside it. One
+  scheduler hiccup on either side ends the move with `piece in past at
+  send`. On the bench a camera stream on a 1 GB Pi 4 was enough; so was a
+  quiet host with the F103's slower transport. Neither halving the sample
+  rate to 1 kHz nor halving the TMC UART baud fixed it. If you are
+  bringing up a slow board, expect to meet this before you meet anything
+  else.
 - Every F1 timer is 16 bit, so the step-output compare cannot hold a
   32-bit deadline. It chases far-future targets in hops of at most 455 us,
   which costs interrupts a 32-bit timer would not.
