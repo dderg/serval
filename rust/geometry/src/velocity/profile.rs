@@ -52,7 +52,7 @@ impl StraightPhase {
     /// integrand is the (non-negative) speed, so the root is unique and
     /// bracketed by `[0, dt]`; the bracket is halved until it collapses onto
     /// adjacent floats.
-    fn solve_tau(&self, ds: f64) -> f64 {
+    pub(super) fn solve_tau(&self, ds: f64) -> f64 {
         if ds <= 0.0 || self.dt <= 0.0 {
             return 0.0;
         }

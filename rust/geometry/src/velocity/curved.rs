@@ -1187,6 +1187,21 @@ fn band_edge_states(bands: &[Kinematics], entry: (f64, f64), exit: (f64, f64)) -
     edges
 }
 
+/// Band edge states for a composite whose bands are whole run members. The
+/// members' seams become interior nodes of one joint solve — the same forward
+/// and backward marches a member's own bands get — instead of states each seam
+/// has to guess before its successor is planned.
+pub(super) fn composite_edges(
+    bands: &[Kinematics],
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> Vec<(f64, f64)> {
+    for band in bands {
+        validate(band);
+    }
+    band_edge_states(bands, entry, exit)
+}
+
 /// Chain between two boundary states planned band by band, with the band edges
 /// carrying acceleration. Each band is the same `bounded_plan` a whole member
 /// gets, so nothing new is assumed about the physics — only the caps tighten.

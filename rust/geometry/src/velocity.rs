@@ -11,6 +11,7 @@ use crate::segment::SourceRange;
 
 mod certify;
 mod chain;
+mod compose;
 mod curved;
 mod disk;
 mod profile;
@@ -341,7 +342,6 @@ pub fn plan_velocity_stops(
     )?;
     check_entry_ceiling(moves, &caps, entry, tol)?;
     let mut plan = seed_seam_velocities(&caps, stop_before, entry, &mut report);
-    cap_seams_at_hold_ceiling(&caps, &mut plan);
     let geo = compute_run_geometry(&caps, &plan);
     forward_pass(moves, &caps, &geo, &mut plan.v, tol)?;
     let (barrier, _) = reverse_brake_envelope(moves, &caps, &geo, &mut plan.v, tol)?;
@@ -490,17 +490,28 @@ fn seed_seam_velocities(
             report.stops += 1;
             is_anchor[k] = true;
         } else {
-            let up = &caps[k - 1].kin;
-            let dn = &caps[k].kin;
-            let kappa_up = (up.kappa0 + up.sigma * up.length).abs();
-            let kappa_dn = dn.kappa0.abs();
-            let boundary_vlim =
-                disk::limit_speed(kappa_up, up.accel).min(disk::limit_speed(kappa_dn, dn.accel));
-            let ceiling = up.flat_ceiling.min(dn.flat_ceiling);
-            v[k] = ceiling.min(disk::notch_free_min(ceiling, boundary_vlim));
+            v[k] = seam_ceiling(caps, k);
         }
     }
     SeamPlan { v, a, is_anchor }
+}
+
+/// Highest speed the geometry itself allows at seam `k`, before any envelope
+/// sweep narrows it: the tighter of the two members' flat ceilings, the disk
+/// limit their curvatures there impose, and the speed both can actually hold
+/// there. Holding every seam to this keeps the forward and backward sweeps from
+/// building an envelope above the jerk rail.
+fn seam_ceiling(caps: &[MoveCaps], k: usize) -> f64 {
+    let up = &caps[k - 1].kin;
+    let dn = &caps[k].kin;
+    let kappa_up = (up.kappa0 + up.sigma * up.length).abs();
+    let kappa_dn = dn.kappa0.abs();
+    let boundary_vlim =
+        disk::limit_speed(kappa_up, up.accel).min(disk::limit_speed(kappa_dn, dn.accel));
+    let ceiling = up.flat_ceiling.min(dn.flat_ceiling);
+    ceiling
+        .min(disk::notch_free_min(ceiling, boundary_vlim))
+        .min(seam_hold_ceiling(caps, k))
 }
 
 /// The `(v, a)` a member requires at its entry to land on the exit state the
@@ -602,16 +613,6 @@ const SEAM_RETREAT_SHRINK: f64 = 0.85;
 /// infeasible at these limits. Bounded so the search cannot iterate forever on
 /// geometry that will never settle.
 const SEAM_RETREATS_PER_MEMBER: u32 = 8;
-
-/// Hold every seam to the speed both its members can actually hold there, so the
-/// forward and backward sweeps never build an envelope above the jerk rail.
-fn cap_seams_at_hold_ceiling(caps: &[MoveCaps], plan: &mut SeamPlan) {
-    for k in 1..caps.len() {
-        if !plan.is_anchor[k] {
-            plan.v[k] = plan.v[k].min(seam_hold_ceiling(caps, k));
-        }
-    }
-}
 
 /// Walk the members right to left, each publishing the `(v, a)` it requires at
 /// its entry as a boundary condition on its predecessor.
@@ -1169,6 +1170,11 @@ fn reconstruct_runs(
                 kin: &caps[j].kin,
                 exit_v: v[j + 1],
                 exit_a: plan.a[j + 1],
+                exit_ceiling: if j + 1 < n {
+                    seam_ceiling(caps, j + 1)
+                } else {
+                    caps[j].kin.flat_ceiling
+                },
             })
             .collect();
         let run = disk::reconstruct_run(

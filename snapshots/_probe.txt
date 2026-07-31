@@ -1,0 +1,21 @@
+PROBE run members=1 stretches=0
+PROBE run members=63 stretches=1
+PROBE n=63 composed=4.138626432046081 settled=4.011728862537324 bands=61
+PROBE run members=29 stretches=1
+PROBE n=29 composed=1.8710408327835009 settled=1.72765791101132 bands=22
+PROBE run members=1 stretches=0
+PROBE run members=1 stretches=0
+PROBE run members=1 stretches=0
+PROBE run members=26 stretches=1
+PROBE n=26 composed=2.7033106765747865 settled=2.2127076622213564 bands=26
+PROBE run members=1 stretches=0
+PROBE run members=1 stretches=0
+PROBE run members=1 stretches=0
+PROBE run members=11 stretches=1
+PROBE n=11 composed=0.607109851053195 settled=0.5578243825138545 bands=11
+PROBE run members=72 stretches=1
+PROBE refused n=72
+PROBE run members=74 stretches=1
+PROBE refused n=74
+PROBE run members=21 stretches=1
+PROBE n=21 composed=0.9651466979821172 settled=0.942224812927626 bands=21

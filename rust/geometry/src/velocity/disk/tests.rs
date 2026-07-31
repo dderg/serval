@@ -152,6 +152,7 @@ fn run_members<'a>(kins: &[&'a Kinematics], exit_v: f64) -> Vec<RunMember<'a>> {
                 kin: k,
                 exit_v: seam_ceiling,
                 exit_a: 0.0,
+                exit_ceiling: seam_ceiling,
             }
         })
         .collect();

@@ -91,3 +91,67 @@ fn chain_is_continuous_rejects_a_velocity_kick() {
     chain[1].v0 += 1.0;
     assert!(!chain_is_continuous(&chain, false));
 }
+
+#[test]
+fn clip_phases_slices_sum_back_to_the_composite() {
+    let chain = two_phase_chain();
+    let total = phase_end_s(&chain[1]);
+    let cuts = [0.0, 0.3 * total, total];
+    let slices = clip_phases(&chain, &cuts);
+    let sliced_time: f64 = slices.iter().flatten().map(|p| p.dt).sum();
+    let whole_time: f64 = chain.iter().map(|p| p.dt).sum();
+    assert!(
+        (sliced_time - whole_time).abs() < 1e-15 * whole_time,
+        "sliced {sliced_time} whole {whole_time}"
+    );
+}
+
+#[test]
+fn clip_phases_rebases_every_slice_onto_its_own_origin() {
+    let chain = two_phase_chain();
+    let total = phase_end_s(&chain[1]);
+    let cuts = [0.0, 0.3 * total, 0.8 * total, total];
+    let slices = clip_phases(&chain, &cuts);
+    assert_eq!(slices.len(), 3);
+    for (slice, w) in slices.iter().zip(cuts.windows(2)) {
+        let first = slice.first().expect("a slice of positive length");
+        assert_eq!(first.s0, 0.0);
+        assert_eq!(first.t0, 0.0);
+        let end = phase_end_s(slice.last().expect("a slice of positive length"));
+        assert!((end - (w[1] - w[0])).abs() < 1e-9, "slice spans {end}");
+    }
+}
+
+#[test]
+fn clip_phases_slices_hand_over_one_continuous_state() {
+    let chain = two_phase_chain();
+    let total = phase_end_s(&chain[1]);
+    let slices = clip_phases(&chain, &[0.0, 0.45 * total, total]);
+    for slice in &slices {
+        assert!(chain_is_continuous(slice, true));
+    }
+    let handover = advance(
+        start_state(slices[0].last().expect("a slice of positive length")),
+        slices[0].last().expect("a slice").j,
+        slices[0].last().expect("a slice").dt,
+    );
+    let resumes = &slices[1][0];
+    assert!((handover.v - resumes.v0).abs() < 1e-9);
+    assert!((handover.a - resumes.a0).abs() < 1e-6);
+}
+
+#[test]
+fn clip_phases_takes_the_final_cut_at_the_chain_end_not_by_arc_length() {
+    let stopping = vec![StraightPhase {
+        t0: 0.0,
+        dt: 0.02,
+        s0: 0.0,
+        v0: 0.0,
+        a0: 0.0,
+        j: 1e5,
+    }];
+    let total = phase_end_s(&stopping[0]);
+    let slices = clip_phases(&stopping, &[0.0, 0.5 * total, total]);
+    let sliced_time: f64 = slices.iter().flatten().map(|p| p.dt).sum();
+    assert!((sliced_time - 0.02).abs() < 1e-15, "sliced {sliced_time}");
+}

@@ -186,5 +186,89 @@ pub(super) fn chain_states(chain: &[StraightPhase], s: &[f64]) -> Vec<(f64, f64)
     out
 }
 
+/// Arc-length cut of a composite chain: the phase the cut falls in and the
+/// local time at which it does.
+struct Cut {
+    phase: usize,
+    tau: f64,
+}
+
+fn locate_cut(chain: &[StraightPhase], s: f64) -> Cut {
+    let last = chain.len() - 1;
+    let phase = chain
+        .iter()
+        .position(|p| s < phase_end_s(p))
+        .unwrap_or(last);
+    let p = &chain[phase];
+    Cut {
+        phase,
+        tau: p.solve_tau(s - p.s0).clamp(0.0, p.dt),
+    }
+}
+
+/// The stretch of `chain` between two cuts, re-based onto its own arc length
+/// and clock. A cut inside a phase splits it on the same cubic, so the
+/// trajectory is unchanged; the two sides of a cut share one solved local time,
+/// so the slices' durations sum back to the composite's.
+fn slice_between(chain: &[StraightPhase], from: &Cut, to: &Cut) -> Vec<StraightPhase> {
+    let base = chain[from.phase].state_at(from.tau).0;
+    let mut out: Vec<StraightPhase> = Vec::new();
+    let mut clock = 0.0;
+    for phase in from.phase..=to.phase {
+        let p = &chain[phase];
+        let lo = if phase == from.phase { from.tau } else { 0.0 };
+        let hi = if phase == to.phase { to.tau } else { p.dt };
+        if hi <= lo {
+            continue;
+        }
+        let (s, v, a) = p.state_at(lo);
+        out.push(StraightPhase {
+            t0: clock,
+            dt: hi - lo,
+            s0: s - base,
+            v0: v,
+            a0: a,
+            j: p.j,
+        });
+        clock += hi - lo;
+    }
+    if let Some(first) = out.first_mut() {
+        first.s0 = 0.0;
+    }
+    out
+}
+
+/// A composite chain cut back into the members it was planned across. `cuts` is
+/// the ascending arc-length grid of member ends, starting at zero, so the
+/// result holds one chain per member in member-local arc length and time.
+///
+/// The outer cuts are the chain's own ends by construction and are taken as
+/// such. Solving them for arc length instead would truncate a chain that comes
+/// to rest: the final approach advances almost nothing over a real duration, so
+/// the arc-length root there says nothing about where the chain stops.
+pub(super) fn clip_phases(chain: &[StraightPhase], cuts: &[f64]) -> Vec<Vec<StraightPhase>> {
+    assert!(
+        !chain.is_empty() && cuts.len() >= 2,
+        "clipping needs a chain and at least one member to clip it into"
+    );
+    let last = chain.len() - 1;
+    let marks: Vec<Cut> = cuts
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| match i {
+            0 => Cut { phase: 0, tau: 0.0 },
+            i if i + 1 == cuts.len() => Cut {
+                phase: last,
+                tau: chain[last].dt,
+            },
+            _ => locate_cut(chain, s),
+        })
+        .collect();
+    marks
+        .windows(2)
+        .map(|w| slice_between(chain, &w[0], &w[1]))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests;

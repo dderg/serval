@@ -5,7 +5,7 @@ use std::f64::consts::FRAC_PI_2;
 
 use super::chain::{chain_is_continuous, chain_states, phase_end_s};
 use super::profile::{self, BoundaryInfeasibility, StraightPhase};
-use super::{VelocityError, certify, curved};
+use super::{VelocityError, certify, compose, curved};
 
 const RK_MIN_STEP_FRAC: f64 = 1e-6;
 const RK_MAX_STEPS: u32 = 100_000;
@@ -31,6 +31,7 @@ pub(super) fn notch_free_min(flat_ceiling: f64, limit: f64) -> f64 {
 }
 const KAPPA_EPS: f64 = 1e-9;
 
+#[derive(Clone)]
 pub(super) struct Kinematics {
     pub length: f64,
     pub accel: f64,
@@ -41,7 +42,7 @@ pub(super) struct Kinematics {
 }
 
 impl Kinematics {
-    fn reversed(&self) -> Kinematics {
+    pub(super) fn reversed(&self) -> Kinematics {
         Kinematics {
             length: self.length,
             accel: self.accel,
@@ -158,6 +159,18 @@ pub(super) struct RunMember<'a> {
     pub kin: &'a Kinematics,
     pub exit_v: f64,
     pub exit_a: f64,
+    /// Speed ceiling the geometry imposes at this member's exit seam, before
+    /// any envelope sweep narrowed it. What a composite has to respect to plan
+    /// straight through the seam.
+    pub exit_ceiling: f64,
+}
+
+/// What one member ends up executing: the chain, and the boundary states it
+/// actually runs between — which a composite moves off the settled seam.
+pub(super) struct MemberPlan {
+    pub entry: (f64, f64),
+    pub exit: (f64, f64),
+    pub chain: Result<Vec<StraightPhase>, VelocityError>,
 }
 
 fn certify_or_panic(kin: &Kinematics, chain: &[StraightPhase]) {
@@ -217,7 +230,7 @@ fn certified_straight_chain(
     Ok(chain)
 }
 
-fn closed_form_is_available(kin: &Kinematics) -> bool {
+pub(super) fn closed_form_is_available(kin: &Kinematics) -> bool {
     kin.is_straight()
         && kin.jerk.is_finite()
         && kin.jerk > 0.0
@@ -362,7 +375,7 @@ fn boundary_handoff(
 /// else — curvature, an unlimited jerk budget, or both. A degenerate budget or
 /// ceiling is not a member the planner may quietly skip, and the solver's own
 /// validation says so.
-fn member_chain(
+pub(super) fn member_chain(
     kin: &Kinematics,
     entry: (f64, f64),
     exit: (f64, f64),
@@ -382,12 +395,15 @@ fn member_chain(
 /// next window to continue this exact curve), and per-member closed-form jerk
 /// phases in move-local time/arc-length.
 ///
-/// Every member emits the chain its own solver plans between the two `(v, a)`
-/// boundary states the backward requirement pass fixed — so a blend inherits its
-/// entry brake instead of manufacturing one at a seam with no authority to build
-/// it — and reads its samples off that chain. A member whose boundary pair no
-/// chain can close is reported; the settlement is what owes every member a pair
-/// it can close.
+/// Every member starts from the chain its own solver plans between the two
+/// `(v, a)` boundary states the backward requirement pass fixed — so a blend
+/// inherits its entry brake instead of manufacturing one at a seam with no
+/// authority to build it. [`compose::absorb_seams`] then re-plans whole
+/// stretches jointly and keeps the result where it is quicker, which is what a
+/// settled seam cannot see: it hands over the fastest state its predecessor can
+/// reach, not the state the run as a whole wants to pass through. A member whose
+/// boundary pair no chain can close is reported; the settlement is what owes
+/// every member a pair it can close.
 pub(super) fn reconstruct_run(
     members: &[RunMember],
     run_start_v: f64,
@@ -395,7 +411,16 @@ pub(super) fn reconstruct_run(
     _tol: f64,
 ) -> RunReconstruction {
     let boundary = run_boundary_states(members, run_start_v, run_start_a);
-
+    let mut plans: Vec<MemberPlan> = members
+        .iter()
+        .enumerate()
+        .map(|(index, m)| MemberPlan {
+            entry: boundary[index],
+            exit: boundary[index + 1],
+            chain: member_chain(m.kin, boundary[index], boundary[index + 1]),
+        })
+        .collect();
+    compose::absorb_seams(members, &boundary, &mut plans);
     let mut out = RunReconstruction {
         samples: Vec::with_capacity(members.len()),
         exit_states: Vec::with_capacity(members.len()),
@@ -404,9 +429,7 @@ pub(super) fn reconstruct_run(
         unreachable: Vec::new(),
         planned: MemberClassCounts::default(),
     };
-    for (index, m) in members.iter().enumerate() {
-        let envelope_entry = boundary[index];
-        let envelope_exit = boundary[index + 1];
+    for (index, (m, plan)) in members.iter().zip(plans).enumerate() {
         if m.kin.length > 0.0 {
             if m.kin.is_straight() {
                 out.planned.straight += 1;
@@ -414,31 +437,33 @@ pub(super) fn reconstruct_run(
                 out.planned.curved += 1;
             }
         }
-        let chain = match member_chain(m.kin, envelope_entry, envelope_exit) {
+        let chain = match plan.chain {
             Ok(chain) => {
                 assert!(
                     chain_is_continuous(&chain, m.kin.jerk.is_finite()),
                     "member {index} of length {} planned a discontinuous chain \
-                     between entry {envelope_entry:?} and exit {envelope_exit:?}",
-                    m.kin.length
+                     between entry {:?} and exit {:?}",
+                    m.kin.length,
+                    plan.entry,
+                    plan.exit
                 );
                 chain
             }
             Err(why) => {
                 out.unreachable.push(UnreachableMember {
                     index,
-                    entry: envelope_entry,
-                    exit: envelope_exit,
+                    entry: plan.entry,
+                    exit: plan.exit,
                     why,
                 });
                 Vec::new()
             }
         };
         let arcs = sample_arcs(&chain, m.kin.length);
-        let samples = samples_from_chain(&arcs, &chain, envelope_entry, envelope_exit);
+        let samples = samples_from_chain(&arcs, &chain, plan.entry, plan.exit);
         out.envelope_chains.push(chain.clone());
         out.exit_states
-            .push(samples.last().map_or(envelope_exit, |p| (p.1, p.2)));
+            .push(samples.last().map_or(plan.exit, |p| (p.1, p.2)));
         out.samples.push(samples);
         out.phases.push(chain);
     }
@@ -456,6 +481,7 @@ pub(super) fn sample_profile(
         kin,
         exit_v: exit,
         exit_a: 0.0,
+        exit_ceiling: kin.flat_ceiling,
     };
     let mut run = reconstruct_run(&[member], entry, 0.0, tol);
     assert!(
