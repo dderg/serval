@@ -306,12 +306,22 @@ fn infeasible<T>(why: BoundaryInfeasibility) -> Result<T, VelocityError> {
     Err(VelocityError::InfeasibleBoundary(why))
 }
 
+/// The two states an exit sits between on its acceleration swing. Inside the
+/// member the profile winds *up* to `a`, arriving from `v - a|a|/2j`, and
+/// whatever continues past the exit unwinds `a` back to zero at `v + a|a|/2j`.
+/// Both are speeds the member's cap has to cover and neither may sit below rest,
+/// so both are boundary states in their own right — pricing only one of them
+/// lets a brake at the exit masquerade as a gain in speed.
+fn exit_swing_ends((v, a): (f64, f64)) -> [(f64, f64); 2] {
+    [(v, a.abs()), (v, -a.abs())]
+}
+
 /// Lowest top speed at which the boundary states are admissible at all: neither
-/// end, nor the speed its acceleration unwinds to, may sit above the cap. The
-/// swing costs are measured with the jerk the caps leave at the answer itself,
-/// so the budget held back is what these swings need rather than a fixed share
-/// of it. The answer is the bracket floor rather than the bare demand, so the
-/// caps the caller derives from it are the very caps the swings were measured
+/// end, nor the speed its acceleration swing passes through, may sit above the
+/// cap. The swing costs are measured with the jerk the caps leave at the answer
+/// itself, so the budget held back is what these swings need rather than a fixed
+/// share of it. The answer is the bracket floor rather than the bare demand, so
+/// the caps the caller derives from it are the very caps the swings were measured
 /// against; raising the top speed only tightens them, so the demand climbs
 /// monotonically and either settles or leaves the member.
 fn required_top(
@@ -322,7 +332,7 @@ fn required_top(
 ) -> Result<f64, VelocityError> {
     let mut states = vec![entry];
     if let Some(e) = exit {
-        states.push(e);
+        states.extend(exit_swing_ends(e));
     }
     let mut plain = 0.0_f64;
     for &(v, a) in &states {

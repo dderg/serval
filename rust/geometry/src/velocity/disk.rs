@@ -1,7 +1,7 @@
 use std::f64::consts::FRAC_PI_2;
 
 use super::profile::{self, StraightPhase};
-use super::{BoundaryInfeasibility, VelocityError, certify, curved, ride};
+use super::{VelocityError, certify, curved, ride};
 
 const RK_MIN_STEP_FRAC: f64 = 1e-6;
 const RK_MAX_STEPS: u32 = 100_000;
@@ -344,14 +344,9 @@ fn certify_or_panic(kin: &Kinematics, chain: &[StraightPhase]) {
 /// triple-limited chain between the boundary states — solved outright rather
 /// than marched, and certified phase by phase before it is handed on.
 ///
-/// The closed form may only decline a boundary pair no admissible chain can
-/// realise on this member: too short for any slew between the two states, or an
-/// entry/exit acceleration whose unavoidable speed swing leaves the `[0, v_max]`
-/// band. The marcher's grid states are its own integration's, and where it rode
-/// the acceleration or jerk rail they can sit a rounding outside what is
-/// realisable. Every other infeasibility — non-finite input, an acceleration
-/// already over the rail, a chain that fails to close its own length — is a bug
-/// and panics.
+/// A boundary pair the member cannot realise is reported, exactly as the curved
+/// solver reports one, so the envelope's reachability census names it. Any other
+/// failure is a solver bug and panics.
 fn certified_straight_chain(
     kin: &Kinematics,
     entry: (f64, f64),
@@ -366,13 +361,7 @@ fn certified_straight_chain(
         kin.jerk,
     ) {
         Ok(chain) => chain,
-        Err(
-            why @ VelocityError::InfeasibleBoundary(
-                BoundaryInfeasibility::LengthTooShort { .. }
-                | BoundaryInfeasibility::UnwindOverCeiling { .. }
-                | BoundaryInfeasibility::UnwindBelowRest { .. },
-            ),
-        ) => return Err(why),
+        Err(why @ VelocityError::InfeasibleBoundary(_)) => return Err(why),
         Err(why) => panic!(
             "straight member length {} entry {entry:?} exit {exit:?} under \
              v_max {} a_max {} j_max {} is unplannable: {why:?}",
@@ -1223,6 +1212,28 @@ pub(super) fn curved_solver_is_available(kin: &Kinematics) -> bool {
         && kin.sigma.is_finite()
 }
 
+fn solver_is_available(kin: &Kinematics) -> bool {
+    closed_form_is_available(kin) || curved_solver_is_available(kin)
+}
+
+/// The run's marched chain clipped to a member no solver applies to. With jerk
+/// unlimited the profile steps its acceleration at phase joints by design, so
+/// only that case tolerates a clip whose accelerations do not chain; a clip that
+/// does not tile the member is no chain at all and the member lowers from its
+/// samples.
+fn marched_clip(chain: &[StraightPhase], kin: &Kinematics, s0: f64, s1: f64) -> Vec<StraightPhase> {
+    let marcher_applies = kin.is_straight() || !kin.jerk.is_finite();
+    if chain.is_empty() || !marcher_applies {
+        return Vec::new();
+    }
+    let clipped = ride::clip_phases(chain, s0, s1);
+    if ride::chain_is_continuous(&clipped, kin.jerk.is_finite()) {
+        clipped
+    } else {
+        Vec::new()
+    }
+}
+
 /// The chain a member executes between two known boundary states: the closed
 /// form on a straight, the certified curved solver on anything with curvature.
 fn member_chain(
@@ -1244,14 +1255,13 @@ fn member_chain(
 /// next window to continue this exact curve), and per-member closed-form jerk
 /// phases in move-local time/arc-length.
 ///
-/// Two chains are built per member. The envelope chain plans it between the two
-/// `(v, a)` boundary states the backward requirement pass fixed — the state its
-/// predecessor hands it and the state its successor requires — so a blend
-/// inherits its entry brake instead of manufacturing one at a seam with no
-/// authority to build it. A curved member emits that chain and reads its
-/// samples off it. A straight member re-solves the closed form at its marched
-/// seam states; only a member with no chain of its own falls back to the
-/// marcher's.
+/// Every member with a solver of its own — the closed form on a straight, the
+/// certified curved solver on anything with curvature — emits the chain planned
+/// between the two `(v, a)` boundary states the backward requirement pass fixed,
+/// so a blend inherits its entry brake instead of manufacturing one at a seam
+/// with no authority to build it, and reads its samples off that chain. Only a
+/// member no solver applies to — unlimited jerk, or a degenerate length or
+/// ceiling — falls back to the marched run chain.
 pub(super) fn reconstruct_run(
     members: &[RunMember],
     run_start_v: f64,
@@ -1304,7 +1314,12 @@ pub(super) fn reconstruct_run(
         } else if curved_solver_is_available(m.kin) {
             out.planned.curved += 1;
         }
-        let envelope = match member_chain(m.kin, envelope_entry, envelope_exit) {
+        let planned = member_chain(m.kin, envelope_entry, envelope_exit);
+        let declined = match &planned {
+            Some(Err(why)) => Some(*why),
+            _ => None,
+        };
+        let envelope = match planned {
             Some(Ok(built)) => built,
             Some(Err(why)) => {
                 out.unreachable.push(UnreachableMember {
@@ -1319,8 +1334,6 @@ pub(super) fn reconstruct_run(
         };
         out.envelope_chains.push(envelope.clone());
 
-        let entry = interp_flat(&flat, s0)?;
-        let exit = interp_flat(&flat, s1)?;
         let emitted = if !envelope.is_empty() {
             assert!(
                 ride::chain_is_continuous(&envelope, true),
@@ -1330,24 +1343,15 @@ pub(super) fn reconstruct_run(
             );
             restate_from_chain(&mut local, &envelope, envelope_entry, envelope_exit);
             envelope
-        } else if let Some(built) = closed_form_is_available(m.kin)
-            .then(|| certified_straight_chain(m.kin, entry, exit).ok())
-            .flatten()
-        {
-            restate_from_chain(&mut local, &built, entry, exit);
-            built
         } else {
-            let marcher_applies = m.kin.is_straight() || !m.kin.jerk.is_finite();
-            if chain.is_empty() || !marcher_applies {
-                Vec::new()
-            } else {
-                let clipped = ride::clip_phases(&chain, s0, s1);
-                if ride::chain_is_continuous(&clipped, m.kin.jerk.is_finite()) {
-                    clipped
-                } else {
-                    Vec::new()
-                }
-            }
+            assert!(
+                declined.is_some() || !solver_is_available(m.kin),
+                "member {index} of length {} has a solver of its own and refused nothing, \
+                 yet emitted no phase chain between entry {envelope_entry:?} \
+                 and exit {envelope_exit:?}",
+                m.kin.length
+            );
+            marched_clip(&chain, m.kin, s0, s1)
         };
         let member_exit = local.last().map_or(envelope_exit, |p| (p.1, p.2));
         out.samples.push(local);

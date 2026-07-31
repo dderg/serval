@@ -813,3 +813,66 @@ fn the_ladder_rides_the_disk_rim_one_cap_set_prices_out_of_reach() {
     );
     assert!(peak <= rim, "peak {peak} rode over the disk rim {rim}");
 }
+
+/// A blend half off `neptune_cube/fast/discontinuity`, measured: the seam holds
+/// the member's whole speed and the successor requires a brake carried in. The
+/// profile has to be *above* the seam speed just before it winds that brake up,
+/// so a cap ceiling pinned at the seam speed itself cannot hold the chain — the
+/// member's own top-speed floor has to price the wind-up. This member emitted an
+/// empty phase chain until it did.
+#[test]
+fn an_exit_brake_lifts_the_top_speed_floor_that_holds_it() {
+    let k = kin(
+        0.317_546_640_548_856_84,
+        -0.682_713_117_928_910_2,
+        0.465_124_562_879_605_4,
+        10_000.0,
+        2.0e6,
+        98.871_216_666_666_67,
+    );
+    let seam = 84.040_534_166_666_66;
+    let entry = (seam, 0.0);
+    let exit = (seam, -417.725_086_422_075_04);
+
+    let chain = curved_chain(&k, entry, exit)
+        .unwrap_or_else(|e| panic!("carried exit brake refused: {e:?}"));
+    assert_certified(&k, &chain, "carried exit brake");
+    assert_feasible_by_oracle(&k, &chain, "carried exit brake");
+    assert_continuous(&chain, "carried exit brake");
+
+    let (s, v, a) = chain.last().expect("empty chain").end_state();
+    assert!(
+        (s - k.length).abs() <= 1.0e-9 * k.length,
+        "closed {s} of {} mm",
+        k.length
+    );
+    assert!(
+        (v - exit.0).abs() <= 1.0e-9 * (1.0 + exit.0),
+        "landed at v={v}, wanted {}",
+        exit.0
+    );
+    assert!(
+        (a - exit.1).abs() <= 1.0e-9 * (1.0 + k.accel),
+        "landed at a={a}, wanted {}",
+        exit.1
+    );
+}
+
+/// The mirror of the wind-up: whatever follows the member unwinds its exit
+/// acceleration back to zero, and at rest a brake unwinds below rest. Pricing
+/// only the wind-up would admit an exit state whose own continuation reverses
+/// the motion.
+#[test]
+fn a_brake_carried_into_rest_is_refused() {
+    let k = kin(0.05, 0.0, 4.0, 30_000.0, 1.0e7, 250.0);
+    let refused = curved_chain(&k, (0.0, 0.0), (0.0, -k.accel));
+    assert!(
+        matches!(
+            refused,
+            Err(VelocityError::InfeasibleBoundary(
+                BoundaryInfeasibility::UnwindBelowRest { .. }
+            ))
+        ),
+        "a brake at rest must be refused, got {refused:?}"
+    );
+}
