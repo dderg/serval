@@ -1,6 +1,7 @@
 use super::certify;
 use super::curved::{
-    certified_chain, curved_chain, curved_reach, entry_requirement, top_speed_ceiling,
+    bracket_jerk_floor, caps_at, certified_chain, curved_chain, curved_reach, entry_requirement,
+    top_speed_ceiling,
 };
 use super::disk::{Kinematics, const_kappa_reach_w};
 use super::profile::{self, StraightPhase};
@@ -66,6 +67,70 @@ fn assert_certified(kin: &Kinematics, chain: &[StraightPhase], what: &str) {
             kin.sigma,
             kin.flat_ceiling
         );
+    }
+}
+
+/// Feasibility judged in this file alone — the state, the curvature and both
+/// residuals recomputed from the phase's own coefficients. Gutting
+/// `certify.rs` must not be able to keep an emitted chain green, so nothing
+/// here may consult it.
+const ORACLE_REL_TOL: f64 = 1.0e-9;
+const ORACLE_SAMPLES: usize = 64;
+
+fn oracle_state_at(p: &StraightPhase, tau: f64) -> (f64, f64, f64) {
+    (
+        p.s0 + p.v0 * tau + 0.5 * p.a0 * tau * tau + p.j * tau * tau * tau / 6.0,
+        p.v0 + p.a0 * tau + 0.5 * p.j * tau * tau,
+        p.a0 + p.j * tau,
+    )
+}
+
+fn oracle_residuals(kin: &Kinematics, p: &StraightPhase, tau: f64) -> (f64, f64, f64) {
+    let (s, v, a) = oracle_state_at(p, tau);
+    let k = kin.kappa0 + kin.sigma * s;
+    let v2 = v * v;
+    let v3 = v2 * v;
+    let tangential = p.j - k * k * v3;
+    let normal = kin.sigma * v3 + 3.0 * k * v * a;
+    (
+        kin.accel * kin.accel - a * a - k * k * v2 * v2,
+        kin.jerk * kin.jerk - tangential * tangential - normal * normal,
+        v,
+    )
+}
+
+fn assert_feasible_by_oracle(kin: &Kinematics, chain: &[StraightPhase], what: &str) {
+    let disk_tol = ORACLE_REL_TOL * kin.accel * kin.accel;
+    let ball_tol = ORACLE_REL_TOL * kin.jerk * kin.jerk;
+    let speed_tol = ORACLE_REL_TOL * kin.flat_ceiling;
+    for (i, p) in chain.iter().enumerate() {
+        for n in 0..=ORACLE_SAMPLES {
+            let tau = p.dt * (n as f64) / (ORACLE_SAMPLES as f64);
+            let (disk, ball, speed) = oracle_residuals(kin, p, tau);
+            let breach = |name: &str, residual: f64, tol: f64| {
+                assert!(
+                    residual >= -tol,
+                    "{what}: phase {i} of {} breaches {name} by {residual} at tau={tau} of {} \
+                     (s0={} v0={} a0={} j={}; length={} accel={} jerk={} kappa0={} sigma={} \
+                     flat={})",
+                    chain.len(),
+                    p.dt,
+                    p.s0,
+                    p.v0,
+                    p.a0,
+                    p.j,
+                    kin.length,
+                    kin.accel,
+                    kin.jerk,
+                    kin.kappa0,
+                    kin.sigma,
+                    kin.flat_ceiling
+                );
+            };
+            breach("the acceleration disk", disk, disk_tol);
+            breach("the jerk ball", ball, ball_tol);
+            breach("non-reversal", speed, speed_tol);
+        }
     }
 }
 
@@ -156,17 +221,32 @@ struct Sweep {
     chains: usize,
     phases: usize,
     worst_phases: usize,
+    accelerating_boundaries: usize,
+    round_trip_refusals: usize,
+    free_refusals: usize,
+}
+
+impl Sweep {
+    fn record(&mut self, chain: &[StraightPhase]) {
+        self.chains += 1;
+        self.phases += chain.len();
+        self.worst_phases = self.worst_phases.max(chain.len());
+    }
 }
 
 /// Randomised clothoid members, each planned between the boundary states its own
-/// backward solve declares, plus the plain forward reach. Every phase of every
-/// chain is put to the caller's check.
+/// backward solve declares, plus a free forward pass. Both ends carry
+/// acceleration: a seam that hands acceleration on is the scenario this solver
+/// exists for, and a sweep of `(v, 0)` boundaries never reaches it.
 fn sweep(check: &mut dyn FnMut(&Kinematics, &[StraightPhase], &str)) -> Sweep {
     let mut rng = Lcg(0xC10_7401D);
     let mut out = Sweep {
         chains: 0,
         phases: 0,
         worst_phases: 0,
+        accelerating_boundaries: 0,
+        round_trip_refusals: 0,
+        free_refusals: 0,
     };
     for _ in 0..600 {
         let length = rng.in_range(0.05, 8.0);
@@ -178,31 +258,60 @@ fn sweep(check: &mut dyn FnMut(&Kinematics, &[StraightPhase], &str)) -> Sweep {
         let k = kin(kappa0, sigma, length, accel, jerk, flat);
         let ceiling = top_speed_ceiling(&k);
 
-        let entry = (rng.in_range(0.0, ceiling), 0.0);
-        let reach = curved_reach(&k, entry);
+        let entry = (rng.in_range(0.0, ceiling), rng.signed(0.3 * accel));
+        let exit = (rng.in_range(0.0, ceiling), rng.signed(0.3 * accel));
+        if exit.1 != 0.0 {
+            out.accelerating_boundaries += 1;
+        }
+
+        let reach = curved_reach(&k, (entry.0, 0.0));
         assert!(
             reach.0.is_finite() && reach.0 >= 0.0,
             "reach speed {} is not a speed",
             reach.0
         );
 
-        let exit = (rng.in_range(0.0, ceiling), 0.0);
-        if let Ok(required) = entry_requirement(&k, exit) {
-            if let Ok(chain) = curved_chain(&k, required, exit) {
+        match entry_requirement(&k, exit).and_then(|required| curved_chain(&k, required, exit)) {
+            Ok(chain) => {
                 check(&k, &chain, "backward-required chain");
-                out.chains += 1;
-                out.phases += chain.len();
-                out.worst_phases = out.worst_phases.max(chain.len());
+                out.record(&chain);
             }
+            Err(_) => out.round_trip_refusals += 1,
         }
-        if let Ok(chain) = curved_chain(&k, entry, exit) {
-            check(&k, &chain, "forward chain");
-            out.chains += 1;
-            out.phases += chain.len();
-            out.worst_phases = out.worst_phases.max(chain.len());
+        match curved_chain(&k, entry, exit) {
+            Ok(chain) => {
+                check(&k, &chain, "forward chain");
+                out.record(&chain);
+            }
+            Err(_) => out.free_refusals += 1,
         }
     }
     out
+}
+
+/// The refusal rate is part of the contract: a sweep that silently skips what it
+/// cannot plan would pass just as happily with a solver that refuses everything.
+fn assert_sweep_is_substantial(s: &Sweep) {
+    assert!(
+        s.chains >= 650,
+        "the sweep produced only {} chains — it is not exercising the solver",
+        s.chains
+    );
+    assert!(
+        s.accelerating_boundaries >= 500,
+        "only {} of 600 members were given a nonzero exit acceleration",
+        s.accelerating_boundaries
+    );
+    assert!(
+        s.round_trip_refusals <= 110,
+        "the solver refused {} of 600 of its own backward-required boundary pairs",
+        s.round_trip_refusals
+    );
+    assert!(
+        s.free_refusals <= 460,
+        "the solver refused {} of 600 free boundary pairs",
+        s.free_refusals
+    );
 }
 
 #[test]
@@ -211,11 +320,7 @@ fn every_emitted_phase_is_certified() {
         assert!(!chain.is_empty(), "{what}: empty chain");
         assert_certified(k, chain, what);
     });
-    assert!(
-        summary.chains >= 400,
-        "the sweep produced only {} chains — it is not exercising the solver",
-        summary.chains
-    );
+    assert_sweep_is_substantial(&summary);
     assert!(
         summary.worst_phases <= 12,
         "worst chain took {} phases over {} chains ({} total)",
@@ -225,10 +330,18 @@ fn every_emitted_phase_is_certified() {
     );
 }
 
+/// The check the certificate cannot mark its own homework on: every emitted
+/// chain is re-judged against residuals this file computes for itself.
+#[test]
+fn every_emitted_phase_is_feasible_by_an_independent_oracle() {
+    let summary = sweep(&mut assert_feasible_by_oracle);
+    assert_sweep_is_substantial(&summary);
+}
+
 #[test]
 fn chain_is_state_continuous() {
     let summary = sweep(&mut |_, chain, what| assert_continuous(chain, what));
-    assert!(summary.chains >= 400, "sweep too thin");
+    assert_sweep_is_substantial(&summary);
 }
 
 fn reference_blend_halves() -> Vec<Kinematics> {
@@ -323,6 +436,7 @@ fn entry_requirement_round_trips() {
                 panic!("round trip failed for exit {exit:?} required {required:?}: {e:?}")
             });
             assert_certified(k, &chain, "round trip");
+            assert_feasible_by_oracle(k, &chain, "round trip");
             assert_continuous(&chain, "round trip");
             let last = chain.last().expect("round trip produced no phases");
             let (s, v, a) = last.end_state();
@@ -380,6 +494,17 @@ fn infeasible_boundaries_fail_loudly() {
 
     let short = kin(0.5, 0.0, 1.0e-4, 30_000.0, 1.0e7, 300.0);
     match curved_chain(&short, (0.0, 0.0), (top_speed_ceiling(&short), 0.0)) {
+        Err(VelocityError::InfeasibleBoundary(
+            BoundaryInfeasibility::SpeedChangeWithoutAuthority { from, to },
+        )) => {
+            assert_eq!(from, 0.0);
+            assert_eq!(to, top_speed_ceiling(&short));
+        }
+        other => panic!("expected SpeedChangeWithoutAuthority, got {other:?}"),
+    }
+
+    let too_short_to_ramp = kin(0.0, 0.0, 1.0e-4, 30_000.0, 1.0e7, 300.0);
+    match curved_chain(&too_short_to_ramp, (0.0, 0.0), (200.0, 0.0)) {
         Err(VelocityError::InfeasibleBoundary(BoundaryInfeasibility::LengthTooShort {
             length,
             minimum,
@@ -404,6 +529,7 @@ fn a_reference_blend_costs_a_handful_of_phases() {
             curved_chain(half, (ceiling, 0.0), (ceiling, 0.0)).unwrap(),
         ] {
             assert_certified(half, &chain, "reference blend");
+            assert_feasible_by_oracle(half, &chain, "reference blend");
             assert_continuous(&chain, "reference blend");
             total += chain.len();
             worst = worst.max(chain.len());
@@ -454,4 +580,149 @@ fn an_uncertifiable_phase_fails_loudly_instead_of_spinning() {
     let kept = certified_chain(&k, &[feasible]).unwrap();
     assert_eq!(kept.len(), 1, "a certified phase must pass through whole");
     assert_eq!(kept[0], feasible);
+}
+
+/// `certified_chain` is the module's emission gate: nothing reaches a caller
+/// without passing it. Feed it raw phases the solver's own cap model would never
+/// produce — full-authority accelerations and jerks held long enough to leave
+/// the disk, the ball, or reverse the motion — and judge every phase it lets
+/// through with this file's own residuals. A weakened certificate shows up here
+/// as an emitted phase the oracle refuses.
+#[test]
+fn the_emission_gate_never_passes_an_infeasible_phase() {
+    let mut rng = Lcg(0x9A7E_0FFE_1234);
+    let mut emitted = 0usize;
+    let mut refused = 0usize;
+    for _ in 0..3000 {
+        let accel = rng.in_range(1.0e3, 1.0e5);
+        let jerk = rng.in_range(1.0e5, 2.0e8);
+        let flat = rng.in_range(20.0, 400.0);
+        let length = rng.in_range(0.05, 8.0);
+        let k = kin(rng.signed(0.8), rng.signed(6.0), length, accel, jerk, flat);
+        let aggression = rng.in_range(0.02, 1.0);
+        let raw = StraightPhase {
+            t0: 0.0,
+            dt: aggression * rng.in_range(1.0e-4, 2.0e-2),
+            s0: rng.in_range(0.0, length),
+            v0: rng.in_range(0.0, flat),
+            a0: rng.signed(aggression * accel),
+            j: rng.signed(aggression * jerk),
+        };
+        match certified_chain(&k, &[raw]) {
+            Ok(chain) => {
+                assert_feasible_by_oracle(&k, &chain, "emission gate");
+                assert_continuous(&chain, "emission gate");
+                let span: f64 = chain.iter().map(|p| p.dt).sum();
+                assert!(
+                    (span - raw.dt).abs() <= 1.0e-12 * raw.dt,
+                    "the gate must re-emit the whole phase or refuse it: {span} against {}",
+                    raw.dt
+                );
+                emitted += 1;
+            }
+            Err(VelocityError::UncertifiedPhase { .. }) => refused += 1,
+            other => panic!("the gate must refuse loudly, got {other:?}"),
+        }
+    }
+    assert!(
+        refused >= 300,
+        "only {refused} of 3000 adversarial phases were refused — the fixture is not reaching \
+         the infeasible side and cannot judge the certificate"
+    );
+    assert!(
+        emitted >= 300,
+        "only {emitted} of 3000 adversarial phases were emitted — the fixture is not reaching \
+         the feasible side"
+    );
+}
+
+/// The bisection brackets in `curved.rs` measure swing costs with
+/// `bracket_jerk_floor`, which is only sound if it really is a floor. It is not
+/// enough to check the ceiling: `caps_at(v).j` rises again as the disk authority
+/// it deducts vanishes, so the ceiling's own cap is *not* the bracket minimum.
+#[test]
+fn the_bracket_jerk_floor_is_a_floor_the_ceiling_is_not() {
+    let mut rng = Lcg(0x10F5_1234_9ABC);
+    let mut ceiling_is_not_the_minimum = 0usize;
+    let mut worst_ceiling_ratio: f64 = 1.0;
+    for _ in 0..20_000 {
+        let k = kin(
+            rng.signed(0.8),
+            rng.signed(6.0),
+            rng.in_range(0.05, 8.0),
+            rng.in_range(1.0e3, 1.0e5),
+            rng.in_range(1.0e5, 2.0e8),
+            rng.in_range(20.0, 400.0),
+        );
+        let ceiling = top_speed_ceiling(&k);
+        let floor = bracket_jerk_floor(&k, ceiling);
+        assert!(floor > 0.0, "the floor {floor} must leave a usable budget");
+        let at_ceiling = caps_at(&k, ceiling).j;
+        let mut minimum = f64::INFINITY;
+        for n in 0..=400 {
+            let v = (ceiling * (n as f64) / 400.0).min(ceiling);
+            let j = caps_at(&k, v).j;
+            assert!(
+                j >= floor,
+                "caps_at({v}).j = {j} is below the claimed bracket floor {floor} \
+                 (ceiling={ceiling} kappa0={} sigma={} accel={} jerk={})",
+                k.kappa0,
+                k.sigma,
+                k.accel,
+                k.jerk
+            );
+            minimum = minimum.min(j);
+        }
+        if at_ceiling > minimum * (1.0 + 1.0e-12) {
+            ceiling_is_not_the_minimum += 1;
+            worst_ceiling_ratio = worst_ceiling_ratio.max(at_ceiling / minimum);
+        }
+    }
+    assert!(
+        ceiling_is_not_the_minimum > 1_000,
+        "only {ceiling_is_not_the_minimum} members had a non-monotone jerk cap — the sweep no \
+         longer reaches the regime the floor exists for"
+    );
+    assert!(
+        worst_ceiling_ratio > 1.5,
+        "worst j(ceiling)/j(min) was only {worst_ceiling_ratio}; the ceiling's cap would look \
+         like a safe floor and this test would stop defending anything"
+    );
+}
+
+#[test]
+fn a_nonzero_exit_acceleration_never_reverses_the_motion() {
+    let mut rng = Lcg(0xBAD5_EED0);
+    let mut chains = 0usize;
+    let mut worst = f64::INFINITY;
+    for _ in 0..4000 {
+        let length = rng.in_range(0.05, 8.0);
+        let sigma = rng.signed(6.0);
+        let kappa0 = rng.signed(0.8);
+        let accel = rng.in_range(1.0e3, 1.0e5);
+        let jerk = rng.in_range(1.0e5, 2.0e8);
+        let flat = rng.in_range(20.0, 400.0);
+        let k = kin(kappa0, sigma, length, accel, jerk, flat);
+        let ceiling = top_speed_ceiling(&k);
+        let exit = (rng.in_range(0.0, ceiling), rng.signed(0.3 * accel));
+        let Ok(required) = entry_requirement(&k, exit) else {
+            continue;
+        };
+        let Ok(chain) = curved_chain(&k, required, exit) else {
+            continue;
+        };
+        chains += 1;
+        for p in &chain {
+            for i in 0..=64 {
+                let tau = p.dt * (i as f64) / 64.0;
+                let (_, v, _) = oracle_state_at(p, tau);
+                worst = worst.min(v);
+            }
+        }
+    }
+    assert!(chains >= 1000, "probe built only {chains} chains");
+    assert!(
+        worst >= -1.0e-9,
+        "an emitted chain reversed: interior speed reached {worst} mm/s over {chains} chains"
+    );
 }

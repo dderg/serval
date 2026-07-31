@@ -5,7 +5,8 @@
 //! The acceleration disk and the jerk ball are treated as constraints to stay
 //! *under*, never as surfaces to ride: the emitted chain is pure
 //! [`StraightPhase`], so it carries zero representation error, and every phase
-//! is *proved* inside by [`certify::is_certified`] rather than sample-checked.
+//! is *proved* inside the disk, inside the ball, and free of motion reversal by
+//! [`certify::certified_span`] rather than sample-checked.
 //!
 //! Soundness comes from one reduction. On `[0, length]` the curvature
 //! `kappa(s) = kappa0 + sigma*s` is linear, so `|kappa|` peaks at an endpoint;
@@ -50,11 +51,16 @@ const STEADY_JERK_SHARE: f64 = 0.5;
 /// `3 kappa v a` cross term rather than on tangential jerk.
 const NORMAL_ACCEL_SHARE: f64 = 0.5;
 
-/// Relative inflation of the curvature term `kappa v^2` before it is deducted
-/// from the acceleration disk, so a chain at the top speed sits strictly inside
-/// the disk instead of exactly on its edge. It scales with the curvature term
-/// itself and so vanishes on a straight member.
+/// Share of the curvature term `kappa v^2` withheld from the acceleration
+/// authority left inside the disk, so a chain at the top speed sits strictly
+/// inside the disk instead of exactly on its edge. It scales with the curvature
+/// term itself and so vanishes on a straight member.
 const DISK_RAIL_MARGIN: f64 = 1e-3;
+
+/// Overshoot of the curvature term past `accel`, relative to `accel`, that is
+/// attributable to the rounding in [`top_speed_ceiling`]'s own `sqrt(accel/k)`
+/// rather than to a caller asking for a speed above the ceiling.
+const DISK_RIM_ROUNDING: f64 = 1.0e-12;
 
 const TOP_BISECT_ITERS: u32 = 48;
 const ARC_BISECT_ITERS: u32 = 64;
@@ -76,10 +82,10 @@ const REQUIREMENT_MATCH_REL_TOL: f64 = 1.0e-9;
 
 const LENGTH_CLOSURE_REL_TOL: f64 = 1.0e-9;
 
-struct Caps {
-    v: f64,
-    a: f64,
-    j: f64,
+pub(super) struct Caps {
+    pub(super) v: f64,
+    pub(super) a: f64,
+    pub(super) j: f64,
 }
 
 fn reversed(kin: &Kinematics) -> Kinematics {
@@ -143,30 +149,87 @@ pub(super) fn top_speed_ceiling(kin: &Kinematics) -> f64 {
     v
 }
 
+/// Acceleration authority left inside the disk at `v_top` once the curvature
+/// term has been paid for, with a margin proportional to that term so a chain at
+/// the top speed sits strictly inside the disk rather than on its edge. Zero is
+/// the [`cruise_only`] regime, not a failure; a curvature term genuinely outside
+/// the disk is a caller contract breach and fails loudly.
+fn disk_authority(kin: &Kinematics, k: f64, v_top: f64) -> f64 {
+    let rail = k * v_top * v_top;
+    assert!(
+        rail <= kin.accel * (1.0 + DISK_RIM_ROUNDING),
+        "curved: top speed {v_top} puts the curvature term {rail} outside the acceleration disk \
+         {}; caps_at must be called at or below top_speed_ceiling",
+        kin.accel
+    );
+    let on_the_rim = rail.min(kin.accel);
+    let inside = (kin.accel * kin.accel - on_the_rim * on_the_rim).sqrt();
+    let margin = DISK_RAIL_MARGIN * rail;
+    if inside <= margin {
+        0.0
+    } else {
+        inside - margin
+    }
+}
+
 /// Acceleration and jerk budgets that are feasible everywhere on the member for
-/// every state at or below `v_top`. Both fall monotonically as `v_top` rises.
-fn caps_at(kin: &Kinematics, v_top: f64) -> Caps {
+/// every state at or below `v_top`. The acceleration cap falls monotonically as
+/// `v_top` rises; the jerk cap does *not* — see [`bracket_jerk_floor`].
+pub(super) fn caps_at(kin: &Kinematics, v_top: f64) -> Caps {
     let k = kappa_bound(kin);
-    let g = steady_jerk_gain(kin);
-    let ball_slack = kin.jerk - v_top * v_top * v_top * g;
+    let ball_slack = ball_slack_at(kin, v_top);
     assert!(
         ball_slack > 0.0,
         "curved: top speed {v_top} is above the jerk rail; caps_at must be called at or below \
          top_speed_ceiling"
     );
-    let rail = k * v_top * v_top * (1.0 + DISK_RAIL_MARGIN);
-    let disk_accel = (kin.accel * kin.accel - rail * rail).max(0.0).sqrt();
+    let disk_accel = disk_authority(kin, k, v_top);
     let cross_gain = 3.0 * k * v_top;
-    let a = if cross_gain > 0.0 {
-        disk_accel.min(NORMAL_ACCEL_SHARE * ball_slack / cross_gain)
-    } else {
-        disk_accel
-    };
-    Caps {
-        v: v_top,
-        a,
-        j: ball_slack - cross_gain * a,
+    if cross_gain <= 0.0 {
+        return Caps {
+            v: v_top,
+            a: disk_accel,
+            j: ball_slack,
+        };
     }
+    let cross_can_afford = NORMAL_ACCEL_SHARE * ball_slack / cross_gain;
+    if disk_accel <= cross_can_afford {
+        Caps {
+            v: v_top,
+            a: disk_accel,
+            j: ball_slack - cross_gain * disk_accel,
+        }
+    } else {
+        Caps {
+            v: v_top,
+            a: cross_can_afford,
+            j: (1.0 - NORMAL_ACCEL_SHARE) * ball_slack,
+        }
+    }
+}
+
+fn ball_slack_at(kin: &Kinematics, v_top: f64) -> f64 {
+    kin.jerk - v_top * v_top * v_top * steady_jerk_gain(kin)
+}
+
+/// A jerk budget no larger than `caps_at(v).j` for any `v` in `[0, ceiling]`.
+///
+/// `caps.j` is *not* monotone in `v_top`: on the disk-limited branch the
+/// `3 kappa v a` deduction vanishes together with the disk authority, so the cap
+/// rises again as the ceiling is approached. Two bounds hold branch by branch —
+/// the cross term never spends more than `NORMAL_ACCEL_SHARE` of the slack, and
+/// the acceleration it multiplies never exceeds `accel` — and the slack itself
+/// is smallest at the ceiling, so the larger of the two evaluated there is a
+/// floor for the whole bracket.
+pub(super) fn bracket_jerk_floor(kin: &Kinematics, ceiling: f64) -> f64 {
+    let slack = ball_slack_at(kin, ceiling);
+    assert!(
+        slack > 0.0,
+        "curved: ceiling {ceiling} is above the jerk rail; slack {slack}"
+    );
+    let ball_limited = (1.0 - NORMAL_ACCEL_SHARE) * slack;
+    let disk_limited = slack - 3.0 * kappa_bound(kin) * ceiling * kin.accel;
+    ball_limited.max(disk_limited)
 }
 
 /// Speed change of a constant-jerk swing between zero acceleration and `a`.
@@ -180,15 +243,15 @@ fn infeasible<T>(why: BoundaryInfeasibility) -> Result<T, VelocityError> {
 
 /// Lowest top speed at which the boundary states are admissible at all: neither
 /// end, nor the speed its acceleration unwinds to, may sit above the cap. The
-/// swing costs are measured with the *smallest* jerk budget in the bracket, so
-/// the answer is a floor for every candidate above it.
+/// swing costs are measured with [`bracket_jerk_floor`], so the answer is a
+/// floor for every candidate in the bracket rather than for one point of it.
 fn required_top(
     kin: &Kinematics,
     entry: (f64, f64),
     exit: Option<(f64, f64)>,
     ceiling: f64,
 ) -> Result<f64, VelocityError> {
-    let j = caps_at(kin, ceiling).j;
+    let j = bracket_jerk_floor(kin, ceiling);
     let mut states = vec![entry];
     if let Some(e) = exit {
         states.push(e);
@@ -223,10 +286,23 @@ fn bracket_floor(need: f64, ceiling: f64) -> f64 {
     need.max(ceiling * LOWEST_TOP_SHARE).min(ceiling)
 }
 
-/// Largest `v_top` in `[lo, hi]` that `admits`, given `admits(lo)` and
-/// `!admits(hi)`. The predicate is monotone: every cap the search trades on
-/// falls as `v_top` rises.
+/// Largest `v_top` in `[lo, hi]` that `admits`. The bracket preconditions are
+/// asserted rather than assumed: the caps the predicates trade on are not all
+/// monotone in `v_top`, so a caller that hands over an unbracketed predicate
+/// must fail loudly instead of settling on `lo`.
 fn largest_admissible(lo: f64, hi: f64, admits: impl Fn(f64) -> bool) -> f64 {
+    assert!(
+        lo <= hi,
+        "curved: bisection bracket is inverted, lo={lo} hi={hi}"
+    );
+    assert!(
+        admits(lo),
+        "curved: bisection entered with an inadmissible floor v_top={lo}"
+    );
+    assert!(
+        !admits(hi),
+        "curved: bisection entered with an admissible ceiling v_top={hi}"
+    );
     let (mut good, mut bad) = (lo, hi);
     for _ in 0..TOP_BISECT_ITERS {
         let mid = 0.5 * (good + bad);
@@ -370,18 +446,24 @@ fn hold_trigger(v: f64, a: f64, v_cap: f64, j: f64) -> f64 {
 /// the span cannot cover it: at rest with no acceleration, or braking to a stop
 /// first. The caller then leaves the member unclosed and the closure check
 /// reports it.
+///
+/// The root is taken in the form `2 ds / (v + sqrt(disc))` rather than
+/// `(sqrt(disc) - v) / a`: the latter cancels away the entire answer when `a` is
+/// the rounding residue a wind-down leaves behind, and reports a cruise of zero
+/// length on a member that closes comfortably.
 fn zero_jerk_arc_time(v: f64, a: f64, ds: f64) -> Option<f64> {
     if ds <= 0.0 {
         return Some(0.0);
-    }
-    if a == 0.0 {
-        return if v > 0.0 { Some(ds / v) } else { None };
     }
     let disc = v * v + 2.0 * a * ds;
     if disc < 0.0 {
         return None;
     }
-    let t = (disc.sqrt() - v) / a;
+    let opening_speed = v + disc.sqrt();
+    if opening_speed <= 0.0 {
+        return None;
+    }
+    let t = 2.0 * ds / opening_speed;
     if t.is_finite() && t >= 0.0 {
         Some(t)
     } else {
@@ -433,9 +515,10 @@ fn end_state(chain: &[StraightPhase], entry: (f64, f64)) -> (f64, f64) {
     }
 }
 
-/// Re-emit `chain` as phases the certificate proves feasible over their whole
-/// span, splitting at the certified dwell where it refuses one whole. The split
-/// states lie on the same cubic, so the trajectory is unchanged.
+/// Re-emit `chain` as phases the certificate proves feasible — inside the disk,
+/// inside the jerk ball, and never reversing — over their whole span, splitting
+/// at the certified dwell where it refuses one whole. The split states lie on
+/// the same cubic, so the trajectory is unchanged.
 pub(super) fn certified_chain(
     kin: &Kinematics,
     chain: &[StraightPhase],
@@ -447,12 +530,7 @@ pub(super) fn certified_chain(
         let mut left = p.dt;
         let mut splits = 0usize;
         while left > 0.0 {
-            let dwell = certify::certified_dwell(kin, s, v, a, p.j, left);
-            let step = if dwell >= left * (1.0 - certify::DWELL_REL_TOL) {
-                left
-            } else {
-                dwell
-            };
+            let step = certify::certified_span(kin, s, v, a, p.j, left);
             if step <= 0.0 || splits >= MAX_CERTIFY_SPLITS {
                 return Err(VelocityError::UncertifiedPhase {
                     s0: s,
@@ -512,10 +590,17 @@ fn reach_chain(kin: &Kinematics, entry: (f64, f64)) -> Result<Vec<StraightPhase>
     let need = required_top(kin, entry, None, ceiling)?;
     let lo = bracket_floor(need, ceiling);
 
+    let floor_authority = caps_at(kin, lo).a;
+    if floor_authority < entry.1.abs() {
+        return infeasible(BoundaryInfeasibility::AccelOverLimit {
+            a: entry.1,
+            a_max: floor_authority,
+        });
+    }
+
     let saturates = |v_top: f64| {
         let caps = caps_at(kin, v_top);
         caps.a >= entry.1.abs()
-            && caps.v >= need
             && end_state(
                 &march_forward(&caps, entry, kin.length, f64::INFINITY).phases,
                 entry,
@@ -525,16 +610,18 @@ fn reach_chain(kin: &Kinematics, entry: (f64, f64)) -> Result<Vec<StraightPhase>
 
     let top = if saturates(ceiling) {
         ceiling
-    } else {
+    } else if saturates(lo) {
         largest_admissible(lo, ceiling, saturates)
+    } else {
+        lo
     };
     let caps = caps_at(kin, top);
-    if caps.a < entry.1.abs() {
-        return infeasible(BoundaryInfeasibility::AccelOverLimit {
-            a: entry.1,
-            a_max: caps.a,
-        });
-    }
+    assert!(
+        caps.a >= entry.1.abs(),
+        "curved: chosen top speed {top} lost the entry acceleration fit {} against cap {}",
+        entry.1,
+        caps.a
+    );
     let marched = march_forward(&caps, entry, kin.length, caps.v);
     if kin.length - marched.s > LENGTH_CLOSURE_REL_TOL * kin.length {
         return infeasible(BoundaryInfeasibility::LengthNotClosed {
@@ -562,10 +649,16 @@ fn cruise_only(
         });
     }
     let v = entry.0;
-    if v <= 0.0 || (exit.0 - v).abs() > LENGTH_CLOSURE_REL_TOL * (1.0 + v) {
-        return infeasible(BoundaryInfeasibility::LengthTooShort {
-            length: kin.length,
-            minimum: f64::INFINITY,
+    if (exit.0 - v).abs() > LENGTH_CLOSURE_REL_TOL * (1.0 + v) {
+        return infeasible(BoundaryInfeasibility::SpeedChangeWithoutAuthority {
+            from: v,
+            to: exit.0,
+        });
+    }
+    if v <= 0.0 {
+        return infeasible(BoundaryInfeasibility::LengthNotClosed {
+            requested: kin.length,
+            achieved: 0.0,
         });
     }
     Ok(vec![StraightPhase {
@@ -578,9 +671,24 @@ fn cruise_only(
     }])
 }
 
+/// Whether a planning failure means *these caps* were too weak, so a lower top
+/// speed — which buys authority — is worth trying. Everything else is a broken
+/// boundary state or a solver bug and belongs to the caller, not to a bisection.
+fn caps_too_weak(e: &VelocityError) -> bool {
+    matches!(
+        e,
+        VelocityError::InfeasibleBoundary(
+            BoundaryInfeasibility::LengthTooShort { .. }
+                | BoundaryInfeasibility::UnwindBelowRest { .. }
+                | BoundaryInfeasibility::UnwindOverCeiling { .. }
+                | BoundaryInfeasibility::AccelOverLimit { .. }
+        )
+    )
+}
+
 /// Largest top speed whose caps still close the member between the boundary
-/// states. Authority falls as the cap rises, so feasibility is monotone and the
-/// bracket is `[required_top, top_speed_ceiling]`.
+/// states. The bracket is `[required_top, top_speed_ceiling]`; its ends are
+/// established by planning at both before the bisection starts.
 fn bounded_plan(
     kin: &Kinematics,
     entry: (f64, f64),
@@ -596,8 +704,10 @@ fn bounded_plan(
         let caps = caps_at(kin, v_top);
         profile::straight_chain_between(entry, exit, kin.length, caps.v, caps.a, caps.j)
     };
-    if let Ok(chain) = plan(ceiling) {
-        return Ok(chain);
+    match plan(ceiling) {
+        Ok(chain) => return Ok(chain),
+        Err(e) if !caps_too_weak(&e) => return Err(e),
+        Err(_) => {}
     }
     let mut best = plan(lo)?;
     let mut good = lo;
@@ -612,6 +722,7 @@ fn bounded_plan(
                 best = chain;
                 good = mid;
             }
+            Err(e) if !caps_too_weak(&e) => return Err(e),
             Err(_) => bad = mid,
         }
     }
@@ -657,14 +768,17 @@ pub(super) fn curved_chain(
         Err(bounded) => {
             let back = reversed(kin);
             let seed = (exit.0, -exit.1);
-            let Ok(backward) = reach_chain(&back, seed) else {
-                return Err(bounded);
-            };
-            let (v, a) = end_state(&backward, seed);
-            if states_match(entry, (v, -a)) {
-                certified_chain(kin, &reverse_chain(kin.length, &backward))
-            } else {
-                Err(bounded)
+            match reach_chain(&back, seed) {
+                Ok(backward) => {
+                    let (v, a) = end_state(&backward, seed);
+                    if states_match(entry, (v, -a)) {
+                        certified_chain(kin, &reverse_chain(kin.length, &backward))
+                    } else {
+                        Err(bounded)
+                    }
+                }
+                Err(backward) if !caps_too_weak(&backward) => Err(backward),
+                Err(_) => Err(bounded),
             }
         }
     }

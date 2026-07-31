@@ -3,9 +3,10 @@
 //! On local time `tau` in `[0, dt]` the phase state is exact polynomial:
 //! `a = a0 + j*tau`, `v = v0 + a0*tau + j*tau^2/2`,
 //! `s = s0 + v0*tau + a0*tau^2/2 + j*tau^3/6`, `kappa = kappa0 + sigma*s`.
-//! The two feasibility residuals are therefore polynomials too,
-//! `R_d = A^2 - a^2 - kappa^2 v^4` (degree 14) and
-//! `R_b = J^2 - (j - kappa^2 v^3)^2 - (sigma v^3 + 3 kappa v a)^2` (degree 24).
+//! The three feasibility residuals are therefore polynomials too,
+//! `R_d = A^2 - a^2 - kappa^2 v^4` (degree 14),
+//! `R_b = J^2 - (j - kappa^2 v^3)^2 - (sigma v^3 + 3 kappa v a)^2` (degree 24)
+//! and `R_v = v` (degree 2), which forbids motion reversal.
 //! A polynomial whose Bernstein coefficients on an interval are all nonnegative
 //! is nonnegative on the whole interval — the certificate is that test, tightened
 //! by de Casteljau subdivision. It is one-sided by construction: a certified
@@ -17,17 +18,25 @@ const MAX_DEGREE: usize = 24;
 const COEFFS: usize = MAX_DEGREE + 1;
 const SUBDIVISION_DEPTH: u32 = 5;
 const DWELL_BISECT_ITERS: u32 = 40;
-const CONVERSION_ULPS: f64 = 4.0;
+
+/// Rounding slack, in ulps of the summed magnitude, charged to each Bernstein
+/// coefficient of a degree-`deg` polynomial. Forming one coefficient commits up
+/// to `deg` roundings accumulating `span^k`, `deg` more in the weight
+/// recurrence, and one each in the product and the sum.
+fn conversion_ulps(deg: usize) -> f64 {
+    2.0 * (deg + 2) as f64
+}
 
 /// Slack, relative to the natural scale of each residual (`A^2` for the disk,
-/// `J^2` for the ball), inside which a residual counts as nonnegative. Without
-/// it an exactly-on-the-rail phase (`a == A`, `j == J`) would fail on its own
-/// rounding.
+/// `J^2` for the ball, the flat ceiling for the speed), inside which a residual
+/// counts as nonnegative. Without it an exactly-on-the-rail phase (`a == A`,
+/// `j == J`) would fail on its own rounding. It also absorbs the rounding the
+/// residual polynomials pick up while `residuals` composes them.
 pub(super) const CERTIFICATE_REL_TOL: f64 = 1e-11;
 
-/// Shortfall of [`certified_dwell`] against `dt` that [`is_certified`] forgives,
-/// relative to `dt`. It absorbs the bisection's own resolution.
-pub(super) const DWELL_REL_TOL: f64 = 1e-9;
+/// Shortfall of the dwell bisection against `dt` that [`certified_span`]
+/// forgives, relative to `dt`: the bisection's own resolution and nothing more.
+pub(super) const DWELL_REL_TOL: f64 = 1.0 / ((1u64 << (DWELL_BISECT_ITERS - 2)) as f64);
 
 #[derive(Clone, Copy)]
 struct Poly {
@@ -100,6 +109,14 @@ impl Poly {
         out.c[0] += x;
         out
     }
+
+    fn eval(&self, x: f64) -> f64 {
+        let mut acc = 0.0;
+        for i in (0..=self.deg).rev() {
+            acc = acc * x + self.c[i];
+        }
+        acc
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -142,7 +159,7 @@ impl Bernstein {
                 }
             }
             out.b[i] = sum;
-            out.slack[i] = magnitude * CONVERSION_ULPS * f64::EPSILON;
+            out.slack[i] = magnitude * conversion_ulps(n) * f64::EPSILON;
         }
         out
     }
@@ -201,14 +218,23 @@ fn is_nonneg_on(p: &Poly, span: f64, tol: f64) -> bool {
 struct Residuals {
     disk: Poly,
     ball: Poly,
+    speed: Poly,
     disk_tol: f64,
     ball_tol: f64,
+    speed_tol: f64,
 }
 
 impl Residuals {
     fn certified_on(&self, span: f64) -> bool {
         is_nonneg_on(&self.disk, span, self.disk_tol)
             && is_nonneg_on(&self.ball, span, self.ball_tol)
+            && is_nonneg_on(&self.speed, span, self.speed_tol)
+    }
+
+    fn feasible_at(&self, tau: f64) -> bool {
+        self.disk.eval(tau) >= -self.disk_tol
+            && self.ball.eval(tau) >= -self.ball_tol
+            && self.speed.eval(tau) >= -self.speed_tol
     }
 }
 
@@ -238,8 +264,10 @@ fn residuals(kin: &Kinematics, s0: f64, v0: f64, a0: f64, j: f64) -> Residuals {
     Residuals {
         disk_tol: CERTIFICATE_REL_TOL * kin.accel * kin.accel,
         ball_tol: CERTIFICATE_REL_TOL * kin.jerk * kin.jerk,
+        speed_tol: CERTIFICATE_REL_TOL * kin.flat_ceiling,
         disk,
         ball,
+        speed,
     }
 }
 
@@ -278,8 +306,8 @@ fn validate(kin: &Kinematics, s0: f64, v0: f64, a0: f64, j: f64, dt: f64) {
     assert!(dt >= 0.0, "certify: dt must be nonnegative, got {dt}");
 }
 
-/// Largest `tau <= dt` for which both residuals are *proved* nonnegative on the
-/// whole of `[0, tau]`. Never exceeds the true first-violation time.
+/// Largest `tau <= dt` for which all three residuals are *proved* nonnegative on
+/// the whole of `[0, tau]`. Never exceeds the true first-violation time.
 pub(super) fn certified_dwell(kin: &Kinematics, s0: f64, v0: f64, a0: f64, j: f64, dt: f64) -> f64 {
     validate(kin, s0, v0, a0, j, dt);
     if dt == 0.0 {
@@ -305,6 +333,22 @@ pub(super) fn certified_dwell(kin: &Kinematics, s0: f64, v0: f64, a0: f64, j: f6
     lo
 }
 
+/// Span a caller may emit as one phase: `dt` when the whole of it is proved, and
+/// otherwise the certified dwell. A shortfall inside the bisection's own
+/// resolution is rounded up to `dt` only when the state at `dt` is itself
+/// feasible, so a violation living in that terminal sliver is never absorbed.
+pub(super) fn certified_span(kin: &Kinematics, s0: f64, v0: f64, a0: f64, j: f64, dt: f64) -> f64 {
+    let dwell = certified_dwell(kin, s0, v0, a0, j, dt);
+    if dwell >= dt {
+        return dwell;
+    }
+    if dwell >= dt * (1.0 - DWELL_REL_TOL) && residuals(kin, s0, v0, a0, j).feasible_at(dt) {
+        dt
+    } else {
+        dwell
+    }
+}
+
 pub(super) fn is_certified(kin: &Kinematics, s0: f64, v0: f64, a0: f64, j: f64, dt: f64) -> bool {
-    certified_dwell(kin, s0, v0, a0, j, dt) >= dt * (1.0 - DWELL_REL_TOL)
+    certified_span(kin, s0, v0, a0, j, dt) >= dt
 }

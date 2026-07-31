@@ -40,14 +40,18 @@ fn dwell(kin: &Kinematics, ph: &Phase) -> f64 {
     certified_dwell(kin, ph.s0, ph.v0, ph.a0, ph.j, ph.dt)
 }
 
-/// First sampled `tau` at which either residual drops below the same slack the
+/// First sampled `tau` at which any residual drops below the same slack the
 /// certificate allows itself, or `None` if the scan stays feasible throughout.
 fn scan_first_violation(kin: &Kinematics, ph: &Phase, samples: usize) -> Option<f64> {
     let disk_tol = CERTIFICATE_REL_TOL * kin.accel * kin.accel;
     let ball_tol = CERTIFICATE_REL_TOL * kin.jerk * kin.jerk;
+    let speed_tol = CERTIFICATE_REL_TOL * kin.flat_ceiling;
     for i in 0..=samples {
         let tau = ph.dt * (i as f64) / (samples as f64);
-        if disk_residual(kin, ph, tau) < -disk_tol || ball_residual(kin, ph, tau) < -ball_tol {
+        if disk_residual(kin, ph, tau) < -disk_tol
+            || ball_residual(kin, ph, tau) < -ball_tol
+            || state_at(ph, tau).1 < -speed_tol
+        {
             return Some(tau);
         }
     }
@@ -461,5 +465,41 @@ fn certified_dwell_cost_is_measured() {
     assert!(
         per_call_us < 500.0,
         "certified_dwell cost blew past a sane ceiling: {per_call_us} us/call"
+    );
+}
+
+#[test]
+fn a_terminal_sliver_violation_is_not_forgiven() {
+    let kin = Kinematics {
+        length: 100.0,
+        accel: 1000.0,
+        jerk: 1.0e6,
+        kappa0: 0.0,
+        sigma: 0.0,
+        flat_ceiling: 500.0,
+    };
+    let (dt, j) = (0.01, 1.0e5);
+    let crosses_the_rail_at_the_very_end = Phase {
+        s0: 0.0,
+        v0: 100.0,
+        a0: kin.accel - j * dt * (1.0 - 5.0e-10),
+        j,
+        dt,
+    };
+    let ph = &crosses_the_rail_at_the_very_end;
+    let disk_tol = CERTIFICATE_REL_TOL * kin.accel * kin.accel;
+    let end = disk_residual(&kin, ph, dt);
+    assert!(
+        end < -100.0 * disk_tol,
+        "the fixture must genuinely violate the disk at dt: residual {end} against tol {disk_tol}"
+    );
+    assert!(
+        disk_residual(&kin, ph, 0.0) > disk_tol,
+        "the fixture must start feasible"
+    );
+    assert!(
+        !is_certified(&kin, ph.s0, ph.v0, ph.a0, ph.j, ph.dt),
+        "is_certified forgave a violation {}x beyond its own disk tolerance",
+        end.abs() / disk_tol
     );
 }

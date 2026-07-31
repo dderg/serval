@@ -1273,3 +1273,143 @@ fn curvature_pinch_corner_plans_with_disk_consistent_samples() {
     window_consistency(&plan.moves[2], clo_k1, 0.0, accel);
     window_consistency(&plan.moves[3], clo_k1, -sigma, accel);
 }
+
+/// The reference corner blend as `fit_corners` builds it at corner_deviation
+/// 0.05 over a 90 degree turn: two clothoid halves meeting at the curvature
+/// peak, with a straight lead-in and lead-out.
+fn reference_blend_moves() -> (Vec<Move>, f64, f64, f64, f64) {
+    let (accel, jerk, feed) = (60_000.0, 1.5e8, 300.0);
+    let half_len = 0.141_146_f64;
+    let kappa_peak = 11.128_902_f64;
+    let sigma = kappa_peak / half_len;
+    let up = Clothoid::try_new(
+        [0.0; 3],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        0.0,
+        sigma,
+        half_len,
+    )
+    .unwrap();
+    let down = Clothoid::try_new(
+        [0.0; 3],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        kappa_peak,
+        -sigma,
+        half_len,
+    )
+    .unwrap();
+    let moves = with_jerk(
+        vec![
+            line_move(10.0, feed, feed, accel, 1),
+            line_move(0.5, feed, feed, accel, 2),
+            spatial_move(Segment::Clothoid(up), feed, feed, accel, 3),
+            spatial_move(Segment::Clothoid(down), feed, feed, accel, 4),
+            line_move(10.0, feed, feed, accel, 5),
+        ],
+        jerk,
+    );
+    (moves, sigma, accel, jerk, feed)
+}
+
+#[test]
+fn a_blend_entry_seam_is_capped_by_the_clothoid_jerk_rail_the_disk_never_sees() {
+    let (moves, sigma, _accel, jerk, feed) = reference_blend_moves();
+    let plan = plan(&outcome(moves, Vec::new())).expect("the reference blend must plan");
+
+    let seam = plan.boundaries[2].v;
+    assert!(
+        sigma * seam * seam * seam <= jerk,
+        "kappa = 0 blend seam at {seam} mm/s owes sigma*v^3 = {} of a {jerk} budget",
+        sigma * seam * seam * seam
+    );
+    assert!(
+        seam < feed,
+        "the rail must bind below the feedrate, got {seam} mm/s"
+    );
+}
+
+#[test]
+fn a_brake_limited_straight_demands_a_braking_entry_acceleration() {
+    let (moves, sigma, accel, jerk, feed) = reference_blend_moves();
+    let mut report = VelocityReport::default();
+    let caps = build_move_caps(&moves, f64::INFINITY, f64::INFINITY, &mut report).unwrap();
+    let apex = disk::limit_speed(sigma * caps[2].kin.length, accel);
+
+    let required = required_entry_state(&caps[1].kin, BoundaryState { v: apex, a: 0.0 })
+        .expect("a straight always names its entry requirement");
+
+    assert!(
+        required.a < 0.0,
+        "a short straight braking into the blend apex must be entered already braking, got {}",
+        required.a
+    );
+    assert!(required.a.abs() <= accel, "required brake over the budget");
+    assert!(required.v > apex && required.v <= feed);
+    assert!(
+        sigma * required.v.powi(3) > jerk,
+        "the straight owes no normal jerk, so its own requirement may sit above the blend's rail"
+    );
+}
+
+/// At the apex the disk spends the whole acceleration budget on curvature, so
+/// the blend half demands to be entered at its own holdable speed with the
+/// acceleration already wound to zero — a cruise, not a brake.
+#[test]
+fn a_disk_pinned_apex_demands_zero_entry_acceleration() {
+    let (moves, sigma, accel, _jerk, _feed) = reference_blend_moves();
+    let mut report = VelocityReport::default();
+    let caps = build_move_caps(&moves, f64::INFINITY, f64::INFINITY, &mut report).unwrap();
+    let apex = disk::limit_speed(sigma * caps[2].kin.length, accel);
+
+    let required = required_entry_state(&caps[2].kin, BoundaryState { v: apex, a: 0.0 })
+        .expect("the up-clothoid must name its entry requirement");
+
+    assert_eq!(required.a, 0.0, "got {}", required.a);
+    assert!((required.v - apex).abs() < 1e-6, "got {}", required.v);
+}
+
+#[test]
+fn a_required_entry_state_actually_closes_its_member() {
+    let (moves, _sigma, _accel, _jerk, _feed) = reference_blend_moves();
+    let mut report = VelocityReport::default();
+    let caps = build_move_caps(&moves, f64::INFINITY, f64::INFINITY, &mut report).unwrap();
+    let kin = &caps[0].kin;
+    let exit = BoundaryState { v: 40.0, a: -250.0 };
+
+    let required = required_entry_state(kin, exit).expect("a straight always names its entry");
+    let chain = profile::straight_chain_between(
+        (required.v, required.a),
+        (exit.v, exit.a),
+        kin.length,
+        kin.flat_ceiling,
+        kin.accel,
+        kin.jerk,
+    )
+    .expect("the state a member requires at its entry must close that member");
+    let (_, v_end, a_end) = chain.last().unwrap().end_state();
+    assert!((v_end - exit.v).abs() < 1e-6, "landed at {v_end}");
+    assert!((a_end - exit.a).abs() < 1e-3, "landed with a = {a_end}");
+}
+
+#[test]
+fn the_envelope_publishes_boundary_accelerations_and_names_what_it_cannot_reach() {
+    let (moves, _sigma, _accel, _jerk, _feed) = reference_blend_moves();
+    let plan = plan(&outcome(moves, Vec::new())).expect("the reference blend must plan");
+    let report = plan.report;
+
+    assert!(
+        report.boundary_accel_seams > 0,
+        "a corner's blend halves must pin at least one seam acceleration"
+    );
+    assert!(report.worst_boundary_accel_mm_s2 > 0.0);
+    assert_eq!(
+        report.worst_unreachable.is_some(),
+        report.unreachable_entry_states > 0,
+        "an unreachable count must come with the member that produced it"
+    );
+    if let Some(worst) = report.worst_unreachable {
+        assert!(worst.move_index < plan.moves.len());
+    }
+}

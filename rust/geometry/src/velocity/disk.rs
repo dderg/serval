@@ -1,7 +1,7 @@
 use std::f64::consts::FRAC_PI_2;
 
 use super::profile::{self, StraightPhase};
-use super::{BoundaryInfeasibility, VelocityError, certify, ride};
+use super::{BoundaryInfeasibility, VelocityError, certify, curved, ride};
 
 const RK_MIN_STEP_FRAC: f64 = 1e-6;
 const RK_MAX_STEPS: u32 = 100_000;
@@ -64,7 +64,7 @@ impl Kinematics {
         }
     }
 
-    fn is_straight(&self) -> bool {
+    pub(super) fn is_straight(&self) -> bool {
         self.kappa0.abs() <= KAPPA_EPS && self.sigma.abs() <= KAPPA_EPS
     }
 }
@@ -160,6 +160,7 @@ pub(super) fn disk_rail_accel(accel: f64, kappa_abs: f64, v: f64) -> f64 {
 pub(super) struct RunMember<'a> {
     pub kin: &'a Kinematics,
     pub exit_v: f64,
+    pub exit_a: f64,
     pub fwd_s: f64,
 }
 
@@ -355,7 +356,7 @@ fn certified_straight_chain(
     kin: &Kinematics,
     entry: (f64, f64),
     exit: (f64, f64),
-) -> Option<Vec<StraightPhase>> {
+) -> Result<Vec<StraightPhase>, VelocityError> {
     let chain = match profile::straight_chain_between(
         entry,
         exit,
@@ -365,11 +366,13 @@ fn certified_straight_chain(
         kin.jerk,
     ) {
         Ok(chain) => chain,
-        Err(VelocityError::InfeasibleBoundary(
-            BoundaryInfeasibility::LengthTooShort { .. }
-            | BoundaryInfeasibility::UnwindOverCeiling { .. }
-            | BoundaryInfeasibility::UnwindBelowRest { .. },
-        )) => return None,
+        Err(
+            why @ VelocityError::InfeasibleBoundary(
+                BoundaryInfeasibility::LengthTooShort { .. }
+                | BoundaryInfeasibility::UnwindOverCeiling { .. }
+                | BoundaryInfeasibility::UnwindBelowRest { .. },
+            ),
+        ) => return Err(why),
         Err(why) => panic!(
             "straight member length {} entry {entry:?} exit {exit:?} under \
              v_max {} a_max {} j_max {} is unplannable: {why:?}",
@@ -382,7 +385,7 @@ fn certified_straight_chain(
         kin.length
     );
     certify_or_panic(kin, &chain);
-    Some(chain)
+    Ok(chain)
 }
 
 /// Re-read a member's samples off its own analytic chain: the samples become a
@@ -1055,8 +1058,8 @@ fn reconstruct_flat(
                 only.fwd_s, 0.0,
                 "a run's first member must start at run-arc zero"
             );
-            if let Some(chain) =
-                certified_straight_chain(only.kin, (entry_v, run_start_a), (exit_v, 0.0))
+            if let Ok(chain) =
+                certified_straight_chain(only.kin, (entry_v, run_start_a), (exit_v, only.exit_a))
             {
                 return Some((pinned_samples(&chain, &s, entry_v, exit_v), chain));
             }
@@ -1166,35 +1169,96 @@ fn interp_flat(flat: &[(f64, f64, f64)], s: f64) -> Option<(f64, f64)> {
     Some((lo.1 + t * (hi.1 - lo.1), lo.2 + t * (hi.2 - lo.2)))
 }
 
+/// A member no chain can close between the two boundary states its envelope
+/// neighbours fixed: the entry state its predecessor must hand it is not one
+/// this member can be entered at and still land on its own exit.
+pub(super) struct UnreachableMember {
+    pub index: usize,
+    pub entry: (f64, f64),
+    pub exit: (f64, f64),
+}
+
+pub(super) struct RunReconstruction {
+    pub samples: Vec<Vec<(f64, f64, f64)>>,
+    pub exit_states: Vec<(f64, f64)>,
+    pub phases: Vec<Vec<StraightPhase>>,
+    /// Per-member chain planned between the run's `(v, a)` boundary states.
+    /// Empty where the member has no solver. This is what `phases` becomes once
+    /// the marcher is retired; until then only the members whose chain the
+    /// lowering already consumes are published through `phases`.
+    pub envelope_chains: Vec<Vec<StraightPhase>>,
+    pub unreachable: Vec<UnreachableMember>,
+}
+
+/// The run's boundary states in order: the run's own entry, then each member's
+/// envelope exit. Member `i` is planned from `boundary[i]` to `boundary[i + 1]`.
+fn run_boundary_states(
+    members: &[RunMember],
+    run_start_v: f64,
+    run_start_a: f64,
+) -> Vec<(f64, f64)> {
+    let mut boundary = Vec::with_capacity(members.len() + 1);
+    boundary.push((run_start_v, run_start_a));
+    boundary.extend(members.iter().map(|m| (m.exit_v, m.exit_a)));
+    boundary
+}
+
+pub(super) fn curved_solver_is_available(kin: &Kinematics) -> bool {
+    kin.length > 0.0
+        && kin.length.is_finite()
+        && kin.accel > 0.0
+        && kin.jerk > 0.0
+        && kin.jerk.is_finite()
+        && kin.flat_ceiling > 0.0
+        && kin.kappa0.is_finite()
+        && kin.sigma.is_finite()
+}
+
+/// The chain a member executes between two known boundary states: the closed
+/// form on a straight, the certified curved solver on anything with curvature.
+fn member_chain(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> Option<Result<Vec<StraightPhase>, VelocityError>> {
+    if closed_form_is_available(kin) {
+        Some(certified_straight_chain(kin, entry, exit))
+    } else if curved_solver_is_available(kin) {
+        Some(curved::curved_chain(kin, entry, exit))
+    } else {
+        None
+    }
+}
+
 /// Reconstruct the run: per-member `(s, v, a)` samples, the profile state
 /// `(v, a)` at each member's exit seam (what a streaming cut carries into the
 /// next window to continue this exact curve), and per-member closed-form jerk
-/// phases in move-local time/arc-length. A straight member is solved outright
-/// by [`certified_straight_chain`] between its boundary states and its samples
-/// re-read off that chain, so nothing about it is marched; only a boundary
-/// pair the closed form cannot close falls back to a clip of the run's chain.
-/// Curved members get theirs only under unlimited jerk, where the chain is a
-/// handful of merged constant-acceleration spans: the lowering fits axis
-/// positions against that exact scalar profile instead of quintic windows over
-/// stepped samples. A finite-jerk curved chain is left out — its per-substep
-/// phases would say nothing the smooth samples don't already.
-#[allow(clippy::type_complexity)]
+/// phases in move-local time/arc-length.
+///
+/// Two chains are built per member. The envelope chain plans it between the two
+/// `(v, a)` boundary states the backward requirement pass fixed — the state its
+/// predecessor hands it and the state its successor requires — so a blend
+/// inherits its entry brake instead of manufacturing one at a seam with no
+/// authority to build it. The published chain is the marched run's, clipped or
+/// re-solved at the marched seam states, and stays authoritative while the
+/// marcher still owns curved samples.
 pub(super) fn reconstruct_run(
     members: &[RunMember],
     run_start_v: f64,
     run_start_a: f64,
     _tol: f64,
-) -> Option<(
-    Vec<Vec<(f64, f64, f64)>>,
-    Vec<(f64, f64)>,
-    Vec<Vec<StraightPhase>>,
-)> {
+) -> Option<RunReconstruction> {
     let (flat, chain) = reconstruct_flat(members, run_start_v, run_start_a)?;
+    let boundary = run_boundary_states(members, run_start_v, run_start_a);
 
-    let mut per_member: Vec<Vec<(f64, f64, f64)>> = Vec::with_capacity(members.len());
-    let mut exit_states: Vec<(f64, f64)> = Vec::with_capacity(members.len());
-    let mut per_member_phases: Vec<Vec<StraightPhase>> = Vec::with_capacity(members.len());
-    for m in members {
+    let mut out = RunReconstruction {
+        samples: Vec::with_capacity(members.len()),
+        exit_states: Vec::with_capacity(members.len()),
+        phases: Vec::with_capacity(members.len()),
+        envelope_chains: Vec::with_capacity(members.len()),
+        unreachable: Vec::new(),
+    };
+    for (index, m) in members.iter().enumerate() {
         let s0 = m.fwd_s;
         let s1 = m.fwd_s + m.kin.length;
         let lo = flat.partition_point(|p| p.0 < s0 - 1e-9);
@@ -1221,18 +1285,35 @@ pub(super) fn reconstruct_run(
         if let Some(last) = local.last_mut() {
             last.0 = m.kin.length;
         }
+
+        let envelope_entry = boundary[index];
+        let envelope_exit = boundary[index + 1];
+        out.envelope_chains
+            .push(match member_chain(m.kin, envelope_entry, envelope_exit) {
+                Some(Ok(built)) => built,
+                Some(Err(_)) => {
+                    out.unreachable.push(UnreachableMember {
+                        index,
+                        entry: envelope_entry,
+                        exit: envelope_exit,
+                    });
+                    Vec::new()
+                }
+                None => Vec::new(),
+            });
+
         let entry = interp_flat(&flat, s0)?;
         let exit = interp_flat(&flat, s1)?;
         let analytic = closed_form_is_available(m.kin)
-            .then(|| certified_straight_chain(m.kin, entry, exit))
+            .then(|| certified_straight_chain(m.kin, entry, exit).ok())
             .flatten();
         if let Some(built) = &analytic {
             restate_from_chain(&mut local, built, entry, exit);
         }
-        per_member.push(local);
-        exit_states.push(exit_state_at(&flat, s1));
+        out.samples.push(local);
+        out.exit_states.push(exit_state_at(&flat, s1));
         let phases_apply = m.kin.is_straight() || !m.kin.jerk.is_finite();
-        per_member_phases.push(match analytic {
+        out.phases.push(match analytic {
             Some(built) => built,
             None if chain.is_empty() || !phases_apply => Vec::new(),
             None => {
@@ -1245,7 +1326,7 @@ pub(super) fn reconstruct_run(
             }
         });
     }
-    Some((per_member, exit_states, per_member_phases))
+    Some(out)
 }
 
 /// Profile state at run-arc `s`: the emitted samples carry the pass's true
@@ -1266,10 +1347,11 @@ pub(super) fn sample_profile(
     let member = RunMember {
         kin,
         exit_v: exit,
+        exit_a: 0.0,
         fwd_s: 0.0,
     };
     reconstruct_run(&[member], entry, 0.0, tol)?
-        .0
+        .samples
         .into_iter()
         .next()
 }

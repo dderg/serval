@@ -84,6 +84,7 @@ pub enum BoundaryInfeasibility {
     UnwindOverCeiling { v: f64, v_max: f64 },
     LengthTooShort { length: f64, minimum: f64 },
     LengthNotClosed { requested: f64, achieved: f64 },
+    SpeedChangeWithoutAuthority { from: f64, to: f64 },
 }
 
 pub struct Profile {

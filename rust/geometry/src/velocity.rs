@@ -53,6 +53,23 @@ pub struct MoveVelocity {
     pub source: SourceRange,
 }
 
+/// The member the envelope solver could not plan between the two boundary
+/// states its neighbours fixed, named so the failure is actionable rather than
+/// a bare count.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UnreachableEntryState {
+    pub move_index: usize,
+    pub line_no: u32,
+    pub entry: BoundaryState,
+    pub exit: BoundaryState,
+}
+
+impl UnreachableEntryState {
+    fn accel_magnitude(&self) -> f64 {
+        self.entry.a.abs().max(self.exit.a.abs())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct VelocityReport {
     pub stops: u32,
@@ -61,6 +78,18 @@ pub struct VelocityReport {
     pub jerk_bound: u32,
     pub limit_ride: u32,
     pub traversal_time_s: f64,
+    /// Seams whose boundary state carries a nonzero acceleration inherited from
+    /// the member downstream of them: the brake a blend interior needs, carried
+    /// into a seam that has no authority to build one.
+    pub boundary_accel_seams: u32,
+    pub worst_boundary_accel_mm_s2: f64,
+    /// Members whose backward solve could not name an entry requirement at all.
+    pub entry_requirement_unsolved: u32,
+    /// Members the forward emission could not plan between their two envelope
+    /// boundary states. Until this reaches zero the envelope chains cannot
+    /// replace the marched profile.
+    pub unreachable_entry_states: u32,
+    pub worst_unreachable: Option<UnreachableEntryState>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -236,10 +265,11 @@ pub fn plan_velocity_stops(
     )?;
     check_entry_ceiling(moves, &caps, entry, tol)?;
     let mut plan = seed_seam_velocities(&caps, stop_before, entry, &mut report);
-    let geo = compute_run_geometry(&caps, &plan, entry.a);
+    let geo = compute_run_geometry(&caps, &plan);
     forward_pass(moves, &caps, &geo, &mut plan.v, tol)?;
     let (barrier, v_barrier) = reverse_brake_envelope(moves, &caps, &geo, &mut plan.v, tol)?;
     check_entry_brake(moves, &caps, &geo, &plan.v, entry, tol)?;
+    boundary_state_envelope(&caps, &mut plan, &mut report);
     let (out, boundaries) = reconstruct_runs(moves, &caps, &plan, &geo, entry, tol, &mut report)?;
 
     Ok(VelocityProfile {
@@ -356,6 +386,7 @@ fn check_entry_ceiling(
 
 struct SeamPlan {
     v: Vec<f64>,
+    a: Vec<f64>,
     is_anchor: Vec<bool>,
 }
 
@@ -368,6 +399,8 @@ fn seed_seam_velocities(
     let n = caps.len();
     let mut v = vec![0.0_f64; n + 1];
     v[0] = entry.v;
+    let mut a = vec![0.0_f64; n + 1];
+    a[0] = entry.a;
     let mut is_anchor = vec![false; n + 1];
     is_anchor[0] = true;
     is_anchor[n] = true;
@@ -386,7 +419,89 @@ fn seed_seam_velocities(
             v[k] = ceiling.min(disk::notch_free_min(ceiling, boundary_vlim));
         }
     }
-    SeamPlan { v, is_anchor }
+    SeamPlan { v, a, is_anchor }
+}
+
+/// The `(v, a)` a member requires at its entry to land on the exit state the
+/// envelope has already fixed for it. Solved backward: a curved member by the
+/// closed-form curved solver, a straight one by the reversed jerk-limited reach,
+/// whose acceleration flips sign on the way back. Under unlimited jerk the
+/// acceleration is free at every seam, so the member requires nothing.
+fn required_entry_state(kin: &Kinematics, exit: BoundaryState) -> Option<BoundaryState> {
+    if !kin.jerk.is_finite() {
+        return None;
+    }
+    if kin.is_straight() {
+        let (v, a) =
+            scurve::reach_velocity_with_accel(exit.v, -exit.a, kin.length, kin.accel, kin.jerk)
+                .ok()?;
+        if v > kin.flat_ceiling {
+            return Some(BoundaryState {
+                v: kin.flat_ceiling,
+                a: 0.0,
+            });
+        }
+        Some(BoundaryState { v, a: -a })
+    } else if disk::curved_solver_is_available(kin) {
+        let (v, a) = curved::entry_requirement(kin, (exit.v, exit.a)).ok()?;
+        Some(BoundaryState { v, a })
+    } else {
+        None
+    }
+}
+
+/// How tightly a member's entry requirement must match the envelope velocity
+/// before the required acceleration is adopted as the seam's boundary state.
+const REQUIREMENT_BIND_REL: f64 = 1e-9;
+
+/// Highest speed both members meeting at a seam can actually hold there. The
+/// disk envelope only bounds `kappa^2 v^4` against the acceleration budget; a
+/// clothoid also owes `sigma v^3` of normal jerk with no acceleration term to
+/// cancel it, so a blend seam has a speed cap the disk never sees.
+fn seam_hold_ceiling(caps: &[MoveCaps], k: usize) -> f64 {
+    [caps.get(k - 1), caps.get(k)]
+        .into_iter()
+        .flatten()
+        .filter(|c| disk::curved_solver_is_available(&c.kin))
+        .map(|c| curved::top_speed_ceiling(&c.kin))
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Walk the members right to left, each publishing the `(v, a)` it requires at
+/// its entry as a boundary condition on its predecessor. Where the requirement
+/// is at or below the velocity envelope the seam inherits the whole state — the
+/// brake the member's interior needs is carried into the seam instead of being
+/// manufactured there, which a `kappa = 0` seam has no authority to do. Above
+/// it the member has speed slack and pins nothing.
+fn boundary_state_envelope(caps: &[MoveCaps], plan: &mut SeamPlan, report: &mut VelocityReport) {
+    for k in 1..caps.len() {
+        if !plan.is_anchor[k] {
+            plan.v[k] = plan.v[k].min(seam_hold_ceiling(caps, k));
+        }
+    }
+    for k in (1..caps.len()).rev() {
+        if plan.is_anchor[k] {
+            continue;
+        }
+        let exit = BoundaryState {
+            v: plan.v[k + 1],
+            a: plan.a[k + 1],
+        };
+        let Some(required) = required_entry_state(&caps[k].kin, exit) else {
+            report.entry_requirement_unsolved += 1;
+            continue;
+        };
+        if required.v > plan.v[k] * (1.0 + REQUIREMENT_BIND_REL) {
+            continue;
+        }
+        plan.v[k] = required.v;
+        plan.a[k] = required.a;
+        if required.a != 0.0 {
+            report.boundary_accel_seams += 1;
+            report.worst_boundary_accel_mm_s2 =
+                report.worst_boundary_accel_mm_s2.max(required.a.abs());
+        }
+    }
 }
 
 struct RunGeometry {
@@ -396,19 +511,19 @@ struct RunGeometry {
     arc_to_run_end: Vec<f64>,
 }
 
-fn compute_run_geometry(caps: &[MoveCaps], plan: &SeamPlan, entry_a: f64) -> RunGeometry {
+fn compute_run_geometry(caps: &[MoveCaps], plan: &SeamPlan) -> RunGeometry {
     let n = caps.len();
     let mut run_start_v = vec![0.0_f64; n];
     let mut run_start_a = vec![0.0_f64; n];
     let mut arc_from_run_start = vec![0.0_f64; n];
     {
         let mut anchor_v = plan.v[0];
-        let mut anchor_a = entry_a;
+        let mut anchor_a = plan.a[0];
         let mut cum = 0.0;
         for j in 0..n {
             if plan.is_anchor[j] {
                 anchor_v = plan.v[j];
-                anchor_a = if j == 0 { entry_a } else { 0.0 };
+                anchor_a = plan.a[j];
                 cum = 0.0;
             }
             run_start_v[j] = anchor_v;
@@ -547,11 +662,12 @@ fn reconstruct_runs(
             .map(|j| disk::RunMember {
                 kin: &caps[j].kin,
                 exit_v: v[j + 1],
+                exit_a: plan.a[j + 1],
                 fwd_s: geo.arc_from_run_start[j],
             })
             .collect();
         let run_start_line = moves[run_start].source.start_line;
-        let (reconstructed, run_exit_states, reconstructed_phases) = disk::reconstruct_run(
+        let run = disk::reconstruct_run(
             &members,
             geo.run_start_v[run_start],
             geo.run_start_a[run_start],
@@ -560,12 +676,34 @@ fn reconstruct_runs(
         .ok_or(VelocityError::Diverged {
             line_no: run_start_line,
         })?;
+        for miss in &run.unreachable {
+            let j = run_start + miss.index;
+            let named = UnreachableEntryState {
+                move_index: j,
+                line_no: moves[j].source.start_line,
+                entry: BoundaryState {
+                    v: miss.entry.0,
+                    a: miss.entry.1,
+                },
+                exit: BoundaryState {
+                    v: miss.exit.0,
+                    a: miss.exit.1,
+                },
+            };
+            report.unreachable_entry_states += 1;
+            if report
+                .worst_unreachable
+                .is_none_or(|worst| named.accel_magnitude() > worst.accel_magnitude())
+            {
+                report.worst_unreachable = Some(named);
+            }
+        }
 
         for (idx, j) in (run_start..run_end).enumerate() {
             let kin = &caps[j].kin;
             let m = &moves[j];
             let line_no = m.source.start_line;
-            let mut samples: Vec<VelSample> = reconstructed[idx]
+            let mut samples: Vec<VelSample> = run.samples[idx]
                 .iter()
                 .map(|&(s, v, a)| VelSample { s, v, a })
                 .collect();
@@ -581,7 +719,7 @@ fn reconstruct_runs(
                 return Err(VelocityError::NegativeVelocity { line_no, v });
             }
             let peak_v = samples.iter().fold(0.0_f64, |acc, p| acc.max(p.v));
-            let phases = reconstructed_phases[idx].clone();
+            let phases = run.phases[idx].clone();
             // A straight move's phases give the exact traversal time; the sampled
             // estimate mistimes the jerk-from-rest at v = 0 (the singularity the
             // closed-form profile avoids), so prefer the phases when present.
@@ -606,7 +744,7 @@ fn reconstruct_runs(
             boundaries.push(if is_anchor[j + 1] && v[j + 1] <= VELOCITY_EPS_MM_S {
                 BoundaryState::REST
             } else {
-                let (bv, ba) = run_exit_states[idx];
+                let (bv, ba) = run.exit_states[idx];
                 // Grid integration can land the sample a hair above the
                 // analytic node bound; a re-plan re-derives that bound (or a
                 // looser one, by append monotonicity) as its entry check, so
