@@ -22,8 +22,8 @@ the host simulator. `make menuconfig` offers exactly:
 - **STM32F4** — F401, F411, F405, F407, F427, F429, F446
 - **STM32G0** — G070, G071, G0B0, G0B1
 - **STM32H7** — H723, H743, H750
-- **STM32F1** — F103, high-density parts only (xC/xD/xE). Boots and moves
-  on hardware, but does not home reliably — see the caveats below.
+- **STM32F1** — F103, high-density parts only (xC/xD/xE). Builds and
+  boots, but is **not supported** for printing — no FPU. See below.
 
 Everything else mainline supports is absent from `src/Kconfig` on this
 branch: AVR, LPC176x, RP2040, SAMD, HC32, and the STM32 F0/F2/F7/L4/G4
@@ -35,43 +35,35 @@ This is a hard gate, not a rough edge. The MCU executes the trajectory, so
 an unsupported chip cannot be worked around from the host side. Look up
 your board's chip before spending time on the rest of this page.
 
-#### If your board is an F103
+#### If your board is an F103: not supported
 
-The F103 target is new and only partly proven. It was bench-brought-up on
-2026-07-30 against an SKR Mini E3 v2.0 driving a CoreXY Voron 0: the
-firmware boots, klippy connects, the motion engine binds all three lanes,
-streamed moves execute, and one sensorless `G28 X` succeeded. Repeated
-homing then aborts the motion pump. Treat it as a bring-up target and
-expect to find problems.
+The Cortex-M3 has no floating-point hardware, and this architecture
+evaluates the trajectory on the MCU in float math. On the bench (SKR Mini
+E3 v2.0, CoreXY Voron 0, 2026-07-30/31) the motion tick measured ~11,500
+cycles per axis-sample in soft-float library calls — three streamed lanes
+at 2 kHz consume 96% of the core, the MCU latches `-311
+TickIntervalExceeded`, USB stops being serviced, and homing aborts. For
+scale, an F446 (hard FPU, 180 MHz) runs four axes at 10 kHz. This is a
+silicon limit: lowering the sample rate or the TMC UART baud made it
+worse, not better. Get an F4/G0/H7 board.
 
-What is known:
+What the port run established, kept for reference:
 
+- The firmware boots, enumerates, connects, binds three lanes, executes
+  streamed moves, and completed one sensorless `G28 X` — the port is
+  *correct*, the chip is just too slow to hold the real-time contract.
 - **`!PA14` is mandatory on the SKR Mini E3 v2.0.** Select "Enable extra
   low-level configuration options" and set "GPIO pins to set at
   micro-controller startup" to `!PA14`, exactly as the stock Klipper
   config for that board instructs. That pin gates USB: without it the
-  board never enumerates, gives the host no logging whatsoever, and can
-  only be recovered with a physical reset into the bootloader. Start from
-  your board's stock config rather than writing one from the pinout.
-- The part must be high-density (F103xC/xD/xE, e.g. the STM32F103RCT6 on
-  an SKR Mini E3 v2). The motion tick needs TIM5, which medium-density
-  F103s do not have.
-- RAM is the binding constraint, not flash. A 256 KiB/48 KiB RCT6 build
-  lands at 117 KB of flash but leaves only ~11 KB for klipper's C dynamic
-  pool. A large configuration can exhaust it — that failure is loud, at
-  config time.
-- **Homing is the known failure, and the budget is ~100 ms.** Streamed
-  moves get 2 s of scheduling lead, but homing drips with a 100 ms window
-  and the serial retry burst is sized at ~90 ms to fit inside it. One
-  scheduler hiccup on either side ends the move with `piece in past at
-  send`. On the bench a camera stream on a 1 GB Pi 4 was enough; so was a
-  quiet host with the F103's slower transport. Neither halving the sample
-  rate to 1 kHz nor halving the TMC UART baud fixed it. If you are
-  bringing up a slow board, expect to meet this before you meet anything
-  else.
-- Every F1 timer is 16 bit, so the step-output compare cannot hold a
-  32-bit deadline. It chases far-future targets in hops of at most 455 us,
-  which costs interrupts a 32-bit timer would not.
+  board never enumerates and gives the host no logging whatsoever. Start
+  from your board's stock config rather than writing one from the pinout.
+- The part must be high-density (F103xC/xD/xE); the motion tick needs
+  TIM5, which medium-density F103s lack.
+- RAM is the binding constraint, not flash: ~11 KB left for klipper's C
+  dynamic pool on a 48 KB RCT6.
+- Every F1 timer is 16 bit, so the step-output compare chases far-future
+  deadlines in <=455 us hops.
 - F1 cannot do USB and CAN at once — they share one 512-byte packet
   buffer — so a bridge-mode F103 is not available.
 

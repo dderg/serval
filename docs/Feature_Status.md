@@ -57,11 +57,12 @@ Three tiers, honestly applied:
 - **No per-axis XY limits.** Global limits plus Z-only caps, nothing
   finer.
 - **Kinematics:** cartesian and corexy only.
-- **Boards: STM32 F4, G0, H7, and F1 (partial).** `src/Kconfig` carries
-  those four families plus a Linux-process MCU and the host simulator.
-  AVR, LPC176x, RP2040, SAMD, HC32 and the STM32 F0/F2/F7/L4/G4 families
-  are absent, and since the MCU executes the trajectory there is no
-  host-side workaround for an unsupported chip.
+- **Boards: STM32 F4, G0, and H7.** `src/Kconfig` also carries a
+  Linux-process MCU and the host simulator. AVR, LPC176x, RP2040, SAMD,
+  HC32 and the STM32 F0/F2/F7/L4/G4 families are absent, and since the
+  MCU executes the trajectory there is no host-side workaround for an
+  unsupported chip. The STM32F1 target builds and boots but is **not
+  supported** — see the verdict below.
 - **Homing tolerates ~100 ms of host or transport stall, and no more.**
   Streamed moves run under `MAX_LEAD_SECS` = 2 s of lead, so ordinary
   host jitter is invisible. Homing does not: it drips, with
@@ -74,24 +75,30 @@ Three tiers, honestly applied:
   aborted a homing move, while the same camera never disturbed a
   mainline-style step-queue host, which buffers far deeper. This is a
   property of the homing path, not of any one board.
-- **The F103 runs, but does not home reliably.** Bench-tested 2026-07-30
-  on an SKR Mini E3 v2.0 (STM32F103RCT6, 72 MHz, 48 KB SRAM) driving a
-  CoreXY Voron 0: the firmware boots, klippy connects (181 commands), the
-  motion engine binds all three lanes (`configure_axes ... kin=corexy
-  present=0x7 steps_per_mm=[320, 320, 1280]`), streamed moves execute, and
-  one sensorless `G28 X` completed against a TMC2209 StallGuard virtual
-  endstop. Repeated homing aborts as above, at both 1 and 2 kHz sample
-  rates and at both 40000 and 20000 TMC baud. [INFERENCE] the transport
-  side of that budget is spent on klipper's bit-banged TMC UART, which
-  drives one scheduler timer per bit (25 us at 40000 baud) at the same
-  NVIC priority as the motion tick; measured read failures were ~9% with
-  the tick running. Treat the F103 as a bring-up target, not a printing
-  one.
-- **F103 structural caveats.** TIM5 is required, so medium-density F103 is
-  out. Every F1 timer is 16 bit, so the step-output deadline is chased in
-  <=455 us hops instead of held in one 32-bit compare. Flash is 117 KB of
-  256 KB; RAM is the tight one, leaving ~11 KB for klipper's C dynamic
-  pool. The board option `!PA14` is mandatory on the SKR Mini E3 v2.0 —
+- **F103: not supported — a hardware verdict, not a build gap.** The
+  Cortex-M3 has no FPU, so the motion tick's polynomial evaluation runs
+  on soft-float library calls and costs ~11,500 cycles per axis-sample
+  (measured 2026-07-30/31 on an SKR Mini E3 v2.0 driving a CoreXY
+  Voron 0: 34,455-cycle tick ISRs for 3 lanes against a 36,000-cycle
+  budget at 2 kHz — 96% CPU, and the MCU latches -311
+  TickIntervalExceeded). The remaining ~4% cannot service USB and the
+  bit-banged TMC UART: homing's register burst lands exactly when the
+  100 ms drip window opens, the OUT endpoint goes unserviced, host
+  writes stall (measured up to 229 ms), and the pump fails loudly. For
+  comparison the F446 (hard FPU, 180 MHz) delivers 4 axes at 10 kHz.
+  Lowering the sample rate to 1 kHz made it worse, not better; halving
+  the TMC baud doubles the foreground blocking. What the bench proved
+  the port *does* do: boots, enumerates, klippy connects, all three
+  lanes bind, streamed moves execute, and one sensorless G28 X
+  completed — useful as a port-correctness artifact, not as a printer.
+  Supporting chips of this class would take a stepcompress-style
+  adapter (precomputed step queues instead of on-MCU evaluation), which
+  is deliberately out of scope for this architecture.
+- **F103 build notes, for whoever revisits this.** TIM5 required, so
+  medium-density is out. Every F1 timer is 16 bit, so the step-output
+  deadline is chased in <=455 us hops. Flash 117 KB of 256 KB; RAM is
+  the tight one (~11 KB left for klipper's C dynamic pool on 48 KB).
+  The board option `!PA14` is mandatory on the SKR Mini E3 v2.0 —
   without it USB never enumerates and there is no way in.
 - **Config is not mainline-compatible.** `[kinematics]`, `[motor]`,
   `[axis]`, `[post_processor]` replace the classic sections. This is
