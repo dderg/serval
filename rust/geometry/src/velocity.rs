@@ -9,12 +9,16 @@ use crate::path::CurvatureProfile;
 use crate::path::Segment;
 use crate::segment::SourceRange;
 
+mod certify;
 mod disk;
 mod profile;
 mod ride;
 mod scurve;
 
-pub use profile::StraightPhase;
+pub use profile::{
+    BoundaryInfeasibility, Profile, StraightPhase, plan as plan_profile, straight_chain,
+    straight_chain_between,
+};
 
 use disk::Kinematics;
 
@@ -111,6 +115,7 @@ pub enum VelocityError {
     RestAnchorAccel { line_no: u32 },
     NegativeVelocity { line_no: u32, v: f64 },
     InvalidConfig,
+    InfeasibleBoundary(BoundaryInfeasibility),
 }
 
 const REST_ANCHOR_ACCEL_EPS: f64 = 1e-3;
@@ -657,3 +662,6 @@ mod jerk_audit_tests;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod certify_tests;
