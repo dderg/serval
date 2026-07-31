@@ -338,29 +338,3 @@ pub(super) fn phase_knot_times(profile: &ScalarProfile, tol: FitTol) -> Vec<f64>
     }
     out
 }
-
-/// Window boundaries where the profile's leading jerk takes one isolated step
-/// larger than the budget — a jerk-phase edge in the plan, flanked by steady
-/// windows. The isolation requirement is what separates a regime edge from a
-/// numerically-ridden section whose jerk chatters at every boundary: chatter
-/// gets no knots and falls back to plain bisection, which the windowed
-/// reconstruction already smooths well enough to fit.
-pub(super) fn regime_knot_times(profile: &ScalarProfile, tol: FitTol) -> Vec<f64> {
-    let threshold = 8.0 * tol.accel_mm_s2 / KNOT_TARGET_SPAN_S;
-    let jerks: Vec<f64> = profile.windows.iter().map(|w| 6.0 * w.coeffs[3]).collect();
-    let steps: Vec<f64> = jerks.windows(2).map(|j| (j[1] - j[0]).abs()).collect();
-    let mut out: Vec<f64> = Vec::new();
-    for (i, &step) in steps.iter().enumerate() {
-        let isolated = (i == 0 || steps[i - 1] < 0.25 * threshold)
-            && (i + 1 >= steps.len() || steps[i + 1] < 0.25 * threshold);
-        if step > threshold
-            && isolated
-            && out
-                .last()
-                .is_none_or(|&k| profile.knot_t[i + 1] - k > MIN_FIT_PIECE_S)
-        {
-            out.push(profile.knot_t[i + 1]);
-        }
-    }
-    out
-}

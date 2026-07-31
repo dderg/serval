@@ -518,31 +518,36 @@ fn quarter_arc_with_jerk(jerk: f64) -> geometry::Move {
 }
 
 #[test]
-fn scalar_profile_reproduces_samples_at_every_knot() {
+fn scalar_profile_reproduces_the_plan_at_every_phase_knot() {
     let planned = fit_and_plan(std::slice::from_ref(&quarter_arc()));
     let vm = &planned[0].velocity;
-    assert!(vm.phases.is_empty(), "arc is a curved move (no phases)");
-    assert!(vm.samples.len() >= 2);
+    assert!(vm.phases.len() >= 2, "arc must carry a multi-phase plan");
 
-    let (profile, _total_t) = build_profile(&vm.samples).unwrap();
-    for (i, sample) in vm.samples.iter().enumerate() {
+    let (profile, total_t) = profile_from_phases(&vm.phases).unwrap();
+    assert_eq!(profile.knot_t.len(), vm.phases.len() + 1);
+    for (i, phase) in vm.phases.iter().enumerate() {
         let (s, v, a) = profile.state_at(profile.knot_t[i]);
         assert!(
-            (s - sample.s).abs() < 1e-9,
+            (s - phase.s0).abs() < 1e-9,
             "s at knot {i}: {s} vs {}",
-            sample.s
+            phase.s0
         );
         assert!(
-            (v - sample.v).abs() < 1e-9,
+            (v - phase.v0).abs() < 1e-9,
             "v at knot {i}: {v} vs {}",
-            sample.v
+            phase.v0
         );
         assert!(
-            (a - sample.a).abs() < 1e-9,
+            (a - phase.a0).abs() < 1e-9,
             "a at knot {i}: {a} vs {}",
-            sample.a
+            phase.a0
         );
     }
+    let (es, ev, ea) = vm.phases.last().unwrap().end_state();
+    let (s, v, a) = profile.state_at(total_t);
+    assert!((s - es).abs() < 1e-9, "s at the end: {s} vs {es}");
+    assert!((v - ev).abs() < 1e-9, "v at the end: {v} vs {ev}");
+    assert!((a - ea).abs() < 1e-9, "a at the end: {a} vs {ea}");
 }
 
 /// The fitted acceleration (second derivative of the cubic pieces) must join
@@ -553,9 +558,9 @@ fn curved_fit_acceleration_is_continuous_and_converges() {
     let gm = quarter_arc();
     let planned = fit_and_plan(std::slice::from_ref(&gm));
     let vm = &planned[0].velocity;
-    assert!(vm.phases.is_empty());
+    assert!(!vm.phases.is_empty());
 
-    let (profile, total_t) = build_profile(&vm.samples).unwrap();
+    let (profile, total_t) = profile_from_phases(&vm.phases).unwrap();
     let start = [0.0_f64; 4];
     let sampler = Sampler {
         profile: &profile,

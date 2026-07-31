@@ -18,8 +18,8 @@ pub(crate) use straight::apply_derivative_gains;
 use trajectory::ChainStage;
 use trajectory::{CompiledChain, ShapedSegment};
 
-use profile::{build_profile, profile_from_phases};
-use sampled::{Sampler, ZWarp, phase_knot_times, refine_span, regime_knot_times, z_warp_mode};
+use profile::profile_from_phases;
+use sampled::{Sampler, ZWarp, phase_knot_times, refine_span, z_warp_mode};
 use straight::{has_pre_kernel_nonlinear_advance, lower_straight_from_phases};
 
 /// Duplicated from `runtime::piece_ring::MAX_PIECE_COEFFS` (this crate must
@@ -200,23 +200,12 @@ pub fn lower_move_pieces(
         };
         return lower_straight_from_phases(gm, vm, t_start, start_pos, axis_chains, z_offset);
     }
-    // With phases present the scalar profile is the plan's own closed-form
-    // windows; the sampled quintic reconstruction is the fallback for moves
-    // whose plan only exists as `(s, v, a)` grid samples.
-    let (profile, total_t) = if vm.phases.is_empty() {
-        build_profile(&vm.samples)?
-    } else {
-        profile_from_phases(&vm.phases)?
-    };
+    let (profile, total_t) = profile_from_phases(&vm.phases)?;
     // A jerk-regime change is a curvature kink in the arc-length profile: no
     // polynomial spans it within the acceleration budget, so blind bisection
     // cascades down to the floor around each one. Pinning a grid knot at every
     // regime boundary lets both sides fit their full smooth spans instead.
-    let mut knots = if vm.phases.is_empty() {
-        regime_knot_times(&profile, fit_tol)
-    } else {
-        phase_knot_times(&profile, fit_tol)
-    };
+    let mut knots = phase_knot_times(&profile, fit_tol);
     knots.retain(|&t| t > MIN_PHASE_PIECE_S && total_t - t > MIN_PHASE_PIECE_S);
     let spatial = gm.segment.spatial.as_ref();
 

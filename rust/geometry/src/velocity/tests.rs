@@ -109,7 +109,7 @@ fn outcome(moves: Vec<Move>, unblended: Vec<UnblendedJunction>) -> FitOutcome {
 }
 
 fn move_time(m: &MoveVelocity) -> f64 {
-    traversal_time(&m.samples)
+    m.phases.iter().map(|p| p.dt).sum()
 }
 
 fn assert_disk_feasible(m: &MoveVelocity, kappa0: f64, sigma: f64) {

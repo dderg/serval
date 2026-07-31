@@ -725,7 +725,7 @@ fn march_braking(caps: &Caps, entry: (f64, f64), length: f64, cap_speed: f64) ->
 /// A wind-down to `handoff` rather than to rest is the whole point. Landing at
 /// rest on every rung would spend a full acceleration swing per rung and reach
 /// less than the single cap set it replaces; carrying the acceleration makes
-/// the rungs a staircase down the disk rim instead of eight separate ramps.
+/// each rung step down the disk rim instead of eight separate ramps.
 fn climb_rung(caps: &Caps, entry: (f64, f64), max_len: f64, rung: f64, handoff: f64) -> March {
     let mut m = March::new(entry);
     let j = caps.j;

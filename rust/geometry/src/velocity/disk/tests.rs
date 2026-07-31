@@ -66,7 +66,7 @@ fn zero_curvature_reach_is_scurve() {
 fn clothoid_samples_respect_the_acceleration_disk() {
     let accel = 1000.0;
     let k = kin(0.0, 0.05, 4.0, accel, f64::INFINITY, 300.0);
-    let samples = sample_profile(&k, 70.0, 60.0, 1e-8).unwrap();
+    let samples = sample_profile(&k, 70.0, 60.0, 1e-8);
     for &(s, v, _a) in &samples {
         let kappa = (k.kappa0 + k.sigma * s).abs();
         let a_c = v * v * kappa;
@@ -78,7 +78,7 @@ fn clothoid_samples_respect_the_acceleration_disk() {
 fn clothoid_total_acceleration_is_within_the_disk() {
     let accel = 1000.0;
     let k = kin(0.0, 0.05, 4.0, accel, 80_000.0, 300.0);
-    let samples = sample_profile(&k, 65.0, 50.0, 1e-8).unwrap();
+    let samples = sample_profile(&k, 65.0, 50.0, 1e-8);
     for &(s, v, a) in &samples {
         let kappa = (k.kappa0 + k.sigma * s).abs();
         let a_c = v * v * kappa;
@@ -101,7 +101,7 @@ fn sample_profile_is_deterministic() {
 #[test]
 fn sample_profile_endpoints_are_entry_and_exit() {
     let k = kin(0.0, 0.05, 4.0, 1000.0, 80_000.0, 300.0);
-    let s = sample_profile(&k, 65.0, 50.0, 1e-8).unwrap();
+    let s = sample_profile(&k, 65.0, 50.0, 1e-8);
     assert_eq!(s.first().unwrap().0, 0.0);
     assert_eq!(s.last().unwrap().0, k.length);
     assert_eq!(s.first().unwrap().1, 65.0);
@@ -141,7 +141,6 @@ fn worst_accel(samples: &[(f64, f64, f64)]) -> f64 {
 /// `reconstruct_run`: a seam is capped by the ceilings on both of its sides,
 /// never by the upstream member's alone.
 fn run_members<'a>(kins: &[&'a Kinematics], exit_v: f64) -> Vec<RunMember<'a>> {
-    let mut fwd = 0.0;
     let mut members: Vec<RunMember> = kins
         .iter()
         .enumerate()
@@ -149,14 +148,11 @@ fn run_members<'a>(kins: &[&'a Kinematics], exit_v: f64) -> Vec<RunMember<'a>> {
             let seam_ceiling = kins
                 .get(i + 1)
                 .map_or(k.flat_ceiling, |next| k.flat_ceiling.min(next.flat_ceiling));
-            let m = RunMember {
+            RunMember {
                 kin: k,
                 exit_v: seam_ceiling,
                 exit_a: 0.0,
-                fwd_s: fwd,
-            };
-            fwd += k.length;
-            m
+            }
         })
         .collect();
     members.last_mut().unwrap().exit_v = exit_v;
@@ -165,14 +161,16 @@ fn run_members<'a>(kins: &[&'a Kinematics], exit_v: f64) -> Vec<RunMember<'a>> {
 
 fn flatten(per_member: &[Vec<(f64, f64, f64)>], members: &[RunMember]) -> Vec<(f64, f64, f64)> {
     let mut out: Vec<(f64, f64, f64)> = Vec::new();
+    let mut fwd = 0.0;
     for (local, m) in per_member.iter().zip(members) {
         for &(s, v, a) in local {
-            let s_run = m.fwd_s + s;
+            let s_run = fwd + s;
             if out.last().is_some_and(|p| (p.0 - s_run).abs() < 1e-12) {
                 continue;
             }
             out.push((s_run, v, a));
         }
+        fwd += m.kin.length;
     }
     out
 }
@@ -184,7 +182,7 @@ fn straight_run_matches_the_closed_form_profile() {
     let members = run_members(&[&k], 0.0);
     let super::RunReconstruction {
         samples, phases, ..
-    } = reconstruct_run(&members, 0.0, 0.0, 1e-8).unwrap();
+    } = reconstruct_run(&members, 0.0, 0.0, 1e-8);
     let oracle = super::super::profile::plan(0.0, 0.0, k.length, flat, accel, jerk);
     for &(s, v, a) in &samples[0] {
         let (ov, oa) = oracle.at(s);
@@ -217,8 +215,7 @@ fn straight_run_jerk_is_bang_bang() {
     let (accel, jerk, flat) = (1000.0, 1e5, 60.0);
     let k = kin(0.0, 0.0, 30.0, accel, jerk, flat);
     let members = run_members(&[&k], 0.0);
-    let super::RunReconstruction { samples, .. } =
-        reconstruct_run(&members, 0.0, 0.0, 1e-8).unwrap();
+    let super::RunReconstruction { samples, .. } = reconstruct_run(&members, 0.0, 0.0, 1e-8);
     assert!(worst_accel(&samples[0]) <= accel + 1e-6);
     let wj = worst_jerk(&samples[0]);
     assert!(wj <= jerk * 2.0, "worst jerk {wj} (j_max {jerk})");
@@ -233,7 +230,7 @@ fn apex_triangle_jerk_is_bang_bang() {
     let members = run_members(&[&k], 0.0);
     let super::RunReconstruction {
         samples, phases, ..
-    } = reconstruct_run(&members, 0.0, 0.0, 1e-8).unwrap();
+    } = reconstruct_run(&members, 0.0, 0.0, 1e-8);
     assert!(worst_accel(&samples[0]) <= accel + 1e-6);
     let wj = worst_jerk(&samples[0]);
     assert!(
@@ -254,7 +251,7 @@ fn line_clothoid_line_from_rest_is_jerk_clean_on_the_straights() {
     let super::RunReconstruction {
         samples: per_member,
         ..
-    } = reconstruct_run(&members, 0.0, 0.0, 1e-8).unwrap();
+    } = reconstruct_run(&members, 0.0, 0.0, 1e-8);
     let flat_samples = flatten(&per_member, &members);
     assert!(worst_accel(&flat_samples) <= accel + 1e-6);
     // The rest-start ramp lives on the first line: it must be the same clean
@@ -269,16 +266,15 @@ fn line_clothoid_line_from_rest_is_jerk_clean_on_the_straights() {
         wj <= jerk * 2.0,
         "entry ramp worst jerk {wj} (j_max {jerk})"
     );
-    // Velocity through the clothoid respects its curvature ceiling.
-    for &(s, v, _) in &flat_samples {
-        for (m, local) in members_at(&members, s) {
-            let ceil = m
+    for (local_samples, m) in per_member.iter().zip(&members) {
+        for &(s, v, _) in local_samples {
+            let ceiling = m
                 .kin
                 .flat_ceiling
-                .min(limit_speed(m.kin.kappa_abs(local), m.kin.accel));
+                .min(limit_speed(m.kin.kappa_abs(s), m.kin.accel));
             assert!(
-                v <= ceil + 1e-3 * (1.0 + ceil),
-                "v={v} over ceiling {ceil} at s={s}"
+                v <= ceiling + 1e-3 * (1.0 + ceiling),
+                "v={v} over its member's ceiling {ceiling} at member-local s={s}"
             );
         }
     }
@@ -296,7 +292,7 @@ fn mixed_run_straight_members_emit_exact_phases() {
         samples: per_member,
         phases,
         ..
-    } = reconstruct_run(&members, 0.0, 0.0, 1e-8).unwrap();
+    } = reconstruct_run(&members, 0.0, 0.0, 1e-8);
     assert!(
         !phases[0].is_empty() && !phases[3].is_empty(),
         "straight members of a mixed run lower from exact phases"
@@ -325,7 +321,7 @@ fn mixed_run_straight_members_emit_exact_phases() {
             members[idx].kin.length
         );
         let s: Vec<f64> = per_member[idx].iter().map(|p| p.0).collect();
-        for (&(sx, v, _), (cv, _)) in per_member[idx].iter().zip(ride::chain_states(chain, &s)) {
+        for (&(sx, v, _), (cv, _)) in per_member[idx].iter().zip(chain_states(chain, &s)) {
             assert!(
                 (v - cv).abs() <= 1e-6 * (1.0 + v),
                 "member {idx}: sample v={v} vs chain v={cv} at s={sx}"
@@ -346,11 +342,11 @@ fn mixed_run_entry_matches_straight_run_entry() {
     let straight_members = run_members(&[&line], 60.0);
     let super::RunReconstruction {
         samples: straight, ..
-    } = reconstruct_run(&straight_members, 0.0, 0.0, 1e-8).unwrap();
+    } = reconstruct_run(&straight_members, 0.0, 0.0, 1e-8);
 
     let mixed_members = run_members(&[&line, &clot, &tail], 0.0);
     let super::RunReconstruction { samples: mixed, .. } =
-        reconstruct_run(&mixed_members, 0.0, 0.0, 1e-8).unwrap();
+        reconstruct_run(&mixed_members, 0.0, 0.0, 1e-8);
 
     // Compare over the entry ramp (well before either profile brakes).
     for (&(s0, v0, a0), &(s1, v1, a1)) in straight[0].iter().zip(&mixed[0]) {
@@ -378,7 +374,7 @@ fn descending_ceiling_kink_is_dipped_under_tangentially() {
     let super::RunReconstruction {
         samples: per_member,
         ..
-    } = reconstruct_run(&members, 0.0, 0.0, 1e-8).unwrap();
+    } = reconstruct_run(&members, 0.0, 0.0, 1e-8);
     let flat_samples = flatten(&per_member, &members);
     assert!(worst_accel(&flat_samples) <= accel + 1e-6);
     let wj = worst_jerk(&flat_samples);
@@ -397,8 +393,7 @@ fn descending_ceiling_kink_is_dipped_under_tangentially() {
 fn infinite_jerk_curved_member_carries_smooth_phases() {
     let k = kin(0.0, 0.05, 4.0, 1000.0, f64::INFINITY, 300.0);
     let members = run_members(&[&k], 60.0);
-    let super::RunReconstruction { phases, .. } =
-        reconstruct_run(&members, 70.0, 0.0, 1e-8).unwrap();
+    let super::RunReconstruction { phases, .. } = reconstruct_run(&members, 70.0, 0.0, 1e-8);
     assert!(
         !phases[0].is_empty(),
         "unlimited-jerk curved member must carry its chain"
@@ -411,11 +406,11 @@ fn infinite_jerk_curved_member_carries_smooth_phases() {
         "phases cover the member: end {end_s} vs length {}",
         k.length
     );
-    let grid_cells = (k.length / GRID_STEP_MM).ceil() as usize;
+    let grid_cells = (k.length / SAMPLE_STEP_MM).ceil() as usize;
     assert!(
         phases[0].len() * 8 < grid_cells,
         "{} phases across {grid_cells} grid cells — the varying-curvature rail dispatched as a \
-         chord staircase instead of a handful of regime spans",
+         per-chord ladder instead of a handful of regime spans",
         phases[0].len()
     );
 }
@@ -434,12 +429,12 @@ fn finite_jerk_curved_member_emits_its_envelope_chain() {
         samples,
         unreachable,
         ..
-    } = reconstruct_run(&members, 0.0, 0.0, 1e-8).unwrap();
+    } = reconstruct_run(&members, 0.0, 0.0, 1e-8);
     assert!(unreachable.is_empty());
     for idx in [1usize, 2] {
         assert!(!phases[idx].is_empty());
         assert_eq!(phases[idx], envelope_chains[idx]);
-        assert!(super::ride::chain_is_continuous(&phases[idx], true));
+        assert!(chain_is_continuous(&phases[idx], true));
         assert_curved_samples_view_the_chain(&samples[idx], &phases[idx]);
     }
 }
@@ -448,7 +443,7 @@ fn assert_curved_samples_view_the_chain(samples: &[(f64, f64, f64)], chain: &[St
     let arcs: Vec<f64> = samples.iter().map(|p| p.0).collect();
     for (p, (v, a)) in samples
         .iter()
-        .zip(super::ride::chain_states(chain, &arcs))
+        .zip(chain_states(chain, &arcs))
         .skip(1)
         .take(arcs.len().saturating_sub(2))
     {
@@ -473,7 +468,7 @@ fn sub_cruise_straight_lowers_from_the_closed_form_chain() {
         let members = run_members(&[&k], 0.0);
         let super::RunReconstruction {
             samples, phases, ..
-        } = reconstruct_run(&members, 0.0, 0.0, 1e-8).unwrap();
+        } = reconstruct_run(&members, 0.0, 0.0, 1e-8);
         assert!(
             !phases[0].is_empty(),
             "len {len}: a sub-cruise straight must carry its phase chain"
@@ -507,10 +502,10 @@ fn straight_member_samples_are_a_view_of_its_chain() {
     let members = run_members(&[&k], 0.0);
     let super::RunReconstruction {
         samples, phases, ..
-    } = reconstruct_run(&members, 0.0, 0.0, 1e-8).unwrap();
+    } = reconstruct_run(&members, 0.0, 0.0, 1e-8);
     let arcs: Vec<f64> = samples[0].iter().map(|p| p.0).collect();
     let interior = 1..arcs.len() - 1;
-    for (i, (v, a)) in ride::chain_states(&phases[0], &arcs)
+    for (i, (v, a)) in chain_states(&phases[0], &arcs)
         .into_iter()
         .enumerate()
         .filter(|(i, _)| interior.contains(i))
@@ -525,41 +520,11 @@ fn straight_chain_phases_stay_inside_the_acceleration_disk() {
     let (accel, jerk, flat) = SUB_CRUISE_LIMITS;
     let k = kin(0.0, 0.0, 10.0, accel, jerk, flat);
     let members = run_members(&[&k], 0.0);
-    let super::RunReconstruction { phases, .. } =
-        reconstruct_run(&members, 0.0, 0.0, 1e-8).unwrap();
+    let super::RunReconstruction { phases, .. } = reconstruct_run(&members, 0.0, 0.0, 1e-8);
     for p in &phases[0] {
         assert!(
             super::super::certify::is_certified(&k, p.s0, p.v0, p.a0, p.j, p.dt),
             "phase {p:?} is not certified feasible"
         );
     }
-}
-
-/// The grid marcher emits nothing any more — every member carries the chain its
-/// own solver plans — but it stands until the deletion pass, so what it still
-/// reconstructs is pinned here rather than left to rot silently.
-#[test]
-fn the_grid_marcher_still_reconstructs_a_run_it_no_longer_emits() {
-    let (accel, flat) = (1000.0, 60.0);
-    for jerk in [1.0e5, f64::INFINITY] {
-        let line = kin(0.0, 0.0, 10.0, accel, jerk, flat);
-        let blend = kin(0.0, 0.1, 2.0, accel, jerk, flat);
-        let members = run_members(&[&line, &blend], 0.0);
-        let total: f64 = members.iter().map(|m| m.kin.length).sum();
-        let (profile, chain) = reconstruct_flat(&members, 0.0, 0.0).unwrap();
-        assert_eq!(profile.first().unwrap().0, 0.0);
-        assert!((profile.last().unwrap().0 - total).abs() < 1e-9);
-        let covered = chain.last().unwrap().end_state().0;
-        assert!(
-            (covered - total).abs() < 1e-6,
-            "marched chain at jerk {jerk} covers {covered} of {total}"
-        );
-    }
-}
-
-#[test]
-#[should_panic(expected = "yet a solver of its own plans it")]
-fn the_marcher_refuses_a_member_a_solver_of_its_own_plans() {
-    let k = kin(0.0, 0.1, 2.0, 1000.0, 1.0e5, 60.0);
-    marched_clip(&[], &k, 0.0, k.length);
 }

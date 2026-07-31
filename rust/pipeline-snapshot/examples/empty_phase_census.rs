@@ -1,7 +1,7 @@
 //! Scratch investigation tool (not committed): count how many planned moves
-//! still reach the lowering with an empty phase chain — the only condition
-//! under which `lowering::build_profile(&vm.samples)` (the quintic-over-samples
-//! path) and `regime_knot_times` are still reachable.
+//! still reach the lowering with an empty phase chain — the condition under
+//! which `lowering::profile_from_phases` refuses the move with
+//! `LoweringError::EmptyProfile`.
 //!
 //!   cargo run -p pipeline-snapshot --example empty_phase_census -- snapshots/cases
 

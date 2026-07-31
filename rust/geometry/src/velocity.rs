@@ -10,10 +10,10 @@ use crate::path::Segment;
 use crate::segment::SourceRange;
 
 mod certify;
+mod chain;
 mod curved;
 mod disk;
 mod profile;
-mod ride;
 mod scurve;
 
 pub use profile::{
@@ -42,11 +42,11 @@ pub struct MoveVelocity {
     pub exit_v: f64,
     pub peak_v: f64,
     pub samples: Vec<VelSample>,
-    /// Closed-form jerk phases in move-local time/arc-length. The lowering
-    /// emits one exact cubic per phase for a straight move and fits axis
-    /// positions against the phases' exact scalar profile for a curved one.
-    /// Empty only where no solver could close the move's boundary states, in
-    /// which case the lowering falls back to quintic windows over `samples`.
+    /// Closed-form jerk phases in move-local time/arc-length: the plan itself.
+    /// The lowering emits one exact cubic per phase for a straight move and
+    /// fits axis positions against the phases' exact scalar profile for a
+    /// curved one. `samples` is a derived dense `(s, v, a)` view of these same
+    /// phases, never an independent reconstruction.
     pub phases: Vec<StraightPhase>,
     pub accel: f64,
     pub jerk: f64,
@@ -1169,19 +1169,14 @@ fn reconstruct_runs(
                 kin: &caps[j].kin,
                 exit_v: v[j + 1],
                 exit_a: plan.a[j + 1],
-                fwd_s: geo.arc_from_run_start[j],
             })
             .collect();
-        let run_start_line = moves[run_start].source.start_line;
         let run = disk::reconstruct_run(
             &members,
             geo.run_start_v[run_start],
             geo.run_start_a[run_start],
             tol,
-        )
-        .ok_or(VelocityError::Diverged {
-            line_no: run_start_line,
-        })?;
+        );
         report.reachability.straight_members += run.planned.straight;
         report.reachability.curved_members += run.planned.curved;
         for miss in &run.unreachable {
