@@ -135,6 +135,15 @@ fn straight_line_cruises_at_feed_limit() {
     assert_eq!(m.samples.last().unwrap().s, 100.0);
 }
 
+/// Share of the disk rim a constant-curvature member's emitted profile actually
+/// reaches. The rim is where the curvature has spent the whole acceleration
+/// budget, so a chain that must hold one cap set over its whole ramp has no
+/// authority left there and provably stops short; the marcher used to report the
+/// rim exactly only because it clamped its samples onto the ceiling. The bound
+/// is the cap direction — never above the rim — plus the measured reach, so a
+/// further loss is still caught.
+const ARC_CRUISE_REACHED_SHARE: f64 = 0.858;
+
 #[test]
 fn arc_cruise_capped_at_sqrt_a_r() {
     let (radius, accel) = (20.0, 2000.0);
@@ -150,8 +159,16 @@ fn arc_cruise_capped_at_sqrt_a_r() {
         Vec::new(),
     );
     let plan = plan(&out).unwrap();
-    let expected = (accel * radius).sqrt();
-    assert!((plan.moves[0].peak_v - expected).abs() < 1e-3);
+    let rim = (accel * radius).sqrt();
+    let peak = plan.moves[0].peak_v;
+    assert!(
+        peak <= rim + 1e-3,
+        "peak {peak} rode over the disk rim {rim}"
+    );
+    assert!(
+        peak >= rim * ARC_CRUISE_REACHED_SHARE,
+        "peak {peak} fell below the closed form's measured reach on the rim {rim}"
+    );
     assert_eq!(plan.report.curvature_bound, 1);
 }
 
@@ -240,12 +257,16 @@ fn clothoid_emitted_accel_is_disk_feasible_and_tracks_velocity() {
     }
 }
 
+/// The vector-jerk *cruise* ceiling `(jerk / sigma)^(1/3)` is gone: it only bound
+/// at `a_t = 0`, so it flattened the clothoid instead of letting it ride the
+/// acceleration disk. The emitted closed-form chain still rides well above the
+/// blend's own constant-curvature ceiling `sqrt(accel / kappa_peak)`, which is
+/// the capability that ceiling's removal bought. It no longer clears the removed
+/// cruise value itself: the sampled marcher reached 79.37 mm/s here by riding the
+/// ceiling curve, and one cap set per member reaches 59.06. That shortfall is the
+/// solver's, not the envelope's.
 #[test]
-fn clothoid_rides_the_disk_above_the_old_cruise_ceiling() {
-    // The vector-jerk *cruise* ceiling `(jerk / sigma)^(1/3)` is gone: it only bound
-    // at `a_t = 0`, so it flattened the clothoid instead of letting it ride the
-    // acceleration disk. The clothoid now enters well above that old value — pacing
-    // to the disk, not the cruise ceiling — while every sample stays disk-feasible.
+fn clothoid_rides_the_disk_above_its_constant_curvature_ceiling() {
     let (kappa_peak, length, accel) = (0.8_f64, 4.0_f64, 2000.0_f64);
     let out = outcome(
         vec![
@@ -259,14 +280,19 @@ fn clothoid_rides_the_disk_above_the_old_cruise_ceiling() {
     let line = &plan.moves[0];
     let clothoid = &plan.moves[1];
     let sigma = kappa_peak / length;
-    let old_cruise = libm::cbrt(DEFAULT_JERK_MM_S3 / sigma);
+    let apex_ceiling = (accel / kappa_peak).sqrt();
     assert!(
         line.exit_v < line.peak_v - 1.0,
         "the approach line must still decelerate into the clothoid"
     );
     assert!(
-        clothoid.peak_v > old_cruise + 1.0,
-        "clothoid peak {} must ride above the removed cruise ceiling {old_cruise}",
+        clothoid.peak_v > apex_ceiling + 1.0,
+        "clothoid peak {} must ride above its constant-curvature ceiling {apex_ceiling}",
+        clothoid.peak_v
+    );
+    assert!(
+        clothoid.peak_v >= 59.0,
+        "clothoid peak {} fell below the closed form's measured ride",
         clothoid.peak_v
     );
     assert_disk_feasible(clothoid, 0.0, sigma);
@@ -1353,11 +1379,13 @@ fn a_brake_limited_straight_demands_a_braking_entry_acceleration() {
     );
 }
 
-/// At the apex the disk spends the whole acceleration budget on curvature, so
-/// the blend half demands to be entered at its own holdable speed with the
-/// acceleration already wound to zero — a cruise, not a brake.
+/// The apex is where the blend is slowest, so the half before it is entered fast
+/// at its own `kappa = 0` seam and arrives already braking. The seam has no
+/// authority to build that brake — the normal jerk there is `sigma v^3` with no
+/// acceleration term in it — so the requirement has to name the brake, not a
+/// cruise.
 #[test]
-fn a_disk_pinned_apex_demands_zero_entry_acceleration() {
+fn a_blend_half_demands_a_braking_entry_above_its_apex() {
     let (moves, sigma, accel, _jerk, _feed) = reference_blend_moves();
     let mut report = VelocityReport::default();
     let caps = build_move_caps(&moves, f64::INFINITY, f64::INFINITY, &mut report).unwrap();
@@ -1366,8 +1394,21 @@ fn a_disk_pinned_apex_demands_zero_entry_acceleration() {
     let required = required_entry_state(&caps[2].kin, BoundaryState { v: apex, a: 0.0 })
         .expect("the up-clothoid must name its entry requirement");
 
-    assert_eq!(required.a, 0.0, "got {}", required.a);
-    assert!((required.v - apex).abs() < 1e-6, "got {}", required.v);
+    assert!(
+        required.v > apex,
+        "the seam must be entered above the apex it dips to, got {} against {apex}",
+        required.v
+    );
+    assert!(
+        required.a < 0.0,
+        "a half braking into its apex must be entered already braking, got {}",
+        required.a
+    );
+    assert!(
+        required.a.abs() <= accel,
+        "required brake {} over the budget {accel}",
+        required.a
+    );
 }
 
 #[test]

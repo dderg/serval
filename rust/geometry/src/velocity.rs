@@ -42,11 +42,11 @@ pub struct MoveVelocity {
     pub exit_v: f64,
     pub peak_v: f64,
     pub samples: Vec<VelSample>,
-    /// Closed-form jerk phases in move-local time/arc-length. Present for
-    /// straight moves (the lowering emits one exact cubic per phase) and for
-    /// curved moves planned without a jerk limit (the lowering fits axis
-    /// positions against the phases' exact scalar profile instead of quintic
-    /// windows over `samples`). Empty for finite-jerk curved moves.
+    /// Closed-form jerk phases in move-local time/arc-length. The lowering
+    /// emits one exact cubic per phase for a straight move and fits axis
+    /// positions against the phases' exact scalar profile for a curved one.
+    /// Empty only where no solver could close the move's boundary states, in
+    /// which case the lowering falls back to quintic windows over `samples`.
     pub phases: Vec<StraightPhase>,
     pub accel: f64,
     pub jerk: f64,
@@ -533,16 +533,36 @@ fn required_entry_state(kin: &Kinematics, exit: BoundaryState) -> Option<Boundar
 /// before the required acceleration is adopted as the seam's boundary state.
 const REQUIREMENT_BIND_REL: f64 = 1e-9;
 
-/// Highest speed both members meeting at a seam can actually hold there. The
-/// disk envelope only bounds `kappa^2 v^4` against the acceleration budget; a
-/// clothoid also owes `sigma v^3` of normal jerk with no acceleration term to
-/// cancel it, so a blend seam has a speed cap the disk never sees.
+/// Highest speed a member can be held at where it meets the seam: its curvature
+/// *there*, not its peak. The disk envelope only bounds `kappa^2 v^4` against
+/// the acceleration budget; a clothoid also owes `sigma v^3` of normal jerk with
+/// no acceleration term to cancel it, so a blend seam has a speed cap the disk
+/// never sees — and a blend entered at `kappa = 0` must not also pay its apex's
+/// disk price at the seam, which is a speed the seam can hold perfectly well.
+fn hold_ceiling_at(kin: &Kinematics, kappa_at_seam: f64) -> f64 {
+    curved::top_speed_ceiling(&Kinematics {
+        length: 0.0,
+        accel: kin.accel,
+        jerk: kin.jerk,
+        kappa0: kappa_at_seam,
+        sigma: kin.sigma,
+        flat_ceiling: kin.flat_ceiling,
+    })
+}
+
 fn seam_hold_ceiling(caps: &[MoveCaps], k: usize) -> f64 {
-    [caps.get(k - 1), caps.get(k)]
+    let solvable = |c: &&MoveCaps| disk::curved_solver_is_available(&c.kin);
+    let upstream = caps
+        .get(k - 1)
+        .filter(solvable)
+        .map(|c| hold_ceiling_at(&c.kin, c.kin.kappa0 + c.kin.sigma * c.kin.length));
+    let downstream = caps
+        .get(k)
+        .filter(solvable)
+        .map(|c| hold_ceiling_at(&c.kin, c.kin.kappa0));
+    upstream
         .into_iter()
-        .flatten()
-        .filter(|c| disk::curved_solver_is_available(&c.kin))
-        .map(|c| curved::top_speed_ceiling(&c.kin))
+        .chain(downstream)
         .fold(f64::INFINITY, f64::min)
 }
 
@@ -676,7 +696,7 @@ fn slowest_settling_seam<T>(hi: f64, settles: impl Fn(f64) -> Option<T>) -> Opti
 /// the next seam.
 fn member_reach(kin: &Kinematics, entry: BoundaryState) -> f64 {
     if !kin.is_straight() && disk::curved_solver_is_available(kin) {
-        let held = entry.v.min(curved::top_speed_ceiling(kin));
+        let held = entry.v.min(hold_ceiling_at(kin, kin.kappa0));
         return curved::reachable_exit(kin, (held, entry.a))
             .or_else(|| curved::reachable_exit(kin, (held, 0.0)))
             .map_or(f64::INFINITY, |(v, _)| v);
@@ -898,7 +918,7 @@ fn curved_forward_cap(kin: &Kinematics, v_entry: f64) -> f64 {
     if kin.is_straight() || !disk::curved_solver_is_available(kin) {
         return f64::INFINITY;
     }
-    let held = v_entry.min(curved::top_speed_ceiling(kin));
+    let held = v_entry.min(hold_ceiling_at(kin, kin.kappa0));
     curved::reachable_exit(kin, (held, 0.0)).map_or(held, |(v, _)| v)
 }
 
@@ -907,7 +927,7 @@ fn curved_brake_cap(kin: &Kinematics, v_exit: f64) -> f64 {
     if kin.is_straight() || !disk::curved_solver_is_available(kin) {
         return f64::INFINITY;
     }
-    let landed = v_exit.min(curved::top_speed_ceiling(kin));
+    let landed = v_exit.min(hold_ceiling_at(kin, kin.kappa0 + kin.sigma * kin.length));
     curved::brake_reach(kin, landed).unwrap_or(landed)
 }
 

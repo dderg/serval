@@ -42,13 +42,8 @@ use super::certify;
 use super::disk::Kinematics;
 use super::profile::{self, BoundaryInfeasibility, StraightPhase};
 
-/// Share of the jerk budget the curvature's own unavoidable `v^3` demand may
-/// consume at the top speed, leaving the rest for tangential jerk and for the
-/// `3 kappa v a` cross term.
-const STEADY_JERK_SHARE: f64 = 0.5;
-
-/// Share of the jerk budget left after the `v^3` demand that is spent on the
-/// `3 kappa v a` cross term rather than on tangential jerk.
+/// Share of the jerk budget left after the curvature's own `v^3` demand that is
+/// spent on the `3 kappa v a` cross term rather than on tangential jerk.
 const NORMAL_ACCEL_SHARE: f64 = 0.5;
 
 /// Share of the curvature term `kappa v^2` withheld from the acceleration
@@ -62,8 +57,25 @@ const DISK_RAIL_MARGIN: f64 = 1e-3;
 /// rather than to a caller asking for a speed above the ceiling.
 const DISK_RIM_ROUNDING: f64 = 1.0e-12;
 
+/// Overshoot of the curvature's own `v^3` jerk demand past the whole budget,
+/// relative to it, attributable to the rounding in [`top_speed_ceiling`]'s own
+/// `cbrt(jerk / g)` rather than to a caller asking for a speed above the rail.
+const BALL_RAIL_ROUNDING: f64 = 1.0e-12;
+
 const TOP_BISECT_ITERS: u32 = 48;
 const ARC_BISECT_ITERS: u32 = 64;
+
+/// Cap speeds the plan search samples across its bracket before closing in, and
+/// halvings it then spends around the best sample. Coarse first because the
+/// quickest cap speed is interior, so a bisection towards one end would walk
+/// straight past it.
+const PLAN_PROBE_STEPS: u32 = 16;
+const PLAN_REFINE_ITERS: u32 = 12;
+
+/// Rounds of the fixed point that sizes the jerk reserve against the swings the
+/// boundary states actually need. The demand only climbs, and the ceiling bounds
+/// it, so the iteration settles or leaves the member.
+const SWING_FIXPOINT_ITERS: u32 = 32;
 
 /// Bisections spent locating one end of the admissible entry-acceleration
 /// interval. Sixty halvings of `[0, accel]` resolve the end to well under the
@@ -75,15 +87,25 @@ const ACCEL_BISECT_ITERS: u32 = 18;
 /// the admissible interval, which the bisections then measure exactly.
 const ACCEL_SCAN_STEPS: u32 = 16;
 
-/// Geometric splits per monotone-curvature piece. Each band's curvature ratio is
-/// then at most two, and the count is fixed, so the band search cannot run away.
-const BANDS_PER_PIECE: u32 = 3;
+/// Bands per monotone-curvature piece, split geometrically towards the piece's
+/// low-curvature end. Two is what pays: it separates the seam's cheap curvature
+/// from the apex's expensive curvature, and every further split buys a fraction
+/// of that while costing another seam the lowering has to carry as its own
+/// piece. The count is fixed, so the band search cannot run away.
+const BANDS_PER_PIECE: u32 = 2;
 
 pub(super) const MAX_BANDS: usize = 2 * BANDS_PER_PIECE as usize;
 
 /// Shortest band worth keeping, as a share of the member. Below it the band edge
 /// is merged away rather than emitting a phase with no room to act.
 const BAND_MIN_SHARE: f64 = 1.0e-6;
+
+/// Spread between the highest and lowest band ceiling, relative to the lowest,
+/// above which planning band by band buys speed the member's single
+/// peak-curvature cap set cannot reach. Below it every band is held to what is
+/// effectively one ceiling, and the single cap set is the same answer for a
+/// fraction of the work.
+const BAND_CEILING_SPREAD: f64 = 1.0e-2;
 
 /// Lowest top speed the bracket reaches, as a share of the ceiling. The lower
 /// the top speed the more acceleration authority the caps carry, so this floor
@@ -155,7 +177,10 @@ fn steady_jerk_gain(kin: &Kinematics) -> f64 {
 }
 
 /// Highest speed at which the member can be held at all: flat ceiling, disk
-/// limit, and jerk rail, whichever binds first.
+/// limit, and the jerk rail where a steady pass — zero commanded jerk, zero
+/// acceleration — spends the whole budget on the curvature's own `v^3` demand,
+/// whichever binds first. At the rail nothing is left to swing `a` with, which
+/// is the [`cruise_only`] regime rather than a failure.
 pub(super) fn top_speed_ceiling(kin: &Kinematics) -> f64 {
     let mut v = kin.flat_ceiling;
     let k = kappa_bound(kin);
@@ -164,7 +189,7 @@ pub(super) fn top_speed_ceiling(kin: &Kinematics) -> f64 {
     }
     let g = steady_jerk_gain(kin);
     if g > 0.0 {
-        v = v.min(libm::cbrt(STEADY_JERK_SHARE * kin.jerk / g));
+        v = v.min(libm::cbrt(kin.jerk / g));
     }
     v
 }
@@ -194,15 +219,13 @@ fn disk_authority(kin: &Kinematics, k: f64, v_top: f64) -> f64 {
 
 /// Acceleration and jerk budgets that are feasible everywhere on the member for
 /// every state at or below `v_top`. The acceleration cap falls monotonically as
-/// `v_top` rises; the jerk cap does *not* — see [`bracket_jerk_floor`].
+/// `v_top` rises; the jerk cap does *not*. At the member's own ceiling the
+/// curvature has taken the whole budget and both caps are zero: the reserve the
+/// profile keeps back for swinging `a` is exactly what its swings cost, which on
+/// a cruise is nothing.
 pub(super) fn caps_at(kin: &Kinematics, v_top: f64) -> Caps {
     let k = kappa_bound(kin);
     let ball_slack = ball_slack_at(kin, v_top);
-    assert!(
-        ball_slack > 0.0,
-        "curved: top speed {v_top} is above the jerk rail; caps_at must be called at or below \
-         top_speed_ceiling"
-    );
     let disk_accel = disk_authority(kin, k, v_top);
     let cross_gain = 3.0 * k * v_top;
     if cross_gain <= 0.0 {
@@ -228,33 +251,30 @@ pub(super) fn caps_at(kin: &Kinematics, v_top: f64) -> Caps {
     }
 }
 
+/// Jerk budget left once the curvature's own unavoidable `v^3` demand at `v_top`
+/// is paid. Zero at the member's ceiling by construction; a genuinely negative
+/// slack is a caller asking for a speed above the rail and fails loudly.
 fn ball_slack_at(kin: &Kinematics, v_top: f64) -> f64 {
-    kin.jerk - v_top * v_top * v_top * steady_jerk_gain(kin)
-}
-
-/// A jerk budget no larger than `caps_at(v).j` for any `v` in `[0, ceiling]`.
-///
-/// `caps.j` is *not* monotone in `v_top`: on the disk-limited branch the
-/// `3 kappa v a` deduction vanishes together with the disk authority, so the cap
-/// rises again as the ceiling is approached. Two bounds hold branch by branch —
-/// the cross term never spends more than `NORMAL_ACCEL_SHARE` of the slack, and
-/// the acceleration it multiplies never exceeds `accel` — and the slack itself
-/// is smallest at the ceiling, so the larger of the two evaluated there is a
-/// floor for the whole bracket.
-pub(super) fn bracket_jerk_floor(kin: &Kinematics, ceiling: f64) -> f64 {
-    let slack = ball_slack_at(kin, ceiling);
+    let slack = kin.jerk - v_top * v_top * v_top * steady_jerk_gain(kin);
     assert!(
-        slack > 0.0,
-        "curved: ceiling {ceiling} is above the jerk rail; slack {slack}"
+        slack >= -BALL_RAIL_ROUNDING * kin.jerk,
+        "curved: top speed {v_top} is above the jerk rail by {}; caps_at must be called at or \
+         below top_speed_ceiling",
+        -slack
     );
-    let ball_limited = (1.0 - NORMAL_ACCEL_SHARE) * slack;
-    let disk_limited = slack - 3.0 * kappa_bound(kin) * ceiling * kin.accel;
-    ball_limited.max(disk_limited)
+    slack.max(0.0)
 }
 
-/// Speed change of a constant-jerk swing between zero acceleration and `a`.
-fn swing_dv(a: f64, j: f64) -> f64 {
-    a * a.abs() / (2.0 * j)
+/// Speed the state `(v, a)` reaches once a constant-jerk swing has wound its
+/// acceleration back to zero: a drive gains `a^2 / 2j`, a brake loses it, and a
+/// profile that swings nothing needs no jerk to do it however little is left.
+/// The direction is the whole point — pricing a brake as though it could also
+/// swing the other way refuses states no march would ever visit.
+fn unwound_speed(v: f64, a: f64, j: f64) -> f64 {
+    if a == 0.0 {
+        return v;
+    }
+    v + a * a.abs() / (2.0 * j)
 }
 
 fn infeasible<T>(why: BoundaryInfeasibility) -> Result<T, VelocityError> {
@@ -263,43 +283,58 @@ fn infeasible<T>(why: BoundaryInfeasibility) -> Result<T, VelocityError> {
 
 /// Lowest top speed at which the boundary states are admissible at all: neither
 /// end, nor the speed its acceleration unwinds to, may sit above the cap. The
-/// swing costs are measured with [`bracket_jerk_floor`], so the answer is a
-/// floor for every candidate in the bracket rather than for one point of it.
+/// swing costs are measured with the jerk the caps leave at the answer itself,
+/// so the budget held back is what these swings need rather than a fixed share
+/// of it. The answer is the bracket floor rather than the bare demand, so the
+/// caps the caller derives from it are the very caps the swings were measured
+/// against; raising the top speed only tightens them, so the demand climbs
+/// monotonically and either settles or leaves the member.
 fn required_top(
     kin: &Kinematics,
     entry: (f64, f64),
     exit: Option<(f64, f64)>,
     ceiling: f64,
 ) -> Result<f64, VelocityError> {
-    let j = bracket_jerk_floor(kin, ceiling);
     let mut states = vec![entry];
     if let Some(e) = exit {
         states.push(e);
     }
-    let mut need = 0.0_f64;
-    for (v, a) in states {
+    let mut plain = 0.0_f64;
+    for &(v, a) in &states {
         if !(v.is_finite() && a.is_finite()) {
             return infeasible(BoundaryInfeasibility::NonFinite);
         }
         if v < 0.0 {
             return infeasible(BoundaryInfeasibility::UnwindBelowRest { v });
         }
-        let unwound = v + swing_dv(a, j);
-        let wound = v - swing_dv(a, j);
-        if unwound < 0.0 || wound < 0.0 {
-            return infeasible(BoundaryInfeasibility::UnwindBelowRest {
-                v: unwound.min(wound),
-            });
+        plain = plain.max(v);
+    }
+    let over_ceiling =
+        |v: f64| infeasible(BoundaryInfeasibility::UnwindOverCeiling { v, v_max: ceiling });
+    if plain > ceiling {
+        return over_ceiling(plain);
+    }
+    let mut need = plain;
+    for _ in 0..SWING_FIXPOINT_ITERS {
+        let floor = bracket_floor(need, ceiling);
+        let j = caps_at(kin, floor).j;
+        let mut grown = plain;
+        for &(v, a) in &states {
+            let unwound = unwound_speed(v, a, j);
+            if unwound > ceiling {
+                return over_ceiling(unwound);
+            }
+            if unwound < 0.0 {
+                return infeasible(BoundaryInfeasibility::UnwindBelowRest { v: unwound });
+            }
+            grown = grown.max(unwound);
         }
-        need = need.max(v).max(unwound).max(wound);
+        if grown <= floor {
+            return Ok(floor);
+        }
+        need = grown;
     }
-    if need > ceiling {
-        return infeasible(BoundaryInfeasibility::UnwindOverCeiling {
-            v: need,
-            v_max: ceiling,
-        });
-    }
-    Ok(need)
+    over_ceiling(need)
 }
 
 fn bracket_floor(need: f64, ceiling: f64) -> f64 {
@@ -462,6 +497,39 @@ fn hold_trigger(v: f64, a: f64, v_cap: f64, j: f64) -> f64 {
     ((v_cap - v - 0.5 * a * a / j) / a).max(0.0)
 }
 
+/// Local time under `-j` after which winding the acceleration back up to zero
+/// lands exactly on `v_cap`, entered above it. Mirror of [`approach_trigger`]:
+/// on the positive-acceleration stretch the speed is still rising and the
+/// trigger cannot bind, so the solve restarts where the acceleration crosses
+/// zero.
+fn brake_trigger(v: f64, a: f64, v_cap: f64, j: f64) -> f64 {
+    if !v_cap.is_finite() {
+        return f64::INFINITY;
+    }
+    if a > 0.0 {
+        let to_zero_accel = a / j;
+        let v_at_zero_accel = v + 0.5 * a * a / j;
+        return to_zero_accel + brake_trigger(v_at_zero_accel, 0.0, v_cap, j);
+    }
+    let undershoot = v_cap - v + 0.5 * a * a / j;
+    if undershoot >= 0.0 {
+        return 0.0;
+    }
+    ((a * a - j * undershoot).sqrt() + a) / j
+}
+
+/// Local time at constant braking `a` after which the up-swing lands on
+/// `v_cap`.
+fn brake_hold_trigger(v: f64, a: f64, v_cap: f64, j: f64) -> f64 {
+    if !v_cap.is_finite() {
+        return f64::INFINITY;
+    }
+    if a >= 0.0 {
+        return f64::INFINITY;
+    }
+    ((v_cap - v + 0.5 * a * a / j) / a).max(0.0)
+}
+
 /// Local time at constant acceleration needed to advance `ds`, or `None` when
 /// the span cannot cover it: at rest with no acceleration, or braking to a stop
 /// first. The caller then leaves the member unclosed and the closure check
@@ -491,11 +559,28 @@ fn zero_jerk_arc_time(v: f64, a: f64, ds: f64) -> Option<f64> {
     }
 }
 
-/// Fastest chain across the whole member: wind the acceleration up to the cap,
-/// hold it, wind it back down so the speed lands exactly on `cap_speed`, then
-/// cruise. Every stage is truncated where the member ends.
+/// Fastest chain across the whole member: swing the acceleration to the cap,
+/// hold it, swing it back so the speed lands exactly on `cap_speed`, then
+/// cruise. Entered above `cap_speed` the swings brake instead of drive, which is
+/// how a band whose neighbours hold less is arrived at slowing down. Every stage
+/// is truncated where the member ends.
 fn march_forward(caps: &Caps, entry: (f64, f64), length: f64, cap_speed: f64) -> March {
     let mut m = March::new(entry);
+    if caps.j <= 0.0 {
+        assert!(
+            m.a == 0.0,
+            "curved: top speed {} leaves no jerk authority yet the march carries a0={}",
+            caps.v,
+            m.a
+        );
+        if let Some(cruise) = zero_jerk_arc_time(m.v, 0.0, length) {
+            m.stage(0.0, cruise, length);
+        }
+        return m;
+    }
+    if entry.0 > cap_speed {
+        return march_braking(caps, entry, length, cap_speed);
+    }
     let j = caps.j;
 
     let to_cap_accel = ((caps.a - m.a) / j).max(0.0);
@@ -515,6 +600,37 @@ fn march_forward(caps: &Caps, entry: (f64, f64), length: f64, cap_speed: f64) ->
     }
 
     if m.a > 0.0 && m.stage(-j, m.a / j, length) {
+        return m;
+    }
+
+    let Some(cruise) = zero_jerk_arc_time(m.v, m.a, length - m.s) else {
+        return m;
+    };
+    m.stage(0.0, cruise, length);
+    m
+}
+
+fn march_braking(caps: &Caps, entry: (f64, f64), length: f64, cap_speed: f64) -> March {
+    let mut m = March::new(entry);
+    let j = caps.j;
+
+    let to_cap_accel = ((caps.a + m.a) / j).max(0.0);
+    let trigger = brake_trigger(m.v, m.a, cap_speed, j);
+    if m.stage(-j, to_cap_accel.min(trigger), length) {
+        return m;
+    }
+
+    if m.a < 0.0 {
+        let Some(arc) = zero_jerk_arc_time(m.v, m.a, length - m.s) else {
+            return m;
+        };
+        let hold = brake_hold_trigger(m.v, m.a, cap_speed, j).min(arc).max(0.0);
+        if m.stage(0.0, hold, length) {
+            return m;
+        }
+    }
+
+    if m.a < 0.0 && m.stage(j, -m.a / j, length) {
         return m;
     }
 
@@ -702,15 +818,29 @@ fn chain_time(chain: &[StraightPhase]) -> f64 {
     chain.iter().map(|p| p.dt).sum()
 }
 
+/// Whether a boundary state sits inside a cap set: its acceleration within the
+/// authority, its own speed under the top speed, and the speed its unwind lands
+/// on between rest and that top speed.
+fn state_fits(caps: &Caps, (v, a): (f64, f64)) -> bool {
+    let unwound = unwound_speed(v, a, caps.j);
+    a.abs() <= caps.a && v <= caps.v && unwound <= caps.v && unwound >= 0.0
+}
+
 /// Top speed whose caps let the band actually reach that speed. Above it the caps
 /// are too weak to climb to their own ceiling, below it the ceiling itself is what
 /// limits the exit — so the crossing maximises the reachable speed.
+///
+/// `hold_cap` is what the *rest* of the member can hold, so it targets the
+/// cruise the march settles onto; the caps themselves are still derived at this
+/// band's own ceiling, because that is the fastest state the band actually
+/// visits when it is entered above what its neighbours can carry and has to
+/// brake into them.
 fn reach_span(
     kin: &Kinematics,
     entry: (f64, f64),
-    ceiling_cap: f64,
+    hold_cap: f64,
 ) -> Result<Vec<StraightPhase>, VelocityError> {
-    let ceiling = top_speed_ceiling(kin).min(ceiling_cap);
+    let ceiling = top_speed_ceiling(kin);
     let need = required_top(kin, entry, None, ceiling)?;
     let lo = bracket_floor(need, ceiling);
 
@@ -724,7 +854,7 @@ fn reach_span(
 
     let saturates = |v_top: f64| {
         let caps = caps_at(kin, v_top);
-        caps.a >= entry.1.abs()
+        state_fits(&caps, entry)
             && end_state(
                 &march_forward(&caps, entry, kin.length, f64::INFINITY).phases,
                 entry,
@@ -732,21 +862,23 @@ fn reach_span(
             .0 >= v_top
     };
 
-    let top = if saturates(ceiling) {
-        ceiling
-    } else if saturates(lo) {
-        largest_admissible(lo, ceiling, saturates)
-    } else {
+    let brakes_the_whole_way = entry.0 > hold_cap;
+    let top = if brakes_the_whole_way || !saturates(lo) {
         lo
+    } else if saturates(ceiling) {
+        ceiling
+    } else {
+        largest_admissible(lo, ceiling, saturates)
     };
     let caps = caps_at(kin, top);
     assert!(
-        caps.a >= entry.1.abs(),
-        "curved: chosen top speed {top} lost the entry acceleration fit {} against cap {}",
-        entry.1,
-        caps.a
+        state_fits(&caps, entry),
+        "curved: chosen top speed {top} lost the entry state fit {entry:?} against caps \
+         a={} j={}",
+        caps.a,
+        caps.j
     );
-    let marched = march_forward(&caps, entry, kin.length, caps.v);
+    let marched = march_forward(&caps, entry, kin.length, caps.v.min(hold_cap));
     if kin.length - marched.s > LENGTH_CLOSURE_REL_TOL * kin.length {
         return infeasible(BoundaryInfeasibility::LengthNotClosed {
             requested: kin.length,
@@ -754,6 +886,19 @@ fn reach_span(
         });
     }
     Ok(marched.phases)
+}
+
+/// Adjacent phases carrying the same jerk are one phase: the state is continuous
+/// across a band seam, so keeping both only encodes the same cubic twice.
+fn coalesce(chain: Vec<StraightPhase>) -> Vec<StraightPhase> {
+    let mut out: Vec<StraightPhase> = Vec::with_capacity(chain.len());
+    for p in chain {
+        match out.last_mut() {
+            Some(prev) if prev.j == p.j => prev.dt += p.dt,
+            _ => out.push(p),
+        }
+    }
+    out
 }
 
 /// Concatenate per-band chains onto the member's own arc length and clock.
@@ -766,7 +911,7 @@ fn splice(bands: &[Kinematics], spans: &[Vec<StraightPhase>]) -> Vec<StraightPha
         s0 += band.length;
         t0 += chain_time(span);
     }
-    out
+    coalesce(out)
 }
 
 /// Fastest pass across the member band by band, each band's exit state the next
@@ -774,11 +919,10 @@ fn splice(bands: &[Kinematics], spans: &[Vec<StraightPhase>]) -> Vec<StraightPha
 /// whole member; what banding buys is caps derived from the curvature the band
 /// actually carries rather than the member's peak.
 fn banded_reach(
-    kin: &Kinematics,
+    bands: &[Kinematics],
     entry: (f64, f64),
-) -> Result<(Vec<Kinematics>, Vec<Vec<StraightPhase>>), VelocityError> {
-    let bands = bands(kin);
-    let tail = tail_ceilings(&bands);
+) -> Result<Vec<Vec<StraightPhase>>, VelocityError> {
+    let tail = tail_ceilings(bands);
     let mut spans = Vec::with_capacity(bands.len());
     let mut state = entry;
     for (band, &cap) in bands.iter().zip(&tail) {
@@ -786,12 +930,26 @@ fn banded_reach(
         state = chain_end(&span).unwrap_or(state);
         spans.push(span);
     }
-    Ok((bands, spans))
+    Ok(spans)
 }
 
-/// Fastest pass across the whole member. The whole-member caps are tried first
-/// because they are one `caps_at` rather than a march per band; banding is what
-/// answers when a single cap set is too weak to close the member at all.
+/// Whether the bands' ceilings spread far enough apart for the tighter per-band
+/// caps to buy speed the member's single peak-curvature cap set cannot. A blend
+/// half spans a `kappa = 0` seam and a curvature apex, so it always pays; a
+/// member whose bands all hold the same speed never does.
+fn banding_pays(bands: &[Kinematics]) -> bool {
+    if bands.len() < 2 {
+        return false;
+    }
+    let (lowest, highest) = bands
+        .iter()
+        .map(top_speed_ceiling)
+        .fold((f64::INFINITY, 0.0_f64), |(lowest, highest), ceiling| {
+            (lowest.min(ceiling), highest.max(ceiling))
+        });
+    highest > lowest * (1.0 + BAND_CEILING_SPREAD)
+}
+
 fn reach_chain(kin: &Kinematics, entry: (f64, f64)) -> Result<Vec<StraightPhase>, VelocityError> {
     validate(kin);
     certified_chain(kin, &reach_spans(kin, entry)?)
@@ -800,12 +958,17 @@ fn reach_chain(kin: &Kinematics, entry: (f64, f64)) -> Result<Vec<StraightPhase>
 /// The uncertified pass [`reach_chain`] certifies. Feasibility predicates use
 /// this: the certificate proves what is *emitted*, and a predicate emits nothing.
 fn reach_spans(kin: &Kinematics, entry: (f64, f64)) -> Result<Vec<StraightPhase>, VelocityError> {
+    let bands = bands(kin);
+    if banding_pays(&bands) {
+        if let Ok(spans) = banded_reach(&bands, entry) {
+            return Ok(splice(&bands, &spans));
+        }
+    }
     match reach_span(kin, entry, f64::INFINITY) {
         Ok(chain) => Ok(chain),
-        Err(whole) => {
-            let (bands, spans) = banded_reach(kin, entry).map_err(|_| whole)?;
-            Ok(splice(&bands, &spans))
-        }
+        Err(whole) => banded_reach(&bands, entry)
+            .map(|spans| splice(&bands, &spans))
+            .map_err(|_| whole),
     }
 }
 
@@ -842,15 +1005,18 @@ fn holdable(carried: (f64, f64), ceiling: f64, caps: &Caps) -> (f64, f64) {
 
 /// Boundary states at the member's band edges: the forward march's state at each
 /// edge, or the backward march's where that is the slower of the two, so no band
-/// is asked to hold a speed the band beyond it cannot brake from. The two ends
-/// are the caller's own boundary states, which the bands must honour exactly.
+/// is asked to hold a speed the band beyond it cannot brake from. Each march is
+/// held to its own band's ceiling alone — the opposing march is what keeps a
+/// band from carrying a speed its neighbours cannot, and capping the forward
+/// march with the tail minimum as well would flatten the traversal onto the
+/// slowest band's ceiling and erase the dip. The two ends are the caller's own
+/// boundary states, which the bands must honour exactly.
 fn band_edge_states(bands: &[Kinematics], entry: (f64, f64), exit: (f64, f64)) -> Vec<(f64, f64)> {
     let n = bands.len();
-    let tail = tail_ceilings(bands);
-    let ahead = band_march_edges(bands, &tail, entry);
+    let own_ceiling_only = vec![f64::INFINITY; n];
+    let ahead = band_march_edges(bands, &own_ceiling_only, entry);
     let back_bands: Vec<Kinematics> = bands.iter().rev().map(reversed).collect();
-    let back_tail = tail_ceilings(&back_bands);
-    let behind = band_march_edges(&back_bands, &back_tail, (exit.0, -exit.1));
+    let behind = band_march_edges(&back_bands, &own_ceiling_only, (exit.0, -exit.1));
     let mut edges = vec![entry];
     for j in 1..n {
         let (v_back, a_back) = behind[n - j];
@@ -868,23 +1034,16 @@ fn band_edge_states(bands: &[Kinematics], entry: (f64, f64), exit: (f64, f64)) -
 /// carrying acceleration. Each band is the same `bounded_plan` a whole member
 /// gets, so nothing new is assumed about the physics — only the caps tighten.
 fn banded_plan(
-    kin: &Kinematics,
+    bands: &[Kinematics],
     entry: (f64, f64),
     exit: (f64, f64),
 ) -> Result<Vec<StraightPhase>, VelocityError> {
-    let bands = bands(kin);
-    if bands.len() < 2 {
-        return infeasible(BoundaryInfeasibility::LengthTooShort {
-            length: kin.length,
-            minimum: kin.length,
-        });
-    }
-    let edges = band_edge_states(&bands, entry, exit);
+    let edges = band_edge_states(bands, entry, exit);
     let mut spans = Vec::with_capacity(bands.len());
     for (i, band) in bands.iter().enumerate() {
         spans.push(bounded_plan(band, edges[i], edges[i + 1])?);
     }
-    Ok(splice(&bands, &spans))
+    Ok(splice(bands, &spans))
 }
 
 /// The one profile a member with no acceleration authority left can execute: a
@@ -960,57 +1119,113 @@ fn plan_at(
     v_top: f64,
 ) -> Result<Vec<StraightPhase>, VelocityError> {
     let caps = caps_at(kin, v_top);
+    if caps.a <= 0.0 || caps.j <= 0.0 {
+        return cruise_only(kin, entry, exit).map_err(|_| {
+            VelocityError::InfeasibleBoundary(BoundaryInfeasibility::AccelOverLimit {
+                a: entry.1.abs().max(exit.1.abs()),
+                a_max: caps.a,
+            })
+        });
+    }
     profile::straight_chain_between(entry, exit, kin.length, caps.v, caps.a, caps.j)
 }
 
-/// Largest top speed whose caps still close the member between the boundary
-/// states. The bracket is `[required_top, top_speed_ceiling]`; its ends are
-/// established by planning at both before the bisection starts.
+/// A candidate plan: the cap speed it was built at, how long it takes, and the
+/// chain itself.
+struct Candidate {
+    v_top: f64,
+    time: f64,
+    chain: Vec<StraightPhase>,
+}
+
+/// Keep the plan at `v_top` if it is quicker than the incumbent. A refusal the
+/// caps explain is a candidate the search discards; anything else is a broken
+/// boundary state and belongs to the caller.
+fn keep_quicker(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+    v_top: f64,
+    best: &mut Candidate,
+) -> Result<(), VelocityError> {
+    match plan_at(kin, entry, exit, v_top) {
+        Ok(chain) => {
+            let time = chain_time(&chain);
+            if time < best.time {
+                *best = Candidate { v_top, time, chain };
+            }
+            Ok(())
+        }
+        Err(e) if caps_too_weak(&e) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Quickest chain any cap set in the bracket yields. Raising the cap speed
+/// quickens the chain until the caps can no longer carry it that fast, and
+/// slows it again beyond that as the authority they leave shrinks — so the
+/// bracket is swept coarsely and then closed in on around the best sample,
+/// rather than pushed to the highest cap speed that merely closes.
 fn bounded_plan(
     kin: &Kinematics,
     entry: (f64, f64),
     exit: (f64, f64),
 ) -> Result<Vec<StraightPhase>, VelocityError> {
     let (lo, ceiling) = plan_bracket(kin, entry, exit)?;
-    if caps_at(kin, lo).a <= 0.0 {
+    let floor_caps = caps_at(kin, lo);
+    if floor_caps.a <= 0.0 || floor_caps.j <= 0.0 {
         return cruise_only(kin, entry, exit);
     }
-    match plan_at(kin, entry, exit, ceiling) {
-        Ok(chain) => return Ok(chain),
-        Err(e) if !caps_too_weak(&e) => return Err(e),
-        Err(_) => {}
+    let seed = plan_at(kin, entry, exit, lo)?;
+    let mut best = Candidate {
+        v_top: lo,
+        time: chain_time(&seed),
+        chain: seed,
+    };
+    let span = ceiling - lo;
+    let step = span / f64::from(PLAN_PROBE_STEPS);
+    for i in 1..=PLAN_PROBE_STEPS {
+        keep_quicker(kin, entry, exit, lo + step * f64::from(i), &mut best)?;
     }
-    let mut best = plan_at(kin, entry, exit, lo)?;
-    let mut good = lo;
-    let mut bad = ceiling;
-    for _ in 0..TOP_BISECT_ITERS {
-        let mid = 0.5 * (good + bad);
-        if mid <= good || mid >= bad {
-            break;
-        }
-        match plan_at(kin, entry, exit, mid) {
-            Ok(chain) => {
-                best = chain;
-                good = mid;
-            }
-            Err(e) if !caps_too_weak(&e) => return Err(e),
-            Err(_) => bad = mid,
+    let mut below = (best.v_top - step).max(lo);
+    let mut above = (best.v_top + step).min(ceiling);
+    for _ in 0..PLAN_REFINE_ITERS {
+        let anchor = best.v_top;
+        keep_quicker(kin, entry, exit, 0.5 * (below + anchor), &mut best)?;
+        keep_quicker(kin, entry, exit, 0.5 * (anchor + above), &mut best)?;
+        if best.v_top < anchor {
+            above = anchor;
+        } else if best.v_top > anchor {
+            below = anchor;
+        } else {
+            below = 0.5 * (below + anchor);
+            above = 0.5 * (anchor + above);
         }
     }
-    Ok(best)
+    Ok(best.chain)
 }
 
-/// Chain between two boundary states: the whole member's caps first, its bands
-/// where a single cap set is too weak. Banding costs a plan per band, so it is
-/// the answer to a refusal rather than the default.
+/// Chain between two boundary states: band by band where the band ceilings
+/// spread far enough for the tighter caps to buy speed, the whole member's own
+/// single cap set otherwise, and each the other's fallback. The order matters:
+/// [`closes`] answers in the same order, so what the envelope was promised is
+/// what gets emitted.
 fn member_plan(
     kin: &Kinematics,
     entry: (f64, f64),
     exit: (f64, f64),
 ) -> Result<Vec<StraightPhase>, VelocityError> {
+    let bands = bands(kin);
+    if banding_pays(&bands) {
+        if let Ok(chain) = banded_plan(&bands, entry, exit) {
+            return Ok(chain);
+        }
+    }
     match bounded_plan(kin, entry, exit) {
         Ok(chain) => Ok(chain),
-        Err(whole) if caps_too_weak(&whole) => banded_plan(kin, entry, exit).map_err(|_| whole),
+        Err(whole) if caps_too_weak(&whole) && bands.len() >= 2 => {
+            banded_plan(&bands, entry, exit).map_err(|_| whole)
+        }
         Err(whole) => Err(whole),
     }
 }
@@ -1025,7 +1240,8 @@ fn probe_closes(
     exit: (f64, f64),
 ) -> Result<(), VelocityError> {
     let (lo, ceiling) = plan_bracket(kin, entry, exit)?;
-    if caps_at(kin, lo).a <= 0.0 {
+    let floor_caps = caps_at(kin, lo);
+    if floor_caps.a <= 0.0 || floor_caps.j <= 0.0 {
         return cruise_only(kin, entry, exit).map(drop);
     }
     match plan_at(kin, entry, exit, ceiling) {
@@ -1036,24 +1252,30 @@ fn probe_closes(
     plan_at(kin, entry, exit, lo).map(drop)
 }
 
-/// Whether [`member_plan`] would find a chain. The whole member is probed first;
-/// a refusal falls through to the bands, which is what `member_plan` does next.
-/// Both probes stop at the bracket ends, so the answer costs a bounded number of
-/// closed-form solves however many bands the member has.
+fn probe_bands(
+    bands: &[Kinematics],
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> Result<(), VelocityError> {
+    let edges = band_edge_states(bands, entry, exit);
+    bands
+        .iter()
+        .enumerate()
+        .try_for_each(|(i, band)| probe_closes(band, edges[i], edges[i + 1]))
+}
+
+/// Whether [`member_plan`] would find a chain, attempted in the same order it
+/// attempts them. Every probe stops at the bracket ends, so the answer costs a
+/// bounded number of closed-form solves however many bands the member has.
 fn closes(kin: &Kinematics, entry: (f64, f64), exit: (f64, f64)) -> Result<(), VelocityError> {
+    let bands = bands(kin);
+    if banding_pays(&bands) && probe_bands(&bands, entry, exit).is_ok() {
+        return Ok(());
+    }
     match probe_closes(kin, entry, exit) {
         Ok(()) => Ok(()),
-        Err(whole) if caps_too_weak(&whole) => {
-            let bands = bands(kin);
-            if bands.len() < 2 {
-                return Err(whole);
-            }
-            let edges = band_edge_states(&bands, entry, exit);
-            bands
-                .iter()
-                .enumerate()
-                .try_for_each(|(i, band)| probe_closes(band, edges[i], edges[i + 1]))
-                .map_err(|_| whole)
+        Err(whole) if caps_too_weak(&whole) && bands.len() >= 2 => {
+            probe_bands(&bands, entry, exit).map_err(|_| whole)
         }
         Err(whole) => Err(whole),
     }
@@ -1223,6 +1445,17 @@ pub(super) fn entry_accel_window(
     })
 }
 
+/// The member as its entry sees it: where it is planned band by band, the band
+/// the entry state actually lands in, whose ceiling is what that end has to
+/// respect. A blend's `kappa = 0` seam does not owe the curvature peak's price,
+/// and gating the seam on the peak is what holds a whole blend to its apex
+/// speed.
+fn entry_band(kin: &Kinematics) -> Kinematics {
+    let bands = bands(kin);
+    let head = bands.first().filter(|_| banding_pays(&bands));
+    band_kin(kin, 0.0, head.map_or(kin.length, |b| b.length))
+}
+
 /// Entry accelerations the member can be traversed from at all when it is
 /// entered at `v_entry`, its exit state left free.
 ///
@@ -1236,16 +1469,14 @@ pub(super) fn entry_accel_window(
 /// speed the envelope must give up rather than an acceleration it can choose.
 pub(super) fn traversable_entry_accels(kin: &Kinematics, v_entry: f64) -> Option<AccelWindow> {
     validate(kin);
-    let ceiling = top_speed_ceiling(kin);
+    let at_entry = entry_band(kin);
+    let ceiling = top_speed_ceiling(&at_entry);
     if !(v_entry.is_finite() && v_entry >= 0.0) || v_entry > ceiling {
         return None;
     }
-    let j = bracket_jerk_floor(kin, ceiling);
-    let holds = |mag: f64| {
-        let swing = swing_dv(mag, j);
-        v_entry + swing <= ceiling
-            && v_entry - swing >= 0.0
-            && caps_at(kin, bracket_floor(v_entry + swing, ceiling)).a >= mag
+    let holds = |mag: f64| match required_top(&at_entry, (v_entry, mag), None, ceiling) {
+        Ok(need) => caps_at(&at_entry, need).a >= mag,
+        Err(_) => false,
     };
     let rail = stretch_to(0.0, kin.accel, holds);
     let traversable = |a: f64| reach_spans(kin, (v_entry, a)).is_ok();
@@ -1316,6 +1547,28 @@ pub(super) fn curved_reach(kin: &Kinematics, entry: (f64, f64)) -> (f64, f64) {
         .expect("curved_reach: the member cannot be traversed from this entry state")
 }
 
+/// The member's own fastest pass, forward or backward, where that pass is
+/// exactly what the boundary states name. A plan between two states cannot
+/// always rebuild the reach that named one of them — it bands the member and
+/// the band edges it computes are not the reach's own — but the reach is a
+/// trajectory between the very states in hand, so it is the answer.
+fn extremal_chain(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> Option<Vec<StraightPhase>> {
+    if let Ok(forward) = reach_spans(kin, entry) {
+        if states_match(exit, end_state(&forward, entry)) {
+            return Some(forward);
+        }
+    }
+    let back = reversed(kin);
+    let seed = (exit.0, -exit.1);
+    let backward = reach_spans(&back, seed).ok()?;
+    let (v, a) = end_state(&backward, seed);
+    states_match(entry, (v, -a)).then(|| reverse_chain(kin.length, &backward))
+}
+
 /// Certified constant-jerk chain across the member between boundary states that
 /// both carry acceleration.
 pub(super) fn curved_chain(
@@ -1326,21 +1579,9 @@ pub(super) fn curved_chain(
     validate(kin);
     match member_plan(kin, entry, exit) {
         Ok(chain) => certified_chain(kin, &chain),
-        Err(bounded) => {
-            let back = reversed(kin);
-            let seed = (exit.0, -exit.1);
-            match reach_chain(&back, seed) {
-                Ok(backward) => {
-                    let (v, a) = end_state(&backward, seed);
-                    if states_match(entry, (v, -a)) {
-                        certified_chain(kin, &reverse_chain(kin.length, &backward))
-                    } else {
-                        Err(bounded)
-                    }
-                }
-                Err(backward) if !caps_too_weak(&backward) => Err(backward),
-                Err(_) => Err(bounded),
-            }
-        }
+        Err(bounded) => match extremal_chain(kin, entry, exit) {
+            Some(chain) => certified_chain(kin, &chain),
+            None => Err(bounded),
+        },
     }
 }

@@ -1,7 +1,7 @@
 use super::certify;
 use super::curved::{
-    MAX_BANDS, bracket_jerk_floor, caps_at, certified_chain, curved_chain, curved_reach,
-    entry_requirement, top_speed_ceiling,
+    MAX_BANDS, caps_at, certified_chain, curved_chain, curved_reach, entry_requirement,
+    top_speed_ceiling,
 };
 use super::disk::{Kinematics, const_kappa_reach_w};
 use super::profile::{self, StraightPhase};
@@ -12,13 +12,16 @@ use crate::frontend::{MoveContext, VelocityLimits, line_move};
 use crate::path::{CurvatureProfile, Segment};
 use crate::segment::SourceRange;
 
-/// One cap set plans at most the triple-limited alphabet: swing up, hold, swing
-/// down, cruise, and the two flanks a nonzero boundary acceleration adds. A member
-/// the whole-member caps refuse is planned band by band instead, so its budget is
-/// that alphabet once per band.
-const PHASES_PER_CAP_SET: usize = 6;
+/// One cap set plans at most the triple-limited alphabet: swing to the cap,
+/// hold, swing back, cruise, and the flanks a nonzero boundary acceleration adds
+/// at each end. Banded emission is the default, so a member's budget is that
+/// alphabet once per band.
+const PHASES_PER_CAP_SET: usize = 8;
 
 const WORST_PHASES: usize = PHASES_PER_CAP_SET * MAX_BANDS;
+
+/// Phases the committed marcher emits for one reference blend, measured.
+const MARCHER_PHASES_PER_BLEND: usize = 598;
 
 const REFERENCE_FEED: f64 = 300.0;
 const REFERENCE_ACCEL: f64 = 60_000.0;
@@ -544,9 +547,10 @@ fn a_reference_blend_costs_a_handful_of_phases() {
         }
     }
     assert!(
-        total <= 12,
+        total <= MARCHER_PHASES_PER_BLEND / 10,
         "the reference biclothoid took {total} phases ({worst} worst chain); today's marcher \
-         emits ~598 for one blend and this solver must stay in the tens"
+         emits ~{MARCHER_PHASES_PER_BLEND} for one blend and this solver must stay an order of \
+         magnitude under it"
     );
 }
 
@@ -644,15 +648,14 @@ fn the_emission_gate_never_passes_an_infeasible_phase() {
     );
 }
 
-/// The bisection brackets in `curved.rs` measure swing costs with
-/// `bracket_jerk_floor`, which is only sound if it really is a floor. It is not
-/// enough to check the ceiling: `caps_at(v).j` rises again as the disk authority
-/// it deducts vanishes, so the ceiling's own cap is *not* the bracket minimum.
+/// The jerk budget is spent where it is owed, not reserved by a flat share: at a
+/// member's ceiling a steady pass owes the whole of it, so no authority is left
+/// to swing the acceleration with, and below the ceiling the leftover is what
+/// the swings may spend.
 #[test]
-fn the_bracket_jerk_floor_is_a_floor_the_ceiling_is_not() {
+fn the_ceiling_spends_the_whole_jerk_budget_on_a_steady_pass() {
     let mut rng = Lcg(0x10F5_1234_9ABC);
-    let mut ceiling_is_not_the_minimum = 0usize;
-    let mut worst_ceiling_ratio: f64 = 1.0;
+    let mut jerk_bound = 0usize;
     for _ in 0..20_000 {
         let k = kin(
             rng.signed(0.8),
@@ -663,38 +666,35 @@ fn the_bracket_jerk_floor_is_a_floor_the_ceiling_is_not() {
             rng.in_range(20.0, 400.0),
         );
         let ceiling = top_speed_ceiling(&k);
-        let floor = bracket_jerk_floor(&k, ceiling);
-        assert!(floor > 0.0, "the floor {floor} must leave a usable budget");
-        let at_ceiling = caps_at(&k, ceiling).j;
-        let mut minimum = f64::INFINITY;
-        for n in 0..=400 {
-            let v = (ceiling * (n as f64) / 400.0).min(ceiling);
-            let j = caps_at(&k, v).j;
+        let kappa_peak = k.kappa0.abs().max((k.kappa0 + k.sigma * k.length).abs());
+        let gain = libm::hypot(kappa_peak * kappa_peak, k.sigma.abs());
+        let steady = ceiling * ceiling * ceiling * gain;
+        assert!(
+            steady <= k.jerk * (1.0 + 1.0e-9),
+            "a steady pass at the ceiling {ceiling} demands {steady} of a {} budget",
+            k.jerk
+        );
+        let caps = caps_at(&k, ceiling);
+        if steady >= k.jerk * (1.0 - 1.0e-9) && kappa_peak > 0.0 {
+            jerk_bound += 1;
             assert!(
-                j >= floor,
-                "caps_at({v}).j = {j} is below the claimed bracket floor {floor} \
-                 (ceiling={ceiling} kappa0={} sigma={} accel={} jerk={})",
+                caps.a <= 1.0e-9 * k.accel && caps.j <= 1.0e-9 * k.jerk,
+                "the jerk rail left authority a={} j={} behind (kappa0={} sigma={})",
+                caps.a,
+                caps.j,
                 k.kappa0,
-                k.sigma,
-                k.accel,
-                k.jerk
+                k.sigma
             );
-            minimum = minimum.min(j);
         }
-        if at_ceiling > minimum * (1.0 + 1.0e-12) {
-            ceiling_is_not_the_minimum += 1;
-            worst_ceiling_ratio = worst_ceiling_ratio.max(at_ceiling / minimum);
-        }
+        assert!(
+            caps_at(&k, 0.9 * ceiling).j > 0.0,
+            "no jerk authority at nine tenths of the ceiling {ceiling}"
+        );
     }
     assert!(
-        ceiling_is_not_the_minimum > 1_000,
-        "only {ceiling_is_not_the_minimum} members had a non-monotone jerk cap — the sweep no \
-         longer reaches the regime the floor exists for"
-    );
-    assert!(
-        worst_ceiling_ratio > 1.5,
-        "worst j(ceiling)/j(min) was only {worst_ceiling_ratio}; the ceiling's cap would look \
-         like a safe floor and this test would stop defending anything"
+        jerk_bound > 1_000,
+        "only {jerk_bound} members were jerk-rail bound — the sweep no longer reaches the regime \
+         the full-budget ceiling exists for"
     );
 }
 

@@ -581,6 +581,8 @@ struct CornerRow {
     jerk_rail_v: f64,
     entry_v: f64,
     entry_a: f64,
+    exit_v: f64,
+    exit_a: f64,
     time_s: f64,
     shape_ratio: f64,
     exact_ratio: f64,
@@ -604,7 +606,7 @@ impl CornerRow {
 
     fn row(&self) -> String {
         format!(
-            "{:>7.0} {:>8.2e} {:>9.5} {:>10.4} {:>10.4} {:>10.4} {:>7} {:>10.4} {:>9.1e} {:>10.6} {:>8.4} {:>8.4} {:>6}",
+            "{:>7.0} {:>8.2e} {:>9.5} {:>10.4} {:>10.4} {:>10.4} {:>7} {:>10.4} {:>9.1e} {:>10.4} {:>9.1e} {:>10.6} {:>8.4} {:>8.4} {:>6}",
             self.accel,
             self.jerk,
             self.kappa_peak,
@@ -614,6 +616,8 @@ impl CornerRow {
             self.binding(),
             self.entry_v,
             self.entry_a,
+            self.exit_v,
+            self.exit_a,
             self.time_s,
             self.shape_ratio,
             self.exact_ratio,
@@ -622,7 +626,7 @@ impl CornerRow {
     }
 }
 
-const CORNER_TABLE_HEADER: &str = "  accel    j_max  kappa_pk    apex_v  disk_apex  jerk_rail   binds    entry_v   entry_a     time_s    shape    exact phases";
+const CORNER_TABLE_HEADER: &str = "  accel    j_max  kappa_pk    apex_v  disk_apex  jerk_rail   binds    entry_v   entry_a     exit_v    exit_a     time_s    shape    exact phases";
 
 fn measure_corner(accel: f64, jerk: f64) -> Result<CornerRow, String> {
     let halves = corner_halves(Machine::user().accel(accel).jerk(jerk));
@@ -656,6 +660,8 @@ fn measure_corner(accel: f64, jerk: f64) -> Result<CornerRow, String> {
         ),
         entry_v: entry.0,
         entry_a: entry.1,
+        exit_v: handoff.0,
+        exit_a: handoff.1,
         time_s: into_corner.iter().chain(&out_of_corner).map(|p| p.dt).sum(),
         shape_ratio: peak(shape_in, shape_out),
         exact_ratio: peak(exact_in, exact_out),

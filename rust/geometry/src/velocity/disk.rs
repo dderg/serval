@@ -1192,9 +1192,8 @@ pub(super) struct RunReconstruction {
     pub exit_states: Vec<(f64, f64)>,
     pub phases: Vec<Vec<StraightPhase>>,
     /// Per-member chain planned between the run's `(v, a)` boundary states.
-    /// Empty where the member has no solver. This is what `phases` becomes once
-    /// the marcher is retired; until then only the members whose chain the
-    /// lowering already consumes are published through `phases`.
+    /// Empty where the member has no solver, or where no chain can close the
+    /// boundary pair. Every member with a chain publishes it through `phases`.
     pub envelope_chains: Vec<Vec<StraightPhase>>,
     pub unreachable: Vec<UnreachableMember>,
     pub planned: MemberClassCounts,
@@ -1249,9 +1248,10 @@ fn member_chain(
 /// `(v, a)` boundary states the backward requirement pass fixed — the state its
 /// predecessor hands it and the state its successor requires — so a blend
 /// inherits its entry brake instead of manufacturing one at a seam with no
-/// authority to build it. The published chain is the marched run's, clipped or
-/// re-solved at the marched seam states, and stays authoritative while the
-/// marcher still owns curved samples.
+/// authority to build it. A curved member emits that chain and reads its
+/// samples off it. A straight member re-solves the closed form at its marched
+/// seam states; only a member with no chain of its own falls back to the
+/// marcher's.
 pub(super) fn reconstruct_run(
     members: &[RunMember],
     run_start_v: f64,
@@ -1304,36 +1304,43 @@ pub(super) fn reconstruct_run(
         } else if curved_solver_is_available(m.kin) {
             out.planned.curved += 1;
         }
-        out.envelope_chains
-            .push(match member_chain(m.kin, envelope_entry, envelope_exit) {
-                Some(Ok(built)) => built,
-                Some(Err(why)) => {
-                    out.unreachable.push(UnreachableMember {
-                        index,
-                        entry: envelope_entry,
-                        exit: envelope_exit,
-                        why,
-                    });
-                    Vec::new()
-                }
-                None => Vec::new(),
-            });
+        let envelope = match member_chain(m.kin, envelope_entry, envelope_exit) {
+            Some(Ok(built)) => built,
+            Some(Err(why)) => {
+                out.unreachable.push(UnreachableMember {
+                    index,
+                    entry: envelope_entry,
+                    exit: envelope_exit,
+                    why,
+                });
+                Vec::new()
+            }
+            None => Vec::new(),
+        };
+        out.envelope_chains.push(envelope.clone());
 
         let entry = interp_flat(&flat, s0)?;
         let exit = interp_flat(&flat, s1)?;
-        let analytic = closed_form_is_available(m.kin)
+        let emitted = if !envelope.is_empty() {
+            assert!(
+                ride::chain_is_continuous(&envelope, true),
+                "member {index} of length {} planned a discontinuous chain \
+                 between entry {envelope_entry:?} and exit {envelope_exit:?}",
+                m.kin.length
+            );
+            restate_from_chain(&mut local, &envelope, envelope_entry, envelope_exit);
+            envelope
+        } else if let Some(built) = closed_form_is_available(m.kin)
             .then(|| certified_straight_chain(m.kin, entry, exit).ok())
-            .flatten();
-        if let Some(built) = &analytic {
-            restate_from_chain(&mut local, built, entry, exit);
-        }
-        out.samples.push(local);
-        out.exit_states.push(exit_state_at(&flat, s1));
-        let phases_apply = m.kin.is_straight() || !m.kin.jerk.is_finite();
-        out.phases.push(match analytic {
-            Some(built) => built,
-            None if chain.is_empty() || !phases_apply => Vec::new(),
-            None => {
+            .flatten()
+        {
+            restate_from_chain(&mut local, &built, entry, exit);
+            built
+        } else {
+            let marcher_applies = m.kin.is_straight() || !m.kin.jerk.is_finite();
+            if chain.is_empty() || !marcher_applies {
+                Vec::new()
+            } else {
                 let clipped = ride::clip_phases(&chain, s0, s1);
                 if ride::chain_is_continuous(&clipped, m.kin.jerk.is_finite()) {
                     clipped
@@ -1341,17 +1348,13 @@ pub(super) fn reconstruct_run(
                     Vec::new()
                 }
             }
-        });
+        };
+        let member_exit = local.last().map_or(envelope_exit, |p| (p.1, p.2));
+        out.samples.push(local);
+        out.exit_states.push(member_exit);
+        out.phases.push(emitted);
     }
     Some(out)
-}
-
-/// Profile state at run-arc `s`: the emitted samples carry the pass's true
-/// acceleration state, and the grid contains every member boundary exactly.
-fn exit_state_at(flat: &[(f64, f64, f64)], s: f64) -> (f64, f64) {
-    let i = flat.partition_point(|p| p.0 < s - 1e-9);
-    let i = i.min(flat.len() - 1);
-    (flat[i].1, flat[i].2)
 }
 
 #[cfg(test)]

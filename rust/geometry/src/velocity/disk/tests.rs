@@ -140,14 +140,21 @@ fn worst_accel(samples: &[(f64, f64, f64)]) -> f64 {
     samples.iter().map(|p| p.2.abs()).fold(0.0, f64::max)
 }
 
+/// Boundary states shaped like the ones the envelope settlement hands
+/// `reconstruct_run`: a seam is capped by the ceilings on both of its sides,
+/// never by the upstream member's alone.
 fn run_members<'a>(kins: &[&'a Kinematics], exit_v: f64) -> Vec<RunMember<'a>> {
     let mut fwd = 0.0;
     let mut members: Vec<RunMember> = kins
         .iter()
-        .map(|k| {
+        .enumerate()
+        .map(|(i, k)| {
+            let seam_ceiling = kins
+                .get(i + 1)
+                .map_or(k.flat_ceiling, |next| k.flat_ceiling.min(next.flat_ceiling));
             let m = RunMember {
                 kin: k,
-                exit_v: k.flat_ceiling,
+                exit_v: seam_ceiling,
                 exit_a: 0.0,
                 fwd_s: fwd,
             };
@@ -298,8 +305,8 @@ fn mixed_run_straight_members_emit_exact_phases() {
         "straight members of a mixed run lower from exact phases"
     );
     assert!(
-        phases[1].is_empty() && phases[2].is_empty(),
-        "curved members lower by fitting"
+        !phases[1].is_empty() && !phases[2].is_empty(),
+        "curved members lower from their envelope chains"
     );
     for idx in [0usize, 3] {
         let chain = &phases[idx];
@@ -425,12 +432,44 @@ fn infinite_jerk_curved_member_carries_smooth_phases() {
 }
 
 #[test]
-fn finite_jerk_curved_member_still_carries_no_phases() {
-    let k = kin(0.0, 0.05, 4.0, 1000.0, 1e5, 300.0);
-    let members = run_members(&[&k], 70.0);
-    let super::RunReconstruction { phases, .. } =
-        reconstruct_run(&members, 100.0, 0.0, 1e-8).unwrap();
-    assert!(phases[0].is_empty());
+fn finite_jerk_curved_member_emits_its_envelope_chain() {
+    let (accel, jerk, flat) = (1000.0, 1e5, 60.0);
+    let l1 = kin(0.0, 0.0, 10.0, accel, jerk, flat);
+    let c1 = kin(0.0, 0.1, 2.0, accel, jerk, flat);
+    let c2 = kin(0.2, -0.1, 2.0, accel, jerk, flat);
+    let l2 = kin(0.0, 0.0, 10.0, accel, jerk, flat);
+    let members = run_members(&[&l1, &c1, &c2, &l2], 0.0);
+    let super::RunReconstruction {
+        phases,
+        envelope_chains,
+        samples,
+        unreachable,
+        ..
+    } = reconstruct_run(&members, 0.0, 0.0, 1e-8).unwrap();
+    assert!(unreachable.is_empty());
+    for idx in [1usize, 2] {
+        assert!(!phases[idx].is_empty());
+        assert_eq!(phases[idx], envelope_chains[idx]);
+        assert!(super::ride::chain_is_continuous(&phases[idx], true));
+        assert_curved_samples_view_the_chain(&samples[idx], &phases[idx]);
+    }
+}
+
+fn assert_curved_samples_view_the_chain(samples: &[(f64, f64, f64)], chain: &[StraightPhase]) {
+    let arcs: Vec<f64> = samples.iter().map(|p| p.0).collect();
+    for (p, (v, a)) in samples
+        .iter()
+        .zip(super::ride::chain_states(chain, &arcs))
+        .skip(1)
+        .take(arcs.len().saturating_sub(2))
+    {
+        assert!(
+            (p.1 - v).abs() <= 1e-6 * (1.0 + v.abs()),
+            "sample velocity {} is not a view of the emitted chain {v}",
+            p.1
+        );
+        assert!((p.2 - a).abs() <= 1e-4 * (1.0 + a.abs()));
+    }
 }
 
 /// Limits under which a rest-to-rest straight never reaches the flat ceiling:
