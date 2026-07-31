@@ -27,6 +27,13 @@ from .mcu_pins import (  # noqa: F401
     MCU_pwm,
 )
 
+STEPPING_MODE_PIECE = 0
+STEPPING_MODE_STEPCOMPRESS = 1
+STEPPING_MODES = {
+    "piece": STEPPING_MODE_PIECE,
+    "stepcompress": STEPPING_MODE_STEPCOMPRESS,
+}
+
 
 class error(Exception):
     pass
@@ -95,8 +102,38 @@ class MCU:
         self._init_serial_port(config)
         self._init_restart_state(config)
         self._init_config_state()
+        self._init_stepping_mode(config)
         self._init_non_critical(config)
         self._init_event_handlers()
+
+    def _init_stepping_mode(self, config):
+        self._stepping_mode = config.getchoice(
+            "stepping_mode", STEPPING_MODES, "piece"
+        )
+        self._stepcompress_sample_rate = 0.0
+        if self._stepping_mode != STEPPING_MODE_STEPCOMPRESS:
+            return
+        rate = config.getfloat("stepcompress_sample_rate", None)
+        if rate is None:
+            raise config.error(
+                "mcu '%s': stepping_mode: stepcompress requires "
+                "stepcompress_sample_rate (Hz)" % (config.get_name(),)
+            )
+        if not math.isfinite(rate) or rate <= 0.0:
+            raise config.error(
+                "mcu '%s': stepcompress_sample_rate must be a finite "
+                "positive frequency in Hz, got %r" % (config.get_name(), rate)
+            )
+        self._stepcompress_sample_rate = rate
+
+    def get_stepping_mode(self):
+        return self._stepping_mode
+
+    def get_stepcompress_sample_rate(self):
+        return self._stepcompress_sample_rate
+
+    def get_move_queue_slots(self):
+        return self._move_queue_slots
 
     def _init_identity(self, config, clocksync):
         self._config = config
@@ -156,6 +193,7 @@ class MCU:
         self._init_cmds = []
         self._mcu_freq = 0.0
         self._reserved_move_slots = 0
+        self._move_queue_slots = 0
         self._flush_callbacks = []
         self._get_status_info = {}
         self._stats_sumsq_base = 0.0
@@ -474,6 +512,7 @@ class MCU:
         move_count = config_params["move_count"]
         if move_count < self._reserved_move_slots:
             raise error("Too few moves available on MCU '%s'" % (self._name,))
+        self._move_queue_slots = move_count
         # Log config information
         move_msg = "Configured MCU '%s' (%d moves)" % (self._name, move_count)
         logging.info(move_msg)

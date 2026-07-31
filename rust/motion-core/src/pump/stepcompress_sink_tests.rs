@@ -1,0 +1,531 @@
+use super::*;
+use crate::mcu_config::{McuAxisConfig, SteppingMode};
+use runtime::piece_ring::PieceEntry;
+use std::sync::atomic::AtomicU64;
+
+const MCU_ID: u32 = 3;
+const OID: u32 = 7;
+const CYCLES_PER_SECOND: f64 = 1_000_000.0;
+const BUDGET: u32 = 4;
+
+struct Harness {
+    endpoint: StepcompressEndpoint,
+    now: Arc<AtomicU64>,
+    sent: Arc<Mutex<Vec<StepFrame>>>,
+    heartbeats: crossbeam_channel::Receiver<PumpMsg>,
+    fail_sends: Arc<AtomicBool>,
+}
+
+fn motor_cfg() -> MotorConfig {
+    MotorConfig {
+        oid: OID,
+        microstep_distance: 0.01,
+        invert_dir: false,
+        max_steps_per_sample: 16,
+        sample_rate_hz: 10_000.0,
+        cycles_per_second: CYCLES_PER_SECOND,
+    }
+}
+
+fn harness(budget: u32) -> Harness {
+    let now = Arc::new(AtomicU64::new(0));
+    let now_for_clock = Arc::clone(&now);
+    let clock_of: ClockSource =
+        Arc::new(move |_| Some((now_for_clock.load(Ordering::Relaxed), CYCLES_PER_SECOND)));
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let fail_sends = Arc::new(AtomicBool::new(false));
+    let sent_for_egress = Arc::clone(&sent);
+    let fail_for_egress = Arc::clone(&fail_sends);
+    let egress: FrameEgress = Arc::new(move |name: &str, args: &[(String, ArgValue)]| {
+        if fail_for_egress.load(Ordering::Relaxed) {
+            return Err(SendError::Transient("egress down".into()));
+        }
+        let arg = |key: &str| -> i64 {
+            match args.iter().find(|(k, _)| k == key).map(|(_, v)| v) {
+                Some(ArgValue::Int(v)) => *v,
+                other => panic!("missing int arg {key}: {other:?}"),
+            }
+        };
+        let frame = match name {
+            "queue_step" => StepFrame::QueueStep {
+                oid: arg("oid") as u32,
+                interval: arg("interval") as u32,
+                count: arg("count") as u16,
+                add: arg("add") as i16,
+            },
+            "set_next_step_dir" => StepFrame::SetNextStepDir {
+                oid: arg("oid") as u32,
+                dir: arg("dir") as u8,
+            },
+            "reset_step_clock" => StepFrame::ResetStepClock {
+                oid: arg("oid") as u32,
+                clock: arg("clock") as u32,
+            },
+            other => panic!("unexpected command {other}"),
+        };
+        sent_for_egress.lock_ok().push(frame);
+        Ok(())
+    });
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let endpoint = StepcompressEndpoint::new(
+        MCU_ID,
+        StepShim::new(vec![motor_cfg()], SHIM_RING_DEPTH),
+        vec![0],
+        vec![OID],
+        egress,
+        tx,
+        clock_of,
+        budget,
+    );
+    Harness {
+        endpoint,
+        now,
+        sent,
+        heartbeats: rx,
+        fail_sends,
+    }
+}
+
+impl Harness {
+    fn sent_moves(&self) -> usize {
+        self.sent
+            .lock_ok()
+            .iter()
+            .filter(|f| matches!(f, StepFrame::QueueStep { .. }))
+            .count()
+    }
+
+    fn latest_retired(&self) -> Option<Vec<u32>> {
+        let mut last = None;
+        while let Ok(PumpMsg::Heartbeat(hb)) = self.heartbeats.try_recv() {
+            last = Some(hb.retired_counts);
+        }
+        last
+    }
+}
+
+/// One piece per call, chained so the shim's contiguity check passes.
+fn piece(start_time: u64, from_mm: f32, to_mm: f32, duration: f32) -> PieceEntry {
+    let mut entry = PieceEntry::zeroed();
+    entry.start_time = start_time;
+    entry.duration = duration;
+    entry.coeff_count = 2;
+    entry.coeffs[0] = 0.5 * (from_mm + to_mm);
+    entry.coeffs[1] = 0.5 * (to_mm - from_mm);
+    entry
+}
+
+fn axis_frame(pieces: Vec<PieceEntry>) -> AxisFrame {
+    AxisFrame {
+        axis: 0,
+        pieces,
+        start_slot: 0,
+        new_head: 0,
+        room: SHIM_RING_DEPTH,
+    }
+}
+
+/// Pieces whose speed changes every piece, so `compress` cannot merge them
+/// into one long move and the endpoint really has a queue of moves to pace.
+fn ramp(start_time: u64, count: usize) -> Vec<PieceEntry> {
+    ramp_from(start_time, count, 0.0)
+}
+
+fn ramp_from(start_time: u64, count: usize, start_mm: f32) -> Vec<PieceEntry> {
+    let dur = 0.002_f32;
+    let span = (f64::from(dur) * CYCLES_PER_SECOND) as u64;
+    let mut at = start_mm;
+    (0..count)
+        .map(|i| {
+            let from = at;
+            at += 0.05 * (1 + (i % 4)) as f32;
+            piece(start_time + span * i as u64, from, at, dur)
+        })
+        .collect()
+}
+
+#[test]
+fn sending_stops_once_the_in_flight_budget_is_reached() {
+    let mut h = harness(BUDGET);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+
+    assert_eq!(h.sent_moves(), BUDGET as usize);
+    assert!(
+        !h.endpoint.backlog.is_empty(),
+        "the rest of the drained frames must still be waiting"
+    );
+}
+
+#[test]
+fn in_flight_drains_as_the_clock_advances_and_sending_resumes() {
+    let mut h = harness(BUDGET);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+    let first = h.sent_moves();
+    assert_eq!(first, BUDGET as usize);
+
+    let mut previous = first;
+    for step in 1..=20u64 {
+        h.now.store(1_000 + step * 10_000, Ordering::Relaxed);
+        h.endpoint.tick().unwrap();
+        let now_sent = h.sent_moves();
+        assert!(now_sent >= previous, "sent count must never go backwards");
+        previous = now_sent;
+    }
+    assert!(
+        previous > first,
+        "advancing the mcu clock must free budget and release more moves ({previous} vs {first})"
+    );
+    assert!(h.endpoint.in_flight.len() as u32 <= BUDGET);
+}
+
+#[test]
+fn retirement_only_counts_fully_sent_pieces_and_never_regresses() {
+    let mut h = harness(BUDGET);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+
+    let shim_retired = h.endpoint.shim.retired_counts();
+    let published = h.latest_retired().expect("a heartbeat is always posted");
+    assert!(
+        published[0] < shim_retired[0],
+        "retirement must lag the shim while frames are still unsent ({published:?} vs \
+         {shim_retired:?})"
+    );
+
+    let mut last = published[0];
+    for step in 1..=40u64 {
+        h.now.store(1_000 + step * 10_000, Ordering::Relaxed);
+        h.endpoint.tick().unwrap();
+        if let Some(counts) = h.latest_retired() {
+            assert!(
+                counts[0] >= last,
+                "retirement regressed {last} -> {}",
+                counts[0]
+            );
+            last = counts[0];
+        }
+    }
+    assert!(h.endpoint.backlog.is_empty(), "backlog must drain");
+    assert_eq!(
+        last,
+        h.endpoint.shim.retired_counts()[0],
+        "once everything is sent, retirement must catch up to the shim"
+    );
+}
+
+#[test]
+fn backlog_ceiling_breach_is_fatal() {
+    let mut h = harness(1);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .backlog
+        .extend((0..BACKLOG_CEILING_FRAMES).map(|_| OutboundFrame {
+            frame: StepFrame::QueueStep {
+                oid: OID,
+                interval: 10,
+                count: 1,
+                add: 0,
+            },
+            end_clock: u64::MAX,
+        }));
+    let err = h
+        .endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .unwrap_err();
+    match err {
+        SendError::Fatal(msg) => {
+            assert!(msg.contains("outbound step frames"), "{msg}");
+            assert!(msg.contains(&BACKLOG_CEILING_FRAMES.to_string()), "{msg}");
+        }
+        other => panic!("expected Fatal, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_dead_egress_surfaces_instead_of_dropping_frames() {
+    let mut h = harness(BUDGET);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.fail_sends.store(true, Ordering::Relaxed);
+    let err = h
+        .endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 4))])
+        .unwrap_err();
+    assert!(matches!(err, SendError::Transient(_)), "{err:?}");
+    assert_eq!(h.sent_moves(), 0);
+    assert!(!h.endpoint.backlog.is_empty());
+}
+
+#[test]
+fn abort_outbound_discards_unsent_frames() {
+    let mut h = harness(BUDGET);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+    assert!(!h.endpoint.backlog.is_empty());
+    h.endpoint.abort_outbound();
+    assert!(h.endpoint.backlog.is_empty());
+    assert!(h.endpoint.in_flight.is_empty());
+}
+
+#[test]
+fn a_marked_fresh_epoch_may_start_before_the_queued_stream_ends() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+
+    let gap = h
+        .endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
+        .expect_err("an unmarked overlap is still a loud PieceGap");
+    assert!(format!("{gap:?}").contains("PieceGap"), "{gap:?}");
+
+    h.endpoint.mark_reanchor(0, 81_834, Some(CYCLES_PER_SECOND));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
+        .expect("a marked fresh epoch may start at any clock");
+    assert!(
+        h.sent
+            .lock_ok()
+            .iter()
+            .any(|f| matches!(f, StepFrame::ResetStepClock { .. })),
+        "the new epoch must re-anchor the mcu step clock"
+    );
+}
+
+#[test]
+fn a_bundle_spanning_the_epoch_boundary_is_cut_at_the_marked_piece() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .unwrap();
+
+    let mut spanning = ramp_from(18_000, 4, 1.0);
+    spanning.extend(ramp_from(500_000, 4, 1.5));
+    h.endpoint
+        .mark_reanchor(0, 500_000, Some(CYCLES_PER_SECOND));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(spanning)])
+        .expect("the cut must land between the old tail and the new head");
+}
+
+#[test]
+fn a_cut_keeps_frames_that_were_already_emitted() {
+    let mut h = harness(BUDGET);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+    let backlogged = h.endpoint.backlog.len();
+    assert!(backlogged > 0);
+
+    h.endpoint
+        .mark_reanchor(0, 500_000, Some(CYCLES_PER_SECOND));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(500_000, 4, 5.0))])
+        .unwrap();
+    assert!(
+        h.endpoint.backlog.len() >= backlogged,
+        "already-emitted frames describe real steps and must still be delivered"
+    );
+}
+
+#[test]
+fn a_mark_that_never_matches_leaves_the_stream_alone() {
+    let mut h = harness(BUDGET);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .mark_reanchor(0, 999_999_999, Some(CYCLES_PER_SECOND));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .unwrap();
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(18_000, 8, 1.0))])
+        .expect("contiguous pieces still flow with an unmatched mark outstanding");
+}
+#[test]
+fn reset_position_drops_the_stale_stream_and_re_emits_a_step_clock_reset() {
+    let mut h = harness(BUDGET);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+    assert!(!h.endpoint.backlog.is_empty());
+
+    h.endpoint.reset_position(&[0]).unwrap();
+    assert!(h.endpoint.backlog.is_empty());
+    assert!(h.endpoint.in_flight.is_empty());
+
+    h.sent.lock_ok().clear();
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(82_000, 8))])
+        .unwrap();
+    assert!(
+        h.sent
+            .lock_ok()
+            .iter()
+            .any(|f| matches!(f, StepFrame::ResetStepClock { .. })),
+        "a reseeded motor must re-anchor its step clock before the next move"
+    );
+}
+
+#[test]
+fn a_position_seed_of_the_wrong_width_is_fatal() {
+    let mut h = harness(BUDGET);
+    let err = h.endpoint.reset_position(&[1, 2]).unwrap_err();
+    match err {
+        SendError::Fatal(msg) => assert!(msg.contains("configured axes"), "{msg}"),
+        other => panic!("expected Fatal, got {other:?}"),
+    }
+}
+
+fn stepcompress_cfg(mode: SteppingMode, move_queue_slots: u32) -> McuAxisConfig {
+    McuAxisConfig {
+        mcu_id: MCU_ID,
+        axes: vec![0],
+        kinematics: 0,
+        caps: Default::default(),
+        max_motor_velocity: vec![100.0],
+        ethercat: false,
+        stepping_mode: mode,
+        microstep_distance: vec![0.01],
+        invert_dir: vec![false],
+        stepper_oids: vec![OID],
+        stepcompress_sample_rate: 10_000.0,
+        move_queue_slots,
+    }
+}
+
+#[test]
+fn a_move_queue_too_small_for_the_reserve_is_a_build_error() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
+    let err = match build_endpoint(
+        &stepcompress_cfg(SteppingMode::Stepcompress, MOVE_SLOT_RESERVE),
+        Weak::new(),
+        tx,
+        CYCLES_PER_SECOND,
+        clock_of,
+    ) {
+        Err(e) => e,
+        Ok(_) => panic!("a move queue equal to the reserve must not build an endpoint"),
+    };
+    assert!(err.contains("move-queue slots"), "{err}");
+}
+
+#[test]
+fn piece_mode_mcus_never_reach_endpoint_construction() {
+    let cfgs = [
+        stepcompress_cfg(SteppingMode::Piece, 0),
+        stepcompress_cfg(SteppingMode::Stepcompress, 128),
+    ];
+    let built: Vec<u32> = cfgs
+        .iter()
+        .filter(|c| c.stepping_mode == SteppingMode::Stepcompress)
+        .map(|c| c.move_queue_slots)
+        .collect();
+    assert_eq!(built, vec![128]);
+
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
+    let endpoint = build_endpoint(&cfgs[1], Weak::new(), tx, CYCLES_PER_SECOND, clock_of).unwrap();
+    assert_eq!(endpoint.budget, 128 - MOVE_SLOT_RESERVE);
+}
+
+#[test]
+fn expand_clock32_picks_the_value_nearest_the_reference() {
+    assert_eq!(expand_clock32(0x1_0000_0000, 0x0000_0010), 0x1_0000_0010);
+    assert_eq!(expand_clock32(0x1_0000_0010, 0xffff_fff0), 0x0_ffff_fff0);
+    assert_eq!(expand_clock32(0x0_ffff_fff0, 0x0000_0010), 0x1_0000_0010);
+}
+
+#[test]
+fn queue_step_span_matches_the_mcu_stepper_loop() {
+    let (interval, count, add) = (100u32, 5u16, 3i16);
+    let mut clock = 0i64;
+    let mut iv = i64::from(interval);
+    for _ in 0..count {
+        clock += iv;
+        iv += i64::from(add);
+    }
+    assert_eq!(queue_step_span(interval, count, add), clock);
+}
+
+#[test]
+fn ticks_alone_carry_a_finished_stream_to_full_retirement() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    let pieces = ramp(2_000, 10);
+    let last_end = 2_000 + 2_000 * 10;
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(pieces)])
+        .unwrap();
+
+    let mut now = 1_000_u64;
+    while now < last_end + 100_000 {
+        now += 10_000;
+        h.now.store(now, Ordering::Relaxed);
+        h.endpoint.tick().unwrap();
+    }
+
+    assert_eq!(
+        h.latest_retired().expect("ticks post heartbeats"),
+        vec![10],
+        "every pushed piece must retire once the clock passes the stream end"
+    );
+    assert_eq!(h.endpoint.shim.queued_pieces(), 0);
+}
+
+#[test]
+fn a_fresh_epoch_without_a_clock_slope_fails_loud() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+
+    h.endpoint.mark_reanchor(0, 81_834, None);
+    let err = h
+        .endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
+        .expect_err("a fresh epoch that carries no slope must not be cut silently");
+    assert!(format!("{err:?}").contains("no clock slope"), "{err:?}");
+}
+
+#[test]
+fn retirement_waits_for_execution_not_transmission() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .unwrap();
+
+    let sent_while_unexecuted = h.sent.lock_ok().len();
+    assert!(
+        sent_while_unexecuted > 0,
+        "frames must reach the wire before the mcu clock advances"
+    );
+    assert_eq!(
+        h.endpoint.published_counts(),
+        vec![0],
+        "retirement must not advance while the moves are still in flight"
+    );
+
+    h.now.store(10_000_000, Ordering::Relaxed);
+    h.endpoint.tick().unwrap();
+    assert!(
+        h.endpoint.published_counts()[0] > 0,
+        "retirement must advance once the mcu clock passes the moves' terminal clock"
+    );
+}

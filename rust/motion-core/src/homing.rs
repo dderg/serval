@@ -2,7 +2,7 @@ use crate::lock_ext::LockExt;
 use std::sync::{Arc, Mutex};
 
 use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
-use crate::mcu_config::McuAxisConfig;
+use crate::mcu_config::{McuAxisConfig, SteppingMode};
 use crate::types::AxisKey;
 use host_rt::passthrough_queue::PassthroughRouter;
 
@@ -160,6 +160,150 @@ pub fn final_cartesian_position(
 ) -> Result<geometry::MachinePos, String> {
     cartesian_from_motor_lanes(configs, |key| trajectory_final_position(key, history))
         .map(geometry::MachinePos)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StepcompressLane {
+    pub mcu_id: u32,
+    pub axis: u8,
+    pub motor: usize,
+    pub oid: u32,
+    pub microstep_distance: f64,
+    pub invert_dir: bool,
+}
+
+impl StepcompressLane {
+    #[must_use]
+    pub fn steps_to_mm(&self, count: i64) -> f64 {
+        let signed = if self.invert_dir { -count } else { count };
+        signed as f64 * self.microstep_distance
+    }
+
+    #[must_use]
+    pub fn mm_to_steps(&self, mm: f64) -> i64 {
+        let count = (mm / self.microstep_distance).round() as i64;
+        if self.invert_dir { -count } else { count }
+    }
+}
+
+pub fn stepcompress_lane(
+    cfg: &McuAxisConfig,
+    axis_key: AxisKey,
+) -> Result<Option<StepcompressLane>, String> {
+    if cfg.stepping_mode != SteppingMode::Stepcompress {
+        return Ok(None);
+    }
+    let mcu_id = cfg.mcu_id;
+    let axis = axis_key.axis;
+    let motor = cfg
+        .axes
+        .iter()
+        .position(|&a| a == usize::from(axis))
+        .ok_or_else(|| {
+            format!(
+                "stepcompress_lane: mcu {mcu_id} does not serve axis {axis} \
+                 (configured axes {:?})",
+                cfg.axes
+            )
+        })?;
+    let oid = *cfg.stepper_oids.get(motor).ok_or_else(|| {
+        format!(
+            "stepcompress mcu {mcu_id} axis {axis}: motor {motor} has no stepper oid \
+             (stepper_oids has {} entries for {} axes)",
+            cfg.stepper_oids.len(),
+            cfg.axes.len()
+        )
+    })?;
+    let microstep_distance = *cfg.microstep_distance.get(motor).ok_or_else(|| {
+        format!(
+            "stepcompress mcu {mcu_id} axis {axis}: motor {motor} has no microstep distance \
+             (microstep_distance has {} entries for {} axes)",
+            cfg.microstep_distance.len(),
+            cfg.axes.len()
+        )
+    })?;
+    if microstep_distance <= 0.0 || !microstep_distance.is_finite() {
+        return Err(format!(
+            "stepcompress mcu {mcu_id} axis {axis}: microstep distance {microstep_distance} \
+             is not a positive length"
+        ));
+    }
+    let invert_dir = *cfg.invert_dir.get(motor).ok_or_else(|| {
+        format!(
+            "stepcompress mcu {mcu_id} axis {axis}: motor {motor} has no direction polarity \
+             (invert_dir has {} entries for {} axes)",
+            cfg.invert_dir.len(),
+            cfg.axes.len()
+        )
+    })?;
+    Ok(Some(StepcompressLane {
+        mcu_id,
+        axis,
+        motor,
+        oid,
+        microstep_distance,
+        invert_dir,
+    }))
+}
+
+pub fn reconcile_stepcompress_axis(
+    cfg: &McuAxisConfig,
+    axis_key: AxisKey,
+    history_position: f64,
+    query_step_count: &dyn Fn(&StepcompressLane) -> Result<i64, String>,
+    reseed_step_counter: &dyn Fn(&StepcompressLane, i64) -> Result<(), String>,
+) -> Result<f64, String> {
+    let Some(lane) = stepcompress_lane(cfg, axis_key)? else {
+        return Ok(history_position);
+    };
+    let executed_steps = query_step_count(&lane)?;
+    let executed_position = lane.steps_to_mm(executed_steps);
+    let divergence = (executed_position - history_position).abs();
+    if divergence > lane.microstep_distance {
+        return Err(format!(
+            "stepcompress trip reconcile diverged: mcu={} axis={} expected={:.6}mm \
+             (piece history) actual={:.6}mm (stepper_get_position oid={} count={}) \
+             divergence={:.6}mm exceeds one microstep ({:.6}mm)",
+            lane.mcu_id,
+            lane.axis,
+            history_position,
+            executed_position,
+            lane.oid,
+            executed_steps,
+            divergence,
+            lane.microstep_distance
+        ));
+    }
+    reseed_step_counter(&lane, executed_steps)?;
+    Ok(history_position)
+}
+
+pub fn reconcile_stepcompress_lanes(
+    configs: &[McuAxisConfig],
+    mut lane_position: impl FnMut(AxisKey) -> Result<f64, String>,
+    query_step_count: &dyn Fn(&StepcompressLane) -> Result<i64, String>,
+    reseed_step_counter: &dyn Fn(&StepcompressLane, i64) -> Result<(), String>,
+) -> Result<(), String> {
+    for cfg in configs {
+        if cfg.stepping_mode != SteppingMode::Stepcompress {
+            continue;
+        }
+        for &lane in &cfg.axes {
+            let axis_key = AxisKey {
+                mcu_id: cfg.mcu_id,
+                axis: lane as u8,
+            };
+            let history_position = lane_position(axis_key)?;
+            reconcile_stepcompress_axis(
+                cfg,
+                axis_key,
+                history_position,
+                query_step_count,
+                reseed_step_counter,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 pub fn broadcast_stop<S, F>(

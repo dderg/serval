@@ -973,6 +973,94 @@ enable_force_move: True
 """
 
 
+STEPCOMPRESS_SAMPLE_RATE_HZ = 5000
+STEPCOMPRESS_STEPS_PER_MM = 16 * 200 / 40.0
+STEPCOMPRESS_STEP_LINES = {"x": 18, "y": 7, "z": 15}
+
+
+def stepcompress_config(h7_pty: str, sc_pty: str, gcode_dir: str) -> str:
+    """Cartesian printer whose motors all live on a stepping_mode:
+    stepcompress MCU (the CONFIG_CLASSIC_STEPPING sim ELF), driven by
+    host-computed step times over queue_step.
+
+    Step pins sit on the shim's tracked lines (X=18/Y=7/Z=15) with their
+    dir pins on the paired lines (19/8/16), so the classic firmware's real
+    GPIO pulses feed get_steps and the auto-endstop walls
+    (X=gpio200/Y=gpio201/Z=gpio202) exactly like the piece-mode configs.
+    """
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[mcu sc]
+serial: {sc_pty}
+stepping_mode: stepcompress
+stepcompress_sample_rate: {STEPCOMPRESS_SAMPLE_RATE_HZ}
+
+[printer]
+max_velocity: 100
+max_accel: 1000
+max_z_velocity: 10
+max_z_accel: 30
+
+[kinematics]
+type: cartesian
+axis_x: x
+axis_y: y
+axis_z: z
+x_motors: x
+y_motors: y
+z_motors: z
+
+[axis x]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^sc:gpiochip0/gpio200
+homing_speed: 10
+post_processors: is_xy
+
+[axis y]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^sc:gpiochip0/gpio201
+homing_speed: 10
+post_processors: is_xy
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: ^sc:gpiochip0/gpio202
+homing_speed: 5
+
+[motor x]
+drive: stepper
+step_pin: sc:gpiochip0/gpio18
+dir_pin: sc:gpiochip0/gpio19
+enable_pin: !sc:gpiochip0/gpio2
+microsteps: 16
+rotation_distance: 40
+
+[motor y]
+drive: stepper
+step_pin: sc:gpiochip0/gpio7
+dir_pin: sc:gpiochip0/gpio8
+enable_pin: !sc:gpiochip0/gpio5
+microsteps: 16
+rotation_distance: 40
+
+[motor z]
+drive: stepper
+step_pin: sc:gpiochip0/gpio15
+dir_pin: sc:gpiochip0/gpio16
+enable_pin: !sc:gpiochip0/gpio9
+microsteps: 16
+rotation_distance: 40
+{_tail(gcode_dir)}"""
+
+
 PROBE_VARIANTS = (
     "virtual",
     "safe-z",

@@ -600,6 +600,7 @@ fn rebase_after_probe_trip_round_trips_through_cartesian_inversion() {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
+        ..Default::default()
     }];
     let cart_x = 150.0;
     let cart_y = 245.0;

@@ -506,6 +506,7 @@ mod corexy_reconstruction_tests {
             },
             max_motor_velocity: Vec::new(),
             ethercat: false,
+            ..Default::default()
         }
     }
 
@@ -519,6 +520,7 @@ mod corexy_reconstruction_tests {
             },
             max_motor_velocity: Vec::new(),
             ethercat: false,
+            ..Default::default()
         }
     }
 
@@ -700,5 +702,215 @@ mod corexy_reconstruction_tests {
             (cart.0[0] - 200.0).abs() < 1e-3 && (cart.0[1] - 100.0).abs() < 1e-3,
             "A=300 B=100 must invert to x=200 y=100, got {cart:?}"
         );
+    }
+}
+
+mod stepcompress_reconcile_tests {
+    use crate::homing::{
+        StepcompressLane, reconcile_stepcompress_axis, reconcile_stepcompress_lanes,
+    };
+    use crate::mcu_config::{AXIS_X, AXIS_Y, McuAxisConfig, McuCaps, SteppingMode};
+    use crate::types::AxisKey;
+    use runtime::segment::KinematicTag;
+    use std::cell::RefCell;
+
+    const MCU_ID: u32 = 3;
+    const MICROSTEP: f64 = 0.0125;
+
+    fn cfg(stepping_mode: SteppingMode) -> McuAxisConfig {
+        McuAxisConfig {
+            mcu_id: MCU_ID,
+            axes: vec![AXIS_X, AXIS_Y],
+            kinematics: KinematicTag::CoreXy as u8,
+            caps: McuCaps {
+                total_piece_memory: 4096,
+            },
+            max_motor_velocity: Vec::new(),
+            ethercat: false,
+            stepping_mode,
+            microstep_distance: vec![MICROSTEP, MICROSTEP],
+            invert_dir: vec![false, true],
+            stepper_oids: vec![11, 12],
+            stepcompress_sample_rate: match stepping_mode {
+                SteppingMode::Stepcompress => 20_000.0,
+                SteppingMode::Piece => 0.0,
+            },
+            move_queue_slots: match stepping_mode {
+                SteppingMode::Stepcompress => 128,
+                SteppingMode::Piece => 0,
+            },
+        }
+    }
+
+    fn key(axis: usize) -> AxisKey {
+        AxisKey {
+            mcu_id: MCU_ID,
+            axis: axis as u8,
+        }
+    }
+
+    #[test]
+    fn agreeing_readback_returns_history_position_and_reseeds_shim() {
+        let history_position = 40.0;
+        let reseeds: RefCell<Vec<(usize, i64)>> = RefCell::new(Vec::new());
+        let pos = reconcile_stepcompress_axis(
+            &cfg(SteppingMode::Stepcompress),
+            key(AXIS_X),
+            history_position,
+            &|lane| {
+                assert_eq!(lane.oid, 11);
+                assert_eq!(lane.motor, 0);
+                Ok(3200)
+            },
+            &|lane, count| {
+                reseeds.borrow_mut().push((lane.motor, count));
+                Ok(())
+            },
+        )
+        .expect("agreeing readback must reconcile");
+        assert_eq!(pos, history_position);
+        assert_eq!(reseeds.into_inner(), vec![(0, 3200)]);
+    }
+
+    #[test]
+    fn readback_within_one_microstep_is_accepted() {
+        let history_position = 3200.0 * MICROSTEP + MICROSTEP * 0.9;
+        let pos = reconcile_stepcompress_axis(
+            &cfg(SteppingMode::Stepcompress),
+            key(AXIS_X),
+            history_position,
+            &|_| Ok(3200),
+            &|_, _| Ok(()),
+        )
+        .expect("sub-microstep divergence must be accepted");
+        assert_eq!(pos, history_position);
+    }
+
+    #[test]
+    fn inverted_lane_negates_the_readback() {
+        let lane_steps = 800_i64;
+        let history_position = -(lane_steps as f64) * MICROSTEP;
+        let pos = reconcile_stepcompress_axis(
+            &cfg(SteppingMode::Stepcompress),
+            key(AXIS_Y),
+            history_position,
+            &|lane| {
+                assert!(lane.invert_dir);
+                assert_eq!(lane.oid, 12);
+                Ok(lane_steps)
+            },
+            &|_, _| Ok(()),
+        )
+        .expect("inverted lane must reconcile against the negated count");
+        assert_eq!(pos, history_position);
+    }
+
+    #[test]
+    fn divergence_beyond_one_microstep_is_a_loud_error() {
+        let reseeded = RefCell::new(false);
+        let err = reconcile_stepcompress_axis(
+            &cfg(SteppingMode::Stepcompress),
+            key(AXIS_X),
+            40.0,
+            &|_| Ok(3200 + 3),
+            &|_, _| {
+                *reseeded.borrow_mut() = true;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("mcu=3"), "got: {err}");
+        assert!(err.contains("axis=0"), "got: {err}");
+        assert!(err.contains("expected=40.000000mm"), "got: {err}");
+        assert!(err.contains("actual=40.037500mm"), "got: {err}");
+        assert!(err.contains("exceeds one microstep"), "got: {err}");
+        assert!(
+            !reseeded.into_inner(),
+            "a diverged lane must not re-seed the shim"
+        );
+    }
+
+    #[test]
+    fn piece_mode_axis_never_queries_the_mcu() {
+        let pos = reconcile_stepcompress_axis(
+            &cfg(SteppingMode::Piece),
+            key(AXIS_X),
+            17.5,
+            &|_| panic!("piece-mode homing must not call stepper_get_position"),
+            &|_, _| panic!("piece-mode homing must not re-seed a step shim"),
+        )
+        .expect("piece mode returns the history position untouched");
+        assert_eq!(pos, 17.5);
+    }
+
+    #[test]
+    fn lane_sweep_skips_piece_mode_mcus_and_covers_every_stepcompress_lane() {
+        let mut piece_cfg = cfg(SteppingMode::Piece);
+        piece_cfg.mcu_id = 9;
+        let configs = vec![piece_cfg, cfg(SteppingMode::Stepcompress)];
+        let queried: RefCell<Vec<(u32, u32)>> = RefCell::new(Vec::new());
+        reconcile_stepcompress_lanes(
+            &configs,
+            |k| {
+                assert_eq!(k.mcu_id, MCU_ID);
+                Ok(0.0)
+            },
+            &|lane| {
+                queried.borrow_mut().push((lane.mcu_id, lane.oid));
+                Ok(0)
+            },
+            &|_, _| Ok(()),
+        )
+        .expect("mixed-mode sweep must succeed");
+        assert_eq!(queried.into_inner(), vec![(MCU_ID, 11), (MCU_ID, 12)]);
+    }
+
+    #[test]
+    fn missing_oid_for_a_stepcompress_lane_is_a_loud_error() {
+        let mut broken = cfg(SteppingMode::Stepcompress);
+        broken.stepper_oids = vec![11];
+        let err =
+            reconcile_stepcompress_axis(&broken, key(AXIS_Y), 0.0, &|_| Ok(0), &|_, _| Ok(()))
+                .unwrap_err();
+        assert!(err.contains("has no stepper oid"), "got: {err}");
+    }
+
+    #[test]
+    fn steps_to_mm_honours_direction_polarity() {
+        let forward = StepcompressLane {
+            mcu_id: MCU_ID,
+            axis: 0,
+            motor: 0,
+            oid: 11,
+            microstep_distance: MICROSTEP,
+            invert_dir: false,
+        };
+        let inverted = StepcompressLane {
+            invert_dir: true,
+            ..forward
+        };
+        assert_eq!(forward.steps_to_mm(-80), -1.0);
+        assert_eq!(inverted.steps_to_mm(-80), 1.0);
+    }
+
+    #[test]
+    fn mm_to_steps_round_trips_steps_to_mm_under_both_polarities() {
+        let forward = StepcompressLane {
+            mcu_id: MCU_ID,
+            axis: 0,
+            motor: 0,
+            oid: 11,
+            microstep_distance: MICROSTEP,
+            invert_dir: false,
+        };
+        let inverted = StepcompressLane {
+            invert_dir: true,
+            ..forward
+        };
+        assert_eq!(forward.mm_to_steps(-1.0), -80);
+        assert_eq!(inverted.mm_to_steps(-1.0), 80);
+        for lane in [forward, inverted] {
+            assert_eq!(lane.steps_to_mm(lane.mm_to_steps(2.5)), 2.5);
+        }
     }
 }

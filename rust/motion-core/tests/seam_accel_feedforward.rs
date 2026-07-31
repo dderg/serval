@@ -32,6 +32,7 @@ fn corpus_pieces_per_axis() -> BTreeMap<u8, Vec<(PieceEntry, usize)>> {
             total_piece_memory: 62 * 1024,
         },
         max_motor_velocity: vec![f64::INFINITY; 3],
+        ..Default::default()
     }];
     let project = |_mcu: u32, host_secs: f64| -> u64 { (host_secs * 1.0e9) as u64 };
 
@@ -42,6 +43,7 @@ fn corpus_pieces_per_axis() -> BTreeMap<u8, Vec<(PieceEntry, usize)>> {
             seg,
             &mcu_configs,
             &motion_core::enqueue::EnqueueCtx {
+                epoch_freq: &|_| None,
                 t0: 0.0,
                 epoch: if first {
                     motion_core::anchor::StreamEpoch::Reposition

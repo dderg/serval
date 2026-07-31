@@ -534,6 +534,7 @@ impl PyMotionEngine {
             router: Arc::clone(&self.router),
             motion_history: Arc::clone(&self.motion_history),
             mcu_axis_configs: Arc::clone(&self.mcu_axis_configs),
+            stepcompress_endpoints: Arc::clone(&self.stepcompress_endpoints),
         }
     }
     fn reanchor_after_trip(&self, stop_pos: geometry::GcodePos) -> PyResult<()> {

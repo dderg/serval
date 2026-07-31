@@ -1,12 +1,17 @@
+#include "autoconf.h"
 #include "basecmd.h"
 #include "board/gpio.h"
 #include "board/misc.h"
 #include "command.h"
 #include "sched.h"
-#include "runtime.h"
 #include "mcu_transport_dispatch.h"
 
+#if CONFIG_MOTION_RUNTIME
+#include "runtime.h"
 extern void *runtime_handle;
+#else
+extern uint64_t runtime_widened_host_clock(void);
+#endif
 
 struct endstop {
     struct timer time;
@@ -44,7 +49,11 @@ endstop_event(struct timer *t)
     uint8_t active = raw ^ e->invert;
     uint32_t obs_clock = timer_read_time();
     if (active && e->armed) {
+#if CONFIG_MOTION_RUNTIME
         uint64_t now64 = runtime_now_ticks(runtime_handle);
+#else
+        uint64_t now64 = runtime_widened_host_clock();
+#endif
         uint32_t gap = obs_clock - e->last_clear_clock;
         uint32_t mid32 = e->last_clear_clock + gap / 2;
         int32_t mid_delta = (int32_t)(mid32 - (uint32_t)now64);

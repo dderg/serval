@@ -73,6 +73,7 @@ pub(crate) struct PumpHandles {
     pub(crate) tx: Arc<Mutex<Option<crossbeam_channel::Sender<crate::pump::PumpMsg>>>>,
     pub(crate) thread: Mutex<Option<JoinHandle<()>>>,
     pub(crate) backlog: Arc<AtomicU64>,
+    pub(crate) pacer: Mutex<Option<crate::pump::StepcompressPacer>>,
 }
 
 /// The background live-position poller's cache, join handle, and stop flag —

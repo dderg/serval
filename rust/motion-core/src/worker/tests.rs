@@ -846,6 +846,7 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
                     total_piece_memory: 62 * 1024,
                 },
                 max_motor_velocity: vec![2083.3, 2083.3, 208.3],
+                ..Default::default()
             }];
             let seg_clone = seg.clone();
             let cfg_clone = cfg.clone();
@@ -854,6 +855,7 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
                     &seg_clone,
                     &cfg_clone,
                     &crate::enqueue::EnqueueCtx {
+                        epoch_freq: &|_| None,
                         t0: seg_clone.t_start,
                         epoch: crate::anchor::StreamEpoch::Reposition,
                         host_now: 0.0,

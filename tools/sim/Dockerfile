@@ -105,11 +105,13 @@ COPY rust/ /kalico/rust/
 
 RUN mkdir -p /sim_elfs
 
-# Each MCU builds into its own OUT dir (out-h7/, out-f4/) so the two
-# configs never share object/descriptor state. Both are always built from
+# Each firmware builds into its own OUT dir (out-h7/, out-f4/, out-sc/) so
+# the configs never share object/descriptor state. All are always built from
 # clean OUT dirs — a fresh ELF whenever any input changed, never a stale
-# incremental one. Both MCUs are MACH_LINUX sim builds with identical Rust
-# features, so the second build reuses the first's target-linux staticlib.
+# incremental one. All are MACH_LINUX sim builds with identical Rust
+# features, so later builds reuse the first's target-linux staticlib.
+# out-sc/ additionally sets CONFIG_CLASSIC_STEPPING=y (host-computed step
+# times via queue_step) — the stepping_mode: stepcompress counterpart.
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     set -e; \
     cp tools/sim/configs/h7-sim.config .config; \
@@ -124,6 +126,13 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     make -j$(nproc) OUT=out-f4/; \
     cp out-f4/klipper.elf /sim_elfs/klipper-f4-sim.elf; \
     cp out-f4/klipper.dict /sim_elfs/klipper.dict
+
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    set -e; \
+    cp tools/sim/configs/sc-sim.config .config; \
+    make olddefconfig OUT=out-sc/ 2>/dev/null || true; \
+    make -j$(nproc) OUT=out-sc/; \
+    cp out-sc/klipper.elf /sim_elfs/klipper-sc-sim.elf
 
 # Build klippy chelper .so
 RUN cd klippy && python3 chelper/__init__.py

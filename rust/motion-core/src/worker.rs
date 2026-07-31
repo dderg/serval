@@ -195,8 +195,12 @@ pub fn setup_pipeline(
     home_pos: Vec<f64>,
     dispatch: DispatchResources,
     pump: PumpResources,
+    pump_channel: (
+        Sender<crate::pump::PumpMsg>,
+        crossbeam_channel::Receiver<crate::pump::PumpMsg>,
+    ),
 ) -> MotionPipeline {
-    let (pump_control, control_rx) = crossbeam_channel::unbounded::<crate::pump::PumpMsg>();
+    let (pump_control, control_rx) = pump_channel;
     let (pump_data, data_rx) =
         bounded::<crate::pump::EnqueueMsg>(crate::pump::PUMP_DATA_CHANNEL_CAP);
     let pump_thread = thread::Builder::new()
@@ -228,6 +232,7 @@ pub fn setup_pipeline(
         active_drip_cohort: dispatch.active_drip_cohort,
         motion_history: dispatch.motion_history,
         frontier: Arc::clone(&frontier),
+        frozen_projection: Mutex::new(std::collections::HashMap::new()),
     };
     let worker = StreamWorkerHandle::spawn(
         config,

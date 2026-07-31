@@ -13,6 +13,7 @@ pub struct EnqueueMsg {
     pub epoch: crate::anchor::StreamEpoch,
     pub lead_secs: f64,
     pub source_line: u32,
+    pub epoch_freq: Option<f64>,
 }
 
 /// Records each piece into the motion-history store at the moment it is
@@ -125,6 +126,16 @@ pub trait PieceSink: Send {
     fn bundle_limits(&self, _mcu_id: u32) -> BundleLimits {
         SERIAL_BUNDLE_LIMITS
     }
+
+    /// Note that the first piece of a fresh anchor epoch for `key` starts at
+    /// `at_start_clock`, a clock bearing no relation to the timeline the
+    /// transport still holds. Transports that keep a host-side committed
+    /// stream cut it exactly at that piece; the piece-ring transports carry
+    /// the discontinuity on the wire, so this is a no-op for them.
+    ///
+    /// A bundle may span the boundary, so the mark names the piece rather
+    /// than the bundle.
+    fn mark_reanchor(&self, _key: AxisKey, _at_start_clock: u64, _epoch_freq: Option<f64>) {}
 
     /// Deliver every axis frame destined for `mcu_id` as one bundled
     /// transaction. A whole bundle either lands or it doesn't — the caller

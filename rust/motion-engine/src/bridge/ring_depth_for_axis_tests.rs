@@ -12,6 +12,7 @@ fn configs() -> Vec<McuAxisConfig> {
             caps: McuCaps {
                 total_piece_memory: 62 * 1024,
             },
+            ..Default::default()
         },
         McuAxisConfig {
             ethercat: false,
@@ -22,6 +23,7 @@ fn configs() -> Vec<McuAxisConfig> {
             caps: McuCaps {
                 total_piece_memory: 62 * 1024,
             },
+            ..Default::default()
         },
     ]
 }
@@ -71,6 +73,7 @@ fn ring_depth_over_u16_is_hard_error_not_clamp() {
         caps: McuCaps {
             total_piece_memory: 70_000 * 48,
         },
+        ..Default::default()
     }];
     let res = ring_depth_for_axis_inner(&configs, 0, AXIS_X as u8);
     assert!(

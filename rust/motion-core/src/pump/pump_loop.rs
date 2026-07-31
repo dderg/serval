@@ -219,6 +219,7 @@ impl<S: PieceSink> Pump<S> {
             epoch,
             lead_secs,
             source_line,
+            epoch_freq,
         } = msg;
         if let Some(inferred_at) = self.halted.get(&key).copied() {
             let dropped = pieces.len() as u32;
@@ -249,6 +250,19 @@ impl<S: PieceSink> Pump<S> {
                 ));
                 self.cohort = None;
                 return;
+            }
+        }
+        if epoch.is_fresh() {
+            if let Some((first, _)) = pieces.first() {
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "reanchor_mark",
+                    mcu = key.mcu_id,
+                    axis = key.axis,
+                    at_start_clock = first.start_time,
+                    "[reanchor] marking fresh-epoch cut"
+                );
+                self.sink.mark_reanchor(key, first.start_time, epoch_freq);
             }
         }
         if epoch.position_redefined() {

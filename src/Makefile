@@ -2,10 +2,11 @@
 
 src-y += sched.c command.c basecmd.c debugcmds.c
 # Kalico-native transport — stream-level demuxer + Layer 4 dispatcher.
-src-y += mcu_demux.c mcu_transport_dispatch.c piece_sink.c \
-    runtime_storage.c runtime_panic.c step_queue.c \
-    spi_queue.c event_log.c
+src-y += mcu_demux.c mcu_transport_dispatch.c event_log.c
+src-$(CONFIG_MOTION_RUNTIME) += piece_sink.c runtime_storage.c \
+    runtime_panic.c step_queue.c spi_queue.c
 src-$(CONFIG_HAVE_GPIO) += initial_pins.c gpiocmds.c stepper.c trsync.c endstop.c
+src-$(CONFIG_CLASSIC_STEPPING) += stepper_classic.c
 src-$(CONFIG_WANT_ADC) += adccmds.c
 src-$(CONFIG_WANT_SPI) += spicmds.c
 src-$(CONFIG_WANT_I2C) += i2ccmds.c
@@ -72,7 +73,7 @@ ifeq ($(CONFIG_MOTION_MODULE_STEPPER),y)
 MCU_RUST_FEATURES := $(MCU_RUST_FEATURES),motion-module-stepper
 endif
 
-ifneq (,$(filter y,$(CONFIG_MACH_STM32H7) $(CONFIG_MACH_STM32F4) $(CONFIG_MACH_STM32G0)))
+ifeq ($(CONFIG_MOTION_RUNTIME)$(if $(filter y,$(CONFIG_MACH_STM32H7) $(CONFIG_MACH_STM32F4) $(CONFIG_MACH_STM32G0)),y),yy)
 # Exported so src/stm32/Makefile depends on (and links against) the right
 # archive without re-deriving the path. MCU_RUST_TARGET is the rustc
 # triple for the active MCU (thumbv7em for H7/F4, thumbv6m for G0).
@@ -104,7 +105,7 @@ $(MCU_RUST_LIB): FORCE
 		echo "$(MCU_RUST_FEATURES)" > "$$CARGO_TARGET_DIR/.kalico-features-stamp"
 endif
 
-ifeq ($(CONFIG_MACH_LINUX),y)
+ifeq ($(CONFIG_MACH_LINUX)$(CONFIG_MOTION_RUNTIME),yy)
 # First-class Linux MCU build. The `mcu-linux` feature is the f64 host numeric
 # profile (the Pi has an FPU) PLUS the "real MCU firmware" marker that links
 # the C step/SPI FFI (linux/phase_stepping_spi.c) — distinct from a bare `host`

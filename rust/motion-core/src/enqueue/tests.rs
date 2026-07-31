@@ -59,12 +59,14 @@ fn cartesian_x_axis_yields_pieces_with_projected_start_time() {
             total_piece_memory: 62 * 1024,
         },
         max_motor_velocity: vec![f64::INFINITY; 3],
+        ..Default::default()
     }];
 
     let msgs = enqueue_segment(
         &seg_x_move(),
         &cfg,
         &crate::enqueue::EnqueueCtx {
+            epoch_freq: &|_| None,
             t0: 100.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -109,17 +111,19 @@ fn ec_cfg() -> Vec<McuAxisConfig> {
             total_piece_memory: 62 * 1024,
         },
         max_motor_velocity: vec![f64::INFINITY; 2],
+        ..Default::default()
     }]
 }
 
-fn test_ctx() -> crate::enqueue::EnqueueCtx<impl Fn(u32, f64) -> u64> {
+fn test_ctx() -> crate::enqueue::EnqueueCtx<'static, impl Fn(u32, f64) -> u64> {
     ctx_with_epoch(crate::anchor::StreamEpoch::Reposition)
 }
 
 fn ctx_with_epoch(
     epoch: crate::anchor::StreamEpoch,
-) -> crate::enqueue::EnqueueCtx<impl Fn(u32, f64) -> u64> {
+) -> crate::enqueue::EnqueueCtx<'static, impl Fn(u32, f64) -> u64> {
     crate::enqueue::EnqueueCtx {
+        epoch_freq: &|_| None,
         t0: 100.0,
         epoch,
         host_now: 0.0,
@@ -225,6 +229,7 @@ fn corexy_x_slot_is_x_plus_y() {
             total_piece_memory: 62 * 1024,
         },
         max_motor_velocity: vec![f64::INFINITY; 2],
+        ..Default::default()
     }];
 
     let seg = ShapedSegment {
@@ -245,6 +250,7 @@ fn corexy_x_slot_is_x_plus_y() {
         &seg,
         &cfg,
         &crate::enqueue::EnqueueCtx {
+            epoch_freq: &|_| None,
             t0: 0.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -331,6 +337,7 @@ fn flatten_axis_max_piece_secs_splits_long_piece() {
             total_piece_memory: 62 * 1024,
         },
         max_motor_velocity: vec![f64::INFINITY],
+        ..Default::default()
     }];
 
     fn linear_axis_scaled(p0: f64, p1: f64, duration: f64) -> ScalarNurbs {
@@ -358,6 +365,7 @@ fn flatten_axis_max_piece_secs_splits_long_piece() {
         &seg,
         &cfg,
         &crate::enqueue::EnqueueCtx {
+            epoch_freq: &|_| None,
             t0: 100.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -408,6 +416,7 @@ fn axis_cfg_single(axis: usize) -> Vec<McuAxisConfig> {
             total_piece_memory: 62 * 1024,
         },
         max_motor_velocity: vec![f64::INFINITY],
+        ..Default::default()
     }]
 }
 
@@ -432,6 +441,7 @@ fn constant_follower_axis_merges_all_knots_to_one_piece() {
         &seg,
         &axis_cfg_single(0),
         &crate::enqueue::EnqueueCtx {
+            epoch_freq: &|_| None,
             t0: 0.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -497,6 +507,7 @@ fn motion_constant_motion_merges_only_the_constant_run() {
         &seg,
         &axis_cfg_single(0),
         &crate::enqueue::EnqueueCtx {
+            epoch_freq: &|_| None,
             t0: 0.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -570,6 +581,7 @@ fn constant_runs_at_different_values_do_not_merge_across_motion_boundary() {
         &seg,
         &axis_cfg_single(0),
         &crate::enqueue::EnqueueCtx {
+            epoch_freq: &|_| None,
             t0: 0.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -651,6 +663,7 @@ fn constant_run_subdivides_under_max_piece_secs_after_merging() {
         &seg,
         &axis_cfg_single(0),
         &crate::enqueue::EnqueueCtx {
+            epoch_freq: &|_| None,
             t0: 0.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -731,6 +744,7 @@ fn nonzero_curve_base_preserves_host_times() {
         &seg,
         &axis_cfg_single(0),
         &crate::enqueue::EnqueueCtx {
+            epoch_freq: &|_| None,
             t0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -830,6 +844,7 @@ fn test_mcu_configs_one_axis(axis: usize) -> Vec<McuAxisConfig> {
             total_piece_memory: 62 * 1024,
         },
         max_motor_velocity: vec![f64::INFINITY],
+        ..Default::default()
     }]
 }
 
@@ -867,6 +882,7 @@ fn enqueue_stamps_motor_mask_onto_every_piece() {
         &seg,
         &cfgs,
         &crate::enqueue::EnqueueCtx {
+            epoch_freq: &|_| None,
             t0: 0.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -904,6 +920,7 @@ fn overlay_pieces_are_relativized_to_start_at_zero() {
         &make_seg(0b0000_0001),
         &cfg,
         &crate::enqueue::EnqueueCtx {
+            epoch_freq: &|_| None,
             t0: 0.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -929,6 +946,7 @@ fn overlay_pieces_are_relativized_to_start_at_zero() {
         &make_seg(0),
         &cfg,
         &crate::enqueue::EnqueueCtx {
+            epoch_freq: &|_| None,
             t0: 0.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -997,6 +1015,7 @@ fn overlay_multi_piece_cumulative_positions_produce_individual_spans() {
         &seg,
         &cfg,
         &crate::enqueue::EnqueueCtx {
+            epoch_freq: &|_| None,
             t0: 0.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -1038,12 +1057,14 @@ fn step_rate_within_ceiling_enqueues() {
             total_piece_memory: 62 * 1024,
         },
         max_motor_velocity: vec![50.0, 50.0, 50.0],
+        ..Default::default()
     }];
     // seg_x_move covers 10 mm in 1 s — 10 mm/s, comfortably under 50 mm/s.
     let msgs = enqueue_segment(
         &seg_x_move(),
         &cfg,
         &crate::enqueue::EnqueueCtx {
+            epoch_freq: &|_| None,
             t0: 100.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -1067,6 +1088,7 @@ fn step_rate_over_ceiling_fails_loud() {
             total_piece_memory: 62 * 1024,
         },
         max_motor_velocity: vec![5.0, 5.0, 5.0],
+        ..Default::default()
     }];
     // 10 mm/s demand against a 5 mm/s ceiling must abort before the MCU
     // would latch -310.
@@ -1074,6 +1096,7 @@ fn step_rate_over_ceiling_fails_loud() {
         &seg_x_move(),
         &cfg,
         &crate::enqueue::EnqueueCtx {
+            epoch_freq: &|_| None,
             t0: 100.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,

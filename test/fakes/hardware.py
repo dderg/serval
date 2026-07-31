@@ -33,6 +33,9 @@ class FakeMcu:
         state_cmd=None,
         non_critical_disconnected=False,
         clocksync_debug="fake clocksync",
+        stepping_mode=0,
+        stepcompress_sample_rate=0.0,
+        move_queue_slots=0,
     ):
         self._printer = printer
         self._name = name
@@ -46,6 +49,9 @@ class FakeMcu:
         self.state_cmd = state_cmd
         self.non_critical_disconnected = non_critical_disconnected
         self._clocksync = _FakeClockSync(clocksync_debug)
+        self._stepping_mode = stepping_mode
+        self._stepcompress_sample_rate = stepcompress_sample_rate
+        self._move_queue_slots = move_queue_slots
 
     def get_printer(self):
         return self._printer
@@ -55,6 +61,15 @@ class FakeMcu:
 
     def get_engine_handle(self):
         return self._handle
+
+    def get_stepping_mode(self):
+        return self._stepping_mode
+
+    def get_stepcompress_sample_rate(self):
+        return self._stepcompress_sample_rate
+
+    def get_move_queue_slots(self):
+        return self._move_queue_slots
 
     def get_clocksync(self):
         return self._clocksync
@@ -94,12 +109,14 @@ class FakeStepper:
         pulse_duration=0.000002,
         step_both_edge=False,
         step_dist=0.0125,
+        oid=0,
     ):
         self._name = name
         self._active_callbacks = []
         self._mcu = mcu if mcu is not None else FakeMcu(handle=handle)
         self._pulse = (pulse_duration, step_both_edge)
         self._step_dist = step_dist
+        self._oid = oid
         self.current_helper = None
 
     def get_name(self, short=False):
@@ -112,6 +129,9 @@ class FakeStepper:
 
     def get_pulse_duration(self):
         return self._pulse
+
+    def get_oid(self):
+        return self._oid
 
     def get_step_dist(self):
         return self._step_dist

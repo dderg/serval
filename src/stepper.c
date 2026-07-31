@@ -12,21 +12,19 @@
 #include "command.h" // DECL_COMMAND, command_decode_ptr
 #include "sched.h" // DECL_SHUTDOWN
 #include "trsync.h" // trsync_add_signal
+#if CONFIG_MOTION_RUNTIME
 #include "runtime.h" // StepperBindingRust
 #include "step_queue.h" // RUNTIME_MAX_STEPS_PER_SAMPLE
+#endif
 #include "event_log.h" // event_log_emit (mcu structured-log ready marker)
 #include "generic/fault_handler.h" // kalico_diag_emit_prior_crash (Stage 5)
+#include "stepper.h" // struct stepper
 
-struct stepper {
-    struct gpio_out step_pin, dir_pin;
-    uint32_t step_pulse_ticks;
-    uint8_t step_both_edge, step_idle_level;
-    struct trsync_signal stop_signal;
-};
-
+#if CONFIG_MOTION_RUNTIME
 // Minimum spacing between successive step edges enforced by
 // runtime_emit_step_pulses (~1 us), in CONFIG_CLOCK_FREQ ticks.
 #define STEP_MIN_EDGE_DWT ((CONFIG_CLOCK_FREQ) / 1000000u)
+#endif
 
 volatile uint32_t config_stepper_oids_seen
     __attribute__((used, externally_visible));
@@ -52,11 +50,42 @@ command_config_stepper(uint32_t *args)
     s->step_pulse_ticks = args[4];
     s->step_pin = gpio_out_setup(args[1], s->step_idle_level);
     s->dir_pin = gpio_out_setup(args[2], 0);
+#if CONFIG_CLASSIC_STEPPING
+    s->position = -POSITION_BIAS;
+    if (s->step_both_edge)
+        s->flags |= SF_SINGLE_SCHED;
+    move_queue_setup(&s->mq, sizeof(struct stepper_move));
+    if (HAVE_EDGE_OPTIMIZATION) {
+        if (s->step_both_edge && s->step_pulse_ticks <= EDGE_STEP_TICKS)
+            s->flags |= SF_OPTIMIZED_PATH;
+        else
+            s->time.func = stepper_event_full;
+    } else if (HAVE_AVR_OPTIMIZATION) {
+        if (!s->step_both_edge && s->step_pulse_ticks <= AVR_STEP_TICKS)
+            s->flags |= SF_SINGLE_SCHED | SF_OPTIMIZED_PATH;
+        else
+            s->time.func = stepper_event_full;
+    } else if (!CONFIG_INLINE_STEPPER_HACK) {
+        s->time.func = stepper_event_full;
+    }
+#endif
+#if !CONFIG_MOTION_RUNTIME
+    // The config phase runs after the host's identify/attach handshake has
+    // installed the mcu-log hook; emitting at boot races the host and the
+    // frame is lost. The piece build hangs this off kalico_configure_axis.
+    static uint8_t event_log_ready_emitted;
+    if (!event_log_ready_emitted) {
+        event_log_ready_emitted = 1;
+        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
+                       EVENT_LOG_EVENT_RUNTIME_MCU_READY, 0, 0, 0);
+        kalico_diag_emit_prior_crash();
+    }
+#endif
 }
 DECL_COMMAND(command_config_stepper, "config_stepper oid=%c step_pin=%c"
              " dir_pin=%c invert_step=%c step_pulse_ticks=%u");
 
-static struct stepper *
+struct stepper *
 stepper_oid_lookup(uint8_t oid)
 {
     return oid_lookup(oid, command_config_stepper);
@@ -66,6 +95,14 @@ static void
 stepper_stop(struct trsync_signal *tss, uint8_t reason)
 {
     struct stepper *s = container_of(tss, struct stepper, stop_signal);
+#if CONFIG_CLASSIC_STEPPING
+    sched_del_timer(&s->time);
+    s->next_step_time = s->time.waketime = 0;
+    s->position = -stepper_get_position(s);
+    s->count = 0;
+    s->flags = (s->flags & SF_OPTIMIZED_PATH) | SF_NEED_RESET;
+    move_queue_clear(&s->mq);
+#endif
     gpio_out_write(s->dir_pin, 0);
     gpio_out_write(s->step_pin, s->step_idle_level);
 }
@@ -131,6 +168,8 @@ stepper_shutdown(void)
     }
 }
 DECL_SHUTDOWN(stepper_shutdown);
+
+#if CONFIG_MOTION_RUNTIME
 
 #define RUNTIME_MOTOR_COUNT 4
 #define RUNTIME_MAX_STEPPERS_PER_MOTOR 4
@@ -297,6 +336,8 @@ command_runtime_reset(uint32_t *args)
 }
 DECL_COMMAND(command_runtime_reset, "runtime_reset");
 
+#endif
+
 void
 command_runtime_diag_dump(uint32_t *args)
 {
@@ -304,6 +345,8 @@ command_runtime_diag_dump(uint32_t *args)
     kalico_diag_emit_live();
 }
 DECL_COMMAND(command_runtime_diag_dump, "runtime_diag_dump");
+
+#if CONFIG_MOTION_RUNTIME
 
 void
 command_kalico_phase_stepping_enable_spi(uint32_t *args)
@@ -495,3 +538,5 @@ runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps, uint8_t stepper_sel
 
     step_last_edge_dwt[motor_idx] = last;
 }
+
+#endif

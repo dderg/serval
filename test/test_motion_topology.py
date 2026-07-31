@@ -12,6 +12,23 @@ from klippy.motion import Motion
 from klippy.motion_kinematics import _LinearKinematics
 
 FAKE_STEPPER_VELOCITY_CEILING = 0.5 / (0.000001 + 0.000002) * 0.0125
+FAKE_STEP_DIST = 0.0125
+
+
+def piece_topology(handle, axes, kin):
+    n = len(axes)
+    return (
+        handle,
+        axes,
+        kin,
+        [FAKE_STEPPER_VELOCITY_CEILING] * n,
+        0,
+        [FAKE_STEP_DIST] * n,
+        [False] * n,
+        [0] * n,
+        0.0,
+        0,
+    )
 
 
 class FakeKin(FakeKinBase):
@@ -68,7 +85,7 @@ def test_one_mcu_corexy_topology():
     a2h = motion._build_axis_to_handle()
     assert a2h == {0: 11, 1: 11, 2: 11, 3: 11}
     assert motion._derive_mcu_topology(a2h) == [
-        (11, [0, 1, 2, 3], 0, [FAKE_STEPPER_VELOCITY_CEILING] * 4)
+        piece_topology(11, [0, 1, 2, 3], 0)
     ]
 
 
@@ -78,8 +95,8 @@ def test_two_mcu_corexy_topology():
     a2h = motion._build_axis_to_handle()
     assert a2h == {0: 100, 1: 100, 2: 200, 3: 200}
     assert motion._derive_mcu_topology(a2h) == [
-        (100, [0, 1], 0, [FAKE_STEPPER_VELOCITY_CEILING] * 2),
-        (200, [2, 3], 1, [FAKE_STEPPER_VELOCITY_CEILING] * 2),
+        piece_topology(100, [0, 1], 0),
+        piece_topology(200, [2, 3], 1),
     ]
 
 
@@ -89,7 +106,7 @@ def test_cartesian_topology_tag_is_cartesian():
     )
     a2h = motion._build_axis_to_handle()
     assert motion._derive_mcu_topology(a2h) == [
-        (11, [0, 1, 2, 3], 1, [FAKE_STEPPER_VELOCITY_CEILING] * 4)
+        piece_topology(11, [0, 1, 2, 3], 1)
     ]
 
 
@@ -181,5 +198,5 @@ def test_init_planner_passes_config_text_and_topology():
     motion._init_planner()
     assert engine.init_planner_args["config_text"] == motion._motion_config_text
     assert engine.init_planner_args["topology"] == [
-        (11, [0, 1, 2, 3], 0, [FAKE_STEPPER_VELOCITY_CEILING] * 4)
+        piece_topology(11, [0, 1, 2, 3], 0)
     ]

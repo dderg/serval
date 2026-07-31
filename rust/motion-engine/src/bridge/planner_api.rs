@@ -17,6 +17,12 @@ struct McuTopology {
     axes: Vec<u8>,
     kinematics: u8,
     max_motor_velocity: Vec<f64>,
+    stepping_mode: u8,
+    microstep_distance: Vec<f64>,
+    invert_dir: Vec<bool>,
+    stepper_oids: Vec<u32>,
+    stepcompress_sample_rate: f64,
+    move_queue_slots: u32,
 }
 
 impl McuTopology {
@@ -26,6 +32,12 @@ impl McuTopology {
             axes: self.axes,
             kinematics: self.kinematics,
             max_motor_velocity: self.max_motor_velocity,
+            stepping_mode: self.stepping_mode,
+            microstep_distance: self.microstep_distance,
+            invert_dir: self.invert_dir,
+            stepper_oids: self.stepper_oids,
+            stepcompress_sample_rate: self.stepcompress_sample_rate,
+            move_queue_slots: self.move_queue_slots,
         }
     }
 }
@@ -545,6 +557,56 @@ impl PyMotionEngine {
                 PyRuntimeError::new_err(format!(
                     "position seed send to mcu_id {} failed: {e:?}",
                     s.mcu_id
+                ))
+            })?;
+        }
+        self.seed_stepcompress_shims(pos)
+    }
+
+    /// Classic stepping keeps the step counter on the host: re-anchor each
+    /// stepcompress motor's shim counter so the next drain re-emits
+    /// `reset_step_clock` from the new position.
+    fn seed_stepcompress_shims(&self, pos: geometry::MachinePos) -> PyResult<()> {
+        let configs = self.mcu_axis_configs.lock_ok().clone();
+        let endpoints = self.stepcompress_endpoints.lock_ok().clone();
+        for cfg in configs
+            .iter()
+            .filter(|c| c.stepping_mode == crate::mcu_config::SteppingMode::Stepcompress)
+        {
+            let motor = crate::mcu_config::motor_frame(cfg, pos.0);
+            let mut counts = Vec::with_capacity(cfg.axes.len());
+            for (motor_idx, &axis) in cfg.axes.iter().enumerate() {
+                let key = crate::types::AxisKey {
+                    mcu_id: cfg.mcu_id,
+                    axis: axis as u8,
+                };
+                let lane = crate::homing::stepcompress_lane(cfg, key)
+                    .map_err(PyRuntimeError::new_err)?
+                    .ok_or_else(|| {
+                        PyRuntimeError::new_err(format!(
+                            "position seed: stepcompress mcu {} axis {axis} has no shim lane",
+                            cfg.mcu_id
+                        ))
+                    })?;
+                let mm = motor.get(axis).copied().unwrap_or_else(|| {
+                    panic!(
+                        "position seed: stepcompress mcu {} motor {motor_idx} drives \
+                         non-spatial axis {axis} (broken invariant)",
+                        cfg.mcu_id
+                    )
+                });
+                counts.push(lane.mm_to_steps(mm));
+            }
+            let endpoint = endpoints.get(&cfg.mcu_id).ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "position seed: no shim endpoint registered for stepcompress mcu {}",
+                    cfg.mcu_id
+                ))
+            })?;
+            endpoint.lock_ok().reset_position(&counts).map_err(|e| {
+                PyRuntimeError::new_err(format!(
+                    "position seed: shim reseed failed for mcu {}: {e:?}",
+                    cfg.mcu_id
                 ))
             })?;
         }

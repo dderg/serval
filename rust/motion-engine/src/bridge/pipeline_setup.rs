@@ -210,37 +210,86 @@ impl PyMotionEngine {
 
     fn build_pump_resources(
         &self,
+        mcu_configs: &[McuAxisConfig],
         host_ios: &HashMap<u32, Arc<McuHostIo>>,
         ec_conns: &HashMap<u32, Arc<McuSerialConn>>,
-        ring_depth_table: HashMap<crate::types::AxisKey, u32>,
-    ) -> crate::worker::PumpResources {
-        let wire_transports: HashMap<u32, crate::pump::McuTransport> = {
-            let mut t = HashMap::new();
-            for (&id, io) in host_ios {
-                t.insert(id, crate::pump::McuTransport::Serial(Arc::downgrade(io)));
+        mut ring_depth_table: HashMap<crate::types::AxisKey, u32>,
+        pump_control: &crossbeam_channel::Sender<crate::pump::PumpMsg>,
+    ) -> PyResult<crate::worker::PumpResources> {
+        let mut wire_transports: HashMap<u32, crate::pump::McuTransport> = HashMap::new();
+        let router_for_clock = Arc::clone(&self.router);
+        let clock_of: crate::pump::ClockSource = Arc::new(move |mcu_id: u32| {
+            let r = router_for_clock.lock_ok();
+            r.ack_clock_and_freq(mcu_handle_from_raw(mcu_id))
+        });
+        let mut paced_endpoints = Vec::new();
+        for (&id, io) in host_ios {
+            wire_transports.insert(id, crate::pump::McuTransport::Serial(Arc::downgrade(io)));
+        }
+        for (&id, conn) in ec_conns {
+            wire_transports.insert(
+                id,
+                crate::pump::McuTransport::EtherCat(Arc::downgrade(conn)),
+            );
+        }
+        for cfg in mcu_configs {
+            if cfg.stepping_mode != crate::mcu_config::SteppingMode::Stepcompress {
+                continue;
             }
-            for (&id, conn) in ec_conns {
-                t.insert(
-                    id,
-                    crate::pump::McuTransport::EtherCat(Arc::downgrade(conn)),
+            let io = host_ios.get(&cfg.mcu_id).ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "stepcompress mcu {} has no serial transport",
+                    cfg.mcu_id
+                ))
+            })?;
+            let measured_freq = clock_of(cfg.mcu_id).map(|(_, f)| f).ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "stepcompress mcu {} has no clock estimate; the shim's piece spans must \
+                     use the same slope the host projects piece starts with",
+                    cfg.mcu_id
+                ))
+            })?;
+            let endpoint = crate::pump::build_endpoint(
+                cfg,
+                Arc::downgrade(io),
+                pump_control.clone(),
+                measured_freq,
+                Arc::clone(&clock_of),
+            )
+            .map_err(PyRuntimeError::new_err)?;
+            let depth = endpoint.ring_depth();
+            for &axis in &cfg.axes {
+                ring_depth_table.insert(
+                    crate::types::AxisKey {
+                        mcu_id: cfg.mcu_id,
+                        axis: axis as u8,
+                    },
+                    depth,
                 );
             }
-            t
+            let shared = Arc::new(Mutex::new(endpoint));
+            self.stepcompress_endpoints
+                .lock_ok()
+                .insert(cfg.mcu_id, Arc::clone(&shared));
+            paced_endpoints.push(Arc::clone(&shared));
+            wire_transports.insert(cfg.mcu_id, crate::pump::McuTransport::Stepcompress(shared));
+        }
+
+        *self.pump.pacer.lock_ok() = if paced_endpoints.is_empty() {
+            None
+        } else {
+            Some(crate::pump::StepcompressPacer::spawn(paced_endpoints))
         };
 
         let ring_depth_table_for_pump = ring_depth_table;
         let router_for_pump = Arc::clone(&self.router);
         let drain_for_pump = self.drain.clone();
-        let router_for_freq = Arc::clone(&self.router);
         let endpoint_death_for_pump = Arc::clone(&self.latched.endpoint_death);
-        crate::worker::PumpResources {
+        Ok(crate::worker::PumpResources {
             sink: crate::pump::WireSink {
                 transports: wire_transports,
                 timeout: Duration::from_secs(5),
-                clock_of: Arc::new(move |mcu_id: u32| {
-                    let r = router_for_freq.lock_ok();
-                    r.ack_clock_and_freq(mcu_handle_from_raw(mcu_id))
-                }),
+                clock_of: Arc::clone(&clock_of),
             },
             callbacks: crate::pump::PumpCallbacks {
                 ring_depth_of: Box::new(move |k| {
@@ -269,7 +318,7 @@ impl PyMotionEngine {
             },
             drain: drain_for_pump,
             backlog: Arc::clone(&self.pump.backlog),
-        }
+        })
     }
 
     pub(super) fn spawn_pipeline(
@@ -283,7 +332,9 @@ impl PyMotionEngine {
         let counter = Arc::clone(&self.dispatched_segments);
         let router_arc = Arc::clone(&self.router);
 
-        let pump_resources = self.build_pump_resources(host_ios, ec_conns, ring_depth_table);
+        let (pump_tx, pump_rx) = crossbeam_channel::unbounded::<crate::pump::PumpMsg>();
+        let pump_resources =
+            self.build_pump_resources(mcu_configs, host_ios, ec_conns, ring_depth_table, &pump_tx)?;
 
         let anchor_mutex = Arc::clone(&self.dispatch_anchor);
         *anchor_mutex.lock_ok() = crate::anchor::Anchor::new();
@@ -315,6 +366,7 @@ impl PyMotionEngine {
             home,
             dispatch_resources,
             pump_resources,
+            (pump_tx, pump_rx),
         );
         let pump_control = pipeline.pump_control.clone();
         *self.pump.tx.lock_ok() = Some(pipeline.pump_control);
@@ -462,6 +514,14 @@ impl PyMotionEngine {
                 &conn,
                 Arc::clone(&self.mcus),
                 Arc::clone(&self.latched.endpoint_death),
+            );
+        } else if cfg_mcu.stepping_mode == crate::mcu_config::SteppingMode::Stepcompress {
+            tracing::info!(
+                subsystem = "motion",
+                event = "stepcompress_heartbeat_suppressed",
+                mcu_id,
+                "stepcompress mcu retires host-computed step frames, not piece-ring \
+                 slots — the step shim is the sole source of pump credit"
             );
         } else {
             let io = host_ios

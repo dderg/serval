@@ -11,19 +11,54 @@ const _: () = assert!(
      topology tuples mirror it numerically (see segment.rs); renumbering breaks that contract",
 );
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum SteppingMode {
+    #[default]
+    Piece = 0,
+    Stepcompress = 1,
+}
+
+pub const STEPPING_MODE_PIECE: u8 = SteppingMode::Piece as u8;
+pub const STEPPING_MODE_STEPCOMPRESS: u8 = SteppingMode::Stepcompress as u8;
+
+const _: () = assert!(
+    STEPPING_MODE_PIECE == 0 && STEPPING_MODE_STEPCOMPRESS == 1,
+    "SteppingMode discriminants are mirrored numerically by the klippy/mcu.py \
+     STEPPING_MODES table the init_planner topology tuples carry; renumbering \
+     breaks that contract",
+);
+
+impl SteppingMode {
+    #[must_use]
+    pub fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            STEPPING_MODE_PIECE => Some(Self::Piece),
+            STEPPING_MODE_STEPCOMPRESS => Some(Self::Stepcompress),
+            _ => None,
+        }
+    }
+}
+
 pub const AXIS_X: usize = 0;
 pub const AXIS_Y: usize = 1;
 pub const AXIS_Z: usize = 2;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct McuTopologyInput {
     pub mcu_id: u32,
     pub axes: Vec<u8>,
     pub kinematics: u8,
     pub max_motor_velocity: Vec<f64>,
+    pub stepping_mode: u8,
+    pub microstep_distance: Vec<f64>,
+    pub invert_dir: Vec<bool>,
+    pub stepper_oids: Vec<u32>,
+    pub stepcompress_sample_rate: f64,
+    pub move_queue_slots: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct McuAxisConfig {
     pub mcu_id: u32,
     pub axes: Vec<usize>,
@@ -38,6 +73,12 @@ pub struct McuAxisConfig {
     /// rings must stay empty while parked, so pure-hold lanes are never
     /// enqueued for them.
     pub ethercat: bool,
+    pub stepping_mode: SteppingMode,
+    pub microstep_distance: Vec<f64>,
+    pub invert_dir: Vec<bool>,
+    pub stepper_oids: Vec<u32>,
+    pub stepcompress_sample_rate: f64,
+    pub move_queue_slots: u32,
 }
 
 impl McuAxisConfig {
@@ -65,7 +106,7 @@ impl McuAxisConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct McuCaps {
     pub total_piece_memory: u32,
 }
@@ -107,6 +148,38 @@ pub enum KinematicsConfigError {
         axis_count: usize,
         ceiling_count: usize,
     },
+    #[error(
+        "mcu handle {handle}: unknown stepping_mode tag {tag}; \
+         known: {STEPPING_MODE_PIECE}=piece, {STEPPING_MODE_STEPCOMPRESS}=stepcompress"
+    )]
+    UnknownSteppingMode { handle: u32, tag: u8 },
+    #[error(
+        "mcu handle {handle}: {field} has {got} entries for {axis_count} axes; \
+         every configured axis requires exactly one entry"
+    )]
+    PerAxisVectorLength {
+        handle: u32,
+        field: &'static str,
+        axis_count: usize,
+        got: usize,
+    },
+    #[error(
+        "mcu handle {handle}: stepping_mode: stepcompress requires a finite positive \
+         stepcompress_sample_rate (Hz), got {rate}"
+    )]
+    StepcompressSampleRate { handle: u32, rate: f64 },
+    #[error(
+        "mcu handle {handle}: stepping_mode: piece must carry \
+         stepcompress_sample_rate 0.0, got {rate}"
+    )]
+    PieceSampleRate { handle: u32, rate: f64 },
+    #[error(
+        "mcu handle {handle}: stepping_mode: stepcompress requires the mcu's advertised \
+         move_count (move_queue_slots) to be positive, got 0"
+    )]
+    StepcompressMoveQueueSlots { handle: u32 },
+    #[error("mcu handle {handle}: stepping_mode: piece must carry move_queue_slots 0, got {slots}")]
+    PieceMoveQueueSlots { handle: u32, slots: u32 },
 }
 
 pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
@@ -137,6 +210,57 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                     ceiling_count: topology.max_motor_velocity.len(),
                 });
             }
+            let stepping_mode = SteppingMode::from_tag(topology.stepping_mode).ok_or(
+                KinematicsConfigError::UnknownSteppingMode {
+                    handle: topology.mcu_id,
+                    tag: topology.stepping_mode,
+                },
+            )?;
+            for (field, got) in [
+                ("microstep_distance", topology.microstep_distance.len()),
+                ("invert_dir", topology.invert_dir.len()),
+                ("stepper_oids", topology.stepper_oids.len()),
+            ] {
+                if got != axes.len() {
+                    return Err(KinematicsConfigError::PerAxisVectorLength {
+                        handle: topology.mcu_id,
+                        field,
+                        axis_count: axes.len(),
+                        got,
+                    });
+                }
+            }
+            let rate = topology.stepcompress_sample_rate;
+            let move_queue_slots = topology.move_queue_slots;
+            match stepping_mode {
+                SteppingMode::Stepcompress => {
+                    if !rate.is_finite() || rate <= 0.0 {
+                        return Err(KinematicsConfigError::StepcompressSampleRate {
+                            handle: topology.mcu_id,
+                            rate,
+                        });
+                    }
+                    if move_queue_slots == 0 {
+                        return Err(KinematicsConfigError::StepcompressMoveQueueSlots {
+                            handle: topology.mcu_id,
+                        });
+                    }
+                }
+                SteppingMode::Piece => {
+                    if rate != 0.0 {
+                        return Err(KinematicsConfigError::PieceSampleRate {
+                            handle: topology.mcu_id,
+                            rate,
+                        });
+                    }
+                    if move_queue_slots != 0 {
+                        return Err(KinematicsConfigError::PieceMoveQueueSlots {
+                            handle: topology.mcu_id,
+                            slots: move_queue_slots,
+                        });
+                    }
+                }
+            }
             let caps = caps_by_handle.get(&topology.mcu_id).copied().ok_or(
                 KinematicsConfigError::CapsMissing {
                     handle: topology.mcu_id,
@@ -149,6 +273,12 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                 caps,
                 max_motor_velocity: topology.max_motor_velocity.clone(),
                 ethercat: false,
+                stepping_mode,
+                microstep_distance: topology.microstep_distance.clone(),
+                invert_dir: topology.invert_dir.clone(),
+                stepper_oids: topology.stepper_oids.clone(),
+                stepcompress_sample_rate: rate,
+                move_queue_slots,
             })
         })
         .collect()
@@ -216,16 +346,22 @@ pub fn build_seed_sends(configs: &[McuAxisConfig], pos: geometry::MachinePos) ->
 /// physical steps, so the input is [`geometry::MachinePos`]: seeding them
 /// from a raw gcode position while a mesh is active shifts the machine frame
 /// by `correction_at(x, y)` on every reseed — the contact-probe ratchet.
+///
+/// Stepcompress MCUs are excluded alongside EtherCAT ones: classic stepping
+/// has no MCU-side "set position" command by design — the host owns the step
+/// counter and the MCU only reports it back via `stepper_get_position`. Their
+/// seed is [`StepcompressLane::mm_to_steps`] into the host shim.
 pub fn build_serial_seed_sends<S: ::std::hash::BuildHasher>(
     configs: &[McuAxisConfig],
     ethercat_mcu_ids: &HashSet<u32, S>,
     pos: geometry::MachinePos,
 ) -> Vec<SeedSend> {
-    let reachable_over_serial_transport =
-        |cfg: &&McuAxisConfig| !ethercat_mcu_ids.contains(&cfg.mcu_id);
+    let takes_runtime_seed = |cfg: &&McuAxisConfig| {
+        !ethercat_mcu_ids.contains(&cfg.mcu_id) && cfg.stepping_mode != SteppingMode::Stepcompress
+    };
     configs
         .iter()
-        .filter(reachable_over_serial_transport)
+        .filter(takes_runtime_seed)
         .map(|cfg| {
             let m = motor_frame(cfg, pos.0);
             SeedSend {
@@ -266,12 +402,24 @@ mod topology_tests {
                 axes: vec![AXIS_X as u8, AXIS_Y as u8, FOLLOWER_E as u8],
                 kinematics: 0,
                 max_motor_velocity: vec![f64::INFINITY; 3],
+                stepping_mode: STEPPING_MODE_PIECE,
+                microstep_distance: vec![0.0125; 3],
+                invert_dir: vec![false; 3],
+                stepper_oids: vec![1, 2, 3],
+                stepcompress_sample_rate: 0.0,
+                move_queue_slots: 0,
             },
             McuTopologyInput {
                 mcu_id: 9,
                 axes: vec![AXIS_Z as u8],
                 kinematics: 1,
                 max_motor_velocity: vec![f64::INFINITY],
+                stepping_mode: STEPPING_MODE_STEPCOMPRESS,
+                microstep_distance: vec![0.0025],
+                invert_dir: vec![true],
+                stepper_oids: vec![4],
+                stepcompress_sample_rate: 20_000.0,
+                move_queue_slots: 128,
             },
         ];
         let cfgs = build_mcu_configs(&mcus, &caps).unwrap();
@@ -285,9 +433,13 @@ mod topology_tests {
                 total_piece_memory: 62 * 1024
             }
         );
+        assert_eq!(cfgs[0].stepping_mode, SteppingMode::Piece);
+        assert_eq!(cfgs[0].stepper_oids, vec![1, 2, 3]);
         assert_eq!(cfgs[1].mcu_id, 9);
         assert_eq!(cfgs[1].axes, vec![AXIS_Z]);
         assert_eq!(cfgs[1].kinematics, 1);
+        assert_eq!(cfgs[1].stepping_mode, SteppingMode::Stepcompress);
+        assert_eq!(cfgs[1].invert_dir, vec![true]);
     }
 
     #[test]
@@ -298,6 +450,10 @@ mod topology_tests {
             axes: vec![AXIS_X as u8, AXIS_Y as u8],
             kinematics: 0,
             max_motor_velocity: vec![f64::INFINITY; 2],
+            microstep_distance: vec![0.0125; 2],
+            invert_dir: vec![false; 2],
+            stepper_oids: vec![1, 2],
+            ..Default::default()
         }];
         let err = build_mcu_configs(&mcus, &caps).unwrap_err();
         assert!(matches!(
@@ -314,6 +470,7 @@ mod topology_tests {
             axes: vec![AXIS_X as u8],
             kinematics: 9,
             max_motor_velocity: vec![f64::INFINITY],
+            ..Default::default()
         }];
         let err = build_mcu_configs(&mcus, &caps).unwrap_err();
         assert!(matches!(
@@ -330,6 +487,7 @@ mod topology_tests {
             axes: vec![AXIS_X as u8, FOLLOWER_E as u8],
             kinematics: 0,
             max_motor_velocity: vec![f64::INFINITY; 2],
+            ..Default::default()
         }];
         let err = build_mcu_configs(&mcus, &caps).unwrap_err();
         assert!(matches!(
@@ -351,6 +509,7 @@ mod topology_tests {
             axes: vec![AXIS_X as u8, AXIS_Y as u8],
             kinematics: KINEMATICS_COREXY,
             max_motor_velocity: vec![100.0],
+            ..Default::default()
         }];
         let err = build_mcu_configs(&mcus, &caps).unwrap_err();
         assert!(matches!(
@@ -360,6 +519,122 @@ mod topology_tests {
                 axis_count: 2,
                 ceiling_count: 1,
             }
+        ));
+    }
+
+    #[test]
+    fn build_mcu_configs_requires_one_microstep_distance_per_axis() {
+        let caps = HashMap::from([(
+            7,
+            McuCaps {
+                total_piece_memory: 62 * 1024,
+            },
+        )]);
+        let mcus = vec![McuTopologyInput {
+            mcu_id: 7,
+            axes: vec![AXIS_X as u8, AXIS_Y as u8],
+            kinematics: KINEMATICS_COREXY,
+            max_motor_velocity: vec![100.0, 100.0],
+            microstep_distance: vec![0.0125],
+            invert_dir: vec![false; 2],
+            stepper_oids: vec![1, 2],
+            ..Default::default()
+        }];
+        let err = build_mcu_configs(&mcus, &caps).unwrap_err();
+        assert!(matches!(
+            err,
+            KinematicsConfigError::PerAxisVectorLength {
+                handle: 7,
+                field: "microstep_distance",
+                axis_count: 2,
+                got: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn build_mcu_configs_unknown_stepping_mode_is_loud() {
+        let caps = HashMap::from([(
+            7,
+            McuCaps {
+                total_piece_memory: 62 * 1024,
+            },
+        )]);
+        let mcus = vec![McuTopologyInput {
+            mcu_id: 7,
+            axes: vec![AXIS_X as u8, AXIS_Y as u8],
+            kinematics: KINEMATICS_COREXY,
+            max_motor_velocity: vec![100.0, 100.0],
+            stepping_mode: 7,
+            microstep_distance: vec![0.0125; 2],
+            invert_dir: vec![false; 2],
+            stepper_oids: vec![1, 2],
+            stepcompress_sample_rate: 0.0,
+            move_queue_slots: 0,
+        }];
+        let err = build_mcu_configs(&mcus, &caps).unwrap_err();
+        assert!(matches!(
+            err,
+            KinematicsConfigError::UnknownSteppingMode { handle: 7, tag: 7 }
+        ));
+    }
+
+    fn sample_rate_topology(stepping_mode: u8, rate: f64) -> Vec<McuTopologyInput> {
+        vec![McuTopologyInput {
+            mcu_id: 7,
+            axes: vec![AXIS_X as u8, AXIS_Y as u8],
+            kinematics: KINEMATICS_COREXY,
+            max_motor_velocity: vec![100.0, 100.0],
+            stepping_mode,
+            microstep_distance: vec![0.0125; 2],
+            invert_dir: vec![false; 2],
+            stepper_oids: vec![1, 2],
+            stepcompress_sample_rate: rate,
+            move_queue_slots: if stepping_mode == STEPPING_MODE_STEPCOMPRESS {
+                128
+            } else {
+                0
+            },
+        }]
+    }
+
+    #[test]
+    fn stepcompress_without_sample_rate_is_loud() {
+        let caps = HashMap::from([(
+            7,
+            McuCaps {
+                total_piece_memory: 62 * 1024,
+            },
+        )]);
+        for rate in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mcus = sample_rate_topology(STEPPING_MODE_STEPCOMPRESS, rate);
+            let err = build_mcu_configs(&mcus, &caps).unwrap_err();
+            assert!(matches!(
+                err,
+                KinematicsConfigError::StepcompressSampleRate { handle: 7, .. }
+            ));
+        }
+        let cfgs = build_mcu_configs(
+            &sample_rate_topology(STEPPING_MODE_STEPCOMPRESS, 20_000.0),
+            &caps,
+        )
+        .unwrap();
+        assert_eq!(cfgs[0].stepcompress_sample_rate, 20_000.0);
+    }
+
+    #[test]
+    fn piece_mode_rejects_nonzero_sample_rate() {
+        let caps = HashMap::from([(
+            7,
+            McuCaps {
+                total_piece_memory: 62 * 1024,
+            },
+        )]);
+        let err =
+            build_mcu_configs(&sample_rate_topology(STEPPING_MODE_PIECE, 1.0), &caps).unwrap_err();
+        assert!(matches!(
+            err,
+            KinematicsConfigError::PieceSampleRate { handle: 7, .. }
         ));
     }
 }
@@ -380,6 +655,7 @@ mod seed_tests {
                 total_piece_memory: 62 * 1024,
             },
             max_motor_velocity: Vec::new(),
+            ..Default::default()
         }
     }
     fn cartesian_z_cfg() -> McuAxisConfig {
@@ -392,6 +668,7 @@ mod seed_tests {
                 total_piece_memory: 62 * 1024,
             },
             max_motor_velocity: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -476,6 +753,7 @@ mod seed_tests {
                 total_piece_memory: 32 * 1024,
             },
             max_motor_velocity: Vec::new(),
+            ..Default::default()
         };
         let serial_cfg = McuAxisConfig {
             ethercat: false,
@@ -486,6 +764,7 @@ mod seed_tests {
                 total_piece_memory: 62 * 1024,
             },
             max_motor_velocity: Vec::new(),
+            ..Default::default()
         };
         let configs = vec![ec_cfg, serial_cfg];
         let ethercat_mcu_ids: HashSet<u32> = [1u32].into_iter().collect();
@@ -510,6 +789,40 @@ mod seed_tests {
         assert_eq!(serial.x_q16, encode_q16(100.0));
         assert_eq!(serial.y_q16, encode_q16(50.0));
         assert_eq!(serial.z_q16, encode_q16(10.0));
+    }
+
+    #[test]
+    fn build_serial_seed_sends_skips_stepcompress_mcu() {
+        let sc_cfg = McuAxisConfig {
+            ethercat: false,
+            mcu_id: 1,
+            axes: vec![AXIS_X],
+            kinematics: 1,
+            caps: McuCaps {
+                total_piece_memory: 32 * 1024,
+            },
+            max_motor_velocity: Vec::new(),
+            stepping_mode: SteppingMode::Stepcompress,
+            ..Default::default()
+        };
+        let piece_cfg = McuAxisConfig {
+            ethercat: false,
+            mcu_id: 2,
+            axes: vec![AXIS_Y, AXIS_Z],
+            kinematics: 1,
+            caps: McuCaps {
+                total_piece_memory: 62 * 1024,
+            },
+            max_motor_velocity: Vec::new(),
+            ..Default::default()
+        };
+        let sends = build_serial_seed_sends(
+            &[sc_cfg, piece_cfg],
+            &HashSet::<u32>::new(),
+            geometry::MachinePos([100.0, 50.0, 10.0]),
+        );
+        assert_eq!(sends.len(), 1, "got {sends:?}");
+        assert_eq!(sends[0].mcu_id, 2);
     }
 
     #[test]
@@ -539,6 +852,7 @@ mod seed_tests {
                 total_piece_memory: 32 * 1024,
             },
             max_motor_velocity: Vec::new(),
+            ..Default::default()
         };
         let ec_cfg_2 = McuAxisConfig {
             ethercat: false,
@@ -549,6 +863,7 @@ mod seed_tests {
                 total_piece_memory: 32 * 1024,
             },
             max_motor_velocity: Vec::new(),
+            ..Default::default()
         };
         let configs = vec![ec_cfg_1, ec_cfg_2];
         let ethercat_mcu_ids: HashSet<u32> = [1u32, 3u32].into_iter().collect();

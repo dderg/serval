@@ -25,6 +25,7 @@ fn make_enqueue(
     epoch: crate::anchor::StreamEpoch,
 ) -> EnqueueMsg {
     EnqueueMsg {
+        epoch_freq: None,
         key,
         pieces,
         epoch,
@@ -519,6 +520,7 @@ fn flush_clears_queued_pieces_and_junctions() {
     });
 
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key,
         pieces: (0u64..4)
             .map(|i| {
@@ -547,6 +549,7 @@ fn flush_clears_queued_pieces_and_junctions() {
     *clock.lock().unwrap() = Some((gated_tick + 1_000, freq));
 
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key,
         pieces: vec![(
             PieceEntry {
@@ -624,6 +627,7 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
     });
 
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key,
         pieces: (0u64..4)
             .map(|i| {
@@ -650,6 +654,7 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
     *clock.lock().unwrap() = Some((gated_tick + 1_000, freq));
 
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key,
         pieces: vec![(
             PieceEntry {

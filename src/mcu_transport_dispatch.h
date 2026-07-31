@@ -14,8 +14,9 @@
 #define MESSAGE_VERSION_DEFAULT 0x01
 
 // Runtime result codes mirrored from rust/runtime/src/error.rs; keep in sync.
-#define RUNTIME_ERR_INVALID_CURVE -2
-#define RUNTIME_ERR_NOT_INIT      -7
+#define RUNTIME_ERR_INVALID_CURVE          -2
+#define RUNTIME_ERR_NOT_INIT               -7
+#define RUNTIME_ERR_MOTION_RUNTIME_ABSENT -400
 
 void piece_sink_begin(void);
 void piece_sink_feed(uint8_t b);

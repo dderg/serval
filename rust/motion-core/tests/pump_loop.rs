@@ -76,6 +76,7 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
     });
 
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key: AxisKey { mcu_id: 1, axis: 0 },
         pieces: vec![p(0), p(1)],
         epoch: motion_core::anchor::StreamEpoch::Reposition,
@@ -84,6 +85,7 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
     })
     .unwrap();
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key: AxisKey { mcu_id: 1, axis: 0 },
         pieces: vec![p(2)],
         epoch: motion_core::anchor::StreamEpoch::Continuation,
@@ -173,6 +175,7 @@ fn continuous_junction_position_passes() {
 
     let key = AxisKey { mcu_id: 1, axis: 0 };
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key,
         pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
         epoch: motion_core::anchor::StreamEpoch::Reposition,
@@ -181,6 +184,7 @@ fn continuous_junction_position_passes() {
     })
     .unwrap();
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key,
         pieces: vec![piece_at(2000, 0.002, 12.5, 15.0)],
         epoch: motion_core::anchor::StreamEpoch::Continuation,
@@ -205,6 +209,7 @@ fn junction_position_discontinuity_is_fatal() {
 
     let key = AxisKey { mcu_id: 1, axis: 0 };
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key,
         pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
         epoch: motion_core::anchor::StreamEpoch::Reposition,
@@ -213,6 +218,7 @@ fn junction_position_discontinuity_is_fatal() {
     })
     .unwrap();
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key,
         pieces: vec![piece_at(2000, 0.002, 12.8, 15.0)],
         epoch: motion_core::anchor::StreamEpoch::Continuation,
@@ -236,6 +242,7 @@ fn underrun_reanchor_keeps_junction_continuity_guard_armed() {
 
     let key = AxisKey { mcu_id: 1, axis: 0 };
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key,
         pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
         epoch: motion_core::anchor::StreamEpoch::Reposition,
@@ -244,6 +251,7 @@ fn underrun_reanchor_keeps_junction_continuity_guard_armed() {
     })
     .unwrap();
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key,
         pieces: vec![piece_at(2000, 0.002, 12.8, 15.0)],
         epoch: motion_core::anchor::StreamEpoch::Reanchor,
@@ -269,6 +277,7 @@ fn underrun_reanchor_with_continuous_position_passes() {
 
     let key = AxisKey { mcu_id: 1, axis: 0 };
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key,
         pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
         epoch: motion_core::anchor::StreamEpoch::Reposition,
@@ -277,6 +286,7 @@ fn underrun_reanchor_with_continuous_position_passes() {
     })
     .unwrap();
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key,
         pieces: vec![piece_at(2000, 0.002, 12.5, 15.0)],
         epoch: motion_core::anchor::StreamEpoch::Reanchor,
@@ -301,6 +311,7 @@ fn fresh_stream_resets_junction_position_baseline() {
 
     let key = AxisKey { mcu_id: 1, axis: 0 };
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key,
         pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
         epoch: motion_core::anchor::StreamEpoch::Reposition,
@@ -309,6 +320,7 @@ fn fresh_stream_resets_junction_position_baseline() {
     })
     .unwrap();
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key,
         pieces: vec![piece_at(2000, 0.002, 50.0, 55.0)],
         epoch: motion_core::anchor::StreamEpoch::Reposition,
@@ -338,6 +350,7 @@ fn empty_reposition_carrier_resets_junction_position_baseline() {
 
     let key = AxisKey { mcu_id: 1, axis: 0 };
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key,
         pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
         epoch: motion_core::anchor::StreamEpoch::Reposition,
@@ -346,6 +359,7 @@ fn empty_reposition_carrier_resets_junction_position_baseline() {
     })
     .unwrap();
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key,
         pieces: Vec::new(),
         epoch: motion_core::anchor::StreamEpoch::Reposition,
@@ -354,6 +368,7 @@ fn empty_reposition_carrier_resets_junction_position_baseline() {
     })
     .unwrap();
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key,
         pieces: vec![piece_at(2000, 0.002, 50.0, 55.0)],
         epoch: motion_core::anchor::StreamEpoch::Continuation,
@@ -391,6 +406,7 @@ fn bundles_same_mcu_axes_into_one_transaction() {
     // (mcu_clock_of returns None => no horizon gate).
     for axis in 0..3u8 {
         data.send(EnqueueMsg {
+            epoch_freq: None,
             key: AxisKey { mcu_id: 1, axis },
             pieces: vec![p(0)],
             epoch: if axis == 0 {
@@ -453,6 +469,7 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
     let flood = 24000u64; // comfortably above PUMP_INTAKE_BACKLOG_CAP
     for i in 0..flood {
         match data.try_send(EnqueueMsg {
+            epoch_freq: None,
             key,
             pieces: vec![p(i)],
             epoch: if i == 0 {
@@ -493,6 +510,7 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
     std::thread::sleep(std::time::Duration::from_millis(30));
     assert!(
         data.try_send(EnqueueMsg {
+            epoch_freq: None,
             key,
             pieces: vec![p(9999)],
             epoch: motion_core::anchor::StreamEpoch::Continuation,
@@ -539,6 +557,7 @@ fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
     // axis B's pieces arrive behind A's on the same channel.
     for i in 0..8u64 {
         data.send(EnqueueMsg {
+            epoch_freq: None,
             key: key_a,
             pieces: vec![p(i)],
             epoch: if i == 0 {
@@ -553,6 +572,7 @@ fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
     }
     for i in 0..4u64 {
         data.send(EnqueueMsg {
+            epoch_freq: None,
             key: key_b,
             pieces: vec![p(100 + i)],
             epoch: if i == 0 {
@@ -622,6 +642,7 @@ fn drip_cohort_intake_bypasses_cap_and_feeds_all_participants() {
     // depth-4 ring and no retirement so its backlog piles up over the cap.
     for i in 0..2500u64 {
         data.send(EnqueueMsg {
+            epoch_freq: None,
             key: key_a,
             pieces: vec![piece_at(i, i as f64, 0.0, 0.0)],
             epoch: if i == 0 {
@@ -636,6 +657,7 @@ fn drip_cohort_intake_bypasses_cap_and_feeds_all_participants() {
     }
     for i in 0..4u64 {
         data.send(EnqueueMsg {
+            epoch_freq: None,
             key: key_b,
             pieces: vec![piece_at(i, i as f64, 0.0, 0.0)],
             epoch: if i == 0 {

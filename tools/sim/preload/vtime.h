@@ -16,6 +16,12 @@ struct vtime_pacer_slot {
     _Atomic uint32_t active;
     uint32_t reserved;
     _Atomic uint64_t floor_ns;
+    // How far virtual time may run past this pacer's floor. Per pacer
+    // because the tolerable overshoot is a property of the work being
+    // paced: a motion tick only needs its sample period preserved, while a
+    // classic step queue shuts down once its own clock reads more than 1 ms
+    // past a scheduled step.
+    _Atomic uint64_t slack_ns;
 };
 
 struct vtime_shm {
