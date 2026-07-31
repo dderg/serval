@@ -125,8 +125,9 @@ impl InfeasibilityTally {
 
 /// Census of the envelope's per-member plans: how many members were planned
 /// between their two boundary states, how many of those plans failed, and why.
-/// The envelope chains cannot replace the marched profile until `unreachable`
-/// and `no_admissible_entry` are both zero.
+/// A failed plan is now a planning error, so a run that returns at all carries a
+/// census whose refusal counts are zero; the tallies are what names the cause
+/// when one is not.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct EntryReachability {
     pub straight_members: u32,
@@ -345,9 +346,10 @@ pub fn plan_velocity_stops(
     forward_pass(moves, &caps, &geo, &mut plan.v, tol)?;
     let (barrier, _) = reverse_brake_envelope(moves, &caps, &geo, &mut plan.v, tol)?;
     check_entry_brake(moves, &caps, &geo, &plan.v, entry, tol)?;
+    let envelope = plan.v.clone();
     seam_accel_demands(&caps, &mut plan);
-    settle_seam_states(&caps, &mut plan, &mut report);
-    repair_stale_seam_accels(&caps, &mut plan);
+    settle_seam_states(moves, &caps, &envelope, &mut plan, &mut report)?;
+    repair_stale_seam_accels(&caps, &envelope, &mut plan);
     let v_barrier = plan.v[barrier];
     let (out, boundaries) = reconstruct_runs(moves, &caps, &plan, &geo, entry, tol, &mut report)?;
 
@@ -652,21 +654,25 @@ fn seam_accel_demands(caps: &[MoveCaps], plan: &mut SeamPlan) {
     }
 }
 
-/// Largest seam velocity at or below `hi` that `settles`.
+/// Largest seam velocity in `(lo, hi]` that `settles`.
 ///
 /// The band of speeds a seam can settle at is bounded below as well as above: a
 /// predecessor cannot brake to an arbitrarily low exit speed inside its own
 /// length, so descending blindly walks straight out of the feasible band. The
 /// search therefore sweeps the whole band from the top down for a grid point that
 /// settles, then bisects between it and the point above it.
-fn slowest_settling_seam<T>(hi: f64, settles: impl Fn(f64) -> Option<T>) -> Option<(f64, T)> {
-    if !(hi > 0.0) {
+fn slowest_settling_seam<T>(
+    lo: f64,
+    hi: f64,
+    settles: impl Fn(f64) -> Option<T>,
+) -> Option<(f64, T)> {
+    if !(hi > lo) {
         return None;
     }
-    let step = hi / f64::from(SEAM_SLOWDOWN_PROBES);
+    let step = (hi - lo) / f64::from(SEAM_SLOWDOWN_PROBES);
     let mut found = None;
     for i in (1..SEAM_SLOWDOWN_PROBES).rev() {
-        let v = step * f64::from(i);
+        let v = lo + step * f64::from(i);
         if let Some(settled) = settles(v) {
             found = Some((v, settled));
             break;
@@ -677,6 +683,45 @@ fn slowest_settling_seam<T>(hi: f64, settles: impl Fn(f64) -> Option<T>) -> Opti
     for _ in 0..SEAM_VELOCITY_BISECT_ITERS {
         let mid = 0.5 * (good + bad);
         if mid <= good || mid >= bad {
+            break;
+        }
+        match settles(mid) {
+            Some(next) => {
+                good = mid;
+                settled = next;
+            }
+            None => bad = mid,
+        }
+    }
+    Some((good, settled))
+}
+
+/// Slowest seam velocity in `(lo, hi]` that `settles`, for a seam whose whole
+/// demanded band is infeasible.
+///
+/// The backward requirement pass names each seam the speed its own member wants,
+/// and the member before it may be unable to brake that far inside its own length.
+/// Where nothing below the demand can be given up — a run's entry is an anchor no
+/// pass may move — the seam has to give the demand up *upwards*, towards the
+/// envelope the sweeps already proved it can hold. The sweep therefore climbs, and
+/// the bisection pushes the answer back down towards the demand so the excess
+/// speed carried into the next member is the least the predecessor forces.
+fn slowest_undemanded_seam<T>(
+    lo: f64,
+    hi: f64,
+    settles: impl Fn(f64) -> Option<T>,
+) -> Option<(f64, T)> {
+    if !(hi > lo) {
+        return None;
+    }
+    let step = (hi - lo) / f64::from(SEAM_SLOWDOWN_PROBES);
+    let probe = |i: u32| lo + step * f64::from(i);
+    let (index, mut good, mut settled) = (1..=SEAM_SLOWDOWN_PROBES)
+        .find_map(|i| settles(probe(i)).map(|settled| (i, probe(i), settled)))?;
+    let mut bad = probe(index - 1);
+    for _ in 0..SEAM_VELOCITY_BISECT_ITERS {
+        let mid = 0.5 * (good + bad);
+        if mid >= good || mid <= bad {
             break;
         }
         match settles(mid) {
@@ -739,6 +784,35 @@ fn settled_seam_accel(
     Some(preferred.nearest_to(demand))
 }
 
+/// Highest speed both members at seam `k` can be planned whole at. A seam may hold
+/// more than the members it joins — its own curvature is the lowest either of them
+/// has — but a state above what the solver can plan the whole member at is one the
+/// emitter will refuse, so a seam raised off its demand may not go there.
+fn seam_solver_ceiling(caps: &[MoveCaps], k: usize) -> f64 {
+    let solvable = |c: &&MoveCaps| disk::curved_solver_is_available(&c.kin);
+    [caps.get(k - 1), caps.get(k)]
+        .into_iter()
+        .flatten()
+        .filter(solvable)
+        .map(|c| curved::top_speed_ceiling(&c.kin))
+        .fold(f64::INFINITY, f64::min)
+}
+/// Acceleration nearest `demand` at which both members at seam `k` close through
+/// speed `v`: what the predecessor can deliver there, met with what the successor
+/// needs to reach its own exit. `None` where no acceleration serves both.
+fn seam_accel_closing_both(
+    caps: &[MoveCaps],
+    k: usize,
+    v: f64,
+    exit: (f64, f64),
+    upstream: (f64, f64),
+    demand: f64,
+) -> Option<f64> {
+    let needed = curved::entry_accel_window(&caps[k].kin, v, exit).ok()?;
+    let deliverable = curved::exit_accel_window(&caps[k - 1].kin, upstream, v).ok()?;
+    Some(needed.meet(&deliverable)?.nearest_to(demand))
+}
+
 /// Zero, if the predecessor can hand the anchor over at zero acceleration.
 ///
 /// An anchor's speed is not the envelope's to give up — a stop is a stop, and a
@@ -782,55 +856,79 @@ fn anchored_seam(caps: &[MoveCaps], k: usize, v: f64, entry: BoundaryState) -> O
 /// the member needs and what the predecessor can give is exact. Only seams whose
 /// member actually refuses are touched, so a run that settled cleanly pays one
 /// closure test per seam and nothing else.
-fn repair_stale_seam_accels(caps: &[MoveCaps], plan: &mut SeamPlan) {
+///
+/// Where the two windows do not intersect no acceleration serves both members at
+/// that speed, and the speed is what has to move — down first, and up towards the
+/// envelope where the member before it cannot brake that far. Only then, with
+/// nothing left to move, does the seam keep what the predecessor can deliver: the
+/// predecessor's chain is planned to this very state and is never revisited, so
+/// taking the successor's demand there would trade one refusing member for two.
+fn repair_stale_seam_accels(caps: &[MoveCaps], envelope: &[f64], plan: &mut SeamPlan) {
     for k in (1..caps.len()).rev() {
         if plan.is_anchor[k] || !disk::curved_solver_is_available(&caps[k].kin) {
             continue;
         }
-        let entry = (plan.v[k], plan.a[k]);
         let exit = (plan.v[k + 1], plan.a[k + 1]);
-        if curved::member_closes(&caps[k].kin, entry, exit) {
+        let upstream = (plan.v[k - 1], plan.a[k - 1]);
+        if curved::member_closes(&caps[k].kin, (plan.v[k], plan.a[k]), exit) {
+            continue;
+        }
+        let demand = plan.a[k];
+        let both = |v: f64| seam_accel_closing_both(caps, k, v, exit, upstream, demand);
+        let hi = envelope[k].min(seam_solver_ceiling(caps, k)).max(plan.v[k]);
+        let settled = both(plan.v[k])
+            .map(|a| (plan.v[k], a))
+            .or_else(|| slowest_settling_seam(0.0, plan.v[k], &both))
+            .or_else(|| slowest_undemanded_seam(plan.v[k], hi, &both));
+        if let Some((v, a)) = settled {
+            plan.v[k] = v;
+            plan.a[k] = a;
             continue;
         }
         let Ok(needed) = curved::entry_accel_window(&caps[k].kin, plan.v[k], exit) else {
             continue;
         };
-        let upstream = (plan.v[k - 1], plan.a[k - 1]);
         let deliverable = curved::exit_accel_window(&caps[k - 1].kin, upstream, plan.v[k]).ok();
-        plan.a[k] = deliverable
-            .and_then(|window| window.meet(&needed))
-            .unwrap_or(needed)
-            .nearest_to(plan.a[k]);
+        plan.a[k] = deliverable.unwrap_or(needed).nearest_to(plan.a[k]);
     }
 }
 
-fn settle_seam_states(caps: &[MoveCaps], plan: &mut SeamPlan, report: &mut VelocityReport) {
+fn settle_seam_states(
+    moves: &[crate::Move],
+    caps: &[MoveCaps],
+    envelope: &[f64],
+    plan: &mut SeamPlan,
+    report: &mut VelocityReport,
+) -> Result<(), VelocityError> {
     let n = caps.len();
     let mut retreats = 0u32;
     let budget = SEAM_RETREATS_PER_MEMBER * u32::try_from(n).unwrap_or(u32::MAX);
+    let mut given_up_to = vec![0.0_f64; n + 1];
     let mut k = 1;
     while k <= n {
         let entry = BoundaryState {
             v: plan.v[k - 1],
             a: plan.a[k - 1],
         };
-        plan.v[k] = plan.v[k].min(member_reach(&caps[k - 1].kin, entry));
+        let reach = member_reach(&caps[k - 1].kin, entry);
+        plan.v[k] = plan.v[k].min(reach).max(given_up_to[k]);
         if !disk::curved_solver_is_available(&caps[k - 1].kin) {
             k += 1;
             continue;
         }
+        let beyond = (k + 1).min(n);
+        let exit = BoundaryState {
+            v: plan.v[beyond],
+            a: plan.a[beyond],
+        };
+        let demand = plan.a[k];
+        let settles = |v: f64| settled_seam_accel(caps, k, v, exit, entry, demand);
         let settled = if plan.is_anchor[k] {
             anchored_seam(caps, k, plan.v[k], entry).map(|a| (plan.v[k], a))
         } else {
-            let exit = BoundaryState {
-                v: plan.v[k + 1],
-                a: plan.a[k + 1],
-            };
-            let demand = plan.a[k];
-            let settles = |v: f64| settled_seam_accel(caps, k, v, exit, entry, demand);
             settles(plan.v[k])
                 .map(|a| (plan.v[k], a))
-                .or_else(|| slowest_settling_seam(plan.v[k], settles))
+                .or_else(|| slowest_settling_seam(given_up_to[k], plan.v[k], &settles))
         };
         if let Some((v, a)) = settled {
             plan.v[k] = v;
@@ -838,12 +936,36 @@ fn settle_seam_states(caps: &[MoveCaps], plan: &mut SeamPlan, report: &mut Veloc
             k += 1;
             continue;
         }
-        let can_retreat = k > 1 && !plan.is_anchor[k - 1] && retreats < budget;
+        let can_retreat = k > 1
+            && !plan.is_anchor[k - 1]
+            && retreats < budget
+            && plan.v[k - 1] * SEAM_RETREAT_SHRINK >= given_up_to[k - 1];
         if can_retreat {
             plan.v[k - 1] *= SEAM_RETREAT_SHRINK;
             retreats += 1;
             k -= 1;
             continue;
+        }
+        let given_up = (!plan.is_anchor[k])
+            .then(|| {
+                let hi = envelope[k]
+                    .min(reach)
+                    .min(seam_solver_ceiling(caps, k))
+                    .max(plan.v[k]);
+                slowest_undemanded_seam(plan.v[k], hi, &settles)
+            })
+            .flatten();
+        if let Some((v, a)) = given_up {
+            given_up_to[k] = v;
+            plan.v[k] = v;
+            plan.a[k] = a;
+            k += 1;
+            continue;
+        }
+        if k == 1 || plan.is_anchor[k - 1] {
+            return Err(VelocityError::OverCommitted {
+                line_no: moves[k - 1].source.start_line,
+            });
         }
         report.reachability.accel_window_empty += 1;
         if let Ok(deliverable) =
@@ -860,6 +982,7 @@ fn settle_seam_states(caps: &[MoveCaps], plan: &mut SeamPlan, report: &mut Veloc
                 report.worst_boundary_accel_mm_s2.max(plan.a[k].abs());
         }
     }
+    Ok(())
 }
 
 struct RunGeometry {
@@ -1092,6 +1215,9 @@ fn reconstruct_runs(
             {
                 report.worst_unreachable = Some(named);
             }
+        }
+        if let Some(miss) = run.unreachable.first() {
+            return Err(miss.why);
         }
 
         for (idx, j) in (run_start..run_end).enumerate() {

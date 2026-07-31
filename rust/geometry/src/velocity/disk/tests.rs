@@ -76,12 +76,9 @@ fn clothoid_samples_respect_the_acceleration_disk() {
 
 #[test]
 fn clothoid_total_acceleration_is_within_the_disk() {
-    // The emitted tangential accel `a` plus the centripetal `kappa v^2` must stay
-    // inside the acceleration disk — the pass bounds `a` by the disk budget,
-    // so feasibility holds without any post-hoc clamp masking it.
     let accel = 1000.0;
     let k = kin(0.0, 0.05, 4.0, accel, 80_000.0, 300.0);
-    let samples = sample_profile(&k, 100.0, 70.0, 1e-8).unwrap();
+    let samples = sample_profile(&k, 65.0, 50.0, 1e-8).unwrap();
     for &(s, v, a) in &samples {
         let kappa = (k.kappa0 + k.sigma * s).abs();
         let a_c = v * v * kappa;
@@ -96,19 +93,19 @@ fn clothoid_total_acceleration_is_within_the_disk() {
 #[test]
 fn sample_profile_is_deterministic() {
     let k = kin(0.0, 0.05, 4.0, 1000.0, 80_000.0, 300.0);
-    let a = sample_profile(&k, 100.0, 70.0, 1e-8);
-    let b = sample_profile(&k, 100.0, 70.0, 1e-8);
+    let a = sample_profile(&k, 65.0, 50.0, 1e-8);
+    let b = sample_profile(&k, 65.0, 50.0, 1e-8);
     assert_eq!(a, b);
 }
 
 #[test]
 fn sample_profile_endpoints_are_entry_and_exit() {
     let k = kin(0.0, 0.05, 4.0, 1000.0, 80_000.0, 300.0);
-    let s = sample_profile(&k, 100.0, 70.0, 1e-8).unwrap();
+    let s = sample_profile(&k, 65.0, 50.0, 1e-8).unwrap();
     assert_eq!(s.first().unwrap().0, 0.0);
     assert_eq!(s.last().unwrap().0, k.length);
-    assert_eq!(s.first().unwrap().1, 100.0);
-    assert_eq!(s.last().unwrap().1, 70.0);
+    assert_eq!(s.first().unwrap().1, 65.0);
+    assert_eq!(s.last().unwrap().1, 50.0);
 }
 
 #[test]

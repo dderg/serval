@@ -1175,6 +1175,12 @@ fn infinite_jerk_disables_jerk_limiting_and_still_plans_to_rest() {
 /// kinematically consistent: chord acceleration within the accel budget,
 /// total (chord + centripetal) acceleration within the budget, and the chord
 /// within the window's endpoint `a` range.
+///
+/// The 65.663 mm/s warm entry this was first written with is one the arc's own
+/// jerk-limited brake cannot shed inside 0.52 mm onto a seam pinned at 18.365 —
+/// the infinite-jerk disk envelope allows 72.29 there, the solver 50 — so the
+/// planner now reports it as over-commitment instead of marching it. The entry
+/// below is a settled one; the brake it forces is the same regression.
 #[test]
 fn arc_brake_from_curvature_ceiling_emits_consistent_samples() {
     let (len, kappa) = (0.524_480_983_717_975_f64, 1.913_785_577_602_848_f64);
@@ -1190,7 +1196,7 @@ fn arc_brake_from_curvature_ceiling_emits_consistent_samples() {
         ),
         Vec::new(),
     );
-    let plan = plan_warm(&out, 65.663).unwrap();
+    let plan = plan_warm(&out, 50.0).unwrap();
     let arc = &plan.moves[0];
     assert!((arc.exit_v - 18.365).abs() < 0.5, "exit_v={}", arc.exit_v);
     let tol = 0.05 * accel;
@@ -1221,6 +1227,31 @@ fn arc_brake_from_curvature_ceiling_emits_consistent_samples() {
             p.s
         );
     }
+}
+
+/// A warm entry the run cannot shed is reported, not marched. The member the
+/// entry lands on has one exit speed the next move's feedrate pins, and no chain
+/// carries 65.663 mm/s down to it inside 0.52 mm at this jerk, so there is no seam
+/// state that serves both members and nothing for the settlement to give up.
+#[test]
+fn a_warm_entry_the_run_cannot_shed_is_over_committed() {
+    let (len, kappa) = (0.524_480_983_717_975_f64, 1.913_785_577_602_848_f64);
+    let accel = 10_000.0;
+    let feed = 98.871_216_666_666_67;
+    let out = outcome(
+        with_jerk(
+            vec![
+                arc_move(1.0 / kappa, len * kappa, feed, 1000.0, accel, 1),
+                line_move(5.0, 18.365, 1000.0, accel, 2),
+            ],
+            2_000_000.0,
+        ),
+        Vec::new(),
+    );
+    assert_eq!(
+        plan_warm(&out, 65.663).err(),
+        Some(VelocityError::OverCommitted { line_no: 1 })
+    );
 }
 
 fn window_consistency(m: &MoveVelocity, kappa0: f64, sigma: f64, accel: f64) {

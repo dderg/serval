@@ -345,8 +345,9 @@ fn certify_or_panic(kin: &Kinematics, chain: &[StraightPhase]) {
 /// than marched, and certified phase by phase before it is handed on.
 ///
 /// A boundary pair the member cannot realise is reported, exactly as the curved
-/// solver reports one, so the envelope's reachability census names it. Any other
-/// failure is a solver bug and panics.
+/// solver reports one, and the caller turns it into a planning error: the
+/// settlement is what owes every member a pair it can close. Any other failure is
+/// a solver bug and panics.
 fn certified_straight_chain(
     kin: &Kinematics,
     entry: (f64, f64),
@@ -1216,12 +1217,27 @@ fn solver_is_available(kin: &Kinematics) -> bool {
     closed_form_is_available(kin) || curved_solver_is_available(kin)
 }
 
-/// The run's marched chain clipped to a member no solver applies to. With jerk
-/// unlimited the profile steps its acceleration at phase joints by design, so
-/// only that case tolerates a clip whose accelerations do not chain; a clip that
-/// does not tile the member is no chain at all and the member lowers from its
-/// samples.
+/// The run's marched chain clipped to a member no solver applies to — a
+/// degenerate length, budget or ceiling, or unlimited jerk. Every other member
+/// emits the chain its own solver plans, and a solver that refuses is a hard
+/// planning error, so reaching here with a solver in hand is a bug.
+///
+/// With jerk unlimited the profile steps its acceleration at phase joints by
+/// design, so only that case tolerates a clip whose accelerations do not chain; a
+/// clip that does not tile the member is no chain at all and the member lowers
+/// from its samples.
 fn marched_clip(chain: &[StraightPhase], kin: &Kinematics, s0: f64, s1: f64) -> Vec<StraightPhase> {
+    assert!(
+        !solver_is_available(kin),
+        "the marcher was asked for a member of length {} with a solver of its own \
+         (accel {} jerk {} ceiling {} kappa0 {} sigma {})",
+        kin.length,
+        kin.accel,
+        kin.jerk,
+        kin.flat_ceiling,
+        kin.kappa0,
+        kin.sigma
+    );
     let marcher_applies = kin.is_straight() || !kin.jerk.is_finite();
     if chain.is_empty() || !marcher_applies {
         return Vec::new();
@@ -1343,14 +1359,9 @@ pub(super) fn reconstruct_run(
             );
             restate_from_chain(&mut local, &envelope, envelope_entry, envelope_exit);
             envelope
+        } else if declined.is_some() {
+            Vec::new()
         } else {
-            assert!(
-                declined.is_some() || !solver_is_available(m.kin),
-                "member {index} of length {} has a solver of its own and refused nothing, \
-                 yet emitted no phase chain between entry {envelope_entry:?} \
-                 and exit {envelope_exit:?}",
-                m.kin.length
-            );
             marched_clip(&chain, m.kin, s0, s1)
         };
         let member_exit = local.last().map_or(envelope_exit, |p| (p.1, p.2));
