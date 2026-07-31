@@ -521,3 +521,198 @@ fn infinite_jerk_chain_is_two_accel_steps() {
     assert!((s - 20.0).abs() <= 1e-9, "span {s}");
     assert!(v.abs() <= 1e-9, "exit speed {v}");
 }
+
+fn assert_boundary_chain_closes(
+    chain: &[StraightPhase],
+    entry: (f64, f64),
+    exit: (f64, f64),
+    length: f64,
+    v_max: f64,
+    a_max: f64,
+    j_max: f64,
+    what: &str,
+) {
+    assert_chain_continuous(chain, j_max, what);
+    let first = chain.first().expect("chain must not be empty");
+    assert_eq!(first.v0, entry.0, "{what}: entry speed");
+    assert_eq!(first.a0, entry.1, "{what}: entry acceleration");
+    let (s, v, a) = chain.last().unwrap().end_state();
+    assert!(
+        (s - length).abs() <= 1e-9 * (1.0 + length),
+        "{what}: spanned {s} of {length}"
+    );
+    assert!(
+        (v - exit.0).abs() <= 1e-9 * (1.0 + exit.0),
+        "{what}: exit speed {v} vs {}",
+        exit.0
+    );
+    assert!(
+        (a - exit.1).abs() <= 1e-9 * (1.0 + a_max),
+        "{what}: exit acceleration {a} vs {}",
+        exit.1
+    );
+    for (k, p) in chain.iter().enumerate() {
+        assert!(
+            p.j.abs() <= j_max * (1.0 + 1e-12),
+            "{what}: phase {k} jerk {}",
+            p.j
+        );
+        for i in 0..=8 {
+            let (_, v, a) = p.state_at(p.dt * f64::from(i) / 8.0);
+            assert!(a.abs() <= a_max + 1e-6, "{what}: phase {k} accel {a}");
+            assert!(
+                v >= -1e-9 && v <= v_max + 1e-6,
+                "{what}: phase {k} speed {v}"
+            );
+        }
+    }
+}
+
+fn demanded_minimum(
+    entry: (f64, f64),
+    exit: (f64, f64),
+    v_max: f64,
+    a_max: f64,
+    j_max: f64,
+) -> f64 {
+    match straight_chain_between(entry, exit, 0.0, v_max, a_max, j_max) {
+        Err(VelocityError::InfeasibleBoundary(BoundaryInfeasibility::LengthTooShort {
+            minimum,
+            ..
+        })) => minimum,
+        other => panic!("{entry:?} -> {exit:?} should demand a minimum, got {other:?}"),
+    }
+}
+
+/// The case the round-trip construction could not express at all: a member that
+/// is one constant-acceleration span of an ongoing ramp. Its exact answer is a
+/// single zero-jerk phase, and the old unwind-plan-wind detour demanded roughly
+/// twice the member's length for it.
+#[test]
+fn constant_acceleration_slice_is_one_zero_jerk_phase() {
+    let (a_max, j_max) = (1000.0, 1.0e5);
+    let ongoing = StraightPhase {
+        t0: 0.0,
+        dt: 0.02189,
+        s0: 0.0,
+        v0: 20.24,
+        a0: a_max,
+        j: 0.0,
+    };
+    let (length, v1, a1) = ongoing.end_state();
+    let entry = (ongoing.v0, ongoing.a0);
+    let exit = (v1, a1);
+
+    let chain = straight_chain_between(entry, exit, length, 300.0, a_max, j_max)
+        .expect("a constant-acceleration slice is always plannable");
+    assert_eq!(chain.len(), 1, "expected one phase, got {chain:?}");
+    assert_eq!(chain[0].j, 0.0, "the one phase must carry no jerk");
+    assert_boundary_chain_closes(
+        &chain,
+        entry,
+        exit,
+        length,
+        300.0,
+        a_max,
+        j_max,
+        "hold-through",
+    );
+
+    let detour = swing_dist(entry.0 + swing_dv(entry.1, j_max), -entry.1, j_max)
+        + swing_dist(exit.0 - swing_dv(exit.1, j_max), exit.1, j_max)
+        + ramp_dist(
+            entry.0 + swing_dv(entry.1, j_max),
+            exit.0 - swing_dv(exit.1, j_max),
+            a_max,
+            j_max,
+        );
+    assert!(
+        detour > 1.9 * length,
+        "the zero-acceleration detour should still want far more than {length}, wanted {detour}"
+    );
+}
+
+/// A member cut out of an ongoing jerk phase: both ends sit mid-slew, and the
+/// answer is the one jerk phase that slice already is.
+#[test]
+fn mid_jerk_slice_is_one_jerk_phase() {
+    let (a_max, j_max) = (1000.0, 1.0e5);
+    let ongoing = StraightPhase {
+        t0: 0.0,
+        dt: 0.001,
+        s0: 0.0,
+        v0: 50.0,
+        a0: 200.0,
+        j: j_max,
+    };
+    let (length, v1, a1) = ongoing.end_state();
+    let entry = (ongoing.v0, ongoing.a0);
+    let exit = (v1, a1);
+
+    let chain = straight_chain_between(entry, exit, length, 300.0, a_max, j_max)
+        .expect("a mid-jerk slice is always plannable");
+    assert_eq!(chain.len(), 1, "expected one phase, got {chain:?}");
+    assert!(
+        (chain[0].j - j_max).abs() <= 1e-6 * j_max,
+        "the slice must ride the same jerk rail, got {}",
+        chain[0].j
+    );
+    assert_boundary_chain_closes(&chain, entry, exit, length, 300.0, a_max, j_max, "mid-jerk");
+}
+
+/// The minimum a refused boundary pair reports must be the length at which that
+/// same pair becomes plannable — tight from both sides, not a construction's
+/// leftover.
+#[test]
+fn reported_minimum_is_reached_and_not_beaten() {
+    let (v_max, a_max, j_max) = (300.0, 1000.0, 1.0e5);
+    let pairs = [
+        ((20.24, 1000.0), (42.13, 1000.0)),
+        ((50.0, 200.0), (50.25, 300.0)),
+        ((60.0, 900.0), (55.0, -900.0)),
+        ((40.0, -900.0), (45.0, 700.0)),
+        ((60.0, -600.0), (58.0, -600.0)),
+        ((10.0, 0.0), (80.0, -400.0)),
+        ((80.0, 400.0), (10.0, 0.0)),
+    ];
+    for (entry, exit) in pairs {
+        let minimum = demanded_minimum(entry, exit, v_max, a_max, j_max);
+        assert!(minimum > 0.0, "{entry:?} -> {exit:?} minimum {minimum}");
+        for scale in [1.0, 1.000_001, 1.05, 1.5, 3.0, 20.0] {
+            let length = minimum * scale;
+            let what = format!("{entry:?} -> {exit:?} at {scale}x minimum");
+            match straight_chain_between(entry, exit, length, v_max, a_max, j_max) {
+                Ok(chain) => assert_boundary_chain_closes(
+                    &chain, entry, exit, length, v_max, a_max, j_max, &what,
+                ),
+                Err(VelocityError::InfeasibleBoundary(BoundaryInfeasibility::LengthTooShort {
+                    minimum: nearest,
+                    ..
+                })) => {
+                    assert!(
+                        nearest > length,
+                        "{what}: refused with a nearest length {nearest} it does not exceed"
+                    );
+                    let reached = straight_chain_between(entry, exit, nearest, v_max, a_max, j_max)
+                        .unwrap_or_else(|e| {
+                            panic!("{what}: nearest length {nearest} must itself plan, got {e:?}")
+                        });
+                    assert_boundary_chain_closes(
+                        &reached, entry, exit, nearest, v_max, a_max, j_max, &what,
+                    );
+                }
+                other => panic!("{what}: unexpected {other:?}"),
+            }
+        }
+        let below = minimum * (1.0 - 1e-6);
+        assert!(
+            matches!(
+                straight_chain_between(entry, exit, below, v_max, a_max, j_max),
+                Err(VelocityError::InfeasibleBoundary(
+                    BoundaryInfeasibility::LengthTooShort { .. }
+                ))
+            ),
+            "{entry:?} -> {exit:?} must refuse {below}, below its own minimum {minimum}"
+        );
+    }
+}

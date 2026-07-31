@@ -10,6 +10,7 @@ use crate::path::Segment;
 use crate::segment::SourceRange;
 
 mod certify;
+mod curved;
 mod disk;
 mod profile;
 mod ride;
@@ -107,15 +108,37 @@ impl BoundaryState {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VelocityError {
-    Inconsistent { line_no: u32 },
-    NonAlphabet { line_no: u32 },
-    NonFinite { line_no: u32 },
-    Diverged { line_no: u32 },
-    OverCommitted { line_no: u32 },
-    RestAnchorAccel { line_no: u32 },
-    NegativeVelocity { line_no: u32, v: f64 },
+    Inconsistent {
+        line_no: u32,
+    },
+    NonAlphabet {
+        line_no: u32,
+    },
+    NonFinite {
+        line_no: u32,
+    },
+    Diverged {
+        line_no: u32,
+    },
+    OverCommitted {
+        line_no: u32,
+    },
+    RestAnchorAccel {
+        line_no: u32,
+    },
+    NegativeVelocity {
+        line_no: u32,
+        v: f64,
+    },
     InvalidConfig,
     InfeasibleBoundary(BoundaryInfeasibility),
+    UncertifiedPhase {
+        s0: f64,
+        v0: f64,
+        a0: f64,
+        j: f64,
+        dt: f64,
+    },
 }
 
 const REST_ANCHOR_ACCEL_EPS: f64 = 1e-3;
@@ -665,3 +688,6 @@ mod tests;
 
 #[cfg(test)]
 mod certify_tests;
+
+#[cfg(test)]
+mod curved_tests;

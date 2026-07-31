@@ -1,7 +1,7 @@
 use std::f64::consts::FRAC_PI_2;
 
-use super::profile::StraightPhase;
-use super::ride;
+use super::profile::{self, StraightPhase};
+use super::{BoundaryInfeasibility, VelocityError, certify, ride};
 
 const RK_MIN_STEP_FRAC: f64 = 1e-6;
 const RK_MAX_STEPS: u32 = 100_000;
@@ -318,6 +318,101 @@ fn pinned_samples(
         samples[n - 1].2 = 0.0;
     }
     samples
+}
+
+fn certify_or_panic(kin: &Kinematics, chain: &[StraightPhase]) {
+    for p in chain {
+        assert!(
+            certify::is_certified(kin, p.s0, p.v0, p.a0, p.j, p.dt),
+            "straight phase is not certified feasible: s0={} v0={} a0={} j={} dt={} \
+             (length={} accel={} jerk={} flat_ceiling={})",
+            p.s0,
+            p.v0,
+            p.a0,
+            p.j,
+            p.dt,
+            kin.length,
+            kin.accel,
+            kin.jerk,
+            kin.flat_ceiling
+        );
+    }
+}
+
+/// A straight member owes no curvature term, so its optimum is the closed-form
+/// triple-limited chain between the boundary states — solved outright rather
+/// than marched, and certified phase by phase before it is handed on.
+///
+/// The closed form may only decline a boundary pair no admissible chain can
+/// realise on this member: too short for any slew between the two states, or an
+/// entry/exit acceleration whose unavoidable speed swing leaves the `[0, v_max]`
+/// band. The marcher's grid states are its own integration's, and where it rode
+/// the acceleration or jerk rail they can sit a rounding outside what is
+/// realisable. Every other infeasibility — non-finite input, an acceleration
+/// already over the rail, a chain that fails to close its own length — is a bug
+/// and panics.
+fn certified_straight_chain(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> Option<Vec<StraightPhase>> {
+    let chain = match profile::straight_chain_between(
+        entry,
+        exit,
+        kin.length,
+        kin.flat_ceiling,
+        kin.accel,
+        kin.jerk,
+    ) {
+        Ok(chain) => chain,
+        Err(VelocityError::InfeasibleBoundary(
+            BoundaryInfeasibility::LengthTooShort { .. }
+            | BoundaryInfeasibility::UnwindOverCeiling { .. }
+            | BoundaryInfeasibility::UnwindBelowRest { .. },
+        )) => return None,
+        Err(why) => panic!(
+            "straight member length {} entry {entry:?} exit {exit:?} under \
+             v_max {} a_max {} j_max {} is unplannable: {why:?}",
+            kin.length, kin.flat_ceiling, kin.accel, kin.jerk
+        ),
+    };
+    assert!(
+        !chain.is_empty(),
+        "a straight member of length {} planned to an empty chain",
+        kin.length
+    );
+    certify_or_panic(kin, &chain);
+    Some(chain)
+}
+
+/// Re-read a member's samples off its own analytic chain: the samples become a
+/// view of the profile the lowering executes, not an independent integration
+/// that has to be reconciled with it.
+fn restate_from_chain(
+    local: &mut [(f64, f64, f64)],
+    chain: &[StraightPhase],
+    entry: (f64, f64),
+    exit: (f64, f64),
+) {
+    let arcs: Vec<f64> = local.iter().map(|p| p.0).collect();
+    for (p, (v, a)) in local.iter_mut().zip(ride::chain_states(chain, &arcs)) {
+        p.1 = v;
+        p.2 = a;
+    }
+    let last = local.len() - 1;
+    local[0].1 = entry.0;
+    local[0].2 = entry.1;
+    local[last].1 = exit.0;
+    local[last].2 = exit.1;
+}
+
+fn closed_form_is_available(kin: &Kinematics) -> bool {
+    kin.is_straight()
+        && kin.jerk.is_finite()
+        && kin.jerk > 0.0
+        && kin.accel > 0.0
+        && kin.flat_ceiling > 0.0
+        && kin.length > 0.0
 }
 
 /// The pre-integrator reconstruction, kept as the bail-out: forward–backward
@@ -930,6 +1025,10 @@ fn merge_constant_accel(chain: Vec<StraightPhase>) -> Vec<StraightPhase> {
 /// rides included — so the phase chain is normally complete for any run and
 /// the samples are re-derived from it exactly; only a stall or a rejected
 /// splice leaves the chain empty, falling back to the node states.
+///
+/// A run that is one straight member skips the grid entirely: its optimum is
+/// the closed-form triple-limited chain and the samples are that chain read at
+/// the grid nodes.
 fn reconstruct_flat(
     members: &[RunMember],
     run_start_v: f64,
@@ -949,6 +1048,19 @@ fn reconstruct_flat(
         return Some(infinite_jerk_profile(
             &s, &vlc, &accel, &kappa, entry_v, exit_v,
         ));
+    }
+    if let [only] = members {
+        if closed_form_is_available(only.kin) {
+            assert_eq!(
+                only.fwd_s, 0.0,
+                "a run's first member must start at run-arc zero"
+            );
+            if let Some(chain) =
+                certified_straight_chain(only.kin, (entry_v, run_start_a), (exit_v, 0.0))
+            {
+                return Some((pinned_samples(&chain, &s, entry_v, exit_v), chain));
+            }
+        }
     }
     let (bwd_v, brake_chain, bwd_feasible) = {
         let s_rev: Vec<f64> = (0..n).map(|k| s[n - 1] - s[n - 1 - k]).collect();
@@ -1057,13 +1169,15 @@ fn interp_flat(flat: &[(f64, f64, f64)], s: f64) -> Option<(f64, f64)> {
 /// Reconstruct the run: per-member `(s, v, a)` samples, the profile state
 /// `(v, a)` at each member's exit seam (what a streaming cut carries into the
 /// next window to continue this exact curve), and per-member closed-form jerk
-/// phases in move-local time/arc-length. Straight members get their clip of
-/// the run's chain for the exact-cubic lowering. Curved members get theirs
-/// only under unlimited jerk, where the chain is a handful of merged
-/// constant-acceleration spans: the lowering fits axis positions against that
-/// exact scalar profile instead of quintic windows over stepped samples. A
-/// finite-jerk curved chain is left out — its per-substep phases would say
-/// nothing the smooth samples don't already.
+/// phases in move-local time/arc-length. A straight member is solved outright
+/// by [`certified_straight_chain`] between its boundary states and its samples
+/// re-read off that chain, so nothing about it is marched; only a boundary
+/// pair the closed form cannot close falls back to a clip of the run's chain.
+/// Curved members get theirs only under unlimited jerk, where the chain is a
+/// handful of merged constant-acceleration spans: the lowering fits axis
+/// positions against that exact scalar profile instead of quintic windows over
+/// stepped samples. A finite-jerk curved chain is left out — its per-substep
+/// phases would say nothing the smooth samples don't already.
 #[allow(clippy::type_complexity)]
 pub(super) fn reconstruct_run(
     members: &[RunMember],
@@ -1107,17 +1221,27 @@ pub(super) fn reconstruct_run(
         if let Some(last) = local.last_mut() {
             last.0 = m.kin.length;
         }
+        let entry = interp_flat(&flat, s0)?;
+        let exit = interp_flat(&flat, s1)?;
+        let analytic = closed_form_is_available(m.kin)
+            .then(|| certified_straight_chain(m.kin, entry, exit))
+            .flatten();
+        if let Some(built) = &analytic {
+            restate_from_chain(&mut local, built, entry, exit);
+        }
         per_member.push(local);
         exit_states.push(exit_state_at(&flat, s1));
         let phases_apply = m.kin.is_straight() || !m.kin.jerk.is_finite();
-        per_member_phases.push(if chain.is_empty() || !phases_apply {
-            Vec::new()
-        } else {
-            let clipped = ride::clip_phases(&chain, s0, s1);
-            if ride::chain_is_continuous(&clipped, m.kin.jerk.is_finite()) {
-                clipped
-            } else {
-                Vec::new()
+        per_member_phases.push(match analytic {
+            Some(built) => built,
+            None if chain.is_empty() || !phases_apply => Vec::new(),
+            None => {
+                let clipped = ride::clip_phases(&chain, s0, s1);
+                if ride::chain_is_continuous(&clipped, m.kin.jerk.is_finite()) {
+                    clipped
+                } else {
+                    Vec::new()
+                }
             }
         });
     }

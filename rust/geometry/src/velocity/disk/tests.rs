@@ -411,3 +411,72 @@ fn finite_jerk_curved_member_still_carries_no_phases() {
     let (_, _, phases) = reconstruct_run(&members, 100.0, 0.0, 1e-8).unwrap();
     assert!(phases[0].is_empty());
 }
+
+/// Limits under which a rest-to-rest straight never reaches the flat ceiling:
+/// the marcher used to leave these moves with samples and no phase chain.
+const SUB_CRUISE_LIMITS: (f64, f64, f64) = (3000.0, 1e4, 500.0);
+
+#[test]
+fn sub_cruise_straight_lowers_from_the_closed_form_chain() {
+    let (accel, jerk, flat) = SUB_CRUISE_LIMITS;
+    for len in [10.0, 37.3] {
+        let k = kin(0.0, 0.0, len, accel, jerk, flat);
+        let members = run_members(&[&k], 0.0);
+        let (samples, _, phases) = reconstruct_run(&members, 0.0, 0.0, 1e-8).unwrap();
+        assert!(
+            !phases[0].is_empty(),
+            "len {len}: a sub-cruise straight must carry its phase chain"
+        );
+        let oracle = super::super::profile::plan(0.0, 0.0, len, flat, accel, jerk);
+        for &(s, v, a) in &samples[0] {
+            let (ov, oa) = oracle.at(s);
+            assert!(
+                (v - ov).abs() <= 1e-9 * (1.0 + ov),
+                "len {len}: v={v} oracle={ov} at s={s}"
+            );
+            assert!(
+                (a - oa).abs() <= 1e-6 * (1.0 + oa.abs()),
+                "len {len}: a={a} oracle={oa} at s={s}"
+            );
+        }
+        let (end_s, end_v, end_a) = phases[0].last().unwrap().end_state();
+        assert!(
+            (end_s - len).abs() <= 1e-9 * (1.0 + len),
+            "len {len}: {end_s}"
+        );
+        assert!(end_v.abs() <= 1e-9, "len {len}: exits at {end_v}");
+        assert!(end_a.abs() <= 1e-6, "len {len}: exits carrying {end_a}");
+    }
+}
+
+#[test]
+fn straight_member_samples_are_a_view_of_its_chain() {
+    let (accel, jerk, flat) = SUB_CRUISE_LIMITS;
+    let k = kin(0.0, 0.0, 37.3, accel, jerk, flat);
+    let members = run_members(&[&k], 0.0);
+    let (samples, _, phases) = reconstruct_run(&members, 0.0, 0.0, 1e-8).unwrap();
+    let arcs: Vec<f64> = samples[0].iter().map(|p| p.0).collect();
+    let interior = 1..arcs.len() - 1;
+    for (i, (v, a)) in ride::chain_states(&phases[0], &arcs)
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| interior.contains(i))
+    {
+        let (s, sv, sa) = samples[0][i];
+        assert_eq!((sv, sa), (v, a), "sample at s={s} drifted from the chain");
+    }
+}
+
+#[test]
+fn straight_chain_phases_stay_inside_the_acceleration_disk() {
+    let (accel, jerk, flat) = SUB_CRUISE_LIMITS;
+    let k = kin(0.0, 0.0, 10.0, accel, jerk, flat);
+    let members = run_members(&[&k], 0.0);
+    let (_, _, phases) = reconstruct_run(&members, 0.0, 0.0, 1e-8).unwrap();
+    for p in &phases[0] {
+        assert!(
+            super::super::certify::is_certified(&k, p.s0, p.v0, p.a0, p.j, p.dt),
+            "phase {p:?} is not certified feasible"
+        );
+    }
+}

@@ -1,4 +1,3 @@
-#![cfg_attr(not(test), allow(dead_code))]
 //! Bernstein nonnegativity certificate for one constant-jerk phase.
 //!
 //! On local time `tau` in `[0, dt]` the phase state is exact polynomial:

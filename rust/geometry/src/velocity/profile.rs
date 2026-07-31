@@ -15,6 +15,12 @@ const BRACKET_HALVINGS: u32 = 64;
 
 const LENGTH_CLOSURE_TOL: f64 = 1e-9;
 
+/// A hold-free shape has no free parameter left, so it can only be taken when
+/// the boundary data it is over-determined by already agrees with it — to within
+/// the accumulated rounding of the arithmetic that produced that data, not to
+/// within the planner's much looser self-consistency guard.
+const OVERDETERMINED_SHAPE_TOL: f64 = 1e-12;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StraightPhase {
     pub t0: f64,
@@ -121,8 +127,8 @@ fn triangular_dv_ceiling(a_max: f64, j_max: f64) -> f64 {
     a_max * a_max / j_max
 }
 
-fn ramp_time(dv: f64, a_max: f64, j_max: f64) -> f64 {
-    if dv <= EPS {
+fn unclipped_ramp_time(dv: f64, a_max: f64, j_max: f64) -> f64 {
+    if dv <= 0.0 {
         return 0.0;
     }
     if !j_max.is_finite() {
@@ -135,10 +141,28 @@ fn ramp_time(dv: f64, a_max: f64, j_max: f64) -> f64 {
     }
 }
 
+/// The emitter drops a flank whose speed change is sub-`EPS`, so its time is
+/// quoted as zero too.
+fn ramp_time(dv: f64, a_max: f64, j_max: f64) -> f64 {
+    if dv <= EPS {
+        return 0.0;
+    }
+    unclipped_ramp_time(dv, a_max, j_max)
+}
+
 /// A zero-accel-to-zero-accel ramp is point-symmetric about its midpoint, so its
 /// mean speed is exactly `(v0 + v1) / 2`.
 fn ramp_dist(v0: f64, v1: f64, a_max: f64, j_max: f64) -> f64 {
     0.5 * (v0 + v1) * ramp_time((v1 - v0).abs(), a_max, j_max)
+}
+
+/// Ramp distance priced *without* the sub-`EPS` discard. The peak search must
+/// never quote a flank cheaper than the chain will pay for it: a flank whose
+/// speed change straddles `EPS` still costs `2*v*sqrt(dv/j)` of arc, and a peak
+/// chosen against a free quote leaves the cruise budget negative and the chain
+/// overrunning its member.
+fn ramp_price(v0: f64, v1: f64, a_max: f64, j_max: f64) -> f64 {
+    0.5 * (v0 + v1) * unclipped_ramp_time((v1 - v0).abs(), a_max, j_max)
 }
 
 /// Peak reachable when both flanks saturate `a_max`: the ramp-distance sum is
@@ -178,7 +202,7 @@ fn accel_limited_peak(v0: f64, v1: f64, length: f64, a_max: f64) -> f64 {
 /// algebraic form. The pure forms are solved outright; the mixed interval is
 /// irrational in the peak and is bisected inside its own bracket.
 fn peak_velocity(v0: f64, v1: f64, length: f64, v_max: f64, a_max: f64, j_max: f64) -> f64 {
-    let span = |vp: f64| ramp_dist(v0, vp, a_max, j_max) + ramp_dist(vp, v1, a_max, j_max);
+    let span = |vp: f64| ramp_price(v0, vp, a_max, j_max) + ramp_price(vp, v1, a_max, j_max);
     if span(v_max) <= length {
         return v_max;
     }
@@ -296,16 +320,53 @@ impl Builder {
         self.a = 0.0;
     }
 
+    /// Distance [`Builder::ramp`] would cover from the current state — the same
+    /// legs, summed without emitting them, so the cruise budget cannot disagree
+    /// with what the descent actually costs.
+    fn ramp_span(&self, v_to: f64, a_max: f64, j_max: f64) -> f64 {
+        let dv = v_to - self.v;
+        if dv.abs() <= EPS {
+            return 0.0;
+        }
+        let dir = dv.signum();
+        let adv = dv.abs();
+        if !j_max.is_finite() {
+            let dt = adv / a_max;
+            return self.v * dt + 0.5 * dir * a_max * dt * dt;
+        }
+        let legs = if adv <= triangular_dv_ceiling(a_max, j_max) {
+            let t_j = (adv / j_max).sqrt();
+            [(dir * j_max, t_j), (-dir * j_max, t_j), (0.0, 0.0)]
+        } else {
+            let t_j = a_max / j_max;
+            [
+                (dir * j_max, t_j),
+                (0.0, adv / a_max - t_j),
+                (-dir * j_max, t_j),
+            ]
+        };
+        let mut state = (0.0, self.v, 0.0);
+        for (j, dt) in legs {
+            state = advance(state, j, dt);
+        }
+        state.0
+    }
+
     /// Ramp to a peak, optionally cruise, ramp down to `v_to`, spanning
     /// `length`. Requires — and leaves — zero acceleration.
+    ///
+    /// The descent is measured with [`Builder::ramp_span`] from the peak actually
+    /// reached, not quoted from the peak asked for: the two differ by rounding,
+    /// and either side of `EPS` that turns a skipped ramp into an emitted one
+    /// whose arc nothing paid for.
     fn run(&mut self, v_to: f64, length: f64, v_max: f64, a_max: f64, j_max: f64) {
         debug_assert!(self.a.abs() <= EPS);
         let v_peak = peak_velocity(self.v, v_to, length, v_max, a_max, j_max);
         let s_entry = self.s;
         self.ramp(v_peak, a_max, j_max);
-        let cruise = length - (self.s - s_entry) - ramp_dist(v_peak, v_to, a_max, j_max);
-        if cruise > EPS && v_peak > EPS {
-            self.phase(0.0, cruise / v_peak);
+        let cruise = length - (self.s - s_entry) - self.ramp_span(v_to, a_max, j_max);
+        if cruise > EPS && self.v > EPS {
+            self.phase(0.0, cruise / self.v);
         }
         self.ramp(v_to, a_max, j_max);
     }
@@ -328,8 +389,13 @@ impl Builder {
         self.phase(a / dt, dt);
     }
 
-    fn advanced(&self) -> f64 {
-        self.phases.last().map_or(0.0, |p| p.end_state().0)
+    /// Slew the acceleration to `a_to` over `dt`, landing on it exactly rather
+    /// than on `a0 + j*dt`.
+    fn jerk_to(&mut self, a_to: f64, dt: f64) {
+        if dt > 0.0 {
+            self.phase((a_to - self.a) / dt, dt);
+        }
+        self.a = a_to;
     }
 }
 
@@ -343,6 +409,263 @@ fn swing_dv(a: f64, j_max: f64) -> f64 {
 fn swing_dist(v_at_zero_accel: f64, a: f64, j_max: f64) -> f64 {
     let dt = a.abs() / j_max;
     v_at_zero_accel * dt + a * dt * dt / 6.0
+}
+
+/// One constant-jerk leg applied to an `(s, v, a)` state, by the same arithmetic
+/// [`Builder::phase`] uses, so a leg measured and a leg emitted agree bit for bit.
+fn advance(state: (f64, f64, f64), j: f64, dt: f64) -> (f64, f64, f64) {
+    if dt <= 0.0 {
+        return state;
+    }
+    StraightPhase {
+        t0: 0.0,
+        dt,
+        s0: state.0,
+        v0: state.1,
+        a0: state.2,
+        j,
+    }
+    .end_state()
+}
+
+/// Speed change of a constant-jerk slew between two acceleration levels.
+fn slew_dv(a_from: f64, a_to: f64, j_max: f64) -> f64 {
+    (a_to - a_from).abs() * (a_to + a_from) / (2.0 * j_max)
+}
+
+/// `a0 -> a_hold` (jerk), hold, `a_hold -> a1` (jerk): the acceleration-monotone
+/// chain that carries a boundary pair across a member without ever relaxing to
+/// zero acceleration. The hold level alone decides how much length the speed
+/// change costs — the hold *time* is whatever closes `v1 - v0`.
+#[derive(Clone, Copy)]
+struct HoldRamp {
+    a_hold: f64,
+    t_in: f64,
+    t_hold: f64,
+    t_out: f64,
+}
+
+impl HoldRamp {
+    fn new(entry: (f64, f64), exit: (f64, f64), a_hold: f64, j_max: f64) -> Self {
+        let (v0, a0) = entry;
+        let (v1, a1) = exit;
+        let slewed = slew_dv(a0, a_hold, j_max) + slew_dv(a_hold, a1, j_max);
+        Self {
+            a_hold,
+            t_in: (a_hold - a0).abs() / j_max,
+            t_hold: (v1 - v0 - slewed) / a_hold,
+            t_out: (a1 - a_hold).abs() / j_max,
+        }
+    }
+
+    fn legs(&self, a_exit: f64) -> [(f64, f64); 3] {
+        [
+            (self.a_hold, self.t_in),
+            (self.a_hold, self.t_hold),
+            (a_exit, self.t_out),
+        ]
+    }
+
+    /// A member that is one slice of an ongoing jerk phase: the acceleration
+    /// slews straight from `a0` to `a1` with no hold at all.
+    fn slew(entry: (f64, f64), exit: (f64, f64), j_max: f64) -> Self {
+        Self {
+            a_hold: exit.1,
+            t_in: (exit.1 - entry.1).abs() / j_max,
+            t_hold: 0.0,
+            t_out: 0.0,
+        }
+    }
+
+    fn traverse(&self, entry: (f64, f64), a_exit: f64) -> (f64, f64, f64) {
+        let (v0, a0) = entry;
+        let mut state = (0.0, v0, a0);
+        for (a_to, dt) in self.legs(a_exit) {
+            if dt > 0.0 {
+                state = advance(state, (a_to - state.2) / dt, dt);
+            }
+            state.2 = a_to;
+        }
+        state
+    }
+
+    fn span(&self, entry: (f64, f64), a_exit: f64) -> f64 {
+        self.traverse(entry, a_exit).0
+    }
+
+    fn emit(&self, b: &mut Builder, a_exit: f64) {
+        for (a_to, dt) in self.legs(a_exit) {
+            b.jerk_to(a_to, dt);
+        }
+    }
+}
+
+/// Hold levels at which the two jerk slews alone already close `v1 - v0`, so no
+/// hold time is left to place. They are the only places where the sign of the
+/// hold time can turn over, and each region of `slew_dv` contributes at most one
+/// pair of them.
+fn hold_time_zeros(entry: (f64, f64), exit: (f64, f64), j_max: f64) -> [Option<f64>; 4] {
+    let (v0, a0) = entry;
+    let (v1, a1) = exit;
+    let mean_square = 0.5 * (a0 * a0 + a1 * a1);
+    let (below, above) = (a0.min(a1), a0.max(a1));
+    let outward = mean_square + j_max * (v1 - v0);
+    let inward = mean_square - j_max * (v1 - v0);
+    let outward = if outward >= 0.0 {
+        outward.sqrt()
+    } else {
+        f64::NAN
+    };
+    let inward = if inward >= 0.0 {
+        inward.sqrt()
+    } else {
+        f64::NAN
+    };
+    let keep = |x: f64, admissible: bool| if admissible { Some(x) } else { None };
+    [
+        keep(outward, outward >= above),
+        keep(-outward, -outward >= above),
+        keep(inward, inward <= below),
+        keep(-inward, -inward <= below),
+    ]
+}
+
+/// Solve the boundary pair on a member too short to relax to zero acceleration.
+///
+/// A member that is one slice of an ongoing jerk phase is the degenerate shape —
+/// no hold at all — and it has no free parameter, so it is taken only when it
+/// closes both the length and the exit speed on its own.
+///
+/// Otherwise the hold level is the single free parameter, and it is admissible
+/// exactly where the hold time it implies is non-negative — a union of at most
+/// two intervals per sign, delimited by [`hold_time_zeros`] and the acceleration
+/// rails. Span is monotone across each such window, so the window's own extremes
+/// bound the lengths it can span and the level spanning `length` is bracketed and
+/// bisected inside it. The window whose solution traverses fastest wins.
+///
+/// The reachable lengths are a union of those windows' ranges and need not be
+/// contiguous: a boundary pair whose speed change the jerk slews already close
+/// exactly can only be *lengthened* by braking, which costs a whole excursion to
+/// negative acceleration. A refusal therefore reports the nearest length that is
+/// reachable, never a bound the pair does not actually respect.
+fn hold_ramp_chain(
+    entry: (f64, f64),
+    exit: (f64, f64),
+    length: f64,
+    a_max: f64,
+    j_max: f64,
+    zero_crossing_minimum: f64,
+) -> Result<Vec<StraightPhase>, VelocityError> {
+    let ramp_at = |a_hold: f64| HoldRamp::new(entry, exit, a_hold, j_max);
+    let span_at = |a_hold: f64| ramp_at(a_hold).span(entry, exit.1);
+    let closes = |achieved: f64, wanted: f64| {
+        (achieved - wanted).abs() <= OVERDETERMINED_SHAPE_TOL * (1.0 + wanted.abs())
+    };
+
+    let slew = HoldRamp::slew(entry, exit, j_max);
+    let (slew_span, slew_v, _) = slew.traverse(entry, exit.1);
+    if closes(slew_span, length) && closes(slew_v, exit.0) {
+        let mut b = Builder::new(entry.0, entry.1);
+        slew.emit(&mut b, exit.1);
+        return Ok(b.phases);
+    }
+
+    let zeros = hold_time_zeros(entry, exit, j_max);
+    let mut minimum = zero_crossing_minimum;
+    let mut fastest: Option<(f64, f64)> = None;
+
+    for sign in [1.0_f64, -1.0] {
+        let mut marks = [0.0_f64; 4];
+        let mut n = 1;
+        for zero in zeros.iter().flatten() {
+            if zero * sign > 0.0 && zero.abs() < a_max {
+                marks[n] = *zero;
+                n += 1;
+            }
+        }
+        marks[n] = sign * a_max;
+        n += 1;
+        let marks = &mut marks[..n];
+        marks.sort_by(|x, y| x.abs().total_cmp(&y.abs()));
+
+        for window in marks.windows(2) {
+            let (near, far) = (window[0], window[1]);
+            if ramp_at(0.5 * (near + far)).t_hold < 0.0 {
+                continue;
+            }
+            let near_span = if near == 0.0 {
+                f64::INFINITY
+            } else {
+                span_at(near)
+            };
+            let far_span = span_at(far);
+            let (tight, slack) = if far_span <= near_span {
+                (far, near)
+            } else {
+                (near, far)
+            };
+            let tight_span = span_at(tight);
+            let reachable = |span: f64| if span > length { Some(span) } else { None };
+            for candidate in [
+                reachable(tight_span),
+                reachable(near_span),
+                reachable(far_span),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                minimum = minimum.min(candidate);
+            }
+            if length < tight_span && !closes(tight_span, length) {
+                continue;
+            }
+            let slack = if slack == 0.0 {
+                let mut relaxed = 0.5 * tight;
+                while span_at(relaxed) < length {
+                    relaxed *= 0.5;
+                }
+                relaxed
+            } else if span_at(slack) < length {
+                continue;
+            } else {
+                slack
+            };
+
+            let (mut lo, mut hi) = (slack, tight);
+            for _ in 0..BRACKET_HALVINGS {
+                let mid = 0.5 * (lo + hi);
+                if mid == lo || mid == hi {
+                    break;
+                }
+                if span_at(mid) >= length {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            let a_hold = if closes(tight_span, length) {
+                tight
+            } else if (span_at(hi) - length).abs() <= (span_at(lo) - length).abs() {
+                hi
+            } else {
+                lo
+            };
+            let ramp = ramp_at(a_hold);
+            let traversal = ramp.t_in + ramp.t_hold + ramp.t_out;
+            if fastest.is_none_or(|(best, _)| traversal < best) {
+                fastest = Some((traversal, a_hold));
+            }
+        }
+    }
+
+    let Some((_, a_hold)) = fastest else {
+        return Err(VelocityError::InfeasibleBoundary(
+            BoundaryInfeasibility::LengthTooShort { length, minimum },
+        ));
+    };
+    let mut b = Builder::new(entry.0, entry.1);
+    ramp_at(a_hold).emit(&mut b, exit.1);
+    Ok(b.phases)
 }
 
 pub fn straight_chain(
@@ -370,12 +693,14 @@ pub fn plan(v0: f64, v1: f64, length: f64, v_max: f64, a_max: f64, j_max: f64) -
     }
 }
 
-/// Plan across `length` between boundary states that carry acceleration: the
-/// entry acceleration is unwound to zero, the interior is an ordinary run, and
-/// the exit acceleration is wound back up so the chain terminates *carrying*
-/// `exit.1`. A blend's entry brake has to be delivered by the preceding
-/// straight, so the straight must be plannable to a nonzero terminal
-/// acceleration.
+/// Plan across `length` between boundary states that both carry acceleration.
+/// Two shapes cover the boundary-value problem. When the member is long enough
+/// to relax acceleration to zero, the chain is the ordinary run bracketed by the
+/// entry and exit slews — the shortest such member spans
+/// `zero_crossing_minimum`. Below that the acceleration can never reach zero and
+/// the chain becomes a single acceleration-monotone hold ramp; a pure
+/// constant-acceleration slice of an ongoing ramp is that shape with both slews
+/// empty, i.e. one zero-jerk phase.
 pub fn straight_chain_between(
     entry: (f64, f64),
     exit: (f64, f64),
@@ -421,24 +746,27 @@ pub fn straight_chain_between(
 
     let entry_dist = swing_dist(v_after_unwind, -a0, j_max);
     let exit_dist = swing_dist(v_before_wind, a1, j_max);
-    let minimum = entry_dist + exit_dist + ramp_dist(v_after_unwind, v_before_wind, a_max, j_max);
-    if length < minimum {
-        return infeasible(BoundaryInfeasibility::LengthTooShort { length, minimum });
-    }
+    let zero_crossing_minimum =
+        entry_dist + exit_dist + ramp_dist(v_after_unwind, v_before_wind, a_max, j_max);
 
-    let mut b = Builder::new(v0, a0);
-    b.unwind_accel_to_zero(j_max);
-    b.run(v_before_wind, length - b.s - exit_dist, v_max, a_max, j_max);
-    b.wind_accel_up_to(a1, j_max);
+    let phases = if length >= zero_crossing_minimum {
+        let mut b = Builder::new(v0, a0);
+        b.unwind_accel_to_zero(j_max);
+        b.run(v_before_wind, length - b.s - exit_dist, v_max, a_max, j_max);
+        b.wind_accel_up_to(a1, j_max);
+        b.phases
+    } else {
+        hold_ramp_chain(entry, exit, length, a_max, j_max, zero_crossing_minimum)?
+    };
 
-    let achieved = b.advanced();
+    let achieved = phases.last().map_or(0.0, |p| p.end_state().0);
     if (achieved - length).abs() > LENGTH_CLOSURE_TOL * (1.0 + length) {
         return infeasible(BoundaryInfeasibility::LengthNotClosed {
             requested: length,
             achieved,
         });
     }
-    Ok(b.phases)
+    Ok(phases)
 }
 
 #[cfg(test)]

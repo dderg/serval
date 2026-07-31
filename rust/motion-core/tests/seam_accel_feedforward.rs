@@ -17,6 +17,11 @@ const NEPTUNE: &str = include_str!("gcode/neptune_crash_short.gcode");
 
 const SEAM_ACCEL_STEP_LIMIT_MM_S2: f64 = 2.0;
 
+/// The drip cap `pump_sink` enqueues under. Without it a long cruise lowers to
+/// one multi-second piece, whose `f32` duration cannot resolve the seam to
+/// better than ~100 ns and so overlaps its successor.
+const DRIP_MAX_PIECE_SECS: f64 = 0.025;
+
 fn corpus_pieces_per_axis() -> BTreeMap<u8, Vec<(PieceEntry, usize)>> {
     let config = default_stream_config();
     let moves = parse_gcode_to_moves(NEPTUNE, config.limits);
@@ -51,7 +56,7 @@ fn corpus_pieces_per_axis() -> BTreeMap<u8, Vec<(PieceEntry, usize)>> {
                 host_now: 0.0,
                 lead_secs: 2.0,
                 project,
-                max_piece_secs: None,
+                max_piece_secs: Some(DRIP_MAX_PIECE_SECS),
             },
         ) {
             first = false;
