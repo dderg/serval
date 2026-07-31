@@ -20,6 +20,7 @@ default = ["host", "header-runtime"]
 mcu-h7 = ["runtime/mcu-h7"]
 mcu-f4 = ["runtime/mcu-f4"]
 mcu-g0 = ["runtime/mcu-g0"]
+mcu-f1 = ["runtime/mcu-f1"]
 host = ["runtime/host", "dep:cbindgen"]
 # Marker feature for real Linux-MCU firmware builds (MACH_LINUX without
 # CONFIG_MCU_SIM).  Implies `host` and threads runtime/mcu-linux so the

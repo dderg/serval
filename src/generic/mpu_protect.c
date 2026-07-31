@@ -18,7 +18,7 @@ extern uint32_t _sched_protected_end;
 static inline void
 mpu_set_region0_ap(uint32_t ap_mask)
 {
-#if (__CORTEX_M >= 3)
+#if (__CORTEX_M >= 3) && (__MPU_PRESENT == 1)
     MPU->RNR = 0;
     uint32_t rasr = MPU->RASR;
     rasr &= ~(7u << 24);
@@ -80,7 +80,7 @@ mpu_protect_init(void)
     if (end - start != 128u || (start & 127u) != 0u)
         shutdown(".sched_protected size/alignment mismatch");
 
-#if (__CORTEX_M >= 3)
+#if (__CORTEX_M >= 3) && (__MPU_PRESENT == 1)
     // MPU must be disabled while its config registers are written; doing so
     // with the MPU enabled is UB.
     MPU->CTRL = 0;

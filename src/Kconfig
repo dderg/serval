@@ -351,10 +351,11 @@ config HAVE_SOFTWARE_DIVIDE_REQUIRED
 choice
     prompt "Runtime sizing profile"
     default RUNTIME_TARGET_LARGE if MACH_STM32H7
+    default RUNTIME_TARGET_SMALL if MACH_STM32F1
     default RUNTIME_TARGET_SMALL if MACH_STM32F4
     default RUNTIME_TARGET_SMALL if MACH_STM32G0
     default RUNTIME_TARGET_LARGE
-    depends on MACH_STM32H7 || MACH_STM32F4 || MACH_STM32G0 || MACH_LINUX
+    depends on MACH_STM32H7 || MACH_STM32F4 || MACH_STM32F1 || MACH_STM32G0 || MACH_LINUX
     help
       Selects per-MCU runtime sizing presets. `large` is the H7-class
       profile that places the curve pool in AXI SRAM. `small` is the
@@ -374,6 +375,7 @@ endchoice
 
 config RUNTIME_PIECE_RING_SIZE
     int "Piece-ring byte budget (total across all axes)"
+    default 4096 if MACH_STM32F1
     default 6144 if MACH_STM32G0
     default 32768 if MACH_STM32F401
     default 63488 if RUNTIME_TARGET_LARGE
@@ -392,10 +394,11 @@ config RUNTIME_PIECE_RING_SIZE
 
 config MOTION_SAMPLE_RATE_HZ
     int "Motion engine sample rate in Hz (motion-timer ISR fire rate)"
-    depends on MACH_STM32H7 || MACH_STM32F4 || MACH_STM32G0 || MACH_LINUX
+    depends on MACH_STM32H7 || MACH_STM32F4 || MACH_STM32F1 || MACH_STM32G0 || MACH_LINUX
     default 10000 if MACH_STM32H7
     default 5000 if MACH_STM32F401
     default 10000 if MACH_STM32F4
+    default 2000 if MACH_STM32F1
     default 2000 if MACH_STM32G0
     default 1000 if MACH_LINUX
     default 10000
@@ -455,10 +458,11 @@ config RUNTIME_STORAGE_SIZE_LARGE
 
 config RUNTIME_STORAGE_SIZE_SMALL
     int "rt_storage byte ceiling (small profile, F4/G0)"
+    default 10240 if MACH_STM32F1
     default 57344 if MACH_STM32G0
     default 36864 if MACH_STM32F401
     default 73728
-    range 32768 131072
+    range 8192 131072
     help
       Byte ceiling for rt_storage (the C-declared backing buffer that
       replaces RT_CELL's Rust-side #[link_section] placement). The fixed
@@ -466,8 +470,11 @@ config RUNTIME_STORAGE_SIZE_SMALL
       MCU build (2026-06-07), so the floor is PIECE_RING_SIZE + ~3 KB.
       Default is 73728 bytes (72 KB), providing headroom for piece-ring
       growth on F4's 128 KB SRAM. F401 (64 KB SRAM total) defaults to
-      36864 to leave the C-side dynamic pool ~17 KB. Const_assert on
-      Rust catches RuntimeContext growth at compile time.
+      36864 to leave the C-side dynamic pool ~17 KB. F103 (48 KB SRAM
+      total) defaults to 10240: the measured floor for a 4096 B ring is
+      7168, and every byte above it is taken straight out of the C
+      dynamic pool, which is the scarce resource on that part.
+      Const_assert on Rust catches RuntimeContext growth at compile time.
 
 config MCU_SIM
     bool "Build for simulator (disables IWDG, enables Linux sim shims)"
@@ -495,10 +502,10 @@ config MCU_SIM_TMCUART_BYPASS
       jitter would make a shim-side decoder flake intermittently.
 
 menu "Motion dispatch modules"
-    depends on MACH_STM32H7 || MACH_STM32F4 || MACH_STM32G0 || MACH_LINUX
+    depends on MACH_STM32H7 || MACH_STM32F4 || MACH_STM32F1 || MACH_STM32G0 || MACH_LINUX
 config MOTION_MODULE_STEPPER
     bool "Stepper pulse/phase dispatch"
-    default y if MACH_STM32H7 || MACH_STM32F4 || MACH_STM32G0
+    default y if MACH_STM32H7 || MACH_STM32F4 || MACH_STM32F1 || MACH_STM32G0
     default n
     help
       Compiles the STEP/DIR pulse and TMC phase-stepping dispatch backend

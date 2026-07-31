@@ -57,6 +57,49 @@ Three tiers, honestly applied:
 - **No per-axis XY limits.** Global limits plus Z-only caps, nothing
   finer.
 - **Kinematics:** cartesian and corexy only.
+- **Boards: STM32 F4, G0, and H7.** `src/Kconfig` also carries a
+  Linux-process MCU and the host simulator. AVR, LPC176x, RP2040, SAMD,
+  HC32 and the STM32 F0/F2/F7/L4/G4 families are absent, and since the
+  MCU executes the trajectory there is no host-side workaround for an
+  unsupported chip. The STM32F1 target builds and boots but is **not
+  supported** — see the verdict below.
+- **Homing tolerates ~100 ms of host or transport stall, and no more.**
+  Streamed moves run under `MAX_LEAD_SECS` = 2 s of lead, so ordinary
+  host jitter is invisible. Homing does not: it drips, with
+  `DRIP_WINDOW_SECS` = 100 ms of lead, and the serial `PushPieces` retry
+  burst is deliberately sized at ~90 ms to fit inside that window. The
+  slack left over is therefore small enough that one scheduler hiccup
+  ends the move — the pump fails loudly with `piece in past at send`
+  rather than padding the start time. Bench-observed on a 1 GB Pi 4:
+  camera-streamer at 1296x972@30 produced a 101.7 ms send stall and
+  aborted a homing move, while the same camera never disturbed a
+  mainline-style step-queue host, which buffers far deeper. This is a
+  property of the homing path, not of any one board.
+- **F103: not supported — a hardware verdict, not a build gap.** The
+  Cortex-M3 has no FPU, so the motion tick's polynomial evaluation runs
+  on soft-float library calls and costs ~11,500 cycles per axis-sample
+  (measured 2026-07-30/31 on an SKR Mini E3 v2.0 driving a CoreXY
+  Voron 0: 34,455-cycle tick ISRs for 3 lanes against a 36,000-cycle
+  budget at 2 kHz — 96% CPU, and the MCU latches -311
+  TickIntervalExceeded). The remaining ~4% cannot service USB and the
+  bit-banged TMC UART: homing's register burst lands exactly when the
+  100 ms drip window opens, the OUT endpoint goes unserviced, host
+  writes stall (measured up to 229 ms), and the pump fails loudly. For
+  comparison the F446 (hard FPU, 180 MHz) delivers 4 axes at 10 kHz.
+  Lowering the sample rate to 1 kHz made it worse, not better; halving
+  the TMC baud doubles the foreground blocking. What the bench proved
+  the port *does* do: boots, enumerates, klippy connects, all three
+  lanes bind, streamed moves execute, and one sensorless G28 X
+  completed — useful as a port-correctness artifact, not as a printer.
+  Supporting chips of this class would take a stepcompress-style
+  adapter (precomputed step queues instead of on-MCU evaluation), which
+  is deliberately out of scope for this architecture.
+- **F103 build notes, for whoever revisits this.** TIM5 required, so
+  medium-density is out. Every F1 timer is 16 bit, so the step-output
+  deadline is chased in <=455 us hops. Flash 117 KB of 256 KB; RAM is
+  the tight one (~11 KB left for klipper's C dynamic pool on 48 KB).
+  The board option `!PA14` is mandatory on the SKR Mini E3 v2.0 —
+  without it USB never enumerates and there is no way in.
 - **Config is not mainline-compatible.** `[kinematics]`, `[motor]`,
   `[axis]`, `[post_processor]` replace the classic sections. This is
   intentional. Migration guide:

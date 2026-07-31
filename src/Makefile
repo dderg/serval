@@ -55,6 +55,12 @@ else ifeq ($(CONFIG_MACH_STM32F4),y)
 MCU_RUST_FEATURES := mcu-f4,header-runtime
 MCU_CARGO_TARGET_DIR := target-f4
 MCU_RUST_TARGET := thumbv7em-none-eabi
+else ifeq ($(CONFIG_MACH_STM32F1),y)
+# STM32F103 (Cortex-M3) = ARMv7-M = thumbv7m-none-eabi. ARMv7-M has
+# LDREX/STREX, so unlike the G0 branch no single-core atomics cfg is needed.
+MCU_RUST_FEATURES := mcu-f1,header-runtime
+MCU_CARGO_TARGET_DIR := target-f1
+MCU_RUST_TARGET := thumbv7m-none-eabi
 else ifeq ($(CONFIG_MACH_STM32G0),y)
 # STM32G0B1 (Cortex-M0+) = ARMv6-M = thumbv6m-none-eabi, a DIFFERENT rustc
 # triple than H7/F4. The thumbv6m target build sets
@@ -72,10 +78,11 @@ ifeq ($(CONFIG_MOTION_MODULE_STEPPER),y)
 MCU_RUST_FEATURES := $(MCU_RUST_FEATURES),motion-module-stepper
 endif
 
-ifneq (,$(filter y,$(CONFIG_MACH_STM32H7) $(CONFIG_MACH_STM32F4) $(CONFIG_MACH_STM32G0)))
+ifneq (,$(filter y,$(CONFIG_MACH_STM32H7) $(CONFIG_MACH_STM32F4) $(CONFIG_MACH_STM32F1) $(CONFIG_MACH_STM32G0)))
 # Exported so src/stm32/Makefile depends on (and links against) the right
 # archive without re-deriving the path. MCU_RUST_TARGET is the rustc
-# triple for the active MCU (thumbv7em for H7/F4, thumbv6m for G0).
+# triple for the active MCU (thumbv7em for H7/F4, thumbv7m for F1,
+# thumbv6m for G0).
 MCU_RUST_LIB := rust/$(MCU_CARGO_TARGET_DIR)/$(MCU_RUST_TARGET)/release/libc_api.a
 
 # Per-MCU target dir gives H7 and F4 their own caches (see above). Within
