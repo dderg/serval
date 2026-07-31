@@ -10,7 +10,7 @@ use crate::mcu_config::{AXIS_X, AXIS_Z};
 use crate::motion_history::HistoryStore;
 use crate::types::AxisKey;
 
-const FREQ: u32 = 180_000_000;
+const FREQ: f64 = 180_000_000.0;
 
 fn make_linear_piece(
     start_time: u64,
@@ -64,7 +64,7 @@ fn record_synced(
     router: &Arc<Mutex<PassthroughRouter>>,
     key: AxisKey,
     e: &PieceEntry,
-    freq: u32,
+    freq: f64,
 ) {
     let host = host_of(router, key.mcu_id, e.start_time);
     store.record(key, e, freq, host);
@@ -124,7 +124,7 @@ fn trip_at_piece_start_returns_start_position() {
         axis: AXIS_Z as u8,
     };
     let mut store = HistoryStore::default();
-    record_synced(&mut store, &router, key, &piece, 520_000_000_u32);
+    record_synced(&mut store, &router, key, &piece, 520_000_000.0_f64);
 
     let result = reconstruct_axis_position(
         MCU_ID,

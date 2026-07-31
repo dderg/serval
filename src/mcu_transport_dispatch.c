@@ -14,6 +14,11 @@
 extern void *runtime_handle;
 #endif
 
+#if CONFIG_CLASSIC_STEPPING
+#include "stepper.h"
+extern uint64_t runtime_widened_host_clock(void);
+#endif
+
 extern int kalico_console_write_raw(const uint8_t *buf, uint16_t len);
 
 #define MCU_FRAME_SYNC 0x55
@@ -373,8 +378,11 @@ send_stop_response(uint32_t correlation_id, int32_t result, uint64_t discard_clo
 // Stamping each Stop with a fresh clock would place the halt several ms
 // of travel past where the steppers actually stopped, and every probe
 // seeds the toolhead frame from the position reconstructed at this clock.
-#if CONFIG_MOTION_RUNTIME
+#if CONFIG_MOTION_RUNTIME || CONFIG_CLASSIC_STEPPING
 static uint64_t stop_halt_clock;
+#endif
+#if CONFIG_CLASSIC_STEPPING
+static uint8_t stop_gated;
 #endif
 
 int32_t
@@ -392,6 +400,19 @@ handle_stop_inner(uint64_t *discard_clock)
         *discard_clock = stop_halt_clock;
         irq_restore(flag);
     }
+#elif CONFIG_CLASSIC_STEPPING
+    // The host-computed step stream has no MCU-side gate to close: the
+    // halt IS discarding every queued move, and SF_NEED_RESET keeps later
+    // queue_step frames out until the host re-anchors with reset_step_clock.
+    int32_t rc = 0;
+    irqstatus_t flag = irq_save();
+    if (!stop_gated) {
+        stop_gated = 1;
+        stop_halt_clock = runtime_widened_host_clock();
+        stepper_classic_halt_all();
+    }
+    *discard_clock = stop_halt_clock;
+    irq_restore(flag);
 #else
     int32_t rc = RUNTIME_ERR_MOTION_RUNTIME_ABSENT;
 #endif
@@ -430,6 +451,11 @@ handle_resume_stream(uint32_t correlation_id)
         rc = runtime_ungate_pieces(runtime_handle);
         irq_restore(flag);
     }
+#elif CONFIG_CLASSIC_STEPPING
+    int32_t rc = 0;
+    irqstatus_t flag = irq_save();
+    stop_gated = 0;
+    irq_restore(flag);
 #else
     int32_t rc = RUNTIME_ERR_MOTION_RUNTIME_ABSENT;
 #endif

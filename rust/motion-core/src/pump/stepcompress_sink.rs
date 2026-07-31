@@ -13,31 +13,14 @@ use step_shim::{MotorConfig, ShimError, StepFrame, StepShim};
 
 pub const SHIM_RING_DEPTH: u32 = 64;
 
-/// Move-pool slots the endpoint never claims. The MCU's `move_count` pool is
-/// shared: klippy reserves slots through `request_move_queue_slot` for its own
-/// scheduled commands, and `queue_digital_out` / `queue_pwm_out` allocate from
-/// the same free list. Sizing the stepper budget at the full pool would let a
-/// heater or fan update hit an empty pool and shut the printer down.
 pub const MOVE_SLOT_RESERVE: u32 = 16;
 
-/// How far ahead of the estimated MCU clock the shim is drained. Matches the
-/// order of Klipper's step-generation lookahead: deep enough that a 2 ms pacer
-/// tick plus serial wire time never starves the MCU, shallow enough that a
-/// re-plan or a trip discards only a fraction of a second of committed steps.
 pub const SEND_LEAD_SECONDS: f64 = 0.250;
 
-/// A sent move is only counted as consumed once its last step clock is this
-/// far behind the clock estimate. Covers the estimate's own skew and the
-/// ack-driven staleness of `mcu_now` so the budget is never released early.
 pub const CONSUMED_MARGIN_SECONDS: f64 = 0.010;
 
-/// Outbound frames allowed to wait for budget. `SEND_LEAD_SECONDS` of steps
-/// for a handful of motors is a few hundred frames; an order of magnitude of
-/// headroom above that and the backlog is provably not draining.
 pub const BACKLOG_CEILING_FRAMES: usize = 8192;
 
-/// Pacer period. The pump only calls `send_frames` when new pieces arrive, so
-/// this thread is what releases backlog as the MCU clock advances.
 pub const PACER_TICK: Duration = Duration::from_millis(2);
 
 pub type ClockSource = Arc<dyn Fn(u32) -> Option<(u64, f64)> + Send + Sync>;
@@ -124,12 +107,23 @@ struct InFlight {
 }
 
 struct PendingRetire {
-    watermark: u64,
+    waits: Vec<BarrierId>,
     counts: Vec<u32>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct BarrierId {
+    oid: u32,
+    seq: u32,
+}
+
+enum Outbound {
+    Step(StepFrame),
+    Barrier(BarrierId),
+}
+
 struct OutboundFrame {
-    frame: StepFrame,
+    frame: Outbound,
     end_clock: u64,
 }
 
@@ -148,6 +142,9 @@ pub struct StepcompressEndpoint {
     pending_cut: HashMap<u8, (u64, Option<f64>)>,
     pending_retire: VecDeque<PendingRetire>,
     published: Vec<u32>,
+    cohort_counts: Vec<u32>,
+    next_barrier_seq: HashMap<u32, u32>,
+    acked_barrier_seq: HashMap<u32, u32>,
 }
 
 fn shim_error_to_send_error(mcu_id: u32, error: ShimError) -> SendError {
@@ -159,14 +156,14 @@ fn shim_error_to_send_error(mcu_id: u32, error: ShimError) -> SendError {
     }
 }
 
-fn frame_args(frame: StepFrame) -> (&'static str, Vec<(String, ArgValue)>) {
-    match frame {
-        StepFrame::QueueStep {
+fn frame_args(frame: &Outbound) -> (&'static str, Vec<(String, ArgValue)>) {
+    match *frame {
+        Outbound::Step(StepFrame::QueueStep {
             oid,
             interval,
             count,
             add,
-        } => (
+        }) => (
             "queue_step",
             vec![
                 ("oid".to_string(), ArgValue::Int(i64::from(oid))),
@@ -175,18 +172,25 @@ fn frame_args(frame: StepFrame) -> (&'static str, Vec<(String, ArgValue)>) {
                 ("add".to_string(), ArgValue::Int(i64::from(add))),
             ],
         ),
-        StepFrame::SetNextStepDir { oid, dir } => (
+        Outbound::Step(StepFrame::SetNextStepDir { oid, dir }) => (
             "set_next_step_dir",
             vec![
                 ("oid".to_string(), ArgValue::Int(i64::from(oid))),
                 ("dir".to_string(), ArgValue::Int(i64::from(dir))),
             ],
         ),
-        StepFrame::ResetStepClock { oid, clock } => (
+        Outbound::Step(StepFrame::ResetStepClock { oid, clock }) => (
             "reset_step_clock",
             vec![
                 ("oid".to_string(), ArgValue::Int(i64::from(oid))),
                 ("clock".to_string(), ArgValue::Int(i64::from(clock))),
+            ],
+        ),
+        Outbound::Barrier(BarrierId { oid, seq }) => (
+            "stepcompress_barrier",
+            vec![
+                ("oid".to_string(), ArgValue::Int(i64::from(oid))),
+                ("seq".to_string(), ArgValue::Int(i64::from(seq))),
             ],
         ),
     }
@@ -215,6 +219,7 @@ impl StepcompressEndpoint {
         budget: u32,
     ) -> Self {
         let published = shim.retired_counts();
+        let cohort_counts = published.clone();
         Self {
             mcu_id,
             shim,
@@ -230,6 +235,9 @@ impl StepcompressEndpoint {
             pending_cut: HashMap::new(),
             pending_retire: VecDeque::new(),
             published,
+            cohort_counts,
+            next_barrier_seq: HashMap::new(),
+            acked_barrier_seq: HashMap::new(),
         }
     }
 
@@ -254,11 +262,6 @@ impl StepcompressEndpoint {
         &mut self.shim
     }
 
-    /// Seeds motor step counters host-side for an externally set position.
-    /// `pos_steps` is one entry per configured axis, in `axes` order. The
-    /// committed stream described the old origin, so both the unsent backlog
-    /// and the shim's queued pieces are discarded; the next drain re-anchors
-    /// with `reset_step_clock` from the new counter.
     pub fn reset_position(&mut self, pos_steps: &[i64]) -> Result<(), SendError> {
         if pos_steps.len() != self.axes.len() {
             return Err(SendError::Fatal(format!(
@@ -272,52 +275,66 @@ impl StepcompressEndpoint {
         for (motor, &count) in pos_steps.iter().enumerate() {
             self.reset_motor_position(motor, count)
                 .map_err(SendError::Fatal)?;
+            self.seed_mcu_position(self.oids[motor], count)?;
         }
-        self.published = self.shim.retired_counts();
         self.post_heartbeat()
     }
 
-    /// One motor's counterpart of [`Self::reset_position`], for the homing
-    /// reconcile that reseeds a single tripped lane. `halt_at` clears the
-    /// queued pieces and the seam expectation too: the post-trip stream is a
-    /// new timeline and must not be held contiguous with the aborted one.
+    /// The mcu counts the step pulses it executed; the reconcile after an
+    /// endstop trip compares that count against the host's own absolute
+    /// bookkeeping, so both must share an origin.
+    fn seed_mcu_position(&self, oid: u32, count: i64) -> Result<(), SendError> {
+        let count = i32::try_from(count).map_err(|_| {
+            SendError::Fatal(format!(
+                "stepcompress mcu {}: position seed {count} for oid {oid} does not fit the \
+                 mcu's 32-bit step counter",
+                self.mcu_id
+            ))
+        })?;
+        (self.egress)(
+            "stepcompress_set_position",
+            &[
+                ("oid".to_string(), ArgValue::Int(i64::from(oid))),
+                ("pos".to_string(), ArgValue::Int(i64::from(count))),
+            ],
+        )
+    }
+
+    fn sync_retirement_baseline(&mut self) {
+        self.published = self.shim.retired_counts();
+        self.cohort_counts.clone_from(&self.published);
+    }
+
     pub fn reset_motor_position(&mut self, motor: usize, count: i64) -> Result<(), String> {
         self.shim
             .halt_at(motor, u64::MAX)
             .map_err(|e| format!("stepcompress mcu {}: {e}", self.mcu_id))?;
         self.shim.reset_position(motor, count);
+        self.sync_retirement_baseline();
         Ok(())
     }
 
-    /// Discards everything the endpoint has not yet put on the wire. Paired
-    /// with `StepShim::halt_at` / `reset_position`: after a trip the committed
-    /// step stream is void, so shipping the leftover backlog would drive the
-    /// motor past the stop.
+    /// Barriers still queued here never reach the mcu, so nothing will ever
+    /// ack them — cancel them by advancing the high-water mark. Barriers
+    /// already on the wire are acked even when the mcu halt discards them.
     pub fn abort_outbound(&mut self) {
+        for out in &self.backlog {
+            if let Outbound::Barrier(id) = out.frame {
+                let acked = self.acked_barrier_seq.entry(id.oid).or_insert(id.seq);
+                *acked = (*acked).max(id.seq);
+            }
+        }
         self.backlog.clear();
         self.in_flight.clear();
         self.step_clock.clear();
         self.pending_cut.clear();
+        self.pending_retire.clear();
     }
 
-    /// Records that `axis`'s next fresh-epoch piece starts at
-    /// `at_start_clock`. The cut is applied when that exact piece is pushed,
-    /// not when the mark arrives: a bundle can carry the tail of the old
-    /// epoch and the head of the new one, and cutting ahead of the whole
-    /// bundle would re-create the very `PieceGap` it exists to prevent.
     pub fn mark_reanchor(&mut self, axis: u8, at_start_clock: u64, epoch_freq: Option<f64>) {
         self.pending_cut.insert(axis, (at_start_clock, epoch_freq));
     }
 
-    /// Cuts one motor's piece stream at the last step already emitted, so the
-    /// next piece may start at any clock instead of tripping the shim's
-    /// `PieceGap` contiguity check against a timeline that no longer exists.
-    ///
-    /// Frames already emitted (sent or waiting in the backlog) still describe
-    /// real steps and are kept, so the step counter stays exact; only the
-    /// sampled-but-unemitted tail past the emit cursor is discarded, and
-    /// `halt_at` subtracts exactly those steps. The freed ring slots are
-    /// republished so the pump gets its credit back.
     fn cut_stream(&mut self, motor: usize, freq: f64, now: u64) -> Result<(), SendError> {
         let emit_cursor = self.step_clock.get(&self.oids[motor]).copied().unwrap_or(0);
         tracing::info!(
@@ -334,7 +351,10 @@ impl StepcompressEndpoint {
             .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
         for frame in tail {
             let end_clock = self.frame_end_clock(now, frame);
-            self.backlog.push_back(OutboundFrame { frame, end_clock });
+            self.backlog.push_back(OutboundFrame {
+                frame: Outbound::Step(frame),
+                end_clock,
+            });
         }
         self.shim.set_motor_cycles_per_second(motor, freq);
         let snapshot = self.shim.retired_counts();
@@ -342,27 +362,48 @@ impl StepcompressEndpoint {
         Ok(())
     }
 
-    /// Retirement is only observable once every frame it covers has been
-    /// sent, so a snapshot rides on the last outbound frame and is published
-    /// immediately only when nothing is waiting.
     fn publish_retirement(&mut self, snapshot: Vec<u32>) {
-        let watermark = self
-            .backlog
-            .iter()
-            .map(|f| f.end_clock)
-            .chain(self.in_flight.iter().map(|f| f.end_clock))
-            .max()
-            .unwrap_or(0);
+        let mut waits = Vec::new();
+        for motor in 0..self.oids.len() {
+            let before = self.cohort_counts.get(motor).copied().unwrap_or(0);
+            let after = snapshot.get(motor).copied().unwrap_or(0);
+            if before == after {
+                continue;
+            }
+            let oid = self.oids[motor];
+            let seq = {
+                let next = self.next_barrier_seq.entry(oid).or_insert(0);
+                let seq = *next;
+                *next += 1;
+                seq
+            };
+            let end_clock = self.step_clock.get(&oid).copied().unwrap_or(0);
+            let id = BarrierId { oid, seq };
+            self.backlog.push_back(OutboundFrame {
+                frame: Outbound::Barrier(id),
+                end_clock,
+            });
+            waits.push(id);
+        }
+        if waits.is_empty() {
+            return;
+        }
+        self.cohort_counts.clone_from(&snapshot);
         self.pending_retire.push_back(PendingRetire {
-            watermark,
+            waits,
             counts: snapshot,
         });
     }
 
-    fn release_retirements(&mut self, cutoff: u64) {
+    fn barrier_acked(&self, id: BarrierId) -> bool {
+        self.acked_barrier_seq
+            .get(&id.oid)
+            .is_some_and(|&high_water| high_water >= id.seq)
+    }
+
+    fn release_retirements(&mut self) {
         while let Some(front) = self.pending_retire.front() {
-            let unsent = self.backlog.iter().any(|f| f.end_clock <= front.watermark);
-            if unsent || front.watermark > cutoff {
+            if !front.waits.iter().all(|&id| self.barrier_acked(id)) {
                 break;
             }
             let done = self
@@ -371,6 +412,37 @@ impl StepcompressEndpoint {
                 .expect("front was just observed");
             self.published = done.counts;
         }
+    }
+
+    pub fn on_barrier_ack(&mut self, oid: u32, seq: u32) -> Result<(), SendError> {
+        let mcu_id = self.mcu_id;
+        let issued = self.next_barrier_seq.get(&oid).copied().ok_or_else(|| {
+            SendError::Fatal(format!(
+                "stepcompress mcu {mcu_id}: barrier ack oid={oid} seq={seq} but no barrier was \
+                 ever issued for that oid"
+            ))
+        })?;
+        if seq >= issued {
+            return Err(SendError::Fatal(format!(
+                "stepcompress mcu {mcu_id}: barrier ack oid={oid} seq={seq} is ahead of the \
+                 {issued} barriers issued for that oid"
+            )));
+        }
+        let expected = self.acked_barrier_seq.get(&oid).map_or(0, |&s| s + 1);
+        if seq < expected {
+            // An abort cancelled this barrier by advancing the high-water
+            // mark; the ack was already in flight. Nothing left to release.
+            return Ok(());
+        }
+        if seq != expected {
+            return Err(SendError::Fatal(format!(
+                "stepcompress mcu {mcu_id}: barrier ack oid={oid} seq={seq} out of order, \
+                 expected seq={expected}"
+            )));
+        }
+        self.acked_barrier_seq.insert(oid, seq);
+        self.release_retirements();
+        self.post_heartbeat()
     }
 
     fn clock_now(&self) -> Result<(u64, f64), SendError> {
@@ -424,7 +496,10 @@ impl StepcompressEndpoint {
             .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
         for frame in frames {
             let end_clock = self.frame_end_clock(now, frame);
-            self.backlog.push_back(OutboundFrame { frame, end_clock });
+            self.backlog.push_back(OutboundFrame {
+                frame: Outbound::Step(frame),
+                end_clock,
+            });
         }
         if self.backlog.len() > BACKLOG_CEILING_FRAMES {
             return Err(SendError::Fatal(format!(
@@ -445,7 +520,7 @@ impl StepcompressEndpoint {
         self.in_flight.retain(|e| e.end_clock > cutoff);
         let egress = Arc::clone(&self.egress);
         while let Some(front) = self.backlog.front() {
-            let consumes_slot = matches!(front.frame, StepFrame::QueueStep { .. });
+            let consumes_slot = matches!(front.frame, Outbound::Step(StepFrame::QueueStep { .. }));
             if consumes_slot && self.in_flight.len() as u32 >= self.budget {
                 break;
             }
@@ -453,7 +528,7 @@ impl StepcompressEndpoint {
                 .backlog
                 .pop_front()
                 .expect("backlog front was just observed");
-            let (name, args) = frame_args(out.frame);
+            let (name, args) = frame_args(&out.frame);
             egress(name, &args)?;
             if consumes_slot {
                 self.in_flight.push(InFlight {
@@ -461,7 +536,7 @@ impl StepcompressEndpoint {
                 });
             }
         }
-        self.release_retirements(cutoff);
+        self.release_retirements();
         self.post_heartbeat()
     }
 
@@ -479,15 +554,6 @@ impl StepcompressEndpoint {
             })
     }
 
-    /// Periodic driver. The pump only calls `send_frames` when new pieces
-    /// arrive, so this is what turns the advancing MCU clock into progress:
-    /// it samples the pieces the widening drain horizon now covers, releases
-    /// the frames the freed move budget now allows, and posts the heartbeat.
-    /// Sampling here is what retires the last pieces of a stream — without it
-    /// a finished move never reaches full retirement and the pump's
-    /// `RETIREMENT_STALL_FATAL` watchdog fires.
-    ///
-    /// Does nothing (and needs no clock) while there is nothing outstanding.
     pub fn published_counts(&self) -> Vec<u32> {
         self.published.clone()
     }
@@ -511,7 +577,10 @@ impl StepcompressEndpoint {
                     .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
                 for frame in tail {
                     let end_clock = self.frame_end_clock(now, frame);
-                    self.backlog.push_back(OutboundFrame { frame, end_clock });
+                    self.backlog.push_back(OutboundFrame {
+                        frame: Outbound::Step(frame),
+                        end_clock,
+                    });
                 }
             }
             let snapshot = self.shim.retired_counts();
@@ -550,9 +619,6 @@ impl StepcompressEndpoint {
                         .validate_pieces_public(motor, &frame.pieces[..index])
                         .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
                     self.shim
-                        .validate_fresh_pieces(motor, &frame.pieces[index..])
-                        .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
-                    self.shim
                         .push_pieces(motor, &frame.pieces[..index])
                         .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
                     let cut_clock = self.pending_cut[&frame.axis].0;
@@ -560,6 +626,9 @@ impl StepcompressEndpoint {
                     self.drain_into_backlog(now, freq)?;
                     self.cut_stream(motor, epoch_freq, now)?;
                     self.pending_cut.remove(&frame.axis);
+                    self.shim
+                        .validate_fresh_pieces(motor, &frame.pieces[index..])
+                        .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
                     self.shim
                         .push_pieces(motor, &frame.pieces[index..])
                         .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
@@ -575,8 +644,6 @@ impl StepcompressEndpoint {
     }
 }
 
-/// Owns the pacer thread; stopping and joining it on drop keeps a pipeline
-/// respawn from leaving the previous pacer behind.
 pub struct StepcompressPacer {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,

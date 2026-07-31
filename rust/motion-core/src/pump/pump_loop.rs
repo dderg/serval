@@ -205,6 +205,21 @@ impl<S: PieceSink> Pump<S> {
                     self.cohort = None;
                 }
             }
+            PumpMsg::StepcompressBarrierAck { mcu_id, oid, seq } => {
+                if let Err(e) = self.sink.on_barrier_ack(mcu_id, oid, seq) {
+                    tracing::error!(
+                        subsystem = "motion",
+                        event = "stepcompress_barrier_ack_fatal",
+                        mcu = mcu_id,
+                        oid,
+                        seq,
+                        error = ?e,
+                        "stepcompress barrier ack rejected — invoking fatal-transport action"
+                    );
+                    (self.callbacks.on_fatal_transport)(AxisKey { mcu_id, axis: 0 });
+                    return false;
+                }
+            }
             PumpMsg::Barrier(ack) => {
                 self.pending_barrier_acks.push(ack);
             }
@@ -648,10 +663,12 @@ impl<S: PieceSink> Pump<S> {
                 mcu_id,
                 axis: af.axis,
             };
-            let freq = (self.callbacks.mcu_clock_of)(mcu_id).map(|(_, f)| f as f32);
+            let measured_freq = (self.callbacks.mcu_clock_of)(mcu_id).map(|(_, f)| f);
+            #[allow(clippy::cast_possible_truncation)]
+            let diag_freq = measured_freq.map(|f| f as f32);
             let mut prev_end: Option<u64> = None;
             for piece in &af.pieces {
-                prev_end = diag::log_piece_submit(mcu_id, af.axis, freq, piece, prev_end);
+                prev_end = diag::log_piece_submit(mcu_id, af.axis, diag_freq, piece, prev_end);
             }
             let n = af.pieces.len() as u32;
             let q = self.queues.get_mut(&key).expect("planned key exists");
@@ -667,7 +684,7 @@ impl<S: PieceSink> Pump<S> {
                     q.staged_motion = q.staged_motion.saturating_sub(1);
                 }
                 if let Some(history) = &self.history {
-                    history.record(key, &piece, host_t);
+                    history.record(key, &piece, measured_freq, host_t);
                 }
             }
             q.pushed = q.pushed.wrapping_add(n);

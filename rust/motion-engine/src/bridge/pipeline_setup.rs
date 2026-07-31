@@ -257,6 +257,37 @@ impl PyMotionEngine {
                 Arc::clone(&clock_of),
             )
             .map_err(PyRuntimeError::new_err)?;
+            let ack_tx = pump_control.clone();
+            let ack_mcu_id = cfg.mcu_id;
+            io.register_frame_interceptor(
+                "stepcompress_barrier_ack",
+                None,
+                Box::new(move |params| {
+                    let oid = params.try_get_u32("oid").unwrap_or_else(|| {
+                        panic!(
+                            "stepcompress mcu {ack_mcu_id}: barrier ack frame carried no oid \
+                             parameter"
+                        )
+                    });
+                    let seq = params.try_get_u32("seq").unwrap_or_else(|| {
+                        panic!(
+                            "stepcompress mcu {ack_mcu_id}: barrier ack frame carried no seq \
+                             parameter"
+                        )
+                    });
+                    let _ = ack_tx.send(crate::pump::PumpMsg::StepcompressBarrierAck {
+                        mcu_id: ack_mcu_id,
+                        oid: oid as u8,
+                        seq,
+                    });
+                }),
+            )
+            .map_err(|e| {
+                PyRuntimeError::new_err(format!(
+                    "stepcompress mcu {}: cannot intercept stepcompress_barrier_ack: {e:?}",
+                    cfg.mcu_id
+                ))
+            })?;
             let depth = endpoint.ring_depth();
             for &axis in &cfg.axes {
                 ring_depth_table.insert(

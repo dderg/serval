@@ -12,6 +12,8 @@ struct Harness {
     endpoint: StepcompressEndpoint,
     now: Arc<AtomicU64>,
     sent: Arc<Mutex<Vec<StepFrame>>>,
+    barriers: Arc<Mutex<Vec<(u32, u32)>>>,
+    seeds: Arc<Mutex<Vec<(u32, i64)>>>,
     heartbeats: crossbeam_channel::Receiver<PumpMsg>,
     fail_sends: Arc<AtomicBool>,
 }
@@ -35,6 +37,10 @@ fn harness(budget: u32) -> Harness {
     let sent = Arc::new(Mutex::new(Vec::new()));
     let fail_sends = Arc::new(AtomicBool::new(false));
     let sent_for_egress = Arc::clone(&sent);
+    let barriers = Arc::new(Mutex::new(Vec::new()));
+    let barriers_for_egress = Arc::clone(&barriers);
+    let seeds = Arc::new(Mutex::new(Vec::new()));
+    let seeds_for_egress = Arc::clone(&seeds);
     let fail_for_egress = Arc::clone(&fail_sends);
     let egress: FrameEgress = Arc::new(move |name: &str, args: &[(String, ArgValue)]| {
         if fail_for_egress.load(Ordering::Relaxed) {
@@ -46,6 +52,18 @@ fn harness(budget: u32) -> Harness {
                 other => panic!("missing int arg {key}: {other:?}"),
             }
         };
+        if name == "stepcompress_barrier" {
+            barriers_for_egress
+                .lock_ok()
+                .push((arg("oid") as u32, arg("seq") as u32));
+            return Ok(());
+        }
+        if name == "stepcompress_set_position" {
+            seeds_for_egress
+                .lock_ok()
+                .push((arg("oid") as u32, arg("pos")));
+            return Ok(());
+        }
         let frame = match name {
             "queue_step" => StepFrame::QueueStep {
                 oid: arg("oid") as u32,
@@ -81,6 +99,8 @@ fn harness(budget: u32) -> Harness {
         endpoint,
         now,
         sent,
+        barriers,
+        seeds,
         heartbeats: rx,
         fail_sends,
     }
@@ -101,6 +121,13 @@ impl Harness {
             last = Some(hb.retired_counts);
         }
         last
+    }
+
+    fn ack_sent_barriers(&mut self) {
+        let issued: Vec<(u32, u32)> = std::mem::take(&mut self.barriers.lock_ok());
+        for (oid, seq) in issued {
+            self.endpoint.on_barrier_ack(oid, seq).unwrap();
+        }
     }
 }
 
@@ -204,6 +231,7 @@ fn retirement_only_counts_fully_sent_pieces_and_never_regresses() {
     for step in 1..=40u64 {
         h.now.store(1_000 + step * 10_000, Ordering::Relaxed);
         h.endpoint.tick().unwrap();
+        h.ack_sent_barriers();
         if let Some(counts) = h.latest_retired() {
             assert!(
                 counts[0] >= last,
@@ -228,12 +256,12 @@ fn backlog_ceiling_breach_is_fatal() {
     h.endpoint
         .backlog
         .extend((0..BACKLOG_CEILING_FRAMES).map(|_| OutboundFrame {
-            frame: StepFrame::QueueStep {
+            frame: Outbound::Step(StepFrame::QueueStep {
                 oid: OID,
                 interval: 10,
                 count: 1,
                 add: 0,
-            },
+            }),
             end_clock: u64::MAX,
         }));
     let err = h
@@ -363,9 +391,14 @@ fn reset_position_drops_the_stale_stream_and_re_emits_a_step_clock_reset() {
         .unwrap();
     assert!(!h.endpoint.backlog.is_empty());
 
-    h.endpoint.reset_position(&[0]).unwrap();
+    h.endpoint.reset_position(&[5]).unwrap();
     assert!(h.endpoint.backlog.is_empty());
     assert!(h.endpoint.in_flight.is_empty());
+    assert_eq!(
+        h.seeds.lock_ok().as_slice(),
+        &[(OID, 5)],
+        "the mcu step counter must adopt the same origin as the shim"
+    );
 
     h.sent.lock_ok().clear();
     h.endpoint
@@ -477,6 +510,7 @@ fn ticks_alone_carry_a_finished_stream_to_full_retirement() {
         now += 10_000;
         h.now.store(now, Ordering::Relaxed);
         h.endpoint.tick().unwrap();
+        h.ack_sent_barriers();
     }
 
     assert_eq!(
@@ -524,8 +558,101 @@ fn retirement_waits_for_execution_not_transmission() {
 
     h.now.store(10_000_000, Ordering::Relaxed);
     h.endpoint.tick().unwrap();
+    h.ack_sent_barriers();
     assert!(
         h.endpoint.published_counts()[0] > 0,
-        "retirement must advance once the mcu clock passes the moves' terminal clock"
+        "retirement must advance once the mcu has acked the cohort's barrier"
+    );
+}
+
+#[test]
+fn a_cohort_is_not_retired_until_its_barrier_is_acked() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .unwrap();
+
+    h.now.store(10_000_000, Ordering::Relaxed);
+    h.endpoint.tick().unwrap();
+    assert!(
+        h.endpoint.backlog.is_empty(),
+        "every frame including the barrier must be on the wire"
+    );
+    assert_eq!(
+        h.endpoint.published_counts(),
+        vec![0],
+        "a clock watermark far past the stream must not retire an unacked cohort"
+    );
+
+    let issued = h.barriers.lock_ok().clone();
+    assert_eq!(issued.first().map(|&(oid, seq)| (oid, seq)), Some((OID, 0)));
+
+    h.ack_sent_barriers();
+    assert!(
+        h.endpoint.published_counts()[0] > 0,
+        "the ack must release the cohort"
+    );
+}
+
+#[test]
+fn a_barrier_ack_that_skips_ahead_is_fatal() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .unwrap();
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(18_000, 8, 1.0))])
+        .unwrap();
+    h.now.store(10_000_000, Ordering::Relaxed);
+    h.endpoint.tick().unwrap();
+    assert!(h.barriers.lock_ok().len() >= 2, "the run issues barriers");
+
+    let err = h
+        .endpoint
+        .on_barrier_ack(OID, 1)
+        .expect_err("a skipped barrier leaves a cohort unaccounted for");
+    assert!(format!("{err:?}").contains("out of order"), "{err:?}");
+}
+
+#[test]
+fn a_barrier_ack_below_the_high_water_mark_is_ignored() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .unwrap();
+    h.now.store(10_000_000, Ordering::Relaxed);
+    h.endpoint.tick().unwrap();
+    assert!(!h.barriers.lock_ok().is_empty(), "the run issues barriers");
+
+    h.endpoint.on_barrier_ack(OID, 0).unwrap();
+    h.endpoint
+        .on_barrier_ack(OID, 0)
+        .expect("a replayed ack is already covered, not a protocol break");
+}
+
+#[test]
+fn a_barrier_ack_ahead_of_what_was_issued_is_fatal() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .unwrap();
+    let issued = h.barriers.lock_ok().len() as u32;
+    let err = h
+        .endpoint
+        .on_barrier_ack(OID, issued + 5)
+        .expect_err("an ack for a barrier never issued must be fatal");
+    assert!(format!("{err:?}").contains("ahead of"), "{err:?}");
+
+    let err = h
+        .endpoint
+        .on_barrier_ack(OID + 100, 0)
+        .expect_err("an ack for an unknown oid must be fatal");
+    assert!(
+        format!("{err:?}").contains("no barrier was ever issued"),
+        "{err:?}"
     );
 }

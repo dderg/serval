@@ -18,6 +18,7 @@ struct stepper {
     uint32_t next_step_time;
     uint32_t position;
     struct move_queue_head mq;
+    struct move_queue_head completed_barriers;
     uint8_t flags : 8;
 #endif
     struct gpio_out step_pin, dir_pin;
@@ -39,7 +40,7 @@ struct stepper_move {
     uint8_t flags;
 };
 
-enum { MF_DIR=1<<0 };
+enum { MF_DIR=1<<0, MF_BARRIER=1<<1 };
 
 enum { POSITION_BIAS=0x40000000 };
 
@@ -69,6 +70,8 @@ enum {
 uint_fast8_t stepper_event(struct timer *t);
 uint_fast8_t stepper_event_full(struct timer *t);
 uint32_t stepper_get_position(struct stepper *s);
+void stepper_classic_halt(struct stepper *s);
+void stepper_classic_halt_all(void);
 
 #endif // CONFIG_CLASSIC_STEPPING
 

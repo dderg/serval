@@ -305,6 +305,19 @@ impl PieceSink for WireSink {
         }
     }
 
+    fn on_barrier_ack(&self, mcu_id: u32, oid: u8, seq: u32) -> Result<(), SendError> {
+        match self.transports.get(&mcu_id) {
+            Some(McuTransport::Stepcompress(endpoint)) => endpoint
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .on_barrier_ack(u32::from(oid), seq),
+            _ => Err(SendError::Fatal(format!(
+                "stepcompress_barrier_ack oid={oid} seq={seq} arrived for mcu {mcu_id}, which \
+                 has no stepcompress endpoint"
+            ))),
+        }
+    }
+
     fn send_mcu_frames(&self, mcu_id: u32, frames: &[AxisFrame]) -> Result<(), SendError> {
         debug_assert!(
             frames.iter().all(|f| f.pieces.len() <= 255),

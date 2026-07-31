@@ -24,17 +24,31 @@ DECL_CONSTANT("STEPPER_STEP_BOTH_EDGE", 1);
  DECL_CONSTANT("STEPPER_OPTIMIZED_UNSTEP", AVR_STEP_TICKS);
 #endif
 
-// Setup a stepper for the next move in its queue
+static struct task_wake barrier_ack_wake;
+
+static uint_fast8_t
+stepper_next_is_barrier(struct stepper *s)
+{
+    if (move_queue_empty(&s->mq))
+        return 0;
+    struct move_node *mn = move_queue_first(&s->mq);
+    struct stepper_move *m = container_of(mn, struct stepper_move, node);
+    return m->flags & MF_BARRIER;
+}
+
 static uint_fast8_t
 stepper_load_next(struct stepper *s)
 {
+    while (stepper_next_is_barrier(s)) {
+        struct move_node *mn = move_queue_pop(&s->mq);
+        move_queue_push(mn, &s->completed_barriers);
+        sched_wake_task(&barrier_ack_wake);
+    }
     if (move_queue_empty(&s->mq)) {
-        // There is no next move - the queue is empty
         s->count = 0;
         return SF_DONE;
     }
 
-    // Read next 'struct stepper_move'
     struct move_node *mn = move_queue_pop(&s->mq);
     struct stepper_move *m = container_of(mn, struct stepper_move, node);
     uint32_t move_interval = m->interval;
@@ -126,6 +140,10 @@ stepper_event_avr(struct timer *t)
             s->interval += s->add;
         return SF_RESCHEDULE;
     }
+    if (stepper_next_is_barrier(s)) {
+        gpio_out_toggle_noirq(s->step_pin);
+        return stepper_load_next(s);
+    }
     uint_fast8_t ret = stepper_load_next(s);
     gpio_out_toggle_noirq(s->step_pin);
     return ret;
@@ -211,6 +229,56 @@ command_queue_step(uint32_t *args)
 DECL_COMMAND(command_queue_step,
              "queue_step oid=%c interval=%u count=%hu add=%hi");
 
+void
+command_stepcompress_barrier(uint32_t *args)
+{
+    struct stepper *s = stepper_oid_lookup(args[0]);
+    struct stepper_move *m = move_alloc();
+    m->interval = args[1];
+    m->count = 0;
+    m->add = 0;
+    m->flags = MF_BARRIER;
+
+    irq_disable();
+    if (s->count) {
+        move_queue_push(&m->node, &s->mq);
+    } else {
+        if (!move_queue_empty(&s->mq))
+            shutdown("Stepper inactive with queued moves");
+        move_queue_push(&m->node, &s->completed_barriers);
+        sched_wake_task(&barrier_ack_wake);
+    }
+    irq_enable();
+}
+DECL_COMMAND(command_stepcompress_barrier,
+             "stepcompress_barrier oid=%c seq=%u");
+
+void
+stepcompress_barrier_ack_task(void)
+{
+    if (!sched_check_wake(&barrier_ack_wake))
+        return;
+    uint8_t oid;
+    struct stepper *s;
+    foreach_oid(oid, s, command_config_stepper) {
+        irq_disable();
+        struct move_node *mn = move_queue_first(&s->completed_barriers);
+        move_queue_clear(&s->completed_barriers);
+        irq_enable();
+        while (mn) {
+            struct stepper_move *m = container_of(mn, struct stepper_move,
+                                                  node);
+            mn = mn->next;
+            uint32_t seq = m->interval;
+            irq_disable();
+            move_free(m);
+            irq_enable();
+            sendf("stepcompress_barrier_ack oid=%c seq=%u", oid, seq);
+        }
+    }
+}
+DECL_TASK(stepcompress_barrier_ack_task);
+
 // Set the direction of the next queued step
 void
 command_set_next_step_dir(uint32_t *args)
@@ -266,3 +334,60 @@ command_stepper_get_position(uint32_t *args)
     sendf("stepper_position oid=%c pos=%i", oid, position - POSITION_BIAS);
 }
 DECL_COMMAND(command_stepper_get_position, "stepper_get_position oid=%c");
+
+// Seed the absolute step counter so the host's reconcile can compare the
+// mcu's executed position against its own step-stream bookkeeping.
+//
+// The top bit of s->position is the optimized reverse-direction flag: while
+// it is set the counter is stored negated and load_next adds step counts
+// downward. Seeding must re-encode into whichever flavour is live, or every
+// later step lands with the sign flipped.
+void
+command_stepcompress_set_position(uint32_t *args)
+{
+    struct stepper *s = stepper_oid_lookup(args[0]);
+    irq_disable();
+    if (s->count)
+        shutdown("Can't set position when stepper active");
+    uint32_t position = args[1] + POSITION_BIAS;
+    s->position = s->position & 0x80000000 ? -position : position;
+    irq_enable();
+}
+DECL_COMMAND(command_stepcompress_set_position,
+             "stepcompress_set_position oid=%c pos=%i");
+
+// Abandon every queued step and park the outputs. Caller must disable irqs.
+//
+// Barriers are retirement receipts, not motion: the host blocks its own
+// retirement bookkeeping until each one comes back, so a discarded barrier
+// would wedge the host rather than merely lose steps. Discarding a barrier
+// therefore completes it — the steps it fenced are gone either way.
+void
+stepper_classic_halt(struct stepper *s)
+{
+    sched_del_timer(&s->time);
+    s->next_step_time = s->time.waketime = 0;
+    s->position = -stepper_get_position(s);
+    s->count = 0;
+    s->flags = (s->flags & SF_OPTIMIZED_PATH) | SF_NEED_RESET;
+    while (!move_queue_empty(&s->mq)) {
+        struct move_node *mn = move_queue_pop(&s->mq);
+        struct stepper_move *m = container_of(mn, struct stepper_move, node);
+        if (m->flags & MF_BARRIER)
+            move_queue_push(mn, &s->completed_barriers);
+        else
+            move_free(m);
+    }
+    sched_wake_task(&barrier_ack_wake);
+    gpio_out_write(s->dir_pin, 0);
+    gpio_out_write(s->step_pin, s->step_idle_level);
+}
+
+void
+stepper_classic_halt_all(void)
+{
+    uint8_t oid;
+    struct stepper *s;
+    foreach_oid(oid, s, command_config_stepper)
+        stepper_classic_halt(s);
+}

@@ -39,6 +39,7 @@ fn clock_between_mcus_round_trips_through_host_secs() {
 }
 
 const FREQ: u32 = 520_000_000;
+const FREQ_HZ: f64 = FREQ as f64;
 
 fn key() -> AxisKey {
     AxisKey { mcu_id: 7, axis: 2 }
@@ -92,13 +93,13 @@ fn h(clock: u64) -> f64 {
 
 fn rec(store: &mut HistoryStore, key: AxisKey, e: PieceEntry) {
     let host = h(e.start_time);
-    store.record(key, &e, FREQ, host);
+    store.record(key, &e, FREQ_HZ, host);
 }
 
 #[test]
 fn end_clock_matches_isr_formula() {
     let e = entry(1_000, 0.0123, [0.0; 4]);
-    let hp = HistoryPiece::from_entry(&e, FREQ, h(1_000));
+    let hp = HistoryPiece::from_entry(&e, FREQ_HZ, h(1_000));
     assert_eq!(hp.end_clock, e.end_time(FREQ as f32));
     assert_eq!(hp.start_clock, 1_000);
 }
@@ -133,7 +134,7 @@ fn quadratic_piece_derivatives() {
 fn gap_between_pieces_holds_previous_endpoint() {
     let mut store = HistoryStore::default();
     rec(&mut store, key(), linear(0, 0.001, 0.0, 10.0));
-    let gap_start = HistoryPiece::from_entry(&linear(0, 0.001, 0.0, 10.0), FREQ, 0.0).end_clock;
+    let gap_start = HistoryPiece::from_entry(&linear(0, 0.001, 0.0, 10.0), FREQ_HZ, 0.0).end_clock;
     rec(
         &mut store,
         key(),
@@ -390,8 +391,8 @@ fn rebase_to_earlier_clock_accepts_post_rewind_pieces() {
 #[test]
 fn backward_host_supersedes_stale_tail() {
     let mut store = HistoryStore::default();
-    store.record(key(), &linear(0, 0.5, 0.0, 10.0), FREQ, 1.0);
-    store.record(key(), &linear(0, 0.5, 50.0, 60.0), FREQ, 0.2);
+    store.record(key(), &linear(0, 0.5, 0.0, 10.0), FREQ_HZ, 1.0);
+    store.record(key(), &linear(0, 0.5, 50.0, 60.0), FREQ_HZ, 0.2);
     let st = store
         .state_at_host(key(), 0.4, Some(f64::INFINITY))
         .unwrap();
@@ -674,7 +675,7 @@ fn state_at_clock_is_immune_to_host_mapping_skew() {
     // over 40 ms is a 0.4 mm bias in the host-domain answer.
     let skew_s = 0.040;
     let e = linear(0, 1.0, 0.0, 10.0);
-    store.record(key(), &e, FREQ, skew_s);
+    store.record(key(), &e, FREQ_HZ, skew_s);
     let clock = FREQ as u64 / 2;
     let by_clock = store
         .state_at_clock(key(), clock, h(clock), Some(f64::INFINITY))

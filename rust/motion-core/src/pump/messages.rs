@@ -21,27 +21,57 @@ pub struct EnqueueMsg {
 /// execute. Recording at dispatch time instead would flood the ring with an
 /// entire move up front — a long homing move evicts its own start before the
 /// endstop trip is resolved against it.
+///
+/// A piece carries its span in seconds, so placing its end on the MCU clock
+/// needs the rate that clock actually runs at — the same measured rate the
+/// producer spaced the start clocks with, and the executor turns the span
+/// back into ticks with. The configured crystal is only a stand-in for the
+/// window before the first sync estimate lands: on a board whose measured
+/// rate drifts from its nameplate, keying the history off the nameplate
+/// stretches every piece and drags trip reconstruction a velocity-scaled
+/// distance away from where the axis really is.
 pub struct HistoryRecorder {
     pub store: Arc<std::sync::Mutex<crate::motion_history::HistoryStore>>,
     pub nominal_freqs: Arc<std::sync::Mutex<std::collections::HashMap<u32, u32>>>,
 }
 
 impl HistoryRecorder {
-    pub(super) fn record(&self, key: AxisKey, piece: &PieceEntry, host_t: f64) {
-        let nominal_freq = *self
-            .nominal_freqs
-            .lock_ok()
-            .get(&key.mcu_id)
-            .unwrap_or_else(|| {
-                panic!(
-                    "no nominal clock frequency registered for mcu {} \
-                     — set_nominal_clock_freq was not called before streaming",
-                    key.mcu_id
-                )
-            });
+    pub(super) fn record(
+        &self,
+        key: AxisKey,
+        piece: &PieceEntry,
+        measured_freq_hz: Option<f64>,
+        host_t: f64,
+    ) {
+        let clock_freq_hz = match measured_freq_hz {
+            Some(freq) if freq.is_finite() && freq > 0.0 => freq,
+            _ => {
+                let nominal = *self
+                    .nominal_freqs
+                    .lock_ok()
+                    .get(&key.mcu_id)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "no nominal clock frequency registered for mcu {} \
+                             — set_nominal_clock_freq was not called before streaming",
+                            key.mcu_id
+                        )
+                    });
+                tracing::warn!(
+                    subsystem = "motion",
+                    event = "history_clock_freq_unmeasured",
+                    mcu = key.mcu_id,
+                    axis = key.axis,
+                    nominal,
+                    "[history] no measured clock rate for this mcu — keying the piece \
+                     off the configured crystal"
+                );
+                f64::from(nominal)
+            }
+        };
         self.store
             .lock_ok()
-            .record(key, piece, nominal_freq, host_t);
+            .record(key, piece, clock_freq_hz, host_t);
     }
 }
 
@@ -60,6 +90,11 @@ pub enum PumpMsg {
     Resume(Vec<AxisKey>),
     DripArm(DripArm),
     DripDisarm(u64),
+    StepcompressBarrierAck {
+        mcu_id: u32,
+        oid: u8,
+        seq: u32,
+    },
     Barrier(std::sync::mpsc::SyncSender<()>),
     Shutdown,
 }
@@ -159,6 +194,15 @@ pub trait PieceSink: Send {
             )?;
         }
         Ok(())
+    }
+
+    /// Routes a classic-stepping `stepcompress_barrier_ack` to the endpoint
+    /// that issued the barrier.
+    fn on_barrier_ack(&self, mcu_id: u32, oid: u8, seq: u32) -> Result<(), SendError> {
+        Err(SendError::Fatal(format!(
+            "stepcompress_barrier_ack oid={oid} seq={seq} arrived for mcu {mcu_id}, which has \
+             no stepcompress endpoint"
+        )))
     }
 }
 

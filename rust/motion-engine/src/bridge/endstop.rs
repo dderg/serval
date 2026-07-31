@@ -256,6 +256,17 @@ pub(super) fn dispatch_endstop_trip(
                 }
                 Ok(positions)
             });
+            if let Err(e) = outcome.as_ref() {
+                tracing::error!(
+                    subsystem = "trip-relay",
+                    event = "trip_handler_failed",
+                    mcu = event_mcu,
+                    endstop_id,
+                    trip_clock,
+                    error = %e,
+                    "endstop trip handling failed — the homing move is aborted"
+                );
+            }
             let _ = run.notify.send(outcome);
         })
         .expect("spawn homing-trip-handler");

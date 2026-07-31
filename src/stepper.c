@@ -55,6 +55,7 @@ command_config_stepper(uint32_t *args)
     if (s->step_both_edge)
         s->flags |= SF_SINGLE_SCHED;
     move_queue_setup(&s->mq, sizeof(struct stepper_move));
+    move_queue_setup(&s->completed_barriers, sizeof(struct stepper_move));
     if (HAVE_EDGE_OPTIMIZATION) {
         if (s->step_both_edge && s->step_pulse_ticks <= EDGE_STEP_TICKS)
             s->flags |= SF_OPTIMIZED_PATH;
@@ -96,15 +97,11 @@ stepper_stop(struct trsync_signal *tss, uint8_t reason)
 {
     struct stepper *s = container_of(tss, struct stepper, stop_signal);
 #if CONFIG_CLASSIC_STEPPING
-    sched_del_timer(&s->time);
-    s->next_step_time = s->time.waketime = 0;
-    s->position = -stepper_get_position(s);
-    s->count = 0;
-    s->flags = (s->flags & SF_OPTIMIZED_PATH) | SF_NEED_RESET;
-    move_queue_clear(&s->mq);
-#endif
+    stepper_classic_halt(s);
+#else
     gpio_out_write(s->dir_pin, 0);
     gpio_out_write(s->step_pin, s->step_idle_level);
+#endif
 }
 
 void

@@ -12,7 +12,6 @@ from __future__ import annotations
 import pytest
 
 from tools.sim import configs
-from tools.sim.world import EndstopPulser
 
 pytestmark = pytest.mark.needs_elf
 
@@ -63,9 +62,7 @@ def test_stepcompress_step_count_matches_distance(sim_world):
 def test_stepcompress_homing_trips(sim_world):
     world = _boot(sim_world)
     world.gcode_ok("SET_KINEMATIC_POSITION X=125 Y=125 Z=125")
-    control = world.sim_control("f4")
-    with EndstopPulser(control, [(0, 202)]):
-        world.gcode_ok("G28 Z", timeout=120)
+    world.gcode_ok("G28 Z", timeout=120)
     world.gcode_ok("M400")
     assert world.shutdown_line() is None, world.log_tail()
     assert world.status()["toolhead"]["homed_axes"].lower().find("z") >= 0
