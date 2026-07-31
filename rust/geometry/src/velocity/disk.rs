@@ -1,6 +1,14 @@
+//! Run reconstruction: the integration grid every member's samples are taken at,
+//! and the routing that hands each member to the solver that plans it.
+//!
+//! The grid marcher this module was built around no longer emits anything — every
+//! member carries the chain its own solver plans — so what is left of it is
+//! exercised only by the tests that pin it until the deletion pass takes it out.
+#![cfg_attr(not(test), allow(dead_code))]
+
 use std::f64::consts::FRAC_PI_2;
 
-use super::profile::{self, StraightPhase};
+use super::profile::{self, BoundaryInfeasibility, StraightPhase};
 use super::{VelocityError, certify, curved, ride};
 
 const RK_MIN_STEP_FRAC: f64 = 1e-6;
@@ -376,27 +384,6 @@ fn certified_straight_chain(
     );
     certify_or_panic(kin, &chain);
     Ok(chain)
-}
-
-/// Re-read a member's samples off its own analytic chain: the samples become a
-/// view of the profile the lowering executes, not an independent integration
-/// that has to be reconciled with it.
-fn restate_from_chain(
-    local: &mut [(f64, f64, f64)],
-    chain: &[StraightPhase],
-    entry: (f64, f64),
-    exit: (f64, f64),
-) {
-    let arcs: Vec<f64> = local.iter().map(|p| p.0).collect();
-    for (p, (v, a)) in local.iter_mut().zip(ride::chain_states(chain, &arcs)) {
-        p.1 = v;
-        p.2 = a;
-    }
-    let last = local.len() - 1;
-    local[0].1 = entry.0;
-    local[0].2 = entry.1;
-    local[last].1 = exit.0;
-    local[last].2 = exit.1;
 }
 
 fn closed_form_is_available(kin: &Kinematics) -> bool {
@@ -1007,6 +994,116 @@ fn merge_constant_accel(chain: Vec<StraightPhase>) -> Vec<StraightPhase> {
     out
 }
 
+/// The run's integration grid: the arc-length nodes every member's samples are
+/// taken at. Every member emits the chain its own solver plans and reads its
+/// samples off that chain, so the grid supplies node positions and nothing else.
+///
+/// It also carries the one envelope rejection that outlives the marcher. A
+/// backward rail sweep gives, at each node, the highest speed from which the exit
+/// and every downstream cap stay reachable; where that envelope descends faster
+/// than the disk rail allows, the run is infeasible at these limits and is
+/// refused rather than emitted.
+fn run_grid(members: &[RunMember], run_start_v: f64) -> Option<Vec<f64>> {
+    let entry_v = run_start_v;
+    let exit_v = members[members.len() - 1].exit_v;
+    let s = integration_grid(members, entry_v <= VELOCITY_FLOOR, exit_v <= VELOCITY_FLOOR);
+    let jerk = members
+        .iter()
+        .map(|m| m.kin.jerk)
+        .fold(f64::INFINITY, f64::min);
+    if !jerk.is_finite() {
+        return Some(s);
+    }
+    let n = s.len();
+    let (vlc, accel, kappa) = constraint_arrays(members, &s);
+    let s_rev: Vec<f64> = (0..n).map(|k| s[n - 1] - s[n - 1 - k]).collect();
+    let rev = |a: &[f64]| -> Vec<f64> { (0..n).map(|k| a[n - 1 - k]).collect() };
+    let (vlc_rev, accel_rev, kappa_rev) = (rev(&vlc), rev(&accel), rev(&kappa));
+    let cap_a_rev = chord_slopes(&s_rev, &vlc_rev);
+    let track = ride::Track {
+        s: &s_rev,
+        cap_v: &vlc_rev,
+        cap_a: &cap_a_rev,
+        accel: &accel_rev,
+        kappa: &kappa_rev,
+        j_max: jerk,
+    };
+    let pass = ride::reach_pass(&track, exit_v, 0.0, None);
+    let bwd_v = rev(&pass.v);
+    let bwd_feasible: Vec<bool> = (0..n).map(|k| pass.feasible[n - 1 - k]).collect();
+    for i in 0..n - 1 {
+        if !(bwd_feasible[i] && bwd_feasible[i + 1]) {
+            continue;
+        }
+        if bwd_v[i] > vlc[i] || bwd_v[i + 1] > vlc[i + 1] {
+            continue;
+        }
+        let ds = s[i + 1] - s[i];
+        if ds <= GRID_DEDUP_MM {
+            continue;
+        }
+        let descent = (bwd_v[i] * bwd_v[i] - bwd_v[i + 1] * bwd_v[i + 1]) / (2.0 * ds);
+        let rail = disk_rail_accel(accel[i], kappa[i], bwd_v[i]).max(disk_rail_accel(
+            accel[i + 1],
+            kappa[i + 1],
+            bwd_v[i + 1],
+        ));
+        if descent > rail + ENVELOPE_BRAKE_SLACK_FRAC * accel[i] {
+            return None;
+        }
+    }
+    Some(s)
+}
+
+/// The grid nodes inside a member, in member-local arc length, both of the
+/// member's own ends present exactly.
+fn member_arcs(grid: &[f64], s0: f64, length: f64) -> Vec<f64> {
+    let s1 = s0 + length;
+    let lo = grid.partition_point(|&x| x < s0 - 1e-9);
+    let hi = grid.partition_point(|&x| x <= s1 + 1e-9);
+    let mut arcs: Vec<f64> = grid[lo..hi]
+        .iter()
+        .map(|&x| (x - s0).clamp(0.0, length))
+        .collect();
+    arcs.dedup_by(|a, b| (*a - *b).abs() <= GRID_DEDUP_MM);
+    if arcs.first().is_none_or(|&x| x > 1e-9) {
+        arcs.insert(0, 0.0);
+    }
+    if arcs.last().is_none_or(|&x| (x - length).abs() > 1e-9) {
+        arcs.push(length);
+    }
+    let last = arcs.len() - 1;
+    arcs[0] = 0.0;
+    arcs[last] = length;
+    arcs
+}
+
+/// A member's samples read off the chain it executes, with the run's own
+/// boundary states at its ends: the samples are a view of the profile the
+/// lowering executes, not an independent integration to be reconciled with it.
+fn samples_from_chain(
+    arcs: &[f64],
+    chain: &[StraightPhase],
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> Vec<(f64, f64, f64)> {
+    let mut samples: Vec<(f64, f64, f64)> = if chain.is_empty() {
+        arcs.iter().map(|&s| (s, entry.0, entry.1)).collect()
+    } else {
+        ride::chain_states(chain, arcs)
+            .into_iter()
+            .zip(arcs)
+            .map(|((v, a), &s)| (s, v, a))
+            .collect()
+    };
+    let last = samples.len() - 1;
+    samples[0].1 = entry.0;
+    samples[0].2 = entry.1;
+    samples[last].1 = exit.0;
+    samples[last].2 = exit.1;
+    samples
+}
+
 /// Reconstruct the run's `(s, v, a)` profile and its phase chain.
 ///
 /// The velocity-limit curve (feed and `sqrt(accel / kappa)`) is sampled on the
@@ -1140,25 +1237,6 @@ fn reconstruct_flat(
     Some((samples, phases))
 }
 
-/// Linearly interpolate the reconstructed flat profile at run-arc `s`. Member
-/// boundaries read this single smoothed profile so a roll-off straddling a
-/// collinear junction is sampled consistently on both sides of the seam.
-fn interp_flat(flat: &[(f64, f64, f64)], s: f64) -> Option<(f64, f64)> {
-    let first = flat.first()?;
-    let last = flat.last()?;
-    if s <= first.0 {
-        return Some((first.1, first.2));
-    }
-    if s >= last.0 {
-        return Some((last.1, last.2));
-    }
-    let i = flat.partition_point(|p| p.0 < s);
-    let (lo, hi) = (flat[i - 1], flat[i]);
-    let span = hi.0 - lo.0;
-    let t = if span > 1e-12 { (s - lo.0) / span } else { 0.0 };
-    Some((lo.1 + t * (hi.1 - lo.1), lo.2 + t * (hi.2 - lo.2)))
-}
-
 /// A member no chain can close between the two boundary states its envelope
 /// neighbours fixed: the entry state its predecessor must hand it is not one
 /// this member can be entered at and still land on its own exit.
@@ -1207,20 +1285,23 @@ pub(super) fn curved_solver_is_available(kin: &Kinematics) -> bool {
         && kin.length.is_finite()
         && kin.accel > 0.0
         && kin.jerk > 0.0
-        && kin.jerk.is_finite()
         && kin.flat_ceiling > 0.0
         && kin.kappa0.is_finite()
         && kin.sigma.is_finite()
 }
 
-fn solver_is_available(kin: &Kinematics) -> bool {
-    closed_form_is_available(kin) || curved_solver_is_available(kin)
+/// Whether the planner already has a chain for this member without marching the
+/// run: the closed form on a straight the jerk budget bounds, the certified curved
+/// solver on anything else, or the boundary handoff a zero-length member is. Every
+/// member does, and [`marched_clip`] is where that is asserted.
+fn solver_plans(kin: &Kinematics) -> bool {
+    kin.length == 0.0 || closed_form_is_available(kin) || curved_solver_is_available(kin)
 }
 
-/// The run's marched chain clipped to a member no solver applies to — a
-/// degenerate length, budget or ceiling, or unlimited jerk. Every other member
-/// emits the chain its own solver plans, and a solver that refuses is a hard
-/// planning error, so reaching here with a solver in hand is a bug.
+/// The run's marched chain clipped to a member no solver applies to. Every member
+/// is planned by a solver of its own now — the closed form on a straight, the
+/// certified curved solver on anything else, and a zero-length member by the
+/// boundary handoff that is its whole content — so nothing reaches here.
 ///
 /// With jerk unlimited the profile steps its acceleration at phase joints by
 /// design, so only that case tolerates a clip whose accelerations do not chain; a
@@ -1228,15 +1309,17 @@ fn solver_is_available(kin: &Kinematics) -> bool {
 /// from its samples.
 fn marched_clip(chain: &[StraightPhase], kin: &Kinematics, s0: f64, s1: f64) -> Vec<StraightPhase> {
     assert!(
-        !solver_is_available(kin),
-        "the marcher was asked for a member of length {} with a solver of its own \
-         (accel {} jerk {} ceiling {} kappa0 {} sigma {})",
+        !solver_plans(kin),
+        "the marched run chain was asked for a member of length {} \
+         (accel {} jerk {} ceiling {} kappa0 {} sigma {}) over run arc [{s0}, {s1}] of a \
+         {}-phase chain, yet a solver of its own plans it",
         kin.length,
         kin.accel,
         kin.jerk,
         kin.flat_ceiling,
         kin.kappa0,
-        kin.sigma
+        kin.sigma,
+        chain.len()
     );
     let marcher_applies = kin.is_straight() || !kin.jerk.is_finite();
     if chain.is_empty() || !marcher_applies {
@@ -1250,19 +1333,41 @@ fn marched_clip(chain: &[StraightPhase], kin: &Kinematics, s0: f64, s1: f64) -> 
     }
 }
 
-/// The chain a member executes between two known boundary states: the closed
-/// form on a straight, the certified curved solver on anything with curvature.
+/// A zero-length member spans no arc and so executes nothing: the boundary
+/// handoff is the whole member. It carries no authority either, so a demand that
+/// it change speed is reported rather than quietly dropped.
+fn boundary_handoff(
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> Result<Vec<StraightPhase>, VelocityError> {
+    if entry.0 != exit.0 {
+        return Err(VelocityError::InfeasibleBoundary(
+            BoundaryInfeasibility::SpeedChangeWithoutAuthority {
+                from: entry.0,
+                to: exit.0,
+            },
+        ));
+    }
+    Ok(Vec::new())
+}
+
+/// The chain a member executes between two known boundary states: the closed form
+/// on a straight the jerk budget bounds, the certified curved solver on everything
+/// else — curvature, an unlimited jerk budget, or both. A degenerate budget or
+/// ceiling is not a member the planner may quietly skip, and the solver's own
+/// validation says so.
 fn member_chain(
     kin: &Kinematics,
     entry: (f64, f64),
     exit: (f64, f64),
-) -> Option<Result<Vec<StraightPhase>, VelocityError>> {
+) -> Result<Vec<StraightPhase>, VelocityError> {
+    if kin.length == 0.0 {
+        return boundary_handoff(entry, exit);
+    }
     if closed_form_is_available(kin) {
-        Some(certified_straight_chain(kin, entry, exit))
-    } else if curved_solver_is_available(kin) {
-        Some(curved::curved_chain(kin, entry, exit))
+        certified_straight_chain(kin, entry, exit)
     } else {
-        None
+        curved::curved_chain(kin, entry, exit)
     }
 }
 
@@ -1271,20 +1376,19 @@ fn member_chain(
 /// next window to continue this exact curve), and per-member closed-form jerk
 /// phases in move-local time/arc-length.
 ///
-/// Every member with a solver of its own — the closed form on a straight, the
-/// certified curved solver on anything with curvature — emits the chain planned
-/// between the two `(v, a)` boundary states the backward requirement pass fixed,
-/// so a blend inherits its entry brake instead of manufacturing one at a seam
-/// with no authority to build it, and reads its samples off that chain. Only a
-/// member no solver applies to — unlimited jerk, or a degenerate length or
-/// ceiling — falls back to the marched run chain.
+/// Every member emits the chain its own solver plans between the two `(v, a)`
+/// boundary states the backward requirement pass fixed — so a blend inherits its
+/// entry brake instead of manufacturing one at a seam with no authority to build
+/// it — and reads its samples off that chain. A member whose boundary pair no
+/// chain can close is reported; the settlement is what owes every member a pair
+/// it can close.
 pub(super) fn reconstruct_run(
     members: &[RunMember],
     run_start_v: f64,
     run_start_a: f64,
     _tol: f64,
 ) -> Option<RunReconstruction> {
-    let (flat, chain) = reconstruct_flat(members, run_start_v, run_start_a)?;
+    let grid = run_grid(members, run_start_v)?;
     let boundary = run_boundary_states(members, run_start_v, run_start_a);
 
     let mut out = RunReconstruction {
@@ -1296,48 +1400,27 @@ pub(super) fn reconstruct_run(
         planned: MemberClassCounts::default(),
     };
     for (index, m) in members.iter().enumerate() {
-        let s0 = m.fwd_s;
-        let s1 = m.fwd_s + m.kin.length;
-        let lo = flat.partition_point(|p| p.0 < s0 - 1e-9);
-        let hi = flat.partition_point(|p| p.0 <= s1 + 1e-9);
-        let mut local: Vec<(f64, f64, f64)> = flat[lo..hi]
-            .iter()
-            .map(|p| ((p.0 - s0).clamp(0.0, m.kin.length), p.1, p.2))
-            .collect();
-        local.dedup_by(|a, b| (a.0 - b.0).abs() <= GRID_DEDUP_MM);
-        if local.first().is_none_or(|p| p.0 > 1e-9) {
-            let (v, a) = interp_flat(&flat, s0)?;
-            local.insert(0, (0.0, v, a));
-        }
-        if local
-            .last()
-            .is_none_or(|p| (p.0 - m.kin.length).abs() > 1e-9)
-        {
-            let (v, a) = interp_flat(&flat, s1)?;
-            local.push((m.kin.length, v, a));
-        }
-        if let Some(first) = local.first_mut() {
-            first.0 = 0.0;
-        }
-        if let Some(last) = local.last_mut() {
-            last.0 = m.kin.length;
-        }
-
         let envelope_entry = boundary[index];
         let envelope_exit = boundary[index + 1];
-        if closed_form_is_available(m.kin) {
-            out.planned.straight += 1;
-        } else if curved_solver_is_available(m.kin) {
-            out.planned.curved += 1;
+        if m.kin.length > 0.0 {
+            if m.kin.is_straight() {
+                out.planned.straight += 1;
+            } else {
+                out.planned.curved += 1;
+            }
         }
-        let planned = member_chain(m.kin, envelope_entry, envelope_exit);
-        let declined = match &planned {
-            Some(Err(why)) => Some(*why),
-            _ => None,
-        };
-        let envelope = match planned {
-            Some(Ok(built)) => built,
-            Some(Err(why)) => {
+        let arcs = member_arcs(&grid, m.fwd_s, m.kin.length);
+        let chain = match member_chain(m.kin, envelope_entry, envelope_exit) {
+            Ok(chain) => {
+                assert!(
+                    ride::chain_is_continuous(&chain, m.kin.jerk.is_finite()),
+                    "member {index} of length {} planned a discontinuous chain \
+                     between entry {envelope_entry:?} and exit {envelope_exit:?}",
+                    m.kin.length
+                );
+                chain
+            }
+            Err(why) => {
                 out.unreachable.push(UnreachableMember {
                     index,
                     entry: envelope_entry,
@@ -1346,28 +1429,13 @@ pub(super) fn reconstruct_run(
                 });
                 Vec::new()
             }
-            None => Vec::new(),
         };
-        out.envelope_chains.push(envelope.clone());
-
-        let emitted = if !envelope.is_empty() {
-            assert!(
-                ride::chain_is_continuous(&envelope, true),
-                "member {index} of length {} planned a discontinuous chain \
-                 between entry {envelope_entry:?} and exit {envelope_exit:?}",
-                m.kin.length
-            );
-            restate_from_chain(&mut local, &envelope, envelope_entry, envelope_exit);
-            envelope
-        } else if declined.is_some() {
-            Vec::new()
-        } else {
-            marched_clip(&chain, m.kin, s0, s1)
-        };
-        let member_exit = local.last().map_or(envelope_exit, |p| (p.1, p.2));
-        out.samples.push(local);
-        out.exit_states.push(member_exit);
-        out.phases.push(emitted);
+        let samples = samples_from_chain(&arcs, &chain, envelope_entry, envelope_exit);
+        out.envelope_chains.push(chain.clone());
+        out.exit_states
+            .push(samples.last().map_or(envelope_exit, |p| (p.1, p.2)));
+        out.samples.push(samples);
+        out.phases.push(chain);
     }
     Some(out)
 }
@@ -1385,10 +1453,13 @@ pub(super) fn sample_profile(
         exit_a: 0.0,
         fwd_s: 0.0,
     };
-    reconstruct_run(&[member], entry, 0.0, tol)?
-        .samples
-        .into_iter()
-        .next()
+    let run = reconstruct_run(&[member], entry, 0.0, tol)?;
+    assert!(
+        run.unreachable.is_empty(),
+        "sample_profile was handed a boundary pair the member cannot close: {:?}",
+        run.unreachable.first().map(|m| (m.entry, m.exit, m.why))
+    );
+    run.samples.into_iter().next()
 }
 
 #[cfg(test)]

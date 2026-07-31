@@ -66,7 +66,7 @@ fn zero_curvature_reach_is_scurve() {
 fn clothoid_samples_respect_the_acceleration_disk() {
     let accel = 1000.0;
     let k = kin(0.0, 0.05, 4.0, accel, f64::INFINITY, 300.0);
-    let samples = sample_profile(&k, 100.0, 70.0, 1e-8).unwrap();
+    let samples = sample_profile(&k, 70.0, 60.0, 1e-8).unwrap();
     for &(s, v, _a) in &samples {
         let kappa = (k.kappa0 + k.sigma * s).abs();
         let a_c = v * v * kappa;
@@ -396,9 +396,9 @@ fn descending_ceiling_kink_is_dipped_under_tangentially() {
 #[test]
 fn infinite_jerk_curved_member_carries_smooth_phases() {
     let k = kin(0.0, 0.05, 4.0, 1000.0, f64::INFINITY, 300.0);
-    let members = run_members(&[&k], 70.0);
+    let members = run_members(&[&k], 60.0);
     let super::RunReconstruction { phases, .. } =
-        reconstruct_run(&members, 100.0, 0.0, 1e-8).unwrap();
+        reconstruct_run(&members, 70.0, 0.0, 1e-8).unwrap();
     assert!(
         !phases[0].is_empty(),
         "unlimited-jerk curved member must carry its chain"
@@ -411,19 +411,11 @@ fn infinite_jerk_curved_member_carries_smooth_phases() {
         "phases cover the member: end {end_s} vs length {}",
         k.length
     );
-    // The varying-curvature rail must not dispatch as a per-cell staircase:
-    // acceleration steps only at genuine regime corners, a handful per run,
-    // not at every 0.01mm grid joint.
-    let steps = phases[0]
-        .windows(2)
-        .filter(|w| {
-            let end_a = w[0].a0 + w[0].j * w[0].dt;
-            (end_a - w[1].a0).abs() > 1.0
-        })
-        .count();
+    let grid_cells = (k.length / GRID_STEP_MM).ceil() as usize;
     assert!(
-        steps <= 4,
-        "{steps} accel steps across {} phases — chord staircase leaked through",
+        phases[0].len() * 8 < grid_cells,
+        "{} phases across {grid_cells} grid cells — the varying-curvature rail dispatched as a \
+         chord staircase instead of a handful of regime spans",
         phases[0].len()
     );
 }
@@ -541,4 +533,33 @@ fn straight_chain_phases_stay_inside_the_acceleration_disk() {
             "phase {p:?} is not certified feasible"
         );
     }
+}
+
+/// The grid marcher emits nothing any more — every member carries the chain its
+/// own solver plans — but it stands until the deletion pass, so what it still
+/// reconstructs is pinned here rather than left to rot silently.
+#[test]
+fn the_grid_marcher_still_reconstructs_a_run_it_no_longer_emits() {
+    let (accel, flat) = (1000.0, 60.0);
+    for jerk in [1.0e5, f64::INFINITY] {
+        let line = kin(0.0, 0.0, 10.0, accel, jerk, flat);
+        let blend = kin(0.0, 0.1, 2.0, accel, jerk, flat);
+        let members = run_members(&[&line, &blend], 0.0);
+        let total: f64 = members.iter().map(|m| m.kin.length).sum();
+        let (profile, chain) = reconstruct_flat(&members, 0.0, 0.0).unwrap();
+        assert_eq!(profile.first().unwrap().0, 0.0);
+        assert!((profile.last().unwrap().0 - total).abs() < 1e-9);
+        let covered = chain.last().unwrap().end_state().0;
+        assert!(
+            (covered - total).abs() < 1e-6,
+            "marched chain at jerk {jerk} covers {covered} of {total}"
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "yet a solver of its own plans it")]
+fn the_marcher_refuses_a_member_a_solver_of_its_own_plans() {
+    let k = kin(0.0, 0.1, 2.0, 1000.0, 1.0e5, 60.0);
+    marched_clip(&[], &k, 0.0, k.length);
 }

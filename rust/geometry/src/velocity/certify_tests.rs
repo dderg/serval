@@ -408,13 +408,49 @@ fn degenerate_kinematics_fail_loudly() {
     certified_dwell(&kin, 0.0, 100.0, 0.0, 0.0, 0.01);
 }
 
+/// An unlimited budget leaves the ball with no rim to cross, so the certificate
+/// stops charging for normal jerk — a demand no finite budget could carry is
+/// certified — while the acceleration disk still binds exactly as before.
 #[test]
-#[should_panic(expected = "kinematics.jerk must be finite")]
-fn infinite_jerk_fails_loudly() {
+fn an_unlimited_jerk_budget_drops_the_ball_and_keeps_the_disk() {
     let kin = Kinematics {
         length: 10.0,
         accel: 3000.0,
         jerk: f64::INFINITY,
+        kappa0: 0.1,
+        sigma: 1.0,
+        flat_ceiling: 300.0,
+    };
+    let (v, dt) = (100.0, 0.001);
+    let kappa_end = kin.kappa0 + kin.sigma * v * dt;
+    assert!(
+        kappa_end * v * v < kin.accel,
+        "the whole span must sit inside the disk for the ball to be the only question"
+    );
+    let normal_jerk = kin.sigma * v * v * v;
+    assert!(is_certified(&kin, 0.0, v, 0.0, 0.0, dt));
+
+    let finite_budget = Kinematics {
+        jerk: 0.5 * normal_jerk,
+        ..kin
+    };
+    assert!(
+        !is_certified(&finite_budget, 0.0, v, 0.0, 0.0, dt),
+        "a budget below the normal jerk demand must refuse the same span"
+    );
+
+    let outside_the_disk = 200.0;
+    assert!(kin.kappa0 * outside_the_disk * outside_the_disk > kin.accel);
+    assert!(!is_certified(&kin, 0.0, outside_the_disk, 0.0, 0.0, dt));
+}
+
+#[test]
+#[should_panic(expected = "kinematics.jerk must be a number")]
+fn nan_jerk_fails_loudly() {
+    let kin = Kinematics {
+        length: 10.0,
+        accel: 3000.0,
+        jerk: f64::NAN,
         kappa0: 0.0,
         sigma: 0.0,
         flat_ceiling: 300.0,

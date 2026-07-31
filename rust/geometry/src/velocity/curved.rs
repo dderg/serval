@@ -1,4 +1,3 @@
-#![cfg_attr(not(test), allow(dead_code))]
 //! Closed-form profile solver for a curved member (clothoid, and its arc and
 //! line degeneracies).
 //!
@@ -168,7 +167,7 @@ fn reversed(kin: &Kinematics) -> Kinematics {
 
 fn validate(kin: &Kinematics) {
     assert!(
-        kin.accel > 0.0 && kin.jerk > 0.0 && kin.jerk.is_finite() && kin.flat_ceiling > 0.0,
+        kin.accel > 0.0 && kin.jerk > 0.0 && kin.flat_ceiling > 0.0,
         "curved: degenerate kinematics accel={} jerk={} flat_ceiling={}",
         kin.accel,
         kin.jerk,
@@ -429,6 +428,10 @@ impl March {
 
     fn push(&mut self, j: f64, dt: f64) {
         assert!(dt.is_finite(), "curved: march handed a non-finite dt {dt}");
+        assert!(
+            j.is_finite(),
+            "curved: a phase carries the jerk it is executed at, and {j} is not one"
+        );
         if dt <= 0.0 {
             return;
         }
@@ -445,6 +448,17 @@ impl March {
         self.t += dt;
         self.s = s;
         self.v = v;
+        self.a = a;
+    }
+
+    /// Move the acceleration without spending time or arc on it. An unlimited
+    /// jerk budget is exactly the licence to do so; a finite one owes a swing.
+    fn step_accel(&mut self, a: f64, j: f64) {
+        assert!(
+            !j.is_finite(),
+            "curved: an acceleration step costs nothing only where the jerk budget is unlimited, \
+             got j={j}"
+        );
         self.a = a;
     }
 
@@ -594,6 +608,29 @@ fn zero_jerk_arc_time(v: f64, a: f64, ds: f64) -> Option<f64> {
     }
 }
 
+/// Fastest chain across the member where the jerk budget is unlimited: the
+/// acceleration is a free control the profile steps at no cost, so the pass drives
+/// (or brakes) at the whole disk authority until the speed lands on the cap and
+/// cruises the rest. It is the disk-and-ceiling profile, in zero-jerk phases
+/// whose accelerations step at the joints — which unlimited jerk is precisely
+/// what pays for.
+fn march_stepping(caps: &Caps, entry: (f64, f64), length: f64, cap_speed: f64) -> March {
+    let mut m = March::new(entry);
+    let target = caps.v.min(cap_speed);
+    if caps.a > 0.0 && m.v != target {
+        let drive = if m.v < target { caps.a } else { -caps.a };
+        m.step_accel(drive, caps.j);
+        if m.stage(0.0, (target - m.v) / drive, length) {
+            return m;
+        }
+    }
+    m.step_accel(0.0, caps.j);
+    if let Some(cruise) = zero_jerk_arc_time(m.v, 0.0, length - m.s) {
+        m.stage(0.0, cruise, length);
+    }
+    m
+}
+
 /// Fastest chain across the whole member: swing the acceleration to the cap,
 /// hold it, swing it back so the speed lands exactly on `cap_speed`, then
 /// cruise. Entered above `cap_speed` the swings brake instead of drive, which is
@@ -601,6 +638,9 @@ fn zero_jerk_arc_time(v: f64, a: f64, ds: f64) -> Option<f64> {
 /// is truncated where the member ends.
 fn march_forward(caps: &Caps, entry: (f64, f64), length: f64, cap_speed: f64) -> March {
     let mut m = March::new(entry);
+    if !caps.j.is_finite() {
+        return march_stepping(caps, entry, length, cap_speed);
+    }
     if caps.j <= 0.0 {
         assert!(
             m.a == 0.0,
@@ -741,6 +781,18 @@ fn end_state(chain: &[StraightPhase], entry: (f64, f64)) -> (f64, f64) {
             (v, a)
         }
         None => entry,
+    }
+}
+
+/// The state a stretch hands the next one. An unlimited jerk budget makes the
+/// acceleration no part of it: whatever follows steps to the acceleration it
+/// needs at no cost, so a handoff that named one would only over-determine it.
+fn handoff_state(kin: &Kinematics, chain: &[StraightPhase], carried: (f64, f64)) -> (f64, f64) {
+    let (v, a) = end_state(chain, carried);
+    if kin.jerk.is_finite() {
+        (v, a)
+    } else {
+        (v, 0.0)
     }
 }
 
@@ -900,13 +952,6 @@ fn shifted(chain: &[StraightPhase], s0: f64, t0: f64) -> impl Iterator<Item = St
     })
 }
 
-fn chain_end(chain: &[StraightPhase]) -> Option<(f64, f64)> {
-    chain.last().map(|p| {
-        let (_, v, a) = p.end_state();
-        (v, a)
-    })
-}
-
 fn chain_time(chain: &[StraightPhase]) -> f64 {
     chain.iter().map(|p| p.dt).sum()
 }
@@ -991,12 +1036,16 @@ fn reach_span(
 }
 
 /// Adjacent phases carrying the same jerk are one phase: the state is continuous
-/// across a band seam, so keeping both only encodes the same cubic twice.
+/// across a band seam, so keeping both only encodes the same cubic twice. On a
+/// zero-jerk pair the acceleration *is* the cubic, so it has to agree too — an
+/// unlimited jerk budget steps it between two such phases, and merging those
+/// would silently re-plan the second one at the first one's acceleration.
 fn coalesce(chain: Vec<StraightPhase>) -> Vec<StraightPhase> {
     let mut out: Vec<StraightPhase> = Vec::with_capacity(chain.len());
     for p in chain {
+        let same_cubic = |prev: &StraightPhase| prev.j == p.j && (p.j != 0.0 || prev.a0 == p.a0);
         match out.last_mut() {
-            Some(prev) if prev.j == p.j => prev.dt += p.dt,
+            Some(prev) if same_cubic(prev) => prev.dt += p.dt,
             _ => out.push(p),
         }
     }
@@ -1029,7 +1078,7 @@ fn banded_reach(
     let mut state = entry;
     for (band, &cap) in bands.iter().zip(&tail) {
         let span = reach_span(band, state, cap)?;
-        state = chain_end(&span).unwrap_or(state);
+        state = handoff_state(band, &span, state);
         spans.push(span);
     }
     Ok(spans)
@@ -1087,7 +1136,7 @@ fn band_march_edges(bands: &[Kinematics], tail: &[f64], entry: (f64, f64)) -> Ve
         let caps = caps_at(band, ceiling);
         let held = holdable(carried, ceiling, &caps);
         let marched = march_forward(&caps, held, band.length, caps.v);
-        edges.push(end_state(&marched.phases, held));
+        edges.push(handoff_state(band, &marched.phases, held));
     }
     edges
 }
@@ -1095,13 +1144,19 @@ fn band_march_edges(bands: &[Kinematics], tail: &[f64], entry: (f64, f64)) -> Ve
 /// The carried state as this band can actually hold it: the speed under the
 /// band's ceiling, and the acceleration inside both the band's authority and the
 /// swing that keeps the unwind between rest and that ceiling. Marching from a
-/// state whose unwind leaves the band would drive the speed negative.
+/// state whose unwind leaves the band would drive the speed negative. An
+/// unlimited budget unwinds instantly and so costs no speed at all, leaving the
+/// authority as the only bound.
 fn holdable(carried: (f64, f64), ceiling: f64, caps: &Caps) -> (f64, f64) {
     let v = carried.0.clamp(0.0, ceiling);
-    let swing_to = |headroom: f64| (2.0 * caps.j * headroom.max(0.0)).sqrt();
-    let a = carried
-        .1
-        .clamp(-swing_to(v).min(caps.a), swing_to(ceiling - v).min(caps.a));
+    let swing_to = |headroom: f64| {
+        if caps.j.is_finite() {
+            (2.0 * caps.j * headroom.max(0.0)).sqrt().min(caps.a)
+        } else {
+            caps.a
+        }
+    };
+    let a = carried.1.clamp(-swing_to(v), swing_to(ceiling - v));
     (v, a)
 }
 
@@ -1275,7 +1330,15 @@ fn ladder_climb(kin: &Kinematics, entry: (f64, f64), v_top: f64, max_len: f64) -
 /// rungs to buy anything the member's single cap set cannot. On a straight
 /// member it does not vary at all, and the ladder is the same profile spread
 /// over eight times the phases.
+///
+/// The rungs are a jerk device — each hands its successor an acceleration it
+/// wound with its own budget — so an unlimited budget has no rungs to climb: it
+/// steps the acceleration outright and the stepping march is already the whole
+/// answer.
 fn ladder_pays(kin: &Kinematics, v_top: f64) -> bool {
+    if !kin.jerk.is_finite() {
+        return false;
+    }
     let lowest = caps_at(kin, rung_speeds(v_top)[0]).a;
     caps_at(kin, v_top).a < lowest * (1.0 - LADDER_AUTHORITY_SPREAD)
 }
@@ -1528,7 +1591,7 @@ pub(super) fn entry_requirement(
     let back = reversed(kin);
     let seed = (exit.0, -exit.1);
     let chain = reach_chain(&back, seed)?;
-    let (v, a) = end_state(&chain, seed);
+    let (v, a) = handoff_state(&back, &chain, seed);
     Ok((v, -a))
 }
 
@@ -1753,7 +1816,7 @@ pub(super) fn exit_accel_window(
 pub(super) fn reachable_exit(kin: &Kinematics, entry: (f64, f64)) -> Option<(f64, f64)> {
     reach_chain(kin, entry)
         .ok()
-        .map(|chain| end_state(&chain, entry))
+        .map(|chain| handoff_state(kin, &chain, entry))
 }
 
 /// Fastest speed the member may be entered at and still be brought down to
@@ -1767,7 +1830,10 @@ pub(super) fn brake_reach(kin: &Kinematics, v_exit: f64) -> Option<f64> {
     reachable_exit(&reversed(kin), (v_exit, 0.0)).map(|(v, _)| v)
 }
 
-/// Fastest state the member can hand on at its exit, entered at `entry`.
+/// Fastest state the member can hand on at its exit, entered at `entry`. Nothing
+/// in the planner may assume a member is traversable, so this is the jerk audit's
+/// probe rather than a production call.
+#[cfg(test)]
 pub(super) fn curved_reach(kin: &Kinematics, entry: (f64, f64)) -> (f64, f64) {
     reachable_exit(kin, entry)
         .expect("curved_reach: the member cannot be traversed from this entry state")
@@ -1784,14 +1850,14 @@ fn extremal_chain(
     exit: (f64, f64),
 ) -> Option<Vec<StraightPhase>> {
     if let Ok(forward) = reach_spans(kin, entry) {
-        if states_match(exit, end_state(&forward, entry)) {
+        if states_match(exit, handoff_state(kin, &forward, entry)) {
             return Some(forward);
         }
     }
     let back = reversed(kin);
     let seed = (exit.0, -exit.1);
     let backward = reach_spans(&back, seed).ok()?;
-    let (v, a) = end_state(&backward, seed);
+    let (v, a) = handoff_state(&back, &backward, seed);
     states_match(entry, (v, -a)).then(|| reverse_chain(kin.length, &backward))
 }
 

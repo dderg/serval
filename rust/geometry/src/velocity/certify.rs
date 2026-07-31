@@ -217,7 +217,9 @@ fn is_nonneg_on(p: &Poly, span: f64, tol: f64) -> bool {
 
 struct Residuals {
     disk: Poly,
-    ball: Poly,
+    /// Absent where the jerk budget is unlimited: the ball has no rim to cross,
+    /// so the residual is nonnegative everywhere by construction.
+    ball: Option<Poly>,
     speed: Poly,
     disk_tol: f64,
     ball_tol: f64,
@@ -227,13 +229,19 @@ struct Residuals {
 impl Residuals {
     fn certified_on(&self, span: f64) -> bool {
         is_nonneg_on(&self.disk, span, self.disk_tol)
-            && is_nonneg_on(&self.ball, span, self.ball_tol)
+            && self
+                .ball
+                .as_ref()
+                .is_none_or(|ball| is_nonneg_on(ball, span, self.ball_tol))
             && is_nonneg_on(&self.speed, span, self.speed_tol)
     }
 
     fn feasible_at(&self, tau: f64) -> bool {
         self.disk.eval(tau) >= -self.disk_tol
-            && self.ball.eval(tau) >= -self.ball_tol
+            && self
+                .ball
+                .as_ref()
+                .is_none_or(|ball| ball.eval(tau) >= -self.ball_tol)
             && self.speed.eval(tau) >= -self.speed_tol
     }
 }
@@ -253,17 +261,21 @@ fn residuals(kin: &Kinematics, s0: f64, v0: f64, a0: f64, j: f64) -> Residuals {
         .sub(&accel.mul(&accel))
         .sub(&kappa2.mul(&v4));
 
-    let tangential = Poly::constant(j).sub(&kappa2.mul(&v3));
-    let normal = v3
-        .scaled(kin.sigma)
-        .add(&kappa.mul(&speed).mul(&accel).scaled(3.0));
-    let ball = Poly::constant(kin.jerk * kin.jerk)
-        .sub(&tangential.mul(&tangential))
-        .sub(&normal.mul(&normal));
+    let ball = kin.jerk.is_finite().then(|| {
+        let tangential = Poly::constant(j).sub(&kappa2.mul(&v3));
+        let normal = v3
+            .scaled(kin.sigma)
+            .add(&kappa.mul(&speed).mul(&accel).scaled(3.0));
+        Poly::constant(kin.jerk * kin.jerk)
+            .sub(&tangential.mul(&tangential))
+            .sub(&normal.mul(&normal))
+    });
 
     Residuals {
         disk_tol: CERTIFICATE_REL_TOL * kin.accel * kin.accel,
-        ball_tol: CERTIFICATE_REL_TOL * kin.jerk * kin.jerk,
+        ball_tol: ball
+            .as_ref()
+            .map_or(0.0, |_| CERTIFICATE_REL_TOL * kin.jerk * kin.jerk),
         speed_tol: CERTIFICATE_REL_TOL * kin.flat_ceiling,
         disk,
         ball,
@@ -286,9 +298,23 @@ fn require_positive(name: &str, x: f64) {
     );
 }
 
+/// An unlimited budget is a jerk budget: the ball residual drops out rather than
+/// overflowing. A NaN is not — it is a broken caller and says so.
+fn require_jerk_budget(jerk: f64) {
+    assert!(
+        !jerk.is_nan(),
+        "certify: kinematics.jerk must be a number, got NaN — the caller handed the certificate a \
+         broken budget"
+    );
+    assert!(
+        jerk > 0.0,
+        "certify: degenerate kinematics — kinematics.jerk must be strictly positive, got {jerk}"
+    );
+}
+
 fn validate(kin: &Kinematics, s0: f64, v0: f64, a0: f64, j: f64, dt: f64) {
     require_positive("kinematics.accel", kin.accel);
-    require_positive("kinematics.jerk", kin.jerk);
+    require_jerk_budget(kin.jerk);
     require_positive("kinematics.flat_ceiling", kin.flat_ceiling);
     require_finite("kinematics.kappa0", kin.kappa0);
     require_finite("kinematics.sigma", kin.sigma);
