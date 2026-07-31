@@ -29,6 +29,7 @@ pub struct FollowerWord {
 pub use space::{GcodePos, MachinePos};
 pub use surface::{Fade, MeshGrid, SurfaceBounds, SurfaceError, SurfaceSample, SurfaceTransform};
 pub use velocity::{
-    BoundaryState, MoveVelocity, StraightPhase, UnreachableEntryState, VelSample, VelocityError,
-    VelocityProfile, VelocityReport, plan_velocity_stops,
+    BoundaryState, EntryReachability, InfeasibilityTally, MoveVelocity, StraightPhase,
+    UnreachableEntryState, VelSample, VelocityError, VelocityProfile, VelocityReport,
+    plan_velocity_stops,
 };

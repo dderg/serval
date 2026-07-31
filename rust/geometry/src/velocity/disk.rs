@@ -1176,6 +1176,15 @@ pub(super) struct UnreachableMember {
     pub index: usize,
     pub entry: (f64, f64),
     pub exit: (f64, f64),
+    pub why: VelocityError,
+}
+
+/// How many members of each kind the envelope planned, so the reachability
+/// census has a denominator.
+#[derive(Default)]
+pub(super) struct MemberClassCounts {
+    pub straight: u32,
+    pub curved: u32,
 }
 
 pub(super) struct RunReconstruction {
@@ -1188,6 +1197,7 @@ pub(super) struct RunReconstruction {
     /// lowering already consumes are published through `phases`.
     pub envelope_chains: Vec<Vec<StraightPhase>>,
     pub unreachable: Vec<UnreachableMember>,
+    pub planned: MemberClassCounts,
 }
 
 /// The run's boundary states in order: the run's own entry, then each member's
@@ -1257,6 +1267,7 @@ pub(super) fn reconstruct_run(
         phases: Vec::with_capacity(members.len()),
         envelope_chains: Vec::with_capacity(members.len()),
         unreachable: Vec::new(),
+        planned: MemberClassCounts::default(),
     };
     for (index, m) in members.iter().enumerate() {
         let s0 = m.fwd_s;
@@ -1288,14 +1299,20 @@ pub(super) fn reconstruct_run(
 
         let envelope_entry = boundary[index];
         let envelope_exit = boundary[index + 1];
+        if closed_form_is_available(m.kin) {
+            out.planned.straight += 1;
+        } else if curved_solver_is_available(m.kin) {
+            out.planned.curved += 1;
+        }
         out.envelope_chains
             .push(match member_chain(m.kin, envelope_entry, envelope_exit) {
                 Some(Ok(built)) => built,
-                Some(Err(_)) => {
+                Some(Err(why)) => {
                     out.unreachable.push(UnreachableMember {
                         index,
                         entry: envelope_entry,
                         exit: envelope_exit,
+                        why,
                     });
                     Vec::new()
                 }

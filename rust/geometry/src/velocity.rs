@@ -21,6 +21,7 @@ pub use profile::{
     straight_chain_between,
 };
 
+use curved::AccelWindow;
 use disk::Kinematics;
 
 const VELOCITY_EPS_MM_S: f64 = 1e-9;
@@ -70,6 +71,85 @@ impl UnreachableEntryState {
     }
 }
 
+/// Per-cause tally of the boundary infeasibilities a member's chain reported.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct InfeasibilityTally {
+    pub length_too_short: u32,
+    pub unwind_over_ceiling: u32,
+    pub unwind_below_rest: u32,
+    pub accel_over_limit: u32,
+    pub speed_change_without_authority: u32,
+    pub length_not_closed: u32,
+    pub non_finite: u32,
+    pub unbounded_jerk_with_accel_boundary: u32,
+    pub uncertified_phase: u32,
+    pub other: u32,
+}
+
+impl InfeasibilityTally {
+    pub fn total(&self) -> u32 {
+        self.length_too_short
+            + self.unwind_over_ceiling
+            + self.unwind_below_rest
+            + self.accel_over_limit
+            + self.speed_change_without_authority
+            + self.length_not_closed
+            + self.non_finite
+            + self.unbounded_jerk_with_accel_boundary
+            + self.uncertified_phase
+            + self.other
+    }
+
+    fn record(&mut self, e: &VelocityError) {
+        let slot = match e {
+            VelocityError::UncertifiedPhase { .. } => &mut self.uncertified_phase,
+            VelocityError::InfeasibleBoundary(why) => match why {
+                BoundaryInfeasibility::LengthTooShort { .. } => &mut self.length_too_short,
+                BoundaryInfeasibility::UnwindOverCeiling { .. } => &mut self.unwind_over_ceiling,
+                BoundaryInfeasibility::UnwindBelowRest { .. } => &mut self.unwind_below_rest,
+                BoundaryInfeasibility::AccelOverLimit { .. } => &mut self.accel_over_limit,
+                BoundaryInfeasibility::SpeedChangeWithoutAuthority { .. } => {
+                    &mut self.speed_change_without_authority
+                }
+                BoundaryInfeasibility::LengthNotClosed { .. } => &mut self.length_not_closed,
+                BoundaryInfeasibility::NonFinite => &mut self.non_finite,
+                BoundaryInfeasibility::UnboundedJerkWithAccelBoundary { .. } => {
+                    &mut self.unbounded_jerk_with_accel_boundary
+                }
+            },
+            _ => &mut self.other,
+        };
+        *slot += 1;
+    }
+}
+
+/// Census of the envelope's per-member plans: how many members were planned
+/// between their two boundary states, how many of those plans failed, and why.
+/// The envelope chains cannot replace the marched profile until `unreachable`
+/// and `no_admissible_entry` are both zero.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct EntryReachability {
+    pub straight_members: u32,
+    pub curved_members: u32,
+    pub unreachable: u32,
+    /// Members that no entry acceleration whatsoever would have let the envelope
+    /// traverse to their exit: infeasible geometry at these limits rather than a
+    /// state badly handed over. A subset of `unreachable`.
+    pub no_admissible_entry: u32,
+    pub straight: InfeasibilityTally,
+    pub curved: InfeasibilityTally,
+    /// Seams where the interval of entry accelerations the member admits and the
+    /// interval its predecessor can deliver do not overlap: infeasible geometry
+    /// at these limits, not a solver shortfall.
+    pub accel_window_empty: u32,
+}
+
+impl EntryReachability {
+    pub fn member_plans(&self) -> u32 {
+        self.straight_members + self.curved_members
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct VelocityReport {
     pub stops: u32,
@@ -83,12 +163,7 @@ pub struct VelocityReport {
     /// into a seam that has no authority to build one.
     pub boundary_accel_seams: u32,
     pub worst_boundary_accel_mm_s2: f64,
-    /// Members whose backward solve could not name an entry requirement at all.
-    pub entry_requirement_unsolved: u32,
-    /// Members the forward emission could not plan between their two envelope
-    /// boundary states. Until this reaches zero the envelope chains cannot
-    /// replace the marched profile.
-    pub unreachable_entry_states: u32,
+    pub reachability: EntryReachability,
     pub worst_unreachable: Option<UnreachableEntryState>,
 }
 
@@ -265,11 +340,15 @@ pub fn plan_velocity_stops(
     )?;
     check_entry_ceiling(moves, &caps, entry, tol)?;
     let mut plan = seed_seam_velocities(&caps, stop_before, entry, &mut report);
+    cap_seams_at_hold_ceiling(&caps, &mut plan);
     let geo = compute_run_geometry(&caps, &plan);
     forward_pass(moves, &caps, &geo, &mut plan.v, tol)?;
-    let (barrier, v_barrier) = reverse_brake_envelope(moves, &caps, &geo, &mut plan.v, tol)?;
+    let (barrier, _) = reverse_brake_envelope(moves, &caps, &geo, &mut plan.v, tol)?;
     check_entry_brake(moves, &caps, &geo, &plan.v, entry, tol)?;
-    boundary_state_envelope(&caps, &mut plan, &mut report);
+    seam_accel_demands(&caps, &mut plan);
+    settle_seam_states(&caps, &mut plan, &mut report);
+    repair_stale_seam_accels(&caps, &mut plan);
+    let v_barrier = plan.v[barrier];
     let (out, boundaries) = reconstruct_runs(moves, &caps, &plan, &geo, entry, tol, &mut report)?;
 
     Ok(VelocityProfile {
@@ -467,18 +546,69 @@ fn seam_hold_ceiling(caps: &[MoveCaps], k: usize) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
-/// Walk the members right to left, each publishing the `(v, a)` it requires at
-/// its entry as a boundary condition on its predecessor. Where the requirement
-/// is at or below the velocity envelope the seam inherits the whole state — the
-/// brake the member's interior needs is carried into the seam instead of being
-/// manufactured there, which a `kappa = 0` seam has no authority to do. Above
-/// it the member has speed slack and pins nothing.
-fn boundary_state_envelope(caps: &[MoveCaps], plan: &mut SeamPlan, report: &mut VelocityReport) {
+/// The widest interval of entry accelerations the member downstream of seam `k`
+/// admits, entered at `v_seam` and landing on the exit state already fixed for
+/// it. `None` where no entry acceleration serves at all, or where the member has
+/// no solver to ask.
+fn seam_accel_window(
+    caps: &[MoveCaps],
+    k: usize,
+    v_seam: f64,
+    exit: BoundaryState,
+) -> Option<AccelWindow> {
+    let kin = &caps[k].kin;
+    if !disk::curved_solver_is_available(kin) {
+        return Some(AccelWindow { lo: 0.0, hi: 0.0 });
+    }
+    curved::entry_accel_window(kin, v_seam, (exit.v, exit.a)).ok()
+}
+
+/// Grid points the settlement sweeps across a seam's speed band looking for one
+/// it can settle at. The band's own ends are excluded: the top is the speed that
+/// already failed, and a seam at rest is a stop, not a settlement.
+const SEAM_SLOWDOWN_PROBES: u32 = 16;
+
+const SEAM_VELOCITY_BISECT_ITERS: u32 = 14;
+
+/// Share of its speed a seam gives up when the seam after it cannot settle at
+/// any speed: the successor's demand is unreachable because the *predecessor*
+/// arrives too fast to shed what the seam needs shed, and only slowing the seam
+/// before it opens the band.
+const SEAM_RETREAT_SHRINK: f64 = 0.85;
+
+/// Retreats the settlement may spend per member before it declares the run
+/// infeasible at these limits. Bounded so the search cannot iterate forever on
+/// geometry that will never settle.
+const SEAM_RETREATS_PER_MEMBER: u32 = 8;
+
+/// Hold every seam to the speed both its members can actually hold there, so the
+/// forward and backward sweeps never build an envelope above the jerk rail.
+fn cap_seams_at_hold_ceiling(caps: &[MoveCaps], plan: &mut SeamPlan) {
     for k in 1..caps.len() {
         if !plan.is_anchor[k] {
             plan.v[k] = plan.v[k].min(seam_hold_ceiling(caps, k));
         }
     }
+}
+
+/// Walk the members right to left, each publishing the `(v, a)` it requires at
+/// its entry as a boundary condition on its predecessor.
+///
+/// Where a member's fastest entry requirement is at or below the velocity
+/// envelope the seam inherits the whole state — the brake the member's interior
+/// needs is carried into the seam instead of being manufactured there, which a
+/// `kappa = 0` seam has no authority to do. Otherwise the velocity stays the
+/// envelope's and the acceleration comes from the interval the member admits at
+/// that velocity, which is the query `entry_requirement` cannot answer: it names
+/// one *fastest* `(v, a)` and leaves the acceleration at zero wherever the speed
+/// does not bind, handing the predecessor a state the member's interior does not
+/// actually accept.
+///
+/// The chain of demands this leaves is self-consistent by construction — every
+/// member closes from `(v[k], a[k])` to `(v[k + 1], a[k + 1])` — everywhere
+/// except at a run's own entry, which is an anchor the pass cannot move.
+/// [`settle_seam_states`] repairs it from there forward.
+fn seam_accel_demands(caps: &[MoveCaps], plan: &mut SeamPlan) {
     for k in (1..caps.len()).rev() {
         if plan.is_anchor[k] {
             continue;
@@ -487,19 +617,227 @@ fn boundary_state_envelope(caps: &[MoveCaps], plan: &mut SeamPlan, report: &mut 
             v: plan.v[k + 1],
             a: plan.a[k + 1],
         };
-        let Some(required) = required_entry_state(&caps[k].kin, exit) else {
-            report.entry_requirement_unsolved += 1;
-            continue;
-        };
-        if required.v > plan.v[k] * (1.0 + REQUIREMENT_BIND_REL) {
+        let binds = required_entry_state(&caps[k].kin, exit)
+            .filter(|required| required.v <= plan.v[k] * (1.0 + REQUIREMENT_BIND_REL));
+        match binds {
+            Some(required) => {
+                plan.v[k] = required.v;
+                plan.a[k] = required.a;
+            }
+            None => {
+                plan.a[k] = seam_accel_window(caps, k, plan.v[k], exit)
+                    .map_or(0.0, |window| window.nearest_to(0.0));
+            }
+        }
+    }
+}
+
+/// Largest seam velocity at or below `hi` that `settles`.
+///
+/// The band of speeds a seam can settle at is bounded below as well as above: a
+/// predecessor cannot brake to an arbitrarily low exit speed inside its own
+/// length, so descending blindly walks straight out of the feasible band. The
+/// search therefore sweeps the whole band from the top down for a grid point that
+/// settles, then bisects between it and the point above it.
+fn slowest_settling_seam<T>(hi: f64, settles: impl Fn(f64) -> Option<T>) -> Option<(f64, T)> {
+    if !(hi > 0.0) {
+        return None;
+    }
+    let step = hi / f64::from(SEAM_SLOWDOWN_PROBES);
+    let mut found = None;
+    for i in (1..SEAM_SLOWDOWN_PROBES).rev() {
+        let v = step * f64::from(i);
+        if let Some(settled) = settles(v) {
+            found = Some((v, settled));
+            break;
+        }
+    }
+    let (mut good, mut settled) = found?;
+    let mut bad = (good + step).min(hi);
+    for _ in 0..SEAM_VELOCITY_BISECT_ITERS {
+        let mid = 0.5 * (good + bad);
+        if mid <= good || mid >= bad {
+            break;
+        }
+        match settles(mid) {
+            Some(next) => {
+                good = mid;
+                settled = next;
+            }
+            None => bad = mid,
+        }
+    }
+    Some((good, settled))
+}
+
+/// Fastest exit speed a member can hand on, entered at `entry`. A curved member
+/// answers from its own solver; a straight one from the jerk-limited reach, whose
+/// exit acceleration is left running, which is what makes it an upper bound on
+/// the next seam.
+fn member_reach(kin: &Kinematics, entry: BoundaryState) -> f64 {
+    if !kin.is_straight() && disk::curved_solver_is_available(kin) {
+        let held = entry.v.min(curved::top_speed_ceiling(kin));
+        return curved::reachable_exit(kin, (held, entry.a))
+            .or_else(|| curved::reachable_exit(kin, (held, 0.0)))
+            .map_or(f64::INFINITY, |(v, _)| v);
+    }
+    scurve::reach_velocity_with_accel(
+        entry.v,
+        entry.a.clamp(-kin.accel, kin.accel),
+        kin.length,
+        kin.accel,
+        kin.jerk,
+    )
+    .map_or(f64::INFINITY, |(v, _)| v)
+}
+
+/// Acceleration a seam can carry at speed `v`, or `None` when no acceleration
+/// serves both members there.
+///
+/// Three conditions, two of them binding. The predecessor can only hand over
+/// what its own — by now final — entry state lets it exit at. The successor can
+/// only be entered at an acceleration it can be traversed from at all. The third
+/// is a preference — the
+/// successor would like the acceleration its backward requirement named, the
+/// brake its interior needs carried in rather than manufactured at a seam with no
+/// authority to build one — and it narrows the answer only when it can.
+fn settled_seam_accel(
+    caps: &[MoveCaps],
+    k: usize,
+    v: f64,
+    exit: BoundaryState,
+    entry: BoundaryState,
+    demand: f64,
+) -> Option<f64> {
+    let upstream = &caps[k - 1].kin;
+    let deliverable = curved::exit_accel_window(upstream, (entry.v, entry.a), v).ok()?;
+    let traversable = curved::traversable_entry_accels(&caps[k].kin, v)?;
+    let binding = deliverable.meet(&traversable)?;
+    let preferred = seam_accel_window(caps, k, v, exit)
+        .and_then(|needed| binding.meet(&needed))
+        .unwrap_or(binding);
+    Some(preferred.nearest_to(demand))
+}
+
+/// Zero, if the predecessor can hand the anchor over at zero acceleration.
+///
+/// An anchor's speed is not the envelope's to give up — a stop is a stop, and a
+/// window's terminal rest is where the buffer ends — and an anchor carries no
+/// acceleration, so the only lever left is the speed of the seam before it.
+fn anchored_seam(caps: &[MoveCaps], k: usize, v: f64, entry: BoundaryState) -> Option<f64> {
+    curved::exit_accel_window(&caps[k - 1].kin, (entry.v, entry.a), v)
+        .ok()
+        .filter(|deliverable| deliverable.contains(0.0))
+        .map(|_| 0.0)
+}
+
+/// Walk the members left to right, turning the backward pass's demands into seam
+/// states the run can actually execute.
+///
+/// Two things are settled per seam, in this order. The velocity envelope is
+/// tightened to what the predecessor can reach from its now-final entry state —
+/// the earlier sweeps could only assume a zero-acceleration entry, and a seam
+/// that gave up speed here drags its successors down with it. Then the seam
+/// acceleration is chosen from the intersection of what the predecessor can
+/// deliver and what the successor admits.
+///
+/// Where that intersection is empty the seam is being asked to hold a speed at
+/// which no acceleration serves both members, and the envelope gives speed up —
+/// never a member's requirement — until one does. Induction carries the run: the
+/// seam downstream is handed an entry state its member was proved traversable
+/// from, and draws its own acceleration from what that member can then deliver.
+///
+/// A seam that will not settle even after the seam before it has given up speed
+/// is infeasible geometry at these limits. It keeps the nearest deliverable
+/// acceleration, so nothing is emitted that is not provably traversable, and it
+/// is counted so the census names it rather than the plan quietly failing.
+/// Re-pick, right to left, the acceleration of any seam whose member the forward
+/// settlement left unable to close.
+///
+/// The settlement chose each seam's acceleration against the *demand* standing at
+/// the seam beyond it, and that demand can move afterwards — the seam beyond is
+/// settled later, from its own predecessor's capability. Walking back the other
+/// way makes both sides final at once: the exit state is already settled and the
+/// entry the predecessor delivers no longer changes, so the intersection of what
+/// the member needs and what the predecessor can give is exact. Only seams whose
+/// member actually refuses are touched, so a run that settled cleanly pays one
+/// closure test per seam and nothing else.
+fn repair_stale_seam_accels(caps: &[MoveCaps], plan: &mut SeamPlan) {
+    for k in (1..caps.len()).rev() {
+        if plan.is_anchor[k] || !disk::curved_solver_is_available(&caps[k].kin) {
             continue;
         }
-        plan.v[k] = required.v;
-        plan.a[k] = required.a;
-        if required.a != 0.0 {
+        let entry = (plan.v[k], plan.a[k]);
+        let exit = (plan.v[k + 1], plan.a[k + 1]);
+        if curved::member_closes(&caps[k].kin, entry, exit) {
+            continue;
+        }
+        let Ok(needed) = curved::entry_accel_window(&caps[k].kin, plan.v[k], exit) else {
+            continue;
+        };
+        let upstream = (plan.v[k - 1], plan.a[k - 1]);
+        let deliverable = curved::exit_accel_window(&caps[k - 1].kin, upstream, plan.v[k]).ok();
+        plan.a[k] = deliverable
+            .and_then(|window| window.meet(&needed))
+            .unwrap_or(needed)
+            .nearest_to(plan.a[k]);
+    }
+}
+
+fn settle_seam_states(caps: &[MoveCaps], plan: &mut SeamPlan, report: &mut VelocityReport) {
+    let n = caps.len();
+    let mut retreats = 0u32;
+    let budget = SEAM_RETREATS_PER_MEMBER * u32::try_from(n).unwrap_or(u32::MAX);
+    let mut k = 1;
+    while k <= n {
+        let entry = BoundaryState {
+            v: plan.v[k - 1],
+            a: plan.a[k - 1],
+        };
+        plan.v[k] = plan.v[k].min(member_reach(&caps[k - 1].kin, entry));
+        if !disk::curved_solver_is_available(&caps[k - 1].kin) {
+            k += 1;
+            continue;
+        }
+        let settled = if plan.is_anchor[k] {
+            anchored_seam(caps, k, plan.v[k], entry).map(|a| (plan.v[k], a))
+        } else {
+            let exit = BoundaryState {
+                v: plan.v[k + 1],
+                a: plan.a[k + 1],
+            };
+            let demand = plan.a[k];
+            let settles = |v: f64| settled_seam_accel(caps, k, v, exit, entry, demand);
+            settles(plan.v[k])
+                .map(|a| (plan.v[k], a))
+                .or_else(|| slowest_settling_seam(plan.v[k], settles))
+        };
+        if let Some((v, a)) = settled {
+            plan.v[k] = v;
+            plan.a[k] = a;
+            k += 1;
+            continue;
+        }
+        let can_retreat = k > 1 && !plan.is_anchor[k - 1] && retreats < budget;
+        if can_retreat {
+            plan.v[k - 1] *= SEAM_RETREAT_SHRINK;
+            retreats += 1;
+            k -= 1;
+            continue;
+        }
+        report.reachability.accel_window_empty += 1;
+        if let Ok(deliverable) =
+            curved::exit_accel_window(&caps[k - 1].kin, (entry.v, entry.a), plan.v[k])
+        {
+            plan.a[k] = deliverable.nearest_to(plan.a[k]);
+        }
+        k += 1;
+    }
+    for k in 1..=n {
+        if plan.a[k] != 0.0 {
             report.boundary_accel_seams += 1;
             report.worst_boundary_accel_mm_s2 =
-                report.worst_boundary_accel_mm_s2.max(required.a.abs());
+                report.worst_boundary_accel_mm_s2.max(plan.a[k].abs());
         }
     }
 }
@@ -551,6 +889,28 @@ fn compute_run_geometry(caps: &[MoveCaps], plan: &SeamPlan) -> RunGeometry {
     }
 }
 
+/// Speed a curved member can reach at its exit from a seam speed, or infinity
+/// where there is no curved solver to ask. The entry is taken at zero
+/// acceleration: the sweeps run before any seam acceleration is fixed, and a
+/// zero-acceleration entry reaches no further than an accelerating one, so the
+/// cap stays an upper bound.
+fn curved_forward_cap(kin: &Kinematics, v_entry: f64) -> f64 {
+    if kin.is_straight() || !disk::curved_solver_is_available(kin) {
+        return f64::INFINITY;
+    }
+    let held = v_entry.min(curved::top_speed_ceiling(kin));
+    curved::reachable_exit(kin, (held, 0.0)).map_or(held, |(v, _)| v)
+}
+
+/// Speed a curved member may be entered at and still brought down to `v_exit`.
+fn curved_brake_cap(kin: &Kinematics, v_exit: f64) -> f64 {
+    if kin.is_straight() || !disk::curved_solver_is_available(kin) {
+        return f64::INFINITY;
+    }
+    let landed = v_exit.min(curved::top_speed_ceiling(kin));
+    curved::brake_reach(kin, landed).unwrap_or(landed)
+}
+
 fn forward_pass(
     moves: &[crate::Move],
     caps: &[MoveCaps],
@@ -574,7 +934,7 @@ fn forward_pass(
         )
         .map(|(v, _)| v)
         .map_err(|_| VelocityError::Diverged { line_no })?;
-        v[k] = v[k].min(disk).min(jerk);
+        v[k] = v[k].min(disk).min(jerk).min(curved_forward_cap(kin, v[j]));
     }
     Ok(())
 }
@@ -596,7 +956,10 @@ fn reverse_brake_envelope(
             .ok_or(VelocityError::Diverged { line_no })?;
         let jerk = scurve::reach_v(0.0, geo.arc_to_run_end[j] + kin.length, kin.accel, kin.jerk)
             .ok_or(VelocityError::Diverged { line_no })?;
-        v[k] = v[k].min(disk).min(jerk);
+        v[k] = v[k]
+            .min(disk)
+            .min(jerk)
+            .min(curved_brake_cap(kin, v[k + 1]));
     }
     let mut barrier = 0usize;
     for k in 1..n {
@@ -676,6 +1039,8 @@ fn reconstruct_runs(
         .ok_or(VelocityError::Diverged {
             line_no: run_start_line,
         })?;
+        report.reachability.straight_members += run.planned.straight;
+        report.reachability.curved_members += run.planned.curved;
         for miss in &run.unreachable {
             let j = run_start + miss.index;
             let named = UnreachableEntryState {
@@ -690,7 +1055,17 @@ fn reconstruct_runs(
                     a: miss.exit.1,
                 },
             };
-            report.unreachable_entry_states += 1;
+            report.reachability.unreachable += 1;
+            if disk::curved_solver_is_available(&caps[j].kin)
+                && curved::entry_accel_window(&caps[j].kin, miss.entry.0, miss.exit).is_err()
+            {
+                report.reachability.no_admissible_entry += 1;
+            }
+            if caps[j].kin.is_straight() {
+                report.reachability.straight.record(&miss.why);
+            } else {
+                report.reachability.curved.record(&miss.why);
+            }
             if report
                 .worst_unreachable
                 .is_none_or(|worst| named.accel_magnitude() > worst.accel_magnitude())

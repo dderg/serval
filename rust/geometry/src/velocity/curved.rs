@@ -65,6 +65,26 @@ const DISK_RIM_ROUNDING: f64 = 1.0e-12;
 const TOP_BISECT_ITERS: u32 = 48;
 const ARC_BISECT_ITERS: u32 = 64;
 
+/// Bisections spent locating one end of the admissible entry-acceleration
+/// interval. Sixty halvings of `[0, accel]` resolve the end to well under the
+/// planner's own tolerances at any printer acceleration.
+const ACCEL_BISECT_ITERS: u32 = 18;
+
+/// Grid points spanning `[-accel, accel]` in the fallback search for an
+/// admissible entry acceleration. Coarse on purpose: it only has to land inside
+/// the admissible interval, which the bisections then measure exactly.
+const ACCEL_SCAN_STEPS: u32 = 16;
+
+/// Geometric splits per monotone-curvature piece. Each band's curvature ratio is
+/// then at most two, and the count is fixed, so the band search cannot run away.
+const BANDS_PER_PIECE: u32 = 3;
+
+pub(super) const MAX_BANDS: usize = 2 * BANDS_PER_PIECE as usize;
+
+/// Shortest band worth keeping, as a share of the member. Below it the band edge
+/// is merged away rather than emitting a phase with no room to act.
+const BAND_MIN_SHARE: f64 = 1.0e-6;
+
 /// Lowest top speed the bracket reaches, as a share of the ceiling. The lower
 /// the top speed the more acceleration authority the caps carry, so this floor
 /// bounds the search rather than the physics.
@@ -581,12 +601,116 @@ fn reverse_chain(length: f64, chain: &[StraightPhase]) -> Vec<StraightPhase> {
     out
 }
 
-/// Top speed whose caps let the member actually reach that speed. Above it the
-/// caps are too weak to climb to their own ceiling, below it the ceiling itself
-/// is what limits the exit — so the crossing maximises the reachable speed.
-fn reach_chain(kin: &Kinematics, entry: (f64, f64)) -> Result<Vec<StraightPhase>, VelocityError> {
-    validate(kin);
-    let ceiling = top_speed_ceiling(kin);
+/// Arc-length seams of the bands a member is planned in.
+///
+/// `kappa_bound` is a whole-member `max|kappa|`, so a single set of caps holds
+/// every state on the member to its curvature peak — on a blend half that is the
+/// apex, and the `kappa = 0` seam at the other end pays the apex's price for
+/// authority it does not owe. Curvature is linear in arc length, so `|kappa|` is
+/// monotone on each side of its zero crossing; splitting there and then
+/// geometrically towards each piece's low-curvature end bounds every band's
+/// curvature ratio while keeping the band count fixed.
+fn band_edges(kin: &Kinematics) -> Vec<f64> {
+    let zero_crossing = -kin.kappa0 / kin.sigma;
+    let mut edges = vec![0.0, kin.length];
+    let pieces: [(f64, f64); 2] =
+        if zero_crossing.is_finite() && zero_crossing > 0.0 && zero_crossing < kin.length {
+            edges.push(zero_crossing);
+            [(0.0, zero_crossing), (zero_crossing, kin.length)]
+        } else {
+            [(0.0, kin.length), (0.0, 0.0)]
+        };
+    for (lo, hi) in pieces {
+        let span = hi - lo;
+        if span <= 0.0 {
+            continue;
+        }
+        let low_end_at_lo =
+            (kin.kappa0 + kin.sigma * lo).abs() <= (kin.kappa0 + kin.sigma * hi).abs();
+        for i in 1..BANDS_PER_PIECE {
+            let cut = span / f64::from(1u32 << i);
+            edges.push(if low_end_at_lo { lo + cut } else { hi - cut });
+        }
+    }
+    edges.sort_by(f64::total_cmp);
+    edges.dedup_by(|a, b| *a - *b <= BAND_MIN_SHARE * kin.length);
+    assert!(
+        edges.len() <= MAX_BANDS + 1,
+        "curved: {} band edges exceeds the fixed bound {}",
+        edges.len(),
+        MAX_BANDS + 1
+    );
+    if edges.last().is_some_and(|&s| s < kin.length) {
+        let last = edges.len() - 1;
+        edges[last] = kin.length;
+    }
+    edges
+}
+
+fn band_kin(kin: &Kinematics, s0: f64, s1: f64) -> Kinematics {
+    Kinematics {
+        length: s1 - s0,
+        accel: kin.accel,
+        jerk: kin.jerk,
+        kappa0: kin.kappa0 + kin.sigma * s0,
+        sigma: kin.sigma,
+        flat_ceiling: kin.flat_ceiling,
+    }
+}
+
+fn bands(kin: &Kinematics) -> Vec<Kinematics> {
+    let edges = band_edges(kin);
+    edges
+        .windows(2)
+        .map(|w| band_kin(kin, w[0], w[1]))
+        .collect()
+}
+
+/// Speed cap each band must respect so the pass never enters a later band above
+/// what that band can hold: the running minimum of the ceilings from the band to
+/// the member's end.
+fn tail_ceilings(bands: &[Kinematics]) -> Vec<f64> {
+    let mut tail = vec![f64::INFINITY; bands.len()];
+    let mut running = f64::INFINITY;
+    for (i, band) in bands.iter().enumerate().rev() {
+        running = running.min(top_speed_ceiling(band));
+        tail[i] = running;
+    }
+    tail
+}
+
+/// Re-base a band's chain onto the member's own arc length and clock.
+fn shifted(chain: &[StraightPhase], s0: f64, t0: f64) -> impl Iterator<Item = StraightPhase> + '_ {
+    chain.iter().map(move |p| StraightPhase {
+        t0: p.t0 + t0,
+        dt: p.dt,
+        s0: p.s0 + s0,
+        v0: p.v0,
+        a0: p.a0,
+        j: p.j,
+    })
+}
+
+fn chain_end(chain: &[StraightPhase]) -> Option<(f64, f64)> {
+    chain.last().map(|p| {
+        let (_, v, a) = p.end_state();
+        (v, a)
+    })
+}
+
+fn chain_time(chain: &[StraightPhase]) -> f64 {
+    chain.iter().map(|p| p.dt).sum()
+}
+
+/// Top speed whose caps let the band actually reach that speed. Above it the caps
+/// are too weak to climb to their own ceiling, below it the ceiling itself is what
+/// limits the exit — so the crossing maximises the reachable speed.
+fn reach_span(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    ceiling_cap: f64,
+) -> Result<Vec<StraightPhase>, VelocityError> {
+    let ceiling = top_speed_ceiling(kin).min(ceiling_cap);
     let need = required_top(kin, entry, None, ceiling)?;
     let lo = bracket_floor(need, ceiling);
 
@@ -629,7 +753,138 @@ fn reach_chain(kin: &Kinematics, entry: (f64, f64)) -> Result<Vec<StraightPhase>
             achieved: marched.s,
         });
     }
-    certified_chain(kin, &marched.phases)
+    Ok(marched.phases)
+}
+
+/// Concatenate per-band chains onto the member's own arc length and clock.
+fn splice(bands: &[Kinematics], spans: &[Vec<StraightPhase>]) -> Vec<StraightPhase> {
+    let mut out = Vec::new();
+    let mut s0 = 0.0;
+    let mut t0 = 0.0;
+    for (band, span) in bands.iter().zip(spans) {
+        out.extend(shifted(span, s0, t0));
+        s0 += band.length;
+        t0 += chain_time(span);
+    }
+    out
+}
+
+/// Fastest pass across the member band by band, each band's exit state the next
+/// band's entry. Every band uses the same `caps_at` and marching primitives as a
+/// whole member; what banding buys is caps derived from the curvature the band
+/// actually carries rather than the member's peak.
+fn banded_reach(
+    kin: &Kinematics,
+    entry: (f64, f64),
+) -> Result<(Vec<Kinematics>, Vec<Vec<StraightPhase>>), VelocityError> {
+    let bands = bands(kin);
+    let tail = tail_ceilings(&bands);
+    let mut spans = Vec::with_capacity(bands.len());
+    let mut state = entry;
+    for (band, &cap) in bands.iter().zip(&tail) {
+        let span = reach_span(band, state, cap)?;
+        state = chain_end(&span).unwrap_or(state);
+        spans.push(span);
+    }
+    Ok((bands, spans))
+}
+
+/// Fastest pass across the whole member. The whole-member caps are tried first
+/// because they are one `caps_at` rather than a march per band; banding is what
+/// answers when a single cap set is too weak to close the member at all.
+fn reach_chain(kin: &Kinematics, entry: (f64, f64)) -> Result<Vec<StraightPhase>, VelocityError> {
+    validate(kin);
+    certified_chain(kin, &reach_spans(kin, entry)?)
+}
+
+/// The uncertified pass [`reach_chain`] certifies. Feasibility predicates use
+/// this: the certificate proves what is *emitted*, and a predicate emits nothing.
+fn reach_spans(kin: &Kinematics, entry: (f64, f64)) -> Result<Vec<StraightPhase>, VelocityError> {
+    match reach_span(kin, entry, f64::INFINITY) {
+        Ok(chain) => Ok(chain),
+        Err(whole) => {
+            let (bands, spans) = banded_reach(kin, entry).map_err(|_| whole)?;
+            Ok(splice(&bands, &spans))
+        }
+    }
+}
+
+/// Band edge states of one forward pass: per band a single cap set at the speed
+/// that band and everything after it can hold, marched to the band's end. It is
+/// not the fastest pass — no search for the best top speed — but it is a
+/// feasible one, which is all the band edges have to be.
+fn band_march_edges(bands: &[Kinematics], tail: &[f64], entry: (f64, f64)) -> Vec<(f64, f64)> {
+    let mut edges = Vec::with_capacity(bands.len() + 1);
+    edges.push(entry);
+    for (band, &tail_cap) in bands.iter().zip(tail) {
+        let carried = *edges.last().expect("the entry state seeds the edge list");
+        let ceiling = top_speed_ceiling(band).min(tail_cap);
+        let caps = caps_at(band, ceiling);
+        let held = holdable(carried, ceiling, &caps);
+        let marched = march_forward(&caps, held, band.length, caps.v);
+        edges.push(end_state(&marched.phases, held));
+    }
+    edges
+}
+
+/// The carried state as this band can actually hold it: the speed under the
+/// band's ceiling, and the acceleration inside both the band's authority and the
+/// swing that keeps the unwind between rest and that ceiling. Marching from a
+/// state whose unwind leaves the band would drive the speed negative.
+fn holdable(carried: (f64, f64), ceiling: f64, caps: &Caps) -> (f64, f64) {
+    let v = carried.0.clamp(0.0, ceiling);
+    let swing_to = |headroom: f64| (2.0 * caps.j * headroom.max(0.0)).sqrt();
+    let a = carried
+        .1
+        .clamp(-swing_to(v).min(caps.a), swing_to(ceiling - v).min(caps.a));
+    (v, a)
+}
+
+/// Boundary states at the member's band edges: the forward march's state at each
+/// edge, or the backward march's where that is the slower of the two, so no band
+/// is asked to hold a speed the band beyond it cannot brake from. The two ends
+/// are the caller's own boundary states, which the bands must honour exactly.
+fn band_edge_states(bands: &[Kinematics], entry: (f64, f64), exit: (f64, f64)) -> Vec<(f64, f64)> {
+    let n = bands.len();
+    let tail = tail_ceilings(bands);
+    let ahead = band_march_edges(bands, &tail, entry);
+    let back_bands: Vec<Kinematics> = bands.iter().rev().map(reversed).collect();
+    let back_tail = tail_ceilings(&back_bands);
+    let behind = band_march_edges(&back_bands, &back_tail, (exit.0, -exit.1));
+    let mut edges = vec![entry];
+    for j in 1..n {
+        let (v_back, a_back) = behind[n - j];
+        edges.push(if v_back < ahead[j].0 {
+            (v_back, -a_back)
+        } else {
+            ahead[j]
+        });
+    }
+    edges.push(exit);
+    edges
+}
+
+/// Chain between two boundary states planned band by band, with the band edges
+/// carrying acceleration. Each band is the same `bounded_plan` a whole member
+/// gets, so nothing new is assumed about the physics — only the caps tighten.
+fn banded_plan(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> Result<Vec<StraightPhase>, VelocityError> {
+    let bands = bands(kin);
+    if bands.len() < 2 {
+        return infeasible(BoundaryInfeasibility::LengthTooShort {
+            length: kin.length,
+            minimum: kin.length,
+        });
+    }
+    let edges = band_edge_states(&bands, entry, exit);
+    let mut spans = Vec::with_capacity(bands.len());
+    for (i, band) in bands.iter().enumerate() {
+        spans.push(bounded_plan(band, edges[i], edges[i + 1])?);
+    }
+    Ok(splice(&bands, &spans))
 }
 
 /// The one profile a member with no acceleration authority left can execute: a
@@ -686,6 +941,28 @@ fn caps_too_weak(e: &VelocityError) -> bool {
     )
 }
 
+/// The top-speed bracket every plan between two boundary states searches: the
+/// authority floor the states themselves force, and the member's own ceiling.
+fn plan_bracket(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> Result<(f64, f64), VelocityError> {
+    let ceiling = top_speed_ceiling(kin);
+    let need = required_top(kin, entry, Some(exit), ceiling)?;
+    Ok((bracket_floor(need, ceiling), ceiling))
+}
+
+fn plan_at(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+    v_top: f64,
+) -> Result<Vec<StraightPhase>, VelocityError> {
+    let caps = caps_at(kin, v_top);
+    profile::straight_chain_between(entry, exit, kin.length, caps.v, caps.a, caps.j)
+}
+
 /// Largest top speed whose caps still close the member between the boundary
 /// states. The bracket is `[required_top, top_speed_ceiling]`; its ends are
 /// established by planning at both before the bisection starts.
@@ -694,22 +971,16 @@ fn bounded_plan(
     entry: (f64, f64),
     exit: (f64, f64),
 ) -> Result<Vec<StraightPhase>, VelocityError> {
-    let ceiling = top_speed_ceiling(kin);
-    let need = required_top(kin, entry, Some(exit), ceiling)?;
-    let lo = bracket_floor(need, ceiling);
+    let (lo, ceiling) = plan_bracket(kin, entry, exit)?;
     if caps_at(kin, lo).a <= 0.0 {
         return cruise_only(kin, entry, exit);
     }
-    let plan = |v_top: f64| {
-        let caps = caps_at(kin, v_top);
-        profile::straight_chain_between(entry, exit, kin.length, caps.v, caps.a, caps.j)
-    };
-    match plan(ceiling) {
+    match plan_at(kin, entry, exit, ceiling) {
         Ok(chain) => return Ok(chain),
         Err(e) if !caps_too_weak(&e) => return Err(e),
         Err(_) => {}
     }
-    let mut best = plan(lo)?;
+    let mut best = plan_at(kin, entry, exit, lo)?;
     let mut good = lo;
     let mut bad = ceiling;
     for _ in 0..TOP_BISECT_ITERS {
@@ -717,7 +988,7 @@ fn bounded_plan(
         if mid <= good || mid >= bad {
             break;
         }
-        match plan(mid) {
+        match plan_at(kin, entry, exit, mid) {
             Ok(chain) => {
                 best = chain;
                 good = mid;
@@ -727,6 +998,71 @@ fn bounded_plan(
         }
     }
     Ok(best)
+}
+
+/// Chain between two boundary states: the whole member's caps first, its bands
+/// where a single cap set is too weak. Banding costs a plan per band, so it is
+/// the answer to a refusal rather than the default.
+fn member_plan(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> Result<Vec<StraightPhase>, VelocityError> {
+    match bounded_plan(kin, entry, exit) {
+        Ok(chain) => Ok(chain),
+        Err(whole) if caps_too_weak(&whole) => banded_plan(kin, entry, exit).map_err(|_| whole),
+        Err(whole) => Err(whole),
+    }
+}
+
+/// Whether the whole member's own caps close it between the boundary states,
+/// without building the best chain: exactly the two bracket ends
+/// [`bounded_plan`] establishes before it bisects, so success here is success
+/// there.
+fn probe_closes(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> Result<(), VelocityError> {
+    let (lo, ceiling) = plan_bracket(kin, entry, exit)?;
+    if caps_at(kin, lo).a <= 0.0 {
+        return cruise_only(kin, entry, exit).map(drop);
+    }
+    match plan_at(kin, entry, exit, ceiling) {
+        Ok(_) => return Ok(()),
+        Err(e) if !caps_too_weak(&e) => return Err(e),
+        Err(_) => {}
+    }
+    plan_at(kin, entry, exit, lo).map(drop)
+}
+
+/// Whether [`member_plan`] would find a chain. The whole member is probed first;
+/// a refusal falls through to the bands, which is what `member_plan` does next.
+/// Both probes stop at the bracket ends, so the answer costs a bounded number of
+/// closed-form solves however many bands the member has.
+fn closes(kin: &Kinematics, entry: (f64, f64), exit: (f64, f64)) -> Result<(), VelocityError> {
+    match probe_closes(kin, entry, exit) {
+        Ok(()) => Ok(()),
+        Err(whole) if caps_too_weak(&whole) => {
+            let bands = bands(kin);
+            if bands.len() < 2 {
+                return Err(whole);
+            }
+            let edges = band_edge_states(&bands, entry, exit);
+            bands
+                .iter()
+                .enumerate()
+                .try_for_each(|(i, band)| probe_closes(band, edges[i], edges[i + 1]))
+                .map_err(|_| whole)
+        }
+        Err(whole) => Err(whole),
+    }
+}
+
+/// Whether [`member_plan`] would close the member between these boundary states.
+pub(super) fn member_closes(kin: &Kinematics, entry: (f64, f64), exit: (f64, f64)) -> bool {
+    validate(kin);
+    closes(kin, entry, exit).is_ok()
 }
 
 fn states_match(lhs: (f64, f64), rhs: (f64, f64)) -> bool {
@@ -748,11 +1084,236 @@ pub(super) fn entry_requirement(
     Ok((v, -a))
 }
 
+/// Interval of boundary accelerations a member admits at one of its ends, the
+/// other end and both speeds being fixed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct AccelWindow {
+    pub(super) lo: f64,
+    pub(super) hi: f64,
+}
+
+impl AccelWindow {
+    pub(super) fn nearest_to(&self, a: f64) -> f64 {
+        a.clamp(self.lo, self.hi)
+    }
+
+    pub(super) fn contains(&self, a: f64) -> bool {
+        self.lo <= a && a <= self.hi
+    }
+
+    pub(super) fn meet(&self, other: &Self) -> Option<Self> {
+        let both = Self {
+            lo: self.lo.max(other.lo),
+            hi: self.hi.min(other.hi),
+        };
+        (both.lo <= both.hi).then_some(both)
+    }
+}
+
+/// Entry acceleration of the one-constant-jerk pass from `(v0, a0)` to `exit`
+/// over the whole member: `a0` is pinned by the three closure conditions
+/// (speed, acceleration, arc length), which reduce to a quadratic in
+/// `S = a0 + a_exit`. Both roots are offered; a swing that reverses the speed
+/// or leaves the member unclosed is rejected by the admissibility test itself,
+/// so the roots are seeds rather than answers.
+fn single_jerk_entry_accels(v0: f64, exit: (f64, f64), length: f64) -> [Option<f64>; 2] {
+    let dv = exit.0 - v0;
+    if dv == 0.0 {
+        return [None, None];
+    }
+    let b = -(6.0 * v0 * dv + 4.0 * dv * dv);
+    let c = 2.0 * dv * dv * exit.1;
+    let a = 3.0 * length;
+    let disc = b * b - 4.0 * a * c;
+    if disc < 0.0 {
+        return [None, None];
+    }
+    let root = disc.sqrt();
+    let solve = |s: f64| (s != 0.0).then_some(s - exit.1);
+    [solve(0.5 * (-b + root) / a), solve(0.5 * (-b - root) / a)]
+}
+
+/// Entry acceleration of the pass that holds one acceleration the whole way.
+fn zero_jerk_entry_accel(v0: f64, exit: (f64, f64), length: f64) -> f64 {
+    (exit.0 * exit.0 - v0 * v0) / (2.0 * length)
+}
+
+/// Extreme admissible value on the ray from `seed` towards `limit`. The
+/// admissible set is an intersection of intervals — the disk authority, the
+/// unwind band, and the length requirement — so the ray crosses its boundary
+/// once and a bisection converges on that crossing.
+fn stretch_to(seed: f64, limit: f64, admits: impl Fn(f64) -> bool) -> f64 {
+    if admits(limit) {
+        return limit;
+    }
+    let (mut good, mut bad) = (seed, limit);
+    for _ in 0..ACCEL_BISECT_ITERS {
+        let mid = 0.5 * (good + bad);
+        if mid == good || mid == bad {
+            break;
+        }
+        if admits(mid) {
+            good = mid;
+        } else {
+            bad = mid;
+        }
+    }
+    good
+}
+
+/// Any admissible acceleration on an even grid across the whole rail, for the
+/// case where every shaped candidate lands outside a narrow admissible band. The
+/// band is an interval, so one grid point inside it is all the stretch needs.
+fn scan_for_admissible(rail: f64, admits: &impl Fn(f64) -> bool) -> Option<f64> {
+    (0..=ACCEL_SCAN_STEPS)
+        .map(|i| rail * (2.0 * f64::from(i) / f64::from(ACCEL_SCAN_STEPS) - 1.0))
+        .find(|&a| admits(a))
+}
+
+/// Widest interval of boundary accelerations the member admits at one end, given
+/// shaped candidates to seed the search from and a forward closure test.
+fn accel_window_around(
+    rail: f64,
+    shaped: impl IntoIterator<Item = f64>,
+    admits: impl Fn(f64) -> bool,
+) -> Option<AccelWindow> {
+    let seed = shaped
+        .into_iter()
+        .filter(|a| a.is_finite())
+        .map(|a| a.clamp(-rail, rail))
+        .find(|&a| admits(a))
+        .or_else(|| scan_for_admissible(rail, &admits))?;
+    Some(AccelWindow {
+        lo: stretch_to(seed, -rail, &admits),
+        hi: stretch_to(seed, rail, &admits),
+    })
+}
+
+/// Widest interval of entry accelerations from which the member, entered at
+/// `v_entry`, can still be traversed to `exit`.
+///
+/// This is the query a backward pass needs but [`entry_requirement`] cannot
+/// answer: the requirement names one *fastest* `(v, a)`, and where the envelope
+/// holds the seam below that speed the acceleration it names is not the one the
+/// slower pass needs. Handing the predecessor a zero there asks it to build the
+/// member's whole interior brake inside its own length.
+pub(super) fn entry_accel_window(
+    kin: &Kinematics,
+    v_entry: f64,
+    exit: (f64, f64),
+) -> Result<AccelWindow, VelocityError> {
+    validate(kin);
+    if !(v_entry.is_finite() && v_entry >= 0.0 && exit.0.is_finite() && exit.1.is_finite()) {
+        return infeasible(BoundaryInfeasibility::NonFinite);
+    }
+    let admits = |a: f64| closes(kin, (v_entry, a), exit).is_ok();
+    let [jerk_root, other_root] = single_jerk_entry_accels(v_entry, exit, kin.length);
+    let shaped = [
+        Some(zero_jerk_entry_accel(v_entry, exit, kin.length)),
+        jerk_root,
+        other_root,
+        Some(exit.1),
+        Some(0.0),
+        Some(kin.accel),
+        Some(-kin.accel),
+    ];
+    accel_window_around(kin.accel, shaped.into_iter().flatten(), admits).ok_or_else(|| {
+        closes(kin, (v_entry, 0.0), exit)
+            .expect_err("no admissible entry acceleration, yet zero closed the member")
+    })
+}
+
+/// Entry accelerations the member can be traversed from at all when it is
+/// entered at `v_entry`, its exit state left free.
+///
+/// Two bounds, in order. The caps and the unwind band give an interval centred on
+/// zero: every one of those is monotone in `|a|` — the unwind swing widens with
+/// it, and the acceleration authority the caps leave shrinks as that swing lifts
+/// the top speed. Inside that, the member still has to *close its own length*,
+/// and that is not symmetric in `a`: a brake steep enough to stop the toolhead
+/// before the far end leaves the member unclosed however much authority the disk
+/// has left. `None` means the member cannot hold `v_entry` at all, which is a
+/// speed the envelope must give up rather than an acceleration it can choose.
+pub(super) fn traversable_entry_accels(kin: &Kinematics, v_entry: f64) -> Option<AccelWindow> {
+    validate(kin);
+    let ceiling = top_speed_ceiling(kin);
+    if !(v_entry.is_finite() && v_entry >= 0.0) || v_entry > ceiling {
+        return None;
+    }
+    let j = bracket_jerk_floor(kin, ceiling);
+    let holds = |mag: f64| {
+        let swing = swing_dv(mag, j);
+        v_entry + swing <= ceiling
+            && v_entry - swing >= 0.0
+            && caps_at(kin, bracket_floor(v_entry + swing, ceiling)).a >= mag
+    };
+    let rail = stretch_to(0.0, kin.accel, holds);
+    let traversable = |a: f64| reach_spans(kin, (v_entry, a)).is_ok();
+    accel_window_around(rail, [0.0, rail, -rail], traversable)
+}
+
+/// Widest interval of exit accelerations the member can hand on at speed
+/// `v_exit`, entered at the state its predecessor actually leaves it in. This is
+/// what a seam's acceleration is *deliverable* from; the successor's
+/// [`entry_accel_window`] is what it is *needed* for, and a seam state has to sit
+/// in both.
+///
+/// The test is the forward closure the emission itself will run, not the reversed
+/// member's: at the edge of the interval the two agree only to within rounding,
+/// and the edge is exactly where a clamped seam state lands.
+pub(super) fn exit_accel_window(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    v_exit: f64,
+) -> Result<AccelWindow, VelocityError> {
+    validate(kin);
+    if !(v_exit.is_finite() && v_exit >= 0.0 && entry.0.is_finite() && entry.1.is_finite()) {
+        return infeasible(BoundaryInfeasibility::NonFinite);
+    }
+    let admits = |a: f64| closes(kin, entry, (v_exit, a)).is_ok();
+    let [jerk_root, other_root] = single_jerk_entry_accels(v_exit, (entry.0, -entry.1), kin.length);
+    let shaped = [
+        Some(-zero_jerk_entry_accel(
+            v_exit,
+            (entry.0, -entry.1),
+            kin.length,
+        )),
+        jerk_root.map(|a| -a),
+        other_root.map(|a| -a),
+        Some(entry.1),
+        Some(0.0),
+        Some(kin.accel),
+        Some(-kin.accel),
+    ];
+    accel_window_around(kin.accel, shaped.into_iter().flatten(), admits).ok_or_else(|| {
+        closes(kin, entry, (v_exit, 0.0))
+            .expect_err("no admissible exit acceleration, yet zero closed the member")
+    })
+}
+
+/// Fastest state the member can hand on at its exit, entered at `entry`, or
+/// `None` when it cannot be traversed from that entry state at all.
+pub(super) fn reachable_exit(kin: &Kinematics, entry: (f64, f64)) -> Option<(f64, f64)> {
+    reach_chain(kin, entry)
+        .ok()
+        .map(|chain| end_state(&chain, entry))
+}
+
+/// Fastest speed the member may be entered at and still be brought down to
+/// `v_exit`: the reversed member's own forward reach. This is the brake envelope
+/// a curved member imposes and the disk sweep cannot see — the disk bounds
+/// `kappa^2 v^4` against the acceleration budget and says nothing about the
+/// `sigma v^3` of normal jerk a clothoid owes with no acceleration term to
+/// cancel it, nor about the acceleration and jerk the curvature has already
+/// spent.
+pub(super) fn brake_reach(kin: &Kinematics, v_exit: f64) -> Option<f64> {
+    reachable_exit(&reversed(kin), (v_exit, 0.0)).map(|(v, _)| v)
+}
+
 /// Fastest state the member can hand on at its exit, entered at `entry`.
 pub(super) fn curved_reach(kin: &Kinematics, entry: (f64, f64)) -> (f64, f64) {
-    let chain = reach_chain(kin, entry)
-        .expect("curved_reach: the member cannot be traversed from this entry state");
-    end_state(&chain, entry)
+    reachable_exit(kin, entry)
+        .expect("curved_reach: the member cannot be traversed from this entry state")
 }
 
 /// Certified constant-jerk chain across the member between boundary states that
@@ -763,7 +1324,7 @@ pub(super) fn curved_chain(
     exit: (f64, f64),
 ) -> Result<Vec<StraightPhase>, VelocityError> {
     validate(kin);
-    match bounded_plan(kin, entry, exit) {
+    match member_plan(kin, entry, exit) {
         Ok(chain) => certified_chain(kin, &chain),
         Err(bounded) => {
             let back = reversed(kin);

@@ -1406,7 +1406,7 @@ fn the_envelope_publishes_boundary_accelerations_and_names_what_it_cannot_reach(
     assert!(report.worst_boundary_accel_mm_s2 > 0.0);
     assert_eq!(
         report.worst_unreachable.is_some(),
-        report.unreachable_entry_states > 0,
+        report.reachability.unreachable > 0,
         "an unreachable count must come with the member that produced it"
     );
     if let Some(worst) = report.worst_unreachable {

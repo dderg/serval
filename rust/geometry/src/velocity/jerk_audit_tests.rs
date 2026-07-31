@@ -1,3 +1,6 @@
+use super::curved::{self, top_speed_ceiling};
+use super::disk::Kinematics;
+use super::profile::StraightPhase;
 use super::*;
 use crate::fitter::{CornerFitConfig, fit_corners};
 use crate::frontend::{Move, MoveContext, VelocityLimits, line_move};
@@ -503,4 +506,367 @@ fn extreme_corner_accel_still_plans_promptly() {
         assert!(profile.report.traversal_time_s.is_finite());
         let _ = fitted;
     }
+}
+
+const CORNER_SWEEP_ACCELS: [f64; 7] = [
+    20_000.0, 60_000.0, 80_000.0, 100_000.0, 140_000.0, 200_000.0, 300_000.0,
+];
+const CORNER_SWEEP_JERKS: [f64; 3] = [3.0e7, 6.0e7, 1.5e8];
+const CORNER_SIDE_MM: f64 = 30.0;
+const JERK_SAMPLES_PER_PHASE: usize = 33;
+const APEX_PLATEAU_REL_TOL: f64 = 1e-6;
+
+fn corner_halves(m: Machine) -> Vec<Kinematics> {
+    let moves = m.polyline(&[
+        [0.0, 0.0, 0.0],
+        [CORNER_SIDE_MM, 0.0, 0.0],
+        [CORNER_SIDE_MM, CORNER_SIDE_MM, 0.0],
+    ]);
+    let fitted = fit_corners(&moves, CornerFitConfig::default()).expect("fit");
+    let halves: Vec<Kinematics> = fitted
+        .moves
+        .iter()
+        .filter_map(|mv| match &mv.segment.spatial {
+            Some(Segment::Clothoid(c)) => Some(Kinematics {
+                length: c.s_len(),
+                accel: m.accel,
+                jerk: m.jerk,
+                kappa0: c.kappa_endpoints().0,
+                sigma: c.dkappa_ds(0.0),
+                flat_ceiling: m.feed,
+            }),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        halves.len(),
+        2,
+        "the 90 degree corner must fit to a biclothoid"
+    );
+    halves
+}
+
+fn chain_jerk_worsts(kin: &Kinematics, chain: &[StraightPhase]) -> (Option<Worst>, Option<Worst>) {
+    let mut shape = None;
+    let mut exact = None;
+    for p in chain {
+        for i in 0..=JERK_SAMPLES_PER_PHASE {
+            let tau = p.dt * (i as f64) / (JERK_SAMPLES_PER_PHASE as f64);
+            let (s, v, a) = p.state_at(tau);
+            let kappa = kin.kappa0 + kin.sigma * s;
+            let j_n = normal_jerk(kappa, kin.sigma, v, a);
+            let j_t = tangential_jerk(kappa, v, p.j);
+            let at = |ratio| Worst {
+                line_no: 0,
+                s,
+                v,
+                a_t: a,
+                kappa,
+                sigma: kin.sigma,
+                ratio,
+            };
+            Worst::keep(&mut shape, at(j_n.abs() / kin.jerk));
+            Worst::keep(&mut exact, at(libm::hypot(j_t, j_n) / kin.jerk));
+        }
+    }
+    (shape, exact)
+}
+
+struct CornerRow {
+    accel: f64,
+    jerk: f64,
+    kappa_peak: f64,
+    apex_v: f64,
+    disk_apex_v: f64,
+    jerk_rail_v: f64,
+    entry_v: f64,
+    entry_a: f64,
+    time_s: f64,
+    shape_ratio: f64,
+    exact_ratio: f64,
+    phases: usize,
+}
+
+impl CornerRow {
+    fn jerk_binds(&self) -> bool {
+        self.apex_v < self.disk_apex_v * (1.0 - APEX_PLATEAU_REL_TOL)
+    }
+
+    fn binding(&self) -> &'static str {
+        if self.apex_v >= Machine::user().feed * (1.0 - APEX_PLATEAU_REL_TOL) {
+            "flat"
+        } else if self.jerk_binds() {
+            "jerk"
+        } else {
+            "accel"
+        }
+    }
+
+    fn row(&self) -> String {
+        format!(
+            "{:>7.0} {:>8.2e} {:>9.5} {:>10.4} {:>10.4} {:>10.4} {:>7} {:>10.4} {:>9.1e} {:>10.6} {:>8.4} {:>8.4} {:>6}",
+            self.accel,
+            self.jerk,
+            self.kappa_peak,
+            self.apex_v,
+            self.disk_apex_v,
+            self.jerk_rail_v,
+            self.binding(),
+            self.entry_v,
+            self.entry_a,
+            self.time_s,
+            self.shape_ratio,
+            self.exact_ratio,
+            self.phases,
+        )
+    }
+}
+
+const CORNER_TABLE_HEADER: &str = "  accel    j_max  kappa_pk    apex_v  disk_apex  jerk_rail   binds    entry_v   entry_a     time_s    shape    exact phases";
+
+fn measure_corner(accel: f64, jerk: f64) -> Result<CornerRow, String> {
+    let halves = corner_halves(Machine::user().accel(accel).jerk(jerk));
+    let (entry_half, exit_half) = (&halves[0], &halves[1]);
+    let kappa_peak = (entry_half.kappa0 + entry_half.sigma * entry_half.length).abs();
+    let apex_v = top_speed_ceiling(entry_half).min(top_speed_ceiling(exit_half));
+    let apex = (apex_v, 0.0);
+
+    let entry = curved::entry_requirement(entry_half, apex)
+        .map_err(|e| format!("entry_requirement failed: {e:?}"))?;
+    let into_corner = curved::curved_chain(entry_half, entry, apex)
+        .map_err(|e| format!("entry half chain failed: {e:?}"))?;
+    let handoff = curved::curved_reach(exit_half, apex);
+    let out_of_corner = curved::curved_chain(exit_half, apex, handoff)
+        .map_err(|e| format!("exit half chain failed: {e:?}"))?;
+
+    let (shape_in, exact_in) = chain_jerk_worsts(entry_half, &into_corner);
+    let (shape_out, exact_out) = chain_jerk_worsts(exit_half, &out_of_corner);
+    let peak = |a: Option<Worst>, b: Option<Worst>| {
+        a.map_or(0.0, |w| w.ratio).max(b.map_or(0.0, |w| w.ratio))
+    };
+
+    Ok(CornerRow {
+        accel,
+        jerk,
+        kappa_peak,
+        apex_v,
+        disk_apex_v: (accel / kappa_peak).sqrt(),
+        jerk_rail_v: libm::cbrt(
+            jerk / libm::hypot(kappa_peak * kappa_peak, entry_half.sigma.abs()),
+        ),
+        entry_v: entry.0,
+        entry_a: entry.1,
+        time_s: into_corner.iter().chain(&out_of_corner).map(|p| p.dt).sum(),
+        shape_ratio: peak(shape_in, shape_out),
+        exact_ratio: peak(exact_in, exact_out),
+        phases: into_corner.len() + out_of_corner.len(),
+    })
+}
+
+fn corner_sweep() -> (Vec<Vec<CornerRow>>, String) {
+    let mut by_jerk = Vec::new();
+    let mut table = format!("{CORNER_TABLE_HEADER}\n");
+    for jerk in CORNER_SWEEP_JERKS {
+        let mut rows = Vec::new();
+        for accel in CORNER_SWEEP_ACCELS {
+            match measure_corner(accel, jerk) {
+                Ok(row) => {
+                    table.push_str(&row.row());
+                    table.push('\n');
+                    rows.push(row);
+                }
+                Err(why) => {
+                    table.push_str(&format!("{accel:>7.0} {jerk:>8.2e}  SOLVER ERROR: {why}\n"));
+                }
+            }
+        }
+        table.push('\n');
+        by_jerk.push(rows);
+    }
+    (by_jerk, table)
+}
+
+/// Measurement, not a gate: the closed-form curved solver driven directly over
+/// the reference 90 degree corner, so the acceptance answer is known before any
+/// integration. Ignored because it is an instrument, and its cost belongs to
+/// whoever asks for the number.
+#[test]
+#[ignore = "measurement instrument: run with --ignored --nocapture for the corner sweep table"]
+fn curved_corner_sweep_table() {
+    let (by_jerk, table) = corner_sweep();
+    println!("{table}");
+    assert_eq!(
+        by_jerk.iter().map(Vec::len).sum::<usize>(),
+        CORNER_SWEEP_ACCELS.len() * CORNER_SWEEP_JERKS.len(),
+        "the solver refused part of the sweep\n{table}"
+    );
+}
+
+/// The project's acceptance criterion, measured on the solver alone: raising
+/// `max_accel` from a corner the acceleration disk limits into one the jerk ball
+/// limits must never lengthen the corner, must never spend more jerk than the
+/// budget, and must hold the apex speed flat once the jerk rail takes over.
+#[test]
+#[ignore = "acceptance measurement against the closed-form solver; no production caller yet"]
+fn raising_accel_never_lengthens_the_corner() {
+    let (by_jerk, table) = corner_sweep();
+    for rows in &by_jerk {
+        for pair in rows.windows(2) {
+            let (lo, hi) = (&pair[0], &pair[1]);
+            assert!(
+                hi.time_s <= lo.time_s * (1.0 + 1e-9),
+                "j={:.2e}: accel {:.0} -> {:.0} lengthened the corner {:.6}s -> {:.6}s\n{table}",
+                lo.jerk,
+                lo.accel,
+                hi.accel,
+                lo.time_s,
+                hi.time_s
+            );
+            assert!(
+                hi.apex_v >= lo.apex_v * (1.0 - APEX_PLATEAU_REL_TOL),
+                "j={:.2e}: accel {:.0} -> {:.0} lowered the apex {:.4} -> {:.4}\n{table}",
+                lo.jerk,
+                lo.accel,
+                hi.accel,
+                lo.apex_v,
+                hi.apex_v
+            );
+            if lo.jerk_binds() {
+                assert!(
+                    hi.jerk_binds()
+                        && (hi.apex_v - lo.apex_v).abs() <= APEX_PLATEAU_REL_TOL * lo.apex_v,
+                    "j={:.2e}: apex did not plateau past the jerk switch: {:.4} -> {:.4}\n{table}",
+                    lo.jerk,
+                    lo.apex_v,
+                    hi.apex_v
+                );
+            }
+        }
+        for row in rows {
+            assert!(
+                row.exact_ratio <= 1.0 + EXACT_JERK_REL_TOL,
+                "j={:.2e} accel={:.0}: emitted chain spends {:.4}x the jerk budget\n{table}",
+                row.jerk,
+                row.accel,
+                row.exact_ratio
+            );
+        }
+    }
+}
+
+struct MarcherRow {
+    accel: f64,
+    jerk: f64,
+    apex_v: f64,
+    disk_apex_v: f64,
+    time_s: f64,
+    shape_ratio: f64,
+    vector_ratio: f64,
+    samples: usize,
+}
+
+impl MarcherRow {
+    fn row(&self) -> String {
+        format!(
+            "{:>7.0} {:>8.2e} {:>10.4} {:>10.4} {:>10.6} {:>8.4} {:>8.4} {:>7}",
+            self.accel,
+            self.jerk,
+            self.apex_v,
+            self.disk_apex_v,
+            self.time_s,
+            self.shape_ratio,
+            self.vector_ratio,
+            self.samples,
+        )
+    }
+}
+
+fn measure_marcher_corner(accel: f64, jerk: f64) -> MarcherRow {
+    let m = Machine::user().accel(accel).jerk(jerk);
+    let moves = m.polyline(&[
+        [0.0, 0.0, 0.0],
+        [CORNER_SIDE_MM, 0.0, 0.0],
+        [CORNER_SIDE_MM, CORNER_SIDE_MM, 0.0],
+    ]);
+    let (fitted, profile) = plan_for(&moves);
+    let audited = audit(&fitted, &profile);
+    let mut apex_v = f64::INFINITY;
+    let mut time_s = 0.0;
+    let mut samples = 0usize;
+    let mut kappa_peak: f64 = 0.0;
+    for (fit, vel) in fitted.moves.iter().zip(&profile.moves) {
+        let Some(seg) = fit.segment.spatial.as_ref() else {
+            continue;
+        };
+        if is_straight(seg) {
+            continue;
+        }
+        kappa_peak = kappa_peak.max(seg.kappa_peak().1);
+        samples += vel.samples.len();
+        time_s += traversal_time(&vel.samples);
+        for w in &vel.samples {
+            apex_v = apex_v.min(w.v);
+        }
+    }
+    MarcherRow {
+        accel,
+        jerk,
+        apex_v,
+        disk_apex_v: (accel / kappa_peak).sqrt(),
+        time_s,
+        shape_ratio: Audit::ratio(audited.normal),
+        vector_ratio: Audit::ratio(audited.vector),
+        samples,
+    }
+}
+
+/// The same corner, the same sweep, measured on the committed marcher, so the
+/// solver's table is read against a baseline produced by the same instrument
+/// rather than against a remembered number.
+#[test]
+#[ignore = "measurement instrument: run with --ignored --nocapture for the marcher baseline table"]
+fn marcher_corner_sweep_table() {
+    let mut table = String::from(
+        "  accel    j_max     apex_v  disk_apex     time_s    shape   vector samples\n",
+    );
+    for jerk in CORNER_SWEEP_JERKS {
+        for accel in CORNER_SWEEP_ACCELS {
+            table.push_str(&measure_marcher_corner(accel, jerk).row());
+            table.push('\n');
+        }
+        table.push('\n');
+    }
+    println!("{table}");
+}
+
+/// What jerk compliance costs at this one corner, and what the solver's own
+/// conservatism costs on top of it: solver corner time against the marcher's,
+/// and the solver's apex against the unshared jerk rail it declines to ride.
+#[test]
+#[ignore = "measurement instrument: run with --ignored --nocapture for the cost table"]
+fn corner_time_solver_against_marcher() {
+    let mut table = String::from(
+        "  accel    j_max  solver_t marcher_t  cost_x solver_apex  rail_apex  rail_x marcher_shape solver_exact\n",
+    );
+    for jerk in CORNER_SWEEP_JERKS {
+        for accel in CORNER_SWEEP_ACCELS {
+            let solver = measure_corner(accel, jerk).expect("solver refused a sweep point");
+            let marcher = measure_marcher_corner(accel, jerk);
+            table.push_str(&format!(
+                "{:>7.0} {:>8.2e} {:>9.6} {:>9.6} {:>7.3} {:>11.4} {:>10.4} {:>7.3} {:>13.4} {:>12.4}\n",
+                accel,
+                jerk,
+                solver.time_s,
+                marcher.time_s,
+                solver.time_s / marcher.time_s,
+                solver.apex_v,
+                solver.jerk_rail_v,
+                solver.jerk_rail_v / solver.apex_v,
+                marcher.shape_ratio,
+                solver.exact_ratio,
+            ));
+        }
+        table.push('\n');
+    }
+    println!("{table}");
 }

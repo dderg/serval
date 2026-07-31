@@ -1,7 +1,7 @@
 use super::certify;
 use super::curved::{
-    bracket_jerk_floor, caps_at, certified_chain, curved_chain, curved_reach, entry_requirement,
-    top_speed_ceiling,
+    MAX_BANDS, bracket_jerk_floor, caps_at, certified_chain, curved_chain, curved_reach,
+    entry_requirement, top_speed_ceiling,
 };
 use super::disk::{Kinematics, const_kappa_reach_w};
 use super::profile::{self, StraightPhase};
@@ -11,6 +11,14 @@ use crate::fitter::{CornerFitConfig, fit_corners};
 use crate::frontend::{MoveContext, VelocityLimits, line_move};
 use crate::path::{CurvatureProfile, Segment};
 use crate::segment::SourceRange;
+
+/// One cap set plans at most the triple-limited alphabet: swing up, hold, swing
+/// down, cruise, and the two flanks a nonzero boundary acceleration adds. A member
+/// the whole-member caps refuse is planned band by band instead, so its budget is
+/// that alphabet once per band.
+const PHASES_PER_CAP_SET: usize = 6;
+
+const WORST_PHASES: usize = PHASES_PER_CAP_SET * MAX_BANDS;
 
 const REFERENCE_FEED: f64 = 300.0;
 const REFERENCE_ACCEL: f64 = 60_000.0;
@@ -322,7 +330,7 @@ fn every_emitted_phase_is_certified() {
     });
     assert_sweep_is_substantial(&summary);
     assert!(
-        summary.worst_phases <= 12,
+        summary.worst_phases <= WORST_PHASES,
         "worst chain took {} phases over {} chains ({} total)",
         summary.worst_phases,
         summary.chains,

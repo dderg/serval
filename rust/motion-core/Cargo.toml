@@ -30,6 +30,7 @@ host-rt = { path = "../host-rt", features = ["test-harness"] }
 motion-core = { path = ".", features = ["test-support"] }
 ethercat-rt = { path = "../ethercat-rt" }
 serialport = "4"
+libm = { version = "0.2", default-features = false }
 
 [lints]
 workspace = true
