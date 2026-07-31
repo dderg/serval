@@ -112,6 +112,31 @@ const BAND_CEILING_SPREAD: f64 = 1.0e-2;
 /// bounds the search rather than the physics.
 const LOWEST_TOP_SHARE: f64 = 1.0e-3;
 
+/// Rungs the plan ladder climbs, spaced evenly in `v^2` so every rung takes an
+/// equal share of the curvature term `kappa v^2` the disk charges for. One cap
+/// set per member prices the whole ramp at the top speed's authority; a rung
+/// prices its own stretch at its own speed's.
+pub(super) const LADDER_RUNGS: usize = 8;
+
+/// How close a rung climb must land on the top speed it was aimed at, relative
+/// to that speed and to the authority left there, for the arrival to count.
+const LADDER_ARRIVAL_REL_TOL: f64 = 1.0e-9;
+
+/// Shortfall of the authority at the top speed against the authority at the
+/// lowest rung, relative to the latter, below which the rungs are all holding
+/// effectively one cap set and the member's own is the same answer in far fewer
+/// phases. A straight member's caps do not vary with speed at all.
+const LADDER_AUTHORITY_SPREAD: f64 = 1.0e-2;
+
+/// Time the ladder must save against the member's own single cap set at the
+/// same top speed, relative, to be worth the phases it costs the lowering.
+const LADDER_TIME_WIN: f64 = 1.0e-2;
+
+/// Overshoot of a rung's authority, relative to it, attributable to the
+/// rounding in the wind-down that lands the rung below exactly on that
+/// authority rather than to a state the rung genuinely cannot hold.
+const RUNG_HANDOFF_ROUNDING: f64 = 1.0e-9;
+
 /// A phase the certificate refuses whole is split at its certified dwell and
 /// retried; this many splits without clearing it is a hard failure. Shortening
 /// never changes the trajectory, only its encoding, so a phase that keeps
@@ -641,6 +666,64 @@ fn march_braking(caps: &Caps, entry: (f64, f64), length: f64, cap_speed: f64) ->
     m
 }
 
+/// One rung of the ladder: swing the acceleration up under this rung's caps,
+/// hold it, and swing it back so the speed lands on the rung carrying exactly
+/// `handoff` — the authority the next rung has left. It is [`march_forward`]
+/// without the trailing cruise: the arc length past the rung belongs to the
+/// next rung, whose weaker caps are what the higher speed owes.
+///
+/// A wind-down to `handoff` rather than to rest is the whole point. Landing at
+/// rest on every rung would spend a full acceleration swing per rung and reach
+/// less than the single cap set it replaces; carrying the acceleration makes
+/// the rungs a staircase down the disk rim instead of eight separate ramps.
+fn climb_rung(caps: &Caps, entry: (f64, f64), max_len: f64, rung: f64, handoff: f64) -> March {
+    let mut m = March::new(entry);
+    let j = caps.j;
+    let rung_at_handoff = rung + handoff * handoff / (2.0 * j);
+
+    let to_cap_accel = ((caps.a - m.a) / j).max(0.0);
+    let trigger = approach_trigger(m.v, m.a, rung_at_handoff, j);
+    if m.stage(j, to_cap_accel.min(trigger), max_len) {
+        return m;
+    }
+
+    if m.a > 0.0 {
+        let Some(arc) = zero_jerk_arc_time(m.v, m.a, max_len - m.s) else {
+            return m;
+        };
+        let hold = hold_trigger(m.v, m.a, rung_at_handoff, j).min(arc).max(0.0);
+        if m.stage(0.0, hold, max_len) {
+            return m;
+        }
+    }
+
+    if m.a > handoff {
+        m.stage(-j, (m.a - handoff) / j, max_len);
+    }
+    m
+}
+
+fn rung_speeds(v_top: f64) -> [f64; LADDER_RUNGS] {
+    std::array::from_fn(|i| v_top * ((i + 1) as f64 / LADDER_RUNGS as f64).sqrt())
+}
+
+/// Acceleration a rung hands its successor: the authority the successor has,
+/// and no more than the swing the remaining climb to `v_top` can still wind off
+/// against the least jerk any rung above leaves. Winding off more than the
+/// climb has speed left for would carry the pass past `v_top` still
+/// accelerating, which is the one thing the cruise it hands over to cannot take.
+fn handoff_accel(kin: &Kinematics, rungs: &[f64; LADDER_RUNGS], at: usize, v_top: f64) -> f64 {
+    let successor = rungs.get(at + 1).map_or(0.0, |&up| caps_at(kin, up).a);
+    let unwind_jerk = rungs[at..]
+        .iter()
+        .map(|&up| caps_at(kin, up).j)
+        .fold(f64::INFINITY, f64::min);
+    let climb_left = (v_top - rungs[at]).max(0.0);
+    successor
+        .min(caps_at(kin, rungs[at]).a)
+        .min((2.0 * unwind_jerk * climb_left).sqrt())
+}
+
 fn end_state(chain: &[StraightPhase], entry: (f64, f64)) -> (f64, f64) {
     match chain.last() {
         Some(p) => {
@@ -824,6 +907,15 @@ fn chain_time(chain: &[StraightPhase]) -> f64 {
 fn state_fits(caps: &Caps, (v, a): (f64, f64)) -> bool {
     let unwound = unwound_speed(v, a, caps.j);
     a.abs() <= caps.a && v <= caps.v && unwound <= caps.v && unwound >= 0.0
+}
+
+/// Whether a rung can carry the state it is handed: the speed inside the rung,
+/// the acceleration inside the authority the rung leaves. The unwind band
+/// [`state_fits`] also demands is the ladder's business, not a rung's — a rung
+/// hands its acceleration up to the rung above rather than winding it off
+/// inside its own speed stretch.
+fn rung_holds(caps: &Caps, (v, a): (f64, f64)) -> bool {
+    a.abs() <= caps.a * (1.0 + RUNG_HANDOFF_ROUNDING) && v <= caps.v
 }
 
 /// Top speed whose caps let the band actually reach that speed. Above it the caps
@@ -1112,6 +1204,117 @@ fn plan_bracket(
     Ok((bracket_floor(need, ceiling), ceiling))
 }
 
+/// A climb up the ladder: the phases, the arc length they spend, and their
+/// duration.
+struct Climb {
+    phases: Vec<StraightPhase>,
+    length: f64,
+    time: f64,
+}
+
+/// Climb from `entry` to `v_top` rung by rung, each stretch planned with the
+/// caps its own speed carries rather than the caps the top speed carries.
+///
+/// `None` is not a failure to report: it says this top speed is out of the
+/// member's reach from this state within `max_len`, which is exactly what the
+/// search over top speeds is there to discover.
+fn ladder_climb(kin: &Kinematics, entry: (f64, f64), v_top: f64, max_len: f64) -> Option<Climb> {
+    let top_caps = caps_at(kin, v_top);
+    if top_caps.a <= 0.0 || top_caps.j <= 0.0 || max_len <= 0.0 {
+        return None;
+    }
+    let unwound_entry = unwound_speed(entry.0, entry.1, top_caps.j);
+    if unwound_entry < 0.0 || unwound_entry > v_top {
+        return None;
+    }
+    let rungs = rung_speeds(v_top);
+    let lowest_holding = rungs
+        .iter()
+        .position(|&rung| rung_holds(&caps_at(kin, rung), entry))?;
+
+    let mut climb = Climb {
+        phases: Vec::new(),
+        length: 0.0,
+        time: 0.0,
+    };
+    let mut state = entry;
+    for (at, &rung) in rungs.iter().enumerate().skip(lowest_holding) {
+        if state.0 >= rung {
+            continue;
+        }
+        let caps = caps_at(kin, rung);
+        if !rung_holds(&caps, state) {
+            return None;
+        }
+        let handoff = handoff_accel(kin, &rungs, at, v_top);
+        let marched = climb_rung(&caps, state, max_len - climb.length, rung, handoff);
+        climb
+            .phases
+            .extend(shifted(&marched.phases, climb.length, climb.time));
+        climb.length += marched.s;
+        climb.time += marched.t;
+        state = (marched.v, marched.a);
+    }
+
+    let arrived = (v_top - state.0).abs() <= LADDER_ARRIVAL_REL_TOL * v_top
+        && state.1.abs() <= LADDER_ARRIVAL_REL_TOL * top_caps.a;
+    arrived.then_some(climb)
+}
+
+/// Whether the authority the caps leave varies enough across the climb for the
+/// rungs to buy anything the member's single cap set cannot. On a straight
+/// member it does not vary at all, and the ladder is the same profile spread
+/// over eight times the phases.
+fn ladder_pays(kin: &Kinematics, v_top: f64) -> bool {
+    let lowest = caps_at(kin, rung_speeds(v_top)[0]).a;
+    caps_at(kin, v_top).a < lowest * (1.0 - LADDER_AUTHORITY_SPREAD)
+}
+
+/// Two ladders meeting at a cruise: the entry climbs to `v_top`, the exit
+/// climbs to it on the reversed member, and the arc length neither spent is one
+/// cruise phase. Every speed stretch is planned with `caps_at` its own speed, so
+/// the ramp is charged the authority it has where it is rather than the
+/// authority left at the ceiling.
+fn ladder_plan(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+    v_top: f64,
+) -> Option<Vec<StraightPhase>> {
+    if !ladder_pays(kin, v_top) {
+        return None;
+    }
+    let up = ladder_climb(kin, entry, v_top, kin.length)?;
+    let down = ladder_climb(
+        &reversed(kin),
+        (exit.0, -exit.1),
+        v_top,
+        kin.length - up.length,
+    )?;
+    let cruise_length = kin.length - up.length - down.length;
+    if cruise_length < 0.0 {
+        return None;
+    }
+
+    let cruise_speed = end_state(&up.phases, entry).0;
+    let cruise_dt = cruise_length / cruise_speed;
+    let mut out = up.phases;
+    out.push(StraightPhase {
+        t0: up.time,
+        dt: cruise_dt,
+        s0: up.length,
+        v0: cruise_speed,
+        a0: 0.0,
+        j: 0.0,
+    });
+    out.extend(shifted(
+        &reverse_chain(kin.length, &down.phases),
+        0.0,
+        up.time + cruise_dt,
+    ));
+    Some(coalesce(out))
+}
+
 fn plan_at(
     kin: &Kinematics,
     entry: (f64, f64),
@@ -1138,9 +1341,10 @@ struct Candidate {
     chain: Vec<StraightPhase>,
 }
 
-/// Keep the plan at `v_top` if it is quicker than the incumbent. A refusal the
-/// caps explain is a candidate the search discards; anything else is a broken
-/// boundary state and belongs to the caller.
+/// Keep the quickest plan at `v_top` if it beats the incumbent, weighing the
+/// member's one cap set against the ladder. A refusal the caps explain is a
+/// candidate the search discards; anything else is a broken boundary state and
+/// belongs to the caller.
 fn keep_quicker(
     kin: &Kinematics,
     entry: (f64, f64),
@@ -1148,12 +1352,24 @@ fn keep_quicker(
     v_top: f64,
     best: &mut Candidate,
 ) -> Result<(), VelocityError> {
-    match plan_at(kin, entry, exit, v_top) {
+    let mut offer = |chain: Vec<StraightPhase>| {
+        let time = chain_time(&chain);
+        if time < best.time {
+            *best = Candidate { v_top, time, chain };
+        }
+    };
+    let single = plan_at(kin, entry, exit, v_top);
+    let worth_the_phases = single.as_ref().map_or(f64::INFINITY, |chain| {
+        chain_time(chain) * (1.0 - LADDER_TIME_WIN)
+    });
+    if let Some(chain) = ladder_plan(kin, entry, exit, v_top) {
+        if chain_time(&chain) < worth_the_phases {
+            offer(chain);
+        }
+    }
+    match single {
         Ok(chain) => {
-            let time = chain_time(&chain);
-            if time < best.time {
-                *best = Candidate { v_top, time, chain };
-            }
+            offer(chain);
             Ok(())
         }
         Err(e) if caps_too_weak(&e) => Ok(()),

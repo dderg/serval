@@ -1,7 +1,7 @@
 use super::certify;
 use super::curved::{
-    MAX_BANDS, caps_at, certified_chain, curved_chain, curved_reach, entry_requirement,
-    top_speed_ceiling,
+    LADDER_RUNGS, MAX_BANDS, caps_at, certified_chain, curved_chain, curved_reach,
+    entry_requirement, top_speed_ceiling,
 };
 use super::disk::{Kinematics, const_kappa_reach_w};
 use super::profile::{self, StraightPhase};
@@ -14,11 +14,22 @@ use crate::segment::SourceRange;
 
 /// One cap set plans at most the triple-limited alphabet: swing to the cap,
 /// hold, swing back, cruise, and the flanks a nonzero boundary acceleration adds
-/// at each end. Banded emission is the default, so a member's budget is that
-/// alphabet once per band.
+/// at each end.
 const PHASES_PER_CAP_SET: usize = 8;
 
-const WORST_PHASES: usize = PHASES_PER_CAP_SET * MAX_BANDS;
+/// The ladder spends one cap set per rung instead of one per member: a swing
+/// up, a hold and a swing down for each rung at each end of the band, plus the
+/// cruise the two climbs meet at.
+const PHASES_PER_LADDER: usize = 6 * LADDER_RUNGS + 1;
+
+/// Banded emission is the default, so a member's budget is the wider of the two
+/// alphabets once per band.
+const WORST_PHASES: usize = MAX_BANDS
+    * if PHASES_PER_LADDER > PHASES_PER_CAP_SET {
+        PHASES_PER_LADDER
+    } else {
+        PHASES_PER_CAP_SET
+    };
 
 /// Phases the committed marcher emits for one reference blend, measured.
 const MARCHER_PHASES_PER_BLEND: usize = 598;
@@ -733,4 +744,72 @@ fn a_nonzero_exit_acceleration_never_reverses_the_motion() {
         worst >= -1.0e-9,
         "an emitted chain reversed: interior speed reached {worst} mm/s over {chains} chains"
     );
+}
+
+/// Highest speed the chain reaches. A phase's speed is quadratic in local time,
+/// so it peaks at an end unless the jerk is winding a drive down, where the
+/// interior stationary point is the peak.
+fn chain_peak_speed(chain: &[StraightPhase]) -> f64 {
+    chain.iter().fold(0.0_f64, |peak, p| {
+        let (_, v_end, _) = p.end_state();
+        let winds_down = p.j < 0.0 && p.a0 > 0.0;
+        let crest = if winds_down {
+            let tau = (-p.a0 / p.j).min(p.dt);
+            p.v0 + p.a0 * tau + 0.5 * p.j * tau * tau
+        } else {
+            0.0
+        };
+        peak.max(p.v0).max(v_end).max(crest)
+    })
+}
+
+const RIM_ARC_RADIUS: f64 = 20.0;
+const RIM_ARC_ACCEL: f64 = 2000.0;
+const RIM_ARC_JERK: f64 = 1.0e5;
+
+/// Peak the member's single cap set reaches on the reference arc, measured. The
+/// whole ramp is priced at the authority left at the top speed, so the search
+/// settles for a top speed the disk would let it beat by 28 mm/s.
+const SINGLE_CAP_SET_ARC_PEAK: f64 = 171.785;
+
+/// Share of the disk rim the ladder rides on the reference arc, measured at
+/// 198.253 of 200 mm/s.
+const LADDER_ARC_RIM_SHARE: f64 = 0.99;
+
+/// A half-circle long enough that nothing but the acceleration disk can bound
+/// it: the rim `sqrt(accel * radius)` is the speed a steady pass spends the
+/// whole disk on, and a rest-to-rest pass has to buy every mm/s of it with the
+/// authority the disk has left at the speed it is doing at the time.
+#[test]
+fn the_ladder_rides_the_disk_rim_one_cap_set_prices_out_of_reach() {
+    let rim = (RIM_ARC_ACCEL * RIM_ARC_RADIUS).sqrt();
+    let k = kin(
+        1.0 / RIM_ARC_RADIUS,
+        0.0,
+        std::f64::consts::PI * RIM_ARC_RADIUS,
+        RIM_ARC_ACCEL,
+        RIM_ARC_JERK,
+        500.0,
+    );
+    assert_eq!(
+        top_speed_ceiling(&k),
+        rim,
+        "the arc must be disk bound for the rim to be the thing being ridden"
+    );
+
+    let chain = curved_chain(&k, (0.0, 0.0), (0.0, 0.0)).unwrap();
+    assert_certified(&k, &chain, "reference arc");
+    assert_feasible_by_oracle(&k, &chain, "reference arc");
+    assert_continuous(&chain, "reference arc");
+
+    let peak = chain_peak_speed(&chain);
+    assert!(
+        peak > SINGLE_CAP_SET_ARC_PEAK,
+        "peak {peak} did not beat the single cap set's measured {SINGLE_CAP_SET_ARC_PEAK}"
+    );
+    assert!(
+        peak >= rim * LADDER_ARC_RIM_SHARE,
+        "peak {peak} fell off the disk rim {rim}"
+    );
+    assert!(peak <= rim, "peak {peak} rode over the disk rim {rim}");
 }

@@ -137,12 +137,12 @@ fn straight_line_cruises_at_feed_limit() {
 
 /// Share of the disk rim a constant-curvature member's emitted profile actually
 /// reaches. The rim is where the curvature has spent the whole acceleration
-/// budget, so a chain that must hold one cap set over its whole ramp has no
-/// authority left there and provably stops short; the marcher used to report the
-/// rim exactly only because it clamped its samples onto the ceiling. The bound
-/// is the cap direction — never above the rim — plus the measured reach, so a
-/// further loss is still caught.
-const ARC_CRUISE_REACHED_SHARE: f64 = 0.858;
+/// budget, so a ramp held to one cap set over its whole climb has no authority
+/// left there and stops short — that was 0.858 of the rim. The cap ladder buys
+/// each speed stretch the authority the disk leaves at its own speed and the
+/// same arc measures 0.991. The bound is the cap direction — never above the
+/// rim — plus the measured reach, so a loss of the ride is still caught.
+const ARC_CRUISE_REACHED_SHARE: f64 = 0.99;
 
 #[test]
 fn arc_cruise_capped_at_sqrt_a_r() {
@@ -263,8 +263,14 @@ fn clothoid_emitted_accel_is_disk_feasible_and_tracks_velocity() {
 /// blend's own constant-curvature ceiling `sqrt(accel / kappa_peak)`, which is
 /// the capability that ceiling's removal bought. It no longer clears the removed
 /// cruise value itself: the sampled marcher reached 79.37 mm/s here by riding the
-/// ceiling curve, and one cap set per member reaches 59.06. That shortfall is the
-/// solver's, not the envelope's.
+/// ceiling curve, and the closed form reaches 59.06.
+///
+/// That shortfall is the *envelope's*, measured: the clothoid's peak is its own
+/// entry speed and its exit sits exactly on the member ceiling, so the member is
+/// braking the whole way and the plan never chooses the peak. The cap ladder
+/// prices a plan's ramp at the authority each speed stretch really has and moved
+/// this number not at all; what sets it is `reach_span`, which still buys the
+/// whole brake envelope at one cap set.
 #[test]
 fn clothoid_rides_the_disk_above_its_constant_curvature_ceiling() {
     let (kappa_peak, length, accel) = (0.8_f64, 4.0_f64, 2000.0_f64);
