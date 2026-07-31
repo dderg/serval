@@ -17,6 +17,10 @@ communication with the Kalico developers.
 
 - [Installation](Installation.md): Guide to installing Kalico.
   - [Octoprint](OctoPrint.md): Guide to installing Octoprint with Kalico.
+  - [Migrating from Klipper](Migrating_from_Klipper.md): Moving from
+    Klipper's configuration and motion model.
+  - [Config migration](Config_Migration.md): Current configuration model
+    and migration steps.
 - [Config Reference](Config_Reference.md): Description of config
   parameters.
   - [Rotation Distance](Rotation_Distance.md): Calculating the
@@ -24,8 +28,6 @@ communication with the Kalico developers.
 - [Config checks](Config_checks.md): Verify basic pin settings in the
   config file.
 - [Bed level](Bed_Level.md): Information on "bed leveling" in Kalico.
-  - [Delta calibrate](Delta_Calibrate.md): Calibration of delta
-    kinematics.
   - [Probe calibrate](Probe_Calibrate.md): Calibration of automatic Z
     probes.
   - [BL-Touch](BLTouch.md): Configure a "BL-Touch" Z probe.
@@ -59,22 +61,12 @@ communication with the Kalico developers.
 
 ## Developer Documentation
 
-- [Code overview](Code_Overview.md): Developers should read this
-  first.
-- [Kinematics](Kinematics.md): Technical details on how Kalico
-  implements motion.
-- [Protocol](Protocol.md): Information on the low-level messaging
-  protocol between host and micro-controller.
+- [Motion configuration reference](Config_Reference_Motion.md): Current
+  `[printer]`, `[kinematics]`, `[motor]`, `[axis]`, and post-processor schema.
 - [API Server](API_Server.md): Information on Kalico's command and
   control API.
-- [MCU commands](MCU_Commands.md): A description of low-level commands
-  implemented in the micro-controller software.
 - [CAN bus protocol](CANBUS_protocol.md): Kalico CAN bus message
   format.
-- [Debugging](Debugging.md): Information on how to test and debug
-  Kalico.
-- [Benchmarks](Benchmarks.md): Information on the Kalico benchmark
-  method.
 - [Contributing](CONTRIBUTING.md): Information on how to submit
   improvements to Kalico.
 - [Packaging](Packaging.md): Information on building OS packages.

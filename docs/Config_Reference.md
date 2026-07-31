@@ -3,6 +3,9 @@
 This document is a reference for options available in the Kalico
 config file.
 
+Motion configuration lives in [Config_Reference_Motion.md](Config_Reference_Motion.md).
+
+
 Sections and options are marked with an ⚠️ to denote configurations that are changed from stock Klipper.
 
 The descriptions in this document are formatted so that it is possible
@@ -59,7 +62,9 @@ serial:
 #   accomplish a micro-controller reset. The 'command' method involves
 #   sending a Kalico command to the micro-controller so that it can
 #   reset itself. The default is 'arduino' if the micro-controller
-#   communicates over a serial port, 'command' otherwise.
+#   communicates over a serial port, 'command' otherwise. A CAN bus
+#   micro-controller accepts only 'command': the others act on a USB or
+#   serial connection that a CAN node does not have.
 #is_non_critical: False
 #   Setting this to True will allow the mcu to be disconnected and
 #   reconnected at will without errors. Helpful for USB-accelerometer boards
@@ -201,11 +206,11 @@ will display an error if none of the constants are used.
 run_current_ab:  1.0
 i_am_not_used: True  # Will show "Constant 'i_am_not_used' is unused"
 
-[tmc5160 stepper_x]
+[tmc5160 x_motor]
 run_current: ${constants.run_current_ab}
 
-[tmc5160 stepper_y]
-run_current: ${tmc5160 stepper_x.run_current}
+[tmc5160 y_motor]
+run_current: ${tmc5160 x_motor.run_current}
 #   Nested references work, but are not advised
 ```
 
@@ -213,920 +218,34 @@ If needed, references may be escaped as `\${such}`
 
 ## Common kinematic settings
 
-### [printer]
-
-The printer section controls high level printer settings.
-
-```
-[printer]
-kinematics:
-#   The type of printer in use. This option may be one of: cartesian,
-#   corexy, corexz, hybrid_corexy, hybrid_corexz, rotary_delta, delta,
-#   deltesian, polar, winch, or none. This parameter must be specified.
-max_velocity:
-#   Maximum velocity (in mm/s) of the toolhead (relative to the
-#   print). This value may be changed at runtime using the
-#   SET_VELOCITY_LIMIT command. This parameter must be specified.
-max_accel:
-#   Maximum acceleration (in mm/s^2) of the toolhead (relative to the
-#   print). Although this parameter is described as a "maximum"
-#   acceleration, in practice most moves that accelerate or decelerate
-#   will do so at the rate specified here. The value specified here
-#   may be changed at runtime using the SET_VELOCITY_LIMIT command.
-#   This parameter must be specified.
-#minimum_cruise_ratio: 0.5
-#   Most moves will accelerate to a cruising speed, travel at that
-#   cruising speed, and then decelerate. However, some moves that
-#   travel a short distance could nominally accelerate and then
-#   immediately decelerate. This option reduces the top speed of these
-#   moves to ensure there is always a minimum distance traveled at a
-#   cruising speed. That is, it enforces a minimum distance traveled
-#   at cruising speed relative to the total distance traveled. It is
-#   intended to reduce the top speed of short zigzag moves (and thus
-#   reduce printer vibration from these moves). For example, a
-#   minimum_cruise_ratio of 0.5 would ensure that a standalone 1.5mm
-#   move would have a minimum cruising distance of 0.75mm. Specify a
-#   ratio of 0.0 to disable this feature (there would be no minimum
-#   cruising distance enforced between acceleration and deceleration).
-#   The value specified here may be changed at runtime using the
-#   SET_VELOCITY_LIMIT command. The default is 0.5.
-#corner_deviation:
-#   The distance (in mm) the corner blend the planner fits may deviate
-#   from the commanded geometry at a corner. The blend geometry depends
-#   only on this knob — smoothing added by post-processor kernels
-#   (input shapers) is a separate effect on top, governed by the
-#   post-processor's own parameters. Corner speed is derived from this
-#   budget and the acceleration limit: at a fixed deviation, higher
-#   acceleration yields higher cornering speed. Set to zero to
-#   decelerate to a stop at every corner. The value may be changed at
-#   runtime using the SET_VELOCITY_LIMIT command. Mutually exclusive
-#   with square_corner_velocity. The default is the conversion of the
-#   default square_corner_velocity (5 mm/s) at max_accel.
-#square_corner_velocity: 5.0
-#   Legacy alias for corner_deviation: the velocity (in mm/s) the
-#   toolhead may travel a 90 degree corner at, converted once at
-#   startup into a corner_deviation of
-#   square_corner_velocity^2 * (sqrt(2)-1) / max_accel. Unlike older
-#   planners the resulting deviation budget is then constant: moves
-#   with a lower acceleration limit corner at proportionally lower
-#   speed instead of a smaller deviation. Mutually exclusive with
-#   corner_deviation. The default is 5mm/s.
-#max_path_deviation: 0.005
-#   Maximum distance (in mm) the executed motion may deviate from the
-#   commanded path. The planner represents each move as a series of
-#   polynomial pieces and subdivides a move until every piece tracks the
-#   path to within this value, so a smaller value yields more pieces
-#   (tighter path following) and a larger value yields fewer pieces.
-#   Loosening it reduces the per-move piece count, which lowers MCU
-#   piece-ring pressure and host-to-MCU serial bandwidth on
-#   memory-constrained boards at the cost of slightly coarser path
-#   following. This is unrelated to the planner's faceted-arc
-#   reconstruction, which is always on. The default is 0.005 (5 microns).
-#max_accel_deviation: 50.0
-#   Maximum amount (in mm/s^2) the acceleration implied by a polynomial
-#   piece may deviate from the planned motion profile in the piece
-#   interior. Acceleration accuracy only matters to drives that consume
-#   an acceleration feedforward (EtherCAT servos); stepper drivers
-#   follow positions and are unaffected. This budget, not
-#   max_path_deviation, is usually what forces the planner to subdivide
-#   curved moves, so raising it substantially reduces piece counts (and
-#   with them MCU piece-ring pressure and host-to-MCU serial bandwidth)
-#   at the cost of coarser acceleration feedforward. Endpoint
-#   acceleration at piece seams stays exact regardless of this value,
-#   so trajectories remain smooth. The default is 50.0.
-#max_accel_to_decel:
-#   This parameter is deprecated and should no longer be used.
-```
-
-### [stepper]
-
-Stepper motor definitions. Different printer types (as specified by
-the "kinematics" option in the [printer] config section) require
-different names for the stepper (eg, `stepper_x` vs `stepper_a`).
-Below are common stepper definitions.
-
-See the [rotation distance document](Rotation_Distance.md) for
-information on calculating the `rotation_distance` parameter. See the
-[Multi-MCU homing](Multi_MCU_Homing.md) document for information on
-homing using multiple micro-controllers.
-
-```
-[stepper_x]
-step_pin:
-#   Step GPIO pin (triggered high). This parameter must be provided.
-dir_pin:
-#   Direction GPIO pin (high indicates positive direction). This
-#   parameter must be provided.
-enable_pin:
-#   Enable pin (default is enable high; use ! to indicate enable
-#   low). If this parameter is not provided then the stepper motor
-#   driver must always be enabled.
-rotation_distance:
-#   Distance (in mm) that the axis travels with one full rotation of
-#   the stepper motor (or final gear if gear_ratio is specified).
-#   This parameter must be provided.
-microsteps:
-#   The number of microsteps the stepper motor driver uses. This
-#   parameter must be provided.
-#full_steps_per_rotation: 200
-#   The number of full steps for one rotation of the stepper motor.
-#   Set this to 200 for a 1.8 degree stepper motor or set to 400 for a
-#   0.9 degree motor. The default is 200.
-#gear_ratio:
-#   The gear ratio if the stepper motor is connected to the axis via a
-#   gearbox. For example, one may specify "5:1" if a 5 to 1 gearbox is
-#   in use. If the axis has multiple gearboxes one may specify a comma
-#   separated list of gear ratios (for example, "57:11, 2:1"). If a
-#   gear_ratio is specified then rotation_distance specifies the
-#   distance the axis travels for one full rotation of the final gear.
-#   The default is to not use a gear ratio.
-#step_pulse_duration:
-#   The minimum time between the step pulse signal edge and the
-#   following "unstep" signal edge. This is also used to set the
-#   minimum time between a step pulse and a direction change signal.
-#   The default is 0.000000100 (100ns) for TMC steppers that are
-#   configured in UART or SPI mode, and the default is 0.000002 (which
-#   is 2us) for all other steppers.
-endstop_pin:
-#   Endstop switch detection pin. If this endstop pin is on a
-#   different mcu than the stepper motor then it enables "multi-mcu
-#   homing". This parameter must be provided for the X, Y, and Z
-#   steppers on cartesian style printers.
-#position_min: 0
-#   Minimum valid distance (in mm) the user may command the stepper to
-#   move to.  The default is 0mm.
-position_endstop:
-#   Location of the endstop (in mm). This parameter must be provided
-#   for the X, Y, and Z steppers on cartesian style printers.
-position_max:
-#   Maximum valid distance (in mm) the user may command the stepper to
-#   move to. This parameter must be provided for the X, Y, and Z
-#   steppers on cartesian style printers.
-#homing_speed: 5.0
-#   Maximum velocity (in mm/s) of the stepper when homing. The default
-#   is 5mm/s.
-#homing_accel:
-#   Maximum accel (in mm/s) of the stepper when homing. The default
-#   is to use the max accel configured in the [printer]'s object.
-#homing_retract_dist: 5.0
-#   Distance to backoff (in mm) before homing a second time during
-#   homing. If `use_sensorless_homing` is false, this setting can be set
-#   to zero to disable the second home. If `use_sensorless_homing` is
-#   true, this setting can be > 0 to backoff after homing. The default
-#   is 5mm.
-#homing_retract_speed:
-#   Speed to use on the retract move after homing in case this should
-#   be different from the homing speed, which is the default for this
-#   parameter
-#min_home_dist:
-#   Minimum distance (in mm) for toolhead before sensorless homing. If closer
-#   than `min_home_dist` to endstop, it moves away to this distance, then homes.
-#   If further, it directly homes and retracts to `homing_retract_dist`.
-#   The default is equal to `homing_retract_dist`.
-#second_homing_speed:
-#   Velocity (in mm/s) of the stepper when performing the second home.
-#   The default is homing_speed/2. If `use_sensorless_homing` is
-#   true, the default is homing_speed.
-#homing_positive_dir:
-#   If true, homing will cause the stepper to move in a positive
-#   direction (away from zero); if false, home towards zero. It is
-#   better to use the default than to specify this parameter. The
-#   default is true if position_endstop is near position_max and false
-#   if near position_min.
-#use_sensorless_homing:
-#   If true, disables the second home action if homing_retract_dist > 0.
-#   The default is true if endstop_pin is configured to use virtual_endstop
-```
-
-### Cartesian Kinematics
-
-See [example-cartesian.cfg](../config/example-cartesian.cfg) for an
-example cartesian kinematics config file.
-
-Only parameters specific to cartesian printers are described here -
-see [common kinematic settings](#common-kinematic-settings) for
-available parameters.
-
-```
-[printer]
-kinematics: cartesian
-max_z_velocity:
-#   This sets the maximum velocity (in mm/s) of movement along the z
-#   axis. This setting can be used to restrict the maximum speed of
-#   the z stepper motor. The default is to use max_velocity for
-#   max_z_velocity.
-max_z_accel:
-#   This sets the maximum acceleration (in mm/s^2) of movement along
-#   the z axis. It limits the acceleration of the z stepper motor. The
-#   default is to use max_accel for max_z_accel.
-
-# The stepper_x section is used to describe the stepper controlling
-# the X axis in a cartesian robot.
-[stepper_x]
-
-# The stepper_y section is used to describe the stepper controlling
-# the Y axis in a cartesian robot.
-[stepper_y]
-
-# The stepper_z section is used to describe the stepper controlling
-# the Z axis in a cartesian robot.
-[stepper_z]
-```
-
-### ⚠️ Cartesian Kinematics with limits for X and Y axes
-
-Behaves exactly the as cartesian kinematics, but allows to set a velocity and
-acceleration limit for X and Y axis. This also makes command
-[`SET_KINEMATICS_LIMIT`](./G-Codes.md#set_kinematics_limit) available to sets these limits at runtime.
-
-
-```
-[printer]
-kinematics: limited_cartesian
-max_x_velocity:
-#   This sets the maximum velocity (in mm/s) of movement along the x
-#   axis. This setting can be used to restrict the maximum speed of
-#   the x stepper motor. The default is to use max_velocity for
-#   max_x_velocity.
-max_y_velocity:
-#   This sets the maximum velocity (in mm/s) of movement along the y
-#   axis. This setting can be used to restrict the maximum speed of
-#   the y stepper motor. The default is to use max_velocity for
-#   max_x_velocity.
-max_z_velocity:
-#   See cartesian above.
-max_velocity:
-#   In order to get maximum velocity gains on diagonals, this should be equal or
-#   greater than the hypotenuse (sqrt(x*x + y*y)) of max_x_velocity and
-#   max_y_velocity.
-max_x_accel:
-#   This sets the maximum acceleration (in mm/s^2) of movement along
-#   the x axis. It limits the acceleration of the x stepper motor. The
-#   default is to use max_accel for max_x_accel.
-max_y_accel:
-#   This sets the maximum acceleration (in mm/s^2) of movement along
-#   the y axis. It limits the acceleration of the y stepper motor. The
-#   default is to use max_accel for max_y_accel.
-max_z_accel:
-# See cartesian above.
-max_accel:
-# See cartesian above.
-scale_xy_accel: False
-#   When true, scales the XY limits by the current tool head acceleration.
-#   The factor is: slicer accel / hypot(max_x_accel, max_y_accel).
-#   See below.
-```
-
-If scale_xy_accel is `False`, the acceleration set by `max_accel`, M204 or
-SET_VELOCITY_LIMIT, acts as a third limit. In that case, this module doesn't
-apply limitations on moves having an acceleration lower than `max_x_accel`` and
-`max_y_accel`. When scale_xy_accel is `True`, `max_x_accel` and `max_y_accel`
-are scaled by the ratio of the dynamically set acceleration and the hypotenuse
-of max_x_accel and `max_y_accel`, as reported from `SET_KINEMATICS_LIMIT`. This
-implies that the actual acceleration will always depend on the direction. For
-example, these settings:
-
-```
-[printer]
-max_x_accel: 12000
-max_y_accel: 9000
-scale_xy_accel: true
-```
-
-`SET_KINEMATICS_LIMIT` will report a maximum acceleration of 15000 mm/s^2 on 37°
-diagonals. If the slicer emit `M204 S3000` (3000 mm/s^2 accel). On these 37° and
-143° diagonals, the toolhead will accelerate at 3000 mm/s^2. On the X axis, the
-acceleration will be  12000 * 3000 / 15000 = 2400 mm/s^2, and 18000 mm/s^2 for
-pure Y moves.
-
-### Linear Delta Kinematics
-
-See [example-delta.cfg](../config/example-delta.cfg) for an example
-linear delta kinematics config file. See the
-[delta calibrate guide](Delta_Calibrate.md) for information on
-calibration.
-
-Only parameters specific to linear delta printers are described here -
-see [common kinematic settings](#common-kinematic-settings) for
-available parameters.
-
-```
-[printer]
-kinematics: delta
-max_z_velocity:
-#   For delta printers this limits the maximum velocity (in mm/s) of
-#   moves with z axis movement. This setting can be used to reduce the
-#   maximum speed of up/down moves (which require a higher step rate
-#   than other moves on a delta printer). The default is to use
-#   max_velocity for max_z_velocity.
-#max_z_accel:
-#   This sets the maximum acceleration (in mm/s^2) of movement along
-#   the z axis. Setting this may be useful if the printer can reach higher
-#   acceleration on XY moves than Z moves (eg, when using input shaper).
-#   The default is to use max_accel for max_z_accel.
-#minimum_z_position: 0
-#   The minimum Z position that the user may command the head to move
-#   to. The default is 0.
-delta_radius:
-#   Radius (in mm) of the horizontal circle formed by the three linear
-#   axis towers. This parameter may also be calculated as:
-#    delta_radius = smooth_rod_offset - effector_offset - carriage_offset
-#   This parameter must be provided.
-#print_radius:
-#   The radius (in mm) of valid toolhead XY coordinates. One may use
-#   this setting to customize the range checking of toolhead moves. If
-#   a large value is specified here then it may be possible to command
-#   the toolhead into a collision with a tower. The default is to use
-#   delta_radius for print_radius (which would normally prevent a
-#   tower collision).
-
-# The stepper_a section describes the stepper controlling the front
-# left tower (at 210 degrees). This section also controls the homing
-# parameters (homing_speed, homing_retract_dist) for all towers.
-[stepper_a]
-position_endstop:
-#   Distance (in mm) between the nozzle and the bed when the nozzle is
-#   in the center of the build area and the endstop triggers. This
-#   parameter must be provided for stepper_a; for stepper_b and
-#   stepper_c this parameter defaults to the value specified for
-#   stepper_a.
-arm_length:
-#   Length (in mm) of the diagonal rod that connects this tower to the
-#   print head. This parameter must be provided for stepper_a; for
-#   stepper_b and stepper_c this parameter defaults to the value
-#   specified for stepper_a.
-#angle:
-#   This option specifies the angle (in degrees) that the tower is
-#   at. The default is 210 for stepper_a, 330 for stepper_b, and 90
-#   for stepper_c.
-
-# The stepper_b section describes the stepper controlling the front
-# right tower (at 330 degrees).
-[stepper_b]
-
-# The stepper_c section describes the stepper controlling the rear
-# tower (at 90 degrees).
-[stepper_c]
-
-# The delta_calibrate section enables a DELTA_CALIBRATE extended
-# g-code command that can calibrate the tower endstop positions and
-# angles.
-[delta_calibrate]
-radius:
-#   Radius (in mm) of the area that may be probed. This is the radius
-#   of nozzle coordinates to be probed; if using an automatic probe
-#   with an XY offset then choose a radius small enough so that the
-#   probe always fits over the bed. This parameter must be provided.
-#speed: 50
-#   The speed (in mm/s) of non-probing moves during the calibration.
-#   The default is 50.
-#horizontal_move_z: 5
-#   The height (in mm) that the head should be commanded to move to
-#   just prior to starting a probe operation. The default is 5.
-#use_probe_xy_offsets: False
-#   If True, apply the `[probe]` XY offsets to the probed positions. The
-#   default is False.
-```
-
-### Deltesian Kinematics
-
-See [example-deltesian.cfg](../config/example-deltesian.cfg) for an
-example deltesian kinematics config file.
-
-Only parameters specific to deltesian printers are described here - see
-[common kinematic settings](#common-kinematic-settings) for available
-parameters.
-
-```
-[printer]
-kinematics: deltesian
-max_z_velocity:
-#   For deltesian printers, this limits the maximum velocity (in mm/s) of
-#   moves with z axis movement. This setting can be used to reduce the
-#   maximum speed of up/down moves (which require a higher step rate
-#   than other moves on a deltesian printer). The default is to use
-#   max_velocity for max_z_velocity.
-#max_z_accel:
-#   This sets the maximum acceleration (in mm/s^2) of movement along
-#   the z axis. Setting this may be useful if the printer can reach higher
-#   acceleration on XY moves than Z moves (eg, when using input shaper).
-#   The default is to use max_accel for max_z_accel.
-#minimum_z_position: 0
-#   The minimum Z position that the user may command the head to move
-#   to. The default is 0.
-#min_angle: 5
-#   This represents the minimum angle (in degrees) relative to horizontal
-#   that the deltesian arms are allowed to achieve. This parameter is
-#   intended to restrict the arms from becoming completely horizontal,
-#   which would risk accidental inversion of the XZ axis. The default is 5.
-#print_width:
-#   The distance (in mm) of valid toolhead X coordinates. One may use
-#   this setting to customize the range checking of toolhead moves. If
-#   a large value is specified here then it may be possible to command
-#   the toolhead into a collision with a tower. This setting usually
-#   corresponds to bed width (in mm).
-#slow_ratio: 3
-#   The ratio used to limit velocity and acceleration on moves near the
-#   extremes of the X axis. If vertical distance divided by horizontal
-#   distance exceeds the value of slow_ratio, then velocity and
-#   acceleration are limited to half their nominal values. If vertical
-#   distance divided by horizontal distance exceeds twice the value of
-#   the slow_ratio, then velocity and acceleration are limited to one
-#   quarter of their nominal values. The default is 3.
-
-# The stepper_left section is used to describe the stepper controlling
-# the left tower. This section also controls the homing parameters
-# (homing_speed, homing_retract_dist) for all towers.
-[stepper_left]
-position_endstop:
-#   Distance (in mm) between the nozzle and the bed when the nozzle is
-#   in the center of the build area and the endstops are triggered. This
-#   parameter must be provided for stepper_left; for stepper_right this
-#   parameter defaults to the value specified for stepper_left.
-arm_length:
-#   Length (in mm) of the diagonal rod that connects the tower carriage to
-#   the print head. This parameter must be provided for stepper_left; for
-#   stepper_right, this parameter defaults to the value specified for
-#   stepper_left.
-arm_x_length:
-#   Horizontal distance between the print head and the tower when the
-#   printers is homed. This parameter must be provided for stepper_left;
-#   for stepper_right, this parameter defaults to the value specified for
-#   stepper_left.
-
-# The stepper_right section is used to describe the stepper controlling the
-# right tower.
-[stepper_right]
-
-# The stepper_y section is used to describe the stepper controlling
-# the Y axis in a deltesian robot.
-[stepper_y]
-```
-
-### CoreXY Kinematics
-
-See [example-corexy.cfg](../config/example-corexy.cfg) for an example
-corexy (and h-bot) kinematics file.
-
-Only parameters specific to corexy printers are described here - see
-[common kinematic settings](#common-kinematic-settings) for available
-parameters.
-
-```
-[printer]
-kinematics: corexy
-max_z_velocity:
-#   This sets the maximum velocity (in mm/s) of movement along the z
-#   axis. This setting can be used to restrict the maximum speed of
-#   the z stepper motor. The default is to use max_velocity for
-#   max_z_velocity.
-max_z_accel:
-#   This sets the maximum acceleration (in mm/s^2) of movement along
-#   the z axis. It limits the acceleration of the z stepper motor. The
-#   default is to use max_accel for max_z_accel.
-
-# The stepper_x section is used to describe the X axis as well as the
-# stepper controlling the X+Y movement.
-[stepper_x]
-
-# The stepper_y section is used to describe the Y axis as well as the
-# stepper controlling the X-Y movement.
-[stepper_y]
-
-# The stepper_z section is used to describe the stepper controlling
-# the Z axis.
-[stepper_z]
-```
-
-### ⚠️ CoreXY Kinematics with limits for X and Y axes
-
-Behaves exactly the as CoreXY kinematics, but allows to set a acceleration limit
-for X and Y axis.
-
-There is no velocity limits for X and Y, since on a CoreXY the pull-out velocity
-are identical on both axes.
-
-
-```
-[printer]
-kinematics: limited_corexy
-max_z_velocity:
-#   See CoreXY above.
-max_x_accel:
-#   This sets the maximum acceleration (in mm/s^2) of movement along
-#   the x axis. It limits the acceleration of the x stepper motor. The
-#   default is to use max_accel for max_x_accel.
-max_y_accel:
-#   This sets the maximum acceleration (in mm/s^2) of movement along
-#   the y axis. It limits the acceleration of the y stepper motor. The
-#   default is to use max_accel for max_y_accel.
-max_z_accel:
-# See CoreXY above.
-max_accel:
-# See CoreXY above..
-scale_xy_accel:
-#   When True, scales the XY limits by the current tool head acceleration.
-#   The factor is: slicer accel / max(max_x_accel, max_y_accel).
-```
-
-### CoreXZ Kinematics
-
-See [example-corexz.cfg](../config/example-corexz.cfg) for an example
-corexz kinematics config file.
-
-Only parameters specific to corexz printers are described here - see
-[common kinematic settings](#common-kinematic-settings) for available
-parameters.
-
-```
-[printer]
-kinematics: corexz
-max_z_velocity:
-#   This sets the maximum velocity (in mm/s) of movement along the z
-#   axis. The default is to use max_velocity for max_z_velocity.
-max_z_accel:
-#   This sets the maximum acceleration (in mm/s^2) of movement along
-#   the z axis. The default is to use max_accel for max_z_accel.
-
-# The stepper_x section is used to describe the X axis as well as the
-# stepper controlling the X+Z movement.
-[stepper_x]
-
-# The stepper_y section is used to describe the stepper controlling
-# the Y axis.
-[stepper_y]
-
-# The stepper_z section is used to describe the Z axis as well as the
-# stepper controlling the X-Z movement.
-[stepper_z]
-```
-
-### ⚠️ CoreXZ Kinematics with limits for X and Y axes
-
-```
-[printer]
-kinematics: limited_corexz
-max_velocity: 500 # Hypotenuse of the two values bellow
-max_x_velocity: 400
-max_y_velocity: 300
-max_z_velocity: 5
-max_accel: 1500 # Default acceleration of your choice
-max_x_accel: 12000
-max_y_accel: 9000
-max_z_accel: 100
-scale_xy_accel: [True/False, default False]
-```
-
-`max_velocity` is usually the hypotenuses of X and Y velocity, For example:
-with `max_x_velocity: 300` and `max_y_velocity: 400`, the recommended value
-is `max_velocity: 500`.
-
-If `scale_xy_accel` is False, `max_accel`, set by `M204` or
-`SET_VELOCITY_LIMIT`, acts as a third limit. In that case, this module
-doesn't apply limitations to moves with an acceleration lower than
-`max_x_accel` and `max_y_accel`.
-
-When `scale_xy_accel` is `True`, `max_x_accel` and `max_y_accel` are scaled by
-the ratio of the dynamically set acceleration and the hypotenuse of
-`max_x_accel` and `max_y_accel`, as reported from `SET_KINEMATICS_LIMIT`.
-This means that the actual acceleration will always depend on the
-direction.
-
-For example with these settings:
-```
-[printer]
-max_x_accel: 12000
-max_y_accel: 9000
-scale_xy_accel: True
-```
-
-SET_KINEMATICS_LIMIT will report a maximum acceleration of 15000 mm/s^2
-on 37 degrees diagonals. Thus, setting an acceleration of 3000 mm/s^2 in
-the slicer will make the toolhead accelerate at 3000 mm/s^2 on these 37
-and 143 degrees diagonals, but only 12000 * 3000 / 15000 = 2400 mm/s^2
-for moves aligned with the X axis and 18000 mm/s^2 for pure Y moves.
-
-
-### Hybrid-CoreXY Kinematics
-
-See [example-hybrid-corexy.cfg](../config/example-hybrid-corexy.cfg)
-for an example hybrid corexy kinematics config file.
-
-This kinematic is also known as Markforged kinematic.
-
-Only parameters specific to hybrid corexy printers are described here
-see [common kinematic settings](#common-kinematic-settings) for available
-parameters.
-
-```
-[printer]
-kinematics: hybrid_corexy
-invert_kinematics: False
-# ⚠️ Some hybrid_corexy machines with dual carriages may need to
-#   invert the kinematics if the toolheads move in reverse
-max_z_velocity:
-#   This sets the maximum velocity (in mm/s) of movement along the z
-#   axis. The default is to use max_velocity for max_z_velocity.
-max_z_accel:
-#   This sets the maximum acceleration (in mm/s^2) of movement along
-#   the z axis. The default is to use max_accel for max_z_accel.
-
-# The stepper_x section is used to describe the X axis as well as the
-# stepper controlling the X-Y movement.
-[stepper_x]
-
-# The stepper_y section is used to describe the stepper controlling
-# the Y axis.
-[stepper_y]
-
-# The stepper_z section is used to describe the stepper controlling
-# the Z axis.
-[stepper_z]
-```
-
-### Hybrid-CoreXZ Kinematics
-
-See [example-hybrid-corexz.cfg](../config/example-hybrid-corexz.cfg)
-for an example hybrid corexz kinematics config file.
-
-This kinematic is also known as Markforged kinematic.
-
-Only parameters specific to hybrid corexy printers are described here
-see [common kinematic settings](#common-kinematic-settings) for available
-parameters.
-
-```
-[printer]
-kinematics: hybrid_corexz
-invert_kinematics: False
-# ⚠️ Some hybrid_corexy machines with dual carriages may need to
-#   invert the kinematics if the toolheads move in reverse
-max_z_velocity:
-#   This sets the maximum velocity (in mm/s) of movement along the z
-#   axis. The default is to use max_velocity for max_z_velocity.
-max_z_accel:
-#   This sets the maximum acceleration (in mm/s^2) of movement along
-#   the z axis. The default is to use max_accel for max_z_accel.
-
-# The stepper_x section is used to describe the X axis as well as the
-# stepper controlling the X-Z movement.
-[stepper_x]
-
-# The stepper_y section is used to describe the stepper controlling
-# the Y axis.
-[stepper_y]
-
-# The stepper_z section is used to describe the stepper controlling
-# the Z axis.
-[stepper_z]
-```
-
-### Polar Kinematics
-
-See [example-polar.cfg](../config/example-polar.cfg) for an example
-polar kinematics config file.
-
-Only parameters specific to polar printers are described here - see
-[common kinematic settings](#common-kinematic-settings) for available
-parameters.
-
-POLAR KINEMATICS ARE A WORK IN PROGRESS. Moves around the 0, 0
-position are known to not work properly.
-
-```
-[printer]
-kinematics: polar
-max_z_velocity:
-#   This sets the maximum velocity (in mm/s) of movement along the z
-#   axis. This setting can be used to restrict the maximum speed of
-#   the z stepper motor. The default is to use max_velocity for
-#   max_z_velocity.
-max_z_accel:
-#   This sets the maximum acceleration (in mm/s^2) of movement along
-#   the z axis. It limits the acceleration of the z stepper motor. The
-#   default is to use max_accel for max_z_accel.
-
-# The stepper_bed section is used to describe the stepper controlling
-# the bed.
-[stepper_bed]
-gear_ratio:
-#   A gear_ratio must be specified and rotation_distance may not be
-#   specified. For example, if the bed has an 80 toothed pulley driven
-#   by a stepper with a 16 toothed pulley then one would specify a
-#   gear ratio of "80:16". This parameter must be provided.
-
-# The stepper_arm section is used to describe the stepper controlling
-# the carriage on the arm.
-[stepper_arm]
-
-# The stepper_z section is used to describe the stepper controlling
-# the Z axis.
-[stepper_z]
-```
-
-### Rotary delta Kinematics
-
-See [example-rotary-delta.cfg](../config/example-rotary-delta.cfg) for
-an example rotary delta kinematics config file.
-
-Only parameters specific to rotary delta printers are described here -
-see [common kinematic settings](#common-kinematic-settings) for
-available parameters.
-
-ROTARY DELTA KINEMATICS ARE A WORK IN PROGRESS. Homing moves may
-timeout and some boundary checks are not implemented.
-
-```
-[printer]
-kinematics: rotary_delta
-max_z_velocity:
-#   For delta printers this limits the maximum velocity (in mm/s) of
-#   moves with z axis movement. This setting can be used to reduce the
-#   maximum speed of up/down moves (which require a higher step rate
-#   than other moves on a delta printer). The default is to use
-#   max_velocity for max_z_velocity.
-#minimum_z_position: 0
-#   The minimum Z position that the user may command the head to move
-#   to.  The default is 0.
-shoulder_radius:
-#   Radius (in mm) of the horizontal circle formed by the three
-#   shoulder joints, minus the radius of the circle formed by the
-#   effector joints. This parameter may also be calculated as:
-#     shoulder_radius = (delta_f - delta_e) / sqrt(12)
-#   This parameter must be provided.
-shoulder_height:
-#   Distance (in mm) of the shoulder joints from the bed, minus the
-#   effector toolhead height. This parameter must be provided.
-
-# The stepper_a section describes the stepper controlling the rear
-# right arm (at 30 degrees). This section also controls the homing
-# parameters (homing_speed, homing_retract_dist) for all arms.
-[stepper_a]
-gear_ratio:
-#   A gear_ratio must be specified and rotation_distance may not be
-#   specified. For example, if the arm has an 80 toothed pulley driven
-#   by a pulley with 16 teeth, which is in turn connected to a 60
-#   toothed pulley driven by a stepper with a 16 toothed pulley, then
-#   one would specify a gear ratio of "80:16, 60:16". This parameter
-#   must be provided.
-position_endstop:
-#   Distance (in mm) between the nozzle and the bed when the nozzle is
-#   in the center of the build area and the endstop triggers. This
-#   parameter must be provided for stepper_a; for stepper_b and
-#   stepper_c this parameter defaults to the value specified for
-#   stepper_a.
-upper_arm_length:
-#   Length (in mm) of the arm connecting the "shoulder joint" to the
-#   "elbow joint". This parameter must be provided for stepper_a; for
-#   stepper_b and stepper_c this parameter defaults to the value
-#   specified for stepper_a.
-lower_arm_length:
-#   Length (in mm) of the arm connecting the "elbow joint" to the
-#   "effector joint". This parameter must be provided for stepper_a;
-#   for stepper_b and stepper_c this parameter defaults to the value
-#   specified for stepper_a.
-#angle:
-#   This option specifies the angle (in degrees) that the arm is at.
-#   The default is 30 for stepper_a, 150 for stepper_b, and 270 for
-#   stepper_c.
-
-# The stepper_b section describes the stepper controlling the rear
-# left arm (at 150 degrees).
-[stepper_b]
-
-# The stepper_c section describes the stepper controlling the front
-# arm (at 270 degrees).
-[stepper_c]
-
-# The delta_calibrate section enables a DELTA_CALIBRATE extended
-# g-code command that can calibrate the shoulder endstop positions.
-[delta_calibrate]
-radius:
-#   Radius (in mm) of the area that may be probed. This is the radius
-#   of nozzle coordinates to be probed; if using an automatic probe
-#   with an XY offset then choose a radius small enough so that the
-#   probe always fits over the bed. This parameter must be provided.
-#speed: 50
-#   The speed (in mm/s) of non-probing moves during the calibration.
-#   The default is 50.
-#horizontal_move_z: 5
-#   The height (in mm) that the head should be commanded to move to
-#   just prior to starting a probe operation. The default is 5.
-```
-
-### Cable winch Kinematics
-
-See the [example-winch.cfg](../config/example-winch.cfg) for an
-example cable winch kinematics config file.
-
-Only parameters specific to cable winch printers are described here -
-see [common kinematic settings](#common-kinematic-settings) for
-available parameters.
-
-CABLE WINCH SUPPORT IS EXPERIMENTAL. Homing is not implemented on
-cable winch kinematics. In order to home the printer, manually send
-movement commands until the toolhead is at 0, 0, 0 and then issue a
-`G28` command.
-
-```
-[printer]
-kinematics: winch
-
-# The stepper_a section describes the stepper connected to the first
-# cable winch. A minimum of 3 and a maximum of 26 cable winches may be
-# defined (stepper_a to stepper_z) though it is common to define 4.
-[stepper_a]
-rotation_distance:
-#   The rotation_distance is the nominal distance (in mm) the toolhead
-#   moves towards the cable winch for each full rotation of the
-#   stepper motor. This parameter must be provided.
-anchor_x:
-anchor_y:
-anchor_z:
-#   The X, Y, and Z position of the cable winch in cartesian space.
-#   These parameters must be provided.
-```
-
-### None Kinematics
-
-It is possible to define a special "none" kinematics to disable
-kinematic support in Kalico. This may be useful for controlling
-devices that are not typical 3d-printers or for debugging purposes.
-
-```
-[printer]
-kinematics: none
-max_velocity: 1
-max_accel: 1
-#   The max_velocity and max_accel parameters must be defined. The
-#   values are not used for "none" kinematics.
-```
+Motion configuration moved: see [Config_Reference_Motion.md](Config_Reference_Motion.md).
 
 ## Common extruder and heated bed support
 
 ### [extruder]
 
-The extruder section is used to describe the heater parameters for the
-nozzle hotend along with the stepper controlling the extruder. See the
-[command reference](G-Codes.md#extruder) for additional information.
-See the [pressure advance guide](Pressure_Advance.md) for information
-on tuning pressure advance. See [PID](PID.md) or [MPC](MPC.md) for more
-detailed information about the control methods.
+The extruder section describes the heater parameters for the nozzle
+hotend. See the [command reference](G-Codes.md#extruder) for additional
+information. See [PID](PID.md) or [MPC](MPC.md) for more detailed information
+about the control methods.
 
 ```
 [extruder]
-step_pin:
-dir_pin:
-enable_pin:
-microsteps:
-rotation_distance:
-#full_steps_per_rotation:
-#gear_ratio:
-#   See the "stepper" section for a description of the above
-#   parameters. If none of the above parameters are specified then no
-#   stepper will be associated with the nozzle hotend (though a
-#   SYNC_EXTRUDER_MOTION command may associate one at run-time).
+axis:
+#   Name of the follower [axis] declaration carrying the extruder motor and
+#   any pressure-advance post-processors. This parameter must be provided.
 nozzle_diameter:
 #   Diameter of the nozzle orifice (in mm). This parameter must be
 #   provided.
 filament_diameter:
 #   The nominal diameter of the raw filament (in mm) as it enters the
 #   extruder. This parameter must be provided.
-#max_extrude_cross_section:
-#   Maximum area (in mm^2) of an extrusion cross section (eg,
-#   extrusion width multiplied by layer height). This setting prevents
-#   excessive amounts of extrusion during relatively small XY moves.
-#   If a move requests an extrusion rate that would exceed this value
-#   it will cause an error to be returned. The default is: 4.0 *
-#   nozzle_diameter^2
-#instantaneous_corner_velocity: 1.000
-#   The maximum instantaneous velocity change (in mm/s) of the
-#   extruder during the junction of two moves. The default is 1mm/s.
-#max_extrude_only_distance: 50.0
-#   Maximum length (in mm of raw filament) that a retraction or
-#   extrude-only move may have. If a retraction or extrude-only move
-#   requests a distance greater than this value it will cause an error
-#   to be returned. The default is 50mm.
 #max_extrude_only_velocity:
+#   Optional extrude-only velocity cap (mm/s). If specified, it must be
+#   above 0. The default is no cap.
 #max_extrude_only_accel:
-#   Maximum velocity (in mm/s) and acceleration (in mm/s^2) of the
-#   extruder motor for retractions and extrude-only moves. These
-#   settings do not have any impact on normal printing moves. If not
-#   specified then they are calculated to match the limit an XY
-#   printing move with a cross section of 4.0*nozzle_diameter^2 would
-#   have.
-#pressure_advance: 0.0
-#   The amount of raw filament to push into the extruder during
-#   extruder acceleration. An equal amount of filament is retracted
-#   during deceleration. It is measured in millimeters per
-#   millimeter/second. The default is 0, which disables pressure
-#   advance.
-#pressure_advance_smooth_time: 0.040
-#   A time range (in seconds) to use when calculating the average
-#   extruder velocity for pressure advance. A larger value results in
-#   smoother extruder movements. This parameter may not exceed 200ms.
-#   This setting only applies if pressure_advance is non-zero. The
-#   default is 0.040 (40 milliseconds).
+#   Optional extrude-only acceleration cap (mm/s^2). If specified, it must
+#   be above 0. The default is no cap.
 #
 # The remaining variables describe the extruder heater.
 heater_pin:
@@ -1210,10 +329,6 @@ max_temp:
 #   heater and sensor hardware failures. Set this range just wide
 #   enough so that reasonable temperatures do not result in an error.
 #   These parameters must be provided.
-per_move_pressure_advance: False
-#   If true, uses pressure advance constant from trapq when processing moves
-#   This causes changes to pressure advance be taken into account immediately,
-#   for all moves in the current queue, rather than ~250ms later once the queue gets flushed
 #
 #   If: control: dual_loop_pid
 #inner_sensor_name:
@@ -2041,52 +1156,6 @@ information.
 #   the captured position (in mm/s). Default is 50.0 mm/s.
 ```
 
-### [firmware_retraction]
-
-Firmware filament retraction. This enables G10 (retract) and G11
-(unretract) GCODE commands issued by many slicers. The parameters
-below provide startup defaults, although the values can be adjusted
-via the SET_RETRACTION [command](G-Codes.md#firmware_retraction)),
-allowing per-filament settings and runtime tuning.
-
-```
-[firmware_retraction]
-#retract_length: 0.0
-#   The length of filament (in mm) to retract when a G10 command is
-#   executed. When a G11 command is executed, the unretract_length
-#   is the sum of the retract_length and the unretract_extra_length
-#   (see below). The minimum value and default are 0 mm, which
-#   disables firmware retraction.
-#retract_speed: 20.0
-#   The speed of filament retraction moves (in mm/s).
-#   This value is typically set relatively high (>40 mm/s),
-#   except for soft and/oozy filaments like TPU and PETG
-#   (20 to 30 mm/s). The minimum value is 1 mm/s, the default value
-#   is 20 mm/s.
-#unretract_extra_length: 0.0
-#   The *additional* length (in mm) to add or the length to subtract
-#   from the filament move when unretracting compared to the retract
-#   move length. This allows priming the nozzle (positive extra length)
-#   or delaying extrusion after unretracting (negative length). The
-#   latter may help reduce blobbing. The minimum value is -1 mm
-#   (2.41 mm3 volume for 1.75 mm filament), the default value is 0 mm.
-#unretract_speed: 10.0
-#   The speed of filament unretraction moves (in mm/s).
-#   This parameter is not particularly critical, although often lower
-#   than retract_speed. The minimum value is 1 mm/s, the default value
-#   is 10 mm/s.
-#z_hop_height: 0.0
-#   The vertical height by which the nozzle is lifted from the print to
-#   prevent collisions with the print during travel moves when retracted.
-#   The minimum value is 0 mm, the default value is 0 mm, which disables
-#   zhop moves. The value will be reduced if the zhop move reaches
-#   maximum z.
-#clear_zhop_on_z_moves: False
-#   If True, when a change in Z is sent while toolhead is retracted,
-#   z_hop is cancelled until next retraction. Otherwise,
-#   `z_hop_height` is applied as an offset to all movements.
-```
-
 ### [gcode_arcs]
 
 Support for gcode arc (G2/G3) commands.
@@ -2145,44 +1214,6 @@ Marlin/RepRapFirmware compatible M486 G-Code macro.
 ```
 
 ## Resonance compensation
-
-### [input_shaper]
-
-Enables [resonance compensation](Resonance_Compensation.md). Also see
-the [command reference](G-Codes.md#input_shaper).
-
-```
-[input_shaper]
-#shaper_freq_x: 0
-#   A frequency (in Hz) of the input shaper for X axis. This is
-#   usually a resonance frequency of X axis that the input shaper
-#   should suppress. For more complex shapers, like 2- and 3-hump EI
-#   input shapers, this parameter can be set from different
-#   considerations. The default value is 0, which disables input
-#   shaping for X axis.
-#shaper_freq_y: 0
-#   A frequency (in Hz) of the input shaper for Y axis. This is
-#   usually a resonance frequency of Y axis that the input shaper
-#   should suppress. For more complex shapers, like 2- and 3-hump EI
-#   input shapers, this parameter can be set from different
-#   considerations. The default value is 0, which disables input
-#   shaping for Y axis.
-#shaper_type: mzv
-#   A type of the input shaper to use for both X and Y axes. Supported
-#   shapers are zv, mzv, zvd, ei, 2hump_ei, and 3hump_ei. The default
-#   is mzv input shaper.
-#shaper_type_x:
-#shaper_type_y:
-#   If shaper_type is not set, these two parameters can be used to
-#   configure different input shapers for X and Y axes. The same
-#   values are supported as for shaper_type parameter.
-#damping_ratio_x: 0.1
-#damping_ratio_y: 0.1
-#   Damping ratios of vibrations of X and Y axes used by input shapers
-#   to improve vibration suppression. Default value is 0.1 which is a
-#   good all-round value for most printers. In most circumstances this
-#   parameter requires no tuning and should not be changed.
-```
 
 ### [adxl345]
 
@@ -2834,8 +1865,7 @@ z_offset:
 ### [probe_eddy_current]
 
 Support for eddy current inductive probes. One may define this section
-(instead of a probe section) to enable this probe. See the
-[command reference](G-Codes.md#probe_eddy_current) for further information.
+instead of a probe section to enable this probe.
 
 ```
 [probe_eddy_current my_eddy_probe]
@@ -3028,30 +2058,7 @@ end_gcode:
 #   detach the probe afterwards.
 ```
 
-## Additional stepper motors and extruders
-
-### [stepper_z1]
-
-Multi-stepper axes. On a cartesian style printer, the stepper
-controlling a given axis may have additional config blocks defining
-steppers that should be stepped in concert with the primary stepper.
-One may define any number of sections with a numeric suffix starting
-at 1 (for example, "stepper_z1", "stepper_z2", etc.).
-
-```
-[stepper_z1]
-#step_pin:
-#dir_pin:
-#enable_pin:
-#microsteps:
-#rotation_distance:
-#   See the "stepper" section for the definition of the above parameters.
-#endstop_pin:
-#   If an endstop_pin is defined for the additional stepper then the
-#   stepper will home until the endstop is triggered. Otherwise, the
-#   stepper will home until the endstop on the primary stepper for the
-#   axis is triggered.
-```
+## Additional extruders
 
 ### [extruder1]
 
@@ -3065,94 +2072,11 @@ for an example configuration.
 
 ```
 [extruder1]
-#step_pin:
-#dir_pin:
-#...
-#   See the "extruder" section for available stepper and heater
-#   parameters.
-#shared_heater:
-#   This option is deprecated and should no longer be specified.
-```
-
-### [dual_carriage]
-
-Support for cartesian and hybrid_corexy/z printers with dual carriages
-on a single axis. The carriage mode can be set via the
-SET_DUAL_CARRIAGE extended g-code command. For example,
-"SET_DUAL_CARRIAGE CARRIAGE=1" command will activate the carriage defined
-in this section (CARRIAGE=0 will return activation to the primary carriage).
-Dual carriage support is typically combined with extra extruders - the
-SET_DUAL_CARRIAGE command is often called at the same time as the
-ACTIVATE_EXTRUDER command. Be sure to park the carriages during deactivation.
-Note that during G28 homing, typically the primary carriage is homed first
-followed by the carriage defined in the `[dual_carriage]` config section.
-However, the `[dual_carriage]` carriage will be homed first if both carriages
-home in a positive direction and the [dual_carriage] carriage has a
-`position_endstop` greater than the primary carriage, or if both carriages home
-in a negative direction and the `[dual_carriage]` carriage has a
-`position_endstop` less than the primary carriage.
-
-Additionally, one could use "SET_DUAL_CARRIAGE CARRIAGE=1 MODE=COPY" or
-"SET_DUAL_CARRIAGE CARRIAGE=1 MODE=MIRROR" commands to activate either copying
-or mirroring mode of the dual carriage, in which case it will follow the
-motion of the carriage 0 accordingly. These commands can be used to print
-two parts simultaneously - either two identical parts (in COPY mode) or
-mirrored parts (in MIRROR mode). Note that COPY and MIRROR modes also require
-appropriate configuration of the extruder on the dual carriage, which can
-typically be achieved with
-"SYNC_EXTRUDER_MOTION MOTION_QUEUE=extruder EXTRUDER=<dual_carriage_extruder>"
-or a similar command.
-
-See [sample-idex.cfg](../config/sample-idex.cfg) for an example
-configuration.
-
-```
-[dual_carriage]
 axis:
-#   The axis this extra carriage is on (either x or y). This parameter
-#   must be provided.
-#safe_distance:
-#   The minimum distance (in mm) to enforce between the dual and the primary
-#   carriages. If a G-Code command is executed that will bring the carriages
-#   closer than the specified limit, such a command will be rejected with an
-#   error. If safe_distance is not provided, it will be inferred from
-#   position_min and position_max for the dual and primary carriages. If set
-#   to 0 (or safe_distance is unset and position_min and position_max are
-#   identical for the primary and dual carraiges), the carriages proximity
-#   checks will be disabled.
-#step_pin:
-#dir_pin:
-#enable_pin:
-#microsteps:
-#rotation_distance:
-#endstop_pin:
-#position_endstop:
-#position_min:
-#position_max:
-#   See the "stepper" section for the definition of the above parameters.
-```
-
-### [extruder_stepper]
-
-Support for additional steppers synchronized to the movement of an
-extruder (one may define any number of sections with an
-"extruder_stepper" prefix).
-
-See the [command reference](G-Codes.md#extruder) for more information.
-
-```
-[extruder_stepper my_extra_stepper]
-extruder:
-#   The extruder this stepper is synchronized to. If this is set to an
-#   empty string then the stepper will not be synchronized to an
-#   extruder. This parameter must be provided.
-#step_pin:
-#dir_pin:
-#enable_pin:
-#microsteps:
-#rotation_distance:
-#   See the "stepper" section for the definition of the above
-#   parameters.
+#   Name of the follower [axis] declaration carrying this extruder motor
+#   and its post-processors. This parameter must be provided.
+#   Heater, nozzle, filament, and extrude-only cap options are the same
+#   as for [extruder].
 ```
 
 ### [manual_stepper]
@@ -3160,10 +2084,8 @@ extruder:
 Manual steppers (one may define any number of sections with a
 "manual_stepper" prefix). These are steppers that are controlled by
 the MANUAL_STEPPER g-code command. For example: "MANUAL_STEPPER
-STEPPER=my_stepper MOVE=10 SPEED=5". See
-[G-Codes](G-Codes.md#manual_stepper) file for a description of the
-MANUAL_STEPPER command. The steppers are not connected to the normal
-printer kinematics.
+STEPPER=my_stepper MOVE=10 SPEED=5". The steppers are not connected
+to the normal printer kinematics.
 
 ```
 [manual_stepper my_stepper]
@@ -3187,28 +2109,6 @@ printer kinematics.
 #   "homing moves" by adding a STOP_ON_ENDSTOP parameter to
 #   MANUAL_STEPPER movement commands.
 ```
-
-### [mixing_extruder]
-
-A mixing printhead which has <n>in-1out mixing nozzle. When activated
-additional G-Code Commands are available.
-See [G-Codes](G-Codes.md#mixing_extruder) for a detailed description
-of the additional commands.
-
-```
-[mixing_extruder]
-#steppers:
-#   Which steppers feed into the hotend/nozzle. provide a comma
-#   separated list, eg. "extruder,extruder1,extruder2". Should be
-#   the names of either extruder sections or extruder_stepper sections
-#   This configuration is required.
-#extruder_name:
-#   The name of the extruder to synchronize the steppers in the steppers
-#   list to.
-#   The default is the first entry in the
-#   "steppers" list.
-```
-
 
 ## Custom heaters and sensors
 
@@ -4388,7 +3288,7 @@ the name of the corresponding stepper config section (for example,
 "[tmc2130 stepper_x]").
 
 ```
-[tmc2130 stepper_x]
+[tmc2130 x_motor]
 cs_pin:
 #   The pin corresponding to the TMC2130 chip select line. This pin
 #   will be set to low at the start of SPI messages and raised to high
@@ -4516,7 +3416,7 @@ prefix followed by the name of the corresponding stepper config
 section (for example, "[tmc2208 stepper_x]").
 
 ```
-[tmc2208 stepper_x]
+[tmc2208 x_motor]
 uart_pin:
 #   The pin connected to the TMC2208 PDN_UART line. This parameter
 #   must be provided.
@@ -4588,7 +3488,7 @@ by the name of the corresponding stepper config section (for example,
 "[tmc2209 stepper_x]").
 
 ```
-[tmc2209 stepper_x]
+[tmc2209 x_motor]
 uart_pin:
 #tx_pin:
 #select_pins:
@@ -4654,7 +3554,7 @@ name of the corresponding stepper config section (for example,
 "[tmc2660 stepper_x]").
 
 ```
-[tmc2660 stepper_x]
+[tmc2660 x_motor]
 cs_pin:
 #   The pin corresponding to the TMC2660 chip select line. This pin
 #   will be set to low at the start of SPI messages and set to high
@@ -4734,7 +3634,7 @@ the name of the corresponding stepper config section (for example,
 "[tmc2240 stepper_x]").
 
 ```
-[tmc2240 stepper_x]
+[tmc2240 x_motor]
 cs_pin:
 #   The pin corresponding to the TMC2240 chip select line. This pin
 #   will be set to low at the start of SPI messages and raised to high
@@ -4897,7 +3797,7 @@ followed by the name of the corresponding stepper config section
 (for example, "[tmc5160 stepper_x]").
 
 ```
-[tmc5160 stepper_x]
+[tmc5160 x_motor]
 cs_pin:
 #   The pin corresponding to the TMC5160 or TMC2160 chip select line.
 #   This pin will be set to low at the start of SPI messages and raised
@@ -6369,8 +5269,7 @@ serial:
 Magnetic hall angle sensor support for reading stepper motor angle
 shaft measurements using a1333, as5047d, mt6816, mt6826s,
 or tle5012b SPI chips.
-The measurements are available via the [API Server](API_Server.md) and
-[motion analysis tool](Debugging.md#motion-analysis-and-data-logging).
+The measurements are available via the [API Server](API_Server.md).
 See the [G-Code reference](G-Codes.md#angle) for available commands.
 
 ```

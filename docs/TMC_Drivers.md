@@ -432,12 +432,12 @@ high-level value of 0.
 
 ## Common Questions
 
-### Can I use stealthChop mode on an extruder with pressure advance?
+### Can I use stealthChop mode on a motor with pressure advance?
 
 Many people successfully use "stealthChop" mode with Kalico's
-pressure advance. Kalico implements
-[smooth pressure advance](Kinematics.md#pressure-advance) which does
-not introduce any instantaneous velocity changes.
+pressure advance. See the
+[motion configuration reference](Config_Reference_Motion.md) for the
+current pressure-advance post-processors.
 
 However, "stealthChop" mode may produce lower motor torque and/or
 produce higher motor heat. It may or may not be an adequate mode for

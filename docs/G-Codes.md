@@ -9,6 +9,13 @@ Sections and commands marked with an ⚠️ show commands that are new or behave
 
 Kalico supports the following standard G-Code commands:
 - Move (G0 or G1): `G1 [X<pos>] [Y<pos>] [Z<pos>] [E<pos>] [F<speed>]`
+- ⚠️ Cubic Bézier move: `G5 [X<pos>] [Y<pos>] [Z<pos>] [E<pos>]
+  [F<speed>] [I<offset>] [J<offset>] P<offset> Q<offset>`
+  (`P` and `Q` are required; `I` and `J` must both be present or both
+  omitted).
+- ⚠️ Quadratic Bézier move: `G5.1 [X<pos>] [Y<pos>] [Z<pos>] [E<pos>]
+  [F<speed>] [I<offset>] [J<offset>]` (at least one of `I` or `J` is
+  required).
 - Dwell: `G4 P<milliseconds>`
 - Move to origin: `G28 [X] [Y] [Z]`
 - Turn off motors: `M18` or `M84`
@@ -345,25 +352,6 @@ delay duration for the identified [delayed_gcode] and starts the timer
 for gcode execution. A value of 0 will cancel a pending delayed gcode
 from executing.
 
-### [delta_calibrate]
-
-The following commands are available when the
-[delta_calibrate] config section is enabled (also see the
-[delta calibrate guide](Delta_Calibrate.md)).
-
-#### DELTA_CALIBRATE
-`DELTA_CALIBRATE [METHOD=manual] [HORIZONTAL_MOVE_Z=<value>]
-[<probe_parameter>=<value>]`: This command will probe seven points on the bed
-and recommend updated endstop positions, tower angles, and radius. See the
-PROBE command for details on the optional probe parameters. If METHOD=manual is
-specified then the manual probing tool is activated - see the MANUAL_PROBE
-command above for details on the additional commands available while this tool
-is active. The optional `HORIZONTAL_MOVE_Z` value overrides the
-`horizontal_move_z` option specified in the config file.
-
-#### DELTA_ANALYZE
-`DELTA_ANALYZE`: This command is used during enhanced delta
-calibration. See [Delta Calibrate](Delta_Calibrate.md) for details.
 
 ### [display]
 
@@ -416,41 +404,6 @@ commands are available when a
   from the toolhead.
 - `MOVE_AVOIDING_DOCK [X=<value>] [Y=<value>] [SPEED=<value>]`: Move to the
   defined point (absolute coordinates) avoiding the safe dock area
-
-### [dual_carriage]
-
-The following command is available when the
-[dual_carriage config section](Config_Reference.md#dual_carriage) is
-enabled.
-
-#### SET_DUAL_CARRIAGE
-`SET_DUAL_CARRIAGE CARRIAGE=[0|1] [MODE=[PRIMARY|COPY|MIRROR]]`:
-This command will change the mode of the specified carriage.
-If no `MODE` is provided it defaults to `PRIMARY`. Setting the mode
-to `PRIMARY` deactivates the other carriage and makes the specified
-carriage execute subsequent G-Code commands as-is. `COPY` and `MIRROR`
-modes are supported only for `CARRIAGE=1`. When set to either of these
-modes, carriage 1 will then track the subsequent moves of the carriage 0
-and either copy relative movements of it (in `COPY` mode) or execute them
-in the opposite (mirror) direction (in `MIRROR` mode).
-
-#### SAVE_DUAL_CARRIAGE_STATE
-`SAVE_DUAL_CARRIAGE_STATE [NAME=<state_name>]`: Save the current positions
-of the dual carriages and their modes. Saving and restoring DUAL_CARRIAGE
-state can be useful in scripts and macros, as well as in homing routine
-overrides. If NAME is provided it allows one to name the saved state
-to the given string. If NAME is not provided it defaults to "default".
-
-#### RESTORE_DUAL_CARRIAGE_STATE
-`RESTORE_DUAL_CARRIAGE_STATE [NAME=<state_name>] [MOVE=[0|1] [MOVE_SPEED=<speed>]]`:
-Restore the previously saved positions of the dual carriages and their modes,
-unless "MOVE=0" is specified, in which case only the saved modes will be
-restored, but not the positions of the carriages. If positions are being
-restored and "MOVE_SPEED" is specified, then the toolhead moves will be
-performed with the given speed (in mm/s); otherwise the toolhead move will
-use the rail homing speed. Note that the carriages restore their positions
-only over their own axis, which may be necessary to correctly restore COPY
-and MIRROR mode of the dual carraige.
 
 ### [exclude_object]
 
@@ -516,42 +469,21 @@ changes the active hotend.
 #### SET_PRESSURE_ADVANCE
 `SET_PRESSURE_ADVANCE [EXTRUDER=<config_name>]
 [ADVANCE=<pressure_advance>]
-[SMOOTH_TIME=<pressure_advance_smooth_time>]`: Set pressure advance
-parameters of an extruder stepper (as defined in an
-[extruder](Config_Reference.md#extruder) or
-[extruder_stepper](Config_Reference.md#extruder_stepper) config section).
-If EXTRUDER is not specified, it defaults to the stepper defined in
-the active hotend.
+[SMOOTH_TIME=<pressure_advance_smooth_time>]`: Compatibility command
+for updating the active pressure-advance post-processor. `EXTRUDER`
+selects the configured compatibility target; `ADVANCE` and `SMOOTH_TIME`
+update its corresponding parameters.
 
-#### SET_EXTRUDER_ROTATION_DISTANCE
-`SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=<config_name>
-[DISTANCE=<distance>]`: Set a new value for the provided extruder
-stepper's "rotation distance" (as defined in an
-[extruder](Config_Reference.md#extruder) or
-[extruder_stepper](Config_Reference.md#extruder_stepper) config section).
-If the rotation distance is a negative number then the stepper motion
-will be inverted (relative to the stepper direction specified in the
-config file). Changed settings are not retained on Kalico reset. Use
-with caution as small changes can result in excessive pressure between
-extruder and hotend. Do proper calibration with filament before use.
-If 'DISTANCE' value is not provided then this command will return the
-current rotation distance.
+#### SET_POST_PROCESSOR
+`SET_POST_PROCESSOR NAME=<name> <PARAM>=<value> [...]`: Update one or
+more numeric parameters on a named `[post_processor <name>]`. Changes
+apply from the next replan.
 
-#### SYNC_EXTRUDER_MOTION
-`SYNC_EXTRUDER_MOTION EXTRUDER=<name> MOTION_QUEUE=<name>`: This
-command will cause the stepper specified by EXTRUDER (as defined in an
-[extruder](Config_Reference.md#extruder) or
-[extruder_stepper](Config_Reference.md#extruder_stepper) config section)
-to become synchronized to the movement of an extruder specified by
-MOTION_QUEUE (as defined in an [extruder](Config_Reference.md#extruder)
-config section). If MOTION_QUEUE is an empty string then the stepper
-will be desynchronized from all extruder movement.
 
 ### [mixing_extruder]
 
-The following commands are available when a
-[mixingextruder config section](Config_Reference.md#mixing_extruder) is
-enabled:
+The following commands are available when a mixing-extruder config
+section is enabled:
 
 #### SET_MIXING_EXTRUDER
 `SET_MIXING_EXTRUDER [FACTORS=<factor1>[:<factor2>[:<factor3>...]]]
@@ -665,78 +597,6 @@ SMART sets the smart parameter. <br>
 ALWAYS_FIRE_EVENTS sets the always_fire_events parameter, no reset will
 be triggered.
 
-### [firmware_retraction]
-
-The following standard G-Code commands are available when the
-[firmware_retraction config section](Config_Reference.md#firmware_retraction)
-is enabled. These commands allow utilizing the firmware
-retraction feature available in many slicers. Retraction is a strategy to
-reduce stringing during travel moves (non-extrusion) from one part of the
-print to another. Note that pressure advance should be properly configured
-before retraction parameters are tuned to ensure optimal results.
-- `G10`: Retracts the filament using the currently configured
-  parameters. If z_hop_height is set to a value greater zero,
-  besides retracting the filament, the nozzle is lifted by set value.
-- `G11`: Unretracts the filament using the currently configured
-  parameters. If z_hop_height is set to a value greater zero,
-  besides unretracting the filament, the nozzle is lowered back on the print
-  with a vertical movement.
-
-The following additional commands are also available.
-
-#### SET_RETRACTION
-`SET_RETRACTION [RETRACT_LENGTH=<mm>] [RETRACT_SPEED=<mm/s>]
-[UNRETRACT_EXTRA_LENGTH=<mm>] [UNRETRACT_SPEED=<mm/s>] [Z_HOP_HEIGHT=<mm>]`:
-Adjust the parameters used by firmware retraction. RETRACT_LENGTH determines the
-length of filament to retract (the minimum as well as standard value is 0 mm).
-RETRACT_SPEED determines the speed of the filament retraction move (the minimum
-value is 1 mm/s, the standard value is 20 mm/s). This value is typically set
-relatively high (>40 mm/s), except for soft and/or oozy filaments like TPU and
-PETG (20 to 30 mm/s).
-UNRETRACT_SPEED sets the speed of the filament unretract move (the minimum value
-is 1 mm/s, the standard value is 10 mm/s). This parameter is not particularly
-critical, although often lower than RETRACT_SPEED.
-UNRETRACT_EXTRA_LENGTH allows to add a small amount of length to the filament
-unretract move to prime the nozzle or to subtract a small amount of length from
-the filament unretract move to reduce blobbing at seams (the minimum value is
--1 mm (2.41 mm3 volume for 1.75 mm filament), the standard value is 0 mm).
-Z_HOP_HEIGHT determines the vertical height by which the nozzle is lifted from
-the print to prevent collisions with the print during travel moves (the
-minimum value is 0 mm, the standard value is 0 mm, which disables Z-Hop moves).
-If a parameter is set when retracted, the new value will be taken into
-account only after G11 or CLEAR_RETRACTION event.
-SET_RETRACTION is commonly set as part of slicer per-filament configuration, as
-different filaments require different parameter settings. The command can be
-issued at runtime.
-
-#### GET_RETRACTION
-`GET_RETRACTION`: Queries the current parameters used by the firmware retraction
-module as well as the retract state. RETRACT_LENGTH, RETRACT_SPEED,
-UNRETRACT_EXTRA_LENGTH, UNRETRACT_SPEED, Z_HOP_HEIGHT, RETRACT_STATE (True, if
-retracted), ZHOP_STATE (True, if zhop offset currently applied) are displayed on
-the terminal.
-
-#### CLEAR_RETRACTION
-`CLEAR_RETRACTION`: Clears the current retract state without extruder or
-motion system movement. All flags related to the retract state are reset to
-False.
-
-NOTE: The zhop state is also reset to False when the steppers are disabled (M84,
-typically part of end gcode and standard behavior of OctoPrint if a print is
-canceled) or the printer is homed (G28, typically part of start gcode). Hence,
-upon ending or canceling a print as well as starting a new print via GCode
-streaming or virtual SD card, the toolhead will not apply `z_hop_height` until
-next G11 if filament is retracted.
-Nevertheless, it is recommended to add `CLEAR_RETRACTION` to your start and end
-gcode to make sure the retract state is reset before and after each print.
-
-#### RESET_RETRACTION
-`RESET_RETRACTION`: All changes to retraction parameters made via previous
-SET_RETRACTION commands are reset to config values.
-
-NOTE: It is recommended to add `RESET_RETRACTION` to your start and end gcode
-(with a possible override in your filament start gcode to set filament-specific
-overrides of firmware retraction defaults via `SET_RETRACTION`).
 
 ### [force_move]
 
@@ -836,9 +696,9 @@ The gcode_move module is automatically loaded.
 
 #### GET_POSITION
 `GET_POSITION`: Return information on the current location of the
-toolhead. See the developer documentation of
-[GET_POSITION output](Code_Overview.md#coordinate-systems) for more
-information.
+toolhead. See the
+[motion configuration reference](Config_Reference_Motion.md) for the
+current motion configuration model.
 
 #### SET_GCODE_OFFSET
 `SET_GCODE_OFFSET [X=<pos>|X_ADJUST=<adjust>]
@@ -986,24 +846,6 @@ The idle_timeout module is automatically loaded.
 `SET_IDLE_TIMEOUT [TIMEOUT=<timeout>]`: Allows the user to set the
 idle timeout (in seconds).
 
-### [input_shaper]
-
-The following command is enabled if an
-[input_shaper config section](Config_Reference.md#input_shaper) has
-been enabled (also see the
-[resonance compensation guide](Resonance_Compensation.md)).
-
-#### SET_INPUT_SHAPER
-`SET_INPUT_SHAPER [SHAPER_FREQ_X=<shaper_freq_x>]
-[SHAPER_FREQ_Y=<shaper_freq_y>] [DAMPING_RATIO_X=<damping_ratio_x>]
-[DAMPING_RATIO_Y=<damping_ratio_y>] [SHAPER_TYPE=<shaper>]
-[SHAPER_TYPE_X=<shaper_type_x>] [SHAPER_TYPE_Y=<shaper_type_y>]`:
-Modify input shaper parameters. Note that SHAPER_TYPE parameter resets
-input shaper for both X and Y axes even if different shaper types have
-been configured in [input_shaper] section. SHAPER_TYPE cannot be used
-together with either of SHAPER_TYPE_X and SHAPER_TYPE_Y parameters.
-See [config reference](Config_Reference.md#input_shaper) for more
-details on each of these parameters.
 
 ### [load_cell]
 
@@ -1107,30 +949,6 @@ babystepping), and subtract it from the stepper_z endstop_position.
 This acts to take a frequently used babystepping value, and "make it
 permanent". Requires a `SAVE_CONFIG` to take effect.
 
-### [manual_stepper]
-
-The following command is available when a
-[manual_stepper config section](Config_Reference.md#manual_stepper) is
-enabled.
-
-#### MANUAL_STEPPER
-`MANUAL_STEPPER STEPPER=config_name [ENABLE=[0|1]]
-[SET_POSITION=<pos>] [SPEED=<speed>] [ACCEL=<accel>] [MOVE=<pos>
-[STOP_ON_ENDSTOP=[1|2|-1|-2]] [SYNC=0]]`: This command will alter the
-state of the stepper. Use the ENABLE parameter to enable/disable the
-stepper. Use the SET_POSITION parameter to force the stepper to think
-it is at the given position. Use the MOVE parameter to request a
-movement to the given position. If SPEED and/or ACCEL is specified
-then the given values will be used instead of the defaults specified
-in the config file. If an ACCEL of zero is specified then no
-acceleration will be performed. If STOP_ON_ENDSTOP=1 is specified then
-the move will end early should the endstop report as triggered (use
-STOP_ON_ENDSTOP=2 to complete the move without error even if the
-endstop does not trigger, use -1 or -2 to stop when the endstop
-reports not triggered). Normally future G-Code commands will be
-scheduled to run after the stepper move completes, however if a manual
-stepper move uses SYNC=0 then future G-Code movement commands may run
-in parallel with the stepper movement.
 
 ### [mcp4018]
 
@@ -1438,27 +1256,6 @@ tapping to enhance the cleaning effect.
 
 To use the command position the toolhead where you want to start the cleanup. E.g. near the edge of the print area. `PATTERN_X` and `PATTERN_Y` control the number of grid points in each axis. Positive values extend the grid along the positive direction of the axis, negative values do the reverse. E.g. if you position the toolhead near the front left corner of the print area, and you want to keep the cleanup mess out of the print are, you should use `PATTERN_Y=-4` to extend the pattern towards the front of the bed, away from the print area.
 
-### [probe_eddy_current]
-
-The following commands are available when a
-[probe_eddy_current config section](Config_Reference.md#probe_eddy_current)
-is enabled.
-
-#### PROBE_EDDY_CURRENT_CALIBRATE
-`PROBE_EDDY_CURRENT_CALIBRATE CHIP=<config_name>`: This starts a tool
-that calibrates the sensor resonance frequencies to corresponding Z
-heights. The tool will take a couple of minutes to complete. After
-completion, use the SAVE_CONFIG command to store the results in the
-printer.cfg file.
-
-#### LDC_CALIBRATE_DRIVE_CURRENT
-`LDC_CALIBRATE_DRIVE_CURRENT CHIP=<config_name>` This tool will
-calibrate the ldc1612 DRIVE_CURRENT0 register. Prior to using this
-tool, move the sensor so that it is near the center of the bed and
-about 20mm above the bed surface. Run this command to determine an
-appropriate DRIVE_CURRENT for the sensor. After running this command
-use the SAVE_CONFIG command to store that new setting in the
-printer.cfg config file.
 
 ### [pwm_cycle_time]
 
@@ -1782,44 +1579,28 @@ potentially dangerous behavior of your printer. Permanent changes
 should be made using the printer configuration file instead. No sanity
 checks are performed for the given values.
 A VELOCITY can also be specified instead of a VALUE. This velocity is
-converted to the 20bit TSTEP based value representation. Only use the VELOCITY
-argument for fields that represent velocities.
+converted to the 20bit TSTEP based value representation. Only use the
+VELOCITY argument for fields that represent velocities.
 
-### [toolhead]
+### Motion limits
 
-The toolhead module is automatically loaded.
+The motion module is automatically loaded.
 
 #### SET_VELOCITY_LIMIT
 `SET_VELOCITY_LIMIT [VELOCITY=<value>] [ACCEL=<value>]
-[MINIMUM_CRUISE_RATIO=<value>] [CORNER_DEVIATION=<value>]
-[SQUARE_CORNER_VELOCITY=<value>]
-[X_VELOCITY=<value>] [X_ACCEL=<value>] [Y_VELOCITY=<value>] [Y_ACCEL=<value>]
-[Z_VELOCITY=<value>] [Z_ACCEL=<value>]`: This
-command can alter the velocity limits that were specified in the
-printer config file. See the
-[printer config section](Config_Reference.md#printer) for a
-description of each parameter.
-X_VELOCITY, X_ACCEL, Y_VELOCITY, Y_ACCEL, Z_VELOCITY and Z_ACCEL are only
-available if the kinematic supports it.
+[SQUARE_CORNER_VELOCITY=<value>] [CORNER_DEVIATION=<value>]
+[MINIMUM_CRUISE_RATIO=<value>] [ACCEL_TO_DECEL=<value>]`: This command
+can alter the velocity and acceleration limits specified in the printer
+config. `MINIMUM_CRUISE_RATIO` and `ACCEL_TO_DECEL` are accepted as
+legacy no-ops. `SQUARE_CORNER_VELOCITY` and `CORNER_DEVIATION` are
+aliases; specify at most one.
 
-### RESET_VELOCITY_LIMIT
-`RESET_VELOCITY_LIMIT`: This command resets the velocity limits to the values
-specified in the printer config file. See the
-[printer config section](Config_Reference.md#printer) for a
+#### RESET_VELOCITY_LIMIT
+`RESET_VELOCITY_LIMIT`: This command resets the velocity limits to the
+values specified in the printer config file. See the
+[printer config section](Config_Reference_Motion.md#printer) for a
 description of each parameter.
 
-#### ⚠️ SET_KINEMATICS_LIMIT
-
-`SET_KINEMATICS_LIMIT [<X,Y,Z>_ACCEL=<value>] [<X,Y,Z>_VELOCITY=<value>]
-[SCALE=<0:1>]`: change the per-axis limits.
-
-This command is only available when `kinematics` is set to either
-[`limited_cartesian`](./Config_Reference.md#cartesian-kinematics-with-limits-for-x-and-y-axes)
-or
-[`limited_corexy`](./Config_Reference.md#corexy-kinematics-with-limits-for-x-and-y-axes).
-The velocity argument is not available on CoreXY. With no arguments, this
-command responds with the movement direction with the most acceleration or
-velocity.
 
 ### ⚠️ [tools_calibrate]
 
@@ -1848,205 +1629,6 @@ Save the last calibration result to a macro variable.
 `TOOL_CALIBRATE_SAVE_TOOL_OFFSET SECTION= ATTRIBUTE= [VALUE="{x:0.6f}, {y:0.6f}, {z:0.6f}"]`:
 Save the last calibration result to a field in your configuration. Calibration data saved this way will not take effect until after a `RESTART` of your printer.
 
-### [trad_rack]
-
-The following commands are available when the
-[trad_rack config section](Config_Reference.md#trad_rack) is enabled.
-
-#### TR_HOME
-`TR_HOME`: Homes the selector.
-
-#### TR_GO_TO_LANE
-`TR_GO_TO_LANE LANE=<lane index>`: Moves the selector to the specified
-lane.
-
-#### TR_LOAD_LANE
-`TR_LOAD_LANE LANE=<lane index> [RESET_SPEED=<0|1>]`: Ensures filament
-is loaded into the module for the specified lane by prompting the user
-to insert filament, loading filament from the module into the
-selector, and retracting the filament back into the module.
-If RESET_SPEED is 1, the bowden move speed used for the
-specified LANE will be reset to spool_pull_speed from the
-[trad_rack config section](Config_Reference.md#trad_rack)
-(see [bowden speeds](https://github.com/Annex-Engineering/TradRack/blob/main/docs/Tuning.md#bowden-speeds)
-for details on how the bowden speed settings are used). If not
-specified, RESET_SPEED defaults to 1.
-
-#### TR_LOAD_TOOLHEAD
-`TR_LOAD_TOOLHEAD LANE=<lane index>|TOOL=<tool index>
-[MIN_TEMP=<temperature>] [EXACT_TEMP=<temperature>]
-[BOWDEN_LENGTH=<mm>] [EXTRUDER_LOAD_LENGTH=<mm>]
-[HOTEND_LOAD_LENGTH=<mm>]`: Loads filament from the specified lane or
-tool into the toolhead*. Either LANE or TOOL must be specified. If
-both are specified, then LANE takes precedence. If there is already an
-"active lane" because the toolhead has been loaded beforehand, it will
-be unloaded before loading the new filament. If `MIN_TEMP` is
-specified and it is higher than the extruder's current temperature,
-then the extruder will be heated to at least `MIN_TEMP` before
-unloading/loading; the current extruder temperature target may be used
-instead if it is higher than `MIN_TEMP`, and if not then
-[tr_last_heater_target](https://github.com/Annex-Engineering/TradRack/blob/main/docs/kalico/Save_Variables.md)
-may be used. If `EXACT_TEMP` is specified, the extruder will be heated
-to `EXACT_TEMP` before unloading/loading, regardless of any other
-temperature setting. If any of the optional length parameters are
-specified, they override the corresponding settings in the
-[trad_rack config section](Config_Reference.md#trad_rack).
-
-\* see the [Tool Mapping document](https://github.com/Annex-Engineering/TradRack/blob/main/docs/Tool_Mapping.md)
-for details on the difference between lanes and tools and how they
-relate to each other.
-
-#### T0, T1, T2, etc.
-`T<tool index>`: Equivalent to calling
-`TR_LOAD_TOOLHEAD TOOL=<tool index>`. All of the optional parameters
-accepted by the TR_LOAD_TOOLHEAD command can also be used with these
-commands.
-
-#### TR_UNLOAD_TOOLHEAD
-`TR_UNLOAD_TOOLHEAD [MIN_TEMP=<temperature>]
-[EXACT_TEMP=<temperature>]`: Unloads filament from the toolhead and
-back into its module. If `MIN_TEMP` is specified and it is higher than
-the extruder's current temperature, then the extruder will be heated
-to at least `MIN_TEMP` before unloading; the current extruder
-temperature target may be used instead if it is higher than
-`MIN_TEMP`, and if not then
-[tr_last_heater_target](https://github.com/Annex-Engineering/TradRack/blob/main/docs/kalico/Save_Variables.md)
-may be used. If `EXACT_TEMP` is specified, the extruder will be heated
-to `EXACT_TEMP` before unloading/loading, regardless of any other
-temperature setting.
-
-#### TR_SERVO_DOWN
-`TR_SERVO_DOWN [FORCE=<0|1>]`: Moves the servo to bring the drive gear
-down. The selector must be moved to a valid lane before using this
-command, unless FORCE is 1. If not specified, FORCE defaults to 0. The
-FORCE parameter is unsafe for normal use and should only be used when
-the servo is not attached to Trad Rack's carriage.
-
-#### TR_SERVO_UP
-`TR_SERVO_UP`: Moves the servo to bring the drive gear up.
-
-#### TR_SET_ACTIVE_LANE
-`TR_SET_ACTIVE_LANE LANE=<lane index>`: Tells Trad Rack to assume the
-toolhead has been loaded with filament from the specified lane. The
-selector's position will also be inferred from this lane, and the
-selector motor will be enabled if it isn't already.
-
-#### TR_RESET_ACTIVE_LANE
-`TR_RESET_ACTIVE_LANE`: Tells Trad Rack to assume the toolhead has
-not been loaded.
-
-#### TR_RESUME
-`TR_RESUME`: Completes necessary actions for Trad Rack to recover
-(and/or checks that Trad Rack is ready to continue), then resumes the
-print if all of those actions complete successfully. For example, if
-the print was paused due to a failed toolchange, then this command
-would retry the toolchange and then resume the print if the toolchange
-completes successfully. You will be prompted to use this command if
-Trad Rack has paused the print and requires user interaction or
-confirmation before attempting to recover and resume.
-
-#### TR_LOCATE_SELECTOR
-`TR_LOCATE_SELECTOR`: Ensures the position of Trad Rack's selector is
-known so that it is ready for a print. If the user needs to take an
-action, they will be prompted to do so and the print will be paused
-(for example if the selector sensor is triggered but no active lane is
-set). The user_wait_time config option from the
-[trad_rack config section](Config_Reference.md#trad_rack) determines
-how long Trad Rack will wait for user action before automatically
-unloading the toolhead and resuming. In addition, the save_active_lane
-config option determines whether this command can infer the "active
-lane" from a value saved before the last restart if the selector
-filament sensor is triggered but no active lane is currently set.
-It is recommended to call this command in the print start gcode.
-
-#### TR_NEXT
-`TR_NEXT`: You will be prompted to use this command if Trad Rack
-requires user confirmation before continuing an action.
-
-#### TR_SYNC_TO_EXTRUDER
-`TR_SYNC_TO_EXTRUDER`: Syncs Trad Rack's filament driver to the
-extruder during printing, as well as during any extrusion moves within
-toolhead loading or unloading that would normally involve only the
-extruder. See the
-[Extruder syncing document](https://github.com/Annex-Engineering/TradRack/blob/main/docs/Extruder_Syncing.md)
-for more details. If you want the filament driver to be synced to the extruder
-on every startup without having to call this command, you can set
-sync_to_extruder to True in the
-[trad_rack config section](Config_Reference.md#trad_rack).
-
-#### TR_UNSYNC_FROM_EXTRUDER
-`TR_UNSYNC_FROM_EXTRUDER`: Unsyncs Trad Rack's filament driver from
-the extruder during printing, as well as during any extrusion moves
-within toolhead loading or unloading that normally involve only the
-extruder. This is the default behavior unless you have set
-sync_to_extruder to True in the
-[trad_rack config section](Config_Reference.md#trad_rack).
-
-#### TR_SERVO_TEST
-`TR_SERVO_TEST [ANGLE=<degrees>]`: Moves the servo to the specified
-ANGLE relative to the down position. If ANGLE is not specified, the
-servo will be moved to the up position defined by servo_up_angle from
-the [trad_rack config section](Config_Reference.md#trad_rack).
-This command is meant for testing different servo angles in order
-to find the correct value for servo_up_angle.
-
-#### TR_CALIBRATE_SELECTOR
-`TR_CALIBRATE_SELECTOR`: Initiates the process of calibrating
-lane_spacing, as well as the min, endstop, and max positions of the
-selector motor. You will be guided through the selector calibration
-process via messages in the console.
-
-#### TR_SET_HOTEND_LOAD_LENGTH
-`TR_SET_HOTEND_LOAD_LENGTH VALUE=<value>|ADJUST=<adjust>`: Sets the
-value of hotend_load_length, overriding its value from the
-[trad_rack config section](Config_Reference.md#trad_rack). Does not
-persist across restarts. If the VALUE parameter is used,
-hotend_load_length will be set to the value passed in. If the ADJUST
-parameter is used, the adjustment will be added to the current value
-of hotend_load_length.
-
-#### TR_DISCARD_BOWDEN_LENGTHS
-`TR_DISCARD_BOWDEN_LENGTHS [MODE=[ALL|LOAD|UNLOAD]]`: Discards saved
-values for "bowden_load_length" and/or "bowden_unload_length" (see
-[bowden lengths](https://github.com/Annex-Engineering/TradRack/blob/main/docs/Tuning.md#bowden-lengths)
-for details on how these settings are used). These settings will each
-be reset to the value of `bowden_length` from the
-[trad_rack config section](Config_Reference.md#trad_rack), and empty
-dictionaries will be saved for
-[tr_calib_bowden_load_length and tr_calib_bowden_unload_length](https://github.com/Annex-Engineering/TradRack/blob/main/docs/kalico/Save_Variables.md).
-"bowden_load_length" and tr_calib_bowden_load_length will be
-affected if MODE=LOAD is specified, "bowden_unload_length" and
-tr_calib_bowden_unload_length will be affected if MODE=UNLOAD is
-specified, and all 4 will be affected if MODE=ALL is specified. If not
-specified, MODE defaults to ALL.
-
-#### TR_ASSIGN_LANE
-`TR_ASSIGN_LANE LANE=<lane index> TOOL=<tool index>
-[SET_DEFAULT=<0|1>]`:
-Assigns the specified LANE to the specified TOOL. If SET_DEFAULT is 1,
-LANE will become the default lane for the tool. If not specified,
-SET_DEFAULT defaults to 0.
-
-#### TR_SET_DEFAULT_LANE
-`TR_SET_DEFAULT_LANE LANE=<lane index> [TOOL=<tool index>]`: If TOOL
-is specified, LANE will be set as the default lane for the tool. If
-TOOL is not specified, LANE will be set as the default lane for its
-currently-assigned tool.
-
-#### TR_RESET_TOOL_MAP
-`TR_RESET_TOOL_MAP`: Resets lane/tool mapping. Each tool will be
-mapped to a lane group consisting of a single lane with the same index
-as the tool.
-
-#### TR_PRINT_TOOL_MAP
-`TR_PRINT_TOOL_MAP`: Prints a table of the lane/tool mapping to the
-console, with rows corresponding to tools and columns corresponding to
-lanes.
-
-#### TR_PRINT_TOOL_GROUPS
-`TR_PRINT_TOOL_GROUPS`: Prints a list of lanes assigned to each tool
-to the console. If a tool has multiple lanes assigned to it, the
-default lane will be indicated.
 
 ### [tuning_tower]
 

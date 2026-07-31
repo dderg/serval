@@ -58,10 +58,10 @@ CMD_SET_KLIPPER_NODEID command can send and receive data packets.
 
 The packet data in messages using the node's receive CAN bus id
 (`canbus_nodeid * 2 + 256`) are simply appended to a buffer, and when
-a complete [mcu protocol message](Protocol.md) is found its contents
-are parsed and processed. The data is treated as a byte stream - there
-is no requirement for the start of a Kalico message block to align
-with the start of a CAN bus packet.
+a complete MCU protocol message is found its contents are parsed and
+processed. The data is treated as a byte stream - there is no
+requirement for the start of a Kalico message block to align with the
+start of a CAN bus packet.
 
 Similarly, mcu protocol message responses are sent from
 micro-controller to host by copying the message data into one or more

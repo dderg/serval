@@ -6,7 +6,7 @@
 #   ./scripts/ci.sh <job>           # run one gate, exit with its status (CI)
 #
 # Prerequisites (one-time, for the full local run):
-#   rustup target add thumbv7em-none-eabi
+#   rustup target add thumbv7em-none-eabi thumbv6m-none-eabi thumbv7m-none-eabi
 #   rustup component add --toolchain nightly miri
 #   cargo install cargo-nextest --locked        # or: curl -LsSf https://get.nexte.st/latest/<os> | tar zxf - -C ~/.cargo/bin
 #   cargo install cargo-deny                     # optional
@@ -88,6 +88,20 @@ job_rust_mcu_g0() {
         cargo build -p c-api --no-default-features \
         --features mcu-g0,header-runtime,motion-module-stepper \
         --target thumbv6m-none-eabi
+}
+
+# F103 is RAM-starved next to the H7/F4/G0 boards, so it gets its own storage
+# profile instead of MCU_ENV, and a separate CARGO_TARGET_DIR because
+# thumbv7m shares no artifacts with thumbv7em/thumbv6m.
+job_rust_mcu_f1() {
+    cd "$RUST"
+    env CARGO_TARGET_DIR=target-f1 \
+        RUNTIME_STORAGE_SIZE=16384 \
+        RUNTIME_PIECE_RING_SIZE=4096 \
+        RUNTIME_SAMPLE_RATE_HZ=2000 \
+        cargo build -p c-api --no-default-features \
+        --features mcu-f1,header-runtime,motion-module-stepper \
+        --target thumbv7m-none-eabi --release
 }
 
 job_rust_no_stepper() {
@@ -270,6 +284,7 @@ run_all() {
         run_check "rust-mcu-h7"     job_rust_mcu_h7
         run_check "rust-mcu-f4"     job_rust_mcu_f4
         run_check "rust-mcu-g0"     job_rust_mcu_g0
+        run_check "rust-mcu-f1"     job_rust_mcu_f1
         run_check "rust-no-stepper" job_rust_no_stepper
         run_check "rust-loom"       job_rust_loom
         run_check "miri"            job_miri
@@ -315,6 +330,7 @@ case "${1:-all}" in
     rust-mcu-h7)      job_rust_mcu_h7 ;;
     rust-mcu-f4)      job_rust_mcu_f4 ;;
     rust-mcu-g0)      job_rust_mcu_g0 ;;
+    rust-mcu-f1)      job_rust_mcu_f1 ;;
     rust-no-stepper)  job_rust_no_stepper ;;
     cbindgen-drift)   job_cbindgen_drift ;;
     c-smoke)          job_c_smoke ;;

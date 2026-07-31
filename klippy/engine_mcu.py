@@ -42,6 +42,18 @@ class EngineMcu:
             expect_native=expect_native,
         )
 
+    def attach_canbus(
+        self, interface, uuid, timeout_s, klippy_non_critical, expect_native
+    ):
+        self._engine.attach_canbus(
+            self._handle,
+            interface,
+            uuid,
+            timeout_s=timeout_s,
+            klippy_non_critical=klippy_non_critical,
+            expect_native=expect_native,
+        )
+
     def detach_serial(self):
         self._engine.detach_serial(self._handle)
 

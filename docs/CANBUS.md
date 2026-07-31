@@ -71,13 +71,10 @@ Found canbus_uuid=11aa22bb33cc, Application: Kalico, Assigned: 77
 Each device will have a unique identifier. In the above example,
 `11aa22bb33cc` is the micro-controller's "canbus_uuid".
 
-Note that the `canbus_query.py` tool will only report uninitialized
-devices - if Kalico (or a similar tool) configures the device then it
-will no longer appear in the list.
-
-⚠️ Note that only devices flashed with a Kalico firmware will
-respond while assigned a device node ID. Devices using a Klipper firmware
-will no longer appear in the list once configured
+⚠️ Only devices flashed with a Kalico firmware answer the query while
+they already hold a node ID, and they report it (`Assigned: 77` above).
+A device running a Klipper firmware answers only while unassigned, so it
+drops out of the list once Kalico or a similar tool has configured it.
 
 ## Configuring Kalico
 
@@ -86,7 +83,70 @@ the CAN bus to communicate with the device - for example:
 ```
 [mcu my_can_mcu]
 canbus_uuid: 11aa22bb33cc
+#canbus_interface: can0
 ```
+
+`restart_method` is always `command` on a CAN micro-controller; the
+`arduino`, `cheetah` and `rpi_usb` methods act on a USB or serial
+connection a CAN node does not have.
+
+### Step-rate ceiling on toolhead boards
+
+The motion engine emits step pulses from its sample ISR, so a single axis
+cannot exceed `CONFIG_MOTION_SAMPLE_RATE_HZ` steps per second. Toolhead
+boards are usually STM32G0, whose default sample rate is 2 kHz - a
+bring-up rate, not a throughput rate. A CAN toolhead configured with a
+desktop microstepping value reaches that ceiling almost immediately: at
+80 steps/mm, 25 mm/s already asks for 2000 steps/s, and the engine faults
+with `StepQueueOverflow` rather than silently dropping steps.
+
+Size `microsteps` and `rotation_distance` against the sample rate of the
+micro-controller that drives the motor, and raise
+`CONFIG_MOTION_SAMPLE_RATE_HZ` (menuconfig) only as far as that
+micro-controller's CPU allows.
+
+How many axes the toolhead drives matters as much as the step rate. On a
+bench an STM32G0B1 at the default 2 kHz sustained a single axis of
+continuous streamed motion for ten minutes without a fault, while driving
+three axes from the same micro-controller faulted within a minute with
+`StepQueueOverflow` and `Rescheduled timer in the past`. That failure
+reproduces identically over USB, so it is a limit of the micro-controller
+and its sample rate, not of the CAN link. Keep a G0 toolhead to the axes
+it physically drives - normally just the extruder - and leave the machine
+axes on the main board.
+
+## CAN-FD
+
+CAN-FD carries up to 64 bytes per frame instead of 8, and switches to a
+faster bit rate for the data phase. Enable it by setting a non-zero
+"CAN-FD data phase speed" (`CONFIG_CANBUS_DATA_FREQUENCY`) in
+`make menuconfig` when building the micro-controller. Zero, the default,
+is classic CAN.
+
+Requirements: an FDCAN-capable micro-controller (STM32G0B1, G4, H7 - the
+older bxCAN parts such as STM32F4 cannot do FD), a transceiver rated for
+the data bit rate, a host adapter whose firmware advertises FD, and the
+interface brought up in FD mode, for example:
+
+```
+ip link set can0 up type can bitrate 1000000 dbitrate 2000000 fd on
+```
+
+`ip link` control modes are sticky. A `loopback on` left over from a
+previous test survives a `down`/`up` cycle and silently detaches the
+controller from the bus, so clear it explicitly with `loopback off`.
+
+Framing is negotiated, never assumed. The micro-controller reports its
+data phase to the host, the link starts in classic framing, and it moves
+to 64-byte frames only once the host has seen a non-zero data phase from
+the micro-controller and the interface itself is FD-capable. A classic
+micro-controller on an FD-capable bus therefore stays on classic frames
+instead of being flooded with frames it would reject. Messages of eight
+bytes or fewer, including node discovery, stay classic in both
+directions.
+
+All of this is verified on a test bench and has never driven a real
+print. See [Feature status](Feature_Status.md).
 
 ## USB to CAN bus bridge mode
 
@@ -100,6 +160,9 @@ bus adapter" under Linux. The "Kalico bridge mcu" itself will appear
 as if it was on this CAN bus - it can be identified via
 `canbus_query.py` and it must be configured like other CAN bus Kalico
 nodes.
+
+Bridge mode is classic CAN only: it has no CAN-FD support, so a bridge
+board cannot carry an FD data path.
 
 Some important notes when using this mode:
 

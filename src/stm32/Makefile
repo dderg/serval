@@ -4,6 +4,7 @@
 CROSS_PREFIX=arm-none-eabi-
 
 dirs-y += src/stm32 src/generic lib/fast-hash
+dirs-$(CONFIG_MACH_STM32F1) += lib/stm32f1
 dirs-$(CONFIG_MACH_STM32F4) += lib/stm32f4
 dirs-$(CONFIG_MACH_STM32G0) += lib/stm32g0
 dirs-$(CONFIG_MACH_STM32H7) += lib/stm32h7
@@ -11,6 +12,8 @@ dirs-$(CONFIG_MACH_STM32H7) += lib/stm32h7
 MCU := $(shell echo $(CONFIG_MCU))
 MCU_UPPER := $(shell echo $(CONFIG_MCU) | tr a-z A-Z | tr X x)
 
+CFLAGS-$(CONFIG_MACH_STM32F103) += -mcpu=cortex-m3
+CFLAGS-$(CONFIG_MACH_STM32F1) += -Ilib/stm32f1/include
 CFLAGS-$(CONFIG_MACH_STM32F4) += -mcpu=cortex-m4 -Ilib/stm32f4/include
 CFLAGS-$(CONFIG_MACH_STM32G0) += -mcpu=cortex-m0plus -Ilib/stm32g0/include
 CFLAGS-$(CONFIG_MACH_STM32H7) += -mcpu=cortex-m7 -Ilib/stm32h7/include
@@ -51,6 +54,7 @@ src-y += generic/mpu_protect.c
 # CONFIG_MACH_STM32*. H7/F4 use TIM5; G0B1 has no TIM5 and uses a configurable
 # basic timer (default TIM7) plus a software CYCCNT (no DWT on Cortex-M0+).
 ifeq ($(CONFIG_MOTION_RUNTIME),y)
+src-$(CONFIG_MACH_STM32F1) += stm32/runtime_tick_f1.c
 src-$(CONFIG_MACH_STM32H7) += stm32/runtime_tick_h7.c
 src-$(CONFIG_MACH_STM32F4) += stm32/runtime_tick_f4.c
 src-$(CONFIG_MACH_STM32G0) += stm32/runtime_tick_g0.c
@@ -63,6 +67,7 @@ src-y += runtime_tick.c
 # Sim-only: software CYCCNT under CONFIG_MCU_SIM. Per Step-6 spec §3.1.
 src-$(CONFIG_MCU_SIM) += stm32/mcu_sim_clock.c
 
+src-$(CONFIG_MACH_STM32F1) += stm32/stm32f1.c ../lib/stm32f1/system_stm32f1xx.c
 src-$(CONFIG_MACH_STM32F4) += stm32/stm32f4.c ../lib/stm32f4/system_stm32f4xx.c
 src-$(CONFIG_MACH_STM32G0) += stm32/stm32g0.c
 src-$(CONFIG_MACH_STM32H7) += stm32/stm32h7.c ../lib/stm32h7/system_stm32h7xx.c
@@ -70,6 +75,7 @@ src-$(CONFIG_MACH_STM32H7) += stm32/stm32h7.c ../lib/stm32h7/system_stm32h7xx.c
 timer-src-y := generic/armcm_timer.c
 timer-src-$(CONFIG_MACH_STM32G0) := generic/timer_irq.c stm32/stm32f0_timer.c
 gpio-src-y := stm32/gpio.c stm32/gpioperiph.c
+gpio-src-$(CONFIG_MACH_STM32F1) := stm32/gpio.c
 gpio-src-$(CONFIG_MACH_STM32H7) := stm32/stm32h7_gpio.c stm32/gpioperiph.c
 src-y += $(timer-src-y) $(gpio-src-y)
 
@@ -84,6 +90,7 @@ src-$(CONFIG_WANT_GPIO_SPI) += $(spi-src-y)
 
 i2c-src-y := stm32/stm32f0_i2c.c
 i2c-src-$(CONFIG_MACH_STM32F4) := stm32/i2c.c
+i2c-src-$(CONFIG_MACH_STM32F1) := stm32/i2c.c
 src-$(CONFIG_WANT_GPIO_I2C) += $(i2c-src-y)
 
 serial-src-y := stm32/serial.c
@@ -96,6 +103,7 @@ usb-src-$(CONFIG_HAVE_STM32_USBOTG) := stm32/usbotg.c
 src-$(CONFIG_USBSERIAL) += $(usb-src-y) stm32/chipid.c generic/usb_cdc.c
 
 canbus-src-y := generic/canserial.c ../lib/fast-hash/fasthash.c
+
 canbus-src-$(CONFIG_HAVE_STM32_CANBUS) += stm32/can.c
 canbus-src-$(CONFIG_HAVE_STM32_FDCANBUS) += stm32/fdcan.c
 src-$(CONFIG_CANSERIAL) += $(canbus-src-y) generic/canbus.c stm32/chipid.c
@@ -105,6 +113,16 @@ src-$(CONFIG_WANT_HARD_PWM) += stm32/hard_pwm.c
 
 sdio-src-y := stm32/sdio.c
 src-$(CONFIG_HAVE_GPIO_SDIO) += $(sdio-src-y)
+
+# Link runtime_tick.c last on F1 so runtime_init() runs after timer_init()
+# and usb_init(). DECL_INIT order is link order, and the motion runtime
+# otherwise initialises first: it reads DWT->CYCCNT (via timer_read_time)
+# before timer_init() sets DEMCR.TRCENA, and any hang there trips the
+# ~410 ms IWDG before usb_init() ever pulls D+ up — leaving a board with no
+# comms to diagnose through, recoverable only by a physical reset button.
+ifeq ($(CONFIG_MACH_STM32F1),y)
+src-y := $(filter-out runtime_tick.c,$(src-y)) runtime_tick.c
+endif
 
 # Binary output file rules
 target-y += $(OUT)klipper.bin

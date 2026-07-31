@@ -1,22 +1,29 @@
-use std::io::{self, Read};
+use std::io;
 use std::time::{Duration, Instant};
-
-use serialport::SerialPort;
 
 use mcu_transport::demux::{Demuxer, PollOutcome};
 
+use crate::host_io::byte_link::ByteLink;
 use crate::transport::TransportError;
 
 pub struct SerialFrameIo {
-    port: Box<dyn SerialPort>,
+    link: Box<dyn ByteLink>,
     demuxer: Demuxer,
     scratch: [u8; 1024],
 }
 
 impl SerialFrameIo {
-    pub fn new(port: Box<dyn SerialPort>) -> Self {
+    pub fn new(link: impl ByteLink + 'static) -> Self {
         Self {
-            port,
+            link: Box::new(link),
+            demuxer: Demuxer::new(),
+            scratch: [0u8; 1024],
+        }
+    }
+
+    pub fn new_boxed(link: Box<dyn ByteLink>) -> Self {
+        Self {
+            link,
             demuxer: Demuxer::new(),
             scratch: [0u8; 1024],
         }
@@ -25,13 +32,13 @@ impl SerialFrameIo {
     pub fn poll_frames_until(&mut self, deadline: Instant) -> Result<PollOutcome, TransportError> {
         let now = Instant::now();
         let remaining = deadline.saturating_duration_since(now);
-        if let Err(e) = self.port.set_timeout(remaining) {
+        if let Err(e) = self.link.set_timeout(remaining) {
             return Err(TransportError::Io(io::Error::new(
                 io::ErrorKind::Other,
                 e.to_string(),
             )));
         }
-        match self.port.read(&mut self.scratch) {
+        match self.link.read(&mut self.scratch) {
             // USB-CDC Ok(0) is an idle timeout, not a half-close; treat as Timeout so the reactor
             // stays alive across idle windows. Real disconnects arrive as Err(ENODEV).
             Ok(0) => Ok(PollOutcome::Timeout),
@@ -61,15 +68,19 @@ impl SerialFrameIo {
     const WRITE_STALL_LIMIT: Duration = Duration::from_millis(1000);
     const WRITE_POLL: Duration = Duration::from_millis(25);
 
+    fn throttle_retry_for_links_that_never_block() {
+        std::thread::sleep(Self::WRITE_POLL);
+    }
+
     pub fn write_all(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
         let deadline = Instant::now() + Self::WRITE_STALL_LIMIT;
-        if let Err(e) = self.port.set_timeout(Self::WRITE_POLL) {
+        if let Err(e) = self.link.set_timeout(Self::WRITE_POLL) {
             return Err(TransportError::Io(io::Error::other(e.to_string())));
         }
         let mut off = 0;
         let mut stalled_polls = 0u32;
         while off < bytes.len() {
-            match io::Write::write(&mut self.port, &bytes[off..]) {
+            match self.link.write(&bytes[off..]) {
                 Ok(0) => {
                     return Err(TransportError::Io(io::Error::new(
                         io::ErrorKind::WriteZero,
@@ -77,14 +88,7 @@ impl SerialFrameIo {
                     )));
                 }
                 Ok(n) => off += n,
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::TimedOut
-                            | io::ErrorKind::Interrupted
-                            | io::ErrorKind::WouldBlock
-                    ) =>
-                {
+                Err(e) if is_transient_write_error(&e) => {
                     stalled_polls += 1;
                     tracing::warn!(
                         subsystem = "mcu-comms",
@@ -92,7 +96,7 @@ impl SerialFrameIo {
                         written = off,
                         total = bytes.len(),
                         stalled_polls,
-                        outq = ?self.port.bytes_to_write(),
+                        outq = ?self.link.out_queue(),
                         "serial write poll stalled; retrying within stall limit"
                     );
                     if Instant::now() >= deadline {
@@ -105,6 +109,7 @@ impl SerialFrameIo {
                             ),
                         )));
                     }
+                    Self::throttle_retry_for_links_that_never_block();
                 }
                 Err(e) => return Err(TransportError::Io(e)),
             }
@@ -112,11 +117,17 @@ impl SerialFrameIo {
         Ok(())
     }
 
-    /// Bytes queued in the kernel tty out-buffer, not yet on the wire.
+    /// Bytes queued in the kernel out-buffer, not yet on the wire; 0 when the
+    /// link cannot observe a kernel queue.
     pub fn bytes_to_write(&self) -> Result<u32, TransportError> {
-        self.port
-            .bytes_to_write()
-            .map_err(|e| TransportError::Io(io::Error::other(e.to_string())))
+        self.link
+            .out_queue()
+            .map(|pending| pending.unwrap_or(0))
+            .map_err(TransportError::Io)
+    }
+
+    pub fn try_enable_fd(&mut self, mcu_data_rate_hz: u32) -> io::Result<bool> {
+        self.link.try_enable_fd(mcu_data_rate_hz)
     }
 
     // NOT `self.port.flush()`: that is tcdrain(), whose in-kernel wait sleeps
@@ -129,10 +140,9 @@ impl SerialFrameIo {
         const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
         let deadline = Instant::now() + DRAIN_TIMEOUT;
         loop {
-            let pending = self
-                .port
-                .bytes_to_write()
-                .map_err(|e| TransportError::Io(io::Error::other(e.to_string())))?;
+            let Some(pending) = self.link.out_queue().map_err(TransportError::Io)? else {
+                return Ok(());
+            };
             if pending == 0 {
                 return Ok(());
             }
@@ -147,10 +157,20 @@ impl SerialFrameIo {
     }
 
     #[cfg(any(test, feature = "test-harness"))]
-    pub fn port_mut(&mut self) -> &mut Box<dyn SerialPort> {
-        &mut self.port
+    pub fn link_mut(&mut self) -> &mut dyn ByteLink {
+        &mut *self.link
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+fn is_transient_write_error(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::TimedOut
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::OutOfMemory
+    ) || e.raw_os_error() == Some(libc::ENOBUFS)
+}

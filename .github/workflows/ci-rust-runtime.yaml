@@ -171,6 +171,25 @@ jobs:
       - name: cargo build (mcu-g0)
         run: ./scripts/ci.sh rust-mcu-g0
 
+  # F103 (Cortex-M3, thumbv7m) — the SKR Mini E3 v2 class board. Its storage
+  # profile is smaller than MCU_ENV's, so job_rust_mcu_f1 sets its own env.
+  rust-mcu-f1:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7m-none-eabi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: mcu-f1
+      - name: cargo build (mcu-f1)
+        run: ./scripts/ci.sh rust-mcu-f1
+
   # Validate the EtherCAT servo-node / no-stepper compile path: runtime built
   # with --no-default-features --features host omits motion-module-stepper, so
   # the compile_error guard in lib.rs must NOT fire (host builds are valid

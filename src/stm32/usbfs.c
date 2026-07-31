@@ -6,6 +6,7 @@
 
 #include <string.h> // NULL
 #include "board/armcm_boot.h" // armcm_enable_irq
+#include "board/armcm_timer.h" // udelay
 #include "board/gpio.h" // gpio_out_setup
 #include "board/io.h" // writeb
 #include "board/usb_cdc.h" // usb_notify_ep0
@@ -14,7 +15,12 @@
 #include "internal.h" // GPIO
 #include "sched.h" // DECL_INIT
 
-#if CONFIG_MACH_STM32G0
+#if CONFIG_MACH_STM32F1
+  // Transfer memory is accessed with 32bits, but contains only 16bits of data
+  typedef volatile uint32_t epmword_t;
+  #define WSIZE 2
+  #define USBx_IRQn USB_LP_IRQn
+#elif CONFIG_MACH_STM32G0
   // Transfer memory is accessed with 32bits and contains 32bits of data
   typedef volatile uint32_t epmword_t;
   #define WSIZE 4
@@ -395,6 +401,13 @@ DECL_CONSTANT_STR("RESERVE_PINS_USB", "PA11,PA12");
 void
 usb_init(void)
 {
+    if (CONFIG_MACH_STM32F1) {
+        // Pull the D+ pin low briefly to signal a new connection
+        gpio_out_setup(GPIO('A', 12), 0);
+        udelay(5000);
+        gpio_in_setup(GPIO('A', 12), 0);
+    }
+
     // Enable USB clock
     enable_pclock(USB_BASE);
 
