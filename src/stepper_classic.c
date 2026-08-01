@@ -383,11 +383,20 @@ stepper_classic_halt(struct stepper *s)
     gpio_out_write(s->step_pin, s->step_idle_level);
 }
 
-void
-stepper_classic_halt_all(void)
+uint8_t
+stepper_classic_halt_all(uint32_t *stream_end_clock)
 {
-    uint8_t oid;
+    uint8_t oid, found = 0;
     struct stepper *s;
-    foreach_oid(oid, s, command_config_stepper)
+    foreach_oid(oid, s, command_config_stepper) {
+        uint32_t waketime = s->time.waketime;
+        if (waketime && !(s->flags & SF_NEED_RESET)) {
+            uint32_t stream_end = s->count ? waketime - 1 : waketime;
+            if (!found || timer_is_before(*stream_end_clock, stream_end))
+                *stream_end_clock = stream_end;
+            found = 1;
+        }
         stepper_classic_halt(s);
+    }
+    return found;
 }

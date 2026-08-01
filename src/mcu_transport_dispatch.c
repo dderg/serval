@@ -385,6 +385,25 @@ static uint64_t stop_halt_clock;
 static uint8_t stop_gated;
 #endif
 
+#if CONFIG_CLASSIC_STEPPING
+void
+classic_stop_gate_at(uint64_t halt_clock)
+{
+    irqstatus_t flag = irq_save();
+    if (!stop_gated) {
+        stop_gated = 1;
+        uint32_t stream_end = 0;
+        if (stepper_classic_halt_all(&stream_end)) {
+            int32_t delta = (int32_t)(stream_end - (uint32_t)halt_clock);
+            if (delta < 0)
+                halt_clock = halt_clock + (int64_t)delta;
+        }
+        stop_halt_clock = halt_clock;
+    }
+    irq_restore(flag);
+}
+#endif
+
 int32_t
 handle_stop_inner(uint64_t *discard_clock)
 {
@@ -405,12 +424,8 @@ handle_stop_inner(uint64_t *discard_clock)
     // halt IS discarding every queued move, and SF_NEED_RESET keeps later
     // queue_step frames out until the host re-anchors with reset_step_clock.
     int32_t rc = 0;
+    classic_stop_gate_at(runtime_widened_host_clock());
     irqstatus_t flag = irq_save();
-    if (!stop_gated) {
-        stop_gated = 1;
-        stop_halt_clock = runtime_widened_host_clock();
-        stepper_classic_halt_all();
-    }
     *discard_clock = stop_halt_clock;
     irq_restore(flag);
 #else

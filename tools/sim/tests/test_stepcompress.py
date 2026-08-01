@@ -66,6 +66,11 @@ def test_stepcompress_homing_trips(sim_world):
     world.gcode_ok("M400")
     assert world.shutdown_line() is None, world.log_tail()
     assert world.status()["toolhead"]["homed_axes"].lower().find("z") >= 0
+    events = world.events_text()
+    assert "endstop.trsync_do_trigger" in events, (
+        "the trip never reached the mcu-side trsync — the step queues were"
+        " cleared by the host's Stop instead"
+    )
 
 
 def test_piece_mode_regression_beside_stepcompress(sim_world):

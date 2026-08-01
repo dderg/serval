@@ -6,6 +6,7 @@ from collections import defaultdict, namedtuple
 from . import stepper
 from .extras import servo_axis
 from .mcu import STEPPING_MODE_PIECE, STEPPING_MODE_STEPCOMPRESS
+from .motion_endstop import register_stepcompress_steppers
 from .stepper import DEFAULT_STEP_PULSE_DURATION
 
 McuTopology = namedtuple(
@@ -516,7 +517,13 @@ def _send_axis_configuration(
 
 
 def _configure_stepcompress_mcu(
-    motion, name, mcu_handle, present_mask, bind_list, microstep_distance
+    motion,
+    name,
+    mcu_obj,
+    mcu_handle,
+    present_mask,
+    bind_list,
+    microstep_distance,
 ):
     if present_mask == 0:
         logging.info(
@@ -531,6 +538,11 @@ def _configure_stepcompress_mcu(
     for axis_idx, bindings in axis_bindings.items():
         for motor_idx, (sname, _oid, _inv) in enumerate(bindings):
             motion._motor_bindings[sname] = (mcu_handle, axis_idx, motor_idx)
+    register_stepcompress_steppers(
+        motion.printer,
+        mcu_obj,
+        [oid for _slot, _sname, oid, _inv in bind_list],
+    )
     logging.info(
         "Motion: stepcompress mcu=%s present=0x%x microstep_distance=%s "
         "bindings=%s — host-side step generation, no kalico_configure_axis",
@@ -565,6 +577,7 @@ def _configure_one_mcu(
         _configure_stepcompress_mcu(
             motion,
             name,
+            mcu_obj,
             mcu_handle,
             present_mask,
             bind_list,

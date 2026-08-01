@@ -41,6 +41,8 @@ void mcu_transport_emit_endstop_trip(uint8_t endstop_id, uint64_t trip_clock);
 
 int32_t handle_stop_inner(uint64_t *discard_clock);
 
+void classic_stop_gate_at(uint64_t halt_clock);
+
 void send_status_heartbeat(void);
 
 #endif
