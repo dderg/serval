@@ -35,6 +35,15 @@
 //! acceleration, cruise. Where the disk pins the speed exactly at
 //! `sqrt(accel/|kappa|)` no acceleration is left at all and cruise is the only
 //! profile; [`cruise_only`] is that regime.
+//!
+//! That reduction is one-sided in a second way the caps cannot express: `K` is
+//! the whole member's peak curvature, so a member entered above
+//! `sqrt(accel/K)` has to shed the difference at once and then hold the cap for
+//! whatever arc is left, even where the true ceiling it is riding is still
+//! descending towards the peak. The certificate has no such flat cap — it
+//! composes `kappa(tau)` exactly — so [`certified_flat_chain`] offers the pass
+//! that spends the member's whole arc at one acceleration and lets the proof,
+//! not the reduction, decide. Whichever of the two is quicker is emitted.
 
 use super::VelocityError;
 use super::certify;
@@ -63,6 +72,18 @@ const BALL_RAIL_ROUNDING: f64 = 1.0e-12;
 
 const TOP_BISECT_ITERS: u32 = 48;
 const ARC_BISECT_ITERS: u32 = 64;
+
+/// Halvings of the acceleration budget the flat-acceleration solve spends
+/// looking for a hold gentle enough to need the member's whole arc. The arc a
+/// hold needs grows without bound as the hold flattens, so a bracket exists
+/// wherever a flat pass exists at all, and running out of halvings means the
+/// member cannot be crossed flat rather than that the search was too short.
+const FLAT_HOLD_HALVINGS: u32 = 64;
+
+/// Halvings of the jerk the flat-acceleration pass winds its swings at before
+/// giving the member up to the cap-bounded plan. The hold commands no jerk at
+/// all, so what the certificate rations here is only the two swings.
+const FLAT_WIND_HALVINGS: u32 = 16;
 
 /// Cap speeds the plan search samples across its bracket before closing in, and
 /// halvings it then spends around the best sample. Coarse first because the
@@ -1876,9 +1897,120 @@ fn extremal_chain(
     states_match(entry, (v, -a)).then(|| reverse_chain(kin.length, &backward))
 }
 
-/// Certified constant-jerk chain across the member between boundary states that
-/// both carry acceleration.
-pub(super) fn curved_chain(
+/// One flat-acceleration pass between the boundary states: wind the entry
+/// acceleration to `hold`, hold it, wind it to the exit acceleration, both
+/// swings at `j_wind`. The hold duration is pinned by the speed the two swings
+/// do not already account for, so the arc the pass spends is a function of
+/// `hold` alone and the boundary states are met exactly.
+fn flat_span(entry: (f64, f64), exit: (f64, f64), j_wind: f64, hold: f64) -> Option<March> {
+    if hold == 0.0 {
+        return None;
+    }
+    let mut m = March::new(entry);
+    let j_in = if hold >= m.a { j_wind } else { -j_wind };
+    m.push(j_in, (hold - m.a).abs() / j_wind);
+    if m.v < 0.0 {
+        return None;
+    }
+    let j_out = if exit.1 >= hold { j_wind } else { -j_wind };
+    let wound_out = 0.5 * (exit.1 * exit.1 - hold * hold) / j_out;
+    let dt_hold = (exit.0 - wound_out - m.v) / hold;
+    if dt_hold.is_nan() || dt_hold < 0.0 {
+        return None;
+    }
+    m.push(0.0, dt_hold);
+    m.push(j_out, (exit.1 - hold).abs() / j_wind);
+    Some(m)
+}
+
+/// Magnitude of the flat acceleration whose pass spends exactly the member's
+/// arc, on the `sign` side. The arc a pass spends falls as the hold steepens, so
+/// the crossing is unique; a member whose whole authority still needs more arc
+/// than it has cannot be crossed flat at all.
+fn flat_hold(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+    j_wind: f64,
+    sign: f64,
+) -> Option<f64> {
+    let spans = |magnitude: f64| {
+        flat_span(entry, exit, j_wind, sign * magnitude).is_some_and(|m| m.s >= kin.length)
+    };
+    if spans(kin.accel) {
+        return None;
+    }
+    let mut gentlest = kin.accel;
+    for _ in 0..FLAT_HOLD_HALVINGS {
+        gentlest *= 0.5;
+        if spans(gentlest) {
+            return Some(sign * largest_admissible(gentlest, kin.accel, spans));
+        }
+    }
+    None
+}
+
+fn flat_accel_chain(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+    j_wind: f64,
+) -> Option<Vec<StraightPhase>> {
+    let mut best: Option<March> = None;
+    for sign in [-1.0, 1.0] {
+        let Some(hold) = flat_hold(kin, entry, exit, j_wind, sign) else {
+            continue;
+        };
+        let Some(pass) = flat_span(entry, exit, j_wind, hold) else {
+            continue;
+        };
+        if (pass.s - kin.length).abs() > LENGTH_CLOSURE_REL_TOL * kin.length {
+            continue;
+        }
+        if best.as_ref().is_none_or(|incumbent| pass.t < incumbent.t) {
+            best = Some(pass);
+        }
+    }
+    best.map(|pass| coalesce(pass.phases))
+}
+
+/// The flat-acceleration pass the certificate proves, its swings wound at the
+/// largest jerk the certificate accepts.
+///
+/// A member's cap set is a sufficient condition evaluated at the curvature peak,
+/// so it holds the whole member to the peak's ceiling and a pass entered above
+/// that ceiling has to shed the difference at once and then idle at the cap.
+/// [`certify::certified_span`] composes `kappa(tau)` exactly, so an acceleration
+/// held across the varying curvature is provable where the flat cap refuses it.
+/// The swings are what the certificate actually rations: at a `kappa = 0` seam
+/// the curvature's own `sigma v^3` has already spent most of the jerk budget,
+/// and the hold commands none of it.
+fn certified_flat_chain(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> Option<Vec<StraightPhase>> {
+    if !(kin.jerk > 0.0 && kin.jerk.is_finite()) {
+        return None;
+    }
+    let mut j_wind = kin.jerk;
+    for _ in 0..FLAT_WIND_HALVINGS {
+        if let Some(chain) = flat_accel_chain(kin, entry, exit, j_wind) {
+            if let Ok(certified) = certified_chain(kin, &chain) {
+                return Some(certified);
+            }
+        }
+        j_wind *= 0.5;
+    }
+    None
+}
+
+/// Certified chain across the member under its own cap set: the member's plan,
+/// or its extremal pass where the plan refuses. The caps are a sufficient
+/// condition evaluated at the curvature peak, so a member entered above that
+/// peak's ceiling sheds the difference at once and holds the cap for whatever
+/// arc is left.
+pub(super) fn capped_chain(
     kin: &Kinematics,
     entry: (f64, f64),
     exit: (f64, f64),
@@ -1891,4 +2023,24 @@ pub(super) fn curved_chain(
             None => Err(bounded),
         },
     }
+}
+
+/// Certified constant-jerk chain across the member between boundary states that
+/// both carry acceleration. [`capped_chain`] and [`certified_flat_chain`] are
+/// both certified answers between the very same states over the very same arc,
+/// so the quicker of the two is the one emitted.
+///
+/// A refusal stands as a refusal. The cap-bounded plan is what [`closes`]
+/// promised the envelope, and it is the only path that prices what the boundary
+/// states themselves demand — an exit acceleration whose own continuation
+/// reverses the motion is refused there and nowhere else.
+pub(super) fn curved_chain(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> Result<Vec<StraightPhase>, VelocityError> {
+    let capped = capped_chain(kin, entry, exit)?;
+    let quicker = certified_flat_chain(kin, entry, exit)
+        .filter(|flat| chain_time(flat) < chain_time(&capped));
+    Ok(quicker.unwrap_or(capped))
 }

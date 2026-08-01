@@ -759,3 +759,118 @@ fn raising_accel_never_lengthens_the_corner() {
         }
     }
 }
+
+/// The 90 degree blend the repro names, and the one the `clothoid/printer`
+/// snapshot config names — whose own comment says the clothoid should ride at
+/// flat acceleration with its jerk limit.
+fn flat_ride_machines() -> [Machine; 2] {
+    [
+        Machine {
+            feed: 190.0,
+            accel: 70_000.0,
+            corner_accel: f64::INFINITY,
+            deviation: 0.05,
+            jerk: 1.5e8,
+        },
+        Machine {
+            feed: 300.0,
+            accel: 1_000.0,
+            corner_accel: f64::INFINITY,
+            deviation: crate::corner_deviation_from_scv(5.0, 1_000.0),
+            jerk: 6.0e5,
+        },
+    ]
+}
+
+/// The two chains a blend half is planned as: what the member's own cap set
+/// yields, and what is actually emitted.
+fn blend_half_chains(
+    half: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> (Vec<StraightPhase>, Vec<StraightPhase>) {
+    (
+        curved::capped_chain(half, entry, exit).expect("the cap-bounded plan closes the half"),
+        curved::curved_chain(half, entry, exit).expect("the emitted chain closes the half"),
+    )
+}
+
+fn chain_seconds(chain: &[StraightPhase]) -> f64 {
+    chain.iter().map(|p| p.dt).sum()
+}
+
+fn idles(chain: &[StraightPhase]) -> bool {
+    chain.iter().any(|p| p.j == 0.0 && p.a0 == 0.0)
+}
+
+fn assert_states_join(chain: &[StraightPhase], what: &str) {
+    for pair in chain.windows(2) {
+        let (s, v, a) = pair[0].end_state();
+        let next = &pair[1];
+        let joins = |lhs: f64, rhs: f64, scale: f64| (lhs - rhs).abs() <= 1e-9 * (scale + 1.0);
+        assert!(
+            joins(s, next.s0, s.abs())
+                && joins(v, next.v0, v.abs())
+                && joins(a, next.a0, a.abs())
+                && joins(pair[0].t0 + pair[0].dt, next.t0, next.t0.abs()),
+            "{what}: phase boundary is discontinuous, {:?} hands on to {next:?}",
+            pair[0]
+        );
+    }
+}
+
+/// A blend half whose ceiling descends with its curvature must ride its
+/// acceleration all the way to the apex, not brake early onto the apex ceiling
+/// and idle at it. Constant velocity is the answer only where it is quicker than
+/// constant acceleration, and straddling a curvature peak it is neither: it
+/// spends the half's arc at the lowest speed the half ever has to hold.
+///
+/// The half's own cap set is what forces the idle — one flat ceiling for the
+/// whole member, taken at its curvature peak — so the cap-bounded chain is the
+/// measurement the emitted chain has to beat.
+#[test]
+fn a_blend_half_rides_its_acceleration_to_the_apex() {
+    for m in flat_ride_machines() {
+        let halves = corner_halves(m);
+        let (into_half, out_of_half) = (&halves[0], &halves[1]);
+        assert!(
+            into_half.sigma != 0.0 && out_of_half.sigma != 0.0,
+            "a blend half with constant curvature has no descending ceiling to ride"
+        );
+        let apex_v = top_speed_ceiling(into_half).min(top_speed_ceiling(out_of_half));
+        let apex = (apex_v, 0.0);
+        let entry = curved::entry_requirement(into_half, apex).expect("entry requirement");
+        let handoff = curved::curved_reach(out_of_half, apex);
+
+        for (half, from, to, what) in [
+            (into_half, entry, apex, "into the corner"),
+            (out_of_half, apex, handoff, "out of the corner"),
+        ] {
+            let (cruised, ridden) = blend_half_chains(half, from, to);
+            assert!(
+                idles(&cruised),
+                "accel={} jerk={} {what}: the cap-bounded chain no longer idles, so the \
+                 regression this test guards cannot be measured: {cruised:?}",
+                m.accel,
+                m.jerk
+            );
+            assert!(
+                !idles(&ridden),
+                "accel={} jerk={} {what}: emitted chain still idles at the apex ceiling: \
+                 {ridden:?}",
+                m.accel,
+                m.jerk
+            );
+            assert!(
+                chain_seconds(&ridden) < chain_seconds(&cruised),
+                "accel={} jerk={} {what}: riding the acceleration took {} s against the \
+                 cruising chain's {} s",
+                m.accel,
+                m.jerk,
+                chain_seconds(&ridden),
+                chain_seconds(&cruised)
+            );
+            assert_states_join(&ridden, what);
+        }
+    }
+}
