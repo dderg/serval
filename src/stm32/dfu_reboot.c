@@ -24,8 +24,14 @@
 // .axi_bss static has the needed semantics (NOLOAD, never memset at boot,
 // survives NVIC_SystemReset); aligned(32) gives it its own cache line for the
 // clean in dfu_reboot().
+//
+// `volatile` is load-bearing, not decoration: dfu_reboot_check() inlines into
+// the reset handler, and a plain static is provably still zero-initialised
+// that early, so LTO folds the magic comparison to false and deletes the ROM
+// jump outright. The value survives across a reset the compiler cannot see.
 #if CONFIG_MACH_STM32H7
-static uint64_t usb_boot_flag __attribute__((section(".axi_bss"), aligned(32)));
+static volatile uint64_t usb_boot_flag
+    __attribute__((section(".axi_bss"), aligned(32), used));
 #define USB_BOOT_FLAG_ADDR ((uint32_t)&usb_boot_flag)
 #else
 #define USB_BOOT_FLAG_ADDR (CONFIG_RAM_START + CONFIG_RAM_SIZE - 1024)
@@ -41,7 +47,7 @@ dfu_reboot(void)
     if (!CONFIG_STM32_DFU_ROM_ADDRESS || !CONFIG_HAVE_BOOTLOADER_REQUEST)
         return;
     irq_disable();
-    uint64_t *bflag = (void*)USB_BOOT_FLAG_ADDR;
+    volatile uint64_t *bflag = (void*)USB_BOOT_FLAG_ADDR;
     *bflag = USB_BOOT_FLAG;
 #if __CORTEX_M >= 7
     SCB_CleanDCache_by_Addr((void*)bflag, sizeof(*bflag));
@@ -55,9 +61,10 @@ dfu_reboot_check(void)
 {
     if (!CONFIG_STM32_DFU_ROM_ADDRESS || !CONFIG_HAVE_BOOTLOADER_REQUEST)
         return;
-    if (*(uint64_t*)USB_BOOT_FLAG_ADDR != USB_BOOT_FLAG)
+    volatile uint64_t *bflag = (void*)USB_BOOT_FLAG_ADDR;
+    if (*bflag != USB_BOOT_FLAG)
         return;
-    *(uint64_t*)USB_BOOT_FLAG_ADDR = 0;
+    *bflag = 0;
     uint32_t *sysbase = (uint32_t*)CONFIG_STM32_DFU_ROM_ADDRESS;
     asm volatile("mov sp, %0\n bx %1"
                  : : "r"(sysbase[0]), "r"(sysbase[1]));
