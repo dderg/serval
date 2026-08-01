@@ -15,7 +15,7 @@ __attribute__((used, externally_visible))
 _Alignas(16) uint8_t rt_storage[RT_STORAGE_SIZE];
 
 _Static_assert(RT_STORAGE_SIZE >= 1024,
-               "RT_STORAGE_SIZE absurdly small — Kconfig profile broken");
+               "RT_STORAGE_SIZE absurdly small — Kconfig RUNTIME_STORAGE_SIZE broken");
 
 // H7-only AXI SRAM overflow guard — sum every .axi_bss occupant and verify it
 // fits the 320 KB AXI region with headroom. Update when adding/removing an

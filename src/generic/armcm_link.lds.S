@@ -115,6 +115,14 @@ SECTIONS
         . = ALIGN(8);
         _axi_bss_start = .;
         *(.axi_bss .axi_bss.*)
+        // The bootloader at CONFIG_FLASH_BOOT_ADDRESS runs before us on every
+        // reset and takes its stack from the base of AXI SRAM (initial SP
+        // 0x24000738 on this board), so the low ~2 KB of this region is
+        // scratch that cannot carry anything across a reset. `.axi_dfu_flag`
+        // is emitted last, above every live static, which is the only part of
+        // AXI the bootloader never touches.
+        . = ALIGN(32);
+        *(.axi_dfu_flag)
         . = ALIGN(8);
         _axi_bss_end = .;
     } > axi_ram

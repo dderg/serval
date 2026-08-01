@@ -348,38 +348,11 @@ config HAVE_LIMITED_CODE_SIZE
 config HAVE_SOFTWARE_DIVIDE_REQUIRED
     bool
 
-choice
-    prompt "Runtime sizing profile"
-    default RUNTIME_TARGET_LARGE if MACH_STM32H7
-    default RUNTIME_TARGET_SMALL if MACH_STM32F1
-    default RUNTIME_TARGET_SMALL if MACH_STM32F4
-    default RUNTIME_TARGET_SMALL if MACH_STM32G0
-    default RUNTIME_TARGET_LARGE
-    depends on MACH_STM32H7 || MACH_STM32F4 || MACH_STM32F1 || MACH_STM32G0 || MACH_LINUX
-    help
-      Selects per-MCU runtime sizing presets. `large` is the H7-class
-      profile that places the curve pool in AXI SRAM. `small` is the
-      F4-class profile that fits in 128 KB SRAM (and the G0-class profile
-      that fits in the G0B1's 144 KB SRAM). `custom` lets you override
-      individual values below.
-
-    config RUNTIME_TARGET_LARGE
-        bool "Large (H7-class — fits in AXI SRAM)"
-
-    config RUNTIME_TARGET_SMALL
-        bool "Small (F4/G0-class — fits in 128 KB SRAM)"
-
-    config RUNTIME_TARGET_CUSTOM
-        bool "Custom (override individual values)"
-endchoice
-
 config RUNTIME_PIECE_RING_SIZE
-    int "Piece-ring byte budget (total across all axes)"
+    int "Piece-ring byte budget (total across all axes)" if LOW_LEVEL_OPTIONS
     default 4096 if MACH_STM32F1
     default 6144 if MACH_STM32G0
     default 32768 if MACH_STM32F401
-    default 63488 if RUNTIME_TARGET_LARGE
-    default 63488 if RUNTIME_TARGET_SMALL
     default 63488
     range 1024 524288
     help
@@ -393,7 +366,7 @@ config RUNTIME_PIECE_RING_SIZE
       RUNTIME_PIECE_RING_SIZE.
 
 config MOTION_SAMPLE_RATE_HZ
-    int "Motion engine sample rate in Hz (motion-timer ISR fire rate)"
+    int "Motion engine sample rate in Hz (motion-timer ISR fire rate)" if LOW_LEVEL_OPTIONS
     depends on MACH_STM32H7 || MACH_STM32F4 || MACH_STM32F1 || MACH_STM32G0 || MACH_LINUX
     default 10000 if MACH_STM32H7
     default 5000 if MACH_STM32F401
@@ -425,7 +398,7 @@ config MOTION_SAMPLE_RATE_HZ
 # never claim them — making them the safe choices. Default TIM7 (its only
 # shared-vector neighbor is LPTIM2, unused on a toolhead board).
 choice
-    prompt "Motion-engine ISR timer (STM32G0)"
+    prompt "Motion-engine ISR timer (STM32G0)" if LOW_LEVEL_OPTIONS
     default MOTION_TIMER_TIM7
     depends on MACH_STM32G0
     help
@@ -441,40 +414,33 @@ choice
         bool "TIM6 (basic timer, shares vector with DAC/LPTIM1)"
 endchoice
 
-config RUNTIME_STORAGE_SIZE_LARGE
-    int "rt_storage byte ceiling (large profile, H7)"
+config RUNTIME_STORAGE_SIZE
+    int "rt_storage byte ceiling" if LOW_LEVEL_OPTIONS
+    depends on MACH_STM32H7 || MACH_STM32F4 || MACH_STM32F1 || MACH_STM32G0 || MACH_LINUX
+    default 122880 if MACH_STM32H7
+    default 10240 if MACH_STM32F1
+    default 57344 if MACH_STM32G0
+    default 36864 if MACH_STM32F401
+    default 73728 if MACH_STM32F4
     default 122880
-    range 65536 524288
+    range 8192 524288
     help
       Byte ceiling for rt_storage (the C-declared backing buffer that
       replaces RT_CELL's Rust-side #[link_section] placement). The fixed
       (non-ring) part of RuntimeContext measures 2520 bytes on the MCU
-      build (2026-06-07); total is that plus PIECE_RING_SIZE. Default is
-      122880 bytes (120 KB), providing ample headroom for piece-ring
-      growth. The AXI SRAM ceiling on H7 is 320 KB; the C-side
-      _Static_assert in src/runtime_storage.c enforces 2 KB headroom.
-      The Rust-side const_assert fires if RuntimeContext exceeds this
+      build (2026-06-07); total is that plus PIECE_RING_SIZE. The C-side
+      _Static_assert in src/runtime_storage.c enforces 2 KB headroom and
+      the Rust-side const_assert fires if RuntimeContext exceeds this
       value at compile time.
 
-config RUNTIME_STORAGE_SIZE_SMALL
-    int "rt_storage byte ceiling (small profile, F4/G0)"
-    default 10240 if MACH_STM32F1
-    default 57344 if MACH_STM32G0
-    default 36864 if MACH_STM32F401
-    default 73728
-    range 8192 131072
-    help
-      Byte ceiling for rt_storage (the C-declared backing buffer that
-      replaces RT_CELL's Rust-side #[link_section] placement). The fixed
-      (non-ring) part of RuntimeContext measures 2520 bytes on the F4
-      MCU build (2026-06-07), so the floor is PIECE_RING_SIZE + ~3 KB.
-      Default is 73728 bytes (72 KB), providing headroom for piece-ring
-      growth on F4's 128 KB SRAM. F401 (64 KB SRAM total) defaults to
-      36864 to leave the C-side dynamic pool ~17 KB. F103 (48 KB SRAM
-      total) defaults to 10240: the measured floor for a 4096 B ring is
+      Per-MCU defaults: H7 122880 (120 KB, placed in AXI SRAM whose
+      ceiling is 320 KB). F4 73728 (72 KB, headroom for piece-ring growth
+      on F4's 128 KB SRAM). F401 (64 KB SRAM total) 36864, leaving the
+      C-side dynamic pool ~17 KB. G0 57344 (G0B1 has 144 KB SRAM). F103
+      (48 KB SRAM total) 10240: the measured floor for a 4096 B ring is
       7168, and every byte above it is taken straight out of the C
       dynamic pool, which is the scarce resource on that part.
-      Const_assert on Rust catches RuntimeContext growth at compile time.
+      MACH_LINUX uses the H7-class 122880.
 
 config MCU_SIM
     bool "Build for simulator (disables IWDG, enables Linux sim shims)"
