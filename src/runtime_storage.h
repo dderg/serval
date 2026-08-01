@@ -4,13 +4,11 @@
 #include "autoconf.h"
 #include <stdint.h>
 
-#if CONFIG_RUNTIME_TARGET_LARGE
-#  define RT_STORAGE_SIZE CONFIG_RUNTIME_STORAGE_SIZE_LARGE
-#elif CONFIG_RUNTIME_TARGET_SMALL
-#  define RT_STORAGE_SIZE CONFIG_RUNTIME_STORAGE_SIZE_SMALL
-#else
-#  error "No CONFIG_RUNTIME_TARGET_* profile selected — pick LARGE or SMALL"
+#ifndef CONFIG_RUNTIME_STORAGE_SIZE
+#  error "CONFIG_RUNTIME_STORAGE_SIZE missing — Kconfig broken"
 #endif
+
+#define RT_STORAGE_SIZE CONFIG_RUNTIME_STORAGE_SIZE
 
 extern uint8_t rt_storage[RT_STORAGE_SIZE];
 
