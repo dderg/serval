@@ -1061,6 +1061,125 @@ rotation_distance: 40
 {_tail(gcode_dir)}"""
 
 
+STEPCOMPRESS_EXTRUDER_SAMPLE_RATE_HZ = 10000
+STEPCOMPRESS_EXTRUDER_ROTATION_DISTANCE = 7.73
+STEPCOMPRESS_EXTRUDER_STEPS_PER_MM = (
+    16 * 200 / STEPCOMPRESS_EXTRUDER_ROTATION_DISTANCE
+)
+STEPCOMPRESS_EXTRUDER_STEP_LINE = 18
+
+
+def stepcompress_extruder_config(
+    h7_pty: str, sc_pty: str, gcode_dir: str
+) -> str:
+    """The Voron 0 CAN-toolhead topology: spatial motors on the main MCU and
+    the extruder alone on a SECOND, stepping_mode: stepcompress MCU.
+
+    The extruder is a follower axis (axis index 3), so the stepcompress MCU's
+    axis list is [3] while every spatial lane lives on another MCU — the
+    non-zero-based lane layout the single-MCU stepcompress worlds never
+    produce. min_extrude_temp is 0 so extrusion needs no heater ramp.
+    """
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[mcu sc]
+serial: {sc_pty}
+stepping_mode: stepcompress
+stepcompress_sample_rate: {STEPCOMPRESS_EXTRUDER_SAMPLE_RATE_HZ}
+
+[printer]
+max_velocity: 100
+max_accel: 1000
+max_z_velocity: 10
+max_z_accel: 30
+
+[kinematics]
+type: cartesian
+axis_x: x
+axis_y: y
+axis_z: z
+x_motors: x
+y_motors: y
+z_motors: z
+
+[axis x]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio200
+homing_speed: 10
+post_processors: is_xy
+
+[axis y]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio201
+homing_speed: 10
+post_processors: is_xy
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio202
+homing_speed: 5
+
+[axis e]
+follows: x, y, z
+motors: extruder
+
+[motor x]
+drive: stepper
+step_pin: gpiochip0/gpio18
+dir_pin: gpiochip0/gpio19
+enable_pin: !gpiochip0/gpio2
+microsteps: 16
+rotation_distance: 40
+
+[motor y]
+drive: stepper
+step_pin: gpiochip0/gpio7
+dir_pin: gpiochip0/gpio8
+enable_pin: !gpiochip0/gpio5
+microsteps: 16
+rotation_distance: 40
+
+[motor z]
+drive: stepper
+step_pin: gpiochip0/gpio15
+dir_pin: !gpiochip0/gpio16
+enable_pin: !gpiochip0/gpio9
+microsteps: 16
+rotation_distance: 40
+
+[motor extruder]
+drive: stepper
+step_pin: sc:gpiochip0/gpio{STEPCOMPRESS_EXTRUDER_STEP_LINE}
+dir_pin: !sc:gpiochip0/gpio19
+enable_pin: !sc:gpiochip0/gpio2
+microsteps: 16
+rotation_distance: {STEPCOMPRESS_EXTRUDER_ROTATION_DISTANCE}
+
+[extruder]
+axis: e
+nozzle_diameter: 0.400
+filament_diameter: 1.750
+heater_pin: gpiochip0/gpio30
+sensor_type: EPCOS 100K B57560G104F
+sensor_pin: analog0
+min_temp: 0
+max_temp: 250
+min_extrude_temp: 0
+control: pid
+pid_kp: 30.356
+pid_ki: 1.857
+pid_kd: 124.081
+{_tail(gcode_dir)}"""
+
+
 STEPCOMPRESS_COREXY_SAMPLE_RATE_HZ = 10000
 STEPCOMPRESS_COREXY_STEPS_PER_MM = 64 * 200 / 40.0
 STEPCOMPRESS_COREXY_STEP_LINES = {"a": 18, "b": 7, "z": 15}

@@ -12,9 +12,21 @@ pub struct PendingStep {
     pub advance: i8,
 }
 
+/// A per-motor overlay run: pieces carrying a motor_mask (nudges /
+/// FORCE_MOVE) are relativized to start at zero by the enqueue stage, so
+/// they step against their own frame and leave the lane's absolute frame
+/// where the last kinematic piece left it — the same split the on-MCU
+/// dispatcher keeps between `last_step_count` and `overlay_step_frame`.
+#[derive(Debug, Clone, Copy)]
+struct OverlayFrame {
+    p_prev: f32,
+    step_count: i64,
+}
+
 #[derive(Debug)]
 pub struct MotorSampler {
     armed: Option<ArmedPiece>,
+    overlay: Option<OverlayFrame>,
     p_prev: f32,
     step_count: i64,
     prev_sample: u64,
@@ -33,6 +45,7 @@ impl MotorSampler {
         let cycles_per_second = cfg.cycles_per_second as f32;
         Self {
             armed: None,
+            overlay: None,
             p_prev: 0.0,
             step_count: 0,
             prev_sample: 0,
@@ -87,6 +100,10 @@ impl MotorSampler {
                 .is_none_or(|a| a.piece_start_cycles != piece.start_time)
             {
                 let armed = arm_piece(&piece, self.cycles_per_second);
+                self.overlay = (piece.motor_mask != 0).then_some(OverlayFrame {
+                    p_prev: 0.0,
+                    step_count: 0,
+                });
                 if self.origin_clock.is_none() {
                     let begin = piece.start_time.max(self.resume_floor.unwrap_or(0));
                     self.prev_sample = begin;
@@ -126,10 +143,13 @@ impl MotorSampler {
     ) -> Result<(), ShimError> {
         let p_end = armed.eval_pos_vel(now).0;
         let target = libm::roundf(p_end / cfg.microstep_distance) as i64;
-        let prev = self.step_count;
+        let (prev, p_start) = match self.overlay {
+            Some(frame) => (frame.step_count, frame.p_prev),
+            None => (self.step_count, self.p_prev),
+        };
         let signed_steps = target - prev;
         if signed_steps == 0 {
-            self.p_prev = p_end;
+            self.commit_frame(p_end, prev);
             return Ok(());
         }
         let abs_steps = u32::try_from(signed_steps.unsigned_abs()).unwrap_or(u32::MAX);
@@ -142,7 +162,7 @@ impl MotorSampler {
         }
 
         let inputs = StepTimeInputs {
-            p_start: self.p_prev,
+            p_start,
             p_end,
             prev_step_count: step_count_as_i32(prev),
             target_step_count: step_count_as_i32(target),
@@ -155,7 +175,7 @@ impl MotorSampler {
         let times = match compute_step_times(&inputs) {
             StepTimingResult::SecantSlope(t) | StepTimingResult::Uniform(t) => t,
             StepTimingResult::NoSteps => {
-                self.p_prev = p_end;
+                self.commit_frame(p_end, prev);
                 return Ok(());
             }
         };
@@ -180,9 +200,21 @@ impl MotorSampler {
                 advance,
             });
         }
-        self.p_prev = p_end;
-        self.step_count = target;
+        self.commit_frame(p_end, target);
         Ok(())
+    }
+
+    fn commit_frame(&mut self, p_end: f32, step_count: i64) {
+        match &mut self.overlay {
+            Some(frame) => {
+                frame.p_prev = p_end;
+                frame.step_count = step_count;
+            }
+            None => {
+                self.p_prev = p_end;
+                self.step_count = step_count;
+            }
+        }
     }
 }
 

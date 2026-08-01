@@ -11,7 +11,7 @@ use trajectory::ShapedSegment;
 #[derive(Clone, Default)]
 struct Capture {
     segs: Arc<Mutex<Vec<(f64, f64, f64)>>>, // (t_start, t_end, x_at_end)
-    nudges: Arc<Mutex<usize>>,
+    nudges: Arc<Mutex<Vec<(u8, f64)>>>,
 }
 
 impl SegmentSink for Capture {
@@ -26,9 +26,11 @@ impl SegmentSink for Capture {
     fn dispatch_nudge(
         &mut self,
         _mcu_id: u32,
-        _piece: &motion_pipeline::NudgePiece,
+        piece: &motion_pipeline::NudgePiece,
     ) -> Result<(), DispatchError> {
-        *self.nudges.lock().unwrap() += 1;
+        let bp = &piece.piece;
+        let travel = bp.evaluate(bp.u_end) - bp.evaluate(bp.u_start);
+        self.nudges.lock_ok().push((piece.axis, travel));
         Ok(())
     }
 }
@@ -38,7 +40,15 @@ impl Capture {
         self.segs.lock().unwrap().clone()
     }
     fn nudge_count(&self) -> usize {
-        *self.nudges.lock().unwrap()
+        self.nudges.lock_ok().len()
+    }
+    fn nudge_travel(&self, axis: u8) -> f64 {
+        self.nudges
+            .lock_ok()
+            .iter()
+            .filter(|(a, _)| *a == axis)
+            .map(|(_, d)| *d)
+            .sum()
     }
 }
 
@@ -428,6 +438,41 @@ fn nudge_dispatches_pieces_and_advances_time() {
     assert!(
         h.last_move_time() > 0.0,
         "time did not advance past the nudge"
+    );
+    h.shutdown();
+}
+
+#[test]
+fn nudge_on_the_extruder_lane_travels_the_requested_distance() {
+    let cap = Capture::default();
+    let mut h = StreamWorkerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0, 0.0],
+        cap.clone(),
+        Arc::default(),
+        None,
+    );
+    let rx = h
+        .submit_nudge(NudgeParams {
+            mcu_id: 1,
+            axis: 3,
+            motor_mask: 0b0000_0001,
+            delta_mm: 5.0,
+            speed: 5.0,
+            accel: 1000.0,
+        })
+        .unwrap();
+    assert!(rx.recv().unwrap().is_ok(), "extruder nudge was rejected");
+    assert!(cap.nudge_count() > 0, "no extruder nudge pieces dispatched");
+    assert!(
+        (cap.nudge_travel(3) - 5.0).abs() < 1e-6,
+        "extruder lane travelled {} mm, expected 5",
+        cap.nudge_travel(3)
+    );
+    assert!(
+        cap.nudge_travel(0) == 0.0,
+        "spatial lanes must stay untouched by an extruder nudge"
     );
     h.shutdown();
 }

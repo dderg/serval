@@ -66,3 +66,18 @@ fn zero_delta_is_rejected_loudly() {
     let err = plan_nudge_profile(2, 0.0, 10.0, 1000.0, 0b0000_0010, 0.0).unwrap_err();
     assert!(err.contains("degenerate"), "got: {err}");
 }
+
+#[test]
+fn extruder_lane_nudge_is_planned_like_a_spatial_one() {
+    let segs = plan_nudge_profile(3, 5.0, 5.0, 1000.0, 0b0000_0001, 0.0).unwrap();
+    assert!(segs.iter().all(|s| s.axis == 3));
+    assert!(segs.iter().all(|s| s.motor_mask == 0b0000_0001));
+    assert!((total_displacement(&segs) - 5.0).abs() < 1e-6);
+    assert!(total_duration(&segs) > 0.0);
+}
+
+#[test]
+fn lane_beyond_mcu_capacity_is_rejected_loudly() {
+    let err = plan_nudge_profile(MAX_AXES as u8, 1.0, 10.0, 1000.0, 0b0000_0001, 0.0).unwrap_err();
+    assert!(err.contains("out of range"), "got: {err}");
+}

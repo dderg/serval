@@ -147,3 +147,53 @@ fn piece_retires_only_after_sampling_passes_its_end() {
     assert_eq!(ring.retired(), 2);
     assert_eq!(ring.len(), 0);
 }
+
+fn overlay_piece(start_time: u64, span_mm: f32, duration: f32) -> PieceEntry {
+    let mut entry = linear_piece(start_time, 0.0, span_mm, duration);
+    entry.motor_mask = 0b0000_0001;
+    entry
+}
+
+#[test]
+fn overlay_piece_steps_relative_to_its_own_zero() {
+    let cfg = cfg(16);
+    let mut ring = PieceRing::new(4);
+    ring.push(0, linear_piece(1_000, 0.0, 1.0, 0.01)).unwrap();
+    ring.push(0, overlay_piece(11_000, 0.5, 0.01)).unwrap();
+    let mut sampler = MotorSampler::new(&cfg);
+    let mut out = Vec::new();
+    sampler
+        .sample(0, &cfg, &mut ring, u64::MAX, &mut out)
+        .unwrap();
+
+    let lane_steps = (1.0 / MICROSTEP) as usize;
+    let overlay_steps = (0.5 / MICROSTEP) as usize;
+    assert_eq!(out.len(), lane_steps + overlay_steps);
+    assert!(
+        out.iter().all(|s| s.advance == 1),
+        "the overlay must not walk the lane back to its own zero first"
+    );
+    assert_eq!(
+        sampler.step_count(),
+        lane_steps as i64,
+        "an overlay run must leave the lane's absolute frame untouched"
+    );
+}
+
+#[test]
+fn consecutive_overlay_pieces_each_restart_at_zero() {
+    let cfg = cfg(16);
+    let mut ring = PieceRing::new(4);
+    ring.push(0, overlay_piece(1_000, 0.2, 0.01)).unwrap();
+    ring.push(0, overlay_piece(11_000, 0.6, 0.01)).unwrap();
+    ring.push(0, overlay_piece(21_000, 0.2, 0.01)).unwrap();
+    let mut sampler = MotorSampler::new(&cfg);
+    let mut out = Vec::new();
+    sampler
+        .sample(0, &cfg, &mut ring, u64::MAX, &mut out)
+        .unwrap();
+
+    assert_eq!(out.len(), ((0.2 + 0.6 + 0.2) / MICROSTEP) as usize);
+    assert!(out.iter().all(|s| s.advance == 1));
+    assert_eq!(sampler.step_count(), 0);
+}

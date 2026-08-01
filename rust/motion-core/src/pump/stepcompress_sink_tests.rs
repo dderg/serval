@@ -30,6 +30,10 @@ fn motor_cfg() -> MotorConfig {
 }
 
 fn harness(budget: u32) -> Harness {
+    harness_on_axis(budget, 0)
+}
+
+fn harness_on_axis(budget: u32, axis: usize) -> Harness {
     let now = Arc::new(AtomicU64::new(0));
     let now_for_clock = Arc::clone(&now);
     let clock_of: ClockSource =
@@ -88,7 +92,7 @@ fn harness(budget: u32) -> Harness {
     let endpoint = StepcompressEndpoint::new(
         MCU_ID,
         StepShim::new(vec![motor_cfg()], SHIM_RING_DEPTH),
-        vec![0],
+        vec![axis],
         vec![OID],
         egress,
         tx,
@@ -143,8 +147,12 @@ fn piece(start_time: u64, from_mm: f32, to_mm: f32, duration: f32) -> PieceEntry
 }
 
 fn axis_frame(pieces: Vec<PieceEntry>) -> AxisFrame {
+    frame_for_axis(0, pieces)
+}
+
+fn frame_for_axis(axis: u8, pieces: Vec<PieceEntry>) -> AxisFrame {
     AxisFrame {
-        axis: 0,
+        axis,
         pieces,
         start_slot: 0,
         new_head: 0,
@@ -562,6 +570,59 @@ fn retirement_waits_for_execution_not_transmission() {
     assert!(
         h.endpoint.published_counts()[0] > 0,
         "retirement must advance once the mcu has acked the cohort's barrier"
+    );
+}
+
+#[test]
+fn a_lone_follower_lane_reports_retirement_against_its_own_axis() {
+    const EXTRUDER_AXIS: u8 = 3;
+    let mut h = harness_on_axis(1024, EXTRUDER_AXIS as usize);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[frame_for_axis(EXTRUDER_AXIS, ramp(2_000, 8))])
+        .unwrap();
+    h.now.store(10_000_000, Ordering::Relaxed);
+    h.endpoint.tick().unwrap();
+    h.ack_sent_barriers();
+
+    let heartbeat = h.latest_retired().expect("a heartbeat is always posted");
+    assert_eq!(
+        heartbeat.len(),
+        usize::from(EXTRUDER_AXIS) + 1,
+        "the heartbeat must be indexed by axis, so it must reach axis {EXTRUDER_AXIS}"
+    );
+    assert!(
+        heartbeat[usize::from(EXTRUDER_AXIS)] > 0,
+        "the pump keys its rings by axis; motor 0's retirements must land on \
+         axis {EXTRUDER_AXIS} or that lane's ring never drains: {heartbeat:?}"
+    );
+    assert_eq!(
+        &heartbeat[..usize::from(EXTRUDER_AXIS)],
+        &[0, 0, 0],
+        "lanes this mcu does not own must not be credited"
+    );
+}
+
+#[test]
+fn a_virgin_follower_lane_emits_frames_and_a_barrier_on_first_motion() {
+    const EXTRUDER_AXIS: u8 = 3;
+    let mut h = harness_on_axis(1024, EXTRUDER_AXIS as usize);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .mark_reanchor(EXTRUDER_AXIS, 2_000, Some(CYCLES_PER_SECOND));
+    h.endpoint
+        .send_frames(MCU_ID, &[frame_for_axis(EXTRUDER_AXIS, ramp(2_000, 8))])
+        .expect("first motion on a never-homed lane must be accepted");
+
+    assert!(
+        h.sent_moves() > 0,
+        "the fresh-epoch cut must not swallow the lane's first steps"
+    );
+    h.now.store(10_000_000, Ordering::Relaxed);
+    h.endpoint.tick().unwrap();
+    assert!(
+        !h.barriers.lock_ok().is_empty(),
+        "without a barrier the mcu can never ack this lane's retirement"
     );
 }
 

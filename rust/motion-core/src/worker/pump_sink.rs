@@ -236,7 +236,12 @@ impl SegmentSink for PumpSink {
     /// The single-axis, planner-bypassing sibling of `dispatch`.
     fn dispatch_nudge(&mut self, mcu_id: u32, np: &NudgePiece) -> Result<(), DispatchError> {
         let axis = np.axis;
-        if !self.mcu_configs.iter().any(|c| c.mcu_id == mcu_id) {
+        let lane_present = self
+            .mcu_configs
+            .iter()
+            .filter(|c| c.mcu_id == mcu_id)
+            .any(|c| c.axes.contains(&(axis as usize)));
+        if !lane_present {
             return Err(DispatchError::NudgeTargetMissing { mcu_id, axis });
         }
 

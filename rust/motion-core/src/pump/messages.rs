@@ -77,6 +77,9 @@ impl HistoryRecorder {
 
 pub struct HeartbeatMsg {
     pub mcu_id: u32,
+    /// Retired piece counts indexed by AXIS, not by the reporting endpoint's
+    /// motor/slot order — the pump keys its queues by `AxisKey`. Endpoints
+    /// whose native counters are motor- or slot-indexed re-index first.
     pub retired_counts: Vec<u32>,
 }
 

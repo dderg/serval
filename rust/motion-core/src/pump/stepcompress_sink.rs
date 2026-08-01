@@ -545,12 +545,25 @@ impl StepcompressEndpoint {
         self.post_heartbeat()
     }
 
+    /// The shim counts retirements per MOTOR, in this endpoint's `axes`
+    /// order; the pump keys its queues by axis. A stepcompress mcu carrying
+    /// only a follower lane (an extruder toolhead) has `axes == [3]`, so
+    /// motor 0's count must land on axis 3 or that lane's ring never drains.
+    fn retired_by_axis(&self) -> Vec<u32> {
+        let max_axis = self.axes.iter().copied().max().unwrap_or(0);
+        let mut out = vec![0u32; max_axis + 1];
+        for (motor, &axis) in self.axes.iter().enumerate() {
+            out[axis] = self.published[motor];
+        }
+        out
+    }
+
     fn post_heartbeat(&self) -> Result<(), SendError> {
         let mcu_id = self.mcu_id;
         self.pump_control
             .send(PumpMsg::Heartbeat(HeartbeatMsg {
                 mcu_id,
-                retired_counts: self.published.clone(),
+                retired_counts: self.retired_by_axis(),
             }))
             .map_err(|_| {
                 SendError::Fatal(format!(
