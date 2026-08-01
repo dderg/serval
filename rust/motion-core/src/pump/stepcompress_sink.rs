@@ -347,9 +347,12 @@ impl StepcompressEndpoint {
     /// egressed carry clocks derived from it, so it cannot be retimed after
     /// the fact — upstream must adopt it, not the other way round.
     ///
-    /// Half the shim's seam tolerance is budgeted to duration rewrites; the
-    /// other half stays for the producer's own projection rounding, so the
-    /// check the shim runs keeps its meaning.
+    /// The merge spends at most half the shim's flat seam allowance, measured
+    /// against the end of the piece it absorbs. The shim measures the merged
+    /// piece against the start of the piece that follows, so it sees that
+    /// spend plus the absorbed piece's own f32 reprojection — which its
+    /// tolerance covers separately, scaled to the merged piece's span. Half
+    /// the flat allowance therefore leaves the shim's check its meaning.
     pub fn seam_basis(&self, axis: u8) -> Option<SeamBasis> {
         let motor = self.axes.iter().position(|&a| a == usize::from(axis))?;
         let freq = match self.pending_cut.get(&axis) {

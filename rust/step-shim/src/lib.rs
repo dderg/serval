@@ -18,20 +18,60 @@ pub struct MotorConfig {
     pub cycles_per_second: f64,
 }
 
-/// How far a piece may start from where the previous piece was projected to
-/// end before the stream is considered broken rather than merely rounded.
+/// What the producer's own anchoring is allowed to move a piece start by:
+/// the integer rounding on each side of a seam plus the slop the segment
+/// anchor may introduce when it re-times a stream origin. It does **not**
+/// cover the f32 round trip through `duration` — that scales with the piece
+/// and is added per seam by [`projection_slack_cycles`].
 pub const MAX_SEAM_SKEW_CYCLES: u64 = 16;
 
-/// Where the previous piece ended and how long it was, so the seam tolerance
-/// scales with the piece that produced the seam rather than the one arriving.
+/// How far [`PieceEntry::end_time`] — the arithmetic every consumer of a
+/// piece runs, host sampler and mcu walker alike — can land from the clock
+/// the producer projected the *next* piece's start onto.
+///
+/// The consumer computes `start + (fl32(duration) * fl32(freq)) as u64`
+/// while the producer rounds an f64 projection of the same instant, so over
+/// a piece spanning `span_cycles` the two are separated by
+///
+/// - `fl32(duration)`         — up to one f32 half-ulp of the span,
+/// - `fl32(freq)`             — another,
+/// - `fl32(duration * freq)`  — another,
+/// - the truncation to `u64`  — below one cycle,
+/// - the producer's `round()` — half a cycle.
+///
+/// A flat tolerance cannot express this: a merged hold spanning 2^27 cycles
+/// (1.9 s at 72 MHz) already has an 8-cycle half-ulp, and merged holds run
+/// to `MAX_MERGED_HOLD_SECS`. Anything wider than this bound is a broken
+/// stream — a dropped piece, a stale epoch, a clock slope the producer and
+/// the shim do not share — not rounding.
+#[must_use]
+pub fn projection_slack_cycles(span_cycles: u64) -> u64 {
+    const F32_HALF_ULPS: u64 = 3;
+    const INTEGER_ROUNDINGS: u64 = 2;
+    let half_ulp_scale = 1_u64 << f32::MANTISSA_DIGITS;
+    (F32_HALF_ULPS * span_cycles).div_ceil(half_ulp_scale) + INTEGER_ROUNDINGS
+}
+
+/// Where the previous piece was projected to end and how wide that
+/// projection was, so the seam tolerance scales with the piece that produced
+/// the seam rather than the one arriving.
 #[derive(Debug, Clone, Copy)]
 struct Seam {
     expected_start: u64,
+    projected_span: u64,
 }
 
 impl Seam {
+    fn after(piece: &PieceEntry, cycles_per_second: f32) -> Self {
+        let expected_start = piece.end_time(cycles_per_second);
+        Self {
+            expected_start,
+            projected_span: expected_start - piece.start_time,
+        }
+    }
+
     fn skew_tolerance(self) -> u64 {
-        MAX_SEAM_SKEW_CYCLES
+        MAX_SEAM_SKEW_CYCLES + projection_slack_cycles(self.projected_span)
     }
 }
 
@@ -68,6 +108,7 @@ pub enum ShimError {
         expected: u64,
         got: u64,
         tolerance: u64,
+        projected_span: u64,
     },
     CompressFailure {
         motor: usize,
@@ -88,10 +129,12 @@ impl std::fmt::Display for ShimError {
                 expected,
                 got,
                 tolerance,
+                projected_span,
             } => write!(
                 f,
                 "motor {motor}: piece starts at {got}, expected {expected} \
-                 (+/-{tolerance} clock-domain skew)"
+                 (+/-{tolerance} clock-domain skew, reprojected from a \
+                 {projected_span}-cycle piece)"
             ),
             Self::CompressFailure { motor, detail } => {
                 write!(f, "motor {motor}: stepcompress failed: {detail}")
@@ -221,22 +264,8 @@ impl StepShim {
         let state = self.motor_mut(motor);
         let cycles_per_second = state.cfg.cycles_per_second as f32;
         for piece in pieces {
-            if let Some(seam) = state.next_seam {
-                let tolerance = seam.skew_tolerance();
-                if piece.start_time.abs_diff(seam.expected_start) > tolerance {
-                    return Err(ShimError::PieceGap {
-                        motor,
-                        expected: seam.expected_start,
-                        got: piece.start_time,
-                        tolerance,
-                    });
-                }
-            }
-            let end = piece.end_time(cycles_per_second);
             state.ring.push(motor, *piece)?;
-            state.next_seam = Some(Seam {
-                expected_start: end,
-            });
+            state.next_seam = Some(Seam::after(piece, cycles_per_second));
         }
         Ok(())
     }
@@ -279,13 +308,11 @@ impl StepShim {
                         expected: s.expected_start,
                         got: piece.start_time,
                         tolerance,
+                        projected_span: s.projected_span,
                     });
                 }
             }
-            let end = piece.end_time(cycles_per_second);
-            seam = Some(Seam {
-                expected_start: end,
-            });
+            seam = Some(Seam::after(piece, cycles_per_second));
         }
         Ok(())
     }

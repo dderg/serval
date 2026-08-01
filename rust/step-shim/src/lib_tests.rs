@@ -172,6 +172,71 @@ fn a_seam_within_the_clock_domain_skew_is_accepted() {
     }
 }
 
+/// The bound the seam tolerance is built on: whatever the piece length and
+/// whatever the clock, `end_time`'s f32 round trip never lands further from
+/// the instant the producer projected than `projection_slack_cycles` allows.
+#[test]
+fn the_projection_slack_bounds_the_f32_round_trip() {
+    let mut worst_ratio = 0.0_f64;
+    for freq in [1_000_000.0_f64, 72_000_000.0, 71_999_983.66, 550_000_000.0] {
+        #[allow(clippy::cast_possible_truncation)]
+        let freq32 = freq as f32;
+        let mut duration = 1e-4_f64;
+        while duration < 32.0 {
+            for step in 0..97_u32 {
+                let d = duration * (1.0 + f64::from(step) / 97.0);
+                #[allow(clippy::cast_possible_truncation)]
+                let piece = linear_piece(869_400_000_000, 0.0, 1.0, d as f32);
+                let end = piece.end_time(freq32);
+                #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                let projected = piece.start_time + (d * freq).round() as u64;
+                let span = end - piece.start_time;
+                let slack = super::projection_slack_cycles(span);
+                let seen = end.abs_diff(projected);
+                assert!(
+                    seen <= slack,
+                    "a {d} s piece at {freq} Hz reprojects {seen} cycles off, past the \
+                     {slack}-cycle bound the seam check trusts"
+                );
+                worst_ratio = worst_ratio.max(seen as f64 / slack as f64);
+            }
+            duration *= 1.7;
+        }
+    }
+    assert!(
+        worst_ratio > 0.25,
+        "the bound must stay tight enough to catch real breaks; worst observed use \
+         was only {worst_ratio} of it"
+    );
+}
+
+/// The tolerance is the flat producer allowance plus the piece's own f32
+/// slack, and it is still a hard edge: one cycle past it fails loud.
+#[test]
+fn the_seam_tolerance_scales_with_the_piece_that_projected_it() {
+    let long = linear_piece(1_000, 0.0, 1.0, 4.0);
+    #[allow(clippy::cast_possible_truncation)]
+    let end = long.end_time(CYCLES_PER_SECOND as f32);
+    let tolerance =
+        super::MAX_SEAM_SKEW_CYCLES + super::projection_slack_cycles(end - long.start_time);
+    assert!(
+        tolerance > super::MAX_SEAM_SKEW_CYCLES,
+        "a 4 s piece must buy more slack than a flat tolerance gives"
+    );
+
+    for (offset, must_pass) in [(tolerance, true), (tolerance + 1, false)] {
+        let mut shim = StepShim::new(vec![cfg()], 8);
+        shim.push_pieces(0, &[long]).unwrap();
+        let next = linear_piece(end + offset, 1.0, 2.0, 0.01);
+        let pushed = shim.push_pieces(0, &[next]);
+        assert_eq!(
+            pushed.is_ok(),
+            must_pass,
+            "seam {offset} cycles out of a {tolerance}-cycle tolerance: {pushed:?}"
+        );
+    }
+}
+
 #[test]
 fn repeated_overlapping_seams_do_not_accumulate_lost_steps() {
     let mut shim = StepShim::new(vec![cfg()], 64);

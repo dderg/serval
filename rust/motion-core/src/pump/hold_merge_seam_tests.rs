@@ -105,7 +105,10 @@ fn merging_a_long_hold_on_the_live_clock_breaks_the_shim_seam() {
             tolerance,
             ..
         }) => {
-            assert_eq!(tolerance, step_shim::MAX_SEAM_SKEW_CYCLES);
+            assert!(
+                tolerance < 1_000,
+                "the derived tolerance covers f32 reprojection, not a slope error; got {tolerance}"
+            );
             assert!(
                 expected.abs_diff(got) > 1_000,
                 "a 2 ppm slope error over a 20 s hold is thousands of cycles, not rounding: \
@@ -186,6 +189,55 @@ fn a_hold_that_cannot_round_trip_stays_a_separate_piece() {
         true,
     );
     assert_eq!(wire_queue.len(), 1);
+}
+
+/// Two multi-second holds — one lane parked across a first layer, split where
+/// the segment boundary fell. Merging them costs almost nothing by the merge's
+/// own measure, because it weighs the rewritten `duration` against the end of
+/// the piece it absorbs. The shim weighs it against the start of the piece
+/// that *follows*, one whole absorbed duration further out, where the f32
+/// `duration` grid is tens of cycles coarse. That is the bench's residual
+/// `PieceGap`: both halves inside their own budget, the sum outside a flat
+/// tolerance.
+#[test]
+fn a_merge_of_two_multi_second_holds_stays_inside_the_shim_seam() {
+    const FIRST_SECS: f64 = 2.454;
+    const SECOND_SECS: f64 = 4.352;
+
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let project = |secs: f64| ANCHOR + (secs * EPOCH_FREQ).round() as u64;
+    #[allow(clippy::cast_possible_truncation)]
+    let parked_lane = |start: u64, secs: f64| {
+        let mut p = PieceEntry::zeroed();
+        p.start_time = start;
+        p.duration = secs as f32;
+        p.coeffs[0] = 3.25;
+        (p, 0.0_f64)
+    };
+
+    let mut queue = VecDeque::from([parked_lane(project(0.0), FIRST_SECS)]);
+    append_pieces_merging_holds(
+        &mut queue,
+        vec![parked_lane(project(FIRST_SECS), SECOND_SECS)],
+        stepcompress_basis(EPOCH_FREQ),
+        true,
+    );
+    assert_eq!(queue.len(), 1, "two abutting holds must collapse into one");
+
+    let mut resume = move_after_the_hold().0;
+    resume.start_time = project(FIRST_SECS + SECOND_SECS);
+    queue.push_back((resume, 0.0));
+
+    #[allow(clippy::cast_possible_truncation)]
+    let merged_end = queue[0].0.end_time(EPOCH_FREQ as f32);
+    assert!(
+        merged_end.abs_diff(resume.start_time) > step_shim::MAX_SEAM_SKEW_CYCLES,
+        "this case only bites when the reprojection lands outside the flat tolerance; \
+         merged end {merged_end} vs resume {}",
+        resume.start_time
+    );
+
+    push_through_shim(&queue).expect("an in-budget merge must survive the shim's seam check");
 }
 
 #[derive(Clone, Copy)]
