@@ -178,27 +178,31 @@ impl MotorState {
             let run_len = self.pending.iter().take_while(|s| s.dir == dir).count();
             let clocks: Vec<u64> = self.pending[..run_len].iter().map(|s| s.clock).collect();
 
-            let reset_clock = if self.needs_reset {
-                Some(
-                    self.sampler
-                        .origin_clock()
-                        .expect("origin clock is set before any step is sampled"),
-                )
+            let committed = if self.needs_reset {
+                self.sampler
+                    .origin_clock()
+                    .expect("origin clock is set before any step is sampled")
             } else {
-                None
+                self.last_step_clock
             };
-            let base_clock = reset_clock.unwrap_or(self.last_step_clock);
-            if clocks[0] <= base_clock {
+            if clocks[0] <= committed {
                 return Err(ShimError::CompressFailure {
                     motor,
                     detail: format!(
                         "step clock regression: first step of this run is at {} but the \
-                         stream is already committed to {base_clock} (reset={:?}, \
+                         stream is already committed to {committed} (needs_reset={}, \
                          last_step_clock={}, run_len={run_len}, dir={dir})",
-                        clocks[0], reset_clock, self.last_step_clock
+                        clocks[0], self.needs_reset, self.last_step_clock
                     ),
                 });
             }
+
+            let out_of_reach = clocks[0] - committed >= compress::CLOCK_DIFF_MAX;
+            let base_clock = if out_of_reach {
+                clocks[0] - 1
+            } else {
+                committed
+            };
 
             let (moves, covered) =
                 compress(&clocks, base_clock).map_err(|e| ShimError::CompressFailure {
@@ -209,13 +213,15 @@ impl MotorState {
                 break;
             }
 
-            if let Some(clock) = reset_clock {
+            if self.needs_reset || out_of_reach {
                 frames.push(StepFrame::ResetStepClock {
                     oid,
-                    clock: clock as u32,
+                    clock: base_clock as u32,
                 });
-                self.needs_reset = false;
-                self.last_dir = None;
+                if self.needs_reset {
+                    self.needs_reset = false;
+                    self.last_dir = None;
+                }
             }
             if self.last_dir != Some(dir) {
                 frames.push(StepFrame::SetNextStepDir { oid, dir });

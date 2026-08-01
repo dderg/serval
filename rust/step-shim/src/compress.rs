@@ -3,7 +3,10 @@ use core::fmt;
 pub const DEFAULT_MAX_ERROR_TICKS: u32 = 1600;
 
 const QUADRATIC_DEV: i64 = 11;
-const CLOCK_DIFF_MAX: u64 = 3 << 28;
+/// The widest offset a queue_step stream can carry from the clock the mcu
+/// stepper is anchored on. A step further out than this is unreachable from
+/// that anchor: the caller must re-anchor the stepper before encoding it.
+pub const CLOCK_DIFF_MAX: u64 = 3 << 28;
 const MAX_MOVE_STEPS: usize = 65535;
 const MAX_INTERVAL: i64 = 0x8000_0000;
 

@@ -83,3 +83,45 @@ def test_piece_mode_regression_beside_stepcompress(sim_world):
     world.gcode_ok("M400")
     assert world.shutdown_line() is None, world.log_tail()
     assert world.toolhead_position()[0] == pytest.approx(135.0, abs=0.01)
+
+
+SIM_CLOCK_HZ = 50_000_000
+ENCODER_WINDOW_SECONDS = (3 << 28) / SIM_CLOCK_HZ
+
+
+def test_stepcompress_z_survives_an_idle_longer_than_the_encoder_window(
+    sim_world,
+):
+    """Z holds while X/Y print, then moves — all in one motion epoch.
+
+    The host encodes every step as an offset from the clock the mcu stepper
+    is anchored on, and that offset tops out at 3<<28 ticks (~16.1 s at the
+    sim's 50 MHz). A lane held past that has to be re-anchored with
+    reset_step_clock mid-stream; without it the pump dies on the first step
+    of the resuming move. The epoch must not be broken by an M400 before
+    the Z move — a fresh epoch re-anchors every lane anyway.
+    """
+    world = _boot(sim_world)
+    world.gcode_ok("SET_KINEMATIC_POSITION X=125 Y=125 Z=125")
+    world.gcode_ok("G1 Z124 F300")
+    world.gcode_ok("M400", timeout=60)
+    parked_at = _steps(world, "z")
+    held_from = world.status()["toolhead"]["estimated_print_time"]
+
+    for _ in range(8):
+        world.gcode_ok("G1 X135 Y135 F600")
+        world.gcode_ok("G1 X125 Y125 F600")
+    world.gcode_ok("G1 Z120 F300")
+    world.gcode_ok("M400", timeout=180)
+
+    held_for = world.status()["toolhead"]["estimated_print_time"] - held_from
+    assert held_for > ENCODER_WINDOW_SECONDS, (
+        f"the xy print only held z for {held_for:.1f}s of mcu time, inside"
+        f" the {ENCODER_WINDOW_SECONDS:.1f}s encoder window — the test would"
+        " pass without exercising the re-anchor"
+    )
+    assert world.shutdown_line() is None, world.log_tail()
+    assert _steps(world, "z") - parked_at == pytest.approx(
+        4.0 * STEPS_PER_MM, abs=1.0
+    )
+    assert world.toolhead_position()[2] == pytest.approx(120.0, abs=0.01)

@@ -1,3 +1,4 @@
+use super::compress::StepMove;
 use super::{MotorConfig, ShimError, StepFrame, StepShim};
 use runtime::piece_ring::PieceEntry;
 
@@ -409,5 +410,143 @@ fn re_arming_after_a_cut_emits_the_catch_up_delta_exactly_once() {
     assert_eq!(
         total, expected,
         "a cut must neither lose nor duplicate motion: {emitted_before} + {after}"
+    );
+}
+
+const IDLE_CYCLES_PER_SECOND: f64 = 72_000_000.0;
+
+fn idle_cfg() -> MotorConfig {
+    MotorConfig {
+        oid: OID,
+        microstep_distance: 0.01,
+        invert_dir: false,
+        max_steps_per_sample: 16,
+        sample_rate_hz: 1_000.0,
+        cycles_per_second: IDLE_CYCLES_PER_SECOND,
+    }
+}
+
+fn reset_clocks(frames: &[StepFrame]) -> Vec<u64> {
+    frames
+        .iter()
+        .filter_map(|f| match *f {
+            StepFrame::ResetStepClock { clock, .. } => Some(u64::from(clock)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The step clocks the mcu will execute, walked exactly the way the mcu
+/// stepper walks them: an anchor from `reset_step_clock`, then every
+/// `queue_step` interval accumulated onto it.
+fn replayed_step_clocks(frames: &[StepFrame]) -> Vec<u64> {
+    let mut cursor = 0u64;
+    let mut clocks = Vec::new();
+    for frame in frames {
+        match *frame {
+            StepFrame::ResetStepClock { clock, .. } => cursor = u64::from(clock),
+            StepFrame::SetNextStepDir { .. } => {}
+            StepFrame::QueueStep {
+                interval,
+                count,
+                add,
+                ..
+            } => {
+                let mv = StepMove {
+                    interval,
+                    count,
+                    add,
+                };
+                clocks.extend((1..=count).map(|nth| mv.step_clock(cursor, nth)));
+                cursor = mv.last_clock(cursor);
+            }
+        }
+    }
+    clocks
+}
+
+/// A print-shaped lane: it steps, holds while the other axes print, then
+/// steps again in the same direction.
+fn drain_across_hold(hold_secs: f32) -> (StepShim, Result<Vec<StepFrame>, ShimError>) {
+    #[allow(clippy::cast_possible_truncation)]
+    let cps = IDLE_CYCLES_PER_SECOND as f32;
+    let mut shim = StepShim::new(vec![idle_cfg()], 8);
+    let lift = linear_piece(72_000, 0.0, 1.0, 0.05);
+    let hold = linear_piece(lift.end_time(cps), 1.0, 1.0, hold_secs);
+    let resume = linear_piece(hold.end_time(cps), 1.0, 2.0, 0.05);
+    let end = resume.end_time(cps);
+    shim.push_pieces(0, &[lift, hold, resume]).unwrap();
+
+    let frames = shim.drain(hold.start_time).and_then(|mut frames| {
+        frames.extend(shim.drain(end)?);
+        Ok(frames)
+    });
+    (shim, frames)
+}
+
+#[test]
+fn a_hold_inside_the_encoder_window_keeps_the_original_anchor() {
+    let (shim, frames) = drain_across_hold(11.0);
+    let frames = frames.expect("an 11 s hold is 792 Mticks, inside the 805 Mtick window");
+
+    assert_eq!(reset_clocks(&frames).len(), 1);
+    assert_eq!(queue_step_count(&frames), 200);
+    assert_eq!(shim.commanded_steps(0), 200);
+}
+
+/// A lane parked past the encoder's reach cannot be encoded from its old
+/// anchor. Re-anchoring it is time-only: the direction the mcu holds and the
+/// step counter both survive, and every step still lands where it was
+/// sampled.
+#[test]
+fn a_hold_past_the_encoder_window_re_anchors_the_step_clock() {
+    let (shim, frames) = drain_across_hold(12.0);
+    let frames = frames.expect("a hold past the window must re-anchor, not fail");
+
+    let resets = reset_clocks(&frames);
+    assert_eq!(resets.len(), 2, "the parked lane must be re-anchored once");
+    assert_eq!(queue_step_count(&frames), 200);
+    assert_eq!(shim.commanded_steps(0), 200);
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|f| matches!(f, StepFrame::SetNextStepDir { .. }))
+            .count(),
+        1,
+        "re-anchoring is time-only: the mcu's direction latch is untouched"
+    );
+
+    let clocks = replayed_step_clocks(&frames);
+    assert_eq!(clocks.len(), 200);
+    assert!(
+        clocks.windows(2).all(|w| w[0] < w[1]),
+        "the re-anchored stream must stay monotonic: {:?}",
+        &clocks[98..102]
+    );
+    let resume_start = resets[1];
+    assert!(
+        clocks[100] > resume_start && clocks[100] - resume_start < 72_000,
+        "the first step after the re-anchor must land where it was sampled, \
+         not at the anchor: anchor {resume_start}, step {}",
+        clocks[100]
+    );
+    assert!(
+        clocks[199] - clocks[0] > 12 * 72_000_000,
+        "the 12 s hold must survive the re-anchor as real elapsed time"
+    );
+}
+
+/// A trip reconciles the mcu's executed step count against the host's own
+/// count. Re-anchoring the clock must leave that count alone.
+#[test]
+fn a_trip_after_a_re_anchor_still_reports_every_executed_step() {
+    let (mut shim, frames) = drain_across_hold(12.0);
+    frames.expect("a hold past the window must re-anchor, not fail");
+
+    let (executed, tail) = shim.halt_at(0, u64::MAX).unwrap();
+    assert_eq!(executed, 200);
+    assert!(
+        tail.is_empty(),
+        "every sampled step was already on the wire: {tail:?}"
     );
 }

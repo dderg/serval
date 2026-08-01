@@ -762,3 +762,65 @@ fn a_cut_moves_the_seam_basis_onto_the_adopted_epoch_slope() {
         "the shim adopted the epoch slope at the cut; the basis reports it without the mark"
     );
 }
+
+/// A lane that holds through a long print (Z parked while XY runs) is
+/// unreachable from the clock the mcu stepper is anchored on when it finally
+/// moves. The endpoint must re-anchor it mid-stream and keep pacing,
+/// retiring and barrier-acking exactly as before the re-anchor.
+#[test]
+fn a_lane_parked_past_the_encoder_window_re_anchors_mid_stream() {
+    #[allow(clippy::cast_possible_truncation)]
+    let cps = CYCLES_PER_SECOND as f32;
+    let hold_secs = (step_shim::compress::CLOCK_DIFF_MAX as f32 / cps).ceil() + 60.0;
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+
+    let lift = piece(2_000, 0.0, 1.0, 0.010);
+    let hold = piece(lift.end_time(cps), 1.0, 1.0, hold_secs);
+    let resume = piece(hold.end_time(cps), 1.0, 2.0, 0.010);
+    let end = resume.end_time(cps);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(vec![lift, hold, resume])])
+        .unwrap();
+
+    for now in [lift.end_time(cps), hold.end_time(cps), end + 1_000_000] {
+        h.now.store(now, Ordering::Relaxed);
+        h.endpoint.tick().unwrap();
+        h.ack_sent_barriers();
+    }
+
+    let sent = h.sent.lock_ok().clone();
+    let resets: Vec<u64> = sent
+        .iter()
+        .filter_map(|f| match *f {
+            StepFrame::ResetStepClock { clock, .. } => Some(u64::from(clock)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        resets.len(),
+        2,
+        "the parked lane must be re-anchored exactly once: {resets:?}"
+    );
+    let sample_period = (CYCLES_PER_SECOND / 10_000.0) as u64;
+    assert!(
+        resets[1] >= resume.start_time && resets[1] < resume.start_time + 2 * sample_period,
+        "the re-anchor must land at the first step of the resuming move, not at \
+         some stale cursor: anchor {}, move starts {}",
+        resets[1],
+        resume.start_time
+    );
+    let steps: u32 = sent
+        .iter()
+        .map(|f| match *f {
+            StepFrame::QueueStep { count, .. } => u32::from(count),
+            _ => 0,
+        })
+        .sum();
+    assert_eq!(steps, 200, "no step may be lost across the re-anchor");
+    assert_eq!(
+        h.endpoint.published_counts(),
+        vec![3],
+        "retirement must still complete across a mid-stream re-anchor"
+    );
+}
