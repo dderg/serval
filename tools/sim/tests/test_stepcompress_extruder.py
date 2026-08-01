@@ -89,3 +89,44 @@ def test_stepcompress_extruder_moves_with_xy(sim_world):
     assert world.toolhead_position()[0] == pytest.approx(135.0, abs=0.01)
     moved = abs(_extruder_steps(world) - before)
     assert moved == pytest.approx(2.0 * STEPS_PER_MM, abs=2.0), moved
+
+
+def _extrude_then_reanchor_and_home(world):
+    world.gcode_ok("SET_KINEMATIC_POSITION X=125 Y=125 Z=125")
+    world.gcode_ok("M83")
+    world.gcode_ok("G1 E15 F300", timeout=180)
+    world.gcode_ok("G1 E-2 F600", timeout=120)
+    world.gcode_ok("M400", timeout=120)
+    before = _extruder_steps(world)
+    world.gcode_ok("SET_KINEMATIC_POSITION X=60 Y=60 Z=20")
+    world.gcode_ok("G28 X", timeout=180)
+    world.gcode_ok("M400", timeout=60)
+    _assert_alive(world)
+    assert "StepRateExceeded" not in world.events_text(), world.log_tail()
+    held = abs(_extruder_steps(world) - before)
+    assert held <= 2, (
+        f"the spatial re-anchor moved the extruder lane by {held} steps"
+        f" ({held / STEPS_PER_MM:.4f} mm)\n" + world.log_tail()
+    )
+
+
+def test_stepcompress_extruder_home_after_extrude(sim_world):
+    """A spatial re-anchor (SET_KINEMATIC_POSITION, then G28) after a net
+    extrude: the follower lane's shim seed and the stream odometer must land
+    on the same origin, or the first piece after the re-anchor demands the
+    whole extruded distance in one sample."""
+    world = _boot(sim_world)
+    _extrude_then_reanchor_and_home(world)
+
+
+def test_stepcompress_extruder_home_after_force_move_and_extrude(sim_world):
+    """The bench order: a FORCE_MOVE overlay run on the extruder lane
+    precedes the extrude, so the seed path is also exercised against a
+    sampler that has carried an overlay frame."""
+    world = _boot(sim_world)
+    world.gcode_ok("SET_KINEMATIC_POSITION X=125 Y=125 Z=125")
+    world.gcode_ok("SET_STEPPER_ENABLE STEPPER=extruder ENABLE=1")
+    world.gcode_ok("FORCE_MOVE STEPPER=extruder DISTANCE=5 VELOCITY=5")
+    world.gcode_ok("FORCE_MOVE STEPPER=extruder DISTANCE=-5 VELOCITY=5")
+    world.gcode_ok("M400", timeout=120)
+    _extrude_then_reanchor_and_home(world)

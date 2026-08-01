@@ -573,35 +573,8 @@ impl PyMotionEngine {
             .iter()
             .filter(|c| c.stepping_mode == crate::mcu_config::SteppingMode::Stepcompress)
         {
-            let motor = crate::mcu_config::motor_frame(cfg, pos.0);
-            let mut counts = Vec::with_capacity(cfg.axes.len());
-            for &axis in &cfg.axes {
-                let key = crate::types::AxisKey {
-                    mcu_id: cfg.mcu_id,
-                    axis: axis as u8,
-                };
-                let lane = crate::homing::stepcompress_lane(cfg, key)
-                    .map_err(PyRuntimeError::new_err)?
-                    .ok_or_else(|| {
-                        PyRuntimeError::new_err(format!(
-                            "position seed: stepcompress mcu {} axis {axis} has no shim lane",
-                            cfg.mcu_id
-                        ))
-                    })?;
-                // A follower lane (extruder) has no spatial coordinate: hold
-                // whatever motion history already answers for it, the value
-                // `rebase_motion_history_after_position_set` writes back, so
-                // shim, mcu counter and history keep one shared origin.
-                let mm = match motor.get(axis) {
-                    Some(&spatial) => spatial,
-                    None => self
-                        .motion_history
-                        .lock_ok()
-                        .final_position(key)
-                        .unwrap_or(0.0),
-                };
-                counts.push(lane.mm_to_steps(mm));
-            }
+            let counts = crate::mcu_config::stepcompress_seed_counts(cfg, pos)
+                .map_err(PyRuntimeError::new_err)?;
             let endpoint = endpoints.get(&cfg.mcu_id).ok_or_else(|| {
                 PyRuntimeError::new_err(format!(
                     "position seed: no shim endpoint registered for stepcompress mcu {}",
@@ -659,7 +632,7 @@ impl PyMotionEngine {
             }
 
             planner
-                .stream_open(vec![gcode.x(), gcode.y(), gcode.z(), 0.0])
+                .stream_open(crate::mcu_config::reanchor_stream_pos(gcode))
                 .map_err(planner_err)?;
 
             self.send_serial_position_seeds(machine)?;
@@ -674,29 +647,9 @@ impl PyMotionEngine {
     ) {
         let configs: Vec<crate::mcu_config::McuAxisConfig> =
             self.mcu_axis_configs.lock_ok().clone();
-        let rebases = crate::mcu_config::spatial_rebase_targets(&configs, machine);
-        let follower_keys: Vec<crate::types::AxisKey> = configs
-            .iter()
-            .flat_map(|cfg| {
-                cfg.axes
-                    .iter()
-                    .filter(|&&a| a >= 3)
-                    .map(move |&axis| crate::types::AxisKey {
-                        mcu_id: cfg.mcu_id,
-                        axis: axis as u8,
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        {
-            let mut store = self.motion_history.lock_ok();
-            for (key, pos) in rebases {
-                store.rebase_axis(key, host_now, pos);
-            }
-            for key in follower_keys {
-                let held_position = store.final_position(key).unwrap_or(0.0);
-                store.rebase_axis(key, host_now, held_position);
-            }
+        let mut store = self.motion_history.lock_ok();
+        for (key, pos) in crate::mcu_config::reanchor_axis_targets(&configs, machine) {
+            store.rebase_axis(key, host_now, pos);
         }
     }
     /// The machine→gcode crossing: the only place a measured (machine-space)

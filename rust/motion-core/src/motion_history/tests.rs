@@ -581,14 +581,14 @@ fn corexy_history_round_trip_reproduces_bench_symptom() {
 fn rebase_after_probe_trip_round_trips_through_cartesian_inversion() {
     // Reproduces the z_tilt/beacon-probe incident: every proximity probe
     // ends in toolhead.set_position(x, y, z), which rebases the retained
-    // history to the trip's stop position. Before spatial_rebase_targets
+    // history to the trip's stop position. Before reanchor_axis_targets
     // existed, that rebase stored raw cartesian x/y under axis 0/1 — the
     // same slots live CoreXY pieces store in motor frame — so querying
     // through assemble_cartesian_state's kinematics inversion afterward
     // double-transformed an already-correct position into garbage (the
     // bench's "probe at 197.500,-47.500" from a real (150,245) point).
     use crate::kinematics::KinematicsModule;
-    use crate::mcu_config::{McuAxisConfig, McuCaps, spatial_rebase_targets};
+    use crate::mcu_config::{McuAxisConfig, McuCaps, reanchor_axis_targets};
     use crate::motion_history::assemble_cartesian_state;
     use runtime::segment::KinematicTag;
 
@@ -609,7 +609,7 @@ fn rebase_after_probe_trip_round_trips_through_cartesian_inversion() {
 
     let mut store = HistoryStore::default();
     for (key, value) in
-        spatial_rebase_targets(&configs, geometry::MachinePos([cart_x, cart_y, cart_z]))
+        reanchor_axis_targets(&configs, geometry::MachinePos([cart_x, cart_y, cart_z]))
     {
         store.rebase_axis(key, 0.0, value);
     }
