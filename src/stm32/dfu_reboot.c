@@ -20,12 +20,17 @@
 // On H7 the flag must NOT be a hardcoded AXI SRAM address: .axi_bss packs
 // large live statics (rt_storage spans ~72-120 KB) from 0x24000000 up, so any
 // fixed 0x2400xxxx address lands inside one of them — runtime writes could
-// forge the magic and divert a routine restart into ROM DFU. A linker-reserved
-// .axi_bss static has the needed semantics (NOLOAD, never memset at boot,
-// survives NVIC_SystemReset); aligned(32) gives it its own cache line for the
-// clean in dfu_reboot().
+// forge the magic and divert a routine restart into ROM DFU.
+//
+// It also must not sit near the base of AXI SRAM: the bootloader at
+// CONFIG_FLASH_BOOT_ADDRESS runs on every reset with its stack top at
+// 0x24000738 and grows down through 0x24000000, so anything there is gone
+// before dfu_reboot_check() ever reads it. `.axi_dfu_flag` is emitted after
+// every other AXI static (see armcm_link.lds.S); aligned(32) gives it its own
+// cache line for the clean in dfu_reboot().
 #if CONFIG_MACH_STM32H7
-static uint64_t usb_boot_flag __attribute__((section(".axi_bss"), aligned(32)));
+static uint64_t usb_boot_flag
+    __attribute__((section(".axi_dfu_flag"), aligned(32), used));
 #define USB_BOOT_FLAG_ADDR ((uint32_t)&usb_boot_flag)
 #else
 #define USB_BOOT_FLAG_ADDR (CONFIG_RAM_START + CONFIG_RAM_SIZE - 1024)
