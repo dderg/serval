@@ -894,7 +894,7 @@ mod stepcompress_reconcile_tests {
     }
 
     #[test]
-    fn mm_to_steps_round_trips_steps_to_mm_under_both_polarities() {
+    fn mm_to_steps_is_trajectory_signed_regardless_of_polarity() {
         let forward = StepcompressLane {
             mcu_id: MCU_ID,
             axis: 0,
@@ -908,9 +908,12 @@ mod stepcompress_reconcile_tests {
             ..forward
         };
         assert_eq!(forward.mm_to_steps(-1.0), -80);
-        assert_eq!(inverted.mm_to_steps(-1.0), 80);
+        assert_eq!(inverted.mm_to_steps(-1.0), -80);
         for lane in [forward, inverted] {
-            assert_eq!(lane.steps_to_mm(lane.mm_to_steps(2.5)), 2.5);
+            assert_eq!(
+                lane.steps_to_mm(lane.trajectory_steps(lane.mm_to_steps(2.5))),
+                2.5
+            );
         }
     }
 }

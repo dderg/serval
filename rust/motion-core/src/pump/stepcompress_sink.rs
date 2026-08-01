@@ -275,7 +275,12 @@ impl StepcompressEndpoint {
         for (motor, &count) in pos_steps.iter().enumerate() {
             self.reset_motor_position(motor, count)
                 .map_err(SendError::Fatal)?;
-            self.seed_mcu_position(self.oids[motor], count)?;
+            let mcu_count = if self.shim.invert_dir(motor) {
+                -count
+            } else {
+                count
+            };
+            self.seed_mcu_position(self.oids[motor], mcu_count)?;
         }
         self.post_heartbeat()
     }

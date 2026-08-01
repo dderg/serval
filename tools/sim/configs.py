@@ -1054,7 +1054,7 @@ rotation_distance: 40
 [motor z]
 drive: stepper
 step_pin: sc:gpiochip0/gpio15
-dir_pin: sc:gpiochip0/gpio16
+dir_pin: !sc:gpiochip0/gpio16
 enable_pin: !sc:gpiochip0/gpio9
 microsteps: 16
 rotation_distance: 40

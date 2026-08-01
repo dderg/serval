@@ -174,15 +174,22 @@ pub struct StepcompressLane {
 
 impl StepcompressLane {
     #[must_use]
-    pub fn steps_to_mm(&self, count: i64) -> f64 {
-        let signed = if self.invert_dir { -count } else { count };
-        signed as f64 * self.microstep_distance
+    pub fn steps_to_mm(&self, mcu_count: i64) -> f64 {
+        self.trajectory_steps(mcu_count) as f64 * self.microstep_distance
     }
 
     #[must_use]
     pub fn mm_to_steps(&self, mm: f64) -> i64 {
-        let count = (mm / self.microstep_distance).round() as i64;
-        if self.invert_dir { -count } else { count }
+        (mm / self.microstep_distance).round() as i64
+    }
+
+    #[must_use]
+    pub fn trajectory_steps(&self, mcu_count: i64) -> i64 {
+        if self.invert_dir {
+            -mcu_count
+        } else {
+            mcu_count
+        }
     }
 }
 
@@ -274,7 +281,7 @@ pub fn reconcile_stepcompress_axis(
             lane.microstep_distance
         ));
     }
-    reseed_step_counter(&lane, executed_steps)?;
+    reseed_step_counter(&lane, lane.trajectory_steps(executed_steps))?;
     Ok(history_position)
 }
 

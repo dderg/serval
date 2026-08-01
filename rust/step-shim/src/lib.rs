@@ -294,6 +294,10 @@ impl StepShim {
         self.motors[motor].sampler.step_count()
     }
 
+    pub fn invert_dir(&self, motor: usize) -> bool {
+        self.motors[motor].cfg.invert_dir
+    }
+
     pub fn pending_steps(&self) -> usize {
         self.motors.iter().map(|m| m.pending.len()).sum()
     }
