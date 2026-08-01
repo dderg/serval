@@ -575,7 +575,7 @@ impl PyMotionEngine {
         {
             let motor = crate::mcu_config::motor_frame(cfg, pos.0);
             let mut counts = Vec::with_capacity(cfg.axes.len());
-            for (motor_idx, &axis) in cfg.axes.iter().enumerate() {
+            for &axis in &cfg.axes {
                 let key = crate::types::AxisKey {
                     mcu_id: cfg.mcu_id,
                     axis: axis as u8,
@@ -588,13 +588,18 @@ impl PyMotionEngine {
                             cfg.mcu_id
                         ))
                     })?;
-                let mm = motor.get(axis).copied().unwrap_or_else(|| {
-                    panic!(
-                        "position seed: stepcompress mcu {} motor {motor_idx} drives \
-                         non-spatial axis {axis} (broken invariant)",
-                        cfg.mcu_id
-                    )
-                });
+                // A follower lane (extruder) has no spatial coordinate: hold
+                // whatever motion history already answers for it, the value
+                // `rebase_motion_history_after_position_set` writes back, so
+                // shim, mcu counter and history keep one shared origin.
+                let mm = match motor.get(axis) {
+                    Some(&spatial) => spatial,
+                    None => self
+                        .motion_history
+                        .lock_ok()
+                        .final_position(key)
+                        .unwrap_or(0.0),
+                };
                 counts.push(lane.mm_to_steps(mm));
             }
             let endpoint = endpoints.get(&cfg.mcu_id).ok_or_else(|| {

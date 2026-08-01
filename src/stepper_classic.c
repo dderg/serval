@@ -369,7 +369,8 @@ stepper_classic_halt(struct stepper *s)
     s->next_step_time = s->time.waketime = 0;
     s->position = -stepper_get_position(s);
     s->count = 0;
-    s->flags = (s->flags & SF_OPTIMIZED_PATH) | SF_NEED_RESET;
+    s->flags = (s->flags & (SF_OPTIMIZED_PATH | SF_SINGLE_SCHED))
+        | SF_NEED_RESET;
     while (!move_queue_empty(&s->mq)) {
         struct move_node *mn = move_queue_pop(&s->mq);
         struct stepper_move *m = container_of(mn, struct stepper_move, node);
