@@ -551,17 +551,26 @@ fn hold(start_ticks: u64, dur_secs: f32, value: f32, host: f64) -> (PieceEntry, 
 
 const FREQ: f64 = 1.0e8;
 
+fn walker_basis() -> SeamBasis {
+    SeamBasis::wire_walker(FREQ)
+}
+
 #[test]
 fn contiguous_identical_holds_merge_across_appends() {
     let mut queue = VecDeque::new();
-    append_pieces_merging_holds(&mut queue, vec![hold(0, 0.5, 3.25, 0.0)], FREQ, true);
+    append_pieces_merging_holds(
+        &mut queue,
+        vec![hold(0, 0.5, 3.25, 0.0)],
+        walker_basis(),
+        true,
+    );
     append_pieces_merging_holds(
         &mut queue,
         vec![
             hold(50_000_000, 0.25, 3.25, 0.5),
             hold(75_000_000, 0.25, 3.25, 0.75),
         ],
-        FREQ,
+        walker_basis(),
         true,
     );
     assert_eq!(queue.len(), 1);
@@ -583,16 +592,21 @@ fn holds_stay_separate_on_value_gap_motion_or_fresh_stream() {
     moving_tail[0].0.coeff_count = 3;
     for pieces in [value_changed, gapped, moving_tail] {
         let mut queue = VecDeque::new();
-        append_pieces_merging_holds(&mut queue, pieces, FREQ, true);
+        append_pieces_merging_holds(&mut queue, pieces, walker_basis(), true);
         assert_eq!(queue.len(), 2);
     }
 
     let mut queue = VecDeque::new();
-    append_pieces_merging_holds(&mut queue, vec![hold(0, 0.5, 1.0, 0.0)], FREQ, true);
+    append_pieces_merging_holds(
+        &mut queue,
+        vec![hold(0, 0.5, 1.0, 0.0)],
+        walker_basis(),
+        true,
+    );
     append_pieces_merging_holds(
         &mut queue,
         vec![hold(50_000_000, 0.5, 1.0, 0.5)],
-        FREQ,
+        walker_basis(),
         false,
     );
     assert_eq!(
@@ -610,7 +624,7 @@ fn hold_merge_respects_the_duration_cap() {
         append_pieces_merging_holds(
             &mut queue,
             vec![hold(i * step_ticks, 10.0, 7.0, 10.0 * i as f64)],
-            FREQ,
+            walker_basis(),
             true,
         );
     }

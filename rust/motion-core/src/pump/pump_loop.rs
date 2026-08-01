@@ -324,8 +324,17 @@ impl<S: PieceSink> Pump<S> {
         // Hold merging is off during drip cohorts: their release floor is
         // piece-count-based and coalescing would starve it. Without a synced
         // clock there is no freq to prove seam contiguity, so append as-is.
-        let hold_merge_freq = if self.cohort.is_none() {
-            (self.callbacks.mcu_clock_of)(key.mcu_id).map(|(_, freq)| freq)
+        //
+        // A merge rewrites the tail's `duration` from a tick span, so the
+        // basis must be the slope the seam is later projected on. For a
+        // stepcompress transport that is the shim's frozen epoch slope, not
+        // the continuously re-estimated clock: over a lane held for the whole
+        // first layer the two diverge by far more than the seam tolerance.
+        let hold_merge_basis = if self.cohort.is_none() {
+            self.sink.seam_basis(key).or_else(|| {
+                (self.callbacks.mcu_clock_of)(key.mcu_id)
+                    .map(|(_, freq)| super::sched::SeamBasis::wire_walker(freq))
+            })
         } else {
             None
         };
@@ -338,9 +347,9 @@ impl<S: PieceSink> Pump<S> {
             .iter()
             .filter(|(p, _)| !super::sched::is_hold_piece(p))
             .count() as u32;
-        match hold_merge_freq {
-            Some(freq) => {
-                append_pieces_merging_holds(&mut q.pieces, pieces, freq, !epoch.is_fresh());
+        match hold_merge_basis {
+            Some(basis) => {
+                append_pieces_merging_holds(&mut q.pieces, pieces, basis, !epoch.is_fresh());
             }
             None => q.pieces.extend(pieces),
         }

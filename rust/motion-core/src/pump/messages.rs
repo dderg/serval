@@ -175,6 +175,16 @@ pub trait PieceSink: Send {
     /// than the bundle.
     fn mark_reanchor(&self, _key: AxisKey, _at_start_clock: u64, _epoch_freq: Option<f64>) {}
 
+    /// How this transport's seam consumer reprojects a piece `duration` into
+    /// clock ticks for `key`. Hold merging rewrites durations, so it must use
+    /// this basis; the live clock estimate drifts against the frozen epoch
+    /// slope a host-side committed stream already sent frames on, and over a
+    /// lane held for a whole layer that drift becomes a hard seam gap.
+    /// `None` = pieces reach the mcu walker untouched.
+    fn seam_basis(&self, _key: AxisKey) -> Option<super::sched::SeamBasis> {
+        None
+    }
+
     /// Deliver every axis frame destined for `mcu_id` as one bundled
     /// transaction. A whole bundle either lands or it doesn't — the caller
     /// commits the ring bookkeeping for all axes only on `Ok`, so a failed

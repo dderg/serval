@@ -305,6 +305,16 @@ impl PieceSink for WireSink {
         }
     }
 
+    fn seam_basis(&self, key: AxisKey) -> Option<super::sched::SeamBasis> {
+        match self.transports.get(&key.mcu_id) {
+            Some(McuTransport::Stepcompress(endpoint)) => endpoint
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .seam_basis(key.axis),
+            _ => None,
+        }
+    }
+
     fn on_barrier_ack(&self, mcu_id: u32, oid: u8, seq: u32) -> Result<(), SendError> {
         match self.transports.get(&mcu_id) {
             Some(McuTransport::Stepcompress(endpoint)) => endpoint

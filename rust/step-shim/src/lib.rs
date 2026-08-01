@@ -18,7 +18,9 @@ pub struct MotorConfig {
     pub cycles_per_second: f64,
 }
 
-const MAX_SEAM_SKEW_CYCLES: u64 = 16;
+/// How far a piece may start from where the previous piece was projected to
+/// end before the stream is considered broken rather than merely rounded.
+pub const MAX_SEAM_SKEW_CYCLES: u64 = 16;
 
 /// Where the previous piece ended and how long it was, so the seam tolerance
 /// scales with the piece that produced the seam rather than the one arriving.
@@ -296,6 +298,14 @@ impl StepShim {
 
     pub fn invert_dir(&self, motor: usize) -> bool {
         self.motors[motor].cfg.invert_dir
+    }
+
+    /// The clock slope this motor's seam projection is frozen on. Anything
+    /// upstream that rewrites a piece's `duration` from a tick span must use
+    /// this exact value, or the rewritten piece projects to a different end
+    /// clock than the one the next piece was planned to abut.
+    pub fn motor_cycles_per_second(&self, motor: usize) -> f64 {
+        self.motors[motor].cfg.cycles_per_second
     }
 
     pub fn pending_steps(&self) -> usize {

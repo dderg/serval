@@ -717,3 +717,48 @@ fn a_barrier_ack_ahead_of_what_was_issued_is_fatal() {
         "{err:?}"
     );
 }
+
+#[test]
+fn the_seam_basis_is_the_slope_the_shim_will_hold_when_the_pieces_land() {
+    let mut h = harness(1024);
+    let basis = h.endpoint.seam_basis(0).expect("axis 0 is configured");
+    assert_eq!(basis.freq, CYCLES_PER_SECOND);
+    assert_eq!(
+        basis.skew_budget_cycles,
+        step_shim::MAX_SEAM_SKEW_CYCLES / 2,
+        "a duration rewrite may spend at most half the seam tolerance, so the shim's check \
+         still has room to catch a real break"
+    );
+
+    const EPOCH_FREQ: f64 = CYCLES_PER_SECOND * 1.000_002;
+    h.endpoint.mark_reanchor(0, 9_000, Some(EPOCH_FREQ));
+    assert_eq!(
+        h.endpoint.seam_basis(0).unwrap().freq,
+        EPOCH_FREQ,
+        "pieces staged after a mark belong to the incoming epoch and must be merged on its slope"
+    );
+
+    assert!(
+        h.endpoint.seam_basis(1).is_none(),
+        "an axis this endpoint does not carry has no seam here"
+    );
+}
+
+#[test]
+fn a_cut_moves_the_seam_basis_onto_the_adopted_epoch_slope() {
+    const EPOCH_FREQ: f64 = CYCLES_PER_SECOND * 1.000_002;
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .unwrap();
+    h.endpoint.mark_reanchor(0, 50_000, Some(EPOCH_FREQ));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(50_000, 4, 1.0))])
+        .unwrap();
+    assert_eq!(
+        h.endpoint.seam_basis(0).unwrap().freq,
+        EPOCH_FREQ,
+        "the shim adopted the epoch slope at the cut; the basis reports it without the mark"
+    );
+}

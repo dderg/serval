@@ -1,3 +1,4 @@
+use super::sched::SeamBasis;
 use super::{AxisFrame, HeartbeatMsg, PumpMsg, SendError};
 use crate::lock_ext::LockExt;
 use crate::mcu_config::McuAxisConfig;
@@ -340,6 +341,27 @@ impl StepcompressEndpoint {
         self.pending_cut.insert(axis, (at_start_clock, epoch_freq));
     }
 
+    /// How the shim will reproject this axis' piece ends once the pieces being
+    /// staged now reach it: the epoch slope of a marked but not-yet-applied
+    /// cut, otherwise the slope the shim currently holds. Frames already
+    /// egressed carry clocks derived from it, so it cannot be retimed after
+    /// the fact — upstream must adopt it, not the other way round.
+    ///
+    /// Half the shim's seam tolerance is budgeted to duration rewrites; the
+    /// other half stays for the producer's own projection rounding, so the
+    /// check the shim runs keeps its meaning.
+    pub fn seam_basis(&self, axis: u8) -> Option<SeamBasis> {
+        let motor = self.axes.iter().position(|&a| a == usize::from(axis))?;
+        let freq = match self.pending_cut.get(&axis) {
+            Some(&(_, Some(epoch_freq))) => epoch_freq,
+            _ => self.shim.motor_cycles_per_second(motor),
+        };
+        Some(SeamBasis {
+            freq,
+            skew_budget_cycles: step_shim::MAX_SEAM_SKEW_CYCLES / 2,
+        })
+    }
+
     fn cut_stream(&mut self, motor: usize, freq: f64, now: u64) -> Result<(), SendError> {
         let emit_cursor = self.step_clock.get(&self.oids[motor]).copied().unwrap_or(0);
         tracing::info!(
@@ -615,9 +637,10 @@ impl StepcompressEndpoint {
             )));
         }
         let (now, freq) = self.clock_now()?;
-        let cps = freq as f32;
         for frame in frames {
             let motor = self.motor_of(frame.axis)?;
+            #[allow(clippy::cast_possible_truncation)]
+            let cps = self.shim.motor_cycles_per_second(motor) as f32;
             let cut_index = self.pending_cut.get(&frame.axis).and_then(|&(at, _)| {
                 frame
                     .pieces
