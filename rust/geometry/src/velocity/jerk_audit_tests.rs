@@ -782,15 +782,15 @@ fn flat_ride_machines() -> [Machine; 2] {
     ]
 }
 
-/// The two chains a blend half is planned as: what the member's own cap set
-/// yields, and what is actually emitted.
 fn blend_half_chains(
     half: &Kinematics,
     entry: (f64, f64),
     exit: (f64, f64),
-) -> (Vec<StraightPhase>, Vec<StraightPhase>) {
+) -> (Vec<StraightPhase>, Vec<StraightPhase>, Vec<StraightPhase>) {
     (
         curved::capped_chain(half, entry, exit).expect("the cap-bounded plan closes the half"),
+        curved::certified_flat_chain(half, entry, exit)
+            .expect("the flat-acceleration plan closes the half"),
         curved::curved_chain(half, entry, exit).expect("the emitted chain closes the half"),
     )
 }
@@ -819,17 +819,13 @@ fn assert_states_join(chain: &[StraightPhase], what: &str) {
     }
 }
 
-/// A blend half whose ceiling descends with its curvature must ride its
-/// acceleration all the way to the apex, not brake early onto the apex ceiling
-/// and idle at it. Constant velocity is the answer only where it is quicker than
-/// constant acceleration, and straddling a curvature peak it is neither: it
-/// spends the half's arc at the lowest speed the half ever has to hold.
-///
-/// The half's own cap set is what forces the idle — one flat ceiling for the
-/// whole member, taken at its curvature peak — so the cap-bounded chain is the
-/// measurement the emitted chain has to beat.
+/// The cap-bounded plan idles at the apex speed because it prices the entire
+/// member at peak curvature. A flat-acceleration pass beats that. An even faster
+/// pass may coast above the apex before braking late, but it must preserve the
+/// monotone dip, beat flat acceleration measurably, and spend the authority that
+/// the old gentle hold left unused.
 #[test]
-fn a_blend_half_rides_its_acceleration_to_the_apex() {
+fn a_blend_half_only_idles_when_it_beats_flat_acceleration() {
     for m in flat_ride_machines() {
         let halves = corner_halves(m);
         let (into_half, out_of_half) = (&halves[0], &halves[1]);
@@ -846,7 +842,7 @@ fn a_blend_half_rides_its_acceleration_to_the_apex() {
             (into_half, entry, apex, "into the corner"),
             (out_of_half, apex, handoff, "out of the corner"),
         ] {
-            let (cruised, ridden) = blend_half_chains(half, from, to);
+            let (cruised, flat, emitted) = blend_half_chains(half, from, to);
             assert!(
                 idles(&cruised),
                 "accel={} jerk={} {what}: the cap-bounded chain no longer idles, so the \
@@ -855,22 +851,57 @@ fn a_blend_half_rides_its_acceleration_to_the_apex() {
                 m.jerk
             );
             assert!(
-                !idles(&ridden),
-                "accel={} jerk={} {what}: emitted chain still idles at the apex ceiling: \
-                 {ridden:?}",
+                !idles(&flat),
+                "accel={} jerk={} {what}: the constant-acceleration candidate idles: {flat:?}",
                 m.accel,
                 m.jerk
             );
+            let flat_time = chain_seconds(&flat);
+            let emitted_time = chain_seconds(&emitted);
+            if idles(&emitted) {
+                assert!(
+                    emitted_time < 0.999 * flat_time
+                        && emitted
+                            .iter()
+                            .filter(|p| p.j == 0.0 && p.a0 == 0.0)
+                            .all(|p| p.v0 > apex_v * 1.01),
+                    "accel={} jerk={} {what}: coasting must beat flat acceleration and stay \
+                     above the apex: emitted={emitted_time} flat={flat_time} {emitted:?}",
+                    m.accel,
+                    m.jerk
+                );
+            }
+            let descending = from.0 >= to.0;
+            let sign_tol = 1e-9 * m.accel;
             assert!(
-                chain_seconds(&ridden) < chain_seconds(&cruised),
-                "accel={} jerk={} {what}: riding the acceleration took {} s against the \
-                 cruising chain's {} s",
+                emitted.iter().all(|p| {
+                    let a1 = p.end_state().2;
+                    if descending {
+                        p.a0 <= sign_tol && a1 <= sign_tol
+                    } else {
+                        p.a0 >= -sign_tol && a1 >= -sign_tol
+                    }
+                }),
+                "accel={} jerk={} {what}: emitted speed reverses the corner dip: {emitted:?}",
                 m.accel,
-                m.jerk,
-                chain_seconds(&ridden),
-                chain_seconds(&cruised)
+                m.jerk
             );
-            assert_states_join(&ridden, what);
+            let peak_tangential_accel = emitted
+                .iter()
+                .map(|p| p.a0.abs().max(p.end_state().2.abs()))
+                .fold(0.0_f64, f64::max);
+            let exact_jerk = chain_jerk_worsts(half, &emitted)
+                .1
+                .expect("emitted chain has no jerk samples")
+                .ratio;
+            assert!(
+                peak_tangential_accel >= 0.25 * m.accel && exact_jerk >= 0.85,
+                "accel={} jerk={} {what}: left authority unused: tangential accel \
+                 {peak_tangential_accel}, jerk ratio {exact_jerk}",
+                m.accel,
+                m.jerk
+            );
+            assert_states_join(&emitted, what);
         }
     }
 }

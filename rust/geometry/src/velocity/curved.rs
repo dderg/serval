@@ -40,10 +40,12 @@
 //! the whole member's peak curvature, so a member entered above
 //! `sqrt(accel/K)` has to shed the difference at once and then hold the cap for
 //! whatever arc is left, even where the true ceiling it is riding is still
-//! descending towards the peak. The certificate has no such flat cap — it
-//! composes `kappa(tau)` exactly — so [`certified_flat_chain`] offers the pass
-//! that spends the member's whole arc at one acceleration and lets the proof,
-//! not the reduction, decide. Whichever of the two is quicker is emitted.
+//! descending towards the peak. The certificate has no such flat cap: it
+//! composes `kappa(tau)` exactly. [`certified_flat_chain`] offers one
+//! acceleration across the member; the shaped candidate unwinds an inherited
+//! acceleration, coasts only while that is faster, then spends the strongest
+//! certifiable acceleration and jerk on the late brake. The quickest certified
+//! answer is emitted.
 
 use super::VelocityError;
 use super::certify;
@@ -91,6 +93,10 @@ const FLAT_WIND_HALVINGS: u32 = 16;
 /// straight past it.
 const PLAN_PROBE_STEPS: u32 = 16;
 const PLAN_REFINE_ITERS: u32 = 12;
+
+const SHAPED_ACCEL_SHARES: [f64; 3] = [0.25, 0.375, 0.5];
+const SHAPED_JERK_SHARES: [f64; 3] = [0.5, 0.625, 0.75];
+const SHAPED_TIME_WIN: f64 = 1.0e-2;
 
 /// Rounds of the fixed point that sizes the jerk reserve against the swings the
 /// boundary states actually need. The demand only climbs, and the ceiling bounds
@@ -1985,7 +1991,7 @@ fn flat_accel_chain(
 /// The swings are what the certificate actually rations: at a `kappa = 0` seam
 /// the curvature's own `sigma v^3` has already spent most of the jerk budget,
 /// and the hold commands none of it.
-fn certified_flat_chain(
+pub(super) fn certified_flat_chain(
     kin: &Kinematics,
     entry: (f64, f64),
     exit: (f64, f64),
@@ -2003,6 +2009,102 @@ fn certified_flat_chain(
         j_wind *= 0.5;
     }
     None
+}
+
+fn descending_shaped_chain(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+    a_max: f64,
+    j_max: f64,
+) -> Option<Vec<StraightPhase>> {
+    if entry.0 < exit.0 || entry.1 > 0.0 || exit.1 > 0.0 {
+        return None;
+    }
+    let mut chain = Vec::new();
+    let (s_unwound, v_unwound) = if entry.1 < 0.0 {
+        let unwind = StraightPhase {
+            t0: 0.0,
+            dt: -entry.1 / j_max,
+            s0: 0.0,
+            v0: entry.0,
+            a0: entry.1,
+            j: j_max,
+        };
+        let (s, v, _) = unwind.end_state();
+        chain.push(unwind);
+        (s, v)
+    } else {
+        (0.0, entry.0)
+    };
+    if !(s_unwound < kin.length && v_unwound >= exit.0) {
+        return None;
+    }
+    let tail = profile::straight_chain_between(
+        (v_unwound, 0.0),
+        exit,
+        kin.length - s_unwound,
+        v_unwound,
+        a_max,
+        j_max,
+    )
+    .ok()?;
+    let t_unwound = chain_time(&chain);
+    chain.extend(shifted(&tail, s_unwound, t_unwound));
+    let sign_tol = LENGTH_CLOSURE_REL_TOL * kin.accel;
+    chain
+        .iter()
+        .all(|p| p.a0 <= sign_tol && p.end_state().2 <= sign_tol)
+        .then(|| coalesce(chain))
+}
+
+fn shaped_chain(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+    a_max: f64,
+    j_max: f64,
+) -> Option<Vec<StraightPhase>> {
+    if entry.0 >= exit.0 {
+        descending_shaped_chain(kin, entry, exit, a_max, j_max)
+    } else {
+        let back = reversed(kin);
+        let reversed_chain =
+            descending_shaped_chain(&back, (exit.0, -exit.1), (entry.0, -entry.1), a_max, j_max)?;
+        Some(reverse_chain(kin.length, &reversed_chain))
+    }
+}
+
+fn certified_shaped_chain(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> Option<Vec<StraightPhase>> {
+    if kin.sigma == 0.0 || entry.0 == exit.0 || !(kin.jerk > 0.0 && kin.jerk.is_finite()) {
+        return None;
+    }
+    let mut best: Option<Vec<StraightPhase>> = None;
+    for a_scale in SHAPED_ACCEL_SHARES {
+        let a_max = kin.accel * a_scale;
+        if a_max < entry.1.abs().max(exit.1.abs()) {
+            continue;
+        }
+        for j_scale in SHAPED_JERK_SHARES {
+            let Some(chain) = shaped_chain(kin, entry, exit, a_max, kin.jerk * j_scale) else {
+                continue;
+            };
+            let Ok(certified) = certified_chain(kin, &chain) else {
+                continue;
+            };
+            if best
+                .as_ref()
+                .is_none_or(|incumbent| chain_time(&certified) < chain_time(incumbent))
+            {
+                best = Some(certified);
+            }
+        }
+    }
+    best
 }
 
 /// Certified chain across the member under its own cap set: the member's plan,
@@ -2026,9 +2128,9 @@ pub(super) fn capped_chain(
 }
 
 /// Certified constant-jerk chain across the member between boundary states that
-/// both carry acceleration. [`capped_chain`] and [`certified_flat_chain`] are
-/// both certified answers between the very same states over the very same arc,
-/// so the quicker of the two is the one emitted.
+/// both carry acceleration. The quickest cap-bounded or flat-acceleration pass
+/// is the baseline; a shaped pass is emitted only when its extra phases save a
+/// measurable share of that time.
 ///
 /// A refusal stands as a refusal. The cap-bounded plan is what [`closes`]
 /// promised the envelope, and it is the only path that prices what the boundary
@@ -2039,8 +2141,16 @@ pub(super) fn curved_chain(
     entry: (f64, f64),
     exit: (f64, f64),
 ) -> Result<Vec<StraightPhase>, VelocityError> {
-    let capped = capped_chain(kin, entry, exit)?;
-    let quicker = certified_flat_chain(kin, entry, exit)
-        .filter(|flat| chain_time(flat) < chain_time(&capped));
-    Ok(quicker.unwrap_or(capped))
+    let mut quickest = capped_chain(kin, entry, exit)?;
+    if let Some(flat) = certified_flat_chain(kin, entry, exit)
+        .filter(|flat| chain_time(flat) < chain_time(&quickest))
+    {
+        quickest = flat;
+    }
+    if let Some(shaped) = certified_shaped_chain(kin, entry, exit)
+        .filter(|shaped| chain_time(shaped) < (1.0 - SHAPED_TIME_WIN) * chain_time(&quickest))
+    {
+        quickest = shaped;
+    }
+    Ok(quickest)
 }
