@@ -28,19 +28,28 @@ pub const CONSUMED_MARGIN_SECONDS: f64 = 0.010;
 
 pub const BACKLOG_CEILING_FRAMES: usize = 8192;
 
-pub const PACER_TICK: Duration = Duration::from_millis(2);
+/// How often the pacer tops the mcu's move queue back up to
+/// [`SEND_LEAD_SECONDS`]. The tick only has to be short against that lead —
+/// at 10 ms the lead never dips below 240 ms of the 250 ms target — and
+/// every tick is a flush, so a shorter one buys nothing but fragments the
+/// burst: at 2 ms a dense layer's ~1450 frames/s left 2.4 frames per flush,
+/// too few to fill the 59-byte Klipper block they are packed into.
+pub const PACER_TICK: Duration = Duration::from_millis(10);
 
 pub type ClockSource = Arc<dyn Fn(u32) -> Option<(u64, f64)> + Send + Sync>;
+/// A burst of frames leaves the endpoint as one call so the transport can
+/// pack it into full Klipper message blocks; framing each frame on its own
+/// block spends the protocol's sixteen sequence numbers a command at a time.
 pub type FrameEgress =
-    Arc<dyn Fn(&str, &[(String, ArgValue)]) -> Result<(), SendError> + Send + Sync>;
+    Arc<dyn Fn(&[(&'static str, Vec<(String, ArgValue)>)]) -> Result<(), SendError> + Send + Sync>;
 
 pub fn host_io_egress(mcu_id: u32, host_io: Weak<McuHostIo>) -> FrameEgress {
-    Arc::new(move |name: &str, args: &[(String, ArgValue)]| {
+    Arc::new(move |frames: &[(&'static str, Vec<(String, ArgValue)>)]| {
         let io = host_io.upgrade().ok_or_else(|| {
             SendError::Fatal(format!("McuHostIo for stepcompress mcu {mcu_id} detached"))
         })?;
-        io.send_args(name, args)
-            .map_err(|e| SendError::Transient(format!("stepcompress mcu {mcu_id} {name}: {e:?}")))
+        io.send_args_batch(frames)
+            .map_err(|e| SendError::Transient(format!("stepcompress mcu {mcu_id}: {e:?}")))
     })
 }
 
@@ -113,6 +122,9 @@ struct InFlight {
     end_clock: u64,
 }
 
+/// The mcu's barrier ack is the pump's credit for a lane, so a barrier is
+/// issued for every retirement the shim reports — holding one back to save
+/// wire traffic starves the lane of credit for a full round trip.
 struct PendingRetire {
     waits: Vec<BarrierId>,
     counts: Vec<u32>,
@@ -304,18 +316,19 @@ impl StepcompressEndpoint {
                 self.mcu_id
             ))
         })?;
-        (self.egress)(
+        (self.egress)(&[(
             "stepcompress_set_position",
-            &[
+            vec![
                 ("oid".to_string(), ArgValue::Int(i64::from(oid))),
                 ("pos".to_string(), ArgValue::Int(i64::from(count))),
             ],
-        )
+        )])
     }
 
     fn sync_retirement_baseline(&mut self) {
         self.published = self.shim.retired_counts();
         self.cohort_counts.clone_from(&self.published);
+        self.pending_retire.clear();
     }
 
     pub fn reset_motor_position(&mut self, motor: usize, count: i64) -> Result<(), String> {
@@ -396,11 +409,11 @@ impl StepcompressEndpoint {
         }
         self.shim.set_motor_cycles_per_second(motor, freq);
         let snapshot = self.shim.retired_counts();
-        self.publish_retirement(snapshot);
+        self.publish_retirement(&snapshot);
         Ok(())
     }
 
-    fn publish_retirement(&mut self, snapshot: Vec<u32>) {
+    fn publish_retirement(&mut self, snapshot: &[u32]) {
         let mut waits = Vec::new();
         for motor in 0..self.oids.len() {
             let before = self.cohort_counts.get(motor).copied().unwrap_or(0);
@@ -427,10 +440,11 @@ impl StepcompressEndpoint {
         if waits.is_empty() {
             return;
         }
-        self.cohort_counts.clone_from(&snapshot);
+        self.cohort_counts.clear();
+        self.cohort_counts.extend_from_slice(snapshot);
         self.pending_retire.push_back(PendingRetire {
             waits,
-            counts: snapshot,
+            counts: snapshot.to_vec(),
         });
     }
 
@@ -552,7 +566,7 @@ impl StepcompressEndpoint {
             )));
         }
         let snapshot = self.shim.retired_counts();
-        self.publish_retirement(snapshot);
+        self.publish_retirement(&snapshot);
         Ok(())
     }
 
@@ -560,36 +574,44 @@ impl StepcompressEndpoint {
         let margin = (freq * CONSUMED_MARGIN_SECONDS) as u64;
         let cutoff = now.saturating_sub(margin);
         self.in_flight.retain(|e| e.end_clock > cutoff);
-        let egress = Arc::clone(&self.egress);
         let stale_by = (freq * pump_past_guard_secs()) as u64;
-        while let Some(front) = self.backlog.front() {
-            let consumes_slot = matches!(front.frame, Outbound::Step(StepFrame::QueueStep { .. }));
-            if consumes_slot && self.in_flight.len() as u32 >= self.budget {
+        let mut burst: Vec<(&'static str, Vec<(String, ArgValue)>)> = Vec::new();
+        let mut slots: Vec<u64> = Vec::new();
+        let mut stale: Option<SendError> = None;
+        let mut in_flight = self.in_flight.len() as u32;
+        for out in &self.backlog {
+            let consumes_slot = matches!(out.frame, Outbound::Step(StepFrame::QueueStep { .. }));
+            if consumes_slot && in_flight >= self.budget {
                 break;
             }
-            if consumes_slot && front.start_clock.saturating_add(stale_by) < now {
-                let late_us = (now - front.start_clock) as f64 * 1e6 / freq;
-                let backlog = self.backlog.len();
-                let in_flight = self.in_flight.len();
-                return Err(SendError::Fatal(format!(
+            if consumes_slot && out.start_clock.saturating_add(stale_by) < now {
+                let late_us = (now - out.start_clock) as f64 * 1e6 / freq;
+                stale = Some(SendError::Fatal(format!(
                     "stepcompress mcu {}: queue_step first step at clock {} is {late_us:.0} us \
                      behind the mcu clock {now} — the mcu would load it onto an idle stepper and \
                      shut down with \"Timer too close\". {SEND_LEAD_SECONDS} s of lead was not \
-                     delivered: {backlog} frames backlogged, {in_flight}/{} move slots in flight",
-                    self.mcu_id, front.start_clock, self.budget
+                     delivered: {} frames backlogged, {in_flight}/{} move slots in flight",
+                    self.mcu_id,
+                    out.start_clock,
+                    self.backlog.len(),
+                    self.budget
                 )));
+                break;
             }
-            let out = self
-                .backlog
-                .pop_front()
-                .expect("backlog front was just observed");
-            let (name, args) = frame_args(&out.frame);
-            egress(name, &args)?;
+            burst.push(frame_args(&out.frame));
             if consumes_slot {
-                self.in_flight.push(InFlight {
-                    end_clock: out.end_clock,
-                });
+                slots.push(out.end_clock);
+                in_flight += 1;
             }
+        }
+        if !burst.is_empty() {
+            (self.egress)(&burst)?;
+            self.backlog.drain(..burst.len());
+            self.in_flight
+                .extend(slots.into_iter().map(|end_clock| InFlight { end_clock }));
+        }
+        if let Some(error) = stale {
+            return Err(error);
         }
         self.release_retirements();
         self.post_heartbeat()
@@ -653,7 +675,7 @@ impl StepcompressEndpoint {
                 }
             }
             let snapshot = self.shim.retired_counts();
-            self.publish_retirement(snapshot);
+            self.publish_retirement(&snapshot);
         }
         self.flush(now, freq)
     }

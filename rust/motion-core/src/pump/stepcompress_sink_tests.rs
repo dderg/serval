@@ -15,6 +15,7 @@ struct Harness {
     barriers: Arc<Mutex<Vec<(u32, u32)>>>,
     seeds: Arc<Mutex<Vec<(u32, i64)>>>,
     heartbeats: crossbeam_channel::Receiver<PumpMsg>,
+    bursts: Arc<Mutex<Vec<usize>>>,
     fail_sends: Arc<AtomicBool>,
 }
 
@@ -46,48 +47,54 @@ fn harness_on_axis(budget: u32, axis: usize) -> Harness {
     let seeds = Arc::new(Mutex::new(Vec::new()));
     let seeds_for_egress = Arc::clone(&seeds);
     let fail_for_egress = Arc::clone(&fail_sends);
-    let egress: FrameEgress = Arc::new(move |name: &str, args: &[(String, ArgValue)]| {
-        if fail_for_egress.load(Ordering::Relaxed) {
-            return Err(SendError::Transient("egress down".into()));
-        }
-        let arg = |key: &str| -> i64 {
-            match args.iter().find(|(k, _)| k == key).map(|(_, v)| v) {
-                Some(ArgValue::Int(v)) => *v,
-                other => panic!("missing int arg {key}: {other:?}"),
+    let bursts = Arc::new(Mutex::new(Vec::new()));
+    let bursts_for_egress = Arc::clone(&bursts);
+    let egress: FrameEgress =
+        Arc::new(move |frames: &[(&'static str, Vec<(String, ArgValue)>)]| {
+            if fail_for_egress.load(Ordering::Relaxed) {
+                return Err(SendError::Transient("egress down".into()));
             }
-        };
-        if name == "stepcompress_barrier" {
-            barriers_for_egress
-                .lock_ok()
-                .push((arg("oid") as u32, arg("seq") as u32));
-            return Ok(());
-        }
-        if name == "stepcompress_set_position" {
-            seeds_for_egress
-                .lock_ok()
-                .push((arg("oid") as u32, arg("pos")));
-            return Ok(());
-        }
-        let frame = match name {
-            "queue_step" => StepFrame::QueueStep {
-                oid: arg("oid") as u32,
-                interval: arg("interval") as u32,
-                count: arg("count") as u16,
-                add: arg("add") as i16,
-            },
-            "set_next_step_dir" => StepFrame::SetNextStepDir {
-                oid: arg("oid") as u32,
-                dir: arg("dir") as u8,
-            },
-            "reset_step_clock" => StepFrame::ResetStepClock {
-                oid: arg("oid") as u32,
-                clock: arg("clock") as u32,
-            },
-            other => panic!("unexpected command {other}"),
-        };
-        sent_for_egress.lock_ok().push(frame);
-        Ok(())
-    });
+            bursts_for_egress.lock_ok().push(frames.len());
+            for (name, args) in frames {
+                let arg = |key: &str| -> i64 {
+                    match args.iter().find(|(k, _)| k == key).map(|(_, v)| v) {
+                        Some(ArgValue::Int(v)) => *v,
+                        other => panic!("missing int arg {key}: {other:?}"),
+                    }
+                };
+                if *name == "stepcompress_barrier" {
+                    barriers_for_egress
+                        .lock_ok()
+                        .push((arg("oid") as u32, arg("seq") as u32));
+                    continue;
+                }
+                if *name == "stepcompress_set_position" {
+                    seeds_for_egress
+                        .lock_ok()
+                        .push((arg("oid") as u32, arg("pos")));
+                    continue;
+                }
+                let frame = match *name {
+                    "queue_step" => StepFrame::QueueStep {
+                        oid: arg("oid") as u32,
+                        interval: arg("interval") as u32,
+                        count: arg("count") as u16,
+                        add: arg("add") as i16,
+                    },
+                    "set_next_step_dir" => StepFrame::SetNextStepDir {
+                        oid: arg("oid") as u32,
+                        dir: arg("dir") as u8,
+                    },
+                    "reset_step_clock" => StepFrame::ResetStepClock {
+                        oid: arg("oid") as u32,
+                        clock: arg("clock") as u32,
+                    },
+                    other => panic!("unexpected command {other}"),
+                };
+                sent_for_egress.lock_ok().push(frame);
+            }
+            Ok(())
+        });
     let (tx, rx) = crossbeam_channel::unbounded();
     let endpoint = StepcompressEndpoint::new(
         MCU_ID,
@@ -106,6 +113,7 @@ fn harness_on_axis(budget: u32, axis: usize) -> Harness {
         barriers,
         seeds,
         heartbeats: rx,
+        bursts,
         fail_sends,
     }
 }
@@ -896,4 +904,35 @@ fn a_lane_parked_past_the_encoder_window_re_anchors_mid_stream() {
         vec![3],
         "retirement must still complete across a mid-stream re-anchor"
     );
+}
+
+#[test]
+fn a_flush_hands_the_whole_burst_to_the_transport_in_one_call() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+    let bursts = h.bursts.lock_ok().clone();
+    let frames: usize = bursts.iter().sum();
+    assert!(frames > 8, "expected a multi-frame burst, got {frames}");
+    assert_eq!(
+        bursts.iter().filter(|&&n| n > 0).count(),
+        1,
+        "a flush must reach the transport as one batch so it can be packed \
+         into full message blocks, got bursts {bursts:?}"
+    );
+}
+
+#[test]
+fn a_budget_capped_flush_still_batches_what_it_may_send() {
+    let mut h = harness(4);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+    let bursts = h.bursts.lock_ok().clone();
+    assert_eq!(bursts.len(), 1, "{bursts:?}");
+    assert_eq!(h.sent_moves(), 4, "the move-slot budget still bounds sends");
+    assert!(!h.endpoint.backlog.is_empty());
 }

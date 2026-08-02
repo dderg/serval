@@ -69,6 +69,9 @@ impl Reactor {
             ReactorCommand::FireAndForgetTyped { payload } => {
                 self.handle_fire_and_forget_typed(payload)
             }
+            ReactorCommand::FireAndForgetBatch { payloads } => {
+                self.handle_fire_and_forget_batch(&payloads)
+            }
             ReactorCommand::McuIdentify {
                 completion,
                 deadline: _,
@@ -237,6 +240,34 @@ impl Reactor {
                 "FireAndForgetTyped: send error"
             );
             self.close_if_io_fault("handle_command/fire_and_forget_typed", &e);
+        }
+    }
+
+    fn handle_fire_and_forget_batch(&mut self, payloads: &[Vec<u8>]) {
+        let blocks = match crate::host_io::wire::pack_blocks(payloads) {
+            Ok(blocks) => blocks,
+            Err(detail) => {
+                tracing::error!(
+                    subsystem = "mcu-comms",
+                    event = "fire_and_forget_batch_pack_error",
+                    detail = %detail,
+                    "FireAndForgetBatch: refusing to frame an unpackable burst"
+                );
+                return;
+            }
+        };
+        for block in blocks {
+            if let Err(e) = self.dispatch_fire_and_forget(block, false) {
+                tracing::warn!(
+                    subsystem = "mcu-comms",
+                    event = "fire_and_forget_batch_send_error",
+                    error = %e,
+                    "FireAndForgetBatch: send error"
+                );
+                if self.close_if_io_fault("handle_command/fire_and_forget_batch", &e) {
+                    return;
+                }
+            }
         }
     }
 
