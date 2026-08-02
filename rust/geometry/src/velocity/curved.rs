@@ -97,11 +97,6 @@ const PLAN_REFINE_ITERS: u32 = 12;
 const SHAPED_ACCEL_SHARES: [f64; 3] = [0.25, 0.375, 0.5];
 const SHAPED_JERK_SHARES: [f64; 3] = [0.5, 0.625, 0.75];
 const SHAPED_TIME_WIN: f64 = 1.0e-2;
-const TRAIL_ARC_PIECES: u32 = 8;
-const TRAIL_BISECT_ITERS: u32 = 8;
-const TRAIL_LOCAL_JERK_SHARE: f64 = 0.375;
-const TRAIL_MIN_JERK_AUTHORITY_SHARE: f64 = 0.25;
-const TRAIL_MIN_ACCEL_SWINGS: f64 = 2.0;
 
 /// Rounds of the fixed point that sizes the jerk reserve against the swings the
 /// boundary states actually need. The demand only climbs, and the ceiling bounds
@@ -1133,85 +1128,9 @@ fn banding_pays(bands: &[Kinematics]) -> bool {
     highest > lowest * (1.0 + BAND_CEILING_SPREAD)
 }
 
-pub(super) fn trail_reach(kin: &Kinematics, entry: (f64, f64)) -> Option<Vec<StraightPhase>> {
-    let k_exit = kin.kappa0 + kin.sigma * kin.length;
-    if !(kin.jerk.is_finite()
-        && kin.sigma != 0.0
-        && kin.kappa0.abs() > k_exit.abs()
-        && entry.1 >= 0.0
-        && entry.0 > 0.0
-        && ball_slack_at(kin, entry.0) >= TRAIL_MIN_JERK_AUTHORITY_SHARE * kin.jerk
-        && kin.jerk * kin.length >= TRAIL_MIN_ACCEL_SWINGS * kin.accel * entry.0)
-    {
-        return None;
-    }
-    let mut march = March::new(entry);
-    for piece in 1..=TRAIL_ARC_PIECES {
-        let edge = kin.length * f64::from(piece) / f64::from(TRAIL_ARC_PIECES);
-        let ds = edge - march.s;
-        let phase_at = |j: f64| {
-            let dt = march.dt_for_arc(j, ds, ds / march.v);
-            let phase = StraightPhase {
-                t0: march.t,
-                dt,
-                s0: march.s,
-                v0: march.v,
-                a0: march.a,
-                j,
-            };
-            let (s, v, a) = phase.end_state();
-            let state_fits = |s: f64, v: f64, a: f64| {
-                let k = kin.kappa0 + kin.sigma * s;
-                let v2 = v * v;
-                let v3 = v2 * v;
-                let tangential_jerk = j - k * k * v3;
-                let normal_jerk = kin.sigma * v3 + 3.0 * k * v * a;
-                a * a + k * k * v2 * v2 <= (1.0 + LENGTH_CLOSURE_REL_TOL) * kin.accel * kin.accel
-                    && tangential_jerk * tangential_jerk + normal_jerk * normal_jerk
-                        <= (1.0 + LENGTH_CLOSURE_REL_TOL) * kin.jerk * kin.jerk
-            };
-            if (s - edge).abs() > LENGTH_CLOSURE_REL_TOL * kin.length
-                || v > kin.flat_ceiling
-                || !state_fits(phase.s0, phase.v0, phase.a0)
-                || !state_fits(s, v, a)
-            {
-                return None;
-            }
-            Some(phase)
-        };
-        let phase = if let Some(full) = phase_at(kin.jerk) {
-            full
-        } else {
-            let mut lo = 0.0;
-            let mut hi = kin.jerk;
-            phase_at(0.0)?;
-            for _ in 0..TRAIL_BISECT_ITERS {
-                let mid = 0.5 * (lo + hi);
-                if phase_at(mid).is_some() {
-                    lo = mid;
-                } else {
-                    hi = mid;
-                }
-            }
-            phase_at(TRAIL_LOCAL_JERK_SHARE * lo)?
-        };
-        march.push(phase.j, phase.dt);
-    }
-    certified_chain(kin, &coalesce(march.phases)).ok()
-}
-
 fn reach_chain(kin: &Kinematics, entry: (f64, f64)) -> Result<Vec<StraightPhase>, VelocityError> {
     validate(kin);
-    let bounded = reach_spans(kin, entry).and_then(|chain| certified_chain(kin, &chain));
-    match (bounded, trail_reach(kin, entry)) {
-        (Ok(chain), Some(trail))
-            if handoff_state(kin, &chain, entry).0 >= handoff_state(kin, &trail, entry).0 =>
-        {
-            Ok(chain)
-        }
-        (_, Some(trail)) => Ok(trail),
-        (bounded, None) => bounded,
-    }
+    certified_chain(kin, &reach_spans(kin, entry)?)
 }
 
 /// The uncertified pass [`reach_chain`] certifies. Feasibility predicates use
@@ -1693,6 +1612,12 @@ fn closes(kin: &Kinematics, entry: (f64, f64), exit: (f64, f64)) -> Result<(), V
     }
 }
 
+/// Whether [`member_plan`] would close the member between these boundary states.
+pub(super) fn member_closes(kin: &Kinematics, entry: (f64, f64), exit: (f64, f64)) -> bool {
+    validate(kin);
+    closes(kin, entry, exit).is_ok()
+}
+
 fn states_match(lhs: (f64, f64), rhs: (f64, f64)) -> bool {
     let close = |x: f64, y: f64| (x - y).abs() <= REQUIREMENT_MATCH_REL_TOL * (1.0 + x.abs());
     close(lhs.0, rhs.0) && close(lhs.1, rhs.1)
@@ -1834,19 +1759,9 @@ pub(super) fn entry_accel_window(
     if !(v_entry.is_finite() && v_entry >= 0.0 && exit.0.is_finite() && exit.1.is_finite()) {
         return infeasible(BoundaryInfeasibility::NonFinite);
     }
-    let required = entry_requirement(kin, exit)
-        .ok()
-        .filter(|state| {
-            (state.0 - v_entry).abs() <= REQUIREMENT_MATCH_REL_TOL * (1.0 + v_entry.abs())
-        })
-        .map(|state| state.1);
-    let admits = |a: f64| {
-        closes(kin, (v_entry, a), exit).is_ok()
-            || required.is_some_and(|required_a| states_match((v_entry, a), (v_entry, required_a)))
-    };
+    let admits = |a: f64| closes(kin, (v_entry, a), exit).is_ok();
     let [jerk_root, other_root] = single_jerk_entry_accels(v_entry, exit, kin.length);
     let shaped = [
-        required,
         Some(zero_jerk_entry_accel(v_entry, exit, kin.length)),
         jerk_root,
         other_root,
@@ -1917,26 +1832,9 @@ pub(super) fn exit_accel_window(
     if !(v_exit.is_finite() && v_exit >= 0.0 && entry.0.is_finite() && entry.1.is_finite()) {
         return infeasible(BoundaryInfeasibility::NonFinite);
     }
-    let extremal = reachable_exit(kin, entry)
-        .filter(|state| {
-            (state.0 - v_exit).abs() <= REQUIREMENT_MATCH_REL_TOL * (1.0 + v_exit.abs())
-        })
-        .map(|state| state.1);
-    let k_exit = kin.kappa0 + kin.sigma * kin.length;
-    let shaped_zero = (entry.1 < 0.0 && k_exit.abs() > kin.kappa0.abs())
-        .then(|| curved_chain(kin, entry, (v_exit, 0.0)).ok().map(|_| 0.0))
-        .flatten();
-    let admits = |a: f64| {
-        closes(kin, entry, (v_exit, a)).is_ok()
-            || extremal
-                .into_iter()
-                .chain(shaped_zero)
-                .any(|extremal_a| states_match((v_exit, a), (v_exit, extremal_a)))
-    };
+    let admits = |a: f64| closes(kin, entry, (v_exit, a)).is_ok();
     let [jerk_root, other_root] = single_jerk_entry_accels(v_exit, (entry.0, -entry.1), kin.length);
     let shaped = [
-        extremal,
-        shaped_zero,
         Some(-zero_jerk_entry_accel(
             v_exit,
             (entry.0, -entry.1),
@@ -1993,14 +1891,14 @@ fn extremal_chain(
     entry: (f64, f64),
     exit: (f64, f64),
 ) -> Option<Vec<StraightPhase>> {
-    if let Ok(forward) = reach_chain(kin, entry) {
+    if let Ok(forward) = reach_spans(kin, entry) {
         if states_match(exit, handoff_state(kin, &forward, entry)) {
             return Some(forward);
         }
     }
     let back = reversed(kin);
     let seed = (exit.0, -exit.1);
-    let backward = reach_chain(&back, seed).ok()?;
+    let backward = reach_spans(&back, seed).ok()?;
     let (v, a) = handoff_state(&back, &backward, seed);
     states_match(entry, (v, -a)).then(|| reverse_chain(kin.length, &backward))
 }

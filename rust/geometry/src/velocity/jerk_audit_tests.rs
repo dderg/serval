@@ -782,6 +782,19 @@ fn flat_ride_machines() -> [Machine; 2] {
     ]
 }
 
+fn blend_half_chains(
+    half: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> (Vec<StraightPhase>, Vec<StraightPhase>, Vec<StraightPhase>) {
+    (
+        curved::capped_chain(half, entry, exit).expect("the cap-bounded plan closes the half"),
+        curved::certified_flat_chain(half, entry, exit)
+            .expect("the flat-acceleration plan closes the half"),
+        curved::curved_chain(half, entry, exit).expect("the emitted chain closes the half"),
+    )
+}
+
 fn chain_seconds(chain: &[StraightPhase]) -> f64 {
     chain.iter().map(|p| p.dt).sum()
 }
@@ -806,11 +819,13 @@ fn assert_states_join(chain: &[StraightPhase], what: &str) {
     }
 }
 
-/// A blend half spends tangential authority without reversing the corner's
-/// velocity dip. Coasting is accepted only when it remains above the apex speed
-/// and measurably beats the certified constant-acceleration pass.
+/// The cap-bounded plan idles at the apex speed because it prices the entire
+/// member at peak curvature. A flat-acceleration pass beats that. An even faster
+/// pass may coast above the apex before braking late, but it must preserve the
+/// monotone dip, beat flat acceleration measurably, and spend the authority that
+/// the old gentle hold left unused.
 #[test]
-fn a_blend_half_emits_a_monotone_authority_spending_pass() {
+fn a_blend_half_only_idles_when_it_beats_flat_acceleration() {
     for m in flat_ride_machines() {
         let halves = corner_halves(m);
         let (into_half, out_of_half) = (&halves[0], &halves[1]);
@@ -827,19 +842,31 @@ fn a_blend_half_emits_a_monotone_authority_spending_pass() {
             (into_half, entry, apex, "into the corner"),
             (out_of_half, apex, handoff, "out of the corner"),
         ] {
-            let emitted =
-                curved::curved_chain(half, from, to).expect("the emitted chain closes the half");
+            let (cruised, flat, emitted) = blend_half_chains(half, from, to);
+            assert!(
+                idles(&cruised),
+                "accel={} jerk={} {what}: the cap-bounded chain no longer idles, so the \
+                 regression this test guards cannot be measured: {cruised:?}",
+                m.accel,
+                m.jerk
+            );
+            assert!(
+                !idles(&flat),
+                "accel={} jerk={} {what}: the constant-acceleration candidate idles: {flat:?}",
+                m.accel,
+                m.jerk
+            );
+            let flat_time = chain_seconds(&flat);
+            let emitted_time = chain_seconds(&emitted);
             if idles(&emitted) {
-                let flat = curved::certified_flat_chain(half, from, to)
-                    .expect("a coasting candidate requires a flat reference");
                 assert!(
-                    chain_seconds(&emitted) < 0.999 * chain_seconds(&flat)
+                    emitted_time < 0.999 * flat_time
                         && emitted
                             .iter()
                             .filter(|p| p.j == 0.0 && p.a0 == 0.0)
                             .all(|p| p.v0 > apex_v * 1.01),
-                    "accel={} jerk={} {what}: coasting did not beat its reference: \
-                     emitted={emitted:?}, flat={flat:?}",
+                    "accel={} jerk={} {what}: coasting must beat flat acceleration and stay \
+                     above the apex: emitted={emitted_time} flat={flat_time} {emitted:?}",
                     m.accel,
                     m.jerk
                 );
@@ -877,45 +904,4 @@ fn a_blend_half_emits_a_monotone_authority_spending_pass() {
             assert_states_join(&emitted, what);
         }
     }
-}
-
-#[test]
-fn clothoid_snapshot_trail_brakes_through_both_halves() {
-    let machine = flat_ride_machines()[1];
-    let moves = machine.polyline(&[[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0]]);
-    let (fitted, profile) = plan_for(&moves);
-    let curved: Vec<_> = fitted
-        .moves
-        .iter()
-        .zip(&profile.moves)
-        .filter(|(mv, _)| matches!(mv.segment.spatial, Some(Segment::Clothoid(_))))
-        .collect();
-    assert_eq!(curved.len(), 2, "the snapshot corner must be a biclothoid");
-    let into = curved[0].1;
-    let out = curved[1].1;
-    let apex_v = into.exit_v;
-    assert!(
-        into.entry_v > 1.5 * apex_v && out.exit_v > 1.5 * apex_v,
-        "the clothoid envelope did not carry speed into the trail brake: {} -> {apex_v} -> {}",
-        into.entry_v,
-        out.exit_v
-    );
-    let into_a = into.phases.first().expect("empty entry half").a0;
-    let out_a = out.phases.last().expect("empty exit half").end_state().2;
-    assert!(
-        into_a < -0.75 * machine.accel && out_a > 0.75 * machine.accel,
-        "the straight-to-clothoid seams dropped the trail brake: {into_a}, {out_a}"
-    );
-    assert!(
-        into.phases
-            .iter()
-            .all(|p| p.a0 <= 0.0 && p.end_state().2 <= 0.0)
-            && out
-                .phases
-                .iter()
-                .all(|p| p.a0 >= 0.0 && p.end_state().2 >= 0.0),
-        "tangential acceleration stopped braking through the corner: {:?}, {:?}",
-        into.phases,
-        out.phases
-    );
 }

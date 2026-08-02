@@ -648,17 +648,6 @@ fn seam_accel_demands(caps: &[MoveCaps], plan: &mut SeamPlan) {
                 plan.a[k] = required.a;
             }
             None => {
-                let forward = (!plan.is_anchor[k + 1])
-                    .then(|| curved::reachable_exit(&caps[k].kin, (plan.v[k], plan.a[k])))
-                    .flatten()
-                    .filter(|reached| {
-                        (reached.0 - plan.v[k + 1]).abs()
-                            <= REQUIREMENT_BIND_REL * (1.0 + plan.v[k + 1])
-                    });
-                if let Some((_, a)) = forward {
-                    plan.a[k + 1] = a;
-                    continue;
-                }
                 plan.a[k] = seam_accel_window(caps, k, plan.v[k], exit)
                     .map_or(0.0, |window| window.nearest_to(0.0));
             }
@@ -788,18 +777,12 @@ fn settled_seam_accel(
 ) -> Option<f64> {
     let upstream = &caps[k - 1].kin;
     let deliverable = curved::exit_accel_window(upstream, (entry.v, entry.a), v).ok()?;
-    if deliverable.contains(demand)
-        && curved::curved_chain(&caps[k].kin, (v, demand), (exit.v, exit.a)).is_ok()
-    {
-        return Some(demand);
-    }
-    if let Some(preferred) =
-        seam_accel_window(caps, k, v, exit).and_then(|needed| deliverable.meet(&needed))
-    {
-        return Some(preferred.nearest_to(demand));
-    }
     let traversable = curved::traversable_entry_accels(&caps[k].kin, v)?;
-    Some(deliverable.meet(&traversable)?.nearest_to(demand))
+    let binding = deliverable.meet(&traversable)?;
+    let preferred = seam_accel_window(caps, k, v, exit)
+        .and_then(|needed| binding.meet(&needed))
+        .unwrap_or(binding);
+    Some(preferred.nearest_to(demand))
 }
 
 /// Highest speed both members at seam `k` can be planned whole at. A seam may hold
@@ -888,7 +871,7 @@ fn repair_stale_seam_accels(caps: &[MoveCaps], envelope: &[f64], plan: &mut Seam
         }
         let exit = (plan.v[k + 1], plan.a[k + 1]);
         let upstream = (plan.v[k - 1], plan.a[k - 1]);
-        if curved::curved_chain(&caps[k].kin, (plan.v[k], plan.a[k]), exit).is_ok() {
+        if curved::member_closes(&caps[k].kin, (plan.v[k], plan.a[k]), exit) {
             continue;
         }
         let demand = plan.a[k];
@@ -928,14 +911,7 @@ fn settle_seam_states(
             v: plan.v[k - 1],
             a: plan.a[k - 1],
         };
-        let kin = &caps[k - 1].kin;
-        let kappa_exit = kin.kappa0 + kin.sigma * kin.length;
-        let keeps_inverse_trail = entry.a < 0.0 && kappa_exit.abs() > kin.kappa0.abs();
-        let reach = if keeps_inverse_trail {
-            plan.v[k]
-        } else {
-            member_reach(kin, entry)
-        };
+        let reach = member_reach(&caps[k - 1].kin, entry);
         plan.v[k] = plan.v[k].min(reach).max(given_up_to[k]);
         if !disk::curved_solver_is_available(&caps[k - 1].kin) {
             k += 1;
