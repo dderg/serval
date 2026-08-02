@@ -65,6 +65,3 @@ tools/sim/preload/*.so
 test-benches/
 
 graphify-out/
-
-.omp/plugins/installed_plugins.json
-.omp/plugins/node_modules/
