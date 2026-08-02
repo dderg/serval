@@ -98,8 +98,8 @@ const SHAPED_ACCEL_SHARES: [f64; 3] = [0.25, 0.375, 0.5];
 const SHAPED_JERK_SHARES: [f64; 3] = [0.5, 0.625, 0.75];
 const SHAPED_TIME_WIN: f64 = 1.0e-2;
 const TRAIL_ARC_PIECES: u32 = 8;
-const TRAIL_BISECT_ITERS: u32 = 8;
-const TRAIL_LOCAL_JERK_SHARE: f64 = 0.375;
+const TRAIL_BISECT_ITERS: u32 = 24;
+const TRAIL_LOCAL_JERK_SHARES: [f64; 4] = [0.99, 0.75, 0.5, 0.375];
 const TRAIL_MIN_JERK_AUTHORITY_SHARE: f64 = 0.25;
 const TRAIL_MIN_ACCEL_SWINGS: f64 = 2.0;
 
@@ -1133,18 +1133,11 @@ fn banding_pays(bands: &[Kinematics]) -> bool {
     highest > lowest * (1.0 + BAND_CEILING_SPREAD)
 }
 
-pub(super) fn trail_reach(kin: &Kinematics, entry: (f64, f64)) -> Option<Vec<StraightPhase>> {
-    let k_exit = kin.kappa0 + kin.sigma * kin.length;
-    if !(kin.jerk.is_finite()
-        && kin.sigma != 0.0
-        && kin.kappa0.abs() > k_exit.abs()
-        && entry.1 >= 0.0
-        && entry.0 > 0.0
-        && ball_slack_at(kin, entry.0) >= TRAIL_MIN_JERK_AUTHORITY_SHARE * kin.jerk
-        && kin.jerk * kin.length >= TRAIL_MIN_ACCEL_SWINGS * kin.accel * entry.0)
-    {
-        return None;
-    }
+fn trail_reach_at_share(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    local_jerk_share: f64,
+) -> Option<Vec<StraightPhase>> {
     let mut march = March::new(entry);
     for piece in 1..=TRAIL_ARC_PIECES {
         let edge = kin.length * f64::from(piece) / f64::from(TRAIL_ARC_PIECES);
@@ -1174,6 +1167,7 @@ pub(super) fn trail_reach(kin: &Kinematics, entry: (f64, f64)) -> Option<Vec<Str
                 || v > kin.flat_ceiling
                 || !state_fits(phase.s0, phase.v0, phase.a0)
                 || !state_fits(s, v, a)
+                || !certify::is_certified(kin, phase.s0, phase.v0, phase.a0, phase.j, phase.dt)
             {
                 return None;
             }
@@ -1193,11 +1187,33 @@ pub(super) fn trail_reach(kin: &Kinematics, entry: (f64, f64)) -> Option<Vec<Str
                     hi = mid;
                 }
             }
-            phase_at(TRAIL_LOCAL_JERK_SHARE * lo)?
+            phase_at(local_jerk_share * lo)?
         };
         march.push(phase.j, phase.dt);
     }
     certified_chain(kin, &coalesce(march.phases)).ok()
+}
+
+pub(super) fn trail_reach(kin: &Kinematics, entry: (f64, f64)) -> Option<Vec<StraightPhase>> {
+    let k_exit = kin.kappa0 + kin.sigma * kin.length;
+    if !(kin.jerk.is_finite()
+        && kin.sigma != 0.0
+        && kin.kappa0.abs() > k_exit.abs()
+        && entry.1 >= 0.0
+        && entry.0 > 0.0
+        && ball_slack_at(kin, entry.0) >= TRAIL_MIN_JERK_AUTHORITY_SHARE * kin.jerk
+        && kin.jerk * kin.length >= TRAIL_MIN_ACCEL_SWINGS * kin.accel * entry.0)
+    {
+        return None;
+    }
+    TRAIL_LOCAL_JERK_SHARES
+        .into_iter()
+        .filter_map(|share| trail_reach_at_share(kin, entry, share))
+        .max_by(|lhs, rhs| {
+            handoff_state(kin, lhs, entry)
+                .0
+                .total_cmp(&handoff_state(kin, rhs, entry).0)
+        })
 }
 
 fn reach_chain(kin: &Kinematics, entry: (f64, f64)) -> Result<Vec<StraightPhase>, VelocityError> {

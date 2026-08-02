@@ -14,6 +14,7 @@ const EPS: f64 = 1e-12;
 const BRACKET_HALVINGS: u32 = 64;
 
 const LENGTH_CLOSURE_TOL: f64 = 1e-9;
+const SATURATED_BOUNDARY_SHARE: f64 = 0.99;
 
 /// A hold-free shape has no free parameter left, so it can only be taken when
 /// the boundary data it is over-determined by already agrees with it — to within
@@ -371,6 +372,68 @@ impl Builder {
         }
         self.ramp(v_to, a_max, j_max);
     }
+    fn run_to_accel_boundary(
+        &mut self,
+        exit: (f64, f64),
+        length: f64,
+        v_max: f64,
+        a_max: f64,
+        j_max: f64,
+        seed_peak: f64,
+    ) -> bool {
+        if exit.1.abs() < SATURATED_BOUNDARY_SHARE * a_max {
+            return false;
+        }
+        let start_v = self.v;
+        let a_hold = exit.1;
+        let span_at = |v_peak: f64| {
+            let probe = Builder::new(start_v, 0.0);
+            let ramp = HoldRamp::new((v_peak, 0.0), exit, a_hold, j_max);
+            (ramp.t_hold >= 0.0).then(|| {
+                (
+                    probe.ramp_span(v_peak, a_max, j_max) + ramp.span((v_peak, 0.0), exit.1),
+                    ramp,
+                )
+            })
+        };
+        let floor = start_v.max(exit.0);
+        let mut feasible_peak = seed_peak;
+        for _ in 0..BRACKET_HALVINGS {
+            if span_at(feasible_peak).is_some_and(|(span, _)| span <= length) {
+                break;
+            }
+            feasible_peak = 0.5 * (floor + feasible_peak);
+        }
+        if !span_at(feasible_peak).is_some_and(|(span, _)| span <= length) {
+            return false;
+        }
+        let v_peak = if span_at(v_max).is_some_and(|(span, _)| span <= length) {
+            v_max
+        } else {
+            let mut lo = feasible_peak;
+            let mut hi = v_max;
+            for _ in 0..BRACKET_HALVINGS {
+                let mid = 0.5 * (lo + hi);
+                if span_at(mid).is_some_and(|(span, _)| span <= length) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            lo
+        };
+        let (span, ramp) =
+            span_at(v_peak).expect("seeded acceleration-boundary run lost its bracket");
+        let s_entry = self.s;
+        self.ramp(v_peak, a_max, j_max);
+        let cruise = length - span;
+        if cruise > EPS && self.v > EPS {
+            self.phase(0.0, cruise / self.v);
+        }
+        ramp.emit(self, exit.1);
+        debug_assert!((self.s - s_entry - length).abs() <= LENGTH_CLOSURE_TOL * (1.0 + length));
+        true
+    }
 
     fn unwind_accel_to_zero(&mut self, j_max: f64) {
         let a = self.a;
@@ -427,6 +490,32 @@ fn advance(state: (f64, f64, f64), j: f64, dt: f64) -> (f64, f64, f64) {
         j,
     }
     .end_state()
+}
+fn reverse_chain(length: f64, entry: (f64, f64), chain: Vec<StraightPhase>) -> Vec<StraightPhase> {
+    let mut t0 = 0.0;
+    let mut reversed: Vec<_> = chain
+        .into_iter()
+        .rev()
+        .map(|phase| {
+            let (s_end, v_end, a_end) = phase.end_state();
+            let reversed = StraightPhase {
+                t0,
+                dt: phase.dt,
+                s0: length - s_end,
+                v0: v_end,
+                a0: -a_end,
+                j: phase.j,
+            };
+            t0 += phase.dt;
+            reversed
+        })
+        .collect();
+    if let Some(first) = reversed.first_mut() {
+        first.s0 = 0.0;
+        first.v0 = entry.0;
+        first.a0 = entry.1;
+    }
+    reversed
 }
 
 /// Speed change of a constant-jerk slew between two acceleration levels.
@@ -731,6 +820,10 @@ pub fn straight_chain_between(
             return infeasible(BoundaryInfeasibility::UnboundedJerkWithAccelBoundary { a });
         }
     }
+    if a0.abs() >= SATURATED_BOUNDARY_SHARE * a_max && a1 == 0.0 {
+        return straight_chain_between((v1, 0.0), (v0, -a0), length, v_max, a_max, j_max)
+            .map(|chain| reverse_chain(length, (v0, a0), chain));
+    }
 
     let v_after_unwind = v0 + swing_dv(a0, j_max);
     let v_before_wind = v1 - swing_dv(a1, j_max);
@@ -753,8 +846,12 @@ pub fn straight_chain_between(
     let phases = if length >= zero_crossing_minimum {
         let mut b = Builder::new(v0, a0);
         b.unwind_accel_to_zero(j_max);
-        b.run(v_before_wind, length - b.s - exit_dist, v_max, a_max, j_max);
-        b.wind_accel_up_to(a1, j_max);
+        let ordinary_length = length - b.s - exit_dist;
+        let seed_peak = peak_velocity(b.v, v_before_wind, ordinary_length, v_max, a_max, j_max);
+        if !b.run_to_accel_boundary((v1, a1), length - b.s, v_max, a_max, j_max, seed_peak) {
+            b.run(v_before_wind, ordinary_length, v_max, a_max, j_max);
+            b.wind_accel_up_to(a1, j_max);
+        }
         b.phases
     } else {
         hold_ramp_chain(entry, exit, length, a_max, j_max, zero_crossing_minimum)?

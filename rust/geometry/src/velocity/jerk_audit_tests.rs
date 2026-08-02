@@ -919,3 +919,41 @@ fn clothoid_snapshot_trail_brakes_through_both_halves() {
         out.phases
     );
 }
+#[test]
+fn fast_clothoid_snapshot_carries_full_acceleration_through_the_seams() {
+    let machine = Machine {
+        feed: 1_000.0,
+        accel: 70_000.0,
+        corner_accel: f64::INFINITY,
+        deviation: crate::corner_deviation_from_scv(70.0, 70_000.0),
+        jerk: 1.0e11,
+    };
+    let moves = machine.polyline(&[[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0]]);
+    let (fitted, profile) = plan_for(&moves);
+    let curved: Vec<_> = fitted
+        .moves
+        .iter()
+        .zip(&profile.moves)
+        .filter(|(mv, _)| matches!(mv.segment.spatial, Some(Segment::Clothoid(_))))
+        .collect();
+    assert_eq!(
+        curved.len(),
+        2,
+        "the fast snapshot corner must be a biclothoid"
+    );
+    let into = curved[0].1;
+    let out = curved[1].1;
+    assert!(
+        into.entry_v > 100.0 && out.exit_v > 100.0,
+        "the fast envelope left reachable corner speed unused: {} -> {} -> {}",
+        into.entry_v,
+        into.exit_v,
+        out.exit_v
+    );
+    let into_a = into.phases.first().expect("empty entry half").a0;
+    let out_a = out.phases.last().expect("empty exit half").end_state().2;
+    assert!(
+        into_a < -0.99 * machine.accel && out_a > 0.99 * machine.accel,
+        "the fast envelope dropped acceleration at the straight seams: {into_a}, {out_a}"
+    );
+}

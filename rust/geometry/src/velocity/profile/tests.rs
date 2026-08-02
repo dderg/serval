@@ -346,6 +346,49 @@ fn straight_chain_between_hits_both_boundary_accelerations() {
     assert_eq!(reversed[0].a0, -EXACT_EXIT_A);
     assert_eq!(reversed.last().unwrap().end_state().2, -EXACT_ENTRY_A);
 }
+#[test]
+fn straight_chain_between_carries_saturated_acceleration_into_the_boundary() {
+    let length = 9.902_554;
+    let a_max = 70_000.0;
+    let j_max = 1.0e11;
+    let exit = (102.857_4, -69_963.33);
+    let chain = straight_chain_between((0.0, 0.0), exit, length, 1_000.0, a_max, j_max).unwrap();
+    assert_chain_continuous(&chain, j_max, "saturated-exit");
+    let last = chain.last().expect("empty saturated-exit chain");
+    assert!(
+        last.a0 < -0.99 * a_max,
+        "the straight run unwound its brake before the boundary: {chain:?}"
+    );
+    assert_boundary_chain_closes(
+        &chain,
+        (0.0, 0.0),
+        exit,
+        length,
+        1_000.0,
+        a_max,
+        j_max,
+        "saturated-exit",
+    );
+
+    let entry = (exit.0, -exit.1);
+    let reversed =
+        straight_chain_between(entry, (0.0, 0.0), length, 1_000.0, a_max, j_max).unwrap();
+    assert_chain_continuous(&reversed, j_max, "saturated-entry");
+    assert!(
+        reversed[0].end_state().2 > 0.99 * a_max,
+        "the straight run unwound its acceleration after the boundary: {reversed:?}"
+    );
+    assert_boundary_chain_closes(
+        &reversed,
+        entry,
+        (0.0, 0.0),
+        length,
+        1_000.0,
+        a_max,
+        j_max,
+        "saturated-entry",
+    );
+}
 
 #[test]
 fn straight_chain_between_obeys_the_limits_it_was_given() {
