@@ -2021,29 +2021,70 @@ fn extremal_chain(
     states_match(entry, (v, -a)).then(|| reverse_chain(kin.length, &backward))
 }
 
-/// One flat-acceleration pass between the boundary states: wind the entry
-/// acceleration to `hold`, hold it, wind it to the exit acceleration, both
-/// swings at `j_wind`. The hold duration is pinned by the speed the two swings
-/// do not already account for, so the arc the pass spends is a function of
-/// `hold` alone and the boundary states are met exactly.
-fn flat_span(entry: (f64, f64), exit: (f64, f64), j_wind: f64, hold: f64) -> Option<March> {
+fn tangential_jerk_authority(
+    kin: &Kinematics,
+    s: f64,
+    state: (f64, f64),
+    direction: f64,
+) -> Option<f64> {
+    let (v, a) = state;
+    let kappa = kin.kappa0 + kin.sigma * s;
+    let normal_jerk = kin.sigma * v * v * v + 3.0 * kappa * v * a;
+    let tangential_squared = kin.jerk * kin.jerk - normal_jerk * normal_jerk;
+    if tangential_squared < -BALL_RAIL_ROUNDING * kin.jerk * kin.jerk {
+        return None;
+    }
+    let tangential_radius = tangential_squared.max(0.0).sqrt();
+    let geometric_jerk = kappa * kappa * v * v * v;
+    let signed = if direction > 0.0 {
+        geometric_jerk + tangential_radius
+    } else {
+        geometric_jerk - tangential_radius
+    };
+    (signed * direction > 0.0).then(|| signed.abs().min(kin.jerk) * (1.0 - RUNG_HANDOFF_ROUNDING))
+}
+
+fn flat_span(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+    wind_scale: f64,
+    hold: f64,
+) -> Option<March> {
     if hold == 0.0 {
         return None;
     }
     let mut m = March::new(entry);
-    let j_in = if hold >= m.a { j_wind } else { -j_wind };
-    m.push(j_in, (hold - m.a).abs() / j_wind);
+    let direction_in = (hold - m.a).signum();
+    if direction_in != 0.0 {
+        let j_in =
+            direction_in * tangential_jerk_authority(kin, 0.0, entry, direction_in)? * wind_scale;
+        m.push(j_in, (hold - m.a).abs() / j_in.abs());
+    }
     if m.v < 0.0 {
         return None;
     }
-    let j_out = if exit.1 >= hold { j_wind } else { -j_wind };
-    let wound_out = 0.5 * (exit.1 * exit.1 - hold * hold) / j_out;
+    let direction_out = (exit.1 - hold).signum();
+    let j_out = if direction_out == 0.0 {
+        1.0
+    } else {
+        direction_out
+            * tangential_jerk_authority(kin, kin.length, exit, direction_out)?
+            * wind_scale
+    };
+    let wound_out = if direction_out == 0.0 {
+        0.0
+    } else {
+        0.5 * (exit.1 * exit.1 - hold * hold) / j_out
+    };
     let dt_hold = (exit.0 - wound_out - m.v) / hold;
     if dt_hold.is_nan() || dt_hold < 0.0 {
         return None;
     }
     m.push(0.0, dt_hold);
-    m.push(j_out, (exit.1 - hold).abs() / j_wind);
+    if direction_out != 0.0 {
+        m.push(j_out, (exit.1 - hold).abs() / j_out.abs());
+    }
     Some(m)
 }
 
@@ -2055,11 +2096,11 @@ fn flat_hold(
     kin: &Kinematics,
     entry: (f64, f64),
     exit: (f64, f64),
-    j_wind: f64,
+    wind_scale: f64,
     sign: f64,
 ) -> Option<f64> {
     let spans = |magnitude: f64| {
-        flat_span(entry, exit, j_wind, sign * magnitude).is_some_and(|m| m.s >= kin.length)
+        flat_span(kin, entry, exit, wind_scale, sign * magnitude).is_some_and(|m| m.s >= kin.length)
     };
     if spans(kin.accel) {
         return None;
@@ -2078,14 +2119,14 @@ fn flat_accel_chain(
     kin: &Kinematics,
     entry: (f64, f64),
     exit: (f64, f64),
-    j_wind: f64,
+    wind_scale: f64,
 ) -> Option<Vec<StraightPhase>> {
     let mut best: Option<March> = None;
     for sign in [-1.0, 1.0] {
-        let Some(hold) = flat_hold(kin, entry, exit, j_wind, sign) else {
+        let Some(hold) = flat_hold(kin, entry, exit, wind_scale, sign) else {
             continue;
         };
-        let Some(pass) = flat_span(entry, exit, j_wind, hold) else {
+        let Some(pass) = flat_span(kin, entry, exit, wind_scale, hold) else {
             continue;
         };
         if (pass.s - kin.length).abs() > LENGTH_CLOSURE_REL_TOL * kin.length {
@@ -2117,14 +2158,14 @@ pub(super) fn certified_flat_chain(
     if !(kin.jerk > 0.0 && kin.jerk.is_finite()) {
         return None;
     }
-    let mut j_wind = kin.jerk;
+    let mut wind_scale = 1.0;
     for _ in 0..FLAT_WIND_HALVINGS {
-        if let Some(chain) = flat_accel_chain(kin, entry, exit, j_wind) {
+        if let Some(chain) = flat_accel_chain(kin, entry, exit, wind_scale) {
             if let Ok(certified) = certified_chain(kin, &chain) {
                 return Some(certified);
             }
         }
-        j_wind *= 0.5;
+        wind_scale *= 0.5;
     }
     None
 }

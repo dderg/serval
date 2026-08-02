@@ -354,6 +354,9 @@ fn straight_chain_between_carries_saturated_acceleration_into_the_boundary() {
     let exit = (102.857_4, -69_963.33);
     let chain = straight_chain_between((0.0, 0.0), exit, length, 1_000.0, a_max, j_max).unwrap();
     assert_chain_continuous(&chain, j_max, "saturated-exit");
+    let reversal: Vec<_> = chain.iter().filter(|phase| phase.j == -j_max).collect();
+    assert_eq!(reversal.len(), 1, "{chain:?}");
+    assert!(reversal[0].dt >= 2.0 * a_max / j_max, "{chain:?}");
     let last = chain.last().expect("empty saturated-exit chain");
     assert!(
         last.a0 < -0.99 * a_max,
@@ -387,6 +390,25 @@ fn straight_chain_between_carries_saturated_acceleration_into_the_boundary() {
         a_max,
         j_max,
         "saturated-entry",
+    );
+}
+
+#[test]
+fn straight_chain_between_winds_small_brake_without_reversing_jerk() {
+    let exit = (6.030_567, -40.096);
+    let chain =
+        straight_chain_between((0.0, 0.0), exit, 39.910_907, 300.0, 1000.0, 100_000.0).unwrap();
+    assert_chain_continuous(&chain, 100_000.0, "small-brake");
+    assert_eq!(chain.last().expect("empty small-brake chain").j, 100_000.0);
+    assert_boundary_chain_closes(
+        &chain,
+        (0.0, 0.0),
+        exit,
+        39.910_907,
+        300.0,
+        1000.0,
+        100_000.0,
+        "small-brake",
     );
 }
 

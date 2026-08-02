@@ -880,6 +880,29 @@ fn a_blend_half_emits_a_monotone_authority_spending_pass() {
 }
 
 #[test]
+fn flat_clothoid_winds_each_edge_to_its_local_jerk_authority() {
+    let machine = Machine {
+        feed: 150.0,
+        accel: 1_000.0,
+        corner_accel: f64::INFINITY,
+        deviation: crate::corner_deviation_from_scv(8.0, 1_000.0),
+        jerk: 100_000.0,
+    };
+    let half = corner_halves(machine)[0].clone();
+    let apex = (top_speed_ceiling(&half), 0.0);
+    let entry = curved::entry_requirement(&half, apex).expect("entry requirement");
+    let chain = curved::certified_flat_chain(&half, entry, apex).expect("flat chain");
+    let winds: Vec<f64> = chain
+        .iter()
+        .filter_map(|phase| (phase.j != 0.0).then_some(phase.j.abs()))
+        .collect();
+    assert_eq!(winds.len(), 2);
+    assert!(winds[0] > 0.7 * machine.jerk, "{winds:?}");
+    assert!(winds[1] > 0.99 * machine.jerk, "{winds:?}");
+    assert!(winds[1] > 1.2 * winds[0], "{winds:?}");
+}
+
+#[test]
 fn clothoid_snapshot_trail_brakes_through_both_halves() {
     let machine = flat_ride_machines()[1];
     let moves = machine.polyline(&[[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0]]);

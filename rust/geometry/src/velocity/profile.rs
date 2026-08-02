@@ -15,6 +15,7 @@ const BRACKET_HALVINGS: u32 = 64;
 
 const LENGTH_CLOSURE_TOL: f64 = 1e-9;
 const SATURATED_BOUNDARY_SHARE: f64 = 0.99;
+const DIRECT_SMALL_BOUNDARY_SHARE: f64 = 0.1;
 
 /// A hold-free shape has no free parameter left, so it can only be taken when
 /// the boundary data it is over-determined by already agrees with it — to within
@@ -254,6 +255,7 @@ fn peak_velocity(v0: f64, v1: f64, length: f64, v_max: f64, a_max: f64, j_max: f
     lo
 }
 
+#[derive(Clone)]
 struct Builder {
     phases: Vec<StraightPhase>,
     t: f64,
@@ -381,7 +383,12 @@ impl Builder {
         j_max: f64,
         seed_peak: f64,
     ) -> bool {
-        if exit.1.abs() < SATURATED_BOUNDARY_SHARE * a_max {
+        let boundary_share = exit.1.abs() / a_max;
+        if !j_max.is_finite()
+            || exit.1 == 0.0
+            || (boundary_share > DIRECT_SMALL_BOUNDARY_SHARE
+                && boundary_share < SATURATED_BOUNDARY_SHARE)
+        {
             return false;
         }
         let start_v = self.v;
@@ -768,7 +775,7 @@ pub fn straight_chain(
 ) -> Vec<StraightPhase> {
     let mut b = Builder::new(v0, 0.0);
     b.run(v1, length, v_max, a_max, j_max);
-    b.phases
+    coalesce_phases(b.phases)
 }
 
 /// Plan a triple-limited profile from `v0` to `v1` across `length` under a flat
@@ -781,6 +788,30 @@ pub fn plan(v0: f64, v1: f64, length: f64, v_max: f64, a_max: f64, j_max: f64) -
         exit: (v1, 0.0),
         length: span,
     }
+}
+
+fn coalesce_phases(phases: Vec<StraightPhase>) -> Vec<StraightPhase> {
+    let mut coalesced: Vec<StraightPhase> = Vec::with_capacity(phases.len());
+    for phase in phases {
+        let continues_same_cubic = |previous: &StraightPhase| {
+            let (s, v, a) = previous.end_state();
+            let crosses_speed_minimum =
+                previous.j > 0.0 && previous.a0 < 0.0 && phase.end_state().2 > 0.0;
+            !crosses_speed_minimum
+                && previous.j == phase.j
+                && previous.t0 + previous.dt == phase.t0
+                && s == phase.s0
+                && v == phase.v0
+                && a == phase.a0
+        };
+        match coalesced.last_mut() {
+            Some(previous) if continues_same_cubic(previous) => {
+                previous.dt += phase.dt;
+            }
+            _ => coalesced.push(phase),
+        }
+    }
+    coalesced
 }
 
 /// Plan across `length` between boundary states that both carry acceleration.
@@ -848,14 +879,20 @@ pub fn straight_chain_between(
         b.unwind_accel_to_zero(j_max);
         let ordinary_length = length - b.s - exit_dist;
         let seed_peak = peak_velocity(b.v, v_before_wind, ordinary_length, v_max, a_max, j_max);
-        if !b.run_to_accel_boundary((v1, a1), length - b.s, v_max, a_max, j_max, seed_peak) {
-            b.run(v_before_wind, ordinary_length, v_max, a_max, j_max);
-            b.wind_accel_up_to(a1, j_max);
+        let mut direct = b.clone();
+        let has_direct =
+            direct.run_to_accel_boundary((v1, a1), length - b.s, v_max, a_max, j_max, seed_peak);
+        b.run(v_before_wind, ordinary_length, v_max, a_max, j_max);
+        b.wind_accel_up_to(a1, j_max);
+        if has_direct && direct.t < b.t {
+            direct.phases
+        } else {
+            b.phases
         }
-        b.phases
     } else {
         hold_ramp_chain(entry, exit, length, a_max, j_max, zero_crossing_minimum)?
     };
+    let phases = coalesce_phases(phases);
 
     let achieved = phases.last().map_or(0.0, |p| p.end_state().0);
     if (achieved - length).abs() > LENGTH_CLOSURE_TOL * (1.0 + length) {
