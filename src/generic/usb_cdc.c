@@ -33,7 +33,7 @@
  ****************************************************************/
 
 static struct task_wake usb_bulk_in_wake;
-static uint8_t transmit_buf[1024];
+static uint8_t transmit_buf[2048];
 static uint16_t transmit_pos;
 typedef uint16_t transmit_pos_t;
 
