@@ -385,7 +385,7 @@ impl Builder {
             return false;
         }
         let start_v = self.v;
-        let a_hold = exit.1;
+        let a_hold = exit.1.signum() * a_max;
         let span_at = |v_peak: f64| {
             let probe = Builder::new(start_v, 0.0);
             let ramp = HoldRamp::new((v_peak, 0.0), exit, a_hold, j_max);
