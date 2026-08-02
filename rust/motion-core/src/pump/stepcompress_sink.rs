@@ -1,3 +1,4 @@
+use super::pump_loop::pump_past_guard_secs;
 use super::sched::SeamBasis;
 use super::{AxisFrame, HeartbeatMsg, PumpMsg, SendError};
 use crate::lock_ext::LockExt;
@@ -16,7 +17,12 @@ pub const SHIM_RING_DEPTH: u32 = 64;
 
 pub const MOVE_SLOT_RESERVE: u32 = 16;
 
-pub const SEND_LEAD_SECONDS: f64 = 0.250;
+// How deep the pacer keeps the mcu move queue. The link's retransmit floor
+// sets the bar: one dropped ack silences the host for `MIN_RTO`, and a queue
+// shallower than that runs dry before the host can resend. The mcu then loads
+// a queue_step whose first step already sits behind its clock and shuts down
+// with "Timer too close" from sched_add_timer. Two retransmits of headroom.
+pub const SEND_LEAD_SECONDS: f64 = 2.0 * (host_rt::host_io::rtt::MIN_RTO_MS as f64) / 1000.0;
 
 pub const CONSUMED_MARGIN_SECONDS: f64 = 0.010;
 
@@ -125,6 +131,7 @@ enum Outbound {
 
 struct OutboundFrame {
     frame: Outbound,
+    start_clock: u64,
     end_clock: u64,
 }
 
@@ -380,9 +387,10 @@ impl StepcompressEndpoint {
             .halt_at(motor, emit_cursor)
             .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
         for frame in tail {
-            let end_clock = self.frame_end_clock(now, frame);
+            let (start_clock, end_clock) = self.frame_clocks(now, frame);
             self.backlog.push_back(OutboundFrame {
                 frame: Outbound::Step(frame),
+                start_clock,
                 end_clock,
             });
         }
@@ -411,6 +419,7 @@ impl StepcompressEndpoint {
             let id = BarrierId { oid, seq };
             self.backlog.push_back(OutboundFrame {
                 frame: Outbound::Barrier(id),
+                start_clock: end_clock,
                 end_clock,
             });
             waits.push(id);
@@ -491,15 +500,16 @@ impl StepcompressEndpoint {
         Ok((now, freq))
     }
 
-    fn frame_end_clock(&mut self, now: u64, frame: StepFrame) -> u64 {
+    fn frame_clocks(&mut self, now: u64, frame: StepFrame) -> (u64, u64) {
         match frame {
             StepFrame::ResetStepClock { oid, clock } => {
                 let expanded = expand_clock32(now, clock);
                 self.step_clock.insert(oid, expanded);
-                expanded
+                (expanded, expanded)
             }
             StepFrame::SetNextStepDir { oid, .. } => {
-                self.step_clock.get(&oid).copied().unwrap_or(now)
+                let cursor = self.step_clock.get(&oid).copied().unwrap_or(now);
+                (cursor, cursor)
             }
             StepFrame::QueueStep {
                 oid,
@@ -508,8 +518,9 @@ impl StepcompressEndpoint {
                 add,
             } => {
                 let cursor = self.step_clock.entry(oid).or_insert(now);
+                let first_step = cursor.saturating_add(u64::from(interval));
                 *cursor = cursor.saturating_add_signed(queue_step_span(interval, count, add));
-                *cursor
+                (first_step, *cursor)
             }
         }
     }
@@ -525,9 +536,10 @@ impl StepcompressEndpoint {
             .drain(drain_to)
             .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
         for frame in frames {
-            let end_clock = self.frame_end_clock(now, frame);
+            let (start_clock, end_clock) = self.frame_clocks(now, frame);
             self.backlog.push_back(OutboundFrame {
                 frame: Outbound::Step(frame),
+                start_clock,
                 end_clock,
             });
         }
@@ -549,10 +561,23 @@ impl StepcompressEndpoint {
         let cutoff = now.saturating_sub(margin);
         self.in_flight.retain(|e| e.end_clock > cutoff);
         let egress = Arc::clone(&self.egress);
+        let stale_by = (freq * pump_past_guard_secs()) as u64;
         while let Some(front) = self.backlog.front() {
             let consumes_slot = matches!(front.frame, Outbound::Step(StepFrame::QueueStep { .. }));
             if consumes_slot && self.in_flight.len() as u32 >= self.budget {
                 break;
+            }
+            if consumes_slot && front.start_clock.saturating_add(stale_by) < now {
+                let late_us = (now - front.start_clock) as f64 * 1e6 / freq;
+                let backlog = self.backlog.len();
+                let in_flight = self.in_flight.len();
+                return Err(SendError::Fatal(format!(
+                    "stepcompress mcu {}: queue_step first step at clock {} is {late_us:.0} us \
+                     behind the mcu clock {now} — the mcu would load it onto an idle stepper and \
+                     shut down with \"Timer too close\". {SEND_LEAD_SECONDS} s of lead was not \
+                     delivered: {backlog} frames backlogged, {in_flight}/{} move slots in flight",
+                    self.mcu_id, front.start_clock, self.budget
+                )));
             }
             let out = self
                 .backlog
@@ -619,9 +644,10 @@ impl StepcompressEndpoint {
                     .finish(motor)
                     .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
                 for frame in tail {
-                    let end_clock = self.frame_end_clock(now, frame);
+                    let (start_clock, end_clock) = self.frame_clocks(now, frame);
                     self.backlog.push_back(OutboundFrame {
                         frame: Outbound::Step(frame),
+                        start_clock,
                         end_clock,
                     });
                 }

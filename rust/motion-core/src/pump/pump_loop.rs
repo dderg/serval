@@ -75,7 +75,7 @@ fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
 // virtual clock races arbitrarily far ahead of the host projection, so
 // the guard widens to the MCU's own mcu-sim grace instead of aborting on
 // infrastructure jitter.
-fn pump_past_guard_secs() -> f64 {
+pub(super) fn pump_past_guard_secs() -> f64 {
     static GUARD: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *GUARD.get_or_init(|| {
         if std::env::var_os("MCU_SIM_SOCK_DIR").is_some() {

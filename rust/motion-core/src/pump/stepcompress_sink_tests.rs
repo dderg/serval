@@ -179,6 +179,23 @@ fn ramp_from(start_time: u64, count: usize, start_mm: f32) -> Vec<PieceEntry> {
         .collect()
 }
 
+/// A ramp whose pieces are long enough that a few in-flight moves buffer more
+/// mcu time than the budget tests advance the clock per tick. `ramp`'s 2 ms
+/// pieces cannot: four slots hold 8 ms of motion, so a 10 ms tick leaves the
+/// backlog head behind the mcu clock — a pipe no host could deliver through.
+fn paceable_ramp(start_time: u64, count: usize) -> Vec<PieceEntry> {
+    let dur = 0.02_f32;
+    let span = (f64::from(dur) * CYCLES_PER_SECOND) as u64;
+    let mut at = 0.0_f32;
+    (0..count)
+        .map(|i| {
+            let from = at;
+            at += 0.05 * (1 + (i % 4)) as f32;
+            piece(start_time + span * i as u64, from, at, dur)
+        })
+        .collect()
+}
+
 #[test]
 fn sending_stops_once_the_in_flight_budget_is_reached() {
     let mut h = harness(BUDGET);
@@ -199,7 +216,7 @@ fn in_flight_drains_as_the_clock_advances_and_sending_resumes() {
     let mut h = harness(BUDGET);
     h.now.store(1_000, Ordering::Relaxed);
     h.endpoint
-        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .send_frames(MCU_ID, &[axis_frame(paceable_ramp(2_000, 12))])
         .unwrap();
     let first = h.sent_moves();
     assert_eq!(first, BUDGET as usize);
@@ -224,7 +241,7 @@ fn retirement_only_counts_fully_sent_pieces_and_never_regresses() {
     let mut h = harness(BUDGET);
     h.now.store(1_000, Ordering::Relaxed);
     h.endpoint
-        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .send_frames(MCU_ID, &[axis_frame(paceable_ramp(2_000, 12))])
         .unwrap();
 
     let shim_retired = h.endpoint.shim.retired_counts();
@@ -270,6 +287,7 @@ fn backlog_ceiling_breach_is_fatal() {
                 count: 1,
                 add: 0,
             }),
+            start_clock: u64::MAX,
             end_clock: u64::MAX,
         }));
     let err = h
@@ -283,6 +301,61 @@ fn backlog_ceiling_breach_is_fatal() {
         }
         other => panic!("expected Fatal, got {other:?}"),
     }
+}
+
+fn stale_queue_step(start_clock: u64) -> OutboundFrame {
+    OutboundFrame {
+        frame: Outbound::Step(StepFrame::QueueStep {
+            oid: OID,
+            interval: 10,
+            count: 1,
+            add: 0,
+        }),
+        start_clock,
+        end_clock: start_clock + 10,
+    }
+}
+
+#[test]
+fn a_queue_step_behind_the_mcu_clock_is_fatal_before_the_mcu_loads_it() {
+    let mut h = harness(BUDGET);
+    h.endpoint.backlog.push_back(stale_queue_step(1_000));
+    h.now.store(1_000_000, Ordering::Relaxed);
+    let err = h.endpoint.tick().unwrap_err();
+    match err {
+        SendError::Fatal(msg) => {
+            assert!(msg.contains("Timer too close"), "{msg}");
+            assert!(msg.contains("999000 us behind"), "{msg}");
+        }
+        other => panic!("expected Fatal, got {other:?}"),
+    }
+    assert_eq!(
+        h.sent_moves(),
+        0,
+        "a frame the mcu would fault on must never reach the wire"
+    );
+}
+
+#[test]
+fn a_queue_step_within_the_projection_guard_still_goes_out() {
+    let mut h = harness(BUDGET);
+    let guard_cycles = (CYCLES_PER_SECOND * 500e-6) as u64;
+    h.now.store(1_000_000, Ordering::Relaxed);
+    h.endpoint
+        .backlog
+        .push_back(stale_queue_step(1_000_000 - guard_cycles / 2));
+    h.endpoint.tick().unwrap();
+    assert_eq!(h.sent_moves(), 1);
+}
+
+#[test]
+fn the_send_lead_outlasts_the_link_retransmit_floor() {
+    let min_rto = host_rt::host_io::rtt::MIN_RTO.as_secs_f64();
+    assert!(
+        SEND_LEAD_SECONDS >= 2.0 * min_rto,
+        "a move queue {SEND_LEAD_SECONDS} s deep empties during the {min_rto} s the host stays \
+         silent after a dropped ack, and the mcu shuts down with \"Timer too close\""
+    );
 }
 
 #[test]

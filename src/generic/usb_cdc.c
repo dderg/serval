@@ -97,7 +97,8 @@ int
 kalico_console_write_raw(const uint8_t *buf, uint16_t len)
 {
     transmit_pos_t tpos = transmit_pos;
-    if ((uint32_t)tpos + (uint32_t)len > sizeof(transmit_buf)) {
+    if ((uint32_t)tpos + (uint32_t)len
+        > sizeof(transmit_buf) - CONSOLE_TX_PROTOCOL_RESERVE) {
         diag_record_tx_drop_kalico(len, tpos);
         return -1;
     }
