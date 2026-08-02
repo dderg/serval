@@ -15,16 +15,20 @@ __attribute__((used, externally_visible))
 _Alignas(16) uint8_t rt_storage[RT_STORAGE_SIZE];
 
 _Static_assert(RT_STORAGE_SIZE >= 1024,
-               "RT_STORAGE_SIZE absurdly small — Kconfig profile broken");
+               "RT_STORAGE_SIZE absurdly small — Kconfig RUNTIME_STORAGE_SIZE broken");
 
 // H7-only AXI SRAM overflow guard — sum every .axi_bss occupant and verify it
 // fits the 320 KB AXI region with headroom. Update when adding/removing an
 // .axi_bss static. Current occupants:
 //   - kalico_buf       (src/mcu_demux.c, MCU_DEMUX_MCU_BUF_SIZE)
 //   - receive_buf      (src/generic/serial_irq.c, RX_BUFFER_SIZE)
+//   - usb_boot_flag    (src/stm32/dfu_reboot.c, 32-byte aligned u64)
+//   - phase_dma_txbuf/rxbuf (src/stm32/phase_stepping_spi.c, 2x32)
 #if CONFIG_MACH_STM32H7
-#define AXI_BSS_MCU_BUF_BYTES        512   /* matches MCU_DEMUX_MCU_BUF_SIZE */
+#define AXI_BSS_MCU_BUF_BYTES           512   /* matches MCU_DEMUX_MCU_BUF_SIZE */
 #define AXI_BSS_SERIAL_IRQ_RX_BYTES     2048  /* RX_BUFFER_SIZE in serial_irq.c */
+#define AXI_BSS_USB_BOOT_FLAG_BYTES     32    /* usb_boot_flag (aligned 32) */
+#define AXI_BSS_PHASE_DMA_BYTES         64    /* phase_dma_{tx,rx}buf */
 #define AXI_BSS_HEADROOM                2048  /* 2 KB margin */
 #define AXI_SRAM_SIZE                   (320 * 1024)
 
@@ -32,6 +36,8 @@ _Static_assert(
     RT_STORAGE_SIZE
         + AXI_BSS_MCU_BUF_BYTES
         + AXI_BSS_SERIAL_IRQ_RX_BYTES
+        + AXI_BSS_USB_BOOT_FLAG_BYTES
+        + AXI_BSS_PHASE_DMA_BYTES
         + AXI_BSS_HEADROOM
         <= AXI_SRAM_SIZE,
     "AXI SRAM overflow: RT_STORAGE_SIZE too large for AXI region "
