@@ -459,23 +459,24 @@ fn integration_grid_caps_nodes_on_a_long_curved_member() {
     // Uncapped, 40 mm at GRID_STEP_MM would be 4000 nodes, and every one of
     // them becomes a reconstruction window the lowering pays a piece for.
     assert!(
-        grid.len() <= CURVED_MAX_POINTS + 1,
-        "40 mm curved member produced {} nodes, cap is {CURVED_MAX_POINTS}",
+        grid.len() <= MEMBER_MAX_POINTS + 1,
+        "40 mm curved member produced {} nodes, cap is {MEMBER_MAX_POINTS}",
         grid.len()
     );
 }
 
 #[test]
-fn integration_grid_does_not_cap_a_long_straight_member() {
-    // A straight member has no interior structure the cap could be trading
-    // accuracy for: its nodes collapse into merged zero-jerk runs in the
-    // lowering. Capping them only re-partitions an exact closed-form profile
-    // and widens the cells the profile pass reads its ceiling steps from.
+fn integration_grid_caps_nodes_on_a_long_straight_member() {
+    // A straight member is not exempt. `repro_z14.gcode` line 2710 is a
+    // 15.6 mm straight cruising at the step-rate ceiling: uncapped it sampled
+    // 1560 nodes, lowered to 2336 pieces for one shaped segment, and cost
+    // 3.5 s of shaper convolution fits on a Pi 4 — a whole pump lead spent on
+    // one segment, which lands the next lane's piece in the MCU's past.
     let grid = grid_for(40.0, false, false);
-    let widest = grid.windows(2).map(|w| w[1] - w[0]).fold(0.0_f64, f64::max);
     assert!(
-        widest <= GRID_STEP_MM + 1e-12,
-        "40 mm straight member widened to {widest} mm cells"
+        grid.len() <= MEMBER_MAX_POINTS + 1,
+        "40 mm straight member produced {} nodes, cap is {MEMBER_MAX_POINTS}",
+        grid.len()
     );
 }
 
@@ -489,7 +490,7 @@ fn rest_ladder_leaves_no_hole_up_to_the_uniform_step() {
     let length = 40.0;
     let k = curved_kin(length);
     let grid = grid_of(&[&k], true, true);
-    let step = length / CURVED_MAX_POINTS as f64;
+    let step = length / MEMBER_MAX_POINTS as f64;
     assert!(
         step > GRID_STEP_MM,
         "fixture must exercise the widened step"

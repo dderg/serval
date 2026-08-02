@@ -5,31 +5,31 @@ use super::ride;
 
 const RK_MIN_STEP_FRAC: f64 = 1e-6;
 const RK_MAX_STEPS: u32 = 100_000;
-/// Per-member ceiling on integration-grid nodes for a *curved* member.
-/// `GRID_STEP_MM` sets the resolution a short move needs; on a long one it
-/// mints nodes the physics has no structure for. That is not free sampling —
-/// the reconstruction is one quintic window per node, and the lowering's
-/// ladder ends up spending one output piece per window, so node count *is*
-/// piece count on a curved move. A 21 mm blended move sampled at 0.01 mm
-/// reached ~2300 lowered pieces for a single segment: 3.4 s of shaper
-/// convolution fits per axis on a Pi 4, and those same 2300 pieces on the
-/// wire.
+/// Per-member ceiling on integration-grid nodes. `GRID_STEP_MM` sets the
+/// resolution a short move needs; on a long one it mints nodes the physics
+/// has no structure for. That is not free sampling — the reconstruction is
+/// one quintic window per node, and the lowering spends output pieces per
+/// window, so node count *is* piece count. Straight members are no exception:
+/// a 15.6 mm straight cruising at its step-rate ceiling lowered to 2336
+/// pieces from 1560 nodes (`repro_z14.gcode`, line 2710), and eight such
+/// segments cost 3.5 s each in shaper convolution fits on a Pi 4 — the whole
+/// 2 s pump lead, spent on one segment.
 ///
 /// The floor on the cap is the other direction: the sampled reconstruction's
 /// interior acceleration error grows with the node spacing, and the lowering
 /// budgets 50 mm/s² for it. A quarter arc of radius 20 (31 mm of curved
 /// path, `curved_fit_acceleration_is_continuous_and_converges`) holds that
 /// error under 5 mm/s² at 256 nodes and breaks past 13 mm/s² at 128, so 256
-/// is where both ends are satisfied. A move short enough to want a finer
-/// grid still gets `GRID_STEP_MM` exactly.
-const CURVED_MAX_POINTS: usize = 256;
-/// A straight member carries no interior structure to resolve — one flat
-/// ceiling, one accel budget — so its nodes neither buy accuracy nor cost
-/// pieces: the lowering merges the whole span into a handful of zero-jerk
-/// runs however finely it was sampled (200 mm of straight ramp lowers to 22
-/// pieces from 20 021 nodes). Capping them would only re-partition an exact
-/// closed-form profile. This ceiling is the memory backstop it always was.
-const STRAIGHT_MAX_POINTS: usize = 16_384;
+/// is where both ends are satisfied — and a straight member, whose ceiling
+/// and accel budget are constant across its span, has strictly less interior
+/// structure than that arc. A move short enough to want a finer grid still
+/// gets `GRID_STEP_MM` exactly.
+///
+/// Widening a cell does not blunt a member boundary: the interior-boundary
+/// ladders below pin the straddling cells at `GRID_STEP_MM` at any cap, so
+/// the ceiling step there reads super-rail exactly as an uncapped grid reads
+/// it.
+const MEMBER_MAX_POINTS: usize = 256;
 const GRID_STEP_MM: f64 = 0.01;
 const GRID_MIN_STEPS: usize = 16;
 const REST_REFINE_MIN_MM: f64 = 1e-5;
@@ -213,12 +213,7 @@ fn integration_grid(members: &[RunMember], entry_rest: bool, exit_rest: bool) ->
     let mut member_step: Vec<f64> = Vec::with_capacity(members.len());
     for m in members {
         let len = m.kin.length;
-        let cap = if m.kin.is_straight() {
-            STRAIGHT_MAX_POINTS
-        } else {
-            CURVED_MAX_POINTS
-        };
-        let steps = ((len / GRID_STEP_MM).ceil() as usize).clamp(GRID_MIN_STEPS, cap);
+        let steps = ((len / GRID_STEP_MM).ceil() as usize).clamp(GRID_MIN_STEPS, MEMBER_MAX_POINTS);
         member_step.push(len / steps as f64);
         for k in 0..steps {
             s.push(m.fwd_s + len * (k as f64) / (steps as f64));
