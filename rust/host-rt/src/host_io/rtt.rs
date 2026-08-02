@@ -7,7 +7,7 @@ const K: f64 = 4.0;
 // during long-running command_task stalls (e.g. Renode). Driven by srtt+4×rttvar after first sample.
 // Any mcu-side queue the host keeps fed must outlast this floor — a queue
 // shallower than one retransmit empties while the link is silent.
-pub const MIN_RTO_MS: u64 = 500;
+pub const MIN_RTO_MS: u64 = 125;
 pub const MIN_RTO: Duration = Duration::from_millis(MIN_RTO_MS);
 pub const MAX_RTO: Duration = Duration::from_secs(5);
 const G: Duration = Duration::from_millis(1);
