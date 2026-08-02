@@ -16,6 +16,7 @@ fn cfg(max_steps_per_sample: u32) -> MotorConfig {
         max_steps_per_sample,
         sample_rate_hz: SAMPLE_RATE_HZ,
         cycles_per_second: CYCLES_PER_SECOND,
+        min_rearm_cycles: 0,
     }
 }
 

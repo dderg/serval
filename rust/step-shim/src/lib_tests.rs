@@ -13,6 +13,7 @@ fn cfg() -> MotorConfig {
         max_steps_per_sample: 16,
         sample_rate_hz: 10_000.0,
         cycles_per_second: CYCLES_PER_SECOND,
+        min_rearm_cycles: 0,
     }
 }
 
@@ -423,6 +424,7 @@ fn idle_cfg() -> MotorConfig {
         max_steps_per_sample: 16,
         sample_rate_hz: 1_000.0,
         cycles_per_second: IDLE_CYCLES_PER_SECOND,
+        min_rearm_cycles: 0,
     }
 }
 

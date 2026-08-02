@@ -28,6 +28,7 @@ def piece_topology(handle, axes, kin):
         [0] * n,
         0.0,
         0,
+        [2e-06] * n,
     )
 
 

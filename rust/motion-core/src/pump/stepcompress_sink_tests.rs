@@ -27,6 +27,7 @@ fn motor_cfg() -> MotorConfig {
         max_steps_per_sample: 16,
         sample_rate_hz: 10_000.0,
         cycles_per_second: CYCLES_PER_SECOND,
+        min_rearm_cycles: 0,
     }
 }
 
@@ -526,6 +527,7 @@ fn stepcompress_cfg(mode: SteppingMode, move_queue_slots: u32) -> McuAxisConfig 
         stepper_oids: vec![OID],
         stepcompress_sample_rate: 10_000.0,
         move_queue_slots,
+        step_pulse_seconds: vec![2e-6],
     }
 }
 

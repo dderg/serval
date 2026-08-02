@@ -16,6 +16,14 @@ pub struct MotorConfig {
     pub max_steps_per_sample: u32,
     pub sample_rate_hz: f32,
     pub cycles_per_second: f64,
+    /// How far the mcu's classic stepper needs between the last step of one
+    /// queued move and the first step of the next. `stepper_event_full`
+    /// schedules an unstep `step_pulse_ticks` after every step and
+    /// `stepper_load_next` re-arms from that pending unstep, so a run that
+    /// starts sooner is loaded behind it: `motion.step_load_late`, then
+    /// "Stepper too far in past". Zero means the caller only owes strict
+    /// monotonicity (both-edge drivers configure zero pulse ticks).
+    pub min_rearm_cycles: u64,
 }
 
 /// What the producer's own anchoring is allowed to move a piece start by:
@@ -110,6 +118,15 @@ pub enum ShimError {
         tolerance: u64,
         projected_span: u64,
     },
+    /// A run's first step lands closer to the committed cursor than the mcu
+    /// can re-arm its stepper. Reported instead of emitting it because the
+    /// mcu answers such a stream with "Stepper too far in past".
+    StepTooSoon {
+        motor: usize,
+        first: u64,
+        committed: u64,
+        min_rearm: u64,
+    },
     CompressFailure {
         motor: usize,
         detail: String,
@@ -123,6 +140,17 @@ impl std::fmt::Display for ShimError {
             Self::StepRateExceeded { motor, steps, cap } => write!(
                 f,
                 "motor {motor}: {steps} steps in one sample exceeds cap {cap}"
+            ),
+            Self::StepTooSoon {
+                motor,
+                first,
+                committed,
+                min_rearm,
+            } => write!(
+                f,
+                "motor {motor}: run starts at {first}, only {} cycles after the committed \
+                 {committed} — the mcu needs {min_rearm} to re-arm after its pending unstep",
+                first - committed
             ),
             Self::PieceGap {
                 motor,
@@ -194,6 +222,20 @@ impl MotorState {
                          last_step_clock={}, run_len={run_len}, dir={dir})",
                         clocks[0], self.needs_reset, self.last_step_clock
                     ),
+                });
+            }
+
+            let min_rearm = if self.needs_reset {
+                0
+            } else {
+                self.cfg.min_rearm_cycles
+            };
+            if clocks[0] - committed < min_rearm {
+                return Err(ShimError::StepTooSoon {
+                    motor,
+                    first: clocks[0],
+                    committed,
+                    min_rearm,
                 });
             }
 
@@ -468,3 +510,7 @@ impl StepShim {
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "rearm_tests.rs"]
+mod rearm_tests;

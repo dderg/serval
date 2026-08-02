@@ -95,8 +95,17 @@ stepper_load_next(struct stepper *s)
                 while (timer_is_before(timer_read_time(), min_next_time))
                     ;
             gpio_out_toggle_noirq(s->dir_pin);
-            uint32_t curtime = timer_read_time();
-            min_next_time = curtime + s->step_pulse_ticks;
+#if CONFIG_MCU_SIM
+            // The sim's virtual clock races arbitrarily far ahead of a
+            // scheduled event (see src/linux/timer.c), so re-arming the dir
+            // settle off it catapults the stepper past the host's step chain
+            // and makes every later load report a phantom "too far in past".
+            // Settle against the pending unstep, as stepper_event_full() does.
+            uint32_t dir_settle_from = min_next_time;
+#else
+            uint32_t dir_settle_from = timer_read_time();
+#endif
+            min_next_time = dir_settle_from + s->step_pulse_ticks;
             if (timer_is_before(s->time.waketime, min_next_time))
                 s->time.waketime = min_next_time;
             return SF_RESCHEDULE;

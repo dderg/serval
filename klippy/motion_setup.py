@@ -22,6 +22,7 @@ McuTopology = namedtuple(
         "stepper_oids",
         "stepcompress_sample_rate",
         "move_queue_slots",
+        "step_pulse_seconds",
     ],
 )
 
@@ -82,6 +83,19 @@ def motor_velocity_ceiling(mcu_stepper):
         0.0 if both_edge else pulse_duration
     )
     return STEP_ISR_BUDGET_FRACTION / per_step_s * mcu_stepper.get_step_dist()
+
+
+def step_pulse_width(mcu_stepper):
+    """The settle the mcu enforces around every pulse: src/stepper_classic.c
+    re-arms its timer at waketime + step_pulse_ticks, both after a step (for
+    the unstep) and after a direction toggle. Both-edge drivers step on every
+    edge and configure zero ticks."""
+    pulse_duration, both_edge = mcu_stepper.get_pulse_duration()
+    if both_edge:
+        return 0.0
+    if pulse_duration is None:
+        pulse_duration = DEFAULT_STEP_PULSE_DURATION
+    return pulse_duration
 
 
 def build_axis_to_handle(motion):
@@ -206,6 +220,7 @@ def derive_mcu_topology(motion, axis_to_handle):
             slot_microstep_distance,
             slot_invert_dir,
             slot_oids,
+            slot_step_pulse_seconds,
         ) = _build_slot_masks(mcu_obj, slot_steppers, len(mcu_by_handle))
         if stepping_mode == STEPPING_MODE_STEPCOMPRESS:
             _reject_stepcompress_conflicts(
@@ -223,6 +238,7 @@ def derive_mcu_topology(motion, axis_to_handle):
                 [slot_oids[a] for a in axes],
                 sample_rate,
                 move_queue_slots,
+                [slot_step_pulse_seconds[a] for a in axes],
             )
         )
     return topo
@@ -290,6 +306,7 @@ def _build_slot_masks(mcu_obj, slot_steppers, num_engine_mcus):
     microstep_distance = [0.0, 0.0, 0.0, 0.0]
     invert_dir = [False, False, False, False]
     stepper_oids = [0, 0, 0, 0]
+    step_pulse_seconds = [0.0, 0.0, 0.0, 0.0]
     bind_list = []
     for i in range(4):
         on_this_mcu = []
@@ -311,6 +328,7 @@ def _build_slot_masks(mcu_obj, slot_steppers, num_engine_mcus):
         steps_per_mm[i] = 1.0 / step_dist
         microstep_distance[i] = step_dist
         stepper_oids[i] = primary.get_oid()
+        step_pulse_seconds[i] = step_pulse_width(primary)
         present_mask |= 1 << i
         if getattr(primary, "_invert_dir", False):
             invert_mask |= 1 << i
@@ -329,6 +347,7 @@ def _build_slot_masks(mcu_obj, slot_steppers, num_engine_mcus):
         microstep_distance,
         invert_dir,
         stepper_oids,
+        step_pulse_seconds,
     )
 
 
@@ -572,6 +591,7 @@ def _configure_one_mcu(
         microstep_distance,
         _invert_dir,
         _stepper_oids,
+        _step_pulse_seconds,
     ) = _build_slot_masks(mcu_obj, slot_steppers, num_engine_mcus)
     if mcu_obj.get_stepping_mode() == STEPPING_MODE_STEPCOMPRESS:
         _configure_stepcompress_mcu(

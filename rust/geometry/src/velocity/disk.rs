@@ -5,7 +5,23 @@ use super::ride;
 
 const RK_MIN_STEP_FRAC: f64 = 1e-6;
 const RK_MAX_STEPS: u32 = 100_000;
-const SAMPLE_MAX_POINTS: usize = 16_384;
+/// Per-member ceiling on integration-grid nodes. `GRID_STEP_MM` sets the
+/// resolution a short move needs; on a long one it mints nodes the physics
+/// has no structure for. That is not free sampling — the reconstruction is
+/// one quintic window per node, and the lowering's ladder ends up spending
+/// one output piece per window, so node count *is* piece count on a curved
+/// move. A 21 mm blended move sampled at 0.01 mm reached ~2300 lowered
+/// pieces for a single segment: 3.4 s of shaper convolution fits per axis on
+/// a Pi 4, and those same 2300 pieces on the wire.
+///
+/// The floor on the cap is the other direction: the sampled reconstruction's
+/// interior acceleration error grows with the node spacing, and the lowering
+/// budgets 50 mm/s² for it. A quarter arc of radius 20 (31 mm of curved
+/// path, `curved_fit_acceleration_is_continuous_and_converges`) holds that
+/// error under 5 mm/s² at 256 nodes and breaks past 13 mm/s² at 128, so 256
+/// is where both ends are satisfied. A move short enough to want a finer
+/// grid still gets `GRID_STEP_MM` exactly.
+const SAMPLE_MAX_POINTS: usize = 256;
 const GRID_STEP_MM: f64 = 0.01;
 const GRID_MIN_STEPS: usize = 16;
 const REST_REFINE_MIN_MM: f64 = 1e-5;
@@ -174,9 +190,11 @@ pub(super) struct RunMember<'a> {
 /// locked-prefix grids stay append-invariant.
 fn integration_grid(members: &[RunMember], entry_rest: bool, exit_rest: bool) -> Vec<f64> {
     let mut s: Vec<f64> = Vec::new();
+    let mut member_step: Vec<f64> = Vec::with_capacity(members.len());
     for m in members {
         let len = m.kin.length;
         let steps = ((len / GRID_STEP_MM).ceil() as usize).clamp(GRID_MIN_STEPS, SAMPLE_MAX_POINTS);
+        member_step.push(len / steps as f64);
         for k in 0..steps {
             s.push(m.fwd_s + len * (k as f64) / (steps as f64));
         }
@@ -185,15 +203,25 @@ fn integration_grid(members: &[RunMember], entry_rest: bool, exit_rest: bool) ->
     let last = &members[members.len() - 1];
     let end = last.fwd_s + last.kin.length;
     let total = end - start;
-    let mut delta = REST_REFINE_MIN_MM;
-    while delta < GRID_STEP_MM.min(0.5 * total) {
-        if entry_rest {
-            s.push(start + delta);
+    // Each ladder climbs at least to `GRID_STEP_MM` and, where the node cap
+    // has widened its own end's uniform spacing past that, all the way to
+    // that spacing. Stopping short leaves a hole between the ladder's top
+    // rung and the first uniform node, and the pass's first arc out of rest
+    // jumps it in one step — an acceleration step at the rest anchor, exactly
+    // what the ladder exists to prevent.
+    let rest_ladder = |anchor_step: f64, at_start: bool, s: &mut Vec<f64>| {
+        let limit = anchor_step.max(GRID_STEP_MM).min(0.5 * total);
+        let mut delta = REST_REFINE_MIN_MM;
+        while delta < limit {
+            s.push(if at_start { start + delta } else { end - delta });
+            delta *= 2.0;
         }
-        if exit_rest {
-            s.push(end - delta);
-        }
-        delta *= 2.0;
+    };
+    if entry_rest {
+        rest_ladder(member_step[0], true, &mut s);
+    }
+    if exit_rest {
+        rest_ladder(member_step[member_step.len() - 1], false, &mut s);
     }
     s.push(end);
     s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));

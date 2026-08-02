@@ -60,6 +60,7 @@ fn shim_frozen_at_epoch() -> StepShim {
             max_steps_per_sample: 64,
             sample_rate_hz: 20_000.0,
             cycles_per_second: EPOCH_FREQ,
+            min_rearm_cycles: 0,
         }],
         super::stepcompress_sink::SHIM_RING_DEPTH,
     )

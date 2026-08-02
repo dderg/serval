@@ -411,3 +411,65 @@ fn finite_jerk_curved_member_still_carries_no_phases() {
     let (_, _, phases) = reconstruct_run(&members, 100.0, 0.0, 1e-8).unwrap();
     assert!(phases[0].is_empty());
 }
+
+fn grid_for(length: f64, entry_rest: bool, exit_rest: bool) -> Vec<f64> {
+    let k = kin(0.0, 0.0, length, 20_000.0, 40_000.0, 600.0);
+    let members = [RunMember {
+        kin: &k,
+        exit_v: if exit_rest { 0.0 } else { 600.0 },
+        fwd_s: 0.0,
+    }];
+    integration_grid(&members, entry_rest, exit_rest)
+}
+
+#[test]
+fn integration_grid_keeps_the_fine_step_on_a_short_member() {
+    let grid = grid_for(0.5, false, false);
+    let widest = grid.windows(2).map(|w| w[1] - w[0]).fold(0.0_f64, f64::max);
+    assert!(
+        (widest - GRID_STEP_MM).abs() <= 1e-12,
+        "a member short enough to want GRID_STEP_MM must still get it, widest {widest}"
+    );
+}
+
+#[test]
+fn integration_grid_caps_nodes_on_a_long_member() {
+    let grid = grid_for(40.0, false, false);
+    // Uncapped, 40 mm at GRID_STEP_MM would be 4000 nodes, and every one of
+    // them becomes a reconstruction window the lowering pays a piece for.
+    assert!(
+        grid.len() <= SAMPLE_MAX_POINTS + 1,
+        "40 mm member produced {} nodes, cap is {SAMPLE_MAX_POINTS}",
+        grid.len()
+    );
+}
+
+#[test]
+fn rest_ladder_leaves_no_hole_up_to_the_uniform_step() {
+    // The node cap widens a long member's uniform step past GRID_STEP_MM. The
+    // rest ladder has to climb all the way to that step: stopping at
+    // GRID_STEP_MM would leave the pass jumping from a 0.005 mm rung straight
+    // to a 0.16 mm one, and the profile's first arc out of rest steps its
+    // acceleration across the hole.
+    let length = 40.0;
+    let grid = grid_for(length, true, true);
+    let step = length / SAMPLE_MAX_POINTS as f64;
+    assert!(
+        step > GRID_STEP_MM,
+        "fixture must exercise the widened step"
+    );
+    let gaps: Vec<f64> = grid.windows(2).map(|w| w[1] - w[0]).collect();
+    for pair in gaps.windows(2) {
+        assert!(
+            // The ladder doubles, and its top rung meets the first uniform
+            // node part-way, so one transition gap can be up to ~2.5x its
+            // predecessor. Stopping the ladder at GRID_STEP_MM instead made
+            // that ratio ~60x.
+            pair[1] <= 2.5 * pair[0] + 1e-12 || pair[1] <= GRID_STEP_MM + 1e-12,
+            "grid spacing jumped {} -> {} (ladder must stay geometric until it \
+             meets the uniform step {step})",
+            pair[0],
+            pair[1]
+        );
+    }
+}

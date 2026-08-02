@@ -56,6 +56,7 @@ pub struct McuTopologyInput {
     pub stepper_oids: Vec<u32>,
     pub stepcompress_sample_rate: f64,
     pub move_queue_slots: u32,
+    pub step_pulse_seconds: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -79,6 +80,11 @@ pub struct McuAxisConfig {
     pub stepper_oids: Vec<u32>,
     pub stepcompress_sample_rate: f64,
     pub move_queue_slots: u32,
+    /// Per entry of `axes`: the settle the mcu enforces around every pulse
+    /// (`config_stepper step_pulse_ticks`, in seconds). The step shim keeps
+    /// consecutive runs at least this far apart so a re-armed classic
+    /// stepper never loads a move behind its own pending unstep.
+    pub step_pulse_seconds: Vec<f64>,
 }
 
 impl McuAxisConfig {
@@ -220,6 +226,7 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                 ("microstep_distance", topology.microstep_distance.len()),
                 ("invert_dir", topology.invert_dir.len()),
                 ("stepper_oids", topology.stepper_oids.len()),
+                ("step_pulse_seconds", topology.step_pulse_seconds.len()),
             ] {
                 if got != axes.len() {
                     return Err(KinematicsConfigError::PerAxisVectorLength {
@@ -279,6 +286,7 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                 stepper_oids: topology.stepper_oids.clone(),
                 stepcompress_sample_rate: rate,
                 move_queue_slots,
+                step_pulse_seconds: topology.step_pulse_seconds.clone(),
             })
         })
         .collect()

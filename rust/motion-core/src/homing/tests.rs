@@ -739,6 +739,7 @@ mod stepcompress_reconcile_tests {
                 SteppingMode::Stepcompress => 128,
                 SteppingMode::Piece => 0,
             },
+            step_pulse_seconds: vec![2e-6, 2e-6],
         }
     }
 

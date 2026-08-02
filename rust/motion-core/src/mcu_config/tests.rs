@@ -30,6 +30,7 @@ fn build_mcu_configs_two_mcu_corexy_with_e() {
             stepper_oids: vec![1, 2, 3],
             stepcompress_sample_rate: 0.0,
             move_queue_slots: 0,
+            step_pulse_seconds: vec![2e-6; 3],
         },
         McuTopologyInput {
             mcu_id: 9,
@@ -42,6 +43,7 @@ fn build_mcu_configs_two_mcu_corexy_with_e() {
             stepper_oids: vec![4],
             stepcompress_sample_rate: 20_000.0,
             move_queue_slots: 128,
+            step_pulse_seconds: vec![2e-6; 1],
         },
     ];
     let cfgs = build_mcu_configs(&mcus, &caps).unwrap();
@@ -75,6 +77,7 @@ fn build_mcu_configs_missing_caps_is_an_error() {
         microstep_distance: vec![0.0125; 2],
         invert_dir: vec![false; 2],
         stepper_oids: vec![1, 2],
+        step_pulse_seconds: vec![2e-6; 2],
         ..Default::default()
     }];
     let err = build_mcu_configs(&mcus, &caps).unwrap_err();
@@ -193,6 +196,7 @@ fn build_mcu_configs_unknown_stepping_mode_is_loud() {
         stepper_oids: vec![1, 2],
         stepcompress_sample_rate: 0.0,
         move_queue_slots: 0,
+        step_pulse_seconds: vec![2e-6; 2],
     }];
     let err = build_mcu_configs(&mcus, &caps).unwrap_err();
     assert!(matches!(
@@ -217,6 +221,7 @@ fn sample_rate_topology(stepping_mode: u8, rate: f64) -> Vec<McuTopologyInput> {
         } else {
             0
         },
+        step_pulse_seconds: vec![2e-6; 2],
     }]
 }
 
@@ -509,6 +514,7 @@ fn stepcompress_toolhead_cfg() -> McuAxisConfig {
         stepper_oids: vec![4],
         stepcompress_sample_rate: 10_000.0,
         move_queue_slots: 128,
+        step_pulse_seconds: vec![2e-6; 1],
     }
 }
 
@@ -528,6 +534,7 @@ fn stepcompress_corexy_cfg() -> McuAxisConfig {
         stepper_oids: vec![1, 2, 3],
         stepcompress_sample_rate: 10_000.0,
         move_queue_slots: 128,
+        step_pulse_seconds: vec![2e-6; 3],
     }
 }
 

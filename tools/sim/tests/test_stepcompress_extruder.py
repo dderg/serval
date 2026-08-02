@@ -136,3 +136,28 @@ def test_stepcompress_extruder_home_after_force_move_and_extrude(sim_world):
     world.gcode_ok("FORCE_MOVE STEPPER=extruder DISTANCE=-5 VELOCITY=5")
     world.gcode_ok("M400", timeout=120)
     _extrude_then_reanchor_and_home(world)
+
+
+def test_stepcompress_extruder_back_to_back_force_moves(sim_world):
+    """Two FORCE_MOVE nudges on the same lane with no M400 between them.
+
+    Nothing drains the first overlay run before the second is planned, so the
+    second run's first step must still land after the mcu's pending unstep for
+    the last step of the first run. Anchoring the second nudge on the wall
+    clock instead loaded it behind that unstep: motion.step_load_late, then
+    "Stepper too far in past"."""
+    world = _boot(sim_world)
+    world.gcode_ok("SET_KINEMATIC_POSITION X=125 Y=125 Z=125")
+    world.gcode_ok("SET_STEPPER_ENABLE STEPPER=extruder ENABLE=1")
+    before = _extruder_steps(world)
+    world.gcode_ok("FORCE_MOVE STEPPER=extruder DISTANCE=5 VELOCITY=5")
+    world.gcode_ok("FORCE_MOVE STEPPER=extruder DISTANCE=-5 VELOCITY=5")
+    world.gcode_ok("M400", timeout=120)
+    _assert_alive(world)
+    events = world.events_text()
+    assert "step_load_late" not in events, world.log_tail()
+    net = abs(_extruder_steps(world) - before)
+    assert net <= 2, (
+        f"the two opposite nudges left the lane {net} steps off its origin\n"
+        + world.log_tail()
+    )

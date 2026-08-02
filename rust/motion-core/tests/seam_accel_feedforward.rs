@@ -87,24 +87,34 @@ fn accel_feedforward_is_continuous_across_piece_seams() {
         // rejects a cold front piece), so arm the first piece before seam-hopping.
         ring.sample(moving[0].0.start_time)
             .expect("first piece arms at its start");
-        // f32 durations put the armed end within ~10 ns of the next start;
-        // anything further apart is a genuine gap, not a seam. The window must
-        // stay tiny: near a curvature step the fitted interior jerk is huge,
-        // and a wide window reads that as a phantom seam step.
-        const SEAM_SLOP_NS: u64 = 16;
+        // A piece's wire end time is `start + duration_f32`, so the armed end
+        // lands within one f32 ulp of the duration from the next piece's
+        // start; anything further apart is a genuine gap, not a seam. The ulp
+        // scales with the duration, so a flat window silently assumed short
+        // pieces — a second-long piece quantizes to ~170 ns and would read as
+        // a gap, which then leaves the walker parked on a piece it has
+        // already passed. The window must still stay tiny relative to the
+        // piece: near a curvature step the fitted interior jerk is huge, and
+        // a wide window reads that as a phantom seam step.
+        let seam_slop_ns = |dur: f32| 16 + (f64::from(dur) * f64::from(f32::EPSILON) * 4e9) as u64;
         for w in moving.windows(2) {
             let ((left, left_seg), (right, right_seg)) = (w[0], w[1]);
             let left_end = left.end_time(1.0e9);
-            let contiguous = left_end.abs_diff(right.start_time) <= SEAM_SLOP_NS
+            let slop = seam_slop_ns(left.duration);
+            let contiguous = left_end.abs_diff(right.start_time) <= slop
                 && f64::from(left.duration) > 10e-6
                 && f64::from(right.duration) > 10e-6;
             if !contiguous {
-                ring.sample(right.start_time)
+                // Resynchronise past the armed piece's own end, not merely to
+                // the next start: a gap shorter than the armed piece's
+                // remaining time would otherwise re-sample the piece the ring
+                // is still on and never advance it.
+                ring.sample(right.start_time.max(left_end))
                     .expect("piece after a gap arms at its start");
                 continue;
             }
             let (_, _, acc_left) = ring
-                .sample(right.start_time - SEAM_SLOP_NS)
+                .sample(right.start_time - slop)
                 .expect("seam left sample inside piece");
             let (_, _, acc_right) = ring
                 .sample(right.start_time.max(left_end))

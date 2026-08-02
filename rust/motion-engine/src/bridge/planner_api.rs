@@ -23,6 +23,7 @@ struct McuTopology {
     stepper_oids: Vec<u32>,
     stepcompress_sample_rate: f64,
     move_queue_slots: u32,
+    step_pulse_seconds: Vec<f64>,
 }
 
 impl McuTopology {
@@ -38,6 +39,7 @@ impl McuTopology {
             stepper_oids: self.stepper_oids,
             stepcompress_sample_rate: self.stepcompress_sample_rate,
             move_queue_slots: self.move_queue_slots,
+            step_pulse_seconds: self.step_pulse_seconds,
         }
     }
 }

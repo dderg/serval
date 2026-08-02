@@ -26,6 +26,13 @@ pub const SEND_LEAD_SECONDS: f64 = 2.0 * (host_rt::host_io::rtt::MIN_RTO_MS as f
 
 pub const CONSUMED_MARGIN_SECONDS: f64 = 0.010;
 
+/// A classic stepper spends two scheduler events on every step: the pulse at
+/// the step clock and the unstep `step_pulse_ticks` later, from which
+/// `stepper_load_next` re-arms one more `step_pulse_ticks` out. A queued move
+/// whose first step lands inside that window is loaded behind the pending
+/// unstep — see `src/stepper_classic.c`.
+pub const STEP_REARM_PULSES: u64 = 2;
+
 pub const BACKLOG_CEILING_FRAMES: usize = 8192;
 
 /// How often the pacer tops the mcu's move queue back up to
@@ -97,6 +104,14 @@ pub fn build_endpoint(
                 cfg.mcu_id
             ));
         }
+        let step_pulse_seconds = cfg.step_pulse_seconds[motor];
+        if !step_pulse_seconds.is_finite() || step_pulse_seconds < 0.0 {
+            return Err(format!(
+                "stepcompress mcu {} axis {axis}: step pulse width {step_pulse_seconds} s is \
+                 not a non-negative duration",
+                cfg.mcu_id
+            ));
+        }
         motors.push(MotorConfig {
             oid: cfg.stepper_oids[motor],
             microstep_distance: microstep_distance as f32,
@@ -104,6 +119,7 @@ pub fn build_endpoint(
             max_steps_per_sample: steps_per_sample as u32,
             sample_rate_hz: sample_rate_hz as f32,
             cycles_per_second,
+            min_rearm_cycles: STEP_REARM_PULSES * (step_pulse_seconds * cycles_per_second) as u64,
         });
     }
     Ok(StepcompressEndpoint::new(
@@ -787,3 +803,7 @@ impl Drop for StepcompressPacer {
 #[cfg(test)]
 #[path = "stepcompress_sink_tests.rs"]
 mod stepcompress_sink_tests;
+
+#[cfg(test)]
+#[path = "nudge_pacing_tests.rs"]
+mod nudge_pacing_tests;
