@@ -426,7 +426,7 @@ fn grid_of(kins: &[&Kinematics], entry_rest: bool, exit_rest: bool) -> Vec<f64> 
             m
         })
         .collect();
-    integration_grid(&members, entry_rest, exit_rest)
+    seed_grid(&members, entry_rest, exit_rest)
 }
 
 fn straight_kin(length: f64, ceiling: f64) -> Kinematics {
@@ -459,23 +459,25 @@ fn integration_grid_caps_nodes_on_a_long_curved_member() {
     // Uncapped, 40 mm at GRID_STEP_MM would be 4000 nodes, and every one of
     // them becomes a reconstruction window the lowering pays a piece for.
     assert!(
-        grid.len() <= MEMBER_MAX_POINTS + 1,
-        "40 mm curved member produced {} nodes, cap is {MEMBER_MAX_POINTS}",
+        grid.len() <= MEMBER_SEED_MAX_POINTS + 1,
+        "40 mm curved member produced {} nodes, cap is {MEMBER_SEED_MAX_POINTS}",
         grid.len()
     );
 }
 
 #[test]
-fn integration_grid_caps_nodes_on_a_long_straight_member() {
-    // A straight member is not exempt. `repro_z14.gcode` line 2710 is a
-    // 15.6 mm straight cruising at the step-rate ceiling: uncapped it sampled
-    // 1560 nodes, lowered to 2336 pieces for one shaped segment, and cost
-    // 3.5 s of shaper convolution fits on a Pi 4 — a whole pump lead spent on
-    // one segment, which lands the next lane's piece in the MCU's past.
+fn seed_grid_caps_nodes_on_a_long_straight_member() {
+    // A straight member is not exempt from the seed cap. `repro_z14.gcode`
+    // line 2710 is a 15.6 mm straight cruising at the step-rate ceiling:
+    // seeded at the grid pitch it takes 1560 nodes, lowers to 2336 pieces for
+    // one shaped segment, and costs 3.5 s of shaper convolution fits on a
+    // Pi 4 — a whole pump lead spent on one segment, which lands the next
+    // lane's piece in the MCU's past. Only a member the reconstruction
+    // convicts of ringing buys those nodes back.
     let grid = grid_for(40.0, false, false);
     assert!(
-        grid.len() <= MEMBER_MAX_POINTS + 1,
-        "40 mm straight member produced {} nodes, cap is {MEMBER_MAX_POINTS}",
+        grid.len() <= MEMBER_SEED_MAX_POINTS + 1,
+        "40 mm straight member produced {} nodes, cap is {MEMBER_SEED_MAX_POINTS}",
         grid.len()
     );
 }
@@ -490,7 +492,7 @@ fn rest_ladder_leaves_no_hole_up_to_the_uniform_step() {
     let length = 40.0;
     let k = curved_kin(length);
     let grid = grid_of(&[&k], true, true);
-    let step = length / MEMBER_MAX_POINTS as f64;
+    let step = length / MEMBER_SEED_MAX_POINTS as f64;
     assert!(
         step > GRID_STEP_MM,
         "fixture must exercise the widened step"
@@ -571,4 +573,308 @@ fn stepped_ceilings_across_long_members_never_brake_toward_rest() {
              {floor} mm/s and both anchors sit at it"
         );
     }
+}
+
+/// The `repro_z14.gcode` line 3333 run, as the fitter hands it to the
+/// planner: a 15.7 mm straight cruising at its F3600 ceiling with a clothoid
+/// blend pair at each end, on the bench's 20000 mm/s² / 40000 mm/s³ limits.
+fn ceiling_riding_straight(jerk: f64) -> (Vec<Kinematics>, Vec<f64>) {
+    let (accel, ceiling) = (20_000.0, 60.0);
+    let kins = vec![
+        kin(
+            0.0,
+            73.74995326051372,
+            0.13728400896857004,
+            accel,
+            jerk,
+            ceiling,
+        ),
+        kin(
+            10.124689244847987,
+            -73.74995326051372,
+            0.13728400896857004,
+            accel,
+            jerk,
+            ceiling,
+        ),
+        kin(0.0, 0.0, 15.672504385558916, accel, jerk, ceiling),
+        kin(
+            0.0,
+            83.07884272157982,
+            0.13125886761095884,
+            accel,
+            jerk,
+            ceiling,
+        ),
+        kin(
+            10.904834818063517,
+            -83.07884272157982,
+            0.13125886761095884,
+            accel,
+            jerk,
+            ceiling,
+        ),
+    ];
+    let exits = vec![
+        44.44512650163059,
+        ceiling,
+        ceiling,
+        42.8257968079636,
+        ceiling,
+    ];
+    (kins, exits)
+}
+
+fn blended_run<'a>(kins: &'a [Kinematics], exits: &[f64]) -> Vec<RunMember<'a>> {
+    let mut fwd = 0.0;
+    kins.iter()
+        .zip(exits)
+        .map(|(k, &exit_v)| {
+            let m = RunMember {
+                kin: k,
+                exit_v,
+                fwd_s: fwd,
+            };
+            fwd += k.length;
+            m
+        })
+        .collect()
+}
+
+fn plateau(samples: &[(f64, f64, f64)], m: &RunMember) -> Vec<(f64, f64, f64)> {
+    let (s0, s1) = (m.fwd_s + 3.0, m.fwd_s + m.kin.length - 3.0);
+    samples
+        .iter()
+        .copied()
+        .filter(|p| p.0 > s0 && p.0 < s1)
+        .collect()
+}
+
+#[test]
+fn the_seeded_grid_rings_on_a_ceiling_riding_straight() {
+    // The regression this guards: without refinement the seeded 256 nodes put
+    // the pass into a limit cycle across the cruise — it touches the ceiling,
+    // peels, jerks back up and touches again, once per ~1.5 mm.
+    let (kins, exits) = ceiling_riding_straight(40_000.0);
+    let members = blended_run(&kins, &exits);
+    let seeded: Vec<usize> = kins.iter().map(member_seed_steps).collect();
+    let grid = grid_from_steps(&members, &seeded, false, false);
+    let samples = reconstruct_flat_on(&members, &grid, 60.0, 0.0).unwrap().0;
+    let straight = &members[2];
+    let reversals = accel_reversals(
+        &samples,
+        straight.fwd_s,
+        straight.fwd_s + straight.kin.length,
+    );
+    assert!(
+        reversals > PROFILE_REVERSALS_MAX,
+        "the fixture must ring at the seed, saw {reversals} reversals"
+    );
+    let cruise = plateau(&samples, straight);
+    let ripple = cruise.iter().map(|p| p.2.abs()).fold(0.0_f64, f64::max);
+    assert!(
+        ripple > 200.0,
+        "the fixture must ring hard enough to matter, peak |a| {ripple} mm/s²"
+    );
+}
+
+#[test]
+fn refinement_holds_the_ceiling_on_a_ringing_straight() {
+    let (kins, exits) = ceiling_riding_straight(40_000.0);
+    let members = blended_run(&kins, &exits);
+    let samples = reconstruct_flat(&members, 60.0, 0.0).unwrap().0;
+    let straight = &members[2];
+    let reversals = accel_reversals(
+        &samples,
+        straight.fwd_s,
+        straight.fwd_s + straight.kin.length,
+    );
+    assert!(
+        reversals <= PROFILE_REVERSALS_MAX,
+        "refined reconstruction still rings: {reversals} reversals"
+    );
+    let cruise = plateau(&samples, straight);
+    let ripple = cruise.iter().map(|p| p.2.abs()).fold(0.0_f64, f64::max);
+    assert!(
+        ripple <= GRID_ACCEL_TOL_MM_S2,
+        "cruise carries {ripple} mm/s² of acceleration the plan never asked \
+         for (budget {GRID_ACCEL_TOL_MM_S2})"
+    );
+    let dip = 60.0 - cruise.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+    assert!(dip <= 0.05, "cruise dips {dip} mm/s below its own ceiling");
+}
+
+#[test]
+fn refined_reconstruction_tracks_a_dense_grid_reference() {
+    // The dense reference is the same pass at ten times the grid pitch, which
+    // is what the seeded grid is being judged against: a member whose profile
+    // the grid resolves says the same thing at any finer spacing.
+    let (kins, exits) = ceiling_riding_straight(40_000.0);
+    let members = blended_run(&kins, &exits);
+    let dense: Vec<usize> = kins
+        .iter()
+        .map(|k| ((k.length / (0.1 * GRID_STEP_MM)).ceil() as usize).max(GRID_MIN_STEPS))
+        .collect();
+    let reference = reconstruct_flat_on(
+        &members,
+        &grid_from_steps(&members, &dense, false, false),
+        60.0,
+        0.0,
+    )
+    .unwrap()
+    .0;
+    let refined = reconstruct_flat(&members, 60.0, 0.0).unwrap().0;
+    let straight = &members[2];
+    let (mut dv, mut da) = (0.0_f64, 0.0_f64);
+    for &(s, v, a) in &plateau(&refined, straight) {
+        let (rv, ra) = interp_flat(&reference, s).unwrap();
+        dv = dv.max((v - rv).abs());
+        da = da.max((a - ra).abs());
+    }
+    assert!(
+        da <= GRID_ACCEL_TOL_MM_S2,
+        "acceleration is {da} mm/s² off the dense reference (budget \
+         {GRID_ACCEL_TOL_MM_S2})"
+    );
+    assert!(dv <= 0.05, "velocity is {dv} mm/s off the dense reference");
+}
+
+#[test]
+fn reversals_the_grid_cannot_retire_keep_the_seeded_grid() {
+    // At 200000 mm/s³ the same run hunts at every spacing down to a tenth of
+    // the grid pitch — the reversals are the pass's, not the grid's. Spending
+    // nodes on them would buy a denser copy of the same profile, so the
+    // regrid is measured and rolled back.
+    let (kins, exits) = ceiling_riding_straight(200_000.0);
+    let members = blended_run(&kins, &exits);
+    let seeded: Vec<usize> = kins.iter().map(member_seed_steps).collect();
+    let seed_nodes = grid_from_steps(&members, &seeded, false, false).len();
+    let straight = &members[2];
+    let samples = reconstruct_flat(&members, 60.0, 0.0).unwrap().0;
+    assert!(
+        accel_reversals(
+            &samples,
+            straight.fwd_s,
+            straight.fwd_s + straight.kin.length
+        ) > PROFILE_REVERSALS_MAX,
+        "fixture must be one the grid cannot fix"
+    );
+    assert_eq!(
+        samples.len(),
+        seed_nodes,
+        "a member the grid cannot help kept {} nodes instead of the seeded \
+         {seed_nodes}",
+        samples.len()
+    );
+}
+
+#[test]
+fn sub_budget_acceleration_wobble_is_not_a_reversal() {
+    let noise: Vec<(f64, f64, f64)> = (0..40)
+        .map(|i| {
+            let s = i as f64 * 0.01;
+            (s, 60.0, if i % 2 == 0 { 12.0 } else { -12.0 })
+        })
+        .collect();
+    assert_eq!(accel_reversals(&noise, 0.0, 0.39), 0);
+    let executed: Vec<(f64, f64, f64)> = (0..40)
+        .map(|i| {
+            let s = i as f64 * 0.01;
+            (s, 60.0, if i % 2 == 0 { 300.0 } else { -300.0 })
+        })
+        .collect();
+    assert_eq!(accel_reversals(&executed, 0.0, 0.39), 39);
+}
+
+#[test]
+fn a_straight_run_that_cruises_cleanly_is_never_regridded() {
+    // Refinement must be paid for by evidence: a member the seed already
+    // resolves keeps the seed's node count exactly.
+    let k = straight_kin(40.0, 600.0);
+    let members = run_members(&[&k], 600.0);
+    let seed = grid_from_steps(&members, &[member_seed_steps(&k)], false, false);
+    let samples = reconstruct_flat(&members, 600.0, 0.0).unwrap().0;
+    assert_eq!(samples.len(), seed.len());
+}
+
+#[test]
+fn refinement_runs_out_of_room_at_four_times_the_grid_pitch() {
+    // The ceiling is what makes `GridBudget` a verdict rather than a loop:
+    // past it there is no finer grid to try, so a member still ringing there
+    // is rejected instead of quietly planned.
+    let k = straight_kin(15.0, 60.0);
+    let pitch = (k.length / GRID_STEP_MM).ceil() as usize;
+    assert_eq!(refine_step_count(&k, member_seed_steps(&k)), pitch);
+    let mut steps = pitch;
+    for _ in 0..8 {
+        steps = refine_step_count(&k, steps);
+    }
+    assert_eq!(steps, pitch * GRID_REFINE_GROWTH);
+    assert_eq!(
+        refine_step_count(&k, steps),
+        steps,
+        "the ceiling must stick"
+    );
+}
+
+#[test]
+fn chaining_a_phase_run_lands_on_its_true_end_state() {
+    // The chained phase is what the lowering turns into one piece, so its end
+    // arc and end velocity are the seam the next piece starts from: they must
+    // be the run's own, not the leading phase's extrapolation.
+    let residue = 4.0e-4;
+    let chain: Vec<StraightPhase> = (0..64)
+        .map(|i| StraightPhase {
+            t0: i as f64 * 0.001,
+            dt: 0.001,
+            s0: 60.0 * i as f64 * 0.001,
+            v0: 60.0,
+            a0: if i % 2 == 0 { 0.0 } else { residue },
+            j: 0.0,
+        })
+        .collect();
+    let last = chain[chain.len() - 1];
+    let s_end = last.s0 + last.dt * (last.v0 + 0.5 * last.a0 * last.dt);
+    let v_end = last.v0 + last.a0 * last.dt;
+    let merged = merge_constant_accel(chain);
+    assert_eq!(
+        merged.len(),
+        1,
+        "a run inside the residue must chain to one"
+    );
+    let one = merged[0];
+    let got_s = one.s0 + one.dt * (one.v0 + one.dt * (0.5 * one.a0 + one.j * one.dt / 6.0));
+    let got_v = one.v0 + one.dt * (one.a0 + 0.5 * one.j * one.dt);
+    assert!((got_s - s_end).abs() < 1e-12, "end arc {got_s} vs {s_end}");
+    assert!(
+        (got_v - v_end).abs() < 1e-12,
+        "end speed {got_v} vs {v_end}"
+    );
+}
+
+#[test]
+fn a_real_acceleration_change_is_never_chained_away() {
+    // Flattening two genuinely different accelerations into one phase leaves
+    // the difference as a step at the far joint. The spread gate is what
+    // keeps that from happening.
+    let step = 2.0 * CHAIN_MERGE_ACCEL_MM_S2;
+    let chain = vec![
+        StraightPhase {
+            t0: 0.0,
+            dt: 0.001,
+            s0: 0.0,
+            v0: 60.0,
+            a0: 0.0,
+            j: 0.0,
+        },
+        StraightPhase {
+            t0: 0.001,
+            dt: 0.001,
+            s0: 0.06,
+            v0: 60.0,
+            a0: step,
+            j: 0.0,
+        },
+    ];
+    assert_eq!(merge_constant_accel(chain).len(), 2);
 }

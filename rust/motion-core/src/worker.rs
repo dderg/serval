@@ -284,6 +284,7 @@ impl StreamWorkerHandle {
             links: Arc::clone(&links),
             frontier,
             intake: ingress::IntakeState::default(),
+            reserve: ingress::DrainReserve::new(),
             last_line: 0,
             pump_control,
         };

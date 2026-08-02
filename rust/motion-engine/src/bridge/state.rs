@@ -50,7 +50,7 @@ impl HomingState {
 pub(crate) struct FlushState {
     pub(crate) pending: Mutex<HashMap<u64, FlushWait>>,
     pub(crate) pending_drain: Mutex<Option<crossbeam_channel::Receiver<Option<Instant>>>>,
-    pub(crate) drain_wait_diag: Mutex<Option<(Instant, Option<Instant>)>>,
+    pub(crate) drain_wait_diag: Mutex<Option<super::drain_wait::DrainWaitDiag>>,
     /// Starts at 1: id 0 is never handed out.
     pub(crate) next_id: AtomicU64,
 }

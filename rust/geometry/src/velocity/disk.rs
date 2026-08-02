@@ -5,35 +5,79 @@ use super::ride;
 
 const RK_MIN_STEP_FRAC: f64 = 1e-6;
 const RK_MAX_STEPS: u32 = 100_000;
-/// Per-member ceiling on integration-grid nodes. `GRID_STEP_MM` sets the
-/// resolution a short move needs; on a long one it mints nodes the physics
-/// has no structure for. That is not free sampling — the reconstruction is
-/// one quintic window per node, and the lowering spends output pieces per
-/// window, so node count *is* piece count. Straight members are no exception:
-/// a 15.6 mm straight cruising at its step-rate ceiling lowered to 2336
-/// pieces from 1560 nodes (`repro_z14.gcode`, line 2710), and eight such
-/// segments cost 3.5 s each in shaper convolution fits on a Pi 4 — the whole
-/// 2 s pump lead, spent on one segment.
+/// Seed spacing for the integration grid: the resolution a short move needs.
+const GRID_STEP_MM: f64 = 0.01;
+/// Per-member ceiling on the *seed* grid's uniform nodes. `GRID_STEP_MM` on a
+/// long member mints nodes the physics has no structure for. That is not free
+/// sampling — the reconstruction is one quintic window per node, and the
+/// lowering spends output pieces per window, so node count *is* piece count.
+/// A 15.6 mm straight cruising at its step-rate ceiling sampled 1560 nodes,
+/// lowered to 2336 pieces for one shaped segment, and eight such segments
+/// cost 3.5 s each in shaper convolution fits on a Pi 4 (`repro_z14.gcode`,
+/// line 2710) — the whole 2 s pump lead, spent on one segment.
 ///
-/// The floor on the cap is the other direction: the sampled reconstruction's
-/// interior acceleration error grows with the node spacing, and the lowering
-/// budgets 50 mm/s² for it. A quarter arc of radius 20 (31 mm of curved
-/// path, `curved_fit_acceleration_is_continuous_and_converges`) holds that
-/// error under 5 mm/s² at 256 nodes and breaks past 13 mm/s² at 128, so 256
-/// is where both ends are satisfied — and a straight member, whose ceiling
-/// and accel budget are constant across its span, has strictly less interior
-/// structure than that arc. A move short enough to want a finer grid still
-/// gets `GRID_STEP_MM` exactly.
+/// Nothing about that count is an error bound, which is why it is only a
+/// seed: [`reconstruct_flat`] then buys nodes back, member by member, for
+/// the ones whose reconstruction [`ringing_member`] convicts, and for no
+/// others.
 ///
 /// Widening a cell does not blunt a member boundary: the interior-boundary
 /// ladders below pin the straddling cells at `GRID_STEP_MM` at any cap, so
 /// the ceiling step there reads super-rail exactly as an uncapped grid reads
 /// it.
-const MEMBER_MAX_POINTS: usize = 256;
-const GRID_STEP_MM: f64 = 0.01;
+const MEMBER_SEED_MAX_POINTS: usize = 256;
 const GRID_MIN_STEPS: usize = 16;
 const REST_REFINE_MIN_MM: f64 = 1e-5;
 const GRID_DEDUP_MM: f64 = 1e-9;
+/// A reconstruction the lowering can fit puts the pass's acceleration inside
+/// the 50 mm/s² budget its pieces are allowed to miss by
+/// (`SHAPED_FIT_TOL_ACCEL_MM_S2` in the shaper, `fit_tol_accel_mm_s2` in the
+/// planner config). An acceleration swing under that is noise the pieces
+/// absorb; a swing over it is a plan the machine will actually execute, so
+/// it is what the grid is held to.
+const GRID_ACCEL_TOL_MM_S2: f64 = 50.0;
+/// A straight member's cap is a constant ceiling under a monotone brake
+/// envelope, so the fastest feasible profile across it rises, holds, and
+/// falls: acceleration crosses zero on the way onto the ceiling and again on
+/// the way off, and nowhere else. Two is therefore the physics; the third
+/// crossing is the grid.
+const PROFILE_REVERSALS_MAX: usize = 2;
+/// Refining a ringing member goes straight to [`GRID_STEP_MM`] — the pitch
+/// the seed cap widened away from — and then halves that up to this multiple.
+/// Four times the pitch resolves a jerk swing at 20 mm/s into hundreds of
+/// cells; a member still hunting there is not under-sampled.
+const GRID_REFINE_GROWTH: usize = 4;
+/// How far a chained run of near-constant-acceleration phases may bend away
+/// from the arc its members describe: a fiftieth of the lowering's own
+/// 0.005 mm position budget. The chained phase matches its run's end arc and
+/// end velocity exactly, so this bounds the whole error it introduces there.
+const CHAIN_MERGE_ARC_MM: f64 = 1e-4;
+/// The acceleration spread a chained run may absorb. What the chaining is for
+/// is float residue — a cruise the pass reaches by landing tangent holds `a`
+/// to a ten-thousandth of a mm/s² of zero, not at zero — so a hundredth is
+/// two orders of margin over that and five below the lowering's own budget.
+/// Above it the phases describe different accelerations, and flattening them
+/// into one leaves that difference as a step at the run's far joint.
+const CHAIN_MERGE_ACCEL_MM_S2: f64 = 1e-2;
+
+/// Why a run has no reconstruction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum ReconstructError {
+    /// The pass could not integrate the run: a brake envelope steeper than
+    /// the acceleration rail, or a diverged ODE.
+    Diverged,
+    /// A member's reconstruction still rings at the finest grid refinement
+    /// is allowed to build, so the profile the lowering would fit is a limit
+    /// cycle rather than the plan.
+    GridBudget {
+        nodes: usize,
+        reversals: usize,
+        member: usize,
+    },
+}
+
+use ReconstructError::Diverged;
+
 /// A curvature (or boundary) speed limit this close to the flat ceiling is
 /// the fitter's own blend sizing — it solves the corner radius so the apex
 /// speed lands *at* the feedrate, to float tolerance. Taking the raw `min`
@@ -208,12 +252,26 @@ pub(super) struct RunMember<'a> {
 ///   super-rail step it is. Holding the straddling cell at `GRID_STEP_MM`
 ///   keeps the step super-rail at any node cap, exactly as an uncapped grid
 ///   reads it.
-fn integration_grid(members: &[RunMember], entry_rest: bool, exit_rest: bool) -> Vec<f64> {
+#[cfg(test)]
+fn seed_grid(members: &[RunMember], entry_rest: bool, exit_rest: bool) -> Vec<f64> {
+    let steps: Vec<usize> = members.iter().map(|m| member_seed_steps(m.kin)).collect();
+    grid_from_steps(members, &steps, entry_rest, exit_rest)
+}
+
+fn member_seed_steps(kin: &Kinematics) -> usize {
+    ((kin.length / GRID_STEP_MM).ceil() as usize).clamp(GRID_MIN_STEPS, MEMBER_SEED_MAX_POINTS)
+}
+
+fn grid_from_steps(
+    members: &[RunMember],
+    steps_per_member: &[usize],
+    entry_rest: bool,
+    exit_rest: bool,
+) -> Vec<f64> {
     let mut s: Vec<f64> = Vec::new();
     let mut member_step: Vec<f64> = Vec::with_capacity(members.len());
-    for m in members {
+    for (m, &steps) in members.iter().zip(steps_per_member) {
         let len = m.kin.length;
-        let steps = ((len / GRID_STEP_MM).ceil() as usize).clamp(GRID_MIN_STEPS, MEMBER_MAX_POINTS);
         member_step.push(len / steps as f64);
         for k in 0..steps {
             s.push(m.fwd_s + len * (k as f64) / (steps as f64));
@@ -973,24 +1031,82 @@ fn truncate_phase(phase: &StraightPhase, x_star: f64) -> StraightPhase {
     StraightPhase { dt: tau, ..*phase }
 }
 
-/// Adjacent zero-jerk phases with identical acceleration chain exactly — a
-/// straight rail or cruise integrates to them cell by cell — and merge into
-/// one phase, so straight moves keep lowering one exact piece per regime.
+/// Chain adjacent zero-jerk phases whose accelerations agree into one cubic —
+/// a straight rail or cruise integrates to them cell by cell — so a straight
+/// move lowers one piece per regime instead of one per node.
+///
+/// "Agree" cannot mean bit-identical. A cruise the pass reaches by landing
+/// tangent on the ceiling holds `a` to within a ten-thousandth of a mm/s² of
+/// zero, not at zero, and refusing to chain over that residue costs a piece
+/// per cell: the `repro_z14.gcode` line 3322 serpentine lowered its 15.7 mm
+/// straights to 2285 phases each, all of them zero-jerk with `a0` inside
+/// [0, 4.4e-4] mm/s².
+///
+/// The merged phase is solved for `(a0, j)` that reproduce the run's true end
+/// arc *and* end velocity, so it is exact at both ends and no seam moves.
+/// What it approximates is the interior, by at most the acceleration spread
+/// over the span — bounded below [`CHAIN_MERGE_ARC_MM`] of arc, which is a
+/// fiftieth of the lowering's own position budget.
 fn merge_constant_accel(chain: Vec<StraightPhase>) -> Vec<StraightPhase> {
     let mut out: Vec<StraightPhase> = Vec::with_capacity(chain.len());
+    let mut open: Option<(f64, f64)> = None;
     for p in chain {
-        if let Some(last) = out.last_mut() {
-            if last.j == 0.0 && p.j == 0.0 && last.a0 == p.a0 {
-                last.dt += p.dt;
-                continue;
+        if p.j != 0.0 {
+            open = None;
+            out.push(p);
+            continue;
+        }
+        let Some((lo, hi)) = open else {
+            open = Some((p.a0, p.a0));
+            out.push(p);
+            continue;
+        };
+        let last = out.last_mut().expect("an open run has a phase");
+        if last.a0 == p.a0 && last.j == 0.0 {
+            last.dt += p.dt;
+            continue;
+        }
+        let (lo, hi) = (lo.min(p.a0), hi.max(p.a0));
+        match chain_phases(last, &p, hi - lo) {
+            Some(one) => {
+                *last = one;
+                open = Some((lo, hi));
+            }
+            None => {
+                open = Some((p.a0, p.a0));
+                out.push(p);
             }
         }
-        out.push(p);
     }
     out
 }
 
-/// Reconstruct the run's `(s, v, a)` profile and its phase chain.
+/// One constant-jerk phase covering `open` and `next`, landing on `next`'s
+/// true end arc and end velocity — exact at both ends, so no seam moves and
+/// only the interior is approximated. `None` when the run's acceleration
+/// `spread` would bend that interior further off the true arc than
+/// [`CHAIN_MERGE_ARC_MM`].
+fn chain_phases(open: &StraightPhase, next: &StraightPhase, spread: f64) -> Option<StraightPhase> {
+    let dt = open.dt + next.dt;
+    if dt <= 0.0 || spread > CHAIN_MERGE_ACCEL_MM_S2 || spread * dt * dt > 8.0 * CHAIN_MERGE_ARC_MM
+    {
+        return None;
+    }
+    let s_end = next.s0 + next.dt * (next.v0 + 0.5 * next.a0 * next.dt);
+    let v_end = next.v0 + next.a0 * next.dt;
+    let ds = s_end - open.s0 - open.v0 * dt;
+    let dv = v_end - open.v0;
+    let merged = StraightPhase {
+        dt,
+        a0: (6.0 * ds - 2.0 * dv * dt) / (dt * dt),
+        j: 6.0 * (dv * dt - 2.0 * ds) / (dt * dt * dt),
+        ..*open
+    };
+    (merged.a0.is_finite() && merged.j.is_finite()).then_some(merged)
+}
+
+/// Reconstruct the run's `(s, v, a)` profile and its phase chain, on a grid
+/// the reconstruction itself has to justify.
 ///
 /// The velocity-limit curve (feed and `sqrt(accel / kappa)`) is sampled on the
 /// grid; the event-driven pass in [`ride`] integrates the brake envelope
@@ -1001,16 +1117,129 @@ fn merge_constant_accel(chain: Vec<StraightPhase>) -> Vec<StraightPhase> {
 /// rides included — so the phase chain is normally complete for any run and
 /// the samples are re-derived from it exactly; only a stall or a rejected
 /// splice leaves the chain empty, falling back to the node states.
+///
+/// A straight member's cap is its own constant ceiling under a brake envelope
+/// that only descends toward what follows, so the fastest feasible profile on
+/// it rises, holds and falls — its acceleration changes sign at most twice.
+/// A grid too coarse for the pass to settle onto that ceiling instead makes
+/// it hunt: the profile touches the cap, peels, jerks back up and touches
+/// again, a limit cycle with one reversal per ~1.5 mm. `repro_z14.gcode`
+/// line 3322 (15.7 mm straights cruising at F3600 between blends) rings 15
+/// times across each at the seeded 256 nodes and once at [`GRID_STEP_MM`],
+/// costing 1.9 mm/s of peak-to-peak velocity and ±270 mm/s² of acceleration
+/// the plan never asked for, at 37 Hz.
+///
+/// A count over the bound is a suspicion, not a verdict: the pass has
+/// structure the sign count cannot model — a splice joint, a stall, an entry
+/// acceleration it has to shed — and those reversals are there at every
+/// spacing. So the member is regridded and re-counted, and only a count that
+/// *drops* convicts the grid. One that does not is the physics, and the
+/// coarse grid, which said the same thing for a sixth of the nodes, is
+/// restored. Nothing is spent that the reconstruction did not pay for.
 fn reconstruct_flat(
     members: &[RunMember],
+    run_start_v: f64,
+    run_start_a: f64,
+) -> Result<(Vec<(f64, f64, f64)>, Vec<StraightPhase>), ReconstructError> {
+    let entry_rest = run_start_v <= VELOCITY_FLOOR;
+    let exit_rest = members[members.len() - 1].exit_v <= VELOCITY_FLOOR;
+    let mut steps: Vec<usize> = members.iter().map(|m| member_seed_steps(m.kin)).collect();
+    let mut settled: Vec<bool> = members.iter().map(|m| !m.kin.is_straight()).collect();
+    let mut coarser: Vec<Option<(usize, usize)>> = vec![None; members.len()];
+    loop {
+        let s = grid_from_steps(members, &steps, entry_rest, exit_rest);
+        let out = reconstruct_flat_on(members, &s, run_start_v, run_start_a).ok_or(Diverged)?;
+        let mut regridded = false;
+        for (idx, m) in members.iter().enumerate() {
+            if settled[idx] {
+                continue;
+            }
+            let reversals = accel_reversals(&out.0, m.fwd_s, m.fwd_s + m.kin.length);
+            if reversals <= PROFILE_REVERSALS_MAX {
+                settled[idx] = true;
+                continue;
+            }
+            if let Some((steps_before, before)) = coarser[idx] {
+                if reversals >= before {
+                    steps[idx] = steps_before;
+                    settled[idx] = true;
+                    regridded = true;
+                    continue;
+                }
+            }
+            let finer = refine_step_count(m.kin, steps[idx]);
+            if finer == steps[idx] {
+                return Err(ReconstructError::GridBudget {
+                    nodes: s.len(),
+                    reversals,
+                    member: idx,
+                });
+            }
+            coarser[idx] = Some((steps[idx], reversals));
+            steps[idx] = finer;
+            regridded = true;
+        }
+        if !regridded {
+            return Ok(out);
+        }
+    }
+}
+
+/// How many times the reconstructed acceleration changes sign between `s0`
+/// and `s1`, counting only excursions the lowering would actually execute.
+///
+/// Samples straddling a zero crossing are both near zero, so the gate cannot
+/// sit on the crossing: it sits on the *excursion* each same-sign run
+/// reaches. A run peaking under the fit budget is noise the pieces absorb,
+/// and dropping it lets the runs on either side count as one.
+fn accel_reversals(samples: &[(f64, f64, f64)], s0: f64, s1: f64) -> usize {
+    let mut runs: Vec<(f64, f64)> = Vec::new();
+    for p in samples
+        .iter()
+        .filter(|p| p.0 >= s0 - GRID_DEDUP_MM && p.0 <= s1 + GRID_DEDUP_MM)
+    {
+        if p.2 == 0.0 {
+            continue;
+        }
+        let sign = p.2.signum();
+        match runs.last_mut() {
+            Some(last) if last.0 == sign => last.1 = last.1.max(p.2.abs()),
+            _ => runs.push((sign, p.2.abs())),
+        }
+    }
+    let executed: Vec<f64> = runs
+        .iter()
+        .filter(|r| r.1 > GRID_ACCEL_TOL_MM_S2)
+        .map(|r| r.0)
+        .collect();
+    executed.windows(2).filter(|w| w[0] != w[1]).count()
+}
+
+/// The next spacing to try for a ringing member: the grid pitch it was
+/// widened away from, then halvings of that. Returns the input unchanged once
+/// the ceiling is reached — four times the pitch is a grid the pass has
+/// nothing left to resolve, so a member still hunting there is not
+/// under-sampled, it is a bug in the pass.
+fn refine_step_count(kin: &Kinematics, steps: usize) -> usize {
+    let pitch = (kin.length / GRID_STEP_MM).ceil() as usize;
+    let ceiling = pitch.saturating_mul(GRID_REFINE_GROWTH);
+    if steps < pitch {
+        pitch
+    } else {
+        steps.saturating_mul(2).min(ceiling).max(steps)
+    }
+}
+
+fn reconstruct_flat_on(
+    members: &[RunMember],
+    s: &[f64],
     run_start_v: f64,
     run_start_a: f64,
 ) -> Option<(Vec<(f64, f64, f64)>, Vec<StraightPhase>)> {
     let entry_v = run_start_v;
     let exit_v = members[members.len() - 1].exit_v;
-    let s = integration_grid(members, entry_v <= VELOCITY_FLOOR, exit_v <= VELOCITY_FLOOR);
     let n = s.len();
-    let (vlc, accel, kappa) = constraint_arrays(members, &s);
+    let (vlc, accel, kappa) = constraint_arrays(members, s);
 
     let jerk = members
         .iter()
@@ -1018,7 +1247,7 @@ fn reconstruct_flat(
         .fold(f64::INFINITY, f64::min);
     if !jerk.is_finite() {
         return Some(infinite_jerk_profile(
-            &s, &vlc, &accel, &kappa, entry_v, exit_v,
+            s, &vlc, &accel, &kappa, entry_v, exit_v,
         ));
     }
     let (bwd_v, brake_chain, bwd_feasible) = {
@@ -1066,9 +1295,9 @@ fn reconstruct_flat(
             return None;
         }
     }
-    let cap_a = chord_slopes(&s, &cap_v);
+    let cap_a = chord_slopes(s, &cap_v);
     let track = ride::Track {
-        s: &s,
+        s,
         cap_v: &cap_v,
         cap_a: &cap_a,
         accel: &accel,
@@ -1082,7 +1311,7 @@ fn reconstruct_flat(
     let start_v = entry_v.min(cap_v[0]);
     let mut pass = ride::reach_pass(&track, start_v, run_start_a, Some(&brake));
     if pass.complete && !pass.phases.is_empty() {
-        for (i, (v, a)) in ride::chain_states(&pass.phases, &s).into_iter().enumerate() {
+        for (i, (v, a)) in ride::chain_states(&pass.phases, s).into_iter().enumerate() {
             pass.v[i] = v.min(cap_v[i]);
             let rail = disk_rail_accel(accel[i], kappa[i], pass.v[i]);
             pass.a[i] = a.clamp(-rail, rail);
@@ -1141,11 +1370,14 @@ pub(super) fn reconstruct_run(
     run_start_v: f64,
     run_start_a: f64,
     _tol: f64,
-) -> Option<(
-    Vec<Vec<(f64, f64, f64)>>,
-    Vec<(f64, f64)>,
-    Vec<Vec<StraightPhase>>,
-)> {
+) -> Result<
+    (
+        Vec<Vec<(f64, f64, f64)>>,
+        Vec<(f64, f64)>,
+        Vec<Vec<StraightPhase>>,
+    ),
+    ReconstructError,
+> {
     let (flat, chain) = reconstruct_flat(members, run_start_v, run_start_a)?;
 
     let mut per_member: Vec<Vec<(f64, f64, f64)>> = Vec::with_capacity(members.len());
@@ -1162,14 +1394,14 @@ pub(super) fn reconstruct_run(
             .collect();
         local.dedup_by(|a, b| (a.0 - b.0).abs() <= GRID_DEDUP_MM);
         if local.first().is_none_or(|p| p.0 > 1e-9) {
-            let (v, a) = interp_flat(&flat, s0)?;
+            let (v, a) = interp_flat(&flat, s0).ok_or(Diverged)?;
             local.insert(0, (0.0, v, a));
         }
         if local
             .last()
             .is_none_or(|p| (p.0 - m.kin.length).abs() > 1e-9)
         {
-            let (v, a) = interp_flat(&flat, s1)?;
+            let (v, a) = interp_flat(&flat, s1).ok_or(Diverged)?;
             local.push((m.kin.length, v, a));
         }
         if let Some(first) = local.first_mut() {
@@ -1184,7 +1416,7 @@ pub(super) fn reconstruct_run(
         per_member_phases.push(if chain.is_empty() || !phases_apply {
             Vec::new()
         } else {
-            let clipped = ride::clip_phases(&chain, s0, s1);
+            let clipped = merge_constant_accel(ride::clip_phases(&chain, s0, s1));
             if ride::chain_is_continuous(&clipped, m.kin.jerk.is_finite()) {
                 clipped
             } else {
@@ -1192,7 +1424,7 @@ pub(super) fn reconstruct_run(
             }
         });
     }
-    Some((per_member, exit_states, per_member_phases))
+    Ok((per_member, exit_states, per_member_phases))
 }
 
 /// Profile state at run-arc `s`: the emitted samples carry the pass's true
@@ -1215,7 +1447,8 @@ pub(super) fn sample_profile(
         exit_v: exit,
         fwd_s: 0.0,
     };
-    reconstruct_run(&[member], entry, 0.0, tol)?
+    reconstruct_run(&[member], entry, 0.0, tol)
+        .ok()?
         .0
         .into_iter()
         .next()
