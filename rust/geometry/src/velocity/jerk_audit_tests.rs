@@ -979,4 +979,25 @@ fn fast_clothoid_snapshot_carries_full_acceleration_through_the_seams() {
         into_a < -0.99 * machine.accel && out_a > 0.99 * machine.accel,
         "the fast envelope dropped acceleration at the straight seams: {into_a}, {out_a}"
     );
+    let min_vector_accel = curved
+        .iter()
+        .flat_map(|(mv, velocity)| {
+            let spatial = mv
+                .segment
+                .spatial
+                .as_ref()
+                .expect("curved move without geometry");
+            velocity.phases.iter().flat_map(move |phase| {
+                [0.0, 0.5 * phase.dt, phase.dt].map(|tau| {
+                    let (s, v, a) = phase.state_at(tau);
+                    let normal = spatial.kappa(s) * v * v;
+                    libm::hypot(a, normal)
+                })
+            })
+        })
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        min_vector_accel > 0.995 * machine.accel,
+        "the fast clothoid left acceleration unused: {min_vector_accel}"
+    );
 }

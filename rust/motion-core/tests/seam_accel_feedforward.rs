@@ -82,28 +82,19 @@ fn accel_feedforward_is_continuous_across_piece_seams() {
         if moving.len() < 2 {
             continue;
         }
-        let mut ring = AxisRing::new();
-        for (p, _) in moving.iter().copied() {
-            ring.push_entry(*p).expect("test ring sized for the corpus");
-        }
-        // The ISR-style walker must consume pieces in order (the in-past guard
-        // rejects a cold front piece), so arm the first piece before seam-hopping.
-        ring.sample(moving[0].0.start_time)
-            .expect("first piece arms at its start");
-        // f32 durations put the armed end within ~10 ns of the next start;
-        // anything further apart is a genuine gap, not a seam. The window must
-        // stay tiny: near a curvature step the fitted interior jerk is huge,
-        // and a wide window reads that as a phantom seam step.
         const SEAM_SLOP_NS: u64 = 16;
         for w in moving.windows(2) {
             let ((left, left_seg), (right, right_seg)) = (w[0], w[1]);
+            let mut ring = AxisRing::new();
+            ring.push_entry(*left).expect("two-piece seam ring");
+            ring.push_entry(*right).expect("two-piece seam ring");
+            ring.sample(left.start_time)
+                .expect("left piece arms at its start");
             let left_end = left.end_time(1.0e9);
             let contiguous = left_end.abs_diff(right.start_time) <= SEAM_SLOP_NS
                 && f64::from(left.duration) > 10e-6
                 && f64::from(right.duration) > 10e-6;
             if !contiguous {
-                ring.sample(right.start_time)
-                    .expect("piece after a gap arms at its start");
                 continue;
             }
             let (_, _, acc_left) = ring

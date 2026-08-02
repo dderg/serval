@@ -98,6 +98,8 @@ const SHAPED_ACCEL_SHARES: [f64; 3] = [0.25, 0.375, 0.5];
 const SHAPED_JERK_SHARES: [f64; 3] = [0.5, 0.625, 0.75];
 const SHAPED_TIME_WIN: f64 = 1.0e-2;
 const TRAIL_ARC_PIECES: u32 = 8;
+const ACCEL_RAIL_ARC_PIECES: u32 = 64;
+const ACCEL_RAIL_MIN_SWINGS: f64 = 64.0;
 const TRAIL_BISECT_ITERS: u32 = 24;
 const TRAIL_LOCAL_JERK_SHARES: [f64; 4] = [0.99, 0.75, 0.5, 0.375];
 const TRAIL_MIN_JERK_AUTHORITY_SHARE: f64 = 0.25;
@@ -1138,9 +1140,15 @@ fn trail_reach_at_share(
     entry: (f64, f64),
     local_jerk_share: f64,
 ) -> Option<Vec<StraightPhase>> {
+    let arc_pieces =
+        if kin.jerk * kin.length >= ACCEL_RAIL_MIN_SWINGS * kin.accel * top_speed_ceiling(kin) {
+            ACCEL_RAIL_ARC_PIECES
+        } else {
+            TRAIL_ARC_PIECES
+        };
     let mut march = March::new(entry);
-    for piece in 1..=TRAIL_ARC_PIECES {
-        let edge = kin.length * f64::from(piece) / f64::from(TRAIL_ARC_PIECES);
+    for piece in 1..=arc_pieces {
+        let edge = kin.length * f64::from(piece) / f64::from(arc_pieces);
         let ds = edge - march.s;
         let phase_at = |j: f64| {
             let dt = march.dt_for_arc(j, ds, ds / march.v);
