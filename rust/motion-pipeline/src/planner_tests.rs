@@ -150,3 +150,117 @@ fn streamed_commits_reproduce_a_single_window_plan() {
          tens of mm/s, not the iterative velocity stage's own residual"
     );
 }
+
+const RAMP_MM: f64 = 40.0;
+const RAMP_FEEDS: [f64; 5] = [10.0, 30.0, 80.0, 200.0, 10.0];
+const RAMP_E_PER_MM: f64 = 0.05;
+
+fn ramp_limits() -> VelocityLimits {
+    VelocityLimits::try_new(300.0, 3000.0, 5.0, 100_000.0).unwrap()
+}
+
+/// The speed_ramp shape, repeated: collinear 40 mm extruding moves whose
+/// feedrate steps 10 → 30 → 80 → 200 → 10 mm/s. Collinear with one `de/ds`
+/// throughout, so no seam anchors to rest and the whole stream is one run —
+/// every dip below the slowest feedrate is the planner's own doing.
+fn speed_ramp(cycles: usize) -> Vec<geometry::Move> {
+    let mut moves = Vec::with_capacity(cycles * RAMP_FEEDS.len());
+    let mut x = 0.0;
+    for i in 0..cycles * RAMP_FEEDS.len() {
+        let ctx = MoveContext {
+            extruder_axis: 3,
+            feedrate_mm_s: RAMP_FEEDS[i % RAMP_FEEDS.len()],
+            limits: ramp_limits(),
+            source: SourceRange {
+                start_line: i as u32,
+                end_line: i as u32,
+            },
+        };
+        moves.push(
+            line_move(
+                [x, 0.0, 0.0],
+                [x + RAMP_MM, 0.0, 0.0],
+                RAMP_E_PER_MM * RAMP_MM,
+                ctx,
+            )
+            .unwrap(),
+        );
+        x += RAMP_MM;
+    }
+    moves
+}
+
+fn ramp_config() -> StreamConfig {
+    StreamConfig {
+        limits: ramp_limits(),
+        ..config(4096)
+    }
+}
+
+fn plan_one_window(moves: &[geometry::Move]) -> Vec<PlannedMove> {
+    let (tx, rx) = unbounded();
+    let mut planner = Planner::new(ramp_config());
+    for m in moves {
+        assert!(planner.feed(StreamInput::Move(m.clone()), &tx), "closed");
+        planner.moves_since_plan = 0;
+    }
+    assert!(planner.finish(&tx), "closed");
+    drop(tx);
+    rx.into_iter()
+        .filter_map(|item| match item {
+            PlannedItem::Move(m) => Some(m),
+            PlannedItem::Drain | PlannedItem::Control(_) => None,
+        })
+        .collect()
+}
+
+fn stream_ramp(moves: &[geometry::Move]) -> Vec<PlannedMove> {
+    let (tx, rx) = unbounded();
+    let mut planner = Planner::new(ramp_config());
+    for m in moves {
+        assert!(planner.feed(StreamInput::Move(m.clone()), &tx), "closed");
+    }
+    assert!(planner.finish(&tx), "closed");
+    drop(tx);
+    rx.into_iter()
+        .filter_map(|item| match item {
+            PlannedItem::Move(m) => Some(m),
+            PlannedItem::Drain | PlannedItem::Control(_) => None,
+        })
+        .collect()
+}
+
+/// Slowest velocity anywhere strictly inside the plan — the ramps out of and
+/// into the stream's own rest anchors are the two moves at the ends.
+fn interior_min_velocity(plan: &[PlannedMove]) -> f64 {
+    plan[1..plan.len() - 1]
+        .iter()
+        .flat_map(|m| m.velocity.samples.iter().map(|s| s.v))
+        .fold(f64::INFINITY, f64::min)
+}
+
+#[test]
+fn streamed_speed_ramp_holds_its_plateaus() {
+    // 100 moves is many commit horizons' worth, so the stream really does cut
+    // and warm-start repeatedly instead of resolving as one window.
+    let moves = speed_ramp(20);
+    let streamed = stream_ramp(&moves);
+    let whole = plan_one_window(&moves);
+    assert_eq!(streamed.len(), moves.len());
+    assert_eq!(whole.len(), moves.len());
+
+    let floor = RAMP_FEEDS.iter().fold(f64::INFINITY, |m, &f| m.min(f));
+    let whole_min = interior_min_velocity(&whole);
+    assert!(
+        whole_min >= floor - 1e-6,
+        "the single-window plan itself dipped to {whole_min} mm/s between rest \
+         anchors; the slowest feedrate in the ramp is {floor} mm/s"
+    );
+    let streamed_min = interior_min_velocity(&streamed);
+    assert!(
+        streamed_min >= whole_min - 1e-6,
+        "streaming dipped to {streamed_min} mm/s where the single-window plan \
+         held {whole_min} mm/s — a commit seam is braking toward its own \
+         fictional terminal rest"
+    );
+}

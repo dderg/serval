@@ -5,14 +5,15 @@ use super::ride;
 
 const RK_MIN_STEP_FRAC: f64 = 1e-6;
 const RK_MAX_STEPS: u32 = 100_000;
-/// Per-member ceiling on integration-grid nodes. `GRID_STEP_MM` sets the
-/// resolution a short move needs; on a long one it mints nodes the physics
-/// has no structure for. That is not free sampling — the reconstruction is
-/// one quintic window per node, and the lowering's ladder ends up spending
-/// one output piece per window, so node count *is* piece count on a curved
-/// move. A 21 mm blended move sampled at 0.01 mm reached ~2300 lowered
-/// pieces for a single segment: 3.4 s of shaper convolution fits per axis on
-/// a Pi 4, and those same 2300 pieces on the wire.
+/// Per-member ceiling on integration-grid nodes for a *curved* member.
+/// `GRID_STEP_MM` sets the resolution a short move needs; on a long one it
+/// mints nodes the physics has no structure for. That is not free sampling —
+/// the reconstruction is one quintic window per node, and the lowering's
+/// ladder ends up spending one output piece per window, so node count *is*
+/// piece count on a curved move. A 21 mm blended move sampled at 0.01 mm
+/// reached ~2300 lowered pieces for a single segment: 3.4 s of shaper
+/// convolution fits per axis on a Pi 4, and those same 2300 pieces on the
+/// wire.
 ///
 /// The floor on the cap is the other direction: the sampled reconstruction's
 /// interior acceleration error grows with the node spacing, and the lowering
@@ -21,7 +22,14 @@ const RK_MAX_STEPS: u32 = 100_000;
 /// error under 5 mm/s² at 256 nodes and breaks past 13 mm/s² at 128, so 256
 /// is where both ends are satisfied. A move short enough to want a finer
 /// grid still gets `GRID_STEP_MM` exactly.
-const SAMPLE_MAX_POINTS: usize = 256;
+const CURVED_MAX_POINTS: usize = 256;
+/// A straight member carries no interior structure to resolve — one flat
+/// ceiling, one accel budget — so its nodes neither buy accuracy nor cost
+/// pieces: the lowering merges the whole span into a handful of zero-jerk
+/// runs however finely it was sampled (200 mm of straight ramp lowers to 22
+/// pieces from 20 021 nodes). Capping them would only re-partition an exact
+/// closed-form profile. This ceiling is the memory backstop it always was.
+const STRAIGHT_MAX_POINTS: usize = 16_384;
 const GRID_STEP_MM: f64 = 0.01;
 const GRID_MIN_STEPS: usize = 16;
 const REST_REFINE_MIN_MM: f64 = 1e-5;
@@ -182,18 +190,35 @@ pub(super) struct RunMember<'a> {
 /// A dense uniform arc-length grid for the profile pass. Each member is sampled
 /// at a fixed step within its own span — per-member rather than per-run so
 /// appending moves never reshuffles an earlier member's grid (the streaming
-/// locked prefix must be invariant under append). A rest anchor gets a
-/// geometric ladder of extra nodes: the jerk ramp from rest covers
-/// `a³/(6j²)` of arc (a cell or two) over many milliseconds, and samples
-/// uniform in arc-length would leave the lowering nothing to fit the ramp
-/// with. Both refinements depend only on the run's own anchors, so the
-/// locked-prefix grids stay append-invariant.
+/// locked prefix must be invariant under append).
+///
+/// Two geometric refinements sit on top of the uniform nodes, both a function
+/// of the run's own anchors alone, so the locked-prefix grids stay
+/// append-invariant:
+///
+/// - A rest anchor: the jerk ramp from rest covers `a³/(6j²)` of arc (a cell
+///   or two) over many milliseconds, and samples uniform in arc-length would
+///   leave the lowering nothing to fit the ramp with.
+/// - Every interior member boundary. The ceiling is piecewise constant per
+///   member, so a boundary carries a velocity *step*, and the cell straddling
+///   it is the only place the pass can read that step — as the chord
+///   `Δ(v²)/2Δs`. Wide enough, and the chord lands in the band between the
+///   accel rail and the jerk-shed bound where the pass classifies it as a
+///   followable descent it must commit a whole-run brake to, instead of the
+///   super-rail step it is. Holding the straddling cell at `GRID_STEP_MM`
+///   keeps the step super-rail at any node cap, exactly as an uncapped grid
+///   reads it.
 fn integration_grid(members: &[RunMember], entry_rest: bool, exit_rest: bool) -> Vec<f64> {
     let mut s: Vec<f64> = Vec::new();
     let mut member_step: Vec<f64> = Vec::with_capacity(members.len());
     for m in members {
         let len = m.kin.length;
-        let steps = ((len / GRID_STEP_MM).ceil() as usize).clamp(GRID_MIN_STEPS, SAMPLE_MAX_POINTS);
+        let cap = if m.kin.is_straight() {
+            STRAIGHT_MAX_POINTS
+        } else {
+            CURVED_MAX_POINTS
+        };
+        let steps = ((len / GRID_STEP_MM).ceil() as usize).clamp(GRID_MIN_STEPS, cap);
         member_step.push(len / steps as f64);
         for k in 0..steps {
             s.push(m.fwd_s + len * (k as f64) / (steps as f64));
@@ -203,25 +228,36 @@ fn integration_grid(members: &[RunMember], entry_rest: bool, exit_rest: bool) ->
     let last = &members[members.len() - 1];
     let end = last.fwd_s + last.kin.length;
     let total = end - start;
-    // Each ladder climbs at least to `GRID_STEP_MM` and, where the node cap
-    // has widened its own end's uniform spacing past that, all the way to
+    // Each rest ladder climbs at least to `GRID_STEP_MM` and, where the node
+    // cap has widened its own end's uniform spacing past that, all the way to
     // that spacing. Stopping short leaves a hole between the ladder's top
     // rung and the first uniform node, and the pass's first arc out of rest
     // jumps it in one step — an acceleration step at the rest anchor, exactly
     // what the ladder exists to prevent.
-    let rest_ladder = |anchor_step: f64, at_start: bool, s: &mut Vec<f64>| {
-        let limit = anchor_step.max(GRID_STEP_MM).min(0.5 * total);
-        let mut delta = REST_REFINE_MIN_MM;
-        while delta < limit {
-            s.push(if at_start { start + delta } else { end - delta });
-            delta *= 2.0;
-        }
-    };
     if entry_rest {
-        rest_ladder(member_step[0], true, &mut s);
+        ladder_toward(
+            start,
+            -1.0,
+            REST_REFINE_MIN_MM,
+            member_step[0].max(GRID_STEP_MM).min(0.5 * total),
+            &mut s,
+        );
     }
     if exit_rest {
-        rest_ladder(member_step[member_step.len() - 1], false, &mut s);
+        ladder_toward(
+            end,
+            1.0,
+            REST_REFINE_MIN_MM,
+            member_step[member_step.len() - 1]
+                .max(GRID_STEP_MM)
+                .min(0.5 * total),
+            &mut s,
+        );
+    }
+    for k in 1..members.len() {
+        let boundary = members[k].fwd_s;
+        ladder_toward(boundary, 1.0, GRID_STEP_MM, member_step[k - 1], &mut s);
+        ladder_toward(boundary, -1.0, GRID_STEP_MM, member_step[k], &mut s);
     }
     s.push(end);
     s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -231,6 +267,18 @@ fn integration_grid(members: &[RunMember], entry_rest: bool, exit_rest: bool) ->
     // piece with a physically absurd acceleration spike.
     s.dedup_by(|a, b| (*a - *b).abs() <= GRID_DEDUP_MM);
     s
+}
+
+/// Rungs approaching `anchor` from the side `sign` points back along: at
+/// `anchor - sign·delta` for `delta` doubling from `first` while it stays
+/// under `limit`. Empty when the uniform spacing is already at or below
+/// `first` — there is nothing left to refine.
+fn ladder_toward(anchor: f64, sign: f64, first: f64, limit: f64, s: &mut Vec<f64>) {
+    let mut delta = first;
+    while delta < limit {
+        s.push(anchor - sign * delta);
+        delta *= 2.0;
+    }
 }
 
 /// Members whose span covers `s_run` (two at a seam, one in an interior).

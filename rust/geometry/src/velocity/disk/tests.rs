@@ -412,14 +412,34 @@ fn finite_jerk_curved_member_still_carries_no_phases() {
     assert!(phases[0].is_empty());
 }
 
-fn grid_for(length: f64, entry_rest: bool, exit_rest: bool) -> Vec<f64> {
-    let k = kin(0.0, 0.0, length, 20_000.0, 40_000.0, 600.0);
-    let members = [RunMember {
-        kin: &k,
-        exit_v: if exit_rest { 0.0 } else { 600.0 },
-        fwd_s: 0.0,
-    }];
+fn grid_of(kins: &[&Kinematics], entry_rest: bool, exit_rest: bool) -> Vec<f64> {
+    let mut fwd = 0.0;
+    let members: Vec<RunMember> = kins
+        .iter()
+        .map(|k| {
+            let m = RunMember {
+                kin: k,
+                exit_v: k.flat_ceiling,
+                fwd_s: fwd,
+            };
+            fwd += k.length;
+            m
+        })
+        .collect();
     integration_grid(&members, entry_rest, exit_rest)
+}
+
+fn straight_kin(length: f64, ceiling: f64) -> Kinematics {
+    kin(0.0, 0.0, length, 20_000.0, 40_000.0, ceiling)
+}
+
+fn curved_kin(length: f64) -> Kinematics {
+    kin(0.02, 0.0, length, 20_000.0, 40_000.0, 600.0)
+}
+
+fn grid_for(length: f64, entry_rest: bool, exit_rest: bool) -> Vec<f64> {
+    let k = straight_kin(length, 600.0);
+    grid_of(&[&k], entry_rest, exit_rest)
 }
 
 #[test]
@@ -433,27 +453,43 @@ fn integration_grid_keeps_the_fine_step_on_a_short_member() {
 }
 
 #[test]
-fn integration_grid_caps_nodes_on_a_long_member() {
-    let grid = grid_for(40.0, false, false);
+fn integration_grid_caps_nodes_on_a_long_curved_member() {
+    let k = curved_kin(40.0);
+    let grid = grid_of(&[&k], false, false);
     // Uncapped, 40 mm at GRID_STEP_MM would be 4000 nodes, and every one of
     // them becomes a reconstruction window the lowering pays a piece for.
     assert!(
-        grid.len() <= SAMPLE_MAX_POINTS + 1,
-        "40 mm member produced {} nodes, cap is {SAMPLE_MAX_POINTS}",
+        grid.len() <= CURVED_MAX_POINTS + 1,
+        "40 mm curved member produced {} nodes, cap is {CURVED_MAX_POINTS}",
         grid.len()
     );
 }
 
 #[test]
+fn integration_grid_does_not_cap_a_long_straight_member() {
+    // A straight member has no interior structure the cap could be trading
+    // accuracy for: its nodes collapse into merged zero-jerk runs in the
+    // lowering. Capping them only re-partitions an exact closed-form profile
+    // and widens the cells the profile pass reads its ceiling steps from.
+    let grid = grid_for(40.0, false, false);
+    let widest = grid.windows(2).map(|w| w[1] - w[0]).fold(0.0_f64, f64::max);
+    assert!(
+        widest <= GRID_STEP_MM + 1e-12,
+        "40 mm straight member widened to {widest} mm cells"
+    );
+}
+
+#[test]
 fn rest_ladder_leaves_no_hole_up_to_the_uniform_step() {
-    // The node cap widens a long member's uniform step past GRID_STEP_MM. The
-    // rest ladder has to climb all the way to that step: stopping at
-    // GRID_STEP_MM would leave the pass jumping from a 0.005 mm rung straight
-    // to a 0.16 mm one, and the profile's first arc out of rest steps its
-    // acceleration across the hole.
+    // The node cap widens a long curved member's uniform step past
+    // GRID_STEP_MM. The rest ladder has to climb all the way to that step:
+    // stopping at GRID_STEP_MM would leave the pass jumping from a 0.005 mm
+    // rung straight to a 0.16 mm one, and the profile's first arc out of rest
+    // steps its acceleration across the hole.
     let length = 40.0;
-    let grid = grid_for(length, true, true);
-    let step = length / SAMPLE_MAX_POINTS as f64;
+    let k = curved_kin(length);
+    let grid = grid_of(&[&k], true, true);
+    let step = length / CURVED_MAX_POINTS as f64;
     assert!(
         step > GRID_STEP_MM,
         "fixture must exercise the widened step"
@@ -470,6 +506,68 @@ fn rest_ladder_leaves_no_hole_up_to_the_uniform_step() {
              meets the uniform step {step})",
             pair[0],
             pair[1]
+        );
+    }
+}
+
+#[test]
+fn member_boundary_cell_holds_the_fine_step_under_the_node_cap() {
+    // The ceiling is piecewise constant per member, so the cell straddling a
+    // boundary is where the pass reads the ceiling *step*, as the chord
+    // `Δ(v²)/2Δs`. A capped member's 0.16 mm cell shallows that chord into the
+    // band the pass classifies as a followable descent it must commit a
+    // whole-run brake to; at GRID_STEP_MM the chord stays the super-rail step
+    // it is.
+    let (a, b) = (curved_kin(40.0), curved_kin(40.0));
+    let grid = grid_of(&[&a, &b], false, false);
+    let boundary = a.length;
+    let straddling = grid
+        .windows(2)
+        .find(|w| w[0] < boundary - 1e-12 && w[1] >= boundary - 1e-12)
+        .expect("a cell must straddle the member boundary");
+    assert!(
+        straddling[1] - straddling[0] <= GRID_STEP_MM + 1e-12,
+        "boundary cell is {} mm wide; the ceiling step it carries reads as a \
+         shallow ramp instead of a step",
+        straddling[1] - straddling[0]
+    );
+}
+
+#[test]
+fn stepped_ceilings_across_long_members_never_brake_toward_rest() {
+    // The speed_ramp shape: collinear 40 mm members whose feedrate steps
+    // 10 → 30 → 80 → 200 → 10 mm/s. Every step is a ceiling discontinuity at a
+    // member boundary, and the run has to cruise each plateau. A boundary cell
+    // wide enough to shallow one of those steps sends the profile pass into a
+    // committed peel tens of millimetres early, which runs the state past the
+    // accel rail and stalls the profile at rest — a sawtooth where the plan
+    // holds a plateau.
+    let floor = 10.0;
+    let ceilings = [floor, 30.0, 80.0, 200.0, floor];
+    let kins: Vec<Kinematics> = ceilings
+        .iter()
+        .map(|&c| kin(0.0, 0.0, 40.0, 3000.0, 1e5, c))
+        .collect();
+    let refs: Vec<&Kinematics> = kins.iter().collect();
+    // Anchored at the floor on both ends, not at rest: every velocity in the
+    // run is then bounded below by the floor as a matter of physics, with no
+    // ramp out of an anchor to except.
+    let members = run_members(&refs, floor);
+    let (samples, _, phases) = reconstruct_run(&members, floor, 0.0, 1e-8).unwrap();
+    assert!(
+        phases.iter().any(|p| !p.is_empty()),
+        "the straight run's phase chain came back empty — the pass stalled and \
+         fell back to node samples"
+    );
+    for (i, member) in samples.iter().enumerate() {
+        let dip = member
+            .iter()
+            .map(|&(_, v, _)| v)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            dip >= floor - 1e-6,
+            "member {i} dipped to {dip} mm/s; the slowest ceiling in the run is \
+             {floor} mm/s and both anchors sit at it"
         );
     }
 }
