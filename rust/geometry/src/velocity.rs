@@ -1275,11 +1275,11 @@ fn reconstruct_runs(
                 phases.iter().map(|p| p.dt).sum()
             };
 
-            let disk_only = disk::disk_reach_v(kin, entry_v, kin.length, tol)
-                .ok_or(VelocityError::Diverged { line_no })?;
-            let jerk_only = scurve::reach_v(entry_v, kin.length, kin.accel, kin.jerk)
-                .ok_or(VelocityError::Diverged { line_no })?;
-            if jerk_only + VELOCITY_EPS_MM_S < disk_only {
+            if entry_v <= hold_ceiling_at(kin, kin.kappa0)
+                && disk::disk_reach_v(kin, entry_v, kin.length, tol)
+                    .zip(scurve::reach_v(entry_v, kin.length, kin.accel, kin.jerk))
+                    .is_some_and(|(disk_only, jerk_only)| jerk_only + VELOCITY_EPS_MM_S < disk_only)
+            {
                 report.jerk_bound += 1;
             }
             let curvature_ceiling = disk::limit_speed(caps[j].kappa_peak, kin.accel);
