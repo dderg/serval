@@ -16,6 +16,7 @@ const BRACKET_HALVINGS: u32 = 64;
 const LENGTH_CLOSURE_TOL: f64 = 1e-9;
 const SATURATED_BOUNDARY_SHARE: f64 = 0.99;
 const DIRECT_SMALL_BOUNDARY_SHARE: f64 = 0.1;
+const DIRECT_MIN_TIME_GAIN: f64 = 5.0e-3;
 
 /// A hold-free shape has no free parameter left, so it can only be taken when
 /// the boundary data it is over-determined by already agrees with it — to within
@@ -383,12 +384,7 @@ impl Builder {
         j_max: f64,
         seed_peak: f64,
     ) -> bool {
-        let boundary_share = exit.1.abs() / a_max;
-        if !j_max.is_finite()
-            || exit.1 == 0.0
-            || (boundary_share > DIRECT_SMALL_BOUNDARY_SHARE
-                && boundary_share < SATURATED_BOUNDARY_SHARE)
-        {
+        if !j_max.is_finite() || exit.1 == 0.0 {
             return false;
         }
         let start_v = self.v;
@@ -884,7 +880,11 @@ pub fn straight_chain_between(
             direct.run_to_accel_boundary((v1, a1), length - b.s, v_max, a_max, j_max, seed_peak);
         b.run(v_before_wind, ordinary_length, v_max, a_max, j_max);
         b.wind_accel_up_to(a1, j_max);
-        if has_direct && direct.t < b.t {
+        let boundary_share = a1.abs() / a_max;
+        let direct_is_extremal = boundary_share <= DIRECT_SMALL_BOUNDARY_SHARE
+            || boundary_share >= SATURATED_BOUNDARY_SHARE;
+        let direct_is_materially_quicker = direct.t <= (1.0 - DIRECT_MIN_TIME_GAIN) * b.t;
+        if has_direct && (direct_is_extremal || direct_is_materially_quicker) && direct.t < b.t {
             direct.phases
         } else {
             b.phases

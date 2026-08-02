@@ -413,6 +413,37 @@ fn straight_chain_between_winds_small_brake_without_reversing_jerk() {
 }
 
 #[test]
+fn straight_chain_between_keeps_braking_into_a_material_exit_brake() {
+    let length = 9.965_198;
+    let a_max = 1_000.0;
+    let j_max = 600_000.0;
+    let exit = (6.836_81, -826.626);
+    let chain = straight_chain_between((0.0, 0.0), exit, length, 300.0, a_max, j_max).unwrap();
+    assert_chain_continuous(&chain, j_max, "material-exit-brake");
+    let brake = chain
+        .iter()
+        .position(|phase| phase.a0 <= -0.99 * a_max && phase.j == 0.0)
+        .expect("material exit chain never reached its brake rail");
+    assert!(
+        chain[brake..]
+            .iter()
+            .all(|phase| phase.a0 < 0.0 && phase.end_state().2 < 0.0),
+        "the straight stopped braking before its braking boundary: {chain:?}"
+    );
+    assert_eq!(chain.last().expect("empty material-exit chain").j, j_max);
+    assert_boundary_chain_closes(
+        &chain,
+        (0.0, 0.0),
+        exit,
+        length,
+        300.0,
+        a_max,
+        j_max,
+        "material-exit-brake",
+    );
+}
+
+#[test]
 fn straight_chain_between_obeys_the_limits_it_was_given() {
     let (v_max, a_max, j_max) = (300.0, EXACT_A_MAX, EXACT_J_MAX);
     let chain =
