@@ -132,6 +132,7 @@ def test_stepcompress_extruder_home_after_force_move_and_extrude(sim_world):
     world.gcode_ok("SET_KINEMATIC_POSITION X=125 Y=125 Z=125")
     world.gcode_ok("SET_STEPPER_ENABLE STEPPER=extruder ENABLE=1")
     world.gcode_ok("FORCE_MOVE STEPPER=extruder DISTANCE=5 VELOCITY=5")
+    world.gcode_ok("M400", timeout=120)
     world.gcode_ok("FORCE_MOVE STEPPER=extruder DISTANCE=-5 VELOCITY=5")
     world.gcode_ok("M400", timeout=120)
     _extrude_then_reanchor_and_home(world)
