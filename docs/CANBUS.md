@@ -102,8 +102,9 @@ with `StepQueueOverflow` rather than silently dropping steps.
 
 Size `microsteps` and `rotation_distance` against the sample rate of the
 micro-controller that drives the motor, and raise
-`CONFIG_MOTION_SAMPLE_RATE_HZ` (menuconfig) only as far as that
-micro-controller's CPU allows.
+`CONFIG_MOTION_SAMPLE_RATE_HZ` only as far as that micro-controller's CPU
+allows. It is under "Enable extra low-level configuration options" in
+`make menuconfig`; the default follows the processor model.
 
 How many axes the toolhead drives matters as much as the step rate. On a
 bench an STM32G0B1 at the default 2 kHz sustained a single axis of
