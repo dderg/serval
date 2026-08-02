@@ -122,7 +122,12 @@ def test_stepcompress_extruder_home_after_extrude(sim_world):
 def test_stepcompress_extruder_home_after_force_move_and_extrude(sim_world):
     """The bench order: a FORCE_MOVE overlay run on the extruder lane
     precedes the extrude, so the seed path is also exercised against a
-    sampler that has carried an overlay frame."""
+    sampler that has carried an overlay frame.
+
+    Each nudge is drained before the next, like the FORCE_MOVE lane tests:
+    back-to-back nudges on one lane load the second overlay run behind the
+    mcu's pending unstep ("Stepper too far in past", motion.step_load_late),
+    which is a nudge pacing defect, not a seed-origin one."""
     world = _boot(sim_world)
     world.gcode_ok("SET_KINEMATIC_POSITION X=125 Y=125 Z=125")
     world.gcode_ok("SET_STEPPER_ENABLE STEPPER=extruder ENABLE=1")
