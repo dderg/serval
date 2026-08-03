@@ -320,6 +320,7 @@ name = "ethercat-rt"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "crossbeam-channel",
  "host-rt",
  "libc",
  "libm",
@@ -333,7 +334,6 @@ dependencies = [
  "time",
  "toml 0.8.23",
  "tracing",
- "tracing-appender",
  "tracing-subscriber",
  "zstd",
 ]
