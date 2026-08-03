@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "autoconf.h"
 #include "board/irq.h"
+#include "board/misc.h" // timer_from_us
 #include "fault_handler_internal.h"
 
 #if CONFIG_MACH_STM32H7
@@ -133,6 +134,29 @@ diag_note_shutdown_reset(void)
 {
     live_snap.cur_msg_kind = 0;
     live_snap.cur_task_func = 0;
+}
+
+// Called by command_queue_step on the idle re-add path, the only place a
+// stepper timer is handed to sched_add_timer with a waketime the host chose
+// rather than one the stepper computed from its own last step. margin is
+// waketime - now: how much of the host's send lead survived the pipeline,
+// the wire and foreground dispatch. Below REARM_FLOOR_US the host's own
+// LOW_MARGIN_WARN_SECS floor did not survive delivery; below REARM_ARMED_US
+// a single long foreground message turns the next re-add into a shutdown.
+#define REARM_FLOOR_US 20000
+#define REARM_ARMED_US 1000
+__attribute__((used, externally_visible))
+void
+diag_note_step_rearm(int32_t margin)
+{
+    live_snap.rearm_count++;
+    if (margin < (int32_t)live_snap.rearm_min_margin)
+        live_snap.rearm_min_margin = (uint32_t)margin;
+    if (margin < (int32_t)timer_from_us(REARM_FLOOR_US)) {
+        live_snap.rearm_below_floor++;
+        if (margin < (int32_t)timer_from_us(REARM_ARMED_US))
+            live_snap.rearm_armed++;
+    }
 }
 
 __attribute__((used, externally_visible))

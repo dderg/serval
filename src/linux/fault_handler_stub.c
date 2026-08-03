@@ -153,6 +153,11 @@ void diag_note_demux(uint32_t backlog, uint32_t msgs)
     (void)backlog; (void)msgs;
 }
 
+void diag_note_step_rearm(int32_t margin)
+{
+    (void)margin;
+}
+
 // Linux build doesn't have armcm_timer.c or mpu_protect.c — provide
 // stubs for symbols referenced by sched.c.
 #include "sched.h"

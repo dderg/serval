@@ -181,6 +181,21 @@ fn event_info_all_diag_events() {
 }
 
 #[test]
+fn event_info_names_the_idle_stepper_rearm_events() {
+    let (name, tmpl) = event_info(SUBSYSTEM_MOTION, EVENT_MOTION_STEP_REARM);
+    assert_eq!(name, "motion.step_rearm");
+    assert!(tmpl.contains("{arg0}") && tmpl.contains("{arg1:i32}"));
+
+    let (name, tmpl) = event_info(SUBSYSTEM_MOTION, EVENT_MOTION_STEP_REARM_TIGHT);
+    assert_eq!(name, "motion.step_rearm_tight");
+    assert!(tmpl.contains("{arg0}") && tmpl.contains("{arg1}"));
+
+    let (name, tmpl) = event_info(SUBSYSTEM_MOTION, EVENT_MOTION_STEP_REARM_LATE);
+    assert_eq!(name, "motion.step_rearm_late");
+    assert!(tmpl.contains("{arg0:i32}") && tmpl.contains("{arg1}"));
+}
+
+#[test]
 fn event_info_diag_unknown_boundaries() {
     let (name, tmpl) = event_info(SUBSYSTEM_DIAG, 0);
     assert_eq!(name, "unknown");

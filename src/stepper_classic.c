@@ -203,6 +203,17 @@ stepper_event(struct timer *t)
     return stepper_event_full(t);
 }
 
+// A queue_step that arrives while the stepper is idle carries a waketime the
+// host chose, and sched_add_timer treats one tick of lateness in it as fatal
+// ("Timer too close"). The same lateness on a running stepper goes through
+// timer_dispatch_many, which carries a timer up to 1 ms past its waketime and
+// only then calls "Rescheduled timer in the past". The re-arm gets that same
+// bound: the waketime is never moved, so the lane stays phase-locked to the
+// host's timeline and catches its backlog up exactly like a running stepper,
+// every absorbed instance is counted and logged, and past the bound it is a
+// real deadline miss and still shuts down.
+#define REARM_LATE_LIMIT_TICKS timer_from_us(1000)
+
 // Schedule a set of steps with a given timing
 void
 command_queue_step(uint32_t *args)
@@ -231,7 +242,24 @@ command_queue_step(uint32_t *args)
         s->flags = flags;
         move_queue_push(&m->node, &s->mq);
         stepper_load_next(s);
-        sched_add_timer(&s->time);
+        extern void diag_note_step_rearm(int32_t margin);
+        int32_t margin = (int32_t)(s->time.waketime - timer_read_time());
+        diag_note_step_rearm(margin);
+        if (unlikely(margin < 0)) {
+#if !CONFIG_MCU_SIM
+            // The sim's virtual clock races arbitrarily far ahead of the host
+            // projection, so an absolute-time lateness verdict is meaningless
+            // there; same carve-out as sched_add_timer's "Timer too close".
+            if (margin < -(int32_t)REARM_LATE_LIMIT_TICKS)
+                shutdown("Stepper too far in past");
+#endif
+            event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_MOTION,
+                           EVENT_LOG_EVENT_MOTION_STEP_REARM_LATE, 0,
+                           (uint32_t)margin, s->time.waketime);
+            sched_add_timer_late_ok(&s->time);
+        } else {
+            sched_add_timer(&s->time);
+        }
     }
     irq_enable();
 }
