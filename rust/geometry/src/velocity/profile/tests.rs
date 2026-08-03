@@ -444,6 +444,66 @@ fn straight_chain_between_keeps_braking_into_a_material_exit_brake() {
 }
 
 #[test]
+fn straight_chain_between_carries_a_material_entry_accel_out_of_the_boundary() {
+    let length = 9.965_198;
+    let a_max = 1_000.0;
+    let j_max = 600_000.0;
+    let entry = (6.836_81, 826.626);
+    let chain = straight_chain_between(entry, (0.0, 0.0), length, 300.0, a_max, j_max).unwrap();
+    assert_chain_continuous(&chain, j_max, "material-entry-accel");
+    let rail = chain
+        .iter()
+        .position(|phase| phase.a0 >= 0.99 * a_max && phase.j == 0.0)
+        .expect("material entry chain never reached its acceleration rail");
+    assert!(
+        chain[..=rail]
+            .iter()
+            .all(|phase| phase.a0 > 0.0 && phase.end_state().2 > 0.0),
+        "the straight relaxed its acceleration after the boundary: {chain:?}"
+    );
+    assert_eq!(chain[0].j, j_max);
+    assert_boundary_chain_closes(
+        &chain,
+        entry,
+        (0.0, 0.0),
+        length,
+        300.0,
+        a_max,
+        j_max,
+        "material-entry-accel",
+    );
+}
+
+#[test]
+fn straight_chain_between_is_time_symmetric_under_reversal() {
+    let length = 9.965_198;
+    let (v_max, a_max, j_max) = (300.0, 1_000.0, 600_000.0);
+    for (entry, exit) in [
+        ((0.0, 0.0), (6.836_81, -826.626)),
+        ((6.836_81, 826.626), (0.0, 0.0)),
+        ((100.0, 256.0), (80.0, 512.0)),
+        ((6.030_567, -40.096), (0.0, 0.0)),
+    ] {
+        let forward = straight_chain_between(entry, exit, length, v_max, a_max, j_max).unwrap();
+        let backward = straight_chain_between(
+            (exit.0, -exit.1),
+            (entry.0, -entry.1),
+            length,
+            v_max,
+            a_max,
+            j_max,
+        )
+        .unwrap();
+        let time = |chain: &[StraightPhase]| chain.iter().map(|p| p.dt).sum::<f64>();
+        let (tf, tb) = (time(&forward), time(&backward));
+        assert!(
+            (tf - tb).abs() <= 1e-9 * (1.0 + tf),
+            "reversal broke time symmetry for {entry:?}->{exit:?}: {tf} vs {tb}"
+        );
+    }
+}
+
+#[test]
 fn straight_chain_between_obeys_the_limits_it_was_given() {
     let (v_max, a_max, j_max) = (300.0, EXACT_A_MAX, EXACT_J_MAX);
     let chain =

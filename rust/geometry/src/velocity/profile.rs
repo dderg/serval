@@ -810,14 +810,55 @@ fn coalesce_phases(phases: Vec<StraightPhase>) -> Vec<StraightPhase> {
     coalesced
 }
 
+/// The shapes available once the member is long enough to relax acceleration
+/// to zero: the ordinary run bracketed by the boundary slews, and - when the
+/// exit carries acceleration and a hold fits - the direct run that rides the
+/// acceleration rail into the exit boundary. Solving the reversed problem
+/// through the same helper yields the direct run out of the entry boundary.
+fn relaxed_chains(
+    entry: (f64, f64),
+    exit: (f64, f64),
+    length: f64,
+    v_max: f64,
+    a_max: f64,
+    j_max: f64,
+) -> (Builder, Option<Builder>) {
+    let (v1, a1) = exit;
+    let mut b = Builder::new(entry.0, entry.1);
+    b.unwind_accel_to_zero(j_max);
+    let v_before_wind = v1 - swing_dv(a1, j_max);
+    let exit_dist = swing_dist(v_before_wind, a1, j_max);
+    let ordinary_length = length - b.s - exit_dist;
+    let seed_peak = peak_velocity(b.v, v_before_wind, ordinary_length, v_max, a_max, j_max);
+    let mut direct = b.clone();
+    let has_direct =
+        direct.run_to_accel_boundary((v1, a1), length - b.s, v_max, a_max, j_max, seed_peak);
+    b.run(v_before_wind, ordinary_length, v_max, a_max, j_max);
+    b.wind_accel_up_to(a1, j_max);
+    (b, has_direct.then_some(direct))
+}
+
+/// A direct chain displaces the ordinary run when it is quicker and either
+/// rides an extremal boundary share - where the two shapes are genuinely
+/// different regimes - or wins by a material margin. The margin is hysteresis:
+/// near-tie flips between the shapes make traversal time non-monotone in the
+/// acceleration limit.
+fn displaces_ordinary(direct_t: f64, ordinary_t: f64, boundary_a: f64, a_max: f64) -> bool {
+    let share = boundary_a.abs() / a_max;
+    let extremal = share <= DIRECT_SMALL_BOUNDARY_SHARE || share >= SATURATED_BOUNDARY_SHARE;
+    direct_t < ordinary_t && (extremal || direct_t <= (1.0 - DIRECT_MIN_TIME_GAIN) * ordinary_t)
+}
+
 /// Plan across `length` between boundary states that both carry acceleration.
-/// Two shapes cover the boundary-value problem. When the member is long enough
-/// to relax acceleration to zero, the chain is the ordinary run bracketed by the
-/// entry and exit slews — the shortest such member spans
-/// `zero_crossing_minimum`. Below that the acceleration can never reach zero and
-/// the chain becomes a single acceleration-monotone hold ramp; a pure
-/// constant-acceleration slice of an ongoing ramp is that shape with both slews
-/// empty, i.e. one zero-jerk phase.
+/// When the member is long enough to relax acceleration to zero, three
+/// candidate shapes cover the boundary-value problem: the ordinary run (entry
+/// slew, run, exit slew) and one direct run per boundary that carries
+/// acceleration, which rides the acceleration rail straight into (or out of)
+/// that boundary instead of relaxing to zero beside it. The quickest candidate
+/// wins under [`displaces_ordinary`]. Below `zero_crossing_minimum` the
+/// acceleration can never reach zero and the chain becomes a single
+/// acceleration-monotone hold ramp; a pure constant-acceleration slice of an
+/// ongoing ramp is that shape with both slews empty, i.e. one zero-jerk phase.
 pub fn straight_chain_between(
     entry: (f64, f64),
     exit: (f64, f64),
@@ -847,11 +888,6 @@ pub fn straight_chain_between(
             return infeasible(BoundaryInfeasibility::UnboundedJerkWithAccelBoundary { a });
         }
     }
-    if a0.abs() >= SATURATED_BOUNDARY_SHARE * a_max && a1 == 0.0 {
-        return straight_chain_between((v1, 0.0), (v0, -a0), length, v_max, a_max, j_max)
-            .map(|chain| reverse_chain(length, (v0, a0), chain));
-    }
-
     let v_after_unwind = v0 + swing_dv(a0, j_max);
     let v_before_wind = v1 - swing_dv(a1, j_max);
     for v in [v_after_unwind, v_before_wind] {
@@ -871,24 +907,22 @@ pub fn straight_chain_between(
         entry_dist + exit_dist + ramp_dist(v_after_unwind, v_before_wind, a_max, j_max);
 
     let phases = if length >= zero_crossing_minimum {
-        let mut b = Builder::new(v0, a0);
-        b.unwind_accel_to_zero(j_max);
-        let ordinary_length = length - b.s - exit_dist;
-        let seed_peak = peak_velocity(b.v, v_before_wind, ordinary_length, v_max, a_max, j_max);
-        let mut direct = b.clone();
-        let has_direct =
-            direct.run_to_accel_boundary((v1, a1), length - b.s, v_max, a_max, j_max, seed_peak);
-        b.run(v_before_wind, ordinary_length, v_max, a_max, j_max);
-        b.wind_accel_up_to(a1, j_max);
-        let boundary_share = a1.abs() / a_max;
-        let direct_is_extremal = boundary_share <= DIRECT_SMALL_BOUNDARY_SHARE
-            || boundary_share >= SATURATED_BOUNDARY_SHARE;
-        let direct_is_materially_quicker = direct.t <= (1.0 - DIRECT_MIN_TIME_GAIN) * b.t;
-        if has_direct && (direct_is_extremal || direct_is_materially_quicker) && direct.t < b.t {
-            direct.phases
-        } else {
-            b.phases
+        let (ordinary, direct_into_exit) = relaxed_chains(entry, exit, length, v_max, a_max, j_max);
+        let (_, direct_from_entry) =
+            relaxed_chains((v1, -a1), (v0, -a0), length, v_max, a_max, j_max);
+        let candidates = [
+            direct_into_exit.map(|d| (d.t, d.phases, a1)),
+            direct_from_entry.map(|d| (d.t, reverse_chain(length, entry, d.phases), a0)),
+        ];
+        let mut best_t = ordinary.t;
+        let mut best = ordinary.phases;
+        for (t, chain, boundary_a) in candidates.into_iter().flatten() {
+            if t < best_t && displaces_ordinary(t, ordinary.t, boundary_a, a_max) {
+                best_t = t;
+                best = chain;
+            }
         }
+        best
     } else {
         hold_ramp_chain(entry, exit, length, a_max, j_max, zero_crossing_minimum)?
     };
