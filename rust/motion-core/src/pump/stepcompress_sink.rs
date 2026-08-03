@@ -26,15 +26,6 @@ pub const SEND_LEAD_SECONDS: f64 = 2.0 * (host_rt::host_io::rtt::MIN_RTO_MS as f
 
 pub const CONSUMED_MARGIN_SECONDS: f64 = 0.010;
 
-/// How far behind its own clock the mcu will carry a `queue_step` that lands
-/// on an idle stepper before it calls "Stepper too far in past" — the
-/// scheduler's own dispatch-loop tolerance, mirrored from
-/// `REARM_LATE_LIMIT_TICKS` in `src/stepper_classic.c`. The host refuses a
-/// stale frame strictly inside this window, so the diagnosis is always the
-/// pump's (which names the backlog, the slot occupancy and the lateness)
-/// rather than a bare mcu shutdown.
-pub const MCU_REARM_ABSORB_SECONDS: f64 = 0.001;
-
 /// A classic stepper spends two scheduler events on every step: the pulse at
 /// the step clock and the unstep `step_pulse_ticks` later, from which
 /// `stepper_load_next` re-arms one more `step_pulse_ticks` out. A queued move
@@ -613,9 +604,8 @@ impl StepcompressEndpoint {
                 let late_us = (now - out.start_clock) as f64 * 1e6 / freq;
                 stale = Some(SendError::Fatal(format!(
                     "stepcompress mcu {}: queue_step first step at clock {} is {late_us:.0} us \
-                     behind the mcu clock {now} — the mcu carries an idle-stepper re-arm only \
-                     {MCU_REARM_ABSORB_SECONDS} s past its waketime before it shuts down with \
-                     \"Stepper too far in past\". {SEND_LEAD_SECONDS} s of lead was not \
+                     behind the mcu clock {now} — the mcu shuts down on any late idle-stepper \
+                     re-arm (\"Stepper too far in past\"). {SEND_LEAD_SECONDS} s of lead was not \
                      delivered: {} frames backlogged, {in_flight}/{} move slots in flight",
                     self.mcu_id,
                     out.start_clock,

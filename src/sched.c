@@ -158,7 +158,7 @@ volatile uint32_t sched_bad_add_stack2 __attribute__((used));
 volatile uint32_t sched_bad_add_blocked_count __attribute__((used));
 
 static void
-sched_insert_timer(struct timer *add, uint32_t caller, uint_fast8_t guard_past)
+sched_insert_timer(struct timer *add, uint32_t caller)
 {
     if (addr_looks_bogus_for_timer((uint32_t)add)) {
         sched_bad_add_blocked_count++;
@@ -179,7 +179,7 @@ sched_insert_timer(struct timer *add, uint32_t caller, uint_fast8_t guard_past)
     if (unlikely(timer_is_before(waketime, tl->waketime))) {
         // This timer is before all other scheduled timers
         uint32_t now = timer_read_time();
-        if (guard_past && timer_is_before(waketime, now)) {
+        if (timer_is_before(waketime, now)) {
             extern void diag_note_timer_too_close(uint32_t caller,
                                                   uint32_t func,
                                                   uint32_t late);
@@ -211,19 +211,7 @@ sched_insert_timer(struct timer *add, uint32_t caller, uint_fast8_t guard_past)
 void
 sched_add_timer(struct timer *add)
 {
-    sched_insert_timer(add, (uint32_t)(uintptr_t)__builtin_return_address(0),
-                       1);
-}
-
-// Insert a timer whose waketime the caller has already judged. The dispatch
-// loop carries a timer up to 1 ms past its waketime before it calls
-// "Rescheduled timer in the past", so a caller that applies the same bound
-// itself does not need the stricter add-time guard on top of it.
-void
-sched_add_timer_late_ok(struct timer *add)
-{
-    sched_insert_timer(add, (uint32_t)(uintptr_t)__builtin_return_address(0),
-                       0);
+    sched_insert_timer(add, (uint32_t)(uintptr_t)__builtin_return_address(0));
 }
 
 // The deleted timer is used when deleting an active timer.

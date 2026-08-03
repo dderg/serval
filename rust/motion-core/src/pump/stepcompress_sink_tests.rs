@@ -368,14 +368,14 @@ fn the_send_lead_outlasts_the_link_retransmit_floor() {
 }
 
 #[test]
-fn the_host_refuses_a_stale_queue_step_before_the_mcu_stops_absorbing_it() {
+fn the_host_guard_rejects_a_stale_queue_step_before_the_send_lead_is_gone() {
     let host_guard = crate::pump::pump_loop::pump_past_guard_secs();
     assert!(
-        host_guard < MCU_REARM_ABSORB_SECONDS,
-        "the pump lets a queue_step through until it is {host_guard} s behind the mcu clock, but \
-         the mcu only carries an idle-stepper re-arm {MCU_REARM_ABSORB_SECONDS} s past its \
-         waketime before it shuts down with \"Stepper too far in past\" — the host must fault \
-         first so the diagnosis names the backlog and the slot occupancy"
+        host_guard < SEND_LEAD_SECONDS,
+        "the pump lets a queue_step through until it is {host_guard} s behind the mcu clock — \
+         the mcu shuts down on any late idle-stepper re-arm, so the host guard exists only to \
+         name a send-time stall with its backlog and slot occupancy, and it must trip well \
+         inside the {SEND_LEAD_SECONDS} s delivery lead"
     );
 }
 
