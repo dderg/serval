@@ -2,6 +2,16 @@ name: Sim e2e (advisory)
 
 on:
   workflow_dispatch:
+    inputs:
+      tests:
+        description: >-
+          Optional comma-separated test items, one runner each. An item
+          containing ".py" or "::" is a pytest target (bare filenames
+          resolve under tools/sim/tests/); anything else is a pytest -k
+          expression. Empty runs the standard shard matrix.
+        required: false
+        type: string
+        default: ""
   pull_request:
 
 concurrency:
@@ -10,6 +20,7 @@ concurrency:
 
 jobs:
   sim-e2e:
+    if: ${{ (inputs.tests || '') == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Advisory gate: surfaces regressions the unit suites can't see (full
@@ -63,3 +74,46 @@ jobs:
         run: ./scripts/ci.sh sim-e2e
         env:
           SIM_TEST_TARGETS: ${{ matrix.targets }}
+
+  plan:
+    if: ${{ (inputs.tests || '') != '' }}
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+    steps:
+      - id: split
+        env:
+          TESTS: ${{ inputs.tests }}
+        run: |
+          matrix=$(jq -cn --arg s "$TESTS" \
+            '[$s | split(",")[] | gsub("^\\s+|\\s+$"; "") | select(length > 0)]')
+          [ "$matrix" != "[]" ] || { echo "no test items in input" >&2; exit 1; }
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  sim-e2e-item:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        item: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: sim-e2e (${{ matrix.item }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run sim tests
+        env:
+          ITEM: ${{ matrix.item }}
+        run: |
+          case "$ITEM" in
+            *.py*|*::*)
+              if [[ "$ITEM" != */* ]]; then
+                ITEM="tools/sim/tests/$ITEM"
+              fi
+              SIM_TEST_TARGETS="$ITEM" ./scripts/ci.sh sim-e2e
+              ;;
+            *)
+              ./scripts/ci.sh sim-e2e -k "$ITEM"
+              ;;
+          esac
