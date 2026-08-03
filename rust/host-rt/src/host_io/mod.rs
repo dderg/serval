@@ -119,6 +119,11 @@ pub enum ReactorCommand {
     FireAndForgetTyped {
         payload: Vec<u8>,
     },
+    /// A burst of encoded commands to pack into as few Klipper message
+    /// blocks as the 64-byte block allows before it reaches the wire.
+    FireAndForgetBatch {
+        payloads: Vec<Vec<u8>>,
+    },
     McuIdentify {
         completion:
             SyncSender<Result<crate::host_io::mcu_session::IdentifyOutcome, TransportError>>,
@@ -756,6 +761,27 @@ impl McuHostIo {
             .map_err(|e| TransportError::Parse(format!("{name}: {e:?}")))?;
         self.submission_tx
             .send(ReactorCommand::FireAndForgetTyped { payload })
+            .map_err(|_| TransportError::Closed)
+    }
+
+    /// Hand a whole burst of commands to the reactor as one unit so it can
+    /// pack them into full message blocks. Sending them one at a time
+    /// through `send_args` would let the reactor drain the channel between
+    /// them and frame each command on its own block.
+    pub fn send_args_batch(
+        &self,
+        frames: &[(&str, Vec<(String, crate::host_io::parser::ArgValue)>)],
+    ) -> Result<(), TransportError> {
+        let mut payloads = Vec::with_capacity(frames.len());
+        for (name, args) in frames {
+            payloads.push(
+                self.parser
+                    .encode_args(name, args)
+                    .map_err(|e| TransportError::Parse(format!("{name}: {e:?}")))?,
+            );
+        }
+        self.submission_tx
+            .send(ReactorCommand::FireAndForgetBatch { payloads })
             .map_err(|_| TransportError::Closed)
     }
 

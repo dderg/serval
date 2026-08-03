@@ -1,5 +1,5 @@
-use crate::kinematics::SPATIAL_AXES;
 use nurbs::bezier::BezierPiece;
+use runtime::stepping_state::MAX_AXES;
 
 #[cfg(test)]
 mod tests;
@@ -51,10 +51,10 @@ pub fn plan_nudge_profile(
     }
 
     let ax = axis_idx as usize;
-    if ax >= SPATIAL_AXES {
+    if ax >= MAX_AXES {
         return Err(format!(
             "nudge: axis_idx {axis_idx} out of range (max {})",
-            SPATIAL_AXES - 1
+            MAX_AXES - 1
         ));
     }
 

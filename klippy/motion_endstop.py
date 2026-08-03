@@ -1,8 +1,14 @@
+from .mcu import STEPPING_MODE_STEPCOMPRESS
+
 AXIS_ENDSTOP_IDS = (0, 1, 2)
 PROVIDER_ID_FIRST = len(AXIS_ENDSTOP_IDS)
 ENDSTOP_ID_MAX = 255
 
 _ALLOCATOR_OBJECT = "motion_endstop_allocator"
+_TRIP_STOP_OBJECT = "motion_endstop_trip_stop"
+
+TRIGGER_REASON_ENDSTOP = 1
+TRIGGER_REASON_HOST_DISARM = 2
 
 
 class MotionEndstop:
@@ -15,6 +21,9 @@ class MotionEndstop:
         self.oid = self.mcu.create_oid()
         self._query_cmd = None
         self._state_cmd = None
+        self._trip_stop = None
+        if self.mcu.get_stepping_mode() == STEPPING_MODE_STEPCOMPRESS:
+            self._trip_stop = _StepcompressTripStop(self.mcu, self.oid)
         self.mcu.register_config_callback(self._build_config)
 
     def _build_config(self):
@@ -31,6 +40,8 @@ class MotionEndstop:
             " trip_clock=%u",
             oid=self.oid,
         )
+        if self._trip_stop is not None:
+            self._trip_stop.build_config()
 
     def is_triggered(self):
         params = self._state_cmd.send([self.oid])
@@ -50,7 +61,13 @@ class MotionEndstop:
                 "endstop %d (pin %s): arm rest_ticks must be positive"
                 % (self.endstop_id, self.pin)
             )
+        if self._trip_stop is not None:
+            self._trip_stop.arm()
         self._query_cmd.send([self.oid, rest_ticks])
+
+    def disarm(self):
+        if self._trip_stop is not None:
+            self._trip_stop.disarm()
 
     def query_endstop(self, print_time):
         return self.is_triggered()
@@ -111,3 +128,91 @@ def allocate_provider_id(printer):
         allocator = _ProviderIdAllocator()
         printer.add_object(_ALLOCATOR_OBJECT, allocator)
     return allocator.allocate()
+
+
+class _StepcompressStepperRegistry:
+    def __init__(self):
+        self._by_mcu = {}
+
+    def register(self, mcu, stepper_oids):
+        known = self._by_mcu.setdefault(id(mcu), [])
+        for oid in stepper_oids:
+            if oid not in known:
+                known.append(oid)
+
+    def stepper_oids(self, mcu):
+        return self._by_mcu.get(id(mcu), [])
+
+
+def _stepcompress_registry(printer):
+    registry = printer.lookup_object(_TRIP_STOP_OBJECT, None)
+    if registry is None:
+        registry = _StepcompressStepperRegistry()
+        printer.add_object(_TRIP_STOP_OBJECT, registry)
+    return registry
+
+
+def register_stepcompress_steppers(printer, mcu, stepper_oids):
+    _stepcompress_registry(printer).register(mcu, stepper_oids)
+
+
+class _StepcompressTripStop:
+    """MCU-side trip stop for a stepcompress endstop: the classic step
+    queues are cleared inside the endstop's trigger IRQ instead of waiting
+    for the host's Stop round-trip, which at homing speed is hundreds of
+    microsteps of overtravel."""
+
+    def __init__(self, mcu, endstop_oid):
+        self._mcu = mcu
+        self._endstop_oid = endstop_oid
+        self._trsync_oid = mcu.create_oid()
+        self._start_cmd = None
+        self._trigger_cmd = None
+        self._stop_on_trigger_cmd = None
+        self._arm_cmd = None
+        self._clear_cmd = None
+        self._armed_stepper_oids = []
+
+    def build_config(self):
+        self._mcu.add_config_cmd("config_trsync oid=%d" % (self._trsync_oid,))
+        self._start_cmd = self._mcu.lookup_command(
+            "trsync_start oid=%c report_clock=%u report_ticks=%u"
+            " expire_reason=%c"
+        )
+        self._trigger_cmd = self._mcu.lookup_command(
+            "trsync_trigger oid=%c reason=%c"
+        )
+        self._stop_on_trigger_cmd = self._mcu.lookup_command(
+            "stepper_stop_on_trigger oid=%c trsync_oid=%c"
+        )
+        self._arm_cmd = self._mcu.lookup_command(
+            "endstop_arm_trsync oid=%c trsync_oid=%c trigger_reason=%c"
+        )
+        self._clear_cmd = self._mcu.lookup_command(
+            "endstop_clear_trsync oid=%c"
+        )
+
+    def arm(self):
+        stepper_oids = _stepcompress_registry(
+            self._mcu.get_printer()
+        ).stepper_oids(self._mcu)
+        if not stepper_oids:
+            raise ValueError(
+                "endstop oid %d: stepcompress mcu '%s' has no classic"
+                " steppers registered; the trip move would run without an"
+                " mcu-side stop" % (self._endstop_oid, self._mcu.get_name())
+            )
+        self._start_cmd.send([self._trsync_oid, 0, 0, 0])
+        for oid in stepper_oids:
+            self._stop_on_trigger_cmd.send([oid, self._trsync_oid])
+        self._arm_cmd.send(
+            [self._endstop_oid, self._trsync_oid, TRIGGER_REASON_ENDSTOP]
+        )
+        self._armed_stepper_oids = stepper_oids
+
+    def disarm(self):
+        if not self._armed_stepper_oids:
+            return
+        self._armed_stepper_oids = []
+        self._clear_cmd.send([self._endstop_oid])
+        self._trigger_cmd.send([self._trsync_oid, TRIGGER_REASON_HOST_DISARM])

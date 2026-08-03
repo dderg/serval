@@ -189,6 +189,7 @@ class SimWorld:
         workdir: pathlib.Path,
         repo_root: pathlib.Path = REPO_ROOT,
         dual_mcu: bool = True,
+        sc_mcu: bool = False,
         beacon: bool = False,
         cartographer: bool = False,
         verbose: bool = False,
@@ -197,6 +198,7 @@ class SimWorld:
         self.workdir = pathlib.Path(workdir)
         self.repo_root = repo_root
         self.dual_mcu = dual_mcu
+        self.sc_mcu = sc_mcu
         self.want_beacon = beacon
         self.want_cartographer = cartographer
         self.verbose = verbose
@@ -307,7 +309,10 @@ class SimWorld:
     def _spawn_mcus(self, shim_so, vtime_so) -> None:
         specs = [("h7", self._elf("klipper-h7-sim.elf"), self.h7_pty)]
         if self.dual_mcu:
-            specs.append(("f4", self._elf("klipper-f4-sim.elf"), self.f4_pty))
+            second = (
+                "klipper-sc-sim.elf" if self.sc_mcu else "klipper-f4-sim.elf"
+            )
+            specs.append(("f4", self._elf(second), self.f4_pty))
 
         spawned: dict = {}
         errors: dict = {}
@@ -348,6 +353,8 @@ class SimWorld:
             "VTIME_SPEED", str(self.vtime_speed)
         )
         env["MCU_SIM_SOCK_DIR"] = str(sock_dir)
+        if self.sc_mcu and name == "f4":
+            env["MCU_SIM_GPIO_STEP_TRACKING"] = "1"
         if self.verbose:
             env["MCU_SIM_SHIM_VERBOSE"] = "1"
             env["VTIME_DEBUG"] = "1"

@@ -1,0 +1,26 @@
+; the repro_z14.gcode line 3322 serpentine: ~16 mm straights at F3600
+; joined by short turnaround blends, on corexy limits. Each straight
+; cruises at its own feedrate ceiling for most of its length.
+G90
+G1 X52.249 Y62.142 F36000
+G1 F3600
+G1 X52.116 Y61.607
+G1 X67.874 Y61.607
+G1 X67.972 Y61.071
+G1 X52.032 Y61.071
+G1 X51.984 Y60.729
+G1 X51.977 Y60.536
+G1 X68.019 Y60.536
+G1 X68.047 Y60.219
+G1 X68.04 Y60
+G1 X51.959 Y60
+G1 X51.953 Y59.787
+G1 X51.981 Y59.464
+G1 X68.022 Y59.464
+G1 X68.016 Y59.271
+G1 X67.968 Y58.929
+G1 X52.028 Y58.929
+G1 X52.126 Y58.393
+G1 X67.881 Y58.393
+G1 X67.75 Y57.858
+G1 X66.252 Y57.858

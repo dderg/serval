@@ -56,6 +56,13 @@
 #define MESSAGE_DEST 0x10
 #define MESSAGE_SYNC 0x7E
 
+// The kalico log channel (kalico_console_write_raw) shares each transport's
+// transmit buffer with the klipper protocol. Protocol frames carry the acks
+// that release the host's send window, so a log burst that fills the buffer
+// stalls the host until its retransmit timer fires. The log may therefore
+// never occupy the last CONSOLE_TX_PROTOCOL_RESERVE bytes.
+#define CONSOLE_TX_PROTOCOL_RESERVE (2 * MESSAGE_MAX)
+
 struct command_encoder {
     uint16_t encoded_msgid;
     uint8_t max_size, num_params;

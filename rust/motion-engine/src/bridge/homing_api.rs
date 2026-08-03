@@ -51,9 +51,9 @@ impl PyMotionEngine {
 
         self.quiesce_pump_and_drain(py)?;
 
-        // home_drip resets the planner odometer to home_pos with extruder=0;
-        // the seed zeroes the MCU extruder counters to match. The counters
-        // are machine space, so the gcode rest point crosses the warp here.
+        // The counters are machine space, so the gcode rest point crosses
+        // the warp here; the follower lanes take the same origin home_drip
+        // restarts the stream odometer's follower coordinate at.
         self.send_serial_position_seeds(self.machine_from_gcode(start_pos))?;
 
         let window_start_host = match self.homing.last_arm.lock_ok().take() {
@@ -89,7 +89,7 @@ impl PyMotionEngine {
 
         let planner_done_rx = planner
             .home_drip(crate::worker::HomeDripParams {
-                home_pos: [start_pos.x(), start_pos.y(), start_pos.z(), 0.0],
+                home_pos: crate::mcu_config::reanchor_home_pos(start_pos),
                 start: start_pos.0,
                 axis,
                 direction,
@@ -483,7 +483,7 @@ impl PyMotionEngine {
         let Some(planner) = planner_guard.as_ref() else {
             return true;
         };
-        let open_result = planner.stream_open(vec![gcode.x(), gcode.y(), gcode.z(), 0.0]);
+        let open_result = planner.stream_open(crate::mcu_config::reanchor_stream_pos(gcode));
         if let Err(e) = open_result {
             tracing::error!(
                 event = "home_abort_stream_open_failed",
@@ -534,6 +534,7 @@ impl PyMotionEngine {
             router: Arc::clone(&self.router),
             motion_history: Arc::clone(&self.motion_history),
             mcu_axis_configs: Arc::clone(&self.mcu_axis_configs),
+            stepcompress_endpoints: Arc::clone(&self.stepcompress_endpoints),
         }
     }
     fn reanchor_after_trip(&self, stop_pos: geometry::GcodePos) -> PyResult<()> {

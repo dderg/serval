@@ -149,13 +149,14 @@ int
 kalico_console_write_raw(const uint8_t *buf, uint16_t len)
 {
     transmit_pos_t tpos = CanData.transmit_pos, tmax = CanData.transmit_max;
-    if (tpos && (uint32_t)tmax + (uint32_t)len > sizeof(CanData.transmit_buf)) {
+    uint32_t log_limit = sizeof(CanData.transmit_buf) - CONSOLE_TX_PROTOCOL_RESERVE;
+    if (tpos && (uint32_t)tmax + (uint32_t)len > log_limit) {
         tmax -= tpos;
         memmove(&CanData.transmit_buf[0], &CanData.transmit_buf[tpos], tmax);
         CanData.transmit_pos = 0;
         CanData.transmit_max = tmax;
     }
-    if ((uint32_t)tmax + (uint32_t)len > sizeof(CanData.transmit_buf))
+    if ((uint32_t)tmax + (uint32_t)len > log_limit)
         return -1;
     memcpy(&CanData.transmit_buf[tmax], buf, len);
     CanData.transmit_max = tmax + len;

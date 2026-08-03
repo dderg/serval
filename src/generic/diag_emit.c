@@ -175,6 +175,7 @@ kalico_diag_emit_live(void)
     event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
                     EVENT_LOG_EVENT_RUNTIME_TIM5_IA, 0,
                     diag.tim5_ia_min_cyc, diag.tim5_ia_max_cyc);
+#if CONFIG_MOTION_RUNTIME
     {
         extern void kalico_stepout_late_get(uint32_t *out_max_late,
                                             uint32_t *out_late_count,
@@ -189,6 +190,7 @@ kalico_diag_emit_live(void)
                         EVENT_LOG_EVENT_RUNTIME_STEPOUT_LATE, 0,
                         late_max, packed);
     }
+#endif
 
     if (live_snap.worst_fg_stall_ticks) {
         event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,

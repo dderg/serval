@@ -53,7 +53,10 @@ fn classify_same_starvation_from_rest_is_an_idle_resume() {
 fn classify_healthy_margin_is_a_continuation() {
     let a = primed(false);
     // Playhead well behind the start (0.25s margin): a healthy continuation.
-    assert_eq!(a.classify(1.0, 101.0), AnchorClass::Continuation);
+    assert!(matches!(
+        a.classify(1.0, 101.0),
+        AnchorClass::Continuation { .. }
+    ));
 }
 
 #[test]
@@ -90,9 +93,9 @@ fn underrun_after_rest_reanchors_as_idle_resume() {
     let (t0_new, epoch) = a.anchor_segment(1.0, 2.0, 104.0, false);
     assert_eq!(epoch, StreamEpoch::Reanchor, "idle resume must re-anchor");
     assert_ne!(t0_first, t0_new);
-    // The resumed segment lands a lead ahead of the current playhead.
+    // The resumed segment lands the earned lead ahead of the current playhead.
     assert!(
-        (t0_new + 1.0 - (104.0 + DEFAULT_LEAD_SECS)).abs() < 1e-9,
+        (t0_new + 1.0 - (104.0 + RESUME_LEAD_GROWTH * DEFAULT_LEAD_SECS)).abs() < 1e-9,
         "t0_new={t0_new}"
     );
 }
@@ -113,7 +116,7 @@ fn thin_margin_after_rest_reanchors_instead_of_racing_transport() {
         "resume from rest must re-anchor"
     );
     assert!(
-        (t0_new + 1.0 - (host_now + DEFAULT_LEAD_SECS)).abs() < 1e-9,
+        (t0_new + 1.0 - (host_now + RESUME_LEAD_GROWTH * DEFAULT_LEAD_SECS)).abs() < 1e-9,
         "t0_new={t0_new}"
     );
 }
@@ -199,7 +202,8 @@ fn grounded_frontier_reports_real_queued_seconds_after_reanchor() {
 
     // Committed span [501,505] = 4 s mapped to the host clock, minus how far the
     // playhead advanced into it, plus the lead the frontier floats ahead.
-    let expected = DEFAULT_LEAD_SECS + (frontier_stream_t - 501.0) - (read_host_now - host_now);
+    let expected = RESUME_LEAD_GROWTH * DEFAULT_LEAD_SECS + (frontier_stream_t - 501.0)
+        - (read_host_now - host_now);
     assert!(
         (queued - expected).abs() < 1e-9,
         "queued={queued} expected={expected}"
@@ -229,5 +233,106 @@ fn grounding_cancels_the_stream_time_baseline() {
         (near_zero - deep).abs() < 1e-9,
         "grounded signal must not depend on stream baseline: {near_zero} vs {deep}"
     );
-    assert!((near_zero - (DEFAULT_LEAD_SECS + 2.0)).abs() < 1e-9);
+    assert!((near_zero - (RESUME_LEAD_GROWTH * DEFAULT_LEAD_SECS + 2.0)).abs() < 1e-9);
+}
+
+// The lead a fresh anchor grants is the whole runway the resumed stream has
+// to survive the producer's next hiccup. These pin the feedback loop that
+// earns it: grow on every idle resume, release once the producer proves it
+// is ahead again.
+
+/// One shaped segment of the bench trace below.
+const BENCH_SEG_SECS: f64 = 0.0125;
+
+/// Wall clock the first commit of the dense burst took to deliver one such
+/// segment, measured between the two `anchor_decision` records on the Voron 0
+/// bench (host_now 45.113477542 -> 45.620990870).
+const BENCH_COMMIT_STALL_SECS: f64 = 0.5075;
+
+/// Replays the Voron 0 failure (2026-08-02T04:43Z, repro_z14.gcode): G28,
+/// approach, M400, then a dense layer. The approach ends at rest and resumes,
+/// the M400 drain ends at rest and resumes, and the first commit of the dense
+/// burst then stalls half a second — a planner re-plan pass, the stall the
+/// pump's staging is explicitly sized for. On a flat 250 ms lead the very
+/// next segment landed 245 ms behind the playhead and `anchor_underrun`
+/// aborted klippy. Each resume must have earned enough lead to carry it.
+#[test]
+fn a_stalled_first_commit_after_two_resumes_stays_a_continuation() {
+    let mut a = Anchor::new();
+    let (_, epoch) = a.anchor_segment(0.0, BENCH_SEG_SECS, 100.0, true);
+    assert_eq!(epoch, StreamEpoch::Reposition);
+
+    let (_, epoch) = a.anchor_segment(BENCH_SEG_SECS, 2.0 * BENCH_SEG_SECS, 100.709, true);
+    assert_eq!(epoch, StreamEpoch::Reanchor, "approach resume");
+
+    let resume_at = 108.1;
+    let (_, epoch) = a.anchor_segment(2.0 * BENCH_SEG_SECS, 3.0 * BENCH_SEG_SECS, resume_at, false);
+    assert_eq!(epoch, StreamEpoch::Reanchor, "post-M400 resume");
+
+    let class = a.classify(3.0 * BENCH_SEG_SECS, resume_at + BENCH_COMMIT_STALL_SECS);
+    assert!(
+        matches!(class, AnchorClass::Continuation { .. }),
+        "the earned lead must absorb a {BENCH_COMMIT_STALL_SECS}s producer stall, got {class:?}",
+    );
+}
+
+#[test]
+fn every_idle_resume_doubles_the_lead_the_next_timeline_starts_on() {
+    let mut a = Anchor::new();
+    let (t0, _) = a.anchor_segment(0.0, 1.0, 100.0, true);
+    assert!((t0 - (100.0 + DEFAULT_LEAD_SECS)).abs() < 1e-9);
+
+    let (t0, epoch) = a.anchor_segment(1.0, 2.0, 200.0, true);
+    assert_eq!(epoch, StreamEpoch::Reanchor);
+    assert!((t0 + 1.0 - (200.0 + 2.0 * DEFAULT_LEAD_SECS)).abs() < 1e-9);
+
+    let (t0, epoch) = a.anchor_segment(2.0, 3.0, 300.0, true);
+    assert_eq!(epoch, StreamEpoch::Reanchor);
+    assert!((t0 + 2.0 - (300.0 + 4.0 * DEFAULT_LEAD_SECS)).abs() < 1e-9);
+}
+
+#[test]
+fn the_earned_lead_stops_at_the_pumps_push_horizon() {
+    let mut a = Anchor::new();
+    let mut t = 100.0;
+    let mut seg = 0.0;
+    let mut t0 = a.anchor_segment(seg, seg + 1.0, t, true).0;
+    for _ in 0..8 {
+        seg += 1.0;
+        t += 1000.0;
+        t0 = a.anchor_segment(seg, seg + 1.0, t, true).0;
+    }
+    assert!(
+        (t0 + seg - (t + crate::pump::MAX_LEAD_SECS)).abs() < 1e-9,
+        "a lead deeper than the pump's horizon buys nothing",
+    );
+}
+
+#[test]
+fn a_producer_that_builds_runway_releases_the_earned_lead() {
+    let mut a = Anchor::new();
+    a.anchor_segment(0.0, 1.0, 100.0, true);
+    a.anchor_segment(1.0, 2.0, 200.0, false);
+    assert_eq!(a.lead_secs, 2.0 * DEFAULT_LEAD_SECS);
+
+    // t0 = 200 + 0.5 - 1.0 = 199.5. A commit at stream-t 2.0 while the
+    // playhead sits at 200.7 carries 0.8s of runway — a full default lead
+    // beyond the 0.5s it was granted.
+    let (_, epoch) = a.anchor_segment(2.0, 3.0, 200.7, false);
+    assert_eq!(epoch, StreamEpoch::Continuation);
+    assert_eq!(a.lead_secs, DEFAULT_LEAD_SECS);
+}
+
+#[test]
+fn the_commit_right_behind_a_resume_does_not_release_the_earned_lead() {
+    let mut a = Anchor::new();
+    a.anchor_segment(0.0, 1.0, 100.0, true);
+    a.anchor_segment(1.0, 1.05, 200.0, false);
+    let earned = a.lead_secs;
+
+    // The next segment follows 5ms of wall clock later: its margin is the
+    // granted lead plus one segment, which is not runway the producer built.
+    let (_, epoch) = a.anchor_segment(1.05, 1.1, 200.005, false);
+    assert_eq!(epoch, StreamEpoch::Continuation);
+    assert_eq!(a.lead_secs, earned);
 }

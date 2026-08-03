@@ -17,6 +17,7 @@ gcode = { path = "../gcode" }
 nurbs = { path = "../nurbs" }
 runtime = { path = "../runtime" }
 planner-config = { path = "../planner-config" }
+step-shim = { path = "../step-shim" }
 crossbeam-channel = "0.5"
 tracing = "0.1"
 thiserror = { workspace = true }

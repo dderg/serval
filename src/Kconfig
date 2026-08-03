@@ -313,6 +313,54 @@ config CAN_UUID_USE_CHIPID
 config CAN_UUID_CUSTOM
     default "abc1234"
 
+# Classic host-scheduled stepping
+config CLASSIC_STEPPING
+    bool "Classic host-computed step timing (stepcompress)"
+    depends on HAVE_GPIO
+    default n
+    help
+        Execute motion from host-computed step times delivered by the
+        classic queue_step / set_next_step_dir / reset_step_clock
+        commands instead of evaluating trajectory pieces on the
+        micro-controller. This trades phase stepping and MCU-side piece
+        evaluation away, and is intended for micro-controllers too weak
+        to run the real-time piece evaluator (for example the STM32G0B1).
+        Selecting it removes the whole MCU-side motion runtime — the Rust
+        staticlib, the piece ring, the step queue, the sample ISR and the
+        phase-stepping path — so it is mutually exclusive with
+        MOTION_MODULE_STEPPER and every runtime sizing option.
+
+# Master switch for the MCU-side motion runtime: the Rust staticlib, the
+# piece ring/evaluator, the step queue, the motion sample ISR, the per-axis
+# step-output timers and the phase-stepping path. Mutually exclusive with
+# classic host-computed stepping.
+config MOTION_RUNTIME
+    bool
+    default y if !CLASSIC_STEPPING
+
+# Stepper optimizations
+config INLINE_STEPPER_HACK
+    # Enables gcc to inline stepper_event() into the main timer irq handler
+    bool
+    depends on CLASSIC_STEPPING
+    default y
+config HAVE_STEPPER_OPTIMIZED_BOTH_EDGE
+    bool
+config WANT_STEPPER_OPTIMIZED_BOTH_EDGE
+    bool "Optimize stepper code for 'step on both edges'" if LOW_LEVEL_OPTIONS
+    depends on INLINE_STEPPER_HACK && HAVE_STEPPER_OPTIMIZED_BOTH_EDGE
+    default y
+    help
+        Optimize the stepper code for Trinamic stepper motor drivers
+        that are configured in UART or SPI mode (and thus can perform
+        a step on both "edges" of the step pin).  Enabling this option
+        typically improves the stepper cpu performance by about 20%
+        when using these drivers.  If this option is disabled the code
+        will instead deploy optimizations that improve the cpu
+        performance by about 20% for traditional drivers (those that
+        take a step only on the "rising" or "falling" level of the
+        step pin).
+
 # Support setting gpio state at startup
 config INITIAL_PINS
     string "GPIO pins to set at micro-controller startup"
@@ -349,6 +397,7 @@ config HAVE_SOFTWARE_DIVIDE_REQUIRED
     bool
 
 config RUNTIME_PIECE_RING_SIZE
+    depends on MOTION_RUNTIME
     int "Piece-ring byte budget (total across all axes)" if LOW_LEVEL_OPTIONS
     default 4096 if MACH_STM32F1
     default 6144 if MACH_STM32G0
@@ -400,7 +449,7 @@ config MOTION_SAMPLE_RATE_HZ
 choice
     prompt "Motion-engine ISR timer (STM32G0)" if LOW_LEVEL_OPTIONS
     default MOTION_TIMER_TIM7
-    depends on MACH_STM32G0
+    depends on MACH_STM32G0 && MOTION_RUNTIME
     help
       Selects which hardware timer drives the motion-engine sample ISR on
       STM32G0. Pick one not otherwise used by your board's PWM/peripherals.
@@ -416,7 +465,8 @@ endchoice
 
 config RUNTIME_STORAGE_SIZE
     int "rt_storage byte ceiling" if LOW_LEVEL_OPTIONS
-    depends on MACH_STM32H7 || MACH_STM32F4 || MACH_STM32F1 || MACH_STM32G0 || MACH_LINUX
+    depends on (MACH_STM32H7 || MACH_STM32F4 || MACH_STM32F1 || MACH_STM32G0 || MACH_LINUX) \
+        && MOTION_RUNTIME
     default 122880 if MACH_STM32H7
     default 10240 if MACH_STM32F1
     default 57344 if MACH_STM32G0
@@ -468,7 +518,8 @@ config MCU_SIM_TMCUART_BYPASS
       jitter would make a shim-side decoder flake intermittently.
 
 menu "Motion dispatch modules"
-    depends on MACH_STM32H7 || MACH_STM32F4 || MACH_STM32F1 || MACH_STM32G0 || MACH_LINUX
+    depends on (MACH_STM32H7 || MACH_STM32F4 || MACH_STM32F1 || MACH_STM32G0 || MACH_LINUX) \
+        && MOTION_RUNTIME
 config MOTION_MODULE_STEPPER
     bool "Stepper pulse/phase dispatch"
     default y if MACH_STM32H7 || MACH_STM32F4 || MACH_STM32F1 || MACH_STM32G0

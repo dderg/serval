@@ -1630,15 +1630,25 @@ fn assert_gain_kernel_orders_commute(leader_smooth_time: Option<f64>) {
         0.0,
         &moves,
     );
+    // The window is the intersection of all three replays — `plain` (k2 = 0)
+    // is sampled too, and its emit window is not guaranteed to be the widest.
     let t0 = pre
         .first()
         .unwrap()
         .t_start
-        .max(post.first().unwrap().t_start);
-    let t1 = pre.last().unwrap().t_end.min(post.last().unwrap().t_end);
+        .max(post.first().unwrap().t_start)
+        .max(plain.first().unwrap().t_start);
+    let t1 = pre
+        .last()
+        .unwrap()
+        .t_end
+        .min(post.last().unwrap().t_end)
+        .min(plain.last().unwrap().t_end);
     let mut max_k2_effect: f64 = 0.0;
     for i in 0..=400 {
-        let t = t0 + (t1 - t0) * i as f64 / 400.0;
+        // Clamped: the last sample's product form lands an ulp past `t1`,
+        // which is exactly the final segment's `t_end`.
+        let t = (t0 + (t1 - t0) * i as f64 / 400.0).min(t1);
         let a = eval_axis_at(&pre, 3, t);
         let b = eval_axis_at(&post, 3, t);
         assert!(

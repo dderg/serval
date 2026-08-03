@@ -103,13 +103,37 @@ impl BoundaryState {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VelocityError {
-    Inconsistent { line_no: u32 },
-    NonAlphabet { line_no: u32 },
-    NonFinite { line_no: u32 },
-    Diverged { line_no: u32 },
-    OverCommitted { line_no: u32 },
-    RestAnchorAccel { line_no: u32 },
-    NegativeVelocity { line_no: u32, v: f64 },
+    Inconsistent {
+        line_no: u32,
+    },
+    NonAlphabet {
+        line_no: u32,
+    },
+    NonFinite {
+        line_no: u32,
+    },
+    Diverged {
+        line_no: u32,
+    },
+    OverCommitted {
+        line_no: u32,
+    },
+    RestAnchorAccel {
+        line_no: u32,
+    },
+    NegativeVelocity {
+        line_no: u32,
+        v: f64,
+    },
+    /// The integration grid could not be refined into a reconstruction the
+    /// lowering can fit: member `member` of the run still rings `reversals`
+    /// times across `nodes` nodes.
+    GridBudget {
+        line_no: u32,
+        nodes: usize,
+        reversals: usize,
+        member: usize,
+    },
     InvalidConfig,
 }
 
@@ -521,8 +545,20 @@ fn reconstruct_runs(
             geo.run_start_a[run_start],
             tol,
         )
-        .ok_or(VelocityError::Diverged {
-            line_no: run_start_line,
+        .map_err(|e| match e {
+            disk::ReconstructError::Diverged => VelocityError::Diverged {
+                line_no: run_start_line,
+            },
+            disk::ReconstructError::GridBudget {
+                nodes,
+                reversals,
+                member,
+            } => VelocityError::GridBudget {
+                line_no: run_start_line,
+                nodes,
+                reversals,
+                member,
+            },
         })?;
 
         for (idx, j) in (run_start..run_end).enumerate() {

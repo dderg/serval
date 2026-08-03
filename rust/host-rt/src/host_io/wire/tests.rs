@@ -37,3 +37,39 @@ fn retransmit_buffer_starts_with_sync() {
     assert_eq!(buf[0], MESSAGE_SYNC);
     assert_eq!(buf.len(), 1 + f1.len() + f2.len());
 }
+
+#[test]
+fn pack_blocks_fills_a_block_before_opening_the_next() {
+    let payloads = vec![vec![0xAA; 30], vec![0xBB; 29], vec![0xCC; 1]];
+    let blocks = pack_blocks(&payloads).unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0].len(), BLOCK_PAYLOAD_MAX);
+    assert_eq!(&blocks[0][..30], &payloads[0][..]);
+    assert_eq!(&blocks[0][30..], &payloads[1][..]);
+    assert_eq!(blocks[1], payloads[2]);
+}
+
+#[test]
+fn packed_blocks_preserve_command_order_and_bytes() {
+    let payloads: Vec<Vec<u8>> = (0u8..40).map(|i| vec![i, i, i, i, i]).collect();
+    let blocks = pack_blocks(&payloads).unwrap();
+    let flat: Vec<u8> = blocks.concat();
+    assert_eq!(flat, payloads.concat());
+    for block in &blocks {
+        assert!(block.len() <= BLOCK_PAYLOAD_MAX);
+        assert!(MESSAGE_MIN + block.len() <= MESSAGE_MAX);
+    }
+}
+
+#[test]
+fn pack_blocks_never_splits_a_command_across_blocks() {
+    let payloads = vec![vec![0x11; 40], vec![0x22; 40]];
+    let blocks = pack_blocks(&payloads).unwrap();
+    assert_eq!(blocks, payloads);
+}
+
+#[test]
+fn a_command_too_wide_for_a_block_fails_loud() {
+    let err = pack_blocks(&[vec![0u8; BLOCK_PAYLOAD_MAX + 1]]).unwrap_err();
+    assert!(err.contains("block payload"), "{err}");
+}

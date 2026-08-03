@@ -100,6 +100,10 @@ pub const RUNTIME_ERR_STEPS_PER_SAMPLE_EXCEEDED: i32 = -310;
 /// TIM5 inter-arrival gap exceeded the allowed multiple of `sample_period_cycles`.
 /// ISR was starved; fail loud before acting on stale time.
 pub const RUNTIME_ERR_TICK_INTERVAL_EXCEEDED: i32 = -311;
+/// Firmware was built with `CONFIG_CLASSIC_STEPPING` — it has no MCU-side
+/// motion runtime, so every piece-stream and phase-stepping request is
+/// rejected instead of silently ignored.
+pub const RUNTIME_ERR_MOTION_RUNTIME_ABSENT: i32 = -400;
 /// `dispatch_axis` encountered a `StepMode` byte that is not `Pulse` (0) or
 /// `Phase` (1). Detail: `((axis_idx & 0xFF) << 16) | (mode & 0xFF)`.
 pub const RUNTIME_ERR_UNKNOWN_STEP_MODE: i32 = -312;

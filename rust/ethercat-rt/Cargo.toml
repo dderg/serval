@@ -42,7 +42,7 @@ mcu-transport = { path = "../mcu-transport" }
 libc = "0.2"                                       # raw clock_gettime(CLOCK_MONOTONIC)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter", "std"] }
-tracing-appender = "0.2"                            # non-blocking file writer so the RT cycle never blocks on log I/O
+crossbeam-channel = "0.5"                           # lossy bounded record channel: field capture on the emitter, formatting + file I/O on the obs-writer thread
 time = { version = "0.3", default-features = false, features = ["formatting", "macros", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

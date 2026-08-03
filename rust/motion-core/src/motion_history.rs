@@ -59,8 +59,9 @@ pub struct HistoryPiece {
 }
 
 impl HistoryPiece {
-    pub fn from_entry(entry: &PieceEntry, nominal_freq_hz: u32, host_secs: f64) -> Self {
-        let end_clock = entry.end_time(nominal_freq_hz as f32);
+    pub fn from_entry(entry: &PieceEntry, clock_freq_hz: f64, host_secs: f64) -> Self {
+        #[allow(clippy::cast_possible_truncation)]
+        let end_clock = entry.end_time(clock_freq_hz as f32);
         Self {
             start_host: host_secs,
             start_clock: entry.start_time,
@@ -287,13 +288,7 @@ pub struct HistoryStore {
 }
 
 impl HistoryStore {
-    pub fn record(
-        &mut self,
-        key: AxisKey,
-        entry: &PieceEntry,
-        nominal_freq_hz: u32,
-        host_secs: f64,
-    ) {
+    pub fn record(&mut self, key: AxisKey, entry: &PieceEntry, clock_freq_hz: f64, host_secs: f64) {
         if !host_secs.is_finite() {
             tracing::error!(
                 subsystem = "motion",
@@ -305,7 +300,7 @@ impl HistoryStore {
             );
             return;
         }
-        let piece = HistoryPiece::from_entry(entry, nominal_freq_hz, host_secs);
+        let piece = HistoryPiece::from_entry(entry, clock_freq_hz, host_secs);
         let ring = self.rings.entry(key).or_default();
         if ring.is_empty() {
             if let Some(hold) = self.holds_before_ring.get_mut(&key) {
@@ -338,7 +333,7 @@ impl HistoryStore {
         if let Some((last_clock, last_host)) = prev {
             if piece.start_clock < last_clock {
                 let regress_ticks = last_clock - piece.start_clock;
-                let regress_us = regress_ticks as f64 * 1.0e6 / f64::from(nominal_freq_hz);
+                let regress_us = regress_ticks as f64 * 1.0e6 / clock_freq_hz;
                 let host_delta_us = (piece.start_host - last_host) * 1.0e6;
                 tracing::warn!(
                     subsystem = "motion",
