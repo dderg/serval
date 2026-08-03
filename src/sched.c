@@ -13,6 +13,9 @@
 #include "board/misc.h" // timer_from_us
 #include "board/pgm.h" // READP
 #include "command.h" // shutdown
+#if CONFIG_CLASSIC_STEPPING
+#include "stepper.h" // stepper_event
+#endif
 #include "sched.h" // sched_check_periodic
 
 static uint_fast8_t periodic_event(struct timer *t);
@@ -280,8 +283,20 @@ sched_timer_dispatch(void)
     extern void diag_note_dispatch(uint32_t func, uint32_t addr);
     diag_note_dispatch((uint32_t)t->func, (uint32_t)t);
 
-    uint_fast8_t res = t->func(t);
-    uint32_t updated_waketime = t->waketime;
+    uint_fast8_t res;
+    uint32_t updated_waketime;
+#if CONFIG_CLASSIC_STEPPING && CONFIG_INLINE_STEPPER_HACK
+    if (likely(!t->func)) {
+        res = stepper_event(t);
+        updated_waketime = t->waketime;
+    } else {
+        res = t->func(t);
+        updated_waketime = t->waketime;
+    }
+#else
+    res = t->func(t);
+    updated_waketime = t->waketime;
+#endif
 
     // Update timer_list (rescheduling current timer if necessary)
     unsigned int next_waketime = updated_waketime;

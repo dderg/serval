@@ -16,6 +16,7 @@
 #include "generic/runtime_tick.h"
 #include "generic/fault_handler.h"
 
+#if CONFIG_MOTION_RUNTIME
 // Read from Rust via `extern "C" { static runtime_clock_freq: u32; }`;
 // used,externally_visible keeps it through -fwhole-program LTO.
 const uint32_t runtime_clock_freq __attribute__((used, externally_visible))
@@ -23,8 +24,10 @@ const uint32_t runtime_clock_freq __attribute__((used, externally_visible))
 
 const uint32_t runtime_sample_rate_hz __attribute__((used, externally_visible))
     = CONFIG_MOTION_SAMPLE_RATE_HZ;
+#endif
 
 
+#if CONFIG_MOTION_RUNTIME
 extern volatile uint8_t runtime_liveness_ok;  // defined in src/stm32/watchdog.c
 
 #define ENGINE_STATUS_RUNNING 1
@@ -38,6 +41,7 @@ runtime_host_now_us(void)
     uint32_t cycles = timer_read_time();
     return ((uint64_t)cycles) / (CONFIG_CLOCK_FREQ / 1000000U);
 }
+#endif
 
 // (tag, stage, value) packed: bits[31:24]=tag, [23:16]=stage, [15:0]=value.
 volatile uint32_t runtime_diag_last_packed __attribute__((used, externally_visible));
@@ -90,6 +94,7 @@ runtime_widened_host_clock(void)
     return ((uint64_t)high << 32) | (uint64_t)cur;
 }
 
+#if CONFIG_MOTION_RUNTIME
 // used,externally_visible: the Rust staticlib calls these; LTO would otherwise
 // DCE the standalone symbols.
 __attribute__((used, externally_visible))
@@ -105,6 +110,9 @@ runtime_irq_restore(uint32_t flags)
 {
     irq_restore((irqstatus_t)flags);
 }
+#endif
+
+#if CONFIG_MOTION_RUNTIME
 
 void* runtime_handle = 0;            // exposed (non-static) for runtime_tick_h7.c
 static struct task_wake runtime_drain_wake;
@@ -440,3 +448,38 @@ kalico_kick_step_output(uint8_t axis_idx, uint32_t cycle_abs)
         step_output_timer_arm(cycle_abs);
 }
 
+#else
+
+// Classic stepping build: no MCU-side motion engine. The Kalico envelope
+// stays alive — the status heartbeat and the structured log drain remain the
+// host's health and diagnostics feed.
+
+void
+runtime_diag_boot_snapshot_init(void)
+{
+    runtime_diag_prior_magic_raw = rt_diag_persistent.magic;
+    runtime_diag_prior_packed_raw = rt_diag_persistent.last_packed;
+    if (rt_diag_persistent.magic == RT_DIAG_MAGIC
+        && rt_diag_persistent.last_packed != 0)
+        runtime_diag_prior_boot_snapshot = rt_diag_persistent.last_packed;
+    runtime_diag_progress(0xB0, 0, 0);
+}
+DECL_INIT(runtime_diag_boot_snapshot_init);
+
+static uint32_t last_status_emit_time;
+
+void
+runtime_status_drain(void)
+{
+    uint32_t now = timer_read_time();
+    const uint32_t status_period_ticks = CONFIG_CLOCK_FREQ / 10;
+    if ((int32_t)(now - last_status_emit_time)
+        >= (int32_t)status_period_ticks) {
+        last_status_emit_time = now;
+        send_status_heartbeat();
+    }
+    event_log_drain();
+}
+DECL_TASK(runtime_status_drain);
+
+#endif

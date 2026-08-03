@@ -37,6 +37,7 @@ def sim_world(request, tmp_path):
         config_fn,
         *,
         dual_mcu: bool = True,
+        sc_mcu: bool = False,
         beacon: bool = False,
         cartographer: bool = False,
         expect_boot_error: str = None,
@@ -46,6 +47,7 @@ def sim_world(request, tmp_path):
         world = SimWorld(
             tmp_path / f"world{len(worlds)}",
             dual_mcu=dual_mcu,
+            sc_mcu=sc_mcu,
             beacon=beacon,
             cartographer=cartographer,
         )

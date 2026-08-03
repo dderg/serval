@@ -1,4 +1,6 @@
+pub mod byte_link;
 pub mod call_handle;
+pub mod can_link;
 pub mod events;
 pub mod identify;
 pub(crate) mod interceptor;
@@ -116,6 +118,11 @@ pub enum ReactorCommand {
     },
     FireAndForgetTyped {
         payload: Vec<u8>,
+    },
+    /// A burst of encoded commands to pack into as few Klipper message
+    /// blocks as the 64-byte block allows before it reaches the wire.
+    FireAndForgetBatch {
+        payloads: Vec<Vec<u8>>,
     },
     McuIdentify {
         completion:
@@ -309,11 +316,55 @@ impl McuHostIo {
         mut port_box: Box<dyn serialport::SerialPort>,
         config: McuHostIoConfig,
     ) -> Result<Self, TransportError> {
-        let _ = port_box.set_timeout(Duration::from_millis(100));
-        let mut io = crate::host_io::serial_frame_io::SerialFrameIo::new(port_box);
+        let _ = serialport::SerialPort::set_timeout(&mut *port_box, Duration::from_millis(100));
+        Self::open_with_link(Box::new(port_box), config)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn open_canbus_with_config(
+        interface: &str,
+        uuid: u64,
+        mut config: McuHostIoConfig,
+    ) -> Result<Self, TransportError> {
+        config
+            .mcu_label
+            .get_or_insert_with(|| format!("{interface}:{uuid:012x}"));
+        let link =
+            crate::host_io::can_link::CanLink::open(interface, uuid, config.identify_timeout)
+                .map_err(|e| {
+                    TransportError::Io(std::io::Error::new(
+                        e.kind(),
+                        format!("canbus open({interface}, uuid={uuid:012x}): {e}"),
+                    ))
+                })?;
+        Self::open_with_link(Box::new(link), config)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn open_canbus_with_config(
+        interface: &str,
+        uuid: u64,
+        _config: McuHostIoConfig,
+    ) -> Result<Self, TransportError> {
+        Err(TransportError::Io(std::io::Error::other(format!(
+            "canbus transport requires SocketCAN (Linux); cannot open {interface} uuid={uuid:012x}"
+        ))))
+    }
+
+    pub fn open_with_link(
+        link: Box<dyn crate::host_io::byte_link::ByteLink>,
+        config: McuHostIoConfig,
+    ) -> Result<Self, TransportError> {
+        let mut io = crate::host_io::serial_frame_io::SerialFrameIo::new_boxed(link);
 
         let (parser_owned, raw_identify_bytes, identify_seq) =
             identify::identify_handshake(&mut io, config.identify_timeout)?;
+
+        let mcu_can_data_rate = parser_owned
+            .numeric_constant("CANBUS_DATA_FREQUENCY")
+            .unwrap_or(0);
+        io.try_enable_fd(u32::try_from(mcu_can_data_rate).unwrap_or(0))
+            .map_err(TransportError::Io)?;
 
         let parser = Arc::new(parser_owned);
         let (submission_tx, submission_rx) = std::sync::mpsc::channel();
@@ -710,6 +761,27 @@ impl McuHostIo {
             .map_err(|e| TransportError::Parse(format!("{name}: {e:?}")))?;
         self.submission_tx
             .send(ReactorCommand::FireAndForgetTyped { payload })
+            .map_err(|_| TransportError::Closed)
+    }
+
+    /// Hand a whole burst of commands to the reactor as one unit so it can
+    /// pack them into full message blocks. Sending them one at a time
+    /// through `send_args` would let the reactor drain the channel between
+    /// them and frame each command on its own block.
+    pub fn send_args_batch(
+        &self,
+        frames: &[(&str, Vec<(String, crate::host_io::parser::ArgValue)>)],
+    ) -> Result<(), TransportError> {
+        let mut payloads = Vec::with_capacity(frames.len());
+        for (name, args) in frames {
+            payloads.push(
+                self.parser
+                    .encode_args(name, args)
+                    .map_err(|e| TransportError::Parse(format!("{name}: {e:?}")))?,
+            );
+        }
+        self.submission_tx
+            .send(ReactorCommand::FireAndForgetBatch { payloads })
             .map_err(|_| TransportError::Closed)
     }
 

@@ -112,14 +112,15 @@ vtime_now(void)
 
 static int owned_pacer_slots[VTIME_MAX_PACERS];
 
-// Virtual time may run this far ahead of the slowest pacer. Zero slack
+// Default distance virtual time may run ahead of a pacer's floor. Zero slack
 // serializes every pacer step through a real sleep quantum — with two MCU
 // processes that drags virtual time to a fraction of the configured speed.
 // The slack is the burst bound: a preempted tick thread replays at most
 // this much virtual time at once, so position observed against the virtual
 // clock is never more than slack x velocity stale (2 ms at probing speeds
 // is ~10 um). Keep it far below the ~1 ms endstop poll error budget only
-// if probing speeds rise well past 5 mm/s.
+// if probing speeds rise well past 5 mm/s. Pacers whose consumer needs a
+// tighter bound register their own via vtime_pacer_register_slack.
 #define VTIME_PACER_SLACK_NS 2000000ULL
 
 static uint64_t
@@ -135,13 +136,13 @@ pacer_floor_min(void)
                                   memory_order_acquire))
             continue;
         uint64_t f = atomic_load_explicit(&vshm->pacers[i].floor_ns,
-                                          memory_order_acquire);
+                                          memory_order_acquire)
+                     + atomic_load_explicit(&vshm->pacers[i].slack_ns,
+                                            memory_order_acquire);
         if (f < floor)
             floor = f;
     }
-    if (floor == UINT64_MAX)
-        return floor;
-    return floor + VTIME_PACER_SLACK_NS;
+    return floor;
 }
 
 static void
@@ -223,7 +224,7 @@ vtime_driver_main(void *arg)
 static void vtimer_check_and_fire(void);
 
 __attribute__((visibility("default"))) int
-vtime_pacer_register(uint64_t period_ns)
+vtime_pacer_register_slack(uint64_t period_ns, uint64_t slack_ns)
 {
     if (!vshm || period_ns == 0)
         return -1;
@@ -231,14 +232,22 @@ vtime_pacer_register(uint64_t period_ns)
                                               memory_order_acq_rel);
     if (slot >= VTIME_MAX_PACERS)
         return -1;
+    atomic_store_explicit(&vshm->pacers[slot].slack_ns, slack_ns,
+                          memory_order_release);
     atomic_store_explicit(&vshm->pacers[slot].floor_ns,
                           vtime_now() + period_ns, memory_order_release);
     atomic_store_explicit(&vshm->pacers[slot].active, 1,
                           memory_order_release);
     owned_pacer_slots[slot] = 1;
-    VLOG("pacer %u registered, period=%lu ns", slot,
-         (unsigned long)period_ns);
+    VLOG("pacer %u registered, period=%lu ns, slack=%lu ns", slot,
+         (unsigned long)period_ns, (unsigned long)slack_ns);
     return (int)slot;
+}
+
+__attribute__((visibility("default"))) int
+vtime_pacer_register(uint64_t period_ns)
+{
+    return vtime_pacer_register_slack(period_ns, VTIME_PACER_SLACK_NS);
 }
 
 __attribute__((visibility("default"))) void

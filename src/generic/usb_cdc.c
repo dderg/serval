@@ -33,7 +33,7 @@
  ****************************************************************/
 
 static struct task_wake usb_bulk_in_wake;
-static uint8_t transmit_buf[1024];
+static uint8_t transmit_buf[2048];
 static uint16_t transmit_pos;
 typedef uint16_t transmit_pos_t;
 
@@ -97,7 +97,8 @@ int
 kalico_console_write_raw(const uint8_t *buf, uint16_t len)
 {
     transmit_pos_t tpos = transmit_pos;
-    if ((uint32_t)tpos + (uint32_t)len > sizeof(transmit_buf)) {
+    if ((uint32_t)tpos + (uint32_t)len
+        > sizeof(transmit_buf) - CONSOLE_TX_PROTOCOL_RESERVE) {
         diag_record_tx_drop_kalico(len, tpos);
         return -1;
     }

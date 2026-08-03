@@ -102,6 +102,7 @@ fn stall_detection_fires_when_floor_stuck() {
     .unwrap();
 
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key: ka,
         pieces: (0..20).map(|i| make_piece_dur(i as u64, 0.003)).collect(),
         epoch: crate::anchor::StreamEpoch::Continuation,
@@ -110,6 +111,7 @@ fn stall_detection_fires_when_floor_stuck() {
     })
     .unwrap();
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key: kb,
         pieces: (0..20).map(|i| make_piece_dur(i as u64, 0.003)).collect(),
         epoch: crate::anchor::StreamEpoch::Continuation,
@@ -169,6 +171,7 @@ fn fully_executed_cohort_awaiting_trip_is_not_a_stall() {
     .unwrap();
     for key in [ka, kb] {
         data.send(EnqueueMsg {
+            epoch_freq: None,
             key,
             pieces: (0..5).map(|i| make_piece(i as u64)).collect(),
             epoch: crate::anchor::StreamEpoch::Continuation,
@@ -251,6 +254,7 @@ fn idle_participant_does_not_pin_the_cohort_floor() {
     // deadline windows; the parked lane never receives anything.
     for step in 0u32..4 {
         data.send(EnqueueMsg {
+            epoch_freq: None,
             key: active,
             pieces: vec![make_piece(u64::from(step))],
             epoch: crate::anchor::StreamEpoch::Continuation,
@@ -322,6 +326,7 @@ fn non_participant_enqueue_aborts_cohort_and_drops_pieces() {
     }))
     .unwrap();
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key: outsider,
         pieces: (0..3).map(|i| make_piece(i as u64)).collect(),
         epoch: crate::anchor::StreamEpoch::Continuation,
@@ -388,6 +393,7 @@ fn participant_release_tracks_mcu_clock_horizon() {
     }))
     .unwrap();
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key: ka,
         pieces: vec![make_piece(50), make_piece(500)],
         epoch: crate::anchor::StreamEpoch::Continuation,
@@ -437,6 +443,7 @@ fn unsynced_clock_releases_nothing_for_participants() {
     }))
     .unwrap();
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key: ka,
         pieces: (10..14).map(|i| make_piece(i as u64)).collect(),
         epoch: crate::anchor::StreamEpoch::Continuation,
@@ -551,6 +558,7 @@ fn mcu_reboot_retired_to_zero_triggers_regression() {
     });
 
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key: ka,
         pieces: vec![make_piece(10)],
         epoch: crate::anchor::StreamEpoch::Continuation,
@@ -626,6 +634,7 @@ fn drip_disarm_clears_cohort() {
     .unwrap();
     ctl.send(PumpMsg::DripDisarm(31)).unwrap();
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key: outsider,
         pieces: vec![make_piece(1)],
         epoch: crate::anchor::StreamEpoch::Continuation,
@@ -683,6 +692,7 @@ fn drip_disarm_wrong_cohort_id_is_noop() {
     .unwrap();
     ctl.send(PumpMsg::DripDisarm(999)).unwrap();
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key: outsider,
         pieces: vec![make_piece(1)],
         epoch: crate::anchor::StreamEpoch::Continuation,

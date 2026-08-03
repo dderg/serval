@@ -30,6 +30,8 @@ DEADLINE_MARGIN_WARN = 0.150
 
 REACTOR_STALL_LOG_S = 0.5
 
+IFF_UP = 0x1
+
 
 class EngineCommandChannel:
     def __init__(self, reactor, warn_prefix="", mcu=None):
@@ -189,30 +191,13 @@ class EngineCommandChannel:
     def _error(self, msg, *params):
         raise error(self.warn_prefix + (msg % params))
 
-    def connect_pipe(self, filename, baud=0):
-        logging.info("%sStarting connect", self.warn_prefix)
-        # claim() normally happens in _mcu_identify after connect_pipe
-        # returns; claiming here (idempotently) gives attach_serial a
-        # handle to bind to.
-        handle = self.engine_mcu.claim(filename, baud)
-        klippy_non_critical = bool(getattr(self.mcu, "is_non_critical", False))
-        expect_native = bool(getattr(self.mcu, "_expect_native", True))
-        logging.info(
-            "%sengine attach_serial %s (handle=%s, non_critical=%s,"
-            " expect_native=%s)",
-            self.warn_prefix,
-            filename,
-            handle,
-            klippy_non_critical,
-            expect_native,
+    def _attach_flags(self):
+        return (
+            bool(getattr(self.mcu, "is_non_critical", False)),
+            bool(getattr(self.mcu, "_expect_native", True)),
         )
-        self.engine_mcu.attach_serial(
-            filename,
-            baud,
-            timeout_s=30.0,
-            klippy_non_critical=klippy_non_critical,
-            expect_native=expect_native,
-        )
+
+    def _finish_connect(self):
         identify_data = self.engine_mcu.get_identify_data()
         logging.info(
             "%sengine identify done (%d bytes)",
@@ -230,8 +215,56 @@ class EngineCommandChannel:
             self._engine_event_poller, self.reactor.NOW
         )
 
+    def connect_pipe(self, filename, baud=0):
+        logging.info("%sStarting connect", self.warn_prefix)
+        # claim() normally happens in _mcu_identify after connect_pipe
+        # returns; claiming here (idempotently) gives attach_serial a
+        # handle to bind to.
+        handle = self.engine_mcu.claim(filename, baud)
+        klippy_non_critical, expect_native = self._attach_flags()
+        logging.info(
+            "%sengine attach_serial %s (handle=%s, non_critical=%s,"
+            " expect_native=%s)",
+            self.warn_prefix,
+            filename,
+            handle,
+            klippy_non_critical,
+            expect_native,
+        )
+        self.engine_mcu.attach_serial(
+            filename,
+            baud,
+            timeout_s=30.0,
+            klippy_non_critical=klippy_non_critical,
+            expect_native=expect_native,
+        )
+        self._finish_connect()
+
     def connect_uart(self, serialport, baud, rts=True):
         self.connect_pipe(serialport, baud)
+
+    def connect_canbus(self, interface, uuid, timeout_s=30.0):
+        logging.info("%sStarting canbus connect", self.warn_prefix)
+        handle = self.engine_mcu.claim("%s:%s" % (interface, uuid), 0)
+        klippy_non_critical, expect_native = self._attach_flags()
+        logging.info(
+            "%sengine attach_canbus %s uuid=%s (handle=%s, non_critical=%s,"
+            " expect_native=%s)",
+            self.warn_prefix,
+            interface,
+            uuid,
+            handle,
+            klippy_non_critical,
+            expect_native,
+        )
+        self.engine_mcu.attach_canbus(
+            interface,
+            uuid,
+            timeout_s=timeout_s,
+            klippy_non_critical=klippy_non_critical,
+            expect_native=expect_native,
+        )
+        self._finish_connect()
 
     def check_connect(self, serialport, baud, rts=True):
         serial_dev = serial.Serial(baudrate=baud, timeout=0, exclusive=False)
@@ -243,6 +276,14 @@ class EngineCommandChannel:
             return False
         serial_dev.close()
         return True
+
+    def check_canbus_connect(self, interface):
+        try:
+            with open("/sys/class/net/%s/flags" % (interface,)) as f:
+                flags = int(f.read().strip(), 16)
+        except OSError:
+            return False
+        return bool(flags & IFF_UP)
 
     def set_clock_est(self, freq, conv_time, conv_clock, last_clock):
         if not self.engine_mcu.available():

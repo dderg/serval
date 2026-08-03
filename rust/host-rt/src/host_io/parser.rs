@@ -251,6 +251,7 @@ pub struct MsgProtoParser {
     pub(crate) by_command_name: IndexMap<String, OutboundSpec>,
     pub(crate) enumerations: IndexMap<String, EnumTable>,
     pub(crate) static_strings: HashMap<i32, String>,
+    pub(crate) numeric_constants: HashMap<String, i64>,
 }
 
 #[derive(Debug)]
@@ -288,6 +289,7 @@ impl MsgProtoParser {
             by_command_name: IndexMap::new(),
             enumerations: IndexMap::new(),
             static_strings: std::collections::HashMap::new(),
+            numeric_constants: std::collections::HashMap::new(),
         }
     }
 
@@ -389,14 +391,29 @@ impl MsgProtoParser {
             .get("static_string_id")
             .map(|t| t.by_int.clone())
             .unwrap_or_default();
-
         Ok(Self {
             by_msgid,
             by_command_name,
             enumerations,
             static_strings,
+            numeric_constants: numeric_constants_from_config(&dict.config),
         })
     }
+
+    pub fn numeric_constant(&self, name: &str) -> Option<i64> {
+        self.numeric_constants.get(name).copied()
+    }
+}
+
+fn numeric_constants_from_config(config: &serde_json::Value) -> HashMap<String, i64> {
+    config
+        .as_object()
+        .map(|map| {
+            map.iter()
+                .filter_map(|(name, value)| Some((name.clone(), value.as_i64()?)))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub fn decode_vlq(buf: &[u8]) -> Result<(i64, usize), ParseError> {

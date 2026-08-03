@@ -98,6 +98,12 @@ struct fdcan_fifo {
 
 #define FDCAN_XTD (1<<30)
 #define FDCAN_RTR (1<<29)
+#define FDCAN_FDF (1<<21)
+#define FDCAN_BRS (1<<20)
+
+static const uint8_t fdcan_dlc2len[16] = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64
+};
 
 struct fdcan_msg_ram {
     uint32_t FLS[28]; // Filter list standard
@@ -138,9 +144,25 @@ canhw_send(struct canbus_msg *msg)
         ids = (msg->id & 0x7ff) << 18;
     ids |= msg->id & CANMSG_ID_RTR ? FDCAN_RTR : 0;
     txfifo->id_section = ids;
-    txfifo->dlc_section = (msg->dlc & 0x0f) << 16;
-    txfifo->data[0] = msg->data32[0];
-    txfifo->data[1] = msg->data32[1];
+    uint32_t len = msg->dlc, dlc_section;
+    if (CONFIG_CANBUS_DATA_FREQUENCY && len > 8) {
+        if (len > CANMSG_DATA_MAX)
+            shutdown("canhw_send payload exceeds a CAN-FD frame");
+        uint32_t dlc = 9;
+        while (fdcan_dlc2len[dlc] < len)
+            dlc++;
+        if (fdcan_dlc2len[dlc] != len)
+            shutdown("canhw_send payload is not an exact CAN-FD frame length");
+        dlc_section = (dlc << 16) | FDCAN_FDF | FDCAN_BRS;
+    } else {
+        if (len > 8)
+            len = 8;
+        dlc_section = len << 16;
+    }
+    txfifo->dlc_section = dlc_section;
+    uint32_t w;
+    for (w = 0; w < DIV_ROUND_UP(len, 4); w++)
+        txfifo->data[w] = msg->data32[w];
     barrier();
     SOC_CAN->TXBAR = ((uint32_t)1 << w_index);
     return CANMSG_DATA_LEN(msg);
@@ -242,9 +264,15 @@ CAN_IRQHandler(void)
             else
                 msg.id = (ids >> 18) & 0x7ff;
             msg.id |= ids & FDCAN_RTR ? CANMSG_ID_RTR : 0;
-            msg.dlc = (rxf0->dlc_section >> 16) & 0x0f;
-            msg.data32[0] = rxf0->data[0];
-            msg.data32[1] = rxf0->data[1];
+            uint32_t dlc_section = rxf0->dlc_section;
+            uint32_t dlc = (dlc_section >> 16) & 0x0f;
+            if (CONFIG_CANBUS_DATA_FREQUENCY && (dlc_section & FDCAN_FDF))
+                msg.dlc = fdcan_dlc2len[dlc];
+            else
+                msg.dlc = dlc > 8 ? 8 : dlc;
+            uint32_t w;
+            for (w = 0; w < DIV_ROUND_UP(msg.dlc, 4); w++)
+                msg.data32[w] = rxf0->data[w];
             barrier();
             SOC_CAN->RXF0A = idx;
 
@@ -317,6 +345,44 @@ compute_btr(uint32_t pclock, uint32_t bitrate)
     return make_btr(sjw, time_seg1, time_seg2, brp);
 }
 
+static void
+halt_invalid_canfd_data_timing(void)
+{
+    for (;;)
+        ;
+}
+
+static inline const uint32_t
+compute_dbtr(uint32_t pclock, uint32_t bitrate)
+{
+    if (!bitrate || pclock % bitrate)
+        return 0;
+    uint32_t bit_clocks = pclock / bitrate;
+    uint32_t brp;
+    for (brp = 1; brp <= 32; brp++) {
+        if (bit_clocks % brp)
+            continue;
+        uint32_t qs = bit_clocks / brp;
+        if (qs < 8 || qs > 48)
+            continue;
+        uint32_t time_seg2 = qs / 4;
+        if (time_seg2 > 16)
+            time_seg2 = 16;
+        uint32_t time_seg1 = qs - (1 + time_seg2);
+        if (time_seg1 < 1 || time_seg1 > 32)
+            continue;
+        uint32_t sjw = time_seg2;
+        uint32_t dbtp = (((uint32_t)(sjw-1)) << FDCAN_DBTP_DSJW_Pos
+                         | ((uint32_t)(time_seg1-1)) << FDCAN_DBTP_DTSEG1_Pos
+                         | ((uint32_t)(time_seg2-1)) << FDCAN_DBTP_DTSEG2_Pos
+                         | ((uint32_t)(brp-1)) << FDCAN_DBTP_DBRP_Pos);
+        if (bitrate > 1000000)
+            dbtp |= FDCAN_DBTP_TDC;
+        return dbtp;
+    }
+    return 0;
+}
+
 void
 can_init(void)
 {
@@ -348,6 +414,24 @@ can_init(void)
     SOC_CAN->CCCR |= FDCAN_CCCR_PXHD;
 
     SOC_CAN->NBTP = btr;
+
+    if (CONFIG_CANBUS_DATA_FREQUENCY) {
+        uint32_t dbtp = compute_dbtr(pclock, CONFIG_CANBUS_DATA_FREQUENCY);
+        if (!dbtp)
+            halt_invalid_canfd_data_timing();
+        SOC_CAN->CCCR |= FDCAN_CCCR_FDOE | FDCAN_CCCR_BRSE;
+        SOC_CAN->DBTP = dbtp;
+        if (dbtp & FDCAN_DBTP_TDC) {
+            uint32_t dbrp = ((dbtp & FDCAN_DBTP_DBRP_Msk)
+                             >> FDCAN_DBTP_DBRP_Pos) + 1;
+            uint32_t dtseg1 = ((dbtp & FDCAN_DBTP_DTSEG1_Msk)
+                               >> FDCAN_DBTP_DTSEG1_Pos) + 1;
+            uint32_t tdco = dbrp * (1 + dtseg1);
+            if (tdco > 127)
+                tdco = 127;
+            SOC_CAN->TDCR = tdco << FDCAN_TDCR_TDCO_Pos;
+        }
+    }
 
 #if CONFIG_MACH_STM32H7
     /* Setup message RAM addresses */

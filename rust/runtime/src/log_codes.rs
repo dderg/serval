@@ -65,6 +65,7 @@ pub const EVENT_MOTION_PIECE_START_PAST: u16 = 1;
 pub const EVENT_MOTION_RING_FULL: u16 = 2;
 pub const EVENT_MOTION_AXIS_STALLED: u16 = 3;
 pub const EVENT_MOTION_AXIS_STALLED_HEAD: u16 = 4;
+pub const EVENT_MOTION_STEP_LOAD_LATE: u16 = 5;
 
 pub const EVENT_TICK_INTERVAL_EXCEEDED: u16 = 1;
 pub const EVENT_TICK_UNDERRUN: u16 = 2;
@@ -232,6 +233,10 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         (SUBSYSTEM_MOTION, EVENT_MOTION_AXIS_STALLED_HEAD) => (
             "motion.axis_stalled_head",
             "stalled axis armed piece window vs now start-now={arg0:i32}ms end-now={arg1:i32}ms",
+        ),
+        (SUBSYSTEM_MOTION, EVENT_MOTION_STEP_LOAD_LATE) => (
+            "motion.step_load_late",
+            "classic move loaded behind its pending unstep: behind={arg0:i32} cyc min_next={arg1}",
         ),
         (SUBSYSTEM_TICK, EVENT_TICK_INTERVAL_EXCEEDED) => (
             "tick.interval_exceeded",

@@ -37,6 +37,7 @@ fn corpus_pieces_per_axis() -> BTreeMap<u8, Vec<(PieceEntry, usize)>> {
             total_piece_memory: 62 * 1024,
         },
         max_motor_velocity: vec![f64::INFINITY; 3],
+        ..Default::default()
     }];
     let project = |_mcu: u32, host_secs: f64| -> u64 { (host_secs * 1.0e9) as u64 };
 
@@ -47,6 +48,7 @@ fn corpus_pieces_per_axis() -> BTreeMap<u8, Vec<(PieceEntry, usize)>> {
             seg,
             &mcu_configs,
             &motion_core::enqueue::EnqueueCtx {
+                epoch_freq: &|_| None,
                 t0: 0.0,
                 epoch: if first {
                     motion_core::anchor::StreamEpoch::Reposition
@@ -82,23 +84,35 @@ fn accel_feedforward_is_continuous_across_piece_seams() {
         if moving.len() < 2 {
             continue;
         }
-        const SEAM_SLOP_NS: u64 = 16;
+        // A fresh two-piece ring per seam: the drip cap mints far more pieces
+        // than any fixed test ring holds, and only the seam's own pair matters.
+        // A piece's wire end time is `start + duration_f32`, so the armed end
+        // lands within one f32 ulp of the duration from the next piece's
+        // start; anything further apart is a genuine gap, not a seam. The ulp
+        // scales with the duration, so a flat window silently assumed short
+        // pieces — a second-long piece quantizes to ~170 ns and would read as
+        // a gap, which then leaves the walker parked on a piece it has
+        // already passed. The window must still stay tiny relative to the
+        // piece: near a curvature step the fitted interior jerk is huge, and
+        // a wide window reads that as a phantom seam step.
+        let seam_slop_ns = |dur: f32| 16 + (f64::from(dur) * f64::from(f32::EPSILON) * 4e9) as u64;
         for w in moving.windows(2) {
             let ((left, left_seg), (right, right_seg)) = (w[0], w[1]);
-            let mut ring = AxisRing::new();
-            ring.push_entry(*left).expect("two-piece seam ring");
-            ring.push_entry(*right).expect("two-piece seam ring");
-            ring.sample(left.start_time)
-                .expect("left piece arms at its start");
             let left_end = left.end_time(1.0e9);
-            let contiguous = left_end.abs_diff(right.start_time) <= SEAM_SLOP_NS
+            let slop = seam_slop_ns(left.duration);
+            let contiguous = left_end.abs_diff(right.start_time) <= slop
                 && f64::from(left.duration) > 10e-6
                 && f64::from(right.duration) > 10e-6;
             if !contiguous {
                 continue;
             }
+            let mut ring = AxisRing::new();
+            ring.push_entry(*left).expect("two-piece seam ring");
+            ring.push_entry(*right).expect("two-piece seam ring");
+            ring.sample(left.start_time)
+                .expect("left piece arms at its start");
             let (_, _, acc_left) = ring
-                .sample(right.start_time - SEAM_SLOP_NS)
+                .sample(right.start_time - slop)
                 .expect("seam left sample inside piece");
             let (_, _, acc_right) = ring
                 .sample(right.start_time.max(left_end))

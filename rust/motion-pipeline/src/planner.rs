@@ -7,6 +7,10 @@ use crate::types::{
     Control, PlannedItem, PlannedMove, StreamConfig, StreamInput, jerk_limited_brake_time,
 };
 
+/// Slack for reading "riding the ceiling exactly" off the iterative velocity
+/// stage's converged boundaries, relative to the ceiling and accel limit.
+const PINNED_SEAM_REL_TOL: f64 = 1.0e-6;
+
 /// Cost governor, not a lookahead bound: velocity planning is ~linear in the
 /// window, so re-planning on every arriving move would be quadratic. The window
 /// keeps absorbing input and a re-plan fires once this many moves have arrived
@@ -212,19 +216,14 @@ impl Planner {
     }
 
     /// Emit the prefix up to the furthest-forward clean seam that is inside
-    /// the finality barrier and clear of the brake-to-rest setback.
+    /// the finality barrier, clear of the brake-to-rest setback, and whose
+    /// planned boundary state is append-stable.
     fn emit_committable(&mut self, output: &Sender<PlannedItem>) -> bool {
         let profile = self.plan();
-        let setback = brake_to_rest_setback(&self.moves);
-        let total_arc: f64 = self.moves.iter().map(|m| m.segment.s_len()).sum();
-        let mut arc_to_seam = 0.0_f64;
+        let horizon = self.terminal_independent_seam();
         let mut chosen = 0usize;
-        for i in 1..=profile.barrier {
-            arc_to_seam += self.moves[i - 1].segment.s_len();
-            if total_arc - arc_to_seam < setback {
-                break;
-            }
-            if self.is_clean_seam(i) {
+        for i in 1..=profile.barrier.min(horizon) {
+            if self.is_clean_seam(i) && self.is_pinned_seam(i, &profile) {
                 chosen = i;
             }
         }
@@ -232,6 +231,68 @@ impl Planner {
             return true;
         }
         self.emit(chosen, &profile, output)
+    }
+
+    /// Whether the planned state at seam `i` is one no appended move can
+    /// improve on, so the bodies before it are final under append.
+    ///
+    /// The planner is globally time-optimal, so an early body may depend on
+    /// geometry arbitrarily far ahead: on a fast travel into a long slow run,
+    /// whether the travel spends its speed before the seam or undershoots
+    /// through it depends on how long the slow run lasts, not merely on the
+    /// tail's brake distance. The one seam state appends cannot shift is the
+    /// junction ceiling ridden exactly — `(cap, 0)` where `cap` is the
+    /// binding side's own feedrate ceiling: no admissible state is faster,
+    /// and accelerating through would breach the ceiling just past the seam
+    /// unless the far side's ceiling steps up, which is why a step-up seam is
+    /// never pinned. A geometry-forced rest is final for the same reason with
+    /// `cap = 0`.
+    fn is_pinned_seam(&self, i: usize, profile: &VelocityProfile) -> bool {
+        if self.stop_at_seam(i) {
+            return true;
+        }
+        let cap = |m: &Move| m.feedrate_mm_s.min(m.limits.max_velocity_mm_s);
+        let cap_in = cap(&self.moves[i - 1]);
+        let cap_out = cap(&self.moves[i]);
+        if cap_out > cap_in {
+            return false;
+        }
+        let state = profile.boundaries[i];
+        let accel_scale = self.moves[i].limits.accel_mm_s2;
+        (state.v - cap_out).abs() <= PINNED_SEAM_REL_TOL * cap_out
+            && state.a.abs() <= PINNED_SEAM_REL_TOL * accel_scale
+    }
+
+    /// Furthest-forward seam whose emitted bodies are terminal-independent.
+    ///
+    /// The lowering reconstructs each move's velocity body against its run
+    /// terminal, so a move within one braking distance of the window's
+    /// fictional rest has its body shaped by that fiction and an appended
+    /// move would change it. That braking rides the *open tail* — the moves
+    /// beyond the seam — so the tail's own peak feedrate and tightest
+    /// accel/jerk budget are what set its length. Reading them off the whole
+    /// window instead makes one already-passed travel move dictate the
+    /// setback for every seam behind it, which on a print that interleaves
+    /// 600 mm/s travels with 300 mm/s extrusions inflates the held-back tail
+    /// ~3x and, with it, the re-plan window every arriving move is charged
+    /// for. `v · t_brake` still over-bounds the true `∫v dt`, so the held-back
+    /// tail keeps its safety factor; it is now just measured where it applies.
+    fn terminal_independent_seam(&self) -> usize {
+        let mut arc = 0.0_f64;
+        let mut v_peak = 0.0_f64;
+        let mut accel = f64::INFINITY;
+        let mut jerk = f64::INFINITY;
+        for i in (1..self.moves.len()).rev() {
+            let m = &self.moves[i];
+            arc += m.segment.s_len();
+            v_peak = v_peak.max(m.feedrate_mm_s.min(m.limits.max_velocity_mm_s));
+            accel = accel.min(m.limits.accel_mm_s2);
+            jerk = jerk.min(m.limits.max_jerk_mm_s3);
+            if arc >= v_peak * jerk_limited_brake_time(v_peak, accel, jerk) {
+                return i;
+            }
+        }
+        0
     }
 
     fn emit(
@@ -308,30 +369,6 @@ fn follower_rate_step(prev: &Move, next: &Move, rel_tol: f64) -> bool {
     })
 }
 
-/// Arc length the emission boundary is held back from the window's tentative
-/// terminal. The lowering reconstructs each move's velocity body against its
-/// run terminal, so a move within one braking distance of the window's
-/// fictional rest has its body shaped by that fiction — it is not yet
-/// terminal-independent and an appended move would change it. Holding the
-/// boundary this far back makes every emitted body a function of geometry
-/// alone, so the emitted trajectory is final under append and
-/// output-equivalent to a full re-plan — positions exactly, seam timing within
-/// the iterative velocity stage's tolerance. A safe over-estimate of the
-/// jerk-limited stopping distance from the window's peak feedrate
-/// (`v · t_brake` over-bounds the true `∫v dt`), so the held-back open tail
-/// stays bounded.
-fn brake_to_rest_setback(moves: &[Move]) -> f64 {
-    let v_peak = moves
-        .iter()
-        .map(|m| m.feedrate_mm_s.min(m.limits.max_velocity_mm_s))
-        .fold(0.0_f64, f64::max);
-    let a_min = moves
-        .iter()
-        .map(|m| m.limits.accel_mm_s2)
-        .fold(f64::INFINITY, f64::min);
-    let j_min = moves
-        .iter()
-        .map(|m| m.limits.max_jerk_mm_s3)
-        .fold(f64::INFINITY, f64::min);
-    v_peak * jerk_limited_brake_time(v_peak, a_min, j_min)
-}
+#[cfg(test)]
+#[path = "planner_tests.rs"]
+mod planner_tests;

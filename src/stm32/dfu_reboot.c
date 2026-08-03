@@ -17,11 +17,23 @@
 // flag on the next boot it will perform a code jump to the ROM
 // address.
 
-// Location of ram address to set internal flag
+// On H7 the flag must NOT be a hardcoded AXI SRAM address: .axi_bss packs
+// large live statics (rt_storage spans ~72-120 KB) from 0x24000000 up, so any
+// fixed 0x2400xxxx address lands inside one of them — runtime writes could
+// forge the magic and divert a routine restart into ROM DFU.
+//
+// It also must not sit near the base of AXI SRAM: the bootloader at
+// CONFIG_FLASH_BOOT_ADDRESS runs on every reset with its stack top at
+// 0x24000738 and grows down through 0x24000000, so anything there is gone
+// before dfu_reboot_check() ever reads it. `.axi_dfu_flag` is emitted after
+// every other AXI static (see armcm_link.lds.S); aligned(32) gives it its own
+// cache line for the clean in dfu_reboot().
 #if CONFIG_MACH_STM32H7
-  #define USB_BOOT_FLAG_ADDR (0x24000000 + 0x8000) // Place flag in "AXI SRAM"
+static uint64_t usb_boot_flag
+    __attribute__((section(".axi_dfu_flag"), aligned(32), used));
+#define USB_BOOT_FLAG_ADDR ((uint32_t)&usb_boot_flag)
 #else
-  #define USB_BOOT_FLAG_ADDR (CONFIG_RAM_START + CONFIG_RAM_SIZE - 1024)
+#define USB_BOOT_FLAG_ADDR (CONFIG_RAM_START + CONFIG_RAM_SIZE - 1024)
 #endif
 
 // Signature to set in memory to flag that a dfu reboot is requested
@@ -40,17 +52,6 @@ dfu_reboot(void)
     SCB_CleanDCache_by_Addr((void*)bflag, sizeof(*bflag));
 #endif
     NVIC_SystemReset();
-}
-
-// Request the ROM DFU bootloader without resetting: dfu_reboot_check() later in
-// this same boot performs the jump. The boot-loop guard uses this to divert a
-// repeatedly-failing image to USB-recoverable DFU.
-void
-dfu_reboot_set_flag(void)
-{
-    if (!CONFIG_STM32_DFU_ROM_ADDRESS || !CONFIG_HAVE_BOOTLOADER_REQUEST)
-        return;
-    *(uint64_t*)USB_BOOT_FLAG_ADDR = USB_BOOT_FLAG;
 }
 
 // Check if rebooting into system DFU Bootloader

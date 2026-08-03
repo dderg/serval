@@ -168,6 +168,60 @@ max_extrude_only_accel: 5000
 
 `[motor <name>]` requires `drive`, `step_pin`, `dir_pin`, `microsteps`, and either `rotation_distance` or gear-ratio mode. Enable pins, if needed by the hardware integration, belong to the relevant stepper/driver support rather than the topology declaration above. Axis endstop and homing options belong on `[axis <name>]`, not on `[motor <name>]`.
 
+## CoreXY
+
+CoreXY declares the same three lanes, but the belt motors are named by
+belt rather than by cartesian axis: the role keys are `a_motors` and
+`b_motors`, still bound to `axis_x` and `axis_y`.
+
+```ini
+[kinematics]
+type: corexy
+axis_x: x
+a_motors: a_motor
+axis_y: y
+b_motors: b_motor
+axis_z: z
+z_motors: z_motor
+```
+
+`a_motors` is the lane the old `[stepper_x]` drove, `b_motors` the old
+`[stepper_y]`. Everything else — the `[axis x]`/`[axis y]` travel and
+homing keys, the shaping chains — converts exactly as in the cartesian
+example above.
+
+## Stepper drivers and sensorless endstops
+
+A driver section is named after the section it drives, and that is now a
+motor rather than a role:
+
+```ini
+[tmc2209 stepper_x]     # mainline
+[tmc2209 a_motor]       # fork
+```
+
+The driver reads its microstep count from `[motor <suffix>]`, so an
+unconverted suffix stops the boot with `Could not find config section
+'[motor stepper_x]' required by tmc driver`. The driver's own options are
+untouched: `run_current`, `home_current`, `sense_resistor`, `diag_pin`,
+`driver_SGTHRS`, `stealthchop_threshold`, `interpolate`, and the rest
+carry over verbatim.
+
+Sensorless homing follows that rename, because the virtual pin's chip
+name comes from the driver section:
+
+```ini
+endstop_pin: tmc2209_stepper_x:virtual_endstop   # mainline, on [stepper_x]
+endstop_pin: tmc2209_a_motor:virtual_endstop     # fork, on [axis x]
+```
+
+`use_sensorless_homing` still defaults to true when the endstop is
+virtual, and the homing keys it interacts with — `homing_retract_dist`,
+`homing_retract_speed`, `min_home_dist`, `homing_positive_dir`,
+`second_homing_speed` — all belong on `[axis <name>]`. Putting any of
+them on a `[motor <name>]` is rejected with a message naming the axis
+they belong to.
+
 ## Option mapping
 
 | Mainline option/section | Fork option or result |
@@ -187,13 +241,60 @@ max_extrude_only_accel: 5000
 | `[printer] kinematics` | **No equivalent.** Declare `[kinematics] type: cartesian` or `type: corexy` and its role bindings. |
 | `[stepper_x]`, `[stepper_y]`, `[stepper_z]` | **No direct section alias.** Split each into a `[motor <name>]` plus `[axis <name>]`; bind kinematic X/Y/Z motors from `[kinematics]` only. Use `[axis <name>] motors:` for non-kinematic axes such as the extruder. |
 | `[input_shaper] shaper_type*`, `shaper_freq*` | Named smoothing post-processors on the axis chains. `shaper_type: mzv` + `shaper_freq: F` maps to `type: smooth_mzv` + `frequency_hz: F`. No EI-family kernel exists. |
+| `[tmc2209 stepper_x]`, `[tmc5160 stepper_y]`, `[tmc2130 ...]` | Rename the suffix to the motor's name (`[tmc2209 a_motor]`). Driver options are unchanged. |
+| `endstop_pin: tmc2209_stepper_x:virtual_endstop` | `endstop_pin: tmc2209_<motor>:virtual_endstop` on `[axis <name>]`. |
+| `high_precision_step_compress` (any section) | **No equivalent.** Delete it. The MCU plays trajectory pieces, so there is no step compression to tune. |
 | `[extruder] pressure_advance` | `[post_processor <name>] type: linear_pressure_advance`, `k: ...`; put its name in the extruder axis chain. |
 | `[extruder] pressure_advance_smooth_time` | `[post_processor <name>] type: smooth_triangle`, `smooth_time: ...`; put its name in the extruder axis chain. |
+| `[extruder] max_extrude_cross_section`, `max_extrude_only_distance`, `instantaneous_corner_velocity` | **Rejected loudly** — "the planner has no such concept". Delete them. |
+| `[extruder] step_pin`, `dir_pin`, `rotation_distance`, `microsteps` | **Rejected.** Move them to a `[motor <name>]` and name it in `[axis e] motors:`. |
+| `[extruder]` with no stepper (heater only) | **Not expressible.** `axis:` is required, the named axis must be a follower, and every declared axis must be motor-mapped — a hotend with no extruder motor is rejected with `axis 'e' is not motor-mapped`. |
 | `max_x_velocity`, `max_y_velocity`, and other old per-axis velocity limits | **No equivalent.** The fork exposes global velocity/acceleration plus Z-only caps, not independent X/Y limits. |
 | legacy `[servo_x]`, `[servo_y]`, `[servo_z]` | **No direct section alias.** Declare a `[motor <name>]` with `drive: servo` and bind it in `[kinematics]`. |
 | `[firmware_retraction]` | **No equivalent in the motion model;** the section is rejected. |
+| `[gcode_arcs]` | **Rejected.** The motion engine has no native G2/G3 ingestion yet; slice with arcs disabled so the slicer emits G1 segments. |
+| `[resonance_tester] sweeping_period`, `sweeping_accel` | **No equivalent.** Kalico's sweeping vibration test is not here; the rest of the section (`accel_per_hz`, `hz_per_sec`, `min_freq`, `max_freq`, `max_smoothing`, `probe_points`, `accel_chip*`) is unchanged. |
 
 Unknown options normally fail validation: with the default `error_on_unused_config_options: True`, an option not consumed by a registered object errors as an invalid option. The explicitly rejected motion sections/options above fail earlier with a specific error.
+
+## Sections that no longer exist
+
+Beyond the motion model, a set of klippy extras is absent from this
+branch, so their sections stop resolving with `Section '<name>' is not a
+valid config section`. Some were deleted with the old planner, others
+were simply never carried across:
+
+| Section | Note |
+|---|---|
+| `[input_shaper]` | Replaced by `[post_processor]` chains (see above). |
+| `[extruder_smoother]` | Replaced by a `smooth_triangle` post-processor. |
+| `[ringing_test]`, `[pa_test]` | Kalico's calibration-pattern generators. The `RINGING_TEST` / `PA_TEST` commands go with them, so macros that call them break too. |
+| `[manual_stepper]` | Drives a stepper outside the kinematic model, which the motor/axis split has no room for. Mods that depend on it (filament changers, nozzle wipers, `[trad_rack]`) do not load. |
+| `[endstop_phase]` | Incompatible with the new stepper model. |
+| `[pwm_tool]` | Not carried. |
+| `[load_cell]`, `[hx71x]`, `[ads1220]` | Load-cell family, not carried. |
+| `[probe_eddy_current]`, `[ldc1612]` | Eddy-current probing, deleted with the old CAN connect path. |
+
+A configuration that includes any of these has to drop the section
+before klippy will finish parsing. Check your `[include]` files, not just
+`printer.cfg` — on a typical Voron tree these live in separate
+calibration includes.
+
+## The SAVE_CONFIG block
+
+The autosave block at the end of `printer.cfg` is config like any other,
+so it is parsed and rejected on the same rules. A calibrated printer
+usually carries at least these:
+
+```ini
+#*# [stepper_z]
+#*# position_endstop = 116.100
+```
+
+Move that value into `[axis z] position_endstop` by hand and delete the
+stanza; the same goes for a saved `[input_shaper]` result, which becomes
+the `frequency_hz` of a shaping post-processor. Saved heater PID and MPC
+stanzas are untouched by the migration and can stay exactly as they are.
 
 ## Pressure advance
 
@@ -236,6 +337,32 @@ The available shaping/smoothing kernels are `smooth_zv` (`frequency_hz`), `smoot
 
 Recommended defaults: `smooth_mzv` at the measured resonance frequency for
 X and Y; `smooth_bell` for Z and for axes without a measured resonance.
+
+Coming from Kalico's smooth shapers (`shaper_type_x: smooth_mzv` with
+`smoother_freq_x`), keep your measured frequency and write it as
+`frequency_hz`: these are the same kernels, coefficient for coefficient,
+with the same window (`0.95625 / f` for `smooth_mzv`, `0.8025 / f` for
+`smooth_zv`). No retune is required. Coming from a classic
+`shaper_type: mzv` instead, the frequency carries over but the kernel
+does not — `smooth_mzv` is the smoothed variant, so expect to verify the
+result.
+
+## Macros that read config sections
+
+Macros that introspect the old section names break at runtime, because
+those sections no longer exist. This line, straight out of the stock
+Voron macro set, is the one most configurations trip over:
+
+```jinja
+{% set max_x = printer.configfile.config["stepper_x"]["position_max"]|float %}
+```
+
+Read the limits off the toolhead instead. The field exists on mainline
+too, so the macro stays portable in both directions:
+
+```jinja
+{% set max_x = printer.toolhead.axis_maximum.x|float %}
+```
 
 ## G-code command differences
 

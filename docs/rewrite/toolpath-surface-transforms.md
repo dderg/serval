@@ -37,7 +37,7 @@ the two spaces convert.**
   stream odometer inputs, and everything returned to Python are `GcodePos`;
   trip/abort reconstructions from motion history, MCU step-counter seeds
   (`build_serial_seed_sends`), and history rebase targets
-  (`spatial_rebase_targets`) are `MachinePos`. The only converters are
+  (`reanchor_axis_targets`) are `MachinePos`. The only converters are
   `gcode_from_machine` / `machine_from_gcode` on the bridge (backed by
   `SurfaceTransform::gcode_z` and `correction_at`), so a forgotten crossing
   is a compile error. Full kinematic states (`motion_state_at_clock`, the

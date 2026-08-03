@@ -100,6 +100,7 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
     });
 
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key: AxisKey { mcu_id: 1, axis: 0 },
         pieces: vec![piece(0)],
         epoch: motion_core::anchor::StreamEpoch::Continuation,
@@ -108,6 +109,7 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
     })
     .unwrap();
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key: AxisKey { mcu_id: 2, axis: 0 },
         pieces: vec![piece(1)],
         epoch: motion_core::anchor::StreamEpoch::Continuation,
@@ -176,6 +178,7 @@ fn heartbeat_retirement_drains_pump_ledger() {
     assert!(ledger.drained(), "empty pump is trivially drained");
 
     data.send(EnqueueMsg {
+        epoch_freq: None,
         key: AxisKey {
             mcu_id: 42,
             axis: 0,

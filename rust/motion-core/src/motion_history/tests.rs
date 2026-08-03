@@ -39,6 +39,7 @@ fn clock_between_mcus_round_trips_through_host_secs() {
 }
 
 const FREQ: u32 = 520_000_000;
+const FREQ_HZ: f64 = FREQ as f64;
 
 fn key() -> AxisKey {
     AxisKey { mcu_id: 7, axis: 2 }
@@ -92,13 +93,13 @@ fn h(clock: u64) -> f64 {
 
 fn rec(store: &mut HistoryStore, key: AxisKey, e: PieceEntry) {
     let host = h(e.start_time);
-    store.record(key, &e, FREQ, host);
+    store.record(key, &e, FREQ_HZ, host);
 }
 
 #[test]
 fn end_clock_matches_isr_formula() {
     let e = entry(1_000, 0.0123, [0.0; 4]);
-    let hp = HistoryPiece::from_entry(&e, FREQ, h(1_000));
+    let hp = HistoryPiece::from_entry(&e, FREQ_HZ, h(1_000));
     assert_eq!(hp.end_clock, e.end_time(FREQ as f32));
     assert_eq!(hp.start_clock, 1_000);
 }
@@ -133,7 +134,7 @@ fn quadratic_piece_derivatives() {
 fn gap_between_pieces_holds_previous_endpoint() {
     let mut store = HistoryStore::default();
     rec(&mut store, key(), linear(0, 0.001, 0.0, 10.0));
-    let gap_start = HistoryPiece::from_entry(&linear(0, 0.001, 0.0, 10.0), FREQ, 0.0).end_clock;
+    let gap_start = HistoryPiece::from_entry(&linear(0, 0.001, 0.0, 10.0), FREQ_HZ, 0.0).end_clock;
     rec(
         &mut store,
         key(),
@@ -390,8 +391,8 @@ fn rebase_to_earlier_clock_accepts_post_rewind_pieces() {
 #[test]
 fn backward_host_supersedes_stale_tail() {
     let mut store = HistoryStore::default();
-    store.record(key(), &linear(0, 0.5, 0.0, 10.0), FREQ, 1.0);
-    store.record(key(), &linear(0, 0.5, 50.0, 60.0), FREQ, 0.2);
+    store.record(key(), &linear(0, 0.5, 0.0, 10.0), FREQ_HZ, 1.0);
+    store.record(key(), &linear(0, 0.5, 50.0, 60.0), FREQ_HZ, 0.2);
     let st = store
         .state_at_host(key(), 0.4, Some(f64::INFINITY))
         .unwrap();
@@ -580,14 +581,14 @@ fn corexy_history_round_trip_reproduces_bench_symptom() {
 fn rebase_after_probe_trip_round_trips_through_cartesian_inversion() {
     // Reproduces the z_tilt/beacon-probe incident: every proximity probe
     // ends in toolhead.set_position(x, y, z), which rebases the retained
-    // history to the trip's stop position. Before spatial_rebase_targets
+    // history to the trip's stop position. Before reanchor_axis_targets
     // existed, that rebase stored raw cartesian x/y under axis 0/1 — the
     // same slots live CoreXY pieces store in motor frame — so querying
     // through assemble_cartesian_state's kinematics inversion afterward
     // double-transformed an already-correct position into garbage (the
     // bench's "probe at 197.500,-47.500" from a real (150,245) point).
     use crate::kinematics::KinematicsModule;
-    use crate::mcu_config::{McuAxisConfig, McuCaps, spatial_rebase_targets};
+    use crate::mcu_config::{McuAxisConfig, McuCaps, reanchor_axis_targets};
     use crate::motion_history::assemble_cartesian_state;
     use runtime::segment::KinematicTag;
 
@@ -600,6 +601,7 @@ fn rebase_after_probe_trip_round_trips_through_cartesian_inversion() {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
+        ..Default::default()
     }];
     let cart_x = 150.0;
     let cart_y = 245.0;
@@ -607,7 +609,7 @@ fn rebase_after_probe_trip_round_trips_through_cartesian_inversion() {
 
     let mut store = HistoryStore::default();
     for (key, value) in
-        spatial_rebase_targets(&configs, geometry::MachinePos([cart_x, cart_y, cart_z]))
+        reanchor_axis_targets(&configs, geometry::MachinePos([cart_x, cart_y, cart_z]))
     {
         store.rebase_axis(key, 0.0, value);
     }
@@ -673,7 +675,7 @@ fn state_at_clock_is_immune_to_host_mapping_skew() {
     // over 40 ms is a 0.4 mm bias in the host-domain answer.
     let skew_s = 0.040;
     let e = linear(0, 1.0, 0.0, 10.0);
-    store.record(key(), &e, FREQ, skew_s);
+    store.record(key(), &e, FREQ_HZ, skew_s);
     let clock = FREQ as u64 / 2;
     let by_clock = store
         .state_at_clock(key(), clock, h(clock), Some(f64::INFINITY))

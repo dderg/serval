@@ -5,10 +5,25 @@ from collections import defaultdict, namedtuple
 
 from . import stepper
 from .extras import servo_axis
+from .mcu import STEPPING_MODE_PIECE, STEPPING_MODE_STEPCOMPRESS
+from .motion_endstop import register_stepcompress_steppers
 from .stepper import DEFAULT_STEP_PULSE_DURATION
 
 McuTopology = namedtuple(
-    "McuTopology", ["mcu_id", "axes", "kinematics", "max_motor_velocity"]
+    "McuTopology",
+    [
+        "mcu_id",
+        "axes",
+        "kinematics",
+        "max_motor_velocity",
+        "stepping_mode",
+        "microstep_distance",
+        "invert_dir",
+        "stepper_oids",
+        "stepcompress_sample_rate",
+        "move_queue_slots",
+        "step_pulse_seconds",
+    ],
 )
 
 CORNER_DEVIATION_SCV_FACTOR = math.sqrt(2.0) - 1.0
@@ -70,6 +85,19 @@ def motor_velocity_ceiling(mcu_stepper):
     return STEP_ISR_BUDGET_FRACTION / per_step_s * mcu_stepper.get_step_dist()
 
 
+def step_pulse_width(mcu_stepper):
+    """The settle the mcu enforces around every pulse: src/stepper_classic.c
+    re-arms its timer at waketime + step_pulse_ticks, both after a step (for
+    the unstep) and after a direction toggle. Both-edge drivers step on every
+    edge and configure zero ticks."""
+    pulse_duration, both_edge = mcu_stepper.get_pulse_duration()
+    if both_edge:
+        return 0.0
+    if pulse_duration is None:
+        pulse_duration = DEFAULT_STEP_PULSE_DURATION
+    return pulse_duration
+
+
 def build_axis_to_handle(motion):
     axis_to_handle = {}
     motion._axis_velocity_ceiling = axis_ceiling = {}
@@ -112,18 +140,105 @@ def build_axis_to_handle(motion):
     return axis_to_handle
 
 
+def engine_mcus_by_handle(motion):
+    by_handle = {}
+    for name, mcu in motion.printer.lookup_objects(module="mcu"):
+        handle = mcu.get_engine_handle()
+        if handle is None:
+            continue
+        by_handle[handle] = (name, mcu)
+    return by_handle
+
+
+def ethercat_handles(motion):
+    handles = set()
+    for _name, node in motion.printer.lookup_objects(module="ethercat_node"):
+        handle = node.get_engine_handle()
+        if handle is not None:
+            handles.add(handle)
+    return handles
+
+
+def _reject_stepcompress_conflicts(
+    motion, name, handle, axes, step_modes, endpoint_handles
+):
+    if handle in endpoint_handles:
+        raise motion.printer.config_error(
+            "mcu '%s': stepping_mode: stepcompress is invalid for an ethercat "
+            "endpoint (engine handle %d). EtherCAT drives consume position "
+            "targets, not step pulses; use stepping_mode: piece."
+            % (name, handle)
+        )
+    modulated = [a for a in axes if step_modes[a] == STEP_MODE_MODULATED]
+    if modulated:
+        raise motion.printer.config_error(
+            "mcu '%s': stepping_mode: stepcompress cannot drive phase-stepped "
+            "motors, but axes %s request phase_stepping: 1. Set "
+            "phase_stepping: 0 on those steppers or move them to a "
+            "stepping_mode: piece MCU." % (name, modulated)
+        )
+
+
 def derive_mcu_topology(motion, axis_to_handle):
     by_handle = {}
     for axis_idx, handle in axis_to_handle.items():
         by_handle.setdefault(handle, []).append(axis_idx)
     ceilings = getattr(motion, "_axis_velocity_ceiling", {})
+    mcu_by_handle = engine_mcus_by_handle(motion)
+    endpoint_handles = ethercat_handles(motion)
+    slot_steppers = motion._build_slot_steppers()
     topo = []
     for handle in sorted(by_handle):
         axes = sorted(by_handle[handle])
         max_motor_velocity = [ceilings.get(a, float("inf")) for a in axes]
+        name, mcu_obj = mcu_by_handle.get(handle, (str(handle), None))
+        stepping_mode = (
+            STEPPING_MODE_PIECE
+            if mcu_obj is None
+            else mcu_obj.get_stepping_mode()
+        )
+        sample_rate = (
+            0.0
+            if mcu_obj is None or stepping_mode != STEPPING_MODE_STEPCOMPRESS
+            else mcu_obj.get_stepcompress_sample_rate()
+        )
+        move_queue_slots = 0
+        if mcu_obj is not None and stepping_mode == STEPPING_MODE_STEPCOMPRESS:
+            move_queue_slots = mcu_obj.get_move_queue_slots()
+            if move_queue_slots <= 0:
+                raise motion.printer.config_error(
+                    "mcu '%s': stepping_mode: stepcompress needs the mcu's "
+                    "advertised move_count, but none was received before the "
+                    "motion planner was built" % (name,)
+                )
+        (
+            _present_mask,
+            _invert_mask,
+            _steps_per_mm,
+            step_modes,
+            _bind_list,
+            slot_microstep_distance,
+            slot_invert_dir,
+            slot_oids,
+            slot_step_pulse_seconds,
+        ) = _build_slot_masks(mcu_obj, slot_steppers, len(mcu_by_handle))
+        if stepping_mode == STEPPING_MODE_STEPCOMPRESS:
+            _reject_stepcompress_conflicts(
+                motion, name, handle, axes, step_modes, endpoint_handles
+            )
         topo.append(
             McuTopology(
-                handle, axes, motion.kin.mcu_tag(axes), max_motor_velocity
+                handle,
+                axes,
+                motion.kin.mcu_tag(axes),
+                max_motor_velocity,
+                stepping_mode,
+                [slot_microstep_distance[a] for a in axes],
+                [slot_invert_dir[a] for a in axes],
+                [slot_oids[a] for a in axes],
+                sample_rate,
+                move_queue_slots,
+                [slot_step_pulse_seconds[a] for a in axes],
             )
         )
     return topo
@@ -188,6 +303,10 @@ def _build_slot_masks(mcu_obj, slot_steppers, num_engine_mcus):
     invert_mask = 0
     steps_per_mm = [0.0, 0.0, 0.0, 0.0]
     step_modes = [STEP_MODE_STEP_TIME] * 4
+    microstep_distance = [0.0, 0.0, 0.0, 0.0]
+    invert_dir = [False, False, False, False]
+    stepper_oids = [0, 0, 0, 0]
+    step_pulse_seconds = [0.0, 0.0, 0.0, 0.0]
     bind_list = []
     for i in range(4):
         on_this_mcu = []
@@ -207,15 +326,29 @@ def _build_slot_masks(mcu_obj, slot_steppers, num_engine_mcus):
         if step_dist <= 0.0:
             continue
         steps_per_mm[i] = 1.0 / step_dist
+        microstep_distance[i] = step_dist
+        stepper_oids[i] = primary.get_oid()
+        step_pulse_seconds[i] = step_pulse_width(primary)
         present_mask |= 1 << i
         if getattr(primary, "_invert_dir", False):
             invert_mask |= 1 << i
+            invert_dir[i] = True
         if getattr(primary, "phase_stepping", False):
             step_modes[i] = STEP_MODE_MODULATED
         for sname, s in on_this_mcu:
             inv = 1 if getattr(s, "_invert_dir", False) else 0
             bind_list.append((i, sname, s.get_oid(), inv))
-    return present_mask, invert_mask, steps_per_mm, step_modes, bind_list
+    return (
+        present_mask,
+        invert_mask,
+        steps_per_mm,
+        step_modes,
+        bind_list,
+        microstep_distance,
+        invert_dir,
+        stepper_oids,
+        step_pulse_seconds,
+    )
 
 
 PHASE_STEPPING_DRIVER_TYPES = ("tmc5160", "tmc2240")
@@ -402,6 +535,43 @@ def _send_axis_configuration(
         )
 
 
+def _configure_stepcompress_mcu(
+    motion,
+    name,
+    mcu_obj,
+    mcu_handle,
+    present_mask,
+    bind_list,
+    microstep_distance,
+):
+    if present_mask == 0:
+        logging.info(
+            "Motion: no steppers matched stepcompress MCU %s; "
+            "skipping motor binding",
+            name,
+        )
+        return
+    axis_bindings = defaultdict(list)
+    for slot_idx, sname, oid, inv in bind_list:
+        axis_bindings[slot_idx].append((sname, oid, inv))
+    for axis_idx, bindings in axis_bindings.items():
+        for motor_idx, (sname, _oid, _inv) in enumerate(bindings):
+            motion._motor_bindings[sname] = (mcu_handle, axis_idx, motor_idx)
+    register_stepcompress_steppers(
+        motion.printer,
+        mcu_obj,
+        [oid for _slot, _sname, oid, _inv in bind_list],
+    )
+    logging.info(
+        "Motion: stepcompress mcu=%s present=0x%x microstep_distance=%s "
+        "bindings=%s — host-side step generation, no kalico_configure_axis",
+        name,
+        present_mask,
+        microstep_distance,
+        bind_list,
+    )
+
+
 def _configure_one_mcu(
     motion,
     name,
@@ -412,9 +582,28 @@ def _configure_one_mcu(
     awd_default,
     num_engine_mcus,
 ):
-    present_mask, invert_mask, steps_per_mm, step_modes, bind_list = (
-        _build_slot_masks(mcu_obj, slot_steppers, num_engine_mcus)
-    )
+    (
+        present_mask,
+        invert_mask,
+        steps_per_mm,
+        step_modes,
+        bind_list,
+        microstep_distance,
+        _invert_dir,
+        _stepper_oids,
+        _step_pulse_seconds,
+    ) = _build_slot_masks(mcu_obj, slot_steppers, num_engine_mcus)
+    if mcu_obj.get_stepping_mode() == STEPPING_MODE_STEPCOMPRESS:
+        _configure_stepcompress_mcu(
+            motion,
+            name,
+            mcu_obj,
+            mcu_handle,
+            present_mask,
+            bind_list,
+            microstep_distance,
+        )
+        return
     phase_configs, any_phase_stepping = _configure_phase_stepping_groups(
         motion, slot_steppers, step_modes, coupled
     )

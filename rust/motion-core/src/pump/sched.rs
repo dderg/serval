@@ -61,7 +61,37 @@ pub const MAX_MERGED_HOLD_SECS: f64 = 30.0;
 // a genuine gap (dwell, stream restart) and must stay a separate piece.
 const HOLD_MERGE_SEAM_SLOP_SECS: f64 = 2e-6;
 
-fn try_extend_hold(last: &mut PieceEntry, next: &PieceEntry, freq: f64) -> bool {
+// What the mcu piece walker tolerates when a piece starts before the clock it
+// is handed to. A transport that ships pieces to the walker untouched has no
+// host-side seam projector, so this is the only bound on a merged duration.
+const WIRE_WALKER_START_SLOP_SECS: f64 = 200e-6;
+
+/// How the consumer of a piece seam turns `duration` back into clock ticks.
+/// A merge rewrites the tail's `duration` from a tick span, and both the
+/// span-to-seconds and the seconds-to-ticks halves of that round trip must
+/// use `freq` or the merged piece reprojects somewhere the following piece
+/// does not start. `skew_budget_cycles` bounds what is left after the round
+/// trip: `duration` is an f32, so past ~2^24 ticks the reprojection is
+/// quantized coarser than a seam check can accept and the merge is refused.
+#[derive(Debug, Clone, Copy)]
+pub struct SeamBasis {
+    pub freq: f64,
+    pub skew_budget_cycles: u64,
+}
+
+impl SeamBasis {
+    /// The basis for a transport that hands pieces straight to the mcu walker.
+    #[must_use]
+    pub fn wire_walker(freq: f64) -> Self {
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        Self {
+            freq,
+            skew_budget_cycles: (freq * WIRE_WALKER_START_SLOP_SECS) as u64,
+        }
+    }
+}
+
+fn try_extend_hold(last: &mut PieceEntry, next: &PieceEntry, basis: SeamBasis) -> bool {
     let same_hold = last.coeff_count == 1
         && next.coeff_count == 1
         && last.motor_mask == next.motor_mask
@@ -70,34 +100,41 @@ fn try_extend_hold(last: &mut PieceEntry, next: &PieceEntry, freq: f64) -> bool 
         return false;
     }
     #[allow(clippy::cast_possible_truncation)]
-    let last_end = last.end_time(freq as f32);
+    let freq32 = basis.freq as f32;
+    let last_end = last.end_time(freq32);
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    let slop = (freq * HOLD_MERGE_SEAM_SLOP_SECS) as u64;
+    let slop = (basis.freq * HOLD_MERGE_SEAM_SLOP_SECS) as u64;
     if last_end.abs_diff(next.start_time) > slop {
         return false;
     }
     #[allow(clippy::cast_precision_loss)]
-    let merged_secs =
-        next.start_time.saturating_sub(last.start_time) as f64 / freq + f64::from(next.duration);
+    let merged_secs = next.start_time.saturating_sub(last.start_time) as f64 / basis.freq
+        + f64::from(next.duration);
     if merged_secs > MAX_MERGED_HOLD_SECS {
         return false;
     }
     #[allow(clippy::cast_possible_truncation)]
-    {
-        last.duration = merged_secs as f32;
+    let merged_duration = merged_secs as f32;
+    let merged_end = PieceEntry {
+        duration: merged_duration,
+        ..*last
     }
+    .end_time(freq32);
+    if merged_end.abs_diff(next.end_time(freq32)) > basis.skew_budget_cycles {
+        return false;
+    }
+    last.duration = merged_duration;
     true
 }
 
 /// Append `pieces`, coalescing runs of bit-identical constant (hold) pieces
 /// with the queue tail — a stationary axis otherwise ships one 20-byte wire
-/// entry per planner segment. Tick-anchored duration recomputation keeps the
-/// merged end time drift-free. `allow_tail_merge=false` fences the first
+/// entry per planner segment. `allow_tail_merge=false` fences the first
 /// incoming piece from a pre-existing tail (fresh stream re-anchor).
 pub fn append_pieces_merging_holds(
     queue: &mut VecDeque<(PieceEntry, f64)>,
     pieces: Vec<(PieceEntry, f64)>,
-    freq: f64,
+    basis: SeamBasis,
     allow_tail_merge: bool,
 ) {
     let mut merge_with_tail = allow_tail_merge;
@@ -105,7 +142,7 @@ pub fn append_pieces_merging_holds(
         let merged = merge_with_tail
             && queue
                 .back_mut()
-                .is_some_and(|(last, _)| try_extend_hold(last, &piece, freq));
+                .is_some_and(|(last, _)| try_extend_hold(last, &piece, basis));
         if !merged {
             queue.push_back((piece, host));
         }

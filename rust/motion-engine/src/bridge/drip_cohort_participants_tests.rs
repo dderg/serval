@@ -14,6 +14,7 @@ fn cfg(mcu_id: u32, axes: Vec<usize>) -> McuAxisConfig {
         },
         kinematics: 1,
         ethercat: false,
+        ..Default::default()
     }
 }
 

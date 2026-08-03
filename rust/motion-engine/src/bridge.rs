@@ -23,6 +23,7 @@ use crate::worker::{StreamWorkerError, StreamWorkerHandle};
 mod attach;
 mod clock_regression;
 pub use clock_regression::{PyClockSyncEstimator, PyDecayRegression};
+mod drain_wait;
 mod endstop;
 mod ethercat_endpoint;
 mod homing_api;
@@ -81,6 +82,35 @@ fn planner_err(e: StreamWorkerError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
 
+fn open_link_with_retry(
+    what: &str,
+    link_desc: &str,
+    deadline: Instant,
+    timeout_s: f64,
+    mut open: impl FnMut() -> Result<McuHostIo, host_rt::transport::TransportError>,
+) -> PyResult<McuHostIo> {
+    loop {
+        match open() {
+            Ok(io) => return Ok(io),
+            Err(e) => {
+                if Instant::now() >= deadline {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "{what}: could not open {link_desc} within {timeout_s}s: {e}"
+                    )));
+                }
+                tracing::warn!(
+                    subsystem = "mcu-comms",
+                    event = "attach_open_retry",
+                    link = link_desc,
+                    error = %e,
+                    "{what}: retrying open"
+                );
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+}
+
 fn open_serial_with_retry(
     serial_path: &str,
     effective_baud: u32,
@@ -89,8 +119,8 @@ fn open_serial_with_retry(
     deadline: Instant,
     timeout_s: f64,
 ) -> PyResult<McuHostIo> {
-    let host_io = loop {
-        let result = if is_pipe {
+    open_link_with_retry("attach_serial", serial_path, deadline, timeout_s, || {
+        if is_pipe {
             #[cfg(target_family = "unix")]
             {
                 McuHostIo::open_pipe_with_config(serial_path, config.clone())
@@ -101,34 +131,35 @@ fn open_serial_with_retry(
             }
         } else {
             McuHostIo::open_with_config(serial_path, effective_baud, config.clone())
-        };
-        match result {
-            Ok(io) => break io,
-            Err(e) => {
-                if Instant::now() >= deadline {
-                    return Err(PyRuntimeError::new_err(format!(
-                        "attach_serial: could not open {serial_path} within {timeout_s}s: {e}"
-                    )));
-                }
-                tracing::warn!(
-                    subsystem = "mcu-comms",
-                    event = "attach_open_retry",
-                    serial_path,
-                    error = %e,
-                    "attach_serial: retrying open"
-                );
-                std::thread::sleep(Duration::from_millis(500));
-            }
         }
-    };
-    Ok(host_io)
+    })
+}
+
+fn open_canbus_with_retry(
+    interface: &str,
+    uuid: u64,
+    config: &McuHostIoConfig,
+    deadline: Instant,
+    timeout_s: f64,
+) -> PyResult<McuHostIo> {
+    let link_desc = format!("{interface} uuid={uuid:012x}");
+    open_link_with_retry("attach_canbus", &link_desc, deadline, timeout_s, || {
+        McuHostIo::open_canbus_with_config(interface, uuid, config.clone())
+    })
 }
 
 /// Backstop only. The continuity commit drains at every blend, so the buffer
 /// normally hovers near the open-tail length past the finality barrier; this
-/// force-drain to rest fires solely when no clean seam exists within reach. Set
-/// well above a realistic open tail so a dense (but normal) stream never trips it.
-const STREAM_MAX_BUFFER_MOVES: usize = 128;
+/// force-drain to rest fires solely when no clean seam exists within reach.
+///
+/// It must sit well above the open tail a *legitimate* dense stream carries,
+/// or the backstop stops being a backstop: the open tail is the re-plan batch
+/// plus the brake-to-rest setback measured in moves, and at 600 mm/s with the
+/// default `max_jerk = 2·max_accel` that setback is ~150 mm — about 300 moves
+/// of half-millimetre slicer output. At 128 the Voron 0 motion repro tripped
+/// it 41 times in 4673 moves, i.e. once per window: every look-ahead ended in
+/// a full stop. A `Move` is 192 bytes, so this ceiling costs 200 kB of window.
+const STREAM_MAX_BUFFER_MOVES: usize = 1024;
 /// Velocity-profile ODE/sampling tolerance for the streaming planner, in v²
 /// units. The offline default (1e-7) drives the adaptive RK4 to a precision far
 /// below the physical noise floor — ~0.015 mm/s velocity error at this value on
@@ -151,6 +182,7 @@ pub struct PyMotionEngine {
     bed_mesh: Mutex<Option<Arc<geometry::SurfaceTransform>>>,
     last_g5_pq: Mutex<Option<(f64, f64)>>,
     mcu_axis_configs: Arc<Mutex<Vec<McuAxisConfig>>>,
+    stepcompress_endpoints: Arc<Mutex<HashMap<u32, Arc<Mutex<crate::pump::StepcompressEndpoint>>>>>,
     dispatched_segments: Arc<AtomicU64>,
     dispatch_anchor: Arc<Mutex<crate::anchor::Anchor>>,
     fallback_clock_conversions: Arc<AtomicU64>,
@@ -191,6 +223,7 @@ impl PyMotionEngine {
             bed_mesh: Mutex::new(None),
             last_g5_pq: Mutex::new(None),
             mcu_axis_configs: Arc::new(Mutex::new(Vec::new())),
+            stepcompress_endpoints: Arc::new(Mutex::new(HashMap::new())),
             dispatched_segments: Arc::new(AtomicU64::new(0)),
             dispatch_anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
             fallback_clock_conversions: Arc::new(AtomicU64::new(0)),
@@ -508,6 +541,65 @@ impl PyMotionEngine {
         self.register_freshly_attached_mcu(
             mcu_handle,
             serial_path,
+            &mcu_label,
+            klippy_non_critical,
+            expect_native,
+            host_io,
+        )
+    }
+
+    #[pyo3(signature = (mcu_handle, interface, uuid, timeout_s = 30.0, klippy_non_critical = false, expect_native = true))]
+    fn attach_canbus(
+        &self,
+        mcu_handle: u32,
+        interface: &str,
+        uuid: &str,
+        timeout_s: f64,
+        klippy_non_critical: bool,
+        expect_native: bool,
+    ) -> PyResult<()> {
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs_f64(timeout_s);
+        let uuid_value = u64::from_str_radix(uuid, 16).map_err(|e| {
+            PyRuntimeError::new_err(format!("attach_canbus: invalid canbus_uuid {uuid:?}: {e}"))
+        })?;
+        if uuid_value > 0xffff_ffff_ffff {
+            return Err(PyRuntimeError::new_err(format!(
+                "attach_canbus: canbus_uuid {uuid:?} exceeds 6 bytes"
+            )));
+        }
+        let link_desc = format!("{interface}:{uuid_value:012x}");
+
+        if self.try_reuse_existing_connection(
+            mcu_handle,
+            &link_desc,
+            klippy_non_critical,
+            expect_native,
+        )? {
+            return Ok(());
+        }
+
+        let mcu_label: String = self.with_mcu(
+            mcu_handle,
+            |h| format!("attach_canbus: unknown mcu_handle {h} (claim_mcu not called)"),
+            |conn| {
+                conn.runtime_rx_priority = None;
+                conn.runtime_rx_bulk = None;
+                conn.host_io = None;
+                Ok(conn.label.clone())
+            },
+        )?;
+
+        let config = McuHostIoConfig {
+            mcu_label: Some(mcu_label.clone()),
+            ..McuHostIoConfig::default()
+        };
+
+        let host_io = open_canbus_with_retry(interface, uuid_value, &config, deadline, timeout_s)?;
+
+        self.register_freshly_attached_mcu(
+            mcu_handle,
+            &link_desc,
             &mcu_label,
             klippy_non_critical,
             expect_native,

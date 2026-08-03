@@ -2,20 +2,28 @@
 #define __CANBUS_H__
 
 #include <stdint.h> // uint32_t
+#include "autoconf.h" // CONFIG_CANBUS_DATA_FREQUENCY
+
+#if CONFIG_CANBUS_DATA_FREQUENCY
+#define CANMSG_DATA_MAX 64
+#else
+#define CANMSG_DATA_MAX 8
+#endif
 
 struct canbus_msg {
     uint32_t id;
     uint32_t dlc;
     union {
-        uint8_t data[8];
-        uint32_t data32[2];
+        uint8_t data[CANMSG_DATA_MAX];
+        uint32_t data32[CANMSG_DATA_MAX / 4];
     };
 };
 
 #define CANMSG_ID_RTR (1<<30)
 #define CANMSG_ID_EFF (1<<31)
 
-#define CANMSG_DATA_LEN(msg) ((msg)->dlc > 8 ? 8 : (msg)->dlc)
+#define CANMSG_DATA_LEN(msg) \
+    ((msg)->dlc > CANMSG_DATA_MAX ? CANMSG_DATA_MAX : (msg)->dlc)
 
 struct canbus_status {
     uint32_t rx_error, tx_error, tx_retries;

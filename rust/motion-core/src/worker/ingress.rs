@@ -29,14 +29,51 @@ use motion_pipeline::{
 use super::dispatch::WorkerLinks;
 use super::{CommittedFrontier, HomeDripParams, NudgeParams, StreamMsg, fatal};
 
-/// Runway kept in reserve when the pacer waits out a silent input instead of
-/// sending `Drain`. A drain fired at the reserve must still travel
+/// Runway the pacer keeps in reserve when it waits out a silent input instead
+/// of draining. A drain fired at the reserve must still travel
 /// fit → plan → lower → shape → dispatch and reach the pump before the
-/// playhead overruns the committed frontier; those stages take milliseconds,
-/// so this covers them with a wide margin while staying under the anchor's
-/// 250 ms initial lead. Overrunning anyway is not fatal — the anchor
-/// re-anchors forward with a logged stutter.
-const RUNWAY_RESERVE_S: f64 = 0.1;
+/// playhead overruns the committed frontier. Overrunning is not a stutter:
+/// the committed trajectory ends mid-motion, so the anchor classifies the
+/// late brake-to-rest as [`crate::anchor`]'s `UnderrunFatal` and aborts the
+/// process — which is what ended two bench cube prints, 12.5 ms and 43.4 ms
+/// past a 100 ms reserve, once the gcode stream went quiet at end of file.
+///
+/// That traversal is a whole brake-to-rest plan pass over whatever the
+/// lookahead still holds, on whatever host is running: it belongs to the
+/// pipeline, not to a constant. So the pacer measures it — every `Drain` it
+/// fires is timed against the barrier that reports it dispatched — and keeps
+/// the reserve at [`DRAIN_RESERVE_SAFETY`] times the worst traversal it has
+/// seen. The floor is what covers the first drain of a session, sized well
+/// clear of the bench's worst; a healthy print carries tens of seconds of
+/// committed runway, so a reserve this deep never fires early.
+const DRAIN_RESERVE_FLOOR_S: f64 = 0.5;
+const DRAIN_RESERVE_SAFETY: f64 = 2.0;
+
+/// The pacer's runway reserve, earned from the drains the pipeline has
+/// already served.
+pub(super) struct DrainReserve {
+    worst_s: f64,
+}
+
+impl DrainReserve {
+    pub(super) fn new() -> Self {
+        Self { worst_s: 0.0 }
+    }
+
+    pub(super) fn secs(&self) -> f64 {
+        (self.worst_s * DRAIN_RESERVE_SAFETY).max(DRAIN_RESERVE_FLOOR_S)
+    }
+
+    /// Records one measured drain traversal; `true` when it widened the
+    /// reserve.
+    pub(super) fn observe(&mut self, latency_s: f64) -> bool {
+        if latency_s <= self.worst_s {
+            return false;
+        }
+        self.worst_s = latency_s;
+        true
+    }
+}
 
 // TODO: expose as a config knob if 250 ms turns out wrong for slower feeds.
 const STARTUP_PRIME_S: f64 = 0.250;
@@ -94,6 +131,7 @@ pub(super) struct Ingress {
     pub(super) links: Arc<WorkerLinks>,
     pub(super) frontier: Arc<CommittedFrontier>,
     pub(super) intake: IntakeState,
+    pub(super) reserve: DrainReserve,
     /// Source line of the last move forwarded into the pipeline; a fence
     /// arriving now sequences after it.
     pub(super) last_line: u32,
@@ -164,11 +202,25 @@ impl Ingress {
 
     /// Drain the lookahead and fence: the pipeline is empty and the full
     /// braked-to-rest trajectory is dispatched when this returns, so no
-    /// intake remains uncommitted.
+    /// intake remains uncommitted. Every drain runs through here, so every
+    /// drain measures the traversal the pacer's reserve has to cover.
     fn drain_and_fence(&mut self) -> BarrierAck {
+        let sent = Instant::now();
         self.send(StreamInput::Drain);
         self.intake.mark_drained();
-        self.barrier()
+        let ack = self.barrier();
+        let latency_s = sent.elapsed().as_secs_f64();
+        if self.reserve.observe(latency_s) {
+            tracing::info!(
+                subsystem = "motion",
+                event = "pacer_reserve_raised",
+                latency_s,
+                reserve_s = self.reserve.secs(),
+                "[pacer] slowest brake-to-rest yet — widening the runway the \
+                 pacer keeps for the next one"
+            );
+        }
+        ack
     }
 
     fn handle_move(&mut self, m: geometry::Move) {
@@ -209,7 +261,7 @@ impl Ingress {
     /// brake-to-rest and the drained trajectory beats the playhead to the
     /// pump.
     fn drain_or_runway(&mut self) -> Option<Duration> {
-        let wait_s = self.frontier.runway_secs() - RUNWAY_RESERVE_S;
+        let wait_s = self.frontier.runway_secs() - self.reserve.secs();
         if wait_s > 0.0 {
             return Some(Duration::from_secs_f64(wait_s));
         }
@@ -226,11 +278,7 @@ impl Ingress {
             t_us = crate::timing::mono_us(),
             "[pipe] runway exhausted — draining pipeline to rest"
         );
-        self.send(StreamInput::Drain);
-        self.intake.mark_drained();
-        if self.links.fences.has_armed() {
-            self.barrier();
-        }
+        self.drain_and_fence();
         None
     }
 
@@ -398,3 +446,6 @@ impl Ingress {
         self.barrier().result.map_err(|e| format!("nudge: {e}"))
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -1,12 +1,15 @@
+use super::stepcompress_sink::StepcompressEndpoint;
 use super::{AxisFrame, AxisKey, PieceSink, SendError};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::Weak;
 use std::time::{Duration, Instant};
 
 pub enum McuTransport {
     Serial(Weak<host_rt::host_io::McuHostIo>),
     EtherCat(Weak<host_rt::mcu_serial_conn::McuSerialConn>),
+    Stepcompress(Arc<Mutex<StepcompressEndpoint>>),
 }
 
 impl std::fmt::Debug for McuTransport {
@@ -14,6 +17,7 @@ impl std::fmt::Debug for McuTransport {
         match self {
             Self::Serial(_) => write!(f, "McuTransport::Serial"),
             Self::EtherCat(_) => write!(f, "McuTransport::EtherCat"),
+            Self::Stepcompress(_) => write!(f, "McuTransport::Stepcompress"),
         }
     }
 }
@@ -141,6 +145,18 @@ where
 }
 
 impl WireSink {
+    pub fn stepcompress_ring_depth(&self, mcu_id: u32) -> Option<u32> {
+        match self.transports.get(&mcu_id)? {
+            McuTransport::Stepcompress(endpoint) => Some(
+                endpoint
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .ring_depth(),
+            ),
+            _ => None,
+        }
+    }
+
     /// The wall-clock instant at which the bundle's earliest piece enters the
     /// MCU's past — retrying a send beyond it cannot succeed. `None` when the
     /// clock regression has no record yet (attempt-count cap still applies).
@@ -232,6 +248,11 @@ impl WireSink {
                     })?;
                 b
             }
+            McuTransport::Stepcompress(_) => {
+                return Err(SendError::Fatal(format!(
+                    "PushPieces attempted on stepcompress mcu {mcu_id}"
+                )));
+            }
         };
 
         use mcu_protocol::codec::Decode as _;
@@ -269,7 +290,41 @@ impl PieceSink for WireSink {
                 wire_budget: 8192,
                 pieces_per_axis: 255,
             },
-            Some(McuTransport::Serial(_)) | None => super::messages::SERIAL_BUNDLE_LIMITS,
+            Some(McuTransport::Serial(_) | McuTransport::Stepcompress(_)) | None => {
+                super::messages::SERIAL_BUNDLE_LIMITS
+            }
+        }
+    }
+
+    fn mark_reanchor(&self, key: AxisKey, at_start_clock: u64, epoch_freq: Option<f64>) {
+        if let Some(McuTransport::Stepcompress(endpoint)) = self.transports.get(&key.mcu_id) {
+            endpoint
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .mark_reanchor(key.axis, at_start_clock, epoch_freq);
+        }
+    }
+
+    fn seam_basis(&self, key: AxisKey) -> Option<super::sched::SeamBasis> {
+        match self.transports.get(&key.mcu_id) {
+            Some(McuTransport::Stepcompress(endpoint)) => endpoint
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .seam_basis(key.axis),
+            _ => None,
+        }
+    }
+
+    fn on_barrier_ack(&self, mcu_id: u32, oid: u8, seq: u32) -> Result<(), SendError> {
+        match self.transports.get(&mcu_id) {
+            Some(McuTransport::Stepcompress(endpoint)) => endpoint
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .on_barrier_ack(u32::from(oid), seq),
+            _ => Err(SendError::Fatal(format!(
+                "stepcompress_barrier_ack oid={oid} seq={seq} arrived for mcu {mcu_id}, which \
+                 has no stepcompress endpoint"
+            ))),
         }
     }
 
@@ -278,6 +333,13 @@ impl PieceSink for WireSink {
             frames.iter().all(|f| f.pieces.len() <= 255),
             "PushPieces axis block exceeds u8 piece_count; schedule() must cap at MAX_PER_FRAME"
         );
+
+        if let Some(McuTransport::Stepcompress(endpoint)) = self.transports.get(&mcu_id) {
+            return endpoint
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .send_frames(mcu_id, frames);
+        }
 
         let send_started_ns = super::transit_trace::send_started_ns();
         let send_started_at = Instant::now();

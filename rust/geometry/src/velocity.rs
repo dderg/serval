@@ -236,6 +236,7 @@ pub enum VelocityError {
         line_no: u32,
         v: f64,
     },
+
     InvalidConfig,
     InfeasibleBoundary(BoundaryInfeasibility),
     UncertifiedPhase {
@@ -1291,13 +1292,21 @@ fn reconstruct_runs(
                 BoundaryState::REST
             } else {
                 let (bv, ba) = run.exit_states[idx];
-                // Grid integration can land the sample a hair above the
-                // analytic node bound; a re-plan re-derives that bound (or a
-                // looser one, by append monotonicity) as its entry check, so
-                // clamping here is what makes every boundary a valid warm
-                // start.
+                // The boundary carries the state the reconstruction actually
+                // ends at — the seam plan may sit below it where a retreat
+                // dragged a whole cruise down to a brake ramp's minimum, and
+                // hiding the reconstruction's ceiling ride behind that plan
+                // value would hand a streaming cut an entry the emitted body
+                // does not end at. Grid integration can still land a hair
+                // above the analytic seam ceiling, so shave against the
+                // physical bound only.
+                let ceiling = if j + 1 < n {
+                    seam_ceiling(caps, j + 1)
+                } else {
+                    kin.flat_ceiling
+                };
                 BoundaryState {
-                    v: bv.min(v[j + 1]),
+                    v: bv.min(ceiling),
                     a: ba,
                 }
             });

@@ -51,6 +51,7 @@ fn harness_mcu_configs() -> Vec<McuAxisConfig> {
             total_piece_memory: 62 * 1024,
         },
         max_motor_velocity: vec![f64::INFINITY; 3],
+        ..Default::default()
     }]
 }
 
@@ -266,6 +267,7 @@ impl Ingestor {
                 seg,
                 &self.mcu_configs,
                 &crate::enqueue::EnqueueCtx {
+                    epoch_freq: &|_| None,
                     t0: 0.0,
                     epoch,
                     host_now: 0.0,

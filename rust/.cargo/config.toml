@@ -64,3 +64,18 @@ rustflags = [
     # generated codegen for our types (no packed access) is alignment-safe.
     "-C", "link-arg=--nmagic",
 ]
+
+# Cortex-M3 (ARMv7-M) — STM32F103. Distinct from thumbv7em because the M3
+# has no DSP extension and no FPU: every f32/f64 operation the runtime
+# performs lowers to a compiler_builtins soft-float call. That is a cycle
+# cost, not a correctness problem.
+#
+# WHY no `portable_atomic_unsafe_assume_single_core` here: ARMv7-M has
+# LDREX/STREX, so `portable_atomic` lowers RMW operations to native
+# exclusive-monitor instructions exactly as it does on thumbv7em. Only the
+# ARMv6-M (thumbv6m) build needs the interrupt-masking fallback.
+[target.thumbv7m-none-eabi]
+rustflags = [
+    "-C", "target-cpu=cortex-m3",
+    "-C", "link-arg=--nmagic",
+]

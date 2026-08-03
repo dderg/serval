@@ -71,13 +71,21 @@ impl InterceptorTable {
     }
 
     pub fn dispatch(&self, msg_name: &str, oid: Option<u32>, params: &MessageParams) {
-        let key = InterceptorKey {
+        let mut keys = vec![InterceptorKey {
             msg_name: msg_name.to_owned(),
             oid,
-        };
-        if let Some(entries) = self.entries.get(&key) {
-            for entry in entries {
-                (entry.callback)(params);
+        }];
+        if oid.is_some() {
+            keys.push(InterceptorKey {
+                msg_name: msg_name.to_owned(),
+                oid: None,
+            });
+        }
+        for key in keys {
+            if let Some(entries) = self.entries.get(&key) {
+                for entry in entries {
+                    (entry.callback)(params);
+                }
             }
         }
     }

@@ -15,9 +15,30 @@
 #include "canserial.h" // canserial_notify_tx
 #include "command.h" // DECL_CONSTANT
 #include "fasthash.h" // fasthash64
+#include "mcu_demux.h" // mcu_demux_pump
 #include "sched.h" // sched_wake_task
 
 #define CANBUS_UUID_LEN 6
+
+typedef uint8_t transmit_pos_t;
+
+#if CONFIG_CANBUS_DATA_FREQUENCY
+#define CANSERIAL_RECEIVE_BUF_SIZE 768
+typedef uint16_t receive_pos_t;
+#define read_receive_pos(a) readw(a)
+#else
+#define CANSERIAL_RECEIVE_BUF_SIZE 192
+typedef uint8_t receive_pos_t;
+#define read_receive_pos(a) readb(a)
+#endif
+
+#define CANMSG_ADMIN_DATA_MAX 8
+
+struct canbus_admin_msg {
+    uint32_t id;
+    uint32_t dlc;
+    uint8_t data[CANMSG_ADMIN_DATA_MAX];
+};
 
 // Global storage
 static struct canbus_data {
@@ -26,18 +47,23 @@ static struct canbus_data {
 
     // Tx data
     struct task_wake tx_wake;
-    uint8_t transmit_pos, transmit_max;
+    transmit_pos_t transmit_pos, transmit_max;
+    uint8_t host_fd;
 
     // Rx data
     struct task_wake rx_wake;
-    uint8_t receive_pos;
+    receive_pos_t receive_pos;
     uint32_t admin_pull_pos, admin_push_pos;
 
     // Transfer buffers
-    struct canbus_msg admin_queue[8];
-    uint8_t transmit_buf[96];
-    uint8_t receive_buf[192];
+    struct canbus_admin_msg admin_queue[8];
+    uint8_t transmit_buf[224];
+    uint8_t receive_buf[CANSERIAL_RECEIVE_BUF_SIZE];
 } CanData;
+_Static_assert(sizeof(CanData.transmit_buf) <= (transmit_pos_t)-1,
+               "transmit_pos_t cannot index transmit_buf");
+_Static_assert(sizeof(CanData.receive_buf) <= (receive_pos_t)-1,
+               "receive_pos_t cannot index receive_buf");
 
 
 /****************************************************************
@@ -48,6 +74,18 @@ void
 canserial_notify_tx(void)
 {
     sched_wake_task(&CanData.tx_wake);
+}
+
+static uint32_t
+canserial_chunk_size(uint32_t avail)
+{
+    if (!CONFIG_CANBUS_DATA_FREQUENCY || !CanData.host_fd || avail <= 8)
+        return avail > 8 ? 8 : avail;
+    static const uint8_t fd_sizes[] = {64, 48, 32, 24, 20, 16, 12};
+    for (uint32_t i = 0; i < ARRAY_SIZE(fd_sizes); i++)
+        if (avail >= fd_sizes[i])
+            return fd_sizes[i];
+    return 8;
 }
 
 void
@@ -64,9 +102,10 @@ canserial_tx_task(void)
     msg.id = id + 1;
     uint32_t tpos = CanData.transmit_pos, tmax = CanData.transmit_max;
     for (;;) {
-        int avail = tmax - tpos, now = avail > 8 ? 8 : avail;
+        int avail = tmax - tpos;
         if (avail <= 0)
             break;
+        uint32_t now = canserial_chunk_size(avail);
         msg.dlc = now;
         memcpy(msg.data, &CanData.transmit_buf[tpos], now);
         int ret = canbus_send(&msg);
@@ -106,6 +145,25 @@ console_sendf(const struct command_encoder *ce, va_list args)
     canserial_notify_tx();
 }
 
+int
+kalico_console_write_raw(const uint8_t *buf, uint16_t len)
+{
+    transmit_pos_t tpos = CanData.transmit_pos, tmax = CanData.transmit_max;
+    uint32_t log_limit = sizeof(CanData.transmit_buf) - CONSOLE_TX_PROTOCOL_RESERVE;
+    if (tpos && (uint32_t)tmax + (uint32_t)len > log_limit) {
+        tmax -= tpos;
+        memmove(&CanData.transmit_buf[0], &CanData.transmit_buf[tpos], tmax);
+        CanData.transmit_pos = 0;
+        CanData.transmit_max = tmax;
+    }
+    if ((uint32_t)tmax + (uint32_t)len > log_limit)
+        return -1;
+    memcpy(&CanData.transmit_buf[tmax], buf, len);
+    CanData.transmit_max = tmax + len;
+    canserial_notify_tx();
+    return len;
+}
+
 /****************************************************************
  * CAN "admin" command handling
  ****************************************************************/
@@ -123,7 +181,7 @@ console_sendf(const struct command_encoder *ce, va_list args)
 
 // Helper to verify a UUID in a command matches this chip's UUID
 static int
-can_check_uuid(struct canbus_msg *msg)
+can_check_uuid(struct canbus_admin_msg *msg)
 {
     return (msg->dlc >= 7
             && memcmp(&msg->data[1], CanData.uuid, sizeof(CanData.uuid)) == 0);
@@ -144,7 +202,7 @@ can_decode_nodeid(int nodeid)
 }
 
 static void
-can_process_query_unassigned(struct canbus_msg *msg)
+can_process_query_unassigned(struct canbus_admin_msg *msg)
 {
     uint8_t is_extended_query = // Kalico addition
         msg->dlc > 1
@@ -181,17 +239,19 @@ static void
 can_id_conflict(void)
 {
     CanData.assigned_id = 0;
+    CanData.host_fd = 0;
     canbus_set_filter(CanData.assigned_id);
     shutdown("Another CAN node assigned this ID");
 }
 
 static void
-can_process_set_klipper_nodeid(struct canbus_msg *msg)
+can_process_set_klipper_nodeid(struct canbus_admin_msg *msg)
 {
     if (msg->dlc < 8)
         return;
     uint32_t newid = can_decode_nodeid(msg->data[7]);
     if (can_check_uuid(msg)) {
+        CanData.host_fd = 0;
         if (newid != CanData.assigned_id) {
             CanData.assigned_id = newid;
             canbus_set_filter(CanData.assigned_id);
@@ -202,7 +262,7 @@ can_process_set_klipper_nodeid(struct canbus_msg *msg)
 }
 
 static void
-can_process_request_bootloader(struct canbus_msg *msg)
+can_process_request_bootloader(struct canbus_admin_msg *msg)
 {
     if (!CONFIG_HAVE_BOOTLOADER_REQUEST || !can_check_uuid(msg))
         return;
@@ -211,7 +271,7 @@ can_process_request_bootloader(struct canbus_msg *msg)
 
 // Handle an "admin" command
 static void
-can_process_admin(struct canbus_msg *msg)
+can_process_admin(struct canbus_admin_msg *msg)
 {
     if (!msg->dlc)
         return;
@@ -248,12 +308,16 @@ canserial_process_data(struct canbus_msg *msg)
     uint32_t id = msg->id;
     if (CanData.assigned_id && id == CanData.assigned_id) {
         // Add to incoming data buffer
-        int rpos = CanData.receive_pos;
+        receive_pos_t rpos = CanData.receive_pos;
         uint32_t len = CANMSG_DATA_LEN(msg);
-        if (len > sizeof(CanData.receive_buf) - rpos)
+        if (len > sizeof(CanData.receive_buf) - rpos) {
+            try_shutdown("CAN receive buffer overflow: host exceeded RECEIVE_WINDOW");
             return;
+        }
         memcpy(&CanData.receive_buf[rpos], msg->data, len);
         CanData.receive_pos = rpos + len;
+        if (CONFIG_CANBUS_DATA_FREQUENCY && len > 8)
+            CanData.host_fd = 1;
         canserial_notify_rx();
     } else if (id == CANBUS_ID_ADMIN
                || (CanData.assigned_id && id == CanData.assigned_id + 1)) {
@@ -263,36 +327,31 @@ canserial_process_data(struct canbus_msg *msg)
             // No space - drop message
             return;
         uint32_t pos = pushp % ARRAY_SIZE(CanData.admin_queue);
-        memcpy(&CanData.admin_queue[pos], msg, sizeof(*msg));
+        struct canbus_admin_msg *entry = &CanData.admin_queue[pos];
+        uint32_t len = CANMSG_DATA_LEN(msg);
+        if (len > CANMSG_ADMIN_DATA_MAX)
+            return;
+        entry->id = id;
+        entry->dlc = len;
+        memcpy(entry->data, msg->data, len);
         CanData.admin_push_pos = pushp + 1;
         canserial_notify_rx();
     }
 }
 
-// Remove from the receive buffer the given number of bytes
 static void
-console_pop_input(int len)
+rebase_receive_buf_against_rx_irq(receive_pos_t consumed)
 {
-    int copied = 0;
-    for (;;) {
-        int rpos = readb(&CanData.receive_pos);
-        int needcopy = rpos - len;
-        if (needcopy) {
-            memmove(&CanData.receive_buf[copied]
-                    , &CanData.receive_buf[copied + len], needcopy - copied);
-            copied = needcopy;
-            canserial_notify_rx();
-        }
-        irqstatus_t flag = irq_save();
-        if (rpos != readb(&CanData.receive_pos)) {
-            // Raced with irq handler - retry
-            irq_restore(flag);
-            continue;
-        }
-        CanData.receive_pos = needcopy;
-        irq_restore(flag);
-        break;
+    irqstatus_t flag = irq_save();
+    receive_pos_t now = read_receive_pos(&CanData.receive_pos);
+    if (now == consumed) {
+        CanData.receive_pos = 0;
+    } else {
+        receive_pos_t tail = now - consumed;
+        memmove(CanData.receive_buf, &CanData.receive_buf[consumed], tail);
+        CanData.receive_pos = tail;
     }
+    irq_restore(flag);
 }
 
 // Task to process incoming commands and admin messages
@@ -309,7 +368,7 @@ canserial_rx_task(void)
         if (pushp == pullp)
             break;
         uint32_t pos = pullp % ARRAY_SIZE(CanData.admin_queue);
-        struct canbus_msg *msg = &CanData.admin_queue[pos];
+        struct canbus_admin_msg *msg = &CanData.admin_queue[pos];
         uint32_t id = msg->id;
         if (CanData.assigned_id && id == CanData.assigned_id + 1)
             can_id_conflict();
@@ -318,16 +377,9 @@ canserial_rx_task(void)
         CanData.admin_pull_pos = pullp + 1;
     }
 
-    // Check for a complete message block and process it
-    uint_fast8_t rpos = readb(&CanData.receive_pos), pop_count;
-    int ret = command_find_block(CanData.receive_buf, rpos, &pop_count);
-    if (ret > 0)
-        command_dispatch(CanData.receive_buf, pop_count);
-    if (ret) {
-        console_pop_input(pop_count);
-        if (ret > 0)
-            command_send_ack();
-    }
+    receive_pos_t rpos = read_receive_pos(&CanData.receive_pos);
+    mcu_demux_pump(CanData.receive_buf, rpos);
+    rebase_receive_buf_against_rx_irq(rpos);
 }
 DECL_TASK(canserial_rx_task);
 
