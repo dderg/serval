@@ -29,16 +29,23 @@ else
     dispatch_args=(-f "tests=$tests")
 fi
 
-prev_id=$(gh run list --workflow "$workflow" --branch "$branch" --limit 1 \
+# `gh workflow run <file>` only resolves workflows present on the default
+# branch; new workflow files on a feature branch must be dispatched by the
+# numeric id GitHub registers on push.
+workflow_id=$(gh api "repos/{owner}/{repo}/actions/workflows" --paginate \
+    -q ".workflows[] | select(.path == \".github/workflows/$workflow\") | .id")
+[[ -n "$workflow_id" ]] || { echo "workflow $workflow not registered; is the branch pushed?" >&2; exit 1; }
+
+prev_id=$(gh run list --workflow "$workflow_id" --branch "$branch" --limit 1 \
     --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
 
-gh workflow run "$workflow" --ref "$branch" ${dispatch_args[@]+"${dispatch_args[@]}"}
+gh workflow run "$workflow_id" --ref "$branch" ${dispatch_args[@]+"${dispatch_args[@]}"}
 
 echo "waiting for the run to appear..."
 run_id=""
 for _ in $(seq 30); do
     sleep 2
-    run_id=$(gh run list --workflow "$workflow" --branch "$branch" --limit 1 \
+    run_id=$(gh run list --workflow "$workflow_id" --branch "$branch" --limit 1 \
         --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
     [[ -n "$run_id" && "$run_id" != "$prev_id" ]] && break
     run_id=""
