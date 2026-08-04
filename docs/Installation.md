@@ -81,6 +81,97 @@ KIAUH can be used to install Kalico and its associated programs on a variety
 of Linux-based systems that run a form of Debian. More information can be found
 at https://github.com/dw-0/kiauh
 
+## Host memory requirements
+
+Kalico's motion pipeline runs on the host, and its worker threads have to
+keep feeding the micro-controller ahead of real time. If the kernel has
+paged those threads out, waking them costs a disk round trip: on a
+memory-pressured SBC we have measured pipeline threads sitting
+unscheduled for 0.3 to 1.9 seconds while their pages faulted back in.
+Homing and probing hand work to the micro-controller in 100ms slices, so
+a stall of that size arrives after the slice it belongs to has already
+played, and Kalico aborts with a "start time in the past" error rather
+than quietly moving the toolhead at the wrong moment.
+
+To make that impossible, the Kalico host process locks all of its current
+and future memory (`mlockall(MCL_CURRENT | MCL_FUTURE)`) once, immediately
+before the planner, pump, and position-polling threads are spawned.
+Locking cannot be partially applied, so if it fails the printer does not
+start at all: Kalico reports the operating system error and names the
+setting to change. A host whose locked-memory budget is too small fails
+with `Cannot allocate memory` (`ENOMEM`) — that is a configuration
+problem on the host, not a fault in the printer.
+
+### Required: raise LimitMEMLOCK on the service
+
+Most distributions give a service a locked-memory allowance of only a few
+megabytes, which is far below what the host needs. The unit that runs
+`klippy.py` (`klipper.service` in a KIAUH, MainsailOS, or OctoPi install)
+therefore needs an unlimited allowance. Create a drop-in:
+
+```
+sudo systemctl edit klipper.service
+```
+
+and add:
+
+```
+[Service]
+LimitMEMLOCK=infinity
+```
+
+Then apply it:
+
+```
+sudo systemctl daemon-reload
+sudo systemctl restart klipper.service
+```
+
+Verify that the unit asks for it, and that the running process actually
+got it:
+
+```
+systemctl show -p LimitMEMLOCK klipper.service
+grep 'Max locked memory' /proc/$(pgrep -f klippy.py)/limits
+```
+
+The first should report `LimitMEMLOCK=infinity`, the second `unlimited`
+in both the soft and hard columns. A small number in `/proc` means the
+drop-in was not applied or the service was not restarted.
+
+If Kalico is started by hand instead of by systemd, the same allowance
+comes from `ulimit -l unlimited` in the shell that launches it, which
+requires either root or a matching `memlock` entry in
+`/etc/security/limits.conf`.
+
+Hosts driving an EtherCAT servo bus already have this: the drop-in in the
+[EtherCAT installation guide](rewrite/ethercat-igh-macb-install.md) sets
+`LimitMEMLOCK=infinity` together with `AmbientCapabilities=CAP_IPC_LOCK`,
+which lifts the limit outright, for the endpoint's own memory lock.
+
+### Recommended: no disk swap
+
+Locking the host process protects the host process. It does not stop the
+rest of the machine from thrashing, and a printer that is swapping is a
+printer whose front end, camera streamer, and log writers are all stalling
+on the same disk. Production printers should run without disk swap:
+
+```
+sudo systemctl disable --now dphys-swapfile   # Raspberry Pi OS
+sudo swapoff -a                               # other distributions
+```
+
+On non-Raspberry Pi systems also remove the swap entry from
+`/etc/fstab` so it does not come back at the next boot. Confirm with
+`swapon --show`, which should print nothing.
+
+If the host is tight on memory and you would rather absorb pressure than
+let the out-of-memory killer pick a victim, a compressed in-RAM swap
+device (`zram`) is a reasonable safety valve, and it is much faster than
+swapping to an SD card. It is not a replacement for the memory lock: the
+lock is what guarantees the motion threads are never evicted at all,
+while zram only makes evicting *other* processes cheaper. Keep both.
+
 ## Building and flashing the micro-controller
 
 To compile the micro-controller code, start by running these commands

@@ -203,6 +203,13 @@ stepper_event(struct timer *t)
     return stepper_event_full(t);
 }
 
+// A queue_step that lands on an idle stepper re-arms the lane with a
+// host-chosen waketime. A waketime already in the past means the host
+// failed to deliver its lead — absorbing the lateness would hide the
+// producer-side stall, so any late re-arm is fatal. The signed margin is
+// latched in reset-surviving diag counters first, so the crash forensics
+// report how much lead actually survived.
+
 // Schedule a set of steps with a given timing
 void
 command_queue_step(uint32_t *args)
@@ -231,6 +238,20 @@ command_queue_step(uint32_t *args)
         s->flags = flags;
         move_queue_push(&m->node, &s->mq);
         stepper_load_next(s);
+        extern void diag_note_step_rearm(int32_t margin);
+        int32_t margin = (int32_t)(s->time.waketime - timer_read_time());
+        diag_note_step_rearm(margin);
+        if (unlikely(margin < 0)) {
+            event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_MOTION,
+                           EVENT_LOG_EVENT_MOTION_STEP_REARM_LATE, 0,
+                           (uint32_t)margin, s->time.waketime);
+#if !CONFIG_MCU_SIM
+            // The sim's virtual clock races arbitrarily far ahead of the host
+            // projection, so an absolute-time lateness verdict is meaningless
+            // there; same carve-out as sched_add_timer's "Timer too close".
+            shutdown("Stepper too far in past");
+#endif
+        }
         sched_add_timer(&s->time);
     }
     irq_enable();

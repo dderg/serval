@@ -333,7 +333,7 @@ fn a_queue_step_behind_the_mcu_clock_is_fatal_before_the_mcu_loads_it() {
     let err = h.endpoint.tick().unwrap_err();
     match err {
         SendError::Fatal(msg) => {
-            assert!(msg.contains("Timer too close"), "{msg}");
+            assert!(msg.contains("Stepper too far in past"), "{msg}");
             assert!(msg.contains("999000 us behind"), "{msg}");
         }
         other => panic!("expected Fatal, got {other:?}"),
@@ -364,6 +364,18 @@ fn the_send_lead_outlasts_the_link_retransmit_floor() {
         SEND_LEAD_SECONDS >= 2.0 * min_rto,
         "a move queue {SEND_LEAD_SECONDS} s deep empties during the {min_rto} s the host stays \
          silent after a dropped ack, and the mcu shuts down with \"Timer too close\""
+    );
+}
+
+#[test]
+fn the_host_guard_rejects_a_stale_queue_step_before_the_send_lead_is_gone() {
+    let host_guard = crate::pump::pump_loop::pump_past_guard_secs();
+    assert!(
+        host_guard < SEND_LEAD_SECONDS,
+        "the pump lets a queue_step through until it is {host_guard} s behind the mcu clock — \
+         the mcu shuts down on any late idle-stepper re-arm, so the host guard exists only to \
+         name a send-time stall with its backlog and slot occupancy, and it must trip well \
+         inside the {SEND_LEAD_SECONDS} s delivery lead"
     );
 }
 

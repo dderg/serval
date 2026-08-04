@@ -106,20 +106,29 @@ impl PyMotionEngine {
             self.build_transport_maps(&mcu_configs)?;
         self.seed_ethercat_clock_estimates(&ethercat_mcu_ids);
 
-        let pump_control =
-            self.spawn_pipeline(&cfg, &mcu_configs, &host_ios, &ec_conns, ring_depth_table)?;
+        host_rt::memory_lock::HOST_MEMORY_LOCK
+            .start_pipeline_threads(|| {
+                let pump_control = self.spawn_pipeline(
+                    &cfg,
+                    &mcu_configs,
+                    &host_ios,
+                    &ec_conns,
+                    ring_depth_table,
+                )?;
 
-        self.spawn_live_position_poll_thread();
+                self.spawn_live_position_poll_thread();
 
-        self.wire_mcu_supervision(
-            &mcu_configs,
-            &ethercat_mcu_ids,
-            &ec_conns,
-            &host_ios,
-            pump_control,
-        );
+                self.wire_mcu_supervision(
+                    &mcu_configs,
+                    &ethercat_mcu_ids,
+                    &ec_conns,
+                    &host_ios,
+                    pump_control,
+                );
 
-        Ok(())
+                Ok(())
+            })
+            .map_err(|denied| PyRuntimeError::new_err(denied.to_string()))?
     }
     /// Push one move into the pipe. Returns `false` when the pipe is full —
     /// queued motion has reached the configured depth, or the entry channel

@@ -604,8 +604,8 @@ impl StepcompressEndpoint {
                 let late_us = (now - out.start_clock) as f64 * 1e6 / freq;
                 stale = Some(SendError::Fatal(format!(
                     "stepcompress mcu {}: queue_step first step at clock {} is {late_us:.0} us \
-                     behind the mcu clock {now} — the mcu would load it onto an idle stepper and \
-                     shut down with \"Timer too close\". {SEND_LEAD_SECONDS} s of lead was not \
+                     behind the mcu clock {now} — the mcu shuts down on any late idle-stepper \
+                     re-arm (\"Stepper too far in past\"). {SEND_LEAD_SECONDS} s of lead was not \
                      delivered: {} frames backlogged, {in_flight}/{} move slots in flight",
                     self.mcu_id,
                     out.start_clock,

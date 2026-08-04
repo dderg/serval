@@ -27,7 +27,7 @@ MODE="run"
 BRANCH=""
 GCODE=""
 EXTRA_ARGS=()
-DOCKER_ARGS=(--rm)
+DOCKER_ARGS=(--rm --ulimit memlock=-1:-1)
 DOCKER_BUILD_ARGS=()
 
 case "${1:-}" in

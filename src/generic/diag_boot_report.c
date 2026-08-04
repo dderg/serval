@@ -169,6 +169,10 @@ fault_handler_report_boot_init(uint32_t now)
     live_snap.ttc_func             = 0;
     live_snap.ttc_late             = 0;
     live_snap.ttc_count            = 0;
+    live_snap.rearm_count          = 0;
+    live_snap.rearm_min_margin     = (uint32_t)INT32_MAX;
+    live_snap.rearm_armed          = 0;
+    live_snap.rearm_below_floor    = 0;
 #if CONFIG_MACH_STM32H7
     if (reset_cause_raw & RCC_RSR_IWDG1RSTF)
         live_snap.iwdg_reset_count++;
@@ -365,6 +369,11 @@ fault_handler_report_emit(uint32_t now)
            prior_snap.ttc_func,
            prior_snap.ttc_late,
            prior_snap.ttc_count);
+    output("step_rearm count %u min_margin_cyc %i armed %u below_floor %u",
+           prior_snap.rearm_count,
+           (int32_t)prior_snap.rearm_min_margin,
+           prior_snap.rearm_armed,
+           prior_snap.rearm_below_floor);
     if (fault_rec.magic == FAULT_MAGIC) {
         output("prior_fault kind %u count %u pc %u lr %u psr %u"
                " r0 %u r1 %u r2 %u r3 %u r12 %u",

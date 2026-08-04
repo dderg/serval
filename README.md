@@ -26,6 +26,9 @@ paste G-code, tweak config, watch it re-plan:
 **Try it on your printer** — add a remote, switch the branch, build,
 flash, migrate the config: [docs/Quickstart.md](docs/Quickstart.md).
 
+**Host requirements** — lock motion memory and configure swap before running a
+printer: [docs/Installation.md#host-memory-requirements](docs/Installation.md#host-memory-requirements).
+
 ---
 
 ## The corner problem

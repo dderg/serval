@@ -157,14 +157,13 @@ volatile uint32_t sched_bad_add_stack1 __attribute__((used));
 volatile uint32_t sched_bad_add_stack2 __attribute__((used));
 volatile uint32_t sched_bad_add_blocked_count __attribute__((used));
 
-// Schedule a function call at a supplied time.
-void
-sched_add_timer(struct timer *add)
+static void
+sched_insert_timer(struct timer *add, uint32_t caller)
 {
     if (addr_looks_bogus_for_timer((uint32_t)add)) {
         sched_bad_add_blocked_count++;
         if (!sched_bad_add_caller) {
-            sched_bad_add_caller = (uint32_t)__builtin_return_address(0);
+            sched_bad_add_caller = caller;
             sched_bad_add_value  = (uint32_t)add;
             register uint32_t *sp asm("sp");
             sched_bad_add_stack0 = sp[0];
@@ -184,9 +183,9 @@ sched_add_timer(struct timer *add)
             extern void diag_note_timer_too_close(uint32_t caller,
                                                   uint32_t func,
                                                   uint32_t late);
-            diag_note_timer_too_close(
-                (uint32_t)(uintptr_t)__builtin_return_address(0),
-                (uint32_t)(uintptr_t)add->func, now - waketime);
+            diag_note_timer_too_close(caller,
+                                      (uint32_t)(uintptr_t)add->func,
+                                      now - waketime);
 #if !CONFIG_MCU_SIM
             // Sim virtual-clock races trip this on infrastructure
             // jitter; see the matching gate in src/linux/timer.c.
@@ -206,6 +205,13 @@ sched_add_timer(struct timer *add)
     }
     sched_writable_end();
     irq_restore(flag);
+}
+
+// Schedule a function call at a supplied time.
+void
+sched_add_timer(struct timer *add)
+{
+    sched_insert_timer(add, (uint32_t)(uintptr_t)__builtin_return_address(0));
 }
 
 // The deleted timer is used when deleting an active timer.

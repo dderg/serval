@@ -55,6 +55,7 @@ WantedBy=multi-user.target
 Type=simple
 User=$USER
 RemainAfterExit=yes
+LimitMEMLOCK=infinity
 ExecStart=${PYTHONDIR}/bin/python ${SRCDIR}/klippy/klippy.py ${HOME}/printer.cfg -l /var/log/klippy.log
 EOF
 # Use systemctl to enable the klipper systemd service script
