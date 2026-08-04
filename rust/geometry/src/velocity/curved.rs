@@ -87,6 +87,23 @@ const FLAT_HOLD_HALVINGS: u32 = 64;
 /// all, so what the certificate rations here is only the two swings.
 const FLAT_WIND_HALVINGS: u32 = 16;
 
+/// Halvings of the disk radius the rim-riding solve spends looking for a rim
+/// gentle enough to need the member's whole arc, and halvings of the wind jerk
+/// before the member is given up to the cap-bounded plan. Same bracket
+/// argument as the flat hold: the arc a rim pass spends grows as the rim
+/// shrinks, so a crossing exists wherever a rim pass exists at all.
+const RIM_HALVINGS: u32 = 64;
+const RIM_WIND_HALVINGS: u32 = 8;
+
+/// Widest rim angle one constant-jerk chord may subtend, and the piece budget
+/// per member. The chord of a `0.15 rad` arc of the disk circle sags
+/// `~3e-3 * accel` inside the rim — utilization noise, not a violation — so
+/// finer chords only mint pieces the lowering has to carry.
+const RIM_MAX_DTHETA: f64 = 0.15;
+const RIM_MAX_PIECES: usize = 48;
+const RIM_CROSSING_SCAN_STEPS: u32 = 64;
+const RIM_CROSSING_BISECT_ITERS: u32 = 48;
+
 /// Cap speeds the plan search samples across its bracket before closing in, and
 /// halvings it then spends around the best sample. Coarse first because the
 /// quickest cap speed is interior, so a bisection towards one end would walk
@@ -2178,6 +2195,467 @@ pub(super) fn certified_flat_chain(
     None
 }
 
+/// State on the rim of the disk of radius `a_r` at constant curvature `k`.
+///
+/// The rim ride solves in closed form there: with `k v^2 = a_r sin(theta)` and
+/// `a = a_r cos(theta)`, the rim ODE `d(v^2)/ds = 2a` collapses to
+/// `theta = theta_0 + 2 k s`, so one angle walks the whole pass — climb
+/// (`theta < pi/2`), apex, and brake (`theta > pi/2`) — riding the disk
+/// exactly instead of holding the discrete rungs the cap-bounded ladder
+/// quantizes a climb into.
+fn rim_state(k: f64, a_r: f64, theta: f64) -> (f64, f64) {
+    (
+        libm::sqrt((a_r * libm::sin(theta) / k).max(0.0)),
+        a_r * libm::cos(theta),
+    )
+}
+
+fn disk_excess(k: f64, a_r: f64, v: f64, a: f64) -> f64 {
+    let normal = k * v * v;
+    a * a + normal * normal - a_r * a_r
+}
+
+/// Earliest time at which a constant-jerk wind from `state` reaches the rim of
+/// radius `a_r`, with the crossing state; `None` when the wind never gets
+/// there or runs the speed into the ground first.
+fn rim_crossing(
+    k: f64,
+    a_r: f64,
+    state: (f64, f64),
+    j: f64,
+    accel: f64,
+) -> Option<(f64, f64, f64)> {
+    let (v0, a0) = state;
+    if disk_excess(k, a_r, v0, a0) >= 0.0 {
+        return None;
+    }
+    let t_max = (2.0 * accel + a0.abs()) / j.abs();
+    let at = |t: f64| (v0 + a0 * t + 0.5 * j * t * t, a0 + j * t);
+    let mut lo = 0.0;
+    let mut hi = None;
+    for i in 1..=RIM_CROSSING_SCAN_STEPS {
+        let t = t_max * f64::from(i) / f64::from(RIM_CROSSING_SCAN_STEPS);
+        let (v, a) = at(t);
+        if v <= 0.0 {
+            return None;
+        }
+        if disk_excess(k, a_r, v, a) >= 0.0 {
+            hi = Some(t);
+            break;
+        }
+        lo = t;
+    }
+    let mut hi = hi?;
+    for _ in 0..RIM_CROSSING_BISECT_ITERS {
+        let mid = 0.5 * (lo + hi);
+        let (v, a) = at(mid);
+        if disk_excess(k, a_r, v, a) >= 0.0 {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    let (v, a) = at(lo);
+    (lo > 0.0 && v > 0.0).then_some((lo, v, a))
+}
+
+/// Shortest constant-jerk wind from `state` onto the rim, over both jerk
+/// directions the state's own ball authority allows. `reverse` solves the
+/// exit-side wind in reversed time: the crossing it returns is where the
+/// forward wind-out must leave the rim to land exactly on the boundary state.
+fn rim_wind(
+    kin: &Kinematics,
+    a_r: f64,
+    s_at: f64,
+    state: (f64, f64),
+    wind_scale: f64,
+    reverse: bool,
+) -> Option<(f64, f64, f64, f64)> {
+    let k = kin.kappa0.abs();
+    let seed = if reverse { (state.0, -state.1) } else { state };
+    let mut best: Option<(f64, f64, f64, f64)> = None;
+    for sign in [1.0, -1.0] {
+        let Some(auth) = tangential_jerk_authority(kin, s_at, state, sign) else {
+            continue;
+        };
+        let mut j = sign * auth * wind_scale;
+        let Some((_, v_c, a_c)) = rim_crossing(k, a_r, seed, j, kin.accel) else {
+            continue;
+        };
+        // The ball prices `3 kappa v a`, which grows along the wind, so the
+        // jerk the entry state affords can run the crossing end just over
+        // budget; one refinement against the crossing state's own authority
+        // settles it, since the authority varies slowly across the wind.
+        let cross = if reverse { (v_c, -a_c) } else { (v_c, a_c) };
+        if let Some(auth_c) = tangential_jerk_authority(kin, s_at, cross, sign) {
+            j = sign * auth.min(auth_c) * wind_scale;
+        }
+        if let Some((dt, v, a)) = rim_crossing(k, a_r, seed, j, kin.accel) {
+            let a = if reverse { -a } else { a };
+            if best.as_ref().is_none_or(|b| dt < b.0) {
+                best = Some((dt, j, v, a));
+            }
+        }
+    }
+    best
+}
+
+/// One rim-riding pass: wind onto the rim, chord along it, wind off onto the
+/// exit state. Every chord lands exactly on its rim node — a constant-jerk
+/// phase between `(v_a, a_a)` and `(v_b, a_b)` closes both coordinates when
+/// `dt = 2 (v_b - v_a) / (a_a + a_b)` — and sags inside the disk between
+/// nodes, so the certificate prices only the winds and the chord pitch.
+fn rim_span(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+    wind_scale: f64,
+    a_r: f64,
+) -> Option<March> {
+    let k = kin.kappa0.abs();
+    let (dt_in, j_in, v_in, a_in) = rim_wind(kin, a_r, 0.0, entry, wind_scale, false)?;
+    let (dt_out, j_out, v_out, a_out) = rim_wind(kin, a_r, kin.length, exit, wind_scale, true)?;
+    let theta_in = libm::atan2(k * v_in * v_in, a_in);
+    let theta_out = libm::atan2(k * v_out * v_out, a_out);
+    if theta_out <= theta_in {
+        return None;
+    }
+    let ceiling_sin = k * kin.flat_ceiling * kin.flat_ceiling / a_r;
+    if ceiling_sin < 1.0 {
+        let band = libm::asin(ceiling_sin);
+        if theta_out > band && theta_in < std::f64::consts::PI - band {
+            return None;
+        }
+    }
+    let mut m = March::new(entry);
+    m.push(j_in, dt_in);
+    rim_ride(&mut m, k, a_r, theta_in, theta_out, (v_out, a_out))?;
+    m.push(j_out, dt_out);
+    (m.v >= 0.0).then_some(m)
+}
+
+/// Chord from the march's state along the rim to `to`, landing exactly on
+/// `last` at the far end. A constant-jerk phase between `(v_a, a_a)` and
+/// `(v_b, a_b)` closes both coordinates when `dt = 2 (v_b - v_a) / (a_a + a_b)`
+/// and sags inside the disk between nodes; the apex chord, where both the
+/// speed step and the mean acceleration vanish, falls back to the rim's own
+/// clock `d theta = 2 k v dt`. Interior nodes sit on an *absolute* grid of
+/// `RIM_MAX_DTHETA` multiples so the arc a ride spends varies smoothly as its
+/// endpoints move — endpoint-relative pitches step the arc whenever the piece
+/// count re-quantizes, and the closure bisections need the smoothness.
+fn rim_ride(m: &mut March, k: f64, a_r: f64, from: f64, to: f64, last: (f64, f64)) -> Option<()> {
+    if to < from {
+        return None;
+    }
+    let first_node = (from / RIM_MAX_DTHETA).floor() as i64 + 1;
+    let last_node = ((to / RIM_MAX_DTHETA).ceil() as i64 - 1).max(first_node - 1);
+    if (last_node - first_node + 2) as usize > RIM_MAX_PIECES {
+        return None;
+    }
+    let targets = (first_node..=last_node)
+        .map(|n| rim_state(k, a_r, n as f64 * RIM_MAX_DTHETA))
+        .chain(std::iter::once(last));
+    for (v_b, a_b) in targets {
+        if (v_b - m.v).abs() <= f64::EPSILON * (1.0 + m.v)
+            && (a_b - m.a).abs() <= f64::EPSILON * (1.0 + a_r)
+        {
+            continue;
+        }
+        let chord_dt = 2.0 * (v_b - m.v) / (m.a + a_b);
+        let dt = if chord_dt.is_finite() && chord_dt > 0.0 {
+            chord_dt
+        } else {
+            RIM_MAX_DTHETA / (2.0 * k * (0.5 * (m.v + v_b)).max(f64::MIN_POSITIVE))
+        };
+        let j = (a_b - m.a) / dt;
+        if !j.is_finite() {
+            return None;
+        }
+        m.push(j, dt);
+    }
+    Some(())
+}
+
+/// Rim pass with an apex cruise: climb the rim, dwell at the apex — where the
+/// rim's `a = 0` makes dwelling legal — and descend, the dwell sized so the
+/// pass spends exactly the member's arc. This is the regime the pure ride
+/// cannot reach: a rim pass subtends at most `pi`, i.e. `pi / (2 k)` of arc,
+/// so a longer member must cruise, and the fastest place to cruise is the
+/// apex the ceiling allows.
+fn rim_cruise_chain(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+    wind_scale: f64,
+    apex_scale: f64,
+) -> Option<Vec<StraightPhase>> {
+    let k = kin.kappa0.abs();
+    let v_apex = top_speed_ceiling(kin) * apex_scale;
+    let a_r = k * v_apex * v_apex;
+    if !(a_r > 0.0) {
+        return None;
+    }
+    let (dt_in, j_in, v_in, a_in) = rim_wind(kin, a_r, 0.0, entry, wind_scale, false)?;
+    let (dt_out, j_out, v_out, a_out) = rim_wind(kin, a_r, kin.length, exit, wind_scale, true)?;
+    let theta_in = libm::atan2(k * v_in * v_in, a_in);
+    let theta_out = libm::atan2(k * v_out * v_out, a_out);
+    let half = std::f64::consts::FRAC_PI_2;
+    if !(theta_in <= half && theta_out >= half) {
+        return None;
+    }
+    let mut m = March::new(entry);
+    m.push(j_in, dt_in);
+    rim_ride(&mut m, k, a_r, theta_in, half, (v_apex, 0.0))?;
+    let mut tail = March::new((v_apex, 0.0));
+    rim_ride(&mut tail, k, a_r, half, theta_out, (v_out, a_out))?;
+    tail.push(j_out, dt_out);
+    if tail.v < 0.0 {
+        return None;
+    }
+    let dwell = kin.length - m.s - tail.s;
+    if dwell < 0.0 {
+        return None;
+    }
+    m.push(0.0, dwell / v_apex);
+    let (s0, t0) = (m.s, m.t);
+    let mut phases = m.phases;
+    phases.extend(shifted(&tail.phases, s0, t0));
+    Some(coalesce(phases))
+}
+
+/// Rim pass whose crown is a max-jerk swing: climb the full rim, leave it at
+/// `theta_l`, swing the acceleration across the disk interior onto the
+/// descending rim, ride down, wind off. A member too short to carry the rim
+/// over the whole apex — the over-apex ride subtends `pi`, i.e. `pi / (2 k)`
+/// of arc before winds — still deserves the full disk on its flanks; shrinking
+/// the rim instead strangles the crown speed the flanks paid for.
+fn rim_crown_span(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+    wind_scale: f64,
+    a_r: f64,
+    theta_l: f64,
+) -> Option<March> {
+    let k = kin.kappa0.abs();
+    let (dt_in, j_in, v_in, a_in) = rim_wind(kin, a_r, 0.0, entry, wind_scale, false)?;
+    let (dt_out, j_out, v_out, a_out) = rim_wind(kin, a_r, kin.length, exit, wind_scale, true)?;
+    let theta_in = libm::atan2(k * v_in * v_in, a_in);
+    let theta_out = libm::atan2(k * v_out * v_out, a_out);
+    let half = std::f64::consts::FRAC_PI_2;
+    if !(theta_in <= theta_l && theta_l <= half && theta_out >= half) {
+        return None;
+    }
+    let mut m = March::new(entry);
+    m.push(j_in, dt_in);
+    let leave = rim_state(k, a_r, theta_l);
+    rim_ride(&mut m, k, a_r, theta_in, theta_l, leave)?;
+    let crown_state = (m.v, m.a);
+    let crown_sign = -1.0;
+    let auth = tangential_jerk_authority(kin, 0.5 * kin.length, crown_state, crown_sign)?;
+    let j_crown = crown_sign * auth * wind_scale;
+    let (dt_c, v_c, a_c) = rim_crossing_descending(k, a_r, crown_state, j_crown)?;
+    let theta_c = libm::atan2(k * v_c * v_c, a_c);
+    if theta_c > theta_out {
+        return None;
+    }
+    m.push(j_crown, dt_c);
+    rim_ride(&mut m, k, a_r, theta_c, theta_out, (v_out, a_out))?;
+    m.push(j_out, dt_out);
+    (m.v >= 0.0).then_some(m)
+}
+
+/// Where a constant-jerk swing leaving the climbing rim lands back on the
+/// rim's descending branch. The swing starts on the rim, dips inside while
+/// the acceleration crosses zero, and re-crosses with `a < 0`; the first
+/// breath of the search skips the departure neighbourhood so the crossing
+/// found is the far one.
+fn rim_crossing_descending(k: f64, a_r: f64, state: (f64, f64), j: f64) -> Option<(f64, f64, f64)> {
+    let (v0, a0) = state;
+    let t_max = (a0.max(0.0) + a_r) / j.abs();
+    if !(t_max.is_finite() && t_max > 0.0) {
+        return None;
+    }
+    let at = |t: f64| (v0 + a0 * t + 0.5 * j * t * t, a0 + j * t);
+    let mut lo = 0.0;
+    let mut hi = None;
+    for i in 1..=RIM_CROSSING_SCAN_STEPS {
+        let t = t_max * f64::from(i) / f64::from(RIM_CROSSING_SCAN_STEPS);
+        let (v, a) = at(t);
+        if v <= 0.0 {
+            return None;
+        }
+        if a < 0.0 && disk_excess(k, a_r, v, a) >= 0.0 {
+            hi = Some(t);
+            break;
+        }
+        lo = t;
+    }
+    let mut hi = hi?;
+    for _ in 0..RIM_CROSSING_BISECT_ITERS {
+        let mid = 0.5 * (lo + hi);
+        let (v, a) = at(mid);
+        if a < 0.0 && disk_excess(k, a_r, v, a) >= 0.0 {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    if lo == 0.0 {
+        // The leave state already sits where the swing re-crosses — the apex
+        // itself. A zero-length crown is the over-apex ride.
+        return (v0 > 0.0).then_some((0.0, v0, a0));
+    }
+    let (v, a) = at(lo);
+    // Near the apex the converged `a` may still be a positive hair — the
+    // caller reads the landing angle off the state, so the sign is not a
+    // correctness gate.
+    (v > 0.0).then_some((lo, v, a))
+}
+
+/// Crown pass closed on the leave angle: the arc a crown pass spends grows as
+/// the leave angle climbs towards the apex — more rim on both flanks and a
+/// faster crown — so the closure bisects `theta_l` between the wind-in attach
+/// and the apex.
+fn rim_crown_chain(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+    wind_scale: f64,
+    apex_scale: f64,
+) -> Option<Vec<StraightPhase>> {
+    let k = kin.kappa0.abs();
+    let v_apex = top_speed_ceiling(kin) * apex_scale;
+    let a_r = k * v_apex * v_apex;
+    if !(a_r > 0.0) {
+        return None;
+    }
+    let half = std::f64::consts::FRAC_PI_2;
+    let spans = |theta_l: f64| {
+        rim_crown_span(kin, entry, exit, wind_scale, a_r, theta_l)
+            .is_some_and(|m| m.s >= kin.length)
+    };
+    if !spans(half) {
+        return None;
+    }
+    let mut lo = 0.0;
+    let mut hi = half;
+    for _ in 0..ARC_BISECT_ITERS {
+        let mid = 0.5 * (lo + hi);
+        if spans(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    let pass = rim_crown_span(kin, entry, exit, wind_scale, a_r, hi)?;
+    if (pass.s - kin.length).abs() > LENGTH_CLOSURE_REL_TOL * kin.length {
+        return None;
+    }
+    Some(coalesce(pass.phases))
+}
+
+/// Rim radius whose pass spends exactly the member's arc. Two regimes share
+/// the closure: on a one-sided climb the pass lengthens as the rim shrinks —
+/// [`flat_hold`]'s bracket — while over the apex it *shortens*, because the
+/// subtended angle `pi - 2 asin(kappa v^2 / a_r)` narrows with the rim. The
+/// crossing is approached from whichever side spans, so the returned pass
+/// always closes the arc within tolerance.
+fn rim_ride_chain(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+    wind_scale: f64,
+) -> Option<Vec<StraightPhase>> {
+    let spans =
+        |a_r: f64| rim_span(kin, entry, exit, wind_scale, a_r).is_some_and(|m| m.s >= kin.length);
+    let a_r = if spans(kin.accel) {
+        let mut bad = kin.accel;
+        for _ in 0..RIM_HALVINGS {
+            bad *= 0.5;
+            if !spans(bad) {
+                break;
+            }
+        }
+        if spans(bad) {
+            return None;
+        }
+        let mut good = kin.accel;
+        for _ in 0..ARC_BISECT_ITERS {
+            let mid = 0.5 * (good + bad);
+            if spans(mid) {
+                good = mid;
+            } else {
+                bad = mid;
+            }
+        }
+        good
+    } else {
+        let mut gentlest = kin.accel;
+        for _ in 0..RIM_HALVINGS {
+            gentlest *= 0.5;
+            if spans(gentlest) {
+                break;
+            }
+        }
+        if !spans(gentlest) {
+            return None;
+        }
+        largest_admissible(gentlest, kin.accel, spans)
+    };
+    let pass = rim_span(kin, entry, exit, wind_scale, a_r)?;
+    if (pass.s - kin.length).abs() > LENGTH_CLOSURE_REL_TOL * kin.length {
+        return None;
+    }
+    Some(coalesce(pass.phases))
+}
+
+/// Apex speeds, as shares of the member ceiling, the cruise variant offers
+/// the certificate before giving up a rung of apex speed.
+const RIM_APEX_SHARES: [f64; 3] = [1.0, 0.995, 0.98];
+
+/// The rim-riding pass the certificate proves, for constant-curvature members.
+/// The ladder quantizes a climb into discrete acceleration rungs — the
+/// staircase arcs show in their lowered tangential acceleration — where the
+/// rim ride tracks the disk continuously; whichever certifies and is quicker
+/// wins in [`curved_chain`]. Short members close their arc by shrinking the
+/// rim; long ones cruise at the apex.
+pub(super) fn certified_rim_chain(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> Option<Vec<StraightPhase>> {
+    if kin.sigma != 0.0 || kin.kappa0 == 0.0 || !(kin.jerk > 0.0 && kin.jerk.is_finite()) {
+        return None;
+    }
+    let mut wind_scale = 1.0;
+    for _ in 0..RIM_WIND_HALVINGS {
+        let ride = rim_ride_chain(kin, entry, exit, wind_scale);
+        let cruise = RIM_APEX_SHARES
+            .iter()
+            .find_map(|&share| rim_cruise_chain(kin, entry, exit, wind_scale, share));
+        let crown = RIM_APEX_SHARES
+            .iter()
+            .find_map(|&share| rim_crown_chain(kin, entry, exit, wind_scale, share));
+        let mut best: Option<Vec<StraightPhase>> = None;
+        for chain in [ride, cruise, crown].into_iter().flatten() {
+            if let Ok(certified) = certified_chain(kin, &chain) {
+                if best
+                    .as_ref()
+                    .is_none_or(|incumbent| chain_time(&certified) < chain_time(incumbent))
+                {
+                    best = Some(certified);
+                }
+            }
+        }
+        if best.is_some() {
+            return best;
+        }
+        wind_scale *= 0.5;
+    }
+    None
+}
+
 fn descending_shaped_chain(
     kin: &Kinematics,
     entry: (f64, f64),
@@ -2313,6 +2791,11 @@ pub(super) fn curved_chain(
         .filter(|flat| chain_time(flat) < chain_time(&quickest))
     {
         quickest = flat;
+    }
+    if let Some(rim) =
+        certified_rim_chain(kin, entry, exit).filter(|rim| chain_time(rim) < chain_time(&quickest))
+    {
+        quickest = rim;
     }
     if let Some(shaped) = certified_shaped_chain(kin, entry, exit)
         .filter(|shaped| chain_time(shaped) < (1.0 - SHAPED_TIME_WIN) * chain_time(&quickest))

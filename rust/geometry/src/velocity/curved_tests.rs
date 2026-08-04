@@ -876,3 +876,42 @@ fn a_brake_carried_into_rest_is_refused() {
         "a brake at rest must be refused, got {refused:?}"
     );
 }
+
+/// The constant-curvature rim ride: an arc member planned between boundary
+/// states must not fall back to the ladder's rung quantization where the rim
+/// pass is quicker. The two cases are lifted from `arc_fit/printer/circle`:
+/// a short bump the crown variant owns (the ladder spent 0.1307 s and drew a
+/// staircase in lowered tangential acceleration) and a long apex-cruise
+/// member the cruise variant owns (ladder: 0.2211 s).
+#[test]
+fn arc_members_ride_the_disk_rim() {
+    let bump = Kinematics {
+        length: 7.4147,
+        accel: 1000.0,
+        jerk: 1.0e5,
+        kappa0: 0.1296,
+        sigma: 0.0,
+        flat_ceiling: 98.871,
+    };
+    let chain = curved_chain(&bump, (32.652, 0.0), (32.560, 0.0)).unwrap();
+    let time: f64 = chain.iter().map(|p| p.dt).sum();
+    assert!(
+        time < 0.130,
+        "bump member regressed to the rung ladder: {time:.6} s"
+    );
+
+    let cruise = Kinematics {
+        length: 15.1081,
+        accel: 1000.0,
+        jerk: 1.0e5,
+        kappa0: 0.1301,
+        sigma: 0.0,
+        flat_ceiling: 98.871,
+    };
+    let chain = curved_chain(&cruise, (32.546, 0.0), (33.755, 0.0)).unwrap();
+    let time: f64 = chain.iter().map(|p| p.dt).sum();
+    assert!(
+        time < 0.220,
+        "apex-cruise member regressed to the rung ladder: {time:.6} s"
+    );
+}
