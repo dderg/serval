@@ -95,6 +95,13 @@ const FLAT_WIND_HALVINGS: u32 = 16;
 const RIM_HALVINGS: u32 = 64;
 const RIM_WIND_HALVINGS: u32 = 8;
 
+/// Share of the wind's tangential authority withheld so the commanded jerk
+/// sits strictly inside the ball. The authority is evaluated at the wind's
+/// end states, not its worst interior point, so commanding the rail exactly
+/// can overshoot by parts in 1e6 and forfeit the whole wind to the next
+/// `wind_scale` halving - a 2% traversal loss to dodge a 1e-4 one.
+const RIM_WIND_AUTHORITY_MARGIN: f64 = 1.0e-4;
+
 /// Widest rim angle one constant-jerk chord may subtend, and the piece budget
 /// per member. The chord of a `0.15 rad` arc of the disk circle sags
 /// `~3e-3 * accel` inside the rim — utilization noise, not a violation — so
@@ -2278,7 +2285,8 @@ fn rim_wind(
         let Some(auth) = tangential_jerk_authority(kin, s_at, state, sign) else {
             continue;
         };
-        let mut j = sign * auth * wind_scale;
+        let derate = wind_scale * (1.0 - RIM_WIND_AUTHORITY_MARGIN);
+        let mut j = sign * auth * derate;
         let Some((_, v_c, a_c)) = rim_crossing(k, a_r, seed, j, kin.accel) else {
             continue;
         };
@@ -2288,7 +2296,7 @@ fn rim_wind(
         // settles it, since the authority varies slowly across the wind.
         let cross = if reverse { (v_c, -a_c) } else { (v_c, a_c) };
         if let Some(auth_c) = tangential_jerk_authority(kin, s_at, cross, sign) {
-            j = sign * auth.min(auth_c) * wind_scale;
+            j = sign * auth.min(auth_c) * derate;
         }
         if let Some((dt, v, a)) = rim_crossing(k, a_r, seed, j, kin.accel) {
             let a = if reverse { -a } else { a };
