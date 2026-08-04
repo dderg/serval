@@ -5,6 +5,9 @@
 #include "sched.h"
 #include "runtime.h"
 #include "mcu_transport_dispatch.h"
+#include "stepper.h"
+
+#define ENDSTOP_UNBOUND 0xFF
 
 extern void *runtime_handle;
 
@@ -20,6 +23,8 @@ struct endstop {
     uint8_t armed;
     uint8_t trip_pending;
     uint8_t tripped;
+    uint8_t motor;
+    uint8_t stepper;
 };
 
 static struct task_wake endstop_trip_wake;
@@ -72,6 +77,19 @@ command_config_endstop(uint32_t *args)
     e->trip_pending = 0;
     e->tripped = 0;
     e->trip_clock = 0;
+
+    uint8_t motor = args[5];
+    uint8_t stepper = args[6];
+    uint8_t motor_unbound = motor == ENDSTOP_UNBOUND;
+    uint8_t stepper_unbound = stepper == ENDSTOP_UNBOUND;
+    if (motor_unbound != stepper_unbound)
+        shutdown("config_endstop motor and stepper must both be bound");
+    if (!motor_unbound && motor >= RUNTIME_MOTOR_COUNT)
+        shutdown("config_endstop motor out of range");
+    if (!stepper_unbound && stepper >= RUNTIME_MAX_STEPPERS_PER_MOTOR)
+        shutdown("config_endstop stepper out of range");
+    e->motor = motor;
+    e->stepper = stepper;
     e->time.func = endstop_event;
 
     uint8_t oid;
@@ -82,7 +100,8 @@ command_config_endstop(uint32_t *args)
     }
 }
 DECL_COMMAND(command_config_endstop,
-             "config_endstop oid=%c endstop_id=%c pin=%u pull_up=%c invert=%c");
+             "config_endstop oid=%c endstop_id=%c pin=%u pull_up=%c invert=%c"
+             " motor=%c stepper=%c");
 
 void
 command_query_endstop(uint32_t *args)
@@ -94,6 +113,9 @@ command_query_endstop(uint32_t *args)
         e->armed = 0;
         return;
     }
+    if (e->motor != ENDSTOP_UNBOUND
+        && e->stepper >= runtime_motor_binding_count(e->motor))
+        shutdown("endstop bound to unconfigured stepper");
     e->tripped = 0;
     e->trip_clock = 0;
     e->armed = 1;
@@ -115,15 +137,38 @@ command_endstop_query_state(uint32_t *args)
 }
 DECL_COMMAND(command_endstop_query_state, "endstop_query_state oid=%c");
 
+static uint8_t
+endstop_has_armed_lane_peer(const struct endstop *e)
+{
+    uint8_t oid;
+    struct endstop *other;
+    foreach_oid(oid, other, command_config_endstop) {
+        if (other != e && other->armed && other->motor == e->motor)
+            return 1;
+    }
+    return 0;
+}
+
 void
 endstop_trip_task(void)
 {
     if (!sched_check_wake(&endstop_trip_wake))
         return;
-    uint64_t discard_clock;
-    (void)handle_stop_inner(&discard_clock);
     uint8_t oid;
     struct endstop *e;
+    uint8_t needs_stop = 0;
+    foreach_oid(oid, e, command_config_endstop) {
+        if (!e->trip_pending)
+            continue;
+        if (e->motor != ENDSTOP_UNBOUND && endstop_has_armed_lane_peer(e))
+            stepper_suppress_set(e->motor, e->stepper);
+        else
+            needs_stop = 1;
+    }
+    if (needs_stop) {
+        uint64_t discard_clock;
+        (void)handle_stop_inner(&discard_clock);
+    }
     foreach_oid(oid, e, command_config_endstop) {
         if (!e->trip_pending)
             continue;

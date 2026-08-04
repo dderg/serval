@@ -201,6 +201,24 @@ position_max: 220
 #   Optional. Default is None. If set, must be above 0.
 ```
 
+A dual-motor axis (one motor per gantry side) can carry one switch per motor.
+Replace the pin with an indented `motor_name: pin` block listing every motor of
+that axis's kinematic lane, exactly once each:
+
+```
+[axis x]
+endstop_pin:
+  xm_left: ^PA1
+  xm_right: ^PB2
+```
+
+The first switch to trip freezes only its own motor while the other side keeps
+moving; the last trip stops the axis, so the gantry squares itself against the
+two switches. Every switch must be wired to the MCU that drives its motor, and
+the axis must map 1:1 to a motor lane — CoreXY x/y share a lane and reject the
+keyed form. Virtual/sensorless endstops stay single-switch. Each switch appears
+in `QUERY_ENDSTOPS` as `x:<motor_name>`.
+
 Follower/non-kinematic axes only need topology and post-processor fields:
 
 ```

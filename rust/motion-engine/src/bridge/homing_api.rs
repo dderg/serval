@@ -23,7 +23,7 @@ fn next_homing_cohort() -> u64 {
 
 #[pymethods]
 impl PyMotionEngine {
-    #[pyo3(signature = (axis, direction, speed_mm_s, max_travel_mm, endstop_id, endstop_mcu))]
+    #[pyo3(signature = (axis, direction, speed_mm_s, max_travel_mm, endstops))]
     #[allow(clippy::too_many_arguments)]
     fn home_axis_start(
         &self,
@@ -32,9 +32,18 @@ impl PyMotionEngine {
         direction: f64,
         speed_mm_s: f64,
         max_travel_mm: f64,
-        endstop_id: u8,
-        endstop_mcu: u32,
+        endstops: Vec<(u8, u32)>,
     ) -> PyResult<()> {
+        if endstops.is_empty() {
+            return Err(PyRuntimeError::new_err(
+                "home_axis: endstops list must not be empty",
+            ));
+        }
+        let remaining_trips: Vec<(u32, u8)> = endstops
+            .iter()
+            .map(|&(endstop_id, endstop_mcu)| (endstop_mcu, endstop_id))
+            .collect();
+
         let guard = self.planner.lock_ok();
         let planner = guard
             .as_ref()
@@ -56,11 +65,13 @@ impl PyMotionEngine {
         // are machine space, so the gcode rest point crosses the warp here.
         self.send_serial_position_seeds(self.machine_from_gcode(start_pos))?;
 
-        let window_start_host = match self.homing.last_arm.lock_ok().take() {
-            Some((arm_mcu, arm_id, arm_host)) if arm_mcu == endstop_mcu && arm_id == endstop_id => {
-                arm_host
-            }
-            _ => self.router.lock_ok().host_now_secs(),
+        let window_start_host = {
+            let arms = std::mem::take(&mut *self.homing.recent_arms.lock_ok());
+            arms.iter()
+                .filter(|(arm_mcu, arm_id, _)| remaining_trips.contains(&(*arm_mcu, *arm_id)))
+                .map(|&(_, _, arm_host)| arm_host)
+                .min_by(f64::total_cmp)
+                .unwrap_or_else(|| self.router.lock_ok().host_now_secs())
         };
 
         *self.homing.active_drip_cohort.lock_ok() = Some(cohort);
@@ -79,8 +90,7 @@ impl PyMotionEngine {
 
         *self.homing.run.lock_ok() = Some(HomingRun {
             cohort,
-            endstop_id,
-            endstop_mcu,
+            remaining_trips,
             axis_key,
             all_axis_keys: all_axis_keys.clone(),
             window_start_host,
@@ -106,7 +116,7 @@ impl PyMotionEngine {
 
         *self.homing.result.lock_ok() = Some(result_rx);
 
-        self.consume_buffered_early_trip(endstop_mcu, endstop_id);
+        self.consume_buffered_early_trips();
         Ok(())
     }
     fn motion_drained(&self) -> bool {
@@ -163,10 +173,9 @@ impl PyMotionEngine {
                 ))
             })?;
         let deps = self.trip_deps();
-        *self.homing.pending_trip.lock_ok() = None;
         {
             let host_now = self.router.lock_ok().host_now_secs();
-            *self.homing.last_arm.lock_ok() = Some((mcu_handle, endstop_id, host_now));
+            self.homing.note_arm(mcu_handle, endstop_id, host_now);
         }
         let router = Arc::clone(&self.router);
         let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -406,20 +415,23 @@ impl PyMotionEngine {
         Ok(())
     }
 
-    fn consume_buffered_early_trip(&self, endstop_mcu: u32, endstop_id: u8) {
-        let pending = self.homing.pending_trip.lock_ok().take();
-        if let Some((p_mcu, p_endstop, p_clock)) = pending {
-            if p_mcu == endstop_mcu && p_endstop == endstop_id {
-                tracing::warn!(
-                    subsystem = "trip-relay",
-                    event = "early_trip_consumed",
-                    mcu = p_mcu,
-                    endstop_id = p_endstop,
-                    trip_clock = p_clock,
-                    "dispatching buffered early trip"
-                );
-                dispatch_endstop_trip(&self.trip_deps(), p_mcu, p_endstop, p_clock);
-            }
+    fn consume_buffered_early_trips(&self) {
+        let pending: Vec<(u32, u8, u64)> =
+            std::mem::take(&mut *self.homing.pending_trips.lock_ok());
+        if pending.is_empty() {
+            return;
+        }
+        let deps = self.trip_deps();
+        for (p_mcu, p_endstop, p_clock) in pending {
+            tracing::warn!(
+                subsystem = "trip-relay",
+                event = "early_trip_consumed",
+                mcu = p_mcu,
+                endstop_id = p_endstop,
+                trip_clock = p_clock,
+                "dispatching buffered early trip"
+            );
+            dispatch_endstop_trip(&deps, p_mcu, p_endstop, p_clock);
         }
     }
 

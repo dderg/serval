@@ -18,13 +18,14 @@ use crate::lock_ext::LockExt;
 #[derive(Default)]
 pub(crate) struct HomingState {
     pub(crate) run: Arc<Mutex<Option<HomingRun>>>,
-    pub(crate) pending_trip: Arc<Mutex<Option<(u32, u8, u64)>>>,
-    /// (endstop_mcu, endstop_id, host_secs) of the most recent endstop arm.
-    /// `home_axis_start` consumes it as the staleness window's start: a trip
+    pub(crate) pending_trips: Arc<Mutex<Vec<(u32, u8, u64)>>>,
+    /// (endstop_mcu, endstop_id, host_secs) of every endstop armed since the
+    /// last homing run started. `home_axis_start` consumes the earliest arm
+    /// belonging to its endstop set as the staleness window's start: a trip
     /// is genuine from the moment the endstop is armed, which happens before
     /// the run is registered — an endstop already loaded past its threshold
     /// (e.g. pair strain against a hard stop) trips in that gap.
-    pub(crate) last_arm: Arc<Mutex<Option<(u32, u8, f64)>>>,
+    pub(crate) recent_arms: Arc<Mutex<Vec<(u32, u8, f64)>>>,
     pub(crate) active_drip_cohort: Arc<Mutex<Option<u64>>>,
     pub(crate) result: Mutex<
         Option<
@@ -40,7 +41,20 @@ impl HomingState {
         *self.active_drip_cohort.lock_ok() = None;
         *self.run.lock_ok() = None;
         *self.result.lock_ok() = None;
-        *self.pending_trip.lock_ok() = None;
+        self.pending_trips.lock_ok().clear();
+    }
+
+    pub(super) fn note_arm(&self, mcu: u32, endstop_id: u8, host_secs: f64) {
+        self.drop_buffered_trips_for(mcu, endstop_id);
+        let mut arms = self.recent_arms.lock_ok();
+        arms.retain(|&(m, e, _)| m != mcu || e != endstop_id);
+        arms.push((mcu, endstop_id, host_secs));
+    }
+
+    pub(super) fn drop_buffered_trips_for(&self, mcu: u32, endstop_id: u8) {
+        self.pending_trips
+            .lock_ok()
+            .retain(|&(m, e, _)| m != mcu || e != endstop_id);
     }
 }
 
@@ -104,8 +118,7 @@ pub(crate) struct LatchedFaults {
 
 pub(crate) struct HomingRun {
     pub(crate) cohort: u64,
-    pub(crate) endstop_id: u8,
-    pub(crate) endstop_mcu: u32,
+    pub(crate) remaining_trips: Vec<(u32, u8)>,
     pub(crate) axis_key: crate::types::AxisKey,
     pub(crate) all_axis_keys: Vec<crate::types::AxisKey>,
     pub(crate) window_start_host: f64,

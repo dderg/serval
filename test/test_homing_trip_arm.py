@@ -44,7 +44,7 @@ def run_trip_move(endstop):
     homing = Homing.__new__(Homing)
     homing.printer = FakePrinter(reactor=FakeReactor())
     toolhead = FakeToolhead(endstop)
-    entry = {"endstop": endstop, "provider": None}
+    entry = {"endstops": [endstop], "provider": None}
     homing.trip_move(
         FakeGcmd(error=RuntimeError),
         toolhead,

@@ -1,26 +1,69 @@
 AXIS_ENDSTOP_IDS = (0, 1, 2)
 PROVIDER_ID_FIRST = len(AXIS_ENDSTOP_IDS)
 ENDSTOP_ID_MAX = 255
+UNBOUND_MOTOR = 0xFF
+UNBOUND_STEPPER = 0xFF
 
 _ALLOCATOR_OBJECT = "motion_endstop_allocator"
 
 
+class MotorBinding:
+    """Ties an endstop switch to one motor of a kinematic lane. A bound
+    endstop's trip freezes only that motor instead of stopping the MCU, which
+    is what lets a dual-motor axis square itself against two switches."""
+
+    def __init__(self, lane_idx, stepper_idx, mcu, motor_name):
+        self.lane_idx = lane_idx
+        self.stepper_idx = stepper_idx
+        self.mcu = mcu
+        self.motor_name = motor_name
+
+
 class MotionEndstop:
-    def __init__(self, pin_params, endstop_id):
+    def __init__(self, pin_params, endstop_id, binding=None):
         self.mcu = pin_params["chip"]
         self.endstop_id = endstop_id
         self.pin = pin_params["pin"]
         self.pullup = pin_params["pullup"]
         self.invert = pin_params["invert"]
+        self.binding = binding
+        self.motor_name = None if binding is None else binding.motor_name
+        if binding is not None and binding.mcu is not self.mcu:
+            raise self.mcu.get_printer().config_error(
+                "endstop pin '%s' is on MCU '%s' but motor '%s' is driven by"
+                " MCU '%s': a motor-bound endstop switch must be wired to its"
+                " own motor's MCU"
+                % (
+                    self.pin,
+                    self.mcu.get_name(),
+                    binding.motor_name,
+                    binding.mcu.get_name(),
+                )
+            )
         self.oid = self.mcu.create_oid()
         self._query_cmd = None
         self._state_cmd = None
         self.mcu.register_config_callback(self._build_config)
 
     def _build_config(self):
+        motor = UNBOUND_MOTOR if self.binding is None else self.binding.lane_idx
+        stepper = (
+            UNBOUND_STEPPER
+            if self.binding is None
+            else self.binding.stepper_idx
+        )
         self.mcu.add_config_cmd(
             "config_endstop oid=%d endstop_id=%d pin=%s pull_up=%d invert=%d"
-            % (self.oid, self.endstop_id, self.pin, self.pullup, self.invert)
+            " motor=%d stepper=%d"
+            % (
+                self.oid,
+                self.endstop_id,
+                self.pin,
+                self.pullup,
+                self.invert,
+                motor,
+                stepper,
+            )
         )
         self._query_cmd = self.mcu.lookup_command(
             "query_endstop oid=%c rest_ticks=%u"

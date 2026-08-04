@@ -25,7 +25,7 @@ pub(super) fn dispatch_endstop_trip(
         let mut guard = deps.homing.run.lock_ok();
         guard.take()
     };
-    let run = match run_opt {
+    let mut run = match run_opt {
         None => {
             tracing::warn!(
                 subsystem = "trip-relay",
@@ -35,21 +35,42 @@ pub(super) fn dispatch_endstop_trip(
                 trip_clock,
                 "terminal report arrived before the homing run was registered — buffered"
             );
-            *deps.homing.pending_trip.lock_ok() = Some((event_mcu, endstop_id, trip_clock));
+            deps.homing
+                .pending_trips
+                .lock_ok()
+                .push((event_mcu, endstop_id, trip_clock));
             return;
         }
         Some(r) => r,
     };
-    if run.endstop_id != endstop_id || run.endstop_mcu != event_mcu {
+    let matched = run
+        .remaining_trips
+        .iter()
+        .position(|&(mcu, id)| mcu == event_mcu && id == endstop_id);
+    let Some(member_idx) = matched else {
         tracing::warn!(
             subsystem = "trip-relay",
             event = "trip_identity_mismatch",
             mcu = event_mcu,
             endstop_id,
-            expected_mcu = run.endstop_mcu,
-            expected_endstop_id = run.endstop_id,
+            expected = ?run.remaining_trips,
             trip_clock,
             "terminal report does not match the active homing run — ignored"
+        );
+        let mut guard = deps.homing.run.lock_ok();
+        *guard = Some(run);
+        return;
+    };
+    if run.remaining_trips.len() > 1 {
+        run.remaining_trips.swap_remove(member_idx);
+        tracing::info!(
+            subsystem = "trip-relay",
+            event = "partial_trip",
+            mcu = event_mcu,
+            endstop_id,
+            trip_clock,
+            remaining = run.remaining_trips.len(),
+            "endstop tripped ahead of its group — motor frozen, run continues"
         );
         let mut guard = deps.homing.run.lock_ok();
         *guard = Some(run);
@@ -145,7 +166,7 @@ pub(super) fn dispatch_endstop_trip(
                     )
                 };
 
-            let outcome = reconstruct_cartesian(run.endstop_mcu, trip_clock).and_then(|trip| {
+            let outcome = reconstruct_cartesian(event_mcu, trip_clock).and_then(|trip| {
                 reconstruct_cartesian(axis_key.mcu_id, discard_clock)
                     .map(|final_pos| (trip, final_pos, trip_clock))
             });

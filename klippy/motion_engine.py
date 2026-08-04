@@ -211,6 +211,13 @@ class MotionEngineWrapper:
             "finalize_homed_axis",
         )
 
+    def home_axis_start(self, axis, direction, speed, max_travel, endstops):
+        """endstops: [(endstop_id, endstop_mcu_handle)] — a multi-motor axis
+        arms one switch per motor and the run resolves on the last trip."""
+        return self._engine.home_axis_start(
+            axis, direction, speed, max_travel, list(endstops)
+        )
+
     def set_torque(self, mcu_handle, value, print_time):
         self.set_torque_deferred(mcu_handle, value, print_time)()
 

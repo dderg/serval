@@ -16,6 +16,7 @@
 #include "step_queue.h" // RUNTIME_MAX_STEPS_PER_SAMPLE
 #include "event_log.h" // event_log_emit (mcu structured-log ready marker)
 #include "generic/fault_handler.h" // kalico_diag_emit_prior_crash (Stage 5)
+#include "stepper.h" // RUNTIME_MOTOR_COUNT, stepper_suppress_set
 
 struct stepper {
     struct gpio_out step_pin, dir_pin;
@@ -129,11 +130,11 @@ stepper_shutdown(void)
     foreach_oid(i, s, command_config_stepper) {
         stepper_stop(&s->stop_signal, 0);
     }
+    stepper_suppress_clear_all();
 }
 DECL_SHUTDOWN(stepper_shutdown);
 
-#define RUNTIME_MOTOR_COUNT 4
-#define RUNTIME_MAX_STEPPERS_PER_MOTOR 4
+static volatile uint8_t runtime_motor_suppress_mask[RUNTIME_MOTOR_COUNT];
 
 struct runtime_motor_stepper {
     struct stepper *stepper;
@@ -156,6 +157,22 @@ runtime_motor_binding_count(uint8_t motor_idx)
 {
     if (motor_idx >= RUNTIME_MOTOR_COUNT) return 0;
     return runtime_motor_stepper_count[motor_idx];
+}
+
+void
+stepper_suppress_set(uint8_t motor, uint8_t stepper)
+{
+    if (motor >= RUNTIME_MOTOR_COUNT
+        || stepper >= RUNTIME_MAX_STEPPERS_PER_MOTOR)
+        shutdown("stepper suppress index out of range");
+    runtime_motor_suppress_mask[motor] |= (uint8_t)(1u << stepper);
+}
+
+void
+stepper_suppress_clear_all(void)
+{
+    for (uint8_t i = 0; i < RUNTIME_MOTOR_COUNT; i++)
+        runtime_motor_suppress_mask[i] = 0;
 }
 
 extern void *runtime_handle;
@@ -243,6 +260,7 @@ command_kalico_configure_axis(uint32_t *args)
     runtime_motor_both_edge[axis_idx] = motor_both_edge;
     runtime_motor_pulse_ticks[axis_idx] = motor_pulse_ticks;
     runtime_motor_last_dir[axis_idx] = -1;
+    runtime_motor_suppress_mask[axis_idx] = 0;
     (void)extrusion_bits;
 
     // The per-sample step budget this motor can physically emit: half the
@@ -444,6 +462,7 @@ runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps, uint8_t stepper_sel
     if (n_steps == 0)
         return;
     runtime_emit_pulses += (n_steps < 0) ? (uint32_t)-n_steps : (uint32_t)n_steps;
+    uint8_t suppress = runtime_motor_suppress_mask[motor_idx];
 
     uint8_t j_begin = 0, j_end = cnt;
     if (stepper_sel != 0) {
@@ -458,6 +477,8 @@ runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps, uint8_t stepper_sel
 
     if (stepper_sel != 0 || runtime_motor_last_dir[motor_idx] != want_dir) {
         for (uint8_t j = j_begin; j < j_end; j++) {
+            if (suppress & (uint8_t)(1u << j))
+                continue;
             uint8_t bench_verified_not_want_dir_xor_invert
                 = (uint8_t)(!want_dir)
                 ^ runtime_motor_steppers[motor_idx][j].invert_dir;
@@ -480,15 +501,21 @@ runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps, uint8_t stepper_sel
             while ((int32_t)(runtime_cyccnt_read() - target) < 0)
                 ;
         }
-        for (uint8_t j = j_begin; j < j_end; j++)
+        for (uint8_t j = j_begin; j < j_end; j++) {
+            if (suppress & (uint8_t)(1u << j))
+                continue;
             gpio_out_toggle_noirq(runtime_motor_steppers[motor_idx][j].stepper->step_pin);
+        }
         if (!both_edge) {
             uint32_t fall_at = runtime_cyccnt_read() + pulse_ticks;
             while ((int32_t)(runtime_cyccnt_read() - fall_at) < 0)
                 ;
-            for (uint8_t j = j_begin; j < j_end; j++)
+            for (uint8_t j = j_begin; j < j_end; j++) {
+                if (suppress & (uint8_t)(1u << j))
+                    continue;
                 gpio_out_toggle_noirq(
                     runtime_motor_steppers[motor_idx][j].stepper->step_pin);
+            }
         }
         last = runtime_cyccnt_read();
     }

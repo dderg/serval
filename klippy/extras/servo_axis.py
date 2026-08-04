@@ -330,12 +330,13 @@ class ServoRail(BaseRail):
     def trip_move_begin(self, entry):
         node = self._engine_node()
         engine = self.printer.lookup_object("motion_engine")
+        (endstop,) = entry["endstops"]
         for motor in self.motors:
             _, torque_trip_tenth_pct = motor.get_homing_drive_limits()
             engine.arm_sensorless_endstop(
                 node.get_engine_handle(),
                 node.get_slot_for_motor(motor.get_motor_name()),
-                entry["endstop"].endstop_id,
+                endstop.endstop_id,
                 torque_trip_tenth_pct,
                 True,
             )
@@ -343,11 +344,12 @@ class ServoRail(BaseRail):
     def trip_move_end(self, entry):
         node = self._engine_node()
         engine = self.printer.lookup_object("motion_engine")
+        (endstop,) = entry["endstops"]
         for motor in self.motors:
             engine.disarm_sensorless_endstop(
                 node.get_engine_handle(),
                 node.get_slot_for_motor(motor.get_motor_name()),
-                entry["endstop"].endstop_id,
+                endstop.endstop_id,
             )
 
 

@@ -10,6 +10,7 @@
 #include "autoconf.h"
 
 #include "runtime.h"
+#include "stepper.h"
 extern void *runtime_handle;
 
 extern int kalico_console_write_raw(const uint8_t *buf, uint16_t len);
@@ -363,6 +364,9 @@ handle_stop_inner(uint64_t *discard_clock)
 {
     int32_t rc = RUNTIME_ERR_NOT_INIT;
     *discard_clock = 0;
+    irqstatus_t suppress_flag = irq_save();
+    stepper_suppress_clear_all();
+    irq_restore(suppress_flag);
     if (runtime_handle) {
         irqstatus_t flag = irq_save();
         int32_t was_gated = runtime_pieces_gated(runtime_handle);

@@ -60,6 +60,7 @@ def test_config_cmd_emitted():
     _connected(mcu, MotionEndstop(_pin_params(mcu), 3))
     assert mcu.config_cmds == [
         "config_endstop oid=0 endstop_id=3 pin=PA8 pull_up=1 invert=0"
+        " motor=255 stepper=255"
     ]
 
 
