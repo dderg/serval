@@ -36,6 +36,11 @@ pub enum StreamEpoch {
     /// idle gap, but the motion content is the same continuous track parked
     /// at rest, so position continuity across the seam is still mandatory.
     Reanchor,
+    /// The stream time itself jumped forward across a drained-to-rest hole
+    /// (a dwell): the standing anchor keeps the timing, but the interval has
+    /// no pieces, so per-lane seams downstream must be cut exactly like a
+    /// re-anchor. Position continuity across the seam is still mandatory.
+    Rejoin,
 }
 
 impl StreamEpoch {
@@ -47,6 +52,13 @@ impl StreamEpoch {
     #[must_use]
     pub fn position_redefined(self) -> bool {
         self == Self::Reposition
+    }
+
+    /// The anchor re-derived `t0` for this epoch: retained absolute-time
+    /// state (motion history) no longer maps onto the new timeline.
+    #[must_use]
+    pub fn retimed(self) -> bool {
+        matches!(self, Self::Reposition | Self::Reanchor)
     }
 }
 
@@ -62,6 +74,18 @@ enum AnchorClass {
     /// legitimate idle resume, re-anchored forward with `margin_s` recorded.
     IdleResume {
         margin_s: f64,
+    },
+    /// Healthy margin, but the stream time jumped forward across a hole the
+    /// previous segment left at rest (a dwell emitted no pieces for the
+    /// interval): keep the standing anchor, cut downstream seams.
+    Rejoin {
+        hole_s: f64,
+        margin_s: f64,
+    },
+    /// A forward stream-time hole while the previous segment ended
+    /// mid-motion: the producer dropped part of the trajectory — fatal.
+    HoleMidMotionFatal {
+        hole_s: f64,
     },
     /// The playhead overran the committed end while mid-motion — fatal.
     UnderrunFatal {
@@ -106,8 +130,15 @@ impl Anchor {
             return AnchorClass::Reposition;
         }
         let margin_s = t0 + seg_t_start - host_now;
+        let hole_s = seg_t_start - self.last_t_end;
         if margin_s >= LOW_MARGIN_WARN_SECS {
-            AnchorClass::Continuation { margin_s }
+            if hole_s <= CONTIGUITY_EPS {
+                AnchorClass::Continuation { margin_s }
+            } else if self.last_ends_at_rest {
+                AnchorClass::Rejoin { hole_s, margin_s }
+            } else {
+                AnchorClass::HoleMidMotionFatal { hole_s }
+            }
         } else if self.last_ends_at_rest {
             AnchorClass::IdleResume { margin_s }
         } else if margin_s < 0.0 {
@@ -167,6 +198,36 @@ impl Anchor {
                 );
                 StreamEpoch::Reanchor
             }
+            AnchorClass::Rejoin { hole_s, margin_s } => {
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "anchor_rejoin",
+                    hole_s,
+                    margin_s,
+                    seg_t_start,
+                    "[anchor] stream time jumped a drained-to-rest hole \
+                     (dwell) — keeping the standing anchor, cutting \
+                     downstream seams"
+                );
+                StreamEpoch::Rejoin
+            }
+            AnchorClass::HoleMidMotionFatal { hole_s } => {
+                tracing::error!(
+                    subsystem = "motion",
+                    event = "anchor_hole_mid_motion",
+                    hole_s,
+                    seg_t_start,
+                    last_t_end = self.last_t_end,
+                    "[anchor] forward stream-time hole while the previous \
+                     segment ended mid-motion — trajectory content is missing"
+                );
+                crate::worker::fatal(&format!(
+                    "anchor hole mid-motion: stream time jumped {hole_s:.6}s \
+                     forward at seg_t_start={seg_t_start:.6} while the \
+                     previous segment ended in motion — the producer dropped \
+                     part of the trajectory"
+                ));
+            }
             AnchorClass::UnderrunFatal { gap_s, t0 } => {
                 tracing::error!(
                     subsystem = "motion",
@@ -205,7 +266,7 @@ impl Anchor {
             }
         };
 
-        if epoch.is_fresh() {
+        if epoch.retimed() {
             let condition = match self.t0 {
                 None => "first",
                 Some(_) => "reanchor",

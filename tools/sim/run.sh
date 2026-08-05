@@ -163,6 +163,7 @@ case "$MODE" in
         # acceptable. SIM_TEST_TARGETS narrows the run to specific test
         # files (used by the CI shards).
         [[ -n "${VTIME_SPEED:-}" ]] && DOCKER_ARGS+=(-e VTIME_SPEED)
+        [[ -n "${RUST_LOG:-}" ]] && DOCKER_ARGS+=(-e RUST_LOG)
         XDIST_ARGS=()
         [[ -n "${SIM_TEST_JOBS:-}" ]] && XDIST_ARGS=(-n "$SIM_TEST_JOBS")
         # Every SimWorld lives in a pytest tmp dir that dies with the

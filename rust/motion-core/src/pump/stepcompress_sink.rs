@@ -6,6 +6,7 @@ use crate::mcu_config::McuAxisConfig;
 use crossbeam_channel::Sender;
 use host_rt::host_io::McuHostIo;
 use host_rt::host_io::parser::ArgValue;
+use runtime::piece_ring::PieceEntry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -163,6 +164,24 @@ struct OutboundFrame {
     end_clock: u64,
 }
 
+/// A seam the endpoint must handle when the marked piece reaches it, in
+/// stream order. `Cut` is a fresh anchor: halt the shim, re-slope, reset the
+/// mcu step clock. `Gap` is a rejoin: a stationary stream-time hole — no mcu
+/// frames, only a sanctioned forward seam jump in the shim.
+#[derive(Clone, Copy, Debug)]
+enum PendingSeam {
+    Cut { at: u64, epoch_freq: Option<f64> },
+    Gap { at: u64 },
+}
+
+impl PendingSeam {
+    fn at(self) -> u64 {
+        match self {
+            Self::Cut { at, .. } | Self::Gap { at } => at,
+        }
+    }
+}
+
 pub struct StepcompressEndpoint {
     mcu_id: u32,
     shim: StepShim,
@@ -175,7 +194,7 @@ pub struct StepcompressEndpoint {
     backlog: VecDeque<OutboundFrame>,
     in_flight: Vec<InFlight>,
     step_clock: HashMap<u32, u64>,
-    pending_cut: HashMap<u8, (u64, Option<f64>)>,
+    pending_seams: HashMap<u8, VecDeque<PendingSeam>>,
     pending_retire: VecDeque<PendingRetire>,
     published: Vec<u32>,
     cohort_counts: Vec<u32>,
@@ -268,7 +287,7 @@ impl StepcompressEndpoint {
             backlog: VecDeque::new(),
             in_flight: Vec::new(),
             step_clock: HashMap::new(),
-            pending_cut: HashMap::new(),
+            pending_seams: HashMap::new(),
             pending_retire: VecDeque::new(),
             published,
             cohort_counts,
@@ -369,12 +388,25 @@ impl StepcompressEndpoint {
         self.backlog.clear();
         self.in_flight.clear();
         self.step_clock.clear();
-        self.pending_cut.clear();
+        self.pending_seams.clear();
         self.pending_retire.clear();
     }
 
     pub fn mark_reanchor(&mut self, axis: u8, at_start_clock: u64, epoch_freq: Option<f64>) {
-        self.pending_cut.insert(axis, (at_start_clock, epoch_freq));
+        self.pending_seams
+            .entry(axis)
+            .or_default()
+            .push_back(PendingSeam::Cut {
+                at: at_start_clock,
+                epoch_freq,
+            });
+    }
+
+    pub fn mark_seam_gap(&mut self, axis: u8, at_start_clock: u64) {
+        self.pending_seams
+            .entry(axis)
+            .or_default()
+            .push_back(PendingSeam::Gap { at: at_start_clock });
     }
 
     /// How the shim will reproject this axis' piece ends once the pieces being
@@ -391,8 +423,18 @@ impl StepcompressEndpoint {
     /// the flat allowance therefore leaves the shim's check its meaning.
     pub fn seam_basis(&self, axis: u8) -> Option<SeamBasis> {
         let motor = self.axes.iter().position(|&a| a == usize::from(axis))?;
-        let freq = match self.pending_cut.get(&axis) {
-            Some(&(_, Some(epoch_freq))) => epoch_freq,
+        let pending_cut_freq = self
+            .pending_seams
+            .get(&axis)
+            .into_iter()
+            .flatten()
+            .rev()
+            .find_map(|s| match *s {
+                PendingSeam::Cut { epoch_freq, .. } => Some(epoch_freq),
+                PendingSeam::Gap { .. } => None,
+            });
+        let freq = match pending_cut_freq {
+            Some(Some(epoch_freq)) => epoch_freq,
             _ => self.shim.motor_cycles_per_second(motor),
         };
         Some(SeamBasis {
@@ -706,45 +748,81 @@ impl StepcompressEndpoint {
         let (now, freq) = self.clock_now()?;
         for frame in frames {
             let motor = self.motor_of(frame.axis)?;
-            #[allow(clippy::cast_possible_truncation)]
-            let cps = self.shim.motor_cycles_per_second(motor) as f32;
-            let cut_index = self.pending_cut.get(&frame.axis).and_then(|&(at, _)| {
-                frame
-                    .pieces
-                    .iter()
-                    .position(|p| p.start_time >= at || p.end_time(cps) > at)
-            });
-            match cut_index {
-                Some(index) => {
-                    let epoch_freq = self.pending_cut[&frame.axis].1.ok_or_else(|| {
-                        SendError::Fatal(format!(
-                            "stepcompress mcu {mcu_id} axis {}: fresh epoch carried no clock \
-                             slope; the shim cannot adopt the producer's timeline",
-                            frame.axis
-                        ))
-                    })?;
+            let mut rest: &[PieceEntry] = &frame.pieces;
+            let mut fresh_head = false;
+            loop {
+                let seam = self
+                    .pending_seams
+                    .get(&frame.axis)
+                    .and_then(VecDeque::front)
+                    .copied();
+                #[allow(clippy::cast_possible_truncation)]
+                let cps = self.shim.motor_cycles_per_second(motor) as f32;
+                let seam_index = seam.and_then(|s| {
+                    let at = s.at();
+                    rest.iter()
+                        .position(|p| p.start_time >= at || p.end_time(cps) > at)
+                });
+                let Some(index) = seam_index else {
+                    if fresh_head {
+                        self.shim
+                            .validate_fresh_pieces(motor, rest)
+                            .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
+                    }
                     self.shim
-                        .validate_pieces_public(motor, &frame.pieces[..index])
+                        .push_pieces(motor, rest)
                         .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
+                    break;
+                };
+                let seam = seam.expect("seam_index implies a pending seam");
+                let (head, tail) = rest.split_at(index);
+                if fresh_head {
                     self.shim
-                        .push_pieces(motor, &frame.pieces[..index])
+                        .validate_fresh_pieces(motor, head)
                         .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
-                    let cut_clock = self.pending_cut[&frame.axis].0;
-                    self.drain_until(now, cut_clock)?;
-                    self.drain_into_backlog(now, freq)?;
-                    self.cut_stream(motor, epoch_freq, now)?;
-                    self.pending_cut.remove(&frame.axis);
+                } else {
                     self.shim
-                        .validate_fresh_pieces(motor, &frame.pieces[index..])
-                        .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
-                    self.shim
-                        .push_pieces(motor, &frame.pieces[index..])
+                        .validate_pieces_public(motor, head)
                         .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
                 }
-                None => self
-                    .shim
-                    .push_pieces(motor, &frame.pieces)
-                    .map_err(|e| shim_error_to_send_error(mcu_id, e))?,
+                self.shim
+                    .push_pieces(motor, head)
+                    .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
+                match seam {
+                    PendingSeam::Cut { at, epoch_freq } => {
+                        let epoch_freq = epoch_freq.ok_or_else(|| {
+                            SendError::Fatal(format!(
+                                "stepcompress mcu {mcu_id} axis {}: fresh epoch carried no \
+                                 clock slope; the shim cannot adopt the producer's timeline",
+                                frame.axis
+                            ))
+                        })?;
+                        self.drain_until(now, at)?;
+                        self.drain_into_backlog(now, freq)?;
+                        self.cut_stream(motor, epoch_freq, now)?;
+                    }
+                    PendingSeam::Gap { at } => {
+                        tracing::info!(
+                            subsystem = "motion",
+                            event = "seam_gap_accepted",
+                            mcu = self.mcu_id,
+                            motor,
+                            at,
+                            "[rejoin] forward seam gap sanctioned — no mcu frames"
+                        );
+                        self.shim
+                            .accept_forward_seam_gap(motor, at)
+                            .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
+                    }
+                }
+                if let Some(q) = self.pending_seams.get_mut(&frame.axis) {
+                    q.pop_front();
+                    if q.is_empty() {
+                        self.pending_seams.remove(&frame.axis);
+                    }
+                }
+                rest = tail;
+                fresh_head = true;
             }
         }
         self.drain_into_backlog(now, freq)?;

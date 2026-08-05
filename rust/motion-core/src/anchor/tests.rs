@@ -122,6 +122,55 @@ fn thin_margin_after_rest_reanchors_instead_of_racing_transport() {
 }
 
 #[test]
+fn dwell_hole_at_rest_with_healthy_margin_rejoins_on_the_standing_anchor() {
+    // A dwell drains to rest and advances stream time with no pieces; the
+    // next segment arrives while the margin is still comfortable (buffered
+    // print, no M400). Timing must stay on the standing anchor, but the
+    // epoch must be fresh so per-lane transports cut their seams.
+    let mut a = primed(true);
+    let t0_before = a.t0().unwrap();
+    // 0.2s hole (two DISABLE_STALL_TIME dwells); playhead far behind.
+    let (t0, epoch) = a.anchor_segment(1.2, 2.2, 100.0, false);
+    assert_eq!(epoch, StreamEpoch::Rejoin, "dwell hole must cut seams");
+    assert!(epoch.is_fresh());
+    assert!(!epoch.retimed(), "a rejoin must not re-derive t0");
+    assert_eq!(t0, t0_before, "the standing anchor keeps the timing");
+}
+
+#[test]
+fn dwell_hole_with_decayed_margin_is_still_an_idle_resume() {
+    // Once the playhead has actually consumed the dwell, the resume is a
+    // plain idle resume: re-anchor forward on the earned lead.
+    let mut a = primed(true);
+    let (t0_new, epoch) = a.anchor_segment(1.2, 2.2, 104.0, false);
+    assert_eq!(epoch, StreamEpoch::Reanchor);
+    assert!(
+        (t0_new + 1.2 - (104.0 + RESUME_LEAD_GROWTH * DEFAULT_LEAD_SECS)).abs() < 1e-9,
+        "t0_new={t0_new}"
+    );
+}
+
+#[test]
+fn classify_hole_mid_motion_is_fatal() {
+    // A forward stream-time hole while the previous segment ended in motion
+    // means trajectory content is missing — never paper over it.
+    let a = primed(false);
+    let class = a.classify(1.2, 100.0);
+    assert!(
+        matches!(class, AnchorClass::HoleMidMotionFatal { hole_s }
+            if (hole_s - 0.2).abs() < 1e-9),
+        "mid-motion hole must be fatal, got {class:?}",
+    );
+}
+
+#[test]
+fn sub_eps_stream_gap_stays_a_continuation() {
+    let mut a = primed(false);
+    let (_, epoch) = a.anchor_segment(1.0 + 0.5 * CONTIGUITY_EPS, 2.0, 100.9, false);
+    assert_eq!(epoch, StreamEpoch::Continuation);
+}
+
+#[test]
 fn margin_above_the_floor_stays_a_continuation() {
     let mut a = Anchor::new();
     let (t0_first, _) = a.anchor_segment(0.0, 1.0, 100.0, false);
