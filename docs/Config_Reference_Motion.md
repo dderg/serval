@@ -13,8 +13,8 @@ max_velocity: 300
 max_accel: 3000
 #   Required. Must be above 0. Cartesian acceleration limit in mm/s^2.
 #max_jerk: 6000
-#   Optional. Default is max_accel * 2. Must be >= 0. A value of 0
-#   is converted to an unlimited jerk value.
+#   Optional. Default is 0, i.e. jerk limiting is disabled. Must be
+#   >= 0. A value of 0 is converted to an unlimited jerk value.
 #square_corner_velocity: 5
 #   Optional legacy alias. Default is 5. Must be >= 0. Set this XOR
 #   corner_deviation; it is converted to the corner-deviation budget.
