@@ -4,6 +4,13 @@
 #   ./scripts/ci.sh quick           # fast subset: ruff + rust test/clippy/fmt
 #   ./scripts/ci.sh install-hooks   # enable the pre-push hook (runs `quick` per push)
 #   ./scripts/ci.sh <job>           # run one gate, exit with its status (CI)
+#   ./scripts/ci.sh -v <job>        # stream the gate's output live
+#
+# Output policy: a terminal, GitHub Actions and `-v` get the live stream.
+# Everywhere else (agents, scripts capturing stdout) a gate prints one PASS
+# line with its tally, or FAIL plus the last 100 lines of the log. Either way
+# the complete log of every job stays in .ci-logs/<job>.log until the next run
+# of that job overwrites it.
 #
 # Prerequisites (one-time, for the full local run):
 #   rustup target add thumbv7em-none-eabi thumbv6m-none-eabi thumbv7m-none-eabi
@@ -14,6 +21,27 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST="$ROOT/rust"
+LOG_DIR="$ROOT/.ci-logs"
+VERBOSE=""
+
+# A docker build narrates every layer even when all of them are cached: ~400
+# lines that say nothing on success and everything on failure. Streaming is for
+# a human watching progress and for CI job logs; a captured stdout gets silence
+# on success and the complete log on failure.
+stream_output() { [ -n "$VERBOSE" ] || [ -t 2 ] || [ -n "${GITHUB_ACTIONS:-}" ]; }
+
+run_quiet() {
+    if stream_output; then
+        "$@" >&2
+        return
+    fi
+    local log rc=0
+    log="$(mktemp)"
+    "$@" >"$log" 2>&1 || rc=$?
+    [ "$rc" -eq 0 ] || { printf '%s failed (rc=%s):\n' "$1" "$rc" >&2; cat "$log" >&2; }
+    rm -f "$log"
+    return "$rc"
+}
 
 # Built locally from the worktree's own scripts/Dockerfile-build, tagged per
 # branch so concurrent worktrees never test against a stale or mismatched
@@ -28,7 +56,7 @@ docker_image() {
     [ "$branch" = "HEAD" ] && branch="$(cd "$ROOT" && git rev-parse --short HEAD 2>/dev/null || echo head)"
     tag="klipper-build-${branch//\//-}"
     tag="$(echo "$tag" | tr '[:upper:]' '[:lower:]')"
-    docker build -f "$ROOT/scripts/Dockerfile-build" -t "$tag" "$ROOT" >&2
+    run_quiet docker build -f "$ROOT/scripts/Dockerfile-build" -t "$tag" "$ROOT" || return 1
     echo "$tag"
 }
 
@@ -49,7 +77,7 @@ job_rust_build()  { cd "$RUST" && cargo build --workspace; }
 job_rust_test() {
     cd "$RUST"
     host_cargo nextest run --workspace --profile ci
-    host_cargo test --workspace --doc
+    run_quiet host_cargo test --workspace --doc
 }
 
 job_rust_clippy() { cd "$RUST" && cargo clippy --workspace --all-targets -- -D warnings; }
@@ -250,11 +278,15 @@ FAILED_JOBS=()
 red()    { printf '\033[1;31m%s\033[0m\n' "$*"; }
 green()  { printf '\033[1;32m%s\033[0m\n' "$*"; }
 
+tally() { sed -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*//' "$1" | tail -1 | cut -c1-120; }
+
+job_log() { mkdir -p "$LOG_DIR"; echo "$LOG_DIR/$1.log"; }
+
 run_check() {
     local name="$1"; shift
     printf '%-20s ' "$name"
     local log rc=0
-    log="$(mktemp)"
+    log="$(job_log "$name")"
     # Standalone statement, NOT `... && rc=0 || rc=$?`: in a `&&`/`||`
     # condition context bash ignores the subshell's `set -e`, so multi-command
     # jobs would report only their last command's status and a failing
@@ -262,12 +294,14 @@ run_check() {
     ( set -e; "$@" ) >"$log" 2>&1
     rc=$?
     if [ "$rc" -eq 0 ]; then
-        green "PASS"; PASS=$((PASS + 1))
+        printf '\033[1;32mPASS\033[0m  %s  \033[2m[%s]\033[0m\n' \
+            "$(tally "$log")" ".ci-logs/$name.log"; PASS=$((PASS + 1))
     else
-        red "FAIL ($rc)"; FAIL=$((FAIL + 1)); FAILED_JOBS+=("$name")
-        sed 's/^/    /' "$log" | tail -50
+        red "FAIL ($rc) — full log: .ci-logs/$name.log"
+        FAIL=$((FAIL + 1)); FAILED_JOBS+=("$name")
+        sed 's/^/    /' "$log" | tail -100
     fi
-    rm -f "$log"
+    return "$rc"
 }
 
 run_all() {
@@ -304,7 +338,7 @@ run_all() {
 }
 
 usage() {
-    sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+    awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
 }
 
 job_install_hooks() {
@@ -320,35 +354,53 @@ job_install_hooks() {
     echo "  disable:      git config --unset core.hooksPath"
 }
 
+if [ "${1:-}" = "-v" ] || [ "${1:-}" = "--verbose" ]; then
+    VERBOSE=1
+    shift
+fi
+
 case "${1:-all}" in
-    rust-host)        job_rust_host ;;
-    rust-build)       job_rust_build ;;
-    rust-test)        job_rust_test ;;
-    rust-clippy)      job_rust_clippy ;;
-    rust-fmt)         job_rust_fmt ;;
-    rust-loom)        job_rust_loom ;;
-    rust-mcu-h7)      job_rust_mcu_h7 ;;
-    rust-mcu-f4)      job_rust_mcu_f4 ;;
-    rust-mcu-g0)      job_rust_mcu_g0 ;;
-    rust-mcu-f1)      job_rust_mcu_f1 ;;
-    rust-no-stepper)  job_rust_no_stepper ;;
-    cbindgen-drift)   job_cbindgen_drift ;;
-    c-smoke)          job_c_smoke ;;
-    rust-ethercat-hw) job_rust_ethercat_hw ;;
-    deny)             job_deny ;;
-    miri)             job_miri ;;
-    panic-grep)       job_panic_grep ;;
-    watchdog-canary)  job_watchdog_canary ;;
-    ruff)             job_ruff ;;
-    py)               shift; job_py "${1:-3.13}" ;;
-    py-typecheck)     job_py_typecheck ;;
-    docs)             job_docs ;;
-    sim)              job_sim ;;
-    sim-e2e)          shift; job_sim_e2e "$@" ;;
-    snapshot)         job_snapshot ;;
-    all)              run_all false ;;
-    quick|--quick)    run_all true ;;
-    install-hooks|hooks) job_install_hooks ;;
-    -h|--help|help)   usage ;;
-    *) echo "unknown job: ${1:-}" >&2; usage >&2; exit 2 ;;
+    all)                 run_all false; exit $? ;;
+    quick|--quick)       run_all true; exit $? ;;
+    install-hooks|hooks) job_install_hooks; exit $? ;;
+    -h|--help|help)      usage; exit 0 ;;
 esac
+
+name="$1"; shift
+case "$name" in
+    rust-host)        job=(job_rust_host) ;;
+    rust-build)       job=(job_rust_build) ;;
+    rust-test)        job=(job_rust_test) ;;
+    rust-clippy)      job=(job_rust_clippy) ;;
+    rust-fmt)         job=(job_rust_fmt) ;;
+    rust-loom)        job=(job_rust_loom) ;;
+    rust-mcu-h7)      job=(job_rust_mcu_h7) ;;
+    rust-mcu-f4)      job=(job_rust_mcu_f4) ;;
+    rust-mcu-g0)      job=(job_rust_mcu_g0) ;;
+    rust-mcu-f1)      job=(job_rust_mcu_f1) ;;
+    rust-no-stepper)  job=(job_rust_no_stepper) ;;
+    cbindgen-drift)   job=(job_cbindgen_drift) ;;
+    c-smoke)          job=(job_c_smoke) ;;
+    rust-ethercat-hw) job=(job_rust_ethercat_hw) ;;
+    deny)             job=(job_deny) ;;
+    miri)             job=(job_miri) ;;
+    panic-grep)       job=(job_panic_grep) ;;
+    watchdog-canary)  job=(job_watchdog_canary) ;;
+    ruff)             job=(job_ruff) ;;
+    py)               job=(job_py "${1:-3.13}") ;;
+    py-typecheck)     job=(job_py_typecheck) ;;
+    docs)             job=(job_docs) ;;
+    sim)              job=(job_sim) ;;
+    sim-e2e)          job=(job_sim_e2e ${@+"$@"}) ;;
+    snapshot)         job=(job_snapshot) ;;
+    *) echo "unknown job: $name" >&2; usage >&2; exit 2 ;;
+esac
+
+if stream_output; then
+    VERBOSE=1
+    log="$(job_log "$name")"
+    "${job[@]}" 2>&1 | tee "$log"
+    exit "${PIPESTATUS[0]}"
+fi
+run_check "$name" "${job[@]}"
+exit $?
