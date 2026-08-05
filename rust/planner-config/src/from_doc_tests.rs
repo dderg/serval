@@ -23,7 +23,7 @@ fn printer_defaults_match_motion_setup() {
     // Default scv = 5 -> deviation = scv^2 * (sqrt(2)-1) / accel.
     let expected = 25.0 * (std::f64::consts::SQRT_2 - 1.0) / 3000.0;
     assert!((c.corner_deviation - expected).abs() < 1e-15);
-    assert_eq!(c.max_jerk, 6000.0);
+    assert_eq!(c.max_jerk, f64::INFINITY);
     assert_eq!(c.max_z_velocity, 300.0);
     assert_eq!(c.max_z_accel, 3000.0);
     assert_eq!(s.fit_tolerance_mm, 0.005);
@@ -155,7 +155,7 @@ fn consumed_options_report_values_and_defaults() {
     };
     assert_eq!(find("max_velocity").value, ConsumedValue::Float(300.0));
     // Defaults taken are recorded too, matching _get_wrapper.
-    assert_eq!(find("max_jerk").value, ConsumedValue::Float(6000.0));
+    assert_eq!(find("max_jerk").value, ConsumedValue::Float(0.0));
     assert_eq!(
         find("max_path_deviation").value,
         ConsumedValue::Float(0.005)

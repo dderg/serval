@@ -357,8 +357,7 @@ impl Reader<'_> {
             }
         };
 
-        let max_jerk =
-            self.getfloat_or("printer", "max_jerk", max_accel * 2.0, Bounds::min(0.0))?;
+        let max_jerk = self.getfloat_or("printer", "max_jerk", 0.0, Bounds::min(0.0))?;
         let max_jerk = if max_jerk > 0.0 {
             max_jerk
         } else {
