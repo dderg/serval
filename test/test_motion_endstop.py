@@ -24,8 +24,13 @@ class FakeRemoteMcu:
         return 42
 
 
-def _fake_mcu():
+def _fake_mcu(engine=None, handle=7):
+    if engine is None:
+        engine = FakeEngine()
+    printer = FakePrinter(objects={"motion_engine": engine})
     return FakeMcu(
+        printer=printer,
+        handle=handle,
         query_cmd=FakeCommand(),
         state_cmd=FakeCommand(
             {
@@ -93,6 +98,43 @@ def test_arm_zero_period_rejected():
     with pytest.raises(ValueError, match="rest_ticks"):
         endstop.arm(0.0)
     assert mcu.query_cmd.sent == []
+    assert mcu.get_printer().lookup_object("motion_engine").calls == []
+
+
+class _OrderedEngine(FakeEngine):
+    def __init__(self, log):
+        super().__init__()
+        self._log = log
+
+    def note_endstop_arm(self, endstop_mcu, endstop_id):
+        self._log.append(("note_arm", endstop_mcu, endstop_id))
+
+
+class _LoggingCommand(FakeCommand):
+    def __init__(self, log):
+        super().__init__()
+        self._log = log
+
+    def send(self, args):
+        self._log.append(("query_endstop", list(args)))
+        return super().send(args)
+
+
+def test_arm_notes_engine_before_sending_query_endstop():
+    log = []
+    mcu = _fake_mcu(engine=_OrderedEngine(log), handle=5)
+    mcu.query_cmd = _LoggingCommand(log)
+    endstop = _connected(mcu, MotionEndstop(_pin_params(mcu), 3))
+    endstop.arm(0.001)
+    assert log == [("note_arm", 5, 3), ("query_endstop", [0, 1000])]
+
+
+def test_disarm_sends_zero_rest_ticks_to_clear_suppression():
+    mcu = _fake_mcu()
+    endstop = _connected(mcu, MotionEndstop(_pin_params(mcu), 3))
+    endstop.arm(0.001)
+    endstop.disarm()
+    assert mcu.query_cmd.sent == [[0, 1000], [0, 0]]
 
 
 def test_query_trip_state_not_tripped():

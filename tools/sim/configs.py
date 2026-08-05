@@ -558,6 +558,8 @@ DUAL_MOTOR_X_MOTORS = ("xm_a", "xm_b")
 DUAL_MOTOR_Y_MOTORS = ("ym_a", "ym_b")
 DUAL_MOTOR_X_ENDSTOPS = ((0, 10), (0, 13))
 DUAL_MOTOR_Y_ENDSTOPS = ((0, 11), (0, 14))
+DUAL_MOTOR_X_STEP_PINS = ((0, 30), (0, 33))
+DUAL_MOTOR_Y_STEP_PINS = ((0, 36), (0, 39))
 DUAL_MOTOR_POSITION_ENDSTOP = 0.0
 DUAL_MOTOR_ROTATION_DISTANCE = 40.0
 DUAL_MOTOR_MICROSTEPS = 16
@@ -569,13 +571,15 @@ def dual_motor_xy_config(h7_pty: str, gcode_dir: str) -> str:
     is 0 so every G28 is a single approach the test can trip by hand."""
     motor_sections = ""
     lane_motors = DUAL_MOTOR_X_MOTORS + DUAL_MOTOR_Y_MOTORS
+    step_pins = DUAL_MOTOR_X_STEP_PINS + DUAL_MOTOR_Y_STEP_PINS
     for i, name in enumerate(lane_motors):
+        chip, step_line = step_pins[i]
         motor_sections += f"""
 [motor {name}]
 drive: stepper
-step_pin: gpiochip0/gpio{30 + 3 * i}
-dir_pin: gpiochip0/gpio{31 + 3 * i}
-enable_pin: !gpiochip0/gpio{32 + 3 * i}
+step_pin: gpiochip{chip}/gpio{step_line}
+dir_pin: gpiochip{chip}/gpio{step_line + 1}
+enable_pin: !gpiochip{chip}/gpio{step_line + 2}
 microsteps: {DUAL_MOTOR_MICROSTEPS}
 rotation_distance: {DUAL_MOTOR_ROTATION_DISTANCE}
 """

@@ -65,14 +65,10 @@ impl PyMotionEngine {
         // restarts the stream odometer's follower coordinate at.
         self.send_serial_position_seeds(self.machine_from_gcode(start_pos))?;
 
-        let window_start_host = {
-            let arms = std::mem::take(&mut *self.homing.recent_arms.lock_ok());
-            arms.iter()
-                .filter(|(arm_mcu, arm_id, _)| remaining_trips.contains(&(*arm_mcu, *arm_id)))
-                .map(|&(_, _, arm_host)| arm_host)
-                .min_by(f64::total_cmp)
-                .unwrap_or_else(|| self.router.lock_ok().host_now_secs())
-        };
+        let window_start_host = self
+            .homing
+            .take_arm_window_start(&remaining_trips)
+            .unwrap_or_else(|| self.router.lock_ok().host_now_secs());
 
         *self.homing.active_drip_cohort.lock_ok() = Some(cohort);
 
@@ -121,6 +117,10 @@ impl PyMotionEngine {
     }
     fn motion_drained(&self) -> bool {
         self.drain.drained()
+    }
+    fn note_endstop_arm(&self, endstop_mcu: u32, endstop_id: u8) {
+        let host_now = self.router.lock_ok().host_now_secs();
+        self.homing.note_arm(endstop_mcu, endstop_id, host_now);
     }
     fn home_axis_poll(&self) -> PyResult<Option<([f64; 3], [f64; 3], u64)>> {
         let rx = {

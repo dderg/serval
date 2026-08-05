@@ -51,6 +51,14 @@ impl HomingState {
         arms.push((mcu, endstop_id, host_secs));
     }
 
+    pub(super) fn take_arm_window_start(&self, trips: &[(u32, u8)]) -> Option<f64> {
+        let arms = std::mem::take(&mut *self.recent_arms.lock_ok());
+        arms.iter()
+            .filter(|(mcu, endstop_id, _)| trips.contains(&(*mcu, *endstop_id)))
+            .map(|&(_, _, host_secs)| host_secs)
+            .min_by(f64::total_cmp)
+    }
+
     pub(super) fn drop_buffered_trips_for(&self, mcu: u32, endstop_id: u8) {
         self.pending_trips
             .lock_ok()

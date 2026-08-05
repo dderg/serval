@@ -742,3 +742,6 @@ mod kinematics_calls_tests;
 
 #[cfg(test)]
 mod submit_nudge_validation_tests;
+
+#[cfg(test)]
+mod homing_state_tests;

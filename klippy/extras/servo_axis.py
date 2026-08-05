@@ -1,7 +1,7 @@
 import collections
 
 from .. import pins
-from ..motion_endstop import allocate_provider_id
+from ..motion_endstop import allocate_provider_id, entry_endstops
 from ..rail import BaseRail
 from . import servo_param
 
@@ -330,7 +330,7 @@ class ServoRail(BaseRail):
     def trip_move_begin(self, entry):
         node = self._engine_node()
         engine = self.printer.lookup_object("motion_engine")
-        (endstop,) = entry["endstops"]
+        (endstop,) = entry_endstops(entry)
         for motor in self.motors:
             _, torque_trip_tenth_pct = motor.get_homing_drive_limits()
             engine.arm_sensorless_endstop(
@@ -344,7 +344,7 @@ class ServoRail(BaseRail):
     def trip_move_end(self, entry):
         node = self._engine_node()
         engine = self.printer.lookup_object("motion_engine")
-        (endstop,) = entry["endstops"]
+        (endstop,) = entry_endstops(entry)
         for motor in self.motors:
             engine.disarm_sensorless_endstop(
                 node.get_engine_handle(),

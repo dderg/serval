@@ -204,6 +204,24 @@ stepper_suppress_set(uint8_t motor, uint8_t stepper)
 }
 
 void
+stepper_suppress_clear(uint8_t motor, uint8_t stepper)
+{
+    if (motor >= RUNTIME_MOTOR_COUNT
+        || stepper >= RUNTIME_MAX_STEPPERS_PER_MOTOR)
+        shutdown("stepper suppress index out of range");
+    runtime_motor_suppress_mask[motor] &= (uint8_t)~(1u << stepper);
+}
+
+__attribute__((used, externally_visible))
+uint8_t
+stepper_suppress_mask(uint8_t motor)
+{
+    if (motor >= RUNTIME_MOTOR_COUNT)
+        shutdown("stepper suppress index out of range");
+    return runtime_motor_suppress_mask[motor];
+}
+
+void
 stepper_suppress_clear_all(void)
 {
     for (uint8_t i = 0; i < RUNTIME_MOTOR_COUNT; i++)

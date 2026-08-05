@@ -1,6 +1,7 @@
 #include "autoconf.h"
 #include "basecmd.h"
 #include "board/gpio.h"
+#include "board/irq.h"
 #include "board/misc.h"
 #include "command.h"
 #include "sched.h"
@@ -30,6 +31,7 @@ struct endstop {
     uint8_t invert;
     uint8_t armed;
     uint8_t trip_pending;
+    uint8_t trip_processing;
     uint8_t tripped;
     uint8_t motor;
     uint8_t stepper;
@@ -93,6 +95,7 @@ command_config_endstop(uint32_t *args)
     e->invert = args[4] ? 1 : 0;
     e->armed = 0;
     e->trip_pending = 0;
+    e->trip_processing = 0;
     e->tripped = 0;
     e->trip_clock = 0;
 
@@ -131,6 +134,8 @@ command_query_endstop(uint32_t *args)
     e->rest_ticks = args[1];
     if (!e->rest_ticks) {
         e->armed = 0;
+        if (e->motor != ENDSTOP_UNBOUND)
+            stepper_suppress_clear(e->motor, e->stepper);
         return;
     }
     if (e->motor != ENDSTOP_UNBOUND
@@ -195,9 +200,21 @@ endstop_trip_task(void)
         return;
     uint8_t oid;
     struct endstop *e;
-    uint8_t needs_stop = 0;
+    uint8_t any_processing = 0;
+    irqstatus_t flag = irq_save();
     foreach_oid(oid, e, command_config_endstop) {
         if (!e->trip_pending)
+            continue;
+        e->trip_pending = 0;
+        e->trip_processing = 1;
+        any_processing = 1;
+    }
+    irq_restore(flag);
+    if (!any_processing)
+        return;
+    uint8_t needs_stop = 0;
+    foreach_oid(oid, e, command_config_endstop) {
+        if (!e->trip_processing)
             continue;
         if (e->motor != ENDSTOP_UNBOUND && endstop_has_armed_lane_peer(e))
             stepper_suppress_set(e->motor, e->stepper);
@@ -209,9 +226,9 @@ endstop_trip_task(void)
         (void)handle_stop_inner(&discard_clock);
     }
     foreach_oid(oid, e, command_config_endstop) {
-        if (!e->trip_pending)
+        if (!e->trip_processing)
             continue;
-        e->trip_pending = 0;
+        e->trip_processing = 0;
         mcu_transport_emit_endstop_trip(e->endstop_id, e->trip_clock);
     }
 }

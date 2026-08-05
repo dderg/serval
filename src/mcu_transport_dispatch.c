@@ -410,9 +410,6 @@ handle_stop_inner(uint64_t *discard_clock)
 {
     *discard_clock = 0;
 #if CONFIG_MOTION_RUNTIME
-    irqstatus_t suppress_flag = irq_save();
-    stepper_suppress_clear_all();
-    irq_restore(suppress_flag);
     int32_t rc = RUNTIME_ERR_NOT_INIT;
     if (runtime_handle) {
         irqstatus_t flag = irq_save();

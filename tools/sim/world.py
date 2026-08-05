@@ -120,6 +120,21 @@ class SimControl:
             f"set_gpio_input chip={chip} line={line} value={value}"
         )
 
+    def gpio_edges(self, chip: int, line: int) -> int:
+        response = self.send(f"get_gpio_edges chip={chip} line={line}")
+        if not response.startswith("edges="):
+            raise SimError(
+                f"get_gpio_edges chip={chip} line={line}: {response!r}"
+            )
+        return int(response.split()[0].split("=", 1)[1])
+
+    def enable_step_pin_emit(self) -> None:
+        """Arm the runtime's physical per-stepper step/dir pin output. Off
+        by default: the ioctl-per-edge traffic distorts sim timing."""
+        response = self.send("set_step_emit enable=1")
+        if response.strip() != "ok":
+            raise SimError(f"set_step_emit enable=1: {response!r}")
+
     def get_step_times(self, line: int) -> dict[str, int]:
         response = self.send(f"get_step_times line={line}")
         values = dict(item.split("=", 1) for item in response.split())

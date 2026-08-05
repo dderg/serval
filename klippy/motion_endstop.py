@@ -11,6 +11,25 @@ _TRIP_STOP_OBJECT = "motion_endstop_trip_stop"
 
 TRIGGER_REASON_ENDSTOP = 1
 TRIGGER_REASON_HOST_DISARM = 2
+DISARM_REST_TICKS = 0
+
+
+def endstop_entry(endstops, provider, trigger_position):
+    entry = {
+        "endstops": list(endstops),
+        "provider": provider,
+        "trigger_position": trigger_position,
+    }
+    if len(entry["endstops"]) == 1:
+        entry["endstop"] = entry["endstops"][0]
+    return entry
+
+
+def entry_endstops(entry):
+    endstops = entry.get("endstops")
+    if endstops is None:
+        return [entry["endstop"]]
+    return endstops
 
 
 class MotorBinding:
@@ -106,9 +125,12 @@ class MotionEndstop:
             )
         if self._trip_stop is not None:
             self._trip_stop.arm()
+        engine = self.mcu.get_printer().lookup_object("motion_engine")
+        engine.note_endstop_arm(self.engine_mcu_handle(), self.endstop_id)
         self._query_cmd.send([self.oid, rest_ticks])
 
     def disarm(self):
+        self._query_cmd.send([self.oid, DISARM_REST_TICKS])
         if self._trip_stop is not None:
             self._trip_stop.disarm()
 

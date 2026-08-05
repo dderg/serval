@@ -3,11 +3,14 @@ import logging
 
 from klippy import engine_wait, structured_log
 from klippy.extras.danger_options import get_danger_options
+from klippy.mcu import STEPPING_MODE_STEPCOMPRESS
 from klippy.motion_endstop import (
     AXIS_ENDSTOP_IDS,
     MotionEndstop,
     MotorBinding,
     allocate_provider_id,
+    endstop_entry,
+    entry_endstops,
 )
 
 HOMING_POLL_PERIOD = 0.001
@@ -452,7 +455,7 @@ class Homing:
         query_endstops = self.printer.load_object(config, "query_endstops")
         for axis_index in sorted(self._axes):
             axis_name = "xyz"[axis_index]
-            for endstop in self._axes[axis_index]["endstops"]:
+            for endstop in entry_endstops(self._axes[axis_index]):
                 motor_name = getattr(endstop, "motor_name", None)
                 query_endstops.register_endstop(
                     endstop,
@@ -482,13 +485,11 @@ class Homing:
                     pin_params["chip_name"],
                 )
             )
-        return {
-            "endstops": [
-                MotionEndstop(pin_params, AXIS_ENDSTOP_IDS[axis_index])
-            ],
-            "provider": None,
-            "trigger_position": None,
-        }
+        return endstop_entry(
+            [MotionEndstop(pin_params, AXIS_ENDSTOP_IDS[axis_index])],
+            None,
+            None,
+        )
 
     def _keyed_entry(self, ppins, kin, axis_config, axis_index, endstop_pin):
         section = axis_config.get_name()
@@ -514,6 +515,13 @@ class Homing:
                         lane_mcu.get_name(),
                     )
                 )
+        if lane_mcu.get_stepping_mode() == STEPPING_MODE_STEPCOMPRESS:
+            raise axis_config.error(
+                "[%s] keyed endstop_pin: MCU '%s' runs classic stepcompress"
+                " stepping, whose endstops stop every stepper at once; a keyed"
+                " endstop requires motion-runtime stepping"
+                % (section, lane_mcu.get_name())
+            )
         endstops = []
         for stepper_idx, motor_name in enumerate(motor_names):
             pin_params = ppins.parse_pin(
@@ -548,11 +556,7 @@ class Homing:
                     ),
                 )
             )
-        return {
-            "endstops": endstops,
-            "provider": None,
-            "trigger_position": None,
-        }
+        return endstop_entry(endstops, None, None)
 
     def _provider_entry(self, axis_config, axis_index, chip, pin_params):
         endstop = chip.setup_motion_endstop(pin_params, axis_index)
@@ -565,11 +569,7 @@ class Homing:
                     " '%s' supplies the trigger position"
                     % (axis_config.get_name(), pin_params["chip_name"])
                 )
-        return {
-            "endstops": [endstop],
-            "provider": chip,
-            "trigger_position": trigger_position,
-        }
+        return endstop_entry([endstop], chip, trigger_position)
 
     def cmd_G28(self, gcmd):
         if self._axes is None:
@@ -835,10 +835,7 @@ class Homing:
     def trip_move(
         self, gcmd, toolhead, engine, axis, direction, speed, max_travel, entry
     ):
-        entry_endstops = entry.get("endstops")
-        endstops = (
-            entry_endstops if entry_endstops is not None else [entry["endstop"]]
-        )
+        endstops = entry_endstops(entry)
         for endstop in endstops:
             if endstop.engine_mcu_handle() is None:
                 raise gcmd.error(

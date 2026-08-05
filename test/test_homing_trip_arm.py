@@ -1,8 +1,20 @@
+import types
+
 import pytest
 from fakes import FakeEngine, FakeGcmd, FakePrinter, FakeReactor
 from fakes import FakeToolhead as _FakeToolhead
 
+from klippy.extras import homing as homing_mod
 from klippy.extras.homing import Homing
+
+
+@pytest.fixture
+def patched_danger(monkeypatch):
+    monkeypatch.setattr(
+        homing_mod,
+        "get_danger_options",
+        lambda: types.SimpleNamespace(homing_trip_deadline_margin=5.0),
+    )
 
 
 class ArmReached(Exception):
@@ -74,3 +86,83 @@ def test_trip_move_waits_for_queued_motion_before_arming():
     with pytest.raises(ArmReached):
         run_trip_move(endstop)
     assert endstop.calls.index("wait_moves") < endstop.calls.index("arm")
+
+
+class DisarmTrackingEndstop:
+    def __init__(self, name, arm_error=None):
+        self.name = name
+        self.endstop_id = 0
+        self.arm_error = arm_error
+        self.armed = False
+        self.disarms = 0
+
+    def engine_mcu_handle(self):
+        return 1
+
+    def is_triggered(self):
+        return False
+
+    def query_trip_state(self):
+        return {"tripped": True, "trip_clock": 11}
+
+    def arm(self, poll_period):
+        if self.arm_error is not None:
+            raise self.arm_error
+        self.armed = True
+
+    def disarm(self):
+        self.disarms += 1
+
+
+def run_trip_move_with(endstops, engine):
+    homing = Homing.__new__(Homing)
+    homing.printer = FakePrinter(reactor=FakeReactor())
+    toolhead = _FakeToolhead(position=[0.0, 0.0, 0.0, 0.0])
+    entry = {"endstops": list(endstops), "provider": None}
+    return homing.trip_move(
+        FakeGcmd(error=RuntimeError),
+        toolhead,
+        engine,
+        2,
+        -1,
+        5.0,
+        40.0,
+        entry,
+    )
+
+
+class TripEngine:
+    def __init__(self, poll_result=None):
+        self._poll_result = poll_result
+        self.calls = []
+
+    def motion_drained(self):
+        return True
+
+    def home_axis_start(self, axis, direction, speed, max_travel, endstops):
+        self.calls.append("home_axis_start")
+
+    def home_axis_poll(self):
+        return self._poll_result
+
+    def home_abort(self):
+        return [0.0, 0.0, 0.0]
+
+
+def test_every_endstop_disarms_after_a_successful_trip(patched_danger):
+    endstops = [DisarmTrackingEndstop("a"), DisarmTrackingEndstop("b")]
+    engine = TripEngine(((0.0, 0.0, 1.0), (0.0, 0.0, 0.9), 11))
+    trip_pos, final_pos = run_trip_move_with(endstops, engine)
+    assert (trip_pos, final_pos) == ((0.0, 0.0, 1.0), (0.0, 0.0, 0.9))
+    assert [e.disarms for e in endstops] == [1, 1]
+
+
+def test_every_endstop_disarms_when_one_arm_raises(patched_danger):
+    endstops = [
+        DisarmTrackingEndstop("a"),
+        DisarmTrackingEndstop("b", arm_error=ArmReached()),
+        DisarmTrackingEndstop("c"),
+    ]
+    with pytest.raises(ArmReached):
+        run_trip_move_with(endstops, TripEngine())
+    assert [e.disarms for e in endstops] == [1, 1, 1]
