@@ -104,11 +104,11 @@ command_config_endstop(uint32_t *args)
     uint8_t motor_unbound = motor == ENDSTOP_UNBOUND;
     uint8_t stepper_unbound = stepper == ENDSTOP_UNBOUND;
     if (motor_unbound != stepper_unbound)
-        shutdown("config_endstop motor and stepper must both be bound");
-    if (!motor_unbound && motor >= RUNTIME_MOTOR_COUNT)
-        shutdown("config_endstop motor out of range");
-    if (!stepper_unbound && stepper >= RUNTIME_MAX_STEPPERS_PER_MOTOR)
-        shutdown("config_endstop stepper out of range");
+        shutdown("config_endstop binding must be complete");
+    if (!motor_unbound
+        && (motor >= RUNTIME_MOTOR_COUNT
+            || stepper >= RUNTIME_MAX_STEPPERS_PER_MOTOR))
+        shutdown("config_endstop binding out of range");
     e->motor = motor;
     e->stepper = stepper;
     e->ts = NULL;
@@ -135,7 +135,7 @@ command_query_endstop(uint32_t *args)
     if (!e->rest_ticks) {
         e->armed = 0;
         if (e->motor != ENDSTOP_UNBOUND)
-            stepper_suppress_clear(e->motor, e->stepper);
+            stepper_suppress_update(e->motor, e->stepper, 0);
         return;
     }
     if (e->motor != ENDSTOP_UNBOUND
@@ -217,7 +217,7 @@ endstop_trip_task(void)
         if (!e->trip_processing)
             continue;
         if (e->motor != ENDSTOP_UNBOUND && endstop_has_armed_lane_peer(e))
-            stepper_suppress_set(e->motor, e->stepper);
+            stepper_suppress_update(e->motor, e->stepper, 1);
         else
             needs_stop = 1;
     }

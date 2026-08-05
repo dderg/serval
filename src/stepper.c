@@ -195,21 +195,16 @@ runtime_motor_binding_count(uint8_t motor_idx)
 }
 
 void
-stepper_suppress_set(uint8_t motor, uint8_t stepper)
+stepper_suppress_update(uint8_t motor, uint8_t stepper, uint8_t suppress)
 {
     if (motor >= RUNTIME_MOTOR_COUNT
         || stepper >= RUNTIME_MAX_STEPPERS_PER_MOTOR)
         shutdown("stepper suppress index out of range");
-    runtime_motor_suppress_mask[motor] |= (uint8_t)(1u << stepper);
-}
-
-void
-stepper_suppress_clear(uint8_t motor, uint8_t stepper)
-{
-    if (motor >= RUNTIME_MOTOR_COUNT
-        || stepper >= RUNTIME_MAX_STEPPERS_PER_MOTOR)
-        shutdown("stepper suppress index out of range");
-    runtime_motor_suppress_mask[motor] &= (uint8_t)~(1u << stepper);
+    uint8_t bit = (uint8_t)(1u << stepper);
+    if (suppress)
+        runtime_motor_suppress_mask[motor] |= bit;
+    else
+        runtime_motor_suppress_mask[motor] &= (uint8_t)~bit;
 }
 
 __attribute__((used, externally_visible))

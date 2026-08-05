@@ -14,8 +14,7 @@
 
 #if CONFIG_MOTION_RUNTIME
 uint8_t runtime_motor_binding_count(uint8_t motor_idx);
-void stepper_suppress_set(uint8_t motor, uint8_t stepper);
-void stepper_suppress_clear(uint8_t motor, uint8_t stepper);
+void stepper_suppress_update(uint8_t motor, uint8_t stepper, uint8_t suppress);
 void stepper_suppress_clear_all(void);
 uint8_t stepper_suppress_mask(uint8_t motor);
 #else
@@ -27,19 +26,12 @@ runtime_motor_binding_count(uint8_t motor_idx)
 }
 
 static inline void
-stepper_suppress_set(uint8_t motor, uint8_t stepper)
+stepper_suppress_update(uint8_t motor, uint8_t stepper, uint8_t suppress)
 {
     (void)motor;
     (void)stepper;
+    (void)suppress;
 }
-
-static inline void
-stepper_suppress_clear(uint8_t motor, uint8_t stepper)
-{
-    (void)motor;
-    (void)stepper;
-}
-
 static inline void
 stepper_suppress_clear_all(void)
 {
