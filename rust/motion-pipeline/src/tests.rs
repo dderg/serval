@@ -97,9 +97,33 @@ fn replay(
     t_start: f64,
     moves: &[geometry::Move],
 ) -> Vec<ShapedSegment> {
+    replay_stream(
+        config,
+        chains,
+        home,
+        t_start,
+        moves.iter().map(|m| m.clone().into()).collect(),
+    )
+    .into_iter()
+    .filter_map(|item| match item {
+        ShapedItem::Seg(seg) => Some(seg),
+        ShapedItem::Parked | ShapedItem::Control(_) => None,
+    })
+    .collect()
+}
+
+/// [`replay`] without the segment filter — the marker stream the dispatcher
+/// sees, park declaration included.
+fn replay_stream(
+    config: StreamConfig,
+    chains: AxisChainSet,
+    home: &[f64],
+    t_start: f64,
+    items: Vec<StreamInput>,
+) -> Vec<ShapedItem> {
     let (raw_tx, raw_rx) = unbounded();
-    for m in moves {
-        raw_tx.send(m.clone().into()).unwrap();
+    for item in items {
+        raw_tx.send(item).unwrap();
     }
     drop(raw_tx);
 
@@ -125,13 +149,7 @@ fn replay(
     let (shaped_tx, shaped_rx) = unbounded();
     Shaper::new(chains).run(lowered_rx, shaped_tx);
 
-    shaped_rx
-        .into_iter()
-        .filter_map(|item| match item {
-            ShapedItem::Seg(seg) => Some(seg),
-            ShapedItem::Control(_) => None,
-        })
-        .collect()
+    shaped_rx.into_iter().collect()
 }
 
 fn boundary_speed(prev: &ShapedSegment, next: &ShapedSegment) -> f64 {
@@ -800,7 +818,7 @@ fn smooth_shaper_second_batch_window_before_stream_start_clamps() {
         .into_iter()
         .filter_map(|item| match item {
             ShapedItem::Seg(seg) => Some(seg),
-            ShapedItem::Control(_) => None,
+            ShapedItem::Parked | ShapedItem::Control(_) => None,
         })
         .collect();
     assert_eq!(segs.len(), 8);
@@ -959,7 +977,7 @@ fn replay_inputs(
         .into_iter()
         .filter_map(|item| match item {
             ShapedItem::Seg(seg) => Some(seg),
-            ShapedItem::Control(_) => None,
+            ShapedItem::Parked | ShapedItem::Control(_) => None,
         })
         .collect()
 }
@@ -1049,6 +1067,62 @@ fn follower_chains_without_kernels() -> AxisChainSet {
         chains: vec![trajectory::CompiledChain::default(); 4],
         followers: vec![(3, vec![0, 1, 2])],
     }
+}
+
+/// The dispatcher learns a stop is a park from the drain itself. Reading it
+/// off the committed track's end derivative cannot work: a trailing
+/// derivative-gain stage (pressure advance) leaves the parked extruder's
+/// commanded velocity at `k·ë`, nonzero wherever the profile stops with
+/// acceleration still applied — which unlimited jerk makes every stop.
+#[test]
+fn a_drain_declares_the_park_after_its_last_segment() {
+    let mut config = cfg();
+    config.max_extrude_only_velocity_mm_s = 100.0;
+    config.max_extrude_only_accel_mm_s2 = 1000.0;
+    config.limits = VelocityLimits::try_new(
+        300.0,
+        5000.0,
+        geometry::corner_deviation_from_scv(5.0, 5000.0),
+        f64::INFINITY,
+    )
+    .unwrap();
+    let chains = AxisChainSet {
+        chains: vec![
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
+                "pa",
+                &trajectory::algos::LinearPressureAdvance,
+                vec![0.05],
+            )])
+            .expect("single post-processor always compiles"),
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    };
+
+    let items = replay_stream(
+        config,
+        chains,
+        &[0.0, 0.0, 0.0, 0.0],
+        0.0,
+        vec![
+            line(1, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 5.0).into(),
+            line(2, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 1.0).into(),
+            line(3, [10.0, 0.0, 0.0], [20.0, 0.0, 0.0], 0.0).into(),
+        ],
+    );
+
+    assert!(
+        matches!(items.last(), Some(ShapedItem::Parked)),
+        "the drain must declare the park after its last segment"
+    );
+    assert!(
+        items[..items.len() - 1]
+            .iter()
+            .all(|item| !matches!(item, ShapedItem::Parked)),
+        "only the drain parks: no marker may precede its segments"
+    );
 }
 
 fn sampled_planar_path_length(segs: &[ShapedSegment]) -> f64 {
@@ -1809,39 +1883,11 @@ fn replay_items(
     home: &[f64],
     items: Vec<StreamInput>,
 ) -> Vec<ShapedSegment> {
-    let (raw_tx, raw_rx) = unbounded();
-    for item in items {
-        raw_tx.send(item).unwrap();
-    }
-    drop(raw_tx);
-
-    let (fitted_tx, fitted_rx) = unbounded();
-    FitStage::new(config.corner).run(raw_rx, fitted_tx);
-
-    let (planned_tx, planned_rx) = unbounded();
-    Planner::new(config).run(fitted_rx, planned_tx);
-
-    let (lowered_tx, lowered_rx) = unbounded();
-    run_lowerer(
-        planned_rx,
-        lowered_tx,
-        FitTol {
-            pos_mm: config.fit_tol_mm,
-            accel_mm_s2: config.fit_tol_accel_mm_s2,
-        },
-        chains.clone(),
-        home.to_vec(),
-        0.0,
-    );
-
-    let (shaped_tx, shaped_rx) = unbounded();
-    Shaper::new(chains).run(lowered_rx, shaped_tx);
-
-    shaped_rx
+    replay_stream(config, chains, home, 0.0, items)
         .into_iter()
         .filter_map(|item| match item {
             ShapedItem::Seg(seg) => Some(seg),
-            ShapedItem::Control(_) => None,
+            ShapedItem::Parked | ShapedItem::Control(_) => None,
         })
         .collect()
 }
