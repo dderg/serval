@@ -151,6 +151,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
+max_jerk: 2000
 max_z_velocity: 10
 max_z_accel: 30
 
@@ -224,6 +225,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 2800
 max_accel: 100000
+max_jerk: 200000
 # shaper_x kernel share 0.653mm at 100000mm/s^2 + the old scv-100 blend
 # budget 0.041mm (corner_deviation is the total incl. the kernel share).
 corner_deviation: 0.695
@@ -315,6 +317,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 1000
 max_accel: 10000
+max_jerk: 20000
 # shaper kernel share 0.173mm at 10000mm/s^2 + the old scv-30 blend
 # budget 0.037mm (corner_deviation is the total incl. the kernel share).
 corner_deviation: 0.21
@@ -428,6 +431,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
+max_jerk: 2000
 max_z_velocity: 10
 max_z_accel: 30
 
@@ -504,6 +508,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
+max_jerk: 2000
 max_z_velocity: 10
 max_z_accel: 30
 
@@ -563,6 +568,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
+max_jerk: 2000
 max_z_velocity: 10
 max_z_accel: 30
 
@@ -647,6 +653,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
+max_jerk: 2000
 max_z_velocity: 10
 max_z_accel: 30
 
@@ -777,6 +784,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 300
 max_accel: 3000
+max_jerk: 6000
 max_z_velocity: 10
 max_z_accel: 100
 # is_xy's kernel share (0.0196mm at 3000mm/s^2) + the old default blend
@@ -904,6 +912,7 @@ serial: {f4_pty}
 [printer]
 max_velocity: 500
 max_accel: 5000
+max_jerk: 10000
 max_z_velocity: 50
 max_z_accel: 500
 corner_deviation: 0.023
@@ -1000,6 +1009,7 @@ stepcompress_sample_rate: {STEPCOMPRESS_SAMPLE_RATE_HZ}
 [printer]
 max_velocity: 100
 max_accel: 1000
+max_jerk: 2000
 max_z_velocity: 10
 max_z_accel: 30
 
@@ -1092,6 +1102,7 @@ stepcompress_sample_rate: {STEPCOMPRESS_EXTRUDER_SAMPLE_RATE_HZ}
 [printer]
 max_velocity: 100
 max_accel: 1000
+max_jerk: 2000
 max_z_velocity: 10
 max_z_accel: 30
 
@@ -1213,6 +1224,7 @@ stepcompress_sample_rate: {STEPCOMPRESS_COREXY_SAMPLE_RATE_HZ}
 [printer]
 max_velocity: 600
 max_accel: 20000
+max_jerk: 40000
 max_z_velocity: 20
 max_z_accel: 500
 corner_deviation: 0.04
@@ -1435,6 +1447,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
+max_jerk: 2000
 max_z_velocity: 10
 max_z_accel: 30
 
@@ -1517,6 +1530,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
+max_jerk: 2000
 max_z_velocity: 10
 max_z_accel: 100
 
@@ -1732,6 +1746,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 300
 max_accel: 3000
+max_jerk: 6000
 max_z_velocity: 5
 max_z_accel: 100
 
@@ -1947,6 +1962,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 300
 max_accel: 3000
+max_jerk: 6000
 max_z_velocity: 10
 max_z_accel: 100
 corner_deviation: 0.023
