@@ -203,6 +203,10 @@ pub enum LoweredItem {
 /// Shaper → dispatcher.
 pub enum ShapedItem {
     Seg(ShapedSegment),
+    /// Everything before it is committed and planned to rest, with the
+    /// chains' trailing decay carried to rest with it: the machine is stopped
+    /// at the last segment's end.
+    Parked,
     Control(Control),
 }
 

@@ -51,6 +51,9 @@ pub enum DispatchError {
 pub trait SegmentSink: Send + 'static {
     fn dispatch(&mut self, seg: &ShapedSegment) -> Result<(), DispatchError>;
     fn dispatch_nudge(&mut self, mcu_id: u32, piece: &NudgePiece) -> Result<(), DispatchError>;
+    /// The committed trajectory is planned to rest through its end; a resume
+    /// across the idle gap that follows may re-anchor the timeline forward.
+    fn mark_parked(&mut self) {}
 }
 
 /// State the ingress, dispatcher, and worker handle share. Everything here is
@@ -104,6 +107,7 @@ impl<S: SegmentSink> Dispatcher<S> {
         while let Ok(item) = input.recv() {
             match item {
                 ShapedItem::Seg(seg) => self.handle_segment(&seg),
+                ShapedItem::Parked => self.sink.mark_parked(),
                 ShapedItem::Control(ctrl) => self.handle_control(ctrl),
             }
         }

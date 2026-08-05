@@ -78,7 +78,7 @@ enum AnchorClass {
 pub struct Anchor {
     t0: Option<f64>,
     last_t_end: f64,
-    last_ends_at_rest: bool,
+    parked: bool,
     /// Runway the next fresh anchor starts the timeline on, earned by the
     /// stream's own history — see [`RESUME_LEAD_GROWTH`].
     lead_secs: f64,
@@ -89,7 +89,7 @@ impl Anchor {
         Self {
             t0: None,
             last_t_end: 0.0,
-            last_ends_at_rest: true,
+            parked: true,
             lead_secs: DEFAULT_LEAD_SECS,
         }
     }
@@ -108,7 +108,7 @@ impl Anchor {
         let margin_s = t0 + seg_t_start - host_now;
         if margin_s >= LOW_MARGIN_WARN_SECS {
             AnchorClass::Continuation { margin_s }
-        } else if self.last_ends_at_rest {
+        } else if self.parked {
             AnchorClass::IdleResume { margin_s }
         } else if margin_s < 0.0 {
             AnchorClass::UnderrunFatal {
@@ -123,27 +123,25 @@ impl Anchor {
     /// Map a committed segment's stream time onto the absolute host clock.
     /// `host_now` is the current playhead in host-monotonic seconds
     /// (`router.host_now_secs()`); the dispatched lead reconciles against the
-    /// same clock. `ends_at_rest` reports whether this segment's trajectory
-    /// is at rest at its end — it decides how the *next* segment's underrun
-    /// is judged. Returns `(t0, fresh)` where the segment's absolute start is
+    /// same clock. Returns `(t0, fresh)` where the segment's absolute start is
     /// `t0 + seg_t_start` and `fresh` marks a (re)anchor.
     ///
     /// The timeline floats ahead of the playhead and is only re-anchored when
     /// it must be: the first segment, a backward jump (idle restart), or an
     /// idle resume — the playhead overran the committed end (or the margin
-    /// fell below `LOW_MARGIN_WARN_SECS`) while the machine sat **at rest**,
-    /// where a forward re-anchor loses nothing. The same conditions arriving
-    /// while the previous segment ended in motion mean the producer fell
-    /// behind mid-stream and continuous motion is already lost: that aborts
-    /// the process instead of hiding the gap behind a re-anchor. A healthy
-    /// stream never gets near the floor because the committed frontier stays
-    /// `buffer_time` ahead of the playhead.
+    /// fell below `LOW_MARGIN_WARN_SECS`) after the stream drained and
+    /// [`Anchor::mark_parked`] declared the machine stopped, where a forward
+    /// re-anchor loses nothing. The same conditions arriving with committed
+    /// motion past the last park mean the producer fell behind mid-stream and
+    /// continuous motion is already lost: that aborts the process instead of
+    /// hiding the gap behind a re-anchor. A healthy stream never gets near
+    /// the floor because the committed frontier stays `buffer_time` ahead of
+    /// the playhead.
     pub fn anchor_segment(
         &mut self,
         seg_t_start: f64,
         seg_t_end: f64,
         host_now: f64,
-        ends_at_rest: bool,
     ) -> (f64, StreamEpoch) {
         let epoch = match self.classify(seg_t_start, host_now) {
             AnchorClass::Reposition => StreamEpoch::Reposition,
@@ -226,8 +224,20 @@ impl Anchor {
             );
         }
         self.last_t_end = seg_t_end;
-        self.last_ends_at_rest = ends_at_rest;
+        self.parked = false;
         (self.t0.unwrap(), epoch)
+    }
+
+    /// The stream drained: everything committed is planned to rest and the
+    /// chains' trailing decay is carried to rest with it, so the machine is
+    /// stopped at `last_t_end` and a later resume may re-anchor forward.
+    /// Declared by the drain rather than read off the committed track's end
+    /// derivative: a trailing derivative-gain stage (pressure advance) leaves
+    /// the parked extruder's commanded velocity at `k·ë`, which is nonzero
+    /// wherever the profile stops with acceleration still applied — every
+    /// stop, once jerk is unlimited.
+    pub fn mark_parked(&mut self) {
+        self.parked = true;
     }
 
     pub fn t0(&self) -> Option<f64> {

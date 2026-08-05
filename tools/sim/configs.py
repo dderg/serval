@@ -1668,7 +1668,11 @@ M400
 
 
 def heaters_config(
-    h7_pty: str, gcode_dir: str, control: str = "pid", heated_fan: bool = False
+    h7_pty: str,
+    gcode_dir: str,
+    control: str = "pid",
+    heated_fan: bool = False,
+    max_jerk: float = 6000,
 ) -> str:
     """Cartesian world carrying the heater/fan/pwm zoo the legacy batch
     suite (test/klippy) covered: extruder heater (pid or mpc), chamber
@@ -1746,7 +1750,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 300
 max_accel: 3000
-max_jerk: 6000
+max_jerk: {max_jerk}
 max_z_velocity: 5
 max_z_accel: 100
 
