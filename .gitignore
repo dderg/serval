@@ -18,6 +18,11 @@ klippy/plugins/*
 .vscode
 .idea/*
 
+# Test-run logs kept for inspection: per-gate logs from scripts/ci.sh, and
+# whole simulator worlds from `tools/sim/run.sh test --keep-logs`
+.ci-logs/
+.sim-logs/
+
 # docs
 site/
 .env/
