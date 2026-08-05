@@ -23,6 +23,7 @@ use crate::worker::{StreamWorkerError, StreamWorkerHandle};
 mod attach;
 mod clock_regression;
 pub use clock_regression::{PyClockSyncEstimator, PyDecayRegression};
+mod drain_wait;
 mod endstop;
 mod ethercat_endpoint;
 mod homing_api;
@@ -149,9 +150,16 @@ fn open_canbus_with_retry(
 
 /// Backstop only. The continuity commit drains at every blend, so the buffer
 /// normally hovers near the open-tail length past the finality barrier; this
-/// force-drain to rest fires solely when no clean seam exists within reach. Set
-/// well above a realistic open tail so a dense (but normal) stream never trips it.
-const STREAM_MAX_BUFFER_MOVES: usize = 128;
+/// force-drain to rest fires solely when no clean seam exists within reach.
+///
+/// It must sit well above the open tail a *legitimate* dense stream carries,
+/// or the backstop stops being a backstop: the open tail is the re-plan batch
+/// plus the brake-to-rest setback measured in moves, and at 600 mm/s with the
+/// default `max_jerk = 2·max_accel` that setback is ~150 mm — about 300 moves
+/// of half-millimetre slicer output. At 128 the Voron 0 motion repro tripped
+/// it 41 times in 4673 moves, i.e. once per window: every look-ahead ended in
+/// a full stop. A `Move` is 192 bytes, so this ceiling costs 200 kB of window.
+const STREAM_MAX_BUFFER_MOVES: usize = 1024;
 /// Velocity-profile ODE/sampling tolerance for the streaming planner, in v²
 /// units. The offline default (1e-7) drives the adaptive RK4 to a precision far
 /// below the physical noise floor — ~0.015 mm/s velocity error at this value on
@@ -174,6 +182,7 @@ pub struct PyMotionEngine {
     bed_mesh: Mutex<Option<Arc<geometry::SurfaceTransform>>>,
     last_g5_pq: Mutex<Option<(f64, f64)>>,
     mcu_axis_configs: Arc<Mutex<Vec<McuAxisConfig>>>,
+    stepcompress_endpoints: Arc<Mutex<HashMap<u32, Arc<Mutex<crate::pump::StepcompressEndpoint>>>>>,
     dispatched_segments: Arc<AtomicU64>,
     dispatch_anchor: Arc<Mutex<crate::anchor::Anchor>>,
     fallback_clock_conversions: Arc<AtomicU64>,
@@ -214,6 +223,7 @@ impl PyMotionEngine {
             bed_mesh: Mutex::new(None),
             last_g5_pq: Mutex::new(None),
             mcu_axis_configs: Arc::new(Mutex::new(Vec::new())),
+            stepcompress_endpoints: Arc::new(Mutex::new(HashMap::new())),
             dispatched_segments: Arc::new(AtomicU64::new(0)),
             dispatch_anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
             fallback_clock_conversions: Arc::new(AtomicU64::new(0)),

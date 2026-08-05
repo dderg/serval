@@ -75,7 +75,7 @@ fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
 // virtual clock races arbitrarily far ahead of the host projection, so
 // the guard widens to the MCU's own mcu-sim grace instead of aborting on
 // infrastructure jitter.
-fn pump_past_guard_secs() -> f64 {
+pub(super) fn pump_past_guard_secs() -> f64 {
     static GUARD: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *GUARD.get_or_init(|| {
         if std::env::var_os("MCU_SIM_SOCK_DIR").is_some() {
@@ -205,6 +205,21 @@ impl<S: PieceSink> Pump<S> {
                     self.cohort = None;
                 }
             }
+            PumpMsg::StepcompressBarrierAck { mcu_id, oid, seq } => {
+                if let Err(e) = self.sink.on_barrier_ack(mcu_id, oid, seq) {
+                    tracing::error!(
+                        subsystem = "motion",
+                        event = "stepcompress_barrier_ack_fatal",
+                        mcu = mcu_id,
+                        oid,
+                        seq,
+                        error = ?e,
+                        "stepcompress barrier ack rejected — invoking fatal-transport action"
+                    );
+                    (self.callbacks.on_fatal_transport)(AxisKey { mcu_id, axis: 0 });
+                    return false;
+                }
+            }
             PumpMsg::Barrier(ack) => {
                 self.pending_barrier_acks.push(ack);
             }
@@ -219,6 +234,7 @@ impl<S: PieceSink> Pump<S> {
             epoch,
             lead_secs,
             source_line,
+            epoch_freq,
         } = msg;
         if let Some(inferred_at) = self.halted.get(&key).copied() {
             let dropped = pieces.len() as u32;
@@ -249,6 +265,19 @@ impl<S: PieceSink> Pump<S> {
                 ));
                 self.cohort = None;
                 return;
+            }
+        }
+        if epoch.is_fresh() {
+            if let Some((first, _)) = pieces.first() {
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "reanchor_mark",
+                    mcu = key.mcu_id,
+                    axis = key.axis,
+                    at_start_clock = first.start_time,
+                    "[reanchor] marking fresh-epoch cut"
+                );
+                self.sink.mark_reanchor(key, first.start_time, epoch_freq);
             }
         }
         if epoch.position_redefined() {
@@ -295,8 +324,17 @@ impl<S: PieceSink> Pump<S> {
         // Hold merging is off during drip cohorts: their release floor is
         // piece-count-based and coalescing would starve it. Without a synced
         // clock there is no freq to prove seam contiguity, so append as-is.
-        let hold_merge_freq = if self.cohort.is_none() {
-            (self.callbacks.mcu_clock_of)(key.mcu_id).map(|(_, freq)| freq)
+        //
+        // A merge rewrites the tail's `duration` from a tick span, so the
+        // basis must be the slope the seam is later projected on. For a
+        // stepcompress transport that is the shim's frozen epoch slope, not
+        // the continuously re-estimated clock: over a lane held for the whole
+        // first layer the two diverge by far more than the seam tolerance.
+        let hold_merge_basis = if self.cohort.is_none() {
+            self.sink.seam_basis(key).or_else(|| {
+                (self.callbacks.mcu_clock_of)(key.mcu_id)
+                    .map(|(_, freq)| super::sched::SeamBasis::wire_walker(freq))
+            })
         } else {
             None
         };
@@ -309,9 +347,9 @@ impl<S: PieceSink> Pump<S> {
             .iter()
             .filter(|(p, _)| !super::sched::is_hold_piece(p))
             .count() as u32;
-        match hold_merge_freq {
-            Some(freq) => {
-                append_pieces_merging_holds(&mut q.pieces, pieces, freq, !epoch.is_fresh());
+        match hold_merge_basis {
+            Some(basis) => {
+                append_pieces_merging_holds(&mut q.pieces, pieces, basis, !epoch.is_fresh());
             }
             None => q.pieces.extend(pieces),
         }
@@ -634,10 +672,12 @@ impl<S: PieceSink> Pump<S> {
                 mcu_id,
                 axis: af.axis,
             };
-            let freq = (self.callbacks.mcu_clock_of)(mcu_id).map(|(_, f)| f as f32);
+            let measured_freq = (self.callbacks.mcu_clock_of)(mcu_id).map(|(_, f)| f);
+            #[allow(clippy::cast_possible_truncation)]
+            let diag_freq = measured_freq.map(|f| f as f32);
             let mut prev_end: Option<u64> = None;
             for piece in &af.pieces {
-                prev_end = diag::log_piece_submit(mcu_id, af.axis, freq, piece, prev_end);
+                prev_end = diag::log_piece_submit(mcu_id, af.axis, diag_freq, piece, prev_end);
             }
             let n = af.pieces.len() as u32;
             let q = self.queues.get_mut(&key).expect("planned key exists");
@@ -653,7 +693,7 @@ impl<S: PieceSink> Pump<S> {
                     q.staged_motion = q.staged_motion.saturating_sub(1);
                 }
                 if let Some(history) = &self.history {
-                    history.record(key, &piece, host_t);
+                    history.record(key, &piece, measured_freq, host_t);
                 }
             }
             q.pushed = q.pushed.wrapping_add(n);

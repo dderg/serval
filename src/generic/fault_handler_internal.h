@@ -58,6 +58,10 @@ struct live_snapshot {
     uint32_t ttc_func;
     uint32_t ttc_late;
     uint32_t ttc_count;
+    uint32_t rearm_count;
+    uint32_t rearm_min_margin;
+    uint32_t rearm_armed;
+    uint32_t rearm_below_floor;
 };
 
 extern volatile struct live_snapshot live_snap;

@@ -10,16 +10,29 @@ src-y += linux/sensor_ds18b20.c
 
 # Kalico host-tick driver — pthread-based modulation tick replacing TIM5
 # on the host build. Provides the kalico_h7_* symbol surface that the
-# Rust runtime's producer-protocol calls across the FFI boundary.
+# Rust runtime's producer-protocol calls across the FFI boundary. Only the
+# piece-evaluating build has a Rust runtime to serve; CONFIG_CLASSIC_STEPPING
+# drops it (mirrors src/stm32/Makefile's MOTION_RUNTIME block).
+ifeq ($(CONFIG_MOTION_RUNTIME),y)
 src-y += linux/runtime_tick_host.c
-src-y += linux/fault_handler_stub.c
-src-y += runtime_tick.c
 src-y += runtime_commands.c
 src-y += linux/phase_stepping_spi.c
+endif
+
+# Classic sim builds have no motion tick thread to pace the shared virtual
+# clock, so they carry their own libvtime pacer thread instead.
+ifeq ($(CONFIG_MCU_SIM),y)
+ifneq ($(CONFIG_MOTION_RUNTIME),y)
+src-y += linux/sim_vtime_pacer.c
+endif
+endif
+src-y += linux/fault_handler_stub.c
+src-y += runtime_tick.c
 
 # Generated FFI header (cbindgen) shared with the H7 build.
 CFLAGS += -Irust/c-api/include
 
+ifeq ($(CONFIG_MOTION_RUNTIME),y)
 # Link libc_api.a. The Linux build has a mutual-callback edge:
 # host_tick.o calls into libkalico (runtime_tick) and libkalico
 # calls back out (runtime_tick_enable / read_cyccnt). Wrap with
@@ -28,6 +41,7 @@ CFLAGS += -Irust/c-api/include
 # dir, mirroring the per-arch STM32 paths) — included before this file.
 CFLAGS_klipper.elf := -Wl,--start-group $(MCU_RUST_LIB) -Wl,--end-group $(CFLAGS_klipper.elf)
 $(OUT)klipper.elf: $(MCU_RUST_LIB)
+endif
 
 CFLAGS_klipper.elf += -lutil -lrt -lpthread
 

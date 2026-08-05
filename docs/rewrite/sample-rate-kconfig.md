@@ -17,10 +17,8 @@ Range is clamped to `1000..=100000` Hz.
 ## Spec-drift resolution
 
 The implementation plan's literal stanza used `depends on RUNTIME`, but
-no such symbol exists in this codebase — the runtime is gated by the
-`RUNTIME_TARGET_LARGE/SMALL/CUSTOM` choice block (around `src/Kconfig:385`),
-which itself `depends on MACH_STM32H7 || MACH_STM32F4 || MACH_LINUX`. We
-mirror that dependency on the new option so the symbol is only visible on the
-same MCU/Linux set that has runtime sizing presets. The option is placed
-immediately after `RUNTIME_CURVE_POOL_N` to keep it with the other runtime
-knobs.
+no such symbol exists in this codebase — the runtime sizing symbol is
+`RUNTIME_STORAGE_SIZE` in `src/Kconfig`, which itself
+`depends on MACH_STM32H7 || MACH_STM32F4 || MACH_STM32F1 || MACH_STM32G0 ||
+MACH_LINUX`. We mirror that dependency on the new option so the symbol is
+only visible on the same MCU/Linux set that has runtime sizing.

@@ -1056,6 +1056,331 @@ enable_force_move: True
 """
 
 
+STEPCOMPRESS_SAMPLE_RATE_HZ = 5000
+STEPCOMPRESS_STEPS_PER_MM = 16 * 200 / 40.0
+STEPCOMPRESS_STEP_LINES = {"x": 18, "y": 7, "z": 15}
+
+
+def stepcompress_config(h7_pty: str, sc_pty: str, gcode_dir: str) -> str:
+    """Cartesian printer whose motors all live on a stepping_mode:
+    stepcompress MCU (the CONFIG_CLASSIC_STEPPING sim ELF), driven by
+    host-computed step times over queue_step.
+
+    Step pins sit on the shim's tracked lines (X=18/Y=7/Z=15) with their
+    dir pins on the paired lines (19/8/16), so the classic firmware's real
+    GPIO pulses feed get_steps and the auto-endstop walls
+    (X=gpio200/Y=gpio201/Z=gpio202) exactly like the piece-mode configs.
+    """
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[mcu sc]
+serial: {sc_pty}
+stepping_mode: stepcompress
+stepcompress_sample_rate: {STEPCOMPRESS_SAMPLE_RATE_HZ}
+
+[printer]
+max_velocity: 100
+max_accel: 1000
+max_z_velocity: 10
+max_z_accel: 30
+
+[kinematics]
+type: cartesian
+axis_x: x
+axis_y: y
+axis_z: z
+x_motors: x
+y_motors: y
+z_motors: z
+
+[axis x]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^sc:gpiochip0/gpio200
+homing_speed: 10
+post_processors: is_xy
+
+[axis y]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^sc:gpiochip0/gpio201
+homing_speed: 10
+post_processors: is_xy
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: ^sc:gpiochip0/gpio202
+homing_speed: 5
+
+[motor x]
+drive: stepper
+step_pin: sc:gpiochip0/gpio18
+dir_pin: sc:gpiochip0/gpio19
+enable_pin: !sc:gpiochip0/gpio2
+microsteps: 16
+rotation_distance: 40
+
+[motor y]
+drive: stepper
+step_pin: sc:gpiochip0/gpio7
+dir_pin: sc:gpiochip0/gpio8
+enable_pin: !sc:gpiochip0/gpio5
+microsteps: 16
+rotation_distance: 40
+
+[motor z]
+drive: stepper
+step_pin: sc:gpiochip0/gpio15
+dir_pin: !sc:gpiochip0/gpio16
+enable_pin: !sc:gpiochip0/gpio9
+microsteps: 16
+rotation_distance: 40
+{_tail(gcode_dir)}"""
+
+
+STEPCOMPRESS_EXTRUDER_SAMPLE_RATE_HZ = 10000
+STEPCOMPRESS_EXTRUDER_ROTATION_DISTANCE = 7.73
+STEPCOMPRESS_EXTRUDER_STEPS_PER_MM = (
+    16 * 200 / STEPCOMPRESS_EXTRUDER_ROTATION_DISTANCE
+)
+STEPCOMPRESS_EXTRUDER_STEP_LINE = 18
+
+
+def stepcompress_extruder_config(
+    h7_pty: str, sc_pty: str, gcode_dir: str
+) -> str:
+    """The Voron 0 CAN-toolhead topology: spatial motors on the main MCU and
+    the extruder alone on a SECOND, stepping_mode: stepcompress MCU.
+
+    The extruder is a follower axis (axis index 3), so the stepcompress MCU's
+    axis list is [3] while every spatial lane lives on another MCU — the
+    non-zero-based lane layout the single-MCU stepcompress worlds never
+    produce. min_extrude_temp is 0 so extrusion needs no heater ramp.
+    """
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[mcu sc]
+serial: {sc_pty}
+stepping_mode: stepcompress
+stepcompress_sample_rate: {STEPCOMPRESS_EXTRUDER_SAMPLE_RATE_HZ}
+
+[printer]
+max_velocity: 100
+max_accel: 1000
+max_z_velocity: 10
+max_z_accel: 30
+
+[kinematics]
+type: cartesian
+axis_x: x
+axis_y: y
+axis_z: z
+x_motors: x
+y_motors: y
+z_motors: z
+
+[axis x]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio200
+homing_speed: 10
+post_processors: is_xy
+
+[axis y]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio201
+homing_speed: 10
+post_processors: is_xy
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio202
+homing_speed: 5
+
+[axis e]
+follows: x, y, z
+motors: extruder
+
+[motor x]
+drive: stepper
+step_pin: gpiochip0/gpio18
+dir_pin: gpiochip0/gpio19
+enable_pin: !gpiochip0/gpio2
+microsteps: 16
+rotation_distance: 40
+
+[motor y]
+drive: stepper
+step_pin: gpiochip0/gpio7
+dir_pin: gpiochip0/gpio8
+enable_pin: !gpiochip0/gpio5
+microsteps: 16
+rotation_distance: 40
+
+[motor z]
+drive: stepper
+step_pin: gpiochip0/gpio15
+dir_pin: !gpiochip0/gpio16
+enable_pin: !gpiochip0/gpio9
+microsteps: 16
+rotation_distance: 40
+
+[motor extruder]
+drive: stepper
+step_pin: sc:gpiochip0/gpio{STEPCOMPRESS_EXTRUDER_STEP_LINE}
+dir_pin: !sc:gpiochip0/gpio19
+enable_pin: !sc:gpiochip0/gpio2
+microsteps: 16
+rotation_distance: {STEPCOMPRESS_EXTRUDER_ROTATION_DISTANCE}
+
+[extruder]
+axis: e
+nozzle_diameter: 0.400
+filament_diameter: 1.750
+heater_pin: gpiochip0/gpio30
+sensor_type: EPCOS 100K B57560G104F
+sensor_pin: analog0
+min_temp: 0
+max_temp: 250
+min_extrude_temp: 0
+control: pid
+pid_kp: 30.356
+pid_ki: 1.857
+pid_kd: 124.081
+{_tail(gcode_dir)}"""
+
+
+STEPCOMPRESS_COREXY_SAMPLE_RATE_HZ = 10000
+STEPCOMPRESS_COREXY_STEPS_PER_MM = 64 * 200 / 40.0
+STEPCOMPRESS_COREXY_STEP_LINES = {"a": 18, "b": 7, "z": 15}
+STEPCOMPRESS_COREXY_ENDSTOPS = {"x": (0, 10), "y": (0, 11)}
+
+
+def stepcompress_corexy_config(h7_pty: str, sc_pty: str, gcode_dir: str) -> str:
+    """The Voron 0 bench topology (its printer.cfg, verbatim apart from pin
+    names) moved onto a stepping_mode: stepcompress MCU: CoreXY a/b at 64
+    microsteps, a gear-reduced Z, the measured smooth_mzv shapers, and X
+    then Y homing toward position_max at 40 mm/s.
+
+    The A/B step queues sit on the shim's tracked lines (a->gpio18,
+    b->gpio7) so get_steps observes the executed motor tracks. X and Y
+    home against switches the test drives from the cartesian position
+    (gpio10/gpio11) rather than the shim's per-lane auto-endstop walls: on
+    CoreXY a single-axis home moves BOTH motors, so a lane counter wall
+    would latch the other axis' pin as a side effect. That coupling is the
+    point of this world — G28 X halts A and B mid-move and trip-reseeds
+    them, and G28 Y then re-trips those same motors.
+    """
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[mcu sc]
+serial: {sc_pty}
+stepping_mode: stepcompress
+stepcompress_sample_rate: {STEPCOMPRESS_COREXY_SAMPLE_RATE_HZ}
+
+[printer]
+max_velocity: 600
+max_accel: 20000
+max_z_velocity: 20
+max_z_accel: 500
+corner_deviation: 0.04
+
+[kinematics]
+type: corexy
+axis_x: x
+a_motors: a
+axis_y: y
+b_motors: b
+axis_z: z
+z_motors: z
+
+[motor a]
+drive: stepper
+step_pin: sc:gpiochip0/gpio18
+dir_pin: sc:gpiochip0/gpio19
+enable_pin: !sc:gpiochip0/gpio2
+microsteps: 64
+full_steps_per_rotation: 200
+rotation_distance: 40
+
+[motor b]
+drive: stepper
+step_pin: sc:gpiochip0/gpio7
+dir_pin: sc:gpiochip0/gpio8
+enable_pin: !sc:gpiochip0/gpio5
+microsteps: 64
+full_steps_per_rotation: 200
+rotation_distance: 40
+
+[motor z]
+drive: stepper
+step_pin: sc:gpiochip0/gpio15
+dir_pin: !sc:gpiochip0/gpio16
+enable_pin: !sc:gpiochip0/gpio9
+microsteps: 32
+rotation_distance: 40
+gear_ratio: 80:20, 2:1
+
+[axis x]
+endstop_pin: ^sc:gpiochip0/gpio10
+position_endstop: 121
+position_max: 121
+homing_speed: 40
+homing_retract_dist: 10
+homing_positive_dir: true
+min_home_dist: 0
+post_processors: x_shaping
+
+[axis y]
+endstop_pin: ^sc:gpiochip0/gpio11
+position_endstop: 120
+position_max: 120
+homing_speed: 40
+homing_retract_dist: 10
+homing_positive_dir: true
+min_home_dist: 0
+post_processors: y_shaping
+
+[axis z]
+endstop_pin: ^sc:gpiochip0/gpio202
+position_min: -5
+position_endstop: 116.100
+position_max: 120
+homing_speed: 40
+second_homing_speed: 3.0
+homing_retract_dist: 3.0
+post_processors: z_shaping
+
+[post_processor x_shaping]
+type: smooth_mzv
+frequency_hz: 112.8
+
+[post_processor y_shaping]
+type: smooth_mzv
+frequency_hz: 90.2
+
+[post_processor z_shaping]
+type: smooth_bell
+smooth_time: 0.025
+
+{_tail(gcode_dir)}"""
+
+
 PROBE_VARIANTS = (
     "virtual",
     "safe-z",

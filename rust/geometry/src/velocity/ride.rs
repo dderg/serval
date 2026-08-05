@@ -1171,6 +1171,14 @@ fn advance_on_disk(g: &Grid, st: State, j_cmd: f64, dt: f64, curved: bool) -> (S
     let mut dt = dt;
     let mut next = advance(st, j_cmd, dt);
     if !curved {
+        // A straight cell's rail is a constant, so no step can out-run it and
+        // the clamp is exact — but a committed peel jerks down for as long as
+        // it stays committed, and nothing else bounds `a`. Past the rail the
+        // brake BVP's own `a_floor` can no longer bracket the state, every
+        // feasibility probe answers "still committed", and the peel runs the
+        // profile to rest. The disk is a hard state constraint here too.
+        let r = g.rail_at(next.s, next.v);
+        next.a = next.a.clamp(-r, r);
         return (next, dt);
     }
     let trim_max = RAIL_TRIM_MAX_FRAC * g.lerp_node(g.t.accel, st.s);

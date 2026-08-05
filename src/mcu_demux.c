@@ -19,11 +19,14 @@ typedef enum {
     DEMUX_S_WAITING,
     DEMUX_S_KLIPPER,
     DEMUX_S_KALICO,
+#if CONFIG_MOTION_RUNTIME
     DEMUX_S_PIECES,
+#endif
 } demux_state_t;
 
 static demux_state_t state;
 
+#if CONFIG_MOTION_RUNTIME
 // Must match the one-shot crc16_ccitt() in src/generic/crc16_ccitt.c (seed
 // 0xffff); the streaming pieces path folds byte-by-byte and never has a
 // contiguous buffer to pass to the one-shot variant.
@@ -40,6 +43,7 @@ static uint16_t pieces_payload_remaining;
 static uint16_t pieces_crc;
 static uint8_t  pieces_crc_byte;
 static uint8_t  pieces_crc_lo;
+#endif
 
 volatile uint32_t mcu_demux_out_mcu_total
                 __attribute__((used, externally_visible));
@@ -151,6 +155,7 @@ mcu_demux_feed_byte(uint8_t b)
         }
         if (kalico_pos == 4 && kalico_buf[3] == MCU_CHANNEL_PIECES
             && transport_total_len > 0) {
+#if CONFIG_MOTION_RUNTIME
             pieces_payload_remaining =
                 (uint16_t)(transport_total_len - MCU_FRAME_OVERHEAD);
             pieces_crc = 0xffff;
@@ -161,6 +166,16 @@ mcu_demux_feed_byte(uint8_t b)
             piece_sink_begin();
             state = DEMUX_S_PIECES;
             return MCU_DEMUX_OUT_NONE;
+#else
+            state = DEMUX_S_WAITING;
+            kalico_pos = 0;
+            transport_total_len = 0;
+            mcu_transport_emit_fault_event(
+                (uint16_t)RUNTIME_ERR_MOTION_RUNTIME_ABSENT,
+                (uint32_t)MCU_CHANNEL_PIECES, 0);
+            shutdown("piece stream rejected:"
+                     " classic stepping firmware has no motion runtime");
+#endif
         }
         if (kalico_pos == 4 && kalico_buf[3] != MCU_CHANNEL_PIECES
             && transport_total_len > MCU_DEMUX_MCU_BUF_SIZE) {
@@ -174,6 +189,7 @@ mcu_demux_feed_byte(uint8_t b)
         }
         return MCU_DEMUX_OUT_NONE;
 
+#if CONFIG_MOTION_RUNTIME
     case DEMUX_S_PIECES:
         if (pieces_payload_remaining > 0) {
             pieces_crc = crc16_ccitt_update(pieces_crc, b);
@@ -203,6 +219,7 @@ mcu_demux_feed_byte(uint8_t b)
             mcu_demux_crc_mismatch_total++;
             return MCU_DEMUX_OUT_ERROR;
         }
+#endif
     }
     state = DEMUX_S_WAITING;
     return MCU_DEMUX_OUT_ERROR;
@@ -275,13 +292,16 @@ mcu_demux_pump(const uint8_t *buf, uint16_t len)
     extern void diag_note_msg_exit(void);
     extern void diag_note_demux(uint32_t backlog, uint32_t msgs);
     uint32_t msg_count = 0;
+#if CONFIG_MOTION_RUNTIME
     // The pieces channel commits inline byte-by-byte and never surfaces as
     // OUT_MCU, so open/close a synthetic msg span while the demuxer is in the
     // pieces state; a frame spanning multiple pump calls is accounted one
     // span per call, never across the inter-packet gap.
     uint8_t in_pieces = 0;
+#endif
     for (uint16_t i = 0; i < len; i++) {
         mcu_demux_output_t out = mcu_demux_feed_byte(buf[i]);
+#if CONFIG_MOTION_RUNTIME
         if (state == DEMUX_S_PIECES) {
             if (!in_pieces) {
                 diag_note_msg_enter(0x100u | MCU_CHANNEL_PIECES,
@@ -293,6 +313,7 @@ mcu_demux_pump(const uint8_t *buf, uint16_t len)
             diag_note_msg_exit();
             in_pieces = 0;
         }
+#endif
         switch (out) {
         case MCU_DEMUX_OUT_NONE:
             break;
@@ -351,7 +372,9 @@ mcu_demux_pump(const uint8_t *buf, uint16_t len)
             break;
         }
     }
+#if CONFIG_MOTION_RUNTIME
     if (in_pieces)
         diag_note_msg_exit();
+#endif
     diag_note_demux(len, msg_count);
 }

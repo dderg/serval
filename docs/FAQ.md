@@ -130,7 +130,10 @@ Kalico has some real-time scheduling requirements. If, during a
 print, the host computer also performs an intensive general-purpose
 computing task (such as defragmenting a hard drive, 3d rendering,
 heavy swapping, etc.), then it may cause Kalico to report print
-errors.
+errors. See
+[host memory requirements](Installation.md#host-memory-requirements)
+for the memory-lock setting every host needs and the recommended swap
+policy.
 
 Note: If you are not using an OctoPi image, be aware that several
 Linux distributions enable a "ModemManager" (or similar) package that

@@ -17,6 +17,13 @@ struct McuTopology {
     axes: Vec<u8>,
     kinematics: u8,
     max_motor_velocity: Vec<f64>,
+    stepping_mode: u8,
+    microstep_distance: Vec<f64>,
+    invert_dir: Vec<bool>,
+    stepper_oids: Vec<u32>,
+    stepcompress_sample_rate: f64,
+    move_queue_slots: u32,
+    step_pulse_seconds: Vec<f64>,
 }
 
 impl McuTopology {
@@ -26,6 +33,13 @@ impl McuTopology {
             axes: self.axes,
             kinematics: self.kinematics,
             max_motor_velocity: self.max_motor_velocity,
+            stepping_mode: self.stepping_mode,
+            microstep_distance: self.microstep_distance,
+            invert_dir: self.invert_dir,
+            stepper_oids: self.stepper_oids,
+            stepcompress_sample_rate: self.stepcompress_sample_rate,
+            move_queue_slots: self.move_queue_slots,
+            step_pulse_seconds: self.step_pulse_seconds,
         }
     }
 }
@@ -92,20 +106,29 @@ impl PyMotionEngine {
             self.build_transport_maps(&mcu_configs)?;
         self.seed_ethercat_clock_estimates(&ethercat_mcu_ids);
 
-        let pump_control =
-            self.spawn_pipeline(&cfg, &mcu_configs, &host_ios, &ec_conns, ring_depth_table)?;
+        host_rt::memory_lock::HOST_MEMORY_LOCK
+            .start_pipeline_threads(|| {
+                let pump_control = self.spawn_pipeline(
+                    &cfg,
+                    &mcu_configs,
+                    &host_ios,
+                    &ec_conns,
+                    ring_depth_table,
+                )?;
 
-        self.spawn_live_position_poll_thread();
+                self.spawn_live_position_poll_thread();
 
-        self.wire_mcu_supervision(
-            &mcu_configs,
-            &ethercat_mcu_ids,
-            &ec_conns,
-            &host_ios,
-            pump_control,
-        );
+                self.wire_mcu_supervision(
+                    &mcu_configs,
+                    &ethercat_mcu_ids,
+                    &ec_conns,
+                    &host_ios,
+                    pump_control,
+                );
 
-        Ok(())
+                Ok(())
+            })
+            .map_err(|denied| PyRuntimeError::new_err(denied.to_string()))?
     }
     /// Push one move into the pipe. Returns `false` when the pipe is full —
     /// queued motion has reached the configured depth, or the entry channel
@@ -548,6 +571,34 @@ impl PyMotionEngine {
                 ))
             })?;
         }
+        self.seed_stepcompress_shims(pos)
+    }
+
+    /// Classic stepping keeps the step counter on the host: re-anchor each
+    /// stepcompress motor's shim counter so the next drain re-emits
+    /// `reset_step_clock` from the new position.
+    fn seed_stepcompress_shims(&self, pos: geometry::MachinePos) -> PyResult<()> {
+        let configs = self.mcu_axis_configs.lock_ok().clone();
+        let endpoints = self.stepcompress_endpoints.lock_ok().clone();
+        for cfg in configs
+            .iter()
+            .filter(|c| c.stepping_mode == crate::mcu_config::SteppingMode::Stepcompress)
+        {
+            let counts = crate::mcu_config::stepcompress_seed_counts(cfg, pos)
+                .map_err(PyRuntimeError::new_err)?;
+            let endpoint = endpoints.get(&cfg.mcu_id).ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "position seed: no shim endpoint registered for stepcompress mcu {}",
+                    cfg.mcu_id
+                ))
+            })?;
+            endpoint.lock_ok().reset_position(&counts).map_err(|e| {
+                PyRuntimeError::new_err(format!(
+                    "position seed: shim reseed failed for mcu {}: {e:?}",
+                    cfg.mcu_id
+                ))
+            })?;
+        }
         Ok(())
     }
 
@@ -592,7 +643,7 @@ impl PyMotionEngine {
             }
 
             planner
-                .stream_open(vec![gcode.x(), gcode.y(), gcode.z(), 0.0])
+                .stream_open(crate::mcu_config::reanchor_stream_pos(gcode))
                 .map_err(planner_err)?;
 
             self.send_serial_position_seeds(machine)?;
@@ -607,29 +658,9 @@ impl PyMotionEngine {
     ) {
         let configs: Vec<crate::mcu_config::McuAxisConfig> =
             self.mcu_axis_configs.lock_ok().clone();
-        let rebases = crate::mcu_config::spatial_rebase_targets(&configs, machine);
-        let follower_keys: Vec<crate::types::AxisKey> = configs
-            .iter()
-            .flat_map(|cfg| {
-                cfg.axes
-                    .iter()
-                    .filter(|&&a| a >= 3)
-                    .map(move |&axis| crate::types::AxisKey {
-                        mcu_id: cfg.mcu_id,
-                        axis: axis as u8,
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        {
-            let mut store = self.motion_history.lock_ok();
-            for (key, pos) in rebases {
-                store.rebase_axis(key, host_now, pos);
-            }
-            for key in follower_keys {
-                let held_position = store.final_position(key).unwrap_or(0.0);
-                store.rebase_axis(key, host_now, held_position);
-            }
+        let mut store = self.motion_history.lock_ok();
+        for (key, pos) in crate::mcu_config::reanchor_axis_targets(&configs, machine) {
+            store.rebase_axis(key, host_now, pos);
         }
     }
     /// The machine→gcode crossing: the only place a measured (machine-space)

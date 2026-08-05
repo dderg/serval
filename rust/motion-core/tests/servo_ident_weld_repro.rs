@@ -165,6 +165,7 @@ fn corexy_lane_pieces(segs: &[trajectory::ShapedSegment]) -> BTreeMap<u8, Vec<Pi
             total_piece_memory: 62 * 1024,
         },
         max_motor_velocity: vec![f64::INFINITY; 2],
+        ..Default::default()
     }];
     let mut lanes: BTreeMap<u8, Vec<PieceEntry>> = BTreeMap::new();
     for seg in segs {
@@ -172,6 +173,7 @@ fn corexy_lane_pieces(segs: &[trajectory::ShapedSegment]) -> BTreeMap<u8, Vec<Pi
             seg,
             &cfgs,
             &EnqueueCtx {
+                epoch_freq: &|_| None,
                 t0: 0.0,
                 epoch: motion_core::anchor::StreamEpoch::Continuation,
                 host_now: 0.0,

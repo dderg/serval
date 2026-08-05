@@ -20,6 +20,7 @@ members = [
     "ethercat-rt",
     "piece-sink-harness",
     "shaper-ident",
+    "step-shim",
 ]
 exclude = ["gcode/fuzz", "snapshot-viewer", "motion-playground"]
 resolver = "2"

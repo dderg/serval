@@ -148,7 +148,7 @@ impl PyMotionEngine {
                 *pending = None;
                 let drained = self.drain.drained();
                 if drained {
-                    *self.flush.drain_wait_diag.lock_ok() = None;
+                    self.report_drain_wait_done();
                 }
                 Ok(drained)
             }
@@ -424,19 +424,16 @@ impl PyMotionEngine {
     }
 
     fn report_lagging_drain_wait(&self) {
-        const DRAIN_WAIT_REPORT_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
         let now = std::time::Instant::now();
-        let mut diag = self.flush.drain_wait_diag.lock_ok();
-        let (started, last_report) = diag.get_or_insert((now, None));
-        if now.duration_since(*started) < DRAIN_WAIT_REPORT_AFTER {
+        let outstanding_secs = self.committed_lead_secs();
+        let report = {
+            let mut diag = self.flush.drain_wait_diag.lock_ok();
+            diag.get_or_insert_with(|| super::drain_wait::DrainWaitDiag::new(now, outstanding_secs))
+                .poll(now, outstanding_secs)
+        };
+        let Some(report) = report else {
             return;
-        }
-        if last_report.is_some_and(|t| now.duration_since(t) < DRAIN_WAIT_REPORT_AFTER) {
-            return;
-        }
-        *last_report = Some(now);
-        let waited_s = now.duration_since(*started).as_secs_f64();
-        drop(diag);
+        };
         for (mcu, axis, state) in self.drain.lagging_axes() {
             tracing::warn!(
                 subsystem = "motion",
@@ -448,11 +445,34 @@ impl PyMotionEngine {
                 retired = state.retired,
                 staged_motion = state.staged_motion,
                 hold_tail = state.hold_tail,
-                waited_s,
-                "drain wait not completing — this axis still has staged or \
-                 unretired motion pieces (trailing hold coverage excluded)"
+                waited_s = report.waited_s,
+                overdue_s = report.overdue_s,
+                horizon_s = report.horizon_s,
+                "drain wait is past the committed-motion horizon — this axis still \
+                 has staged or unretired motion pieces (trailing hold coverage excluded)"
             );
         }
+    }
+
+    /// A drain that outlasts a wire round trip is worth a line: paired with
+    /// the horizon it waited on, it says whether the machine was still moving
+    /// or the pipeline was dragging, without needing the warning to fire.
+    fn report_drain_wait_done(&self) {
+        const WORTH_REPORTING: std::time::Duration = std::time::Duration::from_secs(1);
+        let Some(diag) = self.flush.drain_wait_diag.lock_ok().take() else {
+            return;
+        };
+        let (waited_s, horizon_s) = diag.elapsed(std::time::Instant::now());
+        if waited_s < WORTH_REPORTING.as_secs_f64() {
+            return;
+        }
+        tracing::info!(
+            subsystem = "motion",
+            event = "drain_wait_done",
+            waited_s,
+            horizon_s,
+            "[drain] wait finished after the committed motion it was owed"
+        );
     }
 
     fn flush_try_start_inner(

@@ -16,6 +16,9 @@ class _FakeMcu:
         self.oids += 1
         return oid
 
+    def get_stepping_mode(self):
+        return 0
+
     def register_config_callback(self, cb):
         self.config_callbacks.append(cb)
 

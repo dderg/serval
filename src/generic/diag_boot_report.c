@@ -7,9 +7,11 @@
 #include "fault_handler_internal.h"
 
 extern volatile uint8_t runtime_liveness_ok;
+#if CONFIG_MOTION_RUNTIME
 extern void *runtime_handle;
 extern uint32_t runtime_handle_tick_counter(void *handle);
 extern uint8_t  runtime_handle_status(void *handle);
+#endif
 
 struct rt_diag_persistent {
     uint32_t magic;
@@ -167,6 +169,10 @@ fault_handler_report_boot_init(uint32_t now)
     live_snap.ttc_func             = 0;
     live_snap.ttc_late             = 0;
     live_snap.ttc_count            = 0;
+    live_snap.rearm_count          = 0;
+    live_snap.rearm_min_margin     = (uint32_t)INT32_MAX;
+    live_snap.rearm_armed          = 0;
+    live_snap.rearm_below_floor    = 0;
 #if CONFIG_MACH_STM32H7
     if (reset_cause_raw & RCC_RSR_IWDG1RSTF)
         live_snap.iwdg_reset_count++;
@@ -242,6 +248,7 @@ fault_handler_report_boot_init(uint32_t now)
         prior_diag.usb_out_doepint        = diag.usb_out_doepint;
         prior_diag.out_unarmed_worst_cyc  = diag.out_unarmed_worst_cyc;
         prior_diag.out_unarmed_worst_end  = diag.out_unarmed_worst_end;
+#if CONFIG_MOTION_RUNTIME
         {
             extern void kalico_stepout_late_get(uint32_t *out_max_late,
                                                 uint32_t *out_late_count,
@@ -250,6 +257,7 @@ fault_handler_report_boot_init(uint32_t now)
                                     &prior_diag.stepout_late_count,
                                     &prior_diag.stepout_late_max_drained);
         }
+#endif
         for (uint32_t i = 0; i < DIAG_RING_LEN; i++) {
             prior_ring[i].tag       = diag_ring[i].tag;
             prior_ring[i]._pad0     = diag_ring[i]._pad0;
@@ -294,10 +302,12 @@ fault_handler_report_liveness_update(uint32_t now)
     uint32_t live_now = runtime_liveness_ok;
     uint8_t engine_now = 0xFF;
     uint32_t tick_now = 0;
+#if CONFIG_MOTION_RUNTIME
     if (runtime_handle) {
         tick_now = runtime_handle_tick_counter(runtime_handle);
         engine_now = runtime_handle_status(runtime_handle);
     }
+#endif
     if (live_snap.magic != LIVE_MAGIC)
         live_snap.boot_count = 0;
     live_snap.live = live_now;
@@ -359,6 +369,11 @@ fault_handler_report_emit(uint32_t now)
            prior_snap.ttc_func,
            prior_snap.ttc_late,
            prior_snap.ttc_count);
+    output("step_rearm count %u min_margin_cyc %i armed %u below_floor %u",
+           prior_snap.rearm_count,
+           (int32_t)prior_snap.rearm_min_margin,
+           prior_snap.rearm_armed,
+           prior_snap.rearm_below_floor);
     if (fault_rec.magic == FAULT_MAGIC) {
         output("prior_fault kind %u count %u pc %u lr %u psr %u"
                " r0 %u r1 %u r2 %u r3 %u r12 %u",

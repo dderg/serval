@@ -14,8 +14,9 @@
 #define MESSAGE_VERSION_DEFAULT 0x01
 
 // Runtime result codes mirrored from rust/runtime/src/error.rs; keep in sync.
-#define RUNTIME_ERR_INVALID_CURVE -2
-#define RUNTIME_ERR_NOT_INIT      -7
+#define RUNTIME_ERR_INVALID_CURVE          -2
+#define RUNTIME_ERR_NOT_INIT               -7
+#define RUNTIME_ERR_MOTION_RUNTIME_ABSENT -400
 
 void piece_sink_begin(void);
 void piece_sink_feed(uint8_t b);
@@ -39,6 +40,8 @@ void mcu_transport_emit_fault_event(uint16_t fault_code,
 void mcu_transport_emit_endstop_trip(uint8_t endstop_id, uint64_t trip_clock);
 
 int32_t handle_stop_inner(uint64_t *discard_clock);
+
+void classic_stop_gate_at(uint64_t halt_clock);
 
 void send_status_heartbeat(void);
 

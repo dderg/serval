@@ -154,8 +154,11 @@ Flashing mechanics are unchanged — follow
 [Installation](Installation.md#building-and-flashing-the-micro-controller)
 for your board's flash method. Repeat for every MCU in the printer.
 
-The motion sample rate is a per-target build option in `make menuconfig`;
-the default is right for typical boards.
+The motion sample rate is a per-target build option; the default is right
+for typical boards. It lives under "Enable extra low-level configuration
+options" in `make menuconfig`, alongside the piece-ring and `rt_storage`
+size ceilings. All three are derived from the processor model, so you
+should not need to touch them.
 
 ## 5. Migrate the configuration
 

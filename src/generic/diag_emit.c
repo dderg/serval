@@ -98,6 +98,17 @@ kalico_diag_emit_prior_crash(void)
                         prior_snap.ttc_count);
     }
 
+    if (prior_snap.rearm_count) {
+        event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_MOTION,
+                        EVENT_LOG_EVENT_MOTION_STEP_REARM, 0,
+                        prior_snap.rearm_count,
+                        prior_snap.rearm_min_margin);
+        event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_MOTION,
+                        EVENT_LOG_EVENT_MOTION_STEP_REARM_TIGHT, 0,
+                        prior_snap.rearm_armed,
+                        prior_snap.rearm_below_floor);
+    }
+
     if (abnormal) {
         extern volatile uint32_t runtime_diag_prior_packed_raw;
         uint32_t fc = had_fault ? fault_rec.fault_count : 0u;
@@ -175,6 +186,7 @@ kalico_diag_emit_live(void)
     event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
                     EVENT_LOG_EVENT_RUNTIME_TIM5_IA, 0,
                     diag.tim5_ia_min_cyc, diag.tim5_ia_max_cyc);
+#if CONFIG_MOTION_RUNTIME
     {
         extern void kalico_stepout_late_get(uint32_t *out_max_late,
                                             uint32_t *out_late_count,
@@ -189,6 +201,7 @@ kalico_diag_emit_live(void)
                         EVENT_LOG_EVENT_RUNTIME_STEPOUT_LATE, 0,
                         late_max, packed);
     }
+#endif
 
     if (live_snap.worst_fg_stall_ticks) {
         event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
@@ -230,6 +243,17 @@ kalico_diag_emit_live(void)
                         EVENT_LOG_EVENT_RUNTIME_TIMER_TOO_CLOSE_LATE, 0,
                         live_snap.ttc_late,
                         live_snap.ttc_count);
+    }
+
+    if (live_snap.rearm_count) {
+        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_MOTION,
+                        EVENT_LOG_EVENT_MOTION_STEP_REARM, 0,
+                        live_snap.rearm_count,
+                        live_snap.rearm_min_margin);
+        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_MOTION,
+                        EVENT_LOG_EVENT_MOTION_STEP_REARM_TIGHT, 0,
+                        live_snap.rearm_armed,
+                        live_snap.rearm_below_floor);
     }
 
     for (uint32_t i = 0; i < DIAG_RING_LEN; i++) {

@@ -25,6 +25,7 @@ CFLAGS_klipper.elf += -nostdlib -lgcc -lc_nano
 CFLAGS_klipper.elf += -T $(OUT)src/generic/armcm_link.ld
 $(OUT)klipper.elf: $(OUT)src/generic/armcm_link.ld
 
+ifeq ($(CONFIG_MOTION_RUNTIME),y)
 # Link libc_api.a. Place ahead of -lgcc/-lc_nano on the link line —
 # archive extraction is demand-driven and order-sensitive (spec §2.4 link-line
 # pitfalls). Empirically, prepending to CFLAGS_klipper.elf works because
@@ -39,6 +40,7 @@ $(OUT)klipper.elf: $(OUT)src/generic/armcm_link.ld
 # target-f4 cargo target dir); see comments there.
 CFLAGS_klipper.elf := -Wl,--start-group $(MCU_RUST_LIB) -Wl,--end-group $(CFLAGS_klipper.elf)
 $(OUT)klipper.elf: $(MCU_RUST_LIB)
+endif
 
 # Add source files
 src-y += stm32/watchdog.c stm32/clockline.c stm32/dfu_reboot.c
@@ -51,15 +53,17 @@ src-y += generic/mpu_protect.c
 # Kalico runtime glue. Per-family motion-timer backend selected by
 # CONFIG_MACH_STM32*. H7/F4 use TIM5; G0B1 has no TIM5 and uses a configurable
 # basic timer (default TIM7) plus a software CYCCNT (no DWT on Cortex-M0+).
+ifeq ($(CONFIG_MOTION_RUNTIME),y)
 src-$(CONFIG_MACH_STM32F1) += stm32/runtime_tick_f1.c
 src-$(CONFIG_MACH_STM32H7) += stm32/runtime_tick_h7.c
 src-$(CONFIG_MACH_STM32F4) += stm32/runtime_tick_f4.c
 src-$(CONFIG_MACH_STM32G0) += stm32/runtime_tick_g0.c
-src-y += runtime_tick.c
 src-y += runtime_commands.c
 # Phase-stepping XDIRECT SPI helper (Step 7-D / phase-stepping sim slice).
 # Called from the Rust modulator via FFI; see src/stm32/phase_stepping_spi.h.
 src-y += stm32/phase_stepping_spi.c
+endif
+src-y += runtime_tick.c
 # Sim-only: software CYCCNT under CONFIG_MCU_SIM. Per Step-6 spec §3.1.
 src-$(CONFIG_MCU_SIM) += stm32/mcu_sim_clock.c
 

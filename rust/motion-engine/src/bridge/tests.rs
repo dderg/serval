@@ -618,6 +618,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
     )];
     data_tx
         .send(EnqueueMsg {
+            epoch_freq: None,
             key: AxisKey {
                 mcu_id: EC_MCU_ID,
                 axis: 0,

@@ -9,9 +9,16 @@
 #include "sched.h"
 #include "autoconf.h"
 
+#if CONFIG_MOTION_RUNTIME
 #include "runtime.h"
 #include "stepper.h"
 extern void *runtime_handle;
+#endif
+
+#if CONFIG_CLASSIC_STEPPING
+#include "stepper.h"
+extern uint64_t runtime_widened_host_clock(void);
+#endif
 
 extern int kalico_console_write_raw(const uint8_t *buf, uint16_t len);
 
@@ -137,9 +144,10 @@ handle_identify(uint32_t correlation_id, const uint8_t *body, uint16_t body_len)
     body_out[58] = (uint8_t)((epoch >> 8) & 0xFF);
     body_out[59] = (uint8_t)((epoch >> 16) & 0xFF);
     body_out[60] = (uint8_t)((epoch >> 24) & 0xFF);
-    // capabilities bit 0 = PHASE_STEPPING_CAPABLE, advertised unconditionally.
+    // capabilities bit 0 = PHASE_STEPPING_CAPABLE. A classic-stepping build
+    // has no MCU-side motion runtime and advertises no motion capability.
     memset(&body_out[61], 0, 8);
-    body_out[61] = 0x01;
+    body_out[61] = CONFIG_MOTION_RUNTIME ? 0x01 : 0x00;
     memset(&body_out[69], 0, 12);
 
     mcu_transport_send_frame(MCU_CHANNEL_CONTROL,
@@ -203,8 +211,13 @@ handle_query_runtime_caps(uint32_t correlation_id, const uint8_t *body,
                           MESSAGE_VERSION_DEFAULT, correlation_id);
     uint8_t *b = &payload[PER_MESSAGE_HEADER_LEN];
     // u32 total_piece_memory (bytes); host divides by 32 (PieceEntry size)
-    // and axis count for per-axis ring depth.
+    // and axis count for per-axis ring depth. Zero on a classic-stepping
+    // build: there is no piece ring to fill.
+#if CONFIG_MOTION_RUNTIME
     uint32_t total_piece_memory = (uint32_t)CONFIG_RUNTIME_PIECE_RING_SIZE;
+#else
+    uint32_t total_piece_memory = 0;
+#endif
     b[0] = (uint8_t)(total_piece_memory & 0xFF);
     b[1] = (uint8_t)((total_piece_memory >> 8) & 0xFF);
     b[2] = (uint8_t)((total_piece_memory >> 16) & 0xFF);
@@ -227,9 +240,11 @@ handle_query_motor_state(uint32_t correlation_id, const uint8_t *body,
     int32_t pos[MCU_MOTOR_STATE_MAX_AXES];
     int32_t vel[MCU_MOTOR_STATE_MAX_AXES];
     int n = 0;
+#if CONFIG_MOTION_RUNTIME
     if (runtime_handle)
         n = runtime_query_motor_state(runtime_handle, slots, pos, vel,
                                              MCU_MOTOR_STATE_MAX_AXES);
+#endif
     if (n < 0)
         n = 0;
     uint8_t payload[PER_MESSAGE_HEADER_LEN + 1
@@ -262,6 +277,7 @@ handle_query_motor_state(uint32_t correlation_id, const uint8_t *body,
 void
 send_status_heartbeat(void)
 {
+#if CONFIG_MOTION_RUNTIME
     if (!runtime_handle)
         return;
 
@@ -272,6 +288,12 @@ send_status_heartbeat(void)
                                              &st, &fc, counts, 8);
     if (n < 0)
         return;
+#else
+    uint8_t st = 0;
+    uint16_t fc = 0;
+    uint32_t counts[8];
+    int32_t n = 0;
+#endif
 
     uint8_t payload[MCU_TX_BUF_SIZE];
     int off = 0;
@@ -357,16 +379,41 @@ send_stop_response(uint32_t correlation_id, int32_t result, uint64_t discard_clo
 // Stamping each Stop with a fresh clock would place the halt several ms
 // of travel past where the steppers actually stopped, and every probe
 // seeds the toolhead frame from the position reconstructed at this clock.
+#if CONFIG_MOTION_RUNTIME || CONFIG_CLASSIC_STEPPING
 static uint64_t stop_halt_clock;
+#endif
+#if CONFIG_CLASSIC_STEPPING
+static uint8_t stop_gated;
+#endif
+
+#if CONFIG_CLASSIC_STEPPING
+void
+classic_stop_gate_at(uint64_t halt_clock)
+{
+    irqstatus_t flag = irq_save();
+    if (!stop_gated) {
+        stop_gated = 1;
+        uint32_t stream_end = 0;
+        if (stepper_classic_halt_all(&stream_end)) {
+            int32_t delta = (int32_t)(stream_end - (uint32_t)halt_clock);
+            if (delta < 0)
+                halt_clock = halt_clock + (int64_t)delta;
+        }
+        stop_halt_clock = halt_clock;
+    }
+    irq_restore(flag);
+}
+#endif
 
 int32_t
 handle_stop_inner(uint64_t *discard_clock)
 {
-    int32_t rc = RUNTIME_ERR_NOT_INIT;
     *discard_clock = 0;
+#if CONFIG_MOTION_RUNTIME
     irqstatus_t suppress_flag = irq_save();
     stepper_suppress_clear_all();
     irq_restore(suppress_flag);
+    int32_t rc = RUNTIME_ERR_NOT_INIT;
     if (runtime_handle) {
         irqstatus_t flag = irq_save();
         int32_t was_gated = runtime_pieces_gated(runtime_handle);
@@ -376,6 +423,18 @@ handle_stop_inner(uint64_t *discard_clock)
         *discard_clock = stop_halt_clock;
         irq_restore(flag);
     }
+#elif CONFIG_CLASSIC_STEPPING
+    // The host-computed step stream has no MCU-side gate to close: the
+    // halt IS discarding every queued move, and SF_NEED_RESET keeps later
+    // queue_step frames out until the host re-anchors with reset_step_clock.
+    int32_t rc = 0;
+    classic_stop_gate_at(runtime_widened_host_clock());
+    irqstatus_t flag = irq_save();
+    *discard_clock = stop_halt_clock;
+    irq_restore(flag);
+#else
+    int32_t rc = RUNTIME_ERR_MOTION_RUNTIME_ABSENT;
+#endif
     return rc;
 }
 
@@ -404,11 +463,20 @@ send_resume_stream_response(uint32_t correlation_id, int32_t result)
 static void
 handle_resume_stream(uint32_t correlation_id)
 {
+#if CONFIG_MOTION_RUNTIME
     int32_t rc = RUNTIME_ERR_NOT_INIT;
     if (runtime_handle) {
         irqstatus_t flag = irq_save();
         rc = runtime_ungate_pieces(runtime_handle);
         irq_restore(flag);
     }
+#elif CONFIG_CLASSIC_STEPPING
+    int32_t rc = 0;
+    irqstatus_t flag = irq_save();
+    stop_gated = 0;
+    irq_restore(flag);
+#else
+    int32_t rc = RUNTIME_ERR_MOTION_RUNTIME_ABSENT;
+#endif
     send_resume_stream_response(correlation_id, rc);
 }

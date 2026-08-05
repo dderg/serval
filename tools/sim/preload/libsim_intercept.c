@@ -120,9 +120,15 @@ struct auto_endstop {
     unsigned long long sum_step_cycles;
     unsigned long long sum_index_cycles;
     long min_pos, max_pos;
+    int dir_chip, dir_line;
 };
 static struct auto_endstop auto_endstops[MAX_AUTO_ENDSTOPS];
 static pthread_mutex_t auto_endstop_mtx = PTHREAD_MUTEX_INITIALIZER;
+// Classic-stepping (CONFIG_CLASSIC_STEPPING) firmware pulses the real step
+// GPIO instead of notifying the tick hook, so step tracking has to come off
+// the ioctl path. Opt-in per process: piece-mode builds write dir pins that
+// collide with the tracked step lines.
+static int gpio_step_tracking;
 __attribute__((constructor(101)))
 static void iio_init(void) {
     for (int i = 0; i < MAX_IIO_CHANNELS; i++) iio_values[i] = DEFAULT_ADC_VALUE;
@@ -138,6 +144,14 @@ static void iio_init(void) {
     // asserts an endstop; exists so get_steps can observe the E track.
     auto_endstops[4] = (struct auto_endstop){1, 0,20, 0,210, 1000000000L,
                                              0, 0, 1, 0};
+    // Dir lines paired with each tracked step line, read on the rising
+    // edge when gpio_step_tracking is on.
+    auto_endstops[0].dir_line = 19;
+    auto_endstops[1].dir_line = 8;
+    auto_endstops[2].dir_line = 16;
+    auto_endstops[3].dir_line = 16;
+    auto_endstops[4].dir_line = 21;
+    gpio_step_tracking = getenv("MCU_SIM_GPIO_STEP_TRACKING") != NULL;
 }
 
 static int alloc_fake_fd(enum sim_slot_kind kind) {
@@ -749,9 +763,21 @@ static int gpio_handle_set_values(int line_fd, struct gpiohandle_data *data) {
     int chip_id = slot->u.gpioline.chip_id;
     int offset = slot->u.gpioline.line_offset;
     int v = data->values[0] ? 1 : 0;
+    int step_delta = 0;
     pthread_mutex_lock(&gpio_state_mtx);
+    int prev = gpio_lines[chip_id][offset].value ? 1 : 0;
     gpio_lines[chip_id][offset].value = v;
     slot->u.gpioline.last_value = v;
+    if (gpio_step_tracking && v && !prev) {
+        for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
+            struct auto_endstop *ae = &auto_endstops[i];
+            if (!ae->active || ae->dir_line <= 0) continue;
+            if (ae->step_chip != chip_id || ae->step_line != offset) continue;
+            step_delta =
+                gpio_lines[ae->dir_chip][ae->dir_line].value ? 1 : -1;
+            break;
+        }
+    }
     if (v == 0 && gpio_lines[chip_id][offset].direction == 1) {
         active_cs.chip_id = chip_id;
         active_cs.line_offset = offset;
@@ -762,7 +788,13 @@ static int gpio_handle_set_values(int line_fd, struct gpiohandle_data *data) {
         active_cs.valid = 0;
     }
     pthread_mutex_unlock(&gpio_state_mtx);
-
+    if (step_delta) {
+        struct timespec vt;
+        clock_gettime(CLOCK_MONOTONIC, &vt);
+        uint64_t vt_ns = (uint64_t)vt.tv_sec * 1000000000ULL
+                         + (uint64_t)vt.tv_nsec;
+        auto_endstop_advance(chip_id, offset, step_delta, vt_ns, 0);
+    }
     return 0;
 }
 

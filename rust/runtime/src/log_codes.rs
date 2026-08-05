@@ -65,6 +65,10 @@ pub const EVENT_MOTION_PIECE_START_PAST: u16 = 1;
 pub const EVENT_MOTION_RING_FULL: u16 = 2;
 pub const EVENT_MOTION_AXIS_STALLED: u16 = 3;
 pub const EVENT_MOTION_AXIS_STALLED_HEAD: u16 = 4;
+pub const EVENT_MOTION_STEP_LOAD_LATE: u16 = 5;
+pub const EVENT_MOTION_STEP_REARM: u16 = 6;
+pub const EVENT_MOTION_STEP_REARM_TIGHT: u16 = 7;
+pub const EVENT_MOTION_STEP_REARM_LATE: u16 = 8;
 
 pub const EVENT_TICK_INTERVAL_EXCEEDED: u16 = 1;
 pub const EVENT_TICK_UNDERRUN: u16 = 2;
@@ -232,6 +236,22 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         (SUBSYSTEM_MOTION, EVENT_MOTION_AXIS_STALLED_HEAD) => (
             "motion.axis_stalled_head",
             "stalled axis armed piece window vs now start-now={arg0:i32}ms end-now={arg1:i32}ms",
+        ),
+        (SUBSYSTEM_MOTION, EVENT_MOTION_STEP_LOAD_LATE) => (
+            "motion.step_load_late",
+            "classic move loaded behind its pending unstep: behind={arg0:i32} cyc min_next={arg1}",
+        ),
+        (SUBSYSTEM_MOTION, EVENT_MOTION_STEP_REARM) => (
+            "motion.step_rearm",
+            "idle stepper re-armed count={arg0} min_margin_cyc={arg1:i32}",
+        ),
+        (SUBSYSTEM_MOTION, EVENT_MOTION_STEP_REARM_TIGHT) => (
+            "motion.step_rearm_tight",
+            "idle stepper re-arm margin armed={arg0} below_floor={arg1}",
+        ),
+        (SUBSYSTEM_MOTION, EVENT_MOTION_STEP_REARM_LATE) => (
+            "motion.step_rearm_late",
+            "idle stepper re-armed behind the mcu clock by margin={arg0:i32} cyc waketime={arg1}",
         ),
         (SUBSYSTEM_TICK, EVENT_TICK_INTERVAL_EXCEEDED) => (
             "tick.interval_exceeded",

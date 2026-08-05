@@ -69,6 +69,20 @@ serial:
 #   Setting this to True will allow the mcu to be disconnected and
 #   reconnected at will without errors. Helpful for USB-accelerometer boards
 #   and USB/CAN-probes
+#stepping_mode: piece
+#   Selects how this micro-controller executes motion. 'piece' (the
+#   default) streams polynomial motion pieces the MCU evaluates in
+#   real time. 'stepcompress' makes the host compute step times and
+#   send classic interval/count/add step queues instead, for MCUs too
+#   weak to evaluate pieces. A 'stepcompress' MCU may not drive
+#   phase-stepped motors and may not be an EtherCAT endpoint.
+#stepcompress_sample_rate:
+#   Rate (in Hz) at which the host samples the planned motion when
+#   generating step queues for this micro-controller. It sets the
+#   quantization of the emitted step times, the host CPU cost of step
+#   generation, and the maximum number of steps per sample. This
+#   parameter must be provided when stepping_mode is 'stepcompress'
+#   and is unused otherwise.
 ```
 
 ### [mcu my_extra_mcu]

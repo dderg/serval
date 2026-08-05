@@ -1,15 +1,21 @@
+#include "autoconf.h"
 #include "basecmd.h"
 #include "board/gpio.h"
 #include "board/misc.h"
 #include "command.h"
 #include "sched.h"
-#include "runtime.h"
+#include "trsync.h"
 #include "mcu_transport_dispatch.h"
 #include "stepper.h"
 
 #define ENDSTOP_UNBOUND 0xFF
 
+#if CONFIG_MOTION_RUNTIME
+#include "runtime.h"
 extern void *runtime_handle;
+#else
+extern uint64_t runtime_widened_host_clock(void);
+#endif
 
 struct endstop {
     struct timer time;
@@ -18,6 +24,8 @@ struct endstop {
     uint32_t last_clear_clock;
     struct gpio_in pin;
     uint64_t trip_clock;
+    struct trsync *ts;
+    uint8_t trigger_reason;
     uint8_t endstop_id;
     uint8_t invert;
     uint8_t armed;
@@ -49,7 +57,11 @@ endstop_event(struct timer *t)
     uint8_t active = raw ^ e->invert;
     uint32_t obs_clock = timer_read_time();
     if (active && e->armed) {
+#if CONFIG_MOTION_RUNTIME
         uint64_t now64 = runtime_now_ticks(runtime_handle);
+#else
+        uint64_t now64 = runtime_widened_host_clock();
+#endif
         uint32_t gap = obs_clock - e->last_clear_clock;
         uint32_t mid32 = e->last_clear_clock + gap / 2;
         int32_t mid_delta = (int32_t)(mid32 - (uint32_t)now64);
@@ -57,6 +69,12 @@ endstop_event(struct timer *t)
         e->armed = 0;
         e->trip_pending = 1;
         e->tripped = 1;
+        if (e->ts) {
+#if CONFIG_CLASSIC_STEPPING
+            classic_stop_gate_at(now64);
+#endif
+            trsync_do_trigger(e->ts, e->trigger_reason);
+        }
         sched_wake_task(&endstop_trip_wake);
         return SF_DONE;
     }
@@ -90,6 +108,8 @@ command_config_endstop(uint32_t *args)
         shutdown("config_endstop stepper out of range");
     e->motor = motor;
     e->stepper = stepper;
+    e->ts = NULL;
+    e->trigger_reason = 0;
     e->time.func = endstop_event;
 
     uint8_t oid;
@@ -148,6 +168,25 @@ endstop_has_armed_lane_peer(const struct endstop *e)
     }
     return 0;
 }
+
+void
+command_endstop_arm_trsync(uint32_t *args)
+{
+    struct endstop *e = oid_lookup(args[0], command_config_endstop);
+    e->ts = trsync_oid_lookup(args[1]);
+    e->trigger_reason = args[2];
+}
+DECL_COMMAND(command_endstop_arm_trsync,
+             "endstop_arm_trsync oid=%c trsync_oid=%c trigger_reason=%c");
+
+void
+command_endstop_clear_trsync(uint32_t *args)
+{
+    struct endstop *e = oid_lookup(args[0], command_config_endstop);
+    e->ts = NULL;
+    e->trigger_reason = 0;
+}
+DECL_COMMAND(command_endstop_clear_trsync, "endstop_clear_trsync oid=%c");
 
 void
 endstop_trip_task(void)

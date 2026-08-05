@@ -13,6 +13,7 @@ pub struct EnqueueMsg {
     pub epoch: crate::anchor::StreamEpoch,
     pub lead_secs: f64,
     pub source_line: u32,
+    pub epoch_freq: Option<f64>,
 }
 
 /// Records each piece into the motion-history store at the moment it is
@@ -20,32 +21,65 @@ pub struct EnqueueMsg {
 /// execute. Recording at dispatch time instead would flood the ring with an
 /// entire move up front — a long homing move evicts its own start before the
 /// endstop trip is resolved against it.
+///
+/// A piece carries its span in seconds, so placing its end on the MCU clock
+/// needs the rate that clock actually runs at — the same measured rate the
+/// producer spaced the start clocks with, and the executor turns the span
+/// back into ticks with. The configured crystal is only a stand-in for the
+/// window before the first sync estimate lands: on a board whose measured
+/// rate drifts from its nameplate, keying the history off the nameplate
+/// stretches every piece and drags trip reconstruction a velocity-scaled
+/// distance away from where the axis really is.
 pub struct HistoryRecorder {
     pub store: Arc<std::sync::Mutex<crate::motion_history::HistoryStore>>,
     pub nominal_freqs: Arc<std::sync::Mutex<std::collections::HashMap<u32, u32>>>,
 }
 
 impl HistoryRecorder {
-    pub(super) fn record(&self, key: AxisKey, piece: &PieceEntry, host_t: f64) {
-        let nominal_freq = *self
-            .nominal_freqs
-            .lock_ok()
-            .get(&key.mcu_id)
-            .unwrap_or_else(|| {
-                panic!(
-                    "no nominal clock frequency registered for mcu {} \
-                     — set_nominal_clock_freq was not called before streaming",
-                    key.mcu_id
-                )
-            });
+    pub(super) fn record(
+        &self,
+        key: AxisKey,
+        piece: &PieceEntry,
+        measured_freq_hz: Option<f64>,
+        host_t: f64,
+    ) {
+        let clock_freq_hz = match measured_freq_hz {
+            Some(freq) if freq.is_finite() && freq > 0.0 => freq,
+            _ => {
+                let nominal = *self
+                    .nominal_freqs
+                    .lock_ok()
+                    .get(&key.mcu_id)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "no nominal clock frequency registered for mcu {} \
+                             — set_nominal_clock_freq was not called before streaming",
+                            key.mcu_id
+                        )
+                    });
+                tracing::warn!(
+                    subsystem = "motion",
+                    event = "history_clock_freq_unmeasured",
+                    mcu = key.mcu_id,
+                    axis = key.axis,
+                    nominal,
+                    "[history] no measured clock rate for this mcu — keying the piece \
+                     off the configured crystal"
+                );
+                f64::from(nominal)
+            }
+        };
         self.store
             .lock_ok()
-            .record(key, piece, nominal_freq, host_t);
+            .record(key, piece, clock_freq_hz, host_t);
     }
 }
 
 pub struct HeartbeatMsg {
     pub mcu_id: u32,
+    /// Retired piece counts indexed by AXIS, not by the reporting endpoint's
+    /// motor/slot order — the pump keys its queues by `AxisKey`. Endpoints
+    /// whose native counters are motor- or slot-indexed re-index first.
     pub retired_counts: Vec<u32>,
 }
 
@@ -59,6 +93,11 @@ pub enum PumpMsg {
     Resume(Vec<AxisKey>),
     DripArm(DripArm),
     DripDisarm(u64),
+    StepcompressBarrierAck {
+        mcu_id: u32,
+        oid: u8,
+        seq: u32,
+    },
     Barrier(std::sync::mpsc::SyncSender<()>),
     Shutdown,
 }
@@ -126,6 +165,26 @@ pub trait PieceSink: Send {
         SERIAL_BUNDLE_LIMITS
     }
 
+    /// Note that the first piece of a fresh anchor epoch for `key` starts at
+    /// `at_start_clock`, a clock bearing no relation to the timeline the
+    /// transport still holds. Transports that keep a host-side committed
+    /// stream cut it exactly at that piece; the piece-ring transports carry
+    /// the discontinuity on the wire, so this is a no-op for them.
+    ///
+    /// A bundle may span the boundary, so the mark names the piece rather
+    /// than the bundle.
+    fn mark_reanchor(&self, _key: AxisKey, _at_start_clock: u64, _epoch_freq: Option<f64>) {}
+
+    /// How this transport's seam consumer reprojects a piece `duration` into
+    /// clock ticks for `key`. Hold merging rewrites durations, so it must use
+    /// this basis; the live clock estimate drifts against the frozen epoch
+    /// slope a host-side committed stream already sent frames on, and over a
+    /// lane held for a whole layer that drift becomes a hard seam gap.
+    /// `None` = pieces reach the mcu walker untouched.
+    fn seam_basis(&self, _key: AxisKey) -> Option<super::sched::SeamBasis> {
+        None
+    }
+
     /// Deliver every axis frame destined for `mcu_id` as one bundled
     /// transaction. A whole bundle either lands or it doesn't — the caller
     /// commits the ring bookkeeping for all axes only on `Ok`, so a failed
@@ -148,6 +207,15 @@ pub trait PieceSink: Send {
             )?;
         }
         Ok(())
+    }
+
+    /// Routes a classic-stepping `stepcompress_barrier_ack` to the endpoint
+    /// that issued the barrier.
+    fn on_barrier_ack(&self, mcu_id: u32, oid: u8, seq: u32) -> Result<(), SendError> {
+        Err(SendError::Fatal(format!(
+            "stepcompress_barrier_ack oid={oid} seq={seq} arrived for mcu {mcu_id}, which has \
+             no stepcompress endpoint"
+        )))
     }
 }
 

@@ -13,6 +13,8 @@ pub(super) struct TripDeps {
     pub(super) router: Arc<Mutex<PassthroughRouter>>,
     pub(super) motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
     pub(super) mcu_axis_configs: Arc<Mutex<Vec<McuAxisConfig>>>,
+    pub(super) stepcompress_endpoints:
+        Arc<Mutex<HashMap<u32, Arc<Mutex<crate::pump::StepcompressEndpoint>>>>>,
 }
 
 pub(super) fn dispatch_endstop_trip(
@@ -102,6 +104,13 @@ pub(super) fn dispatch_endstop_trip(
     let router_arc = Arc::clone(&deps.router);
     let history_arc = Arc::clone(&deps.motion_history);
     let configs: Vec<McuAxisConfig> = deps.mcu_axis_configs.lock_ok().clone();
+    let host_ios: HashMap<u32, Arc<host_rt::host_io::McuHostIo>> = {
+        let mcus = deps.mcus.lock_ok();
+        mcus.iter()
+            .filter_map(|(&id, conn)| conn.host_io.as_ref().map(|io| (id, Arc::clone(io))))
+            .collect()
+    };
+    let endpoints = deps.stepcompress_endpoints.lock_ok().clone();
 
     std::thread::Builder::new()
         .name("homing-trip-handler".into())
@@ -166,10 +175,72 @@ pub(super) fn dispatch_endstop_trip(
                     )
                 };
 
-            let outcome = reconstruct_cartesian(event_mcu, trip_clock).and_then(|trip| {
-                reconstruct_cartesian(axis_key.mcu_id, discard_clock)
-                    .map(|final_pos| (trip, final_pos, trip_clock))
-            });
+            let query_step_count = |lane: &crate::homing::StepcompressLane| -> Result<i64, String> {
+                let io = host_ios.get(&lane.mcu_id).ok_or_else(|| {
+                    format!(
+                        "stepper_get_position: no host_io for stepcompress mcu {}",
+                        lane.mcu_id
+                    )
+                })?;
+                let params = io
+                    .call_args(
+                        "stepper_get_position",
+                        &[(
+                            "oid".to_string(),
+                            host_rt::host_io::parser::ArgValue::Int(i64::from(lane.oid)),
+                        )],
+                        "stepper_position",
+                        stop_timeout,
+                    )
+                    .map_err(|e| {
+                        format!(
+                            "stepper_get_position failed for mcu {} oid {}: {e:?}",
+                            lane.mcu_id, lane.oid
+                        )
+                    })?;
+                params.try_get_i32("pos").map(i64::from).ok_or_else(|| {
+                    format!(
+                        "stepper_position from mcu {} oid {} carries no `pos` field",
+                        lane.mcu_id, lane.oid
+                    )
+                })
+            };
+            let reseed_step_counter =
+                |lane: &crate::homing::StepcompressLane, count: i64| -> Result<(), String> {
+                    let endpoint = endpoints.get(&lane.mcu_id).ok_or_else(|| {
+                        format!(
+                            "stepcompress reconcile: no shim endpoint registered for mcu {}",
+                            lane.mcu_id
+                        )
+                    })?;
+                    let mut guard = endpoint.lock_ok();
+                    guard.abort_outbound();
+                    guard.reset_motor_position(lane.motor, count)
+                };
+
+            let outcome = reconstruct_cartesian(event_mcu, trip_clock)
+                .and_then(|trip| {
+                    reconstruct_cartesian(axis_key.mcu_id, discard_clock)
+                        .map(|final_pos| (trip, final_pos, trip_clock))
+                })
+                .and_then(|positions| {
+                    crate::homing::reconcile_stepcompress_lanes(
+                        &configs,
+                        |key| {
+                            crate::homing::reconstruct_axis_position(
+                                axis_key.mcu_id,
+                                discard_clock,
+                                key,
+                                &router_arc,
+                                &history_arc,
+                                run.window_start_host,
+                            )
+                        },
+                        &query_step_count,
+                        &reseed_step_counter,
+                    )
+                    .map(|()| positions)
+                });
 
             let outcome = outcome.and_then(|positions| {
                 for &mcu_id in &stepper_mcu_ids {
@@ -206,6 +277,17 @@ pub(super) fn dispatch_endstop_trip(
                 }
                 Ok(positions)
             });
+            if let Err(e) = outcome.as_ref() {
+                tracing::error!(
+                    subsystem = "trip-relay",
+                    event = "trip_handler_failed",
+                    mcu = event_mcu,
+                    endstop_id,
+                    trip_clock,
+                    error = %e,
+                    "endstop trip handling failed — the homing move is aborted"
+                );
+            }
             let _ = run.notify.send(outcome);
         })
         .expect("spawn homing-trip-handler");

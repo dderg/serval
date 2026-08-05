@@ -40,19 +40,20 @@ pub(crate) fn lane_curve(
     acc.expect("kinematics lane with all-zero weights is a module construction bug")
 }
 
-pub struct EnqueueCtx<P> {
+pub struct EnqueueCtx<'a, P> {
     pub t0: f64,
     pub epoch: crate::anchor::StreamEpoch,
     pub host_now: f64,
     pub lead_secs: f64,
     pub project: P,
     pub max_piece_secs: Option<f64>,
+    pub epoch_freq: &'a dyn Fn(u32) -> Option<f64>,
 }
 
 pub fn enqueue_segment<P>(
     seg: &ShapedSegment,
     mcu_configs: &[McuAxisConfig],
-    ctx: &EnqueueCtx<P>,
+    ctx: &EnqueueCtx<'_, P>,
 ) -> Vec<EnqueueMsg>
 where
     P: Fn(u32, f64) -> u64,
@@ -102,6 +103,7 @@ where
             if cfg.ethercat && is_pure_hold(&pieces) {
                 if ctx.epoch.position_redefined() {
                     out.push(EnqueueMsg {
+                        epoch_freq: (ctx.epoch_freq)(cfg.mcu_id),
                         key,
                         pieces: Vec::new(),
                         epoch: ctx.epoch,
@@ -113,6 +115,7 @@ where
             }
             if !pieces.is_empty() {
                 out.push(EnqueueMsg {
+                    epoch_freq: (ctx.epoch_freq)(cfg.mcu_id),
                     key,
                     pieces,
                     epoch: ctx.epoch,

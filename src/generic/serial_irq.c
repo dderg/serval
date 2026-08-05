@@ -150,7 +150,8 @@ kalico_console_write_raw(const uint8_t *buf, uint16_t len)
 {
     transmit_pos_t tpos = read_tpos(&transmit_pos);
     transmit_pos_t tmax = read_tpos(&transmit_max);
-    if (tpos && (uint32_t)tmax + (uint32_t)len > sizeof(transmit_buf)) {
+    transmit_pos_t log_limit = sizeof(transmit_buf) - CONSOLE_TX_PROTOCOL_RESERVE;
+    if (tpos && (uint32_t)tmax + (uint32_t)len > log_limit) {
         write_tpos(&transmit_max, 0);
         tpos = read_tpos(&transmit_pos);
         tmax -= tpos;
@@ -158,7 +159,7 @@ kalico_console_write_raw(const uint8_t *buf, uint16_t len)
         write_tpos(&transmit_pos, 0);
         write_tpos(&transmit_max, tmax);
     }
-    if ((uint32_t)tmax + (uint32_t)len > sizeof(transmit_buf))
+    if ((uint32_t)tmax + (uint32_t)len > log_limit)
         return -1;
     memcpy(&transmit_buf[tmax], buf, len);
     write_tpos(&transmit_max, tmax + len);
