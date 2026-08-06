@@ -250,3 +250,45 @@ def test_stepcompress_g4_mid_print(sim_world):
     print_time = world.print_file(gcode, timeout=600)
     world.gcode_ok("M400", timeout=60)
     _assert_clean(world, print_time)
+
+
+PRINT_END_MACRO = """
+[gcode_macro PRINT_END]
+gcode:
+    G92 E0
+    G1 E-2 F1800
+    G91
+    G1 Z5 F600
+    G90
+    G1 X10 Y200 F6000
+    M107
+    SET_STEPPER_ENABLE STEPPER=x ENABLE=0
+    SET_STEPPER_ENABLE STEPPER=y ENABLE=0
+    SET_STEPPER_ENABLE STEPPER=z ENABLE=0
+    SET_STEPPER_ENABLE STEPPER=extruder ENABLE=0
+"""
+
+
+def test_print_end_macro_per_motor_disable_native_runtime(sim_world):
+    """The user-reported shape verbatim: a PRINT_END gcode_macro that parks
+    and disables motors individually instead of M84, invoked from the file,
+    on the native motion runtime (no stepcompress)."""
+    world = sim_world(
+        lambda w: configs.neptune_print_config(w.h7_pty, str(w.gcode_dir))
+        + PRINT_END_MACRO,
+        dual_mcu=False,
+    )
+    world.gcode_ok("SET_KINEMATIC_POSITION X=0 Y=0 Z=0", timeout=10)
+    gcode = world.gcode_dir / "print_end_macro.gcode"
+    lines = [
+        "G90",
+        "G21",
+        "M83",
+        "G92 E0",
+        "G1 Z0.2 F600",
+        *_zigzag(120),
+        "PRINT_END",
+    ]
+    gcode.write_text("\n".join(lines) + "\n")
+    print_time = world.print_file(gcode, timeout=600)
+    _assert_clean(world, print_time)
