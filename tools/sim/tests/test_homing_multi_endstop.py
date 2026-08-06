@@ -61,7 +61,7 @@ MOVING_STEPS = int(0.5 * STEPS_PER_MM)
 # suppress bit: one endstop poll period (1 ms) of travel at homing speed,
 # with margin. Drained from the lane before any suppression baseline.
 SUPPRESSED_EDGE_SLOP = 4
-SUPPRESS_SETTLE_STEPS = 8
+SUPPRESS_SETTLE_STEPS = MOVING_STEPS
 # A running motor pulses at least one edge per lane step; the lane and the
 # edge counters are read in separate round trips, so allow the same slop.
 RUNNING_EDGE_MIN = MOVING_STEPS - SUPPRESSED_EDGE_SLOP
