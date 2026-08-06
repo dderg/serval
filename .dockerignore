@@ -7,6 +7,8 @@ scripts/Dockerfile*
 out/
 .pytest_cache/
 .ruff_cache/
+.ci-logs/
+.sim-logs/
 klippy/chelper/*.so
 klippy/chelper/*.dylib
 klippy/chelper/c_helper.so.dSYM/

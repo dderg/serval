@@ -175,6 +175,14 @@ pub trait PieceSink: Send {
     /// than the bundle.
     fn mark_reanchor(&self, _key: AxisKey, _at_start_clock: u64, _epoch_freq: Option<f64>) {}
 
+    /// Note that the stream time jumped a drained-to-rest hole (a dwell)
+    /// and the next piece for `key` starts at `at_start_clock`, later than
+    /// the previous piece's projected end. The position is unchanged and no
+    /// steps span the hole, so transports that validate seam contiguity
+    /// sanction a forward-only jump; piece-ring transports carry absolute
+    /// clocks and need nothing.
+    fn mark_seam_gap(&self, _key: AxisKey, _at_start_clock: u64) {}
+
     /// How this transport's seam consumer reprojects a piece `duration` into
     /// clock ticks for `key`. Hold merging rewrites durations, so it must use
     /// this basis; the live clock estimate drifts against the frozen epoch

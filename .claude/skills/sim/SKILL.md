@@ -14,6 +14,8 @@ tools/sim/run.sh                    # build image (incremental) + self-test prin
 tools/sim/run.sh --gcode f.gcode    # print a G-code file, report speedup
 tools/sim/run.sh test               # full e2e pytest suite (homing, probe, beacon, phase stepping, motor adjust)
 tools/sim/run.sh test -k probe      # subset by pytest -k expression
+tools/sim/run.sh test --keep-logs   # leave every world's logs in .sim-logs/
+tools/sim/run.sh test --verbose     # stream the image build (hidden by default)
 tools/sim/run.sh serve              # long-lived printer for Moonraker/Mainsail
 tools/sim/run.sh shell              # bash inside the image
 tools/sim/run.sh --branch X test    # any mode against another branch
@@ -21,6 +23,24 @@ tools/sim/run.sh --no-cache         # force full rebuild
 ```
 
 Every build is tagged `kalico-sim-<branch>` (the worktree's branch, or `--branch`'s argument), so agents/sessions on different worktrees build and test in parallel without clobbering each other's images.
+
+## Getting at a run's logs
+
+The container is `--rm`, so each world's `tmp_path` — `klippy.log`,
+`klippy.stdout`, the MCU `h7.log`/`f4.log`, the structured `events/*.jsonl`
+store and the generated `printer.cfg` — dies with the run. On failure the
+`sim_world` finalizer prints tails of all of them (`world.dump_diagnostics`),
+which is usually enough.
+
+When it is not, re-run with `--keep-logs`: pytest's basetemp moves onto a host
+mount and the whole tree survives at
+`.sim-logs/run/<test-name>0/world0/logs/`. Read the files directly — the
+`events/*.jsonl` records are the same ones `scripts/logq.py` serves from
+VictoriaLogs on a real host, so `jq` over them answers the same questions.
+
+Through the CI wrapper the flag forwards: `./scripts/ci.sh sim-e2e
+--keep-logs -k probe`. That gate also keeps its own full pytest output in
+`.ci-logs/sim-e2e.log`.
 
 ## Writing a new scenario test
 

@@ -33,6 +33,56 @@ cargo install cargo-nextest --locked   # process-per-test isolation
 cargo install cargo-deny               # optional
 ```
 
+## Output: one line per gate unless it fails
+
+A gate's log is worth nothing when it passes and everything when it fails, so
+`ci.sh` prints it accordingly. Interactive terminals and GitHub Actions get the
+full live stream — a human wants progress, a CI job log wants the record.
+Anywhere else (an agent, a script capturing stdout) each gate collapses to one
+line carrying its tally, and a failing gate dumps the last 100 lines of its log:
+
+```
+ruff                 PASS  389 files already formatted
+rust-test            PASS  Summary [ 3.789s] 2367 tests run: 2367 passed, 5 skipped
+py                   PASS  751 passed, 5 skipped, 2 warnings in 32.98s
+```
+
+The same rule covers the docker builds behind `py`/`sim`/`sim-e2e` and the
+workspace doc-tests, and `rust/.config/nextest.toml` sets `status-level =
+"slow"` so a green Rust run is one summary line instead of 2367 PASS lines.
+Nothing is discarded on the failure path.
+
+### Getting the full output back
+
+Quiet is the default, not a wall. Three ways through it:
+
+```sh
+./scripts/ci.sh -v py                     # stream the gate live
+cat .ci-logs/py.log                       # complete log of the last `py` run
+./scripts/ci.sh sim-e2e --keep-logs -k probe   # keep the simulator's own logs
+```
+
+Every job — quiet or streamed, passing or failing — writes its complete output
+to `.ci-logs/<job>.log` (gitignored, overwritten per job per run). Prefer
+reading that file over re-running a gate verbosely: the failure dump is capped
+at 100 lines, the file is not.
+
+`--keep-logs` is a `tools/sim/run.sh test` flag (reachable through `ci.sh
+sim-e2e`). The sim's `--rm` container normally takes every world's logs with
+it; the flag puts pytest's basetemp on a host mount, leaving the whole tree in
+`.sim-logs/run/<test-name>0/world0/`:
+
+```
+logs/klippy.log            klippy's own log
+logs/klippy.stdout         tracebacks that never reached the log
+logs/h7.log, f4.log        MCU process stdout/stderr
+logs/events/host-py.jsonl  structured event store (also host-rust, <mcu>.jsonl)
+printer.cfg                the exact config the world booted
+```
+
+The `.jsonl` files are the same structured records `scripts/logq.py` queries on
+a real host, minus the VictoriaLogs round trip — read them with `jq`.
+
 ## Checking locally before a PR
 
 The single source of truth runs the same gates CI does. Before opening a PR to

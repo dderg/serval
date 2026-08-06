@@ -6,6 +6,8 @@
 #   ./run.sh --gcode benchy.gcode     # print a G-code file
 #   ./run.sh test                     # run the e2e pytest suite
 #   ./run.sh test -k probe            # subset of the e2e suite
+#   ./run.sh test --keep-logs         # keep every world's logs in .sim-logs/
+#   ./run.sh test --verbose           # stream the image build instead of hiding it
 #   ./run.sh serve                    # long-lived printer for Moonraker
 #   ./run.sh shell                    # bash inside the image
 #   ./run.sh --branch sota-motion     # build+run a specific branch
@@ -29,6 +31,8 @@ GCODE=""
 EXTRA_ARGS=()
 DOCKER_ARGS=(--rm --ulimit memlock=-1:-1)
 DOCKER_BUILD_ARGS=()
+KEEP_LOGS=""
+VERBOSE=""
 
 case "${1:-}" in
     test|serve|shell)
@@ -49,6 +53,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --privileged)
             DOCKER_ARGS+=(--privileged)
+            shift
+            ;;
+        --keep-logs)
+            KEEP_LOGS="$REPO_ROOT/.sim-logs"
+            shift
+            ;;
+        --verbose)
+            VERBOSE=1
             shift
             ;;
         --no-cache)
@@ -76,6 +88,7 @@ echo "=== Kalico Simulator ==="
 echo "  Mode:      $MODE"
 echo "  Branch:    ${BUILD_BRANCH}"
 echo "  Image:     $IMAGE_TAG"
+[[ -n "$KEEP_LOGS" ]] && echo "  Logs:      $KEEP_LOGS"
 echo ""
 
 if [[ -z "$BRANCH" ]]; then
@@ -90,16 +103,34 @@ if [[ -z "$BRANCH" ]]; then
            -o -name third_party_repos \) -prune -o -type f -exec touch {} +)
 fi
 
+# A docker build narrates every layer even when all of them are cached: over a
+# thousand lines that say nothing on success and everything on failure. A
+# terminal and GitHub Actions keep the live stream (progress, job logs);
+# anything else — an agent or a script capturing stdout — gets silence on
+# success and the complete log on failure.
+run_quiet() {
+    if [[ -n "$VERBOSE" || -t 2 || -n "${GITHUB_ACTIONS:-}" ]]; then
+        "$@" >&2
+        return
+    fi
+    local log rc=0
+    log="$(mktemp)"
+    "$@" >"$log" 2>&1 || rc=$?
+    [[ $rc -eq 0 ]] || { printf '%s failed (rc=%s):\n' "$1" "$rc" >&2; cat "$log" >&2; }
+    rm -f "$log"
+    return "$rc"
+}
+
 build_image() {
     # One retry absorbs transient registry/network failures (e.g. a cargo
     # crate download aborting mid-unpack on a CI runner). Deterministic
     # build errors replay from the layer cache and fail fast the second
     # time, so real breakage stays loud.
     local ctx="$1" dockerfile="$2"
-    if ! docker build ${DOCKER_BUILD_ARGS[@]+"${DOCKER_BUILD_ARGS[@]}"} \
+    if ! run_quiet docker build ${DOCKER_BUILD_ARGS[@]+"${DOCKER_BUILD_ARGS[@]}"} \
             -t "$IMAGE_TAG" -f "$dockerfile" "$ctx"; then
         echo "docker build failed; retrying once (transient network flakes)" >&2
-        docker build ${DOCKER_BUILD_ARGS[@]+"${DOCKER_BUILD_ARGS[@]}"} \
+        run_quiet docker build ${DOCKER_BUILD_ARGS[@]+"${DOCKER_BUILD_ARGS[@]}"} \
             -t "$IMAGE_TAG" -f "$dockerfile" "$ctx"
     fi
 }
@@ -132,13 +163,33 @@ case "$MODE" in
         # acceptable. SIM_TEST_TARGETS narrows the run to specific test
         # files (used by the CI shards).
         [[ -n "${VTIME_SPEED:-}" ]] && DOCKER_ARGS+=(-e VTIME_SPEED)
+        [[ -n "${RUST_LOG:-}" ]] && DOCKER_ARGS+=(-e RUST_LOG)
         XDIST_ARGS=()
         [[ -n "${SIM_TEST_JOBS:-}" ]] && XDIST_ARGS=(-n "$SIM_TEST_JOBS")
+        # Every SimWorld lives in a pytest tmp dir that dies with the
+        # container, taking klippy.log, the MCU logs and the structured
+        # events/*.jsonl store with it. --keep-logs puts pytest's basetemp on
+        # a host mount instead, so world0/, world1/ … survive the run. pytest
+        # wipes and recreates its basetemp, which a mount point cannot be —
+        # hence the subdirectory.
+        if [[ -n "$KEEP_LOGS" ]]; then
+            mkdir -p "$KEEP_LOGS"
+            DOCKER_ARGS+=(-v "$KEEP_LOGS:/sim-logs")
+            EXTRA_ARGS+=(--basetemp=/sim-logs/run)
+        fi
+        rc=0
         docker run ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"} --entrypoint python3 "$IMAGE_TAG" \
             -m pytest ${SIM_TEST_TARGETS:-tools/sim/tests} \
             -m needs_elf -v -p no:cacheprovider \
             ${XDIST_ARGS[@]+"${XDIST_ARGS[@]}"} \
-            ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
+            ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} || rc=$?
+        # The container writes as root; hand the tree back so the host user
+        # can read, grep and delete it without sudo.
+        if [[ -n "$KEEP_LOGS" && "$(id -u)" != 0 ]]; then
+            docker run --rm -v "$KEEP_LOGS:/sim-logs" --entrypoint chown \
+                "$IMAGE_TAG" -R "$(id -u):$(id -g)" /sim-logs >/dev/null 2>&1 || true
+        fi
+        exit "$rc"
         ;;
     serve)
         docker run ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"} -i "$IMAGE_TAG" --serve ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}

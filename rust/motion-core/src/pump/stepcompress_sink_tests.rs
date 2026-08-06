@@ -451,6 +451,83 @@ fn a_bundle_spanning_the_epoch_boundary_is_cut_at_the_marked_piece() {
 }
 
 #[test]
+fn two_marked_gaps_in_one_buffered_stretch_both_apply_in_order() {
+    // Two dwells inside one buffered stream (G4 G4, or stepper-enable
+    // stalls) mark two seam gaps before any of their pieces reach the
+    // endpoint. Both must survive queued — a single-slot mark would drop
+    // the first seam and die on its PieceGap.
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .unwrap();
+
+    h.endpoint.mark_seam_gap(0, 100_000);
+    h.endpoint.mark_seam_gap(0, 700_000);
+
+    let mut spanning = ramp_from(100_000, 4, 1.0);
+    spanning.extend(ramp_from(700_000, 4, 1.5));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(spanning)])
+        .expect("both marked seam gaps must be sanctioned, in order");
+    assert!(
+        !h.endpoint.pending_seams.contains_key(&0),
+        "both gaps must be consumed"
+    );
+}
+
+#[test]
+fn a_seam_gap_emits_no_mcu_frames() {
+    // A rejoin hole is stationary: sanctioning it must not halt the shim,
+    // reset the mcu step clock, or emit any frame — a mid-stream cut wedges
+    // a live classic mcu.
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .unwrap();
+    let resets_before = h
+        .sent
+        .lock_ok()
+        .iter()
+        .filter(|f| matches!(f, StepFrame::ResetStepClock { .. }))
+        .count();
+
+    h.endpoint.mark_seam_gap(0, 300_000);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(300_000, 4, 1.0))])
+        .expect("a marked forward gap is sanctioned");
+    let resets_after = h
+        .sent
+        .lock_ok()
+        .iter()
+        .filter(|f| matches!(f, StepFrame::ResetStepClock { .. }))
+        .count();
+    assert_eq!(
+        resets_before, resets_after,
+        "a seam gap must not re-anchor the mcu step clock"
+    );
+}
+
+#[test]
+fn a_seam_gap_cannot_sanction_a_backward_overlap() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+
+    // The stream above runs well past 40_000; a "gap" pointing back into it
+    // is an overlap and must stay loud.
+    h.endpoint.mark_seam_gap(0, 40_000);
+    let err = h
+        .endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(40_000, 4, 5.0))])
+        .expect_err("a backward jump is an overlap, not a gap");
+    assert!(format!("{err:?}").contains("PieceGap"), "{err:?}");
+}
+
+#[test]
 fn a_cut_keeps_frames_that_were_already_emitted() {
     let mut h = harness(BUDGET);
     h.now.store(1_000, Ordering::Relaxed);

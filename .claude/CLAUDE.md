@@ -23,6 +23,19 @@ Use `cargo nextest run -p <crate>` or `-E 'test(<name>)'` to scope down.
 Doc-tests are the one gap — `nextest` skips them, so run `cargo test --doc`
 when you touch doc examples.
 
+Test output is quiet by design: `ci.sh <job>` prints one `PASS <tally>` line
+off a terminal, and dumps the last 100 lines of the log when the job fails;
+nextest prints failures and slow tests only. Never re-run a gate verbosely to
+"see" a green result — the tally line is the result.
+
+When you do need the detail, the complete log of every job is already on disk
+at `.ci-logs/<job>.log` — read or grep that instead of re-running. `ci.sh -v
+<job>` streams live if you really want it in the transcript. For a simulator
+post-mortem, `tools/sim/run.sh test --keep-logs` (also via `ci.sh sim-e2e
+--keep-logs`) leaves each world's `klippy.log`, MCU logs, `printer.cfg` and
+`events/*.jsonl` under `.sim-logs/run/<test>/world0/`; without it the `--rm`
+container deletes them.
+
 # Before opening or updating a PR
 
 Run `./scripts/ci.sh quick` and get it fully green — it bundles ruff

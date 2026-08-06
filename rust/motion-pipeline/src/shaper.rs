@@ -176,6 +176,7 @@ impl Shaper {
                     "shaper: drain marker arrived while the trajectory is not at rest"
                 );
                 self.emit(self.pending.len(), true, output)
+                    && output.send(ShapedItem::Parked).is_ok()
             }
             LoweredItem::Control(ctrl) => {
                 match &ctrl {

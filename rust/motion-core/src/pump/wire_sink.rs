@@ -305,6 +305,15 @@ impl PieceSink for WireSink {
         }
     }
 
+    fn mark_seam_gap(&self, key: AxisKey, at_start_clock: u64) {
+        if let Some(McuTransport::Stepcompress(endpoint)) = self.transports.get(&key.mcu_id) {
+            endpoint
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .mark_seam_gap(key.axis, at_start_clock);
+        }
+    }
+
     fn seam_basis(&self, key: AxisKey) -> Option<super::sched::SeamBasis> {
         match self.transports.get(&key.mcu_id) {
             Some(McuTransport::Stepcompress(endpoint)) => endpoint
