@@ -8,15 +8,14 @@
 #include "board/irq.h"
 #include "sched.h"
 #include "autoconf.h"
+#include "stepper.h"
 
 #if CONFIG_MOTION_RUNTIME
 #include "runtime.h"
-#include "stepper.h"
 extern void *runtime_handle;
 #endif
 
 #if CONFIG_CLASSIC_STEPPING
-#include "stepper.h"
 extern uint64_t runtime_widened_host_clock(void);
 #endif
 
@@ -36,6 +35,8 @@ static void handle_query_runtime_caps(uint32_t correlation_id, const uint8_t *bo
 static void handle_query_motor_state(uint32_t correlation_id, const uint8_t *body, uint16_t body_len);
 static void handle_stop(uint32_t correlation_id);
 static void handle_resume_stream(uint32_t correlation_id);
+static void handle_stepper_suppress(uint32_t correlation_id,
+                                    const uint8_t *body, uint16_t body_len);
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <fcntl.h>
@@ -190,6 +191,9 @@ mcu_transport_dispatch_frame(uint8_t channel, const uint8_t *payload,
         return;
     case MCU_MSG_RESUME_STREAM:
         handle_resume_stream(correlation_id);
+        return;
+    case MCU_MSG_STEPPER_SUPPRESS:
+        handle_stepper_suppress(correlation_id, body, body_len);
         return;
     default:
         return;
@@ -458,8 +462,42 @@ send_resume_stream_response(uint32_t correlation_id, int32_t result)
 }
 
 static void
+send_stepper_suppress_response(uint32_t correlation_id, int32_t result)
+{
+    uint8_t payload[PER_MESSAGE_HEADER_LEN + 4];
+    encode_message_header(payload, MCU_MSG_STEPPER_SUPPRESS_RESPONSE,
+                          MESSAGE_VERSION_DEFAULT, correlation_id);
+    uint8_t *b = &payload[PER_MESSAGE_HEADER_LEN];
+    b[0] = (uint8_t)(result & 0xFF);
+    b[1] = (uint8_t)((result >> 8) & 0xFF);
+    b[2] = (uint8_t)((result >> 16) & 0xFF);
+    b[3] = (uint8_t)((result >> 24) & 0xFF);
+    mcu_transport_send_frame(MCU_CHANNEL_CONTROL, payload, sizeof(payload));
+}
+
+static void
+handle_stepper_suppress(uint32_t correlation_id, const uint8_t *body,
+                        uint16_t body_len)
+{
+    if (body_len < 3)
+        shutdown("stepper_suppress truncated body");
+    int32_t rc = 0;
+    if (body[0] == 0xFF && body[1] == 0xFF && !body[2]) {
+        stepper_suppress_clear_all();
+    } else {
+#if CONFIG_MOTION_RUNTIME
+        stepper_suppress_update(body[0], body[1], body[2] ? 1 : 0);
+#else
+        rc = RUNTIME_ERR_MOTION_RUNTIME_ABSENT;
+#endif
+    }
+    send_stepper_suppress_response(correlation_id, rc);
+}
+
+static void
 handle_resume_stream(uint32_t correlation_id)
 {
+    stepper_suppress_clear_all();
 #if CONFIG_MOTION_RUNTIME
     int32_t rc = RUNTIME_ERR_NOT_INIT;
     if (runtime_handle) {

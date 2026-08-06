@@ -573,6 +573,26 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
             SchemaField { name: "result", ty: "i32" },
         ],
     },
+    SchemaMessage {
+        type_tag: 0x0092,
+        name: "StepperSuppress",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "motor", ty: "u8" },
+            SchemaField { name: "stepper", ty: "u8" },
+            SchemaField { name: "engage", ty: "u8" },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x0093,
+        name: "StepperSuppressResponse",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "result", ty: "i32" },
+        ],
+    },
 ];
 
 /// Bootstrap type tags that the C header must define alongside the schema

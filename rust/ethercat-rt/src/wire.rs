@@ -8,7 +8,8 @@ use mcu_protocol::messages::{
     SeedServoHomeResponse, SetDiffDamper, SetDiffDamperResponse, SetDiffTrim, SetDiffTrimResponse,
     SetDriveLimits, SetDriveLimitsResponse, SetDynamicsModel, SetDynamicsModelResponse, SetFfLead,
     SetFfLeadResponse, SetStrainComp, SetStrainCompResponse, SetTorque, SetTorqueResponse,
-    StartCapture, StartCaptureResponse, StatusHeartbeat, StopCaptureResponse, StopResponse,
+    StartCapture, StartCaptureResponse, StatusHeartbeat, StepperSuppress, StepperSuppressResponse,
+    StopCaptureResponse, StopResponse,
 };
 use mcu_protocol::MCU_CHANNEL_PIECES;
 use mcu_transport::frame::{encode_frame, CHANNEL_CONTROL, CHANNEL_EVENTS};
@@ -51,6 +52,10 @@ pub enum Command {
     },
     ResumeStream {
         correlation_id: u32,
+    },
+    StepperSuppress {
+        correlation_id: u32,
+        msg: StepperSuppress,
     },
     SetDriveLimits {
         correlation_id: u32,
@@ -165,6 +170,13 @@ pub fn decode_command(channel: u8, payload: &[u8]) -> Result<Command, DecodeCmdE
         Some(MessageKind::ResumeStream) => Ok(Command::ResumeStream {
             correlation_id: cid,
         }),
+        Some(MessageKind::StepperSuppress) => {
+            let msg = StepperSuppress::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
+            Ok(Command::StepperSuppress {
+                correlation_id: cid,
+                msg,
+            })
+        }
         Some(MessageKind::SetDriveLimits) => {
             let msg = SetDriveLimits::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
             Ok(Command::SetDriveLimits {
@@ -415,6 +427,11 @@ pub fn set_diff_trim_response_frame(cid: u32, result: i32) -> Vec<u8> {
 pub fn set_ff_lead_response_frame(cid: u32, result: i32) -> Vec<u8> {
     let body = SetFfLeadResponse { result }.encoded_to_vec();
     control_frame(MessageKind::SetFfLeadResponse, cid, &body)
+}
+
+pub fn stepper_suppress_response_frame(cid: u32, result: i32) -> Vec<u8> {
+    let body = StepperSuppressResponse { result }.encoded_to_vec();
+    control_frame(MessageKind::StepperSuppressResponse, cid, &body)
 }
 
 pub fn status_heartbeat_frame(

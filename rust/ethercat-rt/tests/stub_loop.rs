@@ -170,6 +170,7 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
                     Command::StopCapture { .. } => {}
                     Command::Stop { .. } => {}
                     Command::ResumeStream { .. } => {}
+                    Command::StepperSuppress { .. } => {}
                     Command::SetDriveLimits { .. } | Command::RestoreDriveLimits { .. } => {}
                     Command::SeedServoHome { .. } => {}
                     Command::ArmSensorlessEndstop { .. } => {}
@@ -205,6 +206,7 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
                     | Command::StopCapture { .. }
                     | Command::Stop { .. }
                     | Command::ResumeStream { .. }
+                    | Command::StepperSuppress { .. }
                     | Command::SetDriveLimits { .. }
                     | Command::RestoreDriveLimits { .. }
                     | Command::SeedServoHome { .. }

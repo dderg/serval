@@ -125,9 +125,23 @@ pub(crate) struct LatchedFaults {
     pub(crate) endpoint_death: Arc<Mutex<HashMap<u32, String>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TripMember {
+    pub(crate) endstop_mcu: u32,
+    pub(crate) endstop_id: u8,
+    pub(crate) remote_freeze: Option<RemoteFreeze>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RemoteFreeze {
+    pub(crate) motor_mcu: u32,
+    pub(crate) motor_idx: u8,
+    pub(crate) stepper_idx: u8,
+}
+
 pub(crate) struct HomingRun {
     pub(crate) cohort: u64,
-    pub(crate) remaining_trips: Vec<(u32, u8)>,
+    pub(crate) remaining_trips: Vec<TripMember>,
     pub(crate) axis_key: crate::types::AxisKey,
     pub(crate) all_axis_keys: Vec<crate::types::AxisKey>,
     pub(crate) window_start_host: f64,

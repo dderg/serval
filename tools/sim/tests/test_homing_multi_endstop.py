@@ -61,7 +61,12 @@ MOVING_STEPS = int(0.5 * STEPS_PER_MM)
 # suppress bit: one endstop poll period (1 ms) of travel at homing speed,
 # with margin. Drained from the lane before any suppression baseline.
 SUPPRESSED_EDGE_SLOP = 4
-SUPPRESS_SETTLE_STEPS = MOVING_STEPS
+# The freeze lands after a real-time delay the virtual clock does not wait
+# for: one endstop poll period on the same-MCU fast path, a full host round
+# trip (EndstopTrip on the switch MCU -> engine -> StepperSuppress to the
+# motor MCU) on the cross-MCU path. The settle loop keeps sampling lane
+# windows until the bound pin goes quiet or this budget runs out.
+SUPPRESS_LATENCY_TIMEOUT_S = 30.0
 # A running motor pulses at least one edge per lane step; the lane and the
 # edge counters are read in separate round trips, so allow the same slop.
 RUNNING_EDGE_MIN = MOVING_STEPS - SUPPRESSED_EDGE_SLOP
@@ -207,7 +212,10 @@ def _assert_seeded_to_endstop(world, axis_index: int, label: str) -> None:
     )
 
 
-def _home_with_staggered_trips(world, control, axis: str, first_index: int):
+def _home_with_staggered_trips(
+    world, control, axis: str, first_index: int, switch_control=None
+):
+    switch_control = switch_control if switch_control is not None else control
     axis_index, lane_line, endstops, step_pins = AXES[axis]
     first_switch, last_switch = endstops[first_index], endstops[1 - first_index]
     bound_pin, peer_pin = step_pins[first_index], step_pins[1 - first_index]
@@ -226,13 +234,16 @@ def _home_with_staggered_trips(world, control, axis: str, first_index: int):
             f" edges, {peer_pin} advanced {peer_pre}"
         )
 
-        control.set_gpio_input(*first_switch, 1)
-        _sample_while_lane_advances(
-            control, watched, lane_line, SUPPRESS_SETTLE_STEPS
-        )
-        lane_post, (bound_post, peer_post) = _sample_while_lane_advances(
-            control, watched, lane_line, MOVING_STEPS
-        )
+        switch_control.set_gpio_input(*first_switch, 1)
+        deadline = time.monotonic() + SUPPRESS_LATENCY_TIMEOUT_S
+        while True:
+            lane_post, (bound_post, peer_post) = _sample_while_lane_advances(
+                control, watched, lane_line, MOVING_STEPS
+            )
+            if bound_post <= SUPPRESSED_EDGE_SLOP:
+                break
+            if time.monotonic() >= deadline:
+                break
         _assert_split_after_trip(
             f"G28 {axis}",
             first_switch,
@@ -248,12 +259,12 @@ def _home_with_staggered_trips(world, control, axis: str, first_index: int):
         )
 
         bound_at_last_trip = _edges(control, (bound_pin,))[0]
-        control.set_gpio_input(*last_switch, 1)
+        switch_control.set_gpio_input(*last_switch, 1)
         homing.join(timeout=HOME_TIMEOUT_S)
         bound_through_stop = _edges(control, (bound_pin,))[0]
     finally:
-        control.set_gpio_input(*first_switch, 0)
-        control.set_gpio_input(*last_switch, 0)
+        switch_control.set_gpio_input(*first_switch, 0)
+        switch_control.set_gpio_input(*last_switch, 0)
 
     assert not homing.is_alive(), f"G28 {axis} never returned"
     assert homing.failure is None, homing.failure
@@ -308,6 +319,27 @@ def test_staggered_trip_suppresses_only_the_tripped_motor(
     _home_with_staggered_trips(world, control, axis, first_index)
 
 
+@pytest.mark.parametrize("first_index", [0, 1])
+def test_cross_mcu_staggered_trip_suppresses_only_the_tripped_motor(
+    sim_world, first_index
+):
+    """Every X/Y switch lives on the aux (F4) MCU while the motors stay on
+    the main (H7) MCU: the freeze must arrive host-side via StepperSuppress,
+    and only the tripped motor's step pin goes quiet."""
+    world = sim_world(
+        lambda w: configs.dual_motor_xy_cross_mcu_config(
+            w.h7_pty, w.f4_pty, str(w.gcode_dir)
+        ),
+        dual_mcu=True,
+    )
+    control = world.sim_control("h7")
+    control.enable_step_pin_emit()
+    switch_control = world.sim_control("f4")
+    _home_with_staggered_trips(
+        world, control, "X", first_index, switch_control=switch_control
+    )
+
+
 def test_abort_after_first_trip_leaves_no_suppression(sim_world):
     """One switch of the pair never closes. The approach runs out of travel
     and the host fails loudly -- naming the sibling it is still waiting on --
@@ -328,12 +360,15 @@ def test_abort_after_first_trip_leaves_no_suppression(sim_world):
     try:
         _wait_until_moving(control, lane_line)
         control.set_gpio_input(*first_switch, 1)
-        _sample_while_lane_advances(
-            control, (bound_pin, peer_pin), lane_line, SUPPRESS_SETTLE_STEPS
-        )
-        lane_post, (bound_post, peer_post) = _sample_while_lane_advances(
-            control, (bound_pin, peer_pin), lane_line, MOVING_STEPS
-        )
+        deadline = time.monotonic() + SUPPRESS_LATENCY_TIMEOUT_S
+        while True:
+            lane_post, (bound_post, peer_post) = _sample_while_lane_advances(
+                control, (bound_pin, peer_pin), lane_line, MOVING_STEPS
+            )
+            if bound_post <= SUPPRESSED_EDGE_SLOP:
+                break
+            if time.monotonic() >= deadline:
+                break
         _assert_split_after_trip(
             "_HOME_TEST AXIS=X",
             first_switch,

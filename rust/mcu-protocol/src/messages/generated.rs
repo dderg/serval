@@ -71,6 +71,8 @@ pub enum MessageKind {
     SetDynamicsModelResponse = 0x008D,
     SetFfLead = 0x008E,
     SetFfLeadResponse = 0x008F,
+    StepperSuppress = 0x0092,
+    StepperSuppressResponse = 0x0093,
 }
 
 impl MessageKind {
@@ -126,6 +128,8 @@ impl MessageKind {
             0x008D => Self::SetDynamicsModelResponse,
             0x008E => Self::SetFfLead,
             0x008F => Self::SetFfLeadResponse,
+            0x0092 => Self::StepperSuppress,
+            0x0093 => Self::StepperSuppressResponse,
             _ => return None,
         })
     }
@@ -139,8 +143,10 @@ impl MessageKind {
     }
 
     pub fn is_event(self) -> bool {
-        let tag = self as u16;
-        (0x0080..=0x00BF).contains(&tag)
+        matches!(
+            self,
+            Self::FaultEvent | Self::StatusHeartbeat | Self::McuLog | Self::EndstopTrip
+        )
     }
 }
 
@@ -990,6 +996,50 @@ impl Encode for SetFfLeadResponse {
 }
 
 impl Decode for SetFfLeadResponse {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            result: get_i32(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StepperSuppress {
+    pub motor: u8,
+    pub stepper: u8,
+    pub engage: u8,
+}
+
+impl Encode for StepperSuppress {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_u8(out, self.motor);
+        put_u8(out, self.stepper);
+        put_u8(out, self.engage);
+    }
+}
+
+impl Decode for StepperSuppress {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            motor: get_u8(c)?,
+            stepper: get_u8(c)?,
+            engage: get_u8(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StepperSuppressResponse {
+    pub result: i32,
+}
+
+impl Encode for StepperSuppressResponse {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_i32(out, self.result);
+    }
+}
+
+impl Decode for StepperSuppressResponse {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
             result: get_i32(c)?,

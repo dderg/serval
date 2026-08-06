@@ -45,26 +45,15 @@ class MotorBinding:
 
 
 class MotionEndstop:
-    def __init__(self, pin_params, endstop_id, binding=None):
+    def __init__(self, pin_params, endstop_id, binding=None, group=False):
         self.mcu = pin_params["chip"]
         self.endstop_id = endstop_id
         self.pin = pin_params["pin"]
         self.pullup = pin_params["pullup"]
         self.invert = pin_params["invert"]
         self.binding = binding
+        self.group = group
         self.motor_name = None if binding is None else binding.motor_name
-        if binding is not None and binding.mcu is not self.mcu:
-            raise self.mcu.get_printer().config_error(
-                "endstop pin '%s' is on MCU '%s' but motor '%s' is driven by"
-                " MCU '%s': a motor-bound endstop switch must be wired to its"
-                " own motor's MCU"
-                % (
-                    self.pin,
-                    self.mcu.get_name(),
-                    binding.motor_name,
-                    binding.mcu.get_name(),
-                )
-            )
         self.oid = self.mcu.create_oid()
         self._query_cmd = None
         self._state_cmd = None
@@ -74,15 +63,14 @@ class MotionEndstop:
         self.mcu.register_config_callback(self._build_config)
 
     def _build_config(self):
-        motor = UNBOUND_MOTOR if self.binding is None else self.binding.lane_idx
-        stepper = (
-            UNBOUND_STEPPER
-            if self.binding is None
-            else self.binding.stepper_idx
+        bound_locally = (
+            self.binding is not None and self.binding.mcu is self.mcu
         )
+        motor = self.binding.lane_idx if bound_locally else UNBOUND_MOTOR
+        stepper = self.binding.stepper_idx if bound_locally else UNBOUND_STEPPER
         self.mcu.add_config_cmd(
             "config_endstop oid=%d endstop_id=%d pin=%s pull_up=%d invert=%d"
-            " motor=%d stepper=%d"
+            " motor=%d stepper=%d group=%d"
             % (
                 self.oid,
                 self.endstop_id,
@@ -91,6 +79,7 @@ class MotionEndstop:
                 self.invert,
                 motor,
                 stepper,
+                int(self.group),
             )
         )
         self._query_cmd = self.mcu.lookup_command(
@@ -140,6 +129,15 @@ class MotionEndstop:
     def engine_mcu_handle(self):
         return self.mcu.get_engine_handle()
 
+    def remote_freeze(self):
+        if self.binding is None:
+            return None
+        return (
+            self.binding.mcu.get_engine_handle(),
+            self.binding.lane_idx,
+            self.binding.stepper_idx,
+        )
+
 
 class RemoteMotionEndstop:
     """Endstop whose trigger is a trsync on a non-engine-driven MCU (e.g. a
@@ -156,6 +154,9 @@ class RemoteMotionEndstop:
 
     def engine_mcu_handle(self):
         return self.mcu.get_engine_handle()
+
+    def remote_freeze(self):
+        return None
 
     def is_triggered(self):
         return False

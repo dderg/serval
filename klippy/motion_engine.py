@@ -212,8 +212,10 @@ class MotionEngineWrapper:
         )
 
     def home_axis_start(self, axis, direction, speed, max_travel, endstops):
-        """endstops: [(endstop_id, endstop_mcu_handle)] — a multi-motor axis
-        arms one switch per motor and the run resolves on the last trip."""
+        """endstops: [(endstop_id, endstop_mcu_handle, remote_freeze)] where
+        remote_freeze is None or (motor_mcu_handle, motor_idx, stepper_idx) —
+        a multi-motor axis arms one switch per motor; each non-final trip
+        freezes its bound motor and the run resolves on the last trip."""
         return self._engine.home_axis_start(
             axis, direction, speed, max_travel, list(endstops)
         )

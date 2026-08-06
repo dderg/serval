@@ -38,6 +38,9 @@ class ServoVirtualEndstop:
         node = self._printer.lookup_object("ethercat_node " + self._node_name)
         return node.get_engine_handle()
 
+    def remote_freeze(self):
+        return None
+
     def is_triggered(self):
         return False
 

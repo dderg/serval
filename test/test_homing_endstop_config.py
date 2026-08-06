@@ -118,6 +118,12 @@ def test_keyed_endstops_bind_each_motor_to_its_lane_slot():
     assert [e.motor_name for e in endstops] == ["stepper_x", "stepper_x1"]
     assert [e.binding.stepper_idx for e in endstops] == [0, 1]
     assert all(e.binding.lane_idx == 0 for e in endstops)
+    handle = mcu.get_engine_handle()
+    assert [e.remote_freeze() for e in endstops] == [
+        (handle, 0, 0),
+        (handle, 0, 1),
+    ]
+    assert all(e.group for e in endstops)
     assert [name for _, name in query_endstops.registered] == [
         "x:stepper_x",
         "x:stepper_x1",
@@ -155,16 +161,21 @@ def test_keyed_endstop_on_corexy_shared_lane_is_rejected():
         _resolve(pin_text, kin, pins, printer)
 
 
-def test_keyed_endstop_pin_on_a_foreign_mcu_is_rejected():
+def test_keyed_endstop_pin_on_a_foreign_mcu_freezes_the_motor_mcu():
     printer = FakePrinter()
     mcu = _mcu(printer)
     other = _mcu(printer, name="mcu2")
     kin = _kin(mcu, ["stepper_x", "stepper_x1"])
     pins = Pins({"PA0": (mcu, "mcu"), "PA1": (other, "mcu2")})
-    with pytest.raises(
-        FakeConfigError, match="must be wired to its own motor's MCU"
-    ):
-        _resolve(KEYED_PINS, kin, pins, printer)
+    homing, _ = _resolve(KEYED_PINS, kin, pins, printer)
+    endstops = entry_endstops(homing._axes[0])
+    assert [e.mcu for e in endstops] == [mcu, other]
+    handle = mcu.get_engine_handle()
+    assert [e.remote_freeze() for e in endstops] == [
+        (handle, 0, 0),
+        (handle, 0, 1),
+    ]
+    assert all(e.group for e in endstops)
 
 
 def test_keyed_endstop_lane_split_across_mcus_is_rejected():

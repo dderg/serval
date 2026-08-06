@@ -35,6 +35,7 @@ struct endstop {
     uint8_t tripped;
     uint8_t motor;
     uint8_t stepper;
+    uint8_t group;
 };
 
 static struct task_wake endstop_trip_wake;
@@ -111,6 +112,7 @@ command_config_endstop(uint32_t *args)
         shutdown("config_endstop binding out of range");
     e->motor = motor;
     e->stepper = stepper;
+    e->group = args[7] ? 1 : 0;
     e->ts = NULL;
     e->trigger_reason = 0;
     e->time.func = endstop_event;
@@ -124,7 +126,7 @@ command_config_endstop(uint32_t *args)
 }
 DECL_COMMAND(command_config_endstop,
              "config_endstop oid=%c endstop_id=%c pin=%u pull_up=%c invert=%c"
-             " motor=%c stepper=%c");
+             " motor=%c stepper=%c group=%c");
 
 void
 command_query_endstop(uint32_t *args)
@@ -161,18 +163,6 @@ command_endstop_query_state(uint32_t *args)
           args[0], e->armed, raw, e->tripped, (uint32_t)e->trip_clock);
 }
 DECL_COMMAND(command_endstop_query_state, "endstop_query_state oid=%c");
-
-static uint8_t
-endstop_has_armed_lane_peer(const struct endstop *e)
-{
-    uint8_t oid;
-    struct endstop *other;
-    foreach_oid(oid, other, command_config_endstop) {
-        if (other != e && other->armed && other->motor == e->motor)
-            return 1;
-    }
-    return 0;
-}
 
 void
 command_endstop_arm_trsync(uint32_t *args)
@@ -216,10 +206,12 @@ endstop_trip_task(void)
     foreach_oid(oid, e, command_config_endstop) {
         if (!e->trip_processing)
             continue;
-        if (e->motor != ENDSTOP_UNBOUND && endstop_has_armed_lane_peer(e))
-            stepper_suppress_update(e->motor, e->stepper, 1);
-        else
+        if (e->group) {
+            if (e->motor != ENDSTOP_UNBOUND)
+                stepper_suppress_update(e->motor, e->stepper, 1);
+        } else {
             needs_stop = 1;
+        }
     }
     if (needs_stop) {
         uint64_t discard_clock;

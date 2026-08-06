@@ -33,6 +33,8 @@ fn message_kind_round_trips_via_u16() {
         MessageKind::ResonanceBuzzResponse,
         MessageKind::ArmSensorlessEndstop,
         MessageKind::ArmSensorlessEndstopResponse,
+        MessageKind::StepperSuppress,
+        MessageKind::StepperSuppressResponse,
     ] {
         assert_eq!(MessageKind::from_u16(k.as_u16()), Some(k));
     }

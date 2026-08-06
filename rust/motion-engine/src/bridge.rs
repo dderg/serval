@@ -59,7 +59,7 @@ use runtime_caps::{
 };
 use state::{
     EthercatDrive, FlushState, FlushWait, HomingRun, HomingState, LatchedFaults, McuConnection,
-    PositionPoll, PumpHandles,
+    PositionPoll, PumpHandles, RemoteFreeze, TripMember,
 };
 
 fn abort_after_tracing_appender_drains() {

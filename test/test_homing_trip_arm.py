@@ -99,6 +99,9 @@ class DisarmTrackingEndstop:
     def engine_mcu_handle(self):
         return 1
 
+    def remote_freeze(self):
+        return None
+
     def is_triggered(self):
         return False
 

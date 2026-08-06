@@ -1,6 +1,7 @@
 use super::{
     Arc, DRAIN_TIMEOUT, Duration, HomingRun, Ordering, PyMotionEngine, PyResult, PyRuntimeError,
-    Python, TripDeps, dispatch_endstop_trip, drip_cohort_participants, planner_err, pymethods,
+    Python, RemoteFreeze, TripDeps, TripMember, dispatch_endstop_trip, drip_cohort_participants,
+    planner_err, pymethods,
 };
 use crate::lock_ext::LockExt;
 
@@ -32,16 +33,24 @@ impl PyMotionEngine {
         direction: f64,
         speed_mm_s: f64,
         max_travel_mm: f64,
-        endstops: Vec<(u8, u32)>,
+        endstops: Vec<(u8, u32, Option<(u32, u8, u8)>)>,
     ) -> PyResult<()> {
         if endstops.is_empty() {
             return Err(PyRuntimeError::new_err(
                 "home_axis: endstops list must not be empty",
             ));
         }
-        let remaining_trips: Vec<(u32, u8)> = endstops
+        let remaining_trips: Vec<TripMember> = endstops
             .iter()
-            .map(|&(endstop_id, endstop_mcu)| (endstop_mcu, endstop_id))
+            .map(|&(endstop_id, endstop_mcu, freeze)| TripMember {
+                endstop_mcu,
+                endstop_id,
+                remote_freeze: freeze.map(|(motor_mcu, motor_idx, stepper_idx)| RemoteFreeze {
+                    motor_mcu,
+                    motor_idx,
+                    stepper_idx,
+                }),
+            })
             .collect();
 
         let guard = self.planner.lock_ok();
@@ -67,7 +76,12 @@ impl PyMotionEngine {
 
         let window_start_host = self
             .homing
-            .take_arm_window_start(&remaining_trips)
+            .take_arm_window_start(
+                &remaining_trips
+                    .iter()
+                    .map(|t| (t.endstop_mcu, t.endstop_id))
+                    .collect::<Vec<_>>(),
+            )
             .unwrap_or_else(|| self.router.lock_ok().host_now_secs());
 
         *self.homing.active_drip_cohort.lock_ok() = Some(cohort);
@@ -259,6 +273,10 @@ impl PyMotionEngine {
         }
 
         self.finish_homing();
+
+        if !self.clear_all_suppress_masks() {
+            return None;
+        }
 
         let machine = self.reconcile_aborted_position(ctx.axis_key).ok()?;
 
@@ -506,6 +524,73 @@ impl PyMotionEngine {
             return false;
         }
         true
+    }
+
+    /// A partial trip may have engaged suppress masks on motor MCUs before
+    /// the run aborted; ResumeStream never reaches them on this path, so the
+    /// masks must be cleared explicitly or a stepper stays silently frozen.
+    fn clear_all_suppress_masks(&self) -> bool {
+        use mcu_protocol::codec::{Decode as _, Encode as _};
+        let transports: Vec<(u32, Arc<dyn host_rt::mcu_call::McuCall>)> = {
+            let mcus = self.mcus.lock_ok();
+            mcus.iter()
+                .filter(|(_, conn)| conn.mcu_transport_supported)
+                .filter_map(|(&id, conn)| {
+                    if let Some(io) = conn.host_io.as_ref() {
+                        Some((id, Arc::clone(io) as Arc<dyn host_rt::mcu_call::McuCall>))
+                    } else {
+                        conn.endpoint_conn
+                            .as_ref()
+                            .map(|ec| (id, Arc::clone(ec) as Arc<dyn host_rt::mcu_call::McuCall>))
+                    }
+                })
+                .collect()
+        };
+        let mut ok = true;
+        for (mcu_id, transport) in transports {
+            let mut body = Vec::with_capacity(3);
+            mcu_protocol::messages::StepperSuppress {
+                motor: 0xFF,
+                stepper: 0xFF,
+                engage: 0,
+            }
+            .encode(&mut body);
+            let outcome = transport
+                .mcu_call(
+                    mcu_protocol::MessageKind::StepperSuppress,
+                    body,
+                    Duration::from_secs(3),
+                )
+                .map_err(|e| format!("{e:?}"))
+                .and_then(|(_kind, resp_body)| {
+                    mcu_protocol::messages::StepperSuppressResponse::decode(&resp_body)
+                        .map_err(|e| format!("{e:?}"))
+                });
+            match outcome {
+                Ok(resp) if resp.result == 0 => {}
+                Ok(resp) => {
+                    tracing::error!(
+                        event = "suppress_clear_rejected",
+                        mcu = mcu_id,
+                        result = resp.result,
+                        "home_abort: suppress mask clear rejected — a stepper may \
+                         remain frozen; a firmware restart is required"
+                    );
+                    ok = false;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        event = "suppress_clear_failed",
+                        mcu = mcu_id,
+                        error = %e,
+                        "home_abort: suppress mask clear failed — a stepper may \
+                         remain frozen; a firmware restart is required"
+                    );
+                    ok = false;
+                }
+            }
+        }
+        ok
     }
 
     fn finish_homing(&self) {

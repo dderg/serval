@@ -1,4 +1,5 @@
-use super::HomingState;
+use super::endstop::{TripMatch, match_trip};
+use super::{HomingRun, HomingState, RemoteFreeze, TripMember};
 use crate::lock_ext::LockExt;
 
 const MCU: u32 = 3;
@@ -76,4 +77,81 @@ fn a_trip_buffered_after_the_arm_survives_until_the_run_consumes_it() {
     state.pending_trips.lock_ok().push((MCU, 0, 4321));
     assert_eq!(state.take_arm_window_start(&[(MCU, 0)]), Some(5.0));
     assert_eq!(*state.pending_trips.lock_ok(), vec![(MCU, 0, 4321)]);
+}
+
+fn run_with(members: Vec<TripMember>) -> HomingRun {
+    let (tx, _rx) = crossbeam_channel::bounded(1);
+    HomingRun {
+        cohort: 1,
+        remaining_trips: members,
+        axis_key: crate::types::AxisKey {
+            mcu_id: MCU,
+            axis: 0,
+        },
+        all_axis_keys: vec![crate::types::AxisKey {
+            mcu_id: MCU,
+            axis: 0,
+        }],
+        window_start_host: 0.0,
+        notify: tx,
+    }
+}
+
+fn member(mcu: u32, id: u8, freeze: Option<RemoteFreeze>) -> TripMember {
+    TripMember {
+        endstop_mcu: mcu,
+        endstop_id: id,
+        remote_freeze: freeze,
+    }
+}
+
+#[test]
+fn non_final_trip_yields_its_remote_freeze_target_and_leaves_the_rest() {
+    let freeze = RemoteFreeze {
+        motor_mcu: 7,
+        motor_idx: 1,
+        stepper_idx: 2,
+    };
+    let mut run = run_with(vec![member(MCU, 0, Some(freeze)), member(4, 3, None)]);
+    assert_eq!(
+        match_trip(&mut run, MCU, 0),
+        TripMatch::Partial(Some(freeze))
+    );
+    assert_eq!(run.remaining_trips, vec![member(4, 3, None)]);
+}
+
+#[test]
+fn non_final_trip_without_binding_carries_no_freeze_target() {
+    let mut run = run_with(vec![member(MCU, 0, None), member(MCU, 1, None)]);
+    assert_eq!(match_trip(&mut run, MCU, 1), TripMatch::Partial(None));
+}
+
+#[test]
+fn last_remaining_trip_is_final_and_carries_its_freeze_target() {
+    let freeze = RemoteFreeze {
+        motor_mcu: 7,
+        motor_idx: 0,
+        stepper_idx: 0,
+    };
+    let mut run = run_with(vec![member(MCU, 0, Some(freeze))]);
+    assert_eq!(match_trip(&mut run, MCU, 0), TripMatch::Final(Some(freeze)));
+    assert_eq!(run.remaining_trips.len(), 1);
+}
+
+#[test]
+fn trip_from_an_unknown_endstop_is_unmatched_and_removes_nothing() {
+    let mut run = run_with(vec![member(MCU, 0, None), member(MCU, 1, None)]);
+    assert_eq!(match_trip(&mut run, 9, 0), TripMatch::Unmatched);
+    assert_eq!(run.remaining_trips.len(), 2);
+}
+
+#[test]
+fn trip_identity_distinguishes_same_endstop_id_across_mcus() {
+    let freeze = RemoteFreeze {
+        motor_mcu: 2,
+        motor_idx: 0,
+        stepper_idx: 1,
+    };
+    let mut run = run_with(vec![member(1, 0, None), member(2, 0, Some(freeze))]);
+    assert_eq!(match_trip(&mut run, 2, 0), TripMatch::Partial(Some(freeze)));
 }

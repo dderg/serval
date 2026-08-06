@@ -20,8 +20,8 @@ use crate::wire::{
     sdo_write_response_frame, seed_servo_home_response_frame, set_diff_damper_response_frame,
     set_diff_trim_response_frame, set_drive_limits_response_frame,
     set_dynamics_model_response_frame, set_ff_lead_response_frame, set_strain_comp_response_frame,
-    set_torque_response_frame, start_capture_response_frame, stop_capture_response_frame,
-    stop_response_frame, Command,
+    set_torque_response_frame, start_capture_response_frame, stepper_suppress_response_frame,
+    stop_capture_response_frame, stop_response_frame, Command,
 };
 use mcu_protocol::messages::{
     ArmSensorlessEndstop, PushPieces, ResonanceBuzz, SdoRead, SdoReadResponse, SdoWrite,
@@ -45,6 +45,7 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::StartCapture { .. } => "StartCapture",
         Command::StopCapture { .. } => "StopCapture",
         Command::ResumeStream { .. } => "ResumeStream",
+        Command::StepperSuppress { .. } => "StepperSuppress",
         Command::ClaimHandshake { .. } => "ClaimHandshake",
         Command::SetDriveLimits { .. } => "SetDriveLimits",
         Command::RestoreDriveLimits { .. } => "RestoreDriveLimits",
@@ -152,6 +153,9 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             Command::ResumeStream { correlation_id } => match ctx.stream_halt.resume() {
                 Ok(()) => {
                     discard_motion(ctx);
+                    for s in &mut ctx.suppressed {
+                        *s = false;
+                    }
                     crate::rt_eprintln!("ec-rt: ResumeStream — stream reopened");
                     ctx.server
                         .respond(&resume_stream_response_frame(correlation_id, 0));
@@ -164,6 +168,12 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
                         .respond(&resume_stream_response_frame(correlation_id, code));
                 }
             },
+            Command::StepperSuppress {
+                correlation_id,
+                msg,
+            } => {
+                handle_stepper_suppress(ctx, correlation_id, msg);
+            }
             Command::ClaimHandshake { .. } => {
                 crate::rt_eprintln!(
                     "ec-rt: protocol violation: ClaimHandshake after handshake \
@@ -495,6 +505,56 @@ fn handle_restore_drive_limits(ctx: &mut EndpointCtx, correlation_id: u32, slot_
     });
 }
 
+const ERR_SUPPRESS_UNKNOWN_SLOT: i32 = -827;
+
+pub(super) fn handle_stepper_suppress(
+    ctx: &mut EndpointCtx,
+    correlation_id: u32,
+    msg: mcu_protocol::messages::StepperSuppress,
+) {
+    if msg.motor == 0xFF && msg.stepper == 0xFF && msg.engage == 0 {
+        for s in &mut ctx.suppressed {
+            *s = false;
+        }
+        crate::rt_eprintln!("ec-rt: StepperSuppress — all slots released");
+        ctx.server
+            .respond(&stepper_suppress_response_frame(correlation_id, 0));
+        return;
+    }
+    let slot = ctx
+        .slave_axes
+        .iter()
+        .enumerate()
+        .filter(|&(_, &axis)| axis == msg.motor)
+        .map(|(s, _)| s)
+        .nth(usize::from(msg.stepper));
+    let result = match slot {
+        Some(s) => {
+            ctx.suppressed[s] = msg.engage != 0;
+            crate::rt_eprintln!(
+                "ec-rt: StepperSuppress — slot {s} (axis {}, stepper {}) {}",
+                msg.motor,
+                msg.stepper,
+                if msg.engage != 0 {
+                    "frozen"
+                } else {
+                    "released"
+                }
+            );
+            0
+        }
+        None => {
+            crate::rt_eprintln!(
+                "ec-rt: StepperSuppress rejected — no slot for axis {} stepper {}",
+                msg.motor,
+                msg.stepper
+            );
+            ERR_SUPPRESS_UNKNOWN_SLOT
+        }
+    };
+    ctx.server
+        .respond(&stepper_suppress_response_frame(correlation_id, result));
+}
 const ERR_SEED_HOME_STREAMING: i32 = -826;
 const SEED_DRAIN_TIMEOUT_NS: i64 = 2_000_000_000;
 
