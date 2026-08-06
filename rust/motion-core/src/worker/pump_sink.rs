@@ -172,7 +172,7 @@ impl SegmentSink for PumpSink {
         }
 
         let seam_host = at.t0 + seg.t_start;
-        if at.epoch.is_fresh() || self.frozen_projection.lock_ok().is_empty() {
+        if at.epoch.retimed() || self.frozen_projection.lock_ok().is_empty() {
             for mcu_id in self
                 .mcu_configs
                 .iter()
@@ -214,7 +214,7 @@ impl SegmentSink for PumpSink {
             },
         );
 
-        if at.epoch.is_fresh() {
+        if at.epoch.retimed() {
             self.motion_history.lock_ok().drop_pieces_on_reanchor();
         }
         for m in msgs {
@@ -249,7 +249,7 @@ impl SegmentSink for PumpSink {
         self.anchor.lock_ok().mark_parked();
 
         let fresh_projection = self.is_stepcompress(mcu_id)
-            && (at.epoch.is_fresh() || !self.frozen_projection.lock_ok().contains_key(&mcu_id));
+            && (at.epoch.retimed() || !self.frozen_projection.lock_ok().contains_key(&mcu_id));
         if fresh_projection {
             self.reanchor_projection(mcu_id, at.t0 + np.piece.u_start)?;
         }

@@ -326,6 +326,32 @@ impl StepShim {
         self.validate_from(motor, pieces, None)
     }
 
+    /// Sanction a forward-only seam jump: the stream time crossed a
+    /// drained-to-rest hole (a dwell) with no pieces, so the next piece for
+    /// this motor starts later than the projected end of the previous one.
+    /// No steps, no clock reset — only the seam expectation moves. A jump
+    /// BACKWARD past the tolerance is still an overlap and stays loud.
+    pub fn accept_forward_seam_gap(
+        &mut self,
+        motor: usize,
+        at_start_clock: u64,
+    ) -> Result<(), ShimError> {
+        let state = self.motor_mut(motor);
+        if let Some(s) = state.next_seam {
+            if at_start_clock.saturating_add(s.skew_tolerance()) < s.expected_start {
+                return Err(ShimError::PieceGap {
+                    motor,
+                    expected: s.expected_start,
+                    got: at_start_clock,
+                    tolerance: s.skew_tolerance(),
+                    projected_span: s.projected_span,
+                });
+            }
+        }
+        state.next_seam = None;
+        Ok(())
+    }
+
     pub fn validate_pieces_public(
         &mut self,
         motor: usize,
