@@ -763,6 +763,68 @@ fn chain_peak_speed(chain: &[StraightPhase]) -> f64 {
     })
 }
 
+/// Every phase's speed extremum — including the interior crest of a joining
+/// chord that bridges a driving state to a braking one — must stay under the
+/// flat ceiling. The independent oracle only guards non-reversal, so this is
+/// the ceiling's own regression net.
+#[test]
+fn chain_peak_speed_never_exceeds_the_flat_ceiling() {
+    let summary = sweep(&mut |k, chain, what| {
+        let peak = chain_peak_speed(chain);
+        assert!(
+            peak <= k.flat_ceiling * (1.0 + 1.0e-9),
+            "{what}: peak speed {peak} exceeds the flat ceiling {} \
+             (length={} accel={} jerk={} kappa0={} sigma={})",
+            k.flat_ceiling,
+            k.length,
+            k.accel,
+            k.jerk,
+            k.kappa0,
+            k.sigma
+        );
+    });
+    assert_sweep_is_substantial(&summary);
+}
+
+/// The emitted chain must land exactly on the member: full arc length and the
+/// requested exit `(v, a)`, within the solver's own closure tolerance.
+#[test]
+fn chain_lands_on_the_requested_exit() {
+    let mut rng = Lcg(0xE817_C105);
+    let mut chains = 0usize;
+    for _ in 0..2000 {
+        let length = rng.in_range(0.05, 8.0);
+        let sigma = rng.signed(6.0);
+        let kappa0 = rng.signed(0.8);
+        let accel = rng.in_range(1.0e3, 1.0e5);
+        let jerk = rng.in_range(1.0e5, 2.0e8);
+        let flat = rng.in_range(20.0, 400.0);
+        let k = kin(kappa0, sigma, length, accel, jerk, flat);
+        let ceiling = top_speed_ceiling(&k);
+        let exit = (rng.in_range(0.0, ceiling), rng.signed(0.3 * accel));
+        let Ok(required) = entry_requirement(&k, exit) else {
+            continue;
+        };
+        let Ok(chain) = curved_chain(&k, required, exit) else {
+            continue;
+        };
+        chains += 1;
+        let (s, v, a) = chain.last().expect("empty chain").end_state();
+        let close = |lhs: f64, rhs: f64, scale: f64, name: &str| {
+            assert!(
+                (lhs - rhs).abs() <= 1.0e-8 * scale,
+                "exit {name} misses: {lhs} != {rhs} \
+                 (length={length} accel={accel} jerk={jerk} kappa0={kappa0} sigma={sigma} \
+                 flat={flat} exit={exit:?} required={required:?})"
+            );
+        };
+        close(s, k.length, k.length, "arc length");
+        close(v, exit.0, 1.0 + exit.0, "speed");
+        close(a, exit.1, 1.0 + k.accel, "acceleration");
+    }
+    assert!(chains >= 1000, "probe built only {chains} chains");
+}
+
 const RIM_ARC_RADIUS: f64 = 20.0;
 const RIM_ARC_ACCEL: f64 = 2000.0;
 const RIM_ARC_JERK: f64 = 1.0e5;
@@ -913,5 +975,91 @@ fn arc_members_ride_the_disk_rim() {
     assert!(
         time < 0.220,
         "apex-cruise member regressed to the rung ladder: {time:.6} s"
+    );
+}
+
+/// The joining chord's admission guard, exercised on synthetic states. A
+/// chord bridging a driving state to a braking one has an interior crest
+/// `v_a + a_a^2 / (2 |j|)` above both endpoints; the guard must refuse it
+/// when that crest tops the flat ceiling, and must refuse any chord whose
+/// closure residual is not essentially zero.
+#[test]
+fn the_joining_chord_guard_refuses_ceiling_and_residual_breaches() {
+    use super::curved::chord_admitted;
+    let member = |flat: f64| kin(0.01, 0.0, 5.0, 1.0e5, 1.0e9, flat);
+    let from = (100.0_f64, 1000.0_f64);
+    let to = (90.0_f64, -3000.0_f64);
+    let dt = 2.0 * (to.0 - from.0) / (from.1 + to.1);
+    let j = (to.1 - from.1) / dt;
+    let tau = -from.1 / j;
+    let crest = from.0 + from.1 * tau + 0.5 * j * tau * tau;
+    assert!(tau > 0.0 && tau < dt && crest > from.0.max(to.0));
+    let ds = from.0 * dt + 0.5 * from.1 * dt * dt + j * dt * dt * dt / 6.0;
+
+    let roomy = member(crest + 1.0);
+    assert!(
+        chord_admitted(&roomy, from, to, ds, false).is_some(),
+        "an exactly closing chord under the ceiling must be admitted"
+    );
+    let tight = member(crest - 1.0);
+    assert!(
+        chord_admitted(&tight, from, to, ds, false).is_none(),
+        "a chord whose interior crest {crest} tops the ceiling must be refused"
+    );
+    assert!(
+        chord_admitted(&roomy, from, to, ds + 0.01, false).is_none(),
+        "a chord with an O(1) arc residual must be refused"
+    );
+    assert!(
+        chord_admitted(&roomy, from, (to.0 + 0.01, to.1), ds, true).is_none(),
+        "a chord with an O(1) speed residual must be refused"
+    );
+}
+
+/// The envelope join's emitted chains, judged directly: every chain must keep
+/// its speed under the flat ceiling, hand state on continuously at every
+/// joint, and land exactly on the member's exit.
+#[test]
+fn envelope_chains_are_capped_continuous_and_land_on_the_exit() {
+    use super::curved::certified_envelope_chain;
+    let mut rng = Lcg(0xFEED_FACE);
+    let mut emitted = 0usize;
+    for _ in 0..12_000 {
+        let length = rng.in_range(0.05, 8.0);
+        let sigma = rng.signed(6.0);
+        let kappa0 = rng.signed(0.8);
+        let accel = rng.in_range(1.0e3, 1.0e5);
+        let jerk = rng.in_range(1.0e5, 2.0e8);
+        let flat = rng.in_range(20.0, 400.0);
+        let k = kin(kappa0, sigma, length, accel, jerk, flat);
+        let ceiling = top_speed_ceiling(&k);
+        let entry = (rng.in_range(0.5 * ceiling, ceiling), rng.signed(accel));
+        let exit = (rng.in_range(0.5 * ceiling, ceiling), rng.signed(accel));
+        let Some(chain) = certified_envelope_chain(&k, entry, exit) else {
+            continue;
+        };
+        emitted += 1;
+        let what = "envelope chain";
+        let peak = chain_peak_speed(&chain);
+        assert!(
+            peak <= k.flat_ceiling * (1.0 + 1.0e-9),
+            "{what}: peak speed {peak} exceeds the flat ceiling {} (kappa0={kappa0} sigma={sigma} length={length} accel={accel} jerk={jerk} entry={entry:?} exit={exit:?})",
+            k.flat_ceiling
+        );
+        assert_continuous(&chain, what);
+        let (s, v, a) = chain.last().expect("empty chain").end_state();
+        assert!(
+            (s - k.length).abs() <= 1.0e-8 * k.length
+                && (v - exit.0).abs() <= 1.0e-8 * (1.0 + exit.0)
+                && (a - exit.1).abs() <= 1.0e-8 * (1.0 + k.accel),
+            "{what}: exit ({s}, {v}, {a}) misses ({}, {}, {}) (kappa0={kappa0} sigma={sigma} length={length} accel={accel} jerk={jerk} entry={entry:?} exit={exit:?})",
+            k.length,
+            exit.0,
+            exit.1
+        );
+    }
+    assert!(
+        emitted >= 150,
+        "the probe emitted only {emitted} envelope chains"
     );
 }

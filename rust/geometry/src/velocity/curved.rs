@@ -205,6 +205,37 @@ const MAX_CERTIFY_SPLITS: usize = 64;
 const REQUIREMENT_MATCH_REL_TOL: f64 = 1.0e-9;
 
 const LENGTH_CLOSURE_REL_TOL: f64 = 1.0e-9;
+/// Steps each extremal envelope sweep may spend, and so the phase budget one
+/// sweep can mint; the arc-step share below keeps a full-length sweep well
+/// under it.
+const ENVELOPE_MAX_STEPS: usize = 64;
+
+/// Share of the jerk ball's tangential radius the sweep commands, so the
+/// marched extreme sits strictly inside the ball and the certificate has slack
+/// to prove it over a whole coarse step.
+const ENVELOPE_BALL_SHARE: f64 = 0.999;
+
+/// Share of the acceleration disk the sweep is allowed to fill; the rest is
+/// the margin the coarse constant-jerk steps sag into.
+const ENVELOPE_DISK_SHARE: f64 = 0.9999;
+
+/// Halvings a step spends shrinking until its end state clears the disk, ball
+/// and ceiling margins; running out ends the sweep rather than the member.
+const ENVELOPE_STEP_HALVINGS: u32 = 16;
+
+/// Longest arc one sweep step may cover, as a share of the member.
+const ENVELOPE_ARC_STEP_SHARE: f64 = 1.0 / 16.0;
+
+/// Largest acceleration change one sweep step may command, as a share of the
+/// acceleration budget, and largest relative speed change per step.
+const ENVELOPE_ACCEL_STEP_SHARE: f64 = 0.5;
+const ENVELOPE_SPEED_STEP_SHARE: f64 = 0.5;
+const ENVELOPE_CROSS_BISECT_ITERS: u32 = 48;
+const ENVELOPE_JERK_BISECT_ITERS: u32 = 24;
+
+/// Relative time the envelope pass must save over the incumbent to be worth
+/// the phases its sweeps mint.
+const ENVELOPE_TIME_WIN: f64 = 1.0e-6;
 
 pub(super) struct Caps {
     pub(super) v: f64,
@@ -2760,6 +2791,568 @@ fn certified_shaped_chain(
     best
 }
 
+fn kappa_at(kin: &Kinematics, s: f64) -> f64 {
+    kin.kappa0 + kin.sigma * s.clamp(0.0, kin.length)
+}
+
+fn disk_load(kin: &Kinematics, s: f64, v: f64, a: f64) -> f64 {
+    let curvature_term = kappa_at(kin, s) * v * v;
+    a * a + curvature_term * curvature_term
+}
+
+fn ball_residual(kin: &Kinematics, s: f64, v: f64, a: f64, j: f64) -> f64 {
+    let kappa = kappa_at(kin, s);
+    let tangential = j - kappa * kappa * v * v * v;
+    let normal = kin.sigma * v * v * v + 3.0 * kappa * v * a;
+    kin.jerk * kin.jerk - tangential * tangential - normal * normal
+}
+
+/// Margined tangential-jerk interval the ball leaves at one `(s, v, a)` state:
+/// centred on the curvature's own `kappa^2 v^3` demand, with
+/// [`ENVELOPE_BALL_SHARE`] of the tangential radius on either side. `None` is
+/// the sweep's end — the normal component alone has spent the whole budget.
+fn ball_edges(kin: &Kinematics, s: f64, v: f64, a: f64) -> Option<(f64, f64)> {
+    let kappa = kappa_at(kin, s);
+    let v_cubed = v * v * v;
+    let normal = kin.sigma * v_cubed + 3.0 * kappa * v * a;
+    let tangential_squared = kin.jerk * kin.jerk - normal * normal;
+    if tangential_squared <= 0.0 {
+        return None;
+    }
+    let radius = ENVELOPE_BALL_SHARE * tangential_squared.sqrt();
+    let center = kappa * kappa * v_cubed;
+    Some((center - radius, center + radius))
+}
+
+/// Speed-maximizing extremal sweep from `start` at the member's near end:
+/// constant-jerk steps, each commanding the largest jerk in the state's
+/// margined ball interval whose *end state* still clears the disk allowance,
+/// the flat ceiling and the ball. Aiming the step's chord at the boundary
+/// instead of holding the boundary's tangent is what lets a coarse step ride
+/// the disk rim: the rim tangent `j = -(kappa sigma v q^2 + 2 kappa^2 q v a)/a`
+/// (from `d/dt (a^2 + kappa^2 q^2) = 0`, `q = v^2`) leaves the disk to second
+/// order, where the chord's far end is held on it exactly, sagging inside in
+/// between. The phases *are* the envelope — every node is an exact cubic
+/// state, so the chords between envelope states carry no fitting error. The
+/// sweep ends where the extreme runs out of authority; covering the whole
+/// member is not its job.
+fn extremal_sweep(kin: &Kinematics, start: (f64, f64)) -> Vec<StraightPhase> {
+    let mut phases = Vec::with_capacity(ENVELOPE_MAX_STEPS);
+    let (mut v, mut a) = start;
+    let (mut s, mut t) = (0.0_f64, 0.0_f64);
+    let disk_limit = ENVELOPE_DISK_SHARE * kin.accel;
+    let start_load = disk_load(kin, 0.0, v, a);
+    let load_allowance = (disk_limit * disk_limit)
+        .max(start_load.min(kin.accel * kin.accel * (1.0 + DISK_RIM_ROUNDING)));
+    if v <= 0.0
+        || start_load > kin.accel * kin.accel * (1.0 + DISK_RIM_ROUNDING)
+        || v > kin.flat_ceiling
+        || ball_residual(kin, 0.0, v, a, kappa_at(kin, 0.0).powi(2) * v * v * v) < 0.0
+    {
+        return phases;
+    }
+    let mut allowance = load_allowance;
+    for _ in 0..ENVELOPE_MAX_STEPS {
+        if s >= kin.length || v <= 0.0 {
+            break;
+        }
+        let Some((j_lo, j_hi)) = ball_edges(kin, s, v, a) else {
+            break;
+        };
+        let mut dt = ENVELOPE_ARC_STEP_SHARE * kin.length / v;
+        let j_scale = j_lo.abs().max(j_hi.abs());
+        if j_scale > 0.0 {
+            dt = dt.min(ENVELOPE_ACCEL_STEP_SHARE * kin.accel / j_scale);
+        }
+        if a != 0.0 {
+            dt = dt.min(ENVELOPE_SPEED_STEP_SHARE * v / a.abs());
+        }
+        if !(dt.is_finite() && dt > 0.0) {
+            break;
+        }
+        let mut accepted = None;
+        for _ in 0..=ENVELOPE_STEP_HALVINGS {
+            let step_holds = |j: f64| -> Option<StraightPhase> {
+                let p = StraightPhase {
+                    t0: t,
+                    dt,
+                    s0: s,
+                    v0: v,
+                    a0: a,
+                    j,
+                };
+                let (s1, v1, a1) = p.end_state();
+                let peak = if j != 0.0 {
+                    let tau = -a / j;
+                    if tau > 0.0 && tau < dt {
+                        p.state_at(tau).1
+                    } else {
+                        v1
+                    }
+                } else {
+                    v1
+                };
+                let kappa1 = kappa_at(kin, s1);
+                let normal1 = kin.sigma * v1 * v1 * v1 + 3.0 * kappa1 * v1 * a1;
+                (v1 > 0.0
+                    && peak <= kin.flat_ceiling
+                    && v1 <= kin.flat_ceiling
+                    && disk_load(kin, s1, v1, a1) <= allowance
+                    && normal1.abs() <= kin.jerk
+                    && ball_residual(kin, s1, v1, a1, j) >= 0.0)
+                    .then_some(p)
+            };
+            if let Some(p) = step_holds(j_hi) {
+                accepted = Some(p);
+                break;
+            }
+            let center = 0.5 * (j_lo + j_hi);
+            if step_holds(center).is_some() {
+                let (mut lo, mut hi) = (center, j_hi);
+                for _ in 0..ENVELOPE_JERK_BISECT_ITERS {
+                    let mid = 0.5 * (lo + hi);
+                    if step_holds(mid).is_some() {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                accepted = step_holds(lo);
+                break;
+            }
+            if step_holds(j_lo).is_some() {
+                let (mut lo, mut hi) = (j_lo, j_hi);
+                for _ in 0..ENVELOPE_JERK_BISECT_ITERS {
+                    let mid = 0.5 * (lo + hi);
+                    if step_holds(mid).is_some() {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                accepted = step_holds(lo);
+                break;
+            }
+            dt *= 0.5;
+        }
+        let Some(mut p) = accepted else {
+            break;
+        };
+        if p.end_state().0 > kin.length {
+            p.dt = p.solve_tau(kin.length - s);
+        }
+        if p.dt <= 0.0 {
+            break;
+        }
+        let (s1, v1, a1) = p.end_state();
+        t += p.dt;
+        phases.push(p);
+        allowance = (disk_limit * disk_limit).max(disk_load(kin, s1, v1, a1).min(allowance));
+        (s, v, a) = (s1, v1, a1);
+    }
+    phases
+}
+
+/// `(v, a)` on a sweep chain at arc length `s` inside its span.
+fn sweep_state(chain: &[StraightPhase], s: f64) -> (f64, f64) {
+    let mut i = 0;
+    while i + 1 < chain.len() && chain[i + 1].s0 <= s {
+        i += 1;
+    }
+    let p = &chain[i];
+    let (_, v, a) = p.state_at(p.solve_tau(s - p.s0));
+    (v, a)
+}
+
+/// The forward sweep truncated at arc length `x`: whole phases before it and
+/// the containing phase cut at the matching local time, so the truncation node
+/// is a state on the same cubic.
+fn truncated_at(chain: &[StraightPhase], x: f64) -> Vec<StraightPhase> {
+    let mut out = Vec::with_capacity(chain.len());
+    for p in chain {
+        if p.s0 >= x {
+            break;
+        }
+        let mut p = *p;
+        if p.end_state().0 > x {
+            p.dt = p.solve_tau(x - p.s0);
+            if p.dt <= 0.0 {
+                break;
+            }
+        }
+        out.push(p);
+    }
+    out
+}
+
+/// The backward sweep's tail from arc length `x`: whole phases past it and
+/// the containing phase re-headed at the matching mid-phase state, which lies
+/// on the same cubic.
+fn tail_from(chain: &[StraightPhase], x: f64) -> Vec<StraightPhase> {
+    let mut out = Vec::with_capacity(chain.len());
+    for p in chain {
+        if p.end_state().0 <= x {
+            continue;
+        }
+        if p.s0 >= x {
+            out.push(*p);
+            continue;
+        }
+        let tau = p.solve_tau(x - p.s0);
+        let (s0, v0, a0) = p.state_at(tau);
+        let dt = p.dt - tau;
+        if dt > 0.0 {
+            out.push(StraightPhase {
+                t0: 0.0,
+                dt,
+                s0,
+                v0,
+                a0,
+                j: p.j,
+            });
+        }
+    }
+    out
+}
+
+/// One constant-jerk chord between two states over arc `ds`: its duration and
+/// the closure residual. `arc_closed` picks which of the three closure
+/// equations is left as the residual: `false` sizes `dt` so speed and
+/// acceleration both land exactly and reports the arc mismatch; `true` sizes
+/// `dt` from the arc and acceleration — well conditioned across an apex,
+/// where the speed step vanishes — and reports the speed mismatch.
+fn chord_fit(from: (f64, f64), to: (f64, f64), ds: f64, arc_closed: bool) -> Option<(f64, f64)> {
+    let (v_a, a_a) = from;
+    let (v_b, a_b) = to;
+    let dt = if arc_closed {
+        let c2 = (2.0 * a_a + a_b) / 6.0;
+        let disc = v_a * v_a + 4.0 * c2 * ds;
+        if disc < 0.0 {
+            return None;
+        }
+        2.0 * ds / (v_a + disc.sqrt())
+    } else {
+        2.0 * (v_b - v_a) / (a_a + a_b)
+    };
+    if !(dt > 0.0 && dt.is_finite()) {
+        return None;
+    }
+    let residual = if arc_closed {
+        v_a + 0.5 * dt * (a_a + a_b) - v_b
+    } else {
+        let j = (a_b - a_a) / dt;
+        v_a * dt + 0.5 * a_a * dt * dt + j * dt * dt * dt / 6.0 - ds
+    };
+    Some((dt, residual))
+}
+
+/// The joining chord re-fitted at the converged bisection point, admitted
+/// only when its closure residual is within the chain-wide relative
+/// tolerance and its interior speed extremum stays under the flat ceiling —
+/// the same two rules the sweep steps themselves obey. Returns the chord
+/// duration, or `None` to refuse the candidate.
+pub(super) fn chord_admitted(
+    kin: &Kinematics,
+    from: (f64, f64),
+    to: (f64, f64),
+    ds: f64,
+    arc_closed: bool,
+) -> Option<f64> {
+    let (dt, residual) = chord_fit(from, to, ds, arc_closed)?;
+    let tol = if arc_closed {
+        LENGTH_CLOSURE_REL_TOL * (1.0 + to.0)
+    } else {
+        LENGTH_CLOSURE_REL_TOL * kin.length
+    };
+    if residual.abs() > tol {
+        return None;
+    }
+    let j = (to.1 - from.1) / dt;
+    let mut peak = from.0.max(to.0);
+    if j != 0.0 {
+        let tau = -from.1 / j;
+        if tau > 0.0 && tau < dt {
+            peak = peak.max(from.0 + from.1 * tau + 0.5 * j * tau * tau);
+        }
+    }
+    (peak <= kin.flat_ceiling).then_some(dt)
+}
+
+/// Chord join sliding the far end along the backward sweep instead of the
+/// forward one: from a fixed forward node, the landing arc on the backward
+/// chain is the free variable. This is the join that closes where the forward
+/// extremal touches the brake envelope between backward nodes — the node-
+/// anchored join has nothing to bracket there.
+fn chord_join_backward(
+    kin: &Kinematics,
+    forward: &[StraightPhase],
+    backward: &[StraightPhase],
+    cut_forward: usize,
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> Option<Vec<StraightPhase>> {
+    let i_hi = cut_forward.min(forward.len());
+    let i_lo = i_hi.saturating_sub(4);
+    for i in (i_lo..=i_hi).rev() {
+        let (s_a, from) = if i == 0 {
+            (0.0, entry)
+        } else {
+            let (s, v, a) = forward[i - 1].end_state();
+            (s, (v, a))
+        };
+        for arc_closed in [false, true] {
+            let target = |s_b: f64| -> (f64, f64) {
+                if s_b >= kin.length {
+                    exit
+                } else {
+                    sweep_state(backward, s_b)
+                }
+            };
+            let residual = |s_b: f64| -> Option<f64> {
+                if s_b <= s_a {
+                    return None;
+                }
+                chord_fit(from, target(s_b), s_b - s_a, arc_closed).map(|(_, r)| r)
+            };
+            let mut nodes: Vec<f64> = backward.iter().map(|p| p.s0).filter(|&s| s > s_a).collect();
+            nodes.push(kin.length);
+            let mut prev: Option<(f64, f64)> = None;
+            let mut bracket = None;
+            for &x in &nodes {
+                let Some(r) = residual(x) else {
+                    prev = None;
+                    continue;
+                };
+                if let Some((px, pr)) = prev {
+                    if (pr <= 0.0) != (r <= 0.0) {
+                        bracket = Some((px, x));
+                        break;
+                    }
+                }
+                prev = Some((x, r));
+            }
+            let Some((mut lo, mut hi)) = bracket else {
+                continue;
+            };
+            let mut lo_is_neg = residual(lo).is_some_and(|r| r <= 0.0);
+            for _ in 0..ENVELOPE_CROSS_BISECT_ITERS {
+                let mid = 0.5 * (lo + hi);
+                match residual(mid) {
+                    Some(r) if (r <= 0.0) == lo_is_neg => {
+                        lo = mid;
+                        lo_is_neg = r <= 0.0;
+                    }
+                    _ => hi = mid,
+                }
+            }
+            let s_b = 0.5 * (lo + hi);
+            let to = target(s_b);
+            let Some(dt) = chord_admitted(kin, from, to, s_b - s_a, arc_closed) else {
+                continue;
+            };
+            let mut chain: Vec<StraightPhase> = forward[..i].to_vec();
+            let mut t = chain.last().map_or(0.0, |p| p.t0 + p.dt);
+            chain.push(StraightPhase {
+                t0: t,
+                dt,
+                s0: s_a,
+                v0: from.0,
+                a0: from.1,
+                j: (to.1 - from.1) / dt,
+            });
+            t += dt;
+            for p in tail_from(backward, s_b) {
+                chain.push(StraightPhase { t0: t, ..p });
+                t += p.dt;
+            }
+            if let Ok(certified) = certified_chain(kin, &chain) {
+                return Some(certified);
+            }
+        }
+    }
+    None
+}
+
+/// Join the two sweeps with one constant-jerk chord between envelope states.
+/// A chord from `(v_a, a_a)` to `(v_b, a_b)` closes both coordinates when
+/// `dt = 2 (v_b - v_a) / (a_a + a_b)`; the arc it spends is then fixed, so the
+/// join slides the forward truncation point until that arc lands exactly on
+/// the gap to the backward node. Both endpoints are exact sweep states — the
+/// truncation node lies on its own step's cubic — so the assembled chain is
+/// state-continuous everywhere and only the certificate can refuse it.
+fn chord_join(
+    kin: &Kinematics,
+    forward: &[StraightPhase],
+    backward: &[StraightPhase],
+    cut_backward: usize,
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> Option<Vec<StraightPhase>> {
+    let forward_end = forward.last().map_or(0.0, |p| p.end_state().0);
+    let k_lo = cut_backward.saturating_sub(4);
+    let k_hi = (cut_backward + 4).min(backward.len());
+    for k in k_lo..=k_hi {
+        let (s_b, to) = match backward.get(k) {
+            Some(p) => (p.s0, (p.v0, p.a0)),
+            None => (kin.length, exit),
+        };
+        for arc_closed in [false, true] {
+            let chord = |from: (f64, f64), ds: f64| chord_fit(from, to, ds, arc_closed);
+            let state_at = |x: f64| -> (f64, f64) {
+                if x <= 0.0 {
+                    entry
+                } else {
+                    sweep_state(forward, x)
+                }
+            };
+            let residual = |x: f64| -> Option<f64> {
+                let ds = s_b - x;
+                if ds <= 0.0 {
+                    return None;
+                }
+                chord(state_at(x), ds).map(|(_, r)| r)
+            };
+            let mut nodes: Vec<f64> = vec![0.0];
+            nodes.extend(
+                forward
+                    .iter()
+                    .map(|p| p.end_state().0)
+                    .filter(|&s| s < s_b.min(forward_end)),
+            );
+            let mut prev: Option<(f64, f64)> = None;
+            let mut bracket = None;
+            for &x in &nodes {
+                let Some(r) = residual(x) else {
+                    prev = None;
+                    continue;
+                };
+                if let Some((px, pr)) = prev {
+                    if (pr <= 0.0) != (r <= 0.0) {
+                        bracket = Some((px, x));
+                        break;
+                    }
+                }
+                prev = Some((x, r));
+            }
+            let Some((mut lo, mut hi)) = bracket else {
+                continue;
+            };
+            let mut lo_is_neg = residual(lo).is_some_and(|r| r <= 0.0);
+            for _ in 0..ENVELOPE_CROSS_BISECT_ITERS {
+                let mid = 0.5 * (lo + hi);
+                match residual(mid) {
+                    Some(r) if (r <= 0.0) == lo_is_neg => {
+                        lo = mid;
+                        lo_is_neg = r <= 0.0;
+                    }
+                    _ => hi = mid,
+                }
+            }
+            let x = 0.5 * (lo + hi);
+            let mut chain = truncated_at(forward, x);
+            let (s_a, v_a, a_a) = chain.last().map_or((0.0, entry.0, entry.1), |p| {
+                let (s, v, a) = p.end_state();
+                (s, v, a)
+            });
+            let Some(dt) = chord_admitted(kin, (v_a, a_a), to, s_b - s_a, arc_closed) else {
+                continue;
+            };
+            let mut t = chain.last().map_or(0.0, |p| p.t0 + p.dt);
+            chain.push(StraightPhase {
+                t0: t,
+                dt,
+                s0: s_a,
+                v0: v_a,
+                a0: a_a,
+                j: (to.1 - a_a) / dt,
+            });
+            t += dt;
+            for p in &backward[k.min(backward.len())..] {
+                chain.push(StraightPhase { t0: t, ..*p });
+                t += p.dt;
+            }
+            if let Ok(certified) = certified_chain(kin, &chain) {
+                return Some(certified);
+            }
+        }
+    }
+    None
+}
+
+/// Two-state backward-reachable envelope pass: the forward extremal sweep from
+/// the entry and the backward one from the exit — both built jointly in
+/// `(q, a)`, never pinning `a` to a rail — joined at their speed crossing by a
+/// certified chord planned between the exact node states on either side of
+/// it. Where the flanks' exact ceiling falls steeply the sweeps hug it with
+/// the acceleration the rail's slope actually demands, which is what the
+/// whole-member cap sets flatten away.
+pub(super) fn certified_envelope_chain(
+    kin: &Kinematics,
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> Option<Vec<StraightPhase>> {
+    if (kin.kappa0 == 0.0 && kin.sigma == 0.0) || !(kin.jerk > 0.0 && kin.jerk.is_finite()) {
+        return None;
+    }
+    let back = reversed(kin);
+    let backward = extremal_sweep(&back, (exit.0, -exit.1));
+    if backward.is_empty() {
+        return None;
+    }
+    let backward = reverse_chain(kin.length, &backward);
+    let forward = extremal_sweep(kin, entry);
+    if forward.is_empty() {
+        return None;
+    }
+    join_sweeps(kin, &forward, &backward, entry, exit)
+}
+
+/// Join one forward and one (already forward-framed) backward sweep at their
+/// speed crossing: a constant-jerk chord between exact sweep states where one
+/// closes, a capped bridge over widening node gaps where it does not.
+fn join_sweeps(
+    kin: &Kinematics,
+    forward: &[StraightPhase],
+    backward: &[StraightPhase],
+    entry: (f64, f64),
+    exit: (f64, f64),
+) -> Option<Vec<StraightPhase>> {
+    let forward_end = forward
+        .last()
+        .map_or(0.0, |p| p.end_state().0)
+        .min(kin.length);
+    let (lo, hi) = (backward[0].s0, forward_end);
+    if lo > hi {
+        return None;
+    }
+    let gap = |s: f64| sweep_state(forward, s).0 - sweep_state(backward, s).0;
+    let (g_lo, g_hi) = (gap(lo), gap(hi));
+    let crossing = if g_lo > 0.0 && g_hi < 0.0 {
+        return None;
+    } else if g_lo > 0.0 {
+        lo
+    } else if g_hi < 0.0 {
+        hi
+    } else {
+        let (mut lo, mut hi) = (lo, hi);
+        for _ in 0..ENVELOPE_CROSS_BISECT_ITERS {
+            let mid = 0.5 * (lo + hi);
+            if gap(mid) <= 0.0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        0.5 * (lo + hi)
+    };
+    let cut_forward = forward.partition_point(|p| p.end_state().0 <= crossing);
+    let cut_backward = backward.partition_point(|p| p.s0 < crossing);
+    if let Some(chain) = chord_join(kin, forward, backward, cut_backward, entry, exit) {
+        return Some(chain);
+    }
+    chord_join_backward(kin, forward, backward, cut_forward, entry, exit)
+}
+
 /// Certified chain across the member under its own cap set: the member's plan,
 /// or its extremal pass where the plan refuses. The caps are a sufficient
 /// condition evaluated at the curvature peak, so a member entered above that
@@ -2809,6 +3402,12 @@ pub(super) fn curved_chain(
         .filter(|shaped| chain_time(shaped) < (1.0 - SHAPED_TIME_WIN) * chain_time(&quickest))
     {
         quickest = shaped;
+    }
+    if let Some(envelope) = certified_envelope_chain(kin, entry, exit) {
+        let (te, tq) = (chain_time(&envelope), chain_time(&quickest));
+        if te < (1.0 - ENVELOPE_TIME_WIN) * tq {
+            quickest = envelope;
+        }
     }
     Ok(quickest)
 }
