@@ -5,7 +5,9 @@ use runtime::piece_ring::PieceEntry;
 
 use host_rt::passthrough_queue::PassthroughRouter;
 
-use crate::homing::{reconstruct_axis_position, trajectory_final_position};
+use crate::homing::{
+    STALE_TRIP_HARD_LIMIT_S, reconstruct_axis_position, trajectory_final_position,
+};
 use crate::mcu_config::{AXIS_X, AXIS_Z};
 use crate::motion_history::HistoryStore;
 use crate::types::AxisKey;
@@ -100,6 +102,7 @@ fn same_mcu_trip_clock_exact_reconstruction() {
         &router,
         &shared(store),
         f64::NEG_INFINITY,
+        -777.0,
     );
     let pos = result.expect("same-MCU reconstruction must succeed");
 
@@ -133,6 +136,7 @@ fn trip_at_piece_start_returns_start_position() {
         &router,
         &shared(store),
         f64::NEG_INFINITY,
+        -777.0,
     );
     let pos = result.expect("trip at piece start must succeed");
     assert!(
@@ -168,6 +172,7 @@ fn trip_outside_trajectory_window_holds_last_position() {
         &router,
         &shared(store),
         f64::NEG_INFINITY,
+        -777.0,
     );
     let pos = result.expect("trip after last piece holds endpoint position");
     assert!(
@@ -201,6 +206,7 @@ fn trip_before_trajectory_window_errors() {
         &router,
         &shared(store),
         f64::NEG_INFINITY,
+        -777.0,
     )
     .unwrap_err();
     assert!(
@@ -210,7 +216,7 @@ fn trip_before_trajectory_window_errors() {
 }
 
 #[test]
-fn no_history_for_axis_errors() {
+fn no_history_for_axis_clamps_to_run_start() {
     const MCU_ID: u32 = 5;
     const FREQ_F64: f64 = 180_000_000.0;
 
@@ -222,19 +228,17 @@ fn no_history_for_axis_errors() {
     };
     let store = HistoryStore::default();
 
-    let err = reconstruct_axis_position(
+    let pos = reconstruct_axis_position(
         MCU_ID,
         12_345_678,
         key,
         &router,
         &shared(store),
         f64::NEG_INFINITY,
+        42.5,
     )
-    .unwrap_err();
-    assert!(
-        err.contains("no motion history"),
-        "expected 'no motion history' in error, got: {err}"
-    );
+    .expect("an axis with no motion since attach clamps to the run start");
+    assert!((pos - 42.5).abs() < 1e-12, "expected 42.5, got {pos}");
 }
 
 #[test]
@@ -270,6 +274,7 @@ fn multiple_pieces_trip_in_second_piece() {
         &router,
         &shared(store),
         f64::NEG_INFINITY,
+        -777.0,
     );
     let pos = result.expect("trip in second piece must succeed");
     assert!(
@@ -279,7 +284,7 @@ fn multiple_pieces_trip_in_second_piece() {
 }
 
 #[test]
-fn trip_before_homing_window_is_rejected() {
+fn trip_just_before_the_arm_window_clamps_to_run_start() {
     const MCU_ID: u32 = 7;
     const FREQ_F64: f64 = 180_000_000.0;
 
@@ -299,18 +304,54 @@ fn trip_before_homing_window_is_rejected() {
     );
 
     let window_start_host = host_of(&router, MCU_ID, 2_000_000);
-    let err = reconstruct_axis_position(
+    let pos = reconstruct_axis_position(
         MCU_ID,
         1_500_000,
         key,
         &router,
         &shared(store),
         window_start_host,
+        3.25,
+    )
+    .expect("a trip within jitter of the arm window clamps to the run start");
+    assert!((pos - 3.25).abs() < 1e-12, "expected 3.25, got {pos}");
+}
+
+#[test]
+fn trip_a_second_before_the_arm_window_is_rejected() {
+    const MCU_ID: u32 = 7;
+    const FREQ_F64: f64 = 180_000_000.0;
+
+    let router = router_with_clock(MCU_ID, FREQ_F64);
+
+    let key = AxisKey {
+        mcu_id: MCU_ID,
+        axis: AXIS_X as u8,
+    };
+    let mut store = HistoryStore::default();
+    record_synced(
+        &mut store,
+        &router,
+        key,
+        &make_linear_piece(1_000_000, 0.01, 0.0, 5.0),
+        FREQ,
+    );
+
+    let trip_clock = 1_500_000;
+    let window_start_host = host_of(&router, MCU_ID, trip_clock) + STALE_TRIP_HARD_LIMIT_S + 0.001;
+    let err = reconstruct_axis_position(
+        MCU_ID,
+        trip_clock,
+        key,
+        &router,
+        &shared(store),
+        window_start_host,
+        3.25,
     )
     .unwrap_err();
     assert!(
-        err.contains("stale"),
-        "error must mention stale, got: {err}"
+        err.contains("mis-synced clock"),
+        "error must name the broken clock model, got: {err}"
     );
 }
 
@@ -588,6 +629,7 @@ mod corexy_reconstruction_tests {
             &router,
             &shared(store),
             f64::NEG_INFINITY,
+            geometry::MachinePos([0.0; 3]),
         )
         .expect("corexy reconstruction must succeed");
 
@@ -634,6 +676,7 @@ mod corexy_reconstruction_tests {
             &router,
             &shared(store),
             f64::NEG_INFINITY,
+            geometry::MachinePos([0.0; 3]),
         )
         .unwrap_err();
         assert!(
@@ -643,7 +686,7 @@ mod corexy_reconstruction_tests {
     }
 
     #[test]
-    fn trip_reconstruction_fails_when_a_lane_is_missing() {
+    fn lane_with_no_motion_since_attach_clamps_to_the_run_start() {
         const MCU_ID: u32 = 21;
         let router = router_with_clock(MCU_ID, 180_000_000.0);
 
@@ -656,18 +699,37 @@ mod corexy_reconstruction_tests {
             FREQ,
         );
 
-        let err = reconstruct_cartesian_position(
+        let cart = reconstruct_cartesian_position(
             MCU_ID,
             2_000_000,
             &[corexy_cfg(MCU_ID), z_cfg(121)],
             &router,
             &shared(store),
             f64::NEG_INFINITY,
+            geometry::MachinePos([10.0, 40.0, 5.0]),
         )
-        .unwrap_err();
+        .expect("the B lane never moved since attach: it clamps to its start");
+        // A: linear 0->100mm over 4.5M ticks, read 1M ticks in = 22.222mm.
+        // B: no motion since attach, held at forward([10,40,5])[1] = -30.
+        // x=(A+B)/2, y=(A-B)/2, z passes through.
+        let a = 100.0 * (1.0e6 / 4.5e6);
+        let b = 10.0 - 40.0;
         assert!(
-            err.contains("no motion history"),
-            "missing Y lane must fail loudly, got: {err}"
+            (cart.0[0] - (a + b) / 2.0).abs() < 0.5,
+            "x=(A+B)/2 expected {:.3}, got {:.4}",
+            (a + b) / 2.0,
+            cart.0[0]
+        );
+        assert!(
+            (cart.0[1] - (a - b) / 2.0).abs() < 0.5,
+            "y=(A-B)/2 expected {:.3}, got {:.4}",
+            (a - b) / 2.0,
+            cart.0[1]
+        );
+        assert!(
+            (cart.0[2] - 5.0).abs() < 1e-6,
+            "z passes through, got {:.4}",
+            cart.0[2]
         );
     }
 

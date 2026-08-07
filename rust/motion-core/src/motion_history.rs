@@ -418,6 +418,10 @@ impl HistoryStore {
         self.endpoints.get(&key).map(|e| e.position)
     }
 
+    pub fn is_tracked(&self, key: AxisKey) -> bool {
+        self.rings.get(&key).is_some_and(|r| !r.is_empty()) || self.endpoints.contains_key(&key)
+    }
+
     /// Axis state at an MCU clock reading from the same MCU the pieces were
     /// sent to. Pieces execute at exactly their wire start clock, so
     /// evaluating by clock is exact where `state_at_host` goes through the
