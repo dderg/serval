@@ -422,6 +422,28 @@ impl HistoryStore {
         self.rings.get(&key).is_some_and(|r| !r.is_empty()) || self.endpoints.contains_key(&key)
     }
 
+    /// True only when nothing recorded for `key` precedes `clock` (axis MCU
+    /// clock domain — host projections drift and cannot gate this): no
+    /// eviction, no pre-ring hold (both imply older motion existed), and
+    /// `clock` lies before the ring's first piece — or the axis was never
+    /// recorded at all.
+    pub fn predates_all_recorded_motion(&self, key: AxisKey, clock: u64) -> bool {
+        if self.evicted.get(&key).copied().unwrap_or(0) != 0 {
+            return false;
+        }
+        if self.holds_before_ring.contains_key(&key) {
+            return false;
+        }
+        match self
+            .rings
+            .get(&key)
+            .and_then(std::collections::VecDeque::front)
+        {
+            Some(front) => clock < front.start_clock,
+            None => !self.endpoints.contains_key(&key),
+        }
+    }
+
     /// Axis state at an MCU clock reading from the same MCU the pieces were
     /// sent to. Pieces execute at exactly their wire start clock, so
     /// evaluating by clock is exact where `state_at_host` goes through the

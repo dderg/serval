@@ -182,7 +182,7 @@ fn trip_outside_trajectory_window_holds_last_position() {
 }
 
 #[test]
-fn trip_before_trajectory_window_errors() {
+fn trip_before_the_first_recorded_piece_clamps_to_run_start() {
     const MCU_ID: u32 = 4;
     const FREQ_F64: f64 = 180_000_000.0;
 
@@ -199,9 +199,51 @@ fn trip_before_trajectory_window_errors() {
     record_synced(&mut store, &router, key, &piece, FREQ);
 
     let before = piece_start - 1;
-    let err = reconstruct_axis_position(
+    let pos = reconstruct_axis_position(
         MCU_ID,
         before,
+        key,
+        &router,
+        &shared(store),
+        f64::NEG_INFINITY,
+        -777.0,
+    )
+    .expect("a trip before the axis's first-ever piece clamps to run start");
+    assert!((pos + 777.0).abs() < 1e-12, "expected -777.0, got {pos}");
+}
+
+#[test]
+fn trip_before_a_reanchor_hold_with_prior_motion_errors() {
+    const MCU_ID: u32 = 4;
+    const FREQ_F64: f64 = 180_000_000.0;
+
+    let router = router_with_clock(MCU_ID, FREQ_F64);
+
+    let key = AxisKey {
+        mcu_id: MCU_ID,
+        axis: AXIS_X as u8,
+    };
+    let mut store = HistoryStore::default();
+    record_synced(
+        &mut store,
+        &router,
+        key,
+        &make_linear_piece(1_000_000_000, 0.025, 0.0, 10.0),
+        FREQ,
+    );
+    store.drop_pieces_on_reanchor();
+    record_synced(
+        &mut store,
+        &router,
+        key,
+        &make_linear_piece(3_000_000_000, 0.025, 10.0, 20.0),
+        FREQ,
+    );
+
+    let before_all = 500_000_000;
+    let err = reconstruct_axis_position(
+        MCU_ID,
+        before_all,
         key,
         &router,
         &shared(store),
@@ -211,7 +253,7 @@ fn trip_before_trajectory_window_errors() {
     .unwrap_err();
     assert!(
         err.contains("precedes retained"),
-        "expected 'precedes retained' in error, got: {err}"
+        "prior motion existed: the clamp must not swallow this, got: {err}"
     );
 }
 
