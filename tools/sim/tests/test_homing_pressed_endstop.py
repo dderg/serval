@@ -19,7 +19,6 @@ from tools.sim.tests.test_homing_min_dist_corexy import (
     XyTracker,
     _needs_rehome_records,
 )
-from tools.sim.tests.test_homing_multi_endstop import AXES
 
 pytestmark = pytest.mark.needs_elf
 
@@ -53,25 +52,34 @@ def test_pressed_endstop_recovers_via_rehome(sim_world):
     assert world.shutdown_line() is None
 
 
-def test_multi_endstop_pressed_at_arm_completes(sim_world):
+def test_pressed_endstop_seeds_without_min_home_dist(sim_world):
+    """With the early-trigger guard off, a pressed switch has no rehome pass
+    to fall back on: the insta-trip must reconstruct to the run's start and
+    seed the axis at position_endstop instead of aborting position-unknown."""
     world = sim_world(
-        lambda w: configs.dual_motor_xy_config(w.h7_pty, str(w.gcode_dir))
+        lambda w: configs.awd_corexy_positive_dir_config(
+            w.h7_pty, str(w.gcode_dir)
+        ).replace("min_home_dist: 10", "min_home_dist: 0"),
+        dual_mcu=False,
     )
     control = world.sim_control("h7")
-    _, _, endstops, _ = AXES["X"]
-    for chip, line in endstops:
-        control.set_gpio_input(chip, line, 1)
+    world.mark_log()
+
+    control.set_gpio_input(*Y_ENDSTOP, 1)
     try:
-        resp = world.gcode("G28 X", timeout=120)
+        resp = world.gcode("G28 Y", timeout=300)
     finally:
-        for chip, line in endstops:
-            control.set_gpio_input(chip, line, 0)
+        control.set_gpio_input(*Y_ENDSTOP, 0)
+
     assert not resp.get("error"), (
-        f"both switches pressed at arm: the run must seed at the endstop"
-        f" instead of aborting position-unknown: {resp}"
+        f"a switch pressed at arm must seed at the endstop instead of"
+        f" aborting position-unknown: {resp}"
     )
+    log = world.expect_log("homing: Y trigger=", timeout=15.0)
+    assert "homing: Y trigger=300.0000" in log, log[-2000:]
     pos = world.toolhead_position()
-    assert pos[0] == pytest.approx(
-        configs.DUAL_MOTOR_POSITION_ENDSTOP, abs=0.5
-    ), pos
+    assert pos[1] == pytest.approx(295.0, abs=0.5), (
+        f"seeded at position_endstop 300 then retracted homing_retract_dist"
+        f" 5mm: {pos}"
+    )
     assert world.shutdown_line() is None
