@@ -115,6 +115,24 @@ pub fn reconstruct_axis_position(
     let store = history.lock_ok();
     match store.state_at_clock(axis_key, axis_clock, trip_host, None) {
         Ok(st) => Ok(st.position),
+        Err(e @ crate::motion_history::HistoryError::BeforeRetainedWindow { .. })
+            if store.predates_all_recorded_motion(axis_key, axis_clock) =>
+        {
+            tracing::warn!(
+                subsystem = "homing",
+                event = "pre_motion_trip_clamped",
+                endstop_mcu,
+                axis_mcu = axis_key.mcu_id,
+                axis = axis_key.axis,
+                trip_host,
+                lane_start,
+                error = %e,
+                "trip precedes every piece ever recorded for this axis — \
+                 motion-caused trips cannot precede their pieces' recording, \
+                 so this trip predates the run; clamping to its start position"
+            );
+            Ok(lane_start)
+        }
         Err(e) => Err(e.to_string()),
     }
 }
