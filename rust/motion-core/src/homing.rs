@@ -20,6 +20,11 @@ pub enum ReconstructError {
     },
 }
 
+/// Firmware resets the trip latch at arm and pre-arm buffered trips are
+/// dropped, so a trip older than the arm window by more than clock-sync
+/// jitter has no legitimate source: the clock model is broken.
+pub const STALE_TRIP_HARD_LIMIT_S: f64 = 1.0;
+
 pub fn reconstruct_axis_position(
     endstop_mcu: u32,
     trip_clock: u64,
@@ -27,12 +32,13 @@ pub fn reconstruct_axis_position(
     router: &Arc<Mutex<PassthroughRouter>>,
     history: &Arc<Mutex<crate::motion_history::HistoryStore>>,
     window_start_host: f64,
+    lane_start: f64,
 ) -> Result<f64, String> {
     let axis_mcu = axis_key.mcu_id;
 
-    let (trip_host, axis_clock) = {
+    let trip_host = {
         let router_guard = router.lock_ok();
-        let trip_host = crate::motion_history::clock_to_host(
+        crate::motion_history::clock_to_host(
             &router_guard,
             crate::types::mcu_handle_from_raw(endstop_mcu),
             trip_clock,
@@ -45,41 +51,72 @@ pub fn reconstruct_axis_position(
                 trip_clock,
             }
             .to_string()
-        })?;
-        // The trip is answered in the axis MCU's clock domain — the domain
-        // the recorded pieces are keyed in — never against their host-time
-        // keys. Host keys are the schedule as projected at send time; the
-        // clock↔host mapping drifts between send and trip (sync jitter,
-        // and in the simulator the virtual clock legally slips against
-        // real time), and that drift lands the lookup a velocity-scaled
-        // distance away. A remote endstop converts through both CURRENT
-        // models back-to-back, so their shared drift cancels.
-        let axis_clock = if endstop_mcu == axis_mcu {
-            trip_clock
-        } else {
-            router_guard
-                .host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(axis_mcu), trip_host)
-                .map_err(|e| {
-                    format!("host_time_to_mcu_clock failed for axis mcu {axis_mcu}: {e:?}")
-                })?
-        };
-        (trip_host, axis_clock)
+        })?
     };
 
-    if trip_host <= window_start_host {
+    if trip_host < window_start_host - STALE_TRIP_HARD_LIMIT_S {
         return Err(format!(
             "endstop trip host time {trip_host:.6}s predates this homing move \
-             (window starts at {window_start_host:.6}s) — stale trip or \
-             mis-synced clock (endstop_mcu={endstop_mcu} trip_clock={trip_clock} \
+             (window starts at {window_start_host:.6}s) by more than \
+             {STALE_TRIP_HARD_LIMIT_S}s — mis-synced clock \
+             (endstop_mcu={endstop_mcu} trip_clock={trip_clock} \
              axis_mcu={axis_mcu})"
         ));
     }
+    if trip_host <= window_start_host {
+        tracing::warn!(
+            subsystem = "homing",
+            event = "insta_trip_clamped",
+            endstop_mcu,
+            axis_mcu = axis_key.mcu_id,
+            axis = axis_key.axis,
+            trip_host,
+            window_start_host,
+            lane_start,
+            "trip at or before the arm window — the axis had not moved; \
+             clamping to the run's start position"
+        );
+        return Ok(lane_start);
+    }
+
+    if !history.lock_ok().is_tracked(axis_key) {
+        tracing::warn!(
+            subsystem = "homing",
+            event = "pre_motion_trip_clamped",
+            endstop_mcu,
+            axis_mcu = axis_key.mcu_id,
+            axis = axis_key.axis,
+            trip_host,
+            lane_start,
+            "trip on an axis with no recorded motion since attach — \
+             motion-caused trips cannot precede their pieces' recording, \
+             so this trip predates the run; clamping to its start position"
+        );
+        return Ok(lane_start);
+    }
+
+    // The trip is answered in the axis MCU's clock domain — the domain
+    // the recorded pieces are keyed in — never against their host-time
+    // keys. Host keys are the schedule as projected at send time; the
+    // clock↔host mapping drifts between send and trip (sync jitter,
+    // and in the simulator the virtual clock legally slips against
+    // real time), and that drift lands the lookup a velocity-scaled
+    // distance away. A remote endstop converts through both CURRENT
+    // models back-to-back, so their shared drift cancels.
+    let axis_clock = if endstop_mcu == axis_mcu {
+        trip_clock
+    } else {
+        router
+            .lock_ok()
+            .host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(axis_mcu), trip_host)
+            .map_err(|e| format!("host_time_to_mcu_clock failed for axis mcu {axis_mcu}: {e:?}"))?
+    };
 
     let store = history.lock_ok();
-    let st = store
-        .state_at_clock(axis_key, axis_clock, trip_host, None)
-        .map_err(|e| e.to_string())?;
-    Ok(st.position)
+    match store.state_at_clock(axis_key, axis_clock, trip_host, None) {
+        Ok(st) => Ok(st.position),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 pub fn trajectory_final_position(
@@ -133,6 +170,24 @@ fn cartesian_from_motor_lanes(
         .inverse(motor_frame))
 }
 
+pub fn motor_frame_start(
+    configs: &[McuAxisConfig],
+    start: geometry::MachinePos,
+) -> Result<[f64; SPATIAL_AXES], String> {
+    let kin_tag = configs
+        .iter()
+        .find(|c| c.axes.contains(&0usize))
+        .map(|c| c.kinematics)
+        .ok_or_else(|| {
+            "spatial lane 0 is not configured on any mcu — cannot assemble \
+             a cartesian position"
+                .to_string()
+        })?;
+    Ok(KinematicsModule::from_tag(kin_tag)
+        .map_err(|e| e.to_string())?
+        .forward(start.0))
+}
+
 pub fn reconstruct_cartesian_position(
     endstop_mcu: u32,
     trip_clock: u64,
@@ -140,7 +195,9 @@ pub fn reconstruct_cartesian_position(
     router: &Arc<Mutex<PassthroughRouter>>,
     history: &Arc<Mutex<crate::motion_history::HistoryStore>>,
     window_start_host: f64,
+    start: geometry::MachinePos,
 ) -> Result<geometry::MachinePos, String> {
+    let motor_start = motor_frame_start(configs, start)?;
     cartesian_from_motor_lanes(configs, |key| {
         reconstruct_axis_position(
             endstop_mcu,
@@ -149,6 +206,7 @@ pub fn reconstruct_cartesian_position(
             router,
             history,
             window_start_host,
+            motor_start[usize::from(key.axis)],
         )
     })
     .map(geometry::MachinePos)

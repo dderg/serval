@@ -145,6 +145,7 @@ pub(crate) struct HomingRun {
     pub(crate) axis_key: crate::types::AxisKey,
     pub(crate) all_axis_keys: Vec<crate::types::AxisKey>,
     pub(crate) window_start_host: f64,
+    pub(crate) start_pos: geometry::MachinePos,
     pub(crate) notify: crossbeam_channel::Sender<
         Result<(geometry::MachinePos, geometry::MachinePos, u64), String>,
     >,

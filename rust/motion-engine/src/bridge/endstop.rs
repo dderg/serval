@@ -221,6 +221,7 @@ pub(super) fn dispatch_endstop_trip(
             };
 
             let axis_key = run.axis_key;
+            let run_start = run.start_pos;
             let reconstruct_cartesian =
                 |source_mcu: u32, clock: u64| -> Result<geometry::MachinePos, String> {
                     crate::homing::reconstruct_cartesian_position(
@@ -230,8 +231,16 @@ pub(super) fn dispatch_endstop_trip(
                         &router_arc,
                         &history_arc,
                         run.window_start_host,
+                        run_start,
                     )
                 };
+            let motor_start = match crate::homing::motor_frame_start(&configs, run_start) {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = run.notify.send(Err(e));
+                    return;
+                }
+            };
 
             let query_step_count = |lane: &crate::homing::StepcompressLane| -> Result<i64, String> {
                 let io = host_ios.get(&lane.mcu_id).ok_or_else(|| {
@@ -301,6 +310,7 @@ pub(super) fn dispatch_endstop_trip(
                                 &router_arc,
                                 &history_arc,
                                 run.window_start_host,
+                                motor_start[usize::from(key.axis)],
                             )
                         },
                         &query_step_count,
