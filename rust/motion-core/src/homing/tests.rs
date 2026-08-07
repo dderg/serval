@@ -102,7 +102,7 @@ fn same_mcu_trip_clock_exact_reconstruction() {
         &router,
         &shared(store),
         f64::NEG_INFINITY,
-        -777.0,
+        Some(-777.0),
     );
     let pos = result.expect("same-MCU reconstruction must succeed");
 
@@ -136,7 +136,7 @@ fn trip_at_piece_start_returns_start_position() {
         &router,
         &shared(store),
         f64::NEG_INFINITY,
-        -777.0,
+        Some(-777.0),
     );
     let pos = result.expect("trip at piece start must succeed");
     assert!(
@@ -172,7 +172,7 @@ fn trip_outside_trajectory_window_holds_last_position() {
         &router,
         &shared(store),
         f64::NEG_INFINITY,
-        -777.0,
+        Some(-777.0),
     );
     let pos = result.expect("trip after last piece holds endpoint position");
     assert!(
@@ -206,10 +206,74 @@ fn trip_before_the_first_recorded_piece_clamps_to_run_start() {
         &router,
         &shared(store),
         f64::NEG_INFINITY,
-        -777.0,
+        Some(-777.0),
     )
     .expect("a trip before the axis's first-ever piece clamps to run start");
     assert!((pos + 777.0).abs() < 1e-12, "expected -777.0, got {pos}");
+}
+
+#[test]
+fn lane_without_a_run_start_reconstructs_from_history() {
+    const MCU_ID: u32 = 41;
+    const FREQ_F64: f64 = 180_000_000.0;
+
+    let router = router_with_clock(MCU_ID, FREQ_F64);
+
+    // The extruder lane of a stepcompress MCU: reconcile walks every
+    // configured lane, and the run's start position covers spatial axes
+    // only. Such a lane must take the ordinary history path, never a clamp.
+    let key = AxisKey {
+        mcu_id: MCU_ID,
+        axis: 3,
+    };
+    let piece_start: u64 = 1_000_000;
+    #[allow(clippy::cast_possible_truncation)]
+    let duration_ticks = (0.025_f64 * FREQ_F64) as u64;
+    let mut store = HistoryStore::default();
+    record_synced(
+        &mut store,
+        &router,
+        key,
+        &make_linear_piece(piece_start, 0.025, 0.0, 40.0),
+        FREQ,
+    );
+    let shared_store = shared(store);
+
+    let trip_clock = piece_start + duration_ticks / 2;
+    let window_start_host = host_of(&router, MCU_ID, trip_clock) + 0.001;
+    let pos = reconstruct_axis_position(
+        MCU_ID,
+        trip_clock,
+        key,
+        &router,
+        &shared_store,
+        window_start_host,
+        None,
+    )
+    .expect("a lane with no run start still reconstructs from its history");
+    assert!(
+        (pos - 20.0).abs() < 0.5,
+        "midpoint of the 0..40mm extruder piece must be ~20mm even though the \
+         trip precedes the arm window, got {pos:.4}"
+    );
+
+    let err = reconstruct_axis_position(
+        MCU_ID,
+        trip_clock,
+        AxisKey {
+            mcu_id: MCU_ID,
+            axis: 2,
+        },
+        &router,
+        &shared_store,
+        window_start_host,
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("no motion history"),
+        "with no start and no history the lane must fail loudly, got: {err}"
+    );
 }
 
 #[test]
@@ -248,7 +312,7 @@ fn trip_before_a_reanchor_hold_with_prior_motion_errors() {
         &router,
         &shared(store),
         f64::NEG_INFINITY,
-        -777.0,
+        Some(-777.0),
     )
     .unwrap_err();
     assert!(
@@ -277,7 +341,7 @@ fn no_history_for_axis_clamps_to_run_start() {
         &router,
         &shared(store),
         f64::NEG_INFINITY,
-        42.5,
+        Some(42.5),
     )
     .expect("an axis with no motion since attach clamps to the run start");
     assert!((pos - 42.5).abs() < 1e-12, "expected 42.5, got {pos}");
@@ -316,7 +380,7 @@ fn multiple_pieces_trip_in_second_piece() {
         &router,
         &shared(store),
         f64::NEG_INFINITY,
-        -777.0,
+        Some(-777.0),
     );
     let pos = result.expect("trip in second piece must succeed");
     assert!(
@@ -353,7 +417,7 @@ fn trip_just_before_the_arm_window_clamps_to_run_start() {
         &router,
         &shared(store),
         window_start_host,
-        3.25,
+        Some(3.25),
     )
     .expect("a trip within jitter of the arm window clamps to the run start");
     assert!((pos - 3.25).abs() < 1e-12, "expected 3.25, got {pos}");
@@ -388,7 +452,7 @@ fn trip_a_second_before_the_arm_window_is_rejected() {
         &router,
         &shared(store),
         window_start_host,
-        3.25,
+        Some(3.25),
     )
     .unwrap_err();
     assert!(

@@ -32,7 +32,7 @@ pub fn reconstruct_axis_position(
     router: &Arc<Mutex<PassthroughRouter>>,
     history: &Arc<Mutex<crate::motion_history::HistoryStore>>,
     window_start_host: f64,
-    lane_start: f64,
+    lane_start: Option<f64>,
 ) -> Result<f64, String> {
     let axis_mcu = axis_key.mcu_id;
 
@@ -63,36 +63,37 @@ pub fn reconstruct_axis_position(
              axis_mcu={axis_mcu})"
         ));
     }
-    if trip_host <= window_start_host {
-        tracing::warn!(
-            subsystem = "homing",
-            event = "insta_trip_clamped",
-            endstop_mcu,
-            axis_mcu = axis_key.mcu_id,
-            axis = axis_key.axis,
-            trip_host,
-            window_start_host,
-            lane_start,
-            "trip at or before the arm window — the axis had not moved; \
-             clamping to the run's start position"
-        );
-        return Ok(lane_start);
-    }
-
-    if !history.lock_ok().is_tracked(axis_key) {
-        tracing::warn!(
-            subsystem = "homing",
-            event = "pre_motion_trip_clamped",
-            endstop_mcu,
-            axis_mcu = axis_key.mcu_id,
-            axis = axis_key.axis,
-            trip_host,
-            lane_start,
-            "trip on an axis with no recorded motion since attach — \
-             motion-caused trips cannot precede their pieces' recording, \
-             so this trip predates the run; clamping to its start position"
-        );
-        return Ok(lane_start);
+    if let Some(lane_start) = lane_start {
+        if trip_host <= window_start_host {
+            tracing::warn!(
+                subsystem = "homing",
+                event = "insta_trip_clamped",
+                endstop_mcu,
+                axis_mcu = axis_key.mcu_id,
+                axis = axis_key.axis,
+                trip_host,
+                window_start_host,
+                lane_start,
+                "trip at or before the arm window — the axis had not moved; \
+                 clamping to the run's start position"
+            );
+            return Ok(lane_start);
+        }
+        if !history.lock_ok().is_tracked(axis_key) {
+            tracing::warn!(
+                subsystem = "homing",
+                event = "pre_motion_trip_clamped",
+                endstop_mcu,
+                axis_mcu = axis_key.mcu_id,
+                axis = axis_key.axis,
+                trip_host,
+                lane_start,
+                "trip on an axis with no recorded motion since attach — \
+                 motion-caused trips cannot precede their pieces' recording, \
+                 so this trip predates the run; clamping to its start position"
+            );
+            return Ok(lane_start);
+        }
     }
 
     // The trip is answered in the axis MCU's clock domain — the domain
@@ -116,8 +117,9 @@ pub fn reconstruct_axis_position(
     match store.state_at_clock(axis_key, axis_clock, trip_host, None) {
         Ok(st) => Ok(st.position),
         Err(e @ crate::motion_history::HistoryError::BeforeRetainedWindow { .. })
-            if store.predates_all_recorded_motion(axis_key, axis_clock) =>
+            if lane_start.is_some() && store.predates_all_recorded_motion(axis_key, axis_clock) =>
         {
+            let lane_start = lane_start.expect("checked by the guard above");
             tracing::warn!(
                 subsystem = "homing",
                 event = "pre_motion_trip_clamped",
@@ -224,7 +226,7 @@ pub fn reconstruct_cartesian_position(
             router,
             history,
             window_start_host,
-            motor_start[usize::from(key.axis)],
+            motor_start.get(usize::from(key.axis)).copied(),
         )
     })
     .map(geometry::MachinePos)

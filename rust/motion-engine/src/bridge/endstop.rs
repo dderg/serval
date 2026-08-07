@@ -222,7 +222,7 @@ pub(super) fn dispatch_endstop_trip(
                                 &router_arc,
                                 &history_arc,
                                 run.window_start_host,
-                                motor_start[usize::from(key.axis)],
+                                motor_start.get(usize::from(key.axis)).copied(),
                             )
                         },
                         &query_step_count,
