@@ -53,14 +53,13 @@ endstop_event(struct timer *t)
 #else
         uint64_t now64 = runtime_widened_host_clock();
 #endif
+        uint32_t gap = obs_clock - e->last_clear_clock;
+        uint32_t mid32 = e->last_clear_clock + gap / 2;
+        int32_t mid_delta = (int32_t)(mid32 - (uint32_t)now64);
+        e->trip_clock = now64 + (int64_t)mid_delta;
         if (e->group && e->motor != ENDSTOP_UNBOUND) {
             stepper_suppress_set(e->motor, e->stepper);
             e->trip_clock = now64;
-        } else {
-            uint32_t gap = obs_clock - e->last_clear_clock;
-            uint32_t mid32 = e->last_clear_clock + gap / 2;
-            int32_t mid_delta = (int32_t)(mid32 - (uint32_t)now64);
-            e->trip_clock = now64 + (int64_t)mid_delta;
         }
         e->armed = 0;
         e->trip_pending = 1;

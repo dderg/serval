@@ -519,7 +519,6 @@ pub(super) fn handle_stepper_suppress(
         crate::rt_eprintln!("ec-rt: StepperSuppress — all slots released");
         ctx.server.respond(&stepper_suppress_response_frame(
             correlation_id,
-            0,
             monotonic_ns() as u32,
         ));
         return;
@@ -557,8 +556,11 @@ pub(super) fn handle_stepper_suppress(
     };
     ctx.server.respond(&stepper_suppress_response_frame(
         correlation_id,
-        result,
-        monotonic_ns() as u32,
+        if result == 0 {
+            monotonic_ns() as u32
+        } else {
+            0
+        },
     ));
 }
 const ERR_SEED_HOME_STREAMING: i32 = -826;

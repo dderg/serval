@@ -429,12 +429,8 @@ pub fn set_ff_lead_response_frame(cid: u32, result: i32) -> Vec<u8> {
     control_frame(MessageKind::SetFfLeadResponse, cid, &body)
 }
 
-pub fn stepper_suppress_response_frame(cid: u32, result: i32, effective_clock: u32) -> Vec<u8> {
-    let body = StepperSuppressResponse {
-        result,
-        effective_clock,
-    }
-    .encoded_to_vec();
+pub fn stepper_suppress_response_frame(cid: u32, effective_clock: u32) -> Vec<u8> {
+    let body = StepperSuppressResponse { effective_clock }.encoded_to_vec();
     control_frame(MessageKind::StepperSuppressResponse, cid, &body)
 }
 

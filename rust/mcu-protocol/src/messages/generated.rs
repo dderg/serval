@@ -1030,13 +1030,11 @@ impl Decode for StepperSuppress {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StepperSuppressResponse {
-    pub result: i32,
     pub effective_clock: u32,
 }
 
 impl Encode for StepperSuppressResponse {
     fn encode(&self, out: &mut Vec<u8>) {
-        put_i32(out, self.result);
         put_u32(out, self.effective_clock);
     }
 }
@@ -1044,7 +1042,6 @@ impl Encode for StepperSuppressResponse {
 impl Decode for StepperSuppressResponse {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
-            result: get_i32(c)?,
             effective_clock: get_u32(c)?,
         })
     }

@@ -590,7 +590,6 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
         version: 1,
         channel: "control",
         fields: &[
-            SchemaField { name: "result", ty: "i32" },
             SchemaField { name: "effective_clock", ty: "u32" },
         ],
     },

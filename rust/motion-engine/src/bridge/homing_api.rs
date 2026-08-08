@@ -582,12 +582,11 @@ impl PyMotionEngine {
                         .map_err(|e| format!("{e:?}"))
                 });
             match outcome {
-                Ok(resp) if resp.result == 0 => {}
-                Ok(resp) => {
+                Ok(resp) if resp.effective_clock != 0 => {}
+                Ok(_) => {
                     tracing::error!(
                         event = "suppress_clear_rejected",
                         mcu = mcu_id,
-                        result = resp.result,
                         "home_abort: suppress mask clear rejected — a stepper may \
                          remain frozen; a firmware restart is required"
                     );

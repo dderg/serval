@@ -490,10 +490,10 @@ fn suppress_call(
                 freeze.motor_mcu
             )
         })?;
-    if resp.result != 0 {
+    if resp.effective_clock == 0 {
         return Err(format!(
-            "StepperSuppress rejected by mcu {}: result={}",
-            freeze.motor_mcu, resp.result
+            "StepperSuppress rejected by mcu {}",
+            freeze.motor_mcu
         ));
     }
     Ok(resp.effective_clock)
