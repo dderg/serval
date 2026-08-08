@@ -199,7 +199,7 @@ stepper_suppress_update(uint8_t motor, uint8_t stepper, uint8_t suppress)
 {
     if (motor >= RUNTIME_MOTOR_COUNT
         || stepper >= RUNTIME_MAX_STEPPERS_PER_MOTOR)
-        shutdown("stepper suppress index out of range");
+        shutdown("suppress index out of range");
     uint8_t bit = (uint8_t)(1u << stepper);
     if (suppress)
         runtime_motor_suppress_mask[motor] |= bit;
@@ -212,7 +212,7 @@ uint8_t
 stepper_suppress_mask(uint8_t motor)
 {
     if (motor >= RUNTIME_MOTOR_COUNT)
-        shutdown("stepper suppress index out of range");
+        shutdown("suppress index out of range");
     return runtime_motor_suppress_mask[motor];
 }
 
@@ -529,8 +529,6 @@ runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps, uint8_t stepper_sel
 
     if (stepper_sel != 0 || runtime_motor_last_dir[motor_idx] != want_dir) {
         for (uint8_t j = j_begin; j < j_end; j++) {
-            if (suppress & (uint8_t)(1u << j))
-                continue;
             uint8_t bench_verified_not_want_dir_xor_invert
                 = (uint8_t)(!want_dir)
                 ^ runtime_motor_steppers[motor_idx][j].invert_dir;
