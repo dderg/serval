@@ -2,6 +2,7 @@ import pytest
 from fakes import FakeConfig, FakeConfigError, FakeMcu, FakePrinter
 
 from klippy import stepper
+from klippy.gcode import Coord
 
 
 class FakePinParams:
@@ -129,3 +130,64 @@ def test_homing_keys_on_motor_section_rejected():
             },
             [motor_section("motor a", position_min=0.0)],
         )
+
+
+def _x_rail():
+    return make_axis_rail(
+        {
+            "__name__": "axis x",
+            "position_min": 0.0,
+            "position_max": 300.0,
+            "position_endstop": 0.0,
+            "endstop_pin": "^PE5",
+        },
+        [motor_section("motor a")],
+    )
+
+
+def test_setup_itersolve_rejects_unknown_allocator():
+    with pytest.raises(stepper.error):
+        _x_rail().setup_itersolve("mystery_stepper_alloc", b"x")
+
+
+def test_setup_itersolve_rejects_unknown_axis():
+    rail = _x_rail()
+    with pytest.raises(stepper.error):
+        rail.setup_itersolve("cartesian_stepper_alloc", b"w")
+    with pytest.raises(stepper.error):
+        rail.setup_itersolve("corexy_stepper_alloc", b"q")
+
+
+def test_calc_position_from_coord_before_setup_fails_loud():
+    with pytest.raises(stepper.error):
+        _x_rail().calc_position_from_coord(Coord(1.0, 2.0, 3.0, 0.0))
+
+
+def test_cartesian_projector_maps_coord_to_axis():
+    rail = _x_rail()
+    rail.setup_itersolve("cartesian_stepper_alloc", b"x")
+    assert rail.calc_position_from_coord(Coord(4.0, 5.0, 6.0, 0.0)) == 4.0
+    motor = rail.get_steppers()[0]
+    assert motor.is_active_axis("x") is True
+    assert motor.is_active_axis("y") is False
+
+
+def test_corexy_projector_maps_xy_sum_and_difference():
+    rail = _x_rail()
+    rail.setup_itersolve("corexy_stepper_alloc", b"+")
+    assert rail.calc_position_from_coord(Coord(4.0, 5.0, 6.0, 0.0)) == 9.0
+    motor = rail.get_steppers()[0]
+    assert motor.is_active_axis("x") is True
+    assert motor.is_active_axis("y") is True
+    rail.setup_itersolve("corexy_stepper_alloc", b"-")
+    assert rail.calc_position_from_coord(Coord(4.0, 5.0, 6.0, 0.0)) == -1.0
+
+
+def test_corexy_projector_accepts_sequence_coords():
+    rail = _x_rail()
+    rail.setup_itersolve("corexy_stepper_alloc", b"+")
+    assert rail.calc_position_from_coord([4.0, 5.0]) == 9.0
+    assert rail.calc_position_from_coord((4.0, 5.0, 6.0)) == 9.0
+    rail.setup_itersolve("corexy_stepper_alloc", b"-")
+    assert rail.calc_position_from_coord([4.0, 5.0]) == -1.0
+    assert rail.calc_position_from_coord((4.0, 5.0, 6.0)) == -1.0

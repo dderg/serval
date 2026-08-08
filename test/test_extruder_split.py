@@ -1,6 +1,7 @@
 import pytest
 from fakes import (
     FakeCommandError,
+    FakeEngine,
     FakeGcode,
     FakeMotion,
     FakeToolhead,
@@ -62,7 +63,9 @@ class FakeHeaters:
 
 
 class FakePrinter(FakePrinterBase):
-    def __init__(self, axis_sections=None, can_extrude=True):
+    def __init__(
+        self, axis_sections=None, can_extrude=True, engine=None, mcu=None
+    ):
         if axis_sections is None:
             axis_sections = [
                 ("x", [], ["x"], []),
@@ -75,15 +78,23 @@ class FakePrinter(FakePrinterBase):
                 "heaters": FakeHeaters(can_extrude),
                 "gcode": FakeGcode(),
                 "toolhead": FakeToolhead(),
-                "motion": FakeMotion(axis_sections=axis_sections),
+                "motion": FakeMotion(
+                    axis_sections=axis_sections, engine=engine, mcu=mcu
+                ),
             }
         )
 
 
 def make_extruder_section(
-    name="extruder", axis="e", axis_sections=None, can_extrude=True, **options
+    name="extruder",
+    axis="e",
+    axis_sections=None,
+    can_extrude=True,
+    engine=None,
+    mcu=None,
+    **options,
 ):
-    printer = FakePrinter(axis_sections, can_extrude)
+    printer = FakePrinter(axis_sections, can_extrude, engine, mcu)
     base = {
         "nozzle_diameter": 0.4,
         "filament_diameter": 1.75,
@@ -137,6 +148,21 @@ def test_extruder_valid_follower_axis_loads():
     section = make_extruder_section(axis="e")
     pe = PrinterExtruder(section, 0)
     assert pe.axis_name == "e"
+
+
+def test_find_past_position_queries_engine_state_at_mcu_and_time():
+    mcu = object()
+    engine = FakeEngine(motion_state_at={"e": (12.5, 0.0, 0.0)})
+    pe = PrinterExtruder(make_extruder_section(engine=engine, mcu=mcu), 0)
+    assert pe.find_past_position(42.0) == 12.5
+    assert engine.calls == [("motion_state_at", mcu, None, 42.0)]
+
+
+def test_find_past_position_missing_e_history_fails_loudly():
+    engine = FakeEngine(motion_state_at={"x": (1.0, 0.0, 0.0)})
+    pe = PrinterExtruder(make_extruder_section(engine=engine), 0)
+    with pytest.raises(KeyError, match="'e'"):
+        pe.find_past_position(42.0)
 
 
 class FakeMove:

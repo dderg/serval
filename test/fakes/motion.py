@@ -162,6 +162,9 @@ class FakeEngine:
     def motion_lead_secs(self):
         return self._call("motion_lead_secs")
 
+    def motion_state_at(self, mcu, clock=None, print_time=None):
+        return self._call("motion_state_at", mcu, clock, print_time)
+
     def shutdown(self):
         return self._call("shutdown")
 

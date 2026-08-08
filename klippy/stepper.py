@@ -52,6 +52,7 @@ class MCU_stepper:
         self._req_step_both_edge = False
         self._active_callbacks = []
         self._engine_active_axes = b""
+        self._projector = None
         self._stepper_kinematics = None
         self._trapq = None
         self._tmc_current_helper = None
@@ -82,10 +83,32 @@ class MCU_stepper:
         self._req_step_both_edge = step_both_edge
 
     def setup_itersolve(self, alloc_func, *params):
-        for p in params:
-            if isinstance(p, (bytes, bytearray)):
-                self._engine_active_axes = bytes(p)
-                break
+        if len(params) != 1 or not isinstance(params[0], (bytes, bytearray)):
+            raise error(
+                "Stepper '%s' requires a single axis descriptor" % (self._name,)
+            )
+        axis = bytes(params[0])
+        if alloc_func == "cartesian_stepper_alloc":
+            if axis not in (b"x", b"y", b"z"):
+                raise error(
+                    "Stepper '%s' has unknown cartesian axis '%s'"
+                    % (self._name, axis.decode())
+                )
+            self._projector = ("cartesian", axis)
+            self._engine_active_axes = axis
+        elif alloc_func == "corexy_stepper_alloc":
+            if axis not in (b"+", b"-"):
+                raise error(
+                    "Stepper '%s' has unknown corexy axis '%s'"
+                    % (self._name, axis.decode())
+                )
+            self._projector = ("corexy", axis)
+            self._engine_active_axes = b"xy"
+        else:
+            raise error(
+                "Stepper '%s' has unknown itersolve allocator '%s'"
+                % (self._name, alloc_func)
+            )
 
     def _build_config(self):
         if self._step_pulse_duration is None:
@@ -140,10 +163,18 @@ class MCU_stepper:
         self._mcu.get_printer().send_event("stepper:set_dir_inverted", self)
 
     def calc_position_from_coord(self, coord):
-        raise error(
-            "MCU_stepper.calc_position_from_coord is host step generation; "
-            "motion runs on the engine runtime engine"
-        )
+        projector = self._projector
+        if projector is None:
+            raise error(
+                "Stepper '%s' has no itersolve projector; setup_itersolve"
+                " was never called" % (self._name,)
+            )
+        kind, axis = projector
+        if kind == "cartesian":
+            return coord[b"xyz".index(axis)]
+        if axis == b"+":
+            return coord[0] + coord[1]
+        return coord[0] - coord[1]
 
     def get_past_mcu_position(self, print_time):
         raise error(
@@ -210,7 +241,7 @@ def PrinterStepper(config, units_in_radians=False, name=None):
         units_in_radians,
     )
     mcu_stepper.phase_stepping = config.getboolean("phase_stepping", False)
-    for mname in ["stepper_enable", "force_move"]:
+    for mname in ["stepper_enable", "force_move", "motion_report"]:
         m = printer.load_object(config, mname)
         m.register_stepper(config, mcu_stepper)
     return mcu_stepper
