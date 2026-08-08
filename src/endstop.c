@@ -97,11 +97,11 @@ command_config_endstop(uint32_t *args)
     uint8_t motor_unbound = motor == ENDSTOP_UNBOUND;
     uint8_t stepper_unbound = stepper == ENDSTOP_UNBOUND;
     if (motor_unbound != stepper_unbound)
-        shutdown("endstop binding incomplete");
+        shutdown("bad endstop binding");
     if (!motor_unbound
         && (motor >= RUNTIME_MOTOR_COUNT
             || stepper >= RUNTIME_MAX_STEPPERS_PER_MOTOR))
-        shutdown("endstop binding out of range");
+        shutdown("bad endstop binding");
     e->motor = motor;
     e->stepper = stepper;
     e->group = args[7] ? 1 : 0;
@@ -132,9 +132,8 @@ command_query_endstop(uint32_t *args)
     }
     if (e->motor != ENDSTOP_UNBOUND
         && e->stepper >= runtime_motor_binding_count(e->motor))
-        shutdown("endstop stepper not configured");
+        shutdown("bad endstop binding");
     e->tripped = 0;
-    e->trip_clock = 0;
     e->armed = 1;
     e->last_clear_clock = timer_read_time();
     e->time.waketime = e->last_clear_clock + e->rest_ticks;
