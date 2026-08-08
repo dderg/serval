@@ -199,7 +199,7 @@ stepper_suppress_set(uint8_t motor, uint8_t stepper)
 {
     if (motor >= RUNTIME_MOTOR_COUNT
         || stepper >= RUNTIME_MAX_STEPPERS_PER_MOTOR)
-        shutdown("suppress index out of range");
+        shutdown("suppress index");
     runtime_motor_suppress_mask[motor] |= (uint8_t)(1u << stepper);
 }
 
@@ -208,7 +208,7 @@ uint8_t
 stepper_suppress_mask(uint8_t motor)
 {
     if (motor >= RUNTIME_MOTOR_COUNT)
-        shutdown("suppress index out of range");
+        shutdown("suppress index");
     return runtime_motor_suppress_mask[motor];
 }
 

@@ -485,7 +485,7 @@ handle_stepper_suppress(uint32_t correlation_id, const uint8_t *body,
                         uint16_t body_len)
 {
     if (body_len < 3)
-        shutdown("suppress body truncated");
+        shutdown("bad suppress body");
     if (body[0] == 0xFF && body[1] == 0xFF && !body[2])
         stepper_suppress_clear_all();
     else
