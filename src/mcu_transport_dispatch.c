@@ -35,8 +35,10 @@ static void handle_query_runtime_caps(uint32_t correlation_id, const uint8_t *bo
 static void handle_query_motor_state(uint32_t correlation_id, const uint8_t *body, uint16_t body_len);
 static void handle_stop(uint32_t correlation_id);
 static void handle_resume_stream(uint32_t correlation_id);
+#if CONFIG_MOTION_RUNTIME
 static void handle_stepper_suppress(uint32_t correlation_id,
-                                    const uint8_t *body, uint16_t body_len);
+                                     const uint8_t *body, uint16_t body_len);
+#endif
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <fcntl.h>
@@ -192,9 +194,11 @@ mcu_transport_dispatch_frame(uint8_t channel, const uint8_t *payload,
     case MCU_MSG_RESUME_STREAM:
         handle_resume_stream(correlation_id);
         return;
+#if CONFIG_MOTION_RUNTIME
     case MCU_MSG_STEPPER_SUPPRESS:
         handle_stepper_suppress(correlation_id, body, body_len);
         return;
+#endif
     default:
         return;
     }
@@ -461,6 +465,7 @@ send_resume_stream_response(uint32_t correlation_id, int32_t result)
     mcu_transport_send_frame(MCU_CHANNEL_CONTROL, payload, sizeof(payload));
 }
 
+#if CONFIG_MOTION_RUNTIME
 static void
 send_stepper_suppress_response(uint32_t correlation_id, int32_t result)
 {
@@ -481,18 +486,13 @@ handle_stepper_suppress(uint32_t correlation_id, const uint8_t *body,
 {
     if (body_len < 3)
         shutdown("stepper_suppress truncated body");
-    int32_t rc = 0;
-    if (body[0] == 0xFF && body[1] == 0xFF && !body[2]) {
+    if (body[0] == 0xFF && body[1] == 0xFF && !body[2])
         stepper_suppress_clear_all();
-    } else {
-#if CONFIG_MOTION_RUNTIME
+    else
         stepper_suppress_update(body[0], body[1], body[2] ? 1 : 0);
-#else
-        rc = RUNTIME_ERR_MOTION_RUNTIME_ABSENT;
-#endif
-    }
-    send_stepper_suppress_response(correlation_id, rc);
+    send_stepper_suppress_response(correlation_id, 0);
 }
+#endif
 
 static void
 handle_resume_stream(uint32_t correlation_id)
