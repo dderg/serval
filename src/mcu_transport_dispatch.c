@@ -468,16 +468,15 @@ send_resume_stream_response(uint32_t correlation_id, int32_t result)
 #if CONFIG_MOTION_RUNTIME
 static void
 send_stepper_suppress_response(uint32_t correlation_id, int32_t result,
-                               uint64_t effective_clock)
+                               uint32_t effective_clock)
 {
-    uint8_t payload[PER_MESSAGE_HEADER_LEN + 12];
+    uint8_t payload[PER_MESSAGE_HEADER_LEN + 8];
     encode_message_header(payload, MCU_MSG_STEPPER_SUPPRESS_RESPONSE,
                           MESSAGE_VERSION_DEFAULT, correlation_id);
     uint8_t *b = &payload[PER_MESSAGE_HEADER_LEN];
-    for (uint8_t i = 0; i < 4; i++)
-        b[i] = (uint8_t)((result >> (8 * i)) & 0xFF);
-    for (uint8_t i = 0; i < 8; i++)
-        b[4 + i] = (uint8_t)((effective_clock >> (8 * i)) & 0xFF);
+    __builtin_memcpy(b, &result, sizeof(result));
+    __builtin_memcpy(b + sizeof(result), &effective_clock,
+                     sizeof(effective_clock));
     mcu_transport_send_frame(MCU_CHANNEL_CONTROL, payload, sizeof(payload));
 }
 
@@ -492,7 +491,7 @@ handle_stepper_suppress(uint32_t correlation_id, const uint8_t *body,
     else
         stepper_suppress_set(body[0], body[1]);
     send_stepper_suppress_response(correlation_id, 0,
-                                   runtime_now_ticks(runtime_handle));
+                                   (uint32_t)runtime_now_ticks(runtime_handle));
 }
 #endif
 

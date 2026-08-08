@@ -174,7 +174,18 @@ pub(super) fn dispatch_endstop_trip(
                         })
                         .and_then(|t| suppress_call(t.as_ref(), freeze));
                     match outcome {
-                        Ok(clock) => suppression_clock = Some((freeze.motor_mcu, clock)),
+                        Ok(clock32) => {
+                            let reference = router_arc
+                                .lock_ok()
+                                .compute_ack_clock(crate::types::mcu_handle_from_raw(
+                                    freeze.motor_mcu,
+                                ))
+                                .unwrap_or(0);
+                            suppression_clock = Some((
+                                freeze.motor_mcu,
+                                crate::remote_trigger::relay_trip_clock(clock32, reference),
+                            ));
+                        }
                         Err(e) => {
                             tracing::error!(
                                 subsystem = "trip-relay",
@@ -451,7 +462,7 @@ pub(super) fn wait_for_pending_suppresses(
 fn suppress_call(
     transport: &dyn host_rt::mcu_call::McuCall,
     freeze: RemoteFreeze,
-) -> Result<u64, String> {
+) -> Result<u32, String> {
     use mcu_protocol::codec::{Decode as _, Encode as _};
     let mut body = Vec::with_capacity(3);
     mcu_protocol::messages::StepperSuppress {

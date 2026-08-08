@@ -292,7 +292,7 @@ fn main() {
                     server.respond(&stepper_suppress_response_frame(
                         correlation_id,
                         0,
-                        monotonic_ns(),
+                        monotonic_ns() as u32,
                     ));
                 }
                 Command::ClaimHandshake { .. } => {
