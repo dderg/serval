@@ -93,6 +93,7 @@ fn run_with(members: Vec<TripMember>) -> HomingRun {
             axis: 0,
         }],
         window_start_host: 0.0,
+        start_pos: geometry::MachinePos([0.0, 0.0, 0.0]),
         notify: tx,
     }
 }
