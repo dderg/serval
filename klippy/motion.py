@@ -16,6 +16,12 @@ from .kinematics import extruder
 
 REACTOR_YIELD_INTERVAL = 0.020
 
+_AXIS_UNIT_DELTAS = {
+    "x": (1.0, 0.0, 0.0),
+    "y": (0.0, 1.0, 0.0),
+    "z": (0.0, 0.0, 1.0),
+}
+
 
 class EngineWakeup:
     """Parks waiters on the engine's readiness fd. The fd becomes readable
@@ -250,6 +256,12 @@ class Motion:
 
     def get_kinematics(self):
         return self.kin
+
+    def get_active_rails_for_axis(self, axis):
+        if axis not in _AXIS_UNIT_DELTAS:
+            raise ValueError("Invalid axis %s" % (axis,))
+        dx, dy, dz = _AXIS_UNIT_DELTAS[axis]
+        return self.kin.active_rails(dx, dy, dz)
 
     def get_engine(self):
         return self.engine
