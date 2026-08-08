@@ -489,7 +489,7 @@ handle_stepper_suppress(uint32_t correlation_id, const uint8_t *body,
     if (body[0] == 0xFF && body[1] == 0xFF && !body[2])
         stepper_suppress_clear_all();
     else
-        stepper_suppress_update(body[0], body[1], body[2] ? 1 : 0);
+        stepper_suppress_set(body[0], body[1]);
     send_stepper_suppress_response(correlation_id, 0);
 }
 #endif

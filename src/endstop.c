@@ -136,8 +136,6 @@ command_query_endstop(uint32_t *args)
     e->rest_ticks = args[1];
     if (!e->rest_ticks) {
         e->armed = 0;
-        if (e->motor != ENDSTOP_UNBOUND)
-            stepper_suppress_update(e->motor, e->stepper, 0);
         return;
     }
     if (e->motor != ENDSTOP_UNBOUND
@@ -208,7 +206,7 @@ endstop_trip_task(void)
             continue;
         if (e->group) {
             if (e->motor != ENDSTOP_UNBOUND)
-                stepper_suppress_update(e->motor, e->stepper, 1);
+                stepper_suppress_set(e->motor, e->stepper);
         } else {
             needs_stop = 1;
         }
