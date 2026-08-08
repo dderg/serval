@@ -95,6 +95,10 @@ fn run_with(members: Vec<TripMember>) -> HomingRun {
         window_start_host: 0.0,
         start_pos: geometry::MachinePos([0.0, 0.0, 0.0]),
         notify: tx,
+        pending_suppresses: std::sync::Arc::new((
+            std::sync::Mutex::new(0),
+            std::sync::Condvar::new(),
+        )),
     }
 }
 
@@ -155,4 +159,20 @@ fn trip_identity_distinguishes_same_endstop_id_across_mcus() {
     };
     let mut run = run_with(vec![member(1, 0, None), member(2, 0, Some(freeze))]);
     assert_eq!(match_trip(&mut run, 2, 0), TripMatch::Partial(Some(freeze)));
+}
+
+#[test]
+fn terminal_trip_waits_for_partial_suppress_completion() {
+    let pending = std::sync::Arc::new((std::sync::Mutex::new(1usize), std::sync::Condvar::new()));
+    let worker_pending = std::sync::Arc::clone(&pending);
+    let worker = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let (count, ready) = &*worker_pending;
+        *count.lock_ok() = 0;
+        ready.notify_all();
+    });
+    let started = std::time::Instant::now();
+    super::endstop::wait_for_pending_suppresses(&pending).unwrap();
+    worker.join().unwrap();
+    assert!(started.elapsed() >= std::time::Duration::from_millis(20));
 }

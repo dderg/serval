@@ -523,7 +523,6 @@ class Homing:
                 % (section, lane_mcu.get_name())
             )
         endstops = []
-        group = len(motor_names) > 1
         for stepper_idx, motor_name in enumerate(motor_names):
             pin_params = ppins.parse_pin(
                 pins_by_motor[motor_name], can_invert=True, can_pullup=True
@@ -555,7 +554,7 @@ class Homing:
                         steppers[stepper_idx].get_mcu(),
                         motor_name,
                     ),
-                    group=group,
+                    group=True,
                 )
             )
         return endstop_entry(endstops, None, None)

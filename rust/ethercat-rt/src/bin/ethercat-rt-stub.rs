@@ -289,7 +289,11 @@ fn main() {
                             msg.motor, msg.stepper, msg.engage
                         );
                     }
-                    server.respond(&stepper_suppress_response_frame(correlation_id, 0));
+                    server.respond(&stepper_suppress_response_frame(
+                        correlation_id,
+                        0,
+                        monotonic_ns(),
+                    ));
                 }
                 Command::ClaimHandshake { .. } => {
                     eprintln!(

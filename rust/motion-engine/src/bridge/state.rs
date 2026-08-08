@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -149,6 +149,7 @@ pub(crate) struct HomingRun {
     pub(crate) notify: crossbeam_channel::Sender<
         Result<(geometry::MachinePos, geometry::MachinePos, u64), String>,
     >,
+    pub(crate) pending_suppresses: Arc<(Mutex<usize>, Condvar)>,
 }
 
 pub(crate) struct McuConnection {

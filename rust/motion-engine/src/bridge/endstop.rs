@@ -98,12 +98,18 @@ pub(super) fn dispatch_endstop_trip(
                 "endstop tripped ahead of its group — motor frozen, run continues"
             );
             let notify = run.notify.clone();
+            let remote = freeze_opt.filter(|f| f.motor_mcu != event_mcu);
+            let pending = Arc::clone(&run.pending_suppresses);
+            if remote.is_some() {
+                let (count, _) = &*pending;
+                *count.lock_ok() += 1;
+            }
             {
                 let mut guard = deps.homing.run.lock_ok();
                 *guard = Some(run);
             }
-            if let Some(freeze) = freeze_opt {
-                send_remote_freeze(deps, notify, freeze, event_mcu, endstop_id);
+            if let Some(freeze) = remote {
+                send_remote_freeze(deps, notify, pending, freeze, event_mcu, endstop_id);
             }
             return;
         }
@@ -151,33 +157,39 @@ pub(super) fn dispatch_endstop_trip(
             let stepper_mcu_ids: std::collections::HashSet<u32> =
                 run.all_axis_keys.iter().map(|k| k.mcu_id).collect();
 
-            // A bound final member is frozen the moment its switch trips —
-            // locally when switch and motor share the MCU, and via this
-            // suppress call when they don't. Sent before the Stop broadcast
-            // so the engage can never race past the ResumeStream that clears
-            // every mask at the end of the run.
-            if let Some(freeze) = final_freeze {
-                let outcome = transports
-                    .get(&freeze.motor_mcu)
-                    .ok_or_else(|| {
-                        format!("StepperSuppress: no transport for mcu {}", freeze.motor_mcu)
-                    })
-                    .and_then(|t| suppress_call(t.as_ref(), freeze));
-                if let Err(e) = outcome {
-                    tracing::error!(
-                        subsystem = "trip-relay",
-                        event = "cross_mcu_suppress_failed",
-                        mcu = event_mcu,
-                        endstop_id,
-                        motor_mcu = freeze.motor_mcu,
-                        error = %e,
-                        "final-trip stepper suppress failed — the homing move is aborted"
-                    );
-                    let _ = run.notify.send(Err(e));
-                    return;
-                }
+            let mut terminal_errors = Vec::new();
+            if let Err(e) = wait_for_pending_suppresses(&run.pending_suppresses) {
+                terminal_errors.push(e);
             }
 
+            let mut suppression_clock = None;
+            if let Some(freeze) = final_freeze {
+                if freeze.motor_mcu == event_mcu {
+                    suppression_clock = Some((event_mcu, trip_clock));
+                } else {
+                    let outcome = transports
+                        .get(&freeze.motor_mcu)
+                        .ok_or_else(|| {
+                            format!("StepperSuppress: no transport for mcu {}", freeze.motor_mcu)
+                        })
+                        .and_then(|t| suppress_call(t.as_ref(), freeze));
+                    match outcome {
+                        Ok(clock) => suppression_clock = Some((freeze.motor_mcu, clock)),
+                        Err(e) => {
+                            tracing::error!(
+                                subsystem = "trip-relay",
+                                event = "cross_mcu_suppress_failed",
+                                mcu = event_mcu,
+                                endstop_id,
+                                motor_mcu = freeze.motor_mcu,
+                                error = %e,
+                                "final-trip stepper suppress failed; stopping the homing cohort"
+                            );
+                            terminal_errors.push(e);
+                        }
+                    }
+                }
+            }
             if let Some(tx) = pump_tx_opt.as_ref() {
                 let _ = tx.send(crate::pump::PumpMsg::DripDisarm(run.cohort));
                 let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
@@ -189,10 +201,8 @@ pub(super) fn dispatch_endstop_trip(
                     .is_err()
                     || ack_rx.recv_timeout(Duration::from_secs(1)).is_err()
                 {
-                    let _ = run.notify.send(Err(
-                        "EndstopTrip: pump did not halt before endpoint Stop".into(),
-                    ));
-                    return;
+                    terminal_errors
+                        .push("EndstopTrip: pump did not halt before endpoint Stop".to_string());
                 }
             }
 
@@ -213,12 +223,17 @@ pub(super) fn dispatch_endstop_trip(
                 run.axis_key.mcu_id,
                 stop_call,
             ) {
-                Ok(c) => c,
+                Ok(c) => Some(c),
                 Err(e) => {
-                    let _ = run.notify.send(Err(e));
-                    return;
+                    terminal_errors.push(e);
+                    None
                 }
             };
+            if !terminal_errors.is_empty() {
+                let _ = run.notify.send(Err(terminal_errors.join("; ")));
+                return;
+            }
+            let discard_clock = discard_clock.expect("successful Stop has a discard clock");
 
             let axis_key = run.axis_key;
             let run_start = run.start_pos;
@@ -287,13 +302,9 @@ pub(super) fn dispatch_endstop_trip(
 
             let outcome = reconstruct_cartesian(event_mcu, trip_clock)
                 .and_then(|trip| {
-                    // A bound member's motor freezes at the trip itself (the
-                    // local fast path or the suppress sent above), so travel
-                    // commanded between the trip and the host Stop is phantom
-                    // — the final position anchors at the trip clock. An
-                    // unbound member really moved until the Stop gate.
-                    if final_freeze.is_some() {
-                        Ok((trip, trip, trip_clock))
+                    if let Some((freeze_mcu, freeze_clock)) = suppression_clock {
+                        reconstruct_cartesian(freeze_mcu, freeze_clock)
+                            .map(|final_pos| (trip, final_pos, trip_clock))
                     } else {
                         reconstruct_cartesian(axis_key.mcu_id, discard_clock)
                             .map(|final_pos| (trip, final_pos, trip_clock))
@@ -375,6 +386,7 @@ fn send_remote_freeze(
     notify: crossbeam_channel::Sender<
         Result<(geometry::MachinePos, geometry::MachinePos, u64), String>,
     >,
+    pending_suppresses: Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>,
     freeze: RemoteFreeze,
     event_mcu: u32,
     endstop_id: u8,
@@ -413,14 +425,33 @@ fn send_remote_freeze(
                 );
                 let _ = notify.send(Err(e));
             }
+            let (count, ready) = &*pending_suppresses;
+            let mut count = count.lock_ok();
+            *count -= 1;
+            ready.notify_all();
         })
         .expect("spawn homing-suppress");
 }
-
+pub(super) fn wait_for_pending_suppresses(
+    pending: &Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>,
+) -> Result<(), String> {
+    let (count, ready) = &**pending;
+    let count = count.lock_ok();
+    let (count, timeout) = ready
+        .wait_timeout_while(count, Duration::from_secs(4), |count| *count != 0)
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if timeout.timed_out() && *count != 0 {
+        return Err(format!(
+            "StepperSuppress: {} partial call(s) did not finish before terminal Stop",
+            *count
+        ));
+    }
+    Ok(())
+}
 fn suppress_call(
     transport: &dyn host_rt::mcu_call::McuCall,
     freeze: RemoteFreeze,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     use mcu_protocol::codec::{Decode as _, Encode as _};
     let mut body = Vec::with_capacity(3);
     mcu_protocol::messages::StepperSuppress {
@@ -454,5 +485,5 @@ fn suppress_call(
             freeze.motor_mcu, resp.result
         ));
     }
-    Ok(())
+    Ok(resp.effective_clock)
 }

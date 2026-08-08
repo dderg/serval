@@ -40,18 +40,6 @@ struct endstop {
 
 static struct task_wake endstop_trip_wake;
 
-// Timer context (IRQ): capture the trip clock here for accuracy, but defer
-// the transport write to endstop_trip_task — mcu_transport_send_frame uses
-// a shared tx_buf and the USB transmit cursor, neither safe against the
-// foreground from IRQ.
-//
-// The trip clock is the midpoint of the two observations that bracket the
-// edge: the pin was clear when last read and active now, so the trip lies
-// between those reads. Midpoint error is bounded by half the observation
-// gap and is unbiased — stamping the detection time instead would be late
-// by up to the full gap, always in the same direction, and the gap
-// stretches well past rest_ticks when timer dispatch runs late (host
-// preemption and pacing slack under the simulator's virtual clock).
 static uint_fast8_t
 endstop_event(struct timer *t)
 {
@@ -65,10 +53,15 @@ endstop_event(struct timer *t)
 #else
         uint64_t now64 = runtime_widened_host_clock();
 #endif
-        uint32_t gap = obs_clock - e->last_clear_clock;
-        uint32_t mid32 = e->last_clear_clock + gap / 2;
-        int32_t mid_delta = (int32_t)(mid32 - (uint32_t)now64);
-        e->trip_clock = now64 + (int64_t)mid_delta;
+        if (e->group && e->motor != ENDSTOP_UNBOUND) {
+            stepper_suppress_set(e->motor, e->stepper);
+            e->trip_clock = now64;
+        } else {
+            uint32_t gap = obs_clock - e->last_clear_clock;
+            uint32_t mid32 = e->last_clear_clock + gap / 2;
+            int32_t mid_delta = (int32_t)(mid32 - (uint32_t)now64);
+            e->trip_clock = now64 + (int64_t)mid_delta;
+        }
         e->armed = 0;
         e->trip_pending = 1;
         e->tripped = 1;
@@ -202,14 +195,8 @@ endstop_trip_task(void)
         return;
     uint8_t needs_stop = 0;
     foreach_oid(oid, e, command_config_endstop) {
-        if (!e->trip_processing)
-            continue;
-        if (e->group) {
-            if (e->motor != ENDSTOP_UNBOUND)
-                stepper_suppress_set(e->motor, e->stepper);
-        } else {
+        if (e->trip_processing && !e->group)
             needs_stop = 1;
-        }
     }
     if (needs_stop) {
         uint64_t discard_clock;

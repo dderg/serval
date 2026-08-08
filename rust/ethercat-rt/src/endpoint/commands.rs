@@ -517,8 +517,11 @@ pub(super) fn handle_stepper_suppress(
             *s = false;
         }
         crate::rt_eprintln!("ec-rt: StepperSuppress — all slots released");
-        ctx.server
-            .respond(&stepper_suppress_response_frame(correlation_id, 0));
+        ctx.server.respond(&stepper_suppress_response_frame(
+            correlation_id,
+            0,
+            monotonic_ns(),
+        ));
         return;
     }
     let slot = ctx
@@ -552,8 +555,11 @@ pub(super) fn handle_stepper_suppress(
             ERR_SUPPRESS_UNKNOWN_SLOT
         }
     };
-    ctx.server
-        .respond(&stepper_suppress_response_frame(correlation_id, result));
+    ctx.server.respond(&stepper_suppress_response_frame(
+        correlation_id,
+        result,
+        monotonic_ns(),
+    ));
 }
 const ERR_SEED_HOME_STREAMING: i32 = -826;
 const SEED_DRAIN_TIMEOUT_NS: i64 = 2_000_000_000;

@@ -14,6 +14,7 @@ struct AbortContext {
     all_axis_keys: Vec<crate::types::AxisKey>,
     cohort: u64,
     axis_key: crate::types::AxisKey,
+    pending_suppresses: Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>,
 }
 
 fn next_homing_cohort() -> u64 {
@@ -107,6 +108,7 @@ impl PyMotionEngine {
             window_start_host,
             start_pos: machine_start,
             notify: result_tx,
+            pending_suppresses: Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new())),
         });
 
         let planner_done_rx = planner
@@ -270,6 +272,10 @@ impl PyMotionEngine {
         };
 
         if !self.flush_aborted_cohort(py, ctx.all_axis_keys, ctx.cohort) {
+            self.finish_homing();
+            return None;
+        }
+        if super::endstop::wait_for_pending_suppresses(&ctx.pending_suppresses).is_err() {
             self.finish_homing();
             return None;
         }
@@ -461,6 +467,7 @@ impl PyMotionEngine {
             all_axis_keys: r.all_axis_keys.clone(),
             cohort: r.cohort,
             axis_key: r.axis_key,
+            pending_suppresses: Arc::clone(&r.pending_suppresses),
         })
     }
 
@@ -536,7 +543,13 @@ impl PyMotionEngine {
         let transports: Vec<(u32, Arc<dyn host_rt::mcu_call::McuCall>)> = {
             let mcus = self.mcus.lock_ok();
             mcus.iter()
-                .filter(|(_, conn)| conn.mcu_transport_supported)
+                .filter(|(_, conn)| {
+                    conn.endpoint_conn.is_some()
+                        || conn
+                            .runtime_caps
+                            .as_ref()
+                            .is_some_and(|caps| caps.total_piece_memory > 0)
+                })
                 .filter_map(|(&id, conn)| {
                     if let Some(io) = conn.host_io.as_ref() {
                         Some((id, Arc::clone(io) as Arc<dyn host_rt::mcu_call::McuCall>))

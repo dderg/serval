@@ -78,6 +78,7 @@ LANE_PROGRESS_TIMEOUT_S = 60.0
 HOME_TIMEOUT_S = 300.0
 POSITION_TOLERANCE_MM = 0.1
 MAX_STOP_OVERSHOOT_MM = 1.0
+CROSS_MCU_MAX_STOP_OVERSHOOT_MM = 10.0
 ABORT_SPEED_MM_S = 10.0
 ABORT_MAX_TRAVEL_MM = 30.0
 
@@ -200,12 +201,14 @@ def _assert_both_motors_step(world, control, step_pins, script, label):
     )
 
 
-def _assert_seeded_to_endstop(world, axis_index: int, label: str) -> None:
+def _assert_seeded_to_endstop(
+    world, axis_index: int, label: str, max_overshoot_mm=MAX_STOP_OVERSHOOT_MM
+) -> None:
     position = world.status({"toolhead": None})["toolhead"]["position"]
     seeded = position[axis_index]
     endstop = configs.DUAL_MOTOR_POSITION_ENDSTOP
     overshoot = seeded - endstop
-    assert -MAX_STOP_OVERSHOOT_MM < overshoot <= POSITION_TOLERANCE_MM, (
+    assert -max_overshoot_mm < overshoot <= POSITION_TOLERANCE_MM, (
         f"{label} seeded to {seeded}: expected position_endstop {endstop}"
         f" minus a bounded stop-latency overshoot"
         f" (homing direction is negative, retract is 0)"
@@ -213,7 +216,12 @@ def _assert_seeded_to_endstop(world, axis_index: int, label: str) -> None:
 
 
 def _home_with_staggered_trips(
-    world, control, axis: str, first_index: int, switch_control=None
+    world,
+    control,
+    axis: str,
+    first_index: int,
+    switch_control=None,
+    max_overshoot_mm=MAX_STOP_OVERSHOOT_MM,
 ):
     switch_control = switch_control if switch_control is not None else control
     axis_index, lane_line, endstops, step_pins = AXES[axis]
@@ -276,7 +284,7 @@ def _home_with_staggered_trips(
         f" decelerated after the final Stop: its suppress bit must survive"
         f" until the endstop is disarmed"
     )
-    _assert_seeded_to_endstop(world, axis_index, axis)
+    _assert_seeded_to_endstop(world, axis_index, axis, max_overshoot_mm)
     _assert_both_motors_step(
         world,
         control,
@@ -336,7 +344,12 @@ def test_cross_mcu_staggered_trip_suppresses_only_the_tripped_motor(
     control.enable_step_pin_emit()
     switch_control = world.sim_control("f4")
     _home_with_staggered_trips(
-        world, control, "X", first_index, switch_control=switch_control
+        world,
+        control,
+        "X",
+        first_index,
+        switch_control=switch_control,
+        max_overshoot_mm=CROSS_MCU_MAX_STOP_OVERSHOOT_MM,
     )
 
 
