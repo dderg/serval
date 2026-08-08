@@ -452,12 +452,11 @@ handle_stop(uint32_t correlation_id)
 }
 
 static void
-send_control_result_response(uint16_t message_kind, uint32_t correlation_id,
-                             int32_t result)
+send_resume_stream_response(uint32_t correlation_id, int32_t result)
 {
     uint8_t payload[PER_MESSAGE_HEADER_LEN + 4];
-    encode_message_header(payload, message_kind, MESSAGE_VERSION_DEFAULT,
-                          correlation_id);
+    encode_message_header(payload, MCU_MSG_RESUME_STREAM_RESPONSE,
+                          MESSAGE_VERSION_DEFAULT, correlation_id);
     uint8_t *b = &payload[PER_MESSAGE_HEADER_LEN];
     b[0] = (uint8_t)(result & 0xFF);
     b[1] = (uint8_t)((result >> 8) & 0xFF);
@@ -468,6 +467,20 @@ send_control_result_response(uint16_t message_kind, uint32_t correlation_id,
 
 #if CONFIG_MOTION_RUNTIME
 static void
+send_stepper_suppress_response(uint32_t correlation_id, int32_t result)
+{
+    uint8_t payload[PER_MESSAGE_HEADER_LEN + 4];
+    encode_message_header(payload, MCU_MSG_STEPPER_SUPPRESS_RESPONSE,
+                          MESSAGE_VERSION_DEFAULT, correlation_id);
+    uint8_t *b = &payload[PER_MESSAGE_HEADER_LEN];
+    b[0] = (uint8_t)(result & 0xFF);
+    b[1] = (uint8_t)((result >> 8) & 0xFF);
+    b[2] = (uint8_t)((result >> 16) & 0xFF);
+    b[3] = (uint8_t)((result >> 24) & 0xFF);
+    mcu_transport_send_frame(MCU_CHANNEL_CONTROL, payload, sizeof(payload));
+}
+
+static void
 handle_stepper_suppress(uint32_t correlation_id, const uint8_t *body,
                         uint16_t body_len)
 {
@@ -477,10 +490,10 @@ handle_stepper_suppress(uint32_t correlation_id, const uint8_t *body,
         stepper_suppress_clear_all();
     else
         stepper_suppress_update(body[0], body[1], body[2] ? 1 : 0);
-    send_control_result_response(MCU_MSG_STEPPER_SUPPRESS_RESPONSE,
-                                 correlation_id, 0);
+    send_stepper_suppress_response(correlation_id, 0);
 }
 #endif
+
 static void
 handle_resume_stream(uint32_t correlation_id)
 {
@@ -500,6 +513,5 @@ handle_resume_stream(uint32_t correlation_id)
 #else
     int32_t rc = RUNTIME_ERR_MOTION_RUNTIME_ABSENT;
 #endif
-    send_control_result_response(MCU_MSG_RESUME_STREAM_RESPONSE,
-                                 correlation_id, rc);
+    send_resume_stream_response(correlation_id, rc);
 }
