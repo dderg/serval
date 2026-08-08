@@ -87,6 +87,7 @@ fn run_endpoint(socket_path: String, faulted: Arc<AtomicBool>) {
                 Command::StopCapture { .. } => {}
                 Command::Stop { .. } => {}
                 Command::ResumeStream { .. } => {}
+                Command::StepperSuppress { .. } => {}
                 Command::SetDriveLimits { .. } | Command::RestoreDriveLimits { .. } => {}
                 Command::SeedServoHome { .. } => {}
                 Command::ArmSensorlessEndstop { .. } => {}

@@ -26,7 +26,7 @@ use ethercat_rt::wire::{
     set_diff_damper_response_frame, set_diff_trim_response_frame, set_drive_limits_response_frame,
     set_dynamics_model_response_frame, set_ff_lead_response_frame, set_strain_comp_response_frame,
     set_torque_response_frame, start_capture_response_frame, status_heartbeat_frame,
-    stop_capture_response_frame, stop_response_frame, Command,
+    stepper_suppress_response_frame, stop_capture_response_frame, stop_response_frame, Command,
 };
 use mcu_protocol::messages::{SdoReadResponse, SlaveState, StopCaptureResponse};
 
@@ -129,6 +129,7 @@ fn main() {
     let mut stored_limits: Option<(u32, u16)> = None;
     let mut sensorless = SensorlessBank::new(1);
     let mut stream_halt = StreamHalt::default();
+    let mut suppressed = false;
     let mut sim_torque: i16 = 0;
 
     let mut server = FrameServer::bind(&socket).expect("bind socket");
@@ -262,6 +263,7 @@ fn main() {
                 Command::ResumeStream { correlation_id } => match stream_halt.resume() {
                     Ok(()) => {
                         ring.reset();
+                        suppressed = false;
                         eprintln!("ec-rt-stub: ResumeStream — stream reopened");
                         server.respond(&resume_stream_response_frame(correlation_id, 0));
                     }
@@ -273,6 +275,25 @@ fn main() {
                         server.respond(&resume_stream_response_frame(correlation_id, code));
                     }
                 },
+                Command::StepperSuppress {
+                    correlation_id,
+                    msg,
+                } => {
+                    if msg.motor == 0xFF && msg.stepper == 0xFF && msg.engage == 0 {
+                        suppressed = false;
+                        eprintln!("ec-rt-stub: StepperSuppress — all slots released");
+                    } else {
+                        suppressed = msg.engage != 0;
+                        eprintln!(
+                            "ec-rt-stub: StepperSuppress axis={} stepper={} engage={}",
+                            msg.motor, msg.stepper, msg.engage
+                        );
+                    }
+                    server.respond(&stepper_suppress_response_frame(
+                        correlation_id,
+                        monotonic_ns() as u32,
+                    ));
+                }
                 Command::ClaimHandshake { .. } => {
                     eprintln!(
                         "ec-rt-stub: protocol violation: ClaimHandshake after handshake \
@@ -552,7 +573,12 @@ fn main() {
         }
 
         let sampled_pos = if gate.state() == TorqueState::Enabled {
-            ring.sample(now)
+            let s = ring.sample(now);
+            if suppressed {
+                None
+            } else {
+                s
+            }
         } else {
             None
         };

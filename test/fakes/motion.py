@@ -213,6 +213,9 @@ class FakeEngine:
     def disarm_remote_trigger(self, endstop_id):
         return self._call("disarm_remote_trigger", endstop_id)
 
+    def note_endstop_arm(self, endstop_mcu, endstop_id):
+        return self._call("note_endstop_arm", endstop_mcu, endstop_id)
+
     def frontier_print_time(self, mcu_handle):
         return self._call("frontier_print_time", mcu_handle)
 

@@ -16,7 +16,10 @@ use std::sync::{
     Arc,
 };
 
-use mcu_protocol::{messages::SetTorque, Decode, Encode};
+use mcu_protocol::{
+    messages::{SetTorque, StepperSuppress},
+    Decode, Encode,
+};
 use runtime::piece_ring::PieceEntry;
 
 use super::cycle::compute_motion_targets;
@@ -233,6 +236,7 @@ fn test_ctx_with_drive(name: &str, drive: impl DriveChain + 'static) -> Endpoint
         last_written_offset: vec![0; NUM_SLAVES],
         report_anchor: vec![None; NUM_SLAVES],
         last_streamed_target: vec![None; NUM_SLAVES],
+        suppressed: vec![false; NUM_SLAVES],
         last_sent_retired: 0,
         heartbeat_sent: false,
         gate,
@@ -1976,4 +1980,81 @@ fn pin_torque_vanishes_at_constant_accel_for_every_lead() {
             );
         }
     }
+}
+
+#[test]
+fn suppressed_slot_holds_target_while_peer_advances() {
+    let mut ctx = test_ctx("suppress-hold");
+
+    push_all(&mut ctx, piece(1_000_000, 0.01, &[2.5, 2.5]));
+    run_cycles(&mut ctx, 1_000_000, 5_000_000);
+    let mid = targets(&ctx);
+
+    super::commands::handle_stepper_suppress(
+        &mut ctx,
+        1,
+        StepperSuppress {
+            motor: 0,
+            stepper: 0,
+            engage: 1,
+        },
+    );
+    run_cycles(&mut ctx, 5_250_000, 11_000_000);
+    let end = targets(&ctx);
+    assert_eq!(
+        end[0], mid[0],
+        "suppressed slot must hold its last commanded target"
+    );
+    assert_ne!(end[1], mid[1], "peer slot must keep following the stream");
+
+    super::commands::handle_stepper_suppress(
+        &mut ctx,
+        2,
+        StepperSuppress {
+            motor: 0xFF,
+            stepper: 0xFF,
+            engage: 0,
+        },
+    );
+    assert!(
+        ctx.suppressed.iter().all(|&s| !s),
+        "clear-all must release every slot"
+    );
+    push_all(&mut ctx, piece(20_000_000, 0.01, &[9.0]));
+    run_cycles(&mut ctx, 20_000_000, 20_500_000);
+    assert_ne!(
+        targets(&ctx)[0],
+        end[0],
+        "released slot must follow the stream again"
+    );
+}
+
+#[test]
+fn suppress_maps_stepper_index_within_a_shared_axis() {
+    let mut ctx = test_ctx("suppress-pair");
+    ctx.slave_axes = vec![0, 0];
+    super::commands::handle_stepper_suppress(
+        &mut ctx,
+        1,
+        StepperSuppress {
+            motor: 0,
+            stepper: 1,
+            engage: 1,
+        },
+    );
+    assert_eq!(ctx.suppressed, vec![false, true]);
+    super::commands::handle_stepper_suppress(
+        &mut ctx,
+        2,
+        StepperSuppress {
+            motor: 0,
+            stepper: 2,
+            engage: 1,
+        },
+    );
+    assert_eq!(
+        ctx.suppressed,
+        vec![false, true],
+        "an unknown stepper index must be rejected, not clamped"
+    );
 }

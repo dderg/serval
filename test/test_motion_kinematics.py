@@ -38,7 +38,7 @@ class FakeRegistrar:
 
 
 class FakeHoming:
-    def resolve_endstops(self):
+    def resolve_endstops(self, kin):
         pass
 
 

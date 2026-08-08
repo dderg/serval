@@ -32,7 +32,7 @@ class _LinearKinematics:
         self.limits = [(1.0, -1.0)] * 3
         self._parked_dirty = [False, False, False]
 
-        self._printer.load_object(config, "homing").resolve_endstops()
+        self._printer.load_object(config, "homing").resolve_endstops(self)
         self._printer.register_event_handler(
             "stepper_enable:motor_off", self._handle_motor_off
         )

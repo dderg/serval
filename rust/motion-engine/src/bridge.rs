@@ -59,7 +59,7 @@ use runtime_caps::{
 };
 use state::{
     EthercatDrive, FlushState, FlushWait, HomingRun, HomingState, LatchedFaults, McuConnection,
-    PositionPoll, PumpHandles,
+    PositionPoll, PumpHandles, RemoteFreeze, TripMember,
 };
 
 fn abort_after_tracing_appender_drains() {
@@ -742,3 +742,6 @@ mod kinematics_calls_tests;
 
 #[cfg(test)]
 mod submit_nudge_validation_tests;
+
+#[cfg(test)]
+mod homing_state_tests;
