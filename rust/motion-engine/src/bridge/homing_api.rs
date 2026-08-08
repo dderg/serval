@@ -54,7 +54,8 @@ impl PyMotionEngine {
         // The counters are machine space, so the gcode rest point crosses
         // the warp here; the follower lanes take the same origin home_drip
         // restarts the stream odometer's follower coordinate at.
-        self.send_serial_position_seeds(self.machine_from_gcode(start_pos))?;
+        let machine_start = self.machine_from_gcode(start_pos);
+        self.send_serial_position_seeds(machine_start)?;
 
         let window_start_host = match self.homing.last_arm.lock_ok().take() {
             Some((arm_mcu, arm_id, arm_host)) if arm_mcu == endstop_mcu && arm_id == endstop_id => {
@@ -84,6 +85,7 @@ impl PyMotionEngine {
             axis_key,
             all_axis_keys: all_axis_keys.clone(),
             window_start_host,
+            start_pos: machine_start,
             notify: result_tx,
         });
 
