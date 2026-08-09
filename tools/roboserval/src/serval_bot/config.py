@@ -81,7 +81,7 @@ class BotSettings:
             omp_command=command,
             bind_host=os.environ.get("SERVAL_BOT_BIND_HOST", "0.0.0.0"),
             bind_port=_positive_int("SERVAL_BOT_BIND_PORT", 8080),
-            task_timeout_seconds=_positive_int("SERVAL_BOT_TASK_TIMEOUT_SECONDS", 1200),
+            task_timeout_seconds=_positive_int("SERVAL_BOT_TASK_TIMEOUT_SECONDS", 3600),
             task_hard_grace_seconds=_bounded_int("SERVAL_BOT_TASK_TIMEOUT_HARD_GRACE_SECONDS", 60, 1, 3600),
             max_concurrency=_bounded_int("SERVAL_BOT_MAX_CONCURRENCY", 1, 1, MAX_SLOTS),
             poll_interval_seconds=_positive_int("SERVAL_BOT_POLL_INTERVAL_SECONDS", 30),

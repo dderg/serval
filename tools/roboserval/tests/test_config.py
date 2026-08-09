@@ -17,6 +17,7 @@ def test_bot_settings_reads_inline_repository_policy(monkeypatch) -> None:
 
     policy = PolicySet.parse(settings.policy_toml).require("dderg/serval")
     assert policy.mode is Mode.TRIAGE
+    assert settings.task_timeout_seconds == 3600
 
 
 def _proxy_env(monkeypatch) -> None:
