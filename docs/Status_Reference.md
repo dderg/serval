@@ -693,7 +693,3 @@ object is available if z_tilt is defined):
 ## `motion_report`
 
 The optional `[motion_report]` object exposes live motion values for front ends. `live_position` is derived from actual motor/encoder counts where available, not the commanded G-code coordinate; `live_velocity` and `live_extruder_velocity` are corresponding measured/derived values. It also exposes stepper and trapq data used by the reporting integration. A missing or stale live value must not be treated as a position correction. Compare it with commanded position only when diagnosing, then home/recover safely if they disagree.
-
-## `post_processor <name>`
-
-Each configured `[post_processor <name>]` is a named status object. It reports its configured `type` and `params`. This is configuration/status visibility, not proof that already-buffered trajectory pieces use a later runtime update; `SET_POST_PROCESSOR` affects the next replan. See [Motion operations](Motion_Operations.md) and [Motion configuration reference](Config_Reference_Motion.md).
