@@ -204,6 +204,7 @@ def test_pull_request_review_uses_exact_revision_and_posts_comment(tmp_path: Pat
     assert prepared[0].head_sha == "b" * 40
     assert FakeRpcClient.command is not None
     assert "read,grep,glob,lsp,bash" in FakeRpcClient.command
+    assert "write" not in FakeRpcClient.command
     assert "Pull request: #373 Fix LEDs" in (FakeRpcClient.prompt or "")
     assert f"Review the exact diff {'a' * 40}...{'b' * 40}" in (FakeRpcClient.prompt or "")
     assert "Do not classify or label the pull request" in (FakeRpcClient.prompt or "")
@@ -256,6 +257,48 @@ def _comment_event(delivery_id: str, issue_number: int) -> Event:
         issue_number=issue_number,
         actor="dderg",
         payload={"issue": {"title": "restart", "body": "details"}, "comment": {"body": "triage"}},
+        state="running",
+        attempts=1,
+        error=None,
+    )
+
+
+def _sim_directive_event(delivery_id: str, issue_number: int) -> Event:
+    return Event(
+        delivery_id=delivery_id,
+        event_type="issue_comment.created",
+        repo="dderg/serval",
+        issue_number=issue_number,
+        actor="dderg",
+        payload={
+            "issue": {"title": "restart", "body": "details"},
+            "comment": {"body": "@roboserval Reproduce in the simulator"},
+        },
+        state="running",
+        attempts=1,
+        error=None,
+    )
+
+
+def _pr_sim_directive_event(delivery_id: str, issue_number: int) -> Event:
+    return Event(
+        delivery_id=delivery_id,
+        event_type="pull_request_review.requested",
+        repo="dderg/serval",
+        issue_number=issue_number,
+        actor="dderg",
+        payload={
+            "issue": {"title": "Fix LEDs", "body": ""},
+            "comment": {"body": "@roboserval Reproduce in the simulator"},
+            "pull_request": {
+                "number": issue_number,
+                "title": "Fix LEDs",
+                "body": "",
+                "html_url": f"https://github.com/dderg/serval/pull/{issue_number}",
+                "base": {"ref": "sota-motion", "sha": "a" * 40},
+                "head": {"ref": "fix-leds", "sha": "b" * 40},
+            },
+        },
         state="running",
         attempts=1,
         error=None,
@@ -427,17 +470,50 @@ def test_followup_tools_exclude_classify_and_include_simulator(tmp_path: Path) -
     database = Database(tmp_path / "bot.sqlite")
     try:
         event = _comment_event("delivery-tools-followup", 378)
-        names = [
-            tool.name
+        tools = [
+            tool
             for tool in TriageAgent._tools(_gateway(database, event), _shadow_policies().require("dderg/serval"), event)
         ]
+        names = [tool.name for tool in tools]
         assert "classify_issue" not in names
         assert "post_issue_comment" in names
         assert "search_issues" in names
         assert "dispatch_simulator" in names
         assert "get_simulator_result" in names
+        dispatch = next(tool for tool in tools if tool.name == "dispatch_simulator")
+        assert "farm/378-<slug>" in dispatch.description
+        assert "default branch" in dispatch.description
+        assert "[skip ci]" in dispatch.description
+        assert ".github/workflows/**" in dispatch.description
+        assert dispatch.parameters["required"] == ["ref"]
+        assert dispatch.parameters["properties"]["head_sha"]["pattern"] == "^[0-9a-f]{40}$"
+        result = next(tool for tool in tools if tool.name == "get_simulator_result")
+        assert "Poll" in result.description
+        assert "terminal" in result.description
     finally:
         database.close()
+
+
+def test_simulator_directive_prompt_requires_dispatch_result_comment(tmp_path: Path) -> None:
+    policy = _shadow_policies().require("dderg/serval")
+    event = _sim_directive_event("delivery-prompt-sim", 381)
+    prompt = TriageAgent._prompt(event, policy, "trunk", None)
+    assert "farm/381-<slug>" in prompt
+    assert "tools/sim/tests/test_*.py" in prompt
+    assert "dispatch_simulator" in prompt
+    assert "get_simulator_result" in prompt
+    assert "[skip ci]" in prompt
+    assert ".github/workflows/**" in prompt
+    assert "Never push with git" in prompt or "never push with git" in prompt
+    assert "control" in prompt and "reproduced or not-reproduced evidence" in prompt
+    assert "cites the exact run" in prompt
+
+
+def test_ordinary_followup_prompt_stays_comment_only(tmp_path: Path) -> None:
+    event = _comment_event("delivery-prompt-ordinary", 382)
+    prompt = TriageAgent._prompt(event, _shadow_policies().require("dderg/serval"), "trunk", None)
+    assert "dispatch_simulator" not in prompt
+    assert "exactly one comment completes this delivery" in prompt
 
 
 def test_pr_review_tools_exclude_classify(tmp_path: Path) -> None:
@@ -463,6 +539,125 @@ def test_pr_review_tools_exclude_classify(tmp_path: Path) -> None:
         assert "search_issues" in names
     finally:
         database.close()
+
+
+def _agent(settings: Any, policies: Any, actions: list[Any]) -> TriageAgent:
+    return TriageAgent(settings, policies, FakeDatabase(actions=actions), None)
+
+
+def test_simulator_directive_completion_requires_dispatch_result_comment(tmp_path: Path, monkeypatch: Any) -> None:
+    settings = _prepared_settings(tmp_path, monkeypatch)
+    policies = _shadow_policies()
+    event = _sim_directive_event("delivery-complete-sim", 383)
+    cases = [
+        ([_comment_action()], False),
+        (
+            [SimpleNamespace(kind="dispatch_sim:trunk:default", state="applied"), _comment_action()],
+            False,
+        ),
+        (
+            [
+                SimpleNamespace(kind="dispatch_sim:trunk:default", state="applied"),
+                SimpleNamespace(kind="sim_result:99", state="applied"),
+                _comment_action(),
+            ],
+            True,
+        ),
+        (
+            [
+                SimpleNamespace(kind="dispatch_sim:farm/383-restart:" + "a" * 40, state="proposed"),
+                SimpleNamespace(kind="sim_result:99", state="proposed"),
+                _comment_action(),
+            ],
+            True,
+        ),
+    ]
+    for actions, completed in cases:
+        agent = _agent(settings, policies, actions)
+        assert agent._completed(event, None) is completed
+
+
+def test_ordinary_followup_completion_requires_comment_only(tmp_path: Path, monkeypatch: Any) -> None:
+    settings = _prepared_settings(tmp_path, monkeypatch)
+    policies = _shadow_policies()
+    event = _comment_event("delivery-complete-ordinary", 384)
+    assert _agent(settings, policies, [_comment_action()])._completed(event, None) is True
+    assert (
+        _agent(
+            settings,
+            policies,
+            [SimpleNamespace(kind="dispatch_sim:trunk:default", state="applied")],
+        )._completed(event, None)
+        is False
+    )
+    opened = _opened_event("delivery-complete-opened", 385)
+    assert _agent(settings, policies, [_classify_action(), _comment_action()])._completed(opened, None) is True
+    assert _agent(settings, policies, [_comment_action()])._completed(opened, None) is False
+
+
+def test_simulator_directive_reminder_demands_dispatch_result_comment(tmp_path: Path, monkeypatch: Any) -> None:
+    agent = _agent(_prepared_settings(tmp_path, monkeypatch), _shadow_policies(), [])
+    event = _sim_directive_event("delivery-reminder-sim", 386)
+    reminder = agent._reminder_prompt(event, None)
+    assert "dispatch_simulator" in reminder
+    assert "get_simulator_result" in reminder
+    assert "farm/386-<slug>" in reminder
+    assert "[skip ci]" in reminder
+    assert "post_issue_comment" in reminder
+    incomplete = agent._incomplete_message(event, None)
+    assert "dispatch" in incomplete and "result" in incomplete and "comment" in incomplete
+
+
+def test_simulator_directive_command_enables_write_and_edit(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setattr(agent_module, "RpcClient", FakeRpcClient)
+    FakeRpcClient.command = None
+    actions = [
+        SimpleNamespace(kind="dispatch_sim:trunk:default", state="applied"),
+        SimpleNamespace(kind="sim_result:99", state="applied"),
+        _comment_action(),
+    ]
+    agent = _agent(_prepared_settings(tmp_path, monkeypatch), _shadow_policies(), actions)
+    answer = agent.run(_sim_directive_event("delivery-command-sim", 387))
+    assert answer == "done"
+    assert FakeRpcClient.command is not None
+    assert "read,grep,glob,lsp,bash,write,edit" in FakeRpcClient.command
+
+
+def test_ordinary_followup_command_stays_read_only(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setattr(agent_module, "RpcClient", FakeRpcClient)
+    FakeRpcClient.command = None
+    agent = _agent(_prepared_settings(tmp_path, monkeypatch), _shadow_policies(), [_comment_action()])
+    answer = agent.run(_comment_event("delivery-command-ordinary", 388))
+    assert answer == "done"
+    assert FakeRpcClient.command is not None
+    assert "read,grep,glob,lsp" in FakeRpcClient.command
+    assert "bash" not in FakeRpcClient.command
+    assert "write" not in FakeRpcClient.command
+
+
+def test_pr_review_sim_directive_prompt_is_reproduction_not_review(tmp_path: Path) -> None:
+    policy = _shadow_policies().require("dderg/serval")
+    event = _pr_sim_directive_event("delivery-pr-prompt-sim", 389)
+    pull_request = PullRequestContext.from_event(event)
+    assert pull_request is not None
+    prompt = TriageAgent._prompt(event, policy, "sota-motion", pull_request)
+    assert "A maintainer simulator directive" in prompt
+    assert "farm/389-<slug>" in prompt
+    assert "dispatch_simulator" in prompt
+    assert "Review the exact diff" not in prompt
+    assert "post exactly one PR conversation comment" not in prompt
+
+
+def test_pr_review_sim_directive_reminder_prioritizes_reproduction(tmp_path: Path, monkeypatch: Any) -> None:
+    agent = _agent(_prepared_settings(tmp_path, monkeypatch), _shadow_policies(), [])
+    event = _pr_sim_directive_event("delivery-pr-reminder-sim", 390)
+    pull_request = PullRequestContext.from_event(event)
+    assert pull_request is not None
+    reminder = agent._reminder_prompt(event, pull_request)
+    assert "dispatch_simulator" in reminder
+    assert "farm/390-<slug>" in reminder
+    incomplete = agent._incomplete_message(event, pull_request)
+    assert "simulator directive" in incomplete
 
 
 def test_host_tool_tracker_waits_for_inflight_executions() -> None:

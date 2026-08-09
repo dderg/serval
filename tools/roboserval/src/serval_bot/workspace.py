@@ -494,6 +494,96 @@ class CredentialedWorkspace:
             )
             return destination
 
+    def publish_issue(
+        self,
+        repo: str,
+        issue_number: int,
+        token: str,
+        *,
+        ref: str,
+        expected_sha: str,
+    ) -> None:
+        """Validate one issue workspace and push its exact HEAD to refs/heads/<ref>.
+
+        Everything runs as root under the sanitized environment with the
+        per-issue metadata recreated from the trusted pool first, so
+        agent-controlled aliases, hooks, and transports never survive into the
+        invocation. The workspace must be clean, checked out on the requested
+        farm branch at exactly expected_sha, its HEAD commit must carry the
+        [skip ci] marker (so ordinary push-triggered workflows stay off the
+        agent branch), and it must not change anything under .github/workflows/
+        relative to the resolved upstream default branch. The push sends that
+        exact commit, so a concurrent workspace change cannot redirect it.
+        """
+        if not _REPO_PATTERN.fullmatch(repo):
+            raise WorkspaceFailure(f"invalid repository: {repo}")
+        if type(issue_number) is not int or issue_number <= 0:
+            raise WorkspaceFailure(f"invalid issue number: {issue_number!r}")
+        if not _BRANCH_PATTERN.fullmatch(ref) or ".." in ref or ref.startswith("/"):
+            raise WorkspaceFailure(f"invalid publication ref: {ref}")
+        if not _SHA_PATTERN.fullmatch(expected_sha):
+            raise WorkspaceFailure(f"invalid expected sha: {expected_sha!r}")
+        repo_key = repo.replace("/", "--")
+        workspace = self.root / repo_key / str(issue_number)
+        if not (workspace / ".git").is_dir():
+            raise WorkspaceFailure(f"issue workspace not found: {workspace}")
+        _validate_repo_control(workspace, allow_slots=True)
+        environment = self._environment(token)
+        remote = self.remote_template.format(repo=repo)
+        with _repo_lock(self.root, repo_key):
+            pool = _ensure_pool(self.root, repo_key, remote, environment)
+            _reset_metadata(workspace, pool)
+            env = _git_environment(environment, workspace, pool, overrides=_issue_overrides(pool))
+            _run("git", "fetch", "origin", cwd=workspace, environment=env)
+            pool_env = _git_environment(environment, pool, overrides=_GIT_SAFE_OVERRIDES)
+            default_branch = _pool_default_branch(pool, pool_env)
+            status = _run("git", "status", "--porcelain", cwd=workspace, environment=env)
+            if status:
+                raise WorkspaceFailure(f"issue workspace is not clean:\n{status}")
+            branch = _run("git", "rev-parse", "--abbrev-ref", "HEAD", cwd=workspace, environment=env)
+            if branch != ref:
+                raise WorkspaceFailure(f"issue workspace is not on branch {ref}: {branch}")
+            head = _run("git", "rev-parse", "HEAD", cwd=workspace, environment=env)
+            if head != expected_sha:
+                raise WorkspaceFailure(f"issue workspace head mismatch: expected {expected_sha}, got {head}")
+            message = _run("git", "log", "-1", "--format=%B", cwd=workspace, environment=env)
+            if "[skip ci]" not in message:
+                raise WorkspaceFailure(
+                    "issue workspace HEAD commit does not carry the [skip ci] marker; reword the commit "
+                    "message so ordinary push-triggered workflows stay off the agent branch"
+                )
+            changed = _run(
+                "git",
+                "diff",
+                "--name-status",
+                "-M",
+                f"refs/remotes/origin/{default_branch}",
+                "HEAD",
+                cwd=workspace,
+                environment=env,
+            )
+            for line in changed.splitlines():
+                paths = line.split("\t")[1:]
+                if any(path.startswith(".github/workflows/") for path in paths):
+                    raise WorkspaceFailure(
+                        f"issue workspace modifies dispatched workflows under .github/workflows/:\n{changed}"
+                    )
+            push_env = _git_environment(
+                environment,
+                workspace,
+                pool,
+                overrides=(*_issue_overrides(pool), ("remote.origin.url", remote)),
+            )
+            _run(
+                "git",
+                "push",
+                "--no-verify",
+                "origin",
+                f"{head}:refs/heads/{ref}",
+                cwd=workspace,
+                environment=push_env,
+            )
+
     @staticmethod
     def _environment(token: str) -> dict[str, str]:
         credentials = base64.b64encode(f"x-access-token:{token}".encode()).decode()

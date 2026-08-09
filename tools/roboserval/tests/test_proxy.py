@@ -18,6 +18,7 @@ from serval_bot.proxy import (
     WorkspaceRequest,
     create_proxy_app,
 )
+from serval_bot.workspace import WorkspaceFailure
 
 
 class StaticTokenProvider:
@@ -117,7 +118,12 @@ _ENDPOINT_PAYLOADS = {
     "/github/comment": {"repo": "dderg/serval", "issue_number": 7, "body": "hello"},
     "/github/search-issues": {"repo": "dderg/serval", "query": "is:open"},
     "/github/poll-events": {"repo": "dderg/serval", "since": "2026-08-09T12:00:00Z", "bot_login": "roboserval"},
-    "/github/dispatch-sim": {"repo": "dderg/serval", "workflow": "ci-sim-e2e.yaml", "ref": "sota-motion"},
+    "/github/dispatch-sim": {
+        "repo": "dderg/serval",
+        "issue_number": 7,
+        "workflow": "ci-sim-e2e.yaml",
+        "ref": "sota-motion",
+    },
     "/github/sim-result": {"repo": "dderg/serval", "run_id": 42},
 }
 
@@ -330,10 +336,12 @@ class _DispatchHarness:
     def __init__(
         self,
         *,
+        ref: str = "trunk",
         head_sha: str = "b" * 40,
         poll_attempts: int = 30,
         poll_interval: float = 1.0,
     ) -> None:
+        self.ref = ref
         self.head_sha = head_sha
         self.poll_attempts = poll_attempts
         self.poll_interval = poll_interval
@@ -367,7 +375,7 @@ class _DispatchHarness:
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if path.endswith("/git/ref/heads/trunk"):
+        if path.endswith(f"/git/ref/heads/{self.ref}"):
             self.sequence.append("resolve")
             return httpx.Response(
                 200,
@@ -413,6 +421,7 @@ async def test_dispatch_sim_create_dispatch_poll_delete_ordering() -> None:
         result = await api.dispatch_sim(
             DispatchRequest(
                 repo="dderg/serval",
+                issue_number=7,
                 workflow="ci-sim-e2e.yaml",
                 ref="trunk",
                 head_sha="b" * 40,
@@ -438,7 +447,9 @@ async def test_dispatch_sim_fails_on_ambiguous_new_runs() -> None:
     api = harness.api()
     try:
         with pytest.raises(GitHubFailure, match="ambiguous"):
-            await api.dispatch_sim(DispatchRequest(repo="dderg/serval", workflow="ci-sim-e2e.yaml", ref="trunk"))
+            await api.dispatch_sim(
+                DispatchRequest(repo="dderg/serval", issue_number=7, workflow="ci-sim-e2e.yaml", ref="trunk")
+            )
     finally:
         await api.close()
     assert "delete" in harness.sequence
@@ -451,7 +462,9 @@ async def test_dispatch_sim_polls_only_the_temp_ref() -> None:
     api = harness.api()
     try:
         with pytest.raises(GitHubFailure, match="did not appear"):
-            await api.dispatch_sim(DispatchRequest(repo="dderg/serval", workflow="ci-sim-e2e.yaml", ref="trunk"))
+            await api.dispatch_sim(
+                DispatchRequest(repo="dderg/serval", issue_number=7, workflow="ci-sim-e2e.yaml", ref="trunk")
+            )
     finally:
         await api.close()
     # Every runs request was scoped to the temporary branch (asserted inside
@@ -467,7 +480,9 @@ async def test_dispatch_sim_verifies_supplied_head_sha() -> None:
     try:
         with pytest.raises(GitHubFailure, match="moved"):
             await api.dispatch_sim(
-                DispatchRequest(repo="dderg/serval", workflow="ci-sim-e2e.yaml", ref="trunk", head_sha="c" * 40)
+                DispatchRequest(
+                    repo="dderg/serval", issue_number=7, workflow="ci-sim-e2e.yaml", ref="trunk", head_sha="c" * 40
+                )
             )
     finally:
         await api.close()
@@ -481,7 +496,9 @@ async def test_dispatch_sim_deletes_temp_ref_on_dispatch_error() -> None:
     api = harness.api()
     try:
         with pytest.raises(GitHubFailure, match="dispatch failed"):
-            await api.dispatch_sim(DispatchRequest(repo="dderg/serval", workflow="ci-sim-e2e.yaml", ref="trunk"))
+            await api.dispatch_sim(
+                DispatchRequest(repo="dderg/serval", issue_number=7, workflow="ci-sim-e2e.yaml", ref="trunk")
+            )
     finally:
         await api.close()
     assert harness.sequence == ["resolve", "create", "runs", "dispatch", "delete"]
@@ -495,9 +512,153 @@ async def test_dispatch_sim_delete_failure_is_loud() -> None:
     api = harness.api()
     try:
         with pytest.raises(GitHubFailure, match="DELETE"):
-            await api.dispatch_sim(DispatchRequest(repo="dderg/serval", workflow="ci-sim-e2e.yaml", ref="trunk"))
+            await api.dispatch_sim(
+                DispatchRequest(repo="dderg/serval", issue_number=7, workflow="ci-sim-e2e.yaml", ref="trunk")
+            )
     finally:
         await api.close()
+
+
+def _fake_publish(harness: _DispatchHarness, *, sha: str = "b" * 40, error: str | None = None):
+    def publish(self, repo, issue_number, token, *, ref, expected_sha) -> None:
+        harness.sequence.append("publish")
+        assert repo == "dderg/serval"
+        assert issue_number == 7
+        assert token == "installation-token"
+        assert ref == "farm/7-calib"
+        assert expected_sha == sha
+        if error is not None:
+            raise WorkspaceFailure(error)
+
+    return publish
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sim_farm_publishes_before_correlating(monkeypatch: pytest.MonkeyPatch) -> None:
+    harness = _DispatchHarness(ref="farm/7-calib")
+    harness.runs_pages = [[], [], [harness.run(77)]]
+    monkeypatch.setattr("serval_bot.proxy.CredentialedWorkspace.publish_issue", _fake_publish(harness))
+    api = harness.api()
+    try:
+        result = await api.dispatch_sim(
+            DispatchRequest(
+                repo="dderg/serval",
+                issue_number=7,
+                workflow="ci-sim-e2e.yaml",
+                ref="farm/7-calib",
+                head_sha="b" * 40,
+            )
+        )
+    finally:
+        await api.close()
+    # Publish the exact issue-workspace commit, resolve it, create the
+    # temporary branch at that commit, dispatch on it, poll it, then delete it.
+    assert harness.sequence == ["publish", "resolve", "create", "runs", "dispatch", "runs", "runs", "delete"]
+    assert harness.dispatched_on == harness.temp_ref
+    assert result["run_id"] == 77
+    assert result["requested_ref"] == "farm/7-calib"
+    assert result["head_sha"] == "b" * 40
+    assert result["ref"] == harness.temp_ref
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sim_farm_requires_head_sha() -> None:
+    harness = _DispatchHarness(ref="farm/7-calib")
+    api = harness.api()
+    try:
+        with pytest.raises(GitHubFailure, match="head_sha"):
+            await api.dispatch_sim(
+                DispatchRequest(repo="dderg/serval", issue_number=7, workflow="ci-sim-e2e.yaml", ref="farm/7-calib")
+            )
+    finally:
+        await api.close()
+    assert harness.sequence == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sim_rejects_farm_ref_scoped_to_another_issue() -> None:
+    harness = _DispatchHarness(ref="farm/5-calib")
+    api = harness.api()
+    try:
+        with pytest.raises(GitHubFailure, match="scoped to issue 7"):
+            await api.dispatch_sim(
+                DispatchRequest(
+                    repo="dderg/serval",
+                    issue_number=7,
+                    workflow="ci-sim-e2e.yaml",
+                    ref="farm/5-calib",
+                    head_sha="b" * 40,
+                )
+            )
+    finally:
+        await api.close()
+    assert harness.sequence == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ref", ["farm/7-", "farm/7-bad ref"])
+async def test_dispatch_sim_rejects_malformed_farm_refs(ref: str) -> None:
+    harness = _DispatchHarness(ref=ref)
+    api = harness.api()
+    try:
+        with pytest.raises(GitHubFailure):
+            await api.dispatch_sim(
+                DispatchRequest(
+                    repo="dderg/serval",
+                    issue_number=7,
+                    workflow="ci-sim-e2e.yaml",
+                    ref=ref,
+                    head_sha="b" * 40,
+                )
+            )
+    finally:
+        await api.close()
+    assert harness.sequence == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sim_farm_verifies_published_head_sha(monkeypatch: pytest.MonkeyPatch) -> None:
+    harness = _DispatchHarness(ref="farm/7-calib")
+    monkeypatch.setattr("serval_bot.proxy.CredentialedWorkspace.publish_issue", _fake_publish(harness, sha="c" * 40))
+    api = harness.api()
+    try:
+        with pytest.raises(GitHubFailure, match="moved"):
+            await api.dispatch_sim(
+                DispatchRequest(
+                    repo="dderg/serval",
+                    issue_number=7,
+                    workflow="ci-sim-e2e.yaml",
+                    ref="farm/7-calib",
+                    head_sha="c" * 40,
+                )
+            )
+    finally:
+        await api.close()
+    assert harness.sequence == ["publish", "resolve"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sim_publication_failure_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:
+    harness = _DispatchHarness(ref="farm/7-calib")
+    monkeypatch.setattr(
+        "serval_bot.proxy.CredentialedWorkspace.publish_issue",
+        _fake_publish(harness, error="issue workspace is not clean:\n?? scratch.txt"),
+    )
+    api = harness.api()
+    try:
+        with pytest.raises(GitHubFailure, match="publication failed"):
+            await api.dispatch_sim(
+                DispatchRequest(
+                    repo="dderg/serval",
+                    issue_number=7,
+                    workflow="ci-sim-e2e.yaml",
+                    ref="farm/7-calib",
+                    head_sha="b" * 40,
+                )
+            )
+    finally:
+        await api.close()
+    assert harness.sequence == ["publish"]
 
 
 @pytest.mark.asyncio

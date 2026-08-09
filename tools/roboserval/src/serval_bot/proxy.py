@@ -21,10 +21,11 @@ from serval_bot.auth import SIGNATURE_HEADER, TIMESTAMP_HEADER, verify
 from serval_bot.config import ProxySettings
 from serval_bot.policy import Mode, PolicyError
 from serval_bot.token_auth import StaticTokenProvider
-from serval_bot.workspace import CredentialedWorkspace
+from serval_bot.workspace import CredentialedWorkspace, WorkspaceFailure
 
 _REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _WORKFLOW_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+\.ya?ml$")
+_FARM_SLUG_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 class GitHubFailure(RuntimeError):
@@ -58,6 +59,7 @@ class SearchRequest(RepositoryRequest):
 
 
 class DispatchRequest(RepositoryRequest):
+    issue_number: int = Field(gt=0)
     workflow: str
     ref: str = Field(min_length=1, max_length=256)
     head_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
@@ -285,16 +287,50 @@ class GitHubApi:
     async def _delete_temp_ref(self, repo: str, ref: str) -> None:
         await self.request("DELETE", f"/repos/{repo}/git/refs/heads/{ref}")
 
+    async def _publish_farm_ref(self, request: DispatchRequest) -> None:
+        """Publish the exact issue-workspace commit to the requested farm ref.
+
+        Farm refs are scoped to the issue the request derives from: the agent
+        never supplies a workspace path or authority, only the branch name and
+        the commit it claims to have made. The workspace is located and
+        validated by the credentialed root, and its exact HEAD is pushed before
+        any dispatch happens; any validation or publication failure aborts the
+        dispatch loudly.
+        """
+        if request.head_sha is None:
+            raise GitHubFailure("farm ref dispatch requires the workspace head_sha")
+        prefix = f"farm/{request.issue_number}-"
+        if not request.ref.startswith(prefix) or len(request.ref) == len(prefix):
+            raise GitHubFailure(f"farm ref must be scoped to issue {request.issue_number}: {request.ref}")
+        if not _FARM_SLUG_PATTERN.fullmatch(request.ref.removeprefix(prefix)):
+            raise GitHubFailure(f"invalid farm ref: {request.ref}")
+        token = await self._tokens.token()
+        try:
+            await asyncio.to_thread(
+                self._workspace.publish_issue,
+                request.repo,
+                request.issue_number,
+                token,
+                ref=request.ref,
+                expected_sha=request.head_sha,
+            )
+        except WorkspaceFailure as exc:
+            raise GitHubFailure(f"issue workspace publication failed: {exc}") from exc
+
     async def dispatch_sim(self, request: DispatchRequest) -> dict[str, Any]:
         key = (request.repo, request.workflow, request.ref)
         lock = self._dispatch_locks.setdefault(key, asyncio.Lock())
         async with lock:
-            # Authoritative correlation: resolve the requested ref to its exact
-            # sha (verifying a caller-supplied head_sha), dispatch the existing
-            # workflow on a fresh random temporary branch at that sha, and poll
-            # only that unique branch. An external or manual run on any other
-            # ref can never qualify. The temporary ref is deleted in a strict
-            # finally path, and a failed delete fails loudly.
+            # Authoritative correlation: farm refs are first published from the
+            # exact validated issue-workspace commit; the requested ref is then
+            # resolved to its exact sha (verifying a caller-supplied head_sha),
+            # the existing workflow is dispatched on a fresh random temporary
+            # branch at that sha, and only that unique branch is polled. An
+            # external or manual run on any other ref can never qualify. The
+            # temporary ref is deleted in a strict finally path, and a failed
+            # delete fails loudly.
+            if request.ref.startswith("farm/"):
+                await self._publish_farm_ref(request)
             sha = await self._resolve_ref_sha(request.repo, request.ref)
             if request.head_sha is not None and sha != request.head_sha:
                 raise GitHubFailure(f"ref heads/{request.ref} moved: expected {request.head_sha}, found {sha}")

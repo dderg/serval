@@ -15,6 +15,8 @@ class FakeProxy:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
         self.runs: dict[int, dict] = {}
+        self.ref_runs: dict[tuple, int] = {}
+        self.sim_status = "completed"
 
     def add_labels(self, repo: str, issue_number: int, labels: list[str]) -> dict:
         self.calls.append(("labels", repo, issue_number, labels))
@@ -28,25 +30,34 @@ class FakeProxy:
         self.calls.append(("search", repo, query))
         return {"items": []}
 
-    def dispatch_sim(self, repo: str, workflow: str, ref: str, head_sha: str | None) -> dict:
-        self.calls.append(("dispatch", repo, workflow, ref, head_sha))
-        run = {
-            "run_id": 99,
-            "url": "https://example.test/run/99",
-            "status": "queued",
-            "conclusion": None,
-            "head_sha": head_sha,
-            "ref": f"serval-dispatch-{len(self.runs) + 1}",
-            "workflow": f".github/workflows/{workflow}",
-            "requested_ref": ref,
-        }
-        self.runs[99] = run
-        return dict(run)
+    def dispatch_sim(self, repo: str, issue_number: int, workflow: str, ref: str, head_sha: str | None) -> dict:
+        self.calls.append(("dispatch", repo, issue_number, workflow, ref, head_sha))
+        key = (ref, head_sha)
+        run_id = self.ref_runs.get(key)
+        if run_id is None:
+            run_id = 99 + len(self.runs)
+            self.ref_runs[key] = run_id
+            self.runs[run_id] = {
+                "run_id": run_id,
+                "url": f"https://example.test/run/{run_id}",
+                "status": "queued",
+                "conclusion": None,
+                "head_sha": head_sha,
+                "ref": f"serval-dispatch-{run_id}",
+                "workflow": f".github/workflows/{workflow}",
+                "requested_ref": ref,
+            }
+        return dict(self.runs[run_id])
 
     def sim_result(self, repo: str, run_id: int) -> dict:
         self.calls.append(("sim_result", repo, run_id))
         run = self.runs[run_id]
-        return {**run, "status": "completed", "conclusion": "success", "jobs": []}
+        return {
+            **run,
+            "status": self.sim_status,
+            "conclusion": "success" if self.sim_status == "completed" else None,
+            "jobs": [],
+        }
 
 
 def _event(
@@ -88,6 +99,10 @@ def _gateway(
     proxy: FakeProxy | None = None,
 ) -> ActionGateway:
     return ActionGateway(database, event, _policy(mode), "trunk", proxy)
+
+
+_SIM_SHA = "a" * 40
+_SIM_FARM_REF = "farm/7-restart"
 
 
 def test_shadow_mode_records_without_github_side_effect(tmp_path: Path) -> None:
@@ -229,7 +244,7 @@ def test_issue370_wording_dispatches_in_triage(tmp_path: Path) -> None:
         assert result["state"] == "applied"
         assert result["result"]["run_id"] == 99
         assert result["result"]["requested_ref"] == "trunk"
-        assert proxy.calls == [("dispatch", "dderg/serval", "ci-sim-e2e.yaml", "trunk", None)]
+        assert proxy.calls == [("dispatch", "dderg/serval", 7, "ci-sim-e2e.yaml", "trunk", None)]
         runs = database.workflow_runs_for_issue(event.repo, event.issue_number)
         assert [(run["run_id"], run["ref"], run["workflow"]) for run in runs] == [
             (99, proxy.runs[99]["ref"], "ci-sim-e2e.yaml")
@@ -246,9 +261,9 @@ def test_sim_dispatch_in_maintainer_mode_applies_and_persists(tmp_path: Path) ->
             database,
             _event(actor="dderg", event_type="issue_comment.created", comment="@roboserval Reproduce in the simulator"),
         )
-        result = json.loads(_gateway(database, event, Mode.MAINTAINER, proxy).dispatch_sim("farm/calib-1", None))
+        result = json.loads(_gateway(database, event, Mode.MAINTAINER, proxy).dispatch_sim(_SIM_FARM_REF, _SIM_SHA))
         assert result["state"] == "applied"
-        assert proxy.calls == [("dispatch", "dderg/serval", "ci-sim-e2e.yaml", "farm/calib-1", None)]
+        assert proxy.calls == [("dispatch", "dderg/serval", 7, "ci-sim-e2e.yaml", _SIM_FARM_REF, _SIM_SHA)]
         runs = database.workflow_runs_for_issue(event.repo, event.issue_number)
         assert [(run["run_id"], run["ref"]) for run in runs] == [(99, proxy.runs[99]["ref"])]
     finally:
@@ -267,7 +282,7 @@ def test_repeated_dispatch_denied_before_proxy(tmp_path: Path) -> None:
         gateway.dispatch_sim("trunk", None)
         with pytest.raises(ActionDenied, match="already recorded"):
             gateway.dispatch_sim("trunk", None)
-        assert proxy.calls == [("dispatch", "dderg/serval", "ci-sim-e2e.yaml", "trunk", None)]
+        assert proxy.calls == [("dispatch", "dderg/serval", 7, "ci-sim-e2e.yaml", "trunk", None)]
     finally:
         database.close()
 
@@ -309,11 +324,11 @@ def test_concurrent_same_ref_dispatch_serializes_and_claims_once(tmp_path: Path)
     released = threading.Event()
     original_dispatch = proxy.dispatch_sim
 
-    def blocking_dispatch(repo: str, workflow: str, ref: str, head_sha: str | None) -> dict:
+    def blocking_dispatch(repo: str, issue_number: int, workflow: str, ref: str, head_sha: str | None) -> dict:
         with entered_guard:
             entered.append(ref)
         released.wait(10)
-        return original_dispatch(repo, workflow, ref, head_sha)
+        return original_dispatch(repo, issue_number, workflow, ref, head_sha)
 
     proxy.dispatch_sim = blocking_dispatch
     first = _claimed(
@@ -385,7 +400,7 @@ def test_sim_result_applies_in_triage_and_persists(tmp_path: Path) -> None:
         assert result["state"] == "applied"
         assert result["result"]["conclusion"] == "success"
         assert proxy.calls == [
-            ("dispatch", "dderg/serval", "ci-sim-e2e.yaml", "trunk", None),
+            ("dispatch", "dderg/serval", 7, "ci-sim-e2e.yaml", "trunk", None),
             ("sim_result", "dderg/serval", 99),
         ]
         runs = database.workflow_runs_for_issue(event.repo, event.issue_number)
@@ -398,7 +413,7 @@ def test_sim_result_applies_in_triage_and_persists(tmp_path: Path) -> None:
         database.close()
 
 
-def test_repeated_sim_result_denied_before_proxy(tmp_path: Path) -> None:
+def test_repeated_sim_result_polls_refresh_the_run_scoped_record(tmp_path: Path) -> None:
     database = Database(tmp_path / "bot.sqlite")
     proxy = FakeProxy()
     try:
@@ -408,13 +423,21 @@ def test_repeated_sim_result_denied_before_proxy(tmp_path: Path) -> None:
         )
         gateway = _gateway(database, event, Mode.TRIAGE, proxy)
         gateway.dispatch_sim("trunk", None)
-        gateway.sim_result(99)
-        with pytest.raises(ActionDenied, match="already recorded"):
-            gateway.sim_result(99)
-        assert proxy.calls == [
-            ("dispatch", "dderg/serval", "ci-sim-e2e.yaml", "trunk", None),
+        first = json.loads(gateway.sim_result(99))
+        assert first["state"] == "applied"
+        second = json.loads(gateway.sim_result(99))
+        assert second["state"] == "applied"
+        assert [call for call in proxy.calls if call[0] == "sim_result"] == [
+            ("sim_result", "dderg/serval", 99),
             ("sim_result", "dderg/serval", 99),
         ]
+        reads = [
+            action
+            for action in database.actions_for_delivery(event.delivery_id)
+            if action.kind.startswith("sim_result")
+        ]
+        assert [action.kind for action in reads] == ["sim_result:99"]
+        assert all(action.state == "applied" for action in reads)
     finally:
         database.close()
 
@@ -432,8 +455,7 @@ def test_sim_result_requires_recorded_dispatch_before_proxy(tmp_path: Path) -> N
             gateway.sim_result(99)
         assert proxy.calls == []
         assert database.workflow_runs_for_issue(event.repo, event.issue_number) == []
-        actions = database.actions_for_issue(event.repo, event.issue_number)
-        assert [(action.kind, action.state) for action in actions] == [("sim_result", "failed")]
+        assert database.actions_for_issue(event.repo, event.issue_number) == []
     finally:
         database.close()
 
@@ -464,7 +486,7 @@ def test_sim_result_denied_for_run_of_another_issue(tmp_path: Path) -> None:
         _gateway(database, event, Mode.TRIAGE, proxy).dispatch_sim("trunk", None)
         with pytest.raises(ActionDenied, match="no recorded dispatch"):
             _gateway(database, other, Mode.TRIAGE, proxy).sim_result(99)
-        assert proxy.calls == [("dispatch", "dderg/serval", "ci-sim-e2e.yaml", "trunk", None)]
+        assert proxy.calls == [("dispatch", "dderg/serval", 7, "ci-sim-e2e.yaml", "trunk", None)]
     finally:
         database.close()
 
@@ -493,7 +515,7 @@ def test_sim_result_rejects_identity_mismatch(tmp_path: Path) -> None:
             with pytest.raises(ActionDenied, match=message):
                 gateway.sim_result(99)
             actions = database.actions_for_issue(event.repo, event.issue_number)
-            assert actions[-1].kind == "sim_result"
+            assert actions[-1].kind == "sim_result:99"
             assert actions[-1].state == "failed"
             runs = database.workflow_runs_for_issue(event.repo, event.issue_number)
             assert [(run["run_id"], run["status"]) for run in runs] == [(99, "queued")]
@@ -526,10 +548,14 @@ def test_sim_result_shadow_records_proposal_only(tmp_path: Path) -> None:
             database,
             _event(actor="dderg", event_type="issue_comment.created", comment="@roboserval Reproduce in the simulator"),
         )
-        result = json.loads(_gateway(database, event, Mode.SHADOW, proxy).sim_result(99))
+        gateway = _gateway(database, event, Mode.SHADOW, proxy)
+        gateway.dispatch_sim("trunk", None)
+        result = json.loads(gateway.sim_result(99))
         assert result["state"] == "proposed"
         assert proxy.calls == []
         assert database.workflow_runs_for_issue(event.repo, event.issue_number) == []
+        kinds = [action.kind for action in database.actions_for_issue(event.repo, event.issue_number)]
+        assert kinds == ["dispatch_sim:trunk:default", "sim_result:99"]
     finally:
         database.close()
 
@@ -559,9 +585,10 @@ def test_maintainer_dispatch_is_recorded(tmp_path: Path) -> None:
             database,
             _event(actor="dderg", event_type="issue_comment.created", comment="@roboserval Reproduce in the simulator"),
         )
-        result = json.loads(_gateway(database, event, Mode.MAINTAINER, proxy).dispatch_sim("trunk", None))
+        result = json.loads(_gateway(database, event, Mode.MAINTAINER, proxy).dispatch_sim("trunk", _SIM_SHA))
         assert result["state"] == "applied"
         assert result["result"]["run_id"] == 99
+        assert proxy.calls == [("dispatch", "dderg/serval", 7, "ci-sim-e2e.yaml", "trunk", _SIM_SHA)]
     finally:
         database.close()
 
@@ -580,15 +607,140 @@ def test_autonomous_opened_event_cannot_dispatch(tmp_path: Path) -> None:
         database.close()
 
 
-def test_maintainer_cannot_dispatch_obsolete_default_branch(tmp_path: Path) -> None:
+def test_maintainer_cannot_dispatch_unrelated_ref(tmp_path: Path) -> None:
     database = Database(tmp_path / "bot.sqlite")
+    proxy = FakeProxy()
     try:
         event = _claimed(
             database,
             _event(actor="dderg", event_type="issue_comment.created", comment="@roboserval Reproduce in the simulator"),
         )
-        with pytest.raises(ActionDenied, match="outside the bot namespace"):
-            _gateway(database, event, Mode.MAINTAINER, FakeProxy()).dispatch_sim("sota-motion", None)
+        gateway = _gateway(database, event, Mode.MAINTAINER, proxy)
+        for ref in ("sota-motion", "farm/calib-1", "farm/8-restart", "farm/7-", "farm/7", "farm/7-restart/extra"):
+            with pytest.raises(ActionDenied, match="must be the default branch"):
+                gateway.dispatch_sim(ref, _SIM_SHA)
+        with pytest.raises(ActionDenied, match="farm/7-<slug>"):
+            gateway.dispatch_sim("farm/8-restart", _SIM_SHA)
+        assert proxy.calls == []
+        assert database.actions_for_issue(event.repo, event.issue_number) == []
+    finally:
+        database.close()
+
+
+def test_farm_ref_requires_exact_head_sha(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    proxy = FakeProxy()
+    try:
+        event = _claimed(
+            database,
+            _event(actor="dderg", event_type="issue_comment.created", comment="@roboserval Reproduce in the simulator"),
+        )
+        gateway = _gateway(database, event, Mode.MAINTAINER, proxy)
+        with pytest.raises(ActionDenied, match="40-character HEAD SHA"):
+            gateway.dispatch_sim(_SIM_FARM_REF, None)
+        for sha in ("", "a" * 39, "A" * 40, "a" * 41, 123):
+            with pytest.raises(ActionDenied, match="invalid simulator HEAD SHA"):
+                gateway.dispatch_sim(_SIM_FARM_REF, sha)
+        with pytest.raises(ActionDenied, match="invalid simulator HEAD SHA"):
+            gateway.dispatch_sim("trunk", "short")
+        assert proxy.calls == []
+        assert database.actions_for_issue(event.repo, event.issue_number) == []
+    finally:
+        database.close()
+
+
+def test_simulator_directive_allows_distinct_dispatches_and_denies_duplicates(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    proxy = FakeProxy()
+    try:
+        event = _claimed(
+            database,
+            _event(actor="dderg", event_type="issue_comment.created", comment="@roboserval Reproduce in the simulator"),
+        )
+        gateway = _gateway(database, event, Mode.TRIAGE, proxy)
+        control = json.loads(gateway.dispatch_sim("trunk", None))
+        repro = json.loads(gateway.dispatch_sim(_SIM_FARM_REF, _SIM_SHA))
+        assert control["state"] == "applied" and control["result"]["run_id"] == 99
+        assert repro["state"] == "applied" and repro["result"]["run_id"] == 100
+        with pytest.raises(ActionDenied, match="already recorded"):
+            gateway.dispatch_sim("trunk", None)
+        with pytest.raises(ActionDenied, match="already recorded"):
+            gateway.dispatch_sim(_SIM_FARM_REF, _SIM_SHA)
+        assert proxy.calls == [
+            ("dispatch", "dderg/serval", 7, "ci-sim-e2e.yaml", "trunk", None),
+            ("dispatch", "dderg/serval", 7, "ci-sim-e2e.yaml", _SIM_FARM_REF, _SIM_SHA),
+        ]
+    finally:
+        database.close()
+
+
+def test_simulator_directive_comment_requires_dispatch_result_and_completed_run(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    proxy = FakeProxy()
+    try:
+        event = _claimed(
+            database,
+            _event(actor="dderg", event_type="issue_comment.created", comment="@roboserval Reproduce in the simulator"),
+        )
+        gateway = _gateway(database, event, Mode.TRIAGE, proxy)
+        with pytest.raises(ActionDenied, match="dispatch_sim then sim_result"):
+            gateway.post_comment("done")
+        gateway.dispatch_sim("trunk", None)
+        with pytest.raises(ActionDenied, match="dispatch_sim then sim_result"):
+            gateway.post_comment("done")
+        proxy.sim_status = "in_progress"
+        gateway.sim_result(99)
+        with pytest.raises(ActionDenied, match="has not completed"):
+            gateway.post_comment("done")
+        proxy.sim_status = "completed"
+        gateway.sim_result(99)
+        result = json.loads(gateway.post_comment("done"))
+        assert result["state"] == "applied"
+        assert [call[0] for call in proxy.calls] == ["dispatch", "sim_result", "sim_result", "comment"]
+    finally:
+        database.close()
+
+
+def test_pr_review_sim_directive_requires_dispatch_result_and_completed_run(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    proxy = FakeProxy()
+    try:
+        event = _claimed(
+            database,
+            _event(
+                actor="dderg",
+                event_type="pull_request_review.requested",
+                comment="@roboserval Reproduce in the simulator",
+            ),
+        )
+        gateway = _gateway(database, event, Mode.TRIAGE, proxy)
+        with pytest.raises(ActionDenied, match="dispatch_sim then sim_result"):
+            gateway.post_comment("done")
+        gateway.dispatch_sim("trunk", None)
+        proxy.sim_status = "in_progress"
+        gateway.sim_result(99)
+        with pytest.raises(ActionDenied, match="has not completed"):
+            gateway.post_comment("done")
+        proxy.sim_status = "completed"
+        gateway.sim_result(99)
+        result = json.loads(gateway.post_comment("done"))
+        assert result["state"] == "applied"
+        assert [call[0] for call in proxy.calls] == ["dispatch", "sim_result", "sim_result", "comment"]
+    finally:
+        database.close()
+
+
+def test_ordinary_followup_comment_does_not_require_simulator_dispatch(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    proxy = FakeProxy()
+    try:
+        event = _claimed(
+            database,
+            _event(actor="dderg", event_type="issue_comment.created", comment="@roboserval triage this"),
+        )
+        result = json.loads(_gateway(database, event, Mode.TRIAGE, proxy).post_comment("ok"))
+        assert result["state"] == "applied"
+        assert proxy.calls == [("comment", "dderg/serval", 7, "ok")]
     finally:
         database.close()
 

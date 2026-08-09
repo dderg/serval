@@ -32,7 +32,9 @@ def _make_remote(tmp_path: Path) -> tuple[Path, Path]:
     _git(seed, "config", "user.name", "Test")
     _git(seed, "config", "user.email", "test@example.com")
     (seed / "state.txt").write_text("one\n")
-    _git(seed, "add", "state.txt")
+    (seed / ".github/workflows").mkdir(parents=True)
+    (seed / ".github/workflows" / "ci-sim-e2e.yaml").write_text("name: sim-e2e\non: workflow_dispatch\n")
+    _git(seed, "add", ".")
     _git(seed, "commit", "-m", "initial")
     _git(seed, "remote", "add", "origin", str(remote))
     _git(seed, "push", "origin", "main")
@@ -372,3 +374,176 @@ def test_workspace_adopt_namespace_dir_adopts_foreign_owner_and_rejects_symlink(
     os.symlink(namespace, link)
     with pytest.raises(WorkspaceFailure, match="not a directory"):
         workspace_module._adopt_namespace_dir(link)
+
+
+def _farm_branch(workspace: Path, message: str = "reproduce issue 7 [skip ci]") -> str:
+    _git(workspace, "checkout", "-b", "farm/7-calib")
+    (workspace / "repro.py").write_text("print('repro')\n")
+    _git(workspace, "add", "repro.py")
+    _git(workspace, "commit", "-m", message)
+    return _git_out(workspace, "rev-parse", "HEAD")
+
+
+def _remote_has(remote: Path, ref: str) -> bool:
+    result = subprocess.run(("git", "-C", str(remote), "show-ref", "--verify", ref), capture_output=True, text=True)
+    return result.returncode == 0
+
+
+def test_workspace_publish_pushes_exact_commit_to_farm_ref(tmp_path: Path) -> None:
+    remote, _seed = _make_remote(tmp_path)
+    manager = _manager(tmp_path, remote)
+    workspace = manager.sync("owner/repo", "main", "secret-token", issue_number=7)
+    head = _farm_branch(workspace)
+
+    manager.publish_issue("owner/repo", 7, "secret-token", ref="farm/7-calib", expected_sha=head)
+    # idempotent: the same exact commit is published again without error
+    manager.publish_issue("owner/repo", 7, "secret-token", ref="farm/7-calib", expected_sha=head)
+
+    assert _git_out(remote, "rev-parse", "refs/heads/farm/7-calib") == head
+    assert _git_out(remote, "rev-parse", "refs/heads/main") != head
+    assert "secret-token" not in (workspace / ".git" / "config").read_text()
+    assert "secret-token" not in (_pool_for(tmp_path) / "config").read_text()
+
+
+def test_workspace_publish_rejects_dirty_workspace(tmp_path: Path) -> None:
+    remote, _seed = _make_remote(tmp_path)
+    manager = _manager(tmp_path, remote)
+    workspace = manager.sync("owner/repo", "main", "secret-token", issue_number=7)
+    head = _farm_branch(workspace)
+    (workspace / "scratch.txt").write_text("uncommitted\n")
+
+    with pytest.raises(WorkspaceFailure, match="not clean"):
+        manager.publish_issue("owner/repo", 7, "secret-token", ref="farm/7-calib", expected_sha=head)
+    assert not _remote_has(remote, "refs/heads/farm/7-calib")
+
+
+def test_workspace_publish_rejects_head_sha_mismatch(tmp_path: Path) -> None:
+    remote, _seed = _make_remote(tmp_path)
+    manager = _manager(tmp_path, remote)
+    workspace = manager.sync("owner/repo", "main", "secret-token", issue_number=7)
+    _farm_branch(workspace)
+
+    with pytest.raises(WorkspaceFailure, match="head mismatch"):
+        manager.publish_issue("owner/repo", 7, "secret-token", ref="farm/7-calib", expected_sha="0" * 40)
+    assert not _remote_has(remote, "refs/heads/farm/7-calib")
+    assert _git_out(remote, "rev-parse", "refs/heads/main") == _git_out(
+        workspace, "rev-parse", "refs/remotes/origin/main"
+    )
+
+
+def test_workspace_publish_rejects_wrong_branch(tmp_path: Path) -> None:
+    remote, _seed = _make_remote(tmp_path)
+    manager = _manager(tmp_path, remote)
+    workspace = manager.sync("owner/repo", "main", "secret-token", issue_number=7)
+    head = _git_out(workspace, "rev-parse", "HEAD")
+
+    # a freshly synced workspace is detached, so it can never satisfy the branch check
+    with pytest.raises(WorkspaceFailure, match="not on branch farm/7-calib"):
+        manager.publish_issue("owner/repo", 7, "secret-token", ref="farm/7-calib", expected_sha=head)
+
+    _git(workspace, "checkout", "-b", "farm/7-other")
+    with pytest.raises(WorkspaceFailure, match="not on branch farm/7-calib"):
+        manager.publish_issue("owner/repo", 7, "secret-token", ref="farm/7-calib", expected_sha=head)
+    assert not _remote_has(remote, "refs/heads/farm/7-calib")
+
+
+def test_workspace_publish_requires_skip_ci_commit_message(tmp_path: Path) -> None:
+    remote, _seed = _make_remote(tmp_path)
+    manager = _manager(tmp_path, remote)
+    workspace = manager.sync("owner/repo", "main", "secret-token", issue_number=7)
+    head = _farm_branch(workspace, message="reproduce issue 7")
+
+    with pytest.raises(WorkspaceFailure, match="skip ci"):
+        manager.publish_issue("owner/repo", 7, "secret-token", ref="farm/7-calib", expected_sha=head)
+    assert not _remote_has(remote, "refs/heads/farm/7-calib")
+
+
+def test_workspace_publish_rejects_workflow_changes(tmp_path: Path) -> None:
+    remote, _seed = _make_remote(tmp_path)
+    manager = _manager(tmp_path, remote)
+    workspace = manager.sync("owner/repo", "main", "secret-token", issue_number=7)
+    _git(workspace, "checkout", "-b", "farm/7-calib")
+    workflow = workspace / ".github/workflows/ci-sim-e2e.yaml"
+    workflow.write_text(workflow.read_text() + "permissions: write-all\n")
+    _git(workspace, "add", ".github/workflows/ci-sim-e2e.yaml")
+    _git(workspace, "commit", "-m", "tweak workflow [skip ci]")
+    head = _git_out(workspace, "rev-parse", "HEAD")
+
+    with pytest.raises(WorkspaceFailure, match="workflows"):
+        manager.publish_issue("owner/repo", 7, "secret-token", ref="farm/7-calib", expected_sha=head)
+    assert not _remote_has(remote, "refs/heads/farm/7-calib")
+
+
+def test_workspace_publish_allows_non_workflow_reproduction_files(tmp_path: Path) -> None:
+    remote, _seed = _make_remote(tmp_path)
+    manager = _manager(tmp_path, remote)
+    workspace = manager.sync("owner/repo", "main", "secret-token", issue_number=7)
+    _git(workspace, "checkout", "-b", "farm/7-calib")
+    (workspace / "tools/sim/tests").mkdir(parents=True)
+    (workspace / "tools/sim/tests" / "test_repro.py").write_text("def test_repro():\n    assert True\n")
+    (workspace / "notes").mkdir()
+    (workspace / "notes" / "repro.md").write_text("steps\n")
+    (workspace / "state.txt").write_text("repro state\n")
+    _git(workspace, "add", ".")
+    _git(workspace, "commit", "-m", "reproduce issue 7 [skip ci]")
+    head = _git_out(workspace, "rev-parse", "HEAD")
+
+    manager.publish_issue("owner/repo", 7, "secret-token", ref="farm/7-calib", expected_sha=head)
+
+    assert _git_out(remote, "rev-parse", "refs/heads/farm/7-calib") == head
+
+
+def test_workspace_publish_rejects_missing_workspace(tmp_path: Path) -> None:
+    remote, _seed = _make_remote(tmp_path)
+    manager = _manager(tmp_path, remote)
+    with pytest.raises(WorkspaceFailure, match="workspace not found"):
+        manager.publish_issue("owner/repo", 7, "secret-token", ref="farm/7-calib", expected_sha="a" * 40)
+
+
+def test_workspace_publish_rejects_invalid_inputs(tmp_path: Path) -> None:
+    remote, _seed = _make_remote(tmp_path)
+    manager = _manager(tmp_path, remote)
+    workspace = manager.sync("owner/repo", "main", "secret-token", issue_number=7)
+    head = _git_out(workspace, "rev-parse", "HEAD")
+    with pytest.raises(WorkspaceFailure, match="invalid publication ref"):
+        manager.publish_issue("owner/repo", 7, "secret-token", ref="../escape", expected_sha=head)
+    with pytest.raises(WorkspaceFailure, match="invalid expected sha"):
+        manager.publish_issue("owner/repo", 7, "secret-token", ref="farm/7-calib", expected_sha="not-a-sha")
+    with pytest.raises(WorkspaceFailure, match="invalid repository"):
+        manager.publish_issue("not-a-repo", 7, "secret-token", ref="farm/7-calib", expected_sha=head)
+
+
+def test_workspace_publish_fails_loudly_on_unsafe_metadata(tmp_path: Path) -> None:
+    remote, _seed = _make_remote(tmp_path)
+    manager = _manager(tmp_path, remote)
+    workspace = manager.sync("owner/repo", "main", "secret-token", issue_number=7)
+    (workspace / ".git").chmod(0o777)
+    with pytest.raises(WorkspaceFailure, match="unsafe repository control data"):
+        manager.publish_issue("owner/repo", 7, "secret-token", ref="farm/7-calib", expected_sha="a" * 40)
+
+
+def test_workspace_publish_rewrites_agent_controlled_metadata_before_push(tmp_path: Path) -> None:
+    remote, _seed = _make_remote(tmp_path)
+    manager = _manager(tmp_path, remote)
+    workspace = manager.sync("owner/repo", "main", "secret-token", issue_number=7)
+    head = _farm_branch(workspace)
+
+    hook_marker = tmp_path / "hook-ran"
+    alias_marker = tmp_path / "alias-ran"
+    hooks = workspace / ".git" / "hooks"
+    hooks.mkdir()
+    (hooks / "pre-push").write_text(f"#!/bin/sh\ntouch {hook_marker}\n")
+    (hooks / "pre-push").chmod(0o755)
+    config = workspace / ".git" / "config"
+    config.write_text(
+        config.read_text()
+        + f"[alias]\n\tstatus = !touch {alias_marker}\n"
+        + f'[remote "origin"]\n\turl = {tmp_path / "nowhere.git"}\n'
+    )
+
+    manager.publish_issue("owner/repo", 7, "secret-token", ref="farm/7-calib", expected_sha=head)
+
+    assert _git_out(remote, "rev-parse", "refs/heads/farm/7-calib") == head
+    assert not hook_marker.exists()
+    assert not alias_marker.exists()
+    assert "nowhere.git" not in (workspace / ".git" / "config").read_text()

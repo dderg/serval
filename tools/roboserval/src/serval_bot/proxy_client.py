@@ -73,10 +73,23 @@ class ProxyClient:
             {"repo": repo, "since": since, "bot_login": bot_login},
         )
 
-    def dispatch_sim(self, repo: str, workflow: str, ref: str, head_sha: str | None) -> dict[str, Any]:
+    def dispatch_sim(
+        self,
+        repo: str,
+        issue_number: int,
+        workflow: str,
+        ref: str,
+        head_sha: str | None,
+    ) -> dict[str, Any]:
         return self._request(
             "/github/dispatch-sim",
-            {"repo": repo, "workflow": workflow, "ref": ref, "head_sha": head_sha},
+            {
+                "repo": repo,
+                "issue_number": issue_number,
+                "workflow": workflow,
+                "ref": ref,
+                "head_sha": head_sha,
+            },
         )
 
     def sim_result(self, repo: str, run_id: int) -> dict[str, Any]:
