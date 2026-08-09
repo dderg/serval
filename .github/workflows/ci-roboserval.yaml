@@ -1,0 +1,28 @@
+name: RoboServal
+
+on:
+  pull_request:
+    paths:
+      - "tools/roboserval/**"
+      - ".github/workflows/ci-roboserval.yaml"
+      - ".github/workflows/roboserval-image.yaml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/roboserval
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --all-extras --locked
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run pytest -q
+      - run: docker build .
