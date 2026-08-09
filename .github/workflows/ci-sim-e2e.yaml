@@ -2,14 +2,7 @@ name: Sim e2e (advisory)
 
 on:
   workflow_dispatch:
-    inputs:
-      serval_dispatch_id:
-        description: Correlation token issued by the serval-bot proxy for this dispatch
-        required: true
-        type: string
   pull_request:
-
-run-name: serval-${{ inputs.serval_dispatch_id }}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}

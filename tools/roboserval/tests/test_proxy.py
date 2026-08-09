@@ -1,5 +1,4 @@
 import json
-import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -325,63 +324,91 @@ async def test_sim_result_includes_failed_job_log() -> None:
     assert result["jobs"][0]["failure_log"] == "assertion failed\n"
 
 
-@pytest.mark.asyncio
-async def test_dispatch_sim_correlates_exactly_one_new_run() -> None:
-    sequence: list[str] = []
-    runs_calls = {"count": 0}
-    token = {"value": None}
+class _DispatchHarness:
+    """Mock GitHub API around an ephemeral-ref workflow dispatch."""
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/workflows/ci-sim-e2e.yaml/dispatches"):
-            sequence.append("post")
-            assert request.method == "POST"
-            body = json.loads(request.content)
-            assert body["ref"] == "trunk"
-            assert re.fullmatch(r"[0-9a-f]{32}", body["inputs"]["serval_dispatch_id"])
-            token["value"] = body["inputs"]["serval_dispatch_id"]
-            return httpx.Response(204)
-        if request.url.path.endswith("/workflows/ci-sim-e2e.yaml/runs"):
-            sequence.append("runs")
-            assert request.method == "GET"
-            assert request.url.params["branch"] == "trunk"
-            assert request.url.params["event"] == "workflow_dispatch"
-            assert request.url.params["per_page"] == "100"
-            runs_calls["count"] += 1
-            if runs_calls["count"] <= 2:  # baseline snapshot, then first poll
-                return httpx.Response(200, json={"workflow_runs": []})
-            # Run 78 appears concurrently but lacks the dispatch token and is
-            # on a different head sha, so it never qualifies; only run 77
-            # carries the echoed token and matches the requested head sha.
+    def __init__(
+        self,
+        *,
+        head_sha: str = "b" * 40,
+        poll_attempts: int = 30,
+        poll_interval: float = 1.0,
+    ) -> None:
+        self.head_sha = head_sha
+        self.poll_attempts = poll_attempts
+        self.poll_interval = poll_interval
+        self.sequence: list[str] = []
+        self.temp_ref: str | None = None
+        self.dispatched_on: str | None = None
+        self.dispatch_error: int | None = None
+        self.delete_error: int | None = None
+        self.runs_pages: list[list[dict[str, Any]]] = []
+        self.runs_calls = 0
+
+    def api(self) -> GitHubApi:
+        return GitHubApi(
+            StaticTokenProvider(),
+            20_000,
+            httpx.MockTransport(self.handler),
+            dispatch_poll_attempts=self.poll_attempts,
+            dispatch_poll_interval=self.poll_interval,
+        )
+
+    def run(self, run_id: int) -> dict[str, Any]:
+        return {
+            "id": run_id,
+            "status": "queued",
+            "conclusion": None,
+            "html_url": f"https://example.test/run/{run_id}",
+            "head_sha": self.head_sha,
+            "head_branch": self.temp_ref,
+            "path": ".github/workflows/ci-sim-e2e.yaml",
+        }
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/git/ref/heads/trunk"):
+            self.sequence.append("resolve")
             return httpx.Response(
                 200,
-                json={
-                    "workflow_runs": [
-                        {
-                            "id": 78,
-                            "status": "queued",
-                            "conclusion": None,
-                            "html_url": "https://example.test/run/78",
-                            "display_title": "Manual dispatch",
-                            "head_sha": "c" * 40,
-                            "head_branch": "trunk",
-                            "path": ".github/workflows/ci-sim-e2e.yaml",
-                        },
-                        {
-                            "id": 77,
-                            "status": "queued",
-                            "conclusion": None,
-                            "html_url": "https://example.test/run/77",
-                            "display_title": f"serval-{token['value']}",
-                            "head_sha": "b" * 40,
-                            "head_branch": "trunk",
-                            "path": ".github/workflows/ci-sim-e2e.yaml",
-                        },
-                    ]
-                },
+                json={"ref": "refs/heads/trunk", "object": {"sha": self.head_sha, "type": "commit"}},
             )
-        raise AssertionError(f"unexpected GitHub request: {request.url}")
+        if path.endswith("/git/refs") and request.method == "POST":
+            self.sequence.append("create")
+            body = json.loads(request.content)
+            assert body["ref"].startswith("refs/heads/serval-")
+            assert body["sha"] == self.head_sha
+            self.temp_ref = body["ref"].removeprefix("refs/heads/")
+            return httpx.Response(201, json={"ref": body["ref"]})
+        if request.method == "DELETE" and path.endswith(f"/git/refs/heads/{self.temp_ref}"):
+            self.sequence.append("delete")
+            if self.delete_error is not None:
+                return httpx.Response(self.delete_error, json={"message": "Reference does not exist"})
+            return httpx.Response(204)
+        if path.endswith("/workflows/ci-sim-e2e.yaml/dispatches"):
+            self.sequence.append("dispatch")
+            body = json.loads(request.content)
+            assert body == {"ref": self.temp_ref}
+            self.dispatched_on = body["ref"]
+            if self.dispatch_error is not None:
+                return httpx.Response(self.dispatch_error, json={"message": "dispatch failed"})
+            return httpx.Response(204)
+        if path.endswith("/workflows/ci-sim-e2e.yaml/runs"):
+            self.sequence.append("runs")
+            assert request.url.params["branch"] == self.temp_ref
+            assert request.url.params["event"] == "workflow_dispatch"
+            assert request.url.params["per_page"] == "100"
+            page = self.runs_pages[min(self.runs_calls, len(self.runs_pages) - 1)] if self.runs_pages else []
+            self.runs_calls += 1
+            return httpx.Response(200, json={"workflow_runs": page})
+        raise AssertionError(f"unexpected GitHub request: {request.url} {request.method}")
 
-    api = GitHubApi(StaticTokenProvider(), 20_000, httpx.MockTransport(handler))
+
+@pytest.mark.asyncio
+async def test_dispatch_sim_create_dispatch_poll_delete_ordering() -> None:
+    harness = _DispatchHarness()
+    harness.runs_pages = [[], [], [harness.run(77)]]
+    api = harness.api()
     try:
         result = await api.dispatch_sim(
             DispatchRequest(
@@ -393,159 +420,82 @@ async def test_dispatch_sim_correlates_exactly_one_new_run() -> None:
         )
     finally:
         await api.close()
-    # The baseline snapshot must be taken before the dispatch POST, and the
-    # dispatch POST must carry the fresh random token as the input.
-    assert sequence == ["runs", "post", "runs", "runs"]
-    assert token["value"] is not None
-    assert result == {
-        "run_id": 77,
-        "url": "https://example.test/run/77",
-        "status": "queued",
-        "conclusion": None,
-        "head_sha": "b" * 40,
-        "ref": "trunk",
-        "workflow": ".github/workflows/ci-sim-e2e.yaml",
-    }
+    # Resolve the ref, create the temporary branch at its exact sha, dispatch
+    # on that unique branch with no inputs, poll it, then delete the branch.
+    assert harness.sequence == ["resolve", "create", "runs", "dispatch", "runs", "runs", "delete"]
+    assert harness.dispatched_on == harness.temp_ref
+    assert result["run_id"] == 77
+    assert result["ref"] == harness.temp_ref
+    assert result["requested_ref"] == "trunk"
+    assert result["head_sha"] == "b" * 40
+    assert result["workflow"] == ".github/workflows/ci-sim-e2e.yaml"
 
 
 @pytest.mark.asyncio
 async def test_dispatch_sim_fails_on_ambiguous_new_runs() -> None:
-    runs_calls = {"count": 0}
-    token = {"value": None}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/workflows/ci-sim-e2e.yaml/dispatches"):
-            token["value"] = json.loads(request.content)["inputs"]["serval_dispatch_id"]
-            return httpx.Response(204)
-        if request.url.path.endswith("/workflows/ci-sim-e2e.yaml/runs"):
-            runs_calls["count"] += 1
-            if runs_calls["count"] == 1:  # baseline: nothing preexisting
-                return httpx.Response(200, json={"workflow_runs": []})
-            run_name = f"serval-{token['value']}"
-            return httpx.Response(
-                200,
-                json={
-                    "workflow_runs": [
-                        {
-                            "id": 77,
-                            "status": "queued",
-                            "html_url": "https://example.test/run/77",
-                            "display_title": run_name,
-                            "head_branch": "trunk",
-                            "path": ".github/workflows/ci-sim-e2e.yaml",
-                        },
-                        {
-                            "id": 78,
-                            "status": "queued",
-                            "html_url": "https://example.test/run/78",
-                            "display_title": run_name,
-                            "head_branch": "trunk",
-                            "path": ".github/workflows/ci-sim-e2e.yaml",
-                        },
-                    ]
-                },
-            )
-        raise AssertionError(f"unexpected GitHub request: {request.url}")
-
-    api = GitHubApi(StaticTokenProvider(), 20_000, httpx.MockTransport(handler))
+    harness = _DispatchHarness()
+    harness.runs_pages = [[], [harness.run(77), harness.run(78)]]
+    api = harness.api()
     try:
         with pytest.raises(GitHubFailure, match="ambiguous"):
             await api.dispatch_sim(DispatchRequest(repo="dderg/serval", workflow="ci-sim-e2e.yaml", ref="trunk"))
     finally:
         await api.close()
+    assert "delete" in harness.sequence
 
 
 @pytest.mark.asyncio
-async def test_dispatch_sim_rejects_external_run_without_token() -> None:
-    runs_calls = {"count": 0}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/workflows/ci-sim-e2e.yaml/dispatches"):
-            return httpx.Response(204)
-        if request.url.path.endswith("/workflows/ci-sim-e2e.yaml/runs"):
-            runs_calls["count"] += 1
-            if runs_calls["count"] == 1:  # baseline: nothing preexisting
-                return httpx.Response(200, json={"workflow_runs": []})
-            # A manual dispatch lands on the same branch and head sha after the
-            # baseline snapshot: it is the only new run, yet it does not carry
-            # the random token, so it must never be correlated to this dispatch.
-            return httpx.Response(
-                200,
-                json={
-                    "workflow_runs": [
-                        {
-                            "id": 9,
-                            "status": "queued",
-                            "conclusion": None,
-                            "html_url": "https://example.test/run/9",
-                            "display_title": "Manual dispatch",
-                            "head_sha": "b" * 40,
-                            "head_branch": "trunk",
-                            "path": ".github/workflows/ci-sim-e2e.yaml",
-                        }
-                    ]
-                },
-            )
-        raise AssertionError(f"unexpected GitHub request: {request.url}")
-
-    api = GitHubApi(
-        StaticTokenProvider(),
-        20_000,
-        httpx.MockTransport(handler),
-        dispatch_poll_attempts=2,
-        dispatch_poll_interval=0,
-    )
+async def test_dispatch_sim_polls_only_the_temp_ref() -> None:
+    harness = _DispatchHarness(poll_attempts=2, poll_interval=0)
+    harness.runs_pages = [[]]
+    api = harness.api()
     try:
         with pytest.raises(GitHubFailure, match="did not appear"):
+            await api.dispatch_sim(DispatchRequest(repo="dderg/serval", workflow="ci-sim-e2e.yaml", ref="trunk"))
+    finally:
+        await api.close()
+    # Every runs request was scoped to the temporary branch (asserted inside
+    # the harness), so a run on the original ref can never qualify, and the
+    # temporary branch is deleted even though no run appeared.
+    assert harness.sequence == ["resolve", "create", "runs", "dispatch", "runs", "runs", "delete"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sim_verifies_supplied_head_sha() -> None:
+    harness = _DispatchHarness()
+    api = harness.api()
+    try:
+        with pytest.raises(GitHubFailure, match="moved"):
             await api.dispatch_sim(
-                DispatchRequest(repo="dderg/serval", workflow="ci-sim-e2e.yaml", ref="trunk", head_sha="b" * 40)
+                DispatchRequest(repo="dderg/serval", workflow="ci-sim-e2e.yaml", ref="trunk", head_sha="c" * 40)
             )
     finally:
         await api.close()
+    assert harness.sequence == ["resolve"]
 
 
 @pytest.mark.asyncio
-async def test_dispatch_sim_excludes_preexisting_run_despite_fresh_timestamps() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/workflows/ci-sim-e2e.yaml/dispatches"):
-            return httpx.Response(204)
-        if request.url.path.endswith("/workflows/ci-sim-e2e.yaml/runs"):
-            # The preexisting run is served with a freshly generated created_at
-            # on every poll, so a wall-clock comparison would misclassify it as
-            # new. Baseline id membership excludes it regardless of timestamps,
-            # clock skew, or even a token-shaped title.
-            return httpx.Response(
-                200,
-                json={
-                    "workflow_runs": [
-                        {
-                            "id": 5,
-                            "status": "queued",
-                            "conclusion": None,
-                            "html_url": "https://example.test/run/5",
-                            "display_title": "serval-deadbeef",
-                            "head_sha": "b" * 40,
-                            "head_branch": "trunk",
-                            "path": ".github/workflows/ci-sim-e2e.yaml",
-                            "created_at": datetime.now(UTC).isoformat(),
-                        }
-                    ]
-                },
-            )
-        raise AssertionError(f"unexpected GitHub request: {request.url}")
-
-    api = GitHubApi(
-        StaticTokenProvider(),
-        20_000,
-        httpx.MockTransport(handler),
-        dispatch_poll_attempts=2,
-        dispatch_poll_interval=0,
-    )
+async def test_dispatch_sim_deletes_temp_ref_on_dispatch_error() -> None:
+    harness = _DispatchHarness()
+    harness.dispatch_error = 500
+    api = harness.api()
     try:
-        with pytest.raises(GitHubFailure, match="did not appear"):
-            await api.dispatch_sim(
-                DispatchRequest(repo="dderg/serval", workflow="ci-sim-e2e.yaml", ref="trunk", head_sha="b" * 40)
-            )
+        with pytest.raises(GitHubFailure, match="dispatch failed"):
+            await api.dispatch_sim(DispatchRequest(repo="dderg/serval", workflow="ci-sim-e2e.yaml", ref="trunk"))
+    finally:
+        await api.close()
+    assert harness.sequence == ["resolve", "create", "runs", "dispatch", "delete"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sim_delete_failure_is_loud() -> None:
+    harness = _DispatchHarness()
+    harness.runs_pages = [[], [harness.run(77)]]
+    harness.delete_error = 422
+    api = harness.api()
+    try:
+        with pytest.raises(GitHubFailure, match="DELETE"):
+            await api.dispatch_sim(DispatchRequest(repo="dderg/serval", workflow="ci-sim-e2e.yaml", ref="trunk"))
     finally:
         await api.close()
 

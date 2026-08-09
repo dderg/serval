@@ -63,12 +63,14 @@ def _validate_run_identity(result: dict[str, Any], ref: str, workflow: str) -> N
     run_id = result.get("run_id")
     if not isinstance(run_id, int) or run_id <= 0:
         raise ActionDenied(f"proxy returned an invalid simulator run id: {run_id!r}")
+    if result.get("requested_ref") != ref:
+        raise ActionDenied(f"proxy dispatched a different ref than requested: {result.get('requested_ref')!r}")
+    if not isinstance(result.get("ref"), str) or not result["ref"]:
+        raise ActionDenied(f"proxy did not report the actual dispatch ref: {result.get('ref')!r}")
     if not _workflow_name_matches(result.get("workflow"), workflow):
         raise ActionDenied(
             f"proxy returned a run outside the configured simulator workflow: {result.get('workflow')!r}"
         )
-    if result.get("ref") != ref:
-        raise ActionDenied(f"proxy returned a run on an unexpected ref {result.get('ref')!r}: expected {ref!r}")
 
 
 @dataclass(slots=True)
@@ -135,7 +137,7 @@ class ActionGateway:
                     self.event.repo,
                     self.event.issue_number,
                     self.policy.sim_workflow,
-                    ref,
+                    result["ref"],
                     result["run_id"],
                     str(result["url"]),
                     str(result["status"]),

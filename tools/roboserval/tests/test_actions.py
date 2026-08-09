@@ -36,8 +36,9 @@ class FakeProxy:
             "status": "queued",
             "conclusion": None,
             "head_sha": head_sha,
-            "ref": ref,
+            "ref": f"serval-dispatch-{len(self.runs) + 1}",
             "workflow": f".github/workflows/{workflow}",
+            "requested_ref": ref,
         }
         self.runs[99] = run
         return dict(run)
@@ -227,9 +228,12 @@ def test_issue370_wording_dispatches_in_triage(tmp_path: Path) -> None:
         result = json.loads(_gateway(database, event, Mode.TRIAGE, proxy).dispatch_sim("trunk", None))
         assert result["state"] == "applied"
         assert result["result"]["run_id"] == 99
+        assert result["result"]["requested_ref"] == "trunk"
         assert proxy.calls == [("dispatch", "dderg/serval", "ci-sim-e2e.yaml", "trunk", None)]
         runs = database.workflow_runs_for_issue(event.repo, event.issue_number)
-        assert [(run["run_id"], run["ref"], run["workflow"]) for run in runs] == [(99, "trunk", "ci-sim-e2e.yaml")]
+        assert [(run["run_id"], run["ref"], run["workflow"]) for run in runs] == [
+            (99, proxy.runs[99]["ref"], "ci-sim-e2e.yaml")
+        ]
     finally:
         database.close()
 
@@ -246,7 +250,7 @@ def test_sim_dispatch_in_maintainer_mode_applies_and_persists(tmp_path: Path) ->
         assert result["state"] == "applied"
         assert proxy.calls == [("dispatch", "dderg/serval", "ci-sim-e2e.yaml", "farm/calib-1", None)]
         runs = database.workflow_runs_for_issue(event.repo, event.issue_number)
-        assert [(run["run_id"], run["ref"]) for run in runs] == [(99, "farm/calib-1")]
+        assert [(run["run_id"], run["ref"]) for run in runs] == [(99, proxy.runs[99]["ref"])]
     finally:
         database.close()
 
@@ -278,6 +282,7 @@ def test_same_ref_dispatch_never_reuses_claimed_run(tmp_path: Path) -> None:
         )
         result = json.loads(_gateway(database, event, Mode.TRIAGE, proxy).dispatch_sim("trunk", None))
         assert result["state"] == "applied"
+        first_ref = result["result"]["ref"]
         database.finish(event.delivery_id, "done")
         later = _claimed(
             database,
@@ -291,7 +296,7 @@ def test_same_ref_dispatch_never_reuses_claimed_run(tmp_path: Path) -> None:
         with pytest.raises(ActionDenied, match="already claimed"):
             _gateway(database, later, Mode.TRIAGE, proxy).dispatch_sim("trunk", None)
         runs = database.workflow_runs_for_issue(event.repo, event.issue_number)
-        assert [(run["run_id"], run["ref"]) for run in runs] == [(99, "trunk")]
+        assert [(run["run_id"], run["ref"]) for run in runs] == [(99, first_ref)]
     finally:
         database.close()
 
@@ -357,11 +362,12 @@ def test_concurrent_same_ref_dispatch_serializes_and_claims_once(tmp_path: Path)
     thread_second.join(10)
     assert not thread_first.is_alive() and not thread_second.is_alive()
     assert len(outcomes) == 1 and outcomes[0]["state"] == "applied"
+    first_ref = outcomes[0]["result"]["ref"]
     assert len(errors) == 1
     assert isinstance(errors[0], ActionDenied)
     assert "already claimed" in str(errors[0])
     runs = database.workflow_runs_for_issue(first.repo, first.issue_number)
-    assert [(run["run_id"], run["ref"]) for run in runs] == [(99, "trunk")]
+    assert [(run["run_id"], run["ref"]) for run in runs] == [(99, first_ref)]
     database.close()
 
 
@@ -383,7 +389,11 @@ def test_sim_result_applies_in_triage_and_persists(tmp_path: Path) -> None:
             ("sim_result", "dderg/serval", 99),
         ]
         runs = database.workflow_runs_for_issue(event.repo, event.issue_number)
-        assert [(run["run_id"], run["status"], run["conclusion"]) for run in runs] == [(99, "completed", "success")]
+        # The persisted association holds the actual dispatch ref, and the
+        # sim_result identity check validated the run against it.
+        assert [(run["run_id"], run["ref"], run["status"], run["conclusion"]) for run in runs] == [
+            (99, proxy.runs[99]["ref"], "completed", "success")
+        ]
     finally:
         database.close()
 

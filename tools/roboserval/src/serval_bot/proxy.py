@@ -263,63 +263,83 @@ class GitHubApi:
             next_params = None
         return items
 
-    async def _workflow_dispatch_runs(self, request: DispatchRequest) -> list[dict[str, Any]]:
+    async def _resolve_ref_sha(self, repo: str, ref: str) -> str:
+        response = await self.request("GET", f"/repos/{repo}/git/ref/heads/{ref}")
+        data = response.json()
+        sha = data.get("object", {}).get("sha")
+        if not isinstance(sha, str) or len(sha) != 40:
+            raise GitHubFailure(f"could not resolve ref heads/{ref} to a commit sha")
+        return sha
+
+    async def _workflow_dispatch_runs(self, request: DispatchRequest, ref: str) -> list[dict[str, Any]]:
         response = await self.request(
             "GET",
             f"/repos/{request.repo}/actions/workflows/{request.workflow}/runs",
-            params={"branch": request.ref, "event": "workflow_dispatch", "per_page": 100},
+            params={"branch": ref, "event": "workflow_dispatch", "per_page": 100},
         )
         runs = response.json().get("workflow_runs", [])
         if request.head_sha is not None:
             runs = [run for run in runs if run.get("head_sha") == request.head_sha]
         return runs
 
+    async def _delete_temp_ref(self, repo: str, ref: str) -> None:
+        await self.request("DELETE", f"/repos/{repo}/git/refs/heads/{ref}")
+
     async def dispatch_sim(self, request: DispatchRequest) -> dict[str, Any]:
         key = (request.repo, request.workflow, request.ref)
         lock = self._dispatch_locks.setdefault(key, asyncio.Lock())
         async with lock:
-            # Snapshot every preexisting matching run id before dispatching so
-            # an already-visible run is never correlated to this dispatch.
-            baseline = {run["id"] for run in await self._workflow_dispatch_runs(request)}
-            # Authoritative correlation: a fresh random token is posted as the
-            # serval_dispatch_id input and echoed into the run name, so an
-            # external or manual run — even one that appears after this
-            # snapshot — can never qualify.
-            token = secrets.token_hex(16)
-            run_name = f"serval-{token}"
+            # Authoritative correlation: resolve the requested ref to its exact
+            # sha (verifying a caller-supplied head_sha), dispatch the existing
+            # workflow on a fresh random temporary branch at that sha, and poll
+            # only that unique branch. An external or manual run on any other
+            # ref can never qualify. The temporary ref is deleted in a strict
+            # finally path, and a failed delete fails loudly.
+            sha = await self._resolve_ref_sha(request.repo, request.ref)
+            if request.head_sha is not None and sha != request.head_sha:
+                raise GitHubFailure(f"ref heads/{request.ref} moved: expected {request.head_sha}, found {sha}")
+            temp_ref = f"serval-{secrets.token_hex(16)}"
             await self.request(
                 "POST",
-                f"/repos/{request.repo}/actions/workflows/{request.workflow}/dispatches",
-                json={"ref": request.ref, "inputs": {"serval_dispatch_id": token}},
+                f"/repos/{request.repo}/git/refs",
+                json={"ref": f"refs/heads/{temp_ref}", "sha": sha},
             )
-            for _ in range(self._dispatch_poll_attempts):
-                matches = [
-                    run
-                    for run in await self._workflow_dispatch_runs(request)
-                    if run["id"] not in baseline
-                    and (run.get("display_title") == run_name or run.get("name") == run_name)
-                ]
-                if len(matches) == 1:
-                    run = matches[0]
-                    return {
-                        "run_id": run["id"],
-                        "url": run["html_url"],
-                        "status": run["status"],
-                        "conclusion": run.get("conclusion"),
-                        "head_sha": run.get("head_sha"),
-                        "ref": run.get("head_branch"),
-                        "workflow": run.get("path"),
-                    }
-                if len(matches) > 1:
-                    raise GitHubFailure(
-                        "ambiguous workflow dispatch: multiple runs carried the dispatch token for "
-                        f"{request.workflow}@{request.ref}"
-                    )
-                await asyncio.sleep(self._dispatch_poll_interval)
-            raise GitHubFailure(
-                f"dispatched workflow run did not appear within "
-                f"{self._dispatch_poll_attempts * self._dispatch_poll_interval:.0f} seconds"
-            )
+            try:
+                baseline = {run["id"] for run in await self._workflow_dispatch_runs(request, temp_ref)}
+                await self.request(
+                    "POST",
+                    f"/repos/{request.repo}/actions/workflows/{request.workflow}/dispatches",
+                    json={"ref": temp_ref},
+                )
+                for _ in range(self._dispatch_poll_attempts):
+                    matches = [
+                        run
+                        for run in await self._workflow_dispatch_runs(request, temp_ref)
+                        if run["id"] not in baseline
+                    ]
+                    if len(matches) == 1:
+                        run = matches[0]
+                        return {
+                            "run_id": run["id"],
+                            "url": run["html_url"],
+                            "status": run["status"],
+                            "conclusion": run.get("conclusion"),
+                            "head_sha": run.get("head_sha"),
+                            "ref": temp_ref,
+                            "workflow": run.get("path"),
+                            "requested_ref": request.ref,
+                        }
+                    if len(matches) > 1:
+                        raise GitHubFailure(
+                            f"ambiguous workflow dispatch: multiple new runs appeared for {request.workflow}@{temp_ref}"
+                        )
+                    await asyncio.sleep(self._dispatch_poll_interval)
+                raise GitHubFailure(
+                    f"dispatched workflow run did not appear within "
+                    f"{self._dispatch_poll_attempts * self._dispatch_poll_interval:.0f} seconds"
+                )
+            finally:
+                await self._delete_temp_ref(request.repo, temp_ref)
 
     async def sim_result(self, request: SimResultRequest) -> dict[str, Any]:
         run_response, jobs_response = await asyncio.gather(
