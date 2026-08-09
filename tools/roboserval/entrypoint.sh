@@ -24,9 +24,9 @@ chown root:root /data/db /data/logs
 chmod 0700 /data/db /data/logs
 chown root:root /data/workspaces /data/sessions
 chmod 0755 /data/workspaces /data/sessions
-chown root:omp /data/omp-agent /data/omp-agent/config /data/omp-agent/auth
-chmod 2775 /data/omp-agent
-chmod 2770 /data/omp-agent/config /data/omp-agent/auth
+chown root:root /data/omp-agent /data/omp-agent/config /data/omp-agent/auth
+chmod 0755 /data/omp-agent
+chmod 0750 /data/omp-agent/config /data/omp-agent/auth
 
 touch /data/serval-bot.sqlite
 chown root:root /data/serval-bot.sqlite

@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import platform
+import shutil
 import signal
 import stat
 import time
@@ -41,6 +42,10 @@ class SlotReapError(PoolFatalError):
 
 class HardGraceExceeded(PoolFatalError):
     """The run thread outlived the hard grace, so its slot must not be reused."""
+
+
+class AgentDirFailure(RuntimeError):
+    """The shared agent dir seed source exists but is unsafe or malformed."""
 
 
 _SCRUBBED_ENV_KEYS: tuple[str, ...] = (
@@ -189,15 +194,77 @@ def _provision_private_dirs(session_dir: Path) -> tuple[Path, Path]:
     return home, tmpdir
 
 
+_AGENT_DIR_SEED_NAMES = ("config.yml", "config.yaml", "config", "auth")
+
+
+def _provision_agent_dir(session_dir: Path) -> Path:
+    """Per-event private omp agent dir, seeded from the shared source.
+
+    The private dir lives under the slot-owned session tree and is wiped and
+    re-seeded on every event so no state outlives its slot. Only the required
+    persistent config/auth inputs are copied; runtime databases, models,
+    sessions, memories, and blobs are never shared. A missing or empty shared
+    source seeds nothing; a present but unsafe source fails loudly.
+    """
+    private = session_dir / ".omp-agent"
+    if private.exists():
+        shutil.rmtree(private)
+    private.mkdir()
+    shared = os.environ.get("PI_CODING_AGENT_DIR")
+    if shared:
+        _seed_agent_dir(private, Path(shared))
+    return private
+
+
+def _seed_agent_dir(private: Path, shared: Path) -> None:
+    if not shared.is_dir():
+        return
+    for name in _AGENT_DIR_SEED_NAMES:
+        source = shared / name
+        if not source.exists() and not source.is_symlink():
+            continue
+        if source.is_symlink():
+            raise AgentDirFailure(f"unsafe agent dir seed source (symlink): {source}")
+        if source.is_dir():
+            if any(source.iterdir()):
+                _copy_seed_tree(source, private / name)
+        elif source.is_file():
+            shutil.copy2(source, private / name)
+        else:
+            raise AgentDirFailure(f"unsafe agent dir seed source (unexpected type): {source}")
+
+
+def _copy_seed_tree(source: Path, destination: Path) -> None:
+    destination.mkdir(parents=True)
+    for dirpath, dirnames, filenames in os.walk(source, followlinks=False):
+        relative = Path(dirpath).relative_to(source)
+        for name in dirnames:
+            path = Path(dirpath) / name
+            if path.is_symlink():
+                raise AgentDirFailure(f"unsafe agent dir seed source (symlink): {path}")
+            (destination / relative / name).mkdir(parents=True, exist_ok=True)
+        for name in filenames:
+            path = Path(dirpath) / name
+            if path.is_symlink():
+                raise AgentDirFailure(f"unsafe agent dir seed source (symlink): {path}")
+            if not path.is_file():
+                raise AgentDirFailure(f"unsafe agent dir seed source (unexpected type): {path}")
+            shutil.copy2(path, destination / relative / name)
+
+
 def slot_env(slot_uid: int | None, workspace: Path, session_dir: Path) -> dict[str, str]:
     """Prepare the event's private runtime tree and return the OMP env overlay.
 
-    Provisions per-event HOME/TMP/XDG under the session dir, hands both
-    event-owned trees to the slot identity, and returns an overlay with
-    workspace-private paths plus credential keys blanked so the agent
-    subprocess cannot printenv them; RpcClient merges it over os.environ.
+    Provisions per-event HOME/TMP/XDG and a private omp agent dir under the
+    session dir, hands the event-owned trees to the slot identity, and returns
+    an overlay with workspace-private paths plus credential keys blanked so
+    the agent subprocess cannot printenv them; RpcClient merges it over
+    os.environ. The agent dir is seeded with required config/auth inputs from
+    the shared PI_CODING_AGENT_DIR source before the chown, and the overlay
+    redirects PI_CODING_AGENT_DIR to the private copy.
     """
     home, tmpdir = _provision_private_dirs(session_dir)
+    agent_dir = _provision_agent_dir(session_dir)
     chown_event_paths(workspace, session_dir, slot_uid)
     xdg_root = session_dir / ".xdg"
     env = dict.fromkeys(_SCRUBBED_ENV_KEYS, "")
@@ -211,6 +278,7 @@ def slot_env(slot_uid: int | None, workspace: Path, session_dir: Path) -> dict[s
             "XDG_STATE_HOME": str(xdg_root / "state"),
             "XDG_CACHE_HOME": str(xdg_root / "cache"),
             "BUN_INSTALL_CACHE_DIR": str(xdg_root / "cache" / "bun-install"),
+            "PI_CODING_AGENT_DIR": str(agent_dir),
         }
     )
     return env
