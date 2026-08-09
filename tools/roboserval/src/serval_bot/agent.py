@@ -386,6 +386,13 @@ class TriageAgent:
             )
         elif pull_request is not None:
             comment = event.payload.get("comment", {})
+            review_request = event.payload.get("review_request")
+            if isinstance(review_request, dict):
+                request_context = (
+                    f"@{event.actor} requested @{policy.bot_login} as a reviewer through GitHub reviewer assignment."
+                )
+            else:
+                request_context = f"Review instruction from @{event.actor}:\n\n{comment.get('body', '')}"
             return (
                 f"Repository: {event.repo}\n"
                 f"Default branch: {default_branch}\n"
@@ -396,7 +403,7 @@ class TriageAgent:
                 f"Head: {pull_request.head_ref} {pull_request.head_sha}\n"
                 f"Checked out revision: {pull_request.head_sha}\n\n"
                 f"{pull_request.body}\n\n"
-                f"Review request from @{event.actor}:\n\n{comment.get('body', '')}\n\n"
+                f"{request_context}\n\n"
                 f"Review the exact diff {pull_request.base_sha}...{pull_request.head_sha}. "
                 "Inspect affected call paths and run focused checks when useful. "
                 "Post exactly one PR conversation comment through post_issue_comment; that comment completes this "

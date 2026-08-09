@@ -171,14 +171,18 @@ def test_pull_request_review_uses_exact_revision_and_posts_comment(tmp_path: Pat
         }
     )
     event = Event(
-        delivery_id="poll:comment:45:created",
+        delivery_id="poll:review:45:requested",
         event_type="pull_request_review.requested",
         repo="dderg/serval",
         issue_number=373,
         actor="dderg",
         payload={
             "issue": {"title": "Fix LEDs", "body": "Change priority dispatch"},
-            "comment": {"body": "@roboserval review this"},
+            "review_request": {
+                "id": 45,
+                "event": "review_requested",
+                "requested_reviewer": {"login": "roboserval"},
+            },
             "pull_request": {
                 "number": 373,
                 "title": "Fix LEDs",
@@ -208,6 +212,9 @@ def test_pull_request_review_uses_exact_revision_and_posts_comment(tmp_path: Pat
     assert "Pull request: #373 Fix LEDs" in (FakeRpcClient.prompt or "")
     assert f"Review the exact diff {'a' * 40}...{'b' * 40}" in (FakeRpcClient.prompt or "")
     assert "Do not classify or label the pull request" in (FakeRpcClient.prompt or "")
+    assert "@dderg requested @roboserval as a reviewer through GitHub reviewer assignment" in (
+        FakeRpcClient.prompt or ""
+    )
 
 
 def _prepared_settings(tmp_path: Path, monkeypatch: Any) -> BotSettings:

@@ -662,7 +662,7 @@ async def test_dispatch_sim_publication_failure_is_loud(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
-async def test_github_poll_returns_only_new_issues_and_mentioned_comments() -> None:
+async def test_github_poll_returns_new_issues_mentions_and_reviewer_assignments() -> None:
     issue = {
         "id": 10,
         "number": 5,
@@ -704,11 +704,26 @@ async def test_github_poll_returns_only_new_issues_and_mentioned_comments() -> N
         "updated_at": "2026-08-09T12:03:00Z",
         "issue_url": "https://api.github.com/repos/dderg/serval/issues/8",
     }
+    review_requested = {
+        "id": 46,
+        "event": "review_requested",
+        "created_at": "2026-08-09T12:04:00Z",
+        "actor": {"login": "maintainer"},
+        "review_requester": {"login": "maintainer"},
+        "requested_reviewer": {"login": "roboserval"},
+    }
     requested_pages: list[str | None] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/repos/dderg/serval/issues":
             return httpx.Response(200, json=[issue, old_issue, pull_parent])
+        if request.url.path == "/repos/dderg/serval/issues/8/events":
+            ignored_reviewer = {
+                **review_requested,
+                "id": 47,
+                "requested_reviewer": {"login": "someone-else"},
+            }
+            return httpx.Response(200, json=[review_requested, ignored_reviewer])
         if request.url.path == "/repos/dderg/serval/issues/comments":
             page = request.url.params.get("page")
             requested_pages.append(page)
@@ -744,8 +759,13 @@ async def test_github_poll_returns_only_new_issues_and_mentioned_comments() -> N
         "poll:issue:10:opened",
         "poll:comment:41:created",
         "poll:comment:45:created",
+        "poll:review:46:requested",
     ]
-    review_event = result["events"][2]
-    assert review_event["event_type"] == "pull_request_review.requested"
-    assert review_event["payload"]["pull_request"]["head"]["sha"] == "b" * 40
+    mentioned_review = result["events"][2]
+    assigned_review = result["events"][3]
+    assert mentioned_review["event_type"] == "pull_request_review.requested"
+    assert assigned_review["event_type"] == "pull_request_review.requested"
+    assert assigned_review["actor"] == "maintainer"
+    assert assigned_review["payload"]["pull_request"]["head"]["sha"] == "b" * 40
+    assert assigned_review["payload"]["review_request"] == review_requested
     assert requested_pages == [None, "2"]
