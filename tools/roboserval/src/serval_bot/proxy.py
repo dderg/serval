@@ -29,7 +29,9 @@ _FARM_SLUG_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 class GitHubFailure(RuntimeError):
-    pass
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class RepositoryRequest(BaseModel):
@@ -146,7 +148,10 @@ class GitHubApi:
         if response.is_error:
             retry = response.headers.get("retry-after")
             detail = response.text[:4000]
-            raise GitHubFailure(f"GitHub {method} {path} failed: {response.status_code}, retry={retry}, {detail}")
+            raise GitHubFailure(
+                f"GitHub {method} {path} failed: {response.status_code}, retry={retry}, {detail}",
+                response.status_code,
+            )
         return response
 
     async def add_labels(self, request: AddLabelsRequest) -> dict[str, Any]:
@@ -369,8 +374,12 @@ class GitHubApi:
             runs = [run for run in runs if run.get("head_sha") == request.head_sha]
         return runs
 
-    async def _delete_temp_ref(self, repo: str, ref: str) -> None:
-        await self.request("DELETE", f"/repos/{repo}/git/refs/heads/{ref}")
+    async def _delete_temp_ref(self, repo: str, ref: str, *, allow_missing: bool = False) -> None:
+        try:
+            await self.request("DELETE", f"/repos/{repo}/git/refs/heads/{ref}")
+        except GitHubFailure as exc:
+            if not allow_missing or exc.status_code not in {404, 422}:
+                raise
 
     async def _publish_farm_ref(self, request: DispatchRequest) -> None:
         """Publish the exact issue-workspace commit to the requested farm ref.
@@ -420,12 +429,14 @@ class GitHubApi:
             if request.head_sha is not None and sha != request.head_sha:
                 raise GitHubFailure(f"ref heads/{request.ref} moved: expected {request.head_sha}, found {sha}")
             temp_ref = f"serval-{secrets.token_hex(16)}"
-            await self.request(
-                "POST",
-                f"/repos/{request.repo}/git/refs",
-                json={"ref": f"refs/heads/{temp_ref}", "sha": sha},
-            )
+            creation_confirmed = False
             try:
+                await self.request(
+                    "POST",
+                    f"/repos/{request.repo}/git/refs",
+                    json={"ref": f"refs/heads/{temp_ref}", "sha": sha},
+                )
+                creation_confirmed = True
                 baseline = {run["id"] for run in await self._workflow_dispatch_runs(request, temp_ref)}
                 await self.request(
                     "POST",
@@ -460,7 +471,7 @@ class GitHubApi:
                     f"{self._dispatch_poll_attempts * self._dispatch_poll_interval:.0f} seconds"
                 )
             finally:
-                await self._delete_temp_ref(request.repo, temp_ref)
+                await self._delete_temp_ref(request.repo, temp_ref, allow_missing=not creation_confirmed)
 
     async def sim_result(self, request: SimResultRequest) -> dict[str, Any]:
         run_response, jobs_response = await asyncio.gather(

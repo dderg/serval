@@ -349,6 +349,7 @@ class _DispatchHarness:
         self.temp_ref: str | None = None
         self.dispatched_on: str | None = None
         self.dispatch_error: int | None = None
+        self.create_error: int | None = None
         self.delete_error: int | None = None
         self.runs_pages: list[list[dict[str, Any]]] = []
         self.runs_calls = 0
@@ -387,6 +388,8 @@ class _DispatchHarness:
             assert body["ref"].startswith("refs/heads/serval-")
             assert body["sha"] == self.head_sha
             self.temp_ref = body["ref"].removeprefix("refs/heads/")
+            if self.create_error is not None:
+                return httpx.Response(self.create_error, json={"message": "ambiguous create failure"})
             return httpx.Response(201, json={"ref": body["ref"]})
         if request.method == "DELETE" and path.endswith(f"/git/refs/heads/{self.temp_ref}"):
             self.sequence.append("delete")
@@ -502,6 +505,37 @@ async def test_dispatch_sim_deletes_temp_ref_on_dispatch_error() -> None:
     finally:
         await api.close()
     assert harness.sequence == ["resolve", "create", "runs", "dispatch", "delete"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sim_reconciles_ambiguous_create_failure() -> None:
+    harness = _DispatchHarness()
+    harness.create_error = 500
+    api = harness.api()
+    try:
+        with pytest.raises(GitHubFailure, match="ambiguous create failure"):
+            await api.dispatch_sim(
+                DispatchRequest(repo="dderg/serval", issue_number=7, workflow="ci-sim-e2e.yaml", ref="trunk")
+            )
+    finally:
+        await api.close()
+    assert harness.sequence == ["resolve", "create", "delete"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sim_preserves_create_failure_when_temp_ref_is_absent() -> None:
+    harness = _DispatchHarness()
+    harness.create_error = 500
+    harness.delete_error = 422
+    api = harness.api()
+    try:
+        with pytest.raises(GitHubFailure, match="ambiguous create failure"):
+            await api.dispatch_sim(
+                DispatchRequest(repo="dderg/serval", issue_number=7, workflow="ci-sim-e2e.yaml", ref="trunk")
+            )
+    finally:
+        await api.close()
+    assert harness.sequence == ["resolve", "create", "delete"]
 
 
 @pytest.mark.asyncio

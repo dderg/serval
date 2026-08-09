@@ -163,10 +163,23 @@ def test_comment_before_classify_denied_on_opened_issue(tmp_path: Path) -> None:
     proxy = FakeProxy()
     try:
         event = _claimed(database, _event())
-        with pytest.raises(ActionDenied, match="must be classified before"):
+        with pytest.raises(ActionDenied, match="successfully classified"):
             _gateway(database, event, Mode.TRIAGE, proxy).post_comment("jump the queue")
         assert proxy.calls == []
         assert database.actions_for_issue(event.repo, event.issue_number) == []
+    finally:
+        database.close()
+
+
+def test_comment_after_failed_classification_is_denied(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    proxy = FakeProxy()
+    try:
+        event = _claimed(database, _event())
+        database.add_action(event, "classify", {"primary": "bug"}, "failed")
+        with pytest.raises(ActionDenied, match="successfully classified"):
+            _gateway(database, event, Mode.TRIAGE, proxy).post_comment("classification failed")
+        assert proxy.calls == []
     finally:
         database.close()
 

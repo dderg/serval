@@ -121,11 +121,10 @@ class ActionGateway:
         if not normalized:
             raise ActionDenied("comment body is empty")
         self._require_unique("comment")
-        if (
-            self.event.event_type == "issues.opened"
-            and self.database.find_action(self.event.delivery_id, "classify") is None
-        ):
-            raise ActionDenied("a new issue must be classified before it is commented on")
+        if self.event.event_type == "issues.opened":
+            classification = self.database.find_action(self.event.delivery_id, "classify")
+            if classification is None or classification.state not in {"proposed", "applied"}:
+                raise ActionDenied("a new issue must be successfully classified before it is commented on")
         if is_simulator_directive(self.event, self.policy):
             dispatches = self._sim_dispatches()
             reads = [

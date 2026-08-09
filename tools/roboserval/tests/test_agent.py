@@ -137,6 +137,7 @@ def test_pull_request_review_uses_exact_revision_and_posts_comment(tmp_path: Pat
     workspace.mkdir(parents=True)
     prepared: list[PullRequestContext | None] = []
     monkeypatch.setattr(agent_module, "RpcClient", FakeRpcClient)
+    monkeypatch.setattr(agent_module, "_review_diff", lambda path, pull_request: "diff --git a/led.py b/led.py")
     monkeypatch.setattr(
         agent_module.WorkspaceManager,
         "prepare",
@@ -207,14 +208,15 @@ def test_pull_request_review_uses_exact_revision_and_posts_comment(tmp_path: Pat
     assert prepared[0] is not None
     assert prepared[0].head_sha == "b" * 40
     assert FakeRpcClient.command is not None
-    assert "read,grep,glob,lsp,bash" in FakeRpcClient.command
-    assert "write" not in FakeRpcClient.command
+    tools_index = FakeRpcClient.command.index("--tools")
+    assert FakeRpcClient.command[tools_index + 1] == ""
     assert "Pull request: #373 Fix LEDs" in (FakeRpcClient.prompt or "")
     assert f"Review the exact diff {'a' * 40}...{'b' * 40}" in (FakeRpcClient.prompt or "")
     assert "Do not classify or label the pull request" in (FakeRpcClient.prompt or "")
     assert "@dderg requested @roboserval as a reviewer through GitHub reviewer assignment" in (
         FakeRpcClient.prompt or ""
     )
+    assert "<untrusted-pull-request-diff>\ndiff --git a/led.py b/led.py" in (FakeRpcClient.prompt or "")
 
 
 def _prepared_settings(tmp_path: Path, monkeypatch: Any) -> BotSettings:
