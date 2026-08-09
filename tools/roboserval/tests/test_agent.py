@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -217,6 +218,82 @@ def test_pull_request_review_uses_exact_revision_and_posts_comment(tmp_path: Pat
         FakeRpcClient.prompt or ""
     )
     assert "<untrusted-pull-request-diff>\ndiff --git a/led.py b/led.py" in (FakeRpcClient.prompt or "")
+
+
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ("git", *args),
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _review_context(base_sha: str, head_sha: str) -> PullRequestContext:
+    return PullRequestContext(
+        373,
+        "Fix LEDs",
+        "",
+        "https://github.com/dderg/serval/pull/373",
+        "main",
+        base_sha,
+        "fix-leds",
+        head_sha,
+    )
+
+
+def test_review_diff_renders_exact_committed_revision(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.name", "RoboServal Test")
+    _git(tmp_path, "config", "user.email", "roboserval@example.test")
+    source = tmp_path / "led.py"
+    source.write_text("brightness = 1\n")
+    _git(tmp_path, "add", "led.py")
+    _git(tmp_path, "commit", "-qm", "base")
+    base_sha = _git(tmp_path, "rev-parse", "HEAD")
+    source.write_text("brightness = 2\n")
+    _git(tmp_path, "commit", "-qam", "head")
+    head_sha = _git(tmp_path, "rev-parse", "HEAD")
+    source.write_text("provider_key = 'must-not-appear'\n")
+
+    rendered = agent_module._review_diff(tmp_path, _review_context(base_sha, head_sha))
+
+    assert "-brightness = 1" in rendered
+    assert "+brightness = 2" in rendered
+    assert "must-not-appear" not in rendered
+
+
+def test_review_diff_fails_loudly_when_too_large(tmp_path: Path, monkeypatch: Any) -> None:
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.name", "RoboServal Test")
+    _git(tmp_path, "config", "user.email", "roboserval@example.test")
+    source = tmp_path / "large.py"
+    source.write_text("small = True\n")
+    _git(tmp_path, "add", "large.py")
+    _git(tmp_path, "commit", "-qm", "base")
+    base_sha = _git(tmp_path, "rev-parse", "HEAD")
+    source.write_text("large = '" + ("x" * 100) + "'\n")
+    _git(tmp_path, "commit", "-qam", "head")
+    head_sha = _git(tmp_path, "rev-parse", "HEAD")
+    monkeypatch.setattr(agent_module, "_MAX_REVIEW_DIFF_BYTES", 16)
+
+    with pytest.raises(AgentFailure, match="limit is 16 bytes"):
+        agent_module._review_diff(tmp_path, _review_context(base_sha, head_sha))
+
+
+def test_review_diff_fails_loudly_when_revision_is_missing(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.name", "RoboServal Test")
+    _git(tmp_path, "config", "user.email", "roboserval@example.test")
+    source = tmp_path / "led.py"
+    source.write_text("brightness = 1\n")
+    _git(tmp_path, "add", "led.py")
+    _git(tmp_path, "commit", "-qm", "head")
+    head_sha = _git(tmp_path, "rev-parse", "HEAD")
+
+    with pytest.raises(AgentFailure, match="failed to render pull request diff"):
+        agent_module._review_diff(tmp_path, _review_context("f" * 40, head_sha))
 
 
 def _prepared_settings(tmp_path: Path, monkeypatch: Any) -> BotSettings:
