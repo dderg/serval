@@ -348,6 +348,9 @@ def test_workspace_upgrade_adopts_legacy_namespace_with_new_pool(tmp_path: Path)
     assert (workspace / "state.txt").read_text() == "one\n"
     assert stat.S_IMODE(namespace.stat().st_mode) == 0o755
     pool = _pool_for(tmp_path)
+    pool.chmod(0o750)
+    manager.sync("owner/repo", "main", "secret-token", issue_number=7)
+    assert stat.S_IMODE(pool.stat().st_mode) == 0o755
     assert (pool / "config").is_file()
     assert stat.S_IMODE((pool / "config").stat().st_mode) & 0o022 == 0
 

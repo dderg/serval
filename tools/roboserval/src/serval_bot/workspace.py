@@ -213,6 +213,7 @@ def _validate_repo_control(repo: Path, *, allow_slots: bool, bare: bool = False)
 
 def _secure_pool(pool: Path) -> None:
     """Normalize the shared pool to root-owned, world-readable, non-group-writable."""
+    pool.chmod(0o755)
     hooks = pool / "hooks"
     if hooks.is_symlink() or hooks.is_file():
         hooks.unlink()
