@@ -64,7 +64,7 @@ and `query-logs` skills.
 # Git
 
 Never rewrite git history, never amend commits, never force-push.
-Our "main" branch we create branches from and open pull requests to is "main"
+Create branches from `main` and open pull requests against `main`.
 
 # Snapshots
 
