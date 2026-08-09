@@ -3,7 +3,6 @@ from __future__ import annotations
 import tomllib
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
 from typing import Any
 
 
@@ -51,9 +50,8 @@ class PolicySet:
     repositories: dict[str, RepositoryPolicy]
 
     @classmethod
-    def load(cls, path: Path) -> PolicySet:
-        with path.open("rb") as stream:
-            raw = tomllib.load(stream)
+    def parse(cls, content: str) -> PolicySet:
+        raw = tomllib.loads(content)
         repositories = raw.get("repositories")
         if not isinstance(repositories, dict) or not repositories:
             raise PolicyError('policy must define at least one [repositories."owner/repo"] table')

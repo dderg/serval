@@ -51,7 +51,7 @@ def test_task_timeout_covers_full_agent_turn(tmp_path: Path, monkeypatch: Any) -
     settings = BotSettings(
         proxy_url=None,
         proxy_hmac_key=None,
-        policy_path=tmp_path / "repositories.toml",
+        policy_toml='[repositories."dderg/serval"]',
         data_dir=tmp_path,
         model="test/model",
         provider=None,

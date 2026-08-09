@@ -15,7 +15,7 @@ from serval_bot.server import create_app
 def build_app():
     settings = BotSettings.from_env()
     settings.ensure_paths()
-    policies = PolicySet.load(settings.policy_path)
+    policies = PolicySet.parse(settings.policy_toml)
     database = Database(settings.data_dir / "serval-bot.sqlite")
     proxy = (
         ProxyClient(settings.proxy_url, settings.proxy_hmac_key)

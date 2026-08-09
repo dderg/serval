@@ -32,7 +32,7 @@ def _positive_int(name: str, default: int) -> int:
 class BotSettings:
     proxy_url: str | None
     proxy_hmac_key: str | None
-    policy_path: Path
+    policy_toml: str
     data_dir: Path
     model: str
     provider: str | None
@@ -56,7 +56,7 @@ class BotSettings:
         return cls(
             proxy_url=proxy_url,
             proxy_hmac_key=proxy_key,
-            policy_path=Path(os.environ.get("SERVAL_BOT_POLICY_PATH", "/config/repositories.toml")),
+            policy_toml=_required("SERVAL_BOT_REPOSITORY_POLICY"),
             data_dir=Path(os.environ.get("SERVAL_BOT_DATA_DIR", "/data")),
             model=_required("SERVAL_BOT_MODEL"),
             provider=os.environ.get("SERVAL_BOT_PROVIDER", "").strip() or None,

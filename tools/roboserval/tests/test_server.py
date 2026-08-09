@@ -35,7 +35,7 @@ def _settings(tmp_path: Path) -> BotSettings:
     return BotSettings(
         proxy_url=None,
         proxy_hmac_key=None,
-        policy_path=tmp_path / "policy.toml",
+        policy_toml='[repositories."dderg/serval"]',
         data_dir=tmp_path,
         model="test/model",
         provider=None,

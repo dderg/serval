@@ -5,7 +5,12 @@ services:
     environment:
       SERVAL_BOT_PROXY_URL: http://github-proxy:8081
       SERVAL_BOT_PROXY_HMAC_KEY: ${SERVAL_BOT_PROXY_HMAC_KEY:?required}
-      SERVAL_BOT_POLICY_PATH: /config/repositories.toml
+      SERVAL_BOT_REPOSITORY_POLICY: |
+        [repositories."dderg/serval"]
+        mode = "triage"
+        bot_login = "roboserval"
+        maintainers = ["dderg"]
+        sim_workflow = "ci-sim-e2e.yaml"
       SERVAL_BOT_DATA_DIR: /data
       PI_CODING_AGENT_DIR: /data/omp-agent
       SERVAL_BOT_MODEL: ${SERVAL_BOT_MODEL:?required}
@@ -18,9 +23,6 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
     volumes:
       - bot_data:/data
-    configs:
-      - source: repository_policy
-        target: /config/repositories.toml
     ports:
       - "127.0.0.1:${SERVAL_BOT_PORT:-6543}:8080"
     networks:
@@ -53,9 +55,6 @@ networks:
 volumes:
   bot_data: {}
 
-configs:
-  repository_policy:
-    file: ./repositories.toml
 
 secrets:
   github_token:
