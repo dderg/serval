@@ -403,7 +403,10 @@ class EngineCommandChannel:
     def _reqclock_holds_or_warns(self, command_name, reqclock, resend):
         if self._held_until_timer_horizon(resend, reqclock):
             return True
-        self._warn_if_deadline_margin_thin(command_name, reqclock)
+        # This sentinel is a priority marker, not a clock deadline; it has no
+        # deadline margin to evaluate.
+        if reqclock != BACKGROUND_PRIORITY_CLOCK:
+            self._warn_if_deadline_margin_thin(command_name, reqclock)
         return False
 
     def _warn_if_deadline_margin_thin(self, command_name, reqclock):
