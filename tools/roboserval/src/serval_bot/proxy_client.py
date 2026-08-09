@@ -64,6 +64,27 @@ class ProxyClient:
     def post_comment(self, repo: str, issue_number: int, body: str) -> dict[str, Any]:
         return self._request("/github/comment", {"repo": repo, "issue_number": issue_number, "body": body})
 
+    def submit_review(
+        self,
+        repo: str,
+        pull_number: int,
+        commit_id: str,
+        event: str,
+        body: str,
+        comments: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return self._request(
+            "/github/review",
+            {
+                "repo": repo,
+                "pull_number": pull_number,
+                "commit_id": commit_id,
+                "event": event,
+                "body": body,
+                "comments": comments,
+            },
+        )
+
     def search_issues(self, repo: str, query: str) -> dict[str, Any]:
         return self._request("/github/search-issues", {"repo": repo, "query": query})
 

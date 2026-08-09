@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from serval_bot.actions import ActionDenied, ActionGateway, parse_sim_directive
+from serval_bot.actions import ActionDenied, ActionGateway, parse_sim_directive, reviewable_diff_lines
 from serval_bot.database import ActionConflict, Database, Event
 from serval_bot.policy import Mode, RepositoryPolicy
 
@@ -25,6 +25,18 @@ class FakeProxy:
     def post_comment(self, repo: str, issue_number: int, body: str) -> dict:
         self.calls.append(("comment", repo, issue_number, body))
         return {"id": 1, "url": "https://example.test/comment"}
+
+    def submit_review(
+        self,
+        repo: str,
+        pull_number: int,
+        commit_id: str,
+        event: str,
+        body: str,
+        comments: list[dict],
+    ) -> dict:
+        self.calls.append(("review", repo, pull_number, commit_id, event, body, comments))
+        return {"id": 2, "url": "https://example.test/review", "state": event}
 
     def search_issues(self, repo: str, query: str) -> dict:
         self.calls.append(("search", repo, query))
@@ -97,8 +109,9 @@ def _gateway(
     event: Event,
     mode: Mode,
     proxy: FakeProxy | None = None,
+    review_lines: frozenset[tuple[str, int, str]] = frozenset(),
 ) -> ActionGateway:
-    return ActionGateway(database, event, _policy(mode), "trunk", proxy)
+    return ActionGateway(database, event, _policy(mode), "trunk", proxy, review_lines)
 
 
 _SIM_SHA = "a" * 40
@@ -136,6 +149,98 @@ def test_triage_mode_applies_comment(tmp_path: Path) -> None:
         assert all(action.state == "applied" for action in actions)
     finally:
         database.close()
+
+
+def _review_event(delivery_id: str = "review-delivery") -> Event:
+    return Event(
+        delivery_id,
+        "pull_request_review.requested",
+        "dderg/serval",
+        7,
+        "dderg",
+        {"pull_request": {"number": 7, "head": {"sha": "b" * 40}}},
+        "running",
+        1,
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("decision", "comments"),
+    [
+        ("APPROVE", []),
+        (
+            "REQUEST_CHANGES",
+            [{"path": "src/main.py", "line": 12, "side": "RIGHT", "body": "Handle the error here."}],
+        ),
+    ],
+)
+def test_native_pull_request_review_applies(
+    tmp_path: Path,
+    decision: str,
+    comments: list[dict],
+) -> None:
+    database = Database(tmp_path / f"{decision}.sqlite")
+    proxy = FakeProxy()
+    try:
+        event = _claimed(database, _review_event(f"review-{decision}"))
+        result = json.loads(
+            _gateway(
+                database,
+                event,
+                Mode.TRIAGE,
+                proxy,
+                frozenset({("src/main.py", 12, "RIGHT")}),
+            ).submit_review(decision, "Review summary", comments)
+        )
+        assert result["state"] == "applied"
+        assert proxy.calls == [("review", "dderg/serval", 7, "b" * 40, decision, "Review summary", comments)]
+        assert database.actions_for_issue(event.repo, event.issue_number)[0].kind == "review"
+    finally:
+        database.close()
+
+
+def test_native_pull_request_review_rejects_invalid_inline_location(tmp_path: Path) -> None:
+    database = Database(tmp_path / "review.sqlite")
+    proxy = FakeProxy()
+    try:
+        event = _claimed(database, _review_event())
+        comment = {"path": "src/main.py", "line": 99, "side": "RIGHT", "body": "Not in this diff."}
+        with pytest.raises(ActionDenied, match="outside the supplied diff"):
+            _gateway(
+                database,
+                event,
+                Mode.TRIAGE,
+                proxy,
+                frozenset({("src/main.py", 12, "RIGHT")}),
+            ).submit_review("REQUEST_CHANGES", "Review summary", [comment])
+        assert proxy.calls == []
+        assert database.actions_for_issue(event.repo, event.issue_number) == []
+    finally:
+        database.close()
+
+
+def test_reviewable_diff_lines_maps_both_sides() -> None:
+    diff = """\
+diff --git a/src/main.py b/src/main.py
+--- a/src/main.py
++++ b/src/main.py
+@@ -10,4 +10,4 @@
+ keep
+-old
++new
+--- removed heading
++++ added heading
+"""
+    assert reviewable_diff_lines(diff) == frozenset(
+        {
+            ("src/main.py", 10, "RIGHT"),
+            ("src/main.py", 11, "LEFT"),
+            ("src/main.py", 11, "RIGHT"),
+            ("src/main.py", 12, "LEFT"),
+            ("src/main.py", 12, "RIGHT"),
+        }
+    )
 
 
 def test_opened_issue_exactly_one_classify_then_one_comment(tmp_path: Path) -> None:

@@ -44,6 +44,56 @@ def parse_sim_directive(bot_login: str, body: str) -> bool:
 
 _SIM_REF_RE = re.compile(r"farm/(?P<issue>[0-9]+)-(?P<slug>[a-z0-9]+(?:-[a-z0-9]+)*)")
 _SIM_HEAD_SHA_RE = re.compile(r"[0-9a-f]{40}")
+_DIFF_HUNK_RE = re.compile(r"^@@ -(?P<old>[0-9]+)(?:,[0-9]+)? \+(?P<new>[0-9]+)(?:,[0-9]+)? @@")
+
+
+def reviewable_diff_lines(diff: str) -> frozenset[tuple[str, int, str]]:
+    old_path: str | None = None
+    new_path: str | None = None
+    old_line: int | None = None
+    new_line: int | None = None
+    lines: set[tuple[str, int, str]] = set()
+    for text in diff.splitlines():
+        if text.startswith("diff --git "):
+            old_path = None
+            new_path = None
+            old_line = None
+            new_line = None
+            continue
+        if old_line is None and new_line is None and text.startswith("--- "):
+            raw = text[4:]
+            old_path = None if raw == "/dev/null" else raw.removeprefix("a/")
+            continue
+        if old_line is None and new_line is None and text.startswith("+++ "):
+            raw = text[4:]
+            new_path = None if raw == "/dev/null" else raw.removeprefix("b/")
+            continue
+        if text.startswith("@@ "):
+            match = _DIFF_HUNK_RE.match(text)
+            if match is None:
+                old_line = None
+                new_line = None
+            else:
+                old_line = int(match.group("old"))
+                new_line = int(match.group("new"))
+            continue
+        if old_line is None or new_line is None or not text:
+            continue
+        prefix = text[0]
+        if prefix == " ":
+            if new_path is not None:
+                lines.add((new_path, new_line, "RIGHT"))
+            old_line += 1
+            new_line += 1
+        elif prefix == "-":
+            if old_path is not None:
+                lines.add((old_path, old_line, "LEFT"))
+            old_line += 1
+        elif prefix == "+":
+            if new_path is not None:
+                lines.add((new_path, new_line, "RIGHT"))
+            new_line += 1
+    return frozenset(lines)
 
 
 def is_simulator_directive(event: Event, policy: RepositoryPolicy) -> bool:
@@ -95,6 +145,7 @@ class ActionGateway:
     policy: RepositoryPolicy
     default_branch: str
     proxy: ProxyClient | None
+    review_lines: frozenset[tuple[str, int, str]] = frozenset()
 
     def classify(self, primary: str, priority: str | None, area: list[str], rationale: str) -> str:
         if self.event.event_type != "issues.opened":
@@ -151,6 +202,66 @@ class ActionGateway:
             "comment",
             {"body": normalized},
             lambda proxy: proxy.post_comment(self.event.repo, self.event.issue_number, normalized),
+        )
+
+    def submit_review(self, decision: str, body: str, comments: list[dict[str, Any]]) -> str:
+        if self.event.event_type != "pull_request_review.requested":
+            raise ActionDenied("pull request reviews are only permitted for review requests")
+        if decision not in {"APPROVE", "REQUEST_CHANGES"}:
+            raise ActionDenied(f"unsupported pull request review decision: {decision}")
+        normalized_body = body.strip()
+        if not normalized_body:
+            raise ActionDenied("pull request review body is empty")
+        pull_request = self.event.payload.get("pull_request")
+        if not isinstance(pull_request, dict):
+            raise ActionDenied("pull request review event has no pull request")
+        number = pull_request.get("number")
+        head = pull_request.get("head")
+        head_sha = head.get("sha") if isinstance(head, dict) else None
+        if not isinstance(number, int) or number != self.event.issue_number:
+            raise ActionDenied("pull request review event has an invalid pull request number")
+        if not isinstance(head_sha, str) or _SIM_HEAD_SHA_RE.fullmatch(head_sha) is None:
+            raise ActionDenied("pull request review event has an invalid head SHA")
+        if len(comments) > 100:
+            raise ActionDenied("pull request review exceeds 100 inline comments")
+        normalized_comments: list[dict[str, Any]] = []
+        locations: set[tuple[str, int, str]] = set()
+        for comment in comments:
+            path = comment.get("path")
+            line = comment.get("line")
+            side = comment.get("side")
+            comment_body = comment.get("body")
+            location = (path, line, side)
+            if (
+                not isinstance(path, str)
+                or not isinstance(line, int)
+                or isinstance(line, bool)
+                or line <= 0
+                or side not in {"LEFT", "RIGHT"}
+                or not isinstance(comment_body, str)
+                or not comment_body.strip()
+            ):
+                raise ActionDenied(f"invalid inline review comment: {comment!r}")
+            if location not in self.review_lines:
+                raise ActionDenied(f"inline review comment is outside the supplied diff: {path}:{line}:{side}")
+            if location in locations:
+                raise ActionDenied(f"duplicate inline review location: {path}:{line}:{side}")
+            locations.add(location)
+            normalized_comments.append({"path": path, "line": line, "side": side, "body": comment_body.strip()})
+        self._require_unique("review")
+        arguments = {"decision": decision, "body": normalized_body, "comments": normalized_comments}
+        return self._mutate(
+            Capability.REVIEW,
+            "review",
+            arguments,
+            lambda proxy: proxy.submit_review(
+                self.event.repo,
+                number,
+                head_sha,
+                decision,
+                normalized_body,
+                normalized_comments,
+            ),
         )
 
     def search_issues(self, query: str) -> str:

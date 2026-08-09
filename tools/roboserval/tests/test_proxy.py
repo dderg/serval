@@ -14,6 +14,7 @@ from serval_bot.proxy import (
     GitHubApi,
     GitHubFailure,
     PollRequest,
+    PullReviewRequest,
     SimResultRequest,
     WorkspaceRequest,
     create_proxy_app,
@@ -50,6 +51,10 @@ class FakeGitHubApi:
     async def post_comment(self, request) -> dict[str, Any]:
         self.calls.append("post_comment")
         return {"id": 1, "url": "https://example.test/comment"}
+
+    async def submit_review(self, request) -> dict[str, Any]:
+        self.calls.append("submit_review")
+        return {"id": 2, "url": "https://example.test/review", "state": request.event}
 
     async def search_issues(self, request) -> dict[str, Any]:
         self.calls.append("search_issues")
@@ -116,6 +121,14 @@ _ENDPOINT_PAYLOADS = {
     "/github/sync-workspace": {"repo": "dderg/serval"},
     "/github/add-labels": {"repo": "dderg/serval", "issue_number": 7, "labels": ["bug"]},
     "/github/comment": {"repo": "dderg/serval", "issue_number": 7, "body": "hello"},
+    "/github/review": {
+        "repo": "dderg/serval",
+        "pull_number": 7,
+        "commit_id": "b" * 40,
+        "event": "REQUEST_CHANGES",
+        "body": "Needs correction.",
+        "comments": [{"path": "src/main.py", "line": 12, "side": "RIGHT", "body": "Fix this."}],
+    },
     "/github/search-issues": {"repo": "dderg/serval", "query": "is:open"},
     "/github/poll-events": {"repo": "dderg/serval", "since": "2026-08-09T12:00:00Z", "bot_login": "roboserval"},
     "/github/dispatch-sim": {
@@ -168,6 +181,7 @@ async def test_proxy_verifies_hmac_before_repo_allowlist() -> None:
     {
         "/github/add-labels": _ENDPOINT_PAYLOADS["/github/add-labels"],
         "/github/comment": _ENDPOINT_PAYLOADS["/github/comment"],
+        "/github/review": _ENDPOINT_PAYLOADS["/github/review"],
         "/github/dispatch-sim": _ENDPOINT_PAYLOADS["/github/dispatch-sim"],
         "/github/sim-result": _ENDPOINT_PAYLOADS["/github/sim-result"],
     }.items(),
@@ -219,6 +233,43 @@ async def test_proxy_applies_signed_label_request() -> None:
         response = await client.post("/github/add-labels", content=body, headers=headers)
     assert response.status_code == 200, response.text
     assert api.labels == ["bug"]
+
+
+@pytest.mark.asyncio
+async def test_github_api_submits_native_review_with_inline_comments() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"id": 2, "html_url": "https://example.test/review", "state": "CHANGES_REQUESTED"},
+        )
+
+    api = GitHubApi(StaticTokenProvider(), 20_000, httpx.MockTransport(handler))
+    try:
+        result = await api.submit_review(
+            PullReviewRequest(
+                repo="dderg/serval",
+                pull_number=7,
+                commit_id="b" * 40,
+                event="REQUEST_CHANGES",
+                body="Needs correction.",
+                comments=[{"path": "src/main.py", "line": 12, "side": "RIGHT", "body": "Fix this."}],
+            )
+        )
+    finally:
+        await api.close()
+
+    assert result == {"id": 2, "url": "https://example.test/review", "state": "CHANGES_REQUESTED"}
+    assert requests[0].method == "POST"
+    assert requests[0].url.path == "/repos/dderg/serval/pulls/7/reviews"
+    assert json.loads(requests[0].content) == {
+        "commit_id": "b" * 40,
+        "event": "REQUEST_CHANGES",
+        "body": "Needs correction.",
+        "comments": [{"path": "src/main.py", "line": 12, "side": "RIGHT", "body": "Fix this."}],
+    }
 
 
 @pytest.mark.asyncio

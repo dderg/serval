@@ -19,14 +19,19 @@ class Mode(StrEnum):
 class Capability(StrEnum):
     LABEL = "label"
     COMMENT = "comment"
+    REVIEW = "review"
     DISPATCH_SIM = "dispatch_sim"
     READ_SIM = "read_sim"
 
 
 _CAPABILITIES: dict[Mode, frozenset[Capability]] = {
     Mode.SHADOW: frozenset(),
-    Mode.TRIAGE: frozenset({Capability.LABEL, Capability.COMMENT, Capability.DISPATCH_SIM, Capability.READ_SIM}),
-    Mode.MAINTAINER: frozenset({Capability.LABEL, Capability.COMMENT, Capability.DISPATCH_SIM, Capability.READ_SIM}),
+    Mode.TRIAGE: frozenset(
+        {Capability.LABEL, Capability.COMMENT, Capability.REVIEW, Capability.DISPATCH_SIM, Capability.READ_SIM}
+    ),
+    Mode.MAINTAINER: frozenset(
+        {Capability.LABEL, Capability.COMMENT, Capability.REVIEW, Capability.DISPATCH_SIM, Capability.READ_SIM}
+    ),
 }
 
 

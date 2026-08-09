@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -27,6 +28,10 @@ from serval_bot.policy import Mode, PolicySet, RepositoryPolicy
 
 def _comment_action() -> SimpleNamespace:
     return SimpleNamespace(kind="comment", state="applied")
+
+
+def _review_action() -> SimpleNamespace:
+    return SimpleNamespace(kind="review", state="applied")
 
 
 def _classify_action() -> SimpleNamespace:
@@ -133,7 +138,7 @@ def test_task_timeout_covers_full_agent_turn(tmp_path: Path, monkeypatch: Any) -
     assert "Default branch: trunk" in FakeRpcClient.prompt
 
 
-def test_pull_request_review_uses_exact_revision_and_posts_comment(tmp_path: Path, monkeypatch: Any) -> None:
+def test_pull_request_review_uses_exact_revision_and_native_review(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "workspaces" / "dderg--serval"
     workspace.mkdir(parents=True)
     prepared: list[PullRequestContext | None] = []
@@ -201,7 +206,7 @@ def test_pull_request_review_uses_exact_revision_and_posts_comment(tmp_path: Pat
 
     class ReviewDatabase:
         def actions_for_delivery(self, delivery_id: str) -> list[Any]:
-            return [_comment_action()]
+            return [_review_action()]
 
     answer = TriageAgent(settings, policies, ReviewDatabase(), None).run(event)
 
@@ -216,6 +221,8 @@ def test_pull_request_review_uses_exact_revision_and_posts_comment(tmp_path: Pat
     assert "@dderg requested @roboserval as a reviewer through GitHub reviewer assignment" in (
         FakeRpcClient.prompt or ""
     )
+    assert "REQUEST_CHANGES for blocking findings and APPROVE otherwise" in (FakeRpcClient.prompt or "")
+    assert "exact diff lines" in (FakeRpcClient.prompt or "")
     assert "<untrusted-pull-request-diff>\ndiff --git a/led.py b/led.py" in (FakeRpcClient.prompt or "")
 
 
@@ -611,13 +618,49 @@ def test_pr_review_tools_exclude_classify(tmp_path: Path) -> None:
             attempts=1,
             error=None,
         )
-        names = [
-            tool.name
-            for tool in TriageAgent._tools(_gateway(database, event), _shadow_policies().require("dderg/serval"), event)
-        ]
+        tools = TriageAgent._tools(
+            _gateway(database, event),
+            _shadow_policies().require("dderg/serval"),
+            event,
+        )
+        names = [tool.name for tool in tools]
         assert "classify_issue" not in names
-        assert "post_issue_comment" in names
+        assert "post_issue_comment" not in names
+        assert "submit_pull_request_review" in names
+        review = next(tool for tool in tools if tool.name == "submit_pull_request_review")
+        assert review.parameters["properties"]["decision"]["enum"] == ["APPROVE", "REQUEST_CHANGES"]
+        assert review.parameters["required"] == ["decision", "body", "comments"]
+        assert review.parameters["properties"]["comments"]["items"]["required"] == ["path", "line", "side", "body"]
         assert "search_issues" in names
+    finally:
+        database.close()
+
+
+def test_pull_request_followup_uses_comment_not_native_review(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    try:
+        review_event = _pr_sim_directive_event("delivery-pr-followup", 391)
+        event = replace(
+            review_event,
+            event_type="issue_comment.created",
+            payload={**review_event.payload, "comment": {"body": "@roboserval can you explain this?"}},
+        )
+        tools = TriageAgent._tools(
+            _gateway(database, event),
+            _shadow_policies().require("dderg/serval"),
+            event,
+        )
+        names = [tool.name for tool in tools]
+        assert "post_issue_comment" in names
+        assert "submit_pull_request_review" not in names
+        pull_request = _review_context("a" * 40, "b" * 40)
+        settings = _prepared_settings(tmp_path, monkeypatch)
+        policies = _shadow_policies()
+        assert _agent(settings, policies, [_comment_action()])._completed(event, pull_request) is True
+        assert _agent(settings, policies, [_review_action()])._completed(event, pull_request) is False
     finally:
         database.close()
 
@@ -674,6 +717,12 @@ def test_ordinary_followup_completion_requires_comment_only(tmp_path: Path, monk
     opened = _opened_event("delivery-complete-opened", 385)
     assert _agent(settings, policies, [_classify_action(), _comment_action()])._completed(opened, None) is True
     assert _agent(settings, policies, [_comment_action()])._completed(opened, None) is False
+    pull_event = _pr_sim_directive_event("delivery-complete-review", 390)
+    pull_event.payload["comment"] = {"body": "@roboserval review"}
+    pull_request = PullRequestContext.from_event(pull_event)
+    assert pull_request is not None
+    assert _agent(settings, policies, [_review_action()])._completed(pull_event, pull_request) is True
+    assert _agent(settings, policies, [_comment_action()])._completed(pull_event, pull_request) is False
 
 
 def test_simulator_directive_reminder_stays_concise(tmp_path: Path, monkeypatch: Any) -> None:

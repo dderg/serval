@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import httpx
 import uvicorn
@@ -54,6 +54,21 @@ class AddLabelsRequest(IssueRequest):
 
 class CommentRequest(IssueRequest):
     body: str = Field(min_length=1, max_length=65_000)
+
+
+class ReviewComment(BaseModel):
+    path: str = Field(min_length=1, max_length=4096)
+    line: int = Field(gt=0)
+    side: Literal["LEFT", "RIGHT"]
+    body: str = Field(min_length=1, max_length=65_000)
+
+
+class PullReviewRequest(RepositoryRequest):
+    pull_number: int = Field(gt=0)
+    commit_id: str = Field(pattern=r"^[0-9a-f]{40}$")
+    event: Literal["APPROVE", "REQUEST_CHANGES"]
+    body: str = Field(min_length=1, max_length=65_000)
+    comments: list[ReviewComment] = Field(default_factory=list, max_length=100)
 
 
 class SearchRequest(RepositoryRequest):
@@ -170,6 +185,20 @@ class GitHubApi:
         )
         data = response.json()
         return {"id": data["id"], "url": data["html_url"]}
+
+    async def submit_review(self, request: PullReviewRequest) -> dict[str, Any]:
+        response = await self.request(
+            "POST",
+            f"/repos/{request.repo}/pulls/{request.pull_number}/reviews",
+            json={
+                "commit_id": request.commit_id,
+                "event": request.event,
+                "body": request.body,
+                "comments": [comment.model_dump() for comment in request.comments],
+            },
+        )
+        data = response.json()
+        return {"id": data["id"], "url": data["html_url"], "state": data["state"]}
 
     async def search_issues(self, request: SearchRequest) -> dict[str, Any]:
         response = await self.request(
@@ -607,6 +636,12 @@ def create_proxy_app(settings: ProxySettings, api: GitHubApi | None = None) -> F
         _validated_repo(request)
         _authorize_repo(settings, request, _ACTIVE_MODES)
         return await github.post_comment(request)
+
+    @app.post("/github/review", dependencies=[Depends(authenticate)])
+    async def review(request: PullReviewRequest) -> dict[str, Any]:
+        _validated_repo(request)
+        _authorize_repo(settings, request, _ACTIVE_MODES)
+        return await github.submit_review(request)
 
     @app.post("/github/search-issues", dependencies=[Depends(authenticate)])
     async def search(request: SearchRequest) -> dict[str, Any]:
