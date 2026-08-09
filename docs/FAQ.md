@@ -110,9 +110,6 @@ one of these slower boards anyway, consider using the "virtual_sdcard"
 feature when printing (see
 [config reference](Config_Reference.md#virtual_sdcard) for details).
 
-For running on the Beaglebone, see the
-[Beaglebone specific installation instructions](Beaglebone.md).
-
 Kalico has been run on other machines. The Kalico host software only
 requires Python running on a Linux (or similar) computer. However, if
 you wish to run it on a different machine you will need Linux admin

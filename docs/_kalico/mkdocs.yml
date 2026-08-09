@@ -142,7 +142,6 @@ nav:
   - Slicers:
     - Slicers.md
     - Exclude_Object.md
-    - Using_PWM_Tools.md
   - Developer Documentation:
     - API_Server.md
     - CANBUS_protocol.md
@@ -152,7 +151,6 @@ nav:
     - Example_Configs.md
     - SDCard_Updates.md
     - RPi_microcontroller.md
-    - Beaglebone.md
     - Bootloaders.md
     - Bootloader_Entry.md
     - CANBUS.md
