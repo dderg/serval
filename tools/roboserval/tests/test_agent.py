@@ -270,6 +270,31 @@ def test_review_diff_renders_exact_committed_revision(tmp_path: Path) -> None:
     assert "must-not-appear" not in rendered
 
 
+def test_review_diff_allows_isolated_workspace_owner(tmp_path: Path, monkeypatch: Any) -> None:
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.name", "RoboServal Test")
+    _git(tmp_path, "config", "user.email", "roboserval@example.test")
+    source = tmp_path / "led.py"
+    source.write_text("brightness = 1\n")
+    _git(tmp_path, "add", "led.py")
+    _git(tmp_path, "commit", "-qm", "base")
+    base_sha = _git(tmp_path, "rev-parse", "HEAD")
+    source.write_text("brightness = 2\n")
+    _git(tmp_path, "commit", "-qam", "head")
+    head_sha = _git(tmp_path, "rev-parse", "HEAD")
+    real_run = subprocess.run
+
+    def assume_different_owner(*args: Any, **kwargs: Any) -> Any:
+        kwargs["env"] = {**kwargs["env"], "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1"}
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(agent_module.subprocess, "run", assume_different_owner)
+
+    rendered = agent_module._review_diff(tmp_path, _review_context(base_sha, head_sha))
+
+    assert "+brightness = 2" in rendered
+
+
 def test_review_diff_fails_loudly_when_too_large(tmp_path: Path, monkeypatch: Any) -> None:
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "config", "user.name", "RoboServal Test")

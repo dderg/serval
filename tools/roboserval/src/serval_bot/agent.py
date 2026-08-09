@@ -168,6 +168,8 @@ def _review_diff(workspace: Path, pull_request: PullRequestContext) -> str:
     result = subprocess.run(
         (
             "git",
+            "-c",
+            f"safe.directory={workspace}",
             "diff",
             "--no-ext-diff",
             "--no-textconv",
