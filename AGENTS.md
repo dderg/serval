@@ -17,6 +17,10 @@ Treat executable code and tests as the authority. Public configuration, G-code, 
 - `scripts/`: supported entry points; `ci.sh` is the gate dispatcher; `build-native.sh` builds host artifacts; `ci-build-mcu.sh` checks C+Rust firmware links.
 - `docs/`: MkDocs source. Update `docs/Overview.md` and `docs/_kalico/mkdocs.yml` for new public pages. `site/` is generated.
 
+## Repository skills
+
+Reusable project skills live in `.prime/agent/skills/`: `serval-development`, `serval-docs`, `serval-simulation`, and `serval-incident-response`. Agents should load the matching skill before acting in that domain; `AGENTS.md` remains the shared concise source of truth.
+
 ## Build/runtime contracts
 
 - Bootstrap Python: `uv sync --group dev` (Python 3.9+). Cargo within `rust/` uses `rust/rust-toolchain.toml`; do not casually change it.
