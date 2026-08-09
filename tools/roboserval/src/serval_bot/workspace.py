@@ -425,6 +425,24 @@ def _run(*command: str, cwd: Path, environment: dict[str, str]) -> str:
     return result.stdout.strip()
 
 
+def _is_ancestor(ancestor: str, descendant: str, *, cwd: Path, environment: dict[str, str]) -> bool:
+    result = subprocess.run(
+        ("git", "merge-base", "--is-ancestor", ancestor, descendant),
+        cwd=cwd,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=300,
+        check=False,
+    )
+    if result.returncode not in (0, 1):
+        output = (result.stdout + result.stderr)[-4000:]
+        raise WorkspaceFailure(
+            f"git command failed ({result.returncode}): git merge-base --is-ancestor {ancestor} {descendant}\n{output}"
+        )
+    return result.returncode == 0
+
+
 @dataclass(slots=True)
 class CredentialedWorkspace:
     root: Path
@@ -510,7 +528,8 @@ class CredentialedWorkspace:
         per-issue metadata recreated from the trusted pool first, so
         agent-controlled aliases, hooks, and transports never survive into the
         invocation. The workspace must be clean, checked out on the requested
-        farm branch at exactly expected_sha, its HEAD commit must carry the
+        farm branch at exactly expected_sha descending from the freshly
+        fetched upstream default branch, its HEAD commit must carry the
         [skip ci] marker (so ordinary push-triggered workflows stay off the
         agent branch), and it must not change anything under .github/workflows/
         relative to the resolved upstream default branch. The push sends that
@@ -547,6 +566,11 @@ class CredentialedWorkspace:
             head = _run("git", "rev-parse", "HEAD", cwd=workspace, environment=env)
             if head != expected_sha:
                 raise WorkspaceFailure(f"issue workspace head mismatch: expected {expected_sha}, got {head}")
+            if not _is_ancestor(f"refs/remotes/origin/{default_branch}", "HEAD", cwd=workspace, environment=env):
+                raise WorkspaceFailure(
+                    f"issue workspace HEAD does not descend from the upstream default branch {default_branch}: "
+                    "orphan, replaced, or stale-base histories cannot be published"
+                )
             message = _run("git", "log", "-1", "--format=%B", cwd=workspace, environment=env)
             if "[skip ci]" not in message:
                 raise WorkspaceFailure(

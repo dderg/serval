@@ -477,6 +477,43 @@ def test_workspace_publish_rejects_workflow_changes(tmp_path: Path) -> None:
     assert not _remote_has(remote, "refs/heads/farm/7-calib")
 
 
+def test_workspace_publish_rejects_orphan_history(tmp_path: Path) -> None:
+    remote, _seed = _make_remote(tmp_path)
+    manager = _manager(tmp_path, remote)
+    workspace = manager.sync("owner/repo", "main", "secret-token", issue_number=7)
+    # a parentless commit whose tree only differs from main by the repro file
+    _git(workspace, "checkout", "--orphan", "farm/7-calib")
+    (workspace / "repro.py").write_text("print('repro')\n")
+    _git(workspace, "add", "repro.py")
+    _git(workspace, "commit", "-m", "reproduce issue 7 [skip ci]")
+    head = _git_out(workspace, "rev-parse", "HEAD")
+
+    with pytest.raises(WorkspaceFailure, match="does not descend"):
+        manager.publish_issue("owner/repo", 7, "secret-token", ref="farm/7-calib", expected_sha=head)
+    assert not _remote_has(remote, "refs/heads/farm/7-calib")
+
+
+def test_workspace_publish_rejects_stale_base_history(tmp_path: Path) -> None:
+    remote, seed = _make_remote(tmp_path)
+    manager = _manager(tmp_path, remote)
+    workspace = manager.sync("owner/repo", "main", "secret-token", issue_number=7)
+    _git(workspace, "checkout", "-b", "farm/7-calib")
+    (workspace / "repro.py").write_text("print('repro')\n")
+    _git(workspace, "add", "repro.py")
+    _git(workspace, "commit", "-m", "reproduce issue 7 [skip ci]")
+    head = _git_out(workspace, "rev-parse", "HEAD")
+
+    # upstream advances while the agent still sits on the old base
+    (seed / "state.txt").write_text("updated upstream\n")
+    _git(seed, "add", "state.txt")
+    _git(seed, "commit", "-m", "upstream update")
+    _git(seed, "push", "origin", "main")
+
+    with pytest.raises(WorkspaceFailure, match="does not descend"):
+        manager.publish_issue("owner/repo", 7, "secret-token", ref="farm/7-calib", expected_sha=head)
+    assert not _remote_has(remote, "refs/heads/farm/7-calib")
+
+
 def test_workspace_publish_allows_non_workflow_reproduction_files(tmp_path: Path) -> None:
     remote, _seed = _make_remote(tmp_path)
     manager = _manager(tmp_path, remote)

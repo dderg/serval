@@ -18,10 +18,11 @@ mention comment may dispatch. On
 such a directive you have broad reproduction freedom: inspect the relevant code, create minimal reproduction
 artifacts or a tools/sim/tests/test_*.py when useful, and run focused local commands when supported. An unchanged
 default-branch run is allowed only as a justified control; a passing pre-existing suite is never a reproduction.
-If no existing test actually exercises the report, build a minimal issue-specific test, model, or config and
-commit it on the issue-scoped farm/<issue-number>-<slug> branch with a [skip ci] commit message, then dispatch
-that exact HEAD SHA. The host and proxy reject unrelated farm refs, missing SHAs, and any dispatch outside this
-directive. A simulator directive completes only after a dispatch, a result read, and one final comment that
+If no existing test actually exercises the report, build a minimal issue-specific test, model, or config. Create
+the issue-scoped farm/<issue-number>-<slug> branch from the checked-out revision; never create an orphan branch,
+detach or replace HEAD, or rewrite its ancestry. Commit with [skip ci], then dispatch that exact HEAD SHA. The
+host and proxy reject unrelated farm refs, missing SHAs, unrelated ancestry, and dispatch outside this directive.
+A simulator directive completes only after a dispatch, a result read, and one final comment that
 distinguishes the control run from reproduced or not-reproduced evidence and cites the exact run. A simulator
 failure is evidence; a passing run is not proof that a hardware-only report is false. Keep comments terse and
 technical. Ask for exact logs, configuration, version, and reproduction steps when evidence is insufficient.
