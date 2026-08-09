@@ -13,17 +13,22 @@ REQUIRED_CHECKS=(
   rust-loom
   rust-mcu-h7
   rust-mcu-f4
+  rust-mcu-g0
+  rust-mcu-f1
+  rust-no-stepper
   rust-cbindgen-drift
   rust-c-smoke
+  rust-ethercat-hw
   rust-deny
   rust-miri
   rust-panic-symbol-grep
   watchdog-canary
   # ci-build_test.yaml
   build
-  sim
   # ci-lintformat.yaml
   ruff
+  # ci-snapshot.yaml
+  snapshot
 )
 
 contexts_json="$(printf '%s\n' "${REQUIRED_CHECKS[@]}" | jq -R . | jq -s .)"
