@@ -25,7 +25,7 @@ what is exploratory, and the known limits:
 
 **Play with it in your browser** — the actual pipeline compiled to WASM;
 paste G-code, tweak config, watch it re-plan:
-[dderg.github.io/kalico/playground](https://dderg.github.io/kalico/playground/).
+[dderg.github.io/serval/playground](https://dderg.github.io/serval/playground/).
 
 **Try it on your printer** — add a remote, switch the branch, build,
 flash, migrate the config: [docs/Quickstart.md](docs/Quickstart.md).
@@ -328,7 +328,7 @@ native `ec_macb` driver.
   over a config × G-code matrix and diff the full output trajectory
   against committed baselines. Browser gallery for reviewing before/after.
 - **Playground** — the actual pipeline compiled to WASM:
-  [dderg.github.io/kalico/playground](https://dderg.github.io/kalico/playground/).
+  [dderg.github.io/serval/playground](https://dderg.github.io/serval/playground/).
   Paste G-code, tweak config, watch it re-plan in the browser.
 - **Structured logging** — host and MCU emit structured events
   (`events/*.jsonl`) instead of free-form log text, queryable with
