@@ -32,6 +32,11 @@ is taken. It defaults to 0 which causes it to act as if there is no debouncing.
 `scl_pin` and `sda_pin` options. Use `i2c_software_scl_pin` and
 `i2c_software_sda_pin` instead.
 
+20250425: The maximum `cycle_time` for pwm `[output_pin]`,
+`[pwm_cycle_time]`, `[pwm_tool]`, and similar config sections is now 3
+seconds (reduced from 5 seconds). The `maximum_mcu_duration` in
+`[pwm_tool]` is now also 3 seconds.
+
 20250816: The filament_switch_sensor adds a new option `debounce_delay` that
 takes a time in seconds to debounce the state of the switch before any action
 is taken. It defaults to 0 which causes it to act as if there is no debouncing.
@@ -115,6 +120,10 @@ settings).
 removed. Use the new
 [pwm_cycle_time](Config_Reference.md#pwm_cycle_time) module if it is
 necessary to dynamically change a pwm pin's cycle time.
+
+20240123: The output_pin `maximum_mcu_duration` parameter is
+deprecated. Use a [pwm_tool config section](Config_Reference.md#pwm_tool)
+instead. The option will be removed in the near future.
 
 20240123: The output_pin `static_value` parameter is deprecated.
 Replace with `value` and `shutdown_value` parameters.  The option will
