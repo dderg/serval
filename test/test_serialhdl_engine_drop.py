@@ -8,7 +8,11 @@ sys.path.insert(
 from fakes import FakeEngine, FakePrinter  # noqa: E402
 
 from klippy.engine_mcu import EngineMcu  # noqa: E402
-from klippy.serialhdl import EngineCommandChannel, error  # noqa: E402
+from klippy.serialhdl import (  # noqa: E402
+    BACKGROUND_PRIORITY_CLOCK,
+    EngineCommandChannel,
+    error,
+)
 
 TRANSPORT_CLOSED = RuntimeError("engine_send: transport closed")
 
@@ -67,6 +71,13 @@ def test_engine_get_clock_async_swallows_drop():
     sr = _reader(FakeEngine(raises=TRANSPORT_CLOSED))
     sr.engine_get_clock_async()
     assert sr._engine_detached is True
+
+
+def test_background_priority_command_is_sent_immediately():
+    engine = FakeEngine()
+    sr = _reader(engine)
+    sr.send(b"neopixel_update", reqclock=BACKGROUND_PRIORITY_CLOCK)
+    assert engine.calls[-1][0] == "engine_send"
 
 
 if __name__ == "__main__":
