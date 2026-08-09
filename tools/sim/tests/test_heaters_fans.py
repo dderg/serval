@@ -194,6 +194,16 @@ def test_heater_pid_flows(sim_world):
 
 def test_mpc_heater(sim_world):
     world = sim_world(_cfg_mpc, dual_mcu=False)
+    world.gcode_ok("M104 S100")
+    deadline = time.monotonic() + 5.0
+    power = 0.0
+    while time.monotonic() < deadline:
+        power = world.status({"extruder": None})["extruder"]["power"]
+        if power > 0.0:
+            break
+        time.sleep(0.1)
+    world.gcode_ok("M104 S0")
+    assert power > 0.0
     _extrude_preamble(world)
     world.gcode_ok(
         "MPC_SET HEATER=extruder FILAMENT_DENSITY=1.15 FILAMENT_HEAT_CAPACITY=2.20"
