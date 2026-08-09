@@ -95,7 +95,7 @@ What the port run established, kept for reference:
 
 ```bash
 cd ~/klipper
-git remote add serval https://github.com/alextverdyy/serval.git
+git remote add serval https://github.com/dderg/serval.git
 git fetch serval
 git checkout -b sota-motion serval/sota-motion
 ```

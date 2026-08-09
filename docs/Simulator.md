@@ -16,7 +16,7 @@ tools/sim/run.sh test -k homing          # focused E2E selection
 tools/sim/run.sh test --keep-logs        # retain worlds in .sim-logs/
 tools/sim/run.sh serve                    # long-lived printer for Moonraker
 tools/sim/run.sh shell                    # shell in image
-tools/sim/run.sh --branch sota-motion test
+tools/sim/run.sh test --branch sota-motion
 ```
 
 Docker BuildKit is required. The image tag is branch-specific so concurrent worktrees do not test a stale image. `--branch` builds an archived branch with current simulator tooling overlaid for comparison.

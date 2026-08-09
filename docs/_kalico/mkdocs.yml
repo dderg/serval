@@ -2,9 +2,9 @@
 
 # Site and directory configuration
 site_name: Serval Documentation
-site_url: https://alextverdyy.github.io/serval
-repo_url: https://github.com/alextverdyy/serval/
-repo_name: alextverdyy/serval
+site_url: https://dderg.github.io/serval
+repo_url: https://github.com/dderg/serval/
+repo_name: dderg/serval
 edit_uri: edit/sota-motion/docs/
 use_directory_urls: False
 docs_dir: '../'
