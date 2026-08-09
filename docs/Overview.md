@@ -1,10 +1,22 @@
-# Overview
+# Documentation overview
 
-Welcome to the Kalico documentation. If new to Kalico, start with
-the [features](Features.md) and [installation](Installation.md)
-documents.
+Serval documentation has two layers: the Serval motion stack and inherited Kalico/Klipper subsystem documentation. Start with [Documentation guide](Documentation_Guide.md) to understand their authority. For a printer using Serval motion, begin with [Quickstart](Quickstart.md), not the generic installation page.
 
-## Overview information
+## Serval motion
+
+- [README](../README.md): rationale and high-level capabilities.
+- [Quickstart](Quickstart.md): supported-board gate, host build, firmware matching, and first startup.
+- [Feature status](Feature_Status.md): real-hardware, simulator, and exploratory support tiers.
+- [Config migration](Config_Migration.md): transition from classic role-encoded configuration.
+- [Motion configuration reference](Config_Reference_Motion.md): complete current motion schema.
+- [Architecture](Architecture.md): host, native pipeline, protocol, and firmware boundaries.
+- [Developer guide](Development.md): builds, tests, simulator, and contribution workflow.
+
+## Inherited subsystem documentation
+
+The following references cover the broader Kalico-derived feature estate. Their workflow descriptions may name Kalico because they are inherited; where a page conflicts with Serval motion requirements, the Serval pages above win.
+
+## General information
 
 - [Features](Features.md): A high-level list of features in Kalico.
 - [FAQ](FAQ.md): Frequently asked questions.
@@ -63,6 +75,9 @@ communication with the Kalico developers.
 
 - [Motion configuration reference](Config_Reference_Motion.md): Current
   `[printer]`, `[kinematics]`, `[motor]`, `[axis]`, and post-processor schema.
+- [Architecture](Architecture.md): Serval pipeline and execution boundaries.
+- [Developer guide](Development.md): Native build, test, simulator, and review workflows.
+- [Documentation guide](Documentation_Guide.md): scope, authority, and maintenance rules.
 - [API Server](API_Server.md): Information on Kalico's command and
   control API.
 - [CAN bus protocol](CANBUS_protocol.md): Kalico CAN bus message

@@ -19,6 +19,10 @@ and install instructions: [README_KALICO.md](README_KALICO.md).
 what is exploratory, and the known limits:
 [docs/Feature_Status.md](docs/Feature_Status.md).
 
+**Documentation map:** [installation and migration](docs/Quickstart.md),
+[hardware support](docs/Hardware_Support.md), [motion configuration](docs/Config_Reference_Motion.md),
+[architecture](docs/Architecture.md), and [developer workflows](docs/Development.md).
+
 **Play with it in your browser** — the actual pipeline compiled to WASM;
 paste G-code, tweak config, watch it re-plan:
 [dderg.github.io/kalico/playground](https://dderg.github.io/kalico/playground/).

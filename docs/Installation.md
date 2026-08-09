@@ -1,5 +1,7 @@
 # Installation
 
+> **Serval motion-path notice:** this inherited installation guide contains general Kalico/Klipper subsystem material. For a printer that will execute Serval motion, use [Quickstart](Quickstart.md) as the canonical conversion and upgrade procedure. Serval requires matching host native artifacts and firmware on every MCU; it supports only the board families listed in [Hardware support](Hardware_Support.md). Do not follow a legacy board or flashing recipe if it conflicts with those pages.
+
 These instructions assume the software will run on a Linux-based host
 running a Kalico-compatible front end. It is recommended that a
 SBC(Small Board Computer) such as a Raspberry Pi or Debian-based Linux
@@ -12,6 +14,8 @@ mcu relates to the printer board. SBC relates to the term Small Board Computer
 such as the Raspberry Pi.
 
 ## Obtain a Kalico Configuration File
+
+The repository's `config/` directory is **not** a catalogue of current Serval printer configurations; it currently contains deployment/observability material. Preserve and migrate a known-good configuration with [Config migration](Config_Migration.md) and validate it against [Motion configuration reference](Config_Reference_Motion.md). Do not assume an inherited `printer-*` or `generic-*` example is compatible with the Serval motion protocol.
 
 Most Kalico settings are determined by a "printer configuration file"
 printer.cfg, that will be stored on the host. An appropriate configuration

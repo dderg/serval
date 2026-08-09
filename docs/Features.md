@@ -1,4 +1,6 @@
-# Features
+# Inherited Kalico feature reference
+
+> **Serval compatibility notice:** this page describes the inherited Kalico feature estate and is retained for peripherals and subsystems that Serval has not replaced. Its opening motion claims describe the classic host-generated step-event architecture, **not** Serval. For Serval motion, supported boards, drives, and transports, read [README](../README.md), [Hardware support](Hardware_Support.md), and [Feature status](Feature_Status.md). Do not infer Serval support from a feature listed below.
 
 Kalico has several compelling features:
 

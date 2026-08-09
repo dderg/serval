@@ -1,10 +1,27 @@
-# Contributing to Kalico
+# Contributing to Serval
 
-Thank you for contributing to Kalico! This document describes the
-process for contributing changes to Kalico.
+Thank you for contributing to Serval. This document retains the upstream Kalico review and DCO policy below; the Serval-specific workflow in this section takes precedence where the two differ.
 
-Please see the [contact page](Contact.md) for information on reporting
-an issue or for details on contacting the developers.
+## Serval workflow
+
+Develop against the active Serval branch and use the checked-in CI scripts as the command source of truth. The repository combines Python, Rust, C firmware, and integration assets, so report the exact validation you ran rather than assuming a Python-only check is sufficient.
+
+```bash
+uv sync --group dev
+./scripts/build-native.sh              # required for real native motion work
+./scripts/ci.sh quick                  # fast local gate
+./scripts/ci.sh install-hooks          # optional pre-push quick gate
+cd docs/_kalico && uv run mkdocs build --strict   # documentation changes
+```
+
+Use [Developer guide](Development.md) for the full test ladder, simulator, snapshot-review workflow, firmware checks, and optional tooling. A change to configuration, G-code, status/API, support claims, or native protocol must update its matching reference page; see that guide and [Documentation guide](Documentation_Guide.md). Firmware/protocol work also needs a matching host/native build and target-appropriate validation.
+
+Do not claim that a board, transport, drive mode, or calibration is generally supported without evidence reflected in [Feature status](Feature_Status.md). A simulator pass is valuable but does not replace hardware evidence. Preserve the DCO and licensing requirements in the inherited policy below.
+
+Please use the repository's issue and pull-request facilities for this fork; the contacts and repository names in inherited historical sections may refer to Kalico and are not Serval routing instructions.
+
+## Inherited review policy
+
 
 ## Overview of Contribution Process
 

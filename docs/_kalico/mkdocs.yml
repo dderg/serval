@@ -1,11 +1,11 @@
 # Main configuration file for mkdocs generation of the Kalico documentation.
 
 # Site and directory configuration
-site_name: Kalico Documentation
-site_url: https://docs.kalico.gg
-repo_url: https://github.com/KalicoCrew/kalico/
-repo_name: KalicoCrew/kalico
-edit_uri: edit/main/docs/
+site_name: Serval Documentation
+site_url: https://alextverdyy.github.io/serval
+repo_url: https://github.com/alextverdyy/serval/
+repo_name: alextverdyy/serval
+edit_uri: edit/sota-motion/docs/
 use_directory_urls: False
 docs_dir: '../'
 site_dir: '../../site/'
@@ -99,6 +99,7 @@ extra:
 nav:
   - Home: index.md
   - Overview.md
+  - Documentation_Guide.md
   - Features.md
   - Feature_Status.md
   - FAQ.md
@@ -107,6 +108,7 @@ nav:
   - Configuration:
     - Config_Reference.md
     - Config_Reference_Motion.md
+    - Hardware_Support.md
     - Kalico_Additions.md
     - Nonlinear_Pressure_Advance.md
     - PID.md
@@ -145,6 +147,8 @@ nav:
     - Exclude_Object.md
     - Using_PWM_Tools.md
   - Developer Documentation:
+    - Architecture.md
+    - Development.md
     - API_Server.md
     - CANBUS_protocol.md
     - CONTRIBUTING.md

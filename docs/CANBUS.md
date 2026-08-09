@@ -1,12 +1,15 @@
-# CANBUS
+# CAN bus
 
-This document describes Kalico's CAN bus support.
+> **Serval scope:** CAN and CAN-FD are bench-verified, not validated by a real print. Only the Serval-supported MCU families in [Hardware support](Hardware_Support.md) apply. This inherited page contains general CAN setup detail; where it claims broader Kalico chip support, it does not apply to Serval.
+
+This document describes the inherited Kalico CAN bus support.
 
 ## Device Hardware
 
-Kalico currently supports CAN on stm32, SAME5x, and rp2040 chips. In
-addition, the micro-controller chip must be on a board that has a CAN
-transceiver.
+For Serval, use a supported STM32 F4, G0, or H7 target with a CAN
+transceiver; other inherited families, including SAME5x and RP2040, are not
+Serval motion targets. In addition, the micro-controller chip must be on a
+board that has a CAN transceiver.
 
 To compile for CAN, run `make menuconfig` and select "CAN bus" as the
 communication interface. Finally, compile the micro-controller code

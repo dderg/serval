@@ -2,6 +2,10 @@
 
 [![Action Status](https://github.com/KalicoCrew/kalico/actions/workflows/ci-build_test.yaml/badge.svg?branch=main)](https://github.com/KalicoCrew/kalico/actions/workflows/ci-build_test.yaml)
 
+# Historical Kalico reference
+
+> This file is retained from the upstream Kalico fork for provenance and reference. It does **not** describe the Serval motion protocol, supported board set, configuration model, release process, or installation procedure. Use [README.md](README.md), [docs/Quickstart.md](docs/Quickstart.md), and [docs/Feature_Status.md](docs/Feature_Status.md) for Serval.
+
 # Welcome to the Kalico project!
 
 This is a community-maintained fork of the [Klipper](https://github.com/Klipper3d/klipper) firmware.
