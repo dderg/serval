@@ -3,9 +3,8 @@
 # Copyright (C) 2022  Ricardo Alcantara <ricardo@vulcanolabs.com>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+from .. import serialhdl
 from . import bus, led
-
-BACKGROUND_PRIORITY_CLOCK = 0x7FFFFFFF00000000
 
 # Register addresses
 PCA9632_MODE1 = 0x00
@@ -40,7 +39,9 @@ class PCA9632:
             return
         self.prev_regs[reg] = val
         self.i2c.i2c_write_noack(
-            [reg, val], minclock=minclock, reqclock=BACKGROUND_PRIORITY_CLOCK
+            [reg, val],
+            minclock=minclock,
+            delivery=serialhdl.CommandDelivery.BACKGROUND,
         )
 
     def handle_connect(self):

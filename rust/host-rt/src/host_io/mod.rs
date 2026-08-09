@@ -77,6 +77,13 @@ impl std::fmt::Debug for McuLogHook {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandTiming {
+    Immediate,
+    Background { min_clock: u64 },
+    Timed { min_clock: u64, req_clock: u64 },
+}
+
 #[derive(Debug)]
 pub enum ReactorCommand {
     Submit {
@@ -92,6 +99,14 @@ pub enum ReactorCommand {
         expected_response_name: String,
         completion: SyncSender<Result<MessageParams, TransportError>>,
         deadline: std::time::Instant,
+    },
+    ScheduleSubmitTyped {
+        call_id: u64,
+        payload: Vec<u8>,
+        timing: CommandTiming,
+        expected_response_name: String,
+        completion: SyncSender<Result<MessageParams, TransportError>>,
+        timeout: Duration,
     },
     Abandon(u64),
     AttachHeartbeatCallback(HeartbeatCallback),
@@ -118,6 +133,17 @@ pub enum ReactorCommand {
     },
     FireAndForgetTyped {
         payload: Vec<u8>,
+    },
+    ScheduleTyped {
+        payload: Vec<u8>,
+        timing: CommandTiming,
+        accepted: SyncSender<Result<(), TransportError>>,
+    },
+    SetClockEstimate {
+        freq: f64,
+        offset_raw: f64,
+        last_clock: u64,
+        accepted: SyncSender<Result<(), TransportError>>,
     },
     /// A burst of encoded commands to pack into as few Klipper message
     /// blocks as the 64-byte block allows before it reaches the wire.
@@ -270,7 +296,12 @@ impl McuHostIo {
                     }
                 }
             }
-            let port = unsafe { Box::new(serialport::TTYPort::from_raw_fd(fd)) };
+            let mut port = unsafe { Box::new(serialport::TTYPort::from_raw_fd(fd)) };
+            serialport::SerialPort::set_baud_rate(&mut *port, DEFAULT_BAUD).map_err(|error| {
+                TransportError::Io(std::io::Error::other(format!(
+                    "set pipe timing rate for {path}: {error}"
+                )))
+            })?;
             #[allow(unsafe_code)]
             unsafe {
                 let mut tio3: libc::termios = std::mem::zeroed();
@@ -360,11 +391,20 @@ impl McuHostIo {
         let (parser_owned, raw_identify_bytes, identify_seq) =
             identify::identify_handshake(&mut io, config.identify_timeout)?;
 
-        let mcu_can_data_rate = parser_owned
-            .numeric_constant("CANBUS_DATA_FREQUENCY")
-            .unwrap_or(0);
-        io.try_enable_fd(u32::try_from(mcu_can_data_rate).unwrap_or(0))
-            .map_err(TransportError::Io)?;
+        let nominal_rate_hz = u32::try_from(
+            parser_owned
+                .numeric_constant("CANBUS_FREQUENCY")
+                .unwrap_or(0),
+        )
+        .unwrap_or(0);
+        let data_rate_hz = u32::try_from(
+            parser_owned
+                .numeric_constant("CANBUS_DATA_FREQUENCY")
+                .unwrap_or(0),
+        )
+        .unwrap_or(0);
+        io.configure_wire_rates(nominal_rate_hz, data_rate_hz);
+        io.try_enable_fd(data_rate_hz).map_err(TransportError::Io)?;
 
         let parser = Arc::new(parser_owned);
         let (submission_tx, submission_rx) = std::sync::mpsc::channel();
@@ -764,6 +804,48 @@ impl McuHostIo {
             .map_err(|_| TransportError::Closed)
     }
 
+    pub fn send_args_with_timing(
+        &self,
+        name: &str,
+        args: &[(String, crate::host_io::parser::ArgValue)],
+        timing: CommandTiming,
+    ) -> Result<(), TransportError> {
+        if timing == CommandTiming::Immediate {
+            return self.send_args(name, args);
+        }
+        let payload = self
+            .parser
+            .encode_args(name, args)
+            .map_err(|e| TransportError::Parse(format!("{name}: {e:?}")))?;
+        let (accepted, result) = std::sync::mpsc::sync_channel(1);
+        self.submission_tx
+            .send(ReactorCommand::ScheduleTyped {
+                payload,
+                timing,
+                accepted,
+            })
+            .map_err(|_| TransportError::Closed)?;
+        result.recv().unwrap_or(Err(TransportError::Closed))
+    }
+
+    pub fn set_clock_estimate(
+        &self,
+        freq: f64,
+        offset_raw: f64,
+        last_clock: u64,
+    ) -> Result<(), TransportError> {
+        let (accepted, result) = std::sync::mpsc::sync_channel(1);
+        self.submission_tx
+            .send(ReactorCommand::SetClockEstimate {
+                freq,
+                offset_raw,
+                last_clock,
+                accepted,
+            })
+            .map_err(|_| TransportError::Closed)?;
+        result.recv().unwrap_or(Err(TransportError::Closed))
+    }
+
     /// Hand a whole burst of commands to the reactor as one unit so it can
     /// pack them into full message blocks. Sending them one at a time
     /// through `send_args` would let the reactor drain the channel between
@@ -823,6 +905,63 @@ impl McuHostIo {
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(TransportError::Timeout),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(TransportError::Closed),
+        }
+    }
+
+    pub fn call_args_with_timing(
+        &self,
+        preface: Option<(&str, &[(String, crate::host_io::parser::ArgValue)])>,
+        name: &str,
+        args: &[(String, crate::host_io::parser::ArgValue)],
+        expected_response_name: &str,
+        timing: CommandTiming,
+        timeout: Duration,
+    ) -> Result<MessageParams, TransportError> {
+        if timing == CommandTiming::Immediate && preface.is_none() {
+            return self.call_args(name, args, expected_response_name, timeout);
+        }
+        let query = self
+            .parser
+            .encode_args(name, args)
+            .map_err(|e| TransportError::Parse(format!("{name}: {e:?}")))?;
+        let payloads = match preface {
+            Some((preface_name, preface_args)) => vec![
+                self.parser
+                    .encode_args(preface_name, preface_args)
+                    .map_err(|e| TransportError::Parse(format!("{preface_name}: {e:?}")))?,
+                query,
+            ],
+            None => vec![query],
+        };
+        let mut blocks =
+            crate::host_io::wire::pack_blocks(&payloads).map_err(TransportError::Parse)?;
+        if blocks.len() != 1 {
+            return Err(TransportError::Parse(
+                "preface and query do not fit in one ordered message block".into(),
+            ));
+        }
+        let call_id = self.next_call_id.fetch_add(1, Ordering::Relaxed);
+        let (completion, result) = std::sync::mpsc::sync_channel(1);
+        self.submission_tx
+            .send(ReactorCommand::ScheduleSubmitTyped {
+                call_id,
+                payload: blocks.pop().expect("one block"),
+                timing,
+                expected_response_name: expected_response_name.to_string(),
+                completion,
+                timeout,
+            })
+            .map_err(|_| TransportError::Closed)?;
+        let handle = crate::host_io::call_handle::CallHandle {
+            call_id,
+            submission_tx: self.submission_tx.clone(),
+        };
+        match result.recv() {
+            Ok(response) => {
+                handle.defuse();
+                response
+            }
+            Err(_) => Err(TransportError::Closed),
         }
     }
 

@@ -465,6 +465,8 @@ mod linux {
         interface: String,
         timeout: Duration,
         pending: VecDeque<u8>,
+        nominal_rate_hz: u32,
+        data_rate_hz: u32,
     }
 
     impl CanLink {
@@ -532,6 +534,8 @@ mod linux {
                 interface: interface.to_owned(),
                 timeout: Duration::from_millis(100),
                 pending: VecDeque::new(),
+                nominal_rate_hz: 0,
+                data_rate_hz: 0,
             })
         }
 
@@ -700,6 +704,25 @@ mod linux {
 
         fn out_queue(&self) -> io::Result<Option<u32>> {
             Ok(None)
+        }
+
+        fn wire_time(&self, bytes: usize) -> io::Result<Option<Duration>> {
+            let rate = if self.format == FrameFormat::Fd && self.data_rate_hz != 0 {
+                self.data_rate_hz
+            } else {
+                self.nominal_rate_hz
+            };
+            if rate == 0 {
+                return Ok(None);
+            }
+            Ok(Some(Duration::from_secs_f64(
+                bytes as f64 * 8.0 / f64::from(rate),
+            )))
+        }
+
+        fn configure_wire_rates(&mut self, nominal_rate_hz: u32, data_rate_hz: u32) {
+            self.nominal_rate_hz = nominal_rate_hz;
+            self.data_rate_hz = data_rate_hz;
         }
 
         fn try_enable_fd(&mut self, mcu_data_rate_hz: u32) -> io::Result<bool> {

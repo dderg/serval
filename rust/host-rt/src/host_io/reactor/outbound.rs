@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use crate::host_io::CommandTiming;
 use crate::host_io::reactor::{
     PENDING_FIRE_AND_FORGET_CEILING, PENDING_SUBMISSION_CEILING, PIECE_OUTQ_BUDGET_BYTES, Reactor,
 };
@@ -21,6 +22,62 @@ pub(crate) enum PendingOutboundKind {
     FireAndForget,
 }
 
+pub(crate) enum ScheduledPayload {
+    FireAndForget(Vec<u8>),
+    Submission {
+        call_id: u64,
+        payload: Vec<u8>,
+        expected_response_name: String,
+        completion:
+            std::sync::mpsc::SyncSender<Result<crate::transport::MessageParams, TransportError>>,
+        timeout: Duration,
+    },
+}
+
+pub(crate) struct ScheduledCommand {
+    pub timing: CommandTiming,
+    pub payload: ScheduledPayload,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ClockEstimate {
+    freq: f64,
+    offset: f64,
+    last_clock: u64,
+}
+
+impl ClockEstimate {
+    pub(crate) fn from_raw(
+        freq: f64,
+        offset_raw: f64,
+        last_clock: u64,
+        now: Instant,
+    ) -> Result<Self, TransportError> {
+        if !freq.is_finite() || freq <= 0.0 || !offset_raw.is_finite() {
+            return Err(TransportError::Parse("invalid MCU clock estimate".into()));
+        }
+        let offset =
+            offset_raw - (crate::clock::monotonic_raw_secs() - crate::clock::instant_to_f64(now));
+        Ok(Self {
+            freq,
+            offset,
+            last_clock,
+        })
+    }
+
+    fn projected_clock(&self, at: Instant) -> Result<u64, TransportError> {
+        let projected =
+            self.last_clock as f64 + (crate::clock::instant_to_f64(at) - self.offset) * self.freq;
+        if !projected.is_finite() || !(0.0..=u64::MAX as f64).contains(&projected) {
+            return Err(TransportError::Parse(
+                "MCU clock estimate projected outside u64".into(),
+            ));
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        Ok(projected as u64)
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct OutboundQueues {
     pub(crate) pending_submissions: VecDeque<PendingSubmission>,
@@ -32,6 +89,8 @@ pub(crate) struct OutboundQueues {
     /// rule this enforces.
     pub(crate) pending_piece_frames: VecDeque<(u32, Vec<u8>)>,
     pub(crate) pending_outbound_order: VecDeque<PendingOutboundKind>,
+    pub(crate) scheduled_timed: VecDeque<ScheduledCommand>,
+    pub(crate) scheduled_background: VecDeque<ScheduledCommand>,
 }
 
 impl OutboundQueues {
@@ -46,6 +105,164 @@ impl OutboundQueues {
             .push_back((payload, is_get_clock));
         self.pending_outbound_order
             .push_back(PendingOutboundKind::FireAndForget);
+    }
+}
+
+impl Reactor {
+    pub(crate) fn enqueue_scheduled(
+        &mut self,
+        timing: CommandTiming,
+        payload: ScheduledPayload,
+    ) -> Result<(), TransportError> {
+        if matches!(timing, CommandTiming::Immediate) {
+            return self.dispatch_scheduled(ScheduledCommand { timing, payload });
+        }
+        let needs_clock = match timing {
+            CommandTiming::Timed { .. } => true,
+            CommandTiming::Background { min_clock } => min_clock != 0,
+            CommandTiming::Immediate => false,
+        };
+        if needs_clock {
+            self.predicted_ack_clock(scheduled_payload_len(&payload))?;
+        }
+        let queue = match timing {
+            CommandTiming::Background { .. } => &mut self.outbound.scheduled_background,
+            CommandTiming::Timed { .. } => &mut self.outbound.scheduled_timed,
+            CommandTiming::Immediate => unreachable!(),
+        };
+        if queue.len() >= PENDING_FIRE_AND_FORGET_CEILING {
+            return Err(TransportError::Backpressure);
+        }
+        queue.push_back(ScheduledCommand { timing, payload });
+        Ok(())
+    }
+
+    fn predicted_ack_clock(&self, payload_len: usize) -> Result<(u64, f64), TransportError> {
+        let estimate = self.clock_estimate.ok_or_else(|| {
+            TransportError::Parse("timed command has no MCU clock estimate".into())
+        })?;
+        let frame_len = crate::host_io::wire::MESSAGE_MIN.saturating_add(payload_len);
+        let wire_time = self.io.predicted_wire_time(frame_len)?;
+        Ok((
+            estimate.projected_clock(self.clock.now() + wire_time)?,
+            estimate.freq,
+        ))
+    }
+
+    fn timed_front_is_eligible(&self) -> Result<bool, TransportError> {
+        let Some(command) = self.outbound.scheduled_timed.front() else {
+            return Ok(false);
+        };
+        let CommandTiming::Timed {
+            min_clock,
+            req_clock,
+        } = command.timing
+        else {
+            return Err(TransportError::Parse(
+                "non-timed command entered timed queue".into(),
+            ));
+        };
+        let (ack_clock, freq) =
+            self.predicted_ack_clock(scheduled_payload_len(&command.payload))?;
+        if ack_clock < min_clock {
+            return Ok(false);
+        }
+        if req_clock == 0 {
+            return Ok(true);
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let send_ahead_ticks = (freq * 0.100) as u64;
+        Ok(req_clock <= ack_clock.saturating_add(send_ahead_ticks))
+    }
+
+    fn background_front_is_eligible(&self) -> Result<bool, TransportError> {
+        let Some(command) = self.outbound.scheduled_background.front() else {
+            return Ok(false);
+        };
+        let CommandTiming::Background { min_clock } = command.timing else {
+            return Err(TransportError::Parse(
+                "non-background command entered background queue".into(),
+            ));
+        };
+        if min_clock == 0 {
+            return Ok(true);
+        }
+        let (ack_clock, _) = self.predicted_ack_clock(scheduled_payload_len(&command.payload))?;
+        Ok(ack_clock >= min_clock)
+    }
+
+    fn dispatch_scheduled(&mut self, command: ScheduledCommand) -> Result<(), TransportError> {
+        match command.payload {
+            ScheduledPayload::FireAndForget(payload) => {
+                self.dispatch_fire_and_forget(payload, false)
+            }
+            ScheduledPayload::Submission {
+                call_id,
+                payload,
+                expected_response_name,
+                completion,
+                timeout,
+            } => self.dispatch_submission(
+                call_id,
+                payload,
+                expected_response_name,
+                completion,
+                self.clock.now() + timeout,
+            ),
+        }
+    }
+
+    pub(crate) fn drain_scheduled_commands(&mut self) {
+        while !self.unacked_window.is_full() {
+            let timed_ready = match self.timed_front_is_eligible() {
+                Ok(ready) => ready,
+                Err(error) => {
+                    let command = self
+                        .outbound
+                        .scheduled_timed
+                        .pop_front()
+                        .expect("timed eligibility requires a front command");
+                    reject_scheduled(command, error);
+                    continue;
+                }
+            };
+            if timed_ready {
+                let command = self
+                    .outbound
+                    .scheduled_timed
+                    .pop_front()
+                    .expect("timed front was eligible");
+                if let Err(error) = self.dispatch_scheduled(command) {
+                    self.close_if_io_fault("drain_scheduled_commands", &error);
+                    break;
+                }
+                continue;
+            }
+            let background_ready = match self.background_front_is_eligible() {
+                Ok(ready) => ready,
+                Err(error) => {
+                    let command = self
+                        .outbound
+                        .scheduled_background
+                        .pop_front()
+                        .expect("background eligibility requires a front command");
+                    reject_scheduled(command, error);
+                    continue;
+                }
+            };
+            if !background_ready {
+                break;
+            }
+            let command = self
+                .outbound
+                .scheduled_background
+                .pop_front()
+                .expect("background front was eligible");
+            if let Err(error) = self.dispatch_scheduled(command) {
+                self.close_if_io_fault("drain_scheduled_commands", &error);
+            }
+            break;
+        }
     }
 }
 
@@ -303,5 +520,25 @@ impl Reactor {
                 return;
             }
         }
+    }
+}
+
+fn scheduled_payload_len(payload: &ScheduledPayload) -> usize {
+    match payload {
+        ScheduledPayload::FireAndForget(payload) => payload.len(),
+        ScheduledPayload::Submission { payload, .. } => payload.len(),
+    }
+}
+
+fn reject_scheduled(command: ScheduledCommand, error: TransportError) {
+    if let ScheduledPayload::Submission { completion, .. } = command.payload {
+        let _ = completion.send(Err(error));
+    } else {
+        tracing::error!(
+            subsystem = "mcu-comms",
+            event = "scheduled_command_rejected",
+            error = %error,
+            "scheduled fire-and-forget command rejected"
+        );
     }
 }

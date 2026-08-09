@@ -5,6 +5,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
 import threading
+from enum import IntEnum
 
 import serial
 
@@ -16,21 +17,12 @@ class error(Exception):
     pass
 
 
-# MCU timers compare 32-bit clocks: a waketime more than 2^31 ticks ahead of
-# the MCU's now reads as the past and trips "Timer too close".  Commands are
-# held host-side until within 2^30 ticks, deep inside the half-range on every
-# supported clock frequency.
-MCU_TIMER_HORIZON = 1 << 30
+class CommandDelivery(IntEnum):
+    IMMEDIATE = 0
+    BACKGROUND = 1
+    TIMED = 2
 
-# This sentinel is a serialqueue priority marker, not an MCU deadline.  It is
-# used by low-priority devices such as LEDs and displays, which must be sent
-# immediately instead of being deferred to a (far-future) timer horizon.
-BACKGROUND_PRIORITY_CLOCK = 0x7FFFFFFF00000000
 
-# Engine-path commands carrying a near-term reqclock (heater PWM schedules
-# ~0.3 s ahead) die as "Timer too close" if delivery eats the margin.  Sends
-# whose remaining margin is already below this threshold get logged so a
-# late-arrival crash can be split into generated-late vs delivered-late.
 DEADLINE_MARGIN_WARN = 0.150
 
 REACTOR_STALL_LOG_S = 0.5
@@ -368,14 +360,10 @@ class EngineCommandChannel:
             if not self._is_engine_transport_drop(e):
                 raise
 
-    def send(self, msg, minclock=0, reqclock=0):
+    def send(self, msg):
         if not self.engine_mcu.available():
             self._error("send() called without a motion engine")
         if self._engine_detached:
-            return
-        if reqclock and self._reqclock_holds_or_warns(
-            msg.split()[0], reqclock, lambda: self.send(msg, minclock, reqclock)
-        ):
             return
         try:
             self.engine_mcu.send(msg)
@@ -383,31 +371,25 @@ class EngineCommandChannel:
             if not self._is_engine_transport_drop(e):
                 raise
 
-    def send_args(self, name, args, minclock=0, reqclock=0):
+    def send_args(
+        self,
+        name,
+        args,
+        delivery=CommandDelivery.IMMEDIATE,
+        minclock=0,
+        reqclock=0,
+    ):
         if not self.engine_mcu.available():
             self._error("send_args() called without a motion engine")
         if self._engine_detached:
             return
-        if reqclock and self._reqclock_holds_or_warns(
-            name,
-            reqclock,
-            lambda: self.send_args(name, args, minclock, reqclock),
-        ):
-            return
+        if delivery == CommandDelivery.TIMED and reqclock:
+            self._warn_if_deadline_margin_thin(name, reqclock)
         try:
-            self.engine_mcu.send_args(name, args)
+            self.engine_mcu.send_args(name, args, delivery, minclock, reqclock)
         except RuntimeError as e:
             if not self._is_engine_transport_drop(e):
                 raise
-
-    def _reqclock_holds_or_warns(self, command_name, reqclock, resend):
-        if self._held_until_timer_horizon(resend, reqclock):
-            return True
-        # This sentinel is a priority marker, not a clock deadline; it has no
-        # deadline margin to evaluate.
-        if reqclock != BACKGROUND_PRIORITY_CLOCK:
-            self._warn_if_deadline_margin_thin(command_name, reqclock)
-        return False
 
     def _warn_if_deadline_margin_thin(self, command_name, reqclock):
         clocksync = self.mcu._clocksync
@@ -423,19 +405,6 @@ class EngineCommandChannel:
                 margin_s=margin,
             )
 
-    def _held_until_timer_horizon(self, resend, reqclock):
-        if reqclock == BACKGROUND_PRIORITY_CLOCK:
-            return False
-        clocksync = self.mcu._clocksync
-        est_clock = clocksync.get_clock(self.reactor.monotonic())
-        if reqclock - est_clock <= MCU_TIMER_HORIZON:
-            return False
-        release_systime = clocksync.estimate_clock_systime(
-            reqclock - MCU_TIMER_HORIZON
-        )
-        self.reactor.register_callback(lambda et: resend(), release_systime)
-        return True
-
     def send_with_response(self, msg, response):
         if not self.engine_mcu.available():
             self._error("send_with_response() called without a motion engine")
@@ -449,15 +418,46 @@ class EngineCommandChannel:
             raise error("serial connection closed")
         return self._stamp_response_times(params)
 
-    def send_with_response_args(self, name, args, response):
+    def send_with_response_args(
+        self,
+        name,
+        args,
+        response,
+        delivery=CommandDelivery.IMMEDIATE,
+        minclock=0,
+        reqclock=0,
+        preface=None,
+    ):
         if not self.engine_mcu.available():
             self._error(
                 "send_with_response_args() called without a motion engine"
             )
         if self._engine_detached:
             raise error("serial connection closed")
+        if delivery == CommandDelivery.TIMED and reqclock:
+            self._warn_if_deadline_margin_thin(name, reqclock)
         try:
-            params = self.engine_mcu.call_args(name, args, response)
+            if preface is None:
+                params = self.engine_mcu.call_args(
+                    name,
+                    args,
+                    response,
+                    delivery,
+                    minclock,
+                    reqclock,
+                )
+            else:
+                preface_name, preface_args = preface
+                params = self.engine_mcu.call_args_with_preface(
+                    preface_name,
+                    preface_args,
+                    name,
+                    args,
+                    response,
+                    delivery,
+                    minclock,
+                    reqclock,
+                )
         except RuntimeError as e:
             if not self._is_engine_transport_drop(e):
                 raise

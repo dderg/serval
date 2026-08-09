@@ -9,7 +9,7 @@ from fakes import FakeEngine, FakePrinter  # noqa: E402
 
 from klippy.engine_mcu import EngineMcu  # noqa: E402
 from klippy.serialhdl import (  # noqa: E402
-    BACKGROUND_PRIORITY_CLOCK,
+    CommandDelivery,
     EngineCommandChannel,
     error,
 )
@@ -73,11 +73,21 @@ def test_engine_get_clock_async_swallows_drop():
     assert sr._engine_detached is True
 
 
-def test_background_priority_command_is_sent_immediately():
+def test_background_delivery_reaches_engine_explicitly():
     engine = FakeEngine()
     sr = _reader(engine)
-    sr.send(b"neopixel_update", reqclock=BACKGROUND_PRIORITY_CLOCK)
-    assert engine.calls[-1][0] == "engine_send"
+    sr.send_args("neopixel_update", [], delivery=CommandDelivery.BACKGROUND)
+    assert engine.calls[-1] == (
+        "engine_send_args",
+        7,
+        "neopixel_update",
+        [],
+        {
+            "delivery": int(CommandDelivery.BACKGROUND),
+            "min_clock": 0,
+            "req_clock": 0,
+        },
+    )
 
 
 if __name__ == "__main__":

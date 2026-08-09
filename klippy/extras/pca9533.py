@@ -3,9 +3,8 @@
 # Copyright (C) 2021  Marc-Andre Denis <marcadenis@msn.com>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+from .. import serialhdl
 from . import bus, led
-
-BACKGROUND_PRIORITY_CLOCK = 0x7FFFFFFF00000000
 
 PCA9533_PWM0 = 0b010
 PCA9533_PWM1 = 0b100
@@ -35,7 +34,7 @@ class PCA9533:
         self.i2c.i2c_write_noack(
             [PCA9533_PLS0, ls0],
             minclock=minclock,
-            reqclock=BACKGROUND_PRIORITY_CLOCK,
+            delivery=serialhdl.CommandDelivery.BACKGROUND,
         )
 
     def get_status(self, eventtime):

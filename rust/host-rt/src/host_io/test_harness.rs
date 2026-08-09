@@ -73,7 +73,7 @@ impl SerialPort for FakeSerialPort {
         Some("fake".into())
     }
     fn baud_rate(&self) -> serialport::Result<u32> {
-        Ok(0)
+        Ok(250_000)
     }
     fn data_bits(&self) -> serialport::Result<serialport::DataBits> {
         Err(serialport::Error::new(

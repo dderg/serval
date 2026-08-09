@@ -111,30 +111,43 @@ class MCU_SPI:
             oid=self.oid,
         )
 
-    def spi_send(self, data, minclock=0, reqclock=0):
+    def spi_send(self, data, minclock=0, reqclock=0, delivery=None):
         if self.spi_send_cmd is None:
-            # Send setup message via mcu initialization
             data_msg = "".join(["%02x" % (x,) for x in data])
             self.mcu.add_config_cmd(
                 "spi_send oid=%d data=%s" % (self.oid, data_msg), is_init=True
             )
             return
         self.spi_send_cmd.send(
-            [self.oid, data], minclock=minclock, reqclock=reqclock
+            [self.oid, data],
+            minclock=minclock,
+            reqclock=reqclock,
+            delivery=delivery,
         )
 
-    def spi_send_wait_ack(self, data, minclock=0, reqclock=0):
+    def spi_send_wait_ack(self, data, minclock=0, reqclock=0, delivery=None):
         self.spi_send_cmd.send_wait_ack(
-            [self.oid, data], minclock=minclock, reqclock=reqclock
+            [self.oid, data],
+            minclock=minclock,
+            reqclock=reqclock,
+            delivery=delivery,
         )
 
-    def spi_transfer(self, data, minclock=0, reqclock=0):
+    def spi_transfer(self, data, minclock=0, reqclock=0, delivery=None):
         return self.spi_transfer_cmd.send(
-            [self.oid, data], minclock=minclock, reqclock=reqclock
+            [self.oid, data],
+            minclock=minclock,
+            reqclock=reqclock,
+            delivery=delivery,
         )
 
     def spi_transfer_with_preface(
-        self, preface_data, data, minclock=0, reqclock=0
+        self,
+        preface_data,
+        data,
+        minclock=0,
+        reqclock=0,
+        delivery=None,
     ):
         return self.spi_transfer_cmd.send_with_preface(
             self.spi_send_cmd,
@@ -142,6 +155,7 @@ class MCU_SPI:
             [self.oid, data],
             minclock=minclock,
             reqclock=reqclock,
+            delivery=delivery,
         )
 
 
@@ -262,30 +276,42 @@ class MCU_I2C:
             oid=self.oid,
         )
 
-    def i2c_write_noack(self, data, minclock=0, reqclock=0):
+    def i2c_write_noack(self, data, minclock=0, reqclock=0, delivery=None):
         if self.i2c_write_cmd is None:
             self._to_write.append(data)
             return
         self.i2c_write_cmd.send(
-            [self.oid, data], minclock=minclock, reqclock=reqclock
+            [self.oid, data],
+            minclock=minclock,
+            reqclock=reqclock,
+            delivery=delivery,
         )
 
-    def i2c_write(self, data, minclock=0, reqclock=0):
+    def i2c_write(self, data, minclock=0, reqclock=0, delivery=None):
         if self.i2c_write_cmd is None:
             self._to_write.append(data)
             return
         if self._debugoutput is not None:
             self.i2c_write_cmd.send(
-                [self.oid, data], minclock=minclock, reqclock=reqclock
+                [self.oid, data],
+                minclock=minclock,
+                reqclock=reqclock,
+                delivery=delivery,
             )
             return
         self.i2c_write_cmd.send_wait_ack(
-            [self.oid, data], minclock=minclock, reqclock=reqclock
+            [self.oid, data],
+            minclock=minclock,
+            reqclock=reqclock,
+            delivery=delivery,
         )
 
-    def i2c_write_wait_ack(self, data, minclock=0, reqclock=0):
+    def i2c_write_wait_ack(self, data, minclock=0, reqclock=0, delivery=None):
         self.i2c_write_cmd.send_wait_ack(
-            [self.oid, data], minclock=minclock, reqclock=reqclock
+            [self.oid, data],
+            minclock=minclock,
+            reqclock=reqclock,
+            delivery=delivery,
         )
 
     def i2c_read(self, write, read_len, retry=True):
@@ -354,13 +380,15 @@ class MCU_bus_digital_out:
             "update_digital_out oid=%c value=%c"
         )
 
-    def update_digital_out(self, value, minclock=0, reqclock=0):
+    def update_digital_out(self, value, minclock=0, reqclock=0, delivery=None):
         if self.update_pin_cmd is None:
-            # Send setup message via mcu initialization
             self.mcu.add_config_cmd(
                 "update_digital_out oid=%c value=%c" % (self.oid, not not value)
             )
             return
         self.update_pin_cmd.send(
-            [self.oid, not not value], minclock=minclock, reqclock=reqclock
+            [self.oid, not not value],
+            minclock=minclock,
+            reqclock=reqclock,
+            delivery=delivery,
         )

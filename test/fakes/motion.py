@@ -292,6 +292,35 @@ class FakeEngine:
     def engine_call(self, handle, msg, response):
         return self._call("engine_call", handle, msg, response)
 
+    def engine_send_args(self, handle, name, args, **timing):
+        return self._call("engine_send_args", handle, name, args, timing)
+
+    def engine_call_args(self, handle, name, args, response, **timing):
+        return self._call(
+            "engine_call_args", handle, name, args, response, timing
+        )
+
+    def engine_call_args_with_preface(
+        self,
+        handle,
+        preface_name,
+        preface_args,
+        name,
+        args,
+        response,
+        **timing,
+    ):
+        return self._call(
+            "engine_call_args_with_preface",
+            handle,
+            preface_name,
+            preface_args,
+            name,
+            args,
+            response,
+            timing,
+        )
+
     def engine_get_clock_async(self, handle):
         return self._call("engine_get_clock_async", handle)
 

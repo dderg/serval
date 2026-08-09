@@ -126,6 +126,25 @@ impl SerialFrameIo {
             .map_err(TransportError::Io)
     }
 
+    pub fn predicted_wire_time(&self, frame_bytes: usize) -> Result<Duration, TransportError> {
+        let pending = self
+            .link
+            .out_queue()
+            .map_err(TransportError::Io)?
+            .unwrap_or(0);
+        let pending = usize::try_from(pending)
+            .map_err(|_| TransportError::Parse("wire queue byte count overflow".into()))?;
+        self.link
+            .wire_time(pending.saturating_add(frame_bytes))
+            .map_err(TransportError::Io)?
+            .ok_or_else(|| TransportError::Parse("link has no wire timing metadata".into()))
+    }
+
+    pub fn configure_wire_rates(&mut self, nominal_rate_hz: u32, data_rate_hz: u32) {
+        self.link
+            .configure_wire_rates(nominal_rate_hz, data_rate_hz);
+    }
+
     pub fn try_enable_fd(&mut self, mcu_data_rate_hz: u32) -> io::Result<bool> {
         self.link.try_enable_fd(mcu_data_rate_hz)
     }

@@ -59,6 +59,7 @@ pub struct Reactor {
     pub(crate) transport_state: McuTransportState,
     pub(crate) interceptors: crate::host_io::interceptor::InterceptorTable,
     pub(crate) mcu_label: Arc<str>,
+    pub(crate) clock_estimate: Option<outbound::ClockEstimate>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -124,6 +125,7 @@ impl Reactor {
             transport_state: McuTransportState::default(),
             interceptors: crate::host_io::interceptor::InterceptorTable::new(),
             mcu_label,
+            clock_estimate: None,
         }
     }
 
@@ -226,6 +228,7 @@ impl Reactor {
 
         let s3 = std::time::Instant::now();
         self.drain_pending_submissions();
+        self.drain_scheduled_commands();
         let t_step3 = s3.elapsed();
 
         let s3b = std::time::Instant::now();
@@ -334,3 +337,6 @@ mod io_fault_propagation;
 
 #[cfg(test)]
 mod a9_mcu_shutdown_fail_fast;
+
+#[cfg(test)]
+mod scheduler;

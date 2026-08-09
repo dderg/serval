@@ -5,7 +5,8 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
-BACKGROUND_PRIORITY_CLOCK = 0x7FFFFFFF00000000
+from ... import serialhdl
+
 LINE_LENGTH_DEFAULT = 20
 LINE_LENGTH_OPTIONS = [16, 20]
 
@@ -88,8 +89,10 @@ class HD44780:
         cmd_type = self.send_cmds_cmd
         if is_data:
             cmd_type = self.send_data_cmd
-        cmd_type.send([self.oid, cmds], reqclock=BACKGROUND_PRIORITY_CLOCK)
-        # logging.debug("hd44780 %d %s", is_data, repr(cmds))
+        cmd_type.send(
+            [self.oid, cmds],
+            delivery=serialhdl.CommandDelivery.BACKGROUND,
+        )
 
     def flush(self):
         # Find all differences in the framebuffers and send them to the chip

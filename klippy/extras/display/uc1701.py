@@ -4,10 +4,9 @@
 # Copyright (C) 2018  Eric Callahan  <arksine.code@gmail.com>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+from ... import serialhdl
 from .. import bus
 from . import font8x14
-
-BACKGROUND_PRIORITY_CLOCK = 0x7FFFFFFF00000000
 
 TextGlyphs = {"right_arrow": b"\x1a", "degrees": b"\xf8"}
 
@@ -137,9 +136,9 @@ class SPI4wire:
 
     def send(self, cmds, is_data=False):
         self.mcu_dc.update_digital_out(
-            is_data, reqclock=BACKGROUND_PRIORITY_CLOCK
+            is_data, delivery=serialhdl.CommandDelivery.BACKGROUND
         )
-        self.spi.spi_send(cmds, reqclock=BACKGROUND_PRIORITY_CLOCK)
+        self.spi.spi_send(cmds, delivery=serialhdl.CommandDelivery.BACKGROUND)
 
 
 # IO wrapper for i2c bus
@@ -155,8 +154,9 @@ class I2C:
         else:
             hdr = 0x00
         cmds = bytearray(cmds)
-        cmds.insert(0, hdr)
-        self.i2c.i2c_write_noack(cmds, reqclock=BACKGROUND_PRIORITY_CLOCK)
+        self.i2c.i2c_write_noack(
+            cmds, delivery=serialhdl.CommandDelivery.BACKGROUND
+        )
 
 
 # Helper code for toggling a reset pin on startup

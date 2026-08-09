@@ -5,9 +5,8 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
 
+from .. import serialhdl
 from . import led
-
-BACKGROUND_PRIORITY_CLOCK = 0x7FFFFFFF00000000
 
 BIT_MAX_TIME = 0.000004
 RESET_MIN_TIME = 0.000050
@@ -92,7 +91,7 @@ class PrinterNeoPixel:
         for pos, count in diffs:
             ucmd(
                 [self.oid, pos, new_data[pos : pos + count]],
-                reqclock=BACKGROUND_PRIORITY_CLOCK,
+                delivery=serialhdl.CommandDelivery.BACKGROUND,
             )
         old_data[:] = new_data
         # Instruct mcu to update the LEDs
@@ -106,7 +105,7 @@ class PrinterNeoPixel:
             params = scmd(
                 [self.oid],
                 minclock=minclock,
-                reqclock=BACKGROUND_PRIORITY_CLOCK,
+                delivery=serialhdl.CommandDelivery.BACKGROUND,
             )
             if params["success"]:
                 break

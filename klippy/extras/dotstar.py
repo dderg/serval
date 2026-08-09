@@ -3,9 +3,8 @@
 # Copyright (C) 2019-2024  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+from .. import serialhdl
 from . import bus, led
-
-BACKGROUND_PRIORITY_CLOCK = 0x7FFFFFFF00000000
 
 
 class PrinterDotstar:
@@ -59,7 +58,9 @@ class PrinterDotstar:
             )
         for d in [data[i : i + 20] for i in range(0, len(data), 20)]:
             self.spi.spi_send(
-                d, minclock=minclock, reqclock=BACKGROUND_PRIORITY_CLOCK
+                d,
+                minclock=minclock,
+                delivery=serialhdl.CommandDelivery.BACKGROUND,
             )
 
     def get_status(self, eventtime):

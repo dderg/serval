@@ -30,6 +30,21 @@ impl Reactor {
                 completion,
                 deadline,
             ),
+            ReactorCommand::ScheduleSubmitTyped {
+                call_id,
+                payload,
+                timing,
+                expected_response_name,
+                completion,
+                timeout,
+            } => self.handle_scheduled_submission(
+                call_id,
+                payload,
+                timing,
+                expected_response_name,
+                completion,
+                timeout,
+            ),
             ReactorCommand::Abandon(call_id) => {
                 self.awaiting_response.mark_abandoned(call_id);
             }
@@ -68,6 +83,34 @@ impl Reactor {
             ReactorCommand::FireAndForget { cmd } => self.handle_fire_and_forget(cmd),
             ReactorCommand::FireAndForgetTyped { payload } => {
                 self.handle_fire_and_forget_typed(payload)
+            }
+            ReactorCommand::ScheduleTyped {
+                payload,
+                timing,
+                accepted,
+            } => {
+                let result = self.enqueue_scheduled(
+                    timing,
+                    crate::host_io::reactor::outbound::ScheduledPayload::FireAndForget(payload),
+                );
+                let _ = accepted.send(result);
+            }
+            ReactorCommand::SetClockEstimate {
+                freq,
+                offset_raw,
+                last_clock,
+                accepted,
+            } => {
+                let result = crate::host_io::reactor::outbound::ClockEstimate::from_raw(
+                    freq,
+                    offset_raw,
+                    last_clock,
+                    self.clock.now(),
+                )
+                .map(|estimate| {
+                    self.clock_estimate = Some(estimate);
+                });
+                let _ = accepted.send(result);
             }
             ReactorCommand::FireAndForgetBatch { payloads } => {
                 self.handle_fire_and_forget_batch(&payloads)
@@ -159,6 +202,29 @@ impl Reactor {
         ) {
             self.close_if_io_fault("handle_command/submit_typed", &e);
             let _ = completion.send(Err(e));
+        }
+    }
+
+    fn handle_scheduled_submission(
+        &mut self,
+        call_id: u64,
+        payload: Vec<u8>,
+        timing: crate::host_io::CommandTiming,
+        expected_response_name: String,
+        completion: std::sync::mpsc::SyncSender<
+            Result<crate::transport::MessageParams, TransportError>,
+        >,
+        timeout: std::time::Duration,
+    ) {
+        let scheduled = crate::host_io::reactor::outbound::ScheduledPayload::Submission {
+            call_id,
+            payload,
+            expected_response_name,
+            completion: completion.clone(),
+            timeout,
+        };
+        if let Err(error) = self.enqueue_scheduled(timing, scheduled) {
+            let _ = completion.send(Err(error));
         }
     }
 

@@ -3,6 +3,7 @@ use super::{
     Python, mcu_handle_from_raw, pymethods, router_err,
 };
 use crate::lock_ext::LockExt;
+use host_rt::host_io::CommandTiming;
 use host_rt::host_io::parser::ArgValue;
 use host_rt::transport::MessageParams;
 use pyo3::prelude::*;
@@ -28,6 +29,26 @@ impl From<PyArgValue> for ArgValue {
 
 fn owned_args(args: Vec<(String, PyArgValue)>) -> Vec<(String, ArgValue)> {
     args.into_iter().map(|(k, v)| (k, v.into())).collect()
+}
+
+fn command_timing(delivery: u8, min_clock: u64, req_clock: u64) -> PyResult<CommandTiming> {
+    match delivery {
+        0 if min_clock == 0 && req_clock == 0 => Ok(CommandTiming::Immediate),
+        1 if req_clock == 0 => Ok(CommandTiming::Background { min_clock }),
+        2 => Ok(CommandTiming::Timed {
+            min_clock,
+            req_clock,
+        }),
+        0 => Err(PyRuntimeError::new_err(
+            "immediate delivery rejects clock constraints",
+        )),
+        1 => Err(PyRuntimeError::new_err(
+            "background delivery rejects reqclock",
+        )),
+        _ => Err(PyRuntimeError::new_err(format!(
+            "unknown command delivery value {delivery}"
+        ))),
+    }
 }
 
 fn params_to_pydict(py: Python<'_>, params: &MessageParams) -> PyResult<Py<PyDict>> {
@@ -92,7 +113,10 @@ impl PyMotionEngine {
 
         params_to_pydict(py, &params)
     }
-    #[pyo3(signature = (mcu_handle, name, args, response, timeout_s = 5.0))]
+    #[pyo3(signature = (
+        mcu_handle, name, args, response, timeout_s = 5.0, delivery = 0,
+        min_clock = 0, req_clock = 0
+    ))]
     fn engine_call_args(
         &self,
         py: Python<'_>,
@@ -101,34 +125,81 @@ impl PyMotionEngine {
         args: Vec<(String, PyArgValue)>,
         response: &str,
         timeout_s: f64,
+        delivery: u8,
+        min_clock: u64,
+        req_clock: u64,
     ) -> PyResult<Py<PyDict>> {
         use std::time::Duration;
 
         let io = self.host_io_for_mcu("engine_call_args", mcu_handle)?;
-        let name_owned = name.to_owned();
-        let response_owned = response.to_owned();
+        let timing = command_timing(delivery, min_clock, req_clock)?;
         let args = owned_args(args);
-        let params = py.detach(|| -> PyResult<_> {
-            io.call_args(
-                &name_owned,
+        let params = py.detach(|| {
+            io.call_args_with_timing(
+                None,
+                name,
                 &args,
-                &response_owned,
+                response,
+                timing,
                 Duration::from_secs_f64(timeout_s),
             )
             .map_err(|e| PyRuntimeError::new_err(format!("engine_call_args: {e}")))
         })?;
-
         params_to_pydict(py, &params)
     }
-    #[pyo3(signature = (mcu_handle, name, args))]
+
+    #[pyo3(signature = (
+        mcu_handle, preface_name, preface_args, name, args, response,
+        timeout_s = 5.0, delivery = 0, min_clock = 0, req_clock = 0
+    ))]
+    fn engine_call_args_with_preface(
+        &self,
+        py: Python<'_>,
+        mcu_handle: u32,
+        preface_name: &str,
+        preface_args: Vec<(String, PyArgValue)>,
+        name: &str,
+        args: Vec<(String, PyArgValue)>,
+        response: &str,
+        timeout_s: f64,
+        delivery: u8,
+        min_clock: u64,
+        req_clock: u64,
+    ) -> PyResult<Py<PyDict>> {
+        use std::time::Duration;
+
+        let io = self.host_io_for_mcu("engine_call_args_with_preface", mcu_handle)?;
+        let timing = command_timing(delivery, min_clock, req_clock)?;
+        let preface_args = owned_args(preface_args);
+        let args = owned_args(args);
+        let params = py.detach(|| {
+            io.call_args_with_timing(
+                Some((preface_name, &preface_args)),
+                name,
+                &args,
+                response,
+                timing,
+                Duration::from_secs_f64(timeout_s),
+            )
+            .map_err(|e| PyRuntimeError::new_err(format!("engine_call_args_with_preface: {e}")))
+        })?;
+        params_to_pydict(py, &params)
+    }
+    #[pyo3(signature = (
+        mcu_handle, name, args, delivery = 0, min_clock = 0, req_clock = 0
+    ))]
     fn engine_send_args(
         &self,
         mcu_handle: u32,
         name: &str,
         args: Vec<(String, PyArgValue)>,
+        delivery: u8,
+        min_clock: u64,
+        req_clock: u64,
     ) -> PyResult<()> {
         let io = self.host_io_for_mcu("engine_send_args", mcu_handle)?;
-        io.send_args(name, &owned_args(args))
+        let timing = command_timing(delivery, min_clock, req_clock)?;
+        io.send_args_with_timing(name, &owned_args(args), timing)
             .map_err(|e| PyRuntimeError::new_err(format!("engine_send_args: {e}")))
     }
     fn take_runtime_event(&self, py: Python<'_>, mcu_handle: u32) -> PyResult<Option<Py<PyDict>>> {
@@ -263,6 +334,10 @@ impl PyMotionEngine {
                 host_now_raw,
             )
             .map_err(router_err)?;
+        drop(router);
+        self.host_io_for_mcu("set_clock_est", mcu)?
+            .set_clock_estimate(freq, offset, last_clock)
+            .map_err(|e| PyRuntimeError::new_err(format!("set_clock_est: {e}")))?;
         Ok(())
     }
     #[pyo3(signature = (mcu, freq_hz))]

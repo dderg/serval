@@ -3,10 +3,9 @@
 # Copyright (C) 2018  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+from ... import serialhdl
 from .. import bus
 from . import font8x14
-
-BACKGROUND_PRIORITY_CLOCK = 0x7FFFFFFF00000000
 
 # Spec says 72us, but faster is possible in practice
 ST7920_CMD_DELAY = 0.000020
@@ -209,8 +208,10 @@ class ST7920(DisplayBase):
                 add_cmd = 0x26
             cmds = [add_cmd] + cmds
             self.is_extended = is_extended
-        cmd_type.send([self.oid, cmds], reqclock=BACKGROUND_PRIORITY_CLOCK)
-        # logging.debug("st7920 %d %s", is_data, repr(cmds))
+        cmd_type.send(
+            [self.oid, cmds],
+            delivery=serialhdl.CommandDelivery.BACKGROUND,
+        )
 
 
 # Helper code for toggling the en pin on startup
@@ -288,6 +289,6 @@ class EmulatedST7920(DisplayBase):
         if not self.en_set:
             self.en_helper.init()
             self.en_set = True
-        # send data
-        self.spi.spi_send(spi_data, reqclock=BACKGROUND_PRIORITY_CLOCK)
-        # logging.debug("st7920 %s", repr(spi_data))
+        self.spi.spi_send(
+            spi_data, delivery=serialhdl.CommandDelivery.BACKGROUND
+        )
