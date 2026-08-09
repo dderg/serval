@@ -1,7 +1,9 @@
 import os
 import shutil
+import stat
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -309,3 +311,64 @@ def test_workspace_git_environment_pins_fixed_overrides(tmp_path: Path) -> None:
         if env[f"GIT_CONFIG_KEY_{index}"] == "safe.directory"
     ]
     assert safe == [str(workspace), str(pool)]
+
+
+def test_workspace_upgrade_adopts_legacy_namespace_with_existing_pool(tmp_path: Path) -> None:
+    remote, _seed = _make_remote(tmp_path)
+    manager = _manager(tmp_path, remote)
+    workspace = manager.sync("owner/repo", "main", "secret-token", issue_number=7)
+    namespace = tmp_path / "workspaces" / "owner--repo"
+    (workspace / "agent-note.txt").write_text("scratch\n")
+
+    # legacy deployment state: namespace group-writable (old setgid omp layout)
+    namespace.chmod(0o775)
+    refreshed = manager.sync("owner/repo", "main", "secret-token", issue_number=7)
+
+    assert refreshed == workspace
+    assert stat.S_IMODE(namespace.stat().st_mode) == 0o755
+    assert not (refreshed / "agent-note.txt").exists()
+
+    # pool control data tampering is still rejected loudly after adoption
+    (_pool_for(tmp_path) / "config").chmod(0o666)
+    with pytest.raises(WorkspaceFailure, match="unsafe repository control data"):
+        manager.sync("owner/repo", "main", "secret-token", issue_number=7)
+
+
+def test_workspace_upgrade_adopts_legacy_namespace_with_new_pool(tmp_path: Path) -> None:
+    remote, _seed = _make_remote(tmp_path)
+    manager = _manager(tmp_path, remote)
+    namespace = tmp_path / "workspaces" / "owner--repo"
+    namespace.mkdir(parents=True)
+    namespace.chmod(0o775)  # legacy state, no pool yet
+
+    workspace = manager.sync("owner/repo", "main", "secret-token", issue_number=7)
+
+    assert (workspace / "state.txt").read_text() == "one\n"
+    assert stat.S_IMODE(namespace.stat().st_mode) == 0o755
+    pool = _pool_for(tmp_path)
+    assert (pool / "config").is_file()
+    assert stat.S_IMODE((pool / "config").stat().st_mode) & 0o022 == 0
+
+
+def test_workspace_adopt_namespace_dir_adopts_foreign_owner_and_rejects_symlink(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    from serval_bot import workspace as workspace_module
+
+    namespace = tmp_path / "workspaces" / "owner--repo"
+    namespace.mkdir(parents=True)
+    namespace.chmod(0o770)
+    chowned: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(workspace_module.os, "geteuid", lambda: 10001)
+    monkeypatch.setattr(workspace_module.os, "chown", lambda path, uid, gid: chowned.append((str(path), uid, gid)))
+
+    workspace_module._adopt_namespace_dir(namespace)
+
+    # only the namespace directory itself is adopted, never its contents
+    assert chowned == [(str(namespace), 10001, 10001)]
+    assert stat.S_IMODE(namespace.stat().st_mode) == 0o755
+
+    link = tmp_path / "evil-namespace"
+    os.symlink(namespace, link)
+    with pytest.raises(WorkspaceFailure, match="not a directory"):
+        workspace_module._adopt_namespace_dir(link)

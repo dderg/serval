@@ -136,6 +136,25 @@ def _trusted_owners(*, allow_slots: bool) -> frozenset[int]:
     return frozenset(owners)
 
 
+def _adopt_namespace_dir(namespace: Path) -> None:
+    """Adopt a repository namespace directory itself (not its contents) to root.
+
+    Upgraded deployments may leave the namespace directory owned by the legacy
+    bot identity or group-writable; only the directory itself is normalized so
+    existing slot-owned workspaces underneath stay untouched. Symlinked or
+    non-directory namespaces still fail loudly.
+    """
+    try:
+        st = namespace.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        raise WorkspaceFailure(f"unsafe repository namespace at {namespace}: not a directory")
+    if st.st_uid != os.geteuid():
+        os.chown(namespace, os.geteuid(), os.geteuid())
+    namespace.chmod(0o755)
+
+
 def _validate_repo_control(repo: Path, *, allow_slots: bool, bare: bool = False) -> None:
     """Fail loudly when repository control data is writable by an untrusted principal."""
     trusted = _trusted_owners(allow_slots=allow_slots)
@@ -209,6 +228,13 @@ def _secure_pool(pool: Path) -> None:
 def _ensure_pool(root: Path, repo_key: str, remote: str, environment: dict[str, str]) -> Path:
     """Root-owned bare mirror: the read-only object/reference cache for issues."""
     pool = root / repo_key / _POOL_DIRNAME
+    _adopt_namespace_dir(pool.parent)
+    try:
+        pool_st = pool.lstat()
+    except FileNotFoundError:
+        pool_st = None
+    if pool_st is not None and (stat.S_ISLNK(pool_st.st_mode) or not stat.S_ISDIR(pool_st.st_mode)):
+        raise WorkspaceFailure(f"unsafe repository control data at {pool}: not a directory")
     if not (pool / "config").exists():
         _run("git", "init", "--bare", str(pool), cwd=root, environment=environment)
         _run("git", "remote", "add", "origin", remote, cwd=pool, environment=environment)
@@ -361,6 +387,7 @@ def prepare_workspace(
     root.chmod(0o755)
     repo_key = repo.replace("/", "--")
     repo_dir = root / repo_key
+    _adopt_namespace_dir(repo_dir)
     repo_dir.mkdir(parents=True, exist_ok=True)
     repo_dir.chmod(0o755)
     workspace = repo_dir / str(issue_number)
@@ -446,6 +473,7 @@ class CredentialedWorkspace:
     ) -> Path:
         repo_key = repo.replace("/", "--")
         legacy_dir = self.root / "legacy"
+        _adopt_namespace_dir(legacy_dir)
         legacy_dir.mkdir(parents=True, exist_ok=True)
         legacy_dir.chmod(0o755)
         destination = legacy_dir / repo_key
