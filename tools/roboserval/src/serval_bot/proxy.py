@@ -33,6 +33,11 @@ class RepositoryRequest(BaseModel):
     repo: str
 
 
+class WorkspaceRequest(RepositoryRequest):
+    pull_number: int | None = Field(default=None, gt=0)
+    head_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+
+
 class IssueRequest(RepositoryRequest):
     issue_number: int = Field(gt=0)
 
@@ -96,14 +101,28 @@ class GitHubApi:
     async def close(self) -> None:
         await asyncio.gather(self._client.aclose(), self._tokens.close())
 
-    async def sync_workspace(self, request: RepositoryRequest) -> dict[str, Any]:
+    async def sync_workspace(self, request: WorkspaceRequest) -> dict[str, Any]:
         repository = (await self.request("GET", f"/repos/{request.repo}")).json()
         default_branch = repository.get("default_branch")
         if not isinstance(default_branch, str) or not default_branch:
             raise GitHubFailure(f"repository metadata has no default branch: {request.repo}")
+        if (request.pull_number is None) != (request.head_sha is None):
+            raise GitHubFailure("pull_number and head_sha must be set together")
+        fetch_ref = f"refs/pull/{request.pull_number}/head" if request.pull_number is not None else None
         token = await self._tokens.token()
-        path = await asyncio.to_thread(self._workspace.sync, request.repo, default_branch, token)
-        return {"workspace": path.name, "default_branch": default_branch}
+        path = await asyncio.to_thread(
+            self._workspace.sync,
+            request.repo,
+            default_branch,
+            token,
+            fetch_ref=fetch_ref,
+            expected_sha=request.head_sha,
+        )
+        return {
+            "workspace": path.name,
+            "default_branch": default_branch,
+            "head_sha": request.head_sha,
+        }
 
     async def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         supplied_headers = kwargs.pop("headers", {})
@@ -190,22 +209,28 @@ class GitHubApi:
                 continue
             issue_number = _issue_number(comment["issue_url"])
             issue = (await self.request("GET", f"/repos/{request.repo}/issues/{issue_number}")).json()
+            pull_request = None
+            event_type = "issue_comment.created"
             if "pull_request" in issue:
-                continue
+                pull_request = (await self.request("GET", f"/repos/{request.repo}/pulls/{issue_number}")).json()
+                event_type = "pull_request_review.requested"
+            payload = {
+                "action": "created",
+                "repository": {"full_name": request.repo},
+                "sender": comment["user"],
+                "issue": issue,
+                "comment": comment,
+            }
+            if pull_request is not None:
+                payload["pull_request"] = pull_request
             events.append(
                 {
                     "delivery_id": f"poll:comment:{comment['id']}:created",
-                    "event_type": "issue_comment.created",
+                    "event_type": event_type,
                     "issue_number": issue_number,
                     "actor": actor,
                     "occurred_at": comment["created_at"],
-                    "payload": {
-                        "action": "created",
-                        "repository": {"full_name": request.repo},
-                        "sender": comment["user"],
-                        "issue": issue,
-                        "comment": comment,
-                    },
+                    "payload": payload,
                 }
             )
         events.sort(key=lambda event: (event["occurred_at"], event["delivery_id"]))
@@ -357,7 +382,7 @@ def create_proxy_app(settings: ProxySettings, api: GitHubApi | None = None) -> F
         return {"status": "ok"}
 
     @app.post("/github/sync-workspace", dependencies=[Depends(authenticate)])
-    async def sync_workspace(request: RepositoryRequest) -> dict[str, Any]:
+    async def sync_workspace(request: WorkspaceRequest) -> dict[str, Any]:
         _validated_repo(request)
         return await github.sync_workspace(request)
 

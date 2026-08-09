@@ -41,8 +41,16 @@ class ProxyClient:
             raise ProxyError(f"proxy {path} returned a non-object response")
         return data
 
-    def sync_workspace(self, repo: str) -> dict[str, Any]:
-        return self._request("/github/sync-workspace", {"repo": repo})
+    def sync_workspace(
+        self,
+        repo: str,
+        pull_number: int | None = None,
+        head_sha: str | None = None,
+    ) -> dict[str, Any]:
+        return self._request(
+            "/github/sync-workspace",
+            {"repo": repo, "pull_number": pull_number, "head_sha": head_sha},
+        )
 
     def add_labels(self, repo: str, issue_number: int, labels: list[str]) -> dict[str, Any]:
         return self._request("/github/add-labels", {"repo": repo, "issue_number": issue_number, "labels": labels})

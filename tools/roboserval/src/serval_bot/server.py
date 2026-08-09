@@ -125,7 +125,7 @@ def _polled_events(result: dict[str, Any]) -> list[PolledEvent]:
         payload = item.get("payload")
         if (
             not isinstance(delivery_id, str)
-            or event_type not in {"issues.opened", "issue_comment.created"}
+            or event_type not in {"issues.opened", "issue_comment.created", "pull_request_review.requested"}
             or not isinstance(issue_number, int)
             or issue_number <= 0
             or not isinstance(actor, str)

@@ -12,8 +12,8 @@ from serval_bot.proxy import (
     GitHubApi,
     GitHubFailure,
     PollRequest,
-    RepositoryRequest,
     SimResultRequest,
+    WorkspaceRequest,
     create_proxy_app,
 )
 
@@ -119,8 +119,9 @@ async def test_proxy_applies_signed_poll_request() -> None:
 async def test_github_sync_resolves_repository_default_branch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, str, str]] = []
 
-    def sync(_, repo: str, branch: str, token: str) -> Path:
+    def sync(_, repo: str, branch: str, token: str, **kwargs) -> Path:
         calls.append((repo, branch, token))
+        assert kwargs == {"fetch_ref": None, "expected_sha": None}
         return tmp_path / "dderg--serval"
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -130,11 +131,11 @@ async def test_github_sync_resolves_repository_default_branch(tmp_path: Path, mo
     monkeypatch.setattr("serval_bot.proxy.CredentialedWorkspace.sync", sync)
     api = GitHubApi(StaticTokenProvider(), 20_000, httpx.MockTransport(handler), tmp_path)
     try:
-        result = await api.sync_workspace(RepositoryRequest(repo="dderg/serval"))
+        result = await api.sync_workspace(WorkspaceRequest(repo="dderg/serval"))
     finally:
         await api.close()
 
-    assert result == {"workspace": "dderg--serval", "default_branch": "trunk"}
+    assert result == {"workspace": "dderg--serval", "default_branch": "trunk", "head_sha": None}
     assert calls == [("dderg/serval", "trunk", "installation-token")]
 
 
@@ -148,7 +149,7 @@ async def test_github_sync_rejects_missing_default_branch(tmp_path: Path) -> Non
     )
     try:
         with pytest.raises(GitHubFailure, match="no default branch"):
-            await api.sync_workspace(RepositoryRequest(repo="dderg/serval"))
+            await api.sync_workspace(WorkspaceRequest(repo="dderg/serval"))
     finally:
         await api.close()
 
@@ -213,6 +214,15 @@ async def test_github_poll_returns_only_new_issues_and_mentioned_comments() -> N
         "created_at": "2026-08-08T12:00:00Z",
         "updated_at": "2026-08-09T12:02:00Z",
     }
+    pull_parent = {**issue, "id": 14, "number": 8, "pull_request": {}}
+    pull_request = {
+        "number": 8,
+        "title": "Fix LEDs",
+        "body": "Change priority dispatch",
+        "html_url": "https://github.com/dderg/serval/pull/8",
+        "base": {"ref": "sota-motion", "sha": "a" * 40},
+        "head": {"ref": "fix-leds", "sha": "b" * 40},
+    }
     parent = {**issue, "id": 12, "number": 7}
     mentioned = {
         "id": 41,
@@ -222,11 +232,18 @@ async def test_github_poll_returns_only_new_issues_and_mentioned_comments() -> N
         "issue_url": "https://api.github.com/repos/dderg/serval/issues/7",
         "user": {"login": "maintainer"},
     }
+    pull_mentioned = {
+        **mentioned,
+        "id": 45,
+        "created_at": "2026-08-09T12:03:00Z",
+        "updated_at": "2026-08-09T12:03:00Z",
+        "issue_url": "https://api.github.com/repos/dderg/serval/issues/8",
+    }
     requested_pages: list[str | None] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/repos/dderg/serval/issues":
-            return httpx.Response(200, json=[issue, old_issue, {**issue, "id": 13, "pull_request": {}}])
+            return httpx.Response(200, json=[issue, old_issue, pull_parent])
         if request.url.path == "/repos/dderg/serval/issues/comments":
             page = request.url.params.get("page")
             requested_pages.append(page)
@@ -237,11 +254,15 @@ async def test_github_poll_returns_only_new_issues_and_mentioned_comments() -> N
             edited_old = {**mentioned, "id": 44, "created_at": "2026-08-08T12:00:00Z"}
             return httpx.Response(
                 200,
-                json=[mentioned, ignored, bot_authored, edited_old],
+                json=[mentioned, pull_mentioned, ignored, bot_authored, edited_old],
                 headers={"link": '<https://api.github.com/repos/dderg/serval/issues/comments?page=2>; rel="next"'},
             )
         if request.url.path == "/repos/dderg/serval/issues/7":
             return httpx.Response(200, json=parent)
+        if request.url.path == "/repos/dderg/serval/issues/8":
+            return httpx.Response(200, json=pull_parent)
+        if request.url.path == "/repos/dderg/serval/pulls/8":
+            return httpx.Response(200, json=pull_request)
         raise AssertionError(f"unexpected GitHub request: {request.url}")
 
     api = GitHubApi(StaticTokenProvider(), 20_000, httpx.MockTransport(handler))
@@ -254,9 +275,12 @@ async def test_github_poll_returns_only_new_issues_and_mentioned_comments() -> N
         result = await api.poll_events(request)
     finally:
         await api.close()
-
     assert [event["delivery_id"] for event in result["events"]] == [
         "poll:issue:10:opened",
         "poll:comment:41:created",
+        "poll:comment:45:created",
     ]
+    review_event = result["events"][2]
+    assert review_event["event_type"] == "pull_request_review.requested"
+    assert review_event["payload"]["pull_request"]["head"]["sha"] == "b" * 40
     assert requested_pages == [None, "2"]

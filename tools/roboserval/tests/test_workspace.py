@@ -27,13 +27,44 @@ def test_workspace_sync_keeps_token_out_of_git_config(tmp_path: Path) -> None:
     _git(seed, "remote", "add", "origin", str(remote))
     _git(seed, "push", "origin", "main")
 
-    workspace = CredentialedWorkspace(
+    manager = CredentialedWorkspace(
         tmp_path / "workspaces",
         str(tmp_path / "remotes" / "{repo}.git"),
-    ).sync("owner/repo", "main", "secret-token")
+    )
+    workspace = manager.sync("owner/repo", "main", "secret-token")
 
     assert (workspace / "state.txt").read_text() == "one\n"
     assert "secret-token" not in (workspace / ".git" / "config").read_text()
+
+    (seed / "state.txt").write_text("pull request\n")
+    _git(seed, "add", "state.txt")
+    _git(seed, "commit", "-m", "pull request")
+    _git(seed, "push", "origin", "HEAD:refs/pull/7/head")
+    head_sha = subprocess.run(
+        ("git", "rev-parse", "HEAD"),
+        cwd=seed,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    manager.sync(
+        "owner/repo",
+        "main",
+        "secret-token",
+        fetch_ref="refs/pull/7/head",
+        expected_sha=head_sha,
+    )
+
+    assert (workspace / "state.txt").read_text() == "pull request\n"
+    with pytest.raises(WorkspaceFailure, match="pull request head changed"):
+        manager.sync(
+            "owner/repo",
+            "main",
+            "secret-token",
+            fetch_ref="refs/pull/7/head",
+            expected_sha="0" * 40,
+        )
 
 
 def test_workspace_sync_rejects_parent_branch(tmp_path: Path) -> None:
