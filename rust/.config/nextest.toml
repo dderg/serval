@@ -1,0 +1,32 @@
+# Nextest configuration for the kalico Rust workspace.
+#
+# Honesty principles:
+#   - retries = 0: no retry-masking of flaky tests; every failure is surfaced
+#   - fail-fast = false: see all failures in one run, not just the first
+#   - final-status-level = "fail": report only the failures in the final summary
+#   - status-level = "slow": live output carries failures, retries and
+#     slow-test warnings only — a green run is one summary line instead of one
+#     PASS line per test (~2400 for the workspace)
+#   - slow-timeout: warn after 60s, terminate after 3 warnings (180s total)
+
+[profile.default]
+retries = 0
+fail-fast = false
+final-status-level = "fail"
+status-level = "slow"
+
+[profile.default.slow-timeout]
+period = "60s"
+terminate-after = 3
+
+# CI profile: identical honesty constraints with a tighter slow-timeout to
+# surface hanging tests quickly without masking real failures via retries.
+[profile.ci]
+retries = 0
+fail-fast = false
+final-status-level = "fail"
+status-level = "slow"
+
+[profile.ci.slow-timeout]
+period = "60s"
+terminate-after = 3

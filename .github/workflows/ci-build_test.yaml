@@ -11,7 +11,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -23,28 +23,14 @@ jobs:
               - 'pyproject.toml'
               - 'scripts/klippy-requirements.txt'
               - 'scripts/requirements_dev.txt'
-            klipper:
-              - 'pyproject.toml'
-              - 'Makefile'
-              - 'src/**'
-              - 'lib/**'
-              - 'test/configs/**'
-              - 'scripts/Dockerfile-build'
-              - 'scripts/buildcommands.py'
-              - 'scripts/check-gcc.sh'
 
-      # Always pull the latest image to take advantage of layer caching
-      - name: Pull docker image
-        run: docker pull dangerklippers/klipper-build:latest
-
-      - name: Test Klipper build (changes to the firmware)
-        if: steps.changes.outputs.klipper == 'true'
+      - name: Build docker image
         run: |
           sudo apt-get update && sudo apt-get install -y expect
           # Clean up docker output so that github ::group: instructions
           # get recognized
           unbuffer docker build --progress=plain -f scripts/Dockerfile-build \
-            -t dangerklippers/klipper-build:latest . 2>&1 \
+            -t klipper-build:latest . 2>&1 \
             | sed -u -E 's/^#[0-9]+ [0-9.]+ ?//g'
 
       - name: Ensure scripts/klippy-dependencies.txt is up to date
@@ -52,24 +38,20 @@ jobs:
         uses: nickcharlton/diff-check@main
         with:
           command: |
-            docker run -v $PWD:/klipper dangerklippers/klipper-build:latest uv export --frozen -o scripts/klippy-requirements.txt --no-dev --no-hashes
-            docker run -v $PWD:/klipper dangerklippers/klipper-build:latest uv export --frozen -o scripts/requirements_dev.txt --only-dev --no-hashes
+            docker run -v $PWD:/klipper klipper-build:latest uv export --frozen -o scripts/klippy-requirements.txt --no-dev --no-hashes
+            docker run -v $PWD:/klipper klipper-build:latest uv export --frozen -o scripts/requirements_dev.txt --only-dev --no-hashes
 
-      # This *could* be done with a matrix, but then we would have to figure out sharing the docker image between builds
+      # Klippy tests across all supported Python versions. Each step runs the
+      # SAME command as `./scripts/ci.sh py <ver>` locally (one source of truth).
       - name: Test Klippy (Python 3.9)
-        run: docker run -v $PWD:/klipper dangerklippers/klipper-build:latest --python 3.9  py.test -n auto
-
+        run: ./scripts/ci.sh py 3.9
       - name: Test Klippy (Python 3.10)
-        run: docker run -v $PWD:/klipper dangerklippers/klipper-build:latest --python 3.10 py.test -n auto
-
+        run: ./scripts/ci.sh py 3.10
       - name: Test Klippy (Python 3.11)
-        run: docker run -v $PWD:/klipper dangerklippers/klipper-build:latest --python 3.11 py.test -n auto
-
+        run: ./scripts/ci.sh py 3.11
       - name: Test Klippy (Python 3.12)
-        run: docker run -v $PWD:/klipper dangerklippers/klipper-build:latest --python 3.12 py.test -n auto
-
+        run: ./scripts/ci.sh py 3.12
       - name: Test Klippy (Python 3.13)
-        run: docker run -v $PWD:/klipper dangerklippers/klipper-build:latest --python 3.13 py.test -n auto
-
+        run: ./scripts/ci.sh py 3.13
       - name: Test Klippy (Python 3.14)
-        run: docker run -v $PWD:/klipper dangerklippers/klipper-build:latest --python 3.14 py.test -n auto
+        run: ./scripts/ci.sh py 3.14

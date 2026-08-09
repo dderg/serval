@@ -192,9 +192,42 @@ static uint8_t oid_count;
 void *
 oid_lookup(uint8_t oid, void *type)
 {
-    if (oid >= oid_count || type != oids[oid].type)
+    if (oid >= oid_count || type != oids[oid].type) {
+        // Capture state before crashing so we can identify which oid_lookup
+        // site fired the shutdown. tag=0xCF, stage=oid, value packs
+        // (actual_type_lo << 8) | expected_type_lo. The expected_type_lo
+        // is the low byte of the caller's expected type function pointer;
+        // map it back via `arm-none-eabi-nm out/klipper.elf` to identify
+        // which command_* handler was on the stack.
+        extern void runtime_diag_progress(uint32_t tag, uint32_t stage,
+                                          uint32_t value);
+        uint32_t actual_lo = (oid < oid_count)
+            ? (uint32_t)((uintptr_t)oids[oid].type & 0xFFu)
+            : 0xFFu;
+        uint32_t expected_lo = (uint32_t)((uintptr_t)type & 0xFFu);
+        runtime_diag_progress(0xCF, (uint32_t)oid,
+                              (actual_lo << 8) | expected_lo);
         shutdown("Invalid oid type");
+    }
     return oids[oid].data;
+}
+
+// Read-only peek for diagnostic probes investigating "Invalid oid type"
+// without crashing the MCU. Returns oids[oid].type if oid is in range,
+// otherwise (void *)1 as an out-of-range sentinel (0x1 is never a valid
+// function pointer on ARM).
+void *
+oid_type_peek(uint8_t oid)
+{
+    if (oid >= oid_count)
+        return (void *)1;
+    return oids[oid].type;
+}
+
+uint8_t
+oid_get_count(void)
+{
+    return oid_count;
 }
 
 void *
@@ -288,7 +321,8 @@ command_get_clock(uint32_t *args)
 }
 DECL_COMMAND_FLAGS(command_get_clock, HF_IN_SHUTDOWN, "get_clock");
 
-static uint32_t stats_send_time, stats_send_time_high;
+uint32_t stats_send_time;
+uint32_t stats_send_time_high;
 
 void
 command_get_uptime(uint32_t *args)

@@ -49,13 +49,7 @@ class BulkAdcSensor(Protocol):
         ...
 
 
-class McuLoadCellProbe(Protocol):
-    """Attach a sensor to a LoadCell object on the MCU"""
-
-    def attach_load_cell_probe(self, load_cell_probe_oid: int): ...
-
-
-class LoadCellSensor(BulkAdcSensor, McuLoadCellProbe):
+class LoadCellSensor(BulkAdcSensor):
     """The complete load cell interface"""
 
     ...

@@ -1,0 +1,28 @@
+[package]
+name = "pipeline-snapshot"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "Headless snapshot of the streaming motion pipeline: waypoints in, fitted geometry + lowered per-axis polynomial trajectory + seam metrics out. Shared by the PyO3 binding (snapshot tests) and the WASM playground."
+license.workspace = true
+
+[dependencies]
+crossbeam-channel = "0.5"
+gcode = { path = "../gcode" }
+geometry = { path = "../geometry" }
+motion-pipeline = { path = "../motion-pipeline" }
+nurbs = { path = "../nurbs" }
+planner-config = { path = "../planner-config" }
+serde = { version = "1", features = ["derive"] }
+thiserror = { workspace = true }
+trajectory = { path = "../trajectory" }
+
+[dev-dependencies]
+libm = { version = "0.2", default-features = false }
+proptest = "1"
+serde_json = "1"
+tracing = "0.1"
+
+[lints]
+workspace = true

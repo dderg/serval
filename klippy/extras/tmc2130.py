@@ -284,6 +284,37 @@ class MCU_TMC_SPI_chain:
             config, 3, default_speed=4000000, share_type=share
         )
         self.taken_chain_positions = []
+        # 2026-05-18 phase-stepping integration: lazy resolution.
+        # The integer (bus_id, cs_pin_id) needed by the firmware's spi_setup
+        # / gpio_out_setup come from the MCU's identify-time enumeration
+        # tables (the msgparser enumerations). Resolution is deferred to
+        # get_bus_and_cs_ids() because __init__ runs at config-load time,
+        # BEFORE the MCU has identified — the msgparser doesn't exist yet
+        # and the enumerations dict isn't populated.
+        self._phase_bus_id = None
+        self._phase_cs_pin_id = None
+
+    def get_bus_and_cs_ids(self):
+        if self._phase_bus_id is None and self._phase_cs_pin_id is None:
+            bus_str = self.spi.bus
+            pin_str = self.spi.cs_pin
+            if bus_str is not None and pin_str is not None:
+                enums = (
+                    self.spi.get_mcu()
+                    .get_command_channel()
+                    .get_msgparser()
+                    .get_enumerations()
+                )
+                self._phase_bus_id = enums.get("spi_bus", {}).get(bus_str)
+                self._phase_cs_pin_id = enums.get("pin", {}).get(pin_str)
+        if self._phase_bus_id is None or self._phase_cs_pin_id is None:
+            raise self.printer.config_error(
+                "TMC SPI bus/pin could not be resolved to integer IDs "
+                "(software SPI or missing MCU enumeration?); phase "
+                "stepping requires hardware SPI with enumerated bus and "
+                "pin."
+            )
+        return (self._phase_bus_id, self._phase_cs_pin_id)
 
     def _build_cmd(self, data, chain_pos):
         return (
@@ -308,7 +339,11 @@ class MCU_TMC_SPI_chain:
     def reg_write(self, reg, val, chain_pos, print_time=None):
         minclock = 0
         if print_time is not None:
-            minclock = self.spi.get_mcu().print_time_to_clock(print_time)
+            minclock = (
+                self.spi.get_mcu()
+                .get_clocksync()
+                .print_time_to_clock(print_time)
+            )
         data = [
             (reg | 0x80) & 0xFF,
             (val >> 24) & 0xFF,
@@ -404,12 +439,12 @@ class TMC2130:
         self.mcu_tmc = MCU_TMC_SPI(
             config, Registers, self.fields, TMC_FREQUENCY
         )
-        # Allow virtual pins to be created
-        tmc.TMCVirtualPinHelper(config, self.mcu_tmc)
         # Register commands
         current_helper = TMC2130CurrentHelper(config, self.mcu_tmc)
         cmdhelper = tmc.TMCCommandHelper(config, self.mcu_tmc, current_helper)
         cmdhelper.setup_register_dump(ReadRegisters)
+        # Allow virtual pins to be created
+        tmc.TMCVirtualPinHelper(config, self.mcu_tmc, cmdhelper.mode_tracker)
         self.get_phase_offset = cmdhelper.get_phase_offset
         self.get_status = cmdhelper.get_status
         # Setup basic register values

@@ -146,7 +146,6 @@ Fields["DRV_STATUS"] = {
     "stst": 0x01 << 31,
 }
 Fields["FACTORY_CONF"] = {"factory_conf": 0x1F << 0}
-Fields["FACTORY_CONF"] = {"factory_conf": 0x1F << 0}
 Fields["GCONF"] = {
     "recalibrate": 0x01 << 0,
     "faststandstill": 0x01 << 1,
@@ -209,9 +208,6 @@ Fields["MSLUTSTART"] = {
 }
 Fields["MSCNT"] = {"mscnt": 0x3FF << 0}
 Fields["MSCURACT"] = {"cur_a": 0x1FF << 0, "cur_b": 0x1FF << 16}
-Fields["LOST_STEPS"] = {"lost_steps": 0xFFFFF << 0}
-Fields["MSCNT"] = {"mscnt": 0x3FF << 0}
-Fields["MSCURACT"] = {"cur_a": 0x1FF << 0, "cur_b": 0x1FF << 16}
 Fields["OTP_READ"] = {
     "otp_fclktrim": 0x1F << 0,
     "otp_s2_level": 0x01 << 5,
@@ -268,15 +264,15 @@ GLOBALSCALER_ERROR = (
 
 
 class TMC5160CurrentHelper(tmc.BaseTMCCurrentHelper):
-    def __init__(self, config, mcu_tmc):
+    def __init__(self, config, mcu_tmc, direct_mode=False):
         super().__init__(config, mcu_tmc, MAX_CURRENT)
-
+        self._direct_mode = direct_mode
         self.cs = config.getint("driver_CS", None, minval=0, maxval=31)
         gscaler, irun, ihold = self._calc_current(
             self.req_run_current, self.req_hold_current
         )
         self.fields.set_field("globalscaler", gscaler)
-        self.fields.set_field("ihold", ihold)
+        self.fields.set_field("ihold", irun if self._direct_mode else ihold)
         self.fields.set_field("irun", irun)
 
     def _calc_globalscaler(self, current):
@@ -354,7 +350,7 @@ class TMC5160CurrentHelper(tmc.BaseTMCCurrentHelper):
         )
         val = self.fields.set_field("globalscaler", gscaler)
         self.mcu_tmc.set_register("GLOBALSCALER", val, print_time)
-        self.fields.set_field("ihold", ihold)
+        self.fields.set_field("ihold", irun if self._direct_mode else ihold)
         val = self.fields.set_field("irun", irun)
         self.mcu_tmc.set_register("IHOLD_IRUN", val, print_time)
 
@@ -364,19 +360,36 @@ class TMC5160CurrentHelper(tmc.BaseTMCCurrentHelper):
 ######################################################################
 
 
-class TMC5160:
+class TMC5160(tmc.TMCPhaseStepping):
+    PHASE_DIRECT_REGISTER = "XTARGET"
+
     def __init__(self, config):
         # Setup mcu communication
+        self.printer = config.get_printer()
         self.fields = tmc.FieldHelper(Fields, SignedFields, FieldFormatters)
         self.mcu_tmc = tmc2130.MCU_TMC_SPI(
             config, Registers, self.fields, TMC_FREQUENCY
         )
-        # Allow virtual pins to be created
-        tmc.TMCVirtualPinHelper(config, self.mcu_tmc)
+        self.name = " ".join(config.get_name().split()[1:])
+        self._setup_phase_stepping(config)
         # Register commands
-        current_helper = TMC5160CurrentHelper(config, self.mcu_tmc)
+        current_helper = TMC5160CurrentHelper(
+            config,
+            self.mcu_tmc,
+            direct_mode=self._phase_stepping,
+        )
         cmdhelper = tmc.TMCCommandHelper(config, self.mcu_tmc, current_helper)
+        self._echeck_helper = cmdhelper.echeck_helper
+        self._mode_tracker = cmdhelper.mode_tracker
+        if self._phase_stepping:
+            cmdhelper.set_post_enable_callback(self._enter_phase_mode_single)
         cmdhelper.setup_register_dump(ReadRegisters)
+        # Allow virtual pins to be created
+        self._virtual_pin_helper = tmc.TMCVirtualPinHelper(
+            config, self.mcu_tmc, cmdhelper.mode_tracker
+        )
+        if self._phase_stepping:
+            self._virtual_pin_helper.phase_mode_helper = self
         self.get_phase_offset = cmdhelper.get_phase_offset
         self.get_status = cmdhelper.get_status
         # Setup basic register values
@@ -443,6 +456,12 @@ class TMC5160:
         set_config_field(config, "pwm_lim", 12)
         #   TPOWERDOWN
         set_config_field(config, "tpowerdown", 10)
+        if self._phase_stepping:
+            # In direct_mode the TMC5160 uses IHOLD for current scaling
+            # (no step pulses to trigger IRUN). Extend the standstill
+            # timeout to maximum so the driver doesn't power-down the
+            # coils while phase stepping is active.
+            self.fields.set_field("tpowerdown", 255)
 
 
 def load_config_prefix(config):

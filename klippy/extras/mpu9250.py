@@ -92,7 +92,6 @@ class MPU9250:
         )
 
     def _build_config(self):
-        cmdqueue = self.i2c.get_command_queue()
         self.mcu.add_config_cmd(
             "config_mpu9250 oid=%d i2c_oid=%d" % (self.oid, self.i2c.get_oid())
         )
@@ -100,10 +99,10 @@ class MPU9250:
             "query_mpu9250 oid=%d rest_ticks=0" % (self.oid,), on_restart=True
         )
         self.query_mpu9250_cmd = self.mcu.lookup_command(
-            "query_mpu9250 oid=%c rest_ticks=%u", cq=cmdqueue
+            "query_mpu9250 oid=%c rest_ticks=%u"
         )
         self.ffreader.setup_query_command(
-            "query_mpu9250_status oid=%c", oid=self.oid, cq=cmdqueue
+            "query_mpu9250_status oid=%c", oid=self.oid
         )
 
     def check_connected(self):
@@ -160,7 +159,7 @@ class MPU9250:
         self.set_reg(
             REG_SMPLRT_DIV,
             SAMPLE_RATE_DIVS[self.data_rate],
-            minclock=self.mcu.print_time_to_clock(next_time),
+            minclock=self.mcu.get_clocksync().print_time_to_clock(next_time),
         )
         self.set_reg(REG_CONFIG, SET_CONFIG)
         self.set_reg(REG_ACCEL_CONFIG, SET_ACCEL_CONFIG)

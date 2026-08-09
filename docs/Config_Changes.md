@@ -8,6 +8,16 @@ All dates in this document are approximate.
 
 ## Changes
 
+20260729: CAN bus micro-controllers are supported again on this fork.
+`[mcu] canbus_uuid` is accepted instead of `serial`, alongside a new
+optional `canbus_interface` (default `can0`). A CAN micro-controller
+accepts only `restart_method: command`. CAN-FD is available by setting a
+non-zero "CAN-FD data phase speed" (`CONFIG_CANBUS_DATA_FREQUENCY`) when
+building the micro-controller; it is negotiated with the host and falls
+back to classic framing. CAN has been verified on a test bench only and
+has never driven a real print - see [Feature status](Feature_Status.md)
+and [CANBUS](CANBUS.md).
+
 20260121: Kalico now uses automatic monthly release tags in the format
 `vYYYY.MM.NN` (e.g., `v2026.01.00`). Users can configure Moonraker to track
 stable monthly releases instead of the latest commits. See
@@ -58,9 +68,8 @@ instead. The `printer[fan object].speed` status will be replaced by
 `printer[fan object].value` and `printer[fan object].power`.
 
 20241223: The `CLEAR_RETRACTION` command does not reset parameters to
-default config values anymore, a [`RESET_RETRACTION`](./G-Codes.md#reset_retraction)
-command was added to achieve this. Automatic resetting behavior on
-events was removed.
+default config values anymore. Automatic resetting behavior on events
+was removed.
 
 20240912: `SET_PIN`, `SET_SERVO`, `SET_FAN_SPEED`, `M106`, and `M107`
 commands are now collated. Previously, if many updates to the same
@@ -88,10 +97,10 @@ print) then define `on_error_gcode` with an empty value.
 20240313: The `max_accel_to_decel` parameter in the `[printer]` config
 section has been deprecated. The `ACCEL_TO_DECEL` parameter of the
 `SET_VELOCITY_LIMIT` command has been deprecated. The
-`printer.toolhead.max_accel_to_decel` status has been removed. Use the
-[minimum_cruise_ratio parameter](./Config_Reference.md#printer)
-instead. The deprecated features will be removed in the near future,
-and using them in the interim may result in subtly different behavior.
+`printer.toolhead.max_accel_to_decel` status has been removed. Use
+the `minimum_cruise_ratio` parameter instead. The deprecated features
+will be removed in the near future, and using them in the interim may
+result in subtly different behavior.
 
 20240215: Several deprecated features have been removed. Using "NTC
 100K beta 3950" as a thermistor name has been removed (deprecated on
@@ -137,9 +146,8 @@ the carriages proximity checks will be disabled as per documentation. A user
 may wish to configure `safe_distance` explicitly to prevent accidental crashes
 of the carriages with each other. Additionally, the homing order of the primary
 and the dual carriage is changed in some configurations (certain configurations
-when both carriages home in the same direction, see
-[[dual_carriage] configuration reference](./Config_Reference.md#dual_carriage)
-for more details).
+when both carriages home in the same direction; the old
+`[dual_carriage]` configuration is no longer part of the current schema.
 
 20230810: The flash-sdcard.sh script now supports both variants of the
 Bigtreetech SKR-3, STM32H743 and STM32H723. For this, the original tag
@@ -242,10 +250,8 @@ for details.
 20220307: `M73` will no longer set print progress to 0 if `P` is missing.
 
 20220304: There is no longer a default for the `extruder` parameter of
-[extruder_stepper](Config_Reference.md#extruder_stepper) config
-sections. If desired, specify `extruder: extruder` explicitly to
-associate the stepper motor with the "extruder" motion queue at
-startup.
+extruder-stepper config sections. If desired, specify it explicitly to
+associate the stepper motor with the extruder motion queue at startup.
 
 20220210: The `SYNC_STEPPER_TO_EXTRUDER` command is deprecated; the
 `SET_EXTRUDER_STEP_DISTANCE` command is deprecated; the
@@ -254,10 +260,8 @@ is deprecated. These features will be removed in the near future.
 Replace `SET_EXTRUDER_STEP_DISTANCE` with
 `SET_EXTRUDER_ROTATION_DISTANCE`. Replace `SYNC_STEPPER_TO_EXTRUDER`
 with `SYNC_EXTRUDER_MOTION`. Replace extruder config sections using
-`shared_heater` with
-[extruder_stepper](Config_Reference.md#extruder_stepper) config
-sections and update any activation macros to use
-[SYNC_EXTRUDER_MOTION](G-Codes.md#sync_extruder_motion).
+`shared_heater` with extruder-stepper config
+sections and update any activation macros to use `SYNC_EXTRUDER_MOTION`.
 
 20220116: The tmc2130, tmc2208, tmc2209, and tmc2660 `run_current`
 calculation code has changed. For some `run_current` settings the
@@ -285,8 +289,8 @@ use the older (typically less accurate) definition, define a custom
 20211104: The "step pulse duration" option in "make menuconfig" has
 been removed. The default step duration for TMC drivers configured in
 UART or SPI mode is now 100ns. A new `step_pulse_duration` setting in
-the [stepper config section](Config_Reference.md#stepper) should be
-set for all steppers that need a custom pulse duration.
+the motor configuration should be set for motors that need a custom
+pulse duration.
 
 20211102: Several deprecated features have been removed.  The stepper
 `step_distance` option has been removed (deprecated on 20201222).  The
@@ -396,9 +400,8 @@ endstop phases by running the ENDSTOP_PHASE_CALIBRATE command.
 
 20201218: Rotary delta and polar printers must now specify a
 `gear_ratio` for their rotary steppers, and they may no longer specify
-a `step_distance` parameter.  See the
-[config reference](Config_Reference.md#stepper) for the format of the
-new gear_ratio paramter.
+`step_distance`; use `gear_ratio`/`rotation_distance` in the current
+motor configuration.
 
 20201213: It is not valid to specify a Z "position_endstop" when using
 "probe:z_virtual_endstop".  An error will now be raised if a Z

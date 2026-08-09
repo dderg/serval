@@ -371,12 +371,10 @@ class HelperTLE5012B:
         )
 
     def _build_config(self):
-        cmdqueue = self.spi.get_command_queue()
         self.spi_angle_transfer_cmd = self.mcu.lookup_query_command(
             "spi_angle_transfer oid=%c data=%*s",
             "spi_angle_transfer_response oid=%c clock=%u response=%*s",
             oid=self.oid,
-            cq=cmdqueue,
         )
 
     def get_tcode_params(self):
@@ -435,7 +433,7 @@ class HelperTLE5012B:
         msg = [0x84, 0x42, 0, 0, 0, 0, 0, 0]  # Read with latch, AREV and FSYNC
         params = self._send_spi(msg)
         resp = bytearray(params["response"])
-        mcu_clock = self.mcu.clock32_to_clock64(params["clock"])
+        mcu_clock = self.mcu.get_clocksync().clock32_to_clock64(params["clock"])
         chip_clock = ((resp[2] & 0x7E) << 9) | ((resp[4] & 0x3E) << 4)
         # Calculate temperature
         temper = resp[5] - ((resp[4] & 0x01) << 8)
@@ -510,12 +508,10 @@ class HelperMT6816:
         )
 
     def _build_config(self):
-        cmdqueue = self.spi.get_command_queue()
         self.spi_angle_transfer_cmd = self.mcu.lookup_query_command(
             "spi_angle_transfer oid=%c data=%*s",
             "spi_angle_transfer_response oid=%c clock=%u response=%*s",
             oid=self.oid,
-            cq=cmdqueue,
         )
 
     def _send_spi(self, msg):
@@ -585,12 +581,10 @@ class HelperMT6826S:
         }
 
     def _build_config(self):
-        cmdqueue = self.spi.get_command_queue()
         self.spi_angle_transfer_cmd = self.mcu.lookup_query_command(
             "spi_angle_transfer oid=%c data=%*s",
             "spi_angle_transfer_response oid=%c clock=%u response=%*s",
             oid=self.oid,
-            cq=cmdqueue,
         )
 
     def _send_spi(self, msg):
@@ -781,10 +775,8 @@ class Angle:
         freq = self.mcu.seconds_to_clock(1.0)
         while float(TCODE_ERROR << self.time_shift) / freq < 0.002:
             self.time_shift += 1
-        cmdqueue = self.spi.get_command_queue()
         self.query_spi_angle_cmd = self.mcu.lookup_command(
             "query_spi_angle oid=%c clock=%u rest_ticks=%u time_shift=%c",
-            cq=cmdqueue,
         )
 
     def get_status(self, eventtime=None):
@@ -862,7 +854,9 @@ class Angle:
         self.last_sequence = 0
         systime = self.printer.get_reactor().monotonic()
         print_time = self.mcu.estimated_print_time(systime) + MIN_MSG_TIME
-        self.start_clock = reqclock = self.mcu.print_time_to_clock(print_time)
+        self.start_clock = reqclock = (
+            self.mcu.get_clocksync().print_time_to_clock(print_time)
+        )
         rest_ticks = self.mcu.seconds_to_clock(self.sample_period)
         self.sample_ticks = rest_ticks
         self.query_spi_angle_cmd.send(

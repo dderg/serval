@@ -1,10 +1,12 @@
 # development
+.cache/
 out
 *.so
 *.pyc
 __pycache__/
-.config
+/.config
 .config.old
+.config.*.*
 klippy/.version
 .history/
 .DS_Store
@@ -16,6 +18,11 @@ klippy/plugins/*
 .vscode
 .idea/*
 
+# Test-run logs kept for inspection: per-gate logs from scripts/ci.sh, and
+# whole simulator worlds from `tools/sim/run.sh test --keep-logs`
+.ci-logs/
+.sim-logs/
+
 # docs
 site/
 .env/
@@ -23,3 +30,43 @@ site/
 env/
 venv/
 mkdocs-env/
+
+# git worktrees
+.worktrees/
+.claude/worktrees/
+
+# claude-code session-local runtime state (lock file holds session pid +
+# acquired-at; the rest of .claude/ — plugins, skills, settings — IS tracked)
+.claude/scheduled_tasks.lock
+
+# MCU firmware build outputs
+firmware/
+
+# Built artifacts (motion-engine .so, chelper .so) — built per-platform,
+# never checked in. Keep klippy/ clean across macOS/Linux/Pi dev.
+klippy/_motion_engine*.so
+klippy/motion_engine*.dylib
+klippy/_config_doc*.so
+klippy/_shaper_ident*.so
+klippy/chelper/c_helper*.so
+klippy/chelper/c_helper*.so.dSYM/
+klippy/chelper/*.dylib
+
+# Sim-only third-party plugin symlinks (created by the sim Docker image)
+klippy/extras/beacon.py
+klippy/extras/beacon_kalico.py
+
+# Third-party plugin sources (fetched on demand by tools/sim/fetch_plugins.sh)
+tools/sim/third_party_repos/
+
+# Sim preload shims built in-tree for local (non-Docker) Linux runs
+tools/sim/preload/*.so
+
+# Local observability test rig (VictoriaLogs + Vector binaries + scratch data)
+.tools/
+
+# Local test-bench notes (passwords, mDNS hostnames, board-specific quirks).
+# Not checked in — they describe physical hardware on a specific desk.
+test-benches/
+
+graphify-out/

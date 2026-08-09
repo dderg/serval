@@ -5,12 +5,97 @@
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
 #include <string.h> // memcpy
+#include "autoconf.h" // CONFIG_MACH_LINUX
 #include "board/gpio.h" // gpio_out_write
 #include "board/irq.h" // irq_disable
 #include "board/misc.h" // timer_read_time
 #include "basecmd.h" // oid_alloc
 #include "command.h" // DECL_COMMAND
 #include "sched.h" // DECL_SHUTDOWN
+
+#if CONFIG_MACH_LINUX
+#include <stdio.h> // snprintf
+#include "linux/sim_chip_socket.h" // sim_chip_socket_connect, sim_chip_socket_xfer
+
+struct sim_uart_route { uint8_t oid; char socket_path[64]; int fd; };
+static struct sim_uart_route sim_uart_routes[8];
+static int sim_uart_routes_count = 0;
+
+void
+sim_tmcuart_register_route(uint8_t oid, const char *path) {
+    for (int i = 0; i < sim_uart_routes_count; i++)
+        if (sim_uart_routes[i].oid == oid) {
+            snprintf(sim_uart_routes[i].socket_path,
+                     sizeof(sim_uart_routes[i].socket_path), "%s", path);
+            sim_uart_routes[i].fd = -1;
+            return;
+        }
+    sim_uart_routes[sim_uart_routes_count].oid = oid;
+    snprintf(sim_uart_routes[sim_uart_routes_count].socket_path,
+             sizeof(sim_uart_routes[sim_uart_routes_count].socket_path),
+             "%s", path);
+    sim_uart_routes[sim_uart_routes_count].fd = -1;
+    sim_uart_routes_count++;
+}
+
+static int
+sim_uart_lookup_fd(uint8_t oid) {
+    for (int i = 0; i < sim_uart_routes_count; i++)
+        if (sim_uart_routes[i].oid == oid) {
+            if (sim_uart_routes[i].fd < 0)
+                sim_uart_routes[i].fd =
+                    sim_chip_socket_connect(sim_uart_routes[i].socket_path);
+            return sim_uart_routes[i].fd;
+        }
+#if CONFIG_MCU_SIM
+    // Auto-route: any tmcuart oid with no explicit route falls back to
+    // a canonical per-MCU socket path. The flavor prefix (`h7` for the
+    // RUNTIME-enabled H7 build, `f4` otherwise) differentiates
+    // sockets so the H7 extruder TMC2209 (oid=0) and the F4 stepper_z
+    // TMC2209 (also oid=0) talk to distinct emulators. The orchestrator
+    // binds matching paths in conftest.py before klippy attaches.
+    char path[64];
+    const char *flavor = "h7";
+    snprintf(path, sizeof(path), "/tmp/klipper_sim_%s_chip_uart%u",
+             flavor, (unsigned)oid);
+    sim_tmcuart_register_route(oid, path);
+    for (int i = 0; i < sim_uart_routes_count; i++)
+        if (sim_uart_routes[i].oid == oid) {
+            sim_uart_routes[i].fd =
+                sim_chip_socket_connect(sim_uart_routes[i].socket_path);
+            return sim_uart_routes[i].fd;
+        }
+#endif
+    return -1;
+}
+#endif
+
+#if CONFIG_MCU_SIM_TMCUART_BYPASS
+#include <stdio.h>     // snprintf
+#include <stdlib.h>    // getenv
+#include "linux/sim_chip_socket.h"
+
+// Per-oid socket fd cache. Path computed from MCU_SIM_SOCK_DIR env var
+// at first use; orchestrator binds matching paths before spawn.
+#define MAX_TMCUART_OIDS 8
+static int sim_tmcuart_fds[MAX_TMCUART_OIDS];
+static int sim_tmcuart_fds_initialized = 0;
+
+static int sim_tmcuart_lookup_fd(uint8_t oid) {
+    if (oid >= MAX_TMCUART_OIDS) return -1;
+    if (!sim_tmcuart_fds_initialized) {
+        for (int i = 0; i < MAX_TMCUART_OIDS; i++) sim_tmcuart_fds[i] = -1;
+        sim_tmcuart_fds_initialized = 1;
+    }
+    if (sim_tmcuart_fds[oid] >= 0) return sim_tmcuart_fds[oid];
+    const char *sock_dir = getenv("MCU_SIM_SOCK_DIR");
+    if (!sock_dir) return -1;
+    char path[256];
+    snprintf(path, sizeof(path), "%s/tmcuart_%u", sock_dir, (unsigned)oid);
+    sim_tmcuart_fds[oid] = sim_chip_socket_connect(path);
+    return sim_tmcuart_fds[oid];
+}
+#endif
 
 struct tmcuart_s {
     struct timer timer;
@@ -190,6 +275,25 @@ DECL_COMMAND(command_config_tmcuart,
 void
 command_tmcuart_send(uint32_t *args)
 {
+#if CONFIG_MCU_SIM_TMCUART_BYPASS
+    {
+        uint8_t oid = args[0];
+        int sfd = sim_tmcuart_lookup_fd(oid);
+        if (sfd >= 0) {
+            uint8_t write_len = args[1];
+            uint8_t *write_data = command_decode_ptr(args[2]);
+            uint8_t read_len = args[3];
+            uint8_t reply[16] = {0};
+            if (read_len > sizeof(reply))
+                shutdown("sim tmcuart read_len too big");
+            if (sim_chip_socket_xfer(sfd, write_data, write_len,
+                                     reply, read_len) != 0)
+                shutdown("sim tmcuart xfer failed");
+            sendf("tmcuart_response oid=%c read=%*s", oid, read_len, reply);
+            return;
+        }
+    }
+#endif
     struct tmcuart_s *t = oid_lookup(args[0], command_config_tmcuart);
     if (t->flags & TU_ACTIVE)
         // Uart is busy - silently drop this request (host should retransmit)

@@ -1,0 +1,16 @@
+[package]
+name = "nurbs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "Layer 0 NURBS substrate: eval, arc-length, algebra"
+license.workspace = true
+
+[dev-dependencies]
+libm = "0.2"
+proptest = "1.5"
+serde_json = "1.0"
+
+[lints]
+workspace = true

@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+from klippy.motion import _derive_mcu_topology
+
+
+def test_corexy_two_mcu_extruder_on_octopus():
+    axis_to_handle = {0: 7, 1: 7, 3: 7, 2: 9}
+    topo = _derive_mcu_topology(axis_to_handle, "corexy")
+    assert topo == [(7, [0, 1, 3], 0), (9, [2], 1)]
+
+
+def test_cartesian_single_mcu_all_axes():
+    axis_to_handle = {0: 5, 1: 5, 2: 5, 3: 5}
+    topo = _derive_mcu_topology(axis_to_handle, "cartesian")
+    assert topo == [(5, [0, 1, 2, 3], 1)]
+
+
+def test_corexy_single_mcu_gets_corexy_tag():
+    axis_to_handle = {0: 5, 1: 5, 2: 5, 3: 5}
+    topo = _derive_mcu_topology(axis_to_handle, "corexy")
+    assert topo == [(5, [0, 1, 2, 3], 0)]
+
+
+def test_corexy_z_only_mcu_is_cartesian():
+    axis_to_handle = {2: 9}
+    topo = _derive_mcu_topology(axis_to_handle, "corexy")
+    assert topo == [(9, [2], 1)]
+
+
+if __name__ == "__main__":
+    test_corexy_two_mcu_extruder_on_octopus()
+    test_cartesian_single_mcu_all_axes()
+    test_corexy_single_mcu_gets_corexy_tag()
+    test_corexy_z_only_mcu_is_cartesian()
+    print("all passed")

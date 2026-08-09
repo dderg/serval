@@ -192,12 +192,11 @@ class ST7920(DisplayBase):
                 self.mcu.seconds_to_clock(ST7920_CMD_DELAY),
             )
         )
-        cmd_queue = self.mcu.alloc_command_queue()
         self.send_cmds_cmd = self.mcu.lookup_command(
-            "st7920_send_cmds oid=%c cmds=%*s", cq=cmd_queue
+            "st7920_send_cmds oid=%c cmds=%*s"
         )
         self.send_data_cmd = self.mcu.lookup_command(
-            "st7920_send_data oid=%c data=%*s", cq=cmd_queue
+            "st7920_send_data oid=%c data=%*s"
         )
 
     def send(self, cmds, is_data=False, is_extended=False):
@@ -217,21 +216,19 @@ class ST7920(DisplayBase):
 # Helper code for toggling the en pin on startup
 class EnableHelper:
     def __init__(self, pin_desc, spi):
-        self.en_pin = bus.MCU_bus_digital_out(
-            spi.get_mcu(), pin_desc, spi.get_command_queue()
-        )
+        self.en_pin = bus.MCU_bus_digital_out(spi.get_mcu(), pin_desc)
 
     def init(self):
         mcu = self.en_pin.get_mcu()
         curtime = mcu.get_printer().get_reactor().monotonic()
         print_time = mcu.estimated_print_time(curtime)
         # Toggle enable pin
-        minclock = mcu.print_time_to_clock(print_time + 0.100)
+        minclock = mcu.get_clocksync().print_time_to_clock(print_time + 0.100)
         self.en_pin.update_digital_out(0, minclock=minclock)
-        minclock = mcu.print_time_to_clock(print_time + 0.200)
+        minclock = mcu.get_clocksync().print_time_to_clock(print_time + 0.200)
         self.en_pin.update_digital_out(1, minclock=minclock)
         # Force a delay to any subsequent commands on the command queue
-        minclock = mcu.print_time_to_clock(print_time + 0.300)
+        minclock = mcu.get_clocksync().print_time_to_clock(print_time + 0.300)
         self.en_pin.update_digital_out(1, minclock=minclock)
 
 

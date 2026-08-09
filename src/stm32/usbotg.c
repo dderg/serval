@@ -61,11 +61,44 @@ usb_irq_enable(void)
 
 #define OTG ((USB_OTG_GlobalTypeDef*)USB_PERIPH_BASE)
 #define OTGD ((USB_OTG_DeviceTypeDef*)(USB_PERIPH_BASE + USB_OTG_DEVICE_BASE))
+
+void
+usb_diag_read_otg_state(uint32_t *gintmsk, uint32_t *gintsts)
+{
+    *gintmsk = OTG->GINTMSK;
+    *gintsts = OTG->GINTSTS;
+}
+
+
 #define EPFIFO(EP) ((void*)(USB_PERIPH_BASE + USB_OTG_FIFO_BASE + ((EP) << 12)))
 #define EPIN(EP) ((USB_OTG_INEndpointTypeDef*)                          \
                   (USB_PERIPH_BASE + USB_OTG_IN_ENDPOINT_BASE + ((EP) << 5)))
 #define EPOUT(EP) ((USB_OTG_OUTEndpointTypeDef*)                        \
                    (USB_PERIPH_BASE + USB_OTG_OUT_ENDPOINT_BASE + ((EP) << 5)))
+
+void
+usb_diag_read_out_ep(uint32_t *doepctl, uint32_t *doeptsiz, uint32_t *doepint)
+{
+    USB_OTG_OUTEndpointTypeDef *epo = EPOUT(USB_CDC_EP_BULK_OUT);
+    *doepctl  = epo->DOEPCTL;
+    *doeptsiz = epo->DOEPTSIZ;
+    *doepint  = epo->DOEPINT;
+}
+
+void
+usb_diag_poll_task(void)
+{
+    extern void diag_usb_poll(uint32_t gintsts, uint32_t gintmsk,
+                              uint32_t in_diepctl, uint32_t in_diepint,
+                              uint32_t in_dtxfsts, uint32_t out_doepctl,
+                              uint32_t out_doepint);
+    USB_OTG_INEndpointTypeDef  *epi = EPIN(USB_CDC_EP_BULK_IN);
+    USB_OTG_OUTEndpointTypeDef *epo = EPOUT(USB_CDC_EP_BULK_OUT);
+    diag_usb_poll(OTG->GINTSTS, OTG->GINTMSK,
+                  epi->DIEPCTL, epi->DIEPINT, epi->DTXFSTS,
+                  epo->DOEPCTL, epo->DOEPINT);
+}
+DECL_TASK(usb_diag_poll_task);
 
 // Setup the USB fifos
 static void
@@ -148,9 +181,13 @@ fifo_read_packet(uint8_t *dest, uint_fast8_t max_len)
 static void
 enable_rx_endpoint(uint32_t ep)
 {
+    extern volatile uint32_t *diag_slot_enable_rx(void);
+    extern volatile uint32_t *diag_slot_enable_rx_rearm(void);
+    (*diag_slot_enable_rx())++;
     USB_OTG_OUTEndpointTypeDef *epo = EPOUT(ep);
     uint32_t ctl = epo->DOEPCTL;
     if (!(ctl & USB_OTG_DOEPCTL_EPENA) || ctl & USB_OTG_DOEPCTL_NAKSTS) {
+        (*diag_slot_enable_rx_rearm())++;
         epo->DOEPTSIZ = 64 | (1 << USB_OTG_DOEPTSIZ_PKTCNT_Pos);
         epo->DOEPCTL = ctl | USB_OTG_DOEPCTL_EPENA | USB_OTG_DOEPCTL_CNAK;
     }
@@ -198,10 +235,14 @@ usb_read_bulk_out(void *data, uint_fast8_t max_len)
     uint32_t grx = peek_rx_queue(USB_CDC_EP_BULK_OUT);
     if (!grx) {
         // Wait for packet
+        extern volatile uint32_t *diag_slot_peek_empty(void);
+        (*diag_slot_peek_empty())++;
         OTG->GINTMSK |= USB_OTG_GINTMSK_RXFLVLM;
         usb_irq_enable();
         return -1;
     }
+    extern volatile uint32_t *diag_slot_peek_data(void);
+    (*diag_slot_peek_data())++;
     int_fast8_t ret = fifo_read_packet(data, max_len);
     enable_rx_endpoint(USB_CDC_EP_BULK_OUT);
     usb_irq_enable();
@@ -219,7 +260,8 @@ usb_send_bulk_in(void *data, uint_fast8_t len)
         return len;
     }
     if (ctl & USB_OTG_DIEPCTL_EPENA) {
-        // Wait for space to transmit
+        extern void diag_note_usb_in_busy(void);
+        diag_note_usb_in_busy();
         OTGD->DAINTMSK |= 1 << USB_CDC_EP_BULK_IN;
         usb_irq_enable();
         return -1;
@@ -385,8 +427,23 @@ usb_set_configure(void)
 void
 OTG_FS_IRQHandler(void)
 {
+    // Diag accounting — DWT is enabled by runtime_tick_h7.c::runtime_tick_init
+    // (and the F4 equivalent). DWT->CYCCNT is free-running once enabled, so
+    // a simple read at entry/exit is sufficient. The handler runs at NVIC
+    // priority 1 (per usb_init below), so the cycle window is uninterrupted
+    // by other sources we instrument.
+    extern void diag_otg_account(uint32_t enter, uint32_t exit);
+    uint32_t diag_enter = DWT->CYCCNT;
+
     uint32_t sts = OTG->GINTSTS;
+    extern volatile uint32_t *diag_slot_otg_rxflvl(void);
+    extern volatile uint32_t *diag_slot_otg_iepint(void);
+    extern volatile uint32_t *diag_slot_otg_other(void);
+    extern volatile uint32_t *diag_slot_otg_other_sts(void);
+    uint32_t diag_handled = 0;
     if (sts & USB_OTG_GINTSTS_RXFLVL) {
+        (*diag_slot_otg_rxflvl())++;
+        diag_handled = 1;
         // Received data - disable irq and notify endpoint
         OTG->GINTMSK &= ~USB_OTG_GINTMSK_RXFLVLM;
         uint32_t grx = OTG->GRXSTSR, ep = grx & USB_OTG_GRXSTSP_EPNUM_Msk;
@@ -396,6 +453,8 @@ OTG_FS_IRQHandler(void)
             usb_notify_bulk_out();
     }
     if (sts & USB_OTG_GINTSTS_IEPINT) {
+        (*diag_slot_otg_iepint())++;
+        diag_handled = 1;
         // Can transmit data - disable irq and notify endpoint
         uint32_t daint = OTGD->DAINT, msk = OTGD->DAINTMSK, pend = daint & msk;
         OTGD->DAINTMSK = msk & ~daint;
@@ -404,6 +463,12 @@ OTG_FS_IRQHandler(void)
         if (pend & (1 << USB_CDC_EP_BULK_IN))
             usb_notify_bulk_in();
     }
+    if (!diag_handled) {
+        (*diag_slot_otg_other())++;
+        *diag_slot_otg_other_sts() = sts;
+    }
+
+    diag_otg_account(diag_enter, DWT->CYCCNT);
 }
 
 // Initialize the usb controller

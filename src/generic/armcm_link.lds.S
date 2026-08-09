@@ -13,6 +13,21 @@ MEMORY
 {
   rom (rx) : ORIGIN = CONFIG_FLASH_APPLICATION_ADDRESS , LENGTH = CONFIG_FLASH_SIZE
   ram (rwx) : ORIGIN = CONFIG_RAM_START , LENGTH = CONFIG_RAM_SIZE
+#if CONFIG_MACH_STM32H7
+  // STM32H7 AXI SRAM (D1 domain). 320 KB on H723; clock is always-on after
+  // reset. Used to host large statics (notably the kalico Rust runtime's
+  // RT_CELL curve pool) that don't fit in the 128 KB DTCM `ram` region.
+  axi_ram (rwx) : ORIGIN = 0x24000000 , LENGTH = 320K
+  // Backup SRAM (D3 domain). 4 KB at 0x38800000. Survives any system
+  // reset (IWDG, software, NRST) and even VBAT-only — the only thing
+  // that wipes it is full power loss / POR with VBAT disconnected.
+  // Used by the diagnostic fault handler to record CPU-fault details
+  // and runtime-engine snapshots so we can read out what state the
+  // firmware was in just before a watchdog-triggered reset.
+  // Requires runtime enable: PWR->CR2 |= BREN, RCC->AHB4ENR |= BKPRAMEN
+  // (see generic/diag_boot_report.c::fault_handler_init).
+  bkp_ram (rwx) : ORIGIN = 0x38800000 , LENGTH = 4K
+#endif
 }
 
 SECTIONS
@@ -41,6 +56,25 @@ SECTIONS
     {
         . = ALIGN(4);
         _data_start = .;
+
+        // MPU-protected scheduler bookkeeping. The single SchedState struct
+        // in src/sched.c (containing all foundation timers + dispatcher head
+        // / last_insert pointers) is tagged
+        // `__attribute__((section(".sched_protected")))` and placed here.
+        // The region is 128-byte
+        // aligned and 128-byte sized so it fits a single MPU comparator on
+        // both Cortex-M4 and M7 (PMSAv7: region size must be power-of-2 ≥ 32 B
+        // and naturally aligned). 60 B used + padding. Initialised normally
+        // via the .data copy in armcm_boot.c — we don't need a separate
+        // load path. The MPU is configured later (after the .data copy)
+        // to mark this section read-only; sched.c opens it briefly around
+        // its own writes via sched_writable_begin()/end().
+        . = ALIGN(128);
+        _sched_protected_start = .;
+        *(.sched_protected .sched_protected.*)
+        . = _sched_protected_start + 128;
+        _sched_protected_end = .;
+
         *(.ramfunc .ramfunc.*);
         *(.data .data.*);
         . = ALIGN(4);
@@ -56,6 +90,54 @@ SECTIONS
         . = ALIGN(4);
         _bss_end = .;
     } > ram
+
+    // Persistent diag region. NOLOAD + placed OUTSIDE [_bss_start.._bss_end],
+    // so `armcm_boot.c::boot_memset(&_bss_start, 0, …)` doesn't touch it.
+    // STM32 SRAM contents survive `NVIC_SystemReset` (soft reset) and even
+    // most fault-trampoline resets — only cold POR/BOR clears it. Used by
+    // `runtime_diag_progress` to record the last stage reached before a
+    // hard fault on platforms (e.g. STM32F446) that don't have BKPSRAM. A
+    // 32-bit magic guards against random SRAM contents at cold boot.
+    .persistent_diag (NOLOAD) : {
+        . = ALIGN(4);
+        _persistent_diag_start = .;
+        *(.persistent_diag .persistent_diag.*)
+        . = ALIGN(4);
+        _persistent_diag_end = .;
+    } > ram
+
+#if CONFIG_MACH_STM32H7
+    // Symbols / statics tagged `__attribute__((section(".axi_bss")))` (C) or
+    // `#[link_section = ".axi_bss"]` (Rust) are placed in AXI SRAM rather
+    // than DTCM. NOLOAD because these are uninitialised (BSS-style) and we
+    // do not want them in the flash image.
+    .axi_bss (NOLOAD) : {
+        . = ALIGN(8);
+        _axi_bss_start = .;
+        *(.axi_bss .axi_bss.*)
+        // The bootloader at CONFIG_FLASH_BOOT_ADDRESS runs before us on every
+        // reset and takes its stack from the base of AXI SRAM (initial SP
+        // 0x24000738 on this board), so the low ~2 KB of this region is
+        // scratch that cannot carry anything across a reset. `.axi_dfu_flag`
+        // is emitted last, above every live static, which is the only part of
+        // AXI the bootloader never touches.
+        . = ALIGN(32);
+        *(.axi_dfu_flag)
+        . = ALIGN(8);
+        _axi_bss_end = .;
+    } > axi_ram
+
+    // Backup-SRAM-resident statics. NOLOAD because the bootloader
+    // doesn't initialize this region; we rely on prior contents
+    // surviving the reset (or detect uninitialised state via a magic).
+    .bkp_bss (NOLOAD) : {
+        . = ALIGN(4);
+        _bkp_bss_start = .;
+        *(.bkp_bss .bkp_bss.*)
+        . = ALIGN(4);
+        _bkp_bss_end = .;
+    } > bkp_ram
+#endif
 
     _stack_start = CONFIG_RAM_START + CONFIG_RAM_SIZE - CONFIG_STACK_SIZE ;
     .stack _stack_start (NOLOAD) :

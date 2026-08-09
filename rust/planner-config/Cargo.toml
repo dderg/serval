@@ -1,0 +1,23 @@
+[package]
+name = "planner-config"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "Axis topology and post-processor chain config: parses and validates [axis]/[post_processor]/[limit] declarations into a compiled AxisChainSet. Depends only on trajectory/geometry so it can be shared by native (motion-core) and wasm32 (pipeline-snapshot/motion-playground) consumers."
+license.workspace = true
+
+[dependencies]
+trajectory = { path = "../trajectory" }
+geometry = { path = "../geometry" }
+thiserror = { workspace = true }
+config-doc = { path = "../config-doc", optional = true }
+
+[features]
+# Reading planner sections straight from a parsed config Document. Off by
+# default so the wasm32 consumers (pipeline-snapshot, motion-playground)
+# never pull in the filesystem-touching parser crate.
+doc = ["dep:config-doc"]
+
+[lints]
+workspace = true

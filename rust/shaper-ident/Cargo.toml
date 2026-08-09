@@ -1,0 +1,30 @@
+[package]
+name = "shaper-ident"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "Input-shaper resonance identification numeric core, exposed to klippy as _shaper_ident."
+license.workspace = true
+
+[lib]
+# Must match the #[pymodule] fn name in src/lib.rs. Underscore-prefixed like
+# _motion_engine / _config_doc; klippy/extras/shaper_calibrate.py loads it as
+# _shaper_ident by explicit path.
+name = "_shaper_ident"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libm = { version = "0.2", default-features = false }
+nurbs = { path = "../nurbs" }
+pyo3 = { version = "0.29", features = ["abi3-py39"] }
+realfft = "3"
+trajectory = { path = "../trajectory" }
+
+[features]
+# extension-module leaves libpython symbols undefined (resolved by the host
+# process). Test binaries are standalone executables and MUST NOT enable it.
+extension-module = ["pyo3/extension-module"]
+
+[lints]
+workspace = true

@@ -25,7 +25,8 @@ struct gpio_adc
 gpio_adc_setup(uint32_t pin)
 {
     char fname[256];
-    snprintf(fname, sizeof(fname), IIO_PATH, pin-ANALOG_START);
+    uint8_t idx = (uint8_t)(pin - ANALOG_START);
+    snprintf(fname, sizeof(fname), IIO_PATH, (int)idx);
 
     int fd = open(fname, O_RDONLY|O_CLOEXEC);
     if (fd < 0) {
@@ -35,7 +36,7 @@ gpio_adc_setup(uint32_t pin)
     int ret = set_non_blocking(fd);
     if (ret < 0)
         goto fail;
-    return (struct gpio_adc){ .fd = fd };
+    return (struct gpio_adc){ .fd = fd, .adc_pin = idx };
 fail:
     if (fd >= 0)
         close(fd);

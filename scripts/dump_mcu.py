@@ -58,7 +58,7 @@ class MCUDump:
             )
         if self.read_length <= 0:
             raise MCUDumpError("Read count must be greater than 0")
-        self._serial = serialhdl.SerialReader(self.reactor)
+        self._serial = serialhdl.EngineCommandChannel(self.reactor)
         self.clocksync = clocksync.ClockSync(self.reactor)
         self.connect_completion = None
         self.connected = False

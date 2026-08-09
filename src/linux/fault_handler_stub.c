@@ -1,0 +1,181 @@
+// Linux-host stubs for the diag/fault-handler API declared in
+// src/generic/fault_handler.h. The real implementation, split across
+// src/generic/fault_capture.c, diag_counters.c, diag_ring.c,
+// diag_boot_report.c and diag_emit.c, is Cortex-M / STM32 specific (custom
+// link sections, SCB cache ops, exception handlers) and cannot be
+// compiled for the Linux MCU build. The host sim doesn't need the
+// wedge counters or fault-record persistence — provide no-ops so
+// runtime_tick.c and friends link cleanly.
+
+#include <stdint.h>
+#include "generic/fault_handler.h"
+
+static volatile uint32_t stub_zero;
+
+void diag_ring_push(uint8_t tag, uint32_t a, uint32_t b)
+{
+    (void)tag; (void)a; (void)b;
+}
+
+void diag_task_heartbeat(volatile uint32_t *calls,
+                         volatile uint32_t *last_tick,
+                         volatile uint32_t *max_gap,
+                         uint32_t threshold_ticks,
+                         uint8_t event_tag)
+{
+    (void)calls; (void)last_tick; (void)max_gap;
+    (void)threshold_ticks; (void)event_tag;
+}
+
+void diag_tim5_account(uint32_t enter_cycles, uint32_t exit_cycles)
+{
+    (void)enter_cycles; (void)exit_cycles;
+}
+
+void diag_otg_account(uint32_t enter_cycles, uint32_t exit_cycles)
+{
+    (void)enter_cycles; (void)exit_cycles;
+}
+
+void diag_runtime_tick_account(uint32_t cycles)
+{
+    (void)cycles;
+}
+
+void diag_walk_account(uint32_t cycles)
+{
+    (void)cycles;
+}
+
+void diag_monomial_account(uint32_t cycles)
+{
+    (void)cycles;
+}
+
+void runtime_set_isr_phase(uint32_t phase)
+{
+    (void)phase;
+}
+
+#define DIAG_SLOT_STUB(name) \
+    volatile uint32_t *diag_slot_##name(void) { return &stub_zero; }
+
+DIAG_SLOT_STUB(usb_out_calls)
+DIAG_SLOT_STUB(usb_out_last_tick)
+DIAG_SLOT_STUB(usb_out_max_gap)
+DIAG_SLOT_STUB(usb_in_calls)
+DIAG_SLOT_STUB(usb_in_last_tick)
+DIAG_SLOT_STUB(usb_in_max_gap)
+DIAG_SLOT_STUB(rt_drain_calls)
+DIAG_SLOT_STUB(rt_drain_last_tick)
+DIAG_SLOT_STUB(rt_drain_max_gap)
+DIAG_SLOT_STUB(rt_status_calls)
+DIAG_SLOT_STUB(rt_status_last_tick)
+DIAG_SLOT_STUB(rt_status_max_gap)
+DIAG_SLOT_STUB(otg_rxflvl)
+DIAG_SLOT_STUB(otg_iepint)
+DIAG_SLOT_STUB(otg_other)
+DIAG_SLOT_STUB(otg_other_sts)
+DIAG_SLOT_STUB(notify_bulk_out)
+DIAG_SLOT_STUB(task_invoke)
+DIAG_SLOT_STUB(read_zero)
+DIAG_SLOT_STUB(read_data)
+DIAG_SLOT_STUB(enable_rx)
+DIAG_SLOT_STUB(enable_rx_rearm)
+DIAG_SLOT_STUB(peek_empty)
+DIAG_SLOT_STUB(peek_data)
+
+void diag_record_tx_drop_kalico(uint32_t len, uint32_t tpos)
+{
+    (void)len; (void)tpos;
+}
+
+void diag_record_tx_drop_klipper(uint32_t max_size, uint32_t tpos)
+{
+    (void)max_size; (void)tpos;
+}
+
+void diag_record_engine_xition(uint8_t prev, uint8_t cur,
+                               uint32_t samples_taken)
+{
+    (void)prev; (void)cur; (void)samples_taken;
+}
+
+// Crash-diag emit hooks. The real (STM32) implementations re-emit the
+// prior-boot crash summary / the live diag state through the structured-log
+// path, reading the .persistent_diag / BKPSRAM-resident counters and event
+// ring. The Linux MCU has no persisted crash-diag RAM (no NOLOAD section that
+// survives a reset, no BKPSRAM), so there is nothing to replay — no-op stubs.
+// Referenced unconditionally from src/stepper.c (configure-axis "runtime ready"
+// path and the runtime_diag_dump command), so they must link.
+void kalico_diag_emit_prior_crash(void)
+{
+}
+
+void kalico_diag_emit_live(void)
+{
+}
+
+void diag_note_dispatch(uint32_t func, uint32_t addr)
+{
+    (void)func; (void)addr;
+}
+
+void diag_note_task_enter(uint32_t func)
+{
+    (void)func;
+}
+
+void diag_note_task_loop_end(void)
+{
+}
+
+void diag_note_msg_enter(uint32_t kind, uint32_t head)
+{
+    (void)kind; (void)head;
+}
+
+void diag_note_msg_exit(void)
+{
+}
+
+void diag_note_timer_too_close(uint32_t caller, uint32_t func, uint32_t late)
+{
+    (void)caller; (void)func; (void)late;
+}
+
+void diag_note_shutdown_reset(void)
+{
+}
+
+void diag_note_demux(uint32_t backlog, uint32_t msgs)
+{
+    (void)backlog; (void)msgs;
+}
+
+void diag_note_step_rearm(int32_t margin)
+{
+    (void)margin;
+}
+
+// Linux build doesn't have armcm_timer.c or mpu_protect.c — provide
+// stubs for symbols referenced by sched.c.
+#include "sched.h"
+
+uint_fast8_t timer_wrap_event(struct timer *t)
+{
+    t->waketime += 0xffffff;
+    return SF_RESCHEDULE;
+}
+
+void sched_writable_reset(void)
+{
+}
+
+void sched_writable_begin(void)
+{
+}
+
+void sched_writable_end(void)
+{
+}

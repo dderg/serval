@@ -1,0 +1,608 @@
+use std::time::Duration;
+
+use crossbeam_channel::{bounded, unbounded};
+use geometry::segment::SourceRange;
+use geometry::{CornerFitConfig, Move, MoveContext, VelocityLimits, line_move};
+
+use super::FitStage;
+use crate::{Control, StreamInput};
+
+fn moves_of(rx: crossbeam_channel::Receiver<StreamInput>) -> Vec<Move> {
+    rx.into_iter()
+        .filter_map(|item| match item {
+            StreamInput::Move(m) => Some(m),
+            StreamInput::Drain | StreamInput::Control(_) => None,
+        })
+        .collect()
+}
+
+fn ctx(line_no: u32, feed: f64) -> MoveContext {
+    MoveContext {
+        extruder_axis: 3,
+        feedrate_mm_s: feed,
+        limits: VelocityLimits::try_new(
+            300.0,
+            5000.0,
+            geometry::corner_deviation_from_scv(5.0, 5000.0),
+            100_000.0,
+        )
+        .unwrap(),
+        source: SourceRange {
+            start_line: line_no,
+            end_line: line_no,
+        },
+    }
+}
+
+fn line(line_no: u32, start: [f64; 3], end: [f64; 3], e: f64) -> Move {
+    line_move(start, end, e, ctx(line_no, 80.0)).unwrap()
+}
+
+/// A line under looser corner limits (scv 9, accel 3000 — junction deviation
+/// ~11µm) where facet consumption has room to act.
+fn loose_line(line_no: u32, start: [f64; 3], end: [f64; 3], e: f64) -> Move {
+    let mut c = ctx(line_no, 80.0);
+    c.limits = VelocityLimits::try_new(
+        300.0,
+        3000.0,
+        geometry::corner_deviation_from_scv(9.0, 3000.0),
+        100_000.0,
+    )
+    .unwrap();
+    line_move(start, end, e, c).unwrap()
+}
+
+/// A 90° corner rounded by debris facets between two 10mm legs, all
+/// extruding at ratio 0.1. Each facet is (turn at its entry corner in
+/// degrees, length); the exit corner absorbs the rest of the 90°. Uneven
+/// turns and lengths are deliberately nothing like a circle, so the arc-run
+/// detector rejects the chain and it reaches facet consumption the way
+/// slicer debris does.
+fn faceted_corner_moves(facets: &[(f64, f64)]) -> Vec<Move> {
+    let mut moves = vec![loose_line(1, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 1.0)];
+    let mut p = [10.0, 0.0, 0.0];
+    let mut heading = 0.0_f64;
+    for (i, (turn_deg, h)) in facets.iter().enumerate() {
+        heading += turn_deg.to_radians();
+        let q = [
+            p[0] + h * libm::cos(heading),
+            p[1] + h * libm::sin(heading),
+            0.0,
+        ];
+        moves.push(loose_line(2 + i as u32, p, q, 0.1 * h));
+        p = q;
+    }
+    moves.push(loose_line(
+        2 + facets.len() as u32,
+        p,
+        [p[0], p[1] + 10.0, 0.0],
+        1.0,
+    ));
+    moves
+}
+
+fn assert_no_arcs(ms: &[Move]) {
+    assert!(
+        ms.iter()
+            .all(|m| !matches!(m.segment.spatial, Some(geometry::path::Segment::Arc(_)))),
+        "irregular debris must not arc-fit"
+    );
+}
+
+/// Pre-fills the input channel and closes it before the fit stage runs, so
+/// the fit stage never observes a transient-empty input: the output is the
+/// pure end-of-stream fit.
+fn run_fit_stage(moves: &[Move], config: CornerFitConfig) -> Vec<Move> {
+    let (tx, rx) = unbounded();
+    let (out_tx, out_rx) = unbounded();
+    for m in moves {
+        tx.send(m.clone().into()).unwrap();
+    }
+    drop(tx);
+    FitStage::new(config).run(rx, out_tx);
+    moves_of(out_rx)
+}
+
+fn half_circle(
+    first_line_no: u32,
+    start: [f64; 3],
+    c: [f64; 2],
+    r: f64,
+    n: u32,
+    a0: f64,
+    e_per_facet: f64,
+) -> Vec<Move> {
+    let mut prev = start;
+    (1..=n)
+        .map(|i| {
+            let a = a0 + std::f64::consts::PI * f64::from(i) / f64::from(n);
+            let end = [c[0] + r * libm::cos(a), c[1] + r * libm::sin(a), 0.0];
+            let m = line(first_line_no + i - 1, prev, end, e_per_facet);
+            prev = end;
+            m
+        })
+        .collect()
+}
+
+#[test]
+fn arc_mode_all_line_input_reconstructs_arc() {
+    // Production shape: no non-line moves at all. Straight collinear runs feed
+    // into a dense polygonal half-circle and back out; the run seals when the
+    // first straight facet breaks the arc fit, and eases into the tangent
+    // lines on both sides.
+    let mut moves = Vec::new();
+    let mut prev = [10.0, 50.0, 0.0];
+    for i in 0..4u32 {
+        let end = [15.0 + 5.0 * f64::from(i), 50.0, 0.0];
+        moves.push(line(i + 1, prev, end, 0.3));
+        prev = end;
+    }
+    let arc = half_circle(5, prev, [50.0, 50.0], 20.0, 400, std::f64::consts::PI, 0.3);
+    prev = *geometry::fitter::spatial_end(arc.last().unwrap())
+        .as_ref()
+        .unwrap();
+    moves.extend(arc);
+    for i in 0..4u32 {
+        let end = [prev[0] + 5.0 + 5.0 * f64::from(i), prev[1], 0.0];
+        moves.push(line(405 + i, prev, end, 0.3));
+        prev = end;
+    }
+    let streamed = run_fit_stage(&moves, CornerFitConfig::default());
+    assert!(
+        streamed
+            .iter()
+            .any(|m| matches!(m.segment.spatial, Some(geometry::path::Segment::Arc(_)))),
+        "expected the half-circle to reconstruct into an arc"
+    );
+}
+
+fn circle_facets(n: u32, e_of: impl Fn(u32) -> f64) -> Vec<Move> {
+    let (r, c) = (20.0_f64, [50.0, 50.0]);
+    let mut prev = [c[0] + r, c[1], 0.0];
+    (1..=n)
+        .map(|i| {
+            let a = 2.0 * std::f64::consts::PI * f64::from(i) / f64::from(n + 4);
+            let end = [c[0] + r * libm::cos(a), c[1] + r * libm::sin(a), 0.0];
+            let m = line(i, prev, end, e_of(i));
+            prev = end;
+            m
+        })
+        .collect()
+}
+
+#[test]
+fn extrusion_ratio_step_splits_the_arc() {
+    // Same circle, but extrusion per facet doubles halfway: one arc must not
+    // absorb both extrusion ratios, so two runs (two Arc pieces) come out.
+    let n = 400;
+    let moves = circle_facets(n, |i| if i <= n / 2 { 0.3 } else { 0.6 });
+    let streamed = run_fit_stage(&moves, CornerFitConfig::default());
+    let arcs = streamed
+        .iter()
+        .filter(|m| matches!(m.segment.spatial, Some(geometry::path::Segment::Arc(_))))
+        .count();
+    assert_eq!(arcs, 2, "expected the epmm step to split the run");
+}
+
+#[test]
+fn small_extrusion_drift_rides_one_arc_with_a_ramp() {
+    // A 10% epmm step sits inside the ramp band: one arc absorbs the whole
+    // window and carries a linear extrusion-rate ramp between the commanded
+    // rates.
+    let n = 400;
+    let moves = circle_facets(n, |i| if i <= n / 2 { 0.30 } else { 0.33 });
+    let streamed = run_fit_stage(&moves, CornerFitConfig::default());
+    let arcs: Vec<&Move> = streamed
+        .iter()
+        .filter(|m| matches!(m.segment.spatial, Some(geometry::path::Segment::Arc(_))))
+        .collect();
+    assert_eq!(arcs.len(), 1, "expected the drift to ride one ramped arc");
+    assert!(
+        arcs[0].segment.followers.iter().any(|f| f.is_ramped()),
+        "expected the arc to carry the drift as a ratio ramp"
+    );
+    let (lo, hi) = moves
+        .iter()
+        .flat_map(|m| m.segment.followers.iter())
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), f| {
+            (lo.min(f.ratio.min(f.ratio_end)), hi.max(f.max_abs_ratio()))
+        });
+    assert_rate_band(&streamed, lo, hi);
+}
+
+fn total_e(ms: &[Move]) -> f64 {
+    ms.iter()
+        .flat_map(|m| {
+            let len = m.segment.s_len();
+            m.segment.followers.iter().map(move |f| f.delta_over(len))
+        })
+        .sum()
+}
+
+/// Every emitted demand stays inside the band of commanded rates — the
+/// fitter reshapes the path, never the flow per millimeter.
+fn assert_rate_band(output: &[Move], lo: f64, hi: f64) {
+    for m in output {
+        for f in &m.segment.followers {
+            for r in [f.ratio, f.ratio_end] {
+                assert!(
+                    (lo - 1e-9..=hi + 1e-9).contains(&r),
+                    "de/ds {r} escapes the commanded band [{lo}, {hi}]: {f:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A uniform-rate stream must come out at exactly that rate over whatever
+/// path the fitter produced.
+fn assert_uniform_rate(output: &[Move], r: f64) {
+    assert_rate_band(output, r, r);
+    let total_len: f64 = output.iter().map(|m| m.segment.s_len()).sum();
+    let e_out = total_e(output);
+    assert!(
+        (e_out - r * total_len).abs() <= 1e-9,
+        "stream must extrude the commanded rate over its actual path: \
+         {e_out} vs {r} × {total_len}"
+    );
+}
+
+fn count_clothoids(ms: &[Move]) -> usize {
+    ms.iter()
+        .filter(|m| {
+            matches!(
+                m.segment.spatial,
+                Some(geometry::path::Segment::Clothoid(_))
+            )
+        })
+        .count()
+}
+
+fn assert_no_facet_lines(ms: &[Move], lines: std::ops::RangeInclusive<u32>) {
+    assert!(
+        ms.iter().all(
+            |m| !matches!(m.segment.spatial, Some(geometry::path::Segment::Line(_)))
+                || !lines.contains(&m.source.start_line)
+        ),
+        "consumed facets must not be emitted as lines"
+    );
+}
+
+#[test]
+fn squeezed_chamfer_facet_is_consumed_in_the_stream() {
+    // A 90° corner whose vertex is a 5µm 45°-45° chamfer between two long
+    // legs — well under the junction deviation, so the facet's own corner
+    // blends would be microscopic and one blend consumes it instead. The
+    // facet's line number must not survive, the stream stays contiguous
+    // (asserted inside the stage), and E is conserved.
+    let d = 0.005 / std::f64::consts::SQRT_2;
+    let moves = vec![
+        line(1, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 1.0),
+        line(2, [10.0, 0.0, 0.0], [10.0 + d, d, 0.0], 0.0005),
+        line(3, [10.0 + d, d, 0.0], [10.0 + d, 10.0 + d, 0.0], 1.0),
+    ];
+    let streamed = run_fit_stage(&moves, CornerFitConfig::default());
+
+    assert_eq!(
+        count_clothoids(&streamed),
+        2,
+        "one blend (two halves) spans the chamfer"
+    );
+    assert_no_facet_lines(&streamed, 2..=2);
+    assert_uniform_rate(&streamed, 0.1);
+}
+
+#[test]
+fn wide_cluster_is_consumed_by_a_split_blend_in_the_stream() {
+    // Two irregular facets (60µm and 100µm, turning 35°/10°/45°) are below
+    // the arc-run detector's three-facet minimum and beyond one curvature
+    // bump's reach at the ~11µm junction deviation, so the consuming blend
+    // is a split: exactly four clothoids (two G2 pairs), not the six a
+    // pairwise fallback would emit (two per corner).
+    let moves = faceted_corner_moves(&[(35.0, 0.06), (10.0, 0.10)]);
+    let streamed = run_fit_stage(&moves, CornerFitConfig::default());
+
+    assert_no_arcs(&streamed);
+    assert_eq!(
+        count_clothoids(&streamed),
+        4,
+        "two pairs hug the cluster — pairwise fallback would emit six"
+    );
+    assert_no_facet_lines(&streamed, 2..=3);
+    assert_uniform_rate(&streamed, 0.1);
+}
+
+#[test]
+fn facet_cluster_is_consumed_in_the_stream() {
+    // A 90° corner rounded by two 60µm facets between two long legs: the
+    // whole cluster is squeezed, so a single clothoid pair — exactly two
+    // clothoids, where pairwise blending would emit six — replaces both
+    // facets and both corner trims, conserving E.
+    let moves = faceted_corner_moves(&[(30.0, 0.06), (30.0, 0.06)]);
+    let streamed = run_fit_stage(&moves, CornerFitConfig::default());
+
+    assert_no_arcs(&streamed);
+    assert_eq!(
+        count_clothoids(&streamed),
+        2,
+        "one pair spans the cluster — pairwise fallback would emit six"
+    );
+    assert_no_facet_lines(&streamed, 2..=3);
+    assert_uniform_rate(&streamed, 0.1);
+}
+
+#[test]
+fn cluster_gate_failure_still_consumes_the_first_facet_alone() {
+    // A squeezed facet followed by another short piece whose extrusion ratio
+    // breaks the cluster's ramp band: the two-facet cluster is rejected, but
+    // the first facet must still be consumed with the second piece as its
+    // anchor — exactly what happened before clusters existed. Greedy
+    // cluster growth must shrink and retry, not fall back to pairwise.
+    let dir30 = [
+        libm::cos(f64::to_radians(30.0)),
+        libm::sin(f64::to_radians(30.0)),
+        0.0,
+    ];
+    let dir60 = [
+        libm::cos(f64::to_radians(60.0)),
+        libm::sin(f64::to_radians(60.0)),
+        0.0,
+    ];
+    let p0 = [10.0, 0.0, 0.0];
+    let p1 = [p0[0] + 0.06 * dir30[0], p0[1] + 0.06 * dir30[1], 0.0];
+    let p2 = [p1[0] + 0.2 * dir60[0], p1[1] + 0.2 * dir60[1], 0.0];
+    let moves = vec![
+        loose_line(1, [0.0, 0.0, 0.0], p0, 1.0),
+        loose_line(2, p0, p1, 0.006),
+        loose_line(3, p1, p2, 0.2),
+        loose_line(4, p2, [p2[0], p2[1] + 10.0, 0.0], 1.0),
+    ];
+    let streamed = run_fit_stage(&moves, CornerFitConfig::default());
+
+    assert_eq!(
+        count_clothoids(&streamed),
+        2,
+        "exactly the facet's consuming pair — its exit corner is an extrusion step"
+    );
+    // Pairwise fallback could not erase the facet: its exit corner is an
+    // extrusion step (sharp), so only consumption removes the line.
+    assert_no_facet_lines(&streamed, 2..=2);
+    assert_rate_band(&streamed, 0.1, 1.0);
+}
+
+#[test]
+fn drain_flushes_buffered_moves_without_close() {
+    let (tx, rx) = bounded::<StreamInput>(64);
+    let (out_tx, out_rx) = bounded::<StreamInput>(64);
+    let fit_stage = FitStage::new(CornerFitConfig::default());
+    let handle = std::thread::spawn(move || fit_stage.run(rx, out_tx));
+
+    tx.send(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.5).into())
+        .unwrap();
+    tx.send(line(2, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 0.5).into())
+        .unwrap();
+    tx.send(StreamInput::Drain).unwrap();
+
+    // Without closing the input, `Drain` must flush everything: trimmed body,
+    // two blend halves, trimmed tail body, then the forwarded `Drain`.
+    let mut got = Vec::new();
+    for _ in 0..4 {
+        let item = out_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("fit stage held moves across a drain");
+        assert!(matches!(item, StreamInput::Move(_)), "move expected");
+        got.push(item);
+    }
+    assert_eq!(got.len(), 4);
+    assert!(matches!(
+        out_rx.recv_timeout(Duration::from_secs(10)),
+        Ok(StreamInput::Drain)
+    ));
+    drop(tx);
+    handle.join().unwrap();
+}
+
+#[test]
+fn set_mesh_rebases_the_travel_align_anchor() {
+    let (tx, rx) = bounded::<StreamInput>(64);
+    let (out_tx, out_rx) = bounded::<StreamInput>(64);
+    let fit_stage = FitStage::new(CornerFitConfig::default());
+    let handle = std::thread::spawn(move || fit_stage.run(rx, out_tx));
+
+    tx.send(line(1, [0.0, 0.0, 5.0], [10.0, 0.0, 5.0], 0.5).into())
+        .unwrap();
+    tx.send(StreamInput::Drain).unwrap();
+    tx.send(StreamInput::Control(Control::SetMesh {
+        mesh: None,
+        gcode_z_rebase: 4.9,
+    }))
+    .unwrap();
+    // The compensation travel: from the rebased resting Z back to the
+    // pre-swap gcode Z, then a printing move continuing from there. Without
+    // the anchor rebase the aligner snaps the travel's start to the stale
+    // z=5.0 name and collapses it to a zero-length line (bench crash:
+    // "travel align of line 3 failed: ZeroMotion").
+    tx.send(line(3, [10.0, 0.0, 4.9], [10.0, 0.0, 5.0], 0.0).into())
+        .unwrap();
+    tx.send(line(4, [10.0, 0.0, 5.0], [20.0, 0.0, 5.0], 0.5).into())
+        .unwrap();
+    drop(tx);
+    handle.join().unwrap();
+
+    let moves = moves_of(out_rx);
+    let travel = moves
+        .iter()
+        .find(|m| m.source.start_line == 3)
+        .expect("compensation travel emitted");
+    assert_eq!(
+        geometry::fitter::spatial_start(travel),
+        Some([10.0, 0.0, 4.9])
+    );
+    let end = geometry::fitter::spatial_end(travel).unwrap();
+    assert!(
+        end[2] > 4.95,
+        "travel should climb toward the pre-swap z (tail may be blend-trimmed), got {end:?}"
+    );
+}
+
+fn cd_ctx(line_no: u32, cd: f64) -> MoveContext {
+    let mut c = ctx(line_no, 80.0);
+    c.limits = VelocityLimits::try_new(300.0, 5000.0, cd, 100_000.0).unwrap();
+    c
+}
+
+/// Facets of a `sweep_deg` arc around `c`, vertices quantized to 1µm the way
+/// slicers emit them.
+fn cd_arc_facets(base: u32, c: [f64; 2], r: f64, n: u32, cd: f64, sweep_deg: f64) -> Vec<Move> {
+    let q = |x: f64| (x * 1000.0).round() / 1000.0;
+    let sweep = sweep_deg.to_radians();
+    let mut prev = [q(c[0] + r), q(c[1]), 0.0];
+    (1..=n)
+        .map(|i| {
+            let a = sweep * f64::from(i) / f64::from(n);
+            let end = [q(c[0] + r * libm::cos(a)), q(c[1] + r * libm::sin(a)), 0.0];
+            let m = line_move(prev, end, 0.3, cd_ctx(base + i, cd)).unwrap();
+            prev = end;
+            m
+        })
+        .collect()
+}
+
+fn travel_between(line_no: u32, from: [f64; 3], to: [f64; 3], cd: f64) -> Move {
+    line_move(from, to, 0.0, cd_ctx(line_no, cd)).unwrap()
+}
+
+fn fitted_arcs(out: &[Move]) -> Vec<&geometry::path::Arc> {
+    out.iter()
+        .filter_map(|m| match &m.segment.spatial {
+            Some(geometry::path::Segment::Arc(a)) => Some(a),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Two concentric arcs faceted from micrometre-quantized G-code vertices
+/// (slicer output precision), joined by a travel, must reconstruct around a
+/// shared center regardless of the corner-deviation budget. Regressions:
+/// anchoring the arc center by intersecting the least-squares radius with
+/// the endpoint bisector amplified quantization noise by r/offset (~75µm of
+/// center drift on a 20mm half-circle at 0.2mm deviation), and near-closed
+/// loops (tiny endpoint chord) swung the center by hundreds of µm until
+/// travel-bounded ends were freed to keep the least-squares circle.
+#[test]
+fn quantized_concentric_arcs_share_a_center_at_high_corner_deviation() {
+    for (cd, n, sweep_deg) in [
+        (0.005, 200u32, 180.0),
+        (0.2, 60, 180.0),
+        (0.2, 200, 180.0),
+        (0.3, 62, 355.0),
+        (0.05, 200, 355.0),
+    ] {
+        let c = [50.0, 50.0];
+        let inner = cd_arc_facets(1, c, 20.0, n, cd, sweep_deg);
+        let outer = cd_arc_facets(301, c, 20.5, n, cd, sweep_deg);
+        let inner_end = *geometry::fitter::spatial_end(inner.last().unwrap())
+            .as_ref()
+            .unwrap();
+        let outer_start = geometry::fitter::spatial_start(&outer[0]).unwrap();
+        let mut moves = inner;
+        moves.push(travel_between(300, inner_end, outer_start, cd));
+        moves.extend(outer);
+        let out = run_fit_stage(&moves, CornerFitConfig::default());
+        let arcs = fitted_arcs(&out);
+        assert_eq!(
+            arcs.len(),
+            2,
+            "n={n} cd={cd} sweep={sweep_deg}: expected both loops to fit"
+        );
+        for a in &arcs {
+            let center_err = libm::hypot(a.origin[0] - c[0], a.origin[1] - c[1]);
+            assert!(
+                center_err < 1e-3,
+                "n={n} cd={cd} sweep={sweep_deg}: center drifted {center_err:.6}mm"
+            );
+        }
+    }
+}
+
+#[test]
+fn entry_z_step_keeps_seam_contiguity() {
+    let (r, c, n) = (20.0_f64, [50.0_f64, 50.0], 400_u32);
+    let (z_layer, z_step) = (38.15, 1e-4);
+    let first_facet_angle = std::f64::consts::PI * (1.0 + 1.5 / f64::from(n));
+    let z_of = |a: f64| {
+        if a < first_facet_angle {
+            z_layer + z_step
+        } else {
+            z_layer
+        }
+    };
+    let mut moves = Vec::new();
+    let mut prev = [10.0, 50.0, z_of(std::f64::consts::PI)];
+    for i in 0..4u32 {
+        let end = [15.0 + 5.0 * f64::from(i), 50.0, prev[2]];
+        moves.push(line(i + 1, prev, end, 0.3));
+        prev = end;
+    }
+    for i in 1..=n {
+        let a = std::f64::consts::PI * (1.0 + f64::from(i) / f64::from(n));
+        let end = [c[0] + r * libm::cos(a), c[1] + r * libm::sin(a), z_of(a)];
+        moves.push(line(4 + i, prev, end, 0.3));
+        prev = end;
+    }
+    for i in 0..4u32 {
+        let end = [prev[0] + 5.0 + 5.0 * f64::from(i), prev[1], prev[2]];
+        moves.push(line(405 + i, prev, end, 0.3));
+        prev = end;
+    }
+    run_fit_stage(&moves, CornerFitConfig::default());
+}
+
+/// Six consecutive moves from a Voron-cube top layer (bench 2026-07-27): a
+/// shallow near-collinear run arc-fits at r=35.5mm with only 0.069rad of
+/// sweep, while its 11.7mm tail neighbor lets the easing spirals claim more
+/// lead angle than the whole arc has. The residual mid-arc then truly runs
+/// backward, and unwrapping it toward the original direction emitted a
+/// near-full-circle arc — the toolhead traced a 71mm-wide circle around the
+/// part. Every fitted arc must stay commensurate with the input path.
+#[test]
+fn shallow_arc_ease_never_wraps_into_a_full_circle() {
+    let pts: [[f64; 3]; 6] = [
+        [130.943, 157.408, 37.0],
+        [130.365, 157.407, 37.0],
+        [130.108, 157.406, 37.0],
+        [128.498, 157.345, 37.0],
+        [127.755, 157.302, 37.0],
+        [116.008, 156.626, 37.0],
+    ];
+    let feeds = [175.0, 432.56095, 432.56095, 432.56095, 432.56095];
+    let extrusions = [0.01944, 0.00865, 0.0542, 0.02504, 0.39582];
+    let mut input_len = 0.0;
+    let moves: Vec<Move> = pts
+        .windows(2)
+        .zip(feeds.iter().zip(extrusions.iter()))
+        .enumerate()
+        .map(|(i, (w, (&feed, &e)))| {
+            input_len += (0..3)
+                .map(|k| (w[1][k] - w[0][k]).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let mut c = ctx(1 + i as u32, feed);
+            c.limits = VelocityLimits::try_new(2800.0, 100_000.0, 0.03, f64::INFINITY).unwrap();
+            line_move(w[0], w[1], e, c).unwrap()
+        })
+        .collect();
+    let fitted = run_fit_stage(&moves, CornerFitConfig::default());
+    for m in &fitted {
+        if let Some(geometry::path::Segment::Arc(a)) = &m.segment.spatial {
+            let arc_len = a.radius * a.sweep.abs();
+            assert!(
+                arc_len < input_len,
+                "fitted arc length {arc_len:.3}mm exceeds the whole input path \
+                 ({input_len:.3}mm): sweep wrapped (r={:.3}, sweep={:.4})",
+                a.radius,
+                a.sweep
+            );
+        }
+    }
+}

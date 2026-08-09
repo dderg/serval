@@ -27,9 +27,51 @@ def intersect_3_planes(p1, p2, p3):
     return sol
 
 
+def _estimate_pivot_point(ad_params, offsets):
+    planes = [params_to_normal_form(pr, offsets) for pr in ad_params]
+    tilt_pos = (
+        intersect_3_planes(planes[0], planes[2], planes[3])[:2],
+        intersect_3_planes(planes[0], planes[1], planes[3])[:2],
+        intersect_3_planes(planes[0], planes[1], planes[2])[:2],
+    )
+    tilt_neg = (
+        intersect_3_planes(planes[0], planes[5], planes[6])[:2],
+        intersect_3_planes(planes[0], planes[4], planes[6])[:2],
+        intersect_3_planes(planes[0], planes[4], planes[5])[:2],
+    )
+    z_pos = []
+    for _pos, _neg in zip(tilt_pos, tilt_neg):
+        z_pos.append([(_p + _n) / 2 for _p, _n in zip(_pos, _neg)])
+    return z_pos
+
+
+def _check_convergence(runs, avlen):
+    errors = np.std(runs[-avlen:], axis=0)
+    return np.std(errors)
+
+
+def _average_runs(runs, avlen):
+    return np.mean(runs[-avlen:], axis=0).tolist()
+
+
+def _format_offsets(offsets):
+    s = ""
+    for off in offsets:
+        s += "%.6f, " % off
+    return s[:-2]
+
+
+def _format_positions(positions):
+    s = ""
+    for pos in positions:
+        s += "%.6f, %.6f\n" % tuple(pos)
+    return s
+
+
 class ZAdjustHelper:
     def __init__(self, config, z_count):
         self.printer = config.get_printer()
+        self.config = config
         self.name = config.get_name()
         self.z_count = z_count
         self.z_steppers = []
@@ -58,47 +100,26 @@ class ZAdjustHelper:
         self.z_steppers = z_steppers
 
     def adjust_steppers(self, adjustments, speed):
-        toolhead = self.printer.lookup_object("toolhead")
         gcode = self.printer.lookup_object("gcode")
-        curpos = toolhead.get_position()
-        # Report on movements
+        reference = min(adjustments)
+        deltas = [a - reference for a in adjustments]
         stepstrs = [
-            "%s = %.6f" % (s.get_name(), a)
-            for s, a in zip(self.z_steppers, adjustments)
+            "%s = %.6f" % (s.get_name(), d)
+            for s, d in zip(self.z_steppers, deltas)
         ]
-        msg = "Making the following Z adjustments:\n%s" % ("\n".join(stepstrs),)
-        gcode.respond_info(msg)
-        # Disable Z stepper movements
-        toolhead.flush_step_generation()
-        for s in self.z_steppers:
-            s.set_trapq(None)
-        # Move each z stepper (sorted from lowest to highest) until they match
-        positions = [
-            (float(-a), s) for a, s in zip(adjustments, self.z_steppers)
-        ]
-        positions.sort(key=(lambda k: k[0]))
-        first_stepper_offset, first_stepper = positions[0]
-        z_low = curpos[2] - first_stepper_offset
-        for i in range(len(positions) - 1):
-            stepper_offset, stepper = positions[i]
-            next_stepper_offset, next_stepper = positions[i + 1]
-            toolhead.flush_step_generation()
-            stepper.set_trapq(toolhead.get_trapq())
-            curpos[2] = z_low + next_stepper_offset
-            try:
-                toolhead.move(curpos, speed)
-                toolhead.set_position(curpos)
-            except:
-                logging.exception("ZAdjustHelper adjust_steppers")
-                toolhead.flush_step_generation()
-                for s in self.z_steppers:
-                    s.set_trapq(toolhead.get_trapq())
-                raise
-        # Z should now be level - do final cleanup
-        last_stepper_offset, last_stepper = positions[-1]
-        toolhead.flush_step_generation()
-        last_stepper.set_trapq(toolhead.get_trapq())
-        curpos[2] += first_stepper_offset
+        gcode.respond_info(
+            "Making the following Z adjustments:\n%s" % ("\n".join(stepstrs),)
+        )
+        force_move = self.printer.load_object(self.config, "force_move")
+        toolhead = self.printer.lookup_object("toolhead")
+        accel = toolhead.get_max_axis_accel(2)
+        for stepper, delta in zip(self.z_steppers, deltas):
+            if delta < 1e-6:
+                continue
+            force_move.manual_move(stepper, delta, speed, accel)
+        toolhead.wait_moves()
+        curpos = toolhead.get_position()
+        curpos[2] -= reference
         toolhead.set_position(curpos)
 
 
@@ -341,27 +362,21 @@ class ZTilt:
         self.cal_runs.append([p[2] for p in positions])
         if len(self.cal_runs) < avlen + 1:
             return "retry"
-        prev_error = np.std(self.cal_runs[-avlen - 1 : -1], axis=0)
-        prev_error = np.std(prev_error)
-        this_error = np.std(self.cal_runs[-avlen:], axis=0)
-        this_error = np.std(this_error)
+        prev_error = _check_convergence(self.cal_runs[:-1], avlen)
+        this_error = _check_convergence(self.cal_runs, avlen)
         self.cal_gcmd.respond_info(
             "previous error: %.6f current error: %.6f"
             % (prev_error, this_error)
         )
         if this_error < prev_error:
             return "retry"
-        z_offsets = np.mean(self.cal_runs[-avlen:], axis=0).tolist()
+        z_offsets = _average_runs(self.cal_runs, avlen)
         z_offsets = [z - offsets[2] for z in z_offsets]
         self.z_offsets = z_offsets
-        s_zoff = ""
-        for off in z_offsets[0 : self.num_probe_points]:
-            s_zoff += "%.6f, " % off
-        s_zoff = s_zoff[:-2]
+        s_zoff = _format_offsets(z_offsets[: self.num_probe_points])
         self.cal_gcmd.respond_info("final z_offsets are: %s" % (s_zoff))
         configfile = self.printer.lookup_object("configfile")
-        section = self.section
-        configfile.set(section, "z_offsets", s_zoff)
+        configfile.set(self.section, "z_offsets", s_zoff)
         self.cal_gcmd.respond_info(
             "The SAVE_CONFIG command will update the printer config\n"
             "file with these parameters and restart the printer."
@@ -410,68 +425,15 @@ class ZTilt:
         if self.ad_phase < 6:
             self.ad_phase += 1
             return "retry"
-        # calculcate results
-        p = []
-        for i in range(7):
-            p.append(params_to_normal_form(self.ad_params[i], offsets))
-
-        # This is how it works.
-        # To find the pivot point, we take 3 planes:
-        #  a) the original untilted plane
-        #  b) the plane with one motor raised, on one corner opposite the
-        #     one we want to determine the pivot point of
-        #  c) the plane with the other motor opposite the one we want to
-        #     determine the pivot point raised
-        # The intersection of all 3 planes is a point very near the pivot
-        # point we search for. If the pivot point would be a point on the
-        # bed surface, we would already be done. But as the actual pivot
-        # point is in most cases below the bed, the intersection of the 3
-        # points is behind or in front of the actual point (in X/Y). To
-        # compensate for this error, we do the same calculation again, but
-        # with the planes b) and c) tilted in the opposite direction and
-        # take the average of the 2 points.
-
-        z_p1 = (
-            intersect_3_planes(p[0], p[2], p[3])[:2],
-            intersect_3_planes(p[0], p[1], p[3])[:2],
-            intersect_3_planes(p[0], p[1], p[2])[:2],
+        z_pos = _estimate_pivot_point(self.ad_params, offsets)
+        self.ad_gcmd.respond_info(
+            "current estimated z_positions %s" % (_format_positions(z_pos))
         )
-
-        z_p2 = (
-            intersect_3_planes(p[0], p[5], p[6])[:2],
-            intersect_3_planes(p[0], p[4], p[6])[:2],
-            intersect_3_planes(p[0], p[4], p[5])[:2],
-        )
-
-        # take the average of positive and negative measurement
-        z_pos = []
-        for _zp1, _zp2 in zip(z_p1, z_p2):
-            _z = []
-            for _z1, _z2 in zip(_zp1, _zp2):
-                _z.append((_z1 + _z2) / 2)
-            z_pos.append(_z)
-        s_zpos = ""
-        for zp in z_pos:
-            s_zpos += "%.6f, %.6f\n" % tuple(zp)
-        self.ad_gcmd.respond_info("current estimated z_positions %s" % (s_zpos))
         self.ad_runs.append(z_pos)
-        if len(self.ad_runs) >= avlen:
-            self.z_positions = np.mean(self.ad_runs[-avlen:], axis=0).tolist()
-        else:
-            self.z_positions = np.mean(self.ad_runs, axis=0).tolist()
-
-        # We got a first estimate of the pivot points. Now apply the
-        # adjustemts to all motors and repeat the process until the result
-        # converges. We determine convergence by keeping track of the last
-        # <average_len> + 1 runs and compare the standard deviation over that
-        # len between the last two runs. When the error stops to decrease, we
-        # are done. The final z_positions are determined by calculating the
-        # average over the last <average_len> calculated positions.
-
+        self.z_positions = _average_runs(self.ad_runs, avlen)
         self.apply_adjustments(offsets, self.ad_params[0])
         if len(self.ad_runs) >= avlen:
-            errors = np.std(self.ad_runs[-avlen:], axis=0)
-            error = np.std(errors).item()
+            error = _check_convergence(self.ad_runs, avlen).item()
             if self.ad_error is None:
                 self.ad_gcmd.respond_info("current error: %.6f" % (error))
             else:
@@ -484,27 +446,20 @@ class ZTilt:
                     self.ad_finalize_done(offsets)
                     return
             self.ad_error = error
-        # restart
         self.ad_init()
         return "retry"
 
     def ad_finalize_done(self, offsets):
         avlen = self.cal_avg_len
-        # calculate probe point z offsets
-        z_offsets = np.mean(self.ad_points[-avlen:], axis=0).tolist()
+        z_offsets = _average_runs(self.ad_points, avlen)
         z_offsets = [z - offsets[2] for z in z_offsets]
         self.z_offsets = z_offsets
         logging.info("final z_offsets %s", (z_offsets))
         configfile = self.printer.lookup_object("configfile")
         section = self.section
-        s_zoff = ""
-        for off in z_offsets:
-            s_zoff += "%.6f, " % off
-        s_zoff = s_zoff[:-2]
+        s_zoff = _format_offsets(z_offsets)
         configfile.set(section, "z_offsets", s_zoff)
-        s_zpos = ""
-        for zpos in self.z_positions:
-            s_zpos += "%.6f, %.6f\n" % tuple(zpos)
+        s_zpos = _format_positions(self.z_positions)
         configfile.set(section, "z_positions", s_zpos)
         self.ad_gcmd.respond_info("final z_positions are %s" % (s_zpos))
         self.ad_gcmd.respond_info("final z_offsets are: %s" % (s_zoff))

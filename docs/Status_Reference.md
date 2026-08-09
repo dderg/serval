@@ -118,20 +118,6 @@ The following information is available in the
   the QUERY_DOCKABLE_PROBE command must be run prior to the macro
   containing this reference.
 
-## endstop_phase
-
-The following information is available in the
-[endstop_phase](Config_Reference.md#endstop_phase) object:
-- `last_home.<stepper name>.phase`: The phase of the stepper motor at
-  the end of the last home attempt.
-- `last_home.<stepper name>.phases`: The total number of phases
-  available on the stepper motor.
-- `last_home.<stepper name>.mcu_position`: The position (as tracked by
-  the micro-controller) of the stepper motor at the end of the last
-  home attempt. The position is the total number of steps taken in a
-  forward direction minus the total number of steps taken in the
-  reverse direction since the micro-controller was last restarted.
-
 ## exclude_object
 
 The following information is available in the
@@ -214,8 +200,7 @@ objects:
 
 ## firmware_retraction
 
-The following information is available in the
-[firmware_retraction](Config_Reference.md#firmware_retraction) object:
+The following information is available in the `firmware_retraction` object:
 - `retract_length`: Current setting for length of filament retract moves.
 - `retract_speed`: Current setting for speed of filament retract moves.
 - `unretract_extra_length`: Current setting for additional length of filament
@@ -408,8 +393,7 @@ The following information is available in the `mixing_extruder` object
 (this object is automatically available if any stepper config section
 is defined):
 
-The following information is available in
-[mixing_extruder](Config_Reference.md#mixing_extruder) objects:
+The following information is available in `mixing_extruder` objects:
 - `<mixing>`: The current mixing weights in percent for the configured
   extruders separated by comma
 - `<ticks>`: A comma separated list of the current mcu position for the
@@ -634,9 +618,8 @@ The following information is available in the `toolhead` object
 
 ## dual_carriage
 
-The following information is available in
-[dual_carriage](Config_Reference.md#dual_carriage)
-on a cartesian, hybrid_corexy or hybrid_corexz robot
+The following information is available in `dual_carriage` objects
+on a cartesian, hybrid_corexy or hybrid_corexz robot.
 - `carriage_0`: The mode of the carriage 0. Possible values are:
   "INACTIVE" and "PRIMARY".
 - `carriage_1`: The mode of the carriage 1. Possible values are:

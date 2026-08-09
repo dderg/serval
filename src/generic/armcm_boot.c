@@ -51,6 +51,39 @@ reset_handler_stage_two(void)
 {
     int i;
 
+#if __CORTEX_M >= 7
+    // A bootloader (e.g. Katapult) may leave D-cache and I-cache enabled.
+    // CMSIS SCB_EnableDCache/ICache skip invalidation when already on,
+    // so stale cache lines survive into the application.  Disable and
+    // invalidate both caches before touching RAM.
+    if (SCB->CCR & SCB_CCR_DC_Msk) {
+        SCB->CCR &= ~SCB_CCR_DC_Msk;
+        __DSB(); __ISB();
+    }
+    SCB->CSSELR = 0U;
+    __DSB();
+    {
+        uint32_t ccsidr = SCB->CCSIDR;
+        uint32_t sets = (ccsidr >> 13) & 0x7FFF;
+        uint32_t ways = (ccsidr >> 3) & 0x3FF;
+        uint32_t wshift = __CLZ(ways) & 0x1FU;
+        do {
+            uint32_t w = ways;
+            do {
+                SCB->DCISW = (sets << SCB_DCISW_SET_Pos)
+                           | (w << wshift);
+            } while (w--);
+        } while (sets--);
+    }
+    __DSB(); __ISB();
+    if (SCB->CCR & SCB_CCR_IC_Msk) {
+        SCB->CCR &= ~SCB_CCR_IC_Msk;
+        __DSB(); __ISB();
+    }
+    SCB->ICIALLU = 0U;
+    __DSB(); __ISB();
+#endif
+
     // Clear all enabled user interrupts and user pending interrupts
     for (i = 0; i < ARRAY_SIZE(NVIC->ICER); i++) {
         NVIC->ICER[i] = 0xFFFFFFFF;
@@ -133,11 +166,22 @@ DefaultHandler(void)
  * Dynamic memory range
  ****************************************************************/
 
-// Return the start of memory available for dynamic allocations
+// Return the start of memory available for dynamic allocations.
+// `.persistent_diag` (NOLOAD, sits at `_bss_end` in the linker script's `ram`
+// region) is RAM we deliberately keep OUTSIDE the boot-time bss-zero pass so
+// it can preserve a diag word across `NVIC_SystemReset`. Without this skip,
+// alloc_init would set alloc_end = &_bss_end — overlapping `.persistent_diag`
+// — and the first `alloc_chunk` (e.g. for `oids[]`) would memset over it,
+// then subsequent oid_alloc/oid_lookup writes would corrupt
+// `rt_diag_persistent.{magic,last_packed,last_us,fault_count}`. Bench-2026-05-12
+// symptom: H7 hit `Invalid oid type` on `tmcuart_send` after dozens of
+// successful per-oid writes — `oids[N].type` was being clobbered by a
+// later runtime_diag_progress write to `rt_diag_persistent.last_packed`.
+extern uint32_t _persistent_diag_end;
 void *
 dynmem_start(void)
 {
-    return &_bss_end;
+    return &_persistent_diag_end;
 }
 
 // Return the end of memory available for dynamic allocations

@@ -1,0 +1,745 @@
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use crate::cli::EC_RT_MAX_SLAVES;
+use crate::thread_prio::demote_to_normal_scheduling;
+
+pub const ERR_CAPTURE_ACTIVE: i32 = -320;
+pub const ERR_CAPTURE_NOT_ACTIVE: i32 = -321;
+pub const ERR_CAPTURE_FILE: i32 = -322;
+pub const ERR_CAPTURE_OVERFLOW: i32 = -323;
+pub const ERR_CAPTURE_BAD_ARG: i32 = -324;
+pub const ERR_CAPTURE_BAD_DRIVE_LIST: i32 = -325;
+pub const ERR_CAPTURE_CHANNEL_NOT_READY: i32 = -326;
+
+/// Sized to hold a full calibration stroke (~55k records at the 4 kHz DC
+/// cycle) even if the SD card stalls for the stroke's whole duration —
+/// observed contention from journald/Vector/VictoriaLogs on the same card
+/// cut writer throughput to ~60% for 10+ seconds (2026-07-12 bench).
+pub const CAPTURE_RING_CAPACITY: usize = 65536;
+
+pub const MAX_DRIVES: usize = EC_RT_MAX_SLAVES;
+pub const RECORD_PREFIX_SIZE: usize = 21;
+pub const DRIVE_BLOCK_SIZE: usize = 44;
+pub const MAX_RECORD_SIZE: usize = RECORD_PREFIX_SIZE + MAX_DRIVES * DRIVE_BLOCK_SIZE;
+
+#[must_use]
+pub const fn record_size(drive_count: usize) -> usize {
+    RECORD_PREFIX_SIZE + drive_count * DRIVE_BLOCK_SIZE
+}
+
+pub const FLAG_TORQUE_ENABLED: u8 = 1 << 0;
+pub const FLAG_MOTION_ACTIVE: u8 = 1 << 1;
+
+const OFF_CYCLE_INDEX: usize = 0;
+const OFF_FLAGS: usize = 8;
+const OFF_SKIP_COUNT: usize = 9;
+const OFF_LATE_FRAMES: usize = 13;
+const OFF_FRAME_LATENESS_NS: usize = 17;
+
+const DOFF_TARGET_COUNTS: usize = 0;
+const DOFF_POSITION_ACTUAL: usize = 4;
+const DOFF_FOLLOWING_ERROR: usize = 8;
+const DOFF_TORQUE_ACTUAL: usize = 12;
+const DOFF_STATUSWORD: usize = 14;
+const DOFF_ERROR_CODE: usize = 16;
+const DOFF_VELOCITY_OFFSET: usize = 18;
+const DOFF_TORQUE_OFFSET: usize = 22;
+const DOFF_VELOCITY_ACTUAL: usize = 24;
+const DOFF_ACCEL_CMD: usize = 28;
+const DOFF_VEL_CMD: usize = 32;
+const DOFF_PIN_RES_RE: usize = 36;
+const DOFF_PIN_RES_IM: usize = 40;
+
+/// Flush to page cache only — live readers tail the file and never need
+/// fsync. A periodic `sync_data` here blocked >16s on SD-card GC and
+/// overflowed the record ring mid-capture (2026-07-21 bench); the final
+/// fsync at stop still makes completed captures durable.
+const WRITER_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+const WRITER_POLL: Duration = Duration::from_millis(1);
+const IO_THREAD_STACK: usize = 512 * 1024;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DriveSample {
+    pub target_counts: i32,
+    pub position_actual: i32,
+    pub velocity_actual: i32,
+    pub following_error: i32,
+    pub torque_actual: i16,
+    pub statusword: u16,
+    pub error_code: u16,
+    pub velocity_offset: i32,
+    pub torque_offset: i16,
+    pub accel_cmd: f32,
+    pub vel_cmd: f32,
+    /// In-phase / quadrature belt-resonance following-error residual for the
+    /// pinned mode of the same index (0 when the slot's mode is not pinned).
+    pub pin_res_re: f32,
+    pub pin_res_im: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CaptureRecord {
+    pub cycle_index: u64,
+    pub flags: u8,
+    /// Cumulative RT-loop cycle skips since policing armed — a nonzero step
+    /// between two records marks the exact cycles the drives coasted.
+    pub skip_count: u32,
+    /// Cumulative frames that finished sending after the SYNC0 latch.
+    pub late_frames: u32,
+    /// This cycle's frame lateness vs the latch; negative is margin to spare.
+    pub frame_lateness_ns: i32,
+    pub drive_count: u8,
+    pub drives: [DriveSample; MAX_DRIVES],
+}
+
+impl CaptureRecord {
+    #[must_use]
+    pub fn new(cycle_index: u64, flags: u8) -> Self {
+        Self {
+            cycle_index,
+            flags,
+            skip_count: 0,
+            late_frames: 0,
+            frame_lateness_ns: 0,
+            drive_count: 0,
+            drives: [DriveSample::default(); MAX_DRIVES],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaptureDriveConfig {
+    pub slot: u8,
+    pub name: String,
+    pub counts_per_mm: f64,
+    pub rotation_distance: f64,
+    pub invert: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaptureConfig {
+    pub path: String,
+    pub started_utc: String,
+    pub drives: Vec<CaptureDriveConfig>,
+    pub cycle_ns: i64,
+    pub started_mono_ns: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct StopOutcome {
+    pub result: i32,
+    pub samples: u64,
+    pub overflow_cycle: Option<u64>,
+}
+
+fn encode_drive(block: &mut [u8], d: &DriveSample) {
+    block[DOFF_TARGET_COUNTS..DOFF_TARGET_COUNTS + 4]
+        .copy_from_slice(&d.target_counts.to_le_bytes());
+    block[DOFF_POSITION_ACTUAL..DOFF_POSITION_ACTUAL + 4]
+        .copy_from_slice(&d.position_actual.to_le_bytes());
+    block[DOFF_FOLLOWING_ERROR..DOFF_FOLLOWING_ERROR + 4]
+        .copy_from_slice(&d.following_error.to_le_bytes());
+    block[DOFF_TORQUE_ACTUAL..DOFF_TORQUE_ACTUAL + 2]
+        .copy_from_slice(&d.torque_actual.to_le_bytes());
+    block[DOFF_STATUSWORD..DOFF_STATUSWORD + 2].copy_from_slice(&d.statusword.to_le_bytes());
+    block[DOFF_ERROR_CODE..DOFF_ERROR_CODE + 2].copy_from_slice(&d.error_code.to_le_bytes());
+    block[DOFF_VELOCITY_OFFSET..DOFF_VELOCITY_OFFSET + 4]
+        .copy_from_slice(&d.velocity_offset.to_le_bytes());
+    block[DOFF_TORQUE_OFFSET..DOFF_TORQUE_OFFSET + 2]
+        .copy_from_slice(&d.torque_offset.to_le_bytes());
+    block[DOFF_VELOCITY_ACTUAL..DOFF_VELOCITY_ACTUAL + 4]
+        .copy_from_slice(&d.velocity_actual.to_le_bytes());
+    block[DOFF_ACCEL_CMD..DOFF_ACCEL_CMD + 4].copy_from_slice(&d.accel_cmd.to_le_bytes());
+    block[DOFF_VEL_CMD..DOFF_VEL_CMD + 4].copy_from_slice(&d.vel_cmd.to_le_bytes());
+    block[DOFF_PIN_RES_RE..DOFF_PIN_RES_RE + 4].copy_from_slice(&d.pin_res_re.to_le_bytes());
+    block[DOFF_PIN_RES_IM..DOFF_PIN_RES_IM + 4].copy_from_slice(&d.pin_res_im.to_le_bytes());
+}
+
+pub fn encode_record(r: &CaptureRecord) -> ([u8; MAX_RECORD_SIZE], usize) {
+    let n = r.drive_count as usize;
+    let size = record_size(n);
+    let mut b = [0u8; MAX_RECORD_SIZE];
+    b[OFF_CYCLE_INDEX..OFF_CYCLE_INDEX + 8].copy_from_slice(&r.cycle_index.to_le_bytes());
+    b[OFF_FLAGS] = r.flags;
+    b[OFF_SKIP_COUNT..OFF_SKIP_COUNT + 4].copy_from_slice(&r.skip_count.to_le_bytes());
+    b[OFF_LATE_FRAMES..OFF_LATE_FRAMES + 4].copy_from_slice(&r.late_frames.to_le_bytes());
+    b[OFF_FRAME_LATENESS_NS..OFF_FRAME_LATENESS_NS + 4]
+        .copy_from_slice(&r.frame_lateness_ns.to_le_bytes());
+    for (d, drive) in r.drives[..n].iter().enumerate() {
+        let base = RECORD_PREFIX_SIZE + d * DRIVE_BLOCK_SIZE;
+        encode_drive(&mut b[base..base + DRIVE_BLOCK_SIZE], drive);
+    }
+    (b, size)
+}
+
+/// Slot-agnostic drive-list checks the I/O thread can run without the slave
+/// count: non-empty, no more than `MAX_DRIVES`, no duplicate slot. The endpoint
+/// adds the range check (`slot < num_slaves`) where it knows the topology.
+pub fn validate_drive_list(drives: &[CaptureDriveConfig]) -> Result<(), i32> {
+    if drives.is_empty() || drives.len() > MAX_DRIVES {
+        return Err(ERR_CAPTURE_BAD_DRIVE_LIST);
+    }
+    for (i, d) in drives.iter().enumerate() {
+        if drives[..i].iter().any(|prev| prev.slot == d.slot) {
+            return Err(ERR_CAPTURE_BAD_DRIVE_LIST);
+        }
+    }
+    Ok(())
+}
+
+pub fn any_slot_out_of_range(slots: &[u8], num_slaves: usize) -> bool {
+    slots.iter().any(|&slot| usize::from(slot) >= num_slaves)
+}
+
+fn json_string_safe(s: &str) -> bool {
+    s.chars()
+        .all(|c| (c.is_ascii_graphic() || c == ' ') && c != '"' && c != '\\')
+}
+
+pub fn header_json(cfg: &CaptureConfig) -> String {
+    let p = RECORD_PREFIX_SIZE;
+    let mut channels = String::new();
+    for (name, dtype, offset) in [
+        ("cycle_index", "u64", OFF_CYCLE_INDEX),
+        ("flags", "u8", OFF_FLAGS),
+        ("skip_count", "u32", OFF_SKIP_COUNT),
+        ("late_frames", "u32", OFF_LATE_FRAMES),
+        ("frame_lateness_ns", "i32", OFF_FRAME_LATENESS_NS),
+        ("target_counts", "i32", p + DOFF_TARGET_COUNTS),
+        ("position_actual", "i32", p + DOFF_POSITION_ACTUAL),
+        ("following_error", "i32", p + DOFF_FOLLOWING_ERROR),
+        ("torque_actual", "i16", p + DOFF_TORQUE_ACTUAL),
+        ("statusword", "u16", p + DOFF_STATUSWORD),
+        ("error_code", "u16", p + DOFF_ERROR_CODE),
+        ("velocity_offset", "i32", p + DOFF_VELOCITY_OFFSET),
+        ("torque_offset", "i16", p + DOFF_TORQUE_OFFSET),
+        ("velocity_actual", "i32", p + DOFF_VELOCITY_ACTUAL),
+        ("accel_cmd", "f32", p + DOFF_ACCEL_CMD),
+        ("vel_cmd", "f32", p + DOFF_VEL_CMD),
+        ("pin_res_re", "f32", p + DOFF_PIN_RES_RE),
+        ("pin_res_im", "f32", p + DOFF_PIN_RES_IM),
+    ] {
+        if !channels.is_empty() {
+            channels.push(',');
+        }
+        channels.push_str(&format!(
+            "{{\"name\":\"{name}\",\"dtype\":\"{dtype}\",\"offset\":{offset}}}"
+        ));
+    }
+    let mut drives = String::new();
+    for d in &cfg.drives {
+        if !drives.is_empty() {
+            drives.push(',');
+        }
+        drives.push_str(&format!(
+            "{{\"name\":\"{}\",\"counts_per_mm\":{},\"rotation_distance\":{},\"invert\":{}}}",
+            d.name, d.counts_per_mm, d.rotation_distance, d.invert
+        ));
+    }
+    format!(
+        concat!(
+            "{{\"version\":2,\"cycle_ns\":{},\"record_size\":{},",
+            "\"started_utc\":\"{}\",\"started_mono_ns\":{},",
+            "\"drives\":[{}],",
+            "\"channels\":[{}]}}\n",
+        ),
+        cfg.cycle_ns,
+        record_size(cfg.drives.len()),
+        cfg.started_utc,
+        cfg.started_mono_ns,
+        drives,
+        channels,
+    )
+}
+
+enum WriterHook {
+    None,
+    #[cfg(test)]
+    Gate(Receiver<()>),
+    #[cfg(test)]
+    FailAfterHeader(SyncSender<()>),
+}
+
+enum IoMsg {
+    Open {
+        cfg: CaptureConfig,
+        hook: WriterHook,
+        records: rtrb::Consumer<CaptureRecord>,
+        reply: SyncSender<i32>,
+    },
+    Finalize {
+        failure: Option<(u64, i32)>,
+        reply: SyncSender<StopOutcome>,
+    },
+}
+
+struct ActiveCapture {
+    tx: rtrb::Producer<CaptureRecord>,
+    failure: Option<(u64, i32)>,
+}
+
+type RecordChannel = (rtrb::Producer<CaptureRecord>, rtrb::Consumer<CaptureRecord>);
+
+/// All file I/O runs on one persistent `capture-io` thread, spawned once.
+/// The DC thread's start/push/stop are channel operations only: file opens,
+/// writes, fsync, and rename stall for SD-card eternities (100+ ms), and a
+/// pause in cyclic frames beyond ~3 ms trips the drive's sync-error counter
+/// (ErC1.1 / AL 0x001a). Thread creation is banned on the DC thread for the
+/// same reason — under mlockall(MCL_FUTURE) a pthread spawn prefaults and
+/// locks the new stack, which is milliseconds by itself. The record ring
+/// obeys the same rule: its bounded buffer preallocates ~20 MB at construction
+/// (prefaulted and locked under MCL_FUTURE — 57 of 66 working-counter misses
+/// on the 2026-07-06 bench were capture starts), so the capture-io thread
+/// builds each ring and hands it over; start only try_recv()s a spare.
+///
+/// The record ring is an rtrb SPSC ring, not a `sync_channel`: an mpsc
+/// `try_send` takes the receiver-waker mutex whenever the consumer is parked
+/// in `recv_timeout` (it almost always is), which let this normal-priority
+/// thread stall the FIFO-80 DC thread for 358 µs on the 2026-07-27 bench and
+/// park the drives. rtrb push/pop are wait-free on both ends — no waker, no
+/// futex — so the writer polls instead of parking.
+pub struct Capture {
+    control: Sender<IoMsg>,
+    spare_channels: Receiver<RecordChannel>,
+    service: Option<JoinHandle<()>>,
+    active: Option<ActiveCapture>,
+}
+
+impl Default for Capture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Capture {
+    pub fn new() -> Self {
+        Self::with_capacity(CAPTURE_RING_CAPACITY)
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        let (control, control_rx) = channel();
+        let (spare_tx, spare_channels) = channel();
+        spare_tx
+            .send(rtrb::RingBuffer::new(capacity))
+            .expect("spare receiver held by self");
+        let service = std::thread::Builder::new()
+            .name("capture-io".into())
+            .stack_size(IO_THREAD_STACK)
+            .spawn(move || service_loop(control_rx, &spare_tx, capacity))
+            .expect("spawn capture-io thread");
+        Self {
+            control,
+            spare_channels,
+            service: Some(service),
+            active: None,
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active.is_some()
+    }
+
+    /// Blocking start — for the stub endpoint and tests, where there is no
+    /// realtime cycle to starve.
+    pub fn start(&mut self, cfg: CaptureConfig) -> i32 {
+        let pending = self.start_inner(cfg, WriterHook::None);
+        let claimed = pending.claimed();
+        let rc = pending.wait();
+        if rc != 0 && claimed {
+            self.clear_failed_start();
+        }
+        rc
+    }
+
+    /// Non-blocking start: the file open happens on the capture-io thread
+    /// and the result arrives through the handle. Records pushed before the
+    /// open resolves buffer in the ring. If the handle yields a non-zero rc
+    /// the caller must invoke `clear_failed_start`.
+    pub fn start_async(&mut self, cfg: CaptureConfig) -> PendingStart {
+        self.start_inner(cfg, WriterHook::None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_gated(&mut self, cfg: CaptureConfig, gate: Receiver<()>) -> i32 {
+        let pending = self.start_inner(cfg, WriterHook::Gate(gate));
+        let claimed = pending.claimed();
+        let rc = pending.wait();
+        if rc != 0 && claimed {
+            self.clear_failed_start();
+        }
+        rc
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_writer_fails(&mut self, cfg: CaptureConfig) -> (i32, Receiver<()>) {
+        let (done_tx, done_rx) = sync_channel(1);
+        let pending = self.start_inner(cfg, WriterHook::FailAfterHeader(done_tx));
+        let claimed = pending.claimed();
+        let rc = pending.wait();
+        if rc != 0 && claimed {
+            self.clear_failed_start();
+        }
+        (rc, done_rx)
+    }
+
+    fn start_inner(&mut self, cfg: CaptureConfig, hook: WriterHook) -> PendingStart {
+        let immediate = |rc: i32| {
+            let (tx, rx) = sync_channel(1);
+            let _ = tx.send(rc);
+            PendingStart { rx, claimed: false }
+        };
+        if self.active.is_some() {
+            return immediate(ERR_CAPTURE_ACTIVE);
+        }
+        if !json_string_safe(&cfg.started_utc)
+            || cfg.drives.iter().any(|d| !json_string_safe(&d.name))
+        {
+            return immediate(ERR_CAPTURE_BAD_ARG);
+        }
+        if let Err(rc) = validate_drive_list(&cfg.drives) {
+            return immediate(rc);
+        }
+        let Ok((tx, records)) = self.spare_channels.try_recv() else {
+            return immediate(ERR_CAPTURE_CHANNEL_NOT_READY);
+        };
+        let (reply, reply_rx) = sync_channel(1);
+        self.control
+            .send(IoMsg::Open {
+                cfg,
+                hook,
+                records,
+                reply,
+            })
+            .expect("capture-io thread is gone");
+        self.active = Some(ActiveCapture { tx, failure: None });
+        PendingStart {
+            rx: reply_rx,
+            claimed: true,
+        }
+    }
+
+    /// Discard the active slot after `PendingStart` resolved non-zero. The
+    /// service already abandoned the session; no Finalize is owed.
+    pub fn clear_failed_start(&mut self) {
+        self.active = None;
+    }
+
+    pub fn push(&mut self, record: CaptureRecord) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        if active.failure.is_some() {
+            return;
+        }
+        if active.tx.is_abandoned() {
+            active.failure = Some((record.cycle_index, ERR_CAPTURE_FILE));
+            return;
+        }
+        if let Err(rtrb::PushError::Full(r)) = active.tx.push(record) {
+            active.failure = Some((r.cycle_index, ERR_CAPTURE_OVERFLOW));
+        }
+    }
+
+    /// Blocking stop — for the stub endpoint and tests.
+    pub fn stop(&mut self) -> StopOutcome {
+        self.stop_async().wait()
+    }
+
+    /// Non-blocking stop: drops the record channel and asks the capture-io
+    /// thread to drain, fsync, and (on failure) rename. Poll the handle from
+    /// the cycle; the outcome arrives when the file is durable.
+    pub fn stop_async(&mut self) -> PendingStop {
+        let (tx, rx) = sync_channel(1);
+        let Some(active) = self.active.take() else {
+            let _ = tx.send(StopOutcome {
+                result: ERR_CAPTURE_NOT_ACTIVE,
+                samples: 0,
+                overflow_cycle: None,
+            });
+            return PendingStop { rx };
+        };
+        drop(active.tx);
+        self.control
+            .send(IoMsg::Finalize {
+                failure: active.failure,
+                reply: tx,
+            })
+            .expect("capture-io thread is gone");
+        PendingStop { rx }
+    }
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        self.active = None;
+        let (sink, _) = channel();
+        let _ = std::mem::replace(&mut self.control, sink);
+        if let Some(service) = self.service.take() {
+            let _ = service.join();
+        }
+    }
+}
+
+pub struct PendingStart {
+    rx: Receiver<i32>,
+    claimed: bool,
+}
+
+impl PendingStart {
+    pub fn try_take(&self) -> Option<i32> {
+        self.rx.try_recv().ok()
+    }
+
+    pub fn wait(self) -> i32 {
+        self.rx.recv().expect("capture-io thread died")
+    }
+
+    /// Whether this start took the active slot. Rejections (already active,
+    /// bad arguments) never claim it — `clear_failed_start` after such a
+    /// failure would kill the live capture instead.
+    pub fn claimed(&self) -> bool {
+        self.claimed
+    }
+}
+
+pub struct PendingStop {
+    rx: Receiver<StopOutcome>,
+}
+
+impl PendingStop {
+    pub fn try_take(&self) -> Option<StopOutcome> {
+        self.rx.try_recv().ok()
+    }
+
+    pub fn wait(self) -> StopOutcome {
+        self.rx.recv().expect("capture-io thread died")
+    }
+}
+
+fn service_loop(control: Receiver<IoMsg>, spares: &Sender<RecordChannel>, capacity: usize) {
+    demote_to_normal_scheduling();
+    while let Ok(msg) = control.recv() {
+        match msg {
+            IoMsg::Finalize { reply, .. } => {
+                let _ = reply.send(StopOutcome {
+                    result: ERR_CAPTURE_NOT_ACTIVE,
+                    samples: 0,
+                    overflow_cycle: None,
+                });
+            }
+            IoMsg::Open {
+                cfg,
+                hook,
+                records,
+                reply,
+            } => {
+                let _ = spares.send(rtrb::RingBuffer::new(capacity));
+                let path = PathBuf::from(&cfg.path);
+                let session = match open_session(&path) {
+                    Ok(file) => {
+                        let _ = reply.send(0);
+                        Some(run_session(file, &path, header_json(&cfg), hook, records))
+                    }
+                    Err(rc) => {
+                        let _ = reply.send(rc);
+                        None
+                    }
+                };
+                let Some(written) = session else {
+                    continue;
+                };
+                match control.recv() {
+                    Ok(IoMsg::Finalize { failure, reply }) => {
+                        let _ = reply.send(compose_outcome(&path, written, failure));
+                    }
+                    Ok(IoMsg::Open { reply, .. }) => {
+                        let _ = reply.send(ERR_CAPTURE_ACTIVE);
+                    }
+                    Err(_) => return,
+                }
+            }
+        }
+    }
+}
+
+fn open_session(path: &PathBuf) -> Result<File, i32> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && std::fs::create_dir_all(parent).is_err() {
+            return Err(ERR_CAPTURE_FILE);
+        }
+    }
+    File::create(path).map_err(|_| ERR_CAPTURE_FILE)
+}
+
+const WRITE_BUFFER_SIZE: usize = 256 * 1024;
+
+/// Write sink for the capture-io thread. A small enum (not `Box<dyn Write>`)
+/// so the per-record `write_all` in `run_session` stays one static code path
+/// with zero allocation per record; the RT thread never touches this.
+///
+/// Buffer placement: the `BufWriter` sits *under* the encoder
+/// (`Encoder<BufWriter<File>>`), never above it. zstd already coalesces the
+/// many tiny per-record inputs into its own block buffer, so a buffer above
+/// the encoder would only add copies without cutting syscalls. What benefits
+/// from buffering is the encoder's *output*: it emits variably-sized
+/// compressed blocks, and the 256 KiB `BufWriter` batches those into few large
+/// writes to the SD card — keeping write amplification sane. The raw path
+/// keeps the identical `BufWriter<File>` it always had, so `.scap` bytes are
+/// unchanged.
+enum Sink {
+    Raw(BufWriter<File>),
+    Zst(zstd::stream::write::Encoder<'static, BufWriter<File>>),
+}
+
+impl Sink {
+    /// A path ending `.zst` gets a zstd level-3 stream encoder; anything else
+    /// (`.scap`) stays a raw buffered file, byte-identical to before.
+    fn new(file: File, path: &Path) -> std::io::Result<Self> {
+        let buf = BufWriter::with_capacity(WRITE_BUFFER_SIZE, file);
+        if path.extension().and_then(|e| e.to_str()) == Some("zst") {
+            Ok(Sink::Zst(zstd::stream::write::Encoder::new(buf, 3)?))
+        } else {
+            Ok(Sink::Raw(buf))
+        }
+    }
+
+    /// Finish compression (zstd frame epilogue; no-op for raw) and flush the
+    /// remaining buffered bytes down to the file, so a following `sync_data`
+    /// makes the complete stream durable.
+    fn finish(self) -> std::io::Result<File> {
+        match self {
+            Sink::Raw(buf) => buf
+                .into_inner()
+                .map_err(std::io::IntoInnerError::into_error),
+            Sink::Zst(enc) => enc
+                .finish()?
+                .into_inner()
+                .map_err(std::io::IntoInnerError::into_error),
+        }
+    }
+}
+
+impl Write for Sink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Sink::Raw(w) => w.write(buf),
+            Sink::Zst(w) => w.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Sink::Raw(w) => w.flush(),
+            Sink::Zst(w) => w.flush(),
+        }
+    }
+}
+
+fn run_session(
+    file: File,
+    path: &Path,
+    header: String,
+    hook: WriterHook,
+    mut rx: rtrb::Consumer<CaptureRecord>,
+) -> Result<u64, (u64, String)> {
+    let mut sink =
+        Sink::new(file, path).map_err(|e| (0u64, format!("capture encoder init: {e}")))?;
+    sink.write_all(header.as_bytes())
+        .map_err(|e| (0u64, format!("capture header write: {e}")))?;
+    match hook {
+        WriterHook::None => {}
+        #[cfg(test)]
+        WriterHook::Gate(g) => {
+            let _ = g.recv();
+        }
+        #[cfg(test)]
+        WriterHook::FailAfterHeader(done_tx) => {
+            let _ = done_tx.send(());
+            return Err((0, "injected".into()));
+        }
+    }
+    let mut written = 0u64;
+    let mut last_flush = Instant::now();
+    loop {
+        match rx.pop() {
+            Ok(r) => {
+                let (buf, size) = encode_record(&r);
+                sink.write_all(&buf[..size])
+                    .map_err(|e| (written, format!("capture record write: {e}")))?;
+                written += 1;
+            }
+            Err(rtrb::PopError::Empty) => {
+                if rx.is_abandoned() && rx.is_empty() {
+                    break;
+                }
+                std::thread::sleep(WRITER_POLL);
+            }
+        }
+        if last_flush.elapsed() >= WRITER_FLUSH_INTERVAL {
+            sink.flush()
+                .map_err(|e| (written, format!("capture flush: {e}")))?;
+            last_flush = Instant::now();
+        }
+    }
+    // finish() flushes the encoder epilogue / BufWriter, then fsync the file.
+    let file = sink
+        .finish()
+        .map_err(|e| (written, format!("capture finalize: {e}")))?;
+    file.sync_data()
+        .map_err(|e| (written, format!("capture final fsync: {e}")))?;
+    Ok(written)
+}
+
+fn compose_outcome(
+    path: &PathBuf,
+    written: Result<u64, (u64, String)>,
+    failure: Option<(u64, i32)>,
+) -> StopOutcome {
+    let (mut result, mut overflow_cycle) = (0i32, None);
+    if let Some((cycle, code)) = failure {
+        result = code;
+        overflow_cycle = Some(cycle);
+    }
+    let samples = match written {
+        Ok(n) => n,
+        Err((n, _)) if result == 0 => {
+            result = ERR_CAPTURE_FILE;
+            n
+        }
+        Err((n, _)) => n,
+    };
+    if result != 0 {
+        let failed = failed_capture_path(path);
+        if std::fs::rename(path, &failed).is_err() {
+            result = ERR_CAPTURE_FILE;
+        }
+    }
+    StopOutcome {
+        result,
+        samples,
+        overflow_cycle,
+    }
+}
+
+/// Rename target for a failed capture, preserving the real extension so a
+/// compressed capture keeps its `.zst` suffix (readers detect compression by
+/// magic, but the name must still round-trip through decompressors and globs):
+/// `foo.scap` -> `foo.failed.scap`, `foo.scap.zst` -> `foo.failed.scap.zst`.
+fn failed_capture_path(path: &Path) -> PathBuf {
+    if path.extension().and_then(|e| e.to_str()) == Some("zst") {
+        let renamed = path.with_extension("").with_extension("failed.scap");
+        let mut name = renamed.into_os_string();
+        name.push(".zst");
+        PathBuf::from(name)
+    } else {
+        path.with_extension("failed.scap")
+    }
+}
+
+#[cfg(test)]
+mod tests;

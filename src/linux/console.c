@@ -19,6 +19,8 @@
 #include "board/misc.h" // console_sendf
 #include "command.h" // command_find_block
 #include "internal.h" // console_setup
+#include "mcu_demux.h" // mcu_demux_*
+#include "mcu_transport_dispatch.h" // mcu_transport_dispatch_frame
 #include "sched.h" // sched_wake_task
 
 static struct pollfd main_pfd[1];
@@ -136,12 +138,28 @@ console_receive_buffer(void)
     return receive_buf;
 }
 
+int
+kalico_console_write_raw(const uint8_t *buf, uint16_t len)
+{
+    int ret = write(main_pfd[MP_TTY_IDX].fd, buf, len);
+    if (ret < 0) {
+        report_errno("write", ret);
+        return -1;
+    }
+    return ret;
+}
+
 // Process any incoming commands
 void
 console_task(void)
 {
+#if !CONFIG_MCU_SIM
+    // In the sim the runtime tick monopolizes the cooperative scheduler
+    // and irq_wait() never reaches ppoll, so console_wake is never set;
+    // skipping the gate costs one EWOULDBLOCK read() per task round.
     if (!sched_check_wake(&console_wake))
         return;
+#endif
 
     // Read data
     int ret = read(main_pfd[MP_TTY_IDX].fd, &receive_buf[receive_pos]
@@ -158,18 +176,9 @@ console_task(void)
         && memcmp(&receive_buf[receive_pos], "FORCE_SHUTDOWN\n", 15) == 0)
         shutdown("Force shutdown command");
 
-    // Find and dispatch message blocks in the input
-    int len = receive_pos + ret;
-    uint_fast8_t pop_count, msglen = len > MESSAGE_MAX ? MESSAGE_MAX : len;
-    ret = command_find_and_dispatch(receive_buf, msglen, &pop_count);
-    if (ret) {
-        len -= pop_count;
-        if (len) {
-            memmove(receive_buf, &receive_buf[pop_count], len);
-            sched_wake_task(&console_wake);
-        }
-    }
-    receive_pos = len;
+    if (ret > 0)
+        mcu_demux_pump(&receive_buf[receive_pos], (uint16_t)ret);
+    receive_pos = 0;
 }
 DECL_TASK(console_task);
 

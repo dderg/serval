@@ -20,16 +20,6 @@
   typedef volatile uint32_t epmword_t;
   #define WSIZE 2
   #define USBx_IRQn USB_LP_IRQn
-#elif CONFIG_MACH_STM32F0 || CONFIG_MACH_STM32L4
-  // Transfer memory is accessed with 16bits and contains 16bits of data
-  typedef volatile uint16_t epmword_t;
-  #define WSIZE 2
-  #define USBx_IRQn USB_IRQn
-#elif CONFIG_MACH_STM32G4
-  // Transfer memory is accessed with 16bits and contains 16bits of data
-  typedef volatile uint16_t epmword_t;
-  #define WSIZE 2
-  #define USBx_IRQn USB_LP_IRQn
 #elif CONFIG_MACH_STM32G0
   // Transfer memory is accessed with 32bits and contains 32bits of data
   typedef volatile uint32_t epmword_t;
@@ -265,8 +255,7 @@ usb_send_bulk_in(void *data, uint_fast8_t len)
             // buffering mode, so wait for second packet before starting.
             if (bipp == (BI_START | 1)) {
                 bulk_in_push_pos = 0;
-                if (!CONFIG_MACH_AT32F403)
-                    writel(&bulk_in_pop_flag, USB_EP_KIND); // Dummy flag
+                writel(&bulk_in_pop_flag, USB_EP_KIND); // Dummy flag
                 USB_EPR[ep] = calc_epr_bits(epr, USB_EPTX_STAT
                                             , USB_EP_TX_VALID);
             }

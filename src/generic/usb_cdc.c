@@ -11,8 +11,10 @@
 #include "board/usb_cdc_ep.h" // USB_CDC_EP_BULK_IN
 #include "byteorder.h" // cpu_to_le16
 #include "command.h" // output
+#include "fault_handler.h" // diag_task_heartbeat, diag_record_tx_drop_*
 #include "generic/usbstd.h" // struct usb_device_descriptor
 #include "generic/usbstd_cdc.h" // struct usb_cdc_header_descriptor
+#include "mcu_demux.h" // mcu_demux_pump
 #include "sched.h" // sched_wake_task
 #include "usb_cdc.h" // usb_notify_ep0
 
@@ -31,7 +33,9 @@
  ****************************************************************/
 
 static struct task_wake usb_bulk_in_wake;
-static uint8_t transmit_buf[192], transmit_pos;
+static uint8_t transmit_buf[2048];
+static uint16_t transmit_pos;
+typedef uint16_t transmit_pos_t;
 
 void
 usb_notify_bulk_in(void)
@@ -44,7 +48,12 @@ usb_bulk_in_task(void)
 {
     if (!sched_check_wake(&usb_bulk_in_wake))
         return;
-    uint_fast8_t tpos = transmit_pos, max_tpos = tpos;
+    diag_task_heartbeat(diag_slot_usb_in_calls(),
+                        diag_slot_usb_in_last_tick(),
+                        diag_slot_usb_in_max_gap(),
+                        timer_from_us(20000),
+                        DIAG_EV_USB_IN_GAP);
+    transmit_pos_t tpos = transmit_pos, max_tpos = tpos;
     if (!tpos)
         return;
     if (max_tpos > USB_CDC_EP_BULK_IN_SIZE)
@@ -54,7 +63,7 @@ usb_bulk_in_task(void)
     int_fast8_t ret = usb_send_bulk_in(transmit_buf, max_tpos);
     if (ret <= 0)
         return;
-    uint_fast8_t needcopy = tpos - ret;
+    transmit_pos_t needcopy = tpos - ret;
     if (needcopy) {
         memmove(transmit_buf, &transmit_buf[ret], needcopy);
         usb_notify_bulk_in();
@@ -68,10 +77,12 @@ void
 console_sendf(const struct command_encoder *ce, va_list args)
 {
     // Verify space for message
-    uint_fast8_t tpos = transmit_pos, max_size = READP(ce->max_size);
-    if (tpos + max_size > sizeof(transmit_buf))
-        // Not enough space for message
+    transmit_pos_t tpos = transmit_pos;
+    uint_fast8_t max_size = READP(ce->max_size);
+    if (tpos + max_size > sizeof(transmit_buf)) {
+        diag_record_tx_drop_klipper(max_size, tpos);
         return;
+    }
 
     // Generate message
     uint8_t *buf = &transmit_buf[tpos];
@@ -80,6 +91,21 @@ console_sendf(const struct command_encoder *ce, va_list args)
     // Start message transmit
     transmit_pos = tpos + msglen;
     usb_notify_bulk_in();
+}
+
+int
+kalico_console_write_raw(const uint8_t *buf, uint16_t len)
+{
+    transmit_pos_t tpos = transmit_pos;
+    if ((uint32_t)tpos + (uint32_t)len
+        > sizeof(transmit_buf) - CONSOLE_TX_PROTOCOL_RESERVE) {
+        diag_record_tx_drop_kalico(len, tpos);
+        return -1;
+    }
+    memcpy(&transmit_buf[tpos], buf, len);
+    transmit_pos = tpos + len;
+    usb_notify_bulk_in();
+    return len;
 }
 
 
@@ -93,19 +119,28 @@ static uint8_t receive_buf[128], receive_pos;
 void
 usb_notify_bulk_out(void)
 {
+    (*diag_slot_notify_bulk_out())++;
     sched_wake_task(&usb_bulk_out_wake);
 }
 
 void
 usb_bulk_out_task(void)
 {
+    (*diag_slot_task_invoke())++;
     if (!sched_check_wake(&usb_bulk_out_wake))
         return;
+    diag_task_heartbeat(diag_slot_usb_out_calls(),
+                        diag_slot_usb_out_last_tick(),
+                        diag_slot_usb_out_max_gap(),
+                        timer_from_us(20000),
+                        DIAG_EV_USB_OUT_GAP);
     // Read data
-    uint_fast8_t rpos = receive_pos, pop_count;
+    uint_fast8_t rpos = receive_pos;
     if (rpos + USB_CDC_EP_BULK_OUT_SIZE <= sizeof(receive_buf)) {
         int_fast8_t ret = usb_read_bulk_out(
             &receive_buf[rpos], USB_CDC_EP_BULK_OUT_SIZE);
+        if (ret > 0) (*diag_slot_read_data())++;
+        else         (*diag_slot_read_zero())++;
         if (ret > 0) {
             rpos += ret;
             usb_notify_bulk_out();
@@ -113,18 +148,8 @@ usb_bulk_out_task(void)
     } else {
         usb_notify_bulk_out();
     }
-    // Process a message block
-    int_fast8_t ret = command_find_and_dispatch(receive_buf, rpos, &pop_count);
-    if (ret) {
-        // Move buffer
-        uint_fast8_t needcopy = rpos - pop_count;
-        if (needcopy) {
-            memmove(receive_buf, &receive_buf[pop_count], needcopy);
-            usb_notify_bulk_out();
-        }
-        rpos = needcopy;
-    }
-    receive_pos = rpos;
+    mcu_demux_pump(receive_buf, rpos);
+    receive_pos = 0;
 }
 DECL_TASK(usb_bulk_out_task);
 
@@ -536,6 +561,10 @@ DECL_TASK(usb_ep0_task);
 void
 usb_shutdown(void)
 {
+    // Without this reset, a stale shutdown-triggering command left in
+    // receive_buf re-fires sched_shutdown's longjmp every task-loop pass,
+    // wedging the MCU in an infinite longjmp cycle.
+    receive_pos = 0;
     usb_notify_bulk_in();
     usb_notify_bulk_out();
     usb_notify_ep0();

@@ -1,0 +1,16 @@
+[package]
+name = "mcu-transport"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "Kalico-native transport (host side): Layer 1 framer, stream-level demuxer, and bootstrap identify encoding."
+license.workspace = true
+
+[dependencies]
+tracing = "0.1"
+thiserror = { workspace = true }
+mcu-protocol = { path = "../mcu-protocol" }
+
+[lints]
+workspace = true

@@ -28,15 +28,23 @@ from . import (
     configfile,
     gcode,
     mcu,
+    motion,
     msgproto,
     pins,
     queuelogger,
     reactor,
-    toolhead,
+    structured_log,
     util,
     webhooks,
 )
 from .extras.danger_options import get_danger_options
+
+
+def events_dir_for(logfile):
+    if not logfile:
+        return None
+    return os.path.join(os.path.dirname(os.path.abspath(logfile)), "events")
+
 
 message_ready = "Printer is ready"
 
@@ -170,6 +178,7 @@ class Printer:
         self.state_message = message_startup
         self.in_shutdown_state = False
         self.run_result = None
+        self._disconnect_dispatched = False
         self.event_handlers = {}
         self.printer_modules: dict[str, PrinterModule] = {}
         self.components = SubsystemComponentCollection(self.config_error)
@@ -309,6 +318,26 @@ class Printer:
             pconfig.log_config(config)
         # Register subsystem components
         self._register_subsystem_components()
+        # Instantiate the motion engine BEFORE MCU objects are constructed.
+        # Skip when the native Rust .so is unavailable (CI/test) — boot and
+        # config-only tests run without it; any MCU send without the engine
+        # fails loudly in serialhdl.
+        try:
+            from . import motion_engine as motion_engine_mod
+
+            engine = motion_engine_mod.MotionEngineWrapper(self)
+            self.add_object("motion_engine", engine)
+            # Wire the Rust host structured-logging subscriber + push the
+            # session context across the PyO3 seam, before any MCU
+            # attach/configure call can emit a Rust log (binding-timing
+            # invariant, spec §6). Inside the try block: no engine → no attach.
+            motion_engine_mod.attach_structured_logging(
+                engine.get_engine(),
+                self,
+                self.get_start_args().get("log_events_dir"),
+            )
+        except (ImportError, TypeError):
+            pass
         # Create printer objects
         for m in [pins, mcu]:
             m.add_printer_objects(config)
@@ -320,11 +349,13 @@ class Printer:
             "respond",
             "exclude_object",
             "telemetry",
+            "log_observability",
+            "pressure_advance_compat",
         ]:
             self.load_object(config, section_config, None)
         if self.get_start_args().get("debuginput") is not None:
             self.load_object(config, "testing", None)
-        for m in [toolhead]:
+        for m in [motion]:
             m.add_printer_objects(config)
         # Validate that there are no undefined parameters in the config file
         error_on_unused = get_danger_options().error_on_unused_config_options
@@ -456,8 +487,17 @@ class Printer:
         run_result = self.run_result
         try:
             if run_result == "firmware_restart":
-                self.send_event("klippy:firmware_restart")
-            self.send_event("klippy:disconnect")
+                handlers = list(
+                    self.event_handlers.get("klippy:firmware_restart", [])
+                )
+                for cb in handlers:
+                    try:
+                        cb()
+                    except BaseException:
+                        logging.exception(
+                            "klippy:firmware_restart handler %r raised", cb
+                        )
+            self._dispatch_disconnect()
         except:
             logging.exception("Unhandled exception during post run")
         return run_result
@@ -493,6 +533,16 @@ class Printer:
 
     def send_event(self, event, *params):
         return [cb(*params) for cb in self.event_handlers.get(event, [])]
+
+    def _dispatch_disconnect(self):
+        if self._disconnect_dispatched:
+            return
+        self._disconnect_dispatched = True
+        for cb in list(self.event_handlers.get("klippy:disconnect", [])):
+            try:
+                cb()
+            except BaseException:
+                logging.exception("klippy:disconnect handler raised")
 
     def request_exit(self, result):
         if self.run_result is None:
@@ -652,6 +702,15 @@ def main():
     if options.debugoutput:
         start_args["debugoutput"] = options.debugoutput
         start_args.update(options.dictionary)
+    # Bind the session id BEFORE the first log line (spec §6 binding-timing).
+    session_id = structured_log.make_session_id()
+    structured_log.bind_session(session_id)
+    start_args["session_id"] = session_id
+
+    edir = events_dir_for(options.logfile)
+    start_args["log_events_dir"] = edir
+    if edir is not None:
+        structured_log.check_log_space(edir)
     bglogger = None
     if options.logfile:
         start_args["log_file"] = options.logfile
@@ -659,6 +718,7 @@ def main():
             filename=options.logfile,
             debuglevel=debuglevel,
             rotate_log_at_restart=options.rotate_log_at_restart,
+            events_dir=edir,
         )
         if options.rotate_log_at_restart:
             bglogger.doRollover()

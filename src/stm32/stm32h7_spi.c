@@ -10,6 +10,15 @@
 #include "internal.h" // gpio_peripheral
 #include "sched.h" // sched_shutdown
 #include "board/misc.h" // timer_is_before
+#include "phase_stepping_spi.h" // phase_spi_try_acquire / phase_spi_release
+
+volatile uint32_t kalico_spi_hang_addr __attribute__((used, externally_visible));
+volatile uint32_t kalico_spi_hang_sr   __attribute__((used, externally_visible));
+volatile uint32_t kalico_spi_hang_cr1  __attribute__((used, externally_visible));
+volatile uint32_t kalico_spi_hang_cr2  __attribute__((used, externally_visible));
+volatile uint32_t kalico_spi_hang_cfg2 __attribute__((used, externally_visible));
+// Low 4 bits = remaining-byte count at hang; bit 7 = R (rx) / E (eot)
+volatile uint8_t  kalico_spi_hang_reason __attribute__((used, externally_visible));
 
 struct spi_info {
     SPI_TypeDef *spi;
@@ -124,34 +133,77 @@ spi_prepare(struct spi_config config)
             ;
 }
 
+#define MAX_FIFO 8 // Limit tx fifo usage so rx fifo doesn't overrun
+
 void
-spi_transfer(struct spi_config config, uint8_t receive_data,
-             uint8_t len, uint8_t *data)
+spi_transfer_locked(struct spi_config config, uint8_t receive_data,
+                    uint8_t len, uint8_t *data)
 {
-    uint8_t rdata = 0;
+    uint8_t *wptr = data, *end = data + len;
     SPI_TypeDef *spi = config.spi;
 
-    spi->CR2 = len << SPI_CR2_TSIZE_Pos;
+    spi->CR2 = (uint32_t)len << SPI_CR2_TSIZE_Pos;
     // Enable SPI and start transfer, these MUST be set in this sequence
     spi->CR1 = SPI_CR1_SSI | SPI_CR1_SPE;
     spi->CR1 = SPI_CR1_SSI | SPI_CR1_CSTART | SPI_CR1_SPE;
 
-    while (len--) {
-        writeb((void *)&spi->TXDR, *data);
-        while ((spi->SR & (SPI_SR_RXWNE | SPI_SR_RXPLVL)) == 0)
-            ;
-        rdata = readb((void *)&spi->RXDR);
-
-        if (receive_data) {
-            *data = rdata;
+    uint32_t spi_deadline = timer_read_time() + timer_from_us(100 * len);
+    while (data < end) {
+        uint32_t sr = spi->SR & (SPI_SR_TXP | SPI_SR_RXP);
+        if ((sr & SPI_SR_TXP) && wptr < end && wptr < data + MAX_FIFO) {
+            writeb((void *)&spi->TXDR, *wptr++);
+            spi_deadline = timer_read_time() + timer_from_us(100 * (uint32_t)(end - data));
+            continue;
         }
-        data++;
+        if (sr & SPI_SR_RXP) {
+            uint8_t rdata = readb((void *)&spi->RXDR);
+            if (receive_data) {
+                *data = rdata;
+            }
+            data++;
+            spi_deadline = timer_read_time() + timer_from_us(100 * (uint32_t)(end - data));
+            continue;
+        }
+        if (!timer_is_before(timer_read_time(), spi_deadline)) {
+            kalico_spi_hang_addr = (uint32_t)(uintptr_t)spi;
+            kalico_spi_hang_sr   = spi->SR;
+            kalico_spi_hang_cr1  = spi->CR1;
+            kalico_spi_hang_cr2  = spi->CR2;
+            kalico_spi_hang_cfg2 = spi->CFG2;
+            kalico_spi_hang_reason = (uint8_t)((uint32_t)(end - data) & 0x0F);
+            shutdown("spi rx timeout");
+        }
     }
 
-    while ((spi->SR & SPI_SR_EOT) == 0)
-        ;
+    uint32_t eot_deadline = timer_read_time() + timer_from_us(100);
+    while ((spi->SR & SPI_SR_EOT) == 0) {
+        if (!timer_is_before(timer_read_time(), eot_deadline)) {
+            kalico_spi_hang_addr = (uint32_t)(uintptr_t)spi;
+            kalico_spi_hang_sr   = spi->SR;
+            kalico_spi_hang_cr1  = spi->CR1;
+            kalico_spi_hang_cr2  = spi->CR2;
+            kalico_spi_hang_cfg2 = spi->CFG2;
+            kalico_spi_hang_reason = (uint8_t)0x80;
+            shutdown("spi eot timeout");
+        }
+    }
 
     // Clear flags and disable SPI
     spi->IFCR = 0xFFFFFFFF;
     spi->CR1 = SPI_CR1_SSI;
+}
+
+void
+spi_transfer(struct spi_config config, uint8_t receive_data,
+             uint8_t len, uint8_t *data)
+{
+    while (!phase_spi_try_acquire())
+        ;
+    // spi_prepare MUST stay inside the lock: the ISR's
+    // phase_stepping_write_xdirect calls spi_prepare(fast_cfg) with a
+    // different MBR divisor; hoisting this out lets the ISR fire between
+    // prepare and transfer, clocking the foreground transfer at the wrong rate.
+    spi_prepare(config);
+    spi_transfer_locked(config, receive_data, len, data);
+    phase_spi_release();
 }

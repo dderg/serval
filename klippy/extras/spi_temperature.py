@@ -36,7 +36,7 @@ class SensorBase:
         self.printer.register_event_handler(
             "klippy:connect", self._handle_connect
         )
-        mcu.register_response(
+        mcu.get_command_channel().register_response(
             self._handle_spi_response, "thermocouple_result", oid
         )
         self._is_connected = False
@@ -90,9 +90,13 @@ class SensorBase:
             self.handle_fault(params["value"], params["fault"])
             return
         temp = self.calc_temp(params["value"])
-        next_clock = self.mcu.clock32_to_clock64(params["next_clock"])
+        next_clock = self.mcu.get_clocksync().clock32_to_clock64(
+            params["next_clock"]
+        )
         last_read_clock = next_clock - self._report_clock
-        last_read_time = self.mcu.clock_to_print_time(last_read_clock)
+        last_read_time = self.mcu.get_clocksync().clock_to_print_time(
+            last_read_clock
+        )
         self._callback(last_read_time, temp)
 
     def report_fault(self, msg):

@@ -68,28 +68,6 @@ DECL_CONSTANT_STR("RESERVE_PINS_crystal", "PH0,PH1");
 
 // Clock configuration
 static void
-enable_clock_stm32f20x(void)
-{
-#if CONFIG_MACH_STM32F207
-    uint32_t pll_base = 1000000, pll_freq = CONFIG_CLOCK_FREQ * 2, pllcfgr;
-    if (!CONFIG_STM32_CLOCK_REF_INTERNAL) {
-        // Configure 120Mhz PLL from external crystal (HSE)
-        uint32_t div = CONFIG_CLOCK_REF_FREQ / pll_base;
-        RCC->CR |= RCC_CR_HSEON;
-        pllcfgr = RCC_PLLCFGR_PLLSRC_HSE | (div << RCC_PLLCFGR_PLLM_Pos);
-    } else {
-        // Configure 120Mhz PLL from internal 16Mhz oscillator (HSI)
-        uint32_t div = 16000000 / pll_base;
-        pllcfgr = RCC_PLLCFGR_PLLSRC_HSI | (div << RCC_PLLCFGR_PLLM_Pos);
-    }
-    RCC->PLLCFGR = (pllcfgr | ((pll_freq/pll_base) << RCC_PLLCFGR_PLLN_Pos)
-                    | (0 << RCC_PLLCFGR_PLLP_Pos)
-                    | ((pll_freq/FREQ_USB) << RCC_PLLCFGR_PLLQ_Pos));
-    RCC->CR |= RCC_CR_PLLON;
-#endif
-}
-
-static void
 enable_clock_stm32f40x(void)
 {
 #if CONFIG_MACH_STM32F401 || CONFIG_MACH_STM32F411 || CONFIG_MACH_STM32F4x5
@@ -181,9 +159,7 @@ clock_setup(void)
 #endif
 
     // Configure and enable PLL
-    if (CONFIG_MACH_STM32F207)
-        enable_clock_stm32f20x();
-    else if (CONFIG_MACH_STM32F401 || CONFIG_MACH_STM32F411 || CONFIG_MACH_STM32F4x5)
+    if (CONFIG_MACH_STM32F401 || CONFIG_MACH_STM32F411 || CONFIG_MACH_STM32F4x5)
         enable_clock_stm32f40x();
     else
         enable_clock_stm32f446();
@@ -252,6 +228,23 @@ armcm_main(void)
     SystemInit();
     SCB->VTOR = (uint32_t)VectorTable;
 
+#if __FPU_PRESENT == 1
+    // Enable the FPU (CP10/CP11 = Full Access). SystemInit() only does this
+    // when __FPU_USED == 1, which is gated on -mfloat-abi=hard|softfp at
+    // build time — Klipper compiles -mfloat-abi=soft so SystemInit skips it.
+    // The kalico Rust runtime is also soft-float (target=thumbv7em-none-eabi)
+    // so in principle no FPU instructions are emitted, but defensively we
+    // enable FPU here so that ANY accidental VFP / VLDR emission (rust libcore
+    // sometimes generates `vmov` for u32→u32 reg-reg copies that the M4
+    // soft-float decoder rejects as Undefined when CPACR.CP10/11 are zero)
+    // is handled by hardware rather than HardFaulting. Cost: 16 bytes of
+    // additional context saved on lazy-stacking exception entry. Harmless on
+    // soft-float code that never touches FPU registers.
+    SCB->CPACR |= ((3UL << (10 * 2)) | (3UL << (11 * 2)));
+    __DSB();
+    __ISB();
+#endif
+
     // Reset peripheral clocks (for some bootloaders that don't)
     RCC->AHB1ENR = 0x38000;
     RCC->AHB2ENR = 0;
@@ -259,6 +252,8 @@ armcm_main(void)
     RCC->APB2ENR = 0;
 
     clock_setup();
+
+    mpu_protect_init();
 
     sched_main();
 }

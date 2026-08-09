@@ -1,0 +1,47 @@
+#![allow(
+    clippy::ref_as_ptr,
+    clippy::float_cmp,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args,
+    clippy::doc_markdown
+)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+
+use runtime::error::{
+    encode_clock_sync_quality, encode_invalid_curve_handle, encode_stream_state_violation,
+};
+
+#[test]
+fn invalid_curve_handle_encoding() {
+    let d = encode_invalid_curve_handle(5, 100, 200);
+    assert_eq!(d >> 16, 5);
+    assert_eq!(d & 0xFFFF, u32::from(0x0064_u16 ^ 0x00c8_u16));
+}
+
+#[test]
+fn clock_sync_quality_encoding() {
+    let d = encode_clock_sync_quality(150, 42);
+    assert_eq!(d >> 16, 150);
+    assert_eq!(d & 0xFFFF, 42);
+}
+
+#[test]
+fn stream_state_violation_encoding() {
+    let d = encode_stream_state_violation(2, 5);
+    assert_eq!(d, (2_u32 << 8) | 5);
+}
+
+#[test]
+fn invalid_curve_handle_xor_collapses_to_zero_when_match() {
+    let d = encode_invalid_curve_handle(7, 0xABCD, 0xABCD);
+    assert_eq!(d >> 16, 7);
+    assert_eq!(d & 0xFFFF, 0);
+}
+
+#[test]
+fn stream_state_violation_max_bytes_pack() {
+    let d = encode_stream_state_violation(0xFF, 0xFF);
+    assert_eq!(d, 0x0000_FFFF);
+}

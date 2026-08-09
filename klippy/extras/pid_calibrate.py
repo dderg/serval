@@ -110,7 +110,7 @@ class PIDCalibrate:
             heater = pheaters.lookup_heater(heater_name)
         except self.printer.config_error as e:
             raise gcmd.error(str(e))
-        self.printer.lookup_object("toolhead").get_last_move_time()
+        self.printer.lookup_object("toolhead").wait_moves()
 
         if isinstance(heater.control, heaters.ControlDualLoopPID):
             # Calibrate the inner (secondary) loop

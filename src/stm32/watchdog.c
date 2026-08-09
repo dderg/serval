@@ -12,9 +12,17 @@
 #define IWDG IWDG1
 #endif
 
+// __attribute__((used, externally_visible)) survives Klipper's -fwhole-program --gc-sections.
+volatile uint8_t runtime_liveness_ok __attribute__((used, externally_visible))
+    = 1;
+
 void
 watchdog_reset(void)
 {
+#if CONFIG_MCU_SIM
+    return;  // Renode's IWDG model misbehaves; sim build is silicon-unsafe
+#endif
+    if (!runtime_liveness_ok) return;
     IWDG->KR = 0xAAAA;
 }
 DECL_TASK(watchdog_reset);
@@ -22,6 +30,9 @@ DECL_TASK(watchdog_reset);
 void
 watchdog_init(void)
 {
+#if CONFIG_MCU_SIM
+    return;  // Don't arm IWDG in sim — see watchdog_reset
+#endif
     IWDG->KR = 0x5555;
     IWDG->PR = 0;
     IWDG->RLR = 0x0FFF; // 410-512ms timeout (depending on stm32 chip)

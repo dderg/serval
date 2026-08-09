@@ -1,0 +1,80 @@
+name: playground-pages
+
+# Rebuilds the interactive motion playground (snapshots/web/static + the
+# motion-playground WASM) and publishes it to the playground/ subdirectory of
+# the gh-pages branch, which GitHub Pages serves. The rest of gh-pages (the
+# inherited docs site) is left untouched.
+
+on:
+  push:
+    branches: [sota-motion]
+    paths:
+      - "rust/**"
+      - "snapshots/web/static/**"
+      - ".github/workflows/playground-pages.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: playground-pages
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            rust
+            rust/snapshot-viewer
+            rust/motion-playground
+
+      - name: Install wasm toolchain
+        run: |
+          rustup target add wasm32-unknown-unknown
+          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM bundles
+        run: |
+          wasm-pack build --target web --release \
+            --out-dir ../../snapshots/web/static/wasm rust/snapshot-viewer
+          wasm-pack build --target web --release \
+            --out-dir ../../snapshots/web/static/wasm-playground rust/motion-playground
+
+      - name: Assemble playground site
+        run: |
+          mkdir -p dist/playground
+          cd snapshots/web/static
+          cp playground.html playground.js playground-worker.js \
+            trajectory-view.js default.gcode "$GITHUB_WORKSPACE/dist/playground/"
+          cp playground.html "$GITHUB_WORKSPACE/dist/playground/index.html"
+          cp -r wasm wasm-playground "$GITHUB_WORKSPACE/dist/playground/"
+          # wasm-pack writes a catch-all .gitignore into its out-dirs; it must
+          # not travel into gh-pages or git ignores the deployed bundles.
+          rm -f "$GITHUB_WORKSPACE"/dist/playground/wasm/.gitignore \
+            "$GITHUB_WORKSPACE"/dist/playground/wasm-playground/.gitignore
+
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages
+
+      - name: Publish playground/ to gh-pages
+        run: |
+          rm -rf gh-pages/playground
+          cp -r dist/playground gh-pages/playground
+          cd gh-pages
+          git add playground
+          if git diff --cached --quiet; then
+            echo "playground unchanged — nothing to deploy"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "playground: rebuild from ${GITHUB_SHA}"
+          git push origin gh-pages

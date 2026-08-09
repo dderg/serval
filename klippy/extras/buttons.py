@@ -48,10 +48,7 @@ class MCU_buttons:
                 % (self.oid, i, pin, pull_up),
                 is_init=True,
             )
-        cmd_queue = self.mcu.alloc_command_queue()
-        self.ack_cmd = self.mcu.lookup_command(
-            "buttons_ack oid=%c count=%c", cq=cmd_queue
-        )
+        self.ack_cmd = self.mcu.lookup_command("buttons_ack oid=%c count=%c")
         clock = self.mcu.get_query_slot(self.oid)
         rest_ticks = self.mcu.seconds_to_clock(QUERY_TIME)
         self.mcu.add_config_cmd(
@@ -60,7 +57,7 @@ class MCU_buttons:
             % (self.oid, clock, rest_ticks, RETRANSMIT_COUNT, self.invert),
             is_init=True,
         )
-        self.mcu.register_response(
+        self.mcu.get_command_channel().register_response(
             self.handle_buttons_state, "buttons_state", self.oid
         )
 

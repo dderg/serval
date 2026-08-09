@@ -1,0 +1,18 @@
+[package]
+name = "config-doc"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "Klipper-compatible config parsing: INI dialect, includes, ${} interpolation."
+license.workspace = true
+
+[dependencies]
+glob = "0.3"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

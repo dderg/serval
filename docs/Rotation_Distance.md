@@ -1,8 +1,7 @@
 # Rotation distance
 
 Stepper motor drivers on Kalico require a `rotation_distance`
-parameter in each
-[stepper config section](Config_Reference.md#stepper). The
+parameter in each motor section. The
 `rotation_distance` is the amount of distance that the axis moves with
 one full revolution of the stepper motor. This document describes how
 one can configure this value.

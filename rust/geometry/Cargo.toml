@@ -1,0 +1,16 @@
+[package]
+name = "geometry"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "Layer 1 geometry pipeline for the kalico motion planner. Token stream → typed segments."
+license.workspace = true
+
+[dependencies]
+libm = { version = "0.2", default-features = false }
+nurbs = { path = "../nurbs" }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

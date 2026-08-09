@@ -1,0 +1,1142 @@
+use js_sys::Float64Array;
+use serde::Deserialize;
+use wasm_bindgen::prelude::*;
+
+#[cfg(test)]
+mod tests;
+
+// -- Snapshot input types (matching Python snapshot dict) ---------------------
+
+#[derive(Deserialize)]
+struct Snapshot {
+    raw_x: Vec<f64>,
+    raw_y: Vec<f64>,
+    traversal_time_s: f64,
+    // The lowered trajectory the firmware executes: per-axis pieces
+    // [t0, t1, c0, c1, …] of position vs time (cubic = 6 floats). Variable-length
+    // so any baseline degree loads — missing high coefficients read as zero — and
+    // the executed (post-lowering) path/derivatives never drop to the sampled
+    // planner fallback on a format mismatch. Differentiated analytically.
+    traj_x_pieces: Option<Vec<Vec<f64>>>,
+    traj_y_pieces: Option<Vec<Vec<f64>>>,
+    // Z (axis 2) and E (axis 3) lanes. Optional so legacy baselines that only
+    // stored X/Y still deserialize; a missing lane plots as a flat zero track.
+    #[serde(default)]
+    traj_z_pieces: Option<Vec<Vec<f64>>>,
+    #[serde(default)]
+    traj_e_pieces: Option<Vec<Vec<f64>>>,
+    // The toolhead signal: the same tracks before the motor-side
+    // derivative-gain stages turned them into the motor command. Emitted only
+    // for cases where the two differ (e.g. a mode_inverse chain).
+    #[serde(default)]
+    toolhead_x_pieces: Option<Vec<Vec<f64>>>,
+    #[serde(default)]
+    toolhead_y_pieces: Option<Vec<Vec<f64>>>,
+    traj_t_end: Option<f64>,
+    // Per-axis (x, y, z, e) worst continuity jumps across piece seams, plus the
+    // top offending seams. Optional so pre-seam-metric baselines still load.
+    #[serde(default)]
+    seam_max_dp: Option<Vec<f64>>,
+    #[serde(default)]
+    seam_max_dv: Option<Vec<f64>>,
+    #[serde(default)]
+    seam_max_da: Option<Vec<f64>>,
+    #[serde(default)]
+    worst_seams: Option<Vec<serde_json::Value>>,
+    // Legacy baselines stored sampled position + speed instead of the cubics.
+    kin_x: Option<Vec<f64>>,
+    kin_y: Option<Vec<f64>>,
+    kin_v: Option<Vec<f64>>,
+    kin_s: Option<Vec<f64>>,
+    kin_heading_x: Option<Vec<f64>>,
+    kin_heading_y: Option<Vec<f64>>,
+}
+
+// -- Numerical gradient (matches numpy.gradient) ----------------------------
+
+fn gradient(values: &[f64], times: &[f64]) -> Vec<f64> {
+    let n = values.len();
+    if n == 0 {
+        return vec![];
+    }
+    if n == 1 {
+        return vec![0.0];
+    }
+
+    let mut result = vec![0.0; n];
+
+    // Forward difference for first point
+    let dt0 = times[1] - times[0];
+    result[0] = if dt0.abs() > 1e-30 {
+        (values[1] - values[0]) / dt0
+    } else {
+        0.0
+    };
+
+    // Central differences for interior
+    for i in 1..n - 1 {
+        let dt = times[i + 1] - times[i - 1];
+        result[i] = if dt.abs() > 1e-30 {
+            (values[i + 1] - values[i - 1]) / dt
+        } else {
+            0.0
+        };
+    }
+
+    // Backward difference for last point
+    let dt_last = times[n - 1] - times[n - 2];
+    result[n - 1] = if dt_last.abs() > 1e-30 {
+        (values[n - 1] - values[n - 2]) / dt_last
+    } else {
+        0.0
+    };
+
+    result
+}
+
+fn scalar_derivative(comp_x: &[f64], comp_y: &[f64]) -> Vec<f64> {
+    comp_x
+        .iter()
+        .zip(comp_y)
+        .map(|(ax, ay)| libm::hypot(*ax, *ay))
+        .collect()
+}
+
+// Project a per-sample XY vector series onto the velocity's tangent/normal
+// frame: tangential = (v·f)/|v| (signed — negative while braking), normal =
+// |v×f|/|v|. For acceleration this splits speed change from direction change
+// (centripetal); the same projection of jerk shows which of the two is
+// changing. Where the toolhead is stopped the frame is undefined, so both
+// components read zero.
+const FRENET_SPEED_FLOOR: f64 = 1e-9;
+
+// FRENET_SPEED_FLOOR (above) is tuned for Frenet-projection's 1/speed
+// sensitivity; kappa's 1/speed^3 sensitivity blows up far sooner as speed
+// shrinks -- a speed that's a perfectly fine floor for tangential/normal
+// projection still produces an astronomically large, physically
+// meaningless kappa near a genuine full stop. First-pass, tune against
+// real cases if a genuinely slow (but not stopped) cornering move is ever
+// seen misclassified as Cusp.
+const CURVATURE_CUSP_SPEED_FLOOR: f64 = 1e-3;
+
+fn frenet_components(vx: &[f64], vy: &[f64], fx: &[f64], fy: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let n = vx.len();
+    let mut tang = Vec::with_capacity(n);
+    let mut norm = Vec::with_capacity(n);
+    for i in 0..n {
+        let speed = libm::hypot(vx[i], vy[i]);
+        if speed <= FRENET_SPEED_FLOOR {
+            tang.push(0.0);
+            norm.push(0.0);
+        } else {
+            tang.push((vx[i] * fx[i] + vy[i] * fy[i]) / speed);
+            norm.push((vx[i] * fy[i] - vy[i] * fx[i]).abs() / speed);
+        }
+    }
+    (tang, norm)
+}
+
+// -- Curvature -----------------------------------------------------------
+
+// Signed planar curvature kappa = (vx*ay - vy*ax) / speed^3 and its time
+// derivative, from one instant's velocity/accel/jerk. kappa is
+// parameterization-invariant -- its *value* at a point along the path
+// doesn't depend on how fast that point was reached -- so this is exactly
+// as valid whether vx/vy/ax/ay/jx/jy came from a fast or slow traversal of
+// the same geometric path. Precondition: speed > 0 (a zero-speed sample is
+// a cusp, handled by the caller before this is ever invoked).
+fn kappa_and_dkappa_dt(vx: f64, vy: f64, ax: f64, ay: f64, jx: f64, jy: f64) -> (f64, f64) {
+    let speed2 = vx * vx + vy * vy;
+    let speed = speed2.sqrt();
+    let n = vx * ay - vy * ax;
+    let kappa = n / (speed2 * speed);
+    let n_dot = vx * jy - vy * jx;
+    let dkappa_dt =
+        n_dot / (speed2 * speed) - 3.0 * n * (vx * ax + vy * ay) / (speed2 * speed2 * speed);
+    (kappa, dkappa_dt)
+}
+
+const PIECE_CONTIGUITY_TOL_S: f64 = 1e-9;
+
+// Spans where consecutive pieces are NOT contiguous: either a gap (piece[i]
+// ends before piece[i+1] starts -- no piece covers that span, so evaluating
+// a sample there would silently extrapolate whichever piece partition_point
+// picks) or an overlap (piece[i+1] starts before piece[i] ends -- two pieces
+// both claim the same instant). Either way this is a pipeline defect worth
+// surfacing, not bridging.
+fn domain_anomalies(pieces: &[Vec<f64>]) -> Vec<(f64, f64)> {
+    let mut spans = Vec::new();
+    for w in pieces.windows(2) {
+        let end = w[0][1];
+        let start = w[1][0];
+        if (start - end).abs() > PIECE_CONTIGUITY_TOL_S {
+            spans.push((end.min(start), end.max(start)));
+        }
+    }
+    spans
+}
+
+fn in_any_span(spans: &[(f64, f64)], t: f64, tol: f64) -> bool {
+    spans.iter().any(|&(lo, hi)| t >= lo - tol && t <= hi + tol)
+}
+
+// -- Curvature classification (Task 3) -----------------------------------------------
+
+const KAPPA_ZERO_EPS: f64 = 1e-4; // 1/mm -- radius > 10 m reads as straight
+
+// Known finding (not a threshold bug): `snapshots/cases/arc_fit/circle.gcode`
+// -- a case with no shaper, designed to be a constant-curvature circle --
+// classifies as majority "Other" against these thresholds. Investigated and
+// confirmed the fitter is exact (the geometry layer emits a genuine Arc
+// segment, mathematically constant curvature by construction); the ripple is
+// introduced entirely by the lowering stage's conversion of that exact arc
+// into the executed per-axis polynomial trajectory, which is a non-rational
+// spline (ScalarNurbs has no weights -- see rust/nurbs/src/scalar.rs) and
+// therefore cannot represent a circle's curvature exactly. Measured inside
+// one exact arc segment: kappa ripples ~5-7% around its true value, with a
+// windowed dkappa/ds spread ~16x DKAPPA_DS_SPREAD_EPS's current value. This
+// is a real, quantified property of the lowering stage -- nothing there
+// currently budgets for curvature/dkappa-ds consistency, only position
+// (fit_tol_mm) and acceleration (fit_tol_accel_mm_s2) deviation -- not a
+// classifier miscalibration, and deliberately NOT papered over here by
+// loosening these thresholds. Left as a known, documented finding for
+// whoever next investigates the fitter/lowerer's curvature budget.
+const DKAPPA_DS_ZERO_EPS: f64 = 1e-3; // 1/mm^2 -- first-pass, tune against real cases
+const DKAPPA_DS_SPREAD_EPS: f64 = 1e-3; // 1/mm^2 -- first-pass, tune against real cases
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CurvatureClass {
+    Zero,
+    Constant,
+    Linear,
+    Other,
+    Cusp,
+    Gap,
+}
+
+impl CurvatureClass {
+    fn code(self) -> f64 {
+        match self {
+            CurvatureClass::Zero => 0.0,
+            CurvatureClass::Constant => 1.0,
+            CurvatureClass::Linear => 2.0,
+            CurvatureClass::Other => 3.0,
+            CurvatureClass::Cusp => 4.0,
+            CurvatureClass::Gap => 5.0,
+        }
+    }
+}
+
+// ~10th-to-90th-percentile spread of a sorted slice: robust to a handful of
+// outliers (e.g. the one or two samples nearest a piece seam, where dkappa/ds
+// can legitimately jump even in a perfectly healthy trajectory) in a way a
+// raw max-min is not. Trims at least 1 sample off each end whenever there are
+// at least 3 -- plain `n / 10` truncates to 0 (i.e. no trim at all, degrading
+// to raw min-max) for any n under 10, which is exactly the small-window case
+// (a trailing partial window, or one shrunk by excluding Cusp/Gap samples)
+// this robustness exists to cover. At n=3 this trims to a single middle element,
+// so spread always reads as 0 regardless of the two outer samples — an accepted
+// tradeoff: a 3-sample window erring toward "not enough data to call it anomalous"
+// is safer than the alternative of no outlier protection at all.
+fn percentile_spread(sorted: &[f64]) -> f64 {
+    let n = sorted.len();
+    if n < 3 {
+        return sorted.last().copied().unwrap_or(0.0) - sorted.first().copied().unwrap_or(0.0);
+    }
+    let trim = (n / 10).max(1).min((n - 1) / 2);
+    let lo = sorted[trim];
+    let hi = sorted[n - 1 - trim];
+    hi - lo
+}
+
+// Classifies one window's worth of (kappa, dkappa/ds) samples -- both
+// already restricted by the caller to non-Cusp, non-Gap samples. Zero is
+// checked against kappa itself (not its rate) so a dead-straight stretch
+// reads as Zero rather than Constant; Constant vs. Linear both hinge on
+// whether dkappa/ds is steady across the window (a percentile spread, not
+// raw min-max), splitting on whether that steady rate is itself ~zero.
+fn classify_window(kappa: &[f64], dkappa_ds: &[f64]) -> CurvatureClass {
+    let max_abs_kappa = kappa.iter().fold(0.0_f64, |m, k| m.max(k.abs()));
+    if max_abs_kappa < KAPPA_ZERO_EPS {
+        return CurvatureClass::Zero;
+    }
+    let mut sorted: Vec<f64> = dkappa_ds.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let spread = percentile_spread(&sorted);
+    let median = sorted[sorted.len() / 2];
+    if spread >= DKAPPA_DS_SPREAD_EPS {
+        return CurvatureClass::Other;
+    }
+    if median.abs() < DKAPPA_DS_ZERO_EPS {
+        CurvatureClass::Constant
+    } else {
+        CurvatureClass::Linear
+    }
+}
+
+// Despikes a per-window class sequence: a window whose class differs from
+// BOTH neighbors, when those neighbors agree with each other, is overwritten
+// to match them. This is what turns "one seam artifact flips one window"
+// into a stable, contiguous stretch, while a class change that actually
+// persists across several windows -- a real pipeline anomaly -- survives
+// untouched.
+fn smooth_classes(raw: &[CurvatureClass]) -> Vec<CurvatureClass> {
+    if raw.len() < 3 {
+        return raw.to_vec();
+    }
+    let mut out = raw.to_vec();
+    for i in 1..raw.len() - 1 {
+        if raw[i] != raw[i - 1] && raw[i] != raw[i + 1] && raw[i - 1] == raw[i + 1] {
+            out[i] = raw[i - 1];
+        }
+    }
+    out
+}
+
+const CLASSIFY_WINDOW_SAMPLES: usize = 24; // first-pass; tune against real cases
+
+// One kappa value and one CurvatureClass per entry of `t` (same grid the
+// velocity/acceleration/jerk panels already use -- no new sampling). A
+// sample landing in a piece-domain gap/overlap is flagged Gap; a
+// near-zero-speed sample is flagged Cusp; everything else feeds a
+// fixed-size, piece-agnostic sliding window that gets classified as a unit
+// and then despiked against its neighbors.
+fn curvature_series(
+    t: &[f64],
+    xp: &[Vec<f64>],
+    yp: &[Vec<f64>],
+) -> (Vec<f64>, Vec<CurvatureClass>) {
+    let n = t.len();
+    let mut anomalies = domain_anomalies(xp);
+    anomalies.extend(domain_anomalies(yp));
+
+    let mut kappa = vec![0.0; n];
+    let mut dkappa_ds = vec![0.0; n];
+    let mut flag: Vec<Option<CurvatureClass>> = vec![None; n];
+
+    for i in 0..n {
+        let ti = t[i];
+        if in_any_span(&anomalies, ti, PIECE_CONTIGUITY_TOL_S) {
+            flag[i] = Some(CurvatureClass::Gap);
+            continue;
+        }
+        let (_, vx, ax, jx) = eval_lane(xp, ti);
+        let (_, vy, ay, jy) = eval_lane(yp, ti);
+        let speed = libm::hypot(vx, vy);
+        if speed < CURVATURE_CUSP_SPEED_FLOOR {
+            flag[i] = Some(CurvatureClass::Cusp);
+            continue;
+        }
+        let (k, dk_dt) = kappa_and_dkappa_dt(vx, vy, ax, ay, jx, jy);
+        kappa[i] = k;
+        dkappa_ds[i] = dk_dt / speed;
+    }
+
+    // Classify per window first (one entry per window, NOT expanded to
+    // per-sample) so smooth_classes's neighbor comparison actually compares
+    // adjacent WINDOWS. Expanding to per-sample before smoothing would make
+    // every non-boundary sample its own "neighbor" by construction (they're
+    // all the same repeated value within a window), so the despike pass
+    // would never find anything to despike.
+    let mut window_starts: Vec<usize> = Vec::new();
+    let mut window_classes: Vec<CurvatureClass> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let end = (i + CLASSIFY_WINDOW_SAMPLES).min(n);
+        let idxs: Vec<usize> = (i..end).filter(|&j| flag[j].is_none()).collect();
+        let cls = if idxs.is_empty() {
+            CurvatureClass::Other
+        } else {
+            let k: Vec<f64> = idxs.iter().map(|&j| kappa[j]).collect();
+            let dk: Vec<f64> = idxs.iter().map(|&j| dkappa_ds[j]).collect();
+            classify_window(&k, &dk)
+        };
+        window_starts.push(i);
+        window_classes.push(cls);
+        i = end;
+    }
+    let smoothed_windows = smooth_classes(&window_classes);
+
+    let mut classes = vec![CurvatureClass::Zero; n];
+    for (w, &start) in window_starts.iter().enumerate() {
+        let end = window_starts.get(w + 1).copied().unwrap_or(n);
+        for j in start..end {
+            classes[j] = flag[j].unwrap_or(smoothed_windows[w]);
+        }
+    }
+    (kappa, classes)
+}
+
+// -- Toolhead position (handles legacy format) ------------------------------
+
+fn toolhead_position(snap: &Snapshot) -> (Vec<f64>, Vec<f64>) {
+    if let (Some(kx), Some(ky)) = (&snap.kin_x, &snap.kin_y) {
+        return (kx.clone(), ky.clone());
+    }
+    // Legacy: integrate heading along arc length
+    let s: Vec<f64> = snap.kin_s.as_ref().cloned().unwrap_or_default();
+    let hx: Vec<f64> = snap.kin_heading_x.as_ref().cloned().unwrap_or_default();
+    let hy: Vec<f64> = snap.kin_heading_y.as_ref().cloned().unwrap_or_default();
+    let n = s.len();
+    let mut x = vec![0.0; n];
+    let mut y = vec![0.0; n];
+    if n == 0 {
+        return (x, y);
+    }
+    x[0] = snap.raw_x.first().copied().unwrap_or(0.0);
+    y[0] = snap.raw_y.first().copied().unwrap_or(0.0);
+    let mut cx = x[0];
+    let mut cy = y[0];
+    for i in 1..n {
+        let ds = s[i] - s[i - 1];
+        cx += hx[i] * ds;
+        cy += hy[i] * ds;
+        x[i] = cx;
+        y[i] = cy;
+    }
+    (x, y)
+}
+
+// -- Time series computation ------------------------------------------------
+
+struct TimeSeries {
+    t: Vec<f64>,
+    // Toolhead position sampled on the same time grid as the derivatives, so the
+    // path marker and the graph cursor index the same way.
+    kin_x: Vec<f64>,
+    kin_y: Vec<f64>,
+    vx: Vec<f64>,
+    vy: Vec<f64>,
+    vz: Vec<f64>,
+    ve: Vec<f64>,
+    v_scalar: Vec<f64>,
+    ax: Vec<f64>,
+    ay: Vec<f64>,
+    az: Vec<f64>,
+    ae: Vec<f64>,
+    a_scalar: Vec<f64>,
+    jx: Vec<f64>,
+    jy: Vec<f64>,
+    jz: Vec<f64>,
+    je: Vec<f64>,
+    j_scalar: Vec<f64>,
+}
+
+impl TimeSeries {
+    fn zeroed(n: usize) -> Self {
+        let z = || vec![0.0; n];
+        Self {
+            t: z(),
+            kin_x: z(),
+            kin_y: z(),
+            vx: z(),
+            vy: z(),
+            vz: z(),
+            ve: z(),
+            v_scalar: z(),
+            ax: z(),
+            ay: z(),
+            az: z(),
+            ae: z(),
+            a_scalar: z(),
+            jx: z(),
+            jy: z(),
+            jz: z(),
+            je: z(),
+            j_scalar: z(),
+        }
+    }
+}
+
+// Evaluate one per-axis monomial piece [t0, t1, c0, c1, …, cn] -- the lowered
+// trajectory the firmware runs -- and its analytic derivatives at time `ti`.
+// Within a piece pos = sum(ck * tau^k) (tau = ti - t0), so velocity,
+// acceleration, and jerk are exact polynomial derivatives, no differencing.
+// Degree-generic: any coefficient count from the row (c0..cn, n = len - 3) is
+// summed via Horner; a piece with fewer than 6 floats (e.g. a linear or
+// quadratic row) simply has no higher terms to contribute.
+fn eval_piece(p: &[f64], ti: f64) -> (f64, f64, f64, f64) {
+    let tau = ti - p[0];
+    let coeffs = &p[2..];
+    let (mut pos, mut vel, mut acc, mut jerk) = (0.0, 0.0, 0.0, 0.0);
+    for (k, &ck) in coeffs.iter().enumerate().rev() {
+        pos = pos * tau + ck;
+        if k >= 1 {
+            vel = vel * tau + ck * (k as f64);
+        }
+        if k >= 2 {
+            acc = acc * tau + ck * (k as f64) * ((k - 1) as f64);
+        }
+        if k >= 3 {
+            jerk = jerk * tau + ck * (k as f64) * ((k - 1) as f64) * ((k - 2) as f64);
+        }
+    }
+    (pos, vel, acc, jerk)
+}
+
+// Last piece whose start is <= ti, clamped into range (searchsorted-right - 1).
+fn piece_at(pieces: &[Vec<f64>], ti: f64) -> usize {
+    pieces
+        .partition_point(|p| p[0] <= ti)
+        .saturating_sub(1)
+        .min(pieces.len() - 1)
+}
+
+// Evaluate a lane on the shared time grid; an absent lane (empty) reads zero so
+// legacy X/Y-only baselines still produce full-length Z/E tracks.
+fn eval_lane(pieces: &[Vec<f64>], ti: f64) -> (f64, f64, f64, f64) {
+    if pieces.is_empty() {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    eval_piece(&pieces[piece_at(pieces, ti)], ti)
+}
+
+#[derive(Default)]
+struct ToolheadSeries {
+    x: Vec<f64>,
+    y: Vec<f64>,
+    vx: Vec<f64>,
+    vy: Vec<f64>,
+    ax: Vec<f64>,
+    ay: Vec<f64>,
+    jx: Vec<f64>,
+    jy: Vec<f64>,
+    v_scalar: Vec<f64>,
+    a_scalar: Vec<f64>,
+    j_scalar: Vec<f64>,
+    a_tang: Vec<f64>,
+    a_cent: Vec<f64>,
+    j_tang: Vec<f64>,
+    j_cent: Vec<f64>,
+    kappa: Vec<f64>,
+}
+
+// The toolhead signal sampled on the exact grid the motor-command series use,
+// so the panels can overlay both without any resampling. Every derived motor
+// series (|XY| scalars, Frenet ∥/⊥ projections, kappa) is mirrored with the
+// identical formulas so the two signal families are directly comparable.
+fn toolhead_series(t: &[f64], xp: &[Vec<f64>], yp: &[Vec<f64>]) -> ToolheadSeries {
+    let mut s = ToolheadSeries::default();
+    for &ti in t {
+        let (x, vx, ax, jx) = eval_lane(xp, ti);
+        let (y, vy, ay, jy) = eval_lane(yp, ti);
+        s.x.push(x);
+        s.y.push(y);
+        s.vx.push(vx);
+        s.vy.push(vy);
+        s.ax.push(ax);
+        s.ay.push(ay);
+        s.jx.push(jx);
+        s.jy.push(jy);
+    }
+    s.v_scalar = scalar_derivative(&s.vx, &s.vy);
+    s.a_scalar = scalar_derivative(&s.ax, &s.ay);
+    s.j_scalar = scalar_derivative(&s.jx, &s.jy);
+    (s.a_tang, s.a_cent) = frenet_components(&s.vx, &s.vy, &s.ax, &s.ay);
+    (s.j_tang, s.j_cent) = frenet_components(&s.vx, &s.vy, &s.jx, &s.jy);
+    if !xp.is_empty() && !yp.is_empty() {
+        (s.kappa, _) = curvature_series(t, xp, yp);
+    }
+    s
+}
+
+fn time_series_from_pieces(
+    xp: &[Vec<f64>],
+    yp: &[Vec<f64>],
+    zp: &[Vec<f64>],
+    ep: &[Vec<f64>],
+    t_end: f64,
+) -> TimeSeries {
+    if xp.is_empty() || yp.is_empty() || t_end <= 0.0 {
+        return TimeSeries::zeroed(1);
+    }
+
+    // Acceleration is linear within a cubic piece and steps at a piece boundary,
+    // so every accel peak sits exactly on a boundary -- a uniform grid lands a
+    // hair off it and the peak wobbles as t_end shifts between before/after.
+    // Sample each interval between consecutive boundaries (of ALL lanes) on its
+    // own piece with both endpoints included: every step gets a sample on each
+    // side, so the plotted accel/jerk are exact and stable.
+    let mut bounds: Vec<f64> = vec![0.0, t_end];
+    for p in xp.iter().chain(yp).chain(zp).chain(ep) {
+        for edge in [p[0], p[1]] {
+            if edge > 0.0 && edge < t_end {
+                bounds.push(edge);
+            }
+        }
+    }
+    bounds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    bounds.dedup();
+
+    // Sample density must follow time, not piece count: since the lowering
+    // fits one long piece where the signal is smooth (an arc can span tens of
+    // milliseconds), a fixed per-interval count leaves millimeter-scale chords
+    // that render a genuinely smooth trajectory as a polyline.
+    const TARGET_SAMPLE_DT_S: f64 = 2.5e-4;
+    let per_interval_of = |a: f64, b: f64| -> usize {
+        (((b - a) / TARGET_SAMPLE_DT_S).ceil() as usize).clamp(4, 512)
+    };
+    let cap: usize = bounds.windows(2).map(|w| per_interval_of(w[0], w[1])).sum();
+
+    let new = || Vec::with_capacity(cap);
+    let mut t = new();
+    let (mut kin_x, mut vx, mut ax, mut jx) = (new(), new(), new(), new());
+    let (mut kin_y, mut vy, mut ay, mut jy) = (new(), new(), new(), new());
+    let (mut vz, mut az, mut jz) = (new(), new(), new());
+    let (mut ve, mut ae, mut je) = (new(), new(), new());
+
+    for w in bounds.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let per_interval = per_interval_of(a, b);
+        for k in 0..per_interval {
+            let ti = a + (b - a) * (k as f64) / ((per_interval - 1) as f64);
+            let (x, vxk, axk, jxk) = eval_lane(xp, ti);
+            let (y, vyk, ayk, jyk) = eval_lane(yp, ti);
+            let (_, vzk, azk, jzk) = eval_lane(zp, ti);
+            let (_, vek, aek, jek) = eval_lane(ep, ti);
+            t.push(ti);
+            kin_x.push(x);
+            vx.push(vxk);
+            ax.push(axk);
+            jx.push(jxk);
+            kin_y.push(y);
+            vy.push(vyk);
+            ay.push(ayk);
+            jy.push(jyk);
+            vz.push(vzk);
+            az.push(azk);
+            jz.push(jzk);
+            ve.push(vek);
+            ae.push(aek);
+            je.push(jek);
+        }
+    }
+
+    let v_scalar = scalar_derivative(&vx, &vy);
+    let a_scalar = scalar_derivative(&ax, &ay);
+    let j_scalar = scalar_derivative(&jx, &jy);
+
+    TimeSeries {
+        t,
+        kin_x,
+        kin_y,
+        vx,
+        vy,
+        vz,
+        ve,
+        v_scalar,
+        ax,
+        ay,
+        az,
+        ae,
+        a_scalar,
+        jx,
+        jy,
+        jz,
+        je,
+        j_scalar,
+    }
+}
+
+// Acceleration steps at a piece boundary are jerk impulses: a true Dirac --
+// infinite height, zero width -- so the per-piece analytic jerk can never plot
+// them and the jerk panel looks deceptively smooth across the step. Surface
+// them honestly. The finite, physical strength of each impulse is the
+// acceleration jump |Δa| across the boundary (∫ jerk dt over the impulse). The
+// C1 Hermite lowering matches position and velocity at joints but not
+// acceleration, so most joints step a little; a relative floor keeps float
+// noise and trivial joints off the panel.
+fn jerk_impulses(
+    xp: &[Vec<f64>],
+    yp: &[Vec<f64>],
+    t_end: f64,
+    a_peak: f64,
+) -> (Vec<f64>, Vec<f64>) {
+    discontinuities(xp, yp, t_end, a_peak, |p, t| eval_piece(p, t).2)
+}
+
+// A step in velocity at a piece boundary is an acceleration impulse: the same
+// Dirac-delta reasoning as `jerk_impulses`, one derivative order down. The C1
+// Hermite lowering is supposed to match velocity at every joint, so a nonzero
+// one here is a real discontinuity the position/velocity graphs render as a
+// sharp corner rather than a smooth curve -- surface it the same way.
+fn accel_impulses(
+    xp: &[Vec<f64>],
+    yp: &[Vec<f64>],
+    t_end: f64,
+    v_peak: f64,
+) -> (Vec<f64>, Vec<f64>) {
+    discontinuities(xp, yp, t_end, v_peak, |p, t| eval_piece(p, t).1)
+}
+
+// Shared boundary-step detector: samples `derivative_at` on both sides of
+// every piece boundary and reports the ones whose jump clears a relative
+// floor of `scale_peak` (the peak value of the derivative one order up, e.g.
+// the acceleration peak when comparing jerk steps).
+fn discontinuities(
+    xp: &[Vec<f64>],
+    yp: &[Vec<f64>],
+    t_end: f64,
+    scale_peak: f64,
+    derivative_at: impl Fn(&[f64], f64) -> f64,
+) -> (Vec<f64>, Vec<f64>) {
+    if xp.is_empty() || yp.is_empty() || t_end <= 0.0 {
+        return (Vec::new(), Vec::new());
+    }
+    let mut bounds: Vec<f64> = vec![0.0, t_end];
+    for p in xp.iter().chain(yp.iter()) {
+        for edge in [p[0], p[1]] {
+            if edge > 0.0 && edge < t_end {
+                bounds.push(edge);
+            }
+        }
+    }
+    bounds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    bounds.dedup();
+
+    let floor = (scale_peak * 1e-3).max(1e-9);
+    let (mut times, mut mags) = (Vec::new(), Vec::new());
+    for i in 1..bounds.len().saturating_sub(1) {
+        let b = bounds[i];
+        let lo = 0.5 * (bounds[i - 1] + b);
+        let hi = 0.5 * (b + bounds[i + 1]);
+        let dxl = derivative_at(&xp[piece_at(xp, lo)], b);
+        let dxr = derivative_at(&xp[piece_at(xp, hi)], b);
+        let dyl = derivative_at(&yp[piece_at(yp, lo)], b);
+        let dyr = derivative_at(&yp[piece_at(yp, hi)], b);
+        let d = libm::hypot(dxr - dxl, dyr - dyl);
+        if d > floor {
+            times.push(b);
+            mags.push(d);
+        }
+    }
+    (times, mags)
+}
+
+fn build_time_series(snap: &Snapshot) -> TimeSeries {
+    if let (Some(xp), Some(yp)) = (&snap.traj_x_pieces, &snap.traj_y_pieces) {
+        let t_end = snap.traj_t_end.unwrap_or(0.0);
+        let empty: Vec<Vec<f64>> = Vec::new();
+        let zp = snap.traj_z_pieces.as_ref().unwrap_or(&empty);
+        let ep = snap.traj_e_pieces.as_ref().unwrap_or(&empty);
+        return time_series_from_pieces(xp, yp, zp, ep, t_end);
+    }
+    time_series_from_position(snap)
+}
+
+fn time_series_from_position(snap: &Snapshot) -> TimeSeries {
+    let (x_raw, y_raw) = toolhead_position(snap);
+    let v_raw: Vec<f64> = snap.kin_v.clone().unwrap_or_default();
+
+    if x_raw.is_empty() || v_raw.is_empty() {
+        return TimeSeries::zeroed(1);
+    }
+
+    // Filter distinct points
+    let mut x = Vec::with_capacity(x_raw.len());
+    let mut y = Vec::with_capacity(y_raw.len());
+    let mut v = Vec::with_capacity(v_raw.len());
+    x.push(x_raw[0]);
+    y.push(y_raw[0]);
+    v.push(v_raw[0]);
+    for i in 1..x_raw.len() {
+        let dx = x_raw[i] - x_raw[i - 1];
+        let dy = y_raw[i] - y_raw[i - 1];
+        if libm::hypot(dx, dy) > 1e-9 {
+            x.push(x_raw[i]);
+            y.push(y_raw[i]);
+            v.push(v_raw[i]);
+        }
+    }
+
+    let n = x.len();
+    if n < 2 {
+        let mut ts = TimeSeries::zeroed(n);
+        ts.kin_x = x;
+        ts.kin_y = y;
+        return ts;
+    }
+
+    // Build time axis: dt = ds / v_avg
+    let v_safe: Vec<f64> = v.iter().map(|vi| vi.max(1e-6)).collect();
+    let mut ds = Vec::with_capacity(n - 1);
+    for i in 0..n - 1 {
+        let dx = x[i + 1] - x[i];
+        let dy = y[i + 1] - y[i];
+        ds.push(libm::hypot(dx, dy));
+    }
+
+    let mut v_avg = Vec::with_capacity(n - 1);
+    for i in 0..n - 1 {
+        v_avg.push(0.5 * (v_safe[i] + v_safe[i + 1]));
+    }
+
+    let mut t = vec![0.0; n];
+    let mut cumsum = 0.0;
+    for i in 0..n - 1 {
+        let dt = if v_avg[i] > 1e-30 {
+            ds[i] / v_avg[i]
+        } else {
+            0.0
+        };
+        cumsum += dt;
+        t[i + 1] = cumsum;
+    }
+
+    // Derivatives
+    let vx = gradient(&x, &t);
+    let vy = gradient(&y, &t);
+    let v_scalar: Vec<f64> = vx
+        .iter()
+        .zip(&vy)
+        .map(|(vx, vy)| libm::hypot(*vx, *vy))
+        .collect();
+
+    let ax = gradient(&vx, &t);
+    let ay = gradient(&vy, &t);
+    let a_scalar = scalar_derivative(&ax, &ay);
+
+    let jx = gradient(&ax, &t);
+    let jy = gradient(&ay, &t);
+    let j_scalar = scalar_derivative(&jx, &jy);
+
+    let zeros = || vec![0.0; n];
+    TimeSeries {
+        t,
+        kin_x: x,
+        kin_y: y,
+        vx,
+        vy,
+        vz: zeros(),
+        ve: zeros(),
+        v_scalar,
+        ax,
+        ay,
+        az: zeros(),
+        ae: zeros(),
+        a_scalar,
+        jx,
+        jy,
+        jz: zeros(),
+        je: zeros(),
+        j_scalar,
+    }
+}
+
+// -- WASM export -------------------------------------------------------------
+
+#[wasm_bindgen]
+pub struct TrajectoryData {
+    raw_x: Vec<f64>,
+    raw_y: Vec<f64>,
+    kin_x: Vec<f64>,
+    kin_y: Vec<f64>,
+    kappa: Vec<f64>,
+    curvature_class: Vec<f64>,
+    t: Vec<f64>,
+    vx: Vec<f64>,
+    vy: Vec<f64>,
+    vz: Vec<f64>,
+    ve: Vec<f64>,
+    v_scalar: Vec<f64>,
+    ax: Vec<f64>,
+    ay: Vec<f64>,
+    az: Vec<f64>,
+    ae: Vec<f64>,
+    a_scalar: Vec<f64>,
+    jx: Vec<f64>,
+    jy: Vec<f64>,
+    jz: Vec<f64>,
+    je: Vec<f64>,
+    j_scalar: Vec<f64>,
+    a_tang: Vec<f64>,
+    a_cent: Vec<f64>,
+    j_tang: Vec<f64>,
+    j_cent: Vec<f64>,
+    toolhead: ToolheadSeries,
+    jerk_impulse_t: Vec<f64>,
+    jerk_impulse_mag: Vec<f64>,
+    accel_impulse_t: Vec<f64>,
+    accel_impulse_mag: Vec<f64>,
+    seam_max_dp: Vec<f64>,
+    seam_max_dv: Vec<f64>,
+    seam_max_da: Vec<f64>,
+    worst_seams_json: String,
+    traversal_time_s: f64,
+}
+
+#[wasm_bindgen]
+impl TrajectoryData {
+    #[wasm_bindgen(constructor)]
+    pub fn from_json(json: &str) -> Result<TrajectoryData, JsValue> {
+        let snap: Snapshot =
+            serde_json::from_str(json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let ts = build_time_series(&snap);
+        let (kappa, classes) = match (&snap.traj_x_pieces, &snap.traj_y_pieces) {
+            (Some(xp), Some(yp)) => curvature_series(&ts.t, xp, yp),
+            _ => (vec![0.0; ts.t.len()], vec![CurvatureClass::Gap; ts.t.len()]),
+        };
+        let curvature_class: Vec<f64> = classes.iter().map(|c| c.code()).collect();
+
+        let a_peak = ts.a_scalar.iter().copied().fold(0.0_f64, f64::max);
+        let v_peak = ts.v_scalar.iter().copied().fold(0.0_f64, f64::max);
+        let (jerk_impulse_t, jerk_impulse_mag, accel_impulse_t, accel_impulse_mag) =
+            match (&snap.traj_x_pieces, &snap.traj_y_pieces) {
+                (Some(xp), Some(yp)) => {
+                    let t_end = snap.traj_t_end.unwrap_or(0.0);
+                    let (jt, jm) = jerk_impulses(xp, yp, t_end, a_peak);
+                    let (at, am) = accel_impulses(xp, yp, t_end, v_peak);
+                    (jt, jm, at, am)
+                }
+                _ => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            };
+
+        let toolhead = match (&snap.toolhead_x_pieces, &snap.toolhead_y_pieces) {
+            (Some(xp), Some(yp)) => toolhead_series(&ts.t, xp, yp),
+            (None, None) => ToolheadSeries::default(),
+            _ => {
+                return Err(JsValue::from_str(
+                    "snapshot carries only one of toolhead_x_pieces/toolhead_y_pieces",
+                ));
+            }
+        };
+
+        let seam_axis = |v: &Option<Vec<f64>>| v.clone().unwrap_or_default();
+
+        let (a_tang, a_cent) = frenet_components(&ts.vx, &ts.vy, &ts.ax, &ts.ay);
+        let (j_tang, j_cent) = frenet_components(&ts.vx, &ts.vy, &ts.jx, &ts.jy);
+
+        Ok(TrajectoryData {
+            raw_x: snap.raw_x,
+            raw_y: snap.raw_y,
+            kin_x: ts.kin_x,
+            kin_y: ts.kin_y,
+            kappa,
+            curvature_class,
+            t: ts.t,
+            vx: ts.vx,
+            vy: ts.vy,
+            vz: ts.vz,
+            ve: ts.ve,
+            v_scalar: ts.v_scalar,
+            ax: ts.ax,
+            ay: ts.ay,
+            az: ts.az,
+            ae: ts.ae,
+            a_scalar: ts.a_scalar,
+            jx: ts.jx,
+            jy: ts.jy,
+            jz: ts.jz,
+            je: ts.je,
+            j_scalar: ts.j_scalar,
+            a_tang,
+            a_cent,
+            j_tang,
+            j_cent,
+            toolhead,
+            jerk_impulse_t,
+            jerk_impulse_mag,
+            accel_impulse_t,
+            accel_impulse_mag,
+            seam_max_dp: seam_axis(&snap.seam_max_dp),
+            seam_max_dv: seam_axis(&snap.seam_max_dv),
+            seam_max_da: seam_axis(&snap.seam_max_da),
+            worst_seams_json: snap
+                .worst_seams
+                .as_ref()
+                .and_then(|w| serde_json::to_string(w).ok())
+                .unwrap_or_else(|| "[]".to_string()),
+            traversal_time_s: snap.traversal_time_s,
+        })
+    }
+
+    // Path getters
+    pub fn raw_x(&self) -> Float64Array {
+        Float64Array::from(&self.raw_x[..])
+    }
+    pub fn raw_y(&self) -> Float64Array {
+        Float64Array::from(&self.raw_y[..])
+    }
+    pub fn kin_x(&self) -> Float64Array {
+        Float64Array::from(&self.kin_x[..])
+    }
+    pub fn kin_y(&self) -> Float64Array {
+        Float64Array::from(&self.kin_y[..])
+    }
+
+    // Time-series getters
+    pub fn t(&self) -> Float64Array {
+        Float64Array::from(&self.t[..])
+    }
+    pub fn vx(&self) -> Float64Array {
+        Float64Array::from(&self.vx[..])
+    }
+    pub fn vy(&self) -> Float64Array {
+        Float64Array::from(&self.vy[..])
+    }
+    pub fn v_scalar(&self) -> Float64Array {
+        Float64Array::from(&self.v_scalar[..])
+    }
+    pub fn ax(&self) -> Float64Array {
+        Float64Array::from(&self.ax[..])
+    }
+    pub fn ay(&self) -> Float64Array {
+        Float64Array::from(&self.ay[..])
+    }
+    pub fn a_scalar(&self) -> Float64Array {
+        Float64Array::from(&self.a_scalar[..])
+    }
+    pub fn jx(&self) -> Float64Array {
+        Float64Array::from(&self.jx[..])
+    }
+    pub fn jy(&self) -> Float64Array {
+        Float64Array::from(&self.jy[..])
+    }
+    pub fn j_scalar(&self) -> Float64Array {
+        Float64Array::from(&self.j_scalar[..])
+    }
+
+    // Times and |Δaccel| of the jerk impulses at acceleration discontinuities.
+    pub fn jerk_impulse_t(&self) -> Float64Array {
+        Float64Array::from(&self.jerk_impulse_t[..])
+    }
+    pub fn jerk_impulse_mag(&self) -> Float64Array {
+        Float64Array::from(&self.jerk_impulse_mag[..])
+    }
+
+    // Times and |Δvel| of the accel impulses at velocity discontinuities.
+    pub fn accel_impulse_t(&self) -> Float64Array {
+        Float64Array::from(&self.accel_impulse_t[..])
+    }
+    pub fn accel_impulse_mag(&self) -> Float64Array {
+        Float64Array::from(&self.accel_impulse_mag[..])
+    }
+
+    // Z and E lane derivatives (axes 2 and 3). Empty on legacy X/Y baselines.
+    pub fn vz(&self) -> Float64Array {
+        Float64Array::from(&self.vz[..])
+    }
+    pub fn ve(&self) -> Float64Array {
+        Float64Array::from(&self.ve[..])
+    }
+    pub fn az(&self) -> Float64Array {
+        Float64Array::from(&self.az[..])
+    }
+    pub fn ae(&self) -> Float64Array {
+        Float64Array::from(&self.ae[..])
+    }
+    pub fn jz(&self) -> Float64Array {
+        Float64Array::from(&self.jz[..])
+    }
+    pub fn je(&self) -> Float64Array {
+        Float64Array::from(&self.je[..])
+    }
+
+    // XY acceleration and jerk projected onto the velocity tangent/normal
+    // frame: tangential (signed) and centripetal/normal (magnitude).
+    pub fn a_tang(&self) -> Float64Array {
+        Float64Array::from(&self.a_tang[..])
+    }
+    pub fn a_cent(&self) -> Float64Array {
+        Float64Array::from(&self.a_cent[..])
+    }
+    pub fn j_tang(&self) -> Float64Array {
+        Float64Array::from(&self.j_tang[..])
+    }
+    pub fn j_cent(&self) -> Float64Array {
+        Float64Array::from(&self.j_cent[..])
+    }
+
+    // The toolhead signal on the same grid as t(). All empty — and
+    // has_toolhead() false — when the snapshot's motor command IS the
+    // toolhead signal (no motor-side derivative-gain stage).
+    pub fn has_toolhead(&self) -> bool {
+        !self.toolhead.x.is_empty()
+    }
+    pub fn th_x(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.x[..])
+    }
+    pub fn th_y(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.y[..])
+    }
+    pub fn th_vx(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.vx[..])
+    }
+    pub fn th_vy(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.vy[..])
+    }
+    pub fn th_ax(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.ax[..])
+    }
+    pub fn th_ay(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.ay[..])
+    }
+    pub fn th_jx(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.jx[..])
+    }
+    pub fn th_jy(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.jy[..])
+    }
+    pub fn th_v_scalar(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.v_scalar[..])
+    }
+    pub fn th_a_scalar(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.a_scalar[..])
+    }
+    pub fn th_j_scalar(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.j_scalar[..])
+    }
+    pub fn th_a_tang(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.a_tang[..])
+    }
+    pub fn th_a_cent(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.a_cent[..])
+    }
+    pub fn th_j_tang(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.j_tang[..])
+    }
+    pub fn th_j_cent(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.j_cent[..])
+    }
+    pub fn th_kappa(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.kappa[..])
+    }
+
+    // Per-axis (x, y, z, e) worst seam continuity jumps. Empty on baselines
+    // recorded before seam metrics existed.
+    pub fn seam_max_dp(&self) -> Float64Array {
+        Float64Array::from(&self.seam_max_dp[..])
+    }
+    pub fn seam_max_dv(&self) -> Float64Array {
+        Float64Array::from(&self.seam_max_dv[..])
+    }
+    pub fn seam_max_da(&self) -> Float64Array {
+        Float64Array::from(&self.seam_max_da[..])
+    }
+
+    // The top offending seams as a JSON array of {t, axis, dp, dv, da}.
+    pub fn worst_seams_json(&self) -> String {
+        self.worst_seams_json.clone()
+    }
+
+    // Metadata
+    pub fn traversal_time(&self) -> f64 {
+        self.traversal_time_s
+    }
+    pub fn point_count(&self) -> usize {
+        self.t.len()
+    }
+
+    // Signed curvature per sample, same grid as t()/vx()/etc. -- the
+    // curvature-vs-time graph.
+    pub fn kappa(&self) -> Float64Array {
+        Float64Array::from(&self.kappa[..])
+    }
+
+    // Curvature-behavior class per sample as an integer code: 0=Zero,
+    // 1=Constant, 2=Linear, 3=Other, 4=Cusp, 5=Gap. Same grid as kappa().
+    pub fn curvature_class(&self) -> Float64Array {
+        Float64Array::from(&self.curvature_class[..])
+    }
+}

@@ -66,7 +66,11 @@ class pca9685_pwm:
         self._is_enable = not not self._start_value
 
     def _build_config(self):
-        self._pwm_max = self._mcu.get_constant_float("PCA9685_MAX")
+        self._pwm_max = (
+            self._mcu.get_command_channel()
+            .get_msgparser()
+            .get_constant_float("PCA9685_MAX")
+        )
         cycle_ticks = self._mcu.seconds_to_clock(self._cycle_time)
         self._mcu.request_move_queue_slot()
         self._oid = self._mcu.create_oid()
@@ -84,13 +88,12 @@ class pca9685_pwm:
                 self._mcu.seconds_to_clock(self._max_duration),
             )
         )
-        cmd_queue = self._mcu.alloc_command_queue()
         self._set_cmd = self._mcu.lookup_command(
-            "queue_pca9685_out oid=%c clock=%u value=%hu", cq=cmd_queue
+            "queue_pca9685_out oid=%c clock=%u value=%hu"
         )
 
     def set_pwm(self, print_time, value):
-        clock = self._mcu.print_time_to_clock(print_time)
+        clock = self._mcu.get_clocksync().print_time_to_clock(print_time)
         if self._invert:
             value = 1.0 - value
         value = int(max(0.0, min(1.0, value)) * self._pwm_max + 0.5)
@@ -301,7 +304,7 @@ class Replicape:
             sr = self.sr_enabled
         else:
             return
-        clock = self.host_mcu.print_time_to_clock(print_time)
+        clock = self.host_mcu.get_clocksync().print_time_to_clock(print_time)
         self.sr_spi.spi_send(sr, minclock=clock, reqclock=clock)
 
     def setup_pin(self, pin_type, pin_params):

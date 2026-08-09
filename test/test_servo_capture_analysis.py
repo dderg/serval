@@ -1,0 +1,1169 @@
+import importlib.util
+import json
+import os
+import struct
+
+import numpy as np
+import pytest
+
+_SCRIPT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "scripts",
+    "servo_capture.py",
+)
+_spec = importlib.util.spec_from_file_location("servo_capture_script", _SCRIPT)
+sc = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(sc)
+
+FLAG_TORQUE_ENABLED = 1
+FLAG_MOTION_ACTIVE = 2
+DECAY_AMP_COUNTS = 150.0
+DECAY_TAU_S = 0.05
+SATURATED_TORQUE = 950
+
+CHANNELS = [
+    {"name": "cycle_index", "dtype": "u64", "offset": 0},
+    {"name": "flags", "dtype": "u8", "offset": 8},
+    {"name": "target_counts", "dtype": "i32", "offset": 9},
+    {"name": "position_demand", "dtype": "i32", "offset": 13},
+    {"name": "position_actual", "dtype": "i32", "offset": 17},
+    {"name": "following_error", "dtype": "i32", "offset": 21},
+    {"name": "torque_actual", "dtype": "i16", "offset": 25},
+    {"name": "statusword", "dtype": "u16", "offset": 27},
+    {"name": "error_code", "dtype": "u16", "offset": 29},
+]
+
+
+def synth_capture(tmp_path, n=4000, move=(1000, 2000), freq_hz=80.0):
+    """1 kHz capture: flat, then a move with an 80 Hz error tone, then a
+    post-move exponential decay (settling), then flat."""
+    fs = 1000.0
+    t = np.arange(n) / fs
+    ferr = np.zeros(n)
+    ms, me = move
+    ferr[ms:me] = 200.0 * np.sin(2 * np.pi * freq_hz * t[ms:me])
+    decay = DECAY_AMP_COUNTS * np.exp(-(t[me:] - t[me]) / DECAY_TAU_S)
+    ferr[me:] = decay * np.cos(2 * np.pi * 30.0 * (t[me:] - t[me]))
+    flags = np.zeros(n, dtype=np.uint8)
+    flags[:] = FLAG_TORQUE_ENABLED
+    flags[ms:me] |= FLAG_MOTION_ACTIVE
+    target = np.cumsum(np.where(flags & FLAG_MOTION_ACTIVE, 100, 0)).astype(
+        np.int64
+    )
+    torque = np.zeros(n, dtype=np.int16)
+    torque[ms:me] = SATURATED_TORQUE
+
+    header = {
+        "version": 1,
+        "cycle_ns": 1_000_000,
+        "record_size": 31,
+        "started_utc": "2026-06-10T12:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [{"name": "x", "counts_per_mm": 3276.8}],
+        "channels": CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "synth.scap")
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+        for i in range(n):
+            fe = int(round(ferr[i]))
+            tgt = int(target[i])
+            f.write(
+                struct.pack(
+                    "<QBiiiihHH",
+                    i,
+                    int(flags[i]),
+                    tgt,
+                    tgt,
+                    tgt - fe,
+                    fe,
+                    int(torque[i]),
+                    0x0627,
+                    0,
+                )
+            )
+    return path, ferr
+
+
+def test_load_capture_reads_header_and_records(tmp_path):
+    path, _ = synth_capture(tmp_path)
+    header, data, _ = sc.load_capture(path)
+    assert header["version"] == 1
+    assert len(data) == 4000
+    assert data["cycle_index"][0] == 0
+    assert data["cycle_index"][-1] == 3999
+
+
+def test_refuses_failed_capture(tmp_path):
+    path, _ = synth_capture(tmp_path)
+    failed = path.replace(".scap", ".failed.scap")
+    os.rename(path, failed)
+    with pytest.raises(SystemExit):
+        sc.load_capture(failed)
+
+
+def test_truncated_file_parses_to_last_whole_record(tmp_path):
+    path, _ = synth_capture(tmp_path)
+    partial_last_record = os.path.getsize(path) - 17
+    with open(path, "r+b") as f:
+        f.truncate(partial_last_record)
+    _, data, _ = sc.load_capture(path)
+    assert len(data) == 3999
+
+
+def test_motion_segments_found(tmp_path):
+    path, _ = synth_capture(tmp_path)
+    _, data, _ = sc.load_capture(path)
+    segs = sc.motion_segments(data["flags"])
+    assert segs == [(1000, 2000)]
+
+
+def test_following_error_rms_matches_numpy(tmp_path):
+    path, ferr = synth_capture(tmp_path)
+    _, data, _ = sc.load_capture(path)
+    m = sc.compute_metrics(data, settle_band=10, torque_limit=900)
+    settle_samples = int(round(m["moves"][0]["settle_ms"]))
+    window = np.round(ferr[1000 : 2000 + settle_samples])
+    expected_rms = float(np.sqrt(np.mean(window**2)))
+    assert m["moves"][0]["ferr_rms"] == pytest.approx(expected_rms, rel=0.01)
+    assert m["moves"][0]["ferr_peak"] == pytest.approx(200.0, rel=0.02)
+
+
+def _metric_data(target, ferr):
+    data = np.zeros(
+        len(target),
+        dtype=[
+            ("target_counts", "<i8"),
+            ("position_actual", "<i8"),
+            ("following_error", "<i8"),
+            ("torque_actual", "<i8"),
+            ("flags", "u1"),
+        ],
+    )
+    data["target_counts"] = target
+    data["following_error"] = ferr
+    data["position_actual"] = target - ferr
+    data["flags"] = FLAG_MOTION_ACTIVE
+    return data
+
+
+def test_move_direction_and_signed_mean_use_only_moving_window():
+    n = 220
+    step = np.zeros(n, dtype=np.int64)
+    step[20:60] = 1
+    step[100:140] = -1
+    target = np.cumsum(step)
+    ferr = np.zeros(n, dtype=np.int64)
+    forward_lead = slice(18, 20)
+    forward_move = slice(20, 60)
+    forward_settle = slice(60, 100)
+    reverse_lead = slice(98, 100)
+    reverse_move = slice(100, 140)
+    reverse_settle = slice(140, 150)
+    ferr[forward_lead] = 1000
+    ferr[forward_move] = 12
+    ferr[forward_settle] = 600
+    ferr[reverse_lead] = -1000
+    ferr[reverse_move] = -8
+    ferr[reverse_settle] = -700
+
+    metrics = sc.compute_metrics(
+        _metric_data(target, ferr), 50, 1400, ff_lead_samples=2
+    )
+    assert [move["direction"] for move in metrics["moves"]] == [1, -1]
+    assert [move["ferr_mean_moving"] for move in metrics["moves"]] == [
+        12.0,
+        -8.0,
+    ]
+    assert [move["ferr_peak"] for move in metrics["moves"]] == [1000.0, 1000.0]
+
+
+def test_merged_zero_net_move_has_zero_direction():
+    n = 200
+    step = np.zeros(n, dtype=np.int64)
+    step[20:60] = 1
+    step[70:110] = -1
+    target = np.cumsum(step)
+    ferr = np.full(n, 3, dtype=np.int64)
+
+    metrics = sc.compute_metrics(_metric_data(target, ferr), 50, 1400)
+    assert len(metrics["moves"]) == 1
+    assert metrics["moves"][0]["direction"] == 0
+    assert metrics["moves"][0]["ferr_mean_moving"] == 3.0
+
+
+def test_resonance_peak_detected_at_80hz(tmp_path):
+    path, _ = synth_capture(tmp_path)
+    _, data, _ = sc.load_capture(path)
+    segs = sc.motion_segments(data["flags"])
+    freqs, psd = sc.moving_psd(data, segs, fs=1000.0)
+    peaks = sc.top_peaks(freqs, psd, count=3)
+    assert abs(peaks[0][0] - 80.0) < 2.5, "dominant peak at the injected 80 Hz"
+
+
+def test_settling_time_in_expected_range(tmp_path):
+    path, _ = synth_capture(tmp_path)
+    _, data, _ = sc.load_capture(path)
+    settle_band = 10
+    m = sc.compute_metrics(data, settle_band=settle_band, torque_limit=900)
+    decay_crosses_band_ms = (
+        1000.0 * DECAY_TAU_S * np.log(DECAY_AMP_COUNTS / settle_band)
+    )
+    assert (
+        0.6 * decay_crosses_band_ms
+        <= m["moves"][0]["settle_ms"]
+        <= 2.2 * decay_crosses_band_ms
+    )
+
+
+def test_torque_saturation_fraction(tmp_path):
+    path, _ = synth_capture(tmp_path)
+    _, data, _ = sc.load_capture(path)
+    m = sc.compute_metrics(data, settle_band=10, torque_limit=900)
+    assert m["torque_saturation_pct"] == pytest.approx(25.0, abs=1.0)
+
+
+def test_drive_vs_recomputed_error_consistent(tmp_path):
+    path, _ = synth_capture(tmp_path)
+    _, data, _ = sc.load_capture(path)
+    m = sc.compute_metrics(data, settle_band=10, torque_limit=900)
+    assert m["ferr_crosscheck_max"] == 0, "synth file must be self-consistent"
+
+
+def _write_header_only(tmp_path):
+    header = {
+        "version": 1,
+        "cycle_ns": 1_000_000,
+        "record_size": 31,
+        "started_utc": "2026-06-10T12:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [{"name": "x", "counts_per_mm": 3276.8}],
+        "channels": CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "empty.scap")
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+    return path
+
+
+def test_empty_capture_loads_zero_records(tmp_path):
+    path = _write_header_only(tmp_path)
+    header, data, _ = sc.load_capture(path)
+    assert len(data) == 0
+
+
+def test_empty_capture_compute_metrics_raises(tmp_path):
+    path = _write_header_only(tmp_path)
+    _, data, _ = sc.load_capture(path)
+    with pytest.raises(SystemExit):
+        sc.compute_metrics(data, settle_band=10, torque_limit=900)
+
+
+def test_load_capture_no_drives_raises(tmp_path):
+    header = {
+        "version": 1,
+        "cycle_ns": 1_000_000,
+        "record_size": 31,
+        "started_utc": "2026-06-10T12:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [],
+        "channels": CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "nodrives.scap")
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+    with pytest.raises(SystemExit):
+        sc.load_capture(path)
+
+
+MOVE0_WITH_DECAYING_ERROR = slice(1000, 1500)
+DWELL_BETWEEN_MOVES = slice(1500, 1530)
+MOVE1_WITH_PERSISTENT_ERROR = slice(1530, 2000)
+
+
+def synth_two_move_capture(tmp_path):
+    n = 3000
+    fs = 1000.0
+    t = np.arange(n) / fs
+    m0, dwell, m1 = (
+        MOVE0_WITH_DECAYING_ERROR,
+        DWELL_BETWEEN_MOVES,
+        MOVE1_WITH_PERSISTENT_ERROR,
+    )
+
+    ferr = np.zeros(n)
+    ferr[m0] = 80.0 * np.sin(2 * np.pi * 40.0 * t[m0])
+    ferr[dwell] = 5.0 * np.exp(-np.arange(dwell.stop - dwell.start) / 5.0)
+    ferr[m1] = 500.0
+
+    flags = np.zeros(n, dtype=np.uint8)
+    flags[:] = FLAG_TORQUE_ENABLED
+    flags[m0] |= FLAG_MOTION_ACTIVE
+    flags[m1] |= FLAG_MOTION_ACTIVE
+
+    target = np.cumsum(np.where(flags & 2, 100, 0)).astype(np.int64)
+    torque = np.zeros(n, dtype=np.int16)
+
+    header = {
+        "version": 1,
+        "cycle_ns": 1_000_000,
+        "record_size": 31,
+        "started_utc": "2026-06-10T12:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [{"name": "x", "counts_per_mm": 3276.8}],
+        "channels": CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "two_move.scap")
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+        for i in range(n):
+            fe = int(round(ferr[i]))
+            tgt = int(target[i])
+            f.write(
+                struct.pack(
+                    "<QBiiiihHH",
+                    i,
+                    int(flags[i]),
+                    tgt,
+                    tgt,
+                    tgt - fe,
+                    fe,
+                    int(torque[i]),
+                    0x0627,
+                    0,
+                )
+            )
+    return path
+
+
+def test_per_move_post_window_not_contaminated(tmp_path):
+    path = synth_two_move_capture(tmp_path)
+    _, data, _ = sc.load_capture(path)
+    m = sc.compute_metrics(data, settle_band=50, torque_limit=900)
+    assert len(m["moves"]) == 2
+    move0 = m["moves"][0]
+    assert move0["overshoot"] < 50, (
+        "move 0 overshoot contaminated by move 1 error: %s" % move0["overshoot"]
+    )
+    dwell_ms_at_1khz = DWELL_BETWEEN_MOVES.stop - DWELL_BETWEEN_MOVES.start
+    if move0["settle_ms"] is not None:
+        assert move0["settle_ms"] <= dwell_ms_at_1khz
+
+
+MOVE_AT_500HZ = slice(200, 400)
+
+
+def synth_500hz_capture(tmp_path):
+    n = 1000
+    fs = 500.0
+    t = np.arange(n) / fs
+    mv = MOVE_AT_500HZ
+
+    ferr = np.zeros(n)
+    ferr[mv] = 100.0 * np.sin(2 * np.pi * 20.0 * t[mv])
+
+    flags = np.zeros(n, dtype=np.uint8)
+    flags[:] = FLAG_TORQUE_ENABLED
+    flags[mv] |= FLAG_MOTION_ACTIVE
+
+    target = np.cumsum(np.where(flags & 2, 100, 0)).astype(np.int64)
+    torque = np.zeros(n, dtype=np.int16)
+
+    header = {
+        "version": 1,
+        "cycle_ns": 2_000_000,
+        "record_size": 31,
+        "started_utc": "2026-06-10T12:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [{"name": "x", "counts_per_mm": 3276.8}],
+        "channels": CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "500hz.scap")
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+        for i in range(n):
+            fe = int(round(ferr[i]))
+            tgt = int(target[i])
+            f.write(
+                struct.pack(
+                    "<QBiiiihHH",
+                    i,
+                    int(flags[i]),
+                    tgt,
+                    tgt,
+                    tgt - fe,
+                    fe,
+                    int(torque[i]),
+                    0x0627,
+                    0,
+                )
+            )
+    return path
+
+
+def test_fs_aware_ms_at_500hz(tmp_path):
+    path = synth_500hz_capture(tmp_path)
+    _, data, _ = sc.load_capture(path)
+    fs = 1e9 / 2_000_000
+    m = sc.compute_metrics(data, settle_band=10, torque_limit=900, fs=fs)
+    move = m["moves"][0]
+    ms_per_sample = 1000.0 / fs
+    assert move["start_ms"] == pytest.approx(
+        MOVE_AT_500HZ.start * ms_per_sample
+    )
+    assert move["end_ms"] == pytest.approx(MOVE_AT_500HZ.stop * ms_per_sample)
+
+
+def test_fs_1khz_values_unchanged(tmp_path):
+    """At fs=1000 Hz, sample index == ms — existing numeric expectations unchanged."""
+    path, _ = synth_capture(tmp_path)
+    _, data, _ = sc.load_capture(path)
+    m_default = sc.compute_metrics(data, settle_band=10, torque_limit=900)
+    m_explicit = sc.compute_metrics(
+        data, settle_band=10, torque_limit=900, fs=1000.0
+    )
+    assert (
+        m_default["moves"][0]["start_ms"] == m_explicit["moves"][0]["start_ms"]
+    )
+    assert m_default["moves"][0]["end_ms"] == m_explicit["moves"][0]["end_ms"]
+    assert (
+        m_default["moves"][0]["settle_ms"]
+        == m_explicit["moves"][0]["settle_ms"]
+    )
+    assert m_default["moves"][0]["start_ms"] == 1000.0
+    assert m_default["moves"][0]["end_ms"] == 2000.0
+
+
+def test_load_capture_offset_mismatch_raises(tmp_path):
+    channels_with_wrong_flags_offset = [dict(c) for c in CHANNELS]
+    channels_with_wrong_flags_offset[1] = dict(
+        channels_with_wrong_flags_offset[1], offset=999
+    )
+    header = {
+        "version": 1,
+        "cycle_ns": 1_000_000,
+        "record_size": 31,
+        "started_utc": "2026-06-10T12:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [{"name": "x", "counts_per_mm": 3276.8}],
+        "channels": channels_with_wrong_flags_offset,
+    }
+    path = os.path.join(str(tmp_path), "bad_offset.scap")
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+    with pytest.raises(SystemExit):
+        sc.load_capture(path)
+
+
+def test_main_requires_exactly_one_capture_source():
+    with pytest.raises(SystemExit, match="not both or neither"):
+        sc.main([])
+    with pytest.raises(SystemExit, match="not both or neither"):
+        sc.main(["/tmp/x.scap", "--name", "x"])
+
+
+def test_resolve_newest_capture_picks_latest(tmp_path):
+    for ts in ("20260611_210000", "20260611_230000"):
+        with open(tmp_path / ("track_%s.scap" % ts), "w"):
+            pass
+    newest = sc.resolve_newest_capture(str(tmp_path), "track")
+    assert newest.endswith("track_20260611_230000.scap")
+
+
+def test_resolve_newest_capture_missing_fails_loudly(tmp_path):
+    with pytest.raises(SystemExit, match="track"):
+        sc.resolve_newest_capture(str(tmp_path), "track")
+
+
+def _ext_capture(tmp_path, vel_offsets, tq_offsets, moving_mask):
+    channels = CHANNELS + [
+        {"name": "velocity_offset", "dtype": "i32", "offset": 31},
+        {"name": "torque_offset", "dtype": "i16", "offset": 35},
+    ]
+    header = {
+        "version": 1,
+        "cycle_ns": 1_000_000,
+        "record_size": 37,
+        "started_utc": "2026-06-12T12:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [{"name": "x", "counts_per_mm": 3276.8}],
+        "channels": channels,
+    }
+    path = os.path.join(str(tmp_path), "ext.scap")
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+        for i, (vo, tq, moving) in enumerate(
+            zip(vel_offsets, tq_offsets, moving_mask)
+        ):
+            flags = FLAG_TORQUE_ENABLED | (FLAG_MOTION_ACTIVE if moving else 0)
+            f.write(
+                struct.pack(
+                    "<QBiiiihHHih", i, flags, i, i, i, 0, 0, 0x0627, 0, vo, tq
+                )
+            )
+    return path
+
+
+def test_ff_offset_metrics_cover_only_motion_samples(tmp_path):
+    path = _ext_capture(
+        tmp_path,
+        vel_offsets=[999999, -327680, 100, 0],
+        tq_offsets=[500, -120, 3, 0],
+        moving_mask=[False, True, True, False],
+    )
+    _, data, _ = sc.load_capture(path)
+    m = sc.compute_metrics(data, 50, 900)
+    assert m["ff_velocity_offset_max"] == 327680
+    assert m["ff_torque_offset_max"] == 120
+
+
+def test_ff_offset_metrics_absent_for_legacy_captures(tmp_path):
+    path, _ = synth_capture(tmp_path)
+    _, data, _ = sc.load_capture(path)
+    m = sc.compute_metrics(data, 50, 900)
+    assert "ff_velocity_offset_max" not in m
+
+
+DRIVE_CHANNELS = [
+    {"name": "cycle_index", "dtype": "u64", "offset": 0},
+    {"name": "flags", "dtype": "u8", "offset": 8},
+    {"name": "target_counts", "dtype": "i32", "offset": 9},
+    {"name": "position_actual", "dtype": "i32", "offset": 13},
+    {"name": "following_error", "dtype": "i32", "offset": 17},
+    {"name": "torque_actual", "dtype": "i16", "offset": 21},
+    {"name": "statusword", "dtype": "u16", "offset": 23},
+    {"name": "error_code", "dtype": "u16", "offset": 25},
+    {"name": "velocity_offset", "dtype": "i32", "offset": 27},
+    {"name": "torque_offset", "dtype": "i16", "offset": 31},
+    {"name": "velocity_actual", "dtype": "i32", "offset": 33},
+]
+
+
+def synth_two_drive_capture(tmp_path, n=200):
+    header = {
+        "version": 1,
+        "cycle_ns": 1_000_000,
+        "record_size": 9 + 2 * 28,
+        "started_utc": "2026-06-12T12:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [
+            {"name": "motor_a", "counts_per_mm": 1000.0},
+            {"name": "motor_b", "counts_per_mm": 2000.0},
+        ],
+        "channels": DRIVE_CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "two_drive.scap")
+
+    def block(target):
+        return struct.pack(
+            "<iiihHHihi", target, target, 0, 0, 0x0627, 0, 0, 0, 0
+        )
+
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+        for i in range(n):
+            f.write(struct.pack("<QB", i, FLAG_TORQUE_ENABLED))
+            f.write(block(10 * i))
+            f.write(block(-10 * i))
+    return path
+
+
+def test_multi_drive_default_selects_first(tmp_path):
+    path = synth_two_drive_capture(tmp_path)
+    header, data, drive_idx = sc.load_capture(path)
+    assert drive_idx == 0
+    assert header["drives"][drive_idx]["name"] == "motor_a"
+    assert data["target_counts"][5] == 50
+
+
+def test_multi_drive_selects_named_drive(tmp_path):
+    path = synth_two_drive_capture(tmp_path)
+    header, data, drive_idx = sc.load_capture(path, "motor_b")
+    assert drive_idx == 1
+    assert header["drives"][drive_idx]["counts_per_mm"] == 2000.0
+    assert data["target_counts"][5] == -50
+
+
+def test_multi_drive_unknown_drive_raises(tmp_path):
+    path = synth_two_drive_capture(tmp_path)
+    with pytest.raises(SystemExit):
+        sc.load_capture(path, "motor_z")
+
+
+V2_CHANNELS = [
+    {"name": "cycle_index", "dtype": "u64", "offset": 0},
+    {"name": "flags", "dtype": "u8", "offset": 8},
+    {"name": "target_counts", "dtype": "i32", "offset": 9},
+    {"name": "position_actual", "dtype": "i32", "offset": 13},
+    {"name": "following_error", "dtype": "i32", "offset": 17},
+    {"name": "torque_actual", "dtype": "i16", "offset": 21},
+    {"name": "statusword", "dtype": "u16", "offset": 23},
+    {"name": "error_code", "dtype": "u16", "offset": 25},
+    {"name": "velocity_offset", "dtype": "i32", "offset": 27},
+    {"name": "torque_offset", "dtype": "i16", "offset": 31},
+    {"name": "velocity_actual", "dtype": "i32", "offset": 33},
+    {"name": "accel_cmd", "dtype": "f32", "offset": 37},
+    {"name": "vel_cmd", "dtype": "f32", "offset": 41},
+]
+
+
+def synth_v2_capture(tmp_path, n=64):
+    """Minimal version-2 capture carrying the f32 commanded-kinematics channels."""
+    header = {
+        "version": 2,
+        "cycle_ns": 1_000_000,
+        "record_size": 45,
+        "started_utc": "2026-06-28T10:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [
+            {"name": "x", "counts_per_mm": 3276.8, "rotation_distance": 40}
+        ],
+        "channels": V2_CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "v2.scap")
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+        for i in range(n):
+            f.write(
+                struct.pack(
+                    "<QBiiihHHihiff",
+                    i,
+                    FLAG_TORQUE_ENABLED | FLAG_MOTION_ACTIVE,
+                    100 * i,
+                    100 * i - 3,
+                    3,
+                    50,
+                    0x0627,
+                    0,
+                    7,
+                    -2,
+                    100 * i - 3,
+                    1234.5 + i,
+                    -67.25 + i,
+                )
+            )
+    return path
+
+
+def test_v2_capture_reads_f32_commanded_channels(tmp_path):
+    path = synth_v2_capture(tmp_path)
+    header, data, _ = sc.load_capture(path)
+    assert header["version"] == 2
+    assert data["accel_cmd"].dtype == np.float32
+    assert data["vel_cmd"].dtype == np.float32
+    assert data["accel_cmd"][0] == pytest.approx(1234.5)
+    assert data["vel_cmd"][10] == pytest.approx(-57.25)
+    assert data["velocity_actual"][5] == 100 * 5 - 3
+
+
+def test_unsupported_version_still_rejected(tmp_path):
+    path = synth_v2_capture(tmp_path)
+    with open(path, "rb") as f:
+        body = f.read()
+    bad = body.replace(b'"version":2', b'"version":3', 1).replace(
+        b'"version": 2', b'"version": 3', 1
+    )
+    bad_path = os.path.join(str(tmp_path), "v3.scap")
+    with open(bad_path, "wb") as f:
+        f.write(bad)
+    with pytest.raises(SystemExit):
+        sc.load_capture(bad_path)
+
+
+def test_export_ident_csv_writes_commanded_kinematics(tmp_path):
+    path = synth_v2_capture(tmp_path, n=20)
+    header, data, _ = sc.load_capture(path)
+    out = os.path.join(str(tmp_path), "ident.csv")
+    sc.export_ident_csv(out, header, [(0, data)])
+    with open(out) as f:
+        lines = f.read().splitlines()
+    assert lines[0] == "t,accel_x,vel_x,vel_act_x,torque_x"
+    # all 20 cycles are motion-active in the synthetic capture
+    assert len(lines) == 1 + 20
+    first = lines[1].split(",")
+    assert float(first[1]) == pytest.approx(1234.5)
+    assert float(first[2]) == pytest.approx(-67.25)
+
+
+def synth_v2_two_drive_capture(tmp_path, n=8):
+    header = {
+        "version": 2,
+        "cycle_ns": 1_000_000,
+        "record_size": 81,
+        "started_utc": "2026-06-28T10:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [
+            {"name": "x", "counts_per_mm": 3276.8, "rotation_distance": 40},
+            {"name": "y", "counts_per_mm": 3276.8, "rotation_distance": 40},
+        ],
+        "channels": V2_CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "v2_xy.scap")
+    block = "iiihHHihiff"
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+        for i in range(n):
+            f.write(
+                struct.pack("<QB", i, FLAG_TORQUE_ENABLED | FLAG_MOTION_ACTIVE)
+            )
+            for base in (0.0, 1000.0):
+                f.write(
+                    struct.pack(
+                        "<" + block,
+                        100 * i,
+                        100 * i - 3,
+                        3,
+                        50 + int(base),
+                        0x0627,
+                        0,
+                        7,
+                        -2,
+                        100 * i - 3,
+                        base + 1234.5 + i,
+                        base - 67.25 + i,
+                    )
+                )
+    return path
+
+
+def test_export_ident_csv_two_drive_capture(tmp_path):
+    path = synth_v2_two_drive_capture(tmp_path, n=8)
+    header, data_x, _ = sc.load_capture(path, "x")
+    _, data_y, _ = sc.load_capture(path, "y")
+    out = os.path.join(str(tmp_path), "ident_xy.csv")
+    sc.export_ident_csv(out, header, [(0, data_x), (1, data_y)])
+    with open(out) as f:
+        lines = f.read().splitlines()
+    assert lines[0] == (
+        "t,accel_x,vel_x,vel_act_x,torque_x,accel_y,vel_y,vel_act_y,torque_y"
+    )
+    assert len(lines) == 1 + 8
+    first = lines[1].split(",")
+    assert float(first[1]) == pytest.approx(1234.5)
+    assert float(first[4]) == pytest.approx(50.0)
+    assert float(first[5]) == pytest.approx(2234.5)
+    assert float(first[8]) == pytest.approx(1050.0)
+
+
+def test_export_ident_csv_rejects_pre_v2_capture(tmp_path):
+    # The legacy v1 synthetic capture has no accel_cmd channel.
+    path, _ = synth_capture(tmp_path)
+    header, data, _ = sc.load_capture(path)
+    with pytest.raises(SystemExit):
+        sc.export_ident_csv(
+            os.path.join(str(tmp_path), "x.csv"),
+            header,
+            [(0, data)],
+        )
+
+
+def synth_two_drive_ferr(tmp_path, ferr_a, ferr_b, cpm_a=1000.0, cpm_b=1000.0):
+    """Two-drive capture (motors a, b) carrying prescribed per-motor
+    following errors, every sample motion-active."""
+    n = len(ferr_a)
+    header = {
+        "version": 1,
+        "cycle_ns": 1_000_000,
+        "record_size": 9 + 2 * 28,
+        "started_utc": "2026-07-05T00:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [
+            {"name": "a", "counts_per_mm": cpm_a},
+            {"name": "b", "counts_per_mm": cpm_b},
+        ],
+        "channels": DRIVE_CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "combine.scap")
+
+    def block(fe):
+        return struct.pack("<iiihHHihi", 0, 0, int(fe), 0, 0x0627, 0, 0, 0, 0)
+
+    flag = FLAG_TORQUE_ENABLED | FLAG_MOTION_ACTIVE
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+        for i in range(n):
+            f.write(struct.pack("<QB", i, flag))
+            f.write(block(ferr_a[i]))
+            f.write(block(ferr_b[i]))
+    return path
+
+
+def _drive_datas(path):
+    header, _, _ = sc.load_capture(path)
+    return header, [
+        (i, d["name"], sc.load_capture(path, d["name"])[1])
+        for i, d in enumerate(header["drives"])
+    ]
+
+
+def test_combine_corexy_matrix():
+    x, y = sc.combine_corexy([2.0, 4.0], [1.0, 2.0])
+    assert list(x) == [1.5, 3.0]
+    assert list(y) == [0.5, 1.0]
+
+
+def test_combine_corexy_on_and_cross_axis(tmp_path):
+    n = 100
+    path = synth_two_drive_ferr(tmp_path, np.full(n, 200.0), np.full(n, 100.0))
+    header, drive_datas = _drive_datas(path)
+    cx = sc.compute_corexy_combine(header, drive_datas, "a,b", "X")
+    # a=200/1000=0.2mm, b=100/1000=0.1mm -> X=(0.2+0.1)/2, Y=(0.2-0.1)/2
+    assert cx["on_ferr"][0] == pytest.approx(0.15)
+    assert cx["cross_ferr"][0] == pytest.approx(0.05)
+    cy = sc.compute_corexy_combine(header, drive_datas, "a,b", "Y")
+    assert cy["on_ferr"][0] == pytest.approx(0.05)
+    assert cy["cross_ferr"][0] == pytest.approx(0.15)
+
+
+def test_combine_corexy_honors_per_motor_counts_per_mm(tmp_path):
+    n = 10
+    path = synth_two_drive_ferr(
+        tmp_path,
+        np.full(n, 200.0),
+        np.full(n, 200.0),
+        cpm_a=1000.0,
+        cpm_b=2000.0,
+    )
+    header, drive_datas = _drive_datas(path)
+    c = sc.compute_corexy_combine(header, drive_datas, "a,b", "X")
+    # a=200/1000=0.2mm, b=200/2000=0.1mm -> X=0.15, Y=0.05
+    assert c["on_ferr"][0] == pytest.approx(0.15)
+    assert c["cross_ferr"][0] == pytest.approx(0.05)
+
+
+def synth_four_drive_ferr(tmp_path, ferrs, cpm=1000.0):
+    n = len(ferrs[0])
+    header = {
+        "version": 1,
+        "cycle_ns": 1_000_000,
+        "record_size": 9 + 4 * 28,
+        "started_utc": "2026-07-05T00:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [
+            {"name": name, "counts_per_mm": cpm}
+            for name in ("a", "a1", "b", "b1")
+        ],
+        "channels": DRIVE_CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "combine4.scap")
+
+    def block(fe):
+        return struct.pack("<iiihHHihi", 0, 0, int(fe), 0, 0x0627, 0, 0, 0, 0)
+
+    flag = FLAG_TORQUE_ENABLED | FLAG_MOTION_ACTIVE
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+        for i in range(n):
+            f.write(struct.pack("<QB", i, flag))
+            for ferr in ferrs:
+                f.write(block(ferr[i]))
+    return path
+
+
+def test_combine_corexy_awd_belt_averages_its_motors(tmp_path):
+    n = 10
+    path = synth_four_drive_ferr(
+        tmp_path,
+        [
+            np.full(n, 200.0),
+            np.full(n, 100.0),
+            np.full(n, 100.0),
+            np.full(n, 0.0),
+        ],
+    )
+    header, drive_datas = _drive_datas(path)
+    c = sc.compute_corexy_combine(header, drive_datas, "a:1+a1:1,b:1+b1:1", "X")
+    # belt A = mean(0.2, 0.1) = 0.15mm, belt B = mean(0.1, 0.0) = 0.05mm
+    assert c["on_ferr"][0] == pytest.approx(0.10)
+    assert c["cross_ferr"][0] == pytest.approx(0.05)
+    assert c["motors"] == ("a+a1", "b+b1")
+
+
+def test_combine_corexy_awd_honors_per_motor_sign(tmp_path):
+    n = 10
+    path = synth_four_drive_ferr(
+        tmp_path,
+        [
+            np.full(n, 200.0),
+            np.full(n, -200.0),
+            np.full(n, 100.0),
+            np.full(n, 100.0),
+        ],
+    )
+    header, drive_datas = _drive_datas(path)
+    c = sc.compute_corexy_combine(
+        header, drive_datas, "a:1+a1:-1,b:1+b1:1", "X"
+    )
+    # belt A = mean(0.2, -(-0.2)) = 0.2mm, belt B = 0.1mm
+    assert c["on_ferr"][0] == pytest.approx(0.15)
+    assert c["cross_ferr"][0] == pytest.approx(0.05)
+
+
+def test_png_combined_corexy_four_drives(tmp_path):
+    pytest.importorskip("matplotlib")
+    t = np.arange(500)
+    path = synth_four_drive_ferr(
+        tmp_path,
+        [
+            50.0 * np.sin(2 * np.pi * t / 50.0),
+            45.0 * np.sin(2 * np.pi * t / 50.0),
+            30.0 * np.sin(2 * np.pi * t / 40.0),
+            25.0 * np.sin(2 * np.pi * t / 40.0),
+        ],
+    )
+    out = tmp_path / "combined4.png"
+    rc = sc.main(
+        [
+            path,
+            "--plot-out",
+            str(out),
+            "--combine-corexy",
+            "a:1+a1:1,b:1+b1:1",
+            "--axis",
+            "X",
+        ]
+    )
+    assert rc == 0 and out.stat().st_size > 0
+
+
+def test_combine_corexy_missing_drive_raises(tmp_path):
+    path = synth_two_drive_ferr(tmp_path, np.zeros(5), np.zeros(5))
+    header, drive_datas = _drive_datas(path)
+    with pytest.raises(SystemExit):
+        sc.compute_corexy_combine(header, drive_datas, "a,zzz", "X")
+
+
+def test_combine_corexy_requires_two_motors(tmp_path):
+    path = synth_two_drive_ferr(tmp_path, np.zeros(5), np.zeros(5))
+    header, drive_datas = _drive_datas(path)
+    with pytest.raises(SystemExit):
+        sc.compute_corexy_combine(header, drive_datas, "a", "X")
+
+
+def test_main_multi_drive_prints_each_drive(tmp_path, capsys):
+    path = synth_two_drive_ferr(tmp_path, np.full(50, 100.0), np.full(50, 50.0))
+    assert sc.main([path]) == 0
+    out = capsys.readouterr().out
+    assert "drive: a" in out and "drive: b" in out
+
+
+def test_png_written_single_drive(tmp_path):
+    pytest.importorskip("matplotlib")
+    path, _ = synth_capture(tmp_path)
+    out_dir = tmp_path / "out"
+    assert sc.main([path, "--png", "--plot-dir", str(out_dir)]) == 0
+    pngs = list(out_dir.glob("*.png"))
+    assert len(pngs) == 1 and pngs[0].stat().st_size > 0
+
+
+def test_png_renders_without_position_demand(tmp_path):
+    # Real firmware captures (v2) carry no position_demand channel; the plot
+    # must not reference it.
+    pytest.importorskip("matplotlib")
+    path = synth_v2_capture(tmp_path)
+    out = tmp_path / "v2.png"
+    assert sc.main([path, "--plot-out", str(out)]) == 0
+    assert out.stat().st_size > 0
+
+
+def test_png_combined_corexy(tmp_path):
+    pytest.importorskip("matplotlib")
+    t = np.arange(500)
+    ferr_a = 50.0 * np.sin(2 * np.pi * t / 50.0)
+    ferr_b = 30.0 * np.sin(2 * np.pi * t / 40.0)
+    path = synth_two_drive_ferr(tmp_path, ferr_a, ferr_b)
+    out = tmp_path / "combined.png"
+    rc = sc.main(
+        [path, "--plot-out", str(out), "--combine-corexy", "a,b", "--axis", "X"]
+    )
+    assert rc == 0 and out.stat().st_size > 0
+
+
+def test_combine_corexy_inverted_motor_flips_on_axis(tmp_path):
+    n = 10
+    path = synth_two_drive_ferr(tmp_path, np.full(n, 200.0), np.full(n, 100.0))
+    header, drive_datas = _drive_datas(path)
+    c = sc.compute_corexy_combine(header, drive_datas, "a:1,b:-1", "X")
+    # b inverted: kinematic b = -0.1 -> X=(0.2-0.1)/2, Y=(0.2+0.1)/2
+    assert c["on_ferr"][0] == pytest.approx(0.05)
+    assert c["cross_ferr"][0] == pytest.approx(0.15)
+
+
+def test_round_trip_windows_pairs_forward_and_reverse():
+    flags = np.zeros(40, dtype=np.uint8)
+    for s, e in [(2, 6), (10, 14), (20, 24), (28, 32)]:
+        flags[s:e] = 2
+    segs = sc.motion_segments(flags)
+    wins = sc.round_trip_windows(segs, len(flags))
+    # trip 0 spans forward seg (2..6) + reverse seg (10..14) up to next trip;
+    # trip 1 spans the remaining pair to end of capture.
+    assert wins == [(2, 20), (20, 40)]
+
+
+def test_round_trip_windows_trailing_odd_move():
+    flags = np.zeros(20, dtype=np.uint8)
+    for s, e in [(2, 6), (10, 14), (16, 18)]:
+        flags[s:e] = 2
+    segs = sc.motion_segments(flags)
+    wins = sc.round_trip_windows(segs, len(flags))
+    assert wins == [(2, 16), (16, 20)]
+
+
+def synth_two_drive_strokes(tmp_path, n_strokes=3, move=150, dwell=40):
+    """Forward/reverse strokes separated by dwell; drive b is inverted (its
+    counts run opposite the kinematic frame), so combined X = (a - b)/2."""
+
+    def block(tgt, act, fe, tq):
+        return struct.pack(
+            "<iiihHHihi",
+            int(tgt),
+            int(act),
+            int(fe),
+            int(tq),
+            0x0627,
+            0,
+            0,
+            0,
+            0,
+        )
+
+    rows, pos, direction = [], 0, 1
+    for _ in range(n_strokes):
+        for _ in range(move):
+            pos += direction
+            rows.append((True, pos, 5 * direction))
+        for _ in range(dwell):
+            rows.append((False, pos, 0))
+        direction = -direction
+
+    header = {
+        "version": 1,
+        "cycle_ns": 1_000_000,
+        "record_size": 9 + 2 * 28,
+        "started_utc": "2026-07-05T00:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [
+            {"name": "a", "counts_per_mm": 1000.0},
+            {"name": "b", "counts_per_mm": 1000.0},
+        ],
+        "channels": DRIVE_CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "strokes.scap")
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+        for i, (moving, p, fe) in enumerate(rows):
+            flag = FLAG_TORQUE_ENABLED | (FLAG_MOTION_ACTIVE if moving else 0)
+            tq = 100 if moving else 0
+            f.write(struct.pack("<QB", i, flag))
+            f.write(block(p, p - fe, fe, tq))
+            f.write(block(-p, -(p - fe), -fe, -tq))
+    return path
+
+
+def test_combine_corexy_recovers_stroke_when_motor_inverted(tmp_path):
+    path = synth_two_drive_strokes(tmp_path)
+    header, drive_datas = _drive_datas(path)
+    c = sc.compute_corexy_combine(header, drive_datas, "a:1,b:-1", "X")
+    # Naive (a+b)/2 would cancel to ~0; the inverted-b sign recovers the ramp.
+    assert np.ptp(c["on_target"]) == pytest.approx(0.15)
+    assert np.max(np.abs(c["cross_target"])) < 1e-6
+    # Without the inversion sign the ramp lands on the wrong axis.
+    naive = sc.compute_corexy_combine(header, drive_datas, "a,b", "X")
+    assert np.max(np.abs(naive["on_target"])) < 1e-6
+    assert np.ptp(naive["cross_target"]) == pytest.approx(0.15)
+
+
+def test_png_combined_corexy_overlay_multi_stroke(tmp_path):
+    pytest.importorskip("matplotlib")
+    path = synth_two_drive_strokes(tmp_path)
+    out = tmp_path / "overlay.png"
+    rc = sc.main(
+        [
+            path,
+            "--plot-out",
+            str(out),
+            "--combine-corexy",
+            "a:1,b:-1",
+            "--axis",
+            "X",
+        ]
+    )
+    assert rc == 0 and out.stat().st_size > 0
+
+
+def synth_capture_with_flagged_dwell(tmp_path, n=4000):
+    """Motion flag held across a queued dwell: flag active 1000..3000, but the
+    target only moves 2000..3000. Post-move settle decay after 3000."""
+    fs = 1000.0
+    t = np.arange(n) / fs
+    flags = np.full(n, FLAG_TORQUE_ENABLED, dtype=np.uint8)
+    flags[1000:3000] |= FLAG_MOTION_ACTIVE
+    step = np.zeros(n)
+    step[2000:3000] = 100
+    target = np.cumsum(step).astype(np.int64)
+    ferr = np.zeros(n)
+    ferr[2000:3000] = 120.0
+    decay = DECAY_AMP_COUNTS * np.exp(-(t[3000:] - t[3000]) / DECAY_TAU_S)
+    ferr[3000:] = decay
+    header = {
+        "version": 1,
+        "cycle_ns": 1_000_000,
+        "record_size": 31,
+        "started_utc": "2026-06-10T12:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [{"name": "x", "counts_per_mm": 3276.8}],
+        "channels": CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "dwell.scap")
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+        for i in range(n):
+            fe = int(round(ferr[i]))
+            tgt = int(target[i])
+            f.write(
+                struct.pack(
+                    "<QBiiiihHH",
+                    i,
+                    int(flags[i]),
+                    tgt,
+                    tgt,
+                    tgt - fe,
+                    fe,
+                    0,
+                    0x0627,
+                    0,
+                )
+            )
+    return path
+
+
+def test_move_windows_come_from_target_not_motion_flag(tmp_path):
+    path = synth_capture_with_flagged_dwell(tmp_path)
+    _, data, _ = sc.load_capture(path)
+    m = sc.compute_metrics(data, settle_band=10, torque_limit=900)
+    assert len(m["moves"]) == 1
+    mv = m["moves"][0]
+    assert mv["start_ms"] == pytest.approx(2000.0, abs=25.0)
+    assert mv["end_ms"] == pytest.approx(3000.0, abs=25.0)
+    assert mv["settle_ms"] is not None
+    assert not mv["settle_window_truncated"]
+
+
+def test_settle_window_truncated_is_reported(tmp_path):
+    path = synth_capture_with_flagged_dwell(tmp_path)
+    _, data, _ = sc.load_capture(path)
+    data = data[:3010]
+    m = sc.compute_metrics(data, settle_band=10, torque_limit=900)
+    mv = m["moves"][0]
+    assert mv["settle_ms"] is None
+    assert mv["settle_window_truncated"]
+
+
+def test_target_segments_bridge_reversal_pauses(tmp_path):
+    fs = 1000.0
+    step = np.zeros(2000)
+    step[100:500] = 50
+    step[510:900] = -50
+    target = np.cumsum(step).astype(np.int64)
+    segs = sc.target_motion_segments(target, fs)
+    assert segs == [(100, 900)]

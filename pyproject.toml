@@ -12,7 +12,8 @@ dependencies = [
   "Jinja2>=3.1.6",
   "markupsafe==2.1.5",
   "numpy~=2.0 ; python_version=='3.9'",
-  "numpy~=2.2 ; python_version>='3.10'",
+  "numpy~=2.2 ; python_version>='3.10' and python_version<'3.14'",
+  "numpy>=2.3.2 ; python_version>='3.14'",
   "pyserial==3.4",
   "python-can~=4.5",
   "setuptools==75.8.2 ; python_version >= '3.12'", # required by python-can < 4.3
@@ -24,6 +25,11 @@ dev = [
   "pre-commit>=4.0.1",
   "pytest-xdist>=3.6.1",
   "pytest>=8.3.4",
+  "basedpyright>=1.21",
+]
+prototype = [
+  "scipy>=1.14 ; python_version>='3.10'",
+  "matplotlib>=3.8",
 ]
 
 [project.urls]
@@ -33,10 +39,26 @@ documentation = "https://docs.kalico.gg/"
 issues = "https://github.com/KalicoCrew/kalico/issues"
 funding = "https://docs.kalico.gg/Sponsors.html"
 
+# Typechecking is scoped to the servo calibration modules only — the wider
+# klippy estate is untyped legacy and stays out of scope deliberately.
+[tool.basedpyright]
+include = [
+  "klippy/extras/servo_calibration",
+  "klippy/extras/servo_strokes.py",
+  "klippy/extras/servo_tuning.py",
+  "klippy/extras/servo_param.py",
+  "klippy/extras/servo_capture.py",
+]
+typeCheckingMode = "standard"
+pythonVersion = "3.13"
+reportMissingTypeStubs = false
+
 [tool.ruff]
 line-length = 80
 indent-width = 4
-exclude = ["./.github", "./.history", "./config", "./docs", "./lib", "./src"]
+# motors_sync.py is vendored third-party code (see docs/kalico-rewrite/credits.md);
+# kept close to upstream for provenance/diffing rather than reformatted to house style.
+exclude = ["./.github", "./.history", "./config", "./docs", "./lib", "./src", "./klippy/extras/motors_sync.py"]
 
 [tool.ruff.lint]
 extend-select = [
@@ -57,5 +79,21 @@ ignore = [
 ]
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
-testpaths = ["test"]
+pythonpath = [".", "klippy", "scripts"]
+# NOTE: tools/ is deliberately NOT in testpaths. The CI-able sim unit
+# subset is run via an explicit path + marker selection (see
+# `scripts/ci.sh sim`), so widening testpaths here would sweep in the
+# ELF/hardware tests that must not run in CI. The full-stack sim e2e
+# suite runs via `tools/sim/run.sh test` (Docker).
+# scripts/ and snapshots/ are listed as explicit files, not whole
+# directories, so unrelated helper scripts are not swept into this job.
+testpaths = [
+  "test",
+  "tests",
+  "snapshots/test_harness.py",
+]
+markers = [
+  "sim_unit: in-process sim unit/contract test (CI-able, no ELF/hardware)",
+  "needs_elf: requires the built MACH_LINUX sim ELFs (tools/sim)",
+  "needs_hardware: requires real H723/F446/Trident bench hardware",
+]

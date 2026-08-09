@@ -1,0 +1,211 @@
+[workspace]
+members = [
+    "nurbs",
+    "c-api",
+    "config-doc",
+    "config-py",
+    "gcode",
+    "geometry",
+    "trajectory",
+    "runtime",
+    "host-rt",
+    "planner-config",
+    "motion-core",
+    "motion-engine",
+    "motion-pipeline",
+    "motion-services",
+    "pipeline-snapshot",
+    "mcu-transport",
+    "mcu-protocol",
+    "ethercat-rt",
+    "piece-sink-harness",
+    "shaper-ident",
+    "step-shim",
+]
+exclude = ["gcode/fuzz", "snapshot-viewer", "motion-playground"]
+resolver = "2"
+
+[workspace.package]
+# Permissive license per the deny.toml rationale: the kalico Rust crates ship
+# under MIT/Apache-2.0 so they can be linked into Klipper (GPL-3.0) at the
+# staticlib boundary without leaking copyleft into the Rust crate API.
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# Shared deps versioned here from day one.
+thiserror = "2"
+heapless = { version = "0.8", default-features = false }
+
+# Workspace-wide lint configuration. Crates opt in via `[lints] workspace = true`.
+# Pedantic-tier lints are enabled at warn (with `-D warnings` they fail CI).
+# A handful of categories are explicitly allowed because they fire pervasively
+# on patterns that are correct for this codebase: stub functions awaiting Layer 1+
+# integration (missing-docs nags), FFI/wire-format pointer casts (cast nags),
+# numerical-array index loops in eval/de Boor (needless-range-loop), and
+# NaN-rejecting `!(x > y)` validation (neg_cmp_op_on_partial_ord).
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "allow"
+dead_code = "warn"
+unused_imports = "warn"
+unexpected_cfgs = "allow"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+similar_names = "allow"
+# Allowed pervasively (see workspace-lints rationale above):
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+missing_safety_doc = "allow"
+must_use_candidate = "allow"
+return_self_not_must_use = "allow"
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_ptr_alignment = "allow"
+needless_range_loop = "allow"
+neg_cmp_op_on_partial_ord = "allow"
+many_single_char_names = "allow"
+type_complexity = "allow"
+# Pervasive across the codebase; fix incrementally rather than blocking CI:
+doc_markdown = "allow"
+items_after_statements = "allow"
+cast_lossless = "allow"
+cast_sign_loss = "allow"
+too_many_lines = "allow"
+float_cmp = "allow"
+uninlined_format_args = "allow"
+unreadable_literal = "allow"
+wildcard_in_or_patterns = "allow"
+map_unwrap_or = "allow"
+let_and_return = "allow"
+redundant_closure_for_method_calls = "allow"
+ref_as_ptr = "allow"
+large_stack_arrays = "allow"
+missing_fields_in_debug = "allow"
+cast_possible_wrap = "allow"
+single_match_else = "allow"
+needless_pass_by_value = "allow"
+explicit_iter_loop = "allow"
+match_wildcard_for_single_variants = "allow"
+manual_range_contains = "allow"
+useless_conversion = "allow"
+match_same_arms = "allow"
+bool_to_int_with_if = "allow"
+unnested_or_patterns = "allow"
+needless_lifetimes = "allow"
+used_underscore_binding = "allow"
+unused_self = "allow"
+single_char_pattern = "allow"
+if_not_else = "allow"
+option_if_let_else = "allow"
+match_bool = "allow"
+struct_field_names = "allow"
+trivially_copy_pass_by_ref = "allow"
+semicolon_if_nothing_returned = "allow"
+match_on_vec_items = "allow"
+manual_let_else = "allow"
+bool_assert_comparison = "allow"
+checked_conversions = "allow"
+enum_variant_names = "allow"
+len_without_is_empty = "allow"
+unnecessary_wraps = "allow"
+manual_clamp = "allow"
+if_then_some_else_none = "allow"
+only_used_in_recursion = "allow"
+default_trait_access = "allow"
+map_err_ignore = "allow"
+result_unit_err = "allow"
+or_fun_call = "allow"
+single_match = "allow"
+derivable_impls = "allow"
+panic_in_result_fn = "allow"
+if_same_then_else = "allow"
+manual_instant_elapsed = "allow"
+unchecked_duration_subtraction = "allow"
+large_enum_variant = "allow"
+option_map_or_none = "allow"
+panic = "allow"
+manual_memcpy = "allow"
+new_without_default = "allow"
+ignored_unit_patterns = "allow"
+extra_unused_lifetimes = "allow"
+unnecessary_map_or = "allow"
+assertions_on_constants = "allow"
+vec_init_then_push = "allow"
+assigning_clones = "allow"
+field_reassign_with_default = "allow"
+identity_op = "allow"
+items_after_test_module = "allow"
+no_effect_underscore_binding = "allow"
+option_as_ref_cloned = "allow"
+manual_assert = "allow"
+range_plus_one = "allow"
+too_many_arguments = "allow"
+inefficient_to_string = "allow"
+iter_cloned_collect = "allow"
+needless_borrows_for_generic_args = "allow"
+unnecessary_cast = "allow"
+
+[profile.release]
+# opt-level = 3 for host builds: measured on a Pi 5, the SOCP solve
+# (cubic @ N=200) runs ~25% slower under opt-level = "z". Future MCU firmware
+# build (build-order steps 5+, not yet wired up) should override via a
+# `[profile.release-mcu]` or per-package profile when it lands; size matters
+# on the H723/F4x targets.
+opt-level = 3
+# Thin, not fat: fat LTO re-optimizes the whole merged module on one thread
+# on every build, which dominates on-printer (Pi) build time. The snapshot
+# profile already validates that planner output is bit-exact with LTO off
+# entirely, and no measured hot path here is within a few percent of a
+# deadline, so fat's residual edge over thin buys nothing we can observe.
+lto = "thin"
+codegen-units = 16
+panic = "abort"
+debug = true
+overflow-checks = false
+
+# Build-time tooling (proc-macros, build scripts, and their dependencies — e.g.
+# syn, cbindgen) is never shipped and does not need optimization or debuginfo.
+# The release profile's opt-level=3 + debug=true makes compiling `syn` alone
+# OOM-kill rustc on a 1 GB host (Pi 3B), and it needlessly slows every build.
+# opt-level=0 + no debuginfo cuts that compile's peak memory ~4x. This applies
+# ONLY to build-time crates (cargo's build-override never touches normal
+# dependencies), so emitted runtime/MCU code — and the firmware
+# disasm-identical guarantee — is unaffected.
+[profile.release.build-override]
+opt-level = 0
+debug = false
+
+# `cbindgen` is a normal `[dependencies]` entry (c-api, behind the
+# `dep:cbindgen` feature, used by the gen-headers binary), so cargo's
+# build-override above does NOT cover it. `syn` is pulled in again via
+# cbindgen → serde_derive on that path and compiles at opt-level=3 under the
+# base release profile, which is the heavy compile that re-triggers OOM.
+# Per-package overrides apply to normal deps, closing the gap. These crates
+# are build-time-only and never appear in the shipped staticlib or MCU
+# firmware, so opt0 is free — MCU builds pull zero syn or cbindgen.
+[profile.release.package.syn]
+opt-level = 0
+debug = false
+
+[profile.release.package.cbindgen]
+opt-level = 0
+debug = false
+
+[profile.dev]
+opt-level = 1            # eval correctness tests run faster than -O0; still debuggable
+debug = true
+
+# Snapshot-iteration profile: identical float semantics to `release` (Rust
+# never reassociates or contracts FP regardless of opt/LTO settings), but no
+# fat-LTO + single-codegen-unit relink on every planner edit. The snapshot
+# suite validates this empirically — baselines built under `release` compare
+# EXACT against a `snapshot`-profile engine.
+[profile.snapshot]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+debug = false

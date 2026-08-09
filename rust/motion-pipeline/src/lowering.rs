@@ -1,0 +1,280 @@
+mod ladder;
+mod profile;
+mod sampled;
+mod straight;
+
+#[cfg(test)]
+pub(crate) use ladder::FIT_TRUNC_ACC_MM_S2;
+pub(crate) use ladder::{
+    FIT_TRUNC_POS_FACTOR, LADDER_PROBES_U, ladder_fit, quintic_in_u, truncated_piece,
+};
+
+use geometry::{FollowerDemand, Move, MoveVelocity, SurfaceTransform};
+use nurbs::ScalarNurbs;
+use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
+#[cfg(test)]
+pub(crate) use straight::apply_derivative_gains;
+#[cfg(test)]
+use trajectory::ChainStage;
+use trajectory::{CompiledChain, ShapedSegment};
+
+use profile::{build_profile, profile_from_phases};
+use sampled::{Sampler, ZWarp, phase_knot_times, refine_span, regime_knot_times, z_warp_mode};
+use straight::{has_pre_kernel_nonlinear_advance, lower_straight_from_phases};
+
+/// Duplicated from `runtime::piece_ring::MAX_PIECE_COEFFS` (this crate must
+/// not depend on the MCU runtime); equality is enforced by the cross-crate
+/// const test in motion-engine.
+pub const MAX_PIECE_COEFFS: usize = 8;
+
+const MIN_PIECE_DURATION_S: f64 = 1e-9;
+/// Below this span the Bézier round trip corrupts a piece's derivatives:
+/// Bernstein control points carry the absolute position, so pack + extract
+/// rounds each one to `ulp(|pos|)` and reconstructs acceleration with error
+/// ~`ulp(|pos|)/h²` and jerk with ~`ulp(|pos|)/h³`. At 250 mm a 150 ns piece
+/// comes back with ~1e8 mm/s³ of phantom jerk (100× a 1e6 limit); at 1 µs the
+/// same rounding stays under ~0.2 mm/s² and ~2e5 mm/s³. Phases this short
+/// merge into a neighbor instead of lowering to their own piece — the
+/// absorbed content is at most `j·dt` of acceleration and `j·dt³/6`
+/// (~1e-13 mm) of position.
+const MIN_PHASE_PIECE_S: f64 = 1e-6;
+const MAX_SUBDIVISION_DEPTH: u32 = 22;
+
+const MIN_FIT_PIECE_S: f64 = 1e-4;
+
+/// Mirrors the planner's straightness epsilon on member curvature: a move at
+/// or under it planned as straight, so its phases scale to every axis and the
+/// closed-form path applies.
+const STRAIGHT_KAPPA_EPS: f64 = 1e-9;
+
+/// Fit acceptance budgets for one lowered piece, probed at the interior
+/// Chebyshev nodes (endpoints are matched exactly by construction).
+#[derive(Debug, Clone, Copy)]
+pub struct FitTol {
+    pub pos_mm: f64,
+    /// Absolute acceleration-error budget for a fitted piece. The positional
+    /// weighting alone (`accel_err·h²/8`) lets a short piece end with an
+    /// acceleration hundreds of mm/s² off the profile — positionally
+    /// invisible, but adjacent pieces then step by twice that error at their
+    /// shared knot, and the dispatched trajectory carries a jerk spike the
+    /// planner never asked for. Only accel-feedforward consumers (EtherCAT
+    /// servos) can tell; steppers just follow positions.
+    pub accel_mm_s2: f64,
+}
+
+/// Fit budgets are sized for the spatial axes. A follower's whole signal is
+/// its ratio times the path profile, so an unscaled budget is `1/r` looser
+/// for it in relative terms — visible as flow ripple once a derivative-gain
+/// stage (pressure advance) turns the tolerated acceleration error into
+/// velocity error. The budget therefore scales with the follower's peak
+/// ratio, floored so a near-zero demand (travel) cannot collapse it and
+/// force bottomless subdivision of an already-trivial track.
+const FOLLOWER_TOL_SCALE_MIN: f64 = 1e-2;
+
+impl FitTol {
+    pub(crate) fn scaled(self, factor: f64) -> Self {
+        Self {
+            pos_mm: self.pos_mm * factor,
+            accel_mm_s2: self.accel_mm_s2 * factor,
+        }
+    }
+}
+
+pub(crate) fn follower_tol_scale(followers: &[FollowerDemand], axis: usize) -> f64 {
+    followers
+        .iter()
+        .find(|f| f.axis_index == axis)
+        .map_or(1.0, |f| {
+            f.max_abs_ratio().clamp(FOLLOWER_TOL_SCALE_MIN, 1.0)
+        })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoweringError {
+    SourceMismatch,
+    EmptyProfile,
+    DegeneratePhase,
+    FollowerAxisOutOfRange { axis_index: usize },
+}
+
+impl std::fmt::Display for LoweringError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SourceMismatch => write!(f, "geometry and velocity move sources differ"),
+            Self::EmptyProfile => write!(f, "velocity move has fewer than two samples"),
+            Self::DegeneratePhase => write!(f, "velocity profile phase is degenerate"),
+            Self::FollowerAxisOutOfRange { axis_index } => {
+                write!(
+                    f,
+                    "follower axis {axis_index} exceeds the registry start vector"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for LoweringError {}
+
+/// Zero-pad every piece of every axis to the move's maximum degree — both
+/// `bezier_pieces_to_nurbs` (uniform degree per curve) and `lane_curve`'s
+/// cross-axis addition for CoreXY mixing require it. Enqueue's Chebyshev
+/// truncation recovers each piece's true degree at the wire.
+fn pad_to_uniform_degree(axes_pieces: &mut [Vec<BezierPiece>]) {
+    let max_len = axes_pieces
+        .iter()
+        .flatten()
+        .map(|p| p.coeffs.len())
+        .max()
+        .unwrap_or(1);
+    assert!(
+        max_len <= MAX_PIECE_COEFFS,
+        "fitted piece degree {} exceeds the wire maximum",
+        max_len - 1
+    );
+    for piece in axes_pieces.iter_mut().flatten() {
+        piece.coeffs.resize(max_len, 0.0);
+    }
+}
+
+pub fn lower_move(
+    gm: &Move,
+    vm: &MoveVelocity,
+    t_start: f64,
+    start_pos: &[f64],
+    fit_tol: FitTol,
+    axis_chains: &[CompiledChain],
+    mesh: Option<&SurfaceTransform>,
+) -> Result<ShapedSegment, LoweringError> {
+    let (axes_pieces, total_t) =
+        lower_move_pieces(gm, vm, t_start, start_pos, fit_tol, axis_chains, mesh)?;
+    let axes: Vec<ScalarNurbs> = axes_pieces
+        .iter()
+        .map(|p| bezier_pieces_to_nurbs(p))
+        .collect();
+    Ok(ShapedSegment {
+        axes,
+        followers: gm.segment.followers.clone(),
+        spatial_path: gm.segment.spatial.is_some(),
+        t_start,
+        t_end: t_start + total_t,
+        motor_mask: 0,
+        source_line: 0,
+    })
+}
+
+/// Lower a move to per-axis cubic Bézier pieces in monomial form
+/// (`pos = c0 + c1·τ + c2·τ² + c3·τ³`, `τ = t − u_start`) — the trajectory the
+/// firmware executes, before it is packed into NURBS. Returns the per-axis pieces
+/// and the move duration.
+pub fn lower_move_pieces(
+    gm: &Move,
+    vm: &MoveVelocity,
+    t_start: f64,
+    start_pos: &[f64],
+    fit_tol: FitTol,
+    axis_chains: &[CompiledChain],
+    mesh: Option<&SurfaceTransform>,
+) -> Result<(Vec<Vec<BezierPiece>>, f64), LoweringError> {
+    if gm.source != vm.source {
+        return Err(LoweringError::SourceMismatch);
+    }
+    let z_warp = z_warp_mode(mesh, gm, start_pos);
+    // The closed-form phase path expresses each axis as one constant scale times
+    // the arc-length profile; a ramped follower's ratio varies along the move
+    // and a surface-warped Z varies with XY — so route those through the sampled
+    // exact phase path, as does a warp flat enough to be one constant offset.
+    let ramped = gm.segment.followers.iter().any(|f| f.is_ramped());
+    let straight = gm.segment.spatial.as_ref().is_none_or(|seg| {
+        use geometry::path::CurvatureProfile;
+        seg.kappa_peak().1.abs() <= STRAIGHT_KAPPA_EPS
+    });
+    if !vm.phases.is_empty()
+        && straight
+        && !ramped
+        && !matches!(z_warp, ZWarp::Surface(_))
+        && !has_pre_kernel_nonlinear_advance(axis_chains)
+    {
+        let z_offset = match z_warp {
+            ZWarp::Constant(c) => c,
+            _ => 0.0,
+        };
+        return lower_straight_from_phases(gm, vm, t_start, start_pos, axis_chains, z_offset);
+    }
+    // With phases present the scalar profile is the plan's own closed-form
+    // windows; the sampled quintic reconstruction is the fallback for moves
+    // whose plan only exists as `(s, v, a)` grid samples.
+    let (profile, total_t) = if vm.phases.is_empty() {
+        build_profile(&vm.samples)?
+    } else {
+        profile_from_phases(&vm.phases)?
+    };
+    // A jerk-regime change is a curvature kink in the arc-length profile: no
+    // polynomial spans it within the acceleration budget, so blind bisection
+    // cascades down to the floor around each one. Pinning a grid knot at every
+    // regime boundary lets both sides fit their full smooth spans instead.
+    let mut knots = if vm.phases.is_empty() {
+        regime_knot_times(&profile, fit_tol)
+    } else {
+        phase_knot_times(&profile, fit_tol)
+    };
+    knots.retain(|&t| t > MIN_PHASE_PIECE_S && total_t - t > MIN_PHASE_PIECE_S);
+    let spatial = gm.segment.spatial.as_ref();
+
+    let n_axes = start_pos.len().max(3);
+    for f in &gm.segment.followers {
+        if f.axis_index >= n_axes {
+            return Err(LoweringError::FollowerAxisOutOfRange {
+                axis_index: f.axis_index,
+            });
+        }
+    }
+
+    let sampler = Sampler {
+        profile: &profile,
+        spatial,
+        start_pos,
+        followers: &gm.segment.followers,
+        s_len: gm.segment.s_len(),
+        axis_chains,
+        z_warp,
+    };
+    // Each axis refines its own grid: an axis only pays for the knots its own
+    // signal needs (a follower is blind to path curvature, z to planar motion),
+    // and each axis's pieces are probed against its own ratio-scaled budget.
+    let mut axes_pieces: Vec<Vec<BezierPiece>> = vec![Vec::new(); n_axes];
+    for (axis, pieces) in axes_pieces.iter_mut().enumerate() {
+        let driven = [axis];
+        let axis_scale = if axis < 3 {
+            1.0
+        } else {
+            follower_tol_scale(&gm.segment.followers, axis)
+        };
+        let axis_tol = fit_tol.scaled(axis_scale);
+        // The budget scales with the follower's ratio, so it sees the
+        // profile's jerk edges at the same relative size the spatial axes
+        // do — it needs the same regime knots to keep spans off them.
+        let axis_knots = &knots;
+        let mut bounds = vec![0.0];
+        let mut prev = 0.0;
+        for &k in axis_knots.iter().chain(std::iter::once(&total_t)) {
+            if k - prev > MIN_PIECE_DURATION_S {
+                refine_span(&sampler, &driven, axis_tol, prev, k, 0, &mut bounds);
+                prev = k;
+            }
+        }
+        for w in bounds.windows(2) {
+            let (ta, tb) = (w[0], w[1]);
+            if tb - ta <= MIN_PIECE_DURATION_S {
+                continue;
+            }
+            let (ua, ub) = (t_start + ta, t_start + tb);
+            pieces.push(sampler.fitted_piece(axis, ta, tb, ua, ub, axis_tol, axis_scale));
+        }
+    }
+    pad_to_uniform_degree(&mut axes_pieces);
+
+    Ok((axes_pieces, total_t))
+}
+
+#[cfg(test)]
+mod tests;

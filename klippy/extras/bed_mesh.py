@@ -118,7 +118,6 @@ class BedMesh:
         self.printer.register_event_handler(
             "klippy:connect", self.handle_connect
         )
-        self.last_position = [0.0, 0.0, 0.0, 0.0]
         self.bmc = BedMeshCalibrate(config, self)
         self.z_mesh = None
         self.toolhead = None
@@ -128,12 +127,15 @@ class BedMesh:
         self.fade_dist = self.fade_end - self.fade_start
         if self.fade_dist <= 0.0:
             self.fade_start = self.fade_end = self.FADE_DISABLE
-        self.log_fade_complete = False
         self.base_fade_target = config.getfloat("fade_target", None)
+        self.z_velocity_limit = config.getfloat(
+            "z_velocity_limit", None, above=0.0
+        )
+        self.z_accel_limit = config.getfloat("z_accel_limit", None, above=0.0)
+        self.z_budget_report = None
         self.fade_target = 0.0
         self.tool_offset = 0.0
         self.gcode = self.printer.lookup_object("gcode")
-        self.splitter = MoveSplitter(config, self.gcode)
         # setup persistent storage
         self.pmgr = ProfileManager(config, self)
         self.save_profile = self.pmgr.save_profile
@@ -164,9 +166,6 @@ class BedMesh:
             self.cmd_BED_MESH_CHECK,
             desc=self.cmd_BED_MESH_CHECK_help,
         )
-        # Register transform
-        gcode_move = self.printer.load_object(config, "gcode_move")
-        gcode_move.set_move_transform(self)
         # initialize status dict
         self.update_status()
 
@@ -188,8 +187,18 @@ class BedMesh:
             self.bmc.print_generated_points(logging.info, truncate=True)
 
     def set_mesh(self, mesh):
+        self._validate_fade_target(mesh)
+        self.tool_offset = 0.0
+        rebase = self._apply_to_engine(mesh)
+        self.z_mesh = mesh
+        self.toolhead.rebase_gcode_z(rebase)
+        excess = self._z_budget_excess()
+        if excess is not None:
+            self.gcode.respond_raw("!! bed_mesh: %s" % (excess,))
+        self.update_status()
+
+    def _validate_fade_target(self, mesh):
         if mesh is not None and self.fade_end != self.FADE_DISABLE:
-            self.log_fade_complete = True
             if self.base_fade_target is None:
                 self.fade_target = mesh.get_z_average()
             else:
@@ -199,7 +208,6 @@ class BedMesh:
                     not min_z <= self.fade_target <= max_z
                     and self.fade_target != 0.0
                 ):
-                    # fade target is non-zero, out of mesh range
                     err_target = self.fade_target
                     self.z_mesh = None
                     self.fade_target = 0.0
@@ -220,74 +228,72 @@ class BedMesh:
                 )
         else:
             self.fade_target = 0.0
-        self.tool_offset = 0.0
-        self.z_mesh = mesh
-        self.splitter.initialize(mesh, self.fade_target)
-        # cache the current position before a transform takes place
-        gcode_move = self.printer.lookup_object("gcode_move")
-        gcode_move.reset_last_position()
-        self.update_status()
 
-    def get_z_factor(self, z_pos):
-        z_pos += self.tool_offset
-        if z_pos >= self.fade_end:
-            return 0.0
-        elif z_pos >= self.fade_start:
-            return (self.fade_end - z_pos) / self.fade_dist
-        else:
-            return 1.0
+    def _z_budget_excess(self):
+        if self.z_budget_report is None:
+            return None
+        coupled_v, coupled_a, v_budget, a_budget, max_slope = (
+            self.z_budget_report
+        )
+        if coupled_v <= v_budget and coupled_a <= a_budget:
+            return None
+        return (
+            "mesh-following needs up to %.2fmm/s / %.1fmm/s² of Z at your "
+            "XY limits, but the Z budget allows %.2fmm/s / %.1fmm/s² "
+            "(max slope %.4f) — the bed is warped or the Z budget is too "
+            "conservative; re-tram the bed or raise z_velocity_limit/"
+            "z_accel_limit in [bed_mesh]"
+            % (coupled_v, coupled_a, v_budget, a_budget, max_slope)
+        )
 
-    def get_position(self):
-        # Return last, non-transformed position
-        if self.z_mesh is None:
-            # No mesh calibrated, so send toolhead position
-            self.last_position[:] = self.toolhead.get_position()
-            self.last_position[2] -= self.fade_target
-        else:
-            # return current position minus the current z-adjustment
-            x, y, z, e = self.toolhead.get_position()
-            max_adj = self.z_mesh.calc_z(x, y)
-            factor = 1.0
-            z_adj = max_adj - self.fade_target
-            fade_z_pos = z + self.tool_offset
-            if min(fade_z_pos, (fade_z_pos - max_adj)) >= self.fade_end:
-                # Fade out is complete, no factor
-                factor = 0.0
-            elif max(fade_z_pos, (fade_z_pos - max_adj)) >= self.fade_start:
-                # Likely in the process of fading out adjustment.
-                # Because we don't yet know the gcode z position, use
-                # algebra to calculate the factor from the toolhead pos
-                factor = (self.fade_end + self.fade_target - fade_z_pos) / (
-                    self.fade_dist - z_adj
-                )
-                factor = constrain(factor, 0.0, 1.0)
-            final_z_adj = factor * z_adj + self.fade_target
-            self.last_position[:] = [x, y, z - final_z_adj, e]
-        return list(self.last_position)
-
-    def move(self, newpos, speed):
-        factor = self.get_z_factor(newpos[2])
-        if self.z_mesh is None or not factor:
-            # No mesh calibrated, or mesh leveling phased out.
-            x, y, z, e = newpos
-            if self.log_fade_complete:
-                self.log_fade_complete = False
-                logging.info(
-                    "bed_mesh fade complete: Current Z: %.4f fade_target: %.4f "
-                    % (z, self.fade_target)
-                )
-            self.toolhead.move([x, y, z + self.fade_target, e], speed)
-        else:
-            self.splitter.build_move(self.last_position, newpos, factor)
-            while not self.splitter.traverse_complete:
-                split_move = self.splitter.split()
-                if split_move:
-                    self.toolhead.move(split_move, speed)
-                else:
-                    raise self.gcode.error(
-                        "Mesh Leveling: Error splitting move "
-                    )
-        self.last_position[:] = newpos
+    def _apply_to_engine(self, mesh):
+        engine = self.printer.lookup_object("motion_engine", None)
+        if engine is None:
+            raise self.gcode.error(
+                "bed_mesh: motion engine unavailable, cannot apply a mesh"
+            )
+        if mesh is None:
+            self.z_budget_report = None
+            return engine.clear_bed_mesh()
+        zero_ref = self.bmc.zero_ref_pos
+        if zero_ref is None:
+            self.fade_target = 0.0
+            raise self.gcode.error(
+                "bed_mesh: zero_reference_position is required to activate "
+                "a mesh under the new motion planner — a mesh nonzero at "
+                "the Z datum would silently shift it"
+            )
+        params = mesh.get_mesh_params()
+        probed = mesh.get_probed_matrix()
+        ny = len(probed)
+        nx = len(probed[0])
+        x_min, y_min = params["min_x"], params["min_y"]
+        dx = (params["max_x"] - x_min) / (nx - 1)
+        dy = (params["max_y"] - y_min) / (ny - 1)
+        points = [z for row in probed for z in row]
+        fade = None
+        if self.fade_end != self.FADE_DISABLE:
+            fade = (self.fade_start, self.fade_end, self.fade_target)
+        try:
+            rebase, self.z_budget_report = engine.set_bed_mesh(
+                points,
+                x_min,
+                y_min,
+                dx,
+                dy,
+                nx,
+                ny,
+                params["tension"],
+                fade,
+                zero_ref[0],
+                zero_ref[1],
+                self.z_velocity_limit,
+                self.z_accel_limit,
+            )
+            return rebase
+        except ValueError as e:
+            self.fade_target = 0.0
+            raise self.gcode.error(str(e))
 
     def get_status(self, eventtime=None):
         return self.status
@@ -350,18 +356,10 @@ class BedMesh:
     cmd_BED_MESH_OFFSET_help = "Add X/Y offsets to the mesh lookup"
 
     def cmd_BED_MESH_OFFSET(self, gcmd):
-        if self.z_mesh is not None:
-            offsets = [None, None]
-            for i, axis in enumerate(["X", "Y"]):
-                offsets[i] = gcmd.get_float(axis, None)
-            self.z_mesh.set_mesh_offsets(offsets)
-            tool_offset = gcmd.get_float("ZFADE", None)
-            if tool_offset is not None:
-                self.tool_offset = tool_offset
-            gcode_move = self.printer.lookup_object("gcode_move")
-            gcode_move.reset_last_position()
-        else:
-            gcmd.respond_info("No mesh loaded to offset")
+        raise self.gcode.error(
+            "bed_mesh: BED_MESH_OFFSET is not supported under the new motion "
+            "planner yet (runtime mesh XY offsets have not been ported)"
+        )
 
     cmd_BED_MESH_CHECK_help = "Validate a variety of bed mesh parameters"
 
@@ -454,11 +452,27 @@ class BedMesh:
                     f"allowed maximum ({max_slope:.6f} mm/mm)"
                 )
 
+        if gcmd.get_int("CHECK_Z_LIMITS", 0):
+            has_checks = True
+            if self.z_budget_report is None:
+                raise self.gcode.error("No mesh is active in the motion engine")
+            excess = self._z_budget_excess()
+            if excess is not None:
+                raise self.gcode.error(excess)
+            coupled_v, coupled_a, v_budget, a_budget, _ = self.z_budget_report
+            gcmd.respond_info(
+                "Mesh-following Z demand (%.2fmm/s / %.1fmm/s²) is within "
+                "the Z budget (%.2fmm/s / %.1fmm/s²)"
+                % (coupled_v, coupled_a, v_budget, a_budget)
+            )
+
         if not has_checks:
             gcmd.respond_info(
                 "No validation checks specified. Available checks:\n"
                 "MAX_DEVIATION - Validate maximum mesh height deviation\n"
-                "MAX_SLOPE - Validate maximum slope between adjacent points"
+                "MAX_SLOPE - Validate maximum slope between adjacent points\n"
+                "CHECK_Z_LIMITS - Validate mesh-following Z demand against "
+                "the Z budget"
             )
 
 
@@ -1165,84 +1179,6 @@ class BedMeshCalibrate:
             logging.info(
                 "  %-4d| %-17s| %-25s| %s" % (i, gen_pt, probed_pt, corr_pt)
             )
-
-
-class MoveSplitter:
-    def __init__(self, config, gcode):
-        self.split_delta_z = config.getfloat(
-            "split_delta_z", 0.025, minval=0.01
-        )
-        self.move_check_distance = config.getfloat(
-            "move_check_distance", 5.0, minval=3.0
-        )
-        self.z_mesh = None
-        self.fade_offset = 0.0
-        self.gcode = gcode
-
-    def initialize(self, mesh, fade_offset):
-        self.z_mesh = mesh
-        self.fade_offset = fade_offset
-
-    def build_move(self, prev_pos, next_pos, factor):
-        self.prev_pos = tuple(prev_pos)
-        self.next_pos = tuple(next_pos)
-        self.current_pos = list(prev_pos)
-        self.z_factor = factor
-        self.z_offset = self._calc_z_offset(prev_pos)
-        self.traverse_complete = False
-        self.distance_checked = 0.0
-        axes_d = [self.next_pos[i] - self.prev_pos[i] for i in range(4)]
-        self.total_move_length = math.sqrt(sum([d * d for d in axes_d[:3]]))
-        self.axis_move = [not isclose(d, 0.0, abs_tol=1e-10) for d in axes_d]
-
-    def _calc_z_offset(self, pos):
-        z = self.z_mesh.calc_z(pos[0], pos[1])
-        offset = self.fade_offset
-        return self.z_factor * (z - offset) + offset
-
-    def _set_next_move(self, distance_from_prev):
-        t = distance_from_prev / self.total_move_length
-        if t > 1.0 or t < 0.0:
-            raise self.gcode.error(
-                "bed_mesh: Slice distance is negative "
-                "or greater than entire move length"
-            )
-        for i in range(4):
-            if self.axis_move[i]:
-                self.current_pos[i] = lerp(
-                    t, self.prev_pos[i], self.next_pos[i]
-                )
-
-    def split(self):
-        if not self.traverse_complete:
-            if self.axis_move[0] or self.axis_move[1]:
-                # X and/or Y axis move, traverse if necessary
-                while (
-                    self.distance_checked + self.move_check_distance
-                    < self.total_move_length
-                ):
-                    self.distance_checked += self.move_check_distance
-                    self._set_next_move(self.distance_checked)
-                    next_z = self._calc_z_offset(self.current_pos)
-                    if abs(next_z - self.z_offset) >= self.split_delta_z:
-                        self.z_offset = next_z
-                        return (
-                            self.current_pos[0],
-                            self.current_pos[1],
-                            self.current_pos[2] + self.z_offset,
-                            self.current_pos[3],
-                        )
-            # end of move reached
-            self.current_pos[:] = self.next_pos
-            self.z_offset = self._calc_z_offset(self.current_pos)
-            # Its okay to add Z-Offset to the final move, since it will not be
-            # used again.
-            self.current_pos[2] += self.z_offset
-            self.traverse_complete = True
-            return self.current_pos
-        else:
-            # Traverse complete
-            return None
 
 
 class ZMesh:

@@ -19,21 +19,6 @@
 
 #define FREQ_PERIPH (CONFIG_CLOCK_FREQ / 2)
 
-#define REG_ACC_BASE          (0x40015800)
-#define REG_ACC_CTRL1_ADDR    (REG_ACC_BASE + 0x0c)
-#define REG_ACC_CTRL1_STEP    (1 << 8)
-#define REG_ACC_CTRL1_ENTRIM  (1 << 1)
-#define REG_ACC_CTRL1_CALON   (1 << 0)
-
-#define REG_CRM_BASE              (0x40021000)
-#define REG_CRM_CTRL_HICKEN       (1 << 0)
-#define REG_CRM_MISC1_ADDR        (REG_CRM_BASE + 0x30)
-#define REG_CRM_MISC1_HICKDIV     (1 << 25)
-#define REG_CRM_MISC3_ADDR        (REG_CRM_BASE + 0x54)
-#define REG_CRM_MISC3_HICK_TO_USB (1 << 8)
-#define REG_CRM_APB2EN_ACCEN      (1 << 22)
-
-
 // Map a peripheral address to its enable bits
 struct cline
 lookup_clock_line(uint32_t periph_base)
@@ -83,25 +68,9 @@ clock_setup(void)
             cfgr |= RCC_CFGR_PLLXTPRE_HSE_DIV2;
         else
             div /= 2;
-        if (div <= 16) {
-            cfgr |= (div - 2) << RCC_CFGR_PLLMULL_Pos;
-        } else { // only at32f4 exceeds 16
-            cfgr |= ((div - 1) & 0xF) << RCC_CFGR_PLLMULL_Pos;
-            cfgr |= ((div - 1) & 0x30) << (29-4); // PLLMULT UPPER
-            cfgr |= (2 << 22) | (1 << 27); // usb /4, USBDIV
-            cfgr |= (1 << 31); // PLLRANGE
-            cfgr |= (1 << 28); // ADCDIV UPPER /16 total
-        }
-
-        if (CONFIG_CLOCK_FREQ > 192000000) { // at32 and needs hick for usb
-            RCC->APB2ENR |= REG_CRM_APB2EN_ACCEN; // enable ACC clock domain
-            RCC->CR |= RCC_CR_HSION; // turn on hick aka HSI for f1
-            *((uint32_t *)REG_ACC_CTRL1_ADDR) |= REG_ACC_CTRL1_ENTRIM | REG_ACC_CTRL1_CALON; // enable clock recovery
-            *((uint32_t *)REG_CRM_MISC1_ADDR) |= REG_CRM_MISC1_HICKDIV; // set to 48mhz output
-            *((uint32_t *)REG_CRM_MISC3_ADDR) |= REG_CRM_MISC3_HICK_TO_USB; // drive hick to usb
-        }
+        cfgr |= (div - 2) << RCC_CFGR_PLLMULL_Pos;
     } else {
-        // Configure 72Mhz PLL from internal 8Mhz oscillator (HSI)
+        // Configure 64Mhz PLL from internal 8Mhz oscillator (HSI)
         uint32_t div2 = (CONFIG_CLOCK_FREQ / 8000000) * 2;
         cfgr = ((0 << RCC_CFGR_PLLSRC_Pos)
                 | ((div2 - 2) << RCC_CFGR_PLLMULL_Pos));
@@ -111,8 +80,7 @@ clock_setup(void)
     RCC->CR |= RCC_CR_PLLON;
 
     // Set flash latency
-    if (!CONFIG_MACH_AT32F403)
-        FLASH->ACR = (2 << FLASH_ACR_LATENCY_Pos) | FLASH_ACR_PRFTBE;
+    FLASH->ACR = (2 << FLASH_ACR_LATENCY_Pos) | FLASH_ACR_PRFTBE;
 
     // Wait for PLL lock
     while (!(RCC->CR & RCC_CR_PLLRDY))
@@ -308,13 +276,18 @@ armcm_main(void)
 
     // Disable JTAG to free PA15, PB3, PB4
     enable_pclock(AFIO_BASE);
-    if (CONFIG_STM32F103GD_DISABLE_SWD)
-        // GigaDevice clone can't enable PA13/PA14 at runtime - enable here
-        stm32f1_alternative_remap(AFIO_MAPR_SWJ_CFG_Msk,
-                                  AFIO_MAPR_SWJ_CFG_DISABLE);
-    else
-        stm32f1_alternative_remap(AFIO_MAPR_SWJ_CFG_Msk,
-                                  AFIO_MAPR_SWJ_CFG_JTAGDISABLE);
+    stm32f1_alternative_remap(AFIO_MAPR_SWJ_CFG_Msk,
+                              AFIO_MAPR_SWJ_CFG_JTAGDISABLE);
+
+    // Enable the DWT cycle counter before anything can read it. On
+    // Cortex-M4/M7 an unclocked DWT read merely returns zero, but on
+    // Cortex-M3 the unit is dark until DEMCR.TRCENA is set and the read
+    // faults. timer_read_time() dereferences DWT->CYCCNT directly, and
+    // runtime_init() (which calls it) is linked ahead of timer_init(),
+    // where TRCENA would otherwise first be set.
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 
     sched_main();
 }

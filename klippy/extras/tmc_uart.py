@@ -11,9 +11,8 @@
 
 
 class MCU_analog_mux:
-    def __init__(self, mcu, cmd_queue, select_pins_desc):
+    def __init__(self, mcu, select_pins_desc):
         self.mcu = mcu
-        self.cmd_queue = cmd_queue
         ppins = mcu.get_printer().lookup_object("pins")
         select_pin_params = [
             ppins.lookup_pin(spd, can_invert=True) for spd in select_pins_desc
@@ -31,7 +30,7 @@ class MCU_analog_mux:
 
     def build_config(self):
         self.update_pin_cmd = self.mcu.lookup_command(
-            "update_digital_out oid=%c value=%c", cq=self.cmd_queue
+            "update_digital_out oid=%c value=%c"
         )
 
     def get_instance_id(self, select_pins_desc):
@@ -96,19 +95,21 @@ class MCU_TMC_uart_bitbang:
         self.rx_pin = rx_pin_params["pin"]
         self.tx_pin = tx_pin_params["pin"]
         self.oid = self.mcu.create_oid()
-        self.cmd_queue = self.mcu.alloc_command_queue()
         self.analog_mux = None
         if select_pins_desc is not None:
-            self.analog_mux = MCU_analog_mux(
-                self.mcu, self.cmd_queue, select_pins_desc
-            )
+            self.analog_mux = MCU_analog_mux(self.mcu, select_pins_desc)
         self.instances = {}
         self.tmcuart_send_cmd = None
         self.mcu.register_config_callback(self.build_config)
 
     def build_config(self):
         baud = TMC_BAUD_RATE
-        mcu_type = self.mcu.get_constants().get("MCU", "")
+        mcu_type = (
+            self.mcu.get_command_channel()
+            .get_msgparser()
+            .get_constants()
+            .get("MCU", "")
+        )
         if mcu_type.startswith("atmega") or mcu_type.startswith("at90usb"):
             baud = TMC_BAUD_RATE_AVR
         bit_ticks = self.mcu.seconds_to_clock(1.0 / baud)
@@ -120,8 +121,6 @@ class MCU_TMC_uart_bitbang:
             "tmcuart_send oid=%c write=%*s read=%c",
             "tmcuart_response oid=%c read=%*s",
             oid=self.oid,
-            cq=self.cmd_queue,
-            is_async=True,
         )
 
     def register_instance(
@@ -225,7 +224,7 @@ class MCU_TMC_uart_bitbang:
     def reg_write(self, instance_id, addr, reg, val, print_time=None):
         minclock = 0
         if print_time is not None:
-            minclock = self.mcu.print_time_to_clock(print_time)
+            minclock = self.mcu.get_clocksync().print_time_to_clock(print_time)
         if self.analog_mux is not None:
             self.analog_mux.activate(instance_id)
         msg = self._encode_write(0xF5, addr, reg | 0x80, val)

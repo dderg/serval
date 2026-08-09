@@ -5,6 +5,7 @@
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
 #include "board/io.h" // readb, writeb
+#include "board/misc.h" // timer_is_before, timer_from_us, timer_read_time
 #include "command.h" // shutdown
 #include "gpio.h" // spi_setup
 #include "internal.h" // gpio_peripheral
@@ -129,9 +130,8 @@ spi_prepare(struct spi_config config)
 {
     SPI_TypeDef *spi = config.spi;
     uint32_t cr1 = spi->CR1;
-    if (!CONFIG_MACH_AT32F403)
-        if (cr1 == config.spi_cr1)
-            return;
+    if (cr1 == config.spi_cr1)
+        return;
     // The SPE bit must be disabled before changing CPOL/CPHA bits
     spi->CR1 = cr1 & ~SPI_CR1_SPE;
     spi->CR1; // Force flush of previous write
@@ -145,14 +145,20 @@ spi_transfer(struct spi_config config, uint8_t receive_data,
     SPI_TypeDef *spi = config.spi;
     while (len--) {
         writeb((void*)&spi->DR, *data);
-        while (!(spi->SR & SPI_SR_RXNE))
-            ;
+        uint32_t rxne_deadline = timer_read_time() + timer_from_us(100);
+        while (!(spi->SR & SPI_SR_RXNE)) {
+            if (!timer_is_before(timer_read_time(), rxne_deadline))
+                shutdown("spi rx timeout");
+        }
         uint8_t rdata = readb((void*)&spi->DR);
         if (receive_data)
             *data = rdata;
         data++;
     }
     // Wait for any remaining SCLK updates before returning
-    while ((spi->SR & (SPI_SR_TXE|SPI_SR_BSY)) != SPI_SR_TXE)
-        ;
+    uint32_t bsy_deadline = timer_read_time() + timer_from_us(100);
+    while ((spi->SR & (SPI_SR_TXE|SPI_SR_BSY)) != SPI_SR_TXE) {
+        if (!timer_is_before(timer_read_time(), bsy_deadline))
+            shutdown("spi bsy timeout");
+    }
 }

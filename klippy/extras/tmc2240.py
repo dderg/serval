@@ -276,11 +276,12 @@ GLOBALSCALER_ERROR = (
 
 
 class TMC2240CurrentHelper(tmc.BaseTMCCurrentHelper):
-    def __init__(self, config, mcu_tmc):
+    def __init__(self, config, mcu_tmc, direct_mode=False):
         self.Rref = config.getfloat("rref", minval=12000.0, maxval=60000.0)
         super().__init__(
             config, mcu_tmc, self._get_ifs_rms(3), has_sense_resistor=False
         )
+        self._direct_mode = direct_mode
 
         current_range = self._calc_current_range(self.actual_current)
         self.current_range = config.getint(
@@ -292,7 +293,7 @@ class TMC2240CurrentHelper(tmc.BaseTMCCurrentHelper):
             self.req_run_current, self.req_hold_current
         )
         self.fields.set_field("globalscaler", gscaler)
-        self.fields.set_field("ihold", ihold)
+        self.fields.set_field("ihold", irun if self._direct_mode else ihold)
         self.fields.set_field("irun", irun)
 
     def _get_ifs_rms(self, current_range=None):
@@ -373,7 +374,7 @@ class TMC2240CurrentHelper(tmc.BaseTMCCurrentHelper):
         )
         val = self.fields.set_field("globalscaler", gscaler)
         self.mcu_tmc.set_register("GLOBALSCALER", val, print_time)
-        self.fields.set_field("ihold", ihold)
+        self.fields.set_field("ihold", irun if self._direct_mode else ihold)
         val = self.fields.set_field("irun", irun)
         self.mcu_tmc.set_register("IHOLD_IRUN", val, print_time)
 
@@ -383,26 +384,47 @@ class TMC2240CurrentHelper(tmc.BaseTMCCurrentHelper):
 ######################################################################
 
 
-class TMC2240:
+class TMC2240(tmc.TMCPhaseStepping):
+    PHASE_DIRECT_REGISTER = "DIRECT_MODE"
+
     def __init__(self, config):
         # Setup mcu communication
+        self.printer = config.get_printer()
         self.fields = tmc.FieldHelper(Fields, SignedFields, FieldFormatters)
-        if config.get("uart_pin", None) is not None:
-            # use UART for communication
+        self.name = " ".join(config.get_name().split()[1:])
+        self._setup_phase_stepping(config)
+        uses_uart = config.get("uart_pin", None) is not None
+        if self._phase_stepping and uses_uart:
+            raise config.error(
+                "phase_stepping=True requires SPI communication; [%s] is "
+                "configured with uart_pin" % config.get_name()
+            )
+        if uses_uart:
             self.mcu_tmc = tmc_uart.MCU_TMC_uart(
                 config, Registers, self.fields, 7, TMC_FREQUENCY
             )
         else:
-            # Use SPI bus for communication
             self.mcu_tmc = tmc2130.MCU_TMC_SPI(
                 config, Registers, self.fields, TMC_FREQUENCY
             )
-        # Allow virtual pins to be created
-        tmc.TMCVirtualPinHelper(config, self.mcu_tmc)
         # Register commands
-        current_helper = TMC2240CurrentHelper(config, self.mcu_tmc)
+        current_helper = TMC2240CurrentHelper(
+            config,
+            self.mcu_tmc,
+            direct_mode=self._phase_stepping,
+        )
         cmdhelper = tmc.TMCCommandHelper(config, self.mcu_tmc, current_helper)
+        self._echeck_helper = cmdhelper.echeck_helper
+        self._mode_tracker = cmdhelper.mode_tracker
+        if self._phase_stepping:
+            cmdhelper.set_post_enable_callback(self._enter_phase_mode_single)
         cmdhelper.setup_register_dump(ReadRegisters)
+        # Allow virtual pins to be created
+        self._virtual_pin_helper = tmc.TMCVirtualPinHelper(
+            config, self.mcu_tmc, cmdhelper.mode_tracker
+        )
+        if self._phase_stepping:
+            self._virtual_pin_helper.phase_mode_helper = self
         self.get_phase_offset = cmdhelper.get_phase_offset
         self.get_status = cmdhelper.get_status
         # Setup basic register values
@@ -450,6 +472,12 @@ class TMC2240:
         set_config_field(config, "pwm_lim", 12)
         #   TPOWERDOWN
         set_config_field(config, "tpowerdown", 10)
+        if self._phase_stepping:
+            # In direct_mode the driver uses IHOLD for current scaling
+            # (no step pulses to trigger IRUN). Extend the standstill
+            # timeout to maximum so the driver doesn't power-down the
+            # coils while phase stepping is active.
+            self.fields.set_field("tpowerdown", 255)
         #   SG4_THRS
         set_config_field(config, "sg4_angle_offset", 1)
         #   DRV_CONF

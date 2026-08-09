@@ -77,12 +77,11 @@ class HD44780:
                 self.mcu.seconds_to_clock(HD44780_DELAY),
             )
         )
-        cmd_queue = self.mcu.alloc_command_queue()
         self.send_cmds_cmd = self.mcu.lookup_command(
-            "hd44780_send_cmds oid=%c cmds=%*s", cq=cmd_queue
+            "hd44780_send_cmds oid=%c cmds=%*s"
         )
         self.send_data_cmd = self.mcu.lookup_command(
-            "hd44780_send_data oid=%c data=%*s", cq=cmd_queue
+            "hd44780_send_data oid=%c data=%*s"
         )
 
     def send(self, cmds, is_data=False):
@@ -128,7 +127,9 @@ class HD44780:
         # Reset (set positive direction ; enable display and hide cursor)
         init.append([0x06, 0x0C])
         for i, cmds in enumerate(init):
-            minclock = self.mcu.print_time_to_clock(print_time + i * 0.100)
+            minclock = self.mcu.get_clocksync().print_time_to_clock(
+                print_time + i * 0.100
+            )
             self.send_cmds_cmd.send([self.oid, cmds], minclock=minclock)
         self.flush()
 

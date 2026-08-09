@@ -424,4 +424,6 @@ class GradientMixingExtruder(MixingExtruder):
 
 
 def load_config(config):
-    return GradientMixingExtruder(config)
+    raise config.error(
+        "[mixing_extruder] is not supported under the new motion path"
+    )

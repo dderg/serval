@@ -5,21 +5,30 @@
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
 #include <stdarg.h> // va_start
+#include <stdio.h>  // fprintf (MACH_LINUX diag)
 #include <string.h> // memcpy
+#include "autoconf.h" // CONFIG_MACH_LINUX
 #include "board/io.h" // readb
 #include "board/irq.h" // irq_poll
 #include "board/misc.h" // crc16_ccitt
 #include "board/pgm.h" // READP
 #include "command.h" // output_P
+#include "mcu_demux.h" // mcu_demux_klipper_buf
 #include "sched.h" // sched_is_shutdown
 
 static uint8_t next_sequence = MESSAGE_DEST;
 
+// On >32-bit targets a buffer pointer cannot ride in a uint32_t arg, so
+// it is encoded as an offset from the buffer commands are dispatched
+// from. Since the transport demux landed, that is mcu_demux's klipper
+// buffer — NOT console_receive_buffer(); encoding against the console
+// buffer only round-trips when the linker happens to place the two
+// statics within range, and segfaults otherwise.
 static uint32_t
 command_encode_ptr(void *p)
 {
     if (sizeof(size_t) > sizeof(uint32_t))
-        return p - console_receive_buffer();
+        return (const uint8_t *)p - mcu_demux_klipper_buf();
     return (size_t)p;
 }
 
@@ -27,7 +36,7 @@ void *
 command_decode_ptr(uint32_t v)
 {
     if (sizeof(size_t) > sizeof(uint32_t))
-        return console_receive_buffer() + v;
+        return (void *)(uintptr_t)(mcu_demux_klipper_buf() + v);
     return (void*)(size_t)v;
 }
 
@@ -173,8 +182,13 @@ command_encodef(uint8_t *buf, const struct command_encoder *ce, va_list args)
         case PT_progmem_buffer:
         case PT_buffer: {
             v = va_arg(args, int);
-            if (v > maxend-p)
-                v = maxend-p;
+            // Reserve one byte for the data_len header itself; without this
+            // a fully saturated v=maxend-p caused total payload to overrun
+            // by one (msglen = MESSAGE_MAX + 1), producing wire frames the
+            // host's demuxer rejects with KLIPPER_LEN_MAX=64.
+            uint_fast8_t budget = (p < maxend) ? (uint_fast8_t)(maxend - p - 1) : 0;
+            if (v > budget)
+                v = budget;
             *p++ = v;
             uint8_t *s = va_arg(args, uint8_t*);
             if (t == PT_progmem_buffer)
@@ -291,10 +305,28 @@ command_find_block(uint8_t *buf, uint_fast8_t buf_len, uint_fast8_t *pop_count)
     *pop_count = msglen;
     // Check sequence number
     if (msgseq != next_sequence) {
+#if CONFIG_MACH_LINUX
+        fprintf(stderr, "[mcu-seq] MISMATCH msgseq=0x%02x next_sequence=0x%02x msglen=%u\n",
+                msgseq, next_sequence, msglen);
+        fflush(stderr);
+#endif
         // Lost message - discard messages until it is retransmitted
         goto nak;
     }
     next_sequence = ((msgseq + 1) & MESSAGE_SEQ_MASK) | MESSAGE_DEST;
+#if CONFIG_MACH_LINUX
+    {
+        uint8_t *p = &buf[MESSAGE_HEADER_SIZE];
+        uint_fast16_t cmdid = 0;
+        if (msglen > MESSAGE_MIN) {
+            cmdid = *p;
+            if (cmdid >= 0x80) cmdid = (cmdid & 0x7f) | (*++p << 7);
+        }
+        fprintf(stderr, "[mcu-seq] OK msgseq=0x%02x cmdid=%u msglen=%u\n",
+                msgseq, (unsigned)cmdid, msglen);
+        fflush(stderr);
+    }
+#endif
     return 1;
 
 need_more_data:
@@ -336,9 +368,22 @@ command_dispatch(uint8_t *buf, uint_fast8_t msglen)
         uint32_t args[READP(cp->num_args)];
         p = command_parsef(p, msgend, cp, args);
         if (sched_is_shutdown() && !(READP(cp->flags) & HF_IN_SHUTDOWN)) {
+#if CONFIG_MACH_LINUX
+            fprintf(stderr, "[mcu-dispatch] SKIP cmdid=%u (shutdown, no HF_IN_SHUTDOWN)\n",
+                    (unsigned)cmdid);
+            fflush(stderr);
+#endif
             sched_report_shutdown();
             continue;
         }
+#if CONFIG_MACH_LINUX
+        {
+            void (*fn)(uint32_t*) = READP(cp->func);
+            fprintf(stderr, "[mcu-dispatch] CALL cmdid=%u func=%p\n",
+                    (unsigned)cmdid, (void*)fn);
+            fflush(stderr);
+        }
+#endif
         irq_poll();
         void (*func)(uint32_t*) = READP(cp->func);
         func(args);

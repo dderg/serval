@@ -1,0 +1,211 @@
+use geometry::curve::to_collinear_bezier;
+#[cfg(test)]
+use geometry::curve::{g5_control_points, g51_control_points};
+use geometry::segment::{CubicSegment, FollowerDemand, SourceRange};
+use nurbs::VectorNurbs;
+
+const DISPLACEMENT_EPSILON: f64 = 1e-9;
+
+#[derive(Debug)]
+pub struct ClassifiedMove {
+    pub segment: CubicSegment,
+    pub distance_mm: f64,
+}
+
+impl ClassifiedMove {
+    #[must_use]
+    pub fn nominal_duration(&self) -> f64 {
+        if self.segment.feedrate_mm_s <= 0.0 {
+            return 0.0;
+        }
+        self.distance_mm / self.segment.feedrate_mm_s
+    }
+}
+
+pub fn classify_and_build(
+    start: [f64; 3],
+    dx: f64,
+    dy: f64,
+    dz: f64,
+    followers: &[(usize, f64)],
+    feedrate_mm_s: f64,
+) -> Result<ClassifiedMove, ClassifyError> {
+    let end = [start[0] + dx, start[1] + dy, start[2] + dz];
+    let spatial_distance = (dx * dx + dy * dy + dz * dz).sqrt();
+    let has_spatial = dx.abs() > DISPLACEMENT_EPSILON
+        || dy.abs() > DISPLACEMENT_EPSILON
+        || dz.abs() > DISPLACEMENT_EPSILON;
+    let active_followers: Vec<(usize, f64)> = followers
+        .iter()
+        .copied()
+        .filter(|&(_, delta)| delta.abs() > DISPLACEMENT_EPSILON)
+        .collect();
+
+    if !has_spatial && active_followers.is_empty() {
+        return Err(ClassifyError::ZeroDisplacement);
+    }
+
+    let source = SourceRange {
+        start_line: 0,
+        end_line: 0,
+    };
+
+    if has_spatial {
+        let xyz = build_cubic(to_collinear_bezier(start, end))?;
+        let demands = active_followers
+            .iter()
+            .map(|&(axis_index, delta)| {
+                FollowerDemand::constant(axis_index, delta / spatial_distance)
+            })
+            .collect();
+        let segment = CubicSegment::try_new(xyz, demands, feedrate_mm_s, source)
+            .map_err(|e| ClassifyError::SegmentConstruction(format!("{e:?}")))?;
+        return Ok(ClassifiedMove {
+            segment,
+            distance_mm: spatial_distance,
+        });
+    }
+
+    let virtual_path_mm = active_followers
+        .iter()
+        .map(|(_, delta)| delta.abs())
+        .fold(0.0_f64, f64::max);
+    let xyz = build_cubic(to_collinear_bezier(start, start))?;
+    let demands = active_followers
+        .iter()
+        .map(|&(axis_index, delta)| FollowerDemand::constant(axis_index, delta / virtual_path_mm))
+        .collect();
+    let segment =
+        CubicSegment::try_new_virtual(xyz, demands, feedrate_mm_s, source, virtual_path_mm)
+            .map_err(|e| ClassifyError::SegmentConstruction(format!("{e:?}")))?;
+    Ok(ClassifiedMove {
+        segment,
+        distance_mm: virtual_path_mm,
+    })
+}
+
+pub fn build_move(
+    start: [f64; 3],
+    delta: [f64; 3],
+    extruder_axis: usize,
+    e_delta: f64,
+    limits: geometry::VelocityLimits,
+    feedrate_mm_s: f64,
+    line_no: u32,
+) -> Result<geometry::Move, geometry::FrontendError> {
+    let end = [
+        start[0] + delta[0],
+        start[1] + delta[1],
+        start[2] + delta[2],
+    ];
+    let ctx = geometry::MoveContext {
+        extruder_axis,
+        feedrate_mm_s,
+        limits,
+        source: SourceRange {
+            start_line: line_no,
+            end_line: line_no,
+        },
+    };
+    geometry::line_move(start, end, e_delta, ctx)
+}
+
+#[cfg(test)]
+fn classify_curve(
+    cps: [[f64; 3]; 4],
+    followers: &[(usize, f64)],
+    feedrate_mm_s: f64,
+) -> Result<ClassifiedMove, ClassifyError> {
+    let xyz = build_cubic(cps)?;
+    let arc_len = nurbs::arc_length::path_arc_length(&xyz);
+    if arc_len <= DISPLACEMENT_EPSILON {
+        return Err(ClassifyError::ZeroDisplacement);
+    }
+    let demands = followers
+        .iter()
+        .copied()
+        .filter(|&(_, d)| d.abs() > DISPLACEMENT_EPSILON)
+        .map(|(axis_index, delta)| FollowerDemand::constant(axis_index, delta / arc_len))
+        .collect();
+    let source = SourceRange {
+        start_line: 0,
+        end_line: 0,
+    };
+    let segment = CubicSegment::try_new(xyz, demands, feedrate_mm_s, source)
+        .map_err(|e| ClassifyError::SegmentConstruction(format!("{e:?}")))?;
+    Ok(ClassifiedMove {
+        segment,
+        distance_mm: arc_len,
+    })
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn classify_bezier(
+    start: [f64; 3],
+    i: f64,
+    j: f64,
+    p: f64,
+    q: f64,
+    dx: f64,
+    dy: f64,
+    dz: f64,
+    followers: &[(usize, f64)],
+    feedrate_mm_s: f64,
+) -> Result<ClassifiedMove, ClassifyError> {
+    classify_curve(
+        g5_control_points(start, i, j, p, q, dx, dy, dz),
+        followers,
+        feedrate_mm_s,
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn classify_quadratic(
+    start: [f64; 3],
+    i: f64,
+    j: f64,
+    dx: f64,
+    dy: f64,
+    dz: f64,
+    followers: &[(usize, f64)],
+    feedrate_mm_s: f64,
+) -> Result<ClassifiedMove, ClassifyError> {
+    classify_curve(
+        g51_control_points(start, i, j, dx, dy, dz),
+        followers,
+        feedrate_mm_s,
+    )
+}
+
+fn build_cubic(cps: [[f64; 3]; 4]) -> Result<VectorNurbs<3>, ClassifyError> {
+    VectorNurbs::<3>::try_new(
+        3,
+        vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+        cps.to_vec(),
+    )
+    .map_err(|e| ClassifyError::NurbsConstruction(format!("{e:?}")))
+}
+
+#[derive(Debug)]
+pub enum ClassifyError {
+    ZeroDisplacement,
+    NurbsConstruction(String),
+    SegmentConstruction(String),
+}
+
+impl std::fmt::Display for ClassifyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroDisplacement => write!(f, "zero displacement move"),
+            Self::NurbsConstruction(e) => write!(f, "NURBS construction: {e}"),
+            Self::SegmentConstruction(e) => write!(f, "segment construction: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ClassifyError {}
+
+#[cfg(test)]
+mod tests;

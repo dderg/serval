@@ -4,6 +4,8 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
+from .. import structured_log
+
 
 class PrintStats:
     def __init__(self, config):
@@ -33,17 +35,33 @@ class PrintStats:
 
     def note_start(self):
         curtime = self.reactor.monotonic()
-        if self.print_start_time is None:
+        is_new_print = self.print_start_time is None
+        resumed_pause_duration = None
+        if is_new_print:
             self.print_start_time = curtime
         elif self.last_pause_time is not None:
-            # Update pause time duration
-            pause_duration = curtime - self.last_pause_time
-            self.prev_pause_duration += pause_duration
+            resumed_pause_duration = curtime - self.last_pause_time
+            self.prev_pause_duration += resumed_pause_duration
             self.last_pause_time = None
-        # Reset last e-position
         gc_status = self.gcode_move.get_status(curtime)
         self.last_epos = gc_status["position"].e
         self.state = "printing"
+        if is_new_print:
+            structured_log.bind_print(structured_log.make_print_id())
+            structured_log.event(
+                "print_stats",
+                "print.start",
+                msg="print started: %s" % (self.filename,),
+                file=self.filename,
+            )
+        elif resumed_pause_duration is not None:
+            structured_log.event(
+                "print_stats",
+                "print.resume",
+                msg="print resumed after pause_duration_s=%.3f"
+                % (resumed_pause_duration,),
+                pause_duration_s=resumed_pause_duration,
+            )
         self.printer.send_event("print_stats:start_printing")
         self.error_message = ""
 
@@ -51,35 +69,64 @@ class PrintStats:
         if self.last_pause_time is None:
             curtime = self.reactor.monotonic()
             self.last_pause_time = curtime
-            # update filament usage
             self._update_filament_usage(curtime)
+            structured_log.event(
+                "print_stats", "print.pause", msg="print paused"
+            )
         if self.state != "error":
             self.state = "paused"
             self.printer.send_event("print_stats:paused_printing")
 
     def note_complete(self):
-        self._note_finish("complete")
+        finished = self._note_finish("complete")
         self.printer.send_event("print_stats:complete_printing")
+        if finished:
+            self._emit_print_end(
+                "complete", "", self.total_duration, self.filament_used
+            )
+        structured_log.clear_print()
 
     def note_error(self, message):
-        self._note_finish("error", message)
+        finished = self._note_finish("error", message)
         self.printer.send_event("print_stats:error_printing")
+        if finished:
+            self._emit_print_end(
+                "error", message, self.total_duration, self.filament_used
+            )
+        structured_log.clear_print()
 
     def note_cancel(self):
-        self._note_finish("cancelled")
+        finished = self._note_finish("cancelled")
         self.printer.send_event("print_stats:cancelled_printing")
+        if finished:
+            self._emit_print_end(
+                "cancelled", "", self.total_duration, self.filament_used
+            )
+        structured_log.clear_print()
+
+    def _emit_print_end(self, outcome, reason, duration_s, filament_mm):
+        structured_log.event(
+            "print_stats",
+            "print.end",
+            msg="print ended: outcome=%s reason=%s duration_s=%.3f"
+            % (outcome, reason, duration_s),
+            outcome=outcome,
+            reason=reason,
+            duration_s=duration_s,
+            filament_mm=filament_mm,
+        )
 
     def _note_finish(self, state, error_message=""):
         if self.print_start_time is None:
-            return
+            return False
         self.state = state
         self.error_message = error_message
         eventtime = self.reactor.monotonic()
         self.total_duration = eventtime - self.print_start_time
         if self.filament_used < 0.0000001:
-            # No positive extusion detected during print
             self.init_duration = self.total_duration - self.prev_pause_duration
         self.print_start_time = None
+        return True
 
     cmd_SET_PRINT_STATS_INFO_help = (
         "Pass slicer info like layer act and total to klipper"
@@ -107,6 +154,15 @@ class PrintStats:
             self.info_current_layer = min(current_layer, self.info_total_layer)
 
     def reset(self):
+        if structured_log.get_print():
+            reset_duration_s = (
+                self.reactor.monotonic() - self.print_start_time
+                if self.print_start_time is not None
+                else self.total_duration
+            )
+            self._emit_print_end(
+                "reset", "", reset_duration_s, self.filament_used
+            )
         self.filename = self.error_message = ""
         self.state = "standby"
         self.prev_pause_duration = self.last_epos = 0.0
@@ -116,6 +172,7 @@ class PrintStats:
         self.info_total_layer = None
         self.info_current_layer = None
         self.printer.send_event("print_stats:reset")
+        structured_log.clear_print()
 
     def get_status(self, eventtime):
         time_paused = self.prev_pause_duration

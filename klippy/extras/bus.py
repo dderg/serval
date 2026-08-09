@@ -8,7 +8,7 @@ from klippy import mcu
 
 def resolve_bus_name(mcu, param, bus):
     # Find enumerations for the given bus
-    enumerations = mcu.get_enumerations()
+    enumerations = mcu.get_command_channel().get_msgparser().get_enumerations()
     enums = enumerations.get(param, enumerations.get("bus"))
     if enums is None:
         if bus is None:
@@ -25,7 +25,7 @@ def resolve_bus_name(mcu, param, bus):
     if bus not in enums:
         raise ppins.error("Unknown %s '%s'" % (param, bus))
     # Check for reserved bus pins
-    constants = mcu.get_constants()
+    constants = mcu.get_command_channel().get_msgparser().get_constants()
     reserve_pins = constants.get("BUS_PINS_%s" % (bus,), None)
     pin_resolver = ppins.get_pin_resolver(mcu_name)
     if reserve_pins is not None:
@@ -46,6 +46,7 @@ class MCU_SPI:
     ):
         self.mcu = mcu
         self.bus = bus
+        self.cs_pin = pin
         self.speed = speed
         # Config SPI object (set all CS pins high before spi_set_bus commands)
         self.oid = mcu.create_oid()
@@ -74,7 +75,6 @@ class MCU_SPI:
                 "spi_set_bus oid=%d spi_bus=%%s mode=%d rate=%d"
                 % (self.oid, mode, speed)
             )
-        self.cmd_queue = mcu.alloc_command_queue()
         mcu.register_config_callback(self.build_config)
         self.spi_send_cmd = self.spi_transfer_cmd = None
 
@@ -91,9 +91,6 @@ class MCU_SPI:
     def get_mcu(self):
         return self.mcu
 
-    def get_command_queue(self):
-        return self.cmd_queue
-
     def build_config(self):
         if "%" in self.config_fmt:
             bus = resolve_bus_name(self.mcu, "spi_bus", self.bus)
@@ -107,14 +104,11 @@ class MCU_SPI:
                 pulse_ticks = self.mcu.seconds_to_clock(1.0 / self.speed)
                 self.config_fmt = self.config_fmt_ticks % (pulse_ticks,)
         self.mcu.add_config_cmd(self.config_fmt)
-        self.spi_send_cmd = self.mcu.lookup_command(
-            "spi_send oid=%c data=%*s", cq=self.cmd_queue
-        )
+        self.spi_send_cmd = self.mcu.lookup_command("spi_send oid=%c data=%*s")
         self.spi_transfer_cmd = self.mcu.lookup_query_command(
             "spi_transfer oid=%c data=%*s",
             "spi_transfer_response oid=%c response=%*s",
             oid=self.oid,
-            cq=self.cmd_queue,
         )
 
     def spi_send(self, data, minclock=0, reqclock=0):
@@ -225,7 +219,6 @@ class MCU_I2C:
                 "i2c_set_bus oid=%d i2c_bus=%%s rate=%d address=%d"
                 % (self.oid, speed, addr)
             )
-        self.cmd_queue = self.mcu.alloc_command_queue()
         self.mcu.register_config_callback(self.build_config)
         self.i2c_write_cmd = self.i2c_read_cmd = None
         printer = self.mcu.get_printer()
@@ -247,9 +240,6 @@ class MCU_I2C:
     def get_i2c_address(self):
         return self.i2c_address
 
-    def get_command_queue(self):
-        return self.cmd_queue
-
     def build_config(self):
         if "%" in self.config_fmt:
             bus = resolve_bus_name(self.mcu, "i2c_bus", self.bus)
@@ -264,13 +254,12 @@ class MCU_I2C:
                 self.config_fmt = self.config_fmt_ticks % (pulse_ticks,)
         self.mcu.add_config_cmd(self.config_fmt)
         self.i2c_write_cmd = self.mcu.lookup_command(
-            "i2c_write oid=%c data=%*s", cq=self.cmd_queue
+            "i2c_write oid=%c data=%*s"
         )
         self.i2c_read_cmd = self.mcu.lookup_query_command(
             "i2c_read oid=%c reg=%*s read_len=%u",
             "i2c_read_response oid=%c response=%*s",
             oid=self.oid,
-            cq=self.cmd_queue,
         )
 
     def i2c_write_noack(self, data, minclock=0, reqclock=0):
@@ -336,9 +325,8 @@ def MCU_I2C_from_config(config, default_addr=None, default_speed=100000):
 ######################################################################
 
 
-# Helper code for a gpio that updates on a cmd_queue
 class MCU_bus_digital_out:
-    def __init__(self, mcu, pin_desc, cmd_queue=None, value=0):
+    def __init__(self, mcu, pin_desc, value=0):
         self.mcu = mcu
         self.oid = mcu.create_oid()
         ppins = mcu.get_printer().lookup_object("pins")
@@ -353,9 +341,6 @@ class MCU_bus_digital_out:
             % (self.oid, pin_params["pin"], value, value, 0)
         )
         mcu.register_config_callback(self.build_config)
-        if cmd_queue is None:
-            cmd_queue = mcu.alloc_command_queue()
-        self.cmd_queue = cmd_queue
         self.update_pin_cmd = None
 
     def get_oid(self):
@@ -364,12 +349,9 @@ class MCU_bus_digital_out:
     def get_mcu(self):
         return self.mcu
 
-    def get_command_queue(self):
-        return self.cmd_queue
-
     def build_config(self):
         self.update_pin_cmd = self.mcu.lookup_command(
-            "update_digital_out oid=%c value=%c", cq=self.cmd_queue
+            "update_digital_out oid=%c value=%c"
         )
 
     def update_digital_out(self, value, minclock=0, reqclock=0):
