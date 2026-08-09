@@ -27,12 +27,12 @@ The commanded advance is:
 advance(v) = linear_advance * v + nonlinear_offset * s(v / linearization_velocity)
 ```
 
-where `s` is either a bounded odd `tanh` curve or the reciprocal curve. Both nonlinear terms have the same small-signal slope, `nonlinear_offset / linearization_velocity`; `tanh` approaches its bound more quickly, while `recipr` approaches it more gradually.
+where `v` is the signed follower-axis velocity in mm/s and `s` is either a bounded odd `tanh` curve or the reciprocal curve. Both nonlinear terms have the same small-signal slope, `nonlinear_offset / linearization_velocity`; `tanh` approaches its bound more quickly, while `recipr` approaches it more gradually.
 
-- `linear_advance` is non-negative.
-- `nonlinear_offset` is non-negative. At zero, the processor reduces to linear pressure advance.
-- `linearization_velocity` must be positive.
+- `linear_advance` is non-negative and has units of seconds.
+- `nonlinear_offset` is non-negative and has units of mm. At zero, the processor reduces to linear pressure advance.
+- `linearization_velocity` must be positive and has units of mm/s.
 
-These parameters affect motor demand. Start conservatively, validate the entire motion configuration and extrusion limits, and tune on a controlled test rather than copying values from a different hotend, filament path, or machine. `SET_POST_PROCESSOR` can update a named processor for future replanning.
+These parameters affect motor demand. Start conservatively, validate the entire motion configuration and extrusion limits, and tune on a controlled test rather than copying values from a different hotend, filament path, or machine. Update a named processor for future replanning with, for example, `SET_POST_PROCESSOR NAME=extruder_pa LINEAR_ADVANCE=0.05`.
 
 For the complete schema, axis setup, and validation constraints, see [Motion configuration reference](Config_Reference_Motion.md#tanh_pressure_advance-and-recipr_pressure_advance).
