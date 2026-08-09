@@ -121,9 +121,10 @@ removed. Use the new
 [pwm_cycle_time](Config_Reference.md#pwm_cycle_time) module if it is
 necessary to dynamically change a pwm pin's cycle time.
 
-20240123: The output_pin `maximum_mcu_duration` parameter is
-deprecated. Use a `[pwm_tool]` config section instead. That section was
-subsequently removed and is retained here only as historical migration context. The option will be removed in the near future.
+20240123: The output_pin `maximum_mcu_duration` parameter was
+deprecated. At the time, users were directed to a `[pwm_tool]` config
+section. The option was removed on 20240912; `[pwm_tool]` has also since
+been removed.
 
 20240123: The output_pin `static_value` parameter is deprecated.
 Replace with `value` and `shutdown_value` parameters.  The option will
