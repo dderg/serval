@@ -139,6 +139,7 @@ nav:
       - Measuring_Resonances.md
       - Resonance_Compensation.md
       - Pressure_Advance.md
+      - Nonlinear_Pressure_Advance.md
   - Slicers:
     - Slicers.md
     - Exclude_Object.md

@@ -43,6 +43,7 @@ communication with the Kalico developers.
     using adxl345 accelerometer hardware to measure resonance.
 - [Pressure advance](Pressure_Advance.md): Calibrate extruder
   pressure.
+  - [Nonlinear pressure advance](Nonlinear_Pressure_Advance.md): Current Serval nonlinear post-processor configuration and limits.
 - [G-Codes](G-Codes.md): Information on commands supported by Kalico.
 - [Command Templates](Command_Templates.md): G-Code macros and
   conditional evaluation.
