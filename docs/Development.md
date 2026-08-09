@@ -14,7 +14,7 @@ For the comprehensive local CI workflow, `scripts/ci.sh` documents optional one-
 ## Bootstrap and native artifacts
 
 ```bash
-git clone https://github.com/alextverdyy/serval.git
+git clone https://github.com/dderg/serval.git
 cd serval
 uv sync --group dev
 ./scripts/build-native.sh

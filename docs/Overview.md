@@ -7,6 +7,7 @@ Serval documentation has two layers: the Serval motion stack and inherited Kalic
 - [README](../README.md): rationale and high-level capabilities.
 - [Quickstart](Quickstart.md): supported-board gate, host build, firmware matching, and first startup.
 - [Feature status](Feature_Status.md): real-hardware, simulator, and exploratory support tiers.
+- [Hardware support](Hardware_Support.md): supported MCU families, drives, and transports.
 - [Config migration](Config_Migration.md): transition from classic role-encoded configuration.
 - [Motion configuration reference](Config_Reference_Motion.md): complete current motion schema.
 - [Serval configuration examples](Serval_Configuration_Examples.md): annotated topology patterns.
