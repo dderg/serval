@@ -55,12 +55,7 @@ volumes:
 
 configs:
   repository_policy:
-    content: |
-      [repositories."dderg/serval"]
-      mode = "triage"
-      bot_login = "roboserval"
-      maintainers = ["dderg"]
-      sim_workflow = "ci-sim-e2e.yaml"
+    file: ./repositories.toml
 
 secrets:
   github_token:
