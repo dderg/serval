@@ -109,6 +109,7 @@ nav:
     - Config_Reference.md
     - Config_Reference_Motion.md
     - Hardware_Support.md
+    - Serval_Configuration_Examples.md
     - Kalico_Additions.md
     - Nonlinear_Pressure_Advance.md
     - PID.md
@@ -149,6 +150,11 @@ nav:
   - Developer Documentation:
     - Architecture.md
     - Development.md
+    - Motion_Operations.md
+    - Execution_and_Timing.md
+    - Homing_and_Endstops.md
+    - EtherCAT_Servos.md
+    - Diagnostics_and_Observability.md
     - API_Server.md
     - CANBUS_protocol.md
     - CONTRIBUTING.md

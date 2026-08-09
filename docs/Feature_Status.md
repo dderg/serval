@@ -35,7 +35,7 @@ Three tiers, honestly applied:
 | Drive type | Status | Notes |
 | --- | --- | --- |
 | Step/dir | **solid** | classic path |
-| Phase stepping | **verified in sim (2026-07)**; not recently exercised on real hardware | opt in with `phase_stepping: 1` in the stepper's existing section. Switch-endstop homing on a phase-stepped axis is not covered by the sim tests — only sensorless |
+| Phase stepping | **verified in sim (2026-07)**; not recently exercised on real hardware | opt in with `phase_stepping: True` in the applicable `[motor <name>]` section. Switch-endstop homing on a phase-stepped axis is not covered by the sim tests — only sensorless |
 | EtherCAT servo | **solid on the test bench** | industrial servo on X, steppers elsewhere |
 
 ### Host to micro-controller transports

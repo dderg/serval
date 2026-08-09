@@ -1766,3 +1766,18 @@ configured in the z_tilt_ng section:
   small misalgnments of the steppers. The amount of misalignment can be
   configured with the DELTA paramter. It iterates until the calculated
   positions cannot be improved any further. This is can be lengthy procedure.
+
+
+## Serval motion additions
+
+For current Serval motion commands—`SET_VELOCITY_LIMIT`, `RESET_VELOCITY_LIMIT`, `SET_POST_PROCESSOR`, `G5`, `G5.1`, `M400`, and their units/timing semantics—see [Motion operations](Motion_Operations.md). `M115` identifies this firmware as `Serval`.
+
+`DIAG_DUMP` requests live runtime diagnostics from every capable MCU and writes/updates structured events under `printer_data/logs/events/`; see [Diagnostics and observability](Diagnostics_and_Observability.md). It is safe to request diagnostics but it does not make an unsafe machine state safe.
+
+### Resonance buzz
+
+When `[resonance_buzz]` is loaded (normally by `resonance_tester`), `RESONANCE_BUZZ` drives one axis with parameters including `AXIS`, `FREQ` (default 50 Hz), `DURATION` (default 1 s), `ACCEL_PER_HZ` (default 75), optional `AMPLITUDE`, and optional `RAMP`. `RESONANCE_BUZZ_SWEEP` accepts `AXIS`, `FREQ_START` (default 5 Hz), `FREQ_END` (default 135 Hz), `ACCEL_PER_HZ`, optional `AMPLITUDE`, `HZ_PER_SEC` (default 1), optional `DURATION`, and `RAMP`. The implementation rejects demands beyond configured acceleration/amplitude limits. Keep the machine attended: phase stepping uses a continuous chirp while step/dir output is staircase-like.
+
+### EtherCAT servo operations
+
+`SERVO_CAPTURE_START`, `SERVO_CAPTURE_STOP`, `SERVO_PARAM`, `SERVO_SYNC`, `SERVO_DIFF_TRIM`, and `SERVO_STRAIN_COMP` are optional advanced servo-module commands. Their required configuration, exact arguments, state effects, and drive safety rules are documented in [EtherCAT servos](EtherCAT_Servos.md). Do not issue raw SDO, sync, trim, or strain commands from a generic macro.

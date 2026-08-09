@@ -1,3 +1,7 @@
+# Historical / bench note
+
+> **Not a current console-command reference.** This is an engineering record and may name servo-calibration commands that are no longer registered in `klippy`; the toolchain was extracted to the external Serval dashboard. Do not copy its commands into a printer macro. Use the current [EtherCAT servo guide](../EtherCAT_Servos.md), checked-in code, and bench procedures.
+
 # Servo feedforward + identification
 
 > See also the [serval-dashboard](https://github.com/dderg/serval-dashboard)

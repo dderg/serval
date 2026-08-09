@@ -9,6 +9,8 @@ Serval documentation has two layers: the Serval motion stack and inherited Kalic
 - [Feature status](Feature_Status.md): real-hardware, simulator, and exploratory support tiers.
 - [Config migration](Config_Migration.md): transition from classic role-encoded configuration.
 - [Motion configuration reference](Config_Reference_Motion.md): complete current motion schema.
+- [Serval configuration examples](Serval_Configuration_Examples.md): annotated topology patterns.
+- [Motion operations and G-code](Motion_Operations.md): Serval-specific move, limit, curve, and tuning commands.
 - [Architecture](Architecture.md): host, native pipeline, protocol, and firmware boundaries.
 - [Developer guide](Development.md): builds, tests, simulator, and contribution workflow.
 
@@ -76,6 +78,10 @@ communication with the Kalico developers.
 - [Motion configuration reference](Config_Reference_Motion.md): Current
   `[printer]`, `[kinematics]`, `[motor]`, `[axis]`, and post-processor schema.
 - [Architecture](Architecture.md): Serval pipeline and execution boundaries.
+- [Execution and timing](Execution_and_Timing.md): piece/stepcompress modes, timing, phase, and recovery.
+- [Homing and endstops](Homing_and_Endstops.md): guarded homing and multi-motor squaring.
+- [EtherCAT servos](EtherCAT_Servos.md): endpoint, servo configuration, and advanced operations.
+- [Diagnostics and observability](Diagnostics_and_Observability.md): structured-log incident workflow.
 - [Developer guide](Development.md): Native build, test, simulator, and review workflows.
 - [Documentation guide](Documentation_Guide.md): scope, authority, and maintenance rules.
 - [API Server](API_Server.md): Information on Kalico's command and
