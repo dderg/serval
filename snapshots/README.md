@@ -60,7 +60,7 @@ server runs, or host `snapshots/web/static/` anywhere static (both WASM
 bundles live inside it; `snapshot-tests.sh` builds them when stale). The
 public copy lives at <https://dderg.github.io/kalico/playground/> — the
 `playground-pages` workflow rebuilds it into the `playground/` corner of
-the `gh-pages` branch on every push to `sota-motion`.
+the `gh-pages` branch on every push to `main`.
 
 ## Layout
 

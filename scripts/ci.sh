@@ -349,7 +349,7 @@ job_install_hooks() {
     }
     git config core.hooksPath .githooks
     echo "pre-push hook enabled (core.hooksPath = .githooks)."
-    echo "  runs './scripts/ci.sh quick' before every push — incl. direct pushes to sota-motion"
+    echo "  runs './scripts/ci.sh quick' before every push — incl. direct pushes to main"
     echo "  bypass once:  git push --no-verify"
     echo "  disable:      git config --unset core.hooksPath"
 }

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
-BRANCH="${2:-sota-motion}"
+BRANCH="${2:-main}"
 
 REQUIRED_CHECKS=(
   # ci-rust-runtime.yaml

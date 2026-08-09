@@ -128,7 +128,7 @@ Tests are not silenced to make CI pass. In particular:
 ## Where CI runs
 
 CI runs on **pull requests** — that is the gate you rely on when merging a chunk
-of work. `sota-motion` (the de-facto main) is committed to **directly** during
+of work. `main` is committed to **directly** during
 development and bench iteration; those direct pushes are intentionally *not*
 CI-gated, so they stay fast. The contract is: **red on a PR means a real
 problem.** When you want assurance before a direct commit, run `./scripts/ci.sh`
