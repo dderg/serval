@@ -31,7 +31,9 @@ jobs:
         id: metadata
         with:
           images: ghcr.io/dderg/serval-roboserval
-          tags: type=sha
+          tags: |
+            type=sha
+            type=raw,value=latest
       - uses: docker/build-push-action@v6
         with:
           context: tools/roboserval
