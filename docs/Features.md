@@ -60,11 +60,10 @@ Kalico has several compelling features:
   if it is unable to). This makes it easier to use available hardware,
   to upgrade to new hardware, and to have confidence in the hardware.
 
-* Portable code. Kalico works on ARM, AVR, PRU, and other
-  micro-controllers. Existing "reprap" style printers can run Kalico
-  without hardware modification - just add a Raspberry Pi. Kalico's
-  internal code layout makes it easier to support other
-  micro-controller architectures as well.
+* Portable code. Serval's current firmware targets supported STM32
+  micro-controllers, with Linux-process and host-simulator targets for
+  deployment and testing. Board and transport support depend on the
+  configured firmware target.
 
 * Simpler code. Kalico uses a very high level language (Python) for
   most code. The kinematics algorithms, the G-code parsing, the
