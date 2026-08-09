@@ -5137,8 +5137,8 @@ vssa_pin:
 
 ### [replicape]
 
-Replicape support - see the [generic-replicape.cfg](../config/generic-replicape.cfg)
-file for an example.
+Replicape compatibility support. This section documents the retained host-side
+module; this branch does not include a working Replicape example configuration.
 
 ```
 # The "replicape" config section adds "replicape:stepper_x_enable"
