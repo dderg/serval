@@ -83,6 +83,7 @@ communication with the Kalico developers.
 - [EtherCAT servos](EtherCAT_Servos.md): endpoint, servo configuration, and advanced operations.
 - [Diagnostics and observability](Diagnostics_and_Observability.md): structured-log incident workflow.
 - [Developer guide](Development.md): Native build, test, simulator, and review workflows.
+- [Simulator](Simulator.md): full-stack simulation boundaries and commands.
 - [Documentation guide](Documentation_Guide.md): scope, authority, and maintenance rules.
 - [API Server](API_Server.md): Information on Kalico's command and
   control API.

@@ -155,6 +155,7 @@ nav:
     - Homing_and_Endstops.md
     - EtherCAT_Servos.md
     - Diagnostics_and_Observability.md
+    - Simulator.md
     - API_Server.md
     - CANBUS_protocol.md
     - CONTRIBUTING.md
