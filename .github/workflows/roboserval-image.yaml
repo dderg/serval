@@ -33,7 +33,7 @@ jobs:
           images: ghcr.io/dderg/serval-roboserval
           tags: |
             type=sha
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/sota-motion' }}
       - uses: docker/build-push-action@v6
         with:
           context: tools/roboserval

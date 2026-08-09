@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -8,7 +9,9 @@ import pytest
 
 from serval_bot.auth import SIGNATURE_HEADER, TIMESTAMP_HEADER, sign
 from serval_bot.config import ProxySettings
+from serval_bot.policy import PolicySet
 from serval_bot.proxy import (
+    DispatchRequest,
     GitHubApi,
     GitHubFailure,
     PollRequest,
@@ -30,36 +33,66 @@ class FakeGitHubApi:
     def __init__(self) -> None:
         self.labels: list[str] = []
         self.polls: list[Any] = []
+        self.calls: list[str] = []
 
     async def close(self) -> None:
         return None
 
     async def sync_workspace(self, request) -> dict[str, Any]:
+        self.calls.append("sync_workspace")
         return {"workspace": request.repo.replace("/", "--"), "default_branch": "trunk"}
 
     async def add_labels(self, request) -> dict[str, Any]:
+        self.calls.append("add_labels")
         self.labels = request.labels
         return {"labels": request.labels}
 
     async def post_comment(self, request) -> dict[str, Any]:
+        self.calls.append("post_comment")
         return {"id": 1, "url": "https://example.test/comment"}
 
     async def search_issues(self, request) -> dict[str, Any]:
+        self.calls.append("search_issues")
         return {"items": []}
 
     async def poll_events(self, request) -> dict[str, Any]:
+        self.calls.append("poll_events")
         self.polls.append(request)
         return {"events": []}
 
     async def dispatch_sim(self, request) -> dict[str, Any]:
+        self.calls.append("dispatch_sim")
         return {"run_id": 1, "url": "https://example.test/run", "status": "queued", "conclusion": None}
 
     async def sim_result(self, request) -> dict[str, Any]:
+        self.calls.append("sim_result")
         return {"run_id": request.run_id, "status": "completed", "conclusion": "success", "jobs": []}
 
 
-def _settings() -> ProxySettings:
-    return ProxySettings(Path("/tmp/token"), "proxy-secret", "127.0.0.1", 8081, 20_000, Path("/tmp/workspaces"))
+_POLICY_TOML = """
+[repositories."dderg/serval"]
+mode = "triage"
+bot_login = "roboserval"
+maintainers = ["dderg"]
+sim_workflow = "ci-sim-e2e.yaml"
+"""
+
+_SHADOW_POLICY_TOML = """
+[repositories."dderg/serval"]
+mode = "shadow"
+"""
+
+
+def _settings(policy_toml: str = _POLICY_TOML) -> ProxySettings:
+    return ProxySettings(
+        github_token_path=Path("/tmp/token"),
+        hmac_key="proxy-secret",
+        bind_host="127.0.0.1",
+        bind_port=8081,
+        max_log_bytes=20_000,
+        workspace_root=Path("/tmp/workspaces"),
+        policy=PolicySet.parse(policy_toml),
+    )
 
 
 def _signed(path: str, payload: dict) -> tuple[bytes, dict[str, str]]:
@@ -77,6 +110,98 @@ async def test_proxy_requires_valid_signature() -> None:
             json={"repo": "dderg/serval", "issue_number": 7, "labels": ["bug"]},
         )
     assert response.status_code == 401, response.text
+
+
+_ENDPOINT_PAYLOADS = {
+    "/github/sync-workspace": {"repo": "dderg/serval"},
+    "/github/add-labels": {"repo": "dderg/serval", "issue_number": 7, "labels": ["bug"]},
+    "/github/comment": {"repo": "dderg/serval", "issue_number": 7, "body": "hello"},
+    "/github/search-issues": {"repo": "dderg/serval", "query": "is:open"},
+    "/github/poll-events": {"repo": "dderg/serval", "since": "2026-08-09T12:00:00Z", "bot_login": "roboserval"},
+    "/github/dispatch-sim": {"repo": "dderg/serval", "workflow": "ci-sim-e2e.yaml", "ref": "sota-motion"},
+    "/github/sim-result": {"repo": "dderg/serval", "run_id": 42},
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("path", "payload"), _ENDPOINT_PAYLOADS.items())
+async def test_proxy_triage_allows_all_endpoint_classes(path: str, payload: dict) -> None:
+    api = FakeGitHubApi()
+    app = create_proxy_app(_settings(), api)
+    body, headers = _signed(path, payload)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(path, content=body, headers=headers)
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("path", "payload"), _ENDPOINT_PAYLOADS.items())
+async def test_proxy_rejects_unknown_repo_with_valid_hmac(path: str, payload: dict) -> None:
+    api = FakeGitHubApi()
+    app = create_proxy_app(_settings(), api)
+    body, headers = _signed(path, {**payload, "repo": "other/repo"})
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(path, content=body, headers=headers)
+    assert response.status_code == 403, response.text
+    assert api.calls == []
+
+
+@pytest.mark.asyncio
+async def test_proxy_verifies_hmac_before_repo_allowlist() -> None:
+    app = create_proxy_app(_settings(), FakeGitHubApi())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/github/add-labels",
+            json={"repo": "other/repo", "issue_number": 7, "labels": ["bug"]},
+        )
+    assert response.status_code == 401, response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    {
+        "/github/add-labels": _ENDPOINT_PAYLOADS["/github/add-labels"],
+        "/github/comment": _ENDPOINT_PAYLOADS["/github/comment"],
+        "/github/dispatch-sim": _ENDPOINT_PAYLOADS["/github/dispatch-sim"],
+        "/github/sim-result": _ENDPOINT_PAYLOADS["/github/sim-result"],
+    }.items(),
+)
+async def test_proxy_shadow_mode_blocks_mutations_and_simulator(path: str, payload: dict) -> None:
+    api = FakeGitHubApi()
+    app = create_proxy_app(_settings(_SHADOW_POLICY_TOML), api)
+    body, headers = _signed(path, payload)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(path, content=body, headers=headers)
+    assert response.status_code == 403, response.text
+    assert api.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    {
+        "/github/sync-workspace": _ENDPOINT_PAYLOADS["/github/sync-workspace"],
+        "/github/search-issues": _ENDPOINT_PAYLOADS["/github/search-issues"],
+        "/github/poll-events": _ENDPOINT_PAYLOADS["/github/poll-events"],
+    }.items(),
+)
+async def test_proxy_shadow_mode_allows_read_sync_search(path: str, payload: dict) -> None:
+    api = FakeGitHubApi()
+    app = create_proxy_app(_settings(_SHADOW_POLICY_TOML), api)
+    body, headers = _signed(path, payload)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(path, content=body, headers=headers)
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.asyncio
+async def test_proxy_rejects_malformed_repo_syntax_before_allowlist() -> None:
+    app = create_proxy_app(_settings(), FakeGitHubApi())
+    body, headers = _signed("/github/sync-workspace", {"repo": "not-a-repo"})
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/github/sync-workspace", content=body, headers=headers)
+    assert response.status_code == 422, response.text
 
 
 @pytest.mark.asyncio
@@ -166,6 +291,8 @@ async def test_sim_result_includes_failed_job_log() -> None:
                     "conclusion": "failure",
                     "html_url": "https://example.test/run/42",
                     "head_sha": "a" * 40,
+                    "head_branch": "trunk",
+                    "path": ".github/workflows/ci-sim-e2e.yaml",
                 },
             )
         if request.url.path.endswith("/actions/runs/42/jobs"):
@@ -193,7 +320,234 @@ async def test_sim_result_includes_failed_job_log() -> None:
     finally:
         await api.close()
     assert result["conclusion"] == "failure"
+    assert result["workflow"] == ".github/workflows/ci-sim-e2e.yaml"
+    assert result["ref"] == "trunk"
     assert result["jobs"][0]["failure_log"] == "assertion failed\n"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sim_correlates_exactly_one_new_run() -> None:
+    sequence: list[str] = []
+    runs_calls = {"count": 0}
+    token = {"value": None}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/workflows/ci-sim-e2e.yaml/dispatches"):
+            sequence.append("post")
+            assert request.method == "POST"
+            body = json.loads(request.content)
+            assert body["ref"] == "trunk"
+            assert re.fullmatch(r"[0-9a-f]{32}", body["inputs"]["serval_dispatch_id"])
+            token["value"] = body["inputs"]["serval_dispatch_id"]
+            return httpx.Response(204)
+        if request.url.path.endswith("/workflows/ci-sim-e2e.yaml/runs"):
+            sequence.append("runs")
+            assert request.method == "GET"
+            assert request.url.params["branch"] == "trunk"
+            assert request.url.params["event"] == "workflow_dispatch"
+            assert request.url.params["per_page"] == "100"
+            runs_calls["count"] += 1
+            if runs_calls["count"] <= 2:  # baseline snapshot, then first poll
+                return httpx.Response(200, json={"workflow_runs": []})
+            # Run 78 appears concurrently but lacks the dispatch token and is
+            # on a different head sha, so it never qualifies; only run 77
+            # carries the echoed token and matches the requested head sha.
+            return httpx.Response(
+                200,
+                json={
+                    "workflow_runs": [
+                        {
+                            "id": 78,
+                            "status": "queued",
+                            "conclusion": None,
+                            "html_url": "https://example.test/run/78",
+                            "display_title": "Manual dispatch",
+                            "head_sha": "c" * 40,
+                            "head_branch": "trunk",
+                            "path": ".github/workflows/ci-sim-e2e.yaml",
+                        },
+                        {
+                            "id": 77,
+                            "status": "queued",
+                            "conclusion": None,
+                            "html_url": "https://example.test/run/77",
+                            "display_title": f"serval-{token['value']}",
+                            "head_sha": "b" * 40,
+                            "head_branch": "trunk",
+                            "path": ".github/workflows/ci-sim-e2e.yaml",
+                        },
+                    ]
+                },
+            )
+        raise AssertionError(f"unexpected GitHub request: {request.url}")
+
+    api = GitHubApi(StaticTokenProvider(), 20_000, httpx.MockTransport(handler))
+    try:
+        result = await api.dispatch_sim(
+            DispatchRequest(
+                repo="dderg/serval",
+                workflow="ci-sim-e2e.yaml",
+                ref="trunk",
+                head_sha="b" * 40,
+            )
+        )
+    finally:
+        await api.close()
+    # The baseline snapshot must be taken before the dispatch POST, and the
+    # dispatch POST must carry the fresh random token as the input.
+    assert sequence == ["runs", "post", "runs", "runs"]
+    assert token["value"] is not None
+    assert result == {
+        "run_id": 77,
+        "url": "https://example.test/run/77",
+        "status": "queued",
+        "conclusion": None,
+        "head_sha": "b" * 40,
+        "ref": "trunk",
+        "workflow": ".github/workflows/ci-sim-e2e.yaml",
+    }
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sim_fails_on_ambiguous_new_runs() -> None:
+    runs_calls = {"count": 0}
+    token = {"value": None}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/workflows/ci-sim-e2e.yaml/dispatches"):
+            token["value"] = json.loads(request.content)["inputs"]["serval_dispatch_id"]
+            return httpx.Response(204)
+        if request.url.path.endswith("/workflows/ci-sim-e2e.yaml/runs"):
+            runs_calls["count"] += 1
+            if runs_calls["count"] == 1:  # baseline: nothing preexisting
+                return httpx.Response(200, json={"workflow_runs": []})
+            run_name = f"serval-{token['value']}"
+            return httpx.Response(
+                200,
+                json={
+                    "workflow_runs": [
+                        {
+                            "id": 77,
+                            "status": "queued",
+                            "html_url": "https://example.test/run/77",
+                            "display_title": run_name,
+                            "head_branch": "trunk",
+                            "path": ".github/workflows/ci-sim-e2e.yaml",
+                        },
+                        {
+                            "id": 78,
+                            "status": "queued",
+                            "html_url": "https://example.test/run/78",
+                            "display_title": run_name,
+                            "head_branch": "trunk",
+                            "path": ".github/workflows/ci-sim-e2e.yaml",
+                        },
+                    ]
+                },
+            )
+        raise AssertionError(f"unexpected GitHub request: {request.url}")
+
+    api = GitHubApi(StaticTokenProvider(), 20_000, httpx.MockTransport(handler))
+    try:
+        with pytest.raises(GitHubFailure, match="ambiguous"):
+            await api.dispatch_sim(DispatchRequest(repo="dderg/serval", workflow="ci-sim-e2e.yaml", ref="trunk"))
+    finally:
+        await api.close()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sim_rejects_external_run_without_token() -> None:
+    runs_calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/workflows/ci-sim-e2e.yaml/dispatches"):
+            return httpx.Response(204)
+        if request.url.path.endswith("/workflows/ci-sim-e2e.yaml/runs"):
+            runs_calls["count"] += 1
+            if runs_calls["count"] == 1:  # baseline: nothing preexisting
+                return httpx.Response(200, json={"workflow_runs": []})
+            # A manual dispatch lands on the same branch and head sha after the
+            # baseline snapshot: it is the only new run, yet it does not carry
+            # the random token, so it must never be correlated to this dispatch.
+            return httpx.Response(
+                200,
+                json={
+                    "workflow_runs": [
+                        {
+                            "id": 9,
+                            "status": "queued",
+                            "conclusion": None,
+                            "html_url": "https://example.test/run/9",
+                            "display_title": "Manual dispatch",
+                            "head_sha": "b" * 40,
+                            "head_branch": "trunk",
+                            "path": ".github/workflows/ci-sim-e2e.yaml",
+                        }
+                    ]
+                },
+            )
+        raise AssertionError(f"unexpected GitHub request: {request.url}")
+
+    api = GitHubApi(
+        StaticTokenProvider(),
+        20_000,
+        httpx.MockTransport(handler),
+        dispatch_poll_attempts=2,
+        dispatch_poll_interval=0,
+    )
+    try:
+        with pytest.raises(GitHubFailure, match="did not appear"):
+            await api.dispatch_sim(
+                DispatchRequest(repo="dderg/serval", workflow="ci-sim-e2e.yaml", ref="trunk", head_sha="b" * 40)
+            )
+    finally:
+        await api.close()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sim_excludes_preexisting_run_despite_fresh_timestamps() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/workflows/ci-sim-e2e.yaml/dispatches"):
+            return httpx.Response(204)
+        if request.url.path.endswith("/workflows/ci-sim-e2e.yaml/runs"):
+            # The preexisting run is served with a freshly generated created_at
+            # on every poll, so a wall-clock comparison would misclassify it as
+            # new. Baseline id membership excludes it regardless of timestamps,
+            # clock skew, or even a token-shaped title.
+            return httpx.Response(
+                200,
+                json={
+                    "workflow_runs": [
+                        {
+                            "id": 5,
+                            "status": "queued",
+                            "conclusion": None,
+                            "html_url": "https://example.test/run/5",
+                            "display_title": "serval-deadbeef",
+                            "head_sha": "b" * 40,
+                            "head_branch": "trunk",
+                            "path": ".github/workflows/ci-sim-e2e.yaml",
+                            "created_at": datetime.now(UTC).isoformat(),
+                        }
+                    ]
+                },
+            )
+        raise AssertionError(f"unexpected GitHub request: {request.url}")
+
+    api = GitHubApi(
+        StaticTokenProvider(),
+        20_000,
+        httpx.MockTransport(handler),
+        dispatch_poll_attempts=2,
+        dispatch_poll_interval=0,
+    )
+    try:
+        with pytest.raises(GitHubFailure, match="did not appear"):
+            await api.dispatch_sim(
+                DispatchRequest(repo="dderg/serval", workflow="ci-sim-e2e.yaml", ref="trunk", head_sha="b" * 40)
+            )
+    finally:
+        await api.close()
 
 
 @pytest.mark.asyncio

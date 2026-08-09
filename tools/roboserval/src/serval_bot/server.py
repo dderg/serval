@@ -11,49 +11,12 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 from serval_bot.config import BotSettings
-from serval_bot.database import Database, Event, PolledEvent
+from serval_bot.database import Database, PolledEvent
 from serval_bot.policy import PolicySet
 from serval_bot.proxy_client import ProxyClient
+from serval_bot.runtime import Agent, WorkerPool
 
 log = logging.getLogger(__name__)
-
-
-class Agent(Protocol):
-    def run(self, event: Event) -> str: ...
-
-
-class Worker:
-    def __init__(self, database: Database, agent: Agent, timeout_seconds: int):
-        self._database = database
-        self._agent = agent
-        self._timeout_seconds = timeout_seconds
-        self._stop = asyncio.Event()
-        self._wake = asyncio.Event()
-
-    def wake(self) -> None:
-        self._wake.set()
-
-    def stop(self) -> None:
-        self._stop.set()
-        self._wake.set()
-
-    async def run(self) -> None:
-        self._database.reset_running()
-        while not self._stop.is_set():
-            event = self._database.claim()
-            if event is None:
-                self._wake.clear()
-                with suppress(TimeoutError):
-                    await asyncio.wait_for(self._wake.wait(), timeout=1.0)
-                continue
-            try:
-                await asyncio.wait_for(asyncio.to_thread(self._agent.run, event), self._timeout_seconds)
-            except Exception as exc:
-                error = f"{type(exc).__name__}: {exc}"
-                log.exception("event failed", extra={"delivery_id": event.delivery_id})
-                self._database.finish(event.delivery_id, "failed", error[:8000])
-            else:
-                self._database.finish(event.delivery_id, "done")
 
 
 class PollSource(Protocol):
@@ -66,7 +29,7 @@ class Poller:
         database: Database,
         policies: PolicySet,
         source: PollSource,
-        worker: Worker,
+        worker: WorkerPool,
         interval_seconds: int,
         overlap_seconds: int,
     ):
@@ -151,7 +114,13 @@ def create_app(
     start_worker: bool = True,
     start_poller: bool = True,
 ) -> FastAPI:
-    worker = Worker(database, agent, settings.task_timeout_seconds)
+    worker = WorkerPool(
+        database,
+        agent,
+        timeout_seconds=settings.task_timeout_seconds,
+        hard_grace_seconds=settings.task_hard_grace_seconds,
+        max_concurrency=settings.max_concurrency,
+    )
     if start_poller and proxy is None:
         raise RuntimeError("GitHub proxy is required when polling is enabled")
     poller = (

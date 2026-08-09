@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import re
+import secrets
 import zipfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -18,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from serval_bot.auth import SIGNATURE_HEADER, TIMESTAMP_HEADER, verify
 from serval_bot.config import ProxySettings
+from serval_bot.policy import Mode, PolicyError
 from serval_bot.token_auth import StaticTokenProvider
 from serval_bot.workspace import CredentialedWorkspace
 
@@ -34,6 +36,7 @@ class RepositoryRequest(BaseModel):
 
 
 class WorkspaceRequest(RepositoryRequest):
+    issue_number: int | None = Field(default=None, gt=0)
     pull_number: int | None = Field(default=None, gt=0)
     head_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
 
@@ -82,6 +85,9 @@ class GitHubApi:
         max_log_bytes: int,
         transport: httpx.AsyncBaseTransport | None = None,
         workspace_root: Path | None = None,
+        *,
+        dispatch_poll_attempts: int = 30,
+        dispatch_poll_interval: float = 1.0,
     ):
         self._tokens = tokens
         self._client = httpx.AsyncClient(
@@ -97,6 +103,9 @@ class GitHubApi:
         )
         self._max_log_bytes = max_log_bytes
         self._workspace = CredentialedWorkspace(workspace_root or Path("/data/workspaces"))
+        self._dispatch_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
+        self._dispatch_poll_attempts = dispatch_poll_attempts
+        self._dispatch_poll_interval = dispatch_poll_interval
 
     async def close(self) -> None:
         await asyncio.gather(self._client.aclose(), self._tokens.close())
@@ -110,6 +119,9 @@ class GitHubApi:
             raise GitHubFailure("pull_number and head_sha must be set together")
         fetch_ref = f"refs/pull/{request.pull_number}/head" if request.pull_number is not None else None
         token = await self._tokens.token()
+        sync_kwargs: dict[str, Any] = {}
+        if request.issue_number is not None:
+            sync_kwargs["issue_number"] = request.issue_number
         path = await asyncio.to_thread(
             self._workspace.sync,
             request.repo,
@@ -117,6 +129,7 @@ class GitHubApi:
             token,
             fetch_ref=fetch_ref,
             expected_sha=request.head_sha,
+            **sync_kwargs,
         )
         return {
             "workspace": path.name,
@@ -250,34 +263,63 @@ class GitHubApi:
             next_params = None
         return items
 
-    async def dispatch_sim(self, request: DispatchRequest) -> dict[str, Any]:
-        started = datetime.now(UTC)
-        await self.request(
-            "POST",
-            f"/repos/{request.repo}/actions/workflows/{request.workflow}/dispatches",
-            json={"ref": request.ref},
+    async def _workflow_dispatch_runs(self, request: DispatchRequest) -> list[dict[str, Any]]:
+        response = await self.request(
+            "GET",
+            f"/repos/{request.repo}/actions/workflows/{request.workflow}/runs",
+            params={"branch": request.ref, "event": "workflow_dispatch", "per_page": 100},
         )
-        for _ in range(30):
-            response = await self.request(
-                "GET",
-                f"/repos/{request.repo}/actions/workflows/{request.workflow}/runs",
-                params={"branch": request.ref, "event": "workflow_dispatch", "per_page": 10},
+        runs = response.json().get("workflow_runs", [])
+        if request.head_sha is not None:
+            runs = [run for run in runs if run.get("head_sha") == request.head_sha]
+        return runs
+
+    async def dispatch_sim(self, request: DispatchRequest) -> dict[str, Any]:
+        key = (request.repo, request.workflow, request.ref)
+        lock = self._dispatch_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            # Snapshot every preexisting matching run id before dispatching so
+            # an already-visible run is never correlated to this dispatch.
+            baseline = {run["id"] for run in await self._workflow_dispatch_runs(request)}
+            # Authoritative correlation: a fresh random token is posted as the
+            # serval_dispatch_id input and echoed into the run name, so an
+            # external or manual run — even one that appears after this
+            # snapshot — can never qualify.
+            token = secrets.token_hex(16)
+            run_name = f"serval-{token}"
+            await self.request(
+                "POST",
+                f"/repos/{request.repo}/actions/workflows/{request.workflow}/dispatches",
+                json={"ref": request.ref, "inputs": {"serval_dispatch_id": token}},
             )
-            for run in response.json().get("workflow_runs", []):
-                created = datetime.fromisoformat(run["created_at"])
-                if created < started:
-                    continue
-                if request.head_sha is not None and run.get("head_sha") != request.head_sha:
-                    continue
-                return {
-                    "run_id": run["id"],
-                    "url": run["html_url"],
-                    "status": run["status"],
-                    "conclusion": run.get("conclusion"),
-                    "head_sha": run.get("head_sha"),
-                }
-            await asyncio.sleep(1)
-        raise GitHubFailure("dispatched workflow run did not appear within 30 seconds")
+            for _ in range(self._dispatch_poll_attempts):
+                matches = [
+                    run
+                    for run in await self._workflow_dispatch_runs(request)
+                    if run["id"] not in baseline
+                    and (run.get("display_title") == run_name or run.get("name") == run_name)
+                ]
+                if len(matches) == 1:
+                    run = matches[0]
+                    return {
+                        "run_id": run["id"],
+                        "url": run["html_url"],
+                        "status": run["status"],
+                        "conclusion": run.get("conclusion"),
+                        "head_sha": run.get("head_sha"),
+                        "ref": run.get("head_branch"),
+                        "workflow": run.get("path"),
+                    }
+                if len(matches) > 1:
+                    raise GitHubFailure(
+                        "ambiguous workflow dispatch: multiple runs carried the dispatch token for "
+                        f"{request.workflow}@{request.ref}"
+                    )
+                await asyncio.sleep(self._dispatch_poll_interval)
+            raise GitHubFailure(
+                f"dispatched workflow run did not appear within "
+                f"{self._dispatch_poll_attempts * self._dispatch_poll_interval:.0f} seconds"
+            )
 
     async def sim_result(self, request: SimResultRequest) -> dict[str, Any]:
         run_response, jobs_response = await asyncio.gather(
@@ -313,6 +355,8 @@ class GitHubApi:
             "conclusion": run.get("conclusion"),
             "url": run["html_url"],
             "head_sha": run.get("head_sha"),
+            "ref": run.get("head_branch"),
+            "workflow": run.get("path"),
             "jobs": rendered_jobs,
         }
 
@@ -350,6 +394,19 @@ def _validated_repo(request: RepositoryRequest) -> RepositoryRequest:
     return request
 
 
+_ALL_MODES = frozenset(Mode)
+_ACTIVE_MODES = frozenset({Mode.TRIAGE, Mode.MAINTAINER})
+
+
+def _authorize_repo(settings: ProxySettings, request: RepositoryRequest, modes: frozenset[Mode]) -> None:
+    try:
+        policy = settings.policy.require(request.repo)
+    except PolicyError as exc:
+        raise HTTPException(403, "repository not allowlisted") from exc
+    if policy.mode not in modes:
+        raise HTTPException(403, f"endpoint not permitted for {policy.mode.value} repositories")
+
+
 def create_proxy_app(settings: ProxySettings, api: GitHubApi | None = None) -> FastAPI:
     if api is None:
         tokens = StaticTokenProvider(settings.github_token_path)
@@ -384,31 +441,37 @@ def create_proxy_app(settings: ProxySettings, api: GitHubApi | None = None) -> F
     @app.post("/github/sync-workspace", dependencies=[Depends(authenticate)])
     async def sync_workspace(request: WorkspaceRequest) -> dict[str, Any]:
         _validated_repo(request)
+        _authorize_repo(settings, request, _ALL_MODES)
         return await github.sync_workspace(request)
 
     @app.post("/github/add-labels", dependencies=[Depends(authenticate)])
     async def add_labels(request: AddLabelsRequest) -> dict[str, Any]:
         _validated_repo(request)
+        _authorize_repo(settings, request, _ACTIVE_MODES)
         return await github.add_labels(request)
 
     @app.post("/github/comment", dependencies=[Depends(authenticate)])
     async def comment(request: CommentRequest) -> dict[str, Any]:
         _validated_repo(request)
+        _authorize_repo(settings, request, _ACTIVE_MODES)
         return await github.post_comment(request)
 
     @app.post("/github/search-issues", dependencies=[Depends(authenticate)])
     async def search(request: SearchRequest) -> dict[str, Any]:
         _validated_repo(request)
+        _authorize_repo(settings, request, _ALL_MODES)
         return await github.search_issues(request)
 
     @app.post("/github/poll-events", dependencies=[Depends(authenticate)])
     async def poll_events(request: PollRequest) -> dict[str, Any]:
         _validated_repo(request)
+        _authorize_repo(settings, request, _ALL_MODES)
         return await github.poll_events(request)
 
     @app.post("/github/dispatch-sim", dependencies=[Depends(authenticate)])
     async def dispatch(request: DispatchRequest) -> dict[str, Any]:
         _validated_repo(request)
+        _authorize_repo(settings, request, _ACTIVE_MODES)
         if not _WORKFLOW_PATTERN.fullmatch(request.workflow):
             raise HTTPException(422, "invalid workflow")
         return await github.dispatch_sim(request)
@@ -416,6 +479,7 @@ def create_proxy_app(settings: ProxySettings, api: GitHubApi | None = None) -> F
     @app.post("/github/sim-result", dependencies=[Depends(authenticate)])
     async def result(request: SimResultRequest) -> dict[str, Any]:
         _validated_repo(request)
+        _authorize_repo(settings, request, _ACTIVE_MODES)
         return await github.sim_result(request)
 
     @app.exception_handler(GitHubFailure)

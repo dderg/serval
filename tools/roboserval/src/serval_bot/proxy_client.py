@@ -44,12 +44,18 @@ class ProxyClient:
     def sync_workspace(
         self,
         repo: str,
+        issue_number: int,
         pull_number: int | None = None,
         head_sha: str | None = None,
     ) -> dict[str, Any]:
         return self._request(
             "/github/sync-workspace",
-            {"repo": repo, "pull_number": pull_number, "head_sha": head_sha},
+            {
+                "repo": repo,
+                "issue_number": issue_number,
+                "pull_number": pull_number,
+                "head_sha": head_sha,
+            },
         )
 
     def add_labels(self, repo: str, issue_number: int, labels: list[str]) -> dict[str, Any]:

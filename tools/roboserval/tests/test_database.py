@@ -48,3 +48,19 @@ def test_action_records_proposed_arguments(tmp_path: Path) -> None:
         assert actions[0].state == "proposed"
     finally:
         database.close()
+
+
+def test_workflow_run_claim_is_atomic_and_never_reused(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    try:
+        assert database.claim_workflow_run("dderg/serval", 7, "ci-sim-e2e.yaml", "trunk", 99, "u", "queued", None)
+        assert not database.claim_workflow_run("dderg/serval", 8, "ci-sim-e2e.yaml", "trunk", 99, "u", "queued", None)
+        assert not database.claim_workflow_run("dderg/serval", 7, "ci-sim-e2e.yaml", "trunk", 99, "u", "queued", None)
+        recorded = database.workflow_run("dderg/serval", 7, 99)
+        assert recorded is not None
+        assert (recorded["run_id"], recorded["workflow"], recorded["ref"]) == (99, "ci-sim-e2e.yaml", "trunk")
+        assert database.workflow_run("dderg/serval", 8, 99) is None
+        database.update_workflow_run_status(99, "completed", "success")
+        assert database.workflow_run("dderg/serval", 7, 99)["status"] == "completed"
+    finally:
+        database.close()

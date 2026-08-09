@@ -7,7 +7,7 @@ ENV BUN_INSTALL=/opt/bun \
     PYTHONUNBUFFERED=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git passwd tini unzip \
+    && apt-get install -y --no-install-recommends ca-certificates curl git login passwd tini unzip \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://bun.sh/install | bash \
     && bun add --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}"
@@ -15,13 +15,12 @@ RUN apt-get update \
 WORKDIR /app
 COPY pyproject.toml ./
 COPY src ./src
-RUN pip install --no-cache-dir . \
-    && useradd --create-home --uid 10001 bot \
-    && mkdir -p /data /config \
-    && chown -R bot:bot /data /config /app
+RUN pip install --no-cache-dir .
 
-USER bot
+COPY entrypoint.sh /usr/local/bin/serval-entrypoint
+RUN chmod +x /usr/local/bin/serval-entrypoint
+
 VOLUME ["/data"]
 EXPOSE 8080 8081
-ENTRYPOINT ["/usr/bin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/serval-entrypoint"]
 CMD ["serval-bot"]

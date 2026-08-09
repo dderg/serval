@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import os
 import shlex
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+
+from serval_bot.policy import PolicyError, PolicySet
+from serval_bot.runtime import MAX_SLOTS
 
 
 class ConfigurationError(RuntimeError):
@@ -28,6 +32,17 @@ def _positive_int(name: str, default: int) -> int:
     return value
 
 
+def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be an integer") from exc
+    if not minimum <= value <= maximum:
+        raise ConfigurationError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
 @dataclass(slots=True, frozen=True)
 class BotSettings:
     proxy_url: str | None
@@ -43,6 +58,8 @@ class BotSettings:
     task_timeout_seconds: int
     poll_interval_seconds: int
     poll_overlap_seconds: int
+    task_hard_grace_seconds: int = 60
+    max_concurrency: int = 1
 
     @classmethod
     def from_env(cls) -> BotSettings:
@@ -65,6 +82,8 @@ class BotSettings:
             bind_host=os.environ.get("SERVAL_BOT_BIND_HOST", "0.0.0.0"),
             bind_port=_positive_int("SERVAL_BOT_BIND_PORT", 8080),
             task_timeout_seconds=_positive_int("SERVAL_BOT_TASK_TIMEOUT_SECONDS", 1200),
+            task_hard_grace_seconds=_bounded_int("SERVAL_BOT_TASK_TIMEOUT_HARD_GRACE_SECONDS", 60, 1, 3600),
+            max_concurrency=_bounded_int("SERVAL_BOT_MAX_CONCURRENCY", 1, 1, MAX_SLOTS),
             poll_interval_seconds=_positive_int("SERVAL_BOT_POLL_INTERVAL_SECONDS", 30),
             poll_overlap_seconds=_positive_int("SERVAL_BOT_POLL_OVERLAP_SECONDS", 300),
         )
@@ -82,9 +101,14 @@ class ProxySettings:
     bind_port: int
     max_log_bytes: int
     workspace_root: Path
+    policy: PolicySet
 
     @classmethod
     def from_env(cls) -> ProxySettings:
+        try:
+            policy = PolicySet.parse(_required("SERVAL_BOT_REPOSITORY_POLICY"))
+        except (PolicyError, tomllib.TOMLDecodeError) as exc:
+            raise ConfigurationError(f"invalid SERVAL_BOT_REPOSITORY_POLICY: {exc}") from exc
         return cls(
             github_token_path=Path(_required("SERVAL_BOT_GITHUB_TOKEN_PATH")),
             hmac_key=_required("SERVAL_BOT_PROXY_HMAC_KEY"),
@@ -92,4 +116,5 @@ class ProxySettings:
             bind_port=_positive_int("SERVAL_BOT_PROXY_BIND_PORT", 8081),
             max_log_bytes=_positive_int("SERVAL_BOT_PROXY_MAX_LOG_BYTES", 20_000),
             workspace_root=Path(os.environ.get("SERVAL_BOT_WORKSPACE_ROOT", "/data/workspaces")),
+            policy=policy,
         )

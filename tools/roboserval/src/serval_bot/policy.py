@@ -25,7 +25,7 @@ class Capability(StrEnum):
 
 _CAPABILITIES: dict[Mode, frozenset[Capability]] = {
     Mode.SHADOW: frozenset(),
-    Mode.TRIAGE: frozenset({Capability.LABEL, Capability.COMMENT}),
+    Mode.TRIAGE: frozenset({Capability.LABEL, Capability.COMMENT, Capability.DISPATCH_SIM, Capability.READ_SIM}),
     Mode.MAINTAINER: frozenset({Capability.LABEL, Capability.COMMENT, Capability.DISPATCH_SIM, Capability.READ_SIM}),
 }
 
