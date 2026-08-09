@@ -2052,7 +2052,7 @@ firmware build. With it enabled, bypass a single push with <code>git push
 </ul>
 <h2 id="where-ci-runs">Where CI runs<a class="headerlink" href="#where-ci-runs" title="Permanent link">&para;</a></h2>
 <p>CI runs on <strong>pull requests</strong> — that is the gate you rely on when merging a chunk
-of work. <code>sota-motion</code> (the de-facto main) is committed to <strong>directly</strong> during
+of work. <code>main</code> is committed to <strong>directly</strong> during
 development and bench iteration; those direct pushes are intentionally <em>not</em>
 CI-gated, so they stay fast. The contract is: <strong>red on a PR means a real
 problem.</strong> When you want assurance before a direct commit, run <code>./scripts/ci.sh</code>

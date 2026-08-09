@@ -2026,7 +2026,7 @@ already verified off-bench (see that doc); this is the on-hardware sequence.</p>
 </blockquote>
 <h2 id="whats-already-proven-without-hardware">What's already proven without hardware<a class="headerlink" href="#whats-already-proven-without-hardware" title="Permanent link">&para;</a></h2>
 <ul>
-<li>MCU stepper hot-path codegen is <strong>byte-identical</strong> to pristine sota-motion (disasm-verified). Flashing this branch will not change stepper behavior.</li>
+<li>MCU stepper hot-path codegen is <strong>byte-identical</strong> to pristine main (disasm-verified). Flashing this branch will not change stepper behavior.</li>
 <li>The servo runs the <strong>same hardened walker</strong> as the MCU (<code>runtime::motion_core</code>); its trajectory eval, origin/no-jump mapping, piece-boundary continuity, and the <code>PieceStartInPast</code> fault boundary are unit-tested.</li>
 <li>Sustained streaming past one ring depth works over the real <code>McuSerialConn ↔ FrameServer</code> socket (no stall — the "stopped after first move" class is covered).</li>
 <li><code>klippy → motion-engine → endpoint</code> host wiring is ported and the stepper-path tests still pass.</li>
