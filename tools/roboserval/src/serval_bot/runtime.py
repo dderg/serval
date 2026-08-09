@@ -14,6 +14,7 @@ import os
 import platform
 import shutil
 import signal
+import sqlite3
 import stat
 import time
 from contextlib import suppress
@@ -194,17 +195,18 @@ def _provision_private_dirs(session_dir: Path) -> tuple[Path, Path]:
     return home, tmpdir
 
 
-_AGENT_DIR_SEED_NAMES = ("config.yml", "config.yaml", "config", "auth")
+_AGENT_DIR_SEED_NAMES = ("config.yml", "config.yaml", "config", "auth", "agent.db")
 
 
 def _provision_agent_dir(session_dir: Path) -> Path:
     """Per-event private omp agent dir, seeded from the shared source.
 
     The private dir lives under the slot-owned session tree and is wiped and
-    re-seeded on every event so no state outlives its slot. Only the required
-    persistent config/auth inputs are copied; runtime databases, models,
-    sessions, memories, and blobs are never shared. A missing or empty shared
-    source seeds nothing; a present but unsafe source fails loudly.
+    re-seeded on every event so no state outlives its slot. Required
+    persistent config/auth inputs are copied, with agent.db snapshotted as a
+    transactionally consistent SQLite copy; history.db, models, sessions,
+    memories, and blobs are never shared. A missing or empty shared source
+    seeds nothing; a present but unsafe source fails loudly.
     """
     private = session_dir / ".omp-agent"
     if private.exists():
@@ -225,13 +227,34 @@ def _seed_agent_dir(private: Path, shared: Path) -> None:
             continue
         if source.is_symlink():
             raise AgentDirFailure(f"unsafe agent dir seed source (symlink): {source}")
-        if source.is_dir():
+        if name == "agent.db":
+            if not source.is_file():
+                raise AgentDirFailure(f"unsafe agent dir seed source (unexpected type): {source}")
+            _snapshot_sqlite(source, private / "agent.db")
+        elif source.is_dir():
             if any(source.iterdir()):
                 _copy_seed_tree(source, private / name)
         elif source.is_file():
             shutil.copy2(source, private / name)
         else:
             raise AgentDirFailure(f"unsafe agent dir seed source (unexpected type): {source}")
+
+
+def _snapshot_sqlite(source: Path, destination: Path) -> None:
+    """Copy a SQLite database consistently via the backup API.
+
+    The source is opened read-only so the shared auth store can never be
+    mutated by seeding, and the backup captures committed WAL content without
+    ever copying -wal/-shm sidecars into the private dir. The copy is switched
+    back to rollback-journal mode so the private agent dir stays a
+    single-file database.
+    """
+    with (
+        sqlite3.connect(f"{source.as_uri()}?mode=ro", uri=True) as src,
+        sqlite3.connect(destination) as dst,
+    ):
+        src.backup(dst)
+        dst.execute("PRAGMA journal_mode=DELETE")
 
 
 def _copy_seed_tree(source: Path, destination: Path) -> None:
