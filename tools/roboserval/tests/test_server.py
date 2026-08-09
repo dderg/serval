@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
+import signal
 import stat
 import threading
 from collections.abc import Callable
@@ -421,6 +423,68 @@ async def test_webhook_ingress_is_removed(tmp_path: Path) -> None:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             response = await client.post("/webhook/github", json={})
         assert response.status_code == 404
+    finally:
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_poller_failure_signals_termination_and_unreadies(tmp_path: Path, monkeypatch: Any) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    database.record_poll_batch("dderg/serval", "2026-08-09T12:00:00Z", [])
+    app = create_app(
+        _settings(tmp_path),
+        _policies(),
+        database,
+        FakeAgent(),
+        proxy=FailingPollSource(),
+        start_worker=True,
+        start_poller=True,
+    )
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr("serval_bot.server.os.kill", lambda pid, sig: killed.append((pid, sig)))
+    try:
+        with pytest.raises(BaseExceptionGroup) as caught:
+            async with app.router.lifespan_context(app):
+                await asyncio.sleep(3600)
+        assert caught.value.subgroup(lambda exc: isinstance(exc, RuntimeError) and "poll failed" in str(exc))
+        await _wait_until(lambda: bool(killed))
+        assert killed == [(os.getpid(), signal.SIGTERM)]
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/readyz")
+        assert response.status_code == 503
+    finally:
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_failure_signals_termination_and_unreadies(tmp_path: Path, monkeypatch: Any) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    database.record_event("first", "issues.opened", "dderg/serval", 7, "reporter", _payload())
+    monkeypatch.setattr(
+        database,
+        "claim",
+        lambda: (_ for _ in ()).throw(RuntimeError("claim failed")),
+    )
+    app = create_app(
+        _settings(tmp_path),
+        _policies(),
+        database,
+        FakeAgent(),
+        start_worker=True,
+        start_poller=False,
+    )
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr("serval_bot.server.os.kill", lambda pid, sig: killed.append((pid, sig)))
+    try:
+        with pytest.raises(BaseExceptionGroup) as caught:
+            async with app.router.lifespan_context(app):
+                await asyncio.sleep(3600)
+        assert caught.value.subgroup(lambda exc: isinstance(exc, RuntimeError) and "claim failed" in str(exc))
+        await _wait_until(lambda: bool(killed))
+        assert killed == [(os.getpid(), signal.SIGTERM)]
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/readyz")
+        assert response.status_code == 503
     finally:
         database.close()
 

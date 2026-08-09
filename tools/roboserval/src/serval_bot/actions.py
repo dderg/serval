@@ -246,7 +246,7 @@ class ActionGateway:
         return [
             action
             for action in self.database.actions_for_delivery(self.event.delivery_id)
-            if action.kind.startswith("dispatch_sim")
+            if action.kind.startswith("dispatch_sim") and action.state in {"applied", "proposed"}
         ]
 
     def _require_sim_context(self, action: str) -> None:

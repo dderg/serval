@@ -730,6 +730,67 @@ def test_pr_review_sim_directive_requires_dispatch_result_and_completed_run(tmp_
         database.close()
 
 
+def test_completed_dispatch_flow_survives_later_failed_dispatch(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    proxy = FakeProxy()
+    try:
+        event = _claimed(
+            database,
+            _event(actor="dderg", event_type="issue_comment.created", comment="@roboserval Reproduce in the simulator"),
+        )
+        gateway = _gateway(database, event, Mode.TRIAGE, proxy)
+        gateway.dispatch_sim("trunk", None)
+        gateway.sim_result(99)
+
+        def exploding_dispatch(repo: str, issue_number: int, workflow: str, ref: str, head_sha: str | None) -> dict:
+            proxy.calls.append(("dispatch", repo, issue_number, workflow, ref, head_sha))
+            raise RuntimeError("dispatch exploded")
+
+        proxy.dispatch_sim = exploding_dispatch
+        with pytest.raises(RuntimeError, match="dispatch exploded"):
+            gateway.dispatch_sim(_SIM_FARM_REF, _SIM_SHA)
+        failed = [
+            action
+            for action in database.actions_for_delivery(event.delivery_id)
+            if action.kind.startswith("dispatch_sim")
+        ][-1]
+        assert failed.state == "failed"
+        result = json.loads(gateway.post_comment("run summary"))
+        assert result["state"] == "applied"
+        assert [call[0] for call in proxy.calls] == ["dispatch", "sim_result", "dispatch", "comment"]
+    finally:
+        database.close()
+
+
+def test_failed_only_dispatch_satisfies_no_simulator_delivery(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    proxy = FakeProxy()
+    try:
+        event = _claimed(
+            database,
+            _event(actor="dderg", event_type="issue_comment.created", comment="@roboserval Reproduce in the simulator"),
+        )
+        gateway = _gateway(database, event, Mode.TRIAGE, proxy)
+
+        def exploding_dispatch(repo: str, issue_number: int, workflow: str, ref: str, head_sha: str | None) -> dict:
+            proxy.calls.append(("dispatch", repo, issue_number, workflow, ref, head_sha))
+            raise RuntimeError("dispatch exploded")
+
+        proxy.dispatch_sim = exploding_dispatch
+        with pytest.raises(RuntimeError, match="dispatch exploded"):
+            gateway.dispatch_sim("trunk", None)
+        with pytest.raises(ActionDenied, match="no recorded dispatch"):
+            gateway.sim_result(99)
+        with pytest.raises(ActionDenied, match="dispatch_sim then sim_result"):
+            gateway.post_comment("done")
+        assert proxy.calls == [("dispatch", "dderg/serval", 7, "ci-sim-e2e.yaml", "trunk", None)]
+        actions = database.actions_for_delivery(event.delivery_id)
+        assert [action.kind for action in actions] == ["dispatch_sim:trunk:default"]
+        assert actions[0].state == "failed"
+    finally:
+        database.close()
+
+
 def test_ordinary_followup_comment_does_not_require_simulator_dispatch(tmp_path: Path) -> None:
     database = Database(tmp_path / "bot.sqlite")
     proxy = FakeProxy()

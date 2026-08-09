@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import signal
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 
 from serval_bot.config import BotSettings
@@ -136,13 +138,34 @@ def create_app(
         else None
     )
 
+    background_failed = False
+
+    def _fail_loud(task: asyncio.Task[None]) -> None:
+        nonlocal background_failed
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is None:
+            return
+        background_failed = True
+        if poller is not None:
+            poller.stop()
+        worker.stop()
+        log.error(
+            "background task failed; signaling process termination",
+            extra={"task": task.get_name(), "error": f"{type(error).__name__}: {error}"},
+        )
+        os.kill(os.getpid(), signal.SIGTERM)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with asyncio.TaskGroup() as tasks:
             if start_worker:
-                tasks.create_task(worker.run())
+                worker_task = tasks.create_task(worker.run(), name="serval-worker-pool")
+                worker_task.add_done_callback(_fail_loud)
             if start_poller and poller is not None:
-                tasks.create_task(poller.run())
+                poller_task = tasks.create_task(poller.run(), name="serval-poller")
+                poller_task.add_done_callback(_fail_loud)
             try:
                 yield
             finally:
@@ -158,6 +181,8 @@ def create_app(
 
     @app.get("/readyz")
     async def ready() -> dict[str, str]:
+        if background_failed:
+            raise HTTPException(status_code=503, detail="background task failed; terminating")
         return {"status": "ready"}
 
     @app.get("/events")
