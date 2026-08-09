@@ -3,7 +3,7 @@
 # Copyright (C) 2018-2023  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-from klippy import structured_log
+
 
 ######################################################################
 # Button state tracking
@@ -73,14 +73,6 @@ class MCU_buttons:
         if new_count <= 0:
             return
         new_buttons = buttons[-new_count:]
-        structured_log.event(
-            "input",
-            "buttons_state",
-            mcu=self.mcu.get_name(),
-            oid=self.oid,
-            ack_count=params["ack_count"],
-            state_hex=bytes(new_buttons).hex(),
-        )
         # Send ack to MCU
         self.ack_cmd.send([self.oid, new_count])
         self.ack_count += new_count
