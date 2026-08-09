@@ -1,0 +1,100 @@
+# Makefile.rust — build the PyO3 motion-engine module.
+#
+# Builds the Rust cdylib and copies it to klippy/_motion_engine.so so
+# that klippy can import it as a normal Python extension module.  Python
+# requires the .so extension on all platforms; on macOS the Rust toolchain
+# produces a .dylib which we rename on copy.
+#
+# Usage:
+#   make -f Makefile.rust motion-engine
+#   make -f Makefile.rust clean-motion-engine
+
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+  MOTION_ENGINE_EXT = dylib
+else
+  MOTION_ENGINE_EXT = so
+endif
+
+# Cargo may redirect the target dir (e.g. a shared-target in ~/.cargo/config.toml),
+# so ask cargo where the artifacts actually land instead of assuming rust/target.
+CARGO_TARGET_DIR := $(shell cd rust && cargo metadata --format-version 1 --no-deps 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
+
+MOTION_ENGINE_SRC  = $(CARGO_TARGET_DIR)/release/lib_motion_engine.$(MOTION_ENGINE_EXT)
+MOTION_ENGINE_DEST = klippy/_motion_engine.so
+
+# rm before cp: overwriting the existing inode in place invalidates the
+# dylib's ad-hoc code signature on macOS and the kernel SIGKILLs every
+# process that imports it; a fresh inode keeps the linker's signature valid.
+motion-engine:
+	cd rust && cargo build -p motion-engine -p config-py -p shaper-ident --release \
+		--features motion-engine/extension-module,config-py/extension-module,shaper-ident/extension-module
+	rm -f $(MOTION_ENGINE_DEST) $(CONFIG_DOC_DEST) $(SHAPER_IDENT_DEST)
+	cp $(MOTION_ENGINE_SRC) $(MOTION_ENGINE_DEST)
+	cp $(CONFIG_DOC_SRC) $(CONFIG_DOC_DEST)
+	cp $(SHAPER_IDENT_SRC) $(SHAPER_IDENT_DEST)
+
+# Config parser module — klippy/configfile.py refuses to start without it.
+# Small dependency graph (pyo3 + config-doc only), so python-only
+# environments build just this target.
+CONFIG_DOC_SRC  = $(CARGO_TARGET_DIR)/release/lib_config_doc.$(MOTION_ENGINE_EXT)
+CONFIG_DOC_DEST = klippy/_config_doc.so
+
+config-doc:
+	cd rust && cargo build -p config-py --release --features extension-module
+	rm -f $(CONFIG_DOC_DEST)
+	cp $(CONFIG_DOC_SRC) $(CONFIG_DOC_DEST)
+
+clean-config-doc:
+	rm -f $(CONFIG_DOC_DEST)
+	cd rust && cargo clean -p config-py
+
+# Resonance-identification numeric core — imported by
+# klippy/extras/shaper_calibrate.py by explicit path.
+SHAPER_IDENT_SRC  = $(CARGO_TARGET_DIR)/release/lib_shaper_ident.$(MOTION_ENGINE_EXT)
+SHAPER_IDENT_DEST = klippy/_shaper_ident.so
+
+shaper-ident:
+	cd rust && cargo build -p shaper-ident --release --features extension-module
+	rm -f $(SHAPER_IDENT_DEST)
+	cp $(SHAPER_IDENT_SRC) $(SHAPER_IDENT_DEST)
+
+clean-shaper-ident:
+	rm -f $(SHAPER_IDENT_DEST)
+	cd rust && cargo clean -p shaper-ident
+
+# Same module under the `snapshot` cargo profile: float-identical output,
+# much faster edit-rebuild cycle (no fat LTO, parallel codegen, incremental).
+# The snapshot test loop uses this target.
+MOTION_ENGINE_FAST_SRC = $(CARGO_TARGET_DIR)/snapshot/lib_motion_engine.$(MOTION_ENGINE_EXT)
+
+motion-engine-fast: config-doc
+	cd rust && cargo build -p motion-engine --profile snapshot --features extension-module,snapshot
+	rm -f $(MOTION_ENGINE_DEST)
+	cp $(MOTION_ENGINE_FAST_SRC) $(MOTION_ENGINE_DEST)
+
+clean-motion-engine:
+	rm -f $(MOTION_ENGINE_DEST)
+	cd rust && cargo clean -p motion-engine
+
+# Hardware EtherCAT endpoint — build.rs compiles csrc/libecrt_igh.c and links the
+# IgH (EtherLab) kernel master via libethercat under --features hw; build on the
+# Pi. The full link runs only here (libethercat is bench-only), but CI
+# compile-checks this path via `scripts/ci.sh rust-ethercat-hw` (cargo check
+# against the csrc/ci-igh stub header). IGH_DIR (headers under include/) defaults
+# to /opt/etherlab and IGH_LIB_DIR to $IGH_DIR/lib in build.rs, so no env is
+# needed for the standard bench layout.
+ethercat-endpoint-hw:
+	cd rust && cargo build -p ethercat-rt --features hw --bin ethercat-rt --release
+
+# Capabilities so the endpoint runs unprivileged (raw socket, RT sched, mlockall).
+# sudo, once per rebuild of the binary. Not run in CI.
+setcap-ethercat:
+	sudo setcap cap_net_raw,cap_sys_nice,cap_ipc_lock+ep rust/target/release/ethercat-rt
+
+ethercat-stub:
+	cd rust && cargo build -p ethercat-rt --bin ethercat-rt-stub --release
+
+.PHONY: motion-engine motion-engine-fast clean-motion-engine \
+	config-doc clean-config-doc shaper-ident clean-shaper-ident \
+	ethercat-endpoint-hw setcap-ethercat ethercat-stub

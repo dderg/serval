@@ -1,0 +1,533 @@
+# Main Kconfig settings
+
+mainmenu "Klipper Firmware Configuration"
+
+config LOW_LEVEL_OPTIONS
+    bool "Enable extra low-level configuration options"
+    help
+        Enable low-level configuration options that (if modified) may
+        result in a build that does not function correctly.
+
+choice
+    prompt "Micro-controller Architecture"
+    config MACH_STM32
+        bool "STMicroelectronics STM32"
+    config MACH_LINUX
+        bool "Linux process"
+    config MACH_SIMU
+        bool "Host simulator"
+endchoice
+
+source "src/stm32/Kconfig"
+source "src/linux/Kconfig"
+source "src/simulator/Kconfig"
+
+# Generic configuration options for serial ports
+config SERIAL
+    bool
+config SERIAL_BOOTLOADER_SIDECHANNEL
+    bool
+config SERIAL_BAUD
+    depends on SERIAL
+    int "Baud rate for serial port" if LOW_LEVEL_OPTIONS
+    default 250000
+    help
+        Specify the baud rate of the serial port. This should be set
+        to 250000. Read the FAQ before changing this value.
+
+# Generic configuration options for USB
+config USBSERIAL
+    bool
+config USBCANBUS
+    bool
+config USB
+    bool
+    default y if USBSERIAL || USBCANBUS
+config USB_VENDOR_ID
+    default 0x1d50
+config USB_DEVICE_ID
+    default 0x614e
+config USB_SERIAL_NUMBER_CHIPID
+    depends on USB && HAVE_CHIPID
+    default y
+config USB_SERIAL_NUMBER
+    default "12345"
+config USB_MANUFACTURER
+    default "Klipper"
+
+menu "USB ids"
+    depends on USB && LOW_LEVEL_OPTIONS
+config USB_VENDOR_ID
+    hex "USB vendor ID" if USBSERIAL
+config USB_DEVICE_ID
+    hex "USB device ID" if USBSERIAL
+config USB_SERIAL_NUMBER_CHIPID
+    bool "USB serial number from CHIPID" if HAVE_CHIPID
+config USB_SERIAL_NUMBER
+    string "USB serial number" if !USB_SERIAL_NUMBER_CHIPID
+config USB_MANUFACTURER
+    string "USB manufacturer"
+endmenu
+
+menu "CAN bus UUID"
+    depends on CANBUS && LOW_LEVEL_OPTIONS
+config CAN_UUID_USE_CHIPID
+    bool "CAN bus UUID Hash from CHIPID" if HAVE_CHIPID
+config CAN_UUID_CUSTOM
+    string "CAN bus UUID Hash" if !CAN_UUID_USE_CHIPID
+endmenu
+
+# Optional features that can be disabled (for devices with small flash sizes)
+config WANT_ADC
+    bool
+    depends on HAVE_GPIO_ADC
+    default y
+config WANT_SPI
+    bool
+    default y if WANT_GPIO_SPI || WANT_SOFTWARE_SPI
+    default n
+config WANT_SOFTWARE_SPI
+    bool
+    depends on HAVE_GPIO
+    default y if HAVE_GPIO
+config WANT_I2C
+    bool
+    default y if WANT_GPIO_I2C || WANT_SOFTWARE_I2C
+    default n
+config WANT_SOFTWARE_I2C
+    bool
+    depends on HAVE_GPIO
+    default y if HAVE_GPIO
+config WANT_HARD_PWM
+    bool
+    depends on HAVE_GPIO_HARD_PWM
+    default y
+config WANT_BUTTONS
+    bool
+    depends on HAVE_GPIO
+    default y
+config WANT_TMCUART
+    bool
+    depends on HAVE_GPIO
+    default y
+config WANT_NEOPIXEL
+    bool
+    depends on HAVE_GPIO
+    default y
+config WANT_PULSE_COUNTER
+    bool
+    depends on HAVE_GPIO
+    default y
+config WANT_ST7920
+    bool
+    depends on HAVE_GPIO
+    default y
+config WANT_HD44780
+    bool
+    depends on HAVE_GPIO
+    default y
+config WANT_ADXL345
+    bool
+    depends on WANT_SPI
+    default y
+config WANT_LIS2DW
+    bool
+    depends on WANT_SPI || WANT_I2C
+    default y
+config WANT_MPU9250
+    bool
+    depends on WANT_I2C
+    default y
+config WANT_ICM20948
+    bool
+    depends on WANT_I2C
+    default y
+config WANT_THERMOCOUPLE
+    bool
+    depends on WANT_SPI
+    default y
+config WANT_HX71X
+    bool
+    depends on HAVE_GPIO
+    default y
+config WANT_ADS1220
+    bool
+    depends on WANT_SPI
+    default y
+config WANT_ADS131MX
+    bool
+    depends on WANT_SPI
+    default y
+config WANT_LDC1612
+    bool
+    depends on WANT_I2C
+    default y
+config WANT_SENSOR_ANGLE
+    bool
+    depends on HAVE_SPI
+    default y
+config WANT_GPIO_SPI
+    bool
+    depends on HAVE_GPIO && HAVE_GPIO_SPI
+    default y
+config WANT_GPIO_ADC
+    bool
+    depends on HAVE_GPIO && HAVE_GPIO_ADC
+    default y
+config WANT_GPIO_I2C
+    bool
+    depends on HAVE_GPIO && HAVE_GPIO_I2C
+    default y
+config NEED_SENSOR_BULK
+    bool
+    depends on WANT_ADXL345 || WANT_LIS2DW || WANT_MPU9250 || WANT_ICM20948 \
+        || WANT_HX71X || WANT_ADS1220 || WANT_ADS131MX \
+        || WANT_LDC1612 || WANT_SENSOR_ANGLE
+    default y
+config NEED_LOAD_CELL_PROBE
+    bool
+    depends on WANT_HX71X || WANT_ADS1220 || WANT_ADS131MX
+    default y
+config NEED_SOS_FILTER
+    bool
+    depends on NEED_LOAD_CELL_PROBE
+    default y
+config WANT_OPTIMIZE_SIZE
+    bool
+    default n
+
+menu "Feature Configuration"
+comment "Microcontroller interfaces"
+config WANT_ADC
+    bool "Support hardware ADC (analog to digital)"
+    depends on HAVE_GPIO_ADC
+config WANT_GPIO_SPI
+    bool "Support hardware SPI communication"
+    depends on HAVE_GPIO && HAVE_GPIO_SPI
+config WANT_SOFTWARE_SPI
+    bool "Support software SPI communication"
+    depends on HAVE_GPIO
+config WANT_GPIO_I2C
+    bool "Support hardware I2C communication"
+    depends on HAVE_GPIO && HAVE_GPIO_I2C
+config WANT_SOFTWARE_I2C
+    bool "Support software I2C communication"
+    depends on HAVE_GPIO
+config WANT_HARD_PWM
+    bool "Support hardware PWM (pulse width modulation)"
+    depends on HAVE_GPIO_HARD_PWM
+config WANT_GPIO_BUTTONS
+    bool "Support GPIO based button reading"
+    depends on HAVE_GPIO
+
+comment "----"
+config WANT_TMCUART
+    bool "Support Trinamic stepper motor driver UART communication"
+    depends on HAVE_GPIO
+config WANT_NEOPIXEL
+    bool "Support 'neopixel' type LED control"
+    depends on HAVE_GPIO
+config WANT_PULSE_COUNTER
+    bool "Support measuring fan tachometer GPIO pins"
+    depends on HAVE_GPIO
+
+comment "LCD chips"
+config WANT_ST7920
+    bool "Support ST7920 LCD display"
+    depends on HAVE_GPIO
+config WANT_HD44780
+    bool "Support HD44780 LCD display"
+    depends on HAVE_GPIO
+
+comment "Accelerometer chips"
+    depends on WANT_SPI || WANT_I2C
+config WANT_ADXL345
+    bool "Support adxl accelerometers"
+    depends on WANT_SPI
+config WANT_LIS2DW
+    bool "Support lis2dw and lis3dh 3-axis accelerometers"
+    depends on WANT_SPI || WANT_I2C
+config WANT_MPU9250
+    bool "Support MPU accelerometers"
+    depends on WANT_I2C
+config WANT_ICM20948
+    bool "Support ICM20948 accelerometer"
+    depends on WANT_I2C
+
+comment "External ADC type chips"
+config WANT_THERMOCOUPLE
+    bool "Support thermocouple MAX sensors"
+    depends on WANT_SPI
+config WANT_HX71X
+    bool "Support HX711 and HX717 ADC chips"
+    depends on HAVE_GPIO
+config WANT_ADS1220
+    bool "Support ADS 1220 ADC chip"
+    depends on WANT_SPI
+config WANT_ADS131MX
+    bool "Support ADS131M02 and ADS131M04 ADC chips"
+    depends on WANT_SPI
+config WANT_LDC1612
+    bool "Support ldc1612 eddy current sensor chip"
+    depends on WANT_I2C
+
+config WANT_SENSOR_ANGLE
+    bool "Support angle sensors"
+    depends on WANT_SPI
+
+comment "Compiler options"
+config WANT_OPTIMIZE_SIZE
+    bool "Optimize for code size (-Os) not speed (-O2)"
+    default y if CONFIG_HAVE_LIMITED_CODE_SIZE
+    default n
+endmenu
+
+# Generic configuration options for CANbus
+config CANSERIAL
+    bool
+config CANBUS
+    bool
+    default y if CANSERIAL || USBCANBUS
+config CANBUS_FREQUENCY
+    int "CAN bus speed" if LOW_LEVEL_OPTIONS && CANBUS
+    default 1000000
+config HAVE_CANFD
+    bool
+config CANBUS_DATA_FREQUENCY
+    int "CAN-FD data phase speed (0 to disable CAN-FD)" if CANSERIAL && HAVE_CANFD
+    default 0
+    help
+        Non-zero switches the CAN serial transport to CAN-FD, carrying up
+        to 64 bytes per frame with this bit rate during the data phase.
+        The rate must divide the FDCAN kernel clock into a legal quanta
+        split or initialization fails loudly rather than silently running
+        classic frames; 2000000 on a 64 MHz G0B1 is known good.
+        Deliberately unavailable to USB-to-CAN bridge builds, whose frame
+        forwarding is classic-only.
+config CANBUS_FILTER
+    bool
+    default y if CANSERIAL
+config CAN_UUID_USE_CHIPID
+    depends on CANBUS && HAVE_CHIPID
+    default y
+config CAN_UUID_CUSTOM
+    default "abc1234"
+
+# Classic host-scheduled stepping
+config CLASSIC_STEPPING
+    bool "Classic host-computed step timing (stepcompress)"
+    depends on HAVE_GPIO
+    default n
+    help
+        Execute motion from host-computed step times delivered by the
+        classic queue_step / set_next_step_dir / reset_step_clock
+        commands instead of evaluating trajectory pieces on the
+        micro-controller. This trades phase stepping and MCU-side piece
+        evaluation away, and is intended for micro-controllers too weak
+        to run the real-time piece evaluator (for example the STM32G0B1).
+        Selecting it removes the whole MCU-side motion runtime — the Rust
+        staticlib, the piece ring, the step queue, the sample ISR and the
+        phase-stepping path — so it is mutually exclusive with
+        MOTION_MODULE_STEPPER and every runtime sizing option.
+
+# Master switch for the MCU-side motion runtime: the Rust staticlib, the
+# piece ring/evaluator, the step queue, the motion sample ISR, the per-axis
+# step-output timers and the phase-stepping path. Mutually exclusive with
+# classic host-computed stepping.
+config MOTION_RUNTIME
+    bool
+    default y if !CLASSIC_STEPPING
+
+# Stepper optimizations
+config INLINE_STEPPER_HACK
+    # Enables gcc to inline stepper_event() into the main timer irq handler
+    bool
+    depends on CLASSIC_STEPPING
+    default y
+config HAVE_STEPPER_OPTIMIZED_BOTH_EDGE
+    bool
+config WANT_STEPPER_OPTIMIZED_BOTH_EDGE
+    bool "Optimize stepper code for 'step on both edges'" if LOW_LEVEL_OPTIONS
+    depends on INLINE_STEPPER_HACK && HAVE_STEPPER_OPTIMIZED_BOTH_EDGE
+    default y
+    help
+        Optimize the stepper code for Trinamic stepper motor drivers
+        that are configured in UART or SPI mode (and thus can perform
+        a step on both "edges" of the step pin).  Enabling this option
+        typically improves the stepper cpu performance by about 20%
+        when using these drivers.  If this option is disabled the code
+        will instead deploy optimizations that improve the cpu
+        performance by about 20% for traditional drivers (those that
+        take a step only on the "rising" or "falling" level of the
+        step pin).
+
+# Support setting gpio state at startup
+config INITIAL_PINS
+    string "GPIO pins to set at micro-controller startup"
+    depends on LOW_LEVEL_OPTIONS
+    help
+        One may specify a comma separated list of gpio pins to set
+        during the micro-controller startup sequence. By default the
+        pins will be set to output high - preface a pin with a '!'
+        character to set that pin to output low.
+
+# The HAVE_x options allow boards to disable support for some commands
+# if the hardware does not support the feature.
+config HAVE_GPIO
+    bool
+config HAVE_GPIO_ADC
+    bool
+config HAVE_GPIO_SPI
+    bool
+config HAVE_GPIO_SDIO
+    bool
+config HAVE_GPIO_I2C
+    bool
+config HAVE_GPIO_HARD_PWM
+    bool
+config HAVE_STRICT_TIMING
+    bool
+config HAVE_CHIPID
+    bool
+config HAVE_BOOTLOADER_REQUEST
+    bool
+config HAVE_LIMITED_CODE_SIZE
+    bool
+config HAVE_SOFTWARE_DIVIDE_REQUIRED
+    bool
+
+config RUNTIME_PIECE_RING_SIZE
+    depends on MOTION_RUNTIME
+    int "Piece-ring byte budget (total across all axes)" if LOW_LEVEL_OPTIONS
+    default 4096 if MACH_STM32F1
+    default 6144 if MACH_STM32G0
+    default 32768 if MACH_STM32F401
+    default 63488
+    range 1024 524288
+    help
+      Total byte budget for all per-axis piece rings. Each PieceEntry is
+      48 bytes (variable-degree Chebyshev, up to 8 f32 coefficients);
+      TOTAL_RING_PIECES = PIECE_RING_SIZE / 48. The budget is divided
+      evenly across configured axes at runtime via the per-axis
+      RingDescriptor. Default 63488 (62 KB) gives 1322 entries spread
+      across 4 axes (330 entries each) — sufficient for lookahead at
+      40 kHz with typical slicer output. Exported to the Rust build as
+      RUNTIME_PIECE_RING_SIZE.
+
+config MOTION_SAMPLE_RATE_HZ
+    int "Motion engine sample rate in Hz (motion-timer ISR fire rate)" if LOW_LEVEL_OPTIONS
+    depends on MACH_STM32H7 || MACH_STM32F4 || MACH_STM32F1 || MACH_STM32G0 || MACH_LINUX
+    default 10000 if MACH_STM32H7
+    default 5000 if MACH_STM32F401
+    default 10000 if MACH_STM32F4
+    default 2000 if MACH_STM32F1
+    default 2000 if MACH_STM32G0
+    default 1000 if MACH_LINUX
+    default 10000
+    range 1000 100000
+    help
+      Rate at which the motion-engine ISR evaluates motion curves and emits
+      step pulses. Higher rates give better velocity-extrapolation accuracy
+      but cost more CPU. Defaults to 40 kHz on H7 (520 MHz) and 20 kHz
+      on F4 (180 MHz). Defaults to 2 kHz on G0B1 (64 MHz Cortex-M0+,
+      soft-float): this is a low-rate bring-up target, not a throughput
+      target. Defaults to 1 kHz on MACH_LINUX: the host tick
+      (linux/runtime_tick_host.c) drives the ISR from a clock_nanosleep loop
+      whose resolution floor on a stock (non-PREEMPT_RT) kernel is ~1 ms, and
+      this rate MUST equal the tick rate or the runtime's TickIntervalExceeded
+      guard fires on the first active tick. Raising it requires a PREEMPT_RT
+      kernel and a SCHED_FIFO launch (klipper_mcu -r).
+
+# Motion-engine ISR timer selection. The physical timer is chosen per
+# architecture via the alias in src/stm32/runtime_tick_timer.h: H7/F4 use
+# TIM5 (hardcoded in their runtime_tick_{h7,f4}.c). STM32G0B1 has no TIM5
+# (timers: TIM1/2/3/4/6/7/14/15/16/17), and TIM2 is already Klipper's 32-bit
+# scheduler clock (stm32f0_timer.c), so the motion ISR needs a different free
+# timer. TIM6/TIM7 are basic timers with no output channels — hard_pwm can
+# never claim them — making them the safe choices. Default TIM7 (its only
+# shared-vector neighbor is LPTIM2, unused on a toolhead board).
+choice
+    prompt "Motion-engine ISR timer (STM32G0)" if LOW_LEVEL_OPTIONS
+    default MOTION_TIMER_TIM7
+    depends on MACH_STM32G0 && MOTION_RUNTIME
+    help
+      Selects which hardware timer drives the motion-engine sample ISR on
+      STM32G0. Pick one not otherwise used by your board's PWM/peripherals.
+      TIM6 and TIM7 are basic timers (no PWM channels) and are the
+      recommended choices.
+
+    config MOTION_TIMER_TIM7
+        bool "TIM7 (basic timer, shares vector with LPTIM2)"
+
+    config MOTION_TIMER_TIM6
+        bool "TIM6 (basic timer, shares vector with DAC/LPTIM1)"
+endchoice
+
+config RUNTIME_STORAGE_SIZE
+    int "rt_storage byte ceiling" if LOW_LEVEL_OPTIONS
+    depends on (MACH_STM32H7 || MACH_STM32F4 || MACH_STM32F1 || MACH_STM32G0 || MACH_LINUX) \
+        && MOTION_RUNTIME
+    default 122880 if MACH_STM32H7
+    default 10240 if MACH_STM32F1
+    default 57344 if MACH_STM32G0
+    default 36864 if MACH_STM32F401
+    default 73728 if MACH_STM32F4
+    default 122880
+    range 8192 524288
+    help
+      Byte ceiling for rt_storage (the C-declared backing buffer that
+      replaces RT_CELL's Rust-side #[link_section] placement). The fixed
+      (non-ring) part of RuntimeContext measures 2520 bytes on the MCU
+      build (2026-06-07); total is that plus PIECE_RING_SIZE. The C-side
+      _Static_assert in src/runtime_storage.c enforces 2 KB headroom and
+      the Rust-side const_assert fires if RuntimeContext exceeds this
+      value at compile time.
+
+      Per-MCU defaults: H7 122880 (120 KB, placed in AXI SRAM whose
+      ceiling is 320 KB). F4 73728 (72 KB, headroom for piece-ring growth
+      on F4's 128 KB SRAM). F401 (64 KB SRAM total) 36864, leaving the
+      C-side dynamic pool ~17 KB. G0 57344 (G0B1 has 144 KB SRAM). F103
+      (48 KB SRAM total) 10240: the measured floor for a 4096 B ring is
+      7168, and every byte above it is taken straight out of the C
+      dynamic pool, which is the scarce resource on that part.
+      MACH_LINUX uses the H7-class 122880.
+
+config MCU_SIM
+    bool "Build for simulator (disables IWDG, enables Linux sim shims)"
+    default n
+    help
+      Builds a sim-flavor image: skips watchdog_init / watchdog_reset
+      so Renode's IWDG model can't trigger spurious resets, and (on
+      MACH_LINUX) replaces real /dev/gpiochip / /dev/spidev / /sys/iio
+      / /sys/class/pwm access with in-memory stubs and Unix-socket
+      passthroughs to chip emulators. NEVER enable for a flashed-to-
+      silicon build — it leaves the IWDG effectively off, which is
+      unsafe on real hardware.
+
+config MCU_SIM_TMCUART_BYPASS
+    bool "Bypass tmcuart bit-bang and write bytes to a Unix socket"
+    depends on MACH_LINUX
+    default n
+    help
+      Sim-only escape hatch for the tmcuart driver. When enabled, the
+      tmcuart_send command bypasses the GPIO bit-bang and writes raw
+      bytes directly to ${MCU_SIM_SOCK_DIR}/tmcuart_<oid>. This is
+      the one architectural exception to the otherwise-clean
+      "production firmware knows nothing about sim" rule for MACH_LINUX
+      builds — the bit-bang's timing fragility under Linux scheduler
+      jitter would make a shim-side decoder flake intermittently.
+
+menu "Motion dispatch modules"
+    depends on (MACH_STM32H7 || MACH_STM32F4 || MACH_STM32F1 || MACH_STM32G0 || MACH_LINUX) \
+        && MOTION_RUNTIME
+config MOTION_MODULE_STEPPER
+    bool "Stepper pulse/phase dispatch"
+    default y if MACH_STM32H7 || MACH_STM32F4 || MACH_STM32F1 || MACH_STM32G0
+    default n
+    help
+      Compiles the STEP/DIR pulse and TMC phase-stepping dispatch backend
+      into this firmware. Required for any build that drives stepper motors;
+      a servo/EtherCAT node leaves it off.
+endmenu
+
+source "src/extras/Kconfig"

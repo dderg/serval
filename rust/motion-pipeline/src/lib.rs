@@ -1,0 +1,98 @@
+use std::thread;
+
+use crossbeam_channel::bounded;
+use trajectory::AxisChainSet;
+
+pub mod fit_stage;
+mod follower_projection;
+pub mod lower_stage;
+pub mod lowering;
+pub mod planner;
+pub mod shaper;
+pub mod timing;
+pub mod types;
+
+use fit_stage::FitStage;
+use planner::Planner;
+use types::PipelineHandle;
+
+pub use fit_stage::FitDriver;
+pub use lower_stage::{Lowerer, advance_odometer, dist3, run_lowerer};
+pub use lowering::FitTol;
+pub use shaper::Shaper;
+pub use types::{
+    BarrierAck, CONTIGUITY_EPS_MM, Control, LoweredItem, NudgePiece, PlannedItem, ShapedItem,
+    StreamConfig, StreamError, StreamInput,
+};
+
+/// Inter-stage channels only smooth scheduling jitter between stage threads;
+/// throughput is set by the slowest stage regardless of depth, while every
+/// buffered slot is queued-command latency (a fan change waits behind it).
+/// Depth therefore covers a consumer's longest single-item stall, nothing
+/// more. The pipe's time-depth safety margin lives downstream, in the pump's
+/// staged pieces and the MCU rings.
+const STAGE_CHANNEL_CAP: usize = 16;
+/// The ingress is a µs-per-item pass-through sitting directly behind the
+/// input channel, so its outbox needs no burst absorption of its own.
+const RAW_CHANNEL_CAP: usize = 8;
+
+/// Wires the pure stream stages (fit stage → planner → lowerer → shaper) into
+/// OS threads. Production goes through `motion_engine::worker::setup_pipeline`,
+/// which wraps these stages with the dispatcher and pump; this stage-only
+/// wiring is also used standalone by offline consumers (seam harness,
+/// trajectory dump) that have no hardware behind them.
+pub fn setup_stages(
+    config: StreamConfig,
+    axis_chains: AxisChainSet,
+    home_pos: Vec<f64>,
+    t_start: f64,
+) -> PipelineHandle {
+    let (raw_tx, raw_rx) = bounded::<StreamInput>(RAW_CHANNEL_CAP);
+    let (fitted_tx, fitted_rx) = bounded::<StreamInput>(STAGE_CHANNEL_CAP);
+    let (planned_tx, planned_rx) = bounded::<PlannedItem>(STAGE_CHANNEL_CAP);
+    let (lowered_tx, lowered_rx) = bounded::<LoweredItem>(STAGE_CHANNEL_CAP);
+    let (shaped_tx, shaped_rx) = bounded::<ShapedItem>(STAGE_CHANNEL_CAP);
+
+    let mut corner = config.corner;
+    corner.ramp_accel_budget_mm_s2 = config.max_extrude_only_accel_mm_s2;
+    let fit_stage = FitStage::new(corner);
+    let fit_thread = spawn_stage("kalico-fit", move || fit_stage.run(raw_rx, fitted_tx));
+
+    let planner = Planner::new(config);
+    let planner_thread = spawn_stage("kalico-plan", move || planner.run(fitted_rx, planned_tx));
+
+    let fit_tol = FitTol {
+        pos_mm: config.fit_tol_mm,
+        accel_mm_s2: config.fit_tol_accel_mm_s2,
+    };
+    let lower_chains = axis_chains.clone();
+    let lower_thread = spawn_stage("kalico-lower", move || {
+        run_lowerer(
+            planned_rx,
+            lowered_tx,
+            fit_tol,
+            lower_chains,
+            home_pos,
+            t_start,
+        );
+    });
+
+    let shaper = Shaper::new(axis_chains);
+    let shaper_thread = spawn_stage("kalico-shape", move || shaper.run(lowered_rx, shaped_tx));
+
+    PipelineHandle {
+        input: raw_tx,
+        output: shaped_rx,
+        threads: vec![fit_thread, planner_thread, lower_thread, shaper_thread],
+    }
+}
+
+fn spawn_stage(name: &str, f: impl FnOnce() + Send + 'static) -> thread::JoinHandle<()> {
+    thread::Builder::new()
+        .name(name.to_string())
+        .spawn(f)
+        .unwrap_or_else(|e| panic!("spawn {name}: {e}"))
+}
+
+#[cfg(test)]
+mod tests;

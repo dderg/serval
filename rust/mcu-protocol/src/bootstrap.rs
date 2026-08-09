@@ -1,0 +1,144 @@
+// IdentifyResponse byte layout is frozen at proto v1; any offset change is a wire break.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Identify {
+    pub proto_version: u8,
+}
+
+pub const IDENTIFY_BODY_LEN: usize = 1;
+
+impl Identify {
+    pub fn encode_body(&self, out: &mut Vec<u8>) {
+        out.push(self.proto_version);
+    }
+
+    pub fn encode_body_to_array(&self) -> [u8; IDENTIFY_BODY_LEN] {
+        [self.proto_version]
+    }
+
+    pub fn decode_body(buf: &[u8]) -> Result<Self, BootstrapDecodeError> {
+        if buf.len() != IDENTIFY_BODY_LEN {
+            return Err(BootstrapDecodeError::WrongLength {
+                expected: IDENTIFY_BODY_LEN,
+                got: buf.len(),
+            });
+        }
+        Ok(Self {
+            proto_version: buf[0],
+        })
+    }
+}
+
+// IdentifyResponse body (81 bytes, frozen):
+//  0     proto_version : u8
+//  1..5  firmware_ver  : u32_le
+//  5..25 build_hash    : [u8; 20]
+// 25..57 schema_hash   : [u8; 32]
+// 57..61 reset_epoch   : u32_le
+// 61..69 capabilities  : u64_le
+// 69..81 mcu_serial    : [u8; 12]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentifyResponse {
+    pub proto_version: u8,
+    pub firmware_ver: u32,
+    pub build_hash: [u8; 20],
+    pub schema_hash: [u8; 32],
+    pub reset_epoch: u32,
+    pub capabilities: u64,
+    pub mcu_serial: [u8; 12],
+}
+
+pub const IDENTIFY_RESPONSE_BODY_LEN: usize = 81;
+
+// Field offsets frozen forever; exposed for C side and tests.
+pub const IDR_OFF_PROTO_VERSION: usize = 0;
+pub const IDR_OFF_FIRMWARE_VER: usize = 1;
+pub const IDR_OFF_BUILD_HASH: usize = 5;
+pub const IDR_OFF_SCHEMA_HASH: usize = 25;
+pub const IDR_OFF_RESET_EPOCH: usize = 57;
+pub const IDR_OFF_CAPABILITIES: usize = 61;
+pub const IDR_OFF_MCU_SERIAL: usize = 69;
+
+impl IdentifyResponse {
+    pub fn encode_body(&self, out: &mut Vec<u8>) {
+        let arr = self.encode_body_to_array();
+        out.extend_from_slice(&arr);
+    }
+
+    #[allow(clippy::range_plus_one)]
+    pub fn encode_body_to_array(&self) -> [u8; IDENTIFY_RESPONSE_BODY_LEN] {
+        let mut b = [0u8; IDENTIFY_RESPONSE_BODY_LEN];
+        b[IDR_OFF_PROTO_VERSION] = self.proto_version;
+        b[IDR_OFF_FIRMWARE_VER..IDR_OFF_FIRMWARE_VER + 4]
+            .copy_from_slice(&self.firmware_ver.to_le_bytes());
+        b[IDR_OFF_BUILD_HASH..IDR_OFF_BUILD_HASH + 20].copy_from_slice(&self.build_hash);
+        b[IDR_OFF_SCHEMA_HASH..IDR_OFF_SCHEMA_HASH + 32].copy_from_slice(&self.schema_hash);
+        b[IDR_OFF_RESET_EPOCH..IDR_OFF_RESET_EPOCH + 4]
+            .copy_from_slice(&self.reset_epoch.to_le_bytes());
+        b[IDR_OFF_CAPABILITIES..IDR_OFF_CAPABILITIES + 8]
+            .copy_from_slice(&self.capabilities.to_le_bytes());
+        b[IDR_OFF_MCU_SERIAL..IDR_OFF_MCU_SERIAL + 12].copy_from_slice(&self.mcu_serial);
+        b
+    }
+
+    #[allow(clippy::range_plus_one)]
+    pub fn decode_body(buf: &[u8]) -> Result<Self, BootstrapDecodeError> {
+        if buf.len() != IDENTIFY_RESPONSE_BODY_LEN {
+            return Err(BootstrapDecodeError::WrongLength {
+                expected: IDENTIFY_RESPONSE_BODY_LEN,
+                got: buf.len(),
+            });
+        }
+        let proto_version = buf[IDR_OFF_PROTO_VERSION];
+        let firmware_ver = u32::from_le_bytes(
+            buf[IDR_OFF_FIRMWARE_VER..IDR_OFF_FIRMWARE_VER + 4]
+                .try_into()
+                .expect("range checked above"),
+        );
+        let mut build_hash = [0u8; 20];
+        build_hash.copy_from_slice(&buf[IDR_OFF_BUILD_HASH..IDR_OFF_BUILD_HASH + 20]);
+        let mut schema_hash = [0u8; 32];
+        schema_hash.copy_from_slice(&buf[IDR_OFF_SCHEMA_HASH..IDR_OFF_SCHEMA_HASH + 32]);
+        let reset_epoch = u32::from_le_bytes(
+            buf[IDR_OFF_RESET_EPOCH..IDR_OFF_RESET_EPOCH + 4]
+                .try_into()
+                .expect("range checked above"),
+        );
+        let capabilities = u64::from_le_bytes(
+            buf[IDR_OFF_CAPABILITIES..IDR_OFF_CAPABILITIES + 8]
+                .try_into()
+                .expect("range checked above"),
+        );
+        let mut mcu_serial = [0u8; 12];
+        mcu_serial.copy_from_slice(&buf[IDR_OFF_MCU_SERIAL..IDR_OFF_MCU_SERIAL + 12]);
+        Ok(Self {
+            proto_version,
+            firmware_ver,
+            build_hash,
+            schema_hash,
+            reset_epoch,
+            capabilities,
+            mcu_serial,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapDecodeError {
+    WrongLength { expected: usize, got: usize },
+}
+
+impl core::fmt::Display for BootstrapDecodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::WrongLength { expected, got } => write!(
+                f,
+                "bootstrap message wrong length: expected {expected} bytes, got {got}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BootstrapDecodeError {}
+
+#[cfg(test)]
+mod tests;

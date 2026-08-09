@@ -1,0 +1,65 @@
+name: Sim e2e (advisory)
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sim-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Advisory gate: surfaces regressions the unit suites can't see (full
+    # firmware + host under the virtual clock) without blocking merges.
+    # Keep this job OUT of the branch-protection required checks.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      # Shards run on separate runners, so tests inside each shard stay
+      # sequential (klippy's real-clock timing budgets flake under CPU
+      # contention) while the suite parallelizes across machines. Shards
+      # are balanced by measured test-file duration. The fallback "rest"
+      # shard ignores every pinned file, so new test files run there without
+      # touching this matrix.
+      matrix:
+        include:
+          - shard: probe
+            targets: tools/sim/tests/test_probe.py
+          - shard: print
+            targets: >-
+              tools/sim/tests/test_neptune_print.py
+              tools/sim/tests/test_print.py
+              tools/sim/tests/test_first_extrude.py
+          - shard: beacon
+            targets: >-
+              tools/sim/tests/test_beacon.py
+              tools/sim/tests/test_beacon_scan_path.py
+              tools/sim/tests/test_bed_mesh_transform.py
+          - shard: rest-pinned
+            targets: >-
+              tools/sim/tests/test_heaters_fans.py
+              tools/sim/tests/test_phase_stepping.py
+              tools/sim/tests/test_probe_calibrate.py
+          - shard: rest
+            targets: >-
+              tools/sim/tests
+              --ignore=tools/sim/tests/test_probe.py
+              --ignore=tools/sim/tests/test_neptune_print.py
+              --ignore=tools/sim/tests/test_print.py
+              --ignore=tools/sim/tests/test_first_extrude.py
+              --ignore=tools/sim/tests/test_beacon.py
+              --ignore=tools/sim/tests/test_beacon_scan_path.py
+              --ignore=tools/sim/tests/test_bed_mesh_transform.py
+              --ignore=tools/sim/tests/test_heaters_fans.py
+              --ignore=tools/sim/tests/test_phase_stepping.py
+              --ignore=tools/sim/tests/test_probe_calibrate.py
+    name: sim-e2e (${{ matrix.shard }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the sim e2e suite
+        run: ./scripts/ci.sh sim-e2e
+        env:
+          SIM_TEST_TARGETS: ${{ matrix.targets }}

@@ -1,0 +1,108 @@
+//! Callers must ensure no concurrent access. `ec_rt_bringup_preop` must
+//! succeed before SDO access; `ec_rt_bringup_finish` must succeed before
+//! anything that touches process data (cycle, targets, offsets, telemetry).
+#![allow(unsafe_code)]
+
+#[cfg(feature = "hw")]
+use std::os::raw::{c_char, c_int};
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct EcTelemetry {
+    pub error_code: u16,
+    pub statusword: u16,
+    pub position_actual: i32,
+    pub velocity_actual: i32,
+    pub torque_actual: i16,
+    pub following_error: i32,
+    pub target_position: i32,
+    pub velocity_offset: i32,
+    pub torque_offset: i16,
+}
+
+const _: () = assert!(
+    core::mem::size_of::<EcTelemetry>() == 32,
+    "EcTelemetry layout must match ec_telemetry_t in csrc/libecrt.h"
+);
+
+#[cfg(feature = "hw")]
+extern "C" {
+    pub fn ec_rt_bringup_preop(
+        ifname: *const c_char,
+        cycle_ns: i64,
+        rt_cpu: c_int,
+        rt_prio: c_int,
+        slave_positions: *const i32,
+        num_slaves: c_int,
+    ) -> c_int;
+
+    pub fn ec_rt_bringup_finish() -> c_int;
+
+    pub fn ec_rt_enable_all() -> c_int;
+
+    pub fn ec_rt_dump_al_state();
+
+    pub fn ec_rt_cycle(toff_ns: *mut i64) -> c_int;
+
+    pub fn ec_rt_cycle_time_ns() -> u64;
+
+    pub fn ec_rt_reanchor_count() -> u32;
+    pub fn ec_rt_last_reanchor_behind_ns() -> i64;
+    pub fn ec_rt_cycle_stage_ns(
+        wake_late: *mut i64,
+        recv: *mut i64,
+        process: *mut i64,
+        send: *mut i64,
+    );
+
+    pub fn ec_rt_park_cycle(toff_ns: *mut i64) -> c_int;
+
+    pub fn ec_rt_al_status(slave: c_int, state: *mut u16, alstatuscode: *mut u16);
+
+    pub fn ec_rt_set_target_position(slave: c_int, counts: i32);
+
+    pub fn ec_rt_get_position_actual(slave: c_int) -> i32;
+
+    pub fn ec_rt_get_velocity_actual(slave: c_int) -> i32;
+
+    pub fn ec_rt_get_error_code(slave: c_int) -> u16;
+
+    pub fn ec_rt_set_velocity_offset(slave: c_int, counts_per_s: i32);
+
+    pub fn ec_rt_set_torque_offset(slave: c_int, tenths_pct: i16);
+
+    pub fn ec_rt_get_torque_actual(slave: c_int) -> i16;
+
+    pub fn ec_rt_read_limits(
+        slave: c_int,
+        ferr_counts: *mut u32,
+        ferr_timeout_ms: *mut u16,
+        torque_tenth_pct: *mut u16,
+    ) -> c_int;
+
+    pub fn ec_rt_write_limits(slave: c_int, ferr_counts: u32, torque_tenth_pct: u16) -> c_int;
+
+    pub fn ec_rt_sdo_read(
+        slave: c_int,
+        index: u16,
+        sub: u8,
+        buf: *mut u8,
+        size: *mut c_int,
+        abort_code: *mut u32,
+    ) -> c_int;
+
+    pub fn ec_rt_sdo_write(
+        slave: c_int,
+        index: u16,
+        sub: u8,
+        buf: *const u8,
+        size: c_int,
+        abort_code: *mut u32,
+    ) -> c_int;
+
+    pub fn ec_rt_disable_all();
+
+    pub fn ec_rt_shutdown();
+
+    pub fn ec_rt_get_telemetry(slave: c_int, out: *mut EcTelemetry);
+}

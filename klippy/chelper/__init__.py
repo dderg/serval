@@ -1,0 +1,144 @@
+# Wrapper around C helper code
+#
+# Copyright (C) 2016-2021  Kevin O'Connor <kevin@koconnor.net>
+#
+# This file may be distributed under the terms of the GNU GPLv3 license.
+import logging
+import os
+import platform
+
+import cffi
+
+######################################################################
+# c_helper.so compiling
+######################################################################
+
+GCC_CMD = "gcc"
+COMPILE_ARGS = (
+    "-Wall -g -O2 -shared -fPIC"
+    " -flto -fwhole-program -fno-use-linker-plugin"
+    " -o %s %s"
+)
+NATIVE_FLAGS = "-march=native -mtune=native"
+SOURCE_FILES = [
+    "pyhelper.c",
+]
+DEST_LIB = "c_helper.%s-%s.so" % (platform.system(), platform.machine())
+OTHER_FILES = [
+    "pyhelper.h",
+]
+
+defs_pyhelper = """
+    void set_python_logging_callback(void (*func)(const char *));
+    double get_monotonic(void);
+"""
+
+defs_all = [
+    defs_pyhelper,
+]
+
+
+# Update filenames to an absolute path
+def get_abs_files(srcdir, filelist):
+    return [os.path.join(srcdir, fname) for fname in filelist]
+
+
+# Return the list of file modification times
+def get_mtimes(filelist):
+    out = []
+    for filename in filelist:
+        try:
+            t = os.path.getmtime(filename)
+        except os.error:
+            continue
+        out.append(t)
+    return out
+
+
+# Check if the code needs to be compiled
+def check_build_code(sources, target):
+    src_times = get_mtimes(sources)
+    obj_times = get_mtimes([target])
+    return not obj_times or max(src_times) > min(obj_times)
+
+
+# Check if the current gcc version supports a particular command-line option
+def check_gcc_option(option):
+    cmd = "%s %s -S -o /dev/null -xc /dev/null > /dev/null 2>&1" % (
+        GCC_CMD,
+        option,
+    )
+    res = os.system(cmd)
+    return res == 0
+
+
+# Check if the current gcc version supports a particular command-line option
+def do_build_code(cmd):
+    res = os.system(cmd)
+    if res:
+        msg = "Unable to build C code module (error=%s)" % (res,)
+        logging.error(msg)
+        raise Exception(msg)
+
+
+FFI_main = None
+FFI_lib = None
+pyhelper_logging_callback = None
+
+
+# Hepler invoked from C errorf() code to log errors
+def logging_callback(msg):
+    logging.error(FFI_main.string(msg))
+
+
+# Return the Foreign Function Interface api to the caller
+def get_ffi():
+    global FFI_main, FFI_lib, pyhelper_logging_callback
+    if FFI_lib is None:
+        srcdir = os.path.dirname(os.path.realpath(__file__))
+        srcfiles = get_abs_files(srcdir, SOURCE_FILES)
+        ofiles = get_abs_files(srcdir, OTHER_FILES)
+        destlib = get_abs_files(srcdir, [DEST_LIB])[0]
+        if check_build_code(srcfiles + ofiles + [__file__], destlib):
+            if check_gcc_option(NATIVE_FLAGS):
+                cmd = "%s %s %s" % (GCC_CMD, NATIVE_FLAGS, COMPILE_ARGS)
+            else:
+                cmd = "%s %s" % (GCC_CMD, COMPILE_ARGS)
+            logging.info("Building C code module %s", DEST_LIB)
+            do_build_code(cmd % (destlib, " ".join(srcfiles)))
+        FFI_main = cffi.FFI()
+        for d in defs_all:
+            FFI_main.cdef(d)
+        FFI_lib = FFI_main.dlopen(destlib)
+        # Setup error logging
+        pyhelper_logging_callback = FFI_main.callback(
+            "void func(const char *)", logging_callback
+        )
+        FFI_lib.set_python_logging_callback(pyhelper_logging_callback)
+    return FFI_main, FFI_lib
+
+
+######################################################################
+# hub-ctrl hub power controller
+######################################################################
+
+HC_COMPILE_CMD = "gcc -Wall -g -O2 -o %s %s -lusb"
+HC_SOURCE_FILES = ["hub-ctrl.c"]
+HC_SOURCE_DIR = "../../lib/hub-ctrl"
+HC_TARGET = "hub-ctrl"
+HC_CMD = "sudo %s/hub-ctrl -h 0 -P 2 -p %d"
+
+
+def run_hub_ctrl(enable_power):
+    srcdir = os.path.dirname(os.path.realpath(__file__))
+    hubdir = os.path.join(srcdir, HC_SOURCE_DIR)
+    srcfiles = get_abs_files(hubdir, HC_SOURCE_FILES)
+    destlib = get_abs_files(hubdir, [HC_TARGET])[0]
+    if check_build_code(srcfiles, destlib):
+        logging.info("Building C code module %s", HC_TARGET)
+        do_build_code(HC_COMPILE_CMD % (destlib, " ".join(srcfiles)))
+    os.system(HC_CMD % (hubdir, enable_power))
+
+
+if __name__ == "__main__":
+    get_ffi()

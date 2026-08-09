@@ -1,0 +1,305 @@
+use nurbs::algebra::PiecewisePolynomialKernel;
+#[cfg(test)]
+use nurbs::ScalarNurbs;
+
+#[cfg(test)]
+fn eval_clamped(curve: &ScalarNurbs, t: f64) -> f64 {
+    let knots = curve.knots();
+    let lo = knots[0];
+    let hi = knots[knots.len() - 1];
+    nurbs::eval::eval(curve, t.clamp(lo, hi))
+}
+
+fn eval_kernel(kernel: &PiecewisePolynomialKernel, z: f64) -> f64 {
+    let (k_lo, k_hi) = kernel.support();
+    if z < k_lo || z > k_hi {
+        return 0.0;
+    }
+    for p in &kernel.pieces {
+        if z >= p.u_start - 1e-15 && z <= p.u_end + 1e-15 {
+            return p.evaluate(z);
+        }
+    }
+    0.0
+}
+
+/// 8-point Gauss–Legendre on [−1, 1]: exact through degree 15, comfortably
+/// above the degree-11 worst case (degree-7 input piece × degree-4 kernel).
+const GAUSS_NODES: [f64; 8] = [
+    -0.960_289_856_497_536_2,
+    -0.796_666_477_413_626_7,
+    -0.525_532_409_916_329,
+    -0.183_434_642_495_649_8,
+    0.183_434_642_495_649_8,
+    0.525_532_409_916_329,
+    0.796_666_477_413_626_7,
+    0.960_289_856_497_536_2,
+];
+const GAUSS_WEIGHTS: [f64; 8] = [
+    0.101_228_536_290_376_26,
+    0.222_381_034_453_374_47,
+    0.313_706_645_877_887_3,
+    0.362_683_783_378_362,
+    0.362_683_783_378_362,
+    0.313_706_645_877_887_3,
+    0.222_381_034_453_374_47,
+    0.101_228_536_290_376_26,
+];
+
+const CUT_DEDUP_EPS_S: f64 = 1e-12;
+
+/// The convolution `(input ∗ kernel)(t)`, evaluated exactly: both factors are
+/// piecewise polynomials, so integrating between their breakpoints with a
+/// Gauss rule of sufficient order carries no quadrature error at all. The
+/// previous sampled rectangle-rule evaluator corrugated the result at the
+/// sample wavelength — noise invisible in position but fatal to the refit's
+/// second-difference acceleration probes, which chased it into subdividing
+/// every span to the floor.
+pub struct ShapedSignal<'a> {
+    eval_input: Box<dyn Fn(f64) -> f64 + 'a>,
+    /// Sorted times where the input signal changes polynomial (piece seams,
+    /// segment boundaries, clamp edges). Between two consecutive cuts the
+    /// integrand is one polynomial, which the Gauss rule integrates exactly.
+    input_breaks: Vec<f64>,
+    /// Reusable cut buffer for `convolve` — the merge of kernel-piece
+    /// boundaries and in-window input breaks, rebuilt on every call.
+    cuts: std::cell::RefCell<Vec<f64>>,
+    /// Recent `(t, (p, v, a))` results: adjacent fit spans share boundary
+    /// times (a segment's end is the next segment's start, and bisection
+    /// re-evaluates its parent's endpoints), so a tiny exact-`t` memo removes
+    /// whole convolution passes without changing any computed value.
+    pva_memo: std::cell::RefCell<[Option<(u64, (f64, f64, f64))>; 4]>,
+    pva_memo_next: std::cell::Cell<usize>,
+    kernel: &'a PiecewisePolynomialKernel,
+    /// `k′` and `k″` as piecewise polynomials over the same support, plus the
+    /// jump of `k′` at each internal piece boundary (a delta in `k″` — the
+    /// triangle kernel has them, the bell kernel does not). With these,
+    /// `(f∗k)′ = f∗k′` and `(f∗k)″ = f∗k″ + Σ Δk′·f(t−τ)` are as exact as
+    /// `eval` itself — no finite-difference stencil, no stencil noise.
+    d_kernel: PiecewisePolynomialKernel,
+    dd_kernel: PiecewisePolynomialKernel,
+    d_kernel_jumps: Vec<(f64, f64)>,
+    k_lo: f64,
+    k_hi: f64,
+}
+
+impl<'a> ShapedSignal<'a> {
+    #[cfg(test)]
+    pub fn new(padded: &'a ScalarNurbs, kernel: &'a PiecewisePolynomialKernel) -> Self {
+        let mut breaks = padded.knots().to_vec();
+        breaks.dedup_by(|a, b| (*a - *b).abs() <= CUT_DEDUP_EPS_S);
+        Self::new_from_evaluator(kernel, |t| eval_clamped(padded, t), breaks)
+    }
+
+    pub fn new_from_evaluator<F>(
+        kernel: &'a PiecewisePolynomialKernel,
+        eval: F,
+        mut input_breaks: Vec<f64>,
+    ) -> Self
+    where
+        F: Fn(f64) -> f64 + 'a,
+    {
+        let (k_lo, k_hi) = kernel.support();
+        assert!(
+            (k_hi - k_lo).is_finite() && k_hi - k_lo > 0.0,
+            "shaper kernel support width must be finite and positive"
+        );
+        input_breaks.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        input_breaks.dedup_by(|a, b| (*a - *b).abs() <= CUT_DEDUP_EPS_S);
+        let d_kernel = PiecewisePolynomialKernel {
+            pieces: kernel.pieces.iter().map(|p| p.differentiate()).collect(),
+        };
+        let dd_kernel = PiecewisePolynomialKernel {
+            pieces: d_kernel.pieces.iter().map(|p| p.differentiate()).collect(),
+        };
+        assert!(
+            eval_kernel(kernel, k_lo).abs() <= 1e-9 && eval_kernel(kernel, k_hi).abs() <= 1e-9,
+            "shaper kernel must vanish at its support edges — otherwise the \
+             convolution differentiates into boundary deltas eval() cannot carry"
+        );
+        let mut d_kernel_jumps: Vec<(f64, f64)> = Vec::new();
+        let edge_jumps = [
+            (k_lo, eval_kernel(&d_kernel, k_lo)),
+            (k_hi, -eval_kernel(&d_kernel, k_hi)),
+        ];
+        for (tau, jump) in edge_jumps {
+            if jump.abs() > 0.0 {
+                d_kernel_jumps.push((tau, jump));
+            }
+        }
+        for w in kernel.pieces.windows(2) {
+            let tau = w[1].u_start;
+            let jump = w[1].differentiate().evaluate(tau) - w[0].differentiate().evaluate(tau);
+            if jump.abs() > 0.0 {
+                d_kernel_jumps.push((tau, jump));
+            }
+        }
+        Self {
+            eval_input: Box::new(eval),
+            input_breaks,
+            cuts: std::cell::RefCell::new(Vec::new()),
+            pva_memo: std::cell::RefCell::new([None; 4]),
+            pva_memo_next: std::cell::Cell::new(0),
+            kernel,
+            d_kernel,
+            dd_kernel,
+            d_kernel_jumps,
+            k_lo,
+            k_hi,
+        }
+    }
+
+    pub fn eval(&self, t: f64) -> f64 {
+        self.convolve(t, self.kernel)
+    }
+
+    /// `(f∗k)′(t) = (f∗k′)(t)` — exact because `k` is continuous and vanishes
+    /// at its support edges.
+    pub fn deriv(&self, t: f64) -> f64 {
+        self.convolve(t, &self.d_kernel)
+    }
+
+    /// `(f∗k)″(t) = (f∗k″)(t) + Σ Δk′(τ)·f(t−τ)` — the sum carries the deltas
+    /// a piecewise `k′` puts into `k″` at its jump points.
+    pub fn second_deriv(&self, t: f64) -> f64 {
+        let mut acc = self.convolve(t, &self.dd_kernel);
+        for &(tau, jump) in &self.d_kernel_jumps {
+            acc += jump * (self.eval_input)(t - tau);
+        }
+        acc
+    }
+
+    /// `(eval, deriv, second_deriv)` at `t` in one pass: the three kernels
+    /// share piece boundaries (differentiation preserves them), so the cut
+    /// merge and every `eval_input` sample — the expensive part on dense
+    /// micro-segment windows — are computed once instead of three times.
+    /// Accumulation mirrors `convolve` op for op, so each component is
+    /// bit-identical to the separate `eval`/`deriv`/`second_deriv` calls.
+    pub fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let key = t.to_bits();
+        if let Some(hit) = self
+            .pva_memo
+            .borrow()
+            .iter()
+            .flatten()
+            .find(|(bits, _)| *bits == key)
+        {
+            return hit.1;
+        }
+        let mut cuts = self.cuts.borrow_mut();
+        self.merge_cuts(t, &mut cuts);
+
+        let mut kernel_idx = 0usize;
+        let (mut p, mut v, mut a) = (0.0_f64, 0.0_f64, 0.0_f64);
+        for w in cuts.windows(2) {
+            let (lo, hi) = (w[0], w[1]);
+            let half = 0.5 * (hi - lo);
+            if half <= 0.0 {
+                continue;
+            }
+            let mid = 0.5 * (lo + hi);
+            while kernel_idx + 1 < self.kernel.pieces.len()
+                && self.kernel.pieces[kernel_idx].u_end <= mid
+            {
+                kernel_idx += 1;
+            }
+            let k = &self.kernel.pieces[kernel_idx];
+            let kd = &self.d_kernel.pieces[kernel_idx];
+            let kdd = &self.dd_kernel.pieces[kernel_idx];
+            let (mut sp, mut sv, mut sa) = (0.0_f64, 0.0_f64, 0.0_f64);
+            for (node, weight) in GAUSS_NODES.iter().zip(&GAUSS_WEIGHTS) {
+                let tau = nurbs::fmadd(*node, half, mid);
+                let f = weight * (self.eval_input)(t - tau);
+                sp += f * k.evaluate(tau);
+                sv += f * kd.evaluate(tau);
+                sa += f * kdd.evaluate(tau);
+            }
+            p += sp * half;
+            v += sv * half;
+            a += sa * half;
+        }
+        for &(tau, jump) in &self.d_kernel_jumps {
+            a += jump * (self.eval_input)(t - tau);
+        }
+        {
+            let slot = self.pva_memo_next.get();
+            self.pva_memo.borrow_mut()[slot] = Some((key, (p, v, a)));
+            self.pva_memo_next.set((slot + 1) % 4);
+        }
+        (p, v, a)
+    }
+
+    /// Merge the kernel-piece boundaries (ascending by construction) with the
+    /// in-window input breaks (`t - b` is ascending over `input_breaks`
+    /// iterated in reverse), deduplicating on the fly — no per-call sort.
+    fn merge_cuts(&self, t: f64, cuts: &mut Vec<f64>) {
+        cuts.clear();
+        let b_lo = self
+            .input_breaks
+            .partition_point(|&b| b <= t - self.k_hi + CUT_DEDUP_EPS_S);
+        let b_hi = self
+            .input_breaks
+            .partition_point(|&b| b < t - self.k_lo - CUT_DEDUP_EPS_S);
+        let mut breaks = self.input_breaks[b_lo..b_hi].iter().rev().peekable();
+        let push = |v: f64, cuts: &mut Vec<f64>| {
+            if cuts.last().is_none_or(|&last| v - last > CUT_DEDUP_EPS_S) {
+                cuts.push(v);
+            }
+        };
+        for boundary in self
+            .kernel
+            .pieces
+            .iter()
+            .map(|p| p.u_start)
+            .chain(std::iter::once(self.k_hi))
+        {
+            while let Some(&&b) = breaks.peek() {
+                if t - b >= boundary {
+                    break;
+                }
+                push(t - b, cuts);
+                breaks.next();
+            }
+            push(boundary, cuts);
+        }
+    }
+
+    fn convolve(&self, t: f64, kernel: &PiecewisePolynomialKernel) -> f64 {
+        let mut cuts = self.cuts.borrow_mut();
+        self.merge_cuts(t, &mut cuts);
+
+        let mut kernel_idx = 0usize;
+        let mut acc = 0.0_f64;
+        for w in cuts.windows(2) {
+            let (lo, hi) = (w[0], w[1]);
+            let half = 0.5 * (hi - lo);
+            if half <= 0.0 {
+                continue;
+            }
+            let mid = 0.5 * (lo + hi);
+            // Every interval lies inside one kernel piece: the merge kept all
+            // piece boundaries, so advancing past pieces ending at or before
+            // `mid` lands on the covering piece without a per-node scan.
+            while kernel_idx + 1 < kernel.pieces.len() && kernel.pieces[kernel_idx].u_end <= mid {
+                kernel_idx += 1;
+            }
+            let piece = &kernel.pieces[kernel_idx];
+            let mut sub = 0.0_f64;
+            for (node, weight) in GAUSS_NODES.iter().zip(&GAUSS_WEIGHTS) {
+                let tau = nurbs::fmadd(*node, half, mid);
+                sub += weight * (self.eval_input)(t - tau) * piece.evaluate(tau);
+            }
+            acc += sub * half;
+        }
+        acc
+    }
+}
+
+#[cfg(test)]
+mod fixtures;
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+mod long_segment_stability;

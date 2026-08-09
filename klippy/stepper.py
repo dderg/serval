@@ -1,0 +1,377 @@
+# Printer stepper support
+#
+# Copyright (C) 2016-2025  Kevin O'Connor <kevin@koconnor.net>
+#
+# This file may be distributed under the terms of the GNU GPLv3 license.
+import math
+
+from .rail import BaseRail
+
+
+class error(Exception):
+    pass
+
+
+######################################################################
+# Steppers
+######################################################################
+
+MAX_BOTH_EDGE_PULSE_DURATION = 0.000000500
+DEFAULT_STEP_PULSE_DURATION = 0.000002
+
+
+class MCU_stepper:
+    def __init__(
+        self,
+        name,
+        step_pin_params,
+        dir_pin_params,
+        rotation_dist,
+        steps_per_rotation,
+        step_pulse_duration=None,
+        units_in_radians=False,
+    ):
+        self._name = name
+        self._rotation_dist = rotation_dist
+        self._steps_per_rotation = steps_per_rotation
+        self._step_pulse_duration = step_pulse_duration
+        self._units_in_radians = units_in_radians
+        self._step_dist = rotation_dist / steps_per_rotation
+        self._mcu = step_pin_params["chip"]
+        self._oid = self._mcu.create_oid()
+        self._mcu.register_config_callback(self._build_config)
+        self._step_pin = step_pin_params["pin"]
+        self._invert_step = step_pin_params["invert"]
+        if dir_pin_params["chip"] is not self._mcu:
+            raise self._mcu.get_printer().config_error(
+                "Stepper dir pin must be on same mcu as step pin"
+            )
+        self._dir_pin = dir_pin_params["pin"]
+        self._invert_dir = self._orig_invert_dir = dir_pin_params["invert"]
+        self._step_both_edge = False
+        self._req_step_both_edge = False
+        self._active_callbacks = []
+        self._engine_active_axes = b""
+        self._projector = None
+        self._stepper_kinematics = None
+        self._trapq = None
+        self._tmc_current_helper = None
+
+    def get_tmc_current_helper(self):
+        return self._tmc_current_helper
+
+    def set_tmc_current_helper(self, tmc_current_helper):
+        self._tmc_current_helper = tmc_current_helper
+
+    def get_mcu(self):
+        return self._mcu
+
+    def get_name(self, short=False):
+        if short and self._name.startswith("stepper_"):
+            return self._name[8:]
+        return self._name
+
+    def units_in_radians(self):
+        return self._units_in_radians
+
+    def get_pulse_duration(self):
+        return self._step_pulse_duration, self._step_both_edge
+
+    def setup_default_pulse_duration(self, pulse_duration, step_both_edge):
+        if self._step_pulse_duration is None:
+            self._step_pulse_duration = pulse_duration
+        self._req_step_both_edge = step_both_edge
+
+    def setup_itersolve(self, alloc_func, *params):
+        if len(params) != 1 or not isinstance(params[0], (bytes, bytearray)):
+            raise error(
+                "Stepper '%s' requires a single axis descriptor" % (self._name,)
+            )
+        axis = bytes(params[0])
+        if alloc_func == "cartesian_stepper_alloc":
+            if axis not in (b"x", b"y", b"z"):
+                raise error(
+                    "Stepper '%s' has unknown cartesian axis '%s'"
+                    % (self._name, axis.decode())
+                )
+            self._projector = ("cartesian", axis)
+            self._engine_active_axes = axis
+        elif alloc_func == "corexy_stepper_alloc":
+            if axis not in (b"+", b"-"):
+                raise error(
+                    "Stepper '%s' has unknown corexy axis '%s'"
+                    % (self._name, axis.decode())
+                )
+            self._projector = ("corexy", axis)
+            self._engine_active_axes = b"xy"
+        else:
+            raise error(
+                "Stepper '%s' has unknown itersolve allocator '%s'"
+                % (self._name, alloc_func)
+            )
+
+    def _build_config(self):
+        if self._step_pulse_duration is None:
+            self._step_pulse_duration = DEFAULT_STEP_PULSE_DURATION
+        self._step_both_edge = (
+            self._req_step_both_edge
+            and self._step_pulse_duration <= MAX_BOTH_EDGE_PULSE_DURATION
+        )
+        if self._step_both_edge:
+            self._step_pulse_duration = 0.0
+            invert_step = -1
+            step_pulse_ticks = 0
+        else:
+            invert_step = self._invert_step
+            step_pulse_ticks = self._mcu.seconds_to_clock(
+                self._step_pulse_duration
+            )
+        self._mcu.add_config_cmd(
+            "config_stepper oid=%d step_pin=%s dir_pin=%s invert_step=%d"
+            " step_pulse_ticks=%u"
+            % (
+                self._oid,
+                self._step_pin,
+                self._dir_pin,
+                invert_step,
+                step_pulse_ticks,
+            )
+        )
+
+    def get_oid(self):
+        return self._oid
+
+    def get_step_dist(self):
+        return self._step_dist
+
+    def get_rotation_distance(self):
+        return self._rotation_dist, self._steps_per_rotation
+
+    def set_rotation_distance(self, rotation_dist):
+        self._rotation_dist = rotation_dist
+        self._step_dist = rotation_dist / self._steps_per_rotation
+        self.set_stepper_kinematics(self._stepper_kinematics)
+
+    def get_dir_inverted(self):
+        return self._invert_dir, self._orig_invert_dir
+
+    def set_dir_inverted(self, invert_dir):
+        invert_dir = not not invert_dir
+        if invert_dir == self._invert_dir:
+            return
+        self._invert_dir = invert_dir
+        self._mcu.get_printer().send_event("stepper:set_dir_inverted", self)
+
+    def calc_position_from_coord(self, coord):
+        projector = self._projector
+        if projector is None:
+            raise error(
+                "Stepper '%s' has no itersolve projector; setup_itersolve"
+                " was never called" % (self._name,)
+            )
+        kind, axis = projector
+        if kind == "cartesian":
+            return coord[b"xyz".index(axis)]
+        if axis == b"+":
+            return coord[0] + coord[1]
+        return coord[0] - coord[1]
+
+    def get_past_mcu_position(self, print_time):
+        raise error(
+            "MCU_stepper.get_past_mcu_position is host step history; the engine"
+            " keeps no motor-space step history. Use motion_engine"
+            ".motion_state_at for toolhead-space history."
+        )
+
+    def set_position(self, coord):
+        return
+
+    def get_commanded_position(self):
+        return 0.0
+
+    def get_stepper_kinematics(self):
+        return self._stepper_kinematics
+
+    def set_stepper_kinematics(self, sk):
+        old_sk = self._stepper_kinematics
+        self._stepper_kinematics = sk
+        return old_sk
+
+    def get_trapq(self):
+        return self._trapq
+
+    def set_trapq(self, tq):
+        old_tq = self._trapq
+        self._trapq = tq
+        return old_tq
+
+    def add_active_callback(self, cb):
+        self._active_callbacks.append(cb)
+
+    def generate_steps(self, flush_time):
+        if self._active_callbacks:
+            self._active_callbacks = []
+
+    def is_active_axis(self, axis):
+        return axis.encode() in self._engine_active_axes
+
+
+def PrinterStepper(config, units_in_radians=False, name=None):
+    printer = config.get_printer()
+    if name is None:
+        name = config.get_name()
+    ppins = printer.lookup_object("pins")
+    step_pin = config.get("step_pin")
+    step_pin_params = ppins.lookup_pin(step_pin, can_invert=True)
+    dir_pin = config.get("dir_pin")
+    dir_pin_params = ppins.lookup_pin(dir_pin, can_invert=True)
+    rotation_dist, steps_per_rotation = parse_step_distance(
+        config, units_in_radians, True
+    )
+    step_pulse_duration = config.getfloat(
+        "step_pulse_duration", None, minval=0.0, maxval=0.001
+    )
+    mcu_stepper = MCU_stepper(
+        name,
+        step_pin_params,
+        dir_pin_params,
+        rotation_dist,
+        steps_per_rotation,
+        step_pulse_duration,
+        units_in_radians,
+    )
+    mcu_stepper.phase_stepping = config.getboolean("phase_stepping", False)
+    for mname in ["stepper_enable", "force_move", "motion_report"]:
+        m = printer.load_object(config, mname)
+        m.register_stepper(config, mcu_stepper)
+    return mcu_stepper
+
+
+def parse_gear_ratio(config, note_valid):
+    gear_ratio = config.getlists(
+        "gear_ratio",
+        (),
+        seps=(":", ","),
+        count=2,
+        parser=float,
+        note_valid=note_valid,
+    )
+    result = 1.0
+    for g1, g2 in gear_ratio:
+        result *= g1 / g2
+    return result
+
+
+def parse_step_distance(config, units_in_radians=None, note_valid=False):
+    if units_in_radians is None:
+        rd = config.get("rotation_distance", None, note_valid=False)
+        gr = config.get("gear_ratio", None, note_valid=False)
+        units_in_radians = rd is None and gr is not None
+    if units_in_radians:
+        rotation_dist = 2.0 * math.pi
+        config.get("gear_ratio", note_valid=note_valid)
+    else:
+        rotation_dist = config.getfloat(
+            "rotation_distance", above=0.0, note_valid=note_valid
+        )
+    microsteps = config.getint("microsteps", minval=1, note_valid=note_valid)
+    full_steps = config.getint(
+        "full_steps_per_rotation", 200, minval=1, note_valid=note_valid
+    )
+    if full_steps % 4:
+        raise config.error(
+            "full_steps_per_rotation invalid in section '%s'"
+            % (config.get_name(),)
+        )
+    gearing = parse_gear_ratio(config, note_valid)
+    return rotation_dist, full_steps * microsteps * gearing
+
+
+######################################################################
+# Stepper controlled rails
+######################################################################
+
+
+AXIS_HOMING_KEYS = (
+    "position_min",
+    "position_max",
+    "position_endstop",
+    "homing_speed",
+    "second_homing_speed",
+    "homing_retract_dist",
+    "homing_retract_speed",
+    "homing_positive_dir",
+)
+
+
+class AxisRail(BaseRail):
+    def __init__(self, axis_config, motor_specs):
+        super().__init__()
+        if not motor_specs:
+            raise axis_config.error(
+                "[%s] needs at least one motor section"
+                % (axis_config.get_name(),)
+            )
+        self.axis_name = axis_config.get_name().split()[-1]
+        self._reject_homing_keys_on_motors(axis_config, motor_specs)
+        self.steppers = [
+            PrinterStepper(section, name=short)
+            for section, short in motor_specs
+        ]
+        primary = self.steppers[0]
+        self._tmc_current_helpers = None
+        self.get_name = primary.get_name
+        self.get_commanded_position = primary.get_commanded_position
+        self.calc_position_from_coord = primary.calc_position_from_coord
+        self._parse_axis_homing(axis_config)
+        self.endstops = []
+
+    def _reject_homing_keys_on_motors(self, axis_config, motor_specs):
+        for motor_config, _short in motor_specs:
+            for key in AXIS_HOMING_KEYS:
+                if motor_config.get(key, None) is not None:
+                    raise motor_config.error(
+                        "'%s' belongs on [axis %s], not on motor section '%s'"
+                        % (key, self.axis_name, motor_config.get_name())
+                    )
+
+    def _parse_axis_homing(self, config):
+        self.position_endstop = config.getfloat(
+            "position_endstop", config.getfloat("position_min", 0.0)
+        )
+        self.endstop_pin = config.get("endstop_pin", None)
+        endstop_is_virtual = (
+            self.endstop_pin is not None
+            and ":virtual_endstop" in self.endstop_pin
+        )
+        self._parse_position_range(config)
+        self._finalize_homing(config, endstop_is_virtual)
+
+    def get_tmc_current_helpers(self):
+        if self._tmc_current_helpers is None:
+            self._tmc_current_helpers = [
+                s.get_tmc_current_helper() for s in self.steppers
+            ]
+        return self._tmc_current_helpers
+
+    def get_steppers(self):
+        return list(self.steppers)
+
+    def get_endstops(self):
+        return list(self.endstops)
+
+    def setup_itersolve(self, alloc_func, *params):
+        for stepper in self.steppers:
+            stepper.setup_itersolve(alloc_func, *params)
+
+    def generate_steps(self, flush_time):
+        for stepper in self.steppers:
+            stepper.generate_steps(flush_time)
+
+    def set_trapq(self, trapq):
+        for stepper in self.steppers:
+            stepper.set_trapq(trapq)
+
+    def set_position(self, coord):
+        for stepper in self.steppers:
+            stepper.set_position(coord)

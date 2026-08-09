@@ -1,0 +1,315 @@
+name: Rust runtime (Step 5 + Step 6)
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+# Every gate below runs `./scripts/ci.sh <job>` — the SAME command developers
+# run locally (`./scripts/ci.sh` / `./scripts/ci.sh quick`). CI and local
+# cannot drift because they execute one shared script.
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      headers: ${{ steps.filter.outputs.headers }}
+      klipper-c: ${{ steps.filter.outputs.klipper-c }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v2
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'rust/**'
+              - 'Cargo.lock'
+              - 'scripts/ci.sh'
+              - '.github/workflows/ci-rust-runtime.yaml'
+            headers:
+              - 'rust/**'
+              - 'tools/regen_headers.sh'
+              - 'scripts/ci.sh'
+              - '.github/workflows/ci-rust-runtime.yaml'
+            klipper-c:
+              - 'src/**'
+              - 'scripts/ci.sh'
+              - '.github/workflows/ci-rust-runtime.yaml'
+
+  rust-test:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev lld
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: test
+      - name: test (nextest + doctests)
+        run: ./scripts/ci.sh rust-test
+
+  rust-clippy:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: clippy
+      - name: clippy
+        run: ./scripts/ci.sh rust-clippy
+
+  rust-fmt:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: fmt --check
+        run: ./scripts/ci.sh rust-fmt
+
+  # Step-6 §11.4 / §11.3 loom tests for half-split SPSC, widened-clock
+  # seqlock, force_idle handshake, and curve-pool alloc race. Loom
+  # exhaustively explores the model-checked thread interleavings; it
+  # only runs when --cfg loom is set (see runtime/Cargo.toml).
+  rust-loom:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: loom
+      - name: cargo test (loom — runtime, --release)
+        run: ./scripts/ci.sh rust-loom
+
+  rust-mcu-h7:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: mcu-h7
+      - name: cargo build (mcu-h7)
+        # Env (RUNTIME_STORAGE_SIZE / _PIECE_RING_SIZE) and the
+        # motion-module-stepper feature live inside scripts/ci.sh so CI and
+        # local stay one source of truth — see job_rust_mcu_h7.
+        run: ./scripts/ci.sh rust-mcu-h7
+
+  rust-mcu-f4:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: mcu-f4
+      - name: cargo build (mcu-f4)
+        # Env + motion-module-stepper feature live inside scripts/ci.sh
+        # (job_rust_mcu_f4) so CI and local stay one source of truth.
+        run: ./scripts/ci.sh rust-mcu-f4
+
+  # G0 (Cortex-M0+, thumbv6m). CI never compiled mcu-g0 at all, and the
+  # runtime_tick_g0.c FFI-drift bug was G0-only — this closes the Rust-side
+  # gap. The full C link per arch is covered by ci-mcu-firmware.yaml.
+  # Env + motion-module-stepper feature live in scripts/ci.sh (job_rust_mcu_g0).
+  rust-mcu-g0:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv6m-none-eabi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: mcu-g0
+      - name: cargo build (mcu-g0)
+        run: ./scripts/ci.sh rust-mcu-g0
+
+  # F103 (Cortex-M3, thumbv7m) — the SKR Mini E3 v2 class board. Its storage
+  # profile is smaller than MCU_ENV's, so job_rust_mcu_f1 sets its own env.
+  rust-mcu-f1:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7m-none-eabi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: mcu-f1
+      - name: cargo build (mcu-f1)
+        run: ./scripts/ci.sh rust-mcu-f1
+
+  # Validate the EtherCAT servo-node / no-stepper compile path: runtime built
+  # with --no-default-features --features host omits motion-module-stepper, so
+  # the compile_error guard in lib.rs must NOT fire (host builds are valid
+  # without a dispatch module). Also confirms the two dispatch_stepper test
+  # files are fully suppressed by their #![cfg(feature = "motion-module-stepper")].
+  rust-no-stepper:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: no-stepper
+      - name: cargo build + test --no-run (runtime, no-stepper servo-node path)
+        run: ./scripts/ci.sh rust-no-stepper
+
+  rust-cbindgen-drift:
+    needs: changes
+    if: needs.changes.outputs.headers == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: cbindgen-drift
+      - name: Regenerate headers and verify committed copies match
+        run: ./scripts/ci.sh cbindgen-drift
+
+  rust-c-smoke:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: c-smoke
+      - name: Build release staticlib + run c_smoke_build test
+        run: ./scripts/ci.sh c-smoke
+
+  rust-ethercat-hw:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: ethercat-hw
+      - name: Compile-check the IgH hw endpoint against the CI ecrt.h stub
+        run: ./scripts/ci.sh rust-ethercat-hw
+
+  rust-deny:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: rust/Cargo.toml
+
+  rust-miri:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: miri
+      - name: cargo +nightly miri test (runtime, host)
+        run: ./scripts/ci.sh miri
+
+  rust-panic-symbol-grep:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: panic-grep
+      - name: Assert release MCU build is panic-free
+        run: ./scripts/ci.sh panic-grep
+
+  # Safety gate: the MCU watchdog must keep reading the runtime liveness flag
+  # (renamed runtime_liveness_ok). Cheap grep; guards against accidental removal.
+  watchdog-canary:
+    needs: changes
+    if: needs.changes.outputs.klipper-c == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert runtime_liveness_ok gate present in watchdog
+        run: ./scripts/ci.sh watchdog-canary

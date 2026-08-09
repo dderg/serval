@@ -1,0 +1,81 @@
+# macOS: allow Python extension cdylibs to leave Python symbols unresolved at
+# link time.  Python's dlopen will satisfy them when it loads the .so at
+# runtime.  Without this flag the static linker rejects _Py_* symbols as
+# "undefined".  This flag is a no-op on non-Darwin hosts.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+# Klipper's H7 build uses soft-float ABI (no -mfloat-abi=hard in CFLAGS),
+# so the kalico staticlib must match or the linker rejects archive merge
+# with "uses VFP register arguments, klipper.elf does not". Use the
+# soft-ABI target. Step 6 (phase stepping) may revisit and switch the
+# whole H7 firmware to hard-float if the cycle budget demands it.
+#
+# IMPORTANT: target-cpu is set conservatively to cortex-m4 because the same
+# rust target (thumbv7em-none-eabi) is used for BOTH H7 (cortex-m7) and F4
+# (cortex-m4) Klipper builds. The Makefile-driven cargo invocation tunes
+# this per-target via the MCU_RUST_FEATURES path (mcu-h7 / mcu-f4),
+# but `target-cpu` is a rustflag not a feature, so it has to be safe for
+# every architecture this target supports. Cortex-M4F is a strict subset
+# of Cortex-M7's ISA, so cortex-m4 codegen runs fine on both — whereas
+# cortex-m7 codegen emits instructions (e.g. some DSP / SIMD variants)
+# that the F446 silently mis-decodes into HardFault.
+#
+# Bench-2026-05-12: F446's ConfigureAxes consistently crashed with USB
+# disconnect (host BrokenPipe) because the FFI's engine.configure() pulled
+# in a cortex-m7-only instruction encoding compiled under the prior
+# target-cpu=cortex-m7 setting. Switching to cortex-m4 here is the fix.
+# Cortex-M0+ (ARMv6-M) — STM32G0B1, BTT EBB SB2209.
+#
+# WHY `--cfg portable_atomic_unsafe_assume_single_core`:
+#   ARMv6-M has no LDREX/STREX instructions, so the standard library's
+#   `core::sync::atomic` does NOT provide fetch_add / compare_exchange /
+#   swap on this architecture. `portable_atomic`'s software fallback for
+#   those operations uses brief interrupt-disable critical sections instead.
+#   The `portable_atomic_unsafe_assume_single_core` cfg activates that
+#   fallback. It is SOUND here because the STM32G0B1 is a single-core MCU;
+#   the engine's atomics are used only for ISR↔foreground coordination,
+#   which interrupt masking serialises correctly on a single core.
+#
+# WHY this cfg is NOT added to the thumbv7em section:
+#   H7 and F4 are ARMv7-M targets that DO have LDREX/STREX. On thumbv7em,
+#   `portable_atomic` compiles RMW operations to native exclusive-monitor
+#   instructions — the interrupt-mask fallback is never used. Adding the
+#   cfg there would be misleading and unnecessary.
+[target.thumbv6m-none-eabi]
+rustflags = [
+    "-C", "target-cpu=cortex-m0plus",
+    "-C", "link-arg=--nmagic",
+    "--cfg", "portable_atomic_unsafe_assume_single_core",
+]
+
+[target.thumbv7em-none-eabi]
+rustflags = [
+    "-C", "target-cpu=cortex-m4",
+    # No `+strict-align`: it forces compiler_builtins to emit byte-by-byte
+    # memcpy/memset that get linked as weak symbols and override libgcc's
+    # word-aligned versions for the entire firmware, including Klipper's
+    # USB stack. Cortex-M7 permits unaligned word/halfword access by default
+    # (CCR.UNALIGN_TRP=0 at reset) so the standard fast copies are correct
+    # there too; Cortex-M4F enforces alignment for some accesses but the
+    # generated codegen for our types (no packed access) is alignment-safe.
+    "-C", "link-arg=--nmagic",
+]
+
+# Cortex-M3 (ARMv7-M) — STM32F103. Distinct from thumbv7em because the M3
+# has no DSP extension and no FPU: every f32/f64 operation the runtime
+# performs lowers to a compiler_builtins soft-float call. That is a cycle
+# cost, not a correctness problem.
+#
+# WHY no `portable_atomic_unsafe_assume_single_core` here: ARMv7-M has
+# LDREX/STREX, so `portable_atomic` lowers RMW operations to native
+# exclusive-monitor instructions exactly as it does on thumbv7em. Only the
+# ARMv6-M (thumbv6m) build needs the interrupt-masking fallback.
+[target.thumbv7m-none-eabi]
+rustflags = [
+    "-C", "target-cpu=cortex-m3",
+    "-C", "link-arg=--nmagic",
+]

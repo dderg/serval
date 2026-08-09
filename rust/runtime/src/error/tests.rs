@@ -1,0 +1,309 @@
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
+use super::*;
+
+#[test]
+fn every_runtime_error_variant_maps_to_a_distinct_or_grouped_code() {
+    let mappings = [
+        (RuntimeError::NotInit, RUNTIME_ERR_NOT_INIT),
+        (RuntimeError::NullPtr, RUNTIME_ERR_NULL_PTR),
+        (RuntimeError::QueueFull, RUNTIME_ERR_QUEUE_FULL),
+        (RuntimeError::InvalidCurve, RUNTIME_ERR_INVALID_CURVE),
+        (RuntimeError::InvalidHandle, RUNTIME_ERR_INVALID_HANDLE),
+        (RuntimeError::InvalidDuration, RUNTIME_ERR_INVALID_DURATION),
+        (
+            RuntimeError::InvalidKinematics,
+            RUNTIME_ERR_INVALID_KINEMATICS,
+        ),
+        (RuntimeError::FaultLatched, RUNTIME_ERR_FAULT_LATCHED),
+        (RuntimeError::Underrun, RUNTIME_ERR_UNDERRUN),
+        (
+            RuntimeError::StepBurstExceeded,
+            RUNTIME_ERR_STEP_BURST_EXCEEDED,
+        ),
+        (
+            RuntimeError::ZeroDurationSegment,
+            RUNTIME_ERR_ZERO_DURATION_SEGMENT,
+        ),
+        (RuntimeError::HomingTrip, RUNTIME_ERR_HOMING_TRIP),
+        (RuntimeError::BoundaryLoopExhausted, RUNTIME_ERR_INTERNAL),
+        (RuntimeError::NaNOrInfFromEval, RUNTIME_ERR_INTERNAL),
+        (RuntimeError::Internal, RUNTIME_ERR_INTERNAL),
+    ];
+    for (err, expected_code) in mappings {
+        assert_eq!(i32::from(err), expected_code, "{err:?}");
+    }
+}
+
+#[test]
+fn fault_code_step5_numeric_values_preserved() {
+    assert_eq!(FaultCode::QueueFull.as_i32(), RUNTIME_ERR_QUEUE_FULL);
+    assert_eq!(FaultCode::InvalidCurve.as_i32(), RUNTIME_ERR_INVALID_CURVE);
+    assert_eq!(
+        FaultCode::InvalidHandle.as_i32(),
+        RUNTIME_ERR_INVALID_HANDLE
+    );
+    assert_eq!(FaultCode::NotInit.as_i32(), RUNTIME_ERR_NOT_INIT);
+    assert_eq!(FaultCode::FaultLatched.as_i32(), RUNTIME_ERR_FAULT_LATCHED);
+    assert_eq!(FaultCode::Internal.as_i32(), RUNTIME_ERR_INTERNAL);
+}
+
+#[test]
+fn fault_code_step6_numeric_values() {
+    assert_eq!(FaultCode::BadCrc.as_i32(), RUNTIME_ERR_BAD_CRC);
+    assert_eq!(
+        FaultCode::ProtocolVersionUnsupported.as_i32(),
+        RUNTIME_ERR_PROTOCOL_VERSION_UNSUPPORTED
+    );
+    assert_eq!(
+        FaultCode::ClockSyncQuality.as_i32(),
+        RUNTIME_ERR_CLOCK_SYNC_QUALITY
+    );
+    assert_eq!(FaultCode::Underrun.as_i32(), RUNTIME_ERR_UNDERRUN);
+    assert_eq!(
+        FaultCode::TraceOverflow.as_i32(),
+        RUNTIME_ERR_TRACE_OVERFLOW
+    );
+    assert_eq!(
+        FaultCode::SegmentIdNonMonotonic.as_i32(),
+        RUNTIME_ERR_SEGMENT_ID_NON_MONOTONIC
+    );
+    assert_eq!(
+        FaultCode::InvalidCurveHandle.as_i32(),
+        RUNTIME_ERR_INVALID_CURVE_HANDLE
+    );
+    assert_eq!(FaultCode::NanInfOutput.as_i32(), RUNTIME_ERR_NAN_INF_OUTPUT);
+}
+
+#[test]
+fn host_disconnect_round_trips() {
+    assert_eq!(
+        FaultCode::HostDisconnect.as_i32(),
+        RUNTIME_ERR_HOST_DISCONNECT
+    );
+    assert_eq!(RUNTIME_ERR_HOST_DISCONNECT, -200);
+}
+
+#[test]
+fn host_retransmit_exhausted_round_trips() {
+    assert_eq!(
+        FaultCode::HostRetransmitExhausted.as_i32(),
+        RUNTIME_ERR_HOST_RETRANSMIT_EXHAUSTED
+    );
+    assert_eq!(RUNTIME_ERR_HOST_RETRANSMIT_EXHAUSTED, -201);
+}
+
+#[test]
+fn host_dispatcher_timeout_round_trips() {
+    assert_eq!(
+        FaultCode::HostDispatcherTimeout.as_i32(),
+        RUNTIME_ERR_HOST_DISPATCHER_TIMEOUT
+    );
+    assert_eq!(RUNTIME_ERR_HOST_DISPATCHER_TIMEOUT, -202);
+}
+
+#[test]
+fn fault_code_stepping_redesign_numeric_values() {
+    assert_eq!(
+        FaultCode::StepQueueOverflow.as_i32(),
+        RUNTIME_ERR_STEP_QUEUE_OVERFLOW
+    );
+    assert_eq!(
+        FaultCode::SpiQueueOverflow.as_i32(),
+        RUNTIME_ERR_SPI_QUEUE_OVERFLOW
+    );
+    assert_eq!(
+        FaultCode::MathNonFinite.as_i32(),
+        RUNTIME_ERR_MATH_NON_FINITE
+    );
+    assert_eq!(
+        FaultCode::PieceAdvanceUnderflow.as_i32(),
+        RUNTIME_ERR_PIECE_ADVANCE_UNDERFLOW
+    );
+    assert_eq!(
+        FaultCode::SampleRateMisconfigured.as_i32(),
+        RUNTIME_ERR_SAMPLE_RATE_MISCONFIGURED
+    );
+    assert_eq!(
+        FaultCode::PositionCountOverflow.as_i32(),
+        RUNTIME_ERR_POSITION_COUNT_OVERFLOW
+    );
+    assert_eq!(
+        FaultCode::JogParametersInvalid.as_i32(),
+        RUNTIME_ERR_JOG_PARAMETERS_INVALID
+    );
+    assert_eq!(
+        FaultCode::StepRateExceedsMcuCeiling.as_i32(),
+        RUNTIME_ERR_STEP_RATE_EXCEEDS_MCU_CEILING
+    );
+    assert_eq!(
+        FaultCode::PieceStartInPast.as_i32(),
+        RUNTIME_ERR_PIECE_START_IN_PAST
+    );
+    assert_eq!(FaultCode::RingFull.as_i32(), RUNTIME_ERR_RING_FULL);
+    assert_eq!(
+        FaultCode::StepsPerSampleExceeded.as_i32(),
+        RUNTIME_ERR_STEPS_PER_SAMPLE_EXCEEDED
+    );
+    assert_eq!(
+        FaultCode::TickIntervalExceeded.as_i32(),
+        RUNTIME_ERR_TICK_INTERVAL_EXCEEDED
+    );
+    assert_eq!(
+        FaultCode::UnknownStepMode.as_i32(),
+        RUNTIME_ERR_UNKNOWN_STEP_MODE
+    );
+    assert_eq!(RUNTIME_ERR_STEP_QUEUE_OVERFLOW, -300);
+    assert_eq!(RUNTIME_ERR_STEP_RATE_EXCEEDS_MCU_CEILING, -307);
+    assert_eq!(RUNTIME_ERR_TICK_INTERVAL_EXCEEDED, -311);
+    assert_eq!(RUNTIME_ERR_UNKNOWN_STEP_MODE, -312);
+    assert_ne!(
+        RUNTIME_ERR_STEP_QUEUE_OVERFLOW,
+        RUNTIME_ERR_HOST_DISPATCHER_TIMEOUT
+    );
+}
+
+#[test]
+fn fault_code_as_u16_round_trips_negative_codes() {
+    // -160 (InvalidCurveHandle) → as_i16 = -160 → as u16 = 0xFF60.
+    // Host sign-extends 0xFF60 back through i16 → -160. clippy::cast_sign_loss
+    // is the whole point — the wire format is u16 and the host reverses it.
+    let code = FaultCode::InvalidCurveHandle.as_u16();
+    #[allow(clippy::cast_sign_loss)]
+    let expected = (-160_i16) as u16;
+    assert_eq!(code, expected);
+}
+
+#[test]
+fn fault_code_from_u16_round_trip_positive_zero() {
+    assert_eq!(FaultCode::from_u16(0), Some(FaultCode::None));
+}
+
+#[test]
+fn fault_code_from_u16_sign_wrap_piece_start_in_past() {
+    // -308 as i16 = -308; -308i16 as u16 = 65228 = 0xFECC
+    let wire = FaultCode::PieceStartInPast.as_u16();
+    assert_eq!(wire, 0xFECC);
+    assert_eq!(FaultCode::from_u16(wire), Some(FaultCode::PieceStartInPast));
+}
+
+#[test]
+fn fault_code_from_u16_sign_wrap_tick_interval_exceeded() {
+    // -311 as i16 = -311; -311i16 as u16 = 65225 = 0xFEC9
+    let wire = FaultCode::TickIntervalExceeded.as_u16();
+    assert_eq!(wire, 0xFEC9);
+    assert_eq!(
+        FaultCode::from_u16(wire),
+        Some(FaultCode::TickIntervalExceeded)
+    );
+}
+
+#[test]
+fn fault_code_from_u16_sign_wrap_host_disconnect() {
+    let wire = FaultCode::HostDisconnect.as_u16();
+    assert_eq!(FaultCode::from_u16(wire), Some(FaultCode::HostDisconnect));
+}
+
+#[test]
+fn fault_code_from_u16_unknown_returns_none() {
+    assert_eq!(FaultCode::from_u16(0x1234), None);
+}
+
+#[test]
+fn code_name_piece_start_in_past() {
+    assert_eq!(FaultCode::PieceStartInPast.code_name(), "PieceStartInPast");
+}
+
+#[test]
+fn code_name_none() {
+    assert_eq!(FaultCode::None.code_name(), "None");
+}
+
+#[test]
+fn code_name_tick_interval_exceeded() {
+    assert_eq!(
+        FaultCode::TickIntervalExceeded.code_name(),
+        "TickIntervalExceeded"
+    );
+}
+
+#[test]
+fn from_u16_round_trip_all_variants() {
+    let all_codes = [
+        FaultCode::None,
+        FaultCode::QueueFull,
+        FaultCode::InvalidCurve,
+        FaultCode::InvalidHandle,
+        FaultCode::InvalidDuration,
+        FaultCode::InvalidKinematics,
+        FaultCode::NullPtr,
+        FaultCode::NotInit,
+        FaultCode::FaultLatched,
+        FaultCode::Internal,
+        FaultCode::StepBurstExceeded,
+        FaultCode::ZeroDurationSegment,
+        FaultCode::HomingTrip,
+        FaultCode::CapabilityMissing,
+        FaultCode::NoStep,
+        FaultCode::InvalidArg,
+        FaultCode::InvalidPhaseAxisCount,
+        FaultCode::PhaseBusReentrant,
+        FaultCode::PhaseModeNotAvailable,
+        FaultCode::CurveLoadInvalid,
+        FaultCode::MotionInProgress,
+        FaultCode::BadCrc,
+        FaultCode::FramingViolation,
+        FaultCode::Disconnect,
+        FaultCode::ProtocolVersionUnsupported,
+        FaultCode::ClockSyncQuality,
+        FaultCode::ClockSyncTimeout,
+        FaultCode::ArmTimeout,
+        FaultCode::ArmRejected,
+        FaultCode::CrossMcuDesync,
+        FaultCode::Underrun,
+        FaultCode::QueueOverrun,
+        FaultCode::LivenessStalled,
+        FaultCode::TraceOverflow,
+        FaultCode::StreamStateViolation,
+        FaultCode::SegmentIdNonMonotonic,
+        FaultCode::TStartInPast,
+        FaultCode::TEndBeforeTStart,
+        FaultCode::SegmentTooShort,
+        FaultCode::SegmentTooLong,
+        FaultCode::InvalidCurveHandle,
+        FaultCode::CurveReloadRejected,
+        FaultCode::CurveFormatInvalid,
+        FaultCode::NanInfOutput,
+        FaultCode::BoundaryLoopOverflow,
+        FaultCode::InternalInvariant,
+        FaultCode::HostDisconnect,
+        FaultCode::HostRetransmitExhausted,
+        FaultCode::HostDispatcherTimeout,
+        FaultCode::EthercatEndpointDied,
+        FaultCode::StepQueueOverflow,
+        FaultCode::SpiQueueOverflow,
+        FaultCode::MathNonFinite,
+        FaultCode::PieceAdvanceUnderflow,
+        FaultCode::SampleRateMisconfigured,
+        FaultCode::PositionCountOverflow,
+        FaultCode::JogParametersInvalid,
+        FaultCode::StepRateExceedsMcuCeiling,
+        FaultCode::PieceStartInPast,
+        FaultCode::RingFull,
+        FaultCode::StepsPerSampleExceeded,
+        FaultCode::TickIntervalExceeded,
+        FaultCode::UnknownStepMode,
+        FaultCode::PhaseMotorUnmapped,
+        FaultCode::OverlayUnsupported,
+        FaultCode::BuzzAxisConflict,
+        FaultCode::BuzzInPhaseMode,
+    ];
+    for code in all_codes {
+        let wire = code.as_u16();
+        let recovered = FaultCode::from_u16(wire)
+            .expect("from_u16 must succeed for every known FaultCode variant");
+        assert_eq!(recovered, code, "round-trip mismatch for {code:?}");
+        let name = code.code_name();
+        assert!(!name.is_empty(), "code_name empty for {code:?}");
+    }
+}

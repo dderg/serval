@@ -1,0 +1,158 @@
+# Main code build rules
+
+src-y += sched.c command.c basecmd.c debugcmds.c
+# Kalico-native transport — stream-level demuxer + Layer 4 dispatcher.
+src-y += mcu_demux.c mcu_transport_dispatch.c event_log.c
+src-$(CONFIG_MOTION_RUNTIME) += piece_sink.c runtime_storage.c \
+    runtime_panic.c step_queue.c spi_queue.c
+src-$(CONFIG_HAVE_GPIO) += initial_pins.c gpiocmds.c stepper.c trsync.c endstop.c
+src-$(CONFIG_CLASSIC_STEPPING) += stepper_classic.c
+src-$(CONFIG_WANT_ADC) += adccmds.c
+src-$(CONFIG_WANT_SPI) += spicmds.c
+src-$(CONFIG_WANT_I2C) += i2ccmds.c
+src-$(CONFIG_WANT_HARD_PWM) += pwmcmds.c
+src-$(CONFIG_HAVE_GPIO_SDIO) += sdiocmds.c
+
+src-$(CONFIG_WANT_BUTTONS) += buttons.c
+src-$(CONFIG_WANT_TMCUART) += tmcuart.c
+src-$(CONFIG_WANT_NEOPIXEL) += neopixel.c
+src-$(CONFIG_WANT_PULSE_COUNTER) += pulse_counter.c
+src-$(CONFIG_WANT_ST7920) += lcd_st7920.c
+src-$(CONFIG_WANT_HD44780) += lcd_hd44780.c
+src-$(CONFIG_WANT_SOFTWARE_SPI) += spi_software.c
+src-$(CONFIG_WANT_SOFTWARE_I2C) += i2c_software.c
+src-$(CONFIG_WANT_THERMOCOUPLE) += thermocouple.c
+src-$(CONFIG_WANT_ADXL345) += sensor_adxl345.c
+src-$(CONFIG_WANT_LIS2DW) += sensor_lis2dw.c
+src-$(CONFIG_WANT_LDC1612) += sensor_ldc1612.c
+src-$(CONFIG_WANT_MPU9250) += sensor_mpu9250.c
+src-$(CONFIG_WANT_ICM20948) += sensor_icm20948.c
+src-$(CONFIG_WANT_HX71X) += sensor_hx71x.c
+src-$(CONFIG_WANT_ADS1220) += sensor_ads1220.c
+src-$(CONFIG_WANT_ADS131M0X) += sensor_ads131m0x.c
+src-$(CONFIG_WANT_SENSOR_ANGLE) += sensor_angle.c
+src-$(CONFIG_NEED_SENSOR_BULK) += sensor_bulk.c
+src-$(CONFIG_NEED_SOS_FILTER) += sos_filter.c
+src-$(CONFIG_NEED_LOAD_CELL_PROBE) += load_cell_probe.c
+
+# Kalico Rust staticlib build hook. The C-side dependency on the staticlib
+# is declared in src/stm32/Makefile (klipper.elf: $(MCU_RUST_LIB)); this rule
+# tells Make how to build the staticlib in the first place. FORCE ensures
+# cargo is invoked every build — cargo itself handles up-to-date checks
+# (incremental compilation), so this is cheap on no-op builds.
+# Production firmware: thumbv7em + per-MCU-family Rust features. Sim build
+# (CONFIG_MCU_SIM=y) appends `mcu-sim` to keep MCU-style tick paths
+# active under the sim clock. Never in production firmware.
+ifeq ($(CONFIG_MACH_STM32H7),y)
+MCU_RUST_FEATURES := mcu-h7,header-runtime
+# Per-MCU cargo target dir. H7 and F4 both use the thumbv7em-none-eabi
+# rustc triple but emit different `#[link_section]` attributes (`.axi_bss`
+# vs `.bss` for RT_CELL); a shared incremental cache forces a full rebuild
+# on every MCU switch (~minutes on the Pi). Separate dirs keep both caches
+# warm so each MCU switch is incremental, not from-scratch.
+MCU_CARGO_TARGET_DIR := target-h7
+MCU_RUST_TARGET := thumbv7em-none-eabi
+else ifeq ($(CONFIG_MACH_STM32F4),y)
+MCU_RUST_FEATURES := mcu-f4,header-runtime
+MCU_CARGO_TARGET_DIR := target-f4
+MCU_RUST_TARGET := thumbv7em-none-eabi
+else ifeq ($(CONFIG_MACH_STM32F1),y)
+# STM32F103 (Cortex-M3) = ARMv7-M = thumbv7m-none-eabi. ARMv7-M has
+# LDREX/STREX, so unlike the G0 branch no single-core atomics cfg is needed.
+MCU_RUST_FEATURES := mcu-f1,header-runtime
+MCU_CARGO_TARGET_DIR := target-f1
+MCU_RUST_TARGET := thumbv7m-none-eabi
+else ifeq ($(CONFIG_MACH_STM32G0),y)
+# STM32G0B1 (Cortex-M0+) = ARMv6-M = thumbv6m-none-eabi, a DIFFERENT rustc
+# triple than H7/F4. The thumbv6m target build sets
+# `--cfg portable_atomic_unsafe_assume_single_core` in rust/.cargo/config.toml
+# because ARMv6-M has no LDREX/STREX (see the design record). Own target dir
+# keeps the thumbv6m cache from colliding with the thumbv7em caches.
+MCU_RUST_FEATURES := mcu-g0,header-runtime
+MCU_CARGO_TARGET_DIR := target-g0
+MCU_RUST_TARGET := thumbv6m-none-eabi
+endif
+ifeq ($(CONFIG_MCU_SIM),y)
+MCU_RUST_FEATURES := $(MCU_RUST_FEATURES),mcu-sim
+endif
+ifeq ($(CONFIG_MOTION_MODULE_STEPPER),y)
+MCU_RUST_FEATURES := $(MCU_RUST_FEATURES),motion-module-stepper
+endif
+
+ifeq ($(CONFIG_MOTION_RUNTIME)$(if $(filter y,$(CONFIG_MACH_STM32H7) $(CONFIG_MACH_STM32F4) $(CONFIG_MACH_STM32F1) $(CONFIG_MACH_STM32G0)),y),yy)
+# Exported so src/stm32/Makefile depends on (and links against) the right
+# archive without re-deriving the path. MCU_RUST_TARGET is the rustc
+# triple for the active MCU (thumbv7em for H7/F4, thumbv7m for F1,
+# thumbv6m for G0).
+MCU_RUST_LIB := rust/$(MCU_CARGO_TARGET_DIR)/$(MCU_RUST_TARGET)/release/libc_api.a
+
+# Per-MCU target dir gives H7 and F4 their own caches (see above). Within
+# a single MCU's dir, the mcu-sim feature toggle is the only remaining
+# feature-set change cargo sees; the stamp guard catches the rare case
+# where cargo's incremental cache misses a feature flip and forces a
+# targeted clean of just the affected crates.
+$(MCU_RUST_LIB): FORCE
+	cd rust && PATH="$(HOME)/.cargo/bin:$$PATH" && \
+		export CARGO_TARGET_DIR="$(MCU_CARGO_TARGET_DIR)" && \
+		mkdir -p "$$CARGO_TARGET_DIR" && \
+		PREV=$$(cat "$$CARGO_TARGET_DIR/.kalico-features-stamp" 2>/dev/null || echo ""); \
+		if [ "$$PREV" != "$(MCU_RUST_FEATURES)" ]; then \
+			echo "c-api features changed ($$PREV -> $(MCU_RUST_FEATURES)); cargo clean"; \
+			cargo clean -p c-api 2>/dev/null || true; \
+			cargo clean -p host-rt 2>/dev/null || true; \
+			cargo clean -p runtime 2>/dev/null || true; \
+		fi && \
+		RUNTIME_STORAGE_SIZE=$(CONFIG_RUNTIME_STORAGE_SIZE) \
+		RUNTIME_PIECE_RING_SIZE=$(CONFIG_RUNTIME_PIECE_RING_SIZE) \
+		RUNTIME_SAMPLE_RATE_HZ=$(CONFIG_MOTION_SAMPLE_RATE_HZ) \
+		cargo build -p c-api \
+		--no-default-features \
+		--features $(MCU_RUST_FEATURES) \
+		--target $(MCU_RUST_TARGET) --release && \
+		echo "$(MCU_RUST_FEATURES)" > "$$CARGO_TARGET_DIR/.kalico-features-stamp"
+endif
+
+ifeq ($(CONFIG_MACH_LINUX)$(CONFIG_MOTION_RUNTIME),yy)
+# First-class Linux MCU build. The `mcu-linux` feature is the f64 host numeric
+# profile (the Pi has an FPU) PLUS the "real MCU firmware" marker that links
+# the C step/SPI FFI (linux/phase_stepping_spi.c) — distinct from a bare `host`
+# build (the motion-engine planner cdylib / unit tests), which must NOT
+# reference that symbol. mcu-sim is OPT-IN here exactly like the STM32
+# families (CONFIG_MCU_SIM), not hardwired: a Linux MCU drives real
+# /dev/gpiochip / /dev/spidev by default.
+MCU_RUST_FEATURES := mcu-linux,header-runtime
+ifeq ($(CONFIG_MCU_SIM),y)
+MCU_RUST_FEATURES := $(MCU_RUST_FEATURES),mcu-sim
+endif
+ifeq ($(CONFIG_MOTION_MODULE_STEPPER),y)
+MCU_RUST_FEATURES := $(MCU_RUST_FEATURES),motion-module-stepper
+endif
+# Own target dir: the motion-engine cdylib builds the shared crates (runtime,
+# ...) with different host features into rust/target/, and a mcu-sim
+# flip changes this firmware's feature set — keeping them separate avoids
+# mutual incremental-cache thrash (slow on the Pi). Mirrors the per-arch STM32
+# dirs. Exported for src/linux/Makefile's link rule.
+MCU_CARGO_TARGET_DIR := target-linux
+MCU_RUST_LIB := rust/$(MCU_CARGO_TARGET_DIR)/release/libc_api.a
+
+$(MCU_RUST_LIB): FORCE
+	cd rust && PATH="$(HOME)/.cargo/bin:$$PATH" && \
+		export CARGO_TARGET_DIR="$(MCU_CARGO_TARGET_DIR)" && \
+		mkdir -p "$$CARGO_TARGET_DIR" && \
+		PREV=$$(cat "$$CARGO_TARGET_DIR/.kalico-features-stamp" 2>/dev/null || echo ""); \
+		if [ "$$PREV" != "$(MCU_RUST_FEATURES)" ]; then \
+			echo "c-api features changed ($$PREV -> $(MCU_RUST_FEATURES)); cargo clean"; \
+			cargo clean -p c-api 2>/dev/null || true; \
+			cargo clean -p host-rt 2>/dev/null || true; \
+			cargo clean -p runtime 2>/dev/null || true; \
+		fi && \
+		RUNTIME_PIECE_RING_SIZE=$(CONFIG_RUNTIME_PIECE_RING_SIZE) \
+		RUNTIME_SAMPLE_RATE_HZ=$(CONFIG_MOTION_SAMPLE_RATE_HZ) \
+		cargo build -p c-api \
+		--no-default-features \
+		--features $(MCU_RUST_FEATURES) \
+		--release && \
+		echo "$(MCU_RUST_FEATURES)" > "$$CARGO_TARGET_DIR/.kalico-features-stamp"
+endif
+
+.PHONY: FORCE

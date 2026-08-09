@@ -1,0 +1,57 @@
+name: Build test
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v2
+        id: changes
+        with:
+          filters: |
+            dependencies:
+              - 'pyproject.toml'
+              - 'scripts/klippy-requirements.txt'
+              - 'scripts/requirements_dev.txt'
+
+      - name: Build docker image
+        run: |
+          sudo apt-get update && sudo apt-get install -y expect
+          # Clean up docker output so that github ::group: instructions
+          # get recognized
+          unbuffer docker build --progress=plain -f scripts/Dockerfile-build \
+            -t klipper-build:latest . 2>&1 \
+            | sed -u -E 's/^#[0-9]+ [0-9.]+ ?//g'
+
+      - name: Ensure scripts/klippy-dependencies.txt is up to date
+        if: steps.changes.outputs.dependencies == 'true'
+        uses: nickcharlton/diff-check@main
+        with:
+          command: |
+            docker run -v $PWD:/klipper klipper-build:latest uv export --frozen -o scripts/klippy-requirements.txt --no-dev --no-hashes
+            docker run -v $PWD:/klipper klipper-build:latest uv export --frozen -o scripts/requirements_dev.txt --only-dev --no-hashes
+
+      # Klippy tests across all supported Python versions. Each step runs the
+      # SAME command as `./scripts/ci.sh py <ver>` locally (one source of truth).
+      - name: Test Klippy (Python 3.9)
+        run: ./scripts/ci.sh py 3.9
+      - name: Test Klippy (Python 3.10)
+        run: ./scripts/ci.sh py 3.10
+      - name: Test Klippy (Python 3.11)
+        run: ./scripts/ci.sh py 3.11
+      - name: Test Klippy (Python 3.12)
+        run: ./scripts/ci.sh py 3.12
+      - name: Test Klippy (Python 3.13)
+        run: ./scripts/ci.sh py 3.13
+      - name: Test Klippy (Python 3.14)
+        run: ./scripts/ci.sh py 3.14

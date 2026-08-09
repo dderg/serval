@@ -1,0 +1,25 @@
+name: Ruff
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned: an unpinned ruff-action tracks the latest release, so a new
+      # ruff turning a rule on by default turns this gate red on every open
+      # PR at once, for code none of them touched. Bump deliberately.
+      - uses: astral-sh/ruff-action@v3
+        with:
+          version: "0.15.21"
+      - uses: astral-sh/ruff-action@v3
+        with:
+          version: "0.15.21"
+          args: "format --check --diff"

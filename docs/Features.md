@@ -1,0 +1,165 @@
+# Features
+
+Kalico has several compelling features:
+
+* High precision stepper movement. Kalico utilizes an application
+  processor (such as a low-cost Raspberry Pi) when calculating printer
+  movements. The application processor determines when to step each
+  stepper motor, it compresses those events, transmits them to the
+  micro-controller, and then the micro-controller executes each event
+  at the requested time. Each stepper event is scheduled with a
+  precision of 25 micro-seconds or better. The software does not use
+  kinematic estimations (such as the Bresenham algorithm) - instead it
+  calculates precise step times based on the physics of acceleration
+  and the physics of the machine kinematics. More precise stepper
+  movement provides quieter and more stable printer operation.
+
+* Best in class performance. Kalico is able to achieve high stepping
+  rates on both new and old micro-controllers. Even old 8-bit
+  micro-controllers can obtain rates over 175K steps per second. On
+  more recent micro-controllers, several million steps per second are
+  possible. Higher stepper rates enable higher print velocities. The
+  stepper event timing remains precise even at high speeds which
+  improves overall stability.
+
+* Kalico supports printers with multiple micro-controllers. For
+  example, one micro-controller could be used to control an extruder,
+  while another controls the printer's heaters, while a third controls
+  the rest of the printer. The Kalico host software implements clock
+  synchronization to account for clock drift between
+  micro-controllers. No special code is needed to enable multiple
+  micro-controllers - it just requires a few extra lines in the config
+  file.
+
+* Configuration via simple config file. There's no need to reflash the
+  micro-controller to change a setting. All of Kalico's configuration
+  is stored in a standard config file which can be easily edited. This
+  makes it easier to setup and maintain the hardware.
+
+* Kalico supports "Smooth Pressure Advance" - a mechanism to account
+  for the effects of pressure within an extruder. This reduces
+  extruder "ooze" and improves the quality of print corners. Kalico's
+  implementation does not introduce instantaneous extruder speed
+  changes, which improves overall stability and robustness.
+
+* Kalico supports "Input Shaping" to reduce the impact of vibrations
+  on print quality. This can reduce or eliminate "ringing" (also known
+  as "ghosting", "echoing", or "rippling") in prints. It may also
+  allow one to obtain faster printing speeds while still maintaining
+  high print quality.
+
+* Kalico uses an "iterative solver" to calculate precise step times
+  from simple kinematic equations. This makes porting Kalico to new
+  types of robots easier and it keeps timing precise even with complex
+  kinematics (no "line segmentation" is needed).
+
+* Kalico is hardware agnostic. One should get the same precise timing
+  independent of the low-level electronics hardware. The Kalico
+  micro-controller code is designed to faithfully follow the schedule
+  provided by the Kalico host software (or prominently alert the user
+  if it is unable to). This makes it easier to use available hardware,
+  to upgrade to new hardware, and to have confidence in the hardware.
+
+* Portable code. Kalico works on ARM, AVR, PRU, and other
+  micro-controllers. Existing "reprap" style printers can run Kalico
+  without hardware modification - just add a Raspberry Pi. Kalico's
+  internal code layout makes it easier to support other
+  micro-controller architectures as well.
+
+* Simpler code. Kalico uses a very high level language (Python) for
+  most code. The kinematics algorithms, the G-code parsing, the
+  heating and thermistor algorithms, etc. are all written in Python.
+  This makes it easier to develop new functionality.
+
+* Custom programmable macros. New G-Code commands can be defined in
+  the printer config file (no code changes are necessary). Those
+  commands are programmable - allowing them to produce different
+  actions depending on the state of the printer.
+
+* Builtin API server. In addition to the standard G-Code interface,
+  Kalico supports a rich JSON based application interface. This
+  enables programmers to build external applications with detailed
+  control of the printer.
+
+## Additional features
+
+Kalico supports many standard 3d printer features:
+
+* Several web interfaces available. Works with Mainsail, Fluidd,
+  OctoPrint and others. This allows the printer to be controlled using
+  a regular web-browser. The same Raspberry Pi that runs Kalico can
+  also run the web interface.
+
+* Standard G-Code support. Common g-code commands that are produced by
+  typical "slicers" (SuperSlicer, Cura, PrusaSlicer, etc.) are
+  supported.
+
+* Support for multiple extruders. Extruders with shared heaters and
+  extruders on independent carriages (IDEX) are also supported.
+
+* Support for cartesian, delta, corexy, corexz, hybrid-corexy,
+  hybrid-corexz, deltesian, rotary delta, polar, and cable winch style
+  printers.
+
+* Automatic bed leveling support. Kalico can be configured for basic
+  bed tilt detection or full mesh bed leveling. If the bed uses
+  multiple Z steppers then Kalico can also level by independently
+  manipulating the Z steppers. Most Z height probes are supported,
+  including BL-Touch probes and servo activated probes. Probes may be
+  calibrated for axis twist compensation.
+
+* Automatic delta calibration support. The calibration tool can
+  perform basic height calibration as well as an enhanced X and Y
+  dimension calibration. The calibration can be done with a Z height
+  probe or via manual probing.
+
+* Run-time "exclude object" support. When configured, this module may
+  facilitate canceling of just one object in a multi-part print.
+
+* Support for common temperature sensors (eg, common thermistors,
+  AD595, AD597, AD849x, PT100, PT1000, MAX6675, MAX31855, MAX31856,
+  MAX31865, BME280, HTU21D, DS18B20, AHT10, and LM75). Custom
+  thermistors and custom analog temperature sensors can also be
+  configured. One can monitor the internal micro-controller
+  temperature sensor and the internal temperature sensor of a
+  Raspberry Pi.
+
+* Basic thermal heater protection enabled by default.
+
+* Support for standard fans, nozzle fans, and temperature controlled
+  fans. No need to keep fans running when the printer is idle. Fan
+  speed can be monitored on fans that have a tachometer.
+
+* Support for run-time configuration of TMC2130, TMC2208/TMC2224,
+  TMC2209, TMC2240, TMC2660, TMC5160 and TMC2160 stepper motor drivers.
+  There is also support for current control of traditional stepper drivers
+  via AD5206, DAC084S085, MCP4451, MCP4728, MCP4018, and PWM pins.
+
+* Support for common LCD displays attached directly to the printer. A
+  default menu is also available. The contents of the display and menu
+  can be fully customized via the config file.
+
+* Constant acceleration and "look-ahead" support. All printer moves
+  will gradually accelerate from standstill to cruising speed and then
+  decelerate back to a standstill. The incoming stream of G-Code
+  movement commands are queued and analyzed - the acceleration between
+  movements in a similar direction will be optimized to reduce print
+  stalls and improve overall print time.
+
+* Kalico implements a "stepper phase endstop" algorithm that can
+  improve the accuracy of typical endstop switches. When properly
+  tuned it can improve a print's first layer bed adhesion.
+
+* Support for filament presence sensors, filament motion sensors, and
+  filament width sensors.
+
+* Support for measuring and recording acceleration using adxl345,
+  mpu9250, mpu6050, and lis2dw12 accelerometers.
+
+
+* Sample configuration files are available for many common printers.
+  Check the [config directory](../config/) for a list.
+
+To get started with Kalico, read the [installation](Installation.md)
+guide.
+
