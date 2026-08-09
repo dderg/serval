@@ -7,7 +7,7 @@
 > already verified off-bench (see that doc); this is the on-hardware sequence.
 
 ## What's already proven without hardware
-- MCU stepper hot-path codegen is **byte-identical** to pristine sota-motion (disasm-verified). Flashing this branch will not change stepper behavior.
+- MCU stepper hot-path codegen is **byte-identical** to pristine main (disasm-verified). Flashing this branch will not change stepper behavior.
 - The servo runs the **same hardened walker** as the MCU (`runtime::motion_core`); its trajectory eval, origin/no-jump mapping, piece-boundary continuity, and the `PieceStartInPast` fault boundary are unit-tested.
 - Sustained streaming past one ring depth works over the real `McuSerialConn ↔ FrameServer` socket (no stall — the "stopped after first move" class is covered).
 - `klippy → motion-engine → endpoint` host wiring is ported and the stepper-path tests still pass.

@@ -157,7 +157,7 @@ order; the σ² exposure is additive and small).
   should NOT change, that's a bug — stop and investigate.
 - Consider splitting Part 1 and Part 2 into separate PRs (Part 1 changes
   semantics user-visibly; Part 2 is the budget fix) — both base on
-  `sota-motion`.
+  `main`.
 
 ## Verification gates
 

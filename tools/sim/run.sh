@@ -10,7 +10,7 @@
 #   ./run.sh test --verbose           # stream the image build instead of hiding it
 #   ./run.sh serve                    # long-lived printer for Moonraker
 #   ./run.sh shell                    # bash inside the image
-#   ./run.sh --branch sota-motion     # build+run a specific branch
+#   ./run.sh --branch main            # build+run a specific branch
 #   ./run.sh --no-cache               # force a full rebuild
 #   ./run.sh --privileged             # SCHED_FIFO for jitter-sensitive runs
 

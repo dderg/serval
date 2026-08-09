@@ -164,7 +164,7 @@ cd rust && cargo nextest run
 ./snapshots/snapshot-tests.sh --ci
 ```
 
-PR bases on `sota-motion`. Never amend or force-push. No Claude/Co-Authored-By
+PR bases on `main`. Never amend or force-push. No Claude/Co-Authored-By
 trailers. Comments are a failure of expression — express intent through naming
 (`apply_derivative_gains_to_track`, `k1`, `k2` with doc on the stage enum only
 if the units/semantics can't be named).
