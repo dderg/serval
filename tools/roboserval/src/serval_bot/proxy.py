@@ -222,19 +222,38 @@ class GitHubApi:
                 pull_requests[issue_number] = value
             return pull_requests[issue_number]
 
-        for issue in issues:
-            if "pull_request" not in issue:
+        open_pull_requests = await self._pages(
+            f"/repos/{request.repo}/pulls",
+            {"state": "open", "per_page": 100},
+        )
+        for current_pull_request in open_pull_requests:
+            requested_reviewers = current_pull_request.get("requested_reviewers")
+            issue_number = current_pull_request.get("number")
+            if not isinstance(requested_reviewers, list) or not isinstance(issue_number, int):
+                raise GitHubFailure(f"GitHub open pull request is malformed: {current_pull_request!r}")
+            if not any(
+                isinstance(reviewer, dict)
+                and _normalize_login(reviewer.get("login", "")) == _normalize_login(request.bot_login)
+                for reviewer in requested_reviewers
+            ):
                 continue
-            issue_number = issue["number"]
+            pull_requests[issue_number] = current_pull_request
+            issue = issues_by_number.get(issue_number)
+            if issue is None:
+                value = (await self.request("GET", f"/repos/{request.repo}/issues/{issue_number}")).json()
+                if not isinstance(value, dict):
+                    raise GitHubFailure(f"GitHub issue {request.repo}#{issue_number} is not an object")
+                issue = value
+                issues_by_number[issue_number] = issue
             issue_events = await self._pages(
                 f"/repos/{request.repo}/issues/{issue_number}/events",
                 {"per_page": 100},
             )
+            matching_requests: list[tuple[str, int, dict[str, Any], dict[str, Any]]] = []
             for issue_event in issue_events:
                 requested_reviewer = issue_event.get("requested_reviewer")
                 if (
                     issue_event.get("event") != "review_requested"
-                    or issue_event.get("created_at", "") < since
                     or not isinstance(requested_reviewer, dict)
                     or _normalize_login(requested_reviewer.get("login", "")) != _normalize_login(request.bot_login)
                 ):
@@ -249,26 +268,33 @@ class GitHubApi:
                     or not isinstance(occurred_at, str)
                 ):
                     raise GitHubFailure(f"GitHub review request event is malformed: {issue_event!r}")
-                actor = review_requester["login"]
-                if _normalize_login(actor) == _normalize_login(request.bot_login):
-                    continue
-                events.append(
-                    {
-                        "delivery_id": f"poll:review:{event_id}:requested",
-                        "event_type": "pull_request_review.requested",
-                        "issue_number": issue_number,
-                        "actor": actor,
-                        "occurred_at": occurred_at,
-                        "payload": {
-                            "action": "review_requested",
-                            "repository": {"full_name": request.repo},
-                            "sender": review_requester,
-                            "issue": issue,
-                            "pull_request": await pull_request(issue_number),
-                            "review_request": issue_event,
-                        },
-                    }
+                matching_requests.append((occurred_at, event_id, issue_event, review_requester))
+            if not matching_requests:
+                raise GitHubFailure(
+                    f"GitHub pull request {request.repo}#{issue_number} requests {request.bot_login} "
+                    "but has no matching review_requested event"
                 )
+            occurred_at, event_id, issue_event, review_requester = max(matching_requests)
+            actor = review_requester["login"]
+            if _normalize_login(actor) == _normalize_login(request.bot_login):
+                continue
+            events.append(
+                {
+                    "delivery_id": f"poll:review:{event_id}:requested",
+                    "event_type": "pull_request_review.requested",
+                    "issue_number": issue_number,
+                    "actor": actor,
+                    "occurred_at": occurred_at,
+                    "payload": {
+                        "action": "review_requested",
+                        "repository": {"full_name": request.repo},
+                        "sender": review_requester,
+                        "issue": issue,
+                        "pull_request": current_pull_request,
+                        "review_request": issue_event,
+                    },
+                }
+            )
 
         comments = await self._pages(
             f"/repos/{request.repo}/issues/comments",

@@ -687,6 +687,7 @@ async def test_github_poll_returns_new_issues_mentions_and_reviewer_assignments(
         "html_url": "https://github.com/dderg/serval/pull/8",
         "base": {"ref": "sota-motion", "sha": "a" * 40},
         "head": {"ref": "fix-leds", "sha": "b" * 40},
+        "requested_reviewers": [{"login": "roboserval"}],
     }
     parent = {**issue, "id": 12, "number": 7}
     mentioned = {
@@ -707,23 +708,26 @@ async def test_github_poll_returns_new_issues_mentions_and_reviewer_assignments(
     review_requested = {
         "id": 46,
         "event": "review_requested",
-        "created_at": "2026-08-09T12:04:00Z",
+        "created_at": "2026-08-08T12:04:00Z",
         "actor": {"login": "maintainer"},
         "review_requester": {"login": "maintainer"},
         "requested_reviewer": {"login": "roboserval"},
     }
+    active_review_events = [review_requested]
     requested_pages: list[str | None] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/repos/dderg/serval/issues":
             return httpx.Response(200, json=[issue, old_issue, pull_parent])
+        if request.url.path == "/repos/dderg/serval/pulls":
+            return httpx.Response(200, json=[pull_request])
         if request.url.path == "/repos/dderg/serval/issues/8/events":
             ignored_reviewer = {
                 **review_requested,
                 "id": 47,
                 "requested_reviewer": {"login": "someone-else"},
             }
-            return httpx.Response(200, json=[review_requested, ignored_reviewer])
+            return httpx.Response(200, json=[*active_review_events, ignored_reviewer])
         if request.url.path == "/repos/dderg/serval/issues/comments":
             page = request.url.params.get("page")
             requested_pages.append(page)
@@ -753,19 +757,35 @@ async def test_github_poll_returns_new_issues_mentions_and_reviewer_assignments(
     )
     try:
         result = await api.poll_events(request)
+        review_request_removed = {
+            **review_requested,
+            "id": 48,
+            "event": "review_request_removed",
+            "created_at": "2026-08-09T12:04:00Z",
+        }
+        review_requested_again = {
+            **review_requested,
+            "id": 49,
+            "created_at": "2026-08-09T12:05:00Z",
+        }
+        active_review_events.extend((review_request_removed, review_requested_again))
+        repeated_result = await api.poll_events(request)
     finally:
         await api.close()
     assert [event["delivery_id"] for event in result["events"]] == [
+        "poll:review:46:requested",
         "poll:issue:10:opened",
         "poll:comment:41:created",
         "poll:comment:45:created",
-        "poll:review:46:requested",
     ]
-    mentioned_review = result["events"][2]
-    assigned_review = result["events"][3]
+    assigned_review = result["events"][0]
+    mentioned_review = result["events"][3]
     assert mentioned_review["event_type"] == "pull_request_review.requested"
     assert assigned_review["event_type"] == "pull_request_review.requested"
     assert assigned_review["actor"] == "maintainer"
     assert assigned_review["payload"]["pull_request"]["head"]["sha"] == "b" * 40
     assert assigned_review["payload"]["review_request"] == review_requested
-    assert requested_pages == [None, "2"]
+    assert [
+        event["delivery_id"] for event in repeated_result["events"] if event["delivery_id"].startswith("poll:review:")
+    ] == ["poll:review:49:requested"]
+    assert requested_pages == [None, "2", None, "2"]
