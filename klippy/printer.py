@@ -338,18 +338,17 @@ class Printer:
             )
         except (ImportError, TypeError):
             pass
-        # Create printer objects
         for m in [pins, mcu]:
             m.add_printer_objects(config)
         for section_config in config.get_prefix_sections(""):
             self.load_object(config, section_config.get_name(), None)
-        # Kalico on-by-default extras
         for section_config in [
             "force_move",
             "respond",
             "exclude_object",
             "telemetry",
             "log_observability",
+            "support_bundle",
             "pressure_advance_compat",
         ]:
             self.load_object(config, section_config, None)
