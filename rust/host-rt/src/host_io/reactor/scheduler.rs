@@ -121,6 +121,39 @@ fn timed_commands_keep_fifo_order() {
 }
 
 #[test]
+fn background_command_does_not_bypass_earlier_timed_command() {
+    let mut harness = ReactorHarness::new();
+    seed_clock(&mut harness, 1_000_000);
+    harness
+        .reactor
+        .enqueue_scheduled(
+            CommandTiming::Timed {
+                min_clock: 2_000_000,
+                req_clock: 0,
+            },
+            ScheduledPayload::FireAndForget(vec![0xB1]),
+        )
+        .unwrap();
+    harness
+        .reactor
+        .enqueue_scheduled(
+            CommandTiming::Background { min_clock: 0 },
+            ScheduledPayload::FireAndForget(vec![0xB2]),
+        )
+        .unwrap();
+
+    harness.reactor.drain_scheduled_commands();
+    assert!(!payload_written(&harness, 0xB1));
+    assert!(!payload_written(&harness, 0xB2));
+    harness.clock.advance(Duration::from_millis(1_100));
+    harness.reactor.drain_scheduled_commands();
+    let bytes = harness.port_handles.tx.lock().unwrap();
+    let timed = bytes.iter().position(|byte| *byte == 0xB1).unwrap();
+    let background = bytes.iter().position(|byte| *byte == 0xB2).unwrap();
+    assert!(timed < background);
+}
+
+#[test]
 fn background_minclock_is_preserved() {
     let mut harness = ReactorHarness::new();
     seed_clock(&mut harness, 1_000_000);

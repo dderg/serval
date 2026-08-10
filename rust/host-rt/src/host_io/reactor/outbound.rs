@@ -89,8 +89,7 @@ pub(crate) struct OutboundQueues {
     /// rule this enforces.
     pub(crate) pending_piece_frames: VecDeque<(u32, Vec<u8>)>,
     pub(crate) pending_outbound_order: VecDeque<PendingOutboundKind>,
-    pub(crate) scheduled_timed: VecDeque<ScheduledCommand>,
-    pub(crate) scheduled_background: VecDeque<ScheduledCommand>,
+    pub(crate) scheduled_commands: VecDeque<ScheduledCommand>,
 }
 
 impl OutboundQueues {
@@ -125,15 +124,12 @@ impl Reactor {
         if needs_clock {
             self.predicted_ack_clock(scheduled_payload_len(&payload))?;
         }
-        let queue = match timing {
-            CommandTiming::Background { .. } => &mut self.outbound.scheduled_background,
-            CommandTiming::Timed { .. } => &mut self.outbound.scheduled_timed,
-            CommandTiming::Immediate => unreachable!(),
-        };
-        if queue.len() >= PENDING_FIRE_AND_FORGET_CEILING {
+        if self.outbound.scheduled_commands.len() >= PENDING_FIRE_AND_FORGET_CEILING {
             return Err(TransportError::Backpressure);
         }
-        queue.push_back(ScheduledCommand { timing, payload });
+        self.outbound
+            .scheduled_commands
+            .push_back(ScheduledCommand { timing, payload });
         Ok(())
     }
 
@@ -149,46 +145,39 @@ impl Reactor {
         ))
     }
 
-    fn timed_front_is_eligible(&self) -> Result<bool, TransportError> {
-        let Some(command) = self.outbound.scheduled_timed.front() else {
+    fn scheduled_front_is_eligible(&self) -> Result<bool, TransportError> {
+        let Some(command) = self.outbound.scheduled_commands.front() else {
             return Ok(false);
         };
-        let CommandTiming::Timed {
-            min_clock,
-            req_clock,
-        } = command.timing
-        else {
-            return Err(TransportError::Parse(
-                "non-timed command entered timed queue".into(),
-            ));
-        };
-        let (ack_clock, freq) =
-            self.predicted_ack_clock(scheduled_payload_len(&command.payload))?;
-        if ack_clock < min_clock {
-            return Ok(false);
+        match command.timing {
+            CommandTiming::Timed {
+                min_clock,
+                req_clock,
+            } => {
+                let (ack_clock, freq) =
+                    self.predicted_ack_clock(scheduled_payload_len(&command.payload))?;
+                if ack_clock < min_clock {
+                    return Ok(false);
+                }
+                if req_clock == 0 {
+                    return Ok(true);
+                }
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let send_ahead_ticks = (freq * 0.100) as u64;
+                Ok(req_clock <= ack_clock.saturating_add(send_ahead_ticks))
+            }
+            CommandTiming::Background { min_clock } => {
+                if min_clock == 0 {
+                    return Ok(true);
+                }
+                let (ack_clock, _) =
+                    self.predicted_ack_clock(scheduled_payload_len(&command.payload))?;
+                Ok(ack_clock >= min_clock)
+            }
+            CommandTiming::Immediate => Err(TransportError::Parse(
+                "immediate command entered scheduled queue".into(),
+            )),
         }
-        if req_clock == 0 {
-            return Ok(true);
-        }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let send_ahead_ticks = (freq * 0.100) as u64;
-        Ok(req_clock <= ack_clock.saturating_add(send_ahead_ticks))
-    }
-
-    fn background_front_is_eligible(&self) -> Result<bool, TransportError> {
-        let Some(command) = self.outbound.scheduled_background.front() else {
-            return Ok(false);
-        };
-        let CommandTiming::Background { min_clock } = command.timing else {
-            return Err(TransportError::Parse(
-                "non-background command entered background queue".into(),
-            ));
-        };
-        if min_clock == 0 {
-            return Ok(true);
-        }
-        let (ack_clock, _) = self.predicted_ack_clock(scheduled_payload_len(&command.payload))?;
-        Ok(ack_clock >= min_clock)
     }
 
     fn dispatch_scheduled(&mut self, command: ScheduledCommand) -> Result<(), TransportError> {
@@ -214,54 +203,34 @@ impl Reactor {
 
     pub(crate) fn drain_scheduled_commands(&mut self) {
         while !self.unacked_window.is_full() {
-            let timed_ready = match self.timed_front_is_eligible() {
+            let ready = match self.scheduled_front_is_eligible() {
                 Ok(ready) => ready,
                 Err(error) => {
                     let command = self
                         .outbound
-                        .scheduled_timed
+                        .scheduled_commands
                         .pop_front()
-                        .expect("timed eligibility requires a front command");
+                        .expect("scheduled eligibility requires a front command");
                     reject_scheduled(command, error);
                     continue;
                 }
             };
-            if timed_ready {
-                let command = self
-                    .outbound
-                    .scheduled_timed
-                    .pop_front()
-                    .expect("timed front was eligible");
-                if let Err(error) = self.dispatch_scheduled(command) {
-                    self.close_if_io_fault("drain_scheduled_commands", &error);
-                    break;
-                }
-                continue;
-            }
-            let background_ready = match self.background_front_is_eligible() {
-                Ok(ready) => ready,
-                Err(error) => {
-                    let command = self
-                        .outbound
-                        .scheduled_background
-                        .pop_front()
-                        .expect("background eligibility requires a front command");
-                    reject_scheduled(command, error);
-                    continue;
-                }
-            };
-            if !background_ready {
+            if !ready {
                 break;
             }
             let command = self
                 .outbound
-                .scheduled_background
+                .scheduled_commands
                 .pop_front()
-                .expect("background front was eligible");
+                .expect("scheduled front was eligible");
+            let is_background = matches!(command.timing, CommandTiming::Background { .. });
             if let Err(error) = self.dispatch_scheduled(command) {
                 self.close_if_io_fault("drain_scheduled_commands", &error);
+                break;
             }
-            break;
+            if is_background {
+                break;
+            }
         }
     }
 }
