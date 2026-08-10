@@ -43,6 +43,7 @@ communication with the Kalico developers.
     using adxl345 accelerometer hardware to measure resonance.
 - [Pressure advance](Pressure_Advance.md): Calibrate extruder
   pressure.
+  - [Nonlinear pressure advance](Nonlinear_Pressure_Advance.md): Current Serval nonlinear post-processor configuration and limits.
 - [G-Codes](G-Codes.md): Information on commands supported by Kalico.
 - [Command Templates](Command_Templates.md): G-Code macros and
   conditional evaluation.
@@ -54,8 +55,6 @@ communication with the Kalico developers.
 - [Slicers](Slicers.md): Configure "slicer" software for Kalico.
 - [Skew correction](Skew_Correction.md): Adjustments for axes not
   perfectly square.
-- [PWM tools](Using_PWM_Tools.md): Guide on how to use PWM controlled
-  tools such as lasers or spindles.
 - [Exclude Object](Exclude_Object.md): The guide to the Exclude Objects
   implementation.
 
@@ -79,8 +78,6 @@ communication with the Kalico developers.
   copying a binary to an sdcard in the micro-controller.
 - [Raspberry Pi as Micro-controller](RPi_microcontroller.md): Details
   for controlling devices wired to the GPIO pins of a Raspberry Pi.
-- [Beaglebone](Beaglebone.md): Details for running Kalico on the
-  Beaglebone PRU.
 - [Bootloaders](Bootloaders.md): Developer information on
   micro-controller flashing.
 - [Bootloader Entry](Bootloader_Entry.md): Requesting the bootloader.

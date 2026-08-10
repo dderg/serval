@@ -13,10 +13,6 @@ directly use the GPIOs and the buses (i2c, spi) of the RPi inside
 Kalico without using Octoprint plugins (if used) or external programs
 giving the ability to control everything within the print GCODE.
 
-**Warning**: If your platform is a _Beaglebone_ and you have correctly
-followed the installation steps, the linux mcu is already installed
-and configured for your system.
-
 ## Install the rc script
 
 If you want to use the host as a secondary MCU the klipper_mcu process
