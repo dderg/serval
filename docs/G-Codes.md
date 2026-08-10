@@ -1010,9 +1010,7 @@ commands to manage the LED's color settings).
 ### [output_pin]
 
 The following command is available when an
-[output_pin config section](Config_Reference.md#output_pin) or
-[pwm_tool config section](Config_Reference.md#pwm_tool) is
-enabled.
+[output_pin config section](Config_Reference.md#output_pin) is enabled.
 
 #### SET_PIN
 `SET_PIN PIN=config_name VALUE=<value>`: Set the pin to the given
