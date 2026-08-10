@@ -138,11 +138,23 @@ _SIM_SHA = "a" * 40
 _SIM_FARM_REF = "farm/7-restart"
 
 
-def test_parse_code_directive_requires_explicit_full_body_command() -> None:
+def test_parse_code_directive_supports_natural_collaborator_requests() -> None:
     assert parse_code_directive("roboserval", "@roboserval please implement bounded queue handling") == (
         "bounded queue handling"
     )
+    assert parse_code_directive("roboserval", "@roboserval can you implement bounded queues?") == (
+        "can you implement bounded queues"
+    )
+    issue_request = (
+        "@roboserval I think we should have a flag that will tell if .config was made in serval or elsewhere. "
+        "Can you open a pr for that?"
+    )
+    assert parse_code_directive("roboserval", issue_request) == issue_request.removeprefix("@roboserval ").rstrip("?")
+    assert parse_code_directive("roboserval", "@roboserval please open a pull request to update the docs") == (
+        "please open a pull request to update the docs"
+    )
     assert parse_code_directive("roboserval", "@roboserval did you implement bounded queues?") is None
+    assert parse_code_directive("roboserval", "@roboserval do not open a PR for this") is None
     assert parse_code_directive("roboserval", "Do not @roboserval implement bounded queues") is None
 
 
@@ -188,7 +200,7 @@ def test_code_pull_request_rejects_non_directive(tmp_path: Path) -> None:
     try:
         event = _claimed(
             database,
-            _event(event_type="issue_comment.created", comment="@roboserval can you implement bounded queues?"),
+            _event(event_type="issue_comment.created", comment="@roboserval did you implement bounded queues?"),
         )
         with pytest.raises(ActionDenied, match="explicit coding directive"):
             _gateway(database, event, Mode.TRIAGE, FakeProxy()).create_code_pull_request(
