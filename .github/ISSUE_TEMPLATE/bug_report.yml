@@ -1,20 +1,15 @@
 name: Bug report
-description: Something not working? Tell us what happened.
+description: Report a Serval problem.
 title: ""
 labels:
   - bug
 body:
-  - type: markdown
-    attributes:
-      value: |
-        Thanks for reporting a problem. You do not need to diagnose it or fill in every optional field—share what you know and we will help with the rest.
 
   - type: textarea
     id: problem
     attributes:
       label: What happened?
-      description: Tell us what you did, what you expected, and what happened instead.
-      placeholder: I ran… I expected… Instead…
+      description: Describe the expected and actual results.
     validations:
       required: true
 
@@ -22,25 +17,22 @@ body:
     id: reproduction
     attributes:
       label: How can we reproduce it?
-      description: Commands, relevant configuration, or a small G-code example are useful when available.
-      placeholder: This happens when…
+      description: List the steps or commands.
 
   - type: textarea
     id: support_bundle
     attributes:
       label: Support bundle
-      description: After a crash or other failure, run CREATE_SUPPORT_BUNDLE in the printer console, download the generated serval-support archive from the Logs page, and drag it here. If you cannot collect one, submit the issue anyway.
-      placeholder: Drag the serval-support-*.tar.gz archive here, or explain why it is unavailable.
+      description: Run CREATE_SUPPORT_BUNDLE. Download the archive from Logs. Drag it here.
 
   - type: textarea
     id: version
     attributes:
       label: Version and printer details
-      description: Serval version, printer model, host, and MCU details are helpful when known.
-      placeholder: Version…, printer…, host…, MCU…
+      description: Add the Serval version, printer, host, and MCU.
 
   - type: textarea
     id: additional_context
     attributes:
       label: Anything else?
-      description: Screenshots, video, related issues, or any other context.
+      description: Add screenshots, video, or links.
