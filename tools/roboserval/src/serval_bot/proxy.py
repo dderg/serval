@@ -312,9 +312,13 @@ class GitHubApi:
             actor = review_requester["login"]
             if _normalize_login(actor) == _normalize_login(request.bot_login):
                 continue
+            head = current_pull_request.get("head")
+            if not isinstance(head, dict) or not isinstance(head.get("sha"), str):
+                raise GitHubFailure(f"GitHub pull request {request.repo}#{issue_number} has no head SHA")
+            head_sha = head["sha"]
             events.append(
                 {
-                    "delivery_id": f"poll:review:{event_id}:requested",
+                    "delivery_id": f"poll:review:{event_id}:{head_sha}:requested",
                     "event_type": "pull_request_review.requested",
                     "issue_number": issue_number,
                     "actor": actor,
