@@ -28,18 +28,40 @@ _SIM_DIRECTIVE_RE = re.compile(
     re.IGNORECASE,
 )
 
-_CODE_DIRECTIVE_RE = re.compile(
-    r"@(?P<login>[\w-]+) +(?:please +)?(?:implement|code|fix) +(?P<task>\S(?:.*\S)?)",
+_CODE_MENTION_RE = re.compile(r"@(?P<login>[\w-]+) +(?P<request>\S(?:.*\S)?)", re.IGNORECASE | re.DOTALL)
+_CODE_IMPERATIVE_RE = re.compile(
+    r"(?:please +)?(?:implement|code|fix) +(?P<task>\S(?:.*\S)?)",
+    re.IGNORECASE | re.DOTALL,
+)
+_CODE_NATURAL_REQUEST_RE = re.compile(
+    r"(?:^|[.!]\s+)(?:"
+    r"(?:can|could|would|will) +you +(?:please +)?(?:"
+    r"(?:implement|code|fix) +\S|open +(?:a +)?(?:pr|pull request)(?: +\S)?"
+    r")|"
+    r"(?:please +)?open +(?:a +)?(?:pr|pull request)(?: +\S)?"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+_CODE_NEGATION_RE = re.compile(
+    r"\b(?:do not|don't|not to|shouldn't|cannot|can't)\b.*\b(?:implement|code|fix|open)\b",
     re.IGNORECASE | re.DOTALL,
 )
 _CODE_BRANCH_RE = re.compile(r"serval/(?P<issue>[0-9]+)-[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
 def parse_code_directive(bot_login: str, body: str) -> str | None:
-    match = _CODE_DIRECTIVE_RE.fullmatch(body.strip())
+    match = _CODE_MENTION_RE.fullmatch(body.strip())
     if match is None or match.group("login").casefold() != bot_login.casefold():
         return None
-    return match.group("task")
+    request = match.group("request").strip()
+    if _CODE_NEGATION_RE.search(request):
+        return None
+    imperative = _CODE_IMPERATIVE_RE.fullmatch(request)
+    if imperative is not None:
+        return imperative.group("task").rstrip("?!").strip()
+    if _CODE_NATURAL_REQUEST_RE.search(request):
+        return request.rstrip("?!").strip()
+    return None
 
 
 def is_code_directive(event: Event, policy: RepositoryPolicy) -> bool:
