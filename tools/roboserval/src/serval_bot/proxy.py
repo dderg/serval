@@ -82,6 +82,15 @@ class DispatchRequest(RepositoryRequest):
     head_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
 
 
+class CodePullRequest(RepositoryRequest):
+    issue_number: int = Field(gt=0)
+    actor: str = Field(min_length=1, max_length=39, pattern=r"^[A-Za-z0-9-]+$")
+    branch: str = Field(min_length=1, max_length=256)
+    head_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    title: str = Field(min_length=1, max_length=256)
+    body: str = Field(min_length=1, max_length=65_000)
+
+
 class SimResultRequest(RepositoryRequest):
     run_id: int = Field(gt=0)
 
@@ -411,15 +420,6 @@ class GitHubApi:
                 raise
 
     async def _publish_farm_ref(self, request: DispatchRequest) -> None:
-        """Publish the exact issue-workspace commit to the requested farm ref.
-
-        Farm refs are scoped to the issue the request derives from: the agent
-        never supplies a workspace path or authority, only the branch name and
-        the commit it claims to have made. The workspace is located and
-        validated by the credentialed root, and its exact HEAD is pushed before
-        any dispatch happens; any validation or publication failure aborts the
-        dispatch loudly.
-        """
         if request.head_sha is None:
             raise GitHubFailure("farm ref dispatch requires the workspace head_sha")
         prefix = f"farm/{request.issue_number}-"
@@ -439,6 +439,49 @@ class GitHubApi:
             )
         except WorkspaceFailure as exc:
             raise GitHubFailure(f"issue workspace publication failed: {exc}") from exc
+
+    async def create_code_pull_request(self, request: CodePullRequest) -> dict[str, Any]:
+        prefix = f"serval/{request.issue_number}-"
+        if not request.branch.startswith(prefix) or len(request.branch) == len(prefix):
+            raise GitHubFailure(f"code branch must be scoped to issue {request.issue_number}: {request.branch}")
+        if not _FARM_SLUG_PATTERN.fullmatch(request.branch.removeprefix(prefix)):
+            raise GitHubFailure(f"invalid code branch: {request.branch}")
+        permission_response = await self.request(
+            "GET",
+            f"/repos/{request.repo}/collaborators/{request.actor}/permission",
+        )
+        permission = permission_response.json().get("permission")
+        if permission not in {"admin", "maintain", "push"}:
+            raise GitHubFailure(f"actor is not a repository collaborator with write access: {request.actor}")
+        token = await self._tokens.token()
+        try:
+            await asyncio.to_thread(
+                self._workspace.publish_issue,
+                request.repo,
+                request.issue_number,
+                token,
+                ref=request.branch,
+                expected_sha=request.head_sha,
+                require_skip_ci=False,
+            )
+        except WorkspaceFailure as exc:
+            raise GitHubFailure(f"issue workspace publication failed: {exc}") from exc
+        repository = (await self.request("GET", f"/repos/{request.repo}")).json()
+        default_branch = repository.get("default_branch")
+        if not isinstance(default_branch, str) or not default_branch:
+            raise GitHubFailure(f"repository metadata has no default branch: {request.repo}")
+        response = await self.request(
+            "POST",
+            f"/repos/{request.repo}/pulls",
+            json={
+                "title": request.title,
+                "head": request.branch,
+                "base": default_branch,
+                "body": request.body,
+            },
+        )
+        data = response.json()
+        return {"number": data["number"], "url": data["html_url"], "head_sha": request.head_sha}
 
     async def dispatch_sim(self, request: DispatchRequest) -> dict[str, Any]:
         key = (request.repo, request.workflow, request.ref)
@@ -654,6 +697,12 @@ def create_proxy_app(settings: ProxySettings, api: GitHubApi | None = None) -> F
         _validated_repo(request)
         _authorize_repo(settings, request, _ALL_MODES)
         return await github.poll_events(request)
+
+    @app.post("/github/code-pull-request", dependencies=[Depends(authenticate)])
+    async def code_pull_request(request: CodePullRequest) -> dict[str, Any]:
+        _validated_repo(request)
+        _authorize_repo(settings, request, _ACTIVE_MODES)
+        return await github.create_code_pull_request(request)
 
     @app.post("/github/dispatch-sim", dependencies=[Depends(authenticate)])
     async def dispatch(request: DispatchRequest) -> dict[str, Any]:
