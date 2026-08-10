@@ -2036,39 +2036,26 @@ bug. Please follow these steps:</p>
    undesirable event occurs. This causes Kalico to go into a
    "shutdown state" and it will cause additional debugging information
    to be written to the log file.</li>
-<li>Obtain the Kalico log file from the event. The log file has been
-   engineered to answer common questions the Kalico developers have
-   about the software and its environment (software version, hardware
-   type, configuration, event timing, and hundreds of other
-   questions).<ol>
-<li>Dedicated Kalico web interfaces have the ability to directly
-    obtain the Kalico log file. It's the easiest way to obtain the
-    log when using one of these interfaces. Otherwise, an "scp" or
-    "sftp" utility is needed to copy the log file to your desktop
-    computer. The "scp" utility comes standard with Linux and MacOS
-    desktops. There are freely available scp utilities for other
-    desktops (eg, WinSCP). The log file may be located in the
-    <code>~/printer_data/logs/klippy.log</code> file (if using a graphical scp
-    utility, look for the "printer_data" folder, then the "logs"
-    folder under that, then the <code>klippy.log</code> file). The log file may
-    alternatively be located in the <code>/tmp/klippy.log</code> file (if using
-    a graphical scp utility that can not directly copy
-    <code>/tmp/klippy.log</code> then repeatedly click on <code>..</code> or
-    "parent folder" until reaching the root directory, click on
-    the <code>tmp</code> folder, and then select the <code>klippy.log</code> file).</li>
-<li>Copy the log file to your desktop so that it can be attached to
-    an issue report.</li>
-<li>Do not modify the log file in any way; do not provide a snippet
-    of the log. Only the full unmodified log file provides the
-    necessary information.</li>
-<li>It is a good idea to compress the log file with zip or gzip.</li>
+<li>Run <code>CREATE_SUPPORT_BUNDLE</code> after the failure. It creates a
+   <code>serval-support-&lt;timestamp&gt;.tar.gz</code> archive in the same directory as
+   <code>klippy.log</code>. The default bundle covers the previous 30 minutes; use
+   <code>CREATE_SUPPORT_BUNDLE SINCE=2h</code> when the failure happened earlier.
+   The archive includes the text log, structured host and MCU events, and the
+   Klipper service journal when available.<ol>
+<li>Download the archive from the logs page in the printer's web interface.
+    Otherwise, copy it from <code>~/printer_data/logs/</code> with an <code>scp</code> or <code>sftp</code>
+    utility.</li>
+<li>Attach the complete, unmodified archive to the issue report. It may
+    contain printer configuration, file names, and diagnostic data.</li>
+<li>On older versions without <code>CREATE_SUPPORT_BUNDLE</code>, attach the complete
+    unmodified <code>~/printer_data/logs/klippy.log</code> file instead.</li>
 </ol>
 </li>
 <li>Open a new thread on the <a href="#discord">Discord server</a>
    and provide a clear description of the problem. Other Kalico
    contributors will need to understand what steps were taken, what
    the desired outcome was, and what outcome actually occurred. The
-   compressed Kalico log file should be attached to that topic.</li>
+   support bundle should be attached to that topic.</li>
 </ol>
 <h2 id="i-am-making-changes-that-id-like-to-include-in-kalico">I am making changes that I'd like to include in Kalico<a class="headerlink" href="#i-am-making-changes-that-id-like-to-include-in-kalico" title="Permanent link">&para;</a></h2>
 <p>Kalico is open-source software and we appreciate new contributions.</p>

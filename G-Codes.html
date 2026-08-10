@@ -1434,6 +1434,15 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#create_support_bundle" class="md-nav__link">
+    <span class="md-ellipsis">
+      CREATE_SUPPORT_BUNDLE
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#status" class="md-nav__link">
     <span class="md-ellipsis">
       STATUS
@@ -4883,6 +4892,15 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#create_support_bundle" class="md-nav__link">
+    <span class="md-ellipsis">
+      CREATE_SUPPORT_BUNDLE
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#status" class="md-nav__link">
     <span class="md-ellipsis">
       STATUS
@@ -6947,6 +6965,17 @@ clears any error state from the micro-controller.</p>
 <p><code>HEATER_INTERRUPT</code>: Interrupts a TEMPERATURE_WAIT command.</p>
 <h4 id="log_rollover">LOG_ROLLOVER<a class="headerlink" href="#log_rollover" title="Permanent link">&para;</a></h4>
 <p><code>LOG_ROLLOVER</code>: Trigger a klippy.log rollover and generate a new log file.</p>
+<h4 id="create_support_bundle">CREATE_SUPPORT_BUNDLE<a class="headerlink" href="#create_support_bundle" title="Permanent link">&para;</a></h4>
+<p><code>CREATE_SUPPORT_BUNDLE [SINCE=&lt;time&gt;] [INCLUDE_CORE=&lt;0|1&gt;]</code>: Create a compressed
+support bundle in the same directory as <code>klippy.log</code>. The default <code>SINCE</code> is
+<code>30m</code>; values from <code>1m</code> through <code>24h</code> are accepted. Collection runs in a
+separate worker process; Klippy reports when the archive is ready without
+blocking printer communication. The bundle contains recent structured events,
+the last 32 MiB of <code>klippy.log</code>, the Klipper service journal
+when accessible, and a manifest describing any recent native core dump.
+<code>INCLUDE_CORE=1</code> includes the newest core from the selected interval; core dumps
+can make the archive hundreds of MiB. The bundle may contain printer
+configuration, file names, and diagnostic data.</p>
 <h4 id="status">STATUS<a class="headerlink" href="#status" title="Permanent link">&para;</a></h4>
 <p><code>STATUS</code>: Report the Kalico host software status.</p>
 <h4 id="help">HELP<a class="headerlink" href="#help" title="Permanent link">&para;</a></h4>
