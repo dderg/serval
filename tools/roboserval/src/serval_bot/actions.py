@@ -54,12 +54,13 @@ def parse_code_directive(bot_login: str, body: str) -> str | None:
     if match is None or match.group("login").casefold() != bot_login.casefold():
         return None
     request = match.group("request").strip()
-    if _CODE_NEGATION_RE.search(request):
-        return None
     imperative = _CODE_IMPERATIVE_RE.fullmatch(request)
     if imperative is not None:
+        if _CODE_NEGATION_RE.search(request):
+            return None
         return imperative.group("task").rstrip("?!").strip()
-    if _CODE_NATURAL_REQUEST_RE.search(request):
+    natural_request = _CODE_NATURAL_REQUEST_RE.search(request)
+    if natural_request is not None and not _CODE_NEGATION_RE.search(natural_request.group()):
         return request.rstrip("?!").strip()
     return None
 
