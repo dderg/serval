@@ -4,6 +4,9 @@ on:
   workflow_dispatch:
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
@@ -59,6 +62,8 @@ jobs:
     name: sim-e2e (${{ matrix.shard }})
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Run the sim e2e suite
         run: ./scripts/ci.sh sim-e2e
         env:

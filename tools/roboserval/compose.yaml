@@ -1,0 +1,67 @@
+x-repository-policy: &repository-policy |
+  [repositories."dderg/serval"]
+  mode = "triage"
+  bot_login = "roboserval"
+  maintainers = ["dderg"]
+  sim_workflow = "ci-sim-e2e.yaml"
+
+services:
+  bot:
+    image: ${SERVAL_BOT_IMAGE:?required}
+    restart: unless-stopped
+    environment:
+      SERVAL_BOT_PROXY_URL: http://github-proxy:8081
+      SERVAL_BOT_PROXY_HMAC_KEY: ${SERVAL_BOT_PROXY_HMAC_KEY:?required}
+      SERVAL_BOT_REPOSITORY_POLICY: *repository-policy
+      SERVAL_BOT_DATA_DIR: /data
+      PI_CODING_AGENT_DIR: /data/omp-agent
+      SERVAL_BOT_MODEL: ${SERVAL_BOT_MODEL:?required}
+      SERVAL_BOT_PROVIDER: ${SERVAL_BOT_PROVIDER:-}
+      SERVAL_BOT_THINKING: ${SERVAL_BOT_THINKING:-medium}
+      SERVAL_BOT_MAX_CONCURRENCY: ${SERVAL_BOT_MAX_CONCURRENCY:-1}
+      SERVAL_BOT_TASK_TIMEOUT_SECONDS: ${SERVAL_BOT_TASK_TIMEOUT_SECONDS:-3600}
+      SERVAL_BOT_TASK_TIMEOUT_HARD_GRACE_SECONDS: ${SERVAL_BOT_TASK_TIMEOUT_HARD_GRACE_SECONDS:-60}
+      SERVAL_BOT_POLL_INTERVAL_SECONDS: ${SERVAL_BOT_POLL_INTERVAL_SECONDS:-30}
+      SERVAL_BOT_POLL_OVERLAP_SECONDS: ${SERVAL_BOT_POLL_OVERLAP_SECONDS:-300}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    volumes:
+      - bot_data:/data
+    ports:
+      - "127.0.0.1:${SERVAL_BOT_PORT:-6543}:8080"
+    networks:
+      - default
+      - private
+    depends_on:
+      - github-proxy
+
+  github-proxy:
+    image: ${SERVAL_BOT_IMAGE:?required}
+    restart: unless-stopped
+    command: ["serval-github-proxy"]
+    environment:
+      SERVAL_BOT_GITHUB_TOKEN_PATH: /run/secrets/github_token
+      SERVAL_BOT_PROXY_HMAC_KEY: ${SERVAL_BOT_PROXY_HMAC_KEY:?required}
+      SERVAL_BOT_REPOSITORY_POLICY: *repository-policy
+      SERVAL_BOT_WORKSPACE_ROOT: /data/workspaces
+    volumes:
+      - bot_data:/data
+    secrets:
+      - github_token
+    networks:
+      - default
+      - private
+
+networks:
+  default: {}
+  private:
+    internal: true
+
+volumes:
+  bot_data: {}
+
+
+secrets:
+  github_token:
+    environment: SERVAL_BOT_GITHUB_TOKEN
