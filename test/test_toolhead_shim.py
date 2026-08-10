@@ -36,6 +36,7 @@ LEGACY_METHODS = [
     "check_busy",
     "stats",
     "get_kinematics",
+    "get_active_rails_for_axis",
     "get_max_velocity",
     "get_extruder",
     "set_extruder",

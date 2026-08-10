@@ -45,19 +45,19 @@ def test_verify_skips_endstops_without_latch():
 
 
 def test_no_trigger_message_plain():
-    msg = _no_trigger_error_message(2, FakeLatchEndstop(False, 0), 40.0)
+    msg = _no_trigger_error_message(2, [FakeLatchEndstop(False, 0)], 40.0)
     assert "did not trigger within 40.0mm" in msg
     assert "doorbell" not in msg
 
 
 def test_no_trigger_message_reports_lost_doorbell():
-    msg = _no_trigger_error_message(2, FakeLatchEndstop(True, 1234), 40.0)
+    msg = _no_trigger_error_message(2, [FakeLatchEndstop(True, 1234)], 40.0)
     assert "trip event was lost" in msg
     assert "1234" in msg
 
 
 def test_no_trigger_message_remote_endstop():
-    msg = _no_trigger_error_message(2, FakeRemoteEndstop(), 40.0)
+    msg = _no_trigger_error_message(2, [FakeRemoteEndstop()], 40.0)
     assert "did not trigger within 40.0mm" in msg
 
 

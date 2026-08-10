@@ -234,6 +234,10 @@ fn sample_slot_targets(
         None
     };
     for s in 0..num_slaves {
+        if ctx.suppressed[s] {
+            let _ = ctx.rings[s].sample(sample_time);
+            continue;
+        }
         let sampled = if buzz_was_active {
             buzz_sample.and_then(|(rel_mm, vel_mm_s, acc_mm_s2)| {
                 if !ctx.buzz.drives_slot(s) {

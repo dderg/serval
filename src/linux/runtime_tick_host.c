@@ -82,6 +82,89 @@ static int (*vtime_pacer_register)(uint64_t period_ns);
 static void (*vtime_pacer_advance)(int slot, uint64_t target_ns,
                                    uint64_t period_ns);
 static int vtime_pacer_slot = -1;
+
+extern void runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps,
+                                     uint8_t stepper_sel);
+
+// Off by default: pulsing the real step pins costs an ioctl per edge and a
+// spinning emitter, which distorts every other sim world's timing. The shim's
+// `set_step_emit enable=1` control verb arms it for tests that must observe
+// per-stepper suppression on the physical pins.
+//
+// runtime_emit_step_pulses paces its edges by spinning on the virtual clock.
+// The tick thread holds the vtime pacer floor, so a spin there stalls the very
+// clock it waits on: the physical step/dir pins are driven from this ring by a
+// thread that holds no floor.
+#define SIM_STEP_EMIT_DEPTH 4096
+struct sim_step_emit {
+    uint8_t motor;
+    int8_t  dir;
+    uint8_t stepper_sel;
+};
+static struct sim_step_emit sim_step_emit_ring[SIM_STEP_EMIT_DEPTH];
+static atomic_uint sim_step_emit_head;
+static atomic_uint sim_step_emit_tail;
+static pthread_t sim_step_emit_thread;
+static int (*sim_step_emit_enabled)(void);
+static atomic_int sim_step_emit_started;
+
+static void
+sim_step_emit_push(uint8_t motor, int8_t dir, uint8_t stepper_sel)
+{
+    unsigned tail = atomic_load_explicit(&sim_step_emit_tail,
+                                         memory_order_relaxed);
+    unsigned head = atomic_load_explicit(&sim_step_emit_head,
+                                         memory_order_acquire);
+    if (tail - head >= SIM_STEP_EMIT_DEPTH) {
+        fprintf(stderr, "[sim-step-emit] ring overflow motor=%u backlog=%u\n",
+                (unsigned)motor, tail - head);
+        abort();
+    }
+    sim_step_emit_ring[tail & (SIM_STEP_EMIT_DEPTH - 1)] =
+        (struct sim_step_emit){ .motor = motor, .dir = dir,
+                                .stepper_sel = stepper_sel };
+    atomic_store_explicit(&sim_step_emit_tail, tail + 1, memory_order_release);
+}
+
+static void *
+sim_step_emit_main(void *arg)
+{
+    (void)arg;
+    while (1) {
+        unsigned head = atomic_load_explicit(&sim_step_emit_head,
+                                             memory_order_relaxed);
+        if (head == atomic_load_explicit(&sim_step_emit_tail,
+                                         memory_order_acquire)) {
+            // Raw syscall: a libvtime-intercepted sleep would advance the
+            // virtual clock from a thread that has no work to pace.
+            struct timespec idle = { 0, 200000 };
+            syscall(SYS_clock_nanosleep, CLOCK_MONOTONIC, 0, &idle, NULL);
+            continue;
+        }
+        struct sim_step_emit entry =
+            sim_step_emit_ring[head & (SIM_STEP_EMIT_DEPTH - 1)];
+        runtime_emit_step_pulses(entry.motor, entry.dir, entry.stepper_sel);
+        atomic_store_explicit(&sim_step_emit_head, head + 1,
+                              memory_order_release);
+    }
+    return NULL;
+}
+
+static int
+sim_step_emit_active(void)
+{
+    if (!sim_step_emit_enabled || !sim_step_emit_enabled())
+        return 0;
+    if (atomic_exchange(&sim_step_emit_started, 1))
+        return 1;
+    int rc = pthread_create(&sim_step_emit_thread, NULL, sim_step_emit_main,
+                            NULL);
+    if (rc != 0) {
+        fprintf(stderr, "[sim-step-emit] pthread_create failed: %d\n", rc);
+        abort();
+    }
+    return 1;
+}
 #endif
 
 #define TICK_TRACE_DEPTH 16
@@ -109,6 +192,8 @@ host_tick_main(void *arg)
     // driver), so it must not be demoted: every starved tick is a span
     // where the whole simulated world stands still against real time.
     sim_notify_step = dlsym(RTLD_DEFAULT, "sim_intercept_notify_step");
+    sim_step_emit_enabled = dlsym(RTLD_DEFAULT,
+                                  "sim_intercept_step_emit_enabled");
     vtime_pacer_register = dlsym(RTLD_DEFAULT, "vtime_pacer_register");
     vtime_pacer_advance = dlsym(RTLD_DEFAULT, "vtime_pacer_advance");
     if (vtime_pacer_register && vtime_pacer_advance)
@@ -207,6 +292,7 @@ host_tick_main(void *arg)
                              + (uint64_t)sim_vt.tv_nsec;
         uint64_t sim_now_cyc = timer_read_time_u64();
         const int64_t sim_ns_per_tick = 1000000000LL / CONFIG_CLOCK_FREQ;
+        const int emit_step_pins = sim_step_emit_active();
 #endif
         for (int axis = 0; axis < N_AXIS_STEP_QUEUES; axis++) {
             StepQueue *q = &step_queues[axis];
@@ -214,6 +300,7 @@ host_tick_main(void *arg)
 #if CONFIG_MCU_SIM
                 uint16_t idx = q->head & (STEP_QUEUE_DEPTH - 1);
                 int8_t signed_step_delta = q->buf[idx].dir;
+                uint8_t stepper_sel = q->buf[idx].stepper_sel;
                 uint32_t sched_lo = q->buf[idx].cycle_abs;
                 int32_t sched_delta = (int32_t)(sched_lo - (uint32_t)sim_now_cyc);
                 uint64_t sched_vtime_ns =
@@ -228,6 +315,9 @@ host_tick_main(void *arg)
                                     signed_step_delta, sched_vtime_ns,
                                     sched_cycle);
                 }
+                if (emit_step_pins)
+                    sim_step_emit_push((uint8_t)axis, signed_step_delta,
+                                       stepper_sel);
 #endif
             }
         }
@@ -243,7 +333,6 @@ runtime_tick_init(void)
     if (atomic_exchange(&host_tick_thread_started, 1))
         return;
     clock_gettime(CLOCK_MONOTONIC, &host_tick_t0);
-
 
     pthread_attr_t attr;
     pthread_attr_init(&attr);

@@ -711,7 +711,7 @@ def test_trip_move_begin_arms_engine_with_homing_torque_cap():
         printer, extra={"homing_max_torque": 50.0}
     )
     es = rail.setup_motion_endstop(_virtual_pin_params(), 2)
-    rail.trip_move_begin({"endstop": es})
+    rail.trip_move_begin({"endstops": [es]})
     engine = printer.lookup_object("motion_engine")
     assert engine.calls == [
         ("arm_sensorless_endstop", 7, 0, es.endstop_id, 500, True)
@@ -722,7 +722,7 @@ def test_trip_move_end_disarms_engine():
     printer = FakeProviderPrinter(node_handle=7)
     rail = make_servo_rail_with_printer(printer)
     es = rail.setup_motion_endstop(_virtual_pin_params(), 2)
-    rail.trip_move_end({"endstop": es})
+    rail.trip_move_end({"endstops": [es]})
     engine = printer.lookup_object("motion_engine")
     assert engine.calls == [("disarm_sensorless_endstop", 7, 0, es.endstop_id)]
 
@@ -732,7 +732,7 @@ def test_trip_move_begin_raises_when_no_engine_handle():
     rail = make_servo_rail_with_printer(printer)
     es = rail.setup_motion_endstop(_virtual_pin_params(), 2)
     with pytest.raises(Exception):
-        rail.trip_move_begin({"endstop": es})
+        rail.trip_move_begin({"endstops": [es]})
 
 
 def make_awd_servo_rail_with_printer(printer):
@@ -782,13 +782,13 @@ def test_awd_trip_move_begin_arms_every_motor_with_its_own_torque_cap():
     printer = make_awd_printer()
     rail = make_awd_servo_rail_with_printer(printer)
     es = rail.setup_motion_endstop(_virtual_pin_params(), 2)
-    rail.trip_move_begin({"endstop": es})
+    rail.trip_move_begin({"endstops": [es]})
     engine = printer.lookup_object("motion_engine")
     assert engine.calls == [
         ("arm_sensorless_endstop", 7, 1, es.endstop_id, 500, True),
         ("arm_sensorless_endstop", 7, 2, es.endstop_id, 300, True),
     ]
-    rail.trip_move_end({"endstop": es})
+    rail.trip_move_end({"endstops": [es]})
     assert engine.calls[-2:] == [
         ("disarm_sensorless_endstop", 7, 1, es.endstop_id),
         ("disarm_sensorless_endstop", 7, 2, es.endstop_id),

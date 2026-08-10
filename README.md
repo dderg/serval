@@ -302,6 +302,10 @@ native `ec_macb` driver.
 - **On trigger, the trip is matched against the streamed trajectory** to
   reconstruct the exact trip position (including overshoot) and re-anchor
   the axis.
+- **Beacon users must install the [Serval-compatible
+  `beacon_klipper` fork](https://github.com/dderg/beacon_klipper).** The
+  upstream module targets Klipper's motion APIs and is not compatible with
+  Serval's rewritten motion stack.
 - **Endstops on remote MCUs and probe-style triggers** (Beacon and
   similar) use the same mechanism.
 - **Sensorless homing** exists on the servo path via a torque threshold.

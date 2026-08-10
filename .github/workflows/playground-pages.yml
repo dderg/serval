@@ -7,7 +7,7 @@ name: playground-pages
 
 on:
   push:
-    branches: [sota-motion]
+    branches: [main]
     paths:
       - "rust/**"
       - "snapshots/web/static/**"

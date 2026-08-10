@@ -557,6 +557,7 @@ class PrinterConfig:
         for (section, option), value in config.access_tracking.items():
             self.status_settings.setdefault(section, {})[option] = value
         self._mirror_axes_to_legacy_steppers()
+        self._mirror_kinematics_to_legacy_printer()
         for (section, option, value), msg in self.deprecated.items():
             _type = "deprecated_value"
             self.warn(_type, msg, section, option, value)
@@ -581,6 +582,12 @@ class PrinterConfig:
                     continue
                 legacy = "stepper_" + section[len(axis_prefix) :]
                 store.setdefault(legacy, dict(store[section]))
+
+    def _mirror_kinematics_to_legacy_printer(self):
+        for store in (self.status_settings, self.status_raw_config):
+            kinematics = store.get("kinematics", {}).get("type")
+            if kinematics is not None:
+                store.setdefault("printer", {})["kinematics"] = kinematics
 
     def get_status(self, eventtime):
         return {

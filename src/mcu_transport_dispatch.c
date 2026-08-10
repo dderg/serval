@@ -8,6 +8,7 @@
 #include "board/irq.h"
 #include "sched.h"
 #include "autoconf.h"
+#include "stepper.h"
 
 #if CONFIG_MOTION_RUNTIME
 #include "runtime.h"
@@ -15,7 +16,6 @@ extern void *runtime_handle;
 #endif
 
 #if CONFIG_CLASSIC_STEPPING
-#include "stepper.h"
 extern uint64_t runtime_widened_host_clock(void);
 #endif
 
@@ -35,6 +35,10 @@ static void handle_query_runtime_caps(uint32_t correlation_id, const uint8_t *bo
 static void handle_query_motor_state(uint32_t correlation_id, const uint8_t *body, uint16_t body_len);
 static void handle_stop(uint32_t correlation_id);
 static void handle_resume_stream(uint32_t correlation_id);
+#if CONFIG_MOTION_RUNTIME
+static void handle_stepper_suppress(uint32_t correlation_id,
+                                     const uint8_t *body, uint16_t body_len);
+#endif
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <fcntl.h>
@@ -190,6 +194,11 @@ mcu_transport_dispatch_frame(uint8_t channel, const uint8_t *payload,
     case MCU_MSG_RESUME_STREAM:
         handle_resume_stream(correlation_id);
         return;
+#if CONFIG_MOTION_RUNTIME
+    case MCU_MSG_STEPPER_SUPPRESS:
+        handle_stepper_suppress(correlation_id, body, body_len);
+        return;
+#endif
     default:
         return;
     }
@@ -456,9 +465,41 @@ send_resume_stream_response(uint32_t correlation_id, int32_t result)
     mcu_transport_send_frame(MCU_CHANNEL_CONTROL, payload, sizeof(payload));
 }
 
+#if CONFIG_MOTION_RUNTIME
+static void
+send_stepper_suppress_response(uint32_t correlation_id,
+                               uint32_t effective_clock)
+{
+    uint8_t payload[PER_MESSAGE_HEADER_LEN + 4];
+    encode_message_header(payload, MCU_MSG_STEPPER_SUPPRESS_RESPONSE,
+                          MESSAGE_VERSION_DEFAULT, correlation_id);
+    uint8_t *b = &payload[PER_MESSAGE_HEADER_LEN];
+    b[0] = (uint8_t)(effective_clock & 0xFF);
+    b[1] = (uint8_t)((effective_clock >> 8) & 0xFF);
+    b[2] = (uint8_t)((effective_clock >> 16) & 0xFF);
+    b[3] = (uint8_t)((effective_clock >> 24) & 0xFF);
+    mcu_transport_send_frame(MCU_CHANNEL_CONTROL, payload, sizeof(payload));
+}
+
+static void
+handle_stepper_suppress(uint32_t correlation_id, const uint8_t *body,
+                        uint16_t body_len)
+{
+    if (body_len < 3)
+        shutdown("bad suppress");
+    if (body[0] == 0xFF && body[1] == 0xFF && !body[2])
+        stepper_suppress_clear_all();
+    else
+        stepper_suppress_set(body[0], body[1]);
+    send_stepper_suppress_response(
+        correlation_id, (uint32_t)runtime_now_ticks(runtime_handle));
+}
+#endif
+
 static void
 handle_resume_stream(uint32_t correlation_id)
 {
+    stepper_suppress_clear_all();
 #if CONFIG_MOTION_RUNTIME
     int32_t rc = RUNTIME_ERR_NOT_INIT;
     if (runtime_handle) {

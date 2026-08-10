@@ -32,7 +32,7 @@ class _LinearKinematics:
         self.limits = [(1.0, -1.0)] * 3
         self._parked_dirty = [False, False, False]
 
-        self._printer.load_object(config, "homing").resolve_endstops()
+        self._printer.load_object(config, "homing").resolve_endstops(self)
         self._printer.register_event_handler(
             "stepper_enable:motor_off", self._handle_motor_off
         )
@@ -48,9 +48,14 @@ class _LinearKinematics:
             config.getsection("axis " + axis_name),
             list(zip(motor_sections, motor_names)),
         )
-        rail.setup_itersolve(
-            "cartesian_stepper_alloc", "xyz"[lane_idx].encode()
-        )
+        if self.kind == "corexy" and lane_idx < 2:
+            rail.setup_itersolve(
+                "corexy_stepper_alloc", b"+" if lane_idx == 0 else b"-"
+            )
+        else:
+            rail.setup_itersolve(
+                "cartesian_stepper_alloc", "xyz"[lane_idx].encode()
+            )
         return rail
 
     def _build_servo_lane(self, config, axis_name, motor_sections):
@@ -126,6 +131,14 @@ class _LinearKinematics:
                 return 0.0
             return sum(vals) / len(vals)
 
+        if self.coupled_xy():
+            a = rail_pos(self.rails[0])
+            b = rail_pos(self.rails[1])
+            return [
+                (a + b) * 0.5,
+                (a - b) * 0.5,
+                rail_pos(self.rails[2]),
+            ]
         return [rail_pos(rail) for rail in self.rails]
 
     def _check_endstops(self, move):

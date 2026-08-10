@@ -3,21 +3,57 @@ from .mcu import STEPPING_MODE_STEPCOMPRESS
 AXIS_ENDSTOP_IDS = (0, 1, 2)
 PROVIDER_ID_FIRST = len(AXIS_ENDSTOP_IDS)
 ENDSTOP_ID_MAX = 255
+UNBOUND_MOTOR = 0xFF
+UNBOUND_STEPPER = 0xFF
 
 _ALLOCATOR_OBJECT = "motion_endstop_allocator"
 _TRIP_STOP_OBJECT = "motion_endstop_trip_stop"
 
 TRIGGER_REASON_ENDSTOP = 1
 TRIGGER_REASON_HOST_DISARM = 2
+DISARM_REST_TICKS = 0
+
+
+def endstop_entry(endstops, provider, trigger_position):
+    entry = {
+        "endstops": list(endstops),
+        "provider": provider,
+        "trigger_position": trigger_position,
+    }
+    if len(entry["endstops"]) == 1:
+        entry["endstop"] = entry["endstops"][0]
+    return entry
+
+
+def entry_endstops(entry):
+    endstops = entry.get("endstops")
+    if endstops is None:
+        return [entry["endstop"]]
+    return endstops
+
+
+class MotorBinding:
+    """Ties an endstop switch to one motor of a kinematic lane. A bound
+    endstop's trip freezes only that motor instead of stopping the MCU, which
+    is what lets a dual-motor axis square itself against two switches."""
+
+    def __init__(self, lane_idx, stepper_idx, mcu, motor_name):
+        self.lane_idx = lane_idx
+        self.stepper_idx = stepper_idx
+        self.mcu = mcu
+        self.motor_name = motor_name
 
 
 class MotionEndstop:
-    def __init__(self, pin_params, endstop_id):
+    def __init__(self, pin_params, endstop_id, binding=None, group=False):
         self.mcu = pin_params["chip"]
         self.endstop_id = endstop_id
         self.pin = pin_params["pin"]
         self.pullup = pin_params["pullup"]
         self.invert = pin_params["invert"]
+        self.binding = binding
+        self.group = group
+        self.motor_name = None if binding is None else binding.motor_name
         self.oid = self.mcu.create_oid()
         self._query_cmd = None
         self._state_cmd = None
@@ -27,9 +63,24 @@ class MotionEndstop:
         self.mcu.register_config_callback(self._build_config)
 
     def _build_config(self):
+        bound_locally = (
+            self.binding is not None and self.binding.mcu is self.mcu
+        )
+        motor = self.binding.lane_idx if bound_locally else UNBOUND_MOTOR
+        stepper = self.binding.stepper_idx if bound_locally else UNBOUND_STEPPER
         self.mcu.add_config_cmd(
             "config_endstop oid=%d endstop_id=%d pin=%s pull_up=%d invert=%d"
-            % (self.oid, self.endstop_id, self.pin, self.pullup, self.invert)
+            " motor=%d stepper=%d group=%d"
+            % (
+                self.oid,
+                self.endstop_id,
+                self.pin,
+                self.pullup,
+                self.invert,
+                motor,
+                stepper,
+                int(self.group),
+            )
         )
         self._query_cmd = self.mcu.lookup_command(
             "query_endstop oid=%c rest_ticks=%u"
@@ -63,9 +114,12 @@ class MotionEndstop:
             )
         if self._trip_stop is not None:
             self._trip_stop.arm()
+        engine = self.mcu.get_printer().lookup_object("motion_engine")
+        engine.note_endstop_arm(self.engine_mcu_handle(), self.endstop_id)
         self._query_cmd.send([self.oid, rest_ticks])
 
     def disarm(self):
+        self._query_cmd.send([self.oid, DISARM_REST_TICKS])
         if self._trip_stop is not None:
             self._trip_stop.disarm()
 
@@ -74,6 +128,15 @@ class MotionEndstop:
 
     def engine_mcu_handle(self):
         return self.mcu.get_engine_handle()
+
+    def remote_freeze(self):
+        if self.binding is None:
+            return None
+        return (
+            self.binding.mcu.get_engine_handle(),
+            self.binding.lane_idx,
+            self.binding.stepper_idx,
+        )
 
 
 class RemoteMotionEndstop:
@@ -91,6 +154,9 @@ class RemoteMotionEndstop:
 
     def engine_mcu_handle(self):
         return self.mcu.get_engine_handle()
+
+    def remote_freeze(self):
+        return None
 
     def is_triggered(self):
         return False

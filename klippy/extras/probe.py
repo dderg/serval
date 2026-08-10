@@ -212,7 +212,7 @@ class PrinterProbe:
             speed,
             max_travel,
             {
-                "endstop": self._endstop,
+                "endstops": [self._endstop],
                 "provider": self,
                 "trigger_position": None,
             },

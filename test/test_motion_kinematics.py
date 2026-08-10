@@ -12,8 +12,9 @@ from fakes import (
     FakePrinter as _FakePrinterBase,
 )
 
-from klippy import motion_kinematics
+from klippy import motion_kinematics, motion_setup, stepper
 from klippy.extras import servo_axis
+from klippy.gcode import Coord
 
 
 class FakeMCUEndstop:
@@ -37,7 +38,7 @@ class FakeRegistrar:
 
 
 class FakeHoming:
-    def resolve_endstops(self):
+    def resolve_endstops(self, kin):
         pass
 
 
@@ -183,6 +184,114 @@ def test_mcu_tag_corexy_needs_both_xy():
 def test_coupled_xy_true_for_corexy_false_for_cartesian():
     assert make_kin(corexy_sections()).coupled_xy() is True
     assert make_kin(cartesian_sections()).coupled_xy() is False
+
+
+def test_cartesian_steppers_project_their_axis_coord():
+    kin = make_kin(cartesian_sections())
+    coord = Coord(4.0, 5.0, 6.0, 0.0)
+    assert kin.rails[0].calc_position_from_coord(coord) == 4.0
+    assert kin.rails[1].calc_position_from_coord(coord) == 5.0
+    assert kin.rails[2].calc_position_from_coord(coord) == 6.0
+
+
+def test_corexy_steppers_project_xy_sum_difference_and_z():
+    kin = make_kin(corexy_sections())
+    coord = Coord(4.0, 5.0, 6.0, 0.0)
+    assert kin.rails[0].calc_position_from_coord(coord) == 9.0
+    assert kin.rails[1].calc_position_from_coord(coord) == -1.0
+    assert kin.rails[2].calc_position_from_coord(coord) == 6.0
+
+
+def test_corexy_steppers_accept_sequence_coords():
+    kin = make_kin(corexy_sections())
+    assert kin.rails[0].calc_position_from_coord([4.0, 5.0]) == 9.0
+    assert kin.rails[1].calc_position_from_coord((4.0, 5.0, 6.0)) == -1.0
+    assert kin.rails[2].calc_position_from_coord([4.0, 5.0, 6.0]) == 6.0
+
+
+def _motor_positions(kin, coord):
+    return {
+        name: rail.calc_position_from_coord(coord)
+        for rail in kin.rails
+        for name in (s.get_name() for s in rail.get_steppers())
+    }
+
+
+def test_cartesian_calc_position_reads_rail_positions_directly():
+    kin = make_kin(cartesian_sections())
+    assert kin.calc_position({"x": 4.0, "y": 5.0, "z": 6.0}) == [4.0, 5.0, 6.0]
+
+
+def test_corexy_calc_position_inverts_xy_half_sum_difference():
+    kin = make_kin(corexy_sections())
+    assert kin.calc_position({"a": 9.0, "b": -1.0, "z0": 6.0, "z1": 6.0}) == [
+        4.0,
+        5.0,
+        6.0,
+    ]
+
+
+def test_corexy_calc_position_round_trips_from_coord():
+    kin = make_kin(corexy_sections())
+    coord = Coord(4.0, 5.0, 6.0, 0.0)
+    motor_pos = _motor_positions(kin, coord)
+    assert motor_pos == {"a": 9.0, "b": -1.0, "z0": 6.0, "z1": 6.0}
+    assert kin.calc_position(motor_pos) == [4.0, 5.0, 6.0]
+
+
+def test_cartesian_calc_position_round_trips_from_coord():
+    kin = make_kin(cartesian_sections())
+    coord = Coord(4.0, 5.0, 6.0, 0.0)
+    motor_pos = _motor_positions(kin, coord)
+    assert kin.calc_position(motor_pos) == [4.0, 5.0, 6.0]
+
+
+def test_cartesian_motors_active_on_their_own_axis():
+    kin = make_kin(cartesian_sections())
+    for lane_idx, axis in {0: "x", 1: "y", 2: "z"}.items():
+        for motor in kin.rails[lane_idx].get_steppers():
+            assert motor.is_active_axis(axis) is True
+            for other in set("xyz") - {axis}:
+                assert motor.is_active_axis(other) is False
+
+
+def test_corexy_xy_motors_active_on_both_axes():
+    kin = make_kin(corexy_sections())
+    for lane_idx in (0, 1):
+        for motor in kin.rails[lane_idx].get_steppers():
+            assert motor.is_active_axis("x") is True
+            assert motor.is_active_axis("y") is True
+            assert motor.is_active_axis("z") is False
+    for motor in kin.rails[2].get_steppers():
+        assert motor.is_active_axis("z") is True
+        assert motor.is_active_axis("x") is False
+        assert motor.is_active_axis("y") is False
+
+
+def test_lane_follower_motors_share_the_lane_projector():
+    kin = make_kin(corexy_sections())
+    coord = Coord(4.0, 5.0, 6.0, 0.0)
+    z0, z1 = kin.rails[2].get_steppers()
+    assert z0.calc_position_from_coord(coord) == 6.0
+    assert z1.calc_position_from_coord(coord) == 6.0
+    assert z0.is_active_axis("z") is True
+    assert z1.is_active_axis("z") is True
+
+
+def test_follower_axis_stepper_fails_loud_without_projector():
+    sections = cartesian_sections()
+    sections["motor e"] = motor_section()
+    sections["axis e"] = {"follows": "x", "motors": "e"}
+    printer = FakePrinter()
+    config = FakeConfig(printer, sections=sections, error=FakeError)
+    motion = FakeMotion()
+    motion.kinematics_decl = read_native_decl(sections)
+    motion_setup.build_follower_steppers(motion, config)
+    assert [s.get_name() for s in motion.follower_steppers] == ["e"]
+    with pytest.raises(stepper.error):
+        motion.follower_steppers[0].calc_position_from_coord(
+            Coord(1.0, 2.0, 3.0, 0.0)
+        )
 
 
 def test_unknown_type_rejected():

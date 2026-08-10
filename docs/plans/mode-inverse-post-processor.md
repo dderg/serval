@@ -145,7 +145,7 @@ cd rust && cargo nextest run
 ./snapshots/snapshot-tests.sh --ci   # new case PENDING is expected; nothing else may change
 ```
 
-PR bases on `sota-motion`. Never amend or force-push. No Claude/Co-Authored-By
+PR bases on `main`. Never amend or force-push. No Claude/Co-Authored-By
 trailers. Comments are a failure of expression — the inversion formula's
 provenance belongs in the README paragraph and in test assertions, not inline
 comments.
