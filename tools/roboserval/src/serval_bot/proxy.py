@@ -316,6 +316,8 @@ class GitHubApi:
             if not isinstance(head, dict) or not isinstance(head.get("sha"), str):
                 raise GitHubFailure(f"GitHub pull request {request.repo}#{issue_number} has no head SHA")
             head_sha = head["sha"]
+            if not await self._head_checks_passed(request.repo, head_sha):
+                continue
             events.append(
                 {
                     "delivery_id": f"poll:review:{event_id}:{head_sha}:requested",
@@ -373,6 +375,34 @@ class GitHubApi:
             )
         events.sort(key=lambda event: (event["occurred_at"], event["delivery_id"]))
         return {"events": events}
+
+    async def _head_checks_passed(self, repo: str, head_sha: str) -> bool:
+        response = await self.request(
+            "GET",
+            f"/repos/{repo}/commits/{head_sha}/check-runs",
+            params={"filter": "latest", "per_page": 100},
+        )
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise GitHubFailure(f"GitHub check runs for {repo}@{head_sha} are not an object")
+        total_count = payload.get("total_count")
+        check_runs = payload.get("check_runs")
+        if not isinstance(total_count, int) or not isinstance(check_runs, list):
+            raise GitHubFailure(f"GitHub check runs for {repo}@{head_sha} are malformed")
+        if total_count > len(check_runs):
+            raise GitHubFailure(f"GitHub check runs for {repo}@{head_sha} exceed one page")
+        if not check_runs:
+            return False
+        for check_run in check_runs:
+            if not isinstance(check_run, dict):
+                raise GitHubFailure(f"GitHub check run for {repo}@{head_sha} is malformed")
+            status = check_run.get("status")
+            conclusion = check_run.get("conclusion")
+            if not isinstance(status, str) or (conclusion is not None and not isinstance(conclusion, str)):
+                raise GitHubFailure(f"GitHub check run for {repo}@{head_sha} is malformed")
+            if status != "completed" or conclusion not in {"success", "neutral", "skipped"}:
+                return False
+        return True
 
     async def _pages(self, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
