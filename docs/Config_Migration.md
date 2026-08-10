@@ -272,7 +272,6 @@ were simply never carried across:
 | `[manual_stepper]` | Drives a stepper outside the kinematic model, which the motor/axis split has no room for. Mods that depend on it (filament changers, nozzle wipers, `[trad_rack]`) do not load. |
 | `[endstop_phase]` | Incompatible with the new stepper model. |
 | `[pwm_tool]` | Not carried. |
-| `[load_cell]`, `[hx71x]`, `[ads1220]` | Load-cell family, not carried. |
 | `[probe_eddy_current]`, `[ldc1612]` | Eddy-current probing, deleted with the old CAN connect path. |
 
 A configuration that includes any of these has to drop the section
