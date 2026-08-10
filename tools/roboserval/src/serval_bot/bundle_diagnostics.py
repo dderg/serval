@@ -149,8 +149,22 @@ def load_bundle_records(bundle):
     return manifest, records, malformed, total_records, context_truncated
 
 
+def validate_manifest(manifest):
+    if not isinstance(manifest, dict):
+        raise BundleDiagnosticError("support bundle has no valid manifest.json")
+    warnings = manifest.get("warnings", [])
+    if not isinstance(warnings, list) or not all(isinstance(warning, str) for warning in warnings):
+        raise BundleDiagnosticError("support bundle manifest has invalid warnings")
+    event_files = manifest.get("event_files", {})
+    if not isinstance(event_files, dict) or not all(
+        isinstance(name, str) and isinstance(details, dict) for name, details in event_files.items()
+    ):
+        raise BundleDiagnosticError("support bundle manifest has invalid event_files")
+
+
 def render_bundle_report(bundle):
     manifest, selected, malformed, total_records, context_truncated = load_bundle_records(bundle)
+    validate_manifest(manifest)
     lines = [
         f"created: {manifest.get('created_utc', '?')}",
         f"cutoff: {manifest.get('cutoff_utc', '?')}",
@@ -170,7 +184,7 @@ def render_bundle_report(bundle):
         warnings.append(f"lifecycle context limited to {MAX_LIFECYCLE_RECORDS} records")
     lines.append("evidence: INCOMPLETE" if warnings else "evidence: complete")
     lines.extend(f"warning: {warning}" for warning in warnings)
-    selected.sort(key=lambda record: record.get("_time", ""))
+    selected.sort(key=lambda record: str(record.get("_time", "")))
     lines.append(f"diagnostic records: {len(selected)} selected from {total_records}")
     for record in selected:
         lines.append(

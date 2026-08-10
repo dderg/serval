@@ -120,3 +120,19 @@ def test_rejects_cumulative_uncompressed_event_overflow(tmp_path, monkeypatch):
         match="exceeds the uncompressed limit",
     ):
         bundle_diagnostics.load_bundle_records(bundle)
+
+
+@pytest.mark.parametrize(
+    "manifest,error",
+    [
+        ({"warnings": None, "event_files": {}}, "invalid warnings"),
+        ({"warnings": [], "event_files": []}, "invalid event_files"),
+        (
+            {"warnings": [], "event_files": {"host-py.jsonl": []}},
+            "invalid event_files",
+        ),
+    ],
+)
+def test_rejects_invalid_manifest_schema(manifest, error):
+    with pytest.raises(bundle_diagnostics.BundleDiagnosticError, match=error):
+        bundle_diagnostics.validate_manifest(manifest)

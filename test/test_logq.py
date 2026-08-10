@@ -127,6 +127,15 @@ class TestBundleCommand:
         assert rc == 1
         assert "has no manifest.json" in capsys.readouterr().err
 
+    def test_rejects_invalid_manifest_schema(self, tmp_path, capsys):
+        bundle = tmp_path / "serval-support-test.tar.gz"
+        _write_bundle(bundle, {"warnings": None, "event_files": {}}, [])
+
+        rc = logq.main(["bundle", str(bundle)])
+
+        assert rc == 1
+        assert "manifest has invalid warnings" in capsys.readouterr().err
+
 
 class TestValidateSince:
     @pytest.mark.parametrize("value", ["10m", "24h", "7d", "30s", "2w"])

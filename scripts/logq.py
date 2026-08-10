@@ -286,10 +286,27 @@ def load_bundle(bundle_path):
     return manifest, records, malformed, total_records, context_truncated
 
 
+def validate_bundle_manifest(manifest):
+    if not isinstance(manifest, dict):
+        raise UsageError("support bundle manifest is not an object")
+    warnings = manifest.get("warnings", [])
+    if not isinstance(warnings, list) or not all(
+        isinstance(warning, str) for warning in warnings
+    ):
+        raise UsageError("support bundle manifest has invalid warnings")
+    event_files = manifest.get("event_files", {})
+    if not isinstance(event_files, dict) or not all(
+        isinstance(name, str) and isinstance(details, dict)
+        for name, details in event_files.items()
+    ):
+        raise UsageError("support bundle manifest has invalid event_files")
+
+
 def cmd_bundle(args, _vl_url):
     manifest, diagnostics, malformed, total_records, context_truncated = (
         load_bundle(args.path)
     )
+    validate_bundle_manifest(manifest)
     print("support bundle: %s" % args.path)
     print("created: %s" % manifest.get("created_utc", "?"))
     print("cutoff: %s" % manifest.get("cutoff_utc", "?"))
@@ -317,12 +334,13 @@ def cmd_bundle(args, _vl_url):
         {
             record.get("session_id")
             for record in diagnostics
-            if record.get("session_id")
+            if isinstance(record.get("session_id"), str)
+            and record.get("session_id")
             and record.get("session_id") != "__unbound__"
         }
     )
     print("sessions: %s" % (", ".join(session_ids) if session_ids else "none"))
-    diagnostics.sort(key=lambda record: record.get("_time", ""))
+    diagnostics.sort(key=lambda record: str(record.get("_time", "")))
     print("")
     print(
         "diagnostic records: %d selected from %d"
