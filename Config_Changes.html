@@ -557,27 +557,6 @@
   
   
     <li class="md-nav__item">
-      <a href="Nonlinear_Pressure_Advance.html" class="md-nav__link">
-        
-  
-  <span class="md-ellipsis">
-    Nonlinear Pressure Advance
-  </span>
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
       <a href="PID.html" class="md-nav__link">
         
   
@@ -1300,6 +1279,27 @@
 
               
             
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Nonlinear_Pressure_Advance.html" class="md-nav__link">
+        
+  
+  <span class="md-ellipsis">
+    Nonlinear pressure advance
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
           </ul>
         </nav>
       
@@ -1383,27 +1383,6 @@
   
   <span class="md-ellipsis">
     Exclude Objects
-  </span>
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="Using_PWM_Tools.html" class="md-nav__link">
-        
-  
-  <span class="md-ellipsis">
-    Using PWM tools
   </span>
   
 
@@ -1635,27 +1614,6 @@
   
   <span class="md-ellipsis">
     RPi microcontroller
-  </span>
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="Beaglebone.html" class="md-nav__link">
-        
-  
-  <span class="md-ellipsis">
-    Beaglebone
   </span>
   
 
@@ -2034,9 +1992,10 @@ settings).</p>
 removed. Use the new
 <a href="Config_Reference.html#pwm_cycle_time">pwm_cycle_time</a> module if it is
 necessary to dynamically change a pwm pin's cycle time.</p>
-<p>20240123: The output_pin <code>maximum_mcu_duration</code> parameter is
-deprecated. Use a <a href="Config_Reference.html#pwm_tool">pwm_tool config section</a>
-instead. The option will be removed in the near future.</p>
+<p>20240123: The output_pin <code>maximum_mcu_duration</code> parameter was
+deprecated. At the time, users were directed to a <code>[pwm_tool]</code> config
+section. The option was removed on 20240912; <code>[pwm_tool]</code> has also since
+been removed.</p>
 <p>20240123: The output_pin <code>static_value</code> parameter is deprecated.
 Replace with <code>value</code> and <code>shutdown_value</code> parameters.  The option will
 be removed in the near future.</p>

@@ -1502,15 +1502,6 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#pwm_tool" class="md-nav__link">
-    <span class="md-ellipsis">
-      [pwm_tool]
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
   <a href="#pwm_cycle_time" class="md-nav__link">
     <span class="md-ellipsis">
       [pwm_cycle_time]
@@ -2121,27 +2112,6 @@
   
   <span class="md-ellipsis">
     Kalico additions
-  </span>
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="Nonlinear_Pressure_Advance.html" class="md-nav__link">
-        
-  
-  <span class="md-ellipsis">
-    Nonlinear Pressure Advance
   </span>
   
 
@@ -2880,6 +2850,27 @@
 
               
             
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Nonlinear_Pressure_Advance.html" class="md-nav__link">
+        
+  
+  <span class="md-ellipsis">
+    Nonlinear pressure advance
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
           </ul>
         </nav>
       
@@ -2963,27 +2954,6 @@
   
   <span class="md-ellipsis">
     Exclude Objects
-  </span>
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="Using_PWM_Tools.html" class="md-nav__link">
-        
-  
-  <span class="md-ellipsis">
-    Using PWM tools
   </span>
   
 
@@ -3215,27 +3185,6 @@
   
   <span class="md-ellipsis">
     RPi microcontroller
-  </span>
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="Beaglebone.html" class="md-nav__link">
-        
-  
-  <span class="md-ellipsis">
-    Beaglebone
   </span>
   
 
@@ -4489,15 +4438,6 @@
   <a href="#static_pwm_clock" class="md-nav__link">
     <span class="md-ellipsis">
       [static_pwm_clock]
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#pwm_tool" class="md-nav__link">
-    <span class="md-ellipsis">
-      [pwm_tool]
     </span>
   </a>
   
@@ -7989,30 +7929,6 @@ pin:
 #   Target output frequency.
 </code></pre></div>
 
-<h3 id="pwm_tool">[pwm_tool]<a class="headerlink" href="#pwm_tool" title="Permanent link">&para;</a></h3>
-<p>Pulse width modulation digital output pins capable of high speed
-updates (one may define any number of sections with an "output_pin"
-prefix). Pins configured here will be setup as output pins and one may
-modify them at run-time using "SET_PIN PIN=my_pin VALUE=.1" type
-extended <a href="G-Codes.html#output_pin">g-code commands</a>.</p>
-<div class="highlight"><pre><span></span><code>[pwm_tool my_tool]
-pin:
-#   The pin to configure as an output. This parameter must be provided.
-#maximum_mcu_duration:
-#   The maximum duration a non-shutdown value may be driven by the MCU
-#   without an acknowledge from the host.
-#   If host can not keep up with an update, the MCU will shutdown
-#   and set all pins to their respective shutdown values.
-#   Default: 0 (disabled)
-#   Usual values are around 5 seconds.
-#value:
-#shutdown_value:
-#cycle_time: 0.100
-#hardware_pwm: False
-#scale:
-#   See the &quot;output_pin&quot; section for the definition of these parameters.
-</code></pre></div>
-
 <h3 id="pwm_cycle_time">[pwm_cycle_time]<a class="headerlink" href="#pwm_cycle_time" title="Permanent link">&para;</a></h3>
 <p>Run-time configurable output pins with dynamic pwm cycle timing (one
 may define any number of sections with an "pwm_cycle_time" prefix).
@@ -9824,9 +9740,8 @@ vssa_pin:
 </code></pre></div>
 
 <h3 id="replicape">[replicape]<a class="headerlink" href="#replicape" title="Permanent link">&para;</a></h3>
-<p>Replicape support - see the <a href="Beaglebone.html">beaglebone guide</a> and the
-<a href="https://github.com/KalicoCrew/kalico//blob/main/config/generic-replicape.cfg">generic-replicape.cfg</a> file for an
-example.</p>
+<p>Replicape compatibility support. This section documents the retained host-side
+module; this branch does not include a working Replicape example configuration.</p>
 <div class="highlight"><pre><span></span><code># The &quot;replicape&quot; config section adds &quot;replicape:stepper_x_enable&quot;
 # virtual stepper enable pins (for steppers X, Y, Z, E, and H) and
 # &quot;replicape:power_x&quot; PWM output pins (for hotbed, e, h, fan0, fan1,

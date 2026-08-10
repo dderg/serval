@@ -108,7 +108,6 @@ nav:
     - Config_Reference.md
     - Config_Reference_Motion.md
     - Kalico_Additions.md
-    - Nonlinear_Pressure_Advance.md
     - PID.md
     - MPC.md
     - Dockable_Probe.md
@@ -140,10 +139,10 @@ nav:
       - Measuring_Resonances.md
       - Resonance_Compensation.md
       - Pressure_Advance.md
+      - Nonlinear_Pressure_Advance.md
   - Slicers:
     - Slicers.md
     - Exclude_Object.md
-    - Using_PWM_Tools.md
   - Developer Documentation:
     - API_Server.md
     - CANBUS_protocol.md
@@ -153,7 +152,6 @@ nav:
     - Example_Configs.md
     - SDCard_Updates.md
     - RPi_microcontroller.md
-    - Beaglebone.md
     - Bootloaders.md
     - Bootloader_Entry.md
     - CANBUS.md
