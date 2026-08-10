@@ -13,6 +13,7 @@ from typing import Any
 from omp_rpc import RpcClient, RpcError, host_tool
 
 from serval_bot.actions import ActionGateway, is_simulator_directive, reviewable_diff_lines
+from serval_bot.bundle_diagnostics import inspect_support_bundles
 from serval_bot.config import BotSettings
 from serval_bot.database import Database, Event
 from serval_bot.policy import PolicySet, RepositoryPolicy
@@ -260,6 +261,15 @@ class TriageAgent:
         session_dir = self.settings.data_dir / "sessions" / event.repo.replace("/", "--") / str(event.issue_number)
         session_dir.mkdir(parents=True, exist_ok=True)
         (session_dir / ".home").mkdir(parents=True, exist_ok=True)
+        issue = event.payload.get("issue", {})
+        comment = event.payload.get("comment", {})
+        bundle_diagnostics = inspect_support_bundles(
+            (
+                issue.get("body", "") if isinstance(issue, dict) else "",
+                comment.get("body", "") if isinstance(comment, dict) else "",
+            ),
+            session_dir,
+        )
         gateway = ActionGateway(
             self.database,
             event,
@@ -292,7 +302,14 @@ class TriageAgent:
         try:
             client.install_headless_ui()
             turn = client.prompt_and_wait(
-                self._prompt(event, policy, workspace.default_branch, pull_request, review_diff),
+                self._prompt(
+                    event,
+                    policy,
+                    workspace.default_branch,
+                    pull_request,
+                    review_diff,
+                    bundle_diagnostics,
+                ),
                 timeout=float(self.settings.task_timeout_seconds),
             )
             answer = turn.assistant_text or ""
@@ -414,6 +431,7 @@ class TriageAgent:
         default_branch: str,
         pull_request: PullRequestContext | None,
         review_diff: str | None = None,
+        bundle_diagnostics: str = "",
     ) -> str:
         issue = event.payload.get("issue", {})
         title = issue.get("title", "")
@@ -456,12 +474,17 @@ class TriageAgent:
         else:
             comment = event.payload.get("comment", {})
             instruction = f"A follow-up from @{event.actor} says:\n\n{comment.get('body', '')}\n\nRespond concisely."
+        diagnostic_context = (
+            f"\n\n<support-bundle-diagnostics>\n{bundle_diagnostics}\n</support-bundle-diagnostics>"
+            if bundle_diagnostics
+            else ""
+        )
         return (
             f"Repository: {event.repo}\n"
             f"Default branch: {default_branch}\n"
             f"Rollout mode: {policy.mode}\n"
             f"Issue: #{event.issue_number} {title}\n\n"
-            f"{body}\n\n"
+            f"{body}{diagnostic_context}\n\n"
             f"{instruction}"
         )
 

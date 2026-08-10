@@ -218,7 +218,9 @@ def test_pull_request_review_uses_exact_revision_and_native_review(tmp_path: Pat
     assert FakeRpcClient.command[tools_index + 1] == ""
     system_prompt_index = FakeRpcClient.command.index("--append-system-prompt")
     system_prompt = FakeRpcClient.command[system_prompt_index + 1]
-    assert "request a CREATE_SUPPORT_BUNDLE archive" in system_prompt
+    assert "request CREATE_SUPPORT_BUNDLE without INCLUDE_CORE" in system_prompt
+    assert "only for a confirmed or strongly suspected native host-process crash" in system_prompt
+    assert "may exceed GitHub's upload limit" in system_prompt
     assert "klippy.log" not in system_prompt
     assert "Pull request: #373 Fix LEDs" in (FakeRpcClient.prompt or "")
     assert f"Review the exact diff {'a' * 40}...{'b' * 40}" in (FakeRpcClient.prompt or "")
@@ -631,6 +633,19 @@ def test_ordinary_followup_prompt_stays_comment_only(tmp_path: Path) -> None:
     prompt = TriageAgent._prompt(event, _shadow_policies().require("dderg/serval"), "trunk", None)
     assert "dispatch_simulator" not in prompt
     assert "Respond concisely." in prompt
+
+
+def test_prompt_includes_automatic_bundle_diagnostics() -> None:
+    event = _comment_event("delivery-prompt-bundle", 383)
+    prompt = TriageAgent._prompt(
+        event,
+        _shadow_policies().require("dderg/serval"),
+        "trunk",
+        None,
+        bundle_diagnostics="MCU 'mcu' shutdown: Timer too close",
+    )
+    assert "<support-bundle-diagnostics>" in prompt
+    assert "MCU 'mcu' shutdown: Timer too close" in prompt
 
 
 def test_pr_review_tools_exclude_classify(tmp_path: Path) -> None:

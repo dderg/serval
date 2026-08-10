@@ -4,8 +4,10 @@
 import argparse
 import datetime
 import json
+import pathlib
 import re
 import sys
+import tarfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -160,6 +162,143 @@ def build_schema_level_query(since):
 
 def build_resolve_query(code, since):
     return "code:=%s _time:%s | fields code_name, event, _msg" % (code, since)
+
+
+BUNDLE_MEMBER_MAX_BYTES = 128 * 1024 * 1024
+BUNDLE_CONTEXT_RECORD_LIMIT = 500
+
+
+def load_bundle(bundle_path):
+    path = pathlib.Path(bundle_path)
+    if not path.is_file():
+        raise UsageError("support bundle does not exist: %s" % path)
+    records = []
+    manifest = None
+    malformed = 0
+    try:
+        with tarfile.open(path, "r:gz") as archive:
+            for member in archive.getmembers():
+                member_path = pathlib.PurePosixPath(member.name)
+                if (
+                    member_path.is_absolute()
+                    or ".." in member_path.parts
+                    or not member.isfile()
+                ):
+                    continue
+                is_manifest = member_path == pathlib.PurePosixPath(
+                    "manifest.json"
+                )
+                is_event_file = (
+                    len(member_path.parts) == 2
+                    and member_path.parts[0] == "events"
+                    and member_path.suffix == ".jsonl"
+                )
+                if not is_manifest and not is_event_file:
+                    continue
+                if member.size > BUNDLE_MEMBER_MAX_BYTES:
+                    raise UsageError(
+                        "support bundle member is too large: %s" % member.name
+                    )
+                source = archive.extractfile(member)
+                if source is None:
+                    raise UsageError(
+                        "support bundle member is unreadable: %s" % member.name
+                    )
+                if is_manifest:
+                    manifest = json.load(source)
+                    continue
+                for raw_line in source:
+                    try:
+                        record = json.loads(raw_line)
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        malformed += 1
+                        continue
+                    if not isinstance(record, dict):
+                        malformed += 1
+                        continue
+                    records.append(record)
+    except (OSError, tarfile.TarError, json.JSONDecodeError) as exc:
+        raise UsageError("support bundle is unreadable: %s" % exc) from exc
+    if manifest is None:
+        raise UsageError("support bundle has no manifest.json")
+    if not isinstance(manifest, dict):
+        raise UsageError("support bundle manifest is not an object")
+    return manifest, records, malformed
+
+
+def bundle_diagnostic_records(records):
+    primary = []
+    lifecycle = []
+    for record in records:
+        level = record.get("level", "info")
+        if (
+            level in ("warn", "error")
+            or record.get("exception")
+            or "\n" in str(record.get("_msg", ""))
+        ):
+            primary.append(record)
+        elif record.get("event") in LIFECYCLE_EVENTS:
+            lifecycle.append(record)
+    context_truncated = len(lifecycle) > BUNDLE_CONTEXT_RECORD_LIMIT
+    selected = primary + lifecycle[:BUNDLE_CONTEXT_RECORD_LIMIT]
+    deduped = {
+        (record.get("_time"), record.get("_msg"), record.get("event")): record
+        for record in selected
+    }
+    return (
+        sorted(deduped.values(), key=lambda r: r.get("_time", "")),
+        context_truncated,
+    )
+
+
+def cmd_bundle(args, _vl_url):
+    manifest, records, malformed = load_bundle(args.path)
+    print("support bundle: %s" % args.path)
+    print("created: %s" % manifest.get("created_utc", "?"))
+    print("cutoff: %s" % manifest.get("cutoff_utc", "?"))
+    print("software: %s" % manifest.get("software_version", "?"))
+    warnings = list(manifest.get("warnings", []))
+    if manifest.get("klippy_log_truncated"):
+        warnings.append("klippy.log is truncated")
+    for name, details in manifest.get("event_files", {}).items():
+        if details.get("scan_truncated"):
+            warnings.append("%s scan is truncated" % name)
+        count = details.get("malformed", 0)
+        if count:
+            warnings.append("%s contains %s malformed records" % (name, count))
+    if malformed:
+        warnings.append(
+            "%s bundled event records could not be decoded" % malformed
+        )
+    if warnings:
+        print("evidence: INCOMPLETE")
+        for warning in warnings:
+            print("warning: %s" % warning)
+    else:
+        print("evidence: complete for the bundle window")
+    session_ids = sorted(
+        {
+            record.get("session_id")
+            for record in records
+            if record.get("session_id")
+            and record.get("session_id") != "__unbound__"
+        }
+    )
+    print("sessions: %s" % (", ".join(session_ids) if session_ids else "none"))
+    diagnostics, context_truncated = bundle_diagnostic_records(records)
+    print("")
+    print(
+        "diagnostic records: %d selected from %d"
+        % (len(diagnostics), len(records))
+    )
+    if context_truncated:
+        print(
+            "warning: lifecycle context limited to %d records"
+            % BUNDLE_CONTEXT_RECORD_LIMIT
+        )
+    for line in render_records(diagnostics):
+        print(line)
+    return 0
 
 
 def fetch_records(vl_url, query, limit):
@@ -790,6 +929,12 @@ def build_parser():
         "--raw", action="store_true", help="print NDJSON lines verbatim"
     )
     p_q.set_defaults(func=cmd_q)
+
+    p_bundle = subparsers.add_parser(
+        "bundle", help="summarize a CREATE_SUPPORT_BUNDLE archive"
+    )
+    p_bundle.add_argument("path", help="path to serval-support-*.tar.gz")
+    p_bundle.set_defaults(func=cmd_bundle)
 
     return parser
 
