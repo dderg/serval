@@ -660,8 +660,10 @@ clears any error state from the micro-controller.
 #### CREATE_SUPPORT_BUNDLE
 `CREATE_SUPPORT_BUNDLE [SINCE=<time>] [INCLUDE_CORE=<0|1>]`: Create a compressed
 support bundle in the same directory as `klippy.log`. The default `SINCE` is
-`30m`; values from `1m` through `24h` are accepted. The bundle contains recent
-structured events, the last 32 MiB of `klippy.log`, the Klipper service journal
+`30m`; values from `1m` through `24h` are accepted. Collection runs in a
+separate worker process; Klippy reports when the archive is ready without
+blocking printer communication. The bundle contains recent structured events,
+the last 32 MiB of `klippy.log`, the Klipper service journal
 when accessible, and a manifest describing any recent native core dump.
 `INCLUDE_CORE=1` includes the newest core from the selected interval; core dumps
 can make the archive hundreds of MiB. The bundle may contain printer
