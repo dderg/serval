@@ -12,7 +12,13 @@ from typing import Any
 
 from omp_rpc import RpcClient, RpcError, host_tool
 
-from serval_bot.actions import ActionGateway, is_simulator_directive, reviewable_diff_lines
+from serval_bot.actions import (
+    ActionGateway,
+    is_code_directive,
+    is_simulator_directive,
+    parse_code_directive,
+    reviewable_diff_lines,
+)
 from serval_bot.config import BotSettings
 from serval_bot.database import Database, Event
 from serval_bot.policy import PolicySet, RepositoryPolicy
@@ -275,6 +281,7 @@ class TriageAgent:
             any(session_dir.glob("*.jsonl")),
             reviewing=pull_request is not None,
             reproducing=is_simulator_directive(event, policy),
+            coding=is_code_directive(event, policy),
         )
         client = RpcClient(
             command=command,
@@ -321,6 +328,8 @@ class TriageAgent:
     def _completed(self, event: Event, pull_request: PullRequestContext | None) -> bool:
         actions = self.database.actions_for_delivery(event.delivery_id)
         accepted = {action.kind for action in actions if action.state in {"proposed", "applied"}}
+        if is_code_directive(event, self.policies.require(event.repo)):
+            return "code_pull_request" in accepted
         if is_simulator_directive(event, self.policies.require(event.repo)):
             return (
                 any(kind.startswith("dispatch_sim") for kind in accepted)
@@ -336,6 +345,8 @@ class TriageAgent:
     def _reminder_prompt(self, event: Event, pull_request: PullRequestContext | None) -> str:
         if event.event_type == "issues.opened":
             required = "exactly one classify_issue call followed by exactly one post_issue_comment call"
+        elif is_code_directive(event, self.policies.require(event.repo)):
+            required = "implement the requested change, commit it, and create exactly one pull request"
         elif is_simulator_directive(event, self.policies.require(event.repo)):
             required = "finish the simulator task and post exactly one result comment"
         elif _is_native_review(event, pull_request, self.policies.require(event.repo)):
@@ -350,6 +361,8 @@ class TriageAgent:
     def _incomplete_message(self, event: Event, pull_request: PullRequestContext | None) -> str:
         if event.event_type == "issues.opened":
             return "new issue turn ended without classification and comment"
+        if is_code_directive(event, self.policies.require(event.repo)):
+            return "coding directive ended without a pull request"
         if is_simulator_directive(event, self.policies.require(event.repo)):
             return "simulator directive ended without a completed dispatch, terminal result read, and comment"
         if _is_native_review(event, pull_request, self.policies.require(event.repo)):
@@ -380,11 +393,12 @@ class TriageAgent:
         *,
         reviewing: bool,
         reproducing: bool,
+        coding: bool,
     ) -> tuple[str, ...]:
         command = [*self.settings.omp_command, "--mode", "rpc", "--model", self.settings.model]
         if self.settings.provider:
             command.extend(("--provider", self.settings.provider))
-        if reproducing:
+        if reproducing or coding:
             tools = "read,grep,glob,lsp,bash,write,edit"
         elif reviewing:
             tools = ""
@@ -423,6 +437,17 @@ class TriageAgent:
             instruction = (
                 f"A maintainer says:\n\n{comment.get('body', '')}\n\n"
                 f"Reproduce issue #{event.issue_number} in the simulator and report what happened."
+            )
+        elif is_code_directive(event, policy):
+            comment = event.payload.get("comment", {})
+            task = parse_code_directive(policy.bot_login, str(comment.get("body", "")))
+            instruction = (
+                f"Collaborator coding request from @{event.actor}:\n\n{task}\n\n"
+                f"Implement the complete change on branch serval/{event.issue_number}-<slug>. "
+                "Run focused verification, commit the result with a normal commit message, then call "
+                "create_code_pull_request with the exact HEAD SHA, a concise title, and a body containing "
+                f"the verification evidence and `Closes #{event.issue_number}`. "
+                "Do not modify .github/workflows/** or push with git."
             )
         elif _is_native_review(event, pull_request, policy):
             comment = event.payload.get("comment", {})
@@ -500,6 +525,37 @@ class TriageAgent:
             },
             execute=tracked(lambda args, _ctx: gateway.search_issues(args["query"])),
         )
+        if is_code_directive(event, policy):
+            return (
+                host_tool(
+                    name="create_code_pull_request",
+                    description=(
+                        "Publish the exact committed issue workspace branch and open one pull request. "
+                        f"The branch must be serval/{event.issue_number}-<slug>. The proxy independently "
+                        "verifies that the requesting actor has repository write permission."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "branch": {"type": "string", "pattern": f"^serval/{event.issue_number}-[a-z0-9-]+$"},
+                            "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                            "title": {"type": "string", "minLength": 1, "maxLength": 256},
+                            "body": {"type": "string", "minLength": 1},
+                        },
+                        "required": ["branch", "head_sha", "title", "body"],
+                        "additionalProperties": False,
+                    },
+                    execute=tracked(
+                        lambda args, _ctx: gateway.create_code_pull_request(
+                            args["branch"],
+                            args["head_sha"],
+                            args["title"],
+                            args["body"],
+                        )
+                    ),
+                ),
+                search_tool,
+            )
         if event.event_type == "pull_request_review.requested" and not is_simulator_directive(event, policy):
             return (
                 host_tool(

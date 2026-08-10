@@ -521,6 +521,7 @@ class CredentialedWorkspace:
         *,
         ref: str,
         expected_sha: str,
+        require_skip_ci: bool = True,
     ) -> None:
         """Validate one issue workspace and push its exact HEAD to refs/heads/<ref>.
 
@@ -528,10 +529,9 @@ class CredentialedWorkspace:
         per-issue metadata recreated from the trusted pool first, so
         agent-controlled aliases, hooks, and transports never survive into the
         invocation. The workspace must be clean, checked out on the requested
-        farm branch at exactly expected_sha descending from the freshly
-        fetched upstream default branch, its HEAD commit must carry the
-        [skip ci] marker (so ordinary push-triggered workflows stay off the
-        agent branch), and it must not change anything under .github/workflows/
+        branch at exactly expected_sha descending from the freshly fetched
+        upstream default branch. Simulator branches must carry [skip ci].
+        No publication may change anything under .github/workflows/
         relative to the resolved upstream default branch. The push sends that
         exact commit, so a concurrent workspace change cannot redirect it.
         """
@@ -572,7 +572,7 @@ class CredentialedWorkspace:
                     "orphan, replaced, or stale-base histories cannot be published"
                 )
             message = _run("git", "log", "-1", "--format=%B", cwd=workspace, environment=env)
-            if "[skip ci]" not in message:
+            if require_skip_ci and "[skip ci]" not in message:
                 raise WorkspaceFailure(
                     "issue workspace HEAD commit does not carry the [skip ci] marker; reword the commit "
                     "message so ordinary push-triggered workflows stay off the agent branch"
