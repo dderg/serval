@@ -155,6 +155,10 @@ def test_parse_code_directive_supports_natural_collaborator_requests() -> None:
     )
     contextual_request = "@roboserval I can't reproduce this. Can you fix it?"
     assert parse_code_directive("roboserval", contextual_request) == ("I can't reproduce this. Can you fix it")
+    unrelated_negation = "@roboserval Can you fix this? I can't open the attached log."
+    assert parse_code_directive("roboserval", unrelated_negation) == (
+        "Can you fix this? I can't open the attached log."
+    )
     assert parse_code_directive("roboserval", "@roboserval did you implement bounded queues?") is None
     assert parse_code_directive("roboserval", "@roboserval do not open a PR for this") is None
     assert (

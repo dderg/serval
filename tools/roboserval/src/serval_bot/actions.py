@@ -42,9 +42,13 @@ _CODE_NATURAL_REQUEST_RE = re.compile(
     r")",
     re.IGNORECASE | re.DOTALL,
 )
-_CODE_NEGATION_RE = re.compile(
-    r"\b(?:do not|don't|not to|shouldn't|cannot|can't)\b.*\b(?:implement|code|fix|open)\b",
-    re.IGNORECASE | re.DOTALL,
+_CODE_CANCELLATION_RE = re.compile(
+    r"\b(?:do not|don't|not to|shouldn't|cannot|can't) +(?:"
+    r"(?:please +)?(?:implement|code|fix)\b|"
+    r"(?:open|create) +(?:(?:a|the) +)?(?:pr|pull request)\b"
+    r")|"
+    r"\b(?:cancel|ignore|disregard) +(?:that|the|my) +(?:request|change|pr|pull request)\b",
+    re.IGNORECASE,
 )
 _CODE_BRANCH_RE = re.compile(r"serval/(?P<issue>[0-9]+)-[a-z0-9]+(?:-[a-z0-9]+)*")
 
@@ -56,11 +60,11 @@ def parse_code_directive(bot_login: str, body: str) -> str | None:
     request = match.group("request").strip()
     imperative = _CODE_IMPERATIVE_RE.fullmatch(request)
     if imperative is not None:
-        if _CODE_NEGATION_RE.search(request):
+        if _CODE_CANCELLATION_RE.search(request):
             return None
         return imperative.group("task").rstrip("?!").strip()
     natural_request = _CODE_NATURAL_REQUEST_RE.search(request)
-    if natural_request is not None and not _CODE_NEGATION_RE.search(request[natural_request.start() :]):
+    if natural_request is not None and not _CODE_CANCELLATION_RE.search(request[natural_request.start() :]):
         return request.rstrip("?!").strip()
     return None
 
