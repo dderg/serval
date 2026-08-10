@@ -2,6 +2,8 @@ import io
 import json
 import tarfile
 
+import pytest
+
 import serval_bot.bundle_diagnostics as bundle_diagnostics
 from serval_bot.bundle_diagnostics import render_bundle_report, support_bundle_urls
 
@@ -78,3 +80,43 @@ def test_uploaded_bundle_is_inspected_without_user_commands(tmp_path, monkeypatc
 
     assert "Attachment: https://github.com/user-attachments/" in report
     assert "MCU 'mcu' shutdown: Timer too close" in report
+
+
+def test_rejects_cumulative_uncompressed_event_overflow(tmp_path, monkeypatch):
+    bundle = tmp_path / "serval-support-bomb.tar.gz"
+    manifest = json.dumps(
+        {
+            "created_utc": "2026-08-10T12:00:00+00:00",
+            "cutoff_utc": "2026-08-10T11:30:00+00:00",
+            "software_version": "test",
+            "warnings": [],
+            "event_files": {},
+        }
+    ).encode()
+    event = json.dumps(
+        {
+            "_time": "2026-08-10T11:59:00.000Z",
+            "_msg": "ordinary record",
+            "level": "info",
+        }
+    ).encode()
+    with tarfile.open(bundle, "w:gz") as archive:
+        for name, payload in (
+            ("manifest.json", manifest),
+            ("events/host-py.jsonl", event),
+            ("events/host-rust.jsonl", event),
+        ):
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+    monkeypatch.setattr(
+        bundle_diagnostics,
+        "MAX_TOTAL_EVENT_BYTES",
+        len(manifest) + len(event),
+    )
+
+    with pytest.raises(
+        bundle_diagnostics.BundleDiagnosticError,
+        match="exceeds the uncompressed limit",
+    ):
+        bundle_diagnostics.load_bundle_records(bundle)

@@ -165,6 +165,13 @@ def build_resolve_query(code, since):
 
 
 BUNDLE_MEMBER_MAX_BYTES = 128 * 1024 * 1024
+BUNDLE_TOTAL_EVENT_BYTES = 128 * 1024 * 1024
+BUNDLE_LINE_MAX_BYTES = 1024 * 1024
+BUNDLE_MEMBER_LIMIT = 64
+BUNDLE_ARCHIVE_MEMBER_LIMIT = 1024
+BUNDLE_RECORD_LIMIT = 1_000_000
+BUNDLE_MANIFEST_MAX_BYTES = 1024 * 1024
+BUNDLE_DIAGNOSTIC_RECORD_LIMIT = 20_000
 BUNDLE_CONTEXT_RECORD_LIMIT = 500
 
 
@@ -175,9 +182,20 @@ def load_bundle(bundle_path):
     records = []
     manifest = None
     malformed = 0
+    selected_members = 0
+    selected_bytes = 0
+    archive_members = 0
+    total_records = 0
+    lifecycle_records = 0
+    context_truncated = False
     try:
         with tarfile.open(path, "r:gz") as archive:
-            for member in archive.getmembers():
+            for member in archive:
+                archive_members += 1
+                if archive_members > BUNDLE_ARCHIVE_MEMBER_LIMIT:
+                    raise UsageError(
+                        "support bundle has too many archive members"
+                    )
                 member_path = pathlib.PurePosixPath(member.name)
                 if (
                     member_path.is_absolute()
@@ -195,9 +213,23 @@ def load_bundle(bundle_path):
                 )
                 if not is_manifest and not is_event_file:
                     continue
+                selected_members += 1
+                selected_bytes += member.size
+                if selected_members > BUNDLE_MEMBER_LIMIT:
+                    raise UsageError(
+                        "support bundle has too many diagnostic members"
+                    )
+                if selected_bytes > BUNDLE_TOTAL_EVENT_BYTES:
+                    raise UsageError(
+                        "support bundle diagnostic data exceeds the uncompressed limit"
+                    )
                 if member.size > BUNDLE_MEMBER_MAX_BYTES:
                     raise UsageError(
                         "support bundle member is too large: %s" % member.name
+                    )
+                if is_manifest and member.size > BUNDLE_MANIFEST_MAX_BYTES:
+                    raise UsageError(
+                        "support bundle manifest exceeds the size limit"
                     )
                 source = archive.extractfile(member)
                 if source is None:
@@ -207,7 +239,19 @@ def load_bundle(bundle_path):
                 if is_manifest:
                     manifest = json.load(source)
                     continue
-                for raw_line in source:
+                while True:
+                    raw_line = source.readline(BUNDLE_LINE_MAX_BYTES + 1)
+                    if not raw_line:
+                        break
+                    if len(raw_line) > BUNDLE_LINE_MAX_BYTES:
+                        raise UsageError(
+                            "support bundle event record exceeds the line limit"
+                        )
+                    total_records += 1
+                    if total_records > BUNDLE_RECORD_LIMIT:
+                        raise UsageError(
+                            "support bundle exceeds the event record limit"
+                        )
                     try:
                         record = json.loads(raw_line)
                     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -216,43 +260,36 @@ def load_bundle(bundle_path):
                     if not isinstance(record, dict):
                         malformed += 1
                         continue
-                    records.append(record)
+                    primary = (
+                        record.get("level") in ("warn", "error")
+                        or record.get("exception")
+                        or "\n" in str(record.get("_msg", ""))
+                    )
+                    lifecycle = record.get("event") in LIFECYCLE_EVENTS
+                    if lifecycle:
+                        lifecycle_records += 1
+                        if lifecycle_records > BUNDLE_CONTEXT_RECORD_LIMIT:
+                            context_truncated = True
+                            lifecycle = False
+                    if primary or lifecycle:
+                        if len(records) >= BUNDLE_DIAGNOSTIC_RECORD_LIMIT:
+                            raise UsageError(
+                                "support bundle exceeds the diagnostic record limit"
+                            )
+                        records.append(record)
     except (OSError, tarfile.TarError, json.JSONDecodeError) as exc:
         raise UsageError("support bundle is unreadable: %s" % exc) from exc
     if manifest is None:
         raise UsageError("support bundle has no manifest.json")
     if not isinstance(manifest, dict):
         raise UsageError("support bundle manifest is not an object")
-    return manifest, records, malformed
-
-
-def bundle_diagnostic_records(records):
-    primary = []
-    lifecycle = []
-    for record in records:
-        level = record.get("level", "info")
-        if (
-            level in ("warn", "error")
-            or record.get("exception")
-            or "\n" in str(record.get("_msg", ""))
-        ):
-            primary.append(record)
-        elif record.get("event") in LIFECYCLE_EVENTS:
-            lifecycle.append(record)
-    context_truncated = len(lifecycle) > BUNDLE_CONTEXT_RECORD_LIMIT
-    selected = primary + lifecycle[:BUNDLE_CONTEXT_RECORD_LIMIT]
-    deduped = {
-        (record.get("_time"), record.get("_msg"), record.get("event")): record
-        for record in selected
-    }
-    return (
-        sorted(deduped.values(), key=lambda r: r.get("_time", "")),
-        context_truncated,
-    )
+    return manifest, records, malformed, total_records, context_truncated
 
 
 def cmd_bundle(args, _vl_url):
-    manifest, records, malformed = load_bundle(args.path)
+    manifest, diagnostics, malformed, total_records, context_truncated = (
+        load_bundle(args.path)
+    )
     print("support bundle: %s" % args.path)
     print("created: %s" % manifest.get("created_utc", "?"))
     print("cutoff: %s" % manifest.get("cutoff_utc", "?"))
@@ -279,17 +316,17 @@ def cmd_bundle(args, _vl_url):
     session_ids = sorted(
         {
             record.get("session_id")
-            for record in records
+            for record in diagnostics
             if record.get("session_id")
             and record.get("session_id") != "__unbound__"
         }
     )
     print("sessions: %s" % (", ".join(session_ids) if session_ids else "none"))
-    diagnostics, context_truncated = bundle_diagnostic_records(records)
+    diagnostics.sort(key=lambda record: record.get("_time", ""))
     print("")
     print(
         "diagnostic records: %d selected from %d"
-        % (len(diagnostics), len(records))
+        % (len(diagnostics), total_records)
     )
     if context_truncated:
         print(
