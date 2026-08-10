@@ -3,7 +3,15 @@ import logging
 
 from klippy import engine_wait, structured_log
 from klippy.extras.danger_options import get_danger_options
-from klippy.motion_endstop import AXIS_ENDSTOP_IDS, MotionEndstop
+from klippy.mcu import STEPPING_MODE_STEPCOMPRESS
+from klippy.motion_endstop import (
+    AXIS_ENDSTOP_IDS,
+    MotionEndstop,
+    MotorBinding,
+    allocate_provider_id,
+    endstop_entry,
+    entry_endstops,
+)
 
 HOMING_POLL_PERIOD = 0.001
 HOMING_TRAVEL_MARGIN_FACTOR = 1.5
@@ -15,6 +23,92 @@ def _endstop_section(config, axis_name):
     if config.has_section(section):
         return section
     return None
+
+
+def _parse_keyed_endstop_pins(axis_config, section, endstop_pin):
+    pins_by_motor = {}
+    for line in endstop_pin.split("\n"):
+        entry = line.strip()
+        if not entry:
+            continue
+        if ":" not in entry:
+            raise axis_config.error(
+                "[%s] endstop_pin line '%s' must read 'motor_name: pin'"
+                % (section, entry)
+            )
+        motor_name, pin = entry.split(":", 1)
+        motor_name = motor_name.strip()
+        pin = pin.strip()
+        if not motor_name or not pin:
+            raise axis_config.error(
+                "[%s] endstop_pin line '%s' must read 'motor_name: pin'"
+                % (section, entry)
+            )
+        if motor_name in pins_by_motor:
+            raise axis_config.error(
+                "[%s] endstop_pin lists motor '%s' twice"
+                % (section, motor_name)
+            )
+        pins_by_motor[motor_name] = pin
+    if not pins_by_motor:
+        raise axis_config.error("[%s] endstop_pin is empty" % (section,))
+    return pins_by_motor
+
+
+def _lane_motors(axis_config, kin, axis_index, section):
+    axis_name = "xyz"[axis_index]
+    if kin.coupled_xy() and axis_index in (0, 1):
+        raise axis_config.error(
+            "[%s] per-motor endstop_pin needs an axis that maps to exactly one"
+            " motor lane; %s kinematics drives x and y through a shared lane"
+            % (section, kin.kind)
+        )
+    position, lane = next(
+        (
+            (position, lane)
+            for position, lane in enumerate(kin.lanes())
+            if lane[1] == axis_name
+        ),
+        (None, None),
+    )
+    if lane is None:
+        raise axis_config.error(
+            "[%s] per-motor endstop_pin: no motor lane drives axis %s"
+            % (section, axis_name)
+        )
+    lane_idx = lane[0]
+    if lane_idx != axis_index:
+        raise axis_config.error(
+            "[%s] per-motor endstop_pin: axis %s is driven by lane %d, not its"
+            " own lane" % (section, axis_name, lane_idx)
+        )
+    steppers = kin.rails[position].get_steppers()
+    motor_names = list(lane[2])
+    if len(steppers) != len(motor_names):
+        raise axis_config.error(
+            "[%s] per-motor endstop_pin: lane %d declares motors %s but drives"
+            " %d steppers"
+            % (section, lane_idx, ", ".join(motor_names), len(steppers))
+        )
+    return motor_names, steppers
+
+
+def _check_motor_keys(axis_config, section, motor_names, pins_by_motor):
+    known = set(motor_names)
+    for motor_name in pins_by_motor:
+        if motor_name not in known:
+            raise axis_config.error(
+                "[%s] endstop_pin names motor '%s', which does not drive this"
+                " axis; its motors are %s"
+                % (section, motor_name, ", ".join(motor_names))
+            )
+    for motor_name in motor_names:
+        if motor_name not in pins_by_motor:
+            raise axis_config.error(
+                "[%s] endstop_pin is missing motor '%s'; a per-motor"
+                " endstop_pin must list every motor of the axis (%s)"
+                % (section, motor_name, ", ".join(motor_names))
+            )
 
 
 def _homing_motor_names(rail):
@@ -204,44 +298,109 @@ def _trigger_too_early(traveled, min_home_dist, tolerance):
     return traveled < min_home_dist and (min_home_dist - traveled) >= tolerance
 
 
-def _verify_latched_trip(gcmd, axis, endstop, doorbell_clock):
+def _endstop_label(axis, endstop):
+    motor_name = getattr(endstop, "motor_name", None)
+    if motor_name is None:
+        return "%s endstop" % ("XYZ"[axis],)
+    return "%s endstop %s" % ("XYZ"[axis], motor_name)
+
+
+def _latched_trip(gcmd, axis, endstop):
     query = getattr(endstop, "query_trip_state", None)
     if query is None:
-        return
+        return None
     latch = query()
     if not latch["tripped"]:
         raise gcmd.error(
-            "%s endstop: doorbell event arrived but the MCU latch shows no"
-            " trip — duplicate or stale trip event" % ("XYZ"[axis],)
+            "%s: doorbell event arrived but the MCU latch shows no"
+            " trip — duplicate or stale trip event"
+            % (_endstop_label(axis, endstop),)
         )
+    return latch
+
+
+def _verify_latched_trip(gcmd, axis, endstop, doorbell_clock):
+    latch = _latched_trip(gcmd, axis, endstop)
+    if latch is None:
+        return
     if latch["trip_clock"] != (doorbell_clock & 0xFFFFFFFF):
         raise gcmd.error(
-            "%s endstop: latch/doorbell clock mismatch — latch=%d"
+            "%s: latch/doorbell clock mismatch — latch=%d"
             " doorbell_low32=%d"
             % (
-                "XYZ"[axis],
+                _endstop_label(axis, endstop),
                 latch["trip_clock"],
                 doorbell_clock & 0xFFFFFFFF,
             )
         )
 
 
-def _no_trigger_error_message(axis, endstop, max_travel):
+def _verify_latched_trips(gcmd, axis, endstops, doorbell_clock):
+    """The doorbell carries the clock of the trip that resolved the run; the
+    other switches of a multi-endstop axis tripped earlier and only have to
+    show a latched trip."""
+    if len(endstops) == 1:
+        _verify_latched_trip(gcmd, axis, endstops[0], doorbell_clock)
+        return
+    latched = [_latched_trip(gcmd, axis, e) for e in endstops]
+    observed = [latch for latch in latched if latch is not None]
+    if not observed:
+        return
+    if all(
+        latch["trip_clock"] != (doorbell_clock & 0xFFFFFFFF)
+        for latch in observed
+    ):
+        raise gcmd.error(
+            "%s homing: no endstop latch matches the doorbell clock"
+            " (doorbell_low32=%d, latches=%s)"
+            % (
+                "XYZ"[axis],
+                doorbell_clock & 0xFFFFFFFF,
+                ", ".join(str(latch["trip_clock"]) for latch in observed),
+            )
+        )
+
+
+def _no_trigger_error_message(axis, endstops, max_travel):
     base = "%s endstop did not trigger within %.1fmm of travel" % (
         "XYZ"[axis],
         max_travel,
     )
-    query = getattr(endstop, "query_trip_state", None)
-    if query is None:
+    latched = []
+    for endstop in endstops:
+        query = getattr(endstop, "query_trip_state", None)
+        latched.append((endstop, None if query is None else query()))
+    silent = [
+        endstop
+        for endstop, latch in latched
+        if latch is not None and not latch["tripped"]
+    ]
+    tripped = [
+        (endstop, latch)
+        for endstop, latch in latched
+        if latch is not None and latch["tripped"]
+    ]
+    if not tripped:
+        if len(endstops) > 1 and silent:
+            return "%s (%s never tripped)" % (
+                base,
+                ", ".join(_endstop_label(axis, e) for e in silent),
+            )
         return base
-    latch = query()
-    if latch["tripped"]:
+    lost = ", ".join(
+        "%s (latched clock %d)" % (_endstop_label(axis, e), latch["trip_clock"])
+        for e, latch in tripped
+    )
+    if silent:
         return (
-            "%s endstop tripped (latched clock %d) but the trip event was"
-            " lost — doorbell never reached the host"
-            % ("XYZ"[axis], latch["trip_clock"])
+            "%s tripped but the trip event was lost — doorbell never reached"
+            " the host; still waiting on %s"
+            % (lost, ", ".join(_endstop_label(axis, e) for e in silent))
         )
-    return base
+    return (
+        "%s tripped but the trip event was lost — doorbell never reached"
+        " the host" % (lost,)
+    )
 
 
 class HomingState:
@@ -266,7 +425,7 @@ class Homing:
             desc="Bench only: home one axis with override SPEED/MAX_TRAVEL",
         )
 
-    def resolve_endstops(self):
+    def resolve_endstops(self, kin):
         if self._config is None:
             raise self.printer.config_error(
                 "homing: resolve_endstops called twice"
@@ -283,35 +442,122 @@ class Homing:
             endstop_pin = axis_config.get("endstop_pin", None)
             if endstop_pin is None:
                 continue
-            pin_params = ppins.parse_pin(
-                endstop_pin, can_invert=True, can_pullup=True
-            )
-            chip = pin_params["chip"]
-            if hasattr(chip, "setup_motion_endstop"):
-                entry = self._provider_entry(
-                    axis_config, axis_index, chip, pin_params
+            if "\n" in endstop_pin:
+                entry = self._keyed_entry(
+                    ppins, kin, axis_config, axis_index, endstop_pin
                 )
-            elif hasattr(chip, "create_oid"):
-                entry = {
-                    "endstop": MotionEndstop(
-                        pin_params, AXIS_ENDSTOP_IDS[axis_index]
-                    ),
-                    "provider": None,
-                    "trigger_position": None,
-                }
             else:
-                raise config.error(
-                    "endstop_pin '%s' in [%s]: chip '%s' is neither an MCU"
-                    " nor a virtual endstop provider"
-                    % (endstop_pin, section, pin_params["chip_name"])
+                entry = self._single_entry(
+                    config, ppins, axis_config, axis_index, endstop_pin
                 )
             self._axes[axis_index] = entry
 
         query_endstops = self.printer.load_object(config, "query_endstops")
         for axis_index in sorted(self._axes):
-            query_endstops.register_endstop(
-                self._axes[axis_index]["endstop"], "xyz"[axis_index]
+            axis_name = "xyz"[axis_index]
+            for endstop in entry_endstops(self._axes[axis_index]):
+                motor_name = getattr(endstop, "motor_name", None)
+                query_endstops.register_endstop(
+                    endstop,
+                    axis_name
+                    if motor_name is None
+                    else "%s:%s" % (axis_name, motor_name),
+                )
+
+    def _single_entry(
+        self, config, ppins, axis_config, axis_index, endstop_pin
+    ):
+        pin_params = ppins.parse_pin(
+            endstop_pin, can_invert=True, can_pullup=True
+        )
+        chip = pin_params["chip"]
+        if hasattr(chip, "setup_motion_endstop"):
+            return self._provider_entry(
+                axis_config, axis_index, chip, pin_params
             )
+        if not hasattr(chip, "create_oid"):
+            raise config.error(
+                "endstop_pin '%s' in [%s]: chip '%s' is neither an MCU"
+                " nor a virtual endstop provider"
+                % (
+                    endstop_pin,
+                    axis_config.get_name(),
+                    pin_params["chip_name"],
+                )
+            )
+        return endstop_entry(
+            [MotionEndstop(pin_params, AXIS_ENDSTOP_IDS[axis_index])],
+            None,
+            None,
+        )
+
+    def _keyed_entry(self, ppins, kin, axis_config, axis_index, endstop_pin):
+        section = axis_config.get_name()
+        pins_by_motor = _parse_keyed_endstop_pins(
+            axis_config, section, endstop_pin
+        )
+        motor_names, steppers = _lane_motors(
+            axis_config, kin, axis_index, section
+        )
+        _check_motor_keys(axis_config, section, motor_names, pins_by_motor)
+        lane_mcu = steppers[0].get_mcu()
+        for motor_name, mcu_stepper in zip(motor_names, steppers):
+            if mcu_stepper.get_mcu() is not lane_mcu:
+                raise axis_config.error(
+                    "[%s] keyed endstop_pin: motor '%s' is driven by MCU '%s'"
+                    " but the lane's first motor '%s' is on MCU '%s'; a"
+                    " multi-endstop axis must live on one MCU"
+                    % (
+                        section,
+                        motor_name,
+                        mcu_stepper.get_mcu().get_name(),
+                        motor_names[0],
+                        lane_mcu.get_name(),
+                    )
+                )
+        if lane_mcu.get_stepping_mode() == STEPPING_MODE_STEPCOMPRESS:
+            raise axis_config.error(
+                "[%s] keyed endstop_pin: MCU '%s' runs classic stepcompress"
+                " stepping, whose endstops stop every stepper at once; a keyed"
+                " endstop requires motion-runtime stepping"
+                % (section, lane_mcu.get_name())
+            )
+        endstops = []
+        for stepper_idx, motor_name in enumerate(motor_names):
+            pin_params = ppins.parse_pin(
+                pins_by_motor[motor_name], can_invert=True, can_pullup=True
+            )
+            chip = pin_params["chip"]
+            if hasattr(chip, "setup_motion_endstop"):
+                raise axis_config.error(
+                    "[%s] keyed endstop_pin: motor '%s' uses virtual endstop"
+                    " chip '%s'; virtual endstops drive one switch per axis"
+                    % (section, motor_name, pin_params["chip_name"])
+                )
+            if not hasattr(chip, "create_oid"):
+                raise axis_config.error(
+                    "[%s] keyed endstop_pin: motor '%s' pin chip '%s' is not"
+                    " an MCU" % (section, motor_name, pin_params["chip_name"])
+                )
+            endstop_id = (
+                AXIS_ENDSTOP_IDS[axis_index]
+                if stepper_idx == 0
+                else allocate_provider_id(self.printer)
+            )
+            endstops.append(
+                MotionEndstop(
+                    pin_params,
+                    endstop_id,
+                    MotorBinding(
+                        axis_index,
+                        stepper_idx,
+                        steppers[stepper_idx].get_mcu(),
+                        motor_name,
+                    ),
+                    group=True,
+                )
+            )
+        return endstop_entry(endstops, None, None)
 
     def _provider_entry(self, axis_config, axis_index, chip, pin_params):
         endstop = chip.setup_motion_endstop(pin_params, axis_index)
@@ -324,11 +570,7 @@ class Homing:
                     " '%s' supplies the trigger position"
                     % (axis_config.get_name(), pin_params["chip_name"])
                 )
-        return {
-            "endstop": endstop,
-            "provider": chip,
-            "trigger_position": trigger_position,
-        }
+        return endstop_entry([endstop], chip, trigger_position)
 
     def cmd_G28(self, gcmd):
         if self._axes is None:
@@ -594,27 +836,30 @@ class Homing:
     def trip_move(
         self, gcmd, toolhead, engine, axis, direction, speed, max_travel, entry
     ):
-        endstop = entry["endstop"]
-        endstop_mcu = endstop.engine_mcu_handle()
-        if endstop_mcu is None:
-            raise gcmd.error(
-                "trip_move: endstop MCU for axis %s is not attached to the"
-                " engine" % ("XYZ"[axis],)
-            )
+        endstops = entry_endstops(entry)
+        for endstop in endstops:
+            if endstop.engine_mcu_handle() is None:
+                raise gcmd.error(
+                    "trip_move: %s is not attached to the engine"
+                    % (_endstop_label(axis, endstop),)
+                )
         toolhead.wait_moves()
         self._drain_motion_before_arming_device(gcmd, engine, axis)
         provider = entry["provider"]
         if provider is not None and hasattr(provider, "trip_move_begin"):
             provider.trip_move_begin(entry)
         try:
-            endstop.arm(HOMING_POLL_PERIOD)
+            for endstop in endstops:
+                endstop.arm(HOMING_POLL_PERIOD)
             engine.home_axis_start(
                 axis,
                 direction,
                 speed,
                 max_travel,
-                endstop.endstop_id,
-                endstop_mcu,
+                [
+                    (e.endstop_id, e.engine_mcu_handle(), e.remote_freeze())
+                    for e in endstops
+                ],
             )
             try:
                 result = engine_wait.wait_for(
@@ -630,7 +875,7 @@ class Homing:
                     gcmd, toolhead, engine, axis
                 )
                 raise gcmd.error(
-                    _no_trigger_error_message(axis, endstop, max_travel)
+                    _no_trigger_error_message(axis, endstops, max_travel)
                 )
             except Exception as e:
                 self._abort_trip_and_adopt_stop_position(
@@ -638,8 +883,10 @@ class Homing:
                 )
                 raise gcmd.error("%s trip move failed: %s" % ("XYZ"[axis], e))
         finally:
-            disarm = getattr(endstop, "disarm", None)
-            if disarm is not None:
+            for endstop in endstops:
+                disarm = getattr(endstop, "disarm", None)
+                if disarm is None:
+                    continue
                 try:
                     disarm()
                 except Exception:
@@ -649,7 +896,7 @@ class Homing:
             if provider is not None and hasattr(provider, "trip_move_end"):
                 provider.trip_move_end(entry)
         trip_pos, final_pos, trip_clock = result
-        _verify_latched_trip(gcmd, axis, endstop, trip_clock)
+        _verify_latched_trips(gcmd, axis, endstops, trip_clock)
         return trip_pos, final_pos
 
 

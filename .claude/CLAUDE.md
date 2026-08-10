@@ -64,7 +64,6 @@ and `query-logs` skills.
 # Git
 
 Never rewrite git history, never amend commits, never force-push.
-Our "main" branch we create branches from and open pull requests to is "sota-motion"
 
 # Snapshots
 

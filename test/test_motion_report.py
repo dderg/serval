@@ -1,4 +1,4 @@
-from fakes import FakeConfig, FakeEngine, FakeGcode, FakePrinter
+from fakes import FakeConfig, FakeEngine, FakeGcode, FakePrinter, FakeStepper
 
 from klippy.extras.motion_report import PrinterMotionReport
 
@@ -12,6 +12,29 @@ def _build(axes=None):
     report = PrinterMotionReport(FakeConfig(printer))
     printer.event_handlers["klippy:connect"]()
     return report
+
+
+class FakeWebhooks:
+    def __init__(self):
+        self.endpoints = []
+
+    def register_mux_endpoint(self, path, key, value, callback):
+        self.endpoints.append((path, key, value, callback))
+
+
+def test_registered_steppers_are_published_on_connect():
+    webhooks = FakeWebhooks()
+    printer = FakePrinter(objects={"gcode": FakeGcode(), "webhooks": webhooks})
+    report = PrinterMotionReport(FakeConfig(printer))
+    report.register_stepper(None, FakeStepper("motor_x"))
+    printer.event_handlers["klippy:connect"]()
+
+    assert report.get_status(0.0)["steppers"] == ["motor_x"]
+    assert webhooks.endpoints[0][:3] == (
+        "motion_report/dump_stepper",
+        "name",
+        "motor_x",
+    )
 
 
 def test_get_status_serves_live_position_from_engine():

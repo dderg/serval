@@ -17,26 +17,6 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-// THREADING MODEL
-// ===============
-// Klipper firmware on MACH_LINUX is single-threaded for /dev/* and /sys/*
-// access — `console_task` is the sole consumer of these fds. The shim
-// adds ONE additional thread (Task 8: control-socket accept thread).
-//
-// Lock invariants:
-//   - fake_slots_mtx: held during alloc_fake_fd / free_fake_fd. Reads
-//     via slot_for_fd are NOT locked, on the assumption that any given
-//     slot is owned by exactly one of {klipper main, control thread}
-//     at any time.
-//   - gpio_state_mtx: held during gpio_lines[] and active_cs reads/writes.
-//   - iio_state_mtx: held during iio_values[] reads/writes.
-//
-// The control-socket thread (Task 8+) must NOT touch active_cs or the
-// spidev slot's chip_socket_fd — those belong to klipper's main thread.
-// The control thread writes gpio_lines[] (under gpio_state_mtx) and
-// iio_values[] (under iio_state_mtx). It may read pwm_file slot's
-// last_value (under fake_slots_mtx) for the get_pwm diagnostic verb;
-// that is read-only and atomic on the supported platforms.
 
 static int verbose = 0;
 #define LOG(fmt, ...) do { if (verbose) fprintf(stderr, "[shim] " fmt "\n", ##__VA_ARGS__); } while (0)
@@ -58,7 +38,6 @@ struct sim_fd_slot {
             int bus, dev;
             uint32_t speed_hz;
             uint8_t mode;
-            int chip_socket_fd;     // negative = not yet connected
         } spidev;
         struct {
             int chip_id, pwm_id;
@@ -79,13 +58,13 @@ static pthread_mutex_t fake_slots_mtx = PTHREAD_MUTEX_INITIALIZER;
 struct sim_gpio_line {
     int direction;   // 0 = input, 1 = output, -1 = unconfigured
     int value;
+    unsigned long edges;
 };
 static struct sim_gpio_line gpio_lines[MAX_GPIO_CHIPS][MAX_GPIO_LINES];
 static pthread_mutex_t gpio_state_mtx = PTHREAD_MUTEX_INITIALIZER;
 
-// Currently-asserted output line — used as the SPI CS demultiplex key.
 struct sim_active_cs { int chip_id; int line_offset; int valid; };
-static struct sim_active_cs active_cs;
+static _Thread_local struct sim_active_cs active_cs;
 
 #define MAX_IIO_CHANNELS 32
 #define DEFAULT_ADC_VALUE 3900
@@ -129,6 +108,18 @@ static pthread_mutex_t auto_endstop_mtx = PTHREAD_MUTEX_INITIALIZER;
 // the ioctl path. Opt-in per process: piece-mode builds write dir pins that
 // collide with the tracked step lines.
 static int gpio_step_tracking;
+
+// Polled by the runtime tick thread (src/linux/runtime_tick_host.c) to decide
+// whether to drive the real per-stepper step/dir pins. Default off: the
+// ioctl-per-edge traffic and its emitter thread perturb every sim world's
+// timing, and only the multi-endstop suppression proof needs those pins.
+static int step_pin_emit;
+
+__attribute__((visibility("default")))
+int sim_intercept_step_emit_enabled(void) {
+    return __atomic_load_n(&step_pin_emit, __ATOMIC_ACQUIRE);
+}
+
 __attribute__((constructor(101)))
 static void iio_init(void) {
     for (int i = 0; i < MAX_IIO_CHANNELS; i++) iio_values[i] = DEFAULT_ADC_VALUE;
@@ -279,6 +270,37 @@ static void control_handle_line(int client_fd, char *line) {
         pthread_mutex_unlock(&gpio_state_mtx);
         char buf[32];
         snprintf(buf, sizeof(buf), "value=%d\n", v);
+        send_resp(client_fd, buf);
+        return;
+    }
+    if (strncmp(line, "set_step_emit", 13) == 0) {
+        long enable;
+        if (parse_kv(line, "enable", &enable) < 0) {
+            send_resp(client_fd, "error: parse error\n");
+            return;
+        }
+        __atomic_store_n(&step_pin_emit, enable ? 1 : 0, __ATOMIC_RELEASE);
+        send_resp(client_fd, "ok\n");
+        return;
+    }
+    if (strncmp(line, "get_gpio_edges", 14) == 0) {
+        long chip, line_off;
+        if (parse_kv(line, "chip", &chip) < 0
+            || parse_kv(line, "line", &line_off) < 0) {
+            send_resp(client_fd, "error: parse error\n");
+            return;
+        }
+        if (chip < 0 || chip >= MAX_GPIO_CHIPS
+            || line_off < 0 || line_off >= MAX_GPIO_LINES) {
+            send_resp(client_fd, "error: chip or line out of range\n");
+            return;
+        }
+        pthread_mutex_lock(&gpio_state_mtx);
+        unsigned long edges = gpio_lines[chip][line_off].edges;
+        int v = gpio_lines[chip][line_off].value;
+        pthread_mutex_unlock(&gpio_state_mtx);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "edges=%lu value=%d\n", edges, v);
         send_resp(client_fd, buf);
         return;
     }
@@ -554,7 +576,6 @@ static int sim_open_spidev(const char *path, int flags) {
     struct sim_fd_slot *slot = slot_for_fd(fd);
     slot->u.spidev.bus = bus;
     slot->u.spidev.dev = dev;
-    slot->u.spidev.chip_socket_fd = -1;
     LOG("open spidev(%s) -> fd=%d", path, fd);
     return fd;
 }
@@ -767,6 +788,7 @@ static int gpio_handle_set_values(int line_fd, struct gpiohandle_data *data) {
     pthread_mutex_lock(&gpio_state_mtx);
     int prev = gpio_lines[chip_id][offset].value ? 1 : 0;
     gpio_lines[chip_id][offset].value = v;
+    if (v != prev) gpio_lines[chip_id][offset].edges++;
     slot->u.gpioline.last_value = v;
     if (gpio_step_tracking && v && !prev) {
         for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
@@ -812,10 +834,7 @@ static int gpio_handle_get_values(int line_fd, struct gpiohandle_data *data) {
     return 0;
 }
 
-static int spi_get_chip_socket(struct sim_fd_slot *slot) {
-    if (slot->u.spidev.chip_socket_fd >= 0) {
-        return slot->u.spidev.chip_socket_fd;
-    }
+static int spi_open_chip_socket(void) {
     if (!active_cs.valid) {
         LOG("spi xfer with no active CS");
         errno = EIO;
@@ -848,40 +867,33 @@ static int spi_get_chip_socket(struct sim_fd_slot *slot) {
         real_close(sock);
         return -1;
     }
-    slot->u.spidev.chip_socket_fd = sock;
     LOG("spi connected to %s -> sock=%d", path, sock);
     return sock;
 }
 
-static void spi_drop_chip_socket(struct sim_fd_slot *slot) {
-    if (slot->u.spidev.chip_socket_fd >= 0) {
-        real_close(slot->u.spidev.chip_socket_fd);
-        slot->u.spidev.chip_socket_fd = -1;
-    }
-}
 
 static int spi_handle_message(int fd, struct spi_ioc_transfer *xfer) {
     struct sim_fd_slot *slot = slot_for_fd(fd);
     if (!slot || slot->kind != SIM_SPIDEV) { errno = EBADF; return -1; }
-    int sock = spi_get_chip_socket(slot);
+    int sock = spi_open_chip_socket();
     if (sock < 0) return -1;
     const uint8_t *tx = (const uint8_t *)(uintptr_t)xfer->tx_buf;
     uint8_t *rx = (uint8_t *)(uintptr_t)xfer->rx_buf;
     size_t off = 0;
     while (off < xfer->len) {
         ssize_t n = real_write(sock, tx + off, xfer->len - off);
-        if (n <= 0) { spi_drop_chip_socket(slot); errno = EIO; return -1; }
+        if (n <= 0) { real_close(sock); errno = EIO; return -1; }
         off += n;
     }
     if (rx) {
         off = 0;
         while (off < xfer->len) {
             ssize_t n = real_read(sock, rx + off, xfer->len - off);
-            if (n <= 0) { spi_drop_chip_socket(slot); errno = EIO; return -1; }
+            if (n <= 0) { real_close(sock); errno = EIO; return -1; }
             off += n;
         }
     }
-    spi_drop_chip_socket(slot);
+    real_close(sock);
     return 0;
 }
 
@@ -939,15 +951,15 @@ ssize_t write(int fd, const void *buf, size_t count) {
     if (!slot) { errno = EBADF; return -1; }
     switch (slot->kind) {
         case SIM_SPIDEV: {
-            int sock = spi_get_chip_socket(slot);
+            int sock = spi_open_chip_socket();
             if (sock < 0) return -1;
             size_t off = 0;
             while (off < count) {
                 ssize_t n = real_write(sock, (const uint8_t *)buf + off, count - off);
-                if (n <= 0) { spi_drop_chip_socket(slot); errno = EIO; return -1; }
+                if (n <= 0) { real_close(sock); errno = EIO; return -1; }
                 off += n;
             }
-            spi_drop_chip_socket(slot);
+            real_close(sock);
             return (ssize_t)count;
         }
         case SIM_PWM_FILE: {

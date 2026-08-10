@@ -295,9 +295,17 @@ fn generate_message_kind() -> String {
     s.push_str("    pub fn is_schema_validated(self) -> bool {\n");
     s.push_str(&format!("        !matches!(self, {bootstrap_pattern})\n"));
     s.push_str("    }\n\n");
+    let event_pattern = SCHEMA_MESSAGES
+        .iter()
+        .filter(|m| m.channel == "events")
+        .map(|m| format!("Self::{}", m.name))
+        .collect::<Vec<_>>()
+        .join(" | ");
     s.push_str("    pub fn is_event(self) -> bool {\n");
-    s.push_str("        let tag = self as u16;\n");
-    s.push_str("        (0x0080..=0x00BF).contains(&tag)\n");
+    s.push_str("        matches!(\n");
+    s.push_str("            self,\n");
+    s.push_str(&format!("            {event_pattern}\n"));
+    s.push_str("        )\n");
     s.push_str("    }\n");
     s.push_str("}\n");
     s

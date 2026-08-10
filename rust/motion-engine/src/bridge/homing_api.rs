@@ -1,6 +1,7 @@
 use super::{
     Arc, DRAIN_TIMEOUT, Duration, HomingRun, Ordering, PyMotionEngine, PyResult, PyRuntimeError,
-    Python, TripDeps, dispatch_endstop_trip, drip_cohort_participants, planner_err, pymethods,
+    Python, RemoteFreeze, TripDeps, TripMember, dispatch_endstop_trip, drip_cohort_participants,
+    planner_err, pymethods,
 };
 use crate::lock_ext::LockExt;
 
@@ -13,6 +14,7 @@ struct AbortContext {
     all_axis_keys: Vec<crate::types::AxisKey>,
     cohort: u64,
     axis_key: crate::types::AxisKey,
+    pending_suppresses: Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>,
 }
 
 fn next_homing_cohort() -> u64 {
@@ -23,7 +25,7 @@ fn next_homing_cohort() -> u64 {
 
 #[pymethods]
 impl PyMotionEngine {
-    #[pyo3(signature = (axis, direction, speed_mm_s, max_travel_mm, endstop_id, endstop_mcu))]
+    #[pyo3(signature = (axis, direction, speed_mm_s, max_travel_mm, endstops))]
     #[allow(clippy::too_many_arguments)]
     fn home_axis_start(
         &self,
@@ -32,9 +34,26 @@ impl PyMotionEngine {
         direction: f64,
         speed_mm_s: f64,
         max_travel_mm: f64,
-        endstop_id: u8,
-        endstop_mcu: u32,
+        endstops: Vec<(u8, u32, Option<(u32, u8, u8)>)>,
     ) -> PyResult<()> {
+        if endstops.is_empty() {
+            return Err(PyRuntimeError::new_err(
+                "home_axis: endstops list must not be empty",
+            ));
+        }
+        let remaining_trips: Vec<TripMember> = endstops
+            .iter()
+            .map(|&(endstop_id, endstop_mcu, freeze)| TripMember {
+                endstop_mcu,
+                endstop_id,
+                remote_freeze: freeze.map(|(motor_mcu, motor_idx, stepper_idx)| RemoteFreeze {
+                    motor_mcu,
+                    motor_idx,
+                    stepper_idx,
+                }),
+            })
+            .collect();
+
         let guard = self.planner.lock_ok();
         let planner = guard
             .as_ref()
@@ -57,12 +76,15 @@ impl PyMotionEngine {
         let machine_start = self.machine_from_gcode(start_pos);
         self.send_serial_position_seeds(machine_start)?;
 
-        let window_start_host = match self.homing.last_arm.lock_ok().take() {
-            Some((arm_mcu, arm_id, arm_host)) if arm_mcu == endstop_mcu && arm_id == endstop_id => {
-                arm_host
-            }
-            _ => self.router.lock_ok().host_now_secs(),
-        };
+        let window_start_host = self
+            .homing
+            .take_arm_window_start(
+                &remaining_trips
+                    .iter()
+                    .map(|t| (t.endstop_mcu, t.endstop_id))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap_or_else(|| self.router.lock_ok().host_now_secs());
 
         *self.homing.active_drip_cohort.lock_ok() = Some(cohort);
 
@@ -80,13 +102,13 @@ impl PyMotionEngine {
 
         *self.homing.run.lock_ok() = Some(HomingRun {
             cohort,
-            endstop_id,
-            endstop_mcu,
+            remaining_trips,
             axis_key,
             all_axis_keys: all_axis_keys.clone(),
             window_start_host,
             start_pos: machine_start,
             notify: result_tx,
+            pending_suppresses: Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new())),
         });
 
         let planner_done_rx = planner
@@ -108,11 +130,15 @@ impl PyMotionEngine {
 
         *self.homing.result.lock_ok() = Some(result_rx);
 
-        self.consume_buffered_early_trip(endstop_mcu, endstop_id);
+        self.consume_buffered_early_trips();
         Ok(())
     }
     fn motion_drained(&self) -> bool {
         self.drain.drained()
+    }
+    fn note_endstop_arm(&self, endstop_mcu: u32, endstop_id: u8) {
+        let host_now = self.router.lock_ok().host_now_secs();
+        self.homing.note_arm(endstop_mcu, endstop_id, host_now);
     }
     fn home_axis_poll(&self) -> PyResult<Option<([f64; 3], [f64; 3], u64)>> {
         let rx = {
@@ -165,10 +191,9 @@ impl PyMotionEngine {
                 ))
             })?;
         let deps = self.trip_deps();
-        *self.homing.pending_trip.lock_ok() = None;
         {
             let host_now = self.router.lock_ok().host_now_secs();
-            *self.homing.last_arm.lock_ok() = Some((mcu_handle, endstop_id, host_now));
+            self.homing.note_arm(mcu_handle, endstop_id, host_now);
         }
         let router = Arc::clone(&self.router);
         let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -250,8 +275,16 @@ impl PyMotionEngine {
             self.finish_homing();
             return None;
         }
+        if super::endstop::wait_for_pending_suppresses(&ctx.pending_suppresses).is_err() {
+            self.finish_homing();
+            return None;
+        }
 
         self.finish_homing();
+
+        if !self.clear_all_suppress_masks() {
+            return None;
+        }
 
         let machine = self.reconcile_aborted_position(ctx.axis_key).ok()?;
 
@@ -408,20 +441,23 @@ impl PyMotionEngine {
         Ok(())
     }
 
-    fn consume_buffered_early_trip(&self, endstop_mcu: u32, endstop_id: u8) {
-        let pending = self.homing.pending_trip.lock_ok().take();
-        if let Some((p_mcu, p_endstop, p_clock)) = pending {
-            if p_mcu == endstop_mcu && p_endstop == endstop_id {
-                tracing::warn!(
-                    subsystem = "trip-relay",
-                    event = "early_trip_consumed",
-                    mcu = p_mcu,
-                    endstop_id = p_endstop,
-                    trip_clock = p_clock,
-                    "dispatching buffered early trip"
-                );
-                dispatch_endstop_trip(&self.trip_deps(), p_mcu, p_endstop, p_clock);
-            }
+    fn consume_buffered_early_trips(&self) {
+        let pending: Vec<(u32, u8, u64)> =
+            std::mem::take(&mut *self.homing.pending_trips.lock_ok());
+        if pending.is_empty() {
+            return;
+        }
+        let deps = self.trip_deps();
+        for (p_mcu, p_endstop, p_clock) in pending {
+            tracing::warn!(
+                subsystem = "trip-relay",
+                event = "early_trip_consumed",
+                mcu = p_mcu,
+                endstop_id = p_endstop,
+                trip_clock = p_clock,
+                "dispatching buffered early trip"
+            );
+            dispatch_endstop_trip(&deps, p_mcu, p_endstop, p_clock);
         }
     }
 
@@ -431,6 +467,7 @@ impl PyMotionEngine {
             all_axis_keys: r.all_axis_keys.clone(),
             cohort: r.cohort,
             axis_key: r.axis_key,
+            pending_suppresses: Arc::clone(&r.pending_suppresses),
         })
     }
 
@@ -496,6 +533,78 @@ impl PyMotionEngine {
             return false;
         }
         true
+    }
+
+    /// A partial trip may have engaged suppress masks on motor MCUs before
+    /// the run aborted; ResumeStream never reaches them on this path, so the
+    /// masks must be cleared explicitly or a stepper stays silently frozen.
+    fn clear_all_suppress_masks(&self) -> bool {
+        use mcu_protocol::codec::{Decode as _, Encode as _};
+        let transports: Vec<(u32, Arc<dyn host_rt::mcu_call::McuCall>)> = {
+            let mcus = self.mcus.lock_ok();
+            mcus.iter()
+                .filter(|(_, conn)| {
+                    conn.endpoint_conn.is_some()
+                        || conn
+                            .runtime_caps
+                            .as_ref()
+                            .is_some_and(|caps| caps.total_piece_memory > 0)
+                })
+                .filter_map(|(&id, conn)| {
+                    if let Some(io) = conn.host_io.as_ref() {
+                        Some((id, Arc::clone(io) as Arc<dyn host_rt::mcu_call::McuCall>))
+                    } else {
+                        conn.endpoint_conn
+                            .as_ref()
+                            .map(|ec| (id, Arc::clone(ec) as Arc<dyn host_rt::mcu_call::McuCall>))
+                    }
+                })
+                .collect()
+        };
+        let mut ok = true;
+        for (mcu_id, transport) in transports {
+            let mut body = Vec::with_capacity(3);
+            mcu_protocol::messages::StepperSuppress {
+                motor: 0xFF,
+                stepper: 0xFF,
+                engage: 0,
+            }
+            .encode(&mut body);
+            let outcome = transport
+                .mcu_call(
+                    mcu_protocol::MessageKind::StepperSuppress,
+                    body,
+                    Duration::from_secs(3),
+                )
+                .map_err(|e| format!("{e:?}"))
+                .and_then(|(_kind, resp_body)| {
+                    mcu_protocol::messages::StepperSuppressResponse::decode(&resp_body)
+                        .map_err(|e| format!("{e:?}"))
+                });
+            match outcome {
+                Ok(resp) if resp.effective_clock != 0 => {}
+                Ok(_) => {
+                    tracing::error!(
+                        event = "suppress_clear_rejected",
+                        mcu = mcu_id,
+                        "home_abort: suppress mask clear rejected — a stepper may \
+                         remain frozen; a firmware restart is required"
+                    );
+                    ok = false;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        event = "suppress_clear_failed",
+                        mcu = mcu_id,
+                        error = %e,
+                        "home_abort: suppress mask clear failed — a stepper may \
+                         remain frozen; a firmware restart is required"
+                    );
+                    ok = false;
+                }
+            }
+        }
+        ok
     }
 
     fn finish_homing(&self) {

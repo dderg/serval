@@ -22,6 +22,11 @@ class error(Exception):
 # supported clock frequency.
 MCU_TIMER_HORIZON = 1 << 30
 
+# This sentinel is a serialqueue priority marker, not an MCU deadline.  It is
+# used by low-priority devices such as LEDs and displays, which must be sent
+# immediately instead of being deferred to a (far-future) timer horizon.
+BACKGROUND_PRIORITY_CLOCK = 0x7FFFFFFF00000000
+
 # Engine-path commands carrying a near-term reqclock (heater PWM schedules
 # ~0.3 s ahead) die as "Timer too close" if delivery eats the margin.  Sends
 # whose remaining margin is already below this threshold get logged so a
@@ -398,7 +403,10 @@ class EngineCommandChannel:
     def _reqclock_holds_or_warns(self, command_name, reqclock, resend):
         if self._held_until_timer_horizon(resend, reqclock):
             return True
-        self._warn_if_deadline_margin_thin(command_name, reqclock)
+        # This sentinel is a priority marker, not a clock deadline; it has no
+        # deadline margin to evaluate.
+        if reqclock != BACKGROUND_PRIORITY_CLOCK:
+            self._warn_if_deadline_margin_thin(command_name, reqclock)
         return False
 
     def _warn_if_deadline_margin_thin(self, command_name, reqclock):
@@ -416,6 +424,8 @@ class EngineCommandChannel:
             )
 
     def _held_until_timer_horizon(self, resend, reqclock):
+        if reqclock == BACKGROUND_PRIORITY_CLOCK:
+            return False
         clocksync = self.mcu._clocksync
         est_clock = clocksync.get_clock(self.reactor.monotonic())
         if reqclock - est_clock <= MCU_TIMER_HORIZON:

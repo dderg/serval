@@ -300,6 +300,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
     // a permanent report offset.
     let report_anchor: Vec<Option<(i32, f64)>> = vec![None; num_slaves];
     let last_streamed_target: Vec<Option<i32>> = vec![None; num_slaves];
+    let suppressed: Vec<bool> = vec![false; num_slaves];
     let last_sent_retired: u32 = 0;
     let heartbeat_sent = false;
 
@@ -518,6 +519,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
         last_written_offset: vec![0; num_slaves],
         report_anchor,
         last_streamed_target,
+        suppressed,
         last_sent_retired,
         heartbeat_sent,
         gate,

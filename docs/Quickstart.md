@@ -97,7 +97,7 @@ What the port run established, kept for reference:
 cd ~/klipper
 git remote add serval https://github.com/dderg/kalico.git
 git fetch serval
-git checkout -b sota-motion serval/sota-motion
+git checkout -b main serval/main
 ```
 
 Your previous branch stays untouched; `git checkout <old-branch>` brings it

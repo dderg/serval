@@ -559,6 +559,174 @@ rotation_distance: 4
 {_tail(gcode_dir)}"""
 
 
+DUAL_MOTOR_X_MOTORS = ("xm_a", "xm_b")
+DUAL_MOTOR_Y_MOTORS = ("ym_a", "ym_b")
+DUAL_MOTOR_X_ENDSTOPS = ((0, 10), (0, 13))
+DUAL_MOTOR_Y_ENDSTOPS = ((0, 11), (0, 14))
+DUAL_MOTOR_X_STEP_PINS = ((0, 30), (0, 33))
+DUAL_MOTOR_Y_STEP_PINS = ((0, 36), (0, 39))
+DUAL_MOTOR_POSITION_ENDSTOP = 0.0
+DUAL_MOTOR_ROTATION_DISTANCE = 40.0
+DUAL_MOTOR_MICROSTEPS = 16
+
+
+def dual_motor_xy_config(h7_pty: str, gcode_dir: str) -> str:
+    """Cross-gantry cartesian: X and Y each driven by two motors with one
+    endstop switch per motor (keyed endstop_pin form). homing_retract_dist
+    is 0 so every G28 is a single approach the test can trip by hand."""
+    motor_sections = ""
+    lane_motors = DUAL_MOTOR_X_MOTORS + DUAL_MOTOR_Y_MOTORS
+    step_pins = DUAL_MOTOR_X_STEP_PINS + DUAL_MOTOR_Y_STEP_PINS
+    for i, name in enumerate(lane_motors):
+        chip, step_line = step_pins[i]
+        motor_sections += f"""
+[motor {name}]
+drive: stepper
+step_pin: gpiochip{chip}/gpio{step_line}
+dir_pin: gpiochip{chip}/gpio{step_line + 1}
+enable_pin: !gpiochip{chip}/gpio{step_line + 2}
+microsteps: {DUAL_MOTOR_MICROSTEPS}
+rotation_distance: {DUAL_MOTOR_ROTATION_DISTANCE}
+"""
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[printer]
+max_velocity: 100
+max_accel: 1000
+max_z_velocity: 10
+max_z_accel: 30
+
+[kinematics]
+type: cartesian
+axis_x: x
+axis_y: y
+axis_z: z
+x_motors: {", ".join(DUAL_MOTOR_X_MOTORS)}
+y_motors: {", ".join(DUAL_MOTOR_Y_MOTORS)}
+z_motors: z
+
+[axis x]
+position_min: 0
+position_endstop: {DUAL_MOTOR_POSITION_ENDSTOP}
+position_max: 250
+endstop_pin:
+  {DUAL_MOTOR_X_MOTORS[0]}: ^gpiochip0/gpio{DUAL_MOTOR_X_ENDSTOPS[0][1]}
+  {DUAL_MOTOR_X_MOTORS[1]}: ^gpiochip0/gpio{DUAL_MOTOR_X_ENDSTOPS[1][1]}
+homing_speed: 10
+homing_retract_dist: 0
+post_processors: is_xy
+
+[axis y]
+position_min: 0
+position_endstop: {DUAL_MOTOR_POSITION_ENDSTOP}
+position_max: 250
+endstop_pin:
+  {DUAL_MOTOR_Y_MOTORS[0]}: ^gpiochip0/gpio{DUAL_MOTOR_Y_ENDSTOPS[0][1]}
+  {DUAL_MOTOR_Y_MOTORS[1]}: ^gpiochip0/gpio{DUAL_MOTOR_Y_ENDSTOPS[1][1]}
+homing_speed: 10
+homing_retract_dist: 0
+post_processors: is_xy
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio12
+homing_speed: 5
+{motor_sections}
+[motor z]
+drive: stepper
+step_pin: gpiochip0/gpio50
+dir_pin: gpiochip0/gpio51
+enable_pin: !gpiochip0/gpio52
+microsteps: 16
+rotation_distance: 4
+{_tail(gcode_dir)}"""
+
+
+def dual_motor_xy_cross_mcu_config(
+    h7_pty: str, f4_pty: str, gcode_dir: str
+) -> str:
+    """dual_motor_xy_config with every X/Y endstop switch wired to a second
+    MCU while the motors stay on the main one: the per-motor freeze must
+    travel host-side (StepperSuppress) instead of the same-MCU fast path."""
+    motor_sections = ""
+    lane_motors = DUAL_MOTOR_X_MOTORS + DUAL_MOTOR_Y_MOTORS
+    step_pins = DUAL_MOTOR_X_STEP_PINS + DUAL_MOTOR_Y_STEP_PINS
+    for i, name in enumerate(lane_motors):
+        chip, step_line = step_pins[i]
+        motor_sections += f"""
+[motor {name}]
+drive: stepper
+step_pin: gpiochip{chip}/gpio{step_line}
+dir_pin: gpiochip{chip}/gpio{step_line + 1}
+enable_pin: !gpiochip{chip}/gpio{step_line + 2}
+microsteps: {DUAL_MOTOR_MICROSTEPS}
+rotation_distance: {DUAL_MOTOR_ROTATION_DISTANCE}
+"""
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[mcu aux]
+serial: {f4_pty}
+
+[printer]
+max_velocity: 100
+max_accel: 1000
+max_z_velocity: 10
+max_z_accel: 30
+
+[kinematics]
+type: cartesian
+axis_x: x
+axis_y: y
+axis_z: z
+x_motors: {", ".join(DUAL_MOTOR_X_MOTORS)}
+y_motors: {", ".join(DUAL_MOTOR_Y_MOTORS)}
+z_motors: z
+
+[axis x]
+position_min: 0
+position_endstop: {DUAL_MOTOR_POSITION_ENDSTOP}
+position_max: 250
+endstop_pin:
+  {DUAL_MOTOR_X_MOTORS[0]}: ^aux:gpiochip0/gpio{DUAL_MOTOR_X_ENDSTOPS[0][1]}
+  {DUAL_MOTOR_X_MOTORS[1]}: ^aux:gpiochip0/gpio{DUAL_MOTOR_X_ENDSTOPS[1][1]}
+homing_speed: 10
+homing_retract_dist: 0
+post_processors: is_xy
+
+[axis y]
+position_min: 0
+position_endstop: {DUAL_MOTOR_POSITION_ENDSTOP}
+position_max: 250
+endstop_pin:
+  {DUAL_MOTOR_Y_MOTORS[0]}: ^aux:gpiochip0/gpio{DUAL_MOTOR_Y_ENDSTOPS[0][1]}
+  {DUAL_MOTOR_Y_MOTORS[1]}: ^aux:gpiochip0/gpio{DUAL_MOTOR_Y_ENDSTOPS[1][1]}
+homing_speed: 10
+homing_retract_dist: 0
+post_processors: is_xy
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio12
+homing_speed: 5
+{motor_sections}
+[motor z]
+drive: stepper
+step_pin: gpiochip0/gpio50
+dir_pin: gpiochip0/gpio51
+enable_pin: !gpiochip0/gpio52
+microsteps: 16
+rotation_distance: 4
+{_tail(gcode_dir)}"""
+
+
 def phase_stepping_config(h7_pty: str, gcode_dir: str) -> str:
     """TMC5160 phase stepping on X."""
     return f"""\

@@ -49,14 +49,14 @@ class PrinterExtruder:
                     "[axis e] motors:" % self.name
                 )
         axis_name = config.get("axis")
-        motion = self.printer.lookup_object("motion", None)
-        if motion is None:
+        self.motion = self.printer.lookup_object("motion", None)
+        if self.motion is None:
             raise config.error(
                 "[%s] axis: requires the [motion] object, which was not "
                 "available at extruder load time" % self.name
             )
         declared = {
-            n: follows for n, follows, motors, _pp in motion.axis_sections
+            n: follows for n, follows, motors, _pp in self.motion.axis_sections
         }
         if axis_name not in declared:
             raise config.error(
@@ -127,7 +127,10 @@ class PrinterExtruder:
             )
 
     def find_past_position(self, print_time):
-        return 0.0
+        state = self.motion.engine.motion_state_at(
+            self.motion.mcu, print_time=print_time
+        )
+        return state["e"][0]
 
     def cmd_M104(self, gcmd, wait=False):
         # Set Extruder Temperature

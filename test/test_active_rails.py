@@ -1,3 +1,4 @@
+import pytest
 from fakes import FakeKin as FakeKinBase
 from fakes import FakeRail, FakeStepper
 from fakes import FakeToolhead as FakeToolheadBase
@@ -61,6 +62,7 @@ def test_cartesian_rails_are_independent():
 
 class FakeToolhead(FakeToolheadBase):
     _fire_active_callbacks = Motion._fire_active_callbacks
+    get_active_rails_for_axis = Motion.get_active_rails_for_axis
 
     def __init__(self, kin, follower_steppers=()):
         super().__init__(
@@ -77,8 +79,9 @@ class FakeToolhead(FakeToolheadBase):
 
 def arm_callbacks(steppers):
     fired = []
-    for s in steppers:
-        s.add_active_callback(lambda pt, n=s.get_name(): fired.append(n))
+    for stepper in steppers:
+        name = stepper.get_name()
+        stepper.add_active_callback(lambda print_time, n=name: fired.append(n))
     return fired
 
 
@@ -144,3 +147,23 @@ def test_pure_kinematic_move_leaves_follower_disabled():
         (0.0, 0.0, 5.0, 0.0)
     )
     assert fired == ["stepper_z", "stepper_z1"]
+
+
+def test_get_active_rails_for_axis_cartesian():
+    th = FakeToolhead(make_kin("cartesian"))
+    assert rail_names(th.get_active_rails_for_axis("x")) == ["x"]
+    assert rail_names(th.get_active_rails_for_axis("y")) == ["y"]
+    assert rail_names(th.get_active_rails_for_axis("z")) == ["z"]
+
+
+def test_get_active_rails_for_axis_corexy_couples_both_xy_rails():
+    th = FakeToolhead(make_kin("corexy"))
+    assert rail_names(th.get_active_rails_for_axis("x")) == ["x", "y"]
+    assert rail_names(th.get_active_rails_for_axis("y")) == ["x", "y"]
+    assert rail_names(th.get_active_rails_for_axis("z")) == ["z"]
+
+
+def test_get_active_rails_for_axis_rejects_unknown_axis():
+    th = FakeToolhead(make_kin("cartesian"))
+    with pytest.raises(ValueError):
+        th.get_active_rails_for_axis("a")

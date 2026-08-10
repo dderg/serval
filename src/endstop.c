@@ -1,11 +1,15 @@
 #include "autoconf.h"
 #include "basecmd.h"
 #include "board/gpio.h"
+#include "board/irq.h"
 #include "board/misc.h"
 #include "command.h"
 #include "sched.h"
 #include "trsync.h"
 #include "mcu_transport_dispatch.h"
+#include "stepper.h"
+
+#define ENDSTOP_UNBOUND 0xFF
 
 #if CONFIG_MOTION_RUNTIME
 #include "runtime.h"
@@ -27,23 +31,15 @@ struct endstop {
     uint8_t invert;
     uint8_t armed;
     uint8_t trip_pending;
+    uint8_t trip_processing;
     uint8_t tripped;
+    uint8_t motor;
+    uint8_t stepper;
+    uint8_t group;
 };
 
 static struct task_wake endstop_trip_wake;
 
-// Timer context (IRQ): capture the trip clock here for accuracy, but defer
-// the transport write to endstop_trip_task — mcu_transport_send_frame uses
-// a shared tx_buf and the USB transmit cursor, neither safe against the
-// foreground from IRQ.
-//
-// The trip clock is the midpoint of the two observations that bracket the
-// edge: the pin was clear when last read and active now, so the trip lies
-// between those reads. Midpoint error is bounded by half the observation
-// gap and is unbiased — stamping the detection time instead would be late
-// by up to the full gap, always in the same direction, and the gap
-// stretches well past rest_ticks when timer dispatch runs late (host
-// preemption and pacing slack under the simulator's virtual clock).
 static uint_fast8_t
 endstop_event(struct timer *t)
 {
@@ -61,6 +57,10 @@ endstop_event(struct timer *t)
         uint32_t mid32 = e->last_clear_clock + gap / 2;
         int32_t mid_delta = (int32_t)(mid32 - (uint32_t)now64);
         e->trip_clock = now64 + (int64_t)mid_delta;
+        if (e->group && e->motor != ENDSTOP_UNBOUND) {
+            stepper_suppress_set(e->motor, e->stepper);
+            e->trip_clock = now64;
+        }
         e->armed = 0;
         e->trip_pending = 1;
         e->tripped = 1;
@@ -88,8 +88,23 @@ command_config_endstop(uint32_t *args)
     e->invert = args[4] ? 1 : 0;
     e->armed = 0;
     e->trip_pending = 0;
+    e->trip_processing = 0;
     e->tripped = 0;
     e->trip_clock = 0;
+
+    uint8_t motor = args[5];
+    uint8_t stepper = args[6];
+    uint8_t motor_unbound = motor == ENDSTOP_UNBOUND;
+    uint8_t stepper_unbound = stepper == ENDSTOP_UNBOUND;
+    if (motor_unbound != stepper_unbound)
+        shutdown("bad endstop binding");
+    if (!motor_unbound
+        && (motor >= RUNTIME_MOTOR_COUNT
+            || stepper >= RUNTIME_MAX_STEPPERS_PER_MOTOR))
+        shutdown("bad endstop binding");
+    e->motor = motor;
+    e->stepper = stepper;
+    e->group = args[7] ? 1 : 0;
     e->ts = NULL;
     e->trigger_reason = 0;
     e->time.func = endstop_event;
@@ -102,7 +117,8 @@ command_config_endstop(uint32_t *args)
     }
 }
 DECL_COMMAND(command_config_endstop,
-             "config_endstop oid=%c endstop_id=%c pin=%u pull_up=%c invert=%c");
+             "config_endstop oid=%c endstop_id=%c pin=%u pull_up=%c invert=%c"
+             " motor=%c stepper=%c group=%c");
 
 void
 command_query_endstop(uint32_t *args)
@@ -114,8 +130,10 @@ command_query_endstop(uint32_t *args)
         e->armed = 0;
         return;
     }
+    if (e->motor != ENDSTOP_UNBOUND
+        && e->stepper >= runtime_motor_binding_count(e->motor))
+        shutdown("bad endstop binding");
     e->tripped = 0;
-    e->trip_clock = 0;
     e->armed = 1;
     e->last_clear_clock = timer_read_time();
     e->time.waketime = e->last_clear_clock + e->rest_ticks;
@@ -159,14 +177,33 @@ endstop_trip_task(void)
 {
     if (!sched_check_wake(&endstop_trip_wake))
         return;
-    uint64_t discard_clock;
-    (void)handle_stop_inner(&discard_clock);
     uint8_t oid;
     struct endstop *e;
+    uint8_t any_processing = 0;
+    irqstatus_t flag = irq_save();
     foreach_oid(oid, e, command_config_endstop) {
         if (!e->trip_pending)
             continue;
         e->trip_pending = 0;
+        e->trip_processing = 1;
+        any_processing = 1;
+    }
+    irq_restore(flag);
+    if (!any_processing)
+        return;
+    uint8_t needs_stop = 0;
+    foreach_oid(oid, e, command_config_endstop) {
+        if (e->trip_processing && !e->group)
+            needs_stop = 1;
+    }
+    if (needs_stop) {
+        uint64_t discard_clock;
+        (void)handle_stop_inner(&discard_clock);
+    }
+    foreach_oid(oid, e, command_config_endstop) {
+        if (!e->trip_processing)
+            continue;
+        e->trip_processing = 0;
         mcu_transport_emit_endstop_trip(e->endstop_id, e->trip_clock);
     }
 }

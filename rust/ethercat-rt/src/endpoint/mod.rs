@@ -71,6 +71,9 @@ pub struct EndpointCtx {
     last_written_offset: Vec<i32>,
     report_anchor: Vec<Option<(i32, f64)>>,
     last_streamed_target: Vec<Option<i32>>,
+    /// Per-slot homing freeze: a StepperSuppress-ed slot holds its last
+    /// commanded target and discards stream samples until ResumeStream.
+    suppressed: Vec<bool>,
     last_sent_retired: u32,
     heartbeat_sent: bool,
     gate: TorqueGate,

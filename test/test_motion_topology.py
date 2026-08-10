@@ -78,6 +78,7 @@ def make_motion(kind, lane_handles, follower=None, fm_present=True):
     fm = FakeForceMove(steppers) if fm_present else None
     objs = {} if fm is None else {"force_move": fm}
     motion.printer = FakePrinter(objects=objs)
+    motion.reactor = motion.printer.get_reactor()
     return motion
 
 
@@ -169,10 +170,11 @@ class CaptureEngine:
     def __init__(self):
         self.init_planner_args = None
 
-    def init_planner(self, config_text, topology):
+    def init_planner(self, config_text, topology, host_now):
         self.init_planner_args = {
             "config_text": config_text,
             "topology": topology,
+            "host_now": host_now,
         }
 
 
@@ -201,3 +203,4 @@ def test_init_planner_passes_config_text_and_topology():
     assert engine.init_planner_args["topology"] == [
         piece_topology(11, [0, 1, 2, 3], 0)
     ]
+    assert engine.init_planner_args["host_now"] == 0.0
