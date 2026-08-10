@@ -216,6 +216,10 @@ def test_pull_request_review_uses_exact_revision_and_native_review(tmp_path: Pat
     assert FakeRpcClient.command is not None
     tools_index = FakeRpcClient.command.index("--tools")
     assert FakeRpcClient.command[tools_index + 1] == ""
+    system_prompt_index = FakeRpcClient.command.index("--append-system-prompt")
+    system_prompt = FakeRpcClient.command[system_prompt_index + 1]
+    assert "request a CREATE_SUPPORT_BUNDLE archive" in system_prompt
+    assert "request klippy.log only when the affected version lacks that command" in system_prompt
     assert "Pull request: #373 Fix LEDs" in (FakeRpcClient.prompt or "")
     assert f"Review the exact diff {'a' * 40}...{'b' * 40}" in (FakeRpcClient.prompt or "")
     assert "@dderg requested @roboserval as a reviewer through GitHub reviewer assignment" in (
