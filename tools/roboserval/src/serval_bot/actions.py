@@ -60,7 +60,7 @@ def parse_code_directive(bot_login: str, body: str) -> str | None:
             return None
         return imperative.group("task").rstrip("?!").strip()
     natural_request = _CODE_NATURAL_REQUEST_RE.search(request)
-    if natural_request is not None and not _CODE_NEGATION_RE.search(natural_request.group()):
+    if natural_request is not None and not _CODE_NEGATION_RE.search(request[natural_request.start() :]):
         return request.rstrip("?!").strip()
     return None
 
