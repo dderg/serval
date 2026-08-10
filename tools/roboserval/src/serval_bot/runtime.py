@@ -420,6 +420,13 @@ class WorkerPool:
         if skipped:
             self.wake()
 
+    def _remove_active_review(self, review_key: tuple[str, int] | None, event: Event) -> None:
+        if review_key is None:
+            return
+        active = self._active_reviews.get(review_key)
+        if active is not None and active[0].delivery_id == event.delivery_id:
+            self._active_reviews.pop(review_key)
+
     async def run(self) -> None:
         recovered = self._database.reset_running()
         if recovered:
@@ -505,12 +512,10 @@ class WorkerPool:
             if event.delivery_id in self._superseded:
                 self._superseded.remove(event.delivery_id)
                 self._database.finish(event.delivery_id, "skipped", "superseded by newer pull request head")
-                if review_key is not None:
-                    self._active_reviews.pop(review_key, None)
+                self._remove_active_review(review_key, event)
                 self._log_event("event superseded", event, slot_uid, started, extra={"reaped": reaped})
                 return
-            if review_key is not None:
-                self._active_reviews.pop(review_key, None)
+            self._remove_active_review(review_key, event)
             self._log_event("event stopped by shutdown", event, slot_uid, started, extra={"reaped": reaped})
             raise asyncio.CancelledError
 
@@ -523,10 +528,9 @@ class WorkerPool:
             reaped = reap_slot(slot_uid)
             self._database.finish(event.delivery_id, "failed", error)
             self._log_event("event timed out", event, slot_uid, started, extra={"error": error, "reaped": reaped})
+            self._remove_active_review(review_key, event)
             if cancelled:
                 raise asyncio.CancelledError
-            if review_key is not None:
-                self._active_reviews.pop(review_key, None)
             return
 
         if outcome == "failure":
@@ -534,20 +538,18 @@ class WorkerPool:
             reaped = reap_slot(slot_uid)
             self._database.finish(event.delivery_id, "failed", error)
             self._log_event("event failed", event, slot_uid, started, extra={"error": error, "reaped": reaped})
+            self._remove_active_review(review_key, event)
             if cancelled:
                 raise asyncio.CancelledError
-            if review_key is not None:
-                self._active_reviews.pop(review_key, None)
             return
 
         if outcome == "success":
             self._database.finish(event.delivery_id, "done")
             reaped = reap_slot(slot_uid)
             self._log_event("event succeeded", event, slot_uid, started, extra={"reaped": reaped})
+            self._remove_active_review(review_key, event)
             if cancelled:
                 raise asyncio.CancelledError
-            if review_key is not None:
-                self._active_reviews.pop(review_key, None)
             return
 
         raise RuntimeError(f"unreachable outcome for {event.delivery_id}")

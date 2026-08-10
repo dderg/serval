@@ -354,6 +354,43 @@ def test_reconcile_skips_queued_review_for_old_head(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_old_review_cleanup_preserves_registered_replacement(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    pool = _pool(database, FakeAgent())
+    key = ("dderg/serval", 7)
+    old_event = Event(
+        "review-old",
+        "pull_request_review.requested",
+        key[0],
+        key[1],
+        "maintainer",
+        _review_payload("a" * 40),
+        "running",
+        1,
+        None,
+    )
+    replacement_event = Event(
+        "review-new",
+        "pull_request_review.requested",
+        key[0],
+        key[1],
+        "maintainer",
+        _review_payload("b" * 40),
+        "running",
+        1,
+        None,
+    )
+    task = asyncio.current_task()
+    assert task is not None
+    try:
+        pool._active_reviews[key] = (replacement_event, task)
+        pool._remove_active_review(key, old_event)
+        assert pool._active_reviews[key] == (replacement_event, task)
+    finally:
+        database.close()
+
+
+@pytest.mark.asyncio
 async def test_worker_pool_failure_marks_failed_before_next_claim(tmp_path: Path) -> None:
     database = Database(tmp_path / "bot.sqlite")
     agent = FakeAgent(error=RuntimeError("boom"))
