@@ -260,6 +260,7 @@ class GitHubApi:
             f"/repos/{request.repo}/pulls",
             {"state": "open", "per_page": 100},
         )
+        review_heads: list[dict[str, Any]] = []
         for current_pull_request in open_pull_requests:
             requested_reviewers = current_pull_request.get("requested_reviewers")
             issue_number = current_pull_request.get("number")
@@ -272,6 +273,11 @@ class GitHubApi:
             ):
                 continue
             pull_requests[issue_number] = current_pull_request
+            head = current_pull_request.get("head")
+            if not isinstance(head, dict) or not isinstance(head.get("sha"), str):
+                raise GitHubFailure(f"GitHub pull request {request.repo}#{issue_number} has no head SHA")
+            head_sha = head["sha"]
+            review_heads.append({"issue_number": issue_number, "head_sha": head_sha})
             issue = issues_by_number.get(issue_number)
             if issue is None:
                 value = (await self.request("GET", f"/repos/{request.repo}/issues/{issue_number}")).json()
@@ -312,10 +318,6 @@ class GitHubApi:
             actor = review_requester["login"]
             if _normalize_login(actor) == _normalize_login(request.bot_login):
                 continue
-            head = current_pull_request.get("head")
-            if not isinstance(head, dict) or not isinstance(head.get("sha"), str):
-                raise GitHubFailure(f"GitHub pull request {request.repo}#{issue_number} has no head SHA")
-            head_sha = head["sha"]
             if not await self._head_checks_passed(request.repo, head_sha):
                 continue
             events.append(
@@ -374,7 +376,7 @@ class GitHubApi:
                 }
             )
         events.sort(key=lambda event: (event["occurred_at"], event["delivery_id"]))
-        return {"events": events}
+        return {"events": events, "review_heads": review_heads}
 
     async def _head_checks_passed(self, repo: str, head_sha: str) -> bool:
         response = await self.request(

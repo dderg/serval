@@ -109,13 +109,14 @@ class DrainingAgent:
 
 
 class FakePollSource:
-    def __init__(self, events: list[dict[str, Any]]):
+    def __init__(self, events: list[dict[str, Any]], review_heads: list[dict[str, Any]] | None = None):
         self.events = events
+        self.review_heads = review_heads or []
         self.calls: list[tuple[str, str, str]] = []
 
     def poll_events(self, repo: str, since: str, bot_login: str) -> dict[str, Any]:
         self.calls.append((repo, since, bot_login))
-        return {"events": self.events}
+        return {"events": self.events, "review_heads": self.review_heads}
 
 
 class FailingPollSource:
@@ -186,6 +187,13 @@ def _event() -> dict[str, Any]:
 
 def _payload() -> dict[str, Any]:
     return {"issue": {"number": 7, "title": "failure"}}
+
+
+def _review_payload(head_sha: str) -> dict[str, Any]:
+    return {
+        "issue": {"number": 7, "title": "change"},
+        "pull_request": {"head": {"sha": head_sha}},
+    }
 
 
 def _event_row(database: Database, delivery_id: str) -> dict[str, Any]:
@@ -296,6 +304,52 @@ async def test_worker_pool_success_marks_done_with_slot(tmp_path: Path) -> None:
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_pool_supersedes_running_review_on_new_head(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    agent = FakeAgent(blocking={"review-old"})
+    pool = _pool(database, agent)
+    old_head = "a" * 40
+    new_head = "b" * 40
+    database.record_event(
+        "review-old",
+        "pull_request_review.requested",
+        "dderg/serval",
+        7,
+        "maintainer",
+        _review_payload(old_head),
+    )
+    task = asyncio.create_task(pool.run())
+    try:
+        await _wait_until(lambda: len(agent.runs) == 1)
+        pool.reconcile_review_heads("dderg/serval", {7: new_head})
+        await _wait_until(lambda: _event_row(database, "review-old")["state"] == "skipped")
+        assert agent.stops == ["review-old"]
+        assert _event_row(database, "review-old")["error"] == "superseded by newer pull request head"
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        database.close()
+
+
+def test_reconcile_skips_queued_review_for_old_head(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    try:
+        database.record_event(
+            "review-old",
+            "pull_request_review.requested",
+            "dderg/serval",
+            7,
+            "maintainer",
+            _review_payload("a" * 40),
+        )
+        assert database.skip_stale_reviews("dderg/serval", {7: "b" * 40}) == 1
+        assert _event_row(database, "review-old")["state"] == "skipped"
+    finally:
         database.close()
 
 

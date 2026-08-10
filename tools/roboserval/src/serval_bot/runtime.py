@@ -395,6 +395,8 @@ class WorkerPool:
         self._pool = SlotPool(max_concurrency)
         self._stop = asyncio.Event()
         self._wake = [asyncio.Event() for _ in self._pool.slot_uids]
+        self._active_reviews: dict[tuple[str, int], tuple[Event, asyncio.Task[None]]] = {}
+        self._superseded: set[str] = set()
 
     def wake(self) -> None:
         for event in self._wake:
@@ -403,6 +405,20 @@ class WorkerPool:
     def stop(self) -> None:
         self._stop.set()
         self.wake()
+
+    def reconcile_review_heads(self, repo: str, review_heads: dict[int, str]) -> None:
+        skipped = self._database.skip_stale_reviews(repo, review_heads)
+        for key, (event, task) in tuple(self._active_reviews.items()):
+            if key[0] != repo:
+                continue
+            current_head = review_heads.get(key[1])
+            event_head = event.payload.get("pull_request", {}).get("head", {}).get("sha")
+            if current_head is None or current_head == event_head:
+                continue
+            self._superseded.add(event.delivery_id)
+            task.cancel()
+        if skipped:
+            self.wake()
 
     async def run(self) -> None:
         recovered = self._database.reset_running()
@@ -451,6 +467,13 @@ class WorkerPool:
 
     async def _run_event(self, event: Event, slot_uid: int) -> None:
         started = time.monotonic()
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("review worker has no asyncio task")
+        review_key: tuple[str, int] | None = None
+        if event.event_type == "pull_request_review.requested":
+            review_key = (event.repo, event.issue_number)
+            self._active_reviews[review_key] = (event, task)
         self._log_event("event claimed", event, slot_uid, started)
         future = asyncio.ensure_future(asyncio.to_thread(self._agent.run, event, slot_uid))
         self._log_event("event started", event, slot_uid, started)
@@ -479,6 +502,15 @@ class WorkerPool:
             if fatal is not None:
                 raise fatal
             reaped = reap_slot(slot_uid)
+            if event.delivery_id in self._superseded:
+                self._superseded.remove(event.delivery_id)
+                self._database.finish(event.delivery_id, "skipped", "superseded by newer pull request head")
+                if review_key is not None:
+                    self._active_reviews.pop(review_key, None)
+                self._log_event("event superseded", event, slot_uid, started, extra={"reaped": reaped})
+                return
+            if review_key is not None:
+                self._active_reviews.pop(review_key, None)
             self._log_event("event stopped by shutdown", event, slot_uid, started, extra={"reaped": reaped})
             raise asyncio.CancelledError
 
@@ -493,6 +525,8 @@ class WorkerPool:
             self._log_event("event timed out", event, slot_uid, started, extra={"error": error, "reaped": reaped})
             if cancelled:
                 raise asyncio.CancelledError
+            if review_key is not None:
+                self._active_reviews.pop(review_key, None)
             return
 
         if outcome == "failure":
@@ -502,6 +536,8 @@ class WorkerPool:
             self._log_event("event failed", event, slot_uid, started, extra={"error": error, "reaped": reaped})
             if cancelled:
                 raise asyncio.CancelledError
+            if review_key is not None:
+                self._active_reviews.pop(review_key, None)
             return
 
         if outcome == "success":
@@ -510,6 +546,8 @@ class WorkerPool:
             self._log_event("event succeeded", event, slot_uid, started, extra={"reaped": reaped})
             if cancelled:
                 raise asyncio.CancelledError
+            if review_key is not None:
+                self._active_reviews.pop(review_key, None)
             return
 
         raise RuntimeError(f"unreachable outcome for {event.delivery_id}")

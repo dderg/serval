@@ -67,11 +67,34 @@ class Poller:
                 since.isoformat(),
                 policy.bot_login,
             )
+            review_heads = _review_heads(result)
+            self._worker.reconcile_review_heads(policy.repo, review_heads)
             events = _polled_events(result)
             inserted += self._database.record_poll_batch(policy.repo, started.isoformat(), events)
         if inserted:
             self._worker.wake()
         return inserted
+
+
+def _review_heads(result: dict[str, Any]) -> dict[int, str]:
+    raw_heads = result.get("review_heads")
+    if not isinstance(raw_heads, list):
+        raise TypeError("poll response has no review_heads list")
+    review_heads: dict[int, str] = {}
+    for item in raw_heads:
+        if not isinstance(item, dict):
+            raise TypeError("poll response review head is not an object")
+        issue_number = item.get("issue_number")
+        head_sha = item.get("head_sha")
+        if (
+            not isinstance(issue_number, int)
+            or issue_number <= 0
+            or not isinstance(head_sha, str)
+            or len(head_sha) != 40
+        ):
+            raise RuntimeError(f"invalid poll response review head: {item!r}")
+        review_heads[issue_number] = head_sha
+    return review_heads
 
 
 def _polled_events(result: dict[str, Any]) -> list[PolledEvent]:
