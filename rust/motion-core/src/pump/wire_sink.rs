@@ -379,7 +379,7 @@ impl PieceSink for WireSink {
                         result: super::transit_trace::transport_error_result(),
                     });
                 }
-                super::transit_trace::emit_fault_snapshot(
+                super::transit_trace::emit_result_fault_snapshot(
                     "transport_error",
                     super::transit_trace::transport_error_result(),
                 );
@@ -410,7 +410,7 @@ impl PieceSink for WireSink {
             });
         }
         if result != mcu_protocol::result_codes::OK {
-            super::transit_trace::emit_fault_snapshot("mcu_reject", result);
+            super::transit_trace::emit_result_fault_snapshot("mcu_reject", result);
             return Err(SendError::mcu_reject(mcu_id, result));
         }
         Ok(())

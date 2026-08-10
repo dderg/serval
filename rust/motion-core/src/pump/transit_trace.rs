@@ -144,19 +144,22 @@ pub(super) fn transport_error_result() -> i32 {
     TRANSPORT_ERROR_RESULT
 }
 
-pub fn emit_fault_snapshot(trigger: &'static str, result: i32) {
-    {
-        let mut emitted = EMITTED_RESULTS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if emitted.contains(&result) {
-            return;
-        }
-        let Some(slot) = emitted.iter_mut().find(|slot| **slot == i32::MAX) else {
-            return;
-        };
-        *slot = result;
+pub(super) fn emit_result_fault_snapshot(trigger: &'static str, result: i32) {
+    let mut emitted = EMITTED_RESULTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if emitted.contains(&result) {
+        return;
     }
+    let Some(slot) = emitted.iter_mut().find(|slot| **slot == i32::MAX) else {
+        return;
+    };
+    *slot = result;
+    drop(emitted);
+    emit_fault_snapshot(trigger, result);
+}
+
+pub fn emit_fault_snapshot(trigger: &'static str, result: i32) {
     let records = snapshot_last(FAULT_TRACE_RECORDS);
     tracing::error!(
         subsystem = "motion",
