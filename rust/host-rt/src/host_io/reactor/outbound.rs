@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 
 use crate::host_io::CommandTiming;
 use crate::host_io::reactor::{
-    PENDING_FIRE_AND_FORGET_CEILING, PENDING_SUBMISSION_CEILING, PIECE_OUTQ_BUDGET_BYTES, Reactor,
+    PENDING_FIRE_AND_FORGET_CEILING, PENDING_SCHEDULED_CEILING, PENDING_SUBMISSION_CEILING,
+    PIECE_OUTQ_BUDGET_BYTES, Reactor,
 };
 use crate::transport::TransportError;
 
@@ -124,7 +125,7 @@ impl Reactor {
         if needs_clock {
             self.predicted_ack_clock(scheduled_payload_len(&payload))?;
         }
-        if self.outbound.scheduled_commands.len() >= PENDING_FIRE_AND_FORGET_CEILING {
+        if self.outbound.scheduled_commands.len() >= PENDING_SCHEDULED_CEILING {
             return Err(TransportError::Backpressure);
         }
         self.outbound

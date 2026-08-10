@@ -165,6 +165,7 @@ pub enum RetransmitTrigger {
 
 const PENDING_SUBMISSION_CEILING: usize = 256;
 pub const PENDING_FIRE_AND_FORGET_CEILING: usize = 256;
+pub(crate) const PENDING_SCHEDULED_CEILING: usize = PENDING_FIRE_AND_FORGET_CEILING * 2;
 pub(crate) const PENDING_PIECE_FRAMES_CEILING: usize = 64;
 
 /// Max bytes of kalico (piece) traffic allowed in the kernel tty out-buffer
