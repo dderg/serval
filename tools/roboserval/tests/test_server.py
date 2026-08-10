@@ -28,7 +28,7 @@ from serval_bot.runtime import (
     slot_pids,
     slot_uids,
 )
-from serval_bot.server import Poller, create_app
+from serval_bot.server import Poller, _polled_events, create_app
 
 
 class FakeAgent:
@@ -183,6 +183,20 @@ def _event() -> dict[str, Any]:
             "comment": {"body": "@roboserval investigate"},
         },
     }
+
+
+def test_poll_ingestion_drops_bot_authored_alias() -> None:
+    event = _event()
+    event["actor"] = "roboserval[bot]"
+    event["payload"]["sender"]["login"] = "roboserval[bot]"
+    assert _polled_events({"events": [event]}, "roboserval") == []
+
+
+def test_poll_ingestion_rejects_actor_sender_mismatch() -> None:
+    event = _event()
+    event["actor"] = "dderg"
+    with pytest.raises(RuntimeError, match="actor does not match sender"):
+        _polled_events({"events": [event]}, "roboserval")
 
 
 def _payload() -> dict[str, Any]:

@@ -6,6 +6,10 @@ from enum import StrEnum
 from typing import Any
 
 
+def normalize_login(login: str) -> str:
+    return login.strip().removesuffix("[bot]").casefold()
+
+
 class PolicyError(RuntimeError):
     pass
 
@@ -47,7 +51,7 @@ class RepositoryPolicy:
         return capability in _CAPABILITIES[self.mode]
 
     def is_maintainer(self, login: str) -> bool:
-        return login.casefold() in self.maintainers
+        return normalize_login(login) in self.maintainers
 
 
 @dataclass(slots=True, frozen=True)
@@ -93,11 +97,14 @@ def _parse_repository(repo: str, value: Any) -> RepositoryPolicy:
     maintainers_raw = value.get("maintainers", [])
     if not isinstance(maintainers_raw, list) or not all(isinstance(item, str) for item in maintainers_raw):
         raise PolicyError(f"maintainers must be a string array for {repo}")
-    maintainers = frozenset(item.strip().lstrip("@").casefold() for item in maintainers_raw if item.strip())
+    maintainers = frozenset(normalize_login(item.strip().lstrip("@")) for item in maintainers_raw if item.strip())
+    bot_login = _require_text(value.get("bot_login", "serval-bot"), f"{repo}.bot_login").lstrip("@")
+    if normalize_login(bot_login) in maintainers:
+        raise PolicyError(f"bot login cannot be a maintainer: {repo}.{bot_login}")
     return RepositoryPolicy(
         repo=repo,
         mode=mode,
-        bot_login=_require_text(value.get("bot_login", "serval-bot"), f"{repo}.bot_login").lstrip("@"),
+        bot_login=bot_login,
         maintainers=maintainers,
         sim_workflow=_require_text(value.get("sim_workflow", "ci-sim-e2e.yaml"), f"{repo}.sim_workflow"),
     )
