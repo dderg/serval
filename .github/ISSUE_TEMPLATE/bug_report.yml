@@ -29,7 +29,7 @@ body:
     id: support_bundle
     attributes:
       label: Support bundle
-      description: After a crash or other failure, run CREATE_SUPPORT_BUNDLE in the printer console, download the generated serval-support archive from the Logs page, and drag it here. Older versions can attach the complete klippy.log instead. If you cannot collect either one, submit the issue anyway.
+      description: After a crash or other failure, run CREATE_SUPPORT_BUNDLE in the printer console, download the generated serval-support archive from the Logs page, and drag it here. If you cannot collect one, submit the issue anyway.
       placeholder: Drag the serval-support-*.tar.gz archive here, or explain why it is unavailable.
 
   - type: textarea
