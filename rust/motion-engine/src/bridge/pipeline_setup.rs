@@ -652,6 +652,7 @@ impl EthercatHeartbeatSupervisor {
         self.latched_drive_fault
             .lock_ok()
             .insert(self.mcu_id, fault_code);
+        crate::pump::emit_fault_snapshot("homing_drive_fault", i32::from(fault_code));
         *self.homing.active_drip_cohort.lock_ok() = None;
         let _ = self
             .pump_tx
@@ -670,6 +671,7 @@ impl EthercatHeartbeatSupervisor {
             .latched_drive_fault
             .lock_ok()
             .insert(self.mcu_id, fault_code);
+        crate::pump::emit_fault_snapshot("drive_fault_heartbeat", i32::from(fault_code));
         if prev != Some(fault_code) {
             tracing::error!(
                 event = "ethercat_drive_fault_latched",

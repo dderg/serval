@@ -41,6 +41,8 @@ fn closed_peer_yields_fatal_send_error() {
         start_slot: 0,
         new_head: 1,
         room: 8,
+        guard_recorded_ns: 0,
+        guard_mcu_clock: 0,
     };
     match sink.call_push_pieces(key().mcu_id, std::slice::from_ref(&frame)) {
         Err(SendError::Fatal(_)) => {}
@@ -66,6 +68,8 @@ fn detached_ethercat_conn_yields_fatal_send_error() {
         start_slot: 0,
         new_head: 1,
         room: 8,
+        guard_recorded_ns: 0,
+        guard_mcu_clock: 0,
     };
     match sink.call_push_pieces(key().mcu_id, std::slice::from_ref(&frame)) {
         Err(SendError::Fatal(_)) => {}

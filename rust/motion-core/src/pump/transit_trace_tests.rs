@@ -9,6 +9,8 @@ fn snapshot_returns_published_records_in_sequence_order() {
         axis: u8::MAX,
         piece_count: 7,
         room: 11,
+        guard_recorded_ns: marker - 1,
+        guard_mcu_clock: 29,
         send_started_ns: marker,
         send_elapsed_ns: 13,
         host_front_start_time: 17,
@@ -27,6 +29,8 @@ fn snapshot_returns_published_records_in_sequence_order() {
     assert_eq!(record.axis, u8::MAX);
     assert_eq!(record.piece_count, 7);
     assert_eq!(record.room, 11);
+    assert_eq!(record.guard_recorded_ns, marker - 1);
+    assert_eq!(record.guard_mcu_clock, 29);
     assert_eq!(record.send_elapsed_ns, 13);
     assert_eq!(record.host_front_start_time, 17);
     assert_eq!(record.mcu_front_start_time, 19);
