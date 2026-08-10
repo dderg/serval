@@ -300,9 +300,6 @@ class MCU:
         is_latched_shutdown = params["#name"] == "is_shutdown"
         if is_latched_shutdown:
             prefix = "Previous MCU '%s' shutdown: " % (self._name,)
-            self._check_restart(
-                "MCU '%s' latched in shutdown state at connect" % (self._name,)
-            )
 
         self._printer.invoke_async_shutdown(
             prefix + msg + shutdown_diagnostics(self._printer, msg)
@@ -445,9 +442,6 @@ class MCU:
                 % (self._name, self._shutdown_msg)
             )
         if config_params["is_shutdown"]:
-            self._check_restart(
-                "MCU '%s' was in shutdown state at config time" % (self._name,)
-            )
             raise error(
                 "Can not update MCU '%s' config as it is shutdown"
                 % (self._name,)
