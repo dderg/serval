@@ -231,6 +231,20 @@ fn rebase_clears_ring_and_answers_from_register() {
 }
 
 #[test]
+fn unchanged_rebase_preserves_the_pre_rebase_hold() {
+    let mut store = HistoryStore::default();
+    store.rebase_axis(key(), 1.0, 0.0);
+    store.rebase_axis(key(), 2.0, 0.0);
+    store.record(key(), &linear(3_000_000, 1.0, 0.0, 0.0), FREQ_HZ, 3.0);
+
+    let held = store.state_at_host(key(), 1.5, Some(4.0)).unwrap();
+
+    assert_eq!(held.position, 0.0);
+    assert_eq!(held.velocity, 0.0);
+    assert_eq!(held.acceleration, 0.0);
+}
+
+#[test]
 fn eviction_keeps_capacity_and_reports_true_window() {
     let mut store = HistoryStore::default();
     let dur = 0.001_f32;

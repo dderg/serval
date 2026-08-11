@@ -415,9 +415,30 @@ impl HistoryStore {
             position,
             "[history] axis rebased to an externally set position"
         );
+        let continuous_from = self
+            .endpoints
+            .get(&key)
+            .filter(|endpoint| endpoint.position == position)
+            .map(|endpoint| {
+                self.holds_before_ring
+                    .get(&key)
+                    .filter(|hold| hold.endpoint.position == position)
+                    .map_or(endpoint.host, |hold| hold.from.min(endpoint.host))
+            });
         self.rings.entry(key).or_default().clear();
         self.holds_before_ring.remove(&key);
-        self.endpoints.insert(key, AxisEndpoint { host, position });
+        let endpoint = AxisEndpoint { host, position };
+        if let Some(from) = continuous_from.filter(|from| *from <= host) {
+            self.holds_before_ring.insert(
+                key,
+                HoldBeforeRing {
+                    endpoint,
+                    from,
+                    until: f64::INFINITY,
+                },
+            );
+        }
+        self.endpoints.insert(key, endpoint);
     }
 
     pub fn final_position(&self, key: AxisKey) -> Option<f64> {
