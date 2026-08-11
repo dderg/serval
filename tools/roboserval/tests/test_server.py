@@ -373,6 +373,44 @@ async def test_worker_pool_restores_future_retry_without_external_wake(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_due_retry_blocked_by_running_same_issue_does_not_busy_loop(tmp_path: Path) -> None:
+    class CountingDatabase(Database):
+        def __init__(self, path: Path) -> None:
+            super().__init__(path)
+            self.claims = 0
+
+        def claim(self) -> Event | None:
+            self.claims += 1
+            return super().claim()
+
+    database = CountingDatabase(tmp_path / "bot.sqlite")
+    database.record_event("retry", "issues.opened", "dderg/serval", 7, "reporter", _payload())
+    assert database.claim() is not None
+    assert database.schedule_retry("retry", 0.5, "temporary")
+    database.record_event("active", "issue_comment.created", "dderg/serval", 7, "reporter", _payload())
+
+    agent = FakeAgent(blocking={"active"})
+    pool = _pool(database, agent, max_concurrency=2)
+    task = asyncio.create_task(pool.run())
+    try:
+        await _wait_until(lambda: any(delivery == "active" for delivery, _ in agent.runs))
+        claims_before_deadline = database.claims
+        await asyncio.sleep(0.6)
+        assert database.claims - claims_before_deadline < 10
+        agent.release("active")
+        await _wait_until(
+            lambda: (
+                _event_row(database, "active")["state"] == "done" and _event_row(database, "retry")["state"] == "done"
+            )
+        )
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        database.close()
+
+
+@pytest.mark.asyncio
 async def test_idle_worker_observes_replay_from_separate_database_connection(tmp_path: Path) -> None:
     path = tmp_path / "bot.sqlite"
     database = Database(path)

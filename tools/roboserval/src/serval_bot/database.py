@@ -262,7 +262,14 @@ class Database:
     def next_retry_delay_seconds(self) -> float | None:
         with self._lock:
             row = self._connection.execute(
-                "SELECT MIN(available_at) AS available_at FROM events WHERE state='queued' AND available_at IS NOT NULL"
+                "SELECT MIN(candidate.available_at) AS available_at FROM events AS candidate "
+                "WHERE candidate.state='queued' AND candidate.available_at IS NOT NULL "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM events AS active "
+                "WHERE active.state='running' "
+                "AND active.repo=candidate.repo "
+                "AND active.issue_number=candidate.issue_number"
+                ")"
             ).fetchone()
         available_at = row["available_at"] if row is not None else None
         if not isinstance(available_at, str):
