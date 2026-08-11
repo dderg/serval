@@ -444,11 +444,9 @@ class WorkerPool:
             event = self._database.claim()
             if event is None:
                 retry_delay = self._database.next_retry_delay_seconds()
-                if retry_delay is None:
-                    await wake.wait()
-                else:
-                    with suppress(TimeoutError):
-                        await asyncio.wait_for(wake.wait(), timeout=retry_delay)
+                idle_timeout = 1.0 if retry_delay is None else min(1.0, retry_delay)
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(wake.wait(), timeout=idle_timeout)
                 continue
             slot_uid = await self._pool.acquire()
             try:
