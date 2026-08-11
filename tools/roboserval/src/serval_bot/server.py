@@ -7,9 +7,10 @@ import signal
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
+from ipaddress import ip_address
 from typing import Any, Protocol
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from serval_bot.config import BotSettings
@@ -192,7 +193,14 @@ def create_app(
         return database.recent_events(max(1, min(limit, 500)))
 
     @app.post("/replay/{delivery_id}")
-    async def replay(delivery_id: str) -> dict[str, str]:
+    async def replay(delivery_id: str, request: Request) -> dict[str, str]:
+        client = request.client
+        try:
+            loopback = client is not None and ip_address(client.host).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            raise HTTPException(status_code=403, detail="replay is restricted to loopback clients")
         if not database.replay(delivery_id):
             raise HTTPException(status_code=409, detail="event is not replayable")
         worker.wake()

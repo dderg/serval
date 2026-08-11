@@ -440,6 +440,30 @@ async def test_private_replay_endpoint_requeues_failed_event(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_replay_endpoint_rejects_non_loopback_client(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    database.record_event("delivery", "issues.opened", "dderg/serval", 7, "reporter", _payload())
+    assert database.claim() is not None
+    database.finish("delivery", "failed", "temporary")
+    app = create_app(
+        _settings(tmp_path),
+        _policies(),
+        database,
+        FakeAgent(),
+        start_worker=False,
+        start_poller=False,
+    )
+    try:
+        transport = httpx.ASGITransport(app=app, client=("203.0.113.5", 4123))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/replay/delivery")
+        assert response.status_code == 403
+        assert _event_row(database, "delivery")["state"] == "failed"
+    finally:
+        database.close()
+
+
+@pytest.mark.asyncio
 async def test_worker_pool_runs_independent_issues_concurrently(tmp_path: Path) -> None:
     database = Database(tmp_path / "bot.sqlite")
     agent = BarrierAgent(2)
