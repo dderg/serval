@@ -142,7 +142,12 @@ def load_bundle_records(bundle):
                         if len(records) >= MAX_DIAGNOSTIC_RECORDS:
                             raise BundleDiagnosticError("support bundle exceeds the diagnostic record limit")
                         records.append(record)
-    except (OSError, tarfile.TarError, json.JSONDecodeError) as exc:
+    except (
+        OSError,
+        UnicodeDecodeError,
+        tarfile.TarError,
+        json.JSONDecodeError,
+    ) as exc:
         raise BundleDiagnosticError(f"support bundle is unreadable: {exc}") from exc
     if not isinstance(manifest, dict):
         raise BundleDiagnosticError("support bundle has no valid manifest.json")

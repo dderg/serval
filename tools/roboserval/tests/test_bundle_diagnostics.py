@@ -136,3 +136,18 @@ def test_rejects_cumulative_uncompressed_event_overflow(tmp_path, monkeypatch):
 def test_rejects_invalid_manifest_schema(manifest, error):
     with pytest.raises(bundle_diagnostics.BundleDiagnosticError, match=error):
         bundle_diagnostics.validate_manifest(manifest)
+
+
+def test_invalid_utf8_manifest_is_a_controlled_error(tmp_path):
+    bundle = tmp_path / "serval-support-invalid-utf8.tar.gz"
+    payload = b'{"warnings":["\xff"],"event_files":{}}'
+    with tarfile.open(bundle, "w:gz") as archive:
+        info = tarfile.TarInfo("manifest.json")
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+
+    with pytest.raises(
+        bundle_diagnostics.BundleDiagnosticError,
+        match="support bundle is unreadable",
+    ):
+        bundle_diagnostics.load_bundle_records(bundle)

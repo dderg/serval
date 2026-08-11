@@ -136,6 +136,21 @@ class TestBundleCommand:
         assert rc == 1
         assert "manifest has invalid warnings" in capsys.readouterr().err
 
+    def test_invalid_utf8_manifest_is_a_controlled_error(
+        self, tmp_path, capsys
+    ):
+        bundle = tmp_path / "serval-support-invalid-utf8.tar.gz"
+        payload = b'{"warnings":["\xff"],"event_files":{}}'
+        with tarfile.open(bundle, "w:gz") as archive:
+            info = tarfile.TarInfo("manifest.json")
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+
+        rc = logq.main(["bundle", str(bundle)])
+
+        assert rc == 1
+        assert "support bundle is unreadable" in capsys.readouterr().err
+
 
 class TestValidateSince:
     @pytest.mark.parametrize("value", ["10m", "24h", "7d", "30s", "2w"])
