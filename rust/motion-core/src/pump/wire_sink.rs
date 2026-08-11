@@ -279,6 +279,8 @@ impl PieceSink for WireSink {
             start_slot,
             new_head,
             room,
+            guard_recorded_ns: 0,
+            guard_mcu_clock: 0,
         };
         self.send_mcu_frames(key.mcu_id, std::slice::from_ref(&frame))
             .map(|()| mcu_protocol::result_codes::OK)
@@ -350,7 +352,7 @@ impl PieceSink for WireSink {
                 .send_frames(mcu_id, frames);
         }
 
-        let send_started_ns = super::transit_trace::send_started_ns();
+        let send_started_ns = super::transit_trace::trace_now_ns();
         let send_started_at = Instant::now();
         let response = self.call_push_pieces(mcu_id, frames);
         let send_elapsed_ns = send_started_at.elapsed().as_nanos() as u64;
@@ -364,6 +366,8 @@ impl PieceSink for WireSink {
                         axis: frame.axis,
                         piece_count: frame.pieces.len() as u32,
                         room: frame.room,
+                        guard_recorded_ns: frame.guard_recorded_ns,
+                        guard_mcu_clock: frame.guard_mcu_clock,
                         send_started_ns,
                         send_elapsed_ns,
                         host_front_start_time: frame
@@ -375,7 +379,7 @@ impl PieceSink for WireSink {
                         result: super::transit_trace::transport_error_result(),
                     });
                 }
-                super::transit_trace::emit_fault_snapshot(
+                super::transit_trace::emit_result_fault_snapshot(
                     "transport_error",
                     super::transit_trace::transport_error_result(),
                 );
@@ -395,6 +399,8 @@ impl PieceSink for WireSink {
                 axis: frame.axis,
                 piece_count: frame.pieces.len() as u32,
                 room: frame.room,
+                guard_recorded_ns: frame.guard_recorded_ns,
+                guard_mcu_clock: frame.guard_mcu_clock,
                 send_started_ns,
                 send_elapsed_ns,
                 host_front_start_time: frame.pieces.first().map_or(0, |piece| piece.start_time),
@@ -404,7 +410,7 @@ impl PieceSink for WireSink {
             });
         }
         if result != mcu_protocol::result_codes::OK {
-            super::transit_trace::emit_fault_snapshot("mcu_reject", result);
+            super::transit_trace::emit_result_fault_snapshot("mcu_reject", result);
             return Err(SendError::mcu_reject(mcu_id, result));
         }
         Ok(())
