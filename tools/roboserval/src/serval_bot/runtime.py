@@ -17,6 +17,7 @@ import signal
 import sqlite3
 import stat
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Protocol
@@ -385,6 +386,8 @@ class WorkerPool:
         timeout_seconds: int,
         hard_grace_seconds: int,
         max_concurrency: int,
+        max_retries: int = 0,
+        retry_delay_seconds: Callable[[int], float] | None = None,
     ) -> None:
         if not 1 <= max_concurrency <= MAX_SLOTS:
             raise ValueError(f"max_concurrency must be between 1 and {MAX_SLOTS}")
@@ -393,6 +396,8 @@ class WorkerPool:
         self._timeout_seconds = timeout_seconds
         self._hard_grace_seconds = hard_grace_seconds
         self._pool = SlotPool(max_concurrency)
+        self._max_retries = max_retries
+        self._retry_delay_seconds = retry_delay_seconds or (lambda _: 0.0)
         self._stop = asyncio.Event()
         self._wake = [asyncio.Event() for _ in self._pool.slot_uids]
 
@@ -489,6 +494,10 @@ class WorkerPool:
             if fatal is not None:
                 raise fatal
             reaped = reap_slot(slot_uid)
+            if self._schedule_retry(event, error, slot_uid, started, reaped):
+                if cancelled:
+                    raise asyncio.CancelledError
+                return
             self._database.finish(event.delivery_id, "failed", error)
             self._log_event("event timed out", event, slot_uid, started, extra={"error": error, "reaped": reaped})
             if cancelled:
@@ -498,6 +507,10 @@ class WorkerPool:
         if outcome == "failure":
             await self._drain(event, slot_uid, future)
             reaped = reap_slot(slot_uid)
+            if self._schedule_retry(event, error, slot_uid, started, reaped):
+                if cancelled:
+                    raise asyncio.CancelledError
+                return
             self._database.finish(event.delivery_id, "failed", error)
             self._log_event("event failed", event, slot_uid, started, extra={"error": error, "reaped": reaped})
             if cancelled:
@@ -511,8 +524,35 @@ class WorkerPool:
             if cancelled:
                 raise asyncio.CancelledError
             return
-
         raise RuntimeError(f"unreachable outcome for {event.delivery_id}")
+
+    def _schedule_retry(
+        self,
+        event: Event,
+        error: str | None,
+        slot_uid: int,
+        started: float,
+        reaped: int,
+    ) -> bool:
+        if error is None or not 0 < event.attempts <= self._max_retries:
+            return False
+        delay = self._retry_delay_seconds(event.attempts)
+        if not self._database.schedule_retry(event.delivery_id, delay, error):
+            return False
+        self._log_event(
+            "event retry scheduled",
+            event,
+            slot_uid,
+            started,
+            extra={
+                "error": error,
+                "reaped": reaped,
+                "attempt": event.attempts,
+                "max_retries": self._max_retries,
+                "retry_in_seconds": round(delay, 1),
+            },
+        )
+        return True
 
     async def _stop_agent(self, event: Event) -> None:
         """Call agent.stop off-loop; wait for it even under pool cancellation.

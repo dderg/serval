@@ -122,6 +122,8 @@ def create_app(
         timeout_seconds=settings.task_timeout_seconds,
         hard_grace_seconds=settings.task_hard_grace_seconds,
         max_concurrency=settings.max_concurrency,
+        max_retries=settings.event_max_retries,
+        retry_delay_seconds=settings.retry_delay_seconds,
     )
     if start_poller and proxy is None:
         raise RuntimeError("GitHub proxy is required when polling is enabled")
@@ -188,6 +190,13 @@ def create_app(
     @app.get("/events")
     async def events(limit: int = 100) -> list[dict[str, Any]]:
         return database.recent_events(max(1, min(limit, 500)))
+
+    @app.post("/replay/{delivery_id}")
+    async def replay(delivery_id: str) -> dict[str, str]:
+        if not database.replay(delivery_id):
+            raise HTTPException(status_code=409, detail="event is not replayable")
+        worker.wake()
+        return {"delivery_id": delivery_id, "state": "queued"}
 
     @app.get("/actions/{owner}/{repository}/{issue_number}")
     async def actions(owner: str, repository: str, issue_number: int) -> list[dict[str, Any]]:

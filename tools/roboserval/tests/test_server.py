@@ -164,6 +164,8 @@ def _pool(database: Database, agent: Any, **kwargs: Any) -> WorkerPool:
         timeout_seconds=kwargs.pop("timeout_seconds", 10),
         hard_grace_seconds=kwargs.pop("hard_grace_seconds", 5),
         max_concurrency=kwargs.pop("max_concurrency", 1),
+        max_retries=kwargs.pop("max_retries", 0),
+        retry_delay_seconds=kwargs.pop("retry_delay_seconds", None),
     )
 
 
@@ -320,6 +322,33 @@ async def test_worker_pool_failure_marks_failed_before_next_claim(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_worker_pool_retries_with_bounded_schedule(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    agent = FakeAgent(error=RuntimeError("temporary"))
+    delays: list[int] = []
+
+    def retry_delay(attempt: int) -> float:
+        delays.append(attempt)
+        return 0
+
+    pool = _pool(database, agent, max_retries=3, retry_delay_seconds=retry_delay)
+    database.record_event("first", "issues.opened", "dderg/serval", 7, "reporter", _payload())
+    task = asyncio.create_task(pool.run())
+    try:
+        await _wait_until(lambda: _event_row(database, "first")["state"] == "failed")
+        row = _event_row(database, "first")
+        assert row["attempts"] == 4
+        assert "RuntimeError: temporary" in row["error"]
+        assert delays == [1, 2, 3]
+        assert len(agent.runs) == 4
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        database.close()
+
+
+@pytest.mark.asyncio
 async def test_worker_pool_timeout_stops_drains_before_next_claim(tmp_path: Path) -> None:
     database = Database(tmp_path / "bot.sqlite")
     agent = DrainingAgent()
@@ -382,6 +411,31 @@ async def test_worker_pool_serializes_same_issue_events(tmp_path: Path) -> None:
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_private_replay_endpoint_requeues_failed_event(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    database.record_event("delivery", "issues.opened", "dderg/serval", 7, "reporter", _payload())
+    assert database.claim() is not None
+    database.finish("delivery", "failed", "temporary")
+    app = create_app(
+        _settings(tmp_path),
+        _policies(),
+        database,
+        FakeAgent(),
+        start_worker=False,
+        start_poller=False,
+    )
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post("/replay/delivery")
+            duplicate = await client.post("/replay/delivery")
+        assert response.status_code == 200
+        assert response.json() == {"delivery_id": "delivery", "state": "queued"}
+        assert duplicate.status_code == 409
+    finally:
         database.close()
 
 

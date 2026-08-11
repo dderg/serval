@@ -6,7 +6,7 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS events (
     attempts INTEGER NOT NULL DEFAULT 0,
     error TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    available_at TEXT
 );
 CREATE INDEX IF NOT EXISTS events_state_idx ON events(state, created_at);
 CREATE TABLE IF NOT EXISTS actions (
@@ -121,6 +122,12 @@ class Database:
         with self._lock:
             self._connection.executescript(_SCHEMA)
             self._migrate_action_uniqueness()
+            self._migrate_event_retry()
+
+    def _migrate_event_retry(self) -> None:
+        columns = {str(row["name"]) for row in self._connection.execute("PRAGMA table_info(events)")}
+        if "available_at" not in columns:
+            self._connection.execute("ALTER TABLE events ADD COLUMN available_at TEXT")
 
     def _migrate_action_uniqueness(self) -> None:
         """Enforce one action kind per delivery; refuse ambiguous history loudly."""
@@ -232,6 +239,7 @@ class Database:
                 """
                 SELECT * FROM events AS candidate
                 WHERE candidate.state='queued'
+                  AND (candidate.available_at IS NULL OR candidate.available_at <= ?)
                   AND NOT EXISTS (
                       SELECT 1 FROM events AS active
                       WHERE active.state='running'
@@ -239,12 +247,14 @@ class Database:
                         AND active.issue_number=candidate.issue_number
                   )
                 ORDER BY candidate.created_at LIMIT 1
-                """
+                """,
+                (_now(),),
             ).fetchone()
             if row is None:
                 return None
             connection.execute(
-                "UPDATE events SET state='running', attempts=attempts+1, updated_at=? WHERE delivery_id=?",
+                "UPDATE events SET state='running', attempts=attempts+1, available_at=NULL, updated_at=? "
+                "WHERE delivery_id=?",
                 (_now(), row["delivery_id"]),
             )
             return _event_from_row(row, state="running", attempts=int(row["attempts"]) + 1)
@@ -259,6 +269,25 @@ class Database:
             )
             if cursor.rowcount != 1:
                 raise RuntimeError(f"event is not running: {delivery_id}")
+
+    def schedule_retry(self, delivery_id: str, delay_seconds: float, error: str) -> bool:
+        available_at = (datetime.now(UTC) + timedelta(seconds=delay_seconds)).isoformat(timespec="microseconds")
+        with self._transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE events SET state='queued', error=?, available_at=?, updated_at=? "
+                "WHERE delivery_id=? AND state='running'",
+                (error, available_at, _now(), delivery_id),
+            )
+        return cursor.rowcount == 1
+
+    def replay(self, delivery_id: str) -> bool:
+        with self._transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE events SET state='queued', error=NULL, available_at=NULL, updated_at=? "
+                "WHERE delivery_id=? AND state='failed'",
+                (_now(), delivery_id),
+            )
+        return cursor.rowcount == 1
 
     def add_action(
         self,
