@@ -53,6 +53,22 @@ fn compute_ack_clock_projects_from_host_time() {
 }
 
 #[test]
+fn ack_clock_and_freq_projects_across_endpoint_command_delay() {
+    let (mut router, clock) = make_router();
+    let mcu = router.claim_mcu("ethercat");
+    let base_host = instant_to_f64(clock.now());
+    router
+        .set_clock_est(mcu, 1_000_000.0, base_host, 7_000_000)
+        .unwrap();
+
+    clock.advance(Duration::from_millis(31));
+
+    let (projected, freq) = router.ack_clock_and_freq(mcu).unwrap();
+    assert_eq!(freq, 1_000_000.0);
+    assert_eq!(projected, 7_031_000);
+}
+
+#[test]
 fn set_clock_est_rebased_advances_with_mock_clock() {
     let (mut router, clock) = make_router();
     let mcu = router.claim_mcu("mcu");
