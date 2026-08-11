@@ -10,6 +10,7 @@ from serval_bot.auth import SIGNATURE_HEADER, TIMESTAMP_HEADER, sign
 from serval_bot.config import ProxySettings
 from serval_bot.policy import PolicySet
 from serval_bot.proxy import (
+    CodePullRequest,
     DispatchRequest,
     GitHubApi,
     GitHubFailure,
@@ -64,6 +65,10 @@ class FakeGitHubApi:
         self.calls.append("poll_events")
         self.polls.append(request)
         return {"events": []}
+
+    async def create_code_pull_request(self, request) -> dict[str, Any]:
+        self.calls.append("create_code_pull_request")
+        return {"number": 12, "url": "https://example.test/pull/12", "head_sha": request.head_sha}
 
     async def dispatch_sim(self, request) -> dict[str, Any]:
         self.calls.append("dispatch_sim")
@@ -136,6 +141,15 @@ _ENDPOINT_PAYLOADS = {
         "issue_number": 7,
         "workflow": "ci-sim-e2e.yaml",
         "ref": "sota-motion",
+    },
+    "/github/code-pull-request": {
+        "repo": "dderg/serval",
+        "issue_number": 7,
+        "actor": "dderg",
+        "branch": "serval/7-bounded-queue",
+        "head_sha": "c" * 40,
+        "title": "Bound queue handling",
+        "body": "Closes #7",
     },
     "/github/sim-result": {"repo": "dderg/serval", "run_id": 42},
 }
@@ -270,6 +284,75 @@ async def test_github_api_submits_native_review_with_inline_comments() -> None:
         "body": "Needs correction.",
         "comments": [{"path": "src/main.py", "line": 12, "side": "RIGHT", "body": "Fix this."}],
     }
+
+
+@pytest.mark.asyncio
+async def test_code_pull_request_requires_write_permission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    published = False
+
+    def publish(*args: Any, **kwargs: Any) -> None:
+        nonlocal published
+        published = True
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/dderg/serval/collaborators/reporter/permission"
+        return httpx.Response(200, json={"permission": "read"})
+
+    monkeypatch.setattr("serval_bot.proxy.CredentialedWorkspace.publish_issue", publish)
+    api = GitHubApi(StaticTokenProvider(), 20_000, httpx.MockTransport(handler), tmp_path)
+    try:
+        with pytest.raises(GitHubFailure, match="write access"):
+            await api.create_code_pull_request(
+                CodePullRequest(
+                    repo="dderg/serval",
+                    issue_number=7,
+                    actor="reporter",
+                    branch="serval/7-bounded-queue",
+                    head_sha="c" * 40,
+                    title="Bound queue handling",
+                    body="Closes #7",
+                )
+            )
+    finally:
+        await api.close()
+    assert not published
+
+
+@pytest.mark.asyncio
+async def test_code_pull_request_publishes_after_permission_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    published: list[dict[str, Any]] = []
+
+    def publish(*args: Any, **kwargs: Any) -> None:
+        published.append(kwargs)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/collaborators/dderg/permission"):
+            return httpx.Response(200, json={"permission": "push"})
+        if request.method == "GET":
+            return httpx.Response(200, json={"default_branch": "main"})
+        assert request.url.path == "/repos/dderg/serval/pulls"
+        return httpx.Response(201, json={"number": 12, "html_url": "https://example.test/pull/12"})
+
+    monkeypatch.setattr("serval_bot.proxy.CredentialedWorkspace.publish_issue", publish)
+    api = GitHubApi(StaticTokenProvider(), 20_000, httpx.MockTransport(handler), tmp_path)
+    try:
+        result = await api.create_code_pull_request(
+            CodePullRequest(
+                repo="dderg/serval",
+                issue_number=7,
+                actor="dderg",
+                branch="serval/7-bounded-queue",
+                head_sha="c" * 40,
+                title="Bound queue handling",
+                body="Closes #7",
+            )
+        )
+    finally:
+        await api.close()
+    assert result["number"] == 12
+    assert published == [{"ref": "serval/7-bounded-queue", "expected_sha": "c" * 40, "require_skip_ci": False}]
 
 
 @pytest.mark.asyncio
