@@ -60,6 +60,8 @@ class BotSettings:
     poll_overlap_seconds: int
     task_hard_grace_seconds: int = 60
     max_concurrency: int = 1
+    telegram_token: str | None = None
+    telegram_chat_id: str | None = None
 
     @classmethod
     def from_env(cls) -> BotSettings:
@@ -67,6 +69,10 @@ class BotSettings:
         proxy_key = os.environ.get("SERVAL_BOT_PROXY_HMAC_KEY", "").strip() or None
         if (proxy_url is None) != (proxy_key is None):
             raise ConfigurationError("SERVAL_BOT_PROXY_URL and SERVAL_BOT_PROXY_HMAC_KEY must be set together")
+        telegram_token = os.environ.get("SERVAL_BOT_TELEGRAM_TOKEN", "").strip() or None
+        telegram_chat_id = os.environ.get("SERVAL_BOT_TELEGRAM_CHAT_ID", "").strip() or None
+        if (telegram_token is None) != (telegram_chat_id is None):
+            raise ConfigurationError("SERVAL_BOT_TELEGRAM_TOKEN and SERVAL_BOT_TELEGRAM_CHAT_ID must be set together")
         command = tuple(shlex.split(os.environ.get("SERVAL_BOT_OMP_COMMAND", "omp")))
         if not command:
             raise ConfigurationError("SERVAL_BOT_OMP_COMMAND must not be empty")
@@ -86,6 +92,8 @@ class BotSettings:
             max_concurrency=_bounded_int("SERVAL_BOT_MAX_CONCURRENCY", 1, 1, MAX_SLOTS),
             poll_interval_seconds=_positive_int("SERVAL_BOT_POLL_INTERVAL_SECONDS", 30),
             poll_overlap_seconds=_positive_int("SERVAL_BOT_POLL_OVERLAP_SECONDS", 300),
+            telegram_token=telegram_token,
+            telegram_chat_id=telegram_chat_id,
         )
 
     def ensure_paths(self) -> None:

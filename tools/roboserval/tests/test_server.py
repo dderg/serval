@@ -118,6 +118,14 @@ class FakePollSource:
         return {"events": self.events}
 
 
+class FakeNotifier:
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    def notify_event_failure(self, event: Event) -> None:
+        self.events.append(event.delivery_id)
+
+
 class FailingPollSource:
     def poll_events(self, repo: str, since: str, bot_login: str) -> dict[str, Any]:
         raise RuntimeError(f"poll failed for {repo} since {since} as {bot_login}")
@@ -164,6 +172,7 @@ def _pool(database: Database, agent: Any, **kwargs: Any) -> WorkerPool:
         timeout_seconds=kwargs.pop("timeout_seconds", 10),
         hard_grace_seconds=kwargs.pop("hard_grace_seconds", 5),
         max_concurrency=kwargs.pop("max_concurrency", 1),
+        notifier=kwargs.pop("notifier", None),
     )
 
 
@@ -303,7 +312,8 @@ async def test_worker_pool_success_marks_done_with_slot(tmp_path: Path) -> None:
 async def test_worker_pool_failure_marks_failed_before_next_claim(tmp_path: Path) -> None:
     database = Database(tmp_path / "bot.sqlite")
     agent = FakeAgent(error=RuntimeError("boom"))
-    pool = _pool(database, agent)
+    notifier = FakeNotifier()
+    pool = _pool(database, agent, notifier=notifier)
     database.record_event("first", "issues.opened", "dderg/serval", 7, "reporter", _payload())
     task = asyncio.create_task(pool.run())
     try:
@@ -312,6 +322,7 @@ async def test_worker_pool_failure_marks_failed_before_next_claim(tmp_path: Path
         assert "RuntimeError: boom" in row["error"]
         assert agent.stops == []
         assert len(agent.runs) == 1
+        await _wait_until(lambda: notifier.events == ["first"])
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):

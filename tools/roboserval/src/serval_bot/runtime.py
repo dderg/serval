@@ -55,6 +55,8 @@ _SCRUBBED_ENV_KEYS: tuple[str, ...] = (
     "GITHUB_WEBHOOK_SECRET",
     "SERVAL_BOT_PROXY_HMAC_KEY",
     "SERVAL_BOT_GITHUB_TOKEN_PATH",
+    "SERVAL_BOT_TELEGRAM_TOKEN",
+    "SERVAL_BOT_TELEGRAM_CHAT_ID",
 )
 
 
@@ -62,6 +64,10 @@ class Agent(Protocol):
     def run(self, event: Event, slot_uid: int | None) -> str: ...
 
     def stop(self, delivery_id: str) -> None: ...
+
+
+class FailureNotifier(Protocol):
+    def notify_event_failure(self, event: Event) -> None: ...
 
 
 def slot_uids(max_concurrency: int) -> tuple[int, ...]:
@@ -385,6 +391,7 @@ class WorkerPool:
         timeout_seconds: int,
         hard_grace_seconds: int,
         max_concurrency: int,
+        notifier: FailureNotifier | None = None,
     ) -> None:
         if not 1 <= max_concurrency <= MAX_SLOTS:
             raise ValueError(f"max_concurrency must be between 1 and {MAX_SLOTS}")
@@ -393,6 +400,7 @@ class WorkerPool:
         self._timeout_seconds = timeout_seconds
         self._hard_grace_seconds = hard_grace_seconds
         self._pool = SlotPool(max_concurrency)
+        self._notifier = notifier
         self._stop = asyncio.Event()
         self._wake = [asyncio.Event() for _ in self._pool.slot_uids]
 
@@ -491,6 +499,7 @@ class WorkerPool:
             reaped = reap_slot(slot_uid)
             self._database.finish(event.delivery_id, "failed", error)
             self._log_event("event timed out", event, slot_uid, started, extra={"error": error, "reaped": reaped})
+            await self._notify_failure(event, slot_uid, started)
             if cancelled:
                 raise asyncio.CancelledError
             return
@@ -500,6 +509,7 @@ class WorkerPool:
             reaped = reap_slot(slot_uid)
             self._database.finish(event.delivery_id, "failed", error)
             self._log_event("event failed", event, slot_uid, started, extra={"error": error, "reaped": reaped})
+            await self._notify_failure(event, slot_uid, started)
             if cancelled:
                 raise asyncio.CancelledError
             return
@@ -511,8 +521,21 @@ class WorkerPool:
             if cancelled:
                 raise asyncio.CancelledError
             return
-
         raise RuntimeError(f"unreachable outcome for {event.delivery_id}")
+
+    async def _notify_failure(self, event: Event, slot_uid: int, started: float) -> None:
+        if self._notifier is None:
+            return
+        try:
+            await asyncio.to_thread(self._notifier.notify_event_failure, event)
+        except Exception as exc:
+            self._log_event(
+                "failure notification failed",
+                event,
+                slot_uid,
+                started,
+                extra={"error": f"{type(exc).__name__}: {exc}"},
+            )
 
     async def _stop_agent(self, event: Event) -> None:
         """Call agent.stop off-loop; wait for it even under pool cancellation.

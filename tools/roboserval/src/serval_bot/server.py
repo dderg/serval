@@ -17,6 +17,7 @@ from serval_bot.database import Database, PolledEvent
 from serval_bot.policy import PolicySet
 from serval_bot.proxy_client import ProxyClient
 from serval_bot.runtime import Agent, WorkerPool
+from serval_bot.telegram import TelegramNotifier
 
 log = logging.getLogger(__name__)
 
@@ -116,12 +117,18 @@ def create_app(
     start_worker: bool = True,
     start_poller: bool = True,
 ) -> FastAPI:
+    notifier = (
+        TelegramNotifier(database, settings.telegram_token, settings.telegram_chat_id)
+        if settings.telegram_token is not None and settings.telegram_chat_id is not None
+        else None
+    )
     worker = WorkerPool(
         database,
         agent,
         timeout_seconds=settings.task_timeout_seconds,
         hard_grace_seconds=settings.task_hard_grace_seconds,
         max_concurrency=settings.max_concurrency,
+        notifier=notifier,
     )
     if start_poller and proxy is None:
         raise RuntimeError("GitHub proxy is required when polling is enabled")

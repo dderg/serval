@@ -7,6 +7,8 @@ from serval_bot.policy import Mode, PolicySet
 def test_bot_settings_reads_inline_repository_policy(monkeypatch) -> None:
     monkeypatch.delenv("SERVAL_BOT_PROXY_URL", raising=False)
     monkeypatch.delenv("SERVAL_BOT_PROXY_HMAC_KEY", raising=False)
+    monkeypatch.delenv("SERVAL_BOT_TELEGRAM_TOKEN", raising=False)
+    monkeypatch.delenv("SERVAL_BOT_TELEGRAM_CHAT_ID", raising=False)
     monkeypatch.setenv("SERVAL_BOT_MODEL", "test/model")
     monkeypatch.setenv(
         "SERVAL_BOT_REPOSITORY_POLICY",
@@ -18,6 +20,32 @@ def test_bot_settings_reads_inline_repository_policy(monkeypatch) -> None:
     policy = PolicySet.parse(settings.policy_toml).require("dderg/serval")
     assert policy.mode is Mode.TRIAGE
     assert settings.task_timeout_seconds == 3600
+
+
+def test_bot_settings_reads_telegram_credentials_as_a_pair(monkeypatch) -> None:
+    monkeypatch.delenv("SERVAL_BOT_PROXY_URL", raising=False)
+    monkeypatch.delenv("SERVAL_BOT_PROXY_HMAC_KEY", raising=False)
+    monkeypatch.setenv("SERVAL_BOT_MODEL", "test/model")
+    monkeypatch.setenv("SERVAL_BOT_REPOSITORY_POLICY", '[repositories."dderg/serval"]')
+    monkeypatch.setenv("SERVAL_BOT_TELEGRAM_TOKEN", "telegram-secret")
+    monkeypatch.setenv("SERVAL_BOT_TELEGRAM_CHAT_ID", "123456")
+
+    settings = BotSettings.from_env()
+
+    assert settings.telegram_token == "telegram-secret"
+    assert settings.telegram_chat_id == "123456"
+
+
+def test_bot_settings_rejects_partial_telegram_configuration(monkeypatch) -> None:
+    monkeypatch.delenv("SERVAL_BOT_PROXY_URL", raising=False)
+    monkeypatch.delenv("SERVAL_BOT_PROXY_HMAC_KEY", raising=False)
+    monkeypatch.setenv("SERVAL_BOT_MODEL", "test/model")
+    monkeypatch.setenv("SERVAL_BOT_REPOSITORY_POLICY", '[repositories."dderg/serval"]')
+    monkeypatch.setenv("SERVAL_BOT_TELEGRAM_TOKEN", "telegram-secret")
+    monkeypatch.delenv("SERVAL_BOT_TELEGRAM_CHAT_ID", raising=False)
+
+    with pytest.raises(ConfigurationError, match="must be set together"):
+        BotSettings.from_env()
 
 
 def _proxy_env(monkeypatch) -> None:
