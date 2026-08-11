@@ -1,5 +1,8 @@
 import importlib.util
+import io
+import json
 import pathlib
+import tarfile
 
 import pytest
 
@@ -56,6 +59,97 @@ class TestLifecycleContractCrossCheck:
     def test_heartbeat_event_appears_in_log_observability_source(self):
         source = LOG_OBSERVABILITY_PATH.read_text()
         assert '"%s"' % logq.EVENT_HEARTBEAT in source
+
+
+def _write_bundle(path, manifest, records):
+    with tarfile.open(path, "w:gz") as archive:
+        for name, payload in (
+            ("manifest.json", json.dumps(manifest).encode()),
+            (
+                "events/host-py.jsonl",
+                b"".join(
+                    json.dumps(record).encode() + b"\n" for record in records
+                ),
+            ),
+        ):
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+
+
+class TestBundleCommand:
+    def test_reports_structured_shutdown_and_incomplete_evidence(
+        self, tmp_path, capsys
+    ):
+        bundle = tmp_path / "serval-support-test.tar.gz"
+        _write_bundle(
+            bundle,
+            {
+                "created_utc": "2026-08-10T12:00:00+00:00",
+                "cutoff_utc": "2026-08-10T11:30:00+00:00",
+                "software_version": "test",
+                "warnings": [],
+                "klippy_log_truncated": True,
+                "event_files": {
+                    "host-py.jsonl": {
+                        "malformed": 0,
+                        "scan_truncated": False,
+                    }
+                },
+            },
+            [
+                {
+                    **_rec(
+                        "2026-08-10T11:59:00.000Z",
+                        msg="MCU 'mcu' shutdown: Timer too close\nDumping config",
+                    ),
+                    "session_id": "k-1",
+                }
+            ],
+        )
+
+        rc = logq.main(["bundle", str(bundle)])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "evidence: INCOMPLETE" in out
+        assert "klippy.log is truncated" in out
+        assert "sessions: k-1" in out
+        assert "Timer too close" in out
+
+    def test_rejects_archive_without_manifest(self, tmp_path, capsys):
+        bundle = tmp_path / "serval-support-test.tar.gz"
+        with tarfile.open(bundle, "w:gz"):
+            pass
+
+        rc = logq.main(["bundle", str(bundle)])
+
+        assert rc == 1
+        assert "has no manifest.json" in capsys.readouterr().err
+
+    def test_rejects_invalid_manifest_schema(self, tmp_path, capsys):
+        bundle = tmp_path / "serval-support-test.tar.gz"
+        _write_bundle(bundle, {"warnings": None, "event_files": {}}, [])
+
+        rc = logq.main(["bundle", str(bundle)])
+
+        assert rc == 1
+        assert "manifest has invalid warnings" in capsys.readouterr().err
+
+    def test_invalid_utf8_manifest_is_a_controlled_error(
+        self, tmp_path, capsys
+    ):
+        bundle = tmp_path / "serval-support-invalid-utf8.tar.gz"
+        payload = b'{"warnings":["\xff"],"event_files":{}}'
+        with tarfile.open(bundle, "w:gz") as archive:
+            info = tarfile.TarInfo("manifest.json")
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+
+        rc = logq.main(["bundle", str(bundle)])
+
+        assert rc == 1
+        assert "support bundle is unreadable" in capsys.readouterr().err
 
 
 class TestValidateSince:

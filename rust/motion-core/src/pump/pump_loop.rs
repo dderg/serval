@@ -559,6 +559,8 @@ impl<S: PieceSink> Pump<S> {
                     new_head: q.pushed.wrapping_add(n),
                     room: q.room(),
                     pieces: f.pieces,
+                    guard_recorded_ns: 0,
+                    guard_mcu_clock: 0,
                 }
             })
             .collect()
@@ -570,8 +572,13 @@ impl<S: PieceSink> Pump<S> {
     // endpoint ring) trip a cryptic -308 PieceStartInPast after the fact.
     // Mirrors the MCU's MAX_START_IN_PAST_SECS=200us threshold with a margin
     // above host-projection jitter so a healthy print never false-aborts.
-    fn guard_pieces_not_in_past(&self, mcu_id: u32, bundle: &[AxisFrame], context: &str) {
+    fn guard_pieces_not_in_past(&self, mcu_id: u32, bundle: &mut [AxisFrame], context: &str) {
+        let guard_recorded_ns = super::transit_trace::trace_now_ns();
         if let Some((mcu_now, freq)) = (self.callbacks.mcu_clock_of)(mcu_id) {
+            for frame in &mut *bundle {
+                frame.guard_recorded_ns = guard_recorded_ns;
+                frame.guard_mcu_clock = mcu_now;
+            }
             if freq > 0.0 {
                 let guard_ticks = (pump_past_guard_secs() * freq) as u64;
                 for af in bundle {
@@ -607,7 +614,7 @@ impl<S: PieceSink> Pump<S> {
                                 "[pump-guard] piece already in the MCU's past {context} — failing loud on host before the MCU/endpoint trips -308"
                             );
                             eprintln!(
-                                "pump: piece in past {context} — mcu {mcu_id} axis {} start_time={} mcu_now={mcu_now} deficit_us={deficit_us} piece_idx={piece_idx} is_hold={} duration_s={} coeff_count={} queue_lead_secs={queue_lead_secs} queue_pending={queue_pending} queue_staged_motion={queue_staged_motion} cohort_active={} — aborting host before MCU -308",
+                                "pump: piece in past {context} — mcu {mcu_id} axis {} start_time={} mcu_now={mcu_now} deficit_us={deficit_us} piece_idx={piece_idx} is_hold={} duration_s={} coeff_count={} cohort_active={}",
                                 af.axis,
                                 piece.start_time,
                                 super::sched::is_hold_piece(piece),
@@ -759,8 +766,8 @@ impl<S: PieceSink> Pump<S> {
                     }
                     activity = true;
                     let mcu_id = frames[0].key.mcu_id;
-                    let bundle = self.build_bundle(frames);
-                    self.guard_pieces_not_in_past(mcu_id, &bundle, "at send");
+                    let mut bundle = self.build_bundle(frames);
+                    self.guard_pieces_not_in_past(mcu_id, &mut bundle, "at send");
                     let send_result = self.send_bundle_logged(mcu_id, &bundle);
                     match send_result {
                         Ok(()) => {
@@ -807,7 +814,7 @@ impl<S: PieceSink> Pump<S> {
                             );
                             self.guard_pieces_not_in_past(
                                 mcu_id,
-                                &bundle,
+                                &mut bundle,
                                 "after a failed send (transport gave no response \
                                  while the piece's scheduling lead ran out)",
                             );
