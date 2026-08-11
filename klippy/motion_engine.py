@@ -248,7 +248,7 @@ class MotionEngineWrapper:
         )
 
     def set_position(self, x, y, z):
-        return self._engine.set_position(x, y, z, self._reactor.monotonic())
+        return self._engine.set_position(x, y, z)
 
     def queued_motion_secs(self):
         return self._engine.queued_motion_secs() or 0.0

@@ -10,6 +10,9 @@ use pyo3::FromPyObject;
 fn unsupported_curve(py: Python<'_>, message: &'static str) -> PyResult<()> {
     py.detach(|| Err(PyRuntimeError::new_err(message)))
 }
+pub(super) fn motion_history_host_now() -> f64 {
+    host_rt::clock::instant_to_f64(std::time::Instant::now())
+}
 
 #[derive(FromPyObject)]
 struct McuTopology {
@@ -88,12 +91,7 @@ impl PyMotionEngine {
     /// sections are re-read here with the same reader
     /// (`_config_doc.read_motion_settings`) klippy used at config time, so
     /// the planner cannot drift from what the host validated and reported.
-    fn init_planner(
-        &self,
-        config_text: &str,
-        mcus: Vec<McuTopology>,
-        host_now: f64,
-    ) -> PyResult<()> {
+    fn init_planner(&self, config_text: &str, mcus: Vec<McuTopology>) -> PyResult<()> {
         if self.planner.lock_ok().is_some() {
             return Err(PyRuntimeError::new_err("planner already initialized"));
         }
@@ -107,7 +105,7 @@ impl PyMotionEngine {
         let mcus: Vec<McuTopologyInput> = mcus.into_iter().map(McuTopology::into_core).collect();
         let (ec_conns, mcu_configs) = self.resolve_mcu_topology(&mcus)?;
         let machine = self.machine_from_gcode(*self.commanded_pos.lock_ok());
-        self.rebase_motion_history_after_position_set(host_now, machine);
+        self.rebase_motion_history_after_position_set(machine);
 
         let (ethercat_mcu_ids, host_ios, ring_depth_table) =
             self.build_transport_maps(&mcu_configs)?;
@@ -306,8 +304,8 @@ impl PyMotionEngine {
         *self.last_g5_pq.lock_ok() = None;
         Ok(())
     }
-    #[pyo3(signature = (x, y, z, host_now))]
-    fn set_position(&self, py: Python<'_>, x: f64, y: f64, z: f64, host_now: f64) -> PyResult<()> {
+    #[pyo3(signature = (x, y, z))]
+    fn set_position(&self, py: Python<'_>, x: f64, y: f64, z: f64) -> PyResult<()> {
         let gcode = geometry::GcodePos([x, y, z]);
         {
             let mut pos = self.commanded_pos.lock_ok();
@@ -321,7 +319,7 @@ impl PyMotionEngine {
         // the forward warp while the stream odometer takes the gcode value.
         let machine = self.machine_from_gcode(gcode);
         self.reseed_mcus_after_position_set(py, gcode, machine)?;
-        self.rebase_motion_history_after_position_set(host_now, machine);
+        self.rebase_motion_history_after_position_set(machine);
 
         Ok(())
     }
@@ -658,11 +656,8 @@ impl PyMotionEngine {
         Ok(())
     }
 
-    fn rebase_motion_history_after_position_set(
-        &self,
-        host_now: f64,
-        machine: geometry::MachinePos,
-    ) {
+    fn rebase_motion_history_after_position_set(&self, machine: geometry::MachinePos) {
+        let host_now = motion_history_host_now();
         let configs: Vec<crate::mcu_config::McuAxisConfig> =
             self.mcu_axis_configs.lock_ok().clone();
         let mut store = self.motion_history.lock_ok();

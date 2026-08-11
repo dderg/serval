@@ -1,4 +1,4 @@
-use super::homing_api::required_motor_axes;
+use super::{homing_api::required_motor_axes, planner_api::motion_history_host_now};
 use crate::kinematics::KinematicsKind;
 
 #[test]
@@ -39,4 +39,13 @@ fn unknown_axis_fails_loudly() {
         required_motor_axes(KinematicsKind::Cartesian, Some(4)),
         Err(4)
     );
+}
+
+#[test]
+fn history_rebases_use_the_router_clock_domain() {
+    let before = host_rt::clock::instant_to_f64(std::time::Instant::now());
+    let history_now = motion_history_host_now();
+    let after = host_rt::clock::instant_to_f64(std::time::Instant::now());
+
+    assert!((before..=after).contains(&history_now));
 }
