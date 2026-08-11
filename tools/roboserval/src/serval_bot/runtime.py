@@ -440,11 +440,15 @@ class WorkerPool:
 
     async def _worker_loop(self, slot_uid: int, wake: asyncio.Event) -> None:
         while not self._stop.is_set():
+            wake.clear()
             event = self._database.claim()
             if event is None:
-                wake.clear()
-                with suppress(TimeoutError):
-                    await asyncio.wait_for(wake.wait(), timeout=1.0)
+                retry_delay = self._database.next_retry_delay_seconds()
+                if retry_delay is None:
+                    await wake.wait()
+                else:
+                    with suppress(TimeoutError):
+                        await asyncio.wait_for(wake.wait(), timeout=retry_delay)
                 continue
             slot_uid = await self._pool.acquire()
             try:

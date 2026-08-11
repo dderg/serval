@@ -259,6 +259,17 @@ class Database:
             )
             return _event_from_row(row, state="running", attempts=int(row["attempts"]) + 1)
 
+    def next_retry_delay_seconds(self) -> float | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT MIN(available_at) AS available_at FROM events WHERE state='queued' AND available_at IS NOT NULL"
+            ).fetchone()
+        available_at = row["available_at"] if row is not None else None
+        if not isinstance(available_at, str):
+            return None
+        deadline = datetime.fromisoformat(available_at)
+        return max(0.0, (deadline - datetime.now(UTC)).total_seconds())
+
     def finish(self, delivery_id: str, state: EventState, error: str | None = None) -> None:
         if state not in {"done", "failed", "skipped"}:
             raise ValueError(f"terminal event state required: {state}")

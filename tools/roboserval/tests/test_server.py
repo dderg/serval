@@ -349,6 +349,30 @@ async def test_worker_pool_retries_with_bounded_schedule(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_worker_pool_restores_future_retry_without_external_wake(tmp_path: Path) -> None:
+    path = tmp_path / "bot.sqlite"
+    database = Database(path)
+    database.record_event("first", "issues.opened", "dderg/serval", 7, "reporter", _payload())
+    assert database.claim() is not None
+    assert database.schedule_retry("first", 0.05, "temporary")
+    database.close()
+
+    restored = Database(path)
+    agent = FakeAgent()
+    pool = _pool(restored, agent)
+    task = asyncio.create_task(pool.run())
+    try:
+        await _wait_until(lambda: _event_row(restored, "first")["state"] == "done")
+        assert [delivery for delivery, _ in agent.runs] == ["first"]
+        assert _event_row(restored, "first")["attempts"] == 2
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        restored.close()
+
+
+@pytest.mark.asyncio
 async def test_worker_pool_timeout_stops_drains_before_next_claim(tmp_path: Path) -> None:
     database = Database(tmp_path / "bot.sqlite")
     agent = DrainingAgent()
