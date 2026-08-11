@@ -91,6 +91,12 @@ impl HistoryPiece {
             position: self.end_position(),
         }
     }
+    fn startpoint(&self) -> AxisEndpoint {
+        AxisEndpoint {
+            host: self.start_host,
+            position: eval_chebyshev(self.live_coeffs(), -1.0),
+        }
+    }
 
     fn is_rest_at(&self, position: f64) -> bool {
         let coeffs = self.live_coeffs();
@@ -442,6 +448,17 @@ impl HistoryStore {
             Some(front) => clock < front.start_clock,
             None => !self.endpoints.contains_key(&key),
         }
+    }
+    pub fn initial_hold_state(&self, key: AxisKey) -> Option<AxisState> {
+        if self.evicted.get(&key).copied().unwrap_or(0) != 0
+            || self.holds_before_ring.contains_key(&key)
+        {
+            return None;
+        }
+        self.rings
+            .get(&key)?
+            .front()
+            .map(|piece| piece.startpoint().hold_state())
     }
 
     /// Axis state at an MCU clock reading from the same MCU the pieces were

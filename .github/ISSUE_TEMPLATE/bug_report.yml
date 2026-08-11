@@ -1,0 +1,38 @@
+name: Bug report
+description: Report a Serval problem.
+title: ""
+labels:
+  - bug
+body:
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the expected and actual results.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How can we reproduce it?
+      description: List the steps or commands.
+
+  - type: textarea
+    id: support_bundle
+    attributes:
+      label: Support bundle
+      description: Run CREATE_SUPPORT_BUNDLE. Download the archive from Logs. Drag it here.
+
+  - type: textarea
+    id: version
+    attributes:
+      label: Version and printer details
+      description: Add the Serval version, printer, host, and MCU.
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Anything else?
+      description: Add screenshots, video, or links.

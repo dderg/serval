@@ -365,6 +365,12 @@ impl PyMotionEngine {
             match store.state_at_host(key, query_host, Some(host_now)) {
                 Ok(st) => motor_state[axis] = Some(st),
                 Err(crate::motion_history::HistoryError::NoHistoryForAxis(_)) => {}
+                Err(e @ crate::motion_history::HistoryError::BeforeRetainedWindow { .. }) => {
+                    let Some(initial) = store.initial_hold_state(key) else {
+                        return Err(PyRuntimeError::new_err(e.to_string()));
+                    };
+                    motor_state[axis] = Some(initial);
+                }
                 Err(e) => return Err(PyRuntimeError::new_err(e.to_string())),
             }
         }
