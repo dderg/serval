@@ -98,7 +98,6 @@ class ProxyClient:
         self,
         repo: str,
         issue_number: int,
-        actor: str,
         branch: str,
         head_sha: str,
         title: str,
@@ -109,7 +108,6 @@ class ProxyClient:
             {
                 "repo": repo,
                 "issue_number": issue_number,
-                "actor": actor,
                 "branch": branch,
                 "head_sha": head_sha,
                 "title": title,

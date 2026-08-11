@@ -554,7 +554,7 @@ def test_followup_without_comment_gets_one_reminder_then_fails(tmp_path: Path, m
         None,
     )
 
-    with pytest.raises(AgentFailure, match="without a response comment"):
+    with pytest.raises(AgentFailure, match="without a pull request or response comment"):
         agent.run(_comment_event("delivery-reminder-followup", 376))
 
     assert len(FakeRpcClient.prompts) == 2
@@ -601,6 +601,10 @@ def test_followup_tools_exclude_classify_and_include_simulator(tmp_path: Path) -
         assert "search_issues" in names
         assert "dispatch_simulator" in names
         assert "get_simulator_result" in names
+        assert "create_code_pull_request" in names
+        code_pull_request = next(tool for tool in tools if tool.name == "create_code_pull_request")
+        assert "your judgment" in code_pull_request.description
+        assert "actor" not in code_pull_request.description
         dispatch = next(tool for tool in tools if tool.name == "dispatch_simulator")
         assert "farm/378-<slug>" in dispatch.description
         assert "default branch" in dispatch.description
@@ -626,11 +630,12 @@ def test_simulator_directive_prompt_states_plain_task(tmp_path: Path) -> None:
     assert "[skip ci]" not in prompt
 
 
-def test_ordinary_followup_prompt_stays_comment_only(tmp_path: Path) -> None:
+def test_issue_followup_prompt_delegates_coding_decision(tmp_path: Path) -> None:
     event = _comment_event("delivery-prompt-ordinary", 382)
     prompt = TriageAgent._prompt(event, _shadow_policies().require("dderg/serval"), "trunk", None)
-    assert "dispatch_simulator" not in prompt
-    assert "Respond concisely." in prompt
+    assert "Use your judgment." in prompt
+    assert "If code is warranted" in prompt
+    assert "create_code_pull_request" in prompt
 
 
 def test_pr_review_tools_exclude_classify(tmp_path: Path) -> None:
@@ -730,11 +735,19 @@ def test_simulator_directive_completion_requires_dispatch_result_comment(tmp_pat
         assert agent._completed(event, None) is completed
 
 
-def test_ordinary_followup_completion_requires_comment_only(tmp_path: Path, monkeypatch: Any) -> None:
+def test_issue_followup_completion_accepts_comment_or_pull_request(tmp_path: Path, monkeypatch: Any) -> None:
     settings = _prepared_settings(tmp_path, monkeypatch)
     policies = _shadow_policies()
     event = _comment_event("delivery-complete-ordinary", 384)
     assert _agent(settings, policies, [_comment_action()])._completed(event, None) is True
+    assert (
+        _agent(
+            settings,
+            policies,
+            [SimpleNamespace(kind="code_pull_request", state="applied")],
+        )._completed(event, None)
+        is True
+    )
     assert (
         _agent(
             settings,
@@ -779,16 +792,14 @@ def test_simulator_directive_command_enables_write_and_edit(tmp_path: Path, monk
     assert "read,grep,glob,lsp,bash,write,edit" in FakeRpcClient.command
 
 
-def test_ordinary_followup_command_stays_read_only(tmp_path: Path, monkeypatch: Any) -> None:
+def test_issue_followup_command_enables_coding_tools(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.setattr(agent_module, "RpcClient", FakeRpcClient)
     FakeRpcClient.command = None
     agent = _agent(_prepared_settings(tmp_path, monkeypatch), _shadow_policies(), [_comment_action()])
     answer = agent.run(_comment_event("delivery-command-ordinary", 388))
     assert answer == "done"
     assert FakeRpcClient.command is not None
-    assert "read,grep,glob,lsp" in FakeRpcClient.command
-    assert "bash" not in FakeRpcClient.command
-    assert "write" not in FakeRpcClient.command
+    assert "read,grep,glob,lsp,bash,write,edit" in FakeRpcClient.command
 
 
 def test_pr_review_sim_directive_prompt_is_reproduction_not_review(tmp_path: Path) -> None:

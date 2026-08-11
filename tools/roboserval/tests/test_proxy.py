@@ -145,7 +145,6 @@ _ENDPOINT_PAYLOADS = {
     "/github/code-pull-request": {
         "repo": "dderg/serval",
         "issue_number": 7,
-        "actor": "dderg",
         "branch": "serval/7-bounded-queue",
         "head_sha": "c" * 40,
         "title": "Bound queue handling",
@@ -287,39 +286,7 @@ async def test_github_api_submits_native_review_with_inline_comments() -> None:
 
 
 @pytest.mark.asyncio
-async def test_code_pull_request_requires_write_permission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    published = False
-
-    def publish(*args: Any, **kwargs: Any) -> None:
-        nonlocal published
-        published = True
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/repos/dderg/serval/collaborators/reporter/permission"
-        return httpx.Response(200, json={"permission": "read"})
-
-    monkeypatch.setattr("serval_bot.proxy.CredentialedWorkspace.publish_issue", publish)
-    api = GitHubApi(StaticTokenProvider(), 20_000, httpx.MockTransport(handler), tmp_path)
-    try:
-        with pytest.raises(GitHubFailure, match="write access"):
-            await api.create_code_pull_request(
-                CodePullRequest(
-                    repo="dderg/serval",
-                    issue_number=7,
-                    actor="reporter",
-                    branch="serval/7-bounded-queue",
-                    head_sha="c" * 40,
-                    title="Bound queue handling",
-                    body="Closes #7",
-                )
-            )
-    finally:
-        await api.close()
-    assert not published
-
-
-@pytest.mark.asyncio
-async def test_code_pull_request_publishes_after_permission_check(
+async def test_code_pull_request_publishes_without_actor_permission_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     published: list[dict[str, Any]] = []
@@ -328,9 +295,8 @@ async def test_code_pull_request_publishes_after_permission_check(
         published.append(kwargs)
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/collaborators/dderg/permission"):
-            return httpx.Response(200, json={"permission": "push"})
         if request.method == "GET":
+            assert request.url.path == "/repos/dderg/serval"
             return httpx.Response(200, json={"default_branch": "main"})
         assert request.url.path == "/repos/dderg/serval/pulls"
         return httpx.Response(201, json={"number": 12, "html_url": "https://example.test/pull/12"})
@@ -342,7 +308,6 @@ async def test_code_pull_request_publishes_after_permission_check(
             CodePullRequest(
                 repo="dderg/serval",
                 issue_number=7,
-                actor="dderg",
                 branch="serval/7-bounded-queue",
                 head_sha="c" * 40,
                 title="Bound queue handling",

@@ -28,61 +28,14 @@ _SIM_DIRECTIVE_RE = re.compile(
     re.IGNORECASE,
 )
 
-_CODE_MENTION_RE = re.compile(r"@(?P<login>[\w-]+) +(?P<request>\S(?:.*\S)?)", re.IGNORECASE | re.DOTALL)
-_CODE_IMPERATIVE_RE = re.compile(
-    r"(?:please +)?(?:implement|code|fix) +(?P<task>\S(?:.*\S)?)",
-    re.IGNORECASE | re.DOTALL,
-)
-_CODE_NATURAL_REQUEST_RE = re.compile(
-    r"(?:^|[.!]\s+)(?:"
-    r"(?:can|could|would|will) +you +(?:please +)?(?:"
-    r"(?:implement|code|fix) +\S|open +(?:a +)?(?:pr|pull request)(?: +\S)?"
-    r")|"
-    r"(?:please +)?open +(?:a +)?(?:pr|pull request)(?: +\S)?"
-    r")",
-    re.IGNORECASE | re.DOTALL,
-)
-_CODE_CANCELLATION_RE = re.compile(
-    r"\b(?:do not|don't|not to|shouldn't|cannot|can't) +(?:"
-    r"(?:please +)?(?:implement|code|fix)\b|"
-    r"(?:open|create) +(?:(?:a|the) +)?(?:pr|pull request)\b"
-    r")|"
-    r"\b(?:cancel|ignore|disregard) +(?:that|the|my) +(?:request|change|pr|pull request)\b",
-    re.IGNORECASE,
-)
 _CODE_BRANCH_RE = re.compile(r"serval/(?P<issue>[0-9]+)-[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
-def parse_code_directive(bot_login: str, body: str) -> str | None:
-    match = _CODE_MENTION_RE.fullmatch(body.strip())
-    if match is None or match.group("login").casefold() != bot_login.casefold():
-        return None
-    request = match.group("request").strip()
-    imperative = _CODE_IMPERATIVE_RE.fullmatch(request)
-    if imperative is not None:
-        if _CODE_CANCELLATION_RE.search(request):
-            return None
-        return imperative.group("task").rstrip("?!").strip()
-    natural_request = _CODE_NATURAL_REQUEST_RE.search(request)
-    if natural_request is not None and not _CODE_CANCELLATION_RE.search(request[natural_request.start() :]):
-        return request.rstrip("?!").strip()
-    return None
-
-
-def is_code_directive(event: Event, policy: RepositoryPolicy) -> bool:
+def is_issue_follow_up(event: Event) -> bool:
     if event.event_type != "issue_comment.created":
         return False
     issue = event.payload.get("issue")
-    if isinstance(issue, dict) and "pull_request" in issue:
-        return False
-    comment = event.payload.get("comment")
-    body = comment.get("body") if isinstance(comment, dict) else None
-    association = comment.get("author_association") if isinstance(comment, dict) else None
-    return (
-        isinstance(body, str)
-        and association in {"COLLABORATOR", "MEMBER", "OWNER"}
-        and parse_code_directive(policy.bot_login, body) is not None
-    )
+    return isinstance(issue, dict) and "pull_request" not in issue
 
 
 def parse_sim_directive(bot_login: str, body: str) -> bool:
@@ -332,8 +285,8 @@ class ActionGateway:
         title: str,
         body: str,
     ) -> str:
-        if not is_code_directive(self.event, self.policy):
-            raise ActionDenied("pull request creation requires an explicit coding directive on an issue")
+        if not is_issue_follow_up(self.event):
+            raise ActionDenied("pull request creation requires an issue follow-up")
         branch_match = _CODE_BRANCH_RE.fullmatch(branch) if isinstance(branch, str) else None
         if branch_match is None or branch_match.group("issue") != str(self.event.issue_number):
             raise ActionDenied(f"code branch must be serval/{self.event.issue_number}-<slug>: {branch!r}")
@@ -349,7 +302,6 @@ class ActionGateway:
             "head_sha": head_sha,
             "title": title.strip(),
             "body": body.strip(),
-            "actor": self.event.actor,
         }
         return self._mutate(
             Capability.CODE,
@@ -358,7 +310,6 @@ class ActionGateway:
             lambda proxy: proxy.create_code_pull_request(
                 self.event.repo,
                 self.event.issue_number,
-                self.event.actor,
                 branch,
                 head_sha,
                 title.strip(),
