@@ -155,7 +155,7 @@ def test_find_past_position_queries_engine_state_at_mcu_and_time():
     engine = FakeEngine(motion_state_at={"e": (12.5, 0.0, 0.0)})
     pe = PrinterExtruder(make_extruder_section(engine=engine, mcu=mcu), 0)
     assert pe.find_past_position(42.0) == 12.5
-    assert engine.calls == [("motion_state_at", mcu, None, 42.0)]
+    assert engine.calls == [("motion_state_at", mcu, None, 42.0, "e")]
 
 
 def test_find_past_position_missing_e_history_fails_loudly():
