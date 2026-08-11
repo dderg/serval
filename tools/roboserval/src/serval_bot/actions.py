@@ -31,11 +31,19 @@ _SIM_DIRECTIVE_RE = re.compile(
 _CODE_BRANCH_RE = re.compile(r"serval/(?P<issue>[0-9]+)-[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
-def is_issue_follow_up(event: Event) -> bool:
+def is_issue_follow_up(event: Event, bot_login: str) -> bool:
     if event.event_type != "issue_comment.created":
         return False
     issue = event.payload.get("issue")
-    return isinstance(issue, dict) and "pull_request" not in issue
+    comment = event.payload.get("comment")
+    body = comment.get("body") if isinstance(comment, dict) else None
+    mention = re.compile(rf"(?<![\w-])@{re.escape(bot_login)}(?![\w-])", re.IGNORECASE)
+    return (
+        isinstance(issue, dict)
+        and "pull_request" not in issue
+        and isinstance(body, str)
+        and mention.search(body) is not None
+    )
 
 
 def parse_sim_directive(bot_login: str, body: str) -> bool:
@@ -285,7 +293,7 @@ class ActionGateway:
         title: str,
         body: str,
     ) -> str:
-        if not is_issue_follow_up(self.event):
+        if not is_issue_follow_up(self.event, self.policy.bot_login):
             raise ActionDenied("pull request creation requires an issue follow-up")
         branch_match = _CODE_BRANCH_RE.fullmatch(branch) if isinstance(branch, str) else None
         if branch_match is None or branch_match.group("issue") != str(self.event.issue_number):

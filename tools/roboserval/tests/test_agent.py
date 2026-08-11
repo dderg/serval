@@ -379,7 +379,7 @@ def _comment_event(delivery_id: str, issue_number: int) -> Event:
         repo="dderg/serval",
         issue_number=issue_number,
         actor="dderg",
-        payload={"issue": {"title": "restart", "body": "details"}, "comment": {"body": "triage"}},
+        payload={"issue": {"title": "restart", "body": "details"}, "comment": {"body": "@roboserval triage"}},
         state="running",
         attempts=1,
         error=None,

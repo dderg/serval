@@ -150,12 +150,18 @@ def test_issue_follow_up_leaves_coding_judgment_to_model() -> None:
         author_association="NONE",
     )
     non_collaborator.payload["issue"] = {}
+    unmentioned = _event(
+        event_type="issue_comment.created",
+        comment="I cannot reproduce this. Please take a look.",
+        author_association="NONE",
+    )
     pull_request_comment = _event(event_type="issue_comment.created", comment="@roboserval fix this")
     pull_request_comment.payload["issue"] = {"pull_request": {"url": "https://example.test/pull/7"}}
 
-    assert is_issue_follow_up(collaborator)
-    assert is_issue_follow_up(non_collaborator)
-    assert not is_issue_follow_up(pull_request_comment)
+    assert is_issue_follow_up(collaborator, "roboserval")
+    assert is_issue_follow_up(non_collaborator, "ROBOSERVAL")
+    assert not is_issue_follow_up(unmentioned, "roboserval")
+    assert not is_issue_follow_up(pull_request_comment, "roboserval")
 
 
 def test_code_pull_request_records_authorized_publication(tmp_path: Path) -> None:
@@ -190,6 +196,28 @@ def test_code_pull_request_records_authorized_publication(tmp_path: Path) -> Non
                 "Closes #7",
             )
         ]
+    finally:
+        database.close()
+
+
+def test_code_pull_request_rejects_unmentioned_issue_comment(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    try:
+        event = _claimed(
+            database,
+            _event(
+                event_type="issue_comment.created",
+                comment="Please fix this.",
+                author_association="NONE",
+            ),
+        )
+        with pytest.raises(ActionDenied, match="issue follow-up"):
+            _gateway(database, event, Mode.TRIAGE, FakeProxy()).create_code_pull_request(
+                "serval/7-bounded-queue",
+                "c" * 40,
+                "Bound queue handling",
+                "Closes #7",
+            )
     finally:
         database.close()
 

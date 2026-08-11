@@ -286,7 +286,7 @@ class TriageAgent:
             any(session_dir.glob("*.jsonl")),
             reviewing=pull_request is not None,
             reproducing=is_simulator_directive(event, policy),
-            coding=is_issue_follow_up(event),
+            coding=is_issue_follow_up(event, policy.bot_login),
         )
         client = RpcClient(
             command=command,
@@ -346,7 +346,7 @@ class TriageAgent:
                 and any(kind.startswith("sim_result") for kind in accepted)
                 and "comment" in accepted
             )
-        if is_issue_follow_up(event):
+        if is_issue_follow_up(event, self.policies.require(event.repo).bot_login):
             return "code_pull_request" in accepted or "comment" in accepted
         if _is_native_review(event, pull_request, self.policies.require(event.repo)):
             return "review" in accepted
@@ -359,7 +359,7 @@ class TriageAgent:
             required = "exactly one classify_issue call followed by exactly one post_issue_comment call"
         elif is_simulator_directive(event, self.policies.require(event.repo)):
             required = "finish the simulator task and post exactly one result comment"
-        elif is_issue_follow_up(event):
+        elif is_issue_follow_up(event, self.policies.require(event.repo).bot_login):
             required = "use your judgment: either implement and open one pull request, or post one response comment"
         elif _is_native_review(event, pull_request, self.policies.require(event.repo)):
             required = "submit exactly one native pull request review"
@@ -375,7 +375,7 @@ class TriageAgent:
             return "new issue turn ended without classification and comment"
         if is_simulator_directive(event, self.policies.require(event.repo)):
             return "simulator directive ended without a completed dispatch, terminal result read, and comment"
-        if is_issue_follow_up(event):
+        if is_issue_follow_up(event, self.policies.require(event.repo).bot_login):
             return "issue follow-up ended without a pull request or response comment"
         if _is_native_review(event, pull_request, self.policies.require(event.repo)):
             return "pull request review ended without a native review"
@@ -451,7 +451,7 @@ class TriageAgent:
                 f"A maintainer says:\n\n{comment.get('body', '')}\n\n"
                 f"Reproduce issue #{event.issue_number} in the simulator and report what happened."
             )
-        elif is_issue_follow_up(event):
+        elif is_issue_follow_up(event, policy.bot_login):
             comment = event.payload.get("comment", {})
             instruction = (
                 f"A follow-up from @{event.actor} says:\n\n{comment.get('body', '')}\n\n"
@@ -673,7 +673,7 @@ class TriageAgent:
         return (
             comment_tool,
             search_tool,
-            *((code_pull_request_tool,) if is_issue_follow_up(event) else ()),
+            *((code_pull_request_tool,) if is_issue_follow_up(event, policy.bot_login) else ()),
             host_tool(
                 name="dispatch_simulator",
                 description=(
