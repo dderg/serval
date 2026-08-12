@@ -65,7 +65,7 @@ impl PyMotionEngine {
         let io = self.host_io_for_mcu("get_identify_data", mcu_handle)?;
         Ok(io.raw_identify_bytes().to_vec())
     }
-    #[pyo3(signature = (mcu_handle, msg, response, timeout_s = 0.5))]
+    #[pyo3(signature = (mcu_handle, msg, response, timeout_s = 0.02))]
     fn engine_call(
         &self,
         py: Python<'_>,
@@ -92,7 +92,7 @@ impl PyMotionEngine {
 
         params_to_pydict(py, &params)
     }
-    #[pyo3(signature = (mcu_handle, name, args, response, timeout_s = 0.5))]
+    #[pyo3(signature = (mcu_handle, name, args, response, timeout_s = 0.02))]
     fn engine_call_args(
         &self,
         py: Python<'_>,
