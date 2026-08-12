@@ -20,7 +20,7 @@ const RETIREMENT_IDLE_TICKS: u32 = 10;
 
 pub const MOVE_SLOT_RESERVE: u32 = 16;
 
-pub const SEND_LEAD_SECONDS: f64 = 4.0;
+pub const SEND_LEAD_SECONDS: f64 = 2.0;
 
 pub const CONSUMED_MARGIN_SECONDS: f64 = 0.010;
 
