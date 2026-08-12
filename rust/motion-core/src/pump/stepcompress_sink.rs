@@ -15,6 +15,8 @@ use std::time::Duration;
 use step_shim::{MotorConfig, ShimError, StepFrame, StepShim};
 
 pub const SHIM_RING_DEPTH: u32 = 64;
+const RETIREMENT_BATCH: u32 = SHIM_RING_DEPTH / 4;
+const RETIREMENT_IDLE_TICKS: u32 = 10;
 
 pub const MOVE_SLOT_RESERVE: u32 = 16;
 
@@ -194,6 +196,7 @@ pub struct StepcompressEndpoint {
     pending_seams: HashMap<u8, VecDeque<PendingSeam>>,
     pending_retire: VecDeque<PendingRetire>,
     deferred_retirement: bool,
+    retirement_idle_ticks: u32,
     published: Vec<u32>,
     cohort_counts: Vec<u32>,
     next_barrier_seq: HashMap<u32, u32>,
@@ -290,6 +293,7 @@ impl StepcompressEndpoint {
             published,
             cohort_counts,
             deferred_retirement: false,
+            retirement_idle_ticks: 0,
             next_barrier_seq: HashMap::new(),
             acked_barrier_seq: HashMap::new(),
         }
@@ -391,6 +395,7 @@ impl StepcompressEndpoint {
         self.pending_seams.clear();
         self.pending_retire.clear();
         self.deferred_retirement = false;
+        self.retirement_idle_ticks = 0;
     }
 
     pub fn mark_reanchor(&mut self, axis: u8, at_start_clock: u64, epoch_freq: Option<f64>) {
@@ -472,6 +477,12 @@ impl StepcompressEndpoint {
         Ok(())
     }
 
+    fn retirement_batch_ready(&self, snapshot: &[u32]) -> bool {
+        snapshot.iter().enumerate().any(|(motor, &after)| {
+            let before = self.cohort_counts.get(motor).copied().unwrap_or(0);
+            after.wrapping_sub(before) >= RETIREMENT_BATCH
+        })
+    }
     fn publish_retirement(&mut self, snapshot: &[u32]) {
         if !self.pending_retire.is_empty() {
             self.deferred_retirement = true;
@@ -630,7 +641,11 @@ impl StepcompressEndpoint {
             )));
         }
         let snapshot = self.shim.retired_counts();
-        self.publish_retirement(&snapshot);
+        if self.retirement_batch_ready(&snapshot) {
+            self.publish_retirement(&snapshot);
+        } else if snapshot != self.cohort_counts {
+            self.deferred_retirement = true;
+        }
         Ok(())
     }
 
@@ -741,15 +756,23 @@ impl StepcompressEndpoint {
             }
             self.deferred_retirement = true;
         }
-        if self.backlog.is_empty()
+        let transport_quiescent = self.backlog.is_empty()
             && self.in_flight.is_empty()
-            && self.pending_retire.is_empty()
-            && self.deferred_retirement
             && self.shim.queued_pieces() == 0
-            && self.shim.pending_steps() == 0
-        {
+            && self.shim.pending_steps() == 0;
+        self.retirement_idle_ticks = if transport_quiescent {
+            self.retirement_idle_ticks.saturating_add(1)
+        } else {
+            0
+        };
+        if self.pending_retire.is_empty() && self.deferred_retirement && transport_quiescent {
             let snapshot = self.shim.retired_counts();
-            self.publish_retirement(&snapshot);
+            if self.retirement_batch_ready(&snapshot)
+                || self.retirement_idle_ticks >= RETIREMENT_IDLE_TICKS
+            {
+                self.publish_retirement(&snapshot);
+                self.retirement_idle_ticks = 0;
+            }
         }
         self.flush(now, freq)
     }

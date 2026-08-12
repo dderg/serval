@@ -264,7 +264,7 @@ fn retirement_only_counts_fully_sent_pieces_and_never_regresses() {
     );
 
     let mut last = published[0];
-    for step in 1..=40u64 {
+    for step in 1..=120u64 {
         h.now.store(1_000 + step * 10_000, Ordering::Relaxed);
         h.endpoint.tick().unwrap();
         h.ack_sent_barriers();
@@ -688,7 +688,7 @@ fn ticks_alone_carry_a_finished_stream_to_full_retirement() {
         .unwrap();
 
     let mut now = 1_000_u64;
-    while now < last_end + 100_000 {
+    while now < last_end + 1_200_000 {
         now += 10_000;
         h.now.store(now, Ordering::Relaxed);
         h.endpoint.tick().unwrap();
@@ -724,7 +724,7 @@ fn retirement_waits_for_execution_not_transmission() {
     let mut h = harness(1024);
     h.now.store(1_000, Ordering::Relaxed);
     h.endpoint
-        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 16))])
         .unwrap();
 
     let sent_while_unexecuted = h.sent.lock_ok().len();
@@ -753,7 +753,7 @@ fn a_lone_follower_lane_reports_retirement_against_its_own_axis() {
     let mut h = harness_on_axis(1024, EXTRUDER_AXIS as usize);
     h.now.store(1_000, Ordering::Relaxed);
     h.endpoint
-        .send_frames(MCU_ID, &[frame_for_axis(EXTRUDER_AXIS, ramp(2_000, 8))])
+        .send_frames(MCU_ID, &[frame_for_axis(EXTRUDER_AXIS, ramp(2_000, 16))])
         .unwrap();
     h.now.store(10_000_000, Ordering::Relaxed);
     h.endpoint.tick().unwrap();
@@ -785,7 +785,7 @@ fn a_virgin_follower_lane_emits_frames_and_a_barrier_on_first_motion() {
     h.endpoint
         .mark_reanchor(EXTRUDER_AXIS, 2_000, Some(CYCLES_PER_SECOND));
     h.endpoint
-        .send_frames(MCU_ID, &[frame_for_axis(EXTRUDER_AXIS, ramp(2_000, 8))])
+        .send_frames(MCU_ID, &[frame_for_axis(EXTRUDER_AXIS, ramp(2_000, 16))])
         .expect("first motion on a never-homed lane must be accepted");
 
     assert!(
@@ -805,7 +805,7 @@ fn a_cohort_is_not_retired_until_its_barrier_is_acked() {
     let mut h = harness(1024);
     h.now.store(1_000, Ordering::Relaxed);
     h.endpoint
-        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 16))])
         .unwrap();
 
     h.now.store(10_000_000, Ordering::Relaxed);
@@ -835,12 +835,12 @@ fn retirement_barriers_coalesce_while_an_ack_is_outstanding() {
     let mut h = harness(1024);
     h.now.store(1_000, Ordering::Relaxed);
     h.endpoint
-        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 16))])
         .unwrap();
     assert_eq!(h.barriers.lock_ok().len(), 1);
 
     h.endpoint
-        .send_frames(MCU_ID, &[axis_frame(ramp_from(18_000, 8, 1.0))])
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(34_000, 16, 2.0))])
         .unwrap();
     h.now.store(10_000_000, Ordering::Relaxed);
     h.endpoint.tick().unwrap();
@@ -864,7 +864,7 @@ fn a_barrier_ack_below_the_high_water_mark_is_ignored() {
     let mut h = harness(1024);
     h.now.store(1_000, Ordering::Relaxed);
     h.endpoint
-        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 16))])
         .unwrap();
     h.now.store(10_000_000, Ordering::Relaxed);
     h.endpoint.tick().unwrap();
@@ -881,7 +881,7 @@ fn a_barrier_ack_ahead_of_what_was_issued_is_fatal() {
     let mut h = harness(1024);
     h.now.store(1_000, Ordering::Relaxed);
     h.endpoint
-        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 16))])
         .unwrap();
     let issued = h.barriers.lock_ok().len() as u32;
     let err = h
@@ -967,6 +967,10 @@ fn a_lane_parked_past_the_encoder_window_re_anchors_mid_stream() {
 
     for now in [lift.end_time(cps), hold.end_time(cps), end + 1_000_000] {
         h.now.store(now, Ordering::Relaxed);
+        h.endpoint.tick().unwrap();
+        h.ack_sent_barriers();
+    }
+    for _ in 0..RETIREMENT_IDLE_TICKS {
         h.endpoint.tick().unwrap();
         h.ack_sent_barriers();
     }
