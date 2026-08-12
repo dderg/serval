@@ -269,10 +269,10 @@ impl PyMotionEngine {
                              parameter"
                         )
                     });
-                    let seq = params.try_get_u32("seq").unwrap_or_else(|| {
+                    let seq = params.try_get_u32("barrier_seq").unwrap_or_else(|| {
                         panic!(
-                            "stepcompress mcu {ack_mcu_id}: barrier ack frame carried no seq \
-                             parameter"
+                            "stepcompress mcu {ack_mcu_id}: barrier ack frame carried no \
+                             barrier_seq parameter"
                         )
                     });
                     let _ = ack_tx.send(crate::pump::PumpMsg::StepcompressBarrierAck {

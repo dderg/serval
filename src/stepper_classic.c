@@ -303,7 +303,7 @@ stepcompress_barrier_ack_task(void)
             irq_disable();
             move_free(m);
             irq_enable();
-            sendf("stepcompress_barrier_ack oid=%c seq=%u", oid, seq);
+            sendf("stepcompress_barrier_ack oid=%c barrier_seq=%u", oid, seq);
         }
     }
 }
