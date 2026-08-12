@@ -739,10 +739,11 @@ impl StepcompressEndpoint {
                     });
                 }
             }
-            let snapshot = self.shim.retired_counts();
-            self.publish_retirement(&snapshot);
+            self.deferred_retirement = true;
         }
-        if self.pending_retire.is_empty()
+        if self.backlog.is_empty()
+            && self.in_flight.is_empty()
+            && self.pending_retire.is_empty()
             && self.deferred_retirement
             && self.shim.queued_pieces() == 0
             && self.shim.pending_steps() == 0
