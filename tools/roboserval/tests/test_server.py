@@ -164,6 +164,8 @@ def _pool(database: Database, agent: Any, **kwargs: Any) -> WorkerPool:
         timeout_seconds=kwargs.pop("timeout_seconds", 10),
         hard_grace_seconds=kwargs.pop("hard_grace_seconds", 5),
         max_concurrency=kwargs.pop("max_concurrency", 1),
+        max_retries=kwargs.pop("max_retries", 0),
+        retry_delay_seconds=kwargs.pop("retry_delay_seconds", None),
     )
 
 
@@ -320,6 +322,122 @@ async def test_worker_pool_failure_marks_failed_before_next_claim(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_worker_pool_retries_with_bounded_schedule(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    agent = FakeAgent(error=RuntimeError("temporary"))
+    delays: list[int] = []
+
+    def retry_delay(attempt: int) -> float:
+        delays.append(attempt)
+        return 0
+
+    pool = _pool(database, agent, max_retries=3, retry_delay_seconds=retry_delay)
+    database.record_event("first", "issues.opened", "dderg/serval", 7, "reporter", _payload())
+    task = asyncio.create_task(pool.run())
+    try:
+        await _wait_until(lambda: _event_row(database, "first")["state"] == "failed")
+        row = _event_row(database, "first")
+        assert row["attempts"] == 4
+        assert "RuntimeError: temporary" in row["error"]
+        assert delays == [1, 2, 3]
+        assert len(agent.runs) == 4
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_pool_restores_future_retry_without_external_wake(tmp_path: Path) -> None:
+    path = tmp_path / "bot.sqlite"
+    database = Database(path)
+    database.record_event("first", "issues.opened", "dderg/serval", 7, "reporter", _payload())
+    assert database.claim() is not None
+    assert database.schedule_retry("first", 0.05, "temporary")
+    database.close()
+
+    restored = Database(path)
+    agent = FakeAgent()
+    pool = _pool(restored, agent)
+    task = asyncio.create_task(pool.run())
+    try:
+        await _wait_until(lambda: _event_row(restored, "first")["state"] == "done")
+        assert [delivery for delivery, _ in agent.runs] == ["first"]
+        assert _event_row(restored, "first")["attempts"] == 2
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        restored.close()
+
+
+@pytest.mark.asyncio
+async def test_due_retry_blocked_by_running_same_issue_does_not_busy_loop(tmp_path: Path) -> None:
+    class CountingDatabase(Database):
+        def __init__(self, path: Path) -> None:
+            super().__init__(path)
+            self.claims = 0
+
+        def claim(self) -> Event | None:
+            self.claims += 1
+            return super().claim()
+
+    database = CountingDatabase(tmp_path / "bot.sqlite")
+    database.record_event("retry", "issues.opened", "dderg/serval", 7, "reporter", _payload())
+    assert database.claim() is not None
+    assert database.schedule_retry("retry", 0.5, "temporary")
+    database.record_event("active", "issue_comment.created", "dderg/serval", 7, "reporter", _payload())
+
+    agent = FakeAgent(blocking={"active"})
+    pool = _pool(database, agent, max_concurrency=2)
+    task = asyncio.create_task(pool.run())
+    try:
+        await _wait_until(lambda: any(delivery == "active" for delivery, _ in agent.runs))
+        claims_before_deadline = database.claims
+        await asyncio.sleep(0.6)
+        assert database.claims - claims_before_deadline < 10
+        agent.release("active")
+        await _wait_until(
+            lambda: (
+                _event_row(database, "active")["state"] == "done" and _event_row(database, "retry")["state"] == "done"
+            )
+        )
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_idle_worker_observes_replay_from_separate_database_connection(tmp_path: Path) -> None:
+    path = tmp_path / "bot.sqlite"
+    database = Database(path)
+    database.record_event("first", "issues.opened", "dderg/serval", 7, "reporter", _payload())
+    assert database.claim() is not None
+    database.finish("first", "failed", "temporary")
+
+    agent = FakeAgent()
+    pool = _pool(database, agent)
+    task = asyncio.create_task(pool.run())
+    try:
+        await asyncio.sleep(0.05)
+        external = Database(path)
+        try:
+            assert external.replay("first")
+        finally:
+            external.close()
+        await _wait_until(lambda: _event_row(database, "first")["state"] == "done")
+        assert [delivery for delivery, _ in agent.runs] == ["first"]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        database.close()
+
+
+@pytest.mark.asyncio
 async def test_worker_pool_timeout_stops_drains_before_next_claim(tmp_path: Path) -> None:
     database = Database(tmp_path / "bot.sqlite")
     agent = DrainingAgent()
@@ -382,6 +500,55 @@ async def test_worker_pool_serializes_same_issue_events(tmp_path: Path) -> None:
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_private_replay_endpoint_requeues_failed_event(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    database.record_event("delivery", "issues.opened", "dderg/serval", 7, "reporter", _payload())
+    assert database.claim() is not None
+    database.finish("delivery", "failed", "temporary")
+    app = create_app(
+        _settings(tmp_path),
+        _policies(),
+        database,
+        FakeAgent(),
+        start_worker=False,
+        start_poller=False,
+    )
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post("/replay/delivery")
+            duplicate = await client.post("/replay/delivery")
+        assert response.status_code == 200
+        assert response.json() == {"delivery_id": "delivery", "state": "queued"}
+        assert duplicate.status_code == 409
+    finally:
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_replay_endpoint_rejects_non_loopback_client(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    database.record_event("delivery", "issues.opened", "dderg/serval", 7, "reporter", _payload())
+    assert database.claim() is not None
+    database.finish("delivery", "failed", "temporary")
+    app = create_app(
+        _settings(tmp_path),
+        _policies(),
+        database,
+        FakeAgent(),
+        start_worker=False,
+        start_poller=False,
+    )
+    try:
+        transport = httpx.ASGITransport(app=app, client=("203.0.113.5", 4123))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/replay/delivery")
+        assert response.status_code == 403
+        assert _event_row(database, "delivery")["state"] == "failed"
+    finally:
         database.close()
 
 

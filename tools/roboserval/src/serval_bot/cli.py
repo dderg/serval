@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import logging
 
 import uvicorn
@@ -26,7 +27,22 @@ def build_app():
     return create_app(settings, policies, database, agent, proxy)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(prog="serval-bot")
+    subcommands = parser.add_subparsers(dest="command")
+    replay = subcommands.add_parser("replay")
+    replay.add_argument("delivery_id")
+    args = parser.parse_args(argv)
+    if args.command == "replay":
+        settings = BotSettings.from_env()
+        database = Database(settings.data_dir / "serval-bot.sqlite")
+        try:
+            if not database.replay(args.delivery_id):
+                parser.error(f"event is not replayable: {args.delivery_id}")
+        finally:
+            database.close()
+        print(f"queued {args.delivery_id}")
+        return
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = BotSettings.from_env()
     uvicorn.run(build_app(), host=settings.bind_host, port=settings.bind_port)

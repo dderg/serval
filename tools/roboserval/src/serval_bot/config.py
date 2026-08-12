@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import random
 import shlex
 import tomllib
 from dataclasses import dataclass
@@ -43,6 +44,17 @@ def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
     return value
 
 
+def _positive_ints(name: str, default: str) -> tuple[int, ...]:
+    raw = os.environ.get(name, default)
+    try:
+        values = tuple(int(piece.strip()) for piece in raw.split(",") if piece.strip())
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be comma-separated integers") from exc
+    if not values or any(value <= 0 for value in values):
+        raise ConfigurationError(f"{name} must contain positive integers")
+    return values
+
+
 @dataclass(slots=True, frozen=True)
 class BotSettings:
     proxy_url: str | None
@@ -60,6 +72,8 @@ class BotSettings:
     poll_overlap_seconds: int
     task_hard_grace_seconds: int = 60
     max_concurrency: int = 1
+    event_max_retries: int = 3
+    event_retry_delays_seconds: tuple[int, ...] = (30, 120, 600)
 
     @classmethod
     def from_env(cls) -> BotSettings:
@@ -86,7 +100,16 @@ class BotSettings:
             max_concurrency=_bounded_int("SERVAL_BOT_MAX_CONCURRENCY", 1, 1, MAX_SLOTS),
             poll_interval_seconds=_positive_int("SERVAL_BOT_POLL_INTERVAL_SECONDS", 30),
             poll_overlap_seconds=_positive_int("SERVAL_BOT_POLL_OVERLAP_SECONDS", 300),
+            event_max_retries=_bounded_int("SERVAL_BOT_EVENT_MAX_RETRIES", 3, 0, 100),
+            event_retry_delays_seconds=_positive_ints(
+                "SERVAL_BOT_EVENT_RETRY_DELAYS_SECONDS",
+                "30,120,600",
+            ),
         )
+
+    def retry_delay_seconds(self, retry_index: int) -> float:
+        index = min(max(retry_index, 1), len(self.event_retry_delays_seconds)) - 1
+        return self.event_retry_delays_seconds[index] * (0.8 + random.random() * 0.4)
 
     def ensure_paths(self) -> None:
         for path in (self.data_dir, self.data_dir / "workspaces", self.data_dir / "sessions"):
