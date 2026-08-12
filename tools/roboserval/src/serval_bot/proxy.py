@@ -84,7 +84,6 @@ class DispatchRequest(RepositoryRequest):
 
 class CodePullRequest(RepositoryRequest):
     issue_number: int = Field(gt=0)
-    actor: str = Field(min_length=1, max_length=39, pattern=r"^[A-Za-z0-9-]+$")
     branch: str = Field(min_length=1, max_length=256)
     head_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
     title: str = Field(min_length=1, max_length=256)
@@ -446,13 +445,6 @@ class GitHubApi:
             raise GitHubFailure(f"code branch must be scoped to issue {request.issue_number}: {request.branch}")
         if not _FARM_SLUG_PATTERN.fullmatch(request.branch.removeprefix(prefix)):
             raise GitHubFailure(f"invalid code branch: {request.branch}")
-        permission_response = await self.request(
-            "GET",
-            f"/repos/{request.repo}/collaborators/{request.actor}/permission",
-        )
-        permission = permission_response.json().get("permission")
-        if permission not in {"admin", "maintain", "push"}:
-            raise GitHubFailure(f"actor is not a repository collaborator with write access: {request.actor}")
         token = await self._tokens.token()
         try:
             await asyncio.to_thread(

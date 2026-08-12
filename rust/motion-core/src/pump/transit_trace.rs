@@ -15,6 +15,8 @@ pub(super) struct TransitTraceRecord {
     pub(super) axis: u8,
     pub(super) piece_count: u32,
     pub(super) room: u32,
+    pub(super) guard_recorded_ns: u64,
+    pub(super) guard_mcu_clock: u64,
     pub(super) send_started_ns: u64,
     pub(super) send_elapsed_ns: u64,
     pub(super) host_front_start_time: u64,
@@ -29,6 +31,8 @@ struct TransitTraceSlot {
     axis: AtomicU8,
     piece_count: AtomicU32,
     room: AtomicU32,
+    guard_recorded_ns: AtomicU64,
+    guard_mcu_clock: AtomicU64,
     send_started_ns: AtomicU64,
     send_elapsed_ns: AtomicU64,
     host_front_start_time: AtomicU64,
@@ -45,6 +49,8 @@ impl TransitTraceSlot {
             axis: AtomicU8::new(0),
             piece_count: AtomicU32::new(0),
             room: AtomicU32::new(0),
+            guard_recorded_ns: AtomicU64::new(0),
+            guard_mcu_clock: AtomicU64::new(0),
             send_started_ns: AtomicU64::new(0),
             send_elapsed_ns: AtomicU64::new(0),
             host_front_start_time: AtomicU64::new(0),
@@ -62,6 +68,10 @@ impl TransitTraceSlot {
         self.piece_count
             .store(record.piece_count, Ordering::Relaxed);
         self.room.store(record.room, Ordering::Relaxed);
+        self.guard_recorded_ns
+            .store(record.guard_recorded_ns, Ordering::Relaxed);
+        self.guard_mcu_clock
+            .store(record.guard_mcu_clock, Ordering::Relaxed);
         self.send_started_ns
             .store(record.send_started_ns, Ordering::Relaxed);
         self.send_elapsed_ns
@@ -86,6 +96,8 @@ impl TransitTraceSlot {
             axis: self.axis.load(Ordering::Relaxed),
             piece_count: self.piece_count.load(Ordering::Relaxed),
             room: self.room.load(Ordering::Relaxed),
+            guard_recorded_ns: self.guard_recorded_ns.load(Ordering::Relaxed),
+            guard_mcu_clock: self.guard_mcu_clock.load(Ordering::Relaxed),
             send_started_ns: self.send_started_ns.load(Ordering::Relaxed),
             send_elapsed_ns: self.send_elapsed_ns.load(Ordering::Relaxed),
             host_front_start_time: self.host_front_start_time.load(Ordering::Relaxed),
@@ -103,7 +115,7 @@ static TRACE_SLOTS: [TransitTraceSlot; TRACE_CAPACITY] =
     [const { TransitTraceSlot::new() }; TRACE_CAPACITY];
 static EMITTED_RESULTS: Mutex<[i32; 16]> = Mutex::new([i32::MAX; 16]);
 
-pub(super) fn send_started_ns() -> u64 {
+pub(super) fn trace_now_ns() -> u64 {
     TRACE_EPOCH.elapsed().as_nanos() as u64
 }
 
@@ -132,19 +144,22 @@ pub(super) fn transport_error_result() -> i32 {
     TRANSPORT_ERROR_RESULT
 }
 
-pub(super) fn emit_fault_snapshot(trigger: &'static str, result: i32) {
-    {
-        let mut emitted = EMITTED_RESULTS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if emitted.contains(&result) {
-            return;
-        }
-        let Some(slot) = emitted.iter_mut().find(|slot| **slot == i32::MAX) else {
-            return;
-        };
-        *slot = result;
+pub(super) fn emit_result_fault_snapshot(trigger: &'static str, result: i32) {
+    let mut emitted = EMITTED_RESULTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if emitted.contains(&result) {
+        return;
     }
+    let Some(slot) = emitted.iter_mut().find(|slot| **slot == i32::MAX) else {
+        return;
+    };
+    *slot = result;
+    drop(emitted);
+    emit_fault_snapshot(trigger, result);
+}
+
+pub fn emit_fault_snapshot(trigger: &'static str, result: i32) {
     let records = snapshot_last(FAULT_TRACE_RECORDS);
     tracing::error!(
         subsystem = "motion",

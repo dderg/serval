@@ -35,6 +35,39 @@ def test_running_event_resumes_after_restart(tmp_path: Path) -> None:
         database.close()
 
 
+def test_delayed_retry_waits_and_preserves_attempts(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    try:
+        database.record_event("delivery", "issues.opened", "dderg/serval", 7, "reporter", _payload())
+        event = database.claim()
+        assert event is not None
+        assert database.schedule_retry("delivery", 60, "temporary failure")
+        assert database.claim() is None
+        row = database.recent_events(1)[0]
+        assert row["state"] == "queued"
+        assert row["attempts"] == 1
+        assert row["error"] == "temporary failure"
+        assert row["available_at"] is not None
+    finally:
+        database.close()
+
+
+def test_failed_event_can_be_replayed_once(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    try:
+        database.record_event("delivery", "issues.opened", "dderg/serval", 7, "reporter", _payload())
+        assert database.claim() is not None
+        database.finish("delivery", "failed", "credential expired")
+        assert database.replay("delivery")
+        assert not database.replay("delivery")
+        replayed = database.claim()
+        assert replayed is not None
+        assert replayed.attempts == 2
+        assert replayed.error is None
+    finally:
+        database.close()
+
+
 def test_action_records_proposed_arguments(tmp_path: Path) -> None:
     database = Database(tmp_path / "bot.sqlite")
     try:

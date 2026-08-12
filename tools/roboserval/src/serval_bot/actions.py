@@ -28,33 +28,21 @@ _SIM_DIRECTIVE_RE = re.compile(
     re.IGNORECASE,
 )
 
-_CODE_DIRECTIVE_RE = re.compile(
-    r"@(?P<login>[\w-]+) +(?:please +)?(?:implement|code|fix) +(?P<task>\S(?:.*\S)?)",
-    re.IGNORECASE | re.DOTALL,
-)
 _CODE_BRANCH_RE = re.compile(r"serval/(?P<issue>[0-9]+)-[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
-def parse_code_directive(bot_login: str, body: str) -> str | None:
-    match = _CODE_DIRECTIVE_RE.fullmatch(body.strip())
-    if match is None or match.group("login").casefold() != bot_login.casefold():
-        return None
-    return match.group("task")
-
-
-def is_code_directive(event: Event, policy: RepositoryPolicy) -> bool:
+def is_issue_follow_up(event: Event, bot_login: str) -> bool:
     if event.event_type != "issue_comment.created":
         return False
     issue = event.payload.get("issue")
-    if isinstance(issue, dict) and "pull_request" in issue:
-        return False
     comment = event.payload.get("comment")
     body = comment.get("body") if isinstance(comment, dict) else None
-    association = comment.get("author_association") if isinstance(comment, dict) else None
+    mention = re.compile(rf"(?<![\w-])@{re.escape(bot_login)}(?![\w-])", re.IGNORECASE)
     return (
-        isinstance(body, str)
-        and association in {"COLLABORATOR", "MEMBER", "OWNER"}
-        and parse_code_directive(policy.bot_login, body) is not None
+        isinstance(issue, dict)
+        and "pull_request" not in issue
+        and isinstance(body, str)
+        and mention.search(body) is not None
     )
 
 
@@ -305,8 +293,8 @@ class ActionGateway:
         title: str,
         body: str,
     ) -> str:
-        if not is_code_directive(self.event, self.policy):
-            raise ActionDenied("pull request creation requires an explicit coding directive on an issue")
+        if not is_issue_follow_up(self.event, self.policy.bot_login):
+            raise ActionDenied("pull request creation requires an issue follow-up")
         branch_match = _CODE_BRANCH_RE.fullmatch(branch) if isinstance(branch, str) else None
         if branch_match is None or branch_match.group("issue") != str(self.event.issue_number):
             raise ActionDenied(f"code branch must be serval/{self.event.issue_number}-<slug>: {branch!r}")
@@ -322,7 +310,6 @@ class ActionGateway:
             "head_sha": head_sha,
             "title": title.strip(),
             "body": body.strip(),
-            "actor": self.event.actor,
         }
         return self._mutate(
             Capability.CODE,
@@ -331,7 +318,6 @@ class ActionGateway:
             lambda proxy: proxy.create_code_pull_request(
                 self.event.repo,
                 self.event.issue_number,
-                self.event.actor,
                 branch,
                 head_sha,
                 title.strip(),

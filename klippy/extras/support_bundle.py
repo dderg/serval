@@ -1,8 +1,10 @@
 import argparse
 import datetime
+import glob
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -170,6 +172,55 @@ def latest_core(core_dir, cutoff, end):
     return max(candidates, key=lambda path: path.stat().st_mtime, default=None)
 
 
+def config_file_paths(config_file):
+    pending = [config_file.resolve()]
+    visited = set()
+    while pending:
+        path = pending.pop()
+        if path in visited:
+            continue
+        if not path.is_file():
+            raise SupportBundleError(
+                f"configuration file is unavailable: {path}"
+            )
+        visited.add(path)
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.split("#", 1)[0].strip()
+            if not stripped.startswith("[include ") or not stripped.endswith(
+                "]"
+            ):
+                continue
+            include_spec = stripped[9:-1].strip()
+            matches = sorted(
+                pathlib.Path(match)
+                for match in glob.glob(str(path.parent / include_spec))
+            )
+            if not matches and not glob.has_magic(include_spec):
+                raise SupportBundleError(
+                    f"included configuration file is unavailable: {include_spec}"
+                )
+            pending.extend(
+                match.resolve() for match in matches if match.is_file()
+            )
+    return sorted(visited)
+
+
+def copy_config_files(config_file, destination, manifest):
+    paths = config_file_paths(config_file)
+    root = config_file.resolve().parent
+    manifest["config_files"] = []
+    for index, path in enumerate(paths):
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            relative = pathlib.Path("external") / f"{index}-{path.name}"
+        archive_path = pathlib.Path("config") / relative
+        target = destination / archive_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
+        manifest["config_files"].append(str(archive_path))
+
+
 def create_support_bundle(
     log_file,
     events_dir,
@@ -180,6 +231,7 @@ def create_support_bundle(
     software_version="unknown",
     core_dir=None,
     include_core=False,
+    config_file=None,
 ):
     now = (
         datetime.datetime.now(datetime.timezone.utc).timestamp()
@@ -223,7 +275,8 @@ def create_support_bundle(
                 "included": include_core,
             }
         )
-
+        if config_file is not None:
+            copy_config_files(config_file, staging, manifest)
         remaining_scan_bytes = TOTAL_EVENT_SCAN_BYTES
         for source in event_log_paths(events_dir, cutoff):
             if remaining_scan_bytes <= 0:
@@ -281,6 +334,7 @@ def worker_command(
     since_seconds,
     software_version,
     include_core,
+    config_file,
 ):
     command = [
         sys.executable,
@@ -292,6 +346,8 @@ def worker_command(
         str(since_seconds),
         "--software-version",
         software_version,
+        "--config-file",
+        str(config_file),
     ]
     if events_dir is not None:
         command.extend(("--events-dir", str(events_dir)))
@@ -335,6 +391,7 @@ class SupportBundle:
                 since_seconds,
                 start_args.get("software_version", "unknown"),
                 bool(include_core),
+                pathlib.Path(start_args["config_file"]),
             )
             with self.worker_lock:
                 if self.worker is not None:
@@ -390,6 +447,7 @@ def build_worker_parser():
     parser.add_argument("--worker", action="store_true", required=True)
     parser.add_argument("--log-file", type=pathlib.Path, required=True)
     parser.add_argument("--events-dir", type=pathlib.Path)
+    parser.add_argument("--config-file", type=pathlib.Path, required=True)
     parser.add_argument("--since-seconds", type=int, required=True)
     parser.add_argument("--software-version", required=True)
     parser.add_argument("--include-core", action="store_true")
@@ -408,6 +466,7 @@ def run_worker(argv):
         software_version=args.software_version,
         core_dir=args.log_file.parent / "coredumps",
         include_core=args.include_core,
+        config_file=args.config_file,
     )
     print(bundle, flush=True)
     return 0
