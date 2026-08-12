@@ -415,15 +415,21 @@ impl HistoryStore {
             position,
             "[history] axis rebased to an externally set position"
         );
+        let retained_pieces_separate_hold =
+            self.rings.get(&key).is_some_and(|ring| !ring.is_empty());
         let continuous_from = self
             .endpoints
             .get(&key)
             .filter(|endpoint| endpoint.position == position)
             .map(|endpoint| {
-                self.holds_before_ring
-                    .get(&key)
-                    .filter(|hold| hold.endpoint.position == position)
-                    .map_or(endpoint.host, |hold| hold.from.min(endpoint.host))
+                if retained_pieces_separate_hold {
+                    endpoint.host
+                } else {
+                    self.holds_before_ring
+                        .get(&key)
+                        .filter(|hold| hold.endpoint.position == position)
+                        .map_or(endpoint.host, |hold| hold.from.min(endpoint.host))
+                }
             });
         self.rings.entry(key).or_default().clear();
         self.holds_before_ring.remove(&key);
