@@ -401,7 +401,7 @@ class WorkerPool:
         self._stop = asyncio.Event()
         self._wake = [asyncio.Event() for _ in self._pool.slot_uids]
         self._active_reviews: dict[tuple[str, int], tuple[Event, asyncio.Task[None]]] = {}
-        self._superseded: set[str] = set()
+        self._superseded: dict[str, str] = {}
 
     def wake(self) -> None:
         for event in self._wake:
@@ -417,10 +417,14 @@ class WorkerPool:
             if key[0] != repo:
                 continue
             current_head = review_heads.get(key[1])
-            event_head = event.payload.get("pull_request", {}).get("head", {}).get("sha")
-            if current_head is None or current_head == event_head:
+            if "review_request" not in event.payload:
                 continue
-            self._superseded.add(event.delivery_id)
+            event_head = event.payload.get("pull_request", {}).get("head", {}).get("sha")
+            if current_head is not None and current_head == event_head:
+                continue
+            self._superseded[event.delivery_id] = (
+                "review assignment removed" if current_head is None else "superseded by newer pull request head"
+            )
             task.cancel()
         if skipped:
             self.wake()
@@ -517,8 +521,8 @@ class WorkerPool:
                 raise fatal
             reaped = reap_slot(slot_uid)
             if event.delivery_id in self._superseded:
-                self._superseded.remove(event.delivery_id)
-                self._database.finish(event.delivery_id, "skipped", "superseded by newer pull request head")
+                reason = self._superseded.pop(event.delivery_id)
+                self._database.finish(event.delivery_id, "skipped", reason)
                 self._remove_active_review(review_key, event)
                 self._log_event("event superseded", event, slot_uid, started, extra={"reaped": reaped})
                 return

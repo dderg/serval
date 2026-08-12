@@ -209,6 +209,7 @@ def _review_payload(head_sha: str) -> dict[str, Any]:
     return {
         "issue": {"number": 7, "title": "change"},
         "pull_request": {"head": {"sha": head_sha}},
+        "review_request": {"event": "review_requested"},
     }
 
 
@@ -352,6 +353,33 @@ async def test_worker_pool_supersedes_running_review_on_new_head(tmp_path: Path)
         database.close()
 
 
+@pytest.mark.asyncio
+async def test_worker_pool_cancels_running_review_when_assignment_removed(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    agent = FakeAgent(blocking={"review-removed"})
+    pool = _pool(database, agent)
+    database.record_event(
+        "review-removed",
+        "pull_request_review.requested",
+        "dderg/serval",
+        7,
+        "maintainer",
+        _review_payload("a" * 40),
+    )
+    task = asyncio.create_task(pool.run())
+    try:
+        await _wait_until(lambda: len(agent.runs) == 1)
+        pool.reconcile_review_heads("dderg/serval", {})
+        await _wait_until(lambda: _event_row(database, "review-removed")["state"] == "skipped")
+        assert agent.stops == ["review-removed"]
+        assert _event_row(database, "review-removed")["error"] == "review assignment removed"
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        database.close()
+
+
 def test_reconcile_skips_queued_review_for_old_head(tmp_path: Path) -> None:
     database = Database(tmp_path / "bot.sqlite")
     try:
@@ -365,6 +393,25 @@ def test_reconcile_skips_queued_review_for_old_head(tmp_path: Path) -> None:
         )
         assert database.skip_stale_reviews("dderg/serval", {7: "b" * 40}) == 1
         assert _event_row(database, "review-old")["state"] == "skipped"
+    finally:
+        database.close()
+
+
+def test_reconcile_skips_queued_review_when_assignment_removed(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    try:
+        database.record_event(
+            "review-removed",
+            "pull_request_review.requested",
+            "dderg/serval",
+            7,
+            "maintainer",
+            _review_payload("a" * 40),
+        )
+        assert database.skip_stale_reviews("dderg/serval", {}) == 1
+        row = _event_row(database, "review-removed")
+        assert row["state"] == "skipped"
+        assert row["error"] == "review assignment removed"
     finally:
         database.close()
 

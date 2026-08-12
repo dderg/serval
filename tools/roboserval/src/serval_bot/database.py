@@ -243,15 +243,16 @@ class Database:
             ).fetchall()
             for row in rows:
                 current_head = review_heads.get(int(row["issue_number"]))
-                if current_head is None:
-                    continue
                 payload = json.loads(row["payload"])
-                event_head = payload.get("pull_request", {}).get("head", {}).get("sha")
-                if event_head == current_head:
+                if "review_request" not in payload:
                     continue
+                event_head = payload.get("pull_request", {}).get("head", {}).get("sha")
+                if current_head is not None and event_head == current_head:
+                    continue
+                error = "review assignment removed" if current_head is None else "superseded by newer pull request head"
                 cursor = connection.execute(
                     "UPDATE events SET state='skipped', error=?, updated_at=? WHERE delivery_id=? AND state='queued'",
-                    ("superseded by newer pull request head", _now(), row["delivery_id"]),
+                    (error, _now(), row["delivery_id"]),
                 )
                 skipped += cursor.rowcount
         return skipped

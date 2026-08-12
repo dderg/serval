@@ -277,8 +277,6 @@ class GitHubApi:
             head = current_pull_request.get("head")
             if not isinstance(head, dict) or not isinstance(head.get("sha"), str):
                 raise GitHubFailure(f"GitHub pull request {request.repo}#{issue_number} has no head SHA")
-            head_sha = head["sha"]
-            review_heads.append({"issue_number": issue_number, "head_sha": head_sha})
             issue = issues_by_number.get(issue_number)
             if issue is None:
                 value = (await self.request("GET", f"/repos/{request.repo}/issues/{issue_number}")).json()
@@ -320,6 +318,7 @@ class GitHubApi:
             if not isinstance(current_head, dict) or not isinstance(current_head.get("sha"), str):
                 raise GitHubFailure(f"GitHub pull request {request.repo}#{issue_number} has no head SHA")
             head_sha = current_head["sha"]
+            review_heads.append({"issue_number": issue_number, "head_sha": head_sha})
             if not await self._head_checks_passed(request.repo, head_sha):
                 continue
             events.append(
