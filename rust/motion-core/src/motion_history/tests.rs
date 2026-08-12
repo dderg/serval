@@ -253,8 +253,8 @@ fn unchanged_rebase_does_not_hide_intervening_motion() {
     store.record(key(), &linear(3_000_000, 1.0, 10.0, 0.0), FREQ_HZ, 3.0);
     store.rebase_axis(key(), 5.0, 0.0);
 
-    let err = store.state_at_host(key(), 2.5, Some(6.0)).unwrap_err();
-    assert!(matches!(err, HistoryError::BeforeRetainedWindow { .. }));
+    let moving = store.state_at_host(key(), 2.5, Some(6.0)).unwrap();
+    assert!((moving.position - 5.0).abs() < 1e-9);
 
     let held = store.state_at_host(key(), 4.5, Some(6.0)).unwrap();
     assert_eq!(held.position, 0.0);
