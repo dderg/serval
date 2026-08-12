@@ -745,3 +745,6 @@ mod submit_nudge_validation_tests;
 
 #[cfg(test)]
 mod homing_state_tests;
+
+#[cfg(test)]
+mod motion_state_query_tests;

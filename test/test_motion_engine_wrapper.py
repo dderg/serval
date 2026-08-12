@@ -32,11 +32,33 @@ class FakeNativeHandle:
         self.calls.append(("dispatched_lead_secs",))
         return self.return_value
 
+    def motion_state_at_clock(self, mcu_handle, clock, host_now, axis):
+        self.calls.append(
+            ("motion_state_at_clock", mcu_handle, clock, host_now, axis)
+        )
+        return self.return_value
+
 
 def make_wrapper(native_handle):
     wrapper = MotionEngineWrapper.__new__(MotionEngineWrapper)
     wrapper._engine = native_handle
     return wrapper
+
+
+class FakeMcu:
+    def get_clocksync(self):
+        return self
+
+    def print_time_to_clock(self, print_time):
+        return print_time * 1000
+
+    def get_engine_handle(self):
+        return 7
+
+
+class FakeReactor:
+    def monotonic(self):
+        return 12.5
 
 
 def test_getattr_delegates_to_native_verbatim():
@@ -92,3 +114,22 @@ def test_stub_engine_answers_gate_accessors():
     stub = _StubEngine()
     assert stub.dispatched_lead_secs() == 0.0
     assert stub.queued_motion_secs() == 0.0
+
+
+def test_motion_state_query_for_one_axis_filters_the_native_request():
+    handle = FakeNativeHandle(return_value={"e": (3.0, 0.0, 0.0)})
+    wrapper = make_wrapper(handle)
+    wrapper._reactor = FakeReactor()
+
+    assert wrapper.motion_state_at(FakeMcu(), print_time=4.25, axis="e") == {
+        "e": (3.0, 0.0, 0.0)
+    }
+    assert handle.calls == [("motion_state_at_clock", 7, 4250, 12.5, 3)]
+
+
+def test_motion_state_query_rejects_an_unknown_axis():
+    wrapper = make_wrapper(FakeNativeHandle())
+    wrapper._reactor = FakeReactor()
+
+    with pytest.raises(ValueError, match="axis must be one of"):
+        wrapper.motion_state_at(FakeMcu(), print_time=4.25, axis="q")
