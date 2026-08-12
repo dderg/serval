@@ -379,6 +379,18 @@ impl StepcompressEndpoint {
         self.post_heartbeat().map_err(|e| e.to_string())
     }
 
+    pub fn abort_axes(&mut self, axes: &[u8]) -> Result<(), SendError> {
+        self.abort_outbound();
+        for &axis in axes {
+            let motor = self.motor_of(axis)?;
+            self.shim
+                .halt_at(motor, u64::MAX)
+                .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
+        }
+        self.sync_retirement_baseline();
+        self.post_heartbeat()
+    }
+
     /// Barriers still queued here never reach the mcu, so nothing will ever
     /// ack them — cancel them by advancing the high-water mark. Barriers
     /// already on the wire are acked even when the mcu halt discards them.

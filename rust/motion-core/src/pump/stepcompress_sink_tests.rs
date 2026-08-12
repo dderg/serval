@@ -598,6 +598,18 @@ fn reset_position_drops_the_stale_stream_and_re_emits_a_step_clock_reset() {
         "a reseeded motor must re-anchor its step clock before the next move"
     );
 }
+#[test]
+fn abort_axes_retires_flushed_pieces_immediately() {
+    let mut h = harness(BUDGET);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+
+    h.endpoint.abort_axes(&[0]).unwrap();
+
+    assert_eq!(h.latest_retired(), Some(vec![40]));
+}
 
 #[test]
 fn a_position_seed_of_the_wrong_width_is_fatal() {

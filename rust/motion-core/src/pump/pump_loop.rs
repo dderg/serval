@@ -131,6 +131,18 @@ impl<S: PieceSink> Pump<S> {
         match msg {
             PumpMsg::Shutdown => return false,
             PumpMsg::Flush(keys) => {
+                if let Err(e) = self.sink.flush_keys(&keys) {
+                    tracing::error!(
+                        subsystem = "motion",
+                        event = "stepcompress_flush_fatal",
+                        error = ?e,
+                        "stepcompress flush rejected — invoking fatal-transport action"
+                    );
+                    for key in keys {
+                        (self.callbacks.on_fatal_transport)(key);
+                    }
+                    return false;
+                }
                 for key in keys {
                     if let Some(q) = self.queues.get_mut(&key) {
                         let dropped = q.pieces.len() as u32;

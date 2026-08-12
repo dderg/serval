@@ -339,6 +339,22 @@ impl PieceSink for WireSink {
         }
     }
 
+    fn flush_keys(&self, keys: &[AxisKey]) -> Result<(), SendError> {
+        let mut axes_by_mcu: HashMap<u32, Vec<u8>> = HashMap::new();
+        for key in keys {
+            axes_by_mcu.entry(key.mcu_id).or_default().push(key.axis);
+        }
+        for (mcu_id, axes) in axes_by_mcu {
+            if let Some(McuTransport::Stepcompress(endpoint)) = self.transports.get(&mcu_id) {
+                endpoint
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .abort_axes(&axes)?;
+            }
+        }
+        Ok(())
+    }
+
     fn send_mcu_frames(&self, mcu_id: u32, frames: &[AxisFrame]) -> Result<(), SendError> {
         debug_assert!(
             frames.iter().all(|f| f.pieces.len() <= 255),

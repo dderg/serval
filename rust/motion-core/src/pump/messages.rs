@@ -217,6 +217,10 @@ pub trait PieceSink: Send {
         Ok(())
     }
 
+    fn flush_keys(&self, _keys: &[AxisKey]) -> Result<(), SendError> {
+        Ok(())
+    }
+
     /// Routes a classic-stepping `stepcompress_barrier_ack` to the endpoint
     /// that issued the barrier.
     fn on_barrier_ack(&self, mcu_id: u32, oid: u8, seq: u32) -> Result<(), SendError> {
