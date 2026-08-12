@@ -291,9 +291,18 @@ pub struct HistoryStore {
     endpoints: HashMap<AxisKey, AxisEndpoint>,
     evicted: HashMap<AxisKey, u64>,
     holds_before_ring: HashMap<AxisKey, HoldBeforeRing>,
+    rebase_boundaries: HashMap<AxisKey, VecDeque<AxisEndpoint>>,
 }
 
 impl HistoryStore {
+    fn rebase_boundary_at(&self, key: AxisKey, host_t: f64) -> Option<AxisEndpoint> {
+        self.rebase_boundaries
+            .get(&key)?
+            .iter()
+            .rev()
+            .find(|boundary| boundary.host <= host_t)
+            .copied()
+    }
     pub fn record(&mut self, key: AxisKey, entry: &PieceEntry, clock_freq_hz: f64, host_secs: f64) {
         if !host_secs.is_finite() {
             tracing::error!(
@@ -415,9 +424,20 @@ impl HistoryStore {
             position,
             "[history] axis rebased to an externally set position"
         );
-        self.rings.entry(key).or_default().clear();
-        self.holds_before_ring.remove(&key);
-        self.endpoints.insert(key, AxisEndpoint { host, position });
+        self.rings
+            .entry(key)
+            .or_default()
+            .retain(|piece| piece.start_host < host);
+        let boundary = AxisEndpoint { host, position };
+        let boundaries = self.rebase_boundaries.entry(key).or_default();
+        while boundaries.back().is_some_and(|prior| prior.host >= host) {
+            boundaries.pop_back();
+        }
+        if boundaries.len() == HISTORY_CAPACITY {
+            boundaries.pop_front();
+        }
+        boundaries.push_back(boundary);
+        self.endpoints.insert(key, boundary);
     }
 
     pub fn final_position(&self, key: AxisKey) -> Option<f64> {
@@ -484,7 +504,13 @@ impl HistoryStore {
         // projections and may regress a few ticks across re-syncs
         // (`history_order_jitter`), which would break a sorted-ring
         // precondition. Trip queries are rare, so O(len) is fine.
-        let Some(piece) = ring.iter().rev().find(|p| p.start_clock <= clock) else {
+        let piece = ring.iter().rev().find(|p| p.start_clock <= clock);
+        if let Some(boundary) = self.rebase_boundary_at(key, host_t) {
+            if piece.is_none_or(|piece| boundary.host > piece.start_host) {
+                return Ok(boundary.hold_state());
+            }
+        }
+        let Some(piece) = piece else {
             return self.state_at_host(key, host_t, now_host);
         };
         if clock < piece.end_clock {
@@ -514,10 +540,16 @@ impl HistoryStore {
                 queried: host_t,
             });
         }
+        let boundary = self.rebase_boundary_at(key, host_t);
         let ring = self.rings.get(&key).filter(|r| !r.is_empty());
         let hold = match ring {
             Some(ring) => {
                 let idx = ring.partition_point(|p| p.start_host <= host_t);
+                if let Some(boundary) = boundary {
+                    if idx == 0 || boundary.host > ring[idx - 1].start_host {
+                        return Ok(boundary.hold_state());
+                    }
+                }
                 if idx == 0 {
                     let held_rest_before_ring = self
                         .holds_before_ring
@@ -543,24 +575,28 @@ impl HistoryStore {
                 piece.endpoint()
             }
             None => {
-                let endpoint = *self
-                    .endpoints
-                    .get(&key)
-                    .ok_or(HistoryError::NoHistoryForAxis(key))?;
-                if let Some(hold) = self.holds_before_ring.get(&key) {
-                    if host_t < hold.from {
-                        return Err(HistoryError::BeforeRetainedWindow {
-                            key,
-                            queried: host_t,
-                            window_start: hold.from,
-                            window_end: hold.endpoint.host,
-                            ring_len: 0,
-                            evicted: self.evicted.get(&key).copied().unwrap_or(0),
-                            first_dur_s: 0.0,
-                        });
+                if let Some(boundary) = boundary {
+                    boundary
+                } else {
+                    let endpoint = *self
+                        .endpoints
+                        .get(&key)
+                        .ok_or(HistoryError::NoHistoryForAxis(key))?;
+                    if let Some(hold) = self.holds_before_ring.get(&key) {
+                        if host_t < hold.from {
+                            return Err(HistoryError::BeforeRetainedWindow {
+                                key,
+                                queried: host_t,
+                                window_start: hold.from,
+                                window_end: hold.endpoint.host,
+                                ring_len: 0,
+                                evicted: self.evicted.get(&key).copied().unwrap_or(0),
+                                first_dur_s: 0.0,
+                            });
+                        }
                     }
+                    endpoint
                 }
-                endpoint
             }
         };
         if let Some(now_host) = now_host {

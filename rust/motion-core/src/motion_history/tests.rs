@@ -224,10 +224,64 @@ fn rebase_clears_ring_and_answers_from_register() {
         .state_at_host(key(), h(2_000_000_500), Some(h(3_000_000_000)))
         .unwrap();
     assert!((held.position - 42.0).abs() < 1e-9);
-    let held_before = store
+    let before = store
         .state_at_host(key(), h(1_000), Some(f64::INFINITY))
         .unwrap();
-    assert!((held_before.position - 42.0).abs() < 1e-9);
+    assert!((before.position - 0.000_019_230_769).abs() < 1e-9);
+}
+
+#[test]
+fn unchanged_rebase_preserves_the_pre_rebase_hold() {
+    let mut store = HistoryStore::default();
+    store.rebase_axis(key(), 1.0, 0.0);
+    store.rebase_axis(key(), 2.0, 0.0);
+    store.record(key(), &linear(3_000_000, 1.0, 0.0, 0.0), FREQ_HZ, 3.0);
+
+    let held = store.state_at_host(key(), 1.5, Some(4.0)).unwrap();
+
+    assert_eq!(held.position, 0.0);
+    assert_eq!(held.velocity, 0.0);
+    assert_eq!(held.acceleration, 0.0);
+}
+
+#[test]
+fn unchanged_rebase_does_not_hide_intervening_motion() {
+    let mut store = HistoryStore::default();
+    store.rebase_axis(key(), 1.0, 0.0);
+    store.rebase_axis(key(), 2.0, 0.0);
+    store.record(key(), &linear(2_000_000, 1.0, 0.0, 10.0), FREQ_HZ, 2.0);
+    store.record(key(), &linear(3_000_000, 1.0, 10.0, 0.0), FREQ_HZ, 3.0);
+    store.rebase_axis(key(), 5.0, 0.0);
+
+    let moving = store.state_at_host(key(), 2.5, Some(6.0)).unwrap();
+    assert!((moving.position - 5.0).abs() < 1e-9);
+
+    let held = store.state_at_host(key(), 4.5, Some(6.0)).unwrap();
+    assert_eq!(held.position, 0.0);
+    assert_eq!(held.velocity, 0.0);
+    assert_eq!(held.acceleration, 0.0);
+}
+
+#[test]
+fn unchanged_rebase_invalidates_overlapping_and_future_motion() {
+    let mut store = HistoryStore::default();
+    store.rebase_axis(key(), 1.0, 0.0);
+    store.record(key(), &linear(2_000_000, 2.0, 0.0, 10.0), FREQ_HZ, 2.0);
+    store.record(key(), &linear(5_000_000, 1.0, 10.0, 0.0), FREQ_HZ, 5.0);
+    store.rebase_axis(key(), 3.0, 10.0);
+
+    let before = store.state_at_host(key(), 2.5, Some(6.0)).unwrap();
+    assert!((before.position - 2.5).abs() < 1e-9);
+
+    let after = store.state_at_host(key(), 3.5, Some(6.0)).unwrap();
+    assert_eq!(after.position, 10.0);
+    assert_eq!(after.velocity, 0.0);
+    assert_eq!(after.acceleration, 0.0);
+
+    let stale_future = store.state_at_host(key(), 5.5, Some(6.0)).unwrap();
+    assert_eq!(stale_future.position, 10.0);
+    assert_eq!(stale_future.velocity, 0.0);
+    assert_eq!(stale_future.acceleration, 0.0);
 }
 
 #[test]

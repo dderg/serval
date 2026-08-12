@@ -63,6 +63,11 @@ def test_create_support_bundle_selects_recent_records(tmp_path):
     events = logs / "events"
     events.mkdir(parents=True)
     (logs / "klippy.log").write_text("klippy evidence\n", encoding="utf-8")
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "printer.cfg").write_text("[include macros/*.cfg]\n")
+    (config / "macros").mkdir()
+    (config / "macros" / "print.cfg").write_text("[gcode_macro PRINT_START]\n")
     (events / "host-rust.jsonl").write_text(
         event(now - 3600, "old") + "not-json\n" + event(now - 60, "fatal"),
         encoding="utf-8",
@@ -77,6 +82,7 @@ def test_create_support_bundle_selects_recent_records(tmp_path):
         now=now,
         journal_writer=journal_writer(b"journal evidence\n"),
         software_version="test-version",
+        config_file=config / "printer.cfg",
     )
 
     with tarfile.open(archive_path, "r:gz") as archive:
@@ -86,6 +92,10 @@ def test_create_support_bundle_selects_recent_records(tmp_path):
             "klipper-journal.log",
             "klippy.log",
             "manifest.json",
+            "config",
+            "config/macros",
+            "config/macros/print.cfg",
+            "config/printer.cfg",
         }
         selected = archive.extractfile("events/host-rust.jsonl").read()
         assert b'"fatal"' in selected
@@ -100,6 +110,10 @@ def test_create_support_bundle_selects_recent_records(tmp_path):
     assert manifest["event_files"]["host-rust.jsonl"]["malformed"] == 1
     assert manifest["event_files"]["host-rust.jsonl"]["selected"] == 1
     assert not manifest["event_files"]["host-rust.jsonl"]["scan_truncated"]
+    assert manifest["config_files"] == [
+        "config/macros/print.cfg",
+        "config/printer.cfg",
+    ]
     assert manifest["warnings"] == []
 
 
@@ -274,6 +288,7 @@ def test_gcode_command_starts_worker_without_waiting(monkeypatch, tmp_path):
                 "log_file": str(tmp_path / "klippy.log"),
                 "log_events_dir": str(tmp_path / "events"),
                 "software_version": "test",
+                "config_file": str(tmp_path / "printer.cfg"),
             }
 
     class FakeConfig:

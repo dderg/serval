@@ -128,7 +128,7 @@ class PrinterExtruder:
 
     def find_past_position(self, print_time):
         state = self.motion.engine.motion_state_at(
-            self.motion.mcu, print_time=print_time
+            self.motion.mcu, print_time=print_time, axis="e"
         )
         return state["e"][0]
 

@@ -1,6 +1,7 @@
 import io
 import json
 import tarfile
+import zipfile
 
 import pytest
 
@@ -13,6 +14,12 @@ def test_finds_uploaded_support_bundle_links_only():
     unrelated = "[klippy.log](https://github.com/user-attachments/files/124/klippy.log)"
 
     assert support_bundle_urls(bundle, unrelated) == ["https://github.com/user-attachments/files/123/bundle.tar.gz"]
+
+
+def test_finds_zip_archive_with_non_bundle_name():
+    archive = "[session1-bug-report.zip](https://github.com/user-attachments/files/396/report.zip)"
+
+    assert support_bundle_urls(archive) == ["https://github.com/user-attachments/files/396/report.zip"]
 
 
 def test_renders_info_level_multiline_shutdown_from_structured_events(tmp_path):
@@ -80,6 +87,29 @@ def test_uploaded_bundle_is_inspected_without_user_commands(tmp_path, monkeypatc
 
     assert "Attachment: https://github.com/user-attachments/" in report
     assert "MCU 'mcu' shutdown: Timer too close" in report
+
+
+def test_reads_legacy_zip_events_and_imported_configs(tmp_path):
+    bundle = tmp_path / "session1-bug-report.zip"
+    record = {
+        "_time": "2026-08-11T23:00:00.000Z",
+        "_msg": "query precedes retained motion history",
+        "level": "error",
+        "source": "host-rust",
+        "subsystem": "motion",
+    }
+    with zipfile.ZipFile(bundle, "w") as archive:
+        archive.writestr("session1-host-rust.jsonl", json.dumps(record) + "\n")
+        archive.writestr("printer.cfg", "[include steppers.cfg]\n")
+        archive.writestr("steppers.cfg", "[stepper_x]\nstep_pin: PA1\n")
+
+    report = render_bundle_report(bundle)
+
+    assert "legacy archive has no manifest.json" in report
+    assert "query precedes retained motion history" in report
+    assert "configuration: printer.cfg" in report
+    assert "[include steppers.cfg]" in report
+    assert "configuration: steppers.cfg" in report
 
 
 def test_rejects_cumulative_uncompressed_event_overflow(tmp_path, monkeypatch):

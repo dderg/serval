@@ -266,9 +266,7 @@ def init_planner(motion):
         return
 
     try:
-        motion.engine.init_planner(
-            motion._motion_config_text, topology, motion.reactor.monotonic()
-        )
+        motion.engine.init_planner(motion._motion_config_text, topology)
         motion._configure_axes_per_mcu(engine_mcus)
         motion._planner_ready = True
         motion._register_engine_wakeup()
