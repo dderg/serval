@@ -20,11 +20,7 @@ const RETIREMENT_IDLE_TICKS: u32 = 10;
 
 pub const MOVE_SLOT_RESERVE: u32 = 16;
 
-// Keep enough queued motion to survive the transport's retransmit floor plus
-// the 400 ms re-anchor-to-egress delay observed on the Voron 0 host. A
-// quarter-second queue repeatedly re-armed an idle stepper 1.3-1.5 ms late
-// during homing even without a retransmit.
-pub const SEND_LEAD_SECONDS: f64 = 4.0 * (host_rt::host_io::rtt::MIN_RTO_MS as f64) / 1000.0;
+pub const SEND_LEAD_SECONDS: f64 = 4.0;
 
 pub const CONSUMED_MARGIN_SECONDS: f64 = 0.010;
 
