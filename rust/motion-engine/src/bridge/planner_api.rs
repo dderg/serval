@@ -638,21 +638,27 @@ impl PyMotionEngine {
         gcode: geometry::GcodePos,
         machine: geometry::MachinePos,
     ) -> PyResult<()> {
-        let planner_guard = self.planner.lock_ok();
-        if let Some(planner) = planner_guard.as_ref() {
-            py.detach(|| planner.flush()).map_err(planner_err)?;
-            {
-                let drain = self.drain.clone();
-                py.detach(|| drain.wait_drained(DRAIN_TIMEOUT))
-                    .map_err(PyRuntimeError::new_err)?;
+        {
+            let planner_guard = self.planner.lock_ok();
+            if let Some(planner) = planner_guard.as_ref() {
+                py.detach(|| planner.flush()).map_err(planner_err)?;
+            } else {
+                return Ok(());
             }
-
-            planner
-                .stream_open(crate::mcu_config::reanchor_stream_pos(gcode))
-                .map_err(planner_err)?;
-
-            self.send_serial_position_seeds(machine)?;
         }
+        {
+            let drain = self.drain.clone();
+            py.detach(|| drain.wait_drained(DRAIN_TIMEOUT))
+                .map_err(PyRuntimeError::new_err)?;
+        }
+        let planner_guard = self.planner.lock_ok();
+        let planner = planner_guard
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("planner disappeared during position reseed"))?;
+        planner
+            .stream_open(crate::mcu_config::reanchor_stream_pos(gcode))
+            .map_err(planner_err)?;
+        self.send_serial_position_seeds(machine)?;
         Ok(())
     }
 
