@@ -559,10 +559,6 @@ impl StepcompressEndpoint {
         }
         self.acked_barrier_seq.insert(oid, seq);
         self.release_retirements();
-        if self.pending_retire.is_empty() && self.deferred_retirement {
-            let snapshot = self.shim.retired_counts();
-            self.publish_retirement(&snapshot);
-        }
         self.post_heartbeat()
     }
 
@@ -743,6 +739,14 @@ impl StepcompressEndpoint {
                     });
                 }
             }
+            let snapshot = self.shim.retired_counts();
+            self.publish_retirement(&snapshot);
+        }
+        if self.pending_retire.is_empty()
+            && self.deferred_retirement
+            && self.shim.queued_pieces() == 0
+            && self.shim.pending_steps() == 0
+        {
             let snapshot = self.shim.retired_counts();
             self.publish_retirement(&snapshot);
         }
