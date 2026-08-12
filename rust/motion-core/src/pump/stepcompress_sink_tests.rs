@@ -580,6 +580,11 @@ fn reset_position_drops_the_stale_stream_and_re_emits_a_step_clock_reset() {
         &[(OID, 5)],
         "the mcu step counter must adopt the same origin as the shim"
     );
+    assert_eq!(
+        h.latest_retired(),
+        Some(vec![40]),
+        "aborted pieces must retire immediately so a position reseed can drain"
+    );
 
     h.sent.lock_ok().clear();
     h.endpoint

@@ -376,7 +376,7 @@ impl StepcompressEndpoint {
             .map_err(|e| format!("stepcompress mcu {}: {e}", self.mcu_id))?;
         self.shim.reset_position(motor, count);
         self.sync_retirement_baseline();
-        Ok(())
+        self.post_heartbeat().map_err(|e| e.to_string())
     }
 
     /// Barriers still queued here never reach the mcu, so nothing will ever
