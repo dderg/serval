@@ -1,6 +1,4 @@
-# One MCU's claim on the native motion engine
-#
-# This file may be distributed under the terms of the GNU GPLv3 license.
+import concurrent.futures
 
 
 class EngineMcu:
@@ -13,8 +11,24 @@ class EngineMcu:
 
     def __init__(self, printer, name):
         self._engine = printer.lookup_object("motion_engine", None)
+        self._reactor = printer.get_reactor()
         self._name = name
         self._handle = None
+        self._calls = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="mcu-call-%s" % (name,)
+        )
+        printer.register_event_handler(
+            "klippy:disconnect", self._shutdown_calls
+        )
+
+    def _shutdown_calls(self):
+        self._calls.shutdown(wait=False, cancel_futures=True)
+
+    def _wait_call(self, call):
+        future = self._calls.submit(call)
+        while not future.done():
+            self._reactor.pause(self._reactor.monotonic() + 0.001)
+        return future.result()
 
     def available(self):
         return self._engine is not None
@@ -73,10 +87,16 @@ class EngineMcu:
         self._engine.engine_send_args(self._handle, name, args)
 
     def call(self, msg, response):
-        return self._engine.engine_call(self._handle, msg, response)
+        return self._wait_call(
+            lambda: self._engine.engine_call(self._handle, msg, response)
+        )
 
     def call_args(self, name, args, response):
-        return self._engine.engine_call_args(self._handle, name, args, response)
+        return self._wait_call(
+            lambda: self._engine.engine_call_args(
+                self._handle, name, args, response
+            )
+        )
 
     def set_clock_est(self, freq, offset, last_clock, host_now_raw):
         self._engine.set_clock_est(
