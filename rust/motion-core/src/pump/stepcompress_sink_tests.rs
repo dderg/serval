@@ -609,6 +609,14 @@ fn abort_axes_retires_flushed_pieces_immediately() {
     h.endpoint.abort_axes(&[0]).unwrap();
 
     assert_eq!(h.latest_retired(), Some(vec![40]));
+    h.sent.lock_ok().clear();
+    h.now.store(2_600_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(3_000_000, 8, 5.0))])
+        .unwrap();
+    assert!(h.sent.lock_ok().iter().any(
+        |frame| matches!(frame, StepFrame::ResetStepClock { clock, .. } if *clock != u32::MAX)
+    ));
 }
 
 #[test]

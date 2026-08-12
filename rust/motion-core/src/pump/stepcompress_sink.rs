@@ -376,11 +376,18 @@ impl StepcompressEndpoint {
     }
 
     pub fn abort_axes(&mut self, axes: &[u8]) -> Result<(), SendError> {
+        let cuts: Vec<(usize, u64)> = axes
+            .iter()
+            .map(|&axis| {
+                let motor = self.motor_of(axis)?;
+                let clock = self.step_clock.get(&self.oids[motor]).copied().unwrap_or(0);
+                Ok((motor, clock))
+            })
+            .collect::<Result<_, SendError>>()?;
         self.abort_outbound();
-        for &axis in axes {
-            let motor = self.motor_of(axis)?;
+        for (motor, clock) in cuts {
             self.shim
-                .halt_at(motor, u64::MAX)
+                .halt_at(motor, clock)
                 .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
         }
         self.sync_retirement_baseline();
