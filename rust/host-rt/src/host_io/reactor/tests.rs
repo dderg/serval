@@ -222,6 +222,26 @@ fn timeout_driven_doubles_rto() {
     assert!(reactor.rtt.current_rto() >= rto_before * 2);
 }
 
+#[test]
+fn retransmit_restarts_the_timeout_from_the_successful_write() {
+    let (mut reactor, _port) = test_reactor_with_inflight(&[1, 2]);
+    let before = reactor.clock.now();
+    for entry in reactor.unacked_window.iter_mut() {
+        entry.sent_at = before - Duration::from_secs(1);
+    }
+
+    reactor
+        .write_retransmit(RetransmitTrigger::TimeoutDriven)
+        .unwrap();
+
+    assert!(
+        reactor
+            .unacked_window
+            .iter()
+            .all(|entry| entry.sent_at >= before)
+    );
+}
+
 struct BrokenPipePort;
 
 impl std::io::Read for BrokenPipePort {

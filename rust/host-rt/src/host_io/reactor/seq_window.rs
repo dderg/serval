@@ -125,6 +125,7 @@ impl Reactor {
         let silence = now.duration_since(self.last_recv_time);
         for entry in self.unacked_window.iter_mut() {
             entry.retry_count += 1;
+            entry.sent_at = now;
             if entry.retry_count >= MAX_RETRY_COUNT && silence >= MCU_SILENCE_FOR_CLOSE {
                 tracing::error!(
                     subsystem = "mcu-comms",
