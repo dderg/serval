@@ -18,9 +18,8 @@ fn primed(parked: bool) -> Anchor {
 #[test]
 fn classify_mid_motion_underrun_is_fatal() {
     let a = primed(false);
-    // t0 = 100 + 0.25 - 0 = 100.25; next seg starts at stream-t 1.0 -> abs
-    // 101.25. Playhead at 101.5 has overrun it by 0.25s, mid-motion.
-    let class = a.classify(1.0, 101.5);
+    let playhead = 101.0 + DEFAULT_LEAD_SECS + 0.25;
+    let class = a.classify(1.0, playhead);
     assert!(
         matches!(class, AnchorClass::UnderrunFatal { gap_s, .. } if (gap_s - 0.25).abs() < 1e-9),
         "mid-motion underrun must be fatal, got {class:?}",
@@ -30,9 +29,8 @@ fn classify_mid_motion_underrun_is_fatal() {
 #[test]
 fn classify_mid_motion_low_margin_is_fatal() {
     let a = primed(false);
-    // Abs start 101.25; playhead 101.24 leaves a +0.01s margin, under the
-    // 0.02s floor, mid-motion.
-    let class = a.classify(1.0, 101.24);
+    let playhead = 101.0 + DEFAULT_LEAD_SECS - 0.01;
+    let class = a.classify(1.0, playhead);
     assert!(
         matches!(class, AnchorClass::LowMarginFatal { margin_s, .. }
             if margin_s > 0.0 && margin_s < LOW_MARGIN_WARN_SECS),
@@ -215,8 +213,8 @@ fn backward_jump_takes_priority_over_underrun() {
 }
 
 #[test]
-fn default_lead_is_quarter_second_and_shared_with_planner() {
-    assert_eq!(super::DEFAULT_LEAD_SECS, 0.25);
+fn default_lead_is_half_second_and_shared_with_planner() {
+    assert_eq!(super::DEFAULT_LEAD_SECS, 0.5);
     assert_eq!(crate::worker::lead_secs(), super::DEFAULT_LEAD_SECS);
 }
 
@@ -379,10 +377,7 @@ fn a_producer_that_builds_runway_releases_the_earned_lead() {
     a.anchor_segment(1.0, 2.0, 200.0);
     assert_eq!(a.lead_secs, 2.0 * DEFAULT_LEAD_SECS);
 
-    // t0 = 200 + 0.5 - 1.0 = 199.5. A commit at stream-t 2.0 while the
-    // playhead sits at 200.7 carries 0.8s of runway — a full default lead
-    // beyond the 0.5s it was granted.
-    let (_, epoch) = a.anchor_segment(2.0, 3.0, 200.7);
+    let (_, epoch) = a.anchor_segment(2.0, 3.0, 200.4);
     assert_eq!(epoch, StreamEpoch::Continuation);
     assert_eq!(a.lead_secs, DEFAULT_LEAD_SECS);
 }
