@@ -831,24 +831,32 @@ fn a_cohort_is_not_retired_until_its_barrier_is_acked() {
 }
 
 #[test]
-fn a_barrier_ack_that_skips_ahead_is_fatal() {
+fn retirement_barriers_coalesce_while_an_ack_is_outstanding() {
     let mut h = harness(1024);
     h.now.store(1_000, Ordering::Relaxed);
     h.endpoint
         .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
         .unwrap();
+    assert_eq!(h.barriers.lock_ok().len(), 1);
+
     h.endpoint
         .send_frames(MCU_ID, &[axis_frame(ramp_from(18_000, 8, 1.0))])
         .unwrap();
     h.now.store(10_000_000, Ordering::Relaxed);
     h.endpoint.tick().unwrap();
-    assert!(h.barriers.lock_ok().len() >= 2, "the run issues barriers");
+    assert_eq!(
+        h.barriers.lock_ok().len(),
+        1,
+        "an unacknowledged cohort must bound barrier traffic"
+    );
 
-    let err = h
-        .endpoint
-        .on_barrier_ack(OID, 1)
-        .expect_err("a skipped barrier leaves a cohort unaccounted for");
-    assert!(format!("{err:?}").contains("out of order"), "{err:?}");
+    h.ack_sent_barriers();
+    h.endpoint.tick().unwrap();
+    assert_eq!(
+        h.barriers.lock_ok().as_slice(),
+        &[(OID, 1)],
+        "coalesced retirements need one new execution watermark"
+    );
 }
 
 #[test]

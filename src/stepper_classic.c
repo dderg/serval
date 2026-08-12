@@ -291,16 +291,16 @@ stepcompress_barrier_ack_task(void)
     uint8_t oid;
     struct stepper *s;
     foreach_oid(oid, s, command_config_stepper) {
-        for (;;) {
-            irq_disable();
-            if (move_queue_empty(&s->completed_barriers)) {
-                irq_enable();
-                break;
-            }
-            struct move_node *mn = move_queue_pop(&s->completed_barriers);
+        irq_disable();
+        struct move_node *mn = move_queue_first(&s->completed_barriers);
+        move_queue_clear(&s->completed_barriers);
+        irq_enable();
+        while (mn) {
             struct stepper_move *m = container_of(mn, struct stepper_move,
                                                   node);
+            mn = mn->next;
             uint32_t seq = m->interval;
+            irq_disable();
             move_free(m);
             irq_enable();
             sendf("stepcompress_barrier_ack oid=%c seq=%u", oid, seq);

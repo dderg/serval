@@ -139,9 +139,6 @@ struct InFlight {
     end_clock: u64,
 }
 
-/// The mcu's barrier ack is the pump's credit for a lane, so a barrier is
-/// issued for every retirement the shim reports — holding one back to save
-/// wire traffic starves the lane of credit for a full round trip.
 struct PendingRetire {
     waits: Vec<BarrierId>,
     counts: Vec<u32>,
@@ -196,6 +193,7 @@ pub struct StepcompressEndpoint {
     step_clock: HashMap<u32, u64>,
     pending_seams: HashMap<u8, VecDeque<PendingSeam>>,
     pending_retire: VecDeque<PendingRetire>,
+    deferred_retirement: bool,
     published: Vec<u32>,
     cohort_counts: Vec<u32>,
     next_barrier_seq: HashMap<u32, u32>,
@@ -291,6 +289,7 @@ impl StepcompressEndpoint {
             pending_retire: VecDeque::new(),
             published,
             cohort_counts,
+            deferred_retirement: false,
             next_barrier_seq: HashMap::new(),
             acked_barrier_seq: HashMap::new(),
         }
@@ -364,6 +363,7 @@ impl StepcompressEndpoint {
         self.published = self.shim.retired_counts();
         self.cohort_counts.clone_from(&self.published);
         self.pending_retire.clear();
+        self.deferred_retirement = false;
     }
 
     pub fn reset_motor_position(&mut self, motor: usize, count: i64) -> Result<(), String> {
@@ -390,6 +390,7 @@ impl StepcompressEndpoint {
         self.step_clock.clear();
         self.pending_seams.clear();
         self.pending_retire.clear();
+        self.deferred_retirement = false;
     }
 
     pub fn mark_reanchor(&mut self, axis: u8, at_start_clock: u64, epoch_freq: Option<f64>) {
@@ -472,6 +473,11 @@ impl StepcompressEndpoint {
     }
 
     fn publish_retirement(&mut self, snapshot: &[u32]) {
+        if !self.pending_retire.is_empty() {
+            self.deferred_retirement = true;
+            return;
+        }
+        self.deferred_retirement = false;
         let mut waits = Vec::new();
         for motor in 0..self.oids.len() {
             let before = self.cohort_counts.get(motor).copied().unwrap_or(0);
@@ -712,6 +718,7 @@ impl StepcompressEndpoint {
             && self.shim.queued_pieces() == 0
             && self.shim.pending_steps() == 0
             && self.pending_retire.is_empty()
+            && !self.deferred_retirement
         {
             return Ok(());
         }
