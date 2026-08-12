@@ -377,7 +377,7 @@ fn participant_release_tracks_mcu_clock_horizon() {
             data_rx,
             sink_clone,
             PumpCallbacks {
-                mcu_clock_of: Box::new(move |_| Some((*clock_for_pump.lock().unwrap(), 1000.0))),
+                mcu_clock_of: Box::new(move |_| Some((*clock_for_pump.lock().unwrap(), 100.0))),
                 ..PumpCallbacks::noop(64)
             },
             None,
