@@ -29,6 +29,7 @@ pub use stepcompress_sink::{
     BACKLOG_CEILING_FRAMES, ClockSource, FrameEgress, MOVE_SLOT_RESERVE, StepcompressEndpoint,
     StepcompressPacer, build_endpoint,
 };
+pub use transit_trace::emit_fault_snapshot;
 #[cfg(test)]
 pub(crate) use wire_sink::pushpieces_retransmit_serial;
 pub use wire_sink::{McuTransport, WireSink};

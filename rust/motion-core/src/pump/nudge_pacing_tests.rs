@@ -240,6 +240,8 @@ impl Bench {
                 start_slot: 0,
                 new_head: 0,
                 room: SHIM_RING_DEPTH,
+                guard_recorded_ns: 0,
+                guard_mcu_clock: 0,
             }],
         )
     }

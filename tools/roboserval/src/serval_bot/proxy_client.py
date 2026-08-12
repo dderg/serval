@@ -94,6 +94,27 @@ class ProxyClient:
             {"repo": repo, "since": since, "bot_login": bot_login},
         )
 
+    def create_code_pull_request(
+        self,
+        repo: str,
+        issue_number: int,
+        branch: str,
+        head_sha: str,
+        title: str,
+        body: str,
+    ) -> dict[str, Any]:
+        return self._request(
+            "/github/code-pull-request",
+            {
+                "repo": repo,
+                "issue_number": issue_number,
+                "branch": branch,
+                "head_sha": head_sha,
+                "title": title,
+                "body": body,
+            },
+        )
+
     def dispatch_sim(
         self,
         repo: str,

@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from serval_bot.actions import ActionDenied, ActionGateway, parse_sim_directive, reviewable_diff_lines
+from serval_bot.actions import (
+    ActionDenied,
+    ActionGateway,
+    is_issue_follow_up,
+    parse_sim_directive,
+    reviewable_diff_lines,
+)
 from serval_bot.database import ActionConflict, Database, Event
 from serval_bot.policy import Mode, RepositoryPolicy
 
@@ -41,6 +47,18 @@ class FakeProxy:
     def search_issues(self, repo: str, query: str) -> dict:
         self.calls.append(("search", repo, query))
         return {"items": []}
+
+    def create_code_pull_request(
+        self,
+        repo: str,
+        issue_number: int,
+        branch: str,
+        head_sha: str,
+        title: str,
+        body: str,
+    ) -> dict:
+        self.calls.append(("code_pull_request", repo, issue_number, branch, head_sha, title, body))
+        return {"number": 12, "url": "https://example.test/pull/12", "head_sha": head_sha}
 
     def dispatch_sim(self, repo: str, issue_number: int, workflow: str, ref: str, head_sha: str | None) -> dict:
         self.calls.append(("dispatch", repo, issue_number, workflow, ref, head_sha))
@@ -78,10 +96,11 @@ def _event(
     comment: str | None = None,
     delivery_id: str = "delivery",
     issue_number: int = 7,
+    author_association: str = "COLLABORATOR",
 ) -> Event:
-    payload = {}
+    payload = {"issue": {}}
     if comment is not None:
-        payload["comment"] = {"body": comment}
+        payload["comment"] = {"body": comment, "author_association": author_association}
     return Event(delivery_id, event_type, "dderg/serval", issue_number, actor, payload, "running", 1, None)
 
 
@@ -116,6 +135,108 @@ def _gateway(
 
 _SIM_SHA = "a" * 40
 _SIM_FARM_REF = "farm/7-restart"
+
+
+def test_issue_follow_up_leaves_coding_judgment_to_model() -> None:
+    collaborator = _event(
+        actor="collaborator",
+        event_type="issue_comment.created",
+        comment="@roboserval can you implement bounded queues?",
+    )
+    collaborator.payload["issue"] = {}
+    non_collaborator = _event(
+        event_type="issue_comment.created",
+        comment="@roboserval I cannot reproduce this. Please take a look.",
+        author_association="NONE",
+    )
+    non_collaborator.payload["issue"] = {}
+    unmentioned = _event(
+        event_type="issue_comment.created",
+        comment="I cannot reproduce this. Please take a look.",
+        author_association="NONE",
+    )
+    pull_request_comment = _event(event_type="issue_comment.created", comment="@roboserval fix this")
+    pull_request_comment.payload["issue"] = {"pull_request": {"url": "https://example.test/pull/7"}}
+
+    assert is_issue_follow_up(collaborator, "roboserval")
+    assert is_issue_follow_up(non_collaborator, "ROBOSERVAL")
+    assert not is_issue_follow_up(unmentioned, "roboserval")
+    assert not is_issue_follow_up(pull_request_comment, "roboserval")
+
+
+def test_code_pull_request_records_authorized_publication(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    proxy = FakeProxy()
+    try:
+        event = _claimed(
+            database,
+            _event(
+                actor="collaborator",
+                event_type="issue_comment.created",
+                comment="@roboserval implement bounded queue handling",
+            ),
+        )
+        result = json.loads(
+            _gateway(database, event, Mode.TRIAGE, proxy).create_code_pull_request(
+                "serval/7-bounded-queue",
+                "c" * 40,
+                "Bound queue handling",
+                "Closes #7",
+            )
+        )
+        assert result["state"] == "applied"
+        assert proxy.calls == [
+            (
+                "code_pull_request",
+                "dderg/serval",
+                7,
+                "serval/7-bounded-queue",
+                "c" * 40,
+                "Bound queue handling",
+                "Closes #7",
+            )
+        ]
+    finally:
+        database.close()
+
+
+def test_code_pull_request_rejects_unmentioned_issue_comment(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    try:
+        event = _claimed(
+            database,
+            _event(
+                event_type="issue_comment.created",
+                comment="Please fix this.",
+                author_association="NONE",
+            ),
+        )
+        with pytest.raises(ActionDenied, match="issue follow-up"):
+            _gateway(database, event, Mode.TRIAGE, FakeProxy()).create_code_pull_request(
+                "serval/7-bounded-queue",
+                "c" * 40,
+                "Bound queue handling",
+                "Closes #7",
+            )
+    finally:
+        database.close()
+
+
+def test_code_pull_request_rejects_non_issue_follow_up(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    try:
+        payload = _event(event_type="issue_comment.created", comment="@roboserval fix this")
+        payload.payload["issue"]["pull_request"] = {"url": "https://example.test/pull/7"}
+        event = _claimed(database, payload)
+        with pytest.raises(ActionDenied, match="issue follow-up"):
+            _gateway(database, event, Mode.TRIAGE, FakeProxy()).create_code_pull_request(
+                "serval/7-bounded-queue",
+                "c" * 40,
+                "Bound queue handling",
+                "Closes #7",
+            )
+    finally:
+        database.close()
 
 
 def test_shadow_mode_records_without_github_side_effect(tmp_path: Path) -> None:

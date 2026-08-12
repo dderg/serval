@@ -28,6 +28,23 @@ _SIM_DIRECTIVE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_CODE_BRANCH_RE = re.compile(r"serval/(?P<issue>[0-9]+)-[a-z0-9]+(?:-[a-z0-9]+)*")
+
+
+def is_issue_follow_up(event: Event, bot_login: str) -> bool:
+    if event.event_type != "issue_comment.created":
+        return False
+    issue = event.payload.get("issue")
+    comment = event.payload.get("comment")
+    body = comment.get("body") if isinstance(comment, dict) else None
+    mention = re.compile(rf"(?<![\w-])@{re.escape(bot_login)}(?![\w-])", re.IGNORECASE)
+    return (
+        isinstance(issue, dict)
+        and "pull_request" not in issue
+        and isinstance(body, str)
+        and mention.search(body) is not None
+    )
+
 
 def parse_sim_directive(bot_login: str, body: str) -> bool:
     """Return True only when body is exactly a supported imperative directive.
@@ -268,6 +285,45 @@ class ActionGateway:
         if self.proxy is None:
             raise ActionDenied("GitHub proxy is required to search issues")
         return json.dumps(self.proxy.search_issues(self.event.repo, query), sort_keys=True)
+
+    def create_code_pull_request(
+        self,
+        branch: str,
+        head_sha: str,
+        title: str,
+        body: str,
+    ) -> str:
+        if not is_issue_follow_up(self.event, self.policy.bot_login):
+            raise ActionDenied("pull request creation requires an issue follow-up")
+        branch_match = _CODE_BRANCH_RE.fullmatch(branch) if isinstance(branch, str) else None
+        if branch_match is None or branch_match.group("issue") != str(self.event.issue_number):
+            raise ActionDenied(f"code branch must be serval/{self.event.issue_number}-<slug>: {branch!r}")
+        if not isinstance(head_sha, str) or _SIM_HEAD_SHA_RE.fullmatch(head_sha) is None:
+            raise ActionDenied(f"invalid code HEAD SHA: {head_sha!r}")
+        if not isinstance(title, str) or not title.strip():
+            raise ActionDenied("pull request title is empty")
+        if not isinstance(body, str) or not body.strip():
+            raise ActionDenied("pull request body is empty")
+        self._require_unique("code_pull_request")
+        arguments = {
+            "branch": branch,
+            "head_sha": head_sha,
+            "title": title.strip(),
+            "body": body.strip(),
+        }
+        return self._mutate(
+            Capability.CODE,
+            "code_pull_request",
+            arguments,
+            lambda proxy: proxy.create_code_pull_request(
+                self.event.repo,
+                self.event.issue_number,
+                branch,
+                head_sha,
+                title.strip(),
+                body.strip(),
+            ),
+        )
 
     def dispatch_sim(self, ref: str, head_sha: str | None) -> str:
         self._require_sim_context("dispatch simulation")

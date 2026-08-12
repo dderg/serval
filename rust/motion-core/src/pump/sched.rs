@@ -166,6 +166,8 @@ pub struct AxisFrame {
     pub start_slot: u16,
     pub new_head: u32,
     pub room: u32,
+    pub guard_recorded_ns: u64,
+    pub guard_mcu_clock: u64,
 }
 
 #[derive(Debug)]

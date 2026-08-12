@@ -183,9 +183,13 @@ fn inside_committed_future_piece_evaluates() {
 }
 
 #[test]
-fn before_window_is_an_error() {
+fn first_recorded_piece_exposes_initial_hold_state() {
     let mut store = HistoryStore::default();
-    rec(&mut store, key(), linear(1_000_000, 0.001, 0.0, 10.0));
+    rec(&mut store, key(), linear(1_000_000, 0.001, 4.0, 10.0));
+    let held = store.initial_hold_state(key()).unwrap();
+    assert!((held.position - 4.0).abs() < 1e-6);
+    assert_eq!(held.velocity, 0.0);
+    assert_eq!(held.acceleration, 0.0);
     let err = store
         .state_at_host(key(), h(500), Some(f64::INFINITY))
         .unwrap_err();
