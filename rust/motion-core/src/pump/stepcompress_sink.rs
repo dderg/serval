@@ -15,8 +15,8 @@ use std::time::Duration;
 use step_shim::{MotorConfig, ShimError, StepFrame, StepShim};
 
 pub const SHIM_RING_DEPTH: u32 = 64;
-const RETIREMENT_BATCH: u32 = SHIM_RING_DEPTH / 4;
-const RETIREMENT_IDLE_TICKS: u32 = 10;
+const RETIREMENT_BATCH: u32 = SHIM_RING_DEPTH;
+const RETIREMENT_IDLE_TICKS: u32 = 100;
 
 pub const MOVE_SLOT_RESERVE: u32 = 16;
 
