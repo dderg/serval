@@ -2,10 +2,11 @@ name: RoboServal image
 
 on:
   push:
+    branches:
+      - main
     paths:
       - "tools/roboserval/**"
       - ".github/workflows/roboserval-image.yaml"
-  workflow_dispatch:
 
 permissions:
   contents: read

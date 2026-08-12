@@ -15,7 +15,7 @@ from fastapi.responses import HTMLResponse
 
 from serval_bot.config import BotSettings
 from serval_bot.database import Database, PolledEvent
-from serval_bot.policy import PolicySet
+from serval_bot.policy import PolicySet, normalize_login
 from serval_bot.proxy_client import ProxyClient
 from serval_bot.runtime import Agent, WorkerPool
 
@@ -68,14 +68,37 @@ class Poller:
                 since.isoformat(),
                 policy.bot_login,
             )
-            events = _polled_events(result)
+            review_heads = _review_heads(result)
+            self._worker.reconcile_review_heads(policy.repo, review_heads)
+            events = _polled_events(result, policy.bot_login)
             inserted += self._database.record_poll_batch(policy.repo, started.isoformat(), events)
         if inserted:
             self._worker.wake()
         return inserted
 
 
-def _polled_events(result: dict[str, Any]) -> list[PolledEvent]:
+def _review_heads(result: dict[str, Any]) -> dict[int, str]:
+    raw_heads = result.get("review_heads")
+    if not isinstance(raw_heads, list):
+        raise TypeError("poll response has no review_heads list")
+    review_heads: dict[int, str] = {}
+    for item in raw_heads:
+        if not isinstance(item, dict):
+            raise TypeError("poll response review head is not an object")
+        issue_number = item.get("issue_number")
+        head_sha = item.get("head_sha")
+        if (
+            not isinstance(issue_number, int)
+            or issue_number <= 0
+            or not isinstance(head_sha, str)
+            or len(head_sha) != 40
+        ):
+            raise RuntimeError(f"invalid poll response review head: {item!r}")
+        review_heads[issue_number] = head_sha
+    return review_heads
+
+
+def _polled_events(result: dict[str, Any], bot_login: str) -> list[PolledEvent]:
     raw_events = result.get("events")
     if not isinstance(raw_events, list):
         raise TypeError("poll response has no events list")
@@ -100,6 +123,12 @@ def _polled_events(result: dict[str, Any]) -> list[PolledEvent]:
             or not isinstance(payload, dict)
         ):
             raise RuntimeError(f"invalid poll response event: {item!r}")
+        sender = payload.get("sender")
+        sender_login = sender.get("login") if isinstance(sender, dict) else None
+        if not isinstance(sender_login, str) or normalize_login(sender_login) != normalize_login(actor):
+            raise RuntimeError(f"poll response actor does not match sender: {item!r}")
+        if normalize_login(actor) == normalize_login(bot_login):
+            continue
         parsed_time = datetime.fromisoformat(occurred_at)
         if parsed_time.tzinfo is None:
             raise RuntimeError(f"poll response event time has no timezone: {occurred_at}")

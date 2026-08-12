@@ -400,6 +400,8 @@ class WorkerPool:
         self._retry_delay_seconds = retry_delay_seconds or (lambda _: 0.0)
         self._stop = asyncio.Event()
         self._wake = [asyncio.Event() for _ in self._pool.slot_uids]
+        self._active_reviews: dict[tuple[str, int], tuple[Event, asyncio.Task[None]]] = {}
+        self._superseded: dict[str, str] = {}
 
     def wake(self) -> None:
         for event in self._wake:
@@ -408,6 +410,31 @@ class WorkerPool:
     def stop(self) -> None:
         self._stop.set()
         self.wake()
+
+    def reconcile_review_heads(self, repo: str, review_heads: dict[int, str]) -> None:
+        skipped = self._database.skip_stale_reviews(repo, review_heads)
+        for key, (event, task) in tuple(self._active_reviews.items()):
+            if key[0] != repo:
+                continue
+            current_head = review_heads.get(key[1])
+            if "review_request" not in event.payload:
+                continue
+            event_head = event.payload.get("pull_request", {}).get("head", {}).get("sha")
+            if current_head is not None and current_head == event_head:
+                continue
+            self._superseded[event.delivery_id] = (
+                "review assignment removed" if current_head is None else "superseded by newer pull request head"
+            )
+            task.cancel()
+        if skipped:
+            self.wake()
+
+    def _remove_active_review(self, review_key: tuple[str, int] | None, event: Event) -> None:
+        if review_key is None:
+            return
+        active = self._active_reviews.get(review_key)
+        if active is not None and active[0].delivery_id == event.delivery_id:
+            self._active_reviews.pop(review_key)
 
     async def run(self) -> None:
         recovered = self._database.reset_running()
@@ -458,6 +485,13 @@ class WorkerPool:
 
     async def _run_event(self, event: Event, slot_uid: int) -> None:
         started = time.monotonic()
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("review worker has no asyncio task")
+        review_key: tuple[str, int] | None = None
+        if event.event_type == "pull_request_review.requested":
+            review_key = (event.repo, event.issue_number)
+            self._active_reviews[review_key] = (event, task)
         self._log_event("event claimed", event, slot_uid, started)
         future = asyncio.ensure_future(asyncio.to_thread(self._agent.run, event, slot_uid))
         self._log_event("event started", event, slot_uid, started)
@@ -486,6 +520,13 @@ class WorkerPool:
             if fatal is not None:
                 raise fatal
             reaped = reap_slot(slot_uid)
+            if event.delivery_id in self._superseded:
+                reason = self._superseded.pop(event.delivery_id)
+                self._database.finish(event.delivery_id, "skipped", reason)
+                self._remove_active_review(review_key, event)
+                self._log_event("event superseded", event, slot_uid, started, extra={"reaped": reaped})
+                return
+            self._remove_active_review(review_key, event)
             self._log_event("event stopped by shutdown", event, slot_uid, started, extra={"reaped": reaped})
             raise asyncio.CancelledError
 
@@ -502,6 +543,7 @@ class WorkerPool:
                 return
             self._database.finish(event.delivery_id, "failed", error)
             self._log_event("event timed out", event, slot_uid, started, extra={"error": error, "reaped": reaped})
+            self._remove_active_review(review_key, event)
             if cancelled:
                 raise asyncio.CancelledError
             return
@@ -515,6 +557,7 @@ class WorkerPool:
                 return
             self._database.finish(event.delivery_id, "failed", error)
             self._log_event("event failed", event, slot_uid, started, extra={"error": error, "reaped": reaped})
+            self._remove_active_review(review_key, event)
             if cancelled:
                 raise asyncio.CancelledError
             return
@@ -523,6 +566,7 @@ class WorkerPool:
             self._database.finish(event.delivery_id, "done")
             reaped = reap_slot(slot_uid)
             self._log_event("event succeeded", event, slot_uid, started, extra={"reaped": reaped})
+            self._remove_active_review(review_key, event)
             if cancelled:
                 raise asyncio.CancelledError
             return
