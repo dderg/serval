@@ -40,10 +40,8 @@ fn classify_mid_motion_low_margin_is_fatal() {
 
 #[test]
 fn classify_same_starvation_from_rest_is_an_idle_resume() {
-    // Identical geometry to the underrun case, but the previous segment
-    // ended at rest: the very same overrun is a recoverable idle resume.
     let a = primed(true);
-    let class = a.classify(1.0, 101.5);
+    let class = a.classify(1.0, 101.0 + DEFAULT_LEAD_SECS + 0.25);
     assert!(
         matches!(class, AnchorClass::IdleResume { .. }),
         "an overrun from rest must re-anchor, not fault, got {class:?}",
@@ -213,8 +211,8 @@ fn backward_jump_takes_priority_over_underrun() {
 }
 
 #[test]
-fn default_lead_is_half_second_and_shared_with_planner() {
-    assert_eq!(super::DEFAULT_LEAD_SECS, 0.5);
+fn default_lead_covers_the_observed_reanchor_pipeline_delay() {
+    assert_eq!(super::DEFAULT_LEAD_SECS, 1.0);
     assert_eq!(crate::worker::lead_secs(), super::DEFAULT_LEAD_SECS);
 }
 
@@ -317,7 +315,11 @@ fn a_stalled_first_commit_after_two_resumes_stays_a_continuation() {
     a.mark_parked();
     assert_eq!(epoch, StreamEpoch::Reposition);
 
-    let (_, epoch) = a.anchor_segment(BENCH_SEG_SECS, 2.0 * BENCH_SEG_SECS, 100.709);
+    let (_, epoch) = a.anchor_segment(
+        BENCH_SEG_SECS,
+        2.0 * BENCH_SEG_SECS,
+        100.0 + DEFAULT_LEAD_SECS + 0.459,
+    );
     a.mark_parked();
     assert_eq!(epoch, StreamEpoch::Reanchor, "approach resume");
 
@@ -347,7 +349,7 @@ fn every_idle_resume_doubles_the_lead_the_next_timeline_starts_on() {
     let (t0, epoch) = a.anchor_segment(2.0, 3.0, 300.0);
     a.mark_parked();
     assert_eq!(epoch, StreamEpoch::Reanchor);
-    assert!((t0 + 2.0 - (300.0 + 4.0 * DEFAULT_LEAD_SECS)).abs() < 1e-9);
+    assert!((t0 + 2.0 - (300.0 + crate::pump::MAX_LEAD_SECS)).abs() < 1e-9);
 }
 
 #[test]
@@ -372,12 +374,12 @@ fn the_earned_lead_stops_at_the_pumps_push_horizon() {
 #[test]
 fn a_producer_that_builds_runway_releases_the_earned_lead() {
     let mut a = Anchor::new();
-    a.anchor_segment(0.0, 1.0, 100.0);
+    a.anchor_segment(0.0, 2.0, 100.0);
     a.mark_parked();
-    a.anchor_segment(1.0, 2.0, 200.0);
-    assert_eq!(a.lead_secs, 2.0 * DEFAULT_LEAD_SECS);
+    a.anchor_segment(2.0, 4.0, 200.0);
+    assert_eq!(a.lead_secs, crate::pump::MAX_LEAD_SECS);
 
-    let (_, epoch) = a.anchor_segment(2.0, 3.0, 200.4);
+    let (_, epoch) = a.anchor_segment(4.0, 5.0, 201.0);
     assert_eq!(epoch, StreamEpoch::Continuation);
     assert_eq!(a.lead_secs, DEFAULT_LEAD_SECS);
 }

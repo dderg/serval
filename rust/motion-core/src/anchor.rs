@@ -1,5 +1,5 @@
 pub(crate) const CONTIGUITY_EPS: f64 = 1e-6;
-pub const DEFAULT_LEAD_SECS: f64 = 0.5;
+pub const DEFAULT_LEAD_SECS: f64 = 1.0;
 
 /// A continuing stream whose next segment starts closer to the playhead than
 /// this cannot reliably reach the drive before its start time (transport +
