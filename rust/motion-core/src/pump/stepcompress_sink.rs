@@ -20,12 +20,11 @@ const RETIREMENT_IDLE_TICKS: u32 = 10;
 
 pub const MOVE_SLOT_RESERVE: u32 = 16;
 
-// How deep the pacer keeps the mcu move queue. The link's retransmit floor
-// sets the bar: one dropped ack silences the host for `MIN_RTO`, and a queue
-// shallower than that runs dry before the host can resend. The mcu then loads
-// a queue_step whose first step already sits behind its clock and shuts down
-// with "Timer too close" from sched_add_timer. Two retransmits of headroom.
-pub const SEND_LEAD_SECONDS: f64 = 2.0 * (host_rt::host_io::rtt::MIN_RTO_MS as f64) / 1000.0;
+// Keep enough queued motion to survive the transport's retransmit floor plus
+// the 400 ms re-anchor-to-egress delay observed on the Voron 0 host. A
+// quarter-second queue repeatedly re-armed an idle stepper 1.3-1.5 ms late
+// during homing even without a retransmit.
+pub const SEND_LEAD_SECONDS: f64 = 4.0 * (host_rt::host_io::rtt::MIN_RTO_MS as f64) / 1000.0;
 
 pub const CONSUMED_MARGIN_SECONDS: f64 = 0.010;
 
@@ -39,11 +38,8 @@ pub const STEP_REARM_PULSES: u64 = 2;
 pub const BACKLOG_CEILING_FRAMES: usize = 8192;
 
 /// How often the pacer tops the mcu's move queue back up to
-/// [`SEND_LEAD_SECONDS`]. The tick only has to be short against that lead —
-/// at 10 ms the lead never dips below 240 ms of the 250 ms target — and
-/// every tick is a flush, so a shorter one buys nothing but fragments the
-/// burst: at 2 ms a dense layer's ~1450 frames/s left 2.4 frames per flush,
-/// too few to fill the 59-byte Klipper block they are packed into.
+/// [`SEND_LEAD_SECONDS`]. Every tick is a flush, so a shorter interval buys
+/// nothing but fragments the burst.
 pub const PACER_TICK: Duration = Duration::from_millis(10);
 
 pub type ClockSource = Arc<dyn Fn(u32) -> Option<(u64, f64)> + Send + Sync>;
