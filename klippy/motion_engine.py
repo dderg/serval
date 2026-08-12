@@ -248,7 +248,7 @@ class MotionEngineWrapper:
         )
 
     def set_position(self, x, y, z):
-        return self._engine.set_position(x, y, z, self._reactor.monotonic())
+        return self._engine.set_position(x, y, z)
 
     def queued_motion_secs(self):
         return self._engine.queued_motion_secs() or 0.0
@@ -262,7 +262,7 @@ class MotionEngineWrapper:
     def pump_backlog(self):
         return self._engine.pump_backlog() or 0
 
-    def motion_state_at(self, mcu, clock=None, print_time=None):
+    def motion_state_at(self, mcu, clock=None, print_time=None, axis=None):
         """Per-axis (pos, vel, accel) at a clock, in GCODE space: the bridge
         unwarps the machine-space motion history through the active bed mesh,
         so results are directly comparable to toolhead positions."""
@@ -270,8 +270,18 @@ class MotionEngineWrapper:
             raise ValueError(
                 "motion_state_at: specify exactly one of clock= or print_time="
             )
+        if axis is not None:
+            try:
+                axis = "xyze".index(axis)
+            except ValueError as exc:
+                raise ValueError(
+                    "motion_state_at: axis must be one of x, y, z, e"
+                ) from exc
         if print_time is not None:
             clock = mcu.get_clocksync().print_time_to_clock(print_time)
         return self._engine.motion_state_at_clock(
-            mcu.get_engine_handle(), int(clock), self._reactor.monotonic()
+            mcu.get_engine_handle(),
+            int(clock),
+            self._reactor.monotonic(),
+            axis,
         )

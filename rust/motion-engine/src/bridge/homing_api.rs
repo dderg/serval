@@ -16,6 +16,26 @@ struct AbortContext {
     axis_key: crate::types::AxisKey,
     pending_suppresses: Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>,
 }
+pub(super) fn required_motor_axes(
+    kind: crate::kinematics::KinematicsKind,
+    requested_axis: Option<u8>,
+) -> Result<[bool; 4], u8> {
+    let Some(axis) = requested_axis else {
+        return Ok([true; 4]);
+    };
+    if axis >= 4 {
+        return Err(axis);
+    }
+    let mut required = [false; 4];
+    match (kind, axis) {
+        (crate::kinematics::KinematicsKind::CoreXy, 0 | 1) => {
+            required[0] = true;
+            required[1] = true;
+        }
+        (_, axis) => required[axis as usize] = true,
+    }
+    Ok(required)
+}
 
 fn next_homing_cohort() -> u64 {
     use std::sync::atomic::AtomicU64;
@@ -309,12 +329,13 @@ impl PyMotionEngine {
         *self.last_g5_pq.lock_ok() = None;
         Some([gcode.x(), gcode.y(), gcode.z()])
     }
-    #[pyo3(signature = (source_mcu, clock, host_now))]
+    #[pyo3(signature = (source_mcu, clock, host_now, axis=None))]
     fn motion_state_at_clock(
         &self,
         source_mcu: u32,
         clock: u64,
         host_now: f64,
+        axis: Option<u8>,
     ) -> PyResult<std::collections::HashMap<String, (f64, f64, f64)>> {
         let configs: Vec<crate::mcu_config::McuAxisConfig> =
             self.mcu_axis_configs.lock_ok().clone();
@@ -343,6 +364,9 @@ impl PyMotionEngine {
             .unwrap_or(runtime::segment::KinematicTag::Cartesian as u8);
         let kin = crate::kinematics::KinematicsModule::from_tag(kin_tag)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let required = required_motor_axes(kin.kind(), axis).map_err(|axis| {
+            PyRuntimeError::new_err(format!("motion_state_at: unnamed axis {axis}"))
+        })?;
         let resolved: Vec<crate::types::AxisKey> = configs
             .iter()
             .flat_map(|cfg| {
@@ -361,6 +385,9 @@ impl PyMotionEngine {
                     "motion_state_at: unnamed axis {}",
                     key.axis
                 )));
+            }
+            if !required[axis] {
+                continue;
             }
             match store.state_at_host(key, query_host, Some(host_now)) {
                 Ok(st) => motor_state[axis] = Some(st),

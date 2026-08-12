@@ -170,11 +170,10 @@ class CaptureEngine:
     def __init__(self):
         self.init_planner_args = None
 
-    def init_planner(self, config_text, topology, host_now):
+    def init_planner(self, config_text, topology):
         self.init_planner_args = {
             "config_text": config_text,
             "topology": topology,
-            "host_now": host_now,
         }
 
 
@@ -203,4 +202,3 @@ def test_init_planner_passes_config_text_and_topology():
     assert engine.init_planner_args["topology"] == [
         piece_topology(11, [0, 1, 2, 3], 0)
     ]
-    assert engine.init_planner_args["host_now"] == 0.0
