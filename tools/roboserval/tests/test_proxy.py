@@ -906,6 +906,7 @@ async def test_github_poll_returns_new_issues_mentions_and_reviewer_assignments(
         pending_result = await api.poll_events(request)
         check_states["b" * 40] = ("completed", "success")
         result = await api.poll_events(request)
+        pull_request["requested_reviewers"] = []
         pull_request["head"]["sha"] = "c" * 40
         failed_result = await api.poll_events(request)
         check_states["c" * 40] = ("completed", "success")
@@ -921,12 +922,15 @@ async def test_github_poll_returns_new_issues_mentions_and_reviewer_assignments(
             "id": 49,
             "created_at": "2026-08-09T12:05:00Z",
         }
-        active_review_events.extend((review_request_removed, review_requested_again))
+        active_review_events.append(review_request_removed)
+        removed_result = await api.poll_events(request)
+        active_review_events.append(review_requested_again)
         repeated_result = await api.poll_events(request)
     finally:
         await api.close()
     assert not any(event["delivery_id"].startswith("poll:review:") for event in pending_result["events"])
     assert not any(event["delivery_id"].startswith("poll:review:") for event in failed_result["events"])
+    assert not any(event["delivery_id"].startswith("poll:review:") for event in removed_result["events"])
     assert [event["delivery_id"] for event in result["events"]] == [
         f"poll:review:46:{'b' * 40}:requested",
         "poll:issue:10:opened",
@@ -946,4 +950,4 @@ async def test_github_poll_returns_new_issues_mentions_and_reviewer_assignments(
     assert [
         event["delivery_id"] for event in repeated_result["events"] if event["delivery_id"].startswith("poll:review:")
     ] == [f"poll:review:49:{'c' * 40}:requested"]
-    assert requested_pages == [None, "2"] * 5
+    assert requested_pages == [None, "2"] * 6

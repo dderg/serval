@@ -270,16 +270,9 @@ class GitHubApi:
         )
         review_heads: list[dict[str, Any]] = []
         for current_pull_request in open_pull_requests:
-            requested_reviewers = current_pull_request.get("requested_reviewers")
             issue_number = current_pull_request.get("number")
-            if not isinstance(requested_reviewers, list) or not isinstance(issue_number, int):
+            if not isinstance(issue_number, int):
                 raise GitHubFailure(f"GitHub open pull request is malformed: {current_pull_request!r}")
-            if not any(
-                isinstance(reviewer, dict)
-                and _normalize_login(reviewer.get("login", "")) == _normalize_login(request.bot_login)
-                for reviewer in requested_reviewers
-            ):
-                continue
             pull_requests[issue_number] = current_pull_request
             head = current_pull_request.get("head")
             if not isinstance(head, dict) or not isinstance(head.get("sha"), str):
@@ -297,35 +290,36 @@ class GitHubApi:
                 f"/repos/{request.repo}/issues/{issue_number}/events",
                 {"per_page": 100},
             )
-            matching_requests: list[tuple[str, int, dict[str, Any], dict[str, Any]]] = []
+            reviewer_events: list[tuple[str, int, dict[str, Any]]] = []
             for issue_event in issue_events:
                 requested_reviewer = issue_event.get("requested_reviewer")
+                event_kind = issue_event.get("event")
                 if (
-                    issue_event.get("event") != "review_requested"
+                    event_kind not in {"review_requested", "review_request_removed"}
                     or not isinstance(requested_reviewer, dict)
                     or _normalize_login(requested_reviewer.get("login", "")) != _normalize_login(request.bot_login)
                 ):
                     continue
-                review_requester = issue_event.get("review_requester")
                 event_id = issue_event.get("id")
                 occurred_at = issue_event.get("created_at")
-                if (
-                    not isinstance(review_requester, dict)
-                    or not isinstance(review_requester.get("login"), str)
-                    or not isinstance(event_id, int)
-                    or not isinstance(occurred_at, str)
-                ):
-                    raise GitHubFailure(f"GitHub review request event is malformed: {issue_event!r}")
-                matching_requests.append((occurred_at, event_id, issue_event, review_requester))
-            if not matching_requests:
-                raise GitHubFailure(
-                    f"GitHub pull request {request.repo}#{issue_number} requests {request.bot_login} "
-                    "but has no matching review_requested event"
-                )
-            occurred_at, event_id, issue_event, review_requester = max(matching_requests)
+                if not isinstance(event_id, int) or not isinstance(occurred_at, str):
+                    raise GitHubFailure(f"GitHub reviewer event is malformed: {issue_event!r}")
+                reviewer_events.append((occurred_at, event_id, issue_event))
+            if not reviewer_events:
+                continue
+            occurred_at, event_id, issue_event = max(reviewer_events)
+            if issue_event["event"] == "review_request_removed":
+                continue
+            review_requester = issue_event.get("review_requester")
+            if not isinstance(review_requester, dict) or not isinstance(review_requester.get("login"), str):
+                raise GitHubFailure(f"GitHub review request event is malformed: {issue_event!r}")
             actor = review_requester["login"]
             if _normalize_login(actor) == _normalize_login(request.bot_login):
                 continue
+            current_head = current_pull_request.get("head")
+            if not isinstance(current_head, dict) or not isinstance(current_head.get("sha"), str):
+                raise GitHubFailure(f"GitHub pull request {request.repo}#{issue_number} has no head SHA")
+            head_sha = current_head["sha"]
             if not await self._head_checks_passed(request.repo, head_sha):
                 continue
             events.append(
