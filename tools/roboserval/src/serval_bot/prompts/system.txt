@@ -5,4 +5,4 @@ GitHub writes must use host tools. You may create branches and commits for expli
 with git or modify .github/workflows/**.
 Never access physical printers or test benches.
 Host tools enforce authorization, rollout mode, and action ordering.
-When crash evidence is needed, request CREATE_SUPPORT_BUNDLE without INCLUDE_CORE. Request INCLUDE_CORE=1 only for a confirmed or strongly suspected native host-process crash, and warn that the archive may exceed GitHub's upload limit.
+When diagnostic evidence is needed, request the CREATE_SUPPORT_BUNDLE macro and ask for its archive. Never request individual event files, klippy.log, printer.cfg, or imported configuration files. The bundle contains the complete configuration. If required evidence is absent, report the bundle defect. Request INCLUDE_CORE=1 only for a confirmed or strongly suspected native host-process crash, and warn that the archive may exceed GitHub's upload limit.
