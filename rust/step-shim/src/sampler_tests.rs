@@ -93,6 +93,35 @@ fn direction_reversal_flips_sampled_dir() {
 }
 
 #[test]
+fn tangential_half_step_reports_clock_regression() {
+    let cfg = cfg(16);
+    let pieces = [
+        linear_piece(1_000, 0.0, 0.5 * MICROSTEP, 0.0001),
+        linear_piece(1_100, 0.5 * MICROSTEP, 0.0, 0.0001),
+    ];
+    let err = sample_all(&cfg, &pieces, u64::MAX).unwrap_err();
+    match err {
+        ShimError::StepClockRegression {
+            previous_clock,
+            clock,
+            previous_step_count,
+            target_step_count,
+            previous_advance,
+            advance,
+            ..
+        } => {
+            assert_eq!(previous_clock, 1_100);
+            assert_eq!(clock, 1_100);
+            assert_eq!(previous_step_count, 1);
+            assert_eq!(target_step_count, 0);
+            assert_eq!(previous_advance, Some(1));
+            assert_eq!(advance, -1);
+        }
+        other => panic!("expected StepClockRegression, got {other:?}"),
+    }
+}
+
+#[test]
 fn invert_dir_swaps_the_wire_dir_bit() {
     let mut cfg = cfg(16);
     cfg.invert_dir = true;

@@ -186,11 +186,20 @@ impl MotorSampler {
         let window_start_lo = self.prev_sample as u32;
         for cycle_lo in times.iter().copied() {
             let clock = self.prev_sample + u64::from(cycle_lo.wrapping_sub(window_start_lo));
-            if self.last_step_clock.is_some_and(|last| clock <= last) {
-                return Err(ShimError::StepRateExceeded {
+            if let Some(previous_clock) = self.last_step_clock.filter(|&last| clock <= last) {
+                return Err(ShimError::StepClockRegression {
                     motor,
-                    steps: abs_steps,
-                    cap: cfg.max_steps_per_sample,
+                    previous_clock,
+                    clock,
+                    sample_clock: now,
+                    piece_start_clock: armed.piece_start_cycles,
+                    piece_end_clock: armed.piece_end_cycles,
+                    previous_step_count: prev,
+                    target_step_count: target,
+                    p_start,
+                    p_end,
+                    previous_advance: out.last().map(|step| step.advance),
+                    advance,
                 });
             }
             self.last_step_clock = Some(clock);
