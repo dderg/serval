@@ -18,9 +18,9 @@ pub const SHIM_RING_DEPTH: u32 = 64;
 const RETIREMENT_BATCH: u32 = SHIM_RING_DEPTH;
 const RETIREMENT_IDLE_TICKS: u32 = 10;
 
-pub const MOVE_SLOT_RESERVE: u32 = 64;
+pub const MOVE_SLOT_RESERVE: u32 = 16;
 
-pub const SEND_LEAD_SECONDS: f64 = 4.0;
+pub const SEND_LEAD_SECONDS: f64 = 2.0 * (host_rt::host_io::rtt::MIN_RTO_MS as f64) / 1000.0;
 
 pub const CONSUMED_MARGIN_SECONDS: f64 = 0.010;
 

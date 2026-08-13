@@ -112,7 +112,7 @@ impl PyMotionEngine {
             .send(crate::pump::PumpMsg::DripArm(crate::pump::DripArm {
                 cohort,
                 participants: all_axis_keys.clone(),
-                timeout: Duration::from_secs_f64(crate::pump::DRIP_ANCHOR_LEAD_SECS + 5.0),
+                timeout: Duration::from_secs(5),
             }))
             .map_err(|_| PyRuntimeError::new_err("home_axis: pump channel closed"))?;
 

@@ -528,7 +528,9 @@ fn a_hold_past_the_encoder_window_re_anchors_the_step_clock() {
     let resume_start = resets[1];
     assert!(
         clocks[100] > resume_start && clocks[100] - resume_start < 72_000,
-        "the first step after an encoder-window re-anchor must land at its sampled clock"
+        "the first step after the re-anchor must land where it was sampled, \
+         not at the anchor: anchor {resume_start}, step {}",
+        clocks[100]
     );
     assert!(
         clocks[199] - clocks[0] > 12 * 72_000_000,

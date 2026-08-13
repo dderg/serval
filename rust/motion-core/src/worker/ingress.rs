@@ -75,7 +75,8 @@ impl DrainReserve {
     }
 }
 
-const STARTUP_PRIME_S: f64 = crate::anchor::DEFAULT_LEAD_SECS;
+// TODO: expose as a config knob if 250 ms turns out wrong for slower feeds.
+const STARTUP_PRIME_S: f64 = 0.250;
 
 const LEAD: f64 = crate::anchor::DEFAULT_LEAD_SECS;
 

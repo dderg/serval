@@ -12,7 +12,7 @@ mod stepcompress_sink;
 mod transit_trace;
 mod wire_sink;
 
-pub use drip::{DRIP_ANCHOR_LEAD_SECS, DRIP_WINDOW_SECS, DripArm};
+pub use drip::{DRIP_WINDOW_SECS, DripArm};
 pub use junction::{
     JUNCTION_POSITION_FATAL_MM, JUNCTION_POSITION_LOG_MM, JunctionSeam, JunctionTracker,
     junction_jumps,
@@ -25,7 +25,6 @@ pub use pump_loop::{MAX_LEAD_SECS, PUMP_DATA_CHANNEL_CAP, run_pump};
 pub use sched::{
     AxisFrame, AxisQueue, FramePlan, Schedule, SeamBasis, append_pieces_merging_holds, schedule,
 };
-pub use stepcompress_sink::SEND_LEAD_SECONDS;
 pub use stepcompress_sink::{
     BACKLOG_CEILING_FRAMES, ClockSource, FrameEgress, MOVE_SLOT_RESERVE, StepcompressEndpoint,
     StepcompressPacer, build_endpoint,

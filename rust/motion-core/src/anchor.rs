@@ -1,5 +1,5 @@
 pub(crate) const CONTIGUITY_EPS: f64 = 1e-6;
-pub const DEFAULT_LEAD_SECS: f64 = 1.0;
+pub const DEFAULT_LEAD_SECS: f64 = 0.25;
 
 /// A continuing stream whose next segment starts closer to the playhead than
 /// this cannot reliably reach the drive before its start time (transport +
@@ -174,16 +174,6 @@ impl Anchor {
         seg_t_end: f64,
         host_now: f64,
     ) -> (f64, StreamEpoch) {
-        self.anchor_segment_with_min_lead(seg_t_start, seg_t_end, host_now, DEFAULT_LEAD_SECS)
-    }
-
-    pub fn anchor_segment_with_min_lead(
-        &mut self,
-        seg_t_start: f64,
-        seg_t_end: f64,
-        host_now: f64,
-        min_lead_secs: f64,
-    ) -> (f64, StreamEpoch) {
         let epoch = match self.classify(seg_t_start, host_now) {
             AnchorClass::Reposition => StreamEpoch::Reposition,
             AnchorClass::Continuation { margin_s } => {
@@ -279,8 +269,7 @@ impl Anchor {
                 None => "first",
                 Some(_) => "reanchor",
             };
-            let lead_secs = self.lead_secs.max(min_lead_secs);
-            self.t0 = Some(host_now + lead_secs - seg_t_start);
+            self.t0 = Some(host_now + self.lead_secs - seg_t_start);
             let t0 = self.t0.unwrap();
             tracing::info!(
                 subsystem = "motion",
@@ -289,7 +278,7 @@ impl Anchor {
                 t0,
                 seg_t_start,
                 seg_t_end,
-                lead_secs,
+                lead_secs = self.lead_secs,
                 last_t_end = self.last_t_end,
                 condition,
                 "[anchor-decision] fresh anchor"
