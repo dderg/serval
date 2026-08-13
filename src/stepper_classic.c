@@ -239,7 +239,7 @@ command_queue_step(uint32_t *args)
         diag_note_step_rearm(margin);
         if (unlikely(margin < 0))
             event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_MOTION,
-                           EVENT_LOG_EVENT_MOTION_STEP_REARM_LATE, 0,
+                           EVENT_LOG_EVENT_MOTION_STEP_REARM_LATE, args[0],
                            (uint32_t)margin, s->time.waketime);
         sched_add_timer(&s->time);
     }
