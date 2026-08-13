@@ -416,6 +416,9 @@ stepper_classic_halt_all(uint32_t *stream_end_clock)
                 *stream_end_clock = stream_end;
             found = 1;
         }
+        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_MOTION,
+                       EVENT_LOG_EVENT_MOTION_STEP_HALT, oid,
+                       s->flags, s->count);
         stepper_classic_halt(s);
     }
     return found;
