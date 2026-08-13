@@ -395,7 +395,7 @@ fn participant_release_tracks_mcu_clock_horizon() {
     data.send(EnqueueMsg {
         epoch_freq: None,
         key: ka,
-        pieces: vec![make_piece(50), make_piece(500)],
+        pieces: vec![make_piece(50), make_piece(600)],
         epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs: DRIP_WINDOW_SECS,
         source_line: u32::MAX,
@@ -411,10 +411,10 @@ fn participant_release_tracks_mcu_clock_horizon() {
     assert_eq!(
         sink.sent(),
         vec![(ka, 50)],
-        "piece at 500 is beyond horizon 100 and must be held"
+        "piece at 600 is beyond the initial drip horizon and must be held"
     );
 
-    *clock.lock().unwrap() = 450;
+    *clock.lock().unwrap() = 100;
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while sink.sent().len() < 2 {
         assert!(
@@ -423,7 +423,7 @@ fn participant_release_tracks_mcu_clock_horizon() {
         );
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(sink.sent(), vec![(ka, 50), (ka, 500)]);
+    assert_eq!(sink.sent(), vec![(ka, 50), (ka, 600)]);
 
     ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();

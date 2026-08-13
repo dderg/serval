@@ -2,7 +2,7 @@ use super::{AxisKey, AxisQueue};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-pub const DRIP_WINDOW_SECS: f64 = crate::pump::MAX_LEAD_SECS;
+pub const DRIP_WINDOW_SECS: f64 = super::stepcompress_sink::SEND_LEAD_SECONDS + 1.0;
 
 pub struct DripArm {
     pub cohort: u64,
