@@ -1,6 +1,8 @@
 use runtime::dispatch_stepper::DISPLACEMENT_THRESHOLD_MM;
 use runtime::motion_core::{ArmedPiece, arm_piece};
-use runtime::sub_sample_timing::{StepTimeInputs, StepTimingResult, compute_step_times};
+use runtime::sub_sample_timing::{
+    StepTimeInputs, StepTimingResult, compute_step_times, quantize_step_count,
+};
 
 use crate::ring::PieceRing;
 use crate::{MotorConfig, ShimError};
@@ -142,11 +144,14 @@ impl MotorSampler {
         out: &mut Vec<PendingStep>,
     ) -> Result<(), ShimError> {
         let p_end = armed.eval_pos_vel(now).0;
-        let target = libm::roundf(p_end / cfg.microstep_distance) as i64;
         let (prev, p_start) = match self.overlay {
             Some(frame) => (frame.step_count, frame.p_prev),
             None => (self.step_count, self.p_prev),
         };
+        let previous_step_count = step_count_as_i32(prev);
+        let target_step_count =
+            quantize_step_count(previous_step_count, p_end, cfg.microstep_distance);
+        let target = i64::from(target_step_count);
         let signed_steps = target - prev;
         if signed_steps == 0 {
             self.commit_frame(p_end, prev);
@@ -164,8 +169,8 @@ impl MotorSampler {
         let inputs = StepTimeInputs {
             p_start,
             p_end,
-            prev_step_count: step_count_as_i32(prev),
-            target_step_count: step_count_as_i32(target),
+            prev_step_count: previous_step_count,
+            target_step_count,
             microstep_distance: cfg.microstep_distance,
             sample_period_sec: self.sample_period_sec,
             sample_start_cycles: self.prev_sample as u32,

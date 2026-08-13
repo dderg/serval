@@ -15,7 +15,9 @@ const _: () = assert!(
 );
 use crate::step_queue::{StepEntry, StepQueue, peek as queue_peek, push as queue_push};
 use crate::stepping_state::{AxisConfig, StepMode};
-use crate::sub_sample_timing::{StepTimeInputs, StepTimingResult, compute_step_times};
+use crate::sub_sample_timing::{
+    StepTimeInputs, StepTimingResult, compute_step_times, quantize_step_count,
+};
 use crate::tick::bump_relaxed;
 
 // FFI declaration for the C-side SPI write function.
@@ -243,13 +245,12 @@ fn dispatch_pulse(
         Some(stepper) => stepper.overlay_step_frame.store(v, Ordering::Release),
     };
 
-    #[allow(clippy::cast_possible_truncation)]
-    let target_step_count = libm::roundf(p_end / microstep_distance) as i32;
     let prev_step_count = if overlay_just_armed && overlay_motor_idx.is_some() {
         0
     } else {
         load_step_frame(axis)
     };
+    let target_step_count = quantize_step_count(prev_step_count, p_end, microstep_distance);
     let signed_steps = target_step_count.wrapping_sub(prev_step_count);
     if axis_idx == AXIS_A {
         shared

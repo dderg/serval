@@ -190,6 +190,48 @@ fn pulse_positive_motion_enqueues_n_steps() {
 }
 
 #[test]
+fn pulse_tangential_half_step_keeps_the_previous_count() {
+    let shared = SharedState::new();
+    let mut q = StepQueue::new();
+    let mut axis = make_axis(StepMode::Pulse, 0.01);
+    let q_ptr: *mut StepQueue = &mut q;
+
+    dispatch_axis(
+        0,
+        &mut axis,
+        0,
+        q_ptr,
+        &shared,
+        0.005,
+        0.0,
+        0.0,
+        100e-6,
+        1_000,
+        1_000_000.0,
+        false,
+    );
+    dispatch_axis(
+        0,
+        &mut axis,
+        0,
+        q_ptr,
+        &shared,
+        0.0,
+        0.0,
+        0.005,
+        100e-6,
+        1_100,
+        1_000_000.0,
+        false,
+    );
+
+    assert_eq!(q.tail, q.head);
+    assert_eq!(axis.last_step_count, 0);
+    assert_eq!(axis.steppers[0].position_count.load(Ordering::Acquire), 0);
+    assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
+}
+
+#[test]
 fn pulse_below_displacement_threshold_uses_uniform_fallback() {
     let shared = SharedState::new();
     let mut q = StepQueue::new();

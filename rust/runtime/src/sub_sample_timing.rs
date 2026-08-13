@@ -48,6 +48,19 @@ pub enum StepTimingResult {
 }
 
 #[must_use]
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+pub fn quantize_step_count(previous_count: i32, position: f32, microstep_distance: f32) -> i32 {
+    let target = libm::roundf(position / microstep_distance) as i32;
+    if target > previous_count && position <= (target as f32 - 0.5) * microstep_distance {
+        target - 1
+    } else if target < previous_count && position >= (target as f32 + 0.5) * microstep_distance {
+        target + 1
+    } else {
+        target
+    }
+}
+
+#[must_use]
 pub fn compute_step_times(inp: &StepTimeInputs) -> StepTimingResult {
     let signed_steps = inp.target_step_count - inp.prev_step_count;
     if signed_steps == 0 {

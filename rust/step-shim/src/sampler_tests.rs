@@ -93,32 +93,58 @@ fn direction_reversal_flips_sampled_dir() {
 }
 
 #[test]
-fn tangential_half_step_reports_clock_regression() {
+fn tangential_half_step_does_not_emit_a_zero_width_pulse_pair() {
     let cfg = cfg(16);
     let pieces = [
         linear_piece(1_000, 0.0, 0.5 * MICROSTEP, 0.0001),
         linear_piece(1_100, 0.5 * MICROSTEP, 0.0, 0.0001),
     ];
-    let err = sample_all(&cfg, &pieces, u64::MAX).unwrap_err();
-    match err {
-        ShimError::StepClockRegression {
-            previous_clock,
-            clock,
-            previous_step_count,
-            target_step_count,
-            previous_advance,
-            advance,
-            ..
-        } => {
-            assert_eq!(previous_clock, 1_100);
-            assert_eq!(clock, 1_100);
-            assert_eq!(previous_step_count, 1);
-            assert_eq!(target_step_count, 0);
-            assert_eq!(previous_advance, Some(1));
-            assert_eq!(advance, -1);
-        }
-        other => panic!("expected StepClockRegression, got {other:?}"),
-    }
+    let steps = sample_all(&cfg, &pieces, u64::MAX).unwrap();
+    assert!(steps.is_empty());
+}
+
+#[test]
+fn continued_half_step_crossing_emits_once_at_the_boundary() {
+    let cfg = cfg(16);
+    let pieces = [
+        linear_piece(1_000, 0.0, 0.5 * MICROSTEP, 0.0001),
+        linear_piece(1_100, 0.5 * MICROSTEP, MICROSTEP, 0.0001),
+    ];
+    let steps = sample_all(&cfg, &pieces, u64::MAX).unwrap();
+
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].clock, 1_100);
+    assert_eq!(steps[0].advance, 1);
+}
+
+#[test]
+fn large_step_count_tangency_keeps_the_previous_quantized_position() {
+    let mut cfg = cfg(50);
+    cfg.microstep_distance = 0.000_690_468_75;
+    cfg.cycles_per_second = 64_000_000.0;
+    let previous_count = 903_348;
+    let previous_position = previous_count as f32 * cfg.microstep_distance;
+    let tangent_position = (previous_count as f32 + 0.5) * cfg.microstep_distance;
+    let first = linear_piece(64_000, previous_position, tangent_position, 0.0001);
+    let second = linear_piece(
+        first.end_time(cfg.cycles_per_second as f32),
+        tangent_position,
+        previous_position,
+        0.0001,
+    );
+    let mut ring = PieceRing::new(8);
+    ring.push(0, first).unwrap();
+    ring.push(0, second).unwrap();
+    let mut sampler = MotorSampler::new(&cfg);
+    sampler.reset_to(previous_count, &cfg, 0);
+    let mut steps = Vec::new();
+
+    sampler
+        .sample(0, &cfg, &mut ring, u64::MAX, &mut steps)
+        .unwrap();
+
+    assert!(steps.is_empty());
+    assert_eq!(sampler.step_count(), previous_count);
 }
 
 #[test]
