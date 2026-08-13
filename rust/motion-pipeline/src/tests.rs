@@ -831,6 +831,11 @@ fn smooth_shaper_second_batch_window_before_stream_start_clamps() {
             seg.t_start,
             seg.t_end,
         );
+        assert_eq!(
+            seg.axes[0].control_points(),
+            &[150.0],
+            "stationary shaped axes must retain their constant representation"
+        );
     }
 }
 

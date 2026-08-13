@@ -70,6 +70,44 @@ fn trident_chains() -> AxisChainSet {
     }
 }
 
+fn voron0_chains() -> AxisChainSet {
+    let x = trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
+        "x_shaping",
+        &trajectory::algos::SmoothMzv,
+        vec![112.8],
+    )])
+    .expect("x chain compiles");
+    let y = trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
+        "y_shaping",
+        &trajectory::algos::SmoothMzv,
+        vec![90.2],
+    )])
+    .expect("y chain compiles");
+    let z = trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
+        "z_shaping",
+        &trajectory::algos::SmoothBell,
+        vec![0.025],
+    )])
+    .expect("z chain compiles");
+    let e = trajectory::CompiledChain::compile(&[
+        PostProcessorInstance::new(
+            "e_pa",
+            &trajectory::algos::TanhPressureAdvance,
+            vec![0.015, 0.011, 1.5],
+        ),
+        PostProcessorInstance::new(
+            "e_smoothing",
+            &trajectory::algos::SmoothTriangle,
+            vec![0.01],
+        ),
+    ])
+    .expect("e chain compiles");
+    AxisChainSet {
+        chains: vec![x, y, z, e],
+        followers: vec![(3, vec![0, 1, 2])],
+    }
+}
+
 /// Circle approximated by chords — the arc-dense sections of a sliced model
 /// where every chord is a separate G1.
 fn circle_moves(radius_mm: f64, chord_mm: f64, feed_mm_s: f64, laps: usize) -> Vec<StreamInput> {
@@ -267,10 +305,11 @@ fn main() {
             let label = parts.next().unwrap().to_string();
             let start: usize = parts.next().unwrap().parse().unwrap();
             let count: usize = parts.next().unwrap().parse().unwrap();
-            let chains = if label == "smooth_mzv" {
-                trident_chains()
-            } else {
-                AxisChainSet::default()
+            let chains = match label.as_str() {
+                "smooth_mzv" => trident_chains(),
+                "voron0" => voron0_chains(),
+                "no-shaper" => AxisChainSet::default(),
+                _ => panic!("unknown shaper benchmark label {label}"),
             };
             let moves: Vec<StreamInput> = gcode_moves(path)
                 .into_iter()

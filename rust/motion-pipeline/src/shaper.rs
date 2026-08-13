@@ -494,6 +494,21 @@ fn pad_segment_axes_to_uniform_degree(seg: &mut ShapedSegment) {
 /// Fit one kerneled axis over `targets`, returning the shaped column —
 /// `None` when the chain has no kernel. Pure in its inputs, so columns for
 /// different axes run on scoped threads.
+fn constant_axis_column(
+    segments: &[&ShapedSegment],
+    targets: &[ShapedSegment],
+    axis: usize,
+) -> Option<Vec<nurbs::ScalarNurbs>> {
+    let mut control_points = segments
+        .iter()
+        .flat_map(|seg| seg.axes[axis].control_points().iter());
+    let constant = *control_points.next()?;
+    if !constant.is_finite() || control_points.any(|&point| point != constant) {
+        return None;
+    }
+    Some(targets.iter().map(|seg| seg.axes[axis].clone()).collect())
+}
+
 fn fit_axis_column(
     history: &VecDeque<ShapedSegment>,
     base: &[ShapedSegment],
@@ -516,6 +531,19 @@ fn fit_axis_column(
         .map_or(0.0, |seg| seg.t_start);
     let last_t = base.last().map_or(first_t, |seg| seg.t_end);
     let signal_segments: Vec<&ShapedSegment> = history.iter().chain(base.iter()).collect();
+    for seg in targets {
+        let need_lo = seg.t_start - k_hi;
+        let need_hi = seg.t_end - k_lo;
+        if need_lo < first_t && !at_stream_boundary {
+            return Err(PostProcessError::MissingHistory { axis, t: need_lo });
+        }
+        if need_hi > last_t && !force {
+            return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
+        }
+    }
+    if let Some(column) = constant_axis_column(&signal_segments, targets, axis) {
+        return Ok(Some(column));
+    }
     let input_breaks = signal_breakpoints(&signal_segments, axis);
     let table = AxisSignalTable::build(
         &signal_segments,
@@ -528,14 +556,6 @@ fn fit_axis_column(
     let sig = ShapedSignal::new_from_evaluator(kernel, |t| table.eval(t), input_breaks);
     let mut column = Vec::with_capacity(targets.len());
     for seg in targets {
-        let need_lo = seg.t_start - k_hi;
-        let need_hi = seg.t_end - k_lo;
-        if need_lo < first_t && !at_stream_boundary {
-            return Err(PostProcessError::MissingHistory { axis, t: need_lo });
-        }
-        if need_hi > last_t && !force {
-            return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
-        }
         let track = fit_axis_from_signal(axis, &seg.axes[axis], &sig, 1.0)?;
         if !track.control_points().iter().all(|v| v.is_finite()) {
             return Err(PostProcessError::NonFiniteSample {
