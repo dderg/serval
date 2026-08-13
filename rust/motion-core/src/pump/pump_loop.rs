@@ -38,7 +38,6 @@ pub const MAX_LEAD_SECS: f64 = 2.0;
 pub const PUMP_DATA_CHANNEL_CAP: usize = 128;
 
 pub(super) const PUMP_INTAKE_BACKLOG_SOFT_CAP: u64 = 4096;
-pub(super) const PUMP_INTAKE_BACKLOG_HARD_CAP: u64 = 8192;
 pub(super) const PUMP_INTAKE_MIN_RUNWAY_SECS: f64 = 5.0;
 
 fn staged_axis_runway_secs(queue: &AxisQueue) -> f64 {
@@ -65,8 +64,7 @@ fn minimum_staged_runway_secs(queues: &BTreeMap<AxisKey, AxisQueue>) -> f64 {
 pub(super) fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
     let staged: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
     staged < PUMP_INTAKE_BACKLOG_SOFT_CAP
-        || (staged < PUMP_INTAKE_BACKLOG_HARD_CAP
-            && minimum_staged_runway_secs(queues) < PUMP_INTAKE_MIN_RUNWAY_SECS)
+        || minimum_staged_runway_secs(queues) < PUMP_INTAKE_MIN_RUNWAY_SECS
 }
 
 pub(super) const ACCEPTANCE_STALL_FATAL: Duration = Duration::from_secs(10);

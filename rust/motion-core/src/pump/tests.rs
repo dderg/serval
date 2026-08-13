@@ -1,6 +1,5 @@
 use super::pump_loop::{
-    PUMP_INTAKE_BACKLOG_HARD_CAP, PUMP_INTAKE_BACKLOG_SOFT_CAP, PUMP_INTAKE_MIN_RUNWAY_SECS, Pump,
-    wants_pieces,
+    PUMP_INTAKE_BACKLOG_SOFT_CAP, PUMP_INTAKE_MIN_RUNWAY_SECS, Pump, wants_pieces,
 };
 use super::*;
 use crossbeam_channel::unbounded;
@@ -289,7 +288,7 @@ fn make_piece(t: u64) -> (PieceEntry, f64) {
     )
 }
 
-fn staged_runway(piece_count: u64, runway_secs: f64) -> BTreeMap<AxisKey, AxisQueue> {
+fn staged_axis(piece_count: u64, runway_secs: f64) -> AxisQueue {
     let duration = runway_secs / piece_count as f64;
     let mut queue = AxisQueue::new(u32::MAX);
     queue.pieces.extend((0..piece_count).map(|index| {
@@ -302,28 +301,56 @@ fn staged_runway(piece_count: u64, runway_secs: f64) -> BTreeMap<AxisKey, AxisQu
             index as f64 * duration,
         )
     }));
-    BTreeMap::from([(AxisKey { mcu_id: 1, axis: 0 }, queue)])
+    queue
 }
 
 #[test]
-fn pump_intake_extends_only_dense_backlogs_to_the_hard_cap() {
-    let sparse = staged_runway(
-        PUMP_INTAKE_BACKLOG_SOFT_CAP,
-        PUMP_INTAKE_MIN_RUNWAY_SECS * 2.0,
-    );
-    assert!(!wants_pieces(&sparse));
+fn pump_intake_stops_only_after_every_axis_has_runway() {
+    let key = |axis| AxisKey { mcu_id: 1, axis };
+    let below_soft_cap = BTreeMap::from([(
+        key(0),
+        staged_axis(
+            PUMP_INTAKE_BACKLOG_SOFT_CAP - 1,
+            PUMP_INTAKE_MIN_RUNWAY_SECS * 2.0,
+        ),
+    )]);
+    assert!(wants_pieces(&below_soft_cap));
 
-    let dense = staged_runway(
-        PUMP_INTAKE_BACKLOG_SOFT_CAP,
-        PUMP_INTAKE_MIN_RUNWAY_SECS * 0.5,
-    );
-    assert!(wants_pieces(&dense));
+    let one_axis_shallow = BTreeMap::from([
+        (
+            key(0),
+            staged_axis(
+                PUMP_INTAKE_BACKLOG_SOFT_CAP,
+                PUMP_INTAKE_MIN_RUNWAY_SECS * 2.0,
+            ),
+        ),
+        (
+            key(1),
+            staged_axis(
+                PUMP_INTAKE_BACKLOG_SOFT_CAP,
+                PUMP_INTAKE_MIN_RUNWAY_SECS * 0.5,
+            ),
+        ),
+    ]);
+    assert!(wants_pieces(&one_axis_shallow));
 
-    let pathological = staged_runway(
-        PUMP_INTAKE_BACKLOG_HARD_CAP,
-        PUMP_INTAKE_MIN_RUNWAY_SECS * 0.5,
-    );
-    assert!(!wants_pieces(&pathological));
+    let all_axes_ready = BTreeMap::from([
+        (
+            key(0),
+            staged_axis(
+                PUMP_INTAKE_BACKLOG_SOFT_CAP,
+                PUMP_INTAKE_MIN_RUNWAY_SECS * 2.0,
+            ),
+        ),
+        (
+            key(1),
+            staged_axis(
+                PUMP_INTAKE_BACKLOG_SOFT_CAP,
+                PUMP_INTAKE_MIN_RUNWAY_SECS * 2.0,
+            ),
+        ),
+    ]);
+    assert!(!wants_pieces(&all_axes_ready));
 }
 
 #[test]
