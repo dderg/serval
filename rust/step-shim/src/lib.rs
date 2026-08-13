@@ -1,4 +1,7 @@
-const RESET_STEP_CLOCK_LEAD_SECS: f64 = 0.005;
+const RESET_STEP_CLOCK_LEAD_SECS: f64 = 0.050;
+fn reset_step_clock_lead(cfg: &MotorConfig) -> u64 {
+    (cfg.cycles_per_second * RESET_STEP_CLOCK_LEAD_SECS).round() as u64
+}
 
 pub mod compress;
 pub mod ring;
@@ -242,8 +245,7 @@ impl MotorState {
             }
 
             let out_of_reach = clocks[0] - committed >= compress::CLOCK_DIFF_MAX;
-            let reset_lead =
-                (self.cfg.cycles_per_second * RESET_STEP_CLOCK_LEAD_SECS).round() as u64;
+            let reset_lead = reset_step_clock_lead(&self.cfg);
             let base_clock = if self.needs_reset {
                 clocks[0].saturating_sub(reset_lead).max(committed)
             } else if out_of_reach {
