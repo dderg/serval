@@ -128,12 +128,17 @@ impl Harness {
             .count()
     }
 
-    fn latest_retired(&self) -> Option<Vec<u32>> {
+    fn latest_heartbeat(&self) -> Option<HeartbeatMsg> {
         let mut last = None;
-        while let Ok(PumpMsg::Heartbeat(hb)) = self.heartbeats.try_recv() {
-            last = Some(hb.retired_counts);
+        while let Ok(PumpMsg::Heartbeat(heartbeat)) = self.heartbeats.try_recv() {
+            last = Some(heartbeat);
         }
         last
+    }
+
+    fn latest_retired(&self) -> Option<Vec<u32>> {
+        self.latest_heartbeat()
+            .map(|heartbeat| heartbeat.retired_counts)
     }
 
     fn ack_sent_barriers(&mut self) {
@@ -912,7 +917,7 @@ fn a_virgin_follower_lane_emits_frames_and_a_barrier_on_first_motion() {
 }
 
 #[test]
-fn a_cohort_is_not_retired_until_its_barrier_is_acked() {
+fn a_cohort_is_accepted_before_its_barrier_retires_it() {
     let mut h = harness(1024);
     h.now.store(1_000, Ordering::Relaxed);
     h.endpoint
@@ -925,10 +930,12 @@ fn a_cohort_is_not_retired_until_its_barrier_is_acked() {
         h.endpoint.backlog.is_empty(),
         "every frame including the barrier must be on the wire"
     );
+    let heartbeat = h.latest_heartbeat().expect("ticks post heartbeats");
+    assert_eq!(heartbeat.accepted_counts, Some(vec![64]));
     assert_eq!(
-        h.endpoint.published_counts(),
+        heartbeat.retired_counts,
         vec![0],
-        "a clock watermark far past the stream must not retire an unacked cohort"
+        "an unacked execution barrier must not report the cohort retired"
     );
 
     let issued = h.barriers.lock_ok().clone();

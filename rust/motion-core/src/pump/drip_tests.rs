@@ -192,6 +192,7 @@ fn fully_executed_cohort_awaiting_trip_is_not_a_stall() {
     }
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 0,
+        accepted_counts: None,
         retired_counts: vec![5, 5, 0, 0],
     }))
     .unwrap();
@@ -273,6 +274,7 @@ fn idle_participant_does_not_pin_the_cohort_floor() {
         }
         ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
             mcu_id: 0,
+            accepted_counts: None,
             retired_counts: vec![step + 1, 0, 0, 0],
         }))
         .unwrap();
@@ -509,12 +511,14 @@ fn retired_regression_triggers_on_drip_stall() {
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 3,
+        accepted_counts: None,
         retired_counts: vec![0, 0, 5],
     }))
     .unwrap();
     std::thread::sleep(Duration::from_millis(50));
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 3,
+        accepted_counts: None,
         retired_counts: vec![0, 0, 3],
     }))
     .unwrap();
@@ -569,6 +573,7 @@ fn mcu_reboot_retired_to_zero_triggers_regression() {
     std::thread::sleep(Duration::from_millis(30));
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
+        accepted_counts: None,
         retired_counts: vec![40],
     }))
     .unwrap();
@@ -584,6 +589,7 @@ fn mcu_reboot_retired_to_zero_triggers_regression() {
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
+        accepted_counts: None,
         retired_counts: vec![0],
     }))
     .unwrap();

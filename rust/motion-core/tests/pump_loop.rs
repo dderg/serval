@@ -103,6 +103,7 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
+        accepted_counts: None,
         retired_counts: vec![2],
     }))
     .unwrap();
@@ -500,10 +501,9 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
         "intake must be bounded, not drain everything; accepted={accepted}"
     );
 
-    // Retirement (<= pushed; a larger value wraps room() to zero) lets the pump
-    // push from its backlog and pull again, draining the channel.
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
+        accepted_counts: None,
         retired_counts: vec![4],
     }))
     .unwrap();

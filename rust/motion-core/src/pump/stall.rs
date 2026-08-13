@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use crate::types::AxisKey;
 
-pub(super) struct RetirementStallWatch {
+pub(super) struct AcceptanceStallWatch {
     last_log: Option<Instant>,
     fatal_after: Duration,
     started: Option<(AxisKey, u32, Instant)>,
@@ -13,7 +13,7 @@ pub(super) struct StallObservation {
     pub(super) stalled_secs: Option<f64>,
 }
 
-impl RetirementStallWatch {
+impl AcceptanceStallWatch {
     pub(super) fn new(fatal_after: Duration) -> Self {
         Self {
             last_log: None,
@@ -22,7 +22,12 @@ impl RetirementStallWatch {
         }
     }
 
-    pub(super) fn observe(&mut self, key: AxisKey, retired: u32, now: Instant) -> StallObservation {
+    pub(super) fn observe(
+        &mut self,
+        key: AxisKey,
+        accepted: u32,
+        now: Instant,
+    ) -> StallObservation {
         let log_due = self
             .last_log
             .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(1));
@@ -30,14 +35,14 @@ impl RetirementStallWatch {
             self.last_log = Some(now);
         }
         let stalled_secs = match self.started {
-            Some((prior_key, prior_retired, started))
-                if prior_key == key && prior_retired == retired =>
+            Some((prior_key, prior_accepted, started))
+                if prior_key == key && prior_accepted == accepted =>
             {
                 let elapsed = now.duration_since(started);
                 (elapsed >= self.fatal_after).then_some(elapsed.as_secs_f64())
             }
             _ => {
-                self.started = Some((key, retired, now));
+                self.started = Some((key, accepted, now));
                 None
             }
         };

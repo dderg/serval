@@ -385,6 +385,7 @@ fn shutdown_stops_new_dispatch_before_closing_pump() {
         dispatch_count_cb.fetch_add(1, Ordering::SeqCst);
         let hb = crate::pump::PumpMsg::Heartbeat(crate::pump::HeartbeatMsg {
             mcu_id: 0,
+            accepted_counts: None,
             retired_counts: Vec::new(),
         });
         if pump_tx.send(hb).is_err() {

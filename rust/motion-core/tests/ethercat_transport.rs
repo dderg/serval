@@ -197,6 +197,7 @@ fn heartbeat_retirement_drains_pump_ledger() {
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 42,
+        accepted_counts: None,
         retired_counts: vec![1],
     }))
     .unwrap();

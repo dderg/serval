@@ -15,7 +15,7 @@ use super::messages::{
 use super::sched::{
     AxisFrame, AxisQueue, FramePlan, Schedule, append_pieces_merging_holds, schedule,
 };
-use super::stall::RetirementStallWatch;
+use super::stall::AcceptanceStallWatch;
 use crate::types::AxisKey;
 
 // How far ahead of the MCU playhead the pump pushes pieces — the depth of the
@@ -58,10 +58,7 @@ pub const PUMP_DATA_CHANNEL_CAP: usize = 128;
 // typical motion, ~1.5× the two-MCU ring cache.
 const PUMP_INTAKE_BACKLOG_CAP: u64 = 4096;
 
-// How long an axis ring may sit at room()==0 with `q.retired` frozen before the
-// pump treats it as the MCU having stopped retiring pieces rather than a normal
-// transient full-ring wait.
-pub(super) const RETIREMENT_STALL_FATAL: Duration = Duration::from_secs(10);
+pub(super) const ACCEPTANCE_STALL_FATAL: Duration = Duration::from_secs(10);
 
 const INFERRED_HALT_FATAL: Duration = Duration::from_secs(1);
 
@@ -102,7 +99,7 @@ pub(super) struct Pump<S> {
     pub(super) backlog: Arc<AtomicU64>,
     pub(super) holding_ahead: bool,
     pub(super) data_open: bool,
-    pub(super) retirement_stall: RetirementStallWatch,
+    pub(super) acceptance_stall: AcceptanceStallWatch,
     pub(super) mem_probe: MemPressureProbe,
 }
 
@@ -166,14 +163,22 @@ impl<S: PieceSink> Pump<S> {
             }
             PumpMsg::Heartbeat(HeartbeatMsg {
                 mcu_id,
+                accepted_counts,
                 retired_counts,
             }) => {
+                let accepted_counts = accepted_counts.as_ref().unwrap_or(&retired_counts);
+                assert_eq!(
+                    accepted_counts.len(),
+                    retired_counts.len(),
+                    "heartbeat accepted/retired axis count mismatch for mcu{mcu_id}"
+                );
                 for (axis, &c) in retired_counts.iter().enumerate() {
                     let key = AxisKey {
                         mcu_id,
                         axis: axis as u8,
                     };
                     if let Some(q) = self.queues.get_mut(&key) {
+                        q.accepted = accepted_counts[axis];
                         q.retired = c;
                     }
                     if let Some(co) = &mut self.cohort {
@@ -506,49 +511,49 @@ impl<S: PieceSink> Pump<S> {
         let Some(q) = self.queues.get(&stall_key) else {
             return Ok(());
         };
-        let current_retired = q.retired;
+        let current_accepted = q.accepted;
         let observation = self
-            .retirement_stall
-            .observe(stall_key, current_retired, now);
+            .acceptance_stall
+            .observe(stall_key, current_accepted, now);
         if observation.log_due {
-            let in_flight = q.pushed.wrapping_sub(q.retired);
+            let awaiting_acceptance = q.pushed.wrapping_sub(q.accepted);
             tracing::debug!(
                 subsystem = "motion",
                 event = "pump_stall_full",
                 mcu = stall_key.mcu_id,
                 axis = stall_key.axis,
                 pushed = q.pushed,
+                accepted = q.accepted,
                 retired = q.retired,
-                in_flight,
+                awaiting_acceptance,
                 ring_depth = q.ring_depth,
                 room = q.room(),
                 pending = q.pieces.len(),
-                "pump StallFull (room==0): ring full, awaiting MCU retirement"
+                "pump StallFull (room==0): endpoint has not accepted the next piece"
             );
         }
         if let Some(stalled_secs) = observation.stalled_secs {
             tracing::error!(
                 subsystem = "motion",
-                event = "pump_retirement_stall_fatal",
+                event = "pump_acceptance_stall_fatal",
                 mcu = stall_key.mcu_id,
                 axis = stall_key.axis,
                 pushed = q.pushed,
+                accepted = q.accepted,
                 retired = q.retired,
                 ring_depth = q.ring_depth,
                 pending = q.pieces.len(),
                 stalled_secs,
-                "MCU stopped retiring pieces on this axis: retired count \
-                 has not advanced while heartbeats kept arriving — the \
-                 ring is permanently full and the pump would spin forever"
+                "endpoint stopped accepting pieces on this axis while heartbeats continued"
             );
             (self.callbacks.on_drip_stall)(format!(
-                "pump retirement stall: mcu{} axis{} retired stuck at {} \
-                 for {stalled_secs:.1}s with pushed={} ring_depth={} \
-                 pending={} — MCU stopped retiring pieces on this axis",
+                "pump acceptance stall: mcu{} axis{} accepted stuck at {} for \
+                 {stalled_secs:.1}s with pushed={} retired={} ring_depth={} pending={}",
                 stall_key.mcu_id,
                 stall_key.axis,
-                current_retired,
+                current_accepted,
                 q.pushed,
+                q.retired,
                 q.ring_depth,
                 q.pieces.len(),
             ));
@@ -762,7 +767,7 @@ impl<S: PieceSink> Pump<S> {
             };
             match sched {
                 Schedule::Idle => {
-                    self.retirement_stall.reset();
+                    self.acceptance_stall.reset();
                     break;
                 }
                 Schedule::StallFull(stall_key) => {
@@ -770,12 +775,12 @@ impl<S: PieceSink> Pump<S> {
                     break;
                 }
                 Schedule::StallAhead(_stall_key) => {
-                    self.retirement_stall.reset();
+                    self.acceptance_stall.reset();
                     self.holding_ahead = true;
                     break;
                 }
                 Schedule::Send(frames) => {
-                    self.retirement_stall.reset();
+                    self.acceptance_stall.reset();
                     if frames.is_empty() {
                         break;
                     }
@@ -970,7 +975,7 @@ pub fn run_pump<S: PieceSink>(
         backlog,
         holding_ahead: false,
         data_open: true,
-        retirement_stall: RetirementStallWatch::new(RETIREMENT_STALL_FATAL),
+        acceptance_stall: AcceptanceStallWatch::new(ACCEPTANCE_STALL_FATAL),
         mem_probe: MemPressureProbe::new(),
     };
     pump.run(control_rx, data_rx);
