@@ -48,7 +48,7 @@ fn first_emission_resets_the_step_clock_then_sets_dir() {
         frames[0],
         StepFrame::ResetStepClock {
             oid: OID,
-            clock: 1_000
+            clock: 1_049
         }
     );
     assert_eq!(frames[1], StepFrame::SetNextStepDir { oid: OID, dir: 1 });
@@ -329,7 +329,7 @@ fn halt_discards_queued_work_and_re_resets_the_step_clock() {
         frames[0],
         StepFrame::ResetStepClock {
             oid: OID,
-            clock: 50_000
+            clock: 50_048
         }
     );
 }

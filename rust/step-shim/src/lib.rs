@@ -240,7 +240,7 @@ impl MotorState {
             }
 
             let out_of_reach = clocks[0] - committed >= compress::CLOCK_DIFF_MAX;
-            let base_clock = if out_of_reach {
+            let base_clock = if self.needs_reset || out_of_reach {
                 clocks[0] - 1
             } else {
                 committed
