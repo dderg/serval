@@ -25,6 +25,7 @@ pub use pump_loop::{MAX_LEAD_SECS, PUMP_DATA_CHANNEL_CAP, run_pump};
 pub use sched::{
     AxisFrame, AxisQueue, FramePlan, Schedule, SeamBasis, append_pieces_merging_holds, schedule,
 };
+pub use stepcompress_sink::SEND_LEAD_SECONDS;
 pub use stepcompress_sink::{
     BACKLOG_CEILING_FRAMES, ClockSource, FrameEgress, MOVE_SLOT_RESERVE, StepcompressEndpoint,
     StepcompressPacer, build_endpoint,

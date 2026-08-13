@@ -134,7 +134,7 @@ impl PumpSink {
             if drip_active {
                 crate::pump::DRIP_ANCHOR_LEAD_SECS
             } else {
-                crate::anchor::DEFAULT_LEAD_SECS
+                crate::pump::SEND_LEAD_SECONDS
             },
         );
 
