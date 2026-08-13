@@ -248,6 +248,60 @@ fn in_flight_drains_as_the_clock_advances_and_sending_resumes() {
 }
 
 #[test]
+fn move_slots_reclaim_when_the_mcu_loads_the_run() {
+    let mut h = harness(1);
+    h.endpoint.queue_outbound(
+        Outbound::Step(StepFrame::QueueStep {
+            oid: 6,
+            interval: 10,
+            count: 1,
+            add: 0,
+        }),
+        1_000,
+    );
+    h.endpoint.queue_outbound(
+        Outbound::Step(StepFrame::QueueStep {
+            oid: 7,
+            interval: 10,
+            count: 1,
+            add: 0,
+        }),
+        20_000,
+    );
+
+    h.endpoint.flush(0, CYCLES_PER_SECOND).unwrap();
+    assert_eq!(h.sent_moves(), 1);
+
+    let margin = (CYCLES_PER_SECOND * CONSUMED_MARGIN_SECONDS) as u64;
+    h.endpoint.flush(1_000 + margin, CYCLES_PER_SECOND).unwrap();
+    assert_eq!(h.sent_moves(), 2);
+}
+
+#[test]
+fn barriers_hold_move_slots_until_the_mcu_loads_them() {
+    let mut h = harness(1);
+    h.endpoint
+        .queue_outbound(Outbound::Barrier(BarrierId { oid: OID, seq: 1 }), 1_000);
+    h.endpoint.queue_outbound(
+        Outbound::Step(StepFrame::QueueStep {
+            oid: OID,
+            interval: 10,
+            count: 1,
+            add: 0,
+        }),
+        20_000,
+    );
+
+    h.endpoint.flush(0, CYCLES_PER_SECOND).unwrap();
+    assert_eq!(h.barriers.lock_ok().as_slice(), &[(OID, 1)]);
+    assert_eq!(h.sent_moves(), 0);
+
+    let margin = (CYCLES_PER_SECOND * CONSUMED_MARGIN_SECONDS) as u64;
+    h.endpoint.flush(1_000 + margin, CYCLES_PER_SECOND).unwrap();
+    assert_eq!(h.sent_moves(), 1);
+}
+
+#[test]
 fn retirement_only_counts_fully_sent_pieces_and_never_regresses() {
     let mut h = harness(BUDGET);
     h.now.store(1_000, Ordering::Relaxed);
@@ -299,7 +353,6 @@ fn backlog_ceiling_breach_is_fatal() {
                 add: 0,
             }),
             start_clock: u64::MAX,
-            end_clock: u64::MAX,
             enqueue_order: 0,
         }));
     let err = h
@@ -324,7 +377,6 @@ fn stale_queue_step(start_clock: u64) -> OutboundFrame {
             add: 0,
         }),
         start_clock,
-        end_clock: start_clock + 10,
         enqueue_order: 0,
     }
 }
@@ -373,7 +425,6 @@ fn multi_lane_commands_leave_in_step_deadline_order() {
                 add: 0,
             }),
             start_clock,
-            start_clock + 10,
         );
     }
 

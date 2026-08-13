@@ -130,7 +130,7 @@ pub fn build_endpoint(
 }
 
 struct InFlight {
-    end_clock: u64,
+    reclaim_clock: u64,
 }
 
 struct PendingRetire {
@@ -152,7 +152,6 @@ enum Outbound {
 struct OutboundFrame {
     frame: Outbound,
     start_clock: u64,
-    end_clock: u64,
     enqueue_order: u64,
 }
 
@@ -316,7 +315,7 @@ impl StepcompressEndpoint {
                 ))
             })
     }
-    fn queue_outbound(&mut self, frame: Outbound, start_clock: u64, end_clock: u64) {
+    fn queue_outbound(&mut self, frame: Outbound, start_clock: u64) {
         let enqueue_order = self.next_outbound_order;
         self.next_outbound_order = self
             .next_outbound_order
@@ -325,7 +324,6 @@ impl StepcompressEndpoint {
         self.backlog.push_back(OutboundFrame {
             frame,
             start_clock,
-            end_clock,
             enqueue_order,
         });
     }
@@ -508,8 +506,8 @@ impl StepcompressEndpoint {
             .halt_at(motor, emit_cursor)
             .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
         for frame in tail {
-            let (start_clock, end_clock) = self.frame_clocks(now, frame);
-            self.queue_outbound(Outbound::Step(frame), start_clock, end_clock);
+            let (start_clock, _) = self.frame_clocks(now, frame);
+            self.queue_outbound(Outbound::Step(frame), start_clock);
         }
         self.shim.set_motor_cycles_per_second(motor, freq);
         let snapshot = self.shim.retired_counts();
@@ -546,9 +544,9 @@ impl StepcompressEndpoint {
                 *next = next.wrapping_add(1);
                 seq
             };
-            let end_clock = self.step_clock.get(&oid).copied().unwrap_or(0);
+            let barrier_clock = self.step_clock.get(&oid).copied().unwrap_or(0);
             let id = BarrierId { oid, seq };
-            self.queue_outbound(Outbound::Barrier(id), end_clock, end_clock);
+            self.queue_outbound(Outbound::Barrier(id), barrier_clock);
             waits.push(id);
         }
         if waits.is_empty() {
@@ -667,8 +665,8 @@ impl StepcompressEndpoint {
             .drain(drain_to)
             .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
         for frame in frames {
-            let (start_clock, end_clock) = self.frame_clocks(now, frame);
-            self.queue_outbound(Outbound::Step(frame), start_clock, end_clock);
+            let (start_clock, _) = self.frame_clocks(now, frame);
+            self.queue_outbound(Outbound::Step(frame), start_clock);
         }
         if self.backlog.len() > BACKLOG_CEILING_FRAMES {
             return Err(SendError::Fatal(format!(
@@ -690,19 +688,23 @@ impl StepcompressEndpoint {
     fn flush(&mut self, now: u64, freq: f64) -> Result<(), SendError> {
         let margin = (freq * CONSUMED_MARGIN_SECONDS) as u64;
         let cutoff = now.saturating_sub(margin);
-        self.in_flight.retain(|e| e.end_clock > cutoff);
+        self.in_flight.retain(|e| e.reclaim_clock > cutoff);
         self.order_backlog_by_deadline();
         let stale_by = (freq * pump_past_guard_secs()) as u64;
         let mut burst: Vec<(&'static str, Vec<(String, ArgValue)>)> = Vec::new();
-        let mut slots: Vec<u64> = Vec::new();
+        let mut reclaim_clocks: Vec<u64> = Vec::new();
         let mut stale: Option<SendError> = None;
         let mut in_flight = self.in_flight.len() as u32;
         for out in &self.backlog {
-            let consumes_slot = matches!(out.frame, Outbound::Step(StepFrame::QueueStep { .. }));
+            let consumes_slot = matches!(
+                &out.frame,
+                Outbound::Step(StepFrame::QueueStep { .. }) | Outbound::Barrier(_)
+            );
+            let queue_step = matches!(&out.frame, Outbound::Step(StepFrame::QueueStep { .. }));
             if consumes_slot && in_flight >= self.budget {
                 break;
             }
-            if consumes_slot && out.start_clock.saturating_add(stale_by) < now {
+            if queue_step && out.start_clock.saturating_add(stale_by) < now {
                 let late_us = (now - out.start_clock) as f64 * 1e6 / freq;
                 stale = Some(SendError::Fatal(format!(
                     "stepcompress mcu {}: queue_step first step at clock {} is {late_us:.0} us \
@@ -718,15 +720,18 @@ impl StepcompressEndpoint {
             }
             burst.push(frame_args(&out.frame));
             if consumes_slot {
-                slots.push(out.end_clock);
+                reclaim_clocks.push(out.start_clock);
                 in_flight += 1;
             }
         }
         if !burst.is_empty() {
             (self.egress)(&burst)?;
             self.backlog.drain(..burst.len());
-            self.in_flight
-                .extend(slots.into_iter().map(|end_clock| InFlight { end_clock }));
+            self.in_flight.extend(
+                reclaim_clocks
+                    .into_iter()
+                    .map(|reclaim_clock| InFlight { reclaim_clock }),
+            );
         }
         if let Some(error) = stale {
             return Err(error);
@@ -785,8 +790,8 @@ impl StepcompressEndpoint {
                     .finish(motor)
                     .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
                 for frame in tail {
-                    let (start_clock, end_clock) = self.frame_clocks(now, frame);
-                    self.queue_outbound(Outbound::Step(frame), start_clock, end_clock);
+                    let (start_clock, _) = self.frame_clocks(now, frame);
+                    self.queue_outbound(Outbound::Step(frame), start_clock);
                 }
             }
             self.deferred_retirement = true;
