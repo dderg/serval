@@ -300,6 +300,7 @@ fn backlog_ceiling_breach_is_fatal() {
             }),
             start_clock: u64::MAX,
             end_clock: u64::MAX,
+            enqueue_order: 0,
         }));
     let err = h
         .endpoint
@@ -324,6 +325,7 @@ fn stale_queue_step(start_clock: u64) -> OutboundFrame {
         }),
         start_clock,
         end_clock: start_clock + 10,
+        enqueue_order: 0,
     }
 }
 
@@ -357,6 +359,36 @@ fn a_queue_step_within_the_projection_guard_still_goes_out() {
         .push_back(stale_queue_step(1_000_000 - guard_cycles / 2));
     h.endpoint.tick().unwrap();
     assert_eq!(h.sent_moves(), 1);
+}
+
+#[test]
+fn multi_lane_commands_leave_in_step_deadline_order() {
+    let mut h = harness(8);
+    for (oid, start_clock) in [(6, 100), (6, 400), (7, 200), (8, 300)] {
+        h.endpoint.queue_outbound(
+            Outbound::Step(StepFrame::QueueStep {
+                oid,
+                interval: 10,
+                count: 1,
+                add: 0,
+            }),
+            start_clock,
+            start_clock + 10,
+        );
+    }
+
+    h.endpoint.flush(0, CYCLES_PER_SECOND).unwrap();
+
+    let sent_oids: Vec<u32> = h
+        .sent
+        .lock_ok()
+        .iter()
+        .filter_map(|frame| match frame {
+            StepFrame::QueueStep { oid, .. } => Some(*oid),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent_oids, [6, 7, 8, 6]);
 }
 
 #[test]
