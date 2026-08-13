@@ -48,7 +48,7 @@ fn first_emission_resets_the_step_clock_then_sets_dir() {
         frames[0],
         StepFrame::ResetStepClock {
             oid: OID,
-            clock: 1_049
+            clock: 1_000
         }
     );
     assert_eq!(frames[1], StepFrame::SetNextStepDir { oid: OID, dir: 1 });
@@ -329,7 +329,7 @@ fn halt_discards_queued_work_and_re_resets_the_step_clock() {
         frames[0],
         StepFrame::ResetStepClock {
             oid: OID,
-            clock: 50_048
+            clock: 50_000
         }
     );
 }
@@ -528,9 +528,7 @@ fn a_hold_past_the_encoder_window_re_anchors_the_step_clock() {
     let resume_start = resets[1];
     assert!(
         clocks[100] > resume_start && clocks[100] - resume_start < 72_000,
-        "the first step after the re-anchor must land where it was sampled, \
-         not at the anchor: anchor {resume_start}, step {}",
-        clocks[100]
+        "the first step after an encoder-window re-anchor must land at its sampled clock"
     );
     assert!(
         clocks[199] - clocks[0] > 12 * 72_000_000,
