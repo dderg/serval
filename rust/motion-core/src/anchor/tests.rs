@@ -219,9 +219,10 @@ fn default_lead_covers_the_observed_reanchor_pipeline_delay() {
 #[test]
 fn fresh_anchor_honors_a_larger_caller_lead() {
     let mut anchor = Anchor::new();
-    let (t0, epoch) = anchor.anchor_segment_with_min_lead(0.0, 1.0, 100.0, 2.0);
+    let lead = crate::pump::DRIP_WINDOW_SECS;
+    let (t0, epoch) = anchor.anchor_segment_with_min_lead(0.0, 1.0, 100.0, lead);
     assert_eq!(epoch, StreamEpoch::Reposition);
-    assert_eq!(t0, 102.0);
+    assert_eq!(t0, 100.0 + lead);
 }
 
 // `queued_motion_secs` (bridge.rs) reads `t0 + last_move_time - host_now`: the
