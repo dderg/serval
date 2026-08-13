@@ -1,4 +1,7 @@
-use super::pump_loop::Pump;
+use super::pump_loop::{
+    PUMP_INTAKE_BACKLOG_HARD_CAP, PUMP_INTAKE_BACKLOG_SOFT_CAP, PUMP_INTAKE_MIN_RUNWAY_SECS, Pump,
+    wants_pieces,
+};
 use super::*;
 use crossbeam_channel::unbounded;
 use runtime::piece_ring::PieceEntry;
@@ -284,6 +287,43 @@ fn make_piece(t: u64) -> (PieceEntry, f64) {
         },
         t as f64,
     )
+}
+
+fn staged_runway(piece_count: u64, runway_secs: f64) -> BTreeMap<AxisKey, AxisQueue> {
+    let duration = runway_secs / piece_count as f64;
+    let mut queue = AxisQueue::new(u32::MAX);
+    queue.pieces.extend((0..piece_count).map(|index| {
+        (
+            PieceEntry {
+                start_time: index,
+                duration: duration as f32,
+                ..PieceEntry::zeroed()
+            },
+            index as f64 * duration,
+        )
+    }));
+    BTreeMap::from([(AxisKey { mcu_id: 1, axis: 0 }, queue)])
+}
+
+#[test]
+fn pump_intake_extends_only_dense_backlogs_to_the_hard_cap() {
+    let sparse = staged_runway(
+        PUMP_INTAKE_BACKLOG_SOFT_CAP,
+        PUMP_INTAKE_MIN_RUNWAY_SECS * 2.0,
+    );
+    assert!(!wants_pieces(&sparse));
+
+    let dense = staged_runway(
+        PUMP_INTAKE_BACKLOG_SOFT_CAP,
+        PUMP_INTAKE_MIN_RUNWAY_SECS * 0.5,
+    );
+    assert!(wants_pieces(&dense));
+
+    let pathological = staged_runway(
+        PUMP_INTAKE_BACKLOG_HARD_CAP,
+        PUMP_INTAKE_MIN_RUNWAY_SECS * 0.5,
+    );
+    assert!(!wants_pieces(&pathological));
 }
 
 #[test]

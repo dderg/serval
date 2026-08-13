@@ -37,35 +37,40 @@ pub const MAX_LEAD_SECS: f64 = 2.0;
 // for fences and the queued commands riding them.
 pub const PUMP_DATA_CHANNEL_CAP: usize = 128;
 
-// Bound on total host-side staged pieces across all axes. Intake stops here so
-// the data channel backpressures the planner during streaming. It is a TOTAL,
-// not per-axis (all axes interleave on one channel). A drip cohort BYPASSES it:
-// a homing axis can lower into a burst larger than the cap, and stopping intake
-// there would leave the other participants' messages unpulled behind it on the
-// shared channel — starving the cohort floor and freezing the planner on the
-// full channel. Drip is finite, so greedy draining is safe there.
-//
-// Sizing is a latency/stall-margin trade: staged pieces plus the MCU rings
-// are the committed depth that keeps the playhead fed through upstream
-// stalls, and the longest known stall is a full planner re-plan pass
-// (~0.9 s measured on dense jerk-limited infill, planner_bench, M-series;
-// expect 2–3 s on a loaded Pi). Staging must stay comfortably above the
-// total ring cache (62 KB default = 1322 pieces per MCU, 2–3 MCUs typical)
-// or the pump throttles the planner before the frontier can absorb such a
-// gap — the playhead then overruns the committed end (anchor_underrun →
-// drive fault). Every staged piece beyond that margin is queued-command
-// latency: fan changes wait behind the whole backlog. 4096 ≈ 2–3 s of
-// typical motion, ~1.5× the two-MCU ring cache.
-const PUMP_INTAKE_BACKLOG_CAP: u64 = 4096;
+pub(super) const PUMP_INTAKE_BACKLOG_SOFT_CAP: u64 = 4096;
+pub(super) const PUMP_INTAKE_BACKLOG_HARD_CAP: u64 = 8192;
+pub(super) const PUMP_INTAKE_MIN_RUNWAY_SECS: f64 = 5.0;
+
+fn staged_axis_runway_secs(queue: &AxisQueue) -> f64 {
+    let Some((_, start_host)) = queue.pieces.front() else {
+        return 0.0;
+    };
+    let (last, last_start_host) = queue.pieces.back().expect("nonempty queue has a tail");
+    let runway = last_start_host + f64::from(last.duration) - start_host;
+    assert!(
+        runway.is_finite() && runway >= 0.0,
+        "pump staged axis runway must be finite and nonnegative, got {runway}"
+    );
+    runway
+}
+
+fn minimum_staged_runway_secs(queues: &BTreeMap<AxisKey, AxisQueue>) -> f64 {
+    queues
+        .values()
+        .map(staged_axis_runway_secs)
+        .reduce(f64::min)
+        .unwrap_or(0.0)
+}
+
+pub(super) fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
+    let staged: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
+    staged < PUMP_INTAKE_BACKLOG_SOFT_CAP
+        || (staged < PUMP_INTAKE_BACKLOG_HARD_CAP
+            && minimum_staged_runway_secs(queues) < PUMP_INTAKE_MIN_RUNWAY_SECS)
+}
 
 pub(super) const ACCEPTANCE_STALL_FATAL: Duration = Duration::from_secs(10);
-
 const INFERRED_HALT_FATAL: Duration = Duration::from_secs(1);
-
-fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
-    let staged: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
-    staged < PUMP_INTAKE_BACKLOG_CAP
-}
 
 // Mirrors the MCU's MAX_START_IN_PAST_SECS: 500us over host-projection
 // jitter on real hardware; in the simulator (MCU_SIM_SOCK_DIR set) the
