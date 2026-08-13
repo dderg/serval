@@ -216,6 +216,14 @@ fn default_lead_covers_the_observed_reanchor_pipeline_delay() {
     assert_eq!(crate::worker::lead_secs(), super::DEFAULT_LEAD_SECS);
 }
 
+#[test]
+fn fresh_anchor_honors_a_larger_caller_lead() {
+    let mut anchor = Anchor::new();
+    let (t0, epoch) = anchor.anchor_segment_with_min_lead(0.0, 1.0, 100.0, 2.0);
+    assert_eq!(epoch, StreamEpoch::Reposition);
+    assert_eq!(t0, 102.0);
+}
+
 // `queued_motion_secs` (bridge.rs) reads `t0 + last_move_time - host_now`: the
 // committed frontier in stream time, grounded onto the host clock by `t0`. The
 // host backpressure gate is meant to ride this signal. It was abandoned (commit

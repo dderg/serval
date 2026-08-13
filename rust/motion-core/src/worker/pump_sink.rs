@@ -126,11 +126,18 @@ impl PumpSink {
 
     fn anchor(&self, t_start: f64, t_end: f64) -> AnchorPoint {
         let host_now = self.host_now();
-        let (t0, epoch) = self
-            .anchor
-            .lock_ok()
-            .anchor_segment(t_start, t_end, host_now);
         let drip_active = self.active_drip_cohort.lock_ok().is_some();
+        let (t0, epoch) = self.anchor.lock_ok().anchor_segment_with_min_lead(
+            t_start,
+            t_end,
+            host_now,
+            if drip_active {
+                crate::pump::DRIP_WINDOW_SECS
+            } else {
+                crate::anchor::DEFAULT_LEAD_SECS
+            },
+        );
+
         AnchorPoint {
             t0,
             epoch,
