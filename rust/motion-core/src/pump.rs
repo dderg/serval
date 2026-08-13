@@ -12,7 +12,7 @@ mod stepcompress_sink;
 mod transit_trace;
 mod wire_sink;
 
-pub use drip::{DRIP_WINDOW_SECS, DripArm};
+pub use drip::{DRIP_ANCHOR_LEAD_SECS, DRIP_WINDOW_SECS, DripArm};
 pub use junction::{
     JUNCTION_POSITION_FATAL_MM, JUNCTION_POSITION_LOG_MM, JunctionSeam, JunctionTracker,
     junction_jumps,

@@ -219,7 +219,7 @@ fn default_lead_covers_the_observed_reanchor_pipeline_delay() {
 #[test]
 fn fresh_anchor_honors_a_larger_caller_lead() {
     let mut anchor = Anchor::new();
-    let lead = crate::pump::DRIP_WINDOW_SECS;
+    let lead = crate::pump::DRIP_ANCHOR_LEAD_SECS;
     let (t0, epoch) = anchor.anchor_segment_with_min_lead(0.0, 1.0, 100.0, lead);
     assert_eq!(epoch, StreamEpoch::Reposition);
     assert_eq!(t0, 100.0 + lead);

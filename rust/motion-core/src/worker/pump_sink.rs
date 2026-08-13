@@ -132,7 +132,7 @@ impl PumpSink {
             t_end,
             host_now,
             if drip_active {
-                crate::pump::DRIP_WINDOW_SECS
+                crate::pump::DRIP_ANCHOR_LEAD_SECS
             } else {
                 crate::anchor::DEFAULT_LEAD_SECS
             },
