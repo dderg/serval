@@ -8,7 +8,7 @@ use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
     FIT_TRUNC_POS_FACTOR, FitTol, LADDER_PROBES_U, ladder_fit, quintic_in_u, truncated_piece,
 };
-use crate::types::{Control, LoweredItem, PostProcessError, ShapedItem};
+use crate::types::{Control, LoweredItem, LoweredSegment, PostProcessError, ShapedItem};
 
 /// The evaluable (position, velocity, acceleration) signal the shaped-track
 /// fitter consumes: the kernel convolution for kerneled axes, the follower
@@ -147,19 +147,45 @@ impl Shaper {
     }
 
     pub fn run(mut self, input: Receiver<LoweredItem>, output: Sender<ShapedItem>) {
+        let mut deferred = None;
         loop {
-            match input.recv() {
-                Ok(item) => {
-                    if !self.feed(item, &output) {
+            let item = match deferred.take() {
+                Some(item) => item,
+                None => match input.recv() {
+                    Ok(item) => item,
+                    Err(_) => {
+                        self.finish(&output);
                         return;
                     }
-                }
-                Err(_) => {
-                    self.finish(&output);
+                },
+            };
+            let LoweredItem::Seg(segment) = item else {
+                if !self.feed(item, &output) {
                     return;
                 }
+                continue;
+            };
+            self.buffer_segment(segment);
+            for _ in 1..crate::STAGE_CHANNEL_CAP {
+                let Ok(item) = input.try_recv() else {
+                    break;
+                };
+                match item {
+                    LoweredItem::Seg(segment) => self.buffer_segment(segment),
+                    other => {
+                        deferred = Some(other);
+                        break;
+                    }
+                }
+            }
+            if !self.emit(self.supported_count(), false, &output) {
+                return;
             }
         }
+    }
+
+    fn buffer_segment(&mut self, item: LoweredSegment) {
+        self.pending.push(item.seg, item.rest_at_end);
     }
 
     /// One iteration of [`Shaper::run`]'s loop, for single-threaded hosts
@@ -167,7 +193,7 @@ impl Shaper {
     pub fn feed(&mut self, item: LoweredItem, output: &Sender<ShapedItem>) -> bool {
         match item {
             LoweredItem::Seg(item) => {
-                self.pending.push(item.seg, item.rest_at_end);
+                self.buffer_segment(item);
                 self.emit(self.supported_count(), false, output)
             }
             LoweredItem::Drain => {
