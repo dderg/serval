@@ -1,4 +1,4 @@
-const RESET_STEP_CLOCK_LEAD_SECS: f64 = 0.050;
+const RESET_STEP_CLOCK_LEAD_SECS: f64 = 0.500;
 fn reset_step_clock_lead(cfg: &MotorConfig) -> u64 {
     (cfg.cycles_per_second * RESET_STEP_CLOCK_LEAD_SECS).round() as u64
 }
