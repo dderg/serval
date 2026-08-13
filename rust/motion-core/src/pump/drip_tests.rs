@@ -414,7 +414,7 @@ fn participant_release_tracks_mcu_clock_horizon() {
         "piece at 600 is beyond the initial drip horizon and must be held"
     );
 
-    *clock.lock().unwrap() = 200;
+    *clock.lock().unwrap() = 400;
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while sink.sent().len() < 2 {
         assert!(
