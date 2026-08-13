@@ -145,10 +145,12 @@ pub(crate) fn project_followers(
                     !state.projected_trimmed,
                     force,
                 );
+                let input_degree = table.max_degree();
                 let sig = ShapedSignal::new_from_evaluator(
                     kernel,
                     move |t| table.eval(t),
                     state.projected_breakpoints(),
+                    input_degree,
                 );
                 Some((kernel, first_t, last_t, sig))
             }

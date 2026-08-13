@@ -709,6 +709,11 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
     };
     let first = base.first().unwrap().t_start;
     let last = base.last().unwrap().t_end;
+    let input_degree = base
+        .iter()
+        .map(|segment| segment.axes[0].degree() as usize)
+        .max()
+        .expect("non-empty base");
 
     for (base_seg, shaped_seg) in base.iter().zip(shaped) {
         let mut breaks: Vec<f64> = Vec::new();
@@ -729,6 +734,7 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
                     )
             },
             breaks,
+            input_degree,
         );
         for frac in [0.1_f64, 0.3, 0.5, 0.7, 0.9] {
             let t = frac.mul_add(base_seg.t_end - base_seg.t_start, base_seg.t_start);

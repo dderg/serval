@@ -24,7 +24,10 @@ pub(crate) trait TrackSignal {
     }
 }
 
-impl TrackSignal for ShapedSignal<'_> {
+impl<F> TrackSignal for ShapedSignal<'_, F>
+where
+    F: Fn(f64) -> f64,
+{
     fn eval(&self, t: f64) -> f64 {
         ShapedSignal::eval(self, t)
     }
@@ -553,7 +556,9 @@ fn fit_axis_column(
         at_stream_boundary,
         force,
     );
-    let sig = ShapedSignal::new_from_evaluator(kernel, |t| table.eval(t), input_breaks);
+    let input_degree = table.max_degree();
+    let sig =
+        ShapedSignal::new_from_evaluator(kernel, |t| table.eval(t), input_breaks, input_degree);
     let mut column = Vec::with_capacity(targets.len());
     for seg in targets {
         let track = fit_axis_from_signal(axis, &seg.axes[axis], &sig, 1.0)?;
@@ -738,6 +743,14 @@ impl AxisSignalTable {
         table
     }
 
+    pub(crate) fn max_degree(&self) -> usize {
+        self.coeffs
+            .iter()
+            .map(|coefficients| coefficients.len() - 1)
+            .max()
+            .expect("empty signal window")
+    }
+
     fn piece_at(&self, i: usize, t: f64) -> f64 {
         let tau = (t - self.starts[i]).clamp(0.0, self.ends[i] - self.starts[i]);
         self.coeffs[i]
@@ -760,11 +773,22 @@ impl AxisSignalTable {
             return self.piece_at(self.coeffs.len() - 1, self.last_t);
         }
         let mut i = self.cursor.get().min(self.coeffs.len() - 1);
-        while i > 0 && self.ends[i - 1] + SEGMENT_TIME_EPS_S >= t {
-            i -= 1;
-        }
-        while i + 1 < self.coeffs.len() && self.ends[i] + SEGMENT_TIME_EPS_S < t {
-            i += 1;
+        if self.ends[i] + SEGMENT_TIME_EPS_S < t {
+            i = if i + 1 < self.coeffs.len() && self.ends[i + 1] + SEGMENT_TIME_EPS_S >= t {
+                i + 1
+            } else {
+                self.ends
+                    .partition_point(|&end| end + SEGMENT_TIME_EPS_S < t)
+                    .min(self.coeffs.len() - 1)
+            };
+        } else if i > 0 && self.ends[i - 1] + SEGMENT_TIME_EPS_S >= t {
+            i = if i == 1 || self.ends[i - 2] + SEGMENT_TIME_EPS_S < t {
+                i - 1
+            } else {
+                self.ends
+                    .partition_point(|&end| end + SEGMENT_TIME_EPS_S < t)
+                    .min(self.coeffs.len() - 1)
+            };
         }
         self.cursor.set(i);
         if t >= self.starts[i] - SEGMENT_TIME_EPS_S {

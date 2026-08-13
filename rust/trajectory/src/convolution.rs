@@ -23,28 +23,90 @@ fn eval_kernel(kernel: &PiecewisePolynomialKernel, z: f64) -> f64 {
     0.0
 }
 
-/// 8-point Gauss–Legendre on [−1, 1]: exact through degree 15, comfortably
-/// above the degree-11 worst case (degree-7 input piece × degree-4 kernel).
-const GAUSS_NODES: [f64; 8] = [
-    -0.960_289_856_497_536_2,
-    -0.796_666_477_413_626_7,
-    -0.525_532_409_916_329,
-    -0.183_434_642_495_649_8,
-    0.183_434_642_495_649_8,
-    0.525_532_409_916_329,
-    0.796_666_477_413_626_7,
-    0.960_289_856_497_536_2,
+const MAX_EXACT_PRODUCT_DEGREE: usize = 13;
+const GAUSS_1_NODES: [f64; 1] = [0.0];
+const GAUSS_1_WEIGHTS: [f64; 1] = [2.0];
+const GAUSS_2_NODES: [f64; 2] = [-0.577_350_269_189_625_7, 0.577_350_269_189_625_7];
+const GAUSS_2_WEIGHTS: [f64; 2] = [1.0, 1.0];
+const GAUSS_3_NODES: [f64; 3] = [-0.774_596_669_241_483_4, 0.0, 0.774_596_669_241_483_4];
+const GAUSS_3_WEIGHTS: [f64; 3] = [
+    0.555_555_555_555_555_6,
+    0.888_888_888_888_888_8,
+    0.555_555_555_555_555_6,
 ];
-const GAUSS_WEIGHTS: [f64; 8] = [
-    0.101_228_536_290_376_26,
-    0.222_381_034_453_374_47,
-    0.313_706_645_877_887_3,
-    0.362_683_783_378_362,
-    0.362_683_783_378_362,
-    0.313_706_645_877_887_3,
-    0.222_381_034_453_374_47,
-    0.101_228_536_290_376_26,
+const GAUSS_4_NODES: [f64; 4] = [
+    -0.861_136_311_594_052_6,
+    -0.339_981_043_584_856_3,
+    0.339_981_043_584_856_3,
+    0.861_136_311_594_052_6,
 ];
+const GAUSS_4_WEIGHTS: [f64; 4] = [
+    0.347_854_845_137_453_8,
+    0.652_145_154_862_546_1,
+    0.652_145_154_862_546_1,
+    0.347_854_845_137_453_8,
+];
+const GAUSS_5_NODES: [f64; 5] = [
+    -0.906_179_845_938_664,
+    -0.538_469_310_105_683_1,
+    0.0,
+    0.538_469_310_105_683_1,
+    0.906_179_845_938_664,
+];
+const GAUSS_5_WEIGHTS: [f64; 5] = [
+    0.236_926_885_056_189_1,
+    0.478_628_670_499_366_5,
+    0.568_888_888_888_888_9,
+    0.478_628_670_499_366_5,
+    0.236_926_885_056_189_1,
+];
+const GAUSS_6_NODES: [f64; 6] = [
+    -0.932_469_514_203_152,
+    -0.661_209_386_466_264_5,
+    -0.238_619_186_083_196_9,
+    0.238_619_186_083_196_9,
+    0.661_209_386_466_264_5,
+    0.932_469_514_203_152,
+];
+const GAUSS_6_WEIGHTS: [f64; 6] = [
+    0.171_324_492_379_170_4,
+    0.360_761_573_048_138_6,
+    0.467_913_934_572_691,
+    0.467_913_934_572_691,
+    0.360_761_573_048_138_6,
+    0.171_324_492_379_170_4,
+];
+const GAUSS_7_NODES: [f64; 7] = [
+    -0.949_107_912_342_758_5,
+    -0.741_531_185_599_394_5,
+    -0.405_845_151_377_397_2,
+    0.0,
+    0.405_845_151_377_397_2,
+    0.741_531_185_599_394_5,
+    0.949_107_912_342_758_5,
+];
+const GAUSS_7_WEIGHTS: [f64; 7] = [
+    0.129_484_966_168_869_7,
+    0.279_705_391_489_276_6,
+    0.381_830_050_505_118_9,
+    0.417_959_183_673_469_4,
+    0.381_830_050_505_118_9,
+    0.279_705_391_489_276_6,
+    0.129_484_966_168_869_7,
+];
+
+fn quadrature_rule(product_degree: usize) -> (&'static [f64], &'static [f64]) {
+    match product_degree {
+        0..=1 => (&GAUSS_1_NODES, &GAUSS_1_WEIGHTS),
+        2..=3 => (&GAUSS_2_NODES, &GAUSS_2_WEIGHTS),
+        4..=5 => (&GAUSS_3_NODES, &GAUSS_3_WEIGHTS),
+        6..=7 => (&GAUSS_4_NODES, &GAUSS_4_WEIGHTS),
+        8..=9 => (&GAUSS_5_NODES, &GAUSS_5_WEIGHTS),
+        10..=11 => (&GAUSS_6_NODES, &GAUSS_6_WEIGHTS),
+        12..=13 => (&GAUSS_7_NODES, &GAUSS_7_WEIGHTS),
+        _ => panic!("convolution product degree {product_degree} exceeds 13"),
+    }
+}
 
 const CUT_DEDUP_EPS_S: f64 = 1e-12;
 
@@ -55,8 +117,10 @@ const CUT_DEDUP_EPS_S: f64 = 1e-12;
 /// sample wavelength — noise invisible in position but fatal to the refit's
 /// second-difference acceleration probes, which chased it into subdividing
 /// every span to the floor.
-pub struct ShapedSignal<'a> {
-    eval_input: Box<dyn Fn(f64) -> f64 + 'a>,
+pub struct ShapedSignal<'a, F = Box<dyn Fn(f64) -> f64 + 'a>> {
+    eval_input: F,
+    gauss_nodes: &'static [f64],
+    gauss_weights: &'static [f64],
     /// Sorted times where the input signal changes polynomial (piece seams,
     /// segment boundaries, clamp edges). Between two consecutive cuts the
     /// integrand is one polynomial, which the Gauss rule integrates exactly.
@@ -88,22 +152,42 @@ impl<'a> ShapedSignal<'a> {
     pub fn new(padded: &'a ScalarNurbs, kernel: &'a PiecewisePolynomialKernel) -> Self {
         let mut breaks = padded.knots().to_vec();
         breaks.dedup_by(|a, b| (*a - *b).abs() <= CUT_DEDUP_EPS_S);
-        Self::new_from_evaluator(kernel, |t| eval_clamped(padded, t), breaks)
+        Self::new_from_evaluator(
+            kernel,
+            Box::new(move |t| eval_clamped(padded, t)),
+            breaks,
+            padded.degree() as usize,
+        )
     }
+}
 
-    pub fn new_from_evaluator<F>(
+impl<'a, F> ShapedSignal<'a, F>
+where
+    F: Fn(f64) -> f64,
+{
+    pub fn new_from_evaluator(
         kernel: &'a PiecewisePolynomialKernel,
         eval: F,
         mut input_breaks: Vec<f64>,
-    ) -> Self
-    where
-        F: Fn(f64) -> f64 + 'a,
-    {
+        input_degree: usize,
+    ) -> Self {
         let (k_lo, k_hi) = kernel.support();
         assert!(
             (k_hi - k_lo).is_finite() && k_hi - k_lo > 0.0,
             "shaper kernel support width must be finite and positive"
         );
+        let kernel_degree = kernel
+            .pieces
+            .iter()
+            .map(|piece| piece.degree())
+            .max()
+            .expect("shaper kernel has no pieces");
+        assert!(
+            input_degree + kernel_degree <= MAX_EXACT_PRODUCT_DEGREE,
+            "convolution product degree {} exceeds exact quadrature degree {MAX_EXACT_PRODUCT_DEGREE}",
+            input_degree + kernel_degree
+        );
+        let (gauss_nodes, gauss_weights) = quadrature_rule(input_degree + kernel_degree);
         input_breaks.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         input_breaks.dedup_by(|a, b| (*a - *b).abs() <= CUT_DEDUP_EPS_S);
         let d_kernel = PiecewisePolynomialKernel {
@@ -135,7 +219,9 @@ impl<'a> ShapedSignal<'a> {
             }
         }
         Self {
-            eval_input: Box::new(eval),
+            eval_input: eval,
+            gauss_nodes,
+            gauss_weights,
             input_breaks,
             cuts: std::cell::RefCell::new(Vec::new()),
             pva_memo: std::cell::RefCell::new([None; 4]),
@@ -207,7 +293,7 @@ impl<'a> ShapedSignal<'a> {
             let kd = &self.d_kernel.pieces[kernel_idx];
             let kdd = &self.dd_kernel.pieces[kernel_idx];
             let (mut sp, mut sv, mut sa) = (0.0_f64, 0.0_f64, 0.0_f64);
-            for (node, weight) in GAUSS_NODES.iter().zip(&GAUSS_WEIGHTS) {
+            for (node, weight) in self.gauss_nodes.iter().zip(self.gauss_weights) {
                 let tau = nurbs::fmadd(*node, half, mid);
                 let f = weight * (self.eval_input)(t - tau);
                 sp += f * k.evaluate(tau);
@@ -285,7 +371,7 @@ impl<'a> ShapedSignal<'a> {
             }
             let piece = &kernel.pieces[kernel_idx];
             let mut sub = 0.0_f64;
-            for (node, weight) in GAUSS_NODES.iter().zip(&GAUSS_WEIGHTS) {
+            for (node, weight) in self.gauss_nodes.iter().zip(self.gauss_weights) {
                 let tau = nurbs::fmadd(*node, half, mid);
                 sub += weight * (self.eval_input)(t - tau) * piece.evaluate(tau);
             }
