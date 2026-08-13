@@ -749,6 +749,102 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
 }
 
 #[test]
+fn polynomial_moment_convolution_matches_quadrature() {
+    use std::rc::Rc;
+
+    use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
+
+    let first_t = 300.0;
+    let first_end = 300.004;
+    let second_start = 300.006;
+    let last_t = 300.012;
+    let first_track = bezier_pieces_to_nurbs(&[BezierPiece {
+        u_start: first_t,
+        u_end: first_end,
+        coeffs: vec![
+            10.0, 4.0, -30.0, 200.0, -1_000.0, 5_000.0, -20_000.0, 40_000.0,
+        ],
+    }]);
+    let held = eval(&first_track, first_end);
+    let second_track = bezier_pieces_to_nurbs(&[BezierPiece {
+        u_start: second_start,
+        u_end: last_t,
+        coeffs: vec![held, -3.0, 20.0, -100.0, 400.0, -1_000.0, 2_000.0, -3_000.0],
+    }]);
+    let kernel = trajectory::build_smooth_mzv_kernel(90.2);
+    let kernel_degree = kernel
+        .pieces
+        .iter()
+        .map(|piece| piece.degree())
+        .max()
+        .unwrap();
+    let mut breaks = first_track.knots().to_vec();
+    breaks.extend_from_slice(second_track.knots());
+
+    let oracle_table = Rc::new(crate::shaper::AxisSignalTable::from_tracks(
+        [&first_track, &second_track],
+        first_t,
+        last_t,
+        true,
+        true,
+    ));
+    let oracle_eval = Rc::clone(&oracle_table);
+    let oracle = trajectory::ShapedSignal::new_from_evaluator(
+        &kernel,
+        move |t| oracle_eval.eval(t),
+        breaks.clone(),
+        oracle_table.max_degree(),
+    );
+
+    let fast_table = Rc::new(
+        crate::shaper::AxisSignalTable::from_tracks(
+            [&first_track, &second_track],
+            first_t,
+            last_t,
+            true,
+            true,
+        )
+        .with_piece_moments(kernel_degree),
+    );
+    let fast_eval = Rc::clone(&fast_table);
+    let fast_moments = Rc::clone(&fast_table);
+    let fast = trajectory::ShapedSignal::new_from_polynomial_evaluator(
+        &kernel,
+        move |t| fast_eval.eval(t),
+        breaks,
+        fast_table.max_degree(),
+        move |lo, hi, degree, origin, moments| {
+            fast_moments.integrate_moments(lo, hi, degree, origin, moments)
+        },
+    );
+
+    for t in [
+        first_t,
+        300.001,
+        first_end,
+        300.005,
+        second_start,
+        300.009,
+        last_t,
+    ] {
+        let got = fast.eval_pva(t);
+        let want = oracle.eval_pva(t);
+        assert!(
+            (got.0 - want.0).abs() < 1e-10,
+            "position at {t}: {got:?} vs {want:?}"
+        );
+        assert!(
+            (got.1 - want.1).abs() < 1e-6,
+            "velocity at {t}: {got:?} vs {want:?}"
+        );
+        assert!(
+            (got.2 - want.2).abs() < 1e-3,
+            "acceleration at {t}: {got:?} vs {want:?}"
+        );
+    }
+}
+
+#[test]
 fn smooth_shaper_with_wide_support_still_flushes_at_rest() {
     // A 0.5 Hz kernel's support is wider than the whole trajectory; the rest
     // ending lets the shaper clamp and flush instead of waiting forever.

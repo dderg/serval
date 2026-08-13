@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::rc::Rc;
 
 use crossbeam_channel::{Receiver, Sender};
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
@@ -548,17 +549,35 @@ fn fit_axis_column(
         return Ok(Some(column));
     }
     let input_breaks = signal_breakpoints(&signal_segments, axis);
-    let table = AxisSignalTable::build(
-        &signal_segments,
-        axis,
-        first_t,
-        last_t,
-        at_stream_boundary,
-        force,
+    let kernel_degree = kernel
+        .pieces
+        .iter()
+        .map(|piece| piece.degree())
+        .max()
+        .expect("shaper kernel has no pieces");
+    let table = Rc::new(
+        AxisSignalTable::build(
+            &signal_segments,
+            axis,
+            first_t,
+            last_t,
+            at_stream_boundary,
+            force,
+        )
+        .with_piece_moments(kernel_degree),
     );
     let input_degree = table.max_degree();
-    let sig =
-        ShapedSignal::new_from_evaluator(kernel, |t| table.eval(t), input_breaks, input_degree);
+    let eval_table = Rc::clone(&table);
+    let moment_table = Rc::clone(&table);
+    let sig = ShapedSignal::new_from_polynomial_evaluator(
+        kernel,
+        move |t| eval_table.eval(t),
+        input_breaks,
+        input_degree,
+        move |lo, hi, degree, origin, moments| {
+            moment_table.integrate_moments(lo, hi, degree, origin, moments)
+        },
+    );
     let mut column = Vec::with_capacity(targets.len());
     for seg in targets {
         let track = fit_axis_from_signal(axis, &seg.axes[axis], &sig, 1.0)?;
@@ -679,6 +698,10 @@ fn signal_breakpoints(segments: &[&ShapedSegment], axis: usize) -> Vec<f64> {
     breaks
 }
 
+struct PieceMoments {
+    origin: f64,
+    moments: Vec<f64>,
+}
 /// One axis of the emit window, flattened to time-sorted monomial pieces so
 /// the convolution's Gauss sampling evaluates by binary search plus Horner
 /// instead of a de Boor pass per sample. Semantics match the NURBS window it
@@ -695,6 +718,8 @@ pub(crate) struct AxisSignalTable {
     at_stream_boundary: bool,
     force: bool,
     cursor: std::cell::Cell<usize>,
+    moment_degree: usize,
+    piece_moments: Vec<PieceMoments>,
 }
 
 impl AxisSignalTable {
@@ -731,12 +756,28 @@ impl AxisSignalTable {
             at_stream_boundary,
             force,
             cursor: std::cell::Cell::new(0),
+            moment_degree: 0,
+            piece_moments: Vec::new(),
         };
         for track in tracks {
-            for p in extract_bezier_pieces(track) {
-                table.starts.push(p.u_start);
-                table.ends.push(p.u_end);
-                table.coeffs.push(p.coeffs);
+            for piece in extract_bezier_pieces(track) {
+                if let Some(previous_end) = table.ends.last().copied() {
+                    assert!(
+                        piece.u_start >= previous_end,
+                        "signal pieces overlap: next starts at {} before previous end {previous_end}",
+                        piece.u_start
+                    );
+                    if piece.u_start > previous_end {
+                        let previous = table.coeffs.len() - 1;
+                        let held = table.piece_at(previous, previous_end);
+                        table.starts.push(previous_end);
+                        table.ends.push(piece.u_start);
+                        table.coeffs.push(vec![held]);
+                    }
+                }
+                table.starts.push(piece.u_start);
+                table.ends.push(piece.u_end);
+                table.coeffs.push(piece.coeffs);
             }
         }
         assert!(!table.coeffs.is_empty(), "empty signal window");
@@ -749,6 +790,156 @@ impl AxisSignalTable {
             .map(|coefficients| coefficients.len() - 1)
             .max()
             .expect("empty signal window")
+    }
+    pub(crate) fn with_piece_moments(mut self, degree: usize) -> Self {
+        let mut piece_moments = Vec::with_capacity(self.coeffs.len());
+        for i in 0..self.coeffs.len() {
+            let origin = self.starts[i] + 0.5 * (self.ends[i] - self.starts[i]);
+            let mut moments = vec![0.0; degree + 1];
+            Self::accumulate_polynomial_moments(
+                &self.coeffs[i],
+                self.starts[i],
+                self.starts[i],
+                self.ends[i],
+                origin,
+                &mut moments,
+            );
+            piece_moments.push(PieceMoments { origin, moments });
+        }
+        self.moment_degree = degree;
+        self.piece_moments = piece_moments;
+        self
+    }
+    pub(crate) fn integrate_moments(
+        &self,
+        lo: f64,
+        hi: f64,
+        degree: usize,
+        origin: f64,
+        moments: &mut [f64],
+    ) -> bool {
+        assert_eq!(moments.len(), degree + 1);
+        assert!(
+            degree <= self.moment_degree,
+            "requested moment degree {degree} exceeds prepared degree {}",
+            self.moment_degree
+        );
+        if !lo.is_finite() || !hi.is_finite() || !origin.is_finite() || lo > hi {
+            return false;
+        }
+        if (lo < self.first_t && !self.at_stream_boundary) || (hi > self.last_t && !self.force) {
+            return false;
+        }
+        moments.fill(0.0);
+        if lo < self.first_t {
+            let held = [self.piece_at(0, self.first_t)];
+            Self::accumulate_polynomial_moments(
+                &held,
+                lo,
+                lo,
+                hi.min(self.first_t),
+                origin,
+                moments,
+            );
+        }
+        let interior_lo = lo.max(self.first_t);
+        let interior_hi = hi.min(self.last_t);
+        if interior_hi > interior_lo {
+            let mut i = self.ends.partition_point(|&end| end <= interior_lo);
+            while i < self.coeffs.len() && self.starts[i] < interior_hi {
+                if self.starts[i] >= interior_lo && self.ends[i] <= interior_hi {
+                    Self::accumulate_piece_moments(&self.piece_moments[i], origin, moments);
+                } else {
+                    Self::accumulate_polynomial_moments(
+                        &self.coeffs[i],
+                        self.starts[i],
+                        interior_lo.max(self.starts[i]),
+                        interior_hi.min(self.ends[i]),
+                        origin,
+                        moments,
+                    );
+                }
+                i += 1;
+            }
+        }
+        if hi > self.last_t {
+            let held = [self.piece_at(self.coeffs.len() - 1, self.last_t)];
+            Self::accumulate_polynomial_moments(
+                &held,
+                self.last_t,
+                lo.max(self.last_t),
+                hi,
+                origin,
+                moments,
+            );
+        }
+        true
+    }
+    fn accumulate_piece_moments(piece: &PieceMoments, origin: f64, moments: &mut [f64]) {
+        let delta = piece.origin - origin;
+        for (moment_power, moment) in moments.iter_mut().enumerate() {
+            let mut choose = 1.0;
+            for source_power in 0..=moment_power {
+                *moment += choose
+                    * delta.powi((moment_power - source_power) as i32)
+                    * piece.moments[source_power];
+                if source_power < moment_power {
+                    choose *= (moment_power - source_power) as f64 / (source_power + 1) as f64;
+                }
+            }
+        }
+    }
+
+    fn accumulate_polynomial_moments(
+        coefficients: &[f64],
+        polynomial_start: f64,
+        lo: f64,
+        hi: f64,
+        origin: f64,
+        moments: &mut [f64],
+    ) {
+        if hi <= lo {
+            return;
+        }
+        const POWER_CAPACITY: usize = 16;
+        let max_power = coefficients.len() + moments.len() - 1;
+        assert!(
+            max_power < POWER_CAPACITY,
+            "moment product degree {} exceeds capacity {}",
+            max_power - 1,
+            POWER_CAPACITY - 2
+        );
+        let mut translated = [0.0; POWER_CAPACITY];
+        let delta = origin - polynomial_start;
+        for (source_power, coefficient) in coefficients.iter().copied().enumerate() {
+            let mut choose = 1.0;
+            for target_power in 0..=source_power {
+                translated[target_power] +=
+                    coefficient * choose * delta.powi((source_power - target_power) as i32);
+                if target_power < source_power {
+                    choose *= (source_power - target_power) as f64 / (target_power + 1) as f64;
+                }
+            }
+        }
+        let mut lo_powers = [1.0; POWER_CAPACITY];
+        let mut hi_powers = [1.0; POWER_CAPACITY];
+        let x_lo = lo - origin;
+        let x_hi = hi - origin;
+        for power in 1..=max_power {
+            lo_powers[power] = lo_powers[power - 1] * x_lo;
+            hi_powers[power] = hi_powers[power - 1] * x_hi;
+        }
+        for (moment_power, moment) in moments.iter_mut().enumerate() {
+            for (polynomial_power, coefficient) in translated
+                .iter()
+                .copied()
+                .take(coefficients.len())
+                .enumerate()
+            {
+                let power = polynomial_power + moment_power + 1;
+                *moment += coefficient * (hi_powers[power] - lo_powers[power]) / power as f64;
+            }
+        }
     }
 
     fn piece_at(&self, i: usize, t: f64) -> f64 {

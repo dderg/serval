@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use nurbs::ScalarNurbs;
 use nurbs::bezier::bezier_pieces_to_nurbs;
 use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
@@ -138,19 +140,34 @@ pub(crate) fn project_followers(
                 let first = state.projected.first().expect("cache covers commits");
                 let last = state.projected.last().expect("cache covers commits");
                 let (first_t, last_t) = (first.t_start, last.t_end);
-                let table = AxisSignalTable::from_tracks(
-                    state.projected.iter().map(|p| &p.track),
-                    first_t,
-                    last_t,
-                    !state.projected_trimmed,
-                    force,
+                let kernel_degree = kernel
+                    .pieces
+                    .iter()
+                    .map(|piece| piece.degree())
+                    .max()
+                    .expect("shaper kernel has no pieces");
+                let table = Rc::new(
+                    AxisSignalTable::from_tracks(
+                        state.projected.iter().map(|p| &p.track),
+                        first_t,
+                        last_t,
+                        !state.projected_trimmed,
+                        force,
+                    )
+                    .with_piece_moments(kernel_degree),
                 );
                 let input_degree = table.max_degree();
-                let sig = ShapedSignal::new_from_evaluator(
+                let input_breaks = state.projected_breakpoints();
+                let eval_table = Rc::clone(&table);
+                let moment_table = Rc::clone(&table);
+                let sig = ShapedSignal::new_from_polynomial_evaluator(
                     kernel,
-                    move |t| table.eval(t),
-                    state.projected_breakpoints(),
+                    move |t| eval_table.eval(t),
+                    input_breaks,
                     input_degree,
+                    move |lo, hi, degree, origin, moments| {
+                        moment_table.integrate_moments(lo, hi, degree, origin, moments)
+                    },
                 );
                 Some((kernel, first_t, last_t, sig))
             }
