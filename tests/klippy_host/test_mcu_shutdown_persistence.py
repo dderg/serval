@@ -33,6 +33,23 @@ class FakeMcu:
         self._last_runtime_fault = None
 
 
+class FakeReconnectMcu:
+    non_critical_recon_event = mcu.MCU.non_critical_recon_event
+
+    def __init__(self):
+        self._name = "beacon"
+        self._get_status_info = {"non_critical_disconnected": False}
+        self.non_critical_disconnected = False
+        self.reconnect_interval = 5.0
+        self.disconnect_count = 0
+
+    def recon_mcu(self):
+        raise mcu.error("serial connection closed")
+
+    def _disconnect(self):
+        self.disconnect_count += 1
+
+
 def test_latched_firmware_crash_stays_shutdown(monkeypatch):
     monkeypatch.setattr(
         mcu,
@@ -78,3 +95,14 @@ def test_live_firmware_crash_reports_runtime_fault_without_restart(monkeypatch):
     assert crashed_mcu._printer.shutdown_messages == [
         "MCU 'mcu' shutdown: kalico runtime fault — step scheduling fault"
     ]
+
+
+def test_non_critical_reconnect_failure_retries_without_escaping():
+    reconnecting_mcu = FakeReconnectMcu()
+
+    next_attempt = reconnecting_mcu.non_critical_recon_event(12.0)
+
+    assert next_attempt == 17.0
+    assert reconnecting_mcu.non_critical_disconnected
+    assert reconnecting_mcu._get_status_info["non_critical_disconnected"]
+    assert reconnecting_mcu.disconnect_count == 1

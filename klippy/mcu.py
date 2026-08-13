@@ -334,7 +334,14 @@ class MCU:
         self.gcode.respond_info(f"mcu: '{self._name}' disconnected!", log=True)
 
     def non_critical_recon_event(self, eventtime):
-        success = self.recon_mcu()
+        try:
+            success = self.recon_mcu()
+        except error:
+            logging.exception("MCU '%s' reconnect failed", self._name)
+            self.non_critical_disconnected = True
+            self._get_status_info["non_critical_disconnected"] = True
+            self._disconnect()
+            return eventtime + self.reconnect_interval
         if success:
             self.gcode.respond_info(
                 f"mcu: '{self._name}' reconnected!", log=True
