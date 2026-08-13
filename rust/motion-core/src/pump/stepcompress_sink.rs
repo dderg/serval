@@ -844,11 +844,9 @@ impl StepcompressEndpoint {
                                 frame.axis
                             ))
                         })?;
-                        let cut_target =
-                            at.max(now.saturating_add((SEND_LEAD_SECONDS * freq) as u64));
                         self.drain_until(now, at)?;
                         self.drain_into_backlog(now, freq)?;
-                        self.cut_stream(motor, epoch_freq, cut_target)?;
+                        self.cut_stream(motor, epoch_freq, at)?;
                     }
                     PendingSeam::Gap { at } => {
                         tracing::info!(

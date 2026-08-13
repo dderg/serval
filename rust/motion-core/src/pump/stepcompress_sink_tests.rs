@@ -426,13 +426,16 @@ fn a_marked_fresh_epoch_may_start_before_the_queued_stream_ends() {
     h.endpoint
         .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
         .expect("a marked fresh epoch may start at any clock");
-    assert!(
-        h.sent
-            .lock_ok()
-            .iter()
-            .any(|f| matches!(f, StepFrame::ResetStepClock { .. })),
-        "the new epoch must re-anchor the mcu step clock"
-    );
+    let reset_clocks: Vec<u32> = h
+        .sent
+        .lock_ok()
+        .iter()
+        .filter_map(|f| match f {
+            StepFrame::ResetStepClock { clock, .. } => Some(*clock),
+            _ => None,
+        })
+        .collect();
+    assert!(reset_clocks.last().unwrap().abs_diff(81_834) < 72_000);
 }
 
 #[test]
