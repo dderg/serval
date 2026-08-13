@@ -877,7 +877,7 @@ mod stepcompress_reconcile_tests {
     use crate::homing::{
         StepcompressLane, reconcile_stepcompress_axis, reconcile_stepcompress_lanes,
     };
-    use crate::mcu_config::{AXIS_X, AXIS_Y, McuAxisConfig, McuCaps, SteppingMode};
+    use crate::mcu_config::{AXIS_X, AXIS_Y, AXIS_Z, McuAxisConfig, McuCaps, SteppingMode};
     use crate::types::AxisKey;
     use runtime::segment::KinematicTag;
     use std::cell::RefCell;
@@ -911,6 +911,17 @@ mod stepcompress_reconcile_tests {
         }
     }
 
+    fn piece_z_cfg() -> McuAxisConfig {
+        let mut config = cfg(SteppingMode::Piece);
+        config.mcu_id = 9;
+        config.axes = vec![AXIS_Z];
+        config.microstep_distance.clear();
+        config.invert_dir.clear();
+        config.stepper_oids.clear();
+        config.step_pulse_seconds.clear();
+        config
+    }
+
     fn key(axis: usize) -> AxisKey {
         AxisKey {
             mcu_id: MCU_ID,
@@ -919,7 +930,7 @@ mod stepcompress_reconcile_tests {
     }
 
     #[test]
-    fn agreeing_readback_returns_history_position_and_reseeds_shim() {
+    fn agreeing_readback_returns_mcu_position_and_reseeds_shim() {
         let history_position = 40.0;
         let reseeds: RefCell<Vec<(usize, i64)>> = RefCell::new(Vec::new());
         let pos = reconcile_stepcompress_axis(
@@ -942,7 +953,7 @@ mod stepcompress_reconcile_tests {
     }
 
     #[test]
-    fn readback_within_one_microstep_is_accepted() {
+    fn mcu_readback_replaces_a_substep_clock_reconstruction() {
         let history_position = 3200.0 * MICROSTEP + MICROSTEP * 0.9;
         let pos = reconcile_stepcompress_axis(
             &cfg(SteppingMode::Stepcompress),
@@ -951,8 +962,8 @@ mod stepcompress_reconcile_tests {
             &|_| Ok(3200),
             &|_, _| Ok(()),
         )
-        .expect("sub-microstep divergence must be accepted");
-        assert_eq!(pos, history_position);
+        .expect("the executed step count must be authoritative");
+        assert_eq!(pos, 3200.0 * MICROSTEP);
     }
 
     #[test]
@@ -975,28 +986,22 @@ mod stepcompress_reconcile_tests {
     }
 
     #[test]
-    fn divergence_beyond_one_microstep_is_a_loud_error() {
+    fn mcu_readback_replaces_a_multi_step_clock_reconstruction() {
         let reseeded = RefCell::new(false);
-        let err = reconcile_stepcompress_axis(
+        let executed_steps = 3203;
+        let pos = reconcile_stepcompress_axis(
             &cfg(SteppingMode::Stepcompress),
             key(AXIS_X),
             40.0,
-            &|_| Ok(3200 + 3),
+            &|_| Ok(executed_steps),
             &|_, _| {
                 *reseeded.borrow_mut() = true;
                 Ok(())
             },
         )
-        .unwrap_err();
-        assert!(err.contains("mcu=3"), "got: {err}");
-        assert!(err.contains("axis=0"), "got: {err}");
-        assert!(err.contains("expected=40.000000mm"), "got: {err}");
-        assert!(err.contains("actual=40.037500mm"), "got: {err}");
-        assert!(err.contains("exceeds one microstep"), "got: {err}");
-        assert!(
-            !reseeded.into_inner(),
-            "a diverged lane must not re-seed the shim"
-        );
+        .expect("the executed step count must be authoritative");
+        assert!((pos - 40.0375).abs() < 1e-12);
+        assert!(reseeded.into_inner());
     }
 
     #[test]
@@ -1013,25 +1018,33 @@ mod stepcompress_reconcile_tests {
     }
 
     #[test]
-    fn lane_sweep_skips_piece_mode_mcus_and_covers_every_stepcompress_lane() {
-        let mut piece_cfg = cfg(SteppingMode::Piece);
-        piece_cfg.mcu_id = 9;
-        let configs = vec![piece_cfg, cfg(SteppingMode::Stepcompress)];
+    fn lane_sweep_uses_stepcompress_readbacks_and_keeps_piece_mode_axes() {
+        let configs = vec![cfg(SteppingMode::Stepcompress), piece_z_cfg()];
         let queried: RefCell<Vec<(u32, u32)>> = RefCell::new(Vec::new());
-        reconcile_stepcompress_lanes(
+        let reseeded: RefCell<Vec<(usize, i64)>> = RefCell::new(Vec::new());
+        let pos = reconcile_stepcompress_lanes(
             &configs,
-            |k| {
-                assert_eq!(k.mcu_id, MCU_ID);
-                Ok(0.0)
-            },
+            geometry::MachinePos([10.0, 20.0, 30.0]),
             &|lane| {
                 queried.borrow_mut().push((lane.mcu_id, lane.oid));
-                Ok(0)
+                Ok(match lane.oid {
+                    11 => 3200,
+                    12 => 0,
+                    oid => panic!("unexpected oid {oid}"),
+                })
             },
-            &|_, _| Ok(()),
+            &|lane, count| {
+                assert_eq!(queried.borrow().len(), 2);
+                reseeded.borrow_mut().push((lane.motor, count));
+                Ok(())
+            },
         )
         .expect("mixed-mode sweep must succeed");
+        assert!((pos.0[0] - 20.0).abs() < 1e-9);
+        assert!((pos.0[1] - 20.0).abs() < 1e-9);
+        assert_eq!(pos.0[2], 30.0);
         assert_eq!(queried.into_inner(), vec![(MCU_ID, 11), (MCU_ID, 12)]);
+        assert_eq!(reseeded.into_inner(), vec![(0, 3200), (1, 0)]);
     }
 
     #[test]
