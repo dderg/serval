@@ -849,7 +849,11 @@ fn a_cohort_is_not_retired_until_its_barrier_is_acked() {
     );
 
     let issued = h.barriers.lock_ok().clone();
-    assert_eq!(issued.first().map(|&(oid, seq)| (oid, seq)), Some((OID, 0)));
+    let first_seq = issued.first().map(|&(oid, seq)| {
+        assert_eq!(oid, OID);
+        seq
+    });
+    assert!(first_seq.is_some());
 
     h.ack_sent_barriers();
     assert!(
@@ -866,6 +870,7 @@ fn retirement_barriers_coalesce_while_an_ack_is_outstanding() {
         .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 64))])
         .unwrap();
     assert_eq!(h.barriers.lock_ok().len(), 1);
+    let first_seq = h.barriers.lock_ok()[0].1;
 
     h.endpoint
         .send_frames(MCU_ID, &[axis_frame(ramp_from(130_000, 64, 8.0))])
@@ -882,9 +887,10 @@ fn retirement_barriers_coalesce_while_an_ack_is_outstanding() {
 
     h.ack_sent_barriers();
     h.endpoint.tick().unwrap();
+    let barriers = h.barriers.lock_ok();
     assert_eq!(
-        h.barriers.lock_ok().as_slice(),
-        &[(OID, 1)],
+        barriers.as_slice(),
+        &[(OID, first_seq.wrapping_add(1))],
         "coalesced retirements need one new execution watermark"
     );
 }
@@ -900,9 +906,10 @@ fn a_barrier_ack_below_the_high_water_mark_is_ignored() {
     h.endpoint.tick().unwrap();
     assert!(!h.barriers.lock_ok().is_empty(), "the run issues barriers");
 
-    h.endpoint.on_barrier_ack(OID, 0).unwrap();
+    let seq = h.barriers.lock_ok()[0].1;
+    h.endpoint.on_barrier_ack(OID, seq).unwrap();
     h.endpoint
-        .on_barrier_ack(OID, 0)
+        .on_barrier_ack(OID, seq)
         .expect("a replayed ack is already covered, not a protocol break");
 }
 
@@ -913,10 +920,10 @@ fn a_barrier_ack_ahead_of_what_was_issued_is_fatal() {
     h.endpoint
         .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 64))])
         .unwrap();
-    let issued = h.barriers.lock_ok().len() as u32;
+    let issued = h.barriers.lock_ok()[0].1;
     let err = h
         .endpoint
-        .on_barrier_ack(OID, issued + 5)
+        .on_barrier_ack(OID, issued.wrapping_add(5))
         .expect_err("an ack for a barrier never issued must be fatal");
     assert!(format!("{err:?}").contains("ahead of"), "{err:?}");
 

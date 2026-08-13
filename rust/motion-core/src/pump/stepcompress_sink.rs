@@ -193,6 +193,7 @@ pub struct StepcompressEndpoint {
     cohort_counts: Vec<u32>,
     next_barrier_seq: HashMap<u32, u32>,
     acked_barrier_seq: HashMap<u32, u32>,
+    barrier_seq_seed: u32,
 }
 
 fn shim_error_to_send_error(mcu_id: u32, error: ShimError) -> SendError {
@@ -254,6 +255,13 @@ fn queue_step_span(interval: u32, count: u16, add: i16) -> i64 {
     i64::from(interval) * count + i64::from(add) * count * (count - 1) / 2
 }
 
+fn barrier_seq_seed() -> u32 {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is before the Unix epoch");
+    (elapsed.as_nanos() as u32) | 1
+}
+
 impl StepcompressEndpoint {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -268,6 +276,7 @@ impl StepcompressEndpoint {
     ) -> Self {
         let published = shim.retired_counts();
         let cohort_counts = published.clone();
+        let barrier_seq_seed = barrier_seq_seed();
         Self {
             mcu_id,
             shim,
@@ -288,6 +297,7 @@ impl StepcompressEndpoint {
             retirement_idle_ticks: 0,
             next_barrier_seq: HashMap::new(),
             acked_barrier_seq: HashMap::new(),
+            barrier_seq_seed,
         }
     }
 
@@ -506,9 +516,12 @@ impl StepcompressEndpoint {
             }
             let oid = self.oids[motor];
             let seq = {
-                let next = self.next_barrier_seq.entry(oid).or_insert(0);
+                let next = self
+                    .next_barrier_seq
+                    .entry(oid)
+                    .or_insert(self.barrier_seq_seed);
                 let seq = *next;
-                *next += 1;
+                *next = next.wrapping_add(1);
                 seq
             };
             let end_clock = self.step_clock.get(&oid).copied().unwrap_or(0);
@@ -564,7 +577,10 @@ impl StepcompressEndpoint {
                  {issued} barriers issued for that oid"
             )));
         }
-        let expected = self.acked_barrier_seq.get(&oid).map_or(0, |&s| s + 1);
+        let expected = self
+            .acked_barrier_seq
+            .get(&oid)
+            .map_or(self.barrier_seq_seed, |&s| s.wrapping_add(1));
         if seq < expected {
             // An abort cancelled this barrier by advancing the high-water
             // mark; the ack was already in flight. Nothing left to release.
