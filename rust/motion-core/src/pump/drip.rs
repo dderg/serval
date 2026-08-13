@@ -2,8 +2,8 @@ use super::{AxisKey, AxisQueue};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-pub const DRIP_WINDOW_SECS: f64 = super::stepcompress_sink::SEND_LEAD_SECONDS + 1.0;
-pub const DRIP_ANCHOR_LEAD_SECS: f64 = DRIP_WINDOW_SECS + 1.0;
+pub const DRIP_WINDOW_SECS: f64 = super::stepcompress_sink::SEND_LEAD_SECONDS;
+pub const DRIP_ANCHOR_LEAD_SECS: f64 = DRIP_WINDOW_SECS + 2.0;
 
 pub struct DripArm {
     pub cohort: u64,
