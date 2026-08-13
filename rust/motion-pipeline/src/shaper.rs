@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, Sender};
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
@@ -495,9 +495,6 @@ fn pad_segment_axes_to_uniform_degree(seg: &mut ShapedSegment) {
     }
 }
 
-/// Fit one kerneled axis over `targets`, returning the shaped column —
-/// `None` when the chain has no kernel. Pure in its inputs, so columns for
-/// different axes run on scoped threads.
 fn constant_axis_column(
     segments: &[&ShapedSegment],
     targets: &[ShapedSegment],
@@ -520,6 +517,7 @@ fn fit_axis_column(
     axis: usize,
     force: bool,
     at_stream_boundary: bool,
+    parallel_targets: bool,
     chain: &CompiledChain,
 ) -> Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError> {
     let Some(kernel) = chain.stages.iter().find_map(|stage| match stage {
@@ -555,7 +553,7 @@ fn fit_axis_column(
         .map(|piece| piece.degree())
         .max()
         .expect("shaper kernel has no pieces");
-    let table = Rc::new(
+    let table = Arc::new(
         AxisSignalTable::build(
             &signal_segments,
             axis,
@@ -567,15 +565,49 @@ fn fit_axis_column(
         .with_piece_moments(kernel_degree),
     );
     let input_degree = table.max_degree();
-    let eval_table = Rc::clone(&table);
-    let moment_table = Rc::clone(&table);
+    if !parallel_targets || targets.len() < 4 {
+        return fit_axis_targets(axis, targets, kernel, table, input_breaks, input_degree)
+            .map(Some);
+    }
+    let chunk_len = targets.len().div_ceil(2);
+    let columns = std::thread::scope(|scope| {
+        targets
+            .chunks(chunk_len)
+            .map(|chunk| {
+                let table = Arc::clone(&table);
+                let input_breaks = input_breaks.clone();
+                scope.spawn(move || {
+                    fit_axis_targets(axis, chunk, kernel, table, input_breaks, input_degree)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().expect("axis target fit thread panicked"))
+            .collect::<Vec<_>>()
+    });
+    let mut column = Vec::with_capacity(targets.len());
+    for chunk in columns {
+        column.extend(chunk?);
+    }
+    Ok(Some(column))
+}
+
+fn fit_axis_targets(
+    axis: usize,
+    targets: &[ShapedSegment],
+    kernel: &nurbs::algebra::PiecewisePolynomialKernel,
+    table: Arc<AxisSignalTable>,
+    input_breaks: Vec<f64>,
+    input_degree: usize,
+) -> Result<Vec<nurbs::ScalarNurbs>, PostProcessError> {
+    let eval_table = Arc::clone(&table);
     let sig = ShapedSignal::new_from_polynomial_evaluator(
         kernel,
         move |t| eval_table.eval(t),
         input_breaks,
         input_degree,
         move |lo, hi, degree, origin, moments| {
-            moment_table.integrate_moments(lo, hi, degree, origin, moments)
+            table.integrate_moments(lo, hi, degree, origin, moments)
         },
     );
     let mut column = Vec::with_capacity(targets.len());
@@ -589,13 +621,9 @@ fn fit_axis_column(
         }
         column.push(track);
     }
-    Ok(Some(column))
+    Ok(column)
 }
 
-/// Fit every kerneled non-follower axis over `fresh`, one scoped thread per
-/// axis when more than one needs fitting — the columns are independent and
-/// the merge order is fixed, so the result is bit-identical to the serial
-/// pass.
 fn fit_leader_axes(
     history: &VecDeque<ShapedSegment>,
     base: &[ShapedSegment],
@@ -611,11 +639,6 @@ fn fit_leader_axes(
         .map(|axis| (axis, chains.chains.get(axis).unwrap_or(&default_chain)))
         .filter(|(_, chain)| !chain.is_empty())
         .collect();
-    // A column fit costs milliseconds (ladder fits over the convolution
-    // window) against tens of microseconds per scoped spawn, so parallel
-    // pays from the first fresh segment: with the old >=8-segment gate the
-    // dense-region steady state (1-2 fresh segments per emit) fitted every
-    // axis serially and pegged one core while the rest idled.
     let fit_started = crate::timing::stopwatch();
     type TimedColumn = (
         usize,
@@ -623,6 +646,9 @@ fn fit_leader_axes(
         u128,
     );
     let parallel = cfg!(not(target_arch = "wasm32")) && axis_chains.len() > 1 && !fresh.is_empty();
+    let parallel_targets = cfg!(not(target_arch = "wasm32"))
+        && fresh.len() >= 4
+        && std::thread::available_parallelism().is_ok_and(|cores| cores.get() >= 4);
     let columns: Vec<TimedColumn> = if parallel {
         let fresh_ref: &[ShapedSegment] = fresh;
         std::thread::scope(|scope| {
@@ -638,6 +664,7 @@ fn fit_leader_axes(
                             axis,
                             force,
                             at_stream_boundary,
+                            parallel_targets,
                             chain,
                         );
                         (axis, column, column_started.elapsed_us())
@@ -654,8 +681,16 @@ fn fit_leader_axes(
             .iter()
             .map(|&(axis, chain)| {
                 let column_started = crate::timing::stopwatch();
-                let column =
-                    fit_axis_column(history, base, fresh, axis, force, at_stream_boundary, chain);
+                let column = fit_axis_column(
+                    history,
+                    base,
+                    fresh,
+                    axis,
+                    force,
+                    at_stream_boundary,
+                    parallel_targets,
+                    chain,
+                );
                 (axis, column, column_started.elapsed_us())
             })
             .collect()
@@ -698,9 +733,131 @@ fn signal_breakpoints(segments: &[&ShapedSegment], axis: usize) -> Vec<f64> {
     breaks
 }
 
-struct PieceMoments {
-    origin: f64,
+const MOMENT_POWER_CAPACITY: usize = 16;
+
+fn accumulate_translated_moments(
+    source_origin: f64,
+    source: &[f64],
+    target_origin: f64,
+    target: &mut [f64],
+) {
+    assert_eq!(source.len(), target.len());
+    assert!(target.len() <= MOMENT_POWER_CAPACITY);
+    let delta = source_origin - target_origin;
+    let mut delta_powers = [1.0; MOMENT_POWER_CAPACITY];
+    for power in 1..target.len() {
+        delta_powers[power] = delta_powers[power - 1] * delta;
+    }
+    for (moment_power, moment) in target.iter_mut().enumerate() {
+        let mut choose = 1.0;
+        for source_power in 0..=moment_power {
+            *moment += choose * delta_powers[moment_power - source_power] * source[source_power];
+            if source_power < moment_power {
+                choose *= (moment_power - source_power) as f64 / (source_power + 1) as f64;
+            }
+        }
+    }
+}
+
+struct MomentTree {
+    degree: usize,
+    leaf_count: usize,
+    origins: Vec<f64>,
     moments: Vec<f64>,
+}
+
+impl MomentTree {
+    fn build(table: &AxisSignalTable, degree: usize) -> Self {
+        let stride = degree + 1;
+        assert!(
+            stride <= MOMENT_POWER_CAPACITY,
+            "moment degree {degree} exceeds capacity {}",
+            MOMENT_POWER_CAPACITY - 1
+        );
+        let leaf_count = table.coeffs.len().next_power_of_two();
+        let node_count = 2 * leaf_count;
+        let mut origins = vec![f64::NAN; node_count];
+        let mut moments = vec![0.0; node_count * stride];
+        for i in 0..table.coeffs.len() {
+            let node = leaf_count + i;
+            let origin = table.starts[i] + 0.5 * (table.ends[i] - table.starts[i]);
+            origins[node] = origin;
+            AxisSignalTable::accumulate_polynomial_moments(
+                &table.coeffs[i],
+                table.starts[i],
+                table.starts[i],
+                table.ends[i],
+                origin,
+                &mut moments[node * stride..(node + 1) * stride],
+            );
+        }
+        for node in (1..leaf_count).rev() {
+            let left = 2 * node;
+            let right = left + 1;
+            let origin = match (origins[left].is_finite(), origins[right].is_finite()) {
+                (true, true) => 0.5 * (origins[left] + origins[right]),
+                (true, false) => origins[left],
+                (false, true) => origins[right],
+                (false, false) => continue,
+            };
+            origins[node] = origin;
+            let mut combined = [0.0; MOMENT_POWER_CAPACITY];
+            for child in [left, right] {
+                if origins[child].is_finite() {
+                    accumulate_translated_moments(
+                        origins[child],
+                        &moments[child * stride..(child + 1) * stride],
+                        origin,
+                        &mut combined[..stride],
+                    );
+                }
+            }
+            moments[node * stride..(node + 1) * stride].copy_from_slice(&combined[..stride]);
+        }
+        Self {
+            degree,
+            leaf_count,
+            origins,
+            moments,
+        }
+    }
+
+    fn accumulate(&self, start: usize, end: usize, degree: usize, origin: f64, target: &mut [f64]) {
+        if start >= end {
+            return;
+        }
+        let mut left = start + self.leaf_count;
+        let mut right = end + self.leaf_count;
+        let mut right_nodes = [0usize; usize::BITS as usize];
+        let mut right_count = 0;
+        while left < right {
+            if left & 1 != 0 {
+                self.accumulate_node(left, degree, origin, target);
+                left += 1;
+            }
+            if right & 1 != 0 {
+                right -= 1;
+                right_nodes[right_count] = right;
+                right_count += 1;
+            }
+            left /= 2;
+            right /= 2;
+        }
+        while right_count > 0 {
+            right_count -= 1;
+            self.accumulate_node(right_nodes[right_count], degree, origin, target);
+        }
+    }
+
+    fn accumulate_node(&self, node: usize, degree: usize, origin: f64, target: &mut [f64]) {
+        let stride = self.degree + 1;
+        accumulate_translated_moments(
+            self.origins[node],
+            &self.moments[node * stride..node * stride + degree + 1],
+            origin,
+            target,
+        );
+    }
 }
 /// One axis of the emit window, flattened to time-sorted monomial pieces so
 /// the convolution's Gauss sampling evaluates by binary search plus Horner
@@ -717,9 +874,7 @@ pub(crate) struct AxisSignalTable {
     last_t: f64,
     at_stream_boundary: bool,
     force: bool,
-    cursor: std::cell::Cell<usize>,
-    moment_degree: usize,
-    piece_moments: Vec<PieceMoments>,
+    moment_tree: Option<MomentTree>,
 }
 
 impl AxisSignalTable {
@@ -755,9 +910,7 @@ impl AxisSignalTable {
             last_t,
             at_stream_boundary,
             force,
-            cursor: std::cell::Cell::new(0),
-            moment_degree: 0,
-            piece_moments: Vec::new(),
+            moment_tree: None,
         };
         for track in tracks {
             for piece in extract_bezier_pieces(track) {
@@ -792,22 +945,7 @@ impl AxisSignalTable {
             .expect("empty signal window")
     }
     pub(crate) fn with_piece_moments(mut self, degree: usize) -> Self {
-        let mut piece_moments = Vec::with_capacity(self.coeffs.len());
-        for i in 0..self.coeffs.len() {
-            let origin = self.starts[i] + 0.5 * (self.ends[i] - self.starts[i]);
-            let mut moments = vec![0.0; degree + 1];
-            Self::accumulate_polynomial_moments(
-                &self.coeffs[i],
-                self.starts[i],
-                self.starts[i],
-                self.ends[i],
-                origin,
-                &mut moments,
-            );
-            piece_moments.push(PieceMoments { origin, moments });
-        }
-        self.moment_degree = degree;
-        self.piece_moments = piece_moments;
+        self.moment_tree = Some(MomentTree::build(&self, degree));
         self
     }
     pub(crate) fn integrate_moments(
@@ -819,10 +957,14 @@ impl AxisSignalTable {
         moments: &mut [f64],
     ) -> bool {
         assert_eq!(moments.len(), degree + 1);
+        let tree = self
+            .moment_tree
+            .as_ref()
+            .expect("moment integration requested before moments were built");
         assert!(
-            degree <= self.moment_degree,
+            degree <= tree.degree,
             "requested moment degree {degree} exceeds prepared degree {}",
-            self.moment_degree
+            tree.degree
         );
         if !lo.is_finite() || !hi.is_finite() || !origin.is_finite() || lo > hi {
             return false;
@@ -845,21 +987,37 @@ impl AxisSignalTable {
         let interior_lo = lo.max(self.first_t);
         let interior_hi = hi.min(self.last_t);
         if interior_hi > interior_lo {
-            let mut i = self.ends.partition_point(|&end| end <= interior_lo);
-            while i < self.coeffs.len() && self.starts[i] < interior_hi {
-                if self.starts[i] >= interior_lo && self.ends[i] <= interior_hi {
-                    Self::accumulate_piece_moments(&self.piece_moments[i], origin, moments);
-                } else {
-                    Self::accumulate_polynomial_moments(
-                        &self.coeffs[i],
-                        self.starts[i],
-                        interior_lo.max(self.starts[i]),
-                        interior_hi.min(self.ends[i]),
-                        origin,
-                        moments,
-                    );
-                }
-                i += 1;
+            let first_piece = self.ends.partition_point(|&end| end <= interior_lo);
+            let end_piece = self.starts.partition_point(|&start| start < interior_hi);
+            let mut full_start = first_piece;
+            let mut full_end = end_piece;
+            if self.starts[first_piece] < interior_lo {
+                Self::accumulate_polynomial_moments(
+                    &self.coeffs[first_piece],
+                    self.starts[first_piece],
+                    interior_lo,
+                    interior_hi.min(self.ends[first_piece]),
+                    origin,
+                    moments,
+                );
+                full_start += 1;
+            }
+            let right_partial = if full_start < full_end && self.ends[full_end - 1] > interior_hi {
+                full_end -= 1;
+                Some(full_end)
+            } else {
+                None
+            };
+            tree.accumulate(full_start, full_end, degree, origin, moments);
+            if let Some(piece) = right_partial {
+                Self::accumulate_polynomial_moments(
+                    &self.coeffs[piece],
+                    self.starts[piece],
+                    self.starts[piece],
+                    interior_hi,
+                    origin,
+                    moments,
+                );
             }
         }
         if hi > self.last_t {
@@ -875,20 +1033,6 @@ impl AxisSignalTable {
         }
         true
     }
-    fn accumulate_piece_moments(piece: &PieceMoments, origin: f64, moments: &mut [f64]) {
-        let delta = piece.origin - origin;
-        for (moment_power, moment) in moments.iter_mut().enumerate() {
-            let mut choose = 1.0;
-            for source_power in 0..=moment_power {
-                *moment += choose
-                    * delta.powi((moment_power - source_power) as i32)
-                    * piece.moments[source_power];
-                if source_power < moment_power {
-                    choose *= (moment_power - source_power) as f64 / (source_power + 1) as f64;
-                }
-            }
-        }
-    }
 
     fn accumulate_polynomial_moments(
         coefficients: &[f64],
@@ -901,28 +1045,31 @@ impl AxisSignalTable {
         if hi <= lo {
             return;
         }
-        const POWER_CAPACITY: usize = 16;
         let max_power = coefficients.len() + moments.len() - 1;
         assert!(
-            max_power < POWER_CAPACITY,
+            max_power < MOMENT_POWER_CAPACITY,
             "moment product degree {} exceeds capacity {}",
             max_power - 1,
-            POWER_CAPACITY - 2
+            MOMENT_POWER_CAPACITY - 2
         );
-        let mut translated = [0.0; POWER_CAPACITY];
+        let mut translated = [0.0; MOMENT_POWER_CAPACITY];
         let delta = origin - polynomial_start;
+        let mut delta_powers = [1.0; MOMENT_POWER_CAPACITY];
+        for power in 1..coefficients.len() {
+            delta_powers[power] = delta_powers[power - 1] * delta;
+        }
         for (source_power, coefficient) in coefficients.iter().copied().enumerate() {
             let mut choose = 1.0;
             for target_power in 0..=source_power {
                 translated[target_power] +=
-                    coefficient * choose * delta.powi((source_power - target_power) as i32);
+                    coefficient * choose * delta_powers[source_power - target_power];
                 if target_power < source_power {
                     choose *= (source_power - target_power) as f64 / (target_power + 1) as f64;
                 }
             }
         }
-        let mut lo_powers = [1.0; POWER_CAPACITY];
-        let mut hi_powers = [1.0; POWER_CAPACITY];
+        let mut lo_powers = [1.0; MOMENT_POWER_CAPACITY];
+        let mut hi_powers = [1.0; MOMENT_POWER_CAPACITY];
         let x_lo = lo - origin;
         let x_hi = hi - origin;
         for power in 1..=max_power {
@@ -963,25 +1110,10 @@ impl AxisSignalTable {
             }
             return self.piece_at(self.coeffs.len() - 1, self.last_t);
         }
-        let mut i = self.cursor.get().min(self.coeffs.len() - 1);
-        if self.ends[i] + SEGMENT_TIME_EPS_S < t {
-            i = if i + 1 < self.coeffs.len() && self.ends[i + 1] + SEGMENT_TIME_EPS_S >= t {
-                i + 1
-            } else {
-                self.ends
-                    .partition_point(|&end| end + SEGMENT_TIME_EPS_S < t)
-                    .min(self.coeffs.len() - 1)
-            };
-        } else if i > 0 && self.ends[i - 1] + SEGMENT_TIME_EPS_S >= t {
-            i = if i == 1 || self.ends[i - 2] + SEGMENT_TIME_EPS_S < t {
-                i - 1
-            } else {
-                self.ends
-                    .partition_point(|&end| end + SEGMENT_TIME_EPS_S < t)
-                    .min(self.coeffs.len() - 1)
-            };
-        }
-        self.cursor.set(i);
+        let i = self
+            .ends
+            .partition_point(|&end| end + SEGMENT_TIME_EPS_S < t)
+            .min(self.coeffs.len() - 1);
         if t >= self.starts[i] - SEGMENT_TIME_EPS_S {
             return self.piece_at(i, t);
         }
