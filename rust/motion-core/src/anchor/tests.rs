@@ -386,7 +386,7 @@ fn a_producer_that_builds_runway_releases_the_earned_lead() {
     a.anchor_segment(0.0, 2.0, 100.0);
     a.mark_parked();
     a.anchor_segment(2.0, 4.0, 200.0);
-    assert_eq!(a.lead_secs, crate::pump::MAX_LEAD_SECS);
+    assert_eq!(a.lead_secs, RESUME_LEAD_GROWTH * DEFAULT_LEAD_SECS);
 
     let (_, epoch) = a.anchor_segment(4.0, 5.0, 201.0);
     assert_eq!(epoch, StreamEpoch::Continuation);

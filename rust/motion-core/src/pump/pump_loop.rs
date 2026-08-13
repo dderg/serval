@@ -26,7 +26,7 @@ use crate::types::AxisKey;
 // before this horizon, so raising it only deepens the buffer for sparse (long,
 // slow) moves where stalls are otherwise most likely to slip a piece into the
 // past.
-pub const MAX_LEAD_SECS: f64 = 2.0;
+pub const MAX_LEAD_SECS: f64 = super::stepcompress_sink::SEND_LEAD_SECONDS;
 
 // Bound on the planner→pump piece-data channel. When the pump stops pulling
 // (ring full or at the lead horizon), the planner's dispatch send blocks once
