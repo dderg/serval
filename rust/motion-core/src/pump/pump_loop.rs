@@ -209,7 +209,7 @@ impl<S: PieceSink> Pump<S> {
                     baseline,
                     last_retired,
                     step_deadline,
-                    deadline_floor: 0,
+                    progress: 0,
                 });
             }
             PumpMsg::DripDisarm(c) => {
@@ -447,11 +447,11 @@ impl<S: PieceSink> Pump<S> {
             return;
         };
         let now = Instant::now();
-        let floor = co.floor(&self.queues);
-        if floor > co.deadline_floor {
+        let progress = co.progress(&self.queues);
+        if progress > co.progress {
             let co = self.cohort.as_mut().unwrap();
             co.step_deadline = now + co.timeout;
-            co.deadline_floor = floor;
+            co.progress = progress;
             return;
         }
         if now < co.step_deadline {
@@ -467,7 +467,7 @@ impl<S: PieceSink> Pump<S> {
                 subsystem = "motion",
                 event = "drip_cohort_executed_awaiting_trip",
                 cohort = co.id,
-                floor,
+                progress,
                 "drip cohort fully executed with no trip; the host trip \
                  deadline adjudicates — not a stall"
             );
@@ -480,17 +480,20 @@ impl<S: PieceSink> Pump<S> {
             .iter()
             .map(|k| {
                 format!(
-                    "mcu{} axis{}: executed {} queued {}",
+                    "mcu{} axis{}: executed {} queued {} in_flight {}",
                     k.mcu_id,
                     k.axis,
                     co.executed(k, &self.queues),
                     self.queues.get(k).map_or(0, |q| q.pieces.len()),
+                    self.queues
+                        .get(k)
+                        .map_or(0, |q| q.pushed.wrapping_sub(q.retired)),
                 )
             })
             .collect();
         let id = co.id;
         (self.callbacks.on_drip_stall)(format!(
-            "drip cohort {id}: floor stalled at {floor} for {:?}; \
+            "drip cohort {id}: execution stalled at progress {progress} for {:?}; \
              participants: [{}]",
             co.timeout,
             lagging.join(", ")

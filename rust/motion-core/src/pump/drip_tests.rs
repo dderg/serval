@@ -128,8 +128,8 @@ fn stall_detection_fires_when_floor_stuck() {
     let msgs = stall_msgs.lock().unwrap();
     assert_eq!(msgs.len(), 1, "expected one stall, got: {msgs:?}");
     assert!(
-        msgs[0].contains("floor stalled"),
-        "stall must mention the floor; got: {}",
+        msgs[0].contains("execution stalled"),
+        "stall must identify missing execution progress; got: {}",
         msgs[0]
     );
 }
