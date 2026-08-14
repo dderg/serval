@@ -99,15 +99,18 @@ pub fn compute_step_times(inp: &StepTimeInputs) -> StepTimingResult {
         return StepTimingResult::Uniform(times);
     }
 
+    #[allow(clippy::cast_precision_loss)]
+    let previous_step_position = inp.prev_step_count as f32 * inp.microstep_distance;
+    let start_from_previous_step = inp.p_start - previous_step_position;
+    #[allow(clippy::cast_precision_loss)]
+    let direction = sign as f32;
+
     for k in 0..n_steps {
-        // `n_steps` ≤ MAX_STEPS_PER_SAMPLE; cast cannot wrap.
-        #[allow(clippy::cast_possible_wrap)]
-        let step_idx = inp.prev_step_count + ((k as i32) + 1) * sign;
         #[allow(clippy::cast_precision_loss)]
-        let half_step_threshold_pos =
-            ((step_idx as f32) - 0.5 * (sign as f32)) * inp.microstep_distance;
-        let t_local_sec =
-            (half_step_threshold_pos - inp.p_start) * inp.sample_period_sec / displacement;
+        let threshold_from_previous_step = (k as f32 + 0.5) * direction * inp.microstep_distance;
+        let t_local_sec = (threshold_from_previous_step - start_from_previous_step)
+            * inp.sample_period_sec
+            / displacement;
         // f32 → u32: t_local_sec ∈ [0, sample_period_sec], bounded well below u32::MAX.
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let cycle_abs = inp

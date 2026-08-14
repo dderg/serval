@@ -117,3 +117,26 @@ fn falls_back_to_uniform_when_displacement_too_small() {
         );
     }
 }
+
+#[test]
+fn large_absolute_step_counts_keep_distinct_clocks() {
+    let inputs = StepTimeInputs {
+        p_start: 5_792.073,
+        p_end: 5_792.074_7,
+        prev_step_count: 8_388_609,
+        target_step_count: 8_388_611,
+        microstep_distance: 0.000_690_468_75,
+        sample_period_sec: 0.000_1,
+        sample_start_cycles: 2_766_266_336,
+        cycles_per_second: 64_000_000.0,
+        displacement_threshold: 1e-5,
+    };
+
+    let times = match compute_step_times(&inputs) {
+        StepTimingResult::SecantSlope(times) => times,
+        other => panic!("expected SecantSlope, got {other:?}"),
+    };
+
+    assert_eq!(times.len(), 2);
+    assert!(times[0] < times[1], "step clocks must increase: {times:?}");
+}
