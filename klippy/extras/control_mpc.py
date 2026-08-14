@@ -220,8 +220,12 @@ class ControlMPC:
         # Expected power from block to ambient
         block_ambient_delta = self.state_block_temp - self.state_ambient_temp
         expected_ambient_transfer = block_ambient_delta * ambient_transfer
+        expected_block_filament_delta = (
+            self.state_block_temp
+            - self.filament_temp(read_time, self.state_ambient_temp)
+        )
         expected_filament_transfer = (
-            block_ambient_delta
+            expected_block_filament_delta
             * extrude_speed_prev
             * self.const_filament_cross_section_heat_capacity
         )
@@ -258,7 +262,9 @@ class ControlMPC:
             if temp != 0.0:
                 self.state_ambient_temp = temp
                 self.want_ambient_refresh = False
-        if (self.last_power > 0 and self.last_power < 1.0) or abs(
+        if (
+            self.last_power > 0 and self.last_power < self.heater_max_power
+        ) or abs(
             expected_block_dT + adjustment_dT
         ) < self.const_steady_state_rate * dt:
             if adjustment_dT > 0.0:
