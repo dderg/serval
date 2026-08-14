@@ -143,8 +143,68 @@ fn large_step_count_tangency_keeps_the_previous_quantized_position() {
         .sample(0, &cfg, &mut ring, u64::MAX, &mut steps)
         .unwrap();
 
-    assert!(steps.is_empty());
+    assert_eq!(steps.len(), 2);
+    assert_eq!([steps[0].advance, steps[1].advance], [1, -1]);
+    assert!(steps[0].clock < steps[1].clock);
     assert_eq!(sampler.step_count(), previous_count);
+}
+
+#[test]
+fn large_step_count_direction_reversal_keeps_monotonic_clocks() {
+    let mut cfg = cfg(50);
+    cfg.microstep_distance = 0.000_690_468_75;
+    cfg.cycles_per_second = 64_000_000.0;
+    let previous_count = 8_498_429;
+    let previous_position = previous_count as f32 * cfg.microstep_distance;
+    let peak_position = (previous_count + 2) as f32 * cfg.microstep_distance;
+    let forward = linear_piece(64_000, previous_position, peak_position, 0.0001);
+    let reverse = linear_piece(
+        forward.end_time(cfg.cycles_per_second as f32),
+        peak_position,
+        previous_position,
+        0.0001,
+    );
+    let mut ring = PieceRing::new(8);
+    ring.push(0, forward).unwrap();
+    ring.push(0, reverse).unwrap();
+    let mut sampler = MotorSampler::new(&cfg);
+    sampler.reset_to(previous_count, &cfg, 0);
+    let mut steps = Vec::new();
+
+    sampler
+        .sample(0, &cfg, &mut ring, u64::MAX, &mut steps)
+        .unwrap();
+
+    assert!(
+        steps
+            .windows(2)
+            .all(|steps| steps[0].clock < steps[1].clock)
+    );
+    assert_eq!(sampler.step_count(), previous_count);
+}
+
+#[test]
+fn large_step_count_retraction_stays_after_the_previous_pulse() {
+    let mut cfg = cfg(50);
+    cfg.microstep_distance = 0.000_690_468_75;
+    cfg.cycles_per_second = 64_000_000.0;
+    let sample_start = 188_324_244_698;
+    let previous_clock = 188_324_245_473;
+    let sample_clock = 188_324_251_098;
+    let piece = linear_piece(188_324_246_322, 5_867.9, 5_867.9, 0.01);
+    let armed = runtime::motion_core::arm_piece(&piece, cfg.cycles_per_second as f32);
+    let mut sampler = MotorSampler::new(&cfg);
+    sampler.p_prev = 5_867.901;
+    sampler.step_count = 8_498_431;
+    sampler.prev_sample = sample_start;
+    sampler.last_step_clock = Some(previous_clock);
+    let mut steps = Vec::new();
+
+    sampler
+        .emit_sample(0, &cfg, &armed, sample_clock, &mut steps)
+        .unwrap();
+
+    assert!(steps.iter().all(|step| step.clock > previous_clock));
 }
 
 #[test]
