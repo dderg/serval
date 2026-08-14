@@ -37,6 +37,21 @@ pub(super) fn required_motor_axes(
     Ok(required)
 }
 
+pub(super) fn history_state_at_query(
+    store: &crate::motion_history::HistoryStore,
+    key: crate::types::AxisKey,
+    source_mcu: u32,
+    clock: u64,
+    query_host: f64,
+    host_now: f64,
+) -> Result<crate::motion_history::AxisState, crate::motion_history::HistoryError> {
+    if key.mcu_id == source_mcu {
+        store.state_at_clock(key, clock, query_host, Some(host_now))
+    } else {
+        store.state_at_host(key, query_host, Some(host_now))
+    }
+}
+
 fn next_homing_cohort() -> u64 {
     use std::sync::atomic::AtomicU64;
     static SEQ: AtomicU64 = AtomicU64::new(1);
@@ -389,7 +404,7 @@ impl PyMotionEngine {
             if !required[axis] {
                 continue;
             }
-            match store.state_at_host(key, query_host, Some(host_now)) {
+            match history_state_at_query(&store, key, source_mcu, clock, query_host, host_now) {
                 Ok(st) => motor_state[axis] = Some(st),
                 Err(crate::motion_history::HistoryError::NoHistoryForAxis(_)) => {}
                 Err(e @ crate::motion_history::HistoryError::BeforeRetainedWindow { .. }) => {

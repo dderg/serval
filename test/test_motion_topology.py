@@ -102,6 +102,33 @@ def test_two_mcu_corexy_topology():
     ]
 
 
+def test_init_planner_records_axis_mcu_ownership():
+    motion = make_motion(
+        "corexy",
+        [("x", 100), ("y", 100), ("z", 200)],
+        follower=("e", "extruder", 200),
+    )
+    motion._motion_config_text = (
+        "[printer]\nmax_velocity: 300\nmax_accel: 3000\n"
+    )
+    motion._planner_ready = False
+    motion.engine = CaptureEngine()
+    primary = FakeMcu(handle=100)
+    toolboard = FakeMcu(name="toolboard", handle=200)
+    motion.printer.lookup_objects = lambda module=None: (
+        [("mcu", primary), ("toolboard", toolboard)] if module == "mcu" else []
+    )
+    motion._configure_axes_per_mcu = lambda engine_mcus: None
+    motion._register_engine_wakeup = lambda: None
+
+    motion._init_planner()
+
+    assert motion.get_axis_mcu("x") is primary
+    assert motion.get_axis_mcu("y") is primary
+    assert motion.get_axis_mcu("z") is toolboard
+    assert motion.get_axis_mcu("e") is toolboard
+
+
 def test_cartesian_topology_tag_is_cartesian():
     motion = make_motion(
         "cartesian", SPATIAL_AXES, follower=("e", "extruder", 11)

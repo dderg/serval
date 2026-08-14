@@ -103,6 +103,7 @@ class Motion:
         if self.motion_lead is None:
             self.motion_lead = 0.25
         self._motor_bindings = {}
+        self._axis_mcus = {}
         self.all_mcus = [m for n, m in printer.lookup_objects(module="mcu")]
         self.mcu = self.all_mcus[0]
         self.need_flush_time = 0.0
@@ -274,6 +275,15 @@ class Motion:
                 % (stepper_name, ", ".join(sorted(self._motor_bindings)))
             )
         return binding
+
+    def get_axis_mcu(self, axis_name):
+        mcu = self._axis_mcus.get(axis_name)
+        if mcu is None:
+            raise self.printer.config_error(
+                "Axis '%s' has no MCU engine binding; bound axes: %s"
+                % (axis_name, ", ".join(sorted(self._axis_mcus)))
+            )
+        return mcu
 
     def get_max_axis_accel(self, axis_idx):
         axis_name = self._declared_axis_order()[axis_idx]

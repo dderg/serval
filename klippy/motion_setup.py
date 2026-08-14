@@ -265,6 +265,23 @@ def init_planner(motion):
         )
         return
 
+    mcu_by_handle = {handle: mcu for _name, mcu, handle in engine_mcus}
+    slots_by_name = {
+        axis_name: lane_idx
+        for lane_idx, axis_name, _motor_names in motion.kin.lanes()
+    }
+    slots_by_name.update(
+        {
+            axis_name: slot_idx
+            for axis_name, _motors, slot_idx in motion._follower_slots()
+        }
+    )
+    motion._axis_mcus = {}
+    for axis_name, slot_idx in slots_by_name.items():
+        handle = axis_to_handle.get(slot_idx)
+        if handle in mcu_by_handle:
+            motion._axis_mcus[axis_name] = mcu_by_handle[handle]
+
     try:
         motion.engine.init_planner(motion._motion_config_text, topology)
         motion._configure_axes_per_mcu(engine_mcus)
