@@ -1004,6 +1004,33 @@ fn a_barrier_ack_below_the_high_water_mark_is_ignored() {
 }
 
 #[test]
+fn barrier_acknowledgements_cross_rollover_and_ignore_pre_wrap_replay() {
+    let mut h = harness(1024);
+    h.endpoint.barrier_seq_seed = u32::MAX - 1;
+
+    for (index, seq) in [u32::MAX - 1, u32::MAX, 0].into_iter().enumerate() {
+        let retired = (index + 1) as u32;
+        h.endpoint.publish_retirement(&[retired]);
+        h.endpoint.flush(0, CYCLES_PER_SECOND).unwrap();
+        let issued: Vec<(u32, u32)> = std::mem::take(&mut h.barriers.lock_ok());
+        assert_eq!(issued, vec![(OID, seq)]);
+        h.endpoint.on_barrier_ack(OID, seq).unwrap();
+        assert_eq!(h.endpoint.published_counts(), vec![retired]);
+    }
+
+    h.endpoint
+        .on_barrier_ack(OID, u32::MAX)
+        .expect("a pre-wrap replay is already covered by the post-wrap high-water mark");
+    assert_eq!(h.endpoint.published_counts(), vec![3]);
+
+    let err = h
+        .endpoint
+        .on_barrier_ack(OID, 1)
+        .expect_err("the next post-wrap sequence has not been issued");
+    assert!(format!("{err:?}").contains("ahead of"), "{err:?}");
+}
+
+#[test]
 fn a_barrier_ack_ahead_of_what_was_issued_is_fatal() {
     let mut h = harness(1024);
     h.now.store(1_000, Ordering::Relaxed);

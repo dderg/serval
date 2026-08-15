@@ -263,6 +263,19 @@ fn barrier_seq_seed() -> u32 {
     (elapsed.as_nanos() as u32) | 1
 }
 
+fn barrier_seq_after(candidate: u32, reference: u32) -> bool {
+    let distance = candidate.wrapping_sub(reference);
+    distance != 0 && distance < (1 << 31)
+}
+
+fn barrier_seq_before(candidate: u32, reference: u32) -> bool {
+    barrier_seq_after(reference, candidate)
+}
+
+fn barrier_seq_covers(high_water: u32, seq: u32) -> bool {
+    high_water == seq || barrier_seq_after(high_water, seq)
+}
+
 impl StepcompressEndpoint {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -428,7 +441,9 @@ impl StepcompressEndpoint {
         for out in &self.backlog {
             if let Outbound::Barrier(id) = out.frame {
                 let acked = self.acked_barrier_seq.entry(id.oid).or_insert(id.seq);
-                *acked = (*acked).max(id.seq);
+                if barrier_seq_after(id.seq, *acked) {
+                    *acked = id.seq;
+                }
             }
         }
         self.backlog.clear();
@@ -563,7 +578,7 @@ impl StepcompressEndpoint {
     fn barrier_acked(&self, id: BarrierId) -> bool {
         self.acked_barrier_seq
             .get(&id.oid)
-            .is_some_and(|&high_water| high_water >= id.seq)
+            .is_some_and(|&high_water| barrier_seq_covers(high_water, id.seq))
     }
 
     fn release_retirements(&mut self) {
@@ -587,20 +602,18 @@ impl StepcompressEndpoint {
                  ever issued for that oid"
             ))
         })?;
-        if seq >= issued {
-            return Err(SendError::Fatal(format!(
-                "stepcompress mcu {mcu_id}: barrier ack oid={oid} seq={seq} is ahead of the \
-                 {issued} barriers issued for that oid"
-            )));
-        }
         let expected = self
             .acked_barrier_seq
             .get(&oid)
             .map_or(self.barrier_seq_seed, |&s| s.wrapping_add(1));
-        if seq < expected {
-            // An abort cancelled this barrier by advancing the high-water
-            // mark; the ack was already in flight. Nothing left to release.
+        if barrier_seq_before(seq, expected) {
             return Ok(());
+        }
+        if !barrier_seq_before(seq, issued) {
+            return Err(SendError::Fatal(format!(
+                "stepcompress mcu {mcu_id}: barrier ack oid={oid} seq={seq} is ahead of the \
+                 {issued} barriers issued for that oid"
+            )));
         }
         if seq != expected {
             return Err(SendError::Fatal(format!(
