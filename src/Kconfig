@@ -279,6 +279,7 @@ comment "Compiler options"
 config WANT_OPTIMIZE_SIZE
     bool "Optimize for code size (-Os) not speed (-O2)"
     default y if CONFIG_HAVE_LIMITED_CODE_SIZE
+    default y if MACH_STM32G0 && MOTION_RUNTIME
     default n
 endmenu
 
