@@ -1,5 +1,6 @@
 use super::pump_loop::{
-    PUMP_INTAKE_BACKLOG_SOFT_CAP, PUMP_INTAKE_MIN_RUNWAY_SECS, Pump, wants_pieces,
+    PUMP_INTAKE_BACKLOG_HARD_CAP, PUMP_INTAKE_BACKLOG_SOFT_CAP, PUMP_INTAKE_MIN_RUNWAY_SECS, Pump,
+    wants_pieces,
 };
 use super::*;
 use crossbeam_channel::unbounded;
@@ -33,6 +34,7 @@ fn make_enqueue(
         epoch,
         lead_secs: MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     }
 }
 
@@ -42,15 +44,15 @@ fn room_full_then_drains() {
     assert_eq!(q.room(), 4);
     q.pushed = 4;
     assert_eq!(q.room(), 0);
-    q.accepted = 1;
+    q.consumed = 1;
     assert_eq!(q.room(), 1);
 }
 
 #[test]
-fn accepted_pieces_reopen_capacity_before_execution_retires_them() {
+fn consumed_pieces_reopen_capacity_before_execution_retires_them() {
     let mut q = AxisQueue::new(64);
     q.pushed = 64;
-    q.accepted = 64;
+    q.consumed = 64;
     q.retired = 0;
 
     assert_eq!(q.room(), 64);
@@ -61,35 +63,35 @@ fn accepted_pieces_reopen_capacity_before_execution_retires_them() {
 fn room_correct_across_u32_wrap() {
     let mut q = AxisQueue::new(8);
     q.pushed = 2;
-    q.accepted = u32::MAX;
+    q.consumed = u32::MAX;
     assert_eq!(
         q.room(),
         5,
-        "legitimate counter rollover: accepted is numerically larger than pushed only because \
-         the u32 odometer wrapped, so 3 pieces are genuinely awaiting acceptance. wrapping_sub \
+        "legitimate counter rollover: consumed is numerically larger than pushed only because \
+         the u32 odometer wrapped, so 3 pieces are genuinely awaiting consumption. wrapping_sub \
          recovers 3; saturating subtraction would wrongly report a drained ring."
     );
 }
 
 #[test]
-fn room_recovers_when_accepted_overtakes_pushed() {
+fn room_recovers_when_consumed_overtakes_pushed() {
     let mut q = AxisQueue::new(4);
     q.pushed = 100;
-    q.accepted = 101;
+    q.consumed = 101;
     assert_eq!(
         q.room(),
         4,
-        "accepted overtook pushed by 1 after a lost response; the inversion must reconcile to a \
+        "consumed overtook pushed by 1 after a lost response; the inversion must reconcile to a \
          drained ring instead of wedging with zero room"
     );
 }
 
 #[test]
-fn schedule_resends_orphan_when_accepted_overtook_pushed() {
+fn schedule_resends_orphan_when_consumed_overtook_pushed() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let mut q = AxisQueue::new(8);
     q.pushed = 100;
-    q.accepted = 101;
+    q.consumed = 101;
     q.pieces.push_back(make_piece(101));
     let mut queues: BTreeMap<AxisKey, AxisQueue> = BTreeMap::new();
     queues.insert(key, q);
@@ -109,7 +111,7 @@ fn schedule_resends_orphan_when_accepted_overtook_pushed() {
             assert_eq!(frames[0].key, key);
         }
         other => {
-            panic!("accepted>pushed inversion must schedule a re-send, not wedge; got {other:?}")
+            panic!("consumed>pushed inversion must schedule a re-send, not wedge; got {other:?}")
         }
     }
 }
@@ -149,7 +151,7 @@ fn run_pump_delivers_piece_despite_retired_over_pushed_inversion() {
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
-        accepted_counts: None,
+        consumed_counts: None,
         retired_counts: vec![2],
     }))
     .unwrap();
@@ -305,7 +307,7 @@ fn staged_axis(piece_count: u64, runway_secs: f64) -> AxisQueue {
 }
 
 #[test]
-fn pump_intake_stops_only_after_every_axis_has_runway() {
+fn pump_intake_uses_runway_only_below_the_hard_cap() {
     let key = |axis| AxisKey { mcu_id: 1, axis };
     let below_soft_cap = BTreeMap::from([(
         key(0),
@@ -320,14 +322,14 @@ fn pump_intake_stops_only_after_every_axis_has_runway() {
         (
             key(0),
             staged_axis(
-                PUMP_INTAKE_BACKLOG_SOFT_CAP,
+                PUMP_INTAKE_BACKLOG_SOFT_CAP / 2,
                 PUMP_INTAKE_MIN_RUNWAY_SECS * 2.0,
             ),
         ),
         (
             key(1),
             staged_axis(
-                PUMP_INTAKE_BACKLOG_SOFT_CAP,
+                PUMP_INTAKE_BACKLOG_SOFT_CAP / 2,
                 PUMP_INTAKE_MIN_RUNWAY_SECS * 0.5,
             ),
         ),
@@ -338,19 +340,28 @@ fn pump_intake_stops_only_after_every_axis_has_runway() {
         (
             key(0),
             staged_axis(
-                PUMP_INTAKE_BACKLOG_SOFT_CAP,
+                PUMP_INTAKE_BACKLOG_SOFT_CAP / 2,
                 PUMP_INTAKE_MIN_RUNWAY_SECS * 2.0,
             ),
         ),
         (
             key(1),
             staged_axis(
-                PUMP_INTAKE_BACKLOG_SOFT_CAP,
+                PUMP_INTAKE_BACKLOG_SOFT_CAP / 2,
                 PUMP_INTAKE_MIN_RUNWAY_SECS * 2.0,
             ),
         ),
     ]);
     assert!(!wants_pieces(&all_axes_ready));
+
+    let shallow_at_hard_cap = BTreeMap::from([(
+        key(0),
+        staged_axis(
+            PUMP_INTAKE_BACKLOG_HARD_CAP,
+            PUMP_INTAKE_MIN_RUNWAY_SECS * 0.5,
+        ),
+    )]);
+    assert!(!wants_pieces(&shallow_at_hard_cap));
 }
 
 #[test]
@@ -613,6 +624,7 @@ fn flush_clears_queued_pieces_and_junctions() {
         epoch: crate::anchor::StreamEpoch::Reposition,
         lead_secs,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
 
@@ -639,6 +651,7 @@ fn flush_clears_queued_pieces_and_junctions() {
         epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     {
@@ -720,6 +733,7 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
         epoch: crate::anchor::StreamEpoch::Reposition,
         lead_secs,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
 
@@ -744,6 +758,7 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
         epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     {
@@ -945,7 +960,7 @@ fn pump_backlog_drains_to_zero_when_pushed() {
     poll_until(|| !sink.recorded().is_empty(), "pump never pushed pieces");
     poll_until(
         || backlog.load(Ordering::Acquire) == 0,
-        "backlog never returned to zero after the ring accepted the pieces",
+        "backlog never returned to zero after the ring consumed the pieces",
     );
 
     ctl.send(PumpMsg::Shutdown).unwrap();
@@ -954,7 +969,7 @@ fn pump_backlog_drains_to_zero_when_pushed() {
 
 fn queue_pump<S: PieceSink>(
     key: AxisKey,
-    acceptance_stall_fatal: Duration,
+    consumption_stall_fatal: Duration,
     on_drip_stall: impl Fn(String) + Send + 'static,
     sink: S,
 ) -> Pump<S> {
@@ -980,17 +995,18 @@ fn queue_pump<S: PieceSink>(
         backlog: Arc::new(AtomicU64::new(0)),
         holding_ahead: false,
         data_open: true,
-        acceptance_stall: super::stall::AcceptanceStallWatch::new(acceptance_stall_fatal),
+        intake_batch_open: false,
+        consumption_stall: super::stall::ConsumptionStallWatch::new(consumption_stall_fatal),
         mem_probe: super::memstat::MemPressureProbe::new(),
     }
 }
 
 fn stalled_queue_pump(
     key: AxisKey,
-    acceptance_stall_fatal: Duration,
+    consumption_stall_fatal: Duration,
     on_drip_stall: impl Fn(String) + Send + 'static,
 ) -> Pump<NullSink> {
-    queue_pump(key, acceptance_stall_fatal, on_drip_stall, NullSink)
+    queue_pump(key, consumption_stall_fatal, on_drip_stall, NullSink)
 }
 
 #[test]
@@ -1118,7 +1134,7 @@ fn inferred_halt_without_host_ack_escalates() {
 }
 
 #[test]
-fn acceptance_stall_past_threshold_with_frozen_accepted_escalates() {
+fn consumption_stall_past_threshold_with_frozen_counter_escalates() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let threshold = Duration::from_millis(50);
     let escalated: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1139,19 +1155,19 @@ fn acceptance_stall_past_threshold_with_frozen_accepted_escalates() {
     let result = pump.send_ready();
     assert!(
         result.is_err(),
-        "accepted count frozen past the threshold must escalate and stop the pump loop"
+        "consumed count frozen past the threshold must escalate and stop the pump loop"
     );
     let msgs = escalated.lock().unwrap();
     assert_eq!(msgs.len(), 1, "on_drip_stall must fire exactly once");
     assert!(
-        msgs[0].contains("acceptance stall"),
-        "escalation message should explain the acceptance stall: {}",
+        msgs[0].contains("consumption stall"),
+        "escalation message should explain the consumption stall: {}",
         msgs[0]
     );
 }
 
 #[test]
-fn acceptance_stall_resets_when_heartbeat_advances_accepted() {
+fn consumption_stall_resets_when_heartbeat_advances_counter() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let threshold = Duration::from_millis(50);
     let escalated: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1163,16 +1179,16 @@ fn acceptance_stall_resets_when_heartbeat_advances_accepted() {
     pump.queues.get_mut(&key).unwrap().pushed = 2;
 
     pump.send_ready().unwrap();
-    let (_, accepted_at_onset, _) = pump
-        .acceptance_stall
+    let (_, consumed_at_onset, _) = pump
+        .consumption_stall
         .started()
         .expect("first observation tracked");
-    assert_eq!(accepted_at_onset, 0);
+    assert_eq!(consumed_at_onset, 0);
 
     std::thread::sleep(threshold / 2);
     pump.handle_control_msg(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
-        accepted_counts: Some(vec![1]),
+        consumed_counts: Some(vec![1]),
         retired_counts: vec![0],
     }));
     pump.queues.get_mut(&key).unwrap().pushed = 3;
@@ -1180,20 +1196,20 @@ fn acceptance_stall_resets_when_heartbeat_advances_accepted() {
     let result = pump.send_ready();
     assert!(
         result.is_ok(),
-        "acceptance advancing before the threshold must not escalate"
+        "consumption advancing before the threshold must not escalate"
     );
     assert!(
         escalated.lock().unwrap().is_empty(),
-        "no escalation once acceptance progressed"
+        "no escalation once consumption progressed"
     );
-    let (tracked_key, tracked_accepted, _) = pump
-        .acceptance_stall
+    let (tracked_key, tracked_consumed, _) = pump
+        .consumption_stall
         .started()
         .expect("still stalled on a full ring, just with a fresh timer");
     assert_eq!(tracked_key, key);
     assert_eq!(
-        tracked_accepted, 1,
-        "stall tracking must reset to the newly observed accepted count"
+        tracked_consumed, 1,
+        "stall tracking must reset to the newly observed consumed count"
     );
 
     std::thread::sleep(threshold / 2 + Duration::from_millis(5));
@@ -1216,7 +1232,7 @@ fn non_stallfull_outcome_between_stalls_resets_the_timer() {
     });
 
     pump.send_ready().unwrap();
-    assert!(pump.acceptance_stall.started().is_some());
+    assert!(pump.consumption_stall.started().is_some());
 
     std::thread::sleep(threshold * 2);
 
@@ -1224,7 +1240,7 @@ fn non_stallfull_outcome_between_stalls_resets_the_timer() {
     let result = pump.send_ready();
     assert!(result.is_ok());
     assert!(
-        pump.acceptance_stall.started().is_none(),
+        pump.consumption_stall.started().is_none(),
         "an Idle outcome must clear the stall tracking even though the old \
          stall was already past the threshold"
     );
@@ -1241,7 +1257,7 @@ fn non_stallfull_outcome_between_stalls_resets_the_timer() {
          StallFull observation is not immediately fatal"
     );
     assert!(escalated.lock().unwrap().is_empty());
-    assert!(pump.acceptance_stall.started().is_some());
+    assert!(pump.consumption_stall.started().is_some());
 }
 
 mod pushpieces_retransmit_tests {

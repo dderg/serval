@@ -751,11 +751,11 @@ impl StepcompressEndpoint {
 
     fn post_heartbeat(&self) -> Result<(), SendError> {
         let mcu_id = self.mcu_id;
-        let accepted = self.shim.retired_counts();
+        let consumed = self.shim.retired_counts();
         self.pump_control
             .send(PumpMsg::Heartbeat(HeartbeatMsg {
                 mcu_id,
-                accepted_counts: Some(self.counts_by_axis(&accepted)),
+                consumed_counts: Some(self.counts_by_axis(&consumed)),
                 retired_counts: self.counts_by_axis(&self.published),
             }))
             .map_err(|_| {

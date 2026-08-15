@@ -1,7 +1,7 @@
 use runtime::dispatch_stepper::DISPLACEMENT_THRESHOLD_MM;
 use runtime::motion_core::{ArmedPiece, arm_piece};
 use runtime::sub_sample_timing::{
-    StepTimeInputs, StepTimingResult, compute_step_times, quantize_step_count,
+    StepTimeInputs, StepTimingResult, compute_step_times, quantize_step_delta,
 };
 
 use crate::ring::PieceRing;
@@ -159,7 +159,7 @@ impl MotorSampler {
             None => (self.step_count, self.p_prev, self.step_phase),
         };
         let step_phase_end = step_phase_start + (p_end - p_start);
-        let step_delta = quantize_step_count(0, step_phase_end, cfg.microstep_distance);
+        let step_delta = quantize_step_delta(step_phase_end, cfg.microstep_distance);
         #[allow(clippy::cast_precision_loss)]
         let next_step_phase = step_phase_end - step_delta as f32 * cfg.microstep_distance;
         let target = prev + i64::from(step_delta);
@@ -180,8 +180,7 @@ impl MotorSampler {
         let inputs = StepTimeInputs {
             p_start: step_phase_start,
             p_end: step_phase_end,
-            prev_step_count: 0,
-            target_step_count: step_delta,
+            step_delta,
             microstep_distance: cfg.microstep_distance,
             sample_period_sec: self.sample_period_sec,
             sample_start_cycles: self.prev_sample as u32,

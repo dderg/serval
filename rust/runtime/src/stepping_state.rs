@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicI16, AtomicI32, AtomicU8};
+use core::sync::atomic::{AtomicI16, AtomicI32, AtomicU8, AtomicU32};
 use heapless::Vec;
 
 use crate::motion_core::ArmedPiece;
@@ -24,6 +24,7 @@ pub struct StepperRef {
     pub stepper_oid: u8,
     pub position_count: AtomicI32,
     pub overlay_step_frame: AtomicI32,
+    pub overlay_step_phase_bits: AtomicU32,
     /// OID of `command_config_spi` for this stepper's TMC driver.
     /// `None` means Pulse-only (no SPI traffic for this stepper).
     pub tmc_cs_oid: Option<u8>,
@@ -40,6 +41,7 @@ impl StepperRef {
             stepper_oid,
             position_count: AtomicI32::new(0),
             overlay_step_frame: AtomicI32::new(0),
+            overlay_step_phase_bits: AtomicU32::new(0),
             tmc_cs_oid,
             last_coil_A: AtomicI16::new(0),
             last_coil_B: AtomicI16::new(0),
@@ -73,6 +75,7 @@ pub struct AxisState {
     pub ring: RingDescriptor,
     pub armed: Option<ArmedPiece>,
     pub last_step_count: i32,
+    pub step_phase: f32,
     pub p_prev: f32,
     pub v_prev: f32,
     pub overlay_last_p: f32,
@@ -91,6 +94,7 @@ impl AxisState {
             ring: RingDescriptor::new_unconfigured(),
             armed: None,
             last_step_count: 0,
+            step_phase: 0.0,
             p_prev: 0.0,
             v_prev: 0.0,
             overlay_last_p: 0.0,
@@ -101,6 +105,7 @@ impl AxisState {
     pub fn reset_isr_cache(&mut self) {
         self.armed = None;
         self.last_step_count = 0;
+        self.step_phase = 0.0;
         self.p_prev = 0.0;
         self.v_prev = 0.0;
         self.overlay_last_p = 0.0;

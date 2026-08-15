@@ -271,6 +271,60 @@ impl StepcompressLane {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StepcompressReconciliation {
+    lane: StepcompressLane,
+    history_position: f64,
+    executed_steps: i64,
+}
+
+impl StepcompressReconciliation {
+    fn executed_position(self) -> f64 {
+        self.lane.steps_to_mm(self.executed_steps)
+    }
+
+    fn signed_divergence(self) -> f64 {
+        self.executed_position() - self.history_position
+    }
+
+    fn discrepancy_threshold(self) -> f64 {
+        let executed_position = self.executed_position();
+        let magnitude = self
+            .history_position
+            .abs()
+            .max(executed_position.abs())
+            .max(self.lane.microstep_distance);
+        let wire_roundoff = 0.5 * f64::from(f32::EPSILON) * magnitude;
+        let arithmetic_roundoff = 8.0 * f64::EPSILON * magnitude;
+        self.lane.microstep_distance + wire_roundoff + arithmetic_roundoff
+    }
+
+    fn exceeds_threshold(self) -> bool {
+        self.signed_divergence().abs() > self.discrepancy_threshold()
+    }
+
+    fn emit_discrepancy(self) {
+        let signed_divergence = self.signed_divergence();
+        if !self.exceeds_threshold() {
+            return;
+        }
+        tracing::warn!(
+            subsystem = "homing",
+            event = "stepcompress_reconcile_discrepancy",
+            mcu = self.lane.mcu_id,
+            axis = self.lane.axis,
+            motor = self.lane.motor,
+            oid = self.lane.oid,
+            history_position_mm = self.history_position,
+            executed_position_mm = self.executed_position(),
+            executed_steps = self.executed_steps,
+            signed_divergence_mm = signed_divergence,
+            threshold_mm = self.discrepancy_threshold(),
+            "authoritative MCU step readback differs from piece history by more than one microstep"
+        );
+    }
+}
+
 pub fn stepcompress_lane(
     cfg: &McuAxisConfig,
     axis_key: AxisKey,
@@ -341,18 +395,28 @@ pub fn reconcile_stepcompress_axis(
     let Some(lane) = stepcompress_lane(cfg, axis_key)? else {
         return Ok(history_position);
     };
-    let executed_steps = query_step_count(&lane)?;
-    reseed_step_counter(&lane, lane.trajectory_steps(executed_steps))?;
-    Ok(lane.steps_to_mm(executed_steps))
+    let reconciliation = StepcompressReconciliation {
+        lane,
+        history_position,
+        executed_steps: query_step_count(&lane)?,
+    };
+    reconciliation.emit_discrepancy();
+    reseed_step_counter(
+        &reconciliation.lane,
+        reconciliation
+            .lane
+            .trajectory_steps(reconciliation.executed_steps),
+    )?;
+    Ok(reconciliation.executed_position())
 }
 
 pub fn reconcile_stepcompress_lanes(
     configs: &[McuAxisConfig],
-    history_position: geometry::MachinePos,
+    mut history_lane_position: impl FnMut(AxisKey) -> Result<f64, String>,
     query_step_count: &dyn Fn(&StepcompressLane) -> Result<i64, String>,
     reseed_step_counter: &dyn Fn(&StepcompressLane, i64) -> Result<(), String>,
 ) -> Result<geometry::MachinePos, String> {
-    let mut readbacks = Vec::new();
+    let mut reconciliations = Vec::new();
     for cfg in configs {
         if cfg.stepping_mode != SteppingMode::Stepcompress {
             continue;
@@ -364,23 +428,34 @@ pub fn reconcile_stepcompress_lanes(
             };
             let lane = stepcompress_lane(cfg, axis_key)?
                 .expect("stepcompress config must produce a stepcompress lane");
-            let executed_steps = query_step_count(&lane)?;
-            readbacks.push((lane, executed_steps));
+            reconciliations.push(StepcompressReconciliation {
+                lane,
+                history_position: history_lane_position(axis_key)?,
+                executed_steps: query_step_count(&lane)?,
+            });
         }
     }
 
-    let history_motor = motor_frame_start(configs, history_position)?;
     let reconciled = cartesian_from_motor_lanes(configs, |key| {
-        Ok(readbacks
+        reconciliations
             .iter()
-            .find(|(lane, _)| lane.mcu_id == key.mcu_id && lane.axis == key.axis)
-            .map_or(history_motor[usize::from(key.axis)], |(lane, steps)| {
-                lane.steps_to_mm(*steps)
-            }))
+            .find(|reconciliation| {
+                reconciliation.lane.mcu_id == key.mcu_id && reconciliation.lane.axis == key.axis
+            })
+            .map_or_else(
+                || history_lane_position(key),
+                |reconciliation| Ok(reconciliation.executed_position()),
+            )
     })?;
 
-    for (lane, executed_steps) in &readbacks {
-        reseed_step_counter(lane, lane.trajectory_steps(*executed_steps))?;
+    for reconciliation in reconciliations {
+        reconciliation.emit_discrepancy();
+        reseed_step_counter(
+            &reconciliation.lane,
+            reconciliation
+                .lane
+                .trajectory_steps(reconciliation.executed_steps),
+        )?;
     }
     Ok(geometry::MachinePos(reconciled))
 }

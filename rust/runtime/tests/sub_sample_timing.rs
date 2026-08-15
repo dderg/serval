@@ -23,8 +23,7 @@ fn step_times_in_sample_for_constant_velocity() {
     let inputs = StepTimeInputs {
         p_start: 0.0,
         p_end: 1.0,
-        prev_step_count: 0,
-        target_step_count: 4,
+        step_delta: 4,
         microstep_distance: 0.25,
         sample_period_sec: SAMPLE_PERIOD_SEC,
         sample_start_cycles: 0,
@@ -62,8 +61,7 @@ fn step_times_within_sample_for_decelerating() {
     let inputs = StepTimeInputs {
         p_start: 0.0,
         p_end: 1.0,
-        prev_step_count: 0,
-        target_step_count: 4,
+        step_delta: 4,
         microstep_distance: 0.25,
         sample_period_sec: SAMPLE_PERIOD_SEC,
         sample_start_cycles: 0,
@@ -91,8 +89,7 @@ fn falls_back_to_uniform_when_displacement_too_small() {
     let inputs = StepTimeInputs {
         p_start: 0.0,
         p_end: 1e-4,
-        prev_step_count: 0,
-        target_step_count: 3,
+        step_delta: 3,
         microstep_distance: 1e-4 / 3.0,
         sample_period_sec: SAMPLE_PERIOD_SEC,
         sample_start_cycles: 0,
@@ -119,13 +116,13 @@ fn falls_back_to_uniform_when_displacement_too_small() {
 }
 
 #[test]
-fn large_absolute_step_counts_keep_distinct_clocks() {
+fn local_phase_step_times_keep_distinct_clocks() {
+    let microstep_distance = 0.000_690_468_75;
     let inputs = StepTimeInputs {
-        p_start: 5_792.073,
-        p_end: 5_792.074_7,
-        prev_step_count: 8_388_609,
-        target_step_count: 8_388_611,
-        microstep_distance: 0.000_690_468_75,
+        p_start: 0.25 * microstep_distance,
+        p_end: 2.25 * microstep_distance,
+        step_delta: 2,
+        microstep_distance,
         sample_period_sec: 0.000_1,
         sample_start_cycles: 2_766_266_336,
         cycles_per_second: 64_000_000.0,

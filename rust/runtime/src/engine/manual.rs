@@ -174,12 +174,20 @@ impl Engine {
                 continue;
             }
             #[allow(clippy::cast_possible_truncation)]
-            let seed_steps = libm::roundf(axis_pos_mm / microstep_distance) as i32;
+            let seed_steps =
+                libm::round(f64::from(axis_pos_mm) / f64::from(microstep_distance)) as i32;
+            #[allow(clippy::cast_possible_truncation)]
+            let step_phase = (f64::from(axis_pos_mm)
+                - f64::from(seed_steps) * f64::from(microstep_distance))
+                as f32;
             axis.last_step_count = seed_steps;
+            axis.step_phase = step_phase;
             axis.p_prev = axis_pos_mm;
             axis.v_prev = 0.0;
             for stepper in &axis.steppers {
                 stepper.position_count.store(seed_steps, Ordering::Release);
+                stepper.overlay_step_frame.store(0, Ordering::Release);
+                stepper.overlay_step_phase_bits.store(0, Ordering::Release);
                 stepper
                     .last_phase_target
                     .store(seed_steps, Ordering::Release);

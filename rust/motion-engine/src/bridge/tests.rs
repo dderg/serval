@@ -385,7 +385,7 @@ fn shutdown_stops_new_dispatch_before_closing_pump() {
         dispatch_count_cb.fetch_add(1, Ordering::SeqCst);
         let hb = crate::pump::PumpMsg::Heartbeat(crate::pump::HeartbeatMsg {
             mcu_id: 0,
-            accepted_counts: None,
+            consumed_counts: None,
             retired_counts: Vec::new(),
         });
         if pump_tx.send(hb).is_err() {
@@ -628,6 +628,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
             epoch: motion_core::anchor::StreamEpoch::Continuation,
             lead_secs: 0.0,
             source_line: u32::MAX,
+            batch_end: true,
         })
         .expect("enqueue must succeed before shutdown");
 

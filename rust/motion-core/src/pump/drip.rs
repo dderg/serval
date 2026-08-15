@@ -17,7 +17,7 @@ pub(super) struct DripCohort {
     pub baseline: BTreeMap<AxisKey, u32>,
     pub last_retired: BTreeMap<AxisKey, u32>,
     pub step_deadline: Instant,
-    pub progress: u64,
+    pub execution_floor: u32,
 }
 
 impl DripCohort {
@@ -27,10 +27,16 @@ impl DripCohort {
         retired.wrapping_sub(baseline)
     }
 
-    pub(super) fn progress(&self, queues: &BTreeMap<AxisKey, AxisQueue>) -> u64 {
+    pub(super) fn active_execution_floor(&self, queues: &BTreeMap<AxisKey, AxisQueue>) -> u32 {
         self.participants
             .iter()
-            .map(|k| u64::from(self.executed(k, queues)))
-            .sum()
+            .filter(|k| {
+                queues
+                    .get(k)
+                    .is_some_and(|q| !q.pieces.is_empty() || q.pushed != q.retired)
+            })
+            .map(|k| self.executed(k, queues))
+            .min()
+            .unwrap_or(0)
     }
 }

@@ -1289,6 +1289,7 @@ position_endstop: 0
 position_max: 250
 endstop_pin: ^gpiochip0/gpio200
 homing_speed: 10
+min_home_dist: 0
 post_processors: is_xy
 
 [axis y]
@@ -1297,6 +1298,7 @@ position_endstop: 0
 position_max: 250
 endstop_pin: ^gpiochip0/gpio201
 homing_speed: 10
+min_home_dist: 0
 post_processors: is_xy
 
 [axis z]
@@ -1305,6 +1307,7 @@ position_endstop: 0
 position_max: 250
 endstop_pin: ^gpiochip0/gpio202
 homing_speed: 5
+min_home_dist: 0
 
 [axis e]
 follows: x, y, z

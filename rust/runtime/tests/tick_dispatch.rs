@@ -19,6 +19,7 @@ fn make_stepper() -> StepperRef {
         stepper_oid: 0,
         position_count: AtomicI32::new(0),
         overlay_step_frame: AtomicI32::new(0),
+        overlay_step_phase_bits: core::sync::atomic::AtomicU32::new(0),
         tmc_cs_oid: None,
         last_coil_A: AtomicI16::new(0),
         last_coil_B: AtomicI16::new(0),
@@ -264,4 +265,53 @@ fn tick_dispatch_tracks_curve_crossings_at_100us() {
 #[test]
 fn tick_dispatch_tracks_curve_crossings_at_200us() {
     assert_tick_dispatch_matches_curve(5_000);
+}
+
+#[test]
+fn tick_dispatch_emits_the_final_sample_window() {
+    let mut engine = Engine::new(TIMING_CLOCK_HZ, 10_000);
+    let sample_period_cycles = u64::from(engine.sample_period_cycles);
+    let t0 = sample_period_cycles;
+    let mut storage = vec![PieceEntry::zeroed(); 64];
+    let bindings = [StepperBindingRust {
+        stepper_oid: 0,
+        tmc_cs_oid: TMC_CS_OID_NONE,
+        _pad: [0; 2],
+    }];
+    assert_eq!(
+        engine.configure_axis(
+            0,
+            StepMode::Pulse,
+            TIMING_MICROSTEP_DISTANCE,
+            64,
+            &bindings,
+            storage.len(),
+        ),
+        RUNTIME_OK
+    );
+
+    let mut queue = StepQueue::new();
+    let mut queues = [core::ptr::null_mut(); MAX_AXES];
+    queues[0] = &mut queue;
+    engine.test_install_step_queues(queues);
+    let shared = SharedState::new();
+    let duration = engine.sample_period_cycles as f32 / TIMING_CLOCK_HZ as f32;
+    assert_eq!(
+        engine.push_pieces(0, &[constant_velocity_piece(t0, duration)], &mut storage),
+        RUNTIME_OK
+    );
+
+    assert!(engine.tick(t0, &shared, &mut storage));
+    let mut dispatched_times = std::vec::Vec::new();
+    drain_step_times(&mut queue, &mut dispatched_times);
+    assert_eq!(dispatched_times.len(), 4);
+    assert_eq!(
+        dispatched_times.last().copied(),
+        Some(t0 as u32 + sample_period_cycles as u32 * 7 / 8)
+    );
+    assert_eq!(engine.retired_counts()[0], 0);
+
+    assert!(!engine.tick(t0 + sample_period_cycles, &shared, &mut storage));
+    assert_eq!(engine.retired_counts()[0], 1);
+    assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
 }

@@ -137,6 +137,16 @@ pub fn raise_steps_per_sample_exceeded(shared: &SharedState, axis_idx: usize, ab
 }
 
 #[inline]
+pub fn raise_internal_invariant(shared: &SharedState, axis_idx: usize, invariant: u16) {
+    let detail = ((axis_idx as u32 & 0xFF) << 16) | u32::from(invariant);
+    shared.fault_detail.store(detail, Ordering::Release);
+    shared
+        .last_error
+        .store(FaultCode::InternalInvariant.as_i32(), Ordering::Release);
+    emit_fault_log(FaultCode::InternalInvariant, detail);
+}
+
+#[inline]
 pub fn raise_multi_motor_mask(shared: &SharedState, axis_idx: usize, mask: u8) {
     let detail = ((axis_idx as u32 & 0xFF) << 16) | u32::from(mask);
     shared.fault_detail.store(detail, Ordering::Release);

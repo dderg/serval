@@ -289,6 +289,7 @@ impl SegmentSink for PumpSink {
                     epoch: at.epoch,
                     lead_secs: at.lead_secs,
                     source_line: u32::MAX,
+                    batch_end: true,
                 })
                 .map_err(|_| DispatchError::PumpGone)?;
         }

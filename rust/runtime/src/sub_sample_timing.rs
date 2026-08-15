@@ -31,8 +31,7 @@ pub const DEFAULT_MAX_STEPS_PER_SAMPLE: u32 = 16;
 pub struct StepTimeInputs {
     pub p_start: f32,
     pub p_end: f32,
-    pub prev_step_count: i32,
-    pub target_step_count: i32,
+    pub step_delta: i32,
     pub microstep_distance: f32,
     pub sample_period_sec: f32,
     pub sample_start_cycles: u32,
@@ -49,11 +48,11 @@ pub enum StepTimingResult {
 
 #[must_use]
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-pub fn quantize_step_count(previous_count: i32, position: f32, microstep_distance: f32) -> i32 {
-    let target = libm::roundf(position / microstep_distance) as i32;
-    if target > previous_count && position <= (target as f32 - 0.5) * microstep_distance {
+pub fn quantize_step_delta(step_phase: f32, microstep_distance: f32) -> i32 {
+    let target = libm::roundf(step_phase / microstep_distance) as i32;
+    if target > 0 && step_phase <= (target as f32 - 0.5) * microstep_distance {
         target - 1
-    } else if target < previous_count && position >= (target as f32 + 0.5) * microstep_distance {
+    } else if target < 0 && step_phase >= (target as f32 + 0.5) * microstep_distance {
         target + 1
     } else {
         target
@@ -62,7 +61,7 @@ pub fn quantize_step_count(previous_count: i32, position: f32, microstep_distanc
 
 #[must_use]
 pub fn compute_step_times(inp: &StepTimeInputs) -> StepTimingResult {
-    let signed_steps = inp.target_step_count - inp.prev_step_count;
+    let signed_steps = inp.step_delta;
     if signed_steps == 0 {
         return StepTimingResult::NoSteps;
     }
@@ -100,17 +99,13 @@ pub fn compute_step_times(inp: &StepTimeInputs) -> StepTimingResult {
     }
 
     #[allow(clippy::cast_precision_loss)]
-    let previous_step_position = inp.prev_step_count as f32 * inp.microstep_distance;
-    let start_from_previous_step = inp.p_start - previous_step_position;
-    #[allow(clippy::cast_precision_loss)]
     let direction = sign as f32;
 
     for k in 0..n_steps {
         #[allow(clippy::cast_precision_loss)]
         let threshold_from_previous_step = (k as f32 + 0.5) * direction * inp.microstep_distance;
-        let t_local_sec = (threshold_from_previous_step - start_from_previous_step)
-            * inp.sample_period_sec
-            / displacement;
+        let t_local_sec =
+            (threshold_from_previous_step - inp.p_start) * inp.sample_period_sec / displacement;
         // f32 → u32: t_local_sec ∈ [0, sample_period_sec], bounded well below u32::MAX.
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let cycle_abs = inp

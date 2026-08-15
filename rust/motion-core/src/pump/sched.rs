@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 pub struct AxisQueue {
     pub pieces: VecDeque<(PieceEntry, f64)>,
     pub pushed: u32,
-    pub accepted: u32,
+    pub consumed: u32,
     pub retired: u32,
     pub ring_depth: u32,
     pub physical_write_cursor: u32,
@@ -30,7 +30,7 @@ impl AxisQueue {
         Self {
             pieces: VecDeque::new(),
             pushed: 0,
-            accepted: 0,
+            consumed: 0,
             retired: 0,
             ring_depth,
             physical_write_cursor: 0,
@@ -40,7 +40,7 @@ impl AxisQueue {
         }
     }
     pub fn room(&self) -> u32 {
-        let in_flight = self.pushed.wrapping_sub(self.accepted);
+        let in_flight = self.pushed.wrapping_sub(self.consumed);
         if in_flight > self.ring_depth {
             self.ring_depth
         } else {

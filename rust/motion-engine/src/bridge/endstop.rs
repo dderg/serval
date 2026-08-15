@@ -306,20 +306,29 @@ pub(super) fn dispatch_endstop_trip(
 
             let (final_source_mcu, final_clock) =
                 suppression_clock.unwrap_or((axis_key.mcu_id, discard_clock));
-            let outcome = reconstruct_cartesian(event_mcu, trip_clock)
-                .and_then(|trip| {
-                    reconstruct_cartesian(final_source_mcu, final_clock)
-                        .map(|history_final| (trip, history_final, trip_clock))
-                })
-                .and_then(|(trip, history_final, trip_clock)| {
-                    crate::homing::reconcile_stepcompress_lanes(
-                        &configs,
-                        history_final,
-                        &query_step_count,
-                        &reseed_step_counter,
-                    )
-                    .map(|final_pos| (trip, final_pos, trip_clock))
-                });
+            let lane_starts = crate::mcu_config::reanchor_axis_targets(&configs, run_start);
+            let outcome = reconstruct_cartesian(event_mcu, trip_clock).and_then(|trip| {
+                crate::homing::reconcile_stepcompress_lanes(
+                    &configs,
+                    |key| {
+                        crate::homing::reconstruct_axis_position(
+                            final_source_mcu,
+                            final_clock,
+                            key,
+                            &router_arc,
+                            &history_arc,
+                            run.window_start_host,
+                            lane_starts
+                                .iter()
+                                .find(|(lane_key, _)| *lane_key == key)
+                                .map(|(_, position)| *position),
+                        )
+                    },
+                    &query_step_count,
+                    &reseed_step_counter,
+                )
+                .map(|final_pos| (trip, final_pos, trip_clock))
+            });
 
             let outcome = outcome.and_then(|positions| {
                 for &mcu_id in &stepper_mcu_ids {

@@ -602,7 +602,7 @@ fn forward_retired_heartbeat(
 ) {
     let _ = pump_tx.send(crate::pump::PumpMsg::Heartbeat(crate::pump::HeartbeatMsg {
         mcu_id,
-        accepted_counts: None,
+        consumed_counts: None,
         retired_counts,
     }));
 }

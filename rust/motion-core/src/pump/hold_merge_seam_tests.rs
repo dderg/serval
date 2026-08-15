@@ -6,7 +6,7 @@
 
 use super::pump_loop::Pump;
 use super::sched::{SeamBasis, append_pieces_merging_holds};
-use super::stall::AcceptanceStallWatch;
+use super::stall::ConsumptionStallWatch;
 use super::{AxisKey, AxisQueue, EnqueueMsg, PieceSink, PumpCallbacks, SendError};
 use crate::pump::MAX_LEAD_SECS;
 use runtime::piece_ring::PieceEntry;
@@ -275,7 +275,8 @@ fn pump_with(sink: EpochBasisSink, callbacks: PumpCallbacks) -> Pump<EpochBasisS
         backlog: Arc::new(AtomicU64::new(0)),
         holding_ahead: false,
         data_open: true,
-        acceptance_stall: AcceptanceStallWatch::new(std::time::Duration::from_secs(60)),
+        intake_batch_open: false,
+        consumption_stall: ConsumptionStallWatch::new(std::time::Duration::from_secs(60)),
         mem_probe: super::memstat::MemPressureProbe::new(),
     }
 }
@@ -299,6 +300,7 @@ fn the_pump_merges_holds_on_the_transports_basis_not_the_live_clock() {
             epoch: crate::anchor::StreamEpoch::Continuation,
             lead_secs: MAX_LEAD_SECS,
             source_line: u32::MAX,
+            batch_end: true,
         });
     }
 

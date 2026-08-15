@@ -917,7 +917,7 @@ fn a_virgin_follower_lane_emits_frames_and_a_barrier_on_first_motion() {
 }
 
 #[test]
-fn a_cohort_is_accepted_before_its_barrier_retires_it() {
+fn a_cohort_is_consumed_before_its_barrier_retires_it() {
     let mut h = harness(1024);
     h.now.store(1_000, Ordering::Relaxed);
     h.endpoint
@@ -931,7 +931,7 @@ fn a_cohort_is_accepted_before_its_barrier_retires_it() {
         "every frame including the barrier must be on the wire"
     );
     let heartbeat = h.latest_heartbeat().expect("ticks post heartbeats");
-    assert_eq!(heartbeat.accepted_counts, Some(vec![64]));
+    assert_eq!(heartbeat.consumed_counts, Some(vec![64]));
     assert_eq!(
         heartbeat.retired_counts,
         vec![0],

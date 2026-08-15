@@ -82,6 +82,7 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     data.send(EnqueueMsg {
@@ -91,6 +92,7 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
         epoch: motion_core::anchor::StreamEpoch::Continuation,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -103,7 +105,7 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
-        accepted_counts: None,
+        consumed_counts: None,
         retired_counts: vec![2],
     }))
     .unwrap();
@@ -182,6 +184,7 @@ fn continuous_junction_position_passes() {
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     data.send(EnqueueMsg {
@@ -191,6 +194,7 @@ fn continuous_junction_position_passes() {
         epoch: motion_core::anchor::StreamEpoch::Continuation,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -216,6 +220,7 @@ fn junction_position_discontinuity_is_fatal() {
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     data.send(EnqueueMsg {
@@ -225,6 +230,7 @@ fn junction_position_discontinuity_is_fatal() {
         epoch: motion_core::anchor::StreamEpoch::Continuation,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
 
@@ -249,6 +255,7 @@ fn underrun_reanchor_keeps_junction_continuity_guard_armed() {
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     data.send(EnqueueMsg {
@@ -258,6 +265,7 @@ fn underrun_reanchor_keeps_junction_continuity_guard_armed() {
         epoch: motion_core::anchor::StreamEpoch::Reanchor,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
 
@@ -284,6 +292,7 @@ fn underrun_reanchor_with_continuous_position_passes() {
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     data.send(EnqueueMsg {
@@ -293,6 +302,7 @@ fn underrun_reanchor_with_continuous_position_passes() {
         epoch: motion_core::anchor::StreamEpoch::Reanchor,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -318,6 +328,7 @@ fn fresh_stream_resets_junction_position_baseline() {
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     data.send(EnqueueMsg {
@@ -327,6 +338,7 @@ fn fresh_stream_resets_junction_position_baseline() {
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -357,6 +369,7 @@ fn empty_reposition_carrier_resets_junction_position_baseline() {
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     data.send(EnqueueMsg {
@@ -366,6 +379,7 @@ fn empty_reposition_carrier_resets_junction_position_baseline() {
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     data.send(EnqueueMsg {
@@ -375,6 +389,7 @@ fn empty_reposition_carrier_resets_junction_position_baseline() {
         epoch: motion_core::anchor::StreamEpoch::Continuation,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -417,6 +432,7 @@ fn bundles_same_mcu_axes_into_one_transaction() {
             },
             lead_secs: motion_core::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
+            batch_end: true,
         })
         .unwrap();
     }
@@ -480,6 +496,7 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
             },
             lead_secs: motion_core::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
+            batch_end: true,
         }) {
             Ok(()) => accepted += 1,
             Err(TrySendError::Full(_)) => {
@@ -503,7 +520,7 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
-        accepted_counts: None,
+        consumed_counts: None,
         retired_counts: vec![4],
     }))
     .unwrap();
@@ -516,6 +533,7 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
             epoch: motion_core::anchor::StreamEpoch::Continuation,
             lead_secs: motion_core::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
+            batch_end: true,
         })
         .is_ok(),
         "after retirement the pump resumes pulling and the channel drains"
@@ -567,6 +585,7 @@ fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
             },
             lead_secs: motion_core::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
+            batch_end: true,
         })
         .unwrap();
     }
@@ -582,6 +601,7 @@ fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
             },
             lead_secs: motion_core::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
+            batch_end: true,
         })
         .unwrap();
     }
@@ -604,11 +624,7 @@ fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
 }
 
 #[test]
-fn drip_cohort_intake_bypasses_cap_and_feeds_all_participants() {
-    // Regression (homing Z stall): during a drip cohort a homing axis lowers a
-    // burst larger than the intake cap. The pump must keep draining so the other
-    // participants — queued behind it on the shared channel — still get fed;
-    // otherwise the cohort floor (min executed) never leaves 0 and homing stalls.
+fn drip_cohort_finishes_over_cap_projection_batch_before_backpressuring() {
     let rec = Arc::new(Mutex::new(Vec::new()));
     let (ctl, control_rx) = unbounded::<PumpMsg>();
     let (data, data_rx) = unbounded::<EnqueueMsg>();
@@ -638,38 +654,29 @@ fn drip_cohort_intake_bypasses_cap_and_feeds_all_participants() {
     }))
     .unwrap();
 
-    // Axis A lowers a burst far larger than PUMP_INTAKE_BACKLOG_CAP, with a
-    // depth-4 ring and no retirement so its backlog piles up over the cap.
-    for i in 0..2500u64 {
-        data.send(EnqueueMsg {
-            epoch_freq: None,
-            key: key_a,
-            pieces: vec![piece_at(i, i as f64, 0.0, 0.0)],
-            epoch: if i == 0 {
-                motion_core::anchor::StreamEpoch::Reposition
-            } else {
-                motion_core::anchor::StreamEpoch::Continuation
-            },
-            lead_secs: motion_core::pump::DRIP_WINDOW_SECS,
-            source_line: u32::MAX,
-        })
-        .unwrap();
-    }
-    for i in 0..4u64 {
-        data.send(EnqueueMsg {
-            epoch_freq: None,
-            key: key_b,
-            pieces: vec![piece_at(i, i as f64, 0.0, 0.0)],
-            epoch: if i == 0 {
-                motion_core::anchor::StreamEpoch::Reposition
-            } else {
-                motion_core::anchor::StreamEpoch::Continuation
-            },
-            lead_secs: motion_core::pump::DRIP_WINDOW_SECS,
-            source_line: u32::MAX,
-        })
-        .unwrap();
-    }
+    data.send(EnqueueMsg {
+        epoch_freq: None,
+        key: key_a,
+        pieces: (0..9000u64)
+            .map(|i| piece_at(i, i as f64, 0.0, 0.0))
+            .collect(),
+        epoch: motion_core::anchor::StreamEpoch::Reposition,
+        lead_secs: motion_core::pump::DRIP_WINDOW_SECS,
+        source_line: u32::MAX,
+        batch_end: false,
+    })
+    .unwrap();
+    data.send(EnqueueMsg {
+        epoch_freq: None,
+        key: key_b,
+        pieces: (0..4u64).map(|i| piece_at(i, i as f64, 0.0, 0.0)).collect(),
+        epoch: motion_core::anchor::StreamEpoch::Reposition,
+        lead_secs: motion_core::pump::DRIP_WINDOW_SECS,
+        source_line: u32::MAX,
+        batch_end: true,
+    })
+    .unwrap();
+
     std::thread::sleep(std::time::Duration::from_millis(80));
 
     let b_sent: usize = rec
@@ -679,9 +686,9 @@ fn drip_cohort_intake_bypasses_cap_and_feeds_all_participants() {
         .filter(|(k, _)| *k == key_b)
         .map(|(_, n)| n)
         .sum();
-    assert!(
-        b_sent > 0,
-        "cohort participant B must be fed despite A's over-cap burst (drip bypasses the intake cap)"
+    assert_eq!(
+        b_sent, 4,
+        "the pump must finish the current projection batch after crossing the hard cap"
     );
 
     ctl.send(PumpMsg::Shutdown).unwrap();

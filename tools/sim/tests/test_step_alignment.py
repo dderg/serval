@@ -19,7 +19,7 @@ TOLERANCE_NS = 50_000
 # dispatched step cycles. Running the virtual clock slower gives the tick the
 # real-time headroom to sample every period, so steps land on their analytic
 # crossings (as they do for the slower-ticking F4 at default speed).
-VTIME_SPEED = "0.2"
+VTIME_SPEED = "0.05"
 
 
 H7_STEPS_PER_MM = 80.0

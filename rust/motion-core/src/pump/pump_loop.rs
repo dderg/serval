@@ -15,7 +15,7 @@ use super::messages::{
 use super::sched::{
     AxisFrame, AxisQueue, FramePlan, Schedule, append_pieces_merging_holds, schedule,
 };
-use super::stall::AcceptanceStallWatch;
+use super::stall::ConsumptionStallWatch;
 use crate::types::AxisKey;
 
 // How far ahead of the MCU playhead the pump pushes pieces — the depth of the
@@ -38,6 +38,7 @@ pub const MAX_LEAD_SECS: f64 = 2.0;
 pub const PUMP_DATA_CHANNEL_CAP: usize = 128;
 
 pub(super) const PUMP_INTAKE_BACKLOG_SOFT_CAP: u64 = 4096;
+pub(super) const PUMP_INTAKE_BACKLOG_HARD_CAP: u64 = 8192;
 pub(super) const PUMP_INTAKE_MIN_RUNWAY_SECS: f64 = 5.0;
 
 fn staged_axis_runway_secs(queue: &AxisQueue) -> f64 {
@@ -64,10 +65,11 @@ fn minimum_staged_runway_secs(queues: &BTreeMap<AxisKey, AxisQueue>) -> f64 {
 pub(super) fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
     let staged: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
     staged < PUMP_INTAKE_BACKLOG_SOFT_CAP
-        || minimum_staged_runway_secs(queues) < PUMP_INTAKE_MIN_RUNWAY_SECS
+        || (staged < PUMP_INTAKE_BACKLOG_HARD_CAP
+            && minimum_staged_runway_secs(queues) < PUMP_INTAKE_MIN_RUNWAY_SECS)
 }
 
-pub(super) const ACCEPTANCE_STALL_FATAL: Duration = Duration::from_secs(10);
+pub(super) const CONSUMPTION_STALL_FATAL: Duration = Duration::from_secs(10);
 const INFERRED_HALT_FATAL: Duration = Duration::from_secs(1);
 
 // Mirrors the MCU's MAX_START_IN_PAST_SECS: 500us over host-projection
@@ -102,7 +104,8 @@ pub(super) struct Pump<S> {
     pub(super) backlog: Arc<AtomicU64>,
     pub(super) holding_ahead: bool,
     pub(super) data_open: bool,
-    pub(super) acceptance_stall: AcceptanceStallWatch,
+    pub(super) intake_batch_open: bool,
+    pub(super) consumption_stall: ConsumptionStallWatch,
     pub(super) mem_probe: MemPressureProbe,
 }
 
@@ -166,14 +169,14 @@ impl<S: PieceSink> Pump<S> {
             }
             PumpMsg::Heartbeat(HeartbeatMsg {
                 mcu_id,
-                accepted_counts,
+                consumed_counts,
                 retired_counts,
             }) => {
-                let accepted_counts = accepted_counts.as_ref().unwrap_or(&retired_counts);
+                let consumed_counts = consumed_counts.as_ref().unwrap_or(&retired_counts);
                 assert_eq!(
-                    accepted_counts.len(),
+                    consumed_counts.len(),
                     retired_counts.len(),
-                    "heartbeat accepted/retired axis count mismatch for mcu{mcu_id}"
+                    "heartbeat consumed/retired axis count mismatch for mcu{mcu_id}"
                 );
                 for (axis, &c) in retired_counts.iter().enumerate() {
                     let key = AxisKey {
@@ -181,7 +184,7 @@ impl<S: PieceSink> Pump<S> {
                         axis: axis as u8,
                     };
                     if let Some(q) = self.queues.get_mut(&key) {
-                        q.accepted = accepted_counts[axis];
+                        q.consumed = consumed_counts[axis];
                         q.retired = c;
                     }
                     if let Some(co) = &mut self.cohort {
@@ -217,7 +220,7 @@ impl<S: PieceSink> Pump<S> {
                     baseline,
                     last_retired,
                     step_deadline,
-                    progress: 0,
+                    execution_floor: 0,
                 });
             }
             PumpMsg::DripDisarm(c) => {
@@ -255,6 +258,7 @@ impl<S: PieceSink> Pump<S> {
             lead_secs,
             source_line,
             epoch_freq,
+            batch_end: _,
         } = msg;
         if let Some(inferred_at) = self.halted.get(&key).copied() {
             let dropped = pieces.len() as u32;
@@ -434,14 +438,19 @@ impl<S: PieceSink> Pump<S> {
 
     fn drain_data(&mut self, data_rx: &Receiver<EnqueueMsg>) -> bool {
         let mut activity = false;
-        while self.data_open && (self.cohort.is_some() || wants_pieces(&self.queues)) {
+        while self.data_open && (self.intake_batch_open || wants_pieces(&self.queues)) {
             match data_rx.try_recv() {
                 Ok(e) => {
                     activity = true;
+                    self.intake_batch_open = !e.batch_end;
                     self.enqueue(e);
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
+                    assert!(
+                        !self.intake_batch_open,
+                        "pump data channel disconnected before the projection batch ended"
+                    );
                     self.data_open = false;
                     break;
                 }
@@ -455,11 +464,11 @@ impl<S: PieceSink> Pump<S> {
             return;
         };
         let now = Instant::now();
-        let progress = co.progress(&self.queues);
-        if progress > co.progress {
+        let execution_floor = co.active_execution_floor(&self.queues);
+        if execution_floor != co.execution_floor {
             let co = self.cohort.as_mut().unwrap();
             co.step_deadline = now + co.timeout;
-            co.progress = progress;
+            co.execution_floor = execution_floor;
             return;
         }
         if now < co.step_deadline {
@@ -475,7 +484,7 @@ impl<S: PieceSink> Pump<S> {
                 subsystem = "motion",
                 event = "drip_cohort_executed_awaiting_trip",
                 cohort = co.id,
-                progress,
+                execution_floor,
                 "drip cohort fully executed with no trip; the host trip \
                  deadline adjudicates — not a stall"
             );
@@ -501,7 +510,7 @@ impl<S: PieceSink> Pump<S> {
             .collect();
         let id = co.id;
         (self.callbacks.on_drip_stall)(format!(
-            "drip cohort {id}: execution stalled at progress {progress} for {:?}; \
+            "drip cohort {id}: execution stalled at floor {execution_floor} for {:?}; \
              participants: [{}]",
             co.timeout,
             lagging.join(", ")
@@ -514,47 +523,47 @@ impl<S: PieceSink> Pump<S> {
         let Some(q) = self.queues.get(&stall_key) else {
             return Ok(());
         };
-        let current_accepted = q.accepted;
+        let current_consumed = q.consumed;
         let observation = self
-            .acceptance_stall
-            .observe(stall_key, current_accepted, now);
+            .consumption_stall
+            .observe(stall_key, current_consumed, now);
         if observation.log_due {
-            let awaiting_acceptance = q.pushed.wrapping_sub(q.accepted);
+            let awaiting_consumption = q.pushed.wrapping_sub(q.consumed);
             tracing::debug!(
                 subsystem = "motion",
                 event = "pump_stall_full",
                 mcu = stall_key.mcu_id,
                 axis = stall_key.axis,
                 pushed = q.pushed,
-                accepted = q.accepted,
+                consumed = q.consumed,
                 retired = q.retired,
-                awaiting_acceptance,
+                awaiting_consumption,
                 ring_depth = q.ring_depth,
                 room = q.room(),
                 pending = q.pieces.len(),
-                "pump StallFull (room==0): endpoint has not accepted the next piece"
+                "pump StallFull (room==0): endpoint has not consumed the next piece"
             );
         }
         if let Some(stalled_secs) = observation.stalled_secs {
             tracing::error!(
                 subsystem = "motion",
-                event = "pump_acceptance_stall_fatal",
+                event = "pump_consumption_stall_fatal",
                 mcu = stall_key.mcu_id,
                 axis = stall_key.axis,
                 pushed = q.pushed,
-                accepted = q.accepted,
+                consumed = q.consumed,
                 retired = q.retired,
                 ring_depth = q.ring_depth,
                 pending = q.pieces.len(),
                 stalled_secs,
-                "endpoint stopped accepting pieces on this axis while heartbeats continued"
+                "endpoint stopped consuming pieces on this axis while heartbeats continued"
             );
             (self.callbacks.on_drip_stall)(format!(
-                "pump acceptance stall: mcu{} axis{} accepted stuck at {} for \
+                "pump consumption stall: mcu{} axis{} consumed stuck at {} for \
                  {stalled_secs:.1}s with pushed={} retired={} ring_depth={} pending={}",
                 stall_key.mcu_id,
                 stall_key.axis,
-                current_accepted,
+                current_consumed,
                 q.pushed,
                 q.retired,
                 q.ring_depth,
@@ -770,7 +779,7 @@ impl<S: PieceSink> Pump<S> {
             };
             match sched {
                 Schedule::Idle => {
-                    self.acceptance_stall.reset();
+                    self.consumption_stall.reset();
                     break;
                 }
                 Schedule::StallFull(stall_key) => {
@@ -778,12 +787,12 @@ impl<S: PieceSink> Pump<S> {
                     break;
                 }
                 Schedule::StallAhead(_stall_key) => {
-                    self.acceptance_stall.reset();
+                    self.consumption_stall.reset();
                     self.holding_ahead = true;
                     break;
                 }
                 Schedule::Send(frames) => {
-                    self.acceptance_stall.reset();
+                    self.consumption_stall.reset();
                     if frames.is_empty() {
                         break;
                     }
@@ -861,7 +870,7 @@ impl<S: PieceSink> Pump<S> {
     ) -> Result<(), ()> {
         let mut sel = Select::new();
         let ctrl_op = sel.recv(control_rx);
-        let want_data = self.data_open && (self.cohort.is_some() || wants_pieces(&self.queues));
+        let want_data = self.data_open && (self.intake_batch_open || wants_pieces(&self.queues));
         let data_op = if want_data {
             sel.recv(data_rx)
         } else {
@@ -885,8 +894,17 @@ impl<S: PieceSink> Pump<S> {
                 }
             } else if idx == data_op {
                 match op.recv(data_rx) {
-                    Ok(e) => self.enqueue(e),
-                    Err(_) => self.data_open = false,
+                    Ok(e) => {
+                        self.intake_batch_open = !e.batch_end;
+                        self.enqueue(e);
+                    }
+                    Err(_) => {
+                        assert!(
+                            !self.intake_batch_open,
+                            "pump data channel disconnected before the projection batch ended"
+                        );
+                        self.data_open = false;
+                    }
                 }
             }
         }
@@ -978,7 +996,8 @@ pub fn run_pump<S: PieceSink>(
         backlog,
         holding_ahead: false,
         data_open: true,
-        acceptance_stall: AcceptanceStallWatch::new(ACCEPTANCE_STALL_FATAL),
+        intake_batch_open: false,
+        consumption_stall: ConsumptionStallWatch::new(CONSUMPTION_STALL_FATAL),
         mem_probe: MemPressureProbe::new(),
     };
     pump.run(control_rx, data_rx);
