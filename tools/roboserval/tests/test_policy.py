@@ -26,3 +26,14 @@ def test_policy_rejects_invalid_repository_key() -> None:
 def test_policy_rejects_configured_base_branch() -> None:
     with pytest.raises(PolicyError, match=r"unknown policy fields.*base_branch"):
         PolicySet.parse('[repositories."dderg/serval"]\nbase_branch = "sota-motion"\n')
+
+
+def test_policy_rejects_bot_login_as_maintainer() -> None:
+    with pytest.raises(PolicyError, match="bot login cannot be a maintainer"):
+        PolicySet.parse(
+            """
+[repositories."dderg/serval"]
+bot_login = "roboserval"
+maintainers = ["RoboServal[bot]"]
+"""
+        )

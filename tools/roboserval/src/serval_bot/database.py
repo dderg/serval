@@ -233,6 +233,30 @@ class Database:
             )
         return inserted
 
+    def skip_stale_reviews(self, repo: str, review_heads: dict[int, str]) -> int:
+        skipped = 0
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT delivery_id, issue_number, payload FROM events "
+                "WHERE repo=? AND event_type='pull_request_review.requested' AND state='queued'",
+                (repo,),
+            ).fetchall()
+            for row in rows:
+                current_head = review_heads.get(int(row["issue_number"]))
+                payload = json.loads(row["payload"])
+                if "review_request" not in payload:
+                    continue
+                event_head = payload.get("pull_request", {}).get("head", {}).get("sha")
+                if current_head is not None and event_head == current_head:
+                    continue
+                error = "review assignment removed" if current_head is None else "superseded by newer pull request head"
+                cursor = connection.execute(
+                    "UPDATE events SET state='skipped', error=?, updated_at=? WHERE delivery_id=? AND state='queued'",
+                    (error, _now(), row["delivery_id"]),
+                )
+                skipped += cursor.rowcount
+        return skipped
+
     def claim(self) -> Event | None:
         with self._transaction() as connection:
             row = connection.execute(

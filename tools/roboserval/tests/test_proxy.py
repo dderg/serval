@@ -848,6 +848,10 @@ async def test_github_poll_returns_new_issues_mentions_and_reviewer_assignments(
     }
     active_review_events = [review_requested]
     requested_pages: list[str | None] = []
+    check_states: dict[str, tuple[str, str | None]] = {
+        "b" * 40: ("in_progress", None),
+        "c" * 40: ("completed", "failure"),
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/repos/dderg/serval/issues":
@@ -861,6 +865,16 @@ async def test_github_poll_returns_new_issues_mentions_and_reviewer_assignments(
                 "requested_reviewer": {"login": "someone-else"},
             }
             return httpx.Response(200, json=[*active_review_events, ignored_reviewer])
+        if request.url.path.endswith("/check-runs"):
+            head_sha = request.url.path.split("/")[-2]
+            status, conclusion = check_states[head_sha]
+            return httpx.Response(
+                200,
+                json={
+                    "total_count": 1,
+                    "check_runs": [{"name": "quick", "status": status, "conclusion": conclusion}],
+                },
+            )
         if request.url.path == "/repos/dderg/serval/issues/comments":
             page = request.url.params.get("page")
             requested_pages.append(page)
@@ -889,7 +903,14 @@ async def test_github_poll_returns_new_issues_mentions_and_reviewer_assignments(
         bot_login="roboserval",
     )
     try:
+        pending_result = await api.poll_events(request)
+        check_states["b" * 40] = ("completed", "success")
         result = await api.poll_events(request)
+        pull_request["requested_reviewers"] = []
+        pull_request["head"]["sha"] = "c" * 40
+        failed_result = await api.poll_events(request)
+        check_states["c" * 40] = ("completed", "success")
+        pushed_result = await api.poll_events(request)
         review_request_removed = {
             **review_requested,
             "id": 48,
@@ -901,12 +922,17 @@ async def test_github_poll_returns_new_issues_mentions_and_reviewer_assignments(
             "id": 49,
             "created_at": "2026-08-09T12:05:00Z",
         }
-        active_review_events.extend((review_request_removed, review_requested_again))
+        active_review_events.append(review_request_removed)
+        removed_result = await api.poll_events(request)
+        active_review_events.append(review_requested_again)
         repeated_result = await api.poll_events(request)
     finally:
         await api.close()
+    assert not any(event["delivery_id"].startswith("poll:review:") for event in pending_result["events"])
+    assert not any(event["delivery_id"].startswith("poll:review:") for event in failed_result["events"])
+    assert not any(event["delivery_id"].startswith("poll:review:") for event in removed_result["events"])
     assert [event["delivery_id"] for event in result["events"]] == [
-        "poll:review:46:requested",
+        f"poll:review:46:{'b' * 40}:requested",
         "poll:issue:10:opened",
         "poll:comment:41:created",
         "poll:comment:45:created",
@@ -919,6 +945,9 @@ async def test_github_poll_returns_new_issues_mentions_and_reviewer_assignments(
     assert assigned_review["payload"]["pull_request"]["head"]["sha"] == "b" * 40
     assert assigned_review["payload"]["review_request"] == review_requested
     assert [
+        event["delivery_id"] for event in pushed_result["events"] if event["delivery_id"].startswith("poll:review:")
+    ] == [f"poll:review:46:{'c' * 40}:requested"]
+    assert [
         event["delivery_id"] for event in repeated_result["events"] if event["delivery_id"].startswith("poll:review:")
-    ] == ["poll:review:49:requested"]
-    assert requested_pages == [None, "2", None, "2"]
+    ] == [f"poll:review:49:{'c' * 40}:requested"]
+    assert requested_pages == [None, "2"] * 6
