@@ -270,27 +270,34 @@ impl Shaper {
     /// tracks have their own lookahead covered. The time-based bound already
     /// includes the cascaded width, but segment granularity can leave a long
     /// straddling segment unprojectable, so gate on the frontier explicitly.
+    ///
+    /// Every gate compares `t_end + support` against the covered end with no
+    /// slack — the same association and strictness as the fit-time
+    /// `MissingLookahead` checks, so a gated segment can never demand
+    /// lookahead the buffer does not hold. The lowerer's rest-holds are sized
+    /// exactly to a chain's support, so a slack here admits sums that land a
+    /// few ulps past the frontier and panics the fit (issue #405).
     fn supported_count(&self) -> usize {
         let Some(last) = self.pending.back() else {
             return 0;
         };
-        let latest_safe_t = last.t_end - self.forward_support;
+        let last_t = last.t_end;
         let plain = self
             .pending
             .iter()
-            .take_while(|seg| seg.t_end <= latest_safe_t + 1e-12)
+            .take_while(|seg| seg.t_end + self.forward_support <= last_t)
             .count();
         let own_hi = self.chains.max_follower_own_forward_support();
         if own_hi <= 0.0 {
             return plain;
         }
-        let Some(frontier_t) = self.shaping_frontier_t(last.t_end) else {
+        let Some(frontier_t) = self.shaping_frontier_t(last_t) else {
             return 0;
         };
         let gated = self
             .pending
             .iter()
-            .take_while(|seg| seg.t_end + own_hi <= frontier_t + 1e-12)
+            .take_while(|seg| seg.t_end + own_hi <= frontier_t)
             .count();
         plain.min(gated)
     }
@@ -301,7 +308,7 @@ impl Shaper {
         let direct_hi = self.chains.direct_forward_support();
         self.pending
             .iter()
-            .take_while(|seg| seg.t_end + direct_hi <= last_t + 1e-12)
+            .take_while(|seg| seg.t_end + direct_hi <= last_t)
             .last()
             .map(|seg| seg.t_end)
     }
@@ -319,7 +326,7 @@ impl Shaper {
             let direct_hi = self.chains.direct_forward_support();
             self.pending
                 .iter()
-                .take_while(|seg| seg.t_end + direct_hi <= last_t + 1e-12)
+                .take_while(|seg| seg.t_end + direct_hi <= last_t)
                 .count()
                 .max(count)
         };

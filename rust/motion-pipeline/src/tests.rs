@@ -1446,6 +1446,85 @@ fn follower_kernel_chains(
     chains
 }
 
+/// Issue #405: a rest-hold sized exactly to the follower kernel's support
+/// lands `t_end + own_hi` a few ulps past the shaping frontier. The old
+/// gate admitted it through a 1e-12 slack the strict `MissingLookahead`
+/// check does not share, panicking the shape thread mid-print
+/// ("shaping window needs unavailable lookahead"). The gate must be as
+/// strict as the check: the segment waits for real lookahead instead.
+#[test]
+fn follower_frontier_waits_for_exact_kernel_lookahead() {
+    let leader = trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
+        "leader",
+        &trajectory::algos::SmoothZv,
+        vec![80.0],
+    )])
+    .expect("leader chain compiles");
+    let follower = trajectory::CompiledChain::compile(&[
+        PostProcessorInstance::new("pa", &trajectory::algos::LinearPressureAdvance, vec![0.018]),
+        PostProcessorInstance::new("st", &trajectory::algos::SmoothTriangle, vec![0.02]),
+    ])
+    .expect("follower chain compiles");
+    let chains = AxisChainSet {
+        chains: vec![
+            leader.clone(),
+            leader,
+            trajectory::CompiledChain::default(),
+            follower,
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    };
+    let direct_hi = chains.direct_forward_support();
+    let own_hi = chains.max_follower_own_forward_support();
+    let target_end = 20.389_013_601_744_544;
+    let frontier_end = target_end + own_hi - 5e-13;
+    let buffered_end = frontier_end + direct_hi;
+    let last_end = buffered_end + 1e-3;
+    assert!(target_end + own_hi > frontier_end);
+    assert!(target_end + own_hi <= frontier_end + 1e-12);
+
+    let segment = |t_start: f64, t_end: f64| ShapedSegment {
+        axes: (0..4)
+            .map(|axis| {
+                nurbs::bezier::bezier_pieces_to_nurbs(&[nurbs::bezier::BezierPiece {
+                    u_start: t_start,
+                    u_end: t_end,
+                    coeffs: vec![f64::from(axis)],
+                }])
+            })
+            .collect(),
+        followers: vec![],
+        spatial_path: false,
+        t_start,
+        t_end,
+        motor_mask: 0,
+        source_line: 1,
+    };
+    let (lowered_tx, lowered_rx) = unbounded();
+    for (t_start, t_end) in [
+        (target_end - 0.005, target_end),
+        (target_end, frontier_end),
+        (frontier_end, buffered_end),
+        (buffered_end, last_end),
+    ] {
+        lowered_tx
+            .send(LoweredItem::Seg(LoweredSegment {
+                seg: segment(t_start, t_end),
+                rest_at_end: false,
+            }))
+            .unwrap();
+    }
+    drop(lowered_tx);
+
+    let (shaped_tx, shaped_rx) = unbounded();
+    Shaper::new(chains).run(lowered_rx, shaped_tx);
+    let emitted = shaped_rx
+        .into_iter()
+        .filter(|item| matches!(item, ShapedItem::Seg(_)))
+        .count();
+    assert_eq!(emitted, 4);
+}
+
 fn nonlinear_e_chain(
     algo: &'static dyn trajectory::algos::PostProcessorAlgo,
     linear_advance: f64,
