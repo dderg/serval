@@ -875,9 +875,10 @@ mod corexy_reconstruction_tests {
 
 mod stepcompress_reconcile_tests {
     use crate::homing::{
-        StepcompressLane, reconcile_stepcompress_axis, reconcile_stepcompress_lanes,
+        StepcompressLane, StepcompressReconciliation, reconcile_stepcompress_axis,
+        reconcile_stepcompress_lanes, stepcompress_lane,
     };
-    use crate::mcu_config::{AXIS_X, AXIS_Y, McuAxisConfig, McuCaps, SteppingMode};
+    use crate::mcu_config::{AXIS_X, AXIS_Y, AXIS_Z, McuAxisConfig, McuCaps, SteppingMode};
     use crate::types::AxisKey;
     use runtime::segment::KinematicTag;
     use std::cell::RefCell;
@@ -911,6 +912,28 @@ mod stepcompress_reconcile_tests {
         }
     }
 
+    fn piece_z_cfg() -> McuAxisConfig {
+        let mut config = cfg(SteppingMode::Piece);
+        config.mcu_id = 9;
+        config.axes = vec![AXIS_Z];
+        config.microstep_distance.clear();
+        config.invert_dir.clear();
+        config.stepper_oids.clear();
+        config.step_pulse_seconds.clear();
+        config
+    }
+
+    fn stepcompress_follower_cfg() -> McuAxisConfig {
+        let mut config = cfg(SteppingMode::Stepcompress);
+        config.mcu_id = 10;
+        config.axes = vec![3];
+        config.microstep_distance = vec![0.001];
+        config.invert_dir = vec![false];
+        config.stepper_oids = vec![13];
+        config.step_pulse_seconds = vec![2e-6];
+        config
+    }
+
     fn key(axis: usize) -> AxisKey {
         AxisKey {
             mcu_id: MCU_ID,
@@ -919,7 +942,7 @@ mod stepcompress_reconcile_tests {
     }
 
     #[test]
-    fn agreeing_readback_returns_history_position_and_reseeds_shim() {
+    fn agreeing_readback_returns_mcu_position_and_reseeds_shim() {
         let history_position = 40.0;
         let reseeds: RefCell<Vec<(usize, i64)>> = RefCell::new(Vec::new());
         let pos = reconcile_stepcompress_axis(
@@ -942,7 +965,7 @@ mod stepcompress_reconcile_tests {
     }
 
     #[test]
-    fn readback_within_one_microstep_is_accepted() {
+    fn mcu_readback_replaces_a_substep_clock_reconstruction() {
         let history_position = 3200.0 * MICROSTEP + MICROSTEP * 0.9;
         let pos = reconcile_stepcompress_axis(
             &cfg(SteppingMode::Stepcompress),
@@ -951,8 +974,8 @@ mod stepcompress_reconcile_tests {
             &|_| Ok(3200),
             &|_, _| Ok(()),
         )
-        .expect("sub-microstep divergence must be accepted");
-        assert_eq!(pos, history_position);
+        .expect("the executed step count must be authoritative");
+        assert_eq!(pos, 3200.0 * MICROSTEP);
     }
 
     #[test]
@@ -975,27 +998,70 @@ mod stepcompress_reconcile_tests {
     }
 
     #[test]
-    fn divergence_beyond_one_microstep_is_a_loud_error() {
+    fn mcu_readback_replaces_a_multi_step_clock_reconstruction() {
         let reseeded = RefCell::new(false);
-        let err = reconcile_stepcompress_axis(
+        let executed_steps = 3203;
+        let pos = reconcile_stepcompress_axis(
             &cfg(SteppingMode::Stepcompress),
             key(AXIS_X),
             40.0,
-            &|_| Ok(3200 + 3),
+            &|_| Ok(executed_steps),
             &|_, _| {
                 *reseeded.borrow_mut() = true;
                 Ok(())
             },
         )
-        .unwrap_err();
-        assert!(err.contains("mcu=3"), "got: {err}");
-        assert!(err.contains("axis=0"), "got: {err}");
-        assert!(err.contains("expected=40.000000mm"), "got: {err}");
-        assert!(err.contains("actual=40.037500mm"), "got: {err}");
-        assert!(err.contains("exceeds one microstep"), "got: {err}");
+        .expect("the executed step count must be authoritative");
+        assert!((pos - 40.0375).abs() < 1e-12);
+        assert!(reseeded.into_inner());
+    }
+
+    #[test]
+    fn discrepancy_threshold_is_signed_and_roundoff_stable() {
+        let lane = stepcompress_lane(&cfg(SteppingMode::Stepcompress), key(AXIS_X))
+            .unwrap()
+            .unwrap();
+        let one_microstep = StepcompressReconciliation {
+            lane,
+            history_position: lane.steps_to_mm(3200),
+            executed_steps: 3201,
+        };
+        assert!(!one_microstep.exceeds_threshold());
+
+        let positive = StepcompressReconciliation {
+            executed_steps: 3203,
+            ..one_microstep
+        };
+        assert!(positive.exceeds_threshold());
+        assert!((positive.signed_divergence() - 3.0 * MICROSTEP).abs() < 1e-12);
+
+        let negative = StepcompressReconciliation {
+            history_position: lane.steps_to_mm(3203),
+            executed_steps: 3200,
+            ..one_microstep
+        };
+        assert!(negative.exceeds_threshold());
+        assert!((negative.signed_divergence() + 3.0 * MICROSTEP).abs() < 1e-12);
+
+        let large_count = 8_388_609;
+        let large_lane = StepcompressLane {
+            microstep_distance: 0.000_690_468_75,
+            ..lane
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let rounded_history = f64::from(large_lane.steps_to_mm(large_count) as f32);
+        let rounded_one_microstep = StepcompressReconciliation {
+            lane: large_lane,
+            history_position: rounded_history,
+            executed_steps: large_count + 1,
+        };
+        assert!(!rounded_one_microstep.exceeds_threshold());
         assert!(
-            !reseeded.into_inner(),
-            "a diverged lane must not re-seed the shim"
+            StepcompressReconciliation {
+                executed_steps: large_count + 3,
+                ..rounded_one_microstep
+            }
+            .exceeds_threshold()
         );
     }
 
@@ -1013,25 +1079,58 @@ mod stepcompress_reconcile_tests {
     }
 
     #[test]
-    fn lane_sweep_skips_piece_mode_mcus_and_covers_every_stepcompress_lane() {
-        let mut piece_cfg = cfg(SteppingMode::Piece);
-        piece_cfg.mcu_id = 9;
-        let configs = vec![piece_cfg, cfg(SteppingMode::Stepcompress)];
+    fn lane_sweep_uses_all_stepcompress_readbacks_and_keeps_piece_mode_axes() {
+        let configs = vec![
+            cfg(SteppingMode::Stepcompress),
+            piece_z_cfg(),
+            stepcompress_follower_cfg(),
+        ];
+        let history_keys: RefCell<Vec<(u32, u8)>> = RefCell::new(Vec::new());
         let queried: RefCell<Vec<(u32, u32)>> = RefCell::new(Vec::new());
-        reconcile_stepcompress_lanes(
+        let reseeded: RefCell<Vec<(u32, usize, i64)>> = RefCell::new(Vec::new());
+        let pos = reconcile_stepcompress_lanes(
             &configs,
-            |k| {
-                assert_eq!(k.mcu_id, MCU_ID);
-                Ok(0.0)
+            |key| {
+                history_keys.borrow_mut().push((key.mcu_id, key.axis));
+                Ok(match (key.mcu_id, usize::from(key.axis)) {
+                    (MCU_ID, AXIS_X) => 40.0,
+                    (MCU_ID, AXIS_Y) => 0.0,
+                    (9, AXIS_Z) => 30.0,
+                    (10, 3) => 5.0,
+                    unexpected => panic!("unexpected history lane {unexpected:?}"),
+                })
             },
             &|lane| {
                 queried.borrow_mut().push((lane.mcu_id, lane.oid));
-                Ok(0)
+                Ok(match lane.oid {
+                    11 => 3200,
+                    12 => 0,
+                    13 => 5000,
+                    oid => panic!("unexpected oid {oid}"),
+                })
             },
-            &|_, _| Ok(()),
+            &|lane, count| {
+                assert_eq!(queried.borrow().len(), 3);
+                reseeded.borrow_mut().push((lane.mcu_id, lane.motor, count));
+                Ok(())
+            },
         )
         .expect("mixed-mode sweep must succeed");
-        assert_eq!(queried.into_inner(), vec![(MCU_ID, 11), (MCU_ID, 12)]);
+        assert!((pos.0[0] - 20.0).abs() < 1e-9);
+        assert!((pos.0[1] - 20.0).abs() < 1e-9);
+        assert_eq!(pos.0[2], 30.0);
+        assert_eq!(
+            history_keys.into_inner(),
+            vec![(MCU_ID, 0), (MCU_ID, 1), (10, 3), (9, 2)]
+        );
+        assert_eq!(
+            queried.into_inner(),
+            vec![(MCU_ID, 11), (MCU_ID, 12), (10, 13)]
+        );
+        assert_eq!(
+            reseeded.into_inner(),
+            vec![(MCU_ID, 0, 3200), (MCU_ID, 1, 0), (10, 0, 5000)]
+        );
     }
 
     #[test]

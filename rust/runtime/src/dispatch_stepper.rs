@@ -3,8 +3,8 @@
 use core::sync::atomic::Ordering;
 
 use crate::fault_helpers::{
-    raise_multi_motor_mask, raise_position_count_overflow, raise_step_queue_overflow,
-    raise_steps_per_sample_exceeded, raise_unknown_step_mode,
+    raise_internal_invariant, raise_multi_motor_mask, raise_position_count_overflow,
+    raise_step_queue_overflow, raise_steps_per_sample_exceeded, raise_unknown_step_mode,
 };
 use crate::phase_lut::{PHASE_LUT, PHASE_LUT_SIZE};
 use crate::state::SharedState;
@@ -15,7 +15,9 @@ const _: () = assert!(
 );
 use crate::step_queue::{StepEntry, StepQueue, peek as queue_peek, push as queue_push};
 use crate::stepping_state::{AxisConfig, StepMode};
-use crate::sub_sample_timing::{StepTimeInputs, StepTimingResult, compute_step_times};
+use crate::sub_sample_timing::{
+    StepTimeInputs, StepTimingResult, compute_step_times, quantize_step_delta,
+};
 use crate::tick::bump_relaxed;
 
 // FFI declaration for the C-side SPI write function.
@@ -124,6 +126,27 @@ pub const AXIS_B: usize = 1;
 pub const AXIS_Z: usize = 2;
 pub const AXIS_E: usize = 3;
 
+const STEP_TIMING_NO_STEPS_INVARIANT: u16 = 1;
+#[inline]
+fn advance_step_phase(
+    step_phase: f32,
+    p_start: f32,
+    p_end: f32,
+    microstep_distance: f32,
+) -> (f32, i32) {
+    let step_phase_end = step_phase + (p_end - p_start);
+    (
+        step_phase_end,
+        quantize_step_delta(step_phase_end, microstep_distance),
+    )
+}
+
+#[inline]
+#[allow(clippy::cast_precision_loss)]
+fn phase_after_steps(step_phase_end: f32, step_delta: i32, microstep_distance: f32) -> f32 {
+    step_phase_end - step_delta as f32 * microstep_distance
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_axis(
     axis_idx: usize,
@@ -173,11 +196,12 @@ pub fn dispatch_axis(
                     axis,
                     shared,
                     p_end,
+                    p_sample_start,
                     motor_mask,
                     overlay_just_armed,
                 );
             } else {
-                dispatch_phase(axis_idx, axis, shared, p_end);
+                dispatch_phase(axis_idx, axis, shared, p_end, p_sample_start);
             }
         }
         _ => {
@@ -230,41 +254,51 @@ fn dispatch_pulse(
         }
         Some(idx)
     };
-    let load_step_frame = |axis: &AxisConfig| -> i32 {
+    let load_step_frame = |axis: &AxisConfig| -> (i32, f32) {
         match overlay_motor_idx.and_then(|idx| axis.steppers.get(idx)) {
-            None => axis.last_step_count,
-            Some(stepper) => stepper.overlay_step_frame.load(Ordering::Acquire),
+            None => (axis.last_step_count, axis.step_phase),
+            Some(stepper) => (
+                stepper.overlay_step_frame.load(Ordering::Acquire),
+                f32::from_bits(stepper.overlay_step_phase_bits.load(Ordering::Acquire)),
+            ),
         }
     };
-    let store_step_frame = |axis: &mut AxisConfig, v: i32| match overlay_motor_idx
+    let store_step_frame = |axis: &mut AxisConfig, count: i32, phase: f32| match overlay_motor_idx
         .and_then(|idx| axis.steppers.get(idx))
     {
-        None => axis.last_step_count = v,
-        Some(stepper) => stepper.overlay_step_frame.store(v, Ordering::Release),
+        None => {
+            axis.last_step_count = count;
+            axis.step_phase = phase;
+        }
+        Some(stepper) => {
+            stepper.overlay_step_frame.store(count, Ordering::Release);
+            stepper
+                .overlay_step_phase_bits
+                .store(phase.to_bits(), Ordering::Release);
+        }
     };
 
-    #[allow(clippy::cast_possible_truncation)]
-    let target_step_count = libm::roundf(p_end / microstep_distance) as i32;
-    let prev_step_count = if overlay_just_armed && overlay_motor_idx.is_some() {
-        0
+    let (prev_step_count, step_phase_start) = if overlay_just_armed && overlay_motor_idx.is_some() {
+        (0, 0.0)
     } else {
         load_step_frame(axis)
     };
-    let signed_steps = target_step_count.wrapping_sub(prev_step_count);
+    let (step_phase_end, requested_steps) =
+        advance_step_phase(step_phase_start, p_sample_start, p_end, microstep_distance);
+    let requested_target = prev_step_count.wrapping_add(requested_steps);
     if axis_idx == AXIS_A {
         shared
             .isr_last_p_end_bits
             .store(p_end.to_bits(), Ordering::Relaxed);
     }
-    store_step_frame(axis, target_step_count);
-
-    if signed_steps == 0 {
+    if requested_steps == 0 {
+        store_step_frame(axis, prev_step_count, step_phase_end);
         bump_relaxed(&shared.isr_pulse_zero_step_count);
         return;
     }
     if axis_idx == AXIS_A {
         shared.isr_last_signed_steps.store(
-            signed_steps.unsigned_abs(),
+            requested_steps.unsigned_abs(),
             core::sync::atomic::Ordering::Relaxed,
         );
     }
@@ -273,18 +307,19 @@ fn dispatch_pulse(
     // sample. Emit up to the cap and carry the remainder into subsequent
     // samples (steps conserved) instead of faulting on sim jitter.
     #[cfg(feature = "mcu-sim")]
-    let (target_step_count, signed_steps) = {
-        #[allow(clippy::cast_possible_wrap)]
-        let cap = axis_step_cap as i32;
-        if signed_steps.abs() > cap {
-            let clamped_steps = signed_steps.signum() * cap;
-            let clamped_target = prev_step_count.wrapping_add(clamped_steps);
-            store_step_frame(axis, clamped_target);
-            (clamped_target, clamped_steps)
+    let signed_steps = {
+        if requested_steps.unsigned_abs() > axis_step_cap {
+            #[allow(clippy::cast_possible_wrap)]
+            let cap = axis_step_cap as i32;
+            requested_steps.signum() * cap
         } else {
-            (target_step_count, signed_steps)
+            requested_steps
         }
     };
+    #[cfg(not(feature = "mcu-sim"))]
+    let signed_steps = requested_steps;
+    let target_step_count = prev_step_count.wrapping_add(signed_steps);
+    let next_step_phase = phase_after_steps(step_phase_end, signed_steps, microstep_distance);
     let abs_steps = signed_steps.unsigned_abs();
     if abs_steps > axis_step_cap {
         shared
@@ -300,13 +335,12 @@ fn dispatch_pulse(
             );
         }
         bump_relaxed(&shared.isr_overrun_count);
-        store_step_frame(axis, prev_step_count);
         capture_steps_fault_context(
             axis_idx,
             p_end,
             p_sample_start,
             prev_step_count,
-            target_step_count,
+            requested_target,
             abs_steps,
         );
         raise_steps_per_sample_exceeded(shared, axis_idx, abs_steps);
@@ -314,10 +348,9 @@ fn dispatch_pulse(
     }
 
     let inputs = StepTimeInputs {
-        p_start: p_sample_start,
-        p_end,
-        prev_step_count,
-        target_step_count,
+        p_start: step_phase_start,
+        p_end: step_phase_end,
+        step_delta: signed_steps,
         microstep_distance,
         sample_period_sec,
         sample_start_cycles,
@@ -328,7 +361,10 @@ fn dispatch_pulse(
     let result = compute_step_times(&inputs);
     let times = match result {
         StepTimingResult::SecantSlope(t) | StepTimingResult::Uniform(t) => t,
-        StepTimingResult::NoSteps => return,
+        StepTimingResult::NoSteps => {
+            raise_internal_invariant(shared, axis_idx, STEP_TIMING_NO_STEPS_INVARIANT);
+            return;
+        }
     };
 
     let dir: i8 = if signed_steps > 0 { 1 } else { -1 };
@@ -357,7 +393,13 @@ fn dispatch_pulse(
                 }
             }
             raise_step_queue_overflow(shared, axis_idx);
-            store_step_frame(axis, prev_step_count + committed_delta);
+            let committed_phase =
+                phase_after_steps(step_phase_end, committed_delta, microstep_distance);
+            store_step_frame(
+                axis,
+                prev_step_count.wrapping_add(committed_delta),
+                committed_phase,
+            );
             return;
         }
         steps_committed += 1;
@@ -369,6 +411,7 @@ fn dispatch_pulse(
         }
     }
 
+    store_step_frame(axis, target_step_count, next_step_phase);
     commit_position_count_masked(axis, axis_idx, shared, motor_mask, signed_steps);
 }
 
@@ -430,6 +473,7 @@ fn dispatch_phase_overlay(
     axis: &mut AxisConfig,
     shared: &SharedState,
     p_end: f32,
+    p_sample_start: f32,
     motor_mask: u8,
     overlay_just_armed: bool,
 ) {
@@ -449,15 +493,22 @@ fn dispatch_phase_overlay(
         raise_multi_motor_mask(shared, axis_idx, motor_mask);
         return;
     };
-    #[allow(clippy::cast_possible_truncation)]
-    let target = libm::roundf(p_end / microstep_distance) as i32;
-    let prev = if overlay_just_armed {
-        0
+    let (prev, step_phase_start) = if overlay_just_armed {
+        (0, 0.0)
     } else {
-        stepper.overlay_step_frame.load(Ordering::Acquire)
+        (
+            stepper.overlay_step_frame.load(Ordering::Acquire),
+            f32::from_bits(stepper.overlay_step_phase_bits.load(Ordering::Acquire)),
+        )
     };
+    let (step_phase_end, delta) =
+        advance_step_phase(step_phase_start, p_sample_start, p_end, microstep_distance);
+    let target = prev.wrapping_add(delta);
+    let next_step_phase = phase_after_steps(step_phase_end, delta, microstep_distance);
     stepper.overlay_step_frame.store(target, Ordering::Release);
-    let delta = target.wrapping_sub(prev);
+    stepper
+        .overlay_step_phase_bits
+        .store(next_step_phase.to_bits(), Ordering::Release);
     let cur = stepper.phase_offset_microsteps.load(Ordering::Acquire);
     let new_off = cur.wrapping_add(delta);
     stepper
@@ -469,15 +520,22 @@ fn dispatch_phase_overlay(
     write_phase_coils(axis_idx, axis, shared, 0);
 }
 
-fn dispatch_phase(axis_idx: usize, axis: &mut AxisConfig, shared: &SharedState, p_end: f32) {
+fn dispatch_phase(
+    axis_idx: usize,
+    axis: &mut AxisConfig,
+    shared: &SharedState,
+    p_end: f32,
+    p_sample_start: f32,
+) {
     let microstep_distance = axis.microstep_distance;
     if !microstep_distance.is_finite() || microstep_distance == 0.0 {
         return;
     }
 
-    #[allow(clippy::cast_possible_truncation)]
-    let target_microsteps_axis = libm::roundf(p_end / microstep_distance) as i32;
-    axis.last_step_count = target_microsteps_axis;
+    let (step_phase_end, delta) =
+        advance_step_phase(axis.step_phase, p_sample_start, p_end, microstep_distance);
+    axis.last_step_count = axis.last_step_count.wrapping_add(delta);
+    axis.step_phase = phase_after_steps(step_phase_end, delta, microstep_distance);
 
     let max_ramp = i32::from(
         shared

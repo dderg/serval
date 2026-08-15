@@ -1,6 +1,8 @@
 use runtime::dispatch_stepper::DISPLACEMENT_THRESHOLD_MM;
 use runtime::motion_core::{ArmedPiece, arm_piece};
-use runtime::sub_sample_timing::{StepTimeInputs, StepTimingResult, compute_step_times};
+use runtime::sub_sample_timing::{
+    StepTimeInputs, StepTimingResult, compute_step_times, quantize_step_delta,
+};
 
 use crate::ring::PieceRing;
 use crate::{MotorConfig, ShimError};
@@ -21,6 +23,7 @@ pub struct PendingStep {
 struct OverlayFrame {
     p_prev: f32,
     step_count: i64,
+    step_phase: f32,
 }
 
 #[derive(Debug)]
@@ -29,6 +32,7 @@ pub struct MotorSampler {
     overlay: Option<OverlayFrame>,
     p_prev: f32,
     step_count: i64,
+    step_phase: f32,
     prev_sample: u64,
     origin_clock: Option<u64>,
     positioned: bool,
@@ -48,6 +52,7 @@ impl MotorSampler {
             overlay: None,
             p_prev: 0.0,
             step_count: 0,
+            step_phase: 0.0,
             prev_sample: 0,
             origin_clock: None,
             positioned: false,
@@ -75,6 +80,12 @@ impl MotorSampler {
         self.armed = None;
         self.step_count = count;
         self.p_prev = count as f32 * cfg.microstep_distance;
+        #[allow(clippy::cast_precision_loss)]
+        let physical_position = count as f64 * f64::from(cfg.microstep_distance);
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            self.step_phase = (f64::from(self.p_prev) - physical_position) as f32;
+        }
         self.prev_sample = 0;
         self.origin_clock = None;
         self.positioned = true;
@@ -103,6 +114,7 @@ impl MotorSampler {
                 self.overlay = (piece.motor_mask != 0).then_some(OverlayFrame {
                     p_prev: 0.0,
                     step_count: 0,
+                    step_phase: 0.0,
                 });
                 if self.origin_clock.is_none() {
                     let begin = piece.start_time.max(self.resume_floor.unwrap_or(0));
@@ -142,14 +154,18 @@ impl MotorSampler {
         out: &mut Vec<PendingStep>,
     ) -> Result<(), ShimError> {
         let p_end = armed.eval_pos_vel(now).0;
-        let target = libm::roundf(p_end / cfg.microstep_distance) as i64;
-        let (prev, p_start) = match self.overlay {
-            Some(frame) => (frame.step_count, frame.p_prev),
-            None => (self.step_count, self.p_prev),
+        let (prev, p_start, step_phase_start) = match self.overlay {
+            Some(frame) => (frame.step_count, frame.p_prev, frame.step_phase),
+            None => (self.step_count, self.p_prev, self.step_phase),
         };
-        let signed_steps = target - prev;
+        let step_phase_end = step_phase_start + (p_end - p_start);
+        let step_delta = quantize_step_delta(step_phase_end, cfg.microstep_distance);
+        #[allow(clippy::cast_precision_loss)]
+        let next_step_phase = step_phase_end - step_delta as f32 * cfg.microstep_distance;
+        let target = prev + i64::from(step_delta);
+        let signed_steps = i64::from(step_delta);
         if signed_steps == 0 {
-            self.commit_frame(p_end, prev);
+            self.commit_frame(p_end, prev, next_step_phase);
             return Ok(());
         }
         let abs_steps = u32::try_from(signed_steps.unsigned_abs()).unwrap_or(u32::MAX);
@@ -162,10 +178,9 @@ impl MotorSampler {
         }
 
         let inputs = StepTimeInputs {
-            p_start,
-            p_end,
-            prev_step_count: step_count_as_i32(prev),
-            target_step_count: step_count_as_i32(target),
+            p_start: step_phase_start,
+            p_end: step_phase_end,
+            step_delta,
             microstep_distance: cfg.microstep_distance,
             sample_period_sec: self.sample_period_sec,
             sample_start_cycles: self.prev_sample as u32,
@@ -175,7 +190,7 @@ impl MotorSampler {
         let times = match compute_step_times(&inputs) {
             StepTimingResult::SecantSlope(t) | StepTimingResult::Uniform(t) => t,
             StepTimingResult::NoSteps => {
-                self.commit_frame(p_end, prev);
+                self.commit_frame(p_end, prev, next_step_phase);
                 return Ok(());
             }
         };
@@ -186,11 +201,20 @@ impl MotorSampler {
         let window_start_lo = self.prev_sample as u32;
         for cycle_lo in times.iter().copied() {
             let clock = self.prev_sample + u64::from(cycle_lo.wrapping_sub(window_start_lo));
-            if self.last_step_clock.is_some_and(|last| clock <= last) {
-                return Err(ShimError::StepRateExceeded {
+            if let Some(previous_clock) = self.last_step_clock.filter(|&last| clock <= last) {
+                return Err(ShimError::StepClockRegression {
                     motor,
-                    steps: abs_steps,
-                    cap: cfg.max_steps_per_sample,
+                    previous_clock,
+                    clock,
+                    sample_clock: now,
+                    piece_start_clock: armed.piece_start_cycles,
+                    piece_end_clock: armed.piece_end_cycles,
+                    previous_step_count: prev,
+                    target_step_count: target,
+                    p_start,
+                    p_end,
+                    previous_advance: out.last().map(|step| step.advance),
+                    advance,
                 });
             }
             self.last_step_clock = Some(clock);
@@ -200,19 +224,21 @@ impl MotorSampler {
                 advance,
             });
         }
-        self.commit_frame(p_end, target);
+        self.commit_frame(p_end, target, next_step_phase);
         Ok(())
     }
 
-    fn commit_frame(&mut self, p_end: f32, step_count: i64) {
+    fn commit_frame(&mut self, p_end: f32, step_count: i64, step_phase: f32) {
         match &mut self.overlay {
             Some(frame) => {
                 frame.p_prev = p_end;
                 frame.step_count = step_count;
+                frame.step_phase = step_phase;
             }
             None => {
                 self.p_prev = p_end;
                 self.step_count = step_count;
+                self.step_phase = step_phase;
             }
         }
     }
@@ -227,10 +253,6 @@ fn sample_period_cycles(cfg: &MotorConfig) -> u32 {
         cfg.cycles_per_second
     );
     cycles.round() as u32
-}
-
-fn step_count_as_i32(count: i64) -> i32 {
-    i32::try_from(count).unwrap_or_else(|_| panic!("step count {count} exceeds the wire i32 range"))
 }
 
 #[cfg(test)]

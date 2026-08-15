@@ -271,6 +271,60 @@ impl StepcompressLane {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StepcompressReconciliation {
+    lane: StepcompressLane,
+    history_position: f64,
+    executed_steps: i64,
+}
+
+impl StepcompressReconciliation {
+    fn executed_position(self) -> f64 {
+        self.lane.steps_to_mm(self.executed_steps)
+    }
+
+    fn signed_divergence(self) -> f64 {
+        self.executed_position() - self.history_position
+    }
+
+    fn discrepancy_threshold(self) -> f64 {
+        let executed_position = self.executed_position();
+        let magnitude = self
+            .history_position
+            .abs()
+            .max(executed_position.abs())
+            .max(self.lane.microstep_distance);
+        let wire_roundoff = 0.5 * f64::from(f32::EPSILON) * magnitude;
+        let arithmetic_roundoff = 8.0 * f64::EPSILON * magnitude;
+        self.lane.microstep_distance + wire_roundoff + arithmetic_roundoff
+    }
+
+    fn exceeds_threshold(self) -> bool {
+        self.signed_divergence().abs() > self.discrepancy_threshold()
+    }
+
+    fn emit_discrepancy(self) {
+        let signed_divergence = self.signed_divergence();
+        if !self.exceeds_threshold() {
+            return;
+        }
+        tracing::warn!(
+            subsystem = "homing",
+            event = "stepcompress_reconcile_discrepancy",
+            mcu = self.lane.mcu_id,
+            axis = self.lane.axis,
+            motor = self.lane.motor,
+            oid = self.lane.oid,
+            history_position_mm = self.history_position,
+            executed_position_mm = self.executed_position(),
+            executed_steps = self.executed_steps,
+            signed_divergence_mm = signed_divergence,
+            threshold_mm = self.discrepancy_threshold(),
+            "authoritative MCU step readback differs from piece history by more than one microstep"
+        );
+    }
+}
+
 pub fn stepcompress_lane(
     cfg: &McuAxisConfig,
     axis_key: AxisKey,
@@ -331,47 +385,6 @@ pub fn stepcompress_lane(
     }))
 }
 
-/// One lane's reconcile verdict: the mcu's executed step count against the
-/// piece history at the same clock.
-pub struct LaneReconcile {
-    pub lane: StepcompressLane,
-    pub history_position: f64,
-    pub executed_steps: i64,
-}
-
-impl LaneReconcile {
-    #[must_use]
-    pub fn executed_position(&self) -> f64 {
-        self.lane.steps_to_mm(self.executed_steps)
-    }
-
-    #[must_use]
-    pub fn divergence(&self) -> f64 {
-        (self.executed_position() - self.history_position).abs()
-    }
-
-    #[must_use]
-    pub fn diverged(&self) -> bool {
-        self.divergence() > self.lane.microstep_distance
-    }
-
-    fn describe(&self) -> String {
-        format!(
-            "mcu={} axis={} expected={:.6}mm (piece history) actual={:.6}mm \
-             (stepper_get_position oid={} count={}) divergence={:.6}mm exceeds \
-             one microstep ({:.6}mm)",
-            self.lane.mcu_id,
-            self.lane.axis,
-            self.history_position,
-            self.executed_position(),
-            self.lane.oid,
-            self.executed_steps,
-            self.divergence(),
-            self.lane.microstep_distance
-        )
-    }
-}
-
 pub fn reconcile_stepcompress_axis(
     cfg: &McuAxisConfig,
     axis_key: AxisKey,
@@ -382,68 +395,69 @@ pub fn reconcile_stepcompress_axis(
     let Some(lane) = stepcompress_lane(cfg, axis_key)? else {
         return Ok(history_position);
     };
-    let verdict = LaneReconcile {
+    let reconciliation = StepcompressReconciliation {
         lane,
         history_position,
         executed_steps: query_step_count(&lane)?,
     };
-    if verdict.diverged() {
-        return Err(format!(
-            "stepcompress trip reconcile diverged: {}",
-            verdict.describe()
-        ));
-    }
-    reseed_step_counter(&lane, lane.trajectory_steps(verdict.executed_steps))?;
-    Ok(history_position)
+    reconciliation.emit_discrepancy();
+    reseed_step_counter(
+        &reconciliation.lane,
+        reconciliation
+            .lane
+            .trajectory_steps(reconciliation.executed_steps),
+    )?;
+    Ok(reconciliation.executed_position())
 }
 
-/// Every lane is measured before any lane is reseeded: a trip that halted the
-/// whole cohort mid-move only makes sense as a whole, and reseeding the lanes
-/// that happened to be checked before a diverging one would leave the cohort
-/// half-adopted. On CoreXY the sibling belt lane is also the only thing that
-/// distinguishes a timing error from a counting error, so a divergence report
-/// names every lane, not just the first.
 pub fn reconcile_stepcompress_lanes(
     configs: &[McuAxisConfig],
-    mut lane_position: impl FnMut(AxisKey) -> Result<f64, String>,
+    mut history_lane_position: impl FnMut(AxisKey) -> Result<f64, String>,
     query_step_count: &dyn Fn(&StepcompressLane) -> Result<i64, String>,
     reseed_step_counter: &dyn Fn(&StepcompressLane, i64) -> Result<(), String>,
-) -> Result<(), String> {
-    let mut verdicts = Vec::new();
+) -> Result<geometry::MachinePos, String> {
+    let mut reconciliations = Vec::new();
     for cfg in configs {
         if cfg.stepping_mode != SteppingMode::Stepcompress {
             continue;
         }
-        for &lane in &cfg.axes {
+        for &axis in &cfg.axes {
             let axis_key = AxisKey {
                 mcu_id: cfg.mcu_id,
-                axis: lane as u8,
+                axis: axis as u8,
             };
-            let Some(lane) = stepcompress_lane(cfg, axis_key)? else {
-                continue;
-            };
-            verdicts.push(LaneReconcile {
+            let lane = stepcompress_lane(cfg, axis_key)?
+                .expect("stepcompress config must produce a stepcompress lane");
+            reconciliations.push(StepcompressReconciliation {
                 lane,
-                history_position: lane_position(axis_key)?,
+                history_position: history_lane_position(axis_key)?,
                 executed_steps: query_step_count(&lane)?,
             });
         }
     }
-    let diverged: Vec<String> = verdicts
-        .iter()
-        .filter(|v| v.diverged())
-        .map(LaneReconcile::describe)
-        .collect();
-    if !diverged.is_empty() {
-        return Err(format!(
-            "stepcompress trip reconcile diverged: {}",
-            diverged.join("; ")
-        ));
+
+    let reconciled = cartesian_from_motor_lanes(configs, |key| {
+        reconciliations
+            .iter()
+            .find(|reconciliation| {
+                reconciliation.lane.mcu_id == key.mcu_id && reconciliation.lane.axis == key.axis
+            })
+            .map_or_else(
+                || history_lane_position(key),
+                |reconciliation| Ok(reconciliation.executed_position()),
+            )
+    })?;
+
+    for reconciliation in reconciliations {
+        reconciliation.emit_discrepancy();
+        reseed_step_counter(
+            &reconciliation.lane,
+            reconciliation
+                .lane
+                .trajectory_steps(reconciliation.executed_steps),
+        )?;
     }
-    for v in &verdicts {
-        reseed_step_counter(&v.lane, v.lane.trajectory_steps(v.executed_steps))?;
-    }
-    Ok(())
+    Ok(geometry::MachinePos(reconciled))
 }
 
 pub fn broadcast_stop<S, F>(

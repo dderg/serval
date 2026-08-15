@@ -111,6 +111,20 @@ pub enum ShimError {
         steps: u32,
         cap: u32,
     },
+    StepClockRegression {
+        motor: usize,
+        previous_clock: u64,
+        clock: u64,
+        sample_clock: u64,
+        piece_start_clock: u64,
+        piece_end_clock: u64,
+        previous_step_count: i64,
+        target_step_count: i64,
+        p_start: f32,
+        p_end: f32,
+        previous_advance: Option<i8>,
+        advance: i8,
+    },
     PieceGap {
         motor: usize,
         expected: u64,
@@ -140,6 +154,26 @@ impl std::fmt::Display for ShimError {
             Self::StepRateExceeded { motor, steps, cap } => write!(
                 f,
                 "motor {motor}: {steps} steps in one sample exceeds cap {cap}"
+            ),
+            Self::StepClockRegression {
+                motor,
+                previous_clock,
+                clock,
+                sample_clock,
+                piece_start_clock,
+                piece_end_clock,
+                previous_step_count,
+                target_step_count,
+                p_start,
+                p_end,
+                previous_advance,
+                advance,
+            } => write!(
+                f,
+                "motor {motor}: step clock {clock} did not advance past {previous_clock} \
+                 at sample {sample_clock} in piece {piece_start_clock}..{piece_end_clock}; \
+                 position {p_start} -> {p_end}, count {previous_step_count} -> \
+                 {target_step_count}, advance {previous_advance:?} -> {advance}"
             ),
             Self::StepTooSoon {
                 motor,

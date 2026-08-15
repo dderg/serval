@@ -14,13 +14,14 @@ pub struct EnqueueMsg {
     pub lead_secs: f64,
     pub source_line: u32,
     pub epoch_freq: Option<f64>,
+    pub batch_end: bool,
 }
 
-/// Records each piece into the motion-history store at the moment it is
-/// accepted by the MCU, so the store mirrors what the MCU can actually
-/// execute. Recording at dispatch time instead would flood the ring with an
-/// entire move up front — a long homing move evicts its own start before the
-/// endstop trip is resolved against it.
+/// Records each piece into the motion-history store when its transport endpoint
+/// takes ownership, so the store mirrors work that can reach the MCU. Recording
+/// at dispatch time instead would flood the ring with an entire move up front —
+/// a long homing move evicts its own start before the endstop trip is resolved
+/// against it.
 ///
 /// A piece carries its span in seconds, so placing its end on the MCU clock
 /// needs the rate that clock actually runs at — the same measured rate the
@@ -77,9 +78,7 @@ impl HistoryRecorder {
 
 pub struct HeartbeatMsg {
     pub mcu_id: u32,
-    /// Retired piece counts indexed by AXIS, not by the reporting endpoint's
-    /// motor/slot order — the pump keys its queues by `AxisKey`. Endpoints
-    /// whose native counters are motor- or slot-indexed re-index first.
+    pub consumed_counts: Option<Vec<u32>>,
     pub retired_counts: Vec<u32>,
 }
 
@@ -214,6 +213,10 @@ pub trait PieceSink: Send {
                 f.room,
             )?;
         }
+        Ok(())
+    }
+
+    fn flush_keys(&self, _keys: &[AxisKey]) -> Result<(), SendError> {
         Ok(())
     }
 

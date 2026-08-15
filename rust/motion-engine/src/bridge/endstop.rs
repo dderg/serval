@@ -260,13 +260,6 @@ pub(super) fn dispatch_endstop_trip(
                         run_start,
                     )
                 };
-            let motor_start = match crate::homing::motor_frame_start(&configs, run_start) {
-                Ok(v) => v,
-                Err(e) => {
-                    let _ = run.notify.send(Err(e));
-                    return;
-                }
-            };
 
             let query_step_count = |lane: &crate::homing::StepcompressLane| -> Result<i64, String> {
                 let io = host_ios.get(&lane.mcu_id).ok_or_else(|| {
@@ -311,35 +304,31 @@ pub(super) fn dispatch_endstop_trip(
                     guard.reset_motor_position(lane.motor, count)
                 };
 
-            let outcome = reconstruct_cartesian(event_mcu, trip_clock)
-                .and_then(|trip| {
-                    if let Some((freeze_mcu, freeze_clock)) = suppression_clock {
-                        reconstruct_cartesian(freeze_mcu, freeze_clock)
-                            .map(|final_pos| (trip, final_pos, trip_clock))
-                    } else {
-                        reconstruct_cartesian(axis_key.mcu_id, discard_clock)
-                            .map(|final_pos| (trip, final_pos, trip_clock))
-                    }
-                })
-                .and_then(|positions| {
-                    crate::homing::reconcile_stepcompress_lanes(
-                        &configs,
-                        |key| {
-                            crate::homing::reconstruct_axis_position(
-                                axis_key.mcu_id,
-                                discard_clock,
-                                key,
-                                &router_arc,
-                                &history_arc,
-                                run.window_start_host,
-                                motor_start.get(usize::from(key.axis)).copied(),
-                            )
-                        },
-                        &query_step_count,
-                        &reseed_step_counter,
-                    )
-                    .map(|()| positions)
-                });
+            let (final_source_mcu, final_clock) =
+                suppression_clock.unwrap_or((axis_key.mcu_id, discard_clock));
+            let lane_starts = crate::mcu_config::reanchor_axis_targets(&configs, run_start);
+            let outcome = reconstruct_cartesian(event_mcu, trip_clock).and_then(|trip| {
+                crate::homing::reconcile_stepcompress_lanes(
+                    &configs,
+                    |key| {
+                        crate::homing::reconstruct_axis_position(
+                            final_source_mcu,
+                            final_clock,
+                            key,
+                            &router_arc,
+                            &history_arc,
+                            run.window_start_host,
+                            lane_starts
+                                .iter()
+                                .find(|(lane_key, _)| *lane_key == key)
+                                .map(|(_, position)| *position),
+                        )
+                    },
+                    &query_step_count,
+                    &reseed_step_counter,
+                )
+                .map(|final_pos| (trip, final_pos, trip_clock))
+            });
 
             let outcome = outcome.and_then(|positions| {
                 for &mcu_id in &stepper_mcu_ids {

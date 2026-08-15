@@ -15,7 +15,7 @@ use super::messages::{
 use super::sched::{
     AxisFrame, AxisQueue, FramePlan, Schedule, append_pieces_merging_holds, schedule,
 };
-use super::stall::RetirementStallWatch;
+use super::stall::ConsumptionStallWatch;
 use crate::types::AxisKey;
 
 // How far ahead of the MCU playhead the pump pushes pieces — the depth of the
@@ -37,38 +37,40 @@ pub const MAX_LEAD_SECS: f64 = 2.0;
 // for fences and the queued commands riding them.
 pub const PUMP_DATA_CHANNEL_CAP: usize = 128;
 
-// Bound on total host-side staged pieces across all axes. Intake stops here so
-// the data channel backpressures the planner during streaming. It is a TOTAL,
-// not per-axis (all axes interleave on one channel). A drip cohort BYPASSES it:
-// a homing axis can lower into a burst larger than the cap, and stopping intake
-// there would leave the other participants' messages unpulled behind it on the
-// shared channel — starving the cohort floor and freezing the planner on the
-// full channel. Drip is finite, so greedy draining is safe there.
-//
-// Sizing is a latency/stall-margin trade: staged pieces plus the MCU rings
-// are the committed depth that keeps the playhead fed through upstream
-// stalls, and the longest known stall is a full planner re-plan pass
-// (~0.9 s measured on dense jerk-limited infill, planner_bench, M-series;
-// expect 2–3 s on a loaded Pi). Staging must stay comfortably above the
-// total ring cache (62 KB default = 1322 pieces per MCU, 2–3 MCUs typical)
-// or the pump throttles the planner before the frontier can absorb such a
-// gap — the playhead then overruns the committed end (anchor_underrun →
-// drive fault). Every staged piece beyond that margin is queued-command
-// latency: fan changes wait behind the whole backlog. 4096 ≈ 2–3 s of
-// typical motion, ~1.5× the two-MCU ring cache.
-const PUMP_INTAKE_BACKLOG_CAP: u64 = 4096;
+pub(super) const PUMP_INTAKE_BACKLOG_SOFT_CAP: u64 = 4096;
+pub(super) const PUMP_INTAKE_BACKLOG_HARD_CAP: u64 = 8192;
+pub(super) const PUMP_INTAKE_MIN_RUNWAY_SECS: f64 = 5.0;
 
-// How long an axis ring may sit at room()==0 with `q.retired` frozen before the
-// pump treats it as the MCU having stopped retiring pieces rather than a normal
-// transient full-ring wait.
-pub(super) const RETIREMENT_STALL_FATAL: Duration = Duration::from_secs(10);
-
-const INFERRED_HALT_FATAL: Duration = Duration::from_secs(1);
-
-fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
-    let staged: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
-    staged < PUMP_INTAKE_BACKLOG_CAP
+fn staged_axis_runway_secs(queue: &AxisQueue) -> f64 {
+    let Some((_, start_host)) = queue.pieces.front() else {
+        return 0.0;
+    };
+    let (last, last_start_host) = queue.pieces.back().expect("nonempty queue has a tail");
+    let runway = last_start_host + f64::from(last.duration) - start_host;
+    assert!(
+        runway.is_finite() && runway >= 0.0,
+        "pump staged axis runway must be finite and nonnegative, got {runway}"
+    );
+    runway
 }
+
+fn minimum_staged_runway_secs(queues: &BTreeMap<AxisKey, AxisQueue>) -> f64 {
+    queues
+        .values()
+        .map(staged_axis_runway_secs)
+        .reduce(f64::min)
+        .unwrap_or(0.0)
+}
+
+pub(super) fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
+    let staged: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
+    staged < PUMP_INTAKE_BACKLOG_SOFT_CAP
+        || (staged < PUMP_INTAKE_BACKLOG_HARD_CAP
+            && minimum_staged_runway_secs(queues) < PUMP_INTAKE_MIN_RUNWAY_SECS)
+}
+
+pub(super) const CONSUMPTION_STALL_FATAL: Duration = Duration::from_secs(10);
+const INFERRED_HALT_FATAL: Duration = Duration::from_secs(1);
 
 // Mirrors the MCU's MAX_START_IN_PAST_SECS: 500us over host-projection
 // jitter on real hardware; in the simulator (MCU_SIM_SOCK_DIR set) the
@@ -102,7 +104,8 @@ pub(super) struct Pump<S> {
     pub(super) backlog: Arc<AtomicU64>,
     pub(super) holding_ahead: bool,
     pub(super) data_open: bool,
-    pub(super) retirement_stall: RetirementStallWatch,
+    pub(super) intake_batch_open: bool,
+    pub(super) consumption_stall: ConsumptionStallWatch,
     pub(super) mem_probe: MemPressureProbe,
 }
 
@@ -131,6 +134,18 @@ impl<S: PieceSink> Pump<S> {
         match msg {
             PumpMsg::Shutdown => return false,
             PumpMsg::Flush(keys) => {
+                if let Err(e) = self.sink.flush_keys(&keys) {
+                    tracing::error!(
+                        subsystem = "motion",
+                        event = "stepcompress_flush_fatal",
+                        error = ?e,
+                        "stepcompress flush rejected — invoking fatal-transport action"
+                    );
+                    for key in keys {
+                        (self.callbacks.on_fatal_transport)(key);
+                    }
+                    return false;
+                }
                 for key in keys {
                     if let Some(q) = self.queues.get_mut(&key) {
                         let dropped = q.pieces.len() as u32;
@@ -154,14 +169,22 @@ impl<S: PieceSink> Pump<S> {
             }
             PumpMsg::Heartbeat(HeartbeatMsg {
                 mcu_id,
+                consumed_counts,
                 retired_counts,
             }) => {
+                let consumed_counts = consumed_counts.as_ref().unwrap_or(&retired_counts);
+                assert_eq!(
+                    consumed_counts.len(),
+                    retired_counts.len(),
+                    "heartbeat consumed/retired axis count mismatch for mcu{mcu_id}"
+                );
                 for (axis, &c) in retired_counts.iter().enumerate() {
                     let key = AxisKey {
                         mcu_id,
                         axis: axis as u8,
                     };
                     if let Some(q) = self.queues.get_mut(&key) {
+                        q.consumed = consumed_counts[axis];
                         q.retired = c;
                     }
                     if let Some(co) = &mut self.cohort {
@@ -197,7 +220,7 @@ impl<S: PieceSink> Pump<S> {
                     baseline,
                     last_retired,
                     step_deadline,
-                    deadline_floor: 0,
+                    execution_floor: 0,
                 });
             }
             PumpMsg::DripDisarm(c) => {
@@ -235,6 +258,7 @@ impl<S: PieceSink> Pump<S> {
             lead_secs,
             source_line,
             epoch_freq,
+            batch_end: _,
         } = msg;
         if let Some(inferred_at) = self.halted.get(&key).copied() {
             let dropped = pieces.len() as u32;
@@ -414,14 +438,19 @@ impl<S: PieceSink> Pump<S> {
 
     fn drain_data(&mut self, data_rx: &Receiver<EnqueueMsg>) -> bool {
         let mut activity = false;
-        while self.data_open && (self.cohort.is_some() || wants_pieces(&self.queues)) {
+        while self.data_open && (self.intake_batch_open || wants_pieces(&self.queues)) {
             match data_rx.try_recv() {
                 Ok(e) => {
                     activity = true;
+                    self.intake_batch_open = !e.batch_end;
                     self.enqueue(e);
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
+                    assert!(
+                        !self.intake_batch_open,
+                        "pump data channel disconnected before the projection batch ended"
+                    );
                     self.data_open = false;
                     break;
                 }
@@ -435,11 +464,11 @@ impl<S: PieceSink> Pump<S> {
             return;
         };
         let now = Instant::now();
-        let floor = co.floor(&self.queues);
-        if floor > co.deadline_floor {
+        let execution_floor = co.active_execution_floor(&self.queues);
+        if execution_floor != co.execution_floor {
             let co = self.cohort.as_mut().unwrap();
             co.step_deadline = now + co.timeout;
-            co.deadline_floor = floor;
+            co.execution_floor = execution_floor;
             return;
         }
         if now < co.step_deadline {
@@ -455,7 +484,7 @@ impl<S: PieceSink> Pump<S> {
                 subsystem = "motion",
                 event = "drip_cohort_executed_awaiting_trip",
                 cohort = co.id,
-                floor,
+                execution_floor,
                 "drip cohort fully executed with no trip; the host trip \
                  deadline adjudicates — not a stall"
             );
@@ -468,17 +497,20 @@ impl<S: PieceSink> Pump<S> {
             .iter()
             .map(|k| {
                 format!(
-                    "mcu{} axis{}: executed {} queued {}",
+                    "mcu{} axis{}: executed {} queued {} in_flight {}",
                     k.mcu_id,
                     k.axis,
                     co.executed(k, &self.queues),
                     self.queues.get(k).map_or(0, |q| q.pieces.len()),
+                    self.queues
+                        .get(k)
+                        .map_or(0, |q| q.pushed.wrapping_sub(q.retired)),
                 )
             })
             .collect();
         let id = co.id;
         (self.callbacks.on_drip_stall)(format!(
-            "drip cohort {id}: floor stalled at {floor} for {:?}; \
+            "drip cohort {id}: execution stalled at floor {execution_floor} for {:?}; \
              participants: [{}]",
             co.timeout,
             lagging.join(", ")
@@ -491,49 +523,49 @@ impl<S: PieceSink> Pump<S> {
         let Some(q) = self.queues.get(&stall_key) else {
             return Ok(());
         };
-        let current_retired = q.retired;
+        let current_consumed = q.consumed;
         let observation = self
-            .retirement_stall
-            .observe(stall_key, current_retired, now);
+            .consumption_stall
+            .observe(stall_key, current_consumed, now);
         if observation.log_due {
-            let in_flight = q.pushed.wrapping_sub(q.retired);
+            let awaiting_consumption = q.pushed.wrapping_sub(q.consumed);
             tracing::debug!(
                 subsystem = "motion",
                 event = "pump_stall_full",
                 mcu = stall_key.mcu_id,
                 axis = stall_key.axis,
                 pushed = q.pushed,
+                consumed = q.consumed,
                 retired = q.retired,
-                in_flight,
+                awaiting_consumption,
                 ring_depth = q.ring_depth,
                 room = q.room(),
                 pending = q.pieces.len(),
-                "pump StallFull (room==0): ring full, awaiting MCU retirement"
+                "pump StallFull (room==0): endpoint has not consumed the next piece"
             );
         }
         if let Some(stalled_secs) = observation.stalled_secs {
             tracing::error!(
                 subsystem = "motion",
-                event = "pump_retirement_stall_fatal",
+                event = "pump_consumption_stall_fatal",
                 mcu = stall_key.mcu_id,
                 axis = stall_key.axis,
                 pushed = q.pushed,
+                consumed = q.consumed,
                 retired = q.retired,
                 ring_depth = q.ring_depth,
                 pending = q.pieces.len(),
                 stalled_secs,
-                "MCU stopped retiring pieces on this axis: retired count \
-                 has not advanced while heartbeats kept arriving — the \
-                 ring is permanently full and the pump would spin forever"
+                "endpoint stopped consuming pieces on this axis while heartbeats continued"
             );
             (self.callbacks.on_drip_stall)(format!(
-                "pump retirement stall: mcu{} axis{} retired stuck at {} \
-                 for {stalled_secs:.1}s with pushed={} ring_depth={} \
-                 pending={} — MCU stopped retiring pieces on this axis",
+                "pump consumption stall: mcu{} axis{} consumed stuck at {} for \
+                 {stalled_secs:.1}s with pushed={} retired={} ring_depth={} pending={}",
                 stall_key.mcu_id,
                 stall_key.axis,
-                current_retired,
+                current_consumed,
                 q.pushed,
+                q.retired,
                 q.ring_depth,
                 q.pieces.len(),
             ));
@@ -747,7 +779,7 @@ impl<S: PieceSink> Pump<S> {
             };
             match sched {
                 Schedule::Idle => {
-                    self.retirement_stall.reset();
+                    self.consumption_stall.reset();
                     break;
                 }
                 Schedule::StallFull(stall_key) => {
@@ -755,12 +787,12 @@ impl<S: PieceSink> Pump<S> {
                     break;
                 }
                 Schedule::StallAhead(_stall_key) => {
-                    self.retirement_stall.reset();
+                    self.consumption_stall.reset();
                     self.holding_ahead = true;
                     break;
                 }
                 Schedule::Send(frames) => {
-                    self.retirement_stall.reset();
+                    self.consumption_stall.reset();
                     if frames.is_empty() {
                         break;
                     }
@@ -838,7 +870,7 @@ impl<S: PieceSink> Pump<S> {
     ) -> Result<(), ()> {
         let mut sel = Select::new();
         let ctrl_op = sel.recv(control_rx);
-        let want_data = self.data_open && (self.cohort.is_some() || wants_pieces(&self.queues));
+        let want_data = self.data_open && (self.intake_batch_open || wants_pieces(&self.queues));
         let data_op = if want_data {
             sel.recv(data_rx)
         } else {
@@ -862,8 +894,17 @@ impl<S: PieceSink> Pump<S> {
                 }
             } else if idx == data_op {
                 match op.recv(data_rx) {
-                    Ok(e) => self.enqueue(e),
-                    Err(_) => self.data_open = false,
+                    Ok(e) => {
+                        self.intake_batch_open = !e.batch_end;
+                        self.enqueue(e);
+                    }
+                    Err(_) => {
+                        assert!(
+                            !self.intake_batch_open,
+                            "pump data channel disconnected before the projection batch ended"
+                        );
+                        self.data_open = false;
+                    }
                 }
             }
         }
@@ -955,7 +996,8 @@ pub fn run_pump<S: PieceSink>(
         backlog,
         holding_ahead: false,
         data_open: true,
-        retirement_stall: RetirementStallWatch::new(RETIREMENT_STALL_FATAL),
+        intake_batch_open: false,
+        consumption_stall: ConsumptionStallWatch::new(CONSUMPTION_STALL_FATAL),
         mem_probe: MemPressureProbe::new(),
     };
     pump.run(control_rx, data_rx);

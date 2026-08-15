@@ -106,6 +106,7 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
         epoch: motion_core::anchor::StreamEpoch::Continuation,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     data.send(EnqueueMsg {
@@ -115,6 +116,7 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
         epoch: motion_core::anchor::StreamEpoch::Continuation,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
 
@@ -187,6 +189,7 @@ fn heartbeat_retirement_drains_pump_ledger() {
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     barrier(&ctl);
@@ -197,6 +200,7 @@ fn heartbeat_retirement_drains_pump_ledger() {
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 42,
+        consumed_counts: None,
         retired_counts: vec![1],
     }))
     .unwrap();

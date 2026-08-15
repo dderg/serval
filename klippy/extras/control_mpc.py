@@ -3,6 +3,7 @@ import math
 
 AMBIENT_TEMP = 25.0
 PIN_MIN_TIME = 0.100
+MAX_POWERED_OVERSHOOT = 15.0
 
 FILAMENT_TEMP_SRC_AMBIENT = "ambient"
 FILAMENT_TEMP_SRC_FIXED = "fixed"
@@ -219,8 +220,12 @@ class ControlMPC:
         # Expected power from block to ambient
         block_ambient_delta = self.state_block_temp - self.state_ambient_temp
         expected_ambient_transfer = block_ambient_delta * ambient_transfer
+        expected_block_filament_delta = (
+            self.state_block_temp
+            - self.filament_temp(read_time, self.state_ambient_temp)
+        )
         expected_filament_transfer = (
-            block_ambient_delta
+            expected_block_filament_delta
             * extrude_speed_prev
             * self.const_filament_cross_section_heat_capacity
         )
@@ -257,7 +262,9 @@ class ControlMPC:
             if temp != 0.0:
                 self.state_ambient_temp = temp
                 self.want_ambient_refresh = False
-        if (self.last_power > 0 and self.last_power < 1.0) or abs(
+        if (
+            self.last_power > 0 and self.last_power < self.heater_max_power
+        ) or abs(
             expected_block_dT + adjustment_dT
         ) < self.const_steady_state_rate * dt:
             if adjustment_dT > 0.0:
@@ -292,7 +299,6 @@ class ControlMPC:
         )
 
         if target_temp != 0.0:
-            # The required power is the desired heating power + compensation for all the losses
             power = max(
                 0.0,
                 min(
@@ -303,31 +309,26 @@ class ControlMPC:
         else:
             power = 0
 
-        duty = power / self.const_heater_power
-
-        # logging.info(
-        #     "mpc: [%.3f/%.3f] %.2f => %.2f / %.2f / %.2f = %.2f[%.2f+%.2f+%.2f] / %.2f, dT %.2f, E %.2f=>%.2f",
-        #     dt,
-        #     smoothing,
-        #     temp,
-        #     self.state_block_temp,
-        #     self.state_sensor_temp,
-        #     self.state_ambient_temp,
-        #     power,
-        #     heating_power,
-        #     loss_ambient,
-        #     loss_filament,
-        #     duty,
-        #     adjustment_dT,
-        #     extrude_speed_prev,
-        #     extrude_speed_next,
-        # )
-
-        self.last_power = power
         self.last_loss_ambient = loss_ambient
         self.last_loss_filament = loss_filament
         self.last_temp_time = read_time
-        self.heater.set_pwm(read_time, duty)
+        if (
+            target_temp > 0.0
+            and power > 0.0
+            and temp > target_temp + MAX_POWERED_OVERSHOOT
+        ):
+            overshoot = temp - target_temp
+            self.last_power = 0.0
+            self.heater.set_pwm(read_time, 0.0)
+            self.printer.invoke_async_shutdown(
+                f"Heater {self.heater.get_name()} MPC requested "
+                f"{power:.3f}W at {temp:.1f}C, {overshoot:.1f}C above "
+                f"the {target_temp:.1f}C target"
+            )
+            return
+
+        self.last_power = power
+        self.heater.set_pwm(read_time, power / self.const_heater_power)
 
     def filament_temp(self, read_time, ambient_temp):
         src = self.filament_temp_src

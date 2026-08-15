@@ -437,6 +437,7 @@ class FakeMotion:
         max_velocity=300.0,
         max_accel=3000.0,
         mcu=None,
+        axis_mcus=None,
     ):
         self.kin = kin
         self.engine = engine if engine is not None else FakeEngine()
@@ -451,7 +452,11 @@ class FakeMotion:
         self.max_velocity = max_velocity
         self.max_accel = max_accel
         self.mcu = mcu
+        self.axis_mcus = dict(axis_mcus or {})
         self.set_position_calls = []
+
+    def get_axis_mcu(self, axis_name):
+        return self.axis_mcus.get(axis_name, self.mcu)
 
     def get_position(self):
         return list(self.commanded_pos)

@@ -30,13 +30,13 @@ impl Engine {
         now: u64,
         shared: &SharedState,
         storage: &mut [PieceEntry],
-    ) -> Option<(f32, f32, f32, bool)> {
+    ) -> Option<(f32, f32, f32, bool, u8)> {
         let axis = self.stepping_axes.get_mut(i).and_then(|s| s.as_mut())?;
         let cps = self.cycles_per_second;
         let fault = SharedFaultSink { shared };
         let mut just_armed = false;
         let window_end = now.wrapping_add(u64::from(self.sample_period_cycles));
-        match crate::motion_core::get_position_and_velocity_armed(
+        match crate::motion_core::get_position_and_velocity_armed_at_window_end(
             &mut axis.armed,
             &mut axis.ring,
             storage,
@@ -48,26 +48,27 @@ impl Engine {
             &mut just_armed,
         ) {
             Some((p_end, v_end)) => {
-                let is_overlay = axis.ring.peek(storage).map_or(0, |p| p.motor_mask) != 0;
-                if is_overlay {
+                let motor_mask = axis.ring.peek(storage).map_or(0, |p| p.motor_mask);
+                let (p_sample_start, overlay_just_armed) = if motor_mask != 0 {
                     if just_armed {
                         axis.overlay_last_p = 0.0;
                     }
                     let p_sample_start = axis.overlay_last_p;
                     axis.overlay_last_p = p_end;
-                    Some((p_end, v_end, p_sample_start, just_armed))
+                    (p_sample_start, just_armed)
                 } else {
                     let p_sample_start = axis.p_prev;
                     axis.p_prev = p_end;
                     axis.v_prev = v_end;
-                    Some((p_end, v_end, p_sample_start, false))
-                }
+                    (p_sample_start, false)
+                };
+                Some((p_end, v_end, p_sample_start, overlay_just_armed, motor_mask))
             }
             None => {
                 if !idle_phase_slew_pending(axis) {
                     return None;
                 }
-                Some((axis.p_prev, 0.0, axis.p_prev, false))
+                Some((axis.p_prev, 0.0, axis.p_prev, false, 0))
             }
         }
     }
@@ -77,7 +78,7 @@ impl Engine {
     fn dispatch_axis_sample(
         &mut self,
         i: usize,
-        storage: &[PieceEntry],
+        motor_mask: u8,
         shared: &SharedState,
         queue_ptr: *mut crate::step_queue::StepQueue,
         sample_period_sec: f32,
@@ -92,11 +93,10 @@ impl Engine {
         let Some(axis) = self.stepping_axes.get_mut(i).and_then(|s| s.as_mut()) else {
             return;
         };
-        let active_mask = axis.ring.peek(storage).map_or(0, |p| p.motor_mask);
         dispatch_axis(
             i,
             axis,
-            active_mask,
+            motor_mask,
             queue_ptr,
             shared,
             p_end,
@@ -141,7 +141,7 @@ impl Engine {
         let mut active = false;
 
         for i in 0..(self.num_axes as usize) {
-            let Some((p_end, v_end, p_sample_start, overlay_just_armed)) =
+            let Some((p_end, v_end, p_sample_start, overlay_just_armed, motor_mask)) =
                 self.advance_axis_sample(i, now, shared, storage)
             else {
                 continue;
@@ -153,7 +153,7 @@ impl Engine {
                 let queue_ptr = get_queue(i);
                 self.dispatch_axis_sample(
                     i,
-                    storage,
+                    motor_mask,
                     shared,
                     queue_ptr,
                     sample_period_sec,
@@ -167,7 +167,7 @@ impl Engine {
 
             #[cfg(not(feature = "motion-module-stepper"))]
             {
-                let _ = (p_end, v_end, p_sample_start, overlay_just_armed);
+                let _ = (p_end, v_end, p_sample_start, overlay_just_armed, motor_mask);
             }
         }
 

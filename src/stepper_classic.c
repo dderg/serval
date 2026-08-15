@@ -203,12 +203,8 @@ stepper_event(struct timer *t)
     return stepper_event_full(t);
 }
 
-// A queue_step that lands on an idle stepper re-arms the lane with a
-// host-chosen waketime. A waketime already in the past means the host
-// failed to deliver its lead — absorbing the lateness would hide the
-// producer-side stall, so any late re-arm is fatal. The signed margin is
-// latched in reset-surviving diag counters first, so the crash forensics
-// report how much lead actually survived.
+// Record late idle re-arms before the scheduler applies its canonical
+// near-time policy.
 
 // Schedule a set of steps with a given timing
 void
@@ -241,17 +237,10 @@ command_queue_step(uint32_t *args)
         extern void diag_note_step_rearm(int32_t margin);
         int32_t margin = (int32_t)(s->time.waketime - timer_read_time());
         diag_note_step_rearm(margin);
-        if (unlikely(margin < 0)) {
+        if (unlikely(margin < 0))
             event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_MOTION,
-                           EVENT_LOG_EVENT_MOTION_STEP_REARM_LATE, 0,
+                           EVENT_LOG_EVENT_MOTION_STEP_REARM_LATE, args[0],
                            (uint32_t)margin, s->time.waketime);
-#if !CONFIG_MCU_SIM
-            // The sim's virtual clock races arbitrarily far ahead of the host
-            // projection, so an absolute-time lateness verdict is meaningless
-            // there; same carve-out as sched_add_timer's "Timer too close".
-            shutdown("Stepper too far in past");
-#endif
-        }
         sched_add_timer(&s->time);
     }
     irq_enable();
@@ -291,19 +280,19 @@ stepcompress_barrier_ack_task(void)
     uint8_t oid;
     struct stepper *s;
     foreach_oid(oid, s, command_config_stepper) {
-        irq_disable();
-        struct move_node *mn = move_queue_first(&s->completed_barriers);
-        move_queue_clear(&s->completed_barriers);
-        irq_enable();
-        while (mn) {
+        for (;;) {
+            irq_disable();
+            if (move_queue_empty(&s->completed_barriers)) {
+                irq_enable();
+                break;
+            }
+            struct move_node *mn = move_queue_pop(&s->completed_barriers);
             struct stepper_move *m = container_of(mn, struct stepper_move,
                                                   node);
-            mn = mn->next;
             uint32_t seq = m->interval;
-            irq_disable();
             move_free(m);
             irq_enable();
-            sendf("stepcompress_barrier_ack oid=%c seq=%u", oid, seq);
+            sendf("stepcompress_barrier_ack oid=%c barrier_seq=%u", oid, seq);
         }
     }
 }
@@ -427,6 +416,9 @@ stepper_classic_halt_all(uint32_t *stream_end_clock)
                 *stream_end_clock = stream_end;
             found = 1;
         }
+        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_MOTION,
+                       EVENT_LOG_EVENT_MOTION_STEP_HALT, oid,
+                       s->flags, s->count);
         stepper_classic_halt(s);
     }
     return found;

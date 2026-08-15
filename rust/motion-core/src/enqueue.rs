@@ -109,6 +109,7 @@ where
                         epoch: ctx.epoch,
                         lead_secs: ctx.lead_secs,
                         source_line: seg.source_line,
+                        batch_end: false,
                     });
                 }
                 continue;
@@ -121,9 +122,13 @@ where
                     epoch: ctx.epoch,
                     lead_secs: ctx.lead_secs,
                     source_line: seg.source_line,
+                    batch_end: false,
                 });
             }
         }
+    }
+    if let Some(last) = out.last_mut() {
+        last.batch_end = true;
     }
 
     out

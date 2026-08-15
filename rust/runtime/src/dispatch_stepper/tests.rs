@@ -12,6 +12,7 @@ fn make_stepper() -> StepperRef {
         stepper_oid: 0,
         position_count: AtomicI32::new(0),
         overlay_step_frame: AtomicI32::new(0),
+        overlay_step_phase_bits: core::sync::atomic::AtomicU32::new(0),
         tmc_cs_oid: None,
         last_coil_A: AtomicI16::new(0),
         last_coil_B: AtomicI16::new(0),
@@ -190,6 +191,125 @@ fn pulse_positive_motion_enqueues_n_steps() {
 }
 
 #[test]
+fn pulse_large_absolute_count_preserves_local_phase_through_reversal() {
+    let shared = SharedState::new();
+    let mut q = StepQueue::new();
+    let microstep_distance = 0.000_690_468_75_f32;
+    let mut axis = make_axis(StepMode::Pulse, microstep_distance);
+    let initial_count = 8_388_610;
+    let p0 = 5_792.073_f32;
+    let p1 = 5_792.074_7_f32;
+    #[allow(clippy::cast_possible_truncation)]
+    let initial_phase =
+        (f64::from(p0) - f64::from(initial_count) * f64::from(microstep_distance)) as f32;
+    axis.last_step_count = initial_count;
+    axis.step_phase = initial_phase;
+    axis.p_prev = p0;
+    axis.steppers[0]
+        .position_count
+        .store(initial_count, Ordering::Release);
+
+    let q_ptr: *mut StepQueue = &mut q;
+    dispatch_axis(
+        0,
+        &mut axis,
+        0,
+        q_ptr,
+        &shared,
+        p1,
+        0.0,
+        p0,
+        100e-6,
+        1_000,
+        64_000_000.0,
+        false,
+    );
+    dispatch_axis(
+        0,
+        &mut axis,
+        0,
+        q_ptr,
+        &shared,
+        p0,
+        0.0,
+        p1,
+        100e-6,
+        7_400,
+        64_000_000.0,
+        false,
+    );
+
+    assert_eq!(q.tail.wrapping_sub(q.head), 4);
+    let entries = &q.buf[..4];
+    assert!(
+        entries
+            .windows(2)
+            .all(|pair| pair[0].cycle_abs < pair[1].cycle_abs),
+        "step clocks must remain distinct through the reversal: {entries:?}"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.dir())
+            .collect::<std::vec::Vec<_>>(),
+        vec![1, 1, -1, -1]
+    );
+    assert_eq!(axis.last_step_count, initial_count);
+    assert!(
+        (axis.step_phase - initial_phase).abs() < microstep_distance * 1e-3,
+        "local phase drifted across a round trip: initial={initial_phase} final={}",
+        axis.step_phase
+    );
+    assert_eq!(
+        axis.steppers[0].position_count.load(Ordering::Acquire),
+        initial_count
+    );
+    assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn pulse_tangential_half_step_keeps_the_previous_count() {
+    let shared = SharedState::new();
+    let mut q = StepQueue::new();
+    let mut axis = make_axis(StepMode::Pulse, 0.01);
+    let q_ptr: *mut StepQueue = &mut q;
+
+    dispatch_axis(
+        0,
+        &mut axis,
+        0,
+        q_ptr,
+        &shared,
+        0.005,
+        0.0,
+        0.0,
+        100e-6,
+        1_000,
+        1_000_000.0,
+        false,
+    );
+    dispatch_axis(
+        0,
+        &mut axis,
+        0,
+        q_ptr,
+        &shared,
+        0.0,
+        0.0,
+        0.005,
+        100e-6,
+        1_100,
+        1_000_000.0,
+        false,
+    );
+
+    assert_eq!(q.tail, q.head);
+    assert_eq!(axis.last_step_count, 0);
+    assert_eq!(axis.steppers[0].position_count.load(Ordering::Acquire), 0);
+    assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
+}
+
+#[test]
 fn pulse_below_displacement_threshold_uses_uniform_fallback() {
     let shared = SharedState::new();
     let mut q = StepQueue::new();
@@ -197,6 +317,7 @@ fn pulse_below_displacement_threshold_uses_uniform_fallback() {
 
     axis.last_step_count = -2;
     let tiny = DISPLACEMENT_THRESHOLD_MM / 10.0;
+    axis.step_phase = 2.0 * axis.microstep_distance - tiny;
 
     let q_ptr: *mut StepQueue = &mut q;
     dispatch_axis(
@@ -558,7 +679,7 @@ fn overlay_on_phase_axis_accumulates_across_samples() {
         &shared,
         7.0 * msd,
         0.0,
-        0.0,
+        3.0 * msd,
         25e-6,
         0,
         520_000_000.0,

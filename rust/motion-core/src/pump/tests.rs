@@ -1,4 +1,7 @@
-use super::pump_loop::Pump;
+use super::pump_loop::{
+    PUMP_INTAKE_BACKLOG_HARD_CAP, PUMP_INTAKE_BACKLOG_SOFT_CAP, PUMP_INTAKE_MIN_RUNWAY_SECS, Pump,
+    wants_pieces,
+};
 use super::*;
 use crossbeam_channel::unbounded;
 use runtime::piece_ring::PieceEntry;
@@ -31,6 +34,7 @@ fn make_enqueue(
         epoch,
         lead_secs: MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     }
 }
 
@@ -40,47 +44,54 @@ fn room_full_then_drains() {
     assert_eq!(q.room(), 4);
     q.pushed = 4;
     assert_eq!(q.room(), 0);
-    q.retired = 1;
+    q.consumed = 1;
     assert_eq!(q.room(), 1);
+}
+
+#[test]
+fn consumed_pieces_reopen_capacity_before_execution_retires_them() {
+    let mut q = AxisQueue::new(64);
+    q.pushed = 64;
+    q.consumed = 64;
+    q.retired = 0;
+
+    assert_eq!(q.room(), 64);
+    assert_ne!(q.pushed, q.retired);
 }
 
 #[test]
 fn room_correct_across_u32_wrap() {
     let mut q = AxisQueue::new(8);
     q.pushed = 2;
-    q.retired = u32::MAX;
+    q.consumed = u32::MAX;
     assert_eq!(
         q.room(),
         5,
-        "legitimate counter rollover: retired is numerically larger than pushed \
-         only because the u32 odometer wrapped, so 3 pieces are genuinely in \
-         flight. wrapping_sub recovers 3; a saturating_sub / max(0, ..) would \
-         collapse this to 0 in_flight and wrongly report a full ring."
+        "legitimate counter rollover: consumed is numerically larger than pushed only because \
+         the u32 odometer wrapped, so 3 pieces are genuinely awaiting consumption. wrapping_sub \
+         recovers 3; saturating subtraction would wrongly report a drained ring."
     );
 }
 
 #[test]
-fn room_recovers_when_retired_overtakes_pushed() {
+fn room_recovers_when_consumed_overtakes_pushed() {
     let mut q = AxisQueue::new(4);
     q.pushed = 100;
-    q.retired = 101;
+    q.consumed = 101;
     assert_eq!(
         q.room(),
         4,
-        "retired overtook pushed by 1 (a PushPieces the MCU applied but whose \
-         response was lost): in_flight = pushed.wrapping_sub(retired) underflows \
-         to u32::MAX and saturating_sub pins room at 0 forever — the mid-print \
-         wedge. An inversion (in_flight > ring_depth) must reconcile to a \
-         drained ring, not zero room."
+        "consumed overtook pushed by 1 after a lost response; the inversion must reconcile to a \
+         drained ring instead of wedging with zero room"
     );
 }
 
 #[test]
-fn schedule_resends_orphan_when_retired_overtook_pushed() {
+fn schedule_resends_orphan_when_consumed_overtook_pushed() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let mut q = AxisQueue::new(8);
     q.pushed = 100;
-    q.retired = 101;
+    q.consumed = 101;
     q.pieces.push_back(make_piece(101));
     let mut queues: BTreeMap<AxisKey, AxisQueue> = BTreeMap::new();
     queues.insert(key, q);
@@ -100,7 +111,7 @@ fn schedule_resends_orphan_when_retired_overtook_pushed() {
             assert_eq!(frames[0].key, key);
         }
         other => {
-            panic!("retired>pushed inversion must schedule a re-send, not wedge; got {other:?}")
+            panic!("consumed>pushed inversion must schedule a re-send, not wedge; got {other:?}")
         }
     }
 }
@@ -140,6 +151,7 @@ fn run_pump_delivers_piece_despite_retired_over_pushed_inversion() {
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
+        consumed_counts: None,
         retired_counts: vec![2],
     }))
     .unwrap();
@@ -276,6 +288,80 @@ fn make_piece(t: u64) -> (PieceEntry, f64) {
         },
         t as f64,
     )
+}
+
+fn staged_axis(piece_count: u64, runway_secs: f64) -> AxisQueue {
+    let duration = runway_secs / piece_count as f64;
+    let mut queue = AxisQueue::new(u32::MAX);
+    queue.pieces.extend((0..piece_count).map(|index| {
+        (
+            PieceEntry {
+                start_time: index,
+                duration: duration as f32,
+                ..PieceEntry::zeroed()
+            },
+            index as f64 * duration,
+        )
+    }));
+    queue
+}
+
+#[test]
+fn pump_intake_uses_runway_only_below_the_hard_cap() {
+    let key = |axis| AxisKey { mcu_id: 1, axis };
+    let below_soft_cap = BTreeMap::from([(
+        key(0),
+        staged_axis(
+            PUMP_INTAKE_BACKLOG_SOFT_CAP - 1,
+            PUMP_INTAKE_MIN_RUNWAY_SECS * 2.0,
+        ),
+    )]);
+    assert!(wants_pieces(&below_soft_cap));
+
+    let one_axis_shallow = BTreeMap::from([
+        (
+            key(0),
+            staged_axis(
+                PUMP_INTAKE_BACKLOG_SOFT_CAP / 2,
+                PUMP_INTAKE_MIN_RUNWAY_SECS * 2.0,
+            ),
+        ),
+        (
+            key(1),
+            staged_axis(
+                PUMP_INTAKE_BACKLOG_SOFT_CAP / 2,
+                PUMP_INTAKE_MIN_RUNWAY_SECS * 0.5,
+            ),
+        ),
+    ]);
+    assert!(wants_pieces(&one_axis_shallow));
+
+    let all_axes_ready = BTreeMap::from([
+        (
+            key(0),
+            staged_axis(
+                PUMP_INTAKE_BACKLOG_SOFT_CAP / 2,
+                PUMP_INTAKE_MIN_RUNWAY_SECS * 2.0,
+            ),
+        ),
+        (
+            key(1),
+            staged_axis(
+                PUMP_INTAKE_BACKLOG_SOFT_CAP / 2,
+                PUMP_INTAKE_MIN_RUNWAY_SECS * 2.0,
+            ),
+        ),
+    ]);
+    assert!(!wants_pieces(&all_axes_ready));
+
+    let shallow_at_hard_cap = BTreeMap::from([(
+        key(0),
+        staged_axis(
+            PUMP_INTAKE_BACKLOG_HARD_CAP,
+            PUMP_INTAKE_MIN_RUNWAY_SECS * 0.5,
+        ),
+    )]);
+    assert!(!wants_pieces(&shallow_at_hard_cap));
 }
 
 #[test]
@@ -538,6 +624,7 @@ fn flush_clears_queued_pieces_and_junctions() {
         epoch: crate::anchor::StreamEpoch::Reposition,
         lead_secs,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
 
@@ -564,6 +651,7 @@ fn flush_clears_queued_pieces_and_junctions() {
         epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     {
@@ -645,6 +733,7 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
         epoch: crate::anchor::StreamEpoch::Reposition,
         lead_secs,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
 
@@ -669,6 +758,7 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
         epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     {
@@ -870,7 +960,7 @@ fn pump_backlog_drains_to_zero_when_pushed() {
     poll_until(|| !sink.recorded().is_empty(), "pump never pushed pieces");
     poll_until(
         || backlog.load(Ordering::Acquire) == 0,
-        "backlog never returned to zero after the ring accepted the pieces",
+        "backlog never returned to zero after the ring consumed the pieces",
     );
 
     ctl.send(PumpMsg::Shutdown).unwrap();
@@ -879,7 +969,7 @@ fn pump_backlog_drains_to_zero_when_pushed() {
 
 fn queue_pump<S: PieceSink>(
     key: AxisKey,
-    retirement_stall_fatal: Duration,
+    consumption_stall_fatal: Duration,
     on_drip_stall: impl Fn(String) + Send + 'static,
     sink: S,
 ) -> Pump<S> {
@@ -905,17 +995,18 @@ fn queue_pump<S: PieceSink>(
         backlog: Arc::new(AtomicU64::new(0)),
         holding_ahead: false,
         data_open: true,
-        retirement_stall: super::stall::RetirementStallWatch::new(retirement_stall_fatal),
+        intake_batch_open: false,
+        consumption_stall: super::stall::ConsumptionStallWatch::new(consumption_stall_fatal),
         mem_probe: super::memstat::MemPressureProbe::new(),
     }
 }
 
 fn stalled_queue_pump(
     key: AxisKey,
-    retirement_stall_fatal: Duration,
+    consumption_stall_fatal: Duration,
     on_drip_stall: impl Fn(String) + Send + 'static,
 ) -> Pump<NullSink> {
-    queue_pump(key, retirement_stall_fatal, on_drip_stall, NullSink)
+    queue_pump(key, consumption_stall_fatal, on_drip_stall, NullSink)
 }
 
 #[test]
@@ -1043,7 +1134,7 @@ fn inferred_halt_without_host_ack_escalates() {
 }
 
 #[test]
-fn retirement_stall_past_threshold_with_frozen_retired_escalates() {
+fn consumption_stall_past_threshold_with_frozen_counter_escalates() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let threshold = Duration::from_millis(50);
     let escalated: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1064,19 +1155,19 @@ fn retirement_stall_past_threshold_with_frozen_retired_escalates() {
     let result = pump.send_ready();
     assert!(
         result.is_err(),
-        "retired frozen past the threshold must escalate and stop the pump loop"
+        "consumed count frozen past the threshold must escalate and stop the pump loop"
     );
     let msgs = escalated.lock().unwrap();
     assert_eq!(msgs.len(), 1, "on_drip_stall must fire exactly once");
     assert!(
-        msgs[0].contains("retirement stall"),
-        "escalation message should explain the retirement stall: {}",
+        msgs[0].contains("consumption stall"),
+        "escalation message should explain the consumption stall: {}",
         msgs[0]
     );
 }
 
 #[test]
-fn retirement_stall_resets_when_heartbeat_advances_retired() {
+fn consumption_stall_resets_when_heartbeat_advances_counter() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let threshold = Duration::from_millis(50);
     let escalated: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1088,36 +1179,37 @@ fn retirement_stall_resets_when_heartbeat_advances_retired() {
     pump.queues.get_mut(&key).unwrap().pushed = 2;
 
     pump.send_ready().unwrap();
-    let (_, retired_at_onset, _) = pump
-        .retirement_stall
+    let (_, consumed_at_onset, _) = pump
+        .consumption_stall
         .started()
         .expect("first observation tracked");
-    assert_eq!(retired_at_onset, 0);
+    assert_eq!(consumed_at_onset, 0);
 
     std::thread::sleep(threshold / 2);
     pump.handle_control_msg(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
-        retired_counts: vec![1],
+        consumed_counts: Some(vec![1]),
+        retired_counts: vec![0],
     }));
     pump.queues.get_mut(&key).unwrap().pushed = 3;
 
     let result = pump.send_ready();
     assert!(
         result.is_ok(),
-        "retired advancing before the threshold must not escalate"
+        "consumption advancing before the threshold must not escalate"
     );
     assert!(
         escalated.lock().unwrap().is_empty(),
-        "no escalation once retired progressed"
+        "no escalation once consumption progressed"
     );
-    let (tracked_key, tracked_retired, _) = pump
-        .retirement_stall
+    let (tracked_key, tracked_consumed, _) = pump
+        .consumption_stall
         .started()
         .expect("still stalled on a full ring, just with a fresh timer");
     assert_eq!(tracked_key, key);
     assert_eq!(
-        tracked_retired, 1,
-        "stall tracking must reset to the newly observed retired count"
+        tracked_consumed, 1,
+        "stall tracking must reset to the newly observed consumed count"
     );
 
     std::thread::sleep(threshold / 2 + Duration::from_millis(5));
@@ -1140,7 +1232,7 @@ fn non_stallfull_outcome_between_stalls_resets_the_timer() {
     });
 
     pump.send_ready().unwrap();
-    assert!(pump.retirement_stall.started().is_some());
+    assert!(pump.consumption_stall.started().is_some());
 
     std::thread::sleep(threshold * 2);
 
@@ -1148,7 +1240,7 @@ fn non_stallfull_outcome_between_stalls_resets_the_timer() {
     let result = pump.send_ready();
     assert!(result.is_ok());
     assert!(
-        pump.retirement_stall.started().is_none(),
+        pump.consumption_stall.started().is_none(),
         "an Idle outcome must clear the stall tracking even though the old \
          stall was already past the threshold"
     );
@@ -1165,7 +1257,7 @@ fn non_stallfull_outcome_between_stalls_resets_the_timer() {
          StallFull observation is not immediately fatal"
     );
     assert!(escalated.lock().unwrap().is_empty());
-    assert!(pump.retirement_stall.started().is_some());
+    assert!(pump.consumption_stall.started().is_some());
 }
 
 mod pushpieces_retransmit_tests {

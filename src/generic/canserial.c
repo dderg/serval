@@ -48,7 +48,7 @@ static struct canbus_data {
     // Tx data
     struct task_wake tx_wake;
     transmit_pos_t transmit_pos, transmit_max;
-    uint8_t host_fd;
+    uint8_t host_fd, rejoin_after_shutdown;
 
     // Rx data
     struct task_wake rx_wake;
@@ -114,6 +114,12 @@ canserial_tx_task(void)
         tpos += now;
     }
     CanData.transmit_pos = tpos;
+    if (CanData.rejoin_after_shutdown && tpos >= tmax) {
+        CanData.rejoin_after_shutdown = 0;
+        CanData.assigned_id = 0;
+        CanData.host_fd = 0;
+        canbus_set_filter(0);
+    }
 }
 DECL_TASK(canserial_tx_task);
 
@@ -426,6 +432,7 @@ canserial_set_uuid(uint8_t *raw_uuid, uint32_t raw_uuid_len)
 void
 canserial_shutdown(void)
 {
+    CanData.rejoin_after_shutdown = 1;
     canserial_notify_tx();
     canserial_notify_rx();
 }

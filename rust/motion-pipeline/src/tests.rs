@@ -709,6 +709,11 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
     };
     let first = base.first().unwrap().t_start;
     let last = base.last().unwrap().t_end;
+    let input_degree = base
+        .iter()
+        .map(|segment| segment.axes[0].degree() as usize)
+        .max()
+        .expect("non-empty base");
 
     for (base_seg, shaped_seg) in base.iter().zip(shaped) {
         let mut breaks: Vec<f64> = Vec::new();
@@ -729,6 +734,7 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
                     )
             },
             breaks,
+            input_degree,
         );
         for frac in [0.1_f64, 0.3, 0.5, 0.7, 0.9] {
             let t = frac.mul_add(base_seg.t_end - base_seg.t_start, base_seg.t_start);
@@ -739,6 +745,102 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
                 "shaped x at t={t}: got {got}, want {want}"
             );
         }
+    }
+}
+
+#[test]
+fn polynomial_moment_convolution_matches_quadrature() {
+    use std::rc::Rc;
+
+    use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
+
+    let first_t = 300.0;
+    let first_end = 300.004;
+    let second_start = 300.006;
+    let last_t = 300.012;
+    let first_track = bezier_pieces_to_nurbs(&[BezierPiece {
+        u_start: first_t,
+        u_end: first_end,
+        coeffs: vec![
+            10.0, 4.0, -30.0, 200.0, -1_000.0, 5_000.0, -20_000.0, 40_000.0,
+        ],
+    }]);
+    let held = eval(&first_track, first_end);
+    let second_track = bezier_pieces_to_nurbs(&[BezierPiece {
+        u_start: second_start,
+        u_end: last_t,
+        coeffs: vec![held, -3.0, 20.0, -100.0, 400.0, -1_000.0, 2_000.0, -3_000.0],
+    }]);
+    let kernel = trajectory::build_smooth_mzv_kernel(90.2);
+    let kernel_degree = kernel
+        .pieces
+        .iter()
+        .map(|piece| piece.degree())
+        .max()
+        .unwrap();
+    let mut breaks = first_track.knots().to_vec();
+    breaks.extend_from_slice(second_track.knots());
+
+    let oracle_table = Rc::new(crate::shaper::AxisSignalTable::from_tracks(
+        [&first_track, &second_track],
+        first_t,
+        last_t,
+        true,
+        true,
+    ));
+    let oracle_eval = Rc::clone(&oracle_table);
+    let oracle = trajectory::ShapedSignal::new_from_evaluator(
+        &kernel,
+        move |t| oracle_eval.eval(t),
+        breaks.clone(),
+        oracle_table.max_degree(),
+    );
+
+    let fast_table = Rc::new(
+        crate::shaper::AxisSignalTable::from_tracks(
+            [&first_track, &second_track],
+            first_t,
+            last_t,
+            true,
+            true,
+        )
+        .with_piece_moments(kernel_degree),
+    );
+    let fast_eval = Rc::clone(&fast_table);
+    let fast_moments = Rc::clone(&fast_table);
+    let fast = trajectory::ShapedSignal::new_from_polynomial_evaluator(
+        &kernel,
+        move |t| fast_eval.eval(t),
+        breaks,
+        fast_table.max_degree(),
+        move |lo, hi, degree, origin, moments| {
+            fast_moments.integrate_moments(lo, hi, degree, origin, moments)
+        },
+    );
+
+    for t in [
+        first_t,
+        300.001,
+        first_end,
+        300.005,
+        second_start,
+        300.009,
+        last_t,
+    ] {
+        let got = fast.eval_pva(t);
+        let want = oracle.eval_pva(t);
+        assert!(
+            (got.0 - want.0).abs() < 1e-10,
+            "position at {t}: {got:?} vs {want:?}"
+        );
+        assert!(
+            (got.1 - want.1).abs() < 1e-6,
+            "velocity at {t}: {got:?} vs {want:?}"
+        );
+        assert!(
+            (got.2 - want.2).abs() < 1e-3,
+            "acceleration at {t}: {got:?} vs {want:?}"
+        );
     }
 }
 
@@ -830,6 +932,11 @@ fn smooth_shaper_second_batch_window_before_stream_start_clamps() {
             "seg [{}, {}]: shaped constant drifted to {got}",
             seg.t_start,
             seg.t_end,
+        );
+        assert_eq!(
+            seg.axes[0].control_points(),
+            &[150.0],
+            "stationary shaped axes must retain their constant representation"
         );
     }
 }
@@ -1337,6 +1444,85 @@ fn follower_kernel_chains(
         leader_smooth_time.map_or_else(follower_chains_without_kernels, xy_shaper_follower_chains);
     chains.chains[3] = e_chain(k, e_smooth_time);
     chains
+}
+
+/// Issue #405: a rest-hold sized exactly to the follower kernel's support
+/// lands `t_end + own_hi` a few ulps past the shaping frontier. The old
+/// gate admitted it through a 1e-12 slack the strict `MissingLookahead`
+/// check does not share, panicking the shape thread mid-print
+/// ("shaping window needs unavailable lookahead"). The gate must be as
+/// strict as the check: the segment waits for real lookahead instead.
+#[test]
+fn follower_frontier_waits_for_exact_kernel_lookahead() {
+    let leader = trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
+        "leader",
+        &trajectory::algos::SmoothZv,
+        vec![80.0],
+    )])
+    .expect("leader chain compiles");
+    let follower = trajectory::CompiledChain::compile(&[
+        PostProcessorInstance::new("pa", &trajectory::algos::LinearPressureAdvance, vec![0.018]),
+        PostProcessorInstance::new("st", &trajectory::algos::SmoothTriangle, vec![0.02]),
+    ])
+    .expect("follower chain compiles");
+    let chains = AxisChainSet {
+        chains: vec![
+            leader.clone(),
+            leader,
+            trajectory::CompiledChain::default(),
+            follower,
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    };
+    let direct_hi = chains.direct_forward_support();
+    let own_hi = chains.max_follower_own_forward_support();
+    let target_end = 20.389_013_601_744_544;
+    let frontier_end = target_end + own_hi - 5e-13;
+    let buffered_end = frontier_end + direct_hi;
+    let last_end = buffered_end + 1e-3;
+    assert!(target_end + own_hi > frontier_end);
+    assert!(target_end + own_hi <= frontier_end + 1e-12);
+
+    let segment = |t_start: f64, t_end: f64| ShapedSegment {
+        axes: (0..4)
+            .map(|axis| {
+                nurbs::bezier::bezier_pieces_to_nurbs(&[nurbs::bezier::BezierPiece {
+                    u_start: t_start,
+                    u_end: t_end,
+                    coeffs: vec![f64::from(axis)],
+                }])
+            })
+            .collect(),
+        followers: vec![],
+        spatial_path: false,
+        t_start,
+        t_end,
+        motor_mask: 0,
+        source_line: 1,
+    };
+    let (lowered_tx, lowered_rx) = unbounded();
+    for (t_start, t_end) in [
+        (target_end - 0.005, target_end),
+        (target_end, frontier_end),
+        (frontier_end, buffered_end),
+        (buffered_end, last_end),
+    ] {
+        lowered_tx
+            .send(LoweredItem::Seg(LoweredSegment {
+                seg: segment(t_start, t_end),
+                rest_at_end: false,
+            }))
+            .unwrap();
+    }
+    drop(lowered_tx);
+
+    let (shaped_tx, shaped_rx) = unbounded();
+    Shaper::new(chains).run(lowered_rx, shaped_tx);
+    let emitted = shaped_rx
+        .into_iter()
+        .filter(|item| matches!(item, ShapedItem::Seg(_)))
+        .count();
+    assert_eq!(emitted, 4);
 }
 
 fn nonlinear_e_chain(

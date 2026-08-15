@@ -1,5 +1,10 @@
-use super::{homing_api::required_motor_axes, planner_api::motion_history_host_now};
+use super::{
+    homing_api::{history_state_at_query, required_motor_axes},
+    planner_api::motion_history_host_now,
+};
 use crate::kinematics::KinematicsKind;
+use crate::{motion_history::HistoryStore, types::AxisKey};
+use runtime::piece_ring::{MAX_PIECE_COEFFS, PieceEntry};
 
 #[test]
 fn unfiltered_query_requires_every_motor_axis() {
@@ -48,4 +53,27 @@ fn history_rebases_use_the_router_clock_domain() {
     let after = host_rt::clock::instant_to_f64(std::time::Instant::now());
 
     assert!((before..=after).contains(&history_now));
+}
+
+#[test]
+fn same_mcu_query_uses_wire_clock_instead_of_stale_host_projection() {
+    let key = AxisKey { mcu_id: 7, axis: 3 };
+    let mut coeffs = [0.0; MAX_PIECE_COEFFS];
+    coeffs[0] = 5.0;
+    coeffs[1] = 5.0;
+    let piece = PieceEntry {
+        start_time: 0,
+        duration: 1.0,
+        coeff_count: 2,
+        coeffs,
+        ..PieceEntry::zeroed()
+    };
+    let mut store = HistoryStore::default();
+    store.record(key, &piece, 1_000.0, 0.04);
+
+    let exact = history_state_at_query(&store, key, 7, 500, 0.5, f64::INFINITY).unwrap();
+    let projected = history_state_at_query(&store, key, 8, 500, 0.5, f64::INFINITY).unwrap();
+
+    assert!((exact.position - 5.0).abs() < 1.0e-9);
+    assert!((projected.position - 4.6).abs() < 1.0e-9);
 }

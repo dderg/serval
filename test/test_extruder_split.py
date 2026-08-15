@@ -64,7 +64,12 @@ class FakeHeaters:
 
 class FakePrinter(FakePrinterBase):
     def __init__(
-        self, axis_sections=None, can_extrude=True, engine=None, mcu=None
+        self,
+        axis_sections=None,
+        can_extrude=True,
+        engine=None,
+        mcu=None,
+        axis_mcus=None,
     ):
         if axis_sections is None:
             axis_sections = [
@@ -79,7 +84,10 @@ class FakePrinter(FakePrinterBase):
                 "gcode": FakeGcode(),
                 "toolhead": FakeToolhead(),
                 "motion": FakeMotion(
-                    axis_sections=axis_sections, engine=engine, mcu=mcu
+                    axis_sections=axis_sections,
+                    engine=engine,
+                    mcu=mcu,
+                    axis_mcus=axis_mcus,
                 ),
             }
         )
@@ -92,9 +100,10 @@ def make_extruder_section(
     can_extrude=True,
     engine=None,
     mcu=None,
+    axis_mcus=None,
     **options,
 ):
-    printer = FakePrinter(axis_sections, can_extrude, engine, mcu)
+    printer = FakePrinter(axis_sections, can_extrude, engine, mcu, axis_mcus)
     base = {
         "nozzle_diameter": 0.4,
         "filament_diameter": 1.75,
@@ -150,12 +159,20 @@ def test_extruder_valid_follower_axis_loads():
     assert pe.axis_name == "e"
 
 
-def test_find_past_position_queries_engine_state_at_mcu_and_time():
-    mcu = object()
+def test_find_past_position_queries_axis_mcu_at_requested_time():
+    primary_mcu = object()
+    extruder_mcu = object()
     engine = FakeEngine(motion_state_at={"e": (12.5, 0.0, 0.0)})
-    pe = PrinterExtruder(make_extruder_section(engine=engine, mcu=mcu), 0)
+    pe = PrinterExtruder(
+        make_extruder_section(
+            engine=engine,
+            mcu=primary_mcu,
+            axis_mcus={"e": extruder_mcu},
+        ),
+        0,
+    )
     assert pe.find_past_position(42.0) == 12.5
-    assert engine.calls == [("motion_state_at", mcu, None, 42.0, "e")]
+    assert engine.calls == [("motion_state_at", extruder_mcu, None, 42.0, "e")]
 
 
 def test_find_past_position_missing_e_history_fails_loudly():

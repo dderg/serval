@@ -108,7 +108,7 @@ def test_stepcompress_z_survives_an_idle_longer_than_the_encoder_window(
     parked_at = _steps(world, "z")
     held_from = world.status()["toolhead"]["estimated_print_time"]
 
-    for _ in range(8):
+    for _ in range(12):
         world.gcode_ok("G1 X135 Y135 F600")
         world.gcode_ok("G1 X125 Y125 F600")
     world.gcode_ok("G1 Z120 F300")

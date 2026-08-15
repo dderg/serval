@@ -3,7 +3,7 @@ use crossbeam_channel::unbounded;
 use runtime::piece_ring::PieceEntry;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn make_piece_dur(t: u64, duration_secs: f32) -> (PieceEntry, f64) {
     (
@@ -108,6 +108,7 @@ fn stall_detection_fires_when_floor_stuck() {
         epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs: DRIP_WINDOW_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     data.send(EnqueueMsg {
@@ -117,6 +118,7 @@ fn stall_detection_fires_when_floor_stuck() {
         epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs: DRIP_WINDOW_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
 
@@ -128,8 +130,100 @@ fn stall_detection_fires_when_floor_stuck() {
     let msgs = stall_msgs.lock().unwrap();
     assert_eq!(msgs.len(), 1, "expected one stall, got: {msgs:?}");
     assert!(
-        msgs[0].contains("floor stalled"),
-        "stall must mention the floor; got: {}",
+        msgs[0].contains("execution stalled"),
+        "stall must identify missing execution progress; got: {}",
+        msgs[0]
+    );
+}
+
+#[test]
+fn advancing_lane_does_not_hide_a_stalled_lane() {
+    let advancing = AxisKey { mcu_id: 0, axis: 0 };
+    let stalled = AxisKey { mcu_id: 0, axis: 1 };
+    let sink = CountingSink::new();
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let stall_msgs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let stall_msgs_clone = Arc::clone(&stall_msgs);
+
+    let sink_clone = sink.clone();
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            control_rx,
+            data_rx,
+            sink_clone,
+            PumpCallbacks {
+                mcu_clock_of: Box::new(|_| Some((0u64, 1000.0))),
+                on_drip_stall: Box::new(move |msg: String| {
+                    stall_msgs_clone.lock().unwrap().push(msg);
+                }),
+                ..PumpCallbacks::noop(64)
+            },
+            None,
+            std::sync::Arc::new(crate::drain::DrainLedger::new()),
+            Arc::new(AtomicU64::new(0)),
+        );
+    });
+
+    data.send(EnqueueMsg {
+        epoch_freq: None,
+        key: advancing,
+        pieces: (0..20).map(|i| make_piece_dur(i as u64, 0.003)).collect(),
+        epoch: crate::anchor::StreamEpoch::Continuation,
+        lead_secs: DRIP_WINDOW_SECS,
+        source_line: u32::MAX,
+        batch_end: false,
+    })
+    .unwrap();
+    data.send(EnqueueMsg {
+        epoch_freq: None,
+        key: stalled,
+        pieces: (0..20).map(|i| make_piece_dur(i as u64, 0.003)).collect(),
+        epoch: crate::anchor::StreamEpoch::Continuation,
+        lead_secs: DRIP_WINDOW_SECS,
+        source_line: u32::MAX,
+        batch_end: true,
+    })
+    .unwrap();
+
+    let send_deadline = Instant::now() + Duration::from_secs(2);
+    while sink.sent().len() < 40 {
+        assert!(
+            Instant::now() < send_deadline,
+            "pump did not send both lanes"
+        );
+        std::thread::yield_now();
+    }
+
+    ctl.send(PumpMsg::DripArm(DripArm {
+        cohort: 56,
+        participants: vec![advancing, stalled],
+        timeout: Duration::from_millis(60),
+    }))
+    .unwrap();
+
+    for retired in 1..=5 {
+        ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
+            mcu_id: 0,
+            consumed_counts: None,
+            retired_counts: vec![retired, 0],
+        }))
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+
+    let msgs = stall_msgs.lock().unwrap();
+    assert_eq!(
+        msgs.len(),
+        1,
+        "expected one stalled-lane fault, got: {msgs:?}"
+    );
+    assert!(
+        msgs[0].contains("mcu0 axis1: executed 0"),
+        "fault must identify the lane that made no progress: {}",
         msgs[0]
     );
 }
@@ -177,6 +271,7 @@ fn fully_executed_cohort_awaiting_trip_is_not_a_stall() {
             epoch: crate::anchor::StreamEpoch::Continuation,
             lead_secs: MAX_LEAD_SECS,
             source_line: u32::MAX,
+            batch_end: true,
         })
         .unwrap();
     }
@@ -192,6 +287,7 @@ fn fully_executed_cohort_awaiting_trip_is_not_a_stall() {
     }
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 0,
+        consumed_counts: None,
         retired_counts: vec![5, 5, 0, 0],
     }))
     .unwrap();
@@ -260,6 +356,7 @@ fn idle_participant_does_not_pin_the_cohort_floor() {
             epoch: crate::anchor::StreamEpoch::Continuation,
             lead_secs: MAX_LEAD_SECS,
             source_line: u32::MAX,
+            batch_end: true,
         })
         .unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -273,6 +370,7 @@ fn idle_participant_does_not_pin_the_cohort_floor() {
         }
         ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
             mcu_id: 0,
+            consumed_counts: None,
             retired_counts: vec![step + 1, 0, 0, 0],
         }))
         .unwrap();
@@ -332,6 +430,7 @@ fn non_participant_enqueue_aborts_cohort_and_drops_pieces() {
         epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs: MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
 
@@ -399,6 +498,7 @@ fn participant_release_tracks_mcu_clock_horizon() {
         epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs: DRIP_WINDOW_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
 
@@ -449,6 +549,7 @@ fn unsynced_clock_releases_nothing_for_participants() {
         epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs: DRIP_WINDOW_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
 
@@ -509,12 +610,14 @@ fn retired_regression_triggers_on_drip_stall() {
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 3,
+        consumed_counts: None,
         retired_counts: vec![0, 0, 5],
     }))
     .unwrap();
     std::thread::sleep(Duration::from_millis(50));
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 3,
+        consumed_counts: None,
         retired_counts: vec![0, 0, 3],
     }))
     .unwrap();
@@ -564,11 +667,13 @@ fn mcu_reboot_retired_to_zero_triggers_regression() {
         epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs: DRIP_WINDOW_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
     std::thread::sleep(Duration::from_millis(30));
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
+        consumed_counts: None,
         retired_counts: vec![40],
     }))
     .unwrap();
@@ -584,6 +689,7 @@ fn mcu_reboot_retired_to_zero_triggers_regression() {
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
+        consumed_counts: None,
         retired_counts: vec![0],
     }))
     .unwrap();
@@ -640,6 +746,7 @@ fn drip_disarm_clears_cohort() {
         epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs: MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
 
@@ -698,6 +805,7 @@ fn drip_disarm_wrong_cohort_id_is_noop() {
         epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs: MAX_LEAD_SECS,
         source_line: u32::MAX,
+        batch_end: true,
     })
     .unwrap();
 

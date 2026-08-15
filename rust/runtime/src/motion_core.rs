@@ -87,9 +87,64 @@ pub fn get_position_and_velocity_armed<F: FaultSink>(
     fault: &F,
     just_armed: &mut bool,
 ) -> Option<(f32, f32)> {
+    get_position_and_velocity_armed_with_endpoint(
+        armed,
+        ring,
+        storage,
+        now,
+        sample_period_cycles,
+        cycles_per_second,
+        axis_idx,
+        fault,
+        just_armed,
+        false,
+    )
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn get_position_and_velocity_armed_at_window_end<F: FaultSink>(
+    armed: &mut Option<ArmedPiece>,
+    ring: &mut RingDescriptor,
+    storage: &[PieceEntry],
+    now: u64,
+    sample_period_cycles: u32,
+    cycles_per_second: f32,
+    axis_idx: usize,
+    fault: &F,
+    just_armed: &mut bool,
+) -> Option<(f32, f32)> {
+    get_position_and_velocity_armed_with_endpoint(
+        armed,
+        ring,
+        storage,
+        now,
+        sample_period_cycles,
+        cycles_per_second,
+        axis_idx,
+        fault,
+        just_armed,
+        true,
+    )
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn get_position_and_velocity_armed_with_endpoint<F: FaultSink>(
+    armed: &mut Option<ArmedPiece>,
+    ring: &mut RingDescriptor,
+    storage: &[PieceEntry],
+    now: u64,
+    sample_period_cycles: u32,
+    cycles_per_second: f32,
+    axis_idx: usize,
+    fault: &F,
+    just_armed: &mut bool,
+    include_endpoint: bool,
+) -> Option<(f32, f32)> {
     *just_armed = false;
     if let Some(p) = &*armed {
-        if now < p.piece_end_cycles {
+        if now < p.piece_end_cycles || include_endpoint && now == p.piece_end_cycles {
             crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_CLENSHAW);
             return Some(p.eval_pos_vel(now));
         }
@@ -107,16 +162,12 @@ pub fn get_position_and_velocity_armed<F: FaultSink>(
         cycles_per_second,
         axis_idx,
         fault,
+        include_endpoint,
     )?;
     crate::isr_phase::walk_account(crate::isr_phase::cyccnt().wrapping_sub(walk_start));
 
     crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_ARM);
     let arm_start = crate::isr_phase::cyccnt();
-    // SAFETY: `slot` is `ring_offset + tail` from `get_piece_for_time` →
-    // `ring.front_slot()`. `configure_axis` guarantees
-    // `ring_offset + ring_depth <= storage.len()`, and `tail < ring_depth`
-    // always holds (tail advances mod ring_depth). Therefore `slot <
-    // storage.len()`.
     #[allow(clippy::indexing_slicing)]
     let p = arm_and_load(armed, &storage[slot], cycles_per_second);
     *just_armed = true;
@@ -138,6 +189,7 @@ fn get_piece_for_time<F: FaultSink>(
     cycles_per_second: f32,
     axis_idx: usize,
     fault: &F,
+    include_endpoint: bool,
 ) -> Option<usize> {
     // mcu-sim: the virtual clock races far ahead of klippy's clock
     // estimate, so the grace window must absorb sim jitter.
@@ -160,7 +212,8 @@ fn get_piece_for_time<F: FaultSink>(
             fault.piece_start_in_past(axis_idx, deficit_us);
             return None;
         }
-        if now < entry.end_time(cycles_per_second) {
+        let end_time = entry.end_time(cycles_per_second);
+        if now < end_time || include_endpoint && now == end_time {
             return Some(slot);
         }
         ring.advance_counter();

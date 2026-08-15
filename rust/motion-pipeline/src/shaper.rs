@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, Sender};
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
@@ -8,7 +9,7 @@ use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
     FIT_TRUNC_POS_FACTOR, FitTol, LADDER_PROBES_U, ladder_fit, quintic_in_u, truncated_piece,
 };
-use crate::types::{Control, LoweredItem, PostProcessError, ShapedItem};
+use crate::types::{Control, LoweredItem, LoweredSegment, PostProcessError, ShapedItem};
 
 /// The evaluable (position, velocity, acceleration) signal the shaped-track
 /// fitter consumes: the kernel convolution for kerneled axes, the follower
@@ -24,7 +25,10 @@ pub(crate) trait TrackSignal {
     }
 }
 
-impl TrackSignal for ShapedSignal<'_> {
+impl<F> TrackSignal for ShapedSignal<'_, F>
+where
+    F: Fn(f64) -> f64,
+{
     fn eval(&self, t: f64) -> f64 {
         ShapedSignal::eval(self, t)
     }
@@ -147,19 +151,45 @@ impl Shaper {
     }
 
     pub fn run(mut self, input: Receiver<LoweredItem>, output: Sender<ShapedItem>) {
+        let mut deferred = None;
         loop {
-            match input.recv() {
-                Ok(item) => {
-                    if !self.feed(item, &output) {
+            let item = match deferred.take() {
+                Some(item) => item,
+                None => match input.recv() {
+                    Ok(item) => item,
+                    Err(_) => {
+                        self.finish(&output);
                         return;
                     }
-                }
-                Err(_) => {
-                    self.finish(&output);
+                },
+            };
+            let LoweredItem::Seg(segment) = item else {
+                if !self.feed(item, &output) {
                     return;
                 }
+                continue;
+            };
+            self.buffer_segment(segment);
+            for _ in 1..crate::STAGE_CHANNEL_CAP {
+                let Ok(item) = input.try_recv() else {
+                    break;
+                };
+                match item {
+                    LoweredItem::Seg(segment) => self.buffer_segment(segment),
+                    other => {
+                        deferred = Some(other);
+                        break;
+                    }
+                }
+            }
+            if !self.emit(self.supported_count(), false, &output) {
+                return;
             }
         }
+    }
+
+    fn buffer_segment(&mut self, item: LoweredSegment) {
+        self.pending.push(item.seg, item.rest_at_end);
     }
 
     /// One iteration of [`Shaper::run`]'s loop, for single-threaded hosts
@@ -167,7 +197,7 @@ impl Shaper {
     pub fn feed(&mut self, item: LoweredItem, output: &Sender<ShapedItem>) -> bool {
         match item {
             LoweredItem::Seg(item) => {
-                self.pending.push(item.seg, item.rest_at_end);
+                self.buffer_segment(item);
                 self.emit(self.supported_count(), false, output)
             }
             LoweredItem::Drain => {
@@ -240,27 +270,34 @@ impl Shaper {
     /// tracks have their own lookahead covered. The time-based bound already
     /// includes the cascaded width, but segment granularity can leave a long
     /// straddling segment unprojectable, so gate on the frontier explicitly.
+    ///
+    /// Every gate compares `t_end + support` against the covered end with no
+    /// slack — the same association and strictness as the fit-time
+    /// `MissingLookahead` checks, so a gated segment can never demand
+    /// lookahead the buffer does not hold. The lowerer's rest-holds are sized
+    /// exactly to a chain's support, so a slack here admits sums that land a
+    /// few ulps past the frontier and panics the fit (issue #405).
     fn supported_count(&self) -> usize {
         let Some(last) = self.pending.back() else {
             return 0;
         };
-        let latest_safe_t = last.t_end - self.forward_support;
+        let last_t = last.t_end;
         let plain = self
             .pending
             .iter()
-            .take_while(|seg| seg.t_end <= latest_safe_t + 1e-12)
+            .take_while(|seg| seg.t_end + self.forward_support <= last_t)
             .count();
         let own_hi = self.chains.max_follower_own_forward_support();
         if own_hi <= 0.0 {
             return plain;
         }
-        let Some(frontier_t) = self.shaping_frontier_t(last.t_end) else {
+        let Some(frontier_t) = self.shaping_frontier_t(last_t) else {
             return 0;
         };
         let gated = self
             .pending
             .iter()
-            .take_while(|seg| seg.t_end + own_hi <= frontier_t + 1e-12)
+            .take_while(|seg| seg.t_end + own_hi <= frontier_t)
             .count();
         plain.min(gated)
     }
@@ -271,7 +308,7 @@ impl Shaper {
         let direct_hi = self.chains.direct_forward_support();
         self.pending
             .iter()
-            .take_while(|seg| seg.t_end + direct_hi <= last_t + 1e-12)
+            .take_while(|seg| seg.t_end + direct_hi <= last_t)
             .last()
             .map(|seg| seg.t_end)
     }
@@ -289,7 +326,7 @@ impl Shaper {
             let direct_hi = self.chains.direct_forward_support();
             self.pending
                 .iter()
-                .take_while(|seg| seg.t_end + direct_hi <= last_t + 1e-12)
+                .take_while(|seg| seg.t_end + direct_hi <= last_t)
                 .count()
                 .max(count)
         };
@@ -465,9 +502,21 @@ fn pad_segment_axes_to_uniform_degree(seg: &mut ShapedSegment) {
     }
 }
 
-/// Fit one kerneled axis over `targets`, returning the shaped column —
-/// `None` when the chain has no kernel. Pure in its inputs, so columns for
-/// different axes run on scoped threads.
+fn constant_axis_column(
+    segments: &[&ShapedSegment],
+    targets: &[ShapedSegment],
+    axis: usize,
+) -> Option<Vec<nurbs::ScalarNurbs>> {
+    let mut control_points = segments
+        .iter()
+        .flat_map(|seg| seg.axes[axis].control_points().iter());
+    let constant = *control_points.next()?;
+    if !constant.is_finite() || control_points.any(|&point| point != constant) {
+        return None;
+    }
+    Some(targets.iter().map(|seg| seg.axes[axis].clone()).collect())
+}
+
 fn fit_axis_column(
     history: &VecDeque<ShapedSegment>,
     base: &[ShapedSegment],
@@ -475,6 +524,7 @@ fn fit_axis_column(
     axis: usize,
     force: bool,
     at_stream_boundary: bool,
+    parallel_targets: bool,
     chain: &CompiledChain,
 ) -> Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError> {
     let Some(kernel) = chain.stages.iter().find_map(|stage| match stage {
@@ -490,17 +540,6 @@ fn fit_axis_column(
         .map_or(0.0, |seg| seg.t_start);
     let last_t = base.last().map_or(first_t, |seg| seg.t_end);
     let signal_segments: Vec<&ShapedSegment> = history.iter().chain(base.iter()).collect();
-    let input_breaks = signal_breakpoints(&signal_segments, axis);
-    let table = AxisSignalTable::build(
-        &signal_segments,
-        axis,
-        first_t,
-        last_t,
-        at_stream_boundary,
-        force,
-    );
-    let sig = ShapedSignal::new_from_evaluator(kernel, |t| table.eval(t), input_breaks);
-    let mut column = Vec::with_capacity(targets.len());
     for seg in targets {
         let need_lo = seg.t_start - k_hi;
         let need_hi = seg.t_end - k_lo;
@@ -510,6 +549,76 @@ fn fit_axis_column(
         if need_hi > last_t && !force {
             return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
         }
+    }
+    if let Some(column) = constant_axis_column(&signal_segments, targets, axis) {
+        return Ok(Some(column));
+    }
+    let input_breaks = signal_breakpoints(&signal_segments, axis);
+    let kernel_degree = kernel
+        .pieces
+        .iter()
+        .map(|piece| piece.degree())
+        .max()
+        .expect("shaper kernel has no pieces");
+    let table = Arc::new(
+        AxisSignalTable::build(
+            &signal_segments,
+            axis,
+            first_t,
+            last_t,
+            at_stream_boundary,
+            force,
+        )
+        .with_piece_moments(kernel_degree),
+    );
+    let input_degree = table.max_degree();
+    if !parallel_targets || targets.len() < 4 {
+        return fit_axis_targets(axis, targets, kernel, table, input_breaks, input_degree)
+            .map(Some);
+    }
+    let chunk_len = targets.len().div_ceil(2);
+    let columns = std::thread::scope(|scope| {
+        targets
+            .chunks(chunk_len)
+            .map(|chunk| {
+                let table = Arc::clone(&table);
+                let input_breaks = input_breaks.clone();
+                scope.spawn(move || {
+                    fit_axis_targets(axis, chunk, kernel, table, input_breaks, input_degree)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().expect("axis target fit thread panicked"))
+            .collect::<Vec<_>>()
+    });
+    let mut column = Vec::with_capacity(targets.len());
+    for chunk in columns {
+        column.extend(chunk?);
+    }
+    Ok(Some(column))
+}
+
+fn fit_axis_targets(
+    axis: usize,
+    targets: &[ShapedSegment],
+    kernel: &nurbs::algebra::PiecewisePolynomialKernel,
+    table: Arc<AxisSignalTable>,
+    input_breaks: Vec<f64>,
+    input_degree: usize,
+) -> Result<Vec<nurbs::ScalarNurbs>, PostProcessError> {
+    let eval_table = Arc::clone(&table);
+    let sig = ShapedSignal::new_from_polynomial_evaluator(
+        kernel,
+        move |t| eval_table.eval(t),
+        input_breaks,
+        input_degree,
+        move |lo, hi, degree, origin, moments| {
+            table.integrate_moments(lo, hi, degree, origin, moments)
+        },
+    );
+    let mut column = Vec::with_capacity(targets.len());
+    for seg in targets {
         let track = fit_axis_from_signal(axis, &seg.axes[axis], &sig, 1.0)?;
         if !track.control_points().iter().all(|v| v.is_finite()) {
             return Err(PostProcessError::NonFiniteSample {
@@ -519,13 +628,9 @@ fn fit_axis_column(
         }
         column.push(track);
     }
-    Ok(Some(column))
+    Ok(column)
 }
 
-/// Fit every kerneled non-follower axis over `fresh`, one scoped thread per
-/// axis when more than one needs fitting — the columns are independent and
-/// the merge order is fixed, so the result is bit-identical to the serial
-/// pass.
 fn fit_leader_axes(
     history: &VecDeque<ShapedSegment>,
     base: &[ShapedSegment],
@@ -541,11 +646,6 @@ fn fit_leader_axes(
         .map(|axis| (axis, chains.chains.get(axis).unwrap_or(&default_chain)))
         .filter(|(_, chain)| !chain.is_empty())
         .collect();
-    // A column fit costs milliseconds (ladder fits over the convolution
-    // window) against tens of microseconds per scoped spawn, so parallel
-    // pays from the first fresh segment: with the old >=8-segment gate the
-    // dense-region steady state (1-2 fresh segments per emit) fitted every
-    // axis serially and pegged one core while the rest idled.
     let fit_started = crate::timing::stopwatch();
     type TimedColumn = (
         usize,
@@ -553,6 +653,9 @@ fn fit_leader_axes(
         u128,
     );
     let parallel = cfg!(not(target_arch = "wasm32")) && axis_chains.len() > 1 && !fresh.is_empty();
+    let parallel_targets = cfg!(not(target_arch = "wasm32"))
+        && fresh.len() >= 4
+        && std::thread::available_parallelism().is_ok_and(|cores| cores.get() >= 4);
     let columns: Vec<TimedColumn> = if parallel {
         let fresh_ref: &[ShapedSegment] = fresh;
         std::thread::scope(|scope| {
@@ -568,6 +671,7 @@ fn fit_leader_axes(
                             axis,
                             force,
                             at_stream_boundary,
+                            parallel_targets,
                             chain,
                         );
                         (axis, column, column_started.elapsed_us())
@@ -584,8 +688,16 @@ fn fit_leader_axes(
             .iter()
             .map(|&(axis, chain)| {
                 let column_started = crate::timing::stopwatch();
-                let column =
-                    fit_axis_column(history, base, fresh, axis, force, at_stream_boundary, chain);
+                let column = fit_axis_column(
+                    history,
+                    base,
+                    fresh,
+                    axis,
+                    force,
+                    at_stream_boundary,
+                    parallel_targets,
+                    chain,
+                );
                 (axis, column, column_started.elapsed_us())
             })
             .collect()
@@ -628,6 +740,132 @@ fn signal_breakpoints(segments: &[&ShapedSegment], axis: usize) -> Vec<f64> {
     breaks
 }
 
+const MOMENT_POWER_CAPACITY: usize = 16;
+
+fn accumulate_translated_moments(
+    source_origin: f64,
+    source: &[f64],
+    target_origin: f64,
+    target: &mut [f64],
+) {
+    assert_eq!(source.len(), target.len());
+    assert!(target.len() <= MOMENT_POWER_CAPACITY);
+    let delta = source_origin - target_origin;
+    let mut delta_powers = [1.0; MOMENT_POWER_CAPACITY];
+    for power in 1..target.len() {
+        delta_powers[power] = delta_powers[power - 1] * delta;
+    }
+    for (moment_power, moment) in target.iter_mut().enumerate() {
+        let mut choose = 1.0;
+        for source_power in 0..=moment_power {
+            *moment += choose * delta_powers[moment_power - source_power] * source[source_power];
+            if source_power < moment_power {
+                choose *= (moment_power - source_power) as f64 / (source_power + 1) as f64;
+            }
+        }
+    }
+}
+
+struct MomentTree {
+    degree: usize,
+    leaf_count: usize,
+    origins: Vec<f64>,
+    moments: Vec<f64>,
+}
+
+impl MomentTree {
+    fn build(table: &AxisSignalTable, degree: usize) -> Self {
+        let stride = degree + 1;
+        assert!(
+            stride <= MOMENT_POWER_CAPACITY,
+            "moment degree {degree} exceeds capacity {}",
+            MOMENT_POWER_CAPACITY - 1
+        );
+        let leaf_count = table.coeffs.len().next_power_of_two();
+        let node_count = 2 * leaf_count;
+        let mut origins = vec![f64::NAN; node_count];
+        let mut moments = vec![0.0; node_count * stride];
+        for i in 0..table.coeffs.len() {
+            let node = leaf_count + i;
+            let origin = table.starts[i] + 0.5 * (table.ends[i] - table.starts[i]);
+            origins[node] = origin;
+            AxisSignalTable::accumulate_polynomial_moments(
+                &table.coeffs[i],
+                table.starts[i],
+                table.starts[i],
+                table.ends[i],
+                origin,
+                &mut moments[node * stride..(node + 1) * stride],
+            );
+        }
+        for node in (1..leaf_count).rev() {
+            let left = 2 * node;
+            let right = left + 1;
+            let origin = match (origins[left].is_finite(), origins[right].is_finite()) {
+                (true, true) => 0.5 * (origins[left] + origins[right]),
+                (true, false) => origins[left],
+                (false, true) => origins[right],
+                (false, false) => continue,
+            };
+            origins[node] = origin;
+            let mut combined = [0.0; MOMENT_POWER_CAPACITY];
+            for child in [left, right] {
+                if origins[child].is_finite() {
+                    accumulate_translated_moments(
+                        origins[child],
+                        &moments[child * stride..(child + 1) * stride],
+                        origin,
+                        &mut combined[..stride],
+                    );
+                }
+            }
+            moments[node * stride..(node + 1) * stride].copy_from_slice(&combined[..stride]);
+        }
+        Self {
+            degree,
+            leaf_count,
+            origins,
+            moments,
+        }
+    }
+
+    fn accumulate(&self, start: usize, end: usize, degree: usize, origin: f64, target: &mut [f64]) {
+        if start >= end {
+            return;
+        }
+        let mut left = start + self.leaf_count;
+        let mut right = end + self.leaf_count;
+        let mut right_nodes = [0usize; usize::BITS as usize];
+        let mut right_count = 0;
+        while left < right {
+            if left & 1 != 0 {
+                self.accumulate_node(left, degree, origin, target);
+                left += 1;
+            }
+            if right & 1 != 0 {
+                right -= 1;
+                right_nodes[right_count] = right;
+                right_count += 1;
+            }
+            left /= 2;
+            right /= 2;
+        }
+        while right_count > 0 {
+            right_count -= 1;
+            self.accumulate_node(right_nodes[right_count], degree, origin, target);
+        }
+    }
+
+    fn accumulate_node(&self, node: usize, degree: usize, origin: f64, target: &mut [f64]) {
+        let stride = self.degree + 1;
+        accumulate_translated_moments(
+            self.origins[node],
+            &self.moments[node * stride..node * stride + degree + 1],
+            origin,
+            target,
+        );
+    }
+}
 /// One axis of the emit window, flattened to time-sorted monomial pieces so
 /// the convolution's Gauss sampling evaluates by binary search plus Horner
 /// instead of a de Boor pass per sample. Semantics match the NURBS window it
@@ -643,7 +881,7 @@ pub(crate) struct AxisSignalTable {
     last_t: f64,
     at_stream_boundary: bool,
     force: bool,
-    cursor: std::cell::Cell<usize>,
+    moment_tree: Option<MomentTree>,
 }
 
 impl AxisSignalTable {
@@ -679,17 +917,183 @@ impl AxisSignalTable {
             last_t,
             at_stream_boundary,
             force,
-            cursor: std::cell::Cell::new(0),
+            moment_tree: None,
         };
         for track in tracks {
-            for p in extract_bezier_pieces(track) {
-                table.starts.push(p.u_start);
-                table.ends.push(p.u_end);
-                table.coeffs.push(p.coeffs);
+            for piece in extract_bezier_pieces(track) {
+                if let Some(previous_end) = table.ends.last().copied() {
+                    assert!(
+                        piece.u_start >= previous_end,
+                        "signal pieces overlap: next starts at {} before previous end {previous_end}",
+                        piece.u_start
+                    );
+                    if piece.u_start > previous_end {
+                        let previous = table.coeffs.len() - 1;
+                        let held = table.piece_at(previous, previous_end);
+                        table.starts.push(previous_end);
+                        table.ends.push(piece.u_start);
+                        table.coeffs.push(vec![held]);
+                    }
+                }
+                table.starts.push(piece.u_start);
+                table.ends.push(piece.u_end);
+                table.coeffs.push(piece.coeffs);
             }
         }
         assert!(!table.coeffs.is_empty(), "empty signal window");
         table
+    }
+
+    pub(crate) fn max_degree(&self) -> usize {
+        self.coeffs
+            .iter()
+            .map(|coefficients| coefficients.len() - 1)
+            .max()
+            .expect("empty signal window")
+    }
+    pub(crate) fn with_piece_moments(mut self, degree: usize) -> Self {
+        self.moment_tree = Some(MomentTree::build(&self, degree));
+        self
+    }
+    pub(crate) fn integrate_moments(
+        &self,
+        lo: f64,
+        hi: f64,
+        degree: usize,
+        origin: f64,
+        moments: &mut [f64],
+    ) -> bool {
+        assert_eq!(moments.len(), degree + 1);
+        let tree = self
+            .moment_tree
+            .as_ref()
+            .expect("moment integration requested before moments were built");
+        assert!(
+            degree <= tree.degree,
+            "requested moment degree {degree} exceeds prepared degree {}",
+            tree.degree
+        );
+        if !lo.is_finite() || !hi.is_finite() || !origin.is_finite() || lo > hi {
+            return false;
+        }
+        if (lo < self.first_t && !self.at_stream_boundary) || (hi > self.last_t && !self.force) {
+            return false;
+        }
+        moments.fill(0.0);
+        if lo < self.first_t {
+            let held = [self.piece_at(0, self.first_t)];
+            Self::accumulate_polynomial_moments(
+                &held,
+                lo,
+                lo,
+                hi.min(self.first_t),
+                origin,
+                moments,
+            );
+        }
+        let interior_lo = lo.max(self.first_t);
+        let interior_hi = hi.min(self.last_t);
+        if interior_hi > interior_lo {
+            let first_piece = self.ends.partition_point(|&end| end <= interior_lo);
+            let end_piece = self.starts.partition_point(|&start| start < interior_hi);
+            let mut full_start = first_piece;
+            let mut full_end = end_piece;
+            if self.starts[first_piece] < interior_lo {
+                Self::accumulate_polynomial_moments(
+                    &self.coeffs[first_piece],
+                    self.starts[first_piece],
+                    interior_lo,
+                    interior_hi.min(self.ends[first_piece]),
+                    origin,
+                    moments,
+                );
+                full_start += 1;
+            }
+            let right_partial = if full_start < full_end && self.ends[full_end - 1] > interior_hi {
+                full_end -= 1;
+                Some(full_end)
+            } else {
+                None
+            };
+            tree.accumulate(full_start, full_end, degree, origin, moments);
+            if let Some(piece) = right_partial {
+                Self::accumulate_polynomial_moments(
+                    &self.coeffs[piece],
+                    self.starts[piece],
+                    self.starts[piece],
+                    interior_hi,
+                    origin,
+                    moments,
+                );
+            }
+        }
+        if hi > self.last_t {
+            let held = [self.piece_at(self.coeffs.len() - 1, self.last_t)];
+            Self::accumulate_polynomial_moments(
+                &held,
+                self.last_t,
+                lo.max(self.last_t),
+                hi,
+                origin,
+                moments,
+            );
+        }
+        true
+    }
+
+    fn accumulate_polynomial_moments(
+        coefficients: &[f64],
+        polynomial_start: f64,
+        lo: f64,
+        hi: f64,
+        origin: f64,
+        moments: &mut [f64],
+    ) {
+        if hi <= lo {
+            return;
+        }
+        let max_power = coefficients.len() + moments.len() - 1;
+        assert!(
+            max_power < MOMENT_POWER_CAPACITY,
+            "moment product degree {} exceeds capacity {}",
+            max_power - 1,
+            MOMENT_POWER_CAPACITY - 2
+        );
+        let mut translated = [0.0; MOMENT_POWER_CAPACITY];
+        let delta = origin - polynomial_start;
+        let mut delta_powers = [1.0; MOMENT_POWER_CAPACITY];
+        for power in 1..coefficients.len() {
+            delta_powers[power] = delta_powers[power - 1] * delta;
+        }
+        for (source_power, coefficient) in coefficients.iter().copied().enumerate() {
+            let mut choose = 1.0;
+            for target_power in 0..=source_power {
+                translated[target_power] +=
+                    coefficient * choose * delta_powers[source_power - target_power];
+                if target_power < source_power {
+                    choose *= (source_power - target_power) as f64 / (target_power + 1) as f64;
+                }
+            }
+        }
+        let mut lo_powers = [1.0; MOMENT_POWER_CAPACITY];
+        let mut hi_powers = [1.0; MOMENT_POWER_CAPACITY];
+        let x_lo = lo - origin;
+        let x_hi = hi - origin;
+        for power in 1..=max_power {
+            lo_powers[power] = lo_powers[power - 1] * x_lo;
+            hi_powers[power] = hi_powers[power - 1] * x_hi;
+        }
+        for (moment_power, moment) in moments.iter_mut().enumerate() {
+            for (polynomial_power, coefficient) in translated
+                .iter()
+                .copied()
+                .take(coefficients.len())
+                .enumerate()
+            {
+                let power = polynomial_power + moment_power + 1;
+                *moment += coefficient * (hi_powers[power] - lo_powers[power]) / power as f64;
+            }
+        }
     }
 
     fn piece_at(&self, i: usize, t: f64) -> f64 {
@@ -713,14 +1117,10 @@ impl AxisSignalTable {
             }
             return self.piece_at(self.coeffs.len() - 1, self.last_t);
         }
-        let mut i = self.cursor.get().min(self.coeffs.len() - 1);
-        while i > 0 && self.ends[i - 1] + SEGMENT_TIME_EPS_S >= t {
-            i -= 1;
-        }
-        while i + 1 < self.coeffs.len() && self.ends[i] + SEGMENT_TIME_EPS_S < t {
-            i += 1;
-        }
-        self.cursor.set(i);
+        let i = self
+            .ends
+            .partition_point(|&end| end + SEGMENT_TIME_EPS_S < t)
+            .min(self.coeffs.len() - 1);
         if t >= self.starts[i] - SEGMENT_TIME_EPS_S {
             return self.piece_at(i, t);
         }

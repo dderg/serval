@@ -1,3 +1,4 @@
+import concurrent.futures
 import importlib.util
 import os
 import pathlib
@@ -150,6 +151,21 @@ class MotionEngineWrapper:
         self._engine = _native.MotionEngine()
         self._printer = printer
         self._reactor = printer.get_reactor()
+        self._calls = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="motion-engine-call"
+        )
+        printer.register_event_handler(
+            "klippy:disconnect", self._shutdown_calls
+        )
+
+    def _shutdown_calls(self):
+        self._calls.shutdown(wait=False, cancel_futures=True)
+
+    def _wait_native_call(self, call):
+        future = self._calls.submit(call)
+        while not future.done():
+            self._reactor.pause(self._reactor.monotonic() + 0.001)
+        return future.result()
 
     def __getattr__(self, name):
         if name.startswith("_"):
@@ -216,8 +232,11 @@ class MotionEngineWrapper:
         remote_freeze is None or (motor_mcu_handle, motor_idx, stepper_idx) —
         a multi-motor axis arms one switch per motor; each non-final trip
         freezes its bound motor and the run resolves on the last trip."""
-        return self._engine.home_axis_start(
-            axis, direction, speed, max_travel, list(endstops)
+        endstops = list(endstops)
+        return self._wait_native_call(
+            lambda: self._engine.home_axis_start(
+                axis, direction, speed, max_travel, endstops
+            )
         )
 
     def set_torque(self, mcu_handle, value, print_time):
@@ -248,10 +267,9 @@ class MotionEngineWrapper:
         )
 
     def set_position(self, x, y, z):
-        return self._engine.set_position(x, y, z)
-
-    def queued_motion_secs(self):
-        return self._engine.queued_motion_secs() or 0.0
+        return self._wait_native_call(
+            lambda: self._engine.set_position(x, y, z)
+        )
 
     def dispatched_lead_secs(self):
         return self._engine.dispatched_lead_secs() or 0.0

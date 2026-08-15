@@ -87,6 +87,31 @@ fn motor_state_reads_seeded_position() {
     assert!(engine.motor_state(7).is_none());
 }
 
+#[test]
+fn seed_position_preserves_large_step_count_parity_and_local_phase() {
+    let (mut engine, _) = engine_with_z_axis(StepMode::Pulse);
+    let microstep_distance = 0.000_690_468_75_f32;
+    let position = 5_792.071_3_f32;
+    engine.stepping_axes[2].as_mut().unwrap().microstep_distance = microstep_distance;
+
+    engine.seed_position([0.0, 0.0, position]);
+
+    let axis = engine.stepping_axes[2].as_ref().unwrap();
+    let expected_count = 8_388_607;
+    #[allow(clippy::cast_possible_truncation)]
+    let expected_phase =
+        (f64::from(position) - f64::from(expected_count) * f64::from(microstep_distance)) as f32;
+    assert_eq!(axis.last_step_count, expected_count);
+    assert_eq!(axis.step_phase, expected_phase);
+    assert!(axis.step_phase.abs() < 0.5 * microstep_distance);
+    for stepper in &axis.steppers {
+        assert_eq!(
+            stepper.position_count.load(Ordering::Acquire),
+            expected_count
+        );
+    }
+}
+
 fn tickable_z_engine() -> (Engine, Vec<PieceEntry>) {
     let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
     let storage = vec![PieceEntry::zeroed(); TEST_TOTAL_RING_PIECES];

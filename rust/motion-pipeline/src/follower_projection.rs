@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use nurbs::ScalarNurbs;
 use nurbs::bezier::bezier_pieces_to_nurbs;
 use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
@@ -14,6 +17,7 @@ const INTEGRAL_MAX_DEPTH: u32 = 24;
 const GRID_DEDUP_EPS_S: f64 = 1e-12;
 const SPAN_MIN_LEN_MM: f64 = 1e-12;
 const SPAN_LOOKUP_SLACK_MM: f64 = 1e-6;
+const PVA_MEMO_SLOTS: usize = 64;
 
 /// Rebuild every projected-follower track from its leaders' *toolhead*
 /// motion: the kernel-convolved signal, before any trailing derivative-gain
@@ -110,7 +114,7 @@ pub(crate) fn project_followers(
                         &sig,
                         follower_tol_scale(&raw.followers, axis),
                     )?;
-                    (track, sig.s_end(), sig.eval(raw.t_end))
+                    (track, sig.s_end(), sig.eval_pva(raw.t_end).0)
                 };
                 state.s_shaped = s_end;
                 state.e_end = Some(e_end);
@@ -138,17 +142,34 @@ pub(crate) fn project_followers(
                 let first = state.projected.first().expect("cache covers commits");
                 let last = state.projected.last().expect("cache covers commits");
                 let (first_t, last_t) = (first.t_start, last.t_end);
-                let table = AxisSignalTable::from_tracks(
-                    state.projected.iter().map(|p| &p.track),
-                    first_t,
-                    last_t,
-                    !state.projected_trimmed,
-                    force,
+                let kernel_degree = kernel
+                    .pieces
+                    .iter()
+                    .map(|piece| piece.degree())
+                    .max()
+                    .expect("shaper kernel has no pieces");
+                let table = Rc::new(
+                    AxisSignalTable::from_tracks(
+                        state.projected.iter().map(|p| &p.track),
+                        first_t,
+                        last_t,
+                        !state.projected_trimmed,
+                        force,
+                    )
+                    .with_piece_moments(kernel_degree),
                 );
-                let sig = ShapedSignal::new_from_evaluator(
+                let input_degree = table.max_degree();
+                let input_breaks = state.projected_breakpoints();
+                let eval_table = Rc::clone(&table);
+                let moment_table = Rc::clone(&table);
+                let sig = ShapedSignal::new_from_polynomial_evaluator(
                     kernel,
-                    move |t| table.eval(t),
-                    state.projected_breakpoints(),
+                    move |t| eval_table.eval(t),
+                    input_breaks,
+                    input_degree,
+                    move |lo, hi, degree, origin, moments| {
+                        moment_table.integrate_moments(lo, hi, degree, origin, moments)
+                    },
                 );
                 Some((kernel, first_t, last_t, sig))
             }
@@ -471,7 +492,10 @@ fn leader_arc_length(seg: &ShapedSegment, leaders: &[usize]) -> f64 {
         .collect();
     let speed = |t: f64| {
         d1.iter()
-            .map(|c| nurbs::eval::eval(c, t).powi(2))
+            .map(|c| {
+                let value = nurbs::eval::eval(c, t);
+                value * value
+            })
             .sum::<f64>()
             .sqrt()
     };
@@ -484,7 +508,10 @@ fn leader_arc_length(seg: &ShapedSegment, leaders: &[usize]) -> f64 {
 fn leader_distance(a: &ShapedSegment, b: &ShapedSegment, leaders: &[usize], t: f64) -> f64 {
     leaders
         .iter()
-        .map(|&l| (nurbs::eval::eval(&a.axes[l], t) - nurbs::eval::eval(&b.axes[l], t)).powi(2))
+        .map(|&l| {
+            let delta = nurbs::eval::eval(&a.axes[l], t) - nurbs::eval::eval(&b.axes[l], t);
+            delta * delta
+        })
         .sum::<f64>()
         .sqrt()
 }
@@ -529,6 +556,8 @@ pub(crate) struct FollowerSignal<'a> {
     raw_delta: Option<(ScalarNurbs, ScalarNurbs, ScalarNurbs, f64)>,
     grid: Vec<f64>,
     cumulative: Vec<f64>,
+    arc_cache: RefCell<Vec<(f64, f64)>>,
+    pva_memo: RefCell<[Option<(u64, (f64, f64, f64))>; PVA_MEMO_SLOTS]>,
 }
 
 impl<'a> FollowerSignal<'a> {
@@ -567,28 +596,39 @@ impl<'a> FollowerSignal<'a> {
             raw_delta,
             grid,
             cumulative: Vec::new(),
+            pva_memo: RefCell::new([None; PVA_MEMO_SLOTS]),
+            arc_cache: RefCell::new(Vec::new()),
         };
         let mut cumulative = Vec::with_capacity(sig.grid.len());
         let mut acc = 0.0;
         cumulative.push(0.0);
-        for w in sig.grid.clone().windows(2) {
+        for w in sig.grid.windows(2) {
             acc += integrate(&|t| sig.shaped_speed(t), w[0], w[1]);
             cumulative.push(acc);
         }
         sig.cumulative = cumulative;
+        sig.arc_cache = RefCell::new(
+            sig.grid
+                .iter()
+                .copied()
+                .zip(sig.cumulative.iter().copied())
+                .collect(),
+        );
         sig
     }
 
     fn shaped_speed(&self, t: f64) -> f64 {
         self.shaped_d1
             .iter()
-            .map(|c| nurbs::eval::eval(c, t).powi(2))
+            .map(|c| {
+                let value = nurbs::eval::eval(c, t);
+                value * value
+            })
             .sum::<f64>()
             .sqrt()
     }
 
-    fn shaped_speed_deriv(&self, t: f64) -> f64 {
-        let speed = self.shaped_speed(t);
+    fn shaped_speed_deriv_from_speed(&self, t: f64, speed: f64) -> f64 {
         if speed <= 1e-9 {
             return 0.0;
         }
@@ -602,16 +642,30 @@ impl<'a> FollowerSignal<'a> {
 
     fn s_at(&self, t: f64) -> f64 {
         let t = t.clamp(self.t0, self.t1);
-        let idx = self
-            .grid
-            .partition_point(|&g| g <= t)
-            .saturating_sub(1)
-            .min(self.grid.len() - 1);
-        self.s_start
-            + self.cumulative[idx]
-            + integrate(&|u| self.shaped_speed(u), self.grid[idx], t)
+        let (insertion, neighbor_t, neighbor_s) = {
+            let cache = self.arc_cache.borrow();
+            match cache.binary_search_by(|(cached_t, _)| cached_t.total_cmp(&t)) {
+                Ok(index) => return self.s_start + cache[index].1,
+                Err(index) => {
+                    let neighbor = if index == 0 {
+                        0
+                    } else if index == cache.len() || t - cache[index - 1].0 <= cache[index].0 - t {
+                        index - 1
+                    } else {
+                        index
+                    };
+                    (index, cache[neighbor].0, cache[neighbor].1)
+                }
+            }
+        };
+        let local_s = if t >= neighbor_t {
+            neighbor_s + integrate(&|u| self.shaped_speed(u), neighbor_t, t)
+        } else {
+            neighbor_s - integrate(&|u| self.shaped_speed(u), t, neighbor_t)
+        };
+        self.arc_cache.borrow_mut().insert(insertion, (t, local_s));
+        self.s_start + local_s
     }
-
     fn s_end(&self) -> f64 {
         self.s_start + self.cumulative.last().copied().expect("cumulative seeded")
     }
@@ -648,14 +702,18 @@ impl TrackSignal for FollowerSignal<'_> {
             .raw_delta
             .as_ref()
             .map_or(0.0, |(_, _, d2, _)| nurbs::eval::eval(d2, t));
-        slope * speed * speed + ratio * self.shaped_speed_deriv(t) + raw
+        slope * speed * speed + ratio * self.shaped_speed_deriv_from_speed(t, speed) + raw
     }
 
-    /// One `s_at` integral (the dominant cost) and one span lookup shared by
-    /// all three derivatives; each component reproduces its standalone
-    /// counterpart bit for bit.
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let t = t.clamp(self.t0, self.t1);
+        let key = t.to_bits();
+        let slot = ((key ^ key.rotate_right(32)) as usize) & (PVA_MEMO_SLOTS - 1);
+        if let Some((stored_key, value)) = self.pva_memo.borrow()[slot] {
+            if stored_key == key {
+                return value;
+            }
+        }
         let s = self.s_at(t);
         let speed = self.shaped_speed(t);
         let (ratio, slope) = self.state.ratio_and_slope(s);
@@ -670,11 +728,13 @@ impl TrackSignal for FollowerSignal<'_> {
                         nurbs::eval::eval(d2, t),
                     )
                 });
-        (
+        let value = (
             self.e_start + spans + raw_p,
             ratio * speed + raw_v,
-            slope * speed * speed + ratio * self.shaped_speed_deriv(t) + raw_a,
-        )
+            slope * speed * speed + ratio * self.shaped_speed_deriv_from_speed(t, speed) + raw_a,
+        );
+        self.pva_memo.borrow_mut()[slot] = Some((key, value));
+        value
     }
 }
 

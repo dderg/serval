@@ -124,6 +124,17 @@ fn steps_per_sample_exceeded_publishes_code_and_detail() {
 }
 
 #[test]
+fn internal_invariant_publishes_code_axis_and_reason() {
+    let shared = SharedState::new();
+    raise_internal_invariant(&shared, 2, 7);
+    assert_eq!(
+        shared.last_error.load(Ordering::Acquire),
+        FaultCode::InternalInvariant.as_i32()
+    );
+    assert_eq!(shared.fault_detail.load(Ordering::Acquire), (2 << 16) | 7);
+}
+
+#[test]
 fn unknown_step_mode_publishes_code_and_detail() {
     let shared = SharedState::new();
     raise_unknown_step_mode(&shared, 1, 0xAB);
