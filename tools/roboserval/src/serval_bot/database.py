@@ -322,13 +322,22 @@ class Database:
             ).fetchall()
         return [_event_from_row(row) for row in rows]
 
-    def finish_queued(self, delivery_id: str, note: str) -> bool:
+    def reserve_queued(self, delivery_id: str) -> bool:
         with self._transaction() as connection:
             cursor = connection.execute(
-                "UPDATE events SET state='done', error=?, updated_at=? WHERE delivery_id=? AND state='queued'",
-                (note, _now(), delivery_id),
+                "UPDATE events SET state='running', updated_at=? WHERE delivery_id=? AND state='queued'",
+                (_now(), delivery_id),
             )
         return cursor.rowcount == 1
+
+    def requeue(self, delivery_id: str) -> None:
+        with self._transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE events SET state='queued', updated_at=? WHERE delivery_id=? AND state='running'",
+                (_now(), delivery_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"event is not running: {delivery_id}")
 
     def schedule_retry(self, delivery_id: str, delay_seconds: float, error: str) -> bool:
         available_at = (datetime.now(UTC) + timedelta(seconds=delay_seconds)).isoformat(timespec="microseconds")

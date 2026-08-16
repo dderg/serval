@@ -494,6 +494,23 @@ def test_reconcile_skips_queued_review_for_old_head(tmp_path: Path) -> None:
         database.close()
 
 
+def test_reserved_duplicate_review_cannot_be_claimed(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    try:
+        database.record_event(
+            "review-b", "pull_request_review.requested", "dderg/serval", 7, "maintainer", _review_payload("a" * 40)
+        )
+        assert database.reserve_queued("review-b")
+        assert not database.reserve_queued("review-b")
+        assert database.claim() is None
+        database.requeue("review-b")
+        claimed = database.claim()
+        assert claimed is not None
+        assert claimed.delivery_id == "review-b"
+    finally:
+        database.close()
+
+
 def test_reconcile_skips_queued_review_when_assignment_removed(tmp_path: Path) -> None:
     database = Database(tmp_path / "bot.sqlite")
     try:

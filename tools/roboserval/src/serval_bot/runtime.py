@@ -411,7 +411,6 @@ class WorkerPool:
         self._wake = [asyncio.Event() for _ in self._pool.slot_uids]
         self._active_reviews: dict[tuple[str, int], tuple[Event, asyncio.Task[None]]] = {}
         self._superseded: dict[str, str] = {}
-        self._merging: set[str] = set()
 
     def wake(self) -> None:
         for event in self._wake:
@@ -502,15 +501,16 @@ class WorkerPool:
             for duplicate in self._database.queued_reviews(repo, issue_number):
                 if review_head(duplicate) != active_head:
                     continue
-                if duplicate.delivery_id in self._merging:
+                if not self._database.reserve_queued(duplicate.delivery_id):
                     continue
-                self._merging.add(duplicate.delivery_id)
+                merged = False
                 try:
                     merged = await asyncio.to_thread(self._agent.merge_review, active, duplicate)
-                    if not merged:
-                        continue
-                    note = f"merged into running review {active.delivery_id}"
-                    if self._database.finish_queued(duplicate.delivery_id, note):
+                finally:
+                    if merged:
+                        self._database.finish(
+                            duplicate.delivery_id, "done", f"merged into running review {active.delivery_id}"
+                        )
                         log.info(
                             "duplicate review merged into running session",
                             extra={
@@ -520,8 +520,8 @@ class WorkerPool:
                                 "issue": issue_number,
                             },
                         )
-                finally:
-                    self._merging.discard(duplicate.delivery_id)
+                    else:
+                        self._database.requeue(duplicate.delivery_id)
 
     async def _run_event(self, event: Event, slot_uid: int) -> None:
         started = time.monotonic()
