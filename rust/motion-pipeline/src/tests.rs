@@ -139,6 +139,7 @@ fn replay_stream(
         lowered_tx,
         FitTol {
             pos_mm: config.fit_tol_mm,
+            vel_mm_s: f64::INFINITY,
             accel_mm_s2: config.fit_tol_accel_mm_s2,
         },
         chains.clone(),
@@ -1072,6 +1073,7 @@ fn replay_inputs(
         lowered_tx,
         FitTol {
             pos_mm: config.fit_tol_mm,
+            vel_mm_s: f64::INFINITY,
             accel_mm_s2: config.fit_tol_accel_mm_s2,
         },
         chains.clone(),
@@ -1802,7 +1804,7 @@ fn nonlinear_advance_track_transform_matches_the_advance_law() {
             nonlinear_offset: 0.08,
             linearization_velocity: 5.0,
         };
-        let out = crate::shaper::apply_nonlinear_advance_to_track(3, &track, adv)
+        let out = crate::shaper::apply_nonlinear_advance_to_track(3, &track, adv, false)
             .expect("nonlinear advance refits a polynomial track");
         let mut worst: f64 = 0.0;
         let mut worst_offset_term: f64 = 0.0;

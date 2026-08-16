@@ -108,11 +108,17 @@ pub(crate) fn project_followers(
                 let (track, s_end, e_end) = {
                     let sig =
                         FollowerSignal::new(&frontier[i], raw, axis, leaders, &*state, e_start);
+                    let max_grow = if crate::shaper::leading_derivative_stages(chain) {
+                        1
+                    } else {
+                        crate::shaper::MAX_GROW_LATTICE_INTERVALS
+                    };
                     let track = fit_axis_from_signal(
                         axis,
                         raw_track,
                         &sig,
                         follower_tol_scale(&raw.followers, axis),
+                        max_grow,
                     )?;
                     (track, sig.s_end(), sig.eval_pva(raw.t_end).0)
                 };
@@ -190,11 +196,17 @@ pub(crate) fn project_followers(
                     if need_hi > *last_t && !force {
                         return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
                     }
+                    let max_grow = if crate::shaper::trailing_derivative_stages(chain) {
+                        1
+                    } else {
+                        crate::shaper::MAX_GROW_LATTICE_INTERVALS
+                    };
                     let shaped = fit_axis_from_signal(
                         axis,
                         cached,
                         sig,
                         follower_tol_scale(&raw.followers, axis),
+                        max_grow,
                     )?;
                     if !shaped.control_points().iter().all(|v| v.is_finite()) {
                         return Err(PostProcessError::NonFiniteSample {
@@ -227,14 +239,25 @@ fn apply_leading_stages(
     axis: usize,
     mut track: ScalarNurbs,
 ) -> Result<ScalarNurbs, PostProcessError> {
-    for stage in &chain.stages {
+    let leading: Vec<&ChainStage> = chain
+        .stages
+        .iter()
+        .take_while(|stage| !matches!(stage, ChainStage::SmoothKernel(_)))
+        .collect();
+    for (idx, stage) in leading.iter().enumerate() {
         match stage {
-            ChainStage::SmoothKernel(_) => break,
+            ChainStage::SmoothKernel(_) => unreachable!("kernel excluded by take_while"),
             ChainStage::DerivativeGains { k1, k2 } => {
                 track = apply_derivative_gains_to_track(&track, *k1, *k2);
             }
             ChainStage::NonlinearAdvance(adv) => {
-                track = apply_nonlinear_advance_to_track(axis, &track, *adv)?;
+                let followed = leading[idx + 1..].iter().any(|s| {
+                    matches!(
+                        s,
+                        ChainStage::DerivativeGains { .. } | ChainStage::NonlinearAdvance(_)
+                    )
+                });
+                track = apply_nonlinear_advance_to_track(axis, &track, *adv, followed)?;
             }
         }
     }

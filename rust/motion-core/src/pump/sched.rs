@@ -53,6 +53,16 @@ impl AxisQueue {
         }
         self.physical_write_cursor = (self.physical_write_cursor + n) % self.ring_depth;
     }
+    /// Undo `advance_write_cursor(n)` for a bundle the MCU refused without
+    /// advancing its head (endpoint halt): the next write must land on the
+    /// slot the MCU still expects or the contiguity guard rejects it.
+    pub fn rewind_write_cursor(&mut self, n: u32) {
+        if self.ring_depth == 0 {
+            return;
+        }
+        self.physical_write_cursor =
+            (self.physical_write_cursor + self.ring_depth - n % self.ring_depth) % self.ring_depth;
+    }
 }
 
 // Merged holds keep f32 `duration` rounding of `end_time` far inside the

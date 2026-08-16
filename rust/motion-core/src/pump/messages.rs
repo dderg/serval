@@ -146,6 +146,31 @@ pub const SERIAL_BUNDLE_LIMITS: BundleLimits = BundleLimits {
     pieces_per_axis: 32,
 };
 
+/// One in-flight bundled transaction. `poll`/`wait` return `None` while the
+/// transport has not resolved the attempt; a resolved attempt yields the
+/// bundle's final outcome exactly once (subsequent calls return the same
+/// terminal state). A lost response resolves as `Err(Transient)` when the
+/// transport-side deadline lapses — the pump replays the idempotent bundle.
+pub trait PendingSend: Send {
+    /// Non-blocking check.
+    fn poll(&mut self) -> Option<Result<(), SendError>>;
+    /// Block up to `cap` for resolution.
+    fn wait(&mut self, cap: std::time::Duration) -> Option<Result<(), SendError>>;
+}
+
+/// Already-resolved handle for synchronous transports.
+pub struct ResolvedSend(pub Option<Result<(), SendError>>);
+
+impl PendingSend for ResolvedSend {
+    fn poll(&mut self) -> Option<Result<(), SendError>> {
+        Some(self.0.take().unwrap_or(Ok(())))
+    }
+
+    fn wait(&mut self, _cap: std::time::Duration) -> Option<Result<(), SendError>> {
+        self.poll()
+    }
+}
+
 pub trait PieceSink: Send {
     fn send_frame(
         &self,
@@ -214,6 +239,30 @@ pub trait PieceSink: Send {
             )?;
         }
         Ok(())
+    }
+
+    /// Submit one bundled transaction without waiting for the transport's
+    /// response. The returned handle resolves once the transport acknowledges
+    /// (or definitively fails) the frame. Enables windowed delivery: the pump
+    /// keeps up to `send_window` bundles in flight per MCU so throughput is
+    /// bandwidth-bound instead of round-trip-bound.
+    ///
+    /// The default performs the synchronous send and returns an
+    /// already-resolved handle — correct for transports whose round trip is
+    /// cheap and deterministic (EtherCAT DC cycle, in-process test sinks).
+    fn submit_mcu_frames(
+        &self,
+        mcu_id: u32,
+        frames: &[AxisFrame],
+    ) -> Result<Box<dyn PendingSend>, SendError> {
+        let outcome = self.send_mcu_frames(mcu_id, frames);
+        Ok(Box::new(ResolvedSend(Some(outcome))))
+    }
+
+    /// How many bundles the pump may keep in flight to `mcu_id` before it
+    /// must wait for the oldest response. 1 = classic stop-and-wait.
+    fn send_window(&self, _mcu_id: u32) -> usize {
+        1
     }
 
     fn flush_keys(&self, _keys: &[AxisKey]) -> Result<(), SendError> {

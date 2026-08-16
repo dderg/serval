@@ -19,8 +19,8 @@ pub use junction::{
     junction_jumps,
 };
 pub use messages::{
-    BundleLimits, EnqueueMsg, HeartbeatMsg, HistoryRecorder, PieceSink, PumpCallbacks, PumpMsg,
-    SendError,
+    BundleLimits, EnqueueMsg, HeartbeatMsg, HistoryRecorder, PendingSend, PieceSink, PumpCallbacks,
+    PumpMsg, ResolvedSend, SERIAL_BUNDLE_LIMITS, SendError,
 };
 pub use pump_loop::{MAX_LEAD_SECS, PUMP_DATA_CHANNEL_CAP, run_pump};
 pub use sched::{
@@ -49,3 +49,5 @@ mod sched_tests;
 mod tests;
 #[cfg(test)]
 mod transit_trace_tests;
+#[cfg(test)]
+mod window_tests;

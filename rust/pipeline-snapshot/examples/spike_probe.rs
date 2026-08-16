@@ -156,6 +156,7 @@ fn main() {
     if std::env::var("AUDIT_ALL").is_ok() {
         let fit_tol = motion_pipeline::lowering::FitTol {
             pos_mm: TRAJECTORY_FIT_TOL_MM,
+            vel_mm_s: f64::INFINITY,
             accel_mm_s2: TRAJECTORY_FIT_TOL_ACCEL_MM_S2,
         };
         let chains: Vec<trajectory::CompiledChain> = vec![trajectory::CompiledChain::default(); 4];
@@ -245,6 +246,7 @@ fn main() {
     }
     let fit_tol = motion_pipeline::lowering::FitTol {
         pos_mm: TRAJECTORY_FIT_TOL_MM,
+        vel_mm_s: f64::INFINITY,
         accel_mm_s2: TRAJECTORY_FIT_TOL_ACCEL_MM_S2,
     };
     let chains: Vec<trajectory::CompiledChain> = vec![trajectory::CompiledChain::default(); 4];

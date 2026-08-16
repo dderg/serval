@@ -112,6 +112,10 @@ pub const RUNTIME_ERR_UNKNOWN_STEP_MODE: i32 = -312;
 /// SPI motor. Detail: `((axis_idx & 0xFF) << 16) | stepper_oid`.
 pub const RUNTIME_ERR_PHASE_MOTOR_UNMAPPED: i32 = -313;
 pub const RUNTIME_ERR_OVERLAY_UNSUPPORTED: i32 = -314;
+/// A windowed `PushPieces` frame is not contiguous with the ring head — an
+/// earlier in-flight frame was lost (CRC drop). The frame is refused so the
+/// head never advances over unwritten slots; the host replays from the gap.
+pub const RUNTIME_ERR_PIECE_SLOT_GAP: i32 = -317;
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

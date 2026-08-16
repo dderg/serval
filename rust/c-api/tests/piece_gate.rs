@@ -72,7 +72,7 @@ fn gate_refuses_commit_then_ungate_allows_it() {
         assert_eq!(rc, c_api::RUNTIME_OK, "gate_pieces failed: {rc}");
 
         write_one_piece(handle, 0);
-        let rc = c_api::runtime_commit_head(handle, 0, 1);
+        let rc = c_api::runtime_commit_head(handle, 0, 0, 1, 1);
         assert_eq!(
             rc,
             c_api::RUNTIME_ERR_STREAM_HALTED,
@@ -83,7 +83,7 @@ fn gate_refuses_commit_then_ungate_allows_it() {
         assert_eq!(rc, c_api::RUNTIME_OK, "ungate_pieces failed: {rc}");
 
         write_one_piece(handle, 1);
-        let rc = c_api::runtime_commit_head(handle, 0, 2);
+        let rc = c_api::runtime_commit_head(handle, 0, 0, 2, 2);
         assert_eq!(rc, c_api::RUNTIME_OK, "commit after ungate: {rc}");
     }
 }

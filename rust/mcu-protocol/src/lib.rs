@@ -31,6 +31,9 @@ pub mod result_codes {
     // the EtherCAT endpoint's piece gate, distinct from the MCU runtime's -142.
     pub const EC_PIECES_WHILE_HALTED: i32 = -315;
     pub const INVALID_ARG: i32 = -26;
+    // Mirrors RUNTIME_ERR_PIECE_SLOT_GAP — a windowed PushPieces frame was
+    // refused because an earlier in-flight frame was lost; replay in order.
+    pub const PIECE_SLOT_GAP: i32 = -317;
 }
 
 pub const PER_MESSAGE_HEADER_LEN: usize = 7;

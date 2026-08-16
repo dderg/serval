@@ -34,6 +34,14 @@ pub(crate) fn eval_mono(c: &[f64], x: f64) -> f64 {
     c.iter().rev().fold(0.0, |acc, &ck| acc * x + ck)
 }
 
+pub(crate) fn eval_mono_d(c: &[f64], x: f64) -> f64 {
+    let mut acc = 0.0;
+    for (k, &ck) in c.iter().enumerate().skip(1).rev() {
+        acc = acc * x + k as f64 * ck;
+    }
+    acc
+}
+
 pub(crate) fn eval_mono_dd(c: &[f64], x: f64) -> f64 {
     let mut acc = 0.0;
     for (k, &ck) in c.iter().enumerate().skip(2).rev() {
@@ -122,11 +130,14 @@ fn candidate_ok(
     tol: FitTol,
     extra_probes_u: &[f64],
     truth_p: &dyn Fn(f64) -> f64,
+    truth_v: &dyn Fn(f64) -> f64,
     truth_a: &dyn Fn(f64) -> f64,
 ) -> bool {
-    let dd_scale = (2.0 / h) * (2.0 / h);
+    let d_scale = 2.0 / h;
+    let dd_scale = d_scale * d_scale;
     let probe_ok = |u: f64| {
         (eval_mono(mono_u, u) - truth_p(u)).abs() <= tol.pos_mm
+            && (eval_mono_d(mono_u, u) * d_scale - truth_v(u)).abs() <= tol.vel_mm_s
             && (eval_mono_dd(mono_u, u) * dd_scale - truth_a(u)).abs() <= tol.accel_mm_s2
     };
     LADDER_PROBES_U.iter().copied().all(probe_ok) && extra_probes_u.iter().copied().all(probe_ok)
@@ -154,11 +165,12 @@ pub(crate) fn ladder_fit(
     tol: FitTol,
     extra_probes_u: &[f64],
     truth_p: &dyn Fn(f64) -> f64,
+    truth_v: &dyn Fn(f64) -> f64,
     truth_a: &dyn Fn(f64) -> f64,
 ) -> Option<Vec<f64>> {
     ladder_degrees(h).iter().find_map(|&degree| {
         let c = ladder_candidate(base, degree, truth_p);
-        candidate_ok(&c, h, tol, extra_probes_u, truth_p, truth_a).then_some(c)
+        candidate_ok(&c, h, tol, extra_probes_u, truth_p, truth_v, truth_a).then_some(c)
     })
 }
 

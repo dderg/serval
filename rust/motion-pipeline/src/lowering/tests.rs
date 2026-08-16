@@ -92,12 +92,14 @@ fn lowering_emits_coarse_pieces_above_the_sample_floor() {
 const FIT_TOL_MM: f64 = 1e-3;
 const FIT_TOL: FitTol = FitTol {
     pos_mm: FIT_TOL_MM,
+    vel_mm_s: f64::INFINITY,
     accel_mm_s2: 50.0,
 };
 
 fn tol_pos(pos_mm: f64) -> FitTol {
     FitTol {
         pos_mm,
+        vel_mm_s: f64::INFINITY,
         accel_mm_s2: 50.0,
     }
 }

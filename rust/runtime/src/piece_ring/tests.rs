@@ -286,3 +286,79 @@ fn endpoints_of_quadratic_piece() {
         v_at_d
     );
 }
+
+fn ring(depth: usize) -> RingDescriptor {
+    RingDescriptor::new(0, depth)
+}
+
+#[test]
+fn checked_commit_applies_contiguous_block() {
+    let mut r = ring(8);
+    assert_eq!(r.commit_head_checked(0, 3, 3), CommitOutcome::Applied);
+    assert_eq!(r.head, 3);
+    assert_eq!(r.commit_head_checked(3, 2, 5), CommitOutcome::Applied);
+    assert_eq!(r.head, 5);
+}
+
+#[test]
+fn checked_commit_refuses_gap_after_lost_frame() {
+    let mut r = ring(8);
+    assert_eq!(r.commit_head_checked(0, 3, 3), CommitOutcome::Applied);
+    // Frame for slots 3..5 was lost; the next windowed frame declares 5..7.
+    assert_eq!(r.commit_head_checked(5, 2, 7), CommitOutcome::Gap);
+    assert_eq!(r.head, 3, "a gapped commit must not move the head");
+    // Replay of the lost frame, then the gapped one, heals the stream.
+    assert_eq!(r.commit_head_checked(3, 2, 5), CommitOutcome::Applied);
+    assert_eq!(r.commit_head_checked(5, 2, 7), CommitOutcome::Applied);
+}
+
+#[test]
+fn checked_commit_treats_full_duplicate_as_stale_noop() {
+    let mut r = ring(8);
+    assert_eq!(r.commit_head_checked(0, 3, 3), CommitOutcome::Applied);
+    assert_eq!(r.commit_head_checked(0, 3, 3), CommitOutcome::Stale);
+    assert_eq!(r.head, 3);
+}
+
+#[test]
+fn checked_commit_refuses_slot_mismatch_even_when_head_math_adds_up() {
+    let mut r = ring(8);
+    assert_eq!(r.commit_head_checked(0, 2, 2), CommitOutcome::Applied);
+    // new_head - head == piece_count but the declared slot is wrong.
+    assert_eq!(r.commit_head_checked(3, 2, 4), CommitOutcome::Gap);
+}
+
+#[test]
+fn checked_commit_still_detects_overcommit() {
+    let mut r = ring(4);
+    assert_eq!(r.commit_head_checked(0, 5, 5), CommitOutcome::Overcommit);
+}
+
+#[test]
+fn checked_commit_survives_wrapping_counters() {
+    let mut r = ring(8);
+    r.head = u32::MAX - 1;
+    r.retired = u32::MAX - 1;
+    r.tail = ((u32::MAX - 1) % 8) as usize;
+    let slot = ((u32::MAX - 1) % 8) as u16;
+    assert_eq!(
+        r.commit_head_checked(slot, 4, r.head.wrapping_add(4)),
+        CommitOutcome::Applied
+    );
+    assert_eq!(r.head, (u32::MAX - 1).wrapping_add(4));
+}
+
+#[test]
+fn slot_is_live_tracks_committed_unretired_span() {
+    let mut r = ring(8);
+    assert_eq!(r.commit_head_checked(0, 3, 3), CommitOutcome::Applied);
+    assert!(r.slot_is_live(0));
+    assert!(r.slot_is_live(2));
+    assert!(
+        !r.slot_is_live(3),
+        "slots at and past the head are writable"
+    );
+    r.advance_counter();
+    assert!(!r.slot_is_live(0), "retired slots are writable again");
+    assert!(r.slot_is_live(1));
+}

@@ -140,13 +140,22 @@ pub unsafe extern "C" fn runtime_write_piece(
         {
             return RUNTIME_ERR_INVALID_ARG;
         }
+        if axis.ring.slot_is_live(slot) {
+            return RUNTIME_OK;
+        }
         axis.ring.write_slot(storage, slot, entry);
     }
     RUNTIME_OK
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn runtime_commit_head(rt: *mut Runtime, axis_idx: u8, new_head: u32) -> i32 {
+pub unsafe extern "C" fn runtime_commit_head(
+    rt: *mut Runtime,
+    axis_idx: u8,
+    start_slot: u16,
+    piece_count: u8,
+    new_head: u32,
+) -> i32 {
     let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
     // SAFETY: §11.2 foreground-only. ring.head is a plain u32 written only by foreground; on single-core ARMv7E-M exception entry/return are memory barriers — no explicit fence needed.
     unsafe {
@@ -165,7 +174,10 @@ pub unsafe extern "C" fn runtime_commit_head(rt: *mut Runtime, axis_idx: u8, new
         if !axis.ring.is_configured() {
             return RUNTIME_ERR_INVALID_ARG;
         }
-        match axis.ring.commit_head(new_head) {
+        match axis
+            .ring
+            .commit_head_checked(start_slot, piece_count, new_head)
+        {
             runtime::piece_ring::CommitOutcome::Applied
             | runtime::piece_ring::CommitOutcome::Stale => {}
             runtime::piece_ring::CommitOutcome::Overcommit => {
@@ -180,6 +192,19 @@ pub unsafe extern "C" fn runtime_commit_head(rt: *mut Runtime, axis_idx: u8, new
                     axis.ring.retired,
                 );
                 return runtime::error::RUNTIME_ERR_RING_FULL;
+            }
+            runtime::piece_ring::CommitOutcome::Gap => {
+                const LOG_LEVEL_ERROR: u8 = 3;
+                const CODE_FLAG_GAP: u16 = 0x200;
+                event_log_emit(
+                    LOG_LEVEL_ERROR,
+                    runtime::log_codes::SUBSYSTEM_RUNTIME,
+                    runtime::log_codes::EVENT_RUNTIME_RING_STATE,
+                    u16::from(axis_idx) | CODE_FLAG_GAP,
+                    axis.ring.head,
+                    u32::from(start_slot) | (u32::from(piece_count) << 16),
+                );
+                return runtime::error::RUNTIME_ERR_PIECE_SLOT_GAP;
             }
         }
     }
