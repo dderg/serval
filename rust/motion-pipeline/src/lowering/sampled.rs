@@ -244,7 +244,7 @@ impl Sampler<'_> {
         let t_of = |u: f64| (0.5 * (u + 1.0)).mul_add(h, ta);
         let truth_p = |u: f64| self.axis_state(axis, t_of(u), apply_zero_support).0;
         let truth_a = |u: f64| self.axis_accel(axis, t_of(u), apply_zero_support);
-        ladder_fit(&base, h, tol, &truth_p, &truth_a)
+        ladder_fit(&base, h, tol, &[], &truth_p, &truth_a)
     }
 
     /// Fitted output piece for one accepted span: ladder fit on the

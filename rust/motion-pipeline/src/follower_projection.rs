@@ -705,6 +705,18 @@ impl TrackSignal for FollowerSignal<'_> {
         slope * speed * speed + ratio * self.shaped_speed_deriv_from_speed(t, speed) + raw
     }
 
+    fn structure_breaks(&self, t0: f64, t1: f64, out: &mut Vec<f64>) {
+        out.extend(
+            self.grid[1..self.grid.len().saturating_sub(1)]
+                .iter()
+                .copied()
+                .filter(|&t| t > t0 && t < t1),
+        );
+        if let Some((track, _, _, _)) = &self.raw_delta {
+            out.extend(track.knots().iter().copied().filter(|&t| t > t0 && t < t1));
+        }
+    }
+
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let t = t.clamp(self.t0, self.t1);
         let key = t.to_bits();

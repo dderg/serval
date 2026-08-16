@@ -120,14 +120,16 @@ fn candidate_ok(
     mono_u: &[f64],
     h: f64,
     tol: FitTol,
+    extra_probes_u: &[f64],
     truth_p: &dyn Fn(f64) -> f64,
     truth_a: &dyn Fn(f64) -> f64,
 ) -> bool {
     let dd_scale = (2.0 / h) * (2.0 / h);
-    LADDER_PROBES_U.iter().all(|&u| {
+    let probe_ok = |u: f64| {
         (eval_mono(mono_u, u) - truth_p(u)).abs() <= tol.pos_mm
             && (eval_mono_dd(mono_u, u) * dd_scale - truth_a(u)).abs() <= tol.accel_mm_s2
-    })
+    };
+    LADDER_PROBES_U.iter().copied().all(probe_ok) && extra_probes_u.iter().copied().all(probe_ok)
 }
 
 /// Endpoint acceleration reads the wire's f32 coefficients with weight
@@ -150,12 +152,13 @@ pub(crate) fn ladder_fit(
     base: &[f64],
     h: f64,
     tol: FitTol,
+    extra_probes_u: &[f64],
     truth_p: &dyn Fn(f64) -> f64,
     truth_a: &dyn Fn(f64) -> f64,
 ) -> Option<Vec<f64>> {
     ladder_degrees(h).iter().find_map(|&degree| {
         let c = ladder_candidate(base, degree, truth_p);
-        candidate_ok(&c, h, tol, truth_p, truth_a).then_some(c)
+        candidate_ok(&c, h, tol, extra_probes_u, truth_p, truth_a).then_some(c)
     })
 }
 

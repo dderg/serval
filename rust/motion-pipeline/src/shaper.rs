@@ -23,6 +23,11 @@ pub(crate) trait TrackSignal {
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         (self.eval(t), self.deriv(t), self.second_deriv(t))
     }
+    /// Times in `(t0, t1)` where the signal changes analytic structure
+    /// (polynomial seams, kinks). The fitter places span boundaries on these
+    /// so every fitted span is smooth inside; a signal that cannot enumerate
+    /// its structure appends nothing and relies on bisection alone.
+    fn structure_breaks(&self, t0: f64, t1: f64, out: &mut Vec<f64>);
 }
 
 impl<F> TrackSignal for ShapedSignal<'_, F>
@@ -43,6 +48,10 @@ where
 
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         ShapedSignal::eval_pva(self, t)
+    }
+
+    fn structure_breaks(&self, t0: f64, t1: f64, out: &mut Vec<f64>) {
+        ShapedSignal::structure_breaks(self, t0, t1, out);
     }
 }
 
@@ -1166,13 +1175,15 @@ pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
     if template_pieces.is_empty() {
         return Err(PostProcessError::DegenerateAxisTrack { axis });
     }
-    // The template's breakpoints seed the partition, but the convolved signal can
-    // need finer pieces than the unshaped trajectory had — so refine each span to
-    // the shaper's own tolerance rather than inheriting the template's resolution.
-    // Seed spans from the template's boundaries, coalescing any closer than
-    // the fit floor: a sliver template piece (repeated NURBS knot, sub-µs
-    // remainder) fitted on its own divides by its near-zero duration and
-    // mints garbage endpoint accelerations at the seam.
+    // Span boundaries come from the signal's own structure lattice: the times
+    // where it changes analytic form (input breaks shifted by kernel cuts,
+    // follower kinks). Between lattice points the signal is smooth, so the
+    // fitter grows each span greedily across as many lattice intervals as the
+    // ladder accepts instead of splitting at every template boundary and
+    // bisecting blindly into ~1-sample pieces at kinks — the piece flood that
+    // saturates the pump and trips -308 (#405/#408). Lattice points closer
+    // than the fit floor coalesce: a sliver span fitted on its own divides by
+    // its near-zero duration and mints garbage endpoint accelerations.
     let t_lo = template_pieces.first().expect("checked non-empty").u_start;
     let t_hi = template_pieces.last().expect("checked non-empty").u_end;
     if t_hi - t_lo < SHAPED_FIT_MIN_SPAN_S {
@@ -1189,19 +1200,66 @@ pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
         };
         return Ok(bezier_pieces_to_nurbs(&[piece]));
     }
-    let mut seeds = vec![t_lo];
-    for piece in &template_pieces {
-        if piece.u_end - seeds.last().expect("seeded") >= SHAPED_FIT_MIN_SPAN_S {
-            seeds.push(piece.u_end);
+    let mut raw_breaks = Vec::new();
+    sig.structure_breaks(t_lo, t_hi, &mut raw_breaks);
+    raw_breaks.sort_by(f64::total_cmp);
+    let mut lattice = vec![t_lo];
+    for t in raw_breaks {
+        if t - lattice.last().expect("seeded") >= SHAPED_FIT_MIN_SPAN_S
+            && t_hi - t >= SHAPED_FIT_MIN_SPAN_S
+        {
+            lattice.push(t);
         }
     }
-    while seeds.len() > 1 && t_hi - *seeds.last().expect("seeded") < SHAPED_FIT_MIN_SPAN_S {
-        seeds.pop();
-    }
-    seeds.push(t_hi);
-    let mut pieces = Vec::with_capacity(template_pieces.len());
-    for w in seeds.windows(2) {
-        refine_shaped_span(axis, sig, w[0], w[1], 0, tol_scale, &mut pieces)?;
+    lattice.push(t_hi);
+
+    let mut pieces = Vec::with_capacity(lattice.len());
+    let mut probes_t: Vec<f64> = Vec::new();
+    let mut i = 0;
+    while i + 1 < lattice.len() {
+        let mut best: Option<(usize, Vec<f64>)> = None;
+        let mut step = 1;
+        loop {
+            let j = (i + step).min(lattice.len() - 1);
+            probes_t.clear();
+            probes_t.extend_from_slice(&lattice[i + 1..j]);
+            match shaped_ladder(axis, sig, lattice[i], lattice[j], &probes_t, tol_scale)? {
+                (mono, true) => {
+                    let grown_to_end = j == lattice.len() - 1;
+                    best = Some((j, mono));
+                    if grown_to_end || step >= MAX_GROW_LATTICE_INTERVALS {
+                        break;
+                    }
+                    step *= 2;
+                }
+                (_, false) => break,
+            }
+        }
+        match best {
+            Some((j, mono)) => {
+                pieces.push(truncated_piece(
+                    &mono,
+                    lattice[i],
+                    lattice[j],
+                    lattice[j] - lattice[i],
+                    FIT_TRUNC_POS_FACTOR * SHAPED_FIT_TOL_MM * tol_scale,
+                    tol_scale,
+                ));
+                i = j;
+            }
+            None => {
+                refine_shaped_span(
+                    axis,
+                    sig,
+                    lattice[i],
+                    lattice[i + 1],
+                    0,
+                    tol_scale,
+                    &mut pieces,
+                )?;
+                i += 1;
+            }
+        }
     }
     let max_len = pieces.iter().map(|p| p.coeffs.len()).max().unwrap_or(1);
     for piece in &mut pieces {
@@ -1209,6 +1267,11 @@ pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
     }
     Ok(bezier_pieces_to_nurbs(&pieces))
 }
+
+/// Growth cap per fitted span: bounds the acceptance-probe count and the
+/// doubling search, not the physics — a span the ladder accepts at this many
+/// lattice intervals is already far from the fragmentation regime.
+const MAX_GROW_LATTICE_INTERVALS: usize = 32;
 
 const SHAPED_FIT_TOL_MM: f64 = 1e-3;
 const SHAPED_FIT_MAX_DEPTH: u32 = 16;
@@ -1253,6 +1316,7 @@ fn shaped_ladder<S: TrackSignal>(
     sig: &S,
     t0: f64,
     t1: f64,
+    extra_probes_t: &[f64],
     tol_scale: f64,
 ) -> Result<(Vec<f64>, bool), PostProcessError> {
     let h = t1 - t0;
@@ -1283,13 +1347,23 @@ fn shaped_ladder<S: TrackSignal>(
         truth.pos.push((u, exact_value(axis, pos, t)?));
         truth.acc.push((u, exact_value(axis, acc, t)?));
     }
+    let mut extra_u = Vec::with_capacity(extra_probes_t.len());
+    for &t in extra_probes_t {
+        let u = (t - t0).mul_add(2.0 / h, -1.0);
+        let (pos, _, acc) = sig.eval_pva(t);
+        truth.pos.push((u, exact_value(axis, pos, t)?));
+        truth.acc.push((u, exact_value(axis, acc, t)?));
+        extra_u.push(u);
+    }
 
     let tol = FitTol {
         pos_mm: SHAPED_FIT_TOL_MM,
         accel_mm_s2: SHAPED_FIT_TOL_ACCEL_MM_S2,
     }
     .scaled(tol_scale);
-    match ladder_fit(&base, h, tol, &|u| truth.pos_at(u), &|u| truth.acc_at(u)) {
+    match ladder_fit(&base, h, tol, &extra_u, &|u| truth.pos_at(u), &|u| {
+        truth.acc_at(u)
+    }) {
         Some(c) => Ok((c, true)),
         None => Ok((base, false)),
     }
@@ -1304,7 +1378,7 @@ fn refine_shaped_span<S: TrackSignal>(
     tol_scale: f64,
     out: &mut Vec<BezierPiece>,
 ) -> Result<(), PostProcessError> {
-    let (mono_u, fits) = shaped_ladder(axis, sig, t0, t1, tol_scale)?;
+    let (mono_u, fits) = shaped_ladder(axis, sig, t0, t1, &[], tol_scale)?;
     if fits || depth >= SHAPED_FIT_MAX_DEPTH || (t1 - t0) <= 2.0 * SHAPED_FIT_MIN_SPAN_S {
         out.push(truncated_piece(
             &mono_u,
@@ -1435,6 +1509,10 @@ impl TrackSignal for NonlinearAdvanceSignal {
         self.adv
             .curvature(v)
             .mul_add(a * a, self.adv.slope(v).mul_add(j, a))
+    }
+
+    fn structure_breaks(&self, t0: f64, t1: f64, out: &mut Vec<f64>) {
+        out.extend(self.starts.iter().copied().filter(|&t| t > t0 && t < t1));
     }
 
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
