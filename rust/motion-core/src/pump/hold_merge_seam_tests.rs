@@ -278,6 +278,7 @@ fn pump_with(sink: EpochBasisSink, callbacks: PumpCallbacks) -> Pump<EpochBasisS
         intake_batch_open: false,
         consumption_stall: ConsumptionStallWatch::new(std::time::Duration::from_secs(60)),
         mem_probe: super::memstat::MemPressureProbe::new(),
+        margins: super::margin::SendMarginTracker::new(),
     }
 }
 

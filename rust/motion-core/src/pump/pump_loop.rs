@@ -8,6 +8,7 @@ use crossbeam_channel::{Receiver, Select, TryRecvError};
 use super::diag;
 use super::drip::DripCohort;
 use super::junction::{JunctionTracker, check_junction_position_continuity};
+use super::margin::SendMarginTracker;
 use super::memstat::MemPressureProbe;
 use super::messages::{
     EnqueueMsg, HeartbeatMsg, HistoryRecorder, PieceSink, PumpCallbacks, PumpMsg, SendError,
@@ -107,6 +108,7 @@ pub(super) struct Pump<S> {
     pub(super) intake_batch_open: bool,
     pub(super) consumption_stall: ConsumptionStallWatch,
     pub(super) mem_probe: MemPressureProbe,
+    pub(super) margins: SendMarginTracker,
 }
 
 impl<S: PieceSink> Pump<S> {
@@ -172,6 +174,7 @@ impl<S: PieceSink> Pump<S> {
                 consumed_counts,
                 retired_counts,
             }) => {
+                self.margins.note_heartbeat(mcu_id);
                 let consumed_counts = consumed_counts.as_ref().unwrap_or(&retired_counts);
                 assert_eq!(
                     consumed_counts.len(),
@@ -804,6 +807,10 @@ impl<S: PieceSink> Pump<S> {
                     match send_result {
                         Ok(()) => {
                             self.commit_sent_bundle(mcu_id, &bundle);
+                            if let Some((_, freq)) = (self.callbacks.mcu_clock_of)(mcu_id) {
+                                self.margins
+                                    .observe_send(mcu_id, &bundle, freq, &self.queues);
+                            }
                         }
                         Err(SendError::Fatal(ref e)) => {
                             tracing::error!(
@@ -999,6 +1006,7 @@ pub fn run_pump<S: PieceSink>(
         intake_batch_open: false,
         consumption_stall: ConsumptionStallWatch::new(CONSUMPTION_STALL_FATAL),
         mem_probe: MemPressureProbe::new(),
+        margins: SendMarginTracker::new(),
     };
     pump.run(control_rx, data_rx);
 }
