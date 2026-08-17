@@ -117,18 +117,16 @@ class ClockSync:
         self._est.synced = bool(v)
 
     def set_clock_est_callback(self, cb):
-        # cb(freq, offset, last_clock); invoked from the serial-reader thread on
-        # every published regression update.
+        # cb(freq, offset, last_clock, synced); invoked from the serial-reader
+        # thread on every published regression update.
         self._clock_est_callback = cb
         if cb is not None and self.last_clock:
-            try:
-                cb(
-                    self.clock_est[2],
-                    self.time_avg + self.min_half_rtt,
-                    int(self.clock_avg),
-                )
-            except Exception:
-                logging.exception("clocksync: initial set_clock_est callback")
+            cb(
+                self.clock_est[2],
+                self.time_avg + self.min_half_rtt,
+                int(self.clock_avg),
+                self._synced,
+            )
 
     def disconnect(self):
         self.reactor.update_timer(self.get_clock_timer, self.reactor.NEVER)
@@ -163,7 +161,7 @@ class ClockSync:
         freq = 1000000000000.0
         if pace:
             freq = self.mcu_freq
-        serial.set_clock_est(freq, self.reactor.monotonic(), 0, 0)
+        serial.set_clock_est(freq, self.reactor.monotonic(), 0)
 
     # MCU clock querying (_handle_clock is invoked from background thread)
     def _get_clock_event(self, eventtime):
@@ -188,10 +186,7 @@ class ClockSync:
         self.clock_est = (offset, clock_avg, new_freq)
         cb = self._clock_est_callback
         if cb is not None:
-            try:
-                cb(new_freq, offset, int(clock_avg))
-            except Exception:
-                logging.exception("clocksync: set_clock_est callback")
+            cb(new_freq, offset, int(clock_avg), self._synced)
 
     # clock frequency conversions
     def print_time_to_clock(self, print_time):

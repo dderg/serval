@@ -21,30 +21,65 @@ impl McuHandle {
 #[derive(Debug)]
 pub enum RouterError {
     UnknownMcu(McuHandle),
+    NoClockEstimate(McuHandle),
 }
 
 impl std::fmt::Display for RouterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnknownMcu(h) => write!(f, "unknown MCU handle {}", h.0),
+            Self::UnknownMcu(h) => write!(f, "unknown mcu handle {}", h.raw()),
+            Self::NoClockEstimate(h) => write!(
+                f,
+                "mcu handle {} has no valid clocksync record — the record was \
+                 invalidated by a (re)connect and no fresh estimate has arrived",
+                h.raw()
+            ),
         }
     }
 }
 
 impl std::error::Error for RouterError {}
 
-#[derive(Debug)]
-struct McuRecord {
+/// One MCU's live host↔MCU clock map. Present only while a record seeded
+/// after the MCU's current boot epoch is live: a (re)connect drops it, so no
+/// projection can silently run off the previous epoch's numbers.
+#[derive(Debug, Clone, Copy)]
+struct ClockEst {
     /// Measured ticks-per-host-second from the clocksync regression; drifts
     /// around the nominal frequency by ppm. Used to extrapolate what the
     /// MCU's clock reads at a host instant — never to define print_time.
     clock_freq: f64,
     clock_offset: f64,
     last_clock: u64,
+    /// Whether the publishing clocksync had latched convergence. Anchoring
+    /// step streams on an unconverged estimate is rejected.
+    converged: bool,
+}
+
+/// The record numbers plus the clock they project to at a host instant —
+/// what a re-anchor reports so a wrong record is visible in the log.
+#[derive(Debug, Clone, Copy)]
+pub struct ClockRecordSnapshot {
+    pub clock_freq: f64,
+    pub clock_offset: f64,
+    pub last_clock: u64,
+    pub converged: bool,
+    pub projected_now: u64,
+}
+
+#[derive(Debug)]
+struct McuRecord {
+    est: Option<ClockEst>,
     /// The datasheet CLOCK_FREQ. `print_time` is defined as
     /// `clock / nominal_freq`, so converting through the regression frequency
     /// instead accumulates ppm × uptime of error (seconds after hours).
     nominal_freq: f64,
+}
+
+impl McuRecord {
+    fn est(&self, mcu: McuHandle) -> Result<&ClockEst, RouterError> {
+        self.est.as_ref().ok_or(RouterError::NoClockEstimate(mcu))
+    }
 }
 
 pub struct PassthroughRouter {
@@ -77,13 +112,59 @@ impl PassthroughRouter {
         self.mcus.insert(
             handle,
             McuRecord {
-                clock_freq: 0.0,
-                clock_offset: 0.0,
-                last_clock: 0,
+                est: None,
                 nominal_freq: 0.0,
             },
         );
         handle
+    }
+
+    /// Drop this MCU's clock record. Every (re)connect calls this: the MCU
+    /// restarts its counter at zero, so the previous epoch's
+    /// `(offset, last_clock)` pair projects a clock that is wrong by the
+    /// previous boot's uptime. Projections fail loudly until a fresh estimate
+    /// arrives.
+    pub fn invalidate_clock_est(&mut self, mcu: McuHandle) -> Result<(), RouterError> {
+        let rec = self
+            .mcus
+            .get_mut(&mcu)
+            .ok_or(RouterError::UnknownMcu(mcu))?;
+        let dropped = rec.est.take();
+        tracing::info!(
+            subsystem = "clocksync",
+            event = "invalidate_clock_est",
+            mcu = ?mcu,
+            had_record = dropped.is_some(),
+            dropped_freq = dropped.map(|e| e.clock_freq),
+            dropped_offset = dropped.map(|e| e.clock_offset),
+            dropped_last_clock = dropped.map(|e| e.last_clock),
+            "[clock-seed] clock record invalidated by (re)connect"
+        );
+        Ok(())
+    }
+
+    pub fn clock_est_converged(&self, mcu: McuHandle) -> bool {
+        self.mcus
+            .get(&mcu)
+            .and_then(|r| r.est)
+            .is_some_and(|e| e.converged)
+    }
+
+    /// The live record plus the clock it projects at this instant. `None`
+    /// when the record is absent or invalidated.
+    pub fn clock_record(&self, mcu: McuHandle) -> Option<ClockRecordSnapshot> {
+        let est = self.mcus.get(&mcu)?.est?;
+        let host_now = instant_to_f64(self.clock.now());
+        let delta = (host_now - est.clock_offset) * est.clock_freq;
+        #[allow(clippy::cast_sign_loss)]
+        let projected_now = est.last_clock.wrapping_add(delta.max(0.0) as u64);
+        Some(ClockRecordSnapshot {
+            clock_freq: est.clock_freq,
+            clock_offset: est.clock_offset,
+            last_clock: est.last_clock,
+            converged: est.converged,
+            projected_now,
+        })
     }
 
     pub fn set_nominal_freq(&mut self, mcu: McuHandle, freq_hz: f64) -> Result<(), RouterError> {
@@ -119,9 +200,12 @@ impl PassthroughRouter {
             .mcus
             .get_mut(&mcu)
             .ok_or(RouterError::UnknownMcu(mcu))?;
-        rec.clock_freq = freq;
-        rec.clock_offset = offset;
-        rec.last_clock = last_clock;
+        rec.est = Some(ClockEst {
+            clock_freq: freq,
+            clock_offset: offset,
+            last_clock,
+            converged: true,
+        });
         Ok(())
     }
 
@@ -145,6 +229,7 @@ impl PassthroughRouter {
         freq: f64,
         offset_raw: f64,
         last_clock: u64,
+        converged: bool,
         _host_now_raw: f64,
     ) -> Result<(), RouterError> {
         let bridge_now_instant = instant_to_f64(self.clock.now());
@@ -160,15 +245,19 @@ impl PassthroughRouter {
             bridge_now_instant,
             clock_offset,
             last_clock,
+            converged,
             "[clock-seed] set_clock_est_rebased"
         );
         let rec = self
             .mcus
             .get_mut(&mcu)
             .ok_or(RouterError::UnknownMcu(mcu))?;
-        rec.clock_freq = freq;
-        rec.clock_offset = clock_offset;
-        rec.last_clock = last_clock;
+        rec.est = Some(ClockEst {
+            clock_freq: freq,
+            clock_offset,
+            last_clock,
+            converged,
+        });
         Ok(())
     }
 
@@ -193,16 +282,18 @@ impl PassthroughRouter {
             .mcus
             .get_mut(&mcu)
             .ok_or(RouterError::UnknownMcu(mcu))?;
-        rec.clock_freq = freq;
-        rec.clock_offset = clock_offset;
-        rec.last_clock = mcu_at_send;
+        rec.est = Some(ClockEst {
+            clock_freq: freq,
+            clock_offset,
+            last_clock: mcu_at_send,
+            converged: true,
+        });
         Ok(())
     }
 
     /// Convert an MCU tick count to a wall-clock `OffsetDateTime`.
     ///
-    /// Returns `None` when no clock record has been set for this MCU
-    /// (i.e. `clock_freq == 0.0` — no `set_clock_est_rebased` call yet).
+    /// Returns `None` when this MCU has no live clock record.
     ///
     /// `estimated = true` when the tick is more than one frequency-second from
     /// the anchor, i.e. significant extrapolation.
@@ -211,10 +302,7 @@ impl PassthroughRouter {
         mcu: McuHandle,
         mcu_ticks: u64,
     ) -> Option<(time::OffsetDateTime, bool)> {
-        let rec = self.mcus.get(&mcu)?;
-        if rec.clock_freq == 0.0 {
-            return None;
-        }
+        let rec = self.mcus.get(&mcu)?.est?;
         #[allow(clippy::cast_precision_loss)]
         let delta_ticks = (mcu_ticks as f64) - (rec.last_clock as f64);
         let mcu_host_instant = rec.clock_offset + delta_ticks / rec.clock_freq;
@@ -235,10 +323,7 @@ impl PassthroughRouter {
     }
 
     pub fn ack_clock_and_freq(&self, mcu: McuHandle) -> Option<(u64, f64)> {
-        let rec = self.mcus.get(&mcu)?;
-        if rec.clock_freq == 0.0 {
-            return None;
-        }
+        let rec = self.mcus.get(&mcu)?.est?;
         let host_now = instant_to_f64(self.clock.now());
         let delta = (host_now - rec.clock_offset) * rec.clock_freq;
         #[allow(clippy::cast_sign_loss)]
@@ -247,10 +332,11 @@ impl PassthroughRouter {
     }
 
     pub fn compute_ack_clock(&self, mcu: McuHandle) -> Result<u64, RouterError> {
-        let rec = self.mcus.get(&mcu).ok_or(RouterError::UnknownMcu(mcu))?;
-        if rec.clock_freq == 0.0 {
-            return Ok(0);
-        }
+        let rec = self
+            .mcus
+            .get(&mcu)
+            .ok_or(RouterError::UnknownMcu(mcu))?
+            .est(mcu)?;
         let host_now = instant_to_f64(self.clock.now());
         let delta = (host_now - rec.clock_offset) * rec.clock_freq;
         #[allow(clippy::cast_sign_loss)]
@@ -274,12 +360,14 @@ impl PassthroughRouter {
         host: HostSecs,
     ) -> Option<PrintTime> {
         let rec = self.mcus.get(&reference_mcu)?;
-        if rec.clock_freq <= 0.0 || rec.nominal_freq <= 0.0 {
+        let nominal_freq = rec.nominal_freq;
+        let rec = rec.est?;
+        if rec.clock_freq <= 0.0 || nominal_freq <= 0.0 {
             return None;
         }
         #[allow(clippy::cast_precision_loss)]
         let clock = (rec.last_clock as f64) + (host.get() - rec.clock_offset) * rec.clock_freq;
-        Some(PrintTime::new(clock / rec.nominal_freq))
+        Some(PrintTime::new(clock / nominal_freq))
     }
 
     /// [`Self::print_time_at_host`] at this instant, from one clock read.
@@ -288,10 +376,7 @@ impl PassthroughRouter {
     }
 
     pub fn clock_to_host_secs(&self, mcu: McuHandle, mcu_clock: u64) -> Option<f64> {
-        let rec = self.mcus.get(&mcu)?;
-        if rec.clock_freq == 0.0 {
-            return None;
-        }
+        let rec = self.mcus.get(&mcu)?.est?;
         #[allow(clippy::cast_precision_loss)]
         let delta_ticks = (mcu_clock as f64) - (rec.last_clock as f64);
         Some(rec.clock_offset + delta_ticks / rec.clock_freq)
@@ -306,11 +391,13 @@ impl PassthroughRouter {
         print_time: f64,
     ) -> Option<f64> {
         let rec = self.mcus.get(&reference_mcu)?;
-        if rec.clock_freq <= 0.0 || rec.nominal_freq <= 0.0 {
+        let nominal_freq = rec.nominal_freq;
+        let rec = rec.est?;
+        if rec.clock_freq <= 0.0 || nominal_freq <= 0.0 {
             return None;
         }
         #[allow(clippy::cast_precision_loss)]
-        let clock = print_time * rec.nominal_freq;
+        let clock = print_time * nominal_freq;
         Some(rec.clock_offset + (clock - rec.last_clock as f64) / rec.clock_freq)
     }
 
@@ -319,10 +406,11 @@ impl PassthroughRouter {
         mcu: McuHandle,
         host_time_secs: f64,
     ) -> Result<u64, RouterError> {
-        let rec = self.mcus.get(&mcu).ok_or(RouterError::UnknownMcu(mcu))?;
-        if rec.clock_freq == 0.0 {
-            return Ok(0);
-        }
+        let rec = self
+            .mcus
+            .get(&mcu)
+            .ok_or(RouterError::UnknownMcu(mcu))?
+            .est(mcu)?;
         let delta = (host_time_secs - rec.clock_offset) * rec.clock_freq;
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let projected = rec.last_clock.wrapping_add(delta.max(0.0) as u64);
@@ -353,20 +441,20 @@ impl PassthroughRouter {
                 return;
             }
         };
-        if rec.clock_freq == 0.0 {
+        let Some(rec) = rec.est else {
             tracing::warn!(
                 subsystem = "motion",
                 event = "seg0_lead_not_synced",
                 mcu = ?mcu,
                 t0,
                 seg0_host_secs,
-                "[seg0-lead] clock_freq=0 (not yet synced)"
+                "[seg0-lead] no clock record (not yet synced)"
             );
             return;
-        }
-        let start_time = self
-            .host_time_to_mcu_clock(mcu, seg0_host_secs)
-            .unwrap_or(0);
+        };
+        let delta = (seg0_host_secs - rec.clock_offset) * rec.clock_freq;
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let start_time = rec.last_clock.wrapping_add(delta.max(0.0) as u64);
         let ack_now = self.compute_ack_clock(mcu).unwrap_or(0);
         let lead_ticks = start_time as i64 - ack_now as i64;
         let lead_us = (lead_ticks as f64 / rec.clock_freq) * 1e6;
@@ -408,3 +496,6 @@ impl PassthroughRouter {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod clock_record_lifecycle_tests;

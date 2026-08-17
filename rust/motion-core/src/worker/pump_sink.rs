@@ -88,20 +88,27 @@ impl PumpSink {
         self.router
             .lock_ok()
             .host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(mcu_id), host_secs)
-            .unwrap_or(0)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "mcu {mcu_id} projected a piece with no valid clocksync record ({e}) — \
+                     a projection off an invalidated record would send step clocks from the \
+                     previous boot epoch"
+                )
+            })
     }
 
     fn reanchor_projection(&self, mcu_id: u32, host_now: f64) -> Result<(), DispatchError> {
         let handle = crate::types::mcu_handle_from_raw(mcu_id);
-        let freq = self
+        let record = self
             .router
             .lock_ok()
-            .ack_clock_and_freq(handle)
-            .map(|(_, f)| f)
-            .ok_or(DispatchError::ClockSyncTimeout {
+            .clock_record(handle)
+            .filter(|r| r.converged)
+            .ok_or(DispatchError::ClockRecordUnusable {
                 mcu_id,
                 mcu_handle: handle,
             })?;
+        let freq = record.clock_freq;
         // The anchor point always comes from the live clocksync record, never
         // from the previous frozen projection: the frozen slope drifts from
         // the live estimate by `freq_error * elapsed` over a long epoch (an
@@ -116,10 +123,24 @@ impl PumpSink {
             .router
             .lock_ok()
             .host_time_to_mcu_clock(handle, host_now)
-            .map_err(|_| DispatchError::ClockSyncTimeout {
+            .map_err(|_| DispatchError::ClockRecordUnusable {
                 mcu_id,
                 mcu_handle: handle,
             })? as f64;
+        tracing::info!(
+            subsystem = "motion",
+            event = "reanchor_record",
+            mcu = mcu_id,
+            host_now,
+            clock_freq = record.clock_freq,
+            clock_offset = record.clock_offset,
+            last_clock = record.last_clock,
+            converged = record.converged,
+            projected_now = record.projected_now,
+            mcu_ref,
+            anchor_lead_secs = (mcu_ref - record.projected_now as f64) / freq,
+            "[reanchor] anchored the host→mcu map on the live clocksync record"
+        );
         if let Some(prev) = frozen.get(&mcu_id).copied() {
             let drift_ticks = prev.project_exact(host_now) - mcu_ref;
             if drift_ticks.abs() > crate::anchor::LOW_MARGIN_WARN_SECS * freq {
@@ -375,3 +396,7 @@ impl SegmentSink for PumpSink {
 #[cfg(test)]
 #[path = "projection_tests.rs"]
 mod projection_tests;
+
+#[cfg(test)]
+#[path = "clock_record_gate_tests.rs"]
+mod clock_record_gate_tests;

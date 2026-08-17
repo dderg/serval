@@ -1549,3 +1549,106 @@ fn a_budget_capped_flush_still_batches_what_it_may_send() {
     assert_eq!(h.sent_moves(), 4, "the move-slot budget still bounds sends");
     assert!(!h.endpoint.backlog.is_empty());
 }
+
+/// Mirrors `STEP_CLOCK_HORIZON_TICKS` in `src/stepper_classic.c`, where a step
+/// clock this far from the MCU's own clock shuts the board down with
+/// "Step clock beyond sync horizon".
+const MCU_STEP_CLOCK_HORIZON_TICKS: u64 = 3 << 28;
+
+/// The MCU guard's bound must admit every frame the endpoint can legitimately
+/// emit: the drain window reaches `SEND_LEAD_SECONDS` past the projected MCU
+/// clock, which is a fraction of the horizon at every bench frequency.
+#[test]
+fn the_mcu_horizon_admits_the_endpoints_full_send_lead() {
+    for freq in [1_000_000.0_f64, 168_000_000.0, 400_000_000.0, 480_000_000.0] {
+        let lead_ticks = (SEND_LEAD_SECONDS * freq) as u64;
+        assert!(
+            lead_ticks < MCU_STEP_CLOCK_HORIZON_TICKS,
+            "at {freq} Hz the endpoint reaches {lead_ticks} ticks ahead, above the \
+             {MCU_STEP_CLOCK_HORIZON_TICKS}-tick mcu horizon — the guard would reject \
+             healthy frames"
+        );
+    }
+}
+
+/// Guard interplay: with a healthy clock record every step clock the endpoint
+/// puts on the wire lands inside `SEND_LEAD_SECONDS` of the MCU clock at send
+/// time, and therefore far inside the MCU's horizon. The MCU guard can only
+/// fire on a wrong host record, never on healthy pacing.
+#[test]
+fn no_emitted_step_clock_leaves_the_mcu_sync_horizon() {
+    let dur = 0.020_f32;
+    let span = (f64::from(dur) * CYCLES_PER_SECOND) as u64;
+    let mut at = 0.0_f32;
+    let slow_ramp: Vec<PieceEntry> = (0..48)
+        .map(|i| {
+            let from = at;
+            at += 0.05 * (1 + (i % 4)) as f32;
+            piece(2_000 + span * i as u64, from, at, dur)
+        })
+        .collect();
+    let mut h = harness(64);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(slow_ramp)])
+        .unwrap();
+
+    let lead_ticks = (SEND_LEAD_SECONDS * CYCLES_PER_SECOND) as u64;
+    let mut cursor: Option<u64> = None;
+    let mut checked = 0usize;
+    let mut now = 1_000u64;
+    let mut rounds_with_frames = 0usize;
+    let mut checked_this_round = false;
+    for _ in 0..260 {
+        for frame in std::mem::take(&mut *h.sent.lock_ok()) {
+            let first_step = match frame {
+                StepFrame::ResetStepClock { clock, .. } => {
+                    cursor = Some(u64::from(clock));
+                    u64::from(clock)
+                }
+                StepFrame::QueueStep {
+                    interval,
+                    count,
+                    add,
+                    ..
+                } => {
+                    let at = cursor.expect("a queue_step must follow a reset_step_clock");
+                    let first = at + u64::from(interval);
+                    cursor = Some(at.saturating_add_signed(queue_step_span(interval, count, add)));
+                    first
+                }
+                StepFrame::SetNextStepDir { .. } | StepFrame::QueueStepHp { .. } => continue,
+            };
+            checked += 1;
+            checked_this_round = true;
+            let distance = first_step as i64 - now as i64;
+            assert!(
+                distance <= lead_ticks as i64,
+                "step clock {first_step} is {distance} ticks ahead of the mcu clock \
+                 {now} — past the {lead_ticks}-tick send lead"
+            );
+            assert!(
+                distance.unsigned_abs() < MCU_STEP_CLOCK_HORIZON_TICKS,
+                "step clock {first_step} is {distance} ticks from the mcu clock {now} — \
+                 the mcu would shut down on the sync horizon"
+            );
+        }
+        if checked_this_round {
+            rounds_with_frames += 1;
+            checked_this_round = false;
+        }
+        now += 5_000;
+        h.now.store(now, Ordering::Relaxed);
+        h.endpoint.tick().unwrap();
+        h.ack_sent_barriers();
+    }
+    assert!(
+        checked >= 10,
+        "the run must exercise a real volley of step frames, saw {checked}"
+    );
+    assert!(
+        rounds_with_frames > 1,
+        "the endpoint must have released frames across several ticks for the send \
+         lead to be under test, saw {rounds_with_frames} rounds with frames"
+    );
+}

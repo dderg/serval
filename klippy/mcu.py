@@ -712,6 +712,11 @@ class MCU:
                     raw_dict = raw_dict.encode("utf-8")
                 self.engine_mcu.set_msgproto_dict(raw_dict)
             self.engine_mcu.claim(self._serialport or "", int(self._baud or 0))
+            # This MCU just booted (or rebooted): its tick counter restarted,
+            # so any record from the previous boot epoch projects clocks that
+            # are wrong by the previous boot's uptime. Drop it; the clocksync
+            # callback below re-arms it once the regression converges.
+            self.engine_mcu.invalidate_clock_est()
             if not self._mcu_freq:
                 raise error(
                     "MCU '%s': CLOCK_FREQ unknown at engine claim time"
@@ -723,12 +728,9 @@ class MCU:
             reactor = self._reactor
 
             def _engine_clock_est_cb(
-                freq, offset, last_clock, e=emcu, r=reactor
+                freq, offset, last_clock, synced, e=emcu, r=reactor
             ):
-                try:
-                    e.set_clock_est(freq, offset, last_clock, r.monotonic())
-                except Exception:
-                    logging.exception("motion_engine: set_clock_est failed")
+                e.set_clock_est(freq, offset, last_clock, synced, r.monotonic())
 
             self._clocksync.set_clock_est_callback(_engine_clock_est_cb)
 

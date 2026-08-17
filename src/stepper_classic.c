@@ -26,6 +26,24 @@ DECL_CONSTANT("STEPPER_STEP_BOTH_EDGE", 1);
 
 static struct task_wake barrier_ack_wake;
 
+// The host paces every step frame within SEND_LEAD_SECONDS (0.25 s) of the
+// mcu clock, so no legitimate step clock is ever CLOCK_DIFF_MAX from the
+// reading of timer_read_time() at command execution. One that is means the
+// host's clocksync record — not the scheduler — is wrong.
+#define STEP_CLOCK_HORIZON_TICKS ((int32_t)(3u << 28))
+
+static void
+step_clock_check_horizon(int32_t distance, uint32_t clock, uint8_t oid)
+{
+    if (likely(distance <= STEP_CLOCK_HORIZON_TICKS
+               && distance >= -STEP_CLOCK_HORIZON_TICKS))
+        return;
+    event_log_emit(EVENT_LOG_LEVEL_ERROR, EVENT_LOG_SUBSYS_MOTION,
+                   EVENT_LOG_EVENT_MOTION_STEP_CLOCK_HORIZON, oid,
+                   (uint32_t)distance, clock);
+    shutdown("Step clock beyond sync horizon");
+}
+
 #if CONFIG_HIGH_PREC_STEP
 static inline void
 add_interval(uint32_t *time, struct stepper *s)
@@ -305,6 +323,7 @@ enqueue_move(struct stepper *s, struct stepper_move *m, uint8_t oid)
         extern void diag_note_step_rearm(int32_t margin);
         int32_t margin = (int32_t)(s->time.waketime - timer_read_time());
         diag_note_step_rearm(margin);
+        step_clock_check_horizon(margin, s->time.waketime, oid);
         if (unlikely(margin < 0))
             event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_MOTION,
                            EVENT_LOG_EVENT_MOTION_STEP_REARM_LATE, oid,
@@ -440,6 +459,8 @@ command_reset_step_clock(uint32_t *args)
 {
     struct stepper *s = stepper_oid_lookup(args[0]);
     uint32_t waketime = args[1];
+    step_clock_check_horizon((int32_t)(waketime - timer_read_time()), waketime,
+                             args[0]);
     irq_disable();
     if (s->count)
         shutdown("Can't reset time when stepper active");

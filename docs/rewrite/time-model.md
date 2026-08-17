@@ -30,6 +30,12 @@ Two frequencies exist per MCU and they are not interchangeable:
   `PassthroughRouter` record (`set_clock_est_rebased`), so both sides project
   with the same numbers. The router is the Rust-side authority; do not carry
   your own `(freq, offset, last_clock)` anywhere else.
+  The record belongs to one MCU boot epoch: every `_mcu_identify` calls
+  `invalidate_clock_est`, and until a *converged* estimate arrives every
+  projection is a loud error (`RouterError::NoClockEstimate`) and the
+  stepcompress anchor refuses to run (`DispatchError::ClockRecordUnusable`).
+  A record surviving a reflash would project clocks ahead of the restarted
+  MCU counter by the previous boot's uptime.
 - print_time ↔ MCU clock: multiply/divide by **nominal** `CLOCK_FREQ`
   (secondary MCUs additionally go through `SecondarySync.clock_adj`,
   Python-side).

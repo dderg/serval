@@ -37,6 +37,16 @@ pub enum DispatchError {
         mcu_id: u32,
         mcu_handle: host_rt::passthrough_queue::McuHandle,
     },
+    #[error(
+        "mcu {mcu_id} (mcu_h={mcu_handle:?}) has no converged clocksync record — \
+         refusing to anchor a step stream on it. The record is invalidated by every \
+         (re)connect and re-armed only by a converged clocksync estimate; anchoring \
+         without one sends step clocks from the previous boot epoch."
+    )]
+    ClockRecordUnusable {
+        mcu_id: u32,
+        mcu_handle: host_rt::passthrough_queue::McuHandle,
+    },
     #[error("MCU {0}: connection dropped during dispatch")]
     ConnectionDropped(u32),
     #[error("piece pump thread is gone; cannot dispatch")]

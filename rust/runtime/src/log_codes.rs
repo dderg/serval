@@ -70,6 +70,7 @@ pub const EVENT_MOTION_STEP_REARM: u16 = 6;
 pub const EVENT_MOTION_STEP_REARM_TIGHT: u16 = 7;
 pub const EVENT_MOTION_STEP_REARM_LATE: u16 = 8;
 pub const EVENT_MOTION_STEP_HALT: u16 = 9;
+pub const EVENT_MOTION_STEP_CLOCK_HORIZON: u16 = 10;
 
 pub const EVENT_TICK_INTERVAL_EXCEEDED: u16 = 1;
 pub const EVENT_TICK_UNDERRUN: u16 = 2;
@@ -257,6 +258,10 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         (SUBSYSTEM_MOTION, EVENT_MOTION_STEP_HALT) => (
             "motion.step_halt",
             "classic stepper halted flags={arg0} pending_events={arg1}",
+        ),
+        (SUBSYSTEM_MOTION, EVENT_MOTION_STEP_CLOCK_HORIZON) => (
+            "motion.step_clock_horizon",
+            "step clock {arg1} is distance={arg0:i32} cyc from the mcu clock, beyond the sync horizon",
         ),
         (SUBSYSTEM_TICK, EVENT_TICK_INTERVAL_EXCEEDED) => (
             "tick.interval_exceeded",
