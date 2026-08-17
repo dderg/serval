@@ -122,6 +122,7 @@ class _RecordingEngine(_FakeEngine):
 def _make_correction_toolhead(duration):
     th = Motion.__new__(Motion)
     th.mcu = FakeMcu(print_time_offset=1.0)
+    th.all_mcus = [th.mcu]
     th.kin = None
     th.reactor = FakeReactor(now=100.0)
     th.engine = _RecordingEngine(duration)

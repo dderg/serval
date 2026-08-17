@@ -335,6 +335,7 @@ fn move_slots_reclaim_when_the_mcu_loads_the_run() {
         }),
         1_000,
         1_010,
+        0,
     );
     h.endpoint.queue_outbound(
         Outbound::Step(StepFrame::QueueStep {
@@ -345,6 +346,7 @@ fn move_slots_reclaim_when_the_mcu_loads_the_run() {
         }),
         20_000,
         20_010,
+        0,
     );
 
     h.endpoint.flush(0, CYCLES_PER_SECOND).unwrap();
@@ -362,6 +364,7 @@ fn barriers_hold_move_slots_until_the_mcu_loads_them() {
         Outbound::Barrier(BarrierId { oid: OID, seq: 1 }),
         1_000,
         1_000,
+        0,
     );
     h.endpoint.queue_outbound(
         Outbound::Step(StepFrame::QueueStep {
@@ -372,6 +375,7 @@ fn barriers_hold_move_slots_until_the_mcu_loads_them() {
         }),
         20_000,
         20_010,
+        0,
     );
 
     h.endpoint.flush(0, CYCLES_PER_SECOND).unwrap();
@@ -437,6 +441,7 @@ fn backlog_ceiling_breach_is_fatal() {
             start_clock: u64::MAX,
             end_clock: u64::MAX,
             enqueue_order: 0,
+            queued_clock: 0,
         }));
     let err = h
         .endpoint
@@ -462,6 +467,7 @@ fn stale_queue_step(start_clock: u64) -> OutboundFrame {
         start_clock,
         end_clock: start_clock + 10,
         enqueue_order: 0,
+        queued_clock: start_clock,
     }
 }
 
@@ -506,6 +512,7 @@ fn stale_reset_step_clock(start_clock: u64) -> OutboundFrame {
         start_clock,
         end_clock: start_clock,
         enqueue_order: 0,
+        queued_clock: start_clock,
     }
 }
 
@@ -515,6 +522,7 @@ fn stale_set_next_step_dir(start_clock: u64) -> OutboundFrame {
         start_clock,
         end_clock: start_clock,
         enqueue_order: 0,
+        queued_clock: start_clock,
     }
 }
 
@@ -588,6 +596,7 @@ fn multi_lane_commands_leave_in_step_deadline_order() {
             }),
             start_clock,
             start_clock + 10,
+            0,
         );
     }
 
@@ -1430,7 +1439,7 @@ fn barrier_acknowledgements_cross_rollover_and_ignore_pre_wrap_replay() {
 
     for (index, seq) in [u32::MAX - 1, u32::MAX, 0].into_iter().enumerate() {
         let retired = (index + 1) as u32;
-        h.endpoint.publish_retirement(&[retired]);
+        h.endpoint.publish_retirement(&[retired], 0);
         h.endpoint.flush(0, CYCLES_PER_SECOND).unwrap();
         let issued: Vec<(u32, u32)> = std::mem::take(&mut h.barriers.lock_ok());
         assert_eq!(issued, vec![(OID, seq)]);
@@ -2116,4 +2125,117 @@ fn a_lane_that_reverses_after_a_hold_times_its_dir_frame_by_the_step_it_heads() 
         "set_next_step_dir must precede the queue_step it applies to: {:?}",
         &h.sent.lock_ok()[dir_index..],
     );
+}
+
+/// A sent-frame cut parks the lane until the mcu acks the barrier and
+/// `complete_cut` re-anchors it with a fresh `reset_step_clock`. The mcu holds
+/// every stepper in that window under `SF_NEED_RESET` and silently discards any
+/// `queue_step` that arrives before the reset (`stepper_classic.c`
+/// `enqueue_move`), so nothing may leave the endpoint for a cut-pending oid
+/// until its reset heads the resumed volley.
+#[test]
+fn a_cut_pending_lane_sends_nothing_before_its_reset() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+    h.endpoint.mark_reanchor(0, 81_834, Some(CYCLES_PER_SECOND));
+    h.auto_query.store(false, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
+        .unwrap();
+    assert!(h.endpoint.pending_cuts.contains_key(&0));
+
+    let parked = h.sent.lock_ok().len();
+    for _ in 0..20 {
+        let now = h.now.load(Ordering::Relaxed) + 2_000;
+        h.now.store(now, Ordering::Relaxed);
+        h.endpoint.tick().expect("a parked cut is not a fault");
+    }
+    assert_eq!(
+        h.sent.lock_ok().len(),
+        parked,
+        "frames escaped a cut-pending lane before its reset: {:?}",
+        &h.sent.lock_ok()[parked..],
+    );
+
+    let expected = h.endpoint.pending_cuts[&0].expected_count;
+    h.query_count.store(expected, Ordering::Relaxed);
+    h.ack_sent_barriers_result()
+        .expect("the injected mcu count matches the host expectation");
+    let sent = h.sent.lock_ok();
+    let reset = sent[parked..]
+        .iter()
+        .position(|f| matches!(f, StepFrame::ResetStepClock { .. }))
+        .expect("the completed cut re-anchors the lane");
+    assert!(
+        sent[parked..][..reset]
+            .iter()
+            .all(|f| !matches!(f, StepFrame::QueueStep { .. })),
+        "the resumed volley must open with its reset: {:?}",
+        &sent[parked..],
+    );
+}
+
+/// A cut barrier that never reaches the wire is the endpoint's one unbounded
+/// silent wedge: the lane's pieces sit in `PendingCut::held`, `complete_cut`
+/// only ever runs on the ack, and the deadline used to skip any barrier absent
+/// from `sent_barriers` — so nothing executed, nothing retired, no error, and
+/// the sole symptom was the pump's drip cohort stalling at floor 0 (bench
+/// session k-1786973103: every axis "executed 0 queued 94 in_flight 194").
+/// Here a saturated move-slot budget holds the barrier in the backlog.
+#[test]
+fn a_cut_barrier_that_never_reaches_the_wire_trips_the_deadline() {
+    const DEADLINE_SECS: f64 = 0.002;
+    let deadline_ticks = (DEADLINE_SECS * CYCLES_PER_SECOND) as u64;
+    let mut h = harness(1);
+    h.endpoint.barrier_ack_deadline_secs = DEADLINE_SECS;
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+
+    let boundary = h.endpoint.last_sent_boundary[&OID];
+    h.endpoint
+        .mark_reanchor(0, boundary, Some(CYCLES_PER_SECOND));
+    h.auto_query.store(false, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(boundary, 8, 5.0))])
+        .unwrap();
+    assert!(
+        h.endpoint.pending_cuts.contains_key(&0),
+        "the seam falls inside sent frames, so the cut must reconcile"
+    );
+    let queued_clock = h
+        .endpoint
+        .backlog
+        .iter()
+        .find_map(|out| match out.frame {
+            Outbound::Barrier(_) => Some(out.queued_clock),
+            Outbound::Step(_) => None,
+        })
+        .expect("the saturated budget holds the cut barrier in the backlog");
+    assert!(
+        h.barriers.lock_ok().is_empty(),
+        "the barrier must not have reached the wire"
+    );
+
+    h.now
+        .store(queued_clock + deadline_ticks - 1, Ordering::Relaxed);
+    h.endpoint
+        .tick()
+        .expect("inside the deadline a backlogged barrier is merely waiting on a slot");
+
+    h.now
+        .store(queued_clock + deadline_ticks, Ordering::Relaxed);
+    let err = h
+        .endpoint
+        .tick()
+        .expect_err("a barrier that never reaches the wire must not park the lane forever");
+    let SendError::Fatal(message) = err else {
+        panic!("a wedged cut is unrecoverable: {err:?}");
+    };
+    assert!(message.contains("backlogged, never sent"), "{message}");
+    assert!(message.contains(&format!("oid={OID}")), "{message}");
 }

@@ -630,10 +630,17 @@ class Motion:
                 interval_s=0.010,
             )
 
+    def _schedulable_mcus(self):
+        return [
+            m
+            for m in self.all_mcus
+            if m is self.mcu or not m.non_critical_disconnected
+        ]
+
     def _schedule_floor(self):
         now = self.reactor.monotonic()
         return (
-            max(m.estimated_print_time(now) for m in self._engine_mcus())
+            max(m.estimated_print_time(now) for m in self._schedulable_mcus())
             + self.motion_lead
         )
 

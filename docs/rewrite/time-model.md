@@ -85,8 +85,13 @@ the primary's clock. Passing a secondary's handle gives you that MCU's
 2. **Never compose `estimated_print_time(now) + lead`.** That sum samples
    "now" through one clock path and the lead through another. The one
    sanctioned composition is the *schedule floor* in
-   `Motion.get_last_move_time` — a `max()` of absolutes over all engine
-   MCUs, which is drift-safe because max cannot accumulate error.
+   `Motion.get_last_move_time` — a `max()` of absolutes over every connected
+   MCU, which is drift-safe because max cannot accumulate error. It must
+   span every MCU, not just the ones running kinematic lanes: a follower
+   lane's enable pin, a fan, or a heater on a secondary MCU is validated
+   against *that* MCU's estimate, and `SecondarySync` deliberately skews its
+   frequency to converge seconds ahead, so its estimate at `now` can sit
+   over a second away from the primary's.
 3. **Scheduling after motion**: call `toolhead.get_last_move_time()` if you
    also want mainline's flush-to-rest semantics (most G-code handlers do),
    or `engine.frontier_print_time(...)` if committed motion is the right
@@ -110,7 +115,9 @@ the primary's clock. Passing a secondary's handle gives you that MCU's
 - `get_last_move_time` returned `est_main(now₁) + max(lead(now₂), 0.25)` —
   two nows, two clock paths, and only the main MCU's estimate while callers
   scheduled on secondary MCUs → sporadic "scheduled with stale print_time"
-  shutdowns.
+  shutdowns. The floor later became a `max()` of absolutes, but over
+  kinematic-stepper MCUs only, which still excluded follower-lane and
+  peripheral-only MCUs.
 - Lookahead callbacks fired with `est(now)+lead` at resolution time, which
   could be behind moves queued after registration → out-of-order pin/LED
   scheduling.

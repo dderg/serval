@@ -316,7 +316,12 @@ enqueue_move(struct stepper *s, struct stepper_move *m, uint8_t oid)
         s->flags = flags;
         move_queue_push(&m->node, &s->mq);
     } else if (flags & SF_NEED_RESET) {
+        // Discarding is only correct for the steps already on the wire when an
+        // endstop trip halted the lane: the host cannot recall those. Past its
+        // reconcile it owes a reset ahead of every further step.
         move_free(m);
+        if (flags & SF_RESET_FENCED)
+            shutdown("queue_step for a stepper awaiting reset_step_clock");
     } else {
         s->flags = flags;
         move_queue_push(&m->node, &s->mq);
@@ -471,7 +476,7 @@ command_reset_step_clock(uint32_t *args)
     if (s->count)
         shutdown("Can't reset time when stepper active");
     s->next_step_time = s->time.waketime = waketime;
-    s->flags &= ~SF_NEED_RESET;
+    s->flags &= ~(SF_NEED_RESET | SF_RESET_FENCED);
     irq_enable();
 }
 DECL_COMMAND(command_reset_step_clock, "reset_step_clock oid=%c clock=%u");
@@ -512,6 +517,10 @@ DECL_COMMAND(command_stepper_get_position, "stepper_get_position oid=%c");
 // it is set the counter is stored negated and load_next adds step counts
 // downward. Seeding must re-encode into whichever flavour is live, or every
 // later step lands with the sign flipped.
+//
+// The host only reseeds after discarding every unsent frame, so this is also
+// the fence past which a step arriving ahead of reset_step_clock is an ordering
+// bug rather than the in-flight tail of a trip.
 void
 command_stepcompress_set_position(uint32_t *args)
 {
@@ -521,6 +530,7 @@ command_stepcompress_set_position(uint32_t *args)
         shutdown("Can't set position when stepper active");
     uint32_t position = args[1] + POSITION_BIAS;
     s->position = s->position & 0x80000000 ? -position : position;
+    s->flags |= SF_RESET_FENCED;
     irq_enable();
 }
 DECL_COMMAND(command_stepcompress_set_position,

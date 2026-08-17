@@ -223,6 +223,15 @@ struct SentBarrier {
     sent_clock: u64,
 }
 
+/// Where an outstanding barrier actually is. `Queued` has not reached the wire
+/// yet, so the mcu owes nothing for it; `Lost` means the endpoint is waiting on
+/// a receipt that neither the backlog nor the transport is carrying.
+enum BarrierWait {
+    Sent(u64),
+    Queued(u64),
+    Lost,
+}
+
 enum Outbound {
     Step(StepFrame),
     Barrier(BarrierId),
@@ -233,6 +242,7 @@ struct OutboundFrame {
     start_clock: u64,
     end_clock: u64,
     enqueue_order: u64,
+    queued_clock: u64,
 }
 
 /// A seam the endpoint must handle when the marked piece reaches it, in
@@ -443,7 +453,7 @@ impl StepcompressEndpoint {
                 ))
             })
     }
-    fn queue_outbound(&mut self, frame: Outbound, start_clock: u64, end_clock: u64) {
+    fn queue_outbound(&mut self, frame: Outbound, start_clock: u64, end_clock: u64, queued: u64) {
         let enqueue_order = self.next_outbound_order;
         self.next_outbound_order = self
             .next_outbound_order
@@ -454,6 +464,7 @@ impl StepcompressEndpoint {
             start_clock,
             end_clock,
             enqueue_order,
+            queued_clock: queued,
         });
     }
 
@@ -655,6 +666,7 @@ impl StepcompressEndpoint {
         cut_at: u64,
         epoch_freq: f64,
         held: &[PieceEntry],
+        now: u64,
     ) -> Result<(), SendError> {
         if self.pending_cuts.contains_key(&motor) {
             return Err(SendError::Fatal(format!(
@@ -675,7 +687,7 @@ impl StepcompressEndpoint {
             seq
         };
         let barrier = BarrierId { oid, seq };
-        self.queue_outbound(Outbound::Barrier(barrier), resume_clock, resume_clock);
+        self.queue_outbound(Outbound::Barrier(barrier), resume_clock, resume_clock, now);
         self.pending_cuts.insert(
             motor,
             PendingCut {
@@ -753,9 +765,9 @@ impl StepcompressEndpoint {
                 .push_pieces(motor, &cut.held)
                 .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
         }
-        let snapshot = self.shim.retired_counts();
-        self.publish_retirement(&snapshot);
         let (now, freq) = self.clock_now()?;
+        let snapshot = self.shim.retired_counts();
+        self.publish_retirement(&snapshot, now);
         self.drain_into_backlog(now, freq)?;
         self.flush(now, freq)
     }
@@ -766,7 +778,7 @@ impl StepcompressEndpoint {
             after.wrapping_sub(before) >= RETIREMENT_BATCH
         })
     }
-    fn publish_retirement(&mut self, snapshot: &[u32]) {
+    fn publish_retirement(&mut self, snapshot: &[u32], now: u64) {
         if !self.pending_retire.is_empty() {
             self.deferred_retirement = true;
             return;
@@ -791,7 +803,7 @@ impl StepcompressEndpoint {
             };
             let barrier_clock = self.step_clock.get(&oid).copied().unwrap_or(0);
             let id = BarrierId { oid, seq };
-            self.queue_outbound(Outbound::Barrier(id), barrier_clock, barrier_clock);
+            self.queue_outbound(Outbound::Barrier(id), barrier_clock, barrier_clock, now);
             waits.push(id);
         }
         if waits.is_empty() {
@@ -847,22 +859,46 @@ impl StepcompressEndpoint {
             .join(", ")
     }
 
+    fn barrier_wait(&self, id: BarrierId) -> BarrierWait {
+        if let Some(sent) = self.sent_barriers.iter().find(|sent| sent.id == id) {
+            return BarrierWait::Sent(sent.sent_clock);
+        }
+        self.backlog
+            .iter()
+            .find_map(|out| match out.frame {
+                Outbound::Barrier(queued) if queued == id => Some(out.queued_clock),
+                _ => None,
+            })
+            .map_or(BarrierWait::Lost, BarrierWait::Queued)
+    }
+
     /// A cohort barrier the mcu never acks parks `pending_retire` forever, and
-    /// with it every drain waiting on the retirement it gates. Wait no longer
-    /// than [`BARRIER_ACK_DEADLINE_SECONDS`] of mcu clock past the send, then
-    /// name what is missing and what did come back.
+    /// with it every drain waiting on the retirement it gates; a cut barrier
+    /// parks the held pieces of a whole lane. Wait no longer than
+    /// [`BARRIER_ACK_DEADLINE_SECONDS`] of mcu clock, then name what is missing
+    /// and what did come back.
+    ///
+    /// The wait is measured from the send when there is one and from the
+    /// enqueue when the frame is still backlogged: a barrier that never reaches
+    /// the wire earns no ack, and skipping it here left the only unbounded
+    /// silent wedge in the endpoint — the lane parks, nothing executes, nothing
+    /// retires, and the sole symptom is a drip cohort stalling at floor 0.
     fn check_barrier_deadline(&mut self, now: u64, freq: f64) -> Result<(), SendError> {
         let deadline_ticks = (freq * self.barrier_ack_deadline_secs) as u64;
-        let overdue: Vec<(BarrierId, u64)> = self
+        let overdue: Vec<(BarrierId, String)> = self
             .outstanding_barriers()
             .into_iter()
             .filter_map(|id| {
-                let waited = self
-                    .sent_barriers
-                    .iter()
-                    .find(|sent| sent.id == id)
-                    .map(|sent| now.saturating_sub(sent.sent_clock))?;
-                (waited >= deadline_ticks).then_some((id, waited))
+                let (since, state) = match self.barrier_wait(id) {
+                    BarrierWait::Sent(sent_clock) => (sent_clock, "sent but unacked"),
+                    BarrierWait::Queued(queued_clock) => (queued_clock, "backlogged, never sent"),
+                    BarrierWait::Lost => {
+                        return Some((id, "dropped from the backlog unsent".to_string()));
+                    }
+                };
+                let waited = now.saturating_sub(since);
+                (waited >= deadline_ticks)
+                    .then(|| (id, format!("{state} for {:.3} s", waited as f64 / freq)))
             })
             .collect();
         if overdue.is_empty() {
@@ -870,23 +906,20 @@ impl StepcompressEndpoint {
         }
         let missing = overdue
             .iter()
-            .map(|(id, waited)| {
-                format!(
-                    "oid={} seq={} unacked for {:.3} s",
-                    id.oid,
-                    id.seq,
-                    *waited as f64 / freq
-                )
-            })
+            .map(|(id, state)| format!("oid={} seq={} {state}", id.oid, id.seq))
             .collect::<Vec<_>>()
             .join(", ");
         Err(SendError::Fatal(format!(
-            "stepcompress mcu {}: barrier ack deadline of {:.3} s of mcu clock expired — the \
-             mcu never reported [{missing}]; received acks: [{}]. The retirement cohort and \
-             every drain behind it cannot be released",
+            "stepcompress mcu {}: barrier deadline of {:.3} s of mcu clock expired — [{missing}]; \
+             received acks: [{}]. {} frames backlogged, {} move slots in flight of {}. The \
+             retirement cohort, every cut awaiting reconciliation, and every drain behind them \
+             cannot be released",
             self.mcu_id,
             self.barrier_ack_deadline_secs,
-            self.barrier_ack_ledger()
+            self.barrier_ack_ledger(),
+            self.backlog.len(),
+            self.in_flight.len(),
+            self.budget
         )))
     }
 
@@ -1034,7 +1067,7 @@ impl StepcompressEndpoint {
         }
         for (frame, clocks) in frames.into_iter().zip(clocks) {
             let (start_clock, end_clock) = clocks.expect("every frame is stamped");
-            self.queue_outbound(Outbound::Step(frame), start_clock, end_clock);
+            self.queue_outbound(Outbound::Step(frame), start_clock, end_clock, now);
         }
         Ok(())
     }
@@ -1082,7 +1115,7 @@ impl StepcompressEndpoint {
         }
         let snapshot = self.shim.retired_counts();
         if publish && self.retirement_batch_ready(&snapshot) {
-            self.publish_retirement(&snapshot);
+            self.publish_retirement(&snapshot, now);
         } else if snapshot != self.cohort_counts {
             self.deferred_retirement = true;
         }
@@ -1272,7 +1305,10 @@ impl StepcompressEndpoint {
     }
 
     fn tick_inner(&mut self) -> Result<(), SendError> {
-        if !self.sent_barriers.is_empty() {
+        if !self.sent_barriers.is_empty()
+            || !self.pending_cuts.is_empty()
+            || !self.pending_retire.is_empty()
+        {
             let (now, freq) = self.clock_now()?;
             self.check_barrier_deadline(now, freq)?;
         }
@@ -1311,7 +1347,7 @@ impl StepcompressEndpoint {
             if self.retirement_batch_ready(&snapshot)
                 || self.retirement_idle_ticks >= RETIREMENT_IDLE_TICKS
             {
-                self.publish_retirement(&snapshot);
+                self.publish_retirement(&snapshot, now);
                 self.retirement_idle_ticks = 0;
             }
         }
@@ -1389,7 +1425,7 @@ impl StepcompressEndpoint {
                             .get(&self.oids[motor])
                             .is_some_and(|&boundary| at <= boundary);
                         if sent {
-                            self.begin_cut(motor, at, epoch_freq, tail)?;
+                            self.begin_cut(motor, at, epoch_freq, tail, now)?;
                             defer_tail = true;
                         } else {
                             self.cut_stream_unsent(motor, epoch_freq, at, now)?;
