@@ -60,13 +60,6 @@ pub struct FitTol {
     /// planner never asked for. Only accel-feedforward consumers (EtherCAT
     /// servos) can tell; steppers just follow positions.
     pub accel_mm_s2: f64,
-    /// Absolute velocity-error budget. Endpoint velocities are exact by
-    /// construction, but a long accepted span can drift by mm/s in its
-    /// interior while staying inside the position budget — enough to visibly
-    /// flatten pressure-advance structure. `INFINITY` preserves the lowering
-    /// path's historical acceptance, where spans are short enough that the
-    /// endpoint pinning already bounds interior drift.
-    pub vel_mm_s: f64,
 }
 
 /// Fit budgets are sized for the spatial axes. A follower's whole signal is
@@ -82,7 +75,6 @@ impl FitTol {
     pub(crate) fn scaled(self, factor: f64) -> Self {
         Self {
             pos_mm: self.pos_mm * factor,
-            vel_mm_s: self.vel_mm_s * factor,
             accel_mm_s2: self.accel_mm_s2 * factor,
         }
     }

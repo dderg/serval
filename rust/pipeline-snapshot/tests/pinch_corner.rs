@@ -88,7 +88,6 @@ fn piece_extreme(coeffs: &[f64], h: f64, deriv: usize) -> f64 {
 fn lowered_extremes(planned: &[PlannedMove]) -> (f64, f64) {
     let fit_tol = motion_pipeline::lowering::FitTol {
         pos_mm: TRAJECTORY_FIT_TOL_MM,
-        vel_mm_s: f64::INFINITY,
         accel_mm_s2: TRAJECTORY_FIT_TOL_ACCEL_MM_S2,
     };
     let chains: Vec<trajectory::CompiledChain> = vec![trajectory::CompiledChain::default(); 4];

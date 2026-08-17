@@ -196,26 +196,6 @@ where
         )
     }
 
-    /// Times in `(t0, t1)` where the convolution changes polynomial: every
-    /// input break shifted by every kernel cut (piece boundaries and support
-    /// edges). Appended unsorted; between two consecutive such times the
-    /// output is one polynomial of degree `input + kernel + 1`.
-    pub fn structure_breaks(&self, t0: f64, t1: f64, out: &mut Vec<f64>) {
-        let mut cuts: Vec<f64> = Vec::with_capacity(self.kernel.pieces.len() + 1);
-        for p in &self.kernel.pieces {
-            cuts.push(p.u_start);
-        }
-        cuts.push(self.k_hi);
-        for &kappa in &cuts {
-            for &b in &self.input_breaks {
-                let t = b + kappa;
-                if t > t0 && t < t1 {
-                    out.push(t);
-                }
-            }
-        }
-    }
-
     fn new_with_moments(
         kernel: &'a PiecewisePolynomialKernel,
         eval: F,

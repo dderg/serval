@@ -63,7 +63,6 @@ pub fn setup_stages(
 
     let fit_tol = FitTol {
         pos_mm: config.fit_tol_mm,
-        vel_mm_s: f64::INFINITY,
         accel_mm_s2: config.fit_tol_accel_mm_s2,
     };
     let lower_chains = axis_chains.clone();

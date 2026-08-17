@@ -430,7 +430,6 @@ pub fn run_pipeline_streaming(
         lowerer: Lowerer::new(
             FitTol {
                 pos_mm: config.fit_tol_mm,
-                vel_mm_s: f64::INFINITY,
                 accel_mm_s2: config.fit_tol_accel_mm_s2,
             },
             axis_chains,
