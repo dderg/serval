@@ -347,18 +347,3 @@ fn checked_commit_survives_wrapping_counters() {
     );
     assert_eq!(r.head, (u32::MAX - 1).wrapping_add(4));
 }
-
-#[test]
-fn slot_is_live_tracks_committed_unretired_span() {
-    let mut r = ring(8);
-    assert_eq!(r.commit_head_checked(0, 3, 3), CommitOutcome::Applied);
-    assert!(r.slot_is_live(0));
-    assert!(r.slot_is_live(2));
-    assert!(
-        !r.slot_is_live(3),
-        "slots at and past the head are writable"
-    );
-    r.advance_counter();
-    assert!(!r.slot_is_live(0), "retired slots are writable again");
-    assert!(r.slot_is_live(1));
-}

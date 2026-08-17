@@ -140,9 +140,6 @@ pub unsafe extern "C" fn runtime_write_piece(
         {
             return RUNTIME_ERR_INVALID_ARG;
         }
-        if axis.ring.slot_is_live(slot) {
-            return RUNTIME_OK;
-        }
         axis.ring.write_slot(storage, slot, entry);
     }
     RUNTIME_OK

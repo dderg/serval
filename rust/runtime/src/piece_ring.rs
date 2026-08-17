@@ -139,19 +139,6 @@ impl RingDescriptor {
         CommitOutcome::Applied
     }
 
-    /// Whether physical `slot` currently holds a committed, unretired piece —
-    /// i.e. the ISR may be reading it. Writers must skip such slots: they only
-    /// occur when an idempotent frame replay re-sends content the ring already
-    /// committed, and rewriting live storage would race the ISR.
-    #[inline]
-    pub fn slot_is_live(&self, slot: usize) -> bool {
-        if self.ring_depth == 0 {
-            return false;
-        }
-        let len = self.head.wrapping_sub(self.retired) as usize;
-        ((slot + self.ring_depth - self.tail) % self.ring_depth) < len
-    }
-
     #[inline]
     pub fn push(&mut self, storage: &mut [PieceEntry], entry: PieceEntry) -> Result<(), ()> {
         if self.is_full() || self.ring_depth == 0 {
