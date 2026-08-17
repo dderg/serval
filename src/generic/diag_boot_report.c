@@ -173,6 +173,13 @@ fault_handler_report_boot_init(uint32_t now)
     live_snap.rearm_min_margin     = (uint32_t)INT32_MAX;
     live_snap.rearm_armed          = 0;
     live_snap.rearm_below_floor    = 0;
+    live_snap.worst_timer_func     = 0;
+    live_snap.worst_timer_cyc      = 0;
+    live_snap.step_spin_count      = 0;
+    live_snap.step_spin_worst_cyc  = 0;
+    live_snap.step_spin_stale_count = 0;
+    live_snap.step_spin_stale_max  = 0;
+    live_snap.step_spin_stale_first = 0;
 #if CONFIG_MACH_STM32H7
     if (reset_cause_raw & RCC_RSR_IWDG1RSTF)
         live_snap.iwdg_reset_count++;
@@ -374,6 +381,16 @@ fault_handler_report_emit(uint32_t now)
            (int32_t)prior_snap.rearm_min_margin,
            prior_snap.rearm_armed,
            prior_snap.rearm_below_floor);
+    output("sched_timer_worst func %u cyc %u",
+           prior_snap.worst_timer_func,
+           prior_snap.worst_timer_cyc);
+    output("step_spin count %u worst_cyc %u stale_count %u stale_max %u"
+           " stale_first %u",
+           prior_snap.step_spin_count,
+           prior_snap.step_spin_worst_cyc,
+           prior_snap.step_spin_stale_count,
+           prior_snap.step_spin_stale_max,
+           prior_snap.step_spin_stale_first);
     if (fault_rec.magic == FAULT_MAGIC) {
         output("prior_fault kind %u count %u pc %u lr %u psr %u"
                " r0 %u r1 %u r2 %u r3 %u r12 %u",

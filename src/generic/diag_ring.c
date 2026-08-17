@@ -73,6 +73,43 @@ diag_note_dispatch(uint32_t func, uint32_t addr)
     live_snap.last_dispatch_addr = addr;
 }
 
+// Called by sched_timer_dispatch around every callback invocation: the
+// longest single timer-handler duration (DWT cycles) plus its function
+// pointer. A "Rescheduled timer in the past" dump names the head timer's
+// lateness; this names the handler that held the dispatch loop, so a
+// busy-wait hog is identified on the first crash replay.
+__attribute__((used, externally_visible))
+void
+diag_note_timer_duration(uint32_t dur_cyc, uint32_t func)
+{
+    if (dur_cyc > live_snap.worst_timer_cyc) {
+        live_snap.worst_timer_cyc = dur_cyc;
+        live_snap.worst_timer_func = func;
+    }
+}
+
+// Called by the classic stepper dir-change settle spin after it exits.
+// dur_cyc is what the spin actually burned; stale_ahead is how far the
+// (possibly stale-future) settle target sat beyond the fresh
+// now + step_pulse_ticks bound — zero in the healthy case, the whole
+// host turnaround when the reset-step-clock anchor leaked into the spin.
+__attribute__((used, externally_visible))
+void
+diag_note_step_spin(uint32_t dur_cyc, uint32_t stale_ahead)
+{
+    live_snap.step_spin_count++;
+    if (dur_cyc > live_snap.step_spin_worst_cyc)
+        live_snap.step_spin_worst_cyc = dur_cyc;
+    if (stale_ahead) {
+        live_snap.step_spin_stale_count++;
+        if (stale_ahead > live_snap.step_spin_stale_max)
+            live_snap.step_spin_stale_max = stale_ahead;
+        if (!live_snap.step_spin_stale_first)
+            live_snap.step_spin_stale_first = timer_read_time();
+        diag_cache_clean();
+    }
+}
+
 static void
 diag_close_task(uint32_t now)
 {

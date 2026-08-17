@@ -24,7 +24,7 @@ extern volatile struct fault_record fault_rec;
 // Bump on any live_snapshot layout change so a reflash (RAM survives, old magic
 // still matches) can't seed the new fields with stale bytes — a mismatch forces
 // the cold-init zero pass.
-#define LIVE_MAGIC 0x4C495647u
+#define LIVE_MAGIC 0x4C495648u
 
 struct live_snapshot {
     uint32_t magic;
@@ -62,6 +62,13 @@ struct live_snapshot {
     uint32_t rearm_min_margin;
     uint32_t rearm_armed;
     uint32_t rearm_below_floor;
+    uint32_t worst_timer_func;
+    uint32_t worst_timer_cyc;
+    uint32_t step_spin_count;
+    uint32_t step_spin_worst_cyc;
+    uint32_t step_spin_stale_count;
+    uint32_t step_spin_stale_max;
+    uint32_t step_spin_stale_first;
 };
 
 extern volatile struct live_snapshot live_snap;

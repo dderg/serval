@@ -135,10 +135,25 @@ stepper_load_next(struct stepper *s)
             s->time.waketime = min_next_time;
         }
         if (was_active && need_dir_change) {
-            // Must ensure minimum time between step change and dir change
-            if (s->flags & SF_SINGLE_SCHED)
-                while (timer_is_before(timer_read_time(), min_next_time))
+            // Must ensure minimum time between step change and dir change.
+            // The settle window is measured from the fresh clock, never from
+            // min_next_time: that waketime is the reset-step-clock anchor
+            // when a halted stepper re-arms mid-volley, and a stale-future
+            // anchor would hold the ISR until the clock caught it (the
+            // session-stable ~144 ms "Rescheduled timer in the past" at the
+            // post-trip retract). Bounded to step_pulse_ticks by construction.
+            if (s->flags & SF_SINGLE_SCHED) {
+                uint32_t now = timer_read_time();
+                uint32_t spin_until = now + s->step_pulse_ticks;
+                uint32_t stale_ahead = 0;
+                if (timer_is_before(spin_until, min_next_time))
+                    stale_ahead = min_next_time - spin_until;
+                while (timer_is_before(timer_read_time(), spin_until))
                     ;
+                extern void diag_note_step_spin(uint32_t dur_cyc,
+                                                uint32_t stale_ahead);
+                diag_note_step_spin(timer_read_time() - now, stale_ahead);
+            }
             gpio_out_toggle_noirq(s->dir_pin);
 #if CONFIG_MCU_SIM
             // The sim's virtual clock races arbitrarily far ahead of a
@@ -497,6 +512,19 @@ stepper_classic_halt(struct stepper *s)
     s->next_step_time = s->time.waketime = 0;
     s->position = -stepper_get_position(s);
     s->count = 0;
+    // Drop the fixed-point step accumulator wholesale: a resumed stream
+    // re-anchors with reset_step_clock and the first load overwrites every
+    // field, but a stale add/shift/int_low_acc surviving the halt would let
+    // a stray event between halt and re-anchor walk a dead step chain.
+    s->interval = 0;
+#if CONFIG_HIGH_PREC_STEP
+    s->add = 0;
+    s->add2 = 0;
+    s->shift = 0;
+    s->int_low_acc = 0;
+#else
+    s->add = 0;
+#endif
     s->flags = (s->flags & (SF_OPTIMIZED_PATH | SF_SINGLE_SCHED))
         | SF_NEED_RESET;
     while (!move_queue_empty(&s->mq)) {
