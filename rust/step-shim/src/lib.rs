@@ -316,13 +316,19 @@ impl MotorState {
             }
 
             let out_of_reach = clocks[0] - committed >= compress::CLOCK_DIFF_MAX;
-            let base_clock = if out_of_reach {
+            let re_anchoring = self.needs_reset || out_of_reach;
+            // `committed` is where the stream is guaranteed silent, not where
+            // the volley starts: a lane that holds before it steps keeps
+            // `needs_reset` for the whole hold, so its origin clock is the
+            // seam the hold began on — seconds or minutes behind the first
+            // step. reset_step_clock heads the volley and the mcu shuts down
+            // on a late stepper re-arm ("Rescheduled timer in the past"), so
+            // a re-anchoring volley bases itself on its own first step.
+            let base_clock = if re_anchoring {
                 clocks[0] - 1
             } else {
                 committed
             };
-
-            let re_anchoring = self.needs_reset || out_of_reach;
             let hp_carry = if re_anchoring {
                 0
             } else {

@@ -40,6 +40,26 @@ fn queue_step_count(frames: &[StepFrame]) -> u32 {
         .sum()
 }
 
+/// A re-anchoring volley's reset clock and the clock its first step lands on.
+/// The reset heads the volley, so it must sit as close to that first step as
+/// the protocol allows — never back at the clock the piece stream began on.
+fn reset_and_first_step(frames: &[StepFrame]) -> (u64, u64) {
+    let StepFrame::ResetStepClock { clock, .. } = frames[0] else {
+        panic!(
+            "a re-anchoring volley must open with reset_step_clock: {:?}",
+            frames[0]
+        );
+    };
+    let first = frames
+        .iter()
+        .find_map(|f| match f {
+            StepFrame::QueueStep { interval, .. } => Some(u64::from(*interval)),
+            _ => None,
+        })
+        .expect("the volley must carry steps");
+    (u64::from(clock), u64::from(clock) + first)
+}
+
 /// The classic encoder keeps the pre-change stream shape: the same anchor,
 /// the same dir latch, and a cursor the queue_step span arithmetic walks to
 /// exactly the clock the shim reports as emitted.
@@ -50,13 +70,9 @@ fn classic_stream_matches_the_pre_change_expectations() {
         .unwrap();
     let frames = shim.drain(u64::MAX).unwrap();
 
-    assert_eq!(
-        frames[0],
-        StepFrame::ResetStepClock {
-            oid: OID,
-            clock: 1_000
-        }
-    );
+    let (reset, first_step) = reset_and_first_step(&frames);
+    assert_eq!(reset + 1, first_step);
+    assert!(reset >= 1_000, "reset {reset} predates the piece it opens");
     assert_eq!(frames[1], StepFrame::SetNextStepDir { oid: OID, dir: 1 });
     let mut cursor = 0u64;
     let mut steps = 0u32;
@@ -140,12 +156,13 @@ fn first_emission_resets_the_step_clock_then_sets_dir() {
         .unwrap();
     let frames = shim.drain(u64::MAX).unwrap();
 
-    assert_eq!(
-        frames[0],
-        StepFrame::ResetStepClock {
-            oid: OID,
-            clock: 1_000
-        }
+    let (reset, first_step) = reset_and_first_step(&frames);
+    assert_eq!(reset + 1, first_step);
+    assert!(reset >= 1_000, "reset {reset} predates the piece it opens");
+    assert!(
+        matches!(frames[0], StepFrame::ResetStepClock { oid: OID, .. }),
+        "{:?}",
+        frames[0]
     );
     assert_eq!(frames[1], StepFrame::SetNextStepDir { oid: OID, dir: 1 });
     assert!(matches!(frames[2], StepFrame::QueueStep { .. }));
@@ -440,12 +457,11 @@ fn halt_discards_queued_work_and_re_resets_the_step_clock() {
     shim.push_pieces(0, &[linear_piece(50_000, 2.0, 3.0, 0.01)])
         .unwrap();
     let frames = shim.drain(u64::MAX).unwrap();
-    assert_eq!(
-        frames[0],
-        StepFrame::ResetStepClock {
-            oid: OID,
-            clock: 50_000
-        }
+    let (reset, first_step) = reset_and_first_step(&frames);
+    assert_eq!(reset + 1, first_step);
+    assert!(
+        reset >= 50_000,
+        "reset {reset} predates the piece the halted stream resumed on"
     );
 }
 

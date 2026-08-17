@@ -280,7 +280,7 @@ pub struct StepcompressEndpoint {
     barrier_seq_seed: u32,
     sent_barriers: VecDeque<SentBarrier>,
     barrier_ack_deadline_secs: f64,
-    barrier_deadline_escalated: bool,
+    fatal: Option<String>,
 }
 
 fn shim_error_to_send_error(mcu_id: u32, error: ShimError) -> SendError {
@@ -423,7 +423,7 @@ impl StepcompressEndpoint {
             barrier_seq_seed,
             sent_barriers: VecDeque::new(),
             barrier_ack_deadline_secs: BARRIER_ACK_DEADLINE_SECONDS,
-            barrier_deadline_escalated: false,
+            fatal: None,
         }
     }
 
@@ -886,22 +886,14 @@ impl StepcompressEndpoint {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let error = format!(
+        Err(SendError::Fatal(format!(
             "stepcompress mcu {}: barrier ack deadline of {:.3} s of mcu clock expired — the \
              mcu never reported [{missing}]; received acks: [{}]. The retirement cohort and \
              every drain behind it cannot be released",
             self.mcu_id,
             self.barrier_ack_deadline_secs,
             self.barrier_ack_ledger()
-        );
-        if !self.barrier_deadline_escalated {
-            self.barrier_deadline_escalated = true;
-            let _ = self.pump_control.send(PumpMsg::StepcompressFatal {
-                mcu_id: self.mcu_id,
-                error: error.clone(),
-            });
-        }
-        Err(SendError::Fatal(error))
+        )))
     }
 
     fn release_retirements(&mut self) {
@@ -918,6 +910,14 @@ impl StepcompressEndpoint {
     }
 
     pub fn on_barrier_ack(&mut self, oid: u32, seq: u32) -> Result<(), SendError> {
+        if let Some(latched) = self.latched_fatal() {
+            return Err(latched);
+        }
+        let result = self.on_barrier_ack_inner(oid, seq);
+        result.map_err(|e| self.escalate(e))
+    }
+
+    fn on_barrier_ack_inner(&mut self, oid: u32, seq: u32) -> Result<(), SendError> {
         let mcu_id = self.mcu_id;
         let issued = self.next_barrier_seq.get(&oid).copied().ok_or_else(|| {
             SendError::Fatal(format!(
@@ -1193,7 +1193,58 @@ impl StepcompressEndpoint {
         self.published.clone()
     }
 
+    pub fn is_fatal(&self) -> bool {
+        self.fatal.is_some()
+    }
+
+    /// Every fatal this endpoint produces is unrecoverable by construction:
+    /// the shim's timeline, the mcu's move queue, or the transport is already
+    /// wrong, and the next attempt reproduces it. Retrying one silently — the
+    /// pacer's tick loop only logged — froze the backlog and hung klippy's
+    /// `wait_moves` behind a drain that could never release. Escalate to the
+    /// pump once, then refuse to run again so the endpoint stops ticking.
+    fn escalate(&mut self, error: SendError) -> SendError {
+        let SendError::Fatal(message) = &error else {
+            return error;
+        };
+        if self.fatal.is_none() {
+            self.fatal = Some(message.clone());
+            tracing::error!(
+                subsystem = "pump",
+                event = "stepcompress_endpoint_fatal",
+                mcu = self.mcu_id,
+                error = %message,
+                "stepcompress endpoint went fatal — escalating to the pump"
+            );
+            let _ = self.pump_control.send(PumpMsg::StepcompressFatal {
+                mcu_id: self.mcu_id,
+                error: message.clone(),
+            });
+        }
+        error
+    }
+
+    fn latched_fatal(&self) -> Option<SendError> {
+        self.fatal.clone().map(SendError::Fatal)
+    }
+
     pub fn tick(&mut self) -> Result<(), SendError> {
+        if let Some(latched) = self.latched_fatal() {
+            return Err(latched);
+        }
+        let result = self.tick_inner();
+        result.map_err(|e| self.escalate(e))
+    }
+
+    pub fn send_frames(&mut self, mcu_id: u32, frames: &[AxisFrame]) -> Result<(), SendError> {
+        if let Some(latched) = self.latched_fatal() {
+            return Err(latched);
+        }
+        let result = self.send_frames_inner(mcu_id, frames);
+        result.map_err(|e| self.escalate(e))
+    }
+
+    fn tick_inner(&mut self) -> Result<(), SendError> {
         if !self.sent_barriers.is_empty() {
             let (now, freq) = self.clock_now()?;
             self.check_barrier_deadline(now, freq)?;
@@ -1243,7 +1294,7 @@ impl StepcompressEndpoint {
         self.flush(now, freq)
     }
 
-    pub fn send_frames(&mut self, mcu_id: u32, frames: &[AxisFrame]) -> Result<(), SendError> {
+    fn send_frames_inner(&mut self, mcu_id: u32, frames: &[AxisFrame]) -> Result<(), SendError> {
         if mcu_id != self.mcu_id {
             return Err(SendError::Fatal(format!(
                 "stepcompress endpoint for mcu {} received frames addressed to mcu {mcu_id}",
@@ -1368,17 +1419,23 @@ impl StepcompressPacer {
                     host_rt::thread_prio::PUMP_RT_PRIORITY,
                     "stepcompress-pacer",
                 );
+                let mut live = endpoints;
                 while !stop_for_thread.load(Ordering::Relaxed) {
-                    for endpoint in &endpoints {
-                        let result = endpoint.lock_ok().tick();
-                        if let Err(e) = result {
+                    live.retain(|endpoint| match endpoint.lock_ok().tick() {
+                        Ok(()) => true,
+                        Err(SendError::Fatal(_)) => false,
+                        Err(e) => {
                             tracing::error!(
                                 subsystem = "pump",
                                 event = "stepcompress_pacer_error",
                                 error = ?e,
                                 "stepcompress pacer tick failed"
                             );
+                            true
                         }
+                    });
+                    if live.is_empty() {
+                        return;
                     }
                     std::thread::sleep(PACER_TICK);
                 }
