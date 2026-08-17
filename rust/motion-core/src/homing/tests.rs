@@ -878,7 +878,9 @@ mod stepcompress_reconcile_tests {
         StepcompressLane, StepcompressReconciliation, reconcile_stepcompress_axis,
         reconcile_stepcompress_lanes, stepcompress_lane,
     };
-    use crate::mcu_config::{AXIS_X, AXIS_Y, AXIS_Z, McuAxisConfig, McuCaps, SteppingMode};
+    use crate::mcu_config::{
+        AXIS_X, AXIS_Y, AXIS_Z, McuAxisConfig, McuCaps, StepcompressEncoder, SteppingMode,
+    };
     use crate::types::AxisKey;
     use runtime::segment::KinematicTag;
     use std::cell::RefCell;
@@ -909,6 +911,8 @@ mod stepcompress_reconcile_tests {
                 SteppingMode::Piece => 0,
             },
             step_pulse_seconds: vec![2e-6, 2e-6],
+            stepcompress_encoder: StepcompressEncoder::HighPrecision,
+            stepcompress_max_error_secs: 0.0,
         }
     }
 

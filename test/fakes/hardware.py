@@ -1,4 +1,5 @@
 from klippy.extras import stepper_enable as _stepper_enable_mod
+from klippy.mcu import STEPCOMPRESS_ENCODER_HP
 
 
 class _FakeClockSync:
@@ -35,6 +36,8 @@ class FakeMcu:
         clocksync_debug="fake clocksync",
         stepping_mode=0,
         stepcompress_sample_rate=0.0,
+        stepcompress_encoder=STEPCOMPRESS_ENCODER_HP,
+        stepcompress_max_error=0.0,
         move_queue_slots=0,
     ):
         self._printer = printer
@@ -51,6 +54,8 @@ class FakeMcu:
         self._clocksync = _FakeClockSync(clocksync_debug)
         self._stepping_mode = stepping_mode
         self._stepcompress_sample_rate = stepcompress_sample_rate
+        self._stepcompress_encoder = stepcompress_encoder
+        self._stepcompress_max_error = stepcompress_max_error
         self._move_queue_slots = move_queue_slots
 
     def get_printer(self):
@@ -67,6 +72,12 @@ class FakeMcu:
 
     def get_stepcompress_sample_rate(self):
         return self._stepcompress_sample_rate
+
+    def get_stepcompress_encoder(self):
+        return self._stepcompress_encoder
+
+    def get_stepcompress_max_error(self):
+        return self._stepcompress_max_error
 
     def get_move_queue_slots(self):
         return self._move_queue_slots

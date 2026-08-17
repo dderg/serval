@@ -40,6 +40,29 @@ impl SteppingMode {
     }
 }
 
+/// Which step compressor the host uses to turn sampled step times into
+/// classic `queue_step`-family frames: the quadratic high-precision encoder
+/// or the legacy interval/count/add encoder with a bounded error budget.
+/// The budget is expressed in seconds here because the tick conversion needs
+/// the measured clock frequency only `build_endpoint` knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StepcompressEncoder {
+    #[default]
+    HighPrecision,
+    Classic,
+}
+
+impl StepcompressEncoder {
+    #[must_use]
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "hp" => Some(Self::HighPrecision),
+            "classic" => Some(Self::Classic),
+            _ => None,
+        }
+    }
+}
+
 pub const AXIS_X: usize = 0;
 pub const AXIS_Y: usize = 1;
 pub const AXIS_Z: usize = 2;
@@ -57,6 +80,8 @@ pub struct McuTopologyInput {
     pub stepcompress_sample_rate: f64,
     pub move_queue_slots: u32,
     pub step_pulse_seconds: Vec<f64>,
+    pub stepcompress_encoder: String,
+    pub stepcompress_max_error_secs: f64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -85,6 +110,12 @@ pub struct McuAxisConfig {
     /// consecutive runs at least this far apart so a re-armed classic
     /// stepper never loads a move behind its own pending unstep.
     pub step_pulse_seconds: Vec<f64>,
+    pub stepcompress_encoder: StepcompressEncoder,
+    /// Only meaningful with `StepcompressEncoder::Classic`: the max_error
+    /// budget in seconds the encoder may introduce per sub-sample step time.
+    /// `build_endpoint` converts it to ticks with the measured clock
+    /// frequency it alone holds.
+    pub stepcompress_max_error_secs: f64,
 }
 
 impl McuAxisConfig {
@@ -186,6 +217,8 @@ pub enum KinematicsConfigError {
     StepcompressMoveQueueSlots { handle: u32 },
     #[error("mcu handle {handle}: stepping_mode: piece must carry move_queue_slots 0, got {slots}")]
     PieceMoveQueueSlots { handle: u32, slots: u32 },
+    #[error("mcu handle {handle}: unknown stepcompress_encoder {got}; known: hp, classic")]
+    UnknownStepcompressEncoder { handle: u32, got: String },
 }
 
 pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
@@ -273,6 +306,12 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                     handle: topology.mcu_id,
                 },
             )?;
+            let encoder = StepcompressEncoder::from_tag(&topology.stepcompress_encoder).ok_or(
+                KinematicsConfigError::UnknownStepcompressEncoder {
+                    handle: topology.mcu_id,
+                    got: topology.stepcompress_encoder.clone(),
+                },
+            )?;
             Ok(McuAxisConfig {
                 mcu_id: topology.mcu_id,
                 axes,
@@ -287,6 +326,8 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                 stepcompress_sample_rate: rate,
                 move_queue_slots,
                 step_pulse_seconds: topology.step_pulse_seconds.clone(),
+                stepcompress_encoder: encoder,
+                stepcompress_max_error_secs: topology.stepcompress_max_error_secs,
             })
         })
         .collect()

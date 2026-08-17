@@ -31,6 +31,8 @@ fn build_mcu_configs_two_mcu_corexy_with_e() {
             stepcompress_sample_rate: 0.0,
             move_queue_slots: 0,
             step_pulse_seconds: vec![2e-6; 3],
+            stepcompress_encoder: "hp".to_string(),
+            stepcompress_max_error_secs: 0.0,
         },
         McuTopologyInput {
             mcu_id: 9,
@@ -44,6 +46,8 @@ fn build_mcu_configs_two_mcu_corexy_with_e() {
             stepcompress_sample_rate: 20_000.0,
             move_queue_slots: 128,
             step_pulse_seconds: vec![2e-6; 1],
+            stepcompress_encoder: "hp".to_string(),
+            stepcompress_max_error_secs: 0.0,
         },
     ];
     let cfgs = build_mcu_configs(&mcus, &caps).unwrap();
@@ -197,6 +201,8 @@ fn build_mcu_configs_unknown_stepping_mode_is_loud() {
         stepcompress_sample_rate: 0.0,
         move_queue_slots: 0,
         step_pulse_seconds: vec![2e-6; 2],
+        stepcompress_encoder: "hp".to_string(),
+        stepcompress_max_error_secs: 0.0,
     }];
     let err = build_mcu_configs(&mcus, &caps).unwrap_err();
     assert!(matches!(
@@ -222,6 +228,8 @@ fn sample_rate_topology(stepping_mode: u8, rate: f64) -> Vec<McuTopologyInput> {
             0
         },
         step_pulse_seconds: vec![2e-6; 2],
+        stepcompress_encoder: "hp".to_string(),
+        stepcompress_max_error_secs: 0.0,
     }]
 }
 
@@ -263,6 +271,48 @@ fn piece_mode_rejects_nonzero_sample_rate() {
         err,
         KinematicsConfigError::PieceSampleRate { handle: 7, .. }
     ));
+}
+
+fn encoder_topology(encoder: &str, max_error_secs: f64) -> Vec<McuTopologyInput> {
+    let mut mcus = sample_rate_topology(STEPPING_MODE_STEPCOMPRESS, 20_000.0);
+    mcus[0].stepcompress_encoder = encoder.to_string();
+    mcus[0].stepcompress_max_error_secs = max_error_secs;
+    mcus
+}
+
+#[test]
+fn unknown_stepcompress_encoder_is_loud() {
+    let caps = HashMap::from([(
+        7,
+        McuCaps {
+            total_piece_memory: 62 * 1024,
+        },
+    )]);
+    let err = build_mcu_configs(&encoder_topology("bogus", 0.0), &caps).unwrap_err();
+    assert!(matches!(
+        err,
+        KinematicsConfigError::UnknownStepcompressEncoder { handle: 7, got }
+            if got == "bogus"
+    ));
+}
+
+#[test]
+fn stepcompress_encoder_and_max_error_reach_axis_config() {
+    let caps = HashMap::from([(
+        7,
+        McuCaps {
+            total_piece_memory: 62 * 1024,
+        },
+    )]);
+    let cfgs = build_mcu_configs(&encoder_topology("classic", 1e-5), &caps).unwrap();
+    assert_eq!(cfgs[0].stepcompress_encoder, StepcompressEncoder::Classic);
+    assert_eq!(cfgs[0].stepcompress_max_error_secs, 1e-5);
+    let cfgs = build_mcu_configs(&encoder_topology("hp", 0.0), &caps).unwrap();
+    assert_eq!(
+        cfgs[0].stepcompress_encoder,
+        StepcompressEncoder::HighPrecision
+    );
+    assert_eq!(cfgs[0].stepcompress_max_error_secs, 0.0);
 }
 
 fn corexy_cfg() -> McuAxisConfig {
@@ -515,6 +565,8 @@ fn stepcompress_toolhead_cfg() -> McuAxisConfig {
         stepcompress_sample_rate: 10_000.0,
         move_queue_slots: 128,
         step_pulse_seconds: vec![2e-6; 1],
+        stepcompress_encoder: StepcompressEncoder::HighPrecision,
+        stepcompress_max_error_secs: 0.0,
     }
 }
 
@@ -535,6 +587,8 @@ fn stepcompress_corexy_cfg() -> McuAxisConfig {
         stepcompress_sample_rate: 10_000.0,
         move_queue_slots: 128,
         step_pulse_seconds: vec![2e-6; 3],
+        stepcompress_encoder: StepcompressEncoder::HighPrecision,
+        stepcompress_max_error_secs: 0.0,
     }
 }
 

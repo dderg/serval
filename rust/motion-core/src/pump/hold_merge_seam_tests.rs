@@ -61,6 +61,9 @@ fn shim_frozen_at_epoch() -> StepShim {
             sample_rate_hz: 20_000.0,
             cycles_per_second: EPOCH_FREQ,
             min_rearm_cycles: 0,
+            encoder: step_shim::StepEncoder::Classic {
+                max_error_ticks: step_shim::compress::DEFAULT_MAX_ERROR_TICKS,
+            },
         }],
         super::stepcompress_sink::SHIM_RING_DEPTH,
     )

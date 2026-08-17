@@ -83,6 +83,17 @@ serial:
 #   generation, and the maximum number of steps per sample. This
 #   parameter must be provided when stepping_mode is 'stepcompress'
 #   and is unused otherwise.
+#stepcompress_encoder: hp
+#   How the host compresses sampled step times into classic step queues:
+#   'hp' (the default) uses the high-precision quadratic encoder and
+#   requires firmware built with HIGH_PREC_STEP (the queue_step_hp
+#   command); 'classic' uses the interval/count/add encoder with the
+#   bounded error budget from stepcompress_max_error.
+#stepcompress_max_error: 0.000025
+#   Maximum time error in seconds the classic step encoder may
+#   introduce on a sub-sample step time. Only valid with
+#   stepcompress_encoder: classic; setting it while the encoder is
+#   'hp' is a configuration error.
 ```
 
 ### [mcu my_extra_mcu]

@@ -1,12 +1,19 @@
 pub mod compress;
+pub mod compress_hp;
 pub mod ring;
 pub mod sampler;
 
 use runtime::piece_ring::PieceEntry;
 
-use compress::compress;
+use compress::compress_with_max_error;
 use ring::PieceRing;
 use sampler::{MotorSampler, PendingStep};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepEncoder {
+    Classic { max_error_ticks: u32 },
+    HighPrecision,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct MotorConfig {
@@ -16,6 +23,7 @@ pub struct MotorConfig {
     pub max_steps_per_sample: u32,
     pub sample_rate_hz: f32,
     pub cycles_per_second: f64,
+    pub encoder: StepEncoder,
     /// How far the mcu's classic stepper needs between the last step of one
     /// queued move and the first step of the next. `stepper_event_full`
     /// schedules an unstep `step_pulse_ticks` after every step and
@@ -98,6 +106,22 @@ pub enum StepFrame {
         interval: u32,
         count: u16,
         add: i16,
+    },
+    QueueStepHp {
+        oid: u32,
+        interval: u32,
+        count: u16,
+        add: i16,
+        add2: i16,
+        shift: i8,
+        /// Tick offset of the move's first step from the pre-move step
+        /// clock, from the encoder's fixed-point walk. The sink anchors its
+        /// emitted clock on this instead of the wire `interval`, which is
+        /// only the fixed-point seed.
+        first_step: u64,
+        /// Tick offset of the move's last step from the pre-move step
+        /// clock, from the same walk. Never sent on the wire.
+        last_step: u64,
     },
 }
 
@@ -207,6 +231,22 @@ impl std::fmt::Display for ShimError {
 
 impl std::error::Error for ShimError {}
 
+/// A run's compressed moves, in emission order. The classic and high-precision
+/// encoders produce different move types; the emit loop dispatches on this so
+/// the reset/dir/drain tail is shared.
+enum Encoded {
+    Classic(Vec<compress::StepMove>, usize),
+    Hp(Vec<compress_hp::StepMoveHp>, usize, u32),
+}
+
+impl Encoded {
+    fn covered(&self) -> usize {
+        match self {
+            Self::Classic(_, covered) | Self::Hp(_, covered, _) => *covered,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct MotorState {
     cfg: MotorConfig,
@@ -217,6 +257,7 @@ struct MotorState {
     needs_reset: bool,
     last_dir: Option<u8>,
     next_seam: Option<Seam>,
+    next_expected_interval: u32,
 }
 
 impl MotorState {
@@ -230,6 +271,7 @@ impl MotorState {
             needs_reset: true,
             last_dir: None,
             next_seam: None,
+            next_expected_interval: 0,
         }
     }
 
@@ -280,16 +322,40 @@ impl MotorState {
                 committed
             };
 
-            let (moves, covered) =
-                compress(&clocks, base_clock).map_err(|e| ShimError::CompressFailure {
-                    motor,
-                    detail: e.detail,
-                })?;
+            let re_anchoring = self.needs_reset || out_of_reach;
+            let hp_carry = if re_anchoring {
+                0
+            } else {
+                self.next_expected_interval
+            };
+            let encoded = match self.cfg.encoder {
+                StepEncoder::Classic { max_error_ticks } => {
+                    let (moves, covered) =
+                        compress_with_max_error(&clocks, base_clock, max_error_ticks).map_err(
+                            |e| ShimError::CompressFailure {
+                                motor,
+                                detail: e.detail,
+                            },
+                        )?;
+                    Encoded::Classic(moves, covered)
+                }
+                StepEncoder::HighPrecision => {
+                    let (moves, covered, carry_out) =
+                        compress_hp::compress_hp(&clocks, base_clock, hp_carry).map_err(|e| {
+                            ShimError::CompressFailure {
+                                motor,
+                                detail: e.detail,
+                            }
+                        })?;
+                    Encoded::Hp(moves, covered, carry_out)
+                }
+            };
+            let covered = encoded.covered();
             if covered == 0 {
                 break;
             }
 
-            if self.needs_reset || out_of_reach {
+            if re_anchoring {
                 frames.push(StepFrame::ResetStepClock {
                     oid,
                     clock: base_clock as u32,
@@ -304,14 +370,34 @@ impl MotorState {
                 self.last_dir = Some(dir);
             }
             let mut reconstructed = base_clock;
-            for mv in &moves {
-                frames.push(StepFrame::QueueStep {
-                    oid,
-                    interval: mv.interval,
-                    count: mv.count,
-                    add: mv.add,
-                });
-                reconstructed = mv.last_clock(reconstructed);
+            match encoded {
+                Encoded::Classic(moves, _) => {
+                    for mv in &moves {
+                        frames.push(StepFrame::QueueStep {
+                            oid,
+                            interval: mv.interval,
+                            count: mv.count,
+                            add: mv.add,
+                        });
+                        reconstructed = mv.last_clock(reconstructed);
+                    }
+                }
+                Encoded::Hp(moves, _, carry_out) => {
+                    for mv in &moves {
+                        frames.push(StepFrame::QueueStepHp {
+                            oid,
+                            interval: mv.interval,
+                            count: mv.count,
+                            add: mv.add,
+                            add2: mv.add2,
+                            shift: mv.shift,
+                            first_step: mv.first_step,
+                            last_step: mv.last_step,
+                        });
+                        reconstructed = reconstructed.wrapping_add(mv.last_step);
+                    }
+                    self.next_expected_interval = carry_out;
+                }
             }
 
             self.last_step_clock = reconstructed;
@@ -435,6 +521,16 @@ impl StepShim {
         self.motors[motor].cfg.invert_dir
     }
 
+    pub fn motor_encoder(&self, motor: usize) -> StepEncoder {
+        self.motors[motor].cfg.encoder
+    }
+
+    /// The clock the last emitted step of this motor lands on. Every frame
+    /// batch re-anchors from it; the sink mirrors it from the frame clocks.
+    pub fn emitted_clock(&self, motor: usize) -> u64 {
+        self.motors[motor].last_step_clock
+    }
+
     /// The clock slope this motor's seam projection is frozen on. Anything
     /// upstream that rewrites a piece's `duration` from a tick span must use
     /// this exact value, or the rewritten piece projects to a different end
@@ -498,14 +594,44 @@ impl StepShim {
         motor: usize,
         clock: u64,
     ) -> Result<(i64, Vec<StepFrame>), ShimError> {
-        let state = self.motor_mut(motor);
+        let executed = self.derived_halt_count(motor, clock);
+        let frames = self.halt_at_seeded(motor, clock, executed)?;
+        Ok((executed, frames))
+    }
+
+    pub fn halt_at_with_executed(
+        &mut self,
+        motor: usize,
+        clock: u64,
+        executed: i64,
+    ) -> Result<(i64, Vec<StepFrame>), ShimError> {
+        let expected = self.derived_halt_count(motor, clock);
+        let frames = self.halt_at_seeded(motor, clock, executed)?;
+        Ok((expected, frames))
+    }
+
+    pub fn expected_halt_count(&self, motor: usize, clock: u64) -> i64 {
+        self.derived_halt_count(motor, clock)
+    }
+
+    fn derived_halt_count(&self, motor: usize, clock: u64) -> i64 {
+        let state = &self.motors[motor];
         let unexecuted: i64 = state
             .pending
             .iter()
             .filter(|s| s.clock > clock)
             .map(|s| i64::from(s.advance))
             .sum();
-        let executed = state.sampler.step_count() - unexecuted;
+        state.sampler.step_count() - unexecuted
+    }
+
+    fn halt_at_seeded(
+        &mut self,
+        motor: usize,
+        clock: u64,
+        executed: i64,
+    ) -> Result<Vec<StepFrame>, ShimError> {
+        let state = self.motor_mut(motor);
         state.pending.retain(|s| s.clock <= clock);
         let mut frames = Vec::new();
         loop {
@@ -533,7 +659,8 @@ impl StepShim {
         state.last_step_clock = 0;
         state.needs_reset = true;
         state.last_dir = None;
-        Ok((executed, frames))
+        state.next_expected_interval = 0;
+        Ok(frames)
     }
 
     pub fn set_motor_cycles_per_second(&mut self, motor: usize, freq: f64) {
@@ -557,6 +684,7 @@ impl StepShim {
         state.last_step_clock = 0;
         state.needs_reset = true;
         state.last_dir = None;
+        state.next_expected_interval = 0;
     }
 
     fn motor_mut(&mut self, motor: usize) -> &mut MotorState {

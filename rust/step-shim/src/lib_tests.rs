@@ -1,5 +1,5 @@
 use super::compress::StepMove;
-use super::{MotorConfig, ShimError, StepFrame, StepShim};
+use super::{MotorConfig, ShimError, StepEncoder, StepFrame, StepShim};
 use runtime::piece_ring::PieceEntry;
 
 const CYCLES_PER_SECOND: f64 = 1_000_000.0;
@@ -14,6 +14,9 @@ fn cfg() -> MotorConfig {
         sample_rate_hz: 10_000.0,
         cycles_per_second: CYCLES_PER_SECOND,
         min_rearm_cycles: 0,
+        encoder: StepEncoder::Classic {
+            max_error_ticks: super::compress::DEFAULT_MAX_ERROR_TICKS,
+        },
     }
 }
 
@@ -35,6 +38,99 @@ fn queue_step_count(frames: &[StepFrame]) -> u32 {
             _ => 0,
         })
         .sum()
+}
+
+/// The classic encoder keeps the pre-change stream shape: the same anchor,
+/// the same dir latch, and a cursor the queue_step span arithmetic walks to
+/// exactly the clock the shim reports as emitted.
+#[test]
+fn classic_stream_matches_the_pre_change_expectations() {
+    let mut shim = StepShim::new(vec![cfg()], 8);
+    shim.push_pieces(0, &[linear_piece(1_000, 0.0, 1.0, 0.01)])
+        .unwrap();
+    let frames = shim.drain(u64::MAX).unwrap();
+
+    assert_eq!(
+        frames[0],
+        StepFrame::ResetStepClock {
+            oid: OID,
+            clock: 1_000
+        }
+    );
+    assert_eq!(frames[1], StepFrame::SetNextStepDir { oid: OID, dir: 1 });
+    let mut cursor = 0u64;
+    let mut steps = 0u32;
+    for frame in &frames {
+        match frame {
+            StepFrame::ResetStepClock { clock, .. } => cursor = u64::from(*clock),
+            StepFrame::SetNextStepDir { .. } => {}
+            StepFrame::QueueStep {
+                interval,
+                count,
+                add,
+                ..
+            } => {
+                cursor = StepMove {
+                    interval: *interval,
+                    count: *count,
+                    add: *add,
+                }
+                .last_clock(cursor);
+                steps += u32::from(*count);
+            }
+            other => panic!("a classic motor must only emit queue_step, got {other:?}"),
+        }
+    }
+    assert_eq!(steps, 100);
+    assert_eq!(cursor, shim.emitted_clock(0));
+}
+
+/// A high-precision motor emits only queue_step_hp frames, and walking them
+/// with the encoder's first_step/last_step offsets lands the cursor exactly
+/// where the shim says the run ended — across drains, so the carry-out of
+/// one compress call seeds the next.
+#[test]
+fn hp_frames_reconstruct_to_the_shim_emitted_cursor() {
+    let mut config = cfg();
+    config.encoder = StepEncoder::HighPrecision;
+    let mut shim = StepShim::new(vec![config], 8);
+    shim.push_pieces(
+        0,
+        &[
+            linear_piece(1_000, 0.0, 1.0, 0.01),
+            linear_piece(11_000, 1.0, 2.0, 0.01),
+        ],
+    )
+    .unwrap();
+
+    let mut cursor = 0u64;
+    let mut hp_moves = 0;
+    let mut steps = 0u32;
+    for frames in [shim.drain(6_000).unwrap(), shim.drain(u64::MAX).unwrap()] {
+        for frame in &frames {
+            match frame {
+                StepFrame::ResetStepClock { clock, .. } => cursor = u64::from(*clock),
+                StepFrame::SetNextStepDir { .. } => {}
+                StepFrame::QueueStepHp {
+                    first_step,
+                    last_step,
+                    count,
+                    ..
+                } => {
+                    assert!(*first_step > 0, "steps must advance");
+                    cursor += *last_step;
+                    hp_moves += 1;
+                    steps += u32::from(*count);
+                }
+                StepFrame::QueueStep { .. } => {
+                    panic!("an hp motor must not emit classic queue_step")
+                }
+            }
+        }
+    }
+    assert!(hp_moves > 0, "the hp encoder must produce hp moves");
+    assert_eq!(steps, 200);
+    assert_eq!(cursor, shim.emitted_clock(0));
 }
 
 #[test]
@@ -312,6 +408,25 @@ fn halt_returns_executed_steps_and_frees_ring_credit() {
 }
 
 #[test]
+fn halt_with_executed_count_uses_the_external_seed() {
+    let mut shim = StepShim::new(vec![cfg()], 8);
+    shim.push_pieces(0, &[linear_piece(1_000, 0.0, 1.0, 0.01)])
+        .unwrap();
+    shim.drain(u64::MAX).unwrap();
+
+    let expected = shim.expected_halt_count(0, u64::MAX);
+    let (derived, _) = shim
+        .halt_at_with_executed(0, 20_000, 37)
+        .expect("the external count can reseed a drained shim");
+    assert_eq!(derived, expected);
+
+    shim.push_pieces(0, &[linear_piece(50_000, 0.37, 0.47, 0.01)])
+        .unwrap();
+    shim.drain(u64::MAX).unwrap();
+    assert_eq!(shim.halt_at(0, u64::MAX).unwrap().0, 47);
+}
+
+#[test]
 fn halt_discards_queued_work_and_re_resets_the_step_clock() {
     let mut shim = StepShim::new(vec![cfg()], 8);
     shim.push_pieces(0, &[linear_piece(1_000, 0.0, 1.0, 0.01)])
@@ -385,6 +500,9 @@ fn a_cut_inside_a_piece_does_not_replay_steps_before_the_cut() {
                 }
                 cursor = mv.last_clock(cursor);
             }
+            StepFrame::QueueStepHp { .. } => {
+                panic!("the classic cut replay cannot walk an hp frame")
+            }
         }
     }
 }
@@ -425,6 +543,9 @@ fn idle_cfg() -> MotorConfig {
         sample_rate_hz: 1_000.0,
         cycles_per_second: IDLE_CYCLES_PER_SECOND,
         min_rearm_cycles: 0,
+        encoder: StepEncoder::Classic {
+            max_error_ticks: super::compress::DEFAULT_MAX_ERROR_TICKS,
+        },
     }
 }
 
@@ -461,6 +582,9 @@ fn replayed_step_clocks(frames: &[StepFrame]) -> Vec<u64> {
                 };
                 clocks.extend((1..=count).map(|nth| mv.step_clock(cursor, nth)));
                 cursor = mv.last_clock(cursor);
+            }
+            StepFrame::QueueStepHp { .. } => {
+                panic!("the classic clock replay cannot walk an hp frame")
             }
         }
     }

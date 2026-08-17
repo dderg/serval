@@ -5,7 +5,11 @@ from collections import defaultdict, namedtuple
 
 from . import stepper
 from .extras import servo_axis
-from .mcu import STEPPING_MODE_PIECE, STEPPING_MODE_STEPCOMPRESS
+from .mcu import (
+    STEPCOMPRESS_ENCODER_HP,
+    STEPPING_MODE_PIECE,
+    STEPPING_MODE_STEPCOMPRESS,
+)
 from .motion_endstop import register_stepcompress_steppers
 from .stepper import DEFAULT_STEP_PULSE_DURATION
 
@@ -23,6 +27,8 @@ McuTopology = namedtuple(
         "stepcompress_sample_rate",
         "move_queue_slots",
         "step_pulse_seconds",
+        "stepcompress_encoder",
+        "stepcompress_max_error_secs",
     ],
 )
 
@@ -202,6 +208,14 @@ def derive_mcu_topology(motion, axis_to_handle):
             if mcu_obj is None or stepping_mode != STEPPING_MODE_STEPCOMPRESS
             else mcu_obj.get_stepcompress_sample_rate()
         )
+        encoder = (
+            STEPCOMPRESS_ENCODER_HP
+            if mcu_obj is None
+            else mcu_obj.get_stepcompress_encoder()
+        )
+        max_error_secs = (
+            0.0 if mcu_obj is None else mcu_obj.get_stepcompress_max_error()
+        )
         move_queue_slots = 0
         if mcu_obj is not None and stepping_mode == STEPPING_MODE_STEPCOMPRESS:
             move_queue_slots = mcu_obj.get_move_queue_slots()
@@ -226,6 +240,22 @@ def derive_mcu_topology(motion, axis_to_handle):
             _reject_stepcompress_conflicts(
                 motion, name, handle, axes, step_modes, endpoint_handles
             )
+            if (
+                encoder == STEPCOMPRESS_ENCODER_HP
+                and mcu_obj.try_lookup_command(
+                    "queue_step_hp oid=%c interval=%u count=%hu"
+                    " add=%hi add2=%hi shift=%hi"
+                )
+                is None
+            ):
+                raise motion.printer.config_error(
+                    "mcu '%s': stepping_mode: stepcompress with the default "
+                    "stepcompress_encoder: hp needs firmware built with "
+                    "HIGH_PREC_STEP, but the mcu does not provide the "
+                    "queue_step_hp command. Reflash the firmware with "
+                    "HIGH_PREC_STEP or set stepcompress_encoder: classic."
+                    % (name,)
+                )
         topo.append(
             McuTopology(
                 handle,
@@ -239,6 +269,8 @@ def derive_mcu_topology(motion, axis_to_handle):
                 sample_rate,
                 move_queue_slots,
                 [slot_step_pulse_seconds[a] for a in axes],
+                encoder,
+                max_error_secs,
             )
         )
     return topo

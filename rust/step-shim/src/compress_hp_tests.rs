@@ -1,0 +1,206 @@
+use super::*;
+
+fn reference_walk(m: StepMoveHp) -> Vec<u64> {
+    let (mut interval, mut add, add2, shift, mut low) = if m.shift <= 0 {
+        let scale = 1_i64 << (-m.shift as u32);
+        (
+            i64::from(m.interval) * scale,
+            i64::from(m.add) * scale,
+            i64::from(m.add2) * scale,
+            0_u8,
+            0_i64,
+        )
+    } else {
+        let extra_shift = if m.shift > 8 {
+            (16 - m.shift) as u32
+        } else {
+            (8 - m.shift) as u32
+        };
+        let shift = if m.shift > 8 { 16 } else { 8 };
+        let scale = 1_i64 << extra_shift;
+        (
+            i64::from(m.interval) * scale,
+            i64::from(m.add) * scale,
+            i64::from(m.add2) * scale,
+            shift,
+            1_i64 << (shift - 1),
+        )
+    };
+    let mut time = 0_i64;
+    let mut out = Vec::with_capacity(m.count as usize);
+    for _ in 0..m.count {
+        let sum = interval + low;
+        time += if shift == 0 { sum } else { sum >> shift };
+        if shift != 0 {
+            low = sum & ((1_i64 << shift) - 1);
+        }
+        out.push(time as u64);
+        interval += add;
+        add += add2;
+    }
+    out
+}
+
+fn reconstruct(moves: &[StepMoveHp], last_step_clock: u64) -> Vec<u64> {
+    let mut out = Vec::new();
+    let mut cursor = last_step_clock;
+    for m in moves {
+        let offsets = mcu_walk_offsets(m).expect("compressor emitted a valid move");
+        out.extend(offsets.iter().map(|offset| cursor + offset));
+        cursor += m.last_step;
+    }
+    out
+}
+
+fn assert_within_windows(steps: &[u64], last_step_clock: u64, moves: &[StepMoveHp]) {
+    let got = reconstruct(moves, last_step_clock);
+    assert_eq!(got.len(), steps.len(), "reconstructed step count differs");
+    let mut cursor = last_step_clock;
+    let mut input_pos = 0usize;
+    for m in moves {
+        let offsets = mcu_walk_offsets(m).unwrap();
+        assert_eq!(m.first_step, offsets[0]);
+        assert_eq!(m.last_step, *offsets.last().unwrap());
+        for (offset, &actual) in offsets.iter().enumerate() {
+            let index = input_pos + offset;
+            let point = minmax_point(steps, index, input_pos, cursor);
+            let actual = actual as i64;
+            assert!(
+                actual >= point.minp && actual <= point.maxp,
+                "step {index}: reconstructed offset {actual}, requested offset {}, window {}:{}",
+                steps[index] - cursor,
+                point.minp,
+                point.maxp
+            );
+        }
+        cursor += m.last_step;
+        input_pos += usize::from(m.count);
+    }
+}
+
+fn constant_interval(interval: u64, count: usize, base: u64) -> Vec<u64> {
+    (1..=count)
+        .map(|index| base + interval * index as u64)
+        .collect()
+}
+
+#[test]
+fn mcu_walk_matches_reference_fixed_point_emulator() {
+    let moves = [
+        StepMoveHp {
+            interval: 17_321,
+            count: 9,
+            add: -37,
+            add2: 3,
+            shift: 0,
+            first_step: 0,
+            last_step: 0,
+        },
+        StepMoveHp {
+            interval: 1_003,
+            count: 11,
+            add: 23,
+            add2: -2,
+            shift: 5,
+            first_step: 0,
+            last_step: 0,
+        },
+        StepMoveHp {
+            interval: 98,
+            count: 7,
+            add: -4,
+            add2: 1,
+            shift: -3,
+            first_step: 0,
+            last_step: 0,
+        },
+        StepMoveHp {
+            interval: 12_345,
+            count: 8,
+            add: -12,
+            add2: 2,
+            shift: 12,
+            first_step: 0,
+            last_step: 0,
+        },
+    ];
+    for m in moves {
+        assert_eq!(mcu_walk_offsets(&m).unwrap(), reference_walk(m));
+    }
+}
+
+#[test]
+fn constant_velocity_compresses_many_steps_per_move() {
+    let steps = constant_interval(5_000, 1_000, 0);
+    let (moves, covered, carry) = compress_hp(&steps, 0, 0).unwrap();
+    assert_eq!(covered, steps.len());
+    assert_eq!(carry, 0);
+    assert!(
+        moves.len() <= 4,
+        "expected a few moves, got {}",
+        moves.len()
+    );
+    assert!(moves.iter().any(|m| m.count >= 256));
+    assert_within_windows(&steps, 0, &moves);
+}
+
+#[test]
+fn accelerating_ramp_uses_quadratic_wire_parameters() {
+    let mut steps = Vec::with_capacity(2_000);
+    let mut clock = 0_u64;
+    for index in 0..2_000_u64 {
+        let interval = 20_000 - (19_800 * index / 1_999);
+        clock += interval;
+        steps.push(clock);
+    }
+    let (moves, covered, _) = compress_hp(&steps, 0, 0).unwrap();
+    assert_eq!(covered, steps.len());
+    assert!(
+        moves.iter().any(|m| m.add2 != 0 || m.shift > 0),
+        "{moves:?}"
+    );
+    assert_within_windows(&steps, 0, &moves);
+}
+
+#[test]
+fn jerk_profile_stays_inside_every_local_window() {
+    let mut steps = Vec::with_capacity(2_400);
+    let mut clock = 0_u64;
+    for index in 0..2_400_u64 {
+        let t = index as i64 - 1_200;
+        let interval = 1_200 + (t * t * t / 2_000_000).unsigned_abs();
+        clock += interval.max(200);
+        steps.push(clock);
+    }
+    let (moves, covered, _) = compress_hp(&steps, 0, 0).unwrap();
+    assert_eq!(covered, steps.len());
+    assert_within_windows(&steps, 0, &moves);
+}
+
+#[test]
+fn next_expected_interval_preserves_batch_junction_window() {
+    let first = constant_interval(1_000, 700, 10_000);
+    let (first_moves, first_covered, carry) = compress_hp(&first, 10_000, 1_000).unwrap();
+    assert_eq!(first_covered, first.len());
+    let first_end = reconstruct(&first_moves, 10_000).last().copied().unwrap();
+
+    let second = constant_interval(1_001, 700, first.last().copied().unwrap());
+    let (second_moves, second_covered, _) = compress_hp(&second, first_end, carry).unwrap();
+    assert_eq!(second_covered, second.len());
+    assert_within_windows(&second, first_end, &second_moves);
+}
+
+#[test]
+fn degenerate_inputs_are_explicit() {
+    let (single, covered, _) = compress_hp(&[900], 400, 0).unwrap();
+    assert_eq!(covered, 1);
+    assert_eq!(single.len(), 1);
+    assert_eq!(single[0].count, 1);
+
+    let (two, covered, _) = compress_hp(&[1_000, 2_000], 0, 0).unwrap();
+    assert_eq!(covered, 2);
+    assert_within_windows(&[1_000, 2_000], 0, &two);
+
+    let error = compress_hp(&[], 0, 0).unwrap_err();
+    assert!(error.detail.contains("empty input"));
+}

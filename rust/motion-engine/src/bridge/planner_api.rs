@@ -27,6 +27,8 @@ struct McuTopology {
     stepcompress_sample_rate: f64,
     move_queue_slots: u32,
     step_pulse_seconds: Vec<f64>,
+    stepcompress_encoder: String,
+    stepcompress_max_error_secs: f64,
 }
 
 impl McuTopology {
@@ -43,6 +45,8 @@ impl McuTopology {
             stepcompress_sample_rate: self.stepcompress_sample_rate,
             move_queue_slots: self.move_queue_slots,
             step_pulse_seconds: self.step_pulse_seconds,
+            stepcompress_encoder: self.stepcompress_encoder,
+            stepcompress_max_error_secs: self.stepcompress_max_error_secs,
         }
     }
 }

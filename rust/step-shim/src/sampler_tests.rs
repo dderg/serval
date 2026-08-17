@@ -1,6 +1,6 @@
 use super::{MotorSampler, PendingStep};
 use crate::ring::PieceRing;
-use crate::{MotorConfig, ShimError};
+use crate::{MotorConfig, ShimError, StepEncoder};
 use runtime::piece_ring::PieceEntry;
 
 const CYCLES_PER_SECOND: f64 = 1_000_000.0;
@@ -17,6 +17,9 @@ fn cfg(max_steps_per_sample: u32) -> MotorConfig {
         sample_rate_hz: SAMPLE_RATE_HZ,
         cycles_per_second: CYCLES_PER_SECOND,
         min_rearm_cycles: 0,
+        encoder: StepEncoder::Classic {
+            max_error_ticks: crate::compress::DEFAULT_MAX_ERROR_TICKS,
+        },
     }
 }
 

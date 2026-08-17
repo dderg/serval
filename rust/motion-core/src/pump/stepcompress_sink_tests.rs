@@ -1,7 +1,7 @@
 use super::*;
 use crate::mcu_config::{McuAxisConfig, SteppingMode};
 use runtime::piece_ring::PieceEntry;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicI64, AtomicU64};
 
 const MCU_ID: u32 = 3;
 const OID: u32 = 7;
@@ -17,6 +17,9 @@ struct Harness {
     heartbeats: crossbeam_channel::Receiver<PumpMsg>,
     bursts: Arc<Mutex<Vec<usize>>>,
     fail_sends: Arc<AtomicBool>,
+    query_count: Arc<AtomicI64>,
+    auto_query: Arc<AtomicBool>,
+    query_calls: Arc<AtomicU64>,
 }
 
 fn motor_cfg() -> MotorConfig {
@@ -28,6 +31,9 @@ fn motor_cfg() -> MotorConfig {
         sample_rate_hz: 10_000.0,
         cycles_per_second: CYCLES_PER_SECOND,
         min_rearm_cycles: 0,
+        encoder: StepEncoder::Classic {
+            max_error_ticks: step_shim::compress::DEFAULT_MAX_ERROR_TICKS,
+        },
     }
 }
 
@@ -42,6 +48,9 @@ fn harness_on_axis(budget: u32, axis: usize) -> Harness {
         Arc::new(move |_| Some((now_for_clock.load(Ordering::Relaxed), CYCLES_PER_SECOND)));
     let sent = Arc::new(Mutex::new(Vec::new()));
     let fail_sends = Arc::new(AtomicBool::new(false));
+    let query_count = Arc::new(AtomicI64::new(0));
+    let auto_query = Arc::new(AtomicBool::new(true));
+    let query_calls = Arc::new(AtomicU64::new(0));
     let sent_for_egress = Arc::clone(&sent);
     let barriers = Arc::new(Mutex::new(Vec::new()));
     let barriers_for_egress = Arc::clone(&barriers);
@@ -97,7 +106,9 @@ fn harness_on_axis(budget: u32, axis: usize) -> Harness {
             Ok(())
         });
     let (tx, rx) = crossbeam_channel::unbounded();
-    let endpoint = StepcompressEndpoint::new(
+    let query_for_endpoint = Arc::clone(&query_count);
+    let calls_for_query = Arc::clone(&query_calls);
+    let mut endpoint = StepcompressEndpoint::new(
         MCU_ID,
         StepShim::new(vec![motor_cfg()], SHIM_RING_DEPTH),
         vec![axis],
@@ -107,6 +118,10 @@ fn harness_on_axis(budget: u32, axis: usize) -> Harness {
         clock_of,
         budget,
     );
+    endpoint.set_step_count_query(Arc::new(move |_| {
+        calls_for_query.fetch_add(1, Ordering::Relaxed);
+        Ok(query_for_endpoint.load(Ordering::Relaxed))
+    }));
     Harness {
         endpoint,
         now,
@@ -116,6 +131,9 @@ fn harness_on_axis(budget: u32, axis: usize) -> Harness {
         heartbeats: rx,
         bursts,
         fail_sends,
+        query_calls,
+        query_count,
+        auto_query,
     }
 }
 
@@ -141,11 +159,20 @@ impl Harness {
             .map(|heartbeat| heartbeat.retired_counts)
     }
 
-    fn ack_sent_barriers(&mut self) {
+    fn ack_sent_barriers_result(&mut self) -> Result<(), SendError> {
         let issued: Vec<(u32, u32)> = std::mem::take(&mut self.barriers.lock_ok());
         for (oid, seq) in issued {
-            self.endpoint.on_barrier_ack(oid, seq).unwrap();
+            if self.auto_query.load(Ordering::Relaxed) {
+                self.query_count
+                    .store(self.endpoint.shim.commanded_steps(0), Ordering::Relaxed);
+            }
+            self.endpoint.on_barrier_ack(oid, seq)?;
         }
+        Ok(())
+    }
+
+    fn ack_sent_barriers(&mut self) {
+        self.ack_sent_barriers_result().unwrap();
     }
 }
 
@@ -191,6 +218,22 @@ fn ramp_from(start_time: u64, count: usize, start_mm: f32) -> Vec<PieceEntry> {
             let from = at;
             at += 0.05 * (1 + (i % 4)) as f32;
             piece(start_time + span * i as u64, from, at, dur)
+        })
+        .collect()
+}
+
+/// A straight constant-speed run from `from_mm` to `to_mm` split into
+/// `pieces` contiguous segments. The sampler quantizes positions to the
+/// microstep grid, so a run over an exact step multiple yields an exact step
+/// count.
+fn linear_run(start_time: u64, from_mm: f32, to_mm: f32, pieces: usize) -> Vec<PieceEntry> {
+    let dur = 0.01_f32;
+    let span = (f64::from(dur) * CYCLES_PER_SECOND) as u64;
+    let step_mm = (to_mm - from_mm) / pieces as f32;
+    (0..pieces)
+        .map(|i| {
+            let from = from_mm + step_mm * i as f32;
+            piece(start_time + span * i as u64, from, from + step_mm, dur)
         })
         .collect()
 }
@@ -263,6 +306,7 @@ fn move_slots_reclaim_when_the_mcu_loads_the_run() {
             add: 0,
         }),
         1_000,
+        1_010,
     );
     h.endpoint.queue_outbound(
         Outbound::Step(StepFrame::QueueStep {
@@ -272,6 +316,7 @@ fn move_slots_reclaim_when_the_mcu_loads_the_run() {
             add: 0,
         }),
         20_000,
+        20_010,
     );
 
     h.endpoint.flush(0, CYCLES_PER_SECOND).unwrap();
@@ -285,8 +330,11 @@ fn move_slots_reclaim_when_the_mcu_loads_the_run() {
 #[test]
 fn barriers_hold_move_slots_until_the_mcu_loads_them() {
     let mut h = harness(1);
-    h.endpoint
-        .queue_outbound(Outbound::Barrier(BarrierId { oid: OID, seq: 1 }), 1_000);
+    h.endpoint.queue_outbound(
+        Outbound::Barrier(BarrierId { oid: OID, seq: 1 }),
+        1_000,
+        1_000,
+    );
     h.endpoint.queue_outbound(
         Outbound::Step(StepFrame::QueueStep {
             oid: OID,
@@ -295,6 +343,7 @@ fn barriers_hold_move_slots_until_the_mcu_loads_them() {
             add: 0,
         }),
         20_000,
+        20_010,
     );
 
     h.endpoint.flush(0, CYCLES_PER_SECOND).unwrap();
@@ -358,6 +407,7 @@ fn backlog_ceiling_breach_is_fatal() {
                 add: 0,
             }),
             start_clock: u64::MAX,
+            end_clock: u64::MAX,
             enqueue_order: 0,
         }));
     let err = h
@@ -382,6 +432,7 @@ fn stale_queue_step(start_clock: u64) -> OutboundFrame {
             add: 0,
         }),
         start_clock,
+        end_clock: start_clock + 10,
         enqueue_order: 0,
     }
 }
@@ -430,6 +481,7 @@ fn multi_lane_commands_leave_in_step_deadline_order() {
                 add: 0,
             }),
             start_clock,
+            start_clock + 10,
         );
     }
 
@@ -514,6 +566,7 @@ fn a_marked_fresh_epoch_may_start_before_the_queued_stream_ends() {
     h.endpoint
         .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
         .expect("a marked fresh epoch may start at any clock");
+    h.ack_sent_barriers();
     assert!(
         h.sent
             .lock_ok()
@@ -521,6 +574,137 @@ fn a_marked_fresh_epoch_may_start_before_the_queued_stream_ends() {
             .any(|f| matches!(f, StepFrame::ResetStepClock { .. })),
         "the new epoch must re-anchor the mcu step clock"
     );
+}
+
+#[test]
+fn a_sent_cut_reseeds_from_the_mcu_executed_count() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+    h.endpoint.mark_reanchor(0, 81_834, Some(CYCLES_PER_SECOND));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
+        .unwrap();
+
+    let expected = h.endpoint.pending_cuts[&0].expected_count;
+    h.auto_query.store(false, Ordering::Relaxed);
+    h.query_count.store(expected, Ordering::Relaxed);
+    h.ack_sent_barriers_result()
+        .expect("the injected MCU count matches the host expectation");
+
+    assert_eq!(h.query_calls.load(Ordering::Relaxed), 1);
+    assert!(!h.endpoint.pending_cuts.contains_key(&0));
+    assert!(
+        h.sent
+            .lock_ok()
+            .iter()
+            .any(|frame| { matches!(frame, StepFrame::ResetStepClock { .. }) })
+    );
+}
+
+#[test]
+fn a_sent_cut_count_mismatch_is_fatal() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+    h.endpoint.mark_reanchor(0, 81_834, Some(CYCLES_PER_SECOND));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
+        .unwrap();
+
+    let expected = h.endpoint.pending_cuts[&0].expected_count;
+    h.auto_query.store(false, Ordering::Relaxed);
+    h.query_count.store(expected + 1, Ordering::Relaxed);
+    let err = h
+        .ack_sent_barriers_result()
+        .expect_err("a lost step must abort the cut");
+    let message = format!("{err:?}");
+    assert!(message.contains("host expected"), "{message}");
+    assert!(message.contains("MCU reported"), "{message}");
+    assert!(message.contains("delta"), "{message}");
+}
+
+/// Trip halt → external count reseed → retract → sent-frame cut →
+/// re-approach. The homing reconcile adopts the mcu's executed count as a
+/// fresh absolute origin; a later cut must re-anchor from that origin (not
+/// the pre-trip stream total), or the re-approach lands the axis offset by
+/// the reseed delta. Reproduces the trip/retract/re-approach sequence the
+/// sim homing e2e tests run.
+#[test]
+fn trip_halt_reseed_retract_then_cut_re_approach_preserve_net_position() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+
+    // Approach 0 → 0.5 mm (50 steps); fully sent.
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .unwrap();
+
+    // Trip: the endstop reconcile reads 20 executed steps and reseeds the
+    // host stream to that count; the mcu counter adopts the same origin.
+    h.endpoint.reset_motor_position(0, 20).unwrap();
+    assert_eq!(
+        h.endpoint.shim.commanded_steps(0),
+        20,
+        "the reseed must move the stream origin to the mcu readback"
+    );
+
+    // Retract 0.2 → 0.5 mm (+30 steps); sent before the cut is marked.
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(linear_run(50_000, 0.2, 0.5, 5))])
+        .unwrap();
+
+    // The re-approach starts a fresh epoch on the exact clock the sent
+    // stream ended: the seam falls inside frames the mcu already received,
+    // so the cut must reconcile through the mcu executed count.
+    let seam = h.endpoint.step_clock[&OID];
+    h.endpoint.mark_reanchor(0, seam, Some(CYCLES_PER_SECOND));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(linear_run(100_000, 0.5, 0.0, 5))])
+        .unwrap();
+
+    let expected = h.endpoint.pending_cuts[&0].expected_count;
+    assert_eq!(
+        expected, 50,
+        "the host expectation is the reseeded origin plus the retract motion"
+    );
+    h.auto_query.store(false, Ordering::Relaxed);
+    h.query_count.store(expected, Ordering::Relaxed);
+    h.ack_sent_barriers_result()
+        .expect("the mcu executed count matches the host bookkeeping");
+
+    assert!(
+        h.endpoint.pending_cuts.is_empty(),
+        "the cut must complete once the barrier acks"
+    );
+    assert_eq!(
+        h.endpoint.shim.halt_at(0, u64::MAX).unwrap().0,
+        0,
+        "trip + retract + re-approach must land on the reseeded origin, not \
+         the pre-trip stream total"
+    );
+}
+
+#[test]
+fn an_unsent_only_cut_does_not_query_the_mcu() {
+    let mut h = harness(4);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .unwrap();
+    h.endpoint
+        .mark_reanchor(0, 500_000, Some(CYCLES_PER_SECOND));
+    h.auto_query.store(false, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(500_000, 4, 1.0))])
+        .expect("an unsent-only cut remains host-exact");
+
+    assert!(h.endpoint.pending_cuts.is_empty());
+    assert_eq!(h.query_calls.load(Ordering::Relaxed), 0);
 }
 
 #[test]
@@ -735,6 +919,8 @@ fn stepcompress_cfg(mode: SteppingMode, move_queue_slots: u32) -> McuAxisConfig 
         stepcompress_sample_rate: 10_000.0,
         move_queue_slots,
         step_pulse_seconds: vec![2e-6],
+        stepcompress_encoder: StepcompressEncoder::HighPrecision,
+        stepcompress_max_error_secs: 0.0,
     }
 }
 
@@ -772,6 +958,56 @@ fn piece_mode_mcus_never_reach_endpoint_construction() {
     let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
     let endpoint = build_endpoint(&cfgs[1], Weak::new(), tx, CYCLES_PER_SECOND, clock_of).unwrap();
     assert_eq!(endpoint.budget, 128 - MOVE_SLOT_RESERVE);
+}
+
+#[test]
+fn classic_encoder_resolves_max_error_ticks_from_the_measured_clock() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
+    let mut cfg = stepcompress_cfg(SteppingMode::Stepcompress, 128);
+    cfg.stepcompress_encoder = StepcompressEncoder::Classic;
+    cfg.stepcompress_max_error_secs = 10e-6;
+    build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of)
+        .expect("10us max_error at 1 MHz resolves to 10 ticks and must build");
+}
+
+#[test]
+fn classic_encoder_with_a_sub_tick_max_error_is_a_build_error() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
+    let mut cfg = stepcompress_cfg(SteppingMode::Stepcompress, 128);
+    cfg.stepcompress_encoder = StepcompressEncoder::Classic;
+    cfg.stepcompress_max_error_secs = 1e-7;
+    let err = match build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of) {
+        Err(e) => e,
+        Ok(_) => panic!("a max_error below one tick must not build an endpoint"),
+    };
+    assert!(err.contains("tick budget"), "{err}");
+}
+
+#[test]
+fn classic_encoder_with_an_overflowing_tick_budget_is_a_build_error() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
+    let mut cfg = stepcompress_cfg(SteppingMode::Stepcompress, 128);
+    cfg.stepcompress_encoder = StepcompressEncoder::Classic;
+    cfg.stepcompress_max_error_secs = 1e6;
+    let err = match build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of) {
+        Err(e) => e,
+        Ok(_) => panic!("a max_error past the u32 tick budget must not build an endpoint"),
+    };
+    assert!(err.contains("tick budget"), "{err}");
+}
+
+#[test]
+fn hp_encoder_builds_an_endpoint_without_a_max_error_budget() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
+    let mut cfg = stepcompress_cfg(SteppingMode::Stepcompress, 128);
+    cfg.stepcompress_encoder = StepcompressEncoder::HighPrecision;
+    cfg.stepcompress_max_error_secs = 0.0;
+    build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of)
+        .expect("hp ignores the max_error budget and must build");
 }
 
 #[test]

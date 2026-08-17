@@ -33,6 +33,13 @@ STEPPING_MODES = {
     "piece": STEPPING_MODE_PIECE,
     "stepcompress": STEPPING_MODE_STEPCOMPRESS,
 }
+STEPCOMPRESS_ENCODER_HP = "hp"
+STEPCOMPRESS_ENCODER_CLASSIC = "classic"
+STEPCOMPRESS_ENCODERS = {
+    STEPCOMPRESS_ENCODER_HP: STEPCOMPRESS_ENCODER_HP,
+    STEPCOMPRESS_ENCODER_CLASSIC: STEPCOMPRESS_ENCODER_CLASSIC,
+}
+STEPCOMPRESS_MAX_ERROR_DEFAULT = 0.000025
 
 
 class error(Exception):
@@ -111,6 +118,8 @@ class MCU:
             "stepping_mode", STEPPING_MODES, "piece"
         )
         self._stepcompress_sample_rate = 0.0
+        self._stepcompress_encoder = STEPCOMPRESS_ENCODER_HP
+        self._stepcompress_max_error = 0.0
         if self._stepping_mode != STEPPING_MODE_STEPCOMPRESS:
             return
         rate = config.getfloat("stepcompress_sample_rate", None)
@@ -125,12 +134,45 @@ class MCU:
                 "positive frequency in Hz, got %r" % (config.get_name(), rate)
             )
         self._stepcompress_sample_rate = rate
+        self._stepcompress_encoder = config.getchoice(
+            "stepcompress_encoder",
+            STEPCOMPRESS_ENCODERS,
+            STEPCOMPRESS_ENCODER_HP,
+        )
+        if self._stepcompress_encoder == STEPCOMPRESS_ENCODER_HP:
+            if config.fileconfig.has_option(
+                config.section, "stepcompress_max_error"
+            ):
+                raise config.error(
+                    "mcu '%s': stepcompress_max_error is only valid with "
+                    "stepcompress_encoder: classic, but the encoder is '%s' "
+                    "(the default). Remove stepcompress_max_error or set "
+                    "stepcompress_encoder: classic."
+                    % (config.get_name(), STEPCOMPRESS_ENCODER_HP)
+                )
+        else:
+            max_error = config.getfloat(
+                "stepcompress_max_error", STEPCOMPRESS_MAX_ERROR_DEFAULT
+            )
+            if not math.isfinite(max_error) or max_error <= 0.0:
+                raise config.error(
+                    "mcu '%s': stepcompress_max_error must be a finite "
+                    "positive number of seconds, got %r"
+                    % (config.get_name(), max_error)
+                )
+            self._stepcompress_max_error = max_error
 
     def get_stepping_mode(self):
         return self._stepping_mode
 
     def get_stepcompress_sample_rate(self):
         return self._stepcompress_sample_rate
+
+    def get_stepcompress_encoder(self):
+        return self._stepcompress_encoder
+
+    def get_stepcompress_max_error(self):
+        return self._stepcompress_max_error
 
     def get_move_queue_slots(self):
         return self._move_queue_slots

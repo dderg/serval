@@ -48,7 +48,14 @@ struct stepper {
 #if CONFIG_CLASSIC_STEPPING
     struct timer time;
     uint32_t interval;
+#if CONFIG_HIGH_PREC_STEP
+    int32_t add;
+    int32_t add2;
+    uint_fast8_t shift;
+    uint16_t int_low_acc;
+#else
     int16_t add;
+#endif
     uint32_t count;
     uint32_t next_step_time;
     uint32_t position;
@@ -70,7 +77,15 @@ struct stepper *stepper_oid_lookup(uint8_t oid);
 struct stepper_move {
     struct move_node node;
     uint32_t interval;
+#if CONFIG_HIGH_PREC_STEP
+    uint32_t next_interval;
+    int32_t add;
+    int32_t add2;
+    uint_fast8_t shift;
+    uint16_t int_low_acc;
+#else
     int16_t add;
+#endif
     uint16_t count;
     uint8_t flags;
 };
@@ -81,7 +96,10 @@ enum { POSITION_BIAS=0x40000000 };
 
 enum {
     SF_LAST_DIR=1<<0, SF_NEXT_DIR=1<<1, SF_NEED_RESET=1<<3,
-    SF_SINGLE_SCHED=1<<4, SF_OPTIMIZED_PATH=1<<5, SF_HAVE_ADD=1<<6
+    SF_SINGLE_SCHED=1<<4, SF_OPTIMIZED_PATH=1<<5, SF_HAVE_ADD=1<<6,
+#if CONFIG_HIGH_PREC_STEP
+    SF_HIGH_PREC_STEP=1<<7
+#endif
 };
 
 #if CONFIG_INLINE_STEPPER_HACK && CONFIG_WANT_STEPPER_OPTIMIZED_BOTH_EDGE

@@ -331,6 +331,11 @@ config CLASSIC_STEPPING
         phase-stepping path — so it is mutually exclusive with
         MOTION_MODULE_STEPPER and every runtime sizing option.
 
+config HIGH_PREC_STEP
+    bool "High-precision step compression"
+    depends on CLASSIC_STEPPING
+    default y
+
 # Master switch for the MCU-side motion runtime: the Rust staticlib, the
 # piece ring/evaluator, the step queue, the motion sample ISR, the per-axis
 # step-output timers and the phase-stepping path. Mutually exclusive with

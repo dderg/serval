@@ -2,7 +2,7 @@ use super::pump_loop::pump_past_guard_secs;
 use super::sched::SeamBasis;
 use super::{AxisFrame, HeartbeatMsg, PumpMsg, SendError};
 use crate::lock_ext::LockExt;
-use crate::mcu_config::McuAxisConfig;
+use crate::mcu_config::{McuAxisConfig, StepcompressEncoder};
 use crossbeam_channel::Sender;
 use host_rt::host_io::McuHostIo;
 use host_rt::host_io::parser::ArgValue;
@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::Duration;
-use step_shim::{MotorConfig, ShimError, StepFrame, StepShim};
+use step_shim::{MotorConfig, ShimError, StepEncoder, StepFrame, StepShim};
 
 pub const SHIM_RING_DEPTH: u32 = 64;
 const RETIREMENT_BATCH: u32 = SHIM_RING_DEPTH;
@@ -44,6 +44,35 @@ pub type ClockSource = Arc<dyn Fn(u32) -> Option<(u64, f64)> + Send + Sync>;
 /// block spends the protocol's sixteen sequence numbers a command at a time.
 pub type FrameEgress =
     Arc<dyn Fn(&[(&'static str, Vec<(String, ArgValue)>)]) -> Result<(), SendError> + Send + Sync>;
+
+pub type StepCountQuery = Arc<dyn Fn(u32) -> Result<i64, String> + Send + Sync>;
+
+const STEP_COUNT_QUERY_TIMEOUT: Duration = Duration::from_millis(250);
+
+fn host_io_step_count_query(mcu_id: u32, host_io: Weak<McuHostIo>) -> StepCountQuery {
+    Arc::new(move |oid| {
+        let io = host_io.upgrade().ok_or_else(|| {
+            format!("stepcompress mcu {mcu_id}: McuHostIo detached during step count readback")
+        })?;
+        let params = io
+            .call_args(
+                "stepper_get_position",
+                &[("oid".to_string(), ArgValue::Int(i64::from(oid)))],
+                "stepper_position",
+                STEP_COUNT_QUERY_TIMEOUT,
+            )
+            .map_err(|e| {
+                format!(
+                    "stepper_get_position failed for stepcompress mcu {mcu_id} oid {oid}: {e:?}"
+                )
+            })?;
+        params.try_get_i32("pos").map(i64::from).ok_or_else(|| {
+            format!(
+                "stepper_position from stepcompress mcu {mcu_id} oid {oid} carries no `pos` field"
+            )
+        })
+    })
+}
 
 pub fn host_io_egress(mcu_id: u32, host_io: Weak<McuHostIo>) -> FrameEgress {
     Arc::new(move |frames: &[(&'static str, Vec<(String, ArgValue)>)]| {
@@ -85,6 +114,27 @@ pub fn build_endpoint(
     }
     let budget = cfg.move_queue_slots - MOVE_SLOT_RESERVE;
     let cycles_per_second = measured_clock_freq;
+    let encoder = match cfg.stepcompress_encoder {
+        StepcompressEncoder::HighPrecision => StepEncoder::HighPrecision,
+        StepcompressEncoder::Classic => {
+            let max_error_ticks = (cfg.stepcompress_max_error_secs * measured_clock_freq).round();
+            if !max_error_ticks.is_finite()
+                || max_error_ticks < 1.0
+                || max_error_ticks > u32::MAX as f64
+            {
+                return Err(format!(
+                    "stepcompress mcu {}: classic encoder max_error {} s at \
+                     {measured_clock_freq} Hz does not resolve to a tick budget in [1, {}]",
+                    cfg.mcu_id,
+                    cfg.stepcompress_max_error_secs,
+                    u32::MAX
+                ));
+            }
+            StepEncoder::Classic {
+                max_error_ticks: max_error_ticks as u32,
+            }
+        }
+    };
     let mut motors = Vec::with_capacity(cfg.axes.len());
     for (motor, &axis) in cfg.axes.iter().enumerate() {
         let microstep_distance = cfg.microstep_distance[motor];
@@ -115,9 +165,11 @@ pub fn build_endpoint(
             sample_rate_hz: sample_rate_hz as f32,
             cycles_per_second,
             min_rearm_cycles: STEP_REARM_PULSES * (step_pulse_seconds * cycles_per_second) as u64,
+            encoder,
         });
     }
-    Ok(StepcompressEndpoint::new(
+    let query = host_io_step_count_query(cfg.mcu_id, host_io.clone());
+    let mut endpoint = StepcompressEndpoint::new(
         cfg.mcu_id,
         StepShim::new(motors, SHIM_RING_DEPTH),
         cfg.axes.clone(),
@@ -126,7 +178,9 @@ pub fn build_endpoint(
         pump_control,
         clock_of,
         budget,
-    ))
+    );
+    endpoint.set_step_count_query(query);
+    Ok(endpoint)
 }
 
 struct InFlight {
@@ -136,6 +190,15 @@ struct InFlight {
 struct PendingRetire {
     waits: Vec<BarrierId>,
     counts: Vec<u32>,
+}
+
+struct PendingCut {
+    barrier: BarrierId,
+    cut_at: u64,
+    resume_clock: u64,
+    epoch_freq: f64,
+    expected_count: i64,
+    held: Vec<PieceEntry>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -152,6 +215,7 @@ enum Outbound {
 struct OutboundFrame {
     frame: Outbound,
     start_clock: u64,
+    end_clock: u64,
     enqueue_order: u64,
 }
 
@@ -185,6 +249,9 @@ pub struct StepcompressEndpoint {
     backlog: VecDeque<OutboundFrame>,
     next_outbound_order: u64,
     in_flight: Vec<InFlight>,
+    step_count_query: Option<StepCountQuery>,
+    last_sent_boundary: HashMap<u32, u64>,
+    pending_cuts: HashMap<usize, PendingCut>,
     step_clock: HashMap<u32, u64>,
     pending_seams: HashMap<u8, VecDeque<PendingSeam>>,
     pending_retire: VecDeque<PendingRetire>,
@@ -220,6 +287,25 @@ fn frame_args(frame: &Outbound) -> (&'static str, Vec<(String, ArgValue)>) {
                 ("interval".to_string(), ArgValue::Int(i64::from(interval))),
                 ("count".to_string(), ArgValue::Int(i64::from(count))),
                 ("add".to_string(), ArgValue::Int(i64::from(add))),
+            ],
+        ),
+        Outbound::Step(StepFrame::QueueStepHp {
+            oid,
+            interval,
+            count,
+            add,
+            add2,
+            shift,
+            ..
+        }) => (
+            "queue_step_hp",
+            vec![
+                ("oid".to_string(), ArgValue::Int(i64::from(oid))),
+                ("interval".to_string(), ArgValue::Int(i64::from(interval))),
+                ("count".to_string(), ArgValue::Int(i64::from(count))),
+                ("add".to_string(), ArgValue::Int(i64::from(add))),
+                ("add2".to_string(), ArgValue::Int(i64::from(add2))),
+                ("shift".to_string(), ArgValue::Int(i64::from(shift))),
             ],
         ),
         Outbound::Step(StepFrame::SetNextStepDir { oid, dir }) => (
@@ -303,6 +389,9 @@ impl StepcompressEndpoint {
             backlog: VecDeque::new(),
             next_outbound_order: 0,
             in_flight: Vec::new(),
+            step_count_query: None,
+            last_sent_boundary: HashMap::new(),
+            pending_cuts: HashMap::new(),
             step_clock: HashMap::new(),
             pending_seams: HashMap::new(),
             pending_retire: VecDeque::new(),
@@ -314,6 +403,10 @@ impl StepcompressEndpoint {
             acked_barrier_seq: HashMap::new(),
             barrier_seq_seed,
         }
+    }
+
+    fn set_step_count_query(&mut self, query: StepCountQuery) {
+        self.step_count_query = Some(query);
     }
 
     fn motor_of(&self, axis: u8) -> Result<usize, SendError> {
@@ -328,7 +421,7 @@ impl StepcompressEndpoint {
                 ))
             })
     }
-    fn queue_outbound(&mut self, frame: Outbound, start_clock: u64) {
+    fn queue_outbound(&mut self, frame: Outbound, start_clock: u64, end_clock: u64) {
         let enqueue_order = self.next_outbound_order;
         self.next_outbound_order = self
             .next_outbound_order
@@ -337,6 +430,7 @@ impl StepcompressEndpoint {
         self.backlog.push_back(OutboundFrame {
             frame,
             start_clock,
+            end_clock,
             enqueue_order,
         });
     }
@@ -449,6 +543,8 @@ impl StepcompressEndpoint {
         self.backlog.clear();
         self.in_flight.clear();
         self.step_clock.clear();
+        self.last_sent_boundary.clear();
+        self.pending_cuts.clear();
         self.pending_seams.clear();
         self.pending_retire.clear();
         self.deferred_retirement = false;
@@ -506,28 +602,147 @@ impl StepcompressEndpoint {
         })
     }
 
-    fn cut_stream(&mut self, motor: usize, freq: f64, now: u64) -> Result<(), SendError> {
-        let emit_cursor = self.step_clock.get(&self.oids[motor]).copied().unwrap_or(0);
+    fn cut_stream_unsent(
+        &mut self,
+        motor: usize,
+        freq: f64,
+        cut_at: u64,
+        now: u64,
+    ) -> Result<(), SendError> {
         tracing::info!(
             subsystem = "motion",
-            event = "reanchor_cut",
+            event = "reanchor_cut_unsent",
             mcu = self.mcu_id,
             motor,
-            emit_cursor,
-            "[reanchor] cutting the shim piece stream"
+            cut_at,
+            "[reanchor] cutting unsent shim pieces"
         );
-        let (_executed, tail) = self
+        let (_expected, tail) = self
             .shim
-            .halt_at(motor, emit_cursor)
+            .halt_at(motor, cut_at)
             .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
         for frame in tail {
-            let (start_clock, _) = self.frame_clocks(now, frame);
-            self.queue_outbound(Outbound::Step(frame), start_clock);
+            let (start_clock, end_clock) = self.frame_clocks(now, frame);
+            self.queue_outbound(Outbound::Step(frame), start_clock, end_clock);
         }
         self.shim.set_motor_cycles_per_second(motor, freq);
         let snapshot = self.shim.retired_counts();
         self.publish_retirement(&snapshot);
         Ok(())
+    }
+
+    fn begin_cut(
+        &mut self,
+        motor: usize,
+        cut_at: u64,
+        epoch_freq: f64,
+        held: &[PieceEntry],
+    ) -> Result<(), SendError> {
+        if self.pending_cuts.contains_key(&motor) {
+            return Err(SendError::Fatal(format!(
+                "stepcompress mcu {} motor {motor}: reanchor cut already awaiting MCU \
+                 reconciliation at clock {cut_at}",
+                self.mcu_id
+            )));
+        }
+        let oid = self.oids[motor];
+        let resume_clock = self.step_clock.get(&oid).copied().unwrap_or(0);
+        let seq = {
+            let next = self
+                .next_barrier_seq
+                .entry(oid)
+                .or_insert(self.barrier_seq_seed);
+            let seq = *next;
+            *next = next.wrapping_add(1);
+            seq
+        };
+        let barrier = BarrierId { oid, seq };
+        self.queue_outbound(Outbound::Barrier(barrier), resume_clock, resume_clock);
+        self.pending_cuts.insert(
+            motor,
+            PendingCut {
+                barrier,
+                cut_at,
+                resume_clock,
+                epoch_freq,
+                expected_count: self.shim.expected_halt_count(motor, resume_clock),
+                held: held.to_vec(),
+            },
+        );
+        Ok(())
+    }
+
+    fn complete_cut(&mut self, motor: usize) -> Result<(), SendError> {
+        let cut = self.pending_cuts.remove(&motor).ok_or_else(|| {
+            SendError::Fatal(format!(
+                "stepcompress mcu {} motor {motor}: cut completion has no pending cut",
+                self.mcu_id
+            ))
+        })?;
+        let query = self.step_count_query.as_ref().ok_or_else(|| {
+            SendError::Fatal(format!(
+                "stepcompress mcu {} motor {motor}: sent-frame cut at {} has no \
+                 stepper_get_position readback",
+                self.mcu_id, cut.cut_at
+            ))
+        })?;
+        let wire_count = query(cut.barrier.oid).map_err(|error| {
+            SendError::Fatal(format!(
+                "stepcompress mcu {} motor {motor}: stepper_get_position readback failed \
+                 after barrier oid={} seq={}: {error}",
+                self.mcu_id, cut.barrier.oid, cut.barrier.seq
+            ))
+        })?;
+        let executed_count = if self.shim.invert_dir(motor) {
+            wire_count.saturating_neg()
+        } else {
+            wire_count
+        };
+        let delta = executed_count - cut.expected_count;
+        if delta != 0 {
+            return Err(SendError::Fatal(format!(
+                "stepcompress mcu {} motor {} oid {} reanchor count mismatch at clock {}: \
+                 host expected {} trajectory steps, MCU reported {} trajectory steps \
+                 (wire {}), delta {}",
+                self.mcu_id,
+                motor,
+                cut.barrier.oid,
+                cut.cut_at,
+                cut.expected_count,
+                executed_count,
+                wire_count,
+                delta
+            )));
+        }
+        let (expected, tail) = self
+            .shim
+            .halt_at_with_executed(motor, cut.resume_clock, executed_count)
+            .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
+        if expected != cut.expected_count {
+            return Err(SendError::Fatal(format!(
+                "stepcompress mcu {} motor {motor}: host count changed while cut at {} \
+                 awaited reconciliation (was {}, now {})",
+                self.mcu_id, cut.cut_at, cut.expected_count, expected
+            )));
+        }
+        for frame in tail {
+            let (start_clock, end_clock) = self.frame_clocks(cut.resume_clock, frame);
+            self.queue_outbound(Outbound::Step(frame), start_clock, end_clock);
+        }
+        self.shim.set_motor_cycles_per_second(motor, cut.epoch_freq);
+        if !cut.held.is_empty() {
+            self.shim
+                .validate_fresh_pieces(motor, &cut.held)
+                .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
+            self.shim
+                .push_pieces(motor, &cut.held)
+                .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
+        }
+        let snapshot = self.shim.retired_counts();
+        self.publish_retirement(&snapshot);
+        let (now, freq) = self.clock_now()?;
+        self.drain_into_backlog(now, freq)?;
+        self.flush(now, freq)
     }
 
     fn retirement_batch_ready(&self, snapshot: &[u32]) -> bool {
@@ -561,7 +776,7 @@ impl StepcompressEndpoint {
             };
             let barrier_clock = self.step_clock.get(&oid).copied().unwrap_or(0);
             let id = BarrierId { oid, seq };
-            self.queue_outbound(Outbound::Barrier(id), barrier_clock);
+            self.queue_outbound(Outbound::Barrier(id), barrier_clock, barrier_clock);
             waits.push(id);
         }
         if waits.is_empty() {
@@ -623,6 +838,13 @@ impl StepcompressEndpoint {
         }
         self.acked_barrier_seq.insert(oid, seq);
         self.release_retirements();
+        let cut_motor = self
+            .pending_cuts
+            .iter()
+            .find_map(|(&motor, cut)| (cut.barrier == BarrierId { oid, seq }).then_some(motor));
+        if let Some(motor) = cut_motor {
+            self.complete_cut(motor)?;
+        }
         self.post_heartbeat()
     }
 
@@ -664,6 +886,17 @@ impl StepcompressEndpoint {
                 *cursor = cursor.saturating_add_signed(queue_step_span(interval, count, add));
                 (first_step, *cursor)
             }
+            StepFrame::QueueStepHp {
+                oid,
+                first_step,
+                last_step,
+                ..
+            } => {
+                let cursor = self.step_clock.entry(oid).or_insert(now);
+                let first = cursor.saturating_add(first_step);
+                *cursor = cursor.saturating_add(last_step);
+                (first, *cursor)
+            }
         }
     }
 
@@ -678,8 +911,8 @@ impl StepcompressEndpoint {
             .drain(drain_to)
             .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
         for frame in frames {
-            let (start_clock, _) = self.frame_clocks(now, frame);
-            self.queue_outbound(Outbound::Step(frame), start_clock);
+            let (start_clock, end_clock) = self.frame_clocks(now, frame);
+            self.queue_outbound(Outbound::Step(frame), start_clock, end_clock);
         }
         if self.backlog.len() > BACKLOG_CEILING_FRAMES {
             return Err(SendError::Fatal(format!(
@@ -706,14 +939,19 @@ impl StepcompressEndpoint {
         let stale_by = (freq * pump_past_guard_secs()) as u64;
         let mut burst: Vec<(&'static str, Vec<(String, ArgValue)>)> = Vec::new();
         let mut reclaim_clocks: Vec<u64> = Vec::new();
+        let mut sent_boundaries: Vec<(u32, u64)> = Vec::new();
         let mut stale: Option<SendError> = None;
         let mut in_flight = self.in_flight.len() as u32;
         for out in &self.backlog {
             let consumes_slot = matches!(
                 &out.frame,
-                Outbound::Step(StepFrame::QueueStep { .. }) | Outbound::Barrier(_)
+                Outbound::Step(StepFrame::QueueStep { .. } | StepFrame::QueueStepHp { .. })
+                    | Outbound::Barrier(_)
             );
-            let queue_step = matches!(&out.frame, Outbound::Step(StepFrame::QueueStep { .. }));
+            let queue_step = matches!(
+                &out.frame,
+                Outbound::Step(StepFrame::QueueStep { .. } | StepFrame::QueueStepHp { .. })
+            );
             if consumes_slot && in_flight >= self.budget {
                 break;
             }
@@ -732,6 +970,16 @@ impl StepcompressEndpoint {
                 break;
             }
             burst.push(frame_args(&out.frame));
+            let oid = match &out.frame {
+                Outbound::Step(StepFrame::QueueStep { oid, .. })
+                | Outbound::Step(StepFrame::QueueStepHp { oid, .. }) => Some(*oid),
+                Outbound::Step(StepFrame::ResetStepClock { .. })
+                | Outbound::Step(StepFrame::SetNextStepDir { .. })
+                | Outbound::Barrier(_) => None,
+            };
+            if let Some(oid) = oid {
+                sent_boundaries.push((oid, out.end_clock));
+            }
             if consumes_slot {
                 reclaim_clocks.push(out.start_clock);
                 in_flight += 1;
@@ -745,6 +993,9 @@ impl StepcompressEndpoint {
                     .into_iter()
                     .map(|reclaim_clock| InFlight { reclaim_clock }),
             );
+            for (oid, end_clock) in sent_boundaries {
+                self.last_sent_boundary.insert(oid, end_clock);
+            }
         }
         if let Some(error) = stale {
             return Err(error);
@@ -801,8 +1052,8 @@ impl StepcompressEndpoint {
                     .finish(motor)
                     .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
                 for frame in tail {
-                    let (start_clock, _) = self.frame_clocks(now, frame);
-                    self.queue_outbound(Outbound::Step(frame), start_clock);
+                    let (start_clock, end_clock) = self.frame_clocks(now, frame);
+                    self.queue_outbound(Outbound::Step(frame), start_clock, end_clock);
                 }
             }
             self.deferred_retirement = true;
@@ -838,6 +1089,10 @@ impl StepcompressEndpoint {
         let (now, freq) = self.clock_now()?;
         for frame in frames {
             let motor = self.motor_of(frame.axis)?;
+            if let Some(cut) = self.pending_cuts.get_mut(&motor) {
+                cut.held.extend_from_slice(&frame.pieces);
+                continue;
+            }
             let mut rest: &[PieceEntry] = &frame.pieces;
             let mut fresh_head = false;
             loop {
@@ -878,6 +1133,7 @@ impl StepcompressEndpoint {
                 self.shim
                     .push_pieces(motor, head)
                     .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
+                let mut defer_tail = false;
                 match seam {
                     PendingSeam::Cut { at, epoch_freq } => {
                         let epoch_freq = epoch_freq.ok_or_else(|| {
@@ -889,7 +1145,16 @@ impl StepcompressEndpoint {
                         })?;
                         self.drain_until(now, at)?;
                         self.drain_into_backlog(now, freq)?;
-                        self.cut_stream(motor, epoch_freq, at)?;
+                        let sent = self
+                            .last_sent_boundary
+                            .get(&self.oids[motor])
+                            .is_some_and(|&boundary| at <= boundary);
+                        if sent {
+                            self.begin_cut(motor, at, epoch_freq, tail)?;
+                            defer_tail = true;
+                        } else {
+                            self.cut_stream_unsent(motor, epoch_freq, at, now)?;
+                        }
                     }
                     PendingSeam::Gap { at } => {
                         tracing::info!(
@@ -910,6 +1175,9 @@ impl StepcompressEndpoint {
                     if q.is_empty() {
                         self.pending_seams.remove(&frame.axis);
                     }
+                }
+                if defer_tail {
+                    break;
                 }
                 rest = tail;
                 fresh_head = true;
