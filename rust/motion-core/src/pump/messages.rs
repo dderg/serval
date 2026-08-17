@@ -97,6 +97,10 @@ pub enum PumpMsg {
         oid: u8,
         seq: u32,
     },
+    StepcompressFatal {
+        mcu_id: u32,
+        error: String,
+    },
     Barrier(std::sync::mpsc::SyncSender<()>),
     Shutdown,
 }

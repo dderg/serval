@@ -8,6 +8,11 @@ const OID: u32 = 7;
 const CYCLES_PER_SECOND: f64 = 1_000_000.0;
 const BUDGET: u32 = 4;
 
+/// The harness teleports its mcu clock by whole seconds to force a drain, so
+/// every barrier looks arbitrarily old. Tests that mean to exercise the ack
+/// deadline restore [`BARRIER_ACK_DEADLINE_SECONDS`] themselves.
+const TELEPORTING_CLOCK_ACK_DEADLINE_SECONDS: f64 = 3_600.0;
+
 struct Harness {
     endpoint: StepcompressEndpoint,
     now: Arc<AtomicU64>,
@@ -16,6 +21,7 @@ struct Harness {
     seeds: Arc<Mutex<Vec<(u32, i64)>>>,
     heartbeats: crossbeam_channel::Receiver<PumpMsg>,
     bursts: Arc<Mutex<Vec<usize>>>,
+    attempts: Arc<Mutex<Vec<Vec<String>>>>,
     fail_sends: Arc<AtomicBool>,
     query_count: Arc<AtomicI64>,
     auto_query: Arc<AtomicBool>,
@@ -64,8 +70,16 @@ fn harness_axes(budget: u32, axes: Vec<usize>, oids: Vec<u32>) -> Harness {
     let fail_for_egress = Arc::clone(&fail_sends);
     let bursts = Arc::new(Mutex::new(Vec::new()));
     let bursts_for_egress = Arc::clone(&bursts);
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let attempts_for_egress = Arc::clone(&attempts);
     let egress: FrameEgress =
         Arc::new(move |frames: &[(&'static str, Vec<(String, ArgValue)>)]| {
+            attempts_for_egress.lock_ok().push(
+                frames
+                    .iter()
+                    .map(|(name, args)| format!("{name}{args:?}"))
+                    .collect(),
+            );
             if fail_for_egress.load(Ordering::Relaxed) {
                 return Err(SendError::Transient("egress down".into()));
             }
@@ -128,6 +142,7 @@ fn harness_axes(budget: u32, axes: Vec<usize>, oids: Vec<u32>) -> Harness {
         calls_for_query.fetch_add(1, Ordering::Relaxed);
         Ok(query_for_endpoint.load(Ordering::Relaxed))
     }));
+    endpoint.barrier_ack_deadline_secs = TELEPORTING_CLOCK_ACK_DEADLINE_SECONDS;
     Harness {
         endpoint,
         now,
@@ -136,6 +151,7 @@ fn harness_axes(budget: u32, axes: Vec<usize>, oids: Vec<u32>) -> Harness {
         seeds,
         heartbeats: rx,
         bursts,
+        attempts,
         fail_sends,
         query_calls,
         query_count,
@@ -617,6 +633,41 @@ fn a_dead_egress_surfaces_instead_of_dropping_frames() {
     assert!(matches!(err, SendError::Transient(_)), "{err:?}");
     assert_eq!(h.sent_moves(), 0);
     assert!(!h.endpoint.backlog.is_empty());
+}
+
+#[test]
+fn a_refused_burst_is_retried_verbatim_with_nothing_duplicated() {
+    let mut h = harness(BUDGET);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.fail_sends.store(true, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .expect_err("a refused burst must surface");
+    let refused = h.attempts.lock_ok().clone();
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert!(refused[0].len() > 1, "{refused:?}");
+    assert_eq!(h.sent_moves(), 0);
+
+    h.fail_sends.store(false, Ordering::Relaxed);
+    h.endpoint.tick().expect("the retry goes through");
+
+    let attempts = h.attempts.lock_ok().clone();
+    assert_eq!(attempts.len(), 2, "{attempts:?}");
+    assert_eq!(
+        attempts[1][..refused[0].len()],
+        refused[0][..],
+        "the retry must re-offer the refused frames in the same order"
+    );
+
+    let mut delivered = attempts[1].clone();
+    delivered.sort();
+    let unique = delivered.len();
+    delivered.dedup();
+    assert_eq!(
+        delivered.len(),
+        unique,
+        "a refused burst must not be dispatched twice"
+    );
 }
 
 #[test]
@@ -1650,5 +1701,153 @@ fn no_emitted_step_clock_leaves_the_mcu_sync_horizon() {
         rounds_with_frames > 1,
         "the endpoint must have released frames across several ticks for the send \
          lead to be under test, saw {rounds_with_frames} rounds with frames"
+    );
+}
+
+fn four_motor_harness() -> (Harness, Vec<u32>) {
+    let oids = vec![6, 7, 8, 9];
+    let mut h = harness_axes(1024, vec![0, 1, 2, 3], oids.clone());
+    h.now.store(1_000, Ordering::Relaxed);
+    for axis in 0..4 {
+        h.endpoint
+            .mark_reanchor(axis, 2_000, Some(CYCLES_PER_SECOND));
+    }
+    (h, oids)
+}
+
+/// Drive one retirement cohort across all four lanes and return the barriers
+/// the endpoint put on the wire for it.
+fn run_cohort(h: &mut Harness, start: u64, from_mm: f32) -> Vec<(u32, u32)> {
+    h.now.store(start.saturating_sub(1_000), Ordering::Relaxed);
+    h.endpoint
+        .send_frames(
+            MCU_ID,
+            &(0..4)
+                .map(|axis| frame_for_axis(axis, ramp_from(start, 64, from_mm)))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    h.now.store(start + 10_000_000, Ordering::Relaxed);
+    h.endpoint.tick().unwrap();
+    std::mem::take(&mut *h.barriers.lock_ok())
+}
+
+/// The bench saw one lane collect four barriers per volley while its siblings
+/// collected one — the signature of a motor index leaking into the oid the
+/// barrier is addressed to. Every cohort must address each oid exactly once.
+#[test]
+fn every_cohort_addresses_each_oid_with_exactly_one_barrier() {
+    let (mut h, oids) = four_motor_harness();
+    let mut all = Vec::new();
+    let mut start = 2_000u64;
+    let mut from_mm = 0.0_f32;
+    for cohort in 0..3 {
+        let issued = run_cohort(&mut h, start, from_mm);
+        assert_eq!(
+            issued.iter().map(|&(oid, _)| oid).collect::<Vec<_>>(),
+            oids,
+            "cohort {cohort} must carry one barrier per configured oid: {issued:?}"
+        );
+        for &(oid, seq) in &issued {
+            h.endpoint.on_barrier_ack(oid, seq).unwrap();
+        }
+        assert_eq!(
+            h.endpoint.published_counts(),
+            vec![64 * (cohort + 1); 4],
+            "cohort {cohort} must retire once every lane's barrier is acked"
+        );
+        all.extend(issued);
+        start += 2_000 * 64;
+        from_mm += 8.0;
+    }
+    let mut unique = all.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        all.len(),
+        "no (oid, seq) may be issued twice: {all:?}"
+    );
+}
+
+#[test]
+fn a_barrier_ack_replayed_by_the_mcu_retires_its_cohort_once() {
+    let (mut h, oids) = four_motor_harness();
+    let issued = run_cohort(&mut h, 2_000, 0.0);
+    assert_eq!(issued.len(), oids.len(), "{issued:?}");
+
+    for &(oid, seq) in &issued {
+        for _ in 0..4 {
+            h.endpoint
+                .on_barrier_ack(oid, seq)
+                .expect("a replayed ack is a duplicate receipt, not a protocol break");
+        }
+    }
+    assert_eq!(h.endpoint.published_counts(), vec![64; 4]);
+
+    let next = run_cohort(&mut h, 2_000 + 2_000 * 64, 8.0);
+    assert_eq!(
+        next.iter().map(|&(oid, _)| oid).collect::<Vec<_>>(),
+        oids,
+        "replayed acks must not consume the next cohort's barriers: {next:?}"
+    );
+}
+
+#[test]
+fn a_lost_barrier_ack_trips_the_deadline_instead_of_waiting_forever() {
+    let deadline_ticks = (BARRIER_ACK_DEADLINE_SECONDS * CYCLES_PER_SECOND) as u64;
+    let (mut h, _) = four_motor_harness();
+    let issued = run_cohort(&mut h, 2_000, 0.0);
+    h.endpoint.barrier_ack_deadline_secs = BARRIER_ACK_DEADLINE_SECONDS;
+    let (lost_oid, lost_seq) = *issued.last().expect("the cohort issued barriers");
+    for &(oid, seq) in &issued[..issued.len() - 1] {
+        h.endpoint.on_barrier_ack(oid, seq).unwrap();
+    }
+    assert_eq!(
+        h.endpoint.published_counts(),
+        vec![0; 4],
+        "the cohort must still be waiting on the lost ack"
+    );
+    let sent_clock = h
+        .endpoint
+        .sent_barriers
+        .iter()
+        .find(|sent| sent.id.oid == lost_oid && sent.id.seq == lost_seq)
+        .map(|sent| sent.sent_clock)
+        .expect("the lost barrier reached the wire");
+
+    h.now
+        .store(sent_clock + deadline_ticks - 1, Ordering::Relaxed);
+    h.endpoint
+        .tick()
+        .expect("inside the deadline a barrier is merely in flight");
+
+    h.now.store(sent_clock + deadline_ticks, Ordering::Relaxed);
+    let err = h
+        .endpoint
+        .tick()
+        .expect_err("a barrier the mcu never acks must not park the cohort forever");
+    let SendError::Fatal(message) = err else {
+        panic!("a lost barrier ack is unrecoverable: {err:?}");
+    };
+    assert!(
+        message.contains(&format!("oid={lost_oid} seq={lost_seq}")),
+        "the fatal must name the outstanding barrier: {message}"
+    );
+    for &(oid, seq) in &issued[..issued.len() - 1] {
+        assert!(
+            message.contains(&format!("oid={oid} acked_through_seq={seq}")),
+            "the fatal must carry the received-ack ledger: {message}"
+        );
+    }
+    let escalated = h.heartbeats.try_iter().any(|msg| {
+        matches!(
+            msg,
+            PumpMsg::StepcompressFatal { mcu_id, .. } if mcu_id == MCU_ID
+        )
+    });
+    assert!(
+        escalated,
+        "the endpoint must escalate to the pump, or the drain still hangs"
     );
 }

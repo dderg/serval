@@ -258,15 +258,15 @@ impl Reactor {
         };
         for block in blocks {
             if let Err(e) = self.dispatch_fire_and_forget(block, false) {
-                tracing::warn!(
+                tracing::error!(
                     subsystem = "mcu-comms",
                     event = "fire_and_forget_batch_send_error",
                     error = %e,
-                    "FireAndForgetBatch: send error"
+                    "FireAndForgetBatch: block write failed; abandoning the rest of the burst \
+                     rather than putting later blocks on the wire ahead of it"
                 );
-                if self.close_if_io_fault("handle_command/fire_and_forget_batch", &e) {
-                    return;
-                }
+                self.close_if_io_fault("handle_command/fire_and_forget_batch", &e);
+                return;
             }
         }
     }

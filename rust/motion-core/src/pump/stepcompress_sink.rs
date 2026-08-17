@@ -24,6 +24,17 @@ pub const SEND_LEAD_SECONDS: f64 = 2.0 * (host_rt::host_io::rtt::MIN_RTO_MS as f
 
 pub const CONSUMED_MARGIN_SECONDS: f64 = 0.010;
 
+/// A barrier the mcu never acks would otherwise park the retirement cohort —
+/// and every drain waiting on it — forever. One transport RTO ceiling past the
+/// send is far beyond any legitimate wait: a barrier only leaves the backlog
+/// when its clock is within [`SEND_LEAD_SECONDS`] of the mcu clock, so the mcu
+/// reaches it within that lead plus its own queue drain. Measured on the mcu
+/// clock, not the host's: a slow mcu owes its acks against the clock it is
+/// actually running, and the endpoint paces every send against that same
+/// projection.
+pub const BARRIER_ACK_DEADLINE_SECONDS: f64 =
+    host_rt::host_io::rtt::MAX_RTO.as_millis() as f64 / 1000.0;
+
 /// A classic stepper spends two scheduler events on every step: the pulse at
 /// the step clock and the unstep `step_pulse_ticks` later, from which
 /// `stepper_load_next` re-arms one more `step_pulse_ticks` out. A queued move
@@ -201,10 +212,15 @@ struct PendingCut {
     held: Vec<PieceEntry>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct BarrierId {
     oid: u32,
     seq: u32,
+}
+
+struct SentBarrier {
+    id: BarrierId,
+    sent_clock: u64,
 }
 
 enum Outbound {
@@ -262,6 +278,9 @@ pub struct StepcompressEndpoint {
     next_barrier_seq: HashMap<u32, u32>,
     acked_barrier_seq: HashMap<u32, u32>,
     barrier_seq_seed: u32,
+    sent_barriers: VecDeque<SentBarrier>,
+    barrier_ack_deadline_secs: f64,
+    barrier_deadline_escalated: bool,
 }
 
 fn shim_error_to_send_error(mcu_id: u32, error: ShimError) -> SendError {
@@ -402,6 +421,9 @@ impl StepcompressEndpoint {
             next_barrier_seq: HashMap::new(),
             acked_barrier_seq: HashMap::new(),
             barrier_seq_seed,
+            sent_barriers: VecDeque::new(),
+            barrier_ack_deadline_secs: BARRIER_ACK_DEADLINE_SECONDS,
+            barrier_deadline_escalated: false,
         }
     }
 
@@ -547,6 +569,7 @@ impl StepcompressEndpoint {
         self.pending_cuts.clear();
         self.pending_seams.clear();
         self.pending_retire.clear();
+        self.sent_barriers.clear();
         self.deferred_retirement = false;
         self.retirement_idle_ticks = 0;
     }
@@ -794,6 +817,93 @@ impl StepcompressEndpoint {
             .is_some_and(|&high_water| barrier_seq_covers(high_water, id.seq))
     }
 
+    fn note_barrier_sent(&mut self, id: BarrierId, sent_clock: u64) {
+        self.sent_barriers.push_back(SentBarrier { id, sent_clock });
+    }
+
+    fn prune_acked_barriers(&mut self) {
+        let mut sent = std::mem::take(&mut self.sent_barriers);
+        sent.retain(|entry| !self.barrier_acked(entry.id));
+        self.sent_barriers = sent;
+    }
+
+    fn outstanding_barriers(&self) -> Vec<BarrierId> {
+        let cohort = self
+            .pending_retire
+            .iter()
+            .flat_map(|pending| pending.waits.iter().copied());
+        let cuts = self.pending_cuts.values().map(|cut| cut.barrier);
+        cohort
+            .chain(cuts)
+            .filter(|&id| !self.barrier_acked(id))
+            .collect()
+    }
+
+    fn barrier_ack_ledger(&self) -> String {
+        let mut acked: Vec<(u32, u32)> = self
+            .acked_barrier_seq
+            .iter()
+            .map(|(&oid, &seq)| (oid, seq))
+            .collect();
+        acked.sort_unstable();
+        acked
+            .iter()
+            .map(|(oid, seq)| format!("oid={oid} acked_through_seq={seq}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// A cohort barrier the mcu never acks parks `pending_retire` forever, and
+    /// with it every drain waiting on the retirement it gates. Wait no longer
+    /// than [`BARRIER_ACK_DEADLINE_SECONDS`] of mcu clock past the send, then
+    /// name what is missing and what did come back.
+    fn check_barrier_deadline(&mut self, now: u64, freq: f64) -> Result<(), SendError> {
+        let deadline_ticks = (freq * self.barrier_ack_deadline_secs) as u64;
+        let overdue: Vec<(BarrierId, u64)> = self
+            .outstanding_barriers()
+            .into_iter()
+            .filter_map(|id| {
+                let waited = self
+                    .sent_barriers
+                    .iter()
+                    .find(|sent| sent.id == id)
+                    .map(|sent| now.saturating_sub(sent.sent_clock))?;
+                (waited >= deadline_ticks).then_some((id, waited))
+            })
+            .collect();
+        if overdue.is_empty() {
+            return Ok(());
+        }
+        let missing = overdue
+            .iter()
+            .map(|(id, waited)| {
+                format!(
+                    "oid={} seq={} unacked for {:.3} s",
+                    id.oid,
+                    id.seq,
+                    *waited as f64 / freq
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let error = format!(
+            "stepcompress mcu {}: barrier ack deadline of {:.3} s of mcu clock expired — the \
+             mcu never reported [{missing}]; received acks: [{}]. The retirement cohort and \
+             every drain behind it cannot be released",
+            self.mcu_id,
+            self.barrier_ack_deadline_secs,
+            self.barrier_ack_ledger()
+        );
+        if !self.barrier_deadline_escalated {
+            self.barrier_deadline_escalated = true;
+            let _ = self.pump_control.send(PumpMsg::StepcompressFatal {
+                mcu_id: self.mcu_id,
+                error: error.clone(),
+            });
+        }
+        Err(SendError::Fatal(error))
+    }
+
     fn release_retirements(&mut self) {
         while let Some(front) = self.pending_retire.front() {
             if !front.waits.iter().all(|&id| self.barrier_acked(id)) {
@@ -835,6 +945,7 @@ impl StepcompressEndpoint {
             )));
         }
         self.acked_barrier_seq.insert(oid, seq);
+        self.prune_acked_barriers();
         self.release_retirements();
         let cut_motor = self
             .pending_cuts
@@ -961,6 +1072,7 @@ impl StepcompressEndpoint {
         let mut burst: Vec<(&'static str, Vec<(String, ArgValue)>)> = Vec::new();
         let mut reclaim_clocks: Vec<u64> = Vec::new();
         let mut sent_boundaries: Vec<(u32, u64)> = Vec::new();
+        let mut sent_barriers: Vec<BarrierId> = Vec::new();
         let mut stale: Option<SendError> = None;
         let mut in_flight = self.in_flight.len() as u32;
         for out in &self.backlog {
@@ -1022,6 +1134,9 @@ impl StepcompressEndpoint {
             if let Some(oid) = oid {
                 sent_boundaries.push((oid, out.end_clock));
             }
+            if let Outbound::Barrier(id) = out.frame {
+                sent_barriers.push(id);
+            }
             if consumes_slot {
                 reclaim_clocks.push(out.start_clock);
                 in_flight += 1;
@@ -1037,6 +1152,9 @@ impl StepcompressEndpoint {
             );
             for (oid, end_clock) in sent_boundaries {
                 self.last_sent_boundary.insert(oid, end_clock);
+            }
+            for id in sent_barriers {
+                self.note_barrier_sent(id, now);
             }
         }
         if let Some(error) = stale {
@@ -1076,6 +1194,10 @@ impl StepcompressEndpoint {
     }
 
     pub fn tick(&mut self) -> Result<(), SendError> {
+        if !self.sent_barriers.is_empty() {
+            let (now, freq) = self.clock_now()?;
+            self.check_barrier_deadline(now, freq)?;
+        }
         if self.backlog.is_empty()
             && self.in_flight.is_empty()
             && self.shim.queued_pieces() == 0

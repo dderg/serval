@@ -204,6 +204,7 @@ stepper_event_edge(struct timer *t)
     gpio_out_toggle_noirq(s->step_pin);
     uint32_t count = s->count - 1;
     if (likely(count)) {
+        s->count = count;
 #if CONFIG_HIGH_PREC_STEP
         if (s->flags & SF_HIGH_PREC_STEP) {
             add_interval(&s->time.waketime, s);
@@ -419,6 +420,11 @@ void
 stepcompress_barrier_ack_task(void)
 {
     if (!sched_check_wake(&barrier_ack_wake))
+        return;
+    // A shutdown runs move_reset(), which relinks every move node — including
+    // the ones parked in completed_barriers — into the free list. Popping them
+    // afterwards walks the free list and reports acks the host never earned.
+    if (sched_is_shutdown())
         return;
     uint8_t oid;
     struct stepper *s;

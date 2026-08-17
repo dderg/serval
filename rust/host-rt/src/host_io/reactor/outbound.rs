@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Instant;
 
-use crate::host_io::reactor::{
-    PENDING_FIRE_AND_FORGET_CEILING, PENDING_SUBMISSION_CEILING, PIECE_OUTQ_BUDGET_BYTES, Reactor,
-};
+use crate::host_io::fire_and_forget_depth::{FIRE_AND_FORGET_HIGH_WATER, FireAndForgetDepth};
+use crate::host_io::reactor::{PENDING_SUBMISSION_CEILING, PIECE_OUTQ_BUDGET_BYTES, Reactor};
 use crate::transport::TransportError;
 
 pub(crate) struct PendingSubmission {
@@ -21,7 +21,6 @@ pub(crate) enum PendingOutboundKind {
     FireAndForget,
 }
 
-#[derive(Default)]
 pub(crate) struct OutboundQueues {
     pub(crate) pending_submissions: VecDeque<PendingSubmission>,
     /// Queued fire-and-forget payloads; the bool marks a `get_clock` frame
@@ -32,9 +31,20 @@ pub(crate) struct OutboundQueues {
     /// rule this enforces.
     pub(crate) pending_piece_frames: VecDeque<(u32, Vec<u8>)>,
     pub(crate) pending_outbound_order: VecDeque<PendingOutboundKind>,
+    pub(crate) fire_and_forget_depth: Arc<FireAndForgetDepth>,
 }
 
 impl OutboundQueues {
+    pub(crate) fn new(fire_and_forget_depth: Arc<FireAndForgetDepth>) -> Self {
+        Self {
+            pending_submissions: VecDeque::new(),
+            pending_fire_and_forget: VecDeque::new(),
+            pending_piece_frames: VecDeque::new(),
+            pending_outbound_order: VecDeque::new(),
+            fire_and_forget_depth,
+        }
+    }
+
     pub(crate) fn enqueue_submission(&mut self, submission: PendingSubmission) {
         self.pending_submissions.push_back(submission);
         self.pending_outbound_order
@@ -46,6 +56,18 @@ impl OutboundQueues {
             .push_back((payload, is_get_clock));
         self.pending_outbound_order
             .push_back(PendingOutboundKind::FireAndForget);
+        self.publish_fire_and_forget_depth();
+    }
+
+    pub(crate) fn pop_fire_and_forget(&mut self) -> Option<(Vec<u8>, bool)> {
+        let front = self.pending_fire_and_forget.pop_front();
+        self.publish_fire_and_forget_depth();
+        front
+    }
+
+    fn publish_fire_and_forget_depth(&self) {
+        self.fire_and_forget_depth
+            .publish(self.pending_fire_and_forget.len());
     }
 }
 
@@ -173,14 +195,14 @@ impl Reactor {
         is_get_clock: bool,
     ) -> Result<(), TransportError> {
         if self.unacked_window.is_full() {
-            if self.outbound.pending_fire_and_forget.len() >= PENDING_FIRE_AND_FORGET_CEILING {
-                tracing::error!(
+            if self.outbound.pending_fire_and_forget.len() == FIRE_AND_FORGET_HIGH_WATER {
+                tracing::warn!(
                     subsystem = "mcu-comms",
-                    event = "fire_and_forget_ceiling",
-                    ceiling = PENDING_FIRE_AND_FORGET_CEILING,
-                    "dispatch_fire_and_forget: pending_fire_and_forget at ceiling; refusing payload"
+                    event = "fire_and_forget_high_water",
+                    queued_blocks = self.outbound.pending_fire_and_forget.len(),
+                    high_water = FIRE_AND_FORGET_HIGH_WATER,
+                    "fire-and-forget queue past its high water mark; bulk senders are being refused"
                 );
-                return Err(TransportError::Backpressure);
             }
             self.outbound.enqueue_fire_and_forget(payload, is_get_clock);
             return Ok(());
@@ -246,9 +268,7 @@ impl Reactor {
                     }
                 }
                 PendingOutboundKind::FireAndForget => {
-                    let Some((payload, is_get_clock)) =
-                        self.outbound.pending_fire_and_forget.pop_front()
-                    else {
+                    let Some((payload, is_get_clock)) = self.outbound.pop_fire_and_forget() else {
                         tracing::error!(
                             subsystem = "mcu-comms",
                             event = "outbound_order_missing_fire_and_forget",
@@ -260,11 +280,12 @@ impl Reactor {
                         if self.close_if_io_fault("drain_pending_submissions/fire_and_forget", &e) {
                             return;
                         }
-                        tracing::warn!(
+                        tracing::error!(
                             subsystem = "mcu-comms",
                             event = "fire_and_forget_redispatch_error",
                             error = %e,
-                            "drain_pending_submissions: fire-and-forget redispatch error"
+                            "drain_pending_submissions: queued fire-and-forget block lost to a \
+                             non-IO write error"
                         );
                     }
                 }

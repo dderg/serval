@@ -243,6 +243,18 @@ impl<S: PieceSink> Pump<S> {
                     return false;
                 }
             }
+            PumpMsg::StepcompressFatal { mcu_id, error } => {
+                tracing::error!(
+                    subsystem = "motion",
+                    event = "stepcompress_endpoint_fatal",
+                    mcu = mcu_id,
+                    error = %error,
+                    "stepcompress endpoint reported a fatal condition — invoking \
+                     fatal-transport action"
+                );
+                (self.callbacks.on_fatal_transport)(AxisKey { mcu_id, axis: 0 });
+                return false;
+            }
             PumpMsg::Barrier(ack) => {
                 self.pending_barrier_acks.push(ack);
             }

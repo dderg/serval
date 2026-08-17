@@ -230,6 +230,7 @@ impl ReactorHarness {
             seq,
             config,
             clock_dyn,
+            Arc::new(crate::host_io::fire_and_forget_depth::FireAndForgetDepth::default()),
         );
         Self {
             reactor,

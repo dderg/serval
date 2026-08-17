@@ -7,6 +7,7 @@ use arc_swap::ArcSwap;
 use crate::clock::{Clock, RealClock};
 use crate::host_io::ReactorCommand;
 use crate::host_io::events::EventDispatcher;
+use crate::host_io::fire_and_forget_depth::FireAndForgetDepth;
 use crate::host_io::identify::IdentifySeqState;
 use crate::host_io::mcu_session::McuTransportState;
 use crate::host_io::parser::MsgProtoParser;
@@ -75,6 +76,7 @@ impl Reactor {
         status_snapshot: Arc<ArcSwap<StatusEvent>>,
         seq: IdentifySeqState,
         config: crate::host_io::McuHostIoConfig,
+        fire_and_forget_depth: Arc<FireAndForgetDepth>,
     ) -> Self {
         Self::new_with_clock(
             io,
@@ -84,6 +86,7 @@ impl Reactor {
             seq,
             config,
             Arc::new(RealClock),
+            fire_and_forget_depth,
         )
     }
 
@@ -95,6 +98,7 @@ impl Reactor {
         seq: IdentifySeqState,
         config: crate::host_io::McuHostIoConfig,
         clock: Arc<dyn Clock>,
+        fire_and_forget_depth: Arc<FireAndForgetDepth>,
     ) -> Self {
         let mcu_label: Arc<str> = config.mcu_label.as_deref().unwrap_or("unknown").into();
         let event_dispatcher = EventDispatcher::new(
@@ -115,7 +119,7 @@ impl Reactor {
             closed_via_shutdown: false,
             pending_host_fault: None,
             pending_clock_sent_raw: None,
-            outbound: OutboundQueues::default(),
+            outbound: OutboundQueues::new(fire_and_forget_depth),
             zero_byte_first_seen: None,
             last_recv_time: clock.now(),
             last_write_time: clock.now(),
@@ -151,6 +155,7 @@ impl Reactor {
             },
             config,
             clock,
+            Arc::new(FireAndForgetDepth::default()),
         )
     }
 }
@@ -162,7 +167,6 @@ pub enum RetransmitTrigger {
 }
 
 const PENDING_SUBMISSION_CEILING: usize = 256;
-pub const PENDING_FIRE_AND_FORGET_CEILING: usize = 256;
 pub(crate) const PENDING_PIECE_FRAMES_CEILING: usize = 64;
 
 /// Max bytes of kalico (piece) traffic allowed in the kernel tty out-buffer

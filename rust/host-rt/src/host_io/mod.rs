@@ -2,6 +2,7 @@ pub mod byte_link;
 pub mod call_handle;
 pub mod can_link;
 pub mod events;
+pub mod fire_and_forget_depth;
 pub mod identify;
 pub(crate) mod interceptor;
 pub mod mcu_session;
@@ -27,6 +28,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 
 use crate::host_io::events::HostEvent;
+use crate::host_io::fire_and_forget_depth::FireAndForgetDepth;
 use crate::host_io::parser::MsgProtoParser;
 use crate::host_io::runtime_events::{
     FaultEvent, McuLogEvent, RuntimeEvent, StatusEvent, TraceEvent,
@@ -168,6 +170,7 @@ pub struct McuHostIo {
     clock: Arc<dyn crate::clock::Clock>,
     raw_identify_bytes: Vec<u8>,
     is_critical: Arc<AtomicBool>,
+    fire_and_forget_depth: Arc<FireAndForgetDepth>,
 }
 
 impl std::fmt::Debug for McuHostIo {
@@ -377,6 +380,8 @@ impl McuHostIo {
         let reactor_clock = Arc::clone(&clock);
         let is_critical = Arc::new(AtomicBool::new(true));
         let reactor_is_critical = Arc::clone(&is_critical);
+        let fire_and_forget_depth = Arc::new(FireAndForgetDepth::default());
+        let reactor_fire_and_forget_depth = Arc::clone(&fire_and_forget_depth);
         let reactor_handle = std::thread::spawn(move || {
             tracing::info!(
                 subsystem = "mcu-comms",
@@ -392,6 +397,7 @@ impl McuHostIo {
                 identify_seq,
                 reactor_config,
                 reactor_clock,
+                reactor_fire_and_forget_depth,
             );
             reactor.run();
             if !reactor.exited_gracefully() {
@@ -432,6 +438,7 @@ impl McuHostIo {
             clock,
             raw_identify_bytes,
             is_critical,
+            fire_and_forget_depth,
         })
     }
 
@@ -461,6 +468,8 @@ impl McuHostIo {
         let reactor_config = config.clone();
         let reactor_clock = Arc::clone(&clock);
         let is_critical = Arc::new(AtomicBool::new(false));
+        let fire_and_forget_depth = Arc::new(FireAndForgetDepth::default());
+        let reactor_fire_and_forget_depth = Arc::clone(&fire_and_forget_depth);
         let reactor_handle = std::thread::spawn(move || {
             let mut reactor = crate::host_io::reactor::Reactor::new_with_clock(
                 io,
@@ -470,6 +479,7 @@ impl McuHostIo {
                 identify_seq,
                 reactor_config,
                 reactor_clock,
+                reactor_fire_and_forget_depth,
             );
             reactor.run();
         });
@@ -484,7 +494,12 @@ impl McuHostIo {
             clock,
             raw_identify_bytes: Vec::new(),
             is_critical,
+            fire_and_forget_depth,
         }
+    }
+
+    pub fn fire_and_forget_depth(&self) -> &Arc<FireAndForgetDepth> {
+        &self.fire_and_forget_depth
     }
 }
 
@@ -768,10 +783,19 @@ impl McuHostIo {
     /// pack them into full message blocks. Sending them one at a time
     /// through `send_args` would let the reactor drain the channel between
     /// them and frame each command on its own block.
+    ///
+    /// Rejected wholesale — nothing encoded, nothing queued — once the
+    /// reactor's fire-and-forget queue is at its high water mark, so a caller
+    /// that treats [`TransportError::Backpressure`] as retryable re-offers the
+    /// identical burst in the identical order. Any burst the reactor does
+    /// accept reaches the wire; the reactor has no discard path.
     pub fn send_args_batch(
         &self,
         frames: &[(&str, Vec<(String, crate::host_io::parser::ArgValue)>)],
     ) -> Result<(), TransportError> {
+        if self.fire_and_forget_depth.at_high_water() {
+            return Err(TransportError::Backpressure);
+        }
         let mut payloads = Vec::with_capacity(frames.len());
         for (name, args) in frames {
             payloads.push(
@@ -904,9 +928,13 @@ impl McuHostIo {
             clock: Arc::new(crate::clock::RealClock),
             raw_identify_bytes: Vec::new(),
             is_critical: Arc::new(AtomicBool::new(false)),
+            fire_and_forget_depth: Arc::new(FireAndForgetDepth::default()),
         })
     }
 }
 
 #[cfg(test)]
 mod test_internals;
+
+#[cfg(test)]
+mod fire_and_forget_batch_admission;
