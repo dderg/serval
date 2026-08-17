@@ -626,8 +626,6 @@ impl StepcompressEndpoint {
             self.queue_outbound(Outbound::Step(frame), start_clock, end_clock);
         }
         self.shim.set_motor_cycles_per_second(motor, freq);
-        let snapshot = self.shim.retired_counts();
-        self.publish_retirement(&snapshot);
         Ok(())
     }
 
@@ -905,7 +903,29 @@ impl StepcompressEndpoint {
         self.drain_until(now, now.saturating_add(lead))
     }
 
+    fn drain_into_backlog_without_retirement(
+        &mut self,
+        now: u64,
+        freq: f64,
+    ) -> Result<(), SendError> {
+        let lead = (freq * SEND_LEAD_SECONDS) as u64;
+        self.drain_until_without_retirement(now, now.saturating_add(lead))
+    }
+
     fn drain_until(&mut self, now: u64, drain_to: u64) -> Result<(), SendError> {
+        self.drain_until_with_retirement(now, drain_to, true)
+    }
+
+    fn drain_until_without_retirement(&mut self, now: u64, drain_to: u64) -> Result<(), SendError> {
+        self.drain_until_with_retirement(now, drain_to, false)
+    }
+
+    fn drain_until_with_retirement(
+        &mut self,
+        now: u64,
+        drain_to: u64,
+        publish: bool,
+    ) -> Result<(), SendError> {
         let frames = self
             .shim
             .drain(drain_to)
@@ -923,7 +943,7 @@ impl StepcompressEndpoint {
             )));
         }
         let snapshot = self.shim.retired_counts();
-        if self.retirement_batch_ready(&snapshot) {
+        if publish && self.retirement_batch_ready(&snapshot) {
             self.publish_retirement(&snapshot);
         } else if snapshot != self.cohort_counts {
             self.deferred_retirement = true;
@@ -1143,8 +1163,8 @@ impl StepcompressEndpoint {
                                 frame.axis
                             ))
                         })?;
-                        self.drain_until(now, at)?;
-                        self.drain_into_backlog(now, freq)?;
+                        self.drain_until_without_retirement(now, at)?;
+                        self.drain_into_backlog_without_retirement(now, freq)?;
                         let sent = self
                             .last_sent_boundary
                             .get(&self.oids[motor])

@@ -22,9 +22,9 @@ struct Harness {
     query_calls: Arc<AtomicU64>,
 }
 
-fn motor_cfg() -> MotorConfig {
+fn motor_cfg_for(oid: u32) -> MotorConfig {
     MotorConfig {
-        oid: OID,
+        oid,
         microstep_distance: 0.01,
         invert_dir: false,
         max_steps_per_sample: 16,
@@ -42,6 +42,11 @@ fn harness(budget: u32) -> Harness {
 }
 
 fn harness_on_axis(budget: u32, axis: usize) -> Harness {
+    harness_axes(budget, vec![axis], vec![OID])
+}
+
+fn harness_axes(budget: u32, axes: Vec<usize>, oids: Vec<u32>) -> Harness {
+    assert_eq!(axes.len(), oids.len());
     let now = Arc::new(AtomicU64::new(0));
     let now_for_clock = Arc::clone(&now);
     let clock_of: ClockSource =
@@ -108,11 +113,12 @@ fn harness_on_axis(budget: u32, axis: usize) -> Harness {
     let (tx, rx) = crossbeam_channel::unbounded();
     let query_for_endpoint = Arc::clone(&query_count);
     let calls_for_query = Arc::clone(&query_calls);
+    let motors = oids.iter().copied().map(motor_cfg_for).collect();
     let mut endpoint = StepcompressEndpoint::new(
         MCU_ID,
-        StepShim::new(vec![motor_cfg()], SHIM_RING_DEPTH),
-        vec![axis],
-        vec![OID],
+        StepShim::new(motors, SHIM_RING_DEPTH),
+        axes,
+        oids,
         egress,
         tx,
         clock_of,
@@ -1150,6 +1156,40 @@ fn a_virgin_follower_lane_emits_frames_and_a_barrier_on_first_motion() {
         !h.barriers.lock_ok().is_empty(),
         "without a barrier the mcu can never ack this lane's retirement"
     );
+}
+
+#[test]
+fn four_motor_fresh_anchor_emits_and_releases_each_retirement_barrier() {
+    let oids = vec![6, 7, 8, 9];
+    let mut h = harness_axes(1024, vec![0, 1, 2, 3], oids.clone());
+    h.now.store(1_000, Ordering::Relaxed);
+    for axis in 0..4 {
+        h.endpoint
+            .mark_reanchor(axis, 2_000, Some(CYCLES_PER_SECOND));
+    }
+    h.endpoint
+        .send_frames(
+            MCU_ID,
+            &(0..4)
+                .map(|axis| frame_for_axis(axis, ramp(2_000, 64)))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+
+    h.now.store(10_000_000, Ordering::Relaxed);
+    h.endpoint.tick().unwrap();
+    let issued = std::mem::take(&mut *h.barriers.lock_ok());
+    assert_eq!(issued.len(), oids.len(), "issued={issued:?}");
+    assert_eq!(issued.iter().map(|&(oid, _)| oid).collect::<Vec<_>>(), oids);
+
+    for &(oid, seq) in &issued[..3] {
+        h.endpoint.on_barrier_ack(oid, seq).unwrap();
+    }
+    assert_eq!(h.endpoint.published_counts(), vec![0; 4]);
+
+    let (oid, seq) = issued[3];
+    h.endpoint.on_barrier_ack(oid, seq).unwrap();
+    assert_eq!(h.endpoint.published_counts(), vec![64; 4]);
 }
 
 #[test]
