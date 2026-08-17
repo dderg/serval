@@ -131,13 +131,17 @@ pub(super) struct Pump<S> {
     pub(super) mem_probe: MemPressureProbe,
     pub(super) margins: SendMarginTracker,
     pub(super) windows: HashMap<u32, VecDeque<InFlightBundle>>,
-    /// Bumped on every resume. A `Halted` outcome from a bundle submitted
-    /// before the resume is stale: it reports the halt that resume already
-    /// cleared, and a still-halted endpoint re-signals on the next bundle, so
-    /// acting on it would spuriously halt the fresh stream. Halts do not bump
-    /// it — the halt path purges the window itself and halts every axis whose
-    /// bundle it rolled back.
-    pub(super) resume_epoch: u64,
+    /// Per-MCU resume generation. A `Halted` outcome from a bundle submitted
+    /// before its own endpoint's resume is stale: it reports the halt that
+    /// resume already cleared, and a still-halted endpoint re-signals on the
+    /// next bundle, so acting on it would spuriously halt the fresh stream.
+    ///
+    /// Staleness is endpoint-local, so this must be too: a resume on one MCU
+    /// says nothing about a halt another MCU is reporting, and counting them
+    /// together would skip the halt handling that in-flight bundle needs after
+    /// its rollback already abandoned its pieces. Halts do not bump it — the
+    /// halt path purges the window itself and halts every axis it discarded.
+    pub(super) resume_epochs: HashMap<u32, u64>,
 }
 
 /// The axis a transport-wide failure is attributed to: bundles are per-MCU, so
@@ -192,6 +196,10 @@ impl<S: PieceSink> Pump<S> {
             pending.extend(purged);
         }
         Ok(())
+    }
+
+    fn resume_epoch_of(&self, mcu_id: u32) -> u64 {
+        self.resume_epochs.get(&mcu_id).copied().unwrap_or(0)
     }
 
     /// Drain every in-flight bundle for an endpoint that is halting. A bundle
@@ -369,7 +377,7 @@ impl<S: PieceSink> Pump<S> {
                     return Err(());
                 }
                 Some(Err(SendError::Halted(e))) => {
-                    let resumed_since_submit = entry.resume_epoch != self.resume_epoch;
+                    let resumed_since_submit = entry.resume_epoch != self.resume_epoch_of(mcu_id);
                     tracing::debug!(
                         subsystem = "motion",
                         event = "send_frame_halted",
@@ -509,8 +517,8 @@ impl<S: PieceSink> Pump<S> {
                 self.pending_barrier_acks.push(ack);
             }
             PumpMsg::Resume(keys) => {
-                self.resume_epoch += 1;
                 for key in keys {
+                    *self.resume_epochs.entry(key.mcu_id).or_default() += 1;
                     self.halted.remove(&key);
                 }
             }
@@ -1165,6 +1173,7 @@ impl<S: PieceSink> Pump<S> {
                                 self.margins
                                     .observe_send(mcu_id, &bundle, freq, &self.queues);
                             }
+                            let resume_epoch = self.resume_epoch_of(mcu_id);
                             self.windows
                                 .entry(mcu_id)
                                 .or_default()
@@ -1172,7 +1181,7 @@ impl<S: PieceSink> Pump<S> {
                                     bundle,
                                     pending,
                                     attempts: 0,
-                                    resume_epoch: self.resume_epoch,
+                                    resume_epoch,
                                 });
                             self.drain_window(mcu_id, None)?;
                         }
@@ -1376,7 +1385,7 @@ pub fn run_pump<S: PieceSink>(
         mem_probe: MemPressureProbe::new(),
         margins: SendMarginTracker::new(),
         windows: HashMap::new(),
-        resume_epoch: 0,
+        resume_epochs: HashMap::new(),
     };
     pump.run(control_rx, data_rx);
 }

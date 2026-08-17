@@ -387,6 +387,51 @@ fn bundle_built_before_the_drain_that_halts_it_is_abandoned() {
     handle.join().unwrap();
 }
 
+/// Response staleness is endpoint-local: a resume on one MCU says nothing
+/// about a halt another MCU is reporting. Counting resumes globally made the
+/// second MCU's halt look already-handled, so its refused bundle was rolled
+/// back — pieces abandoned — without halting the axis, reopening the hole.
+#[test]
+fn resume_on_one_mcu_does_not_suppress_a_halt_on_another() {
+    let halting = AxisKey { mcu_id: 1, axis: 0 };
+    let elsewhere = AxisKey { mcu_id: 2, axis: 0 };
+    let sink = WindowScriptSink::gated(4, vec![Script::Halted]);
+    let fatal = Arc::new(Mutex::new(Vec::new()));
+    let (ctl, data, handle) = spawn_pump(sink.clone(), Arc::clone(&fatal));
+
+    data.send(make_enqueue(halting, vec![make_piece(0)]))
+        .unwrap();
+    wait_until(|| sink.bundles().len() == 1, "mcu 1 bundle in flight");
+
+    ctl.send(PumpMsg::Resume(vec![elsewhere])).unwrap();
+    let (ack_tx, ack_rx) = mpsc::sync_channel::<()>(1);
+    ctl.send(PumpMsg::Barrier(ack_tx)).unwrap();
+    ack_rx.recv().unwrap();
+    sink.release();
+
+    // This send resolves mcu 1's in-flight bundle as `Halted`; the resume on
+    // mcu 2 must not classify that outcome as already-handled.
+    data.send(make_enqueue(halting, vec![make_piece(1)]))
+        .unwrap();
+    let (ack_tx, ack_rx) = mpsc::sync_channel::<()>(1);
+    ctl.send(PumpMsg::Barrier(ack_tx)).unwrap();
+    ack_rx.recv().unwrap();
+
+    assert_eq!(
+        sink.bundles().len(),
+        1,
+        "mcu 1 halted, so nothing more may reach its wire: {:?}",
+        sink.bundles()
+    );
+    assert!(
+        fatal.lock().unwrap().is_empty(),
+        "an endpoint halt is not a transport fatality"
+    );
+
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+}
+
 /// A resume clears the halt, so a `Halted` response from a bundle submitted
 /// before it is stale and must not re-halt the fresh stream.
 #[test]
