@@ -44,6 +44,10 @@ pub mod per_axis_timer;
 pub mod phase_handover;
 pub mod phase_lut;
 pub mod piece_ring;
+#[cfg(feature = "sample-stepping")]
+pub mod sample_exec;
+pub mod sample_run;
+pub mod sample_wire;
 pub mod state;
 pub use state::{SetStepModeError, StepMode, set_step_mode};
 pub mod step;

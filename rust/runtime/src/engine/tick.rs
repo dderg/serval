@@ -112,6 +112,9 @@ impl Engine {
     pub fn tick(&mut self, now: u64, shared: &SharedState, storage: &mut [PieceEntry]) -> bool {
         Self::drain_refill_fault(shared);
 
+        #[cfg(feature = "sample-stepping")]
+        self.sample_take_halt_request(shared);
+
         #[cfg(feature = "motion-module-stepper")]
         #[cfg(any(test, feature = "host"))]
         let test_queue_ptrs = self.test_queue_ptrs;
@@ -141,6 +144,13 @@ impl Engine {
         let mut active = false;
 
         for i in 0..(self.num_axes as usize) {
+            #[cfg(feature = "sample-stepping")]
+            if self.sample_lane_anchored(i) {
+                if self.sample_dispatch(i, now, shared) {
+                    active = true;
+                }
+                continue;
+            }
             let Some((p_end, v_end, p_sample_start, overlay_just_armed, motor_mask)) =
                 self.advance_axis_sample(i, now, shared, storage)
             else {

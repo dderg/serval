@@ -94,6 +94,14 @@ serial:
 #   introduce on a sub-sample step time. Only valid with
 #   stepcompress_encoder: classic; setting it while the encoder is
 #   'hp' is a configuration error.
+#phase_transport: piece
+#   Selects how phase-stepped lanes on this micro-controller receive
+#   their trajectory. 'piece' (the default) evaluates Chebyshev pieces
+#   on the MCU. 'sample' streams uniformly-spaced position samples the
+#   MCU interpolates linearly at tick rate, which needs firmware built
+#   with CONFIG_SAMPLE_STEPPING. Only valid with stepping_mode: piece,
+#   only on an MCU that has at least one phase_stepping: 1 stepper, and
+#   never on an EtherCAT endpoint.
 ```
 
 ### [mcu my_extra_mcu]

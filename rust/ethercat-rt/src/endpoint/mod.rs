@@ -10,6 +10,7 @@ use crate::mailbox::MailboxWorker;
 use crate::scale::CountMap;
 use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
+use crate::setpoint::{Executor, SampleGrid, SetpointEntry, SetpointRing};
 use crate::strain_comp::StrainCompBank;
 use crate::stream_halt::StreamHalt;
 use crate::torque::TorqueGate;
@@ -21,6 +22,8 @@ mod bringup;
 mod commands;
 mod cycle;
 mod drive;
+#[cfg(test)]
+mod ring_tests;
 #[cfg(test)]
 mod tests;
 
@@ -62,6 +65,24 @@ pub struct EndpointCtx {
     run_limits: Vec<(u32, u16)>,
 
     rings: Vec<AxisRing>,
+    /// Which executor drives the CSP targets. The piece path evaluates
+    /// Chebyshev pieces per cycle; the setpoint ring plays one host-filled
+    /// entry per cycle.
+    executor: Executor,
+    sp_rings: Vec<SetpointRing>,
+    grid: SampleGrid,
+    /// Drive-frame counts that a lane's `pos_counts == 0` maps to, latched at
+    /// the first entry of each anchor epoch exactly as the piece path latches
+    /// its `CountMap`.
+    ring_origin: Vec<Option<i32>>,
+    /// Reused per-cycle buffer of the entries played this cycle, so the DC
+    /// path allocates nothing for the ring executor.
+    sp_play_scratch: Vec<Option<SetpointEntry>>,
+    /// Reused decode buffer for one lane block of a `PushSampleRuns` fill, so
+    /// the command path allocates nothing per frame.
+    sp_fill_scratch: Vec<SetpointEntry>,
+    last_grid_index: u64,
+    last_grid_clock: u64,
     buzz: BuzzOsc,
     damper: DiffDamperBank,
     trim: DiffTrimBank,
@@ -182,12 +203,32 @@ pub fn run(ctx: &mut EndpointCtx) {
     eprintln!("ec-rt: shutdown complete");
 }
 
+/// Per-lane progress the host paces its stream against: retired pieces on the
+/// piece path, played cycles on the setpoint ring.
+pub(super) fn lane_progress(ctx: &EndpointCtx) -> Vec<u32> {
+    match ctx.executor {
+        Executor::Piece => ctx.rings.iter().map(AxisRing::retired_count).collect(),
+        Executor::SetpointRing => ctx
+            .sp_rings
+            .iter()
+            .map(SetpointRing::played_count)
+            .collect(),
+    }
+}
+
+pub(super) fn all_lanes_idle(ctx: &EndpointCtx) -> bool {
+    match ctx.executor {
+        Executor::Piece => ctx.rings.iter().all(AxisRing::is_empty),
+        Executor::SetpointRing => ctx.sp_rings.iter().all(SetpointRing::is_empty),
+    }
+}
+
 pub(super) fn respond_fault_heartbeat(
     ctx: &mut EndpointCtx,
     engine_state: u8,
     error_code: u16,
 ) -> Vec<u32> {
-    let retired: Vec<u32> = ctx.rings.iter().map(|r| r.retired_count()).collect();
+    let retired = lane_progress(ctx);
     ctx.server.respond(&status_heartbeat_frame(
         engine_state,
         error_code,
@@ -200,6 +241,12 @@ pub(super) fn respond_fault_heartbeat(
 pub(super) fn discard_motion(ctx: &mut EndpointCtx) {
     for r in &mut ctx.rings {
         r.reset();
+    }
+    for r in &mut ctx.sp_rings {
+        r.reset();
+    }
+    for o in &mut ctx.ring_origin {
+        *o = None;
     }
     for c in &mut ctx.cmaps {
         *c = None;

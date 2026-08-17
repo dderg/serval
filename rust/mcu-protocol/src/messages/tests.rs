@@ -923,3 +923,168 @@ fn capture_message_kinds_round_trip_u16() {
         assert!(!kind.is_event());
     }
 }
+
+fn lane(axis_idx: u8, sample_count: u16) -> LaneRun {
+    LaneRun {
+        axis_idx,
+        flags: LANE_RUN_FLAG_REANCHOR,
+        origin_mm_q16: -3 * 65_536,
+        start_index: 9_000 + u64::from(axis_idx),
+        interval_ticks: 1_600,
+        sample_count,
+        samples: (0..sample_count)
+            .map(|i| SetpointSample {
+                pos_counts: 100 * i32::from(i),
+                vel_ff: -50 * i32::from(i),
+                torque_ff: -(i as i16),
+                acc_mm_s2: 0.25 * f32::from(i),
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn push_sample_runs_multi_lane_round_trips() {
+    let msg = PushSampleRuns {
+        lanes: vec![lane(0, 3), lane(1, 1), lane(2, 2)],
+    };
+    let buf = msg.encoded_to_vec();
+    assert_eq!(
+        buf.len(),
+        1 + 3 * LANE_RUN_HEADER_LEN + 6 * SETPOINT_SAMPLE_LEN
+    );
+    assert_eq!(buf[0], 3, "leading lane_count byte");
+    assert_eq!(roundtrip(&msg), msg);
+}
+
+#[test]
+fn push_sample_runs_single_lane_single_sample_round_trips() {
+    let msg = PushSampleRuns {
+        lanes: vec![lane(4, 1)],
+    };
+    let buf = msg.encoded_to_vec();
+    assert_eq!(buf.len(), 1 + LANE_RUN_HEADER_LEN + SETPOINT_SAMPLE_LEN);
+    assert_eq!(roundtrip(&msg), msg);
+}
+
+#[test]
+fn push_sample_runs_decode_zero_lane_count_is_err() {
+    assert_eq!(
+        PushSampleRuns::decode(&[0u8]).unwrap_err(),
+        DecodeError::EmptyArray {
+            field: "PushSampleRuns.lanes"
+        }
+    );
+}
+
+#[test]
+fn push_sample_runs_decode_duplicate_axis_is_err() {
+    let mut buf = PushSampleRuns {
+        lanes: vec![lane(1, 1), lane(2, 1)],
+    }
+    .encoded_to_vec();
+    buf[1 + LANE_RUN_HEADER_LEN + SETPOINT_SAMPLE_LEN] = 1;
+    assert_eq!(
+        PushSampleRuns::decode(&buf).unwrap_err(),
+        DecodeError::DuplicateField {
+            field: "PushSampleRuns.axis_idx"
+        }
+    );
+}
+
+#[test]
+fn push_sample_runs_decode_zero_sample_count_is_err() {
+    let buf = PushSampleRuns {
+        lanes: vec![lane(0, 0)],
+    }
+    .encoded_to_vec();
+    assert_eq!(buf.len(), 1 + LANE_RUN_HEADER_LEN);
+    assert_eq!(
+        PushSampleRuns::decode(&buf).unwrap_err(),
+        DecodeError::EmptyArray {
+            field: "PushSampleRuns.samples"
+        }
+    );
+}
+
+#[test]
+fn push_sample_runs_decode_truncated_is_err() {
+    let full = PushSampleRuns {
+        lanes: vec![lane(0, 2)],
+    }
+    .encoded_to_vec();
+    assert_eq!(
+        PushSampleRuns::decode(&full[..full.len() - 3]).unwrap_err(),
+        DecodeError::UnexpectedEof
+    );
+}
+
+#[test]
+fn push_sample_runs_response_round_trips() {
+    let msg = PushSampleRunsResponse {
+        result: 0,
+        arrival_clock: 0x0102_0304_0506_0708,
+        grid_index: 1_234_567,
+        grid_clock: 0x1112_1314_1516_1718,
+        lanes: vec![
+            LaneDepth {
+                axis_idx: 0,
+                free_cycles: 256,
+            },
+            LaneDepth {
+                axis_idx: 3,
+                free_cycles: 0,
+            },
+        ],
+    };
+    let buf = msg.encoded_to_vec();
+    assert_eq!(buf.len(), 4 + 8 + 8 + 8 + 1 + 2 * 5);
+    assert_eq!(buf[28], 2, "lane_count byte");
+    assert_eq!(roundtrip(&msg), msg);
+}
+
+#[test]
+fn push_sample_runs_response_decode_zero_lane_count_is_err() {
+    let buf = vec![0u8; 4 + 8 + 8 + 8 + 1];
+    assert_eq!(
+        PushSampleRunsResponse::decode(&buf).unwrap_err(),
+        DecodeError::EmptyArray {
+            field: "PushSampleRunsResponse.lanes"
+        }
+    );
+}
+
+#[test]
+fn sample_grid_response_round_trips() {
+    let msg = SampleGridResponse {
+        executor: 1,
+        cycle_ticks: 1_600,
+        ring_depth_cycles: 512,
+        grid_index: 77_777,
+        grid_clock: 0x2122_2324_2526_2728,
+    };
+    let buf = msg.encoded_to_vec();
+    assert_eq!(buf.len(), 1 + 4 + 4 + 8 + 8);
+    assert_eq!(roundtrip(&msg), msg);
+}
+
+#[test]
+fn query_sample_grid_round_trips() {
+    let msg = QuerySampleGrid {};
+    assert!(msg.encoded_to_vec().is_empty());
+    assert_eq!(roundtrip(&msg), msg);
+}
+
+#[test]
+fn sample_stream_message_kinds_round_trip_u16() {
+    for (kind, raw) in [
+        (MessageKind::PushSampleRuns, 0x0062u16),
+        (MessageKind::PushSampleRunsResponse, 0x0063),
+        (MessageKind::QuerySampleGrid, 0x0064),
+        (MessageKind::SampleGridResponse, 0x0065),
+    ] {
+        assert_eq!(kind.as_u16(), raw);
+        assert_eq!(MessageKind::from_u16(raw), Some(kind));
+        assert!(!kind.is_event());
+    }
+}

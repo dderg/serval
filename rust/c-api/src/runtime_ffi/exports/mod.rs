@@ -13,11 +13,15 @@ mod diag;
 mod lifecycle;
 mod phase_buzz;
 mod ring;
+#[cfg(feature = "sample-stepping")]
+mod sample;
 
 pub use diag::*;
 pub use lifecycle::*;
 pub use phase_buzz::*;
 pub use ring::*;
+#[cfg(feature = "sample-stepping")]
+pub use sample::*;
 
 #[allow(missing_debug_implementations)]
 #[repr(C)]

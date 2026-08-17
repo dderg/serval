@@ -112,6 +112,22 @@ pub const RUNTIME_ERR_UNKNOWN_STEP_MODE: i32 = -312;
 /// SPI motor. Detail: `((axis_idx & 0xFF) << 16) | stepper_oid`.
 pub const RUNTIME_ERR_PHASE_MOTOR_UNMAPPED: i32 = -313;
 pub const RUNTIME_ERR_OVERLAY_UNSUPPORTED: i32 = -314;
+/// Sample-stream run reached the lane after its start clock had already
+/// passed the playback clock — the host was not feeding in time.
+/// Detail: `((lane_idx & 0xFF) << 16) | deficit_us`.
+pub const RUNTIME_ERR_SAMPLE_RUN_LATE: i32 = -317;
+/// A sample lane's run ring drained while its trajectory still had velocity.
+/// Detail: `((lane_idx & 0xFF) << 16) | tail_delta_quanta`.
+pub const RUNTIME_ERR_SAMPLE_RING_UNDERRUN: i32 = -318;
+/// A `sample_run` / `sample_overlay` arrived for a lane whose run ring is
+/// already full. Detail: `(lane_idx & 0xFF) << 16`.
+pub const RUNTIME_ERR_SAMPLE_RING_FULL: i32 = -319;
+/// A sample command named an oid that is not bound to any configured lane.
+/// Detail: `oid`.
+pub const RUNTIME_ERR_SAMPLE_LANE_UNKNOWN: i32 = -320;
+/// `sample_run.rs` rejected the run itself (abutment, decode, degenerate
+/// header). Detail: `((lane_idx & 0xFF) << 16) | SampleRunError::fault_code()`.
+pub const RUNTIME_ERR_SAMPLE_RUN_REJECTED: i32 = -321;
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +214,11 @@ pub enum FaultCode {
     OverlayUnsupported = -314,
     BuzzAxisConflict = -315,
     BuzzInPhaseMode = -316,
+    SampleRunLate = -317,
+    SampleRingUnderrun = -318,
+    SampleRingFull = -319,
+    SampleLaneUnknown = -320,
+    SampleRunRejected = -321,
 }
 
 impl FaultCode {
@@ -301,6 +322,11 @@ impl FaultCode {
             -314 => Self::OverlayUnsupported,
             -315 => Self::BuzzAxisConflict,
             -316 => Self::BuzzInPhaseMode,
+            -317 => Self::SampleRunLate,
+            -318 => Self::SampleRingUnderrun,
+            -319 => Self::SampleRingFull,
+            -320 => Self::SampleLaneUnknown,
+            -321 => Self::SampleRunRejected,
             _ => return None,
         })
     }
@@ -386,6 +412,11 @@ impl FaultCode {
             Self::OverlayUnsupported => "OverlayUnsupported",
             Self::BuzzAxisConflict => "BuzzAxisConflict",
             Self::BuzzInPhaseMode => "BuzzInPhaseMode",
+            Self::SampleRunLate => "SampleRunLate",
+            Self::SampleRingUnderrun => "SampleRingUnderrun",
+            Self::SampleRingFull => "SampleRingFull",
+            Self::SampleLaneUnknown => "SampleLaneUnknown",
+            Self::SampleRunRejected => "SampleRunRejected",
         }
     }
 }

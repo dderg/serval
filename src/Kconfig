@@ -534,6 +534,40 @@ config MOTION_MODULE_STEPPER
       Compiles the STEP/DIR pulse and TMC phase-stepping dispatch backend
       into this firmware. Required for any build that drives stepper motors;
       a servo/EtherCAT node leaves it off.
+
+config SAMPLE_STEPPING
+    bool "Sample-stream execution for phase-stepped lanes"
+    depends on MOTION_MODULE_STEPPER
+    default n
+    help
+      Adds the sample-stream executor beside the piece transport. A phase
+      lane the host anchors with sample_anchor is driven by linear
+      interpolation between the samples of its sample_run stream instead of
+      Chebyshev evaluation over a piece ring; the LUT phase quantum, the
+      XDIRECT SPI arbitration and the step-count bookkeeping are the same
+      code either way. Lanes the host never anchors keep running pieces, so
+      both transports remain selectable in one firmware.
+
+config RUNTIME_SAMPLE_RUNS_PER_LANE
+    int "Sample runs buffered per phase lane" if LOW_LEVEL_OPTIONS
+    depends on SAMPLE_STEPPING
+    default 12 if MACH_STM32H7
+    default 4
+    range 2 64
+    help
+      Depth of each lane's sample-run ring. One run holds up to
+      SAMPLE_RUN_COUNT_MAX (48) samples, so at a 40 kHz tick the default 12
+      buffers roughly 14 ms of trajectory per lane. Each slot costs
+      48*4 + 16 bytes out of RUNTIME_STORAGE_SIZE.
+
+config RUNTIME_SAMPLE_OVERLAY_RUNS_PER_LANE
+    int "Overlay sample runs buffered per phase lane" if LOW_LEVEL_OPTIONS
+    depends on SAMPLE_STEPPING
+    default 3
+    range 1 16
+    help
+      Depth of each lane's additive overlay ring. Overlay runs carry short
+      nudges, so this is much shallower than the main ring.
 endmenu
 
 source "src/extras/Kconfig"

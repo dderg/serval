@@ -1,3 +1,6 @@
+use super::barrier_ledger::{
+    BarrierId, barrier_seq_after, barrier_seq_before, barrier_seq_covers, barrier_seq_seed,
+};
 use super::pump_loop::pump_past_guard_secs;
 use super::sched::SeamBasis;
 use super::{AxisFrame, HeartbeatMsg, PumpMsg, SendError};
@@ -212,12 +215,6 @@ struct PendingCut {
     held: Vec<PieceEntry>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct BarrierId {
-    oid: u32,
-    seq: u32,
-}
-
 struct SentBarrier {
     id: BarrierId,
     sent_clock: u64,
@@ -369,26 +366,6 @@ fn expand_clock32(reference: u64, low: u32) -> u64 {
 fn queue_step_span(interval: u32, count: u16, add: i16) -> i64 {
     let count = i64::from(count);
     i64::from(interval) * count + i64::from(add) * count * (count - 1) / 2
-}
-
-fn barrier_seq_seed() -> u32 {
-    let elapsed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock is before the Unix epoch");
-    (elapsed.as_nanos() as u32) | 1
-}
-
-fn barrier_seq_after(candidate: u32, reference: u32) -> bool {
-    let distance = candidate.wrapping_sub(reference);
-    distance != 0 && distance < (1 << 31)
-}
-
-fn barrier_seq_before(candidate: u32, reference: u32) -> bool {
-    barrier_seq_after(reference, candidate)
-}
-
-fn barrier_seq_covers(high_water: u32, seq: u32) -> bool {
-    high_water == seq || barrier_seq_after(high_water, seq)
 }
 
 impl StepcompressEndpoint {

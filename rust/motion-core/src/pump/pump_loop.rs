@@ -111,6 +111,8 @@ pub(super) struct Pump<S> {
 
 impl<S: PieceSink> Pump<S> {
     fn halt_keys(&mut self, keys: impl IntoIterator<Item = AxisKey>, inferred: bool) {
+        let keys: Vec<AxisKey> = keys.into_iter().collect();
+        self.sink.cut_staged(&keys);
         let inferred_at = inferred.then(Instant::now);
         for key in keys {
             if inferred {
@@ -965,6 +967,23 @@ impl<S: PieceSink> Pump<S> {
             match self.send_ready() {
                 Ok(a) => activity |= a,
                 Err(()) => return,
+            }
+
+            for mcu_id in self.sink.drain_tick_mcus() {
+                if let Err(e) = self.sink.drain_tick(mcu_id) {
+                    tracing::error!(
+                        subsystem = "motion",
+                        event = "setpoint_drain_tick_failed",
+                        mcu = mcu_id,
+                        error = ?e,
+                        "setpoint-ring drain tick failed — invoking fatal-transport action"
+                    );
+                    (self.callbacks.on_fatal_transport)(AxisKey { mcu_id, axis: 0 });
+                    return;
+                }
+                if self.sink.wants_drain_tick(mcu_id) {
+                    self.holding_ahead = true;
+                }
             }
 
             let unpushed: u64 = self.queues.values().map(|q| q.pieces.len() as u64).sum();

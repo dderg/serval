@@ -96,6 +96,8 @@ fn run_endpoint(socket_path: String, faulted: Arc<AtomicBool>) {
                     todo!("wired in the endpoint task")
                 }
                 Command::Unknown { .. }
+                | Command::PushSampleRuns { .. }
+                | Command::QuerySampleGrid { .. }
                 | Command::SetDiffDamper { .. }
                 | Command::SetDiffTrim { .. }
                 | Command::SetStrainComp { .. }

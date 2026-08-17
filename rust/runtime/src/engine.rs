@@ -13,6 +13,8 @@ pub use crate::stepping_state::N_AXES;
 mod config;
 mod manual;
 mod query;
+#[cfg(feature = "sample-stepping")]
+mod sample;
 mod tick;
 
 pub(crate) struct SharedFaultSink<'a> {
@@ -64,6 +66,8 @@ pub struct Engine {
     pub(crate) buzz: crate::buzz::Buzz,
     #[cfg(any(test, feature = "host"))]
     test_queue_ptrs: [*mut crate::step_queue::StepQueue; MAX_AXES],
+    #[cfg(feature = "sample-stepping")]
+    pub(crate) sample_lanes: [crate::sample_exec::SampleLane; MAX_AXES],
 }
 
 impl Engine {
@@ -85,6 +89,8 @@ impl Engine {
             buzz: crate::buzz::Buzz::new(),
             #[cfg(any(test, feature = "host"))]
             test_queue_ptrs: [core::ptr::null_mut(); MAX_AXES],
+            #[cfg(feature = "sample-stepping")]
+            sample_lanes: [const { crate::sample_exec::SampleLane::new() }; MAX_AXES],
         }
     }
 
@@ -122,6 +128,9 @@ impl Engine {
             addr_of_mut!((*ptr).buzz).write(crate::buzz::Buzz::new());
             #[cfg(any(test, feature = "host"))]
             addr_of_mut!((*ptr).test_queue_ptrs).write([core::ptr::null_mut(); MAX_AXES]);
+            #[cfg(feature = "sample-stepping")]
+            addr_of_mut!((*ptr).sample_lanes)
+                .write([const { crate::sample_exec::SampleLane::new() }; MAX_AXES]);
         }
     }
 
@@ -147,6 +156,10 @@ impl Engine {
             .store(RuntimeStatus::Idle as u8, Ordering::Release);
         self.last_error.store(0, Ordering::Release);
         self.pieces_gated = false;
+        #[cfg(feature = "sample-stepping")]
+        {
+            self.sample_lanes = [const { crate::sample_exec::SampleLane::new() }; MAX_AXES];
+        }
     }
 
     pub fn discard_pending(&mut self) {
@@ -187,6 +200,14 @@ impl Engine {
     ) -> i32 {
         if crate::buzz_stream::axis_active(axis_idx as usize) {
             return RUNTIME_ERR_INVALID_ARG;
+        }
+        #[cfg(feature = "sample-stepping")]
+        if self
+            .sample_lanes
+            .get(axis_idx as usize)
+            .is_some_and(crate::sample_exec::SampleLane::is_anchored)
+        {
+            return crate::error::RUNTIME_ERR_MOTION_IN_PROGRESS;
         }
         let Some(axis) = self
             .stepping_axes

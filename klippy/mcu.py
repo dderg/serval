@@ -40,6 +40,31 @@ STEPCOMPRESS_ENCODERS = {
     STEPCOMPRESS_ENCODER_CLASSIC: STEPCOMPRESS_ENCODER_CLASSIC,
 }
 STEPCOMPRESS_MAX_ERROR_DEFAULT = 0.000025
+PHASE_TRANSPORT_PIECE = "piece"
+PHASE_TRANSPORT_SAMPLE = "sample"
+PHASE_TRANSPORTS = {
+    PHASE_TRANSPORT_PIECE: PHASE_TRANSPORT_PIECE,
+    PHASE_TRANSPORT_SAMPLE: PHASE_TRANSPORT_SAMPLE,
+}
+
+# Mirrors src/sample_wire.h / rust/runtime/src/sample_wire.rs. The wire
+# contract lives in one place per language and test_sample_wire.py asserts the
+# three copies agree.
+SAMPLE_ANCHOR_CMD = "sample_anchor oid=%c clock=%u position=%i"
+SAMPLE_RUN_CMD = "sample_run oid=%c interval=%u count=%c data=%*s"
+SAMPLE_OVERLAY_CMD = (
+    "sample_overlay oid=%c clock=%u interval=%u count=%c data=%*s"
+)
+SAMPLE_GET_POSITION_CMD = "sample_get_position oid=%c"
+SAMPLE_POSITION_MSG = "sample_position oid=%c clock=%u position=%i"
+SAMPLE_COMMANDS = (
+    SAMPLE_ANCHOR_CMD,
+    SAMPLE_RUN_CMD,
+    SAMPLE_OVERLAY_CMD,
+    SAMPLE_GET_POSITION_CMD,
+)
+SAMPLE_RUN_DATA_MAX = 48
+SAMPLE_RUN_COUNT_MAX = 48
 
 
 class error(Exception):
@@ -120,6 +145,19 @@ class MCU:
         self._stepcompress_sample_rate = 0.0
         self._stepcompress_encoder = STEPCOMPRESS_ENCODER_HP
         self._stepcompress_max_error = 0.0
+        self._phase_transport = config.getchoice(
+            "phase_transport", PHASE_TRANSPORTS, PHASE_TRANSPORT_PIECE
+        )
+        if (
+            self._phase_transport == PHASE_TRANSPORT_SAMPLE
+            and self._stepping_mode != STEPPING_MODE_PIECE
+        ):
+            raise config.error(
+                "mcu '%s': phase_transport: sample needs stepping_mode: piece "
+                "(the default) — the sample-stream executor drives phase lanes "
+                "on a motion-runtime mcu, and classic stepcompress stepping "
+                "has no phase lanes at all" % (config.get_name(),)
+            )
         if self._stepping_mode != STEPPING_MODE_STEPCOMPRESS:
             return
         rate = config.getfloat("stepcompress_sample_rate", None)
@@ -173,6 +211,9 @@ class MCU:
 
     def get_stepcompress_max_error(self):
         return self._stepcompress_max_error
+
+    def get_phase_transport(self):
+        return self._phase_transport
 
     def get_move_queue_slots(self):
         return self._move_queue_slots

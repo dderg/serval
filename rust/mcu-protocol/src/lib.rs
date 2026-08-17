@@ -7,9 +7,10 @@ pub mod messages;
 pub use bootstrap::{Identify, IdentifyResponse};
 pub use codec::{Decode, DecodeError, Encode};
 pub use messages::{
-    ClaimHandshakeReply, EndstopTrip, FaultEvent, McuLog, MessageKind, PushPieces,
-    PushPiecesResponse, RuntimeCapsResponse, SlaveState, SlaveStatus, StatusHeartbeat, Stop,
-    StopResponse,
+    ClaimHandshakeReply, EndstopTrip, FaultEvent, LaneDepth, LaneRun, McuLog, MessageKind,
+    PushPieces, PushPiecesResponse, PushSampleRuns, PushSampleRunsResponse, QuerySampleGrid,
+    RuntimeCapsResponse, SampleGridResponse, SetpointSample, SlaveState, SlaveStatus,
+    StatusHeartbeat, Stop, StopResponse,
 };
 
 include!(concat!(env!("OUT_DIR"), "/schema_hash.rs"));

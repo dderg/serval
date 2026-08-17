@@ -224,6 +224,34 @@ pub trait PieceSink: Send {
         Ok(())
     }
 
+    /// Drop whatever the host has staged for `keys` but not yet committed to
+    /// the transport's own timeline, because the endpoint is about to discard
+    /// (or has discarded) the motion it already accepted for them. Transports
+    /// that keep no host-side stage need nothing; the setpoint-ring transport
+    /// re-anchors its lanes here so the next run cannot claim to continue a
+    /// stream the ring no longer holds.
+    fn cut_staged(&self, _keys: &[AxisKey]) {}
+
+    /// The mcus that can owe their endpoint a drain tick at all. Empty for
+    /// every piece transport, so the pump's tick costs nothing there.
+    fn drain_tick_mcus(&self) -> Vec<u32> {
+        Vec::new()
+    }
+
+    /// True while `mcu_id` still owes its endpoint samples the pump has not
+    /// shipped — a host-generated source (a buzz) or trajectory left over past
+    /// one fill window. Piece transports commit everything they are handed, so
+    /// they never do.
+    fn wants_drain_tick(&self, _mcu_id: u32) -> bool {
+        false
+    }
+
+    /// Ship one further window for `mcu_id` without new pieces, draining what
+    /// [`PieceSink::wants_drain_tick`] reported.
+    fn drain_tick(&self, _mcu_id: u32) -> Result<(), SendError> {
+        Ok(())
+    }
+
     /// Routes a classic-stepping `stepcompress_barrier_ack` to the endpoint
     /// that issued the barrier.
     fn on_barrier_ack(&self, mcu_id: u32, oid: u8, seq: u32) -> Result<(), SendError> {

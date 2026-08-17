@@ -11,7 +11,8 @@
 //     impls for every flat message)
 //
 // Field type language:
-//   u8 u16 u32 u64 i32 i64 f32   little-endian scalars (i64 rides the wire
+//   u8 u16 u32 u64 i16 i32 i64 f32
+//                                little-endian scalars (i64 rides the wire
 //                                as its two's-complement u64 bytes)
 //   T[N]                         fixed-size array, packed, no length prefix
 //   string                       u16-le byte length + UTF-8 bytes
@@ -156,6 +157,56 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
                 name: "axes",
                 ty: "array<axis_diag{axis_idx:u8,front_start_time:u64}>",
             },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x0062,
+        name: "PushSampleRuns",
+        version: 1,
+        channel: "pieces",
+        fields: &[
+            SchemaField { name: "lane_count", ty: "u8" },
+            SchemaField {
+                name: "lanes",
+                ty: "array<lane_run{axis_idx:u8,flags:u8,origin_mm_q16:i32,start_index:u64,interval_ticks:u32,sample_count:u16,samples:array<setpoint_sample{pos_counts:i32,vel_ff:i32,torque_ff:i16,acc_mm_s2:f32}>}>",
+            },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x0063,
+        name: "PushSampleRunsResponse",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "result", ty: "i32" },
+            SchemaField { name: "arrival_clock", ty: "u64" },
+            SchemaField { name: "grid_index", ty: "u64" },
+            SchemaField { name: "grid_clock", ty: "u64" },
+            SchemaField { name: "lane_count", ty: "u8" },
+            SchemaField {
+                name: "lanes",
+                ty: "array<lane_depth{axis_idx:u8,free_cycles:u32}>",
+            },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x0064,
+        name: "QuerySampleGrid",
+        version: 1,
+        channel: "control",
+        fields: &[],
+    },
+    SchemaMessage {
+        type_tag: 0x0065,
+        name: "SampleGridResponse",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "executor", ty: "u8" },
+            SchemaField { name: "cycle_ticks", ty: "u32" },
+            SchemaField { name: "ring_depth_cycles", ty: "u32" },
+            SchemaField { name: "grid_index", ty: "u64" },
+            SchemaField { name: "grid_clock", ty: "u64" },
         ],
     },
     SchemaMessage {

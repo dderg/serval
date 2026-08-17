@@ -10,7 +10,7 @@ use crate::config::PlannerConfig;
 use crate::worker::{DispatchError, StreamWorkerHandle};
 use trajectory::ShapedSegment;
 
-use super::{McuConnection, PyMotionEngine};
+use super::{Executor, McuConnection, PyMotionEngine, SampleGrid};
 
 fn open_pty() -> (libc::c_int, String) {
     let mut master: libc::c_int = 0;
@@ -65,6 +65,8 @@ fn serial_mcu_conn(label: &str, host_io: Arc<McuHostIo>) -> McuConnection {
         ethercat_slot_axes: Vec::new(),
         endpoint_process: None,
         endpoint_conn: None,
+        sample_grid: None,
+        ring_filler: None,
     }
 }
 
@@ -168,6 +170,8 @@ fn shutdown_releases_ethercat_socket_and_child() {
         ethercat_slot_axes: Vec::new(),
         endpoint_process: Some(child),
         endpoint_conn: Some(Arc::new(native)),
+        sample_grid: None,
+        ring_filler: None,
     };
     insert_mcu(&engine, 7, conn);
 
@@ -576,7 +580,13 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
     let sink = WireSink {
         transports: {
             let mut m = HashMap::new();
-            m.insert(EC_MCU_ID, McuTransport::EtherCat(detached_weak));
+            m.insert(
+                EC_MCU_ID,
+                McuTransport::EtherCat {
+                    conn: detached_weak,
+                    ring: None,
+                },
+            );
             m
         },
         timeout: Duration::from_millis(50),
@@ -683,11 +693,37 @@ fn register_ethercat_mcu_seeds_nominal_clock_freq() {
         .spawn()
         .expect("spawn true");
 
-    engine.register_ethercat_mcu(raw, "servo", "/tmp/test.sock", child, conn, vec![0]);
+    engine.register_ethercat_mcu(
+        raw,
+        "servo",
+        "/tmp/test.sock",
+        child,
+        conn,
+        vec![0],
+        SampleGrid {
+            executor: Executor::SetpointRing,
+            cycle_ticks: 250_000,
+            ring_depth_cycles: 512,
+            grid_index: 42,
+            grid_clock: 10_500_000,
+        },
+        None,
+    );
 
     assert!(
         engine.mcus.lock_ok().contains_key(&raw),
         "mcus must contain the raw handle after register_ethercat_mcu"
+    );
+    assert_eq!(
+        engine.mcus.lock_ok()[&raw].sample_grid,
+        Some(SampleGrid {
+            executor: Executor::SetpointRing,
+            cycle_ticks: 250_000,
+            ring_depth_cycles: 512,
+            grid_index: 42,
+            grid_clock: 10_500_000,
+        }),
+        "the claim-time sample grid must be retained on the connection for the pump"
     );
     assert_eq!(
         engine.nominal_clock_freqs.lock_ok().get(&raw).copied(),

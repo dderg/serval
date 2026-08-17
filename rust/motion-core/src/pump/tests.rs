@@ -1081,6 +1081,54 @@ fn halt_drops_queued_and_new_pieces_until_resume() {
     assert_eq!(pump.queues[&key].pieces.len(), 1);
 }
 
+/// A halted axis' motion is discarded on the endpoint, so a transport that
+/// keeps a host-side stage (the setpoint ring) must be told to drop it in the
+/// same breath. The pump owns that hand-off, so it is asserted here rather
+/// than at the sink.
+#[derive(Clone)]
+struct CutRecordingSink {
+    cut: Arc<Mutex<Vec<AxisKey>>>,
+}
+
+impl PieceSink for CutRecordingSink {
+    fn send_frame(
+        &self,
+        _key: AxisKey,
+        _pieces: &[PieceEntry],
+        _start_slot: u16,
+        _new_head: u32,
+        _room: u32,
+    ) -> Result<i32, SendError> {
+        Ok(mcu_protocol::result_codes::OK)
+    }
+
+    fn cut_staged(&self, keys: &[AxisKey]) {
+        self.cut.lock().unwrap().extend_from_slice(keys);
+    }
+}
+
+#[test]
+fn halting_an_axis_cuts_the_transport_s_staged_motion() {
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    let cut = Arc::new(Mutex::new(Vec::new()));
+    let sink = CutRecordingSink {
+        cut: Arc::clone(&cut),
+    };
+    let mut pump = queue_pump(key, Duration::from_secs(1), |_| {}, sink);
+    let (ack_tx, _ack_rx) = mpsc::sync_channel(1);
+
+    pump.handle_control_msg(PumpMsg::Halt {
+        keys: vec![key],
+        ack: ack_tx,
+    });
+
+    assert_eq!(
+        *cut.lock().unwrap(),
+        vec![key],
+        "the halted key must reach the sink's stage-cut hook"
+    );
+}
+
 #[test]
 fn halted_stream_rejection_is_not_retryable() {
     assert!(matches!(

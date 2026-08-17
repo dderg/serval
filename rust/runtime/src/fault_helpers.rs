@@ -196,5 +196,43 @@ pub fn raise_overlay_unsupported(shared: &SharedState, axis_idx: usize, mask: u8
     emit_fault_log(FaultCode::OverlayUnsupported, detail);
 }
 
+#[inline]
+fn raise_lane_fault(shared: &SharedState, fault: FaultCode, lane_idx: usize, payload: u32) {
+    let detail = ((lane_idx as u32 & 0xFF) << 16) | (payload & 0xFFFF);
+    shared.fault_detail.store(detail, Ordering::Release);
+    shared.last_error.store(fault.as_i32(), Ordering::Release);
+    emit_fault_log(fault, detail);
+}
+
+#[inline]
+pub fn raise_sample_run_late(shared: &SharedState, lane_idx: usize, deficit_ticks: u32) {
+    raise_lane_fault(shared, FaultCode::SampleRunLate, lane_idx, deficit_ticks);
+}
+
+#[inline]
+pub fn raise_sample_ring_underrun(shared: &SharedState, lane_idx: usize, tail_delta: u32) {
+    raise_lane_fault(shared, FaultCode::SampleRingUnderrun, lane_idx, tail_delta);
+}
+
+#[inline]
+pub fn raise_sample_ring_full(shared: &SharedState, lane_idx: usize) {
+    raise_lane_fault(shared, FaultCode::SampleRingFull, lane_idx, 0);
+}
+
+#[inline]
+pub fn raise_sample_lane_unknown(shared: &SharedState, oid: u8) {
+    raise_lane_fault(shared, FaultCode::SampleLaneUnknown, 0xFF, u32::from(oid));
+}
+
+#[inline]
+pub fn raise_sample_run_rejected(shared: &SharedState, lane_idx: usize, sample_fault: u16) {
+    raise_lane_fault(
+        shared,
+        FaultCode::SampleRunRejected,
+        lane_idx,
+        u32::from(sample_fault),
+    );
+}
+
 #[cfg(test)]
 mod tests;

@@ -226,10 +226,19 @@ impl PyMotionEngine {
         for (&id, io) in host_ios {
             wire_transports.insert(id, crate::pump::McuTransport::Serial(Arc::downgrade(io)));
         }
+        let ring_fillers: HashMap<u32, crate::pump::RingFiller> = self
+            .mcus
+            .lock_ok()
+            .iter()
+            .filter_map(|(&id, mcu)| mcu.ring_filler.clone().map(|filler| (id, filler)))
+            .collect();
         for (&id, conn) in ec_conns {
             wire_transports.insert(
                 id,
-                crate::pump::McuTransport::EtherCat(Arc::downgrade(conn)),
+                crate::pump::McuTransport::EtherCat {
+                    conn: Arc::downgrade(conn),
+                    ring: ring_fillers.get(&id).cloned(),
+                },
             );
         }
         for cfg in mcu_configs {

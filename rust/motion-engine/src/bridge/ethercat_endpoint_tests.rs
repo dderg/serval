@@ -1,6 +1,6 @@
 use super::{
-    EthercatDrive, endpoint_args, handshake_ethercat_endpoint, poll_socket_ready, slots_for_axis,
-    spawn_ethercat_endpoint,
+    EthercatDrive, Executor, endpoint_args, handshake_ethercat_endpoint, poll_socket_ready,
+    slots_for_axis, spawn_ethercat_endpoint,
 };
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
@@ -45,6 +45,7 @@ fn endpoint_args_single_drive_uses_legacy_form() {
         "eth0",
         "/tmp/x.sock",
         250,
+        Executor::Piece,
         None,
         None,
         250.0,
@@ -79,6 +80,7 @@ fn endpoint_args_per_drive_ff_flags() {
         "eth0",
         "/tmp/x.sock",
         250,
+        Executor::Piece,
         None,
         None,
         250.0,
@@ -119,6 +121,7 @@ fn endpoint_args_multi_drive_emits_slave_and_axis_groups() {
         "eth0",
         "/tmp/x.sock",
         250,
+        Executor::Piece,
         None,
         None,
         250.0,
@@ -159,6 +162,7 @@ fn endpoint_args_emits_per_slave_dynamics_profile() {
         "eth0",
         "/tmp/x.sock",
         250,
+        Executor::Piece,
         None,
         None,
         250.0,
@@ -188,6 +192,69 @@ fn endpoint_args_emits_per_slave_dynamics_profile() {
     assert!(!args.iter().any(|a| a == "--dynamics-profile"));
 }
 
+fn args_for(executor: Executor) -> Vec<String> {
+    endpoint_args(
+        "eth0",
+        "/tmp/x.sock",
+        250,
+        executor,
+        None,
+        None,
+        250.0,
+        None,
+        &[drive()],
+    )
+}
+
+#[test]
+fn endpoint_args_piece_executor_uses_the_piece_cli_value() {
+    assert_eq!(
+        args_for(Executor::Piece),
+        vec![
+            "eth0",
+            "--socket",
+            "/tmp/x.sock",
+            "--cycle-us",
+            "250",
+            "--executor",
+            "piece",
+            "--group-delay-us",
+            "250",
+            "--counts-per-mm",
+            "1000",
+            "--rotation-distance",
+            "40",
+            "--torque-clamp-pct",
+            "30",
+        ]
+    );
+}
+
+#[test]
+fn endpoint_args_setpoint_ring_converts_the_underscore_to_a_hyphen() {
+    let args = args_for(Executor::SetpointRing);
+    let idx = args
+        .iter()
+        .position(|a| a == "--executor")
+        .expect("--executor must always be emitted");
+    assert_eq!(args[idx + 1], "setpoint-ring");
+    assert!(
+        !args.iter().any(|a| a == "setpoint_ring"),
+        "the klippy underscore spelling must never reach the CLI; got: {args:?}"
+    );
+}
+
+#[test]
+fn executor_config_values_reject_the_cli_spelling() {
+    assert_eq!(
+        Executor::from_config_value("setpoint_ring"),
+        Some(Executor::SetpointRing)
+    );
+    assert_eq!(Executor::from_config_value("piece"), Some(Executor::Piece));
+    assert!(Executor::from_config_value("setpoint-ring").is_none());
+    assert!(Executor::from_config_value("ring").is_none());
+}
+
 #[test]
 fn spawn_nonexistent_binary_errors_with_binary_path() {
     let result = spawn_ethercat_endpoint(
@@ -195,6 +262,7 @@ fn spawn_nonexistent_binary_errors_with_binary_path() {
         "eth0",
         "/tmp/test.sock",
         250,
+        Executor::Piece,
         None,
         None,
         250.0,

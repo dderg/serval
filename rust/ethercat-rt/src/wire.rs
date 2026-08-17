@@ -2,9 +2,10 @@ use mcu_protocol::bootstrap::{IdentifyResponse, IDENTIFY_RESPONSE_BODY_LEN};
 use mcu_protocol::codec::{Decode, Encode};
 use mcu_protocol::messages::{
     ArmSensorlessEndstop, ArmSensorlessEndstopResponse, AxisDiag, ClaimHandshakeReply, EndstopTrip,
-    MessageKind, MotorSample, MotorStateResponse, PushPieces, PushPiecesResponse, ResonanceBuzz,
-    ResonanceBuzzResponse, RestoreDriveLimits, RestoreDriveLimitsResponse, ResumeStreamResponse,
-    RuntimeCapsResponse, SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome,
+    LaneDepth, MessageKind, MotorSample, MotorStateResponse, PushPieces, PushPiecesResponse,
+    PushSampleRuns, PushSampleRunsResponse, ResonanceBuzz, ResonanceBuzzResponse,
+    RestoreDriveLimits, RestoreDriveLimitsResponse, ResumeStreamResponse, RuntimeCapsResponse,
+    SampleGridResponse, SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome,
     SeedServoHomeResponse, SetDiffDamper, SetDiffDamperResponse, SetDiffTrim, SetDiffTrimResponse,
     SetDriveLimits, SetDriveLimitsResponse, SetDynamicsModel, SetDynamicsModelResponse, SetFfLead,
     SetFfLeadResponse, SetStrainComp, SetStrainCompResponse, SetTorque, SetTorqueResponse,
@@ -26,6 +27,13 @@ pub enum Command {
     PushPieces {
         correlation_id: u32,
         msg: PushPieces,
+    },
+    PushSampleRuns {
+        correlation_id: u32,
+        msg: PushSampleRuns,
+    },
+    QuerySampleGrid {
+        correlation_id: u32,
     },
     QueryRuntimeCaps {
         correlation_id: u32,
@@ -121,16 +129,22 @@ pub enum DecodeCmdError {
 pub fn decode_command(channel: u8, payload: &[u8]) -> Result<Command, DecodeCmdError> {
     let (hdr, body) = decode_message_header(payload).ok_or(DecodeCmdError::BadHeader)?;
     let cid = hdr.correlation_id;
-    if channel == MCU_CHANNEL_PIECES
-        || MessageKind::from_u16(hdr.kind_raw) == Some(MessageKind::PushPieces)
-    {
+    let kind = MessageKind::from_u16(hdr.kind_raw);
+    if kind == Some(MessageKind::PushSampleRuns) {
+        let msg = PushSampleRuns::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
+        return Ok(Command::PushSampleRuns {
+            correlation_id: cid,
+            msg,
+        });
+    }
+    if channel == MCU_CHANNEL_PIECES || kind == Some(MessageKind::PushPieces) {
         let msg = PushPieces::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
         return Ok(Command::PushPieces {
             correlation_id: cid,
             msg,
         });
     }
-    match MessageKind::from_u16(hdr.kind_raw) {
+    match kind {
         Some(MessageKind::Identify) => {
             let proto_version = body.first().copied().unwrap_or(0);
             Ok(Command::Identify {
@@ -139,6 +153,9 @@ pub fn decode_command(channel: u8, payload: &[u8]) -> Result<Command, DecodeCmdE
             })
         }
         Some(MessageKind::QueryRuntimeCaps) => Ok(Command::QueryRuntimeCaps {
+            correlation_id: cid,
+        }),
+        Some(MessageKind::QuerySampleGrid) => Ok(Command::QuerySampleGrid {
             correlation_id: cid,
         }),
         Some(MessageKind::QueryMotorState) => Ok(Command::QueryMotorState {
@@ -365,6 +382,52 @@ pub fn push_pieces_response_frame_multi(
     }
     .encoded_to_vec();
     control_frame(MessageKind::PushPiecesResponse, cid, &body)
+}
+
+/// Per-lane free depth plus the grid pair the host maps trajectory clocks
+/// with, so every fill re-syncs the host's view of the endpoint's grid.
+pub fn push_sample_runs_response_frame(
+    cid: u32,
+    result: i32,
+    arrival_clock: u64,
+    grid: (u64, u64),
+    lanes: &[(u8, u32)],
+) -> Vec<u8> {
+    let (grid_index, grid_clock) = grid;
+    let body = PushSampleRunsResponse {
+        result,
+        arrival_clock,
+        grid_index,
+        grid_clock,
+        lanes: lanes
+            .iter()
+            .map(|&(axis_idx, free_cycles)| LaneDepth {
+                axis_idx,
+                free_cycles,
+            })
+            .collect(),
+    }
+    .encoded_to_vec();
+    control_frame(MessageKind::PushSampleRunsResponse, cid, &body)
+}
+
+pub fn sample_grid_response_frame(
+    cid: u32,
+    executor: u8,
+    cycle_ticks: u32,
+    ring_depth_cycles: u32,
+    grid: (u64, u64),
+) -> Vec<u8> {
+    let (grid_index, grid_clock) = grid;
+    let body = SampleGridResponse {
+        executor,
+        cycle_ticks,
+        ring_depth_cycles,
+        grid_index,
+        grid_clock,
+    }
+    .encoded_to_vec();
+    control_frame(MessageKind::SampleGridResponse, cid, &body)
 }
 
 pub fn set_drive_limits_response_frame(cid: u32, result: i32) -> Vec<u8> {

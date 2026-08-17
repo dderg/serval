@@ -199,7 +199,7 @@ fn test_ctx(name: &str) -> EndpointCtx {
     test_ctx_with_drive(name, TrackingLagDrive::at_rest())
 }
 
-fn test_ctx_with_drive(name: &str, drive: impl DriveChain + 'static) -> EndpointCtx {
+pub(super) fn test_ctx_with_drive(name: &str, drive: impl DriveChain + 'static) -> EndpointCtx {
     let sock = std::env::temp_dir().join(format!("ec-rt-test-{}-{name}.sock", std::process::id()));
     let mut gate = TorqueGate::new();
     let _ = gate.on_set_torque(true, 0);
@@ -227,6 +227,16 @@ fn test_ctx_with_drive(name: &str, drive: impl DriveChain + 'static) -> Endpoint
         drive_scratch: super::cycle::DriveScratch::new(NUM_SLAVES),
         run_limits: Vec::new(),
         rings: (0..NUM_SLAVES).map(AxisRing::with_slot).collect(),
+        executor: crate::setpoint::Executor::Piece,
+        sp_rings: (0..NUM_SLAVES)
+            .map(|slot| crate::setpoint::SetpointRing::new(slot, CYCLE_NS as u32))
+            .collect(),
+        grid: crate::setpoint::SampleGrid::new(CYCLE_NS),
+        ring_origin: vec![None; NUM_SLAVES],
+        sp_play_scratch: vec![None; NUM_SLAVES],
+        sp_fill_scratch: Vec::new(),
+        last_grid_index: 0,
+        last_grid_clock: 0,
         buzz: BuzzOsc::new(),
         damper: DiffDamperBank::new(CYCLE_NS as i64),
         trim: DiffTrimBank::new(CYCLE_NS as i64),

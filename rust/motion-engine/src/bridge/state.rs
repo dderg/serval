@@ -165,6 +165,12 @@ pub(crate) struct McuConnection {
     pub(crate) endpoint_process: Option<std::process::Child>,
     pub(crate) endpoint_conn: Option<Arc<McuSerialConn>>,
     pub(crate) ethercat_slot_axes: Vec<usize>,
+    pub(crate) sample_grid: Option<super::ethercat_endpoint::SampleGrid>,
+    /// The pump's setpoint filler for this endpoint, present exactly when
+    /// `sample_grid` reports the `setpoint_ring` executor. Built at claim time
+    /// because that is where the drives' command scale and the dynamics
+    /// profile are still in hand.
+    pub(crate) ring_filler: Option<crate::pump::RingFiller>,
 }
 
 /// One EtherCAT drive slot as `[ethercat_node]` declares it in klippy. The

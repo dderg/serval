@@ -12,9 +12,10 @@
 use mcu_protocol::Encode;
 use mcu_protocol::messages::{
     AxisDiag, AxisPieces, CaptureDrive, ClaimHandshakeReply, ConfigureAxes, DriveLimitEntry,
-    DynamicsPair, McuLog, MotorSample, MotorStateResponse, PushPieces, PushPiecesResponse,
-    SdoReadResponse, SdoWrite, SetDriveLimits, SetDynamicsModel, SetStrainComp, SlaveState,
-    SlaveStatus, StartCapture, StatusHeartbeat,
+    DynamicsPair, LaneDepth, LaneRun, McuLog, MotorSample, MotorStateResponse, PushPieces,
+    PushPiecesResponse, PushSampleRuns, PushSampleRunsResponse, SdoReadResponse, SdoWrite,
+    SetDriveLimits, SetDynamicsModel, SetStrainComp, SetpointSample, SlaveState, SlaveStatus,
+    StartCapture, StatusHeartbeat,
 };
 
 include!("../schema_def.rs");
@@ -25,6 +26,7 @@ enum Scalar {
     U16,
     U32,
     U64,
+    I16,
     I32,
     I64,
     F32,
@@ -34,7 +36,7 @@ impl Scalar {
     fn size(self) -> usize {
         match self {
             Scalar::U8 => 1,
-            Scalar::U16 => 2,
+            Scalar::U16 | Scalar::I16 => 2,
             Scalar::U32 | Scalar::I32 | Scalar::F32 => 4,
             Scalar::U64 | Scalar::I64 => 8,
         }
@@ -69,6 +71,7 @@ fn parse_scalar(s: &str) -> Scalar {
         "u16" => Scalar::U16,
         "u32" => Scalar::U32,
         "u64" => Scalar::U64,
+        "i16" => Scalar::I16,
         "i32" => Scalar::I32,
         "i64" => Scalar::I64,
         "f32" => Scalar::F32,
@@ -341,6 +344,54 @@ fn push_pieces_response_matches_schema_layout() {
         ],
     };
     reference_decode("PushPiecesResponse", &msg.encoded_to_vec()).unwrap();
+}
+
+fn sample_lane(axis_idx: u8, sample_count: u16) -> LaneRun {
+    LaneRun {
+        axis_idx,
+        flags: 1,
+        origin_mm_q16: -65_536,
+        start_index: 4096 + u64::from(axis_idx),
+        interval_ticks: 1000,
+        sample_count,
+        samples: (0..sample_count)
+            .map(|i| SetpointSample {
+                pos_counts: i32::from(i) * 7,
+                vel_ff: -i32::from(i),
+                torque_ff: i as i16,
+                acc_mm_s2: f32::from(i) * 0.5,
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn push_sample_runs_matches_schema_layout() {
+    let msg = PushSampleRuns {
+        lanes: vec![sample_lane(0, 3), sample_lane(1, 1)],
+    };
+    reference_decode("PushSampleRuns", &msg.encoded_to_vec()).unwrap();
+}
+
+#[test]
+fn push_sample_runs_response_matches_schema_layout() {
+    let msg = PushSampleRunsResponse {
+        result: -315,
+        arrival_clock: 0x0102_0304_0506_0708,
+        grid_index: 987_654,
+        grid_clock: 0x0A0B_0C0D_0E0F_1011,
+        lanes: vec![
+            LaneDepth {
+                axis_idx: 0,
+                free_cycles: 128,
+            },
+            LaneDepth {
+                axis_idx: 1,
+                free_cycles: 64,
+            },
+        ],
+    };
+    reference_decode("PushSampleRunsResponse", &msg.encoded_to_vec()).unwrap();
 }
 
 #[test]

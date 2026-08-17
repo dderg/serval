@@ -9,6 +9,7 @@ use crate::clock::raw_from_monotonic_ns;
 use crate::curves::ENGINE_STATE_FAULT;
 use crate::dynamics::{clamp_torque, DynamicsModel};
 use crate::scale::{mm_to_counts, CountMap};
+use crate::setpoint::{Executor, GridPhaseError, Played, SetpointEntry};
 use crate::torque::{TickAction, TorqueState};
 use crate::wire::{endstop_trip_frame, status_heartbeat_frame};
 
@@ -40,16 +41,24 @@ macro_rules! log_slot_drive_telemetry {
 
 pub(super) fn run_cycle(ctx: &mut EndpointCtx) -> ControlFlow<()> {
     let cycle_start = std::time::Instant::now();
-    let next_flush_mono_ns = ctx.drive.cycle_time_ns() + ctx.cycle_ns as u64;
-    let apply_time = raw_from_monotonic_ns(next_flush_mono_ns);
+    let apply_mono_ns = ctx.drive.cycle_time_ns() + ctx.cycle_ns as u64;
+    let apply_time = raw_from_monotonic_ns(apply_mono_ns);
 
-    let all_rings_empty = ctx.rings.iter().all(|r| r.is_empty());
-    apply_tick_action(ctx, apply_time, all_rings_empty);
+    let all_lanes_idle = super::all_lanes_idle(ctx);
+    apply_tick_action(ctx, apply_time, all_lanes_idle);
 
     poll_sensorless(ctx, apply_time);
 
     let sample_time = apply_time + ctx.group_delay_ns;
-    let (motion_active, all_acc, all_vel) = compute_motion_targets(ctx, sample_time);
+    let (motion_active, all_acc, all_vel) = match ctx.executor {
+        Executor::Piece => compute_motion_targets(ctx, sample_time),
+        Executor::SetpointRing => {
+            let grid_index = resolve_grid_index(ctx, apply_mono_ns);
+            ctx.last_grid_index = grid_index;
+            ctx.last_grid_clock = sample_time;
+            compute_ring_targets(ctx, grid_index)
+        }
+    };
 
     ctx.sensorless
         .record_commanded(apply_time, |slot| ctx.last_counts[slot]);
@@ -333,7 +342,10 @@ fn trim_quiescent_slots(ctx: &EndpointCtx) -> Vec<bool> {
     if ctx.buzz.active() {
         return vec![false; ctx.num_slaves];
     }
-    let mut quiescent: Vec<bool> = ctx.rings.iter().map(|r| r.is_empty()).collect();
+    let mut quiescent: Vec<bool> = match ctx.executor {
+        Executor::Piece => ctx.rings.iter().map(|r| r.is_empty()).collect(),
+        Executor::SetpointRing => ctx.sp_rings.iter().map(|r| r.is_empty()).collect(),
+    };
     for (slot_a, slot_b, applied_mm, target_mm, _bias_mm) in ctx.comp.snapshot() {
         if (applied_mm - target_mm).abs() > f64::EPSILON {
             quiescent[slot_a] = false;
@@ -462,6 +474,7 @@ fn emit_slot_commands(
         ctx.pin.step(&scratch.acc, &scratch.ferr, streaming);
     }
     for s in 0..num_slaves {
+        let offset = trim_counts[s].wrapping_add(comp_counts[s]);
         if let Some(counts) = sp_counts[s] {
             let vel_offset = if ctx.velocity_ff[s] {
                 (f64::from(all_vel[s]) * ctx.cmd_counts_per_mm[s]).round() as i32
@@ -489,59 +502,259 @@ fn emit_slot_commands(
                 }
                 None => damper_tenths[s].round() as i16,
             };
-            if let Some(prev) = ctx.last_counts[s] {
-                let increment = i64::from(counts) - i64::from(prev);
-                if increment.abs() > ctx.jump_log_counts[s] {
-                    tracing::warn!(
-                        subsystem = "ethercat",
-                        event = "target_jump",
-                        slot = s,
-                        prev_target = prev,
-                        new_target = counts,
-                        increment,
-                        vel_mm_s = f64::from(all_vel[s]),
-                        acc_mm_s2 = f64::from(all_acc[s]),
-                        invert = ctx.invert[s],
-                        "commanded target increment exceeds sane per-cycle bound"
-                    );
-                }
-            }
-            ctx.last_counts[s] = Some(counts);
-            ctx.last_streamed_target[s] = Some(counts);
-            let offset = trim_counts[s].wrapping_add(comp_counts[s]);
-            ctx.drive
-                .set_target_position(s, counts.wrapping_add(offset));
-            ctx.last_written_offset[s] = offset;
-            ctx.drive.set_velocity_offset(s, vel_offset);
-            ctx.drive.set_torque_offset(s, torque_offset);
+            write_streaming_slot(
+                ctx,
+                s,
+                SlotWrite {
+                    counts,
+                    vel_offset,
+                    torque_offset,
+                    offset,
+                },
+                all_vel,
+                all_acc,
+            );
             motion_active = true;
         } else {
-            ctx.drive.set_velocity_offset(s, 0);
-            ctx.drive
-                .set_torque_offset(s, damper_tenths[s].round() as i16);
-            // A held slot follows the compensation and trim too: the
-            // stiffness probe steps offsets at standstill, a map ramping
-            // while parked must move the held target now so the next stream
-            // doesn't, and the trim does all of its integrating exactly
-            // here — at commanded standstill. The base is the drive's own
-            // output-image target (always seeded — by enable if nothing
-            // ever streamed) minus the offsets baked into the last write;
-            // last_counts is no good here, Stop and ResumeStream clear it
-            // while the drive keeps holding.
-            if ctx.comp.active() || ctx.trim.active() {
-                let offset = trim_counts[s].wrapping_add(comp_counts[s]);
-                let base = ctx
-                    .drive
-                    .telemetry(s)
-                    .target_position
-                    .wrapping_sub(ctx.last_written_offset[s]);
-                ctx.drive.set_target_position(s, base.wrapping_add(offset));
-                ctx.last_written_offset[s] = offset;
-            }
+            write_held_slot(ctx, s, damper_tenths[s], offset);
         }
     }
     ctx.drive_scratch = scratch;
     motion_active
+}
+
+pub(super) struct SlotWrite {
+    counts: i32,
+    vel_offset: i32,
+    torque_offset: i16,
+    offset: i32,
+}
+
+fn write_streaming_slot(
+    ctx: &mut EndpointCtx,
+    s: usize,
+    write: SlotWrite,
+    all_vel: &[f32],
+    all_acc: &[f32],
+) {
+    let SlotWrite {
+        counts,
+        vel_offset,
+        torque_offset,
+        offset,
+    } = write;
+    if let Some(prev) = ctx.last_counts[s] {
+        let increment = i64::from(counts) - i64::from(prev);
+        if increment.abs() > ctx.jump_log_counts[s] {
+            tracing::warn!(
+                subsystem = "ethercat",
+                event = "target_jump",
+                slot = s,
+                prev_target = prev,
+                new_target = counts,
+                increment,
+                vel_mm_s = f64::from(all_vel[s]),
+                acc_mm_s2 = f64::from(all_acc[s]),
+                invert = ctx.invert[s],
+                "commanded target increment exceeds sane per-cycle bound"
+            );
+        }
+    }
+    ctx.last_counts[s] = Some(counts);
+    ctx.last_streamed_target[s] = Some(counts);
+    ctx.drive
+        .set_target_position(s, counts.wrapping_add(offset));
+    ctx.last_written_offset[s] = offset;
+    ctx.drive.set_velocity_offset(s, vel_offset);
+    ctx.drive.set_torque_offset(s, torque_offset);
+}
+
+/// A held slot follows the compensation and trim too: the stiffness probe
+/// steps offsets at standstill, a map ramping while parked must move the held
+/// target now so the next stream doesn't, and the trim does all of its
+/// integrating exactly here — at commanded standstill. The base is the drive's
+/// own output-image target (always seeded — by enable if nothing ever
+/// streamed) minus the offsets baked into the last write; `last_counts` is no
+/// good here, Stop and ResumeStream clear it while the drive keeps holding.
+fn write_held_slot(ctx: &mut EndpointCtx, s: usize, damper_tenths: f32, offset: i32) {
+    ctx.drive.set_velocity_offset(s, 0);
+    ctx.drive.set_torque_offset(s, damper_tenths.round() as i16);
+    if ctx.comp.active() || ctx.trim.active() {
+        let base = ctx
+            .drive
+            .telemetry(s)
+            .target_position
+            .wrapping_sub(ctx.last_written_offset[s]);
+        ctx.drive.set_target_position(s, base.wrapping_add(offset));
+        ctx.last_written_offset[s] = offset;
+    }
+}
+
+/// Setpoint-ring executor: pop this cycle's entry per lane, then apply the
+/// overlays that can only be computed now — the damper and trim read this
+/// exchange's encoder image, the strain comp rides the commanded lane
+/// position, and the pin oscillator advances on the measured following error.
+/// Everything else (count target, velocity feedforward, coupled torque
+/// feedforward) was computed on the host at fill time.
+pub(super) fn compute_ring_targets(
+    ctx: &mut EndpointCtx,
+    grid_index: u64,
+) -> (bool, Vec<f32>, Vec<f32>) {
+    let num_slaves = ctx.num_slaves;
+    let mut all_acc = vec![0f32; num_slaves];
+    let mut all_vel = vec![0f32; num_slaves];
+    if ctx.gate.state() != TorqueState::Enabled {
+        ctx.damper.reset_filters();
+        ctx.trim.reset();
+        ctx.comp.reset_applied();
+        ctx.pin.reset();
+        for lc in &mut ctx.last_counts {
+            *lc = None;
+        }
+        for off in &mut ctx.last_written_offset {
+            *off = 0;
+        }
+        return (false, all_acc, all_vel);
+    }
+    let mut plays = std::mem::take(&mut ctx.sp_play_scratch);
+    plays.clear();
+    plays.resize(num_slaves, None);
+    let mut sp_counts: Vec<Option<i32>> = vec![None; num_slaves];
+    let mut lane_mm: Vec<Option<f64>> = vec![None; num_slaves];
+    for s in 0..num_slaves {
+        let Played::Entry(entry) = ctx.sp_rings[s].play(grid_index) else {
+            continue;
+        };
+        if ctx.suppressed[s] {
+            continue;
+        }
+        let origin = match ctx.ring_origin[s] {
+            Some(origin) => origin,
+            None => {
+                let origin =
+                    ctx.last_streamed_target[s].unwrap_or_else(|| ctx.drive.position_actual(s));
+                ctx.ring_origin[s] = Some(origin);
+                origin
+            }
+        };
+        let counts = origin.wrapping_add(entry.pos_counts);
+        let cpm = ctx.cmd_counts_per_mm[s];
+        lane_mm[s] = ctx.sp_rings[s]
+            .origin_mm()
+            .map(|origin_mm| origin_mm + f64::from(entry.pos_counts) / cpm);
+        all_vel[s] = (f64::from(entry.vel_ff) / cpm) as f32;
+        all_acc[s] = entry.acc_mm_s2;
+        plays[s] = Some(entry);
+        sp_counts[s] = Some(counts);
+    }
+    let motion_active = emit_ring_commands(ctx, &plays, &sp_counts, &lane_mm, &all_acc, &all_vel);
+    ctx.sp_play_scratch = plays;
+    (motion_active, all_acc, all_vel)
+}
+
+fn emit_ring_commands(
+    ctx: &mut EndpointCtx,
+    plays: &[Option<SetpointEntry>],
+    sp_counts: &[Option<i32>],
+    lane_mm: &[Option<f64>],
+    all_acc: &[f32],
+    all_vel: &[f32],
+) -> bool {
+    let num_slaves = ctx.num_slaves;
+    let mut motion_active = false;
+    let damper_tenths = damper_torque_tenths(ctx);
+    let trim_counts = trim_offset_counts(ctx);
+    let comp_counts = comp_offset_counts(ctx, lane_mm);
+    let mut scratch = std::mem::take(&mut ctx.drive_scratch);
+    if ctx.pin.active() {
+        for s in 0..num_slaves {
+            scratch.acc[s] = ctx.drive_dirs[s] * all_acc[s];
+            scratch.ferr[s] =
+                (f64::from(ctx.drive.telemetry(s).following_error) / ctx.counts_per_mm[s]) as f32;
+        }
+        ctx.pin
+            .step(&scratch.acc, &scratch.ferr, motion_streaming(plays));
+    }
+    for s in 0..num_slaves {
+        let offset = trim_counts[s].wrapping_add(comp_counts[s]);
+        match (plays[s], sp_counts[s]) {
+            (Some(entry), Some(counts)) => {
+                let vel_offset = if ctx.velocity_ff[s] { entry.vel_ff } else { 0 };
+                let torque_offset = if ctx.dynamics.is_some() {
+                    clamp_torque(
+                        f32::from(entry.torque_ff) + ctx.pin.slot_torque_at(s) + damper_tenths[s],
+                        ctx.torque_clamp_tenths[s],
+                        &mut ctx.ff_saturation,
+                    )
+                } else {
+                    damper_tenths[s].round() as i16
+                };
+                write_streaming_slot(
+                    ctx,
+                    s,
+                    SlotWrite {
+                        counts,
+                        vel_offset,
+                        torque_offset,
+                        offset,
+                    },
+                    all_vel,
+                    all_acc,
+                );
+                motion_active = true;
+            }
+            _ => write_held_slot(ctx, s, damper_tenths[s], offset),
+        }
+    }
+    ctx.drive_scratch = scratch;
+    motion_active
+}
+
+fn motion_streaming(plays: &[Option<SetpointEntry>]) -> bool {
+    plays.iter().any(Option::is_some)
+}
+
+/// The DC grid index of the upcoming apply point. `g_ts` advances by whole
+/// cycle periods forever, so a residual is a broken invariant, not jitter to
+/// absorb.
+fn resolve_grid_index(ctx: &mut EndpointCtx, apply_mono_ns: u64) -> u64 {
+    match ctx.grid.index_of(apply_mono_ns) {
+        Ok(index) => index,
+        Err(err) => fault_grid_phase(ctx, err),
+    }
+}
+
+fn fault_grid_phase(ctx: &mut EndpointCtx, err: GridPhaseError) -> ! {
+    crate::rt_eprintln!(
+        "ec-rt: FAULT sample grid phase — apply point {} is {} ns off the \
+         {} ns grid based at {}",
+        err.mono_ns,
+        err.residual_ns,
+        ctx.grid.interval_ns(),
+        err.base_mono_ns
+    );
+    tracing::error!(
+        subsystem = "ethercat",
+        event = "sample_grid_phase",
+        mono_ns = err.mono_ns,
+        base_mono_ns = err.base_mono_ns,
+        residual_ns = err.residual_ns,
+        "DC apply point left the sample grid — the setpoint ring cannot be indexed"
+    );
+    respond_fault_heartbeat(ctx, ENGINE_STATE_FAULT, 0);
+    ctx.drive.shutdown_and_exit();
+}
+
+/// The `(grid_index, grid_clock)` pair the host maps trajectory clocks with.
+/// Answerable at any time, including before the DC loop's first cycle: the
+/// grid is `g_ts`, which the backend has been advancing since activation.
+pub(super) fn grid_now(ctx: &mut EndpointCtx) -> (u64, u64) {
+    let apply_mono_ns = ctx.drive.cycle_time_ns() + ctx.cycle_ns as u64;
+    let grid_index = resolve_grid_index(ctx, apply_mono_ns);
+    (
+        grid_index,
+        raw_from_monotonic_ns(apply_mono_ns) + ctx.group_delay_ns,
+    )
 }
 
 /// Drive-frame per-slot accel/velocity/following-error buffers, sized once
@@ -577,11 +790,18 @@ fn fault_non_finite_torque(ctx: &mut EndpointCtx, slot: usize, acc: f32, vel: f3
 }
 
 fn handle_ring_fault(ctx: &mut EndpointCtx) {
-    let ring_fault = ctx
-        .rings
-        .iter()
-        .enumerate()
-        .find_map(|(s, r)| r.take_fault().map(|f| (s, f)));
+    let ring_fault = match ctx.executor {
+        Executor::Piece => ctx
+            .rings
+            .iter()
+            .enumerate()
+            .find_map(|(s, r)| r.take_fault().map(|f| (s, f))),
+        Executor::SetpointRing => ctx
+            .sp_rings
+            .iter_mut()
+            .enumerate()
+            .find_map(|(s, r)| r.take_fault().map(|f| (s, f))),
+    };
     if let Some((slot, fault_val)) = ring_fault {
         let fault_code_u16 = (fault_val & 0xFFFF) as u16;
         eprintln!(

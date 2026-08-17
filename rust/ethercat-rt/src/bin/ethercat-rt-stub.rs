@@ -14,14 +14,16 @@ use ethercat_rt::curves::{AxisRing, AXIS_RING_CAPACITY, ENGINE_STATE_FAULT};
 use ethercat_rt::sdo::{execute_sdo_read, execute_sdo_write, DictObject, DictSdoBus};
 use ethercat_rt::sensorless::{SensorlessBank, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
 use ethercat_rt::server::FrameServer;
+use ethercat_rt::setpoint::{Executor, ERR_SAMPLES_IN_PIECE_MODE};
 use ethercat_rt::stream_halt::StreamHalt;
 use ethercat_rt::torque::{
     CommandAction, TickAction, TorqueGate, TorqueState, ERR_ENABLE_FAILED, ERR_PIECES_WHILE_FAULTED,
 };
 use ethercat_rt::wire::{
     arm_sensorless_endstop_response_frame, claim_handshake_reply_frame, endstop_trip_frame,
-    identify_response_frame, push_pieces_response_frame, resonance_buzz_response_frame,
-    restore_drive_limits_response_frame, resume_stream_response_frame, runtime_caps_response_frame,
+    identify_response_frame, push_pieces_response_frame, push_sample_runs_response_frame,
+    resonance_buzz_response_frame, restore_drive_limits_response_frame,
+    resume_stream_response_frame, runtime_caps_response_frame, sample_grid_response_frame,
     sdo_read_response_frame, sdo_write_response_frame, seed_servo_home_response_frame,
     set_diff_damper_response_frame, set_diff_trim_response_frame, set_drive_limits_response_frame,
     set_dynamics_model_response_frame, set_ff_lead_response_frame, set_strain_comp_response_frame,
@@ -531,6 +533,34 @@ fn main() {
                 }
                 Command::Unknown { kind_raw, .. } => {
                     eprintln!("ec-rt-stub: ignoring kind 0x{kind_raw:04x}");
+                }
+                Command::PushSampleRuns {
+                    correlation_id,
+                    msg,
+                } => {
+                    let lanes: Vec<(u8, u32)> =
+                        msg.lanes.iter().map(|lane| (lane.axis_idx, 0)).collect();
+                    eprintln!(
+                        "ec-rt-stub: PushSampleRuns rejected — the stub runs the piece \
+                         executor (lanes={})",
+                        lanes.len()
+                    );
+                    server.respond(&push_sample_runs_response_frame(
+                        correlation_id,
+                        ERR_SAMPLES_IN_PIECE_MODE,
+                        monotonic_ns(),
+                        (0, 0),
+                        &lanes,
+                    ));
+                }
+                Command::QuerySampleGrid { correlation_id } => {
+                    server.respond(&sample_grid_response_frame(
+                        correlation_id,
+                        Executor::Piece.wire(),
+                        0,
+                        0,
+                        (0, 0),
+                    ));
                 }
             }
         }

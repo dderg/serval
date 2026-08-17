@@ -148,6 +148,9 @@ pub fn put_u32(out: &mut Vec<u8>, v: u32) {
 pub fn put_u64(out: &mut Vec<u8>, v: u64) {
     out.extend_from_slice(&v.to_le_bytes());
 }
+pub fn put_i16(out: &mut Vec<u8>, v: i16) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
 pub fn put_i32(out: &mut Vec<u8>, v: i32) {
     out.extend_from_slice(&v.to_le_bytes());
 }
@@ -180,6 +183,10 @@ pub fn get_u64(c: &mut Cursor<'_>) -> Result<u64, DecodeError> {
     Ok(u64::from_le_bytes([
         s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
     ]))
+}
+pub fn get_i16(c: &mut Cursor<'_>) -> Result<i16, DecodeError> {
+    let s = c.take(2)?;
+    Ok(i16::from_le_bytes([s[0], s[1]]))
 }
 pub fn get_i32(c: &mut Cursor<'_>) -> Result<i32, DecodeError> {
     let s = c.take(4)?;

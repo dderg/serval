@@ -99,6 +99,10 @@ stepper_stop(struct trsync_signal *tss, uint8_t reason)
 #if CONFIG_CLASSIC_STEPPING
     stepper_classic_halt(s);
 #else
+#if CONFIG_SAMPLE_STEPPING
+    extern void sample_stepping_halt(void);
+    sample_stepping_halt();
+#endif
     gpio_out_write(s->dir_pin, 0);
     gpio_out_write(s->step_pin, s->step_idle_level);
 #endif

@@ -1,7 +1,7 @@
 #![allow(unsafe_code)]
 
 use core::cell::UnsafeCell;
-use portable_atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU16, AtomicU32};
+use portable_atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU16, AtomicU32, AtomicU64};
 
 use crate::clock::WidenState;
 use crate::engine::Engine;
@@ -144,7 +144,16 @@ pub struct SharedState {
     pub sample_period_cycles: AtomicU32,
 
     pub max_phase_offset_ramp_per_sample: AtomicU16,
+
+    /// trsync trip handshake. The trip runs at a lower NVIC priority than
+    /// TIM5, so it may not touch `IsrState`: it publishes the halt clock here
+    /// and the next tick performs the halt. [`NO_HALT_REQUEST`] means idle, and
+    /// the first requester wins so a trip that signals every stepper still
+    /// halts every lane at one clock.
+    pub sample_halt_clock: AtomicU64,
 }
+
+pub const NO_HALT_REQUEST: u64 = u64::MAX;
 
 impl SharedState {
     pub const fn new() -> Self {
@@ -236,6 +245,8 @@ impl SharedState {
             sample_period_cycles: AtomicU32::new(0),
 
             max_phase_offset_ramp_per_sample: AtomicU16::new(0),
+
+            sample_halt_clock: AtomicU64::new(NO_HALT_REQUEST),
         }
     }
 }

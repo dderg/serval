@@ -272,6 +272,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
         dynamics,
         late_tolerance_ns,
         group_delay_ns,
+        executor,
     } = args;
 
     let num_slaves = slaves.len();
@@ -284,6 +285,10 @@ pub fn bringup(args: Args) -> EndpointCtx {
         .unwrap_or(500);
 
     let rings: Vec<AxisRing> = (0..num_slaves).map(AxisRing::with_slot).collect();
+    let sp_rings: Vec<crate::setpoint::SetpointRing> = (0..num_slaves)
+        .map(|slot| crate::setpoint::SetpointRing::new(slot, cycle_ns as u32))
+        .collect();
+    let grid = crate::setpoint::SampleGrid::new(cycle_ns as u64);
     let buzz = BuzzOsc::new();
     let damper = DiffDamperBank::new(cycle_ns);
     let trim = DiffTrimBank::new(cycle_ns);
@@ -510,6 +515,14 @@ pub fn bringup(args: Args) -> EndpointCtx {
         dynamics,
         run_limits,
         rings,
+        executor,
+        sp_rings,
+        grid,
+        ring_origin: vec![None; num_slaves],
+        sp_play_scratch: vec![None; num_slaves],
+        sp_fill_scratch: Vec::with_capacity(crate::setpoint::MAX_FILL_CYCLES),
+        last_grid_index: 0,
+        last_grid_clock: 0,
         buzz,
         damper,
         trim,

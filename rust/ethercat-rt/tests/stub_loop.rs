@@ -183,7 +183,9 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
                     Command::SdoRead { .. } | Command::SdoWrite { .. } => {
                         todo!("wired in the endpoint task")
                     }
-                    Command::Unknown { .. } => {}
+                    Command::Unknown { .. }
+                    | Command::PushSampleRuns { .. }
+                    | Command::QuerySampleGrid { .. } => {}
                 }
             }
             if !push_received {
@@ -197,6 +199,8 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
             for cmd in server.poll_commands() {
                 match cmd {
                     Command::Unknown { .. }
+                    | Command::PushSampleRuns { .. }
+                    | Command::QuerySampleGrid { .. }
                     | Command::Identify { .. }
                     | Command::QueryRuntimeCaps { .. }
                     | Command::QueryMotorState { .. }

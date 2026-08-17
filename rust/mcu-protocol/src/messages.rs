@@ -4,8 +4,8 @@
 //! plus the protocol constants that are not part of any one message.
 
 use crate::codec::{
-    Cursor, Decode, DecodeError, Encode, get_f32, get_i32, get_str, get_u8, get_u16, get_u32,
-    get_u64, put_f32, put_i32, put_str, put_u8, put_u16, put_u32, put_u64,
+    Cursor, Decode, DecodeError, Encode, get_f32, get_i16, get_i32, get_str, get_u8, get_u16,
+    get_u32, get_u64, put_f32, put_i16, put_i32, put_str, put_u8, put_u16, put_u32, put_u64,
 };
 
 mod generated;
@@ -204,6 +204,185 @@ impl Decode for PushPiecesResponse {
             result,
             arrival_clock,
             axes,
+        })
+    }
+}
+
+/// Bytes of one wire `LaneRun` header — everything before the sample block.
+pub const LANE_RUN_HEADER_LEN: usize = 20;
+
+/// Bytes of one wire `SetpointSample`, packed with no padding.
+pub const SETPOINT_SAMPLE_LEN: usize = 14;
+
+/// One DC-cycle setpoint: the ring entry the endpoint hands the drive.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SetpointSample {
+    pub pos_counts: i32,
+    pub vel_ff: i32,
+    pub torque_ff: i16,
+    pub acc_mm_s2: f32,
+}
+
+/// One axis' contiguous run of setpoints. `start_index` is an absolute DC-cycle
+/// grid index — one ring entry per cycle — not a clock. `flags` bit 0 re-anchors
+/// the lane at `start_index`. `origin_mm_q16` is the host-frame position in
+/// mm × 65536 that `pos_counts == 0` denotes for this lane's anchor epoch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LaneRun {
+    pub axis_idx: u8,
+    pub flags: u8,
+    pub origin_mm_q16: i32,
+    pub start_index: u64,
+    pub interval_ticks: u32,
+    pub sample_count: u16,
+    pub samples: Vec<SetpointSample>,
+}
+
+/// Bit 0 of [`LaneRun::flags`]: discard the lane's pending ring content and
+/// re-anchor at `start_index`.
+pub const LANE_RUN_FLAG_REANCHOR: u8 = 0x01;
+
+/// `LaneRun::flags` bit 1: this run ends the lane's commanded motion (a
+/// coverage gap, the end of the stream, or the end of a buzz), so the ring
+/// draining after its last entry is the expected hold rather than a
+/// starvation.
+pub const LANE_RUN_FLAG_TAIL: u8 = 0x02;
+
+/// All of one endpoint's lane runs delivered in a single transaction, under a
+/// leading `lane_count` byte.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PushSampleRuns {
+    pub lanes: Vec<LaneRun>,
+}
+
+impl Encode for PushSampleRuns {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_u8(out, self.lanes.len() as u8);
+        for lane in &self.lanes {
+            put_u8(out, lane.axis_idx);
+            put_u8(out, lane.flags);
+            put_i32(out, lane.origin_mm_q16);
+            put_u64(out, lane.start_index);
+            put_u32(out, lane.interval_ticks);
+            put_u16(out, lane.sample_count);
+            for s in &lane.samples {
+                put_i32(out, s.pos_counts);
+                put_i32(out, s.vel_ff);
+                put_i16(out, s.torque_ff);
+                put_f32(out, s.acc_mm_s2);
+            }
+        }
+    }
+}
+
+impl Decode for PushSampleRuns {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let lane_count = get_u8(c)?;
+        if lane_count == 0 {
+            return Err(DecodeError::EmptyArray {
+                field: "PushSampleRuns.lanes",
+            });
+        }
+        let mut lanes: Vec<LaneRun> = Vec::with_capacity(lane_count as usize);
+        for _ in 0..lane_count {
+            let axis_idx = get_u8(c)?;
+            let flags = get_u8(c)?;
+            let origin_mm_q16 = get_i32(c)?;
+            let start_index = get_u64(c)?;
+            let interval_ticks = get_u32(c)?;
+            let sample_count = get_u16(c)?;
+            if lanes.iter().any(|l| l.axis_idx == axis_idx) {
+                return Err(DecodeError::DuplicateField {
+                    field: "PushSampleRuns.axis_idx",
+                });
+            }
+            if sample_count == 0 {
+                return Err(DecodeError::EmptyArray {
+                    field: "PushSampleRuns.samples",
+                });
+            }
+            let mut samples: Vec<SetpointSample> = Vec::with_capacity(sample_count as usize);
+            for _ in 0..sample_count {
+                samples.push(SetpointSample {
+                    pos_counts: get_i32(c)?,
+                    vel_ff: get_i32(c)?,
+                    torque_ff: get_i16(c)?,
+                    acc_mm_s2: get_f32(c)?,
+                });
+            }
+            lanes.push(LaneRun {
+                axis_idx,
+                flags,
+                origin_mm_q16,
+                start_index,
+                interval_ticks,
+                sample_count,
+                samples,
+            });
+        }
+        Ok(Self { lanes })
+    }
+}
+
+/// Per-lane ring headroom echoed back to the host: how many further DC cycles
+/// the lane can accept before its ring is full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaneDepth {
+    pub axis_idx: u8,
+    pub free_cycles: u32,
+}
+
+/// Frame-level verdict for one `PushSampleRuns` transaction plus the endpoint's
+/// current DC grid position: `grid_index` and the raw clock it was stamped at,
+/// which the host uses to map trajectory clocks onto grid indices.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushSampleRunsResponse {
+    pub result: i32,
+    pub arrival_clock: u64,
+    pub grid_index: u64,
+    pub grid_clock: u64,
+    pub lanes: Vec<LaneDepth>,
+}
+
+impl Encode for PushSampleRunsResponse {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_i32(out, self.result);
+        put_u64(out, self.arrival_clock);
+        put_u64(out, self.grid_index);
+        put_u64(out, self.grid_clock);
+        put_u8(out, self.lanes.len() as u8);
+        for lane in &self.lanes {
+            put_u8(out, lane.axis_idx);
+            put_u32(out, lane.free_cycles);
+        }
+    }
+}
+
+impl Decode for PushSampleRunsResponse {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let result = get_i32(c)?;
+        let arrival_clock = get_u64(c)?;
+        let grid_index = get_u64(c)?;
+        let grid_clock = get_u64(c)?;
+        let lane_count = get_u8(c)?;
+        if lane_count == 0 {
+            return Err(DecodeError::EmptyArray {
+                field: "PushSampleRunsResponse.lanes",
+            });
+        }
+        let mut lanes: Vec<LaneDepth> = Vec::with_capacity(lane_count as usize);
+        for _ in 0..lane_count {
+            lanes.push(LaneDepth {
+                axis_idx: get_u8(c)?,
+                free_cycles: get_u32(c)?,
+            });
+        }
+        Ok(Self {
+            result,
+            arrival_clock,
+            grid_index,
+            grid_clock,
+            lanes,
         })
     }
 }

@@ -340,3 +340,45 @@ def test_dynamics_profile_option_existing_file_passes(tmp_path):
     assert servo_axis.read_dynamics_profile_option(
         FakeOptionConfig(str(path))
     ) == str(path)
+
+
+class FakeChoiceConfig:
+    """Mirrors ConfigWrapper.getchoice for the string-keyed case: the raw value
+    must be a key of the mapping, otherwise it is a config error."""
+
+    error = FakeConfigError
+    section = "ethercat_node node_x"
+
+    def __init__(self, raw=None):
+        self._raw = raw
+
+    def getchoice(self, option, choices, default):
+        value = default if self._raw is None else self._raw
+        if value not in choices:
+            raise FakeConfigError(
+                "Choice '%s' for option '%s' in section '%s' is not a valid "
+                "choice" % (value, option, self.section)
+            )
+        return choices[value]
+
+
+def test_executor_option_defaults_to_piece():
+    assert ethercat_node.read_executor_option(FakeChoiceConfig()) == "piece"
+
+
+def test_executor_option_accepts_setpoint_ring():
+    assert (
+        ethercat_node.read_executor_option(FakeChoiceConfig("setpoint_ring"))
+        == "setpoint_ring"
+    )
+
+
+def test_executor_option_rejects_the_cli_hyphen_spelling():
+    with pytest.raises(FakeConfigError) as e:
+        ethercat_node.read_executor_option(FakeChoiceConfig("setpoint-ring"))
+    assert "setpoint-ring" in str(e.value)
+
+
+def test_executor_option_rejects_unknown_value():
+    with pytest.raises(FakeConfigError):
+        ethercat_node.read_executor_option(FakeChoiceConfig("ring"))

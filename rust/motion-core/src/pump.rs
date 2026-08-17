@@ -1,11 +1,13 @@
 pub use crate::types::AxisKey;
 
+mod barrier_ledger;
 mod diag;
 mod drip;
 mod junction;
 mod memstat;
 mod messages;
 mod pump_loop;
+mod sample_sink;
 mod sched;
 mod stall;
 mod stepcompress_sink;
@@ -24,6 +26,10 @@ pub use messages::{
 #[cfg(test)]
 pub(crate) use pump_loop::pump_past_guard_secs;
 pub use pump_loop::{MAX_LEAD_SECS, PUMP_DATA_CHANNEL_CAP, run_pump};
+pub use sample_sink::{
+    SAMPLE_BACKLOG_CEILING_RUNS, SAMPLE_WINDOW_RUNS, SampleEndpoint, SampleLaneConfig, SamplePacer,
+    SamplePositionQuery,
+};
 pub use sched::{
     AxisFrame, AxisQueue, FramePlan, Schedule, SeamBasis, append_pieces_merging_holds, schedule,
 };
@@ -34,7 +40,7 @@ pub use stepcompress_sink::{
 pub use transit_trace::emit_fault_snapshot;
 #[cfg(test)]
 pub(crate) use wire_sink::pushpieces_retransmit_serial;
-pub use wire_sink::{McuTransport, WireSink};
+pub use wire_sink::{McuTransport, RingFiller, WireSink};
 
 #[cfg(test)]
 mod drip_tests;

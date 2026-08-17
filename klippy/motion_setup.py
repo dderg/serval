@@ -6,6 +6,8 @@ from collections import defaultdict, namedtuple
 from . import stepper
 from .extras import servo_axis
 from .mcu import (
+    PHASE_TRANSPORT_SAMPLE,
+    SAMPLE_COMMANDS,
     STEPCOMPRESS_ENCODER_HP,
     STEPPING_MODE_PIECE,
     STEPPING_MODE_STEPCOMPRESS,
@@ -185,6 +187,35 @@ def _reject_stepcompress_conflicts(
         )
 
 
+def _reject_sample_transport_conflicts(
+    motion, name, mcu_obj, handle, axes, step_modes, endpoint_handles
+):
+    if handle in endpoint_handles:
+        raise motion.printer.config_error(
+            "mcu '%s': phase_transport: sample is invalid for an ethercat "
+            "endpoint (engine handle %d). The sample-stream executor drives "
+            "phase-stepped coils over XDIRECT; EtherCAT drives take position "
+            "targets on their own lane. Use phase_transport: piece."
+            % (name, handle)
+        )
+    modulated = [a for a in axes if step_modes[a] == STEP_MODE_MODULATED]
+    if not modulated:
+        raise motion.printer.config_error(
+            "mcu '%s': phase_transport: sample selects the sample-stream "
+            "executor for phase lanes, but none of axes %s request "
+            "phase_stepping: 1. Set phase_stepping: 1 on the steppers that "
+            "should use it or drop phase_transport." % (name, sorted(axes))
+        )
+    for argstring in SAMPLE_COMMANDS:
+        if mcu_obj.try_lookup_command(argstring) is None:
+            raise motion.printer.config_error(
+                "mcu '%s': phase_transport: sample needs firmware built with "
+                "CONFIG_SAMPLE_STEPPING, but the mcu does not provide the "
+                "'%s' command. Reflash with SAMPLE_STEPPING enabled or set "
+                "phase_transport: piece." % (name, argstring.split(" ")[0])
+            )
+
+
 def derive_mcu_topology(motion, axis_to_handle):
     by_handle = {}
     for axis_idx, handle in axis_to_handle.items():
@@ -256,6 +287,19 @@ def derive_mcu_topology(motion, axis_to_handle):
                     "HIGH_PREC_STEP or set stepcompress_encoder: classic."
                     % (name,)
                 )
+        elif (
+            mcu_obj is not None
+            and mcu_obj.get_phase_transport() == PHASE_TRANSPORT_SAMPLE
+        ):
+            _reject_sample_transport_conflicts(
+                motion,
+                name,
+                mcu_obj,
+                handle,
+                axes,
+                step_modes,
+                endpoint_handles,
+            )
         topo.append(
             McuTopology(
                 handle,

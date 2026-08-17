@@ -29,7 +29,13 @@ fn closed_peer_yields_fatal_send_error() {
     let sink = WireSink {
         transports: {
             let mut m = HashMap::new();
-            m.insert(0, McuTransport::EtherCat(Arc::downgrade(&conn)));
+            m.insert(
+                0,
+                McuTransport::EtherCat {
+                    conn: Arc::downgrade(&conn),
+                    ring: None,
+                },
+            );
             m
         },
         timeout: Duration::from_millis(50),
@@ -56,7 +62,13 @@ fn detached_ethercat_conn_yields_fatal_send_error() {
     let sink = WireSink {
         transports: {
             let mut m = HashMap::new();
-            m.insert(0, McuTransport::EtherCat(weak_to_already_dropped_conn));
+            m.insert(
+                0,
+                McuTransport::EtherCat {
+                    conn: weak_to_already_dropped_conn,
+                    ring: None,
+                },
+            );
             m
         },
         timeout: Duration::from_millis(50),

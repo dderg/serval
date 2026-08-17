@@ -42,10 +42,11 @@ mod telemetry;
 
 use endstop::{TripDeps, dispatch_endstop_trip};
 #[cfg(test)]
-use ethercat_endpoint::{EndpointClaimError, endpoint_args};
+use ethercat_endpoint::{EndpointClaimError, ReportedExecutor, endpoint_args};
 use ethercat_endpoint::{
-    arm_endpoint_death_watchdog, handshake_ethercat_endpoint, message_for_claim_error,
-    poll_socket_ready, report_ethercat_endpoint_death, spawn_ethercat_endpoint,
+    Executor, SampleGrid, arm_endpoint_death_watchdog, build_ring_filler,
+    handshake_ethercat_endpoint, message_for_claim_error, poll_socket_ready,
+    report_ethercat_endpoint_death, spawn_ethercat_endpoint, verify_sample_grid,
 };
 use motion_caps::{
     axis_ring_depth, drip_cohort_participants, require_events_dir_for_mcu_transport,
@@ -283,12 +284,15 @@ impl PyMotionEngine {
                 endpoint_process: None,
                 endpoint_conn: None,
                 ethercat_slot_axes: Vec::new(),
+                sample_grid: None,
+                ring_filler: None,
             },
         );
         Ok(raw)
     }
 
-    #[pyo3(signature = (label, socket_path, interface, endpoint_binary, cycle_us, dynamics_profile, drives, late_tolerance_us=None, group_delay_us=None))]
+    #[pyo3(signature = (label, socket_path, interface, endpoint_binary, cycle_us, dynamics_profile, drives, executor, late_tolerance_us=None, group_delay_us=None))]
+    #[allow(clippy::too_many_arguments)]
     fn claim_ethercat_node(
         &self,
         label: &str,
@@ -298,9 +302,16 @@ impl PyMotionEngine {
         cycle_us: u32,
         dynamics_profile: Option<String>,
         drives: Vec<EthercatDrive>,
+        executor: &str,
         late_tolerance_us: Option<f64>,
         group_delay_us: Option<f64>,
     ) -> PyResult<u32> {
+        let executor = Executor::from_config_value(executor).ok_or_else(|| {
+            PyRuntimeError::new_err(format!(
+                "ethercat {label}: unknown executor '{executor}' — accepted values: {}",
+                Executor::ACCEPTED_CONFIG_VALUES
+            ))
+        })?;
         if drives.is_empty() {
             return Err(PyRuntimeError::new_err(format!(
                 "ethercat {label}: claim received no drives"
@@ -324,6 +335,7 @@ impl PyMotionEngine {
             interface,
             socket_path,
             cycle_us,
+            executor,
             dynamics_profile.as_deref(),
             late_tolerance_us,
             group_delay_us.unwrap_or(f64::from(cycle_us)),
@@ -350,11 +362,36 @@ impl PyMotionEngine {
             PyRuntimeError::new_err(message_for_claim_error(label, interface, &e))
         })?;
 
+        let sample_grid = verify_sample_grid(&conn, executor, handshake_deadline).map_err(|e| {
+            let _ = child.kill();
+            let _ = child.wait();
+            PyRuntimeError::new_err(message_for_claim_error(label, interface, &e))
+        })?;
+
+        let ring_filler = build_ring_filler(sample_grid, dynamics_profile.as_deref(), &drives)
+            .map_err(|e| {
+                let _ = child.kill();
+                let _ = child.wait();
+                PyRuntimeError::new_err(format!(
+                    "ethercat {label}: executor is '{executor}' but the host cannot build its \
+                     setpoint filler — {e}"
+                ))
+            })?;
+
         let mut router = self.router.lock_ok();
         let handle = router.claim_mcu(label);
         let raw = handle.raw();
         drop(router);
-        self.register_ethercat_mcu(raw, label, socket_path, child, conn, slot_axes);
+        self.register_ethercat_mcu(
+            raw,
+            label,
+            socket_path,
+            child,
+            conn,
+            slot_axes,
+            sample_grid,
+            ring_filler,
+        );
         Ok(raw)
     }
 
@@ -680,23 +717,32 @@ impl PyMotionEngine {
         child: std::process::Child,
         conn: McuSerialConn,
         slot_axes: Vec<usize>,
+        sample_grid: SampleGrid,
+        ring_filler: Option<crate::pump::RingFiller>,
     ) {
-        self.mcus.lock_ok().insert(
-            raw,
-            McuConnection {
-                label: label.to_owned(),
-                host_io: None,
-                runtime_rx_priority: None,
-                runtime_rx_bulk: None,
-                runtime_caps: None,
-                identify_caps: 0,
-                mcu_transport_supported: true,
-                ethercat_socket: Some(socket_path.to_owned()),
-                endpoint_process: Some(child),
-                endpoint_conn: Some(Arc::new(conn)),
-                ethercat_slot_axes: slot_axes,
-            },
+        let ethercat = McuConnection {
+            label: label.to_owned(),
+            host_io: None,
+            runtime_rx_priority: None,
+            runtime_rx_bulk: None,
+            runtime_caps: None,
+            identify_caps: 0,
+            mcu_transport_supported: true,
+            ethercat_socket: Some(socket_path.to_owned()),
+            endpoint_process: Some(child),
+            endpoint_conn: Some(Arc::new(conn)),
+            ethercat_slot_axes: slot_axes,
+            sample_grid: Some(sample_grid),
+            ring_filler,
+        };
+        tracing::info!(
+            subsystem = "engine",
+            event = "ethercat_sample_grid",
+            label,
+            sample_grid = ?ethercat.sample_grid,
+            "ethercat endpoint sample grid accepted at claim"
         );
+        self.mcus.lock_ok().insert(raw, ethercat);
         self.nominal_clock_freqs
             .lock_ok()
             .insert(raw, ETHERCAT_CLOCK_FREQ_HZ);

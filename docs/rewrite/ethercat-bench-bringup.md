@@ -85,6 +85,11 @@ interface: eth0                     # required; NIC the drive is wired to (raw E
 # group_delay_us: optional. Leads curve sampling to compensate the drive's CSP
 #   group delay; default is one DC cycle (cycle_us).
 #group_delay_us: 250
+# executor: optional. Which setpoint executor the endpoint runs; 'piece'
+#   (default) evaluates motion pieces per DC cycle, 'setpoint_ring' consumes a
+#   pre-sampled per-cycle setpoint ring. klippy passes it to the endpoint as
+#   --executor and refuses the claim if the endpoint reports a different one.
+#executor: piece
 
 # A position-commanded servo presented as the X axis. No step/dir, no microsteps.
 [servo_x]

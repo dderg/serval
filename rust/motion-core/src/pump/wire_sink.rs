@@ -1,14 +1,31 @@
 use super::stepcompress_sink::StepcompressEndpoint;
 use super::{AxisFrame, AxisKey, PieceSink, SendError};
+use crate::lock_ext::LockExt;
+use ethercat_rt::setpoint_fill::ChainFiller;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
 use std::time::{Duration, Instant};
 
+/// An EtherCAT endpoint's host-side setpoint filler, present exactly when the
+/// claim retained a `SampleGrid` reporting the `setpoint_ring` executor. Its
+/// absence *is* piece mode: a ring endpoint can never reach the piece path
+/// because the claim would already have failed on the executor mismatch.
+pub type RingFiller = Arc<Mutex<ChainFiller>>;
+
+/// Cycles the filler covers in one `PushSampleRuns`, and therefore the ring
+/// headroom a lane must report before the pump ships another window. The
+/// endpoint refuses a larger block outright, so this is a wire limit, not a
+/// tuning knob.
+const FILL_WINDOW_CYCLES: u32 = ethercat_rt::setpoint::MAX_FILL_CYCLES as u32;
+
 pub enum McuTransport {
     Serial(Weak<host_rt::host_io::McuHostIo>),
-    EtherCat(Weak<host_rt::mcu_serial_conn::McuSerialConn>),
+    EtherCat {
+        conn: Weak<host_rt::mcu_serial_conn::McuSerialConn>,
+        ring: Option<RingFiller>,
+    },
     Stepcompress(Arc<Mutex<StepcompressEndpoint>>),
 }
 
@@ -16,7 +33,15 @@ impl std::fmt::Debug for McuTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Serial(_) => write!(f, "McuTransport::Serial"),
-            Self::EtherCat(_) => write!(f, "McuTransport::EtherCat"),
+            Self::EtherCat { ring, .. } => write!(
+                f,
+                "McuTransport::EtherCat({})",
+                if ring.is_some() {
+                    "setpoint_ring"
+                } else {
+                    "piece"
+                }
+            ),
             Self::Stepcompress(_) => write!(f, "McuTransport::Stepcompress"),
         }
     }
@@ -226,7 +251,13 @@ impl WireSink {
                     .map(|(_kind, b)| b)
                 })?
             }
-            McuTransport::EtherCat(weak) => {
+            McuTransport::EtherCat { conn: weak, ring } => {
+                if ring.is_some() {
+                    return Err(SendError::Fatal(format!(
+                        "ethercat mcu {mcu_id} runs the setpoint_ring executor — PushPieces \
+                         must never reach it"
+                    )));
+                }
                 let conn = weak.upgrade().ok_or_else(|| {
                     SendError::Fatal(format!(
                         "ethercat conn for mcu {mcu_id} detached (released)"
@@ -260,6 +291,152 @@ impl WireSink {
             SendError::Transient(format!("decode PushPiecesResponse mcu {mcu_id}: {e:?}"))
         })
     }
+
+    /// One `PushSampleRuns` transaction: the ring counterpart of
+    /// `call_push_pieces`, on the same channel, with the same
+    /// fatal-vs-transient split.
+    fn call_push_sample_runs(
+        &self,
+        mcu_id: u32,
+        conn: &host_rt::mcu_serial_conn::McuSerialConn,
+        lanes: Vec<mcu_protocol::messages::LaneRun>,
+    ) -> Result<mcu_protocol::messages::PushSampleRunsResponse, SendError> {
+        use host_rt::transport::TransportError;
+        use mcu_protocol::codec::Decode as _;
+
+        let msg = mcu_protocol::messages::PushSampleRuns { lanes };
+        let body = mcu_protocol::codec::Encode::encoded_to_vec(&msg);
+        let (_kind, resp_body) = conn
+            .kalico_call_on_channel(
+                mcu_protocol::MCU_CHANNEL_PIECES,
+                mcu_protocol::MessageKind::PushSampleRuns,
+                body,
+                self.timeout,
+            )
+            .map_err(|e| {
+                if matches!(&e, TransportError::Closed | TransportError::Io(_)) {
+                    SendError::Fatal(format!("ethercat PushSampleRuns mcu {mcu_id}: {e:?}"))
+                } else {
+                    SendError::Transient(format!("ethercat PushSampleRuns mcu {mcu_id}: {e:?}"))
+                }
+            })?;
+        mcu_protocol::messages::PushSampleRunsResponse::decode(&resp_body).map_err(|e| {
+            SendError::Transient(format!("decode PushSampleRunsResponse mcu {mcu_id}: {e:?}"))
+        })
+    }
+
+    /// Hand a bundle to the setpoint ring instead of the piece ring: stage the
+    /// frames' pieces in the filler, then ship contiguous per-lane runs until
+    /// the endpoint's reported headroom no longer covers another full fill
+    /// window. The headroom is the only pacing signal — the filler samples the
+    /// whole staged trajectory, so without it a deep bundle would overrun the
+    /// ring instead of arriving one window at a time.
+    ///
+    /// A failed bundle is re-sent byte-identically by the pump, and unlike a
+    /// slot-addressed `PushPieces` a staged sample stream is not idempotent —
+    /// the pieces are already in the filler and its lanes have already moved
+    /// on. So every error path drops the stage of the axes it touched: the
+    /// re-send restages them and the resulting run re-anchors, discarding
+    /// whatever the endpoint accepted from the failed attempt.
+    fn send_sample_runs(
+        &self,
+        mcu_id: u32,
+        frames: &[AxisFrame],
+        ring: &RingFiller,
+    ) -> Result<(), SendError> {
+        let result = self.fill_sample_runs(mcu_id, frames, ring);
+        if result.is_err() {
+            let mut filler = ring.lock_ok();
+            for frame in frames {
+                filler.cut_axis(frame.axis);
+            }
+        }
+        result
+    }
+
+    fn fill_sample_runs(
+        &self,
+        mcu_id: u32,
+        frames: &[AxisFrame],
+        ring: &RingFiller,
+    ) -> Result<(), SendError> {
+        let conn = match self.transports.get(&mcu_id) {
+            Some(McuTransport::EtherCat { conn, .. }) => conn.upgrade().ok_or_else(|| {
+                SendError::Fatal(format!(
+                    "ethercat conn for mcu {mcu_id} detached (released)"
+                ))
+            })?,
+            _ => {
+                return Err(SendError::Fatal(format!(
+                    "setpoint-ring send for mcu {mcu_id}, which has no ethercat transport"
+                )));
+            }
+        };
+        let mut filler = ring.lock_ok();
+        for frame in frames {
+            if !filler.drives_axis(frame.axis) {
+                return Err(SendError::Fatal(format!(
+                    "ethercat mcu {mcu_id}: axis {} has no setpoint lane — the filler was \
+                     built from a lane set that does not cover the pump's axes",
+                    frame.axis
+                )));
+            }
+            filler.push_pieces(frame.axis, &frame.pieces);
+        }
+        loop {
+            let lanes = filler.drain().map_err(|e| {
+                SendError::Fatal(format!(
+                    "ethercat mcu {mcu_id}: setpoint fill failed ({}): {e:?}",
+                    e.as_str()
+                ))
+            })?;
+            if lanes.is_empty() {
+                return Ok(());
+            }
+            let response = self.call_push_sample_runs(mcu_id, &conn, lanes)?;
+            if response.result != mcu_protocol::result_codes::OK {
+                super::transit_trace::emit_result_fault_snapshot("mcu_reject", response.result);
+                return Err(SendError::mcu_reject(mcu_id, response.result));
+            }
+            let mut headroom = u32::MAX;
+            for depth in &response.lanes {
+                if !filler.drives_axis(depth.axis_idx) {
+                    return Err(SendError::Fatal(format!(
+                        "ethercat mcu {mcu_id}: PushSampleRunsResponse reported depth for \
+                         axis {}, which is not a lane of this endpoint",
+                        depth.axis_idx
+                    )));
+                }
+                headroom = headroom.min(depth.free_cycles);
+            }
+            filler
+                .observe_grid(response.grid_index, response.grid_clock)
+                .map_err(|e| {
+                    SendError::Fatal(format!(
+                        "ethercat mcu {mcu_id}: setpoint grid rejected ({}): {e:?}",
+                        e.as_str()
+                    ))
+                })?;
+            if !filler.wants_drain() || headroom < FILL_WINDOW_CYCLES {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Drop the staged setpoints of every named ring lane. Called wherever the
+    /// endpoint discards motion it already accepted, so host and endpoint
+    /// re-anchor together instead of the next run continuing a stream the ring
+    /// no longer holds.
+    fn cut_ring_lanes(&self, keys: &[AxisKey]) {
+        for key in keys {
+            if let Some(McuTransport::EtherCat {
+                ring: Some(ring), ..
+            }) = self.transports.get(&key.mcu_id)
+            {
+                ring.lock_ok().cut_axis(key.axis);
+            }
+        }
+    }
 }
 
 impl PieceSink for WireSink {
@@ -288,7 +465,11 @@ impl PieceSink for WireSink {
 
     fn bundle_limits(&self, mcu_id: u32) -> super::BundleLimits {
         match self.transports.get(&mcu_id) {
-            Some(McuTransport::EtherCat(_)) => super::BundleLimits {
+            Some(McuTransport::EtherCat { ring: Some(_), .. }) => super::BundleLimits {
+                wire_budget: 8192,
+                pieces_per_axis: FILL_WINDOW_CYCLES as usize,
+            },
+            Some(McuTransport::EtherCat { ring: None, .. }) => super::BundleLimits {
                 wire_budget: 8192,
                 pieces_per_axis: 255,
             },
@@ -340,6 +521,7 @@ impl PieceSink for WireSink {
     }
 
     fn flush_keys(&self, keys: &[AxisKey]) -> Result<(), SendError> {
+        self.cut_ring_lanes(keys);
         let mut axes_by_mcu: HashMap<u32, Vec<u8>> = HashMap::new();
         for key in keys {
             axes_by_mcu.entry(key.mcu_id).or_default().push(key.axis);
@@ -355,7 +537,43 @@ impl PieceSink for WireSink {
         Ok(())
     }
 
+    fn cut_staged(&self, keys: &[AxisKey]) {
+        self.cut_ring_lanes(keys);
+    }
+
+    fn drain_tick_mcus(&self) -> Vec<u32> {
+        self.transports
+            .iter()
+            .filter_map(|(&mcu_id, t)| {
+                matches!(t, McuTransport::EtherCat { ring: Some(_), .. }).then_some(mcu_id)
+            })
+            .collect()
+    }
+
+    fn drain_tick(&self, mcu_id: u32) -> Result<(), SendError> {
+        match self.transports.get(&mcu_id) {
+            Some(McuTransport::EtherCat {
+                ring: Some(ring), ..
+            }) if ring.lock_ok().wants_drain() => self.send_sample_runs(mcu_id, &[], ring),
+            _ => Ok(()),
+        }
+    }
+
+    fn wants_drain_tick(&self, mcu_id: u32) -> bool {
+        matches!(
+            self.transports.get(&mcu_id),
+            Some(McuTransport::EtherCat { ring: Some(ring), .. }) if ring.lock_ok().wants_drain()
+        )
+    }
+
     fn send_mcu_frames(&self, mcu_id: u32, frames: &[AxisFrame]) -> Result<(), SendError> {
+        if let Some(McuTransport::EtherCat {
+            ring: Some(ring), ..
+        }) = self.transports.get(&mcu_id)
+        {
+            return self.send_sample_runs(mcu_id, frames, ring);
+        }
+
         debug_assert!(
             frames.iter().all(|f| f.pieces.len() <= 255),
             "PushPieces axis block exceeds u8 piece_count; schedule() must cap at MAX_PER_FRAME"
@@ -436,3 +654,7 @@ impl PieceSink for WireSink {
 #[cfg(test)]
 #[path = "wire_sink_tests.rs"]
 mod wire_sink_tests;
+
+#[cfg(test)]
+#[path = "wire_sink_ring_tests.rs"]
+mod wire_sink_ring_tests;

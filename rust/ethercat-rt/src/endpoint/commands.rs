@@ -1,6 +1,6 @@
 use std::ops::ControlFlow;
 
-use super::{discard_motion, EndpointCtx};
+use super::{cycle, discard_motion, EndpointCtx};
 use crate::capture::{
     any_slot_out_of_range, CaptureConfig, CaptureDriveConfig, ERR_CAPTURE_BAD_DRIVE_LIST,
 };
@@ -10,23 +10,28 @@ use crate::dynamics::{DynamicsModel, ERR_DYNAMICS_BAD_DIM, ERR_DYNAMICS_REJECTED
 use crate::mailbox::{LimitEntry, MailboxReply, MailboxRequest};
 use crate::push_plan::plan_bundle;
 use crate::sensorless::{ERR_ARM_SENSORLESS_AMBIGUOUS_PAIR, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
+use crate::setpoint::{
+    Executor, RunHeader, SetpointEntry, ERR_BUZZ_IN_RING_MODE, ERR_PIECES_IN_RING_MODE,
+    ERR_SAMPLES_IN_PIECE_MODE, RING_DEPTH_CYCLES,
+};
 use crate::strain_comp::ERR_COMP_BAD_LANE;
 use crate::torque::{CommandAction, TorqueState, ERR_ENABLE_FAILED, ERR_PIECES_WHILE_FAULTED};
 use crate::wire::{
     arm_sensorless_endstop_response_frame, identify_response_frame, motor_state_empty_frame,
     motor_state_response_frame_multi, push_pieces_response_frame_multi,
-    resonance_buzz_response_frame, restore_drive_limits_response_frame,
-    resume_stream_response_frame, runtime_caps_response_frame, sdo_read_response_frame,
-    sdo_write_response_frame, seed_servo_home_response_frame, set_diff_damper_response_frame,
-    set_diff_trim_response_frame, set_drive_limits_response_frame,
-    set_dynamics_model_response_frame, set_ff_lead_response_frame, set_strain_comp_response_frame,
-    set_torque_response_frame, start_capture_response_frame, stepper_suppress_response_frame,
-    stop_capture_response_frame, stop_response_frame, Command,
+    push_sample_runs_response_frame, resonance_buzz_response_frame,
+    restore_drive_limits_response_frame, resume_stream_response_frame, runtime_caps_response_frame,
+    sample_grid_response_frame, sdo_read_response_frame, sdo_write_response_frame,
+    seed_servo_home_response_frame, set_diff_damper_response_frame, set_diff_trim_response_frame,
+    set_drive_limits_response_frame, set_dynamics_model_response_frame, set_ff_lead_response_frame,
+    set_strain_comp_response_frame, set_torque_response_frame, start_capture_response_frame,
+    stepper_suppress_response_frame, stop_capture_response_frame, stop_response_frame, Command,
 };
 use mcu_protocol::messages::{
-    ArmSensorlessEndstop, PushPieces, ResonanceBuzz, SdoRead, SdoReadResponse, SdoWrite,
-    SdoWriteResponse, SetDiffDamper, SetDiffTrim, SetDriveLimits, SetDynamicsModel, SetFfLead,
-    SetTorque, StartCapture, StopCaptureResponse,
+    ArmSensorlessEndstop, LaneRun, PushPieces, PushSampleRuns, ResonanceBuzz, SdoRead,
+    SdoReadResponse, SdoWrite, SdoWriteResponse, SetDiffDamper, SetDiffTrim, SetDriveLimits,
+    SetDynamicsModel, SetFfLead, SetTorque, StartCapture, StopCaptureResponse,
+    LANE_RUN_FLAG_REANCHOR, LANE_RUN_FLAG_TAIL,
 };
 
 /// Command execution shares the RT thread with the DC exchange, so it must
@@ -39,6 +44,8 @@ fn command_name(cmd: &Command) -> &'static str {
     match cmd {
         Command::Identify { .. } => "Identify",
         Command::PushPieces { .. } => "PushPieces",
+        Command::PushSampleRuns { .. } => "PushSampleRuns",
+        Command::QuerySampleGrid { .. } => "QuerySampleGrid",
         Command::QueryRuntimeCaps { .. } => "QueryRuntimeCaps",
         Command::SetTorque { .. } => "SetTorque",
         Command::Stop { .. } => "Stop",
@@ -109,6 +116,27 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
                     );
                 }
             }
+            Command::PushSampleRuns {
+                correlation_id,
+                msg,
+            } => {
+                let spans = handle_push_sample_runs(ctx, correlation_id, &msg);
+                if cmd_started.elapsed().as_nanos() > DISPATCH_BUDGET_NS {
+                    tracing::warn!(
+                        subsystem = "ethercat",
+                        event = "slow_push_sample_runs",
+                        entries = spans.entries,
+                        map_ns = spans.map_ns,
+                        fill_ns = spans.fill_ns,
+                        respond_ns = spans.respond_ns,
+                        "PushSampleRuns exceeded the dispatch budget — the frame \
+                         carried more ring depth than the budget affords"
+                    );
+                }
+            }
+            Command::QuerySampleGrid { correlation_id } => {
+                handle_query_sample_grid(ctx, correlation_id);
+            }
             Command::QueryRuntimeCaps { correlation_id } => {
                 // Capacity is per distinct axis, not per slave: an AWD axis
                 // fans its pieces out to every slot claiming it, so extra
@@ -117,10 +145,19 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
                 let mut distinct_axes: Vec<u8> = ctx.slave_axes.clone();
                 distinct_axes.sort_unstable();
                 distinct_axes.dedup();
-                let total: u32 = (AXIS_RING_CAPACITY
-                    * distinct_axes.len()
-                    * runtime::piece_ring::PIECE_ENTRY_BYTES)
-                    as u32;
+                let total: u32 = match ctx.executor {
+                    Executor::Piece => {
+                        (AXIS_RING_CAPACITY
+                            * distinct_axes.len()
+                            * runtime::piece_ring::PIECE_ENTRY_BYTES) as u32
+                    }
+                    Executor::SetpointRing => {
+                        (RING_DEPTH_CYCLES
+                            * distinct_axes.len()
+                            * mcu_protocol::messages::SETPOINT_SAMPLE_LEN)
+                            as u32
+                    }
+                };
                 ctx.server
                     .respond(&runtime_caps_response_frame(correlation_id, total));
             }
@@ -309,7 +346,13 @@ fn handle_push_pieces(
         .collect();
     let mut result = 0i32;
     let mut planned = None;
-    if ctx.gate.state() == TorqueState::Faulted {
+    if ctx.executor != Executor::Piece {
+        result = ERR_PIECES_IN_RING_MODE;
+        crate::rt_eprintln!(
+            "ec-rt: PushPieces rejected — endpoint runs the {} executor",
+            ctx.executor.as_str()
+        );
+    } else if ctx.gate.state() == TorqueState::Faulted {
         result = ERR_PIECES_WHILE_FAULTED;
     } else if let Err(code) = ctx.stream_halt.check_push_allowed() {
         result = code;
@@ -339,6 +382,149 @@ fn handle_push_pieces(
         copy_ns: (respond_start - copy_start).as_nanos() as i64,
         respond_ns: respond_start.elapsed().as_nanos() as i64,
     }
+}
+
+struct SampleFillSpans {
+    entries: u32,
+    map_ns: i64,
+    fill_ns: i64,
+    respond_ns: i64,
+}
+
+/// Fill the setpoint rings from one host frame. Everything expensive already
+/// happened on the host: this is a bounded copy plus the abutment checks, so
+/// it fits the dispatch budget the DC loop leaves between exchanges.
+fn handle_push_sample_runs(
+    ctx: &mut EndpointCtx,
+    correlation_id: u32,
+    msg: &PushSampleRuns,
+) -> SampleFillSpans {
+    let now_ns = monotonic_ns();
+    let map_start = std::time::Instant::now();
+    let mut result = 0i32;
+    if ctx.executor != Executor::SetpointRing {
+        result = ERR_SAMPLES_IN_PIECE_MODE;
+        crate::rt_eprintln!(
+            "ec-rt: PushSampleRuns rejected — endpoint runs the {} executor",
+            ctx.executor.as_str()
+        );
+    } else if ctx.gate.state() == TorqueState::Faulted {
+        result = ERR_PIECES_WHILE_FAULTED;
+    } else if let Err(code) = ctx.stream_halt.check_push_allowed() {
+        result = code;
+    }
+    let fill_start = std::time::Instant::now();
+    let mut entries = 0u32;
+    if result == 0 {
+        let (fill_result, filled) = fill_lane_runs(ctx, &msg.lanes);
+        entries = filled;
+        result = fill_result;
+    }
+    let respond_start = std::time::Instant::now();
+    let lanes: Vec<(u8, u32)> = msg
+        .lanes
+        .iter()
+        .map(|lane| (lane.axis_idx, lane_free_cycles(ctx, lane.axis_idx)))
+        .collect();
+    let grid = cycle::grid_now(ctx);
+    ctx.server.respond(&push_sample_runs_response_frame(
+        correlation_id,
+        result,
+        now_ns,
+        grid,
+        &lanes,
+    ));
+    SampleFillSpans {
+        entries,
+        map_ns: (fill_start - map_start).as_nanos() as i64,
+        fill_ns: (respond_start - fill_start).as_nanos() as i64,
+        respond_ns: respond_start.elapsed().as_nanos() as i64,
+    }
+}
+
+/// Copy one frame's lane runs into the setpoint rings, fanning each lane out
+/// to every slot claiming its axis. Returns the frame result and how many
+/// entries were copied. Every rejection is latched in the ring it hit, so the
+/// heartbeat reports it and the drives park.
+pub(super) fn fill_lane_runs(ctx: &mut EndpointCtx, lanes: &[LaneRun]) -> (i32, u32) {
+    let mut result = 0i32;
+    let mut entries = 0u32;
+    let mut scratch = std::mem::take(&mut ctx.sp_fill_scratch);
+    for lane in lanes {
+        scratch.clear();
+        scratch.extend(lane.samples.iter().map(|s| SetpointEntry {
+            pos_counts: s.pos_counts,
+            vel_ff: s.vel_ff,
+            torque_ff: s.torque_ff,
+            acc_mm_s2: s.acc_mm_s2,
+        }));
+        entries += scratch.len() as u32;
+        let header = RunHeader {
+            start_index: lane.start_index,
+            interval_ticks: lane.interval_ticks,
+            origin_mm: f64::from(lane.origin_mm_q16) / 65536.0,
+            anchor: lane.flags & LANE_RUN_FLAG_REANCHOR != 0,
+            final_run: lane.flags & LANE_RUN_FLAG_TAIL != 0,
+        };
+        for slot in 0..ctx.num_slaves {
+            if ctx.slave_axes[slot] != lane.axis_idx {
+                continue;
+            }
+            if header.anchor {
+                ctx.ring_origin[slot] = None;
+            }
+            if let Err(fault) = ctx.sp_rings[slot].fill(&header, &scratch) {
+                result = fault.code();
+                crate::rt_eprintln!(
+                    "ec-rt: FAULT {} on slot {slot} axis {} start_index {} count {} — {:?}",
+                    fault.as_str(),
+                    lane.axis_idx,
+                    lane.start_index,
+                    scratch.len(),
+                    fault
+                );
+                tracing::error!(
+                    subsystem = "ethercat",
+                    event = "sample_fill_rejected",
+                    reason = fault.as_str(),
+                    slot,
+                    axis = lane.axis_idx,
+                    start_index = lane.start_index,
+                    count = scratch.len(),
+                    fault_code = fault.code(),
+                    "setpoint ring rejected a run — the fault is latched for the \
+                     heartbeat and the drives park"
+                );
+            }
+        }
+    }
+    ctx.sp_fill_scratch = scratch;
+    (result, entries)
+}
+
+/// An AWD axis fans one lane's runs out to every slot claiming it, so the
+/// lane's headroom is the tightest of those slots.
+fn lane_free_cycles(ctx: &EndpointCtx, axis: u8) -> u32 {
+    (0..ctx.num_slaves)
+        .filter(|&slot| ctx.slave_axes[slot] == axis)
+        .map(|slot| ctx.sp_rings[slot].free() as u32)
+        .min()
+        .unwrap_or(0)
+}
+
+fn handle_query_sample_grid(ctx: &mut EndpointCtx, correlation_id: u32) {
+    let (grid, ring_depth) = match ctx.executor {
+        Executor::Piece => ((0, 0), 0),
+        Executor::SetpointRing => (cycle::grid_now(ctx), RING_DEPTH_CYCLES as u32),
+    };
+    let frame = sample_grid_response_frame(
+        correlation_id,
+        ctx.executor.wire(),
+        ctx.cycle_ns as u32,
+        ring_depth,
+        grid,
+    );
+    ctx.server.respond(&frame);
 }
 
 pub(super) fn handle_set_torque(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetTorque) {
@@ -722,7 +908,13 @@ fn handle_arm_sensorless_endstop(
 }
 
 fn handle_resonance_buzz(ctx: &mut EndpointCtx, correlation_id: u32, msg: ResonanceBuzz) {
-    let rc = if ctx.gate.state() != TorqueState::Enabled {
+    let rc = if ctx.executor == Executor::SetpointRing {
+        crate::rt_eprintln!(
+            "ec-rt: ResonanceBuzz rejected — the setpoint-ring executor takes the \
+             buzz as host-generated sample runs, not an endpoint oscillator"
+        );
+        ERR_BUZZ_IN_RING_MODE
+    } else if ctx.gate.state() != TorqueState::Enabled {
         crate::rt_eprintln!("ec-rt: ResonanceBuzz rejected — drive not operation-enabled");
         crate::buzz::ERR_BUZZ_NOT_ENABLED
     } else if ctx.rings.iter().any(|r| !r.is_empty()) || ctx.buzz.active() {
