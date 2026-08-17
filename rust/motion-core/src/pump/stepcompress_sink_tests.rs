@@ -475,6 +475,84 @@ fn a_queue_step_within_the_projection_guard_still_goes_out() {
     assert_eq!(h.sent_moves(), 1);
 }
 
+fn stale_reset_step_clock(start_clock: u64) -> OutboundFrame {
+    OutboundFrame {
+        frame: Outbound::Step(StepFrame::ResetStepClock {
+            oid: OID,
+            clock: start_clock as u32,
+        }),
+        start_clock,
+        end_clock: start_clock,
+        enqueue_order: 0,
+    }
+}
+
+fn stale_set_next_step_dir(start_clock: u64) -> OutboundFrame {
+    OutboundFrame {
+        frame: Outbound::Step(StepFrame::SetNextStepDir { oid: OID, dir: 1 }),
+        start_clock,
+        end_clock: start_clock,
+        enqueue_order: 0,
+    }
+}
+
+#[test]
+fn a_reset_step_clock_behind_the_mcu_clock_is_fatal_before_egress() {
+    let mut h = harness(BUDGET);
+    h.endpoint.backlog.push_back(stale_reset_step_clock(1_000));
+    h.now.store(1_000_000, Ordering::Relaxed);
+    let err = h.endpoint.tick().unwrap_err();
+    match err {
+        SendError::Fatal(msg) => {
+            assert!(msg.contains("reset_step_clock"), "{msg}");
+            assert!(msg.contains("999000 us behind"), "{msg}");
+            assert!(msg.contains("deficit of 999000 us"), "{msg}");
+            assert!(msg.contains("projected mcu clock 1000000"), "{msg}");
+        }
+        other => panic!("expected Fatal, got {other:?}"),
+    }
+    assert!(
+        h.sent.lock_ok().is_empty(),
+        "a reset_step_clock the mcu would load in the past must never reach the wire — \
+         it starts the step catch-up that starves the scheduler into \
+         \"Rescheduled timer in the past\""
+    );
+}
+
+#[test]
+fn a_set_next_step_dir_behind_the_mcu_clock_is_fatal_before_egress() {
+    let mut h = harness(BUDGET);
+    h.endpoint.backlog.push_back(stale_set_next_step_dir(1_000));
+    h.now.store(1_000_000, Ordering::Relaxed);
+    let err = h.endpoint.tick().unwrap_err();
+    match err {
+        SendError::Fatal(msg) => {
+            assert!(msg.contains("set_next_step_dir"), "{msg}");
+            assert!(msg.contains("999000 us behind"), "{msg}");
+        }
+        other => panic!("expected Fatal, got {other:?}"),
+    }
+    assert!(h.sent.lock_ok().is_empty());
+}
+
+#[test]
+fn a_reset_step_clock_within_the_projection_guard_still_goes_out() {
+    let mut h = harness(BUDGET);
+    let guard_cycles = (CYCLES_PER_SECOND * 500e-6) as u64;
+    h.now.store(1_000_000, Ordering::Relaxed);
+    h.endpoint
+        .backlog
+        .push_back(stale_reset_step_clock(1_000_000 - guard_cycles / 2));
+    h.endpoint.tick().unwrap();
+    assert!(
+        h.sent
+            .lock_ok()
+            .iter()
+            .any(|f| matches!(f, StepFrame::ResetStepClock { .. })),
+        "a reset clock inside the projection floor margin is a normal re-anchor"
+    );
+}
+
 #[test]
 fn multi_lane_commands_leave_in_step_deadline_order() {
     let mut h = harness(8);

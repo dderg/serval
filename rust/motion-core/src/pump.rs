@@ -21,6 +21,8 @@ pub use messages::{
     BundleLimits, EnqueueMsg, HeartbeatMsg, HistoryRecorder, PieceSink, PumpCallbacks, PumpMsg,
     SendError,
 };
+#[cfg(test)]
+pub(crate) use pump_loop::pump_past_guard_secs;
 pub use pump_loop::{MAX_LEAD_SECS, PUMP_DATA_CHANNEL_CAP, run_pump};
 pub use sched::{
     AxisFrame, AxisQueue, FramePlan, Schedule, SeamBasis, append_pieces_merging_holds, schedule,

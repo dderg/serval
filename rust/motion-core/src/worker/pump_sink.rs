@@ -67,6 +67,23 @@ impl PumpSink {
         })
     }
 
+    /// Whether any lane this mcu serves carries real motion in the segment —
+    /// the same hold test `is_pure_hold` applies to wire pieces, decided on
+    /// the lane curve so a re-anchor can tell a moving lane (whose clocks
+    /// must track the live record) from an idle one (whose step-clock stream
+    /// must not jump).
+    fn mcu_has_motion(&self, cfg: &crate::mcu_config::McuAxisConfig, seg: &ShapedSegment) -> bool {
+        let module = crate::kinematics::KinematicsModule::from_tag(cfg.kinematics)
+            .expect("mcu_configs were validated at build");
+        cfg.axes.iter().any(|&axis_idx| {
+            if axis_idx >= seg.axes.len() {
+                return false;
+            }
+            let curve = crate::enqueue::lane_curve(&module, &seg.axes, axis_idx);
+            !crate::enqueue::lane_curve_is_hold(&curve)
+        })
+    }
+
     fn live_projection(&self, mcu_id: u32, host_secs: f64) -> u64 {
         self.router
             .lock_ok()
@@ -75,27 +92,56 @@ impl PumpSink {
     }
 
     fn reanchor_projection(&self, mcu_id: u32, host_now: f64) -> Result<(), DispatchError> {
+        let handle = crate::types::mcu_handle_from_raw(mcu_id);
         let freq = self
             .router
             .lock_ok()
-            .ack_clock_and_freq(crate::types::mcu_handle_from_raw(mcu_id))
+            .ack_clock_and_freq(handle)
             .map(|(_, f)| f)
             .ok_or(DispatchError::ClockSyncTimeout {
                 mcu_id,
-                mcu_handle: crate::types::mcu_handle_from_raw(mcu_id),
+                mcu_handle: handle,
             })?;
+        // The anchor point always comes from the live clocksync record, never
+        // from the previous frozen projection: the frozen slope drifts from
+        // the live estimate by `freq_error * elapsed` over a long epoch (an
+        // idle resume after a ten-minute park carries tens of ms with a
+        // 100 ppm crystal), and a chained mcu_ref carries that drift forward
+        // forever. Re-anchoring from the live record bounds the first-volley
+        // clock's error to the clocksync's own — the guards then hold it to
+        // the floor margin — and the reanchor cut re-bases the MCU step
+        // clock anyway, so nothing downstream depends on continuity.
         let mut frozen = self.frozen_projection.lock_ok();
-        let mcu_ref = match frozen.get(&mcu_id) {
-            Some(prev) => prev.project_exact(host_now),
-            None => self
-                .router
-                .lock_ok()
-                .host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(mcu_id), host_now)
-                .map_err(|_| DispatchError::ClockSyncTimeout {
-                    mcu_id,
-                    mcu_handle: crate::types::mcu_handle_from_raw(mcu_id),
-                })? as f64,
-        };
+        let mcu_ref = self
+            .router
+            .lock_ok()
+            .host_time_to_mcu_clock(handle, host_now)
+            .map_err(|_| DispatchError::ClockSyncTimeout {
+                mcu_id,
+                mcu_handle: handle,
+            })? as f64;
+        if let Some(prev) = frozen.get(&mcu_id).copied() {
+            let drift_ticks = prev.project_exact(host_now) - mcu_ref;
+            if drift_ticks.abs() > crate::anchor::LOW_MARGIN_WARN_SECS * freq {
+                let drift_us = drift_ticks / freq * 1e6;
+                let span_s = host_now - prev.host_ref;
+                tracing::warn!(
+                    subsystem = "motion",
+                    event = "reanchor_projection_drift",
+                    mcu = mcu_id,
+                    drift_us,
+                    prev_host_ref = prev.host_ref,
+                    span_s,
+                    prev_freq = prev.freq,
+                    live_freq = freq,
+                    host_now,
+                    mcu_ref,
+                    "[reanchor] the previous epoch's frozen projection drifted \
+                     {drift_us:.0} us from the live clock over {span_s:.1} s — \
+                     its step clocks were that far off the mcu"
+                );
+            }
+        }
         frozen.insert(
             mcu_id,
             FrozenProjection {
@@ -173,13 +219,31 @@ impl SegmentSink for PumpSink {
 
         let seam_host = at.t0 + seg.t_start;
         if at.epoch.retimed() || self.frozen_projection.lock_ok().is_empty() {
-            for mcu_id in self
-                .mcu_configs
-                .iter()
-                .map(|cfg| cfg.mcu_id)
-                .filter(|&id| self.is_stepcompress(id))
-                .collect::<Vec<_>>()
-            {
+            let reanchor = {
+                let frozen = self.frozen_projection.lock_ok();
+                self.mcu_configs
+                    .iter()
+                    .filter(|cfg| self.is_stepcompress(cfg.mcu_id))
+                    .filter(|cfg| {
+                        if !frozen.contains_key(&cfg.mcu_id) {
+                            true
+                        } else {
+                            // A retimed epoch re-bases the lanes that actually
+                            // move on the live clock — the piece clocks of a
+                            // moving lane must track the clocksync, not a
+                            // frozen slope that drifted since the last anchor.
+                            // Hold-only (idle) lanes keep their frozen domain:
+                            // re-basing them would jump their step-clock
+                            // stream by the projection's drift, moving the
+                            // lane (or tripping the count reconcile) for no
+                            // motion.
+                            at.epoch.retimed() && self.mcu_has_motion(cfg, seg)
+                        }
+                    })
+                    .map(|cfg| cfg.mcu_id)
+                    .collect::<Vec<_>>()
+            };
+            for mcu_id in reanchor {
                 self.reanchor_projection(mcu_id, seam_host)?;
             }
         }
@@ -307,3 +371,7 @@ impl SegmentSink for PumpSink {
         self.anchor.lock_ok().mark_parked();
     }
 }
+
+#[cfg(test)]
+#[path = "projection_tests.rs"]
+mod projection_tests;

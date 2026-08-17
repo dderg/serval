@@ -134,6 +134,18 @@ where
     out
 }
 
+/// A lane whose motor-frame curve is constant to wire position resolution
+/// commands no motion — the curve-level mirror of [`is_pure_hold`], decided
+/// before flattening so callers can tell moving from hold-only lanes without
+/// projecting any pieces.
+pub(crate) fn lane_curve_is_hold(curve: &ScalarNurbs) -> bool {
+    let Some((first, rest)) = curve.control_points().split_first() else {
+        return true;
+    };
+    rest.iter()
+        .all(|&cp| (cp - first).abs() <= WIRE_TRUNC_POS_MM)
+}
+
 /// A lane whose every wire piece is the same constant (to wire position
 /// resolution) commands no motion: an ethercat drive at standstill needs no
 /// pieces (its held target is already that position), and a parked drive

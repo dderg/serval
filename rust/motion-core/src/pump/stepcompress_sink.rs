@@ -956,7 +956,8 @@ impl StepcompressEndpoint {
         let cutoff = now.saturating_sub(margin);
         self.in_flight.retain(|e| e.reclaim_clock > cutoff);
         self.order_backlog_by_deadline();
-        let stale_by = (freq * pump_past_guard_secs()) as u64;
+        let guard_secs = pump_past_guard_secs();
+        let stale_by = (freq * guard_secs) as u64;
         let mut burst: Vec<(&'static str, Vec<(String, ArgValue)>)> = Vec::new();
         let mut reclaim_clocks: Vec<u64> = Vec::new();
         let mut sent_boundaries: Vec<(u32, u64)> = Vec::new();
@@ -968,20 +969,41 @@ impl StepcompressEndpoint {
                 Outbound::Step(StepFrame::QueueStep { .. } | StepFrame::QueueStepHp { .. })
                     | Outbound::Barrier(_)
             );
-            let queue_step = matches!(
+            // Every motion frame's start clock is guarded, not just the
+            // queue_step frames: reset_step_clock accepts a past clock
+            // silently and the first stepper_event then fires immediately,
+            // starting a catch-up that starves the scheduler (the MCU-side
+            // "Rescheduled timer in the past"). The reset clock is the first
+            // frame of a fresh volley, so it is the one that must never
+            // reach the wire in the past. Barriers are control receipts —
+            // their start clock is the last sent step clock, in the past by
+            // the delivery lead by design — so they are exempt.
+            let motion_frame = matches!(
                 &out.frame,
-                Outbound::Step(StepFrame::QueueStep { .. } | StepFrame::QueueStepHp { .. })
+                Outbound::Step(StepFrame::ResetStepClock { .. })
+                    | Outbound::Step(StepFrame::SetNextStepDir { .. })
+                    | Outbound::Step(StepFrame::QueueStep { .. })
+                    | Outbound::Step(StepFrame::QueueStepHp { .. })
             );
             if consumes_slot && in_flight >= self.budget {
                 break;
             }
-            if queue_step && out.start_clock.saturating_add(stale_by) < now {
+            if motion_frame && out.start_clock.saturating_add(stale_by) < now {
                 let late_us = (now - out.start_clock) as f64 * 1e6 / freq;
+                let kind = match out.frame {
+                    Outbound::Step(StepFrame::ResetStepClock { .. }) => "reset_step_clock",
+                    Outbound::Step(StepFrame::SetNextStepDir { .. }) => "set_next_step_dir",
+                    Outbound::Step(StepFrame::QueueStep { .. }) => "queue_step",
+                    Outbound::Step(StepFrame::QueueStepHp { .. }) => "queue_step_hp",
+                    Outbound::Barrier(_) => unreachable!("barriers are exempt above"),
+                };
                 stale = Some(SendError::Fatal(format!(
-                    "stepcompress mcu {}: queue_step first step at clock {} is {late_us:.0} us \
-                     behind the mcu clock {now} — the mcu shuts down on any late idle-stepper \
-                     re-arm (\"Stepper too far in past\"). {SEND_LEAD_SECONDS} s of lead was not \
-                     delivered: {} frames backlogged, {in_flight}/{} move slots in flight",
+                    "stepcompress mcu {}: {kind} at clock {} is {late_us:.0} us behind the \
+                     projected mcu clock {now} — a deficit of {late_us:.0} us past the \
+                     {guard_secs} s floor margin. The mcu shuts down on any \
+                     late stepper re-arm (\"Stepper too far in past\"/\"Rescheduled timer in \
+                     the past\"). {SEND_LEAD_SECONDS} s of lead was not delivered: {} frames \
+                     backlogged, {in_flight}/{} move slots in flight",
                     self.mcu_id,
                     out.start_clock,
                     self.backlog.len(),
