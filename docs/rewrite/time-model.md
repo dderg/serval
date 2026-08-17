@@ -36,6 +36,17 @@ Two frequencies exist per MCU and they are not interchangeable:
   stepcompress anchor refuses to run (`DispatchError::ClockRecordUnusable`).
   A record surviving a reflash would project clocks ahead of the restarted
   MCU counter by the previous boot's uptime.
+  Two different quantities describe that record, and confusing them costs
+  hours: `clock_offset` is the regression's decay-weighted sample **centroid**,
+  which on a perfectly live record trails now by up to `1/DECAY` get_clock
+  periods (~30 s), so `host_now - clock_offset` (`centroid_lag_secs`) is the
+  projection's lever arm, not staleness. The record's **age** is
+  `host_now - updated_at`: how long since the router last accepted an estimate.
+  Both are on every `reanchor_record` event. The anchor warns past
+  `DEGRADED_CLOCK_RECORD_AGE_SECS` (3 periods; measured healthy worlds gap up
+  to ~10 s, so this is not a stop) and refuses past
+  `MAX_CLOCK_RECORD_AGE_SECS` (the full regression window) with
+  `DispatchError::ClockRecordStale`.
 - print_time ↔ MCU clock: multiply/divide by **nominal** `CLOCK_FREQ`
   (secondary MCUs additionally go through `SecondarySync.clock_adj`,
   Python-side).

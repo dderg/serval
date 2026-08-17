@@ -116,9 +116,14 @@ fn a_healthy_clocksync_lands_the_first_volley_lead_seconds_ahead_of_the_true_clo
     router.claim_mcu("stepcompress");
 
     // klippy connect at t=0.5, then periodic updates; the estimator's freq
-    // has converged to +50 ppm, the offset to +1 ms.
+    // has converged to +50 ppm, the offset to +1 ms. The host clock walks with
+    // the samples so the record's age is the real one — the anchor refuses a
+    // record clocksync stopped refreshing.
     let freq_est = F_TRUE * (1.0 + 50e-6);
+    let mut host_at = 0.0;
     for (sample_host, offset_err) in [(0.5, 0.0), (1.5, 0.0005), (2.5, 0.001)] {
+        clock.advance(Duration::from_secs_f64(sample_host - host_at));
+        host_at = sample_host;
         seed_clock(
             &mut router,
             freq_est,
@@ -129,7 +134,7 @@ fn a_healthy_clocksync_lands_the_first_volley_lead_seconds_ahead_of_the_true_clo
 
     // The first G28 X anchors 3.2 s after the mcu came up (the bench fault
     // fired at counter 536880068 = 3.196 s of uptime).
-    clock.advance(Duration::from_secs_f64(3.2));
+    clock.advance(Duration::from_secs_f64(3.2 - host_at));
     let host_now = router.host_now_secs();
     let sink = pump_sink(router);
     let first_clock = first_volley_clock(&sink, host_now);
@@ -185,6 +190,7 @@ fn a_clock_record_lagging_the_true_mcu_puts_the_first_volley_past_and_blinds_the
     // instant, but the clock value is lag_secs of ticks behind what the
     // counter really read there.
     let sample_host = 2.5;
+    clock.advance(Duration::from_secs_f64(sample_host));
     seed_clock(
         &mut router,
         F_TRUE,
@@ -192,7 +198,7 @@ fn a_clock_record_lagging_the_true_mcu_puts_the_first_volley_past_and_blinds_the
         (true_clock(sample_host) - lag_secs * F_TRUE) as u64,
     );
 
-    clock.advance(Duration::from_secs_f64(3.2));
+    clock.advance(Duration::from_secs_f64(3.2 - sample_host));
     let host_now = router.host_now_secs();
     let sink = pump_sink(router);
     let first_clock = first_volley_clock(&sink, host_now);

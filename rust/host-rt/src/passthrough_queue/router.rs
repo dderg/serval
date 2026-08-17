@@ -40,6 +40,18 @@ impl std::fmt::Display for RouterError {
 
 impl std::error::Error for RouterError {}
 
+/// A record this old has missed samples. Measured healthy sim worlds gap up to
+/// ~9 s (klippy's outlier rejection drops samples and a loaded reactor defers
+/// the timer), so this is a loud degradation signal, not a hard stop.
+pub const DEGRADED_CLOCK_RECORD_AGE_SECS: f64 =
+    3.0 * crate::clock_regression::NON_RESONANT_GET_CLOCK_PERIOD_SECS;
+
+/// A record older than the regression's own sample window contains no live
+/// sample at all: clocksync has stopped feeding the router and every
+/// projection off it is an open-loop extrapolation. Anchoring a step stream on
+/// one is a hard error.
+pub const MAX_CLOCK_RECORD_AGE_SECS: f64 = crate::clock_regression::REGRESSION_WINDOW_SECS;
+
 /// One MCU's live host↔MCU clock map. Present only while a record seeded
 /// after the MCU's current boot epoch is live: a (re)connect drops it, so no
 /// projection can silently run off the previous epoch's numbers.
@@ -49,11 +61,18 @@ struct ClockEst {
     /// around the nominal frequency by ppm. Used to extrapolate what the
     /// MCU's clock reads at a host instant — never to define print_time.
     clock_freq: f64,
+    /// Host instant of the regression's decay-weighted sample centroid, which
+    /// legitimately trails the newest sample by up to `1/decay` periods. It is
+    /// the projection's anchor point, NOT a measure of the record's freshness.
     clock_offset: f64,
     last_clock: u64,
     /// Whether the publishing clocksync had latched convergence. Anchoring
     /// step streams on an unconverged estimate is rejected.
     converged: bool,
+    /// Host instant at which the router accepted this estimate. The only
+    /// honest freshness measure: `host_now - updated_at` counts the missed
+    /// `get_clock` samples.
+    updated_at: f64,
 }
 
 /// The record numbers plus the clock they project to at a host instant —
@@ -65,6 +84,11 @@ pub struct ClockRecordSnapshot {
     pub last_clock: u64,
     pub converged: bool,
     pub projected_now: u64,
+    /// Seconds since the router last accepted an estimate for this MCU.
+    pub age_secs: f64,
+    /// Seconds between the regression centroid and now: the projection's lever
+    /// arm, which grows to `1/decay` periods on a perfectly healthy record.
+    pub centroid_lag_secs: f64,
 }
 
 #[derive(Debug)]
@@ -164,6 +188,8 @@ impl PassthroughRouter {
             last_clock: est.last_clock,
             converged: est.converged,
             projected_now,
+            age_secs: host_now - est.updated_at,
+            centroid_lag_secs: host_now - est.clock_offset,
         })
     }
 
@@ -196,6 +222,7 @@ impl PassthroughRouter {
             last_clock,
             "[clock-seed] set_clock_est"
         );
+        let now = instant_to_f64(self.clock.now());
         let rec = self
             .mcus
             .get_mut(&mcu)
@@ -205,6 +232,7 @@ impl PassthroughRouter {
             clock_offset: offset,
             last_clock,
             converged: true,
+            updated_at: now,
         });
         Ok(())
     }
@@ -257,6 +285,7 @@ impl PassthroughRouter {
             clock_offset,
             last_clock,
             converged,
+            updated_at: bridge_now_instant,
         });
         Ok(())
     }
@@ -278,6 +307,7 @@ impl PassthroughRouter {
             mcu_at_send,
             "[clock-seed] set_clock_est_from_sample"
         );
+        let now = instant_to_f64(self.clock.now());
         let rec = self
             .mcus
             .get_mut(&mcu)
@@ -287,6 +317,7 @@ impl PassthroughRouter {
             clock_offset,
             last_clock: mcu_at_send,
             converged: true,
+            updated_at: now,
         });
         Ok(())
     }
@@ -499,3 +530,6 @@ mod tests;
 
 #[cfg(test)]
 mod clock_record_lifecycle_tests;
+
+#[cfg(test)]
+mod clock_record_freshness_tests;

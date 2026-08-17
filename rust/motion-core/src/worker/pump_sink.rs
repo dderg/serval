@@ -108,6 +108,42 @@ impl PumpSink {
                 mcu_id,
                 mcu_handle: handle,
             })?;
+        if record.age_secs > host_rt::passthrough_queue::MAX_CLOCK_RECORD_AGE_SECS {
+            tracing::error!(
+                subsystem = "motion",
+                event = "clock_record_stale",
+                mcu = mcu_id,
+                host_now,
+                record_age_secs = record.age_secs,
+                max_age_secs = host_rt::passthrough_queue::MAX_CLOCK_RECORD_AGE_SECS,
+                centroid_lag_secs = record.centroid_lag_secs,
+                clock_offset = record.clock_offset,
+                last_clock = record.last_clock,
+                "[reanchor] refusing to anchor on a clock record the router has not \
+                 updated for {:.3}s",
+                record.age_secs
+            );
+            return Err(DispatchError::ClockRecordStale {
+                mcu_id,
+                mcu_handle: handle,
+                age_secs: record.age_secs,
+                max_age_secs: host_rt::passthrough_queue::MAX_CLOCK_RECORD_AGE_SECS,
+            });
+        }
+        if record.age_secs > host_rt::passthrough_queue::DEGRADED_CLOCK_RECORD_AGE_SECS {
+            tracing::warn!(
+                subsystem = "motion",
+                event = "clock_record_degraded",
+                mcu = mcu_id,
+                host_now,
+                record_age_secs = record.age_secs,
+                degraded_age_secs = host_rt::passthrough_queue::DEGRADED_CLOCK_RECORD_AGE_SECS,
+                centroid_lag_secs = record.centroid_lag_secs,
+                "[reanchor] anchoring on a clock record clocksync last refreshed \
+                 {:.3}s ago — samples are being missed",
+                record.age_secs
+            );
+        }
         let freq = record.clock_freq;
         // The anchor point always comes from the live clocksync record, never
         // from the previous frozen projection: the frozen slope drifts from
@@ -139,6 +175,8 @@ impl PumpSink {
             projected_now = record.projected_now,
             mcu_ref,
             anchor_lead_secs = (mcu_ref - record.projected_now as f64) / freq,
+            record_age_secs = record.age_secs,
+            centroid_lag_secs = record.centroid_lag_secs,
             "[reanchor] anchored the host→mcu map on the live clocksync record"
         );
         if let Some(prev) = frozen.get(&mcu_id).copied() {
