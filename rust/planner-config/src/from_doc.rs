@@ -420,7 +420,7 @@ impl Reader<'_> {
         let inflight = self.getfloat_or(
             "printer",
             "pieces_inflight",
-            4.0,
+            12.0,
             Bounds::min(1.0).max(16.0),
         )?;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

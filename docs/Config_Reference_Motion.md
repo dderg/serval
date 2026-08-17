@@ -34,8 +34,8 @@ max_accel: 3000
 #   PushPieces transaction may carry. The default is sized for 500 kbaud
 #   UART; USB CDC transports move ~1 MB/s and can amortize their round
 #   trip over larger frames.
-#pieces_inflight: 4
-#   Optional. Default is 4. Must be 1..16. PushPieces bundles the host
+#pieces_inflight: 12
+#   Optional. Default is 12. Must be 1..16. PushPieces bundles the host
 #   keeps in flight per serial MCU before waiting for the oldest
 #   response. 1 restores classic stop-and-wait delivery.
 ```

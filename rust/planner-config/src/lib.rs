@@ -427,7 +427,10 @@ pub struct PlannerConfig {
     /// `[printer] pieces_inflight` — serial `PushPieces` bundles the pump
     /// keeps in flight per MCU before waiting for the oldest response.
     /// 1 = classic stop-and-wait; higher values make delivery
-    /// bandwidth-bound instead of round-trip-bound.
+    /// bandwidth-bound instead of round-trip-bound. The default is measured:
+    /// at 4 the Trident bench still spent ~90 s of a 1109 s print waiting on
+    /// window credit (16.4k waits); at 12 that falls to 186 and the send
+    /// margin floor rises from 32 ms to 40 ms.
     pub pieces_inflight: usize,
 }
 
@@ -557,7 +560,7 @@ impl Default for PlannerConfig {
             fit_tolerance_mm: 0.005,
             fit_tolerance_accel_mm_s2: 50.0,
             pieces_wire_budget: 1024,
-            pieces_inflight: 4,
+            pieces_inflight: 12,
         }
     }
 }
