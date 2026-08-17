@@ -2,7 +2,7 @@
 // in flight, commits ring bookkeeping at submit, replays a transiently-failed
 // bundle byte-identically, discards stale halt outcomes across a halt epoch,
 // and fails loudly when a committed bundle exhausts its replay budget.
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -58,10 +58,14 @@ enum Script {
 
 struct ScriptedPending {
     outcome: Option<Result<(), SendError>>,
+    released: Arc<AtomicBool>,
 }
 
 impl PendingSend for ScriptedPending {
     fn poll(&mut self) -> Option<Result<(), SendError>> {
+        if !self.released.load(Ordering::Acquire) {
+            return None;
+        }
         Some(self.outcome.take().unwrap_or(Ok(())))
     }
 
@@ -75,21 +79,44 @@ impl PendingSend for ScriptedPending {
 #[derive(Clone)]
 struct WindowScriptSink {
     submissions: Arc<Mutex<Vec<(u16, u32, usize)>>>,
+    bundles: Arc<Mutex<Vec<(u32, Vec<u8>)>>>,
     script: Arc<Mutex<Vec<Script>>>,
     window: usize,
+    released: Arc<AtomicBool>,
 }
 
 impl WindowScriptSink {
     fn new(window: usize, script: Vec<Script>) -> Self {
+        Self::build(window, script, true)
+    }
+
+    /// Outcomes stay pending until `release`, so several bundles can be held in
+    /// flight at once.
+    fn gated(window: usize, script: Vec<Script>) -> Self {
+        Self::build(window, script, false)
+    }
+
+    fn build(window: usize, script: Vec<Script>, released: bool) -> Self {
         Self {
             submissions: Arc::new(Mutex::new(Vec::new())),
+            bundles: Arc::new(Mutex::new(Vec::new())),
             script: Arc::new(Mutex::new(script)),
             window,
+            released: Arc::new(AtomicBool::new(released)),
         }
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::Release);
     }
 
     fn submitted(&self) -> Vec<(u16, u32, usize)> {
         self.submissions.lock().unwrap().clone()
+    }
+
+    /// One `(mcu_id, axes)` row per submitted bundle.
+    fn bundles(&self) -> Vec<(u32, Vec<u8>)> {
+        self.bundles.lock().unwrap().clone()
     }
 }
 
@@ -111,10 +138,14 @@ impl PieceSink for WindowScriptSink {
 
     fn submit_mcu_frames(
         &self,
-        _mcu_id: u32,
+        mcu_id: u32,
         frames: &[AxisFrame],
     ) -> Result<Box<dyn PendingSend>, SendError> {
         let f = frames.first().expect("bundle is non-empty");
+        self.bundles
+            .lock()
+            .unwrap()
+            .push((mcu_id, frames.iter().map(|af| af.axis).collect()));
         self.submissions
             .lock()
             .unwrap()
@@ -130,6 +161,7 @@ impl PieceSink for WindowScriptSink {
         };
         Ok(Box::new(ScriptedPending {
             outcome: Some(outcome),
+            released: Arc::clone(&self.released),
         }))
     }
 }
@@ -269,4 +301,117 @@ fn halted_outcome_halts_the_bundles_axes() {
 fn resolved_send_reports_its_outcome_once() {
     let mut ready = ResolvedSend(Some(Err(SendError::Transient("x".into()))));
     assert!(matches!(ready.poll(), Some(Err(SendError::Transient(_)))));
+}
+
+/// One MCU carries several axis subsets, so a halt reported by one bundle's
+/// response purges in-flight bundles belonging to axes that were nowhere in it.
+/// Every axis whose committed bundle the purge discarded must be halted, or it
+/// continues from later staged pieces across the hole the purge left.
+#[test]
+fn endpoint_halt_halts_every_axis_whose_bundle_it_purged() {
+    let a = AxisKey { mcu_id: 1, axis: 0 };
+    let b = AxisKey { mcu_id: 1, axis: 1 };
+    let live = AxisKey { mcu_id: 1, axis: 2 };
+    let sink = WindowScriptSink::gated(4, vec![Script::Halted, Script::Halted]);
+    let fatal = Arc::new(Mutex::new(Vec::new()));
+    let (ctl, data, handle) = spawn_pump(sink.clone(), Arc::clone(&fatal));
+
+    data.send(make_enqueue(a, vec![make_piece(0)])).unwrap();
+    wait_until(|| sink.bundles().len() == 1, "axis 0 bundle submitted");
+    data.send(make_enqueue(b, vec![make_piece(1)])).unwrap();
+    wait_until(|| sink.bundles().len() == 2, "axis 1 bundle submitted");
+    assert_eq!(
+        sink.bundles(),
+        vec![(1, vec![0]), (1, vec![1])],
+        "the two axes are in flight in separate bundles on one MCU"
+    );
+
+    // Axis 2 is unaffected by the halt, so its send drives the pass that
+    // resolves axis 0's halt and purges axis 1's committed bundle.
+    sink.release();
+    data.send(make_enqueue(live, vec![make_piece(2)])).unwrap();
+    wait_until(
+        || sink.bundles().iter().any(|(_, axes)| axes == &vec![2]),
+        "an unaffected axis on the same MCU keeps sending",
+    );
+
+    data.send(make_enqueue(b, vec![make_piece(3)])).unwrap();
+    data.send(make_enqueue(a, vec![make_piece(4)])).unwrap();
+    let (ack_tx, ack_rx) = mpsc::sync_channel::<()>(1);
+    ctl.send(PumpMsg::Barrier(ack_tx)).unwrap();
+    ack_rx.recv().unwrap();
+
+    let after: Vec<(u32, Vec<u8>)> = sink.bundles().split_off(2);
+    assert!(
+        after.iter().all(|(_, axes)| axes == &vec![2]),
+        "no axis purged by the halt may reach the wire again: {after:?}"
+    );
+    assert!(
+        fatal.lock().unwrap().is_empty(),
+        "an endpoint halt is not a transport fatality"
+    );
+
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+}
+
+/// A bundle is built before the drain that precedes its submission, so an
+/// in-flight bundle resolving `Halted` in that drain halts the endpoint after
+/// its successor's pieces already left the staging queue. The successor must be
+/// abandoned, not pushed at an endpoint that just refused its predecessor.
+#[test]
+fn bundle_built_before_the_drain_that_halts_it_is_abandoned() {
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    let sink = WindowScriptSink::gated(4, vec![Script::Halted]);
+    let fatal = Arc::new(Mutex::new(Vec::new()));
+    let (ctl, data, handle) = spawn_pump(sink.clone(), Arc::clone(&fatal));
+
+    data.send(make_enqueue(key, vec![make_piece(0)])).unwrap();
+    wait_until(|| sink.bundles().len() == 1, "first bundle submitted");
+
+    sink.release();
+    data.send(make_enqueue(key, vec![make_piece(1)])).unwrap();
+    let (ack_tx, ack_rx) = mpsc::sync_channel::<()>(1);
+    ctl.send(PumpMsg::Barrier(ack_tx)).unwrap();
+    ack_rx.recv().unwrap();
+
+    assert_eq!(
+        sink.bundles().len(),
+        1,
+        "the bundle built before the halting drain must not be submitted: {:?}",
+        sink.bundles()
+    );
+    assert!(fatal.lock().unwrap().is_empty());
+
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+}
+
+/// A resume clears the halt, so a `Halted` response from a bundle submitted
+/// before it is stale and must not re-halt the fresh stream.
+#[test]
+fn halt_response_from_before_a_resume_does_not_rehalt() {
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    let sink = WindowScriptSink::gated(4, vec![Script::Halted]);
+    let fatal = Arc::new(Mutex::new(Vec::new()));
+    let (ctl, data, handle) = spawn_pump(sink.clone(), Arc::clone(&fatal));
+
+    data.send(make_enqueue(key, vec![make_piece(0)])).unwrap();
+    wait_until(|| sink.bundles().len() == 1, "bundle submitted");
+
+    ctl.send(PumpMsg::Resume(vec![key])).unwrap();
+    let (ack_tx, ack_rx) = mpsc::sync_channel::<()>(1);
+    ctl.send(PumpMsg::Barrier(ack_tx)).unwrap();
+    ack_rx.recv().unwrap();
+    sink.release();
+
+    data.send(make_enqueue(key, vec![make_piece(1)])).unwrap();
+    wait_until(
+        || sink.bundles().len() == 2,
+        "the resumed stream keeps sending despite the stale halt outcome",
+    );
+    assert!(fatal.lock().unwrap().is_empty());
+
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
 }

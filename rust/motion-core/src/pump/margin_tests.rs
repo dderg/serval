@@ -105,7 +105,7 @@ fn dense_pump(
         mem_probe: super::memstat::MemPressureProbe::new(),
         margins: super::margin::SendMarginTracker::new(),
         windows: std::collections::HashMap::new(),
-        halt_epoch: 0,
+        resume_epoch: 0,
     }
     .tap_enqueue(key)
 }

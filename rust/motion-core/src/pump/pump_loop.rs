@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -107,7 +107,7 @@ pub(super) struct InFlightBundle {
     pub(super) bundle: Vec<AxisFrame>,
     pub(super) pending: Box<dyn super::PendingSend>,
     pub(super) attempts: u32,
-    pub(super) halt_epoch: u64,
+    pub(super) resume_epoch: u64,
 }
 
 pub(super) struct Pump<S> {
@@ -131,11 +131,24 @@ pub(super) struct Pump<S> {
     pub(super) mem_probe: MemPressureProbe,
     pub(super) margins: SendMarginTracker,
     pub(super) windows: HashMap<u32, VecDeque<InFlightBundle>>,
-    /// Bumped on every halt/resume transition. A `Halted` outcome from a
-    /// bundle submitted under an older epoch is stale — its halt was already
-    /// handled (or cleared), and a still-halted endpoint re-signals on the
-    /// next bundle — so acting on it would spuriously halt a fresh stream.
-    pub(super) halt_epoch: u64,
+    /// Bumped on every resume. A `Halted` outcome from a bundle submitted
+    /// before the resume is stale: it reports the halt that resume already
+    /// cleared, and a still-halted endpoint re-signals on the next bundle, so
+    /// acting on it would spuriously halt the fresh stream. Halts do not bump
+    /// it — the halt path purges the window itself and halts every axis whose
+    /// bundle it rolled back.
+    pub(super) resume_epoch: u64,
+}
+
+/// The axis a transport-wide failure is attributed to: bundles are per-MCU, so
+/// any axis in one identifies the endpoint.
+fn bundle_key(mcu_id: u32, bundle: &[AxisFrame]) -> AxisKey {
+    bundle
+        .first()
+        .map_or(AxisKey { mcu_id, axis: 0 }, |f| AxisKey {
+            mcu_id,
+            axis: f.axis,
+        })
 }
 
 impl<S: PieceSink> Pump<S> {
@@ -143,15 +156,24 @@ impl<S: PieceSink> Pump<S> {
     /// send window: a halted endpoint refuses in-flight bundles without
     /// advancing its head, so each refused bundle's optimistic commit must be
     /// rolled back before any post-resume send computes slots from it.
+    ///
+    /// One MCU carries several axis subsets, so the purge discards committed
+    /// pieces belonging to axes that appear nowhere in the bundle whose
+    /// response reported the halt. It reports those axes and they are halted
+    /// with the rest — an axis whose committed pieces were dropped must never
+    /// continue from later staged pieces across that hole.
     fn halt_keys(
         &mut self,
         keys: impl IntoIterator<Item = AxisKey>,
         inferred: bool,
     ) -> Result<(), ()> {
-        self.halt_epoch += 1;
         let inferred_at = inferred.then(Instant::now);
-        let mut mcus = Vec::new();
-        for key in keys {
+        let mut pending: Vec<AxisKey> = keys.into_iter().collect();
+        let mut seen = BTreeSet::new();
+        while let Some(key) = pending.pop() {
+            if !seen.insert(key) {
+                continue;
+            }
             if inferred {
                 self.halted.entry(key).or_insert(inferred_at);
             } else {
@@ -166,14 +188,93 @@ impl<S: PieceSink> Pump<S> {
                 }
             }
             self.junctions.forget(key);
-            if !mcus.contains(&key.mcu_id) {
-                mcus.push(key.mcu_id);
-            }
-        }
-        for mcu_id in mcus {
-            self.drain_window(mcu_id, Some(0))?;
+            let purged = self.purge_window_for_halt(key.mcu_id)?;
+            pending.extend(purged);
         }
         Ok(())
+    }
+
+    /// Drain every in-flight bundle for an endpoint that is halting. A bundle
+    /// the MCU already took keeps its commit; a refused or lost one has its
+    /// optimistic commit rolled back and its axes returned for halting.
+    fn purge_window_for_halt(&mut self, mcu_id: u32) -> Result<Vec<AxisKey>, ()> {
+        let mut refused = Vec::new();
+        loop {
+            let Some(win) = self.windows.get_mut(&mcu_id) else {
+                return Ok(refused);
+            };
+            let Some(mut entry) = win.pop_front() else {
+                return Ok(refused);
+            };
+            let error = match entry.pending.wait(WINDOW_WAIT_CAP) {
+                Some(Ok(())) => continue,
+                Some(Err(e)) => e,
+                None => {
+                    tracing::error!(
+                        subsystem = "motion",
+                        event = "send_window_wedged",
+                        mcu = mcu_id,
+                        "in-flight PushPieces never resolved within {}s while purging a halted \
+                         endpoint — transport plumbing lost the completion",
+                        WINDOW_WAIT_CAP.as_secs()
+                    );
+                    (self.callbacks.on_fatal_transport)(bundle_key(mcu_id, &entry.bundle));
+                    return Err(());
+                }
+            };
+            if let SendError::Fatal(e) = &error {
+                tracing::error!(
+                    subsystem = "motion",
+                    event = "send_frame_fatal",
+                    mcu = mcu_id,
+                    error = %e,
+                    "windowed PushPieces FATAL transport error while purging a halted endpoint"
+                );
+                (self.callbacks.on_fatal_transport)(bundle_key(mcu_id, &entry.bundle));
+                return Err(());
+            }
+            tracing::debug!(
+                subsystem = "motion",
+                event = "halt_purge_rollback",
+                mcu = mcu_id,
+                error = %error,
+                axes = ?entry.bundle.iter().map(|f| f.axis).collect::<Vec<_>>(),
+                "rolling back an in-flight bundle the halting endpoint did not take"
+            );
+            self.rollback_refused_bundle(mcu_id, &entry.bundle);
+            refused.extend(entry.bundle.iter().map(|f| AxisKey {
+                mcu_id,
+                axis: f.axis,
+            }));
+        }
+    }
+
+    /// A bundle is built before the drain that precedes its submission, so the
+    /// drain can halt its endpoint underneath it. Such a bundle must not be
+    /// submitted: its pieces have already left the staging queue, so they are
+    /// abandoned rather than pushed at an endpoint that would refuse them.
+    fn abandon_if_halted(&mut self, mcu_id: u32, bundle: &[AxisFrame]) -> bool {
+        let halted = bundle.iter().any(|af| {
+            self.halted.contains_key(&AxisKey {
+                mcu_id,
+                axis: af.axis,
+            })
+        });
+        if halted {
+            for af in bundle {
+                let n = af.pieces.len() as u32;
+                if n > 0 {
+                    (self.callbacks.on_abandon)(
+                        AxisKey {
+                            mcu_id,
+                            axis: af.axis,
+                        },
+                        n,
+                    );
+                }
+            }
+        }
+        halted
     }
 
     /// Undo the optimistic commit of a bundle the MCU refused without
@@ -244,13 +345,7 @@ impl<S: PieceSink> Pump<S> {
                              transport plumbing lost the completion",
                             WINDOW_WAIT_CAP.as_secs()
                         );
-                        let key = entry
-                            .bundle
-                            .first()
-                            .map_or(AxisKey { mcu_id, axis: 0 }, |f| AxisKey {
-                                mcu_id,
-                                axis: f.axis,
-                            });
+                        let key = bundle_key(mcu_id, &entry.bundle);
                         (self.callbacks.on_fatal_transport)(key);
                         return Err(());
                     }
@@ -269,28 +364,22 @@ impl<S: PieceSink> Pump<S> {
                         error = %e,
                         "windowed PushPieces FATAL transport error — invoking fatal-transport action"
                     );
-                    let key = entry
-                        .bundle
-                        .first()
-                        .map_or(AxisKey { mcu_id, axis: 0 }, |f| AxisKey {
-                            mcu_id,
-                            axis: f.axis,
-                        });
+                    let key = bundle_key(mcu_id, &entry.bundle);
                     (self.callbacks.on_fatal_transport)(key);
                     return Err(());
                 }
                 Some(Err(SendError::Halted(e))) => {
-                    let stale = entry.halt_epoch != self.halt_epoch;
+                    let resumed_since_submit = entry.resume_epoch != self.resume_epoch;
                     tracing::debug!(
                         subsystem = "motion",
                         event = "send_frame_halted",
                         mcu = mcu_id,
-                        stale,
+                        resumed_since_submit,
                         error = %e,
                         "windowed bundle met an endpoint halt — rolling back its commit"
                     );
                     self.rollback_refused_bundle(mcu_id, &entry.bundle);
-                    if !stale {
+                    if !resumed_since_submit {
                         let keys: Vec<AxisKey> = entry
                             .bundle
                             .iter()
@@ -314,13 +403,7 @@ impl<S: PieceSink> Pump<S> {
                             "committed in-flight bundle undeliverable after replay budget — \
                              failing loud"
                         );
-                        let key = entry
-                            .bundle
-                            .first()
-                            .map_or(AxisKey { mcu_id, axis: 0 }, |f| AxisKey {
-                                mcu_id,
-                                axis: f.axis,
-                            });
+                        let key = bundle_key(mcu_id, &entry.bundle);
                         (self.callbacks.on_fatal_transport)(key);
                         return Err(());
                     }
@@ -426,7 +509,7 @@ impl<S: PieceSink> Pump<S> {
                 self.pending_barrier_acks.push(ack);
             }
             PumpMsg::Resume(keys) => {
-                self.halt_epoch += 1;
+                self.resume_epoch += 1;
                 for key in keys {
                     self.halted.remove(&key);
                 }
@@ -1071,6 +1154,9 @@ impl<S: PieceSink> Pump<S> {
                     self.guard_pieces_not_in_past(mcu_id, &mut bundle, "at send");
                     let window_cap = self.sink.send_window(mcu_id).max(1);
                     self.drain_window(mcu_id, Some(window_cap))?;
+                    if self.abandon_if_halted(mcu_id, &bundle) {
+                        break;
+                    }
                     let send_result = self.submit_bundle_logged(mcu_id, &bundle);
                     match send_result {
                         Ok(pending) => {
@@ -1086,7 +1172,7 @@ impl<S: PieceSink> Pump<S> {
                                     bundle,
                                     pending,
                                     attempts: 0,
-                                    halt_epoch: self.halt_epoch,
+                                    resume_epoch: self.resume_epoch,
                                 });
                             self.drain_window(mcu_id, None)?;
                         }
@@ -1290,7 +1376,7 @@ pub fn run_pump<S: PieceSink>(
         mem_probe: MemPressureProbe::new(),
         margins: SendMarginTracker::new(),
         windows: HashMap::new(),
-        halt_epoch: 0,
+        resume_epoch: 0,
     };
     pump.run(control_rx, data_rx);
 }
