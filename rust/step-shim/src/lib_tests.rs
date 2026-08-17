@@ -692,3 +692,89 @@ fn a_trip_after_a_re_anchor_still_reports_every_executed_step() {
         "every sampled step was already on the wire: {tail:?}"
     );
 }
+
+/// The print-shaped lane again, but it reverses when it resumes.
+fn drain_across_hold_reversing(hold_secs: f32) -> Vec<StepFrame> {
+    #[allow(clippy::cast_possible_truncation)]
+    let cps = IDLE_CYCLES_PER_SECOND as f32;
+    let mut shim = StepShim::new(vec![idle_cfg()], 8);
+    let lift = linear_piece(72_000, 0.0, 1.0, 0.05);
+    let hold = linear_piece(lift.end_time(cps), 1.0, 1.0, hold_secs);
+    let down = linear_piece(hold.end_time(cps), 1.0, 0.0, 0.05);
+    let end = down.end_time(cps);
+    shim.push_pieces(0, &[lift, hold, down]).unwrap();
+    let mut frames = shim.drain(hold.start_time).unwrap();
+    frames.extend(shim.drain(end).unwrap());
+    frames
+}
+
+fn dir_frame_indices(frames: &[StepFrame]) -> Vec<usize> {
+    frames
+        .iter()
+        .enumerate()
+        .filter_map(|(index, f)| matches!(f, StepFrame::SetNextStepDir { .. }).then_some(index))
+        .collect()
+}
+
+/// The mcu applies `set_next_step_dir` to the next `queue_step` it loads, so
+/// every dir frame must sit immediately ahead of the run it turns around —
+/// the frame carries no clock of its own and nothing downstream can reorder it
+/// back into place.
+#[test]
+fn a_reversal_after_a_hold_latches_direction_ahead_of_the_run_it_applies_to() {
+    for hold_secs in [11.0, 12.0] {
+        let frames = drain_across_hold_reversing(hold_secs);
+        let dirs = dir_frame_indices(&frames);
+        assert_eq!(
+            dirs.len(),
+            2,
+            "the lift and the reversed resume each latch a direction: {frames:?}"
+        );
+        for index in dirs {
+            assert!(
+                matches!(frames[index + 1], StepFrame::QueueStep { .. }),
+                "hold {hold_secs}: dir frame at {index} must head a step run: {:?}",
+                &frames[index..]
+            );
+        }
+        let clocks = replayed_step_clocks(&frames);
+        assert_eq!(clocks.len(), 200);
+        assert!(
+            clocks.windows(2).all(|w| w[0] < w[1]),
+            "hold {hold_secs}: the reversed stream must stay monotonic in time"
+        );
+    }
+}
+
+/// A hold past the encoder's reach re-anchors the resumed volley. The reset
+/// re-arms the stepper, so it must head the volley — ahead of the dir latch
+/// and of every step it times — and it must sit just under that first step.
+#[test]
+fn a_re_anchored_reversal_opens_with_the_reset_then_the_dir_latch() {
+    let frames = drain_across_hold_reversing(12.0);
+    let resume_reset = frames
+        .iter()
+        .enumerate()
+        .filter_map(|(index, f)| match *f {
+            StepFrame::ResetStepClock { clock, .. } => Some((index, u64::from(clock))),
+            _ => None,
+        })
+        .nth(1)
+        .expect("a hold past the window must re-anchor the resumed volley");
+    let (reset_index, reset_clock) = resume_reset;
+    let reversal = dir_frame_indices(&frames)[1];
+    assert_eq!(
+        frames[reversal],
+        StepFrame::SetNextStepDir { oid: OID, dir: 0 }
+    );
+    assert!(
+        reset_index < reversal,
+        "the reset must re-arm the stepper before the volley's dir latch: {:?}",
+        &frames[reset_index.min(reversal)..]
+    );
+    let first_resumed_step = replayed_step_clocks(&frames)[100];
+    assert!(
+        first_resumed_step > reset_clock && first_resumed_step - reset_clock < 72_000,
+        "the reset {reset_clock} must sit just under the step it opens {first_resumed_step}"
+    );
+}

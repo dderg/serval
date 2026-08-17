@@ -644,10 +644,7 @@ impl StepcompressEndpoint {
             .shim
             .halt_at(motor, cut_at)
             .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
-        for frame in tail {
-            let (start_clock, end_clock) = self.frame_clocks(now, frame);
-            self.queue_outbound(Outbound::Step(frame), start_clock, end_clock);
-        }
+        self.queue_step_volley(now, tail)?;
         self.shim.set_motor_cycles_per_second(motor, freq);
         Ok(())
     }
@@ -746,10 +743,7 @@ impl StepcompressEndpoint {
                 self.mcu_id, cut.cut_at, cut.expected_count, expected
             )));
         }
-        for frame in tail {
-            let (start_clock, end_clock) = self.frame_clocks(cut.resume_clock, frame);
-            self.queue_outbound(Outbound::Step(frame), start_clock, end_clock);
-        }
+        self.queue_step_volley(cut.resume_clock, tail)?;
         self.shim.set_motor_cycles_per_second(motor, cut.epoch_freq);
         if !cut.held.is_empty() {
             self.shim
@@ -973,17 +967,14 @@ impl StepcompressEndpoint {
         Ok((now, freq))
     }
 
-    fn frame_clocks(&mut self, now: u64, frame: StepFrame) -> (u64, u64) {
+    fn frame_clocks(&mut self, now: u64, frame: StepFrame) -> Option<(u64, u64)> {
         match frame {
             StepFrame::ResetStepClock { oid, clock } => {
                 let expanded = expand_clock32(now, clock);
                 self.step_clock.insert(oid, expanded);
-                (expanded, expanded)
+                Some((expanded, expanded))
             }
-            StepFrame::SetNextStepDir { oid, .. } => {
-                let cursor = self.step_clock.get(&oid).copied().unwrap_or(now);
-                (cursor, cursor)
-            }
+            StepFrame::SetNextStepDir { .. } => None,
             StepFrame::QueueStep {
                 oid,
                 interval,
@@ -993,7 +984,7 @@ impl StepcompressEndpoint {
                 let cursor = self.step_clock.entry(oid).or_insert(now);
                 let first_step = cursor.saturating_add(u64::from(interval));
                 *cursor = cursor.saturating_add_signed(queue_step_span(interval, count, add));
-                (first_step, *cursor)
+                Some((first_step, *cursor))
             }
             StepFrame::QueueStepHp {
                 oid,
@@ -1004,9 +995,48 @@ impl StepcompressEndpoint {
                 let cursor = self.step_clock.entry(oid).or_insert(now);
                 let first = cursor.saturating_add(first_step);
                 *cursor = cursor.saturating_add(last_step);
-                (first, *cursor)
+                Some((first, *cursor))
             }
         }
+    }
+
+    /// `set_next_step_dir` carries no clock on the wire — the mcu latches it
+    /// on receipt and applies it to the next `queue_step`. Its guard clock is
+    /// therefore pure host bookkeeping, and the only coherent value is the
+    /// clock of the step run it heads: the lane's cursor at the time the dir
+    /// frame is emitted is where the *previous* run ended, which after a hold
+    /// or a re-anchored volley is arbitrarily far in the past while the volley
+    /// itself is punctual.
+    fn queue_step_volley(&mut self, now: u64, frames: Vec<StepFrame>) -> Result<(), SendError> {
+        let mut clocks: Vec<Option<(u64, u64)>> = frames
+            .iter()
+            .map(|&frame| self.frame_clocks(now, frame))
+            .collect();
+        let mut heads: HashMap<u32, u64> = HashMap::new();
+        for (index, frame) in frames.iter().enumerate().rev() {
+            match *frame {
+                StepFrame::QueueStep { oid, .. } | StepFrame::QueueStepHp { oid, .. } => {
+                    heads.insert(oid, clocks[index].expect("a step frame is clocked").0);
+                }
+                StepFrame::SetNextStepDir { oid, dir } => {
+                    let head = heads.get(&oid).copied().ok_or_else(|| {
+                        SendError::Fatal(format!(
+                            "stepcompress mcu {}: set_next_step_dir oid={oid} dir={dir} was \
+                             drained without the step run it applies to — a clock-less frame \
+                             cannot be paced against the mcu clock",
+                            self.mcu_id
+                        ))
+                    })?;
+                    clocks[index] = Some((head, head));
+                }
+                StepFrame::ResetStepClock { .. } => {}
+            }
+        }
+        for (frame, clocks) in frames.into_iter().zip(clocks) {
+            let (start_clock, end_clock) = clocks.expect("every frame is stamped");
+            self.queue_outbound(Outbound::Step(frame), start_clock, end_clock);
+        }
+        Ok(())
     }
 
     fn drain_into_backlog(&mut self, now: u64, freq: f64) -> Result<(), SendError> {
@@ -1041,10 +1071,7 @@ impl StepcompressEndpoint {
             .shim
             .drain(drain_to)
             .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
-        for frame in frames {
-            let (start_clock, end_clock) = self.frame_clocks(now, frame);
-            self.queue_outbound(Outbound::Step(frame), start_clock, end_clock);
-        }
+        self.queue_step_volley(now, frames)?;
         if self.backlog.len() > BACKLOG_CEILING_FRAMES {
             return Err(SendError::Fatal(format!(
                 "stepcompress mcu {}: {} outbound step frames waiting on move-queue budget, \
@@ -1266,10 +1293,7 @@ impl StepcompressEndpoint {
                     .shim
                     .finish(motor)
                     .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
-                for frame in tail {
-                    let (start_clock, end_clock) = self.frame_clocks(now, frame);
-                    self.queue_outbound(Outbound::Step(frame), start_clock, end_clock);
-                }
+                self.queue_step_volley(now, tail)?;
             }
             self.deferred_retirement = true;
         }

@@ -1888,13 +1888,23 @@ fn hold_piece(start_time: u64, at_mm: f32, secs: f32) -> PieceEntry {
 /// re-anchored epoch carries piece spans measured with that epoch's freq, not
 /// the endpoint's live clock rate.
 fn epoch_ramp(start_time: u64, count: usize, freq: f64) -> Vec<PieceEntry> {
+    epoch_ramp_from(start_time, count, freq, 0.0, 1.0)
+}
+
+fn epoch_ramp_from(
+    start_time: u64,
+    count: usize,
+    freq: f64,
+    start_mm: f32,
+    direction: f32,
+) -> Vec<PieceEntry> {
     let dur = 0.002_f32;
     let span = (f64::from(dur) * freq) as u64;
-    let mut at = 0.0_f32;
+    let mut at = start_mm;
     (0..count)
         .map(|i| {
             let from = at;
-            at += 0.05 * (1 + (i % 4)) as f32;
+            at += direction * 0.05 * (1 + (i % 4)) as f32;
             piece(start_time + span * i as u64, from, at, dur)
         })
         .collect()
@@ -2038,5 +2048,72 @@ fn a_lane_that_holds_before_it_steps_resumes_on_a_punctual_reset() {
     assert!(
         reset <= now_at_send + send_lead,
         "reset {reset} is further than the {send_lead}-tick send lead ahead of {now_at_send}"
+    );
+}
+
+/// The same hold, resumed the other way round. `set_next_step_dir` carries no
+/// clock on the wire, so its guard clock is pure host bookkeeping — and it
+/// used to be the lane's cursor from *before* the hold, seconds behind the
+/// projected mcu clock, while the volley it heads is punctual (bench,
+/// 2026-08-17 10:43 — dir frame 586 ms late, print killed). A clock-less
+/// frame must be timed by the step it applies to.
+#[test]
+fn a_lane_that_reverses_after_a_hold_times_its_dir_frame_by_the_step_it_heads() {
+    const EPOCH_FREQ: f64 = CYCLES_PER_SECOND * 1.000_002;
+    const HOLD_SECS: f32 = 5.0;
+    const RISE: usize = 6;
+    let anchor = 10_000_000_u64;
+    let anchor_lead = (0.5 * CYCLES_PER_SECOND) as u64;
+    let tick_ticks = CYCLES_PER_SECOND as u64 / 10;
+
+    let mut h = harness(1024);
+    h.now.store(anchor - anchor_lead, Ordering::Relaxed);
+    h.endpoint.mark_reanchor(0, anchor, Some(EPOCH_FREQ));
+
+    let mut pieces = epoch_ramp(anchor, RISE, EPOCH_FREQ);
+    let top_mm = pieces.last().map(|p| p.coeffs[0] + p.coeffs[1]).unwrap();
+    #[allow(clippy::cast_possible_truncation)]
+    let hold_start = pieces.last().unwrap().end_time(EPOCH_FREQ as f32);
+    let hold = hold_piece(hold_start, top_mm, HOLD_SECS);
+    #[allow(clippy::cast_possible_truncation)]
+    let resume_start = hold.end_time(EPOCH_FREQ as f32);
+    pieces.push(hold);
+    pieces.extend(epoch_ramp_from(
+        resume_start,
+        RISE,
+        EPOCH_FREQ,
+        top_mm,
+        -1.0,
+    ));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(pieces)])
+        .expect("a marked fresh epoch may start at any clock");
+
+    let mut reversed_at = None;
+    for _ in 0..(HOLD_SECS as u64 * 10 + 40) {
+        let now = h.now.load(Ordering::Relaxed) + tick_ticks;
+        h.now.store(now, Ordering::Relaxed);
+        h.endpoint
+            .tick()
+            .expect("a lane reversing out of a hold must never hand the mcu a late frame");
+        let sent = h.sent.lock_ok();
+        if let Some(index) = sent
+            .iter()
+            .position(|f| matches!(f, StepFrame::SetNextStepDir { dir: 0, .. }))
+        {
+            reversed_at = Some((index, sent.len()));
+            break;
+        }
+    }
+
+    let (dir_index, sent_len) = reversed_at.expect("the resumed lane must reverse the mcu latch");
+    assert!(
+        dir_index + 1 < sent_len,
+        "the reversing dir frame must be followed by the run it applies to"
+    );
+    assert!(
+        matches!(h.sent.lock_ok()[dir_index + 1], StepFrame::QueueStep { .. }),
+        "set_next_step_dir must precede the queue_step it applies to: {:?}",
+        &h.sent.lock_ok()[dir_index..],
     );
 }
