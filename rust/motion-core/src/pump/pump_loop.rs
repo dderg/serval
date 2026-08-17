@@ -257,10 +257,19 @@ impl<S: PieceSink> Pump<S> {
         }
     }
 
-    /// A bundle is built before the drain that precedes its submission, so the
-    /// drain can halt its endpoint underneath it. Such a bundle must not be
-    /// submitted: its pieces have already left the staging queue, so they are
-    /// abandoned rather than pushed at an endpoint that would refuse them.
+    /// Retire in-flight bundles before a new bundle's slots are computed. A
+    /// drain rolls a refused bundle's optimistic commit back, so slots taken
+    /// before it would place the new bundle a bundle ahead of the head the MCU
+    /// still expects and earn a `PIECE_SLOT_GAP` on arrival.
+    fn settle_window_before_build(&mut self, mcu_id: u32) -> Result<(), ()> {
+        let window_cap = self.sink.send_window(mcu_id).max(1);
+        self.drain_window(mcu_id, Some(window_cap))
+    }
+
+    /// The scheduler has already taken this bundle's pieces out of the staging
+    /// queue, so a bundle whose endpoint the preceding drain halted cannot be
+    /// put back — it is abandoned rather than pushed at an endpoint that would
+    /// refuse it.
     fn abandon_if_halted(&mut self, mcu_id: u32, bundle: &[AxisFrame]) -> bool {
         let halted = bundle.iter().any(|af| {
             self.halted.contains_key(&AxisKey {
@@ -1158,10 +1167,9 @@ impl<S: PieceSink> Pump<S> {
                     }
                     activity = true;
                     let mcu_id = frames[0].key.mcu_id;
+                    self.settle_window_before_build(mcu_id)?;
                     let mut bundle = self.build_bundle(frames);
                     self.guard_pieces_not_in_past(mcu_id, &mut bundle, "at send");
-                    let window_cap = self.sink.send_window(mcu_id).max(1);
-                    self.drain_window(mcu_id, Some(window_cap))?;
                     if self.abandon_if_halted(mcu_id, &bundle) {
                         break;
                     }

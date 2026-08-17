@@ -433,9 +433,12 @@ fn resume_on_one_mcu_does_not_suppress_a_halt_on_another() {
 }
 
 /// A resume clears the halt, so a `Halted` response from a bundle submitted
-/// before it is stale and must not re-halt the fresh stream.
+/// before it is stale and must not re-halt the fresh stream. Its rollback still
+/// rewinds the cursor, so the next bundle must be slotted from the rewound
+/// state — reusing the refused bundle's slots — or the MCU rejects it as
+/// `PIECE_SLOT_GAP` and the replay budget turns that into a fatality.
 #[test]
-fn halt_response_from_before_a_resume_does_not_rehalt() {
+fn send_after_a_stale_halt_reuses_the_rolled_back_slots() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let sink = WindowScriptSink::gated(4, vec![Script::Halted]);
     let fatal = Arc::new(Mutex::new(Vec::new()));
@@ -443,6 +446,7 @@ fn halt_response_from_before_a_resume_does_not_rehalt() {
 
     data.send(make_enqueue(key, vec![make_piece(0)])).unwrap();
     wait_until(|| sink.bundles().len() == 1, "bundle submitted");
+    assert_eq!(sink.submitted()[0], (0, 1, 1), "first bundle takes slot 0");
 
     ctl.send(PumpMsg::Resume(vec![key])).unwrap();
     let (ack_tx, ack_rx) = mpsc::sync_channel::<()>(1);
@@ -455,7 +459,16 @@ fn halt_response_from_before_a_resume_does_not_rehalt() {
         || sink.bundles().len() == 2,
         "the resumed stream keeps sending despite the stale halt outcome",
     );
-    assert!(fatal.lock().unwrap().is_empty());
+    assert_eq!(
+        sink.submitted()[1],
+        (0, 1, 1),
+        "the stale halt's rollback freed slot 0, so the next bundle must reuse \
+         it rather than land a bundle ahead of the MCU's head"
+    );
+    assert!(
+        fatal.lock().unwrap().is_empty(),
+        "a contiguous post-resume send is neither refused nor replayed to death"
+    );
 
     ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
