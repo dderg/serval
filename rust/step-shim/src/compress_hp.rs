@@ -11,7 +11,6 @@ const MAX_ADD: i64 = 0x7FFF;
 const MAX_ADD2: i64 = 0xFFF;
 const MAX_SHIFT: i8 = 16;
 const MIN_SHIFT: i8 = -8;
-const MAX_INT32: i64 = 0x7FFF_FFFF;
 const FIRST_STEP_BIAS: f64 = 1.0;
 const EXTRA_FIRST_STEP_BIAS: f64 = 19.0;
 const A2_REGULARIZATION: f64 = 0.01;
@@ -209,19 +208,10 @@ fn step_move_encode(count: usize, f: &Rhs3) -> Option<StepMoveHp> {
             let next_end_add = end_add * 2.0;
             let next_max_end_int = max_end_int * 2.0;
             let next_shift = result.shift + 1;
-            let extra_shift = if next_shift > 8 {
-                (16 - next_shift) as u32
-            } else {
-                (8 - next_shift) as u32
-            };
-            let scale = (1_i64 << extra_shift) as f64;
             if next_add.abs() > MAX_ADD as f64
                 || next_end_add.abs() > MAX_ADD as f64
                 || next_add2.abs() > MAX_ADD2 as f64
                 || next_max_end_int > MAX_INTRVL as f64
-                || next_interval * scale > MAX_INT32 as f64
-                || next_add.abs() * scale > MAX_INT32 as f64
-                || next_add2.abs() * scale > MAX_INT32 as f64
             {
                 break;
             }
@@ -238,6 +228,15 @@ fn step_move_encode(count: usize, f: &Rhs3) -> Option<StepMoveHp> {
     let interval = round_i64(interval)?;
     let add = round_i64(add)?;
     let add2 = round_i64(add2)?;
+    if result.shift < 0 {
+        let scale = 1_i64 << (-result.shift as u32);
+        let scaled_interval = interval * scale;
+        let scaled_next = scaled_interval + add * scale;
+        if !(0..1_i64 << 32).contains(&scaled_interval) || !(0..1_i64 << 32).contains(&scaled_next)
+        {
+            return None;
+        }
+    }
     if !(0..=u32::MAX as i64).contains(&interval)
         || !(i16::MIN as i64..=i16::MAX as i64).contains(&add)
         || !(i16::MIN as i64..=i16::MAX as i64).contains(&add2)
@@ -305,62 +304,62 @@ fn minmax_point(steps: &[u64], index: usize, queue_pos: usize, last_step_clock: 
     }
 }
 
-#[derive(Debug, Clone, Copy)]
 struct StepperMoves {
-    interval: i64,
-    add: i64,
-    add2: i64,
+    interval: u32,
+    add: i32,
+    add2: i32,
     shift: u8,
-    int_low_acc: i64,
+    int_low_acc: u32,
+    first: u32,
 }
 
 fn fill_stepper_moves(m: &StepMoveHp) -> Result<StepperMoves, &'static str> {
     if m.shift <= 0 {
         let amount = (-m.shift) as u32;
-        let scale = 1_i64 << amount;
+        let interval = m.interval.wrapping_shl(amount);
+        let add = if m.add >= 0 {
+            (m.add as i32) << amount
+        } else {
+            -(-(m.add as i32) << amount)
+        };
+        let add2 = if m.add2 >= 0 {
+            (m.add2 as i32) << amount
+        } else {
+            -(-(m.add2 as i32) << amount)
+        };
         Ok(StepperMoves {
-            interval: i64::from(m.interval) * scale,
-            add: i64::from(m.add) * scale,
-            add2: i64::from(m.add2) * scale,
+            interval: interval.wrapping_add(add as u32),
+            add: add.wrapping_add(add2),
+            add2,
             shift: 0,
             int_low_acc: 0,
+            first: interval,
         })
     } else {
-        let extra_shift = if m.shift > 8 {
-            (16 - m.shift) as u32
-        } else {
-            (8 - m.shift) as u32
-        };
-        let shift = if m.shift > 8 { 16 } else { 8 };
-        let scale = 1_i64 << extra_shift;
+        let shift = m.shift as u32;
+        let seed = 1_u32 << (shift - 1);
+        let first = m.interval.wrapping_add(seed) >> shift;
         Ok(StepperMoves {
-            interval: i64::from(m.interval) * scale,
-            add: i64::from(m.add) * scale,
-            add2: i64::from(m.add2) * scale,
-            shift,
-            int_low_acc: 1_i64 << (shift - 1),
+            interval: m.interval.wrapping_add(m.add as u32),
+            add: i32::from(m.add).wrapping_add(i32::from(m.add2)),
+            add2: i32::from(m.add2),
+            shift: shift as u8,
+            int_low_acc: m.interval.wrapping_add(seed) - (first << shift),
+            first,
         })
     }
 }
 
-fn add_interval(time: &mut i64, s: &mut StepperMoves) -> Result<(), &'static str> {
-    let interval = s.interval + s.int_low_acc;
-    let delta = if s.shift == 0 {
-        interval
-    } else {
-        interval >> s.shift
-    };
-    *time = time.checked_add(delta).ok_or("step time overflow")?;
-    if s.shift != 0 {
-        s.int_low_acc = interval & ((1_i64 << s.shift) - 1);
-    }
-    Ok(())
+fn add_interval(time: &mut u32, s: &mut StepperMoves) {
+    let acc = s.interval.wrapping_add(s.int_low_acc);
+    let delta = acc >> s.shift;
+    *time = time.wrapping_add(delta);
+    s.int_low_acc = acc - (delta << s.shift);
 }
 
-fn inc_interval(s: &mut StepperMoves) -> Result<(), &'static str> {
-    s.interval = s.interval.checked_add(s.add).ok_or("interval overflow")?;
-    s.add = s.add.checked_add(s.add2).ok_or("add overflow")?;
-    Ok(())
+fn inc_interval(s: &mut StepperMoves) {
+    s.interval = s.interval.wrapping_add(s.add as u32);
+    s.add = s.add.wrapping_add(s.add2);
 }
 
 fn validate_wire(m: &StepMoveHp) -> Result<(), &'static str> {
@@ -392,18 +391,16 @@ fn validate_wire(m: &StepMoveHp) -> Result<(), &'static str> {
 fn mcu_walk_offsets(m: &StepMoveHp) -> Result<Vec<u64>, &'static str> {
     validate_wire(m)?;
     let mut s = fill_stepper_moves(m)?;
-    let mut time = 0_i64;
+    let mut time = 0_u32;
     let mut offsets = Vec::with_capacity(m.count as usize);
-    for _ in 0..m.count {
-        add_interval(&mut time, &mut s)?;
-        if time < 0 {
-            return Err("step time became negative");
+    for step in 0..m.count as usize {
+        if step == 0 {
+            time = time.wrapping_add(s.first);
+        } else {
+            add_interval(&mut time, &mut s);
+            inc_interval(&mut s);
         }
-        offsets.push(time as u64);
-        inc_interval(&mut s)?;
-        if !(0..(1_i64 << 31)).contains(&s.interval) {
-            return Err("interval overflow");
-        }
+        offsets.push(u64::from(time));
     }
     Ok(offsets)
 }
@@ -508,20 +505,21 @@ impl<'a> Compressor<'a> {
             covered: 0,
             detail,
         })?;
-        let mut cur_step = 0_i64;
-        let mut prev_step = 0_i64;
+        let mut cur_step = 0_u32;
+        let mut prev_step = 0_u32;
         let mut trunc_pos = 0usize;
-        let mut trunc_last_step = 0_i64;
+        let mut trunc_last_step = 0_u32;
         let mut trunc_err = i64::MAX;
         let mut next_step_interval = 0_u32;
         for i in 0..move_out.count as usize {
-            add_interval(&mut cur_step, &mut s).map_err(|detail| WalkFailure {
-                step_index: i,
-                covered: i,
-                detail,
-            })?;
+            if i == 0 {
+                cur_step = cur_step.wrapping_add(s.first);
+            } else {
+                add_interval(&mut cur_step, &mut s);
+                inc_interval(&mut s);
+            }
             let point = self.point_for(i);
-            if cur_step < point.minp || cur_step > point.maxp {
+            if (cur_step as i64) < point.minp || (cur_step as i64) > point.maxp {
                 return Err(WalkFailure {
                     step_index: i,
                     covered: i,
@@ -533,43 +531,23 @@ impl<'a> Compressor<'a> {
                 && move_out.count as usize - i <= (move_out.count as usize + 9) / 10
             {
                 let requested = (self.steps[self.pos + i] - self.last_step_clock) as i64;
-                let error = (cur_step - requested).abs();
+                let error = ((cur_step as i64) - requested).abs();
                 if error <= trunc_err || error <= 1 {
                     trunc_pos = i;
                     trunc_err = error;
-                    let interval = cur_step - prev_step;
-                    if !(0..=u32::MAX as i64).contains(&interval) {
-                        return Err(WalkFailure {
-                            step_index: i,
-                            covered: i,
-                            detail: "junction interval is outside u32 range",
-                        });
-                    }
-                    next_step_interval = interval as u32;
+                    next_step_interval = cur_step.wrapping_sub(prev_step);
                     trunc_last_step = prev_step;
                 }
             }
-            inc_interval(&mut s).map_err(|detail| WalkFailure {
-                step_index: i,
-                covered: i,
-                detail,
-            })?;
-            if !(0..(1_i64 << 31)).contains(&s.interval) {
-                return Err(WalkFailure {
-                    step_index: i,
-                    covered: i,
-                    detail: "expanded interval overflow",
-                });
-            }
             if i == 0 {
-                move_out.first_step = cur_step as u64;
+                move_out.first_step = u64::from(cur_step);
             }
-            move_out.last_step = cur_step as u64;
+            move_out.last_step = u64::from(cur_step);
             prev_step = cur_step;
         }
         if trunc_move && trunc_pos != 0 {
             move_out.count = trunc_pos as u16;
-            move_out.last_step = trunc_last_step as u64;
+            move_out.last_step = u64::from(trunc_last_step);
         }
         Ok(WalkedMove {
             move_out,
@@ -800,3 +778,7 @@ pub fn compress_hp(
 #[cfg(test)]
 #[path = "compress_hp_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "compress_hp_c_model_tests.rs"]
+mod c_model_tests;
