@@ -100,9 +100,9 @@ pub(super) fn pump_past_guard_secs() -> f64 {
     })
 }
 
-/// One windowed in-flight bundle, retained until its transport outcome. A
-/// transient outcome may replay it only while every physical slot still
-/// belongs to this logical ring generation.
+/// One windowed in-flight bundle, retained until its transport outcome. Oldest-first
+/// retirement keeps every later slot write in the window, so a transient outcome
+/// may replay only when neither logical reuse nor a later bundle changed its slots.
 pub(super) struct InFlightBundle {
     pub(super) bundle: Vec<AxisFrame>,
     pub(super) pending: Box<dyn super::PendingSend>,
@@ -153,6 +153,71 @@ fn bundle_key(mcu_id: u32, bundle: &[AxisFrame]) -> AxisKey {
             mcu_id,
             axis: f.axis,
         })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ReplayOwnershipLoss {
+    pub(super) key: AxisKey,
+    pub(super) start_slot: u16,
+    pub(super) bundle_start_head: u32,
+    pub(super) current_head: u32,
+    pub(super) ring_depth: u32,
+    pub(super) later_start_slot: Option<u16>,
+}
+
+fn overlapping_physical_slot(older: &AxisFrame, later: &AxisFrame, ring_depth: u32) -> Option<u16> {
+    if older.axis != later.axis || ring_depth == 0 {
+        return None;
+    }
+    (0..older.pieces.len() as u32).find_map(|offset| {
+        let slot = (u32::from(older.start_slot) + offset) % ring_depth;
+        let later_offset = (slot + ring_depth - u32::from(later.start_slot)) % ring_depth;
+        (later_offset < later.pieces.len() as u32)
+            .then(|| u16::try_from(slot).expect("physical piece-ring slot exceeds u16"))
+    })
+}
+
+pub(super) fn replay_ownership_loss(
+    queues: &BTreeMap<AxisKey, AxisQueue>,
+    windows: &HashMap<u32, VecDeque<InFlightBundle>>,
+    mcu_id: u32,
+    bundle: &[AxisFrame],
+) -> Option<ReplayOwnershipLoss> {
+    bundle.iter().find_map(|frame| {
+        let key = AxisKey {
+            mcu_id,
+            axis: frame.axis,
+        };
+        let queue = queues.get(&key).expect("in-flight axis queue exists");
+        let bundle_start_head = frame.new_head.wrapping_sub(frame.pieces.len() as u32);
+        let committed_span = queue.pushed.wrapping_sub(bundle_start_head);
+        if committed_span > queue.ring_depth {
+            return Some(ReplayOwnershipLoss {
+                key,
+                start_slot: frame.start_slot,
+                bundle_start_head,
+                current_head: queue.pushed,
+                ring_depth: queue.ring_depth,
+                later_start_slot: None,
+            });
+        }
+        windows.get(&mcu_id).and_then(|later_entries| {
+            later_entries.iter().find_map(|later_entry| {
+                later_entry.bundle.iter().find_map(|later_frame| {
+                    overlapping_physical_slot(frame, later_frame, queue.ring_depth).map(
+                        |start_slot| ReplayOwnershipLoss {
+                            key,
+                            start_slot,
+                            bundle_start_head,
+                            current_head: queue.pushed,
+                            ring_depth: queue.ring_depth,
+                            later_start_slot: Some(later_frame.start_slot),
+                        },
+                    )
+                })
+            })
+        })
+    })
 }
 
 impl<S: PieceSink> Pump<S> {
@@ -294,29 +359,6 @@ impl<S: PieceSink> Pump<S> {
         halted
     }
 
-    fn reused_replay_slot(
-        &self,
-        mcu_id: u32,
-        bundle: &[AxisFrame],
-    ) -> Option<(AxisKey, u16, u32, u32, u32)> {
-        bundle.iter().find_map(|frame| {
-            let key = AxisKey {
-                mcu_id,
-                axis: frame.axis,
-            };
-            let queue = self.queues.get(&key).expect("in-flight axis queue exists");
-            let bundle_start_head = frame.new_head.wrapping_sub(frame.pieces.len() as u32);
-            let committed_span = queue.pushed.wrapping_sub(bundle_start_head);
-            (committed_span > queue.ring_depth).then_some((
-                key,
-                frame.start_slot,
-                bundle_start_head,
-                queue.pushed,
-                queue.ring_depth,
-            ))
-        })
-    }
-
     /// Undo the optimistic commit of a bundle the MCU refused without
     /// advancing its head. The pieces already left the staging queue — they
     /// are abandoned, not restored — but `pushed` and the write cursor must
@@ -431,23 +473,24 @@ impl<S: PieceSink> Pump<S> {
                     }
                 }
                 Some(Err(SendError::Transient(e))) => {
-                    if let Some((key, start_slot, bundle_start_head, current_head, ring_depth)) =
-                        self.reused_replay_slot(mcu_id, &entry.bundle)
+                    if let Some(loss) =
+                        replay_ownership_loss(&self.queues, &self.windows, mcu_id, &entry.bundle)
                     {
                         tracing::error!(
                             subsystem = "motion",
-                            event = "send_window_replay_slot_reused",
+                            event = "send_window_replay_slot_ownership_lost",
                             mcu = mcu_id,
-                            axis = key.axis,
-                            start_slot,
-                            bundle_start_head,
-                            current_head,
-                            ring_depth,
+                            axis = loss.key.axis,
+                            start_slot = loss.start_slot,
+                            bundle_start_head = loss.bundle_start_head,
+                            current_head = loss.current_head,
+                            ring_depth = loss.ring_depth,
+                            later_start_slot = loss.later_start_slot,
                             error = %e,
-                            "refusing replay after ring slot reuse — failing loud before stale \
-                             bytes overwrite live motion"
+                            "refusing replay after physical slot ownership changed — failing loud \
+                             before stale bytes overwrite live motion"
                         );
-                        (self.callbacks.on_fatal_transport)(key);
+                        (self.callbacks.on_fatal_transport)(loss.key);
                         return Err(());
                     }
                     entry.attempts += 1;

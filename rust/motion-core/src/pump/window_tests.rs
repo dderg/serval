@@ -2,6 +2,7 @@
 // in flight, replays transient failures only while their physical slots still
 // belong to the same ring generation, and fails loudly before stale bytes can
 // overwrite live motion.
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -10,6 +11,8 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::unbounded;
 
 use super::messages::{PendingSend, ResolvedSend};
+use super::pump_loop::{InFlightBundle, replay_ownership_loss};
+use super::sched::AxisQueue;
 use super::{
     AxisFrame, AxisKey, EnqueueMsg, HeartbeatMsg, MAX_LEAD_SECS, PieceSink, PumpCallbacks, PumpMsg,
     SendError, run_pump,
@@ -321,6 +324,53 @@ fn transient_replay_never_overwrites_a_reused_ring_generation() {
         "the stale bundle must not overwrite the newer slot generation"
     );
     handle.join().unwrap();
+}
+
+#[test]
+fn a_later_in_place_hold_write_revokes_replay_ownership() {
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    let mut original_hold = make_piece(1_000).0;
+    original_hold.coeff_count = 1;
+    let mut extended_hold = original_hold;
+    extended_hold.duration *= 2.0;
+    let original = AxisFrame {
+        axis: key.axis,
+        pieces: vec![original_hold],
+        start_slot: 36,
+        new_head: 101,
+        room: 64,
+        guard_recorded_ns: 0,
+        guard_mcu_clock: 0,
+    };
+    let later = AxisFrame {
+        axis: key.axis,
+        pieces: vec![extended_hold],
+        start_slot: 36,
+        new_head: 101,
+        room: 64,
+        guard_recorded_ns: 0,
+        guard_mcu_clock: 0,
+    };
+    let mut queue = AxisQueue::new(64);
+    queue.pushed = 101;
+    let queues = BTreeMap::from([(key, queue)]);
+    let windows = HashMap::from([(
+        key.mcu_id,
+        VecDeque::from([InFlightBundle {
+            bundle: vec![later],
+            pending: Box::new(ResolvedSend(Some(Ok(())))),
+            attempts: 1,
+            resume_epoch: 0,
+        }]),
+    )]);
+
+    let loss = replay_ownership_loss(&queues, &windows, key.mcu_id, &[original])
+        .expect("the later in-place write must revoke replay ownership");
+    assert_eq!(loss.key, key);
+    assert_eq!(loss.start_slot, 36);
+    assert_eq!(loss.bundle_start_head, 100);
+    assert_eq!(loss.current_head, 101);
+    assert_eq!(loss.later_start_slot, Some(36));
 }
 
 #[test]
