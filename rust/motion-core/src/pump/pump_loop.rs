@@ -155,14 +155,13 @@ fn bundle_key(mcu_id: u32, bundle: &[AxisFrame]) -> AxisKey {
         })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ReplayOwnershipLoss {
-    pub(super) key: AxisKey,
-    pub(super) start_slot: u16,
-    pub(super) bundle_start_head: u32,
-    pub(super) current_head: u32,
-    pub(super) ring_depth: u32,
-    pub(super) later_start_slot: Option<u16>,
+struct ReplayOwnershipLoss {
+    key: AxisKey,
+    start_slot: u16,
+    bundle_start_head: u32,
+    current_head: u32,
+    ring_depth: u32,
+    later_start_slot: Option<u16>,
 }
 
 fn overlapping_physical_slot(older: &AxisFrame, later: &AxisFrame, ring_depth: u32) -> Option<u16> {
@@ -177,7 +176,7 @@ fn overlapping_physical_slot(older: &AxisFrame, later: &AxisFrame, ring_depth: u
     })
 }
 
-pub(super) fn replay_ownership_loss(
+fn replay_ownership_loss(
     queues: &BTreeMap<AxisKey, AxisQueue>,
     windows: &HashMap<u32, VecDeque<InFlightBundle>>,
     mcu_id: u32,
@@ -221,6 +220,35 @@ pub(super) fn replay_ownership_loss(
 }
 
 impl<S: PieceSink> Pump<S> {
+    pub(super) fn new(
+        sink: S,
+        callbacks: PumpCallbacks,
+        history: Option<HistoryRecorder>,
+        ledger: Arc<crate::drain::DrainLedger>,
+        backlog: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            queues: BTreeMap::new(),
+            junctions: JunctionTracker::default(),
+            cohort: None,
+            halted: BTreeMap::new(),
+            sink,
+            callbacks,
+            history,
+            ledger,
+            pending_barrier_acks: Vec::new(),
+            backlog,
+            holding_ahead: false,
+            data_open: true,
+            intake_batch_open: false,
+            consumption_stall: ConsumptionStallWatch::new(CONSUMPTION_STALL_FATAL),
+            mem_probe: MemPressureProbe::new(),
+            margins: SendMarginTracker::new(),
+            windows: HashMap::new(),
+            resume_epochs: HashMap::new(),
+        }
+    }
+
     /// Halt `keys`, drop their staged pieces, and purge every affected MCU's
     /// send window: a halted endpoint refuses in-flight bundles without
     /// advancing its head, so each refused bundle's optimistic commit must be
@@ -385,7 +413,11 @@ impl<S: PieceSink> Pump<S> {
     /// window is below `cap`. A transient outcome replays the byte-identical
     /// bundle while its slots remain owned. Slot reuse or replay-budget
     /// exhaustion fails loud because either condition makes recovery unsafe.
-    fn drain_window(&mut self, mcu_id: u32, make_room_below: Option<usize>) -> Result<(), ()> {
+    pub(super) fn drain_window(
+        &mut self,
+        mcu_id: u32,
+        make_room_below: Option<usize>,
+    ) -> Result<(), ()> {
         loop {
             let Some(win) = self.windows.get_mut(&mcu_id) else {
                 return Ok(());
@@ -1459,25 +1491,6 @@ pub fn run_pump<S: PieceSink>(
     ledger: Arc<crate::drain::DrainLedger>,
     backlog: Arc<AtomicU64>,
 ) {
-    let mut pump = Pump {
-        queues: BTreeMap::new(),
-        junctions: JunctionTracker::default(),
-        cohort: None,
-        halted: BTreeMap::new(),
-        sink,
-        callbacks,
-        history,
-        ledger,
-        pending_barrier_acks: Vec::new(),
-        backlog,
-        holding_ahead: false,
-        data_open: true,
-        intake_batch_open: false,
-        consumption_stall: ConsumptionStallWatch::new(CONSUMPTION_STALL_FATAL),
-        mem_probe: MemPressureProbe::new(),
-        margins: SendMarginTracker::new(),
-        windows: HashMap::new(),
-        resume_epochs: HashMap::new(),
-    };
+    let mut pump = Pump::new(sink, callbacks, history, ledger, backlog);
     pump.run(control_rx, data_rx);
 }

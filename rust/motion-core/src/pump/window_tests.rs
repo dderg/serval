@@ -2,7 +2,7 @@
 // in flight, replays transient failures only while their physical slots still
 // belong to the same ring generation, and fails loudly before stale bytes can
 // overwrite live motion.
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::unbounded;
 
 use super::messages::{PendingSend, ResolvedSend};
-use super::pump_loop::{InFlightBundle, replay_ownership_loss};
+use super::pump_loop::{InFlightBundle, Pump};
 use super::sched::AxisQueue;
 use super::{
     AxisFrame, AxisKey, EnqueueMsg, HeartbeatMsg, MAX_LEAD_SECS, PieceSink, PumpCallbacks, PumpMsg,
@@ -327,7 +327,7 @@ fn transient_replay_never_overwrites_a_reused_ring_generation() {
 }
 
 #[test]
-fn a_later_in_place_hold_write_revokes_replay_ownership() {
+fn a_transient_original_hold_never_overwrites_a_later_in_place_extension() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let mut original_hold = make_piece(1_000).0;
     original_hold.coeff_count = 1;
@@ -351,26 +351,52 @@ fn a_later_in_place_hold_write_revokes_replay_ownership() {
         guard_recorded_ns: 0,
         guard_mcu_clock: 0,
     };
+    let sink = WindowScriptSink::new(4, vec![]);
+    let fatal = Arc::new(Mutex::new(Vec::new()));
+    let fatal_capture = Arc::clone(&fatal);
+    let callbacks = PumpCallbacks {
+        ring_depth_of: Box::new(|_| 64),
+        mcu_clock_of: Box::new(|_| None),
+        on_fatal_transport: Box::new(move |key| fatal_capture.lock().unwrap().push(key)),
+        on_abandon: Box::new(|_, _| {}),
+        on_drip_stall: Box::new(|_| {}),
+    };
+    let mut pump = Pump::new(
+        sink.clone(),
+        callbacks,
+        None,
+        Arc::new(crate::drain::DrainLedger::new()),
+        Arc::new(AtomicU64::new(0)),
+    );
     let mut queue = AxisQueue::new(64);
     queue.pushed = 101;
-    let queues = BTreeMap::from([(key, queue)]);
-    let windows = HashMap::from([(
+    pump.queues.insert(key, queue);
+    pump.windows.insert(
         key.mcu_id,
-        VecDeque::from([InFlightBundle {
-            bundle: vec![later],
-            pending: Box::new(ResolvedSend(Some(Ok(())))),
-            attempts: 1,
-            resume_epoch: 0,
-        }]),
-    )]);
+        VecDeque::from([
+            InFlightBundle {
+                bundle: vec![original],
+                pending: Box::new(ResolvedSend(Some(Err(SendError::Transient(
+                    "original response lost".into(),
+                ))))),
+                attempts: 1,
+                resume_epoch: 0,
+            },
+            InFlightBundle {
+                bundle: vec![later],
+                pending: Box::new(ResolvedSend(Some(Ok(())))),
+                attempts: 1,
+                resume_epoch: 0,
+            },
+        ]),
+    );
 
-    let loss = replay_ownership_loss(&queues, &windows, key.mcu_id, &[original])
-        .expect("the later in-place write must revoke replay ownership");
-    assert_eq!(loss.key, key);
-    assert_eq!(loss.start_slot, 36);
-    assert_eq!(loss.bundle_start_head, 100);
-    assert_eq!(loss.current_head, 101);
-    assert_eq!(loss.later_start_slot, Some(36));
+    assert!(pump.drain_window(key.mcu_id, None).is_err());
+    assert_eq!(fatal.lock().unwrap().as_slice(), &[key]);
+    assert!(
+        sink.submitted().is_empty(),
+        "the stale original hold must never be resubmitted"
+    );
 }
 
 #[test]
