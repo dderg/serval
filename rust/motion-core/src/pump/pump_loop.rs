@@ -100,9 +100,9 @@ pub(super) fn pump_past_guard_secs() -> f64 {
     })
 }
 
-/// One windowed in-flight bundle: retained until its transport outcome so a
-/// lost or gap-rejected frame can be replayed byte-identically (idempotent:
-/// slot-addressed writes + absolute head, stale = no-op).
+/// One windowed in-flight bundle, retained until its transport outcome. A
+/// transient outcome may replay it only while every physical slot still
+/// belongs to this logical ring generation.
 pub(super) struct InFlightBundle {
     pub(super) bundle: Vec<AxisFrame>,
     pub(super) pending: Box<dyn super::PendingSend>,
@@ -294,6 +294,29 @@ impl<S: PieceSink> Pump<S> {
         halted
     }
 
+    fn reused_replay_slot(
+        &self,
+        mcu_id: u32,
+        bundle: &[AxisFrame],
+    ) -> Option<(AxisKey, u16, u32, u32, u32)> {
+        bundle.iter().find_map(|frame| {
+            let key = AxisKey {
+                mcu_id,
+                axis: frame.axis,
+            };
+            let queue = self.queues.get(&key).expect("in-flight axis queue exists");
+            let bundle_start_head = frame.new_head.wrapping_sub(frame.pieces.len() as u32);
+            let committed_span = queue.pushed.wrapping_sub(bundle_start_head);
+            (committed_span > queue.ring_depth).then_some((
+                key,
+                frame.start_slot,
+                bundle_start_head,
+                queue.pushed,
+                queue.ring_depth,
+            ))
+        })
+    }
+
     /// Undo the optimistic commit of a bundle the MCU refused without
     /// advancing its head. The pieces already left the staging queue — they
     /// are abandoned, not restored — but `pushed` and the write cursor must
@@ -317,10 +340,9 @@ impl<S: PieceSink> Pump<S> {
 
     /// Retire resolved in-flight bundles for `mcu_id`, oldest first. With
     /// `make_room_below = Some(cap)`, blocks on the oldest entry until the
-    /// window is below `cap`. A transient outcome (lost response, slot gap
-    /// after a dropped predecessor) replays the byte-identical bundle —
-    /// idempotent on the MCU — up to `WINDOW_MAX_ATTEMPTS`; exhaustion is
-    /// fatal because the bundle's bookkeeping is already committed.
+    /// window is below `cap`. A transient outcome replays the byte-identical
+    /// bundle while its slots remain owned. Slot reuse or replay-budget
+    /// exhaustion fails loud because either condition makes recovery unsafe.
     fn drain_window(&mut self, mcu_id: u32, make_room_below: Option<usize>) -> Result<(), ()> {
         loop {
             let Some(win) = self.windows.get_mut(&mcu_id) else {
@@ -409,6 +431,25 @@ impl<S: PieceSink> Pump<S> {
                     }
                 }
                 Some(Err(SendError::Transient(e))) => {
+                    if let Some((key, start_slot, bundle_start_head, current_head, ring_depth)) =
+                        self.reused_replay_slot(mcu_id, &entry.bundle)
+                    {
+                        tracing::error!(
+                            subsystem = "motion",
+                            event = "send_window_replay_slot_reused",
+                            mcu = mcu_id,
+                            axis = key.axis,
+                            start_slot,
+                            bundle_start_head,
+                            current_head,
+                            ring_depth,
+                            error = %e,
+                            "refusing replay after ring slot reuse — failing loud before stale \
+                             bytes overwrite live motion"
+                        );
+                        (self.callbacks.on_fatal_transport)(key);
+                        return Err(());
+                    }
                     entry.attempts += 1;
                     if entry.attempts >= WINDOW_MAX_ATTEMPTS {
                         tracing::error!(

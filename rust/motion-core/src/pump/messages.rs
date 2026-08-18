@@ -148,9 +148,9 @@ pub const SERIAL_BUNDLE_LIMITS: BundleLimits = BundleLimits {
 
 /// One in-flight bundled transaction. `poll`/`wait` return `None` while the
 /// transport has not resolved the attempt; a resolved attempt yields the
-/// bundle's final outcome exactly once (subsequent calls return the same
-/// terminal state). A lost response resolves as `Err(Transient)` when the
-/// transport-side deadline lapses — the pump replays the idempotent bundle.
+/// bundle's final outcome exactly once. A lost response resolves as
+/// `Err(Transient)` when the transport deadline lapses. The pump replays only
+/// while the bundle still owns its physical ring slots.
 pub trait PendingSend: Send {
     /// Non-blocking check.
     fn poll(&mut self) -> Option<Result<(), SendError>>;
@@ -217,10 +217,8 @@ pub trait PieceSink: Send {
         None
     }
 
-    /// Deliver every axis frame destined for `mcu_id` as one bundled
-    /// transaction. A whole bundle either lands or it doesn't — the caller
-    /// commits the ring bookkeeping for all axes only on `Ok`, so a failed
-    /// bundle re-sends byte-identical frames to the same ring slots.
+    /// Deliver every axis frame destined for `mcu_id` as one synchronous
+    /// bundled transaction.
     ///
     /// The default fans out to per-axis `send_frame`; a transport that can
     /// pack multiple axes into one round-trip overrides this to collapse the

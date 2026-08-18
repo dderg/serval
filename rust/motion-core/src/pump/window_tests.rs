@@ -1,7 +1,7 @@
 // Windowed PushPieces delivery: the pump keeps up to `send_window` bundles
-// in flight, commits ring bookkeeping at submit, replays a transiently-failed
-// bundle byte-identically, discards stale halt outcomes across a halt epoch,
-// and fails loudly when a committed bundle exhausts its replay budget.
+// in flight, replays transient failures only while their physical slots still
+// belong to the same ring generation, and fails loudly before stale bytes can
+// overwrite live motion.
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -11,8 +11,8 @@ use crossbeam_channel::unbounded;
 
 use super::messages::{PendingSend, ResolvedSend};
 use super::{
-    AxisFrame, AxisKey, EnqueueMsg, MAX_LEAD_SECS, PieceSink, PumpCallbacks, PumpMsg, SendError,
-    run_pump,
+    AxisFrame, AxisKey, EnqueueMsg, HeartbeatMsg, MAX_LEAD_SECS, PieceSink, PumpCallbacks, PumpMsg,
+    SendError, run_pump,
 };
 use runtime::piece_ring::PieceEntry;
 
@@ -79,6 +79,7 @@ impl PendingSend for ScriptedPending {
 #[derive(Clone)]
 struct WindowScriptSink {
     submissions: Arc<Mutex<Vec<(u16, u32, usize)>>>,
+    piece_starts: Arc<Mutex<Vec<u64>>>,
     bundles: Arc<Mutex<Vec<(u32, Vec<u8>)>>>,
     script: Arc<Mutex<Vec<Script>>>,
     window: usize,
@@ -99,6 +100,7 @@ impl WindowScriptSink {
     fn build(window: usize, script: Vec<Script>, released: bool) -> Self {
         Self {
             submissions: Arc::new(Mutex::new(Vec::new())),
+            piece_starts: Arc::new(Mutex::new(Vec::new())),
             bundles: Arc::new(Mutex::new(Vec::new())),
             script: Arc::new(Mutex::new(script)),
             window,
@@ -112,6 +114,10 @@ impl WindowScriptSink {
 
     fn submitted(&self) -> Vec<(u16, u32, usize)> {
         self.submissions.lock().unwrap().clone()
+    }
+
+    fn piece_starts(&self) -> Vec<u64> {
+        self.piece_starts.lock().unwrap().clone()
     }
 
     /// One `(mcu_id, axes)` row per submitted bundle.
@@ -150,6 +156,10 @@ impl PieceSink for WindowScriptSink {
             .lock()
             .unwrap()
             .push((f.start_slot, f.new_head, f.pieces.len()));
+        self.piece_starts
+            .lock()
+            .unwrap()
+            .push(f.pieces[0].start_time);
         let mut script = self.script.lock().unwrap();
         let outcome = if script.is_empty() {
             Ok(())
@@ -174,11 +184,22 @@ fn spawn_pump(
     crossbeam_channel::Sender<EnqueueMsg>,
     std::thread::JoinHandle<()>,
 ) {
-    const RING_DEPTH: u32 = 64;
+    spawn_pump_with_ring_depth(sink, fatal, 64)
+}
+
+fn spawn_pump_with_ring_depth(
+    sink: WindowScriptSink,
+    fatal: Arc<Mutex<Vec<AxisKey>>>,
+    ring_depth: u32,
+) -> (
+    crossbeam_channel::Sender<PumpMsg>,
+    crossbeam_channel::Sender<EnqueueMsg>,
+    std::thread::JoinHandle<()>,
+) {
     let (ctl, control_rx) = unbounded::<PumpMsg>();
     let (data, data_rx) = unbounded::<EnqueueMsg>();
     let callbacks = PumpCallbacks {
-        ring_depth_of: Box::new(move |_| RING_DEPTH),
+        ring_depth_of: Box::new(move |_| ring_depth),
         mcu_clock_of: Box::new(|_| None),
         on_fatal_transport: Box::new(move |key| fatal.lock().unwrap().push(key)),
         on_abandon: Box::new(|_, _| {}),
@@ -250,6 +271,55 @@ fn transient_outcome_replays_byte_identical_bundle() {
     );
 
     ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
+fn transient_replay_never_overwrites_a_reused_ring_generation() {
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    let sink = WindowScriptSink::gated(4, vec![Script::Transient]);
+    let fatal = Arc::new(Mutex::new(Vec::new()));
+    let (ctl, data, handle) = spawn_pump_with_ring_depth(sink.clone(), Arc::clone(&fatal), 2);
+
+    data.send(make_enqueue(key, vec![make_piece(0)])).unwrap();
+    wait_until(|| sink.submitted().len() == 1, "first bundle submitted");
+
+    for next in 1..=2 {
+        ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
+            mcu_id: key.mcu_id,
+            consumed_counts: None,
+            retired_counts: vec![next],
+        }))
+        .unwrap();
+        let (ack_tx, ack_rx) = mpsc::sync_channel::<()>(1);
+        ctl.send(PumpMsg::Barrier(ack_tx)).unwrap();
+        ack_rx.recv().unwrap();
+        data.send(make_enqueue(key, vec![make_piece(u64::from(next))]))
+            .unwrap();
+        wait_until(
+            || sink.submitted().len() == next as usize + 1,
+            "next ring generation submitted",
+        );
+    }
+
+    assert_eq!(
+        sink.submitted(),
+        vec![(0, 1, 1), (1, 2, 1), (0, 3, 1)],
+        "the third bundle reused the first bundle's physical slot"
+    );
+
+    sink.release();
+    wait_until(
+        || !fatal.lock().unwrap().is_empty() || sink.piece_starts().len() >= 4,
+        "unsafe replay rejected or submitted",
+    );
+
+    assert_eq!(fatal.lock().unwrap().as_slice(), &[key]);
+    assert_eq!(
+        sink.piece_starts(),
+        vec![0, 1, 2],
+        "the stale bundle must not overwrite the newer slot generation"
+    );
     handle.join().unwrap();
 }
 
