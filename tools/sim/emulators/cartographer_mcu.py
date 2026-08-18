@@ -157,35 +157,29 @@ class CartographerMcuStub(BeaconMcuStub):
     def _sample_loop(self) -> None:
         SAMPLE_HZ = 200.0
         period = 1.0 / SAMPLE_HZ
-        RESYNC_GAP_S = 0.5
-        next_sample = self._monotonic()
+        next_sample = time.monotonic()
 
         while not self._stop.is_set() and self._stream_en:
-            now_vt = self._monotonic()
-            if now_vt < next_sample:
-                time.sleep(0.001)
+            now = time.monotonic()
+            sleep_for = next_sample - now
+            if sleep_for > 0:
+                time.sleep(min(sleep_for, period))
                 continue
-            if now_vt - next_sample > RESYNC_GAP_S:
-                next_sample = now_vt
-            sample_vt = next_sample
             next_sample += period
 
             if self._home_active and not self._step_tracking:
-                elapsed = sample_vt - self._homing_start_time
+                elapsed = self._monotonic() - self._homing_start_time
                 self._z_current = max(
                     0.0,
                     self._homing_start_z
                     - elapsed * self._homing_approach_speed,
                 )
-                z_at_sample = self._z_current
-            else:
-                z_at_sample = self._project_z(sample_vt)
 
-            freq = self._z_to_frequency(z_at_sample)
+            freq = self._z_to_frequency(self._z_current)
             data_value = self._freq_to_count(freq)
             self._send_msg(
                 "cartographer_data clock=%u data=%u temp=%u",
-                clock=self._clock_at(sample_vt),
+                clock=self._now_clock(),
                 data=data_value,
                 temp=TEMP_RAW_25C,
             )
