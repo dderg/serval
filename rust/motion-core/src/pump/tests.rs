@@ -998,6 +998,9 @@ fn queue_pump<S: PieceSink>(
         intake_batch_open: false,
         consumption_stall: super::stall::ConsumptionStallWatch::new(consumption_stall_fatal),
         mem_probe: super::memstat::MemPressureProbe::new(),
+        margins: super::margin::SendMarginTracker::new(),
+        windows: std::collections::HashMap::new(),
+        resume_epochs: std::collections::HashMap::new(),
     }
 }
 

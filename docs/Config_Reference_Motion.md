@@ -29,6 +29,15 @@ max_accel: 3000
 #   Optional. Default is 0.005 mm. Must be > 0 and <= 1.
 #max_accel_deviation: 50
 #   Optional. Default is 50 mm/s^2. Must be > 0.
+#pieces_wire_budget: 1024
+#   Optional. Default is 1024 bytes. Must be 256..8192. Bytes one serial
+#   PushPieces transaction may carry. The default is sized for 500 kbaud
+#   UART; USB CDC transports move ~1 MB/s and can amortize their round
+#   trip over larger frames.
+#pieces_inflight: 12
+#   Optional. Default is 12. Must be 1..16. PushPieces bundles the host
+#   keeps in flight per serial MCU before waiting for the oldest
+#   response. 1 restores classic stop-and-wait delivery.
 ```
 
 `corner_deviation` is the canonical corner budget. Setting both corner options is an error. `max_accel_to_decel` and `minimum_cruise_ratio` are explicitly unsupported rather than ignored.

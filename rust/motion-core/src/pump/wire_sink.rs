@@ -30,6 +30,218 @@ pub struct WireSink {
     /// and to cap the PushPieces retry budget by the front piece's remaining
     /// scheduling lead.
     pub clock_of: Arc<dyn Fn(u32) -> Option<(u64, f64)> + Send + Sync>,
+    /// Per-transaction budget for serial MCUs; `[printer] pieces_wire_budget`
+    /// overrides the UART-sized default so USB transports can amortize their
+    /// per-transaction round trip over bigger frames.
+    pub serial_limits: super::BundleLimits,
+    /// Bundles the pump may keep in flight per serial MCU
+    /// (`[printer] pieces_inflight`). 1 = classic stop-and-wait.
+    pub serial_window: usize,
+}
+
+/// Trace-relevant slice of one submitted frame, retained by the pending
+/// handle so the transit record is written when the response arrives.
+struct FrameTraceMeta {
+    axis: u8,
+    piece_count: u32,
+    room: u32,
+    guard_recorded_ns: u64,
+    guard_mcu_clock: u64,
+    host_front_start_time: u64,
+}
+
+/// In-flight serial `PushPieces`: resolves from the reactor's correlation
+/// map; the reactor completes it with `TransportError::Timeout` at the
+/// attempt deadline, so `poll`/`wait` never hang past it.
+struct SerialPendingSend {
+    mcu_id: u32,
+    rx: std::sync::mpsc::Receiver<
+        Result<host_rt::host_io::mcu_session::McuCallOutcome, host_rt::transport::TransportError>,
+    >,
+    deadline: Instant,
+    send_started_ns: u64,
+    send_started_at: Instant,
+    frames: Vec<FrameTraceMeta>,
+    resolved: bool,
+}
+
+impl SerialPendingSend {
+    fn resolve(
+        &mut self,
+        outcome: Result<
+            Result<
+                host_rt::host_io::mcu_session::McuCallOutcome,
+                host_rt::transport::TransportError,
+            >,
+            std::sync::mpsc::RecvTimeoutError,
+        >,
+    ) -> Option<Result<(), SendError>> {
+        use host_rt::host_io::mcu_session::McuCallOutcome;
+        use host_rt::transport::TransportError;
+        let call_result = match outcome {
+            Ok(Ok(McuCallOutcome::Response { kind: _, body })) => Ok(body),
+            Ok(Ok(McuCallOutcome::Reset)) => Err(SendError::Fatal(format!(
+                "serial PushPieces mcu {}: transport reset mid-call",
+                self.mcu_id
+            ))),
+            Ok(Err(
+                e @ (TransportError::Closed
+                | TransportError::Io(_)
+                | TransportError::McuShutdown(_)),
+            )) => Err(SendError::Fatal(format!(
+                "serial PushPieces mcu {}: {e:?}",
+                self.mcu_id
+            ))),
+            Ok(Err(e)) => Err(SendError::Transient(format!(
+                "serial PushPieces mcu {}: {e:?}",
+                self.mcu_id
+            ))),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if Instant::now() < self.deadline {
+                    return None;
+                }
+                Err(SendError::Transient(format!(
+                    "serial PushPieces mcu {}: no response within the attempt deadline",
+                    self.mcu_id
+                )))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(SendError::Fatal(format!(
+                "serial PushPieces mcu {}: reactor gone",
+                self.mcu_id
+            ))),
+        };
+        self.resolved = true;
+        let send_elapsed_ns = self.send_started_at.elapsed().as_nanos() as u64;
+        let body = match call_result {
+            Ok(body) => body,
+            Err(error) => {
+                record_transport_error_traces(
+                    self.mcu_id,
+                    &self.frames,
+                    self.send_started_ns,
+                    send_elapsed_ns,
+                );
+                return Some(Err(error));
+            }
+        };
+        use mcu_protocol::codec::Decode as _;
+        let response = match mcu_protocol::messages::PushPiecesResponse::decode(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                record_transport_error_traces(
+                    self.mcu_id,
+                    &self.frames,
+                    self.send_started_ns,
+                    send_elapsed_ns,
+                );
+                return Some(Err(SendError::Transient(format!(
+                    "decode PushPiecesResponse mcu {}: {e:?}",
+                    self.mcu_id
+                ))));
+            }
+        };
+        Some(record_response_traces(
+            self.mcu_id,
+            &self.frames,
+            self.send_started_ns,
+            send_elapsed_ns,
+            &response,
+        ))
+    }
+}
+
+impl super::PendingSend for SerialPendingSend {
+    fn poll(&mut self) -> Option<Result<(), SendError>> {
+        assert!(!self.resolved, "PendingSend polled after resolution");
+        match self.rx.try_recv() {
+            Ok(outcome) => self.resolve(Ok(outcome)),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                if Instant::now() >= self.deadline {
+                    self.resolve(Err(std::sync::mpsc::RecvTimeoutError::Timeout))
+                } else {
+                    None
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.resolve(Err(std::sync::mpsc::RecvTimeoutError::Disconnected))
+            }
+        }
+    }
+
+    fn wait(&mut self, cap: Duration) -> Option<Result<(), SendError>> {
+        assert!(!self.resolved, "PendingSend waited after resolution");
+        let until_deadline = self.deadline.saturating_duration_since(Instant::now());
+        let outcome = self
+            .rx
+            .recv_timeout(cap.min(until_deadline).max(Duration::from_millis(1)));
+        self.resolve(outcome)
+    }
+}
+
+fn record_transport_error_traces(
+    mcu_id: u32,
+    frames: &[FrameTraceMeta],
+    send_started_ns: u64,
+    send_elapsed_ns: u64,
+) {
+    for frame in frames {
+        super::transit_trace::record(super::transit_trace::TransitTraceRecord {
+            sequence: 0,
+            mcu_id,
+            axis: frame.axis,
+            piece_count: frame.piece_count,
+            room: frame.room,
+            guard_recorded_ns: frame.guard_recorded_ns,
+            guard_mcu_clock: frame.guard_mcu_clock,
+            send_started_ns,
+            send_elapsed_ns,
+            host_front_start_time: frame.host_front_start_time,
+            mcu_front_start_time: 0,
+            arrival_clock: 0,
+            result: super::transit_trace::transport_error_result(),
+        });
+    }
+    super::transit_trace::emit_result_fault_snapshot(
+        "transport_error",
+        super::transit_trace::transport_error_result(),
+    );
+}
+
+fn record_response_traces(
+    mcu_id: u32,
+    frames: &[FrameTraceMeta],
+    send_started_ns: u64,
+    send_elapsed_ns: u64,
+    response: &mcu_protocol::messages::PushPiecesResponse,
+) -> Result<(), SendError> {
+    let result = response.result;
+    for frame in frames {
+        let mcu_front_start_time = response
+            .axes
+            .iter()
+            .find(|axis| axis.axis_idx == frame.axis)
+            .map_or(0, |axis| axis.front_start_time);
+        super::transit_trace::record(super::transit_trace::TransitTraceRecord {
+            sequence: 0,
+            mcu_id,
+            axis: frame.axis,
+            piece_count: frame.piece_count,
+            room: frame.room,
+            guard_recorded_ns: frame.guard_recorded_ns,
+            guard_mcu_clock: frame.guard_mcu_clock,
+            send_started_ns,
+            send_elapsed_ns,
+            host_front_start_time: frame.host_front_start_time,
+            mcu_front_start_time,
+            arrival_clock: response.arrival_clock,
+            result,
+        });
+    }
+    if result != mcu_protocol::result_codes::OK {
+        super::transit_trace::emit_result_fault_snapshot("mcu_reject", result);
+        return Err(SendError::mcu_reject(mcu_id, result));
+    }
+    Ok(())
 }
 
 /// Per-attempt response wait for a serial `PushPieces` re-request, before the
@@ -174,13 +386,7 @@ impl WireSink {
         Some(Instant::now() + Duration::from_secs_f64(lead_secs))
     }
 
-    fn call_push_pieces(
-        &self,
-        mcu_id: u32,
-        frames: &[AxisFrame],
-    ) -> Result<mcu_protocol::messages::PushPiecesResponse, SendError> {
-        use host_rt::transport::TransportError;
-
+    fn encode_push_pieces(frames: &[AxisFrame]) -> Vec<u8> {
         let axes: Vec<mcu_protocol::messages::AxisPieces> = frames
             .iter()
             .map(|f| {
@@ -199,7 +405,31 @@ impl WireSink {
             })
             .collect();
         let msg = mcu_protocol::messages::PushPieces { axes };
-        let body = mcu_protocol::codec::Encode::encoded_to_vec(&msg);
+        mcu_protocol::codec::Encode::encoded_to_vec(&msg)
+    }
+
+    fn frame_trace_meta(frames: &[AxisFrame]) -> Vec<FrameTraceMeta> {
+        frames
+            .iter()
+            .map(|f| FrameTraceMeta {
+                axis: f.axis,
+                piece_count: f.pieces.len() as u32,
+                room: f.room,
+                guard_recorded_ns: f.guard_recorded_ns,
+                guard_mcu_clock: f.guard_mcu_clock,
+                host_front_start_time: f.pieces.first().map_or(0, |piece| piece.start_time),
+            })
+            .collect()
+    }
+
+    fn call_push_pieces(
+        &self,
+        mcu_id: u32,
+        frames: &[AxisFrame],
+    ) -> Result<mcu_protocol::messages::PushPiecesResponse, SendError> {
+        use host_rt::transport::TransportError;
+
+        let body = Self::encode_push_pieces(frames);
 
         let transport = self.transports.get(&mcu_id).ok_or_else(|| {
             SendError::Transient(format!(
@@ -293,9 +523,51 @@ impl PieceSink for WireSink {
                 pieces_per_axis: 255,
             },
             Some(McuTransport::Serial(_) | McuTransport::Stepcompress(_)) | None => {
-                super::messages::SERIAL_BUNDLE_LIMITS
+                self.serial_limits
             }
         }
+    }
+
+    fn send_window(&self, mcu_id: u32) -> usize {
+        match self.transports.get(&mcu_id) {
+            Some(McuTransport::Serial(_)) => self.serial_window.max(1),
+            _ => 1,
+        }
+    }
+
+    fn submit_mcu_frames(
+        &self,
+        mcu_id: u32,
+        frames: &[AxisFrame],
+    ) -> Result<Box<dyn super::PendingSend>, SendError> {
+        let Some(McuTransport::Serial(weak)) = self.transports.get(&mcu_id) else {
+            let outcome = self.send_mcu_frames(mcu_id, frames);
+            return Ok(Box::new(super::messages::ResolvedSend(Some(outcome))));
+        };
+        let io = weak
+            .upgrade()
+            .ok_or_else(|| SendError::Fatal(format!("McuHostIo for mcu {mcu_id} detached")))?;
+        let body = Self::encode_push_pieces(frames);
+        let attempt_timeout = pushpieces_attempt_timeout(body.len());
+        let send_started_ns = super::transit_trace::trace_now_ns();
+        let send_started_at = Instant::now();
+        let rx = io
+            .kalico_submit_on_channel(
+                mcu_protocol::MCU_CHANNEL_PIECES,
+                mcu_protocol::MessageKind::PushPieces,
+                body,
+                attempt_timeout,
+            )
+            .map_err(|e| SendError::Fatal(format!("serial PushPieces mcu {mcu_id}: {e:?}")))?;
+        Ok(Box::new(SerialPendingSend {
+            mcu_id,
+            rx,
+            deadline: send_started_at + attempt_timeout,
+            send_started_ns,
+            send_started_at,
+            frames: Self::frame_trace_meta(frames),
+            resolved: false,
+        }))
     }
 
     fn mark_reanchor(&self, key: AxisKey, at_start_clock: u64, epoch_freq: Option<f64>) {

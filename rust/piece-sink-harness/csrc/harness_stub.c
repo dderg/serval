@@ -37,9 +37,12 @@ runtime_write_piece(void *rt, uint8_t axis, uint16_t slot, uint8_t idx,
 }
 
 int32_t
-runtime_commit_head(void *rt, uint8_t axis, uint32_t new_head)
+runtime_commit_head(void *rt, uint8_t axis, uint16_t start_slot,
+                    uint8_t piece_count, uint32_t new_head)
 {
     (void)rt;
+    (void)start_slot;
+    (void)piece_count;
     if (s_commit_count < MAXC) {
         s_c_axis[s_commit_count] = axis;
         s_c_head[s_commit_count] = new_head;

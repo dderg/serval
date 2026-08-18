@@ -54,7 +54,11 @@ int32_t runtime_clock_sync_request(struct Runtime *rt,
                                    uint32_t host_send_time_hi,
                                    uint64_t *out_mcu_clock);
 
-int32_t runtime_commit_head(struct Runtime *rt, uint8_t axis_idx, uint32_t new_head);
+int32_t runtime_commit_head(struct Runtime *rt,
+                            uint8_t axis_idx,
+                            uint16_t start_slot,
+                            uint8_t piece_count,
+                            uint32_t new_head);
 
 int32_t runtime_configure_axis(struct Runtime *rt,
                                uint8_t axis_idx,

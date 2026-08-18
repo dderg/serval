@@ -854,13 +854,22 @@ impl McuHostIo {
         self.kalico_call_on_channel(mcu_transport::CHANNEL_CONTROL, kind, body, timeout)
     }
 
-    pub fn kalico_call_on_channel(
+    /// Submit a kalico call without waiting: the returned receiver resolves
+    /// with the response (or transport error) when the reactor matches the
+    /// correlation id. Enables windowed `PushPieces` — several calls may be
+    /// in flight at once; the reactor's pending map keys them independently.
+    pub fn kalico_submit_on_channel(
         &self,
         channel: u8,
         kind: mcu_protocol::MessageKind,
         body: Vec<u8>,
         timeout: Duration,
-    ) -> Result<(mcu_protocol::MessageKind, Vec<u8>), TransportError> {
+    ) -> Result<
+        std::sync::mpsc::Receiver<
+            Result<crate::host_io::mcu_session::McuCallOutcome, TransportError>,
+        >,
+        TransportError,
+    > {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let deadline = self.clock.now() + timeout;
         self.submission_tx
@@ -872,6 +881,17 @@ impl McuHostIo {
                 deadline,
             })
             .map_err(|_| TransportError::Closed)?;
+        Ok(rx)
+    }
+
+    pub fn kalico_call_on_channel(
+        &self,
+        channel: u8,
+        kind: mcu_protocol::MessageKind,
+        body: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<(mcu_protocol::MessageKind, Vec<u8>), TransportError> {
+        let rx = self.kalico_submit_on_channel(channel, kind, body, timeout)?;
         match rx.recv_timeout(timeout) {
             Ok(Ok(crate::host_io::mcu_session::McuCallOutcome::Response { kind, body })) => {
                 Ok((kind, body))

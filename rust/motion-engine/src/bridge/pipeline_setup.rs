@@ -15,13 +15,13 @@ fn escalate_endpoint_death(latch: &Arc<Mutex<HashMap<u32, String>>>, mcu_id: u32
 }
 
 fn log_abandoned_pieces(key: crate::types::AxisKey, dropped: u32) {
-    tracing::debug!(
+    tracing::warn!(
         subsystem = "motion",
         event = "pump_abandon_unpushed",
         mcu = key.mcu_id,
         axis = key.axis,
         dropped,
-        "pump flush dropped pieces that never reached the wire"
+        "pump dropped staged pieces that never reached the wire — motion was lost"
     );
 }
 
@@ -210,6 +210,7 @@ impl PyMotionEngine {
 
     fn build_pump_resources(
         &self,
+        cfg: &config::PlannerConfig,
         mcu_configs: &[McuAxisConfig],
         host_ios: &HashMap<u32, Arc<McuHostIo>>,
         ec_conns: &HashMap<u32, Arc<McuSerialConn>>,
@@ -321,6 +322,11 @@ impl PyMotionEngine {
                 transports: wire_transports,
                 timeout: Duration::from_secs(5),
                 clock_of: Arc::clone(&clock_of),
+                serial_limits: crate::pump::BundleLimits {
+                    wire_budget: cfg.pieces_wire_budget,
+                    pieces_per_axis: (cfg.pieces_wire_budget * 32 / 1024).clamp(32, 255),
+                },
+                serial_window: cfg.pieces_inflight,
             },
             callbacks: crate::pump::PumpCallbacks {
                 ring_depth_of: Box::new(move |k| {
@@ -364,8 +370,14 @@ impl PyMotionEngine {
         let router_arc = Arc::clone(&self.router);
 
         let (pump_tx, pump_rx) = crossbeam_channel::unbounded::<crate::pump::PumpMsg>();
-        let pump_resources =
-            self.build_pump_resources(mcu_configs, host_ios, ec_conns, ring_depth_table, &pump_tx)?;
+        let pump_resources = self.build_pump_resources(
+            cfg,
+            mcu_configs,
+            host_ios,
+            ec_conns,
+            ring_depth_table,
+            &pump_tx,
+        )?;
 
         let anchor_mutex = Arc::clone(&self.dispatch_anchor);
         *anchor_mutex.lock_ok() = crate::anchor::Anchor::new();

@@ -81,7 +81,7 @@ fn write_piece_then_commit_head_makes_one_piece_visible() {
         let rc = c_api::runtime_write_piece(handle, 0, 0, 0, piece.as_ptr());
         assert_eq!(rc, c_api::RUNTIME_OK, "write_piece failed: {rc}");
 
-        let rc = c_api::runtime_commit_head(handle, 0, 1);
+        let rc = c_api::runtime_commit_head(handle, 0, 0, 1, 1);
         assert_eq!(rc, c_api::RUNTIME_OK, "commit_head failed: {rc}");
     }
 }
@@ -131,7 +131,7 @@ fn write_piece_null_rt_is_null_ptr_error() {
 fn commit_head_null_rt_is_null_ptr_error() {
     let _guard = TEST_LOCK.lock().unwrap();
     unsafe {
-        let rc = c_api::runtime_commit_head(core::ptr::null_mut(), 0, 1);
+        let rc = c_api::runtime_commit_head(core::ptr::null_mut(), 0, 0, 1, 1);
         assert_eq!(rc, c_api::RUNTIME_ERR_NULL_PTR);
     }
 }
@@ -141,7 +141,7 @@ fn commit_head_rejects_unconfigured_axis() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handle = rt();
     unsafe {
-        let rc = c_api::runtime_commit_head(handle, 3, 1);
+        let rc = c_api::runtime_commit_head(handle, 3, 0, 1, 1);
         assert_eq!(rc, c_api::RUNTIME_ERR_INVALID_ARG);
     }
 }

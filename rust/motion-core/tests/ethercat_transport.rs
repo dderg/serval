@@ -29,6 +29,8 @@ fn wire_sink_missing_transport_is_hard_error() {
         transports: HashMap::new(),
         timeout: Duration::from_secs(1),
         clock_of: Arc::new(|_| None),
+        serial_limits: motion_core::pump::SERIAL_BUNDLE_LIMITS,
+        serial_window: 1,
     };
     let (p, _) = piece(0);
     let result = sink.send_frame(

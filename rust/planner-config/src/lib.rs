@@ -419,6 +419,19 @@ pub struct PlannerConfig {
     pub max_extrude_only_accel: Option<f64>,
     pub fit_tolerance_mm: f64,
     pub fit_tolerance_accel_mm_s2: f64,
+    /// `[printer] pieces_wire_budget` — bytes one serial `PushPieces`
+    /// transaction may carry. The UART-sized 1 KiB default is ~20 ms of wire
+    /// at 500 kbaud; USB CDC moves ~1 MB/s, so raising it amortizes the
+    /// per-transaction round trip over more pieces.
+    pub pieces_wire_budget: usize,
+    /// `[printer] pieces_inflight` — serial `PushPieces` bundles the pump
+    /// keeps in flight per MCU before waiting for the oldest response.
+    /// 1 = classic stop-and-wait; higher values make delivery
+    /// bandwidth-bound instead of round-trip-bound. The default is measured:
+    /// at 4 the Trident bench still spent ~90 s of a 1109 s print waiting on
+    /// window credit (16.4k waits); at 12 that falls to 186 and the send
+    /// margin floor rises from 32 ms to 40 ms.
+    pub pieces_inflight: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -546,6 +559,8 @@ impl Default for PlannerConfig {
             max_extrude_only_accel: None,
             fit_tolerance_mm: 0.005,
             fit_tolerance_accel_mm_s2: 50.0,
+            pieces_wire_budget: 1024,
+            pieces_inflight: 12,
         }
     }
 }

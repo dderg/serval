@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -8,6 +8,7 @@ use crossbeam_channel::{Receiver, Select, TryRecvError};
 use super::diag;
 use super::drip::DripCohort;
 use super::junction::{JunctionTracker, check_junction_position_continuity};
+use super::margin::SendMarginTracker;
 use super::memstat::MemPressureProbe;
 use super::messages::{
     EnqueueMsg, HeartbeatMsg, HistoryRecorder, PieceSink, PumpCallbacks, PumpMsg, SendError,
@@ -40,6 +41,17 @@ pub const PUMP_DATA_CHANNEL_CAP: usize = 128;
 pub(super) const PUMP_INTAKE_BACKLOG_SOFT_CAP: u64 = 4096;
 pub(super) const PUMP_INTAKE_BACKLOG_HARD_CAP: u64 = 8192;
 pub(super) const PUMP_INTAKE_MIN_RUNWAY_SECS: f64 = 5.0;
+
+/// Replays of one committed in-flight bundle before the pump declares the
+/// transport dead. The bundle's ring bookkeeping is already committed, so an
+/// undeliverable bundle has no silent fallback — fail loudly.
+pub(super) const WINDOW_MAX_ATTEMPTS: u32 = 3;
+
+/// Safety cap on one blocking wait for the oldest in-flight bundle. The
+/// pending handle resolves itself at its own attempt deadline (reactor-side
+/// timeout), so hitting this cap means the transport plumbing lost the
+/// completion — a bug, not congestion.
+pub(super) const WINDOW_WAIT_CAP: Duration = Duration::from_secs(2);
 
 fn staged_axis_runway_secs(queue: &AxisQueue) -> f64 {
     let Some((_, start_host)) = queue.pieces.front() else {
@@ -88,6 +100,16 @@ pub(super) fn pump_past_guard_secs() -> f64 {
     })
 }
 
+/// One windowed in-flight bundle, retained until its transport outcome. Oldest-first
+/// retirement keeps every later slot write in the window, so a transient outcome
+/// may replay only when neither logical reuse nor a later bundle changed its slots.
+pub(super) struct InFlightBundle {
+    pub(super) bundle: Vec<AxisFrame>,
+    pub(super) pending: Box<dyn super::PendingSend>,
+    pub(super) attempts: u32,
+    pub(super) resume_epoch: u64,
+}
+
 pub(super) struct Pump<S> {
     pub(super) queues: BTreeMap<AxisKey, AxisQueue>,
     pub(super) junctions: JunctionTracker,
@@ -107,12 +129,148 @@ pub(super) struct Pump<S> {
     pub(super) intake_batch_open: bool,
     pub(super) consumption_stall: ConsumptionStallWatch,
     pub(super) mem_probe: MemPressureProbe,
+    pub(super) margins: SendMarginTracker,
+    pub(super) windows: HashMap<u32, VecDeque<InFlightBundle>>,
+    /// Per-MCU resume generation. A `Halted` outcome from a bundle submitted
+    /// before its own endpoint's resume is stale: it reports the halt that
+    /// resume already cleared, and a still-halted endpoint re-signals on the
+    /// next bundle, so acting on it would spuriously halt the fresh stream.
+    ///
+    /// Staleness is endpoint-local, so this must be too: a resume on one MCU
+    /// says nothing about a halt another MCU is reporting, and counting them
+    /// together would skip the halt handling that in-flight bundle needs after
+    /// its rollback already abandoned its pieces. Halts do not bump it — the
+    /// halt path purges the window itself and halts every axis it discarded.
+    pub(super) resume_epochs: HashMap<u32, u64>,
+}
+
+/// The axis a transport-wide failure is attributed to: bundles are per-MCU, so
+/// any axis in one identifies the endpoint.
+fn bundle_key(mcu_id: u32, bundle: &[AxisFrame]) -> AxisKey {
+    bundle
+        .first()
+        .map_or(AxisKey { mcu_id, axis: 0 }, |f| AxisKey {
+            mcu_id,
+            axis: f.axis,
+        })
+}
+
+struct ReplayOwnershipLoss {
+    key: AxisKey,
+    start_slot: u16,
+    bundle_start_head: u32,
+    current_head: u32,
+    ring_depth: u32,
+    later_start_slot: Option<u16>,
+}
+
+fn overlapping_physical_slot(older: &AxisFrame, later: &AxisFrame, ring_depth: u32) -> Option<u16> {
+    if older.axis != later.axis || ring_depth == 0 {
+        return None;
+    }
+    (0..older.pieces.len() as u32).find_map(|offset| {
+        let slot = (u32::from(older.start_slot) + offset) % ring_depth;
+        let later_offset = (slot + ring_depth - u32::from(later.start_slot)) % ring_depth;
+        (later_offset < later.pieces.len() as u32)
+            .then(|| u16::try_from(slot).expect("physical piece-ring slot exceeds u16"))
+    })
+}
+
+fn replay_ownership_loss(
+    queues: &BTreeMap<AxisKey, AxisQueue>,
+    windows: &HashMap<u32, VecDeque<InFlightBundle>>,
+    mcu_id: u32,
+    bundle: &[AxisFrame],
+) -> Option<ReplayOwnershipLoss> {
+    bundle.iter().find_map(|frame| {
+        let key = AxisKey {
+            mcu_id,
+            axis: frame.axis,
+        };
+        let queue = queues.get(&key).expect("in-flight axis queue exists");
+        let bundle_start_head = frame.new_head.wrapping_sub(frame.pieces.len() as u32);
+        let committed_span = queue.pushed.wrapping_sub(bundle_start_head);
+        if committed_span > queue.ring_depth {
+            return Some(ReplayOwnershipLoss {
+                key,
+                start_slot: frame.start_slot,
+                bundle_start_head,
+                current_head: queue.pushed,
+                ring_depth: queue.ring_depth,
+                later_start_slot: None,
+            });
+        }
+        windows.get(&mcu_id).and_then(|later_entries| {
+            later_entries.iter().find_map(|later_entry| {
+                later_entry.bundle.iter().find_map(|later_frame| {
+                    overlapping_physical_slot(frame, later_frame, queue.ring_depth).map(
+                        |start_slot| ReplayOwnershipLoss {
+                            key,
+                            start_slot,
+                            bundle_start_head,
+                            current_head: queue.pushed,
+                            ring_depth: queue.ring_depth,
+                            later_start_slot: Some(later_frame.start_slot),
+                        },
+                    )
+                })
+            })
+        })
+    })
 }
 
 impl<S: PieceSink> Pump<S> {
-    fn halt_keys(&mut self, keys: impl IntoIterator<Item = AxisKey>, inferred: bool) {
+    pub(super) fn new(
+        sink: S,
+        callbacks: PumpCallbacks,
+        history: Option<HistoryRecorder>,
+        ledger: Arc<crate::drain::DrainLedger>,
+        backlog: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            queues: BTreeMap::new(),
+            junctions: JunctionTracker::default(),
+            cohort: None,
+            halted: BTreeMap::new(),
+            sink,
+            callbacks,
+            history,
+            ledger,
+            pending_barrier_acks: Vec::new(),
+            backlog,
+            holding_ahead: false,
+            data_open: true,
+            intake_batch_open: false,
+            consumption_stall: ConsumptionStallWatch::new(CONSUMPTION_STALL_FATAL),
+            mem_probe: MemPressureProbe::new(),
+            margins: SendMarginTracker::new(),
+            windows: HashMap::new(),
+            resume_epochs: HashMap::new(),
+        }
+    }
+
+    /// Halt `keys`, drop their staged pieces, and purge every affected MCU's
+    /// send window: a halted endpoint refuses in-flight bundles without
+    /// advancing its head, so each refused bundle's optimistic commit must be
+    /// rolled back before any post-resume send computes slots from it.
+    ///
+    /// One MCU carries several axis subsets, so the purge discards committed
+    /// pieces belonging to axes that appear nowhere in the bundle whose
+    /// response reported the halt. It reports those axes and they are halted
+    /// with the rest — an axis whose committed pieces were dropped must never
+    /// continue from later staged pieces across that hole.
+    fn halt_keys(
+        &mut self,
+        keys: impl IntoIterator<Item = AxisKey>,
+        inferred: bool,
+    ) -> Result<(), ()> {
         let inferred_at = inferred.then(Instant::now);
-        for key in keys {
+        let mut pending: Vec<AxisKey> = keys.into_iter().collect();
+        let mut seen = BTreeSet::new();
+        while let Some(key) = pending.pop() {
+            if !seen.insert(key) {
+                continue;
+            }
             if inferred {
                 self.halted.entry(key).or_insert(inferred_at);
             } else {
@@ -127,7 +285,326 @@ impl<S: PieceSink> Pump<S> {
                 }
             }
             self.junctions.forget(key);
+            let purged = self.purge_window_for_halt(key.mcu_id)?;
+            pending.extend(purged);
         }
+        Ok(())
+    }
+
+    fn resume_epoch_of(&self, mcu_id: u32) -> u64 {
+        self.resume_epochs.get(&mcu_id).copied().unwrap_or(0)
+    }
+
+    /// Drain every in-flight bundle for an endpoint that is halting. A bundle
+    /// the MCU already took keeps its commit; a refused or lost one has its
+    /// optimistic commit rolled back and its axes returned for halting.
+    fn purge_window_for_halt(&mut self, mcu_id: u32) -> Result<Vec<AxisKey>, ()> {
+        let mut refused = Vec::new();
+        loop {
+            let Some(win) = self.windows.get_mut(&mcu_id) else {
+                return Ok(refused);
+            };
+            let Some(mut entry) = win.pop_front() else {
+                return Ok(refused);
+            };
+            let error = match entry.pending.wait(WINDOW_WAIT_CAP) {
+                Some(Ok(())) => continue,
+                Some(Err(e)) => e,
+                None => {
+                    tracing::error!(
+                        subsystem = "motion",
+                        event = "send_window_wedged",
+                        mcu = mcu_id,
+                        "in-flight PushPieces never resolved within {}s while purging a halted \
+                         endpoint — transport plumbing lost the completion",
+                        WINDOW_WAIT_CAP.as_secs()
+                    );
+                    (self.callbacks.on_fatal_transport)(bundle_key(mcu_id, &entry.bundle));
+                    return Err(());
+                }
+            };
+            if let SendError::Fatal(e) = &error {
+                tracing::error!(
+                    subsystem = "motion",
+                    event = "send_frame_fatal",
+                    mcu = mcu_id,
+                    error = %e,
+                    "windowed PushPieces FATAL transport error while purging a halted endpoint"
+                );
+                (self.callbacks.on_fatal_transport)(bundle_key(mcu_id, &entry.bundle));
+                return Err(());
+            }
+            tracing::debug!(
+                subsystem = "motion",
+                event = "halt_purge_rollback",
+                mcu = mcu_id,
+                error = %error,
+                axes = ?entry.bundle.iter().map(|f| f.axis).collect::<Vec<_>>(),
+                "rolling back an in-flight bundle the halting endpoint did not take"
+            );
+            self.rollback_refused_bundle(mcu_id, &entry.bundle);
+            refused.extend(entry.bundle.iter().map(|f| AxisKey {
+                mcu_id,
+                axis: f.axis,
+            }));
+        }
+    }
+
+    /// Retire in-flight bundles before a new bundle's slots are computed. A
+    /// drain rolls a refused bundle's optimistic commit back, so slots taken
+    /// before it would place the new bundle a bundle ahead of the head the MCU
+    /// still expects and earn a `PIECE_SLOT_GAP` on arrival.
+    fn settle_window_before_build(&mut self, mcu_id: u32) -> Result<(), ()> {
+        let window_cap = self.sink.send_window(mcu_id).max(1);
+        self.drain_window(mcu_id, Some(window_cap))
+    }
+
+    /// The scheduler has already taken this bundle's pieces out of the staging
+    /// queue, so a bundle whose endpoint the preceding drain halted cannot be
+    /// put back — it is abandoned rather than pushed at an endpoint that would
+    /// refuse it.
+    fn abandon_if_halted(&mut self, mcu_id: u32, bundle: &[AxisFrame]) -> bool {
+        let halted = bundle.iter().any(|af| {
+            self.halted.contains_key(&AxisKey {
+                mcu_id,
+                axis: af.axis,
+            })
+        });
+        if halted {
+            for af in bundle {
+                let n = af.pieces.len() as u32;
+                if n > 0 {
+                    (self.callbacks.on_abandon)(
+                        AxisKey {
+                            mcu_id,
+                            axis: af.axis,
+                        },
+                        n,
+                    );
+                }
+            }
+        }
+        halted
+    }
+
+    /// Undo the optimistic commit of a bundle the MCU refused without
+    /// advancing its head. The pieces already left the staging queue — they
+    /// are abandoned, not restored — but `pushed` and the write cursor must
+    /// rewind so the next bundle lands on the slot the MCU still expects.
+    fn rollback_refused_bundle(&mut self, mcu_id: u32, bundle: &[AxisFrame]) {
+        for af in bundle {
+            let key = AxisKey {
+                mcu_id,
+                axis: af.axis,
+            };
+            let n = af.pieces.len() as u32;
+            if let Some(q) = self.queues.get_mut(&key) {
+                q.pushed = q.pushed.wrapping_sub(n);
+                q.rewind_write_cursor(n);
+            }
+            if n > 0 {
+                (self.callbacks.on_abandon)(key, n);
+            }
+        }
+    }
+
+    /// Retire resolved in-flight bundles for `mcu_id`, oldest first. With
+    /// `make_room_below = Some(cap)`, blocks on the oldest entry until the
+    /// window is below `cap`. A transient outcome replays the byte-identical
+    /// bundle while its slots remain owned. Slot reuse or replay-budget
+    /// exhaustion fails loud because either condition makes recovery unsafe.
+    pub(super) fn drain_window(
+        &mut self,
+        mcu_id: u32,
+        make_room_below: Option<usize>,
+    ) -> Result<(), ()> {
+        loop {
+            let Some(win) = self.windows.get_mut(&mcu_id) else {
+                return Ok(());
+            };
+            let need_room = make_room_below.is_some_and(|cap| win.len() >= cap);
+            let Some(mut entry) = win.pop_front() else {
+                return Ok(());
+            };
+            let outcome = if need_room {
+                let wait_started = Instant::now();
+                let outcome = entry.pending.wait(WINDOW_WAIT_CAP);
+                let waited = wait_started.elapsed();
+                if waited >= Duration::from_millis(5) {
+                    tracing::warn!(
+                        subsystem = "motion",
+                        event = "pump_send_blocked",
+                        mcu = mcu_id,
+                        elapsed_ms = waited.as_millis() as u64,
+                        frames = entry.bundle.len(),
+                        ok = matches!(outcome, Some(Ok(()))),
+                        "[pump-send] window full — waited {}ms for the oldest in-flight bundle on mcu {}",
+                        waited.as_millis() as u64,
+                        mcu_id
+                    );
+                }
+                outcome
+            } else {
+                entry.pending.poll()
+            };
+            match &outcome {
+                None => {
+                    if need_room {
+                        tracing::error!(
+                            subsystem = "motion",
+                            event = "send_window_wedged",
+                            mcu = mcu_id,
+                            "in-flight PushPieces never resolved within {}s — \
+                             transport plumbing lost the completion",
+                            WINDOW_WAIT_CAP.as_secs()
+                        );
+                        let key = bundle_key(mcu_id, &entry.bundle);
+                        (self.callbacks.on_fatal_transport)(key);
+                        return Err(());
+                    }
+                    self.windows
+                        .get_mut(&mcu_id)
+                        .expect("window exists")
+                        .push_front(entry);
+                    return Ok(());
+                }
+                Some(Ok(())) => {}
+                Some(Err(SendError::Fatal(e))) => {
+                    tracing::error!(
+                        subsystem = "motion",
+                        event = "send_frame_fatal",
+                        mcu = mcu_id,
+                        error = %e,
+                        "windowed PushPieces FATAL transport error — invoking fatal-transport action"
+                    );
+                    let key = bundle_key(mcu_id, &entry.bundle);
+                    (self.callbacks.on_fatal_transport)(key);
+                    return Err(());
+                }
+                Some(Err(SendError::Halted(e))) => {
+                    let resumed_since_submit = entry.resume_epoch != self.resume_epoch_of(mcu_id);
+                    tracing::debug!(
+                        subsystem = "motion",
+                        event = "send_frame_halted",
+                        mcu = mcu_id,
+                        resumed_since_submit,
+                        error = %e,
+                        "windowed bundle met an endpoint halt — rolling back its commit"
+                    );
+                    self.rollback_refused_bundle(mcu_id, &entry.bundle);
+                    if !resumed_since_submit {
+                        let keys: Vec<AxisKey> = entry
+                            .bundle
+                            .iter()
+                            .map(|frame| AxisKey {
+                                mcu_id,
+                                axis: frame.axis,
+                            })
+                            .collect();
+                        self.halt_keys(keys, true)?;
+                    }
+                }
+                Some(Err(SendError::Transient(e))) => {
+                    if let Some(loss) =
+                        replay_ownership_loss(&self.queues, &self.windows, mcu_id, &entry.bundle)
+                    {
+                        tracing::error!(
+                            subsystem = "motion",
+                            event = "send_window_replay_slot_ownership_lost",
+                            mcu = mcu_id,
+                            axis = loss.key.axis,
+                            start_slot = loss.start_slot,
+                            bundle_start_head = loss.bundle_start_head,
+                            current_head = loss.current_head,
+                            ring_depth = loss.ring_depth,
+                            later_start_slot = loss.later_start_slot,
+                            error = %e,
+                            "refusing replay after physical slot ownership changed — failing loud \
+                             before stale bytes overwrite live motion"
+                        );
+                        (self.callbacks.on_fatal_transport)(loss.key);
+                        return Err(());
+                    }
+                    entry.attempts += 1;
+                    if entry.attempts >= WINDOW_MAX_ATTEMPTS {
+                        tracing::error!(
+                            subsystem = "motion",
+                            event = "send_window_exhausted",
+                            mcu = mcu_id,
+                            attempts = entry.attempts,
+                            error = %e,
+                            "committed in-flight bundle undeliverable after replay budget — \
+                             failing loud"
+                        );
+                        let key = bundle_key(mcu_id, &entry.bundle);
+                        (self.callbacks.on_fatal_transport)(key);
+                        return Err(());
+                    }
+                    tracing::warn!(
+                        subsystem = "motion",
+                        event = "send_window_replay",
+                        mcu = mcu_id,
+                        attempt = entry.attempts,
+                        error = %e,
+                        "replaying idempotent in-flight bundle (lost response or slot gap)"
+                    );
+                    match self.sink.submit_mcu_frames(mcu_id, &entry.bundle) {
+                        Ok(pending) => {
+                            entry.pending = pending;
+                            self.windows
+                                .get_mut(&mcu_id)
+                                .expect("window exists")
+                                .push_front(entry);
+                        }
+                        Err(SendError::Fatal(ref e)) => {
+                            tracing::error!(
+                                subsystem = "motion",
+                                event = "send_frame_fatal",
+                                mcu = mcu_id,
+                                error = %e,
+                                "bundle replay hit a fatal transport error"
+                            );
+                            let key =
+                                entry
+                                    .bundle
+                                    .first()
+                                    .map_or(AxisKey { mcu_id, axis: 0 }, |f| AxisKey {
+                                        mcu_id,
+                                        axis: f.axis,
+                                    });
+                            (self.callbacks.on_fatal_transport)(key);
+                            return Err(());
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                subsystem = "motion",
+                                event = "send_window_replay_submit_failed",
+                                mcu = mcu_id,
+                                error = %e,
+                                "replay submit failed; keeping the entry for the next pass"
+                            );
+                            self.windows
+                                .get_mut(&mcu_id)
+                                .expect("window exists")
+                                .push_front(entry);
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub(super) fn drain_all_windows(&mut self) -> Result<(), ()> {
+        let mcus: Vec<u32> = self.windows.keys().copied().collect();
+        for mcu_id in mcus {
+            self.drain_window(mcu_id, None)?;
+        }
+        Ok(())
+    }
+
+    fn windows_nonempty(&self) -> bool {
+        self.windows.values().any(|w| !w.is_empty())
     }
 
     pub(super) fn handle_control_msg(&mut self, msg: PumpMsg) -> bool {
@@ -159,11 +636,14 @@ impl<S: PieceSink> Pump<S> {
                 }
             }
             PumpMsg::Halt { keys, ack } => {
-                self.halt_keys(keys, false);
+                if self.halt_keys(keys, false).is_err() {
+                    return false;
+                }
                 self.pending_barrier_acks.push(ack);
             }
             PumpMsg::Resume(keys) => {
                 for key in keys {
+                    *self.resume_epochs.entry(key.mcu_id).or_default() += 1;
                     self.halted.remove(&key);
                 }
             }
@@ -172,6 +652,7 @@ impl<S: PieceSink> Pump<S> {
                 consumed_counts,
                 retired_counts,
             }) => {
+                self.margins.note_heartbeat(mcu_id);
                 let consumed_counts = consumed_counts.as_ref().unwrap_or(&retired_counts);
                 assert_eq!(
                     consumed_counts.len(),
@@ -678,10 +1159,14 @@ impl<S: PieceSink> Pump<S> {
         }
     }
 
-    fn send_bundle_logged(&mut self, mcu_id: u32, bundle: &[AxisFrame]) -> Result<(), SendError> {
+    fn submit_bundle_logged(
+        &mut self,
+        mcu_id: u32,
+        bundle: &[AxisFrame],
+    ) -> Result<Box<dyn super::PendingSend>, SendError> {
         let mem_before = self.mem_probe.sample();
         let send_started = Instant::now();
-        let send_result = self.sink.send_mcu_frames(mcu_id, bundle);
+        let send_result = self.sink.submit_mcu_frames(mcu_id, bundle);
         let send_elapsed = send_started.elapsed();
         if send_elapsed >= Duration::from_millis(5) {
             let mem_after = self.mem_probe.sample();
@@ -704,7 +1189,7 @@ impl<S: PieceSink> Pump<S> {
                 majflt_delta,
                 vm_swap_before_kb,
                 vm_swap_after_kb,
-                "[pump-send] send_mcu_frames blocked {}ms on mcu {} ({} frames, ok={}, majflt_delta={:?}, vm_swap_kb={:?}->{:?})",
+                "[pump-send] submit_mcu_frames blocked {}ms on mcu {} ({} frames, ok={}, majflt_delta={:?}, vm_swap_kb={:?}->{:?})",
                 send_elapsed.as_millis() as u64,
                 mcu_id,
                 bundle.len(),
@@ -798,20 +1283,39 @@ impl<S: PieceSink> Pump<S> {
                     }
                     activity = true;
                     let mcu_id = frames[0].key.mcu_id;
+                    self.settle_window_before_build(mcu_id)?;
                     let mut bundle = self.build_bundle(frames);
                     self.guard_pieces_not_in_past(mcu_id, &mut bundle, "at send");
-                    let send_result = self.send_bundle_logged(mcu_id, &bundle);
+                    if self.abandon_if_halted(mcu_id, &bundle) {
+                        break;
+                    }
+                    let send_result = self.submit_bundle_logged(mcu_id, &bundle);
                     match send_result {
-                        Ok(()) => {
+                        Ok(pending) => {
                             self.commit_sent_bundle(mcu_id, &bundle);
+                            if let Some((_, freq)) = (self.callbacks.mcu_clock_of)(mcu_id) {
+                                self.margins
+                                    .observe_send(mcu_id, &bundle, freq, &self.queues);
+                            }
+                            let resume_epoch = self.resume_epoch_of(mcu_id);
+                            self.windows
+                                .entry(mcu_id)
+                                .or_default()
+                                .push_back(InFlightBundle {
+                                    bundle,
+                                    pending,
+                                    attempts: 0,
+                                    resume_epoch,
+                                });
+                            self.drain_window(mcu_id, None)?;
                         }
-                        Err(SendError::Fatal(ref e)) => {
+                        Err(SendError::Fatal(e)) => {
                             tracing::error!(
                                 subsystem = "motion",
                                 event = "send_frame_fatal",
                                 mcu = mcu_id,
                                 error = %e,
-                                "pump send_mcu_frames FATAL transport error — invoking fatal-transport action"
+                                "pump submit_mcu_frames FATAL transport error — invoking fatal-transport action"
                             );
                             (self.callbacks.on_fatal_transport)(AxisKey {
                                 mcu_id,
@@ -819,7 +1323,7 @@ impl<S: PieceSink> Pump<S> {
                             });
                             return Err(());
                         }
-                        Err(SendError::Halted(ref e)) => {
+                        Err(SendError::Halted(e)) => {
                             tracing::debug!(
                                 subsystem = "motion",
                                 event = "send_frame_halted",
@@ -833,16 +1337,16 @@ impl<S: PieceSink> Pump<S> {
                                     axis: frame.axis,
                                 }),
                                 true,
-                            );
+                            )?;
                             break;
                         }
-                        Err(SendError::Transient(ref e)) => {
+                        Err(SendError::Transient(e)) => {
                             tracing::error!(
                                 subsystem = "motion",
                                 event = "send_frame_transient",
                                 mcu = mcu_id,
                                 error = %e,
-                                "pump send_mcu_frames failed"
+                                "pump submit_mcu_frames failed"
                             );
                             self.guard_pieces_not_in_past(
                                 mcu_id,
@@ -876,7 +1380,7 @@ impl<S: PieceSink> Pump<S> {
         } else {
             usize::MAX
         };
-        let selected = if self.holding_ahead || self.cohort.is_some() {
+        let selected = if self.holding_ahead || self.cohort.is_some() || self.windows_nonempty() {
             sel.select_timeout(Duration::from_millis(poll_ms))
         } else {
             Ok(sel.select())
@@ -955,6 +1459,10 @@ impl<S: PieceSink> Pump<S> {
                 Err(()) => return,
             }
 
+            if self.drain_all_windows().is_err() {
+                return;
+            }
+
             let unpushed: u64 = self.queues.values().map(|q| q.pieces.len() as u64).sum();
             self.backlog.store(unpushed, Ordering::Release);
 
@@ -983,22 +1491,6 @@ pub fn run_pump<S: PieceSink>(
     ledger: Arc<crate::drain::DrainLedger>,
     backlog: Arc<AtomicU64>,
 ) {
-    let mut pump = Pump {
-        queues: BTreeMap::new(),
-        junctions: JunctionTracker::default(),
-        cohort: None,
-        halted: BTreeMap::new(),
-        sink,
-        callbacks,
-        history,
-        ledger,
-        pending_barrier_acks: Vec::new(),
-        backlog,
-        holding_ahead: false,
-        data_open: true,
-        intake_batch_open: false,
-        consumption_stall: ConsumptionStallWatch::new(CONSUMPTION_STALL_FATAL),
-        mem_probe: MemPressureProbe::new(),
-    };
+    let mut pump = Pump::new(sink, callbacks, history, ledger, backlog);
     pump.run(control_rx, data_rx);
 }

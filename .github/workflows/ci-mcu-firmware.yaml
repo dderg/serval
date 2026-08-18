@@ -36,8 +36,10 @@ jobs:
       # ARM cross-compiler (same packages mainline Klipper's ci-install.sh uses).
       - name: Install arm-none-eabi toolchain + build deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          printf 'https://archive.ubuntu.com/ubuntu/\tpriority:1\n' \
+            | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=15 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=15 install -y \
             gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
           pip3 install pyelftools
 
@@ -78,10 +80,13 @@ jobs:
 
       # Native gcc + kernel uapi headers (linux/gpio.h, linux/spi/spidev.h) for
       # the real-hardware Linux drivers. No arm cross-compiler needed.
-      - name: Install build deps
+      - name: Verify build deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential linux-libc-dev
+          command -v gcc
+          command -v make
+          command -v nm
+          test -f /usr/include/linux/gpio.h
+          test -f /usr/include/linux/spi/spidev.h
 
       # Host Rust toolchain only — MACH_LINUX builds the `mcu-linux` feature on
       # the native target.

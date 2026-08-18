@@ -100,6 +100,8 @@ static struct {
     uint8_t  cur_piece_off;   // byte offset within the current piece
     uint8_t  cur_piece_len;   // wire length of the current piece (16 + 4*count)
     uint8_t  axis_idx[MCU_MAX_FRAME_AXES];
+    uint16_t start_slot[MCU_MAX_FRAME_AXES];
+    uint8_t  piece_count[MCU_MAX_FRAME_AXES];
     uint32_t new_head[MCU_MAX_FRAME_AXES];
     uint64_t first_start_time[MCU_MAX_FRAME_AXES];
     uint8_t  blocks_done;     // fully-parsed blocks
@@ -184,6 +186,8 @@ piece_sink_feed(uint8_t b)
             }
         }
         piece_sink.axis_idx[piece_sink.cur_axis] = piece_sink.cur_axis_idx;
+        piece_sink.start_slot[piece_sink.cur_axis] = piece_sink.cur_start_slot;
+        piece_sink.piece_count[piece_sink.cur_axis] = piece_sink.cur_piece_count;
         piece_sink.new_head[piece_sink.cur_axis] = piece_sink.cur_new_head;
         piece_sink.first_start_time[piece_sink.cur_axis] = 0;
         piece_sink.in_block_header = 0;
@@ -264,7 +268,9 @@ piece_sink_commit(void)
         // halts, so no further frame is delivered.
         for (uint8_t a = 0; a < piece_sink.axis_count; a++) {
             int32_t r = runtime_commit_head(
-                runtime_handle, piece_sink.axis_idx[a], piece_sink.new_head[a]);
+                runtime_handle, piece_sink.axis_idx[a],
+                piece_sink.start_slot[a], piece_sink.piece_count[a],
+                piece_sink.new_head[a]);
             if (r != 0) {
                 rc = r;
                 break;

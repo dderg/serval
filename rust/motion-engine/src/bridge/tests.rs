@@ -580,6 +580,8 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
             m
         },
         timeout: Duration::from_millis(50),
+        serial_limits: crate::pump::SERIAL_BUNDLE_LIMITS,
+        serial_window: 1,
         clock_of: Arc::new(|_| None),
     };
 

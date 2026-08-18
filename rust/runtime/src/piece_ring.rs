@@ -3,6 +3,11 @@ pub enum CommitOutcome {
     Applied,
     Stale,
     Overcommit,
+    /// The block's `start_slot` (or its implied span) is not contiguous with
+    /// the current head — an earlier windowed frame was lost. Committing
+    /// would advance the head over unwritten slots and hand the ISR garbage,
+    /// so the whole frame is refused; the host replays from the gap.
+    Gap,
 }
 
 /// ## Cursor invariants (ISR/host safety boundary)
@@ -96,6 +101,39 @@ impl RingDescriptor {
         }
         if proposed > self.ring_depth as u32 {
             return CommitOutcome::Overcommit;
+        }
+        self.head = new_head;
+        CommitOutcome::Applied
+    }
+
+    /// `commit_head` with the windowed-stream contiguity guard: the block
+    /// declared it wrote `piece_count` pieces starting at physical
+    /// `start_slot`, and the resulting head must be exactly `head +
+    /// piece_count`. A fully-stale duplicate (replayed frame the ring already
+    /// committed) stays a no-op `Stale`.
+    #[inline]
+    pub fn commit_head_checked(
+        &mut self,
+        start_slot: u16,
+        piece_count: u8,
+        new_head: u32,
+    ) -> CommitOutcome {
+        if self.ring_depth == 0 {
+            return CommitOutcome::Gap;
+        }
+        let cur = self.head.wrapping_sub(self.retired);
+        let proposed = new_head.wrapping_sub(self.retired);
+        if proposed <= cur {
+            return CommitOutcome::Stale;
+        }
+        if proposed > self.ring_depth as u32 {
+            return CommitOutcome::Overcommit;
+        }
+        let expected_slot = (self.head as usize) % self.ring_depth;
+        let contiguous = start_slot as usize == expected_slot
+            && new_head == self.head.wrapping_add(u32::from(piece_count));
+        if !contiguous {
+            return CommitOutcome::Gap;
         }
         self.head = new_head;
         CommitOutcome::Applied
