@@ -78,10 +78,13 @@ jobs:
 
       # Native gcc + kernel uapi headers (linux/gpio.h, linux/spi/spidev.h) for
       # the real-hardware Linux drivers. No arm cross-compiler needed.
-      - name: Install build deps
+      - name: Verify build deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential linux-libc-dev
+          command -v gcc
+          command -v make
+          command -v nm
+          test -f /usr/include/linux/gpio.h
+          test -f /usr/include/linux/spi/spidev.h
 
       # Host Rust toolchain only — MACH_LINUX builds the `mcu-linux` feature on
       # the native target.
