@@ -10,7 +10,7 @@ use crate::config::PlannerConfig;
 use crate::worker::{DispatchError, StreamWorkerHandle};
 use trajectory::ShapedSegment;
 
-use super::{Executor, McuConnection, PyMotionEngine, SampleGrid};
+use super::{McuConnection, PyMotionEngine, SampleGrid};
 
 fn open_pty() -> (libc::c_int, String) {
     let mut master: libc::c_int = 0;
@@ -313,6 +313,7 @@ fn every_fault_free_retirement_heartbeat_reaches_the_pump() {
             engine_state: 1,
             fault_code: 0,
             retired_counts: vec![i, i],
+            playback_clocks: vec![0, 0],
             ff_saturation_count: 0,
         });
     }
@@ -337,6 +338,7 @@ fn fault_heartbeat_is_latched_not_forwarded() {
         engine_state: 1,
         fault_code: 314,
         retired_counts: vec![1, 1],
+        playback_clocks: vec![0, 0],
         ff_saturation_count: 0,
     });
     assert!(rx.try_iter().next().is_none());
@@ -389,8 +391,10 @@ fn shutdown_stops_new_dispatch_before_closing_pump() {
         dispatch_count_cb.fetch_add(1, Ordering::SeqCst);
         let hb = crate::pump::PumpMsg::Heartbeat(crate::pump::HeartbeatMsg {
             mcu_id: 0,
+            axes: Vec::new(),
             consumed_counts: None,
             retired_counts: Vec::new(),
+            retired_by: crate::pump::RetiredBy::Pulse,
         });
         if pump_tx.send(hb).is_err() {
             saw_pump_gone_cb.store(true, Ordering::SeqCst);
@@ -566,7 +570,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use crate::pump::{EnqueueMsg, McuTransport, PumpCallbacks, PumpMsg, WireSink, run_pump};
+    use crate::pump::{EnqueueMsg, EtherCatRing, PumpCallbacks, PumpMsg, WireSink, run_pump};
     use crate::types::AxisKey;
 
     const EC_MCU_ID: u32 = 42;
@@ -577,20 +581,30 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
     let fatal_fired = Arc::new(AtomicBool::new(false));
     let fatal_flag = Arc::clone(&fatal_fired);
 
+    let ring: crate::pump::RingFiller = Arc::new(std::sync::Mutex::new(
+        ethercat_rt::setpoint_fill::ChainFiller::new(
+            &[ethercat_rt::setpoint_fill::LaneSpec {
+                axis: 0,
+                cmd_counts_per_mm: 1_000.0,
+                ff_lead_ns: 0,
+            }],
+            None,
+            250_000,
+            1,
+        ),
+    ));
     let sink = WireSink {
-        transports: {
-            let mut m = HashMap::new();
-            m.insert(
-                EC_MCU_ID,
-                McuTransport::EtherCat {
-                    conn: detached_weak,
-                    ring: None,
-                },
-            );
-            m
-        },
+        stepcompress: HashMap::new(),
+        samples: HashMap::new(),
+        transports: Arc::new(crate::axis_transport::AxisTransports::from_configs(&[])),
+        ethercat: HashMap::from([(
+            EC_MCU_ID,
+            EtherCatRing {
+                conn: detached_weak,
+                ring,
+            },
+        )]),
         timeout: Duration::from_millis(50),
-        clock_of: Arc::new(|_| None),
     };
 
     let mcu_clock_of = |_mcu_id: u32| -> Option<(u64, f64)> { Some((1, 1.0)) };
@@ -701,13 +715,23 @@ fn register_ethercat_mcu_seeds_nominal_clock_freq() {
         conn,
         vec![0],
         SampleGrid {
-            executor: Executor::SetpointRing,
             cycle_ticks: 250_000,
             ring_depth_cycles: 512,
             grid_index: 42,
             grid_clock: 10_500_000,
         },
-        None,
+        std::sync::Arc::new(std::sync::Mutex::new(
+            ethercat_rt::setpoint_fill::ChainFiller::new(
+                &[ethercat_rt::setpoint_fill::LaneSpec {
+                    axis: 0,
+                    cmd_counts_per_mm: 1_000.0,
+                    ff_lead_ns: 0,
+                }],
+                None,
+                250_000,
+                1,
+            ),
+        )),
     );
 
     assert!(
@@ -717,7 +741,6 @@ fn register_ethercat_mcu_seeds_nominal_clock_freq() {
     assert_eq!(
         engine.mcus.lock_ok()[&raw].sample_grid,
         Some(SampleGrid {
-            executor: Executor::SetpointRing,
             cycle_ticks: 250_000,
             ring_depth_cycles: 512,
             grid_index: 42,

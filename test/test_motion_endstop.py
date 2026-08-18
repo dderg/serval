@@ -7,6 +7,7 @@ from klippy.motion_endstop import (
     MotorBinding,
     RemoteMotionEndstop,
     allocate_provider_id,
+    register_stepcompress_steppers,
 )
 
 
@@ -66,34 +67,37 @@ def test_config_cmd_emitted():
     _connected(mcu, MotionEndstop(_pin_params(mcu), 3))
     assert mcu.config_cmds == [
         "config_endstop oid=0 endstop_id=3 pin=PA8 pull_up=1 invert=0"
-        " motor=255 stepper=255 group=0"
+        " motor=255 stepper=255 group=0",
+        "config_trsync oid=1",
     ]
 
 
 def test_local_binding_reaches_firmware_with_group_flag():
     mcu = _fake_mcu()
-    binding = MotorBinding(0, 1, mcu, "stepper_x1")
+    binding = MotorBinding(0, 1, mcu, "stepper_x1", 21)
     _connected(
         mcu, MotionEndstop(_pin_params(mcu), 4, binding=binding, group=True)
     )
     assert mcu.config_cmds == [
         "config_endstop oid=0 endstop_id=4 pin=PA8 pull_up=1 invert=0"
-        " motor=0 stepper=1 group=1"
+        " motor=0 stepper=1 group=1",
+        "config_trsync oid=1",
     ]
 
 
 def test_foreign_binding_is_unbound_in_firmware_but_freezes_remotely():
     mcu = _fake_mcu(handle=7)
     motor_mcu = _fake_mcu(handle=9)
-    binding = MotorBinding(0, 1, motor_mcu, "stepper_x1")
+    binding = MotorBinding(0, 1, motor_mcu, "stepper_x1", 21)
     es = _connected(
         mcu, MotionEndstop(_pin_params(mcu), 4, binding=binding, group=True)
     )
     assert mcu.config_cmds == [
         "config_endstop oid=0 endstop_id=4 pin=PA8 pull_up=1 invert=0"
-        " motor=255 stepper=255 group=1"
+        " motor=255 stepper=255 group=1",
+        "config_trsync oid=1",
     ]
-    assert es.remote_freeze() == (9, 0, 1)
+    assert es.remote_freeze() == (9, 0, 1, 21)
 
 
 def test_is_triggered_applies_invert():
@@ -106,6 +110,37 @@ def test_is_triggered_applies_invert():
 
 
 def test_arm_sends_rest_ticks():
+    mcu = _fake_mcu()
+    endstop = _connected(mcu, MotionEndstop(_pin_params(mcu), 3))
+    endstop.arm(0.001)
+    assert mcu.query_cmd.sent == [[0, 1000]]
+
+
+def test_an_unbound_endstop_arms_every_stepcompress_lane_on_its_mcu():
+    mcu = _fake_mcu()
+    register_stepcompress_steppers(mcu.get_printer(), mcu, [21, 22])
+    endstop = _connected(mcu, MotionEndstop(_pin_params(mcu), 3))
+    endstop.arm(0.001)
+    assert [args for args in mcu.query_cmd.sent if len(args) == 2] == [
+        [21, 1],
+        [22, 1],
+        [0, 1000],
+    ]
+
+
+def test_a_keyed_endstop_arms_only_its_own_motor():
+    mcu = _fake_mcu()
+    register_stepcompress_steppers(mcu.get_printer(), mcu, [21, 22])
+    binding = MotorBinding(0, 1, mcu, "stepper_x1", 22)
+    endstop = _connected(
+        mcu, MotionEndstop(_pin_params(mcu), 4, binding=binding, group=True)
+    )
+    endstop.arm(0.001)
+    assert [22, 1] in mcu.query_cmd.sent
+    assert [21, 1] not in mcu.query_cmd.sent
+
+
+def test_an_mcu_with_no_stepcompress_lanes_arms_no_mcu_side_stop():
     mcu = _fake_mcu()
     endstop = _connected(mcu, MotionEndstop(_pin_params(mcu), 3))
     endstop.arm(0.001)

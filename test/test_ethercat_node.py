@@ -360,25 +360,3 @@ class FakeChoiceConfig:
                 "choice" % (value, option, self.section)
             )
         return choices[value]
-
-
-def test_executor_option_defaults_to_piece():
-    assert ethercat_node.read_executor_option(FakeChoiceConfig()) == "piece"
-
-
-def test_executor_option_accepts_setpoint_ring():
-    assert (
-        ethercat_node.read_executor_option(FakeChoiceConfig("setpoint_ring"))
-        == "setpoint_ring"
-    )
-
-
-def test_executor_option_rejects_the_cli_hyphen_spelling():
-    with pytest.raises(FakeConfigError) as e:
-        ethercat_node.read_executor_option(FakeChoiceConfig("setpoint-ring"))
-    assert "setpoint-ring" in str(e.value)
-
-
-def test_executor_option_rejects_unknown_value():
-    with pytest.raises(FakeConfigError):
-        ethercat_node.read_executor_option(FakeChoiceConfig("ring"))

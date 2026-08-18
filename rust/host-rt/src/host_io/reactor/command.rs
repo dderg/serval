@@ -3,7 +3,7 @@ use std::time::Instant;
 use crate::host_io::mcu_session::{
     PendingMcuCall, build_kalico_frame, build_kalico_identify_frame,
 };
-use crate::host_io::reactor::{PENDING_PIECE_FRAMES_CEILING, Reactor, ReactorState};
+use crate::host_io::reactor::{Reactor, ReactorState};
 use crate::transport::TransportError;
 
 impl Reactor {
@@ -77,12 +77,11 @@ impl Reactor {
                 deadline: _,
             } => self.handle_mcu_identify(completion),
             ReactorCommand::McuCall {
-                channel,
                 kind,
                 body,
                 completion,
                 deadline,
-            } => self.handle_mcu_call(channel, kind, body, completion, deadline),
+            } => self.handle_mcu_call(kind, body, completion, deadline),
             ReactorCommand::GetClockAndDeliver => self.handle_get_clock_and_deliver(),
             ReactorCommand::Noop => {}
             ReactorCommand::RegisterInterceptor {
@@ -177,7 +176,7 @@ impl Reactor {
     fn handle_subscribe_runtime_events(
         &mut self,
         priority: std::sync::mpsc::SyncSender<crate::host_io::runtime_events::RuntimeEvent>,
-        bulk: std::sync::mpsc::SyncSender<crate::host_io::runtime_events::RuntimeEvent>,
+        bulk: std::sync::mpsc::Sender<crate::host_io::runtime_events::RuntimeEvent>,
         reply: std::sync::mpsc::SyncSender<Result<(), crate::transport::SubscribeError>>,
     ) {
         let result = self
@@ -294,7 +293,6 @@ impl Reactor {
 
     fn handle_mcu_call(
         &mut self,
-        channel: u8,
         kind: mcu_protocol::MessageKind,
         body: Vec<u8>,
         completion: std::sync::mpsc::SyncSender<
@@ -308,12 +306,8 @@ impl Reactor {
             )));
             return;
         }
-        if self.outbound.pending_piece_frames.len() >= PENDING_PIECE_FRAMES_CEILING {
-            let _ = completion.send(Err(TransportError::Backpressure));
-            return;
-        }
         let cid = self.transport_state.allocate_correlation_id();
-        let frame = build_kalico_frame(channel, kind, cid, &body);
+        let frame = build_kalico_frame(mcu_transport::CHANNEL_CONTROL, kind, cid, &body);
         self.transport_state.pending.insert(
             cid,
             PendingMcuCall {
@@ -321,8 +315,12 @@ impl Reactor {
                 deadline,
             },
         );
-        self.outbound.pending_piece_frames.push_back((cid, frame));
-        self.drain_piece_frames();
+        if let Err(e) = self.write_frame(&frame) {
+            self.close_if_io_fault("handle_command/mcu_call", &e);
+            if let Some(p) = self.transport_state.pending.remove(&cid) {
+                let _ = p.completion.send(Err(e));
+            }
+        }
     }
 
     fn handle_get_clock_and_deliver(&mut self) {

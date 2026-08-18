@@ -1,4 +1,4 @@
-use super::{EndpointClaimError, Executor, ReportedExecutor, message_for_claim_error};
+use super::{EndpointClaimError, ReportedExecutor, message_for_claim_error};
 
 #[test]
 fn bus_dead_ec_init_failure() {
@@ -103,20 +103,19 @@ fn drive_fault_unchanged() {
 }
 
 #[test]
-fn executor_mismatch_names_both_sides_and_the_node() {
+fn executor_mismatch_code_blames_the_stale_endpoint_executor() {
     let msg = message_for_claim_error(
         "node_x",
         "eth0",
         &EndpointClaimError::ExecutorMismatch {
-            requested: Executor::SetpointRing,
-            reported: ReportedExecutor::Known(Executor::Piece),
+            reported: ReportedExecutor::Code(0),
         },
     );
     assert_eq!(
         msg,
-        "ethercat node_x: executor mismatch — host requested 'setpoint_ring', endpoint \
-         reports 'piece' — set executor= on [ethercat_node node_x] to match the endpoint's \
-         --executor, then FIRMWARE_RESTART"
+        "ethercat node_x: executor mismatch — endpoint reports executor code 0, expected 1 \
+         (setpoint ring) — this endpoint still runs a deleted executor, rebuild \
+         rust/ethercat-rt, then FIRMWARE_RESTART"
     );
 }
 
@@ -126,32 +125,13 @@ fn executor_mismatch_unsupported_blames_the_stale_endpoint_binary() {
         "node_x",
         "eth0",
         &EndpointClaimError::ExecutorMismatch {
-            requested: Executor::Piece,
             reported: ReportedExecutor::Unsupported("QuerySampleGrid call failed: Timeout".into()),
         },
     );
     assert_eq!(
         msg,
-        "ethercat node_x: executor mismatch — host requested 'piece' but the endpoint could \
-         not report its executor (QuerySampleGrid call failed: Timeout); the endpoint binary \
-         predates the sample-stream executor — rebuild rust/ethercat-rt, then FIRMWARE_RESTART"
-    );
-}
-
-#[test]
-fn executor_mismatch_unknown_code_blames_the_newer_endpoint() {
-    let msg = message_for_claim_error(
-        "node_x",
-        "eth0",
-        &EndpointClaimError::ExecutorMismatch {
-            requested: Executor::Piece,
-            reported: ReportedExecutor::UnknownCode(7),
-        },
-    );
-    assert_eq!(
-        msg,
-        "ethercat node_x: executor mismatch — host requested 'piece', endpoint reports \
-         unknown executor code 7 — the endpoint binary is newer than this host, rebuild \
-         both, then FIRMWARE_RESTART"
+        "ethercat node_x: executor mismatch — the endpoint could not report its executor \
+         (QuerySampleGrid call failed: Timeout); the endpoint binary predates the sample-stream \
+         executor — rebuild rust/ethercat-rt, then FIRMWARE_RESTART"
     );
 }

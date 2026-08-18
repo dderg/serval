@@ -76,16 +76,6 @@ pub fn raise_math_non_finite(shared: &SharedState, axis_idx: usize) {
 }
 
 #[inline]
-pub fn raise_piece_advance_underflow(shared: &SharedState, axis_idx: usize) {
-    let detail = (axis_idx as u32 & 0xFF) << 16;
-    shared.fault_detail.store(detail, Ordering::Release);
-    shared
-        .last_error
-        .store(FaultCode::PieceAdvanceUnderflow.as_i32(), Ordering::Release);
-    emit_fault_log(FaultCode::PieceAdvanceUnderflow, detail);
-}
-
-#[inline]
 pub fn raise_phase_mode_not_available(shared: &SharedState, axis_idx: usize) {
     let detail = (axis_idx as u32 & 0xFF) << 16;
     shared.fault_detail.store(detail, Ordering::Release);
@@ -103,16 +93,6 @@ pub fn raise_jog_parameters_invalid(shared: &SharedState) {
         .last_error
         .store(FaultCode::JogParametersInvalid.as_i32(), Ordering::Release);
     emit_fault_log(FaultCode::JogParametersInvalid, detail);
-}
-
-#[inline]
-pub fn raise_piece_start_in_past(shared: &SharedState, axis_idx: usize, deficit_us: u32) {
-    let detail = ((axis_idx as u32 & 0xFF) << 16) | deficit_us.min(0xFFFF);
-    shared.fault_detail.store(detail, Ordering::Release);
-    shared
-        .last_error
-        .store(FaultCode::PieceStartInPast.as_i32(), Ordering::Release);
-    emit_fault_log(FaultCode::PieceStartInPast, detail);
 }
 
 #[inline]
@@ -144,26 +124,6 @@ pub fn raise_internal_invariant(shared: &SharedState, axis_idx: usize, invariant
         .last_error
         .store(FaultCode::InternalInvariant.as_i32(), Ordering::Release);
     emit_fault_log(FaultCode::InternalInvariant, detail);
-}
-
-#[inline]
-pub fn raise_multi_motor_mask(shared: &SharedState, axis_idx: usize, mask: u8) {
-    let detail = ((axis_idx as u32 & 0xFF) << 16) | u32::from(mask);
-    shared.fault_detail.store(detail, Ordering::Release);
-    shared
-        .last_error
-        .store(FaultCode::MultiMotorMask.as_i32(), Ordering::Release);
-    emit_fault_log(FaultCode::MultiMotorMask, detail);
-}
-
-#[inline]
-pub fn raise_unknown_step_mode(shared: &SharedState, axis_idx: usize, mode: u8) {
-    let detail = ((axis_idx as u32 & 0xFF) << 16) | u32::from(mode);
-    shared.fault_detail.store(detail, Ordering::Release);
-    shared
-        .last_error
-        .store(FaultCode::UnknownStepMode.as_i32(), Ordering::Release);
-    emit_fault_log(FaultCode::UnknownStepMode, detail);
 }
 
 #[inline]
@@ -232,6 +192,11 @@ pub fn raise_sample_run_rejected(shared: &SharedState, lane_idx: usize, sample_f
         lane_idx,
         u32::from(sample_fault),
     );
+}
+
+#[inline]
+pub fn raise_sample_barrier_overflow(shared: &SharedState, lane_idx: usize) {
+    raise_lane_fault(shared, FaultCode::SampleBarrierOverflow, lane_idx, 0);
 }
 
 #[cfg(test)]

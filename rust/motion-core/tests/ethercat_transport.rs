@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use motion_core::drain::DrainLedger;
 use motion_core::pump::{
-    AxisKey, EnqueueMsg, HeartbeatMsg, PieceSink, PumpCallbacks, PumpMsg, SendError, WireSink,
-    run_pump,
+    AxisKey, EnqueueMsg, HeartbeatMsg, PieceSink, PumpCallbacks, PumpMsg, RetiredBy, SendError,
+    WireSink, run_pump,
 };
 use runtime::piece_ring::PieceEntry;
 
@@ -22,13 +22,17 @@ fn piece(t: u64) -> (PieceEntry, f64) {
 }
 
 #[test]
-fn wire_sink_missing_transport_is_hard_error() {
+fn wire_sink_lane_with_no_endpoint_is_hard_error() {
     use std::collections::HashMap;
 
     let sink = WireSink {
-        transports: HashMap::new(),
+        stepcompress: HashMap::new(),
+        samples: HashMap::new(),
+        ethercat: HashMap::new(),
         timeout: Duration::from_secs(1),
-        clock_of: Arc::new(|_| None),
+        transports: Arc::new(motion_core::axis_transport::AxisTransports::from_configs(
+            &[],
+        )),
     };
     let (p, _) = piece(0);
     let result = sink.send_frame(
@@ -37,19 +41,18 @@ fn wire_sink_missing_transport_is_hard_error() {
             axis: 0,
         },
         &[p],
-        0,
         1,
         8,
     );
     assert!(
         result.is_err(),
-        "missing transport must be a hard error, not silent drop"
+        "a lane with no endpoint must be a hard error, not silent drop"
     );
     let err = result.unwrap_err();
     let msg = err.to_string();
     assert!(
-        msg.contains("no transport for mcu_id 99"),
-        "error must name the offending mcu_id; got: {msg}"
+        msg.contains("mcu 99 axis 0 belongs to no endpoint"),
+        "error must name the offending lane; got: {msg}"
     );
 }
 
@@ -71,7 +74,6 @@ impl PieceSink for PerMcuCountSink {
         &self,
         key: AxisKey,
         _pieces: &[PieceEntry],
-        _start_slot: u16,
         _new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
@@ -200,8 +202,10 @@ fn heartbeat_retirement_drains_pump_ledger() {
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 42,
+        axes: vec![0],
         consumed_counts: None,
         retired_counts: vec![1],
+        retired_by: RetiredBy::Pulse,
     }))
     .unwrap();
     barrier(&ctl);

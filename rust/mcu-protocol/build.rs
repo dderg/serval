@@ -87,11 +87,6 @@ fn main() {
     }
     h.push('\n');
 
-    h.push_str("/* Piece wire/ring geometry (single source of truth for C). */\n");
-    h.push_str("#define MCU_PIECE_MAX_COEFFS 8\n");
-    h.push_str("#define MCU_PIECE_WIRE_HEADER_LEN 16\n");
-    h.push_str("#define MCU_PIECE_SLOT_LEN 48\n\n");
-
     h.push_str("/* SHA-256 over canonicalized schema (excludes bootstrap). */\n");
     h.push_str("static const uint8_t MCU_SCHEMA_HASH[32] = {\n    ");
     for (i, b) in hash.iter().enumerate() {

@@ -21,7 +21,7 @@ pub mod wire;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Sender, SyncSender};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -34,7 +34,6 @@ use crate::host_io::runtime_events::{
     FaultEvent, McuLogEvent, RuntimeEvent, StatusEvent, TraceEvent,
 };
 use crate::transport::{MessageParams, SubscribeError, Transport, TransportError};
-use std::sync::mpsc::SyncSender;
 
 const DEFAULT_BAUD: u32 = 250_000;
 
@@ -63,7 +62,7 @@ impl Default for McuHostIoConfig {
     }
 }
 
-pub struct HeartbeatCallback(pub Arc<dyn Fn(&[u32]) + Send + Sync>);
+pub struct HeartbeatCallback(pub Arc<dyn Fn(&[u32], &[u64]) + Send + Sync>);
 
 impl std::fmt::Debug for HeartbeatCallback {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -108,7 +107,7 @@ pub enum ReactorCommand {
     },
     SubscribeRuntimeEvents {
         priority: SyncSender<RuntimeEvent>,
-        bulk: SyncSender<RuntimeEvent>,
+        bulk: Sender<RuntimeEvent>,
         reply: SyncSender<Result<(), SubscribeError>>,
     },
     SubscribeHostEvents {
@@ -132,7 +131,6 @@ pub enum ReactorCommand {
         deadline: std::time::Instant,
     },
     McuCall {
-        channel: u8,
         kind: mcu_protocol::MessageKind,
         body: Vec<u8>,
         completion: SyncSender<Result<crate::host_io::mcu_session::McuCallOutcome, TransportError>>,
@@ -602,7 +600,7 @@ impl McuHostIo {
         self.is_critical.load(Ordering::Acquire)
     }
 
-    pub fn attach_heartbeat_callback(&self, cb: Arc<dyn Fn(&[u32]) + Send + Sync>) {
+    pub fn attach_heartbeat_callback(&self, cb: Arc<dyn Fn(&[u32], &[u64]) + Send + Sync>) {
         let _ = self
             .submission_tx
             .send(ReactorCommand::AttachHeartbeatCallback(HeartbeatCallback(
@@ -655,7 +653,7 @@ impl McuHostIo {
     > {
         let cap = self.config.runtime_event_capacity;
         let (priority_tx, priority_rx) = std::sync::mpsc::sync_channel(cap);
-        let (bulk_tx, bulk_rx) = std::sync::mpsc::sync_channel(cap);
+        let (bulk_tx, bulk_rx) = std::sync::mpsc::channel();
         let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
         self.submission_tx
             .send(ReactorCommand::SubscribeRuntimeEvents {
@@ -875,21 +873,10 @@ impl McuHostIo {
         body: Vec<u8>,
         timeout: Duration,
     ) -> Result<(mcu_protocol::MessageKind, Vec<u8>), TransportError> {
-        self.kalico_call_on_channel(mcu_transport::CHANNEL_CONTROL, kind, body, timeout)
-    }
-
-    pub fn kalico_call_on_channel(
-        &self,
-        channel: u8,
-        kind: mcu_protocol::MessageKind,
-        body: Vec<u8>,
-        timeout: Duration,
-    ) -> Result<(mcu_protocol::MessageKind, Vec<u8>), TransportError> {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let deadline = self.clock.now() + timeout;
         self.submission_tx
             .send(ReactorCommand::McuCall {
-                channel,
                 kind,
                 body,
                 completion: tx,

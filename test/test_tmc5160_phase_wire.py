@@ -22,6 +22,7 @@ from tmc_wire_harness import (
     FakeGcode,
     FakeMCU,
     FakeMcuTmc,
+    FakeMotionEngine,
     FakePins,
     FakePrinter,
     FakeStepperEnable,
@@ -54,6 +55,8 @@ class Rig:
         self.printer.add_object(
             "stepper_enable", FakeStepperEnable(FakeEnableLine())
         )
+        self.engine = FakeMotionEngine(self.wire)
+        self.printer.add_object("motion_engine", self.engine)
         self.sections = {}
         self.mcu_tmcs = []
 
@@ -107,10 +110,15 @@ def test_enter_sequence_chopconf_before_direct_mode_checks_stopped_last(rig):
         ("query", "kalico_get_phase_state"),
         ("cmd", "kalico_phase_align_to"),
         ("cmd", "kalico_phase_stepping_enable_spi"),
+        ("transport", "switch_axis_transport"),
         ("cmd", "kalico_set_axis_mode"),
         ("timer-", "_do_periodic_check"),
     ]
     assert tmc_obj.phase_stepping_active()
+    assert rig.engine.switches == [(0, 0, 1)], (
+        "the host adopts the phase transport for the lane before the mcu is "
+        "told to execute in phase mode"
+    )
 
 
 def test_enter_sets_direct_mode_and_forces_spreadcycle(rig):
@@ -162,6 +170,7 @@ def test_exit_jogs_back_to_cached_mscnt_then_flips_mode_then_restarts_checks(
         ("query", "kalico_get_phase_state"),
         ("cmd", "kalico_phase_stepping_disable_spi"),
         ("write", "GCONF"),
+        ("transport", "switch_axis_transport"),
         ("cmd", "kalico_set_axis_mode"),
         ("read", "DRV_STATUS"),
         ("read", "GSTAT"),
@@ -175,6 +184,10 @@ def test_exit_jogs_back_to_cached_mscnt_then_flips_mode_then_restarts_checks(
         "direct_mode cleared"
     )
     assert not tmc_obj.phase_stepping_active()
+    assert rig.engine.switches[-1] == (0, 0, 0), (
+        "the host drains the sample stream and adopts the pulse transport "
+        "before the mcu stops executing phase mode"
+    )
 
 
 def test_exit_polls_until_the_jog_settles(rig):

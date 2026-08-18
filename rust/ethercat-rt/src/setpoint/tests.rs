@@ -279,14 +279,3 @@ fn grid_indices_come_off_the_dc_period_exactly() {
         })
     );
 }
-
-#[test]
-fn executor_parses_only_the_cli_spellings() {
-    assert_eq!(Executor::parse("piece"), Some(Executor::Piece));
-    assert_eq!(
-        Executor::parse("setpoint-ring"),
-        Some(Executor::SetpointRing)
-    );
-    assert_eq!(Executor::parse("setpoint_ring"), None);
-    assert_eq!(Executor::SetpointRing.wire(), Executor::WIRE_SETPOINT_RING);
-}

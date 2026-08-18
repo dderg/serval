@@ -140,3 +140,40 @@ pub unsafe extern "C" fn runtime_sample_halt(rt: *mut Runtime, halt_clock: u64) 
     }
     RUNTIME_OK
 }
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn runtime_sample_barrier(rt: *mut Runtime, oid: u8, seq: u32) -> i32 {
+    let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
+    // SAFETY: as `runtime_sample_anchor`.
+    unsafe {
+        let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
+        let shared: &SharedState = &*core::ptr::addr_of!((*ctx).shared);
+        (*isr_ptr).engine.sample_push_barrier(shared, oid, seq);
+    }
+    RUNTIME_OK
+}
+
+/// Pop one fence playback has passed. Returns 1 when one was written to the
+/// out params, 0 when none is ready. The caller loops until 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn runtime_sample_take_barrier_ack(
+    rt: *mut Runtime,
+    out_oid: *mut u8,
+    out_seq: *mut u32,
+) -> i32 {
+    let ctx = guarded_ctx!(rt, 0, 0);
+    if out_oid.is_null() || out_seq.is_null() {
+        return 0;
+    }
+    // SAFETY: foreground pop of lane-owned state under the caller's irq_save;
+    // out pointers checked non-null above.
+    unsafe {
+        let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
+        let Some((oid, seq)) = (*isr_ptr).engine.sample_take_barrier_ack() else {
+            return 0;
+        };
+        out_oid.write(oid);
+        out_seq.write(seq);
+    }
+    1
+}

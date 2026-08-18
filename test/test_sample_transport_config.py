@@ -7,11 +7,10 @@ from klippy import mcu as mcu_mod
 from klippy import motion_setup
 from klippy.mcu import (
     MCU,
-    PHASE_TRANSPORT_PIECE,
-    PHASE_TRANSPORT_SAMPLE,
     SAMPLE_COMMANDS,
-    STEPPING_MODE_PIECE,
-    STEPPING_MODE_STEPCOMPRESS,
+    STEPCOMPRESS_ENCODER_CLASSIC,
+    STEPCOMPRESS_ENCODER_HP,
+    STEPCOMPRESS_SAMPLE_RATE_HZ,
 )
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -24,10 +23,12 @@ class FakeConfigError(Exception):
 
 
 class FakeFileConfig:
-    def __init__(self, options):
+    def __init__(self, options, accessed):
         self._options = options
+        self._accessed = accessed
 
     def has_option(self, _section, option):
+        self._accessed.add(option)
         return option in self._options
 
 
@@ -38,12 +39,14 @@ class FakeConfig:
         self._options = dict(options or {})
         self._name = name
         self.section = name
-        self.fileconfig = FakeFileConfig(self._options)
+        self.accessed = set()
+        self.fileconfig = FakeFileConfig(self._options, self.accessed)
 
     def get_name(self):
         return self._name
 
     def getchoice(self, option, choices, default):
+        self.accessed.add(option)
         value = self._options.get(option, default)
         if value not in choices:
             raise FakeConfigError(
@@ -52,47 +55,39 @@ class FakeConfig:
         return choices[value]
 
     def getfloat(self, option, default=None):
+        self.accessed.add(option)
         return self._options.get(option, default)
 
 
 def make_mcu(options=None):
     mcu = MCU.__new__(MCU)
-    mcu._init_stepping_mode(FakeConfig(options))
+    mcu._init_stepcompress(FakeConfig(options))
     return mcu
 
 
-def test_phase_transport_defaults_to_the_piece_path():
-    assert make_mcu().get_phase_transport() == PHASE_TRANSPORT_PIECE
+def test_stepcompress_is_unconditional_with_an_internal_sample_rate():
+    mcu = make_mcu()
+    assert mcu.get_stepcompress_sample_rate() == STEPCOMPRESS_SAMPLE_RATE_HZ
+    assert mcu.get_stepcompress_encoder() == STEPCOMPRESS_ENCODER_HP
 
 
-def test_phase_transport_sample_is_selectable():
-    mcu = make_mcu({"phase_transport": "sample"})
-    assert mcu.get_phase_transport() == PHASE_TRANSPORT_SAMPLE
-    assert mcu.get_stepping_mode() == STEPPING_MODE_PIECE
+def test_the_classic_encoder_is_still_selectable():
+    mcu = make_mcu({"stepcompress_encoder": "classic"})
+    assert mcu.get_stepcompress_encoder() == STEPCOMPRESS_ENCODER_CLASSIC
 
 
-def test_phase_transport_sample_is_rejected_on_a_stepcompress_mcu():
-    with pytest.raises(FakeConfigError, match="needs stepping_mode: piece"):
-        make_mcu(
-            {
-                "phase_transport": "sample",
-                "stepping_mode": "stepcompress",
-                "stepcompress_sample_rate": 20000.0,
-            }
-        )
+DELETED_MCU_KEYS = frozenset(
+    ["stepping_mode", "stepcompress_sample_rate", "phase_transport"]
+)
 
 
-def test_an_unknown_phase_transport_is_rejected():
-    with pytest.raises(FakeConfigError):
-        make_mcu({"phase_transport": "spline"})
-
-
-def test_stepcompress_mcu_still_reports_its_encoder():
-    mcu = make_mcu(
-        {"stepping_mode": "stepcompress", "stepcompress_sample_rate": 20000.0}
-    )
-    assert mcu.get_stepping_mode() == STEPPING_MODE_STEPCOMPRESS
-    assert mcu.get_phase_transport() == PHASE_TRANSPORT_PIECE
+@pytest.mark.parametrize("encoder", ["hp", "classic"])
+def test_the_deleted_mcu_keys_are_never_consumed(encoder):
+    config = FakeConfig({"stepcompress_encoder": encoder})
+    mcu = MCU.__new__(MCU)
+    mcu._init_stepcompress(config)
+    assert config.accessed.isdisjoint(DELETED_MCU_KEYS)
+    assert mcu.get_stepcompress_sample_rate() == STEPCOMPRESS_SAMPLE_RATE_HZ
 
 
 class FakePrinter:
@@ -104,22 +99,44 @@ class FakeMotion:
 
 
 class SampleCapableMcu:
-    def __init__(self, missing=()):
+    def __init__(self, missing=(), constants=None):
         self._missing = set(missing)
+        self._constants = (
+            {"MOTION_SAMPLE_RATE_HZ": 10000.0, "SAMPLE_RUNS_PER_LANE": 12}
+            if constants is None
+            else constants
+        )
 
     def try_lookup_command(self, msgformat):
         if msgformat in self._missing:
             return None
         return object()
 
+    def get_constants(self):
+        return self._constants
 
-def reject(mcu=None, axes=(0, 1), step_modes=None, endpoints=()):
+
+def reject(mcu=None, phase_axes=(0,)):
     if mcu is None:
         mcu = SampleCapableMcu()
-    if step_modes is None:
-        step_modes = {0: motion_setup.STEP_MODE_MODULATED, 1: 1}
-    motion_setup._reject_sample_transport_conflicts(
-        FakeMotion(), "mcu", mcu, 11, list(axes), step_modes, set(endpoints)
+    motion_setup._reject_phase_lane_conflicts(
+        FakeMotion(), "mcu", mcu, list(phase_axes)
+    )
+
+
+def sample_rate(mcu=None, phase_axes=(0,)):
+    if mcu is None:
+        mcu = SampleCapableMcu()
+    return motion_setup._phase_sample_rate(
+        FakeMotion(), "mcu", mcu, list(phase_axes)
+    )
+
+
+def ring_depth(mcu=None, phase_axes=(0,)):
+    if mcu is None:
+        mcu = SampleCapableMcu()
+    return motion_setup._phase_ring_depth(
+        FakeMotion(), "mcu", mcu, list(phase_axes)
     )
 
 
@@ -127,20 +144,47 @@ def test_a_phase_lane_on_capable_firmware_is_accepted():
     reject()
 
 
-def test_an_ethercat_endpoint_cannot_use_the_sample_transport():
-    with pytest.raises(FakeConfigError, match="ethercat"):
-        reject(endpoints=(11,))
-
-
-def test_an_mcu_with_no_phase_lane_is_rejected():
-    with pytest.raises(FakeConfigError, match="phase_stepping: 1"):
-        reject(step_modes={0: 1, 1: 1})
-
-
 @pytest.mark.parametrize("missing", SAMPLE_COMMANDS)
 def test_firmware_without_a_sample_command_is_rejected(missing):
     with pytest.raises(FakeConfigError, match="CONFIG_SAMPLE_STEPPING"):
         reject(mcu=SampleCapableMcu(missing=(missing,)))
+
+
+def test_the_phase_sample_rate_comes_from_the_advertised_constant():
+    assert sample_rate() == 10000.0
+    assert (
+        sample_rate(SampleCapableMcu(constants={"MOTION_SAMPLE_RATE_HZ": 5000}))
+        == 5000.0
+    )
+
+
+def test_a_missing_sample_rate_constant_is_rejected():
+    with pytest.raises(FakeConfigError, match="MOTION_SAMPLE_RATE_HZ"):
+        sample_rate(SampleCapableMcu(constants={}))
+
+
+@pytest.mark.parametrize("bad", [0, -5000.0, float("inf")])
+def test_a_nonpositive_sample_rate_constant_is_rejected(bad):
+    with pytest.raises(FakeConfigError, match="finite positive"):
+        sample_rate(SampleCapableMcu(constants={"MOTION_SAMPLE_RATE_HZ": bad}))
+
+
+def test_the_phase_ring_depth_comes_from_the_advertised_constant():
+    assert ring_depth() == 12
+    assert (
+        ring_depth(SampleCapableMcu(constants={"SAMPLE_RUNS_PER_LANE": 4})) == 4
+    )
+
+
+def test_a_missing_ring_depth_constant_is_rejected():
+    with pytest.raises(FakeConfigError, match="SAMPLE_RUNS_PER_LANE"):
+        ring_depth(SampleCapableMcu(constants={}))
+
+
+@pytest.mark.parametrize("bad", [0, -4])
+def test_a_nonpositive_ring_depth_constant_is_rejected(bad):
+    with pytest.raises(FakeConfigError, match="positive run count"):
+        ring_depth(SampleCapableMcu(constants={"SAMPLE_RUNS_PER_LANE": bad}))
 
 
 def header_argstrings():
@@ -172,6 +216,8 @@ PYTHON_ARGSTRINGS = {
     "SAMPLE_ANCHOR": mcu_mod.SAMPLE_ANCHOR_CMD,
     "SAMPLE_RUN": mcu_mod.SAMPLE_RUN_CMD,
     "SAMPLE_OVERLAY": mcu_mod.SAMPLE_OVERLAY_CMD,
+    "SAMPLE_BARRIER": mcu_mod.SAMPLE_BARRIER_CMD,
+    "SAMPLE_BARRIER_ACK": mcu_mod.SAMPLE_BARRIER_ACK_MSG,
     "SAMPLE_GET_POSITION": mcu_mod.SAMPLE_GET_POSITION_CMD,
     "SAMPLE_POSITION": mcu_mod.SAMPLE_POSITION_MSG,
 }

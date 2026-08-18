@@ -7,7 +7,7 @@
 
 use motion_core::classify::build_move;
 use motion_core::enqueue::{EnqueueCtx, enqueue_segment};
-use motion_core::mcu_config::{McuAxisConfig, McuCaps};
+use motion_core::mcu_config::McuAxisConfig;
 use motion_core::seam_test_harness::{collect_shaped_segments_from_script, default_stream_config};
 use motion_pipeline::{Control, StreamInput};
 use runtime::piece_ring::PieceEntry;
@@ -161,9 +161,6 @@ fn corexy_lane_pieces(segs: &[trajectory::ShapedSegment]) -> BTreeMap<u8, Vec<Pi
         mcu_id: 0,
         axes: vec![0, 1],
         kinematics: 0,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![f64::INFINITY; 2],
         ..Default::default()
     }];

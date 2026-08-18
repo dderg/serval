@@ -47,14 +47,6 @@ COUPLED_UNIFORM_OPTIONS = (
     ("ff_max_torque", lambda motor: motor.get_ff_config()[1]),
 )
 
-# Setpoint-delivery executor on the endpoint. 'piece' evaluates motion pieces
-# per DC cycle; 'setpoint_ring' consumes a pre-sampled per-cycle setpoint ring.
-EXECUTOR_CHOICES = {"piece": "piece", "setpoint_ring": "setpoint_ring"}
-
-
-def read_executor_option(config):
-    return config.getchoice("executor", EXECUTOR_CHOICES, "piece")
-
 
 class EtherCatNode:
     def __init__(self, config):
@@ -95,7 +87,6 @@ class EtherCatNode:
         self.group_delay_us = config.getfloat(
             "group_delay_us", default=float(self.cycle_us), minval=0.0
         )
-        self.executor = read_executor_option(config)
         self.engine_handle = None
         self._counts_per_mm = None
         self._slot_by_motor = {}
@@ -248,7 +239,6 @@ class EtherCatNode:
                 self.cycle_us,
                 self.dynamics_profile,
                 drives,
-                executor=self.executor,
                 late_tolerance_us=self.late_tolerance_us,
                 group_delay_us=self.group_delay_us,
             )
@@ -256,7 +246,7 @@ class EtherCatNode:
             raise self.printer.config_error(str(e))
         logging.info(
             "ethercat_node %s: claimed handle=%s socket=%s interface=%s "
-            "endpoint=%s drives=%s dynamics_profile=%s executor=%s",
+            "endpoint=%s drives=%s dynamics_profile=%s",
             self.name,
             self.engine_handle,
             self.socket_path,
@@ -264,7 +254,6 @@ class EtherCatNode:
             self.endpoint,
             drives,
             self.dynamics_profile,
-            self.executor,
         )
         for slot, (_global_axis, motor) in enumerate(motors):
             self._push_drive_params(motor, slot)

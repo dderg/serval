@@ -30,19 +30,23 @@ pub mod buzz_gen;
 pub mod buzz_stream;
 pub mod buzz_sweep;
 pub mod buzz_xdirect;
+#[cfg(feature = "host")]
 pub mod chebyshev;
 pub mod clock;
 pub mod dispatch_stepper;
 pub mod engine;
 pub mod error;
 pub mod fault_helpers;
+#[cfg(feature = "host")]
 pub mod fault_sink;
 pub(crate) mod isr_phase;
 pub mod log_codes;
+#[cfg(feature = "host")]
 pub mod motion_core;
 pub mod per_axis_timer;
 pub mod phase_handover;
 pub mod phase_lut;
+#[cfg(feature = "host")]
 pub mod piece_ring;
 #[cfg(feature = "sample-stepping")]
 pub mod sample_exec;
@@ -50,7 +54,6 @@ pub mod sample_run;
 pub mod sample_wire;
 pub mod state;
 pub use state::{SetStepModeError, StepMode, set_step_mode};
-pub mod step;
 pub mod step_queue;
 pub mod stepping_state;
 pub mod sub_sample_timing;

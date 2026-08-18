@@ -61,3 +61,24 @@ fn the_c_header_mirrors_every_argstring() {
         );
     }
 }
+
+#[test]
+fn the_fence_pair_agree_on_their_parameters() {
+    assert_eq!(
+        SAMPLE_BARRIER.trim_start_matches(SAMPLE_BARRIER_NAME),
+        SAMPLE_BARRIER_ACK.trim_start_matches(SAMPLE_BARRIER_ACK_NAME),
+        "a receipt must carry exactly the fields of the fence it answers"
+    );
+    for argstring in [SAMPLE_BARRIER, SAMPLE_BARRIER_ACK] {
+        assert!(argstring.contains("seq=%u"), "{argstring} carries no seq");
+    }
+}
+
+#[test]
+fn the_readback_pair_agree_on_their_answer() {
+    assert!(SAMPLE_GET_POSITION.starts_with(SAMPLE_GET_POSITION_NAME));
+    assert!(
+        SAMPLE_POSITION.contains("clock=%u") && SAMPLE_POSITION.contains("position=%i"),
+        "the readback answers with both the clock it was taken at and the lane position"
+    );
+}

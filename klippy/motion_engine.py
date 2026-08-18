@@ -227,9 +227,17 @@ class MotionEngineWrapper:
             "finalize_homed_axis",
         )
 
+    def switch_axis_transport(self, mcu_handle, axis_idx, transport):
+        self._wait_native_call(
+            lambda: self._engine.switch_axis_transport(
+                mcu_handle, axis_idx, transport
+            )
+        )
+
     def home_axis_start(self, axis, direction, speed, max_travel, endstops):
         """endstops: [(endstop_id, endstop_mcu_handle, remote_freeze)] where
-        remote_freeze is None or (motor_mcu_handle, motor_idx, stepper_idx) —
+        remote_freeze is None or
+        (motor_mcu_handle, motor_idx, stepper_idx, stepper_oid) —
         a multi-motor axis arms one switch per motor; each non-final trip
         freezes its bound motor and the run resolves on the last trip."""
         endstops = list(endstops)

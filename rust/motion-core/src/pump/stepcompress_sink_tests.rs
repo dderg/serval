@@ -1,5 +1,5 @@
 use super::*;
-use crate::mcu_config::{McuAxisConfig, SteppingMode};
+use crate::mcu_config::{LaneKind, McuAxisConfig};
 use runtime::piece_ring::PieceEntry;
 use std::sync::atomic::{AtomicI64, AtomicU64};
 
@@ -223,7 +223,6 @@ fn frame_for_axis(axis: u8, pieces: Vec<PieceEntry>) -> AxisFrame {
     AxisFrame {
         axis,
         pieces,
-        start_slot: 0,
         new_head: 0,
         room: SHIM_RING_DEPTH,
         guard_recorded_ns: 0,
@@ -281,6 +280,73 @@ fn paceable_ramp(start_time: u64, count: usize) -> Vec<PieceEntry> {
             piece(start_time + span * i as u64, from, at, dur)
         })
         .collect()
+}
+
+#[test]
+fn grouped_axis_fans_out_to_every_motor_and_publishes_one_axis_credit() {
+    let mut h = harness_axes(16, vec![0, 0], vec![7, 8]);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(linear_run(2_000, 0.0, 1.0, 2))])
+        .unwrap();
+
+    let mut direction_oids: Vec<u32> = h
+        .sent
+        .lock_ok()
+        .iter()
+        .filter_map(|frame| match frame {
+            StepFrame::SetNextStepDir { oid, .. } => Some(*oid),
+            _ => None,
+        })
+        .collect();
+    direction_oids.sort_unstable();
+    direction_oids.dedup();
+    assert_eq!(direction_oids, vec![7, 8]);
+    let steps_by_oid = h
+        .sent
+        .lock_ok()
+        .iter()
+        .filter_map(|frame| match frame {
+            StepFrame::QueueStep { oid, count, .. } => Some((*oid, u32::from(*count))),
+            _ => None,
+        })
+        .fold(
+            std::collections::HashMap::new(),
+            |mut totals, (oid, count)| {
+                *totals.entry(oid).or_default() += count;
+                totals
+            },
+        );
+    assert_eq!(
+        steps_by_oid,
+        std::collections::HashMap::from([(7, 100), (8, 100)])
+    );
+
+    let heartbeat = h
+        .latest_heartbeat()
+        .expect("frame send publishes a heartbeat");
+    assert_eq!(heartbeat.axes, vec![0]);
+    assert_eq!(heartbeat.consumed_counts, Some(vec![2]));
+    assert_eq!(heartbeat.retired_counts, vec![0]);
+}
+
+#[test]
+fn selected_motor_frame_advances_grouped_axis_credit() {
+    let mut h = harness_axes(16, vec![0, 0], vec![7, 8]);
+    h.now.store(1_000, Ordering::Relaxed);
+    let mut pieces = linear_run(2_000, 0.0, 0.2, 2);
+    for piece in &mut pieces {
+        piece.motor_mask = 0b0000_0001;
+    }
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(pieces)])
+        .unwrap();
+
+    let heartbeat = h
+        .latest_heartbeat()
+        .expect("frame send publishes a heartbeat");
+    assert_eq!(heartbeat.axes, vec![0]);
+    assert_eq!(heartbeat.consumed_counts, Some(vec![2]));
 }
 
 #[test]
@@ -1063,22 +1129,24 @@ fn a_position_seed_of_the_wrong_width_is_fatal() {
     }
 }
 
-fn stepcompress_cfg(mode: SteppingMode, move_queue_slots: u32) -> McuAxisConfig {
+fn stepcompress_cfg(move_queue_slots: u32) -> McuAxisConfig {
     McuAxisConfig {
         mcu_id: MCU_ID,
         axes: vec![0],
         kinematics: 0,
-        caps: Default::default(),
         max_motor_velocity: vec![100.0],
         ethercat: false,
-        stepping_mode: mode,
+        lane_kinds: vec![LaneKind::Pulse],
+        motor_counts: vec![1],
         microstep_distance: vec![0.01],
         invert_dir: vec![false],
         stepper_oids: vec![OID],
-        stepcompress_sample_rate: 10_000.0,
+        stepcompress_sample_rate: 20_000.0,
         move_queue_slots,
         step_pulse_seconds: vec![2e-6],
         stepcompress_encoder: StepcompressEncoder::HighPrecision,
+        phase_sample_rate: 0.0,
+        phase_ring_depth: 0,
         stepcompress_max_error_secs: 0.0,
     }
 }
@@ -1088,7 +1156,7 @@ fn a_move_queue_too_small_for_the_reserve_is_a_build_error() {
     let (tx, _rx) = crossbeam_channel::unbounded();
     let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
     let err = match build_endpoint(
-        &stepcompress_cfg(SteppingMode::Stepcompress, MOVE_SLOT_RESERVE),
+        &stepcompress_cfg(MOVE_SLOT_RESERVE),
         Weak::new(),
         tx,
         CYCLES_PER_SECOND,
@@ -1101,29 +1169,10 @@ fn a_move_queue_too_small_for_the_reserve_is_a_build_error() {
 }
 
 #[test]
-fn piece_mode_mcus_never_reach_endpoint_construction() {
-    let cfgs = [
-        stepcompress_cfg(SteppingMode::Piece, 0),
-        stepcompress_cfg(SteppingMode::Stepcompress, 128),
-    ];
-    let built: Vec<u32> = cfgs
-        .iter()
-        .filter(|c| c.stepping_mode == SteppingMode::Stepcompress)
-        .map(|c| c.move_queue_slots)
-        .collect();
-    assert_eq!(built, vec![128]);
-
-    let (tx, _rx) = crossbeam_channel::unbounded();
-    let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
-    let endpoint = build_endpoint(&cfgs[1], Weak::new(), tx, CYCLES_PER_SECOND, clock_of).unwrap();
-    assert_eq!(endpoint.budget, 128 - MOVE_SLOT_RESERVE);
-}
-
-#[test]
 fn classic_encoder_resolves_max_error_ticks_from_the_measured_clock() {
     let (tx, _rx) = crossbeam_channel::unbounded();
     let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
-    let mut cfg = stepcompress_cfg(SteppingMode::Stepcompress, 128);
+    let mut cfg = stepcompress_cfg(128);
     cfg.stepcompress_encoder = StepcompressEncoder::Classic;
     cfg.stepcompress_max_error_secs = 10e-6;
     build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of)
@@ -1134,7 +1183,7 @@ fn classic_encoder_resolves_max_error_ticks_from_the_measured_clock() {
 fn classic_encoder_with_a_sub_tick_max_error_is_a_build_error() {
     let (tx, _rx) = crossbeam_channel::unbounded();
     let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
-    let mut cfg = stepcompress_cfg(SteppingMode::Stepcompress, 128);
+    let mut cfg = stepcompress_cfg(128);
     cfg.stepcompress_encoder = StepcompressEncoder::Classic;
     cfg.stepcompress_max_error_secs = 1e-7;
     let err = match build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of) {
@@ -1148,7 +1197,7 @@ fn classic_encoder_with_a_sub_tick_max_error_is_a_build_error() {
 fn classic_encoder_with_an_overflowing_tick_budget_is_a_build_error() {
     let (tx, _rx) = crossbeam_channel::unbounded();
     let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
-    let mut cfg = stepcompress_cfg(SteppingMode::Stepcompress, 128);
+    let mut cfg = stepcompress_cfg(128);
     cfg.stepcompress_encoder = StepcompressEncoder::Classic;
     cfg.stepcompress_max_error_secs = 1e6;
     let err = match build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of) {
@@ -1162,7 +1211,7 @@ fn classic_encoder_with_an_overflowing_tick_budget_is_a_build_error() {
 fn hp_encoder_builds_an_endpoint_without_a_max_error_budget() {
     let (tx, _rx) = crossbeam_channel::unbounded();
     let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
-    let mut cfg = stepcompress_cfg(SteppingMode::Stepcompress, 128);
+    let mut cfg = stepcompress_cfg(128);
     cfg.stepcompress_encoder = StepcompressEncoder::HighPrecision;
     cfg.stepcompress_max_error_secs = 0.0;
     build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of)
@@ -1270,21 +1319,17 @@ fn a_lone_follower_lane_reports_retirement_against_its_own_axis() {
     h.endpoint.tick().unwrap();
     h.ack_sent_barriers();
 
-    let heartbeat = h.latest_retired().expect("a heartbeat is always posted");
+    let heartbeat = h.latest_heartbeat().expect("a heartbeat is always posted");
     assert_eq!(
-        heartbeat.len(),
-        usize::from(EXTRUDER_AXIS) + 1,
-        "the heartbeat must be indexed by axis, so it must reach axis {EXTRUDER_AXIS}"
+        heartbeat.axes,
+        vec![EXTRUDER_AXIS],
+        "the heartbeat speaks only for the axes this endpoint drives"
     );
     assert!(
-        heartbeat[usize::from(EXTRUDER_AXIS)] > 0,
+        heartbeat.retired_counts[0] > 0,
         "the pump keys its rings by axis; motor 0's retirements must land on \
-         axis {EXTRUDER_AXIS} or that lane's ring never drains: {heartbeat:?}"
-    );
-    assert_eq!(
-        &heartbeat[..usize::from(EXTRUDER_AXIS)],
-        &[0, 0, 0],
-        "lanes this mcu does not own must not be credited"
+         axis {EXTRUDER_AXIS} or that lane's ring never drains: {:?}",
+        heartbeat.retired_counts
     );
 }
 

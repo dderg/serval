@@ -61,10 +61,15 @@ impl PumpSink {
         self.router.lock_ok().host_now_secs()
     }
 
-    fn is_stepcompress(&self, mcu_id: u32) -> bool {
-        self.mcu_configs.iter().any(|c| {
-            c.mcu_id == mcu_id && c.stepping_mode == crate::mcu_config::SteppingMode::Stepcompress
-        })
+    /// Whether this mcu's lanes are reached through a host-side committed
+    /// stream — every serial transport is, pulse and phase alike, and each
+    /// demands the epoch slope its frames were already projected on. Only the
+    /// EtherCAT ring re-anchors against a grid the endpoint reports, so it
+    /// keeps the live projection.
+    fn freezes_projection(&self, mcu_id: u32) -> bool {
+        self.mcu_configs
+            .iter()
+            .any(|c| c.mcu_id == mcu_id && !c.ethercat)
     }
 
     /// Whether any lane this mcu serves carries real motion in the segment —
@@ -213,7 +218,7 @@ impl PumpSink {
     }
 
     fn project(&self, mcu_id: u32, host_secs: f64) -> u64 {
-        if !self.is_stepcompress(mcu_id) {
+        if !self.freezes_projection(mcu_id) {
             return self.live_projection(mcu_id, host_secs);
         }
         self.frozen_projection
@@ -282,7 +287,7 @@ impl SegmentSink for PumpSink {
                 let frozen = self.frozen_projection.lock_ok();
                 self.mcu_configs
                     .iter()
-                    .filter(|cfg| self.is_stepcompress(cfg.mcu_id))
+                    .filter(|cfg| self.freezes_projection(cfg.mcu_id))
                     .filter(|cfg| {
                         if !frozen.contains_key(&cfg.mcu_id) {
                             true
@@ -371,7 +376,7 @@ impl SegmentSink for PumpSink {
         let at = self.anchor(np.piece.u_start, np.piece.u_end);
         self.anchor.lock_ok().mark_parked();
 
-        let fresh_projection = self.is_stepcompress(mcu_id)
+        let fresh_projection = self.freezes_projection(mcu_id)
             && (at.epoch.retimed() || !self.frozen_projection.lock_ok().contains_key(&mcu_id));
         if fresh_projection {
             self.reanchor_projection(mcu_id, at.t0 + np.piece.u_start)?;

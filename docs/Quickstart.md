@@ -140,9 +140,9 @@ most of it debug info that is never mapped into klippy's memory.
 
 ## 4. Rebuild and flash the MCU firmware
 
-The firmware speaks a different protocol than mainline (it executes
-trajectory pieces, not a step queue), so every MCU must be reflashed from
-this branch:
+The firmware speaks a different protocol than mainline (its planner,
+shapers and kinematics all live on the host), so every MCU must be
+reflashed from this branch:
 
 ```bash
 make clean
@@ -156,9 +156,9 @@ for your board's flash method. Repeat for every MCU in the printer.
 
 The motion sample rate is a per-target build option; the default is right
 for typical boards. It lives under "Enable extra low-level configuration
-options" in `make menuconfig`, alongside the piece-ring and `rt_storage`
-size ceilings. All three are derived from the processor model, so you
-should not need to touch them.
+options" in `make menuconfig`, alongside the `rt_storage` size ceiling.
+Both are derived from the processor model, so you should not need to touch
+them.
 
 ## 5. Migrate the configuration
 

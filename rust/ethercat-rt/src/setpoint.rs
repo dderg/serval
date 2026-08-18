@@ -12,50 +12,10 @@ use runtime::error::{
 };
 use runtime::sample_run::SampleRunError;
 
-/// Which executor turns host commands into CSP targets. Selected by
-/// `--executor` at launch and reported back over `QuerySampleGrid`, so a host
-/// that expects one and got the other fails the claim instead of streaming
-/// into a transport that will never play it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Executor {
-    Piece,
-    SetpointRing,
-}
+/// The executor code the endpoint reports in `SampleGridResponse.executor`:
+/// the setpoint ring is the only executor there is.
+pub const EXECUTOR_SETPOINT_RING: u8 = 1;
 
-impl Executor {
-    pub const WIRE_PIECE: u8 = 0;
-    pub const WIRE_SETPOINT_RING: u8 = 1;
-
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "piece" => Some(Executor::Piece),
-            "setpoint-ring" => Some(Executor::SetpointRing),
-            _ => None,
-        }
-    }
-
-    #[must_use]
-    pub fn wire(self) -> u8 {
-        match self {
-            Executor::Piece => Self::WIRE_PIECE,
-            Executor::SetpointRing => Self::WIRE_SETPOINT_RING,
-        }
-    }
-
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Executor::Piece => "piece",
-            Executor::SetpointRing => "setpoint-ring",
-        }
-    }
-}
-
-/// A piece frame reached a setpoint-ring endpoint.
-pub const ERR_PIECES_IN_RING_MODE: i32 = -836;
-/// A sample-run frame reached a piece endpoint.
-pub const ERR_SAMPLES_IN_PIECE_MODE: i32 = -837;
 /// `ResonanceBuzz` reached a setpoint-ring endpoint: the buzz is generated on
 /// the host and streamed through the ring like any other motion.
 pub const ERR_BUZZ_IN_RING_MODE: i32 = -838;
@@ -175,8 +135,7 @@ impl RingFault {
     }
 
     /// Endpoint fault-register layout: `detail << 16 | code`, matching the
-    /// host's `StatusHeartbeat` decoder and the piece path's
-    /// `EtherCatFaultSink`.
+    /// host's `StatusHeartbeat` decoder.
     #[must_use]
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn reg_value(self) -> u32 {
@@ -290,6 +249,13 @@ impl SetpointRing {
     #[must_use]
     pub fn played_count(&self) -> u32 {
         self.played
+    }
+
+    /// The DC grid index this ring last played; every entry at or before it has
+    /// left the ring. Zero before the first played cycle.
+    #[must_use]
+    pub fn playback_clock(&self) -> u64 {
+        self.last_played.unwrap_or(0)
     }
 
     #[must_use]
@@ -426,8 +392,7 @@ impl SetpointRing {
     }
 
     /// Drop every queued entry and the anchor: the next run must re-anchor.
-    /// Mirrors the piece path's `AxisRing::reset` on Stop, homing trip and
-    /// drive fault.
+    /// Invoked on Stop, homing trip and drive fault.
     pub fn reset(&mut self) {
         self.len = 0;
         self.tail = None;

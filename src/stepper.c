@@ -50,7 +50,6 @@ command_config_stepper(uint32_t *args)
     s->step_pulse_ticks = args[4];
     s->step_pin = gpio_out_setup(args[1], s->step_idle_level);
     s->dir_pin = gpio_out_setup(args[2], 0);
-#if CONFIG_CLASSIC_STEPPING
     s->position = -POSITION_BIAS;
     if (s->step_both_edge)
         s->flags |= SF_SINGLE_SCHED;
@@ -69,11 +68,11 @@ command_config_stepper(uint32_t *args)
     } else if (!CONFIG_INLINE_STEPPER_HACK) {
         s->time.func = stepper_event_full;
     }
-#endif
 #if !CONFIG_MOTION_RUNTIME
     // The config phase runs after the host's identify/attach handshake has
     // installed the mcu-log hook; emitting at boot races the host and the
-    // frame is lost. The piece build hangs this off kalico_configure_axis.
+    // frame is lost. A MOTION_RUNTIME build hangs this off
+    // kalico_configure_axis.
     static uint8_t event_log_ready_emitted;
     if (!event_log_ready_emitted) {
         event_log_ready_emitted = 1;
@@ -96,15 +95,10 @@ static void
 stepper_stop(struct trsync_signal *tss, uint8_t reason)
 {
     struct stepper *s = container_of(tss, struct stepper, stop_signal);
-#if CONFIG_CLASSIC_STEPPING
     stepper_classic_halt(s);
-#else
 #if CONFIG_SAMPLE_STEPPING
     extern void sample_stepping_halt(void);
     sample_stepping_halt();
-#endif
-    gpio_out_write(s->dir_pin, 0);
-    gpio_out_write(s->step_pin, s->step_idle_level);
 #endif
 }
 
@@ -233,9 +227,8 @@ command_kalico_configure_axis(uint32_t *args)
     uint32_t mstep_bits     = args[2];
     uint32_t extrusion_bits = args[3];
     uint8_t stepper_count   = args[4];
-    uint16_t ring_depth     = (uint16_t)args[5];
-    uint16_t blob_len       = (uint16_t)args[6];
-    const uint8_t *blob     = command_decode_ptr(args[7]);
+    uint16_t blob_len       = (uint16_t)args[5];
+    const uint8_t *blob     = command_decode_ptr(args[6]);
 
     if (axis_idx >= RUNTIME_MOTOR_COUNT)
         shutdown("configure_axis axis_idx out of range");
@@ -245,8 +238,6 @@ command_kalico_configure_axis(uint32_t *args)
         shutdown("configure_axis too many steppers per axis");
     if (blob_len != (uint16_t)stepper_count * 4)
         shutdown("configure_axis blob length mismatch");
-    if (ring_depth == 0)
-        shutdown("configure_axis ring_depth must be nonzero");
     if (!runtime_handle)
         shutdown("configure_axis before runtime init");
 
@@ -284,7 +275,6 @@ command_kalico_configure_axis(uint32_t *args)
     }
     int32_t rc = runtime_configure_axis(
         runtime_handle, axis_idx, mode, mstep_bits,
-        ring_depth,
         stepper_count > 0 ? bindings : 0,
         stepper_count);
     if (rc != 0)
@@ -346,8 +336,7 @@ command_kalico_configure_axis(uint32_t *args)
 }
 DECL_COMMAND(command_kalico_configure_axis,
              "kalico_configure_axis axis_idx=%c mode=%c microstep_distance=%u"
-             " extrusion_per_xy_mm=%u stepper_count=%c ring_depth=%hu"
-             " steppers=%*s");
+             " extrusion_per_xy_mm=%u stepper_count=%c steppers=%*s");
 
 void
 command_runtime_reset(uint32_t *args)

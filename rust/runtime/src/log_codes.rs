@@ -61,8 +61,6 @@ pub const EVENT_RUNTIME_FG_MSG_HEAD: u16 = 20;
 pub const EVENT_RUNTIME_TIMER_TOO_CLOSE: u16 = 21;
 pub const EVENT_RUNTIME_TIMER_TOO_CLOSE_LATE: u16 = 22;
 
-pub const EVENT_MOTION_PIECE_START_PAST: u16 = 1;
-pub const EVENT_MOTION_RING_FULL: u16 = 2;
 pub const EVENT_MOTION_AXIS_STALLED: u16 = 3;
 pub const EVENT_MOTION_AXIS_STALLED_HEAD: u16 = 4;
 pub const EVENT_MOTION_STEP_LOAD_LATE: u16 = 5;
@@ -224,20 +222,13 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         (SUBSYSTEM_DIAG, EVENT_DIAG_RUST_FAULT) => {
             ("diag.rust_fault", "rust fault err={arg0} detail={arg1}")
         }
-        (SUBSYSTEM_MOTION, EVENT_MOTION_PIECE_START_PAST) => (
-            "motion.piece_start_past",
-            "piece start in past start_time={arg0} now={arg1}",
-        ),
-        (SUBSYSTEM_MOTION, EVENT_MOTION_RING_FULL) => {
-            ("motion.ring_full", "axis ring full axis={arg0}")
-        }
         (SUBSYSTEM_MOTION, EVENT_MOTION_AXIS_STALLED) => (
             "motion.axis_stalled",
-            "axis retirement stalled with pieces pending axis={arg0:hi16} occupancy={arg0:lo16} stalled_ms={arg1}",
+            "axis retirement stalled with runs pending axis={arg0:hi16} occupancy={arg0:lo16} stalled_ms={arg1}",
         ),
         (SUBSYSTEM_MOTION, EVENT_MOTION_AXIS_STALLED_HEAD) => (
             "motion.axis_stalled_head",
-            "stalled axis armed piece window vs now start-now={arg0:i32}ms end-now={arg1:i32}ms",
+            "front sample-run window vs now start-now={arg0:i32}ms end-now={arg1:i32}ms",
         ),
         (SUBSYSTEM_MOTION, EVENT_MOTION_STEP_LOAD_LATE) => (
             "motion.step_load_late",

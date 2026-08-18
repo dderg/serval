@@ -13,7 +13,7 @@
 #include "board/misc.h" // timer_from_us
 #include "board/pgm.h" // READP
 #include "command.h" // shutdown
-#if CONFIG_CLASSIC_STEPPING
+#if CONFIG_INLINE_STEPPER_HACK
 #include "stepper.h" // stepper_event
 #endif
 #include "sched.h" // sched_check_periodic
@@ -292,12 +292,12 @@ sched_timer_dispatch(void)
     uint_fast8_t res;
     uint32_t updated_waketime;
     uint32_t diag_func = (uint32_t)(uintptr_t)t->func;
-#if CONFIG_CLASSIC_STEPPING && CONFIG_INLINE_STEPPER_HACK
+#if CONFIG_INLINE_STEPPER_HACK
     if (!diag_func)
         diag_func = (uint32_t)(uintptr_t)&stepper_event;
 #endif
     uint32_t diag_start = timer_read_time();
-#if CONFIG_CLASSIC_STEPPING && CONFIG_INLINE_STEPPER_HACK
+#if CONFIG_INLINE_STEPPER_HACK
     if (likely(!t->func)) {
         res = stepper_event(t);
         updated_waketime = t->waketime;

@@ -167,15 +167,6 @@ pub enum RetransmitTrigger {
 }
 
 const PENDING_SUBMISSION_CEILING: usize = 256;
-pub(crate) const PENDING_PIECE_FRAMES_CEILING: usize = 64;
-
-/// Max bytes of kalico (piece) traffic allowed in the kernel tty out-buffer
-/// before further kalico frames are held back. Klipper-channel control
-/// commands write unconditionally, so this is the most piece traffic a
-/// control frame can ever be queued behind — small enough to bound control
-/// latency to a few ms of wire time, large enough (vs the ~1 ms reactor
-/// tick) to keep the wire saturated with pieces when nothing else wants it.
-pub(crate) const PIECE_OUTQ_BUDGET_BYTES: u32 = 2048;
 const MAX_RETRY_COUNT: u32 = 8;
 
 // Retry exhaustion alone is not sufficient to declare Closed: under Renode
@@ -231,10 +222,6 @@ impl Reactor {
         let s3 = std::time::Instant::now();
         self.drain_pending_submissions();
         let t_step3 = s3.elapsed();
-
-        let s3b = std::time::Instant::now();
-        self.drain_piece_frames();
-        let t_step3b = s3b.elapsed();
 
         let s4 = std::time::Instant::now();
         if let Some(front) = self.unacked_window.front() {
@@ -300,7 +287,6 @@ impl Reactor {
                 step1_ms = t_step1.as_secs_f64() * 1000.0,
                 step2_ms = t_step2.as_secs_f64() * 1000.0,
                 step3_ms = t_step3.as_secs_f64() * 1000.0,
-                step3b_ms = t_step3b.as_secs_f64() * 1000.0,
                 step4_ms = t_step4.as_secs_f64() * 1000.0,
                 "tick_once exceeded 5ms"
             );
@@ -323,9 +309,6 @@ mod a4_nak_submit_race;
 
 #[cfg(test)]
 mod a3_awaiting_response_gc;
-
-#[cfg(test)]
-mod piece_priority;
 
 #[cfg(test)]
 mod a8_fire_and_forget_backpressure;

@@ -60,7 +60,7 @@ fn positions_are_the_analytic_trajectory_in_anchored_counts() {
     let mut f = filler(1);
     f.push_pieces(0, &[piece]);
     let runs = f.drain().expect("fill");
-    let armed = arm_piece(&piece, crate::curves::CLOCK_FREQ_HZ);
+    let armed = arm_piece(&piece, crate::setpoint_fill::CLOCK_FREQ_HZ);
     let origin = f64::from(armed.eval_pos_vel(start).0);
     for (step, sample) in runs[0].samples.iter().enumerate() {
         let clock = start + INTERVAL * step as u64;
@@ -109,8 +109,7 @@ fn a_coverage_gap_closes_the_run_and_the_resume_re_anchors() {
     assert_eq!(
         second[0].flags & LANE_RUN_FLAG_REANCHOR,
         LANE_RUN_FLAG_REANCHOR,
-        "resuming across a gap is a new anchor epoch, like the piece path's \
-         re-created CountMap"
+        "resuming across a gap is a new anchor epoch"
     );
     assert_eq!(second[0].samples[0].pos_counts, 0);
 }

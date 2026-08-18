@@ -17,11 +17,8 @@ impl Engine {
                 crate::fault_helpers::raise_jog_parameters_invalid(shared);
                 return Err(-1);
             }
-            let Some(axis) = self.stepping_axes.get(ex.axis_idx).and_then(|s| s.as_ref()) else {
-                continue;
-            };
-            let axis_idle = axis.armed.is_none() && axis.ring.is_empty();
-            if !axis_idle {
+            #[cfg(feature = "sample-stepping")]
+            if self.sample_lane_anchored(ex.axis_idx) {
                 crate::fault_helpers::raise_buzz_axis_conflict(shared, ex.axis_idx);
                 return Err(-1);
             }
@@ -133,7 +130,19 @@ impl Engine {
         )
     }
 
+    /// A lane frozen on a trip hold plays no samples and drives no coil, so it
+    /// does not contend for the phase the align walks to; only a lane with a
+    /// live playback origin does. Refusing on the hold shut the mcu down on
+    /// re-entry after every sensorless home.
     pub fn phase_align_to(&self, stepper_oid: u8, target_phase: u16) -> i32 {
+        #[cfg(feature = "sample-stepping")]
+        if self
+            .sample_lanes
+            .iter()
+            .any(crate::sample_exec::SampleLane::has_playback)
+        {
+            return -2;
+        }
         crate::phase_handover::align_to(&self.stepping_axes, stepper_oid, target_phase)
     }
 
@@ -144,30 +153,11 @@ impl Engine {
     pub fn seed_position(&mut self, xyz: [f32; 3]) {
         use core::sync::atomic::Ordering;
         let motor_positions = [xyz[0], xyz[1], xyz[2], 0.0_f32, 0.0, 0.0, 0.0, 0.0];
-        for (ss, &pos) in self.step_state.iter_mut().zip(motor_positions.iter()) {
-            ss.seed(pos);
-        }
-        for ((lm, pp), &pos) in self
-            .last_motors
-            .iter_mut()
-            .zip(self.tick_caches.p_prev.iter_mut())
-            .zip(motor_positions.iter())
-        {
-            *lm = pos;
-            *pp = pos;
-        }
-        for vp in self.tick_caches.v_prev.iter_mut() {
-            *vp = 0.0;
-        }
 
         for (i, axis_opt) in self.stepping_axes.iter_mut().enumerate() {
             let Some(axis) = axis_opt.as_mut() else {
                 continue;
             };
-            while axis.ring.front_slot().is_some() {
-                axis.ring.advance_counter();
-            }
-            axis.armed = None;
             let axis_pos_mm = motor_positions.get(i).copied().unwrap_or(0.0);
             let microstep_distance = axis.microstep_distance;
             if !microstep_distance.is_finite() || microstep_distance <= 0.0 {
@@ -176,18 +166,11 @@ impl Engine {
             #[allow(clippy::cast_possible_truncation)]
             let seed_steps =
                 libm::round(f64::from(axis_pos_mm) / f64::from(microstep_distance)) as i32;
-            #[allow(clippy::cast_possible_truncation)]
-            let step_phase = (f64::from(axis_pos_mm)
-                - f64::from(seed_steps) * f64::from(microstep_distance))
-                as f32;
             axis.last_step_count = seed_steps;
-            axis.step_phase = step_phase;
             axis.p_prev = axis_pos_mm;
             axis.v_prev = 0.0;
             for stepper in &axis.steppers {
                 stepper.position_count.store(seed_steps, Ordering::Release);
-                stepper.overlay_step_frame.store(0, Ordering::Release);
-                stepper.overlay_step_phase_bits.store(0, Ordering::Release);
                 stepper
                     .last_phase_target
                     .store(seed_steps, Ordering::Release);

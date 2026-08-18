@@ -6,11 +6,9 @@ from collections import defaultdict, namedtuple
 from . import stepper
 from .extras import servo_axis
 from .mcu import (
-    PHASE_TRANSPORT_SAMPLE,
     SAMPLE_COMMANDS,
     STEPCOMPRESS_ENCODER_HP,
-    STEPPING_MODE_PIECE,
-    STEPPING_MODE_STEPCOMPRESS,
+    STEPCOMPRESS_SAMPLE_RATE_HZ,
 )
 from .motion_endstop import register_stepcompress_steppers
 from .stepper import DEFAULT_STEP_PULSE_DURATION
@@ -22,7 +20,8 @@ McuTopology = namedtuple(
         "axes",
         "kinematics",
         "max_motor_velocity",
-        "stepping_mode",
+        "lane_kinds",
+        "motor_counts",
         "microstep_distance",
         "invert_dir",
         "stepper_oids",
@@ -31,6 +30,8 @@ McuTopology = namedtuple(
         "step_pulse_seconds",
         "stepcompress_encoder",
         "stepcompress_max_error_secs",
+        "phase_sample_rate",
+        "phase_ring_depth",
     ],
 )
 
@@ -48,6 +49,24 @@ def scv_from_corner_deviation(corner_deviation, max_accel):
 
 STEP_MODE_MODULATED = 0
 STEP_MODE_STEP_TIME = 1
+LANE_KIND_PULSE = 0
+LANE_KIND_PHASE = 1
+LANE_KIND_PHASE_WITH_PULSE = 2
+
+
+def lane_kind_of(step_mode, needs_pulse_windows):
+    """A phase lane is phase-capable, not phase-only: a phase-stepped motor
+    homed on StallGuard also carries a classic step/dir binding, and the host
+    routes it by whichever mode it is in."""
+    if step_mode != STEP_MODE_MODULATED:
+        return LANE_KIND_PULSE
+    if needs_pulse_windows:
+        return LANE_KIND_PHASE_WITH_PULSE
+    return LANE_KIND_PHASE
+
+
+MOTION_SAMPLE_RATE_CONSTANT = "MOTION_SAMPLE_RATE_HZ"
+SAMPLE_RUNS_PER_LANE_CONSTANT = "SAMPLE_RUNS_PER_LANE"
 PHASE_STEPPING_CAPABILITY_BIT = 0x1
 FIRMWARE_MAX_PHASE_STEPPED_MOTORS = 16
 MODE_PULSE = 0
@@ -167,53 +186,72 @@ def ethercat_handles(motion):
     return handles
 
 
-def _reject_stepcompress_conflicts(
-    motion, name, handle, axes, step_modes, endpoint_handles
-):
-    if handle in endpoint_handles:
-        raise motion.printer.config_error(
-            "mcu '%s': stepping_mode: stepcompress is invalid for an ethercat "
-            "endpoint (engine handle %d). EtherCAT drives consume position "
-            "targets, not step pulses; use stepping_mode: piece."
-            % (name, handle)
-        )
-    modulated = [a for a in axes if step_modes[a] == STEP_MODE_MODULATED]
-    if modulated:
-        raise motion.printer.config_error(
-            "mcu '%s': stepping_mode: stepcompress cannot drive phase-stepped "
-            "motors, but axes %s request phase_stepping: 1. Set "
-            "phase_stepping: 0 on those steppers or move them to a "
-            "stepping_mode: piece MCU." % (name, modulated)
-        )
-
-
-def _reject_sample_transport_conflicts(
-    motion, name, mcu_obj, handle, axes, step_modes, endpoint_handles
-):
-    if handle in endpoint_handles:
-        raise motion.printer.config_error(
-            "mcu '%s': phase_transport: sample is invalid for an ethercat "
-            "endpoint (engine handle %d). The sample-stream executor drives "
-            "phase-stepped coils over XDIRECT; EtherCAT drives take position "
-            "targets on their own lane. Use phase_transport: piece."
-            % (name, handle)
-        )
-    modulated = [a for a in axes if step_modes[a] == STEP_MODE_MODULATED]
-    if not modulated:
-        raise motion.printer.config_error(
-            "mcu '%s': phase_transport: sample selects the sample-stream "
-            "executor for phase lanes, but none of axes %s request "
-            "phase_stepping: 1. Set phase_stepping: 1 on the steppers that "
-            "should use it or drop phase_transport." % (name, sorted(axes))
-        )
+def _reject_phase_lane_conflicts(motion, name, mcu_obj, phase_axes):
     for argstring in SAMPLE_COMMANDS:
         if mcu_obj.try_lookup_command(argstring) is None:
             raise motion.printer.config_error(
-                "mcu '%s': phase_transport: sample needs firmware built with "
-                "CONFIG_SAMPLE_STEPPING, but the mcu does not provide the "
-                "'%s' command. Reflash with SAMPLE_STEPPING enabled or set "
-                "phase_transport: piece." % (name, argstring.split(" ")[0])
+                "mcu '%s': axes %s request phase_stepping: 1, whose sample-run "
+                "executor needs firmware built with CONFIG_SAMPLE_STEPPING, "
+                "but the mcu does not provide the '%s' command. Reflash with "
+                "SAMPLE_STEPPING enabled or set phase_stepping: 0."
+                % (name, phase_axes, argstring.split(" ")[0])
             )
+
+
+def _phase_sample_rate(motion, name, mcu_obj, phase_axes):
+    rate = mcu_obj.get_constants().get(MOTION_SAMPLE_RATE_CONSTANT)
+    if rate is None:
+        raise motion.printer.config_error(
+            "mcu '%s': axes %s request phase_stepping: 1, but the mcu does not "
+            "advertise %s, so its firmware has no sample executor. Reflash "
+            "with CONFIG_SAMPLE_STEPPING or set phase_stepping: 0."
+            % (name, phase_axes, MOTION_SAMPLE_RATE_CONSTANT)
+        )
+    rate = float(rate)
+    if not math.isfinite(rate) or rate <= 0.0:
+        raise motion.printer.config_error(
+            "mcu '%s': advertised %s must be a finite positive frequency in "
+            "Hz, got %r" % (name, MOTION_SAMPLE_RATE_CONSTANT, rate)
+        )
+    return rate
+
+
+def _phase_ring_depth(motion, name, mcu_obj, phase_axes):
+    depth = mcu_obj.get_constants().get(SAMPLE_RUNS_PER_LANE_CONSTANT)
+    if depth is None:
+        raise motion.printer.config_error(
+            "mcu '%s': axes %s request phase_stepping: 1, but the mcu does not "
+            "advertise %s, so the host cannot pace its sample stream against "
+            "the lane ring. Reflash with CONFIG_SAMPLE_STEPPING or set "
+            "phase_stepping: 0."
+            % (name, phase_axes, SAMPLE_RUNS_PER_LANE_CONSTANT)
+        )
+    depth = int(depth)
+    if depth <= 0:
+        raise motion.printer.config_error(
+            "mcu '%s': advertised %s must be a positive run count, got %r"
+            % (name, SAMPLE_RUNS_PER_LANE_CONSTANT, depth)
+        )
+    return depth
+
+
+def _reject_pulse_lane_conflicts(motion, name, mcu_obj, encoder, pulse_axes):
+    if encoder != STEPCOMPRESS_ENCODER_HP:
+        return
+    if (
+        mcu_obj.try_lookup_command(
+            "queue_step_hp oid=%c interval=%u count=%hu"
+            " add=%hi add2=%hi shift=%hi"
+        )
+        is not None
+    ):
+        return
+    raise motion.printer.config_error(
+        "mcu '%s': step/dir axes %s with the default stepcompress_encoder: hp "
+        "need firmware built with HIGH_PREC_STEP, but the mcu does not provide "
+        "the queue_step_hp command. Reflash the firmware with HIGH_PREC_STEP "
+        "or set stepcompress_encoder: classic." % (name, pulse_axes)
+    )
 
 
 def derive_mcu_topology(motion, axis_to_handle):
@@ -229,14 +267,9 @@ def derive_mcu_topology(motion, axis_to_handle):
         axes = sorted(by_handle[handle])
         max_motor_velocity = [ceilings.get(a, float("inf")) for a in axes]
         name, mcu_obj = mcu_by_handle.get(handle, (str(handle), None))
-        stepping_mode = (
-            STEPPING_MODE_PIECE
-            if mcu_obj is None
-            else mcu_obj.get_stepping_mode()
-        )
         sample_rate = (
-            0.0
-            if mcu_obj is None or stepping_mode != STEPPING_MODE_STEPCOMPRESS
+            STEPCOMPRESS_SAMPLE_RATE_HZ
+            if mcu_obj is None
             else mcu_obj.get_stepcompress_sample_rate()
         )
         encoder = (
@@ -247,74 +280,103 @@ def derive_mcu_topology(motion, axis_to_handle):
         max_error_secs = (
             0.0 if mcu_obj is None else mcu_obj.get_stepcompress_max_error()
         )
-        move_queue_slots = 0
-        if mcu_obj is not None and stepping_mode == STEPPING_MODE_STEPCOMPRESS:
-            move_queue_slots = mcu_obj.get_move_queue_slots()
-            if move_queue_slots <= 0:
-                raise motion.printer.config_error(
-                    "mcu '%s': stepping_mode: stepcompress needs the mcu's "
-                    "advertised move_count, but none was received before the "
-                    "motion planner was built" % (name,)
-                )
         (
             _present_mask,
             _invert_mask,
             _steps_per_mm,
             step_modes,
-            _bind_list,
+            bind_list,
             slot_microstep_distance,
             slot_invert_dir,
             slot_oids,
             slot_step_pulse_seconds,
-        ) = _build_slot_masks(mcu_obj, slot_steppers, len(mcu_by_handle))
-        if stepping_mode == STEPPING_MODE_STEPCOMPRESS:
-            _reject_stepcompress_conflicts(
-                motion, name, handle, axes, step_modes, endpoint_handles
-            )
-            if (
-                encoder == STEPCOMPRESS_ENCODER_HP
-                and mcu_obj.try_lookup_command(
-                    "queue_step_hp oid=%c interval=%u count=%hu"
-                    " add=%hi add2=%hi shift=%hi"
+            slot_dual_transport,
+        ) = _build_slot_masks(
+            motion.printer, mcu_obj, slot_steppers, len(mcu_by_handle)
+        )
+        lane_kinds = [
+            lane_kind_of(step_modes[a], slot_dual_transport[a]) for a in axes
+        ]
+        phase_axes = [
+            a
+            for a, k in zip(axes, lane_kinds)
+            if k in (LANE_KIND_PHASE, LANE_KIND_PHASE_WITH_PULSE)
+        ]
+        pulse_axes = [
+            a
+            for a, k in zip(axes, lane_kinds)
+            if k in (LANE_KIND_PULSE, LANE_KIND_PHASE_WITH_PULSE)
+        ]
+        move_queue_slots = 0
+        phase_sample_rate = 0.0
+        phase_ring_depth = 0
+        if mcu_obj is not None:
+            if phase_axes:
+                _reject_phase_lane_conflicts(motion, name, mcu_obj, phase_axes)
+                phase_sample_rate = _phase_sample_rate(
+                    motion, name, mcu_obj, phase_axes
                 )
-                is None
-            ):
-                raise motion.printer.config_error(
-                    "mcu '%s': stepping_mode: stepcompress with the default "
-                    "stepcompress_encoder: hp needs firmware built with "
-                    "HIGH_PREC_STEP, but the mcu does not provide the "
-                    "queue_step_hp command. Reflash the firmware with "
-                    "HIGH_PREC_STEP or set stepcompress_encoder: classic."
-                    % (name,)
+                phase_ring_depth = _phase_ring_depth(
+                    motion, name, mcu_obj, phase_axes
                 )
-        elif (
-            mcu_obj is not None
-            and mcu_obj.get_phase_transport() == PHASE_TRANSPORT_SAMPLE
-        ):
-            _reject_sample_transport_conflicts(
-                motion,
-                name,
-                mcu_obj,
-                handle,
-                axes,
-                step_modes,
-                endpoint_handles,
+            if pulse_axes and handle not in endpoint_handles:
+                _reject_pulse_lane_conflicts(
+                    motion, name, mcu_obj, encoder, pulse_axes
+                )
+                move_queue_slots = mcu_obj.get_move_queue_slots()
+                if move_queue_slots <= 0:
+                    raise motion.printer.config_error(
+                        "mcu '%s': step/dir axes %s need the mcu's advertised "
+                        "move_count, but none was received before the motion "
+                        "planner was built" % (name, pulse_axes)
+                    )
+        motor_counts = []
+        motor_microstep_distance = []
+        motor_invert_dir = []
+        motor_oids = []
+        motor_step_pulse_seconds = []
+        for axis, kind in zip(axes, lane_kinds):
+            bindings = (
+                [binding for binding in bind_list if binding[0] == axis]
+                if kind == LANE_KIND_PULSE
+                else []
             )
+            if not bindings:
+                motor_counts.append(1)
+                motor_microstep_distance.append(slot_microstep_distance[axis])
+                motor_invert_dir.append(slot_invert_dir[axis])
+                motor_oids.append(slot_oids[axis])
+                motor_step_pulse_seconds.append(slot_step_pulse_seconds[axis])
+                continue
+            motor_counts.append(len(bindings))
+            steppers = dict(slot_steppers[axis])
+            for _axis, stepper_name, oid, invert_dir in bindings:
+                motor_microstep_distance.append(
+                    steppers[stepper_name].get_step_dist()
+                )
+                motor_invert_dir.append(bool(invert_dir))
+                motor_oids.append(oid)
+                motor_step_pulse_seconds.append(
+                    step_pulse_width(steppers[stepper_name])
+                )
         topo.append(
             McuTopology(
                 handle,
                 axes,
                 motion.kin.mcu_tag(axes),
                 max_motor_velocity,
-                stepping_mode,
-                [slot_microstep_distance[a] for a in axes],
-                [slot_invert_dir[a] for a in axes],
-                [slot_oids[a] for a in axes],
+                lane_kinds,
+                motor_counts,
+                motor_microstep_distance,
+                motor_invert_dir,
+                motor_oids,
                 sample_rate,
                 move_queue_slots,
-                [slot_step_pulse_seconds[a] for a in axes],
+                motor_step_pulse_seconds,
                 encoder,
                 max_error_secs,
+                phase_sample_rate,
+                phase_ring_depth,
             )
         )
     return topo
@@ -391,7 +453,7 @@ def build_slot_steppers(motion):
     return slot_steppers
 
 
-def _build_slot_masks(mcu_obj, slot_steppers, num_engine_mcus):
+def _build_slot_masks(printer, mcu_obj, slot_steppers, num_engine_mcus):
     present_mask = 0
     invert_mask = 0
     steps_per_mm = [0.0, 0.0, 0.0, 0.0]
@@ -400,6 +462,7 @@ def _build_slot_masks(mcu_obj, slot_steppers, num_engine_mcus):
     invert_dir = [False, False, False, False]
     stepper_oids = [0, 0, 0, 0]
     step_pulse_seconds = [0.0, 0.0, 0.0, 0.0]
+    dual_transport = [False, False, False, False]
     bind_list = []
     for i in range(4):
         on_this_mcu = []
@@ -428,6 +491,7 @@ def _build_slot_masks(mcu_obj, slot_steppers, num_engine_mcus):
             invert_dir[i] = True
         if getattr(primary, "phase_stepping", False):
             step_modes[i] = STEP_MODE_MODULATED
+            dual_transport[i] = _slot_needs_pulse_windows(printer, on_this_mcu)
         for sname, s in on_this_mcu:
             inv = 1 if getattr(s, "_invert_dir", False) else 0
             bind_list.append((i, sname, s.get_oid(), inv))
@@ -441,7 +505,20 @@ def _build_slot_masks(mcu_obj, slot_steppers, num_engine_mcus):
         invert_dir,
         stepper_oids,
         step_pulse_seconds,
+        dual_transport,
     )
+
+
+def _slot_needs_pulse_windows(printer, slot):
+    """A phase-stepped motor homed on StallGuard runs its trip move through
+    the classic step queue, so the lane needs a pulse binding alongside its
+    phase binding. Anything else keeps a phase binding only, and a mode switch
+    on it is refused."""
+    for sname, _s in slot:
+        tmc = _lookup_phase_tmc(printer, sname)
+        if tmc is not None and tmc.needs_pulse_mode_windows():
+            return True
+    return False
 
 
 PHASE_STEPPING_DRIVER_TYPES = ("tmc5160", "tmc2240")
@@ -609,7 +686,6 @@ def _send_axis_configuration(
                     tmc_oid = tmc.get_spi_oid()
             blob.append(tmc_oid)
             blob.append(FLAGS_DEFAULT)
-        ring_depth = motion.engine.ring_depth_for_axis(mcu_handle, axis_idx)
         axis_mode = (
             MODE_PHASE
             if step_modes[axis_idx] == STEP_MODE_MODULATED
@@ -622,7 +698,6 @@ def _send_axis_configuration(
                 microstep_bits,
                 extrusion_bits,
                 len(bindings),
-                ring_depth,
                 bytes(blob),
             ]
         )
@@ -639,8 +714,8 @@ def _configure_stepcompress_mcu(
 ):
     if present_mask == 0:
         logging.info(
-            "Motion: no steppers matched stepcompress MCU %s; "
-            "skipping motor binding",
+            "Motion: no step/dir lanes on MCU %s; skipping stepcompress "
+            "motor binding",
             name,
         )
         return
@@ -656,8 +731,8 @@ def _configure_stepcompress_mcu(
         [oid for _slot, _sname, oid, _inv in bind_list],
     )
     logging.info(
-        "Motion: stepcompress mcu=%s present=0x%x microstep_distance=%s "
-        "bindings=%s — host-side step generation, no kalico_configure_axis",
+        "Motion: stepcompress lanes mcu=%s present=0x%x "
+        "microstep_distance=%s bindings=%s — host-side step generation",
         name,
         present_mask,
         microstep_distance,
@@ -685,28 +760,36 @@ def _configure_one_mcu(
         _invert_dir,
         _stepper_oids,
         _step_pulse_seconds,
-    ) = _build_slot_masks(mcu_obj, slot_steppers, num_engine_mcus)
-    if mcu_obj.get_stepping_mode() == STEPPING_MODE_STEPCOMPRESS:
-        _configure_stepcompress_mcu(
-            motion,
-            name,
-            mcu_obj,
-            mcu_handle,
-            present_mask,
-            bind_list,
-            microstep_distance,
-        )
+        dual_transport,
+    ) = _build_slot_masks(
+        motion.printer, mcu_obj, slot_steppers, num_engine_mcus
+    )
+    phase_binds = [
+        b for b in bind_list if step_modes[b[0]] == STEP_MODE_MODULATED
+    ]
+    pulse_binds = [
+        b
+        for b in bind_list
+        if step_modes[b[0]] != STEP_MODE_MODULATED or dual_transport[b[0]]
+    ]
+    pulse_mask = 0
+    for slot_idx, _sname, _oid, _inv in pulse_binds:
+        pulse_mask |= 1 << slot_idx
+    _configure_stepcompress_mcu(
+        motion,
+        name,
+        mcu_obj,
+        mcu_handle,
+        pulse_mask,
+        pulse_binds,
+        microstep_distance,
+    )
+    if not phase_binds:
         return
     phase_configs, any_phase_stepping = _configure_phase_stepping_groups(
         motion, slot_steppers, step_modes, coupled
     )
     awd_mask = awd_default & present_mask
-    if present_mask == 0:
-        logging.info(
-            "Motion: no steppers matched MCU %s; skipping configure_axes",
-            name,
-        )
-        return
     mcu_caps = _validate_firmware_capabilities(
         motion, mcu_handle, name, slot_steppers, step_modes
     )
@@ -714,7 +797,7 @@ def _configure_one_mcu(
         configure_axis_cmd = mcu_obj.lookup_command(
             "kalico_configure_axis axis_idx=%c mode=%c"
             " microstep_distance=%u extrusion_per_xy_mm=%u"
-            " stepper_count=%c ring_depth=%hu steppers=%*s"
+            " stepper_count=%c steppers=%*s"
         )
     except Exception:
         logging.info(
@@ -741,7 +824,7 @@ def _configure_one_mcu(
         mcu_handle,
         name,
         configure_axis_cmd,
-        bind_list,
+        phase_binds,
         steps_per_mm,
         step_modes,
         phase_configs,
@@ -761,7 +844,7 @@ def _configure_one_mcu(
         steps_per_mm,
         step_modes,
         mcu_caps,
-        [(m, n, o, i) for (m, n, o, i) in bind_list],
+        phase_binds,
         phase_configs,
         any_phase_stepping,
         len(phase_configs),

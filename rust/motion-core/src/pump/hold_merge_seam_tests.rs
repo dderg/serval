@@ -183,8 +183,7 @@ fn a_hold_that_cannot_round_trip_stays_a_separate_piece() {
         "a merge whose reprojection misses the seam must be refused, not rounded away"
     );
 
-    // The same pair on the wire-walker basis, whose consumer tolerates 200 us,
-    // still merges — piece mode keeps its wire savings.
+    // The same pair on the wire-walker basis, whose consumer tolerates 200 us, still merges.
     let mut wire_queue = VecDeque::from([(long, 0.0)]);
     append_pieces_merging_holds(
         &mut wire_queue,
@@ -252,7 +251,6 @@ impl PieceSink for EpochBasisSink {
         &self,
         _key: AxisKey,
         _pieces: &[PieceEntry],
-        _start_slot: u16,
         _new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {

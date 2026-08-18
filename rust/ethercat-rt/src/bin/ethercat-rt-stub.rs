@@ -10,27 +10,30 @@ use ethercat_rt::capture::{
 };
 use ethercat_rt::claim::{parse_fail_bringup, single_slave_reply, wait_for_claim};
 use ethercat_rt::clock::monotonic_ns;
-use ethercat_rt::curves::{AxisRing, AXIS_RING_CAPACITY, ENGINE_STATE_FAULT};
 use ethercat_rt::sdo::{execute_sdo_read, execute_sdo_write, DictObject, DictSdoBus};
 use ethercat_rt::sensorless::{SensorlessBank, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
 use ethercat_rt::server::FrameServer;
-use ethercat_rt::setpoint::{Executor, ERR_SAMPLES_IN_PIECE_MODE};
+use ethercat_rt::setpoint::{
+    Played, RunHeader, SetpointEntry, SetpointRing, EXECUTOR_SETPOINT_RING, RING_DEPTH_CYCLES,
+};
 use ethercat_rt::stream_halt::StreamHalt;
 use ethercat_rt::torque::{
     CommandAction, TickAction, TorqueGate, TorqueState, ERR_ENABLE_FAILED, ERR_PIECES_WHILE_FAULTED,
 };
 use ethercat_rt::wire::{
     arm_sensorless_endstop_response_frame, claim_handshake_reply_frame, endstop_trip_frame,
-    identify_response_frame, push_pieces_response_frame, push_sample_runs_response_frame,
-    resonance_buzz_response_frame, restore_drive_limits_response_frame,
-    resume_stream_response_frame, runtime_caps_response_frame, sample_grid_response_frame,
-    sdo_read_response_frame, sdo_write_response_frame, seed_servo_home_response_frame,
-    set_diff_damper_response_frame, set_diff_trim_response_frame, set_drive_limits_response_frame,
-    set_dynamics_model_response_frame, set_ff_lead_response_frame, set_strain_comp_response_frame,
-    set_torque_response_frame, start_capture_response_frame, status_heartbeat_frame,
-    stepper_suppress_response_frame, stop_capture_response_frame, stop_response_frame, Command,
+    identify_response_frame, push_sample_runs_response_frame, resonance_buzz_response_frame,
+    restore_drive_limits_response_frame, resume_stream_response_frame, runtime_caps_response_frame,
+    sample_grid_response_frame, sdo_read_response_frame, sdo_write_response_frame,
+    seed_servo_home_response_frame, set_diff_damper_response_frame, set_diff_trim_response_frame,
+    set_drive_limits_response_frame, set_dynamics_model_response_frame, set_ff_lead_response_frame,
+    set_strain_comp_response_frame, set_torque_response_frame, start_capture_response_frame,
+    status_heartbeat_frame, stepper_suppress_response_frame, stop_capture_response_frame,
+    stop_response_frame, Command, ENGINE_STATE_FAULT,
 };
-use mcu_protocol::messages::{SdoReadResponse, SlaveState, StopCaptureResponse};
+use mcu_protocol::messages::{
+    SdoReadResponse, SlaveState, StopCaptureResponse, LANE_RUN_FLAG_REANCHOR, LANE_RUN_FLAG_TAIL,
+};
 
 static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
 
@@ -46,6 +49,18 @@ fn arg_val(args: &[String], key: &str) -> Option<String> {
     args.iter()
         .position(|a| a == key)
         .and_then(|i| args.get(i + 1).cloned())
+}
+
+/// The stub's sample grid: indices count whole `STUB_CYCLE_NS` periods from
+/// the base latched at loop entry, so the host can address ring cycles the
+/// same way it addresses a real endpoint's DC grid.
+fn grid_index_now(base_ns: u64) -> u64 {
+    (monotonic_ns() - base_ns) / STUB_CYCLE_NS as u64
+}
+
+fn grid_now(base_ns: u64) -> (u64, u64) {
+    let index = grid_index_now(base_ns);
+    (index, base_ns + index * STUB_CYCLE_NS as u64)
 }
 
 const STUB_PROBE_COUNTER_INDEX: u16 = 0x5FFF;
@@ -116,9 +131,9 @@ fn main() {
 
     let fail_enable = args.iter().any(|a| a == "--fail-enable");
     let drive_fault_after: Option<u32> =
-        arg_val(&args, "--drive-fault-after-pieces").and_then(|s| s.parse().ok());
+        arg_val(&args, "--drive-fault-after-cycles").and_then(|s| s.parse().ok());
 
-    let mut ring = AxisRing::new();
+    let mut ring = SetpointRing::new(0, STUB_CYCLE_NS as u32);
     let mut gate = TorqueGate::new();
     let mut capture = Capture::new();
     let mut capture_drive_count: usize = 0;
@@ -126,7 +141,7 @@ fn main() {
     let mut sdo_bus = stub_object_dictionary();
     let mut last_sent_retired: u32 = 0;
     let mut heartbeat_sent = false;
-    let mut sampled_pieces: u32 = 0;
+    let mut played_cycles: u32 = 0;
     let mut drive_fault_fired = false;
     let mut stored_limits: Option<(u32, u16)> = None;
     let mut sensorless = SensorlessBank::new(1);
@@ -167,6 +182,7 @@ fn main() {
         &single_slave_reply(1, SlaveState::Ok, 0),
     ));
     eprintln!("ec-rt-stub: handshake ok, entering stub loop");
+    let grid_base_ns = monotonic_ns();
 
     'session: loop {
         if SIGTERM_RECEIVED.load(Ordering::Acquire) {
@@ -186,70 +202,8 @@ fn main() {
                 } => {
                     server.respond(&identify_response_frame(correlation_id, proto_version));
                 }
-                Command::PushPieces {
-                    correlation_id,
-                    msg,
-                } => {
-                    let now_ns = monotonic_ns();
-                    if gate.state() == TorqueState::Faulted {
-                        server.respond(&push_pieces_response_frame(
-                            correlation_id,
-                            ERR_PIECES_WHILE_FAULTED,
-                            now_ns,
-                            0,
-                            0,
-                        ));
-                    } else if let Err(code) = stream_halt.check_push_allowed() {
-                        server.respond(&push_pieces_response_frame(
-                            correlation_id,
-                            code,
-                            now_ns,
-                            0,
-                            0,
-                        ));
-                    } else {
-                        let axis = &msg.axes[0];
-                        let front_start_time = if axis.piece_count > 0
-                            && axis.pieces_bytes.len() >= 8
-                        {
-                            u64::from_le_bytes(axis.pieces_bytes[0..8].try_into().unwrap_or([0; 8]))
-                        } else {
-                            0
-                        };
-                        let pushed = ring.push_from_bytes(axis.piece_count, &axis.pieces_bytes);
-                        #[allow(clippy::cast_precision_loss)]
-                        let delta_ms =
-                            (now_ns as i64 - front_start_time as i64) as f64 / 1_000_000.0;
-                        eprintln!(
-                            "ec-rt-stub: PushPieces axis={} pieces={} pushed={} head={} \
-                             now_ns={} front_start_ns={} delta_ms={:.3}",
-                            axis.axis_idx,
-                            axis.piece_count,
-                            pushed,
-                            axis.new_head,
-                            now_ns,
-                            front_start_time,
-                            delta_ms
-                        );
-                        let arrival_clock = now_ns;
-                        let result = if pushed == axis.piece_count {
-                            0i32
-                        } else {
-                            -309
-                        };
-                        server.respond(&push_pieces_response_frame(
-                            correlation_id,
-                            result,
-                            arrival_clock,
-                            axis.axis_idx,
-                            front_start_time,
-                        ));
-                    }
-                }
                 Command::QueryRuntimeCaps { correlation_id } => {
-                    let total: u32 =
-                        (AXIS_RING_CAPACITY * runtime::piece_ring::PIECE_ENTRY_BYTES) as u32;
-                    server.respond(&runtime_caps_response_frame(correlation_id, total));
+                    server.respond(&runtime_caps_response_frame(correlation_id));
                 }
                 Command::QueryMotorState { .. } => {}
                 Command::Stop { correlation_id } => {
@@ -538,28 +492,69 @@ fn main() {
                     correlation_id,
                     msg,
                 } => {
-                    let lanes: Vec<(u8, u32)> =
-                        msg.lanes.iter().map(|lane| (lane.axis_idx, 0)).collect();
-                    eprintln!(
-                        "ec-rt-stub: PushSampleRuns rejected — the stub runs the piece \
-                         executor (lanes={})",
-                        lanes.len()
-                    );
+                    let now_ns = monotonic_ns();
+                    let mut result = if gate.state() == TorqueState::Faulted {
+                        ERR_PIECES_WHILE_FAULTED
+                    } else {
+                        stream_halt.check_push_allowed().err().unwrap_or(0)
+                    };
+                    if result == 0 {
+                        for lane in &msg.lanes {
+                            let header = RunHeader {
+                                start_index: lane.start_index,
+                                interval_ticks: lane.interval_ticks,
+                                origin_mm: f64::from(lane.origin_mm_q16) / 65536.0,
+                                anchor: lane.flags & LANE_RUN_FLAG_REANCHOR != 0,
+                                final_run: lane.flags & LANE_RUN_FLAG_TAIL != 0,
+                            };
+                            let entries: Vec<SetpointEntry> = lane
+                                .samples
+                                .iter()
+                                .map(|s| SetpointEntry {
+                                    pos_counts: s.pos_counts,
+                                    vel_ff: s.vel_ff,
+                                    torque_ff: s.torque_ff,
+                                    acc_mm_s2: s.acc_mm_s2,
+                                })
+                                .collect();
+                            eprintln!(
+                                "ec-rt-stub: PushSampleRuns axis={} start_index={} count={} \
+                                 flags=0x{:02x}",
+                                lane.axis_idx,
+                                lane.start_index,
+                                entries.len(),
+                                lane.flags
+                            );
+                            if let Err(fault) = ring.fill(&header, &entries) {
+                                eprintln!(
+                                    "ec-rt-stub: sample run rejected — {} ({})",
+                                    fault.as_str(),
+                                    fault.code()
+                                );
+                                result = fault.code();
+                            }
+                        }
+                    }
+                    let lanes: Vec<(u8, u32)> = msg
+                        .lanes
+                        .iter()
+                        .map(|lane| (lane.axis_idx, ring.free() as u32))
+                        .collect();
                     server.respond(&push_sample_runs_response_frame(
                         correlation_id,
-                        ERR_SAMPLES_IN_PIECE_MODE,
-                        monotonic_ns(),
-                        (0, 0),
+                        result,
+                        now_ns,
+                        grid_now(grid_base_ns),
                         &lanes,
                     ));
                 }
                 Command::QuerySampleGrid { correlation_id } => {
                     server.respond(&sample_grid_response_frame(
                         correlation_id,
-                        Executor::Piece.wire(),
-                        0,
-                        0,
-                        (0, 0),
+                        EXECUTOR_SETPOINT_RING,
+                        STUB_CYCLE_NS as u32,
+                        RING_DEPTH_CYCLES as u32,
+                        grid_now(grid_base_ns),
                     ));
                 }
             }
@@ -578,7 +573,8 @@ fn main() {
                 server.respond(&status_heartbeat_frame(
                     ENGINE_STATE_FAULT,
                     0,
-                    &[ring.retired_count()],
+                    &[ring.played_count()],
+                    &[ring.playback_clock()],
                     0,
                 ));
                 std::process::exit(1);
@@ -602,36 +598,37 @@ fn main() {
             stream_halt.halt();
         }
 
-        let sampled_pos = if gate.state() == TorqueState::Enabled {
-            let s = ring.sample(now);
-            if suppressed {
-                None
-            } else {
-                s
+        let played = if gate.state() == TorqueState::Enabled {
+            match ring.play(grid_index_now(grid_base_ns)) {
+                Played::Entry(entry) if !suppressed => Some(entry),
+                _ => None,
             }
         } else {
             None
         };
-        let motion_active = gate.state() == TorqueState::Enabled && sampled_pos.is_some();
+        let motion_active = played.is_some();
 
-        if gate.state() == TorqueState::Enabled && sampled_pos.is_some() {
-            sampled_pieces += 1;
+        if let Some(entry) = played {
+            played_cycles += 1;
             if !drive_fault_fired {
                 if let Some(threshold) = drive_fault_after {
-                    if sampled_pieces >= threshold {
+                    if played_cycles >= threshold {
                         drive_fault_fired = true;
                         gate.on_drive_fault();
                         ring.reset();
                         eprintln!(
-                            "ec-rt-stub: drive fault simulated after {sampled_pieces} pieces"
+                            "ec-rt-stub: drive fault simulated after {played_cycles} cycles \
+                             (last target {} counts)",
+                            entry.pos_counts
                         );
                         server.respond(&status_heartbeat_frame(
                             0,
                             0x8611,
-                            &[ring.retired_count()],
+                            &[ring.played_count()],
+                            &[ring.playback_clock()],
                             0,
                         ));
-                        last_sent_retired = ring.retired_count();
+                        last_sent_retired = ring.played_count();
                         heartbeat_sent = true;
                     }
                 }
@@ -674,56 +671,38 @@ fn main() {
         }
 
         if let Some(fault_val) = ring.take_fault() {
-            if !drive_fault_fired {
-                if let Some(threshold) = drive_fault_after {
-                    sampled_pieces += 1;
-                    if sampled_pieces >= threshold {
-                        drive_fault_fired = true;
-                        gate.on_drive_fault();
-                        ring.reset();
-                        eprintln!("ec-rt-stub: drive fault simulated after {sampled_pieces} pieces (ring fault path)");
-                        server.respond(&status_heartbeat_frame(
-                            0,
-                            0x8611,
-                            &[ring.retired_count()],
-                            0,
-                        ));
-                        last_sent_retired = ring.retired_count();
-                        heartbeat_sent = true;
-                        continue 'session;
-                    }
-                }
-            }
             let fault_code_u16 = (fault_val & 0xFFFF) as u16;
             eprintln!(
                 "ec-rt-stub: FAULT latched fault_val=0x{fault_val:08x} code=0x{fault_code_u16:04x} \
                  — propagating to host via heartbeat, host must shut down"
             );
-            let current_retired = ring.retired_count();
+            let current_played = ring.played_count();
             server.respond(&status_heartbeat_frame(
                 ENGINE_STATE_FAULT,
-                (fault_val & 0xFFFF) as u16,
-                &[current_retired],
+                fault_code_u16,
+                &[current_played],
+                &[ring.playback_clock()],
                 0,
             ));
-            last_sent_retired = current_retired;
+            last_sent_retired = current_played;
             heartbeat_sent = true;
         }
 
-        let current_retired = ring.retired_count();
-        let should_emit = !heartbeat_sent || current_retired != last_sent_retired;
+        let current_played = ring.played_count();
+        let should_emit = !heartbeat_sent || current_played != last_sent_retired;
         if should_emit {
             let engine_state: u8 = if ring.is_empty() { 0 } else { 1 };
             server.respond(&status_heartbeat_frame(
                 engine_state,
                 0,
-                &[current_retired],
+                &[current_played],
+                &[ring.playback_clock()],
                 0,
             ));
-            last_sent_retired = current_retired;
+            last_sent_retired = current_played;
             heartbeat_sent = true;
-            if current_retired != 0 {
-                eprintln!("ec-rt-stub: heartbeat retired_count={current_retired}");
+            if current_played != 0 {
+                eprintln!("ec-rt-stub: heartbeat played_count={current_played}");
             }
         }
 

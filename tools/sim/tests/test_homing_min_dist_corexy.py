@@ -1,10 +1,8 @@
 """min_home_dist early-trigger guard on positive-direction AWD CoreXY.
 
-Each test emulates a physical endstop switch as a *positional wall*: a
-thread watches the shim's per-lane step counters, converts them to
-cartesian XY, and drives the endstop GPIO high exactly while the axis
-sits at/past the wall — the same behavior a real switch (or a StallGuard
-trip at a hard stop) has.
+The long-Y tests use the shim's in-intercept positional wall. It observes
+executed motor steps and asserts the endstop in the same callback, before the
+virtual clock can advance queued motion beyond the trip point.
 
 Scenario from the bench: sensorless AWD CoreXY homing toward
 position_max. X starts near its endstop, so the first X approach trips
@@ -36,6 +34,9 @@ STEPS_PER_MM = 16 * 200 / 40.0
 
 X_ENDSTOP = (0, 10)
 Y_ENDSTOP = (0, 11)
+AUTO_Y_ENDSTOP_LINE = 201
+LONG_Y_WALL_MM = 60.0
+LONG_Y_WALL_STEPS = int(LONG_Y_WALL_MM * STEPS_PER_MM)
 
 NEEDS_REHOME_RE = re.compile(
     r"homing: (?P<axis>[XYZ]) needs rehome: (?P<verdict>True|False) "
@@ -103,26 +104,35 @@ class EndstopWall:
             time.sleep(0.01)
 
 
-def _boot(sim_world):
-    world = sim_world(
-        lambda w: configs.awd_corexy_positive_dir_config(
-            w.h7_pty, str(w.gcode_dir)
-        ),
-        dual_mcu=False,
-    )
+def _boot(sim_world, auto_y_wall=False):
+    def config(world):
+        text = configs.awd_corexy_positive_dir_config(
+            world.h7_pty, str(world.gcode_dir)
+        )
+        if auto_y_wall:
+            text = text.replace(
+                "endstop_pin: ^gpiochip0/gpio11",
+                f"endstop_pin: ^gpiochip0/gpio{AUTO_Y_ENDSTOP_LINE}",
+                1,
+            )
+        return text
+
+    world = sim_world(config, dual_mcu=False)
     control = world.sim_control("h7")
+    if auto_y_wall:
+        control.set_endstop_wall(AUTO_Y_ENDSTOP_LINE, LONG_Y_WALL_STEPS)
     return world, control, XyTracker(control)
 
 
-def _home_y_against_wall_at_60(world, control, tracker):
-    """G28 Y with the wall 60mm out; returns the guard's first decision.
+def _home_y_against_wall_at_60(world):
+    """G28 Y against the in-intercept wall 60mm out; returns the guard's
+    first decision.
 
-    The G28 response is collected non-fatally: when the guard misfires
-    the follow-up rehome can itself error out, and the decision record
-    is the evidence this test is after.
+    The G28 response is collected non-fatally: when the guard misfires the
+    follow-up rehome can itself error out, and the decision record is the
+    evidence this test is after.
     """
-    with EndstopWall(tracker, control, 1, Y_ENDSTOP, wall_mm=60.0):
-        resp = world.gcode("G28 Y", timeout=300)
+    resp = world.gcode("G28 Y", timeout=300)
     records = _needs_rehome_records(world.log_tail(), "Y")
     assert records, (
         f"no needs_rehome decision logged for Y; G28 response: {resp}"
@@ -137,9 +147,9 @@ def _home_y_against_wall_at_60(world, control, tracker):
 
 
 def test_long_travel_y_is_not_an_early_trigger(sim_world):
-    world, control, tracker = _boot(sim_world)
+    world, _, _ = _boot(sim_world, auto_y_wall=True)
     world.mark_log()
-    _home_y_against_wall_at_60(world, control, tracker)
+    _home_y_against_wall_at_60(world)
     assert world.shutdown_line() is None
 
 
@@ -200,7 +210,7 @@ def test_false_trigger_far_from_endstop_fails_loudly(sim_world):
 
 
 def test_long_travel_y_after_x_early_rehome(sim_world):
-    world, control, tracker = _boot(sim_world)
+    world, control, tracker = _boot(sim_world, auto_y_wall=True)
 
     world.mark_log()
     with EndstopWall(tracker, control, 0, X_ENDSTOP, wall_mm=3.0):
@@ -211,5 +221,5 @@ def test_long_travel_y_after_x_early_rehome(sim_world):
         f"have taken the rehome path; decisions: {x_records}"
     )
 
-    _home_y_against_wall_at_60(world, control, tracker)
+    _home_y_against_wall_at_60(world)
     assert world.shutdown_line() is None

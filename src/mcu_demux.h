@@ -12,9 +12,9 @@
 _Static_assert(MCU_DEMUX_MCU_BUF_SIZE >= 64u,
                "kalico_buf too small for control frames");
 
-// Largest legal kalico frame of any channel = a full pieces frame:
-// envelope(4) + per-msg header(7) + piece header(8) + 255*32 + crc(2).
-#define MCU_FRAME_MAX_LEN (4u + 7u + 8u + 255u * 32u + 2u)
+// Largest legal kalico frame of any channel; every channel stages its whole
+// frame in kalico_buf.
+#define MCU_FRAME_MAX_LEN MCU_DEMUX_MCU_BUF_SIZE
 _Static_assert(MCU_FRAME_MAX_LEN >= MCU_DEMUX_MCU_BUF_SIZE,
                "global frame bound must cover the staging buffer");
 

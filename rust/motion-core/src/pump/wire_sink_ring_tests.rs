@@ -1,4 +1,4 @@
-use super::{McuTransport, RingFiller, WireSink};
+use super::{EtherCatRing, RingFiller, WireSink};
 use crate::lock_ext::LockExt;
 use crate::pump::{AxisFrame, AxisKey, PieceSink, SendError};
 use ethercat_rt::server::FrameServer;
@@ -146,19 +146,17 @@ fn harness(name: &str) -> Harness {
         .expect("the claim-time grid is the first observation");
     let filler: RingFiller = Arc::new(Mutex::new(chain));
     let sink = WireSink {
-        transports: {
-            let mut m = HashMap::new();
-            m.insert(
-                MCU_ID,
-                McuTransport::EtherCat {
-                    conn: Arc::downgrade(&conn),
-                    ring: Some(Arc::clone(&filler)),
-                },
-            );
-            m
-        },
+        stepcompress: HashMap::new(),
+        samples: HashMap::new(),
+        ethercat: HashMap::from([(
+            MCU_ID,
+            EtherCatRing {
+                conn: Arc::downgrade(&conn),
+                ring: Arc::clone(&filler),
+            },
+        )]),
         timeout: Duration::from_secs(5),
-        clock_of: Arc::new(|_| Some((GRID_CLOCK, 1e9))),
+        transports: Arc::new(crate::axis_transport::AxisTransports::from_configs(&[])),
     };
     Harness {
         endpoint,
@@ -184,7 +182,6 @@ fn frame(pieces: Vec<PieceEntry>) -> AxisFrame {
     AxisFrame {
         axis: AXIS,
         pieces,
-        start_slot: 0,
         new_head: 0,
         room: 1024,
         guard_recorded_ns: 0,
@@ -263,7 +260,7 @@ fn a_ring_endpoint_receives_abutting_sample_runs_for_a_two_piece_trajectory() {
     let last_clock = start + INTERVAL_NS * (positions.len() as u64 - 1);
     let tail = linear_piece(start + PIECE_NS, 1.0, 3.0);
     let expected_mm = f64::from(
-        runtime::motion_core::arm_piece(&tail, ethercat_rt::curves::CLOCK_FREQ_HZ)
+        runtime::motion_core::arm_piece(&tail, ethercat_rt::setpoint_fill::CLOCK_FREQ_HZ)
             .eval_pos_vel(last_clock)
             .0,
     );
@@ -454,29 +451,6 @@ fn a_frame_for_an_axis_the_filler_does_not_drive_is_fatal() {
     assert!(
         message.contains("has no setpoint lane"),
         "the error must name the missing lane, got: {message}"
-    );
-}
-
-#[test]
-fn push_pieces_must_never_reach_a_ring_endpoint() {
-    let h = harness("no-pieces");
-    let error = h
-        .sink
-        .call_push_pieces(
-            MCU_ID,
-            &[frame(vec![linear_piece(
-                GRID_CLOCK + INTERVAL_NS * 8,
-                0.0,
-                1.0,
-            )])],
-        )
-        .expect_err("the piece path must refuse a ring endpoint");
-    let SendError::Fatal(message) = error else {
-        panic!("a cross-executor frame must be fatal, got {error:?}");
-    };
-    assert!(
-        message.contains("setpoint_ring"),
-        "the error must name the executor, got: {message}"
     );
 }
 

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use crossbeam_channel::{Receiver, TrySendError, unbounded};
 use motion_core::pump::{
     AxisFrame, AxisKey, DripArm, EnqueueMsg, HeartbeatMsg, PieceSink, PumpCallbacks, PumpMsg,
-    SendError, run_pump,
+    RetiredBy, SendError, run_pump,
 };
 use runtime::piece_ring::PieceEntry;
 
@@ -14,7 +14,6 @@ impl PieceSink for RecordingSink {
         &self,
         key: AxisKey,
         pieces: &[PieceEntry],
-        _start_slot: u16,
         _new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
@@ -32,7 +31,6 @@ impl PieceSink for BundleSink {
         &self,
         _key: AxisKey,
         _pieces: &[PieceEntry],
-        _start_slot: u16,
         _new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
@@ -105,8 +103,10 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
+        axes: vec![0],
         consumed_counts: None,
         retired_counts: vec![2],
+        retired_by: RetiredBy::Pulse,
     }))
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -520,8 +520,10 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
+        axes: vec![0],
         consumed_counts: None,
         retired_counts: vec![4],
+        retired_by: RetiredBy::Pulse,
     }))
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(30));

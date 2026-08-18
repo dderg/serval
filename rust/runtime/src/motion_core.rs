@@ -145,15 +145,12 @@ fn get_position_and_velocity_armed_with_endpoint<F: FaultSink>(
     *just_armed = false;
     if let Some(p) = &*armed {
         if now < p.piece_end_cycles || include_endpoint && now == p.piece_end_cycles {
-            crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_CLENSHAW);
             return Some(p.eval_pos_vel(now));
         }
         *armed = None;
         ring.advance_counter();
     }
 
-    crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_WALK);
-    let walk_start = crate::isr_phase::cyccnt();
     let slot = get_piece_for_time(
         ring,
         storage,
@@ -164,16 +161,10 @@ fn get_position_and_velocity_armed_with_endpoint<F: FaultSink>(
         fault,
         include_endpoint,
     )?;
-    crate::isr_phase::walk_account(crate::isr_phase::cyccnt().wrapping_sub(walk_start));
 
-    crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_ARM);
-    let arm_start = crate::isr_phase::cyccnt();
     #[allow(clippy::indexing_slicing)]
     let p = arm_and_load(armed, &storage[slot], cycles_per_second);
     *just_armed = true;
-    crate::isr_phase::arm_account(crate::isr_phase::cyccnt().wrapping_sub(arm_start));
-
-    crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_CLENSHAW);
     Some(p.eval_pos_vel(now))
 }
 

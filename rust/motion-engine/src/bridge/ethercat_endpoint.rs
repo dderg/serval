@@ -72,78 +72,18 @@ pub(crate) fn arm_endpoint_death_watchdog(latch: Arc<Mutex<HashMap<u32, String>>
         });
 }
 
-/// Which setpoint-delivery executor the endpoint runs. The klippy config
-/// spelling (`setpoint_ring`) and the CLI spelling (`setpoint-ring`) differ;
-/// each direction is converted explicitly here so neither side ever accepts
-/// the other's spelling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Executor {
-    Piece,
-    SetpointRing,
-}
-
-impl Executor {
-    pub(crate) const ACCEPTED_CONFIG_VALUES: &'static str = "'piece', 'setpoint_ring'";
-
-    pub(crate) fn from_config_value(value: &str) -> Option<Self> {
-        match value {
-            "piece" => Some(Self::Piece),
-            "setpoint_ring" => Some(Self::SetpointRing),
-            _ => None,
-        }
-    }
-
-    fn from_wire(value: u8) -> Option<Self> {
-        match value {
-            0 => Some(Self::Piece),
-            1 => Some(Self::SetpointRing),
-            _ => None,
-        }
-    }
-
-    fn cli_value(self) -> &'static str {
-        match self {
-            Self::Piece => "piece",
-            Self::SetpointRing => "setpoint-ring",
-        }
-    }
-
-    fn config_value(self) -> &'static str {
-        match self {
-            Self::Piece => "piece",
-            Self::SetpointRing => "setpoint_ring",
-        }
-    }
-}
-
-impl std::fmt::Display for Executor {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.config_value())
-    }
-}
-
 /// What the endpoint answered when asked which executor it runs.
 #[derive(Debug)]
 pub(crate) enum ReportedExecutor {
-    Known(Executor),
-    UnknownCode(u8),
+    Code(u8),
     Unsupported(String),
 }
 
 #[derive(Debug)]
 pub(crate) enum EndpointClaimError {
-    DriveOffline {
-        slave_idx: u8,
-        fault_code: u16,
-    },
-    DriveFault {
-        slave_idx: u8,
-        fault_code: u16,
-    },
-    ExecutorMismatch {
-        requested: Executor,
-        reported: ReportedExecutor,
-    },
+    DriveOffline { slave_idx: u8, fault_code: u16 },
+    DriveFault { slave_idx: u8, fault_code: u16 },
+    ExecutorMismatch { reported: ReportedExecutor },
     Protocol(String),
 }
 
@@ -182,25 +122,17 @@ pub(crate) fn message_for_claim_error(
             "ethercat {label}: drive (slave {slave_idx}) \
              fault 0x{fault_code:04x} — check drive, then FIRMWARE_RESTART"
         ),
-        EndpointClaimError::ExecutorMismatch {
-            requested,
-            reported,
-        } => match reported {
-            ReportedExecutor::Known(reported) => format!(
-                "ethercat {label}: executor mismatch — host requested '{requested}', \
-                 endpoint reports '{reported}' — set executor= on [ethercat_node {label}] \
-                 to match the endpoint's --executor, then FIRMWARE_RESTART"
-            ),
-            ReportedExecutor::UnknownCode(code) => format!(
-                "ethercat {label}: executor mismatch — host requested '{requested}', \
-                 endpoint reports unknown executor code {code} — the endpoint binary is \
-                 newer than this host, rebuild both, then FIRMWARE_RESTART"
+        EndpointClaimError::ExecutorMismatch { reported } => match reported {
+            ReportedExecutor::Code(code) => format!(
+                "ethercat {label}: executor mismatch — endpoint reports executor code {code}, \
+                 expected {expected} (setpoint ring) — this endpoint still runs a deleted \
+                 executor, rebuild rust/ethercat-rt, then FIRMWARE_RESTART",
+                expected = ethercat_rt::setpoint::EXECUTOR_SETPOINT_RING
             ),
             ReportedExecutor::Unsupported(detail) => format!(
-                "ethercat {label}: executor mismatch — host requested '{requested}' but the \
-                 endpoint could not report its executor ({detail}); the endpoint binary \
-                 predates the sample-stream executor — rebuild rust/ethercat-rt, then \
-                 FIRMWARE_RESTART"
+                "ethercat {label}: executor mismatch — the endpoint could not report its \
+                 executor ({detail}); the endpoint binary predates the sample-stream executor \
+                 — rebuild rust/ethercat-rt, then FIRMWARE_RESTART"
             ),
         },
         EndpointClaimError::Protocol(s) => {
@@ -240,7 +172,6 @@ pub(crate) fn endpoint_args(
     interface: &str,
     socket_path: &str,
     cycle_us: u32,
-    executor: Executor,
     dynamics_profile: Option<&str>,
     late_tolerance_us: Option<f64>,
     group_delay_us: f64,
@@ -253,8 +184,6 @@ pub(crate) fn endpoint_args(
         socket_path.to_string(),
         "--cycle-us".into(),
         cycle_us.to_string(),
-        "--executor".into(),
-        executor.cli_value().into(),
     ];
     if let Some(p) = dynamics_profile {
         args.push("--dynamics-profile".into());
@@ -289,7 +218,6 @@ pub(crate) fn spawn_ethercat_endpoint(
     interface: &str,
     socket_path: &str,
     cycle_us: u32,
-    executor: Executor,
     dynamics_profile: Option<&str>,
     late_tolerance_us: Option<f64>,
     group_delay_us: f64,
@@ -300,7 +228,6 @@ pub(crate) fn spawn_ethercat_endpoint(
         interface,
         socket_path,
         cycle_us,
-        executor,
         dynamics_profile,
         late_tolerance_us,
         group_delay_us,
@@ -414,7 +341,6 @@ pub(crate) fn handshake_ethercat_endpoint(
 /// absolute grid indices without re-querying.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SampleGrid {
-    pub(crate) executor: Executor,
     pub(crate) cycle_ticks: u32,
     pub(crate) ring_depth_cycles: u32,
     pub(crate) grid_index: u64,
@@ -422,11 +348,10 @@ pub(crate) struct SampleGrid {
 }
 
 /// Ask the endpoint which executor it runs and refuse the claim on any answer
-/// that is not exactly the requested one. An endpoint that does not understand
-/// `QuerySampleGrid` is a mismatch too, never a quiet fall back to pieces.
+/// that is not the setpoint ring. An endpoint that does not understand
+/// `QuerySampleGrid` is a mismatch too: its binary predates the sample stream.
 pub(crate) fn verify_sample_grid(
     conn: &McuSerialConn,
-    requested: Executor,
     deadline: Instant,
 ) -> Result<SampleGrid, EndpointClaimError> {
     use host_rt::mcu_call::McuCall;
@@ -434,10 +359,7 @@ pub(crate) fn verify_sample_grid(
     use mcu_protocol::codec::{Cursor, Decode};
     use mcu_protocol::messages::SampleGridResponse;
 
-    let mismatch = |reported| EndpointClaimError::ExecutorMismatch {
-        requested,
-        reported,
-    };
+    let mismatch = |reported| EndpointClaimError::ExecutorMismatch { reported };
 
     let remaining = deadline.saturating_duration_since(Instant::now());
     let (kind, body) = conn
@@ -462,15 +384,11 @@ pub(crate) fn verify_sample_grid(
         )))
     })?;
 
-    let Some(reported) = Executor::from_wire(reply.executor) else {
-        return Err(mismatch(ReportedExecutor::UnknownCode(reply.executor)));
-    };
-    if reported != requested {
-        return Err(mismatch(ReportedExecutor::Known(reported)));
+    if reply.executor != ethercat_rt::setpoint::EXECUTOR_SETPOINT_RING {
+        return Err(mismatch(ReportedExecutor::Code(reply.executor)));
     }
 
     Ok(SampleGrid {
-        executor: reported,
         cycle_ticks: reply.cycle_ticks,
         ring_depth_cycles: reply.ring_depth_cycles,
         grid_index: reply.grid_index,
@@ -478,22 +396,18 @@ pub(crate) fn verify_sample_grid(
     })
 }
 
-/// Build the pump's host-side setpoint filler for a claimed endpoint, or
-/// `None` when the node runs the piece executor. Everything the filler needs
-/// is what the endpoint itself was launched with — the drives' command scale,
-/// the dynamics profile (so the host computes the very same torque
-/// feedforward), and the DC grid the endpoint just reported — so a ring node
-/// that cannot produce a filler is a claim failure, never a piece fallback.
+/// Build the pump's host-side setpoint filler for a claimed endpoint.
+/// Everything the filler needs is what the endpoint itself was launched with —
+/// the drives' command scale, the dynamics profile (so the host computes the
+/// very same torque feedforward), and the DC grid the endpoint just reported —
+/// so a node that cannot produce a filler is a claim failure.
 pub(crate) fn build_ring_filler(
     grid: SampleGrid,
     dynamics_profile: Option<&str>,
     drives: &[EthercatDrive],
-) -> Result<Option<crate::pump::RingFiller>, String> {
+) -> Result<crate::pump::RingFiller, String> {
     use ethercat_rt::setpoint_fill::{ChainFiller, LaneSpec};
 
-    if grid.executor != Executor::SetpointRing {
-        return Ok(None);
-    }
     if grid.cycle_ticks == 0 {
         return Err("endpoint reported a zero-length DC cycle".to_owned());
     }
@@ -526,5 +440,5 @@ pub(crate) fn build_ring_filler(
     filler
         .observe_grid(grid.grid_index, grid.grid_clock)
         .map_err(|e| format!("claim-time sample grid rejected: {e:?}"))?;
-    Ok(Some(std::sync::Arc::new(std::sync::Mutex::new(filler))))
+    Ok(std::sync::Arc::new(std::sync::Mutex::new(filler)))
 }

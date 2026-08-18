@@ -1,7 +1,7 @@
-"""Extruder as a lone follower lane on a second stepping_mode: stepcompress MCU.
+"""Extruder as a lone follower lane on a second, step/dir only MCU.
 
 Mirrors the Voron 0 CAN-toolhead bench: spatial motors on the main MCU,
-`[motor extruder]` alone on a stepcompress MCU, so that MCU's axis list is
+`[motor extruder]` alone on that MCU, so its axis list is
 `[3]` and never starts at lane 0. The single-MCU stepcompress worlds all
 carry axes `[0, 1, 2]`, where a motor-indexed retirement report happens to
 coincide with the axis index and hides the mismatch.

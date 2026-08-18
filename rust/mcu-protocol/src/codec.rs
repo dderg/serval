@@ -34,14 +34,8 @@ pub enum DecodeError {
     EmptyArray {
         field: &'static str,
     },
-    /// A field that must be unique across a frame appeared twice (e.g. two
-    /// blocks for the same `axis_idx` in one `PushPieces`).
     DuplicateField {
         field: &'static str,
-    },
-    /// A `PushPieces` wire entry declared a coefficient count outside `1..=8`.
-    BadCoeffCount {
-        raw: u8,
     },
     BadUtf8,
 }
@@ -65,9 +59,6 @@ impl core::fmt::Display for DecodeError {
             }
             Self::DuplicateField { field } => {
                 write!(f, "duplicate {field} in one frame")
-            }
-            Self::BadCoeffCount { raw } => {
-                write!(f, "piece coeff_count {raw} outside 1..=8")
             }
             Self::BadUtf8 => f.write_str("string bytes are not valid UTF-8"),
         }

@@ -11,203 +11,6 @@ use crate::codec::{
 mod generated;
 pub use generated::*;
 
-pub const RUNTIME_CAPS_RESPONSE_BODY_LEN: usize = 4;
-
-/// Response-side budget — mirrors `MCU_TX_BUF_SIZE` (256) in
-/// `src/mcu_transport_dispatch.c` minus the sync/len/channel/CRC framing.
-/// It bounds what the MCU can *transmit* in one frame; the PushPieces
-/// receive path (`src/piece_sink.c`) parses as a byte stream and accepts up
-/// to 255 pieces per axis regardless. Keep in sync with the firmware.
-pub const PIECE_FRAME_PAYLOAD_MAX: usize = 250;
-
-/// Bytes of one axis block header (`axis_idx + piece_count + start_slot + new_head`).
-pub const AXIS_BLOCK_HEADER_LEN: usize = 8;
-
-/// Bytes of one wire piece-entry header (start_time + duration + motor_mask +
-/// coeff_count + reserved) — everything before the coefficient block.
-pub const PIECE_WIRE_HEADER_LEN: usize = 16;
-
-/// Largest wire piece entry (header + 8 coefficients) — also the MCU ring-slot
-/// size the entry is zero-extended into.
-pub const PIECE_WIRE_MAX_LEN: usize = 48;
-
-/// Maximum Chebyshev coefficients per piece (degree ≤ 7).
-pub const MAX_PIECE_COEFFS: usize = 8;
-
-/// Largest `piece_count` per axis that still lets an `axis_count`-axis frame fit
-/// `PIECE_FRAME_PAYLOAD_MAX`, assuming an even split. Parameterized off the
-/// shared budget — never a per-chip number. Returns 0 when even one piece per
-/// axis cannot fit (too many axes for the buffer).
-pub fn max_pieces_per_axis(axis_count: u8) -> usize {
-    let n = axis_count.max(1) as usize;
-    let avail = PIECE_FRAME_PAYLOAD_MAX.saturating_sub(1 + n * AXIS_BLOCK_HEADER_LEN);
-    (avail / PIECE_WIRE_MAX_LEN) / n
-}
-
-/// One axis' pieces within a single-MCU `PushPieces` frame. Byte-identical to
-/// the pre-bundling single-axis layout, now repeated under `axis_count`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AxisPieces {
-    pub axis_idx: u8,
-    pub piece_count: u8,
-    pub start_slot: u16,
-    pub new_head: u32,
-    pub pieces_bytes: Vec<u8>,
-}
-
-/// All of one MCU's axis blocks delivered in a single transaction. `axis_count`
-/// is the leading byte; `axis_count == 1` is the EtherCAT/single-axis case.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PushPieces {
-    pub axes: Vec<AxisPieces>,
-}
-
-impl PushPieces {
-    /// Build a single-axis frame — the common shape for single-axis MCUs.
-    pub fn single(
-        axis_idx: u8,
-        piece_count: u8,
-        start_slot: u16,
-        new_head: u32,
-        pieces_bytes: Vec<u8>,
-    ) -> Self {
-        Self {
-            axes: vec![AxisPieces {
-                axis_idx,
-                piece_count,
-                start_slot,
-                new_head,
-                pieces_bytes,
-            }],
-        }
-    }
-}
-
-impl Encode for PushPieces {
-    fn encode(&self, out: &mut Vec<u8>) {
-        put_u8(out, self.axes.len() as u8);
-        for a in &self.axes {
-            put_u8(out, a.axis_idx);
-            put_u8(out, a.piece_count);
-            put_u16(out, a.start_slot);
-            put_u32(out, a.new_head);
-            out.extend_from_slice(&a.pieces_bytes);
-        }
-    }
-}
-
-impl Decode for PushPieces {
-    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        let axis_count = get_u8(c)?;
-        if axis_count == 0 {
-            return Err(DecodeError::EmptyArray {
-                field: "PushPieces.axes",
-            });
-        }
-        let mut axes: Vec<AxisPieces> = Vec::with_capacity(axis_count as usize);
-        for _ in 0..axis_count {
-            let axis_idx = get_u8(c)?;
-            let piece_count = get_u8(c)?;
-            let start_slot = get_u16(c)?;
-            let new_head = get_u32(c)?;
-            if axes.iter().any(|a| a.axis_idx == axis_idx) {
-                return Err(DecodeError::DuplicateField {
-                    field: "PushPieces.axis_idx",
-                });
-            }
-            // Entries are variable-length: 16-byte header + 4·coeff_count
-            // coefficient bytes, coeff_count at offset 13 of each entry.
-            let mut pieces_bytes: Vec<u8> = Vec::new();
-            for _ in 0..piece_count {
-                let mut header = [0u8; PIECE_WIRE_HEADER_LEN];
-                for b in &mut header {
-                    *b = get_u8(c)?;
-                }
-                let coeff_count = header[13];
-                if coeff_count == 0 || coeff_count as usize > MAX_PIECE_COEFFS {
-                    return Err(DecodeError::BadCoeffCount { raw: coeff_count });
-                }
-                pieces_bytes.extend_from_slice(&header);
-                for _ in 0..(4 * coeff_count as usize) {
-                    pieces_bytes.push(get_u8(c)?);
-                }
-            }
-            axes.push(AxisPieces {
-                axis_idx,
-                piece_count,
-                start_slot,
-                new_head,
-                pieces_bytes,
-            });
-        }
-        Ok(Self { axes })
-    }
-}
-
-/// Per-axis diagnostic echo in a `PushPiecesResponse` — the front piece's start
-/// time, used only for the host's transit-diag `arrival_lead`, never control.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AxisDiag {
-    pub axis_idx: u8,
-    pub front_start_time: u64,
-}
-
-/// Frame-level response: one `result` verdict for the whole MCU transaction (a
-/// partial frame is desync, not partial success), one `arrival_clock` sampled at
-/// frame-receive-complete, and a per-axis diagnostic echo.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PushPiecesResponse {
-    pub result: i32,
-    pub arrival_clock: u64,
-    pub axes: Vec<AxisDiag>,
-}
-
-impl PushPiecesResponse {
-    /// Build a single-axis response — the common shape for single-axis MCUs.
-    pub fn single(result: i32, arrival_clock: u64, axis_idx: u8, front_start_time: u64) -> Self {
-        Self {
-            result,
-            arrival_clock,
-            axes: vec![AxisDiag {
-                axis_idx,
-                front_start_time,
-            }],
-        }
-    }
-}
-
-impl Encode for PushPiecesResponse {
-    fn encode(&self, out: &mut Vec<u8>) {
-        put_i32(out, self.result);
-        put_u64(out, self.arrival_clock);
-        put_u8(out, self.axes.len() as u8);
-        for a in &self.axes {
-            put_u8(out, a.axis_idx);
-            put_u64(out, a.front_start_time);
-        }
-    }
-}
-
-impl Decode for PushPiecesResponse {
-    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        let result = get_i32(c)?;
-        let arrival_clock = get_u64(c)?;
-        let axis_count = get_u8(c)?;
-        let mut axes: Vec<AxisDiag> = Vec::with_capacity(axis_count as usize);
-        for _ in 0..axis_count {
-            axes.push(AxisDiag {
-                axis_idx: get_u8(c)?,
-                front_start_time: get_u64(c)?,
-            });
-        }
-        Ok(Self {
-            result,
-            arrival_clock,
-            axes,
-        })
-    }
-}
-
 /// Bytes of one wire `LaneRun` header — everything before the sample block.
 pub const LANE_RUN_HEADER_LEN: usize = 20;
 
@@ -459,6 +262,11 @@ pub struct StatusHeartbeat {
     pub engine_state: u8,
     pub fault_code: u16,
     pub retired_counts: Vec<u32>,
+    /// Per-axis clock the mcu's sample lane last evaluated playback at. Every
+    /// run whose `end_clock` is at or before it has left the lane ring, so the
+    /// host can prove ring room from the mcu's own clock instead of waiting for
+    /// the retirement count to catch up.
+    pub playback_clocks: Vec<u64>,
     pub ff_saturation_count: u32,
 }
 
@@ -466,10 +274,18 @@ impl Encode for StatusHeartbeat {
     fn encode(&self, out: &mut Vec<u8>) {
         put_u8(out, self.engine_state);
         put_u16(out, self.fault_code);
+        assert_eq!(
+            self.retired_counts.len(),
+            self.playback_clocks.len(),
+            "StatusHeartbeat carries one retired count and one playback clock per axis"
+        );
         let num_axes = self.retired_counts.len() as u8;
         put_u8(out, num_axes);
         for &count in &self.retired_counts {
             put_u32(out, count);
+        }
+        for &clock in &self.playback_clocks {
+            put_u64(out, clock);
         }
         put_u32(out, self.ff_saturation_count);
     }
@@ -495,17 +311,39 @@ fn decode_u32_array(c: &mut Cursor<'_>, count: u8) -> Result<Vec<u32>, DecodeErr
     Ok(v)
 }
 
+fn decode_u64_array(c: &mut Cursor<'_>, count: u8) -> Result<Vec<u64>, DecodeError> {
+    let need = (count as usize)
+        .checked_mul(8)
+        .ok_or(DecodeError::ArrayLengthExceedsBuffer {
+            claimed: u32::from(count),
+            available: c.remaining(),
+        })?;
+    if need > c.remaining() {
+        return Err(DecodeError::ArrayLengthExceedsBuffer {
+            claimed: u32::from(count),
+            available: c.remaining(),
+        });
+    }
+    let mut v = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        v.push(get_u64(c)?);
+    }
+    Ok(v)
+}
+
 impl Decode for StatusHeartbeat {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         let engine_state = get_u8(c)?;
         let fault_code = get_u16(c)?;
         let num_axes = get_u8(c)?;
         let retired_counts = decode_u32_array(c, num_axes)?;
+        let playback_clocks = decode_u64_array(c, num_axes)?;
         let ff_saturation_count = get_u32(c)?;
         Ok(Self {
             engine_state,
             fault_code,
             retired_counts,
+            playback_clocks,
             ff_saturation_count,
         })
     }

@@ -1,14 +1,6 @@
 use super::roundtrip;
 use super::*;
 
-/// One valid variable-length wire entry: `PIECE_WIRE_HEADER_LEN + 4 * coeff_count`
-/// bytes, filled with `fill` except for the `coeff_count` byte at offset 13.
-fn one_piece(fill: u8, coeff_count: u8) -> Vec<u8> {
-    let mut v = vec![fill; PIECE_WIRE_HEADER_LEN + 4 * coeff_count as usize];
-    v[13] = coeff_count;
-    v
-}
-
 #[test]
 fn message_kind_round_trips_via_u16() {
     for &k in &[
@@ -18,8 +10,6 @@ fn message_kind_round_trips_via_u16() {
         MessageKind::ConfigureAxesResponse,
         MessageKind::QueryRuntimeCaps,
         MessageKind::RuntimeCapsResponse,
-        MessageKind::PushPieces,
-        MessageKind::PushPiecesResponse,
         MessageKind::FaultEvent,
         MessageKind::StatusHeartbeat,
         MessageKind::McuLog,
@@ -44,6 +34,8 @@ fn message_kind_round_trips_via_u16() {
     assert_eq!(MessageKind::from_u16(0x0021), None); // PushSegmentResponse
     assert_eq!(MessageKind::from_u16(0x0050), None); // ResetCurvePool
     assert_eq!(MessageKind::from_u16(0x0051), None); // ResetCurvePoolResponse
+    assert_eq!(MessageKind::from_u16(0x0060), None); // PushPieces
+    assert_eq!(MessageKind::from_u16(0x0061), None); // PushPiecesResponse
     assert_eq!(MessageKind::from_u16(0x0080), None); // StatusEvent (old)
     assert_eq!(MessageKind::from_u16(0x0081), None); // CreditFreed
     assert_eq!(MessageKind::from_u16(0x0090), None); // ClaimHandshakeReply (old, relocated to 0x0043)
@@ -251,16 +243,13 @@ fn fault_event_roundtrip() {
 }
 
 #[test]
-fn runtime_caps_response_new_format() {
-    let msg = RuntimeCapsResponse {
-        total_piece_memory: 63488,
-    };
+fn runtime_caps_response_has_empty_body() {
+    let msg = RuntimeCapsResponse {};
     let mut buf = Vec::new();
     msg.encode(&mut buf);
-    assert_eq!(buf.len(), 4);
+    assert!(buf.is_empty());
     let mut cursor = Cursor::new(&buf);
-    let decoded = RuntimeCapsResponse::decode_from(&mut cursor).unwrap();
-    assert_eq!(decoded.total_piece_memory, 63488);
+    assert_eq!(RuntimeCapsResponse::decode_from(&mut cursor).unwrap(), msg);
 }
 
 #[test]
@@ -269,6 +258,7 @@ fn status_heartbeat_roundtrip_empty() {
         engine_state: 0,
         fault_code: 0,
         retired_counts: vec![],
+        playback_clocks: vec![],
         ff_saturation_count: 0,
     };
     let mut buf = Vec::new();
@@ -277,6 +267,7 @@ fn status_heartbeat_roundtrip_empty() {
     let mut cursor = Cursor::new(&buf);
     let decoded = StatusHeartbeat::decode_from(&mut cursor).unwrap();
     assert_eq!(decoded.retired_counts.len(), 0);
+    assert_eq!(decoded.playback_clocks.len(), 0);
     assert_eq!(decoded.ff_saturation_count, 0);
 }
 
@@ -286,16 +277,18 @@ fn status_heartbeat_roundtrip_with_axes() {
         engine_state: 1,
         fault_code: 0,
         retired_counts: vec![42, 42, 10, 5],
+        playback_clocks: vec![900, 901, 7, 0],
         ff_saturation_count: 7,
     };
     let mut buf = Vec::new();
     msg.encode(&mut buf);
-    assert_eq!(buf.len(), 24);
+    assert_eq!(buf.len(), 56);
     let mut cursor = Cursor::new(&buf);
     let decoded = StatusHeartbeat::decode_from(&mut cursor).unwrap();
     assert_eq!(decoded.engine_state, 1);
     assert_eq!(decoded.fault_code, 0);
     assert_eq!(decoded.retired_counts, vec![42, 42, 10, 5]);
+    assert_eq!(decoded.playback_clocks, vec![900, 901, 7, 0]);
     assert_eq!(decoded.ff_saturation_count, 7);
 }
 
@@ -305,6 +298,7 @@ fn status_heartbeat_short_frame_missing_ff_saturation_is_decode_error() {
         engine_state: 2,
         fault_code: 0,
         retired_counts: vec![99],
+        playback_clocks: vec![1234],
         ff_saturation_count: 5,
     };
     let full = msg.encoded_to_vec();
@@ -316,221 +310,24 @@ fn status_heartbeat_short_frame_missing_ff_saturation_is_decode_error() {
 }
 
 #[test]
-fn push_pieces_single_axis_round_trips() {
-    // axis_count(1) + block header(8) + 1 piece(16 + 4*4 = 32) = 41 bytes.
-    let msg = PushPieces::single(2, 1, 41, 5000, one_piece(0xAB, 4));
-    let buf = msg.encoded_to_vec();
-    assert_eq!(buf.len(), 1 + 8 + 32);
-    assert_eq!(buf[0], 1, "leading axis_count byte");
-    let decoded = PushPieces::decode(&buf).expect("decode ok");
-    assert_eq!(decoded, msg);
-    let a = &decoded.axes[0];
-    assert_eq!(
-        (a.axis_idx, a.piece_count, a.start_slot, a.new_head),
-        (2, 1, 41, 5000)
-    );
-    assert_eq!(a.pieces_bytes, one_piece(0xAB, 4));
-}
-
-#[test]
-fn push_pieces_three_axes_round_trip() {
-    let msg = PushPieces {
-        axes: vec![
-            AxisPieces {
-                axis_idx: 0,
-                piece_count: 1,
-                start_slot: 0,
-                new_head: 1,
-                pieces_bytes: one_piece(0x10, 4),
-            },
-            AxisPieces {
-                axis_idx: 1,
-                piece_count: 2,
-                start_slot: 4,
-                new_head: 6,
-                pieces_bytes: [one_piece(0x20, 4), one_piece(0x20, 4)].concat(),
-            },
-            AxisPieces {
-                axis_idx: 2,
-                piece_count: 1,
-                start_slot: 7,
-                new_head: 8,
-                pieces_bytes: one_piece(0x30, 4),
-            },
-        ],
+fn status_heartbeat_missing_playback_clocks_is_decode_error() {
+    let msg = StatusHeartbeat {
+        engine_state: 1,
+        fault_code: 0,
+        retired_counts: vec![7, 8],
+        playback_clocks: vec![100, 200],
+        ff_saturation_count: 0,
     };
-    let buf = msg.encoded_to_vec();
-    // 1 + (8+32) + (8+64) + (8+32) = 153 bytes.
-    assert_eq!(buf.len(), 1 + (8 + 32) + (8 + 64) + (8 + 32));
-    assert_eq!(buf[0], 3);
-    assert_eq!(PushPieces::decode(&buf).expect("decode ok"), msg);
-}
-
-#[test]
-fn push_pieces_three_axes_one_piece_fits_frame_budget() {
-    let block = |axis| AxisPieces {
-        axis_idx: axis,
-        piece_count: 1,
-        start_slot: 0,
-        new_head: 1,
-        pieces_bytes: one_piece(0, 4),
-    };
-    let msg = PushPieces {
-        axes: vec![block(0), block(1), block(2)],
+    let full = msg.encoded_to_vec();
+    let without_clocks = {
+        let mut bytes = full[..4 + 8].to_vec();
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes
     };
     assert!(
-        msg.encoded_to_vec().len() <= PIECE_FRAME_PAYLOAD_MAX,
-        "3 axes x 1 piece must fit the shared MCU frame budget"
+        StatusHeartbeat::decode(&without_clocks).is_err(),
+        "a heartbeat that stops after the retirement counts must not decode"
     );
-}
-
-#[test]
-fn max_pieces_per_axis_is_at_least_one_for_realistic_axis_counts() {
-    // `ConfigureAxes::steps_per_mm` fixes the dispatcher at 4 axes — the
-    // realistic single-MCU axis count this budget must serve.
-    for n in 1..=4u8 {
-        assert!(
-            max_pieces_per_axis(n) >= 1,
-            "axis_count {n} must admit at least one piece per axis within the frame budget"
-        );
-        // And a frame built to that cap must actually fit, sized at the
-        // worst-case (8-coefficient, PIECE_WIRE_MAX_LEN) entry.
-        let pc = max_pieces_per_axis(n) as u8;
-        let axes = (0..n)
-            .map(|axis| AxisPieces {
-                axis_idx: axis,
-                piece_count: pc,
-                start_slot: 0,
-                new_head: u32::from(pc),
-                pieces_bytes: vec![0; PIECE_WIRE_MAX_LEN * pc as usize],
-            })
-            .collect();
-        assert!(PushPieces { axes }.encoded_to_vec().len() <= PIECE_FRAME_PAYLOAD_MAX);
-    }
-}
-
-#[test]
-fn max_pieces_per_axis_saturates_to_zero_beyond_the_worst_case_budget() {
-    // At `PIECE_WIRE_MAX_LEN`-sized (8-coefficient) worst-case entries, 5+
-    // axes on one frame can no longer fit even one piece per axis — the
-    // documented "too many axes for the buffer" case.
-    for n in 5..=6u8 {
-        assert_eq!(
-            max_pieces_per_axis(n),
-            0,
-            "axis_count {n} must saturate to 0 under the worst-case entry budget"
-        );
-    }
-}
-
-#[test]
-fn push_pieces_decode_axis_count_zero_is_err() {
-    assert_eq!(
-        PushPieces::decode(&[0u8]).unwrap_err(),
-        DecodeError::EmptyArray {
-            field: "PushPieces.axes"
-        }
-    );
-}
-
-#[test]
-fn push_pieces_decode_duplicate_axis_idx_is_err() {
-    // axis_count=2; two complete blocks both axis_idx=1, piece_count=0.
-    let mut buf = vec![2u8];
-    for _ in 0..2 {
-        buf.extend_from_slice(&[1, 0]); // axis_idx=1, piece_count=0
-        buf.extend_from_slice(&0u16.to_le_bytes()); // start_slot
-        buf.extend_from_slice(&0u32.to_le_bytes()); // new_head
-    }
-    assert_eq!(
-        PushPieces::decode(&buf).unwrap_err(),
-        DecodeError::DuplicateField {
-            field: "PushPieces.axis_idx"
-        }
-    );
-}
-
-#[test]
-fn push_pieces_decode_truncated_is_err() {
-    let full = PushPieces::single(0, 1, 0, 0, one_piece(0xCD, 4)).encoded_to_vec();
-    assert!(
-        matches!(
-            PushPieces::decode(&full[..full.len() - 5]),
-            Err(DecodeError::UnexpectedEof)
-        ),
-        "a frame missing coefficient bytes must fail with UnexpectedEof, not read garbage"
-    );
-}
-
-#[test]
-fn push_pieces_decode_bad_coeff_count_is_err() {
-    let full = PushPieces::single(0, 1, 0, 0, one_piece(0, 0)).encoded_to_vec();
-    assert_eq!(
-        PushPieces::decode(&full).unwrap_err(),
-        DecodeError::BadCoeffCount { raw: 0 }
-    );
-}
-
-#[test]
-fn push_pieces_decode_coeff_count_above_max_is_err() {
-    let mut bytes = one_piece(0, 1);
-    bytes[13] = MAX_PIECE_COEFFS as u8 + 1;
-    let full = PushPieces::single(0, 1, 0, 0, bytes).encoded_to_vec();
-    assert_eq!(
-        PushPieces::decode(&full).unwrap_err(),
-        DecodeError::BadCoeffCount {
-            raw: MAX_PIECE_COEFFS as u8 + 1
-        }
-    );
-}
-
-#[test]
-fn push_pieces_response_frame_level_round_trips() {
-    // result(i32) | arrival_clock(u64) | axis_count(u8) | per-axis(axis_idx u8 + front_start_time u64).
-    let msg = PushPiecesResponse {
-        result: -2,
-        arrival_clock: 0x0102_0304_0506_0708_u64,
-        axes: vec![
-            AxisDiag {
-                axis_idx: 0,
-                front_start_time: 0xDEAD_BEEF_CAFE_1234,
-            },
-            AxisDiag {
-                axis_idx: 2,
-                front_start_time: 0x1111_2222_3333_4444,
-            },
-        ],
-    };
-    let buf = msg.encoded_to_vec();
-    assert_eq!(buf.len(), 4 + 8 + 1 + 2 * (1 + 8));
-    assert_eq!(&buf[0..4], &0xFFFF_FFFE_u32.to_le_bytes());
-    assert_eq!(buf[12], 2, "axis_count byte");
-    assert_eq!(PushPiecesResponse::decode(&buf).expect("decode ok"), msg);
-}
-
-#[test]
-fn push_pieces_response_single_helper_round_trips() {
-    let msg = PushPiecesResponse::single(0, 7, 1, 9000);
-    let decoded = PushPiecesResponse::decode(&msg.encoded_to_vec()).expect("decode ok");
-    assert_eq!(decoded, msg);
-    assert_eq!(
-        decoded.axes[0],
-        AxisDiag {
-            axis_idx: 1,
-            front_start_time: 9000
-        }
-    );
-}
-
-#[test]
-fn push_pieces_kind_in_message_kind_table() {
-    assert_eq!(MessageKind::from_u16(0x0060), Some(MessageKind::PushPieces));
-    assert_eq!(
-        MessageKind::from_u16(0x0061),
-        Some(MessageKind::PushPiecesResponse)
-    );
-    assert_eq!(MessageKind::PushPieces.as_u16(), 0x0060);
-    assert_eq!(MessageKind::PushPiecesResponse.as_u16(), 0x0061);
 }
 
 #[test]

@@ -646,7 +646,7 @@ fn rebase_after_probe_trip_round_trips_through_cartesian_inversion() {
     // double-transformed an already-correct position into garbage (the
     // bench's "probe at 197.500,-47.500" from a real (150,245) point).
     use crate::kinematics::KinematicsModule;
-    use crate::mcu_config::{McuAxisConfig, McuCaps, reanchor_axis_targets};
+    use crate::mcu_config::{McuAxisConfig, reanchor_axis_targets};
     use crate::motion_history::assemble_cartesian_state;
     use runtime::segment::KinematicTag;
 
@@ -656,9 +656,6 @@ fn rebase_after_probe_trip_round_trips_through_cartesian_inversion() {
         mcu_id: 1,
         axes: vec![0, 1, 2],
         kinematics: KinematicTag::CoreXy as u8,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         ..Default::default()
     }];
     let cart_x = 150.0;

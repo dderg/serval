@@ -2,7 +2,7 @@
 #define __STEPPER_H
 
 #include <stdint.h>
-#include "autoconf.h" // CONFIG_CLASSIC_STEPPING
+#include "autoconf.h" // CONFIG_MOTION_RUNTIME
 #include "basecmd.h" // struct move_queue_head
 #include "board/gpio.h" // struct gpio_out
 #include "compiler.h" // DIV_ROUND_UP
@@ -45,7 +45,6 @@ stepper_suppress_mask(uint8_t motor)
 #endif
 
 struct stepper {
-#if CONFIG_CLASSIC_STEPPING
     struct timer time;
     uint32_t interval;
 #if CONFIG_HIGH_PREC_STEP
@@ -62,7 +61,6 @@ struct stepper {
     struct move_queue_head mq;
     struct move_queue_head completed_barriers;
     uint8_t flags : 8;
-#endif
     struct gpio_out step_pin, dir_pin;
     uint32_t step_pulse_ticks;
     uint8_t step_both_edge, step_idle_level;
@@ -71,8 +69,6 @@ struct stepper {
 
 void command_config_stepper(uint32_t *args);
 struct stepper *stepper_oid_lookup(uint8_t oid);
-
-#if CONFIG_CLASSIC_STEPPING
 
 struct stepper_move {
     struct move_node node;
@@ -125,7 +121,5 @@ uint_fast8_t stepper_event_full(struct timer *t);
 uint32_t stepper_get_position(struct stepper *s);
 void stepper_classic_halt(struct stepper *s);
 uint8_t stepper_classic_halt_all(uint32_t *stream_end_clock);
-
-#endif // CONFIG_CLASSIC_STEPPING
 
 #endif // stepper.h

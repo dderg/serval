@@ -1,5 +1,5 @@
 from klippy.extras import stepper_enable as _stepper_enable_mod
-from klippy.mcu import PHASE_TRANSPORT_PIECE, STEPCOMPRESS_ENCODER_HP
+from klippy.mcu import STEPCOMPRESS_ENCODER_HP, STEPCOMPRESS_SAMPLE_RATE_HZ
 
 
 class _FakeClockSync:
@@ -23,6 +23,8 @@ class _FakeClockSync:
 
 
 class FakeMcu:
+    PRESENT_COMMAND = object()
+
     def __init__(
         self,
         printer=None,
@@ -34,12 +36,12 @@ class FakeMcu:
         state_cmd=None,
         non_critical_disconnected=False,
         clocksync_debug="fake clocksync",
-        stepping_mode=0,
-        stepcompress_sample_rate=0.0,
+        stepcompress_sample_rate=STEPCOMPRESS_SAMPLE_RATE_HZ,
         stepcompress_encoder=STEPCOMPRESS_ENCODER_HP,
         stepcompress_max_error=0.0,
         move_queue_slots=0,
-        phase_transport=PHASE_TRANSPORT_PIECE,
+        constants=None,
+        missing_commands=(),
     ):
         self._printer = printer
         self._name = name
@@ -53,12 +55,12 @@ class FakeMcu:
         self.state_cmd = state_cmd
         self.non_critical_disconnected = non_critical_disconnected
         self._clocksync = _FakeClockSync(clocksync_debug)
-        self._stepping_mode = stepping_mode
         self._stepcompress_sample_rate = stepcompress_sample_rate
         self._stepcompress_encoder = stepcompress_encoder
         self._stepcompress_max_error = stepcompress_max_error
         self._move_queue_slots = move_queue_slots
-        self._phase_transport = phase_transport
+        self._constants = {} if constants is None else dict(constants)
+        self.missing_commands = tuple(missing_commands)
 
     def get_printer(self):
         return self._printer
@@ -69,11 +71,8 @@ class FakeMcu:
     def get_engine_handle(self):
         return self._handle
 
-    def get_stepping_mode(self):
-        return self._stepping_mode
-
-    def get_phase_transport(self):
-        return self._phase_transport
+    def get_constants(self):
+        return self._constants
 
     def get_stepcompress_sample_rate(self):
         return self._stepcompress_sample_rate
@@ -114,6 +113,13 @@ class FakeMcu:
 
     def lookup_query_command(self, msgformat, respformat, oid=None):
         return self.state_cmd
+
+    def try_lookup_command(self, msgformat):
+        if msgformat.split(" ")[0] in self.missing_commands:
+            return None
+        if self.query_cmd is not None:
+            return self.query_cmd
+        return FakeMcu.PRESENT_COMMAND
 
 
 class FakeStepper:

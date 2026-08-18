@@ -3,7 +3,7 @@
 //! rather than a silent projection off the previous boot epoch's numbers.
 
 use super::*;
-use crate::mcu_config::{McuAxisConfig, StepcompressEncoder, SteppingMode};
+use crate::mcu_config::{LaneKind, McuAxisConfig, StepcompressEncoder};
 use host_rt::clock::{Clock, MockClock};
 use host_rt::clock_regression::NON_RESONANT_GET_CLOCK_PERIOD_SECS;
 use host_rt::passthrough_queue::{MAX_CLOCK_RECORD_AGE_SECS, McuHandle, PassthroughRouter};
@@ -19,10 +19,10 @@ fn stepcompress_cfg() -> McuAxisConfig {
         mcu_id: MCU_ID,
         axes: vec![0],
         kinematics: 0,
-        caps: Default::default(),
         max_motor_velocity: vec![200.0],
         ethercat: false,
-        stepping_mode: SteppingMode::Stepcompress,
+        lane_kinds: vec![LaneKind::Pulse],
+        motor_counts: vec![1],
         microstep_distance: vec![0.01],
         invert_dir: vec![false],
         stepper_oids: vec![7],
@@ -30,6 +30,8 @@ fn stepcompress_cfg() -> McuAxisConfig {
         move_queue_slots: 128,
         step_pulse_seconds: vec![0.000_002],
         stepcompress_encoder: StepcompressEncoder::HighPrecision,
+        phase_sample_rate: 0.0,
+        phase_ring_depth: 0,
         stepcompress_max_error_secs: 0.0,
     }
 }

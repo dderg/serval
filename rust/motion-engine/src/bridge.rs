@@ -16,11 +16,12 @@ use host_rt::passthrough_queue::PassthroughRouter;
 
 use crate::classify;
 use crate::config::{self, PlannerConfig};
-use crate::mcu_config::{McuAxisConfig, McuCaps, McuTopologyInput, build_mcu_configs};
+use crate::mcu_config::{McuAxisConfig, McuTopologyInput, build_mcu_configs};
 use crate::types::mcu_handle_from_raw;
 use crate::worker::{StreamWorkerError, StreamWorkerHandle};
 
 mod attach;
+mod axis_transport_api;
 mod clock_regression;
 pub use clock_regression::{PyClockSyncEstimator, PyDecayRegression};
 mod drain_wait;
@@ -44,14 +45,11 @@ use endstop::{TripDeps, dispatch_endstop_trip};
 #[cfg(test)]
 use ethercat_endpoint::{EndpointClaimError, ReportedExecutor, endpoint_args};
 use ethercat_endpoint::{
-    Executor, SampleGrid, arm_endpoint_death_watchdog, build_ring_filler,
-    handshake_ethercat_endpoint, message_for_claim_error, poll_socket_ready,
-    report_ethercat_endpoint_death, spawn_ethercat_endpoint, verify_sample_grid,
+    SampleGrid, arm_endpoint_death_watchdog, build_ring_filler, handshake_ethercat_endpoint,
+    message_for_claim_error, poll_socket_ready, report_ethercat_endpoint_death,
+    spawn_ethercat_endpoint, verify_sample_grid,
 };
-use motion_caps::{
-    axis_ring_depth, drip_cohort_participants, require_events_dir_for_mcu_transport,
-    resolve_motion_caps, ring_depth_for_axis_inner,
-};
+use motion_caps::{drip_cohort_participants, require_events_dir_for_mcu_transport};
 #[cfg(test)]
 use runtime_caps::place_motor_response;
 use runtime_caps::{
@@ -183,7 +181,9 @@ pub struct PyMotionEngine {
     bed_mesh: Mutex<Option<Arc<geometry::SurfaceTransform>>>,
     last_g5_pq: Mutex<Option<(f64, f64)>>,
     mcu_axis_configs: Arc<Mutex<Vec<McuAxisConfig>>>,
+    axis_transports: Mutex<Arc<crate::axis_transport::AxisTransports>>,
     stepcompress_endpoints: Arc<Mutex<HashMap<u32, Arc<Mutex<crate::pump::StepcompressEndpoint>>>>>,
+    sample_endpoints: Arc<Mutex<HashMap<u32, Arc<Mutex<crate::pump::SampleEndpoint>>>>>,
     dispatched_segments: Arc<AtomicU64>,
     dispatch_anchor: Arc<Mutex<crate::anchor::Anchor>>,
     fallback_clock_conversions: Arc<AtomicU64>,
@@ -224,7 +224,9 @@ impl PyMotionEngine {
             bed_mesh: Mutex::new(None),
             last_g5_pq: Mutex::new(None),
             mcu_axis_configs: Arc::new(Mutex::new(Vec::new())),
+            axis_transports: Mutex::new(Arc::new(crate::axis_transport::AxisTransports::default())),
             stepcompress_endpoints: Arc::new(Mutex::new(HashMap::new())),
+            sample_endpoints: Arc::new(Mutex::new(HashMap::new())),
             dispatched_segments: Arc::new(AtomicU64::new(0)),
             dispatch_anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
             fallback_clock_conversions: Arc::new(AtomicU64::new(0)),
@@ -291,7 +293,7 @@ impl PyMotionEngine {
         Ok(raw)
     }
 
-    #[pyo3(signature = (label, socket_path, interface, endpoint_binary, cycle_us, dynamics_profile, drives, executor, late_tolerance_us=None, group_delay_us=None))]
+    #[pyo3(signature = (label, socket_path, interface, endpoint_binary, cycle_us, dynamics_profile, drives, late_tolerance_us=None, group_delay_us=None))]
     #[allow(clippy::too_many_arguments)]
     fn claim_ethercat_node(
         &self,
@@ -302,16 +304,9 @@ impl PyMotionEngine {
         cycle_us: u32,
         dynamics_profile: Option<String>,
         drives: Vec<EthercatDrive>,
-        executor: &str,
         late_tolerance_us: Option<f64>,
         group_delay_us: Option<f64>,
     ) -> PyResult<u32> {
-        let executor = Executor::from_config_value(executor).ok_or_else(|| {
-            PyRuntimeError::new_err(format!(
-                "ethercat {label}: unknown executor '{executor}' — accepted values: {}",
-                Executor::ACCEPTED_CONFIG_VALUES
-            ))
-        })?;
         if drives.is_empty() {
             return Err(PyRuntimeError::new_err(format!(
                 "ethercat {label}: claim received no drives"
@@ -335,7 +330,6 @@ impl PyMotionEngine {
             interface,
             socket_path,
             cycle_us,
-            executor,
             dynamics_profile.as_deref(),
             late_tolerance_us,
             group_delay_us.unwrap_or(f64::from(cycle_us)),
@@ -362,7 +356,7 @@ impl PyMotionEngine {
             PyRuntimeError::new_err(message_for_claim_error(label, interface, &e))
         })?;
 
-        let sample_grid = verify_sample_grid(&conn, executor, handshake_deadline).map_err(|e| {
+        let sample_grid = verify_sample_grid(&conn, handshake_deadline).map_err(|e| {
             let _ = child.kill();
             let _ = child.wait();
             PyRuntimeError::new_err(message_for_claim_error(label, interface, &e))
@@ -373,8 +367,7 @@ impl PyMotionEngine {
                 let _ = child.kill();
                 let _ = child.wait();
                 PyRuntimeError::new_err(format!(
-                    "ethercat {label}: executor is '{executor}' but the host cannot build its \
-                     setpoint filler — {e}"
+                    "ethercat {label}: the host cannot build the endpoint's setpoint filler — {e}"
                 ))
             })?;
 
@@ -651,11 +644,6 @@ impl PyMotionEngine {
             |conn| Ok(conn.identify_caps),
         )
     }
-
-    fn ring_depth_for_axis(&self, mcu_handle: u32, axis: u8) -> PyResult<u16> {
-        let configs = self.mcu_axis_configs.lock_ok();
-        ring_depth_for_axis_inner(&configs, mcu_handle, axis).map_err(PyRuntimeError::new_err)
-    }
 }
 
 impl Drop for PyMotionEngine {
@@ -718,7 +706,7 @@ impl PyMotionEngine {
         conn: McuSerialConn,
         slot_axes: Vec<usize>,
         sample_grid: SampleGrid,
-        ring_filler: Option<crate::pump::RingFiller>,
+        ring_filler: crate::pump::RingFiller,
     ) {
         let ethercat = McuConnection {
             label: label.to_owned(),
@@ -733,7 +721,7 @@ impl PyMotionEngine {
             endpoint_conn: Some(Arc::new(conn)),
             ethercat_slot_axes: slot_axes,
             sample_grid: Some(sample_grid),
-            ring_filler,
+            ring_filler: Some(ring_filler),
         };
         tracing::info!(
             subsystem = "engine",
@@ -766,19 +754,10 @@ mod claim_error_message_tests;
 mod drip_cohort_participants_tests;
 
 #[cfg(test)]
-mod axis_ring_depth_tests;
-
-#[cfg(test)]
-mod ring_depth_for_axis_tests;
-
-#[cfg(test)]
 mod place_motor_response_tests;
 
 #[cfg(test)]
 mod require_events_dir_tests;
-
-#[cfg(test)]
-mod resolve_motion_caps_tests;
 
 #[cfg(test)]
 mod ethercat_endpoint_tests;

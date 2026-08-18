@@ -9,6 +9,8 @@
 #define SAMPLE_RUN_ARGS "sample_run oid=%c interval=%u count=%c data=%*s"
 #define SAMPLE_OVERLAY_ARGS \
     "sample_overlay oid=%c clock=%u interval=%u count=%c data=%*s"
+#define SAMPLE_BARRIER_ARGS "sample_barrier oid=%c seq=%u"
+#define SAMPLE_BARRIER_ACK_ARGS "sample_barrier_ack oid=%c seq=%u"
 #define SAMPLE_GET_POSITION_ARGS "sample_get_position oid=%c"
 #define SAMPLE_POSITION_ARGS "sample_position oid=%c clock=%u position=%i"
 

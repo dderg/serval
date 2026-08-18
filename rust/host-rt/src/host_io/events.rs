@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, sync_channel};
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
@@ -105,34 +105,44 @@ impl TraceRing {
 #[derive(Debug, Default)]
 pub struct RuntimeEventDispatcher {
     priority: Option<SyncSender<RuntimeEvent>>,
-    bulk: Option<SyncSender<RuntimeEvent>>,
+    bulk: Option<Sender<RuntimeEvent>>,
+    priority_overflow: bool,
 }
 
 impl RuntimeEventDispatcher {
     pub fn dispatch(&mut self, event: RuntimeEvent) {
         if event.is_bulk_data() {
-            Self::send_lane(&mut self.bulk, event, "bulk");
+            if let Some(tx) = self.bulk.as_ref() {
+                if tx.send(event).is_err() {
+                    self.bulk = None;
+                }
+            }
         } else {
-            Self::send_lane(&mut self.priority, event, "priority");
+            self.send_priority(event);
         }
     }
 
-    fn send_lane(lane: &mut Option<SyncSender<RuntimeEvent>>, event: RuntimeEvent, which: &str) {
-        if let Some(tx) = lane.as_ref() {
-            match tx.try_send(event) {
-                Ok(()) => {}
-                Err(TrySendError::Full(e)) => {
-                    tracing::warn!(
+    fn send_priority(&mut self, event: RuntimeEvent) {
+        let Some(tx) = self.priority.as_ref() else {
+            return;
+        };
+        match tx.try_send(event) {
+            Ok(()) => self.priority_overflow = false,
+            Err(TrySendError::Full(event)) => {
+                if !self.priority_overflow {
+                    tracing::error!(
                         subsystem = "mcu-comms",
                         event = "runtime_event_subscriber_overflow",
-                        lane = which,
-                        error = ?e,
+                        lane = "priority",
+                        dropped = runtime_event_name(&event),
                         "runtime-event subscriber overflow; dropping"
                     );
                 }
-                Err(TrySendError::Disconnected(_)) => {
-                    *lane = None;
-                }
+                self.priority_overflow = true;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.priority = None;
+                self.priority_overflow = false;
             }
         }
     }
@@ -140,7 +150,7 @@ impl RuntimeEventDispatcher {
     pub fn subscribe(
         &mut self,
         priority: SyncSender<RuntimeEvent>,
-        bulk: SyncSender<RuntimeEvent>,
+        bulk: Sender<RuntimeEvent>,
     ) -> Result<(), crate::transport::SubscribeError> {
         if self.priority.is_some() || self.bulk.is_some() {
             return Err(crate::transport::SubscribeError::AlreadySubscribed {
@@ -149,7 +159,22 @@ impl RuntimeEventDispatcher {
         }
         self.priority = Some(priority);
         self.bulk = Some(bulk);
+        self.priority_overflow = false;
         Ok(())
+    }
+}
+
+fn runtime_event_name(event: &RuntimeEvent) -> &str {
+    match event {
+        RuntimeEvent::CreditFreed(_) => "credit_freed",
+        RuntimeEvent::Fault(_) => "fault",
+        RuntimeEvent::Status(_) => "status",
+        RuntimeEvent::Trace(_) => "trace",
+        RuntimeEvent::EndstopTrip(_) => "endstop_trip",
+        RuntimeEvent::McuLog(_) => "mcu_log",
+        RuntimeEvent::Heartbeat { .. } => "heartbeat",
+        RuntimeEvent::UnknownOutput { .. } => "unknown_output",
+        RuntimeEvent::PassthroughResponse { name, .. } => name,
     }
 }
 
@@ -246,7 +271,7 @@ pub struct EventDispatcher {
     pub runtime_event_dispatcher: RuntimeEventDispatcher,
     pub host_event_dispatcher: HostEventDispatcher,
     status_retired_watermark: u32,
-    pub heartbeat_callback: Option<Arc<dyn Fn(&[u32]) + Send + Sync>>,
+    pub heartbeat_callback: Option<Arc<dyn Fn(&[u32], &[u64]) + Send + Sync>>,
     pub mcu_log_hook: Option<Box<dyn Fn(McuLogEvent) + Send + Sync>>,
 }
 
@@ -318,9 +343,12 @@ impl EventDispatcher {
                     self.dispatch(RuntimeEvent::CreditFreed(c));
                 }
             }
-            RuntimeEvent::Heartbeat { retired_counts } => {
+            RuntimeEvent::Heartbeat {
+                retired_counts,
+                playback_clocks,
+            } => {
                 if let Some(cb) = &self.heartbeat_callback {
-                    cb(&retired_counts);
+                    cb(&retired_counts, &playback_clocks);
                 }
             }
             RuntimeEvent::EndstopTrip(_)

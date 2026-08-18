@@ -1,9 +1,8 @@
 // Sample-stream playback for phase-stepped lanes.
 //
 // The tick ISR interpolates linearly between the two samples bracketing `now`,
-// rounds to the nearest LUT phase quantum, and hands the result to the existing
-// `write_phase_coils` quantizer and SPI arbitration. No Chebyshev evaluation
-// and no piece ring live on this path.
+// rounds to the nearest LUT phase quantum, and hands the result to the
+// `write_phase_coils` quantizer and SPI arbitration.
 //
 // C/Rust boundary: every byte of run storage lives inside `SampleLane`, which
 // the engine embeds in `IsrState` inside the C-declared `rt_storage[]` buffer.
@@ -24,8 +23,7 @@ const _: () = assert!(
 pub type SampleSlot = SampleRunBuf<SAMPLE_RUN_COUNT_MAX>;
 
 /// A run whose start clock is already this many ticks behind the playback
-/// clock has missed its window. Matches the tolerance `get_piece_for_time`
-/// applies to a late piece.
+/// clock has missed its window.
 pub const LATE_TOLERANCE_TICKS: u64 = 2;
 
 /// Widen a 32-bit wire clock against the playback clock by picking the
@@ -54,6 +52,7 @@ pub fn widen_wire_clock(now: u64, clock: u32) -> u64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SampleLaneFault {
     RingFull,
+    BarrierOverflow,
     Late { deficit_ticks: u64 },
     Run(SampleRunError),
 }
@@ -62,6 +61,9 @@ impl SampleLaneFault {
     pub fn latch(self, shared: &SharedState, lane_idx: usize) {
         match self {
             Self::RingFull => crate::fault_helpers::raise_sample_ring_full(shared, lane_idx),
+            Self::BarrierOverflow => {
+                crate::fault_helpers::raise_sample_barrier_overflow(shared, lane_idx);
+            }
             Self::Late { deficit_ticks } => crate::fault_helpers::raise_sample_run_late(
                 shared,
                 lane_idx,
@@ -76,6 +78,7 @@ impl SampleLaneFault {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RingFull => "sample lane run ring is full",
+            Self::BarrierOverflow => "sample lane has too many unacked barriers",
             Self::Late { .. } => "sample run start clock is already in the past",
             Self::Run(err) => err.as_str(),
         }
@@ -95,6 +98,10 @@ struct SlotRing<const DEPTH: usize> {
     slots: [SampleSlot; DEPTH],
     tail: usize,
     len: usize,
+    /// Monotonic count of runs the ring no longer holds — played out or
+    /// dropped by a clear. `clear` credits what it drops so the host's
+    /// sent-minus-retired window reopens across an anchor or a halt.
+    retired: u32,
 }
 
 impl<const DEPTH: usize> SlotRing<DEPTH> {
@@ -103,10 +110,14 @@ impl<const DEPTH: usize> SlotRing<DEPTH> {
             slots: [SampleSlot::new(0, 1); DEPTH],
             tail: 0,
             len: 0,
+            retired: 0,
         }
     }
 
     fn clear(&mut self) {
+        #[allow(clippy::cast_possible_truncation)]
+        let dropped = self.len as u32;
+        self.retired = self.retired.wrapping_add(dropped);
         self.tail = 0;
         self.len = 0;
     }
@@ -141,6 +152,7 @@ impl<const DEPTH: usize> SlotRing<DEPTH> {
         }
         self.tail = (self.tail + 1) % DEPTH;
         self.len -= 1;
+        self.retired = self.retired.wrapping_add(1);
     }
 }
 
@@ -148,6 +160,19 @@ impl<const DEPTH: usize> SlotRing<DEPTH> {
 struct Halt {
     clock: u64,
     position: i32,
+}
+
+/// Unacked `sample_barrier` receipts a lane may hold. The host pipelines at
+/// most a couple of cuts; more than this is a host bug, not backpressure.
+pub const SAMPLE_BARRIERS_PER_LANE: usize = 4;
+
+/// A fence the host wants receipted once playback has passed `fence_clock`.
+/// `fence_clock == 0` is already satisfied — the fence was behind the playback
+/// clock when it arrived, which is the idle-lane case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Barrier {
+    seq: u32,
+    fence_clock: u64,
 }
 
 /// One phase lane's sample stream: the run ring, the additive overlay ring,
@@ -165,6 +190,8 @@ pub struct SampleLane {
     played: i32,
     played_clock: u64,
     halt: Option<Halt>,
+    barriers: [Barrier; SAMPLE_BARRIERS_PER_LANE],
+    barrier_len: usize,
 }
 
 impl SampleLane {
@@ -179,6 +206,11 @@ impl SampleLane {
             played: 0,
             played_clock: 0,
             halt: None,
+            barriers: [Barrier {
+                seq: 0,
+                fence_clock: 0,
+            }; SAMPLE_BARRIERS_PER_LANE],
+            barrier_len: 0,
         }
     }
 
@@ -190,8 +222,38 @@ impl SampleLane {
         self.halt.is_some()
     }
 
+    /// Whether the lane still has a playback origin, i.e. samples the host
+    /// expects it to execute. A halted lane has none: `halt` unanchored the
+    /// cursor and dropped every queued run, leaving only a frozen hold.
+    pub const fn has_playback(&self) -> bool {
+        self.cursor.is_anchored()
+    }
+
+    /// A transport switch takes the axis away from this lane. The frozen hold a
+    /// trip left behind belongs to the mode being left, and the host owes a
+    /// fresh anchor before the lane may drive the axis again, so the hold is
+    /// released rather than carried across the switch.
+    pub fn release_hold(&mut self) {
+        self.halt = None;
+    }
+
     pub fn depth(&self) -> usize {
         self.main.len()
+    }
+
+    pub fn retired(&self) -> u32 {
+        self.main.retired
+    }
+
+    /// The clock this lane last evaluated playback at: every run whose
+    /// `end_clock` is at or before it has been popped off the ring.
+    pub const fn playback_clock(&self) -> u64 {
+        self.played_clock
+    }
+
+    pub fn front_window(&self) -> Option<(u64, u64)> {
+        let header = self.main.get(0)?.header();
+        Some((header.start_clock, header.end_clock()))
     }
 
     /// Cross a sanctioned discontinuity: drop everything queued and restart the
@@ -204,6 +266,7 @@ impl SampleLane {
         self.played = position;
         self.played_clock = clock;
         self.halt = None;
+        self.release_barriers();
         Ok(())
     }
 
@@ -289,6 +352,7 @@ impl SampleLane {
             clock: now,
             position,
         });
+        self.release_barriers();
     }
 
     /// Executed position for host reconcile: the halt point when halted,
@@ -299,6 +363,52 @@ impl SampleLane {
         match self.halt {
             Some(halt) => (halt.clock, halt.position),
             None => (self.played_clock, self.played),
+        }
+    }
+
+    /// Fence the runs pushed so far: the host gets a receipt once playback has
+    /// passed the clock the next run would start at. A fence already behind the
+    /// playback clock — an idle or empty lane — is satisfied on arrival, so the
+    /// host's ack deadline cannot strand it.
+    pub fn push_barrier(&mut self, now: u64, seq: u32) -> Result<(), SampleLaneFault> {
+        if self.barrier_len >= SAMPLE_BARRIERS_PER_LANE {
+            return Err(SampleLaneFault::BarrierOverflow);
+        }
+        let fence_clock = match self.cursor.next_clock() {
+            Some(clock) if clock > now => clock,
+            _ => 0,
+        };
+        let slot = self
+            .barriers
+            .get_mut(self.barrier_len)
+            .ok_or(SampleLaneFault::BarrierOverflow)?;
+        *slot = Barrier { seq, fence_clock };
+        self.barrier_len += 1;
+        Ok(())
+    }
+
+    /// Pop the oldest fence playback has passed. Foreground-only; the caller
+    /// loops until it returns `None` and sends one `sample_barrier_ack` each.
+    pub fn take_passed_barrier(&mut self) -> Option<u32> {
+        if self.barrier_len == 0 {
+            return None;
+        }
+        let head = *self.barriers.first()?;
+        if head.fence_clock > self.played_clock {
+            return None;
+        }
+        self.barriers.copy_within(1..self.barrier_len, 0);
+        self.barrier_len -= 1;
+        Some(head.seq)
+    }
+
+    /// A cut completes every fence it discarded: the runs they fenced are gone
+    /// either way, and a withheld receipt would wedge the host rather than
+    /// merely lose samples — the reasoning `stepper_classic_halt` applies to
+    /// discarded stepcompress barriers.
+    fn release_barriers(&mut self) {
+        for barrier in self.barriers.iter_mut() {
+            barrier.fence_clock = 0;
         }
     }
 
@@ -464,7 +574,3 @@ fn lerp_round(s0: i32, s1: i32, frac: u64, interval: u64) -> i32 {
 #[cfg(test)]
 #[path = "sample_exec_tests.rs"]
 mod sample_exec_tests;
-
-#[cfg(test)]
-#[path = "sample_equivalence_tests.rs"]
-mod sample_equivalence_tests;

@@ -117,10 +117,6 @@ fn fault_code_stepping_redesign_numeric_values() {
         RUNTIME_ERR_MATH_NON_FINITE
     );
     assert_eq!(
-        FaultCode::PieceAdvanceUnderflow.as_i32(),
-        RUNTIME_ERR_PIECE_ADVANCE_UNDERFLOW
-    );
-    assert_eq!(
         FaultCode::SampleRateMisconfigured.as_i32(),
         RUNTIME_ERR_SAMPLE_RATE_MISCONFIGURED
     );
@@ -137,11 +133,6 @@ fn fault_code_stepping_redesign_numeric_values() {
         RUNTIME_ERR_STEP_RATE_EXCEEDS_MCU_CEILING
     );
     assert_eq!(
-        FaultCode::PieceStartInPast.as_i32(),
-        RUNTIME_ERR_PIECE_START_IN_PAST
-    );
-    assert_eq!(FaultCode::RingFull.as_i32(), RUNTIME_ERR_RING_FULL);
-    assert_eq!(
         FaultCode::StepsPerSampleExceeded.as_i32(),
         RUNTIME_ERR_STEPS_PER_SAMPLE_EXCEEDED
     );
@@ -149,14 +140,9 @@ fn fault_code_stepping_redesign_numeric_values() {
         FaultCode::TickIntervalExceeded.as_i32(),
         RUNTIME_ERR_TICK_INTERVAL_EXCEEDED
     );
-    assert_eq!(
-        FaultCode::UnknownStepMode.as_i32(),
-        RUNTIME_ERR_UNKNOWN_STEP_MODE
-    );
     assert_eq!(RUNTIME_ERR_STEP_QUEUE_OVERFLOW, -300);
     assert_eq!(RUNTIME_ERR_STEP_RATE_EXCEEDS_MCU_CEILING, -307);
     assert_eq!(RUNTIME_ERR_TICK_INTERVAL_EXCEEDED, -311);
-    assert_eq!(RUNTIME_ERR_UNKNOWN_STEP_MODE, -312);
     assert_ne!(
         RUNTIME_ERR_STEP_QUEUE_OVERFLOW,
         RUNTIME_ERR_HOST_DISPATCHER_TIMEOUT
@@ -180,11 +166,14 @@ fn fault_code_from_u16_round_trip_positive_zero() {
 }
 
 #[test]
-fn fault_code_from_u16_sign_wrap_piece_start_in_past() {
-    // -308 as i16 = -308; -308i16 as u16 = 65228 = 0xFECC
-    let wire = FaultCode::PieceStartInPast.as_u16();
-    assert_eq!(wire, 0xFECC);
-    assert_eq!(FaultCode::from_u16(wire), Some(FaultCode::PieceStartInPast));
+fn fault_code_from_u16_sign_wrap_steps_per_sample_exceeded() {
+    // -310 as i16 = -310; -310i16 as u16 = 65226 = 0xFECA
+    let wire = FaultCode::StepsPerSampleExceeded.as_u16();
+    assert_eq!(wire, 0xFECA);
+    assert_eq!(
+        FaultCode::from_u16(wire),
+        Some(FaultCode::StepsPerSampleExceeded)
+    );
 }
 
 #[test]
@@ -210,8 +199,11 @@ fn fault_code_from_u16_unknown_returns_none() {
 }
 
 #[test]
-fn code_name_piece_start_in_past() {
-    assert_eq!(FaultCode::PieceStartInPast.code_name(), "PieceStartInPast");
+fn code_name_steps_per_sample_exceeded() {
+    assert_eq!(
+        FaultCode::StepsPerSampleExceeded.code_name(),
+        "StepsPerSampleExceeded"
+    );
 }
 
 #[test]
@@ -283,16 +275,12 @@ fn from_u16_round_trip_all_variants() {
         FaultCode::StepQueueOverflow,
         FaultCode::SpiQueueOverflow,
         FaultCode::MathNonFinite,
-        FaultCode::PieceAdvanceUnderflow,
         FaultCode::SampleRateMisconfigured,
         FaultCode::PositionCountOverflow,
         FaultCode::JogParametersInvalid,
         FaultCode::StepRateExceedsMcuCeiling,
-        FaultCode::PieceStartInPast,
-        FaultCode::RingFull,
         FaultCode::StepsPerSampleExceeded,
         FaultCode::TickIntervalExceeded,
-        FaultCode::UnknownStepMode,
         FaultCode::PhaseMotorUnmapped,
         FaultCode::OverlayUnsupported,
         FaultCode::BuzzAxisConflict,

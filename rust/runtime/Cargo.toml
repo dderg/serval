@@ -57,8 +57,8 @@ motion-module-stepper = []
 # production firmware.
 mcu-sim = []
 # Sample-stream execution for phase-stepped lanes (CONFIG_SAMPLE_STEPPING).
-# Lands beside the piece transport rather than replacing it: with the feature
-# off, none of the sample ring storage or playback code is compiled in.
+# With the feature off, none of the sample ring storage or playback code is
+# compiled in.
 sample-stepping = []
 
 [lints]

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::host_io::fire_and_forget_depth::{FIRE_AND_FORGET_HIGH_WATER, FireAndForgetDepth};
-use crate::host_io::reactor::{PENDING_SUBMISSION_CEILING, PIECE_OUTQ_BUDGET_BYTES, Reactor};
+use crate::host_io::reactor::{PENDING_SUBMISSION_CEILING, Reactor};
 use crate::transport::TransportError;
 
 pub(crate) struct PendingSubmission {
@@ -26,10 +26,6 @@ pub(crate) struct OutboundQueues {
     /// Queued fire-and-forget payloads; the bool marks a `get_clock` frame
     /// whose RAW send stamp is captured at the actual wire write.
     pub(crate) pending_fire_and_forget: VecDeque<(Vec<u8>, bool)>,
-    /// Piece-channel (motion) frames, keyed by correlation id, awaiting a
-    /// shallow kernel tty queue; see `drain_piece_frames` for the priority
-    /// rule this enforces.
-    pub(crate) pending_piece_frames: VecDeque<(u32, Vec<u8>)>,
     pub(crate) pending_outbound_order: VecDeque<PendingOutboundKind>,
     pub(crate) fire_and_forget_depth: Arc<FireAndForgetDepth>,
 }
@@ -39,7 +35,6 @@ impl OutboundQueues {
         Self {
             pending_submissions: VecDeque::new(),
             pending_fire_and_forget: VecDeque::new(),
-            pending_piece_frames: VecDeque::new(),
             pending_outbound_order: VecDeque::new(),
             fire_and_forget_depth,
         }
@@ -85,10 +80,8 @@ impl Reactor {
         let bytes = frame.len();
         // No drain here: waiting for the wire makes this single thread deaf to
         // responses for the frame's whole line time (~20 ms/KiB at 500 kbaud),
-        // which times out unrelated transactions during heavy piece traffic.
-        // The kernel tty buffer queues the bytes; drain_piece_frames bounds
-        // how deep piece traffic may fill it, so control frames written here
-        // are never far from the wire.
+        // which times out unrelated transactions. The kernel tty buffer queues
+        // the bytes.
         let result = self.io.write_all(frame);
         if result.is_ok() {
             self.last_write_time = std::time::Instant::now();
@@ -289,39 +282,6 @@ impl Reactor {
                         );
                     }
                 }
-            }
-        }
-    }
-
-    /// Write queued piece frames while the kernel tty queue is
-    /// shallow. Piece frames yield to control traffic: klipper-channel frames
-    /// (heater/fan PWM, endstops, clocksync) write unconditionally, while a
-    /// piece frame waits until pending wire bytes drop under the budget — so
-    /// a control command is never queued behind more than
-    /// `PIECE_OUTQ_BUDGET_BYTES` of piece bytes. Without this, a print-start
-    /// piece flood keeps the tty queue deep, control acks inflate, and a
-    /// `queue_digital_out` arrives seconds late.
-    pub(crate) fn drain_piece_frames(&mut self) {
-        while !self.outbound.pending_piece_frames.is_empty() {
-            match self.io.bytes_to_write() {
-                Ok(pending) if pending > PIECE_OUTQ_BUDGET_BYTES => return,
-                Ok(_) => {}
-                Err(e) => {
-                    self.transition_closed_on_io_fault("drain_piece_frames/outq_poll", &e);
-                    return;
-                }
-            }
-            let (cid, frame) = self
-                .outbound
-                .pending_piece_frames
-                .pop_front()
-                .expect("checked non-empty");
-            if let Err(e) = self.write_frame(&frame) {
-                self.close_if_io_fault("drain_piece_frames/write_frame", &e);
-                if let Some(p) = self.transport_state.pending.remove(&cid) {
-                    let _ = p.completion.send(Err(e));
-                }
-                return;
             }
         }
     }

@@ -879,17 +879,14 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
     impl SegmentSink for MaxV {
         fn dispatch(&mut self, seg: &ShapedSegment) -> Result<(), DispatchError> {
             // The corexy_fast world's exact motor config: CoreXY mixing, the
-            // 2083 mm/s per-motor step ceiling from its pulse timing. The
-            // wire-piece build panics on any -307-class overspeed track,
+            // 2083 mm/s per-motor step ceiling from its pulse timing.
+            // The enqueue path panics on any -307-class overspeed track,
             // exactly like the live dispatch stage.
             let cfg = vec![crate::mcu_config::McuAxisConfig {
                 ethercat: false,
                 mcu_id: 0,
                 axes: vec![0, 1, 2],
                 kinematics: crate::mcu_config::KINEMATICS_COREXY,
-                caps: crate::mcu_config::McuCaps {
-                    total_piece_memory: 62 * 1024,
-                },
                 max_motor_velocity: vec![2083.3, 2083.3, 208.3],
                 ..Default::default()
             }];

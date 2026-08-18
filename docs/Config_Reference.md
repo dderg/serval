@@ -69,20 +69,12 @@ serial:
 #   Setting this to True will allow the mcu to be disconnected and
 #   reconnected at will without errors. Helpful for USB-accelerometer boards
 #   and USB/CAN-probes
-#stepping_mode: piece
-#   Selects how this micro-controller executes motion. 'piece' (the
-#   default) streams polynomial motion pieces the MCU evaluates in
-#   real time. 'stepcompress' makes the host compute step times and
-#   send classic interval/count/add step queues instead, for MCUs too
-#   weak to evaluate pieces. A 'stepcompress' MCU may not drive
-#   phase-stepped motors and may not be an EtherCAT endpoint.
-#stepcompress_sample_rate:
-#   Rate (in Hz) at which the host samples the planned motion when
-#   generating step queues for this micro-controller. It sets the
-#   quantization of the emitted step times, the host CPU cost of step
-#   generation, and the maximum number of steps per sample. This
-#   parameter must be provided when stepping_mode is 'stepcompress'
-#   and is unused otherwise.
+# Step/dir motors on this micro-controller are always driven by
+# host-computed step queues; phase-stepped motors (phase_stepping: 1) are
+# always driven by the MCU's sample-run executor, which needs firmware built
+# with CONFIG_SAMPLE_STEPPING. One micro-controller may carry both kinds of
+# lane. An EtherCAT endpoint drives neither: its drives consume position
+# setpoints.
 #stepcompress_encoder: hp
 #   How the host compresses sampled step times into classic step queues:
 #   'hp' (the default) uses the high-precision quadratic encoder and
@@ -94,14 +86,6 @@ serial:
 #   introduce on a sub-sample step time. Only valid with
 #   stepcompress_encoder: classic; setting it while the encoder is
 #   'hp' is a configuration error.
-#phase_transport: piece
-#   Selects how phase-stepped lanes on this micro-controller receive
-#   their trajectory. 'piece' (the default) evaluates Chebyshev pieces
-#   on the MCU. 'sample' streams uniformly-spaced position samples the
-#   MCU interpolates linearly at tick rate, which needs firmware built
-#   with CONFIG_SAMPLE_STEPPING. Only valid with stepping_mode: piece,
-#   only on an MCU that has at least one phase_stepping: 1 stepper, and
-#   never on an EtherCAT endpoint.
 ```
 
 ### [mcu my_extra_mcu]

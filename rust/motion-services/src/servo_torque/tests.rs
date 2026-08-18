@@ -81,7 +81,7 @@ fn transport_error_is_an_err() {
 #[test]
 fn wrong_kind_response_is_rejected() {
     let (client, server) = UnixStream::pair().unwrap();
-    let _rx = spawn_endpoint_with_kind(server, MessageKind::PushPiecesResponse, vec![0u8; 20]);
+    let _rx = spawn_endpoint_with_kind(server, MessageKind::PushSampleRunsResponse, vec![0u8; 20]);
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
     let err = send_set_torque(&conn, true, 42_000).expect_err("should error on wrong kind");
     assert!(err.contains("unexpected response kind"));
@@ -168,7 +168,7 @@ fn stop_transport_error_is_an_err() {
 #[test]
 fn stop_wrong_kind_response_is_rejected() {
     let (client, server) = UnixStream::pair().unwrap();
-    let _rx = spawn_stop_endpoint(server, MessageKind::PushPiecesResponse, vec![0u8; 20]);
+    let _rx = spawn_stop_endpoint(server, MessageKind::PushSampleRunsResponse, vec![0u8; 20]);
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
     let err = send_stop(&conn).expect_err("should error on wrong kind");
     assert!(err.contains("unexpected response kind"));

@@ -8,9 +8,9 @@ The producer's first step after a refill from empty is its most expensive
 one, and on a flat 250 ms lead the segment behind it landed 245 ms past the
 playhead -> anchor_underrun -> stream_worker_fatal.
 
-The anchor is transport-agnostic, so this runs in piece mode: the
-stepcompress sim MCU cannot retire a dense micro-segment burst in real time
-on the virtual clock and times out before the seam is reached.
+The anchor is transport-agnostic, so this runs on the main MCU: the second,
+step/dir only sim MCU cannot retire a dense micro-segment burst in real
+time on the virtual clock and times out before the seam is reached.
 
 Streamed via SD so klippy's lookahead fills the way it does on the bench.
 """

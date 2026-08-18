@@ -7,6 +7,7 @@ const OID: u32 = 7;
 const CYCLES_PER_SECOND: f64 = 1_000_000.0;
 const SAMPLE_RATE_HZ: u32 = 2_000;
 const QUANTUM_MM: f32 = 0.01;
+const RING_DEPTH: u32 = 64;
 
 struct Sent {
     name: String,
@@ -74,6 +75,7 @@ fn lane_cfg(axis: u8, oid: u32) -> SampleLaneConfig {
         sample_rate_hz: SAMPLE_RATE_HZ,
         position_quantum_mm: QUANTUM_MM,
         max_units_per_sample: 4_096,
+        ring_depth: RING_DEPTH,
     }
 }
 
@@ -138,7 +140,6 @@ fn frame(axis: u8, pieces: Vec<PieceEntry>) -> AxisFrame {
     AxisFrame {
         axis,
         pieces,
-        start_slot: 0,
         new_head: 0,
         room: 64,
         guard_recorded_ns: 0,
@@ -270,8 +271,11 @@ fn samples_land_on_the_lane_quantum_and_track_the_trajectory() {
 }
 
 #[test]
-fn the_lane_window_bounds_runs_in_flight() {
-    let mut h = harness(&[lane_cfg(0, OID)]);
+fn the_lane_never_outruns_the_advertised_ring_depth_and_resumes_on_retirement() {
+    const DEPTH: u32 = 4;
+    let mut cfg = lane_cfg(0, OID);
+    cfg.ring_depth = DEPTH;
+    let mut h = harness(&[cfg]);
     let mut pieces = Vec::new();
     let mut start = 0u64;
     let mut from = 0.0f32;
@@ -286,11 +290,35 @@ fn the_lane_window_bounds_runs_in_flight() {
     for _ in 0..8 {
         h.endpoint.tick().expect("tick");
     }
-    let in_flight = h.endpoint.in_flight_runs();
-    assert!(
-        in_flight.iter().all(|&depth| depth <= SAMPLE_WINDOW_RUNS),
-        "the in-flight window is bounded, saw {in_flight:?}"
+    assert_eq!(
+        h.runs().len(),
+        DEPTH as usize,
+        "an uncredited lane sends exactly the runs its mcu ring holds"
     );
+    assert_eq!(h.endpoint.outstanding_runs().unwrap(), vec![DEPTH]);
+    assert!(
+        h.endpoint.backlog_len() > 0,
+        "the runs the ring has no room for wait in the host backlog"
+    );
+
+    h.endpoint.tick().expect("tick");
+    assert!(
+        h.runs().is_empty(),
+        "without a retirement credit the lane stays parked"
+    );
+
+    let two_runs = 2
+        * u64::from(SAMPLE_RUN_COUNT_MAX as u32)
+        * (CYCLES_PER_SECOND as u64 / u64::from(SAMPLE_RATE_HZ));
+    h.now.store(two_runs, Ordering::Relaxed);
+    h.endpoint.mcu_retired().record(&[2], &[0]);
+    h.endpoint.tick().expect("tick");
+    assert_eq!(
+        h.runs().len(),
+        2,
+        "two retired runs reopen exactly two slots, with no barrier involved"
+    );
+    assert_eq!(h.endpoint.outstanding_runs().unwrap(), vec![DEPTH]);
     h.drain_control();
 }
 
@@ -412,6 +440,34 @@ fn an_unsent_reanchor_cut_needs_no_barrier() {
     assert!(
         sent.iter().all(|s| s.name != SAMPLE_BARRIER_NAME),
         "nothing had reached the wire, so no receipt is owed"
+    );
+    h.drain_control();
+}
+
+#[test]
+fn a_fresh_epoch_cut_stages_the_pieces_past_it_exactly_once() {
+    let mut h = harness(&[lane_cfg(0, OID)]);
+    let cut_at = (CYCLES_PER_SECOND * 0.02) as u64;
+    h.endpoint
+        .mark_reanchor(0, cut_at, Some(CYCLES_PER_SECOND))
+        .expect("axis exists");
+    h.endpoint
+        .send_frames(
+            MCU_ID,
+            &[frame(
+                0,
+                vec![
+                    piece(cut_at, 0.0, 10.0, 0.05),
+                    piece(cut_at + (CYCLES_PER_SECOND * 0.05) as u64, 10.0, 20.0, 0.05),
+                ],
+            )],
+        )
+        .expect("pieces accepted");
+    assert_eq!(
+        h.endpoint.retired_counts(),
+        vec![2],
+        "the lane consumed the 2 pieces past the seam once each; staging them a second time \
+         credits retirement the pump never pushed and wedges its drain"
     );
     h.drain_control();
 }
@@ -711,6 +767,51 @@ fn a_stream_hole_without_a_seam_marker_is_fatal() {
     assert!(
         message.contains("hole after the sample at"),
         "unexpected message: {message}"
+    );
+    h.drain_control();
+}
+
+/// The lane's lead is whatever its mcu ring can hold, and the ring is paced
+/// against the retirement heartbeat: the host may not send past what the mcu
+/// has credited. So the ring's *playback residency* — depth x the samples a
+/// run actually carries x the sample period — is the whole budget the credit
+/// round trip has to fit inside.
+///
+/// `send_horizon_cycles` measures that residency in maximal
+/// `SAMPLE_RUN_COUNT_MAX`-sample runs. Real motion never gets there: the
+/// 48-byte wire payload closes a run once the deltas fill it, which at two
+/// bytes a delta is half the samples. Sizing a lane ring off the maximal
+/// figure therefore buys half the lead it promises.
+#[test]
+fn a_moving_lane_packs_runs_by_payload_bytes_not_by_the_sample_cap() {
+    let mut h = harness(&[lane_cfg(0, OID)]);
+    let mut pieces = Vec::new();
+    let mut start = 0u64;
+    let mut from = 0.0f32;
+    for _ in 0..40 {
+        pieces.push(piece(start, from, from + 100.0, 0.05));
+        start += (CYCLES_PER_SECOND * 0.05) as u64;
+        from += 100.0;
+    }
+    h.endpoint
+        .send_frames(MCU_ID, &[frame(0, pieces)])
+        .expect("pieces accepted");
+    let runs = h.runs();
+    assert!(
+        runs.len() > 4,
+        "expected a stream of runs, got {}",
+        runs.len()
+    );
+    let widest = runs
+        .iter()
+        .map(|run| run.int("count"))
+        .max()
+        .expect("runs were sent");
+    assert!(
+        widest < SAMPLE_RUN_COUNT_MAX as i64,
+        "a moving lane packed a full {SAMPLE_RUN_COUNT_MAX}-sample run, so the payload budget \
+         is no longer what closes a run and every ring-residency figure derived from it needs \
+         revisiting"
     );
     h.drain_control();
 }

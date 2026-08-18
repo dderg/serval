@@ -15,6 +15,7 @@ from tmc_wire_harness import (
     FakeGcode,
     FakeMCU,
     FakeMcuTmc,
+    FakeMotionEngine,
     FakePins,
     FakePrinter,
     FakeStepperEnable,
@@ -53,6 +54,8 @@ class Rig:
             "stepper_enable", FakeStepperEnable(FakeEnableLine())
         )
         self.printer.add_object("heaters", FakeHeaters())
+        self.engine = FakeMotionEngine(self.wire)
+        self.printer.add_object("motion_engine", self.engine)
         self.sections = {}
         self.mcu_tmcs = []
 
@@ -106,6 +109,7 @@ def test_enter_sequence_chopconf_before_direct_mode_checks_stopped_last(rig):
         ("query", "kalico_get_phase_state"),
         ("cmd", "kalico_phase_align_to"),
         ("cmd", "kalico_phase_stepping_enable_spi"),
+        ("transport", "switch_axis_transport"),
         ("cmd", "kalico_set_axis_mode"),
         ("timer-", "_do_periodic_check"),
     ]
@@ -153,6 +157,7 @@ def test_exit_jogs_back_to_cached_mscnt_then_flips_mode_then_restarts_checks(
         ("query", "kalico_get_phase_state"),
         ("cmd", "kalico_phase_stepping_disable_spi"),
         ("write", "GCONF"),
+        ("transport", "switch_axis_transport"),
         ("cmd", "kalico_set_axis_mode"),
         ("read", "DRV_STATUS"),
         ("read", "GSTAT"),

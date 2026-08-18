@@ -88,14 +88,16 @@ impl Default for FlushState {
     }
 }
 
-/// The push-pieces-pump's control handle, join handle, and backlog counter —
-/// set together by `spawn_pipeline` and torn down together by `shutdown`.
+/// The pump's control handle, join handle, backlog counter and the per-lane-kind
+/// pacers — set together by `spawn_pipeline` and torn down together by
+/// `shutdown`.
 #[derive(Default)]
 pub(crate) struct PumpHandles {
     pub(crate) tx: Arc<Mutex<Option<crossbeam_channel::Sender<crate::pump::PumpMsg>>>>,
     pub(crate) thread: Mutex<Option<JoinHandle<()>>>,
     pub(crate) backlog: Arc<AtomicU64>,
     pub(crate) pacer: Mutex<Option<crate::pump::StepcompressPacer>>,
+    pub(crate) sample_pacer: Mutex<Option<crate::pump::SamplePacer>>,
 }
 
 /// The background live-position poller's cache, join handle, and stop flag —
@@ -137,6 +139,10 @@ pub(crate) struct RemoteFreeze {
     pub(crate) motor_mcu: u32,
     pub(crate) motor_idx: u8,
     pub(crate) stepper_idx: u8,
+    /// The stepper the keyed endstop froze on the mcu. A trip is answered by
+    /// cutting and reseeding exactly this motor's stream, so its identity — not
+    /// its index within a klippy lane — is what the host resolves against.
+    pub(crate) stepper_oid: u32,
 }
 
 pub(crate) struct HomingRun {
@@ -149,6 +155,10 @@ pub(crate) struct HomingRun {
     pub(crate) notify: crossbeam_channel::Sender<
         Result<(geometry::MachinePos, geometry::MachinePos, u64), String>,
     >,
+    /// Stepper oids whose host-side stream a keyed trip has already cut. A
+    /// second trip naming the same motor is a bug in the arming, not a
+    /// second freeze, so it fails loudly instead of cutting twice.
+    pub(crate) frozen_oids: Vec<u32>,
     pub(crate) pending_suppresses: Arc<(Mutex<usize>, Condvar)>,
 }
 
@@ -166,10 +176,9 @@ pub(crate) struct McuConnection {
     pub(crate) endpoint_conn: Option<Arc<McuSerialConn>>,
     pub(crate) ethercat_slot_axes: Vec<usize>,
     pub(crate) sample_grid: Option<super::ethercat_endpoint::SampleGrid>,
-    /// The pump's setpoint filler for this endpoint, present exactly when
-    /// `sample_grid` reports the `setpoint_ring` executor. Built at claim time
+    /// The pump's setpoint filler for this endpoint, built at claim time
     /// because that is where the drives' command scale and the dynamics
-    /// profile are still in hand.
+    /// profile are still in hand. Only an EtherCAT connection has one.
     pub(crate) ring_filler: Option<crate::pump::RingFiller>,
 }
 

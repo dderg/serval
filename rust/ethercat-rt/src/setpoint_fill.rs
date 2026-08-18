@@ -2,16 +2,14 @@
 //!
 //! Runs on the pump's thread, never on the DC thread. It samples the piece
 //! trajectory on the endpoint's DC grid and computes everything the cyclic
-//! task used to compute per cycle: the anchored count target, the velocity
-//! feedforward, and the coupled dynamics torque feedforward. What stays in
-//! the cyclic task is what needs this cycle's encoder image — the damper, the
-//! trim, the strain comp and the pin.
+//! task would otherwise compute per cycle: the anchored count target, the
+//! velocity feedforward, and the coupled dynamics torque feedforward. What
+//! stays in the cyclic task is what needs this cycle's encoder image — the
+//! damper, the trim, the strain comp and the pin.
 //!
 //! The grid is the endpoint's: [`ChainFiller::observe_grid`] takes the
 //! `(grid_index, grid_clock)` pair every `PushSampleRunsResponse` echoes, so
 //! index `n`'s sample clock is `grid_clock + (n - grid_index) * interval`.
-//! That is the same instant the piece executor would have sampled, which is
-//! what makes the two command streams comparable.
 
 use std::collections::VecDeque;
 
@@ -20,10 +18,12 @@ use runtime::motion_core::{arm_piece, ArmedPiece};
 use runtime::piece_ring::PieceEntry;
 
 use crate::buzz::{BuzzOsc, MAX_BUZZ_SLOTS};
-use crate::curves::CLOCK_FREQ_HZ;
 use crate::dynamics::DynamicsModel;
 use crate::scale::mm_to_counts;
 use crate::setpoint::MAX_FILL_CYCLES;
+
+/// Piece timestamps are nanoseconds, so the piece clock ticks at 1 GHz.
+pub const CLOCK_FREQ_HZ: f32 = 1_000_000_000.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LaneSpec {
@@ -95,8 +95,7 @@ impl Lane {
 
     /// Feedforward lookahead: commanded `(vel, acc)` a lead ahead of the
     /// position cursor, cached across samples and never retiring a piece. A
-    /// lead landing in a gap or past the stream end is a stationary target,
-    /// exactly as the piece executor's `peek_vel_acc` reports it.
+    /// lead landing in a gap or past the stream end is a stationary target.
     fn lead_vel_acc(&mut self, clock: u64) -> (f32, f32) {
         let covers = |p: &ArmedPiece| clock >= p.piece_start_cycles && clock < p.piece_end_cycles;
         if !self.lookahead.as_ref().is_some_and(covers) {
@@ -324,8 +323,7 @@ impl ChainFiller {
 
     /// Sample every lane over the next window and return one contiguous run
     /// per lane. A lane whose coverage ends inside the window closes there;
-    /// the run that resumes it carries the re-anchor flag, mirroring how the
-    /// piece executor re-created its `CountMap` across a ring gap.
+    /// the run that resumes it carries the re-anchor flag.
     pub fn drain(&mut self) -> Result<Vec<LaneRun>, FillError> {
         let Some(start) = self.window_start() else {
             return Ok(Vec::new());
@@ -378,8 +376,9 @@ impl ChainFiller {
 
     fn window_start(&self) -> Option<u64> {
         let mut earliest: Option<u64> = None;
-        for lane in &self.lanes {
-            let candidate = match (lane.next_index, self.buzz.active()) {
+        for (slot, lane) in self.lanes.iter().enumerate() {
+            let buzz_driven = self.buzz.active() && self.buzz_slots.get(slot) == Some(&true);
+            let candidate = match (lane.next_index, buzz_driven) {
                 (Some(index), _) => Some(index),
                 (None, true) => self.buzz_next_index,
                 (None, false) => lane

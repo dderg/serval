@@ -16,7 +16,7 @@
 // the wire.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -28,34 +28,150 @@ use runtime::sample_run::{
     SAMPLE_RUN_COUNT_MAX, SAMPLE_RUN_DATA_MAX, SampleRunBuf, SampleRunError, delta_bytes,
     encode_deltas,
 };
-use runtime::sample_wire::{SAMPLE_ANCHOR_NAME, SAMPLE_OVERLAY_NAME, SAMPLE_RUN_NAME};
+use runtime::sample_wire::{
+    SAMPLE_ANCHOR_NAME, SAMPLE_BARRIER_NAME, SAMPLE_OVERLAY_NAME, SAMPLE_RUN_NAME,
+};
+use runtime::stepping_state::MAX_AXES as HEARTBEAT_AXES;
 use runtime::sub_sample_timing::quantize_step_delta;
 
 use super::barrier_ledger::{AckFault, BarrierId, BarrierLedger};
 use super::pump_loop::pump_past_guard_secs;
 use super::stepcompress_sink::{
-    BARRIER_ACK_DEADLINE_SECONDS, CONSUMED_MARGIN_SECONDS, ClockSource, FrameEgress, PACER_TICK,
-    SEND_LEAD_SECONDS,
+    BARRIER_ACK_DEADLINE_SECONDS, ClockSource, FrameEgress, SEND_LEAD_SECONDS,
 };
 use super::{AxisFrame, HeartbeatMsg, PumpMsg, SendError};
 use crate::lock_ext::LockExt;
 
-/// Bounded in-flight sample window per lane: how many sent-but-unconsumed runs
-/// a lane may have outstanding. At the 48-sample wire cap this is far more than
-/// [`SEND_LEAD_SECONDS`] of lead at every rate the executors run, so the lead
-/// paces the stream and this ceiling is what catches a lane whose consumption
-/// has stopped.
-pub const SAMPLE_WINDOW_RUNS: usize = 64;
+/// Pieces one phase lane may have staged in the pump at a time. A sample lane
+/// keeps no piece ring on the mcu — a piece is retired the moment it has been
+/// sampled — so this is the host's own staging window, not a firmware depth.
+/// The firmware depth the wire must respect is `phase_ring_depth`, which the
+/// mcu advertises as `SAMPLE_RUNS_PER_LANE`.
+pub const SAMPLE_LANE_PIECE_WINDOW: u32 = 64;
+
+/// A phase lane's mcu ring is measured in single-digit runs, so the top-up
+/// interval has to be a fraction of the ring's playback time rather than the
+/// move-queue pacer's [`PACER_TICK`]: a retirement credit is worth nothing
+/// until the next flush reads it.
+pub const SAMPLE_PACER_TICK: std::time::Duration = std::time::Duration::from_millis(2);
 
 /// A backlog this deep means the transport is not draining: every run past it
 /// is lead the mcu will never receive in time.
 pub const SAMPLE_BACKLOG_CEILING_RUNS: usize = 4096;
 
-const SAMPLE_BARRIER_NAME: &str = "sample_barrier";
-
 /// Reads back a lane's executed position: `sample_get_position` answered by
 /// `sample_position`, as `(clock, position)`.
 pub type SamplePositionQuery = Arc<dyn Fn(u32) -> Result<(u64, i32), String> + Send + Sync>;
+
+const SAMPLE_POSITION_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+fn host_io_sample_position_query(
+    mcu_id: u32,
+    host_io: std::sync::Weak<host_rt::host_io::McuHostIo>,
+) -> SamplePositionQuery {
+    Arc::new(move |oid| {
+        let io = host_io.upgrade().ok_or_else(|| {
+            format!("sample mcu {mcu_id}: McuHostIo detached during position readback")
+        })?;
+        let params = io
+            .call_args(
+                runtime::sample_wire::SAMPLE_GET_POSITION_NAME,
+                &[("oid".to_string(), ArgValue::Int(i64::from(oid)))],
+                runtime::sample_wire::SAMPLE_POSITION_NAME,
+                SAMPLE_POSITION_QUERY_TIMEOUT,
+            )
+            .map_err(|e| format!("sample_get_position failed for mcu {mcu_id} oid {oid}: {e:?}"))?;
+        let clock = params.try_get_u32("clock").ok_or_else(|| {
+            format!("sample_position from mcu {mcu_id} oid {oid} carries no `clock` field")
+        })?;
+        let position = params.try_get_i32("position").ok_or_else(|| {
+            format!("sample_position from mcu {mcu_id} oid {oid} carries no `position` field")
+        })?;
+        Ok((u64::from(clock), position))
+    })
+}
+
+/// Build the sample endpoint for one mcu's phase lanes. The rate is the
+/// firmware's own `MOTION_SAMPLE_RATE_HZ`, carried on the topology, and the
+/// lane's position quantum is its microstep distance — the LUT phase quantum
+/// the mcu's phase executor counts in. `measured_clock_freq` is the same
+/// measured estimate the pulse lanes' shim uses, so two lane kinds on one board
+/// cannot disagree about the clock.
+pub fn build_sample_endpoint(
+    cfg: &crate::mcu_config::McuAxisConfig,
+    host_io: std::sync::Weak<host_rt::host_io::McuHostIo>,
+    pump_control: Sender<PumpMsg>,
+    measured_clock_freq: f64,
+    clock_of: ClockSource,
+) -> Result<SampleEndpoint, String> {
+    if !measured_clock_freq.is_finite() || measured_clock_freq <= 0.0 {
+        return Err(format!(
+            "sample mcu {}: clock estimate {measured_clock_freq} Hz is not a positive rate",
+            cfg.mcu_id
+        ));
+    }
+    let rate = cfg.phase_sample_rate;
+    if !rate.is_finite() || rate <= 0.0 || rate > f64::from(u32::MAX) {
+        return Err(format!(
+            "sample mcu {}: phase sample rate {rate} Hz is not a representable positive rate",
+            cfg.mcu_id
+        ));
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let sample_rate_hz = rate as u32;
+    let mut lanes = Vec::new();
+    for (lane, &axis) in cfg.axes.iter().enumerate() {
+        if !cfg.phase_capable(lane) {
+            continue;
+        }
+        let motor = cfg.motor_range(lane).start;
+        let quantum = cfg.microstep_distance[motor];
+        if !quantum.is_finite() || quantum <= 0.0 {
+            return Err(format!(
+                "sample mcu {} axis {axis}: position quantum {quantum} mm is not a positive length",
+                cfg.mcu_id
+            ));
+        }
+        let velocity_ceiling = cfg.motor_velocity_ceiling(axis);
+        let units_per_sample = (velocity_ceiling / quantum / rate).ceil();
+        if !units_per_sample.is_finite() || units_per_sample > f64::from(u32::MAX) {
+            return Err(format!(
+                "sample mcu {} axis {axis}: {velocity_ceiling} mm/s over {quantum} mm quanta at \
+                 {rate} Hz needs {units_per_sample} units per sample, which the wire cannot carry",
+                cfg.mcu_id
+            ));
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let max_units_per_sample = (units_per_sample as u32).max(1);
+        #[allow(clippy::cast_possible_truncation)]
+        lanes.push(SampleLaneConfig {
+            axis: axis as u8,
+            oid: cfg.stepper_oids[motor],
+            cycles_per_second: measured_clock_freq,
+            sample_rate_hz,
+            position_quantum_mm: quantum as f32,
+            max_units_per_sample,
+            ring_depth: cfg.phase_ring_depth,
+        });
+    }
+    if lanes.is_empty() {
+        return Err(format!(
+            "sample mcu {}: no phase lanes to stream to; a sample endpoint was built for an \
+             mcu whose every lane is a pulse lane",
+            cfg.mcu_id
+        ));
+    }
+    let mut endpoint = SampleEndpoint::new(
+        cfg.mcu_id,
+        &lanes,
+        super::stepcompress_sink::host_io_egress(cfg.mcu_id, host_io.clone()),
+        clock_of,
+        pump_control,
+    )
+    .map_err(|e| format!("sample mcu {}: {e}", cfg.mcu_id))?;
+    endpoint.set_position_query(host_io_sample_position_query(cfg.mcu_id, host_io));
+    Ok(endpoint)
+}
 
 /// One motor's sample lane. The position quantum is the fixed point the lane
 /// counts in — a phase lane counts LUT phase quanta, an EtherCAT lane counts
@@ -68,6 +184,8 @@ pub struct SampleLaneConfig {
     pub sample_rate_hz: u32,
     pub position_quantum_mm: f32,
     pub max_units_per_sample: u32,
+    /// Runs the mcu's ring for this lane holds, as the firmware advertised it.
+    pub ring_depth: u32,
 }
 
 impl SampleLaneConfig {
@@ -125,8 +243,62 @@ struct PendingSampleCut {
     held: Vec<PieceEntry>,
 }
 
-struct InFlightRun {
-    end_clock: u64,
+/// What the mcu's last `StatusHeartbeat` said about each lane ring: the
+/// monotonic count of sample runs it has retired, and the clock it last
+/// evaluated playback at. The heartbeat lands on the transport's reactor
+/// thread while the pacer holds the endpoint, so both cross threads through
+/// atomics rather than the endpoint lock.
+///
+/// The two prove ring room independently. The count is the round trip: it only
+/// moves when a heartbeat carrying a fresh retirement arrives. The clock is a
+/// fact about the mcu's own playback — a run whose window closed at or before
+/// it has left the ring whatever the count says — and because it comes from
+/// the mcu it can never run ahead of what the mcu actually played.
+#[derive(Debug)]
+pub struct RetiredRuns {
+    per_axis: [AtomicU32; HEARTBEAT_AXES],
+    playback_clock: [AtomicU64; HEARTBEAT_AXES],
+}
+
+impl RetiredRuns {
+    fn new() -> Self {
+        Self {
+            per_axis: [const { AtomicU32::new(0) }; HEARTBEAT_AXES],
+            playback_clock: [const { AtomicU64::new(0) }; HEARTBEAT_AXES],
+        }
+    }
+
+    /// `counts` and `clocks` are the heartbeat's per-axis vectors, indexed the
+    /// way the mcu's engine indexes its sample lanes: by axis.
+    pub fn record(&self, counts: &[u32], clocks: &[u64]) {
+        for (cell, &count) in self.per_axis.iter().zip(counts) {
+            cell.store(count, Ordering::Relaxed);
+        }
+        for (cell, &clock) in self.playback_clock.iter().zip(clocks) {
+            cell.store(clock, Ordering::Relaxed);
+        }
+    }
+
+    fn of_axis(&self, axis: u8) -> Result<u32, SendError> {
+        self.per_axis
+            .get(usize::from(axis))
+            .map(|cell| cell.load(Ordering::Relaxed))
+            .ok_or_else(|| self.past_heartbeat_axes(axis))
+    }
+
+    fn playback_clock_of_axis(&self, axis: u8) -> Result<u64, SendError> {
+        self.playback_clock
+            .get(usize::from(axis))
+            .map(|cell| cell.load(Ordering::Relaxed))
+            .ok_or_else(|| self.past_heartbeat_axes(axis))
+    }
+
+    fn past_heartbeat_axes(&self, axis: u8) -> SendError {
+        SendError::Fatal(format!(
+            "sample lane axis {axis} is past the {HEARTBEAT_AXES} axes the mcu's retirement \
+             heartbeat carries"
+        ))
+    }
 }
 
 enum Outbound {
@@ -161,8 +333,33 @@ impl Outbound {
         }
     }
 
-    fn consumes_window(&self) -> bool {
-        matches!(self, Self::Run { .. } | Self::Overlay { .. })
+    /// Whether the frame takes a slot in the mcu's main lane ring — the ring
+    /// whose depth the firmware advertises and whose retirement the heartbeat
+    /// reports. An overlay run lands in the lane's separate overlay ring and an
+    /// anchor or barrier takes no slot at all.
+    fn occupies_lane_ring(&self) -> bool {
+        matches!(self, Self::Run { .. })
+    }
+
+    /// An anchor heads the run behind it and clears the mcu's ring on arrival,
+    /// so it may only leave when that run can leave with it.
+    fn needs_ring_room(&self) -> bool {
+        matches!(self, Self::Run { .. } | Self::Anchor { .. })
+    }
+
+    /// The clock the mcu's lane cursor reaches once this frame has played out:
+    /// the same `start_clock + interval * count` the executor's ring header
+    /// computes, so the two ends agree on when a slot frees.
+    fn end_clock(&self, start_clock: u64) -> u64 {
+        match self {
+            Self::Run {
+                interval, count, ..
+            }
+            | Self::Overlay {
+                interval, count, ..
+            } => start_clock.wrapping_add(u64::from(*interval) * u64::from(*count)),
+            Self::Anchor { .. } | Self::Barrier(_) => start_clock,
+        }
     }
 }
 
@@ -257,7 +454,19 @@ struct SampleLane {
     run: SampleRunBuf<SAMPLE_RUN_COUNT_MAX>,
     run_bytes: usize,
     run_is_overlay: bool,
-    in_flight: VecDeque<InFlightRun>,
+    /// Monotonic count of runs handed to the wire for this lane, paired with
+    /// what the mcu has proven retired: their difference is what the lane's
+    /// ring holds, and it must never reach `cfg.ring_depth`.
+    runs_sent: u32,
+    /// End clocks of the runs the mcu has not yet proven retired, oldest first,
+    /// and how many the mcu's reported playback clock has already carried past.
+    /// The ring plays in order, so counting from the front is exact.
+    in_flight_end_clocks: VecDeque<u64>,
+    clock_retired: u32,
+    /// The `now` at which this lane was first seen with a full ring and work
+    /// waiting behind it. Delivery that never resumes is a wedged lane, not a
+    /// slow one.
+    saturated_since: Option<u64>,
     seams: VecDeque<PendingSeam>,
     cut: Option<PendingSampleCut>,
     retired: u32,
@@ -284,7 +493,10 @@ impl SampleLane {
             run: SampleRunBuf::new(0, sample_period_cycles),
             run_bytes: 0,
             run_is_overlay: false,
-            in_flight: VecDeque::new(),
+            runs_sent: 0,
+            in_flight_end_clocks: VecDeque::new(),
+            clock_retired: 0,
+            saturated_since: None,
             seams: VecDeque::new(),
             cut: None,
             retired: 0,
@@ -296,8 +508,58 @@ impl SampleLane {
         self.cfg.cycles_per_second as f32
     }
 
-    fn window_full(&self) -> bool {
-        self.in_flight.len() >= SAMPLE_WINDOW_RUNS
+    /// A slot is free once the mcu has proven the run in it gone, and either
+    /// report proves it on its own: the retirement count, or the reported
+    /// playback clock having passed the run's end clock. Neither can over-free
+    /// — both are the mcu's own observations — so the stronger of the two is
+    /// the truth, and the count remains the floor whenever the clock report is
+    /// the older of the two.
+    fn retired_proven(&self, retired: &RetiredRuns) -> Result<u32, SendError> {
+        Ok(retired.of_axis(self.cfg.axis)?.max(self.clock_retired))
+    }
+
+    fn outstanding_runs(&self, retired: &RetiredRuns) -> Result<u32, SendError> {
+        Ok(self.runs_sent.wrapping_sub(self.retired_proven(retired)?))
+    }
+
+    /// Consume the mcu's latest reports: drop every in-flight run the reported
+    /// playback clock has carried past, and drop the ones the count alone
+    /// proves gone so the queue never outgrows the ring.
+    fn absorb_mcu_reports(&mut self, retired: &RetiredRuns) -> Result<(), SendError> {
+        let credit = retired.of_axis(self.cfg.axis)?;
+        let playback_clock = retired.playback_clock_of_axis(self.cfg.axis)?;
+        while self
+            .in_flight_end_clocks
+            .front()
+            .is_some_and(|&end| end <= playback_clock)
+        {
+            self.in_flight_end_clocks.pop_front();
+            self.clock_retired = self.clock_retired.wrapping_add(1);
+        }
+        let credit_lead = credit.wrapping_sub(self.clock_retired);
+        if credit_lead != 0 && credit_lead <= u32::MAX / 2 {
+            for _ in 0..credit_lead.min(self.in_flight_end_clocks.len() as u32) {
+                self.in_flight_end_clocks.pop_front();
+            }
+            self.clock_retired = credit;
+        }
+        Ok(())
+    }
+
+    /// How far past the mcu clock a run may be handed over. The mcu's ring is
+    /// a playback queue, not a buffer for the host's whole planning lead: a run
+    /// parked in it does not retire until its own window arrives, so filling
+    /// the ring with lead would freeze retirement and starve the lane behind
+    /// it. One ring's worth of full runs is exactly the residency the ring can
+    /// turn over.
+    fn send_horizon_cycles(&self) -> u64 {
+        u64::from(self.cfg.ring_depth)
+            * SAMPLE_RUN_COUNT_MAX as u64
+            * u64::from(self.sample_period_cycles)
+    }
+
+    fn open_run_start(&self) -> Option<u64> {
+        (!self.run.is_empty()).then(|| self.run.header().start_clock)
     }
 
     fn reset_to(&mut self, position: i64, resume_floor: u64) {
@@ -321,7 +583,8 @@ impl SampleLane {
     }
 
     /// Sample every piece the lane holds whose samples land at or before
-    /// `sample_to`, closing runs as the wire budget fills.
+    /// `sample_to`. Closed runs queue in the endpoint's backlog; the mcu's ring
+    /// depth paces what leaves it, never what the lane samples.
     fn sample_until(&mut self, sample_to: u64, out: &mut Vec<ClosedRun>) -> Result<(), SendError> {
         let cps = self.cycles_per_second_f32();
         while let Some(piece) = self.pieces.front().copied() {
@@ -339,9 +602,6 @@ impl SampleLane {
                 .armed
                 .ok_or_else(|| self.fatal("the piece armed above is gone"))?;
             loop {
-                if self.window_full() {
-                    return Ok(());
-                }
                 let next_sample = self.prev_sample + u64::from(self.sample_period_cycles);
                 if next_sample > sample_to {
                     return Ok(());
@@ -567,6 +827,7 @@ pub struct SampleEndpoint {
     barriers: BarrierLedger,
     backlog: VecDeque<OutboundRun>,
     next_outbound_order: u64,
+    mcu_retired: Arc<RetiredRuns>,
     fatal: Option<String>,
 }
 
@@ -600,6 +861,7 @@ impl SampleEndpoint {
             barriers: BarrierLedger::new(),
             backlog: VecDeque::new(),
             next_outbound_order: 0,
+            mcu_retired: Arc::new(RetiredRuns::new()),
             fatal: None,
         })
     }
@@ -620,12 +882,33 @@ impl SampleEndpoint {
         self.lanes.iter().map(|lane| lane.position).collect()
     }
 
-    pub fn in_flight_runs(&self) -> Vec<usize> {
-        self.lanes.iter().map(|lane| lane.in_flight.len()).collect()
+    /// The cell the mcu's retirement heartbeat credits. The transport attaches
+    /// its heartbeat callback to this, so a run leaves the backlog as soon as
+    /// the ring has room — no barrier, no timer.
+    pub fn mcu_retired(&self) -> Arc<RetiredRuns> {
+        Arc::clone(&self.mcu_retired)
+    }
+
+    pub fn outstanding_runs(&self) -> Result<Vec<u32>, SendError> {
+        self.lanes
+            .iter()
+            .map(|lane| lane.outstanding_runs(&self.mcu_retired))
+            .collect()
     }
 
     pub fn backlog_len(&self) -> usize {
         self.backlog.len()
+    }
+
+    /// Whether this endpoint owns `axis` as one of its phase lanes. The pump
+    /// routes by this, so a lane's transport is a membership fact rather than
+    /// a configured mode.
+    pub fn drives_axis(&self, axis: u8) -> bool {
+        self.by_axis.contains_key(&axis)
+    }
+
+    pub fn owns_oid(&self, oid: u32) -> bool {
+        self.lanes.iter().any(|lane| lane.cfg.oid == oid)
     }
 
     fn latched_fatal(&self) -> Option<SendError> {
@@ -680,9 +963,10 @@ impl SampleEndpoint {
         })
     }
 
-    fn queue_outbound(&mut self, lane: usize, frame: Outbound, start_clock: u64, end_clock: u64) {
+    fn queue_outbound(&mut self, lane: usize, frame: Outbound, start_clock: u64) {
         let enqueue_order = self.next_outbound_order;
         self.next_outbound_order = self.next_outbound_order.wrapping_add(1);
+        let end_clock = frame.end_clock(start_clock);
         self.backlog.push_back(OutboundRun {
             frame,
             lane,
@@ -718,10 +1002,85 @@ impl SampleEndpoint {
             lane.pieces.clear();
             lane.seams.clear();
             lane.cut = None;
-            lane.in_flight.clear();
             lane.reset_to(position, now);
         }
         self.backlog.clear();
+        Ok(())
+    }
+
+    /// Nothing staged, nothing unretired, no cut in flight: the precondition
+    /// for handing a lane's motor over to the classic step queue.
+    pub fn transport_quiescent(&self) -> Result<bool, SendError> {
+        if !self.backlog.is_empty() {
+            return Ok(false);
+        }
+        for lane in &self.lanes {
+            if lane.cut.is_some()
+                || !lane.pieces.is_empty()
+                || !lane.seams.is_empty()
+                || lane.open_run_start().is_some()
+                || lane.outstanding_runs(&self.mcu_retired)? != 0
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// The mcu's own executed position for `axis` in lane units, cross-checked
+    /// against the host's lane counter. A quiesced lane whose two counters
+    /// disagree has lost samples, and handing that position to the other
+    /// transport would bake the loss into the machine position.
+    ///
+    /// A lane that still owes the mcu an anchor has never told it this origin —
+    /// a host-side `set_position` re-origins the lane locally and the anchor
+    /// carrying it rides the next run — so there the host's counter is the only
+    /// truth and the readback would report the origin before it.
+    pub fn executed_position(&self, axis: u8) -> Result<i64, SendError> {
+        let index = self.lane_of(axis)?;
+        let lane = self.lane_ref(index)?;
+        if lane.wire_next_clock.is_none() {
+            return Ok(lane.position);
+        }
+        let oid = lane.cfg.oid;
+        let query = self.position_query.as_ref().ok_or_else(|| {
+            SendError::Fatal(format!(
+                "sample endpoint mcu {} axis {axis}: no sample_get_position readback",
+                self.mcu_id
+            ))
+        })?;
+        let (executed_clock, executed) = query(oid).map_err(|error| {
+            SendError::Fatal(format!(
+                "sample endpoint mcu {} axis {axis} oid {oid}: sample_get_position failed: \
+                 {error}",
+                self.mcu_id
+            ))
+        })?;
+        let executed = i64::from(executed);
+        if executed != lane.position {
+            return Err(SendError::Fatal(format!(
+                "sample endpoint mcu {} axis {axis} oid {oid}: mcu reported {executed} lane \
+                 units at clock {executed_clock} but the host holds {}, delta {}",
+                self.mcu_id,
+                lane.position,
+                executed - lane.position
+            )));
+        }
+        Ok(executed)
+    }
+
+    /// Re-origin one lane so its next run anchors at the position the other
+    /// transport just left the motor at. The lane owes the mcu a fresh
+    /// `sample_anchor`, which carries the position absolutely.
+    pub fn reset_axis_position(&mut self, axis: u8, position: i64) -> Result<(), SendError> {
+        let index = self.lane_of(axis)?;
+        let (now, _) = self.clock_now()?;
+        self.backlog.retain(|out| out.lane != index);
+        let lane = self.lane_mut(index)?;
+        lane.pieces.clear();
+        lane.seams.clear();
+        lane.cut = None;
+        lane.reset_to(position, now);
         Ok(())
     }
 
@@ -852,7 +1211,8 @@ impl SampleEndpoint {
                     ))
                 })?;
                 self.drain_into_backlog(now, freq)?;
-                if self.lane_ref(index)?.in_flight.is_empty() {
+                let unretired = self.lane_ref(index)?.outstanding_runs(&self.mcu_retired)?;
+                if unretired == 0 {
                     self.backlog.retain(|out| out.lane != index);
                     let lane = self.lane_mut(index)?;
                     lane.pieces.clear();
@@ -860,7 +1220,6 @@ impl SampleEndpoint {
                     lane.sample_period_cycles = lane.cfg.sample_period_cycles()?;
                     let position = lane.position;
                     lane.reset_to(position, at);
-                    lane.pieces.extend(tail.iter().copied());
                     return Ok(false);
                 }
                 if self.lane_ref(index)?.cut.is_some() {
@@ -882,7 +1241,7 @@ impl SampleEndpoint {
                     expected_position,
                     held: tail.to_vec(),
                 });
-                self.queue_outbound(index, Outbound::Barrier(barrier), at, at);
+                self.queue_outbound(index, Outbound::Barrier(barrier), at);
                 Ok(true)
             }
         }
@@ -913,7 +1272,6 @@ impl SampleEndpoint {
                         position: run.base,
                     },
                     run.start_clock,
-                    run.start_clock,
                 );
             }
             let mut data = vec![0u8; SAMPLE_RUN_DATA_MAX];
@@ -928,9 +1286,6 @@ impl SampleEndpoint {
                 ))
             })?;
             data.truncate(written);
-            let end_clock = run
-                .start_clock
-                .saturating_add(u64::from(run.interval) * u64::from(count));
             let frame = if run.overlay {
                 Outbound::Overlay {
                     oid,
@@ -947,7 +1302,7 @@ impl SampleEndpoint {
                     data,
                 }
             };
-            self.queue_outbound(index, frame, run.start_clock, end_clock);
+            self.queue_outbound(index, frame, run.start_clock);
         }
         Ok(())
     }
@@ -958,9 +1313,11 @@ impl SampleEndpoint {
         let sample_to = now.saturating_add(lead);
         for index in 0..self.lanes.len() {
             self.sample_lane_until(index, sample_to)?;
-            let mut closed = Vec::new();
-            self.lane_mut(index)?.close_run(&mut closed)?;
-            self.emit_closed(index, closed)?;
+            if self.lane_needs_its_open_run(index, now)? {
+                let mut closed = Vec::new();
+                self.lane_mut(index)?.close_run(&mut closed)?;
+                self.emit_closed(index, closed)?;
+            }
         }
         if self.backlog.len() > SAMPLE_BACKLOG_CEILING_RUNS {
             return Err(SendError::Fatal(format!(
@@ -973,72 +1330,92 @@ impl SampleEndpoint {
         Ok(())
     }
 
-    fn flush(&mut self, now: u64, freq: f64) -> Result<(), SendError> {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let margin = (freq * CONSUMED_MARGIN_SECONDS) as u64;
-        let cutoff = now.saturating_sub(margin);
-        for lane in &mut self.lanes {
-            while lane
-                .in_flight
-                .front()
-                .is_some_and(|entry| entry.end_clock <= cutoff)
-            {
-                lane.in_flight.pop_front();
-            }
+    /// A partially filled run is worth holding open: every sample that joins it
+    /// is one the mcu's shallow ring does not spend a slot on. It closes once
+    /// its own window comes within the lane's send horizon, which is also how
+    /// the last run of a move leaves.
+    fn lane_needs_its_open_run(&self, index: usize, now: u64) -> Result<bool, SendError> {
+        let lane = self.lane_ref(index)?;
+        if lane.cut.is_some() {
+            return Ok(false);
         }
+        let Some(start) = lane.open_run_start() else {
+            return Ok(false);
+        };
+        Ok(start <= now.saturating_add(lane.send_horizon_cycles()))
+    }
+
+    fn flush(&mut self, now: u64, freq: f64) -> Result<(), SendError> {
         self.order_backlog_by_deadline();
         let guard_secs = pump_past_guard_secs();
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let stale_by = (freq * guard_secs) as u64;
 
+        self.audit_mcu_retirement()?;
+        let mut room: Vec<u32> = Vec::with_capacity(self.lanes.len());
+        let mut horizon: Vec<u64> = Vec::with_capacity(self.lanes.len());
+        for lane in &mut self.lanes {
+            lane.absorb_mcu_reports(&self.mcu_retired)?;
+        }
+        for lane in &self.lanes {
+            let outstanding = lane.outstanding_runs(&self.mcu_retired)?;
+            room.push(lane.cfg.ring_depth.saturating_sub(outstanding));
+            horizon.push(now.saturating_add(lane.send_horizon_cycles()));
+        }
+        self.audit_lane_saturation(now, freq, &room)?;
+        let mut parked = vec![false; self.lanes.len()];
+        let mut selected = vec![false; self.backlog.len()];
         let mut burst: Vec<(&'static str, Vec<(String, ArgValue)>)> = Vec::new();
-        let mut committed: Vec<(usize, u64)> = Vec::new();
+        let mut sent_runs: Vec<(usize, u64)> = Vec::new();
         let mut sent_barriers: Vec<BarrierId> = Vec::new();
-        let mut extra_window: HashMap<usize, usize> = HashMap::new();
         let mut stale: Option<SendError> = None;
-        for out in &self.backlog {
-            let lane = self.lane_ref(out.lane)?;
-            if out.frame.consumes_window() {
-                let extra = extra_window.get(&out.lane).copied().unwrap_or(0);
-                if lane.in_flight.len() + extra >= SAMPLE_WINDOW_RUNS {
-                    break;
-                }
+        for (position, out) in self.backlog.iter().enumerate() {
+            let lane_index = out.lane;
+            let parked_lane = parked
+                .get_mut(lane_index)
+                .ok_or_else(|| self.no_lane(lane_index))?;
+            if *parked_lane {
+                continue;
             }
             if !matches!(out.frame, Outbound::Barrier(_))
                 && out.start_clock.saturating_add(stale_by) < now
             {
-                #[allow(clippy::cast_precision_loss)]
-                let late_us = (now - out.start_clock) as f64 * 1e6 / freq;
-                stale = Some(SendError::Fatal(format!(
-                    "sample endpoint mcu {}: {} at clock {} is {late_us:.0} us behind the \
-                     projected mcu clock {now}, past the {guard_secs} s floor margin. \
-                     {SEND_LEAD_SECONDS} s of lead was not delivered: {} runs backlogged, \
-                     {} in flight on lane {}",
-                    self.mcu_id,
-                    out.frame.kind(),
-                    out.start_clock,
-                    self.backlog.len(),
-                    lane.in_flight.len(),
-                    out.lane
-                )));
+                stale = Some(self.stale_fatal(out, now, freq, guard_secs));
                 break;
             }
-            burst.push(frame_args(&out.frame));
-            if out.frame.consumes_window() {
-                *extra_window.entry(out.lane).or_insert(0) += 1;
-                committed.push((out.lane, out.end_clock));
+            let lane_room = room
+                .get_mut(lane_index)
+                .ok_or_else(|| self.no_lane(lane_index))?;
+            let lane_horizon = horizon
+                .get(lane_index)
+                .copied()
+                .ok_or_else(|| self.no_lane(lane_index))?;
+            if out.start_clock > lane_horizon || (out.frame.needs_ring_room() && *lane_room == 0) {
+                *parked_lane = true;
+                continue;
+            }
+            if out.frame.occupies_lane_ring() {
+                *lane_room -= 1;
+                sent_runs.push((lane_index, out.end_clock));
             }
             if let Outbound::Barrier(id) = out.frame {
                 sent_barriers.push(id);
             }
+            burst.push(frame_args(&out.frame));
+            selected[position] = true;
         }
         if !burst.is_empty() {
             (self.egress)(&burst)?;
-            self.backlog.drain(..burst.len());
-            for (lane_index, end_clock) in committed {
-                self.lane_mut(lane_index)?
-                    .in_flight
-                    .push_back(InFlightRun { end_clock });
+            let mut position = 0;
+            self.backlog.retain(|_| {
+                let keep = !selected[position];
+                position += 1;
+                keep
+            });
+            for (lane_index, end_clock) in sent_runs {
+                let lane = self.lane_mut(lane_index)?;
+                lane.runs_sent = lane.runs_sent.wrapping_add(1);
+                lane.in_flight_end_clocks.push_back(end_clock);
             }
             for id in sent_barriers {
                 self.barriers.note_sent(id, now);
@@ -1050,13 +1427,109 @@ impl SampleEndpoint {
         self.post_heartbeat()
     }
 
+    /// A lane whose ring the mcu reports full while runs queue behind it is
+    /// either being drained or wedged. One ring residency is the whole time a
+    /// healthy ring needs to turn over, so staying full past it means the
+    /// delivery has stopped rather than slowed, and the stream is already
+    /// unrecoverable — the silent multi-second drift this used to produce is a
+    /// fault, not a symptom.
+    fn audit_lane_saturation(
+        &mut self,
+        now: u64,
+        freq: f64,
+        room: &[u32],
+    ) -> Result<(), SendError> {
+        let mut waiting = vec![0u32; self.lanes.len()];
+        for out in &self.backlog {
+            if out.frame.needs_ring_room() {
+                if let Some(count) = waiting.get_mut(out.lane) {
+                    *count += 1;
+                }
+            }
+        }
+        let mut wedged: Option<(usize, u64, u32)> = None;
+        for (index, lane) in self.lanes.iter_mut().enumerate() {
+            let free = room.get(index).copied().unwrap_or(0);
+            let queued = waiting.get(index).copied().unwrap_or(0);
+            if free != 0 || queued == 0 {
+                lane.saturated_since = None;
+                continue;
+            }
+            let since = *lane.saturated_since.get_or_insert(now);
+            if now.saturating_sub(since) > lane.send_horizon_cycles() {
+                wedged = Some((index, now.saturating_sub(since), queued));
+                break;
+            }
+        }
+        let Some((index, saturated_for, queued)) = wedged else {
+            return Ok(());
+        };
+        let lane = self.lane_ref(index)?;
+        let credit = self.mcu_retired.of_axis(lane.cfg.axis)?;
+        let playback_clock = self.mcu_retired.playback_clock_of_axis(lane.cfg.axis)?;
+        let heartbeat_age_ms = 1e3 * now.saturating_sub(playback_clock) as f64 / freq;
+        let saturated_for_ms = 1e3 * saturated_for as f64 / freq;
+        Err(SendError::Fatal(format!(
+            "sample endpoint mcu {} axis {}: lane ring has been full for {saturated_for_ms:.0} ms \
+             with {queued} runs waiting — {} sent, mcu credits {credit} retired and reports \
+             playback clock {playback_clock}, {heartbeat_age_ms:.0} ms behind the pump clock \
+             {now}. The mcu has stopped consuming samples.",
+            self.mcu_id, lane.cfg.axis, lane.runs_sent
+        )))
+    }
+
+    /// The mcu cannot have retired a run the host never handed it. A count
+    /// past what left the endpoint means the two ends disagree about which
+    /// runs exist, and every clock the host derives from its own model is then
+    /// fiction.
+    fn audit_mcu_retirement(&self) -> Result<(), SendError> {
+        for lane in &self.lanes {
+            let retired = self.mcu_retired.of_axis(lane.cfg.axis)?;
+            if lane.runs_sent.wrapping_sub(retired) > u32::MAX / 2 {
+                return Err(SendError::Fatal(format!(
+                    "sample endpoint mcu {} axis {}: the mcu reports {retired} retired sample \
+                     runs but the host has only sent {}",
+                    self.mcu_id, lane.cfg.axis, lane.runs_sent
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn no_lane(&self, index: usize) -> SendError {
+        SendError::Fatal(format!(
+            "sample endpoint mcu {}: no lane {index}",
+            self.mcu_id
+        ))
+    }
+
+    fn stale_fatal(&self, out: &OutboundRun, now: u64, freq: f64, guard_secs: f64) -> SendError {
+        #[allow(clippy::cast_precision_loss)]
+        let late_us = (now - out.start_clock) as f64 * 1e6 / freq;
+        let outstanding = self
+            .lane_ref(out.lane)
+            .and_then(|lane| lane.outstanding_runs(&self.mcu_retired));
+        SendError::Fatal(format!(
+            "sample endpoint mcu {}: {} at clock {} is {late_us:.0} us behind the projected \
+             mcu clock {now}, past the {guard_secs} s floor margin. {SEND_LEAD_SECONDS} s of \
+             lead was not delivered: {} runs backlogged, {outstanding:?} unretired on lane {}",
+            self.mcu_id,
+            out.frame.kind(),
+            out.start_clock,
+            self.backlog.len(),
+            out.lane
+        ))
+    }
+
     fn post_heartbeat(&self) -> Result<(), SendError> {
         let retired_counts = self.retired_counts();
         self.pump_control
             .send(PumpMsg::Heartbeat(HeartbeatMsg {
                 mcu_id: self.mcu_id,
+                axes: self.lanes.iter().map(|lane| lane.cfg.axis).collect(),
                 consumed_counts: Some(retired_counts.clone()),
                 retired_counts,
+                retired_by: super::messages::RetiredBy::Phase,
             }))
             .map_err(|_| {
                 SendError::Fatal(format!(
@@ -1142,7 +1615,6 @@ impl SampleEndpoint {
         }
         self.backlog.retain(|out| out.lane != index);
         let lane = self.lane_mut(index)?;
-        lane.in_flight.clear();
         lane.cfg.cycles_per_second = cut.epoch_freq;
         lane.sample_period_cycles = lane.cfg.sample_period_cycles()?;
         lane.reset_to(i64::from(executed_position), cut.cut_at);
@@ -1221,7 +1693,7 @@ impl SamplePacer {
                     if live.is_empty() {
                         return;
                     }
-                    std::thread::sleep(PACER_TICK);
+                    std::thread::sleep(SAMPLE_PACER_TICK);
                 }
             })
             .expect("spawn sample-pacer thread");

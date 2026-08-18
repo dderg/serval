@@ -10,17 +10,17 @@ src-y += linux/sensor_ds18b20.c
 
 # Kalico host-tick driver — pthread-based modulation tick replacing TIM5
 # on the host build. Provides the kalico_h7_* symbol surface that the
-# Rust runtime's producer-protocol calls across the FFI boundary. Only the
-# piece-evaluating build has a Rust runtime to serve; CONFIG_CLASSIC_STEPPING
-# drops it (mirrors src/stm32/Makefile's MOTION_RUNTIME block).
+# Rust runtime's producer-protocol calls across the FFI boundary. Only a
+# CONFIG_MOTION_RUNTIME build has a Rust runtime to serve (mirrors
+# src/stm32/Makefile's MOTION_RUNTIME block).
 ifeq ($(CONFIG_MOTION_RUNTIME),y)
 src-y += linux/runtime_tick_host.c
 src-y += runtime_commands.c
 src-y += linux/phase_stepping_spi.c
 endif
 
-# Classic sim builds have no motion tick thread to pace the shared virtual
-# clock, so they carry their own libvtime pacer thread instead.
+# A sim build without the motion runtime has no motion tick thread to pace
+# the shared virtual clock, so it carries its own libvtime pacer thread.
 ifeq ($(CONFIG_MCU_SIM),y)
 ifneq ($(CONFIG_MOTION_RUNTIME),y)
 src-y += linux/sim_vtime_pacer.c

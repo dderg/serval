@@ -1,32 +1,31 @@
 use mcu_protocol::bootstrap::{IdentifyResponse, IDENTIFY_RESPONSE_BODY_LEN};
 use mcu_protocol::codec::{Decode, Encode};
 use mcu_protocol::messages::{
-    ArmSensorlessEndstop, ArmSensorlessEndstopResponse, AxisDiag, ClaimHandshakeReply, EndstopTrip,
-    LaneDepth, MessageKind, MotorSample, MotorStateResponse, PushPieces, PushPiecesResponse,
-    PushSampleRuns, PushSampleRunsResponse, ResonanceBuzz, ResonanceBuzzResponse,
-    RestoreDriveLimits, RestoreDriveLimitsResponse, ResumeStreamResponse, RuntimeCapsResponse,
-    SampleGridResponse, SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome,
-    SeedServoHomeResponse, SetDiffDamper, SetDiffDamperResponse, SetDiffTrim, SetDiffTrimResponse,
-    SetDriveLimits, SetDriveLimitsResponse, SetDynamicsModel, SetDynamicsModelResponse, SetFfLead,
+    ArmSensorlessEndstop, ArmSensorlessEndstopResponse, ClaimHandshakeReply, EndstopTrip,
+    LaneDepth, MessageKind, MotorSample, MotorStateResponse, PushSampleRuns,
+    PushSampleRunsResponse, ResonanceBuzz, ResonanceBuzzResponse, RestoreDriveLimits,
+    RestoreDriveLimitsResponse, ResumeStreamResponse, SampleGridResponse, SdoRead, SdoReadResponse,
+    SdoWrite, SdoWriteResponse, SeedServoHome, SeedServoHomeResponse, SetDiffDamper,
+    SetDiffDamperResponse, SetDiffTrim, SetDiffTrimResponse, SetDriveLimits,
+    SetDriveLimitsResponse, SetDynamicsModel, SetDynamicsModelResponse, SetFfLead,
     SetFfLeadResponse, SetStrainComp, SetStrainCompResponse, SetTorque, SetTorqueResponse,
     StartCapture, StartCaptureResponse, StatusHeartbeat, StepperSuppress, StepperSuppressResponse,
     StopCaptureResponse, StopResponse,
 };
-use mcu_protocol::MCU_CHANNEL_PIECES;
 use mcu_transport::frame::{encode_frame, CHANNEL_CONTROL, CHANNEL_EVENTS};
 use mcu_transport::wire_helpers::{
     decode_message_header, encode_message_header, MESSAGE_VERSION_DEFAULT,
 };
+
+/// `StatusHeartbeat.engine_state` value the endpoint reports once it has
+/// latched a fault.
+pub const ENGINE_STATE_FAULT: u8 = 3;
 
 #[derive(Debug)]
 pub enum Command {
     Identify {
         correlation_id: u32,
         proto_version: u8,
-    },
-    PushPieces {
-        correlation_id: u32,
-        msg: PushPieces,
     },
     PushSampleRuns {
         correlation_id: u32,
@@ -126,20 +125,13 @@ pub enum DecodeCmdError {
     BadBody,
 }
 
-pub fn decode_command(channel: u8, payload: &[u8]) -> Result<Command, DecodeCmdError> {
+pub fn decode_command(payload: &[u8]) -> Result<Command, DecodeCmdError> {
     let (hdr, body) = decode_message_header(payload).ok_or(DecodeCmdError::BadHeader)?;
     let cid = hdr.correlation_id;
     let kind = MessageKind::from_u16(hdr.kind_raw);
     if kind == Some(MessageKind::PushSampleRuns) {
         let msg = PushSampleRuns::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
         return Ok(Command::PushSampleRuns {
-            correlation_id: cid,
-            msg,
-        });
-    }
-    if channel == MCU_CHANNEL_PIECES || kind == Some(MessageKind::PushPieces) {
-        let msg = PushPieces::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
-        return Ok(Command::PushPieces {
             correlation_id: cid,
             msg,
         });
@@ -348,42 +340,6 @@ pub fn sdo_write_response_frame(cid: u32, resp: &SdoWriteResponse) -> Vec<u8> {
     control_frame(MessageKind::SdoWriteResponse, cid, &resp.encoded_to_vec())
 }
 
-pub fn push_pieces_response_frame(
-    cid: u32,
-    result: i32,
-    arrival_clock: u64,
-    axis_idx: u8,
-    front_start_time: u64,
-) -> Vec<u8> {
-    let body = PushPiecesResponse::single(result, arrival_clock, axis_idx, front_start_time)
-        .encoded_to_vec();
-    control_frame(MessageKind::PushPiecesResponse, cid, &body)
-}
-
-/// One `AxisDiag` per axis the endpoint pushed, in `(axis_idx, front_start_time)`
-/// order. The bridge matches each axis' transit diag by `axis_idx`, so a
-/// multi-axis PushPieces needs every axis echoed back in one response.
-pub fn push_pieces_response_frame_multi(
-    cid: u32,
-    result: i32,
-    arrival_clock: u64,
-    axes: &[(u8, u64)],
-) -> Vec<u8> {
-    let body = PushPiecesResponse {
-        result,
-        arrival_clock,
-        axes: axes
-            .iter()
-            .map(|&(axis_idx, front_start_time)| AxisDiag {
-                axis_idx,
-                front_start_time,
-            })
-            .collect(),
-    }
-    .encoded_to_vec();
-    control_frame(MessageKind::PushPiecesResponse, cid, &body)
-}
-
 /// Per-lane free depth plus the grid pair the host maps trajectory clocks
 /// with, so every fill re-syncs the host's view of the endpoint's grid.
 pub fn push_sample_runs_response_frame(
@@ -501,12 +457,14 @@ pub fn status_heartbeat_frame(
     engine_state: u8,
     fault_code: u16,
     retired_counts: &[u32],
+    playback_clocks: &[u64],
     ff_saturation_count: u32,
 ) -> Vec<u8> {
     let hb = StatusHeartbeat {
         engine_state,
         fault_code,
         retired_counts: retired_counts.to_vec(),
+        playback_clocks: playback_clocks.to_vec(),
         ff_saturation_count,
     };
     let body = hb.encoded_to_vec();
@@ -519,9 +477,10 @@ pub fn status_heartbeat_frame(
     encode_frame(CHANNEL_EVENTS, &payload)
 }
 
-pub fn runtime_caps_response_frame(cid: u32, total_piece_memory: u32) -> Vec<u8> {
-    let body = RuntimeCapsResponse { total_piece_memory }.encoded_to_vec();
-    control_frame(MessageKind::RuntimeCapsResponse, cid, &body)
+/// `RuntimeCapsResponse` carries no body: the host reads the endpoint's ring
+/// depth from `SampleGridResponse.ring_depth_cycles`.
+pub fn runtime_caps_response_frame(cid: u32) -> Vec<u8> {
+    control_frame(MessageKind::RuntimeCapsResponse, cid, &[])
 }
 
 #[allow(clippy::cast_possible_truncation)]

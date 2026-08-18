@@ -151,8 +151,10 @@ fn run_pump_delivers_piece_despite_retired_over_pushed_inversion() {
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
+        axes: vec![0],
         consumed_counts: None,
         retired_counts: vec![2],
+        retired_by: RetiredBy::Pulse,
     }))
     .unwrap();
     let (ack_tx, ack_rx) = mpsc::sync_channel::<()>(1);
@@ -239,19 +241,9 @@ fn history_records_pieces_at_send_time_not_enqueue_time() {
     handle.join().unwrap();
 }
 
-#[test]
-fn physical_write_cursor_advances_and_wraps_at_n() {
-    let mut q = AxisQueue::new(4);
-    assert_eq!(q.physical_write_cursor, 0);
-    q.advance_write_cursor(3);
-    assert_eq!(q.physical_write_cursor, 3);
-    q.advance_write_cursor(3);
-    assert_eq!(q.physical_write_cursor, 2);
-}
-
 #[derive(Clone)]
 struct RecordingSink {
-    calls: Arc<Mutex<Vec<(u16, u32)>>>,
+    calls: Arc<Mutex<Vec<u32>>>,
 }
 
 impl RecordingSink {
@@ -260,7 +252,7 @@ impl RecordingSink {
             calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
-    fn recorded(&self) -> Vec<(u16, u32)> {
+    fn recorded(&self) -> Vec<u32> {
         self.calls.lock().unwrap().clone()
     }
 }
@@ -270,11 +262,10 @@ impl PieceSink for RecordingSink {
         &self,
         _key: AxisKey,
         _pieces: &[PieceEntry],
-        start_slot: u16,
         new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
-        self.calls.lock().unwrap().push((start_slot, new_head));
+        self.calls.lock().unwrap().push(new_head);
         Ok(mcu_protocol::result_codes::OK)
     }
 }
@@ -362,83 +353,6 @@ fn pump_intake_uses_runway_only_below_the_hard_cap() {
         ),
     )]);
     assert!(!wants_pieces(&shallow_at_hard_cap));
-}
-
-#[test]
-fn run_pump_sets_start_slot_from_cursor_and_advances_it() {
-    const RING_DEPTH: u32 = 8;
-    const N: u32 = 3;
-
-    let sink = RecordingSink::new();
-    let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
-    let sink_clone = sink.clone();
-    let handle = std::thread::spawn(move || {
-        run_pump(
-            control_rx,
-            data_rx,
-            sink_clone,
-            PumpCallbacks::noop(RING_DEPTH),
-            None,
-            std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
-        );
-    });
-
-    data.send(make_enqueue(
-        AxisKey { mcu_id: 1, axis: 0 },
-        (0..N).map(|i| make_piece(i as u64)).collect(),
-        crate::anchor::StreamEpoch::Continuation,
-    ))
-    .unwrap();
-    {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while sink.recorded().is_empty() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "pump did not drain first batch within deadline"
-            );
-            std::thread::yield_now();
-        }
-    }
-
-    data.send(make_enqueue(
-        AxisKey { mcu_id: 1, axis: 0 },
-        (N..N * 2).map(|i| make_piece(i as u64)).collect(),
-        crate::anchor::StreamEpoch::Continuation,
-    ))
-    .unwrap();
-    {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while sink.recorded().len() < 2 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "pump did not drain second batch within deadline"
-            );
-            std::thread::yield_now();
-        }
-    }
-
-    ctl.send(PumpMsg::Shutdown).unwrap();
-    handle.join().unwrap();
-
-    let recorded = sink.recorded();
-    assert_eq!(
-        recorded.len(),
-        2,
-        "expected exactly 2 sends, got {}",
-        recorded.len()
-    );
-
-    let (s0, h0) = recorded[0];
-    let (s1, h1) = recorded[1];
-
-    assert_eq!(s0, 0, "first start_slot should be 0");
-    assert_eq!(h0, N, "first new_head should be N={N}");
-
-    let expected_s1 = (N % RING_DEPTH) as u16;
-    assert_eq!(s1, expected_s1, "second start_slot should be {expected_s1}");
-    assert_eq!(h1, N * 2, "second new_head should be {}", N * 2);
 }
 
 fn make_piece_pos(t: u64, mask: u8, c0: f32, c3: f32) -> (PieceEntry, f64) {
@@ -552,7 +466,6 @@ impl PieceSink for NullSink {
         &self,
         _key: AxisKey,
         _pieces: &[PieceEntry],
-        _start_slot: u16,
         _new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
@@ -567,7 +480,6 @@ impl PieceSink for HaltedSink {
         &self,
         _key: AxisKey,
         _pieces: &[PieceEntry],
-        _start_slot: u16,
         _new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
@@ -1095,7 +1007,6 @@ impl PieceSink for CutRecordingSink {
         &self,
         _key: AxisKey,
         _pieces: &[PieceEntry],
-        _start_slot: u16,
         _new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
@@ -1236,8 +1147,10 @@ fn consumption_stall_resets_when_heartbeat_advances_counter() {
     std::thread::sleep(threshold / 2);
     pump.handle_control_msg(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
+        axes: vec![0],
         consumed_counts: Some(vec![1]),
         retired_counts: vec![0],
+        retired_by: RetiredBy::Pulse,
     }));
     pump.queues.get_mut(&key).unwrap().pushed = 3;
 
@@ -1306,138 +1219,4 @@ fn non_stallfull_outcome_between_stalls_resets_the_timer() {
     );
     assert!(escalated.lock().unwrap().is_empty());
     assert!(pump.consumption_stall.started().is_some());
-}
-
-mod pushpieces_retransmit_tests {
-    use super::super::{SendError, pushpieces_retransmit_serial};
-    use host_rt::transport::TransportError;
-
-    #[test]
-    fn recovers_after_transient_failures_within_budget() {
-        let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 10, None, || {
-            calls += 1;
-            if calls < 3 {
-                Err(TransportError::Timeout)
-            } else {
-                Ok(vec![0xAB, 0xCD])
-            }
-        });
-        assert_eq!(res.expect("should recover"), vec![0xAB, 0xCD]);
-        assert_eq!(
-            calls, 3,
-            "succeeds on the 3rd attempt after 2 transient losses"
-        );
-    }
-
-    #[test]
-    fn first_attempt_success_does_not_retry() {
-        let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 10, None, || {
-            calls += 1;
-            Ok(vec![1, 2, 3])
-        });
-        assert_eq!(res.expect("ok"), vec![1, 2, 3]);
-        assert_eq!(
-            calls, 1,
-            "healthy link: exactly one attempt, no extra latency"
-        );
-    }
-
-    #[test]
-    fn persistent_corruption_gives_up_as_transient_after_budget() {
-        let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 4, None, || {
-            calls += 1;
-            Err(TransportError::Timeout)
-        });
-        assert!(
-            matches!(res, Err(SendError::Transient(_))),
-            "budget exhaustion returns Transient (backstop handles it), not Fatal"
-        );
-        assert_eq!(
-            calls, 4,
-            "exactly max_attempts attempts — no infinite retry"
-        );
-    }
-
-    #[test]
-    fn expired_front_lead_stops_retrying_immediately() {
-        let past = std::time::Instant::now() - std::time::Duration::from_millis(1);
-        let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 10, Some(past), || {
-            calls += 1;
-            Err(TransportError::Timeout)
-        });
-        match res {
-            Err(SendError::Transient(msg)) => assert!(
-                msg.contains("transport unresponsive"),
-                "give-up must name the unresponsive transport: {msg}"
-            ),
-            other => panic!("expected Transient, got {other:?}"),
-        }
-        assert_eq!(
-            calls, 1,
-            "retrying past the front piece's lead cannot succeed — one attempt only"
-        );
-    }
-
-    #[test]
-    fn distant_deadline_leaves_the_attempt_budget_in_charge() {
-        let far = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 3, Some(far), || {
-            calls += 1;
-            Err(TransportError::Timeout)
-        });
-        assert!(matches!(res, Err(SendError::Transient(_))));
-        assert_eq!(
-            calls, 3,
-            "deep lead: the attempt-count budget still caps retries"
-        );
-    }
-
-    #[test]
-    fn dead_transport_closed_fails_fast_no_retry() {
-        let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 10, None, || {
-            calls += 1;
-            Err(TransportError::Closed)
-        });
-        assert!(
-            matches!(res, Err(SendError::Fatal(_))),
-            "Closed = dead transport → Fatal"
-        );
-        assert_eq!(calls, 1, "no retry on a dead transport");
-    }
-
-    #[test]
-    fn dead_transport_io_fails_fast_no_retry() {
-        let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 10, None, || {
-            calls += 1;
-            Err(TransportError::Io(std::io::Error::from(
-                std::io::ErrorKind::BrokenPipe,
-            )))
-        });
-        assert!(
-            matches!(res, Err(SendError::Fatal(_))),
-            "Io = dead transport → Fatal"
-        );
-        assert_eq!(calls, 1, "no retry on a dead transport");
-    }
-
-    #[test]
-    fn mcu_shutdown_fails_fast_no_retry() {
-        let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 10, None, || {
-            calls += 1;
-            Err(TransportError::McuShutdown("fault -112".into()))
-        });
-        assert!(
-            matches!(res, Err(SendError::Fatal(_))),
-            "McuShutdown is a genuine MCU failure → fail loud, not retry"
-        );
-        assert_eq!(calls, 1, "no retry once the MCU has shut down");
-    }
 }

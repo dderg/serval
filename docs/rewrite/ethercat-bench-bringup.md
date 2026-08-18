@@ -8,7 +8,7 @@
 
 ## What's already proven without hardware
 - MCU stepper hot-path codegen is **byte-identical** to pristine main (disasm-verified). Flashing this branch will not change stepper behavior.
-- The servo runs the **same hardened walker** as the MCU (`runtime::motion_core`); its trajectory eval, origin/no-jump mapping, piece-boundary continuity, and the `PieceStartInPast` fault boundary are unit-tested.
+- The servo consumes a **pre-sampled setpoint ring** — one entry per DC cycle, filled host-side by `ChainFiller` (position plus its torque/velocity feedforward). Unit-tested in `rust/ethercat-rt/src/setpoint/tests.rs` and `src/setpoint_fill/tests.rs`: ring fill/drain and run abutment (runs abut by construction — a hole, an overlap, a late run, or a ring drained while still moving is a latched fault, never a pad or a clamp), per-lane free-cycle headroom accounting (the pump's only pacing signal), grid-phase observation (`observe_grid` rejects index/clock regression), and origin anchoring (a lane's counts frame latches at the first played entry of an anchor epoch; a shift without a re-anchor is `OriginShift`).
 - Sustained streaming past one ring depth works over the real `McuSerialConn ↔ FrameServer` socket (no stall — the "stopped after first move" class is covered).
 - `klippy → motion-engine → endpoint` host wiring is ported and the stepper-path tests still pass.
 
@@ -85,11 +85,6 @@ interface: eth0                     # required; NIC the drive is wired to (raw E
 # group_delay_us: optional. Leads curve sampling to compensate the drive's CSP
 #   group delay; default is one DC cycle (cycle_us).
 #group_delay_us: 250
-# executor: optional. Which setpoint executor the endpoint runs; 'piece'
-#   (default) evaluates motion pieces per DC cycle, 'setpoint_ring' consumes a
-#   pre-sampled per-cycle setpoint ring. klippy passes it to the endpoint as
-#   --executor and refuses the claim if the endpoint reports a different one.
-#executor: piece
 
 # A position-commanded servo presented as the X axis. No step/dir, no microsteps.
 [servo_x]
@@ -239,7 +234,7 @@ endpoint: rust/target/release/ethercat-rt-stub
   command, stop and check `encoder_counts_per_rev` / `rotation_distance` / origin
   capture.
 - Do a small supervised jog. Watch for:
-  - `engine_state == Fault (3)` in the `StatusHeartbeat` → the host pump fell behind >2 ms (`PieceStartInPast`). The endpoint latches the fault and propagates it so the host can shut down; the hw binary also disables the drive. This is expected on a gross stall, not on a healthy stream.
+  - `engine_state == Fault (3)` in the `StatusHeartbeat` → the endpoint latched a ring fault; motion has stopped. The usual cause is the host failing to deliver in time (`RingFault::Underrun` — the ring drained while the last played entry still had velocity). The endpoint propagates it so the host can shut down; the hw binary also disables the drive. Expected on a gross stall, not on a healthy stream.
   - `wkc != 3` → EtherCAT bus working-counter fault (drive comms), the endpoint
     halts and dumps `al=0x…`. `al=0x001a` is a DC sync loss (ErC1.1) — see the
     real-time scheduling section; the usual cause is the loop not running
@@ -363,8 +358,17 @@ on the drive's retained state. A failure to write that remap is `rc=-6`
 60B1h/60B2h) that the FF entries feed.
 
 ## Fault-response reference
-- **`PieceStartInPast`** (a piece adopted >2 ms late = 2× the 1 ms DC period): the walker faults, the endpoint latches it (allocation-free atomic) and reports `engine_state=Fault` to the host. Primary response is host-coordinated shutdown (mirrors the MCU model); the hw binary additionally disables the drive as a local backstop. It does **not** silently hold the last position.
-- If `engine_state=Fault` fires during a *healthy* stream, the 2 ms tolerance may be too tight for your RT scheduling — that's a tuning knob (`EC_DC_PERIOD_NS` in `curves.rs`), not a logic change.
+- The endpoint has **no fixed millisecond lateness window**. Every fault below is a `RingFault` variant in `rust/ethercat-rt/src/setpoint.rs`; each latches into the same allocation-free atomic and reports `engine_state=Fault` in the `StatusHeartbeat`. Response is host-coordinated shutdown (mirrors the MCU model); the hw binary additionally disables the drive as a local backstop. None of them silently holds the last position.
+- Pacing faults:
+  - **`Underrun { tail_vel_counts_s }`** (`RUNTIME_ERR_SAMPLE_RING_UNDERRUN`) — the ring drained while the last played entry still carried velocity: the host fell behind mid-motion. This is the real "pump too slow" signal.
+  - **`RunLate { deficit_us }`** (`RUNTIME_ERR_SAMPLE_RUN_LATE`) — a delivered run covers cycles the ring has already played; `deficit_us` is how late it was.
+  - **`RingFull { free_cycles, asked }`** (`RUNTIME_ERR_SAMPLE_RING_FULL`) — the host pushed past the ring's headroom, i.e. ran too far ahead.
+- Divergence guards (loud, not pacing):
+  - **`OriginShift { expected_nm, got_nm }`** — a lane's `pos_counts == 0` reference moved without a re-anchor.
+  - **`GridRegression`** — the playback grid index went backwards.
+  - **`IntervalMismatch { expected_ticks, got_ticks }`** — a run's interval is not the DC cycle. Resampling is the host's job; the cyclic task never interpolates.
+  - **`Rejected(SampleRunError)`** — a malformed run.
+- Tuning knobs are the node's own numbers on `[ethercat_node]`, not a compiled constant: `cycle_us` is the DC cycle the endpoint is launched with, `late_tolerance_us` is the lateness tolerance (default 0 — strict), and `group_delay_us` is the frame/apply offset (default one `cycle_us`). Depth is fixed: the ring holds `RING_DEPTH_CYCLES = 1024` cycles (256 ms at the 250 µs default), and one `PushSampleRuns` block per lane is capped at `MAX_FILL_CYCLES = 256`. If a healthy stream underruns, the pump's lead (100 ms drip / 250 ms post-re-anchor / 2 s print) is what it is sized against.
 
 ## If something's off
 - Re-run `cargo test -p ethercat-rt -p motion-engine` on the Pi — these are the host-path regression tests.

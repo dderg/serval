@@ -1,6 +1,6 @@
 use super::*;
 use crate::kinematics::KinematicsModule;
-use crate::mcu_config::{AXIS_X, AXIS_Y, KINEMATICS_COREXY, McuCaps};
+use crate::mcu_config::{AXIS_X, AXIS_Y, KINEMATICS_COREXY};
 
 fn constant_axis(value: f64, n_pieces: usize, piece_dur: f64) -> ScalarNurbs {
     let bern = [value; 4];
@@ -55,9 +55,6 @@ fn cartesian_x_axis_yields_pieces_with_projected_start_time() {
         mcu_id: 7,
         axes: vec![AXIS_X, AXIS_Y, 2],
         kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![f64::INFINITY; 3],
         ..Default::default()
     }];
@@ -107,9 +104,6 @@ fn ec_cfg() -> Vec<McuAxisConfig> {
         mcu_id: 9,
         axes: vec![AXIS_X, AXIS_Y],
         kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![f64::INFINITY; 2],
         ..Default::default()
     }]
@@ -225,9 +219,6 @@ fn corexy_x_slot_is_x_plus_y() {
         mcu_id: 1,
         axes: vec![AXIS_X, AXIS_Y],
         kinematics: KINEMATICS_COREXY,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![f64::INFINITY; 2],
         ..Default::default()
     }];
@@ -333,9 +324,6 @@ fn flatten_axis_max_piece_secs_splits_long_piece() {
         mcu_id: 7,
         axes: vec![AXIS_X],
         kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![f64::INFINITY],
         ..Default::default()
     }];
@@ -412,9 +400,6 @@ fn axis_cfg_single(axis: usize) -> Vec<McuAxisConfig> {
         mcu_id: 1,
         axes: vec![axis],
         kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![f64::INFINITY],
         ..Default::default()
     }]
@@ -840,9 +825,6 @@ fn test_mcu_configs_one_axis(axis: usize) -> Vec<McuAxisConfig> {
         mcu_id: 1,
         axes: vec![axis],
         kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![f64::INFINITY],
         ..Default::default()
     }]
@@ -1053,9 +1035,6 @@ fn step_rate_within_ceiling_enqueues() {
         mcu_id: 7,
         axes: vec![AXIS_X, AXIS_Y, 2],
         kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![50.0, 50.0, 50.0],
         ..Default::default()
     }];
@@ -1084,9 +1063,6 @@ fn step_rate_over_ceiling_fails_loud() {
         mcu_id: 7,
         axes: vec![AXIS_X, AXIS_Y, 2],
         kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![5.0, 5.0, 5.0],
         ..Default::default()
     }];

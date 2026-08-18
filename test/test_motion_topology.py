@@ -8,29 +8,37 @@ from fakes import (
     FakeStepper,
 )
 
+from klippy.mcu import STEPCOMPRESS_SAMPLE_RATE_HZ
 from klippy.motion import Motion
 from klippy.motion_kinematics import _LinearKinematics
+from klippy.motion_setup import LANE_KIND_PULSE
 
 FAKE_STEPPER_VELOCITY_CEILING = 0.5 / (0.000001 + 0.000002) * 0.0125
 FAKE_STEP_DIST = 0.0125
 
 
-def piece_topology(handle, axes, kin):
+FAKE_MOVE_QUEUE_SLOTS = 128
+
+
+def pulse_topology(handle, axes, kin, move_queue_slots=0):
     n = len(axes)
     return (
         handle,
         axes,
         kin,
         [FAKE_STEPPER_VELOCITY_CEILING] * n,
-        0,
+        [LANE_KIND_PULSE] * n,
+        [1] * n,
         [FAKE_STEP_DIST] * n,
         [False] * n,
         [0] * n,
-        0.0,
-        0,
+        STEPCOMPRESS_SAMPLE_RATE_HZ,
+        move_queue_slots,
         [2e-06] * n,
         "hp",
         0.0,
+        0.0,
+        0,
     )
 
 
@@ -89,7 +97,7 @@ def test_one_mcu_corexy_topology():
     a2h = motion._build_axis_to_handle()
     assert a2h == {0: 11, 1: 11, 2: 11, 3: 11}
     assert motion._derive_mcu_topology(a2h) == [
-        piece_topology(11, [0, 1, 2, 3], 0)
+        pulse_topology(11, [0, 1, 2, 3], 0)
     ]
 
 
@@ -99,8 +107,8 @@ def test_two_mcu_corexy_topology():
     a2h = motion._build_axis_to_handle()
     assert a2h == {0: 100, 1: 100, 2: 200, 3: 200}
     assert motion._derive_mcu_topology(a2h) == [
-        piece_topology(100, [0, 1], 0),
-        piece_topology(200, [2, 3], 1),
+        pulse_topology(100, [0, 1], 0),
+        pulse_topology(200, [2, 3], 1),
     ]
 
 
@@ -115,8 +123,10 @@ def test_init_planner_records_axis_mcu_ownership():
     )
     motion._planner_ready = False
     motion.engine = CaptureEngine()
-    primary = FakeMcu(handle=100)
-    toolboard = FakeMcu(name="toolboard", handle=200)
+    primary = FakeMcu(handle=100, move_queue_slots=FAKE_MOVE_QUEUE_SLOTS)
+    toolboard = FakeMcu(
+        name="toolboard", handle=200, move_queue_slots=FAKE_MOVE_QUEUE_SLOTS
+    )
     motion.printer.lookup_objects = lambda module=None: (
         [("mcu", primary), ("toolboard", toolboard)] if module == "mcu" else []
     )
@@ -137,7 +147,7 @@ def test_cartesian_topology_tag_is_cartesian():
     )
     a2h = motion._build_axis_to_handle()
     assert motion._derive_mcu_topology(a2h) == [
-        piece_topology(11, [0, 1, 2, 3], 1)
+        pulse_topology(11, [0, 1, 2, 3], 1)
     ]
 
 
@@ -215,7 +225,7 @@ def test_init_planner_passes_config_text_and_topology():
     engine = CaptureEngine()
     motion.engine = engine
 
-    mcu = FakeMcu(handle=11)
+    mcu = FakeMcu(handle=11, move_queue_slots=FAKE_MOVE_QUEUE_SLOTS)
 
     def lookup_objects(module=None):
         if module == "mcu":
@@ -229,5 +239,7 @@ def test_init_planner_passes_config_text_and_topology():
     motion._init_planner()
     assert engine.init_planner_args["config_text"] == motion._motion_config_text
     assert engine.init_planner_args["topology"] == [
-        piece_topology(11, [0, 1, 2, 3], 0)
+        pulse_topology(
+            11, [0, 1, 2, 3], 0, move_queue_slots=FAKE_MOVE_QUEUE_SLOTS
+        )
     ]

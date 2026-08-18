@@ -1,15 +1,27 @@
+use super::messages::RetiredBy;
 use super::{AxisKey, MAX_LEAD_SECS};
 use runtime::piece_ring::PieceEntry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+/// One reporting transport's odometers for one axis.
+#[derive(Debug, Default, Clone, Copy)]
+struct WireCredit {
+    consumed: u32,
+    retired: u32,
+}
 
 #[derive(Debug)]
 pub struct AxisQueue {
     pub pieces: VecDeque<(PieceEntry, f64)>,
     pub pushed: u32,
+    /// `consumed` and `retired` are the axis totals: the sum of `credits`,
+    /// recomputed on every report. `pushed` counts the pieces the pump handed
+    /// to whichever transport owned the axis at the time, so only the sum of
+    /// every transport's credit is comparable with it.
     pub consumed: u32,
     pub retired: u32,
+    credits: [WireCredit; RetiredBy::COUNT],
     pub ring_depth: u32,
-    pub physical_write_cursor: u32,
     pub lead_secs: f64,
     /// Staged pieces that carry motion (`!is_hold_piece`), maintained
     /// incrementally so the per-loop ledger publish never scans the queue.
@@ -33,11 +45,25 @@ impl AxisQueue {
             consumed: 0,
             retired: 0,
             ring_depth,
-            physical_write_cursor: 0,
             lead_secs: MAX_LEAD_SECS,
             staged_motion: 0,
             wire_hold_tail: 0,
+            credits: [WireCredit::default(); RetiredBy::COUNT],
         }
+    }
+
+    /// Record one transport's absolute odometers for this axis and refresh the
+    /// axis totals.
+    pub fn credit(&mut self, by: RetiredBy, consumed: u32, retired: u32) {
+        self.credits[by as usize] = WireCredit { consumed, retired };
+        self.consumed = self
+            .credits
+            .iter()
+            .fold(0, |sum, c| sum.wrapping_add(c.consumed));
+        self.retired = self
+            .credits
+            .iter()
+            .fold(0, |sum, c| sum.wrapping_add(c.retired));
     }
     pub fn room(&self) -> u32 {
         let in_flight = self.pushed.wrapping_sub(self.consumed);
@@ -46,12 +72,6 @@ impl AxisQueue {
         } else {
             self.ring_depth - in_flight
         }
-    }
-    pub fn advance_write_cursor(&mut self, n: u32) {
-        if self.ring_depth == 0 {
-            return;
-        }
-        self.physical_write_cursor = (self.physical_write_cursor + n) % self.ring_depth;
     }
 }
 
@@ -156,16 +176,14 @@ pub fn append_pieces_merging_holds(
 pub struct FramePlan {
     pub key: AxisKey,
     pub pieces: Vec<PieceEntry>,
-    pub start_slot: u16,
 }
 
-/// One axis' pieces within a single-MCU bundle, carrying the ring bookkeeping
+/// One axis' pieces within a single-MCU bundle, carrying the wire bookkeeping
 /// the transport needs. `schedule()` only ever groups axes of one MCU into a
 /// `Send`, so a slice of these is exactly the work for one MCU transaction.
 pub struct AxisFrame {
     pub axis: u8,
     pub pieces: Vec<PieceEntry>,
-    pub start_slot: u16,
     pub new_head: u32,
     pub room: u32,
     pub guard_recorded_ns: u64,
@@ -305,7 +323,6 @@ pub fn schedule(
         .map(|(k, n)| FramePlan {
             key: k,
             pieces: queues[&k].pieces.iter().take(n).map(|(p, _)| *p).collect(),
-            start_slot: 0,
         })
         .collect();
     debug_assert!(!frames.is_empty());

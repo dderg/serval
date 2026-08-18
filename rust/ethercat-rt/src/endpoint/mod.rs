@@ -1,16 +1,13 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::buzz::BuzzOsc;
 use crate::capture::{Capture, PendingStart, PendingStop};
-use crate::curves::AxisRing;
 use crate::damper::DiffDamperBank;
 use crate::dynamics::DynamicsModel;
 use crate::live_tap::LiveTap;
 use crate::mailbox::MailboxWorker;
-use crate::scale::CountMap;
 use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
-use crate::setpoint::{Executor, SampleGrid, SetpointEntry, SetpointRing};
+use crate::setpoint::{SampleGrid, SetpointEntry, SetpointRing};
 use crate::strain_comp::StrainCompBank;
 use crate::stream_halt::StreamHalt;
 use crate::torque::TorqueGate;
@@ -22,8 +19,6 @@ mod bringup;
 mod commands;
 mod cycle;
 mod drive;
-#[cfg(test)]
-mod ring_tests;
 #[cfg(test)]
 mod tests;
 
@@ -64,30 +59,22 @@ pub struct EndpointCtx {
     drive_scratch: cycle::DriveScratch,
     run_limits: Vec<(u32, u16)>,
 
-    rings: Vec<AxisRing>,
-    /// Which executor drives the CSP targets. The piece path evaluates
-    /// Chebyshev pieces per cycle; the setpoint ring plays one host-filled
-    /// entry per cycle.
-    executor: Executor,
     sp_rings: Vec<SetpointRing>,
     grid: SampleGrid,
     /// Drive-frame counts that a lane's `pos_counts == 0` maps to, latched at
-    /// the first entry of each anchor epoch exactly as the piece path latches
-    /// its `CountMap`.
+    /// the first entry of each anchor epoch.
     ring_origin: Vec<Option<i32>>,
     /// Reused per-cycle buffer of the entries played this cycle, so the DC
-    /// path allocates nothing for the ring executor.
+    /// path allocates nothing.
     sp_play_scratch: Vec<Option<SetpointEntry>>,
     /// Reused decode buffer for one lane block of a `PushSampleRuns` fill, so
     /// the command path allocates nothing per frame.
     sp_fill_scratch: Vec<SetpointEntry>,
     last_grid_index: u64,
     last_grid_clock: u64,
-    buzz: BuzzOsc,
     damper: DiffDamperBank,
     trim: DiffTrimBank,
     comp: StrainCompBank,
-    cmaps: Vec<Option<CountMap>>,
     last_counts: Vec<Option<i32>>,
     last_written_offset: Vec<i32>,
     report_anchor: Vec<Option<(i32, f64)>>,
@@ -100,7 +87,6 @@ pub struct EndpointCtx {
     gate: TorqueGate,
     capture: Capture,
     live_tap: LiveTap,
-    reclaim: crate::reclaim::Reclaim,
     tap_slots: Vec<u8>,
     cycle_index: u64,
     mailbox: MailboxWorker,
@@ -203,24 +189,24 @@ pub fn run(ctx: &mut EndpointCtx) {
     eprintln!("ec-rt: shutdown complete");
 }
 
-/// Per-lane progress the host paces its stream against: retired pieces on the
-/// piece path, played cycles on the setpoint ring.
+/// Per-lane progress the host paces its stream against: played ring cycles.
 pub(super) fn lane_progress(ctx: &EndpointCtx) -> Vec<u32> {
-    match ctx.executor {
-        Executor::Piece => ctx.rings.iter().map(AxisRing::retired_count).collect(),
-        Executor::SetpointRing => ctx
-            .sp_rings
-            .iter()
-            .map(SetpointRing::played_count)
-            .collect(),
-    }
+    ctx.sp_rings
+        .iter()
+        .map(SetpointRing::played_count)
+        .collect()
+}
+
+/// Per-lane playback clock the heartbeat carries beside the progress counts.
+pub(super) fn lane_playback_clocks(ctx: &EndpointCtx) -> Vec<u64> {
+    ctx.sp_rings
+        .iter()
+        .map(SetpointRing::playback_clock)
+        .collect()
 }
 
 pub(super) fn all_lanes_idle(ctx: &EndpointCtx) -> bool {
-    match ctx.executor {
-        Executor::Piece => ctx.rings.iter().all(AxisRing::is_empty),
-        Executor::SetpointRing => ctx.sp_rings.iter().all(SetpointRing::is_empty),
-    }
+    ctx.sp_rings.iter().all(SetpointRing::is_empty)
 }
 
 pub(super) fn respond_fault_heartbeat(
@@ -229,32 +215,27 @@ pub(super) fn respond_fault_heartbeat(
     error_code: u16,
 ) -> Vec<u32> {
     let retired = lane_progress(ctx);
+    let playback = lane_playback_clocks(ctx);
     ctx.server.respond(&status_heartbeat_frame(
         engine_state,
         error_code,
         &retired,
+        &playback,
         ctx.ff_saturation,
     ));
     retired
 }
 
 pub(super) fn discard_motion(ctx: &mut EndpointCtx) {
-    for r in &mut ctx.rings {
-        r.reset();
-    }
     for r in &mut ctx.sp_rings {
         r.reset();
     }
     for o in &mut ctx.ring_origin {
         *o = None;
     }
-    for c in &mut ctx.cmaps {
-        *c = None;
-    }
     for lc in &mut ctx.last_counts {
         *lc = None;
     }
-    ctx.buzz.clear();
     // A discard re-anchors the commanded frame (homing trip, stop, sensorless
     // trip), so the pin oscillator's predicted deflection is stale — restart
     // it clean.

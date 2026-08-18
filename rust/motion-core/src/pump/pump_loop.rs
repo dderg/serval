@@ -19,13 +19,12 @@ use super::stall::ConsumptionStallWatch;
 use crate::types::AxisKey;
 
 // How far ahead of the MCU playhead the pump pushes pieces — the depth of the
-// MCU-side buffer that absorbs host-side scheduling hiccups. A piece that lands
-// past the playhead faults (PieceStartInPast → stream halt), so this must exceed
-// the worst-case host stall between pump pushes. The per-axis ring (≈496 pieces)
-// is the hard cap; for dense piece streams the pump stalls on a full ring well
-// before this horizon, so raising it only deepens the buffer for sparse (long,
-// slow) moves where stalls are otherwise most likely to slip a piece into the
-// past.
+// host-side buffer that absorbs scheduling hiccups. A piece whose start_time
+// has already passed cannot be executed, so this must exceed the worst-case
+// host stall between pump pushes. Each transport's own depth (`room()`) is the
+// hard cap; for dense streams the pump stalls on a full endpoint well before
+// this horizon, so raising it only deepens the buffer for sparse (long, slow)
+// moves where stalls are otherwise most likely to slip a piece into the past.
 pub const MAX_LEAD_SECS: f64 = 2.0;
 
 // Bound on the planner→pump piece-data channel. When the pump stops pulling
@@ -171,8 +170,10 @@ impl<S: PieceSink> Pump<S> {
             }
             PumpMsg::Heartbeat(HeartbeatMsg {
                 mcu_id,
+                axes,
                 consumed_counts,
                 retired_counts,
+                retired_by,
             }) => {
                 let consumed_counts = consumed_counts.as_ref().unwrap_or(&retired_counts);
                 assert_eq!(
@@ -180,14 +181,19 @@ impl<S: PieceSink> Pump<S> {
                     retired_counts.len(),
                     "heartbeat consumed/retired axis count mismatch for mcu{mcu_id}"
                 );
-                for (axis, &c) in retired_counts.iter().enumerate() {
-                    let key = AxisKey {
-                        mcu_id,
-                        axis: axis as u8,
-                    };
+                assert_eq!(
+                    axes.len(),
+                    retired_counts.len(),
+                    "heartbeat names {} axes for {} counts on mcu{mcu_id}",
+                    axes.len(),
+                    retired_counts.len()
+                );
+                for (slot, &axis) in axes.iter().enumerate() {
+                    let key = AxisKey { mcu_id, axis };
+                    let mut c = retired_counts[slot];
                     if let Some(q) = self.queues.get_mut(&key) {
-                        q.consumed = consumed_counts[axis];
-                        q.retired = c;
+                        q.credit(retired_by, consumed_counts[slot], c);
+                        c = q.retired;
                     }
                     if let Some(co) = &mut self.cohort {
                         if co.participants.contains(&key) {
@@ -594,14 +600,8 @@ impl<S: PieceSink> Pump<S> {
             .map(|f| {
                 let n = f.pieces.len() as u32;
                 let q = self.queues.get(&f.key).expect("planned key exists");
-                debug_assert!(
-                    q.ring_depth <= u32::from(u16::MAX),
-                    "ring_depth {} exceeds u16::MAX; start_slot cast is lossy",
-                    q.ring_depth
-                );
                 AxisFrame {
                     axis: f.key.axis,
-                    start_slot: q.physical_write_cursor as u16,
                     new_head: q.pushed.wrapping_add(n),
                     room: q.room(),
                     pieces: f.pieces,
@@ -762,7 +762,6 @@ impl<S: PieceSink> Pump<S> {
                 }
             }
             q.pushed = q.pushed.wrapping_add(n);
-            q.advance_write_cursor(n);
         }
     }
 
@@ -812,60 +811,9 @@ impl<S: PieceSink> Pump<S> {
                     }
                     activity = true;
                     let mcu_id = frames[0].key.mcu_id;
-                    let mut bundle = self.build_bundle(frames);
-                    self.guard_pieces_not_in_past(mcu_id, &mut bundle, "at send");
-                    let send_result = self.send_bundle_logged(mcu_id, &bundle);
-                    match send_result {
-                        Ok(()) => {
-                            self.commit_sent_bundle(mcu_id, &bundle);
-                        }
-                        Err(SendError::Fatal(ref e)) => {
-                            tracing::error!(
-                                subsystem = "motion",
-                                event = "send_frame_fatal",
-                                mcu = mcu_id,
-                                error = %e,
-                                "pump send_mcu_frames FATAL transport error — invoking fatal-transport action"
-                            );
-                            (self.callbacks.on_fatal_transport)(AxisKey {
-                                mcu_id,
-                                axis: bundle.first().map_or(0, |f| f.axis),
-                            });
-                            return Err(());
-                        }
-                        Err(SendError::Halted(ref e)) => {
-                            tracing::debug!(
-                                subsystem = "motion",
-                                event = "send_frame_halted",
-                                mcu = mcu_id,
-                                error = %e,
-                                "pump frame met an endpoint halt and was discarded"
-                            );
-                            self.halt_keys(
-                                bundle.iter().map(|frame| AxisKey {
-                                    mcu_id,
-                                    axis: frame.axis,
-                                }),
-                                true,
-                            );
-                            break;
-                        }
-                        Err(SendError::Transient(ref e)) => {
-                            tracing::error!(
-                                subsystem = "motion",
-                                event = "send_frame_transient",
-                                mcu = mcu_id,
-                                error = %e,
-                                "pump send_mcu_frames failed"
-                            );
-                            self.guard_pieces_not_in_past(
-                                mcu_id,
-                                &mut bundle,
-                                "after a failed send (transport gave no response \
-                                 while the piece's scheduling lead ran out)",
-                            );
-                            break;
-                        }
+                    let bundle = self.build_bundle(frames);
+                    if !self.send_bundle_grouped(mcu_id, bundle)? {
+                        break;
                     }
                 }
             }
@@ -874,6 +822,116 @@ impl<S: PieceSink> Pump<S> {
             }
         }
         Ok(activity)
+    }
+
+    /// A bundle is atomic per endpoint, so a mixed-lane mcu (a pulse lane
+    /// beside a phase lane) is shipped as one transaction per endpoint, each
+    /// committed on its own answer. The uniform case — every mcu with a single
+    /// endpoint — ships the bundle untouched.
+    fn send_bundle_grouped(&mut self, mcu_id: u32, bundle: Vec<AxisFrame>) -> Result<bool, ()> {
+        let group_of = |frame: &AxisFrame| {
+            self.sink.lane_group(AxisKey {
+                mcu_id,
+                axis: frame.axis,
+            })
+        };
+        let head = group_of(&bundle[0]);
+        if bundle.iter().all(|frame| group_of(frame) == head) {
+            return self.send_bundle(mcu_id, bundle);
+        }
+        let mut groups: BTreeMap<u8, Vec<AxisFrame>> = BTreeMap::new();
+        for frame in bundle {
+            groups.entry(group_of(&frame)).or_default().push(frame);
+        }
+        for (_, group) in groups {
+            if !self.send_bundle(mcu_id, group)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// `Ok(true)` keeps the send pass going; `Ok(false)` ends it (the endpoint
+    /// halted, or the transport gave no answer); `Err(())` is fatal.
+    fn send_bundle(&mut self, mcu_id: u32, mut bundle: Vec<AxisFrame>) -> Result<bool, ()> {
+        self.guard_pieces_not_in_past(mcu_id, &mut bundle, "at send");
+        let send_started_ns = super::transit_trace::trace_now_ns();
+        let send_started_at = Instant::now();
+        let outcome = self.send_bundle_logged(mcu_id, &bundle);
+        let send_elapsed_ns = send_started_at.elapsed().as_nanos() as u64;
+        let result = if outcome.is_ok() {
+            mcu_protocol::result_codes::OK
+        } else {
+            super::transit_trace::transport_error_result()
+        };
+        for frame in &bundle {
+            super::transit_trace::record(super::transit_trace::TransitTraceRecord {
+                sequence: 0,
+                mcu_id,
+                axis: frame.axis,
+                piece_count: frame.pieces.len() as u32,
+                room: frame.room,
+                guard_recorded_ns: frame.guard_recorded_ns,
+                guard_mcu_clock: frame.guard_mcu_clock,
+                send_started_ns,
+                send_elapsed_ns,
+                host_front_start_time: frame.pieces.first().map_or(0, |piece| piece.start_time),
+                result,
+            });
+        }
+        match outcome {
+            Ok(()) => {
+                self.commit_sent_bundle(mcu_id, &bundle);
+                Ok(true)
+            }
+            Err(SendError::Fatal(e)) => {
+                tracing::error!(
+                    subsystem = "motion",
+                    event = "send_frame_fatal",
+                    mcu = mcu_id,
+                    error = %e,
+                    "pump send_mcu_frames FATAL transport error — invoking fatal-transport action"
+                );
+                (self.callbacks.on_fatal_transport)(AxisKey {
+                    mcu_id,
+                    axis: bundle.first().map_or(0, |f| f.axis),
+                });
+                Err(())
+            }
+            Err(SendError::Halted(e)) => {
+                tracing::debug!(
+                    subsystem = "motion",
+                    event = "send_frame_halted",
+                    mcu = mcu_id,
+                    error = %e,
+                    "pump frame met an endpoint halt and was discarded"
+                );
+                self.halt_keys(
+                    bundle.iter().map(|frame| AxisKey {
+                        mcu_id,
+                        axis: frame.axis,
+                    }),
+                    true,
+                );
+                Ok(false)
+            }
+            Err(SendError::Transient(e)) => {
+                tracing::error!(
+                    subsystem = "motion",
+                    event = "send_frame_transient",
+                    mcu = mcu_id,
+                    error = %e,
+                    "pump send_mcu_frames failed"
+                );
+                self.guard_pieces_not_in_past(
+                    mcu_id,
+                    &mut bundle,
+                    "after a failed send (transport gave no response \
+                     while the piece's scheduling lead ran out)",
+                );
+                Ok(false)
+            }
+        }
     }
 
     fn idle_wait(
@@ -925,7 +983,7 @@ impl<S: PieceSink> Pump<S> {
         Ok(())
     }
 
-    fn publish_ledger(&self) {
+    pub(super) fn publish_ledger(&self) {
         let snapshot = self
             .queues
             .iter()

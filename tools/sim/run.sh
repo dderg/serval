@@ -95,12 +95,12 @@ if [[ -z "$BRANCH" ]]; then
     # BuildKit's local context scan trusts mtimes; on macOS file sharing it
     # has been observed to serve stale file CONTENT for files whose mtimes
     # it thought it knew — the built image then quietly disagrees with the
-    # worktree. Bumping every source mtime forces a re-read. Layer caching
-    # is unaffected: it keys on content, so untouched-in-content files
-    # still hit cache.
-    (cd "$REPO_ROOT" && find Makefile pyproject.toml src lib scripts klippy rust tools \
-        \( -name target -o -name target-linux -o -name __pycache__ \
-           -o -name third_party_repos \) -prune -o -type f -exec touch {} +)
+    # worktree. Bumping content-changed mtimes forces a re-read of exactly
+    # the risky files without invalidating the host's cargo/make caches
+    # (touch_changed.py hashes the tree against a manifest in .cache/).
+    python3 "$SCRIPT_DIR/touch_changed.py" "$REPO_ROOT" \
+        "$REPO_ROOT/.cache/sim-ctx-manifest.json" \
+        Makefile pyproject.toml src lib scripts klippy rust tools
 fi
 
 # A docker build narrates every layer even when all of them are cached: over a
@@ -155,17 +155,21 @@ fi
 
 case "$MODE" in
     test)
-        # Sequential by default: klippy runs on the real clock, so CPU
-        # contention from concurrent worlds stutters its timing budgets
-        # into flakes (anchor underruns, missed trip windows). Each
-        # SimWorld has its own virtual-clock shm segment, so SIM_TEST_JOBS=N
-        # opts into pytest-xdist parallelism when the flake risk is
-        # acceptable. SIM_TEST_TARGETS narrows the run to specific test
+        # Each SimWorld has its own virtual-clock shm segment, so worlds
+        # parallelize cleanly; local runs default to 4 pytest-xdist
+        # workers. SIM_TEST_JOBS=N overrides, SIM_TEST_JOBS=0 forces
+        # sequential. SIM_TEST_TARGETS narrows the run to specific test
         # files (used by the CI shards).
         [[ -n "${VTIME_SPEED:-}" ]] && DOCKER_ARGS+=(-e VTIME_SPEED)
         [[ -n "${RUST_LOG:-}" ]] && DOCKER_ARGS+=(-e RUST_LOG)
         XDIST_ARGS=()
-        [[ -n "${SIM_TEST_JOBS:-}" ]] && XDIST_ARGS=(-n "$SIM_TEST_JOBS")
+        if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+            # CI shards stay sequential unless the workflow opts in: their
+            # 2-core runners stutter klippy's real-time budgets into flakes.
+            [[ -n "${SIM_TEST_JOBS:-}" ]] && XDIST_ARGS=(-n "$SIM_TEST_JOBS")
+        elif [[ "${SIM_TEST_JOBS:-4}" != 0 ]]; then
+            XDIST_ARGS=(-n "${SIM_TEST_JOBS:-4}")
+        fi
         # Every SimWorld lives in a pytest tmp dir that dies with the
         # container, taking klippy.log, the MCU logs and the structured
         # events/*.jsonl store with it. --keep-logs puts pytest's basetemp on

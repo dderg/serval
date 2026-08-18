@@ -69,7 +69,7 @@ impl PyMotionEngine {
         direction: f64,
         speed_mm_s: f64,
         max_travel_mm: f64,
-        endstops: Vec<(u8, u32, Option<(u32, u8, u8)>)>,
+        endstops: Vec<(u8, u32, Option<(u32, u8, u8, u32)>)>,
     ) -> PyResult<()> {
         if endstops.is_empty() {
             return Err(PyRuntimeError::new_err(
@@ -81,10 +81,13 @@ impl PyMotionEngine {
             .map(|&(endstop_id, endstop_mcu, freeze)| TripMember {
                 endstop_mcu,
                 endstop_id,
-                remote_freeze: freeze.map(|(motor_mcu, motor_idx, stepper_idx)| RemoteFreeze {
-                    motor_mcu,
-                    motor_idx,
-                    stepper_idx,
+                remote_freeze: freeze.map(|(motor_mcu, motor_idx, stepper_idx, stepper_oid)| {
+                    RemoteFreeze {
+                        motor_mcu,
+                        motor_idx,
+                        stepper_idx,
+                        stepper_oid,
+                    }
                 }),
             })
             .collect();
@@ -136,6 +139,7 @@ impl PyMotionEngine {
         >(1);
 
         *self.homing.run.lock_ok() = Some(HomingRun {
+            frozen_oids: Vec::new(),
             cohort,
             remaining_trips,
             axis_key,
@@ -455,7 +459,7 @@ impl PyMotionEngine {
             .ok_or_else(|| PyRuntimeError::new_err("home_axis: pump not started"))
     }
 
-    fn quiesce_pump_and_drain(&self, py: Python<'_>) -> PyResult<()> {
+    pub(super) fn quiesce_pump_and_drain(&self, py: Python<'_>) -> PyResult<()> {
         let pump_tx = self.homing_pump_tx()?;
         let drain = self.drain.clone();
         py.detach(|| {
@@ -591,13 +595,7 @@ impl PyMotionEngine {
         let transports: Vec<(u32, Arc<dyn host_rt::mcu_call::McuCall>)> = {
             let mcus = self.mcus.lock_ok();
             mcus.iter()
-                .filter(|(_, conn)| {
-                    conn.endpoint_conn.is_some()
-                        || conn
-                            .runtime_caps
-                            .as_ref()
-                            .is_some_and(|caps| caps.total_piece_memory > 0)
-                })
+                .filter(|(_, conn)| conn.endpoint_conn.is_some() || conn.runtime_caps.is_some())
                 .filter_map(|(&id, conn)| {
                     if let Some(io) = conn.host_io.as_ref() {
                         Some((id, Arc::clone(io) as Arc<dyn host_rt::mcu_call::McuCall>))
@@ -629,27 +627,15 @@ impl PyMotionEngine {
                     mcu_protocol::messages::StepperSuppressResponse::decode(&resp_body)
                         .map_err(|e| format!("{e:?}"))
                 });
-            match outcome {
-                Ok(resp) if resp.effective_clock != 0 => {}
-                Ok(_) => {
-                    tracing::error!(
-                        event = "suppress_clear_rejected",
-                        mcu = mcu_id,
-                        "home_abort: suppress mask clear rejected — a stepper may \
-                         remain frozen; a firmware restart is required"
-                    );
-                    ok = false;
-                }
-                Err(e) => {
-                    tracing::error!(
-                        event = "suppress_clear_failed",
-                        mcu = mcu_id,
-                        error = %e,
-                        "home_abort: suppress mask clear failed — a stepper may \
-                         remain frozen; a firmware restart is required"
-                    );
-                    ok = false;
-                }
+            if let Err(e) = outcome {
+                tracing::error!(
+                    event = "suppress_clear_failed",
+                    mcu = mcu_id,
+                    error = %e,
+                    "home_abort: suppress mask clear failed — a stepper may \
+                     remain frozen; a firmware restart is required"
+                );
+                ok = false;
             }
         }
         ok
@@ -694,6 +680,7 @@ impl PyMotionEngine {
             motion_history: Arc::clone(&self.motion_history),
             mcu_axis_configs: Arc::clone(&self.mcu_axis_configs),
             stepcompress_endpoints: Arc::clone(&self.stepcompress_endpoints),
+            axis_transports: Arc::clone(&self.axis_transports.lock_ok()),
         }
     }
     fn reanchor_after_trip(&self, stop_pos: geometry::GcodePos) -> PyResult<()> {

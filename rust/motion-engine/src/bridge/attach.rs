@@ -73,7 +73,6 @@ impl PyMotionEngine {
                                 subsystem = "mcu-comms",
                                 event = "attach_runtime_caps_reuse",
                                 serial_path,
-                                total_piece_memory = caps.total_piece_memory,
                                 "[caps-trace] attach_serial reuse: runtime caps"
                             );
                             Some(caps)
@@ -285,7 +284,6 @@ fn identify_and_query_caps(
                     subsystem = "mcu-comms",
                     event = "attach_runtime_caps",
                     serial_path,
-                    total_piece_memory = caps.total_piece_memory,
                     "[caps-trace] attach_serial: runtime caps"
                 );
                 Some(caps)

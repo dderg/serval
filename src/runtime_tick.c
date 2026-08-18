@@ -81,8 +81,10 @@ runtime_diag_progress(uint32_t tag, uint32_t stage, uint32_t value)
     rt_diag_persistent.last_us = timer_read_time();
 }
 
-// Advances regardless of engine state, unlike the ISR-published widened_now.
-// Foreground-only; do NOT call from ISR.
+// Advances regardless of engine state, unlike the ISR-published widened_now,
+// so this is the only clock a classic-stepping build can widen. Callable from
+// an ISR: stats_task's two-store epoch bump can only be caught mid-update in
+// the instruction pair around a 32-bit wrap.
 __attribute__((used, externally_visible))
 uint64_t
 runtime_widened_host_clock(void)
@@ -185,8 +187,12 @@ DECL_INIT(runtime_init);
     ((LIVENESS_THRESHOLD_MS) * (CONFIG_CLOCK_FREQ / 1000))
 
 #define FAST_STATUS_MAX_AXES 8
+// A phase lane's sample-run ring holds single-digit runs, and the host may not
+// send past what this heartbeat has retired. The credit therefore has to reach
+// the host in a fraction of the ring's playback time, not the 10 ms a status
+// display would be happy with.
 #define FAST_STATUS_RETIREMENT_MIN_TICKS \
-    ((uint32_t)((CONFIG_CLOCK_FREQ) / 100))
+    ((uint32_t)((CONFIG_CLOCK_FREQ) / 500))
 
 #define AXIS_STALL_DETECT_TICKS ((uint32_t)(CONFIG_CLOCK_FREQ) * 2u)
 #define AXIS_STALL_REPORT_PERIOD_TICKS ((uint32_t)(CONFIG_CLOCK_FREQ) * 5u)
@@ -200,11 +206,10 @@ saturate_ticks_to_ms(int64_t ticks)
     return (int32_t)ms;
 }
 
-// Observability only: an axis with pieces pending whose retired counter has
-// been frozen for AXIS_STALL_DETECT_TICKS gets its armed-piece window
-// reported against the current clock. A far-future start/end here is the
-// silent-hold signature (the ISR arms a future piece and parks at its start
-// position); a long dwell also reports and is benign.
+// Observability only: an axis with runs pending whose retired counter has been
+// frozen for AXIS_STALL_DETECT_TICKS gets its front sample-run window reported
+// against the current clock. A far-future start/end here is the silent-hold
+// signature; a long dwell also reports and is benign.
 static void
 report_stalled_axes(int32_t nr, const uint32_t *retired_change_time,
                     uint32_t *stall_report_time, uint32_t cur_time)
@@ -315,10 +320,11 @@ runtime_drain(void)
         static uint32_t retired_change_time[FAST_STATUS_MAX_AXES];
         static uint32_t stall_report_time[FAST_STATUS_MAX_AXES];
         uint32_t retired[FAST_STATUS_MAX_AXES];
+        uint64_t playback[FAST_STATUS_MAX_AXES];
         uint8_t st = 0;
         uint16_t fc = 0;
         int32_t nr = runtime_get_heartbeat(runtime_handle, &st, &fc,
-                                                  retired,
+                                                  retired, playback,
                                                   FAST_STATUS_MAX_AXES);
         static uint8_t pending_advance;
         if (nr > 0) {
@@ -450,7 +456,7 @@ kalico_kick_step_output(uint8_t axis_idx, uint32_t cycle_abs)
 
 #else
 
-// Classic stepping build: no MCU-side motion engine. The Kalico envelope
+// MOTION_RUNTIME=n build: no MCU-side motion engine. The Kalico envelope
 // stays alive — the status heartbeat and the structured log drain remain the
 // host's health and diagnostics feed.
 

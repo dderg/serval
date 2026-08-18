@@ -21,14 +21,14 @@ pub use junction::{
 };
 pub use messages::{
     BundleLimits, EnqueueMsg, HeartbeatMsg, HistoryRecorder, PieceSink, PumpCallbacks, PumpMsg,
-    SendError,
+    RetiredBy, SendError,
 };
 #[cfg(test)]
 pub(crate) use pump_loop::pump_past_guard_secs;
 pub use pump_loop::{MAX_LEAD_SECS, PUMP_DATA_CHANNEL_CAP, run_pump};
 pub use sample_sink::{
-    SAMPLE_BACKLOG_CEILING_RUNS, SAMPLE_WINDOW_RUNS, SampleEndpoint, SampleLaneConfig, SamplePacer,
-    SamplePositionQuery,
+    RetiredRuns, SAMPLE_BACKLOG_CEILING_RUNS, SAMPLE_LANE_PIECE_WINDOW, SampleEndpoint,
+    SampleLaneConfig, SamplePacer, SamplePositionQuery, build_sample_endpoint,
 };
 pub use sched::{
     AxisFrame, AxisQueue, FramePlan, Schedule, SeamBasis, append_pieces_merging_holds, schedule,
@@ -38,12 +38,12 @@ pub use stepcompress_sink::{
     StepcompressPacer, build_endpoint,
 };
 pub use transit_trace::emit_fault_snapshot;
-#[cfg(test)]
-pub(crate) use wire_sink::pushpieces_retransmit_serial;
-pub use wire_sink::{McuTransport, RingFiller, WireSink};
+pub use wire_sink::{EtherCatRing, LANE_GROUP_PHASE, LANE_GROUP_PULSE, RingFiller, WireSink};
 
 #[cfg(test)]
 mod drip_tests;
+#[cfg(test)]
+mod heartbeat_credit_tests;
 #[cfg(test)]
 mod hold_merge_seam_tests;
 #[cfg(test)]

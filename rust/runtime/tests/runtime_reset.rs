@@ -17,14 +17,8 @@ fn pulse_binding() -> StepperBindingRust {
 fn reset_clears_axis_state() {
     let mut e = new_engine();
     let b = pulse_binding();
-    assert_eq!(
-        e.configure_axis(0, StepMode::Pulse, 0.0125, 64, &[b], 512),
-        0
-    );
-    assert_eq!(
-        e.configure_axis(1, StepMode::Pulse, 0.0125, 64, &[b], 512),
-        0
-    );
+    assert_eq!(e.configure_axis(0, StepMode::Pulse, 0.0125, &[b]), 0);
+    assert_eq!(e.configure_axis(1, StepMode::Pulse, 0.0125, &[b]), 0);
     assert_eq!(e.num_axes, 2);
 
     e.reset();
@@ -39,45 +33,11 @@ fn reset_clears_axis_state() {
 }
 
 #[test]
-fn reset_reclaims_ring_allocation() {
-    let mut e = new_engine();
-    let b = pulse_binding();
-    let total = 2 * 240;
-    assert_eq!(
-        e.configure_axis(0, StepMode::Pulse, 0.0125, 240, &[b], total),
-        0
-    );
-    assert_eq!(
-        e.configure_axis(1, StepMode::Pulse, 0.0125, 240, &[b], total),
-        0
-    );
-    assert_ne!(
-        e.configure_axis(2, StepMode::Pulse, 0.0125, 240, &[b], total),
-        0,
-        "expected RING_FULL before reset"
-    );
-
-    e.reset();
-
-    assert_eq!(
-        e.configure_axis(0, StepMode::Pulse, 0.0125, 240, &[b], total),
-        0
-    );
-    assert_eq!(
-        e.configure_axis(1, StepMode::Pulse, 0.0125, 240, &[b], total),
-        0
-    );
-}
-
-#[test]
 fn reset_is_idempotent_on_fresh_engine() {
     let mut e = new_engine();
     e.reset();
     let b = pulse_binding();
-    assert_eq!(
-        e.configure_axis(0, StepMode::Pulse, 0.0125, 448, &[b], 512),
-        0
-    );
+    assert_eq!(e.configure_axis(0, StepMode::Pulse, 0.0125, &[b]), 0);
 }
 
 #[test]

@@ -128,8 +128,8 @@ Verified runnable on macOS (`thumbv7em-none-eabi` installed, `/usr/bin/objdump`
 Apple LLVM 21 is Thumb-capable). Baseline captured to `/tmp/mnu-disasm/before_*`.
 
 ```
-# build (H7); STORAGE/RING/RATE env are mandatory on bare-metal targets
-cd rust && RUNTIME_STORAGE_SIZE=122880 RUNTIME_PIECE_RING_SIZE=63488 \
+# build (H7); STORAGE/RATE env are mandatory on bare-metal targets
+cd rust && RUNTIME_STORAGE_SIZE=32768 \
   RUNTIME_SAMPLE_RATE_HZ=40000 cargo build -p c-api \
   --no-default-features --features mcu-h7,header-nurbs,header-runtime \
   --target thumbv7em-none-eabi --release

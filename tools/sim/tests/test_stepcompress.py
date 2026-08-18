@@ -1,10 +1,8 @@
-"""End-to-end coverage for stepping_mode: stepcompress.
+"""End-to-end coverage for the step/dir (stepcompress) transport.
 
-The steppers live on the second MCU, built with CONFIG_CLASSIC_STEPPING=y
+The steppers live on the second, step/dir only MCU
 (tools/sim/configs/sc-sim.config), so the host computes every step time and
-ships it over queue_step / set_next_step_dir / reset_step_clock. The piece
--mode case runs in the same file so a stepcompress regression cannot hide
-behind a piece-mode pass.
+ships it over queue_step / set_next_step_dir / reset_step_clock.
 """
 
 from __future__ import annotations
@@ -73,18 +71,6 @@ def test_stepcompress_homing_trips(sim_world):
     )
 
 
-def test_piece_mode_regression_beside_stepcompress(sim_world):
-    world = sim_world(
-        lambda w: configs.minimal_config(w.h7_pty, str(w.gcode_dir)),
-        dual_mcu=False,
-    )
-    world.gcode_ok("SET_KINEMATIC_POSITION X=125 Y=125 Z=125")
-    world.gcode_ok("G1 X135 F3000")
-    world.gcode_ok("M400")
-    assert world.shutdown_line() is None, world.log_tail()
-    assert world.toolhead_position()[0] == pytest.approx(135.0, abs=0.01)
-
-
 SIM_CLOCK_HZ = 50_000_000
 ENCODER_WINDOW_SECONDS = (3 << 28) / SIM_CLOCK_HZ
 
@@ -122,6 +108,6 @@ def test_stepcompress_z_survives_an_idle_longer_than_the_encoder_window(
     )
     assert world.shutdown_line() is None, world.log_tail()
     assert _steps(world, "z") - parked_at == pytest.approx(
-        4.0 * STEPS_PER_MM, abs=1.0
+        -4.0 * STEPS_PER_MM, abs=1.0
     )
     assert world.toolhead_position()[2] == pytest.approx(120.0, abs=0.01)

@@ -76,10 +76,32 @@ impl HistoryRecorder {
     }
 }
 
+/// Which wire path finished the pieces a heartbeat reports. A dual-transport
+/// lane is a member of two endpoints at once, and each one only ever retires
+/// the pieces the pump routed through it, so their counts are separate
+/// odometers that the pump adds up. Collapsing them into one number per axis
+/// lets whichever endpoint reports last — the idle one, with a frozen count —
+/// erase the active one's progress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetiredBy {
+    Pulse,
+    Phase,
+    EtherCat,
+}
+
+impl RetiredBy {
+    pub const COUNT: usize = 3;
+}
+
+/// One endpoint's retirement report. `axes` names the axis each count belongs
+/// to: two endpoints share one mcu when a board carries both pulse and phase
+/// lanes, and neither may speak for the other's axes.
 pub struct HeartbeatMsg {
     pub mcu_id: u32,
+    pub axes: Vec<u8>,
     pub consumed_counts: Option<Vec<u32>>,
     pub retired_counts: Vec<u32>,
+    pub retired_by: RetiredBy,
 }
 
 pub enum PumpMsg {
@@ -114,7 +136,7 @@ pub enum SendError {
 
 impl SendError {
     pub(super) fn mcu_reject(mcu_id: u32, result: i32) -> Self {
-        let message = format!("mcu {mcu_id} rejected PushPieces frame: result {result}");
+        let message = format!("mcu {mcu_id} rejected a motion frame: result {result}");
         let halted = result == mcu_protocol::result_codes::STREAM_HALTED
             || result == mcu_protocol::result_codes::EC_PIECES_WHILE_HALTED;
         if halted {
@@ -155,7 +177,6 @@ pub trait PieceSink: Send {
         &self,
         key: AxisKey,
         pieces: &[PieceEntry],
-        start_slot: u16,
         new_head: u32,
         room: u32,
     ) -> Result<i32, SendError>;
@@ -168,11 +189,19 @@ pub trait PieceSink: Send {
         SERIAL_BUNDLE_LIMITS
     }
 
+    /// Which endpoint on the lane's mcu owns it. A bundle is atomic per
+    /// endpoint, so the pump never mixes two groups in one transaction — one
+    /// mcu can carry a pulse lane and a phase lane at once, and each is
+    /// committed on its own transport's answer. A sink with a single endpoint
+    /// per mcu leaves this at the one group.
+    fn lane_group(&self, _key: AxisKey) -> u8 {
+        0
+    }
+
     /// Note that the first piece of a fresh anchor epoch for `key` starts at
     /// `at_start_clock`, a clock bearing no relation to the timeline the
-    /// transport still holds. Transports that keep a host-side committed
-    /// stream cut it exactly at that piece; the piece-ring transports carry
-    /// the discontinuity on the wire, so this is a no-op for them.
+    /// transport still holds. Every transport keeps a host-side committed
+    /// stream, so it cuts that stream exactly at that piece.
     ///
     /// A bundle may span the boundary, so the mark names the piece rather
     /// than the bundle.
@@ -181,9 +210,8 @@ pub trait PieceSink: Send {
     /// Note that the stream time jumped a drained-to-rest hole (a dwell)
     /// and the next piece for `key` starts at `at_start_clock`, later than
     /// the previous piece's projected end. The position is unchanged and no
-    /// steps span the hole, so transports that validate seam contiguity
-    /// sanction a forward-only jump; piece-ring transports carry absolute
-    /// clocks and need nothing.
+    /// steps span the hole, so a transport that validates seam contiguity
+    /// sanctions a forward-only jump.
     fn mark_seam_gap(&self, _key: AxisKey, _at_start_clock: u64) {}
 
     /// How this transport's seam consumer reprojects a piece `duration` into
@@ -191,7 +219,7 @@ pub trait PieceSink: Send {
     /// this basis; the live clock estimate drifts against the frozen epoch
     /// slope a host-side committed stream already sent frames on, and over a
     /// lane held for a whole layer that drift becomes a hard seam gap.
-    /// `None` = pieces reach the mcu walker untouched.
+    /// `None` = this transport has no committed stream to reproject against.
     fn seam_basis(&self, _key: AxisKey) -> Option<super::sched::SeamBasis> {
         None
     }
@@ -212,7 +240,6 @@ pub trait PieceSink: Send {
                     axis: f.axis,
                 },
                 &f.pieces,
-                f.start_slot,
                 f.new_head,
                 f.room,
             )?;
@@ -233,15 +260,14 @@ pub trait PieceSink: Send {
     fn cut_staged(&self, _keys: &[AxisKey]) {}
 
     /// The mcus that can owe their endpoint a drain tick at all. Empty for
-    /// every piece transport, so the pump's tick costs nothing there.
+    /// a transport that commits everything it is handed.
     fn drain_tick_mcus(&self) -> Vec<u32> {
         Vec::new()
     }
 
     /// True while `mcu_id` still owes its endpoint samples the pump has not
     /// shipped — a host-generated source (a buzz) or trajectory left over past
-    /// one fill window. Piece transports commit everything they are handed, so
-    /// they never do.
+    /// one fill window.
     fn wants_drain_tick(&self, _mcu_id: u32) -> bool {
         false
     }

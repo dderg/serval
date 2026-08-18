@@ -1,6 +1,6 @@
 // Engine-side wiring for the sample-stream executor: oid → lane resolution,
-// the foreground command entry points, and the tick-time dispatch that replaces
-// Clenshaw-on-pieces for a sample-driven phase lane.
+// the foreground command entry points, and the tick-time dispatch for a
+// sample-driven phase lane.
 
 use crate::clock::read_widened_now;
 use crate::sample_exec::{LaneOutput, SampleLane};
@@ -79,6 +79,43 @@ impl Engine {
         self.sample_lanes.get(lane_idx).map(SampleLane::executed)
     }
 
+    pub fn sample_push_barrier(&mut self, shared: &SharedState, oid: u8, seq: u32) {
+        let now = read_widened_now(shared);
+        let Some((lane_idx, lane)) = self.lane_mut(oid, shared) else {
+            return;
+        };
+        if let Err(fault) = lane.push_barrier(now, seq) {
+            fault.latch(shared, lane_idx);
+        }
+    }
+
+    /// Pop one passed fence across every lane, tagged with the stepper oid the
+    /// host addressed it by. Foreground-only; the caller loops until `None` and
+    /// sends one `sample_barrier_ack` per result.
+    pub fn sample_take_barrier_ack(&mut self) -> Option<(u8, u32)> {
+        for lane_idx in 0..self.sample_lanes.len() {
+            let Some(oid) = self.sample_lane_oid(lane_idx) else {
+                continue;
+            };
+            let Some(lane) = self.sample_lanes.get_mut(lane_idx) else {
+                continue;
+            };
+            if let Some(seq) = lane.take_passed_barrier() {
+                return Some((oid, seq));
+            }
+        }
+        None
+    }
+
+    fn sample_lane_oid(&self, lane_idx: usize) -> Option<u8> {
+        self.stepping_axes
+            .get(lane_idx)?
+            .as_ref()?
+            .steppers
+            .first()
+            .map(|stepper| stepper.stepper_oid)
+    }
+
     /// Publish a trip halt from a context that may not touch `IsrState`. The
     /// next tick performs the halt at exactly this clock. The first requester
     /// wins: a trip signals every stepper, and every lane must freeze on one
@@ -114,7 +151,13 @@ impl Engine {
     }
 
     /// Drive one sample lane for this tick. Returns whether the lane owns the
-    /// axis this tick; a `false` return leaves the piece path to run it.
+    /// axis this tick.
+    ///
+    /// A halted lane repeats its freeze position every tick and executes no
+    /// host sample. A trip stop halts every lane, including one whose axis the
+    /// host now drives through the classic step queue, so that hold yields the
+    /// axis rather than tripping the mis-routing guard: only a lane still
+    /// playing host samples into a pulse-mode axis is genuinely mis-routed.
     pub(crate) fn sample_dispatch(
         &mut self,
         lane_idx: usize,
@@ -127,6 +170,7 @@ impl Engine {
         let LaneOutput::Position(position) = lane.tick(now, shared, lane_idx) else {
             return false;
         };
+        let only_holding_a_halt = lane.is_halted();
         if crate::buzz_stream::is_xdirect(lane_idx) {
             return true;
         }
@@ -140,12 +184,25 @@ impl Engine {
         if axis.mode.load(core::sync::atomic::Ordering::Acquire)
             != crate::stepping_state::StepMode::Phase as u8
         {
+            if only_holding_a_halt {
+                return false;
+            }
             crate::fault_helpers::raise_phase_mode_not_available(shared, lane_idx);
             return true;
         }
         axis.last_step_count = position;
         #[cfg(feature = "motion-module-stepper")]
-        crate::dispatch_stepper::write_phase_coils(lane_idx, axis, shared, 0);
+        {
+            let max_ramp = i32::from(
+                shared
+                    .max_phase_offset_ramp_per_sample
+                    .load(core::sync::atomic::Ordering::Acquire),
+            );
+            for stepper in &axis.steppers {
+                crate::dispatch_stepper::ramp_phase_offset(stepper, max_ramp);
+            }
+            crate::dispatch_stepper::write_phase_coils(lane_idx, axis, shared, 0);
+        }
         true
     }
 }

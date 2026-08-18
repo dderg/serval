@@ -10,6 +10,9 @@ import math
 from klippy import pins, stepper, structured_log
 from klippy.motion_endstop import MotionEndstop, allocate_provider_id
 
+TRANSPORT_PULSE = 0
+TRANSPORT_PHASE = 1
+
 ######################################################################
 # Field helpers
 ######################################################################
@@ -697,6 +700,9 @@ class TMCVirtualPinHelper:
             )
         return self.mcu_endstop
 
+    def sensorless_homing_configured(self):
+        return self.mcu_endstop is not None
+
     def trip_move_begin(self, entry):
         self.arm()
 
@@ -1009,6 +1015,28 @@ class TMCPhaseStepping:
     def set_phase_group(self, tmcs):
         self._phase_group = tmcs
 
+    def needs_pulse_mode_windows(self):
+        return self._virtual_pin_helper.sensorless_homing_configured()
+
+    def _switch_host_transport(self, axis_idx, transport):
+        """Hand the lane between its two mcu bindings on the host side. The
+        engine drains the outgoing transport, reconciles its executed position
+        off the mcu and seeds the incoming one with it, so the host and the mcu
+        change transport on the same position."""
+        engine = self.printer.lookup_object("motion_engine", None)
+        if engine is None:
+            raise self.printer.command_error(
+                "phase_stepping: the motion engine is required to switch "
+                "transport for %s" % (self.name,)
+            )
+        handle = self._phase_mcu().get_engine_handle()
+        if handle is None:
+            raise self.printer.command_error(
+                "phase_stepping: mcu of %s carries no motion engine handle, so "
+                "its lane has no host transport to switch" % (self.name,)
+            )
+        engine.switch_axis_transport(handle, axis_idx, transport)
+
     def _phase_group_members(self):
         return self._phase_group or [self]
 
@@ -1104,6 +1132,7 @@ class TMCPhaseStepping:
         self._phase_axis_idx = state["axis_idx"]
         align.send([self._phase_stepper_oid, mscnt])
         enable_spi.send([])
+        self._switch_host_transport(self._phase_axis_idx, TRANSPORT_PHASE)
         set_axis_mode.send([self._phase_axis_idx, 1])
         # The ISR's inline direct-register SPI writes corrupt concurrent
         # foreground register reads (false drv_err/uv_cp shutdowns), so the
@@ -1182,6 +1211,7 @@ class TMCPhaseStepping:
         for t in active:
             t.mcu_tmc.set_register("GCONF", t.fields.registers.get("GCONF", 0))
         for axis_idx in sorted({t._phase_axis_idx for t in active}):
+            self._switch_host_transport(axis_idx, TRANSPORT_PULSE)
             set_axis_mode.send([axis_idx, 0])
         for t in active:
             t._echeck_helper.start_checks()

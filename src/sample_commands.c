@@ -19,6 +19,9 @@
 
 extern void *runtime_handle;
 
+DECL_CONSTANT("MOTION_SAMPLE_RATE_HZ", CONFIG_MOTION_SAMPLE_RATE_HZ);
+DECL_CONSTANT("SAMPLE_RUNS_PER_LANE", CONFIG_RUNTIME_SAMPLE_RUNS_PER_LANE);
+
 int32_t runtime_sample_anchor(struct Runtime *rt, uint8_t oid, uint32_t clock,
                               int32_t position);
 int32_t runtime_sample_run(struct Runtime *rt, uint8_t oid,
@@ -30,6 +33,9 @@ int32_t runtime_sample_overlay(struct Runtime *rt, uint8_t oid, uint32_t clock,
 int32_t runtime_sample_query(struct Runtime *rt, uint8_t oid,
                              uint64_t *out_clock, int32_t *out_position);
 int32_t runtime_sample_halt(struct Runtime *rt, uint64_t halt_clock);
+int32_t runtime_sample_barrier(struct Runtime *rt, uint8_t oid, uint32_t seq);
+int32_t runtime_sample_take_barrier_ack(struct Runtime *rt, uint8_t *out_oid,
+                                        uint32_t *out_seq);
 
 void
 command_sample_anchor(uint32_t *args)
@@ -93,6 +99,41 @@ command_sample_get_position(uint32_t *args)
     sendf(SAMPLE_POSITION_ARGS, oid, (uint32_t)clock, position);
 }
 DECL_COMMAND(command_sample_get_position, SAMPLE_GET_POSITION_ARGS);
+
+// Fence the runs pushed so far on this lane. The receipt is emitted from the
+// foreground task below once PLAYBACK has passed the fence clock, not when this
+// command is processed: the host blocks its re-anchor reconcile on the ack, and
+// a receipt issued while the ISR is still playing would leave sample_position a
+// moving target.
+void
+command_sample_barrier(uint32_t *args)
+{
+    if (!runtime_handle)
+        shutdown("sample_barrier without a motion runtime");
+    irqstatus_t flag = irq_save();
+    runtime_sample_barrier(runtime_handle, args[0] & 0xFFu, args[1]);
+    irq_restore(flag);
+}
+DECL_COMMAND(command_sample_barrier, SAMPLE_BARRIER_ARGS);
+
+void
+sample_barrier_ack_task(void)
+{
+    if (!runtime_handle)
+        return;
+    for (;;) {
+        uint8_t oid = 0;
+        uint32_t seq = 0;
+        irqstatus_t flag = irq_save();
+        int32_t taken = runtime_sample_take_barrier_ack(runtime_handle, &oid,
+                                                       &seq);
+        irq_restore(flag);
+        if (!taken)
+            return;
+        sendf(SAMPLE_BARRIER_ACK_ARGS, oid, seq);
+    }
+}
+DECL_TASK(sample_barrier_ack_task);
 
 // trsync trip. Publishes the halt clock through SharedState atomics; the next
 // motion tick freezes each lane at the position that clock interpolates to,

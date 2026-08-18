@@ -1,20 +1,8 @@
 use core::sync::atomic::Ordering;
 
-use crate::piece_ring::PieceEntry;
 use crate::state::SharedState;
-use crate::stepping_state::{AxisState, StepMode};
 
-use super::{Engine, SharedFaultSink};
-
-fn idle_phase_slew_pending(axis: &AxisState) -> bool {
-    if axis.mode.load(Ordering::Acquire) != StepMode::Phase as u8 {
-        return false;
-    }
-    axis.steppers.iter().any(|s| {
-        s.phase_offset_microsteps.load(Ordering::Acquire)
-            != s.phase_offset_target.load(Ordering::Acquire)
-    })
-}
+use super::Engine;
 
 impl Engine {
     fn drain_refill_fault(shared: &SharedState) {
@@ -24,122 +12,49 @@ impl Engine {
         }
     }
 
-    fn advance_axis_sample(
-        &mut self,
-        i: usize,
-        now: u64,
-        shared: &SharedState,
-        storage: &mut [PieceEntry],
-    ) -> Option<(f32, f32, f32, bool, u8)> {
-        let axis = self.stepping_axes.get_mut(i).and_then(|s| s.as_mut())?;
-        let cps = self.cycles_per_second;
-        let fault = SharedFaultSink { shared };
-        let mut just_armed = false;
-        let window_end = now.wrapping_add(u64::from(self.sample_period_cycles));
-        match crate::motion_core::get_position_and_velocity_armed_at_window_end(
-            &mut axis.armed,
-            &mut axis.ring,
-            storage,
-            window_end,
-            self.sample_period_cycles,
-            cps,
-            i,
-            &fault,
-            &mut just_armed,
-        ) {
-            Some((p_end, v_end)) => {
-                let motor_mask = axis.ring.peek(storage).map_or(0, |p| p.motor_mask);
-                let (p_sample_start, overlay_just_armed) = if motor_mask != 0 {
-                    if just_armed {
-                        axis.overlay_last_p = 0.0;
-                    }
-                    let p_sample_start = axis.overlay_last_p;
-                    axis.overlay_last_p = p_end;
-                    (p_sample_start, just_armed)
-                } else {
-                    let p_sample_start = axis.p_prev;
-                    axis.p_prev = p_end;
-                    axis.v_prev = v_end;
-                    (p_sample_start, false)
-                };
-                Some((p_end, v_end, p_sample_start, overlay_just_armed, motor_mask))
-            }
-            None => {
-                if !idle_phase_slew_pending(axis) {
-                    return None;
-                }
-                Some((axis.p_prev, 0.0, axis.p_prev, false, 0))
-            }
-        }
-    }
-
     #[cfg(feature = "motion-module-stepper")]
-    #[allow(clippy::too_many_arguments)]
-    fn dispatch_axis_sample(
-        &mut self,
-        i: usize,
-        motor_mask: u8,
-        shared: &SharedState,
-        queue_ptr: *mut crate::step_queue::StepQueue,
-        sample_period_sec: f32,
-        now_lo: u32,
-        p_end: f32,
-        v_end: f32,
-        p_sample_start: f32,
-        overlay_just_armed: bool,
-    ) {
-        use crate::dispatch_stepper::dispatch_axis;
+    fn phase_slew_dispatch(&mut self, i: usize, shared: &SharedState) -> bool {
+        use crate::stepping_state::StepMode;
 
         let Some(axis) = self.stepping_axes.get_mut(i).and_then(|s| s.as_mut()) else {
-            return;
+            return false;
         };
-        dispatch_axis(
-            i,
-            axis,
-            motor_mask,
-            queue_ptr,
-            shared,
-            p_end,
-            v_end,
-            p_sample_start,
-            sample_period_sec,
-            now_lo,
-            self.cycles_per_second,
-            overlay_just_armed,
+        if axis.mode.load(Ordering::Acquire) != StepMode::Phase as u8 {
+            return false;
+        }
+        if crate::buzz_stream::is_xdirect(i) {
+            return false;
+        }
+        let pending = axis.steppers.iter().any(|s| {
+            s.phase_offset_microsteps.load(Ordering::Acquire)
+                != s.phase_offset_target.load(Ordering::Acquire)
+        });
+        if !pending {
+            return false;
+        }
+        let max_ramp = i32::from(
+            shared
+                .max_phase_offset_ramp_per_sample
+                .load(Ordering::Acquire),
         );
+        for stepper in &axis.steppers {
+            crate::dispatch_stepper::ramp_phase_offset(stepper, max_ramp);
+        }
+        crate::dispatch_stepper::write_phase_coils(i, axis, shared, 0);
+        true
     }
 
-    pub fn tick(&mut self, now: u64, shared: &SharedState, storage: &mut [PieceEntry]) -> bool {
+    #[cfg(not(feature = "motion-module-stepper"))]
+    fn phase_slew_dispatch(&mut self, _i: usize, _shared: &SharedState) -> bool {
+        false
+    }
+
+    #[cfg_attr(not(feature = "sample-stepping"), allow(unused_variables))]
+    pub fn tick(&mut self, now: u64, shared: &SharedState) -> bool {
         Self::drain_refill_fault(shared);
 
         #[cfg(feature = "sample-stepping")]
         self.sample_take_halt_request(shared);
-
-        #[cfg(feature = "motion-module-stepper")]
-        #[cfg(any(test, feature = "host"))]
-        let test_queue_ptrs = self.test_queue_ptrs;
-        #[cfg(feature = "motion-module-stepper")]
-        #[cfg(any(test, feature = "host"))]
-        let get_queue = |i: usize| {
-            test_queue_ptrs
-                .get(i)
-                .copied()
-                .unwrap_or(core::ptr::null_mut())
-        };
-        #[cfg(feature = "motion-module-stepper")]
-        #[cfg(not(any(test, feature = "host")))]
-        let get_queue = |i: usize| crate::step_queue::queue_for_axis(i);
-
-        #[cfg(feature = "motion-module-stepper")]
-        let sample_period_sec = if self.sample_period_cycles == 0 || self.cycles_per_second == 0.0 {
-            0.0_f32
-        } else {
-            self.sample_period_cycles as f32 / self.cycles_per_second
-        };
-
-        #[cfg(feature = "motion-module-stepper")]
-        #[allow(clippy::cast_possible_truncation)]
-        let now_lo = now as u32;
 
         let mut active = false;
 
@@ -151,33 +66,8 @@ impl Engine {
                 }
                 continue;
             }
-            let Some((p_end, v_end, p_sample_start, overlay_just_armed, motor_mask)) =
-                self.advance_axis_sample(i, now, shared, storage)
-            else {
-                continue;
-            };
-            active = true;
-
-            #[cfg(feature = "motion-module-stepper")]
-            {
-                let queue_ptr = get_queue(i);
-                self.dispatch_axis_sample(
-                    i,
-                    motor_mask,
-                    shared,
-                    queue_ptr,
-                    sample_period_sec,
-                    now_lo,
-                    p_end,
-                    v_end,
-                    p_sample_start,
-                    overlay_just_armed,
-                );
-            }
-
-            #[cfg(not(feature = "motion-module-stepper"))]
-            {
-                let _ = (p_end, v_end, p_sample_start, overlay_just_armed, motor_mask);
+            if self.phase_slew_dispatch(i, shared) {
+                active = true;
             }
         }
 

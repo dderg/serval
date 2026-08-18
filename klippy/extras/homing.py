@@ -3,7 +3,6 @@ import logging
 
 from klippy import engine_wait, structured_log
 from klippy.extras.danger_options import get_danger_options
-from klippy.mcu import STEPPING_MODE_STEPCOMPRESS
 from klippy.motion_endstop import (
     AXIS_ENDSTOP_IDS,
     MotionEndstop,
@@ -515,13 +514,6 @@ class Homing:
                         lane_mcu.get_name(),
                     )
                 )
-        if lane_mcu.get_stepping_mode() == STEPPING_MODE_STEPCOMPRESS:
-            raise axis_config.error(
-                "[%s] keyed endstop_pin: MCU '%s' runs classic stepcompress"
-                " stepping, whose endstops stop every stepper at once; a keyed"
-                " endstop requires motion-runtime stepping"
-                % (section, lane_mcu.get_name())
-            )
         endstops = []
         for stepper_idx, motor_name in enumerate(motor_names):
             pin_params = ppins.parse_pin(
@@ -553,6 +545,7 @@ class Homing:
                         stepper_idx,
                         steppers[stepper_idx].get_mcu(),
                         motor_name,
+                        steppers[stepper_idx].get_oid(),
                     ),
                     group=True,
                 )

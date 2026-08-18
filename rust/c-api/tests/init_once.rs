@@ -58,7 +58,6 @@ fn second_init_returns_null() {
 
 #[test]
 fn null_handle_returns_null_ptr_error() {
-    let piece = [0u8; 32];
-    let r = unsafe { c_api::runtime_write_piece(std::ptr::null_mut(), 0, 0, 0, piece.as_ptr()) };
+    let r = unsafe { c_api::runtime_set_axis_mode(std::ptr::null_mut(), 0, 0) };
     assert_eq!(r, c_api::RUNTIME_ERR_NULL_PTR);
 }

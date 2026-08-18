@@ -4,7 +4,6 @@ sensorless (StallGuard virtual endstop) homing with the mode switch."""
 import pytest
 
 from tools.sim import configs
-from tools.sim.world import EndstopPulser
 
 pytestmark = pytest.mark.needs_elf
 
@@ -26,8 +25,7 @@ def test_sensorless_homing_switches_phase_mode(sim_world):
         lambda w: configs.sensorless_phase_config(w.h7_pty, str(w.gcode_dir)),
         dual_mcu=False,
     )
-    with EndstopPulser(world.sim_control("h7"), [(0, 203)]):
-        world.gcode_ok("G28 Z", timeout=120)
+    world.gcode_ok("G28 Z", timeout=120)
 
     log = world.klippy_log_text()
     assert world.shutdown_line() is None

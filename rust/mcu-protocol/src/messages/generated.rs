@@ -31,8 +31,6 @@ pub enum MessageKind {
     ClaimHandshakeReply = 0x0043,
     QueryMotorState = 0x0044,
     MotorStateResponse = 0x0045,
-    PushPieces = 0x0060,
-    PushPiecesResponse = 0x0061,
     PushSampleRuns = 0x0062,
     PushSampleRunsResponse = 0x0063,
     QuerySampleGrid = 0x0064,
@@ -92,8 +90,6 @@ impl MessageKind {
             0x0043 => Self::ClaimHandshakeReply,
             0x0044 => Self::QueryMotorState,
             0x0045 => Self::MotorStateResponse,
-            0x0060 => Self::PushPieces,
-            0x0061 => Self::PushPiecesResponse,
             0x0062 => Self::PushSampleRuns,
             0x0063 => Self::PushSampleRunsResponse,
             0x0064 => Self::QuerySampleGrid,
@@ -224,21 +220,15 @@ impl Decode for QueryRuntimeCaps {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RuntimeCapsResponse {
-    pub total_piece_memory: u32,
-}
+pub struct RuntimeCapsResponse;
 
 impl Encode for RuntimeCapsResponse {
-    fn encode(&self, out: &mut Vec<u8>) {
-        put_u32(out, self.total_piece_memory);
-    }
+    fn encode(&self, _out: &mut Vec<u8>) {}
 }
 
 impl Decode for RuntimeCapsResponse {
-    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        Ok(Self {
-            total_piece_memory: get_u32(c)?,
-        })
+    fn decode_from(_c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self)
     }
 }
 

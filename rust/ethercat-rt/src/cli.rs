@@ -178,7 +178,6 @@ pub struct Args {
     pub dynamics: Option<crate::dynamics::DynamicsModel>,
     pub late_tolerance_ns: Option<i64>,
     pub group_delay_ns: u64,
-    pub executor: crate::setpoint::Executor,
 }
 
 fn resolve_dynamics(
@@ -245,13 +244,6 @@ impl Args {
             }
             None => (cycle_us * 1000) as u64,
         };
-        let executor = match arg_val(&raw, "--executor") {
-            Some(value) => crate::setpoint::Executor::parse(&value).unwrap_or_else(|| {
-                eprintln!("ec-rt: --executor {value} is not one of: piece, setpoint-ring");
-                std::process::exit(1);
-            }),
-            None => crate::setpoint::Executor::Piece,
-        };
         Args {
             ifname,
             socket,
@@ -263,7 +255,6 @@ impl Args {
             dynamics,
             late_tolerance_ns,
             group_delay_ns,
-            executor,
         }
     }
 }

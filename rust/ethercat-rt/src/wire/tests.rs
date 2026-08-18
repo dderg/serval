@@ -12,64 +12,13 @@ use mcu_transport::frame::decode_frame;
 #[test]
 fn decodes_identify_on_control_channel() {
     let payload = frame_payload(MessageKind::Identify, 1, &[3u8]);
-    match decode_command(0, &payload).unwrap() {
+    match decode_command(&payload).unwrap() {
         Command::Identify {
             correlation_id: 1,
             proto_version: 3,
         } => {}
         other => panic!("wrong variant: {other:?}"),
     }
-}
-
-#[test]
-fn decodes_push_pieces_on_pieces_channel() {
-    let msg = PushPieces::single(0, 0, 0, 1, vec![]);
-    let payload = frame_payload(MessageKind::PushPieces, 7, &msg.encoded_to_vec());
-    match decode_command(MCU_CHANNEL_PIECES, &payload).unwrap() {
-        Command::PushPieces {
-            correlation_id,
-            msg: m,
-        } => {
-            assert_eq!(correlation_id, 7);
-            assert_eq!(m.axes[0].axis_idx, 0);
-            assert_eq!(m.axes[0].piece_count, 0);
-            assert_eq!(m.axes[0].new_head, 1);
-        }
-        other => panic!("wrong variant: {other:?}"),
-    }
-}
-
-#[test]
-fn push_pieces_response_decodes_back() {
-    let frame = push_pieces_response_frame(42, 0, 0, 0, 1_000_000_000);
-    let (chan, payload) = decode_frame(&frame).unwrap();
-    assert_eq!(chan, CHANNEL_CONTROL);
-    let (hdr, body) = decode_message_header(payload).unwrap();
-    assert_eq!(hdr.correlation_id, 42);
-    assert_eq!(
-        MessageKind::from_u16(hdr.kind_raw),
-        Some(MessageKind::PushPiecesResponse)
-    );
-    let r = PushPiecesResponse::decode(body).unwrap();
-    assert_eq!(r.result, 0);
-    assert_eq!(
-        r.axes.first().map(|a| a.front_start_time).unwrap_or(0),
-        1_000_000_000
-    );
-}
-
-#[test]
-fn push_pieces_response_multi_echoes_every_axis() {
-    let frame = push_pieces_response_frame_multi(7, 0, 5_000, &[(0, 111), (1, 222)]);
-    let (_chan, payload) = decode_frame(&frame).unwrap();
-    let (hdr, body) = decode_message_header(payload).unwrap();
-    assert_eq!(hdr.correlation_id, 7);
-    let r = PushPiecesResponse::decode(body).unwrap();
-    assert_eq!(r.result, 0);
-    assert_eq!(r.arrival_clock, 5_000);
-    assert_eq!(r.axes.len(), 2);
-    assert_eq!((r.axes[0].axis_idx, r.axes[0].front_start_time), (0, 111));
-    assert_eq!((r.axes[1].axis_idx, r.axes[1].front_start_time), (1, 222));
 }
 
 #[test]
@@ -112,7 +61,7 @@ fn claim_handshake_reply_frame_decodes() {
 #[test]
 fn decode_command_yields_claim_handshake_variant() {
     let payload = frame_payload(MessageKind::ClaimHandshake, 99, &[]);
-    match decode_command(0, &payload).unwrap() {
+    match decode_command(&payload).unwrap() {
         Command::ClaimHandshake { correlation_id: 99 } => {}
         other => panic!("expected ClaimHandshake, got {other:?}"),
     }
@@ -120,7 +69,7 @@ fn decode_command_yields_claim_handshake_variant() {
 
 #[test]
 fn status_heartbeat_frame_on_events_channel() {
-    let frame = status_heartbeat_frame(1, 0, &[42u32, 0u32], 0);
+    let frame = status_heartbeat_frame(1, 0, &[42u32, 0u32], &[900u64, 0u64], 0);
     let (chan, payload) = decode_frame(&frame).unwrap();
     assert_eq!(chan, CHANNEL_EVENTS);
     let (hdr, body) = decode_message_header(payload).unwrap();
@@ -141,7 +90,7 @@ fn decodes_set_torque_command() {
         execute_at_ns: 123_456_789,
     };
     let payload = frame_payload(MessageKind::SetTorque, 7, &msg.encoded_to_vec());
-    let cmd = decode_command(0, &payload[..]).expect("decode");
+    let cmd = decode_command(&payload[..]).expect("decode");
     match cmd {
         Command::SetTorque {
             correlation_id,
@@ -167,7 +116,7 @@ fn decodes_resonance_buzz_command() {
         ramp_ms: 300,
     };
     let payload = frame_payload(MessageKind::ResonanceBuzz, 42, &msg.encoded_to_vec());
-    match decode_command(0, &payload).expect("decode") {
+    match decode_command(&payload).expect("decode") {
         Command::ResonanceBuzz {
             correlation_id,
             msg: m,
@@ -225,7 +174,7 @@ fn decode_start_capture_command() {
         }],
     };
     let payload = frame_payload(MessageKind::StartCapture, 77, &msg.encoded_to_vec());
-    match decode_command(0, &payload).unwrap() {
+    match decode_command(&payload).unwrap() {
         Command::StartCapture {
             correlation_id,
             msg: m,
@@ -244,7 +193,7 @@ fn decode_start_capture_command() {
 #[test]
 fn decode_stop_capture_command() {
     let payload = frame_payload(MessageKind::StopCapture, 78, &[]);
-    match decode_command(0, &payload).unwrap() {
+    match decode_command(&payload).unwrap() {
         Command::StopCapture { correlation_id: 78 } => {}
         other => panic!("expected StopCapture, got {other:?}"),
     }
@@ -293,7 +242,7 @@ fn stop_capture_response_frame_round_trips() {
 #[test]
 fn decodes_stop_command() {
     let payload = frame_payload(MessageKind::Stop, 11, &[]);
-    match decode_command(0, &payload).unwrap() {
+    match decode_command(&payload).unwrap() {
         Command::Stop { correlation_id: 11 } => {}
         other => panic!("expected Stop, got {other:?}"),
     }
@@ -302,7 +251,7 @@ fn decodes_stop_command() {
 #[test]
 fn decodes_resume_stream_command() {
     let payload = frame_payload(MessageKind::ResumeStream, 12, &[]);
-    match decode_command(0, &payload).unwrap() {
+    match decode_command(&payload).unwrap() {
         Command::ResumeStream { correlation_id: 12 } => {}
         other => panic!("expected ResumeStream, got {other:?}"),
     }
@@ -339,7 +288,7 @@ fn decodes_set_drive_limits_command() {
         ],
     };
     let payload = frame_payload(MessageKind::SetDriveLimits, 3, &msg.encoded_to_vec());
-    match decode_command(0, &payload).unwrap() {
+    match decode_command(&payload).unwrap() {
         Command::SetDriveLimits {
             correlation_id: 3,
             msg: m,
@@ -357,7 +306,7 @@ fn decodes_restore_drive_limits_command() {
         4,
         &RestoreDriveLimits { slot_mask: 0b11 }.encoded_to_vec(),
     );
-    match decode_command(0, &payload).unwrap() {
+    match decode_command(&payload).unwrap() {
         Command::RestoreDriveLimits {
             correlation_id: 4,
             slot_mask: 0b11,
@@ -397,7 +346,7 @@ fn decodes_seed_servo_home_command() {
         home_q16: -98_304,
     };
     let payload = frame_payload(MessageKind::SeedServoHome, 8, &msg.encoded_to_vec());
-    match decode_command(0, &payload).unwrap() {
+    match decode_command(&payload).unwrap() {
         Command::SeedServoHome {
             correlation_id: 8,
             slot: 0,
@@ -423,7 +372,7 @@ fn seed_servo_home_response_frame_round_trips() {
 
 #[test]
 fn status_heartbeat_frame_carries_fault_code() {
-    let frame = status_heartbeat_frame(1, 0x8611, &[5u32], 0);
+    let frame = status_heartbeat_frame(1, 0x8611, &[5u32], &[7u64], 0);
     let (_, payload) = decode_frame(&frame).unwrap();
     let (_, body) = decode_message_header(payload).unwrap();
     let hb = StatusHeartbeat::decode(body).unwrap();
@@ -455,7 +404,7 @@ fn decodes_sdo_read_command() {
         subindex: 1,
     };
     let payload = frame_payload(MessageKind::SdoRead, 9, &msg.encoded_to_vec());
-    match decode_command(0, &payload).unwrap() {
+    match decode_command(&payload).unwrap() {
         Command::SdoRead {
             correlation_id: 9,
             msg: m,
@@ -474,7 +423,7 @@ fn decodes_sdo_write_command() {
         value: -42,
     };
     let payload = frame_payload(MessageKind::SdoWrite, 10, &msg.encoded_to_vec());
-    match decode_command(0, &payload).unwrap() {
+    match decode_command(&payload).unwrap() {
         Command::SdoWrite {
             correlation_id: 10,
             msg: m,
@@ -486,7 +435,7 @@ fn decodes_sdo_write_command() {
 #[test]
 fn decodes_query_motor_state_command() {
     let payload = frame_payload(MessageKind::QueryMotorState, 55, &[]);
-    match decode_command(0, &payload).unwrap() {
+    match decode_command(&payload).unwrap() {
         Command::QueryMotorState { correlation_id: 55 } => {}
         other => panic!("expected QueryMotorState, got {other:?}"),
     }
@@ -592,7 +541,7 @@ fn decodes_set_dynamics_model_command() {
         }],
     };
     let payload = frame_payload(MessageKind::SetDynamicsModel, 33, &msg.encoded_to_vec());
-    match decode_command(0, &payload).expect("decode") {
+    match decode_command(&payload).expect("decode") {
         Command::SetDynamicsModel {
             correlation_id,
             msg: m,
@@ -636,7 +585,7 @@ fn set_strain_comp_decodes_into_a_prepared_map() {
         values_um: vec![0, 100, -100, 50],
     };
     let payload = frame_payload(MessageKind::SetStrainComp, 9, &msg.encoded_to_vec());
-    match decode_command(0, &payload).unwrap() {
+    match decode_command(&payload).unwrap() {
         Command::SetStrainComp {
             correlation_id: 9,
             prepared,
@@ -666,7 +615,7 @@ fn set_strain_comp_decode_rejects_an_oversized_offset() {
         values_um: vec![0, 501],
     };
     let payload = frame_payload(MessageKind::SetStrainComp, 10, &msg.encoded_to_vec());
-    match decode_command(0, &payload).unwrap() {
+    match decode_command(&payload).unwrap() {
         Command::SetStrainComp { prepared, .. } => {
             assert_eq!(prepared.grid_rc, crate::strain_comp::ERR_COMP_BAD_GRID);
             assert!(prepared.values_mm.is_empty());
@@ -682,7 +631,7 @@ fn decodes_set_ff_lead_command() {
         lead_ns: 500_000,
     };
     let payload = frame_payload(MessageKind::SetFfLead, 40, &msg.encoded_to_vec());
-    match decode_command(0, &payload).unwrap() {
+    match decode_command(&payload).unwrap() {
         Command::SetFfLead {
             correlation_id: 40,
             msg: m,
