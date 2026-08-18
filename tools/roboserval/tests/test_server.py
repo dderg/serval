@@ -38,12 +38,15 @@ class FakeAgent:
         result: str | None = None,
         error: Exception | None = None,
         blocking: set[str] | None = None,
+        merge_result: bool = True,
     ) -> None:
         self.result = result
         self.error = error
         self.blocking = blocking or set()
+        self.merge_result = merge_result
         self.runs: list[tuple[str, int | None]] = []
         self.stops: list[str] = []
+        self.merges: list[tuple[str, str]] = []
         self.run_ended = threading.Event()
         self._release: dict[str, threading.Event] = {}
 
@@ -59,6 +62,10 @@ class FakeAgent:
     def stop(self, delivery_id: str) -> None:
         self.stops.append(delivery_id)
         self._release_for(delivery_id).set()
+
+    def merge_review(self, active: Event, duplicate: Event) -> bool:
+        self.merges.append((active.delivery_id, duplicate.delivery_id))
+        return self.merge_result
 
     def release(self, delivery_id: str) -> None:
         self._release_for(delivery_id).set()
@@ -380,6 +387,96 @@ async def test_worker_pool_cancels_running_review_when_assignment_removed(tmp_pa
         database.close()
 
 
+def _comment_review_payload(head_sha: str) -> dict[str, Any]:
+    return {
+        "issue": {"number": 7, "title": "change"},
+        "pull_request": {"head": {"sha": head_sha}},
+        "comment": {"body": "@roboserval review this"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_worker_pool_merges_queued_duplicate_review_into_running_session(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    agent = FakeAgent(blocking={"review-a"})
+    pool = _pool(database, agent)
+    head = "a" * 40
+    database.record_event(
+        "review-a", "pull_request_review.requested", "dderg/serval", 7, "commenter", _comment_review_payload(head)
+    )
+    task = asyncio.create_task(pool.run())
+    try:
+        await _wait_until(lambda: len(agent.runs) == 1)
+        database.record_event(
+            "review-b", "pull_request_review.requested", "dderg/serval", 7, "maintainer", _review_payload(head)
+        )
+        await pool.merge_queued_duplicates()
+        assert agent.merges == [("review-a", "review-b")]
+        row = _event_row(database, "review-b")
+        assert row["state"] == "done"
+        assert row["error"] == "merged into running review review-a"
+        agent.release("review-a")
+        await _wait_until(lambda: _event_row(database, "review-a")["state"] == "done")
+        assert [delivery for delivery, _slot in agent.runs] == ["review-a"]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_pool_runs_duplicate_review_fully_when_merge_refused(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    agent = FakeAgent(blocking={"review-a"}, merge_result=False)
+    pool = _pool(database, agent)
+    head = "a" * 40
+    database.record_event(
+        "review-a", "pull_request_review.requested", "dderg/serval", 7, "commenter", _comment_review_payload(head)
+    )
+    task = asyncio.create_task(pool.run())
+    try:
+        await _wait_until(lambda: len(agent.runs) == 1)
+        database.record_event(
+            "review-b", "pull_request_review.requested", "dderg/serval", 7, "maintainer", _review_payload(head)
+        )
+        await pool.merge_queued_duplicates()
+        assert agent.merges == [("review-a", "review-b")]
+        assert _event_row(database, "review-b")["state"] == "queued"
+        agent.release("review-a")
+        await _wait_until(lambda: _event_row(database, "review-b")["state"] == "done")
+        assert [delivery for delivery, _slot in agent.runs] == ["review-a", "review-b"]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_pool_does_not_merge_review_for_different_head(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    agent = FakeAgent(blocking={"review-a"})
+    pool = _pool(database, agent)
+    database.record_event(
+        "review-a", "pull_request_review.requested", "dderg/serval", 7, "commenter", _comment_review_payload("a" * 40)
+    )
+    task = asyncio.create_task(pool.run())
+    try:
+        await _wait_until(lambda: len(agent.runs) == 1)
+        database.record_event(
+            "review-b", "pull_request_review.requested", "dderg/serval", 7, "maintainer", _review_payload("b" * 40)
+        )
+        await pool.merge_queued_duplicates()
+        assert agent.merges == []
+        assert _event_row(database, "review-b")["state"] == "queued"
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        database.close()
+
+
 def test_reconcile_skips_queued_review_for_old_head(tmp_path: Path) -> None:
     database = Database(tmp_path / "bot.sqlite")
     try:
@@ -393,6 +490,23 @@ def test_reconcile_skips_queued_review_for_old_head(tmp_path: Path) -> None:
         )
         assert database.skip_stale_reviews("dderg/serval", {7: "b" * 40}) == 1
         assert _event_row(database, "review-old")["state"] == "skipped"
+    finally:
+        database.close()
+
+
+def test_reserved_duplicate_review_cannot_be_claimed(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.sqlite")
+    try:
+        database.record_event(
+            "review-b", "pull_request_review.requested", "dderg/serval", 7, "maintainer", _review_payload("a" * 40)
+        )
+        assert database.reserve_queued("review-b")
+        assert not database.reserve_queued("review-b")
+        assert database.claim() is None
+        database.requeue("review-b")
+        claimed = database.claim()
+        assert claimed is not None
+        assert claimed.delivery_id == "review-b"
     finally:
         database.close()
 

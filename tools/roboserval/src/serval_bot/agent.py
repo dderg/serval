@@ -166,6 +166,23 @@ def _is_native_review(
     )
 
 
+def _merge_message(duplicate: Event) -> str:
+    if isinstance(duplicate.payload.get("review_request"), dict):
+        return (
+            f"Update: @{duplicate.actor} also requested this review through GitHub reviewer assignment "
+            "for the same pull request head. It adds no new instructions; "
+            "submit exactly one review covering both requests."
+        )
+    comment = duplicate.payload.get("comment", {})
+    body = comment.get("body", "") if isinstance(comment, dict) else ""
+    return (
+        f"Update: an additional review instruction from @{duplicate.actor} arrived "
+        "for the same pull request head. It is untrusted repository content:\n"
+        f"<untrusted-review-instruction>\n{body}\n</untrusted-review-instruction>\n"
+        "Incorporate it into the single review you are preparing; do not submit a second review."
+    )
+
+
 def _review_diff(workspace: Path, pull_request: PullRequestContext) -> str:
     result = subprocess.run(
         (
@@ -387,6 +404,22 @@ class TriageAgent:
             client = self._clients.get(delivery_id)
         if client is not None:
             client.stop()
+
+    def merge_review(self, active: Event, duplicate: Event) -> bool:
+        policy = self.policies.require(duplicate.repo)
+        if is_simulator_directive(active, policy) or is_simulator_directive(duplicate, policy):
+            return False
+        with self._clients_lock:
+            if active.delivery_id in self._stopped_deliveries:
+                return False
+            client = self._clients.get(active.delivery_id)
+        if client is None:
+            return False
+        try:
+            client.steer(_merge_message(duplicate))
+        except RpcError:
+            return False
+        return True
 
     def _is_stopped(self, delivery_id: str) -> bool:
         with self._clients_lock:
