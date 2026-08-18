@@ -36,8 +36,10 @@ jobs:
       # ARM cross-compiler (same packages mainline Klipper's ci-install.sh uses).
       - name: Install arm-none-eabi toolchain + build deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          printf 'https://archive.ubuntu.com/ubuntu/\tpriority:1\n' \
+            | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=15 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=15 install -y \
             gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
           pip3 install pyelftools
 
