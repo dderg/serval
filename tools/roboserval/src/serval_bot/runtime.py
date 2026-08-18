@@ -64,6 +64,15 @@ class Agent(Protocol):
 
     def stop(self, delivery_id: str) -> None: ...
 
+    def merge_review(self, active: Event, duplicate: Event) -> bool: ...
+
+
+def review_head(event: Event) -> str | None:
+    pull_request = event.payload.get("pull_request")
+    head = pull_request.get("head") if isinstance(pull_request, dict) else None
+    sha = head.get("sha") if isinstance(head, dict) else None
+    return sha if isinstance(sha, str) and len(sha) == 40 else None
+
 
 def slot_uids(max_concurrency: int) -> tuple[int, ...]:
     return tuple(range(FIRST_SLOT_UID, FIRST_SLOT_UID + max_concurrency))
@@ -419,7 +428,7 @@ class WorkerPool:
             current_head = review_heads.get(key[1])
             if "review_request" not in event.payload:
                 continue
-            event_head = event.payload.get("pull_request", {}).get("head", {}).get("sha")
+            event_head = review_head(event)
             if current_head is not None and current_head == event_head:
                 continue
             self._superseded[event.delivery_id] = (
@@ -468,6 +477,7 @@ class WorkerPool:
     async def _worker_loop(self, slot_uid: int, wake: asyncio.Event) -> None:
         while not self._stop.is_set():
             wake.clear()
+            await self.merge_queued_duplicates()
             event = self._database.claim()
             if event is None:
                 retry_delay = self._database.next_retry_delay_seconds()
@@ -482,6 +492,36 @@ class WorkerPool:
                 raise
             else:
                 self._pool.release(slot_uid)
+
+    async def merge_queued_duplicates(self) -> None:
+        for (repo, issue_number), (active, _task) in tuple(self._active_reviews.items()):
+            active_head = review_head(active)
+            if active_head is None:
+                continue
+            for duplicate in self._database.queued_reviews(repo, issue_number):
+                if review_head(duplicate) != active_head:
+                    continue
+                if not self._database.reserve_queued(duplicate.delivery_id):
+                    continue
+                merged = False
+                try:
+                    merged = await asyncio.to_thread(self._agent.merge_review, active, duplicate)
+                finally:
+                    if merged:
+                        self._database.finish(
+                            duplicate.delivery_id, "done", f"merged into running review {active.delivery_id}"
+                        )
+                        log.info(
+                            "duplicate review merged into running session",
+                            extra={
+                                "delivery_id": duplicate.delivery_id,
+                                "merged_into": active.delivery_id,
+                                "repo": repo,
+                                "issue": issue_number,
+                            },
+                        )
+                    else:
+                        self._database.requeue(duplicate.delivery_id)
 
     async def _run_event(self, event: Event, slot_uid: int) -> None:
         started = time.monotonic()

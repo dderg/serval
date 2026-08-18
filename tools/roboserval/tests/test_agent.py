@@ -428,6 +428,97 @@ def _pr_sim_directive_event(delivery_id: str, issue_number: int) -> Event:
     )
 
 
+def _running_review_event(delivery_id: str, *, assignment: bool) -> Event:
+    payload: dict[str, Any] = {
+        "issue": {"title": "Fix LEDs", "body": ""},
+        "pull_request": {
+            "number": 412,
+            "title": "Fix LEDs",
+            "body": "",
+            "html_url": "https://github.com/dderg/serval/pull/412",
+            "base": {"ref": "main", "sha": "a" * 40},
+            "head": {"ref": "fix-leds", "sha": "b" * 40},
+        },
+    }
+    if assignment:
+        payload["review_request"] = {"event": "review_requested"}
+    else:
+        payload["comment"] = {"body": "@roboserval please focus on the timing math"}
+    return Event(
+        delivery_id=delivery_id,
+        event_type="pull_request_review.requested",
+        repo="dderg/serval",
+        issue_number=412,
+        actor="dderg",
+        payload=payload,
+        state="running" if not assignment else "queued",
+        attempts=1,
+        error=None,
+    )
+
+
+class SteeringClient:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.steered: list[str] = []
+
+    def steer(self, message: str) -> None:
+        if self.error is not None:
+            raise self.error
+        self.steered.append(message)
+
+
+def test_merge_review_steers_assignment_duplicate_into_running_session(tmp_path: Path, monkeypatch: Any) -> None:
+    agent = TriageAgent(_prepared_settings(tmp_path, monkeypatch), _shadow_policies(), FakeDatabase(), None)
+    client = SteeringClient()
+    agent._clients["active"] = client
+    active = _running_review_event("active", assignment=False)
+    duplicate = _running_review_event("duplicate", assignment=True)
+
+    assert agent.merge_review(active, duplicate) is True
+    assert len(client.steered) == 1
+    assert "reviewer assignment" in client.steered[0]
+    assert "submit exactly one review" in client.steered[0]
+
+
+def test_merge_review_steers_comment_instruction_verbatim(tmp_path: Path, monkeypatch: Any) -> None:
+    agent = TriageAgent(_prepared_settings(tmp_path, monkeypatch), _shadow_policies(), FakeDatabase(), None)
+    client = SteeringClient()
+    agent._clients["active"] = client
+    active = _running_review_event("active", assignment=True)
+    duplicate = _running_review_event("duplicate", assignment=False)
+
+    assert agent.merge_review(active, duplicate) is True
+    assert "@roboserval please focus on the timing math" in client.steered[0]
+    assert "do not submit a second review" in client.steered[0]
+
+
+def test_merge_review_refuses_without_running_client(tmp_path: Path, monkeypatch: Any) -> None:
+    agent = TriageAgent(_prepared_settings(tmp_path, monkeypatch), _shadow_policies(), FakeDatabase(), None)
+    active = _running_review_event("active", assignment=False)
+    duplicate = _running_review_event("duplicate", assignment=True)
+
+    assert agent.merge_review(active, duplicate) is False
+
+
+def test_merge_review_refuses_simulator_directive_duplicate(tmp_path: Path, monkeypatch: Any) -> None:
+    agent = TriageAgent(_prepared_settings(tmp_path, monkeypatch), _shadow_policies(), FakeDatabase(), None)
+    agent._clients["active"] = SteeringClient()
+    active = _running_review_event("active", assignment=True)
+    duplicate = _pr_sim_directive_event("duplicate", 412)
+
+    assert agent.merge_review(active, duplicate) is False
+
+
+def test_merge_review_returns_false_when_steer_fails(tmp_path: Path, monkeypatch: Any) -> None:
+    agent = TriageAgent(_prepared_settings(tmp_path, monkeypatch), _shadow_policies(), FakeDatabase(), None)
+    agent._clients["active"] = SteeringClient(error=RpcProcessExitError("RPC process stopped"))
+    active = _running_review_event("active", assignment=False)
+    duplicate = _running_review_event("duplicate", assignment=True)
+
+    assert agent.merge_review(active, duplicate) is False
+
+
 def test_stop_before_registration_prevents_start(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.setattr(agent_module, "RpcClient", FakeRpcClient)
     FakeRpcClient.started = False

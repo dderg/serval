@@ -312,6 +312,33 @@ class Database:
             if cursor.rowcount != 1:
                 raise RuntimeError(f"event is not running: {delivery_id}")
 
+    def queued_reviews(self, repo: str, issue_number: int) -> list[Event]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM events WHERE repo=? AND issue_number=? "
+                "AND event_type='pull_request_review.requested' AND state='queued' "
+                "ORDER BY created_at",
+                (repo, issue_number),
+            ).fetchall()
+        return [_event_from_row(row) for row in rows]
+
+    def reserve_queued(self, delivery_id: str) -> bool:
+        with self._transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE events SET state='running', updated_at=? WHERE delivery_id=? AND state='queued'",
+                (_now(), delivery_id),
+            )
+        return cursor.rowcount == 1
+
+    def requeue(self, delivery_id: str) -> None:
+        with self._transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE events SET state='queued', updated_at=? WHERE delivery_id=? AND state='running'",
+                (_now(), delivery_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"event is not running: {delivery_id}")
+
     def schedule_retry(self, delivery_id: str, delay_seconds: float, error: str) -> bool:
         available_at = (datetime.now(UTC) + timedelta(seconds=delay_seconds)).isoformat(timespec="microseconds")
         with self._transaction() as connection:
