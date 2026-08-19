@@ -464,8 +464,11 @@ command_kalico_phase_align_to(uint32_t *args)
     uint16_t target_phase = args[1];
     int32_t rc = runtime_phase_align_to(
         runtime_handle, stepper_oid, target_phase);
+    if (rc == -2)
+        shutdown("kalico_phase_align_to rejected: sample playback active");
     if (rc != 0)
-        shutdown("kalico_phase_align_to rejected (motion in progress or bad args)");
+        shutdown("kalico_phase_align_to rejected: unknown stepper oid"
+                 " or bad target_phase");
 }
 DECL_COMMAND(command_kalico_phase_align_to,
              "kalico_phase_align_to oid=%c target_phase=%hu");
