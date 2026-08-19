@@ -684,6 +684,15 @@ class BeaconMcuStub:
             if trigger_time is None
             else self._clock_at(trigger_time)
         )
+        contact_line = (
+            f"CONTACT steps={self._steps_now} z={self._z_current:.6f}"
+            f" trigger_time={trigger_time!r}"
+            f" clock={self._contact_trigger_clock}\n"
+        )
+        logging.info("beacon-stub: %s", contact_line.strip())
+        if self._log_path:
+            with open(self._log_path, "a") as f:
+                f.write(contact_line)
         self._contact_trigger_sample = self._sample_index
         self._contact_trigger_freq = self._z_to_frequency(0.0)
         self._trsync_can_trigger[self._contact_trsync_oid] = False

@@ -1026,11 +1026,9 @@ home_method: proximity
 home_method_when_homed: proximity
 home_autocalibrate: never
 # Contact positions reconstructed from the emulator's trigger clock
-# carry the real-clock <-> virtual-clock mapping jitter. The error is
-# descent-speed proportional; at the plugin's default 3mm/s it straddles
-# the tolerance whenever the virtual clock slews (classic stepping's
-# bursty pacing, loaded hosts), so the sim descends at 1mm/s.
-autocal_speed: 1
+# carry the real-clock <-> virtual-clock mapping jitter (~0.01mm at the
+# 3mm/s autocal speed), so the hardware-default touch repeatability
+# gate (0.008) is marginally flaky in the sim.
 autocal_tolerance: 0.02
 {bed_mesh_section}
 [post_processor is_xy]

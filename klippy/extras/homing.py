@@ -890,6 +890,9 @@ class Homing:
                 provider.trip_move_end(entry)
         trip_pos, final_pos, trip_clock = result
         _verify_latched_trips(gcmd, axis, endstops, trip_clock)
+        reconciled = list(toolhead.get_position())
+        reconciled[:3] = final_pos
+        toolhead.set_position(reconciled)
         return trip_pos, final_pos
 
 
