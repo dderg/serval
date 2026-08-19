@@ -577,6 +577,17 @@ class TMCCommandHelper:
             logging.info(
                 "Enabling TMC virtual enable for '%s'", self.stepper_name
             )
+        # A previous session may have left the firmware's phase ISR
+        # streaming XDIRECT on this SPI bus (klippy restarts do not reset
+        # the mcu); its transfers corrupt the register init below, so
+        # silence it first. Harmless when it is already off.
+        tmc_spi = getattr(self.mcu_tmc, "tmc_spi", None)
+        if tmc_spi is not None:
+            disable_spi = tmc_spi.spi.get_mcu().try_lookup_command(
+                "kalico_phase_stepping_disable_spi"
+            )
+            if disable_spi is not None:
+                disable_spi.send([])
         # Send init
         try:
             if self.mcu_tmc.mcu.non_critical_disconnected:

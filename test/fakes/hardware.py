@@ -23,7 +23,11 @@ class _FakeClockSync:
 
 
 class FakeMcu:
-    PRESENT_COMMAND = object()
+    class _PresentCommand:
+        def send(self, args=()):
+            pass
+
+    PRESENT_COMMAND = _PresentCommand()
 
     def __init__(
         self,
