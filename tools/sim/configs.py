@@ -479,6 +479,83 @@ rotation_distance: 4
 {_tail(gcode_dir)}"""
 
 
+def awd_three_z_probe_config(h7_pty: str, f4_pty: str, gcode_dir: str) -> str:
+    motor_sections = ""
+    for i, name in enumerate(("a", "a1", "b", "b1")):
+        motor_sections += f"""
+[motor {name}]
+drive: stepper
+step_pin: gpiochip0/gpio{30 + 3 * i}
+dir_pin: gpiochip0/gpio{31 + 3 * i}
+enable_pin: !gpiochip0/gpio{32 + 3 * i}
+microsteps: 16
+rotation_distance: 40
+"""
+    z_sections = ""
+    for i, name in enumerate(("z", "z1", "z2")):
+        z_sections += f"""
+[motor {name}]
+drive: stepper
+step_pin: bottom:gpiochip0/gpio{6 + 3 * i}
+dir_pin: bottom:gpiochip0/gpio{7 + 3 * i}
+enable_pin: !bottom:gpiochip0/gpio{8 + 3 * i}
+microsteps: 16
+rotation_distance: 4
+"""
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[mcu bottom]
+serial: {f4_pty}
+
+[printer]
+max_velocity: 100
+max_accel: 1000
+max_jerk: 2000
+max_z_velocity: 10
+max_z_accel: 30
+
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a, a1
+b_motors: b, b1
+z_motors: z, z1, z2
+
+[axis x]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio200
+homing_speed: 10
+post_processors: is_xy
+
+[axis y]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio201
+homing_speed: 10
+post_processors: is_xy
+
+[axis z]
+position_min: -5
+position_max: 250
+endstop_pin: probe:z_virtual_endstop
+homing_speed: 5
+
+[probe]
+pin: bottom:gpiochip0/gpio202
+z_offset: 1.5
+speed: 5
+samples: 1
+
+{motor_sections}{z_sections}{_tail(gcode_dir)}"""
+
+
 def awd_corexy_positive_dir_config(h7_pty: str, gcode_dir: str) -> str:
     """AWD CoreXY homing toward position_max on X and Y, with the
     min_home_dist early-trigger guard active — the bench layout where a

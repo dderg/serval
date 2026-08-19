@@ -22,6 +22,7 @@ pub(crate) struct PumpSink {
     pub(crate) anchor: Arc<Mutex<crate::anchor::Anchor>>,
     pub(crate) mcu_configs: Vec<crate::mcu_config::McuAxisConfig>,
     pub(crate) pump_tx: Sender<crate::pump::EnqueueMsg>,
+    pub(crate) pump_control: Option<Sender<crate::pump::PumpMsg>>,
     pub(crate) counter: Arc<AtomicU64>,
     pub(crate) active_drip_cohort: Arc<Mutex<Option<u64>>>,
     pub(crate) motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
@@ -234,6 +235,45 @@ impl PumpSink {
             .project(host_secs)
     }
 
+    /// A nudge-path projection rebase moved this MCU's host→mcu map for
+    /// every lane, but only the nudged lane carries pieces (and so a cut)
+    /// through the pump. Cut every sibling lane at the same clock via the
+    /// pump's control channel — otherwise their shim seams keep the previous
+    /// epoch's slope and the next pieces (projected on the new map) miss the
+    /// seam by `freq_delta × span` plus the rebase's offset jump.
+    fn cut_sibling_lanes_after_rebase(
+        &self,
+        mcu_id: u32,
+        nudged_axis: u8,
+        seam_host: f64,
+    ) -> Result<(), DispatchError> {
+        let Some(control) = &self.pump_control else {
+            return Ok(());
+        };
+        let at_start_clock = self.project(mcu_id, seam_host);
+        let epoch_freq = self
+            .frozen_projection
+            .lock_ok()
+            .get(&mcu_id)
+            .map(|f| f.freq);
+        for cfg in self.mcu_configs.iter().filter(|c| c.mcu_id == mcu_id) {
+            for &axis_idx in &cfg.axes {
+                let axis = axis_idx as u8;
+                if axis == nudged_axis {
+                    continue;
+                }
+                control
+                    .send(crate::pump::PumpMsg::MarkReanchor {
+                        key: crate::types::AxisKey { mcu_id, axis },
+                        at_start_clock,
+                        epoch_freq,
+                    })
+                    .map_err(|_| DispatchError::PumpGone)?;
+            }
+        }
+        Ok(())
+    }
+
     fn anchor(&self, t_start: f64, t_end: f64) -> AnchorPoint {
         let host_now = self.host_now();
         let (t0, epoch) = self
@@ -380,6 +420,7 @@ impl SegmentSink for PumpSink {
             && (at.epoch.retimed() || !self.frozen_projection.lock_ok().contains_key(&mcu_id));
         if fresh_projection {
             self.reanchor_projection(mcu_id, at.t0 + np.piece.u_start)?;
+            self.cut_sibling_lanes_after_rebase(mcu_id, axis, at.t0 + np.piece.u_start)?;
         }
 
         if at.epoch.is_fresh() {

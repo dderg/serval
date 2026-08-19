@@ -123,6 +123,16 @@ pub enum PumpMsg {
         mcu_id: u32,
         error: String,
     },
+    /// A projection rebase (nudge-path re-anchor) invalidated every lane
+    /// seam on the named lane's MCU without giving that lane any pieces to
+    /// carry the cut. The pump forwards it to the endpoint so the lane's
+    /// stream is cut at `at_start_clock` on the new epoch slope before its
+    /// next pieces arrive.
+    MarkReanchor {
+        key: AxisKey,
+        at_start_clock: u64,
+        epoch_freq: Option<f64>,
+    },
     Barrier(std::sync::mpsc::SyncSender<()>),
     Shutdown,
 }

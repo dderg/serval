@@ -228,6 +228,7 @@ pub fn setup_pipeline(
         anchor: dispatch.anchor,
         mcu_configs: dispatch.mcu_configs,
         pump_tx: pump_data,
+        pump_control: Some(pump_control.clone()),
         counter: dispatch.counter,
         active_drip_cohort: dispatch.active_drip_cohort,
         motion_history: dispatch.motion_history,

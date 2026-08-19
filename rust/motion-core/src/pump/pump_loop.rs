@@ -123,6 +123,7 @@ impl<S: PieceSink> Pump<S> {
                 let dropped = q.pieces.len() as u32;
                 q.pieces.clear();
                 q.staged_motion = 0;
+                q.seam_end_clock = None;
                 if dropped > 0 {
                     (self.callbacks.on_abandon)(key, dropped);
                 }
@@ -152,6 +153,7 @@ impl<S: PieceSink> Pump<S> {
                         let dropped = q.pieces.len() as u32;
                         q.pieces.clear();
                         q.staged_motion = 0;
+                        q.seam_end_clock = None;
                         if dropped > 0 {
                             (self.callbacks.on_abandon)(key, dropped);
                         }
@@ -262,6 +264,24 @@ impl<S: PieceSink> Pump<S> {
                 );
                 (self.callbacks.on_fatal_transport)(AxisKey { mcu_id, axis: 0 });
                 return false;
+            }
+            PumpMsg::MarkReanchor {
+                key,
+                at_start_clock,
+                epoch_freq,
+            } => {
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "sibling_lane_reanchor_mark",
+                    mcu = key.mcu_id,
+                    axis = key.axis,
+                    at_start_clock,
+                    "[reanchor] projection rebase cut a sibling lane without pieces"
+                );
+                self.sink.mark_reanchor(key, at_start_clock, epoch_freq);
+                if let Some(q) = self.queues.get_mut(&key) {
+                    q.seam_end_clock = None;
+                }
             }
             PumpMsg::Barrier(ack) => {
                 self.pending_barrier_acks.push(ack);
@@ -377,6 +397,58 @@ impl<S: PieceSink> Pump<S> {
             }
         }
         let ring_depth = (self.callbacks.ring_depth_of)(key);
+        let lane_freq = (self.callbacks.mcu_clock_of)(key.mcu_id)
+            .map(|(_, freq)| freq)
+            .filter(|freq| *freq > 0.0);
+        if !epoch.is_fresh() {
+            if let (Some((first, _)), Some(freq)) = (pieces.first(), lane_freq) {
+                let seam = self
+                    .queues
+                    .get(&key)
+                    .and_then(|q| q.seam_end_clock.map(|end| (end, q.seam_end_at_rest)));
+                if let Some((end, at_rest)) = seam {
+                    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                    let floor = (freq * super::sched::LANE_REJOIN_GAP_FLOOR_SECS) as u64;
+                    if first.start_time > end.saturating_add(floor) {
+                        if at_rest {
+                            tracing::info!(
+                                subsystem = "motion",
+                                event = "lane_rejoin_gap_mark",
+                                mcu = key.mcu_id,
+                                axis = key.axis,
+                                seam_end = end,
+                                at_start_clock = first.start_time,
+                                "[rejoin] lane sat out single-lane traffic at rest — \
+                                 sanctioning its forward seam gap"
+                            );
+                            self.sink.mark_seam_gap(key, first.start_time);
+                        } else {
+                            tracing::error!(
+                                subsystem = "motion",
+                                event = "lane_hole_mid_motion",
+                                mcu = key.mcu_id,
+                                axis = key.axis,
+                                seam_end = end,
+                                at_start_clock = first.start_time,
+                                "[rejoin] forward lane hole while the lane's last piece \
+                                 ended in motion — trajectory content is missing; the \
+                                 endpoint seam guard will fail loud"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let lane_seam_track = match (pieces.last(), lane_freq) {
+            (Some((last, _)), Some(freq)) => {
+                #[allow(clippy::cast_possible_truncation)]
+                let end = last.end_time(freq as f32);
+                let at_rest = super::sched::is_hold_piece(last)
+                    || last.vel_end().abs() <= super::sched::LANE_REJOIN_REST_VEL_MM_S;
+                Some((end, at_rest))
+            }
+            _ => None,
+        };
         // Hold merging is off during drip cohorts: their release floor is
         // piece-count-based and coalescing would starve it. Without a synced
         // clock there is no freq to prove seam contiguity, so append as-is.
@@ -399,6 +471,12 @@ impl<S: PieceSink> Pump<S> {
             .entry(key)
             .or_insert_with(|| AxisQueue::new(ring_depth));
         q.lead_secs = lead_secs;
+        if let Some((end, at_rest)) = lane_seam_track {
+            q.seam_end_clock = Some(end);
+            q.seam_end_at_rest = at_rest;
+        } else if !pieces.is_empty() {
+            q.seam_end_clock = None;
+        }
         q.staged_motion += pieces
             .iter()
             .filter(|(p, _)| !super::sched::is_hold_piece(p))

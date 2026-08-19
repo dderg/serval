@@ -53,6 +53,7 @@ fn sink() -> (
         anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
         mcu_configs: vec![stepcompress_cfg()],
         pump_tx: tx,
+        pump_control: None,
         counter: Arc::new(AtomicU64::new(0)),
         active_drip_cohort: Arc::new(Mutex::new(None)),
         motion_history: Arc::new(Mutex::new(crate::motion_history::HistoryStore::default())),

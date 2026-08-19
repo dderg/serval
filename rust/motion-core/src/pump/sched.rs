@@ -29,6 +29,14 @@ pub struct AxisQueue {
     /// Consecutive hold pieces at the pushed (wire) tail; any non-hold send
     /// resets it. Feeds the drain ledger's motion-only drained condition.
     pub wire_hold_tail: u32,
+    /// Projected MCU-clock end of the last enqueued piece and whether that
+    /// piece parked the lane at rest. A later enqueue whose first piece
+    /// starts past this by more than the rejoin floor is a lane-local hole
+    /// (single-lane nudge traffic advanced the stream while this lane sat
+    /// out); the pump sanctions it as a forward seam gap iff the lane was
+    /// at rest.
+    pub seam_end_clock: Option<u64>,
+    pub seam_end_at_rest: bool,
 }
 
 /// A constant-position piece: one coefficient, so zero velocity everywhere.
@@ -36,6 +44,15 @@ pub struct AxisQueue {
 pub fn is_hold_piece(p: &PieceEntry) -> bool {
     p.coeff_count == 1
 }
+
+/// A lane-local forward hole wider than this is a genuine sat-out gap
+/// (single-lane nudge traffic), not seam skew: legitimate f32 seam
+/// reprojection error is span-scaled and stays in the microseconds.
+pub const LANE_REJOIN_GAP_FLOOR_SECS: f64 = 1e-3;
+
+/// A lane whose last piece ends slower than this parked at rest — the same
+/// wire velocity resolution the flattener truncates below.
+pub const LANE_REJOIN_REST_VEL_MM_S: f32 = 1e-3;
 
 impl AxisQueue {
     pub fn new(ring_depth: u32) -> Self {
@@ -48,6 +65,8 @@ impl AxisQueue {
             lead_secs: MAX_LEAD_SECS,
             staged_motion: 0,
             wire_hold_tail: 0,
+            seam_end_clock: None,
+            seam_end_at_rest: false,
             credits: [WireCredit::default(); RetiredBy::COUNT],
         }
     }

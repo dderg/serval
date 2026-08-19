@@ -47,6 +47,8 @@ mod heartbeat_credit_tests;
 #[cfg(test)]
 mod hold_merge_seam_tests;
 #[cfg(test)]
+mod lane_rejoin_tests;
+#[cfg(test)]
 mod memstat_tests;
 #[cfg(test)]
 mod sched_tests;
