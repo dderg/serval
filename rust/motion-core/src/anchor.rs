@@ -9,20 +9,6 @@ pub const DEFAULT_LEAD_SECS: f64 = 0.25;
 /// hitting it mid-motion means continuous motion is already lost — fatal.
 pub const LOW_MARGIN_WARN_SECS: f64 = 0.020;
 
-/// A fresh anchor starts the timeline this far ahead of the playhead, and the
-/// stream then has exactly that much runway to survive the producer's next
-/// hiccup before the mid-motion guard fires. [`DEFAULT_LEAD_SECS`] is a
-/// transport-latency number; the producer's real worst case is a full planner
-/// re-plan pass — ~0.9 s on an M-series, 2-3 s on a loaded Pi, the same stall
-/// `PUMP_INTAKE_BACKLOG_CAP` is sized for. Granting that up front would pause
-/// every resume for seconds, so the lead is earned instead: an idle resume is
-/// proof the lead granted at the previous anchor did not cover the producer,
-/// and doubles it; a continuation carrying a full default lead of runway on
-/// top of what was granted is proof the producer is ahead again, and drops it
-/// back. The ceiling is the pump's own horizon — beyond it the pump holds
-/// pieces back and a deeper lead buys nothing.
-const RESUME_LEAD_GROWTH: f64 = 2.0;
-
 /// How a segment relates to the anchored stream it lands in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamEpoch {
@@ -103,9 +89,6 @@ pub struct Anchor {
     t0: Option<f64>,
     last_t_end: f64,
     parked: bool,
-    /// Runway the next fresh anchor starts the timeline on, earned by the
-    /// stream's own history — see [`RESUME_LEAD_GROWTH`].
-    lead_secs: f64,
 }
 
 impl Anchor {
@@ -114,7 +97,6 @@ impl Anchor {
             t0: None,
             last_t_end: 0.0,
             parked: true,
-            lead_secs: DEFAULT_LEAD_SECS,
         }
     }
 
@@ -176,23 +158,15 @@ impl Anchor {
     ) -> (f64, StreamEpoch) {
         let epoch = match self.classify(seg_t_start, host_now) {
             AnchorClass::Reposition => StreamEpoch::Reposition,
-            AnchorClass::Continuation { margin_s } => {
-                if margin_s >= self.lead_secs + DEFAULT_LEAD_SECS {
-                    self.lead_secs = DEFAULT_LEAD_SECS;
-                }
-                StreamEpoch::Continuation
-            }
+            AnchorClass::Continuation { .. } => StreamEpoch::Continuation,
             AnchorClass::IdleResume { margin_s } => {
-                self.lead_secs =
-                    (self.lead_secs * RESUME_LEAD_GROWTH).min(crate::pump::MAX_LEAD_SECS);
                 tracing::info!(
                     subsystem = "motion",
                     event = "anchor_idle_resume",
                     margin_s,
                     seg_t_start,
-                    lead_secs = self.lead_secs,
-                    "[anchor] resuming from rest across an idle gap — \
-                     re-anchoring forward on an earned lead"
+                    lead_secs = DEFAULT_LEAD_SECS,
+                    "[anchor] resuming from rest across an idle gap — re-anchoring forward"
                 );
                 StreamEpoch::Reanchor
             }
@@ -269,7 +243,7 @@ impl Anchor {
                 None => "first",
                 Some(_) => "reanchor",
             };
-            self.t0 = Some(host_now + self.lead_secs - seg_t_start);
+            self.t0 = Some(host_now + DEFAULT_LEAD_SECS - seg_t_start);
             let t0 = self.t0.unwrap();
             tracing::info!(
                 subsystem = "motion",
@@ -278,7 +252,7 @@ impl Anchor {
                 t0,
                 seg_t_start,
                 seg_t_end,
-                lead_secs = self.lead_secs,
+                lead_secs = DEFAULT_LEAD_SECS,
                 last_t_end = self.last_t_end,
                 condition,
                 "[anchor-decision] fresh anchor"

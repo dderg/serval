@@ -72,6 +72,7 @@ class Poller:
             self._worker.reconcile_review_heads(policy.repo, review_heads)
             events = _polled_events(result, policy.bot_login)
             inserted += self._database.record_poll_batch(policy.repo, started.isoformat(), events)
+            await self._worker.merge_queued_duplicates()
         if inserted:
             self._worker.wake()
         return inserted

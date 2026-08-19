@@ -16,6 +16,7 @@ klippy/_motion_engine*.so
 klippy/motion_engine*.dylib
 klippy/_config_doc*.so
 klippy/_shaper_ident*.so
+tools/sim/preload/*.so
 
 .git/
 *.pyc

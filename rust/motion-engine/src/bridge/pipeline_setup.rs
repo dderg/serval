@@ -14,13 +14,13 @@ fn escalate_endpoint_death(latch: &Arc<Mutex<HashMap<u32, String>>>, mcu_id: u32
 }
 
 fn log_abandoned_pieces(key: crate::types::AxisKey, dropped: u32) {
-    tracing::debug!(
+    tracing::warn!(
         subsystem = "motion",
         event = "pump_abandon_unpushed",
         mcu = key.mcu_id,
         axis = key.axis,
         dropped,
-        "pump flush dropped pieces that never reached the wire"
+        "pump dropped staged pieces that never reached the wire — motion was lost"
     );
 }
 
