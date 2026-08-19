@@ -58,15 +58,32 @@ class _FakePins:
         }
 
 
+class _FakeReactor:
+    NEVER = 9e99
+
+    def monotonic(self):
+        return 0.0
+
+    def register_timer(self, callback, waketime):
+        return (callback, waketime)
+
+    def update_timer(self, timer, waketime):
+        pass
+
+
 class _FakePrinter:
     def __init__(self, ppins):
         self._objects = {"pins": ppins}
+        self._reactor = _FakeReactor()
 
     def lookup_object(self, name, default=None):
         return self._objects.get(name, default)
 
     def add_object(self, name, obj):
         self._objects[name] = obj
+
+    def get_reactor(self):
+        return self._reactor
 
 
 class _FakeConfig:

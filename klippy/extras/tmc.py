@@ -671,6 +671,7 @@ class TMCVirtualPinHelper:
         self.mcu_endstop = None
         self.phase_mode_helper = None
         self._reenter_phase = False
+        self._sg_sample_timer = None
         name_parts = config.get_name().split()
         ppins = self.printer.lookup_object("pins")
         ppins.register_chip("%s_%s" % (name_parts[0], name_parts[-1]), self)
@@ -758,6 +759,48 @@ class TMCVirtualPinHelper:
             self.mcu_tmc.set_register(
                 thigh_reg, override(thigh_reg, {"thigh": 0})
             )
+        readback = {}
+        name_to_reg = getattr(self.mcu_tmc, "name_to_reg", {})
+        for reg_name in ("GCONF", "CHOPCONF", "DRV_STATUS", "TSTEP"):
+            if reg_name in name_to_reg:
+                readback[reg_name] = "%08x" % (
+                    self.mcu_tmc.get_register(reg_name),
+                )
+        structured_log.event(
+            "phase_stepping",
+            "sg_armed",
+            msg="StallGuard armed register readback",
+            stepper=self.mode_tracker.stepper_name,
+            **readback,
+        )
+        reactor = self.printer.get_reactor()
+        if self._sg_sample_timer is None:
+            self._sg_sample_timer = reactor.register_timer(
+                self._sample_sg_status, reactor.monotonic() + 0.25
+            )
+        else:
+            reactor.update_timer(
+                self._sg_sample_timer, reactor.monotonic() + 0.25
+            )
+
+    def _sample_sg_status(self, eventtime):
+        if self.mode_tracker.mode != TMCModeTracker.SG_HOMING:
+            return self.printer.get_reactor().NEVER
+        name_to_reg = getattr(self.mcu_tmc, "name_to_reg", {})
+        sample = {}
+        for reg_name in ("DRV_STATUS", "TSTEP"):
+            if reg_name in name_to_reg:
+                sample[reg_name] = "%08x" % (
+                    self.mcu_tmc.get_register(reg_name),
+                )
+        structured_log.event(
+            "phase_stepping",
+            "sg_sample",
+            msg="StallGuard homing sample",
+            stepper=self.mode_tracker.stepper_name,
+            **sample,
+        )
+        return eventtime + 0.25
 
     def disarm(self):
         self.mode_tracker.transition(
