@@ -971,6 +971,106 @@ driver_SGT: 1
 {_tail(gcode_dir)}"""
 
 
+def awd_sensorless_phase_config(h7_pty: str, gcode_dir: str) -> str:
+    """Twin-motor (AWD-style) phase-stepped Z homed on a StallGuard
+    virtual endstop. Mirrors the Trident bench arrangement that exposed
+    the phase-exit twin silence: two motors share one rail, both are
+    phase-stepped, and only one carries the DIAG endstop, so the trip
+    move must pulse BOTH motors through the classic step queue."""
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[printer]
+max_velocity: 100
+max_accel: 1000
+max_jerk: 2000
+max_z_velocity: 10
+max_z_accel: 30
+
+[kinematics]
+type: cartesian
+axis_x: x
+axis_y: y
+axis_z: z
+x_motors: x
+y_motors: y
+z_motors: z, z1
+
+[axis x]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio10
+homing_speed: 10
+post_processors: is_xy
+
+[axis y]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio11
+homing_speed: 10
+post_processors: is_xy
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: tmc5160_z:virtual_endstop
+homing_speed: 5
+homing_retract_dist: 0
+
+[motor x]
+drive: stepper
+step_pin: gpiochip0/gpio0
+dir_pin: gpiochip0/gpio1
+enable_pin: !gpiochip0/gpio2
+microsteps: 16
+rotation_distance: 40
+
+[motor y]
+drive: stepper
+step_pin: gpiochip0/gpio3
+dir_pin: gpiochip0/gpio4
+enable_pin: !gpiochip0/gpio20
+microsteps: 16
+rotation_distance: 40
+
+[motor z]
+drive: stepper
+step_pin: gpiochip0/gpio15
+dir_pin: gpiochip0/gpio16
+enable_pin: !gpiochip0/gpio21
+microsteps: 256
+rotation_distance: 40
+phase_stepping: True
+
+[motor z1]
+drive: stepper
+step_pin: gpiochip0/gpio17
+dir_pin: gpiochip0/gpio18
+enable_pin: !gpiochip0/gpio22
+microsteps: 256
+rotation_distance: 40
+phase_stepping: True
+
+[tmc5160 z]
+spi_bus: spidev0.0
+cs_pin: gpiochip0/gpio5
+run_current: 1.0
+sense_resistor: 0.075
+diag0_pin: gpiochip0/gpio203
+driver_SGT: 1
+
+[tmc5160 z1]
+spi_bus: spidev0.0
+cs_pin: gpiochip0/gpio6
+run_current: 1.0
+sense_resistor: 0.075
+{_tail(gcode_dir)}"""
+
+
 def beacon_homing_config(
     h7_pty: str,
     f4_pty: Optional[str],

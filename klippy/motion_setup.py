@@ -338,7 +338,7 @@ def derive_mcu_topology(motion, axis_to_handle):
         for axis, kind in zip(axes, lane_kinds):
             bindings = (
                 [binding for binding in bind_list if binding[0] == axis]
-                if kind == LANE_KIND_PULSE
+                if kind in (LANE_KIND_PULSE, LANE_KIND_PHASE_WITH_PULSE)
                 else []
             )
             if not bindings:

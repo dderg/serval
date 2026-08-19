@@ -84,7 +84,7 @@ impl PyMotionEngine {
         }
         let from = transports.mode(key);
         if from == mode {
-            tracing::warn!(
+            tracing::info!(
                 subsystem = "phase-stepping",
                 event = "transport_switch_noop",
                 mcu = mcu_handle,
@@ -116,7 +116,7 @@ impl PyMotionEngine {
             })
             .map_err(PyRuntimeError::new_err)?;
 
-        tracing::warn!(
+        tracing::info!(
             subsystem = "phase-stepping",
             event = "transport_switch",
             mcu = mcu_handle,

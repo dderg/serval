@@ -331,6 +331,35 @@ fn grouped_axis_fans_out_to_every_motor_and_publishes_one_axis_credit() {
 }
 
 #[test]
+fn a_reseeded_grouped_axis_still_steps_every_motor() {
+    let mut h = harness_axes(16, vec![0, 0], vec![7, 8]);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint.reset_axis_position(0, 0).unwrap();
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(linear_run(2_000, 0.0, 1.0, 2))])
+        .unwrap();
+    let steps_by_oid = h
+        .sent
+        .lock_ok()
+        .iter()
+        .filter_map(|frame| match frame {
+            StepFrame::QueueStep { oid, count, .. } => Some((*oid, u32::from(*count))),
+            _ => None,
+        })
+        .fold(
+            std::collections::HashMap::new(),
+            |mut totals, (oid, count)| {
+                *totals.entry(oid).or_default() += count;
+                totals
+            },
+        );
+    assert_eq!(
+        steps_by_oid,
+        std::collections::HashMap::from([(7, 100), (8, 100)])
+    );
+}
+
+#[test]
 fn a_transport_reseed_reaches_every_motor_of_a_grouped_axis() {
     let mut h = harness_axes(16, vec![0, 0], vec![7, 8]);
     h.now.store(1_000, Ordering::Relaxed);
