@@ -910,12 +910,10 @@ impl StepcompressEndpoint {
         self.queue_step_volley(cut.resume_clock, tail)?;
         self.shim.set_motor_cycles_per_second(motor, cut.epoch_freq);
         if !cut.held.is_empty() {
-            self.shim
-                .validate_fresh_pieces(motor, &cut.held)
-                .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
-            self.shim
-                .push_pieces(motor, &cut.held)
-                .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
+            let (now, freq) = self.clock_now()?;
+            #[allow(clippy::cast_possible_truncation)]
+            let axis = self.axes[motor] as u8;
+            self.push_motor_pieces(motor, &cut.held, true, axis, now, freq)?;
         }
         let (now, freq) = self.clock_now()?;
         let snapshot = self.shim.retired_counts();
@@ -1597,99 +1595,117 @@ impl StepcompressEndpoint {
                     cut.held.extend_from_slice(&frame.pieces);
                     continue;
                 }
-                let mut rest: &[PieceEntry] = &frame.pieces;
-                let mut fresh_head = false;
-                loop {
-                    let seam = self
-                        .pending_seams
-                        .get(&motor)
-                        .and_then(VecDeque::front)
-                        .copied();
-                    #[allow(clippy::cast_possible_truncation)]
-                    let cps = self.shim.motor_cycles_per_second(motor) as f32;
-                    let seam_index = seam.and_then(|s| {
-                        let at = s.at();
-                        rest.iter()
-                            .position(|p| p.start_time >= at || p.end_time(cps) > at)
-                    });
-                    let Some(index) = seam_index else {
-                        if fresh_head {
-                            self.shim
-                                .validate_fresh_pieces(motor, rest)
-                                .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
-                        }
-                        self.shim
-                            .push_pieces(motor, rest)
-                            .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
-                        break;
-                    };
-                    let seam = seam.expect("seam_index implies a pending seam");
-                    let (head, tail) = rest.split_at(index);
-                    if fresh_head {
-                        self.shim
-                            .validate_fresh_pieces(motor, head)
-                            .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
-                    } else {
-                        self.shim
-                            .validate_pieces_public(motor, head)
-                            .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
-                    }
-                    self.shim
-                        .push_pieces(motor, head)
-                        .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
-                    let mut defer_tail = false;
-                    match seam {
-                        PendingSeam::Cut { at, epoch_freq } => {
-                            let epoch_freq = epoch_freq.ok_or_else(|| {
-                                SendError::Fatal(format!(
-                                    "stepcompress mcu {mcu_id} axis {}: fresh epoch carried no \
-                                 clock slope; the shim cannot adopt the producer's timeline",
-                                    frame.axis
-                                ))
-                            })?;
-                            self.drain_until_without_retirement(now, at)?;
-                            self.drain_into_backlog_without_retirement(now, freq)?;
-                            let sent = self
-                                .last_sent_boundary
-                                .get(&self.oids[motor])
-                                .is_some_and(|&boundary| at <= boundary);
-                            if sent {
-                                self.begin_cut(motor, at, epoch_freq, tail, now)?;
-                                defer_tail = true;
-                            } else {
-                                self.cut_stream_unsent(motor, epoch_freq, at, now)?;
-                            }
-                        }
-                        PendingSeam::Gap { at } => {
-                            tracing::info!(
-                                subsystem = "motion",
-                                event = "seam_gap_accepted",
-                                mcu = self.mcu_id,
-                                motor,
-                                at,
-                                "[rejoin] forward seam gap sanctioned — no mcu frames"
-                            );
-                            self.shim
-                                .accept_forward_seam_gap(motor, at)
-                                .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
-                        }
-                    }
-                    if let Some(q) = self.pending_seams.get_mut(&motor) {
-                        q.pop_front();
-                        if q.is_empty() {
-                            self.pending_seams.remove(&motor);
-                        }
-                    }
-                    if defer_tail {
-                        break;
-                    }
-                    rest = tail;
-                    fresh_head = true;
-                }
+                self.push_motor_pieces(motor, &frame.pieces, false, frame.axis, now, freq)?;
             }
         }
         self.drain_into_backlog(now, freq)?;
         self.flush(now, freq)
+    }
+
+    /// Push one motor's pieces through the pending-seam ladder: validate and
+    /// push up to each marked seam, apply the seam (cut or sanctioned gap),
+    /// continue with the remainder as a fresh run. A sent-boundary cut defers
+    /// the remainder into `pending_cuts.held`; [`Self::complete_cut`] replays
+    /// it through this same path, so seams marked while a cut awaited its
+    /// barrier are applied instead of the held run being validated as one
+    /// contiguous stream.
+    fn push_motor_pieces(
+        &mut self,
+        motor: usize,
+        pieces: &[PieceEntry],
+        mut fresh_head: bool,
+        axis: u8,
+        now: u64,
+        freq: f64,
+    ) -> Result<(), SendError> {
+        let mcu_id = self.mcu_id;
+        let mut rest: &[PieceEntry] = pieces;
+        loop {
+            let seam = self
+                .pending_seams
+                .get(&motor)
+                .and_then(VecDeque::front)
+                .copied();
+            #[allow(clippy::cast_possible_truncation)]
+            let cps = self.shim.motor_cycles_per_second(motor) as f32;
+            let seam_index = seam.and_then(|s| {
+                let at = s.at();
+                rest.iter()
+                    .position(|p| p.start_time >= at || p.end_time(cps) > at)
+            });
+            let Some(index) = seam_index else {
+                if fresh_head {
+                    self.shim
+                        .validate_fresh_pieces(motor, rest)
+                        .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
+                }
+                self.shim
+                    .push_pieces(motor, rest)
+                    .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
+                return Ok(());
+            };
+            let seam = seam.expect("seam_index implies a pending seam");
+            let (head, tail) = rest.split_at(index);
+            if fresh_head {
+                self.shim
+                    .validate_fresh_pieces(motor, head)
+                    .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
+            } else {
+                self.shim
+                    .validate_pieces_public(motor, head)
+                    .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
+            }
+            self.shim
+                .push_pieces(motor, head)
+                .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
+            let mut defer_tail = false;
+            match seam {
+                PendingSeam::Cut { at, epoch_freq } => {
+                    let epoch_freq = epoch_freq.ok_or_else(|| {
+                        SendError::Fatal(format!(
+                            "stepcompress mcu {mcu_id} axis {axis}: fresh epoch carried no \
+                             clock slope; the shim cannot adopt the producer's timeline"
+                        ))
+                    })?;
+                    self.drain_until_without_retirement(now, at)?;
+                    self.drain_into_backlog_without_retirement(now, freq)?;
+                    let sent = self
+                        .last_sent_boundary
+                        .get(&self.oids[motor])
+                        .is_some_and(|&boundary| at <= boundary);
+                    if sent {
+                        self.begin_cut(motor, at, epoch_freq, tail, now)?;
+                        defer_tail = true;
+                    } else {
+                        self.cut_stream_unsent(motor, epoch_freq, at, now)?;
+                    }
+                }
+                PendingSeam::Gap { at } => {
+                    tracing::info!(
+                        subsystem = "motion",
+                        event = "seam_gap_accepted",
+                        mcu = self.mcu_id,
+                        motor,
+                        at,
+                        "[rejoin] forward seam gap sanctioned — no mcu frames"
+                    );
+                    self.shim
+                        .accept_forward_seam_gap(motor, at)
+                        .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
+                }
+            }
+            if let Some(q) = self.pending_seams.get_mut(&motor) {
+                q.pop_front();
+                if q.is_empty() {
+                    self.pending_seams.remove(&motor);
+                }
+            }
+            if defer_tail {
+                return Ok(());
+            }
+            rest = tail;
+            fresh_head = true;
+        }
     }
 }
 

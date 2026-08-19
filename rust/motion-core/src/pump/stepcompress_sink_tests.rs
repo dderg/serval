@@ -853,6 +853,53 @@ fn a_sent_cut_count_mismatch_is_fatal() {
     assert!(message.contains("delta"), "{message}");
 }
 
+/// A second idle-resume may be marked while a sent-frame cut still awaits its
+/// barrier ack (the QGL probe cadence on a real transport): its frames are
+/// swallowed into the pending cut's `held` run together with the first
+/// resume's pieces, with an idle hole between them. Completing the cut must
+/// replay `held` through the pending-seam ladder — validating it as one
+/// contiguous fresh stream is the bench `PieceGap` fatal.
+#[test]
+fn a_resume_marked_while_a_cut_awaits_its_ack_replays_through_its_own_seam() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+
+    h.endpoint.mark_reanchor(0, 81_834, Some(CYCLES_PER_SECOND));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
+        .unwrap();
+    assert!(h.endpoint.pending_cuts.contains_key(&0));
+
+    h.endpoint
+        .mark_reanchor(0, 500_000, Some(CYCLES_PER_SECOND));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(500_000, 8, 6.0))])
+        .unwrap();
+    assert_eq!(
+        h.endpoint.pending_cuts[&0].held.len(),
+        16,
+        "both resumes' pieces ride the pending cut"
+    );
+
+    let expected = h.endpoint.pending_cuts[&0].expected_count;
+    h.auto_query.store(false, Ordering::Relaxed);
+    h.query_count.store(expected, Ordering::Relaxed);
+    h.ack_sent_barriers_result()
+        .expect("held frames replay through their own pending seam, not as one stream");
+
+    assert!(
+        h.endpoint.pending_cuts.is_empty(),
+        "the second resume's cut was unsent and resolves host-exact"
+    );
+    assert!(
+        h.endpoint.pending_seams.is_empty(),
+        "the second resume's seam mark was consumed by the held replay"
+    );
+}
+
 /// Trip halt → external count reseed → retract → sent-frame cut →
 /// re-approach. The homing reconcile adopts the mcu's executed count as a
 /// fresh absolute origin; a later cut must re-anchor from that origin (not
