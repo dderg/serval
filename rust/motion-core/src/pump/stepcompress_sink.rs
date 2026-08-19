@@ -634,6 +634,15 @@ impl StepcompressEndpoint {
         self.last_sent_boundary.remove(&oid);
         self.pending_cuts.remove(&motor);
         self.pending_seams.remove(&motor);
+        tracing::info!(
+            subsystem = "pump",
+            event = "stepcompress_motor_frozen",
+            mcu = self.mcu_id,
+            motor,
+            oid,
+            count,
+            "motor frozen - frames for it are dropped until a reanchor"
+        );
         self.frozen_motors.insert(motor);
         self.reset_motor_position(motor, count)
             .map_err(SendError::Fatal)
@@ -742,6 +751,14 @@ impl StepcompressEndpoint {
             .unwrap_or_else(|error| panic!("mark_reanchor rejected its routed axis: {error}"))
         {
             if self.frozen_motors.remove(&motor) {
+                tracing::info!(
+                    subsystem = "pump",
+                    event = "stepcompress_motor_unfrozen",
+                    mcu = self.mcu_id,
+                    motor,
+                    axis,
+                    "reanchor thawed a frozen motor"
+                );
                 let snapshot = self.shim.retired_counts();
                 let target = self
                     .motors_of(axis)
@@ -1562,10 +1579,20 @@ impl StepcompressEndpoint {
             ))
         })?;
         if selector == 0 {
-            return Ok(motors
+            let (kept, dropped): (Vec<usize>, Vec<usize>) = motors
                 .into_iter()
-                .filter(|motor| !self.frozen_motors.contains(motor))
-                .collect());
+                .partition(|motor| !self.frozen_motors.contains(motor));
+            if !dropped.is_empty() {
+                tracing::warn!(
+                    subsystem = "pump",
+                    event = "stepcompress_frozen_motor_skipped",
+                    mcu = self.mcu_id,
+                    axis = frame.axis,
+                    dropped = ?dropped,
+                    "axis frame skipped frozen motors - they will not step"
+                );
+            }
+            return Ok(kept);
         }
         let selected = usize::from(selector - 1);
         let motor = motors.get(selected).copied().ok_or_else(|| {
