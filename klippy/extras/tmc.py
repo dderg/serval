@@ -799,7 +799,7 @@ class TMCVirtualPinHelper:
             return self.printer.get_reactor().NEVER
         name_to_reg = getattr(self.mcu_tmc, "name_to_reg", {})
         sample = {}
-        for reg_name in ("DRV_STATUS", "TSTEP"):
+        for reg_name in ("DRV_STATUS", "TSTEP", "GCONF", "IOIN"):
             if reg_name in name_to_reg:
                 sample[reg_name] = "%08x" % (
                     self.mcu_tmc.get_register(reg_name),
