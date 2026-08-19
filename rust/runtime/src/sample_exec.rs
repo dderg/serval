@@ -231,11 +231,17 @@ impl SampleLane {
         self.cursor.is_anchored() && (self.main.len() != 0 || self.overlay.len() != 0)
     }
 
-    /// A transport switch takes the axis away from this lane. The frozen hold a
-    /// trip left behind belongs to the mode being left, and the host owes a
-    /// fresh anchor before the lane may drive the axis again, so the hold is
-    /// released rather than carried across the switch.
-    pub fn release_hold(&mut self) {
+    /// A mode switch takes the axis away from this lane: whatever it was
+    /// playing - a frozen trip hold or an idle anchored hold - belongs to
+    /// the mode being left, and the host owes a fresh anchor before the
+    /// lane may drive the axis again. Leaving the cursor anchored would
+    /// make the next tick execute samples under the wrong mode byte
+    /// (PhaseModeNotAvailable).
+    pub fn reset_for_mode_switch(&mut self) {
+        self.main.clear();
+        self.overlay.clear();
+        self.cursor.unanchor();
+        self.overlay_cursor.unanchor();
         self.halt = None;
     }
 

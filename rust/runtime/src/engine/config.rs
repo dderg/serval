@@ -104,7 +104,7 @@ impl Engine {
                 return -2;
             }
             if let Some(lane) = self.sample_lanes.get_mut(axis_idx as usize) {
-                lane.release_hold();
+                lane.reset_for_mode_switch();
             }
         }
         #[cfg(not(any(test, feature = "host")))]

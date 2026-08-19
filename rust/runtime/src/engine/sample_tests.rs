@@ -159,6 +159,23 @@ fn an_idle_anchored_lane_holding_its_last_sample_accepts_a_phase_align() {
 }
 
 #[test]
+fn a_mode_switch_unanchors_the_lane_so_the_next_tick_cannot_fault() {
+    let (mut engine, shared) = phase_engine();
+    engine.sample_anchor(&shared, OID, ANCHOR, 0);
+    feed(&mut engine, &shared, 0, &[0, 100, 200, 200]);
+    engine.tick(ANCHOR + 10 * u64::from(INTERVAL), &shared);
+
+    assert_eq!(engine.set_axis_mode(0, 0), 0, "idle hold must not block");
+    engine.tick(ANCHOR + 20 * u64::from(INTERVAL), &shared);
+    assert_eq!(
+        shared.last_error.load(Ordering::Acquire),
+        0,
+        "an anchored lane under a Pulse mode byte would raise \
+         PhaseModeNotAvailable"
+    );
+}
+
+#[test]
 fn the_first_halt_requester_fixes_the_clock() {
     let (_engine, shared) = phase_engine();
     Engine::sample_request_halt(&shared, 4_000);
