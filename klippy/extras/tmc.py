@@ -1184,8 +1184,19 @@ class TMCPhaseStepping:
         self._phase_axis_idx = state["axis_idx"]
         align.send([self._phase_stepper_oid, mscnt])
         arbiter.resume()
-        self._switch_host_transport(self._phase_axis_idx, TRANSPORT_PHASE)
+        # Mode first, then the host transport: the pump anchors the sample
+        # lane the moment the transport switches, and an anchored lane
+        # ticking while the axis mode byte still reads Pulse is a
+        # PhaseModeNotAvailable fault. The reverse order on exit keeps the
+        # same invariant from the other side.
         set_axis_mode.send([self._phase_axis_idx, 1])
+        state = self._query_phase_state()
+        if state["mode"] != 1:
+            raise self.printer.command_error(
+                "phase mode entry: mcu did not apply Phase mode on %s "
+                "(mode=%d)" % (self.name, state["mode"])
+            )
+        self._switch_host_transport(self._phase_axis_idx, TRANSPORT_PHASE)
         # The ISR's inline direct-register SPI writes corrupt concurrent
         # foreground register reads (false drv_err/uv_cp shutdowns), so the
         # periodic checks must stay off while phase mode is active.
