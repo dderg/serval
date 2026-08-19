@@ -392,8 +392,10 @@ command_kalico_set_axis_mode(uint32_t *args)
     uint8_t axis_idx = args[0];
     uint8_t mode = args[1];
     int32_t rc = runtime_set_axis_mode(runtime_handle, axis_idx, mode);
+    if (rc == -2)
+        shutdown("kalico_set_axis_mode rejected: sample playback active");
     if (rc != 0)
-        shutdown("kalico_set_axis_mode rejected (motion in progress or bad arg)");
+        shutdown("kalico_set_axis_mode rejected: bad axis or mode");
 }
 DECL_COMMAND(command_kalico_set_axis_mode,
              "kalico_set_axis_mode axis_idx=%c mode=%c");

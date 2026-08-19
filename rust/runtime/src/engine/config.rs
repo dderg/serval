@@ -99,7 +99,7 @@ impl Engine {
             if self
                 .sample_lanes
                 .iter()
-                .any(crate::sample_exec::SampleLane::has_playback)
+                .any(crate::sample_exec::SampleLane::has_pending_samples)
             {
                 return -2;
             }

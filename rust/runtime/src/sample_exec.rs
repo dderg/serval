@@ -222,12 +222,6 @@ impl SampleLane {
         self.halt.is_some()
     }
 
-    /// Whether the lane still has a playback origin, i.e. samples the host
-    /// expects it to execute. A halted lane has none: `halt` unanchored the
-    /// cursor and dropped every queued run, leaving only a frozen hold.
-    pub const fn has_playback(&self) -> bool {
-        self.cursor.is_anchored()
-    }
 
     /// Whether the lane still has queued samples left to execute. An anchored
     /// lane whose rings have drained plays a zero-order hold of its last
