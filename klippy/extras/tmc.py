@@ -1317,8 +1317,10 @@ class TMCPhaseStepping:
         reactor = self.printer.get_reactor()
         deadline = reactor.monotonic() + self.PHASE_SETTLE_TIMEOUT
         for t in active:
+            trail = []
             while True:
                 state = t._query_phase_state()
+                trail.append((state["phase"], state["settled"]))
                 if state["settled"] and state["phase"] == t._cached_mscnt:
                     break
                 if reactor.monotonic() > deadline:
@@ -1330,6 +1332,7 @@ class TMCPhaseStepping:
                         stepper=t.name,
                         phase=state["phase"],
                         target=t._cached_mscnt,
+                        trail=repr(trail[:10] + trail[-10:]),
                     )
                     raise self.printer.command_error(
                         "phase handover jog did not settle on %s "
