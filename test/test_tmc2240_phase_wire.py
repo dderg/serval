@@ -109,8 +109,9 @@ def test_enter_sequence_chopconf_before_direct_mode_checks_stopped_last(rig):
         ("query", "kalico_get_phase_state"),
         ("cmd", "kalico_phase_align_to"),
         ("cmd", "kalico_phase_stepping_enable_spi"),
-        ("transport", "switch_axis_transport"),
         ("cmd", "kalico_set_axis_mode"),
+        ("query", "kalico_get_phase_state"),
+        ("transport", "switch_axis_transport"),
         ("timer-", "_do_periodic_check"),
     ]
     assert tmc_obj.phase_stepping_active()

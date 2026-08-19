@@ -110,14 +110,15 @@ def test_enter_sequence_chopconf_before_direct_mode_checks_stopped_last(rig):
         ("query", "kalico_get_phase_state"),
         ("cmd", "kalico_phase_align_to"),
         ("cmd", "kalico_phase_stepping_enable_spi"),
-        ("transport", "switch_axis_transport"),
         ("cmd", "kalico_set_axis_mode"),
+        ("query", "kalico_get_phase_state"),
+        ("transport", "switch_axis_transport"),
         ("timer-", "_do_periodic_check"),
     ]
     assert tmc_obj.phase_stepping_active()
     assert rig.engine.switches == [(0, 0, 1)], (
-        "the host adopts the phase transport for the lane before the mcu is "
-        "told to execute in phase mode"
+        "the mcu executes in phase mode before the host adopts the phase "
+        "transport - an anchored lane with a Pulse mode byte is a fault"
     )
 
 
@@ -196,6 +197,7 @@ def test_exit_polls_until_the_jog_settles(rig):
         "kalico_get_phase_state",
         [
             phase_state(phase=300),  # consumed by enter (axis_idx lookup)
+            phase_state(phase=300),  # consumed by enter (mode confirm)
             phase_state(phase=300),  # exit mode check
             phase_state(phase=120, settled=0),
             phase_state(phase=280, settled=0),
