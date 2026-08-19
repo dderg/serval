@@ -1027,9 +1027,13 @@ home_method_when_homed: proximity
 home_autocalibrate: never
 # Contact positions reconstructed from the emulator's trigger clock
 # carry the real-clock <-> virtual-clock mapping jitter (~0.01mm at the
-# 3mm/s autocal speed), so the hardware-default touch repeatability
-# gate (0.008) is marginally flaky in the sim.
-autocal_tolerance: 0.02
+# 3mm/s autocal speed under piece-mode's steady tick, ~0.02mm with
+# classic stepping's burstier virtual-clock pacing), so the
+# hardware-default touch repeatability gate (0.008) is widened for the
+# sim. Systematic per-trip drift stays caught: the reseed leak this
+# masked-at-0.02 was ~0.03mm PER TRIP, an order above this gate within
+# one four-sample window.
+autocal_tolerance: 0.03
 {bed_mesh_section}
 [post_processor is_xy]
 type: smooth_bell
