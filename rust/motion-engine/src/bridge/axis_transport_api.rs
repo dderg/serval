@@ -101,13 +101,20 @@ impl PyMotionEngine {
 
         let position = py
             .detach(|| -> Result<i64, String> {
-                if !outgoing.quiescent()? {
-                    return Err(format!(
-                        "switch_axis_transport: mcu {mcu_handle} axis {axis_idx} still has \
-                         motion in flight on its {} transport; a mode switch must follow a \
-                         drain, not race one",
-                        transport_name(outgoing.transport())
-                    ));
+                // The outgoing side may still be playing its buffered lead
+                // (the mcu retires sample runs asynchronously after the
+                // pump drains); wait it out instead of failing on a race,
+                // but never unboundedly.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !outgoing.quiescent()? {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(format!(
+                            "switch_axis_transport: mcu {mcu_handle} axis {axis_idx} still has \
+                             motion in flight on its {} transport after a 5s drain wait",
+                            transport_name(outgoing.transport())
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
                 }
                 let position = outgoing.executed_position(axis_idx)?;
                 transports.adopt(key, mode)?;
