@@ -143,6 +143,22 @@ fn a_lane_frozen_on_a_trip_hold_does_not_refuse_a_phase_align() {
 }
 
 #[test]
+fn an_idle_anchored_lane_holding_its_last_sample_accepts_a_phase_align() {
+    let (mut engine, shared) = phase_engine();
+    engine.sample_anchor(&shared, OID, ANCHOR, 0);
+    feed(&mut engine, &shared, 0, &[0, 100, 200, 200]);
+    engine.tick(ANCHOR + 10 * u64::from(INTERVAL), &shared);
+
+    assert_eq!(
+        engine.phase_align_to(OID, 100),
+        0,
+        "a drained lane plays a zero-order hold; refusing here shut the mcu down on every \
+         phase-mode entry"
+    );
+    assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
+}
+
+#[test]
 fn the_first_halt_requester_fixes_the_clock() {
     let (_engine, shared) = phase_engine();
     Engine::sample_request_halt(&shared, 4_000);

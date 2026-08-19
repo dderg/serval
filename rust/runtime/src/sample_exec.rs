@@ -229,6 +229,14 @@ impl SampleLane {
         self.cursor.is_anchored()
     }
 
+    /// Whether the lane still has queued samples left to execute. An anchored
+    /// lane whose rings have drained plays a zero-order hold of its last
+    /// sample - stationary output that a phase re-align may safely shift.
+    /// Only undrained runs mean real motion is pending.
+    pub fn has_pending_samples(&self) -> bool {
+        self.cursor.is_anchored() && (self.main.len() != 0 || self.overlay.len() != 0)
+    }
+
     /// A transport switch takes the axis away from this lane. The frozen hold a
     /// trip left behind belongs to the mode being left, and the host owes a
     /// fresh anchor before the lane may drive the axis again, so the hold is

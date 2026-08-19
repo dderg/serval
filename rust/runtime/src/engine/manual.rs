@@ -130,16 +130,18 @@ impl Engine {
         )
     }
 
-    /// A lane frozen on a trip hold plays no samples and drives no coil, so it
-    /// does not contend for the phase the align walks to; only a lane with a
-    /// live playback origin does. Refusing on the hold shut the mcu down on
-    /// re-entry after every sensorless home.
+    /// A lane frozen on a trip hold, or an anchored lane whose rings have
+    /// drained to an idle zero-order hold, plays no queued sample and holds
+    /// the axis still; aligning the phase offset under it is exactly the
+    /// handover's job. Only undrained queued runs mean the walk would race
+    /// live motion. Refusing on the idle hold shut the mcu down on every
+    /// phase-mode entry.
     pub fn phase_align_to(&self, stepper_oid: u8, target_phase: u16) -> i32 {
         #[cfg(feature = "sample-stepping")]
         if self
             .sample_lanes
             .iter()
-            .any(crate::sample_exec::SampleLane::has_playback)
+            .any(crate::sample_exec::SampleLane::has_pending_samples)
         {
             return -2;
         }
