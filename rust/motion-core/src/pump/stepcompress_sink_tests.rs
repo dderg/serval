@@ -331,6 +331,20 @@ fn grouped_axis_fans_out_to_every_motor_and_publishes_one_axis_credit() {
 }
 
 #[test]
+fn a_transport_reseed_reaches_every_motor_of_a_grouped_axis() {
+    let mut h = harness_axes(16, vec![0, 0], vec![7, 8]);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint.reset_axis_position(0, 40).unwrap();
+
+    let mut seeds = h.seeds.lock_ok().clone();
+    seeds.sort_unstable();
+    assert_eq!(
+        seeds,
+        vec![(7, 40), (8, 40)],
+        "an AWD twin left unseeded generates no steps after a phase-mode exit"
+    );
+}
+#[test]
 fn selected_motor_frame_advances_grouped_axis_credit() {
     let mut h = harness_axes(16, vec![0, 0], vec![7, 8]);
     h.now.store(1_000, Ordering::Relaxed);

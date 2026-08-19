@@ -474,8 +474,35 @@ impl StepcompressEndpoint {
         Ok(motors)
     }
 
-    fn motor_of(&self, axis: u8) -> Result<usize, SendError> {
-        Ok(self.motors_of(axis)?[0])
+    fn motor_executed_position(&self, axis: u8, motor: usize) -> Result<i64, SendError> {
+        let oid = self.oids[motor];
+        let query = self.step_count_query.as_ref().ok_or_else(|| {
+            SendError::Fatal(format!(
+                "stepcompress mcu {} axis {axis}: no stepper_get_position readback",
+                self.mcu_id
+            ))
+        })?;
+        let wire_count = query(oid).map_err(|error| {
+            SendError::Fatal(format!(
+                "stepcompress mcu {} axis {axis} oid {oid}: stepper_get_position failed: {error}",
+                self.mcu_id
+            ))
+        })?;
+        let executed = if self.shim.invert_dir(motor) {
+            wire_count.saturating_neg()
+        } else {
+            wire_count
+        };
+        let commanded = self.shim.commanded_steps(motor);
+        if executed != commanded {
+            return Err(SendError::Fatal(format!(
+                "stepcompress mcu {} axis {axis} oid {oid}: mcu executed {executed} trajectory \
+                 steps (wire {wire_count}) but the host commanded {commanded}, delta {}",
+                self.mcu_id,
+                executed - commanded
+            )));
+        }
+        Ok(executed)
     }
     fn queue_outbound(&mut self, frame: Outbound, start_clock: u64, end_clock: u64, queued: u64) {
         let enqueue_order = self.next_outbound_order;
@@ -624,55 +651,45 @@ impl StepcompressEndpoint {
     }
 
     /// The mcu's own executed step count for `axis` in trajectory steps,
-    /// cross-checked against the host's absolute bookkeeping. A mismatch on a
-    /// quiesced lane means the two counters have diverged, which is exactly
-    /// what a transport handover must not carry forward.
+    /// cross-checked against the host's absolute bookkeeping on EVERY motor
+    /// of the axis - AWD twins must agree, and a mismatch on a quiesced lane
+    /// means the counters have diverged, which is exactly what a transport
+    /// handover must not carry forward.
     pub fn executed_position(&self, axis: u8) -> Result<i64, SendError> {
-        let motor = self.motor_of(axis)?;
-        let oid = self.oids[motor];
-        let query = self.step_count_query.as_ref().ok_or_else(|| {
-            SendError::Fatal(format!(
-                "stepcompress mcu {} axis {axis}: no stepper_get_position readback",
-                self.mcu_id
-            ))
-        })?;
-        let wire_count = query(oid).map_err(|error| {
-            SendError::Fatal(format!(
-                "stepcompress mcu {} axis {axis} oid {oid}: stepper_get_position failed: {error}",
-                self.mcu_id
-            ))
-        })?;
-        let executed = if self.shim.invert_dir(motor) {
-            wire_count.saturating_neg()
-        } else {
-            wire_count
-        };
-        let commanded = self.shim.commanded_steps(motor);
-        if executed != commanded {
-            return Err(SendError::Fatal(format!(
-                "stepcompress mcu {} axis {axis} oid {oid}: mcu executed {executed} trajectory \
-                 steps (wire {wire_count}) but the host commanded {commanded}, delta {}",
-                self.mcu_id,
-                executed - commanded
-            )));
+        let motors = self.motors_of(axis)?;
+        let mut positions = motors
+            .iter()
+            .map(|&motor| self.motor_executed_position(axis, motor));
+        let first = positions.next().expect("motors_of guarantees non-empty")?;
+        for position in positions {
+            let position = position?;
+            if position != first {
+                return Err(SendError::Fatal(format!(
+                    "stepcompress mcu {} axis {axis}: coupled motors disagree on the executed \
+                     position ({first} vs {position}); a transport handover cannot pick one",
+                    self.mcu_id
+                )));
+            }
         }
-        Ok(executed)
+        Ok(first)
     }
 
-    /// Re-origin one lane's counters — host shim and mcu counter together — so
-    /// the next stream starts from a position the other transport just left
-    /// the motor at.
+    /// Re-origin one lane's counters — host shim and mcu counter together,
+    /// for every motor of the axis — so the next stream starts from a
+    /// position the other transport just left the motors at.
     pub fn reset_axis_position(&mut self, axis: u8, count: i64) -> Result<(), SendError> {
-        let motor = self.motor_of(axis)?;
+        let motors = self.motors_of(axis)?;
         self.abort_outbound();
-        self.reset_motor_position(motor, count)
-            .map_err(SendError::Fatal)?;
-        let mcu_count = if self.shim.invert_dir(motor) {
-            -count
-        } else {
-            count
-        };
-        self.seed_mcu_position(self.oids[motor], mcu_count)?;
+        for motor in motors {
+            self.reset_motor_position(motor, count)
+                .map_err(SendError::Fatal)?;
+            let mcu_count = if self.shim.invert_dir(motor) {
+                -count
+            } else {
+                count
+            };
+            self.seed_mcu_position(self.oids[motor], mcu_count)?;
+        }
         self.post_heartbeat()
     }
 
@@ -680,8 +697,11 @@ impl StepcompressEndpoint {
         let (now, _) = self.clock_now()?;
         let motors = axes
             .iter()
-            .map(|&axis| self.motor_of(axis))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|&axis| self.motors_of(axis))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         self.abort_outbound();
         for motor in motors {
             self.shim
