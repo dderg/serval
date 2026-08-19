@@ -62,7 +62,6 @@ pub unsafe extern "C" fn runtime_configure_axis(
 }
 
 #[unsafe(no_mangle)]
-
 pub unsafe extern "C" fn runtime_set_axis_mode(
     rt: *mut Runtime,
     axis_idx: u8,
