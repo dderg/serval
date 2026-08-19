@@ -79,11 +79,11 @@ def test_scan_probing(world):
 def test_scan_probe_reports_sane_z(world):
     _home(world)
     world.gcode_ok("G1 Z3 F600", timeout=30)
+    world.mark_log()
     world.gcode_ok("PROBE SAMPLES=2", timeout=120)
+    probe_out = world.expect_log("probe at ")
     probes = [
-        line
-        for line in world.klippy_log_text().splitlines()
-        if line.startswith("probe at ")
+        line for line in probe_out.splitlines() if line.startswith("probe at ")
     ]
     assert probes, "no probe result line in klippy.log"
     # "probe at x,y,Z is z=D": Z is the toolhead position, D the measured
