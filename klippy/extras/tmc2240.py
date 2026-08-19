@@ -417,7 +417,10 @@ class TMC2240(tmc.TMCPhaseStepping):
         self._echeck_helper = cmdhelper.echeck_helper
         self._mode_tracker = cmdhelper.mode_tracker
         if self._phase_stepping:
-            cmdhelper.set_post_enable_callback(self._enter_phase_mode_single)
+            cmdhelper.set_post_enable_callback(
+                self._enter_phase_mode_single,
+                pre_cb=self.quiesce_phase_spi_for_config,
+            )
         cmdhelper.setup_register_dump(ReadRegisters)
         # Allow virtual pins to be created
         self._virtual_pin_helper = tmc.TMCVirtualPinHelper(

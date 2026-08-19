@@ -346,6 +346,7 @@ class TMCCommandHelper:
         self.stepper = None
         self.mode_tracker = TMCModeTracker(self.printer, self.stepper_name)
         self._post_enable_cb = None
+        self._pre_enable_cb = None
         self.stepper_enable = self.printer.load_object(config, "stepper_enable")
         self.printer.register_event_handler(
             "klippy:mcu_identify", self._handle_mcu_identify
@@ -385,8 +386,9 @@ class TMCCommandHelper:
             val = self.fields.registers[reg_name]  # Val may change during loop
             self.mcu_tmc.set_register(reg_name, val, print_time)
 
-    def set_post_enable_callback(self, cb):
+    def set_post_enable_callback(self, cb, pre_cb=None):
         self._post_enable_cb = cb
+        self._pre_enable_cb = pre_cb
 
     cmd_INIT_TMC_help = "Initialize TMC stepper driver registers"
 
@@ -490,6 +492,8 @@ class TMCCommandHelper:
     def _apply_driver_config(self, restore_toff, print_time=None):
         if restore_toff and self.toff is not None:
             self.fields.set_field("toff", self.toff)
+        if self._pre_enable_cb is not None:
+            self._pre_enable_cb()
         self._init_registers(print_time)
         if self._post_enable_cb is not None:
             self._post_enable_cb()
@@ -1045,6 +1049,16 @@ class TMCPhaseStepping:
 
     def phase_stepping_active(self):
         return any(t._in_phase_mode() for t in self._phase_group_members())
+
+    def quiesce_phase_spi_for_config(self):
+        """A group sibling already in phase mode streams XDIRECT from the
+        ISR; its transfers interleave with foreground register read-backs
+        and corrupt them, so suppress the ISR writer before touching the
+        bus. The entering member's own enable_spi re-arms it."""
+        if not self.phase_stepping_active():
+            return
+        _e, disable_spi, _s, _j, _a = self._lookup_phase_commands()
+        disable_spi.send([])
 
     def _phase_mcu(self):
         return self.mcu_tmc.tmc_spi.spi.get_mcu()
