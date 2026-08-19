@@ -1134,6 +1134,14 @@ class TMCPhaseStepping:
                 "phase_stepping: mcu of %s carries no motion engine handle, so "
                 "its lane has no host transport to switch" % (self.name,)
             )
+        structured_log.event(
+            "phase_stepping",
+            "transport_switch_request",
+            msg="host transport switch requested",
+            stepper=self.name,
+            axis_idx=axis_idx,
+            transport=transport,
+        )
         engine.switch_axis_transport(handle, axis_idx, transport)
 
     def _phase_group_members(self):

@@ -84,6 +84,14 @@ impl PyMotionEngine {
         }
         let from = transports.mode(key);
         if from == mode {
+            tracing::warn!(
+                subsystem = "phase-stepping",
+                event = "transport_switch_noop",
+                mcu = mcu_handle,
+                axis = axis_idx,
+                mode = transport_name(mode),
+                "transport switch requested but the lane is already there"
+            );
             return Ok(());
         }
         let outgoing = self.transport_side(key, from)?;
@@ -108,7 +116,7 @@ impl PyMotionEngine {
             })
             .map_err(PyRuntimeError::new_err)?;
 
-        tracing::info!(
+        tracing::warn!(
             subsystem = "phase-stepping",
             event = "transport_switch",
             mcu = mcu_handle,
