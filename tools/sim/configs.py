@@ -1071,6 +1071,91 @@ sense_resistor: 0.075
 {_tail(gcode_dir)}"""
 
 
+def awd_corexy_sensorless_phase_config(h7_pty: str, gcode_dir: str) -> str:
+    """Full Trident-bench analogue: CoreXY with four phase-stepped belt
+    motors (two per lane) and StallGuard virtual endstops on the twin of
+    each lane. Homing X exits phase mode on the whole coupled group and
+    runs the trip move through the classic step queue on all four."""
+    motor_sections = ""
+    for i, name in enumerate(("a", "a1", "b", "b1")):
+        motor_sections += f"""
+[motor {name}]
+drive: stepper
+step_pin: gpiochip0/gpio{30 + 3 * i}
+dir_pin: gpiochip0/gpio{31 + 3 * i}
+enable_pin: !gpiochip0/gpio{32 + 3 * i}
+microsteps: 256
+rotation_distance: 40
+phase_stepping: True
+"""
+    diag = {
+        "a1": "\ndiag0_pin: gpiochip0/gpio200\ndriver_SGT: 1",
+        "b1": "\ndiag0_pin: gpiochip0/gpio201\ndriver_SGT: 1",
+    }
+    for name in ("a", "a1", "b", "b1"):
+        motor_sections += f"""
+[tmc5160 {name}]
+spi_bus: spidev0.0
+cs_pin: gpiochip0/gpio{AWD_TMC_CS_LINES[name]}
+run_current: 1.0
+sense_resistor: 0.075{diag.get(name, "")}
+"""
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[printer]
+max_velocity: 100
+max_accel: 1000
+max_jerk: 2000
+max_z_velocity: 10
+max_z_accel: 30
+
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a, a1
+b_motors: b, b1
+z_motors: z
+
+[axis x]
+position_min: 0
+position_endstop: 0
+position_max: 300
+endstop_pin: tmc5160_a1:virtual_endstop
+homing_speed: 10
+homing_retract_dist: 0
+post_processors: is_xy
+
+[axis y]
+position_min: 0
+position_endstop: 0
+position_max: 300
+endstop_pin: tmc5160_b1:virtual_endstop
+homing_speed: 10
+homing_retract_dist: 0
+post_processors: is_xy
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio12
+homing_speed: 5
+
+{motor_sections}
+[motor z]
+drive: stepper
+step_pin: gpiochip0/gpio50
+dir_pin: gpiochip0/gpio51
+enable_pin: !gpiochip0/gpio52
+microsteps: 16
+rotation_distance: 4
+{_tail(gcode_dir)}"""
+
+
 def beacon_homing_config(
     h7_pty: str,
     f4_pty: Optional[str],

@@ -152,6 +152,31 @@ impl Engine {
         crate::phase_handover::query(&self.stepping_axes, stepper_oid)
     }
 
+    /// Adopt the classic executor's step count as this axis's position at a
+    /// mode switch: both executors drive the same motor, so the incoming
+    /// mode must start from the count the outgoing one physically reached.
+    /// A stale count would shift the phase readout the moment the host's
+    /// transport seed arrived, dragging the coils away from the aligned
+    /// preload.
+    pub fn seed_axis_count(&mut self, axis_idx: u8, count: i32) -> i32 {
+        use core::sync::atomic::Ordering;
+        let Some(axis) = self
+            .stepping_axes
+            .get_mut(axis_idx as usize)
+            .and_then(|s| s.as_mut())
+        else {
+            return -1;
+        };
+        axis.last_step_count = count;
+        axis.p_prev = count as f32 * axis.microstep_distance;
+        axis.v_prev = 0.0;
+        for stepper in &axis.steppers {
+            stepper.position_count.store(count, Ordering::Release);
+            stepper.last_phase_target.store(count, Ordering::Release);
+        }
+        0
+    }
+
     pub fn seed_position(&mut self, xyz: [f32; 3]) {
         use core::sync::atomic::Ordering;
         let motor_positions = [xyz[0], xyz[1], xyz[2], 0.0_f32, 0.0, 0.0, 0.0, 0.0];

@@ -510,6 +510,17 @@ command_stepper_get_position(uint32_t *args)
 }
 DECL_COMMAND(command_stepper_get_position, "stepper_get_position oid=%c");
 
+// Bias-corrected signed wire count, for handing the classic executor's
+// position to the runtime at a mode switch. Caller must not hold irqs off.
+int32_t
+stepper_classic_wire_position(struct stepper *s)
+{
+    irq_disable();
+    uint32_t position = stepper_get_position(s);
+    irq_enable();
+    return (int32_t)(position - POSITION_BIAS);
+}
+
 // Seed the absolute step counter so the host's reconcile can compare the
 // mcu's executed position against its own step-stream bookkeeping.
 //

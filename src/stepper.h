@@ -119,6 +119,7 @@ enum {
 uint_fast8_t stepper_event(struct timer *t);
 uint_fast8_t stepper_event_full(struct timer *t);
 uint32_t stepper_get_position(struct stepper *s);
+int32_t stepper_classic_wire_position(struct stepper *s);
 void stepper_classic_halt(struct stepper *s);
 uint8_t stepper_classic_halt_all(uint32_t *stream_end_clock);
 

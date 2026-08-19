@@ -1244,8 +1244,6 @@ class TMCPhaseStepping:
         )
         state = self._query_phase_state()
         self._phase_axis_idx = state["axis_idx"]
-        align.send([self._phase_stepper_oid, mscnt])
-        arbiter.resume()
         # Mode first, then the host transport: the pump anchors the sample
         # lane the moment the transport switches, and an anchored lane
         # ticking while the axis mode byte still reads Pulse is a
@@ -1258,6 +1256,13 @@ class TMCPhaseStepping:
                 "phase mode entry: mcu did not apply Phase mode on %s "
                 "(mode=%d)" % (self.name, state["mode"])
             )
+        # set_axis_mode(1) also seeded the runtime's step count from the
+        # classic executor mcu-side, so the align pins the phase against
+        # the final count and the transport switch's host-side seed is a
+        # no-op rather than a late shift that would drag the coils away
+        # from the preload.
+        align.send([self._phase_stepper_oid, mscnt])
+        arbiter.resume()
         self._switch_host_transport(self._phase_axis_idx, TRANSPORT_PHASE)
         # The ISR's inline direct-register SPI writes corrupt concurrent
         # foreground register reads (false drv_err/uv_cp shutdowns), so the

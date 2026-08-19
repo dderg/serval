@@ -107,10 +107,10 @@ def test_enter_sequence_chopconf_before_direct_mode_checks_stopped_last(rig):
         ("read", "MSCNT"),
         ("write", "DIRECT_MODE"),
         ("query", "kalico_get_phase_state"),
-        ("cmd", "kalico_phase_align_to"),
-        ("cmd", "kalico_phase_stepping_enable_spi"),
         ("cmd", "kalico_set_axis_mode"),
         ("query", "kalico_get_phase_state"),
+        ("cmd", "kalico_phase_align_to"),
+        ("cmd", "kalico_phase_stepping_enable_spi"),
         ("transport", "switch_axis_transport"),
         ("timer-", "_do_periodic_check"),
     ]

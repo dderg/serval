@@ -222,7 +222,6 @@ impl SampleLane {
         self.halt.is_some()
     }
 
-
     /// Whether the lane still has queued samples left to execute. An anchored
     /// lane whose rings have drained plays a zero-order hold of its last
     /// sample - stationary output that a phase re-align may safely shift.

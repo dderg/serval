@@ -384,6 +384,24 @@ command_kalico_phase_stepping_disable_spi(uint32_t *args)
 DECL_COMMAND(command_kalico_phase_stepping_disable_spi,
              "kalico_phase_stepping_disable_spi");
 
+// A mode switch hands the axis between the classic executor and the
+// runtime's sample walker. Both drive the same motor, so on entry into
+// Phase mode the runtime adopts the classic executor's step count -
+// otherwise the host's later transport seed shifts the phase readout
+// out from under the freshly aligned coils.
+static void
+runtime_adopt_classic_count(uint8_t axis_idx)
+{
+    if (axis_idx >= RUNTIME_MOTOR_COUNT
+        || !runtime_motor_stepper_count[axis_idx])
+        return;
+    struct runtime_motor_stepper *rms = &runtime_motor_steppers[axis_idx][0];
+    int32_t wire = stepper_classic_wire_position(rms->stepper);
+    int32_t count = rms->invert_dir ? -wire : wire;
+    if (runtime_seed_axis_count(runtime_handle, axis_idx, count) != 0)
+        shutdown("kalico_set_axis_mode count seed rejected");
+}
+
 void
 command_kalico_set_axis_mode(uint32_t *args)
 {
@@ -396,6 +414,8 @@ command_kalico_set_axis_mode(uint32_t *args)
         shutdown("kalico_set_axis_mode rejected: sample playback active");
     if (rc != 0)
         shutdown("kalico_set_axis_mode rejected: bad axis or mode");
+    if (mode == 1)
+        runtime_adopt_classic_count(axis_idx);
 }
 DECL_COMMAND(command_kalico_set_axis_mode,
              "kalico_set_axis_mode axis_idx=%c mode=%c");

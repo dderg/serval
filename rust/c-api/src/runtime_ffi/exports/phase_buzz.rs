@@ -109,6 +109,20 @@ pub unsafe extern "C" fn runtime_phase_align_to(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn runtime_seed_axis_count(
+    rt: *mut Runtime,
+    axis_idx: u8,
+    count: i32,
+) -> i32 {
+    let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
+    // SAFETY: foreground-only; §11.2 raw-pointer projection.
+    unsafe {
+        let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
+        (*isr_ptr).engine.seed_axis_count(axis_idx, count)
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn runtime_get_phase_state(
     rt: *mut Runtime,
     stepper_oid: u8,

@@ -104,6 +104,8 @@ uint64_t runtime_now_ticks(struct Runtime *rt);
 
 int32_t runtime_phase_align_to(struct Runtime *rt, uint8_t stepper_oid, uint16_t target_phase);
 
+int32_t runtime_seed_axis_count(struct Runtime *rt, uint8_t axis_idx, int32_t count);
+
 int32_t runtime_phase_jog_to(struct Runtime *rt,
                              uint8_t stepper_oid,
                              uint16_t target_phase,
