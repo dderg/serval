@@ -154,11 +154,11 @@ def test_exit_jogs_back_to_cached_mscnt_then_flips_mode_then_restarts_checks(
     tmc_obj.exit_phase_mode()
     assert ops(rig.wire) == [
         ("query", "kalico_get_phase_state"),
+        ("transport", "switch_axis_transport"),
         ("cmd", "kalico_phase_jog_to"),
         ("query", "kalico_get_phase_state"),
         ("cmd", "kalico_phase_stepping_disable_spi"),
         ("write", "GCONF"),
-        ("transport", "switch_axis_transport"),
         ("cmd", "kalico_set_axis_mode"),
         ("read", "DRV_STATUS"),
         ("read", "GSTAT"),

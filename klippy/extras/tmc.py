@@ -1302,9 +1302,18 @@ class TMCPhaseStepping:
                     "phase mode bookkeeping desync on %s: host=phase mcu=%d"
                     % (t.name, state["mode"])
                 )
-        # All jogs are issued while the axis is still in Phase mode — the
-        # mode flips to Pulse only once, after every motor in the group sits
-        # on its cached MSCNT.
+        # Hand the host transport to the pulse side FIRST: the switch
+        # barriers the pump and verifies the outgoing phase transport is
+        # quiescent, so the mcu lane has finished playing its buffered
+        # sample runs (up to the full scheduling lead) before any jog.
+        # Jogging earlier chased a moving axis: the jog's delta was
+        # computed against a count the still-draining stream kept
+        # advancing, and the phase came to rest far off the cached MSCNT.
+        for axis_idx in sorted({t._phase_axis_idx for t in active}):
+            self._switch_host_transport(axis_idx, TRANSPORT_PULSE)
+        # All jogs are issued while the mcu still executes Phase mode — the
+        # mode byte flips to Pulse only once, after every motor in the group
+        # sits on its cached MSCNT.
         for t in active:
             _e, _d, _s, t_jog, _a = t._lookup_phase_commands()
             t_jog.send(
@@ -1345,7 +1354,6 @@ class TMCPhaseStepping:
         for t in active:
             t.mcu_tmc.set_register("GCONF", t.fields.registers.get("GCONF", 0))
         for axis_idx in sorted({t._phase_axis_idx for t in active}):
-            self._switch_host_transport(axis_idx, TRANSPORT_PULSE)
             set_axis_mode.send([axis_idx, 0])
         for t in active:
             t._echeck_helper.start_checks()
