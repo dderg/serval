@@ -235,6 +235,60 @@ impl PumpSink {
             .project(host_secs)
     }
 
+    /// Whether a retimed dispatch must re-base this mcu's frozen host→mcu
+    /// projection on the live clocksync record. Moving lanes always re-base:
+    /// their piece clocks must track the clocksync, not a frozen slope that
+    /// drifted since the last anchor. Hold-only (idle) lanes keep their
+    /// frozen domain while it still tracks the live clock — re-basing them
+    /// would jump their step-clock stream by the projection's drift for no
+    /// motion. But that drift grows without bound while the lane sits parked
+    /// (crystal ppm × hours), and once it exceeds the margin floor the
+    /// frozen slope would project even hold pieces into the mcu's past —
+    /// re-base then; the reanchor cut re-bases the seams and a hold carries
+    /// no steps, so no motion results.
+    pub(crate) fn needs_rebase(
+        &self,
+        cfg: &crate::mcu_config::McuAxisConfig,
+        seg: &ShapedSegment,
+        retimed: bool,
+        prev: Option<FrozenProjection>,
+        seam_host: f64,
+    ) -> bool {
+        let Some(prev) = prev else {
+            return true;
+        };
+        if !retimed {
+            return false;
+        }
+        if self.mcu_has_motion(cfg, seg) {
+            return true;
+        }
+        let handle = crate::types::mcu_handle_from_raw(cfg.mcu_id);
+        let live = self
+            .router
+            .lock_ok()
+            .host_time_to_mcu_clock(handle, seam_host);
+        match live {
+            Ok(live) => {
+                let drift = prev.project_exact(seam_host) - live as f64;
+                let freq = prev.freq.max(1.0);
+                let drifted = drift.abs() > crate::anchor::LOW_MARGIN_WARN_SECS * freq;
+                if drifted {
+                    tracing::warn!(
+                        subsystem = "motion",
+                        event = "hold_lane_projection_rebase",
+                        mcu = cfg.mcu_id,
+                        drift_us = drift / freq * 1e6,
+                        "[reanchor] idle mcu's frozen projection drifted past the \
+                         margin floor — re-basing its hold lanes on the live clock"
+                    );
+                }
+                drifted
+            }
+            Err(_) => true,
+        }
+    }
+
     /// A nudge-path projection rebase moved this MCU's host→mcu map for
     /// every lane, but only the nudged lane carries pieces (and so a cut)
     /// through the pump. Cut every sibling lane at the same clock via the
@@ -329,20 +383,13 @@ impl SegmentSink for PumpSink {
                     .iter()
                     .filter(|cfg| self.freezes_projection(cfg.mcu_id))
                     .filter(|cfg| {
-                        if !frozen.contains_key(&cfg.mcu_id) {
-                            true
-                        } else {
-                            // A retimed epoch re-bases the lanes that actually
-                            // move on the live clock — the piece clocks of a
-                            // moving lane must track the clocksync, not a
-                            // frozen slope that drifted since the last anchor.
-                            // Hold-only (idle) lanes keep their frozen domain:
-                            // re-basing them would jump their step-clock
-                            // stream by the projection's drift, moving the
-                            // lane (or tripping the count reconcile) for no
-                            // motion.
-                            at.epoch.retimed() && self.mcu_has_motion(cfg, seg)
-                        }
+                        self.needs_rebase(
+                            cfg,
+                            seg,
+                            at.epoch.retimed(),
+                            frozen.get(&cfg.mcu_id).copied(),
+                            seam_host,
+                        )
                     })
                     .map(|cfg| cfg.mcu_id)
                     .collect::<Vec<_>>()

@@ -421,3 +421,57 @@ fn a_reanchor_reseeds_from_the_live_clock_not_the_drifted_frozen_slope() {
          clock), got {err_secs:.6} s of error — the chained drift must not survive"
     );
 }
+
+/// The bench fault of 2026-08-20: an idle (hold-only) mcu keeps its frozen
+/// slope across retimed epochs, so after hours parked the crystal-ppm drift
+/// exceeds the piece lead and the first hold piece lands in the mcu's past
+/// (pump-guard -308). Once the frozen slope's drift from the live record
+/// crosses the margin floor, a retimed dispatch must re-base the hold lane
+/// too; below the floor it must keep the frozen domain.
+#[test]
+fn a_parked_hold_lane_rebases_once_its_frozen_slope_drifts_past_the_floor() {
+    let clock = MockClock::new();
+    let mut router =
+        PassthroughRouter::with_clock(Arc::clone(&clock) as Arc<dyn Clock + Send + Sync>);
+    let _handle = router.claim_mcu("stepcompress");
+    seed_clock(&mut router, F_TRUE, 0.0, true_clock(0.0) as u64);
+
+    let mut sink = pump_sink(router);
+    let hold_segment = segment_with_axes(vec![
+        lane_curve(0.0),
+        lane_curve(0.0),
+        lane_curve(0.0),
+        lane_curve(0.0),
+    ]);
+    let cfg = sink.mcu_configs[0].clone();
+    sink.reanchor_projection(MCU_ID, 0.25).unwrap();
+    let prev = sink.frozen_projection.lock_ok().get(&MCU_ID).copied();
+
+    assert!(
+        !sink.needs_rebase(&cfg, &hold_segment, true, prev, 0.25),
+        "a freshly anchored hold lane keeps its frozen domain"
+    );
+
+    // Park for 2 h with the mcu crystal running 60 ppm fast relative to the
+    // frozen slope: the live record's clock pulls ahead of the frozen
+    // extrapolation by ~432 ms — far past the 20 ms floor.
+    clock.advance(Duration::from_secs_f64(7200.0));
+    let host_now = sink.router.lock_ok().host_now_secs();
+    let drift_secs = 60e-6 * 7200.0;
+    seed_clock(
+        &mut sink.router.lock_ok(),
+        F_TRUE,
+        host_now,
+        (true_clock(host_now) + drift_secs * F_TRUE) as u64,
+    );
+
+    assert!(
+        sink.needs_rebase(&cfg, &hold_segment, true, prev, host_now + 0.25),
+        "a parked hold lane whose frozen slope drifted past the margin floor \
+         must re-base on the live clock"
+    );
+    assert!(
+        !sink.needs_rebase(&cfg, &hold_segment, false, prev, host_now + 0.25),
+        "a continuation (non-retimed) dispatch never re-bases"
+    );
+}
