@@ -272,11 +272,7 @@ def _run_homing_attempts(
     toolhead.move(backoff, hi.retract_speed)
     toolhead.wait_moves()
     start_pos = toolhead.get_position()
-    # The early trip may have been spurious mid-travel (StallGuard blip),
-    # leaving the real switch far beyond the relabeled coordinates; the
-    # re-approach gets the full travel budget and the too-early re-check
-    # below still rejects a stuck or miswired endstop.
-    trip_pos, final_pos = approach(speed, first_max_travel)
+    trip_pos, final_pos = approach(speed, 2.0 * hi.min_home_dist)
     traveled = abs(trip_pos[axis] - start_pos[axis])
     if _trigger_too_early(traveled, hi.min_home_dist, tolerance):
         raise gcmd.error(

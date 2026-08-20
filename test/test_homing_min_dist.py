@@ -169,10 +169,7 @@ def test_rehome_backoff_stays_within_axis_bounds():
         approach=approach,
     )
     assert len(calls) == 2
-    # The re-approach gets the full travel budget: an early trip may have
-    # been a spurious mid-travel blip with the real switch far beyond a
-    # 2*min_home_dist window.
-    assert calls[1][1] == 200.0
+    assert calls[1][1] == 30.0
     assert calls[0][0] == 50.0
     assert calls[1][0] == 50.0
     # Backoff is computed from the endstop position (20) minus min_home_dist
