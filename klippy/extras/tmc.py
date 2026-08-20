@@ -968,7 +968,26 @@ class BaseTMCCurrentHelper:
 
     def set_current_for_homing(self, print_time, pre_homing) -> float:
         target = self.req_home_current if pre_homing else self.req_run_current
-        if target == self.actual_current:
+        skipped = target == self.actual_current
+        structured_log.event(
+            "homing",
+            "homing_current",
+            msg="homing current %s %s: %.3fA -> %.3fA%s"
+            % (
+                "set" if pre_homing else "restore",
+                self.name,
+                self.actual_current,
+                target,
+                " (already there, no dwell)" if skipped else "",
+            ),
+            stepper=self.name,
+            pre_homing=pre_homing,
+            target=target,
+            actual=self.actual_current,
+            skipped=skipped,
+            print_time=print_time,
+        )
+        if skipped:
             return 0.0
         self.set_current(target, self.req_hold_current, print_time)
         return self.current_change_dwell_time
