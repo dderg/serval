@@ -213,13 +213,16 @@ def test_mpc_heater(sim_world):
 
 
 def _cfg_heater_only_controller_fan(world):
-    return configs.heaters_config(world.h7_pty, str(world.gcode_dir)) + """
+    return (
+        configs.heaters_config(world.h7_pty, str(world.gcode_dir))
+        + """
 [controller_fan heater_only_fan]
 pin: gpiochip0/gpio24
 heater: extruder
 idle_timeout: 60
 stepper:
 """
+    )
 
 
 def test_controller_fan_empty_stepper_is_heater_only(sim_world):
