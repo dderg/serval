@@ -223,3 +223,58 @@ def test_long_travel_y_after_x_early_rehome(sim_world):
 
     _home_y_against_wall_at_60(world)
     assert world.shutdown_line() is None
+
+
+def test_false_trigger_with_real_endstop_beyond_window_still_fails(sim_world):
+    """The re-approach window is deliberately capped at 2*min_home_dist:
+    it exists to verify the first trigger happened at the actual end of
+    travel. A false trigger ~0.5mm in with the real switch 60mm out must
+    therefore fail loudly — a "generous" full-travel re-approach would
+    find the far switch, accept an origin the first trigger never
+    vouched for, and silently mask the misfire (attempted 2026-08-20,
+    reverted). This test pins the capped window as intentional."""
+    world, control, tracker = _boot(sim_world)
+    world.mark_log()
+
+    resp = {}
+    g28 = threading.Thread(
+        target=lambda: resp.update(world.gcode("G28 Y", timeout=300))
+    )
+    y_start = tracker.xy()[1]
+    g28.start()
+
+    _wait_until(
+        lambda: tracker.xy()[1] >= y_start + 0.5, 90, "Y approach motion"
+    )
+    control.set_gpio_input(*Y_ENDSTOP, 1)
+    y_peak = tracker.xy()[1]
+
+    def backoff_started():
+        nonlocal y_peak
+        y = tracker.xy()[1]
+        y_peak = max(y_peak, y)
+        return y <= y_peak - 0.5
+
+    _wait_until(backoff_started, 60, "min_home_dist backoff after the trip")
+    control.set_gpio_input(*Y_ENDSTOP, 0)
+
+    with EndstopWall(tracker, control, 1, Y_ENDSTOP, wall_mm=y_start + 60.0):
+        g28.join(timeout=200)
+    assert not g28.is_alive(), "G28 Y did not finish"
+
+    records = _needs_rehome_records(world.log_tail(), "Y")
+    assert records and records[0][0], (
+        f"the staged false trigger should have tripped the guard: {records}"
+    )
+    error = resp.get("error")
+    assert error and "did not trigger within" in str(error), (
+        f"the re-approach must stay inside the 2*min_home_dist window and "
+        f"fail loudly, not hunt down the far switch; G28 response: {resp}"
+    )
+    y_final = tracker.xy()[1]
+    assert y_final < y_start + 30.0, (
+        f"the re-approach overran the capped window: reached "
+        f"{y_final - y_start:.1f}mm past the start (cap is backoff + "
+        f"2*min_home_dist = 10mm)"
+    )
+    assert world.shutdown_line() is None
