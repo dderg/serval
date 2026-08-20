@@ -783,6 +783,13 @@ class Homing:
                 )
         if dwell_time:
             toolhead.dwell(dwell_time)
+            # The register writes are scheduled at print_time, which sits a
+            # full motion_lead (up to seconds) ahead of the MCU clock, and
+            # the homing drip re-anchors past the queued dwell. Without a
+            # real-clock wait the trip move launches at the OLD current and
+            # the change lands mid-approach — a torque collapse StallGuard
+            # reads as a stall.
+            toolhead.wait_until_print_time(print_time + dwell_time)
 
     def _drain_motion_before_arming_device(self, gcmd, engine, axis):
         try:
