@@ -92,10 +92,11 @@ impl PyMotionEngine {
             })
             .collect();
 
-        let guard = self.planner.lock_ok();
-        let planner = guard
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("home_axis: planner not initialized"))?;
+        if self.planner.lock_ok().is_none() {
+            return Err(PyRuntimeError::new_err(
+                "home_axis: planner not initialized",
+            ));
+        }
 
         let ResolvedHomingTarget {
             all_axis_keys,
@@ -150,21 +151,32 @@ impl PyMotionEngine {
             pending_suppresses: Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new())),
         });
 
-        let planner_done_rx = planner
-            .home_drip(crate::worker::HomeDripParams {
-                home_pos: crate::mcu_config::reanchor_home_pos(start_pos),
-                start: start_pos.0,
-                axis,
-                direction,
-                speed_mm_s,
-                max_travel_mm,
-                cohort,
-                participants: all_axis_keys,
-            })
-            .map_err(|e| {
-                self.finish_homing();
-                planner_err(e)
-            })?;
+        // The guard must not outlive this block: `await_homing_dispatch`
+        // re-attaches the GIL, and a pymethod on another thread that holds
+        // the GIL while contending `self.planner` (frontier_print_time)
+        // would deadlock the process — observed on the Trident bench
+        // 2026-08-20 as a silent full-klippy wedge during G28 X.
+        let planner_done_rx = {
+            let guard = self.planner.lock_ok();
+            let planner = guard
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err("home_axis: planner not initialized"))?;
+            planner
+                .home_drip(crate::worker::HomeDripParams {
+                    home_pos: crate::mcu_config::reanchor_home_pos(start_pos),
+                    start: start_pos.0,
+                    axis,
+                    direction,
+                    speed_mm_s,
+                    max_travel_mm,
+                    cohort,
+                    participants: all_axis_keys,
+                })
+                .map_err(|e| {
+                    self.finish_homing();
+                    planner_err(e)
+                })?
+        };
         self.await_homing_dispatch(py, &planner_done_rx)?;
 
         *self.homing.result.lock_ok() = Some(result_rx);
