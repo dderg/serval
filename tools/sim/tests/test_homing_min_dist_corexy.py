@@ -164,10 +164,11 @@ def _wait_until(pred, timeout, what):
 
 def test_false_trigger_far_from_endstop_fails_loudly(sim_world):
     """A trigger ~0.5mm into the Y approach with no endstop anywhere near
-    is a false trigger (StallGuard misfire, bad wiring). By design the
-    guard retracts min_home_dist and probes only a 2*min_home_dist
-    window: finding nothing there means the trigger lied, and the homing
-    must fail loudly rather than silently accept a bogus origin."""
+    is a false trigger (StallGuard misfire, bad wiring). The guard
+    retracts min_home_dist and re-approaches with the full travel
+    budget: finding a real switch recovers a correct origin, finding
+    nothing means the trigger lied and the homing must fail loudly
+    rather than silently accept a bogus origin."""
     world, control, tracker = _boot(sim_world)
     world.mark_log()
 
@@ -222,4 +223,50 @@ def test_long_travel_y_after_x_early_rehome(sim_world):
     )
 
     _home_y_against_wall_at_60(world)
+    assert world.shutdown_line() is None
+
+
+def test_false_trigger_recovers_when_real_endstop_is_far(sim_world):
+    """The Trident bench failure of 2026-08-20: a StallGuard blip trips
+    the Y approach ~0.5mm in, while the real switch sits 60mm out — far
+    beyond the old 2*min_home_dist re-probe window. The guard must
+    retract and re-approach with the full travel budget, find the real
+    switch, and home successfully instead of failing with 'did not
+    trigger within'."""
+    world, control, tracker = _boot(sim_world)
+    world.mark_log()
+
+    resp = {}
+    g28 = threading.Thread(
+        target=lambda: resp.update(world.gcode("G28 Y", timeout=300))
+    )
+    y_start = tracker.xy()[1]
+    g28.start()
+
+    _wait_until(
+        lambda: tracker.xy()[1] >= y_start + 0.5, 90, "Y approach motion"
+    )
+    control.set_gpio_input(*Y_ENDSTOP, 1)
+    y_peak = tracker.xy()[1]
+
+    def backoff_started():
+        nonlocal y_peak
+        y = tracker.xy()[1]
+        y_peak = max(y_peak, y)
+        return y <= y_peak - 0.5
+
+    _wait_until(backoff_started, 60, "min_home_dist backoff after the trip")
+    control.set_gpio_input(*Y_ENDSTOP, 0)
+
+    with EndstopWall(tracker, control, 1, Y_ENDSTOP, wall_mm=y_start + 60.0):
+        g28.join(timeout=200)
+    assert not g28.is_alive(), "G28 Y did not finish"
+
+    records = _needs_rehome_records(world.log_tail(), "Y")
+    assert records and records[0][0], (
+        f"the staged false trigger should have tripped the guard: {records}"
+    )
+    assert not resp.get("error"), (
+        f"the re-approach must reach the real switch and home: {resp}"
+    )
     assert world.shutdown_line() is None
