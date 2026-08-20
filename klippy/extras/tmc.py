@@ -787,11 +787,11 @@ class TMCVirtualPinHelper:
         reactor = self.printer.get_reactor()
         if self._sg_sample_timer is None:
             self._sg_sample_timer = reactor.register_timer(
-                self._sample_sg_status, reactor.monotonic() + 0.25
+                self._sample_sg_status, reactor.monotonic() + 0.05
             )
         else:
             reactor.update_timer(
-                self._sg_sample_timer, reactor.monotonic() + 0.25
+                self._sg_sample_timer, reactor.monotonic() + 0.05
             )
 
     def _sample_sg_status(self, eventtime):
@@ -811,7 +811,7 @@ class TMCVirtualPinHelper:
             stepper=self.mode_tracker.stepper_name,
             **sample,
         )
-        return eventtime + 0.25
+        return eventtime + 0.05
 
     def disarm(self):
         self.mode_tracker.transition(
