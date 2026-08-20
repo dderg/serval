@@ -171,6 +171,7 @@ fn corexy_lane_pieces(segs: &[trajectory::ShapedSegment]) -> BTreeMap<u8, Vec<Pi
             &cfgs,
             &EnqueueCtx {
                 epoch_freq: &|_| None,
+                lane_is_phase: &|_| false,
                 t0: 0.0,
                 epoch: motion_core::anchor::StreamEpoch::Continuation,
                 host_now: 0.0,

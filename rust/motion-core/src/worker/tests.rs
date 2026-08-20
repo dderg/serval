@@ -898,6 +898,7 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
                     &cfg_clone,
                     &crate::enqueue::EnqueueCtx {
                         epoch_freq: &|_| None,
+                        lane_is_phase: &|_| false,
                         t0: seg_clone.t_start,
                         epoch: crate::anchor::StreamEpoch::Reposition,
                         host_now: 0.0,

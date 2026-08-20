@@ -42,6 +42,7 @@ fn stepcompress_cfg() -> McuAxisConfig {
 fn pump_sink(router: PassthroughRouter) -> PumpSink {
     let (tx, _rx) = crossbeam_channel::unbounded();
     PumpSink {
+        transports: Arc::new(crate::axis_transport::AxisTransports::from_configs(&[])),
         router: Arc::new(Mutex::new(router)),
         anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
         mcu_configs: vec![stepcompress_cfg()],

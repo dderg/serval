@@ -49,6 +49,7 @@ fn sink() -> (
     let router = Arc::new(Mutex::new(router));
     let (tx, _rx) = crossbeam_channel::unbounded();
     let sink = PumpSink {
+        transports: Arc::new(crate::axis_transport::AxisTransports::from_configs(&[])),
         router: Arc::clone(&router),
         anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
         mcu_configs: vec![stepcompress_cfg()],

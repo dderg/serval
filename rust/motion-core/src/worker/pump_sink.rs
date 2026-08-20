@@ -18,6 +18,7 @@ use super::dispatch::{DispatchError, SegmentSink};
 /// anchoring/projection, the axis-lane split, and the motion-history store
 /// whose retained pieces a re-anchor invalidates.
 pub(crate) struct PumpSink {
+    pub(crate) transports: Arc<crate::axis_transport::AxisTransports>,
     pub(crate) router: Arc<Mutex<host_rt::passthrough_queue::PassthroughRouter>>,
     pub(crate) anchor: Arc<Mutex<crate::anchor::Anchor>>,
     pub(crate) mcu_configs: Vec<crate::mcu_config::McuAxisConfig>,
@@ -426,6 +427,7 @@ impl SegmentSink for PumpSink {
                 epoch_freq: &epoch_freq_of,
                 project: |mcu_id, host_secs| self.project(mcu_id, host_secs),
                 max_piece_secs: at.max_piece_secs,
+                lane_is_phase: &|key| self.transports.is_phase(key),
             },
         );
 

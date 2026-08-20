@@ -48,6 +48,10 @@ pub struct EnqueueCtx<'a, P> {
     pub project: P,
     pub max_piece_secs: Option<f64>,
     pub epoch_freq: &'a dyn Fn(u32) -> Option<f64>,
+    /// Whether this lane currently executes on the phase (coil-write)
+    /// transport: phase samples carry no step pulses, so the pulse-path
+    /// step-rate ceiling does not bound them.
+    pub lane_is_phase: &'a dyn Fn(AxisKey) -> bool,
 }
 
 pub fn enqueue_segment<P>(
@@ -99,7 +103,9 @@ where
                     motor_mask: seg.motor_mask,
                 },
             );
-            check_step_rate_ceiling(cfg, axis_idx, &pieces, seg.source_line);
+            if !(ctx.lane_is_phase)(key) {
+                check_step_rate_ceiling(cfg, axis_idx, &pieces, seg.source_line);
+            }
             if cfg.ethercat && is_pure_hold(&pieces) {
                 if ctx.epoch.position_redefined() {
                     out.push(EnqueueMsg {

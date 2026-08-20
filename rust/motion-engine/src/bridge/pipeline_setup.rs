@@ -436,6 +436,7 @@ impl PyMotionEngine {
         let anchor_mutex = Arc::clone(&self.dispatch_anchor);
         *anchor_mutex.lock_ok() = crate::anchor::Anchor::new();
         let dispatch_resources = crate::worker::DispatchResources {
+            transports: Arc::clone(&self.axis_transports.lock_ok()),
             router: Arc::clone(&router_arc),
             anchor: anchor_mutex,
             mcu_configs: mcu_configs.to_vec(),

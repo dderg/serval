@@ -265,6 +265,7 @@ impl Ingestor {
                 &self.mcu_configs,
                 &crate::enqueue::EnqueueCtx {
                     epoch_freq: &|_| None,
+                    lane_is_phase: &|_| false,
                     t0: 0.0,
                     epoch,
                     host_now: 0.0,

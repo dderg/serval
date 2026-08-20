@@ -174,6 +174,7 @@ pub struct DispatchResources {
     pub counter: Arc<AtomicU64>,
     pub active_drip_cohort: Arc<Mutex<Option<u64>>>,
     pub motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
+    pub transports: Arc<crate::axis_transport::AxisTransports>,
 }
 
 pub struct MotionPipeline {
@@ -224,6 +225,7 @@ pub fn setup_pipeline(
     let frontier: Arc<CommittedFrontier> = Arc::default();
     stage_cpu::spawn_sampler(Arc::downgrade(&frontier));
     let sink = PumpSink {
+        transports: dispatch.transports,
         router: dispatch.router,
         anchor: dispatch.anchor,
         mcu_configs: dispatch.mcu_configs,
