@@ -436,7 +436,7 @@ fn a_parked_hold_lane_rebases_once_its_frozen_slope_drifts_past_the_floor() {
     let _handle = router.claim_mcu("stepcompress");
     seed_clock(&mut router, F_TRUE, 0.0, true_clock(0.0) as u64);
 
-    let mut sink = pump_sink(router);
+    let sink = pump_sink(router);
     let hold_segment = segment_with_axes(vec![
         lane_curve(0.0),
         lane_curve(0.0),
