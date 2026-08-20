@@ -210,3 +210,24 @@ def test_mpc_heater(sim_world):
     )
     world.gcode_ok("M105")
     assert world.shutdown_line() is None
+
+
+def _cfg_heater_only_controller_fan(world):
+    return configs.heaters_config(world.h7_pty, str(world.gcode_dir)) + """
+[controller_fan heater_only_fan]
+pin: gpiochip0/gpio24
+heater: extruder
+idle_timeout: 60
+stepper:
+"""
+
+
+def test_controller_fan_empty_stepper_is_heater_only(sim_world):
+    """An explicitly empty `stepper:` list makes controller_fan follow
+    heaters alone - no placeholder [motor] needed (the upstream
+    manual_stepper fake-stepper trick has no fork equivalent since
+    orphan motors are a config error)."""
+    world = sim_world(_cfg_heater_only_controller_fan, dual_mcu=False)
+    world.gcode_ok("SET_HEATER_TEMPERATURE HEATER=extruder TARGET=60")
+    world.gcode_ok("SET_HEATER_TEMPERATURE HEATER=extruder TARGET=0")
+    assert world.shutdown_line() is None
