@@ -204,3 +204,40 @@ fn a_sample_lane_on_a_pulse_axis_is_a_loud_fault() {
         FaultCode::PhaseModeNotAvailable.as_i32()
     );
 }
+
+#[test]
+fn a_halted_lane_swallows_runs_that_raced_the_trip() {
+    // The Trident full-G28 fault of 2026-08-20: the Z trip halted every
+    // lane while the pacer's next X run was already on the wire; the run
+    // landed on the unanchored cursor and latched SampleRunRejected(-321,
+    // NotAnchored), shutting the mcu down mid-home. A halted lane swallows
+    // in-flight runs; the host re-anchors before anything resumes.
+    let (mut engine, shared) = phase_engine();
+    engine.sample_anchor(&shared, OID, ANCHOR, 0);
+    feed(&mut engine, &shared, 0, &[0, 100, 200, 300]);
+
+    let halt_clock = ANCHOR + u64::from(INTERVAL) / 2;
+    Engine::sample_request_halt(&shared, halt_clock);
+    engine.tick(ANCHOR + 3 * u64::from(INTERVAL), &shared);
+    assert_eq!(engine.sample_executed(OID), Some((halt_clock, 50)));
+
+    feed(&mut engine, &shared, 300, &[400, 500]);
+    assert_eq!(
+        shared.last_error.load(Ordering::Acquire),
+        0,
+        "a run racing the halt is a sanctioned discontinuity, not a fault"
+    );
+
+    engine.tick(ANCHOR + 12 * u64::from(INTERVAL), &shared);
+    assert_eq!(
+        engine.sample_executed(OID),
+        Some((halt_clock, 50)),
+        "the swallowed run must not move the halted lane"
+    );
+
+    engine.sample_anchor(&shared, OID, ANCHOR + 20 * u64::from(INTERVAL), 50);
+    feed(&mut engine, &shared, 50, &[54, 58, 58]);
+    engine.tick(ANCHOR + 23 * u64::from(INTERVAL), &shared);
+    assert_eq!(stepper_position(&engine), 58, "re-anchor resumes playback");
+    assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
+}

@@ -326,20 +326,24 @@ fn halt_is_idempotent() {
 }
 
 #[test]
-fn a_halted_lane_rejects_runs_until_it_is_re_anchored() {
+fn a_halted_lane_swallows_runs_until_it_is_re_anchored() {
+    // A run racing the trip halt down the wire is a sanctioned
+    // discontinuity: the host knows the lane halted and re-anchors before
+    // resuming, so the late run is dropped, never a NotAnchored fault.
     let mut lane = SampleLane::new();
     let shared = shared();
     lane.anchor(0, 1_000, 0).expect("anchor accepted");
     push(&mut lane, 0, 0, &[0, 100]);
     lane.halt(1_050, &shared, 0);
     let (buf, len, count) = wire(0, &[0, 10]);
-    let err = lane
-        .push_run(1_050, INTERVAL, count, &buf[..len])
-        .expect_err("halted lane is unanchored");
-    assert!(matches!(
-        err,
-        SampleLaneFault::Run(SampleRunError::NotAnchored { .. })
-    ));
+    lane.push_run(1_050, INTERVAL, count, &buf[..len])
+        .expect("halted lane swallows the raced run");
+    let halted_at = lane.executed().1;
+    assert_eq!(
+        position(&mut lane, &shared, 1_900),
+        halted_at,
+        "the swallowed run must not move the halted lane"
+    );
     lane.anchor(1_050, 2_000, 50).expect("re-anchor accepted");
     assert!(!lane.is_halted());
     assert_eq!(position(&mut lane, &shared, 2_000), 50);

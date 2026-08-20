@@ -277,6 +277,10 @@ impl SampleLane {
         Ok(())
     }
 
+    /// Queue a main-lane run. A halted lane swallows runs instead of
+    /// faulting: the trip halt raced runs already on the wire, and the host
+    /// knows the lane is halted — it re-anchors before anything resumes.
+    /// The same reasoning `release_barriers` applies to discarded fences.
     pub fn push_run(
         &mut self,
         now: u64,
@@ -284,6 +288,9 @@ impl SampleLane {
         count: u8,
         data: &[u8],
     ) -> Result<(), SampleLaneFault> {
+        if self.halt.is_some() {
+            return Ok(());
+        }
         let start_clock =
             self.cursor
                 .next_clock()
@@ -311,6 +318,9 @@ impl SampleLane {
         count: u8,
         data: &[u8],
     ) -> Result<(), SampleLaneFault> {
+        if self.halt.is_some() {
+            return Ok(());
+        }
         late_deficit(now, clock)?;
         if self.overlay_cursor.next_clock() != Some(clock) {
             self.overlay.clear();
