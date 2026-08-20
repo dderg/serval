@@ -58,6 +58,13 @@ pub const SAMPLE_PACER_TICK: std::time::Duration = std::time::Duration::from_mil
 /// A backlog this deep means the transport is not draining: every run past it
 /// is lead the mcu will never receive in time.
 pub const SAMPLE_BACKLOG_CEILING_RUNS: usize = 4096;
+/// One coil write per sample commutates cleanly while the per-sample advance
+/// stays within a quarter electrical cycle: MSCNT spans 1024 microsteps per
+/// cycle (four full steps at the 256 microsteps klippy enforces for phase
+/// stepping), so 256 units. Past that the commanded field angle leads the
+/// rotor enough to shed torque — a demand beyond it is a fault, not a faster
+/// move.
+pub const QUARTER_ELECTRICAL_CYCLE_UNITS: u32 = 256;
 
 /// Reads back a lane's executed position: `sample_get_position` answered by
 /// `sample_position`, as `(clock, position)`.
@@ -132,6 +139,13 @@ pub fn build_sample_endpoint(
                 cfg.mcu_id
             ));
         }
+        // The lane cap models what one coil write per sample can commutate,
+        // not the pulse executor's per-step ISR budget: MSCNT spans 1024
+        // microsteps per electrical cycle (klippy enforces microsteps: 256
+        // for phase stepping), and past a quarter cycle per sample the field
+        // angle leads the rotor far enough to shed torque. The pulse-derived
+        // step ceiling still applies when it is the larger bound (coarse
+        // microstepping at high sample rates).
         let velocity_ceiling = cfg.motor_velocity_ceiling(axis);
         let units_per_sample = (velocity_ceiling / quantum / rate).ceil();
         if !units_per_sample.is_finite() || units_per_sample > f64::from(u32::MAX) {
@@ -142,7 +156,7 @@ pub fn build_sample_endpoint(
             ));
         }
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let max_units_per_sample = (units_per_sample as u32).max(1);
+        let max_units_per_sample = (units_per_sample as u32).max(QUARTER_ELECTRICAL_CYCLE_UNITS);
         #[allow(clippy::cast_possible_truncation)]
         lanes.push(SampleLaneConfig {
             axis: axis as u8,
