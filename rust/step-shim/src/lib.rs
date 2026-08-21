@@ -478,6 +478,15 @@ impl StepShim {
         Ok(())
     }
 
+    pub fn detach_piece_seam(&mut self, motor: usize) -> Result<(), ShimError> {
+        let state = self.motor_mut(motor);
+        if state.ring.len() != 0 {
+            return Err(ShimError::RingFull { motor });
+        }
+        state.next_seam = None;
+        Ok(())
+    }
+
     pub fn validate_pieces_public(
         &mut self,
         motor: usize,
@@ -543,6 +552,17 @@ impl StepShim {
     /// clock than the one the next piece was planned to abut.
     pub fn motor_cycles_per_second(&self, motor: usize) -> f64 {
         self.motors[motor].cfg.cycles_per_second
+    }
+
+    pub fn motor_microstep_distance(&self, motor: usize) -> f32 {
+        self.motors[motor].cfg.microstep_distance
+    }
+
+    pub fn motor_sample_period_cycles(&self, motor: usize) -> u32 {
+        let cfg = &self.motors[motor].cfg;
+        (cfg.cycles_per_second / f64::from(cfg.sample_rate_hz))
+            .round()
+            .max(1.0) as u32
     }
 
     pub fn pending_steps(&self) -> usize {

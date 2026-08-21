@@ -283,8 +283,6 @@ fn from_u16_round_trip_all_variants() {
         FaultCode::TickIntervalExceeded,
         FaultCode::PhaseMotorUnmapped,
         FaultCode::OverlayUnsupported,
-        FaultCode::BuzzAxisConflict,
-        FaultCode::BuzzInPhaseMode,
     ];
     for code in all_codes {
         let wire = code.as_u16();

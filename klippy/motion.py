@@ -248,6 +248,9 @@ class Motion:
             ramp_ms,
         )
 
+    def resonance_buzz_done(self):
+        return self.engine.resonance_buzz_done()
+
     def set_extruder(self, extruder, extrude_pos):
         self.extruder = extruder
         self.commanded_pos[3] = extrude_pos

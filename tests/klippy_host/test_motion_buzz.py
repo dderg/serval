@@ -34,9 +34,16 @@ class FakePrinter:
 class FakeEngine:
     def __init__(self):
         self.buzz_calls = []
+        self.stepper_buzz_calls = []
 
     def resonance_buzz(self, handle, slot_mask, slot_sign_mask, *_args):
         self.buzz_calls.append((handle, slot_mask, slot_sign_mask))
+
+    def stepper_resonance_buzz(self, axis_mask, sign_mask, *_args):
+        self.stepper_buzz_calls.append((axis_mask, sign_mask))
+
+    def resonance_buzz_done(self):
+        return True
 
 
 class FakeServoMotor:
@@ -87,6 +94,13 @@ def submit_buzz(motion, axis_mask, sign_mask):
     motion.submit_resonance_buzz(
         axis_mask, sign_mask, 5000, 133000, 100000, 20000, 1000
     )
+
+
+def test_stepper_buzz_routes_through_the_engine():
+    motion = make_motion([], {}, {})
+    submit_buzz(motion, MOTOR_A | MOTOR_B, MOTOR_B)
+    assert motion.engine.buzz_calls == []
+    assert motion.engine.stepper_buzz_calls == [(MOTOR_A | MOTOR_B, MOTOR_B)]
 
 
 def test_single_motor_rail_buzzes_its_claim_slot_not_chain_index():

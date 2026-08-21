@@ -7,6 +7,7 @@ use super::{AxisFrame, HeartbeatMsg, PumpMsg, SendError};
 use crate::lock_ext::LockExt;
 use crate::mcu_config::{McuAxisConfig, StepcompressEncoder};
 use crossbeam_channel::Sender;
+use ethercat_rt::buzz::{BuzzOsc, MAX_BUZZ_SLOTS};
 use host_rt::host_io::McuHostIo;
 use host_rt::host_io::parser::ArgValue;
 use runtime::piece_ring::PieceEntry;
@@ -237,6 +238,18 @@ struct PendingCut {
     held: Vec<PieceEntry>,
 }
 
+struct StepBuzz {
+    osc: BuzzOsc,
+    selected: Vec<bool>,
+    signs: Vec<f32>,
+    bases: Vec<f32>,
+    next_clock: u64,
+    sample_period_cycles: u64,
+    cycles_per_second: f64,
+    total_samples: u64,
+    emitted_samples: u64,
+    previous_rel: f32,
+}
 struct SentBarrier {
     id: BarrierId,
     sent_clock: u64,
@@ -325,6 +338,7 @@ pub struct StepcompressEndpoint {
     sent_barriers: VecDeque<SentBarrier>,
     barrier_ack_deadline_secs: f64,
     fatal: Option<String>,
+    buzz: Option<StepBuzz>,
 }
 
 fn shim_error_to_send_error(mcu_id: u32, error: ShimError) -> SendError {
@@ -451,11 +465,142 @@ impl StepcompressEndpoint {
             sent_barriers: VecDeque::new(),
             barrier_ack_deadline_secs: BARRIER_ACK_DEADLINE_SECONDS,
             fatal: None,
+            buzz: None,
         }
     }
 
     fn set_step_count_query(&mut self, query: StepCountQuery) {
         self.step_count_query = Some(query);
+    }
+
+    #[must_use]
+    pub fn accepts_buzz_mask(&self, axis_mask: u8) -> bool {
+        self.axes
+            .iter()
+            .any(|&axis| axis < 8 && axis_mask & (1 << axis) != 0)
+    }
+
+    #[must_use]
+    pub fn buzz_complete(&self) -> bool {
+        self.buzz.is_none()
+            && self.backlog.is_empty()
+            && self.in_flight.is_empty()
+            && self.shim.queued_pieces() == 0
+            && self.shim.pending_steps() == 0
+            && self.pending_retire.is_empty()
+            && self.sent_barriers.is_empty()
+            && !self.deferred_retirement
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn arm_buzz(
+        &mut self,
+        axis_mask: u8,
+        sign_mask: u8,
+        freq_start_millihz: u32,
+        freq_end_millihz: u32,
+        amplitude_nm: u32,
+        duration_ms: u32,
+        ramp_ms: u32,
+    ) -> Result<(), SendError> {
+        if amplitude_nm == 0 || duration_ms == 0 || axis_mask == 0 {
+            self.buzz = None;
+            return Ok(());
+        }
+        if self.buzz.is_some() {
+            return Err(SendError::Fatal(format!(
+                "stepcompress mcu {}: resonance buzz is already active",
+                self.mcu_id
+            )));
+        }
+        if !self.backlog.is_empty()
+            || !self.in_flight.is_empty()
+            || self.shim.queued_pieces() != 0
+            || self.shim.pending_steps() != 0
+            || !self.pending_retire.is_empty()
+        {
+            return Err(SendError::Fatal(format!(
+                "stepcompress mcu {}: resonance buzz rejected while trajectory remains queued",
+                self.mcu_id
+            )));
+        }
+        if self.oids.len() > MAX_BUZZ_SLOTS {
+            return Err(SendError::Fatal(format!(
+                "stepcompress mcu {}: {} motors exceed the {MAX_BUZZ_SLOTS}-motor buzz limit",
+                self.mcu_id,
+                self.oids.len()
+            )));
+        }
+        let mut selected = Vec::with_capacity(self.axes.len());
+        let mut signs = Vec::with_capacity(self.axes.len());
+        let mut bases = Vec::with_capacity(self.axes.len());
+        let mut slot_mask = 0u8;
+        let mut slot_sign_mask = 0u8;
+        for motor in 0..self.axes.len() {
+            let axis = self.axes[motor];
+            let drives = axis < 8 && axis_mask & (1 << axis) != 0;
+            selected.push(drives);
+            let negative = axis < 8 && sign_mask & (1 << axis) != 0;
+            signs.push(if negative { -1.0 } else { 1.0 });
+            bases.push(
+                self.shim.commanded_steps(motor) as f32 * self.shim.motor_microstep_distance(motor),
+            );
+            if drives {
+                slot_mask |= 1 << motor;
+                if negative {
+                    slot_sign_mask |= 1 << motor;
+                }
+                self.shim
+                    .detach_piece_seam(motor)
+                    .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
+            }
+        }
+        if slot_mask == 0 {
+            return Err(SendError::Fatal(format!(
+                "stepcompress mcu {}: resonance buzz axis mask 0x{axis_mask:02x} selects no motor",
+                self.mcu_id
+            )));
+        }
+        let mut osc = BuzzOsc::new();
+        let result = osc.arm(
+            self.oids.len() as u8,
+            slot_mask,
+            slot_sign_mask,
+            freq_start_millihz,
+            freq_end_millihz,
+            amplitude_nm,
+            duration_ms,
+            ramp_ms,
+            [0; MAX_BUZZ_SLOTS],
+        );
+        if result != 0 {
+            return Err(SendError::Fatal(format!(
+                "stepcompress mcu {}: resonance buzz rejected with result {result}",
+                self.mcu_id
+            )));
+        }
+        let (now, freq) = self.clock_now()?;
+        let sample_period_cycles = u64::from(self.shim.motor_sample_period_cycles(0));
+        let cycles_per_second = self.shim.motor_cycles_per_second(0);
+        let anchor_clock = now.saturating_add((freq * SEND_LEAD_SECONDS) as u64);
+        let total_samples = ((f64::from(duration_ms) * 1.0e-3 * cycles_per_second)
+            / sample_period_cycles as f64)
+            .ceil()
+            .max(1.0) as u64;
+        let _ = osc.eval(0);
+        self.buzz = Some(StepBuzz {
+            cycles_per_second,
+            osc,
+            selected,
+            signs,
+            bases,
+            next_clock: anchor_clock,
+            sample_period_cycles,
+            total_samples,
+            emitted_samples: 0,
+            previous_rel: 0.0,
+        });
+        Ok(())
     }
 
     fn motors_of(&self, axis: u8) -> Result<Vec<usize>, SendError> {
@@ -1410,6 +1555,88 @@ impl StepcompressEndpoint {
         self.release_retirements();
         self.post_heartbeat()
     }
+    fn generate_buzz(&mut self, now: u64, freq: f64) -> Result<(), SendError> {
+        let Some(mut buzz) = self.buzz.take() else {
+            return Ok(());
+        };
+        let lead_end = now.saturating_add((freq * SEND_LEAD_SECONDS) as u64);
+        while buzz.emitted_samples < buzz.total_samples && buzz.next_clock < lead_end {
+            let remaining = buzz.total_samples - buzz.emitted_samples;
+            let available = lead_end
+                .saturating_sub(buzz.next_clock)
+                .div_ceil(buzz.sample_period_cycles);
+            let count = remaining.min(available).min(u64::from(SHIM_RING_DEPTH));
+            if count == 0 {
+                break;
+            }
+            let mut relative = Vec::with_capacity(count as usize + 1);
+            relative.push(buzz.previous_rel);
+            for offset in 1..=count {
+                let sample = buzz.emitted_samples + offset;
+                let value = if sample == buzz.total_samples {
+                    0.0
+                } else {
+                    let elapsed_cycles = sample.saturating_mul(buzz.sample_period_cycles);
+                    let elapsed_ns =
+                        (elapsed_cycles as f64 / buzz.cycles_per_second * 1.0e9) as u64;
+                    buzz.osc.eval(elapsed_ns).map_or(0.0, |sample| sample.0)
+                };
+                relative.push(value);
+            }
+            for motor in 0..self.oids.len() {
+                if !buzz.selected[motor] {
+                    continue;
+                }
+                let mut pieces = Vec::with_capacity(count as usize);
+                for index in 0..count as usize {
+                    let start = buzz.bases[motor] + buzz.signs[motor] * relative[index];
+                    let end = buzz.bases[motor] + buzz.signs[motor] * relative[index + 1];
+                    let mut piece = PieceEntry::zeroed();
+                    piece.start_time = buzz.next_clock + index as u64 * buzz.sample_period_cycles;
+                    piece.duration =
+                        buzz.sample_period_cycles as f32 / buzz.cycles_per_second as f32;
+                    piece.coeff_count = 2;
+                    piece.coeffs[0] = 0.5 * (start + end);
+                    piece.coeffs[1] = 0.5 * (end - start);
+                    pieces.push(piece);
+                }
+                self.shim
+                    .push_pieces(motor, &pieces)
+                    .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
+                self.retirement_bias[motor] =
+                    self.retirement_bias[motor].wrapping_sub(count as u32);
+            }
+            let chunk_end = buzz
+                .next_clock
+                .saturating_add(count.saturating_mul(buzz.sample_period_cycles));
+            let frames = self
+                .shim
+                .drain(chunk_end.saturating_add(buzz.sample_period_cycles))
+                .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
+            self.queue_step_volley(now, frames)?;
+            buzz.emitted_samples += count;
+            buzz.next_clock = chunk_end;
+            buzz.previous_rel = *relative.last().expect("one endpoint sample");
+        }
+        if buzz.emitted_samples == buzz.total_samples {
+            if buzz.previous_rel != 0.0 {
+                return Err(SendError::Fatal(format!(
+                    "stepcompress mcu {}: resonance buzz ended away from its base",
+                    self.mcu_id
+                )));
+            }
+            for motor in 0..self.oids.len() {
+                if buzz.selected[motor] {
+                    self.shim
+                        .detach_piece_seam(motor)
+                        .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
+                }
+            }
+        } else {
+            self.buzz = Some(buzz);
+        }
+        Ok(())
+    }
 
     fn counts_by_axis(&self, counts: &[u32]) -> (Vec<u8>, Vec<u32>) {
         let mut axes = Vec::new();
@@ -1527,10 +1754,12 @@ impl StepcompressEndpoint {
             && self.shim.pending_steps() == 0
             && self.pending_retire.is_empty()
             && !self.deferred_retirement
+            && self.buzz.is_none()
         {
             return Ok(());
         }
         let (now, freq) = self.clock_now()?;
+        self.generate_buzz(now, freq)?;
         self.drain_into_backlog(now, freq)?;
         if self.shim.queued_pieces() == 0 && self.shim.pending_steps() > 0 {
             for motor in 0..self.oids.len() {

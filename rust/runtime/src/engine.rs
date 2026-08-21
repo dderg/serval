@@ -44,7 +44,6 @@ pub struct Engine {
     pub stepping_axes: [Option<AxisState>; MAX_AXES],
     pub num_axes: u8,
     pub tick_caches: crate::stepping_state::TickCaches,
-    pub(crate) buzz: crate::buzz::Buzz,
     #[cfg(any(test, feature = "host"))]
     test_queue_ptrs: [*mut crate::step_queue::StepQueue; MAX_AXES],
     #[cfg(feature = "sample-stepping")]
@@ -63,7 +62,6 @@ impl Engine {
             stepping_axes: [const { None }; MAX_AXES],
             num_axes: 0,
             tick_caches: crate::stepping_state::TickCaches::new(),
-            buzz: crate::buzz::Buzz::new(),
             #[cfg(any(test, feature = "host"))]
             test_queue_ptrs: [core::ptr::null_mut(); MAX_AXES],
             #[cfg(feature = "sample-stepping")]
@@ -98,7 +96,6 @@ impl Engine {
             addr_of_mut!((*ptr).stepping_axes).write([const { None }; MAX_AXES]);
             addr_of_mut!((*ptr).num_axes).write(0);
             addr_of_mut!((*ptr).tick_caches).write(crate::stepping_state::TickCaches::new());
-            addr_of_mut!((*ptr).buzz).write(crate::buzz::Buzz::new());
             #[cfg(any(test, feature = "host"))]
             addr_of_mut!((*ptr).test_queue_ptrs).write([core::ptr::null_mut(); MAX_AXES]);
             #[cfg(feature = "sample-stepping")]

@@ -171,9 +171,6 @@ impl Engine {
             return false;
         };
         let only_holding_a_halt = lane.is_halted();
-        if crate::buzz_stream::is_xdirect(lane_idx) {
-            return true;
-        }
         let Some(axis) = self
             .stepping_axes
             .get_mut(lane_idx)

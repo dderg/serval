@@ -2374,3 +2374,35 @@ fn a_cut_barrier_that_never_reaches_the_wire_trips_the_deadline() {
     assert!(message.contains("backlogged, never sent"), "{message}");
     assert!(message.contains(&format!("oid={OID}")), "{message}");
 }
+
+#[test]
+fn host_buzz_returns_to_base_without_advancing_retirement() {
+    let mut h = harness(1024);
+    h.endpoint
+        .arm_buzz(0b001, 0, 50_000, 50_000, 100_000, 20, 2)
+        .expect("idle pulse lane accepts a buzz");
+    for tick in 1..=20 {
+        h.now
+            .store(tick * (CYCLES_PER_SECOND as u64 / 100), Ordering::Relaxed);
+        h.endpoint.tick().expect("buzz tick");
+    }
+    assert!(h.endpoint.buzz.is_none());
+    assert_eq!(h.endpoint.shim.commanded_steps(0), 0);
+    assert!(h.sent_moves() > 0);
+    let (_, retired) = h.endpoint.counts_by_axis(&h.endpoint.shim.retired_counts());
+    assert_eq!(retired, vec![0]);
+}
+
+#[test]
+fn host_buzz_rejects_a_lane_with_queued_trajectory() {
+    let mut h = harness(1024);
+    h.endpoint
+        .shim
+        .push_pieces(0, &[piece(100_000, 0.0, 1.0, 0.01)])
+        .expect("stage trajectory");
+    let error = h
+        .endpoint
+        .arm_buzz(0b001, 0, 50_000, 50_000, 100_000, 20, 2)
+        .expect_err("queued trajectory must reject a buzz");
+    assert!(error.to_string().contains("trajectory remains queued"));
+}

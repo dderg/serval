@@ -69,7 +69,6 @@ pub const EVENT_MOTION_STEP_REARM_TIGHT: u16 = 7;
 pub const EVENT_MOTION_STEP_REARM_LATE: u16 = 8;
 pub const EVENT_MOTION_STEP_HALT: u16 = 9;
 pub const EVENT_MOTION_STEP_CLOCK_HORIZON: u16 = 10;
-pub const EVENT_MOTION_BUZZ_REJECTED: u16 = 11;
 
 pub const EVENT_TICK_INTERVAL_EXCEEDED: u16 = 1;
 pub const EVENT_TICK_UNDERRUN: u16 = 2;
@@ -254,10 +253,6 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         (SUBSYSTEM_MOTION, EVENT_MOTION_STEP_CLOCK_HORIZON) => (
             "motion.step_clock_horizon",
             "step clock {arg1} is distance={arg0:i32} cyc from the mcu clock, beyond the sync horizon",
-        ),
-        (SUBSYSTEM_MOTION, EVENT_MOTION_BUZZ_REJECTED) => (
-            "motion.buzz_rejected",
-            "resonance buzz rejected rc={arg0:i32} axis_mask={arg1}",
         ),
         (SUBSYSTEM_TICK, EVENT_TICK_INTERVAL_EXCEEDED) => (
             "tick.interval_exceeded",

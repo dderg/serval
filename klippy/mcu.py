@@ -82,8 +82,6 @@ RUNTIME_FAULT_NAMES = {
     -311: "TickIntervalExceeded",
     -313: "PhaseMotorUnmapped",
     -314: "OverlayUnsupported",
-    -315: "BuzzAxisConflict",
-    -316: "BuzzInPhaseMode",
     -317: "SampleRunLate",
     -318: "SampleRingUnderrun",
     -319: "SampleRingFull",

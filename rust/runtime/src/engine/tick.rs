@@ -1,3 +1,4 @@
+#[cfg(feature = "motion-module-stepper")]
 use core::sync::atomic::Ordering;
 
 use crate::state::SharedState;
@@ -5,13 +6,6 @@ use crate::state::SharedState;
 use super::Engine;
 
 impl Engine {
-    fn drain_refill_fault(shared: &SharedState) {
-        let refill_fault = crate::buzz_stream::take_refill_fault();
-        if refill_fault != 0 {
-            shared.last_error.store(refill_fault, Ordering::Release);
-        }
-    }
-
     #[cfg(feature = "motion-module-stepper")]
     fn phase_slew_dispatch(&mut self, i: usize, shared: &SharedState) -> bool {
         use crate::stepping_state::StepMode;
@@ -20,9 +14,6 @@ impl Engine {
             return false;
         };
         if axis.mode.load(Ordering::Acquire) != StepMode::Phase as u8 {
-            return false;
-        }
-        if crate::buzz_stream::is_xdirect(i) {
             return false;
         }
         let pending = axis.steppers.iter().any(|s| {
@@ -51,8 +42,6 @@ impl Engine {
 
     #[cfg_attr(not(feature = "sample-stepping"), allow(unused_variables))]
     pub fn tick(&mut self, now: u64, shared: &SharedState) -> bool {
-        Self::drain_refill_fault(shared);
-
         #[cfg(feature = "sample-stepping")]
         self.sample_take_halt_request(shared);
 

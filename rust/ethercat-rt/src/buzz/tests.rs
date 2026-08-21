@@ -67,7 +67,7 @@ fn rejects_slot_beyond_num_slots() {
         [0; MAX_BUZZ_SLOTS],
     );
     assert!(!osc.active(), "slot 2 on a 2-slave node must not arm");
-    assert_eq!(rc, runtime::buzz::BUZZ_REJECT_AXIS_MASK);
+    assert_eq!(rc, ERR_BUZZ_AXIS_MASK);
 }
 
 #[test]

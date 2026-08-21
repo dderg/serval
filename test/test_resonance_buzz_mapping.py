@@ -54,6 +54,9 @@ class FakeBuzzMotion:
     def submit_resonance_buzz(self, *args):
         self.calls.append(args)
 
+    def resonance_buzz_done(self):
+        return True
+
 
 class FakeBuzzReactor:
     def monotonic(self):
