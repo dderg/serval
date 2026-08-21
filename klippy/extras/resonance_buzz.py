@@ -186,6 +186,17 @@ class ResonanceBuzz:
         motion = self.printer.lookup_object("motion")
         kin = toolhead.get_kinematics()
         coupled = bool(getattr(kin, "coupled_xy", lambda: False)())
+        homed_axes = toolhead.get_status(
+            self.printer.get_reactor().monotonic()
+        )["homed_axes"]
+        required_homed = (
+            "xy" if coupled and axis_name in ("x", "y") else axis_name
+        )
+        if any(axis not in homed_axes for axis in required_homed):
+            raise gcmd.error(
+                "RESONANCE_BUZZ: home %s before buzzing %s"
+                % (required_homed.upper(), axis_name.upper())
+            )
         try:
             axis_mask, sign_mask = buzz_axis_to_motor_mask(axis_name, coupled)
         except ValueError as e:
