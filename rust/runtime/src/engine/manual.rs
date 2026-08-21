@@ -15,12 +15,12 @@ impl Engine {
         for ex in excitations {
             if ex.axis_idx >= crate::step_queue::N_AXIS_STEP_QUEUES {
                 crate::fault_helpers::raise_jog_parameters_invalid(shared);
-                return Err(-1);
+                return Err(crate::buzz::BUZZ_REJECT_NO_STEP_QUEUE);
             }
             #[cfg(feature = "sample-stepping")]
             if self.sample_lane_anchored(ex.axis_idx) {
                 crate::fault_helpers::raise_buzz_axis_conflict(shared, ex.axis_idx);
-                return Err(-1);
+                return Err(crate::buzz::BUZZ_REJECT_LANE_ANCHORED);
             }
         }
         Ok(())

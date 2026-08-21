@@ -32,11 +32,17 @@ fn envelope_never_exceeds_unity_or_drops_below_zero() {
 #[test]
 fn arm_rejects_malformed_arguments() {
     let buzz = Buzz::new();
-    assert_eq!(buzz.arm(4, 0b1, 0, 0, 100_000, 10_000, 1000, 100), -1);
-    assert_eq!(buzz.arm(4, 0b1, 0, 100_000, 0, 10_000, 1000, 100), -1);
+    assert_eq!(
+        buzz.arm(4, 0b1, 0, 0, 100_000, 10_000, 1000, 100),
+        crate::buzz::BUZZ_REJECT_FREQ_ZERO
+    );
+    assert_eq!(
+        buzz.arm(4, 0b1, 0, 100_000, 0, 10_000, 1000, 100),
+        crate::buzz::BUZZ_REJECT_FREQ_ZERO
+    );
     assert_eq!(
         buzz.arm(4, 0b1_0000, 0, 100_000, 100_000, 10_000, 1000, 100),
-        -1
+        crate::buzz::BUZZ_REJECT_AXIS_MASK
     );
 }
 

@@ -452,8 +452,26 @@ command_kalico_resonance_buzz(uint32_t *args)
     int32_t rc = runtime_resonance_buzz(
         runtime_handle, axis_mask, sign_mask, freq_start_millihz,
         freq_end_millihz, amplitude_nm, duration_ms, ramp_ms);
-    if (rc != 0)
-        shutdown("kalico_resonance_buzz rejected (bad parameters)");
+    if (rc != 0) {
+        event_log_emit(EVENT_LOG_LEVEL_ERROR, EVENT_LOG_SUBSYS_MOTION,
+                       EVENT_LOG_EVENT_MOTION_BUZZ_REJECTED, 0,
+                       (uint32_t)rc, axis_mask);
+        switch (rc) {
+        case -2:
+            shutdown("kalico_resonance_buzz rejected: axis_mask beyond"
+                     " configured axes");
+        case -3:
+            shutdown("kalico_resonance_buzz rejected: zero sweep frequency");
+        case -4:
+            shutdown("kalico_resonance_buzz rejected: axis has no step"
+                     " queue");
+        case -5:
+            shutdown("kalico_resonance_buzz rejected: sample lane anchored"
+                     " on a buzz axis");
+        default:
+            shutdown("kalico_resonance_buzz rejected (runtime handle)");
+        }
+    }
 }
 DECL_COMMAND(command_kalico_resonance_buzz,
              "kalico_resonance_buzz axis_mask=%c sign_mask=%c"

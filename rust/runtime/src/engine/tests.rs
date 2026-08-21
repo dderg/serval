@@ -154,7 +154,7 @@ fn resonance_buzz_conflicts_with_an_anchored_sample_lane_on_the_same_axis() {
 
     assert_eq!(
         engine.resonance_buzz(&shared, 1u8 << axis, 0, 100_000, 100_000, 100_000, 20, 2, 0),
-        -1
+        crate::buzz::BUZZ_REJECT_LANE_ANCHORED
     );
     assert_eq!(
         shared.last_error.load(Ordering::Acquire),
@@ -174,7 +174,7 @@ fn resonance_buzz_rejects_axis_without_step_queue() {
 
     assert_eq!(
         engine.resonance_buzz(&shared, 1u8 << axis, 0, 100_000, 100_000, 100_000, 20, 2, 0),
-        -1
+        crate::buzz::BUZZ_REJECT_NO_STEP_QUEUE
     );
     assert!(!crate::buzz_stream::axis_active(0));
     crate::buzz_stream::reset_for_test();

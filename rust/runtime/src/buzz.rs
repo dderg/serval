@@ -52,6 +52,12 @@ pub struct AxisExcitation {
     pub ramp_seconds: f64,
 }
 
+/// Distinct reject codes so the C shutdown path can say which check fired.
+pub const BUZZ_REJECT_AXIS_MASK: i32 = -2;
+pub const BUZZ_REJECT_FREQ_ZERO: i32 = -3;
+pub const BUZZ_REJECT_NO_STEP_QUEUE: i32 = -4;
+pub const BUZZ_REJECT_LANE_ANCHORED: i32 = -5;
+
 #[allow(missing_debug_implementations)]
 pub struct Buzz {
     control: BuzzControl,
@@ -86,10 +92,10 @@ impl Buzz {
         let disarm = amplitude_nm == 0 || duration_ms == 0 || axis_mask == 0;
         if !disarm {
             if axis_mask & !axis_bits != 0 {
-                return -1;
+                return BUZZ_REJECT_AXIS_MASK;
             }
             if freq_start_millihz == 0 || freq_end_millihz == 0 {
-                return -1;
+                return BUZZ_REJECT_FREQ_ZERO;
             }
         }
         let c = &self.control;
