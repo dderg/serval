@@ -17,7 +17,7 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 struct RtHandle(*mut c_api::Runtime);
 // SAFETY: all FFI calls are serialised by TEST_LOCK; the FFI's own INIT_DONE +
-// null-ptr guards add a second layer. See write_piece.rs for the full rationale.
+// null-ptr guards add a second layer.
 unsafe impl Send for RtHandle {}
 unsafe impl Sync for RtHandle {}
 
@@ -34,7 +34,7 @@ fn rt() -> *mut c_api::Runtime {
 }
 
 #[test]
-fn reset_reclaims_allocation_across_many_configures() {
+fn reset_allows_reconfiguring_axis_repeatedly() {
     let _g = TEST_LOCK.lock().unwrap();
     let handle = rt();
     for i in 0..128 {
@@ -46,7 +46,6 @@ fn reset_reclaims_allocation_across_many_configures() {
                 0,
                 0,
                 (1.0_f32 / 160.0_f32).to_bits(),
-                64,
                 core::ptr::null(),
                 0,
             );

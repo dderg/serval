@@ -2,6 +2,7 @@
 #define _PHASE_STEPPING_SPI_H
 
 #include <stdint.h>
+#include "autoconf.h" // CONFIG_MOTION_RUNTIME
 
 struct spi_config;
 
@@ -37,10 +38,17 @@ void phase_stepping_write_xdirect(uint8_t motor_idx,
 // transfer and release after; irq_save/irq_restore gives mutual exclusion (all
 // writers are single-instruction uint8_t accesses). try_acquire returns 1 if
 // acquired, 0 if busy — the ISR skips + counts on 0; the task path spins.
+// Without the motion runtime there is no phase ISR contending for the bus, so
+// acquisition trivially succeeds.
+#if CONFIG_MOTION_RUNTIME
 uint8_t phase_spi_try_acquire(void);
 void    phase_spi_release(void);
 uint32_t phase_spi_get_skip_count(void);
 uint32_t phase_spi_get_write_count(void);
+#else
+static inline uint8_t phase_spi_try_acquire(void) { return 1; }
+static inline void phase_spi_release(void) {}
+#endif
 
 void phase_stepping_enable_writes(void);
 void phase_stepping_disable_writes(void);

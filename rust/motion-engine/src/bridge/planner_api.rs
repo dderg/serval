@@ -20,13 +20,18 @@ struct McuTopology {
     axes: Vec<u8>,
     kinematics: u8,
     max_motor_velocity: Vec<f64>,
-    stepping_mode: u8,
+    lane_kinds: Vec<u8>,
+    motor_counts: Vec<u8>,
     microstep_distance: Vec<f64>,
     invert_dir: Vec<bool>,
     stepper_oids: Vec<u32>,
     stepcompress_sample_rate: f64,
     move_queue_slots: u32,
     step_pulse_seconds: Vec<f64>,
+    high_precision_step_compress: Vec<bool>,
+    stepcompress_max_error_secs: f64,
+    phase_sample_rate: f64,
+    phase_ring_depth: u32,
 }
 
 impl McuTopology {
@@ -36,13 +41,18 @@ impl McuTopology {
             axes: self.axes,
             kinematics: self.kinematics,
             max_motor_velocity: self.max_motor_velocity,
-            stepping_mode: self.stepping_mode,
+            lane_kinds: self.lane_kinds,
+            motor_counts: self.motor_counts,
             microstep_distance: self.microstep_distance,
             invert_dir: self.invert_dir,
             stepper_oids: self.stepper_oids,
             stepcompress_sample_rate: self.stepcompress_sample_rate,
             move_queue_slots: self.move_queue_slots,
             step_pulse_seconds: self.step_pulse_seconds,
+            high_precision_step_compress: self.high_precision_step_compress,
+            stepcompress_max_error_secs: self.stepcompress_max_error_secs,
+            phase_sample_rate: self.phase_sample_rate,
+            phase_ring_depth: self.phase_ring_depth,
         }
     }
 }
@@ -52,7 +62,7 @@ impl PyMotionEngine {
     #[pyo3(signature = (mcu_id, axis_idx, motor_mask, delta_mm, speed, accel))]
     fn submit_nudge(
         &self,
-        _py: Python<'_>,
+        py: Python<'_>,
         mcu_id: u32,
         axis_idx: u8,
         motor_mask: u8,
@@ -81,7 +91,7 @@ impl PyMotionEngine {
                 })
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
         };
-        rx.recv()
+        py.detach(|| rx.recv())
             .map_err(|_| PyRuntimeError::new_err("nudge notify dropped"))?
             .map_err(PyRuntimeError::new_err)?;
         let (accel_t, cruise_t, _v) = crate::nudge::calc_move_time(delta_mm, speed, accel);
@@ -107,29 +117,16 @@ impl PyMotionEngine {
         let machine = self.machine_from_gcode(*self.commanded_pos.lock_ok());
         self.rebase_motion_history_after_position_set(machine);
 
-        let (ethercat_mcu_ids, host_ios, ring_depth_table) =
-            self.build_transport_maps(&mcu_configs)?;
+        let (ethercat_mcu_ids, host_ios) = self.build_transport_maps(&mcu_configs)?;
         self.seed_ethercat_clock_estimates(&ethercat_mcu_ids);
 
         host_rt::memory_lock::HOST_MEMORY_LOCK
             .start_pipeline_threads(|| {
-                let pump_control = self.spawn_pipeline(
-                    &cfg,
-                    &mcu_configs,
-                    &host_ios,
-                    &ec_conns,
-                    ring_depth_table,
-                )?;
+                let pump_control = self.spawn_pipeline(&cfg, &mcu_configs, &host_ios, &ec_conns)?;
 
                 self.spawn_live_position_poll_thread();
 
-                self.wire_mcu_supervision(
-                    &mcu_configs,
-                    &ethercat_mcu_ids,
-                    &ec_conns,
-                    &host_ios,
-                    pump_control,
-                );
+                self.wire_mcu_supervision(&mcu_configs, &ethercat_mcu_ids, &ec_conns, pump_control);
 
                 Ok(())
             })
@@ -576,18 +573,19 @@ impl PyMotionEngine {
                 ))
             })?;
         }
-        self.seed_stepcompress_shims(pos)
+        self.seed_stepcompress_shims(pos)?;
+        self.seed_sample_lanes(pos)
     }
 
-    /// Classic stepping keeps the step counter on the host: re-anchor each
-    /// stepcompress motor's shim counter so the next drain re-emits
-    /// `reset_step_clock` from the new position.
+    /// A pulse lane keeps its step counter on the host: re-anchor each such
+    /// motor's shim counter so the next drain re-emits `reset_step_clock` from
+    /// the new position.
     fn seed_stepcompress_shims(&self, pos: geometry::MachinePos) -> PyResult<()> {
         let configs = self.mcu_axis_configs.lock_ok().clone();
         let endpoints = self.stepcompress_endpoints.lock_ok().clone();
         for cfg in configs
             .iter()
-            .filter(|c| c.stepping_mode == crate::mcu_config::SteppingMode::Stepcompress)
+            .filter(|c| !c.ethercat && c.has_pulse_lanes())
         {
             let counts = crate::mcu_config::stepcompress_seed_counts(cfg, pos)
                 .map_err(PyRuntimeError::new_err)?;
@@ -600,6 +598,34 @@ impl PyMotionEngine {
             endpoint.lock_ok().reset_position(&counts).map_err(|e| {
                 PyRuntimeError::new_err(format!(
                     "position seed: shim reseed failed for mcu {}: {e:?}",
+                    cfg.mcu_id
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// A phase lane's host counter is the origin its next `sample_anchor`
+    /// carries, so a rename of the rest point has to move it in step with the
+    /// `runtime_seed_position` that just moved the mcu's own axis counter.
+    fn seed_sample_lanes(&self, pos: geometry::MachinePos) -> PyResult<()> {
+        let configs = self.mcu_axis_configs.lock_ok().clone();
+        let endpoints = self.sample_endpoints.lock_ok().clone();
+        for cfg in configs
+            .iter()
+            .filter(|c| !c.ethercat && c.has_phase_lanes())
+        {
+            let counts =
+                crate::mcu_config::sample_seed_counts(cfg, pos).map_err(PyRuntimeError::new_err)?;
+            let endpoint = endpoints.get(&cfg.mcu_id).ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "position seed: no sample endpoint registered for phase mcu {}",
+                    cfg.mcu_id
+                ))
+            })?;
+            endpoint.lock_ok().reset_position(&counts).map_err(|e| {
+                PyRuntimeError::new_err(format!(
+                    "position seed: sample lane reseed failed for mcu {}: {e:?}",
                     cfg.mcu_id
                 ))
             })?;

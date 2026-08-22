@@ -82,6 +82,7 @@ fn a_trip_buffered_after_the_arm_survives_until_the_run_consumes_it() {
 fn run_with(members: Vec<TripMember>) -> HomingRun {
     let (tx, _rx) = crossbeam_channel::bounded(1);
     HomingRun {
+        frozen_oids: Vec::new(),
         cohort: 1,
         remaining_trips: members,
         axis_key: crate::types::AxisKey {
@@ -113,6 +114,7 @@ fn member(mcu: u32, id: u8, freeze: Option<RemoteFreeze>) -> TripMember {
 #[test]
 fn non_final_trip_yields_its_remote_freeze_target_and_leaves_the_rest() {
     let freeze = RemoteFreeze {
+        stepper_oid: 7,
         motor_mcu: 7,
         motor_idx: 1,
         stepper_idx: 2,
@@ -134,6 +136,7 @@ fn non_final_trip_without_binding_carries_no_freeze_target() {
 #[test]
 fn last_remaining_trip_is_final_and_carries_its_freeze_target() {
     let freeze = RemoteFreeze {
+        stepper_oid: 7,
         motor_mcu: 7,
         motor_idx: 0,
         stepper_idx: 0,
@@ -153,6 +156,7 @@ fn trip_from_an_unknown_endstop_is_unmatched_and_removes_nothing() {
 #[test]
 fn trip_identity_distinguishes_same_endstop_id_across_mcus() {
     let freeze = RemoteFreeze {
+        stepper_oid: 7,
         motor_mcu: 2,
         motor_idx: 0,
         stepper_idx: 1,

@@ -115,7 +115,6 @@ unsafe extern "C" {
     static runtime_clock_freq: u32;
     fn timer_read_time() -> u32;
     fn runtime_emit_step_pulses(axis_idx: u8, n_steps: i32, stepper_sel: u8);
-    fn runtime_emit_xdirect(rt: *mut core::ffi::c_void, axis_idx: u8, offset_steps: i32);
     fn kalico_step_output_owned_mask() -> u8;
 }
 
@@ -131,19 +130,13 @@ unsafe fn runtime_emit_step_pulses(axis_idx: u8, n_steps: i32, stepper_sel: u8) 
     test_hooks::record_emit(axis_idx, n_steps, stepper_sel);
 }
 #[cfg(any(test, feature = "host"))]
-unsafe fn runtime_emit_xdirect(_rt: *mut core::ffi::c_void, axis_idx: u8, offset_steps: i32) {
-    test_hooks::record_xdirect(axis_idx, offset_steps);
-}
-#[cfg(any(test, feature = "host"))]
 unsafe fn kalico_step_output_owned_mask() -> u8 {
     test_hooks::owned_mask()
 }
 
-// `rt` is an opaque runtime handle forwarded verbatim to `runtime_emit_xdirect`,
-// which null-checks and projects it; this trampoline never dereferences it.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
-pub extern "C" fn step_output_event(rt: *mut core::ffi::c_void) -> u32 {
+pub extern "C" fn step_output_event(_rt: *mut core::ffi::c_void) -> u32 {
     // SAFETY: `timer_read_time` is a single u32 MMIO read (host: a test hook).
     let now = unsafe { timer_read_time() };
     // SAFETY: side-effect-free C getter (host: a test hook).
@@ -177,21 +170,13 @@ pub extern "C" fn step_output_event(rt: *mut core::ffi::c_void) -> u32 {
                 // SAFETY: sole-consumer discipline as above.
                 let _ = unsafe { queue_pop(q) };
                 crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_STEPOUT_EMIT);
-                if crate::buzz_stream::is_xdirect(axis_idx) {
-                    // Phase-mode buzz: the payload is an absolute coil offset. The
-                    // c-api projects the engine from the forwarded handle.
-                    // SAFETY: sole coil writer for this axis (tick skips it).
-                    unsafe { runtime_emit_xdirect(rt, axis_idx as u8, entry.offset_steps()) };
-                } else {
-                    // SAFETY: C step emitter guards out-of-range motor indices.
-                    unsafe {
-                        runtime_emit_step_pulses(
-                            axis_idx as u8,
-                            i32::from(entry.dir()),
-                            entry.stepper_sel(),
-                        )
-                    };
-                }
+                unsafe {
+                    runtime_emit_step_pulses(
+                        axis_idx as u8,
+                        i32::from(entry.dir()),
+                        entry.stepper_sel(),
+                    )
+                };
                 emitted += 1;
                 emitted_this_pass = true;
             }

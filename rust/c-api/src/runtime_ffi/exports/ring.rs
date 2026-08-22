@@ -1,7 +1,7 @@
 use super::{
     INIT_DONE, IsrState, Ordering, RUNTIME_ERR_INVALID_ARG, RUNTIME_ERR_NOT_INIT,
     RUNTIME_ERR_NULL_PTR, RUNTIME_OK, Runtime, RuntimeContext, SharedState, UnsafeCell,
-    event_log_emit, guarded_ctx,
+    guarded_ctx,
 };
 
 #[unsafe(no_mangle)]
@@ -10,7 +10,6 @@ pub unsafe extern "C" fn runtime_configure_axis(
     axis_idx: u8,
     mode: u8,
     microstep_distance_f32_bits: u32,
-    ring_depth: u16,
     bindings_ptr: *const runtime::stepping_state::StepperBindingRust,
     stepper_count: u8,
 ) -> i32 {
@@ -36,17 +35,11 @@ pub unsafe extern "C" fn runtime_configure_axis(
     };
     let ctx = rt.cast::<RuntimeContext>();
     // SAFETY: foreground-only; §11.2 raw-pointer projection; command dispatch serialised against TIM5.
-    let total_ring_pieces = runtime::state::TOTAL_RING_PIECES;
     unsafe {
         let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
-        let rc = (*isr_ptr).engine.configure_axis(
-            axis_idx,
-            mode_enum,
-            mstep_dist,
-            ring_depth as usize,
-            bindings,
-            total_ring_pieces,
-        );
+        let rc = (*isr_ptr)
+            .engine
+            .configure_axis(axis_idx, mode_enum, mstep_dist, bindings);
         if rc != RUNTIME_OK {
             return rc;
         }
@@ -66,146 +59,6 @@ pub unsafe extern "C" fn runtime_configure_axis(
         }
         RUNTIME_OK
     }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn runtime_gate_pieces(rt: *mut Runtime) -> i32 {
-    let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
-    unsafe {
-        let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
-        (*isr_ptr).engine.gate_pieces();
-    }
-    RUNTIME_OK
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn runtime_pieces_gated(rt: *mut Runtime) -> i32 {
-    let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
-    unsafe {
-        let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
-        i32::from((*isr_ptr).engine.pieces_gated())
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn runtime_ungate_pieces(rt: *mut Runtime) -> i32 {
-    let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
-    unsafe {
-        let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
-        (*isr_ptr).engine.ungate_pieces()
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn runtime_write_piece(
-    rt: *mut Runtime,
-    axis_idx: u8,
-    start_slot: u16,
-    index: u8,
-    piece_ptr: *const u8,
-) -> i32 {
-    if rt.is_null() || piece_ptr.is_null() {
-        return RUNTIME_ERR_NULL_PTR;
-    }
-    if !INIT_DONE.load(Ordering::Acquire) {
-        return RUNTIME_ERR_NOT_INIT;
-    }
-    let ctx = rt.cast::<RuntimeContext>();
-    // SAFETY: §11.2 foreground-only. ISR pops ring tail; foreground writes slots only, never advances head here. piece_ptr is unaligned (protocol frame offset); PieceEntry has no invalid bit patterns.
-    unsafe {
-        let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
-        let ps_ptr: *mut [runtime::piece_ring::PieceEntry; runtime::state::TOTAL_RING_PIECES] =
-            UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).piece_storage));
-        let storage: &mut [runtime::piece_ring::PieceEntry] = &mut *ps_ptr;
-        let Some(axis) = (*isr_ptr)
-            .engine
-            .stepping_axes
-            .get_mut(axis_idx as usize)
-            .and_then(|s| s.as_mut())
-        else {
-            return RUNTIME_ERR_INVALID_ARG;
-        };
-        if !axis.ring.is_configured() {
-            return RUNTIME_ERR_INVALID_ARG;
-        }
-        let depth = axis.ring.ring_depth;
-        let slot = (start_slot as usize + index as usize) % depth;
-        let entry = core::ptr::read_unaligned(piece_ptr.cast::<runtime::piece_ring::PieceEntry>());
-        // Write acceptance: a piece the ISR cannot arm must never enter the
-        // ring. The parser rejects bad coeff_count already; duration is
-        // checked here because 2/duration is computed at arm.
-        if entry.coeff_count == 0
-            || entry.coeff_count as usize > runtime::piece_ring::MAX_PIECE_COEFFS
-            || !(entry.duration > 0.0)
-        {
-            return RUNTIME_ERR_INVALID_ARG;
-        }
-        axis.ring.write_slot(storage, slot, entry);
-    }
-    RUNTIME_OK
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn runtime_commit_head(
-    rt: *mut Runtime,
-    axis_idx: u8,
-    start_slot: u16,
-    piece_count: u8,
-    new_head: u32,
-) -> i32 {
-    let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
-    // SAFETY: §11.2 foreground-only. ring.head is a plain u32 written only by foreground; on single-core ARMv7E-M exception entry/return are memory barriers — no explicit fence needed.
-    unsafe {
-        let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
-        if (*isr_ptr).engine.pieces_gated() {
-            return runtime::error::RUNTIME_ERR_STREAM_HALTED;
-        }
-        let Some(axis) = (*isr_ptr)
-            .engine
-            .stepping_axes
-            .get_mut(axis_idx as usize)
-            .and_then(|s| s.as_mut())
-        else {
-            return RUNTIME_ERR_INVALID_ARG;
-        };
-        if !axis.ring.is_configured() {
-            return RUNTIME_ERR_INVALID_ARG;
-        }
-        match axis
-            .ring
-            .commit_head_checked(start_slot, piece_count, new_head)
-        {
-            runtime::piece_ring::CommitOutcome::Applied
-            | runtime::piece_ring::CommitOutcome::Stale => {}
-            runtime::piece_ring::CommitOutcome::Overcommit => {
-                const LOG_LEVEL_ERROR: u8 = 3;
-                const CODE_FLAG_OVERCOMMIT: u16 = 0x100;
-                event_log_emit(
-                    LOG_LEVEL_ERROR,
-                    runtime::log_codes::SUBSYSTEM_RUNTIME,
-                    runtime::log_codes::EVENT_RUNTIME_RING_STATE,
-                    u16::from(axis_idx) | CODE_FLAG_OVERCOMMIT,
-                    axis.ring.head,
-                    axis.ring.retired,
-                );
-                return runtime::error::RUNTIME_ERR_RING_FULL;
-            }
-            runtime::piece_ring::CommitOutcome::Gap => {
-                const LOG_LEVEL_ERROR: u8 = 3;
-                const CODE_FLAG_GAP: u16 = 0x200;
-                event_log_emit(
-                    LOG_LEVEL_ERROR,
-                    runtime::log_codes::SUBSYSTEM_RUNTIME,
-                    runtime::log_codes::EVENT_RUNTIME_RING_STATE,
-                    u16::from(axis_idx) | CODE_FLAG_GAP,
-                    axis.ring.head,
-                    u32::from(start_slot) | (u32::from(piece_count) << 16),
-                );
-                return runtime::error::RUNTIME_ERR_PIECE_SLOT_GAP;
-            }
-        }
-    }
-    RUNTIME_OK
 }
 
 #[unsafe(no_mangle)]

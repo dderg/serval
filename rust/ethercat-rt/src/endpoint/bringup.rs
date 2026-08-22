@@ -5,16 +5,13 @@ use std::sync::atomic::Ordering;
 
 use super::drive::{DriveChain, FfiDriveChain};
 use super::{EndpointCtx, SIGTERM_RECEIVED};
-use crate::buzz::BuzzOsc;
 use crate::capture::{Capture, PendingStart, PendingStop};
 use crate::claim::{all_slaves_reply, single_slave_reply, wait_for_claim, wait_for_claim_pumping};
 use crate::cli::{Args, SlaveCfg};
-use crate::curves::AxisRing;
 use crate::damper::DiffDamperBank;
 use crate::ffi;
 use crate::live_tap::{self, LiveTap};
 use crate::mailbox::{MailboxWorker, WorkerScheduling};
-use crate::scale::CountMap;
 use crate::sdo::SdoBus;
 use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
@@ -283,35 +280,35 @@ pub fn bringup(args: Args) -> EndpointCtx {
         .map(|u| (500_000u64 / u).max(1))
         .unwrap_or(500);
 
-    let rings: Vec<AxisRing> = (0..num_slaves).map(AxisRing::with_slot).collect();
-    let buzz = BuzzOsc::new();
+    let sp_rings: Vec<crate::setpoint::SetpointRing> = (0..num_slaves)
+        .map(|slot| crate::setpoint::SetpointRing::new(slot, cycle_ns as u32))
+        .collect();
+    let grid = crate::setpoint::SampleGrid::new(cycle_ns as u64);
     let damper = DiffDamperBank::new(cycle_ns);
     let trim = DiffTrimBank::new(cycle_ns);
     let comp = crate::strain_comp::StrainCompBank::new(cycle_ns);
-    let cmaps: Vec<Option<CountMap>> = (0..num_slaves).map(|_| None).collect();
     let last_counts: Vec<Option<i32>> = vec![None; num_slaves];
     // Per-slot report frame: (counts, host mm) captured at the homing finalize.
     // Maps the drive's raw encoder counts into the host frame for
     // QueryMotorState — the drive's own coordinate frame is never touched,
     // exactly like a stepper's step counter. The counts side of the pair is the
     // last COMMANDED target, not position_actual: at finalize the ring is empty
-    // (pieces retired by time) but the servo may still be settling several mm
-    // behind, and anchoring against a lagging actual bakes that transient in as
-    // a permanent report offset.
+    // but the servo may still be settling several mm behind, and anchoring
+    // against a lagging actual bakes that transient in as a permanent report
+    // offset.
     let report_anchor: Vec<Option<(i32, f64)>> = vec![None; num_slaves];
     let last_streamed_target: Vec<Option<i32>> = vec![None; num_slaves];
     let suppressed: Vec<bool> = vec![false; num_slaves];
     let last_sent_retired: u32 = 0;
     let heartbeat_sent = false;
 
-    // The capture-io, live-tap, and reclaim thread spawns and their ring
-    // buffers are multi-millisecond stalls under mlockall(MCL_FUTURE); they
-    // must happen before ec_rt_bringup_preop, while no drive is DC-synced
-    // and no park cycle is being pumped on this thread (claim-time
-    // Capture::new stalled the park loop past the sync watchdog and halted
-    // the bus at every claim, bench 2026-07-06).
+    // The capture-io and live-tap thread spawns and their ring buffers are
+    // multi-millisecond stalls under mlockall(MCL_FUTURE); they must happen
+    // before ec_rt_bringup_preop, while no drive is DC-synced and no park
+    // cycle is being pumped on this thread (claim-time Capture::new stalled
+    // the park loop past the sync watchdog and halted the bus at every claim,
+    // bench 2026-07-06).
     let capture = Capture::new();
-    let reclaim = crate::reclaim::Reclaim::spawn();
     let live_tap = LiveTap::spawn(
         &format!("{socket}.live"),
         live_tap::slot_configs(
@@ -509,12 +506,16 @@ pub fn bringup(args: Args) -> EndpointCtx {
         drive_scratch: super::cycle::DriveScratch::new(num_slaves),
         dynamics,
         run_limits,
-        rings,
-        buzz,
+        sp_rings,
+        grid,
+        ring_origin: vec![None; num_slaves],
+        sp_play_scratch: vec![None; num_slaves],
+        sp_fill_scratch: Vec::with_capacity(crate::setpoint::MAX_FILL_CYCLES),
+        last_grid_index: 0,
+        last_grid_clock: 0,
         damper,
         trim,
         comp,
-        cmaps,
         last_counts,
         last_written_offset: vec![0; num_slaves],
         report_anchor,
@@ -525,7 +526,6 @@ pub fn bringup(args: Args) -> EndpointCtx {
         gate,
         capture,
         live_tap,
-        reclaim,
         tap_slots,
         cycle_index,
         mailbox,

@@ -50,7 +50,6 @@ command_config_stepper(uint32_t *args)
     s->step_pulse_ticks = args[4];
     s->step_pin = gpio_out_setup(args[1], s->step_idle_level);
     s->dir_pin = gpio_out_setup(args[2], 0);
-#if CONFIG_CLASSIC_STEPPING
     s->position = -POSITION_BIAS;
     if (s->step_both_edge)
         s->flags |= SF_SINGLE_SCHED;
@@ -69,11 +68,11 @@ command_config_stepper(uint32_t *args)
     } else if (!CONFIG_INLINE_STEPPER_HACK) {
         s->time.func = stepper_event_full;
     }
-#endif
 #if !CONFIG_MOTION_RUNTIME
     // The config phase runs after the host's identify/attach handshake has
     // installed the mcu-log hook; emitting at boot races the host and the
-    // frame is lost. The piece build hangs this off kalico_configure_axis.
+    // frame is lost. A MOTION_RUNTIME build hangs this off
+    // kalico_configure_axis.
     static uint8_t event_log_ready_emitted;
     if (!event_log_ready_emitted) {
         event_log_ready_emitted = 1;
@@ -96,11 +95,10 @@ static void
 stepper_stop(struct trsync_signal *tss, uint8_t reason)
 {
     struct stepper *s = container_of(tss, struct stepper, stop_signal);
-#if CONFIG_CLASSIC_STEPPING
     stepper_classic_halt(s);
-#else
-    gpio_out_write(s->dir_pin, 0);
-    gpio_out_write(s->step_pin, s->step_idle_level);
+#if CONFIG_SAMPLE_STEPPING
+    extern void sample_stepping_halt(void);
+    sample_stepping_halt();
 #endif
 }
 
@@ -229,9 +227,8 @@ command_kalico_configure_axis(uint32_t *args)
     uint32_t mstep_bits     = args[2];
     uint32_t extrusion_bits = args[3];
     uint8_t stepper_count   = args[4];
-    uint16_t ring_depth     = (uint16_t)args[5];
-    uint16_t blob_len       = (uint16_t)args[6];
-    const uint8_t *blob     = command_decode_ptr(args[7]);
+    uint16_t blob_len       = (uint16_t)args[5];
+    const uint8_t *blob     = command_decode_ptr(args[6]);
 
     if (axis_idx >= RUNTIME_MOTOR_COUNT)
         shutdown("configure_axis axis_idx out of range");
@@ -241,8 +238,6 @@ command_kalico_configure_axis(uint32_t *args)
         shutdown("configure_axis too many steppers per axis");
     if (blob_len != (uint16_t)stepper_count * 4)
         shutdown("configure_axis blob length mismatch");
-    if (ring_depth == 0)
-        shutdown("configure_axis ring_depth must be nonzero");
     if (!runtime_handle)
         shutdown("configure_axis before runtime init");
 
@@ -280,7 +275,6 @@ command_kalico_configure_axis(uint32_t *args)
     }
     int32_t rc = runtime_configure_axis(
         runtime_handle, axis_idx, mode, mstep_bits,
-        ring_depth,
         stepper_count > 0 ? bindings : 0,
         stepper_count);
     if (rc != 0)
@@ -342,8 +336,7 @@ command_kalico_configure_axis(uint32_t *args)
 }
 DECL_COMMAND(command_kalico_configure_axis,
              "kalico_configure_axis axis_idx=%c mode=%c microstep_distance=%u"
-             " extrusion_per_xy_mm=%u stepper_count=%c ring_depth=%hu"
-             " steppers=%*s");
+             " extrusion_per_xy_mm=%u stepper_count=%c steppers=%*s");
 
 void
 command_runtime_reset(uint32_t *args)
@@ -391,6 +384,24 @@ command_kalico_phase_stepping_disable_spi(uint32_t *args)
 DECL_COMMAND(command_kalico_phase_stepping_disable_spi,
              "kalico_phase_stepping_disable_spi");
 
+// A mode switch hands the axis between the classic executor and the
+// runtime's sample walker. Both drive the same motor, so on entry into
+// Phase mode the runtime adopts the classic executor's step count -
+// otherwise the host's later transport seed shifts the phase readout
+// out from under the freshly aligned coils.
+static void
+runtime_adopt_classic_count(uint8_t axis_idx)
+{
+    if (axis_idx >= RUNTIME_MOTOR_COUNT
+        || !runtime_motor_stepper_count[axis_idx])
+        return;
+    struct runtime_motor_stepper *rms = &runtime_motor_steppers[axis_idx][0];
+    int32_t wire = stepper_classic_wire_position(rms->stepper);
+    int32_t count = rms->invert_dir ? -wire : wire;
+    if (runtime_seed_axis_count(runtime_handle, axis_idx, count) != 0)
+        shutdown("kalico_set_axis_mode count seed rejected");
+}
+
 void
 command_kalico_set_axis_mode(uint32_t *args)
 {
@@ -399,8 +410,12 @@ command_kalico_set_axis_mode(uint32_t *args)
     uint8_t axis_idx = args[0];
     uint8_t mode = args[1];
     int32_t rc = runtime_set_axis_mode(runtime_handle, axis_idx, mode);
+    if (rc == -2)
+        shutdown("kalico_set_axis_mode rejected: sample playback active");
     if (rc != 0)
-        shutdown("kalico_set_axis_mode rejected (motion in progress or bad arg)");
+        shutdown("kalico_set_axis_mode rejected: bad axis or mode");
+    if (mode == 1)
+        runtime_adopt_classic_count(axis_idx);
 }
 DECL_COMMAND(command_kalico_set_axis_mode,
              "kalico_set_axis_mode axis_idx=%c mode=%c");
@@ -422,28 +437,6 @@ DECL_COMMAND(command_kalico_set_stepper_offset,
              "kalico_set_stepper_offset stepper_idx=%c delta_microsteps=%i"
              " max_microsteps_per_sample=%hu");
 
-void
-command_kalico_resonance_buzz(uint32_t *args)
-{
-    if (!runtime_handle)
-        shutdown("kalico_resonance_buzz before runtime init");
-    uint8_t axis_mask = args[0];
-    uint8_t sign_mask = args[1];
-    uint32_t freq_start_millihz = args[2];
-    uint32_t freq_end_millihz = args[3];
-    uint32_t amplitude_nm = args[4];
-    uint32_t duration_ms = args[5];
-    uint32_t ramp_ms = args[6];
-    int32_t rc = runtime_resonance_buzz(
-        runtime_handle, axis_mask, sign_mask, freq_start_millihz,
-        freq_end_millihz, amplitude_nm, duration_ms, ramp_ms);
-    if (rc != 0)
-        shutdown("kalico_resonance_buzz rejected (bad parameters)");
-}
-DECL_COMMAND(command_kalico_resonance_buzz,
-             "kalico_resonance_buzz axis_mask=%c sign_mask=%c"
-             " freq_start_millihz=%u freq_end_millihz=%u amplitude_nm=%u"
-             " duration_ms=%u ramp_ms=%u");
 
 void
 command_kalico_phase_jog_to(uint32_t *args)
@@ -471,8 +464,11 @@ command_kalico_phase_align_to(uint32_t *args)
     uint16_t target_phase = args[1];
     int32_t rc = runtime_phase_align_to(
         runtime_handle, stepper_oid, target_phase);
+    if (rc == -2)
+        shutdown("kalico_phase_align_to rejected: sample playback active");
     if (rc != 0)
-        shutdown("kalico_phase_align_to rejected (motion in progress or bad args)");
+        shutdown("kalico_phase_align_to rejected: unknown stepper oid"
+                 " or bad target_phase");
 }
 DECL_COMMAND(command_kalico_phase_align_to,
              "kalico_phase_align_to oid=%c target_phase=%hu");

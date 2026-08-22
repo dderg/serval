@@ -400,7 +400,6 @@ impl PyMotionEngine {
     #[allow(clippy::too_many_arguments)]
     fn resonance_buzz(
         &self,
-        py: Python<'_>,
         mcu_handle: u32,
         axis_mask: u8,
         sign_mask: u8,
@@ -410,11 +409,17 @@ impl PyMotionEngine {
         duration_ms: u32,
         ramp_ms: u32,
     ) -> PyResult<()> {
-        let conn = self.ethercat_conn(mcu_handle, "resonance_buzz")?;
-        tracing::info!(
-            subsystem = "engine",
-            event = "servo_resonance_buzz",
-            mcu_handle,
+        let ring = self
+            .mcus
+            .lock_ok()
+            .get(&mcu_handle)
+            .and_then(|mcu| mcu.ring_filler.clone())
+            .ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "resonance_buzz: mcu_handle {mcu_handle} has no EtherCAT setpoint filler"
+                ))
+            })?;
+        let result = ring.lock_ok().arm_buzz(
             axis_mask,
             sign_mask,
             freq_start_millihz,
@@ -422,30 +427,77 @@ impl PyMotionEngine {
             amplitude_nm,
             duration_ms,
             ramp_ms,
-            "servo resonance buzz"
         );
-        let result = py
-            .detach(|| {
-                crate::servo_torque::send_resonance_buzz(
-                    &conn,
-                    mcu_protocol::messages::ResonanceBuzz {
-                        axis_mask,
-                        sign_mask,
-                        freq_start_millihz,
-                        freq_end_millihz,
-                        amplitude_nm,
-                        duration_ms,
-                        ramp_ms,
-                    },
-                )
-            })
-            .map_err(PyRuntimeError::new_err)?;
         if result != 0 {
             return Err(PyRuntimeError::new_err(format!(
-                "resonance_buzz: endpoint rejected (result {result})"
+                "resonance_buzz: host setpoint filler rejected (result {result})"
             )));
         }
         Ok(())
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn stepper_resonance_buzz(
+        &self,
+        py: Python<'_>,
+        axis_mask: u8,
+        sign_mask: u8,
+        freq_start_millihz: u32,
+        freq_end_millihz: u32,
+        amplitude_nm: u32,
+        duration_ms: u32,
+        ramp_ms: u32,
+    ) -> PyResult<()> {
+        let endpoints: Vec<_> = self
+            .stepcompress_endpoints
+            .lock_ok()
+            .values()
+            .cloned()
+            .collect();
+        let armed = py
+            .detach(|| {
+                let mut armed = 0usize;
+                for endpoint in endpoints {
+                    let mut endpoint = endpoint.lock_ok();
+                    if !endpoint.accepts_buzz_mask(axis_mask) {
+                        continue;
+                    }
+                    endpoint
+                        .arm_buzz(
+                            axis_mask,
+                            sign_mask,
+                            freq_start_millihz,
+                            freq_end_millihz,
+                            amplitude_nm,
+                            duration_ms,
+                            ramp_ms,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    armed += 1;
+                }
+                Ok::<usize, String>(armed)
+            })
+            .map_err(PyRuntimeError::new_err)?;
+        if armed == 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "stepper_resonance_buzz: axis mask 0x{axis_mask:02x} selects no stepcompress endpoint"
+            )));
+        }
+        Ok(())
+    }
+
+    fn resonance_buzz_done(&self) -> bool {
+        let step_done = self
+            .stepcompress_endpoints
+            .lock_ok()
+            .values()
+            .all(|endpoint| endpoint.lock_ok().buzz_complete());
+        let ethercat_done = self.mcus.lock_ok().values().all(|mcu| {
+            mcu.ring_filler.as_ref().is_none_or(|ring| {
+                let filler = ring.lock_ok();
+                !filler.buzz_active() && !filler.wants_drain()
+            })
+        });
+        step_done && ethercat_done
     }
     #[allow(clippy::too_many_arguments)]
     fn set_diff_damper(

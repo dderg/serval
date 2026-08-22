@@ -66,13 +66,13 @@ fn event_info_all_runtime_events() {
 
 #[test]
 fn event_info_all_motion_events() {
-    let (name, tmpl) = event_info(SUBSYSTEM_MOTION, EVENT_MOTION_PIECE_START_PAST);
-    assert_eq!(name, "motion.piece_start_past");
-    assert!(tmpl.contains("{arg0}") && tmpl.contains("{arg1}"));
+    let (name, tmpl) = event_info(SUBSYSTEM_MOTION, EVENT_MOTION_AXIS_STALLED);
+    assert_eq!(name, "motion.axis_stalled");
+    assert!(tmpl.contains("{arg0:hi16}") && tmpl.contains("{arg1}"));
 
-    let (name, tmpl) = event_info(SUBSYSTEM_MOTION, EVENT_MOTION_RING_FULL);
-    assert_eq!(name, "motion.ring_full");
-    assert!(tmpl.contains("{arg0}"));
+    let (name, tmpl) = event_info(SUBSYSTEM_MOTION, EVENT_MOTION_AXIS_STALLED_HEAD);
+    assert_eq!(name, "motion.axis_stalled_head");
+    assert!(tmpl.contains("{arg0:i32}") && tmpl.contains("{arg1:i32}"));
 }
 
 #[test]
@@ -325,7 +325,7 @@ fn compose_msg_axis_stalled_template() {
     let msg = compose_msg(tmpl, packed, 500);
     assert_eq!(
         msg,
-        "axis retirement stalled with pieces pending axis=2 occupancy=3 stalled_ms=500"
+        "axis retirement stalled with runs pending axis=2 occupancy=3 stalled_ms=500"
     );
 }
 
@@ -337,7 +337,7 @@ fn compose_msg_axis_stalled_head_template_renders_signed_ms() {
     let msg = compose_msg(tmpl, (-2000i32) as u32, 500);
     assert_eq!(
         msg,
-        "stalled axis armed piece window vs now start-now=-2000ms end-now=500ms"
+        "front sample-run window vs now start-now=-2000ms end-now=500ms"
     );
 }
 

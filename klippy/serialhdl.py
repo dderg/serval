@@ -290,11 +290,11 @@ class EngineCommandChannel:
             return False
         return bool(flags & IFF_UP)
 
-    def set_clock_est(self, freq, conv_time, conv_clock, last_clock):
+    def set_clock_est(self, freq, conv_time, last_clock):
         if not self.engine_mcu.available():
             return
         self.engine_mcu.set_clock_est(
-            freq, conv_time, conv_clock, self.reactor.monotonic()
+            freq, conv_time, last_clock, True, self.reactor.monotonic()
         )
 
     def disconnect(self):

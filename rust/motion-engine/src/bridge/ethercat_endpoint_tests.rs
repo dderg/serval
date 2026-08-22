@@ -188,6 +188,41 @@ fn endpoint_args_emits_per_slave_dynamics_profile() {
     assert!(!args.iter().any(|a| a == "--dynamics-profile"));
 }
 
+fn args_for() -> Vec<String> {
+    endpoint_args(
+        "eth0",
+        "/tmp/x.sock",
+        250,
+        None,
+        None,
+        250.0,
+        None,
+        &[drive()],
+    )
+}
+
+#[test]
+fn endpoint_args_emits_the_full_argv_for_a_single_drive() {
+    assert_eq!(
+        args_for(),
+        vec![
+            "eth0",
+            "--socket",
+            "/tmp/x.sock",
+            "--cycle-us",
+            "250",
+            "--group-delay-us",
+            "250",
+            "--counts-per-mm",
+            "1000",
+            "--rotation-distance",
+            "40",
+            "--torque-clamp-pct",
+            "30",
+        ]
+    );
+}
+
 #[test]
 fn spawn_nonexistent_binary_errors_with_binary_path() {
     let result = spawn_ethercat_endpoint(

@@ -281,6 +281,7 @@ fn lift_event_to_runtime_event(
         MessageKind::StatusHeartbeat => match KStatusHeartbeat::decode(body) {
             Ok(hb) => McuDispatchResult::Event(RuntimeEvent::Heartbeat {
                 retired_counts: hb.retired_counts,
+                playback_clocks: hb.playback_clocks,
             }),
             Err(e) => {
                 tracing::warn!(

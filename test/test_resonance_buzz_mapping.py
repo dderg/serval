@@ -40,8 +40,14 @@ def test_unsupported_axis_raises():
 
 
 class FakeBuzzToolhead:
+    def __init__(self):
+        self.homed_axes = "xyz"
+
     def get_kinematics(self):
         return object()
+
+    def get_status(self, eventtime):
+        return {"homed_axes": self.homed_axes}
 
     def wait_moves(self):
         pass
@@ -53,6 +59,9 @@ class FakeBuzzMotion:
 
     def submit_resonance_buzz(self, *args):
         self.calls.append(args)
+
+    def resonance_buzz_done(self):
+        return True
 
 
 class FakeBuzzReactor:
@@ -91,6 +100,14 @@ def _resonance_buzz(max_peak_accel=200000.0, max_amplitude=5.0):
     buzz.max_peak_accel = max_peak_accel
     buzz.max_amplitude = max_amplitude
     return buzz
+
+
+def test_unhomed_axis_rejects_buzz_before_motion_submission():
+    buzz = _resonance_buzz()
+    buzz.printer._objs["toolhead"].homed_axes = "yz"
+    with pytest.raises(RuntimeError, match="home X"):
+        buzz.run_sweep(FakeBuzzGcmd(), "x", 40.0, 40.0, 1.0, 0.05, 75.0, 0.05)
+    assert buzz.printer.motion.calls == []
 
 
 def test_over_ceiling_accel_per_hz_fails_loud_instead_of_clamping():

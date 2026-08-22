@@ -1,15 +1,27 @@
+use super::messages::RetiredBy;
 use super::{AxisKey, MAX_LEAD_SECS};
 use runtime::piece_ring::PieceEntry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+/// One reporting transport's odometers for one axis.
+#[derive(Debug, Default, Clone, Copy)]
+struct WireCredit {
+    consumed: u32,
+    retired: u32,
+}
 
 #[derive(Debug)]
 pub struct AxisQueue {
     pub pieces: VecDeque<(PieceEntry, f64)>,
     pub pushed: u32,
+    /// `consumed` and `retired` are the axis totals: the sum of `credits`,
+    /// recomputed on every report. `pushed` counts the pieces the pump handed
+    /// to whichever transport owned the axis at the time, so only the sum of
+    /// every transport's credit is comparable with it.
     pub consumed: u32,
     pub retired: u32,
+    credits: [WireCredit; RetiredBy::COUNT],
     pub ring_depth: u32,
-    pub physical_write_cursor: u32,
     pub lead_secs: f64,
     /// Staged pieces that carry motion (`!is_hold_piece`), maintained
     /// incrementally so the per-loop ledger publish never scans the queue.
@@ -17,6 +29,14 @@ pub struct AxisQueue {
     /// Consecutive hold pieces at the pushed (wire) tail; any non-hold send
     /// resets it. Feeds the drain ledger's motion-only drained condition.
     pub wire_hold_tail: u32,
+    /// Projected MCU-clock end of the last enqueued piece and whether that
+    /// piece parked the lane at rest. A later enqueue whose first piece
+    /// starts past this by more than the rejoin floor is a lane-local hole
+    /// (single-lane nudge traffic advanced the stream while this lane sat
+    /// out); the pump sanctions it as a forward seam gap iff the lane was
+    /// at rest.
+    pub seam_end_clock: Option<u64>,
+    pub seam_end_at_rest: bool,
 }
 
 /// A constant-position piece: one coefficient, so zero velocity everywhere.
@@ -24,6 +44,15 @@ pub struct AxisQueue {
 pub fn is_hold_piece(p: &PieceEntry) -> bool {
     p.coeff_count == 1
 }
+
+/// A lane-local forward hole wider than this is a genuine sat-out gap
+/// (single-lane nudge traffic), not seam skew: legitimate f32 seam
+/// reprojection error is span-scaled and stays in the microseconds.
+pub const LANE_REJOIN_GAP_FLOOR_SECS: f64 = 1e-3;
+
+/// A lane whose last piece ends slower than this parked at rest — the same
+/// wire velocity resolution the flattener truncates below.
+pub const LANE_REJOIN_REST_VEL_MM_S: f32 = 1e-3;
 
 impl AxisQueue {
     pub fn new(ring_depth: u32) -> Self {
@@ -33,11 +62,27 @@ impl AxisQueue {
             consumed: 0,
             retired: 0,
             ring_depth,
-            physical_write_cursor: 0,
             lead_secs: MAX_LEAD_SECS,
             staged_motion: 0,
             wire_hold_tail: 0,
+            seam_end_clock: None,
+            seam_end_at_rest: false,
+            credits: [WireCredit::default(); RetiredBy::COUNT],
         }
+    }
+
+    /// Record one transport's absolute odometers for this axis and refresh the
+    /// axis totals.
+    pub fn credit(&mut self, by: RetiredBy, consumed: u32, retired: u32) {
+        self.credits[by as usize] = WireCredit { consumed, retired };
+        self.consumed = self
+            .credits
+            .iter()
+            .fold(0, |sum, c| sum.wrapping_add(c.consumed));
+        self.retired = self
+            .credits
+            .iter()
+            .fold(0, |sum, c| sum.wrapping_add(c.retired));
     }
     pub fn room(&self) -> u32 {
         let in_flight = self.pushed.wrapping_sub(self.consumed);
@@ -46,22 +91,6 @@ impl AxisQueue {
         } else {
             self.ring_depth - in_flight
         }
-    }
-    pub fn advance_write_cursor(&mut self, n: u32) {
-        if self.ring_depth == 0 {
-            return;
-        }
-        self.physical_write_cursor = (self.physical_write_cursor + n) % self.ring_depth;
-    }
-    /// Undo `advance_write_cursor(n)` for a bundle the MCU refused without
-    /// advancing its head (endpoint halt): the next write must land on the
-    /// slot the MCU still expects or the contiguity guard rejects it.
-    pub fn rewind_write_cursor(&mut self, n: u32) {
-        if self.ring_depth == 0 {
-            return;
-        }
-        self.physical_write_cursor =
-            (self.physical_write_cursor + self.ring_depth - n % self.ring_depth) % self.ring_depth;
     }
 }
 
@@ -166,16 +195,14 @@ pub fn append_pieces_merging_holds(
 pub struct FramePlan {
     pub key: AxisKey,
     pub pieces: Vec<PieceEntry>,
-    pub start_slot: u16,
 }
 
-/// One axis' pieces within a single-MCU bundle, carrying the ring bookkeeping
+/// One axis' pieces within a single-MCU bundle, carrying the wire bookkeeping
 /// the transport needs. `schedule()` only ever groups axes of one MCU into a
 /// `Send`, so a slice of these is exactly the work for one MCU transaction.
 pub struct AxisFrame {
     pub axis: u8,
     pub pieces: Vec<PieceEntry>,
-    pub start_slot: u16,
     pub new_head: u32,
     pub room: u32,
     pub guard_recorded_ns: u64,
@@ -315,7 +342,6 @@ pub fn schedule(
         .map(|(k, n)| FramePlan {
             key: k,
             pieces: queues[&k].pieces.iter().take(n).map(|(p, _)| *p).collect(),
-            start_slot: 0,
         })
         .collect();
     debug_assert!(!frames.is_empty());

@@ -1,4 +1,4 @@
-use super::{EndpointClaimError, message_for_claim_error};
+use super::{EndpointClaimError, ReportedExecutor, message_for_claim_error};
 
 #[test]
 fn bus_dead_ec_init_failure() {
@@ -99,5 +99,39 @@ fn drive_fault_unchanged() {
     assert_eq!(
         msg,
         "ethercat node_x: drive (slave 1) fault 0x0021 — check drive, then FIRMWARE_RESTART"
+    );
+}
+
+#[test]
+fn executor_mismatch_code_blames_the_stale_endpoint_executor() {
+    let msg = message_for_claim_error(
+        "node_x",
+        "eth0",
+        &EndpointClaimError::ExecutorMismatch {
+            reported: ReportedExecutor::Code(0),
+        },
+    );
+    assert_eq!(
+        msg,
+        "ethercat node_x: executor mismatch — endpoint reports executor code 0, expected 1 \
+         (setpoint ring) — this endpoint still runs a deleted executor, rebuild \
+         rust/ethercat-rt, then FIRMWARE_RESTART"
+    );
+}
+
+#[test]
+fn executor_mismatch_unsupported_blames_the_stale_endpoint_binary() {
+    let msg = message_for_claim_error(
+        "node_x",
+        "eth0",
+        &EndpointClaimError::ExecutorMismatch {
+            reported: ReportedExecutor::Unsupported("QuerySampleGrid call failed: Timeout".into()),
+        },
+    );
+    assert_eq!(
+        msg,
+        "ethercat node_x: executor mismatch — the endpoint could not report its executor \
+         (QuerySampleGrid call failed: Timeout); the endpoint binary predates the sample-stream \
+         executor — rebuild rust/ethercat-rt, then FIRMWARE_RESTART"
     );
 }

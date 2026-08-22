@@ -20,8 +20,6 @@ pub(super) struct TransitTraceRecord {
     pub(super) send_started_ns: u64,
     pub(super) send_elapsed_ns: u64,
     pub(super) host_front_start_time: u64,
-    pub(super) mcu_front_start_time: u64,
-    pub(super) arrival_clock: u64,
     pub(super) result: i32,
 }
 
@@ -36,8 +34,6 @@ struct TransitTraceSlot {
     send_started_ns: AtomicU64,
     send_elapsed_ns: AtomicU64,
     host_front_start_time: AtomicU64,
-    mcu_front_start_time: AtomicU64,
-    arrival_clock: AtomicU64,
     result: AtomicI32,
 }
 
@@ -54,8 +50,6 @@ impl TransitTraceSlot {
             send_started_ns: AtomicU64::new(0),
             send_elapsed_ns: AtomicU64::new(0),
             host_front_start_time: AtomicU64::new(0),
-            mcu_front_start_time: AtomicU64::new(0),
-            arrival_clock: AtomicU64::new(0),
             result: AtomicI32::new(0),
         }
     }
@@ -78,10 +72,6 @@ impl TransitTraceSlot {
             .store(record.send_elapsed_ns, Ordering::Relaxed);
         self.host_front_start_time
             .store(record.host_front_start_time, Ordering::Relaxed);
-        self.mcu_front_start_time
-            .store(record.mcu_front_start_time, Ordering::Relaxed);
-        self.arrival_clock
-            .store(record.arrival_clock, Ordering::Relaxed);
         self.result.store(record.result, Ordering::Relaxed);
         self.committed_sequence.store(sequence, Ordering::Release);
     }
@@ -101,8 +91,6 @@ impl TransitTraceSlot {
             send_started_ns: self.send_started_ns.load(Ordering::Relaxed),
             send_elapsed_ns: self.send_elapsed_ns.load(Ordering::Relaxed),
             host_front_start_time: self.host_front_start_time.load(Ordering::Relaxed),
-            mcu_front_start_time: self.mcu_front_start_time.load(Ordering::Relaxed),
-            arrival_clock: self.arrival_clock.load(Ordering::Relaxed),
             result: self.result.load(Ordering::Relaxed),
         };
         (self.committed_sequence.load(Ordering::Acquire) == sequence).then_some(record)

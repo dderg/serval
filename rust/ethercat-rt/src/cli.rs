@@ -180,70 +180,17 @@ pub struct Args {
     pub group_delay_ns: u64,
 }
 
-fn load_dynamics_profile(path: &str) -> crate::dynamics::DynamicsModel {
-    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("ec-rt: dynamics profile {path}: {e}");
-        std::process::exit(1);
-    });
-    crate::dynamics::DynamicsModel::from_toml_str(&text).unwrap_or_else(|e| {
-        if let crate::dynamics::ProfileError::Version(v) = e {
-            eprintln!(
-                "ec-rt: dynamics profile {path} is version {v}, expected 6 — \
-                 refit with SERVO_FIT_DYNAMICS"
-            );
-        } else {
-            eprintln!("ec-rt: dynamics profile {path} invalid: {e:?}");
-        }
-        std::process::exit(1);
-    })
-}
-
 fn resolve_dynamics(
     slaves: &[SlaveCfg],
     node_profile: Option<String>,
     num_slaves: usize,
 ) -> Option<crate::dynamics::DynamicsModel> {
     let per_slot: Vec<Option<String>> = slaves.iter().map(|s| s.dynamics_profile.clone()).collect();
-    if per_slot.iter().any(Option::is_some) {
-        if node_profile.is_some() {
-            eprintln!(
-                "ec-rt: --dynamics-profile and --slave-dynamics-profile are mutually exclusive"
-            );
+    crate::dynamics::chain_model_from_profiles(node_profile.as_deref(), &per_slot, num_slaves)
+        .unwrap_or_else(|e| {
+            eprintln!("ec-rt: {e}");
             std::process::exit(1);
-        }
-        if !per_slot.iter().all(Option::is_some) {
-            eprintln!("ec-rt: per-slave dynamics profiles must cover every drive or none");
-            std::process::exit(1);
-        }
-        let parts: Vec<crate::dynamics::DynamicsModel> = per_slot
-            .iter()
-            .map(|p| load_dynamics_profile(p.as_ref().unwrap()))
-            .collect();
-        let model = crate::dynamics::DynamicsModel::block_diagonal(parts).unwrap_or_else(|e| {
-            eprintln!("ec-rt: per-slave dynamics profiles invalid: {e:?}");
-            std::process::exit(1);
-        });
-        if model.n_slots != num_slaves {
-            eprintln!(
-                "ec-rt: per-slave dynamics profiles cover {} axes, endpoint drives {num_slaves}",
-                model.n_slots
-            );
-            std::process::exit(1);
-        }
-        Some(model)
-    } else {
-        node_profile.map(|path| {
-            let model = load_dynamics_profile(&path);
-            if model.n_slots != num_slaves {
-                eprintln!(
-                    "ec-rt: dynamics profile {path} has {} axes, endpoint drives {num_slaves}",
-                    model.n_slots
-                );
-                std::process::exit(1);
-            }
-            model
         })
-    }
 }
 
 impl Args {

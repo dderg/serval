@@ -10,7 +10,7 @@ use trajectory::{AxisChainSet, ShapedSegment};
 
 use crate::classify::build_move;
 use crate::enqueue::enqueue_segment;
-use crate::mcu_config::{McuAxisConfig, McuCaps};
+use crate::mcu_config::McuAxisConfig;
 use crate::pump::{
     JUNCTION_POSITION_FATAL_MM, JUNCTION_POSITION_LOG_MM, JunctionTracker, MAX_LEAD_SECS,
 };
@@ -47,9 +47,6 @@ fn harness_mcu_configs() -> Vec<McuAxisConfig> {
         mcu_id: HARNESS_MCU_ID,
         axes: vec![0, 1, 2],
         kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![f64::INFINITY; 3],
         ..Default::default()
     }]
@@ -268,6 +265,7 @@ impl Ingestor {
                 &self.mcu_configs,
                 &crate::enqueue::EnqueueCtx {
                     epoch_freq: &|_| None,
+                    lane_is_phase: &|_| false,
                     t0: 0.0,
                     epoch,
                     host_now: 0.0,

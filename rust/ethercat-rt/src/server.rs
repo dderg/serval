@@ -392,8 +392,8 @@ fn read_loop(mut stream: UnixStream, shared: &mut ReaderShared) {
                     eprintln!("ec-rt: stream error: {e:?}");
                 }
                 for f in frames {
-                    if let Frame::Kalico { channel, payload } = f {
-                        match decode_command(channel, &payload) {
+                    if let Frame::Kalico { payload, .. } = f {
+                        match decode_command(&payload) {
                             Ok(cmd) => {
                                 if push_command(shared, cmd).is_break() {
                                     return;

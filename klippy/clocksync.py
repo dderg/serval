@@ -10,7 +10,6 @@ from .extras.danger_options import get_danger_options
 from .motion_engine import native_class
 
 RTT_AGE = 0.000010 / (60.0 * 60.0)
-DECAY = 1.0 / 30.0
 SYNC_STABLE_SAMPLES = 3
 
 
@@ -23,8 +22,9 @@ class ClockSync:
         self.mcu_freq = 1.0
         self.clock_est = (0.0, 0.0, 0.0)
         stable_ppm = get_danger_options().clock_sync_stable_ppm * 1e-6
-        self._est = native_class("ClockSyncEstimator")(
-            DECAY, RTT_AGE, stable_ppm, SYNC_STABLE_SAMPLES
+        estimator = native_class("ClockSyncEstimator")
+        self._est = estimator(
+            estimator.DECAY, RTT_AGE, stable_ppm, SYNC_STABLE_SAMPLES
         )
         self._clock_est_callback = None
 
@@ -117,18 +117,16 @@ class ClockSync:
         self._est.synced = bool(v)
 
     def set_clock_est_callback(self, cb):
-        # cb(freq, offset, last_clock); invoked from the serial-reader thread on
-        # every published regression update.
+        # cb(freq, offset, last_clock, synced); invoked from the serial-reader
+        # thread on every published regression update.
         self._clock_est_callback = cb
         if cb is not None and self.last_clock:
-            try:
-                cb(
-                    self.clock_est[2],
-                    self.time_avg + self.min_half_rtt,
-                    int(self.clock_avg),
-                )
-            except Exception:
-                logging.exception("clocksync: initial set_clock_est callback")
+            cb(
+                self.clock_est[2],
+                self.time_avg + self.min_half_rtt,
+                int(self.clock_avg),
+                self._synced,
+            )
 
     def disconnect(self):
         self.reactor.update_timer(self.get_clock_timer, self.reactor.NEVER)
@@ -163,15 +161,13 @@ class ClockSync:
         freq = 1000000000000.0
         if pace:
             freq = self.mcu_freq
-        serial.set_clock_est(freq, self.reactor.monotonic(), 0, 0)
+        serial.set_clock_est(freq, self.reactor.monotonic(), 0)
 
     # MCU clock querying (_handle_clock is invoked from background thread)
     def _get_clock_event(self, eventtime):
         self.serial.engine_get_clock_async()
         self.queries_pending += 1
-        # Use an unusual time for the next event so clock messages
-        # don't resonate with other periodic events.
-        return eventtime + 0.9839
+        return eventtime + self._est.get_clock_period_secs
 
     def _handle_clock(self, params):
         self.queries_pending = 0
@@ -188,10 +184,7 @@ class ClockSync:
         self.clock_est = (offset, clock_avg, new_freq)
         cb = self._clock_est_callback
         if cb is not None:
-            try:
-                cb(new_freq, offset, int(clock_avg))
-            except Exception:
-                logging.exception("clocksync: set_clock_est callback")
+            cb(new_freq, offset, int(clock_avg), self._synced)
 
     # clock frequency conversions
     def print_time_to_clock(self, print_time):

@@ -11,6 +11,7 @@
 #include "board/misc.h" // timer_from_us
 #include "command.h" // shutdown
 #include "sched.h" // sched_timer_dispatch
+#include "generic/fault_handler_internal.h" // live_snap
 #include "generic/motion_nvic_prio.h" // SCHED_NVIC_PRIO
 
 DECL_CONSTANT("CLOCK_FREQ", CONFIG_CLOCK_FREQ);
@@ -216,6 +217,20 @@ timer_dispatch_many(void)
                        " a3 %u n3 %u a4 %u n4 %u a5 %u n5 %u",
                        cwa[3], cwn[3], cwa[4], cwn[4],
                        cwa[5], cwn[5]);
+                // Name the handler that held the dispatch loop, if any: the
+                // longest single callback of this run and the stepper
+                // dir-change settle spin that exceeded its pulse bound.
+                output("rsched_hog worst_timer_func %u worst_timer_cyc %u"
+                       " spin_count %u spin_worst_cyc %u"
+                       " spin_stale_count %u spin_stale_max %u"
+                       " spin_stale_first %u",
+                       live_snap.worst_timer_func,
+                       live_snap.worst_timer_cyc,
+                       live_snap.step_spin_count,
+                       live_snap.step_spin_worst_cyc,
+                       live_snap.step_spin_stale_count,
+                       live_snap.step_spin_stale_max,
+                       live_snap.step_spin_stale_first);
                 // Close the writable window before try_shutdown longjmps
                 // out of this scope, so the rest of the shutdown path
                 // doesn't accidentally observe RW protected memory.

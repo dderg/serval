@@ -99,33 +99,15 @@ def submit_buzz(
         )
         sent = True
     if stepper_mask:
-        stepper_sent = False
-        for mcu_obj in motion._engine_mcus():
-            try:
-                cmd = mcu_obj.lookup_command(
-                    "kalico_resonance_buzz axis_mask=%c sign_mask=%c"
-                    " freq_start_millihz=%u freq_end_millihz=%u amplitude_nm=%u"
-                    " duration_ms=%u ramp_ms=%u"
-                )
-            except Exception:
-                continue
-            cmd.send(
-                [
-                    stepper_mask,
-                    sign_mask,
-                    freq_start_millihz,
-                    freq_end_millihz,
-                    amplitude_nm,
-                    duration_ms,
-                    ramp_ms,
-                ]
-            )
-            stepper_sent = True
-        if not stepper_sent:
-            raise motion.printer.command_error(
-                "No engine MCU advertises kalico_resonance_buzz; rebuild and "
-                "reflash MCU firmware with CONFIG_RUNTIME=y"
-            )
+        motion.engine.stepper_resonance_buzz(
+            stepper_mask,
+            sign_mask,
+            freq_start_millihz,
+            freq_end_millihz,
+            amplitude_nm,
+            duration_ms,
+            ramp_ms,
+        )
         sent = True
     if not sent:
         raise motion.printer.command_error(
@@ -204,6 +186,17 @@ class ResonanceBuzz:
         motion = self.printer.lookup_object("motion")
         kin = toolhead.get_kinematics()
         coupled = bool(getattr(kin, "coupled_xy", lambda: False)())
+        homed_axes = toolhead.get_status(
+            self.printer.get_reactor().monotonic()
+        )["homed_axes"]
+        required_homed = (
+            "xy" if coupled and axis_name in ("x", "y") else axis_name
+        )
+        if any(axis not in homed_axes for axis in required_homed):
+            raise gcmd.error(
+                "RESONANCE_BUZZ: home %s before buzzing %s"
+                % (required_homed.upper(), axis_name.upper())
+            )
         try:
             axis_mask, sign_mask = buzz_axis_to_motor_mask(axis_name, coupled)
         except ValueError as e:
@@ -259,6 +252,13 @@ class ResonanceBuzz:
         )
         reactor = self.printer.get_reactor()
         reactor.pause(reactor.monotonic() + duration + 0.1)
+        flush_deadline = reactor.monotonic() + 5.0
+        while not motion.resonance_buzz_done():
+            if reactor.monotonic() >= flush_deadline:
+                raise self.printer.command_error(
+                    "RESONANCE_BUZZ: host-generated tail did not flush within 5s"
+                )
+            reactor.pause(reactor.monotonic() + 0.01)
         return amplitude_mm
 
     cmd_RESONANCE_BUZZ_help = (

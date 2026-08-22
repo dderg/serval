@@ -31,7 +31,6 @@ impl Reactor {
             io_kind = ?io_kind,
             error = %error,
             unacked_n = self.unacked_window.len(),
-            pending_piece_frames = self.outbound.pending_piece_frames.len(),
             outq_drain_curve_20ms = %drain_curve.join(","),
             "transport IO fault; transitioning Closed"
         );

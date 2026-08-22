@@ -6,7 +6,7 @@ use crate::fault_helpers::raise_tick_interval_exceeded;
 use crate::state::SharedState;
 
 #[cfg(feature = "motion-module-stepper")]
-pub use crate::dispatch_stepper::{AXIS_A, AXIS_B, AXIS_E, AXIS_Z, DISPLACEMENT_THRESHOLD_MM};
+pub use crate::dispatch_stepper::DISPLACEMENT_THRESHOLD_MM;
 
 pub use crate::stepping_state::N_AXES;
 
@@ -73,12 +73,7 @@ const TICK_GAP_FAULT_MULT: u64 = 2;
 #[cfg(feature = "mcu-sim")]
 const TICK_GAP_FAULT_MULT: u64 = 1_000_000;
 
-pub fn isr_sample_tick(
-    isr: &mut crate::state::IsrState,
-    shared: &SharedState,
-    storage: &mut [crate::piece_ring::PieceEntry],
-    raw_cyccnt: u32,
-) {
+pub fn isr_sample_tick(isr: &mut crate::state::IsrState, shared: &SharedState, raw_cyccnt: u32) {
     let body_start = unsafe { cyccnt_read() };
     crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_ISR_ENTER);
 
@@ -129,7 +124,7 @@ pub fn isr_sample_tick(
     crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_TICK);
     let active = {
         let crate::state::IsrState { engine, .. } = isr;
-        engine.tick(now, shared, storage)
+        engine.tick(now, shared)
     };
 
     let body_end = unsafe { cyccnt_read() };

@@ -691,6 +691,7 @@ version = "0.1.0"
 dependencies = [
  "config-doc",
  "crossbeam-channel",
+ "ethercat-rt",
  "geometry",
  "host-rt",
  "libc",
@@ -840,14 +841,6 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-link",
-]
-
-[[package]]
-name = "piece-sink-harness"
-version = "0.1.0"
-dependencies = [
- "cc",
- "mcu-protocol",
 ]
 
 [[package]]

@@ -1,11 +1,12 @@
 use runtime::dispatch_stepper::DISPLACEMENT_THRESHOLD_MM;
 use runtime::motion_core::{ArmedPiece, arm_piece};
 use runtime::sub_sample_timing::{
-    StepTimeInputs, StepTimingResult, compute_step_times, quantize_step_delta,
+    QuadStepTimeInputs, StepTimeInputs, StepTimingResult, compute_step_times,
+    compute_step_times_quadratic, quantize_step_delta,
 };
 
 use crate::ring::PieceRing;
-use crate::{MotorConfig, ShimError};
+use crate::{MotorConfig, ShimError, StepEncoder};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PendingStep {
@@ -31,6 +32,7 @@ pub struct MotorSampler {
     armed: Option<ArmedPiece>,
     overlay: Option<OverlayFrame>,
     p_prev: f32,
+    v_prev: f32,
     step_count: i64,
     step_phase: f32,
     prev_sample: u64,
@@ -51,6 +53,7 @@ impl MotorSampler {
             armed: None,
             overlay: None,
             p_prev: 0.0,
+            v_prev: 0.0,
             step_count: 0,
             step_phase: 0.0,
             prev_sample: 0,
@@ -66,6 +69,10 @@ impl MotorSampler {
 
     pub fn step_count(&self) -> i64 {
         self.step_count
+    }
+
+    pub fn position(&self) -> f32 {
+        self.p_prev
     }
 
     pub fn resume_floor(&self) -> u64 {
@@ -119,10 +126,12 @@ impl MotorSampler {
                 if self.origin_clock.is_none() {
                     let begin = piece.start_time.max(self.resume_floor.unwrap_or(0));
                     self.prev_sample = begin;
+                    let (position, velocity) = armed.eval_pos_vel(begin);
                     if !self.positioned {
-                        self.p_prev = armed.eval_pos_vel(begin).0;
+                        self.p_prev = position;
                         self.positioned = true;
                     }
+                    self.v_prev = velocity;
                     self.origin_clock = Some(begin);
                 }
                 self.armed = Some(armed);
@@ -153,7 +162,7 @@ impl MotorSampler {
         now: u64,
         out: &mut Vec<PendingStep>,
     ) -> Result<(), ShimError> {
-        let p_end = armed.eval_pos_vel(now).0;
+        let (p_end, v_end) = armed.eval_pos_vel(now);
         let (prev, p_start, step_phase_start) = match self.overlay {
             Some(frame) => (frame.step_count, frame.p_prev, frame.step_phase),
             None => (self.step_count, self.p_prev, self.step_phase),
@@ -165,7 +174,7 @@ impl MotorSampler {
         let target = prev + i64::from(step_delta);
         let signed_steps = i64::from(step_delta);
         if signed_steps == 0 {
-            self.commit_frame(p_end, prev, next_step_phase);
+            self.commit_frame(p_end, v_end, prev, next_step_phase);
             return Ok(());
         }
         let abs_steps = u32::try_from(signed_steps.unsigned_abs()).unwrap_or(u32::MAX);
@@ -187,10 +196,25 @@ impl MotorSampler {
             cycles_per_second: self.cycles_per_second,
             displacement_threshold: DISPLACEMENT_THRESHOLD_MM,
         };
-        let times = match compute_step_times(&inputs) {
+        let times = match cfg.encoder {
+            StepEncoder::Classic { .. } => compute_step_times(&inputs),
+            StepEncoder::HighPrecision => compute_step_times_quadratic(&QuadStepTimeInputs {
+                p_start: step_phase_start,
+                p_end: step_phase_end,
+                v_start: self.v_prev,
+                v_end,
+                step_delta,
+                microstep_distance: cfg.microstep_distance,
+                sample_period_sec: self.sample_period_sec,
+                sample_start_cycles: self.prev_sample as u32,
+                cycles_per_second: self.cycles_per_second,
+                displacement_threshold: DISPLACEMENT_THRESHOLD_MM,
+            }),
+        };
+        let times = match times {
             StepTimingResult::SecantSlope(t) | StepTimingResult::Uniform(t) => t,
             StepTimingResult::NoSteps => {
-                self.commit_frame(p_end, prev, next_step_phase);
+                self.commit_frame(p_end, v_end, prev, next_step_phase);
                 return Ok(());
             }
         };
@@ -224,11 +248,11 @@ impl MotorSampler {
                 advance,
             });
         }
-        self.commit_frame(p_end, target, next_step_phase);
+        self.commit_frame(p_end, v_end, target, next_step_phase);
         Ok(())
     }
 
-    fn commit_frame(&mut self, p_end: f32, step_count: i64, step_phase: f32) {
+    fn commit_frame(&mut self, p_end: f32, v_end: f32, step_count: i64, step_phase: f32) {
         match &mut self.overlay {
             Some(frame) => {
                 frame.p_prev = p_end;
@@ -241,6 +265,7 @@ impl MotorSampler {
                 self.step_phase = step_phase;
             }
         }
+        self.v_prev = v_end;
     }
 }
 

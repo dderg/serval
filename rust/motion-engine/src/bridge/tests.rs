@@ -10,7 +10,7 @@ use crate::config::PlannerConfig;
 use crate::worker::{DispatchError, StreamWorkerHandle};
 use trajectory::ShapedSegment;
 
-use super::{McuConnection, PyMotionEngine};
+use super::{McuConnection, PyMotionEngine, SampleGrid};
 
 fn open_pty() -> (libc::c_int, String) {
     let mut master: libc::c_int = 0;
@@ -65,6 +65,8 @@ fn serial_mcu_conn(label: &str, host_io: Arc<McuHostIo>) -> McuConnection {
         ethercat_slot_axes: Vec::new(),
         endpoint_process: None,
         endpoint_conn: None,
+        sample_grid: None,
+        ring_filler: None,
     }
 }
 
@@ -168,6 +170,8 @@ fn shutdown_releases_ethercat_socket_and_child() {
         ethercat_slot_axes: Vec::new(),
         endpoint_process: Some(child),
         endpoint_conn: Some(Arc::new(native)),
+        sample_grid: None,
+        ring_filler: None,
     };
     insert_mcu(&engine, 7, conn);
 
@@ -309,6 +313,7 @@ fn every_fault_free_retirement_heartbeat_reaches_the_pump() {
             engine_state: 1,
             fault_code: 0,
             retired_counts: vec![i, i],
+            playback_clocks: vec![0, 0],
             ff_saturation_count: 0,
         });
     }
@@ -333,6 +338,7 @@ fn fault_heartbeat_is_latched_not_forwarded() {
         engine_state: 1,
         fault_code: 314,
         retired_counts: vec![1, 1],
+        playback_clocks: vec![0, 0],
         ff_saturation_count: 0,
     });
     assert!(rx.try_iter().next().is_none());
@@ -385,8 +391,10 @@ fn shutdown_stops_new_dispatch_before_closing_pump() {
         dispatch_count_cb.fetch_add(1, Ordering::SeqCst);
         let hb = crate::pump::PumpMsg::Heartbeat(crate::pump::HeartbeatMsg {
             mcu_id: 0,
+            axes: Vec::new(),
             consumed_counts: None,
             retired_counts: Vec::new(),
+            retired_by: crate::pump::RetiredBy::Pulse,
         });
         if pump_tx.send(hb).is_err() {
             saw_pump_gone_cb.store(true, Ordering::SeqCst);
@@ -562,7 +570,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use crate::pump::{EnqueueMsg, McuTransport, PumpCallbacks, PumpMsg, WireSink, run_pump};
+    use crate::pump::{EnqueueMsg, EtherCatRing, PumpCallbacks, PumpMsg, WireSink, run_pump};
     use crate::types::AxisKey;
 
     const EC_MCU_ID: u32 = 42;
@@ -573,16 +581,30 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
     let fatal_fired = Arc::new(AtomicBool::new(false));
     let fatal_flag = Arc::clone(&fatal_fired);
 
+    let ring: crate::pump::RingFiller = Arc::new(std::sync::Mutex::new(
+        ethercat_rt::setpoint_fill::ChainFiller::new(
+            &[ethercat_rt::setpoint_fill::LaneSpec {
+                axis: 0,
+                cmd_counts_per_mm: 1_000.0,
+                ff_lead_ns: 0,
+            }],
+            None,
+            250_000,
+            1,
+        ),
+    ));
     let sink = WireSink {
-        transports: {
-            let mut m = HashMap::new();
-            m.insert(EC_MCU_ID, McuTransport::EtherCat(detached_weak));
-            m
-        },
+        stepcompress: HashMap::new(),
+        samples: HashMap::new(),
+        transports: Arc::new(crate::axis_transport::AxisTransports::from_configs(&[])),
+        ethercat: HashMap::from([(
+            EC_MCU_ID,
+            EtherCatRing {
+                conn: detached_weak,
+                ring,
+            },
+        )]),
         timeout: Duration::from_millis(50),
-        serial_limits: crate::pump::SERIAL_BUNDLE_LIMITS,
-        serial_window: 1,
-        clock_of: Arc::new(|_| None),
     };
 
     let mcu_clock_of = |_mcu_id: u32| -> Option<(u64, f64)> { Some((1, 1.0)) };
@@ -685,11 +707,46 @@ fn register_ethercat_mcu_seeds_nominal_clock_freq() {
         .spawn()
         .expect("spawn true");
 
-    engine.register_ethercat_mcu(raw, "servo", "/tmp/test.sock", child, conn, vec![0]);
+    engine.register_ethercat_mcu(
+        raw,
+        "servo",
+        "/tmp/test.sock",
+        child,
+        conn,
+        vec![0],
+        SampleGrid {
+            cycle_ticks: 250_000,
+            ring_depth_cycles: 512,
+            grid_index: 42,
+            grid_clock: 10_500_000,
+        },
+        std::sync::Arc::new(std::sync::Mutex::new(
+            ethercat_rt::setpoint_fill::ChainFiller::new(
+                &[ethercat_rt::setpoint_fill::LaneSpec {
+                    axis: 0,
+                    cmd_counts_per_mm: 1_000.0,
+                    ff_lead_ns: 0,
+                }],
+                None,
+                250_000,
+                1,
+            ),
+        )),
+    );
 
     assert!(
         engine.mcus.lock_ok().contains_key(&raw),
         "mcus must contain the raw handle after register_ethercat_mcu"
+    );
+    assert_eq!(
+        engine.mcus.lock_ok()[&raw].sample_grid,
+        Some(SampleGrid {
+            cycle_ticks: 250_000,
+            ring_depth_cycles: 512,
+            grid_index: 42,
+            grid_clock: 10_500_000,
+        }),
+        "the claim-time sample grid must be retained on the connection for the pump"
     );
     assert_eq!(
         engine.nominal_clock_freqs.lock_ok().get(&raw).copied(),

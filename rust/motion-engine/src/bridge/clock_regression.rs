@@ -6,7 +6,8 @@
 //! here.
 
 use host_rt::clock_regression::{
-    ClockSyncEstimator as CoreEstimator, DecayRegression as CoreRegression,
+    CLOCK_REGRESSION_DECAY, ClockSyncEstimator as CoreEstimator, DecayRegression as CoreRegression,
+    NON_RESONANT_GET_CLOCK_PERIOD_SECS,
 };
 use pyo3::prelude::*;
 
@@ -64,6 +65,14 @@ impl PyClockSyncEstimator {
         Self {
             inner: CoreEstimator::new(decay, rtt_age, sync_stable_freq_ppm, sync_stable_samples),
         }
+    }
+
+    #[classattr]
+    const DECAY: f64 = CLOCK_REGRESSION_DECAY;
+
+    #[getter(get_clock_period_secs)]
+    fn get_clock_period_secs(&self) -> f64 {
+        NON_RESONANT_GET_CLOCK_PERIOD_SECS
     }
 
     /// Process one clock response. Returns `(freq, offset, clock_avg)` when a

@@ -29,17 +29,14 @@ pub extern "C" fn runtime_handle_create() -> *mut Runtime {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn runtime_tick_sample(rt: *mut Runtime) {
     let ctx = guarded_ctx!(rt);
-    // SAFETY: rt non-null, INIT_DONE=true. TIM5 is the sole writer of IsrState; ISR owns ring tail, foreground writes only HEAD positions not yet seen by ISR. UnsafeCell::raw_get yields provenance without a shared ref.
+    // SAFETY: rt non-null, INIT_DONE=true. TIM5 is the sole writer of IsrState. UnsafeCell::raw_get yields provenance without a shared ref.
     unsafe {
         let raw = runtime_cyccnt_read();
         let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
         let shared_ptr: *const SharedState = core::ptr::addr_of!((*ctx).shared);
-        let ps_ptr: *mut [runtime::piece_ring::PieceEntry; runtime::state::TOTAL_RING_PIECES] =
-            UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).piece_storage));
-        let storage: &mut [runtime::piece_ring::PieceEntry] = &mut *ps_ptr;
         let isr: &mut IsrState = &mut *isr_ptr;
         let shared: &SharedState = &*shared_ptr;
-        runtime::tick::isr_sample_tick(isr, shared, storage, raw);
+        runtime::tick::isr_sample_tick(isr, shared, raw);
     }
 }
 

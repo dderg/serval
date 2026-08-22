@@ -27,7 +27,6 @@ impl PieceSink for NullSink {
         &self,
         _key: AxisKey,
         _pieces: &[PieceEntry],
-        _start_slot: u16,
         _new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
@@ -56,7 +55,6 @@ impl PieceSink for CountingSink {
         &self,
         key: AxisKey,
         pieces: &[PieceEntry],
-        _start_slot: u16,
         _new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
@@ -205,8 +203,10 @@ fn advancing_lane_does_not_hide_a_stalled_lane() {
     for retired in 1..=5 {
         ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
             mcu_id: 0,
+            axes: vec![0, 1],
             consumed_counts: None,
             retired_counts: vec![retired, 0],
+            retired_by: RetiredBy::Pulse,
         }))
         .unwrap();
         std::thread::sleep(Duration::from_millis(20));
@@ -287,8 +287,10 @@ fn fully_executed_cohort_awaiting_trip_is_not_a_stall() {
     }
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 0,
+        axes: vec![0, 1, 2, 3],
         consumed_counts: None,
         retired_counts: vec![5, 5, 0, 0],
+        retired_by: RetiredBy::Pulse,
     }))
     .unwrap();
 
@@ -370,8 +372,10 @@ fn idle_participant_does_not_pin_the_cohort_floor() {
         }
         ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
             mcu_id: 0,
+            axes: vec![0, 1, 2, 3],
             consumed_counts: None,
             retired_counts: vec![step + 1, 0, 0, 0],
+            retired_by: RetiredBy::Pulse,
         }))
         .unwrap();
         std::thread::sleep(Duration::from_millis(40));
@@ -610,15 +614,19 @@ fn retired_regression_triggers_on_drip_stall() {
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 3,
+        axes: vec![0, 1, 2],
         consumed_counts: None,
         retired_counts: vec![0, 0, 5],
+        retired_by: RetiredBy::Pulse,
     }))
     .unwrap();
     std::thread::sleep(Duration::from_millis(50));
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 3,
+        axes: vec![0, 1, 2],
         consumed_counts: None,
         retired_counts: vec![0, 0, 3],
+        retired_by: RetiredBy::Pulse,
     }))
     .unwrap();
     std::thread::sleep(Duration::from_millis(50));
@@ -673,8 +681,10 @@ fn mcu_reboot_retired_to_zero_triggers_regression() {
     std::thread::sleep(Duration::from_millis(30));
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
+        axes: vec![0],
         consumed_counts: None,
         retired_counts: vec![40],
+        retired_by: RetiredBy::Pulse,
     }))
     .unwrap();
     std::thread::sleep(Duration::from_millis(30));
@@ -689,8 +699,10 @@ fn mcu_reboot_retired_to_zero_triggers_regression() {
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
+        axes: vec![0],
         consumed_counts: None,
         retired_counts: vec![0],
+        retired_by: RetiredBy::Pulse,
     }))
     .unwrap();
     std::thread::sleep(Duration::from_millis(50));

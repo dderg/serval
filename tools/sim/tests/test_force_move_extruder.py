@@ -5,9 +5,9 @@ targeting the extruder motor (axis 3) failed the command and shut klippy
 down. A nudge never runs through kinematics — it is a per-motor lane
 profile — so the extruder lane is planned exactly like a spatial one.
 
-Under stepping_mode: stepcompress the nudge then had to survive the shim:
-its pieces carry a motor_mask and are relativized to start at zero, so the
-sampler steps them against an overlay frame, not the lane's absolute one.
+The nudge also has to survive the stepcompress shim: its pieces carry a
+motor_mask and are relativized to start at zero, so the sampler steps them
+against an overlay frame, not the lane's absolute one.
 
 The world's [motor extruder] runs an inverted dir pin, so the sim's raw
 step tracker on the step line counts a forward extrude as negative — that

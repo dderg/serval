@@ -158,6 +158,16 @@ void diag_note_step_rearm(int32_t margin)
     (void)margin;
 }
 
+void diag_note_timer_duration(uint32_t dur_cyc, uint32_t func)
+{
+    (void)dur_cyc; (void)func;
+}
+
+void diag_note_step_spin(uint32_t dur_cyc, uint32_t stale_ahead)
+{
+    (void)dur_cyc; (void)stale_ahead;
+}
+
 // Linux build doesn't have armcm_timer.c or mpu_protect.c — provide
 // stubs for symbols referenced by sched.c.
 #include "sched.h"

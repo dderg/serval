@@ -48,6 +48,10 @@ pub struct EnqueueCtx<'a, P> {
     pub project: P,
     pub max_piece_secs: Option<f64>,
     pub epoch_freq: &'a dyn Fn(u32) -> Option<f64>,
+    /// Whether this lane currently executes on the phase (coil-write)
+    /// transport: phase samples carry no step pulses, so the pulse-path
+    /// step-rate ceiling does not bound them.
+    pub lane_is_phase: &'a dyn Fn(AxisKey) -> bool,
 }
 
 pub fn enqueue_segment<P>(
@@ -99,7 +103,9 @@ where
                     motor_mask: seg.motor_mask,
                 },
             );
-            check_step_rate_ceiling(cfg, axis_idx, &pieces, seg.source_line);
+            if !(ctx.lane_is_phase)(key) {
+                check_step_rate_ceiling(cfg, axis_idx, &pieces, seg.source_line);
+            }
             if cfg.ethercat && is_pure_hold(&pieces) {
                 if ctx.epoch.position_redefined() {
                     out.push(EnqueueMsg {
@@ -132,6 +138,18 @@ where
     }
 
     out
+}
+
+/// A lane whose motor-frame curve is constant to wire position resolution
+/// commands no motion — the curve-level mirror of [`is_pure_hold`], decided
+/// before flattening so callers can tell moving from hold-only lanes without
+/// projecting any pieces.
+pub(crate) fn lane_curve_is_hold(curve: &ScalarNurbs) -> bool {
+    let Some((first, rest)) = curve.control_points().split_first() else {
+        return true;
+    };
+    rest.iter()
+        .all(|&cp| (cp - first).abs() <= WIRE_TRUNC_POS_MM)
 }
 
 /// A lane whose every wire piece is the same constant (to wire position

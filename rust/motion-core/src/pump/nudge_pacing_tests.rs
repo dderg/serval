@@ -70,6 +70,9 @@ fn bench() -> Bench {
         sample_rate_hz: SAMPLE_RATE_HZ as f32,
         cycles_per_second: CYCLES_PER_SECOND,
         min_rearm_cycles: MIN_REARM_CYCLES,
+        encoder: StepEncoder::Classic {
+            max_error_ticks: step_shim::compress::DEFAULT_MAX_ERROR_TICKS,
+        },
     };
     let (tx, _rx) = crossbeam_channel::unbounded();
     let endpoint = StepcompressEndpoint::new(
@@ -224,6 +227,9 @@ fn worst_step_load_late(frames: &[StepFrame]) -> i64 {
                 add,
                 ..
             } => queue.push_back((i64::from(interval), i64::from(count), i64::from(add))),
+            StepFrame::QueueStepHp { .. } => {
+                panic!("the classic mcu model cannot replay an hp frame")
+            }
         }
     }
     mcu.run(&mut queue);
@@ -237,7 +243,6 @@ impl Bench {
             &[AxisFrame {
                 axis: AXIS,
                 pieces,
-                start_slot: 0,
                 new_head: 0,
                 room: SHIM_RING_DEPTH,
                 guard_recorded_ns: 0,

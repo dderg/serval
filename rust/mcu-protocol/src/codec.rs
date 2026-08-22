@@ -34,14 +34,8 @@ pub enum DecodeError {
     EmptyArray {
         field: &'static str,
     },
-    /// A field that must be unique across a frame appeared twice (e.g. two
-    /// blocks for the same `axis_idx` in one `PushPieces`).
     DuplicateField {
         field: &'static str,
-    },
-    /// A `PushPieces` wire entry declared a coefficient count outside `1..=8`.
-    BadCoeffCount {
-        raw: u8,
     },
     BadUtf8,
 }
@@ -65,9 +59,6 @@ impl core::fmt::Display for DecodeError {
             }
             Self::DuplicateField { field } => {
                 write!(f, "duplicate {field} in one frame")
-            }
-            Self::BadCoeffCount { raw } => {
-                write!(f, "piece coeff_count {raw} outside 1..=8")
             }
             Self::BadUtf8 => f.write_str("string bytes are not valid UTF-8"),
         }
@@ -148,6 +139,9 @@ pub fn put_u32(out: &mut Vec<u8>, v: u32) {
 pub fn put_u64(out: &mut Vec<u8>, v: u64) {
     out.extend_from_slice(&v.to_le_bytes());
 }
+pub fn put_i16(out: &mut Vec<u8>, v: i16) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
 pub fn put_i32(out: &mut Vec<u8>, v: i32) {
     out.extend_from_slice(&v.to_le_bytes());
 }
@@ -180,6 +174,10 @@ pub fn get_u64(c: &mut Cursor<'_>) -> Result<u64, DecodeError> {
     Ok(u64::from_le_bytes([
         s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
     ]))
+}
+pub fn get_i16(c: &mut Cursor<'_>) -> Result<i16, DecodeError> {
+    let s = c.take(2)?;
+    Ok(i16::from_le_bytes([s[0], s[1]]))
 }
 pub fn get_i32(c: &mut Cursor<'_>) -> Result<i32, DecodeError> {
     let s = c.take(4)?;

@@ -52,7 +52,6 @@ impl Reactor {
             let _ = p.completion.send(Err(TransportError::Closed));
         }
         self.outbound.pending_fire_and_forget.clear();
-        self.outbound.pending_piece_frames.clear();
         self.outbound.pending_outbound_order.clear();
 
         let drained: Vec<PendingMcuCall> = self

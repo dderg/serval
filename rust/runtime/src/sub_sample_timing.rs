@@ -115,3 +115,121 @@ pub fn compute_step_times(inp: &StepTimeInputs) -> StepTimingResult {
     }
     StepTimingResult::SecantSlope(times)
 }
+
+#[derive(Clone, Copy, Debug)]
+pub struct QuadStepTimeInputs {
+    pub p_start: f32,
+    pub p_end: f32,
+    pub v_start: f32,
+    pub v_end: f32,
+    pub step_delta: i32,
+    pub microstep_distance: f32,
+    pub sample_period_sec: f32,
+    pub sample_start_cycles: u32,
+    pub cycles_per_second: f32,
+    pub displacement_threshold: f32,
+}
+
+/// Quadratic sub-sample step timing for the high-precision encoder path.
+///
+/// Position inside the window follows p(t) = p_start + v_start·t + ½·a·t² with
+/// a = (v_end − v_start)/T, meeting p_end at t = T by construction. Each step
+/// target (the classic path's half-step threshold) is inverted through the
+/// numerically stable quadratic form q = −½·(v_start + sgn(v_start)·√disc).
+/// When the acceleration's whole-window displacement contribution ½·|a|·T² is
+/// below `displacement_threshold` the model is indistinguishable from the
+/// classic secant, so the exact secant timing is emitted; a sub-threshold net
+/// displacement emits the exact uniform fallback. Targets the model cannot
+/// reach inside the window, or crossings that break the non-decreasing order,
+/// yield the classic path's impossible-timing variant.
+#[must_use]
+pub fn compute_step_times_quadratic(inp: &QuadStepTimeInputs) -> StepTimingResult {
+    let signed_steps = inp.step_delta;
+    if signed_steps == 0 {
+        return StepTimingResult::NoSteps;
+    }
+    let sign: i32 = if signed_steps > 0 { 1 } else { -1 };
+    let n_steps: usize = signed_steps.unsigned_abs() as usize;
+
+    let displacement = inp.p_end - inp.p_start;
+
+    // f32 → u32: product is the cycle count for one sample window
+    // (e.g. 50 µs × 520 MHz = 26_000 cycles), always non-negative and
+    // far below u32::MAX. Sign-loss / truncation are safe here.
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let sample_period_cycles = (inp.sample_period_sec * inp.cycles_per_second) as u32;
+
+    let mut times: Vec<u32, MAX_STEPS_PER_SAMPLE> = Vec::new();
+
+    if displacement.abs() <= inp.displacement_threshold {
+        let n_plus_1 = (n_steps as u64) + 1;
+        for k in 0..n_steps {
+            // Integer division is intentional: computing a uniformly-spaced
+            // cycle offset; residue is sub-cycle (< 1 cycle of jitter).
+            #[allow(clippy::integer_division)]
+            let dt_cycles = u64::from(sample_period_cycles) * ((k as u64) + 1) / n_plus_1;
+            // dt_cycles ≤ sample_period_cycles by construction; u64 → u32 is lossless.
+            #[allow(clippy::cast_possible_truncation)]
+            let _ = times.push(inp.sample_start_cycles.wrapping_add(dt_cycles as u32));
+        }
+        return StepTimingResult::Uniform(times);
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    let direction = sign as f32;
+
+    let accel = (inp.v_end - inp.v_start) / inp.sample_period_sec;
+    let accel_window_displacement =
+        0.5 * accel.abs() * inp.sample_period_sec * inp.sample_period_sec;
+    if accel_window_displacement <= inp.displacement_threshold {
+        for k in 0..n_steps {
+            #[allow(clippy::cast_precision_loss)]
+            let threshold_from_previous_step =
+                (k as f32 + 0.5) * direction * inp.microstep_distance;
+            let t_local_sec =
+                (threshold_from_previous_step - inp.p_start) * inp.sample_period_sec / displacement;
+            // f32 → u32: t_local_sec ∈ [0, sample_period_sec], bounded well below u32::MAX.
+            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+            let cycle_abs = inp
+                .sample_start_cycles
+                .wrapping_add((t_local_sec * inp.cycles_per_second) as u32);
+            let _ = times.push(cycle_abs);
+        }
+        return StepTimingResult::SecantSlope(times);
+    }
+
+    let mut previous_t_local = 0.0_f32;
+    for k in 0..n_steps {
+        #[allow(clippy::cast_precision_loss)]
+        let target = (k as f32 + 0.5) * direction * inp.microstep_distance;
+        // Root of ½·accel·t² + v_start·t − target = 0; the stable form
+        // evaluates the near root as 2·target/denom without cancellation.
+        let disc = inp.v_start * inp.v_start + 2.0 * accel * target;
+        if disc < 0.0 {
+            return StepTimingResult::NoSteps;
+        }
+        let root = libm::sqrtf(disc);
+        let denom = inp.v_start + libm::copysignf(root, inp.v_start);
+        let near_root = 2.0 * target / denom;
+        let far_root = -denom / accel;
+        let (lo, hi) = if near_root <= far_root {
+            (near_root, far_root)
+        } else {
+            (far_root, near_root)
+        };
+        let t_local_sec = [lo, hi]
+            .into_iter()
+            .find(|&t| t >= previous_t_local && t <= inp.sample_period_sec);
+        let Some(t_local_sec) = t_local_sec else {
+            return StepTimingResult::NoSteps;
+        };
+        previous_t_local = t_local_sec;
+        // f32 → u32: t_local_sec ∈ [0, sample_period_sec], bounded well below u32::MAX.
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let cycle_abs = inp
+            .sample_start_cycles
+            .wrapping_add((t_local_sec * inp.cycles_per_second) as u32);
+        let _ = times.push(cycle_abs);
+    }
+    StepTimingResult::SecantSlope(times)
+}

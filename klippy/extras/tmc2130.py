@@ -402,23 +402,34 @@ class MCU_TMC_SPI:
         self.fields = fields
         self.tmc_frequency = tmc_frequency
         self.mcu = self.tmc_spi.spi.get_mcu()
+        self.phase_spi_arbiter = tmc.lookup_phase_spi_arbiter(self.mcu)
 
     def get_fields(self):
         return self.fields
 
     def get_register(self, reg_name):
         reg = self.name_to_reg[reg_name]
-        with self.mutex:
-            read = self.tmc_spi.reg_read(reg, self.chain_pos)
+        self.phase_spi_arbiter.suspend()
+        try:
+            with self.mutex:
+                read = self.tmc_spi.reg_read(reg, self.chain_pos)
+        finally:
+            self.phase_spi_arbiter.resume()
         return read
 
     def set_register(self, reg_name, val, print_time=None):
         reg = self.name_to_reg[reg_name]
-        with self.mutex:
-            for retry in range(5):
-                v = self.tmc_spi.reg_write(reg, val, self.chain_pos, print_time)
-                if v == val:
-                    return
+        self.phase_spi_arbiter.suspend()
+        try:
+            with self.mutex:
+                for retry in range(5):
+                    v = self.tmc_spi.reg_write(
+                        reg, val, self.chain_pos, print_time
+                    )
+                    if v == val:
+                        return
+        finally:
+            self.phase_spi_arbiter.resume()
         raise self.printer.command_error(
             "Unable to write tmc spi '%s' register %s" % (self.name, reg_name)
         )

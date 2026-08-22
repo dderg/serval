@@ -81,12 +81,6 @@ pub fn align_to(axes: &[Option<AxisState>], stepper_oid: u8, target_phase: u16) 
     if i32::from(target_phase) >= PHASE_PERIOD {
         return -1;
     }
-    let motion_active = axes
-        .iter()
-        .any(|a| a.as_ref().map_or(false, |ax| ax.armed.is_some()));
-    if motion_active {
-        return -2;
-    }
     let Some((_, axis, stepper)) = find_stepper(axes, stepper_oid) else {
         return -1;
     };

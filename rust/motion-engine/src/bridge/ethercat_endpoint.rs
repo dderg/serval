@@ -72,10 +72,18 @@ pub(crate) fn arm_endpoint_death_watchdog(latch: Arc<Mutex<HashMap<u32, String>>
         });
 }
 
+/// What the endpoint answered when asked which executor it runs.
+#[derive(Debug)]
+pub(crate) enum ReportedExecutor {
+    Code(u8),
+    Unsupported(String),
+}
+
 #[derive(Debug)]
 pub(crate) enum EndpointClaimError {
     DriveOffline { slave_idx: u8, fault_code: u16 },
     DriveFault { slave_idx: u8, fault_code: u16 },
+    ExecutorMismatch { reported: ReportedExecutor },
     Protocol(String),
 }
 
@@ -114,6 +122,19 @@ pub(crate) fn message_for_claim_error(
             "ethercat {label}: drive (slave {slave_idx}) \
              fault 0x{fault_code:04x} — check drive, then FIRMWARE_RESTART"
         ),
+        EndpointClaimError::ExecutorMismatch { reported } => match reported {
+            ReportedExecutor::Code(code) => format!(
+                "ethercat {label}: executor mismatch — endpoint reports executor code {code}, \
+                 expected {expected} (setpoint ring) — this endpoint still runs a deleted \
+                 executor, rebuild rust/ethercat-rt, then FIRMWARE_RESTART",
+                expected = ethercat_rt::setpoint::EXECUTOR_SETPOINT_RING
+            ),
+            ReportedExecutor::Unsupported(detail) => format!(
+                "ethercat {label}: executor mismatch — the endpoint could not report its \
+                 executor ({detail}); the endpoint binary predates the sample-stream executor \
+                 — rebuild rust/ethercat-rt, then FIRMWARE_RESTART"
+            ),
+        },
         EndpointClaimError::Protocol(s) => {
             format!("ethercat {label}: endpoint protocol error — {s}")
         }
@@ -313,4 +334,111 @@ pub(crate) fn handshake_ethercat_endpoint(
     }
 
     Ok(conn)
+}
+
+/// The endpoint's DC-cycle setpoint grid as reported at claim time. Retained on
+/// the per-endpoint `McuConnection` so the pump can map trajectory clocks onto
+/// absolute grid indices without re-querying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SampleGrid {
+    pub(crate) cycle_ticks: u32,
+    pub(crate) ring_depth_cycles: u32,
+    pub(crate) grid_index: u64,
+    pub(crate) grid_clock: u64,
+}
+
+/// Ask the endpoint which executor it runs and refuse the claim on any answer
+/// that is not the setpoint ring. An endpoint that does not understand
+/// `QuerySampleGrid` is a mismatch too: its binary predates the sample stream.
+pub(crate) fn verify_sample_grid(
+    conn: &McuSerialConn,
+    deadline: Instant,
+) -> Result<SampleGrid, EndpointClaimError> {
+    use host_rt::mcu_call::McuCall;
+    use mcu_protocol::MessageKind;
+    use mcu_protocol::codec::{Cursor, Decode};
+    use mcu_protocol::messages::SampleGridResponse;
+
+    let mismatch = |reported| EndpointClaimError::ExecutorMismatch { reported };
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let (kind, body) = conn
+        .mcu_call(MessageKind::QuerySampleGrid, Vec::new(), remaining)
+        .map_err(|e| {
+            mismatch(ReportedExecutor::Unsupported(format!(
+                "QuerySampleGrid call failed: {e:?}"
+            )))
+        })?;
+
+    if kind != MessageKind::SampleGridResponse {
+        return Err(mismatch(ReportedExecutor::Unsupported(format!(
+            "expected SampleGridResponse (0x{:04x}), got 0x{:04x}",
+            MessageKind::SampleGridResponse.as_u16(),
+            kind.as_u16(),
+        ))));
+    }
+
+    let reply = SampleGridResponse::decode_from(&mut Cursor::new(&body)).map_err(|e| {
+        mismatch(ReportedExecutor::Unsupported(format!(
+            "decode SampleGridResponse: {e:?}"
+        )))
+    })?;
+
+    if reply.executor != ethercat_rt::setpoint::EXECUTOR_SETPOINT_RING {
+        return Err(mismatch(ReportedExecutor::Code(reply.executor)));
+    }
+
+    Ok(SampleGrid {
+        cycle_ticks: reply.cycle_ticks,
+        ring_depth_cycles: reply.ring_depth_cycles,
+        grid_index: reply.grid_index,
+        grid_clock: reply.grid_clock,
+    })
+}
+
+/// Build the pump's host-side setpoint filler for a claimed endpoint.
+/// Everything the filler needs is what the endpoint itself was launched with —
+/// the drives' command scale, the dynamics profile (so the host computes the
+/// very same torque feedforward), and the DC grid the endpoint just reported —
+/// so a node that cannot produce a filler is a claim failure.
+pub(crate) fn build_ring_filler(
+    grid: SampleGrid,
+    dynamics_profile: Option<&str>,
+    drives: &[EthercatDrive],
+) -> Result<crate::pump::RingFiller, String> {
+    use ethercat_rt::setpoint_fill::{ChainFiller, LaneSpec};
+
+    if grid.cycle_ticks == 0 {
+        return Err("endpoint reported a zero-length DC cycle".to_owned());
+    }
+    let interval_ns = u64::from(grid.cycle_ticks);
+    let per_slot: Vec<Option<String>> = drives.iter().map(|d| d.dynamics_profile.clone()).collect();
+    let dynamics = ethercat_rt::dynamics::chain_model_from_profiles(
+        dynamics_profile,
+        &per_slot,
+        drives.len(),
+    )?;
+    let ff_lead_ns = match dynamics.as_ref() {
+        Some(model) => model.ff_lead_ns(),
+        None => vec![0u64; drives.len()],
+    };
+    let mut specs: Vec<LaneSpec> = Vec::with_capacity(drives.len());
+    for (drive, &ff_lead_ns) in drives.iter().zip(&ff_lead_ns) {
+        specs.push(LaneSpec {
+            axis: u8::try_from(drive.axis)
+                .map_err(|_| format!("drive axis {} exceeds the wire's u8", drive.axis))?,
+            cmd_counts_per_mm: if drive.invert_direction {
+                -drive.counts_per_mm
+            } else {
+                drive.counts_per_mm
+            },
+            ff_lead_ns,
+        });
+    }
+    let lead_cycles = (crate::pump::DRIP_WINDOW_SECS * 1e9 / interval_ns as f64).ceil() as u64;
+    let mut filler = ChainFiller::new(&specs, dynamics, interval_ns, lead_cycles);
+    filler
+        .observe_grid(grid.grid_index, grid.grid_clock)
+        .map_err(|e| format!("claim-time sample grid rejected: {e:?}"))?;
+    Ok(std::sync::Arc::new(std::sync::Mutex::new(filler)))
 }

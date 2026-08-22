@@ -43,8 +43,10 @@ tools/sim/run.sh --branch X ...     # any of the above for another branch
   build — the sim is a first-class build config.
 - klippy runs at real CPU speed; only MCU processes live on the virtual
   clock. Loading vtime into klippy deadlocks — don't.
-- Auto-endstops (libsim_intercept): step-queue lines X=18/Y=7/Z=15 count
-  toward a 50-step wall, asserting endstop lines gpio200/201/202/203.
+- Auto-endstops (libsim_intercept): `SimWorld` passes each rendered classic
+  motor's step/dir pins into the shim. GPIO edges advance 50-step walls that
+  assert gpio200/201/202/203. Sample lanes retain runtime notifications on
+  X=18/Y=7/Z=15.
 - Each SimWorld allocates its own virtual-clock segment
   (`/dev/shm/vtime-<pid>-<n>`, passed to the shims via `VTIME_SHM_NAME`),
   so worlds never share state. `run.sh test` still runs tests

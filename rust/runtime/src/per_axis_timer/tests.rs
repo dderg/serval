@@ -279,27 +279,3 @@ fn future_only_entry_produces_zero_late_and_zero_drained() {
     assert_eq!(late_count, 0);
     assert_eq!(max_drained, 0, "nothing was drained so max_drained stays 0");
 }
-
-#[test]
-fn xdirect_axis_routes_to_coil_emit_not_steps() {
-    use super::test_hooks::take_xdirect_emits;
-    use crate::step_queue::StepEntry;
-    reset();
-    crate::buzz_stream::set_xdirect_for_test(0, true);
-    set_now(2000);
-    set_owned_mask(0b0001);
-    let q = queue_for_axis(0);
-    // SAFETY: host test queue, sole producer here.
-    unsafe { push(q, StepEntry::xdirect(1500, -7)).expect("queue not full") };
-    step_output_event(core::ptr::null_mut());
-    assert!(
-        take_emits().is_empty(),
-        "an XDIRECT axis must not emit STEP/DIR pulses"
-    );
-    assert_eq!(
-        take_xdirect_emits(),
-        vec![(0u8, -7i32)],
-        "the entry payload must route to the coil-write emit as an offset"
-    );
-    crate::buzz_stream::set_xdirect_for_test(0, false);
-}

@@ -3,7 +3,7 @@
 //! inside that window is loaded behind it — `motion.step_load_late`, then
 //! "Stepper too far in past". The shim owes the caller that distance.
 
-use super::{MotorConfig, ShimError, StepFrame, StepShim};
+use super::{MotorConfig, ShimError, StepEncoder, StepFrame, StepShim};
 use runtime::piece_ring::PieceEntry;
 
 const CYCLES_PER_SECOND: f64 = 1_000_000.0;
@@ -22,6 +22,9 @@ fn cfg(min_rearm_cycles: u64) -> MotorConfig {
         sample_rate_hz: SAMPLE_RATE_HZ,
         cycles_per_second: CYCLES_PER_SECOND,
         min_rearm_cycles,
+        encoder: StepEncoder::Classic {
+            max_error_ticks: super::compress::DEFAULT_MAX_ERROR_TICKS,
+        },
     }
 }
 

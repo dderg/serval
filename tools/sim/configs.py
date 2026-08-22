@@ -2,9 +2,10 @@
 
 Pin conventions (MACH_LINUX + libsim_intercept):
 - Pin names use gpiochip0/gpioN format, not STM32 PA3 style.
-- Auto-endstop walls (libsim_intercept.c): the runtime step queues notify
-  the shim on lines X=18 / Y=7 / Z=15; after 50 steps toward the wall the
-  shim asserts endstop lines X=gpio200 / Y=gpio201 / Z=gpio202+gpio203.
+- Auto-endstop walls use every rendered `drive: stepper` motor's step/dir
+  pins. Classic lanes advance from GPIO edges. Sample lanes keep the runtime
+  notify lines X=18 / Y=7 / Z=15 / E=20. Both paths assert the wall endstops
+  X=gpio200 / Y=gpio201 / Z=gpio202+gpio203 after 50 steps.
 - Homing speeds stay low (<=10 mm/s) to tolerate Docker scheduler jitter.
 """
 
@@ -478,6 +479,83 @@ rotation_distance: 4
 {_tail(gcode_dir)}"""
 
 
+def awd_three_z_probe_config(h7_pty: str, f4_pty: str, gcode_dir: str) -> str:
+    motor_sections = ""
+    for i, name in enumerate(("a", "a1", "b", "b1")):
+        motor_sections += f"""
+[motor {name}]
+drive: stepper
+step_pin: gpiochip0/gpio{30 + 3 * i}
+dir_pin: gpiochip0/gpio{31 + 3 * i}
+enable_pin: !gpiochip0/gpio{32 + 3 * i}
+microsteps: 16
+rotation_distance: 40
+"""
+    z_sections = ""
+    for i, name in enumerate(("z", "z1", "z2")):
+        z_sections += f"""
+[motor {name}]
+drive: stepper
+step_pin: bottom:gpiochip0/gpio{6 + 3 * i}
+dir_pin: bottom:gpiochip0/gpio{7 + 3 * i}
+enable_pin: !bottom:gpiochip0/gpio{8 + 3 * i}
+microsteps: 16
+rotation_distance: 4
+"""
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[mcu bottom]
+serial: {f4_pty}
+
+[printer]
+max_velocity: 100
+max_accel: 1000
+max_jerk: 2000
+max_z_velocity: 10
+max_z_accel: 30
+
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a, a1
+b_motors: b, b1
+z_motors: z, z1, z2
+
+[axis x]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio200
+homing_speed: 10
+post_processors: is_xy
+
+[axis y]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio201
+homing_speed: 10
+post_processors: is_xy
+
+[axis z]
+position_min: -5
+position_max: 250
+endstop_pin: probe:z_virtual_endstop
+homing_speed: 5
+
+[probe]
+pin: bottom:gpiochip0/gpio202
+z_offset: 1.5
+speed: 5
+samples: 1
+
+{motor_sections}{z_sections}{_tail(gcode_dir)}"""
+
+
 def awd_corexy_positive_dir_config(h7_pty: str, gcode_dir: str) -> str:
     """AWD CoreXY homing toward position_max on X and Y, with the
     min_home_dist early-trigger guard active — the bench layout where a
@@ -876,8 +954,8 @@ rotation_distance: 40
 
 [motor z]
 drive: stepper
-step_pin: gpiochip0/gpio6
-dir_pin: gpiochip0/gpio7
+step_pin: gpiochip0/gpio15
+dir_pin: gpiochip0/gpio16
 enable_pin: !gpiochip0/gpio21
 microsteps: 256
 rotation_distance: 40
@@ -890,6 +968,191 @@ run_current: 1.0
 sense_resistor: 0.075
 diag0_pin: gpiochip0/gpio203
 driver_SGT: 1
+{_tail(gcode_dir)}"""
+
+
+def awd_sensorless_phase_config(h7_pty: str, gcode_dir: str) -> str:
+    """Twin-motor (AWD-style) phase-stepped Z homed on a StallGuard
+    virtual endstop. Mirrors the Trident bench arrangement that exposed
+    the phase-exit twin silence: two motors share one rail, both are
+    phase-stepped, and only one carries the DIAG endstop, so the trip
+    move must pulse BOTH motors through the classic step queue."""
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[printer]
+max_velocity: 100
+max_accel: 1000
+max_jerk: 2000
+max_z_velocity: 10
+max_z_accel: 30
+
+[kinematics]
+type: cartesian
+axis_x: x
+axis_y: y
+axis_z: z
+x_motors: x
+y_motors: y
+z_motors: z, z1
+
+[axis x]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio10
+homing_speed: 10
+post_processors: is_xy
+
+[axis y]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio11
+homing_speed: 10
+post_processors: is_xy
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: tmc5160_z:virtual_endstop
+homing_speed: 5
+homing_retract_dist: 0
+
+[motor x]
+drive: stepper
+step_pin: gpiochip0/gpio0
+dir_pin: gpiochip0/gpio1
+enable_pin: !gpiochip0/gpio2
+microsteps: 16
+rotation_distance: 40
+
+[motor y]
+drive: stepper
+step_pin: gpiochip0/gpio3
+dir_pin: gpiochip0/gpio4
+enable_pin: !gpiochip0/gpio20
+microsteps: 16
+rotation_distance: 40
+
+[motor z]
+drive: stepper
+step_pin: gpiochip0/gpio15
+dir_pin: gpiochip0/gpio16
+enable_pin: !gpiochip0/gpio21
+microsteps: 256
+rotation_distance: 40
+phase_stepping: True
+
+[motor z1]
+drive: stepper
+step_pin: gpiochip0/gpio17
+dir_pin: gpiochip0/gpio18
+enable_pin: !gpiochip0/gpio22
+microsteps: 256
+rotation_distance: 40
+phase_stepping: True
+
+[tmc5160 z]
+spi_bus: spidev0.0
+cs_pin: gpiochip0/gpio5
+run_current: 1.0
+sense_resistor: 0.075
+diag0_pin: gpiochip0/gpio203
+driver_SGT: 1
+
+[tmc5160 z1]
+spi_bus: spidev0.0
+cs_pin: gpiochip0/gpio6
+run_current: 1.0
+sense_resistor: 0.075
+{_tail(gcode_dir)}"""
+
+
+def awd_corexy_sensorless_phase_config(h7_pty: str, gcode_dir: str) -> str:
+    """Full Trident-bench analogue: CoreXY with four phase-stepped belt
+    motors (two per lane) and StallGuard virtual endstops on the twin of
+    each lane. Homing X exits phase mode on the whole coupled group and
+    runs the trip move through the classic step queue on all four."""
+    motor_sections = ""
+    for i, name in enumerate(("a", "a1", "b", "b1")):
+        motor_sections += f"""
+[motor {name}]
+drive: stepper
+step_pin: gpiochip0/gpio{30 + 3 * i}
+dir_pin: gpiochip0/gpio{31 + 3 * i}
+enable_pin: !gpiochip0/gpio{32 + 3 * i}
+microsteps: 256
+rotation_distance: 40
+phase_stepping: True
+"""
+    diag = {
+        "a1": "\ndiag0_pin: gpiochip0/gpio200\ndriver_SGT: 1",
+        "b1": "\ndiag0_pin: gpiochip0/gpio201\ndriver_SGT: 1",
+    }
+    for name in ("a", "a1", "b", "b1"):
+        motor_sections += f"""
+[tmc5160 {name}]
+spi_bus: spidev0.0
+cs_pin: gpiochip0/gpio{AWD_TMC_CS_LINES[name]}
+run_current: 1.0
+sense_resistor: 0.075{diag.get(name, "")}
+"""
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[printer]
+max_velocity: 100
+max_accel: 1000
+max_jerk: 2000
+max_z_velocity: 10
+max_z_accel: 30
+
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a, a1
+b_motors: b, b1
+z_motors: z
+
+[axis x]
+position_min: 0
+position_endstop: 0
+position_max: 300
+endstop_pin: tmc5160_a1:virtual_endstop
+homing_speed: 10
+homing_retract_dist: 0
+post_processors: is_xy
+
+[axis y]
+position_min: 0
+position_endstop: 0
+position_max: 300
+endstop_pin: tmc5160_b1:virtual_endstop
+homing_speed: 10
+homing_retract_dist: 0
+post_processors: is_xy
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio12
+homing_speed: 5
+
+{motor_sections}
+[motor z]
+drive: stepper
+step_pin: gpiochip0/gpio50
+dir_pin: gpiochip0/gpio51
+enable_pin: !gpiochip0/gpio52
+microsteps: 16
+rotation_distance: 4
 {_tail(gcode_dir)}"""
 
 
@@ -1026,9 +1289,13 @@ home_method_when_homed: proximity
 home_autocalibrate: never
 # Contact positions reconstructed from the emulator's trigger clock
 # carry the real-clock <-> virtual-clock mapping jitter (~0.01mm at the
-# 3mm/s autocal speed), so the hardware-default touch repeatability
-# gate (0.008) is marginally flaky in the sim.
-autocal_tolerance: 0.02
+# 3mm/s autocal speed under piece-mode's steady tick, ~0.02mm with
+# classic stepping's burstier virtual-clock pacing), so the
+# hardware-default touch repeatability gate (0.008) is widened for the
+# sim. Systematic per-trip drift stays caught: the reseed leak this
+# masked-at-0.02 was ~0.03mm PER TRIP, an order above this gate within
+# one four-sample window.
+autocal_tolerance: 0.03
 {bed_mesh_section}
 [post_processor is_xy]
 type: smooth_bell
@@ -1061,109 +1328,18 @@ enable_force_move: True
 """
 
 
-def dual_mcu_alignment_config(
-    h7_pty: str,
-    f4_pty: str,
-    gcode_dir: str,
-) -> str:
-    """Minimal dual-MCU CoreXY: A/B belts on the main (H7) MCU, Z on the
-    bottom (F4) MCU, GPIO endstops, no beacon/probe. Deliberately light so
-    the H7 motion tick paces without the extra emulator processes stealing
-    CPU (which packs virtual-clock catch-up bursts into single samples)."""
-    return f"""\
-[mcu]
-serial: {h7_pty}
-
-[mcu bottom]
-serial: {f4_pty}
-
-[printer]
-max_velocity: 500
-max_accel: 5000
-max_jerk: 10000
-max_z_velocity: 50
-max_z_accel: 500
-corner_deviation: 0.023
-
-[kinematics]
-type: corexy
-axis_x: x
-axis_y: y
-axis_z: z
-a_motors: a
-b_motors: b
-z_motors: z
-
-[axis x]
-position_endstop: 0
-position_max: 300
-endstop_pin: ^gpiochip0/gpio10
-homing_speed: 10
-post_processors: is_xy
-
-[axis y]
-position_endstop: 0
-position_max: 300
-endstop_pin: ^gpiochip0/gpio11
-homing_speed: 10
-post_processors: is_xy
-
-[axis z]
-position_min: -5
-position_max: 250
-endstop_pin: ^bottom:gpiochip0/gpio12
-homing_speed: 5
-
-[motor a]
-drive: stepper
-step_pin: gpiochip0/gpio0
-dir_pin: gpiochip0/gpio1
-enable_pin: !gpiochip0/gpio2
-microsteps: 16
-rotation_distance: 40
-
-[motor b]
-drive: stepper
-step_pin: gpiochip0/gpio3
-dir_pin: gpiochip0/gpio4
-enable_pin: !gpiochip0/gpio5
-microsteps: 16
-rotation_distance: 40
-
-[motor z]
-drive: stepper
-step_pin: bottom:gpiochip0/gpio0
-dir_pin: bottom:gpiochip0/gpio1
-enable_pin: !bottom:gpiochip0/gpio2
-microsteps: 16
-rotation_distance: 4
-
-[post_processor is_xy]
-type: smooth_bell
-smooth_time: 0.019125
-
-[virtual_sdcard]
-path: {gcode_dir}
-
-[force_move]
-enable_force_move: True
-"""
-
-
-STEPCOMPRESS_SAMPLE_RATE_HZ = 5000
 STEPCOMPRESS_STEPS_PER_MM = 16 * 200 / 40.0
 STEPCOMPRESS_STEP_LINES = {"x": 18, "y": 7, "z": 15}
 
 
 def stepcompress_config(h7_pty: str, sc_pty: str, gcode_dir: str) -> str:
-    """Cartesian printer whose motors all live on a stepping_mode:
-    stepcompress MCU (the CONFIG_CLASSIC_STEPPING sim ELF), driven by
-    host-computed step times over queue_step.
+    """Cartesian printer whose motors all live on the second (step/dir only)
+    sim MCU, driven by host-computed step times over queue_step.
 
     Step pins sit on the shim's tracked lines (X=18/Y=7/Z=15) with their
     dir pins on the paired lines (19/8/16), so the classic firmware's real
     GPIO pulses feed get_steps and the auto-endstop walls
-    (X=gpio200/Y=gpio201/Z=gpio202) exactly like the piece-mode configs.
+    (X=gpio200/Y=gpio201/Z=gpio202).
     """
     return f"""\
 [mcu]
@@ -1171,8 +1347,6 @@ serial: {h7_pty}
 
 [mcu sc]
 serial: {sc_pty}
-stepping_mode: stepcompress
-stepcompress_sample_rate: {STEPCOMPRESS_SAMPLE_RATE_HZ}
 
 [printer]
 max_velocity: 100
@@ -1239,7 +1413,6 @@ rotation_distance: 40
 {_tail(gcode_dir)}"""
 
 
-STEPCOMPRESS_EXTRUDER_SAMPLE_RATE_HZ = 10000
 STEPCOMPRESS_EXTRUDER_ROTATION_DISTANCE = 7.73
 STEPCOMPRESS_EXTRUDER_STEPS_PER_MM = (
     16 * 200 / STEPCOMPRESS_EXTRUDER_ROTATION_DISTANCE
@@ -1251,9 +1424,9 @@ def stepcompress_extruder_config(
     h7_pty: str, sc_pty: str, gcode_dir: str
 ) -> str:
     """The Voron 0 CAN-toolhead topology: spatial motors on the main MCU and
-    the extruder alone on a SECOND, stepping_mode: stepcompress MCU.
+    the extruder alone on a SECOND, step/dir only MCU.
 
-    The extruder is a follower axis (axis index 3), so the stepcompress MCU's
+    The extruder is a follower axis (axis index 3), so that MCU's
     axis list is [3] while every spatial lane lives on another MCU — the
     non-zero-based lane layout the single-MCU stepcompress worlds never
     produce. min_extrude_temp is 0 so extrusion needs no heater ramp.
@@ -1264,8 +1437,6 @@ serial: {h7_pty}
 
 [mcu sc]
 serial: {sc_pty}
-stepping_mode: stepcompress
-stepcompress_sample_rate: {STEPCOMPRESS_EXTRUDER_SAMPLE_RATE_HZ}
 
 [printer]
 max_velocity: 100
@@ -1362,7 +1533,6 @@ pid_kd: 124.081
 {_tail(gcode_dir)}"""
 
 
-STEPCOMPRESS_COREXY_SAMPLE_RATE_HZ = 10000
 STEPCOMPRESS_COREXY_STEPS_PER_MM = 64 * 200 / 40.0
 STEPCOMPRESS_COREXY_STEP_LINES = {"a": 18, "b": 7, "z": 15}
 STEPCOMPRESS_COREXY_ENDSTOPS = {"x": (0, 10), "y": (0, 11)}
@@ -1370,7 +1540,7 @@ STEPCOMPRESS_COREXY_ENDSTOPS = {"x": (0, 10), "y": (0, 11)}
 
 def stepcompress_corexy_config(h7_pty: str, sc_pty: str, gcode_dir: str) -> str:
     """The Voron 0 bench topology (its printer.cfg, verbatim apart from pin
-    names) moved onto a stepping_mode: stepcompress MCU: CoreXY a/b at 64
+    names) moved onto the second, step/dir only sim MCU: CoreXY a/b at 64
     microsteps, a gear-reduced Z, the measured smooth_mzv shapers, and X
     then Y homing toward position_max at 40 mm/s.
 
@@ -1389,8 +1559,6 @@ serial: {h7_pty}
 
 [mcu sc]
 serial: {sc_pty}
-stepping_mode: stepcompress
-stepcompress_sample_rate: {STEPCOMPRESS_COREXY_SAMPLE_RATE_HZ}
 
 [printer]
 max_velocity: 600
@@ -1549,10 +1717,6 @@ z_hop_speed: 15
                 " the trsync lives on a different MCU than the steppers"
             )
         probe_section = ""
-        # The trigger is a wall-clock timer, not a position, so the trip
-        # point moves with each approach — the min_home_dist re-approach
-        # check would reject it. This variant exercises the cross-MCU
-        # trsync relay, not the early-trigger guard.
         z_min_home_dist = "min_home_dist: 0"
         remote_section = f"""
 [mcu bottom]
@@ -1567,6 +1731,7 @@ trigger_height: 0
 
     z_motors = "z"
     points_sections = ""
+    z_homing_speed = 1 if variant == "remote" else 5
     if variant == "points":
         z_motors = "z, z1"
         points_sections = """
@@ -1650,7 +1815,7 @@ post_processors: is_xy
 [axis z]
 position_min: -5
 position_max: 250
-homing_speed: 5
+homing_speed: {z_homing_speed}
 {z_min_home_dist}
 {z_endstop}
 
@@ -1674,7 +1839,7 @@ rotation_distance: 40
 drive: stepper
 step_pin: gpiochip0/gpio6
 dir_pin: gpiochip0/gpio7
-enable_pin: !gpiochip0/gpio8
+enable_pin: !gpiochip0/gpio12
 microsteps: 16
 rotation_distance: 4
 {safe_z_section}{probe_section}{remote_section}{points_sections}{_tail(gcode_dir)}"""
@@ -1691,8 +1856,8 @@ def bed_mesh_config(h7_pty: str, gcode_dir: str) -> str:
       [printer] Z velocity/accel budget, so activation must be refused by
       the motion engine's gross-error gate.
 
-    Z homes against the auto-endstop wall (step line 15 -> gpio202), the
-    same arrangement as probe_config's "gpio-z" variant.
+    Z homes through the configured gpio6/gpio7 classic lane against gpio202,
+    the same arrangement as probe_config's "gpio-z" variant.
     """
     return f"""\
 [mcu]

@@ -81,7 +81,7 @@ fn status_watermark_advance_synthesizes_credit_freed() {
     let mut d = make_dispatcher();
 
     let (tx, rx) = sync_channel::<RuntimeEvent>(8);
-    let (bulk_tx, _bulk_rx) = sync_channel::<RuntimeEvent>(8);
+    let (bulk_tx, _bulk_rx) = std::sync::mpsc::channel::<RuntimeEvent>();
     d.runtime_event_dispatcher.subscribe(tx, bulk_tx).unwrap();
 
     d.dispatch(status_with_watermark(2, 5));
@@ -105,7 +105,7 @@ fn status_watermark_unchanged_does_not_synthesize() {
     let mut d = make_dispatcher();
 
     let (tx, rx) = sync_channel::<RuntimeEvent>(8);
-    let (bulk_tx, _bulk_rx) = sync_channel::<RuntimeEvent>(8);
+    let (bulk_tx, _bulk_rx) = std::sync::mpsc::channel::<RuntimeEvent>();
     d.runtime_event_dispatcher.subscribe(tx, bulk_tx).unwrap();
 
     d.dispatch(status_with_watermark(0, 5));
@@ -126,7 +126,7 @@ fn status_watermark_regression_does_not_synthesize() {
     let mut d = make_dispatcher();
 
     let (tx, rx) = sync_channel::<RuntimeEvent>(8);
-    let (bulk_tx, _bulk_rx) = sync_channel::<RuntimeEvent>(8);
+    let (bulk_tx, _bulk_rx) = std::sync::mpsc::channel::<RuntimeEvent>();
     d.runtime_event_dispatcher.subscribe(tx, bulk_tx).unwrap();
 
     d.dispatch(status_with_watermark(0, 10));
@@ -142,23 +142,27 @@ fn status_watermark_regression_does_not_synthesize() {
 }
 
 #[test]
-fn heartbeat_callback_fires_with_retired_counts() {
+fn heartbeat_callback_fires_with_retired_counts_and_playback_clocks() {
     let status = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
     let mut d = EventDispatcher::new(status, 16, 8);
 
-    let recorder: Arc<Mutex<Vec<Vec<u32>>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder: Arc<Mutex<Vec<(Vec<u32>, Vec<u64>)>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder2 = Arc::clone(&recorder);
-    d.heartbeat_callback = Some(Arc::new(move |counts: &[u32]| {
-        recorder2.lock().unwrap().push(counts.to_vec());
+    d.heartbeat_callback = Some(Arc::new(move |counts: &[u32], clocks: &[u64]| {
+        recorder2
+            .lock()
+            .unwrap()
+            .push((counts.to_vec(), clocks.to_vec()));
     }));
 
     d.dispatch(RuntimeEvent::Heartbeat {
         retired_counts: vec![5, 1],
+        playback_clocks: vec![4_000, 900],
     });
 
     let got = recorder.lock().unwrap();
     assert_eq!(got.len(), 1, "callback must fire exactly once");
-    assert_eq!(got[0], vec![5, 1]);
+    assert_eq!(got[0], (vec![5, 1], vec![4_000, 900]));
 }
 
 #[test]
@@ -169,11 +173,12 @@ fn heartbeat_is_not_forwarded_to_runtime_rx() {
     let mut d = EventDispatcher::new(status, 16, 8);
 
     let (tx, rx) = sync_channel::<RuntimeEvent>(8);
-    let (bulk_tx, _bulk_rx) = sync_channel::<RuntimeEvent>(8);
+    let (bulk_tx, _bulk_rx) = std::sync::mpsc::channel::<RuntimeEvent>();
     d.runtime_event_dispatcher.subscribe(tx, bulk_tx).unwrap();
 
     d.dispatch(RuntimeEvent::Heartbeat {
         retired_counts: vec![3, 7],
+        playback_clocks: vec![0, 0],
     });
 
     assert!(
@@ -242,7 +247,7 @@ fn mcu_log_also_forwarded_to_runtime_rx() {
     let mut dispatcher = EventDispatcher::new(snapshot, 16, 8);
 
     let (tx, rx) = sync_channel::<RuntimeEvent>(8);
-    let (bulk_tx, _bulk_rx) = sync_channel::<RuntimeEvent>(8);
+    let (bulk_tx, _bulk_rx) = std::sync::mpsc::channel::<RuntimeEvent>();
     dispatcher
         .runtime_event_dispatcher
         .subscribe(tx, bulk_tx)
@@ -287,7 +292,7 @@ fn clock_reaches_priority_lane_even_when_bulk_dispatched_first() {
     use std::sync::mpsc::sync_channel;
     let mut d = make_dispatcher();
     let (pri_tx, pri_rx) = sync_channel::<RuntimeEvent>(8);
-    let (bulk_tx, bulk_rx) = sync_channel::<RuntimeEvent>(8);
+    let (bulk_tx, bulk_rx) = std::sync::mpsc::channel::<RuntimeEvent>();
     d.runtime_event_dispatcher
         .subscribe(pri_tx, bulk_tx)
         .unwrap();
@@ -313,4 +318,27 @@ fn clock_reaches_priority_lane_even_when_bulk_dispatched_first() {
         Ok(RuntimeEvent::PassthroughResponse { name, .. }) => assert_eq!(name, "beacon_data"),
         other => panic!("expected accel on bulk lane, got {other:?}"),
     }
+}
+
+#[test]
+fn bulk_lane_preserves_stream_bursts_larger_than_runtime_capacity() {
+    use crate::transport::MessageParams;
+    use std::sync::mpsc::{channel, sync_channel};
+
+    let mut d = make_dispatcher();
+    let (priority_tx, _priority_rx) = sync_channel::<RuntimeEvent>(1);
+    let (bulk_tx, bulk_rx) = channel::<RuntimeEvent>();
+    d.runtime_event_dispatcher
+        .subscribe(priority_tx, bulk_tx)
+        .unwrap();
+
+    for _ in 0..1024 {
+        d.dispatch(RuntimeEvent::PassthroughResponse {
+            name: "beacon_data".into(),
+            params: MessageParams::new(),
+        });
+    }
+
+    let received = bulk_rx.try_iter().count();
+    assert_eq!(received, 1024);
 }

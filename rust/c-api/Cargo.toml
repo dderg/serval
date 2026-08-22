@@ -35,6 +35,9 @@ mcu-sim = ["runtime/mcu-sim"]
 # runtime crate.  The Makefile appends `motion-module-stepper` to
 # MCU_RUST_FEATURES when CONFIG_MOTION_MODULE_STEPPER=y.
 motion-module-stepper = ["runtime/motion-module-stepper"]
+# Pass-through: sample-stream execution for phase lanes. The Makefile appends
+# `sample-stepping` to MCU_RUST_FEATURES when CONFIG_SAMPLE_STEPPING=y.
+sample-stepping = ["runtime/sample-stepping"]
 
 [dependencies]
 runtime = { path = "../runtime", default-features = false }

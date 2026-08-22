@@ -1,8 +1,9 @@
+#![cfg(feature = "motion-module-stepper")]
+
 use core::sync::atomic::Ordering;
 
 use runtime::engine::Engine;
-use runtime::piece_ring::PieceEntry;
-use runtime::state::{SharedState, TOTAL_RING_PIECES};
+use runtime::state::SharedState;
 use runtime::step_queue::StepQueue;
 use runtime::stepping_state::{MAX_AXES, StepMode, StepperBindingRust};
 
@@ -10,21 +11,14 @@ const CLOCK_FREQ: u32 = 520_000_000;
 const SAMPLE_RATE: u32 = 40_000;
 const TICK_CYCLES: u64 = (CLOCK_FREQ / SAMPLE_RATE) as u64;
 
-fn make_engine_with_phase_axis() -> Engine {
+fn make_engine(mode: StepMode) -> Engine {
     let mut engine = Engine::new(CLOCK_FREQ, SAMPLE_RATE);
     let binding = StepperBindingRust {
         stepper_oid: 5,
         tmc_cs_oid: 7,
         _pad: [0; 2],
     };
-    let rc = engine.configure_axis(
-        0,
-        StepMode::Phase,
-        0.000_625,
-        64,
-        &[binding],
-        TOTAL_RING_PIECES,
-    );
+    let rc = engine.configure_axis(0, mode, 0.000_625, &[binding]);
     assert_eq!(rc, 0, "configure_axis failed");
     engine
 }
@@ -36,11 +30,10 @@ fn install_queues(engine: &mut Engine, q0: &mut StepQueue) {
 }
 
 #[test]
-fn jog_slews_to_target_while_no_motion_is_armed() {
-    let mut engine = make_engine_with_phase_axis();
+fn jog_slews_to_target_while_no_lane_is_anchored() {
+    let mut engine = make_engine(StepMode::Phase);
     let mut q0 = StepQueue::new();
     install_queues(&mut engine, &mut q0);
-    let mut storage = vec![PieceEntry::zeroed(); TOTAL_RING_PIECES];
     let shared = SharedState::new();
     shared.phase_motor_count.store(1, Ordering::Release);
     shared.phase_slot_idx[0].store(0, Ordering::Release);
@@ -50,7 +43,10 @@ fn jog_slews_to_target_while_no_motion_is_armed() {
     assert!(!q.settled, "jog must leave a pending slew");
 
     for n in 1..=64_u64 {
-        engine.tick(n * TICK_CYCLES, &shared, &mut storage);
+        assert!(
+            engine.tick(n * TICK_CYCLES, &shared) || engine.phase_state(5).unwrap().settled,
+            "an unsettled phase axis must claim the tick"
+        );
     }
 
     let q = engine.phase_state(5).expect("stepper must be found");
@@ -68,30 +64,27 @@ fn jog_slews_to_target_while_no_motion_is_armed() {
 }
 
 #[test]
-fn idle_pulse_axis_does_not_dispatch() {
-    let mut engine = Engine::new(CLOCK_FREQ, SAMPLE_RATE);
-    let binding = StepperBindingRust {
-        stepper_oid: 5,
-        tmc_cs_oid: 7,
-        _pad: [0; 2],
-    };
-    assert_eq!(
-        engine.configure_axis(
-            0,
-            StepMode::Pulse,
-            0.000_625,
-            64,
-            &[binding],
-            TOTAL_RING_PIECES
-        ),
-        0
-    );
+fn a_settled_phase_axis_does_not_claim_the_tick() {
+    let mut engine = make_engine(StepMode::Phase);
     let mut q0 = StepQueue::new();
     install_queues(&mut engine, &mut q0);
-    let mut storage = vec![PieceEntry::zeroed(); TOTAL_RING_PIECES];
     let shared = SharedState::new();
 
-    let active = engine.tick(TICK_CYCLES, &shared, &mut storage);
+    assert!(
+        !engine.tick(TICK_CYCLES, &shared),
+        "no pending slew means no work"
+    );
+    assert_eq!(q0.tail, q0.head, "phase slew never enqueues step pulses");
+}
+
+#[test]
+fn idle_pulse_axis_does_not_dispatch() {
+    let mut engine = make_engine(StepMode::Pulse);
+    let mut q0 = StepQueue::new();
+    install_queues(&mut engine, &mut q0);
+    let shared = SharedState::new();
+
+    let active = engine.tick(TICK_CYCLES, &shared);
     assert!(!active, "idle pulse axis must not report active");
     assert_eq!(q0.tail, q0.head, "no steps enqueued while idle");
 }

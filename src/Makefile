@@ -3,10 +3,11 @@
 src-y += sched.c command.c basecmd.c debugcmds.c
 # Kalico-native transport — stream-level demuxer + Layer 4 dispatcher.
 src-y += mcu_demux.c mcu_transport_dispatch.c event_log.c
-src-$(CONFIG_MOTION_RUNTIME) += piece_sink.c runtime_storage.c \
+src-$(CONFIG_MOTION_RUNTIME) += runtime_storage.c \
     runtime_panic.c step_queue.c spi_queue.c
-src-$(CONFIG_HAVE_GPIO) += initial_pins.c gpiocmds.c stepper.c trsync.c endstop.c
-src-$(CONFIG_CLASSIC_STEPPING) += stepper_classic.c
+src-$(CONFIG_SAMPLE_STEPPING) += sample_commands.c
+src-$(CONFIG_HAVE_GPIO) += initial_pins.c gpiocmds.c stepper.c trsync.c endstop.c \
+    stepper_classic.c
 src-$(CONFIG_WANT_ADC) += adccmds.c
 src-$(CONFIG_WANT_SPI) += spicmds.c
 src-$(CONFIG_WANT_I2C) += i2ccmds.c
@@ -78,6 +79,9 @@ endif
 ifeq ($(CONFIG_MOTION_MODULE_STEPPER),y)
 MCU_RUST_FEATURES := $(MCU_RUST_FEATURES),motion-module-stepper
 endif
+ifeq ($(CONFIG_SAMPLE_STEPPING),y)
+MCU_RUST_FEATURES := $(MCU_RUST_FEATURES),sample-stepping
+endif
 
 ifeq ($(CONFIG_MOTION_RUNTIME)$(if $(filter y,$(CONFIG_MACH_STM32H7) $(CONFIG_MACH_STM32F4) $(CONFIG_MACH_STM32F1) $(CONFIG_MACH_STM32G0)),y),yy)
 # Exported so src/stm32/Makefile depends on (and links against) the right
@@ -103,8 +107,9 @@ $(MCU_RUST_LIB): FORCE
 			cargo clean -p runtime 2>/dev/null || true; \
 		fi && \
 		RUNTIME_STORAGE_SIZE=$(CONFIG_RUNTIME_STORAGE_SIZE) \
-		RUNTIME_PIECE_RING_SIZE=$(CONFIG_RUNTIME_PIECE_RING_SIZE) \
 		RUNTIME_SAMPLE_RATE_HZ=$(CONFIG_MOTION_SAMPLE_RATE_HZ) \
+		RUNTIME_SAMPLE_RUNS_PER_LANE=$(CONFIG_RUNTIME_SAMPLE_RUNS_PER_LANE) \
+		RUNTIME_SAMPLE_OVERLAY_RUNS_PER_LANE=$(CONFIG_RUNTIME_SAMPLE_OVERLAY_RUNS_PER_LANE) \
 		cargo build -p c-api \
 		--no-default-features \
 		--features $(MCU_RUST_FEATURES) \
@@ -127,6 +132,9 @@ endif
 ifeq ($(CONFIG_MOTION_MODULE_STEPPER),y)
 MCU_RUST_FEATURES := $(MCU_RUST_FEATURES),motion-module-stepper
 endif
+ifeq ($(CONFIG_SAMPLE_STEPPING),y)
+MCU_RUST_FEATURES := $(MCU_RUST_FEATURES),sample-stepping
+endif
 # Own target dir: the motion-engine cdylib builds the shared crates (runtime,
 # ...) with different host features into rust/target/, and a mcu-sim
 # flip changes this firmware's feature set — keeping them separate avoids
@@ -146,8 +154,10 @@ $(MCU_RUST_LIB): FORCE
 			cargo clean -p host-rt 2>/dev/null || true; \
 			cargo clean -p runtime 2>/dev/null || true; \
 		fi && \
-		RUNTIME_PIECE_RING_SIZE=$(CONFIG_RUNTIME_PIECE_RING_SIZE) \
+		RUNTIME_STORAGE_SIZE=$(CONFIG_RUNTIME_STORAGE_SIZE) \
 		RUNTIME_SAMPLE_RATE_HZ=$(CONFIG_MOTION_SAMPLE_RATE_HZ) \
+		RUNTIME_SAMPLE_RUNS_PER_LANE=$(CONFIG_RUNTIME_SAMPLE_RUNS_PER_LANE) \
+		RUNTIME_SAMPLE_OVERLAY_RUNS_PER_LANE=$(CONFIG_RUNTIME_SAMPLE_OVERLAY_RUNS_PER_LANE) \
 		cargo build -p c-api \
 		--no-default-features \
 		--features $(MCU_RUST_FEATURES) \

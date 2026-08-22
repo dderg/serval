@@ -4,7 +4,6 @@ sensorless (StallGuard virtual endstop) homing with the mode switch."""
 import pytest
 
 from tools.sim import configs
-from tools.sim.world import EndstopPulser
 
 pytestmark = pytest.mark.needs_elf
 
@@ -26,8 +25,7 @@ def test_sensorless_homing_switches_phase_mode(sim_world):
         lambda w: configs.sensorless_phase_config(w.h7_pty, str(w.gcode_dir)),
         dual_mcu=False,
     )
-    with EndstopPulser(world.sim_control("h7"), [(0, 203)]):
-        world.gcode_ok("G28 Z", timeout=120)
+    world.gcode_ok("G28 Z", timeout=120)
 
     log = world.klippy_log_text()
     assert world.shutdown_line() is None
@@ -56,4 +54,63 @@ def test_sensorless_homing_switches_phase_mode(sim_world):
     assert len(pos) > 2 and abs(pos[2]) <= 6.0, (
         f"homed Z {pos} too far from position_endstop=0 "
         "(wall=50 steps + retract tolerance)"
+    )
+
+
+def test_awd_sensorless_homing_steps_both_twin_motors(sim_world):
+    """The StallGuard trip move runs through the classic step queue after
+    the phase-mode exit; every motor of the twin rail must pulse, not just
+    the one carrying the DIAG endstop (Trident bench: motor_a1 stood still
+    and the machine crashed into the frame without a stall trigger)."""
+    world = sim_world(
+        lambda w: configs.awd_sensorless_phase_config(
+            w.h7_pty, str(w.gcode_dir)
+        ),
+        dual_mcu=False,
+    )
+    world.gcode_ok("G28 Z", timeout=120)
+    assert world.shutdown_line() is None
+
+    toolhead = world.status().get("toolhead", {})
+    assert "z" in toolhead.get("homed_axes", "")
+
+    control = world.sim_control("h7")
+    steps = {}
+    for name, line in (("z", 15), ("z1", 17)):
+        resp = control.send(f"get_steps line={line}")
+        steps[name] = abs(int(resp.split()[0].split("=", 1)[1]))
+    assert steps["z"] > 0, f"endstop motor never stepped: {steps}"
+    assert steps["z1"] > 0, (
+        f"twin motor never stepped during the trip move: {steps}"
+    )
+
+
+def test_corexy_phase_group_homes_x_through_pulse_mode(sim_world):
+    """CoreXY couples both belt lanes into one phase group; homing X must
+    exit phase mode on all four motors, settle every handover jog, run the
+    trip on the classic queue, and re-enter phase mode afterwards."""
+    world = sim_world(
+        lambda w: configs.awd_corexy_sensorless_phase_config(
+            w.h7_pty, str(w.gcode_dir)
+        ),
+        dual_mcu=False,
+    )
+    world.gcode_ok("G28 X", timeout=120)
+    assert world.shutdown_line() is None
+
+    toolhead = world.status().get("toolhead", {})
+    assert "x" in toolhead.get("homed_axes", "")
+
+    log = world.klippy_log_text()
+    assert log.count("phase mode entered") >= 8, (
+        "all four motors must re-enter phase mode after the trip move"
+    )
+
+    control = world.sim_control("h7")
+    steps = {}
+    for name, line in (("a", 30), ("a1", 33), ("b", 36), ("b1", 39)):
+        resp = control.send(f"get_steps line={line}")
+        steps[name] = abs(int(resp.split()[0].split("=", 1)[1]))
+    assert all(count > 0 for count in steps.values()), (
+        f"every belt motor must step during a CoreXY X trip move: {steps}"
     )

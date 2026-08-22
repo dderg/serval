@@ -7,6 +7,20 @@
 //! estimate on top of it (wraparound correction, minimum-RTT tracking, outlier
 //! rejection, convergence latching), matching `ClockSync._handle_clock`.
 
+/// Seconds between klippy `ClockSync` `get_clock` queries: deliberately not a
+/// round number so the samples do not resonate with other periodic reactor
+/// events.
+pub const NON_RESONANT_GET_CLOCK_PERIOD_SECS: f64 = 0.9839;
+
+/// Per-sample decay weight of the clock regression: the estimate is an
+/// exponential window `1/DECAY` samples wide.
+pub const CLOCK_REGRESSION_DECAY: f64 = 1.0 / 30.0;
+
+/// Span of samples the published estimate is built from. A record older than
+/// this contains no live sample at all: the clocksync that produced it has
+/// stopped feeding the router.
+pub const REGRESSION_WINDOW_SECS: f64 = NON_RESONANT_GET_CLOCK_PERIOD_SECS / CLOCK_REGRESSION_DECAY;
+
 const TWO_POW_32: f64 = 4_294_967_296.0;
 
 /// Decay-weighted least-squares accumulator over `(x, y)` sample pairs.

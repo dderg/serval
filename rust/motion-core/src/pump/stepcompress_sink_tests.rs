@@ -1,12 +1,17 @@
 use super::*;
-use crate::mcu_config::{McuAxisConfig, SteppingMode};
+use crate::mcu_config::{LaneKind, McuAxisConfig};
 use runtime::piece_ring::PieceEntry;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicI64, AtomicU64};
 
 const MCU_ID: u32 = 3;
 const OID: u32 = 7;
 const CYCLES_PER_SECOND: f64 = 1_000_000.0;
 const BUDGET: u32 = 4;
+
+/// The harness teleports its mcu clock by whole seconds to force a drain, so
+/// every barrier looks arbitrarily old. Tests that mean to exercise the ack
+/// deadline restore [`BARRIER_ACK_DEADLINE_SECONDS`] themselves.
+const TELEPORTING_CLOCK_ACK_DEADLINE_SECONDS: f64 = 3_600.0;
 
 struct Harness {
     endpoint: StepcompressEndpoint,
@@ -16,18 +21,26 @@ struct Harness {
     seeds: Arc<Mutex<Vec<(u32, i64)>>>,
     heartbeats: crossbeam_channel::Receiver<PumpMsg>,
     bursts: Arc<Mutex<Vec<usize>>>,
+    attempts: Arc<Mutex<Vec<Vec<String>>>>,
     fail_sends: Arc<AtomicBool>,
+    query_count: Arc<AtomicI64>,
+    auto_query: Arc<AtomicBool>,
+    query_calls: Arc<AtomicU64>,
+    clock_calls: Arc<AtomicU64>,
 }
 
-fn motor_cfg() -> MotorConfig {
+fn motor_cfg_for(oid: u32) -> MotorConfig {
     MotorConfig {
-        oid: OID,
+        oid,
         microstep_distance: 0.01,
         invert_dir: false,
         max_steps_per_sample: 16,
         sample_rate_hz: 10_000.0,
         cycles_per_second: CYCLES_PER_SECOND,
         min_rearm_cycles: 0,
+        encoder: StepEncoder::Classic {
+            max_error_ticks: step_shim::compress::DEFAULT_MAX_ERROR_TICKS,
+        },
     }
 }
 
@@ -36,12 +49,24 @@ fn harness(budget: u32) -> Harness {
 }
 
 fn harness_on_axis(budget: u32, axis: usize) -> Harness {
+    harness_axes(budget, vec![axis], vec![OID])
+}
+
+fn harness_axes(budget: u32, axes: Vec<usize>, oids: Vec<u32>) -> Harness {
+    assert_eq!(axes.len(), oids.len());
     let now = Arc::new(AtomicU64::new(0));
     let now_for_clock = Arc::clone(&now);
-    let clock_of: ClockSource =
-        Arc::new(move |_| Some((now_for_clock.load(Ordering::Relaxed), CYCLES_PER_SECOND)));
+    let clock_calls = Arc::new(AtomicU64::new(0));
+    let clock_calls_for_clock = Arc::clone(&clock_calls);
+    let clock_of: ClockSource = Arc::new(move |_| {
+        clock_calls_for_clock.fetch_add(1, Ordering::Relaxed);
+        Some((now_for_clock.load(Ordering::Relaxed), CYCLES_PER_SECOND))
+    });
     let sent = Arc::new(Mutex::new(Vec::new()));
     let fail_sends = Arc::new(AtomicBool::new(false));
+    let query_count = Arc::new(AtomicI64::new(0));
+    let auto_query = Arc::new(AtomicBool::new(true));
+    let query_calls = Arc::new(AtomicU64::new(0));
     let sent_for_egress = Arc::clone(&sent);
     let barriers = Arc::new(Mutex::new(Vec::new()));
     let barriers_for_egress = Arc::clone(&barriers);
@@ -50,8 +75,16 @@ fn harness_on_axis(budget: u32, axis: usize) -> Harness {
     let fail_for_egress = Arc::clone(&fail_sends);
     let bursts = Arc::new(Mutex::new(Vec::new()));
     let bursts_for_egress = Arc::clone(&bursts);
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let attempts_for_egress = Arc::clone(&attempts);
     let egress: FrameEgress =
         Arc::new(move |frames: &[(&'static str, Vec<(String, ArgValue)>)]| {
+            attempts_for_egress.lock_ok().push(
+                frames
+                    .iter()
+                    .map(|(name, args)| format!("{name}{args:?}"))
+                    .collect(),
+            );
             if fail_for_egress.load(Ordering::Relaxed) {
                 return Err(SendError::Transient("egress down".into()));
             }
@@ -97,16 +130,24 @@ fn harness_on_axis(budget: u32, axis: usize) -> Harness {
             Ok(())
         });
     let (tx, rx) = crossbeam_channel::unbounded();
-    let endpoint = StepcompressEndpoint::new(
+    let query_for_endpoint = Arc::clone(&query_count);
+    let calls_for_query = Arc::clone(&query_calls);
+    let motors = oids.iter().copied().map(motor_cfg_for).collect();
+    let mut endpoint = StepcompressEndpoint::new(
         MCU_ID,
-        StepShim::new(vec![motor_cfg()], SHIM_RING_DEPTH),
-        vec![axis],
-        vec![OID],
+        StepShim::new(motors, SHIM_RING_DEPTH),
+        axes,
+        oids,
         egress,
         tx,
         clock_of,
         budget,
     );
+    endpoint.set_step_count_query(Arc::new(move |_| {
+        calls_for_query.fetch_add(1, Ordering::Relaxed);
+        Ok(query_for_endpoint.load(Ordering::Relaxed))
+    }));
+    endpoint.barrier_ack_deadline_secs = TELEPORTING_CLOCK_ACK_DEADLINE_SECONDS;
     Harness {
         endpoint,
         now,
@@ -115,7 +156,12 @@ fn harness_on_axis(budget: u32, axis: usize) -> Harness {
         seeds,
         heartbeats: rx,
         bursts,
+        attempts,
         fail_sends,
+        query_calls,
+        query_count,
+        auto_query,
+        clock_calls,
     }
 }
 
@@ -141,11 +187,20 @@ impl Harness {
             .map(|heartbeat| heartbeat.retired_counts)
     }
 
-    fn ack_sent_barriers(&mut self) {
+    fn ack_sent_barriers_result(&mut self) -> Result<(), SendError> {
         let issued: Vec<(u32, u32)> = std::mem::take(&mut self.barriers.lock_ok());
         for (oid, seq) in issued {
-            self.endpoint.on_barrier_ack(oid, seq).unwrap();
+            if self.auto_query.load(Ordering::Relaxed) {
+                self.query_count
+                    .store(self.endpoint.shim.commanded_steps(0), Ordering::Relaxed);
+            }
+            self.endpoint.on_barrier_ack(oid, seq)?;
         }
+        Ok(())
+    }
+
+    fn ack_sent_barriers(&mut self) {
+        self.ack_sent_barriers_result().unwrap();
     }
 }
 
@@ -168,7 +223,6 @@ fn frame_for_axis(axis: u8, pieces: Vec<PieceEntry>) -> AxisFrame {
     AxisFrame {
         axis,
         pieces,
-        start_slot: 0,
         new_head: 0,
         room: SHIM_RING_DEPTH,
         guard_recorded_ns: 0,
@@ -195,6 +249,22 @@ fn ramp_from(start_time: u64, count: usize, start_mm: f32) -> Vec<PieceEntry> {
         .collect()
 }
 
+/// A straight constant-speed run from `from_mm` to `to_mm` split into
+/// `pieces` contiguous segments. The sampler quantizes positions to the
+/// microstep grid, so a run over an exact step multiple yields an exact step
+/// count.
+fn linear_run(start_time: u64, from_mm: f32, to_mm: f32, pieces: usize) -> Vec<PieceEntry> {
+    let dur = 0.01_f32;
+    let span = (f64::from(dur) * CYCLES_PER_SECOND) as u64;
+    let step_mm = (to_mm - from_mm) / pieces as f32;
+    (0..pieces)
+        .map(|i| {
+            let from = from_mm + step_mm * i as f32;
+            piece(start_time + span * i as u64, from, from + step_mm, dur)
+        })
+        .collect()
+}
+
 /// A ramp whose pieces are long enough that a few in-flight moves buffer more
 /// mcu time than the budget tests advance the clock per tick. `ramp`'s 2 ms
 /// pieces cannot: four slots hold 8 ms of motion, so a 10 ms tick leaves the
@@ -210,6 +280,116 @@ fn paceable_ramp(start_time: u64, count: usize) -> Vec<PieceEntry> {
             piece(start_time + span * i as u64, from, at, dur)
         })
         .collect()
+}
+
+#[test]
+fn grouped_axis_fans_out_to_every_motor_and_publishes_one_axis_credit() {
+    let mut h = harness_axes(16, vec![0, 0], vec![7, 8]);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(linear_run(2_000, 0.0, 1.0, 2))])
+        .unwrap();
+
+    let mut direction_oids: Vec<u32> = h
+        .sent
+        .lock_ok()
+        .iter()
+        .filter_map(|frame| match frame {
+            StepFrame::SetNextStepDir { oid, .. } => Some(*oid),
+            _ => None,
+        })
+        .collect();
+    direction_oids.sort_unstable();
+    direction_oids.dedup();
+    assert_eq!(direction_oids, vec![7, 8]);
+    let steps_by_oid = h
+        .sent
+        .lock_ok()
+        .iter()
+        .filter_map(|frame| match frame {
+            StepFrame::QueueStep { oid, count, .. } => Some((*oid, u32::from(*count))),
+            _ => None,
+        })
+        .fold(
+            std::collections::HashMap::new(),
+            |mut totals, (oid, count)| {
+                *totals.entry(oid).or_default() += count;
+                totals
+            },
+        );
+    assert_eq!(
+        steps_by_oid,
+        std::collections::HashMap::from([(7, 100), (8, 100)])
+    );
+
+    let heartbeat = h
+        .latest_heartbeat()
+        .expect("frame send publishes a heartbeat");
+    assert_eq!(heartbeat.axes, vec![0]);
+    assert_eq!(heartbeat.consumed_counts, Some(vec![2]));
+    assert_eq!(heartbeat.retired_counts, vec![0]);
+}
+
+#[test]
+fn a_reseeded_grouped_axis_still_steps_every_motor() {
+    let mut h = harness_axes(16, vec![0, 0], vec![7, 8]);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint.reset_axis_position(0, 0).unwrap();
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(linear_run(2_000, 0.0, 1.0, 2))])
+        .unwrap();
+    let steps_by_oid = h
+        .sent
+        .lock_ok()
+        .iter()
+        .filter_map(|frame| match frame {
+            StepFrame::QueueStep { oid, count, .. } => Some((*oid, u32::from(*count))),
+            _ => None,
+        })
+        .fold(
+            std::collections::HashMap::new(),
+            |mut totals, (oid, count)| {
+                *totals.entry(oid).or_default() += count;
+                totals
+            },
+        );
+    assert_eq!(
+        steps_by_oid,
+        std::collections::HashMap::from([(7, 100), (8, 100)])
+    );
+}
+
+#[test]
+fn a_transport_reseed_reaches_every_motor_of_a_grouped_axis() {
+    let mut h = harness_axes(16, vec![0, 0], vec![7, 8]);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint.reset_axis_position(0, 40).unwrap();
+
+    let mut seeds = h.seeds.lock_ok().clone();
+    seeds.sort_unstable();
+    assert_eq!(
+        seeds,
+        vec![(7, 40), (8, 40)],
+        "an AWD twin left unseeded generates no steps after a phase-mode exit"
+    );
+}
+#[test]
+fn selected_motor_frame_advances_grouped_axis_credit() {
+    let mut h = harness_axes(16, vec![0, 0], vec![7, 8]);
+    h.now.store(1_000, Ordering::Relaxed);
+    let mut pieces = linear_run(2_000, 0.0, 0.2, 2);
+    for piece in &mut pieces {
+        piece.motor_mask = 0b0000_0001;
+    }
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(pieces)])
+        .unwrap();
+
+    let heartbeat = h
+        .latest_heartbeat()
+        .expect("frame send publishes a heartbeat");
+    assert_eq!(heartbeat.axes, vec![0]);
+    assert_eq!(heartbeat.consumed_counts, Some(vec![2]));
 }
 
 #[test]
@@ -263,6 +443,8 @@ fn move_slots_reclaim_when_the_mcu_loads_the_run() {
             add: 0,
         }),
         1_000,
+        1_010,
+        0,
     );
     h.endpoint.queue_outbound(
         Outbound::Step(StepFrame::QueueStep {
@@ -272,6 +454,8 @@ fn move_slots_reclaim_when_the_mcu_loads_the_run() {
             add: 0,
         }),
         20_000,
+        20_010,
+        0,
     );
 
     h.endpoint.flush(0, CYCLES_PER_SECOND).unwrap();
@@ -285,8 +469,12 @@ fn move_slots_reclaim_when_the_mcu_loads_the_run() {
 #[test]
 fn barriers_hold_move_slots_until_the_mcu_loads_them() {
     let mut h = harness(1);
-    h.endpoint
-        .queue_outbound(Outbound::Barrier(BarrierId { oid: OID, seq: 1 }), 1_000);
+    h.endpoint.queue_outbound(
+        Outbound::Barrier(BarrierId { oid: OID, seq: 1 }),
+        1_000,
+        1_000,
+        0,
+    );
     h.endpoint.queue_outbound(
         Outbound::Step(StepFrame::QueueStep {
             oid: OID,
@@ -295,6 +483,8 @@ fn barriers_hold_move_slots_until_the_mcu_loads_them() {
             add: 0,
         }),
         20_000,
+        20_010,
+        0,
     );
 
     h.endpoint.flush(0, CYCLES_PER_SECOND).unwrap();
@@ -358,7 +548,9 @@ fn backlog_ceiling_breach_is_fatal() {
                 add: 0,
             }),
             start_clock: u64::MAX,
+            end_clock: u64::MAX,
             enqueue_order: 0,
+            queued_clock: 0,
         }));
     let err = h
         .endpoint
@@ -382,7 +574,9 @@ fn stale_queue_step(start_clock: u64) -> OutboundFrame {
             add: 0,
         }),
         start_clock,
+        end_clock: start_clock + 10,
         enqueue_order: 0,
+        queued_clock: start_clock,
     }
 }
 
@@ -418,6 +612,86 @@ fn a_queue_step_within_the_projection_guard_still_goes_out() {
     assert_eq!(h.sent_moves(), 1);
 }
 
+fn stale_reset_step_clock(start_clock: u64) -> OutboundFrame {
+    OutboundFrame {
+        frame: Outbound::Step(StepFrame::ResetStepClock {
+            oid: OID,
+            clock: start_clock as u32,
+        }),
+        start_clock,
+        end_clock: start_clock,
+        enqueue_order: 0,
+        queued_clock: start_clock,
+    }
+}
+
+fn stale_set_next_step_dir(start_clock: u64) -> OutboundFrame {
+    OutboundFrame {
+        frame: Outbound::Step(StepFrame::SetNextStepDir { oid: OID, dir: 1 }),
+        start_clock,
+        end_clock: start_clock,
+        enqueue_order: 0,
+        queued_clock: start_clock,
+    }
+}
+
+#[test]
+fn a_reset_step_clock_behind_the_mcu_clock_is_fatal_before_egress() {
+    let mut h = harness(BUDGET);
+    h.endpoint.backlog.push_back(stale_reset_step_clock(1_000));
+    h.now.store(1_000_000, Ordering::Relaxed);
+    let err = h.endpoint.tick().unwrap_err();
+    match err {
+        SendError::Fatal(msg) => {
+            assert!(msg.contains("reset_step_clock"), "{msg}");
+            assert!(msg.contains("999000 us behind"), "{msg}");
+            assert!(msg.contains("deficit of 999000 us"), "{msg}");
+            assert!(msg.contains("projected mcu clock 1000000"), "{msg}");
+        }
+        other => panic!("expected Fatal, got {other:?}"),
+    }
+    assert!(
+        h.sent.lock_ok().is_empty(),
+        "a reset_step_clock the mcu would load in the past must never reach the wire — \
+         it starts the step catch-up that starves the scheduler into \
+         \"Rescheduled timer in the past\""
+    );
+}
+
+#[test]
+fn a_set_next_step_dir_behind_the_mcu_clock_is_fatal_before_egress() {
+    let mut h = harness(BUDGET);
+    h.endpoint.backlog.push_back(stale_set_next_step_dir(1_000));
+    h.now.store(1_000_000, Ordering::Relaxed);
+    let err = h.endpoint.tick().unwrap_err();
+    match err {
+        SendError::Fatal(msg) => {
+            assert!(msg.contains("set_next_step_dir"), "{msg}");
+            assert!(msg.contains("999000 us behind"), "{msg}");
+        }
+        other => panic!("expected Fatal, got {other:?}"),
+    }
+    assert!(h.sent.lock_ok().is_empty());
+}
+
+#[test]
+fn a_reset_step_clock_within_the_projection_guard_still_goes_out() {
+    let mut h = harness(BUDGET);
+    let guard_cycles = (CYCLES_PER_SECOND * 500e-6) as u64;
+    h.now.store(1_000_000, Ordering::Relaxed);
+    h.endpoint
+        .backlog
+        .push_back(stale_reset_step_clock(1_000_000 - guard_cycles / 2));
+    h.endpoint.tick().unwrap();
+    assert!(
+        h.sent
+            .lock_ok()
+            .iter()
+            .any(|f| matches!(f, StepFrame::ResetStepClock { .. })),
+        "a reset clock inside the projection floor margin is a normal re-anchor"
+    );
+}
+
 #[test]
 fn multi_lane_commands_leave_in_step_deadline_order() {
     let mut h = harness(8);
@@ -430,6 +704,8 @@ fn multi_lane_commands_leave_in_step_deadline_order() {
                 add: 0,
             }),
             start_clock,
+            start_clock + 10,
+            0,
         );
     }
 
@@ -484,6 +760,41 @@ fn a_dead_egress_surfaces_instead_of_dropping_frames() {
 }
 
 #[test]
+fn a_refused_burst_is_retried_verbatim_with_nothing_duplicated() {
+    let mut h = harness(BUDGET);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.fail_sends.store(true, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .expect_err("a refused burst must surface");
+    let refused = h.attempts.lock_ok().clone();
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert!(refused[0].len() > 1, "{refused:?}");
+    assert_eq!(h.sent_moves(), 0);
+
+    h.fail_sends.store(false, Ordering::Relaxed);
+    h.endpoint.tick().expect("the retry goes through");
+
+    let attempts = h.attempts.lock_ok().clone();
+    assert_eq!(attempts.len(), 2, "{attempts:?}");
+    assert_eq!(
+        attempts[1][..refused[0].len()],
+        refused[0][..],
+        "the retry must re-offer the refused frames in the same order"
+    );
+
+    let mut delivered = attempts[1].clone();
+    delivered.sort();
+    let unique = delivered.len();
+    delivered.dedup();
+    assert_eq!(
+        delivered.len(),
+        unique,
+        "a refused burst must not be dispatched twice"
+    );
+}
+
+#[test]
 fn abort_outbound_discards_unsent_frames() {
     let mut h = harness(BUDGET);
     h.now.store(1_000, Ordering::Relaxed);
@@ -497,7 +808,7 @@ fn abort_outbound_discards_unsent_frames() {
 }
 
 #[test]
-fn a_marked_fresh_epoch_may_start_before_the_queued_stream_ends() {
+fn an_unmarked_overlap_is_a_loud_piece_gap() {
     let mut h = harness(1024);
     h.now.store(1_000, Ordering::Relaxed);
     h.endpoint
@@ -507,13 +818,23 @@ fn a_marked_fresh_epoch_may_start_before_the_queued_stream_ends() {
     let gap = h
         .endpoint
         .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
-        .expect_err("an unmarked overlap is still a loud PieceGap");
+        .expect_err("an unmarked overlap is a loud PieceGap");
     assert!(format!("{gap:?}").contains("PieceGap"), "{gap:?}");
+}
+
+#[test]
+fn a_marked_fresh_epoch_may_start_before_the_queued_stream_ends() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
 
     h.endpoint.mark_reanchor(0, 81_834, Some(CYCLES_PER_SECOND));
     h.endpoint
         .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
         .expect("a marked fresh epoch may start at any clock");
+    h.ack_sent_barriers();
     assert!(
         h.sent
             .lock_ok()
@@ -521,6 +842,184 @@ fn a_marked_fresh_epoch_may_start_before_the_queued_stream_ends() {
             .any(|f| matches!(f, StepFrame::ResetStepClock { .. })),
         "the new epoch must re-anchor the mcu step clock"
     );
+}
+
+#[test]
+fn a_sent_cut_reseeds_from_the_mcu_executed_count() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+    h.endpoint.mark_reanchor(0, 81_834, Some(CYCLES_PER_SECOND));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
+        .unwrap();
+
+    let expected = h.endpoint.pending_cuts[&0].expected_count;
+    h.auto_query.store(false, Ordering::Relaxed);
+    h.query_count.store(expected, Ordering::Relaxed);
+    h.ack_sent_barriers_result()
+        .expect("the injected MCU count matches the host expectation");
+
+    assert_eq!(h.query_calls.load(Ordering::Relaxed), 1);
+    assert!(!h.endpoint.pending_cuts.contains_key(&0));
+    assert!(
+        h.sent
+            .lock_ok()
+            .iter()
+            .any(|frame| { matches!(frame, StepFrame::ResetStepClock { .. }) })
+    );
+}
+
+#[test]
+fn a_sent_cut_count_mismatch_is_fatal() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+    h.endpoint.mark_reanchor(0, 81_834, Some(CYCLES_PER_SECOND));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
+        .unwrap();
+
+    let expected = h.endpoint.pending_cuts[&0].expected_count;
+    h.auto_query.store(false, Ordering::Relaxed);
+    h.query_count.store(expected + 1, Ordering::Relaxed);
+    let err = h
+        .ack_sent_barriers_result()
+        .expect_err("a lost step must abort the cut");
+    let message = format!("{err:?}");
+    assert!(message.contains("host expected"), "{message}");
+    assert!(message.contains("MCU reported"), "{message}");
+    assert!(message.contains("delta"), "{message}");
+}
+
+/// A second idle-resume may be marked while a sent-frame cut still awaits its
+/// barrier ack (the QGL probe cadence on a real transport): its frames are
+/// swallowed into the pending cut's `held` run together with the first
+/// resume's pieces, with an idle hole between them. Completing the cut must
+/// replay `held` through the pending-seam ladder — validating it as one
+/// contiguous fresh stream is the bench `PieceGap` fatal.
+#[test]
+fn a_resume_marked_while_a_cut_awaits_its_ack_replays_through_its_own_seam() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+
+    h.endpoint.mark_reanchor(0, 81_834, Some(CYCLES_PER_SECOND));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
+        .unwrap();
+    assert!(h.endpoint.pending_cuts.contains_key(&0));
+
+    h.endpoint
+        .mark_reanchor(0, 500_000, Some(CYCLES_PER_SECOND));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(500_000, 8, 6.0))])
+        .unwrap();
+    assert_eq!(
+        h.endpoint.pending_cuts[&0].held.len(),
+        16,
+        "both resumes' pieces ride the pending cut"
+    );
+
+    let expected = h.endpoint.pending_cuts[&0].expected_count;
+    h.auto_query.store(false, Ordering::Relaxed);
+    h.query_count.store(expected, Ordering::Relaxed);
+    h.ack_sent_barriers_result()
+        .expect("held frames replay through their own pending seam, not as one stream");
+
+    assert!(
+        h.endpoint.pending_cuts.is_empty(),
+        "the second resume's cut was unsent and resolves host-exact"
+    );
+    assert!(
+        h.endpoint.pending_seams.is_empty(),
+        "the second resume's seam mark was consumed by the held replay"
+    );
+}
+
+/// Trip halt → external count reseed → retract → sent-frame cut →
+/// re-approach. The homing reconcile adopts the mcu's executed count as a
+/// fresh absolute origin; a later cut must re-anchor from that origin (not
+/// the pre-trip stream total), or the re-approach lands the axis offset by
+/// the reseed delta. Reproduces the trip/retract/re-approach sequence the
+/// sim homing e2e tests run.
+#[test]
+fn trip_halt_reseed_retract_then_cut_re_approach_preserve_net_position() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+
+    // Approach 0 → 0.5 mm (50 steps); fully sent.
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .unwrap();
+
+    // Trip: the endstop reconcile reads 20 executed steps and reseeds the
+    // host stream to that count; the mcu counter adopts the same origin.
+    h.endpoint.reset_motor_position(0, 20).unwrap();
+    assert_eq!(
+        h.endpoint.shim.commanded_steps(0),
+        20,
+        "the reseed must move the stream origin to the mcu readback"
+    );
+
+    // Retract 0.2 → 0.5 mm (+30 steps); sent before the cut is marked.
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(linear_run(50_000, 0.2, 0.5, 5))])
+        .unwrap();
+
+    // The re-approach starts a fresh epoch on the exact clock the sent
+    // stream ended: the seam falls inside frames the mcu already received,
+    // so the cut must reconcile through the mcu executed count.
+    let seam = h.endpoint.step_clock[&OID];
+    h.endpoint.mark_reanchor(0, seam, Some(CYCLES_PER_SECOND));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(linear_run(100_000, 0.5, 0.0, 5))])
+        .unwrap();
+
+    let expected = h.endpoint.pending_cuts[&0].expected_count;
+    assert_eq!(
+        expected, 50,
+        "the host expectation is the reseeded origin plus the retract motion"
+    );
+    h.auto_query.store(false, Ordering::Relaxed);
+    h.query_count.store(expected, Ordering::Relaxed);
+    h.ack_sent_barriers_result()
+        .expect("the mcu executed count matches the host bookkeeping");
+
+    assert!(
+        h.endpoint.pending_cuts.is_empty(),
+        "the cut must complete once the barrier acks"
+    );
+    assert_eq!(
+        h.endpoint.shim.halt_at(0, u64::MAX).unwrap().0,
+        0,
+        "trip + retract + re-approach must land on the reseeded origin, not \
+         the pre-trip stream total"
+    );
+}
+
+#[test]
+fn an_unsent_only_cut_does_not_query_the_mcu() {
+    let mut h = harness(4);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .unwrap();
+    h.endpoint
+        .mark_reanchor(0, 500_000, Some(CYCLES_PER_SECOND));
+    h.auto_query.store(false, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(500_000, 4, 1.0))])
+        .expect("an unsent-only cut remains host-exact");
+
+    assert!(h.endpoint.pending_cuts.is_empty());
+    assert_eq!(h.query_calls.load(Ordering::Relaxed), 0);
 }
 
 #[test]
@@ -720,21 +1219,25 @@ fn a_position_seed_of_the_wrong_width_is_fatal() {
     }
 }
 
-fn stepcompress_cfg(mode: SteppingMode, move_queue_slots: u32) -> McuAxisConfig {
+fn stepcompress_cfg(move_queue_slots: u32) -> McuAxisConfig {
     McuAxisConfig {
         mcu_id: MCU_ID,
         axes: vec![0],
         kinematics: 0,
-        caps: Default::default(),
         max_motor_velocity: vec![100.0],
         ethercat: false,
-        stepping_mode: mode,
+        lane_kinds: vec![LaneKind::Pulse],
+        motor_counts: vec![1],
         microstep_distance: vec![0.01],
         invert_dir: vec![false],
         stepper_oids: vec![OID],
-        stepcompress_sample_rate: 10_000.0,
+        stepcompress_sample_rate: 20_000.0,
         move_queue_slots,
         step_pulse_seconds: vec![2e-6],
+        stepcompress_encoders: vec![StepcompressEncoder::Classic],
+        phase_sample_rate: 0.0,
+        phase_ring_depth: 0,
+        stepcompress_max_error_secs: 25e-6,
     }
 }
 
@@ -743,7 +1246,7 @@ fn a_move_queue_too_small_for_the_reserve_is_a_build_error() {
     let (tx, _rx) = crossbeam_channel::unbounded();
     let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
     let err = match build_endpoint(
-        &stepcompress_cfg(SteppingMode::Stepcompress, MOVE_SLOT_RESERVE),
+        &stepcompress_cfg(MOVE_SLOT_RESERVE),
         Weak::new(),
         tx,
         CYCLES_PER_SECOND,
@@ -756,22 +1259,76 @@ fn a_move_queue_too_small_for_the_reserve_is_a_build_error() {
 }
 
 #[test]
-fn piece_mode_mcus_never_reach_endpoint_construction() {
-    let cfgs = [
-        stepcompress_cfg(SteppingMode::Piece, 0),
-        stepcompress_cfg(SteppingMode::Stepcompress, 128),
-    ];
-    let built: Vec<u32> = cfgs
-        .iter()
-        .filter(|c| c.stepping_mode == SteppingMode::Stepcompress)
-        .map(|c| c.move_queue_slots)
-        .collect();
-    assert_eq!(built, vec![128]);
-
+fn classic_encoder_resolves_max_error_ticks_from_the_measured_clock() {
     let (tx, _rx) = crossbeam_channel::unbounded();
     let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
-    let endpoint = build_endpoint(&cfgs[1], Weak::new(), tx, CYCLES_PER_SECOND, clock_of).unwrap();
-    assert_eq!(endpoint.budget, 128 - MOVE_SLOT_RESERVE);
+    let mut cfg = stepcompress_cfg(128);
+    cfg.stepcompress_encoders = vec![StepcompressEncoder::Classic];
+    cfg.stepcompress_max_error_secs = 10e-6;
+    build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of)
+        .expect("10us max_error at 1 MHz resolves to 10 ticks and must build");
+}
+
+#[test]
+fn classic_encoder_with_a_sub_tick_max_error_is_a_build_error() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
+    let mut cfg = stepcompress_cfg(128);
+    cfg.stepcompress_encoders = vec![StepcompressEncoder::Classic];
+    cfg.stepcompress_max_error_secs = 1e-7;
+    let err = match build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of) {
+        Err(e) => e,
+        Ok(_) => panic!("a max_error below one tick must not build an endpoint"),
+    };
+    assert!(err.contains("tick budget"), "{err}");
+}
+
+#[test]
+fn classic_encoder_with_an_overflowing_tick_budget_is_a_build_error() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
+    let mut cfg = stepcompress_cfg(128);
+    cfg.stepcompress_encoders = vec![StepcompressEncoder::Classic];
+    cfg.stepcompress_max_error_secs = 1e6;
+    let err = match build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of) {
+        Err(e) => e,
+        Ok(_) => panic!("a max_error past the u32 tick budget must not build an endpoint"),
+    };
+    assert!(err.contains("tick budget"), "{err}");
+}
+
+#[test]
+fn hp_encoder_builds_an_endpoint_without_a_max_error_budget() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
+    let mut cfg = stepcompress_cfg(128);
+    cfg.stepcompress_encoders = vec![StepcompressEncoder::HighPrecision];
+    cfg.stepcompress_max_error_secs = 0.0;
+    build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of)
+        .expect("hp ignores the max_error budget and must build");
+}
+
+#[test]
+fn one_endpoint_can_mix_classic_and_high_precision_motors() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
+    let mut cfg = stepcompress_cfg(128);
+    cfg.motor_counts = vec![2];
+    cfg.microstep_distance = vec![0.01; 2];
+    cfg.invert_dir = vec![false; 2];
+    cfg.stepper_oids = vec![OID, OID + 1];
+    cfg.step_pulse_seconds = vec![2e-6; 2];
+    cfg.stepcompress_encoders = vec![
+        StepcompressEncoder::Classic,
+        StepcompressEncoder::HighPrecision,
+    ];
+    let endpoint = build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of)
+        .expect("one mcu may opt individual motors into high precision");
+    assert!(matches!(
+        endpoint.shim.motor_encoder(0),
+        StepEncoder::Classic { .. }
+    ));
+    assert_eq!(endpoint.shim.motor_encoder(1), StepEncoder::HighPrecision);
 }
 
 #[test]
@@ -875,21 +1432,17 @@ fn a_lone_follower_lane_reports_retirement_against_its_own_axis() {
     h.endpoint.tick().unwrap();
     h.ack_sent_barriers();
 
-    let heartbeat = h.latest_retired().expect("a heartbeat is always posted");
+    let heartbeat = h.latest_heartbeat().expect("a heartbeat is always posted");
     assert_eq!(
-        heartbeat.len(),
-        usize::from(EXTRUDER_AXIS) + 1,
-        "the heartbeat must be indexed by axis, so it must reach axis {EXTRUDER_AXIS}"
+        heartbeat.axes,
+        vec![EXTRUDER_AXIS],
+        "the heartbeat speaks only for the axes this endpoint drives"
     );
     assert!(
-        heartbeat[usize::from(EXTRUDER_AXIS)] > 0,
+        heartbeat.retired_counts[0] > 0,
         "the pump keys its rings by axis; motor 0's retirements must land on \
-         axis {EXTRUDER_AXIS} or that lane's ring never drains: {heartbeat:?}"
-    );
-    assert_eq!(
-        &heartbeat[..usize::from(EXTRUDER_AXIS)],
-        &[0, 0, 0],
-        "lanes this mcu does not own must not be credited"
+         axis {EXTRUDER_AXIS} or that lane's ring never drains: {:?}",
+        heartbeat.retired_counts
     );
 }
 
@@ -914,6 +1467,40 @@ fn a_virgin_follower_lane_emits_frames_and_a_barrier_on_first_motion() {
         !h.barriers.lock_ok().is_empty(),
         "without a barrier the mcu can never ack this lane's retirement"
     );
+}
+
+#[test]
+fn four_motor_fresh_anchor_emits_and_releases_each_retirement_barrier() {
+    let oids = vec![6, 7, 8, 9];
+    let mut h = harness_axes(1024, vec![0, 1, 2, 3], oids.clone());
+    h.now.store(1_000, Ordering::Relaxed);
+    for axis in 0..4 {
+        h.endpoint
+            .mark_reanchor(axis, 2_000, Some(CYCLES_PER_SECOND));
+    }
+    h.endpoint
+        .send_frames(
+            MCU_ID,
+            &(0..4)
+                .map(|axis| frame_for_axis(axis, ramp(2_000, 64)))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+
+    h.now.store(10_000_000, Ordering::Relaxed);
+    h.endpoint.tick().unwrap();
+    let issued = std::mem::take(&mut *h.barriers.lock_ok());
+    assert_eq!(issued.len(), oids.len(), "issued={issued:?}");
+    assert_eq!(issued.iter().map(|&(oid, _)| oid).collect::<Vec<_>>(), oids);
+
+    for &(oid, seq) in &issued[..3] {
+        h.endpoint.on_barrier_ack(oid, seq).unwrap();
+    }
+    assert_eq!(h.endpoint.published_counts(), vec![0; 4]);
+
+    let (oid, seq) = issued[3];
+    h.endpoint.on_barrier_ack(oid, seq).unwrap();
+    assert_eq!(h.endpoint.published_counts(), vec![64; 4]);
 }
 
 #[test]
@@ -1010,7 +1597,7 @@ fn barrier_acknowledgements_cross_rollover_and_ignore_pre_wrap_replay() {
 
     for (index, seq) in [u32::MAX - 1, u32::MAX, 0].into_iter().enumerate() {
         let retired = (index + 1) as u32;
-        h.endpoint.publish_retirement(&[retired]);
+        h.endpoint.publish_retirement(&[retired], 0);
         h.endpoint.flush(0, CYCLES_PER_SECOND).unwrap();
         let issued: Vec<(u32, u32)> = std::mem::take(&mut h.barriers.lock_ok());
         assert_eq!(issued, vec![(OID, seq)]);
@@ -1043,7 +1630,15 @@ fn a_barrier_ack_ahead_of_what_was_issued_is_fatal() {
         .on_barrier_ack(OID, issued.wrapping_add(5))
         .expect_err("an ack for a barrier never issued must be fatal");
     assert!(format!("{err:?}").contains("ahead of"), "{err:?}");
+}
 
+#[test]
+fn a_barrier_ack_for_an_unknown_oid_is_fatal() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 64))])
+        .unwrap();
     let err = h
         .endpoint
         .on_barrier_ack(OID + 100, 0)
@@ -1194,4 +1789,665 @@ fn a_budget_capped_flush_still_batches_what_it_may_send() {
     assert_eq!(bursts.len(), 1, "{bursts:?}");
     assert_eq!(h.sent_moves(), 4, "the move-slot budget still bounds sends");
     assert!(!h.endpoint.backlog.is_empty());
+}
+
+/// Mirrors `STEP_CLOCK_HORIZON_TICKS` in `src/stepper_classic.c`, where a step
+/// clock this far from the MCU's own clock shuts the board down with
+/// "Step clock beyond sync horizon".
+const MCU_STEP_CLOCK_HORIZON_TICKS: u64 = 3 << 28;
+
+/// The MCU guard's bound must admit every frame the endpoint can legitimately
+/// emit: the drain window reaches `SEND_LEAD_SECONDS` past the projected MCU
+/// clock, which is a fraction of the horizon at every bench frequency.
+#[test]
+fn the_mcu_horizon_admits_the_endpoints_full_send_lead() {
+    for freq in [1_000_000.0_f64, 168_000_000.0, 400_000_000.0, 480_000_000.0] {
+        let lead_ticks = (SEND_LEAD_SECONDS * freq) as u64;
+        assert!(
+            lead_ticks < MCU_STEP_CLOCK_HORIZON_TICKS,
+            "at {freq} Hz the endpoint reaches {lead_ticks} ticks ahead, above the \
+             {MCU_STEP_CLOCK_HORIZON_TICKS}-tick mcu horizon — the guard would reject \
+             healthy frames"
+        );
+    }
+}
+
+/// Guard interplay: with a healthy clock record every step clock the endpoint
+/// puts on the wire lands inside `SEND_LEAD_SECONDS` of the MCU clock at send
+/// time, and therefore far inside the MCU's horizon. The MCU guard can only
+/// fire on a wrong host record, never on healthy pacing.
+#[test]
+fn no_emitted_step_clock_leaves_the_mcu_sync_horizon() {
+    let dur = 0.020_f32;
+    let span = (f64::from(dur) * CYCLES_PER_SECOND) as u64;
+    let mut at = 0.0_f32;
+    let slow_ramp: Vec<PieceEntry> = (0..48)
+        .map(|i| {
+            let from = at;
+            at += 0.05 * (1 + (i % 4)) as f32;
+            piece(2_000 + span * i as u64, from, at, dur)
+        })
+        .collect();
+    let mut h = harness(64);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(slow_ramp)])
+        .unwrap();
+
+    let lead_ticks = (SEND_LEAD_SECONDS * CYCLES_PER_SECOND) as u64;
+    let mut cursor: Option<u64> = None;
+    let mut checked = 0usize;
+    let mut now = 1_000u64;
+    let mut rounds_with_frames = 0usize;
+    let mut checked_this_round = false;
+    for _ in 0..260 {
+        for frame in std::mem::take(&mut *h.sent.lock_ok()) {
+            let first_step = match frame {
+                StepFrame::ResetStepClock { clock, .. } => {
+                    cursor = Some(u64::from(clock));
+                    u64::from(clock)
+                }
+                StepFrame::QueueStep {
+                    interval,
+                    count,
+                    add,
+                    ..
+                } => {
+                    let at = cursor.expect("a queue_step must follow a reset_step_clock");
+                    let first = at + u64::from(interval);
+                    cursor = Some(at.saturating_add_signed(queue_step_span(interval, count, add)));
+                    first
+                }
+                StepFrame::SetNextStepDir { .. } | StepFrame::QueueStepHp { .. } => continue,
+            };
+            checked += 1;
+            checked_this_round = true;
+            let distance = first_step as i64 - now as i64;
+            assert!(
+                distance <= lead_ticks as i64,
+                "step clock {first_step} is {distance} ticks ahead of the mcu clock \
+                 {now} — past the {lead_ticks}-tick send lead"
+            );
+            assert!(
+                distance.unsigned_abs() < MCU_STEP_CLOCK_HORIZON_TICKS,
+                "step clock {first_step} is {distance} ticks from the mcu clock {now} — \
+                 the mcu would shut down on the sync horizon"
+            );
+        }
+        if checked_this_round {
+            rounds_with_frames += 1;
+            checked_this_round = false;
+        }
+        now += 5_000;
+        h.now.store(now, Ordering::Relaxed);
+        h.endpoint.tick().unwrap();
+        h.ack_sent_barriers();
+    }
+    assert!(
+        checked >= 10,
+        "the run must exercise a real volley of step frames, saw {checked}"
+    );
+    assert!(
+        rounds_with_frames > 1,
+        "the endpoint must have released frames across several ticks for the send \
+         lead to be under test, saw {rounds_with_frames} rounds with frames"
+    );
+}
+
+fn four_motor_harness() -> (Harness, Vec<u32>) {
+    let oids = vec![6, 7, 8, 9];
+    let mut h = harness_axes(1024, vec![0, 1, 2, 3], oids.clone());
+    h.now.store(1_000, Ordering::Relaxed);
+    for axis in 0..4 {
+        h.endpoint
+            .mark_reanchor(axis, 2_000, Some(CYCLES_PER_SECOND));
+    }
+    (h, oids)
+}
+
+/// Drive one retirement cohort across all four lanes and return the barriers
+/// the endpoint put on the wire for it.
+fn run_cohort(h: &mut Harness, start: u64, from_mm: f32) -> Vec<(u32, u32)> {
+    h.now.store(start.saturating_sub(1_000), Ordering::Relaxed);
+    h.endpoint
+        .send_frames(
+            MCU_ID,
+            &(0..4)
+                .map(|axis| frame_for_axis(axis, ramp_from(start, 64, from_mm)))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    h.now.store(start + 10_000_000, Ordering::Relaxed);
+    h.endpoint.tick().unwrap();
+    std::mem::take(&mut *h.barriers.lock_ok())
+}
+
+/// The bench saw one lane collect four barriers per volley while its siblings
+/// collected one — the signature of a motor index leaking into the oid the
+/// barrier is addressed to. Every cohort must address each oid exactly once.
+#[test]
+fn every_cohort_addresses_each_oid_with_exactly_one_barrier() {
+    let (mut h, oids) = four_motor_harness();
+    let mut all = Vec::new();
+    let mut start = 2_000u64;
+    let mut from_mm = 0.0_f32;
+    for cohort in 0..3 {
+        let issued = run_cohort(&mut h, start, from_mm);
+        assert_eq!(
+            issued.iter().map(|&(oid, _)| oid).collect::<Vec<_>>(),
+            oids,
+            "cohort {cohort} must carry one barrier per configured oid: {issued:?}"
+        );
+        for &(oid, seq) in &issued {
+            h.endpoint.on_barrier_ack(oid, seq).unwrap();
+        }
+        assert_eq!(
+            h.endpoint.published_counts(),
+            vec![64 * (cohort + 1); 4],
+            "cohort {cohort} must retire once every lane's barrier is acked"
+        );
+        all.extend(issued);
+        start += 2_000 * 64;
+        from_mm += 8.0;
+    }
+    let mut unique = all.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        all.len(),
+        "no (oid, seq) may be issued twice: {all:?}"
+    );
+}
+
+#[test]
+fn a_barrier_ack_replayed_by_the_mcu_retires_its_cohort_once() {
+    let (mut h, oids) = four_motor_harness();
+    let issued = run_cohort(&mut h, 2_000, 0.0);
+    assert_eq!(issued.len(), oids.len(), "{issued:?}");
+
+    for &(oid, seq) in &issued {
+        for _ in 0..4 {
+            h.endpoint
+                .on_barrier_ack(oid, seq)
+                .expect("a replayed ack is a duplicate receipt, not a protocol break");
+        }
+    }
+    assert_eq!(h.endpoint.published_counts(), vec![64; 4]);
+
+    let next = run_cohort(&mut h, 2_000 + 2_000 * 64, 8.0);
+    assert_eq!(
+        next.iter().map(|&(oid, _)| oid).collect::<Vec<_>>(),
+        oids,
+        "replayed acks must not consume the next cohort's barriers: {next:?}"
+    );
+}
+
+#[test]
+fn a_lost_barrier_ack_trips_the_deadline_instead_of_waiting_forever() {
+    let deadline_ticks = (BARRIER_ACK_DEADLINE_SECONDS * CYCLES_PER_SECOND) as u64;
+    let (mut h, _) = four_motor_harness();
+    let issued = run_cohort(&mut h, 2_000, 0.0);
+    h.endpoint.barrier_ack_deadline_secs = BARRIER_ACK_DEADLINE_SECONDS;
+    let (lost_oid, lost_seq) = *issued.last().expect("the cohort issued barriers");
+    for &(oid, seq) in &issued[..issued.len() - 1] {
+        h.endpoint.on_barrier_ack(oid, seq).unwrap();
+    }
+    assert_eq!(
+        h.endpoint.published_counts(),
+        vec![0; 4],
+        "the cohort must still be waiting on the lost ack"
+    );
+    let sent_clock = h
+        .endpoint
+        .sent_barriers
+        .iter()
+        .find(|sent| sent.id.oid == lost_oid && sent.id.seq == lost_seq)
+        .map(|sent| sent.sent_clock)
+        .expect("the lost barrier reached the wire");
+
+    h.now
+        .store(sent_clock + deadline_ticks - 1, Ordering::Relaxed);
+    h.endpoint
+        .tick()
+        .expect("inside the deadline a barrier is merely in flight");
+
+    h.now.store(sent_clock + deadline_ticks, Ordering::Relaxed);
+    let err = h
+        .endpoint
+        .tick()
+        .expect_err("a barrier the mcu never acks must not park the cohort forever");
+    let SendError::Fatal(message) = err else {
+        panic!("a lost barrier ack is unrecoverable: {err:?}");
+    };
+    assert!(
+        message.contains(&format!("oid={lost_oid} seq={lost_seq}")),
+        "the fatal must name the outstanding barrier: {message}"
+    );
+    for &(oid, seq) in &issued[..issued.len() - 1] {
+        assert!(
+            message.contains(&format!("oid={oid} acked_through_seq={seq}")),
+            "the fatal must carry the received-ack ledger: {message}"
+        );
+    }
+    let escalated = h.heartbeats.try_iter().any(|msg| {
+        matches!(
+            msg,
+            PumpMsg::StepcompressFatal { mcu_id, .. } if mcu_id == MCU_ID
+        )
+    });
+    assert!(
+        escalated,
+        "the endpoint must escalate to the pump, or the drain still hangs"
+    );
+}
+
+fn hold_piece(start_time: u64, at_mm: f32, secs: f32) -> PieceEntry {
+    let mut entry = PieceEntry::zeroed();
+    entry.start_time = start_time;
+    entry.duration = secs;
+    entry.coeff_count = 1;
+    entry.coeffs[0] = at_mm;
+    entry
+}
+
+/// [`ramp_from`] on an arbitrary epoch slope: a lane that resumed on its own
+/// re-anchored epoch carries piece spans measured with that epoch's freq, not
+/// the endpoint's live clock rate.
+fn epoch_ramp(start_time: u64, count: usize, freq: f64) -> Vec<PieceEntry> {
+    epoch_ramp_from(start_time, count, freq, 0.0, 1.0)
+}
+
+fn epoch_ramp_from(
+    start_time: u64,
+    count: usize,
+    freq: f64,
+    start_mm: f32,
+    direction: f32,
+) -> Vec<PieceEntry> {
+    let dur = 0.002_f32;
+    let span = (f64::from(dur) * freq) as u64;
+    let mut at = start_mm;
+    (0..count)
+        .map(|i| {
+            let from = at;
+            at += direction * 0.05 * (1 + (i % 4)) as f32;
+            piece(start_time + span * i as u64, from, at, dur)
+        })
+        .collect()
+}
+
+/// The pacer used to only log a fatal tick, so a frame the egress guard
+/// refused was retried every 10 ms forever: the backlog froze, the retirement
+/// cohort never released and klippy's `wait_moves` hung with the hotend parked
+/// hot (bench, 2026-08-17 10:31). A fatal is unrecoverable by construction —
+/// it must escalate once and take the endpoint out of the rotation.
+#[test]
+fn a_guard_tripped_head_frame_escalates_once_and_latches() {
+    let mut h = harness(1024);
+    h.now.store(5_000_000, Ordering::Relaxed);
+    let err = h
+        .endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
+        .expect_err("a volley whose head is seconds in the past must not reach the wire");
+    let SendError::Fatal(message) = err else {
+        panic!("a late volley head is unrecoverable: {err:?}");
+    };
+    assert!(message.contains("reset_step_clock"), "{message}");
+    assert!(h.endpoint.is_fatal());
+
+    let attempts_at_latch = h.attempts.lock_ok().len();
+    for _ in 0..4 {
+        let repeat = h
+            .endpoint
+            .tick()
+            .expect_err("a latched endpoint must refuse every further tick");
+        let SendError::Fatal(repeat) = repeat else {
+            panic!("the latched error must stay fatal: {repeat:?}");
+        };
+        assert_eq!(repeat, message);
+    }
+    assert_eq!(
+        h.attempts.lock_ok().len(),
+        attempts_at_latch,
+        "a latched endpoint must not touch the wire again"
+    );
+
+    let escalations = h
+        .heartbeats
+        .try_iter()
+        .filter(|msg| matches!(msg, PumpMsg::StepcompressFatal { mcu_id, .. } if *mcu_id == MCU_ID))
+        .count();
+    assert_eq!(
+        escalations, 1,
+        "the pump must be told exactly once, so it exits and klippy's wait_moves raises"
+    );
+}
+
+#[test]
+fn the_pacer_stops_ticking_an_endpoint_that_went_fatal() {
+    let mut h = harness(BUDGET);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .expect("the first volley is punctual; the budget holds the rest back");
+    h.now.store(5_000_000, Ordering::Relaxed);
+    let Harness {
+        endpoint,
+        clock_calls,
+        heartbeats,
+        ..
+    } = h;
+
+    let endpoint = Arc::new(Mutex::new(endpoint));
+    let pacer = StepcompressPacer::spawn(vec![Arc::clone(&endpoint)]);
+    std::thread::sleep(PACER_TICK * 10);
+    let after_latch = clock_calls.load(Ordering::Relaxed);
+    std::thread::sleep(PACER_TICK * 10);
+    assert_eq!(
+        clock_calls.load(Ordering::Relaxed),
+        after_latch,
+        "the pacer must drop a fatal endpoint instead of retrying it every tick"
+    );
+    drop(pacer);
+
+    assert!(endpoint.lock_ok().is_fatal());
+    let escalations = heartbeats
+        .try_iter()
+        .filter(|msg| matches!(msg, PumpMsg::StepcompressFatal { mcu_id, .. } if *mcu_id == MCU_ID))
+        .count();
+    assert_eq!(escalations, 1);
+}
+
+/// A lane holds — Z or the extruder between layer changes — for minutes
+/// before it steps again, and `needs_reset` stays latched for the whole hold:
+/// the stream's committed origin is the seam the hold began on. Basing the
+/// resumed volley's reset_step_clock on that origin hands the mcu a frame
+/// minutes in the past; the egress guard then refuses the head of the volley
+/// and the lane never resumes (bench, 2026-08-17 10:31:29 — reset at the
+/// 10:31:28.806 anchor clock, 224 ms late). The reset must track the volley's
+/// own first step, which the drain releases inside the send lead.
+#[test]
+fn a_lane_that_holds_before_it_steps_resumes_on_a_punctual_reset() {
+    const EPOCH_FREQ: f64 = CYCLES_PER_SECOND * 1.000_002;
+    const HOLD_SECS: f32 = 5.0;
+    let anchor = 10_000_000_u64;
+    let anchor_lead = (0.5 * CYCLES_PER_SECOND) as u64;
+    let send_lead = (SEND_LEAD_SECONDS * CYCLES_PER_SECOND) as u64;
+    let tick_ticks = CYCLES_PER_SECOND as u64 / 10;
+
+    let mut h = harness(1024);
+    h.now.store(anchor - anchor_lead, Ordering::Relaxed);
+    h.endpoint.mark_reanchor(0, anchor, Some(EPOCH_FREQ));
+
+    let hold = hold_piece(anchor, 0.0, HOLD_SECS);
+    #[allow(clippy::cast_possible_truncation)]
+    let motion_start = hold.end_time(EPOCH_FREQ as f32);
+    let mut pieces = vec![hold];
+    pieces.extend(epoch_ramp(motion_start, 8, EPOCH_FREQ));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(pieces)])
+        .expect("a marked fresh epoch may start at any clock");
+
+    let mut emitted = None;
+    for _ in 0..(HOLD_SECS as u64 * 10 + 20) {
+        let now = h.now.load(Ordering::Relaxed) + tick_ticks;
+        h.now.store(now, Ordering::Relaxed);
+        h.endpoint
+            .tick()
+            .expect("a lane resuming from a hold must never hand the mcu a late frame");
+        let reset = h.sent.lock_ok().iter().find_map(|f| match f {
+            StepFrame::ResetStepClock { clock, .. } => Some(u64::from(*clock)),
+            _ => None,
+        });
+        if let Some(reset) = reset {
+            emitted = Some((reset, now));
+            break;
+        }
+    }
+
+    let (reset, now_at_send) = emitted.expect("the resumed lane must re-anchor the mcu step clock");
+    assert!(
+        reset >= now_at_send,
+        "reset {reset} reached the wire {} ticks behind the mcu clock {now_at_send}",
+        now_at_send - reset
+    );
+    assert!(
+        reset <= now_at_send + send_lead,
+        "reset {reset} is further than the {send_lead}-tick send lead ahead of {now_at_send}"
+    );
+}
+
+/// The same hold, resumed the other way round. `set_next_step_dir` carries no
+/// clock on the wire, so its guard clock is pure host bookkeeping — and it
+/// used to be the lane's cursor from *before* the hold, seconds behind the
+/// projected mcu clock, while the volley it heads is punctual (bench,
+/// 2026-08-17 10:43 — dir frame 586 ms late, print killed). A clock-less
+/// frame must be timed by the step it applies to.
+#[test]
+fn a_lane_that_reverses_after_a_hold_times_its_dir_frame_by_the_step_it_heads() {
+    const EPOCH_FREQ: f64 = CYCLES_PER_SECOND * 1.000_002;
+    const HOLD_SECS: f32 = 5.0;
+    const RISE: usize = 6;
+    let anchor = 10_000_000_u64;
+    let anchor_lead = (0.5 * CYCLES_PER_SECOND) as u64;
+    let tick_ticks = CYCLES_PER_SECOND as u64 / 10;
+
+    let mut h = harness(1024);
+    h.now.store(anchor - anchor_lead, Ordering::Relaxed);
+    h.endpoint.mark_reanchor(0, anchor, Some(EPOCH_FREQ));
+
+    let mut pieces = epoch_ramp(anchor, RISE, EPOCH_FREQ);
+    let top_mm = pieces.last().map(|p| p.coeffs[0] + p.coeffs[1]).unwrap();
+    #[allow(clippy::cast_possible_truncation)]
+    let hold_start = pieces.last().unwrap().end_time(EPOCH_FREQ as f32);
+    let hold = hold_piece(hold_start, top_mm, HOLD_SECS);
+    #[allow(clippy::cast_possible_truncation)]
+    let resume_start = hold.end_time(EPOCH_FREQ as f32);
+    pieces.push(hold);
+    pieces.extend(epoch_ramp_from(
+        resume_start,
+        RISE,
+        EPOCH_FREQ,
+        top_mm,
+        -1.0,
+    ));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(pieces)])
+        .expect("a marked fresh epoch may start at any clock");
+
+    let mut reversed_at = None;
+    for _ in 0..(HOLD_SECS as u64 * 10 + 40) {
+        let now = h.now.load(Ordering::Relaxed) + tick_ticks;
+        h.now.store(now, Ordering::Relaxed);
+        h.endpoint
+            .tick()
+            .expect("a lane reversing out of a hold must never hand the mcu a late frame");
+        let sent = h.sent.lock_ok();
+        if let Some(index) = sent
+            .iter()
+            .position(|f| matches!(f, StepFrame::SetNextStepDir { dir: 0, .. }))
+        {
+            reversed_at = Some((index, sent.len()));
+            break;
+        }
+    }
+
+    let (dir_index, sent_len) = reversed_at.expect("the resumed lane must reverse the mcu latch");
+    assert!(
+        dir_index + 1 < sent_len,
+        "the reversing dir frame must be followed by the run it applies to"
+    );
+    assert!(
+        matches!(h.sent.lock_ok()[dir_index + 1], StepFrame::QueueStep { .. }),
+        "set_next_step_dir must precede the queue_step it applies to: {:?}",
+        &h.sent.lock_ok()[dir_index..],
+    );
+}
+
+/// A sent-frame cut parks the lane until the mcu acks the barrier and
+/// `complete_cut` re-anchors it with a fresh `reset_step_clock`. The mcu holds
+/// every stepper in that window under `SF_NEED_RESET` and silently discards any
+/// `queue_step` that arrives before the reset (`stepper_classic.c`
+/// `enqueue_move`), so nothing may leave the endpoint for a cut-pending oid
+/// until its reset heads the resumed volley.
+#[test]
+fn a_cut_pending_lane_sends_nothing_before_its_reset() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+    h.endpoint.mark_reanchor(0, 81_834, Some(CYCLES_PER_SECOND));
+    h.auto_query.store(false, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
+        .unwrap();
+    assert!(h.endpoint.pending_cuts.contains_key(&0));
+
+    let parked = h.sent.lock_ok().len();
+    for _ in 0..20 {
+        let now = h.now.load(Ordering::Relaxed) + 2_000;
+        h.now.store(now, Ordering::Relaxed);
+        h.endpoint.tick().expect("a parked cut is not a fault");
+    }
+    assert_eq!(
+        h.sent.lock_ok().len(),
+        parked,
+        "frames escaped a cut-pending lane before its reset: {:?}",
+        &h.sent.lock_ok()[parked..],
+    );
+
+    let expected = h.endpoint.pending_cuts[&0].expected_count;
+    h.query_count.store(expected, Ordering::Relaxed);
+    h.ack_sent_barriers_result()
+        .expect("the injected mcu count matches the host expectation");
+    let sent = h.sent.lock_ok();
+    let reset = sent[parked..]
+        .iter()
+        .position(|f| matches!(f, StepFrame::ResetStepClock { .. }))
+        .expect("the completed cut re-anchors the lane");
+    assert!(
+        sent[parked..][..reset]
+            .iter()
+            .all(|f| !matches!(f, StepFrame::QueueStep { .. })),
+        "the resumed volley must open with its reset: {:?}",
+        &sent[parked..],
+    );
+}
+
+/// A cut barrier that never reaches the wire is the endpoint's one unbounded
+/// silent wedge: the lane's pieces sit in `PendingCut::held`, `complete_cut`
+/// only ever runs on the ack, and the deadline used to skip any barrier absent
+/// from `sent_barriers` — so nothing executed, nothing retired, no error, and
+/// the sole symptom was the pump's drip cohort stalling at floor 0 (bench
+/// session k-1786973103: every axis "executed 0 queued 94 in_flight 194").
+/// Here a saturated move-slot budget holds the barrier in the backlog.
+#[test]
+fn a_cut_barrier_that_never_reaches_the_wire_trips_the_deadline() {
+    const DEADLINE_SECS: f64 = 0.002;
+    let deadline_ticks = (DEADLINE_SECS * CYCLES_PER_SECOND) as u64;
+    let mut h = harness(1);
+    h.endpoint.barrier_ack_deadline_secs = DEADLINE_SECS;
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
+        .unwrap();
+
+    let boundary = h.endpoint.last_sent_boundary[&OID];
+    h.endpoint
+        .mark_reanchor(0, boundary, Some(CYCLES_PER_SECOND));
+    h.auto_query.store(false, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(boundary, 8, 5.0))])
+        .unwrap();
+    assert!(
+        h.endpoint.pending_cuts.contains_key(&0),
+        "the seam falls inside sent frames, so the cut must reconcile"
+    );
+    let queued_clock = h
+        .endpoint
+        .backlog
+        .iter()
+        .find_map(|out| match out.frame {
+            Outbound::Barrier(_) => Some(out.queued_clock),
+            Outbound::Step(_) => None,
+        })
+        .expect("the saturated budget holds the cut barrier in the backlog");
+    assert!(
+        h.barriers.lock_ok().is_empty(),
+        "the barrier must not have reached the wire"
+    );
+
+    h.now
+        .store(queued_clock + deadline_ticks - 1, Ordering::Relaxed);
+    h.endpoint
+        .tick()
+        .expect("inside the deadline a backlogged barrier is merely waiting on a slot");
+
+    h.now
+        .store(queued_clock + deadline_ticks, Ordering::Relaxed);
+    let err = h
+        .endpoint
+        .tick()
+        .expect_err("a barrier that never reaches the wire must not park the lane forever");
+    let SendError::Fatal(message) = err else {
+        panic!("a wedged cut is unrecoverable: {err:?}");
+    };
+    assert!(message.contains("backlogged, never sent"), "{message}");
+    assert!(message.contains(&format!("oid={OID}")), "{message}");
+}
+
+#[test]
+fn host_buzz_returns_to_base_without_advancing_retirement() {
+    let mut h = harness(1024);
+    h.endpoint
+        .arm_buzz(0b001, 0, 50_000, 50_000, 100_000, 20, 2)
+        .expect("idle pulse lane accepts a buzz");
+    for tick in 1..=20 {
+        h.now
+            .store(tick * (CYCLES_PER_SECOND as u64 / 100), Ordering::Relaxed);
+        h.endpoint.tick().expect("buzz tick");
+    }
+    assert!(h.endpoint.buzz.is_none());
+    assert_eq!(h.endpoint.shim.commanded_steps(0), 0);
+    assert!(h.sent_moves() > 0);
+    let (_, retired) = h.endpoint.counts_by_axis(&h.endpoint.shim.retired_counts());
+    assert_eq!(retired, vec![0]);
+}
+
+#[test]
+fn host_buzz_anchors_to_the_sampled_position_not_quantized_steps() {
+    let mut h = harness(1024);
+    h.endpoint
+        .shim
+        .push_pieces(0, &[piece(100_000, 0.0, 0.004, 0.01)])
+        .expect("stage a sub-step move");
+    assert!(
+        h.endpoint
+            .shim
+            .drain(u64::MAX)
+            .expect("sample the sub-step move")
+            .is_empty()
+    );
+    assert_eq!(h.endpoint.shim.commanded_steps(0), 0);
+    h.endpoint
+        .arm_buzz(0b001, 0, 70_000, 230_000, 23_500, 6, 1)
+        .expect("idle lane accepts the chirp");
+    let base = h.endpoint.buzz.as_ref().expect("armed buzz").bases[0];
+    assert!((base - 0.004).abs() < f32::EPSILON);
+}
+
+#[test]
+fn host_buzz_rejects_a_lane_with_queued_trajectory() {
+    let mut h = harness(1024);
+    h.endpoint
+        .shim
+        .push_pieces(0, &[piece(100_000, 0.0, 1.0, 0.01)])
+        .expect("stage trajectory");
+    let error = h
+        .endpoint
+        .arm_buzz(0b001, 0, 50_000, 50_000, 100_000, 20, 2)
+        .expect_err("queued trajectory must reject a buzz");
+    assert!(error.to_string().contains("trajectory remains queued"));
 }

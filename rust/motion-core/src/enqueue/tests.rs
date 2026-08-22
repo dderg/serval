@@ -1,6 +1,6 @@
 use super::*;
 use crate::kinematics::KinematicsModule;
-use crate::mcu_config::{AXIS_X, AXIS_Y, KINEMATICS_COREXY, McuCaps};
+use crate::mcu_config::{AXIS_X, AXIS_Y, KINEMATICS_COREXY};
 
 fn constant_axis(value: f64, n_pieces: usize, piece_dur: f64) -> ScalarNurbs {
     let bern = [value; 4];
@@ -55,9 +55,6 @@ fn cartesian_x_axis_yields_pieces_with_projected_start_time() {
         mcu_id: 7,
         axes: vec![AXIS_X, AXIS_Y, 2],
         kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![f64::INFINITY; 3],
         ..Default::default()
     }];
@@ -67,6 +64,7 @@ fn cartesian_x_axis_yields_pieces_with_projected_start_time() {
         &cfg,
         &crate::enqueue::EnqueueCtx {
             epoch_freq: &|_| None,
+            lane_is_phase: &|_| false,
             t0: 100.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -107,9 +105,6 @@ fn ec_cfg() -> Vec<McuAxisConfig> {
         mcu_id: 9,
         axes: vec![AXIS_X, AXIS_Y],
         kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![f64::INFINITY; 2],
         ..Default::default()
     }]
@@ -124,6 +119,7 @@ fn ctx_with_epoch(
 ) -> crate::enqueue::EnqueueCtx<'static, impl Fn(u32, f64) -> u64> {
     crate::enqueue::EnqueueCtx {
         epoch_freq: &|_| None,
+        lane_is_phase: &|_| false,
         t0: 100.0,
         epoch,
         host_now: 0.0,
@@ -225,9 +221,6 @@ fn corexy_x_slot_is_x_plus_y() {
         mcu_id: 1,
         axes: vec![AXIS_X, AXIS_Y],
         kinematics: KINEMATICS_COREXY,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![f64::INFINITY; 2],
         ..Default::default()
     }];
@@ -251,6 +244,7 @@ fn corexy_x_slot_is_x_plus_y() {
         &cfg,
         &crate::enqueue::EnqueueCtx {
             epoch_freq: &|_| None,
+            lane_is_phase: &|_| false,
             t0: 0.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -333,9 +327,6 @@ fn flatten_axis_max_piece_secs_splits_long_piece() {
         mcu_id: 7,
         axes: vec![AXIS_X],
         kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![f64::INFINITY],
         ..Default::default()
     }];
@@ -366,6 +357,7 @@ fn flatten_axis_max_piece_secs_splits_long_piece() {
         &cfg,
         &crate::enqueue::EnqueueCtx {
             epoch_freq: &|_| None,
+            lane_is_phase: &|_| false,
             t0: 100.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -412,9 +404,6 @@ fn axis_cfg_single(axis: usize) -> Vec<McuAxisConfig> {
         mcu_id: 1,
         axes: vec![axis],
         kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![f64::INFINITY],
         ..Default::default()
     }]
@@ -442,6 +431,7 @@ fn constant_follower_axis_merges_all_knots_to_one_piece() {
         &axis_cfg_single(0),
         &crate::enqueue::EnqueueCtx {
             epoch_freq: &|_| None,
+            lane_is_phase: &|_| false,
             t0: 0.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -508,6 +498,7 @@ fn motion_constant_motion_merges_only_the_constant_run() {
         &axis_cfg_single(0),
         &crate::enqueue::EnqueueCtx {
             epoch_freq: &|_| None,
+            lane_is_phase: &|_| false,
             t0: 0.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -582,6 +573,7 @@ fn constant_runs_at_different_values_do_not_merge_across_motion_boundary() {
         &axis_cfg_single(0),
         &crate::enqueue::EnqueueCtx {
             epoch_freq: &|_| None,
+            lane_is_phase: &|_| false,
             t0: 0.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -664,6 +656,7 @@ fn constant_run_subdivides_under_max_piece_secs_after_merging() {
         &axis_cfg_single(0),
         &crate::enqueue::EnqueueCtx {
             epoch_freq: &|_| None,
+            lane_is_phase: &|_| false,
             t0: 0.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -745,6 +738,7 @@ fn nonzero_curve_base_preserves_host_times() {
         &axis_cfg_single(0),
         &crate::enqueue::EnqueueCtx {
             epoch_freq: &|_| None,
+            lane_is_phase: &|_| false,
             t0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -840,9 +834,6 @@ fn test_mcu_configs_one_axis(axis: usize) -> Vec<McuAxisConfig> {
         mcu_id: 1,
         axes: vec![axis],
         kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![f64::INFINITY],
         ..Default::default()
     }]
@@ -883,6 +874,7 @@ fn enqueue_stamps_motor_mask_onto_every_piece() {
         &cfgs,
         &crate::enqueue::EnqueueCtx {
             epoch_freq: &|_| None,
+            lane_is_phase: &|_| false,
             t0: 0.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -921,6 +913,7 @@ fn overlay_pieces_are_relativized_to_start_at_zero() {
         &cfg,
         &crate::enqueue::EnqueueCtx {
             epoch_freq: &|_| None,
+            lane_is_phase: &|_| false,
             t0: 0.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -947,6 +940,7 @@ fn overlay_pieces_are_relativized_to_start_at_zero() {
         &cfg,
         &crate::enqueue::EnqueueCtx {
             epoch_freq: &|_| None,
+            lane_is_phase: &|_| false,
             t0: 0.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -1016,6 +1010,7 @@ fn overlay_multi_piece_cumulative_positions_produce_individual_spans() {
         &cfg,
         &crate::enqueue::EnqueueCtx {
             epoch_freq: &|_| None,
+            lane_is_phase: &|_| false,
             t0: 0.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -1053,9 +1048,6 @@ fn step_rate_within_ceiling_enqueues() {
         mcu_id: 7,
         axes: vec![AXIS_X, AXIS_Y, 2],
         kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![50.0, 50.0, 50.0],
         ..Default::default()
     }];
@@ -1065,6 +1057,7 @@ fn step_rate_within_ceiling_enqueues() {
         &cfg,
         &crate::enqueue::EnqueueCtx {
             epoch_freq: &|_| None,
+            lane_is_phase: &|_| false,
             t0: 100.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -1084,9 +1077,6 @@ fn step_rate_over_ceiling_fails_loud() {
         mcu_id: 7,
         axes: vec![AXIS_X, AXIS_Y, 2],
         kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![5.0, 5.0, 5.0],
         ..Default::default()
     }];
@@ -1097,6 +1087,7 @@ fn step_rate_over_ceiling_fails_loud() {
         &cfg,
         &crate::enqueue::EnqueueCtx {
             epoch_freq: &|_| None,
+            lane_is_phase: &|_| false,
             t0: 100.0,
             epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
@@ -1105,6 +1096,38 @@ fn step_rate_over_ceiling_fails_loud() {
             max_piece_secs: None,
         },
     );
+}
+
+#[test]
+fn step_rate_over_ceiling_is_ignored_on_a_phase_routed_lane() {
+    // The Trident full-G28 crash of 2026-08-20: the pulse-path step-rate
+    // ceiling (step-pulse cost) does not bound a lane executing on the
+    // phase transport - coil writes carry no step pulses. The same
+    // over-ceiling demand that aborts a pulse lane must enqueue cleanly
+    // when the lane is phase-routed.
+    let cfg = vec![McuAxisConfig {
+        ethercat: false,
+        mcu_id: 7,
+        axes: vec![AXIS_X, AXIS_Y, 2],
+        kinematics: 1,
+        max_motor_velocity: vec![5.0, 5.0, 5.0],
+        ..Default::default()
+    }];
+    let msgs = enqueue_segment(
+        &seg_x_move(),
+        &cfg,
+        &crate::enqueue::EnqueueCtx {
+            epoch_freq: &|_| None,
+            lane_is_phase: &|_| true,
+            t0: 100.0,
+            epoch: crate::anchor::StreamEpoch::Reposition,
+            host_now: 0.0,
+            lead_secs: crate::pump::MAX_LEAD_SECS,
+            project: |_mcu, hs| (hs * 1_000.0) as u64,
+            max_piece_secs: None,
+        },
+    );
+    assert!(!msgs.is_empty());
 }
 
 #[test]

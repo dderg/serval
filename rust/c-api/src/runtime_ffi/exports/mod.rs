@@ -13,11 +13,15 @@ mod diag;
 mod lifecycle;
 mod phase_buzz;
 mod ring;
+#[cfg(feature = "sample-stepping")]
+mod sample;
 
 pub use diag::*;
 pub use lifecycle::*;
 pub use phase_buzz::*;
 pub use ring::*;
+#[cfg(feature = "sample-stepping")]
+pub use sample::*;
 
 #[allow(missing_debug_implementations)]
 #[repr(C)]
@@ -58,7 +62,6 @@ pub(super) static INIT_DONE: AtomicBool = AtomicBool::new(false);
 
 unsafe extern "C" {
     fn runtime_cyccnt_read() -> u32;
-    fn event_log_emit(level: u8, subsystem: u8, event: u16, code: u16, arg0: u32, arg1: u32);
 }
 
 macro_rules! guarded_ctx {

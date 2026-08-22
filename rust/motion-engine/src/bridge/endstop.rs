@@ -17,6 +17,7 @@ pub(super) struct TripDeps {
     pub(super) mcu_axis_configs: Arc<Mutex<Vec<McuAxisConfig>>>,
     pub(super) stepcompress_endpoints:
         Arc<Mutex<HashMap<u32, Arc<Mutex<crate::pump::StepcompressEndpoint>>>>>,
+    pub(super) axis_transports: Arc<crate::axis_transport::AxisTransports>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -98,6 +99,23 @@ pub(super) fn dispatch_endstop_trip(
                 "endstop tripped ahead of its group — motor frozen, run continues"
             );
             let notify = run.notify.clone();
+            if let Some(freeze) = freeze_opt {
+                if let Err(e) = cut_frozen_motor_stream(deps, &mut run, freeze) {
+                    tracing::error!(
+                        subsystem = "trip-relay",
+                        event = "keyed_freeze_cut_failed",
+                        mcu = event_mcu,
+                        endstop_id,
+                        motor_mcu = freeze.motor_mcu,
+                        oid = freeze.stepper_oid,
+                        error = %e,
+                        "keyed trip could not cut the frozen motor's stream — the homing move \
+                         is aborted"
+                    );
+                    let _ = notify.send(Err(e));
+                    return;
+                }
+            }
             let remote = freeze_opt.filter(|f| f.motor_mcu != event_mcu);
             let pending = Arc::clone(&run.pending_suppresses);
             if remote.is_some() {
@@ -149,6 +167,7 @@ pub(super) fn dispatch_endstop_trip(
     };
     let endpoints = deps.stepcompress_endpoints.lock_ok().clone();
 
+    let axis_transports = Arc::clone(&deps.axis_transports);
     std::thread::Builder::new()
         .name("homing-trip-handler".into())
         .spawn(move || {
@@ -310,6 +329,7 @@ pub(super) fn dispatch_endstop_trip(
             let outcome = reconstruct_cartesian(event_mcu, trip_clock).and_then(|trip| {
                 crate::homing::reconcile_stepcompress_lanes(
                     &configs,
+                    &axis_transports,
                     |key| {
                         crate::homing::reconstruct_axis_position(
                             final_source_mcu,
@@ -379,6 +399,95 @@ pub(super) fn dispatch_endstop_trip(
             let _ = run.notify.send(outcome);
         })
         .expect("spawn homing-trip-handler");
+}
+
+/// Cut and reseed exactly the motor a keyed endstop froze, leaving every peer
+/// motor of the run streaming to its own trip. The MCU stops that stepper oid;
+/// the host must stop feeding it and adopt the steps it actually executed, or
+/// the lane's counter and the shim's idea of it diverge for the rest of the run.
+fn cut_frozen_motor_stream(
+    deps: &TripDeps,
+    run: &mut HomingRun,
+    freeze: RemoteFreeze,
+) -> Result<(), String> {
+    if run.frozen_oids.contains(&freeze.stepper_oid) {
+        return Err(format!(
+            "keyed trip named stepper oid {} on mcu {}, whose stream this run already cut — \
+             two endstops are armed against one motor",
+            freeze.stepper_oid, freeze.motor_mcu
+        ));
+    }
+    let configs = deps.mcu_axis_configs.lock_ok().clone();
+    let lane =
+        crate::homing::stepcompress_lane_of_oid(&configs, freeze.motor_mcu, freeze.stepper_oid)?;
+    let io = {
+        let mcus = deps.mcus.lock_ok();
+        mcus.get(&lane.mcu_id)
+            .and_then(|conn| conn.host_io.as_ref().map(Arc::clone))
+            .ok_or_else(|| {
+                format!(
+                    "keyed trip: no host transport for mcu {} to read back oid {}",
+                    lane.mcu_id, lane.oid
+                )
+            })?
+    };
+    let params = io
+        .call_args(
+            "stepper_get_position",
+            &[(
+                "oid".to_string(),
+                host_rt::host_io::parser::ArgValue::Int(i64::from(lane.oid)),
+            )],
+            "stepper_position",
+            Duration::from_secs(3),
+        )
+        .map_err(|e| {
+            format!(
+                "keyed trip: stepper_get_position failed for mcu {} oid {}: {e:?}",
+                lane.mcu_id, lane.oid
+            )
+        })?;
+    let executed = params.try_get_i32("pos").map(i64::from).ok_or_else(|| {
+        format!(
+            "keyed trip: stepper_position from mcu {} oid {} carries no `pos` field",
+            lane.mcu_id, lane.oid
+        )
+    })?;
+    let endpoint = deps
+        .stepcompress_endpoints
+        .lock_ok()
+        .get(&lane.mcu_id)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "keyed trip: no shim endpoint registered for mcu {}, so oid {}'s stream cannot \
+                 be cut",
+                lane.mcu_id, lane.oid
+            )
+        })?;
+    {
+        let mut guard = endpoint.lock_ok();
+        guard
+            .freeze_motor(lane.motor, lane.trajectory_steps(executed))
+            .map_err(|e| {
+                format!(
+                    "keyed trip: freezing mcu {} axis {} motor {}: {e}",
+                    lane.mcu_id, lane.axis, lane.motor
+                )
+            })?;
+    }
+    run.frozen_oids.push(freeze.stepper_oid);
+    tracing::info!(
+        subsystem = "trip-relay",
+        event = "keyed_freeze_cut",
+        mcu = lane.mcu_id,
+        axis = lane.axis,
+        motor = lane.motor,
+        oid = lane.oid,
+        executed_steps = executed,
+        "keyed trip cut and reseeded only the frozen motor's stream"
+    );
+    Ok(())
 }
 
 fn send_remote_freeze(
@@ -481,7 +590,8 @@ fn suppress_call(
         })?;
     if resp.effective_clock == 0 {
         return Err(format!(
-            "StepperSuppress rejected by mcu {}",
+            "StepperSuppress on mcu {} reported a zero effective clock — the freeze instant is \
+             unknown and the trip clock cannot be relayed",
             freeze.motor_mcu
         ));
     }
