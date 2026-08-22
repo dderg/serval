@@ -129,26 +129,28 @@ pub fn build_endpoint(
     }
     let budget = cfg.move_queue_slots - MOVE_SLOT_RESERVE;
     let cycles_per_second = measured_clock_freq;
-    let encoder = match cfg.stepcompress_encoder {
-        StepcompressEncoder::HighPrecision => StepEncoder::HighPrecision,
-        StepcompressEncoder::Classic => {
-            let max_error_ticks = (cfg.stepcompress_max_error_secs * measured_clock_freq).round();
-            if !max_error_ticks.is_finite()
-                || max_error_ticks < 1.0
-                || max_error_ticks > u32::MAX as f64
-            {
-                return Err(format!(
-                    "stepcompress mcu {}: classic encoder max_error {} s at \
-                     {measured_clock_freq} Hz does not resolve to a tick budget in [1, {}]",
-                    cfg.mcu_id,
-                    cfg.stepcompress_max_error_secs,
-                    u32::MAX
-                ));
-            }
-            StepEncoder::Classic {
-                max_error_ticks: max_error_ticks as u32,
-            }
+    let classic_encoder = if cfg
+        .stepcompress_encoders
+        .contains(&StepcompressEncoder::Classic)
+    {
+        let max_error_ticks = (cfg.stepcompress_max_error_secs * measured_clock_freq).round();
+        if !max_error_ticks.is_finite()
+            || max_error_ticks < 1.0
+            || max_error_ticks > u32::MAX as f64
+        {
+            return Err(format!(
+                "stepcompress mcu {}: classic encoder max_error {} s at \
+                 {measured_clock_freq} Hz does not resolve to a tick budget in [1, {}]",
+                cfg.mcu_id,
+                cfg.stepcompress_max_error_secs,
+                u32::MAX
+            ));
         }
+        Some(StepEncoder::Classic {
+            max_error_ticks: max_error_ticks as u32,
+        })
+    } else {
+        None
     };
     let motor_count: usize = cfg
         .motor_counts
@@ -192,7 +194,12 @@ pub fn build_endpoint(
                 cycles_per_second,
                 min_rearm_cycles: STEP_REARM_PULSES
                     * (step_pulse_seconds * cycles_per_second) as u64,
-                encoder,
+                encoder: match cfg.stepcompress_encoders[motor] {
+                    StepcompressEncoder::HighPrecision => StepEncoder::HighPrecision,
+                    StepcompressEncoder::Classic => {
+                        classic_encoder.expect("validated for every classic motor")
+                    }
+                },
             });
             pulse_axes.push(axis);
             pulse_oids.push(cfg.stepper_oids[motor]);

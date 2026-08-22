@@ -8,8 +8,7 @@ from klippy import motion_setup
 from klippy.mcu import (
     MCU,
     SAMPLE_COMMANDS,
-    STEPCOMPRESS_ENCODER_CLASSIC,
-    STEPCOMPRESS_ENCODER_HP,
+    STEPCOMPRESS_MAX_ERROR_DEFAULT,
     STEPCOMPRESS_SAMPLE_RATE_HZ,
 )
 
@@ -65,25 +64,24 @@ def make_mcu(options=None):
     return mcu
 
 
-def test_stepcompress_is_unconditional_with_an_internal_sample_rate():
+def test_stepcompress_defaults_to_classic_error_budget():
     mcu = make_mcu()
     assert mcu.get_stepcompress_sample_rate() == STEPCOMPRESS_SAMPLE_RATE_HZ
-    assert mcu.get_stepcompress_encoder() == STEPCOMPRESS_ENCODER_HP
-
-
-def test_the_classic_encoder_is_still_selectable():
-    mcu = make_mcu({"stepcompress_encoder": "classic"})
-    assert mcu.get_stepcompress_encoder() == STEPCOMPRESS_ENCODER_CLASSIC
+    assert mcu.get_stepcompress_max_error() == STEPCOMPRESS_MAX_ERROR_DEFAULT
 
 
 DELETED_MCU_KEYS = frozenset(
-    ["stepping_mode", "stepcompress_sample_rate", "phase_transport"]
+    [
+        "stepping_mode",
+        "stepcompress_sample_rate",
+        "stepcompress_encoder",
+        "phase_transport",
+    ]
 )
 
 
-@pytest.mark.parametrize("encoder", ["hp", "classic"])
-def test_the_deleted_mcu_keys_are_never_consumed(encoder):
-    config = FakeConfig({"stepcompress_encoder": encoder})
+def test_the_deleted_mcu_keys_are_never_consumed():
+    config = FakeConfig({"stepcompress_encoder": "hp"})
     mcu = MCU.__new__(MCU)
     mcu._init_stepcompress(config)
     assert config.accessed.isdisjoint(DELETED_MCU_KEYS)

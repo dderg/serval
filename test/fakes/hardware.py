@@ -1,5 +1,8 @@
 from klippy.extras import stepper_enable as _stepper_enable_mod
-from klippy.mcu import STEPCOMPRESS_ENCODER_HP, STEPCOMPRESS_SAMPLE_RATE_HZ
+from klippy.mcu import (
+    STEPCOMPRESS_MAX_ERROR_DEFAULT,
+    STEPCOMPRESS_SAMPLE_RATE_HZ,
+)
 
 
 class _FakeClockSync:
@@ -41,8 +44,7 @@ class FakeMcu:
         non_critical_disconnected=False,
         clocksync_debug="fake clocksync",
         stepcompress_sample_rate=STEPCOMPRESS_SAMPLE_RATE_HZ,
-        stepcompress_encoder=STEPCOMPRESS_ENCODER_HP,
-        stepcompress_max_error=0.0,
+        stepcompress_max_error=STEPCOMPRESS_MAX_ERROR_DEFAULT,
         move_queue_slots=0,
         constants=None,
         missing_commands=(),
@@ -60,7 +62,6 @@ class FakeMcu:
         self.non_critical_disconnected = non_critical_disconnected
         self._clocksync = _FakeClockSync(clocksync_debug)
         self._stepcompress_sample_rate = stepcompress_sample_rate
-        self._stepcompress_encoder = stepcompress_encoder
         self._stepcompress_max_error = stepcompress_max_error
         self._move_queue_slots = move_queue_slots
         self._constants = {} if constants is None else dict(constants)
@@ -80,9 +81,6 @@ class FakeMcu:
 
     def get_stepcompress_sample_rate(self):
         return self._stepcompress_sample_rate
-
-    def get_stepcompress_encoder(self):
-        return self._stepcompress_encoder
 
     def get_stepcompress_max_error(self):
         return self._stepcompress_max_error
@@ -143,6 +141,7 @@ class FakeStepper:
         self._pulse = (pulse_duration, step_both_edge)
         self._step_dist = step_dist
         self._oid = oid
+        self.high_precision_step_compress = False
         self.current_helper = None
 
     def get_name(self, short=False):

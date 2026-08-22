@@ -895,7 +895,7 @@ mod stepcompress_reconcile_tests {
             stepcompress_sample_rate: 20_000.0,
             move_queue_slots: 128,
             step_pulse_seconds: vec![2e-6, 2e-6],
-            stepcompress_encoder: StepcompressEncoder::HighPrecision,
+            stepcompress_encoders: vec![StepcompressEncoder::HighPrecision; 2],
             phase_sample_rate: 0.0,
             phase_ring_depth: 0,
             stepcompress_max_error_secs: 0.0,

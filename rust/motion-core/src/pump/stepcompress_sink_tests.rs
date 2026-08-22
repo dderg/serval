@@ -1234,10 +1234,10 @@ fn stepcompress_cfg(move_queue_slots: u32) -> McuAxisConfig {
         stepcompress_sample_rate: 20_000.0,
         move_queue_slots,
         step_pulse_seconds: vec![2e-6],
-        stepcompress_encoder: StepcompressEncoder::HighPrecision,
+        stepcompress_encoders: vec![StepcompressEncoder::Classic],
         phase_sample_rate: 0.0,
         phase_ring_depth: 0,
-        stepcompress_max_error_secs: 0.0,
+        stepcompress_max_error_secs: 25e-6,
     }
 }
 
@@ -1263,7 +1263,7 @@ fn classic_encoder_resolves_max_error_ticks_from_the_measured_clock() {
     let (tx, _rx) = crossbeam_channel::unbounded();
     let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
     let mut cfg = stepcompress_cfg(128);
-    cfg.stepcompress_encoder = StepcompressEncoder::Classic;
+    cfg.stepcompress_encoders = vec![StepcompressEncoder::Classic];
     cfg.stepcompress_max_error_secs = 10e-6;
     build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of)
         .expect("10us max_error at 1 MHz resolves to 10 ticks and must build");
@@ -1274,7 +1274,7 @@ fn classic_encoder_with_a_sub_tick_max_error_is_a_build_error() {
     let (tx, _rx) = crossbeam_channel::unbounded();
     let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
     let mut cfg = stepcompress_cfg(128);
-    cfg.stepcompress_encoder = StepcompressEncoder::Classic;
+    cfg.stepcompress_encoders = vec![StepcompressEncoder::Classic];
     cfg.stepcompress_max_error_secs = 1e-7;
     let err = match build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of) {
         Err(e) => e,
@@ -1288,7 +1288,7 @@ fn classic_encoder_with_an_overflowing_tick_budget_is_a_build_error() {
     let (tx, _rx) = crossbeam_channel::unbounded();
     let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
     let mut cfg = stepcompress_cfg(128);
-    cfg.stepcompress_encoder = StepcompressEncoder::Classic;
+    cfg.stepcompress_encoders = vec![StepcompressEncoder::Classic];
     cfg.stepcompress_max_error_secs = 1e6;
     let err = match build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of) {
         Err(e) => e,
@@ -1302,10 +1302,33 @@ fn hp_encoder_builds_an_endpoint_without_a_max_error_budget() {
     let (tx, _rx) = crossbeam_channel::unbounded();
     let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
     let mut cfg = stepcompress_cfg(128);
-    cfg.stepcompress_encoder = StepcompressEncoder::HighPrecision;
+    cfg.stepcompress_encoders = vec![StepcompressEncoder::HighPrecision];
     cfg.stepcompress_max_error_secs = 0.0;
     build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of)
         .expect("hp ignores the max_error budget and must build");
+}
+
+#[test]
+fn one_endpoint_can_mix_classic_and_high_precision_motors() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
+    let mut cfg = stepcompress_cfg(128);
+    cfg.motor_counts = vec![2];
+    cfg.microstep_distance = vec![0.01; 2];
+    cfg.invert_dir = vec![false; 2];
+    cfg.stepper_oids = vec![OID, OID + 1];
+    cfg.step_pulse_seconds = vec![2e-6; 2];
+    cfg.stepcompress_encoders = vec![
+        StepcompressEncoder::Classic,
+        StepcompressEncoder::HighPrecision,
+    ];
+    let endpoint = build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of)
+        .expect("one mcu may opt individual motors into high precision");
+    assert!(matches!(
+        endpoint.shim.motor_encoder(0),
+        StepEncoder::Classic { .. }
+    ));
+    assert_eq!(endpoint.shim.motor_encoder(1), StepEncoder::HighPrecision);
 }
 
 #[test]

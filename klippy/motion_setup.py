@@ -5,11 +5,7 @@ from collections import defaultdict, namedtuple
 
 from . import stepper
 from .extras import servo_axis
-from .mcu import (
-    SAMPLE_COMMANDS,
-    STEPCOMPRESS_ENCODER_HP,
-    STEPCOMPRESS_SAMPLE_RATE_HZ,
-)
+from .mcu import SAMPLE_COMMANDS, STEPCOMPRESS_SAMPLE_RATE_HZ
 from .motion_endstop import register_stepcompress_steppers
 from .stepper import DEFAULT_STEP_PULSE_DURATION
 
@@ -28,7 +24,7 @@ McuTopology = namedtuple(
         "stepcompress_sample_rate",
         "move_queue_slots",
         "step_pulse_seconds",
-        "stepcompress_encoder",
+        "high_precision_step_compress",
         "stepcompress_max_error_secs",
         "phase_sample_rate",
         "phase_ring_depth",
@@ -235,8 +231,8 @@ def _phase_ring_depth(motion, name, mcu_obj, phase_axes):
     return depth
 
 
-def _reject_pulse_lane_conflicts(motion, name, mcu_obj, encoder, pulse_axes):
-    if encoder != STEPCOMPRESS_ENCODER_HP:
+def _reject_pulse_lane_conflicts(motion, name, mcu_obj, hp_motors):
+    if not any(hp_motors):
         return
     if (
         mcu_obj.try_lookup_command(
@@ -247,10 +243,10 @@ def _reject_pulse_lane_conflicts(motion, name, mcu_obj, encoder, pulse_axes):
     ):
         return
     raise motion.printer.config_error(
-        "mcu '%s': step/dir axes %s with the default stepcompress_encoder: hp "
-        "need firmware built with HIGH_PREC_STEP, but the mcu does not provide "
-        "the queue_step_hp command. Reflash the firmware with HIGH_PREC_STEP "
-        "or set stepcompress_encoder: classic." % (name, pulse_axes)
+        "mcu '%s': motors %s request high_precision_step_compress: True, "
+        "but the mcu does not provide queue_step_hp. Reflash with "
+        "HIGH_PREC_STEP or disable high_precision_step_compress."
+        % (name, hp_motors)
     )
 
 
@@ -271,11 +267,6 @@ def derive_mcu_topology(motion, axis_to_handle):
             STEPCOMPRESS_SAMPLE_RATE_HZ
             if mcu_obj is None
             else mcu_obj.get_stepcompress_sample_rate()
-        )
-        encoder = (
-            STEPCOMPRESS_ENCODER_HP
-            if mcu_obj is None
-            else mcu_obj.get_stepcompress_encoder()
         )
         max_error_secs = (
             0.0 if mcu_obj is None else mcu_obj.get_stepcompress_max_error()
@@ -320,9 +311,6 @@ def derive_mcu_topology(motion, axis_to_handle):
                     motion, name, mcu_obj, phase_axes
                 )
             if pulse_axes and handle not in endpoint_handles:
-                _reject_pulse_lane_conflicts(
-                    motion, name, mcu_obj, encoder, pulse_axes
-                )
                 move_queue_slots = mcu_obj.get_move_queue_slots()
                 if move_queue_slots <= 0:
                     raise motion.printer.config_error(
@@ -335,6 +323,7 @@ def derive_mcu_topology(motion, axis_to_handle):
         motor_invert_dir = []
         motor_oids = []
         motor_step_pulse_seconds = []
+        motor_high_precision_step_compress = []
         for axis, kind in zip(axes, lane_kinds):
             bindings = (
                 [binding for binding in bind_list if binding[0] == axis]
@@ -347,6 +336,7 @@ def derive_mcu_topology(motion, axis_to_handle):
                 motor_invert_dir.append(slot_invert_dir[axis])
                 motor_oids.append(slot_oids[axis])
                 motor_step_pulse_seconds.append(slot_step_pulse_seconds[axis])
+                motor_high_precision_step_compress.append(False)
                 continue
             motor_counts.append(len(bindings))
             steppers = dict(slot_steppers[axis])
@@ -359,6 +349,23 @@ def derive_mcu_topology(motion, axis_to_handle):
                 motor_step_pulse_seconds.append(
                     step_pulse_width(steppers[stepper_name])
                 )
+                motor_high_precision_step_compress.append(
+                    bool(
+                        getattr(
+                            steppers[stepper_name],
+                            "high_precision_step_compress",
+                            False,
+                        )
+                    )
+                )
+        if (
+            mcu_obj is not None
+            and pulse_axes
+            and handle not in endpoint_handles
+        ):
+            _reject_pulse_lane_conflicts(
+                motion, name, mcu_obj, motor_high_precision_step_compress
+            )
         topo.append(
             McuTopology(
                 handle,
@@ -373,7 +380,7 @@ def derive_mcu_topology(motion, axis_to_handle):
                 sample_rate,
                 move_queue_slots,
                 motor_step_pulse_seconds,
-                encoder,
+                motor_high_precision_step_compress,
                 max_error_secs,
                 phase_sample_rate,
                 phase_ring_depth,

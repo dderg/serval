@@ -43,6 +43,24 @@ def test_stepcompress_move_completes(sim_world):
     assert pos[0] == pytest.approx(135.0, abs=0.01), pos
 
 
+def test_one_motor_can_opt_into_high_precision_compression(sim_world):
+    world = sim_world(
+        lambda w: configs.stepcompress_config(
+            w.h7_pty, w.f4_pty, str(w.gcode_dir)
+        ).replace(
+            "[motor x]\n",
+            "[motor x]\nhigh_precision_step_compress: True\n",
+        ),
+        sc_mcu=True,
+    )
+    world.gcode_ok("SET_KINEMATIC_POSITION X=125 Y=125 Z=125")
+    world.gcode_ok("G1 X135 Y130 F3000")
+    world.gcode_ok("M400")
+    assert world.shutdown_line() is None, world.log_tail()
+    assert _steps(world, "x") == pytest.approx(10.0 * STEPS_PER_MM, abs=1.0)
+    assert _steps(world, "y") == pytest.approx(5.0 * STEPS_PER_MM, abs=1.0)
+
+
 def test_stepcompress_step_count_matches_distance(sim_world):
     world = _boot(sim_world)
     world.gcode_ok("SET_KINEMATIC_POSITION X=125 Y=125 Z=125")

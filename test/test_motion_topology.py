@@ -8,7 +8,10 @@ from fakes import (
     FakeStepper,
 )
 
-from klippy.mcu import STEPCOMPRESS_SAMPLE_RATE_HZ
+from klippy.mcu import (
+    STEPCOMPRESS_MAX_ERROR_DEFAULT,
+    STEPCOMPRESS_SAMPLE_RATE_HZ,
+)
 from klippy.motion import Motion
 from klippy.motion_kinematics import _LinearKinematics
 from klippy.motion_setup import LANE_KIND_PULSE
@@ -20,7 +23,7 @@ FAKE_STEP_DIST = 0.0125
 FAKE_MOVE_QUEUE_SLOTS = 128
 
 
-def pulse_topology(handle, axes, kin, move_queue_slots=0):
+def pulse_topology(handle, axes, kin, move_queue_slots=0, max_error=0.0):
     n = len(axes)
     return (
         handle,
@@ -35,8 +38,8 @@ def pulse_topology(handle, axes, kin, move_queue_slots=0):
         STEPCOMPRESS_SAMPLE_RATE_HZ,
         move_queue_slots,
         [2e-06] * n,
-        "hp",
-        0.0,
+        [False] * n,
+        max_error,
         0.0,
         0,
     )
@@ -99,6 +102,15 @@ def test_one_mcu_corexy_topology():
     assert motion._derive_mcu_topology(a2h) == [
         pulse_topology(11, [0, 1, 2, 3], 0)
     ]
+
+
+def test_high_precision_step_compress_is_opted_in_per_motor():
+    motion = make_motion("corexy", SPATIAL_AXES)
+    motion.kin.rails[0].get_steppers()[0].high_precision_step_compress = True
+    topology = motion._derive_mcu_topology(motion._build_axis_to_handle())
+    expected = list(pulse_topology(11, [0, 1, 2], 0))
+    expected[12] = [True, False, False]
+    assert topology == [tuple(expected)]
 
 
 def test_two_mcu_corexy_topology():
@@ -240,6 +252,10 @@ def test_init_planner_passes_config_text_and_topology():
     assert engine.init_planner_args["config_text"] == motion._motion_config_text
     assert engine.init_planner_args["topology"] == [
         pulse_topology(
-            11, [0, 1, 2, 3], 0, move_queue_slots=FAKE_MOVE_QUEUE_SLOTS
+            11,
+            [0, 1, 2, 3],
+            0,
+            move_queue_slots=FAKE_MOVE_QUEUE_SLOTS,
+            max_error=STEPCOMPRESS_MAX_ERROR_DEFAULT,
         )
     ]

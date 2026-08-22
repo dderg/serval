@@ -29,7 +29,7 @@ fn stepcompress_cfg() -> McuAxisConfig {
         stepcompress_sample_rate: 10_000.0,
         move_queue_slots: 128,
         step_pulse_seconds: vec![0.000_002],
-        stepcompress_encoder: StepcompressEncoder::HighPrecision,
+        stepcompress_encoders: vec![StepcompressEncoder::HighPrecision],
         phase_sample_rate: 0.0,
         phase_ring_depth: 0,
         stepcompress_max_error_secs: 0.0,

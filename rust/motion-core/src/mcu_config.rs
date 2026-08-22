@@ -62,27 +62,13 @@ impl LaneKind {
     }
 }
 
-/// Which step compressor the host uses to turn sampled step times into
-/// classic `queue_step`-family frames: the quadratic high-precision encoder
-/// or the legacy interval/count/add encoder with a bounded error budget.
-/// The budget is expressed in seconds here because the tick conversion needs
-/// the measured clock frequency only `build_endpoint` knows.
+/// Which step compressor one motor uses to encode its sampled step times.
+/// Classic is the default; high precision is an explicit per-motor opt-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StepcompressEncoder {
-    #[default]
     HighPrecision,
+    #[default]
     Classic,
-}
-
-impl StepcompressEncoder {
-    #[must_use]
-    pub fn from_tag(tag: &str) -> Option<Self> {
-        match tag {
-            "hp" => Some(Self::HighPrecision),
-            "classic" => Some(Self::Classic),
-            _ => None,
-        }
-    }
 }
 
 pub const AXIS_X: usize = 0;
@@ -103,7 +89,7 @@ pub struct McuTopologyInput {
     pub stepcompress_sample_rate: f64,
     pub move_queue_slots: u32,
     pub step_pulse_seconds: Vec<f64>,
-    pub stepcompress_encoder: String,
+    pub high_precision_step_compress: Vec<bool>,
     pub stepcompress_max_error_secs: f64,
     /// The mcu's own sample-executor rate (Hz), as klippy read it from the
     /// firmware's advertised `MOTION_SAMPLE_RATE_HZ`. Zero when the mcu has no
@@ -143,7 +129,7 @@ pub struct McuAxisConfig {
     /// consecutive runs at least this far apart so a re-armed classic
     /// stepper never loads a move behind its own pending unstep.
     pub step_pulse_seconds: Vec<f64>,
-    pub stepcompress_encoder: StepcompressEncoder,
+    pub stepcompress_encoders: Vec<StepcompressEncoder>,
     /// Rate the mcu's sample executor consumes phase-lane runs at, firmware
     /// truth rather than a host choice. Positive whenever a lane is
     /// [`LaneKind::Phase`].
@@ -321,8 +307,6 @@ pub enum KinematicsConfigError {
          the host cannot pace its in-flight window and would overrun the lane ring"
     )]
     PhaseLaneRingDepth { handle: u32 },
-    #[error("mcu handle {handle}: unknown stepcompress_encoder {got}; known: hp, classic")]
-    UnknownStepcompressEncoder { handle: u32, got: String },
 }
 
 pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
@@ -380,6 +364,10 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                 ("invert_dir", topology.invert_dir.len()),
                 ("stepper_oids", topology.stepper_oids.len()),
                 ("step_pulse_seconds", topology.step_pulse_seconds.len()),
+                (
+                    "high_precision_step_compress",
+                    topology.high_precision_step_compress.len(),
+                ),
             ] {
                 if got != motor_count {
                     return Err(KinematicsConfigError::PerMotorVectorLength {
@@ -429,12 +417,6 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                     handle: topology.mcu_id,
                 });
             }
-            let encoder = StepcompressEncoder::from_tag(&topology.stepcompress_encoder).ok_or(
-                KinematicsConfigError::UnknownStepcompressEncoder {
-                    handle: topology.mcu_id,
-                    got: topology.stepcompress_encoder.clone(),
-                },
-            )?;
             Ok(McuAxisConfig {
                 mcu_id: topology.mcu_id,
                 axes,
@@ -449,7 +431,17 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                 stepcompress_sample_rate: rate,
                 move_queue_slots,
                 step_pulse_seconds: topology.step_pulse_seconds.clone(),
-                stepcompress_encoder: encoder,
+                stepcompress_encoders: topology
+                    .high_precision_step_compress
+                    .iter()
+                    .map(|&enabled| {
+                        if enabled {
+                            StepcompressEncoder::HighPrecision
+                        } else {
+                            StepcompressEncoder::Classic
+                        }
+                    })
+                    .collect(),
                 phase_sample_rate,
                 phase_ring_depth,
                 stepcompress_max_error_secs: topology.stepcompress_max_error_secs,

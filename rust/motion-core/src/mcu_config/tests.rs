@@ -22,7 +22,7 @@ fn build_mcu_configs_two_mcu_corexy_with_e() {
             stepcompress_sample_rate: 20_000.0,
             move_queue_slots: 128,
             step_pulse_seconds: vec![2e-6; 3],
-            stepcompress_encoder: "hp".to_string(),
+            high_precision_step_compress: vec![true; 3],
             stepcompress_max_error_secs: 0.0,
             phase_sample_rate: 10_000.0,
             phase_ring_depth: 12,
@@ -40,7 +40,7 @@ fn build_mcu_configs_two_mcu_corexy_with_e() {
             stepcompress_sample_rate: 20_000.0,
             move_queue_slots: 128,
             step_pulse_seconds: vec![2e-6; 1],
-            stepcompress_encoder: "hp".to_string(),
+            high_precision_step_compress: vec![true],
             stepcompress_max_error_secs: 0.0,
             phase_sample_rate: 0.0,
             phase_ring_depth: 0,
@@ -83,7 +83,7 @@ fn build_mcu_configs_stamps_ethercat_from_the_claimed_handles() {
         stepcompress_sample_rate: 20_000.0,
         move_queue_slots: 0,
         step_pulse_seconds: vec![2e-6],
-        stepcompress_encoder: "hp".to_string(),
+        high_precision_step_compress: vec![true],
         stepcompress_max_error_secs: 0.0,
         phase_sample_rate: 0.0,
         phase_ring_depth: 0,
@@ -163,7 +163,7 @@ fn pulse_topology(lane_kinds: Vec<u8>, rate: f64, move_queue_slots: u32) -> Vec<
         stepcompress_sample_rate: rate,
         move_queue_slots,
         step_pulse_seconds: vec![2e-6; n],
-        stepcompress_encoder: "hp".to_string(),
+        high_precision_step_compress: vec![true; n],
         stepcompress_max_error_secs: 0.0,
         phase_sample_rate: 10_000.0,
         phase_ring_depth: 12,
@@ -193,6 +193,10 @@ fn build_mcu_configs_requires_one_entry_per_axis_in_every_lane_vector() {
         ("step_pulse_seconds", |m: &mut McuTopologyInput| {
             m.step_pulse_seconds.pop().map(|_| ()).unwrap()
         }),
+        (
+            "high_precision_step_compress",
+            |m: &mut McuTopologyInput| m.high_precision_step_compress.pop().map(|_| ()).unwrap(),
+        ),
     ] {
         let mut mcus = pulse_topology(vec![LANE_KIND_PULSE; 2], 20_000.0, 128);
         mutate(&mut mcus[0]);
@@ -329,34 +333,25 @@ fn a_phase_lane_requires_the_firmwares_ring_depth() {
     );
 }
 
-fn encoder_topology(encoder: &str, max_error_secs: f64) -> Vec<McuTopologyInput> {
+fn encoder_topology(high_precision: Vec<bool>, max_error_secs: f64) -> Vec<McuTopologyInput> {
     let mut mcus = pulse_topology(vec![LANE_KIND_PULSE; 2], 20_000.0, 128);
-    mcus[0].stepcompress_encoder = encoder.to_string();
+    mcus[0].high_precision_step_compress = high_precision;
     mcus[0].stepcompress_max_error_secs = max_error_secs;
     mcus
 }
 
 #[test]
-fn unknown_stepcompress_encoder_is_loud() {
-    let err = build_mcu_configs(&encoder_topology("bogus", 0.0), &no_ethercat()).unwrap_err();
-    assert!(matches!(
-        err,
-        KinematicsConfigError::UnknownStepcompressEncoder { handle: 7, got }
-            if got == "bogus"
-    ));
-}
-
-#[test]
-fn stepcompress_encoder_and_max_error_reach_axis_config() {
-    let cfgs = build_mcu_configs(&encoder_topology("classic", 1e-5), &no_ethercat()).unwrap();
-    assert_eq!(cfgs[0].stepcompress_encoder, StepcompressEncoder::Classic);
-    assert_eq!(cfgs[0].stepcompress_max_error_secs, 1e-5);
-    let cfgs = build_mcu_configs(&encoder_topology("hp", 0.0), &no_ethercat()).unwrap();
+fn per_motor_encoder_choices_and_max_error_reach_axis_config() {
+    let cfgs =
+        build_mcu_configs(&encoder_topology(vec![false, true], 1e-5), &no_ethercat()).unwrap();
     assert_eq!(
-        cfgs[0].stepcompress_encoder,
-        StepcompressEncoder::HighPrecision
+        cfgs[0].stepcompress_encoders,
+        vec![
+            StepcompressEncoder::Classic,
+            StepcompressEncoder::HighPrecision
+        ]
     );
-    assert_eq!(cfgs[0].stepcompress_max_error_secs, 0.0);
+    assert_eq!(cfgs[0].stepcompress_max_error_secs, 1e-5);
 }
 
 fn corexy_cfg() -> McuAxisConfig {
@@ -590,7 +585,7 @@ fn stepcompress_toolhead_cfg() -> McuAxisConfig {
         stepcompress_sample_rate: 10_000.0,
         move_queue_slots: 128,
         step_pulse_seconds: vec![2e-6; 1],
-        stepcompress_encoder: StepcompressEncoder::HighPrecision,
+        stepcompress_encoders: vec![StepcompressEncoder::HighPrecision],
         phase_sample_rate: 0.0,
         phase_ring_depth: 0,
         stepcompress_max_error_secs: 0.0,
@@ -612,7 +607,7 @@ fn stepcompress_corexy_cfg() -> McuAxisConfig {
         stepcompress_sample_rate: 10_000.0,
         move_queue_slots: 128,
         step_pulse_seconds: vec![2e-6; 3],
-        stepcompress_encoder: StepcompressEncoder::HighPrecision,
+        stepcompress_encoders: vec![StepcompressEncoder::HighPrecision; 3],
         phase_sample_rate: 0.0,
         phase_ring_depth: 0,
         stepcompress_max_error_secs: 0.0,

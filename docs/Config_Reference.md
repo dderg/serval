@@ -69,23 +69,20 @@ serial:
 #   Setting this to True will allow the mcu to be disconnected and
 #   reconnected at will without errors. Helpful for USB-accelerometer boards
 #   and USB/CAN-probes
-# Step/dir motors on this micro-controller are always driven by
-# host-computed step queues; phase-stepped motors (phase_stepping: 1) are
-# always driven by the MCU's sample-run executor, which needs firmware built
-# with CONFIG_SAMPLE_STEPPING. One micro-controller may carry both kinds of
+# Step/dir motors on this micro-controller are driven by host-computed
+# step queues. They use the classic interval/count/add compressor by
+# default. Set high_precision_step_compress: True in an individual
+# [motor] section to opt that motor into the queue_step_hp encoder; the
+# MCU firmware must be built with HIGH_PREC_STEP.
+# Phase-stepped motors (phase_stepping: 1) are driven by the MCU's
+# sample-run executor, which needs firmware built with
+# CONFIG_SAMPLE_STEPPING. One micro-controller may carry both kinds of
 # lane. An EtherCAT endpoint drives neither: its drives consume position
 # setpoints.
-#stepcompress_encoder: hp
-#   How the host compresses sampled step times into classic step queues:
-#   'hp' (the default) uses the high-precision quadratic encoder and
-#   requires firmware built with HIGH_PREC_STEP (the queue_step_hp
-#   command); 'classic' uses the interval/count/add encoder with the
-#   bounded error budget from stepcompress_max_error.
 #stepcompress_max_error: 0.000025
 #   Maximum time error in seconds the classic step encoder may
-#   introduce on a sub-sample step time. Only valid with
-#   stepcompress_encoder: classic; setting it while the encoder is
-#   'hp' is a configuration error.
+#   introduce on a sub-sample step time. High-precision motors do not
+#   use this budget.
 ```
 
 ### [mcu my_extra_mcu]
