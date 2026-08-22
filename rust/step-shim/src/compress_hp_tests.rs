@@ -55,6 +55,10 @@ fn reconstruct(moves: &[StepMoveHp], last_step_clock: u64) -> Vec<u64> {
 fn assert_within_windows(steps: &[u64], last_step_clock: u64, moves: &[StepMoveHp]) {
     let got = reconstruct(moves, last_step_clock);
     assert_eq!(got.len(), steps.len(), "reconstructed step count differs");
+    assert!(
+        got.last() <= steps.last(),
+        "terminal encoded step must not pass the final requested clock"
+    );
     let mut cursor = last_step_clock;
     let mut input_pos = 0usize;
     for m in moves {
@@ -185,9 +189,40 @@ fn next_expected_interval_preserves_batch_junction_window() {
     let first_end = reconstruct(&first_moves, 10_000).last().copied().unwrap();
 
     let second = constant_interval(1_001, 700, first.last().copied().unwrap());
+
     let (second_moves, second_covered, _) = compress_hp(&second, first_end, carry).unwrap();
     assert_eq!(second_covered, second.len());
     assert_within_windows(&second, first_end, &second_moves);
+}
+#[test]
+fn terminal_error_window_never_extends_past_the_requested_clock() {
+    let steps = [100, 200];
+    let terminal = minmax_point(&steps, 1, 0, 0);
+    assert_eq!(terminal.maxp, 200);
+}
+
+#[test]
+fn terminal_step_never_crosses_an_unseen_direction_boundary() {
+    for initial_interval in 70_u64..300 {
+        for delta in -2_i64..=2 {
+            let mut clock = 10_000_u64;
+            let mut steps = Vec::new();
+            for index in 0..32_i64 {
+                let interval = (initial_interval as i64 + delta * index).max(1) as u64;
+                clock += interval;
+                steps.push(clock);
+            }
+            let Ok((moves, covered, _)) = compress_hp(&steps, 10_000, 0) else {
+                continue;
+            };
+            assert_eq!(covered, steps.len());
+            let encoded_end = reconstruct(&moves, 10_000).last().copied().unwrap();
+            assert!(
+                encoded_end <= clock,
+                "initial_interval={initial_interval} delta={delta}: encoded {encoded_end}, requested {clock}"
+            );
+        }
+    }
 }
 
 #[test]

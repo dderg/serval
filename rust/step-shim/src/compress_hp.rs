@@ -292,8 +292,6 @@ fn minmax_point(steps: &[u64], index: usize, queue_pos: usize, last_step_clock: 
         let shared = max_bck_error.min(max_frw_error);
         max_bck_error = shared;
         max_frw_error = shared;
-    } else {
-        max_frw_error = MIN_STEP_ERR;
     }
     let point = i64::try_from(point).expect("step offset must fit signed arithmetic");
     let back = i64::try_from(max_bck_error).expect("window must fit signed arithmetic");
