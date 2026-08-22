@@ -2394,6 +2394,28 @@ fn host_buzz_returns_to_base_without_advancing_retirement() {
 }
 
 #[test]
+fn host_buzz_anchors_to_the_sampled_position_not_quantized_steps() {
+    let mut h = harness(1024);
+    h.endpoint
+        .shim
+        .push_pieces(0, &[piece(100_000, 0.0, 0.004, 0.01)])
+        .expect("stage a sub-step move");
+    assert!(
+        h.endpoint
+            .shim
+            .drain(u64::MAX)
+            .expect("sample the sub-step move")
+            .is_empty()
+    );
+    assert_eq!(h.endpoint.shim.commanded_steps(0), 0);
+    h.endpoint
+        .arm_buzz(0b001, 0, 70_000, 230_000, 23_500, 6, 1)
+        .expect("idle lane accepts the chirp");
+    let base = h.endpoint.buzz.as_ref().expect("armed buzz").bases[0];
+    assert!((base - 0.004).abs() < f32::EPSILON);
+}
+
+#[test]
 fn host_buzz_rejects_a_lane_with_queued_trajectory() {
     let mut h = harness(1024);
     h.endpoint

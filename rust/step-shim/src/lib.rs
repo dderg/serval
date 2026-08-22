@@ -532,6 +532,10 @@ impl StepShim {
         self.motors[motor].sampler.step_count()
     }
 
+    pub fn commanded_position(&self, motor: usize) -> f32 {
+        self.motors[motor].sampler.position()
+    }
+
     pub fn invert_dir(&self, motor: usize) -> bool {
         self.motors[motor].cfg.invert_dir
     }

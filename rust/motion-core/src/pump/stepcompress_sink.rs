@@ -542,9 +542,7 @@ impl StepcompressEndpoint {
             selected.push(drives);
             let negative = axis < 8 && sign_mask & (1 << axis) != 0;
             signs.push(if negative { -1.0 } else { 1.0 });
-            bases.push(
-                self.shim.commanded_steps(motor) as f32 * self.shim.motor_microstep_distance(motor),
-            );
+            bases.push(self.shim.commanded_position(motor));
             if drives {
                 slot_mask |= 1 << motor;
                 if negative {

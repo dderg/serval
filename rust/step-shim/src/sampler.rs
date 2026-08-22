@@ -71,6 +71,10 @@ impl MotorSampler {
         self.step_count
     }
 
+    pub fn position(&self) -> f32 {
+        self.p_prev
+    }
+
     pub fn resume_floor(&self) -> u64 {
         self.resume_floor.unwrap_or(0)
     }
