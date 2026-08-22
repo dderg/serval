@@ -62,7 +62,7 @@ impl PyMotionEngine {
     #[pyo3(signature = (mcu_id, axis_idx, motor_mask, delta_mm, speed, accel))]
     fn submit_nudge(
         &self,
-        _py: Python<'_>,
+        py: Python<'_>,
         mcu_id: u32,
         axis_idx: u8,
         motor_mask: u8,
@@ -91,7 +91,7 @@ impl PyMotionEngine {
                 })
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
         };
-        rx.recv()
+        py.detach(|| rx.recv())
             .map_err(|_| PyRuntimeError::new_err("nudge notify dropped"))?
             .map_err(PyRuntimeError::new_err)?;
         let (accel_t, cruise_t, _v) = crate::nudge::calc_move_time(delta_mm, speed, accel);
