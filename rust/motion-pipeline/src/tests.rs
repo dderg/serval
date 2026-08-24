@@ -3003,3 +3003,263 @@ fn moving_leader_across_a_short_follower_hold_keeps_c0_seams_and_total() {
         "the follower must still deliver the commanded 2.0 mm total, got {e_with}"
     );
 }
+
+/// The voron0 bench chain set (`tools/sim/tests/test_voron0_migration.py`):
+/// smooth_mzv on the CoreXY leaders at the measured belt frequencies, a
+/// smooth_bell on the gear-reduced Z, and a smooth_triangle on the extruder
+/// declared as a follower of x/y/z.
+fn voron0_chains() -> AxisChainSet {
+    let compile = |name: &str,
+                   algo: &'static dyn trajectory::algos::PostProcessorAlgo,
+                   param: f64| {
+        trajectory::CompiledChain::compile(&[PostProcessorInstance::new(name, algo, vec![param])])
+            .expect("single post-processor always compiles")
+    };
+    AxisChainSet {
+        chains: vec![
+            compile("x_shaping", &trajectory::algos::SmoothMzv, 112.8),
+            compile("y_shaping", &trajectory::algos::SmoothMzv, 90.2),
+            compile("z_shaping", &trajectory::algos::SmoothBell, 0.025),
+            compile("e_smoothing", &trajectory::algos::SmoothTriangle, 0.01),
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    }
+}
+
+fn voron0_config() -> StreamConfig {
+    StreamConfig {
+        corner: CornerFitConfig::default(),
+        integration_tol: 1e-4,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
+        fit_tol_mm: 0.005,
+        fit_tol_accel_mm_s2: 50.0,
+        max_buffer_moves: 128,
+        limits: VelocityLimits::try_new(600.0, 20000.0, 0.04, f64::INFINITY).unwrap(),
+    }
+}
+
+/// `SET_KINEMATIC_POSITION X=60 Y=60 Z=20` then the migration test's move
+/// sequence: two F18000 travels, an F1200 Z drop, an F6000 extruding
+/// diagonal, and the `M400` drain.
+fn voron0_stream() -> (Vec<f64>, Vec<StreamInput>) {
+    let limits = voron0_config().limits;
+    let mv = |line_no: u32, start: [f64; 3], end: [f64; 3], e: f64, feed: f64| {
+        StreamInput::Move(
+            line_move(
+                start,
+                end,
+                e,
+                MoveContext {
+                    extruder_axis: 3,
+                    feedrate_mm_s: feed,
+                    limits,
+                    source: SourceRange {
+                        start_line: line_no,
+                        end_line: line_no,
+                    },
+                },
+            )
+            .unwrap(),
+        )
+    };
+    let items = vec![
+        mv(1, [60.0, 60.0, 20.0], [100.0, 100.0, 20.0], 0.0, 300.0),
+        mv(2, [100.0, 100.0, 20.0], [20.0, 100.0, 20.0], 0.0, 300.0),
+        mv(3, [20.0, 100.0, 20.0], [20.0, 100.0, 10.0], 0.0, 20.0),
+        mv(4, [20.0, 100.0, 10.0], [60.0, 60.0, 10.0], 2.0, 100.0),
+        StreamInput::Drain,
+    ];
+    (vec![60.0, 60.0, 20.0, 0.0], items)
+}
+
+/// Everything ahead of the shaper, run to completion — the lowered stream is
+/// the shaper's input and is identical no matter how the shaper consumes it.
+fn lower_to_base_items(
+    config: StreamConfig,
+    chains: &AxisChainSet,
+    home: &[f64],
+    items: Vec<StreamInput>,
+) -> Vec<BaseItem> {
+    let (raw_tx, raw_rx) = unbounded();
+    for item in items {
+        raw_tx.send(item).unwrap();
+    }
+    drop(raw_tx);
+
+    let (fitted_tx, fitted_rx) = unbounded();
+    FitStage::new(config.corner).run(raw_rx, fitted_tx);
+
+    let (planned_tx, planned_rx) = unbounded();
+    Planner::new(config).run(fitted_rx, planned_tx);
+
+    let (lowered_tx, lowered_rx) = unbounded();
+    run_lowerer(planned_rx, lowered_tx, chains.clone(), home.to_vec(), 0.0);
+    lowered_rx.into_iter().collect()
+}
+
+/// `Shaper::run` over a pre-filled closed channel: the loop's `try_recv`
+/// burst buffers up to `STAGE_CHANNEL_CAP` lowered segments before each emit,
+/// so every emit window covers many segments at once.
+fn shape_in_bursts(
+    chains: AxisChainSet,
+    fit_tol: FitTol,
+    items: Vec<BaseItem>,
+) -> Vec<TrajectoryItem> {
+    let (in_tx, in_rx) = unbounded();
+    for item in items {
+        in_tx.send(item).unwrap();
+    }
+    drop(in_tx);
+    let (out_tx, out_rx) = unbounded();
+    Shaper::new(chains, fit_tol).run(in_rx, out_tx);
+    out_rx.into_iter().collect()
+}
+
+/// `Shaper::feed` per item — the single-threaded host driver, which forces an
+/// emit decision after every single lowered segment.
+fn shape_one_at_a_time(
+    chains: AxisChainSet,
+    fit_tol: FitTol,
+    items: Vec<BaseItem>,
+) -> Vec<TrajectoryItem> {
+    let (out_tx, out_rx) = unbounded();
+    let mut shaper = Shaper::new(chains, fit_tol);
+    for item in items {
+        assert!(shaper.feed(item, &out_tx), "the collector never hangs up");
+    }
+    shaper.finish(&out_tx);
+    drop(out_tx);
+    out_rx.into_iter().collect()
+}
+
+fn item_kind(item: &TrajectoryItem) -> (&'static str, f64, f64) {
+    match item {
+        TrajectoryItem::Seg(seg) => ("seg", seg.t_start, seg.t_end),
+        TrajectoryItem::Parked => ("parked", 0.0, 0.0),
+        TrajectoryItem::Control(_) => ("control", 0.0, 0.0),
+    }
+}
+
+fn trajectory_segments(items: &[TrajectoryItem]) -> Vec<&ContinuousSegment> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            TrajectoryItem::Seg(seg) => Some(seg),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every knot / phase boundary the emitted tracks carry, summed over all axes
+/// — the quantity that explodes when a fit ladder bisects away or when an
+/// emit window is re-fitted per batch instead of reused.
+fn total_track_breakpoints(items: &[TrajectoryItem]) -> usize {
+    trajectory_segments(items)
+        .iter()
+        .map(|seg| {
+            seg.axes
+                .iter()
+                .map(|axis| axis_breakpoints(axis).0.len())
+                .sum::<usize>()
+        })
+        .sum()
+}
+
+/// Chunking the shaper's input must be a scheduling detail, never a semantic
+/// one: the burst driver and the one-item-at-a-time driver group the same
+/// lowered segments into different emit windows, and the trajectory they
+/// produce must have the same structure, the same sampled motion, and the
+/// same order of magnitude of fitted pieces.
+///
+/// Piece count is asserted against a fixed budget rather than a recomputed
+/// expectation, so the test cannot drift with the fitter it guards. Batching
+/// is not free today — the one-item-at-a-time driver fits ~2.5x the pieces
+/// the burst driver does, because each smaller emit window re-partitions the
+/// same signal — so the ratio bound admits that measured spread and trips on
+/// genuine multiplication.
+#[test]
+fn voron0_shaper_output_is_independent_of_input_batching() {
+    let config = voron0_config();
+    let chains = voron0_chains();
+    let (home, items) = voron0_stream();
+
+    let burst = shape_in_bursts(
+        chains.clone(),
+        fit_tol(config),
+        lower_to_base_items(config, &chains, &home, items),
+    );
+    let single = shape_one_at_a_time(
+        chains.clone(),
+        fit_tol(config),
+        lower_to_base_items(config, &chains, &home, voron0_stream().1),
+    );
+
+    let burst_segs = trajectory_segments(&burst);
+    let single_segs = trajectory_segments(&single);
+    assert!(
+        !burst_segs.is_empty(),
+        "the voron0 sequence must produce a trajectory"
+    );
+
+    let burst_kinds: Vec<_> = burst.iter().map(item_kind).collect();
+    let single_kinds: Vec<_> = single.iter().map(item_kind).collect();
+    assert_eq!(
+        burst_kinds.len(),
+        single_kinds.len(),
+        "batching changed the emitted item count: {} vs {}",
+        burst_kinds.len(),
+        single_kinds.len()
+    );
+    for (i, (b, s)) in burst_kinds.iter().zip(&single_kinds).enumerate() {
+        assert_eq!(b.0, s.0, "item {i} kind changed with batching");
+        assert!(
+            (b.1 - s.1).abs() < 1e-12 && (b.2 - s.2).abs() < 1e-12,
+            "item {i} time span changed with batching: [{}, {}] vs [{}, {}]",
+            b.1,
+            b.2,
+            s.1,
+            s.2
+        );
+    }
+
+    let budget = 4.0 * config.fit_tol_mm;
+    for (i, (b, s)) in burst_segs.iter().zip(&single_segs).enumerate() {
+        assert_eq!(b.axes.len(), s.axes.len(), "segment {i} axis count changed");
+        for axis in 0..b.axes.len() {
+            for k in 0..=8 {
+                let t = b.t_start + (b.t_end - b.t_start) * f64::from(k) / 8.0;
+                let pb = eval_segment_axis(b, axis, t);
+                let ps = eval_segment_axis(s, axis, t);
+                assert!(
+                    (pb - ps).abs() <= budget,
+                    "segment {i} axis {axis} moved with batching at t={t}: {pb} vs {ps}"
+                );
+            }
+        }
+        assert_segment_axes_finite(b);
+        assert_segment_axes_finite(s);
+    }
+
+    let burst_pieces = total_track_breakpoints(&burst);
+    let single_pieces = total_track_breakpoints(&single);
+    // Measured on this sequence: 20_126 bursted, 49_410 one-at-a-time. The
+    // budget is a tripwire with headroom over the worse arm, not a golden
+    // number — a ladder bisecting toward resolution scale, or an emit window
+    // re-fitted per batch, overshoots it by orders of magnitude.
+    const PIECE_BUDGET: usize = 80_000;
+    assert!(
+        burst_pieces <= PIECE_BUDGET && single_pieces <= PIECE_BUDGET,
+        "fitted piece count ran away: {burst_pieces} bursted, {single_pieces} one-at-a-time, \
+         budget {PIECE_BUDGET}"
+    );
+    let (lo, hi) = (
+        burst_pieces.min(single_pieces),
+        burst_pieces.max(single_pieces),
+    );
+    assert!(
+        hi <= 3 * lo,
+        "batching multiplied the fitted pieces: {burst_pieces} bursted vs {single_pieces} \
+         one-at-a-time"
+    );
+}

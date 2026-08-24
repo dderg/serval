@@ -253,8 +253,22 @@ impl Shaper {
 
     fn buffer_segment(&mut self, item: BaseSegment) {
         let mut segment = item.segment;
-        materialize_changed_sources(&mut segment, &self.chains, self.fit_tol)
+        let started = crate::timing::stopwatch();
+        let rebuilt = materialize_changed_sources(&mut segment, &self.chains, self.fit_tol)
             .unwrap_or_else(|error| panic!("shaper: {error}"));
+        let elapsed_us = started.elapsed_us();
+        if crate::timing::is_slow_phase(elapsed_us) {
+            crate::timing::log_slow_phase(
+                "materialize_source",
+                elapsed_us,
+                crate::timing::PhaseWorkload {
+                    segments: 1,
+                    axes: rebuilt,
+                    ..Default::default()
+                },
+                "",
+            );
+        }
         let rest_at_end = segment.rest_at_end;
         self.pending.push(segment, rest_at_end);
     }
@@ -462,7 +476,7 @@ fn materialize_changed_sources(
     segment: &mut ContinuousSegment,
     chains: &AxisChainSet,
     fit_tol: FitTol,
-) -> Result<(), PostProcessError> {
+) -> Result<usize, PostProcessError> {
     let mut replacements = Vec::new();
     for (axis, source) in segment.axes.iter().enumerate() {
         let variable_surface_z = axis == 2
@@ -540,11 +554,12 @@ fn materialize_changed_sources(
         }
         replacements.push((axis, ContinuousAxis::Spline(Arc::new(curve))));
     }
+    let rebuilt = replacements.len();
     let axes = Arc::make_mut(&mut segment.axes);
     for (axis, replacement) in replacements {
         axes[axis] = replacement;
     }
-    Ok(())
+    Ok(rebuilt)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -592,6 +607,13 @@ fn apply_axis_chains(
         shaped_cache.len() <= window,
         "frontier retreated below the shaped-leader cache"
     );
+    let work = crate::timing::PhaseWorkload {
+        window,
+        commit: commit_count,
+        frontier: frontier_count,
+        force,
+        ..Default::default()
+    };
     if window > shaped_cache.len() {
         let mut fresh: Vec<ContinuousSegment> = base[shaped_cache.len()..window].to_vec();
         fit_leader_axes(
@@ -603,11 +625,13 @@ fn apply_axis_chains(
             at_stream_boundary,
             chains,
             fit_tol,
+            work,
         )?;
         shaped_cache.extend(fresh);
     }
     let frontier = &shaped_cache.make_contiguous()[..window];
     let mut out: Vec<ContinuousSegment> = frontier.iter().take(commit_count).cloned().collect();
+    let projection_started = crate::timing::stopwatch();
     project_followers(
         base,
         frontier,
@@ -618,8 +642,36 @@ fn apply_axis_chains(
         fit_tol,
         follower_states,
     )?;
+    let projection_us = projection_started.elapsed_us();
+    if crate::timing::is_slow_phase(projection_us) {
+        crate::timing::log_slow_phase(
+            "follower_projection",
+            projection_us,
+            crate::timing::PhaseWorkload {
+                segments: out.len(),
+                axes: follower_states.iter().filter(|s| s.is_active()).count(),
+                ..work
+            },
+            "",
+        );
+    }
     send_toolhead(toolhead_tap, &out);
-    apply_motor_side_stages(&mut out, chains, fit_tol)?;
+    let motor_started = crate::timing::stopwatch();
+    let (motor_axes, motor_pieces) = apply_motor_side_stages(&mut out, chains, fit_tol)?;
+    let motor_us = motor_started.elapsed_us();
+    if crate::timing::is_slow_phase(motor_us) {
+        crate::timing::log_slow_phase(
+            "motor_side",
+            motor_us,
+            crate::timing::PhaseWorkload {
+                segments: out.len(),
+                axes: motor_axes,
+                pieces: motor_pieces,
+                ..work
+            },
+            "",
+        );
+    }
     Ok(out)
 }
 
@@ -639,7 +691,9 @@ fn apply_motor_side_stages(
     out: &mut [ContinuousSegment],
     chains: &AxisChainSet,
     fit_tol: FitTol,
-) -> Result<(), PostProcessError> {
+) -> Result<(usize, usize), PostProcessError> {
+    let mut rebuilt_axes = 0usize;
+    let mut rebuilt_pieces = 0usize;
     for seg in out.iter_mut() {
         for axis in 0..seg.axes.len() {
             let Some(chain) = chains.chains.get(axis) else {
@@ -679,6 +733,7 @@ fn apply_motor_side_stages(
                     )?),
                 },
                 ContinuousAxis::PiecewiseRelativeSpline(pieces) => {
+                    rebuilt_pieces += pieces.len();
                     ContinuousAxis::PiecewiseRelativeSpline(apply_trailing_stages_to_pieces(
                         chain, axis, pieces, fit_tol,
                     )?)
@@ -686,9 +741,10 @@ fn apply_motor_side_stages(
                 _ => return Err(PostProcessError::DegenerateAxisTrack { axis }),
             };
             Arc::make_mut(&mut seg.axes)[axis] = replacement;
+            rebuilt_axes += 1;
         }
     }
-    Ok(())
+    Ok((rebuilt_axes, rebuilt_pieces))
 }
 
 /// The trailing stages are position-blind — they add velocity and
@@ -873,6 +929,7 @@ fn fit_leader_axes(
     at_stream_boundary: bool,
     chains: &AxisChainSet,
     fit_tol: FitTol,
+    work: crate::timing::PhaseWorkload,
 ) -> Result<(), PostProcessError> {
     let default_chain = CompiledChain::default();
     let axis_chains: Vec<(usize, &CompiledChain)> = (0..n_axes)
@@ -939,18 +996,21 @@ fn fit_leader_axes(
             .collect()
     };
     let fit_elapsed_us = fit_started.elapsed_us();
-    if fit_elapsed_us >= 20_000 {
+    if crate::timing::is_slow_phase(fit_elapsed_us) {
         let per_axis: Vec<String> = columns
             .iter()
             .map(|(axis, _, elapsed_us)| format!("axis{axis}={elapsed_us}us"))
             .collect();
-        tracing::warn!(
-            subsystem = "motion",
-            event = "shaper_fit_slow",
-            total_us = fit_elapsed_us as u64,
-            fresh_segments = fresh.len(),
-            columns = %per_axis.join(" "),
-            "shaper leader fit pass exceeded 20ms"
+        crate::timing::log_slow_phase(
+            "leader_fit",
+            fit_elapsed_us,
+            crate::timing::PhaseWorkload {
+                segments: fresh.len(),
+                axes: axis_chains.len(),
+                force,
+                ..work
+            },
+            &per_axis.join(" "),
         );
     }
     for (axis, column, _) in columns {

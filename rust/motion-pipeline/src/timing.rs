@@ -72,3 +72,62 @@ impl Stopwatch {
         0
     }
 }
+
+/// A stage phase that runs longer than this is attributed by one
+/// `shaper_phase_slow` record. The shaper's whole budget is the anchor lead,
+/// so a single phase burning 20ms is already a scheduling event.
+pub const SLOW_PHASE_US: u128 = 20_000;
+
+/// Workload size behind one `shaper_phase_slow` record. Every field is a
+/// count the emitting phase already has in hand, so a fast phase pays a
+/// stopwatch read and scalar bookkeeping and nothing else.
+///
+/// Event schema (`subsystem = "motion"`, `event = "shaper_phase_slow"`):
+/// - `phase` — which phase burned the time: `materialize_source`,
+///   `leader_fit`, `follower_projection`, `motor_side`.
+/// - `elapsed_us` — wall time inside that phase.
+/// - `segments` — segments the phase walked.
+/// - `window` — frontier window length the phase read; 0 when not windowed.
+/// - `commit` — segments this pass commits downstream.
+/// - `frontier` — shaping-frontier length this pass fitted through.
+/// - `axes` — axis columns or tracks the phase rebuilt.
+/// - `pieces` — piecewise-relative pieces the phase re-fitted.
+/// - `force` — drain/flush pass, where the window is clamped instead of
+///   covered by lookahead.
+/// - `detail` — phase-specific breakdown, empty when the phase has none.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PhaseWorkload {
+    pub segments: usize,
+    pub window: usize,
+    pub commit: usize,
+    pub frontier: usize,
+    pub axes: usize,
+    pub pieces: usize,
+    pub force: bool,
+}
+
+#[must_use]
+pub fn is_slow_phase(elapsed_us: u128) -> bool {
+    elapsed_us >= SLOW_PHASE_US
+}
+
+/// Emits the record described on [`PhaseWorkload`]. Callers guard with
+/// [`is_slow_phase`] so neither the formatting nor a `detail` string is paid
+/// for on the fast path.
+pub fn log_slow_phase(phase: &'static str, elapsed_us: u128, work: PhaseWorkload, detail: &str) {
+    tracing::warn!(
+        subsystem = "motion",
+        event = "shaper_phase_slow",
+        phase,
+        elapsed_us = elapsed_us as u64,
+        segments = work.segments,
+        window = work.window,
+        commit = work.commit,
+        frontier = work.frontier,
+        axes = work.axes,
+        pieces = work.pieces,
+        force = work.force,
+        detail,
+        "shaper phase exceeded the slow-phase threshold"
+    );
+}
