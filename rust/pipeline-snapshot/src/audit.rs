@@ -1,18 +1,21 @@
-//! Kinematic-invariant oracle over a lowered trajectory: takes the per-axis
-//! polynomial pieces the firmware would execute plus the limits the plan was
-//! made under, and reports every violation. `hard` violations are invariants
-//! the pipeline must never break (finite coefficients, contiguous monotone
-//! time, rows no narrower than the device's step-time resolution, C0 position
-//! at seams and hold gaps); `target` violations break the intended smoothness
-//! budget (C1/C2 seams, velocity limits, and — only when the plan is
-//! jerk-limited — accel and jerk limits, since an infinite-jerk plan bounds
-//! the scalar path's acceleration, not each axis' reconstruction of it).
-//! Derivative maxima are probed at endpoints plus a dense interior grid, so a
+//! Kinematic-invariant oracle over an exact trajectory: takes the carriers
+//! the firmware would execute plus the limits the plan was made under, and
+//! reports every violation. `hard` violations are invariants the pipeline
+//! must never break (finite states, contiguous monotone time, rows no
+//! narrower than the device's step-time resolution, evaluable carriers, C0
+//! position at seams and hold gaps); `target` violations break the intended
+//! smoothness budget (C1/C2 seams, velocity limits, and — only when the plan
+//! is jerk-limited — accel and jerk limits, since an infinite-jerk plan
+//! bounds the scalar path's acceleration, not each axis' reconstruction of
+//! it). Every state is the carrier's own exact position/velocity/
+//! acceleration/jerk, read one-sided at each discontinuity; derivative
+//! maxima are probed at every breakpoint plus a dense interior grid, so a
 //! reported violation is a certified lower bound on the true excess.
 
 use motion_pipeline::StreamConfig;
+use trajectory::continuous::Pvaj;
 
-use crate::TrajectoryPieces;
+use crate::{CarrierRow, ExactTrajectory, SampleSide};
 
 pub const AXIS_NAMES: [&str; 4] = ["x", "y", "z", "e"];
 
@@ -21,8 +24,7 @@ const TIME_CONTIGUITY_TOL_S: f64 = 1e-9;
 const REST_VELOCITY_TOL_MM_S: f64 = 1e-9;
 
 /// The device's step-time resolution: the narrowest window a row can mean
-/// anything over. Differentiating a narrower row divides coefficient rounding
-/// by a vanishing span, manufacturing derivative magnitudes no axis executes.
+/// anything over.
 const MIN_ROW_SPAN_S: f64 = 2e-9;
 
 /// An infinite-jerk plan bounds the scalar path's acceleration, not each
@@ -33,7 +35,8 @@ const ACCEL_EXPLOSION_MULTIPLIER: f64 = 1e3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViolationKind {
-    NonFiniteCoefficient,
+    NonFiniteState,
+    CarrierNotEvaluable,
     NonPositiveSpan,
     SliverSpan,
     TimeGap,
@@ -86,11 +89,6 @@ pub struct AuditBudgets {
 }
 
 impl AuditBudgets {
-    /// Budgets a correctly-lowered trajectory is expected to satisfy: seam
-    /// steps within twice the lowering's own truncation budgets
-    /// (`FIT_TRUNC_VEL_MM_S`/`FIT_TRUNC_ACC_MM_S2`), accel within the
-    /// configured limit plus the fit tolerance the caller granted the
-    /// lowerer, jerk within twice the configured limit.
     pub fn for_config(config: &StreamConfig) -> Self {
         Self {
             seam_pos_mm: 1e-4,
@@ -147,50 +145,49 @@ impl std::fmt::Display for AuditReport {
 }
 
 pub fn audit_trajectory(
-    traj: &TrajectoryPieces,
+    traj: &ExactTrajectory,
     config: &StreamConfig,
     budgets: &AuditBudgets,
 ) -> AuditReport {
     let mut report = AuditReport::default();
-    let axes = [&traj.x, &traj.y, &traj.z, &traj.e];
-    for (axis, pieces) in axes.iter().enumerate() {
-        audit_axis(axis, pieces, config, budgets, &mut report);
+    for axis in 0..4 {
+        audit_axis(traj, axis, config, budgets, &mut report);
     }
     report
 }
 
 fn audit_axis(
+    traj: &ExactTrajectory,
     axis: usize,
-    pieces: &[Vec<f64>],
     config: &StreamConfig,
     budgets: &AuditBudgets,
     report: &mut AuditReport,
 ) {
+    let rows = traj.rows(axis);
     let mut extrema = AxisExtrema {
-        min_piece_duration_s: f64::INFINITY,
+        min_piece_duration_s: if rows.is_empty() { 0.0 } else { f64::INFINITY },
         ..Default::default()
     };
+    let lane_is_one_row = rows.len() == 1;
 
-    for piece in pieces {
-        audit_piece_structure(axis, piece, report);
-    }
-    let structurally_sound =
-        |p: &Vec<f64>| p.len() >= 3 && p.iter().all(|c| c.is_finite()) && p[1] > p[0];
-
-    let lane_is_one_row = pieces.len() == 1;
-    for piece in pieces.iter().filter(|p| structurally_sound(p)) {
-        let dt = piece[1] - piece[0];
+    for (index, row) in rows.iter().enumerate() {
+        if !audit_row_structure(axis, row, report) {
+            continue;
+        }
+        let dt = row.t1 - row.t0;
         extrema.min_piece_duration_s = extrema.min_piece_duration_s.min(dt);
         if dt < MIN_ROW_SPAN_S && !lane_is_one_row {
             report.hard.push(Violation {
                 kind: ViolationKind::SliverSpan,
                 axis,
-                t: piece[0],
+                t: row.t0,
                 value: dt,
                 bound: MIN_ROW_SPAN_S,
             });
         }
-        let (max_v, max_a, max_j) = probed_derivative_maxima(&piece[2..], dt);
+        let Some((max_v, max_a, max_j)) = probed_maxima(traj, axis, index, report) else {
+            continue;
+        };
         extrema.max_velocity = extrema.max_velocity.max(max_v);
         extrema.max_accel = extrema.max_accel.max(max_a);
         extrema.max_jerk = extrema.max_jerk.max(max_j);
@@ -202,7 +199,7 @@ fn audit_axis(
                 report.target.push(Violation {
                     kind: ViolationKind::Velocity,
                     axis,
-                    t: piece[0],
+                    t: row.t0,
                     value: max_v,
                     bound: v_bound,
                 });
@@ -212,7 +209,7 @@ fn audit_axis(
                 report.hard.push(Violation {
                     kind: ViolationKind::AccelExplosion,
                     axis,
-                    t: piece[0],
+                    t: row.t0,
                     value: max_a,
                     bound: explosion_bound,
                 });
@@ -223,7 +220,7 @@ fn audit_axis(
                     report.target.push(Violation {
                         kind: ViolationKind::Accel,
                         axis,
-                        t: piece[0],
+                        t: row.t0,
                         value: max_a,
                         bound: a_bound,
                     });
@@ -234,7 +231,7 @@ fn audit_axis(
                 report.target.push(Violation {
                     kind: ViolationKind::Jerk,
                     axis,
-                    t: piece[0],
+                    t: row.t0,
                     value: max_j,
                     bound: j_bound,
                 });
@@ -242,139 +239,238 @@ fn audit_axis(
         }
     }
 
-    for w in pieces.windows(2) {
-        let (left, right) = (&w[0], &w[1]);
-        if !structurally_sound(left) || !structurally_sound(right) {
+    for (index, row) in rows.iter().enumerate() {
+        if !row_is_sound(row) {
             continue;
         }
-        audit_seam(axis, left, right, config, budgets, report);
+        for t in traj.row_breakpoints(axis, index) {
+            if t > row.t0 && t < row.t1 {
+                audit_discontinuity(traj, axis, (index, t), (index, t), config, budgets, report);
+            }
+        }
+        if rows.get(index + 1).is_some_and(row_is_sound) {
+            audit_seam(traj, axis, index, config, budgets, report);
+        }
     }
 
-    if pieces.is_empty() {
-        extrema.min_piece_duration_s = 0.0;
-    }
     report.extrema[axis] = extrema;
 }
 
-fn audit_piece_structure(axis: usize, piece: &[f64], report: &mut AuditReport) {
-    if piece.len() < 3 || piece.iter().any(|c| !c.is_finite()) {
+fn row_is_sound(row: &CarrierRow) -> bool {
+    row.t0.is_finite() && row.t1.is_finite() && row.t1 > row.t0
+}
+
+fn audit_row_structure(axis: usize, row: &CarrierRow, report: &mut AuditReport) -> bool {
+    if !(row.t0.is_finite() && row.t1.is_finite()) {
         report.hard.push(Violation {
-            kind: ViolationKind::NonFiniteCoefficient,
+            kind: ViolationKind::NonFiniteState,
             axis,
-            t: piece.first().copied().unwrap_or(f64::NAN),
+            t: row.t0,
             value: f64::NAN,
             bound: f64::NAN,
         });
-        return;
+        return false;
     }
-    if piece[1] <= piece[0] {
+    if row.t1 <= row.t0 {
         report.hard.push(Violation {
             kind: ViolationKind::NonPositiveSpan,
             axis,
-            t: piece[0],
-            value: piece[1] - piece[0],
+            t: row.t0,
+            value: row.t1 - row.t0,
             bound: 0.0,
         });
+        return false;
+    }
+    true
+}
+
+/// Certified lower bounds on the row's own derivative maxima: the carrier is
+/// evaluated on a dense grid of every interval between its breakpoints, from
+/// the side that owns each station, so a jerk step at a phase joint is read
+/// as the two values it really takes.
+fn probed_maxima(
+    traj: &ExactTrajectory,
+    axis: usize,
+    row: usize,
+    report: &mut AuditReport,
+) -> Option<(f64, f64, f64)> {
+    let mut max = [0.0_f64; 3];
+    for interval in traj.row_breakpoints(axis, row).windows(2) {
+        let (t0, t1) = (interval[0], interval[1]);
+        if t1 <= t0 {
+            continue;
+        }
+        for step in 0..=INTERIOR_PROBES {
+            let t = t0 + (t1 - t0) * step as f64 / INTERIOR_PROBES as f64;
+            let side = if step == INTERIOR_PROBES {
+                SampleSide::Left
+            } else {
+                SampleSide::Right
+            };
+            let state = probe(traj, axis, row, t, side, report)?;
+            for (slot, value) in
+                max.iter_mut()
+                    .zip([state.velocity, state.acceleration, state.jerk])
+            {
+                *slot = slot.max(value.abs());
+            }
+        }
+    }
+    Some((max[0], max[1], max[2]))
+}
+
+fn probe(
+    traj: &ExactTrajectory,
+    axis: usize,
+    row: usize,
+    t: f64,
+    side: SampleSide,
+    report: &mut AuditReport,
+) -> Option<Pvaj> {
+    match traj.eval_row(axis, row, t, side) {
+        Ok(state) => {
+            if [
+                state.position,
+                state.velocity,
+                state.acceleration,
+                state.jerk,
+            ]
+            .into_iter()
+            .all(f64::is_finite)
+            {
+                return Some(state);
+            }
+            report.hard.push(Violation {
+                kind: ViolationKind::NonFiniteState,
+                axis,
+                t,
+                value: f64::NAN,
+                bound: f64::NAN,
+            });
+            None
+        }
+        Err(_) => {
+            report.hard.push(Violation {
+                kind: ViolationKind::CarrierNotEvaluable,
+                axis,
+                t,
+                value: f64::NAN,
+                bound: f64::NAN,
+            });
+            None
+        }
     }
 }
 
 fn audit_seam(
+    traj: &ExactTrajectory,
     axis: usize,
-    left: &[f64],
-    right: &[f64],
+    left_row: usize,
     config: &StreamConfig,
     budgets: &AuditBudgets,
     report: &mut AuditReport,
 ) {
-    let gap = right[0] - left[1];
-    let (lp, lv, la) = state_at(&left[2..], left[1] - left[0]);
-    let (rp, rv, ra) = state_at(&right[2..], 0.0);
+    let rows = traj.rows(axis);
+    let (left, right) = (&rows[left_row], &rows[left_row + 1]);
+    let gap = right.t0 - left.t1;
     if gap < -TIME_CONTIGUITY_TOL_S {
         report.hard.push(Violation {
             kind: ViolationKind::TimeOverlap,
             axis,
-            t: right[0],
+            t: right.t0,
             value: -gap,
             bound: TIME_CONTIGUITY_TOL_S,
         });
         return;
     }
-    let gap_is_a_rest_hold =
-        lv.abs() <= REST_VELOCITY_TOL_MM_S && rv.abs() <= REST_VELOCITY_TOL_MM_S;
+    let Some(before) = probe(traj, axis, left_row, left.t1, SampleSide::Left, report) else {
+        return;
+    };
+    let Some(after) = probe(
+        traj,
+        axis,
+        left_row + 1,
+        right.t0,
+        SampleSide::Right,
+        report,
+    ) else {
+        return;
+    };
+    let gap_is_a_rest_hold = before.velocity.abs() <= REST_VELOCITY_TOL_MM_S
+        && after.velocity.abs() <= REST_VELOCITY_TOL_MM_S;
     if gap > TIME_CONTIGUITY_TOL_S && !gap_is_a_rest_hold {
         report.hard.push(Violation {
             kind: ViolationKind::TimeGap,
             axis,
-            t: left[1],
+            t: left.t1,
             value: gap,
             bound: TIME_CONTIGUITY_TOL_S,
         });
         return;
     }
+    report_state_jump(axis, right.t0, before, after, config, budgets, report);
+}
 
-    let dp = (rp - lp).abs();
+/// A phase joint, a knot or a profile boundary inside one row: both sides are
+/// the same carrier's one-sided limits, so a step there is a real
+/// discontinuity the axis executes.
+fn audit_discontinuity(
+    traj: &ExactTrajectory,
+    axis: usize,
+    left: (usize, f64),
+    right: (usize, f64),
+    config: &StreamConfig,
+    budgets: &AuditBudgets,
+    report: &mut AuditReport,
+) {
+    let Some(before) = probe(traj, axis, left.0, left.1, SampleSide::Left, report) else {
+        return;
+    };
+    let Some(after) = probe(traj, axis, right.0, right.1, SampleSide::Right, report) else {
+        return;
+    };
+    report_state_jump(axis, right.1, before, after, config, budgets, report);
+}
+
+fn report_state_jump(
+    axis: usize,
+    t: f64,
+    before: Pvaj,
+    after: Pvaj,
+    config: &StreamConfig,
+    budgets: &AuditBudgets,
+    report: &mut AuditReport,
+) {
+    let dp = (after.position - before.position).abs();
     if dp > budgets.seam_pos_mm {
         report.hard.push(Violation {
             kind: ViolationKind::SeamPosition,
             axis,
-            t: right[0],
+            t,
             value: dp,
             bound: budgets.seam_pos_mm,
         });
     }
-    let dv = (rv - lv).abs();
+    let dv = (after.velocity - before.velocity).abs();
     if dv > budgets.seam_vel_mm_s {
         report.target.push(Violation {
             kind: ViolationKind::SeamVelocity,
             axis,
-            t: right[0],
+            t,
             value: dv,
             bound: budgets.seam_vel_mm_s,
         });
     }
-    let da = (ra - la).abs();
+    let da = (after.acceleration - before.acceleration).abs();
     if config.limits.max_jerk_mm_s3.is_finite() && da > budgets.seam_accel_mm_s2 {
         report.target.push(Violation {
             kind: ViolationKind::SeamAccel,
             axis,
-            t: right[0],
+            t,
             value: da,
             bound: budgets.seam_accel_mm_s2,
         });
     }
-}
-
-fn differentiate(coeffs: &[f64]) -> Vec<f64> {
-    coeffs
-        .iter()
-        .enumerate()
-        .skip(1)
-        .map(|(k, c)| k as f64 * c)
-        .collect()
-}
-
-fn eval(coeffs: &[f64], tau: f64) -> f64 {
-    coeffs.iter().rev().fold(0.0, |acc, c| acc * tau + c)
-}
-
-fn state_at(coeffs: &[f64], tau: f64) -> (f64, f64, f64) {
-    let vel = differentiate(coeffs);
-    let acc = differentiate(&vel);
-    (eval(coeffs, tau), eval(&vel, tau), eval(&acc, tau))
-}
-
-fn probed_derivative_maxima(coeffs: &[f64], dt: f64) -> (f64, f64, f64) {
-    let vel = differentiate(coeffs);
-    let acc = differentiate(&vel);
-    let jerk = differentiate(&acc);
-    let mut max = [0.0_f64; 3];
-    for k in 0..=INTERIOR_PROBES {
-        let tau = dt * k as f64 / INTERIOR_PROBES as f64;
-        for (m, c) in max.iter_mut().zip([&vel, &acc, &jerk]) {
-            *m = m.max(eval(c, tau).abs());
-        }
-    }
-    (max[0], max[1], max[2])
 }
 
 #[cfg(test)]

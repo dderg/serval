@@ -23,6 +23,14 @@ pub struct Pva {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pvaj {
+    pub position: f64,
+    pub velocity: f64,
+    pub acceleration: f64,
+    pub jerk: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PvaBounds {
     pub velocity_min: f64,
     pub velocity_max: f64,
@@ -269,11 +277,25 @@ impl AnalyticMoveSpan {
     }
 
     pub fn eval_axis(&self, axis: usize, t: f64) -> Result<Pva, ContinuousError> {
+        if axis == 2 {
+            if let SurfaceMode::Variable(surface) = &self.surface {
+                return self.eval_warped_z(surface, t);
+            }
+        }
+        let exact = self.eval_axis_pvaj(axis, t)?;
+        Ok(Pva {
+            position: exact.position,
+            velocity: exact.velocity,
+            acceleration: exact.acceleration,
+        })
+    }
+
+    pub fn eval_axis_pvaj(&self, axis: usize, t: f64) -> Result<Pvaj, ContinuousError> {
         check_time(t, self.t_start, self.t_end)?;
-        let local_t = (t - self.t_start).clamp(0.0, self.t_end - self.t_start);
-        let phase = active_phase(&self.phases, local_t);
-        let (phase_s, velocity, acceleration) = phase.state_at(local_t);
-        let s = phase_s - self.source_distance_origin;
+        if axis == 2 && matches!(&self.surface, SurfaceMode::Variable(_)) {
+            return Err(ContinuousError::VariableSurfaceBeforeDispatch);
+        }
+        let (s, velocity, acceleration, jerk) = self.tangential_state(t);
         let length = self.source.segment.s_len();
         let result = if axis < 3 {
             let segment = self
@@ -282,38 +304,20 @@ impl AnalyticMoveSpan {
                 .spatial
                 .as_ref()
                 .ok_or(ContinuousError::AxisOutsideMove { axis })?;
-            let point = segment.point_at(s);
             let heading = segment.heading_at(s);
-            let curvature = segment.dheading_ds(s);
-            let mut result = Pva {
-                position: point[axis],
+            let dheading = segment.dheading_ds(s);
+            let d2heading = segment.d2heading_ds2(s);
+            let mut result = Pvaj {
+                position: segment.point_at(s)[axis],
                 velocity: velocity * heading[axis],
-                acceleration: acceleration * heading[axis] + velocity * velocity * curvature[axis],
+                acceleration: acceleration * heading[axis] + velocity * velocity * dheading[axis],
+                jerk: jerk * heading[axis]
+                    + 3.0 * velocity * acceleration * dheading[axis]
+                    + velocity * velocity * velocity * d2heading[axis],
             };
             if axis == 2 {
-                match &self.surface {
-                    SurfaceMode::None => {}
-                    SurfaceMode::Constant(offset) => result.position += offset,
-                    SurfaceMode::Variable(surface) => {
-                        let warp = surface.warp(point[0], point[1], point[2]);
-                        let path_velocity = heading.map(|component| velocity * component);
-                        let path_acceleration: [f64; 3] = std::array::from_fn(|component| {
-                            acceleration * heading[component]
-                                + velocity * velocity * curvature[component]
-                        });
-                        result.position += warp.w;
-                        result.velocity += warp.wx * path_velocity[0]
-                            + warp.wy * path_velocity[1]
-                            + warp.wz * path_velocity[2];
-                        result.acceleration += warp.wx * path_acceleration[0]
-                            + warp.wy * path_acceleration[1]
-                            + warp.wz * path_acceleration[2]
-                            + warp.wxx * path_velocity[0] * path_velocity[0]
-                            + 2.0 * warp.wxy * path_velocity[0] * path_velocity[1]
-                            + warp.wyy * path_velocity[1] * path_velocity[1]
-                            + 2.0 * warp.wxz * path_velocity[0] * path_velocity[2]
-                            + 2.0 * warp.wyz * path_velocity[1] * path_velocity[2];
-                    }
+                if let SurfaceMode::Constant(offset) = &self.surface {
+                    result.position += offset;
                 }
             }
             result
@@ -325,22 +329,73 @@ impl AnalyticMoveSpan {
                         .get(follower.axis_index)
                         .ok_or(ContinuousError::AxisOutsideMove { axis })?;
                     let ratio = follower.ratio_at(s, length);
-                    Pva {
+                    let slope = follower.ratio_slope(length);
+                    Pvaj {
                         position: start + follower.offset_at(s, length),
                         velocity: ratio * velocity,
-                        acceleration: ratio * acceleration
-                            + follower.ratio_slope(length) * velocity * velocity,
+                        acceleration: ratio * acceleration + slope * velocity * velocity,
+                        jerk: ratio * jerk + 3.0 * slope * velocity * acceleration,
                     }
                 }
-                None => Pva {
+                None => Pvaj {
                     position: *self
                         .axis_start_positions
                         .get(axis)
                         .ok_or(ContinuousError::AxisOutsideMove { axis })?,
                     velocity: 0.0,
                     acceleration: 0.0,
+                    jerk: 0.0,
                 },
             }
+        };
+        finite_pvaj(result, t)
+    }
+
+    fn tangential_state(&self, t: f64) -> (f64, f64, f64, f64) {
+        let local_t = (t - self.t_start).clamp(0.0, self.t_end - self.t_start);
+        let phase = active_phase(&self.phases, local_t);
+        let (phase_s, velocity, acceleration) = phase.state_at(local_t);
+        (
+            phase_s - self.source_distance_origin,
+            velocity,
+            acceleration,
+            phase.j,
+        )
+    }
+
+    fn eval_warped_z(&self, surface: &SurfaceTransform, t: f64) -> Result<Pva, ContinuousError> {
+        check_time(t, self.t_start, self.t_end)?;
+        let (s, velocity, acceleration, _) = self.tangential_state(t);
+        let segment = self
+            .source
+            .segment
+            .spatial
+            .as_ref()
+            .ok_or(ContinuousError::AxisOutsideMove { axis: 2 })?;
+        let point = segment.point_at(s);
+        let heading = segment.heading_at(s);
+        let dheading = segment.dheading_ds(s);
+        let warp = surface.warp(point[0], point[1], point[2]);
+        let path_velocity = heading.map(|component| velocity * component);
+        let path_acceleration: [f64; 3] = std::array::from_fn(|component| {
+            acceleration * heading[component] + velocity * velocity * dheading[component]
+        });
+        let result = Pva {
+            position: point[2] + warp.w,
+            velocity: velocity * heading[2]
+                + warp.wx * path_velocity[0]
+                + warp.wy * path_velocity[1]
+                + warp.wz * path_velocity[2],
+            acceleration: acceleration * heading[2]
+                + velocity * velocity * dheading[2]
+                + warp.wx * path_acceleration[0]
+                + warp.wy * path_acceleration[1]
+                + warp.wz * path_acceleration[2]
+                + warp.wxx * path_velocity[0] * path_velocity[0]
+                + 2.0 * warp.wxy * path_velocity[0] * path_velocity[1]
+                + warp.wyy * path_velocity[1] * path_velocity[1]
+                + 2.0 * warp.wxz * path_velocity[0] * path_velocity[2]
+                + 2.0 * warp.wyz * path_velocity[1] * path_velocity[2],
         };
         finite_pva(result, t)
     }
@@ -413,6 +468,68 @@ impl ContinuousAxis {
         finite_pva(result, t)
     }
 
+    pub fn eval_pvaj(&self, t: f64) -> Result<Pvaj, ContinuousError> {
+        if !t.is_finite() {
+            return Err(ContinuousError::NonFinite { t });
+        }
+        let result = match self {
+            Self::Analytic { span, axis } => span.eval_axis_pvaj(*axis, t)?,
+            Self::Spline(curve) => spline_pvaj(curve, t)?,
+            Self::RelativeSpline {
+                base_position,
+                curve,
+            } => {
+                let mut value = spline_pvaj(curve, t)?;
+                value.position += base_position;
+                value
+            }
+            Self::PiecewiseRelativeSpline(pieces) => {
+                let piece = owning_piece(pieces, t)?;
+                let mut value = spline_pvaj(&piece.curve, t)?;
+                value.position += piece.base_position;
+                value
+            }
+            Self::Hold {
+                position,
+                t_start,
+                t_end,
+            } => {
+                checked_clamped_time(t, *t_start, *t_end)?;
+                Pvaj {
+                    position: *position,
+                    velocity: 0.0,
+                    acceleration: 0.0,
+                    jerk: 0.0,
+                }
+            }
+            Self::Nudge(profile) => {
+                let t = checked_clamped_time(t, profile.t_start(), profile.t_end())?;
+                let value = profile.eval(t);
+                Pvaj {
+                    position: value.position,
+                    velocity: value.velocity,
+                    acceleration: value.acceleration,
+                    jerk: profile.jerk(t),
+                }
+            }
+            Self::Buzz {
+                base_position,
+                sign,
+                profile,
+            } => {
+                let t = checked_clamped_time(t, profile.t_start(), profile.t_end())?;
+                let relative = profile.eval(t);
+                Pvaj {
+                    position: base_position + sign * relative.position,
+                    velocity: sign * relative.velocity,
+                    acceleration: sign * relative.acceleration,
+                    jerk: sign * profile.jerk(t),
+                }
+            }
+        };
+        finite_pvaj(result, t)
+    }
+
     pub fn position(&self, t: f64) -> Result<f64, ContinuousError> {
         Ok(self.eval_pva(t)?.position)
     }
@@ -450,7 +567,13 @@ impl ContinuousAxis {
         }
     }
 
-    fn append_breakpoints(&self, output: &mut Vec<f64>) {
+    pub fn breakpoints(&self) -> Vec<f64> {
+        let mut output = Vec::new();
+        self.append_breakpoints(&mut output);
+        output
+    }
+
+    pub fn append_breakpoints(&self, output: &mut Vec<f64>) {
         match self {
             Self::Analytic { span, .. } => {
                 output.extend(span.phases.iter().map(|phase| span.t_start + phase.t0));
@@ -493,6 +616,29 @@ impl ContinuousSegment {
         source
             .eval_pva(t)
             .map_err(|error| with_source_axis(error, axis, t))
+    }
+
+    pub fn eval_axis_pvaj(&self, axis: usize, t: f64) -> Result<Pvaj, ContinuousError> {
+        let t = checked_clamped_time(t, self.t_start, self.t_end)
+            .map_err(|error| with_source_axis(error, axis, t))?;
+        let source = self
+            .axes
+            .get(axis)
+            .ok_or(ContinuousError::AxisOutsideMove { axis })?;
+        source
+            .eval_pvaj(t)
+            .map_err(|error| with_source_axis(error, axis, t))
+    }
+
+    pub fn breakpoints(&self) -> Vec<f64> {
+        let mut output = vec![self.t_start, self.t_end];
+        for axis in self.axes.iter() {
+            axis.append_breakpoints(&mut output);
+        }
+        output.retain(|value| *value >= self.t_start && *value <= self.t_end);
+        output.sort_by(f64::total_cmp);
+        output.dedup();
+        output
     }
 }
 
@@ -1132,6 +1278,22 @@ fn finite_pva(value: Pva, t: f64) -> Result<Pva, ContinuousError> {
     }
 }
 
+fn finite_pvaj(value: Pvaj, t: f64) -> Result<Pvaj, ContinuousError> {
+    if [
+        value.position,
+        value.velocity,
+        value.acceleration,
+        value.jerk,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+    {
+        Ok(value)
+    } else {
+        Err(ContinuousError::NonFinite { t })
+    }
+}
+
 fn with_source_axis(error: ContinuousError, source_axis: usize, t: f64) -> ContinuousError {
     match error {
         ContinuousError::NonFinite { .. } => {
@@ -1299,8 +1461,7 @@ fn spline_domain(curve: &ScalarNurbs) -> (f64, f64) {
 }
 
 fn spline_pva(curve: &ScalarNurbs, t: f64) -> Result<Pva, ContinuousError> {
-    let (t_start, t_end) = spline_domain(curve);
-    let t = spline_owned_time(curve, checked_clamped_time(t, t_start, t_end)?);
+    let t = spline_evaluation_time(curve, t)?;
     Ok(Pva {
         position: nurbs::eval::eval(&curve.as_view(), t),
         velocity: nurbs::eval::eval_derivative(
@@ -1309,8 +1470,31 @@ fn spline_pva(curve: &ScalarNurbs, t: f64) -> Result<Pva, ContinuousError> {
             curve.degree(),
             t,
         ),
-        acceleration: spline_second_derivative(curve, t),
+        acceleration: spline_nth_derivative(curve, 2, t),
     })
+}
+
+fn spline_pvaj(curve: &ScalarNurbs, t: f64) -> Result<Pvaj, ContinuousError> {
+    let t = spline_evaluation_time(curve, t)?;
+    Ok(Pvaj {
+        position: nurbs::eval::eval(&curve.as_view(), t),
+        velocity: nurbs::eval::eval_derivative(
+            curve.control_points(),
+            curve.knots(),
+            curve.degree(),
+            t,
+        ),
+        acceleration: spline_nth_derivative(curve, 2, t),
+        jerk: spline_nth_derivative(curve, 3, t),
+    })
+}
+
+fn spline_evaluation_time(curve: &ScalarNurbs, t: f64) -> Result<f64, ContinuousError> {
+    let (t_start, t_end) = spline_domain(curve);
+    Ok(spline_owned_time(
+        curve,
+        checked_clamped_time(t, t_start, t_end)?,
+    ))
 }
 
 const DEGENERATE_PIECE_WIDTH_ULPS: f64 = 4.0;
@@ -1340,11 +1524,25 @@ fn spline_pv_continuous(curve: &ScalarNurbs, left: f64, right: f64) -> bool {
             <= PIECE_SEAM_ROUNDOFF_ULPS * f64::EPSILON * velocity_scale
 }
 
-fn interior_time_below(value: f64) -> f64 {
+/// The largest representable time strictly below `value`, for evaluating
+/// infinitesimally inside the carrier interval that *ends* at `value`.
+pub fn interior_time_below(value: f64) -> f64 {
     if value > 0.0 {
         f64::from_bits(value.to_bits() - 1)
+    } else if value < 0.0 {
+        f64::from_bits(value.to_bits() + 1)
     } else {
-        value
+        -f64::from_bits(1)
+    }
+}
+
+/// The smallest representable time strictly above `value`, for evaluating
+/// infinitesimally inside the carrier interval that *starts* at `value`.
+pub fn interior_time_above(value: f64) -> f64 {
+    if value < 0.0 {
+        f64::from_bits(value.to_bits() - 1)
+    } else {
+        f64::from_bits(value.to_bits() + 1)
     }
 }
 
@@ -1383,33 +1581,26 @@ fn spline_owned_time(curve: &ScalarNurbs, t: f64) -> f64 {
     }
 }
 
-fn spline_second_derivative(curve: &ScalarNurbs, t: f64) -> f64 {
-    if curve.degree() < 2 {
+fn spline_nth_derivative(curve: &ScalarNurbs, order: usize, t: f64) -> f64 {
+    let degree = curve.degree() as usize;
+    if order > degree {
         return 0.0;
     }
-    let degree = curve.degree() as usize;
-    let second_degree = degree - 2;
     let cps = curve.control_points();
     let knots = curve.knots();
-    let second_knots = &knots[2..knots.len() - 2];
-    let second_count = cps.len() - 2;
-    let span = nurbs::knot::find_knot_span(second_knots, second_degree, second_count, t);
+    let reduced_degree = degree - order;
+    let reduced_knots = &knots[order..knots.len() - order];
+    let reduced_count = cps.len() - order;
+    let span = nurbs::knot::find_knot_span(reduced_knots, reduced_degree, reduced_count, t);
     let mut values = [0.0; nurbs::WORKSPACE_SIZE];
-    for index in 0..=second_degree {
-        let control_index = span - second_degree + index;
-        let first0 = first_derivative_control(cps, knots, degree, control_index);
-        let first1 = first_derivative_control(cps, knots, degree, control_index + 1);
-        let denominator = knots[control_index + degree + 1] - knots[control_index + 2];
-        values[index] = if denominator > 0.0 {
-            (degree - 1) as f64 * (first1 - first0) / denominator
-        } else {
-            0.0
-        };
+    for index in 0..=reduced_degree {
+        values[index] =
+            derivative_control(cps, knots, degree, order, span - reduced_degree + index);
     }
-    for level in 1..=second_degree {
-        for index in (level..=second_degree).rev() {
-            let low = second_knots[span - second_degree + index];
-            let high = second_knots[span + 1 + index - level];
+    for level in 1..=reduced_degree {
+        for index in (level..=reduced_degree).rev() {
+            let low = reduced_knots[span - reduced_degree + index];
+            let high = reduced_knots[span + 1 + index - level];
             let alpha = if high > low {
                 (t - low) / (high - low)
             } else {
@@ -1418,16 +1609,29 @@ fn spline_second_derivative(curve: &ScalarNurbs, t: f64) -> f64 {
             values[index] = values[index - 1] + alpha * (values[index] - values[index - 1]);
         }
     }
-    values[second_degree]
+    values[reduced_degree]
 }
 
-fn first_derivative_control(cps: &[f64], knots: &[f64], degree: usize, index: usize) -> f64 {
-    let denominator = knots[index + degree + 1] - knots[index + 1];
-    if denominator > 0.0 {
-        degree as f64 * (cps[index + 1] - cps[index]) / denominator
-    } else {
-        0.0
+/// The `order`-th hodograph control point `Q^(order)_index`, from the standard
+/// B-spline derivative recurrence `Q^k_i = (p−k+1)·(Q^{k−1}_{i+1} − Q^{k−1}_i) /
+/// (u_{i+p+1} − u_{i+k})`.
+fn derivative_control(
+    cps: &[f64],
+    knots: &[f64],
+    degree: usize,
+    order: usize,
+    index: usize,
+) -> f64 {
+    if order == 0 {
+        return cps[index];
     }
+    let denominator = knots[index + degree + 1] - knots[index + order];
+    if denominator <= 0.0 {
+        return 0.0;
+    }
+    let low = derivative_control(cps, knots, degree, order - 1, index);
+    let high = derivative_control(cps, knots, degree, order - 1, index + 1);
+    (degree - order + 1) as f64 * (high - low) / denominator
 }
 
 fn spline_bounds(
@@ -1469,7 +1673,7 @@ fn spline_bounds(
             } {
                 continue;
             }
-            let velocity = first_derivative_control(cps, knots, degree, index);
+            let velocity = derivative_control(cps, knots, degree, 1, index);
             velocity_min = velocity_min.min(velocity);
             velocity_max = velocity_max.max(velocity);
         }
@@ -1489,14 +1693,7 @@ fn spline_bounds(
                 } {
                     continue;
                 }
-                let first0 = first_derivative_control(cps, knots, degree, index);
-                let first1 = first_derivative_control(cps, knots, degree, index + 1);
-                let denominator = support_end - support_start;
-                let acceleration = if denominator > 0.0 {
-                    (degree - 1) as f64 * (first1 - first0) / denominator
-                } else {
-                    0.0
-                };
+                let acceleration = derivative_control(cps, knots, degree, 2, index);
                 acceleration_abs_max = acceleration_abs_max.max(acceleration.abs());
             }
         }

@@ -10,8 +10,8 @@ use motion_pipeline::types::PlannedMove;
 use motion_pipeline::{BaseItem, Lowerer, PlannedItem, StreamConfig, StreamInput};
 use pipeline_snapshot::waypoints::parse_gcode;
 use pipeline_snapshot::{
-    SNAPSHOT_MAX_BUFFER_MOVES, TRAJECTORY_FIT_TOL_ACCEL_MM_S2, TRAJECTORY_FIT_TOL_MM,
-    VELOCITY_INTEGRATION_TOL, build_moves, collect_trajectory_pieces,
+    ExactTrajectory, SNAPSHOT_MAX_BUFFER_MOVES, SampleSide, TRAJECTORY_FIT_TOL_ACCEL_MM_S2,
+    TRAJECTORY_FIT_TOL_MM, VELOCITY_INTEGRATION_TOL, build_moves,
 };
 
 fn stream_case(
@@ -69,21 +69,7 @@ fn stream_case(
     planned
 }
 
-fn piece_derivative(coeffs: &[f64], tau: f64, deriv: usize) -> f64 {
-    (deriv..coeffs.len())
-        .map(|k| {
-            let scale: usize = (k - deriv + 1..=k).product();
-            coeffs[k] * scale as f64 * tau.powi((k - deriv) as i32)
-        })
-        .sum()
-}
-
-/// Max per-axis acceleration the lowered carrier itself commands — the
-/// trajectory the firmware executes, sampled through the segments' own
-/// evaluator rather than through the snapshot's polynomial reconstruction.
-/// With jerk unbounded the executed acceleration steps, so a reconstruction
-/// spanning a step rings above the step's own height; the carrier is what the
-/// planner's per-axis budget governs.
+/// Maximum acceleration commanded by the exact continuous carrier.
 fn carrier_max_accel(planned: &[PlannedMove]) -> f64 {
     let segments = lower_run(planned);
     let mut max_a = 0.0_f64;
@@ -102,36 +88,46 @@ fn carrier_max_accel(planned: &[PlannedMove]) -> f64 {
     max_a
 }
 
-/// Every snapshot row is a real window carrying finite coefficients, and
-/// consecutive rows agree in position and velocity: a lowering that rang
-/// through a numerical sliver would report neither.
-fn assert_rows_are_finite_and_continuous(planned: &[PlannedMove]) {
-    let segments = lower_run(planned);
-    let traj = collect_trajectory_pieces(&segments);
-    for (lane, pieces) in [("x", &traj.x), ("y", &traj.y), ("z", &traj.z)] {
-        assert!(!pieces.is_empty(), "{lane}: lane must carry rows");
-        for p in pieces {
-            assert!(p.iter().all(|c| c.is_finite()), "{lane}: {p:?}");
+/// Every exposed carrier has finite state, and consecutive carriers agree in
+/// position and velocity when evaluated from both sides of their shared instant.
+fn assert_carriers_are_finite_and_continuous(planned: &[PlannedMove]) {
+    let traj = ExactTrajectory::from_segments(&lower_run(planned))
+        .expect("continuous segments carry evaluable exact carriers");
+    for (lane, axis) in [("x", 0), ("y", 1), ("z", 2)] {
+        let rows = traj.rows(axis);
+        assert!(!rows.is_empty(), "{lane}: lane must carry rows");
+        for row in rows {
             assert!(
-                p[1] - p[0] >= 2e-9,
-                "{lane}: row spans {:e}s, under device resolution",
-                p[1] - p[0]
+                row.t1 - row.t0 >= 2e-9,
+                "{lane}: carrier spans {:e}s, under device resolution",
+                row.t1 - row.t0
             );
         }
-        for w in pieces.windows(2) {
-            let h = w[0][1] - w[0][0];
-            for deriv in 0..2 {
-                let end = piece_derivative(&w[0][2..], h, deriv);
-                let start = piece_derivative(&w[1][2..], 0.0, deriv);
-                let jump = (end - start).abs();
+        for w in rows.windows(2) {
+            let seam = w[0].t1;
+            let left = eval(&traj, axis, seam, SampleSide::Left);
+            let right = eval(&traj, axis, w[1].t0, SampleSide::Right);
+            for (name, before, after) in [
+                ("position", left.position, right.position),
+                ("velocity", left.velocity, right.velocity),
+            ] {
                 assert!(
-                    jump <= 1e-6 * (1.0 + end.abs().max(start.abs())),
-                    "{lane}: derivative {deriv} jumps {jump:e} at t={}",
-                    w[0][1]
+                    before.is_finite() && after.is_finite(),
+                    "{lane}: non-finite {name} at t={seam}"
+                );
+                let jump = (before - after).abs();
+                assert!(
+                    jump <= 1e-6 * (1.0 + before.abs().max(after.abs())),
+                    "{lane}: {name} jumps {jump:e} at t={seam}"
                 );
             }
         }
     }
+}
+
+fn eval(traj: &ExactTrajectory, axis: usize, t: f64, side: SampleSide) -> pipeline_snapshot::Pvaj {
+    traj.eval_axis(axis, t, side)
+        .unwrap_or_else(|e| panic!("axis {axis} at t={t} is not evaluable: {e}"))
 }
 
 fn lower_run(planned: &[PlannedMove]) -> Vec<trajectory::ContinuousSegment> {
@@ -192,7 +188,7 @@ fn cap_starved_clothoid_holds_per_axis_accel_budget() {
     let max_a = carrier_max_accel(&planned);
     let budget = 1000.0 * (1.0 + 1e-9);
     assert!(max_a <= budget, "carrier accel {max_a:.6} exceeds {budget}");
-    assert_rows_are_finite_and_continuous(&planned);
+    assert_carriers_are_finite_and_continuous(&planned);
 }
 
 /// The facet_debris/debris_corners case (v=300, a=3000, scv=9): micrometre
@@ -214,5 +210,5 @@ fn debris_notch_fly_over_holds_per_axis_accel_budget() {
     let max_a = carrier_max_accel(&planned);
     let budget = 3000.0 * (1.0 + 1e-9);
     assert!(max_a <= budget, "carrier accel {max_a:.6} exceeds {budget}");
-    assert_rows_are_finite_and_continuous(&planned);
+    assert_carriers_are_finite_and_continuous(&planned);
 }

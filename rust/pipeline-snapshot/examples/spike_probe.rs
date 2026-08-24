@@ -15,7 +15,7 @@ use motion_pipeline::{BaseItem, Lowerer, PlannedItem, StreamConfig, StreamInput}
 use pipeline_snapshot::waypoints::parse_gcode;
 use pipeline_snapshot::{
     SNAPSHOT_MAX_BUFFER_MOVES, TRAJECTORY_FIT_TOL_ACCEL_MM_S2, TRAJECTORY_FIT_TOL_MM,
-    VELOCITY_INTEGRATION_TOL, build_moves, collect_trajectory_pieces,
+    VELOCITY_INTEGRATION_TOL, build_moves,
 };
 
 fn main() {
@@ -158,15 +158,12 @@ fn main() {
         let mut worst_jerk = 0.0_f64;
         let mut worst_acc: Vec<(f64, u32)> = Vec::new();
         for segment in lower_run(&planned) {
-            let traj = collect_trajectory_pieces(std::slice::from_ref(&segment));
             let mut mv_max = 0.0_f64;
             let mut mv_jerk = 0.0_f64;
-            for pieces in [&traj.x, &traj.y, &traj.z] {
-                for p in pieces {
-                    let h = p[1] - p[0];
-                    mv_max = mv_max.max(acc_extreme(&p[2..], h));
-                    mv_jerk = mv_jerk.max(jerk_extreme(&p[2..], h));
-                }
+            for axis in 0..3 {
+                let (axis_max, axis_jerk) = axis_extremes(&segment, axis);
+                mv_max = mv_max.max(axis_max);
+                mv_jerk = mv_jerk.max(axis_jerk);
             }
             worst_jerk = worst_jerk.max(mv_jerk);
             if std::env::var_os("AUDIT_KIND").is_some() {
@@ -235,29 +232,24 @@ fn main() {
             println!("   sample s={:.6} v={:.4} a={:.2}", s.s, s.v, s.a);
         }
         for segment in segments.iter().filter(|s| s.source_line == line) {
-            let traj = collect_trajectory_pieces(std::slice::from_ref(segment));
             println!(
                 "   lowered: t=[{:.6},{:.6}]",
                 segment.t_start, segment.t_end
             );
-            for p in &traj.x {
-                let h = p[1] - p[0];
-                let c = &p[2..];
-                let acc = |tau: f64| -> f64 {
-                    (2..c.len())
-                        .map(|k| c[k] * (k * (k - 1)) as f64 * tau.powi(k as i32 - 2))
-                        .sum()
+            for w in segment.breakpoints().windows(2) {
+                let (t0, t1) = (w[0], w[1]);
+                let at = |t: f64| {
+                    segment
+                        .eval_axis_pvaj(0, t)
+                        .unwrap_or_else(|e| panic!("axis 0 at t={t}: {e}"))
                 };
+                let (span_max, span_jerk) = span_extremes(segment, 0, t0, t1);
                 println!(
-                    "   PIECE axis 0 u=[{:.6},{:.6}] h={:.3e} deg={} a0={:.0} amid={:.0} a1={:.0} amax={:.0}",
-                    p[0],
-                    p[1],
-                    h,
-                    c.len() - 1,
-                    acc(0.0),
-                    acc(h / 2.0),
-                    acc(h),
-                    acc_extreme(c, h)
+                    "   CARRIER axis 0 t=[{t0:.6},{t1:.6}] h={:.3e} a0={:.0} amid={:.0} a1={:.0} amax={span_max:.0} jmax={span_jerk:.3e}",
+                    t1 - t0,
+                    at(t0).acceleration,
+                    at(0.5 * (t0 + t1)).acceleration,
+                    at(t1).acceleration,
                 );
             }
         }
@@ -293,24 +285,34 @@ fn lower_run(planned: &[PlannedMove]) -> Vec<trajectory::ContinuousSegment> {
         .collect()
 }
 
-fn acc_extreme(c: &[f64], h: f64) -> f64 {
-    derivative_extreme(c, h, 2)
+/// Largest |acceleration| and |jerk| the segment's own carriers command on
+/// `axis`, read through the exact evaluator over every carrier interval — no
+/// polynomial reconstruction stands between the carrier and the number.
+fn axis_extremes(segment: &trajectory::ContinuousSegment, axis: usize) -> (f64, f64) {
+    segment
+        .breakpoints()
+        .windows(2)
+        .map(|w| span_extremes(segment, axis, w[0], w[1]))
+        .fold((0.0, 0.0), |acc, (a, j)| (acc.0.max(a), acc.1.max(j)))
 }
 
-fn jerk_extreme(c: &[f64], h: f64) -> f64 {
-    derivative_extreme(c, h, 3)
-}
-
-fn derivative_extreme(c: &[f64], h: f64, deriv: usize) -> f64 {
-    let eval = |tau: f64| -> f64 {
-        (deriv..c.len())
-            .map(|k| {
-                let scale: usize = (k - deriv + 1..=k).product();
-                c[k] * scale as f64 * tau.powi((k - deriv) as i32)
-            })
-            .sum()
-    };
+fn span_extremes(
+    segment: &trajectory::ContinuousSegment,
+    axis: usize,
+    t0: f64,
+    t1: f64,
+) -> (f64, f64) {
     (0..=16)
-        .map(|k| eval(h * k as f64 / 16.0).abs())
-        .fold(0.0, f64::max)
+        .map(|k| {
+            let t = t0 + (t1 - t0) * k as f64 / 16.0;
+            segment
+                .eval_axis_pvaj(axis, t)
+                .unwrap_or_else(|e| panic!("axis {axis} at t={t}: {e}"))
+        })
+        .fold((0.0_f64, 0.0_f64), |acc, pvaj| {
+            (
+                acc.0.max(pvaj.acceleration.abs()),
+                acc.1.max(pvaj.jerk.abs()),
+            )
+        })
 }

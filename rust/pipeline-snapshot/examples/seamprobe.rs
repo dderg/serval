@@ -1,5 +1,5 @@
 //! Scratch: seam metrics for the square corner case.
-use pipeline_snapshot::{SnapshotParams, TrajectoryPieces, pipeline_snapshot, seam_metrics};
+use pipeline_snapshot::{SnapshotParams, pipeline_snapshot};
 
 fn main() {
     let snap = pipeline_snapshot(
@@ -25,15 +25,7 @@ fn main() {
         },
     )
     .unwrap();
-    let traj = TrajectoryPieces {
-        x: snap.traj_x_pieces,
-        y: snap.traj_y_pieces,
-        z: snap.traj_z_pieces,
-        e: snap.traj_e_pieces,
-        t_end: snap.traj_t_end,
-    };
-    let m = seam_metrics(&traj);
-    for s in m.worst.iter().take(8) {
+    for s in snap.worst_seams.iter().take(8) {
         println!(
             "seam t={:.6} axis={} dp={:.3e} dv={:.3e} da={:.3e}",
             s.t, s.axis, s.dp, s.dv, s.da

@@ -409,12 +409,9 @@ class PanelRenderer {
     bctx.restore();
   }
 
-  // The executed (post-lowered, post-shaper) toolhead path, colored by the
-  // measured curvature-behavior class at each sample -- the same dense grid
-  // driving every other panel, walked directly with no segment-boundary
-  // matching needed. Cusp/Gap are point anomalies (a near-zero-speed
-  // instant, a piece-domain mismatch), drawn as markers rather than folded
-  // into the stroke color.
+  // The exact continuous toolhead path, colored by measured curvature class on
+  // the shared display grid. Cusp and Gap are point anomalies, so markers show
+  // them without changing the neighboring stroke.
   _strokeCurvaturePath(bctx, DATA, xMin, xMax, yMin, yMax) {
     if (this.view.hiddenSeries.path.has("motor")) return;
     const kx = DATA.kin_x(), ky = DATA.kin_y();

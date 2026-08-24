@@ -201,6 +201,95 @@ fn ac_pos2_heading_is_unit_and_matches_position_derivative() {
     }
 }
 
+fn numeric_d2heading_ds2(profile: &dyn PositionProfile, s: f64, h: f64) -> [f64; 3] {
+    let plus = profile.dheading_ds(s + h);
+    let minus = profile.dheading_ds(s - h);
+    [
+        (plus[0] - minus[0]) / (2.0 * h),
+        (plus[1] - minus[1]) / (2.0 * h),
+        (plus[2] - minus[2]) / (2.0 * h),
+    ]
+}
+
+#[test]
+fn ac_pos3_d2heading_matches_numeric_derivative_of_dheading() {
+    let cases: Vec<(Box<dyn PositionProfile>, f64)> = vec![
+        (Box::new(make_line()), make_line().s_len()),
+        (Box::new(make_arc(3.0, -1.2)), make_arc(3.0, -1.2).s_len()),
+        (Box::new(make_arc(0.7, 2.4)), make_arc(0.7, 2.4).s_len()),
+        (Box::new(make_clothoid(0.1, 0.05, 3.0)), 3.0),
+        (Box::new(make_clothoid(0.0, 0.5, 2.0)), 2.0),
+        (Box::new(make_clothoid(-0.6, -0.4, 2.5)), 2.5),
+    ];
+    for (geom, l) in cases.iter() {
+        let h = 1e-4 * l;
+        for i in 1..10 {
+            let s = l * (i as f64) / 10.0;
+            let analytic = geom.d2heading_ds2(s);
+            let numeric = numeric_d2heading_ds2(geom.as_ref(), s, h);
+            for j in 0..3 {
+                assert!(
+                    (analytic[j] - numeric[j]).abs() < 1e-6,
+                    "d2heading_ds2 mismatch at s={s} axis {j}: analytic={} numeric={}",
+                    analytic[j],
+                    numeric[j]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn ac_pos3_line_d2heading_is_zero() {
+    let line = make_line();
+    for i in 0..5 {
+        assert_eq!(
+            line.d2heading_ds2(line.s_len() * i as f64 / 4.0),
+            [0.0, 0.0, 0.0]
+        );
+    }
+}
+
+#[test]
+fn ac_pos3_arc_d2heading_is_minus_kappa_squared_heading() {
+    for sweep in [-1.2, 2.4] {
+        let arc = make_arc(1.7, sweep);
+        let kappa2 = 1.0 / (1.7 * 1.7);
+        for i in 1..8 {
+            let s = arc.s_len() * i as f64 / 8.0;
+            let heading = arc.heading_at(s);
+            let analytic = arc.d2heading_ds2(s);
+            for j in 0..3 {
+                assert!(
+                    (analytic[j] + kappa2 * heading[j]).abs() < 1e-12,
+                    "arc d2heading is not -kappa^2*heading at s={s} axis {j}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn ac_pos3_clothoid_d2heading_splits_into_sigma_normal_and_kappa_squared_heading() {
+    let (kappa_0, sigma, length) = (0.2, 0.35, 3.0);
+    let clothoid = make_clothoid(kappa_0, sigma, length);
+    for i in 0..=8 {
+        let s = length * i as f64 / 8.0;
+        let kappa = kappa_0 + sigma * s;
+        let heading = clothoid.heading_at(s);
+        let normal = [-heading[1], heading[0], 0.0];
+        let analytic = clothoid.d2heading_ds2(s);
+        for j in 0..3 {
+            let expected = sigma * normal[j] - kappa * kappa * heading[j];
+            assert!(
+                (analytic[j] - expected).abs() < 1e-12,
+                "clothoid d2heading mismatch at s={s} axis {j}: {} vs {expected}",
+                analytic[j]
+            );
+        }
+    }
+}
+
 #[test]
 fn ac_fres1_clothoid_offset_matches_quadrature() {
     let cases = [

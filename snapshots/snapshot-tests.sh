@@ -47,9 +47,18 @@ WASM_OUT="$SCRIPT_DIR/web/static/wasm"
 WP="${WASM_PACK:-wasm-pack}"
 command -v "$WP" &>/dev/null || WP="$HOME/.cargo/bin/wasm-pack"
 
-# Build the WASM interactive viewer if output is missing or source is newer
-if [ ! -f "$WASM_OUT/snapshot_viewer_bg.wasm" ] || \
-   [ "$SNAPSHOT_VIEWER/src/lib.rs" -nt "$WASM_OUT/snapshot_viewer_bg.wasm" ]; then
+viewer_stale() {
+  [ ! -f "$WASM_OUT/snapshot_viewer_bg.wasm" ] && return 0
+  local newer
+  newer=$(find "$SCRIPT_DIR/../rust" \
+    \( -path "*/snapshot-viewer/src/*" -o -path "*/pipeline-snapshot/src/*" \
+       -o -path "*/motion-pipeline/src/*" -o -path "*/geometry/src/*" \
+       -o -path "*/trajectory/src/*" -o -path "*/nurbs/src/*" \
+       -o -path "*/gcode/src/*" \) \
+    -name "*.rs" -newer "$WASM_OUT/snapshot_viewer_bg.wasm" -print -quit)
+  [ -n "$newer" ]
+}
+if viewer_stale; then
   echo "building snapshot-viewer WASM..."
   "$WP" build --target web --release --out-dir "$WASM_OUT" "$SNAPSHOT_VIEWER" 2>&1
 fi

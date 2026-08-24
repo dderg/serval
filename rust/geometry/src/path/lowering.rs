@@ -10,6 +10,10 @@ pub trait PositionProfile {
     /// is `a_t·ĥ + v²·(dĥ/ds)` — the centripetal term the lowering needs without a
     /// finite difference.
     fn dheading_ds(&self, s: f64) -> [f64; 3];
+    /// Second derivative of the unit heading along arc length, `d²ĥ/ds²`. With the
+    /// tangential jerk `j`, acceleration `a_t` and speed `v`, the exact per-axis jerk
+    /// is `j·ĥ + 3·v·a_t·(dĥ/ds) + v³·(d²ĥ/ds²)`.
+    fn d2heading_ds2(&self, s: f64) -> [f64; 3];
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -57,6 +61,10 @@ impl PositionProfile for Line {
     fn dheading_ds(&self, _s: f64) -> [f64; 3] {
         [0.0, 0.0, 0.0]
     }
+
+    fn d2heading_ds2(&self, _s: f64) -> [f64; 3] {
+        [0.0, 0.0, 0.0]
+    }
 }
 
 impl Arc {
@@ -100,6 +108,20 @@ impl PositionProfile for Arc {
             self.v,
         )
     }
+
+    fn d2heading_ds2(&self, s: f64) -> [f64; 3] {
+        // `-κ²·ĥ` with `κ = 1/radius` and no curvature rate: the heading rotates at a
+        // constant rate, so its second derivative points opposite the heading itself.
+        let theta = self.angle_at(s);
+        let sign = self.sweep.signum();
+        let inv_r2 = 1.0 / (self.radius * self.radius);
+        axpby(
+            sign * inv_r2 * libm::sin(theta),
+            self.u,
+            -sign * inv_r2 * libm::cos(theta),
+            self.v,
+        )
+    }
 }
 
 impl Clothoid {
@@ -131,6 +153,20 @@ impl PositionProfile for Clothoid {
             self.v,
         )
     }
+
+    fn d2heading_ds2(&self, s: f64) -> [f64; 3] {
+        // `σ·n̂ − κ²·ĥ`: the curvature rate turns the heading further while the
+        // existing curvature pulls the heading derivative back along `−ĥ`.
+        let phi = self.heading_angle_at(s);
+        let kappa = self.kappa_0 + self.sigma * s;
+        let (sin, cos) = (libm::sin(phi), libm::cos(phi));
+        axpby(
+            -self.sigma * sin - kappa * kappa * cos,
+            self.u,
+            self.sigma * cos - kappa * kappa * sin,
+            self.v,
+        )
+    }
 }
 
 impl PositionProfile for Segment {
@@ -155,6 +191,14 @@ impl PositionProfile for Segment {
             Segment::Line(l) => l.dheading_ds(s),
             Segment::Arc(a) => a.dheading_ds(s),
             Segment::Clothoid(c) => c.dheading_ds(s),
+        }
+    }
+
+    fn d2heading_ds2(&self, s: f64) -> [f64; 3] {
+        match self {
+            Segment::Line(l) => l.d2heading_ds2(s),
+            Segment::Arc(a) => a.d2heading_ds2(s),
+            Segment::Clothoid(c) => c.d2heading_ds2(s),
         }
     }
 }

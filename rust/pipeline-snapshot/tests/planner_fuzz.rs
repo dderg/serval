@@ -1,15 +1,13 @@
-//! Property-based fuzz of the full fitter → planner → lowerer → shaper
-//! pipeline: random adversarial move streams (micro-segments, exact
-//! reversals, collinear runs, feed jumps) under random valid configs, with
-//! the lowered trajectory checked against the kinematic-invariant oracle in
-//! `pipeline_snapshot::audit`.
+//! Property-based fuzz of the full fitter → planner → continuous-trajectory
+//! pipeline: random adversarial move streams under random valid configs,
+//! checked against the kinematic-invariant oracle in `pipeline_snapshot::audit`.
 //!
 //! Every case runs at infinite jerk, the configuration the continuous
-//! pipeline ships: acceleration steps are the plan, so the oracle's per-axis
-//! accel and jerk rails do not apply. What still must hold is finite
-//! coefficients, contiguous time, no row narrower than the device's step-time
-//! resolution, no acceleration explosion, C0 position at seams, and the
-//! velocity rail.
+//! pipeline ships. Acceleration steps are the plan, so the oracle's per-axis
+//! acceleration and jerk rails do not apply. Carrier states must remain finite
+//! over contiguous time, with no interval narrower than device step-time
+//! resolution, no acceleration explosion, C0 position seams, and valid
+//! velocity bounds.
 //!
 //! `hard_invariants_hold` runs in CI on a fixed RNG seed — a deterministic
 //! 256-case corpus verified green — so CI never flakes on a fresh fuzz
@@ -26,7 +24,7 @@ use pipeline_snapshot::audit::{
     AuditBudgets, AuditReport, Violation, ViolationKind, audit_trajectory,
 };
 use pipeline_snapshot::{
-    SnapshotParams, TRAJECTORY_FIT_TOL_ACCEL_MM_S2, TRAJECTORY_FIT_TOL_MM, TrajectoryPieces,
+    ExactTrajectory, SnapshotParams, TRAJECTORY_FIT_TOL_ACCEL_MM_S2, TRAJECTORY_FIT_TOL_MM,
     VELOCITY_INTEGRATION_TOL, pipeline_snapshot,
 };
 use proptest::prelude::*;
@@ -125,14 +123,14 @@ fn waypoints(moves: &[MoveSpec], max_accel: f64) -> Vec<pipeline_snapshot::waypo
     points
 }
 
-fn run_case(limits: FuzzLimits, moves: &[MoveSpec]) -> (TrajectoryPieces, AuditReport) {
+fn run_case(limits: FuzzLimits, moves: &[MoveSpec]) -> (ExactTrajectory, AuditReport) {
     run_waypoints(limits, &waypoints(moves, limits.max_accel))
 }
 
 fn run_waypoints(
     limits: FuzzLimits,
     waypoints: &[pipeline_snapshot::waypoints::Waypoint],
-) -> (TrajectoryPieces, AuditReport) {
+) -> (ExactTrajectory, AuditReport) {
     let params = SnapshotParams {
         max_velocity: limits.max_velocity,
         max_accel: limits.max_accel,
@@ -147,13 +145,7 @@ fn run_waypoints(
         post_processor_decls: Vec::new(),
     };
     let snapshot = pipeline_snapshot(waypoints, params).expect("valid fuzz input");
-    let traj = TrajectoryPieces {
-        x: snapshot.traj_x_pieces,
-        y: snapshot.traj_y_pieces,
-        z: snapshot.traj_z_pieces,
-        e: snapshot.traj_e_pieces,
-        t_end: snapshot.traj_t_end,
-    };
+    let traj = snapshot.trajectory;
     let config = motion_pipeline::StreamConfig {
         corner: geometry::CornerFitConfig::default(),
         integration_tol: VELOCITY_INTEGRATION_TOL,
@@ -204,7 +196,7 @@ proptest! {
         moves in prop::collection::vec(move_strategy(false), 2..40),
     ) {
         let (traj, report) = run_case(limits, &moves);
-        prop_assert!(!traj.x.is_empty(), "pipeline produced no X trajectory");
+        prop_assert!(!traj.rows(0).is_empty(), "pipeline produced no X trajectory");
         prop_assert!(report.hard_ok(), "{report}");
     }
 }

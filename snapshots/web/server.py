@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
-import math
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -81,14 +80,21 @@ def playground_case(name: str) -> dict:
     config = {
         "max_velocity": cfg.max_velocity,
         "max_accel": cfg.max_accel,
-        "square_corner_velocity": cfg.square_corner_velocity,
-        "max_jerk": 0.0 if math.isinf(cfg.max_jerk) else cfg.max_jerk,
+        "max_jerk": cfg.max_jerk,
         "max_path_deviation": cfg.max_path_deviation,
         "max_accel_deviation": cfg.max_accel_deviation,
         "post_processor_config": _axis_and_post_processor_text(
             case.config_path
         ),
     }
+    if cfg.corner_deviation is not None:
+        config["corner_deviation"] = cfg.corner_deviation
+    else:
+        config["square_corner_velocity"] = (
+            5.0
+            if cfg.square_corner_velocity is None
+            else cfg.square_corner_velocity
+        )
     if cfg.max_extrude_only_velocity is not None:
         config["max_extrude_only_velocity"] = cfg.max_extrude_only_velocity
     if cfg.max_extrude_only_accel is not None:
@@ -99,6 +105,13 @@ def playground_case(name: str) -> dict:
         "gcode": case.gcode_path.read_text(),
         "config": config,
     }
+
+
+def snapshots_share_schema(before: object, after: object) -> bool:
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    version = after.get("schema_version")
+    return isinstance(version, int) and before.get("schema_version") == version
 
 
 class ReviewState:
@@ -208,15 +221,19 @@ class ReviewState:
                     "read_only": True,
                     "error": self.error,
                 }
-            review = [
-                {
-                    "name": name,
-                    "status": entry["status"].value,
-                    "has_before": entry["status"] is harness.Status.CHANGED,
-                }
-                for name, entry in self.cases.items()
-                if entry["status"] is not harness.Status.EXACT
-            ]
+            review = []
+            for name, entry in self.cases.items():
+                if entry["status"] is harness.Status.EXACT:
+                    continue
+                baseline = harness.baseline_snapshot(entry["case"])
+                review.append(
+                    {
+                        "name": name,
+                        "status": entry["status"].value,
+                        "has_before": entry["status"] is harness.Status.CHANGED
+                        and snapshots_share_schema(baseline, entry["snapshot"]),
+                    }
+                )
             exact = sum(
                 1
                 for e in self.cases.values()
@@ -336,6 +353,8 @@ class Handler(BaseHTTPRequestHandler):
                 snapshot = None  # gallery shows committed baselines; no prior
             else:
                 snapshot = harness.baseline_snapshot(entry["case"])
+                if not snapshots_share_schema(snapshot, entry["snapshot"]):
+                    snapshot = None
         # A missing "before" is an expected state (baselines gallery, NEW
         # case), not an error — 200 null keeps the browser console clean.
         if snapshot is None and which == "before":

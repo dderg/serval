@@ -299,3 +299,20 @@ def test_parse_gcode_rejects_non_positive_accel(tmp_path):
     gcode.write_text("SET_VELOCITY_LIMIT ACCEL=0\nG1 X10 F6000\n")
     with pytest.raises(ValueError, match="positive finite"):
         harness.parse_gcode(gcode, 300.0, 3000.0)
+
+
+def test_drift_envelope_reports_schema_change():
+    drift = harness.drift_envelope(
+        {"schema_version": 1, "traj_x_pieces": []},
+        {"schema_version": 2, "trajectory": {}},
+    )
+    assert drift["schema_at"] == "<root>"
+
+
+def test_drift_envelope_reports_numeric_change_inside_same_schema():
+    drift = harness.drift_envelope(
+        {"schema_version": 2, "trajectory": {"t_end": 1.0}},
+        {"schema_version": 2, "trajectory": {"t_end": 2.0}},
+    )
+    assert drift["schema_at"] == ""
+    assert drift["rel"] == 0.5

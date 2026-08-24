@@ -175,6 +175,29 @@ impl NudgeProfile {
         self.eval(t).acceleration
     }
 
+    /// The nudge acceleration is piecewise constant, so the jerk is exactly zero
+    /// everywhere inside a phase; the phase boundaries carry impulses instead.
+    #[must_use]
+    pub fn jerk(&self, t: f64) -> f64 {
+        self.validate_eval_time(t);
+        0.0
+    }
+
+    #[must_use]
+    pub fn delta_mm(&self) -> f64 {
+        self.delta_mm
+    }
+
+    #[must_use]
+    pub fn speed_mm_s(&self) -> f64 {
+        self.speed_mm_s
+    }
+
+    #[must_use]
+    pub fn accel_mm_s2(&self) -> f64 {
+        self.accel_mm_s2
+    }
+
     #[must_use]
     pub fn t_start(&self) -> f64 {
         self.t_start
@@ -375,6 +398,36 @@ impl BuzzProfile {
     #[must_use]
     pub fn acceleration(&self, t: f64) -> f64 {
         self.eval(t).acceleration
+    }
+
+    #[must_use]
+    pub fn jerk(&self, t: f64) -> f64 {
+        self.validate_eval_time(t);
+        let local_t = t - self.t_start;
+        if local_t == 0.0 || local_t == self.duration {
+            return 0.0;
+        }
+        self.jerk_local(local_t, self.interval_at(local_t))
+    }
+
+    #[must_use]
+    pub fn amplitude_mm(&self) -> f64 {
+        self.amplitude_mm
+    }
+
+    #[must_use]
+    pub fn freq_start_hz(&self) -> f64 {
+        self.omega_start / (2.0 * PI)
+    }
+
+    #[must_use]
+    pub fn freq_end_hz(&self) -> f64 {
+        (self.omega_start + self.sweep_rate * self.duration) / (2.0 * PI)
+    }
+
+    #[must_use]
+    pub fn ramp(&self) -> f64 {
+        self.ramp
     }
 
     #[must_use]

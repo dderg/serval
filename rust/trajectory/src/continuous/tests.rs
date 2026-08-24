@@ -1451,3 +1451,371 @@ fn relative_spline_rejects_non_finite_base_and_controls() {
         Err(ContinuousError::TimeOutsideSpan { .. })
     ));
 }
+
+fn jerk_span(segment: Segment, followers: Vec<FollowerDemand>) -> Arc<AnalyticMoveSpan> {
+    Arc::new(
+        AnalyticMoveSpan::try_new(
+            move_with(segment, followers),
+            Arc::from([
+                StraightPhase {
+                    t0: 0.0,
+                    dt: 1.0,
+                    s0: 0.0,
+                    v0: 1.0,
+                    a0: 0.0,
+                    j: 6.0,
+                },
+                StraightPhase {
+                    t0: 1.0,
+                    dt: 1.0,
+                    s0: 2.0,
+                    v0: 4.0,
+                    a0: 6.0,
+                    j: -6.0,
+                },
+            ]),
+            0.0,
+            10.0,
+            12.0,
+            Arc::from([0.0, 0.0, 0.0, 7.0]),
+            SurfaceMode::None,
+        )
+        .unwrap(),
+    )
+}
+
+fn numeric_jerk(span: &AnalyticMoveSpan, axis: usize, t: f64, h: f64) -> f64 {
+    let plus = span.eval_axis(axis, t + h).unwrap().acceleration;
+    let minus = span.eval_axis(axis, t - h).unwrap().acceleration;
+    (plus - minus) / (2.0 * h)
+}
+
+#[test]
+fn analytic_line_pvaj_projects_the_phase_jerk_on_the_heading() {
+    let span = jerk_span(
+        Segment::Line(Line::try_new([0.0, 0.0, 0.0], [0.0, 8.0, 0.0]).unwrap()),
+        vec![],
+    );
+    let sample = span.eval_axis_pvaj(1, 10.5).unwrap();
+    close(sample.position, 0.5 + 6.0 * 0.125 / 6.0);
+    close(sample.velocity, 1.0 + 3.0 * 0.25);
+    close(sample.acceleration, 3.0);
+    close(sample.jerk, 6.0);
+    close(span.eval_axis_pvaj(0, 10.5).unwrap().jerk, 0.0);
+    close(span.eval_axis_pvaj(2, 10.5).unwrap().jerk, 0.0);
+}
+
+#[test]
+fn analytic_phase_boundary_jerk_is_selected_by_nudging_the_time() {
+    let span = jerk_span(
+        Segment::Line(Line::try_new([0.0, 0.0, 0.0], [8.0, 0.0, 0.0]).unwrap()),
+        vec![],
+    );
+    close(span.eval_axis_pvaj(0, 11.0).unwrap().jerk, 6.0);
+    close(
+        span.eval_axis_pvaj(0, interior_time_below(11.0))
+            .unwrap()
+            .jerk,
+        6.0,
+    );
+    close(
+        span.eval_axis_pvaj(0, interior_time_above(11.0))
+            .unwrap()
+            .jerk,
+        -6.0,
+    );
+    close(span.eval_axis_pvaj(0, 11.5).unwrap().jerk, -6.0);
+}
+
+#[test]
+fn analytic_arc_pvaj_matches_the_chain_rule() {
+    let span = jerk_span(
+        Segment::Arc(
+            PathArc::try_new(
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                8.0 / FRAC_PI_2,
+                0.2,
+                FRAC_PI_2,
+            )
+            .unwrap(),
+        ),
+        vec![],
+    );
+    for t in [10.2, 10.5, 10.8, 11.2, 11.5, 11.8] {
+        for axis in 0..2 {
+            let exact = span.eval_axis_pvaj(axis, t).unwrap().jerk;
+            let numeric = numeric_jerk(&span, axis, t, 1e-5);
+            assert!(
+                (exact - numeric).abs() < 1e-5,
+                "arc jerk mismatch at t={t} axis {axis}: exact={exact} numeric={numeric}"
+            );
+        }
+    }
+}
+
+#[test]
+fn analytic_clothoid_pvaj_matches_the_chain_rule() {
+    let span = jerk_span(
+        Segment::Clothoid(
+            Clothoid::try_new(
+                [2.0, 3.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                0.25,
+                0.1,
+                8.0,
+            )
+            .unwrap(),
+        ),
+        vec![],
+    );
+    for t in [10.3, 10.7, 11.3, 11.7] {
+        for axis in 0..2 {
+            let exact = span.eval_axis_pvaj(axis, t).unwrap().jerk;
+            let numeric = numeric_jerk(&span, axis, t, 1e-5);
+            assert!(
+                (exact - numeric).abs() < 1e-4,
+                "clothoid jerk mismatch at t={t} axis {axis}: exact={exact} numeric={numeric}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ramped_follower_pvaj_carries_the_ratio_slope_cross_term() {
+    let span = jerk_span(
+        Segment::Line(Line::try_new([0.0, 0.0, 0.0], [8.0, 0.0, 0.0]).unwrap()),
+        vec![FollowerDemand::ramp(3, 0.1, 0.5)],
+    );
+    let t = 10.6;
+    let (s, velocity, acceleration, jerk) = (
+        1.0 * 0.6 + 6.0 * 0.6_f64.powi(3) / 6.0,
+        1.0 + 3.0 * 0.36,
+        6.0 * 0.6,
+        6.0,
+    );
+    let ratio = 0.1 + 0.4 * s / 8.0;
+    let slope = 0.4 / 8.0;
+    let sample = span.eval_axis_pvaj(3, t).unwrap();
+    close(sample.velocity, ratio * velocity);
+    close(
+        sample.acceleration,
+        ratio * acceleration + slope * velocity * velocity,
+    );
+    close(
+        sample.jerk,
+        ratio * jerk + 3.0 * slope * velocity * acceleration,
+    );
+    assert!((sample.jerk - numeric_jerk(&span, 3, t, 1e-6)).abs() < 1e-4);
+}
+
+#[test]
+fn variable_surface_z_has_no_exact_jerk_and_fails_loudly() {
+    let span = analytic_span(
+        Segment::Line(Line::try_new([0.2, 0.3, 1.0], [0.8, 0.7, 1.0]).unwrap()),
+        vec![],
+        1.0,
+        SurfaceMode::Variable(variable_surface()),
+    );
+    assert_eq!(
+        span.eval_axis_pvaj(2, 10.5),
+        Err(ContinuousError::VariableSurfaceBeforeDispatch)
+    );
+    assert!(span.eval_axis_pvaj(0, 10.5).unwrap().jerk.is_finite());
+    assert!(span.eval_axis(2, 10.5).unwrap().position.is_finite());
+}
+
+fn cubic_bezier(control_points: Vec<f64>) -> Arc<ScalarNurbs> {
+    Arc::new(
+        ScalarNurbs::try_new(
+            3,
+            vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            control_points,
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn spline_pvaj_reports_the_exact_cubic_third_derivative() {
+    let curve = cubic_bezier(vec![0.0, 1.0, 0.0, 2.0]);
+    let axis = ContinuousAxis::Spline(Arc::clone(&curve));
+    let sample = axis.eval_pvaj(0.5).unwrap();
+    close(sample.position, 0.625);
+    close(sample.velocity, 0.75);
+    close(sample.acceleration, 3.0);
+    close(sample.jerk, 30.0);
+    for t in [0.0, 0.25, 0.75, 1.0] {
+        close(axis.eval_pvaj(t).unwrap().jerk, 30.0);
+    }
+}
+
+#[test]
+fn relative_spline_pvaj_shifts_position_only() {
+    let curve = cubic_bezier(vec![0.0, 1.0, 0.0, 2.0]);
+    let absolute = ContinuousAxis::Spline(Arc::clone(&curve));
+    let relative = ContinuousAxis::RelativeSpline {
+        base_position: RELATIVE_BASE_MM,
+        curve,
+    };
+    let plain = absolute.eval_pvaj(0.5).unwrap();
+    let shifted = relative.eval_pvaj(0.5).unwrap();
+    close(shifted.position, plain.position + RELATIVE_BASE_MM);
+    close(shifted.velocity, plain.velocity);
+    close(shifted.acceleration, plain.acceleration);
+    close(shifted.jerk, plain.jerk);
+}
+
+#[test]
+fn quadratic_spline_has_zero_exact_jerk() {
+    let fixture = tiny_relative_curve();
+    let axis = ContinuousAxis::Spline(Arc::clone(&fixture.curve));
+    close(
+        axis.eval_pvaj(RELATIVE_T0 + 0.5 * fixture.dt).unwrap().jerk,
+        0.0,
+    );
+}
+
+#[test]
+fn hold_and_nudge_pvaj_have_zero_jerk() {
+    let hold = ContinuousAxis::Hold {
+        position: 3.5,
+        t_start: 1.0,
+        t_end: 2.0,
+    };
+    assert_eq!(
+        hold.eval_pvaj(1.5).unwrap(),
+        Pvaj {
+            position: 3.5,
+            velocity: 0.0,
+            acceleration: 0.0,
+            jerk: 0.0,
+        }
+    );
+
+    let nudge = ContinuousAxis::Nudge(NudgeProfile::try_new(1.0, 20.0, 500.0, 4.0).unwrap());
+    for t in [4.0, 4.01, 4.05, nudge.domain().1] {
+        let sample = nudge.eval_pvaj(t).unwrap();
+        assert_eq!(sample.jerk, 0.0);
+        assert!(sample.acceleration.is_finite());
+    }
+}
+
+#[test]
+fn buzz_pvaj_jerk_matches_a_numeric_derivative_of_acceleration() {
+    let profile = Arc::new(BuzzProfile::try_new(0.4, 20.0, 60.0, 0.5, 0.1, 3.0).unwrap());
+    let axis = ContinuousAxis::Buzz {
+        base_position: 12.0,
+        sign: -1.0,
+        profile: Arc::clone(&profile),
+    };
+    for t in [3.02, 3.05, 3.2, 3.25, 3.44, 3.47] {
+        let h = 1e-7;
+        let exact = axis.eval_pvaj(t).unwrap().jerk;
+        let numeric = (axis.eval_pva(t + h).unwrap().acceleration
+            - axis.eval_pva(t - h).unwrap().acceleration)
+            / (2.0 * h);
+        assert!(
+            (exact - numeric).abs() <= 1e-3 * numeric.abs().max(1.0),
+            "buzz jerk mismatch at t={t}: exact={exact} numeric={numeric}"
+        );
+    }
+    close(axis.eval_pvaj(3.0).unwrap().jerk, 0.0);
+    close(axis.eval_pvaj(3.5).unwrap().jerk, 0.0);
+    close_relative(axis.eval_pvaj(3.2).unwrap().jerk, -profile.jerk(3.2), 1e-12);
+
+    let knee = 3.4;
+    let flat_side = axis.eval_pvaj(interior_time_below(knee)).unwrap().jerk;
+    let falling_side = axis.eval_pvaj(interior_time_above(knee)).unwrap().jerk;
+    close_relative(axis.eval_pvaj(knee).unwrap().jerk, flat_side, 1e-12);
+    assert!(
+        (flat_side - falling_side).abs() > 1.0,
+        "buzz ramp knee must expose a one-sided jerk: {flat_side} vs {falling_side}"
+    );
+}
+
+#[test]
+fn buzz_and_nudge_expose_their_reconstruction_parameters() {
+    let buzz = BuzzProfile::try_new(0.4, 20.0, 60.0, 0.5, 0.1, 3.0).unwrap();
+    close(buzz.amplitude_mm(), 0.4);
+    close(buzz.freq_start_hz(), 20.0);
+    close(buzz.freq_end_hz(), 60.0);
+    close(buzz.duration(), 0.5);
+    close(buzz.ramp(), 0.1);
+    close(buzz.t_start(), 3.0);
+    assert_eq!(
+        BuzzProfile::try_new(
+            buzz.amplitude_mm(),
+            buzz.freq_start_hz(),
+            buzz.freq_end_hz(),
+            buzz.duration(),
+            buzz.ramp(),
+            buzz.t_start(),
+        )
+        .unwrap(),
+        buzz
+    );
+
+    let nudge = NudgeProfile::try_new(-1.0, 20.0, 500.0, 4.0).unwrap();
+    close(nudge.delta_mm(), -1.0);
+    close(nudge.speed_mm_s(), 20.0);
+    close(nudge.accel_mm_s2(), 500.0);
+    assert_eq!(
+        NudgeProfile::try_new(
+            nudge.delta_mm(),
+            nudge.speed_mm_s(),
+            nudge.accel_mm_s2(),
+            nudge.t_start(),
+        )
+        .unwrap(),
+        nudge
+    );
+}
+
+#[test]
+fn carrier_breakpoints_are_publicly_exposed_and_bracket_the_domain() {
+    let span = jerk_span(
+        Segment::Line(Line::try_new([0.0, 0.0, 0.0], [8.0, 0.0, 0.0]).unwrap()),
+        vec![],
+    );
+    let axis = ContinuousAxis::Analytic {
+        span: Arc::clone(&span),
+        axis: 0,
+    };
+    let mut breakpoints = axis.breakpoints();
+    breakpoints.sort_by(f64::total_cmp);
+    breakpoints.dedup();
+    assert_eq!(breakpoints, vec![10.0, 11.0, 12.0]);
+
+    let segment = ContinuousSegment {
+        axes: Arc::from([
+            axis,
+            ContinuousAxis::Hold {
+                position: 0.0,
+                t_start: 10.0,
+                t_end: 12.0,
+            },
+            ContinuousAxis::Hold {
+                position: 0.0,
+                t_start: 10.0,
+                t_end: 12.0,
+            },
+            ContinuousAxis::Nudge(NudgeProfile::try_new(0.2, 10.0, 400.0, 10.5).unwrap()),
+        ]),
+        followers: Arc::from([]),
+        spatial_path: true,
+        t_start: 10.0,
+        t_end: 12.0,
+        motor_mask: 0xF,
+        source_line: 41,
+        rest_at_end: false,
+    };
+    let merged = segment.breakpoints();
+    assert_eq!(merged.first(), Some(&10.0));
+    assert_eq!(merged.last(), Some(&12.0));
+    assert!(merged.contains(&11.0));
+    assert!(merged.windows(2).all(|pair| pair[0] < pair[1]));
+    close(segment.eval_axis_pvaj(0, 10.5).unwrap().jerk, 6.0);
+}

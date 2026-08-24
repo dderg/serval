@@ -67,72 +67,87 @@ fn fitted_outcome_has_spatial_segments() {
     assert!(spatial_count > 0);
 }
 
-fn eval_piece(p: &[f64], t: f64) -> f64 {
-    let z = t - p[0];
-    p[2..].iter().rev().fold(0.0, |acc, &c| acc * z + c)
+fn exact(shaped: &[ContinuousSegment]) -> ExactTrajectory {
+    ExactTrajectory::from_segments(shaped).expect("shaped segments carry evaluable exact carriers")
 }
 
-const MIN_SNAPSHOT_PIECE_S: f64 = 2e-9;
+const MIN_CARRIER_DURATION_S: f64 = 2e-9;
 
-fn assert_lane_schema(pieces: &[Vec<f64>], lane: &str) {
-    assert!(!pieces.is_empty(), "{lane}: lane must carry rows");
-    for (i, p) in pieces.iter().enumerate() {
+fn at(traj: &ExactTrajectory, axis: usize, t: f64, side: SampleSide) -> Pvaj {
+    traj.eval_axis(axis, t, side)
+        .unwrap_or_else(|e| panic!("axis {axis} at t={t} is not evaluable: {e}"))
+}
+
+fn position(traj: &ExactTrajectory, axis: usize, t: f64) -> f64 {
+    at(traj, axis, t, SampleSide::Right).position
+}
+
+fn assert_axis_tiles_the_run(traj: &ExactTrajectory, axis: usize, lane: &str) {
+    let rows = traj.rows(axis);
+    assert!(!rows.is_empty(), "{lane}: lane must carry rows");
+    for (i, row) in rows.iter().enumerate() {
         assert!(
-            p.len() >= 3,
-            "{lane}[{i}]: a row is [t0, t1, c0, ..] — got {p:?}"
+            row.t1 > row.t0,
+            "{lane}[{i}]: carrier must span positive time"
         );
-        assert!(p.iter().all(|c| c.is_finite()), "{lane}[{i}]: {p:?}");
-        assert!(p[1] > p[0], "{lane}[{i}]: row must span positive time");
         assert!(
-            pieces.len() == 1 || p[1] - p[0] >= MIN_SNAPSHOT_PIECE_S,
-            "{lane}[{i}]: row spans {:e}s, under device resolution",
-            p[1] - p[0]
+            rows.len() == 1 || row.t1 - row.t0 >= MIN_CARRIER_DURATION_S,
+            "{lane}[{i}]: carrier spans {:e}s, under device resolution",
+            row.t1 - row.t0
         );
-        if i + 1 < pieces.len() {
+        for side in [SampleSide::Left, SampleSide::Right] {
+            let state = at(traj, axis, 0.5 * (row.t0 + row.t1), side);
             assert!(
-                (pieces[i + 1][0] - p[1]).abs() < 1e-9,
-                "{lane}[{i}]: rows must be contiguous in time"
+                state.position.is_finite()
+                    && state.velocity.is_finite()
+                    && state.acceleration.is_finite()
+                    && state.jerk.is_finite(),
+                "{lane}[{i}]: non-finite carrier state {state:?}"
+            );
+        }
+        if let Some(next) = rows.get(i + 1) {
+            assert!(
+                (next.t0 - row.t1).abs() < 1e-9,
+                "{lane}[{i}]: carriers must be contiguous in time"
             );
         }
     }
 }
 
 #[test]
-fn trajectory_lowers_to_contiguous_finite_cubics() {
+fn trajectory_carriers_tile_the_run_on_every_spatial_axis() {
     let limits = default_limits();
     let moves = build_moves(&square_waypoints(), limits).unwrap();
     let (_, shaped, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
-    let traj = collect_trajectory_pieces(&shaped);
-    assert_lane_schema(&traj.x, "x");
-    assert_lane_schema(&traj.y, "y");
-    // Row counts differ per axis — each lane's fit bisects independently — but
-    // every lane tiles the same time span the run occupies.
-    for (lane, pieces) in [("x", &traj.x), ("y", &traj.y)] {
+    let traj = exact(&shaped);
+    assert_axis_tiles_the_run(&traj, 0, "x");
+    assert_axis_tiles_the_run(&traj, 1, "y");
+    for (lane, axis) in [("x", 0), ("y", 1)] {
+        let rows = traj.rows(axis);
         assert!(
-            (pieces.first().unwrap()[0] - traj.x.first().unwrap()[0]).abs() < 1e-9,
+            (rows.first().unwrap().t0 - traj.t_start()).abs() < 1e-9,
             "{lane}: lanes must start together"
         );
         assert!(
-            (pieces.last().unwrap()[1] - traj.t_end).abs() < 1e-9,
+            (rows.last().unwrap().t1 - traj.t_end()).abs() < 1e-9,
             "{lane}: lane must run to t_end"
         );
     }
 }
 
 #[test]
-fn cubic_pieces_are_position_continuous_at_joins() {
+fn carriers_are_position_continuous_across_their_shared_instant() {
     let limits = default_limits();
     let moves = build_moves(&square_waypoints(), limits).unwrap();
     let (_, shaped, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
-    let traj = collect_trajectory_pieces(&shaped);
-    // Hermite lowering matches position at every join, on both axes.
-    for axis in [&traj.x, &traj.y] {
-        for w in axis.windows(2) {
-            let end = eval_piece(&w[0], w[0][1]);
-            let start = eval_piece(&w[1], w[1][0]);
+    let traj = exact(&shaped);
+    for axis in [0, 1] {
+        for w in traj.rows(axis).windows(2) {
+            let end = at(&traj, axis, w[0].t1, SampleSide::Left).position;
+            let start = at(&traj, axis, w[1].t0, SampleSide::Right).position;
             assert!(
                 (end - start).abs() < 1e-6,
-                "position jump at piece join: {end} vs {start}"
+                "position jump at carrier join: {end} vs {start}"
             );
         }
     }
@@ -244,40 +259,33 @@ fn extrusion_lowers_to_a_moving_e_track() {
     ];
     let moves = build_moves(&waypoints, limits).unwrap();
     let (_, shaped, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
-    let traj = collect_trajectory_pieces(&shaped);
-    assert!(!traj.e.is_empty(), "E lane must lower to cubic pieces");
-    // Every seg contributes to the E track: the E pieces tile the exact same
-    // time span as X, gap-free. (Piece *counts* may differ between axes — the
-    // fit bisects each axis independently.)
-    let (x0, x1) = (traj.x.first().unwrap()[0], traj.x.last().unwrap()[1]);
-    let (e0, e1) = (traj.e.first().unwrap()[0], traj.e.last().unwrap()[1]);
+    let traj = exact(&shaped);
+    let e_rows = traj.rows(3);
+    assert!(!e_rows.is_empty(), "E lane must carry rows");
+    // Every seg contributes to the E track: the E carriers tile the exact same
+    // time span as X, gap-free. (Carrier *counts* may differ between axes.)
+    let x_rows = traj.rows(0);
+    let (x0, x1) = (x_rows.first().unwrap().t0, x_rows.last().unwrap().t1);
+    let (e0, e1) = (e_rows.first().unwrap().t0, e_rows.last().unwrap().t1);
     assert!(
         (e0 - x0).abs() < 1e-9 && (e1 - x1).abs() < 1e-9,
         "E track spans the whole trajectory: x=[{x0},{x1}] e=[{e0},{e1}]"
     );
-    for w in traj.e.windows(2) {
+    for w in e_rows.windows(2) {
         assert!(
-            (w[1][0] - w[0][1]).abs() < 1e-9,
-            "E pieces are gap-free at t={}",
-            w[0][1]
+            (w[1].t0 - w[0].t1).abs() < 1e-9,
+            "E carriers are gap-free at t={}",
+            w[0].t1
         );
     }
-    let e_start = eval_piece(traj.e.first().unwrap(), traj.e.first().unwrap()[0]);
-    let e_end = eval_piece(traj.e.last().unwrap(), traj.e.last().unwrap()[1]);
-    let (t0, t1) = (traj.x.first().unwrap()[0], traj.x.last().unwrap()[1]);
-    let eval_axis = |pieces: &[Vec<f64>], t: f64| {
-        let p = pieces
-            .iter()
-            .find(|p| t >= p[0] && t <= p[1])
-            .expect("t inside trajectory");
-        eval_piece(p, t)
-    };
+    let e_start = position(&traj, 3, e0);
+    let e_end = at(&traj, 3, e1, SampleSide::Left).position;
     let n = 20_000;
     let mut path_len = 0.0;
-    let mut prev = (eval_axis(&traj.x, t0), eval_axis(&traj.y, t0));
+    let mut prev = (position(&traj, 0, x0), position(&traj, 1, x0));
     for i in 1..=n {
-        let t = t0 + (t1 - t0) * f64::from(i) / f64::from(n);
-        let cur = (eval_axis(&traj.x, t), eval_axis(&traj.y, t));
+        let t = x0 + (x1 - x0) * f64::from(i) / f64::from(n);
+        let cur = (position(&traj, 0, t), position(&traj, 1, t));
         path_len += libm::hypot(cur.0 - prev.0, cur.1 - prev.1);
         prev = cur;
     }
@@ -289,20 +297,63 @@ fn extrusion_lowers_to_a_moving_e_track() {
     );
 }
 
+/// One X-axis carrier per `(t0, t1, coefficients-in-local-time)` row, each the
+/// Bézier spline that *is* that polynomial: the power-to-Bernstein change of
+/// basis is exact, so the carrier commands precisely the named coefficients
+/// rather than a fit of them.
+pub(crate) fn x_polynomial_trajectory(rows: &[(f64, f64, Vec<f64>)]) -> ExactTrajectory {
+    let mut curves = Vec::new();
+    let mut lane = Vec::new();
+    for (t0, t1, coeffs) in rows {
+        let degree = coeffs.len() - 1;
+        let mut knots = vec![*t0; degree + 1];
+        knots.extend(std::iter::repeat_n(*t1, degree + 1));
+        curves.push(SplineCurve {
+            degree: degree as u8,
+            knots,
+            control_points: bernstein_control_points(coeffs, t1 - t0),
+        });
+        lane.push(CarrierRow {
+            t0: *t0,
+            t1: *t1,
+            carrier: Carrier::Spline {
+                curve: curves.len() - 1,
+            },
+        });
+    }
+    ExactTrajectory {
+        spans: Vec::new(),
+        curves,
+        axes: [lane, Vec::new(), Vec::new(), Vec::new()],
+        t_start: rows.first().map_or(0.0, |row| row.0),
+        t_end: rows.iter().fold(0.0_f64, |acc, row| acc.max(row.1)),
+        runtime: Default::default(),
+    }
+}
+
+pub(crate) fn bernstein_control_points(coeffs: &[f64], h: f64) -> Vec<f64> {
+    let binomial =
+        |n: usize, k: usize| (0..k).fold(1.0, |acc, i| acc * (n - i) as f64 / (i + 1) as f64);
+    let degree = coeffs.len() - 1;
+    let scaled: Vec<f64> = coeffs
+        .iter()
+        .enumerate()
+        .map(|(k, c)| c * h.powi(k as i32))
+        .collect();
+    (0..=degree)
+        .map(|j| {
+            (0..=j)
+                .map(|k| binomial(j, k) / binomial(degree, k) * scaled[k])
+                .sum()
+        })
+        .collect()
+}
+
 #[test]
 fn seam_metrics_flag_a_known_discontinuity() {
-    // Two X pieces meeting at t=1: left ends at pos=1,vel=0,acc=0; right starts
-    // at pos=5 (Δp=4), vel=3 (Δv=3), acc=2*2=4 (Δa=4).
-    let traj = TrajectoryPieces {
-        x: vec![
-            vec![0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
-            vec![1.0, 2.0, 5.0, 3.0, 2.0, 0.0],
-        ],
-        y: Vec::new(),
-        z: Vec::new(),
-        e: Vec::new(),
-        t_end: 2.0,
-    };
+    // Two X carriers meeting at t=1: left ends at pos=1,vel=0,acc=0; right
+    // starts at pos=5 (Δp=4), vel=3 (Δv=3), acc=2*2=4 (Δa=4).
+    let traj = x_polynomial_trajectory(&[(0.0, 1.0, vec![1.0]), (1.0, 2.0, vec![5.0, 3.0, 2.0])]);
     let m = seam_metrics(&traj);
     assert!((m.max_dp[0] - 4.0).abs() < 1e-12);
     assert!((m.max_dv[0] - 3.0).abs() < 1e-12);
@@ -314,14 +365,11 @@ fn seam_metrics_flag_a_known_discontinuity() {
 }
 
 #[test]
-fn continuous_pieces_report_no_seam_jumps() {
+fn continuous_carriers_report_no_seam_jumps() {
     let limits = default_limits();
     let moves = build_moves(&square_waypoints(), limits).unwrap();
     let (_, shaped, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
-    let traj = collect_trajectory_pieces(&shaped);
-    let m = seam_metrics(&traj);
-    // C1 Hermite lowering matches position and velocity at every join, up to
-    // the ride pass's cap-landing snap band (CONTACT_SNAP_REL, 1e-5 relative).
+    let m = seam_metrics(&exact(&shaped));
     for axis in 0..4 {
         assert!(m.max_dp[axis] < 1e-6, "axis {axis} position jump");
         assert!(m.max_dv[axis] < 1e-5, "axis {axis} velocity jump");
@@ -349,13 +397,10 @@ fn snapshot_serializes_to_the_baseline_schema() {
     .unwrap();
     let json: serde_json::Value = serde_json::to_value(&snap).unwrap();
     for key in [
+        "schema_version",
         "raw_x",
         "raw_y",
-        "traj_x_pieces",
-        "traj_y_pieces",
-        "traj_z_pieces",
-        "traj_e_pieces",
-        "traj_t_end",
+        "trajectory",
         "traversal_time_s",
         "seam_max_dp",
         "seam_max_dv",
@@ -363,6 +408,166 @@ fn snapshot_serializes_to_the_baseline_schema() {
         "worst_seams",
     ] {
         assert!(json.get(key).is_some(), "missing snapshot key {key}");
+    }
+    assert_eq!(json["schema_version"], SNAPSHOT_SCHEMA_VERSION);
+    let traj = &json["trajectory"];
+    for key in ["spans", "curves", "axes", "t_end"] {
+        assert!(traj.get(key).is_some(), "missing trajectory key {key}");
+    }
+    let axes = traj["axes"].as_array().expect("four axis lanes");
+    assert_eq!(axes.len(), 4);
+    for row in axes[0].as_array().expect("x lane rows") {
+        for key in ["t0", "t1", "carrier"] {
+            assert!(row.get(key).is_some(), "missing carrier row key {key}");
+        }
+        assert!(
+            row["carrier"]["kind"].is_string(),
+            "every carrier names its kind: {row}"
+        );
+    }
+}
+
+fn square_snapshot() -> Snapshot {
+    pipeline_snapshot(&square_waypoints(), default_axis_snapshot_params()).unwrap()
+}
+
+/// The carriers a snapshot serializes are the ones the pipeline handed it:
+/// analytic rows point at a span in the shared table, spline rows at a curve,
+/// and the tables are deduplicated — the x and y lanes of a spatial move name
+/// the same span index instead of each carrying a copy.
+#[test]
+fn serialized_carriers_reference_the_deduplicated_shared_tables() {
+    let snap = square_snapshot();
+    let json: serde_json::Value = serde_json::to_value(&snap).unwrap();
+    let traj = &json["trajectory"];
+    let span_count = traj["spans"].as_array().unwrap().len();
+    let curve_count = traj["curves"].as_array().unwrap().len();
+    let span_refs = |axis: usize| -> Vec<u64> {
+        traj["axes"][axis]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["carrier"]["kind"] == "analytic")
+            .map(|row| row["carrier"]["span"].as_u64().expect("span index"))
+            .collect()
+    };
+    let x_spans = span_refs(0);
+    assert!(!x_spans.is_empty(), "the square is carried analytically");
+    for axis in 0..4 {
+        for row in traj["axes"][axis].as_array().unwrap() {
+            let carrier = &row["carrier"];
+            match carrier["kind"].as_str().expect("carrier kind") {
+                "analytic" => {
+                    assert!((carrier["span"].as_u64().unwrap() as usize) < span_count);
+                    assert!((carrier["axis"].as_u64().unwrap() as usize) < 4);
+                }
+                "spline" | "relative_spline" => {
+                    assert!((carrier["curve"].as_u64().unwrap() as usize) < curve_count);
+                }
+                _ => {}
+            }
+        }
+    }
+    let y_spans = span_refs(1);
+    assert!(
+        x_spans.iter().any(|span| y_spans.contains(span)),
+        "x and y of one move must share a span row, not duplicate it"
+    );
+}
+
+fn path_curvature(traj: &ExactTrajectory, t: f64) -> Option<f64> {
+    let x = at(traj, 0, t, SampleSide::Right);
+    let y = at(traj, 1, t, SampleSide::Right);
+    let speed_squared = x.velocity * x.velocity + y.velocity * y.velocity;
+    if speed_squared < 1e-6 {
+        return None;
+    }
+    Some(
+        (x.velocity * y.acceleration - y.velocity * x.acceleration).abs()
+            / libm::pow(speed_squared, 1.5),
+    )
+}
+
+/// A corner blend is an arc or a clothoid, and the snapshot keeps it as one:
+/// the span carries the geometry verbatim, so evaluating the carrier through
+/// the blend reports the curvature that geometry implies — constant `1/r` on an
+/// arc, sweeping between the clothoid's own endpoint curvatures. A polynomial
+/// refit of the same window would answer for neither.
+#[test]
+fn curved_analytic_carriers_keep_their_geometry() {
+    let snap = square_snapshot();
+    let json: serde_json::Value = serde_json::to_value(&snap).unwrap();
+    let traj = &json["trajectory"];
+    let spans = traj["spans"].as_array().unwrap();
+    let kinds: Vec<&str> = spans
+        .iter()
+        .filter_map(|span| span["spatial"]["kind"].as_str())
+        .collect();
+    assert!(
+        kinds.contains(&"arc") || kinds.contains(&"clothoid"),
+        "the square's corners fit to curved geometry, got {kinds:?}"
+    );
+    let mut checked_rows = 0;
+    for row in traj["axes"][0].as_array().unwrap() {
+        if row["carrier"]["kind"] != "analytic" {
+            continue;
+        }
+        let spatial = &spans[row["carrier"]["span"].as_u64().unwrap() as usize]["spatial"];
+        let (lo, hi) = match spatial["kind"].as_str() {
+            Some("arc") => {
+                let kappa = 1.0 / spatial["radius"].as_f64().unwrap();
+                (kappa, kappa)
+            }
+            Some("clothoid") => {
+                let kappa_0 = spatial["kappa_0"].as_f64().unwrap();
+                let kappa_1 = kappa_0
+                    + spatial["sigma"].as_f64().unwrap() * spatial["length"].as_f64().unwrap();
+                let (lo, hi) = (kappa_0.abs(), kappa_1.abs());
+                (lo.min(hi), lo.max(hi))
+            }
+            _ => continue,
+        };
+        let (t0, t1) = (row["t0"].as_f64().unwrap(), row["t1"].as_f64().unwrap());
+        for i in 1..8 {
+            let t = t0 + (t1 - t0) * f64::from(i) / 8.0;
+            let Some(kappa) = path_curvature(&snap.trajectory, t) else {
+                continue;
+            };
+            let slack = 1e-6 * (1.0 + hi);
+            assert!(
+                kappa >= lo - slack && kappa <= hi + slack,
+                "curved carrier at t={t} reports curvature {kappa}, geometry allows [{lo}, {hi}]"
+            );
+            checked_rows += 1;
+        }
+    }
+    assert!(
+        checked_rows > 0,
+        "no curved analytic carrier was reachable on the x lane"
+    );
+}
+
+/// The schema is the whole trajectory: a snapshot that has been through JSON
+/// evaluates identically to the one that never left memory.
+#[test]
+fn a_deserialized_snapshot_evaluates_identically() {
+    let snap = square_snapshot();
+    let text = serde_json::to_string(&snap).unwrap();
+    let restored: Snapshot = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        restored.trajectory.breakpoints(),
+        snap.trajectory.breakpoints()
+    );
+    let t_end = snap.trajectory.t_end();
+    for axis in 0..4 {
+        for i in 0..=500 {
+            let t = t_end * f64::from(i) / 500.0;
+            assert_eq!(
+                at(&restored.trajectory, axis, t, SampleSide::Right),
+                at(&snap.trajectory, axis, t, SampleSide::Right),
+                "axis {axis} at t={t} changed across the schema"
+            );
+        }
     }
 }
 
@@ -423,8 +628,8 @@ fn pp(name: &str, ty: &str, params: &[(&str, f64)]) -> planner_config::PostProce
 #[test]
 fn empty_axis_decls_falls_back_to_the_default_four_axis_topology() {
     let snap = pipeline_snapshot(&square_waypoints(), default_axis_snapshot_params()).unwrap();
-    assert!(!snap.traj_x_pieces.is_empty());
-    assert!(!snap.traj_e_pieces.is_empty());
+    assert!(!snap.trajectory.rows(0).is_empty());
+    assert!(!snap.trajectory.rows(3).is_empty());
 }
 
 #[test]
@@ -438,7 +643,7 @@ fn declaring_only_the_e_axis_still_defaults_x_y_z() {
     params.axis_decls = vec![e];
     params.post_processor_decls = vec![pp("pa", "linear_pressure_advance", &[("k", 0.04)])];
     let snap = pipeline_snapshot(&square_waypoints(), params).unwrap();
-    assert!(!snap.traj_x_pieces.is_empty());
+    assert!(!snap.trajectory.rows(0).is_empty());
 }
 
 #[test]
@@ -563,43 +768,37 @@ fn mode_inverse_on_x_params() -> SnapshotParams {
     params
 }
 
-fn eval_lane(pieces: &[Vec<f64>], t: f64) -> f64 {
-    let idx = pieces
-        .partition_point(|p| p[0] <= t)
-        .saturating_sub(1)
-        .min(pieces.len() - 1);
-    eval_piece(&pieces[idx], t.clamp(pieces[idx][0], pieces[idx][1]))
-}
-
-fn max_lane_difference(a: &[Vec<f64>], b: &[Vec<f64>], t_end: f64) -> f64 {
+fn max_axis_difference(a: &ExactTrajectory, b: &ExactTrajectory, axis: usize) -> f64 {
+    let t_end = a.t_end().min(b.t_end());
     (0..=1000)
         .map(|i| t_end * i as f64 / 1000.0)
-        .map(|t| (eval_lane(a, t) - eval_lane(b, t)).abs())
+        .map(|t| (position(a, axis, t) - position(b, axis, t)).abs())
         .fold(0.0, f64::max)
 }
 
 #[test]
 fn mode_inverse_emits_a_toolhead_signal_distinct_from_the_motor_command() {
     let snap = pipeline_snapshot(&square_waypoints(), mode_inverse_on_x_params()).unwrap();
-    let toolhead_x = snap.toolhead_x_pieces.as_ref().expect("toolhead x lane");
-    let toolhead_y = snap.toolhead_y_pieces.as_ref().expect("toolhead y lane");
-    assert!(!toolhead_x.is_empty());
+    let toolhead = snap.toolhead.as_ref().expect("toolhead trajectory");
+    assert!(!toolhead.rows(0).is_empty());
     assert!(
-        max_lane_difference(toolhead_x, &snap.traj_x_pieces, snap.traj_t_end) > 1e-2,
+        max_axis_difference(toolhead, &snap.trajectory, 0) > 1e-2,
         "x carries motor-side gains, so its motor command must depart from the toolhead signal"
     );
     assert!(
-        max_lane_difference(toolhead_y, &snap.traj_y_pieces, snap.traj_t_end) < 1e-6,
+        max_axis_difference(toolhead, &snap.trajectory, 1) < 1e-6,
         "y has no motor-side stage, so both signals coincide"
     );
     let json: serde_json::Value = serde_json::to_value(&snap).unwrap();
-    for key in [
-        "toolhead_x_pieces",
-        "toolhead_y_pieces",
-        "toolhead_z_pieces",
-        "toolhead_e_pieces",
-    ] {
-        assert!(json.get(key).is_some(), "missing snapshot key {key}");
+    assert!(
+        json.get("toolhead").is_some(),
+        "missing snapshot key toolhead"
+    );
+    for key in ["spans", "curves", "axes", "t_end"] {
+        assert!(
+            json["toolhead"].get(key).is_some(),
+            "missing toolhead trajectory key {key}"
+        );
     }
 }
 
@@ -611,19 +810,12 @@ fn kernel_only_chain_serializes_without_toolhead_lanes() {
     params.axis_decls = vec![x];
     params.post_processor_decls = vec![pp("slew", "smooth_bell", &[("smooth_time", 0.0015)])];
     let snap = pipeline_snapshot(&square_waypoints(), params).unwrap();
-    assert!(snap.toolhead_x_pieces.is_none());
+    assert!(snap.toolhead.is_none());
     let json: serde_json::Value = serde_json::to_value(&snap).unwrap();
-    for key in [
-        "toolhead_x_pieces",
-        "toolhead_y_pieces",
-        "toolhead_z_pieces",
-        "toolhead_e_pieces",
-    ] {
-        assert!(
-            json.get(key).is_none(),
-            "kernel-only snapshot must serialize without {key}"
-        );
-    }
+    assert!(
+        json.get("toolhead").is_none(),
+        "kernel-only snapshot must serialize without a toolhead trajectory"
+    );
 }
 
 #[test]
@@ -696,22 +888,30 @@ fn streaming_final_snapshot_serializes_byte_identical_to_full() {
 
 #[test]
 fn streaming_partials_are_growing_prefixes_with_the_full_raw_path() {
-    let mut partials: Vec<(Vec<f64>, Vec<Vec<f64>>)> = Vec::new();
+    let mut partials: Vec<(Vec<f64>, serde_json::Value)> = Vec::new();
     let streamed = pipeline_snapshot_streaming(
         &square_waypoints(),
         default_axis_snapshot_params(),
         2,
-        |snap| partials.push((snap.raw_x.clone(), snap.traj_x_pieces.clone())),
+        |snap| {
+            partials.push((
+                snap.raw_x.clone(),
+                serde_json::to_value(snap.trajectory.rows(0)).unwrap(),
+            ))
+        },
     )
     .unwrap();
     assert!(!partials.is_empty());
+    let final_rows = serde_json::to_value(streamed.trajectory.rows(0)).unwrap();
+    let final_rows = final_rows.as_array().unwrap();
     let mut prev_len = 0;
-    for (raw_x, x_pieces) in &partials {
+    for (raw_x, rows) in &partials {
         assert_eq!(*raw_x, streamed.raw_x);
-        assert!(x_pieces.len() >= prev_len);
-        assert!(x_pieces.len() <= streamed.traj_x_pieces.len());
-        assert_eq!(*x_pieces, streamed.traj_x_pieces[..x_pieces.len()]);
-        prev_len = x_pieces.len();
+        let rows = rows.as_array().unwrap();
+        assert!(rows.len() >= prev_len);
+        assert!(rows.len() <= final_rows.len());
+        assert_eq!(rows[..], final_rows[..rows.len()]);
+        prev_len = rows.len();
     }
 }
 
@@ -720,12 +920,12 @@ fn streaming_partials_carry_toolhead_lanes_when_the_chain_has_motor_side_stages(
     let mut saw_toolhead_partial = false;
     let streamed =
         pipeline_snapshot_streaming(&square_waypoints(), mode_inverse_on_x_params(), 2, |snap| {
-            assert!(snap.toolhead_x_pieces.is_some());
+            assert!(snap.toolhead.is_some());
             saw_toolhead_partial = true;
         })
         .unwrap();
     assert!(saw_toolhead_partial);
-    assert!(streamed.toolhead_x_pieces.is_some());
+    assert!(streamed.toolhead.is_some());
 }
 
 /// The playground's stock G-code (Voron cube layer 5) carries three
@@ -787,51 +987,4 @@ fn default_gcode_circle_loops_stay_concentric_across_corner_deviation() {
             radii_per_cd[0]
         );
     }
-}
-
-/// A carrier that is point-symmetric about the piece midpoint is met exactly
-/// there by its own quintic Hermite interpolant, so a midpoint-only check
-/// reports zero error for a span the interpolant tracks nowhere else.
-#[test]
-fn symmetric_curved_carrier_cannot_evade_the_interior_check() {
-    let h = 0.02;
-    let w = 2.0 * std::f64::consts::PI / h;
-    let carrier = |tau: f64| libm::sin(w * tau);
-    let ends = |tau: f64| trajectory::Pva {
-        position: carrier(tau),
-        velocity: w * libm::cos(w * tau),
-        acceleration: -w * w * libm::sin(w * tau),
-    };
-    let coeffs = quintic_hermite(h, ends(0.0), ends(h));
-
-    let midpoint_only = (eval_monomial(&coeffs, 0.5 * h) - carrier(0.5 * h)).abs();
-    assert!(
-        midpoint_only <= SAMPLED_PIECE_TOL_MM,
-        "midpoint check must be blind here, got {midpoint_only:e}"
-    );
-    assert!(
-        interior_deviation(&coeffs, h, carrier) > SAMPLED_PIECE_TOL_MM,
-        "interior nodes must see the carrier departing from the interpolant"
-    );
-}
-
-#[test]
-fn a_high_order_term_that_displaces_nothing_over_a_short_row_is_trimmed() {
-    let h = 1e-4;
-    let trimmed = trim_trailing_zeros(vec![0.0, 50.0, 0.0, 0.0, 0.0, 1e3], h);
-    assert_eq!(trimmed, vec![0.0, 50.0]);
-}
-
-#[test]
-fn a_small_coefficient_whose_long_row_contribution_matters_is_retained() {
-    let h = 10.0;
-    let coeffs = vec![0.0, 1.0, 0.0, 0.0, 0.0, 1e-13];
-    let trimmed = trim_trailing_zeros(coeffs.clone(), h);
-    assert_eq!(
-        trimmed.len(),
-        6,
-        "quintic term carries {} mm",
-        1e-13 * h.powi(5)
-    );
-    assert_eq!(trimmed, coeffs);
 }

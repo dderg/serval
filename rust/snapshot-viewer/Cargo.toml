@@ -11,8 +11,8 @@ crate-type = ["cdylib"]
 libm = { version = "0.2", default-features = false }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+pipeline-snapshot = { path = "../pipeline-snapshot" }
+serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [profile.release]
 opt-level = "s"
