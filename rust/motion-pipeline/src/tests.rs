@@ -3174,9 +3174,13 @@ fn total_track_breakpoints(items: &[TrajectoryItem]) -> usize {
 ///
 /// Piece count is asserted against a fixed budget rather than a recomputed
 /// expectation, so the test cannot drift with the fitter it guards. Batching
-/// is not free today — the one-item-at-a-time driver fits ~2.5x the pieces
-/// the burst driver does, because each smaller emit window re-partitions the
-/// same signal — so the ratio bound admits that measured spread and trips on
+/// is not free today, and the cost is not spread evenly: the leaders are
+/// exactly batch-invariant because the shaped-leader cache fits each segment
+/// once, while the projected follower costs ~2.8x more pieces one-at-a-time
+/// than bursted. The follower's post-kernel fit is the only stage without
+/// that cache — it reruns on every emit over the committed range alone, so a
+/// one-segment commit re-partitions what a wide column would have shared.
+/// The per-axis bound pins that attribution; the total bound trips on
 /// genuine multiplication.
 #[test]
 fn voron0_shaper_output_is_independent_of_input_batching() {
@@ -3241,12 +3245,37 @@ fn voron0_shaper_output_is_independent_of_input_batching() {
         assert_segment_axes_finite(s);
     }
 
+    let axis_pieces = |items: &[TrajectoryItem], axis: usize| -> usize {
+        trajectory_segments(items)
+            .iter()
+            .map(|seg| axis_breakpoints(&seg.axes[axis]).0.len())
+            .sum()
+    };
+
+    // Leaders are fitted once into the shaper's shaped-leader cache and
+    // reused bit-identically by every later emit, so their piece counts do
+    // not depend on how the input was chunked at all: measured 1540/1540 on
+    // x and 1296/1296 on y, with z at 712 against 692. Anything beyond a few
+    // percent here means that cache stopped being reused.
+    for axis in 0..3 {
+        let (b, s) = (axis_pieces(&burst, axis), axis_pieces(&single, axis));
+        let (lo, hi) = (b.min(s), b.max(s));
+        assert!(
+            hi <= lo + lo / 10,
+            "leader axis {axis} refitted with batching: {b} bursted vs {s} one-at-a-time — \
+             the shaped-leader cache is no longer reused across emit windows"
+        );
+    }
+
     let burst_pieces = total_track_breakpoints(&burst);
     let single_pieces = total_track_breakpoints(&single);
-    // Measured on this sequence: 20_126 bursted, 49_410 one-at-a-time. The
-    // budget is a tripwire with headroom over the worse arm, not a golden
-    // number — a ladder bisecting toward resolution scale, or an emit window
-    // re-fitted per batch, overshoots it by orders of magnitude.
+    // Measured on this sequence (12 segments): 20_126 bursted, 49_410
+    // one-at-a-time. The spread is entirely the projected follower, whose
+    // post-kernel fit — unlike the leaders' — is redone on every emit over
+    // the committed range only, costing 16_578 bursted against 45_882
+    // one-at-a-time. The budget is a tripwire with headroom over the worse
+    // arm, not a golden number; the ratio bound admits today's follower
+    // spread and should tighten once that fit spans the frontier column.
     const PIECE_BUDGET: usize = 80_000;
     assert!(
         burst_pieces <= PIECE_BUDGET && single_pieces <= PIECE_BUDGET,
