@@ -19,7 +19,6 @@ fn build_mcu_configs_two_mcu_corexy_with_e() {
             microstep_distance: vec![0.0125; 3],
             invert_dir: vec![false; 3],
             stepper_oids: vec![1, 2, 3],
-            stepcompress_sample_rate: 20_000.0,
             move_queue_slots: 128,
             step_pulse_seconds: vec![2e-6; 3],
             high_precision_step_compress: vec![true; 3],
@@ -37,7 +36,6 @@ fn build_mcu_configs_two_mcu_corexy_with_e() {
             microstep_distance: vec![0.0025],
             invert_dir: vec![true],
             stepper_oids: vec![4],
-            stepcompress_sample_rate: 20_000.0,
             move_queue_slots: 128,
             step_pulse_seconds: vec![2e-6; 1],
             high_precision_step_compress: vec![true],
@@ -80,7 +78,6 @@ fn build_mcu_configs_stamps_ethercat_from_the_claimed_handles() {
         microstep_distance: vec![0.0125],
         invert_dir: vec![false],
         stepper_oids: vec![1],
-        stepcompress_sample_rate: 20_000.0,
         move_queue_slots: 0,
         step_pulse_seconds: vec![2e-6],
         high_precision_step_compress: vec![true],
@@ -148,7 +145,7 @@ fn build_mcu_configs_requires_one_velocity_ceiling_per_axis() {
     ));
 }
 
-fn pulse_topology(lane_kinds: Vec<u8>, rate: f64, move_queue_slots: u32) -> Vec<McuTopologyInput> {
+fn pulse_topology(lane_kinds: Vec<u8>, move_queue_slots: u32) -> Vec<McuTopologyInput> {
     let n = lane_kinds.len();
     vec![McuTopologyInput {
         mcu_id: 7,
@@ -160,7 +157,6 @@ fn pulse_topology(lane_kinds: Vec<u8>, rate: f64, move_queue_slots: u32) -> Vec<
         microstep_distance: vec![0.0125; n],
         invert_dir: vec![false; n],
         stepper_oids: (1..=n as u32).collect(),
-        stepcompress_sample_rate: rate,
         move_queue_slots,
         step_pulse_seconds: vec![2e-6; n],
         high_precision_step_compress: vec![true; n],
@@ -198,7 +194,7 @@ fn build_mcu_configs_requires_one_entry_per_axis_in_every_lane_vector() {
             |m: &mut McuTopologyInput| m.high_precision_step_compress.pop().map(|_| ()).unwrap(),
         ),
     ] {
-        let mut mcus = pulse_topology(vec![LANE_KIND_PULSE; 2], 20_000.0, 128);
+        let mut mcus = pulse_topology(vec![LANE_KIND_PULSE; 2], 128);
         mutate(&mut mcus[0]);
         let err = build_mcu_configs(&mcus, &no_ethercat()).unwrap_err();
         let arity_matches = match err {
@@ -225,7 +221,7 @@ fn build_mcu_configs_requires_one_entry_per_axis_in_every_lane_vector() {
 
 #[test]
 fn build_mcu_configs_unknown_lane_kind_is_loud() {
-    let mcus = pulse_topology(vec![LANE_KIND_PULSE, 7], 20_000.0, 128);
+    let mcus = pulse_topology(vec![LANE_KIND_PULSE, 7], 128);
     let err = build_mcu_configs(&mcus, &no_ethercat()).unwrap_err();
     assert!(matches!(
         err,
@@ -234,30 +230,9 @@ fn build_mcu_configs_unknown_lane_kind_is_loud() {
 }
 
 #[test]
-fn nonpositive_stepcompress_sample_rate_is_loud() {
-    for rate in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-        let err = build_mcu_configs(
-            &pulse_topology(vec![LANE_KIND_PULSE; 2], rate, 128),
-            &no_ethercat(),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            err,
-            KinematicsConfigError::StepcompressSampleRate { handle: 7, .. }
-        ));
-    }
-    let cfgs = build_mcu_configs(
-        &pulse_topology(vec![LANE_KIND_PULSE; 2], 20_000.0, 128),
-        &no_ethercat(),
-    )
-    .unwrap();
-    assert_eq!(cfgs[0].stepcompress_sample_rate, 20_000.0);
-}
-
-#[test]
 fn a_pulse_lane_requires_move_queue_slots() {
     let err = build_mcu_configs(
-        &pulse_topology(vec![LANE_KIND_PULSE, LANE_KIND_PHASE], 20_000.0, 0),
+        &pulse_topology(vec![LANE_KIND_PULSE, LANE_KIND_PHASE], 0),
         &no_ethercat(),
     )
     .unwrap_err();
@@ -272,11 +247,8 @@ fn a_pulse_lane_requires_move_queue_slots() {
 
 #[test]
 fn a_phase_only_mcu_needs_no_move_queue_slots() {
-    let cfgs = build_mcu_configs(
-        &pulse_topology(vec![LANE_KIND_PHASE; 2], 20_000.0, 0),
-        &no_ethercat(),
-    )
-    .unwrap();
+    let cfgs =
+        build_mcu_configs(&pulse_topology(vec![LANE_KIND_PHASE; 2], 0), &no_ethercat()).unwrap();
     assert!(!cfgs[0].has_pulse_lanes());
     assert_eq!(cfgs[0].move_queue_slots, 0);
 }
@@ -284,18 +256,14 @@ fn a_phase_only_mcu_needs_no_move_queue_slots() {
 #[test]
 fn an_ethercat_handle_needs_no_move_queue_slots() {
     let ethercat: HashSet<u32> = [7u32].into_iter().collect();
-    let cfgs = build_mcu_configs(
-        &pulse_topology(vec![LANE_KIND_PULSE; 2], 20_000.0, 0),
-        &ethercat,
-    )
-    .unwrap();
+    let cfgs = build_mcu_configs(&pulse_topology(vec![LANE_KIND_PULSE; 2], 0), &ethercat).unwrap();
     assert!(cfgs[0].ethercat);
 }
 
 #[test]
 fn a_phase_lane_requires_the_firmwares_sample_rate() {
     for rate in [0.0, -1.0, f64::NAN] {
-        let mut mcus = pulse_topology(vec![LANE_KIND_PULSE, LANE_KIND_PHASE], 20_000.0, 128);
+        let mut mcus = pulse_topology(vec![LANE_KIND_PULSE, LANE_KIND_PHASE], 128);
         mcus[0].phase_sample_rate = rate;
         let err = build_mcu_configs(&mcus, &no_ethercat()).unwrap_err();
         assert!(
@@ -306,7 +274,7 @@ fn a_phase_lane_requires_the_firmwares_sample_rate() {
             "a phase lane cannot run without the mcu's advertised rate, got {err}"
         );
     }
-    let mut pulse_only = pulse_topology(vec![LANE_KIND_PULSE; 2], 20_000.0, 128);
+    let mut pulse_only = pulse_topology(vec![LANE_KIND_PULSE; 2], 128);
     pulse_only[0].phase_sample_rate = 0.0;
     let cfgs = build_mcu_configs(&pulse_only, &no_ethercat()).unwrap();
     assert_eq!(
@@ -317,14 +285,14 @@ fn a_phase_lane_requires_the_firmwares_sample_rate() {
 
 #[test]
 fn a_phase_lane_requires_the_firmwares_ring_depth() {
-    let mut mcus = pulse_topology(vec![LANE_KIND_PULSE, LANE_KIND_PHASE], 20_000.0, 128);
+    let mut mcus = pulse_topology(vec![LANE_KIND_PULSE, LANE_KIND_PHASE], 128);
     mcus[0].phase_ring_depth = 0;
     let err = build_mcu_configs(&mcus, &no_ethercat()).unwrap_err();
     assert!(
         matches!(err, KinematicsConfigError::PhaseLaneRingDepth { handle: 7 }),
         "the host cannot pace a phase lane without the mcu's advertised ring depth, got {err}"
     );
-    let mut pulse_only = pulse_topology(vec![LANE_KIND_PULSE; 2], 20_000.0, 128);
+    let mut pulse_only = pulse_topology(vec![LANE_KIND_PULSE; 2], 128);
     pulse_only[0].phase_ring_depth = 0;
     let cfgs = build_mcu_configs(&pulse_only, &no_ethercat()).unwrap();
     assert_eq!(
@@ -334,7 +302,7 @@ fn a_phase_lane_requires_the_firmwares_ring_depth() {
 }
 
 fn encoder_topology(high_precision: Vec<bool>, max_error_secs: f64) -> Vec<McuTopologyInput> {
-    let mut mcus = pulse_topology(vec![LANE_KIND_PULSE; 2], 20_000.0, 128);
+    let mut mcus = pulse_topology(vec![LANE_KIND_PULSE; 2], 128);
     mcus[0].high_precision_step_compress = high_precision;
     mcus[0].stepcompress_max_error_secs = max_error_secs;
     mcus
@@ -582,7 +550,6 @@ fn stepcompress_toolhead_cfg() -> McuAxisConfig {
         microstep_distance: vec![7.73 / (200.0 * 16.0)],
         invert_dir: vec![true],
         stepper_oids: vec![4],
-        stepcompress_sample_rate: 10_000.0,
         move_queue_slots: 128,
         step_pulse_seconds: vec![2e-6; 1],
         stepcompress_encoders: vec![StepcompressEncoder::HighPrecision],
@@ -604,7 +571,6 @@ fn stepcompress_corexy_cfg() -> McuAxisConfig {
         microstep_distance: vec![0.0125, 0.0125, 0.0025],
         invert_dir: vec![false; 3],
         stepper_oids: vec![1, 2, 3],
-        stepcompress_sample_rate: 10_000.0,
         move_queue_slots: 128,
         step_pulse_seconds: vec![2e-6; 3],
         stepcompress_encoders: vec![StepcompressEncoder::HighPrecision; 3],

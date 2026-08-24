@@ -47,7 +47,6 @@ int32_t runtime_clock_sync_request(struct Runtime *rt,
                                    uint32_t host_send_time_hi,
                                    uint64_t *out_mcu_clock);
 
-
 int32_t runtime_configure_axis(struct Runtime *rt,
                                uint8_t axis_idx,
                                uint8_t mode,
@@ -56,7 +55,6 @@ int32_t runtime_configure_axis(struct Runtime *rt,
                                uint8_t stepper_count);
 
 extern uint32_t runtime_cyccnt_read(void);
-
 
 int32_t runtime_get_heartbeat(struct Runtime *rt,
                               uint8_t *out_engine_state,
@@ -96,8 +94,6 @@ uint64_t runtime_now_ticks(struct Runtime *rt);
 
 int32_t runtime_phase_align_to(struct Runtime *rt, uint8_t stepper_oid, uint16_t target_phase);
 
-int32_t runtime_seed_axis_count(struct Runtime *rt, uint8_t axis_idx, int32_t count);
-
 int32_t runtime_phase_jog_to(struct Runtime *rt,
                              uint8_t stepper_oid,
                              uint16_t target_phase,
@@ -111,8 +107,9 @@ int32_t runtime_query_motor_state(struct Runtime *rt,
 
 int32_t runtime_reset(struct Runtime *rt);
 
-
 int32_t runtime_sample_anchor(struct Runtime *rt, uint8_t oid, uint32_t clock, int32_t position);
+
+int32_t runtime_sample_barrier(struct Runtime *rt, uint8_t oid, uint32_t seq);
 
 /**
  * trsync trip: publish a halt at `halt_clock`. Safe from the trip's IRQ
@@ -143,6 +140,14 @@ int32_t runtime_sample_run(struct Runtime *rt,
                            uint8_t count,
                            const uint8_t *data,
                            uint16_t data_len);
+
+/**
+ * Pop one fence playback has passed. Returns 1 when one was written to the
+ * out params, 0 when none is ready. The caller loops until 0.
+ */
+int32_t runtime_sample_take_barrier_ack(struct Runtime *rt, uint8_t *out_oid, uint32_t *out_seq);
+
+int32_t runtime_seed_axis_count(struct Runtime *rt, uint8_t axis_idx, int32_t count);
 
 int32_t runtime_seed_position(struct Runtime *rt, int32_t x_q16, int32_t y_q16, int32_t z_q16);
 

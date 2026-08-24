@@ -10,6 +10,27 @@ use pyo3::FromPyObject;
 fn unsupported_curve(py: Python<'_>, message: &'static str) -> PyResult<()> {
     py.detach(|| Err(PyRuntimeError::new_err(message)))
 }
+
+pub(super) fn require_supported_jerk_override(jerk: Option<f64>) -> Result<(), &'static str> {
+    match jerk {
+        None => Ok(()),
+        Some(jerk) if jerk == f64::INFINITY => Ok(()),
+        Some(jerk) if jerk.is_finite() => {
+            Err("finite jerk overrides are not supported by the continuous trajectory pipeline")
+        }
+        Some(_) => Err("jerk override must be positive infinity or None"),
+    }
+}
+
+pub(super) fn require_single_motor_mask(motor_mask: u8) -> Result<(), String> {
+    if motor_mask.count_ones() > 1 {
+        return Err(format!(
+            "submit_nudge: multi-bit motor_mask {motor_mask:#010b} not supported"
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn motion_history_host_now() -> f64 {
     host_rt::clock::instant_to_f64(std::time::Instant::now())
 }
@@ -25,7 +46,6 @@ struct McuTopology {
     microstep_distance: Vec<f64>,
     invert_dir: Vec<bool>,
     stepper_oids: Vec<u32>,
-    stepcompress_sample_rate: f64,
     move_queue_slots: u32,
     step_pulse_seconds: Vec<f64>,
     high_precision_step_compress: Vec<bool>,
@@ -46,7 +66,6 @@ impl McuTopology {
             microstep_distance: self.microstep_distance,
             invert_dir: self.invert_dir,
             stepper_oids: self.stepper_oids,
-            stepcompress_sample_rate: self.stepcompress_sample_rate,
             move_queue_slots: self.move_queue_slots,
             step_pulse_seconds: self.step_pulse_seconds,
             high_precision_step_compress: self.high_precision_step_compress,
@@ -70,11 +89,9 @@ impl PyMotionEngine {
         speed: f64,
         accel: f64,
     ) -> PyResult<f64> {
-        if runtime::piece_ring::stepper_sel_from_mask(motor_mask).is_err() {
-            return Err(PyRuntimeError::new_err(format!(
-                "submit_nudge: multi-bit motor_mask {motor_mask:#010b} not supported"
-            )));
-        }
+        require_single_motor_mask(motor_mask).map_err(PyRuntimeError::new_err)?;
+        let profile = trajectory::NudgeProfile::try_new(delta_mm, speed, accel, 0.0)
+            .map_err(|e| PyRuntimeError::new_err(format!("submit_nudge: {e}")))?;
         let rx = {
             let guard = self.planner.lock_ok();
             let planner = guard.as_ref().ok_or_else(|| {
@@ -94,8 +111,7 @@ impl PyMotionEngine {
         py.detach(|| rx.recv())
             .map_err(|_| PyRuntimeError::new_err("nudge notify dropped"))?
             .map_err(PyRuntimeError::new_err)?;
-        let (accel_t, cruise_t, _v) = crate::nudge::calc_move_time(delta_mm, speed, accel);
-        Ok(accel_t + cruise_t + accel_t)
+        Ok(profile.duration())
     }
     /// `config_text` is the serialized config document; the motion-owned
     /// sections are re-read here with the same reader
@@ -336,20 +352,9 @@ impl PyMotionEngine {
         self.planner_config.lock_ok().runtime_caps.accel = accel;
         Ok(())
     }
-    /// Replace the static `[printer] max_jerk` for subsequent moves —
-    /// unlike the velocity/accel caps this may RAISE the limit (infinity
-    /// disables jerk limiting entirely). Calibration transients
-    /// (SERVO_MEASURE_RINGDOWN) use it so the stop excites the raw plant.
-    /// `None` restores the configured limit.
     #[pyo3(signature = (jerk))]
-    fn set_jerk_override(&self, jerk: Option<f64>) -> PyResult<()> {
-        if let Some(j) = jerk {
-            if !(j > 0.0) {
-                return Err(PyValueError::new_err(
-                    "jerk override must be positive (infinity disables jerk limiting)",
-                ));
-            }
-        }
+    pub(super) fn set_jerk_override(&self, jerk: Option<f64>) -> PyResult<()> {
+        require_supported_jerk_override(jerk).map_err(PyValueError::new_err)?;
         self.planner_config.lock_ok().runtime_caps.jerk_override = jerk;
         Ok(())
     }

@@ -1,29 +1,49 @@
 //! Host-side filler for the setpoint ring.
 //!
-//! Runs on the pump's thread, never on the DC thread. It samples the piece
-//! trajectory on the endpoint's DC grid and computes everything the cyclic
-//! task would otherwise compute per cycle: the anchored count target, the
-//! velocity feedforward, and the coupled dynamics torque feedforward. What
-//! stays in the cyclic task is what needs this cycle's encoder image — the
-//! damper, the trim, the strain comp and the pin.
+//! Runs on the pump's thread, never on the DC thread. It evaluates the
+//! trajectory's clocked motor spans on the endpoint's DC grid and computes
+//! everything the cyclic task would otherwise compute per cycle: the anchored
+//! count target, the velocity feedforward, and the coupled dynamics torque
+//! feedforward. What stays in the cyclic task is what needs this cycle's
+//! encoder image — the damper, the trim, the strain comp and the pin.
 //!
 //! The grid is the endpoint's: [`ChainFiller::observe_grid`] takes the
 //! `(grid_index, grid_clock)` pair every `PushSampleRunsResponse` echoes, so
 //! index `n`'s sample clock is `grid_clock + (n - grid_index) * interval`.
+//!
+//! A lane holds at most two views: the one the fill is converting and its
+//! successor, which the feedforward lead reaches across. A view leaves the
+//! active slot when the fill has converted past its end — that is
+//! consumption. It leaves the filler entirely, dropping the host's `Arc` on
+//! the signal, only once the endpoint proves it played past that end — that
+//! is retirement. A cut abandons whatever is unresolved and credits neither.
 
 use std::collections::VecDeque;
 
 use mcu_protocol::messages::{LaneRun, SetpointSample, LANE_RUN_FLAG_REANCHOR, LANE_RUN_FLAG_TAIL};
-use runtime::motion_core::{arm_piece, ArmedPiece};
-use runtime::piece_ring::PieceEntry;
+use trajectory::ClockedMotorSpan;
 
 use crate::buzz::{BuzzOsc, MAX_BUZZ_SLOTS};
 use crate::dynamics::DynamicsModel;
 use crate::scale::mm_to_counts;
 use crate::setpoint::MAX_FILL_CYCLES;
 
-/// Piece timestamps are nanoseconds, so the piece clock ticks at 1 GHz.
-pub const CLOCK_FREQ_HZ: f32 = 1_000_000_000.0;
+/// The DC grid is stamped in nanoseconds, so a span's clock map must tick at
+/// 1 GHz for its clocks to be this grid's clocks.
+pub const CLOCK_FREQ_HZ: f64 = 1_000_000_000.0;
+
+/// Views one lane may hold at once: the active one plus the successor the
+/// feedforward lead reaches into.
+pub const LANE_SPAN_SLOTS: usize = 2;
+
+/// The pump anchors every route of one sweep on the same instant, so a buzz
+/// can only be armed once the endpoint has echoed a grid the anchor can be
+/// placed on.
+pub const ERR_BUZZ_UNGRIDDED_START: i32 = -839;
+
+/// The anchor the pump handed down already played: the grid the endpoint last
+/// echoed is past it, so no cycle of this sweep could carry its first sample.
+pub const ERR_BUZZ_START_IN_PAST: i32 = -840;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LaneSpec {
@@ -34,9 +54,32 @@ pub struct LaneSpec {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FillError {
-    NonFiniteTorque { slot: usize, acc: f32, vel: f32 },
+    NonFiniteTorque {
+        slot: usize,
+        acc: f32,
+        vel: f32,
+    },
     GridUnobserved,
-    GridRegression { observed: u64, previous: u64 },
+    GridRegression {
+        observed: u64,
+        previous: u64,
+    },
+    SpanSlotsFull {
+        axis: u8,
+    },
+    SpanClockMismatch {
+        axis: u8,
+        clock_freq_hz: f64,
+    },
+    SpanOutOfOrder {
+        axis: u8,
+        start_clock: u64,
+        previous_end: u64,
+    },
+    SpanEval {
+        axis: u8,
+        clock: u64,
+    },
 }
 
 impl FillError {
@@ -46,69 +89,159 @@ impl FillError {
             FillError::NonFiniteTorque { .. } => "sample_fill_non_finite_torque",
             FillError::GridUnobserved => "sample_fill_grid_unobserved",
             FillError::GridRegression { .. } => "sample_fill_grid_regression",
+            FillError::SpanSlotsFull { .. } => "sample_fill_span_slots_full",
+            FillError::SpanClockMismatch { .. } => "sample_fill_span_clock_mismatch",
+            FillError::SpanOutOfOrder { .. } => "sample_fill_span_out_of_order",
+            FillError::SpanEval { .. } => "sample_fill_span_eval",
         }
     }
 }
 
 struct Lane {
     spec: LaneSpec,
-    pieces: VecDeque<PieceEntry>,
+    active: Option<ClockedMotorSpan>,
+    successor: Option<ClockedMotorSpan>,
+    /// Converted views the endpoint has not yet proven it played.
+    released: VecDeque<ClockedMotorSpan>,
+    consumed: usize,
     /// Host mm that `pos_counts == 0` stands for in the current epoch. An
     /// epoch starts at every re-anchor and never shifts inside one.
     origin_mm: Option<f64>,
     /// Grid index the next sample must carry to abut the last one emitted.
     next_index: Option<u64>,
-    lookahead: Option<ArmedPiece>,
 }
 
 impl Lane {
     fn new(spec: LaneSpec) -> Self {
         Self {
             spec,
-            pieces: VecDeque::new(),
+            active: None,
+            successor: None,
+            released: VecDeque::new(),
+            consumed: 0,
             origin_mm: None,
             next_index: None,
-            lookahead: None,
         }
     }
 
-    fn retire_before(&mut self, clock: u64) {
-        while let Some(front) = self.pieces.front() {
-            if front.end_time(CLOCK_FREQ_HZ) > clock {
-                break;
+    fn tail_end_clock(&self) -> Option<u64> {
+        self.successor
+            .as_ref()
+            .or(self.active.as_ref())
+            .map(|span| span.end_clock)
+    }
+
+    fn free_slots(&self) -> usize {
+        LANE_SPAN_SLOTS - usize::from(self.active.is_some()) - usize::from(self.successor.is_some())
+    }
+
+    fn admit(&mut self, span: &ClockedMotorSpan) -> Result<(), FillError> {
+        let axis = self.spec.axis;
+        if span.clock_freq_hz != CLOCK_FREQ_HZ {
+            return Err(FillError::SpanClockMismatch {
+                axis,
+                clock_freq_hz: span.clock_freq_hz,
+            });
+        }
+        if let Some(previous_end) = self.tail_end_clock() {
+            if span.start_clock < previous_end {
+                return Err(FillError::SpanOutOfOrder {
+                    axis,
+                    start_clock: span.start_clock,
+                    previous_end,
+                });
             }
-            self.pieces.pop_front();
+        }
+        let slot = if self.active.is_none() {
+            &mut self.active
+        } else if self.successor.is_none() {
+            &mut self.successor
+        } else {
+            return Err(FillError::SpanSlotsFull { axis });
+        };
+        *slot = Some(span.clone());
+        Ok(())
+    }
+
+    /// Move the cursor past every view the fill has converted through. The
+    /// released view stays owned until the endpoint proves the playback.
+    fn consume_through(&mut self, clock: u64) {
+        while self
+            .active
+            .as_ref()
+            .is_some_and(|span| span.end_clock <= clock)
+        {
+            let span = self.active.take().expect("checked above");
+            self.released.push_back(span);
+            self.consumed += 1;
+            self.active = self.successor.take();
         }
     }
 
-    fn piece_covering(&self, clock: u64) -> Option<ArmedPiece> {
-        for entry in &self.pieces {
-            if clock < entry.start_time {
-                return None;
-            }
-            if clock < entry.end_time(CLOCK_FREQ_HZ) {
-                return Some(arm_piece(entry, CLOCK_FREQ_HZ));
+    fn covering(&self, clock: u64) -> Option<&ClockedMotorSpan> {
+        [self.active.as_ref(), self.successor.as_ref()]
+            .into_iter()
+            .flatten()
+            .find(|span| clock >= span.start_clock && clock < span.end_clock)
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn eval(&self, clock: u64) -> Result<Option<(f64, f32, f32)>, FillError> {
+        match self.covering(clock) {
+            None => Ok(None),
+            Some(span) => {
+                let pva = span.eval_at_clock(clock).map_err(|_| FillError::SpanEval {
+                    axis: self.spec.axis,
+                    clock,
+                })?;
+                Ok(Some((
+                    pva.position,
+                    pva.velocity as f32,
+                    pva.acceleration as f32,
+                )))
             }
         }
-        None
     }
 
     /// Feedforward lookahead: commanded `(vel, acc)` a lead ahead of the
-    /// position cursor, cached across samples and never retiring a piece. A
-    /// lead landing in a gap or past the stream end is a stationary target.
-    fn lead_vel_acc(&mut self, clock: u64) -> (f32, f32) {
-        let covers = |p: &ArmedPiece| clock >= p.piece_start_cycles && clock < p.piece_end_cycles;
-        if !self.lookahead.as_ref().is_some_and(covers) {
-            self.lookahead = self.piece_covering(clock);
-        }
-        match &self.lookahead {
-            Some(p) => (p.eval_pos_vel(clock).1, p.eval_accel(clock)),
-            None => (0.0, 0.0),
-        }
+    /// position cursor, reaching across the successor and never consuming a
+    /// view. A lead landing in a gap or past the stream end is a stationary
+    /// target.
+    fn lead_vel_acc(&self, clock: u64) -> Result<(f32, f32), FillError> {
+        Ok(self
+            .eval(clock)?
+            .map_or((0.0, 0.0), |(_, vel, acc)| (vel, acc)))
     }
 
-    fn stream_end(&self) -> Option<u64> {
-        self.pieces.back().map(|e| e.end_time(CLOCK_FREQ_HZ))
+    fn has_pending(&self) -> bool {
+        self.active.is_some()
+    }
+
+    fn retire_through(&mut self, played_clock: u64) -> usize {
+        let mut retired = 0;
+        while self
+            .released
+            .front()
+            .is_some_and(|span| span.end_clock <= played_clock)
+        {
+            self.released.pop_front();
+            retired += 1;
+        }
+        retired
+    }
+
+    /// Drop everything the lane holds without crediting retirement: the
+    /// endpoint discarded this motion, so nothing here was ever played.
+    fn abandon(&mut self) -> usize {
+        let abandoned = usize::from(self.active.is_some())
+            + usize::from(self.successor.is_some())
+            + self.released.len();
+        self.active = None;
+        self.successor = None;
+        self.released.clear();
+        self.origin_mm = None;
+        self.next_index = None;
+        abandoned
     }
 }
 
@@ -207,29 +340,71 @@ impl ChainFiller {
         self.lanes.iter().any(|lane| lane.spec.axis == axis)
     }
 
-    /// Drop one axis' staged pieces and its anchor epoch. The endpoint has
+    /// Drop one axis' unresolved views and its anchor epoch. The endpoint has
     /// discarded that lane's motion (`Stop`, homing trip, abort), so nothing
     /// staged against the old epoch may still reach the ring and the run that
-    /// resumes the lane must carry the re-anchor flag.
-    pub fn cut_axis(&mut self, axis: u8) {
-        for lane in self.lanes.iter_mut().filter(|l| l.spec.axis == axis) {
-            lane.pieces.clear();
-            lane.origin_mm = None;
-            lane.next_index = None;
-            lane.lookahead = None;
-        }
+    /// resumes the lane must carry the re-anchor flag. Returns the abandoned
+    /// view count; none of them are retired.
+    pub fn cut_axis(&mut self, axis: u8) -> usize {
+        self.lanes
+            .iter_mut()
+            .filter(|l| l.spec.axis == axis)
+            .map(Lane::abandon)
+            .sum()
     }
 
-    pub fn push_pieces(&mut self, axis: u8, pieces: &[PieceEntry]) {
-        for lane in self.lanes.iter_mut().filter(|l| l.spec.axis == axis) {
-            lane.pieces.extend(pieces.iter().copied());
+    /// Stage clocked views on a lane. The host keeps the `Arc` on each
+    /// signal until retirement, so the wire only ever carries the fixed
+    /// `LaneRun` values these views evaluate to.
+    pub fn push_spans(&mut self, axis: u8, spans: &[ClockedMotorSpan]) -> Result<(), FillError> {
+        for span in spans {
+            for lane in self.lanes.iter_mut().filter(|l| l.spec.axis == axis) {
+                lane.admit(span)?;
+            }
         }
+        Ok(())
     }
 
-    /// Arm a host-generated buzz. The buzz is a sample source like any other:
-    /// it fills the same ring through the same runs, so the endpoint has no
-    /// buzz evaluation of its own. Rejected while a driven lane still has
-    /// trajectory queued, exactly as the endpoint's own oscillator was.
+    /// Views this axis can still take. The scheduler's `spans_per_axis`
+    /// budget for an EtherCAT lane is exactly this.
+    #[must_use]
+    pub fn free_span_slots(&self, axis: u8) -> usize {
+        self.lanes
+            .iter()
+            .filter(|l| l.spec.axis == axis)
+            .map(Lane::free_slots)
+            .min()
+            .unwrap_or(0)
+    }
+
+    /// Views fully converted into `LaneRun` samples and released from the
+    /// active cursor since the last call.
+    pub fn take_consumed(&mut self, axis: u8) -> usize {
+        self.lanes
+            .iter_mut()
+            .filter(|l| l.spec.axis == axis)
+            .map(|lane| std::mem::take(&mut lane.consumed))
+            .sum()
+    }
+
+    /// Drop every released view the endpoint has proven it played past,
+    /// reclaiming the host's `Arc` on each signal.
+    pub fn retire_through(&mut self, axis: u8, played_clock: u64) -> usize {
+        self.lanes
+            .iter_mut()
+            .filter(|l| l.spec.axis == axis)
+            .map(|lane| lane.retire_through(played_clock))
+            .sum()
+    }
+
+    /// Arm a host-generated buzz on the instant the pump anchored the whole
+    /// sweep on. The buzz is a sample source like any other: it fills the
+    /// same ring through the same runs, so the endpoint has no buzz
+    /// evaluation of its own. `start_clock_ns` is that anchor on this node's
+    /// DC clock; the sweep opens on the first grid cycle at or after it, so
+    /// every transport of one arming starts at the same instant snapped to
+    /// its own device grid. Rejected while a driven lane still has trajectory
+    /// queued, exactly as the endpoint's own oscillator was.
     #[allow(clippy::too_many_arguments, clippy::cast_possible_truncation)]
     pub fn arm_buzz(
         &mut self,
@@ -240,6 +415,7 @@ impl ChainFiller {
         amplitude_nm: u32,
         duration_ms: u32,
         ramp_ms: u32,
+        start_clock_ns: u64,
     ) -> i32 {
         if self.buzz.active() {
             return crate::buzz::ERR_BUZZ_BUSY;
@@ -250,10 +426,19 @@ impl ChainFiller {
         if driven
             .iter()
             .zip(&self.lanes)
-            .any(|(driven, lane)| *driven && !lane.pieces.is_empty())
+            .any(|(driven, lane)| *driven && lane.has_pending())
         {
             return crate::buzz::ERR_BUZZ_STREAMING;
         }
+        let Some((_, grid_clock)) = self.grid else {
+            return ERR_BUZZ_UNGRIDDED_START;
+        };
+        if start_clock_ns < grid_clock {
+            return ERR_BUZZ_START_IN_PAST;
+        }
+        let Some(start_index) = self.index_at_or_after(start_clock_ns) else {
+            return ERR_BUZZ_UNGRIDDED_START;
+        };
         let rc = self.buzz.arm(
             self.lanes.len() as u8,
             slot_mask,
@@ -268,18 +453,21 @@ impl ChainFiller {
         if rc != 0 {
             return rc;
         }
-        // The buzz is its own anchor epoch: it starts from whatever the lane
-        // is holding, so the trajectory epoch must not continue into it.
+        self.open_buzz_epoch(driven, start_index);
+        0
+    }
+
+    /// The buzz is its own anchor epoch: it starts from whatever the lane is
+    /// holding, so the trajectory epoch must not continue into it.
+    fn open_buzz_epoch(&mut self, driven: Vec<bool>, start_index: u64) {
         for (slot, lane) in self.lanes.iter_mut().enumerate() {
             if driven.get(slot) == Some(&true) {
                 lane.next_index = None;
                 lane.origin_mm = None;
-                lane.lookahead = None;
             }
         }
         self.buzz_slots = driven;
-        self.buzz_next_index = self.grid.map(|(index, _)| index + self.lead_cycles);
-        0
+        self.buzz_next_index = Some(start_index);
     }
 
     #[must_use]
@@ -291,20 +479,17 @@ impl ChainFiller {
     /// keep draining, since a buzz outlives one frame's worth of cycles.
     #[must_use]
     pub fn wants_drain(&self) -> bool {
-        self.buzz.active() || self.lanes.iter().any(|l| !l.pieces.is_empty())
+        self.buzz.active() || self.lanes.iter().any(Lane::has_pending)
     }
 
-    /// Drop every queued piece, the buzz and every anchor: the next run on
-    /// each lane must re-anchor. The Stop / homing-trip / drive-fault path.
-    pub fn reset(&mut self) {
-        for lane in &mut self.lanes {
-            lane.pieces.clear();
-            lane.origin_mm = None;
-            lane.next_index = None;
-            lane.lookahead = None;
-        }
+    /// Abandon every view, the buzz and every anchor: the next run on each
+    /// lane must re-anchor. The Stop / homing-trip / drive-fault path.
+    /// Nothing abandoned here is credited as retired.
+    pub fn reset(&mut self) -> usize {
+        let abandoned = self.lanes.iter_mut().map(Lane::abandon).sum();
         self.buzz.clear();
         self.buzz_next_index = None;
+        abandoned
     }
 
     fn clock_of(&self, index: u64) -> Option<u64> {
@@ -339,7 +524,7 @@ impl ChainFiller {
             let Some(clock) = self.clock_of(index) else {
                 return Err(FillError::GridUnobserved);
             };
-            if !self.sample_chain(clock) {
+            if !self.sample_chain(clock)? {
                 window_exhausted = true;
                 break;
             }
@@ -368,23 +553,23 @@ impl ChainFiller {
             if self.buzz_slots.get(slot) == Some(&true) {
                 lane.next_index = None;
                 lane.origin_mm = None;
-                lane.lookahead = None;
             }
         }
         self.buzz_next_index = None;
     }
 
     fn window_start(&self) -> Option<u64> {
+        if self.buzz.active() {
+            return self.buzz_window_start();
+        }
         let mut earliest: Option<u64> = None;
-        for (slot, lane) in self.lanes.iter().enumerate() {
-            let buzz_driven = self.buzz.active() && self.buzz_slots.get(slot) == Some(&true);
-            let candidate = match (lane.next_index, buzz_driven) {
-                (Some(index), _) => Some(index),
-                (None, true) => self.buzz_next_index,
-                (None, false) => lane
-                    .pieces
-                    .front()
-                    .and_then(|p| self.index_at_or_after(p.start_time)),
+        for lane in &self.lanes {
+            let candidate = match lane.next_index {
+                Some(index) => Some(index),
+                None => lane
+                    .active
+                    .as_ref()
+                    .and_then(|span| self.index_at_or_after(span.start_clock)),
             };
             if let Some(index) = candidate {
                 earliest = Some(earliest.map_or(index, |e: u64| e.min(index)));
@@ -393,13 +578,26 @@ impl ChainFiller {
         earliest
     }
 
+    /// A buzz owns the whole window: [`ChainFiller::sample_buzz`] suppresses
+    /// every undriven lane anyway, so letting one of them open the window
+    /// earlier would only hand the oscillator a first cycle before the
+    /// instant the sweep was armed on.
+    fn buzz_window_start(&self) -> Option<u64> {
+        self.lanes
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| self.buzz_slots.get(*slot) == Some(&true))
+            .filter_map(|(_, lane)| lane.next_index.or(self.buzz_next_index))
+            .min()
+    }
+
     /// Host-frame position and lead-shifted velocity/accel of every lane at
     /// `clock`. Returns false once no lane can still extend an open run — a
-    /// lane closed by a coverage gap keeps its remaining pieces for the next
+    /// lane closed by a coverage gap keeps its remaining views for the next
     /// drain, which re-anchors them.
-    fn sample_chain(&mut self, clock: u64) -> bool {
+    fn sample_chain(&mut self, clock: u64) -> Result<bool, FillError> {
         if self.buzz.active() {
-            return self.sample_buzz(clock);
+            return Ok(self.sample_buzz(clock));
         }
         let mut any = false;
         for slot in 0..self.lanes.len() {
@@ -408,29 +606,28 @@ impl ChainFiller {
                 continue;
             }
             let lane = &mut self.lanes[slot];
-            lane.retire_before(clock);
-            let Some(armed) = lane.piece_covering(clock) else {
-                let pending = lane.stream_end().is_some_and(|end| clock < end);
+            lane.consume_through(clock);
+            let lane = &self.lanes[slot];
+            let Some((pos_mm, vel_mm_s, acc_mm_s2)) = lane.eval(clock)? else {
+                let pending = lane.tail_end_clock().is_some_and(|end| clock < end);
                 self.samples[slot] = LaneSample::default();
                 any |= pending;
                 continue;
             };
-            let (pos_mm, vel_mm_s) = armed.eval_pos_vel(clock);
-            let acc_mm_s2 = armed.eval_accel(clock);
             let lead = lane.spec.ff_lead_ns;
             let (ff_vel, ff_acc) = if lead > 0 {
-                lane.lead_vel_acc(clock + lead)
+                lane.lead_vel_acc(clock + lead)?
             } else {
                 (vel_mm_s, acc_mm_s2)
             };
             self.samples[slot] = LaneSample {
-                pos_mm: Some(f64::from(pos_mm)),
+                pos_mm: Some(pos_mm),
                 vel_host: ff_vel,
                 acc_host: ff_acc,
             };
             any = true;
         }
-        any
+        Ok(any)
     }
 
     fn sample_buzz(&mut self, clock: u64) -> bool {

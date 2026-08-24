@@ -2,12 +2,13 @@
 //! polynomial pieces the firmware would execute plus the limits the plan was
 //! made under, and reports every violation. `hard` violations are invariants
 //! the pipeline must never break (finite coefficients, contiguous monotone
-//! time, C0 position at seams and hold gaps); `target` violations break the
-//! intended smoothness budget (C1/C2 seams, velocity/accel/jerk limits) —
-//! the spikes lowering is allowed zero of once its fit tolerances are
-//! honored. Derivative maxima are probed at endpoints plus a
-//! dense interior grid, so a reported violation is a certified lower bound on
-//! the true excess.
+//! time, rows no narrower than the device's step-time resolution, C0 position
+//! at seams and hold gaps); `target` violations break the intended smoothness
+//! budget (C1/C2 seams, velocity limits, and — only when the plan is
+//! jerk-limited — accel and jerk limits, since an infinite-jerk plan bounds
+//! the scalar path's acceleration, not each axis' reconstruction of it).
+//! Derivative maxima are probed at endpoints plus a dense interior grid, so a
+//! reported violation is a certified lower bound on the true excess.
 
 use motion_pipeline::StreamConfig;
 
@@ -19,10 +20,22 @@ const INTERIOR_PROBES: usize = 16;
 const TIME_CONTIGUITY_TOL_S: f64 = 1e-9;
 const REST_VELOCITY_TOL_MM_S: f64 = 1e-9;
 
+/// The device's step-time resolution: the narrowest window a row can mean
+/// anything over. Differentiating a narrower row divides coefficient rounding
+/// by a vanishing span, manufacturing derivative magnitudes no axis executes.
+const MIN_ROW_SPAN_S: f64 = 2e-9;
+
+/// An infinite-jerk plan bounds the scalar path's acceleration, not each
+/// axis' reconstruction of it, so a per-axis rail crossing is expected — but
+/// only within the order of magnitude the rails live in. Past this multiple a
+/// row is reporting a numerical explosion, not motion.
+const ACCEL_EXPLOSION_MULTIPLIER: f64 = 1e3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViolationKind {
     NonFiniteCoefficient,
     NonPositiveSpan,
+    SliverSpan,
     TimeGap,
     TimeOverlap,
     SeamPosition,
@@ -30,6 +43,7 @@ pub enum ViolationKind {
     SeamAccel,
     Velocity,
     Accel,
+    AccelExplosion,
     Jerk,
 }
 
@@ -163,9 +177,19 @@ fn audit_axis(
     let structurally_sound =
         |p: &Vec<f64>| p.len() >= 3 && p.iter().all(|c| c.is_finite()) && p[1] > p[0];
 
+    let lane_is_one_row = pieces.len() == 1;
     for piece in pieces.iter().filter(|p| structurally_sound(p)) {
         let dt = piece[1] - piece[0];
         extrema.min_piece_duration_s = extrema.min_piece_duration_s.min(dt);
+        if dt < MIN_ROW_SPAN_S && !lane_is_one_row {
+            report.hard.push(Violation {
+                kind: ViolationKind::SliverSpan,
+                axis,
+                t: piece[0],
+                value: dt,
+                bound: MIN_ROW_SPAN_S,
+            });
+        }
         let (max_v, max_a, max_j) = probed_derivative_maxima(&piece[2..], dt);
         extrema.max_velocity = extrema.max_velocity.max(max_v);
         extrema.max_accel = extrema.max_accel.max(max_a);
@@ -183,15 +207,27 @@ fn audit_axis(
                     bound: v_bound,
                 });
             }
-            let a_bound = limits.accel_mm_s2 + budgets.accel_slack_mm_s2;
-            if max_a > a_bound {
-                report.target.push(Violation {
-                    kind: ViolationKind::Accel,
+            let explosion_bound = limits.accel_mm_s2 * ACCEL_EXPLOSION_MULTIPLIER;
+            if max_a > explosion_bound {
+                report.hard.push(Violation {
+                    kind: ViolationKind::AccelExplosion,
                     axis,
                     t: piece[0],
                     value: max_a,
-                    bound: a_bound,
+                    bound: explosion_bound,
                 });
+            }
+            if limits.max_jerk_mm_s3.is_finite() {
+                let a_bound = limits.accel_mm_s2 + budgets.accel_slack_mm_s2;
+                if max_a > a_bound {
+                    report.target.push(Violation {
+                        kind: ViolationKind::Accel,
+                        axis,
+                        t: piece[0],
+                        value: max_a,
+                        bound: a_bound,
+                    });
+                }
             }
             let j_bound = limits.max_jerk_mm_s3 * budgets.jerk_multiplier;
             if j_bound.is_finite() && max_j > j_bound {

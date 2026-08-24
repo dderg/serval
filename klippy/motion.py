@@ -225,28 +225,10 @@ class Motion:
             mcu_id, axis_idx, motor_mask, delta_mm, speed, accel
         )
 
-    def submit_resonance_buzz(
-        self,
-        axis_mask,
-        sign_mask,
-        freq_start_millihz,
-        freq_end_millihz,
-        amplitude_nm,
-        duration_ms,
-        ramp_ms,
-    ):
+    def submit_resonance_buzz(self, axis_mask, sign_mask, wave):
         from .extras import resonance_buzz
 
-        return resonance_buzz.submit_buzz(
-            self,
-            axis_mask,
-            sign_mask,
-            freq_start_millihz,
-            freq_end_millihz,
-            amplitude_nm,
-            duration_ms,
-            ramp_ms,
-        )
+        return resonance_buzz.submit_buzz(self, axis_mask, sign_mask, wave)
 
     def resonance_buzz_done(self):
         return self.engine.resonance_buzz_done()

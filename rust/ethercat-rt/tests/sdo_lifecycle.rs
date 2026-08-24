@@ -40,7 +40,15 @@ fn spawn_and_claim(tag: &str) -> (ChildGuard, McuSerialConn) {
         assert!(Instant::now() < deadline, "stub socket did not appear");
         thread::sleep(Duration::from_millis(10));
     }
-    let conn = McuSerialConn::connect(&path).expect("connect must succeed");
+    let conn = loop {
+        match McuSerialConn::connect(&path) {
+            Ok(conn) => break conn,
+            Err(_) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("connect must succeed: {error}"),
+        }
+    };
     let (kind, _) = conn
         .mcu_call(
             MessageKind::ClaimHandshake,

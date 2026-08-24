@@ -120,6 +120,15 @@ pub enum StreamMsg {
         params: NudgeParams,
         notify: Sender<Result<(), String>>,
     },
+    /// Arm a resonance buzz across every configured route in one atomic
+    /// request. The ingress drains the pipeline and fences the pump once, so
+    /// every route starts from a quiescent lane; the pump validates all
+    /// routes before it mutates any of them and returns a single token that
+    /// covers the whole set.
+    Buzz {
+        params: crate::pump::BuzzParams,
+        notify: Sender<Result<crate::pump::BuzzToken, String>>,
+    },
     Shutdown,
 }
 
@@ -439,6 +448,23 @@ impl StreamWorkerHandle {
         let (notify, result) = crossbeam_channel::bounded(1);
         self.sender
             .send(StreamMsg::Nudge { params, notify })
+            .map_err(|_| StreamWorkerError::ChannelClosed)?;
+        Ok(result)
+    }
+
+    /// Queue one buzz request behind everything already submitted. The
+    /// receiver yields the pump's single verdict: a token covering every
+    /// route, or the first route that failed validation with nothing armed.
+    pub fn submit_buzz(
+        &self,
+        params: crate::pump::BuzzParams,
+    ) -> Result<
+        crossbeam_channel::Receiver<Result<crate::pump::BuzzToken, String>>,
+        StreamWorkerError,
+    > {
+        let (notify, result) = crossbeam_channel::bounded(1);
+        self.sender
+            .send(StreamMsg::Buzz { params, notify })
             .map_err(|_| StreamWorkerError::ChannelClosed)?;
         Ok(result)
     }

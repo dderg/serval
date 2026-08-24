@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use geometry::segment::SourceRange;
 use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
-use motion_pipeline::{ShapedItem, StreamConfig, StreamInput, setup_stages};
+use motion_pipeline::{StreamConfig, StreamInput, TrajectoryItem, setup_stages};
 use trajectory::{AxisChainSet, PostProcessorInstance};
 
 fn limits() -> VelocityLimits {
@@ -174,7 +174,7 @@ fn run_case(name: &str, chains: AxisChainSet, inputs: Vec<StreamInput>) -> Optio
         let mut emits: Vec<(f64, f64)> = Vec::new();
         let t0 = Instant::now();
         for item in output.iter() {
-            if let ShapedItem::Seg(seg) = item {
+            if let TrajectoryItem::Seg(seg) = item {
                 emits.push((t0.elapsed().as_secs_f64(), seg.t_end));
             }
         }

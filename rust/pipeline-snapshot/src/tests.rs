@@ -16,7 +16,7 @@ fn default_limits() -> geometry::VelocityLimits {
         300.0,
         3000.0,
         geometry::corner_deviation_from_scv(5.0, 3000.0),
-        100_000.0,
+        f64::INFINITY,
     )
     .unwrap()
 }
@@ -72,25 +72,51 @@ fn eval_piece(p: &[f64], t: f64) -> f64 {
     p[2..].iter().rev().fold(0.0, |acc, &c| acc * z + c)
 }
 
+const MIN_SNAPSHOT_PIECE_S: f64 = 2e-9;
+
+fn assert_lane_schema(pieces: &[Vec<f64>], lane: &str) {
+    assert!(!pieces.is_empty(), "{lane}: lane must carry rows");
+    for (i, p) in pieces.iter().enumerate() {
+        assert!(
+            p.len() >= 3,
+            "{lane}[{i}]: a row is [t0, t1, c0, ..] — got {p:?}"
+        );
+        assert!(p.iter().all(|c| c.is_finite()), "{lane}[{i}]: {p:?}");
+        assert!(p[1] > p[0], "{lane}[{i}]: row must span positive time");
+        assert!(
+            pieces.len() == 1 || p[1] - p[0] >= MIN_SNAPSHOT_PIECE_S,
+            "{lane}[{i}]: row spans {:e}s, under device resolution",
+            p[1] - p[0]
+        );
+        if i + 1 < pieces.len() {
+            assert!(
+                (pieces[i + 1][0] - p[1]).abs() < 1e-9,
+                "{lane}[{i}]: rows must be contiguous in time"
+            );
+        }
+    }
+}
+
 #[test]
 fn trajectory_lowers_to_contiguous_finite_cubics() {
     let limits = default_limits();
     let moves = build_moves(&square_waypoints(), limits).unwrap();
     let (_, shaped, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
     let traj = collect_trajectory_pieces(&shaped);
-    assert!(!traj.x.is_empty());
-    assert_eq!(traj.x.len(), traj.y.len());
-    for (i, p) in traj.x.iter().enumerate() {
-        assert!(p.iter().all(|c| c.is_finite()));
-        assert!(p[1] > p[0], "piece must span a positive time interval");
-        if i + 1 < traj.x.len() {
-            assert!(
-                (traj.x[i + 1][0] - p[1]).abs() < 1e-9,
-                "pieces must be contiguous in time"
-            );
-        }
+    assert_lane_schema(&traj.x, "x");
+    assert_lane_schema(&traj.y, "y");
+    // Row counts differ per axis — each lane's fit bisects independently — but
+    // every lane tiles the same time span the run occupies.
+    for (lane, pieces) in [("x", &traj.x), ("y", &traj.y)] {
+        assert!(
+            (pieces.first().unwrap()[0] - traj.x.first().unwrap()[0]).abs() < 1e-9,
+            "{lane}: lanes must start together"
+        );
+        assert!(
+            (pieces.last().unwrap()[1] - traj.t_end).abs() < 1e-9,
+            "{lane}: lane must run to t_end"
+        );
     }
-    assert!((traj.x.last().unwrap()[1] - traj.t_end).abs() < 1e-9);
 }
 
 #[test]
@@ -294,11 +320,8 @@ fn continuous_pieces_report_no_seam_jumps() {
     let (_, shaped, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
     let traj = collect_trajectory_pieces(&shaped);
     let m = seam_metrics(&traj);
-    // C1 Hermite lowering matches position and velocity at every join.
-    // Velocity joins carry up to a cap-landing snap kick (the ride pass's
-    // CONTACT_SNAP_REL band, 1e-5 relative): a corner blend whose curvature
-    // ramp outruns the jerk budget lands on the blend ceiling with the
-    // band-sized residual the anchored landing could not absorb.
+    // C1 Hermite lowering matches position and velocity at every join, up to
+    // the ride pass's cap-landing snap band (CONTACT_SNAP_REL, 1e-5 relative).
     for axis in 0..4 {
         assert!(m.max_dp[axis] < 1e-6, "axis {axis} position jump");
         assert!(m.max_dv[axis] < 1e-5, "axis {axis} velocity jump");
@@ -314,7 +337,7 @@ fn snapshot_serializes_to_the_baseline_schema() {
             max_accel: 3000.0,
             square_corner_velocity: 5.0,
             corner_deviation: None,
-            max_jerk: 100_000.0,
+            max_jerk: f64::INFINITY,
             max_extrude_only_velocity: None,
             max_extrude_only_accel: None,
             max_path_deviation: None,
@@ -343,13 +366,34 @@ fn snapshot_serializes_to_the_baseline_schema() {
     }
 }
 
+#[test]
+#[should_panic(expected = "FiniteJerkUnsupported")]
+fn finite_max_jerk_is_rejected_by_the_pipeline() {
+    let _ = pipeline_snapshot(
+        &square_waypoints(),
+        SnapshotParams {
+            max_velocity: 300.0,
+            max_accel: 3000.0,
+            square_corner_velocity: 5.0,
+            corner_deviation: None,
+            max_jerk: 100_000.0,
+            max_extrude_only_velocity: None,
+            max_extrude_only_accel: None,
+            max_path_deviation: None,
+            max_accel_deviation: None,
+            axis_decls: Vec::new(),
+            post_processor_decls: Vec::new(),
+        },
+    );
+}
+
 fn default_axis_snapshot_params() -> SnapshotParams {
     SnapshotParams {
         max_velocity: 300.0,
         max_accel: 3000.0,
         square_corner_velocity: 5.0,
         corner_deviation: None,
-        max_jerk: 100_000.0,
+        max_jerk: f64::INFINITY,
         max_extrude_only_velocity: None,
         max_extrude_only_accel: None,
         max_path_deviation: None,
@@ -646,7 +690,7 @@ fn default_gcode_circle_loops_stay_concentric_across_corner_deviation() {
     let mut radii_per_cd: Vec<Vec<f64>> = Vec::new();
     for cd in [0.05, 0.3] {
         let waypoints = waypoints::parse_gcode(&text, 300.0, 3000.0).unwrap();
-        let limits = geometry::VelocityLimits::try_new(300.0, 3000.0, cd, 2_000_000.0).unwrap();
+        let limits = geometry::VelocityLimits::try_new(300.0, 3000.0, cd, f64::INFINITY).unwrap();
         let moves = build_moves(&waypoints, limits).unwrap();
         let (fitted, _, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
         let loops: Vec<&geometry::path::Arc> = fitted

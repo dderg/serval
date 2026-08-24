@@ -52,7 +52,7 @@ fn trident_config() -> motion_pipeline::StreamConfig {
         2800.0,
         50000.0,
         geometry::corner_deviation_from_scv(20.0, 50000.0),
-        4_000_000.0,
+        f64::INFINITY,
     )
     .expect("trident bench limits are valid");
     cfg
@@ -97,7 +97,10 @@ fn drain_boundaries_leave_extruder_track_step_safe() {
     for seg in &segs {
         let mut t = seg.t_start;
         while t < seg.t_end {
-            let pos = nurbs::eval::eval(&seg.axes[EXTRUDER_AXIS], t);
+            let pos = seg
+                .eval_axis(EXTRUDER_AXIS, t)
+                .expect("extruder axis evaluates inside the segment")
+                .position;
             if let Some(p) = prev {
                 let steps = (pos - p).abs() * STEPS_PER_MM;
                 if steps > worst_steps {

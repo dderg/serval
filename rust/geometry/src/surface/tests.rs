@@ -282,3 +282,133 @@ fn constructor_rejects_bad_grids() {
         Err(SurfaceError::NonFinitePoint { index: 2 })
     ));
 }
+
+fn transition_transform(fade: Fade) -> SurfaceTransform {
+    SurfaceTransform::new(
+        MeshGrid::new(0.0, 0.0, 10.0, 10.0, 3, 3, vec![0.0; 9], TENSION).unwrap(),
+        fade,
+    )
+}
+
+fn assert_transition_s(transitions: &[SurfaceTransition], expected: &[(f64, SurfaceContinuity)]) {
+    assert_eq!(transitions.len(), expected.len());
+    for (actual, expected) in transitions.iter().zip(expected) {
+        assert!((actual.s - expected.0).abs() < 1e-8);
+        assert_eq!(actual.continuity, expected.1);
+    }
+}
+
+#[test]
+fn line_transition_distances_classify_internal_and_clamp_boundaries() {
+    let surface = transition_transform(Fade::disabled());
+    let segment = crate::path::Segment::Line(
+        crate::path::Line::try_new([-5.0, 5.0, 0.0], [25.0, 5.0, 0.0]).unwrap(),
+    );
+    let transitions = surface.path_transition_distances(&segment).unwrap();
+    assert_transition_s(
+        &transitions,
+        &[
+            (5.0, SurfaceContinuity::C0),
+            (15.0, SurfaceContinuity::C1),
+            (25.0, SurfaceContinuity::C0),
+        ],
+    );
+}
+
+#[test]
+fn arc_transition_distances_find_crossings_on_monotone_heading_partitions() {
+    use crate::path::lowering::PositionProfile;
+
+    let surface = transition_transform(Fade::disabled());
+    let arc = crate::path::Arc::try_new(
+        [10.0, -30.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        15.0,
+        std::f64::consts::PI,
+        std::f64::consts::PI,
+    )
+    .unwrap();
+    let segment = crate::path::Segment::Arc(arc);
+    let transitions = surface.path_transition_distances(&segment).unwrap();
+    assert_eq!(transitions.len(), 3);
+    assert_eq!(transitions[0].continuity, SurfaceContinuity::C0);
+    assert_eq!(transitions[1].continuity, SurfaceContinuity::C1);
+    assert_eq!(transitions[2].continuity, SurfaceContinuity::C0);
+    for transition in transitions {
+        let x = segment.point_at(transition.s)[0];
+        assert!(
+            [0.0_f64, 10.0, 20.0]
+                .into_iter()
+                .any(|boundary| (x - boundary).abs() < 1e-8)
+        );
+    }
+}
+
+#[test]
+fn clothoid_transition_distance_is_solved_against_the_curve() {
+    use crate::path::lowering::PositionProfile;
+
+    let surface = SurfaceTransform::new(
+        MeshGrid::new(0.0, -10.0, 1.0, 20.0, 3, 2, vec![0.0; 6], TENSION).unwrap(),
+        Fade::disabled(),
+    );
+    let segment = crate::path::Segment::Clothoid(
+        crate::path::Clothoid::try_new(
+            [0.25, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            0.0,
+            0.2,
+            3.0,
+        )
+        .unwrap(),
+    );
+    let transitions = surface.path_transition_distances(&segment).unwrap();
+    assert_eq!(transitions.len(), 2);
+    assert_eq!(transitions[0].continuity, SurfaceContinuity::C1);
+    assert_eq!(transitions[1].continuity, SurfaceContinuity::C0);
+    for (transition, boundary) in transitions.iter().zip([1.0, 2.0]) {
+        assert!((segment.point_at(transition.s)[0] - boundary).abs() < 1e-8);
+    }
+}
+
+#[test]
+fn fade_boundaries_are_c0_transitions() {
+    let surface = SurfaceTransform::new(
+        MeshGrid::new(10.0, 10.0, 10.0, 10.0, 2, 2, vec![0.0; 4], TENSION).unwrap(),
+        Fade::new(0.0, 2.0, 0.0).unwrap(),
+    );
+    let segment = crate::path::Segment::Line(
+        crate::path::Line::try_new([0.0, 0.0, -1.0], [0.0, 0.0, 3.0]).unwrap(),
+    );
+    assert_transition_s(
+        &surface.path_transition_distances(&segment).unwrap(),
+        &[(1.0, SurfaceContinuity::C0), (3.0, SurfaceContinuity::C0)],
+    );
+}
+
+#[test]
+fn coincident_crossings_are_sorted_deduplicated_and_keep_lowest_continuity() {
+    let surface = transition_transform(Fade::new(10.0, 30.0, 0.0).unwrap());
+    let segment = crate::path::Segment::Line(
+        crate::path::Line::try_new([5.0, 5.0, 5.0], [15.0, 15.0, 15.0]).unwrap(),
+    );
+    let transitions = surface.path_transition_distances(&segment).unwrap();
+    assert_eq!(transitions.len(), 1);
+    assert!((transitions[0].s - 5.0_f64 * libm::sqrt(3.0)).abs() < 1e-8);
+    assert_eq!(transitions[0].continuity, SurfaceContinuity::C0);
+}
+
+#[test]
+fn non_finite_segments_fail_loudly() {
+    let surface = transition_transform(Fade::disabled());
+    let segment = crate::path::Segment::Line(crate::path::Line {
+        start: [0.0, 0.0, 0.0],
+        end: [f64::NAN, 1.0, 0.0],
+    });
+    assert_eq!(
+        surface.path_transition_distances(&segment),
+        Err(SurfaceTransitionError::NonFiniteSegment)
+    );
+}

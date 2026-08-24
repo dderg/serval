@@ -5,7 +5,7 @@ from collections import defaultdict, namedtuple
 
 from . import stepper
 from .extras import servo_axis
-from .mcu import SAMPLE_COMMANDS, STEPCOMPRESS_SAMPLE_RATE_HZ
+from .mcu import SAMPLE_COMMANDS
 from .motion_endstop import register_stepcompress_steppers
 from .stepper import DEFAULT_STEP_PULSE_DURATION
 
@@ -21,7 +21,6 @@ McuTopology = namedtuple(
         "microstep_distance",
         "invert_dir",
         "stepper_oids",
-        "stepcompress_sample_rate",
         "move_queue_slots",
         "step_pulse_seconds",
         "high_precision_step_compress",
@@ -263,11 +262,6 @@ def derive_mcu_topology(motion, axis_to_handle):
         axes = sorted(by_handle[handle])
         max_motor_velocity = [ceilings.get(a, float("inf")) for a in axes]
         name, mcu_obj = mcu_by_handle.get(handle, (str(handle), None))
-        sample_rate = (
-            STEPCOMPRESS_SAMPLE_RATE_HZ
-            if mcu_obj is None
-            else mcu_obj.get_stepcompress_sample_rate()
-        )
         max_error_secs = (
             0.0 if mcu_obj is None else mcu_obj.get_stepcompress_max_error()
         )
@@ -377,7 +371,6 @@ def derive_mcu_topology(motion, axis_to_handle):
                 motor_microstep_distance,
                 motor_invert_dir,
                 motor_oids,
-                sample_rate,
                 move_queue_slots,
                 motor_step_pulse_seconds,
                 motor_high_precision_step_compress,

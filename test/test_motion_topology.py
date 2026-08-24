@@ -8,10 +8,7 @@ from fakes import (
     FakeStepper,
 )
 
-from klippy.mcu import (
-    STEPCOMPRESS_MAX_ERROR_DEFAULT,
-    STEPCOMPRESS_SAMPLE_RATE_HZ,
-)
+from klippy.mcu import STEPCOMPRESS_MAX_ERROR_DEFAULT
 from klippy.motion import Motion
 from klippy.motion_kinematics import _LinearKinematics
 from klippy.motion_setup import LANE_KIND_PULSE
@@ -35,7 +32,6 @@ def pulse_topology(handle, axes, kin, move_queue_slots=0, max_error=0.0):
         [FAKE_STEP_DIST] * n,
         [False] * n,
         [0] * n,
-        STEPCOMPRESS_SAMPLE_RATE_HZ,
         move_queue_slots,
         [2e-06] * n,
         [False] * n,
@@ -109,7 +105,7 @@ def test_high_precision_step_compress_is_opted_in_per_motor():
     motion.kin.rails[0].get_steppers()[0].high_precision_step_compress = True
     topology = motion._derive_mcu_topology(motion._build_axis_to_handle())
     expected = list(pulse_topology(11, [0, 1, 2], 0))
-    expected[12] = [True, False, False]
+    expected[11] = [True, False, False]
     assert topology == [tuple(expected)]
 
 

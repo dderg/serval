@@ -26,7 +26,6 @@ fn stepcompress_cfg() -> McuAxisConfig {
         microstep_distance: vec![0.01],
         invert_dir: vec![false],
         stepper_oids: vec![7],
-        stepcompress_sample_rate: 10_000.0,
         move_queue_slots: 128,
         step_pulse_seconds: vec![0.000_002],
         stepcompress_encoders: vec![StepcompressEncoder::HighPrecision],

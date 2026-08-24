@@ -13,14 +13,14 @@ fn escalate_endpoint_death(latch: &Arc<Mutex<HashMap<u32, String>>>, mcu_id: u32
     }
 }
 
-fn log_abandoned_pieces(key: crate::types::AxisKey, dropped: u32) {
+fn log_abandoned_spans(key: crate::types::AxisKey, dropped: u32) {
     tracing::warn!(
         subsystem = "motion",
         event = "pump_abandon_unpushed",
         mcu = key.mcu_id,
         axis = key.axis,
         dropped,
-        "pump dropped staged pieces that never reached the wire — motion was lost"
+        "pump dropped staged spans that never reached the wire — motion was lost"
     );
 }
 
@@ -35,8 +35,20 @@ fn abort_on_drip_stall(msg: String) {
     abort_after_tracing_appender_drains();
 }
 
-fn build_stream_config(cfg: &config::PlannerConfig) -> PyResult<motion_pipeline::StreamConfig> {
+pub(super) fn require_unlimited_config_jerk(max_jerk: f64) -> Result<(), &'static str> {
+    if max_jerk.is_finite() {
+        return Err(
+            "finite [printer] max_jerk is not supported by the continuous trajectory pipeline; set max_jerk: 0",
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn build_stream_config(
+    cfg: &config::PlannerConfig,
+) -> PyResult<motion_pipeline::StreamConfig> {
     let cart = cfg.cartesian;
+    require_unlimited_config_jerk(cart.max_jerk).map_err(PyValueError::new_err)?;
     Ok(motion_pipeline::StreamConfig {
         corner: cfg.corner,
         integration_tol: STREAM_INTEGRATION_TOL,
@@ -371,12 +383,11 @@ impl PyMotionEngine {
                          — see the send_frame_fatal log for the exact transport error",
                     );
                 }),
-                on_abandon: Box::new(log_abandoned_pieces),
+                on_abandon: Box::new(log_abandoned_spans),
                 on_drip_stall: Box::new(abort_on_drip_stall),
             },
             history: crate::pump::HistoryRecorder {
                 store: Arc::clone(&self.motion_history),
-                nominal_freqs: Arc::clone(&self.nominal_clock_freqs),
             },
             drain: drain_for_pump,
             backlog: Arc::clone(&self.pump.backlog),
@@ -626,7 +637,7 @@ impl PyMotionEngine {
 }
 
 /// Re-index an EtherCAT endpoint's per-SLOT retired counters into the pump's
-/// per-AXIS view. With AWD several slots retire the same axis's pieces; the
+/// per-AXIS view. With AWD several slots retire the same axis's spans; the
 /// minimum is the axis's true progress — capacity accounting must wait for the
 /// laggard ring.
 pub(super) fn retired_by_axis(slot_axes: &[usize], retired_slots: &[u32]) -> Vec<u32> {

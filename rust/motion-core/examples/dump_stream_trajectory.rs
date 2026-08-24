@@ -1,8 +1,8 @@
 // Replays a gcode file through the streaming pipeline and dumps the shaped
-// trajectory as CSV: t,x,y,z,e.
+// trajectory as CSV: per axis position, velocity and acceleration.
 //
 //   cargo run --release -p motion-engine --example dump_stream_trajectory -- \
-//       <file.gcode> <out.csv> [--dt S]
+//       <file.gcode> <out.csv> [--dt S] [--scv MM_S]
 
 use std::env;
 use std::fs;
@@ -11,9 +11,10 @@ use std::process;
 
 use geometry::{CornerFitConfig, VelocityLimits};
 use motion_core::classify::build_move;
-use motion_pipeline::{StreamConfig, setup_stages};
-use nurbs::eval::eval;
-use trajectory::{AxisChainSet, ShapedSegment};
+use motion_pipeline::{StreamConfig, TrajectoryItem, setup_stages};
+use trajectory::{AxisChainSet, ContinuousSegment};
+
+const AXIS_LABELS: [&str; 4] = ["x", "y", "z", "e"];
 
 struct Pos {
     pos: [f64; 3],
@@ -69,6 +70,19 @@ impl Pos {
     }
 }
 
+fn axis_label(axis: usize) -> String {
+    AXIS_LABELS
+        .get(axis)
+        .map_or_else(|| format!("a{axis}"), |label| (*label).to_string())
+}
+
+fn sample(seg: &ContinuousSegment, axis: usize, t: f64) -> trajectory::Pva {
+    seg.eval_axis(axis, t).unwrap_or_else(|e| {
+        eprintln!("axis {axis} line {} at t={t}: {e}", seg.source_line);
+        process::exit(1);
+    })
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
@@ -103,7 +117,7 @@ fn main() {
         process::exit(1);
     });
 
-    let limits = VelocityLimits::try_new(100.0, 1000.0, scv, 1_000_000.0).unwrap();
+    let limits = VelocityLimits::try_new(100.0, 1000.0, scv, f64::INFINITY).unwrap();
     let cfg = StreamConfig {
         corner: CornerFitConfig::default(),
         integration_tol: 1e-4,
@@ -118,9 +132,9 @@ fn main() {
     let handle = setup_stages(cfg, AxisChainSet::default(), vec![0.0, 0.0, 0.0, 0.0], 0.0);
     let output = handle.output;
     let collector = std::thread::spawn(move || {
-        let mut segs: Vec<ShapedSegment> = Vec::new();
+        let mut segs: Vec<ContinuousSegment> = Vec::new();
         while let Ok(item) = output.recv() {
-            if let motion_pipeline::ShapedItem::Seg(seg) = item {
+            if let TrajectoryItem::Seg(seg) = item {
                 segs.push(seg);
             }
         }
@@ -183,38 +197,36 @@ fn main() {
     drop(handle.input);
     let all = collector.join().expect("pipeline collector panicked");
 
+    let n_axes = all.iter().map(|s| s.axes.len()).max().unwrap_or(0);
     let mut out = fs::File::create(out_path).unwrap();
-    writeln!(out, "seg,t,x,y,z").unwrap();
+    let mut header = String::from("seg,t");
+    for axis in 0..n_axes {
+        let label = axis_label(axis);
+        header.push_str(&format!(",{label},v{label},a{label}"));
+    }
+    writeln!(out, "{header}").unwrap();
+
+    let mut zmin = f64::MAX;
+    let mut zmax = f64::MIN;
     for (idx, seg) in all.iter().enumerate() {
         let n = ((seg.t_end - seg.t_start) / dt).ceil().max(1.0) as usize;
         for k in 0..=n {
             let t = (seg.t_start + (k as f64) * dt).min(seg.t_end);
-            let x = eval(&seg.axes[0], t);
-            let y = eval(&seg.axes[1], t);
-            let z = eval(&seg.axes[2], t);
-            writeln!(out, "{idx},{t:.6},{x:.5},{y:.5},{z:.5}").unwrap();
+            let mut row = format!("{idx},{t:.6}");
+            for axis in 0..seg.axes.len() {
+                let pva = sample(seg, axis, t);
+                if axis == 2 {
+                    zmin = zmin.min(pva.position);
+                    zmax = zmax.max(pva.position);
+                }
+                row.push_str(&format!(
+                    ",{:.5},{:.4},{:.2}",
+                    pva.position, pva.velocity, pva.acceleration
+                ));
+            }
+            writeln!(out, "{row}").unwrap();
         }
     }
-    let zmax = all
-        .iter()
-        .flat_map(|s| {
-            let n = 8;
-            (0..=n).map(move |k| {
-                let t = s.t_start + (s.t_end - s.t_start) * (k as f64) / (n as f64);
-                eval(&s.axes[2], t)
-            })
-        })
-        .fold(f64::MIN, f64::max);
-    let zmin = all
-        .iter()
-        .flat_map(|s| {
-            let n = 8;
-            (0..=n).map(move |k| {
-                let t = s.t_start + (s.t_end - s.t_start) * (k as f64) / (n as f64);
-                eval(&s.axes[2], t)
-            })
-        })
-        .fold(f64::MAX, f64::min);
     println!(
         "moves={submitted} segments={} z_range=[{zmin:.4}, {zmax:.4}] -> {out_path}",
         all.len()

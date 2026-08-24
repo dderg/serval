@@ -1,3 +1,5 @@
+mod common;
+
 use std::fs;
 use std::io::Read as IoRead;
 use std::process::{Child, Command};
@@ -95,7 +97,7 @@ fn spawn_and_claim(tag: &str) -> (ChildGuard, McuSerialConn, String) {
 
     wait_for_socket(&path, Instant::now() + Duration::from_secs(5));
 
-    let conn = McuSerialConn::connect(&path).expect("McuSerialConn::connect must succeed");
+    let conn = common::connect_until(&path, Instant::now() + Duration::from_secs(5));
     let _reply = do_handshake(&conn);
 
     (guard, conn, path)

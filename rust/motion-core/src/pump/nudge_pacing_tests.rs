@@ -1,17 +1,18 @@
 //! Back-to-back nudges (FORCE_MOVE) on one stepcompress lane, driven through
-//! the real nudge planner, the real overlay flattener and the real shim, then
+//! the real nudge profile, the real span cutter and the real shim, then
 //! replayed against a model of `src/stepper_classic.c`'s `stepper_load_next`.
 
 use super::*;
 
-use runtime::piece_ring::PieceEntry;
 use std::sync::atomic::AtomicU64;
+use trajectory::{
+    ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm, NudgeProfile,
+};
 
 const MCU_ID: u32 = 1;
 const OID: u32 = 0;
 const AXIS: u8 = 3;
 const CYCLES_PER_SECOND: f64 = 50_000_000.0;
-const SAMPLE_RATE_HZ: f64 = 10_000.0;
 const ROTATION_DISTANCE: f64 = 7.73;
 const MICROSTEP_DISTANCE: f64 = ROTATION_DISTANCE / (200.0 * 16.0);
 const STEP_PULSE_TICKS: i64 = 100;
@@ -64,10 +65,8 @@ fn bench() -> Bench {
     });
     let motor = MotorConfig {
         oid: OID,
-        microstep_distance: MICROSTEP_DISTANCE as f32,
+        microstep_distance: MICROSTEP_DISTANCE,
         invert_dir: true,
-        max_steps_per_sample: (100.0 / MICROSTEP_DISTANCE / SAMPLE_RATE_HZ).ceil() as u32,
-        sample_rate_hz: SAMPLE_RATE_HZ as f32,
         cycles_per_second: CYCLES_PER_SECOND,
         min_rearm_cycles: MIN_REARM_CYCLES,
         encoder: StepEncoder::Classic {
@@ -93,44 +92,74 @@ fn bench() -> Bench {
     }
 }
 
-/// The projection the pump sink freezes for a stepcompress mcu: an affine
-/// host-seconds -> mcu-cycles map.
-fn project(host_ref: f64, mcu_ref: f64) -> impl Fn(u32, f64) -> u64 {
-    move |_, host_secs| (mcu_ref + (host_secs - host_ref) * CYCLES_PER_SECOND).round() as u64
+/// The projection the pump sink freezes for a stepcompress mcu: an affine,
+/// unrounded host-seconds -> mcu-cycles map.
+fn project_exact(host_ref: f64, mcu_ref: f64) -> impl Fn(u32, f64) -> f64 {
+    move |_, host_secs| mcu_ref + (host_secs - host_ref) * CYCLES_PER_SECOND
 }
 
-fn nudge_pieces(
+/// One nudge as the planner's profile, anchored on the mcu clock and cut into
+/// the bounded views the endpoint admits. `base_mm` is where the lane already
+/// stands: a nudge profile travels from zero, so a follow-up nudge carries the
+/// displacement of the one before it as a hold term and the seam stays
+/// position-continuous.
+fn nudge_spans(
     delta_mm: f64,
+    base_mm: f64,
     t_start_base: f64,
     t0: f64,
     host_now: f64,
     host_ref: f64,
     mcu_ref: f64,
-) -> (Vec<PieceEntry>, f64) {
-    let planned =
-        crate::nudge::plan_nudge_profile(AXIS, delta_mm, 5.0, 1000.0, 1, t_start_base).unwrap();
-    let dur: f64 = planned
-        .iter()
-        .map(|p| p.piece.u_end - p.piece.u_start)
-        .sum();
-    let project = project(host_ref, mcu_ref);
-    let mut out = Vec::new();
-    for np in &planned {
-        let flat = crate::enqueue::flatten_bezier_pieces(
-            std::slice::from_ref(&np.piece),
-            &crate::enqueue::FlattenCtx {
-                t0,
-                mcu_id: MCU_ID,
-                axis_idx: AXIS as usize,
-                host_now,
-                project: &project,
-                max_piece_secs: None,
-                motor_mask: np.motor_mask,
-            },
-        );
-        out.extend(flat.into_iter().map(|(entry, _)| entry));
-    }
-    (out, dur)
+) -> (Vec<ClockedMotorSpan>, f64) {
+    let profile = NudgeProfile::try_new(delta_mm, 5.0, 1000.0, t_start_base).unwrap();
+    let dur = profile.duration();
+    let (t_start, t_end) = (profile.t_start(), profile.t_end());
+    let signal = MotorSpan::try_new(
+        Arc::from(vec![
+            MotorGroup::Independent(MotorTerm {
+                source_axis: AXIS as usize,
+                axis: ContinuousAxis::Nudge(profile),
+                scale: 1.0,
+            }),
+            MotorGroup::Independent(MotorTerm {
+                source_axis: AXIS as usize,
+                axis: ContinuousAxis::Hold {
+                    position: base_mm,
+                    t_start,
+                    t_end,
+                },
+                scale: 1.0,
+            }),
+        ]),
+        t_start,
+        t_end,
+        1,
+        u32::MAX,
+        false,
+    )
+    .unwrap();
+    let spans = crate::enqueue::clock_span(
+        Arc::new(signal),
+        MCU_ID,
+        AXIS as usize,
+        &crate::enqueue::EnqueueCtx {
+            t0,
+            epoch: crate::anchor::StreamEpoch::Continuation,
+            host_now,
+            lead_secs: LEAD_SECS,
+            epoch_freq: &|_| None,
+            project_exact: project_exact(host_ref, mcu_ref),
+            clock_freq_hz: &|_| CYCLES_PER_SECOND,
+            lane_is_phase: &|_| false,
+        },
+    )
+    .unwrap();
+    assert!(
+        spans.len() > 1,
+        "a nudge longer than the dispatch span bound must arrive as several views"
+    );
+    (spans, dur)
 }
 
 /// Faithful replay of `stepper_event_full` + `stepper_load_next` from
@@ -237,12 +266,12 @@ fn worst_step_load_late(frames: &[StepFrame]) -> i64 {
 }
 
 impl Bench {
-    fn push(&mut self, pieces: Vec<PieceEntry>) -> Result<(), SendError> {
+    fn push(&mut self, spans: Vec<ClockedMotorSpan>) -> Result<(), SendError> {
         self.endpoint.send_frames(
             MCU_ID,
             &[AxisFrame {
                 axis: AXIS,
-                pieces,
+                spans,
                 new_head: 0,
                 room: SHIM_RING_DEPTH,
                 guard_recorded_ns: 0,
@@ -278,9 +307,9 @@ fn back_to_back_nudges_stay_ahead_of_the_mcu_pending_unstep() {
     );
 
     let t0 = host_now + LEAD_SECS;
-    let (first, dur) = nudge_pieces(NUDGE_MM, 0.0, t0, host_now, host_now, mcu_ref);
+    let (first, dur) = nudge_spans(NUDGE_MM, 0.0, 0.0, t0, host_now, host_now, mcu_ref);
     b.push(first).unwrap();
-    let (second, dur2) = nudge_pieces(-NUDGE_MM, dur, t0, host_now, host_now, mcu_ref);
+    let (second, dur2) = nudge_spans(-NUDGE_MM, NUDGE_MM, dur, t0, host_now, host_now, mcu_ref);
     b.push(second).unwrap();
     b.advance_to(((t0 + dur + dur2 + 0.5) * CYCLES_PER_SECOND) as u64)
         .unwrap();

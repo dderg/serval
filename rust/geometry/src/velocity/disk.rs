@@ -717,6 +717,44 @@ fn cell_toward_velocity(v0: f64, a0: f64, v_end: f64, ds: f64) -> Option<(f64, f
     let dt = cell_duration(a0 / 6.0, v0 + dv / 3.0, ds)?;
     Some((dt, 2.0 * dv / dt - a0))
 }
+fn cell_toward_disk_rail(
+    track: &DiskTrack,
+    k: usize,
+    v0: f64,
+    a0: f64,
+    ds: f64,
+    direction: f64,
+) -> Option<(f64, f64, f64)> {
+    let rail_max = track.accel[k];
+    if track.kappa[k] == 0.0 {
+        let a_end = direction * rail_max;
+        let (dt, v_end) = cell_toward_accel(v0, a0, a_end, ds)?;
+        return Some((dt, v_end, a_end));
+    }
+
+    let residual = |a_end: f64| -> Option<(f64, f64, f64)> {
+        let (dt, v_end) = cell_toward_accel(v0, a0, a_end, ds)?;
+        Some((a_end - direction * track.rail(k, v_end), dt, v_end))
+    };
+    let mut lo = if direction < 0.0 { -rail_max } else { 0.0 };
+    let mut hi = if direction < 0.0 { 0.0 } else { rail_max };
+    let (lo_residual, _, _) = residual(lo)?;
+    let (hi_residual, _, _) = residual(hi)?;
+    if lo_residual > 0.0 || hi_residual < 0.0 {
+        return None;
+    }
+    for _ in 0..DISK_RIDE_BISECT_ITERS {
+        let mid = 0.5 * (lo + hi);
+        if residual(mid)?.0 > 0.0 {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    let a_end = 0.5 * (lo + hi);
+    let (_, dt, v_end) = residual(a_end)?;
+    Some((dt, v_end, a_end))
+}
 
 #[derive(Clone, Copy)]
 enum Law {
@@ -806,7 +844,7 @@ fn integrate_disk(
         let last_cell = k + 1 == n - 1;
         let brake_lands = matches!(law, Law::Brake { until } if until == k + 1);
         if brake_lands || last_cell {
-            let v_land = if last_cell {
+            let mut v_land = if last_cell {
                 exit_v.min(track.vlc[n - 1])
             } else {
                 envelope[k + 1].min(track.vlc[k + 1])
@@ -817,11 +855,27 @@ fn integrate_disk(
             {
                 return None;
             }
-            let (dt, a_end) = cell_toward_velocity(v, a, v_land, ds)?;
-            // A physically-zero implied residual would still block the
-            // zero-jerk merge (and the exact closed-form straight lowering);
-            // snapping it moves the landed velocity by well under the seam
-            // continuity tolerance.
+            let (mut dt, mut a_end) = cell_toward_velocity(v, a, v_land, ds)?;
+            if !last_cell {
+                let rail = track.rail(k + 1, v_land);
+                if a_end < -rail {
+                    let landed = cell_toward_disk_rail(track, k + 1, v, a, ds, -1.0)?;
+                    dt = landed.0;
+                    v_land = landed.1;
+                    a_end = landed.2;
+                    if v_land > track.vlc[k + 1] + VELOCITY_FLOOR {
+                        return None;
+                    }
+                } else if a_end > rail {
+                    return None;
+                }
+            }
+            if last_cell {
+                let rail = track.rail(k + 1, v_land);
+                if !a_end.is_finite() || a_end.abs() > rail + ACCEL_SNAP_MM_S2 {
+                    return None;
+                }
+            }
             let a_end = if (a_end - a).abs() <= ACCEL_SNAP_MM_S2 {
                 a
             } else {
@@ -900,13 +954,17 @@ fn integrate_disk(
                 rail_a + (envelope[k + 1] - v_pred) / dt_est
             }
         };
-        let a_tgt = if (a_tgt - a).abs() <= ACCEL_SNAP_MM_S2 {
-            a
+        let (dt, v1, a_end) = if matches!(law, Law::Rail) {
+            cell_toward_disk_rail(track, k + 1, v, a, ds, 1.0)?
         } else {
-            a_tgt
+            let a_end = if (a_tgt - a).abs() <= ACCEL_SNAP_MM_S2 {
+                a
+            } else {
+                a_tgt
+            };
+            let (dt, v_end) = cell_toward_accel(v, a, a_end, ds)?;
+            (dt, v_end, a_end)
         };
-        let (dt, v1) = cell_toward_accel(v, a, a_tgt, ds)?;
-        let a_end = a_tgt;
         let dt_est = 2.0 * ds / (v + v1.max(VELOCITY_FLOOR));
         if !(dt < DISK_RIDE_DT_SANITY * dt_est && dt * DISK_RIDE_DT_SANITY > dt_est) {
             return None;

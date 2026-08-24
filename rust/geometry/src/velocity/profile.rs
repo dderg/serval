@@ -11,8 +11,10 @@
 //! under a flat speed ceiling: ramp up to a peak, optionally cruise, ramp down —
 //! each ramp itself jerk-up / hold-accel / jerk-down as the limits allow.
 
+const PHASE_SOLVE_EPS: f64 = 1e-12;
+
 #[cfg(test)]
-const EPS: f64 = 1e-12;
+const EPS: f64 = PHASE_SOLVE_EPS;
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
@@ -34,11 +36,6 @@ pub(super) struct Profile {
 
 #[cfg(test)]
 impl Profile {
-    /// `(v, a)` at arc-length `s`, clamped to the profile's span. The terminal
-    /// breakpoint carries the exact exit state `(v1, 0)`, returned directly at the
-    /// end so a sub-ulp `solve_tau` shortfall can't leave a residual acceleration
-    /// (and, under infinite jerk, so the stop is the exit anchor, not the last
-    /// phase's `-a_max` step).
     pub(super) fn at(&self, s: f64) -> (f64, f64) {
         let s = s.clamp(0.0, self.length);
         let last = &self.breaks[self.breaks.len() - 1];
@@ -46,8 +43,19 @@ impl Profile {
             return (last.v, last.a);
         }
         let b = self.breaks[self.locate(s)];
-        let tau = b.solve_tau(s - b.s);
-        (b.v + b.a * tau + 0.5 * b.j * tau * tau, b.a + b.j * tau)
+        let phase = StraightPhase {
+            t0: 0.0,
+            dt: b.dt,
+            s0: b.s,
+            v0: b.v,
+            a0: b.a,
+            j: b.j,
+        };
+        let t = phase
+            .time_at_distance(s)
+            .expect("profile phase distance must be solvable");
+        let (_, v, a) = phase.state_at(t);
+        (v, a)
     }
 
     fn locate(&self, s: f64) -> usize {
@@ -56,38 +64,6 @@ impl Profile {
             i += 1;
         }
         i.min(self.breaks.len().saturating_sub(2)).max(0)
-    }
-}
-
-#[cfg(test)]
-impl Break {
-    /// Time `tau` into this phase at which it has advanced `ds` in arc-length,
-    /// i.e. the root of `v*tau + a*tau^2/2 + j*tau^3/6 = ds` on `[0, dt]`. The
-    /// integrand is non-decreasing (speed stays non-negative within a phase), so
-    /// the root is unique and bracketed; bisection with a Newton step is robust.
-    fn solve_tau(&self, ds: f64) -> f64 {
-        if ds <= 0.0 || self.dt <= 0.0 {
-            return 0.0;
-        }
-        let pos =
-            |tau: f64| self.v * tau + 0.5 * self.a * tau * tau + self.j * tau * tau * tau / 6.0;
-        let (mut lo, mut hi) = (0.0, self.dt);
-        if pos(hi) <= ds {
-            return hi;
-        }
-        for _ in 0..64 {
-            let mid = 0.5 * (lo + hi);
-            let f = pos(mid) - ds;
-            if f.abs() <= EPS * (1.0 + ds) {
-                return mid;
-            }
-            if f < 0.0 {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        0.5 * (lo + hi)
     }
 }
 
@@ -209,6 +185,117 @@ pub struct StraightPhase {
     pub v0: f64,
     pub a0: f64,
     pub j: f64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhaseSolveError {
+    OutsidePhase,
+    NonFinite,
+    NonMonotone,
+    DidNotConverge,
+}
+
+impl StraightPhase {
+    pub fn end_time(&self) -> f64 {
+        self.t0 + self.dt
+    }
+
+    pub fn end_distance(&self) -> f64 {
+        let tau = self.dt;
+        self.s0 + self.v0 * tau + 0.5 * self.a0 * tau * tau + self.j * tau * tau * tau / 6.0
+    }
+
+    pub fn state_at(&self, t: f64) -> (f64, f64, f64) {
+        let tau = (t - self.t0).clamp(0.0, self.dt);
+        let s =
+            self.s0 + self.v0 * tau + 0.5 * self.a0 * tau * tau + self.j * tau * tau * tau / 6.0;
+        let v = self.v0 + self.a0 * tau + 0.5 * self.j * tau * tau;
+        let a = self.a0 + self.j * tau;
+        (s, v, a)
+    }
+
+    pub fn time_at_distance(&self, distance: f64) -> Result<f64, PhaseSolveError> {
+        let end_time = self.end_time();
+        let end_distance = self.end_distance();
+        if ![
+            self.t0,
+            self.dt,
+            self.s0,
+            self.v0,
+            self.a0,
+            self.j,
+            distance,
+            end_time,
+            end_distance,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+        {
+            return Err(PhaseSolveError::NonFinite);
+        }
+        if self.dt <= 0.0 || end_distance <= self.s0 {
+            return Err(PhaseSolveError::NonMonotone);
+        }
+
+        let end_velocity = self.v0 + self.a0 * self.dt + 0.5 * self.j * self.dt * self.dt;
+        let mut minimum_velocity = self.v0.min(end_velocity);
+        if self.j != 0.0 {
+            let turning_time = -self.a0 / self.j;
+            if turning_time > 0.0 && turning_time < self.dt {
+                minimum_velocity = minimum_velocity.min(
+                    self.v0 + self.a0 * turning_time + 0.5 * self.j * turning_time * turning_time,
+                );
+            }
+        }
+        if minimum_velocity < 0.0 {
+            return Err(PhaseSolveError::NonMonotone);
+        }
+        if distance < self.s0 || distance > end_distance {
+            return Err(PhaseSolveError::OutsidePhase);
+        }
+        if distance == self.s0 {
+            return Ok(self.t0);
+        }
+        if distance == end_distance {
+            return Ok(end_time);
+        }
+
+        let phase_distance = self.v0 * self.dt
+            + 0.5 * self.a0 * self.dt * self.dt
+            + self.j * self.dt * self.dt * self.dt / 6.0;
+        let target_distance = distance - self.s0;
+        let position =
+            |tau: f64| self.v0 * tau + 0.5 * self.a0 * tau * tau + self.j * tau * tau * tau / 6.0;
+        let velocity = |tau: f64| self.v0 + self.a0 * tau + 0.5 * self.j * tau * tau;
+        let tolerance = PHASE_SOLVE_EPS * (1.0 + target_distance.abs());
+        let mut lo = 0.0;
+        let mut hi = self.dt;
+        let mut tau = self.dt * target_distance / phase_distance;
+
+        for _ in 0..64 {
+            let residual = position(tau) - target_distance;
+            if !residual.is_finite() {
+                return Err(PhaseSolveError::NonFinite);
+            }
+            if residual.abs() <= tolerance {
+                return Ok(self.t0 + tau);
+            }
+            if residual < 0.0 {
+                lo = tau;
+            } else {
+                hi = tau;
+            }
+            let slope = velocity(tau);
+            let newton = tau - residual / slope;
+            tau = if slope > 0.0 && newton.is_finite() && newton > lo && newton < hi {
+                newton
+            } else {
+                0.5 * (lo + hi)
+            };
+        }
+
+        Err(PhaseSolveError::DidNotConverge)
+    }
 }
 
 #[cfg(test)]

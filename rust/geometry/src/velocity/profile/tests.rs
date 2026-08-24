@@ -127,3 +127,98 @@ fn sampling_is_deterministic_and_density_independent() {
         assert_eq!(p.at(s), p.at(s));
     }
 }
+
+fn production_phase() -> StraightPhase {
+    StraightPhase {
+        t0: 2.0,
+        dt: 2.0,
+        s0: 10.0,
+        v0: 3.0,
+        a0: 4.0,
+        j: 2.0,
+    }
+}
+
+#[test]
+fn straight_phase_evaluates_endpoints_and_interior_state() {
+    let phase = production_phase();
+    assert_eq!(phase.end_time(), 4.0);
+    assert_eq!(phase.state_at(1.0), (10.0, 3.0, 4.0));
+    assert_eq!(phase.state_at(2.0), (10.0, 3.0, 4.0));
+
+    let (s, v, a) = phase.state_at(3.0);
+    assert!((s - 15.333333333333334).abs() < 1e-14);
+    assert_eq!((v, a), (8.0, 6.0));
+
+    assert_eq!(phase.state_at(4.0), phase.state_at(5.0));
+    assert_eq!(phase.end_distance(), phase.state_at(4.0).0);
+}
+
+#[test]
+fn straight_phase_distance_time_round_trips() {
+    let phase = production_phase();
+    for time in [2.0, 2.125, 2.5, 3.0, 3.75, 4.0] {
+        let distance = phase.state_at(time).0;
+        let solved = phase.time_at_distance(distance).unwrap();
+        assert!((solved - time).abs() < 1e-10, "{solved} != {time}");
+    }
+}
+
+#[test]
+fn straight_phase_rejects_zero_duration_inversion() {
+    let phase = StraightPhase {
+        dt: 0.0,
+        ..production_phase()
+    };
+    assert_eq!(
+        phase.time_at_distance(phase.s0),
+        Err(PhaseSolveError::NonMonotone)
+    );
+}
+
+#[test]
+fn straight_phase_rejects_non_monotone_inversion() {
+    let phase = StraightPhase {
+        t0: 0.0,
+        dt: 1.0,
+        s0: 0.0,
+        v0: 1.0,
+        a0: -5.0,
+        j: 10.0,
+    };
+    assert!(phase.end_distance() > phase.s0);
+    assert_eq!(
+        phase.time_at_distance(0.1),
+        Err(PhaseSolveError::NonMonotone)
+    );
+}
+
+#[test]
+fn straight_phase_rejects_non_finite_inversion() {
+    let phase = production_phase();
+    assert_eq!(
+        phase.time_at_distance(f64::NAN),
+        Err(PhaseSolveError::NonFinite)
+    );
+    let phase = StraightPhase {
+        j: f64::INFINITY,
+        ..phase
+    };
+    assert_eq!(
+        phase.time_at_distance(phase.s0),
+        Err(PhaseSolveError::NonFinite)
+    );
+}
+
+#[test]
+fn straight_phase_rejects_distance_outside_phase() {
+    let phase = production_phase();
+    assert_eq!(
+        phase.time_at_distance(phase.s0 - 1.0),
+        Err(PhaseSolveError::OutsidePhase)
+    );
+    assert_eq!(
+        phase.time_at_distance(phase.end_distance() + 1.0),
+        Err(PhaseSolveError::OutsidePhase)
+    );
+}

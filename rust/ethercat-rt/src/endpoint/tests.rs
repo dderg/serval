@@ -21,7 +21,9 @@ use mcu_protocol::{
     messages::{SetTorque, StepperSuppress},
     Decode, Encode,
 };
-use runtime::piece_ring::PieceEntry;
+use trajectory::{
+    ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm, NudgeProfile,
+};
 
 use super::cycle::compute_ring_targets;
 use super::drive::DriveChain;
@@ -34,7 +36,7 @@ use crate::mailbox::{MailboxWorker, WorkerScheduling};
 use crate::sdo::SdoBus;
 use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
-use crate::setpoint_fill::{ChainFiller, LaneSpec};
+use crate::setpoint_fill::{ChainFiller, LaneSpec, CLOCK_FREQ_HZ};
 use crate::stream_halt::StreamHalt;
 use crate::torque::{TorqueGate, TorqueState};
 use crate::trim::DiffTrimBank;
@@ -195,11 +197,12 @@ impl SdoBus for NoSdo {
 }
 
 /// Endpoint plus the host filler that feeds its setpoint ring, so a test can
-/// stage piece trajectories the way the pump does and then play them cycle by
+/// stage span trajectories the way the pump does and then play them cycle by
 /// cycle. Derefs to the endpoint: the assertions read `EndpointCtx` directly.
 struct Bench {
     ctx: EndpointCtx,
     host: ChainFiller,
+    grid_clock_ns: u64,
 }
 
 impl std::ops::Deref for Bench {
@@ -215,8 +218,8 @@ impl std::ops::DerefMut for Bench {
     }
 }
 
-/// A freshly armed buzz starts this many cycles ahead of the grid index the
-/// host last observed, exactly as the pump leads its fills.
+/// A freshly armed buzz is anchored this many cycles ahead of the grid clock
+/// the host last observed, exactly as the pump leads its fills.
 const BUZZ_ARM_LEAD_CYCLES: u64 = 1;
 
 fn lane_specs() -> Vec<LaneSpec> {
@@ -234,6 +237,7 @@ impl Bench {
         Self {
             host: ChainFiller::new(&lane_specs(), None, CYCLE_NS, BUZZ_ARM_LEAD_CYCLES),
             ctx,
+            grid_clock_ns: 0,
         }
     }
 
@@ -253,9 +257,11 @@ impl Bench {
         self.ctx.dynamics = Some(for_endpoint);
     }
 
-    fn push_all(&mut self, entry: PieceEntry) {
+    fn push_all(&mut self, span: ClockedMotorSpan) {
         for axis in 0..NUM_SLAVES as u8 {
-            self.host.push_pieces(axis, &[entry]);
+            self.host
+                .push_spans(axis, std::slice::from_ref(&span))
+                .expect("the lane takes the view");
         }
     }
 
@@ -280,6 +286,7 @@ impl Bench {
             amplitude_nm,
             duration_ms,
             ramp_ms,
+            self.grid_clock_ns + BUZZ_ARM_LEAD_CYCLES * CYCLE_NS,
         )
     }
 
@@ -310,6 +317,7 @@ impl Bench {
         self.host
             .observe_grid(index, clock_ns)
             .expect("the grid only advances");
+        self.grid_clock_ns = clock_ns;
         self.fill();
     }
 
@@ -510,15 +518,86 @@ fn scheduled_torque_disable_uses_one_chain_transition_for_two_slaves() {
     assert_eq!(transitions.disable.load(Ordering::SeqCst), 1);
 }
 
-fn piece(start_ns: u64, duration_s: f32, coeffs: &[f32]) -> PieceEntry {
-    let mut entry = PieceEntry {
-        start_time: start_ns,
-        duration: duration_s,
-        coeff_count: coeffs.len() as u8,
-        ..PieceEntry::zeroed()
-    };
-    entry.coeffs[..coeffs.len()].copy_from_slice(coeffs);
-    entry
+#[allow(clippy::cast_precision_loss)]
+fn clocked(signal: Arc<MotorSpan>, start_ns: u64) -> ClockedMotorSpan {
+    let start_clock_exact = start_ns as f64;
+    let start_host = start_clock_exact / CLOCK_FREQ_HZ;
+    ClockedMotorSpan::try_new(
+        Arc::clone(&signal),
+        signal.t_start,
+        signal.t_end,
+        start_host,
+        start_host + (signal.t_end - signal.t_start),
+        start_clock_exact,
+        CLOCK_FREQ_HZ,
+    )
+    .expect("a positive-duration view on the nanosecond DC clock")
+}
+
+fn one_term_span(axis: ContinuousAxis, duration_s: f64) -> Arc<MotorSpan> {
+    let groups: Arc<[MotorGroup]> = Arc::from([MotorGroup::Independent(MotorTerm {
+        source_axis: 0,
+        axis,
+        scale: 1.0,
+    })]);
+    Arc::new(MotorSpan::try_new(groups, 0.0, duration_s, 0, 0, false).expect("motor span"))
+}
+
+fn hold(start_ns: u64, duration_s: f64, position_mm: f64) -> ClockedMotorSpan {
+    clocked(
+        one_term_span(
+            ContinuousAxis::Hold {
+                position: position_mm,
+                t_start: 0.0,
+                t_end: duration_s,
+            },
+            duration_s,
+        ),
+        start_ns,
+    )
+}
+
+fn ramp(start_ns: u64, duration_s: f64, from_mm: f64, to_mm: f64) -> ClockedMotorSpan {
+    let delta = to_mm - from_mm;
+    let profile =
+        NudgeProfile::try_new(delta, delta.abs() / duration_s, 0.0, 0.0).expect("cruise profile");
+    let duration = profile.duration();
+    let groups: Arc<[MotorGroup]> = Arc::from([
+        MotorGroup::Independent(MotorTerm {
+            source_axis: 0,
+            axis: ContinuousAxis::Hold {
+                position: from_mm,
+                t_start: 0.0,
+                t_end: duration,
+            },
+            scale: 1.0,
+        }),
+        MotorGroup::Independent(MotorTerm {
+            source_axis: 0,
+            axis: ContinuousAxis::Nudge(profile),
+            scale: 1.0,
+        }),
+    ]);
+    clocked(
+        Arc::new(MotorSpan::try_new(groups, 0.0, duration, 0, 0, false).expect("motor span")),
+        start_ns,
+    )
+}
+
+/// The constant-accel law, exact:
+/// p(t) = c2·(2u² − 1) with u = 2t/d − 1, which is the quadratic Bezier
+/// through control points (c2, −3·c2, c2) — accel a constant 16·c2/d².
+fn constant_accel(start_ns: u64, duration_s: f64, c2: f64) -> ClockedMotorSpan {
+    let curve = nurbs::ScalarNurbs::try_new(
+        2,
+        vec![0.0, 0.0, 0.0, duration_s, duration_s, duration_s],
+        vec![c2, -3.0 * c2, c2],
+    )
+    .expect("a quadratic bezier over the span duration");
+    clocked(
+        one_term_span(ContinuousAxis::Spline(Arc::new(curve)), duration_s),
+        start_ns,
+    )
 }
 
 fn targets(ctx: &EndpointCtx) -> Vec<i32> {
@@ -537,8 +616,8 @@ fn target_counts_hold_across_a_mid_stream_ring_gap() {
 
     // Stroke: 0 mm → 5 mm over 10 ms starting at t=1 ms, then a contiguous
     // 10 ms hold at the endpoint — the shape of a stroke braking to rest.
-    ctx.push_all(piece(1_000_000, 0.01, &[2.5, 2.5]));
-    ctx.push_all(piece(11_000_000, 0.01, &[5.0]));
+    ctx.push_all(ramp(1_000_000, 0.01, 0.0, 5.0));
+    ctx.push_all(hold(11_000_000, 0.01, 5.0));
     ctx.run_cycles(1_000_000, 20_750_000);
     let at_rest = targets(&ctx);
 
@@ -557,7 +636,7 @@ fn target_counts_hold_across_a_mid_stream_ring_gap() {
     }
 
     // Continuation: hold at 5 mm, arriving after the gap.
-    ctx.push_all(piece(1_211_000_000, 0.01, &[5.0]));
+    ctx.push_all(hold(1_211_000_000, 0.01, 5.0));
     ctx.run_cycles(1_211_000_000, 1_212_000_000);
 
     let after_gap = targets(&ctx);
@@ -579,7 +658,7 @@ fn target_counts_hold_across_a_mid_stream_ring_gap() {
 fn discard_motion_keeps_commanded_counts_continuous() {
     let mut ctx = test_ctx("discard");
 
-    ctx.push_all(piece(1_000_000, 0.01, &[2.5, 2.5]));
+    ctx.push_all(ramp(1_000_000, 0.01, 0.0, 5.0));
     ctx.run_cycles(1_000_000, 11_000_000);
     let before = targets(&ctx);
 
@@ -598,7 +677,7 @@ fn discard_motion_keeps_commanded_counts_continuous() {
     // New stream restarts the host frame at 0 mm at the same physical spot:
     // the commanded counts must not move, or the pair's standing following
     // errors ({FOLLOWING_ERROR:?}) become a trapped differential.
-    ctx.push_all(piece(20_000_000, 0.01, &[0.0]));
+    ctx.push_all(hold(20_000_000, 0.01, 0.0));
     ctx.run_cycles(20_000_000, 20_500_000);
 
     let after = targets(&ctx);
@@ -616,7 +695,7 @@ fn discard_motion_keeps_commanded_counts_continuous() {
 fn torque_disable_voids_the_commanded_anchor() {
     let mut ctx = test_ctx("torque-off");
 
-    ctx.push_all(piece(1_000_000, 0.01, &[2.5, 2.5]));
+    ctx.push_all(ramp(1_000_000, 0.01, 0.0, 5.0));
     ctx.run_cycles(1_000_000, 11_000_000);
     let before = targets(&ctx);
 
@@ -636,7 +715,7 @@ fn torque_disable_voids_the_commanded_anchor() {
     let _ = ctx.gate.on_set_torque(true, 0);
     ctx.gate.enable_finished(true);
 
-    ctx.push_all(piece(30_000_000, 0.01, &[0.0]));
+    ctx.push_all(hold(30_000_000, 0.01, 0.0));
     ctx.run_cycles(30_000_000, 30_500_000);
 
     let after = targets(&ctx);
@@ -659,7 +738,7 @@ fn homing_trip_retract_releases_pair_wind_up() {
     let mut ctx = test_ctx("trip-retract");
 
     // Approach: 0 mm -> 5 mm, trip mid-stroke.
-    ctx.push_all(piece(1_000_000, 0.01, &[2.5, 2.5]));
+    ctx.push_all(ramp(1_000_000, 0.01, 0.0, 5.0));
     ctx.run_cycles(1_000_000, 6_000_000);
     let at_trip = targets(&ctx);
     let pair_offset_at_trip = i64::from(at_trip[0]) - i64::from(at_trip[1]);
@@ -667,7 +746,7 @@ fn homing_trip_retract_releases_pair_wind_up() {
     // Trip: Stop discards motion; the host rebases its mm frame (the homing
     // set_position) and streams the retract in the new frame.
     ctx.discard_motion();
-    ctx.push_all(piece(10_000_000, 0.01, &[17.5, -2.5]));
+    ctx.push_all(ramp(10_000_000, 0.01, 20.0, 15.0));
     ctx.run_cycles(10_000_000, 20_000_000);
 
     let after_retract = targets(&ctx);
@@ -778,7 +857,7 @@ fn trim_freezes_while_the_pair_is_streaming() {
     );
 
     for ctx in [&mut trimmed, &mut plain] {
-        ctx.push_all(piece(1_000_000, 0.05, &[2.5, 2.5]));
+        ctx.push_all(ramp(1_000_000, 0.05, 0.0, 5.0));
         ctx.run_cycles(1_000_000, 41_000_000);
     }
 
@@ -798,7 +877,7 @@ fn trim_waits_out_the_settle_window_after_motion() {
         TrackingLagDrive::with_torques(vec![100, -100]),
     );
     assert_eq!(ctx.trim.set(NUM_SLAVES, 0, 1, 200_000, 500, 25_000, 200), 0);
-    ctx.push_all(piece(1_000_000, 0.01, &[2.5, 2.5]));
+    ctx.push_all(ramp(1_000_000, 0.01, 0.0, 5.0));
     ctx.run_cycles(1_000_000, 12_000_000);
     let at_rest = targets(&ctx);
     // 100 ms of standstill: inside the 200 ms settle window, still blind.
@@ -839,7 +918,7 @@ fn damper_stays_quiet_on_common_mode_velocity() {
 #[test]
 fn strain_comp_moves_held_targets_at_standstill() {
     let mut ctx = test_ctx("comp-hold");
-    ctx.push_all(piece(1_000_000, 0.01, &[0.0]));
+    ctx.push_all(hold(1_000_000, 0.01, 0.0));
     ctx.run_cycles(1_000_000, 12_000_000);
     let held = targets(&ctx);
     assert_eq!(
@@ -868,7 +947,7 @@ fn strain_comp_moves_held_targets_at_standstill() {
 #[test]
 fn strain_comp_reaches_held_targets_after_a_stop_discard() {
     let mut ctx = test_ctx("comp-stop");
-    ctx.push_all(piece(1_000_000, 0.01, &[0.0]));
+    ctx.push_all(hold(1_000_000, 0.01, 0.0));
     ctx.run_cycles(1_000_000, 12_000_000);
     ctx.discard_motion();
     assert!(ctx.last_counts.iter().all(Option::is_none));
@@ -984,7 +1063,7 @@ fn streamed_motion_keeps_coulomb_in_the_ff() {
     let mut ctx = test_ctx("stream-coulomb");
     ctx.install_dynamics(BUZZ_DYNAMICS);
     ctx.torque_clamp_tenths = vec![300; NUM_SLAVES];
-    ctx.push_all(piece(1_000_000, 0.05, &[0.25, 0.25]));
+    ctx.push_all(ramp(1_000_000, 0.05, 0.0, 0.5));
     ctx.run_cycles(1_000_000, 40_000_000);
     let offset = ctx.drive.telemetry(0).torque_offset;
     assert!(
@@ -1116,7 +1195,7 @@ fn set_dynamics_model_mass_len_mismatch_keeps_no_model() {
 #[test]
 fn seed_defers_while_ring_drains_and_completes_when_empty() {
     let mut ctx = test_ctx("seed-defer");
-    ctx.push_all(piece(1_000_000, 0.01, &[2.5, 2.5]));
+    ctx.push_all(ramp(1_000_000, 0.01, 0.0, 5.0));
     ctx.stage_at(0);
     super::commands::handle_seed_servo_home(&mut ctx, 7, 0, 65536);
     assert!(ctx.pending_seed.is_some());
@@ -1136,7 +1215,7 @@ fn seed_defers_while_ring_drains_and_completes_when_empty() {
 #[test]
 fn seed_fails_when_the_ring_never_drains() {
     let mut ctx = test_ctx("seed-timeout");
-    ctx.push_all(piece(1_000_000, 0.01, &[2.5, 2.5]));
+    ctx.push_all(ramp(1_000_000, 0.01, 0.0, 5.0));
     ctx.stage_at(0);
     super::commands::handle_seed_servo_home(&mut ctx, 7, 0, 65536);
     let deadline = ctx.pending_seed.as_ref().expect("deferred").deadline_cycle;
@@ -1270,9 +1349,9 @@ fn cycle_skip_faults_even_when_lateness_is_within_tolerance() {
     assert_eq!(ctx.latched_drive_err, super::cycle::CYCLE_SKIP_FAULT_CODE);
 }
 
-/// A pure-T2 piece has constant accel: d²/du²·T2 = 4, so
-/// accel = 4·C2·(2/duration)².
-const T2_C: f32 = 0.625; // accel = 4·0.625·400 = 1000 mm/s² at d = 0.1 s
+/// Curvature of the constant-accel span: accel = 16·c2/d², so
+/// 16·0.625/0.1² = 1000 mm/s² over a 0.1 s span.
+const T2_C: f64 = 0.625;
 
 // ---- pin-rotor (mode A) torque hold -------------------------------------
 
@@ -1299,10 +1378,10 @@ fn pin_ctx(name: &str, toml: &str) -> Bench {
     ctx
 }
 
-/// Drive one constant-accel (T2) stroke and return slot-0 torque_offset per
-/// cycle. The stroke stays inside the 0.1 s piece for all `cycles`.
+/// Drive one constant-accel stroke and return slot-0 torque_offset per
+/// cycle. The stroke stays inside the 0.1 s span for all `cycles`.
 fn run_accel_collect_torque(ctx: &mut Bench, cycles: u64) -> Vec<i32> {
-    ctx.push_all(piece(1_000_000, 0.1, &[0.0, 0.0, T2_C]));
+    ctx.push_all(constant_accel(1_000_000, 0.1, T2_C));
     let mut out = Vec::with_capacity(cycles as usize);
     for c in 0..cycles {
         ctx.cycle_at(1_000_000 + c * CYCLE_NS);
@@ -1583,7 +1662,7 @@ fn pin_lead_advances_phase() {
         &PIN_IDENTITY.replace("pin_lead_us = 0.0", "pin_lead_us = 1000.0"),
     );
     let collect = |ctx: &mut Bench| -> Vec<f32> {
-        ctx.push_all(piece(1_000_000, 0.1, &[0.0, 0.0, T2_C]));
+        ctx.push_all(constant_accel(1_000_000, 0.1, T2_C));
         let mut v = Vec::new();
         for c in 0..200u64 {
             ctx.cycle_at(1_000_000 + c * CYCLE_NS);
@@ -2041,7 +2120,7 @@ fn pin_torque_vanishes_at_constant_accel_for_every_lead() {
 fn suppressed_slot_holds_target_while_peer_advances() {
     let mut ctx = test_ctx("suppress-hold");
 
-    ctx.push_all(piece(1_000_000, 0.01, &[2.5, 2.5]));
+    ctx.push_all(ramp(1_000_000, 0.01, 0.0, 5.0));
     ctx.run_cycles(1_000_000, 5_000_000);
     let mid = targets(&ctx);
 
@@ -2075,7 +2154,7 @@ fn suppressed_slot_holds_target_while_peer_advances() {
         ctx.suppressed.iter().all(|&s| !s),
         "clear-all must release every slot"
     );
-    ctx.push_all(piece(20_000_000, 0.01, &[2.5, 2.5]));
+    ctx.push_all(ramp(20_000_000, 0.01, 0.0, 5.0));
     ctx.run_cycles(20_000_000, 22_000_000);
     assert_ne!(
         targets(&ctx)[0],

@@ -8,7 +8,7 @@ use host_rt::mcu_serial_conn::McuSerialConn;
 
 use crate::config::PlannerConfig;
 use crate::worker::{DispatchError, StreamWorkerHandle};
-use trajectory::ShapedSegment;
+use trajectory::{ContinuousSegment, NudgeProfile};
 
 use super::{McuConnection, PyMotionEngine, SampleGrid};
 
@@ -238,15 +238,17 @@ struct FnSink<F>(F);
 
 impl<F> crate::worker::SegmentSink for FnSink<F>
 where
-    F: FnMut(&ShapedSegment) -> Result<(), DispatchError> + Send + 'static,
+    F: FnMut(&ContinuousSegment) -> Result<(), DispatchError> + Send + 'static,
 {
-    fn dispatch(&mut self, seg: &ShapedSegment) -> Result<(), DispatchError> {
+    fn dispatch(&mut self, seg: &ContinuousSegment) -> Result<(), DispatchError> {
         (self.0)(seg)
     }
     fn dispatch_nudge(
         &mut self,
         _mcu_id: u32,
-        _piece: &crate::nudge::NudgePiece,
+        _axis: u8,
+        _motor_mask: u8,
+        _profile: &NudgeProfile,
     ) -> Result<(), DispatchError> {
         Ok(())
     }
@@ -255,7 +257,7 @@ where
 fn counting_dispatch() -> (impl crate::worker::SegmentSink, Arc<AtomicUsize>) {
     let counter = Arc::new(AtomicUsize::new(0));
     let c = Arc::clone(&counter);
-    let sink = FnSink(move |_seg: &ShapedSegment| {
+    let sink = FnSink(move |_seg: &ContinuousSegment| {
         c.fetch_add(1, Ordering::Relaxed);
         Ok(())
     });
@@ -269,7 +271,7 @@ fn relaxed_planner_config() -> PlannerConfig {
 }
 
 fn test_limits() -> geometry::VelocityLimits {
-    geometry::VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap()
+    geometry::VelocityLimits::try_new(300.0, 5000.0, 5.0, f64::INFINITY).unwrap()
 }
 
 fn stream_config_from(cfg: &PlannerConfig) -> (motion_pipeline::StreamConfig, Vec<f64>) {
@@ -300,7 +302,7 @@ fn heartbeat_supervisor(
 }
 
 /// The per-cycle heartbeat is the pump loop's pacemaker: coalescing it in
-/// time (87e64bf37's 5ms RetirementForwardGate) reshaped PushPieces sends
+/// time (87e64bf37's 5ms RetirementForwardGate) reshaped span-frame sends
 /// into bursts the H723's USB did not survive, crashing every print at
 /// first homing. Back-to-back fault-free heartbeats must forward 1:1.
 #[test]
@@ -387,7 +389,7 @@ fn shutdown_stops_new_dispatch_before_closing_pump() {
     let saw_pump_gone_cb = Arc::clone(&saw_pump_gone);
     let dispatch_count = Arc::new(AtomicUsize::new(0));
     let dispatch_count_cb = Arc::clone(&dispatch_count);
-    let dispatch = FnSink(move |_seg: &ShapedSegment| {
+    let dispatch = FnSink(move |_seg: &ContinuousSegment| {
         dispatch_count_cb.fetch_add(1, Ordering::SeqCst);
         let hb = crate::pump::PumpMsg::Heartbeat(crate::pump::HeartbeatMsg {
             mcu_id: 0,
@@ -506,7 +508,7 @@ fn shutdown_unblocks_dispatch_waiting_on_full_pump_data_channel() {
 
     let (dispatch_entered_tx, dispatch_entered_rx) = crossbeam_channel::bounded(1);
     let blocked_data_tx = data_tx.clone();
-    let dispatch = FnSink(move |_seg: &ShapedSegment| {
+    let dispatch = FnSink(move |_seg: &ContinuousSegment| {
         let _ = dispatch_entered_tx.try_send(());
         blocked_data_tx
             .send(())
@@ -566,9 +568,9 @@ fn shutdown_unblocks_dispatch_waiting_on_full_pump_data_channel() {
 
 #[test]
 fn shutdown_does_not_abort_on_detached_ethercat_weak() {
-    use runtime::piece_ring::PieceEntry;
     use std::collections::HashMap;
     use std::time::Duration;
+    use trajectory::{ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm};
 
     use crate::pump::{EnqueueMsg, EtherCatRing, PumpCallbacks, PumpMsg, WireSink, run_pump};
     use crate::types::AxisKey;
@@ -633,14 +635,38 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
         })
         .expect("spawn test pump thread");
 
-    let pieces_to_enqueue = vec![(
-        PieceEntry {
-            start_time: 1_000_000,
-            duration: 0.001,
-            ..PieceEntry::zeroed()
-        },
-        1.0_f64,
-    )];
+    const SPAN_FREQ_HZ: f64 = 1.0e6;
+    const SPAN_T_START: f64 = 1.0;
+    const SPAN_T_END: f64 = 1.001;
+    let signal = MotorSpan::try_new(
+        std::sync::Arc::from([MotorGroup::Independent(MotorTerm {
+            source_axis: 0,
+            axis: ContinuousAxis::Hold {
+                position: 0.0,
+                t_start: SPAN_T_START,
+                t_end: SPAN_T_END,
+            },
+            scale: 1.0,
+        })]),
+        SPAN_T_START,
+        SPAN_T_END,
+        0,
+        u32::MAX,
+        true,
+    )
+    .expect("a hold motor span is dispatchable");
+    let spans_to_enqueue = vec![
+        ClockedMotorSpan::try_new(
+            Arc::new(signal),
+            SPAN_T_START,
+            SPAN_T_END,
+            SPAN_T_START,
+            SPAN_T_END,
+            SPAN_T_START * SPAN_FREQ_HZ,
+            SPAN_FREQ_HZ,
+        )
+        .expect("the projected view spans at least one clock"),
+    ];
     data_tx
         .send(EnqueueMsg {
             epoch_freq: None,
@@ -648,7 +674,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
                 mcu_id: EC_MCU_ID,
                 axis: 0,
             },
-            pieces: pieces_to_enqueue,
+            spans: spans_to_enqueue,
             epoch: motion_core::anchor::StreamEpoch::Continuation,
             lead_secs: 0.0,
             source_line: u32::MAX,

@@ -1,7 +1,7 @@
 use crate::lock_ext::LockExt;
 use std::sync::{Arc, Mutex};
 
-use runtime::piece_ring::PieceEntry;
+use trajectory::ClockedMotorSpan;
 
 use host_rt::passthrough_queue::PassthroughRouter;
 
@@ -14,22 +14,39 @@ use crate::types::AxisKey;
 
 const FREQ: f64 = 180_000_000.0;
 
-fn make_linear_piece(
-    start_time: u64,
-    duration_secs: f32,
-    pos_start: f32,
-    pos_end: f32,
-) -> PieceEntry {
-    let mut coeffs = [0.0_f32; runtime::piece_ring::MAX_PIECE_COEFFS];
-    coeffs[0] = (pos_start + pos_end) / 2.0;
-    coeffs[1] = (pos_end - pos_start) / 2.0;
-    PieceEntry {
-        start_time,
-        coeffs,
-        duration: duration_secs,
-        motor_mask: 0,
-        coeff_count: 2,
-        ..PieceEntry::zeroed()
+/// A recorded main-trajectory ramp, resolved to a clocked view once the MCU
+/// frequency and the host anchor of the recording endpoint are known.
+struct LinearMove {
+    start_clock: u64,
+    duration_secs: f64,
+    pos_start: f64,
+    pos_end: f64,
+}
+
+impl LinearMove {
+    fn clocked(&self, freq: f64, start_host: f64) -> ClockedMotorSpan {
+        crate::motion_history::tests::linear_view(
+            self.start_clock,
+            self.duration_secs,
+            self.pos_start,
+            self.pos_end,
+            freq,
+            start_host,
+        )
+    }
+}
+
+fn make_linear_move(
+    start_clock: u64,
+    duration_secs: f64,
+    pos_start: f64,
+    pos_end: f64,
+) -> LinearMove {
+    LinearMove {
+        start_clock,
+        duration_secs,
+        pos_start,
+        pos_end,
     }
 }
 
@@ -65,11 +82,13 @@ fn record_synced(
     store: &mut HistoryStore,
     router: &Arc<Mutex<PassthroughRouter>>,
     key: AxisKey,
-    e: &PieceEntry,
+    mv: &LinearMove,
     freq: f64,
 ) {
-    let host = host_of(router, key.mcu_id, e.start_time);
-    store.record(key, e, freq, host);
+    let host = host_of(router, key.mcu_id, mv.start_clock);
+    store
+        .record(key, mv.clocked(freq, host))
+        .expect("record must accept a view");
 }
 
 #[test]
@@ -80,11 +99,11 @@ fn same_mcu_trip_clock_exact_reconstruction() {
     let router = router_with_clock(MCU_ID, FREQ_F64);
 
     let piece_start: u64 = 1_000_000;
-    let duration_secs: f32 = 0.025;
+    let duration_secs = 0.025_f64;
     #[allow(clippy::cast_possible_truncation)]
-    let duration_ticks = (duration_secs as f64 * FREQ_F64) as u64;
+    let duration_ticks = (duration_secs * FREQ_F64) as u64;
 
-    let piece = make_linear_piece(piece_start, duration_secs, 0.0, 50.0);
+    let piece = make_linear_move(piece_start, duration_secs, 0.0, 50.0);
 
     let key = AxisKey {
         mcu_id: MCU_ID,
@@ -120,7 +139,7 @@ fn trip_at_piece_start_returns_start_position() {
     let router = router_with_clock(MCU_ID, FREQ_F64);
 
     let piece_start: u64 = 5_000_000_000;
-    let piece = make_linear_piece(piece_start, 0.025, 10.0, 30.0);
+    let piece = make_linear_move(piece_start, 0.025, 10.0, 30.0);
 
     let key = AxisKey {
         mcu_id: MCU_ID,
@@ -153,8 +172,8 @@ fn trip_outside_trajectory_window_holds_last_position() {
     let router = router_with_clock(MCU_ID, FREQ_F64);
 
     let piece_start: u64 = 1_000_000;
-    let duration_secs: f32 = 0.025;
-    let piece = make_linear_piece(piece_start, duration_secs, 0.0, 10.0);
+    let duration_secs = 0.025_f64;
+    let piece = make_linear_move(piece_start, duration_secs, 0.0, 10.0);
 
     let key = AxisKey {
         mcu_id: MCU_ID,
@@ -164,7 +183,7 @@ fn trip_outside_trajectory_window_holds_last_position() {
     record_synced(&mut store, &router, key, &piece, FREQ);
 
     #[allow(clippy::cast_possible_truncation)]
-    let way_after = piece_start + (duration_secs as f64 * FREQ_F64) as u64 + 9_999_999;
+    let way_after = piece_start + (duration_secs * FREQ_F64) as u64 + 9_999_999;
     let result = reconstruct_axis_position(
         MCU_ID,
         way_after,
@@ -189,7 +208,7 @@ fn trip_before_the_first_recorded_piece_clamps_to_run_start() {
     let router = router_with_clock(MCU_ID, FREQ_F64);
 
     let piece_start: u64 = 1_000_000_000;
-    let piece = make_linear_piece(piece_start, 0.025, 0.0, 10.0);
+    let piece = make_linear_move(piece_start, 0.025, 0.0, 10.0);
 
     let key = AxisKey {
         mcu_id: MCU_ID,
@@ -234,7 +253,7 @@ fn lane_without_a_run_start_reconstructs_from_history() {
         &mut store,
         &router,
         key,
-        &make_linear_piece(piece_start, 0.025, 0.0, 40.0),
+        &make_linear_move(piece_start, 0.025, 0.0, 40.0),
         FREQ,
     );
     let shared_store = shared(store);
@@ -292,7 +311,7 @@ fn trip_before_a_reanchor_hold_with_prior_motion_errors() {
         &mut store,
         &router,
         key,
-        &make_linear_piece(1_000_000_000, 0.025, 0.0, 10.0),
+        &make_linear_move(1_000_000_000, 0.025, 0.0, 10.0),
         FREQ,
     );
     store.drop_pieces_on_reanchor();
@@ -300,7 +319,7 @@ fn trip_before_a_reanchor_hold_with_prior_motion_errors() {
         &mut store,
         &router,
         key,
-        &make_linear_piece(3_000_000_000, 0.025, 10.0, 20.0),
+        &make_linear_move(3_000_000_000, 0.025, 10.0, 20.0),
         FREQ,
     );
 
@@ -354,15 +373,15 @@ fn multiple_pieces_trip_in_second_piece() {
 
     let router = router_with_clock(MCU_ID, FREQ_F64);
 
-    let duration_secs: f32 = 0.025;
+    let duration_secs = 0.025_f64;
     #[allow(clippy::cast_possible_truncation)]
-    let duration_ticks = (duration_secs as f64 * FREQ_F64) as u64;
+    let duration_ticks = (duration_secs * FREQ_F64) as u64;
 
     let piece1_start: u64 = 1_000_000;
     let piece2_start = piece1_start + duration_ticks;
 
-    let piece1 = make_linear_piece(piece1_start, duration_secs, 0.0, 50.0);
-    let piece2 = make_linear_piece(piece2_start, duration_secs, 50.0, 100.0);
+    let piece1 = make_linear_move(piece1_start, duration_secs, 0.0, 50.0);
+    let piece2 = make_linear_move(piece2_start, duration_secs, 50.0, 100.0);
 
     let key = AxisKey {
         mcu_id: MCU_ID,
@@ -405,7 +424,7 @@ fn trip_just_before_the_arm_window_clamps_to_run_start() {
         &mut store,
         &router,
         key,
-        &make_linear_piece(1_000_000, 0.01, 0.0, 5.0),
+        &make_linear_move(1_000_000, 0.01, 0.0, 5.0),
         FREQ,
     );
 
@@ -439,7 +458,7 @@ fn trip_a_second_before_the_arm_window_is_rejected() {
         &mut store,
         &router,
         key,
-        &make_linear_piece(1_000_000, 0.01, 0.0, 5.0),
+        &make_linear_move(1_000_000, 0.01, 0.0, 5.0),
         FREQ,
     );
 
@@ -462,40 +481,42 @@ fn trip_a_second_before_the_arm_window_is_rejected() {
 }
 
 #[test]
-fn trajectory_final_position_single_piece() {
+fn trajectory_final_position_single_span() {
     let key = AxisKey {
         mcu_id: 10,
         axis: AXIS_X as u8,
     };
-    let piece = make_linear_piece(1_000_000, 0.025, 5.0, 45.0);
+    let mv = make_linear_move(1_000_000, 0.025, 5.0, 45.0);
     let mut store = HistoryStore::default();
-    store.record(key, &piece, FREQ, 0.0);
+    store.record(key, mv.clocked(FREQ, 0.0)).expect("record");
 
     let pos =
-        trajectory_final_position(key, &shared(store)).expect("single-piece store must succeed");
+        trajectory_final_position(key, &shared(store)).expect("single-span store must succeed");
     assert!(
         (pos - 45.0).abs() < 1e-4,
-        "final position must equal piece end position 45.0, got {pos:.6}"
+        "final position must equal span end position 45.0, got {pos:.6}"
     );
 }
 
 #[test]
-fn trajectory_final_position_multi_piece_takes_last() {
+fn trajectory_final_position_multi_span_takes_last() {
     let key = AxisKey {
         mcu_id: 11,
         axis: AXIS_X as u8,
     };
-    let piece1 = make_linear_piece(1_000_000, 0.025, 0.0, 50.0);
-    let piece2 = make_linear_piece(5_500_000, 0.025, 50.0, 82.5);
+    let first = make_linear_move(1_000_000, 0.025, 0.0, 50.0);
+    let second = make_linear_move(5_500_000, 0.025, 50.0, 82.5);
     let mut store = HistoryStore::default();
-    store.record(key, &piece1, FREQ, 0.0);
-    store.record(key, &piece2, FREQ, 1.0);
+    store.record(key, first.clocked(FREQ, 0.0)).expect("record");
+    store
+        .record(key, second.clocked(FREQ, 1.0))
+        .expect("record");
 
     let pos =
-        trajectory_final_position(key, &shared(store)).expect("multi-piece store must succeed");
+        trajectory_final_position(key, &shared(store)).expect("multi-span store must succeed");
     assert!(
         (pos - 82.5).abs() < 1e-4,
-        "final position must equal last piece's end position 82.5, got {pos:.6}"
+        "final position must equal last span's end position 82.5, got {pos:.6}"
     );
 }
 
@@ -515,35 +536,24 @@ fn trajectory_final_position_missing_key_errors() {
     let msg = result.unwrap_err();
     assert!(
         msg.contains("no recorded motion") || msg.contains("no trajectory"),
-        "error must mention missing pieces, got: {msg}"
+        "error must mention missing motion, got: {msg}"
     );
 }
 
 #[test]
-fn trajectory_final_position_constant_piece() {
+fn trajectory_final_position_hold_span() {
     let key = AxisKey {
         mcu_id: 13,
         axis: AXIS_Z as u8,
     };
-    let piece = runtime::piece_ring::PieceEntry {
-        start_time: 0,
-        duration: 0.01,
-        coeff_count: 1,
-        coeffs: {
-            let mut c = [0.0_f32; runtime::piece_ring::MAX_PIECE_COEFFS];
-            c[0] = 99.0;
-            c
-        },
-        ..runtime::piece_ring::PieceEntry::zeroed()
-    };
+    let mv = make_linear_move(0, 0.01, 99.0, 99.0);
     let mut store = HistoryStore::default();
-    store.record(key, &piece, FREQ, 0.0);
+    store.record(key, mv.clocked(FREQ, 0.0)).expect("record");
 
-    let pos =
-        trajectory_final_position(key, &shared(store)).expect("constant-piece store must succeed");
+    let pos = trajectory_final_position(key, &shared(store)).expect("hold-span store must succeed");
     assert!(
         (pos - 99.0).abs() < 1e-4,
-        "constant piece endpoint must be 99.0, got {pos:.6}"
+        "hold span endpoint must be 99.0, got {pos:.6}"
     );
 }
 
@@ -636,7 +646,7 @@ mod broadcast_stop_tests {
 }
 
 mod corexy_reconstruction_tests {
-    use super::{FREQ, make_linear_piece, record_synced, router_with_clock, shared};
+    use super::{FREQ, make_linear_move, record_synced, router_with_clock, shared};
     use crate::homing::{final_cartesian_position, reconstruct_cartesian_position};
     use crate::mcu_config::{AXIS_X, AXIS_Y, AXIS_Z, McuAxisConfig};
     use crate::motion_history::HistoryStore;
@@ -679,9 +689,9 @@ mod corexy_reconstruction_tests {
         let router = router_with_clock(MCU_ID, FREQ_F64);
 
         let piece_start: u64 = 1_000_000;
-        let duration_secs: f32 = 0.025;
+        let duration_secs = 0.025_f64;
         #[allow(clippy::cast_possible_truncation)]
-        let duration_ticks = (duration_secs as f64 * FREQ_F64) as u64;
+        let duration_ticks = (duration_secs * FREQ_F64) as u64;
 
         // Pure-X homing move from (0, 40): lane A = x + y goes 40 -> 140,
         // lane B = x - y goes -40 -> 60.
@@ -690,14 +700,14 @@ mod corexy_reconstruction_tests {
             &mut store,
             &router,
             key(MCU_ID, AXIS_X),
-            &make_linear_piece(piece_start, duration_secs, 40.0, 140.0),
+            &make_linear_move(piece_start, duration_secs, 40.0, 140.0),
             FREQ,
         );
         record_synced(
             &mut store,
             &router,
             key(MCU_ID, AXIS_Y),
-            &make_linear_piece(piece_start, duration_secs, -40.0, 60.0),
+            &make_linear_move(piece_start, duration_secs, -40.0, 60.0),
             FREQ,
         );
 
@@ -714,12 +724,12 @@ mod corexy_reconstruction_tests {
                 r.set_clock_est_from_sample(h, FREQ_F64, std::time::Instant::now(), 1_000_000_000);
         }
         let z_host = super::host_of(&router, MCU_ID, piece_start);
-        store.record(
-            key(Z_MCU, AXIS_Z),
-            &make_linear_piece(piece_start, duration_secs, 5.0, 5.0),
-            FREQ,
-            z_host,
-        );
+        store
+            .record(
+                key(Z_MCU, AXIS_Z),
+                make_linear_move(piece_start, duration_secs, 5.0, 5.0).clocked(FREQ, z_host),
+            )
+            .expect("record");
 
         let trip_clock = piece_start + duration_ticks / 2;
         let cart = reconstruct_cartesian_position(
@@ -765,7 +775,7 @@ mod corexy_reconstruction_tests {
             &mut store,
             &router,
             key(Z_MCU, AXIS_Z),
-            &make_linear_piece(1_000_000, 0.025, 10.0, 0.0),
+            &make_linear_move(1_000_000, 0.025, 10.0, 0.0),
             FREQ,
         );
 
@@ -795,7 +805,7 @@ mod corexy_reconstruction_tests {
             &mut store,
             &router,
             key(MCU_ID, AXIS_X),
-            &make_linear_piece(1_000_000, 0.025, 0.0, 100.0),
+            &make_linear_move(1_000_000, 0.025, 0.0, 100.0),
             FREQ,
         );
 
@@ -837,26 +847,26 @@ mod corexy_reconstruction_tests {
     fn final_position_inverts_both_motor_lanes() {
         const MCU_ID: u32 = 22;
         let mut store = HistoryStore::default();
-        store.record(
-            key(MCU_ID, AXIS_X),
-            &make_linear_piece(1_000_000, 0.025, 0.0, 300.0),
-            FREQ,
-            0.0,
-        );
-        store.record(
-            key(MCU_ID, AXIS_Y),
-            &make_linear_piece(1_000_000, 0.025, 0.0, 100.0),
-            FREQ,
-            0.0,
-        );
+        store
+            .record(
+                key(MCU_ID, AXIS_X),
+                make_linear_move(1_000_000, 0.025, 0.0, 300.0).clocked(FREQ, 0.0),
+            )
+            .expect("record");
+        store
+            .record(
+                key(MCU_ID, AXIS_Y),
+                make_linear_move(1_000_000, 0.025, 0.0, 100.0).clocked(FREQ, 0.0),
+            )
+            .expect("record");
 
         const Z_MCU: u32 = 122;
-        store.record(
-            key(Z_MCU, AXIS_Z),
-            &make_linear_piece(1_000_000, 0.025, 2.0, 2.0),
-            FREQ,
-            0.0,
-        );
+        store
+            .record(
+                key(Z_MCU, AXIS_Z),
+                make_linear_move(1_000_000, 0.025, 2.0, 2.0).clocked(FREQ, 0.0),
+            )
+            .expect("record");
 
         let cart = final_cartesian_position(&[corexy_cfg(MCU_ID), z_cfg(Z_MCU)], &shared(store))
             .expect("final corexy position must succeed");
@@ -892,7 +902,6 @@ mod stepcompress_reconcile_tests {
             microstep_distance: vec![MICROSTEP, MICROSTEP],
             invert_dir: vec![false, true],
             stepper_oids: vec![11, 12],
-            stepcompress_sample_rate: 20_000.0,
             move_queue_slots: 128,
             step_pulse_seconds: vec![2e-6, 2e-6],
             stepcompress_encoders: vec![StepcompressEncoder::HighPrecision; 2],

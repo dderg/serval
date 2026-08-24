@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use host_rt::passthrough_queue::PassthroughRouter;
-use nurbs::chebyshev::monomial_tau_to_chebyshev;
-use runtime::piece_ring::{MAX_PIECE_COEFFS, PieceEntry};
+use nurbs::ScalarNurbs;
+use trajectory::{ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm};
 
-use crate::motion_history::{HISTORY_CAPACITY, HistoryError, HistoryPiece, HistoryStore};
+use crate::motion_history::{HISTORY_CAPACITY, HistoryError, HistoryStore};
 use crate::types::AxisKey;
 
 fn stub_router_two_mcus() -> PassthroughRouter {
@@ -45,67 +45,136 @@ fn key() -> AxisKey {
     AxisKey { mcu_id: 7, axis: 2 }
 }
 
-fn entry(start_time: u64, duration: f32, bernstein_cubic: [f32; 4]) -> PieceEntry {
-    let [b0, b1, b2, b3] = bernstein_cubic.map(f64::from);
-    let d = f64::from(duration);
-    let mono = if d > 0.0 {
-        [
-            b0,
-            3.0 * (b1 - b0) / d,
-            3.0 * (b2 - 2.0 * b1 + b0) / (d * d),
-            (b3 - 3.0 * b2 + 3.0 * b1 - b0) / (d * d * d),
-        ]
-    } else {
-        [b0, 0.0, 0.0, 0.0]
-    };
-    let cheb = monomial_tau_to_chebyshev(&mono, d);
-    let mut coeffs = [0.0_f32; MAX_PIECE_COEFFS];
-    for (dst, &src) in coeffs.iter_mut().zip(cheb.iter()) {
-        *dst = src as f32;
-    }
-    PieceEntry {
-        start_time,
-        duration,
-        motor_mask: 0,
-        coeff_count: cheb.len() as u8,
-        coeffs,
-        ..PieceEntry::zeroed()
-    }
+/// A clamped Bézier over `[t_start, t_end]`: `control_points.len() - 1` is the
+/// degree, so two points give the linear ramp and four the cubic used by the
+/// derivative tests.
+pub(crate) fn spline_signal(t_start: f64, t_end: f64, control_points: Vec<f64>) -> MotorSpan {
+    let degree = control_points.len() - 1;
+    let mut knots = vec![t_start; degree + 1];
+    knots.extend(std::iter::repeat_n(t_end, degree + 1));
+    let curve = Arc::new(
+        ScalarNurbs::try_new(degree as u8, knots, control_points)
+            .expect("clamped Bézier must construct"),
+    );
+    MotorSpan::try_new(
+        vec![MotorGroup::Spline {
+            curve,
+            summed_scale: 1.0,
+        }]
+        .into(),
+        t_start,
+        t_end,
+        1,
+        0,
+        false,
+    )
+    .expect("spline motor span must construct")
 }
 
-fn linear(start_time: u64, duration: f32, p0: f32, p1: f32) -> PieceEntry {
-    let mut coeffs = [0.0_f32; MAX_PIECE_COEFFS];
-    coeffs[0] = (p0 + p1) / 2.0;
-    coeffs[1] = (p1 - p0) / 2.0;
-    PieceEntry {
-        start_time,
-        duration,
-        motor_mask: 0,
-        coeff_count: 2,
-        coeffs,
-        ..PieceEntry::zeroed()
-    }
+pub(crate) fn hold_signal(t_start: f64, t_end: f64, position: f64) -> MotorSpan {
+    MotorSpan::try_new(
+        vec![MotorGroup::Independent(MotorTerm {
+            source_axis: 0,
+            axis: ContinuousAxis::Hold {
+                position,
+                t_start,
+                t_end,
+            },
+            scale: 1.0,
+        })]
+        .into(),
+        t_start,
+        t_end,
+        1,
+        0,
+        true,
+    )
+    .expect("hold motor span must construct")
+}
+
+pub(crate) fn clocked(
+    signal: MotorSpan,
+    start_clock_exact: f64,
+    start_host: f64,
+    freq_hz: f64,
+) -> ClockedMotorSpan {
+    let duration = signal.t_end - signal.t_start;
+    let (stream_t_start, stream_t_end) = (signal.t_start, signal.t_end);
+    ClockedMotorSpan::try_new(
+        Arc::new(signal),
+        stream_t_start,
+        stream_t_end,
+        start_host,
+        start_host + duration,
+        start_clock_exact,
+        freq_hz,
+    )
+    .expect("clocked view must construct")
+}
+
+/// A ramp from `p0` to `p1`; an unchanged position is an explicit hold, which
+/// is what makes it eligible for the retained-rest fallbacks.
+pub(crate) fn linear_view(
+    start_clock: u64,
+    duration_secs: f64,
+    p0: f64,
+    p1: f64,
+    freq_hz: f64,
+    start_host: f64,
+) -> ClockedMotorSpan {
+    let t_start = start_clock as f64 / freq_hz;
+    let t_end = t_start + duration_secs;
+    let signal = if p0.to_bits() == p1.to_bits() {
+        hold_signal(t_start, t_end, p0)
+    } else {
+        spline_signal(t_start, t_end, vec![p0, p1])
+    };
+    clocked(signal, start_clock as f64, start_host, freq_hz)
 }
 
 fn h(clock: u64) -> f64 {
     clock as f64 / f64::from(FREQ)
 }
 
-fn rec(store: &mut HistoryStore, key: AxisKey, e: PieceEntry) {
-    let host = h(e.start_time);
-    store.record(key, &e, FREQ_HZ, host);
+fn linear(start_clock: u64, duration_secs: f64, p0: f64, p1: f64) -> ClockedMotorSpan {
+    linear_view(start_clock, duration_secs, p0, p1, FREQ_HZ, h(start_clock))
+}
+
+fn linear_at_host(
+    start_clock: u64,
+    duration_secs: f64,
+    p0: f64,
+    p1: f64,
+    start_host: f64,
+) -> ClockedMotorSpan {
+    linear_view(start_clock, duration_secs, p0, p1, FREQ_HZ, start_host)
+}
+
+fn rec(store: &mut HistoryStore, key: AxisKey, view: ClockedMotorSpan) {
+    store.record(key, view).expect("record must accept a view");
 }
 
 #[test]
-fn end_clock_matches_isr_formula() {
-    let e = entry(1_000, 0.0123, [0.0; 4]);
-    let hp = HistoryPiece::from_entry(&e, FREQ_HZ, h(1_000));
-    assert_eq!(hp.end_clock, e.end_time(FREQ as f32));
-    assert_eq!(hp.start_clock, 1_000);
+fn endpoint_clocks_derive_from_the_exact_fractional_anchor() {
+    let duration = 0.0123;
+    let start_clock_exact = 1_000.4;
+    let view = clocked(
+        spline_signal(0.001, 0.001 + duration, vec![0.0, 1.0]),
+        start_clock_exact,
+        0.001,
+        FREQ_HZ,
+    );
+    assert_eq!(view.start_clock, 1_000);
+    assert_eq!(
+        view.end_clock,
+        (start_clock_exact + duration * FREQ_HZ).round() as u64,
+        "the end clock must round the exact anchor, not the rounded start"
+    );
+    assert_eq!(view.clock_at_stream_time(0.001), Ok(1_000));
 }
 
 #[test]
-fn linear_piece_position_velocity_acceleration() {
+fn linear_span_position_velocity_acceleration() {
     let mut store = HistoryStore::default();
     rec(&mut store, key(), linear(0, 1.0, 0.0, 10.0));
     let mid = h(FREQ as u64 / 2);
@@ -118,9 +187,18 @@ fn linear_piece_position_velocity_acceleration() {
 }
 
 #[test]
-fn quadratic_piece_derivatives() {
+fn cubic_span_derivatives() {
     let mut store = HistoryStore::default();
-    rec(&mut store, key(), entry(0, 1.0, [0.0, 0.0, 5.0, 15.0]));
+    rec(
+        &mut store,
+        key(),
+        clocked(
+            spline_signal(0.0, 1.0, vec![0.0, 0.0, 5.0, 15.0]),
+            0.0,
+            0.0,
+            FREQ_HZ,
+        ),
+    );
     let mid = h(FREQ as u64 / 2);
     let st = store
         .state_at_host(key(), mid, Some(f64::INFINITY))
@@ -131,10 +209,11 @@ fn quadratic_piece_derivatives() {
 }
 
 #[test]
-fn gap_between_pieces_holds_previous_endpoint() {
+fn gap_between_spans_holds_previous_endpoint() {
     let mut store = HistoryStore::default();
-    rec(&mut store, key(), linear(0, 0.001, 0.0, 10.0));
-    let gap_start = HistoryPiece::from_entry(&linear(0, 0.001, 0.0, 10.0), FREQ_HZ, 0.0).end_clock;
+    let first = linear(0, 0.001, 0.0, 10.0);
+    let gap_start = first.end_clock;
+    rec(&mut store, key(), first);
     rec(
         &mut store,
         key(),
@@ -149,7 +228,7 @@ fn gap_between_pieces_holds_previous_endpoint() {
 }
 
 #[test]
-fn after_last_piece_holds_when_not_future() {
+fn after_last_span_holds_when_not_future() {
     let mut store = HistoryStore::default();
     rec(&mut store, key(), linear(0, 0.001, 0.0, 10.0));
     let end = store
@@ -173,7 +252,7 @@ fn hold_in_the_future_is_an_error() {
 }
 
 #[test]
-fn inside_committed_future_piece_evaluates() {
+fn inside_committed_future_span_evaluates() {
     let mut store = HistoryStore::default();
     rec(&mut store, key(), linear(0, 1.0, 0.0, 10.0));
     let st = store
@@ -183,7 +262,7 @@ fn inside_committed_future_piece_evaluates() {
 }
 
 #[test]
-fn first_recorded_piece_exposes_initial_hold_state() {
+fn first_recorded_span_exposes_initial_hold_state() {
     let mut store = HistoryStore::default();
     rec(&mut store, key(), linear(1_000_000, 0.001, 4.0, 10.0));
     let held = store.initial_hold_state(key()).unwrap();
@@ -235,7 +314,11 @@ fn unchanged_rebase_preserves_the_pre_rebase_hold() {
     let mut store = HistoryStore::default();
     store.rebase_axis(key(), 1.0, 0.0);
     store.rebase_axis(key(), 2.0, 0.0);
-    store.record(key(), &linear(3_000_000, 1.0, 0.0, 0.0), FREQ_HZ, 3.0);
+    rec(
+        &mut store,
+        key(),
+        linear_at_host(3_000_000, 1.0, 0.0, 0.0, 3.0),
+    );
 
     let held = store.state_at_host(key(), 1.5, Some(4.0)).unwrap();
 
@@ -249,8 +332,16 @@ fn unchanged_rebase_does_not_hide_intervening_motion() {
     let mut store = HistoryStore::default();
     store.rebase_axis(key(), 1.0, 0.0);
     store.rebase_axis(key(), 2.0, 0.0);
-    store.record(key(), &linear(2_000_000, 1.0, 0.0, 10.0), FREQ_HZ, 2.0);
-    store.record(key(), &linear(3_000_000, 1.0, 10.0, 0.0), FREQ_HZ, 3.0);
+    rec(
+        &mut store,
+        key(),
+        linear_at_host(2_000_000, 1.0, 0.0, 10.0, 2.0),
+    );
+    rec(
+        &mut store,
+        key(),
+        linear_at_host(3_000_000, 1.0, 10.0, 0.0, 3.0),
+    );
     store.rebase_axis(key(), 5.0, 0.0);
 
     let moving = store.state_at_host(key(), 2.5, Some(6.0)).unwrap();
@@ -266,8 +357,16 @@ fn unchanged_rebase_does_not_hide_intervening_motion() {
 fn unchanged_rebase_invalidates_overlapping_and_future_motion() {
     let mut store = HistoryStore::default();
     store.rebase_axis(key(), 1.0, 0.0);
-    store.record(key(), &linear(2_000_000, 2.0, 0.0, 10.0), FREQ_HZ, 2.0);
-    store.record(key(), &linear(5_000_000, 1.0, 10.0, 0.0), FREQ_HZ, 5.0);
+    rec(
+        &mut store,
+        key(),
+        linear_at_host(2_000_000, 2.0, 0.0, 10.0, 2.0),
+    );
+    rec(
+        &mut store,
+        key(),
+        linear_at_host(5_000_000, 1.0, 10.0, 0.0, 5.0),
+    );
     store.rebase_axis(key(), 3.0, 10.0);
 
     let before = store.state_at_host(key(), 2.5, Some(6.0)).unwrap();
@@ -287,8 +386,8 @@ fn unchanged_rebase_invalidates_overlapping_and_future_motion() {
 #[test]
 fn eviction_keeps_capacity_and_reports_true_window() {
     let mut store = HistoryStore::default();
-    let dur = 0.001_f32;
-    let dur_ticks = (dur * FREQ as f32) as u64;
+    let dur = 0.001;
+    let dur_ticks = (dur * FREQ_HZ) as u64;
     for i in 0..(HISTORY_CAPACITY as u64 + 10) {
         rec(&mut store, key(), linear(i * dur_ticks, dur, 0.0, 1.0));
     }
@@ -349,8 +448,8 @@ fn eviction_does_not_stretch_the_pre_ring_hold() {
     let mut store = HistoryStore::default();
     rec(&mut store, key(), linear(0, 1.0, 0.0, 10.0));
     store.drop_pieces_on_reanchor();
-    let dur = 0.001_f32;
-    let dur_ticks = (dur * FREQ as f32) as u64;
+    let dur = 0.001;
+    let dur_ticks = (dur * FREQ_HZ) as u64;
     let ring_start = 2_000_000_000_u64;
     for i in 0..(HISTORY_CAPACITY as u64 + 10) {
         rec(
@@ -378,7 +477,7 @@ fn eviction_does_not_stretch_the_pre_ring_hold() {
 #[test]
 fn empty_ring_query_inside_dropped_motion_fails_loud() {
     let mut store = HistoryStore::default();
-    // Moving piece over [0,1]s, 0->10. At host_t=0.5 the axis is mid-motion at
+    // Moving span over [0,1]s, 0->10. At host_t=0.5 the axis is mid-motion at
     // 5.0 and has NOT reached the endpoint 10.0 — that time is dropped motion.
     rec(&mut store, key(), linear(0, 1.0, 0.0, 10.0));
     store.drop_pieces_on_reanchor();
@@ -404,7 +503,7 @@ fn empty_ring_query_inside_dropped_motion_fails_loud() {
 #[test]
 fn trailing_rest_run_extends_hold_coverage_before_endpoint() {
     let mut store = HistoryStore::default();
-    // Move 0->10 over [0,1]s, then hold at 10 over [1,2]s (a rest piece).
+    // Move 0->10 over [0,1]s, then hold at 10 over [1,2]s (an explicit hold).
     // The endpoint host is 2.0, but the axis was provably at 10.0 from 1.0 on.
     rec(&mut store, key(), linear(0, 1.0, 0.0, 10.0));
     let rest_start = FREQ as u64; // 1.0s in clock ticks
@@ -437,7 +536,22 @@ fn trailing_rest_run_extends_hold_coverage_before_endpoint() {
 }
 
 #[test]
-fn rebase_to_earlier_clock_accepts_post_rewind_pieces() {
+fn a_numerically_small_move_is_not_hold_merge_eligible() {
+    let mut store = HistoryStore::default();
+    rec(&mut store, key(), linear(0, 1.0, 10.0, 10.000_000_1));
+    store.drop_pieces_on_reanchor();
+
+    let err = store
+        .state_at_host(key(), 0.5, Some(f64::INFINITY))
+        .unwrap_err();
+    assert!(
+        matches!(err, HistoryError::BeforeRetainedWindow { .. }),
+        "a tiny analytic move is motion, not a provable rest: {err:?}"
+    );
+}
+
+#[test]
+fn rebase_to_earlier_clock_accepts_post_rewind_spans() {
     let mut store = HistoryStore::default();
     rec(&mut store, key(), linear(3_000_000, 1.0, 0.0, 5.0));
     let held = store.final_position(key()).unwrap();
@@ -449,8 +563,8 @@ fn rebase_to_earlier_clock_accepts_post_rewind_pieces() {
 #[test]
 fn backward_host_supersedes_stale_tail() {
     let mut store = HistoryStore::default();
-    store.record(key(), &linear(0, 0.5, 0.0, 10.0), FREQ_HZ, 1.0);
-    store.record(key(), &linear(0, 0.5, 50.0, 60.0), FREQ_HZ, 0.2);
+    rec(&mut store, key(), linear_at_host(0, 0.5, 0.0, 10.0, 1.0));
+    rec(&mut store, key(), linear_at_host(0, 0.5, 50.0, 60.0, 0.2));
     let st = store
         .state_at_host(key(), 0.4, Some(f64::INFINITY))
         .unwrap();
@@ -577,9 +691,9 @@ fn assemble_cartesian_state_corexy_omits_xy_when_one_motor_missing() {
 
 #[test]
 fn corexy_history_round_trip_reproduces_bench_symptom() {
-    // Reproduces the trident-bench beacon scan: motor0/motor1 pieces
-    // recorded through the ring (as commit_sent_bundle does) must invert to
-    // the commanded cartesian XY, not the raw CoreXY A/B sum/difference that
+    // Reproduces the trident-bench beacon scan: motor0/motor1 spans recorded
+    // through the ring (as commit_sent_bundle does) must invert to the
+    // commanded cartesian XY, not the raw CoreXY A/B sum/difference that
     // motion_state_at_clock used to leak straight through.
     use crate::kinematics::KinematicsModule;
     use crate::motion_history::assemble_cartesian_state;
@@ -593,22 +707,12 @@ fn corexy_history_round_trip_reproduces_bench_symptom() {
     rec(
         &mut store,
         axis_key(0),
-        linear(
-            0,
-            1.0,
-            (cart_x0 + cart_y0) as f32,
-            (cart_x1 + cart_y1) as f32,
-        ),
+        linear(0, 1.0, cart_x0 + cart_y0, cart_x1 + cart_y1),
     );
     rec(
         &mut store,
         axis_key(1),
-        linear(
-            0,
-            1.0,
-            (cart_x0 - cart_y0) as f32,
-            (cart_x1 - cart_y1) as f32,
-        ),
+        linear(0, 1.0, cart_x0 - cart_y0, cart_x1 - cart_y1),
     );
 
     let mid = h(FREQ as u64 / 2);
@@ -641,7 +745,7 @@ fn rebase_after_probe_trip_round_trips_through_cartesian_inversion() {
     // ends in toolhead.set_position(x, y, z), which rebases the retained
     // history to the trip's stop position. Before reanchor_axis_targets
     // existed, that rebase stored raw cartesian x/y under axis 0/1 — the
-    // same slots live CoreXY pieces store in motor frame — so querying
+    // same slots live CoreXY spans store in motor frame — so querying
     // through assemble_cartesian_state's kinematics inversion afterward
     // double-transformed an already-correct position into garbage (the
     // bench's "probe at 197.500,-47.500" from a real (150,245) point).
@@ -723,14 +827,35 @@ fn state_at_clock_matches_state_at_host_when_mapping_is_exact() {
 }
 
 #[test]
+fn state_at_clock_inverts_the_fractional_anchor_exactly() {
+    // A view whose start clock is not an integer tick: the rounded start clock
+    // is 3, but stream time at clock 3 must come back through 2.5, not 3.
+    let mut store = HistoryStore::default();
+    let signal = spline_signal(0.0, 1.0, vec![0.0, 10.0]);
+    let view = clocked(signal, 2.5, 0.0, FREQ_HZ);
+    assert_eq!(view.start_clock, 3);
+    store.record(key(), view).expect("record");
+
+    let clock = 2 + FREQ as u64 / 2;
+    let want = (clock as f64 - 2.5) / FREQ_HZ * 10.0;
+    let st = store
+        .state_at_clock(key(), clock, h(clock), Some(f64::INFINITY))
+        .unwrap();
+    assert!(
+        (st.position - want).abs() < 1e-12,
+        "clock query must invert the exact fractional anchor: {} vs {want}",
+        st.position
+    );
+}
+
+#[test]
 fn state_at_clock_is_immune_to_host_mapping_skew() {
     let mut store = HistoryStore::default();
-    // The piece was keyed with a host time 40 ms later than its clock
+    // The span was keyed with a host time 40 ms later than its clock
     // implies — the sync estimate drifted between send and query. 10 mm/s
     // over 40 ms is a 0.4 mm bias in the host-domain answer.
     let skew_s = 0.040;
-    let e = linear(0, 1.0, 0.0, 10.0);
-    store.record(key(), &e, FREQ_HZ, skew_s);
+    rec(&mut store, key(), linear_at_host(0, 1.0, 0.0, 10.0, skew_s));
     let clock = FREQ as u64 / 2;
     let by_clock = store
         .state_at_clock(key(), clock, h(clock), Some(f64::INFINITY))
@@ -751,7 +876,7 @@ fn state_at_clock_is_immune_to_host_mapping_skew() {
 }
 
 #[test]
-fn state_at_clock_holds_endpoint_in_gap_after_piece() {
+fn state_at_clock_holds_endpoint_in_gap_after_span() {
     let mut store = HistoryStore::default();
     rec(&mut store, key(), linear(0, 1.0, 0.0, 10.0));
     let after_end = 2 * FREQ as u64;

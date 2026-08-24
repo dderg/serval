@@ -14,7 +14,7 @@ mod profile;
 mod ride;
 mod scurve;
 
-pub use profile::StraightPhase;
+pub use profile::{PhaseSolveError, StraightPhase};
 
 use disk::Kinematics;
 
@@ -36,11 +36,6 @@ pub struct MoveVelocity {
     pub exit_v: f64,
     pub peak_v: f64,
     pub samples: Vec<VelSample>,
-    /// Closed-form jerk phases in move-local time/arc-length. Present for
-    /// straight moves (the lowering emits one exact cubic per phase) and for
-    /// curved moves planned without a jerk limit (the lowering fits axis
-    /// positions against the phases' exact scalar profile instead of quintic
-    /// windows over `samples`). Empty for finite-jerk curved moves.
     pub phases: Vec<StraightPhase>,
     pub accel: f64,
     pub jerk: f64,
@@ -103,6 +98,10 @@ impl BoundaryState {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VelocityError {
+    FiniteJerkUnsupported {
+        line_no: u32,
+        jerk: f64,
+    },
     Inconsistent {
         line_no: u32,
     },
@@ -136,6 +135,20 @@ pub enum VelocityError {
     },
     InvalidConfig,
 }
+
+impl std::fmt::Display for VelocityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FiniteJerkUnsupported { line_no, jerk } => write!(
+                f,
+                "line {line_no}: finite max_jerk {jerk} is not supported by the continuous trajectory pipeline; set [printer] max_jerk: 0"
+            ),
+            other => write!(f, "{other:?}"),
+        }
+    }
+}
+
+impl std::error::Error for VelocityError {}
 
 const REST_ANCHOR_ACCEL_EPS: f64 = 1e-3;
 
@@ -213,6 +226,12 @@ pub fn plan_velocity_stops(
 
     let n = moves.len();
     assert_eq!(stop_before.len(), n, "one stop flag per move");
+    if let Some(m) = moves.iter().find(|m| m.limits.max_jerk_mm_s3.is_finite()) {
+        return Err(VelocityError::FiniteJerkUnsupported {
+            line_no: m.source.start_line,
+            jerk: m.limits.max_jerk_mm_s3,
+        });
+    }
     if n == 0 {
         return Ok(VelocityProfile {
             moves: Vec::new(),
@@ -582,14 +601,11 @@ fn reconstruct_runs(
             }
             let peak_v = samples.iter().fold(0.0_f64, |acc, p| acc.max(p.v));
             let phases = reconstructed_phases[idx].clone();
-            // A straight move's phases give the exact traversal time; the sampled
-            // estimate mistimes the jerk-from-rest at v = 0 (the singularity the
-            // closed-form profile avoids), so prefer the phases when present.
-            report.traversal_time_s += if phases.is_empty() {
-                traversal_time(&samples)
-            } else {
-                phases.iter().map(|p| p.dt).sum()
-            };
+            assert!(
+                !phases.is_empty(),
+                "line {line_no}: non-zero-duration velocity move has no phases"
+            );
+            report.traversal_time_s += phases.iter().map(|p| p.dt).sum::<f64>();
 
             let disk_only = disk::disk_reach_v(kin, entry_v, kin.length, tol)
                 .ok_or(VelocityError::Diverged { line_no })?;
@@ -642,6 +658,7 @@ fn first_negative_velocity(samples: &[VelSample]) -> Option<f64> {
         .find(|&v| v < -NEGATIVE_VELOCITY_TOL_MM_S)
 }
 
+#[cfg(test)]
 fn traversal_time(samples: &[VelSample]) -> f64 {
     samples
         .windows(2)

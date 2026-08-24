@@ -16,8 +16,8 @@ fn voron_seam_repeat_sweep() {
     let src = std::fs::read_to_string(&path).expect("read gcode");
 
     // Faithful to the bench host StreamConfig (bridge.rs): default harness
-    // already matches integration_tol=1e-4, buffer=512, jerk=100k; the only
-    // deltas are the printer.cfg scv and the host fit_tolerance default.
+    // already matches integration_tol=1e-4, buffer=512, unlimited jerk; the
+    // only deltas are the printer.cfg scv and the host fit_tolerance default.
     let mut cfg = default_stream_config();
     cfg.limits.corner_deviation_mm = geometry::corner_deviation_from_scv(
         std::env::var("VORON_SCV")

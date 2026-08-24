@@ -34,5 +34,5 @@ def test_separate_jogs_do_not_accumulate_startup_delay(sim_world):
 
     assert len(decisions) >= 5, world.events_text()[-4000:]
     leads = [event["lead_secs"] for event in decisions[-5:]]
-    assert leads == pytest.approx([0.25] * 5, abs=1e-6)
+    assert leads == pytest.approx([0.525] * 5, abs=1e-6)
     assert world.shutdown_line() is None, world.log_tail()

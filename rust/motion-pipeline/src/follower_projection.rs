@@ -1,14 +1,19 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use nurbs::ScalarNurbs;
-use nurbs::bezier::bezier_pieces_to_nurbs;
-use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
+use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
+use trajectory::{
+    AxisChainSet, ChainStage, CompiledChain, ContinuousAxis, ContinuousSegment,
+    RelativeSplinePiece, ShapedSignal,
+};
 
-use crate::lowering::follower_tol_scale;
+use crate::lowering::{FitTol, follower_tol_scale};
 use crate::shaper::{
-    AxisSignalTable, SEGMENT_TIME_EPS_S, TrackSignal, apply_derivative_gains_to_track,
-    apply_nonlinear_advance_to_track, fit_axis_from_signal,
+    AxisSignalTable, SEGMENT_TIME_EPS_S, ShiftedTrackSignal, TrackSignal, analytic_phase_boundary,
+    apply_derivative_gains_to_track, apply_nonlinear_advance_to_track, fit_axis_from_signal,
+    shaped_signal_breakpoints,
 };
 use crate::types::PostProcessError;
 
@@ -18,6 +23,16 @@ const GRID_DEDUP_EPS_S: f64 = 1e-12;
 const SPAN_MIN_LEN_MM: f64 = 1e-12;
 const SPAN_LOOKUP_SLACK_MM: f64 = 1e-6;
 const PVA_MEMO_SLOTS: usize = 64;
+const BASIS_CONVERSION_ROUNDOFF_ENVELOPE: f64 = (1_u64 << 20) as f64;
+const ODOMETER_ALIGNMENT_ULPS: f64 = (1_u64 << 12) as f64;
+const SPEED_ZERO_SLIVER_FRACTION: f64 = 1e-6;
+const COMPONENT_ZERO_PROBES: usize = 16;
+fn follower_fit_tol(fit_tol: FitTol, position_scale: f64) -> FitTol {
+    FitTol {
+        pos_mm: fit_tol.pos_mm * position_scale,
+        accel_mm_s2: fit_tol.accel_mm_s2,
+    }
+}
 
 /// Rebuild every projected-follower track from its leaders' *toolhead*
 /// motion: the kernel-convolved signal, before any trailing derivative-gain
@@ -49,12 +64,13 @@ const PVA_MEMO_SLOTS: usize = 64;
 /// track per raw segment; each is computed exactly once, which keeps every
 /// emit reading bit-identical convolution inputs.
 pub(crate) fn project_followers(
-    base: &[ShapedSegment],
-    frontier: &[ShapedSegment],
-    out: &mut [ShapedSegment],
+    base: &[ContinuousSegment],
+    frontier: &[ContinuousSegment],
+    out: &mut [ContinuousSegment],
     commit_count: usize,
     force: bool,
     chains: &AxisChainSet,
+    fit_tol: FitTol,
     states: &mut Vec<FollowerState>,
 ) -> Result<(), PostProcessError> {
     assert!(frontier.len() >= commit_count && out.len() == commit_count);
@@ -67,9 +83,20 @@ pub(crate) fn project_followers(
             ChainStage::SmoothKernel(kernel) => Some(kernel),
             ChainStage::DerivativeGains { .. } | ChainStage::NonlinearAdvance(_) => None,
         });
-        let leaders_shaped = leaders.iter().any(|&l| !chains.chains[l].is_empty());
+        let defer_linear_prefix = kernel.is_some()
+            && chain.stages.iter().all(|stage| {
+                matches!(
+                    stage,
+                    ChainStage::DerivativeGains { .. } | ChainStage::SmoothKernel(_)
+                )
+            });
+        let leaders_changed = base.iter().zip(frontier).any(|(raw, shaped)| {
+            leaders
+                .iter()
+                .any(|&leader| raw.axes[leader] != shaped.axes[leader])
+        });
         let state = &mut states[axis];
-        let projecting = leaders_shaped || state.active;
+        let projecting = leaders_changed || state.active;
         if !projecting && chain.is_empty() {
             continue;
         }
@@ -101,47 +128,171 @@ pub(crate) fn project_followers(
                     raw.t_start,
                 );
             }
-            let raw_track = &raw.axes[axis];
+            let raw_axis = &raw.axes[axis];
+            let (t_start, t_end) = projection_support(raw, &frontier[i], axis, leaders);
+            assert!(
+                t_start < t_end,
+                "follower axis {axis} has no support in segment"
+            );
+            let base_position = state.e_end.unwrap_or_else(|| axis_pva(raw_axis, t_start).0);
             let projected = if projecting {
-                let raw_start = nurbs::eval::eval(raw_track, raw.t_start);
-                let e_start = state.e_end.unwrap_or(raw_start - state.carried_deficit);
-                let (track, s_end, e_end) = {
-                    let sig =
-                        FollowerSignal::new(&frontier[i], raw, axis, leaders, &*state, e_start);
+                let (track, s_end, e_end_relative) = {
+                    let sig = FollowerSignal::new(&frontier[i], raw, axis, leaders, &*state, 0.0);
+                    let breakpoints = sig.construction_breakpoints(raw_axis);
                     let track = fit_axis_from_signal(
                         axis,
-                        raw_track,
+                        t_start,
+                        t_end,
+                        &breakpoints,
                         &sig,
-                        follower_tol_scale(&raw.followers, axis),
+                        follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5),
+                        "follower_source",
                     )?;
-                    (track, sig.s_end(), sig.eval_pva(raw.t_end).0)
+                    let e_end_relative = nurbs::eval::eval(&track.as_view(), t_end);
+                    (track, sig.s_end(), e_end_relative)
                 };
                 state.s_shaped = s_end;
-                state.e_end = Some(e_end);
-                state.carried_deficit = nurbs::eval::eval(raw_track, raw.t_end) - e_end;
+                state.e_end = Some(base_position + e_end_relative);
                 track
             } else {
-                raw_track.clone()
+                fit_continuous_axis(axis, raw_axis, base_position, t_start, t_end, fit_tol)?
             };
-            let track = apply_leading_stages(chain, axis, projected)?;
+            let track = apply_leading_stages(
+                chain,
+                axis,
+                projected,
+                follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis)),
+                defer_linear_prefix,
+            )?;
             if !track.control_points().iter().all(|v| v.is_finite()) {
                 return Err(PostProcessError::NonFiniteSample {
                     axis,
                     t: raw.t_start,
                 });
             }
-            state.projected_through_t = Some(raw.t_end);
+            let track_start = nurbs::eval::eval(&track.as_view(), t_start);
+            let output_base = state.projected_output_end.unwrap_or(base_position) - track_start;
+            state.projected_output_end =
+                Some(output_base + nurbs::eval::eval(&track.as_view(), t_end));
+            state.projected_through_t = Some(t_end);
             state.projected.push(ProjSeg {
-                t_start: raw.t_start,
-                t_end: raw.t_end,
+                t_start,
+                t_end,
+                base: output_base,
                 track,
             });
         }
-        let kernel_sig = match kernel {
+        let kernel_tracks = match kernel {
             Some(kernel) if commit_count > 0 => {
                 let first = state.projected.first().expect("cache covers commits");
                 let last = state.projected.last().expect("cache covers commits");
                 let (first_t, last_t) = (first.t_start, last.t_end);
+                let mut batch_base = first.base;
+                let supports = (0..commit_count)
+                    .map(|i| projection_support(&base[i], &frontier[i], axis, leaders))
+                    .collect::<Vec<_>>();
+                let target_start = supports.first().expect("commit_count > 0").0;
+                let target_end = supports.last().expect("commit_count > 0").1;
+                let (k_lo, k_hi) = kernel.support();
+                let need_lo = target_start - k_hi;
+                let need_hi = target_end - k_lo;
+                if need_lo < first_t && state.projected_trimmed {
+                    return Err(PostProcessError::MissingHistory { axis, t: need_lo });
+                }
+                if need_hi > last_t && !force {
+                    return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
+                }
+                let mut input_pieces = Vec::new();
+                let mut carried = 0.0;
+                let mut input_end = None;
+                for segment in &state.projected {
+                    if let Some(previous_end) = input_end {
+                        assert!(
+                            segment.t_start >= previous_end,
+                            "projected follower segments overlap"
+                        );
+                        if segment.t_start > previous_end {
+                            input_pieces.push(BezierPiece {
+                                u_start: previous_end,
+                                u_end: segment.t_start,
+                                coeffs: vec![carried],
+                            });
+                        }
+                    }
+                    let mut pieces = extract_bezier_pieces(&segment.track);
+                    for piece in &mut pieces {
+                        piece.coeffs[0] += carried;
+                    }
+                    let tail = pieces.last().expect("a projected track has pieces");
+                    carried = polynomial_pva(&tail.coeffs, tail.u_end - tail.u_start).0;
+                    input_pieces.extend(pieces);
+                    input_end = Some(segment.t_end);
+                }
+                for piece in &mut input_pieces {
+                    piece.coeffs.resize(piece.coeffs.len().max(6), 0.0);
+                }
+                let nonnegative_demand = state
+                    .spans
+                    .iter()
+                    .all(|span| span.r0 >= 0.0 && span.r1 >= 0.0);
+                if projecting {
+                    assert_piece_seams(axis, "projected input", &input_pieces);
+                    if nonnegative_demand {
+                        let correction_tol = follower_fit_tol(
+                            fit_tol,
+                            base.iter()
+                                .map(|segment| follower_tol_scale(&segment.followers, axis))
+                                .fold(1.0, f64::min),
+                        );
+                        project_monotone(
+                            axis,
+                            "projected input",
+                            &mut input_pieces,
+                            correction_tol,
+                        );
+                    }
+                }
+                let unified_input_degree = input_pieces
+                    .iter()
+                    .map(|piece| piece.degree())
+                    .max()
+                    .expect("projected follower input is empty");
+                for piece in &mut input_pieces {
+                    piece.coeffs.resize(unified_input_degree + 1, 0.0);
+                }
+                let mut kernel_input = bezier_pieces_to_nurbs(&input_pieces);
+                let input_offset = nurbs::eval::eval(&kernel_input.as_view(), target_start);
+                for piece in &mut input_pieces {
+                    piece.coeffs[0] -= input_offset;
+                }
+                kernel_input = bezier_pieces_to_nurbs(&input_pieces);
+                batch_base += input_offset;
+                let mut gained_input = chain
+                    .stages
+                    .iter()
+                    .take_while(|stage| !matches!(stage, ChainStage::SmoothKernel(_)))
+                    .any(|stage| !matches!(stage, ChainStage::SmoothKernel(_)));
+                if defer_linear_prefix {
+                    for stage in &chain.stages {
+                        if let ChainStage::DerivativeGains { k1, k2 } = stage {
+                            kernel_input = apply_derivative_gains_to_track(&kernel_input, *k1, *k2);
+                            gained_input = true;
+                        }
+                    }
+                }
+                let gained_pieces = extract_bezier_pieces(&kernel_input);
+                assert!(
+                    gained_pieces.iter().all(|piece| {
+                        [0.0, piece.u_end - piece.u_start]
+                            .into_iter()
+                            .flat_map(|tau| {
+                                let pva = polynomial_pva(&piece.coeffs, tau);
+                                [pva.0, pva.1, pva.2]
+                            })
+                            .all(f64::is_finite)
+                    }),
+                    "follower axis {axis} gained input has non-finite one-sided P/V/A"
+                );
                 let kernel_degree = kernel
                     .pieces
                     .iter()
@@ -150,7 +301,7 @@ pub(crate) fn project_followers(
                     .expect("shaper kernel has no pieces");
                 let table = Rc::new(
                     AxisSignalTable::from_tracks(
-                        state.projected.iter().map(|p| &p.track),
+                        std::iter::once(&kernel_input),
                         first_t,
                         last_t,
                         !state.projected_trimmed,
@@ -159,7 +310,11 @@ pub(crate) fn project_followers(
                     .with_piece_moments(kernel_degree),
                 );
                 let input_degree = table.max_degree();
-                let input_breaks = state.projected_breakpoints();
+                let input_breaks = gained_pieces
+                    .iter()
+                    .flat_map(|piece| [piece.u_start, piece.u_end])
+                    .collect::<Vec<_>>();
+                let shaped_breaks = shaped_signal_breakpoints(kernel, &input_breaks);
                 let eval_table = Rc::clone(&table);
                 let moment_table = Rc::clone(&table);
                 let sig = ShapedSignal::new_from_polynomial_evaluator(
@@ -171,42 +326,114 @@ pub(crate) fn project_followers(
                         moment_table.integrate_moments(lo, hi, degree, origin, moments)
                     },
                 );
-                Some((kernel, first_t, last_t, sig))
+                let tol_scale = (0..commit_count)
+                    .map(|i| follower_tol_scale(&base[i].followers, axis))
+                    .fold(1.0, f64::min);
+                let target_tol = follower_fit_tol(fit_tol, tol_scale);
+                let mut bases = Vec::with_capacity(supports.len());
+                let mut tracks: Vec<Vec<BezierPiece>> = Vec::with_capacity(supports.len());
+                for &(start, end) in &supports {
+                    let local_base = TrackSignal::eval(&sig, start);
+                    let local = ShiftedTrackSignal::new(&sig, local_base);
+                    let track = fit_axis_from_signal(
+                        axis,
+                        start,
+                        end,
+                        &shaped_breaks,
+                        &local,
+                        target_tol,
+                        "follower_kernel",
+                    )?;
+                    let mut pieces = extract_bezier_pieces(&track);
+                    if nonnegative_demand && !gained_input {
+                        project_monotone(axis, "shaped output", &mut pieces, target_tol);
+                    }
+                    bases.push(local_base);
+                    tracks.push(pieces);
+                }
+                bases[0] -= piece_run_start(&tracks[0]);
+                for i in 1..tracks.len() {
+                    bases[i] =
+                        bases[i - 1] + piece_run_end(&tracks[i - 1]) - piece_run_start(&tracks[i]);
+                }
+                for (i, pair) in tracks.windows(2).enumerate() {
+                    let t = supports[i].1;
+                    let left_piece = pair[0].last().expect("a fitted target has pieces");
+                    let right_piece = pair[1].first().expect("a fitted target has pieces");
+                    let left = polynomial_pv(&left_piece.coeffs, t - left_piece.u_start);
+                    let right = polynomial_pv(&right_piece.coeffs, t - right_piece.u_start);
+                    assert!(
+                        [left.0, left.1, right.0, right.1]
+                            .into_iter()
+                            .all(f64::is_finite)
+                            && basis_conversion_same(
+                                bases[i] + left.0,
+                                bases[i + 1] + right.0,
+                                left_piece.degree().max(right_piece.degree()),
+                                supports[i].1 - supports[i].0,
+                                supports[i + 1].1 - supports[i + 1].0,
+                            ),
+                        "follower axis {axis} target seam {i} at {t}: left {left:?} over base \
+                         {}, right {right:?} over base {}",
+                        bases[i],
+                        bases[i + 1]
+                    );
+                }
+                Some((batch_base, bases, tracks))
             }
             _ => None,
         };
+        let mut emitted_output_end = state.emitted_output_end;
+        let emit_window = (commit_count > 0).then(|| {
+            (
+                projection_support(&base[0], &frontier[0], axis, leaders).0,
+                projection_support(
+                    &base[commit_count - 1],
+                    &frontier[commit_count - 1],
+                    axis,
+                    leaders,
+                )
+                .1,
+            )
+        });
+        let mut correction: Option<(f64, f64, f64)> = None;
         for i in 0..commit_count {
             let raw = &base[i];
-            let cached = state.cached_track(raw.t_start, raw.t_end);
-            out[i].axes[axis] = match &kernel_sig {
-                None => cached.clone(),
-                Some((kernel, first_t, last_t, sig)) => {
-                    let (k_lo, k_hi) = kernel.support();
-                    let need_lo = raw.t_start - k_hi;
-                    let need_hi = raw.t_end - k_lo;
-                    if need_lo < *first_t && state.projected_trimmed {
-                        return Err(PostProcessError::MissingHistory { axis, t: need_lo });
-                    }
-                    if need_hi > *last_t && !force {
-                        return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
-                    }
-                    let shaped = fit_axis_from_signal(
-                        axis,
-                        cached,
-                        sig,
-                        follower_tol_scale(&raw.followers, axis),
-                    )?;
-                    if !shaped.control_points().iter().all(|v| v.is_finite()) {
-                        return Err(PostProcessError::NonFiniteSample {
-                            axis,
-                            t: raw.t_start,
-                        });
-                    }
-                    shaped
+            let (t_start, t_end) = projection_support(raw, &frontier[i], axis, leaders);
+            let (base_position, mut pieces) = kernel_tracks.as_ref().map_or_else(
+                || {
+                    let cached = state.cached_projection(t_start, t_end);
+                    (cached.base, extract_bezier_pieces(&cached.track))
+                },
+                |(batch_base, bases, tracks)| (*batch_base + bases[i], tracks[i].clone()),
+            );
+            if i == 0 {
+                if let (Some(previous_end), Some((emit_start, emit_end))) =
+                    (emitted_output_end, emit_window)
+                {
+                    let start_correction =
+                        previous_end - (base_position + piece_run_start(&pieces));
+                    correction = Some((
+                        emit_start,
+                        start_correction,
+                        -start_correction / (emit_end - emit_start),
+                    ));
                 }
-            };
+            }
+            if let Some((emit_start, start_correction, slope)) = correction {
+                for piece in &mut pieces {
+                    if piece.coeffs.len() < 2 {
+                        piece.coeffs.resize(2, 0.0);
+                    }
+                    piece.coeffs[0] += start_correction + slope * (piece.u_start - emit_start);
+                    piece.coeffs[1] += slope;
+                }
+            }
+            emitted_output_end = Some(base_position + piece_run_end(&pieces));
+            Arc::make_mut(&mut out[i].axes)[axis] =
+                ContinuousAxis::PiecewiseRelativeSpline(localize_pieces(base_position, &pieces));
         }
-        drop(kernel_sig);
+        state.emitted_output_end = emitted_output_end;
         if commit_count > 0 {
             let emitted_through = base[commit_count - 1].t_end;
             let back = kernel.map_or(0.0, |k| k.support().1.max(0.0));
@@ -226,15 +453,19 @@ fn apply_leading_stages(
     chain: &CompiledChain,
     axis: usize,
     mut track: ScalarNurbs,
+    fit_tol: FitTol,
+    defer_linear_prefix: bool,
 ) -> Result<ScalarNurbs, PostProcessError> {
     for stage in &chain.stages {
         match stage {
             ChainStage::SmoothKernel(_) => break,
             ChainStage::DerivativeGains { k1, k2 } => {
-                track = apply_derivative_gains_to_track(&track, *k1, *k2);
+                if !defer_linear_prefix {
+                    track = apply_derivative_gains_to_track(&track, *k1, *k2);
+                }
             }
             ChainStage::NonlinearAdvance(adv) => {
-                track = apply_nonlinear_advance_to_track(axis, &track, *adv)?;
+                track = apply_nonlinear_advance_to_track(axis, &track, *adv, fit_tol)?;
             }
         }
     }
@@ -247,6 +478,7 @@ fn apply_leading_stages(
 struct ProjSeg {
     t_start: f64,
     t_end: f64,
+    base: f64,
     track: ScalarNurbs,
 }
 
@@ -263,8 +495,12 @@ struct RatioSpan {
 }
 
 impl RatioSpan {
+    fn ratio_at_offset(&self, ds: f64) -> f64 {
+        self.r0 + (self.r1 - self.r0) * ds / (self.s1 - self.s0)
+    }
+
     fn ratio_at(&self, s: f64) -> f64 {
-        self.r0 + (self.r1 - self.r0) * (s - self.s0) / (self.s1 - self.s0)
+        self.ratio_at_offset(s - self.s0)
     }
 
     fn ratio_slope(&self) -> f64 {
@@ -288,7 +524,8 @@ pub(crate) struct FollowerState {
     s_ingested_end: f64,
     s_shaped: f64,
     e_end: Option<f64>,
-    carried_deficit: f64,
+    projected_output_end: Option<f64>,
+    emitted_output_end: Option<f64>,
     projected: Vec<ProjSeg>,
     projected_through_t: Option<f64>,
     projected_trimmed: bool,
@@ -296,20 +533,18 @@ pub(crate) struct FollowerState {
 
 impl FollowerState {
     /// A `Reset` restarts the timeline and relabels the follower odometer to
-    /// a fresh origin. Every reset flavor either re-seeds the MCU step
+    /// a fresh origin: every reset flavor either re-seeds the MCU step
     /// counters at that same origin (stream_open, set_position, home_drip) or
-    /// happens flow-free mid-homing (trip re-anchor), so the commanded-vs-
-    /// projected gap accumulated under the old labels is void: carrying it
-    /// across would anchor the next stream `carried_deficit` away from the
-    /// just-seeded counter and demand that gap in a single sample (-310
-    /// StepsPerSampleExceeded on the first follower piece).
+    /// happens flow-free mid-homing (trip re-anchor), so the pre-reset
+    /// odometer labels are void.
     pub(crate) fn reset_timeline(&mut self) {
         self.spans.clear();
         self.ingested_through_t = None;
         self.s_ingested_end = 0.0;
         self.s_shaped = 0.0;
         self.e_end = None;
-        self.carried_deficit = 0.0;
+        self.projected_output_end = None;
+        self.emitted_output_end = None;
         self.projected.clear();
         self.projected_through_t = None;
         self.projected_trimmed = false;
@@ -328,7 +563,7 @@ impl FollowerState {
         self.active
     }
 
-    fn cached_track(&self, t_start: f64, t_end: f64) -> &ScalarNurbs {
+    fn cached_projection(&self, t_start: f64, t_end: f64) -> &ProjSeg {
         let idx = self
             .projected
             .partition_point(|p| p.t_end <= t_start + GRID_DEDUP_EPS_S);
@@ -343,17 +578,7 @@ impl FollowerState {
             p.t_start,
             p.t_end,
         );
-        &p.track
-    }
-
-    fn projected_breakpoints(&self) -> Vec<f64> {
-        let mut breaks = Vec::new();
-        for p in &self.projected {
-            breaks.push(p.t_start);
-            breaks.extend_from_slice(p.track.knots());
-            breaks.push(p.t_end);
-        }
-        breaks
+        p
     }
 
     fn trim_projected(&mut self, keep_after: f64) {
@@ -364,21 +589,13 @@ impl FollowerState {
         }
     }
 
-    /// Lays the segment's demand along the shaped arc the toolhead covers
-    /// during it. While the raw stream rests, the kernel's creep first
-    /// finishes the previous stretch — converging on the rest point, at that
-    /// stretch's terminal ratio — and then leads into the upcoming spatial
-    /// stretch at its opening ratio. The stretch a lead creeps into is always
-    /// already pending: the shaper only projects a segment once the lookahead
-    /// covers its convolution window, and a lead exists only where that
-    /// window reaches the upcoming motion.
     fn ingest(
         &mut self,
-        raw: &ShapedSegment,
-        shaped: &ShapedSegment,
+        raw: &ContinuousSegment,
+        shaped: &ContinuousSegment,
         axis: usize,
         leaders: &[usize],
-        upcoming: &[ShapedSegment],
+        upcoming: &[ContinuousSegment],
     ) {
         if let Some(through) = self.ingested_through_t {
             if raw.t_end <= through + GRID_DEDUP_EPS_S {
@@ -408,20 +625,22 @@ impl FollowerState {
             self.push_span(shaped_ds, r0, r1);
             return;
         }
-        let tail = leader_distance(shaped, raw, leaders, raw.t_start).min(shaped_ds);
-        if tail > SPAN_MIN_LEN_MM {
-            let r = self.spans.last().map_or(0.0, |span| span.r1);
-            self.push_span(tail, r, r);
-        }
+        let tail = leader_distance(shaped, raw, leaders).min(shaped_ds);
         let lead = shaped_ds - tail;
-        if lead > SPAN_MIN_LEN_MM {
-            let r = upcoming
-                .iter()
-                .find(|seg| seg.spatial_path)
-                .and_then(|seg| seg.followers.iter().find(|f| f.axis_index == axis))
-                .map_or(0.0, |f| f.ratio);
-            self.push_span(lead, r, r);
+        let tail_ratio = self.spans.last().map_or(0.0, |span| span.r1);
+        if lead <= SPAN_LOOKUP_SLACK_MM {
+            self.push_span(shaped_ds, tail_ratio, tail_ratio);
+            return;
         }
+        if tail > SPAN_MIN_LEN_MM {
+            self.push_span(tail, tail_ratio, tail_ratio);
+        }
+        let lead_ratio = upcoming
+            .iter()
+            .find(|seg| seg.spatial_path)
+            .and_then(|seg| seg.followers.iter().find(|f| f.axis_index == axis))
+            .map_or(0.0, |f| f.ratio);
+        self.push_span(lead, lead_ratio, lead_ratio);
     }
 
     /// A span shorter than the odometer's float resolution cannot advance
@@ -475,130 +694,321 @@ impl FollowerState {
         }
     }
 
+    /// Projected extrusion accumulated between two shaped-path offsets
+    /// measured from `s_base`. Every term is a difference of nearby
+    /// quantities, so the result carries no ulp of the cumulative `e0` the
+    /// spans are stacked on — the whole point, since a drain span an
+    /// odometer tick wide sits on tens of millimetres of cumulative
+    /// extrusion and `spans_e(s1) - spans_e(s0)` would be pure rounding.
+    fn spans_delta_e(&self, s_base: f64, offset_start: f64, offset_end: f64) -> f64 {
+        let Some(first) = self.spans.first() else {
+            return 0.0;
+        };
+        let sign = if offset_end < offset_start { -1.0 } else { 1.0 };
+        let floor = first.s0 - s_base;
+        let lo = offset_start.min(offset_end).max(floor);
+        let hi = offset_start.max(offset_end).max(floor);
+        let mut delta = 0.0;
+        for span in &self.spans {
+            let span_lo = span.s0 - s_base;
+            if span_lo >= hi {
+                break;
+            }
+            let span_hi = span.s1 - s_base;
+            let a = lo.clamp(span_lo, span_hi);
+            let b = hi.clamp(span_lo, span_hi);
+            if b > a {
+                delta += (b - a)
+                    * 0.5
+                    * (span.ratio_at_offset(a - span_lo) + span.ratio_at_offset(b - span_lo));
+            }
+        }
+        let last = self.spans.last().expect("non-empty spans");
+        let tail = last.s1 - s_base;
+        if hi > tail {
+            delta += last.r1 * (hi - lo.max(tail));
+        }
+        sign * delta
+    }
+
     fn ratio_and_slope(&self, s: f64) -> (f64, f64) {
-        let idx = self.spans.partition_point(|span| span.s1 < s);
+        let idx = self.spans.partition_point(|span| span.s1 <= s);
         match self.spans.get(idx) {
             Some(span) if s >= span.s0 => (span.ratio_at(s), span.ratio_slope()),
             Some(span) => (span.r0, 0.0),
             None => (self.spans.last().map_or(0.0, |span| span.r1), 0.0),
         }
     }
+
+    fn aligned_span_start(&self, s: f64) -> f64 {
+        let envelope = span_alignment_envelope(s);
+        self.spans
+            .iter()
+            .flat_map(|span| [span.s0, span.s1])
+            .filter(|&boundary| boundary > s && boundary - s <= envelope)
+            .fold(s, f64::max)
+    }
+
+    fn owned_span_end(&self, s_start: f64, s_end: f64) -> f64 {
+        let envelope = span_alignment_envelope(s_end);
+        self.spans
+            .iter()
+            .flat_map(|span| [span.s0, span.s1])
+            .filter(|&boundary| boundary <= s_end && s_end - boundary < envelope)
+            .fold(s_end, |end, boundary| end.min(next_lower_float(boundary)))
+            .max(s_start)
+    }
+}
+fn axis_support(axis: &ContinuousAxis) -> (f64, f64) {
+    axis.domain()
 }
 
-fn leader_arc_length(seg: &ShapedSegment, leaders: &[usize]) -> f64 {
-    let d1: Vec<ScalarNurbs> = leaders
-        .iter()
-        .map(|&l| derivative_or_zero(&seg.axes[l]))
-        .collect();
+fn projection_support(
+    raw: &ContinuousSegment,
+    shaped: &ContinuousSegment,
+    axis: usize,
+    leaders: &[usize],
+) -> (f64, f64) {
+    let (axis_start, axis_end) = axis_support(&raw.axes[axis]);
+    let (mut start, mut end) = (raw.t_start.max(axis_start), raw.t_end.min(axis_end));
+    for &leader in leaders {
+        let (leader_start, leader_end) = axis_support(&shaped.axes[leader]);
+        start = start.max(leader_start);
+        end = end.min(leader_end);
+    }
+    assert!(
+        start < end,
+        "follower axis {axis} has no continuous projection support"
+    );
+    (start, end)
+}
+
+fn axis_pva(axis: &ContinuousAxis, t: f64) -> (f64, f64, f64) {
+    let pva = axis
+        .eval_pva(t)
+        .unwrap_or_else(|error| panic!("continuous follower evaluator failed at {t}: {error}"));
+    (pva.position, pva.velocity, pva.acceleration)
+}
+
+fn axis_breakpoints(axis: &ContinuousAxis) -> Vec<f64> {
+    match axis {
+        ContinuousAxis::Spline(curve) => extract_bezier_pieces(curve)
+            .into_iter()
+            .map(|piece| piece.u_end)
+            .collect(),
+        ContinuousAxis::RelativeSpline { curve, .. } => extract_bezier_pieces(curve)
+            .into_iter()
+            .map(|piece| piece.u_end)
+            .collect(),
+        ContinuousAxis::PiecewiseRelativeSpline(pieces) => pieces
+            .iter()
+            .flat_map(|piece| {
+                extract_bezier_pieces(&piece.curve)
+                    .into_iter()
+                    .map(|bezier| bezier.u_end)
+            })
+            .collect(),
+        ContinuousAxis::Analytic { span, .. } => {
+            let mut breaks = Vec::with_capacity(span.phases.len() + 2);
+            breaks.push(span.t_start);
+            breaks.extend(
+                span.phases
+                    .iter()
+                    .take(span.phases.len().saturating_sub(1))
+                    .map(|phase| analytic_phase_boundary(span.t_start, phase.end_time())),
+            );
+            breaks.push(span.t_end);
+            breaks
+        }
+        ContinuousAxis::Hold { .. } | ContinuousAxis::Nudge(_) | ContinuousAxis::Buzz { .. } => {
+            Vec::new()
+        }
+    }
+}
+
+struct AxisSignal<'a> {
+    axis: &'a ContinuousAxis,
+    base: f64,
+}
+
+impl TrackSignal for AxisSignal<'_> {
+    fn eval(&self, t: f64) -> f64 {
+        axis_pva(self.axis, t).0 - self.base
+    }
+
+    fn deriv(&self, t: f64) -> f64 {
+        axis_pva(self.axis, t).1
+    }
+
+    fn second_deriv(&self, t: f64) -> f64 {
+        axis_pva(self.axis, t).2
+    }
+
+    fn position_delta(&self, t0: f64, t1: f64) -> f64 {
+        axis_pva(self.axis, t1).0 - axis_pva(self.axis, t0).0
+    }
+
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let (position, velocity, acceleration) = axis_pva(self.axis, t);
+        (position - self.base, velocity, acceleration)
+    }
+}
+
+fn fit_continuous_axis(
+    axis_index: usize,
+    axis: &ContinuousAxis,
+    base: f64,
+    t_start: f64,
+    t_end: f64,
+    fit_tol: FitTol,
+) -> Result<ScalarNurbs, PostProcessError> {
+    let breakpoints = axis_breakpoints(axis);
+    fit_axis_from_signal(
+        axis_index,
+        t_start,
+        t_end,
+        &breakpoints,
+        &AxisSignal { axis, base },
+        fit_tol,
+        "follower_axis",
+    )
+}
+
+fn leader_arc_length(seg: &ContinuousSegment, leaders: &[usize]) -> f64 {
     let speed = |t: f64| {
-        d1.iter()
-            .map(|c| {
-                let value = nurbs::eval::eval(c, t);
-                value * value
+        leaders
+            .iter()
+            .map(|&axis| {
+                let velocity = axis_pva(&seg.axes[axis], t).1;
+                velocity * velocity
             })
             .sum::<f64>()
             .sqrt()
     };
-    knot_grid(&d1, seg.t_start, seg.t_end)
+    axis_grid(seg, leaders)
         .windows(2)
-        .map(|w| integrate(&speed, w[0], w[1]))
+        .map(|window| integrate(&speed, window[0], window[1]))
         .sum()
 }
 
-fn leader_distance(a: &ShapedSegment, b: &ShapedSegment, leaders: &[usize], t: f64) -> f64 {
+fn leader_distance(a: &ContinuousSegment, b: &ContinuousSegment, leaders: &[usize]) -> f64 {
+    let t = leaders
+        .iter()
+        .fold(a.t_start.max(b.t_start), |start, &axis| {
+            start
+                .max(axis_support(&a.axes[axis]).0)
+                .max(axis_support(&b.axes[axis]).0)
+        });
     leaders
         .iter()
-        .map(|&l| {
-            let delta = nurbs::eval::eval(&a.axes[l], t) - nurbs::eval::eval(&b.axes[l], t);
+        .map(|&axis| {
+            let delta = axis_pva(&a.axes[axis], t).0 - axis_pva(&b.axes[axis], t).0;
             delta * delta
         })
         .sum::<f64>()
         .sqrt()
 }
 
-/// A constant track (a held axis) differentiates to zero; `nurbs` refuses
-/// degree-0 input, so hold the zero explicitly over the same span.
-fn derivative_or_zero(curve: &ScalarNurbs) -> ScalarNurbs {
-    if curve.degree() >= 1 {
-        return nurbs::eval::derivative(curve);
+fn axis_grid(seg: &ContinuousSegment, axes: &[usize]) -> Vec<f64> {
+    let (mut support_start, mut support_end) = (seg.t_start, seg.t_end);
+    for &axis in axes {
+        let (start, end) = axis_support(&seg.axes[axis]);
+        support_start = support_start.max(start);
+        support_end = support_end.min(end);
     }
-    let knots = curve.knots();
-    bezier_pieces_to_nurbs(&[nurbs::bezier::BezierPiece {
-        u_start: *knots.first().expect("curve has a span"),
-        u_end: *knots.last().expect("curve has a span"),
-        coeffs: vec![0.0],
-    }])
-}
-
-fn knot_grid(curves: &[ScalarNurbs], t0: f64, t1: f64) -> Vec<f64> {
-    let mut grid: Vec<f64> = vec![t0, t1];
-    for curve in curves {
-        grid.extend(curve.knots().iter().copied().filter(|&k| k > t0 && k < t1));
+    assert!(
+        support_start < support_end,
+        "axes have no shared continuous support"
+    );
+    let mut grid = vec![support_start, support_end];
+    for &axis in axes {
+        grid.extend(
+            axis_breakpoints(&seg.axes[axis])
+                .iter()
+                .copied()
+                .filter(|&time| time > support_start && time < support_end),
+        );
     }
     grid.sort_by(f64::total_cmp);
-    grid.dedup_by(|a, b| (*a - *b).abs() <= GRID_DEDUP_EPS_S);
+    grid.dedup_by(|left, right| (*left - *right).abs() <= GRID_DEDUP_EPS_S);
     grid
 }
 
-/// One committed segment's projected follower as an evaluable signal:
-/// `e(t) = e_start + E(s_shaped(t)) − E(s_start) + raw_e_delta(t)`, where `E`
-/// is the spans table's cumulative extrusion and the raw-delta term carries
-/// extrude-only motion (segments with no spatial path).
+#[derive(Clone, Copy)]
+struct SpeedZeroSliver {
+    inner: f64,
+    zero_time: f64,
+    accel_norm: f64,
+    interior_sign: f64,
+}
+
+impl SpeedZeroSliver {
+    fn deriv_at(&self, t: f64) -> f64 {
+        let sign = if t > self.zero_time {
+            1.0
+        } else if t < self.zero_time {
+            -1.0
+        } else {
+            self.interior_sign
+        };
+        sign * self.accel_norm
+    }
+}
+
 pub(crate) struct FollowerSignal<'a> {
     state: &'a FollowerState,
     e_start: f64,
     s_start: f64,
     e_spans_start: f64,
-    t0: f64,
-    t1: f64,
-    shaped_d1: Vec<ScalarNurbs>,
-    shaped_d2: Vec<ScalarNurbs>,
-    raw_delta: Option<(ScalarNurbs, ScalarNurbs, ScalarNurbs, f64)>,
+    shaped_axes: Vec<&'a ContinuousAxis>,
+    raw_delta: Option<(&'a ContinuousAxis, f64)>,
     grid: Vec<f64>,
     cumulative: Vec<f64>,
-    arc_cache: RefCell<Vec<(f64, f64)>>,
+    s_owned_end: f64,
+    start_sliver: Option<SpeedZeroSliver>,
+    end_sliver: Option<SpeedZeroSliver>,
     pva_memo: RefCell<[Option<(u64, (f64, f64, f64))>; PVA_MEMO_SLOTS]>,
 }
 
 impl<'a> FollowerSignal<'a> {
     fn new(
-        shaped: &ShapedSegment,
-        raw: &ShapedSegment,
+        shaped: &'a ContinuousSegment,
+        raw: &'a ContinuousSegment,
         axis: usize,
         leaders: &[usize],
         state: &'a FollowerState,
         e_start: f64,
     ) -> Self {
-        let (t0, t1) = (raw.t_start, raw.t_end);
-        let shaped_d1: Vec<ScalarNurbs> = leaders
-            .iter()
-            .map(|&l| derivative_or_zero(&shaped.axes[l]))
-            .collect();
-        let shaped_d2: Vec<ScalarNurbs> = shaped_d1.iter().map(derivative_or_zero).collect();
-        let raw_delta = (!raw.spatial_path).then(|| {
-            let track = raw.axes[axis].clone();
-            let d1 = derivative_or_zero(&track);
-            let d2 = derivative_or_zero(&d1);
-            let at_start = nurbs::eval::eval(&track, t0);
-            (track, d1, d2, at_start)
-        });
-        let grid = knot_grid(&shaped_d1, t0, t1);
+        let (t0, t1) = projection_support(raw, shaped, axis, leaders);
+        let shaped_axes = leaders.iter().map(|&leader| &shaped.axes[leader]).collect();
+        let raw_delta =
+            (!raw.spatial_path).then(|| (&raw.axes[axis], axis_pva(&raw.axes[axis], t0).0));
+        let mut grid = vec![t0, t1];
+        grid.extend(
+            axis_grid(shaped, leaders)
+                .into_iter()
+                .filter(|&t| t > t0 && t < t1),
+        );
+        grid.sort_by(f64::total_cmp);
+        grid.dedup_by(|left, right| (*left - *right).abs() <= GRID_DEDUP_EPS_S);
 
         let mut sig = Self {
             state,
             e_start,
-            s_start: state.s_shaped,
-            e_spans_start: state.spans_e(state.s_shaped),
-            t0,
-            t1,
-            shaped_d1,
-            shaped_d2,
+            s_start: state.aligned_span_start(state.s_shaped),
+            e_spans_start: state.spans_e(state.aligned_span_start(state.s_shaped)),
+            shaped_axes,
             raw_delta,
             grid,
             cumulative: Vec::new(),
+            s_owned_end: f64::INFINITY,
+            start_sliver: None,
+            end_sliver: None,
             pva_memo: RefCell::new([None; PVA_MEMO_SLOTS]),
-            arc_cache: RefCell::new(Vec::new()),
         };
+        let (start_sliver, end_sliver) = sig.speed_zero_slivers();
+        sig.start_sliver = start_sliver;
+        sig.end_sliver = end_sliver;
         let mut cumulative = Vec::with_capacity(sig.grid.len());
         let mut acc = 0.0;
         cumulative.push(0.0);
@@ -607,106 +1017,305 @@ impl<'a> FollowerSignal<'a> {
             cumulative.push(acc);
         }
         sig.cumulative = cumulative;
-        sig.arc_cache = RefCell::new(
-            sig.grid
-                .iter()
-                .copied()
-                .zip(sig.cumulative.iter().copied())
-                .collect(),
-        );
+        sig.s_owned_end = state.owned_span_end(sig.s_start, sig.s_end());
         sig
     }
 
-    fn shaped_speed(&self, t: f64) -> f64 {
-        self.shaped_d1
+    fn raw_shaped_speed(&self, t: f64) -> f64 {
+        self.shaped_axes
             .iter()
-            .map(|c| {
-                let value = nurbs::eval::eval(c, t);
-                value * value
+            .map(|axis| {
+                let velocity = axis_pva(axis, t).1;
+                velocity * velocity
             })
             .sum::<f64>()
             .sqrt()
     }
 
-    fn shaped_speed_deriv_from_speed(&self, t: f64, speed: f64) -> f64 {
-        if speed <= 1e-9 {
+    fn raw_shaped_speed_deriv(&self, t: f64, speed: f64) -> f64 {
+        if speed == 0.0 {
             return 0.0;
         }
-        self.shaped_d1
+        self.shaped_axes
             .iter()
-            .zip(&self.shaped_d2)
-            .map(|(v, a)| nurbs::eval::eval(v, t) * nurbs::eval::eval(a, t))
+            .map(|axis| {
+                let (_, velocity, acceleration) = axis_pva(axis, t);
+                velocity * acceleration
+            })
             .sum::<f64>()
             / speed
     }
 
-    fn s_at(&self, t: f64) -> f64 {
-        let t = t.clamp(self.t0, self.t1);
-        let (insertion, neighbor_t, neighbor_s) = {
-            let cache = self.arc_cache.borrow();
-            match cache.binary_search_by(|(cached_t, _)| cached_t.total_cmp(&t)) {
-                Ok(index) => return self.s_start + cache[index].1,
-                Err(index) => {
-                    let neighbor = if index == 0 {
-                        0
-                    } else if index == cache.len() || t - cache[index - 1].0 <= cache[index].0 - t {
-                        index - 1
-                    } else {
-                        index
-                    };
-                    (index, cache[neighbor].0, cache[neighbor].1)
-                }
-            }
-        };
-        let local_s = if t >= neighbor_t {
-            neighbor_s + integrate(&|u| self.shaped_speed(u), neighbor_t, t)
+    fn raw_shaped_accel_norm(&self, t: f64) -> f64 {
+        self.shaped_axes
+            .iter()
+            .map(|axis| {
+                let acceleration = axis_pva(axis, t).2;
+                acceleration * acceleration
+            })
+            .sum::<f64>()
+            .sqrt()
+    }
+
+    fn endpoint_sliver(
+        &self,
+        endpoint: f64,
+        slack: f64,
+        interior_sign: f64,
+    ) -> Option<SpeedZeroSliver> {
+        let inner = endpoint + interior_sign * slack;
+        let speed = self.raw_shaped_speed(endpoint);
+        let secant = (self.raw_shaped_speed(inner) - speed) / (inner - endpoint);
+        (speed <= secant.abs() * slack).then(|| SpeedZeroSliver {
+            inner,
+            zero_time: if speed == 0.0 {
+                endpoint
+            } else {
+                endpoint - speed / secant
+            },
+            accel_norm: self.raw_shaped_accel_norm(endpoint),
+            interior_sign,
+        })
+    }
+
+    fn speed_zero_slivers(&self) -> (Option<SpeedZeroSliver>, Option<SpeedZeroSliver>) {
+        let t0 = self.grid[0];
+        let t1 = self.grid[self.grid.len() - 1];
+        let slack = SPEED_ZERO_SLIVER_FRACTION * (t1 - t0);
+        (
+            self.endpoint_sliver(t0, slack, 1.0),
+            self.endpoint_sliver(t1, slack, -1.0),
+        )
+    }
+
+    fn speed_zero_sliver(&self, t: f64) -> Option<SpeedZeroSliver> {
+        self.start_sliver
+            .filter(|sliver| t <= sliver.inner)
+            .or_else(|| self.end_sliver.filter(|sliver| t >= sliver.inner))
+    }
+
+    fn shaped_speed(&self, t: f64) -> f64 {
+        self.raw_shaped_speed(t)
+    }
+
+    fn shaped_speed_deriv_from_speed(&self, t: f64, speed: f64) -> f64 {
+        match self.speed_zero_sliver(t) {
+            Some(sliver) => sliver.deriv_at(t),
+            None => self.raw_shaped_speed_deriv(t, speed),
+        }
+    }
+
+    fn s_offset(&self, t: f64) -> f64 {
+        let start = self.grid[0];
+        let end = self.grid[self.grid.len() - 1];
+        let scale = t.abs().max(start.abs()).max(end.abs());
+        let slack = 1e-12_f64.max(8.0 * f64::EPSILON * scale);
+        assert!(
+            t >= start - slack && t <= end + slack,
+            "follower distance query {t} outside [{start}, {end}]"
+        );
+        let t = if t < start {
+            start
+        } else if t > end {
+            end
         } else {
-            neighbor_s - integrate(&|u| self.shaped_speed(u), t, neighbor_t)
+            t
         };
-        self.arc_cache.borrow_mut().insert(insertion, (t, local_s));
-        self.s_start + local_s
+        match self.grid.binary_search_by(|grid_t| grid_t.total_cmp(&t)) {
+            Ok(index) => self.cumulative[index],
+            Err(insertion) => {
+                assert!(
+                    insertion > 0 && insertion < self.grid.len(),
+                    "follower distance query {t} outside [{}, {}]",
+                    self.grid[0],
+                    self.grid[self.grid.len() - 1]
+                );
+                let index = insertion - 1;
+                self.cumulative[index] + integrate(&|u| self.shaped_speed(u), self.grid[index], t)
+            }
+        }
+    }
+    fn s_at(&self, t: f64) -> f64 {
+        self.s_start + self.s_offset(t)
+    }
+    fn s_owned(&self, t: f64) -> f64 {
+        self.s_at(t).min(self.s_owned_end)
+    }
+    fn s_owned_offset(&self, t: f64) -> f64 {
+        self.s_offset(t).min(self.s_owned_end - self.s_start)
     }
     fn s_end(&self) -> f64 {
         self.s_start + self.cumulative.last().copied().expect("cumulative seeded")
+    }
+    fn construction_breakpoints(&self, raw_axis: &ContinuousAxis) -> Vec<f64> {
+        let mut breaks = axis_breakpoints(raw_axis);
+        breaks.extend_from_slice(&self.grid);
+        let s_end = self.s_end();
+        let support_start = *self.grid.first().expect("follower grid is seeded");
+        let support_end = *self.grid.last().expect("follower grid is seeded");
+        for sliver in [self.start_sliver, self.end_sliver].into_iter().flatten() {
+            if sliver.inner > support_start + GRID_DEDUP_EPS_S
+                && sliver.inner < support_end - GRID_DEDUP_EPS_S
+            {
+                breaks.push(sliver.inner);
+            }
+        }
+        let mut boundaries = self
+            .state
+            .spans
+            .iter()
+            .flat_map(|span| [span.s0, span.s1])
+            .filter(|&s| {
+                s >= self.s_start - SPAN_LOOKUP_SLACK_MM && s <= s_end + SPAN_LOOKUP_SLACK_MM
+            })
+            .collect::<Vec<_>>();
+        boundaries.sort_by(f64::total_cmp);
+        boundaries.dedup();
+        for boundary in boundaries {
+            if self.s_at(support_start) >= boundary {
+                continue;
+            }
+            let mut lo = support_start;
+            let mut hi = support_end;
+            loop {
+                let mid = 0.5 * lo + 0.5 * hi;
+                if mid <= lo || mid >= hi {
+                    break;
+                }
+                if self.s_at(mid) < boundary {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            if hi - support_start > GRID_DEDUP_EPS_S && support_end - hi > GRID_DEDUP_EPS_S {
+                breaks.push(hi);
+            }
+        }
+        breaks.sort_by(f64::total_cmp);
+        breaks.dedup_by(|left, right| (*left - *right).abs() <= GRID_DEDUP_EPS_S);
+        let zeros = self.velocity_component_zeros(&breaks, support_start, support_end);
+        breaks.extend(zeros);
+        breaks.sort_by(f64::total_cmp);
+        breaks.dedup_by(|left, right| (*left - *right).abs() <= GRID_DEDUP_EPS_S);
+        breaks
+    }
+
+    fn velocity_component_zeros(
+        &self,
+        sorted_breaks: &[f64],
+        support_start: f64,
+        support_end: f64,
+    ) -> Vec<f64> {
+        let mut nodes = Vec::with_capacity(sorted_breaks.len() + 2);
+        nodes.push(support_start);
+        nodes.extend(
+            sorted_breaks
+                .iter()
+                .copied()
+                .filter(|&t| t > support_start && t < support_end),
+        );
+        nodes.push(support_end);
+        let mut zeros = Vec::new();
+        for axis in &self.shaped_axes {
+            for window in nodes.windows(2) {
+                isolate_velocity_zeros(axis, window[0], window[1], &mut zeros);
+            }
+        }
+        zeros
+    }
+}
+
+fn isolate_velocity_zeros(axis: &ContinuousAxis, lo: f64, hi: f64, zeros: &mut Vec<f64>) {
+    if hi <= lo {
+        return;
+    }
+    let span = hi - lo;
+    let mut previous_time = lo;
+    let mut previous_velocity = axis_pva(axis, lo).1;
+    if previous_velocity == 0.0 {
+        zeros.push(lo);
+    }
+    for probe in 1..=COMPONENT_ZERO_PROBES {
+        let time = if probe == COMPONENT_ZERO_PROBES {
+            hi
+        } else {
+            lo + span * (probe as f64 / COMPONENT_ZERO_PROBES as f64)
+        };
+        let velocity = axis_pva(axis, time).1;
+        if velocity == 0.0 {
+            zeros.push(time);
+        } else if previous_velocity != 0.0 && previous_velocity.signum() != velocity.signum() {
+            zeros.push(refine_velocity_zero(
+                axis,
+                previous_time,
+                time,
+                previous_velocity,
+            ));
+        }
+        previous_time = time;
+        previous_velocity = velocity;
+    }
+}
+
+fn refine_velocity_zero(axis: &ContinuousAxis, mut lo: f64, mut hi: f64, lo_velocity: f64) -> f64 {
+    loop {
+        let mid = 0.5 * lo + 0.5 * hi;
+        if mid <= lo || mid >= hi {
+            return hi;
+        }
+        let velocity = axis_pva(axis, mid).1;
+        if velocity == 0.0 {
+            return mid;
+        }
+        if velocity.signum() == lo_velocity.signum() {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
     }
 }
 
 impl TrackSignal for FollowerSignal<'_> {
     fn eval(&self, t: f64) -> f64 {
-        let t = t.clamp(self.t0, self.t1);
-        let spans = self.state.spans_e(self.s_at(t)) - self.e_spans_start;
+        let spans = self.state.spans_e(self.s_owned(t)) - self.e_spans_start;
         let raw = self
             .raw_delta
-            .as_ref()
-            .map_or(0.0, |(track, _, _, at_start)| {
-                nurbs::eval::eval(track, t) - at_start
-            });
+            .map_or(0.0, |(axis, at_start)| axis_pva(axis, t).0 - at_start);
         self.e_start + spans + raw
     }
 
-    fn deriv(&self, t: f64) -> f64 {
-        let t = t.clamp(self.t0, self.t1);
-        let (ratio, _) = self.state.ratio_and_slope(self.s_at(t));
+    /// `eval` carries the stream's cumulative extrusion, tens of millimetres
+    /// deep into a print; the difference of two of those samples over a span
+    /// an odometer tick wide is rounding noise. The span table integrates the
+    /// ratio over the shaped distance actually travelled instead, and the raw
+    /// track contributes its own relative delta.
+    fn position_delta(&self, t0: f64, t1: f64) -> f64 {
+        let spans = self.state.spans_delta_e(
+            self.s_start,
+            self.s_owned_offset(t0),
+            self.s_owned_offset(t1),
+        );
         let raw = self
             .raw_delta
-            .as_ref()
-            .map_or(0.0, |(_, d1, _, _)| nurbs::eval::eval(d1, t));
+            .map_or(0.0, |(axis, _)| axis_pva(axis, t1).0 - axis_pva(axis, t0).0);
+        spans + raw
+    }
+
+    fn deriv(&self, t: f64) -> f64 {
+        let (ratio, _) = self.state.ratio_and_slope(self.s_owned(t));
+        let raw = self.raw_delta.map_or(0.0, |(axis, _)| axis_pva(axis, t).1);
         ratio * self.shaped_speed(t) + raw
     }
 
     fn second_deriv(&self, t: f64) -> f64 {
-        let t = t.clamp(self.t0, self.t1);
         let speed = self.shaped_speed(t);
-        let (ratio, slope) = self.state.ratio_and_slope(self.s_at(t));
-        let raw = self
-            .raw_delta
-            .as_ref()
-            .map_or(0.0, |(_, _, d2, _)| nurbs::eval::eval(d2, t));
+        let (ratio, slope) = self.state.ratio_and_slope(self.s_owned(t));
+        let raw = self.raw_delta.map_or(0.0, |(axis, _)| axis_pva(axis, t).2);
         slope * speed * speed + ratio * self.shaped_speed_deriv_from_speed(t, speed) + raw
     }
 
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
-        let t = t.clamp(self.t0, self.t1);
         let key = t.to_bits();
         let slot = ((key ^ key.rotate_right(32)) as usize) & (PVA_MEMO_SLOTS - 1);
         if let Some((stored_key, value)) = self.pva_memo.borrow()[slot] {
@@ -714,20 +1323,14 @@ impl TrackSignal for FollowerSignal<'_> {
                 return value;
             }
         }
-        let s = self.s_at(t);
+        let s = self.s_owned(t);
         let speed = self.shaped_speed(t);
         let (ratio, slope) = self.state.ratio_and_slope(s);
         let spans = self.state.spans_e(s) - self.e_spans_start;
-        let (raw_p, raw_v, raw_a) =
-            self.raw_delta
-                .as_ref()
-                .map_or((0.0, 0.0, 0.0), |(track, d1, d2, at_start)| {
-                    (
-                        nurbs::eval::eval(track, t) - at_start,
-                        nurbs::eval::eval(d1, t),
-                        nurbs::eval::eval(d2, t),
-                    )
-                });
+        let (raw_p, raw_v, raw_a) = self.raw_delta.map_or((0.0, 0.0, 0.0), |(axis, at_start)| {
+            let (position, velocity, acceleration) = axis_pva(axis, t);
+            (position - at_start, velocity, acceleration)
+        });
         let value = (
             self.e_start + spans + raw_p,
             ratio * speed + raw_v,
@@ -736,8 +1339,207 @@ impl TrackSignal for FollowerSignal<'_> {
         self.pva_memo.borrow_mut()[slot] = Some((key, value));
         value
     }
+    fn diagnostic(&self, t: f64) -> Option<String> {
+        let s = self.s_owned(t);
+        let span_index = self.state.spans.partition_point(|span| span.s1 <= s);
+        let span = self.state.spans.get(span_index);
+        let speed = self.shaped_speed(t);
+        let speed_deriv = self.shaped_speed_deriv_from_speed(t, speed);
+        let (ratio, slope) = self.state.ratio_and_slope(s);
+        let leaders = self
+            .shaped_axes
+            .iter()
+            .map(|axis| (axis_pva(axis, t), axis.domain()))
+            .collect::<Vec<_>>();
+        let raw = self
+            .raw_delta
+            .map(|(axis, _)| (axis_pva(axis, t), axis.domain()));
+        Some(format!(
+            "follower t={t} s={s} span_index={span_index} span={span:?} \
+             ratio={ratio} slope={slope} speed={speed} speed_deriv={speed_deriv} \
+             leaders={leaders:?} raw={raw:?}"
+        ))
+    }
 }
 
+/// Every emitted follower piece carries its own position origin: the fitted
+/// polynomial keeps only the excursion it accumulates inside its own knot
+/// span, and `base_position` holds the cumulative print position at the
+/// piece's start. A long target no longer regains a large relative carrier —
+/// the value a fitted curve would have to resolve against never exceeds one
+/// piece's own travel — and the seams stay bit-exact because each origin is
+/// the running sum of the preceding pieces' own increments.
+fn localize_pieces(base: f64, pieces: &[BezierPiece]) -> Arc<[RelativeSplinePiece]> {
+    let first = pieces.first().expect("follower emit has no fitted pieces");
+    let mut origin = base + first.coeffs[0];
+    let mut out = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        let mut local = piece.clone();
+        local.coeffs[0] = 0.0;
+        let travel = polynomial_pv(&local.coeffs, local.u_end - local.u_start).0;
+        out.push(RelativeSplinePiece {
+            base_position: origin,
+            curve: Arc::new(bezier_pieces_to_nurbs(std::slice::from_ref(&local))),
+            t_start: local.u_start,
+            t_end: local.u_end,
+        });
+        origin += travel;
+    }
+    Arc::from(out)
+}
+
+fn piece_run_start(pieces: &[BezierPiece]) -> f64 {
+    pieces.first().expect("a fitted target has pieces").coeffs[0]
+}
+
+fn piece_run_end(pieces: &[BezierPiece]) -> f64 {
+    pieces.last().map_or(0.0, |last| {
+        polynomial_pv(&last.coeffs, last.u_end - last.u_start).0
+    })
+}
+
+fn project_monotone(
+    axis: usize,
+    label: &str,
+    pieces: &mut [nurbs::bezier::BezierPiece],
+    tol: FitTol,
+) {
+    let total_at_end = |pieces: &[nurbs::bezier::BezierPiece]| {
+        pieces
+            .last()
+            .map(|piece| polynomial_pva(&piece.coeffs, piece.u_end - piece.u_start).0)
+            .expect("follower piece run is non-empty")
+    };
+    let source_total = total_at_end(pieces);
+    for piece in pieces.iter_mut() {
+        let h = piece.u_end - piece.u_start;
+        let degree = piece.degree();
+        let probe_tau = |u: f64| 0.5 * (u + 1.0) * h;
+        let sweep = 4 * degree;
+        let dips = (0..=sweep).any(|step| {
+            let tau = h * step as f64 / sweep as f64;
+            polynomial_pva(&piece.coeffs, tau).1 < 0.0
+        });
+        if h <= SEGMENT_TIME_EPS_S || !dips {
+            continue;
+        }
+        let bernstein = piece.to_bernstein();
+        let mut derivative = bernstein
+            .windows(2)
+            .map(|pair| degree as f64 * (pair[1] - pair[0]) / h)
+            .collect::<Vec<_>>();
+        if degree < 3 || derivative[0] < 0.0 || derivative[degree - 1] < 0.0 {
+            continue;
+        }
+        let mut deficit = 0.0_f64;
+        let mut perturbation = 0.0_f64;
+        for rate in &mut derivative[1..degree - 1] {
+            let available = *rate + deficit;
+            let projected = available.max(0.0);
+            deficit = available - projected;
+            perturbation = perturbation.max((projected - *rate).abs());
+            *rate = projected;
+        }
+        if deficit < 0.0 {
+            continue;
+        }
+        let accel_envelope = tol.accel_mm_s2 + 2.0 * (degree - 1) as f64 * perturbation / h;
+        let source = piece.clone();
+        let mut reintegrated = vec![bernstein[0]; degree + 1];
+        for i in 0..degree {
+            reintegrated[i + 1] = reintegrated[i] + derivative[i] * h / degree as f64;
+        }
+        let corrected_piece =
+            nurbs::bezier::BezierPiece::from_bernstein(&reintegrated, piece.u_start, piece.u_end);
+        let within_budget = crate::lowering::LADDER_PROBES_U.iter().all(|&u| {
+            let corrected = polynomial_pva(&corrected_piece.coeffs, probe_tau(u));
+            let uncorrected = polynomial_pva(&source.coeffs, probe_tau(u));
+            [corrected.0, corrected.1, corrected.2]
+                .into_iter()
+                .all(f64::is_finite)
+                && corrected.0 - uncorrected.0 >= -tol.pos_mm
+                && corrected.2.abs() <= uncorrected.2.abs() + accel_envelope
+        });
+        if within_budget {
+            *piece = corrected_piece;
+        }
+    }
+    let corrected_total = total_at_end(pieces);
+    assert!(
+        (corrected_total - source_total).abs() <= tol.pos_mm,
+        "follower axis {axis} {label} monotone correction moved the total from \
+         {source_total} to {corrected_total}"
+    );
+}
+
+fn polynomial_pv(coeffs: &[f64], tau: f64) -> (f64, f64) {
+    let (position, velocity, _) = polynomial_pva(coeffs, tau);
+    (position, velocity)
+}
+
+fn polynomial_pva(coeffs: &[f64], tau: f64) -> (f64, f64, f64) {
+    let (mut p, mut v, mut a) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for &coefficient in coeffs.iter().rev() {
+        a = nurbs::fmadd(a, tau, v);
+        v = nurbs::fmadd(v, tau, p);
+        p = nurbs::fmadd(p, tau, coefficient);
+    }
+    (p, v, 2.0 * a)
+}
+
+fn next_lower_float(value: f64) -> f64 {
+    if value == 0.0 {
+        f64::from_bits((1_u64 << 63) | 1)
+    } else if value > 0.0 {
+        f64::from_bits(value.to_bits() - 1)
+    } else {
+        f64::from_bits(value.to_bits() + 1)
+    }
+}
+
+fn span_alignment_envelope(s: f64) -> f64 {
+    INTEGRAL_TOL_MM.max(ODOMETER_ALIGNMENT_ULPS * f64::EPSILON * s.abs())
+}
+
+fn basis_conversion_same(
+    left: f64,
+    right: f64,
+    degree: usize,
+    left_duration: f64,
+    right_duration: f64,
+) -> bool {
+    let duration_condition = left_duration.max(right_duration) / left_duration.min(right_duration);
+    if !duration_condition.is_finite() {
+        return false;
+    }
+    let degree_terms = (degree + 1) as f64;
+    (left - right).abs()
+        <= BASIS_CONVERSION_ROUNDOFF_ENVELOPE
+            * degree_terms
+            * degree_terms
+            * duration_condition
+            * f64::EPSILON
+            * left.abs().max(right.abs()).max(1.0)
+}
+fn assert_piece_seams(axis: usize, label: &str, pieces: &[nurbs::bezier::BezierPiece]) {
+    for (index, pair) in pieces.windows(2).enumerate() {
+        let left_h = pair[0].u_end - pair[0].u_start;
+        let right_h = pair[1].u_end - pair[1].u_start;
+        let left = polynomial_pv(&pair[0].coeffs, left_h);
+        let right = polynomial_pv(&pair[1].coeffs, 0.0);
+        let seam = pair[0].u_end;
+        let degree = pair[0].degree().max(pair[1].degree());
+        assert!(
+            basis_conversion_same(left.0, right.0, degree, left_h, right_h)
+                && left.1.is_finite()
+                && right.1.is_finite(),
+            "follower axis {axis} {label} seam {index} at {seam}: left {left:?} \
+             degree {} duration {left_h}, right {right:?} degree {} duration {right_h}",
+            pair[0].degree(),
+            pair[1].degree(),
+        );
+    }
+}
 fn integrate(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
     if b - a <= 0.0 {
         return 0.0;

@@ -3,6 +3,11 @@ use super::{
     slots_for_axis,
 };
 use crate::lock_ext::LockExt;
+use crate::pump::{BuzzLane, BuzzParams, BuzzRoute, BuzzWave};
+use crate::types::AxisKey;
+use pyo3::types::PyAnyMethods;
+use pyo3::{Bound, PyAny};
+use std::sync::Arc;
 
 #[pymethods]
 impl PyMotionEngine {
@@ -397,107 +402,65 @@ impl PyMotionEngine {
         }
         Ok((r.readback_size, u32::from_le_bytes(r.readback_data)))
     }
-    #[allow(clippy::too_many_arguments)]
+    /// One request covers every route the caller named, whatever transport
+    /// each rides. Nothing arms until the pipeline is drained, the pump is
+    /// fenced, and every route has validated, so a mixed pulse/phase/EtherCAT
+    /// sweep either starts together or not at all.
+    ///
+    /// `wave` is `(freq_start_millihz, freq_end_millihz, amplitude_nm,
+    /// duration_ms, ramp_ms)`. Each route is a tagged tuple, either
+    /// `("ethercat", mcu_handle, slot_mask, slot_sign_mask)` or
+    /// `("stepper", axis_mask, sign_mask)`; the stepper route is split into
+    /// pulse and phase endpoints here, by the axis transport bindings.
     fn resonance_buzz(
         &self,
-        mcu_handle: u32,
-        axis_mask: u8,
-        sign_mask: u8,
-        freq_start_millihz: u32,
-        freq_end_millihz: u32,
-        amplitude_nm: u32,
-        duration_ms: u32,
-        ramp_ms: u32,
-    ) -> PyResult<()> {
-        let ring = self
-            .mcus
-            .lock_ok()
-            .get(&mcu_handle)
-            .and_then(|mcu| mcu.ring_filler.clone())
-            .ok_or_else(|| {
-                PyRuntimeError::new_err(format!(
-                    "resonance_buzz: mcu_handle {mcu_handle} has no EtherCAT setpoint filler"
-                ))
-            })?;
-        let result = ring.lock_ok().arm_buzz(
-            axis_mask,
-            sign_mask,
-            freq_start_millihz,
-            freq_end_millihz,
-            amplitude_nm,
-            duration_ms,
-            ramp_ms,
-        );
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "resonance_buzz: host setpoint filler rejected (result {result})"
-            )));
-        }
-        Ok(())
-    }
-    #[allow(clippy::too_many_arguments)]
-    fn stepper_resonance_buzz(
-        &self,
         py: Python<'_>,
-        axis_mask: u8,
-        sign_mask: u8,
-        freq_start_millihz: u32,
-        freq_end_millihz: u32,
-        amplitude_nm: u32,
-        duration_ms: u32,
-        ramp_ms: u32,
+        routes: Vec<Bound<'_, PyAny>>,
+        wave: (u32, u32, u32, u32, u32),
     ) -> PyResult<()> {
-        let endpoints: Vec<_> = self
-            .stepcompress_endpoints
-            .lock_ok()
-            .values()
-            .cloned()
-            .collect();
-        let armed = py
-            .detach(|| {
-                let mut armed = 0usize;
-                for endpoint in endpoints {
-                    let mut endpoint = endpoint.lock_ok();
-                    if !endpoint.accepts_buzz_mask(axis_mask) {
-                        continue;
-                    }
-                    endpoint
-                        .arm_buzz(
-                            axis_mask,
-                            sign_mask,
-                            freq_start_millihz,
-                            freq_end_millihz,
-                            amplitude_nm,
-                            duration_ms,
-                            ramp_ms,
-                        )
-                        .map_err(|error| error.to_string())?;
-                    armed += 1;
-                }
-                Ok::<usize, String>(armed)
-            })
-            .map_err(PyRuntimeError::new_err)?;
-        if armed == 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "stepper_resonance_buzz: axis mask 0x{axis_mask:02x} selects no stepcompress endpoint"
-            )));
-        }
+        let specs = parse_buzz_routes(&routes)?;
+        let params = BuzzParams {
+            routes: self.build_buzz_routes(&specs)?,
+            wave: BuzzWave {
+                freq_start_millihz: wave.0,
+                freq_end_millihz: wave.1,
+                amplitude_nm: wave.2,
+                duration_ms: wave.3,
+                ramp_ms: wave.4,
+            },
+        };
+        let rx = {
+            let guard = self.planner.lock_ok();
+            let planner = guard.as_ref().ok_or_else(|| {
+                PyRuntimeError::new_err(
+                    "resonance_buzz: planner not initialized — call init_planner first",
+                )
+            })?;
+            planner
+                .submit_buzz(params)
+                .map_err(|e| PyRuntimeError::new_err(format!("resonance_buzz: {e}")))?
+        };
+        let token = py
+            .detach(|| rx.recv())
+            .map_err(|_| PyRuntimeError::new_err("resonance_buzz: notify dropped"))?
+            .map_err(|e| PyRuntimeError::new_err(format!("resonance_buzz: {e}")))?;
+        *self.buzz_token.lock_ok() = Some(token);
         Ok(())
     }
 
-    fn resonance_buzz_done(&self) -> bool {
-        let step_done = self
-            .stepcompress_endpoints
+    /// Polls the one token the last [`Self::resonance_buzz`] handed back, so
+    /// completion spans every route that request armed.
+    fn resonance_buzz_done(&self) -> PyResult<bool> {
+        self.buzz_token
             .lock_ok()
-            .values()
-            .all(|endpoint| endpoint.lock_ok().buzz_complete());
-        let ethercat_done = self.mcus.lock_ok().values().all(|mcu| {
-            mcu.ring_filler.as_ref().is_none_or(|ring| {
-                let filler = ring.lock_ok();
-                !filler.buzz_active() && !filler.wants_drain()
-            })
-        });
-        step_done && ethercat_done
+            .as_ref()
+            .ok_or_else(|| {
+                PyRuntimeError::new_err(
+                    "resonance_buzz_done: no buzz has been armed on this engine",
+                )
+            })?
+            .complete()
+            .map_err(|e| PyRuntimeError::new_err(format!("resonance_buzz_done: {e}")))
     }
     #[allow(clippy::too_many_arguments)]
     fn set_diff_damper(
@@ -765,6 +728,188 @@ impl PyMotionEngine {
             )));
         }
         Ok(())
+    }
+}
+
+/// One route as Python named it, before any endpoint is resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BuzzRouteSpec {
+    Ethercat {
+        mcu_handle: u32,
+        slot_mask: u8,
+        sign_mask: u8,
+    },
+    Stepper {
+        axis_mask: u8,
+        sign_mask: u8,
+    },
+}
+
+fn parse_buzz_routes(routes: &[Bound<'_, PyAny>]) -> PyResult<Vec<BuzzRouteSpec>> {
+    if routes.is_empty() {
+        return Err(PyRuntimeError::new_err(
+            "resonance_buzz: no routes given — nothing to buzz",
+        ));
+    }
+    let mut specs = Vec::with_capacity(routes.len());
+    for route in routes {
+        let arity = route.len()?;
+        let kind: String = route.get_item(0)?.extract()?;
+        specs.push(match (kind.as_str(), arity) {
+            ("ethercat", 4) => BuzzRouteSpec::Ethercat {
+                mcu_handle: route.get_item(1)?.extract()?,
+                slot_mask: route.get_item(2)?.extract()?,
+                sign_mask: route.get_item(3)?.extract()?,
+            },
+            ("stepper", 3) => BuzzRouteSpec::Stepper {
+                axis_mask: route.get_item(1)?.extract()?,
+                sign_mask: route.get_item(2)?.extract()?,
+            },
+            ("ethercat" | "stepper", n) => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "resonance_buzz: route kind '{kind}' takes \
+                     {} elements, got {n}",
+                    if kind == "ethercat" { 4 } else { 3 }
+                )));
+            }
+            (other, _) => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "resonance_buzz: unknown route kind '{other}' \
+                     (expected 'ethercat' or 'stepper')"
+                )));
+            }
+        });
+    }
+    Ok(specs)
+}
+
+/// The subset of `axis_mask` an endpoint actually owns for this buzz.
+pub(super) fn buzz_axis_bits(axis_mask: u8, keep: impl Fn(u8) -> bool) -> u8 {
+    (0u8..8)
+        .filter(|&axis| axis_mask & (1 << axis) != 0 && keep(axis))
+        .fold(0u8, |bits, axis| bits | (1 << axis))
+}
+
+/// A phase route names its lanes outright: the sign mask is a per-axis
+/// direction flip, not a mask of anything the endpoint has to decode.
+pub(super) fn buzz_lanes(axis_bits: u8, sign_mask: u8) -> Vec<BuzzLane> {
+    (0u8..8)
+        .filter(|&axis| axis_bits & (1 << axis) != 0)
+        .map(|axis| BuzzLane {
+            axis,
+            sign: if sign_mask & (1 << axis) != 0 {
+                -1.0
+            } else {
+                1.0
+            },
+        })
+        .collect()
+}
+
+impl PyMotionEngine {
+    /// Resolve every spec into a live endpoint handle. Every lookup happens
+    /// here, before the request leaves the Python thread, so a missing
+    /// endpoint or an empty mask is a loud failure with nothing armed.
+    fn build_buzz_routes(&self, specs: &[BuzzRouteSpec]) -> PyResult<Arc<[BuzzRoute]>> {
+        let transports = Arc::clone(&self.axis_transports.lock_ok());
+        let mut routes: Vec<BuzzRoute> = Vec::new();
+        for spec in specs {
+            match *spec {
+                BuzzRouteSpec::Ethercat {
+                    mcu_handle,
+                    slot_mask,
+                    sign_mask,
+                } => {
+                    if slot_mask == 0 {
+                        return Err(PyRuntimeError::new_err(
+                            "resonance_buzz: ethercat route has an empty slot mask",
+                        ));
+                    }
+                    let filler = self
+                        .mcus
+                        .lock_ok()
+                        .get(&mcu_handle)
+                        .and_then(|mcu| mcu.ring_filler.clone())
+                        .ok_or_else(|| {
+                            PyRuntimeError::new_err(format!(
+                                "resonance_buzz: mcu_handle {mcu_handle} has no \
+                                 EtherCAT setpoint filler"
+                            ))
+                        })?;
+                    routes.push(BuzzRoute::Ethercat {
+                        mcu_id: mcu_handle,
+                        filler,
+                        slot_mask,
+                        sign_mask,
+                    });
+                }
+                BuzzRouteSpec::Stepper {
+                    axis_mask,
+                    sign_mask,
+                } => {
+                    if axis_mask == 0 {
+                        return Err(PyRuntimeError::new_err(
+                            "resonance_buzz: stepper route has an empty axis mask",
+                        ));
+                    }
+                    let selected = routes.len();
+                    let mut pulse: Vec<_> = self
+                        .stepcompress_endpoints
+                        .lock_ok()
+                        .iter()
+                        .map(|(&mcu_id, endpoint)| (mcu_id, Arc::clone(endpoint)))
+                        .collect();
+                    pulse.sort_by_key(|(mcu_id, _)| *mcu_id);
+                    for (mcu_id, endpoint) in pulse {
+                        let bits = {
+                            let ep = endpoint.lock_ok();
+                            buzz_axis_bits(axis_mask, |axis| {
+                                ep.drives_axis(axis)
+                                    && !transports.is_phase(AxisKey { mcu_id, axis })
+                            })
+                        };
+                        if bits != 0 {
+                            routes.push(BuzzRoute::Pulse {
+                                mcu_id,
+                                endpoint,
+                                axis_mask: bits,
+                                sign_mask,
+                            });
+                        }
+                    }
+                    let mut phase: Vec<_> = self
+                        .sample_endpoints
+                        .lock_ok()
+                        .iter()
+                        .map(|(&mcu_id, endpoint)| (mcu_id, Arc::clone(endpoint)))
+                        .collect();
+                    phase.sort_by_key(|(mcu_id, _)| *mcu_id);
+                    for (mcu_id, endpoint) in phase {
+                        let bits = {
+                            let ep = endpoint.lock_ok();
+                            buzz_axis_bits(axis_mask, |axis| {
+                                ep.drives_axis(axis)
+                                    && transports.is_phase(AxisKey { mcu_id, axis })
+                            })
+                        };
+                        if bits != 0 {
+                            routes.push(BuzzRoute::Phase {
+                                mcu_id,
+                                endpoint,
+                                lanes: buzz_lanes(bits, sign_mask),
+                            });
+                        }
+                    }
+                    if routes.len() == selected {
+                        return Err(PyRuntimeError::new_err(format!(
+                            "resonance_buzz: axis mask 0x{axis_mask:02x} selects no \
+                             pulse or phase endpoint"
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(routes.into())
     }
 }
 

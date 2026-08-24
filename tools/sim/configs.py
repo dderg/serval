@@ -41,7 +41,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 300
 max_accel: 4000
-max_jerk: 1000000
+max_jerk: 0
 max_z_velocity: 25
 max_z_accel: 200
 square_corner_velocity: 8
@@ -152,7 +152,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
-max_jerk: 2000
+max_jerk: 0
 max_z_velocity: 10
 max_z_accel: 30
 
@@ -226,7 +226,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 2800
 max_accel: 100000
-max_jerk: 200000
+max_jerk: 0
 # shaper_x kernel share 0.653mm at 100000mm/s^2 + the old scv-100 blend
 # budget 0.041mm (corner_deviation is the total incl. the kernel share).
 corner_deviation: 0.695
@@ -318,7 +318,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 1000
 max_accel: 10000
-max_jerk: 20000
+max_jerk: 0
 # shaper kernel share 0.173mm at 10000mm/s^2 + the old scv-30 blend
 # budget 0.037mm (corner_deviation is the total incl. the kernel share).
 corner_deviation: 0.21
@@ -432,7 +432,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
-max_jerk: 2000
+max_jerk: 0
 max_z_velocity: 10
 max_z_accel: 30
 
@@ -512,7 +512,7 @@ serial: {f4_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
-max_jerk: 2000
+max_jerk: 0
 max_z_velocity: 10
 max_z_accel: 30
 
@@ -586,7 +586,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
-max_jerk: 2000
+max_jerk: 0
 max_z_velocity: 10
 max_z_accel: 30
 
@@ -814,7 +814,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
-max_jerk: 2000
+max_jerk: 0
 max_z_velocity: 10
 max_z_accel: 30
 
@@ -899,7 +899,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
-max_jerk: 2000
+max_jerk: 0
 max_z_velocity: 10
 max_z_accel: 30
 
@@ -984,7 +984,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
-max_jerk: 2000
+max_jerk: 0
 max_z_velocity: 10
 max_z_accel: 30
 
@@ -1107,7 +1107,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
-max_jerk: 2000
+max_jerk: 0
 max_z_velocity: 10
 max_z_accel: 30
 
@@ -1215,7 +1215,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 300
 max_accel: 3000
-max_jerk: 6000
+max_jerk: 0
 max_z_velocity: 10
 max_z_accel: 100
 # is_xy's kernel share (0.0196mm at 3000mm/s^2) + the old default blend
@@ -1351,7 +1351,7 @@ serial: {sc_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
-max_jerk: 2000
+max_jerk: 0
 max_z_velocity: 10
 max_z_accel: 30
 
@@ -1441,7 +1441,7 @@ serial: {sc_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
-max_jerk: 2000
+max_jerk: 0
 max_z_velocity: 10
 max_z_accel: 30
 
@@ -1563,7 +1563,7 @@ serial: {sc_pty}
 [printer]
 max_velocity: 600
 max_accel: 20000
-max_jerk: 40000
+max_jerk: 0
 max_z_velocity: 20
 max_z_accel: 500
 corner_deviation: 0.04
@@ -1783,7 +1783,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
-max_jerk: 2000
+max_jerk: 0
 max_z_velocity: 10
 max_z_accel: 30
 
@@ -1866,7 +1866,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
-max_jerk: 2000
+max_jerk: 0
 max_z_velocity: 10
 max_z_accel: 100
 
@@ -2008,7 +2008,7 @@ def heaters_config(
     gcode_dir: str,
     control: str = "pid",
     heated_fan: bool = False,
-    max_jerk: float = 6000,
+    max_jerk: float = 0,
 ) -> str:
     """Cartesian world carrying the heater/fan/pwm zoo the legacy batch
     suite (test/klippy) covered: extruder heater (pid or mpc), chamber
@@ -2302,7 +2302,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 300
 max_accel: 3000
-max_jerk: 6000
+max_jerk: 0
 max_z_velocity: 10
 max_z_accel: 100
 corner_deviation: 0.023

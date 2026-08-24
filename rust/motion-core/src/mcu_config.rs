@@ -86,7 +86,6 @@ pub struct McuTopologyInput {
     pub microstep_distance: Vec<f64>,
     pub invert_dir: Vec<bool>,
     pub stepper_oids: Vec<u32>,
-    pub stepcompress_sample_rate: f64,
     pub move_queue_slots: u32,
     pub step_pulse_seconds: Vec<f64>,
     pub high_precision_step_compress: Vec<bool>,
@@ -122,7 +121,6 @@ pub struct McuAxisConfig {
     pub microstep_distance: Vec<f64>,
     pub invert_dir: Vec<bool>,
     pub stepper_oids: Vec<u32>,
-    pub stepcompress_sample_rate: f64,
     pub move_queue_slots: u32,
     /// Per entry of `axes`: the settle the mcu enforces around every pulse
     /// (`config_stepper step_pulse_ticks`, in seconds). The step shim keeps
@@ -287,11 +285,6 @@ pub enum KinematicsConfigError {
     #[error("mcu handle {handle}: logical axis {axis} has no configured motors")]
     EmptyMotorGroup { handle: u32, axis: usize },
     #[error(
-        "mcu handle {handle}: a finite positive stepcompress_sample_rate (Hz) is required, \
-         got {rate}"
-    )]
-    StepcompressSampleRate { handle: u32, rate: f64 },
-    #[error(
         "mcu handle {handle}: its pulse lanes require the mcu's advertised move_count \
          (move_queue_slots) to be positive, got 0"
     )]
@@ -388,13 +381,6 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                     })
                 })
                 .collect::<Result<_, _>>()?;
-            let rate = topology.stepcompress_sample_rate;
-            if !rate.is_finite() || rate <= 0.0 {
-                return Err(KinematicsConfigError::StepcompressSampleRate {
-                    handle: topology.mcu_id,
-                    rate,
-                });
-            }
             let ethercat = ethercat_mcu_ids.contains(&topology.mcu_id);
             let move_queue_slots = topology.move_queue_slots;
             let pulse_capable = lane_kinds.iter().any(|k| k.pulse_capable());
@@ -428,7 +414,6 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                 microstep_distance: topology.microstep_distance.clone(),
                 invert_dir: topology.invert_dir.clone(),
                 stepper_oids: topology.stepper_oids.clone(),
-                stepcompress_sample_rate: rate,
                 move_queue_slots,
                 step_pulse_seconds: topology.step_pulse_seconds.clone(),
                 stepcompress_encoders: topology

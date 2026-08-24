@@ -1,5 +1,7 @@
+use std::sync::Arc;
+
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
-use trajectory::ShapedSegment;
+use trajectory::{ContinuousAxis, ContinuousSegment};
 
 use super::{FollowerSignal, FollowerState, integrate};
 
@@ -69,20 +71,21 @@ fn incremental_arc_cache_matches_direct_integration_in_any_query_order() {
             coeffs,
         }])
     };
-    let held = curve(vec![0.0]);
-    let shaped = ShapedSegment {
-        axes: vec![
-            curve(vec![1.0, 120.0, -2_000.0, 50_000.0]),
-            curve(vec![2.0, -50.0, 1_000.0]),
-            held.clone(),
-            held,
-        ],
-        followers: Vec::new(),
+    let held = Arc::new(curve(vec![0.0]));
+    let shaped = ContinuousSegment {
+        axes: Arc::from([
+            ContinuousAxis::Spline(Arc::new(curve(vec![1.0, 120.0, -2_000.0, 50_000.0]))),
+            ContinuousAxis::Spline(Arc::new(curve(vec![2.0, -50.0, 1_000.0]))),
+            ContinuousAxis::Spline(Arc::clone(&held)),
+            ContinuousAxis::Spline(held),
+        ]),
+        followers: Arc::from([]),
         spatial_path: true,
         t_start: t0,
         t_end: t1,
         motor_mask: 0,
         source_line: 1,
+        rest_at_end: false,
     };
     let raw = shaped.clone();
     let state = FollowerState::default();
@@ -96,4 +99,71 @@ fn incremental_arc_cache_matches_direct_integration_in_any_query_order() {
             "arc length at {t}: cache={got}, direct={expected}"
         );
     }
+}
+
+fn cusp_segment(x_coeffs: Vec<f64>, y_coeffs: Vec<f64>, t0: f64, t1: f64) -> ContinuousSegment {
+    let curve = |coeffs| {
+        bezier_pieces_to_nurbs(&[BezierPiece {
+            u_start: t0,
+            u_end: t1,
+            coeffs,
+        }])
+    };
+    let held = Arc::new(curve(vec![0.0]));
+    ContinuousSegment {
+        axes: Arc::from([
+            ContinuousAxis::Spline(Arc::new(curve(x_coeffs))),
+            ContinuousAxis::Spline(Arc::new(curve(y_coeffs))),
+            ContinuousAxis::Spline(Arc::clone(&held)),
+            ContinuousAxis::Spline(held),
+        ]),
+        followers: Arc::from([]),
+        spatial_path: true,
+        t_start: t0,
+        t_end: t1,
+        motor_mask: 0,
+        source_line: 1,
+        rest_at_end: false,
+    }
+}
+
+#[test]
+fn leader_velocity_sign_change_is_seeded_as_a_construction_breakpoint() {
+    let (t0, t1) = (300.0, 300.02);
+    let shaped = cusp_segment(vec![1.0, -16.0, 1_000.0], vec![2.0, 1e-3], t0, t1);
+    let raw = shaped.clone();
+    let state = FollowerState::default();
+    let sig = FollowerSignal::new(&shaped, &raw, 3, &[0, 1], &state, 0.0);
+    let breaks = sig.construction_breakpoints(&raw.axes[3]);
+    let vx = |t: f64| super::axis_pva(&shaped.axes[0], t).1;
+    let seeded = breaks
+        .iter()
+        .copied()
+        .find(|&t| t > t0 && t < t1 && vx(super::next_lower_float(t)) < 0.0 && vx(t) >= 0.0);
+    let root = seeded.unwrap_or_else(|| panic!("no velocity-zero seed in {breaks:?}"));
+    assert!(
+        (root - 300.008).abs() <= 1e-12,
+        "seed {root} is not the vx zero at 300.008"
+    );
+    assert!(
+        breaks.len() <= 8,
+        "component-zero isolation retained sampled times: {breaks:?}"
+    );
+}
+
+#[test]
+fn endpoint_velocity_zero_dedups_against_the_support_grid() {
+    let (t0, t1) = (300.0, 300.02);
+    let shaped = cusp_segment(vec![1.0, 0.0, 1_000.0], vec![2.0, 1e-3], t0, t1);
+    let raw = shaped.clone();
+    let state = FollowerState::default();
+    let sig = FollowerSignal::new(&shaped, &raw, 3, &[0, 1], &state, 0.0);
+    let breaks = sig.construction_breakpoints(&raw.axes[3]);
+    assert_eq!(
+        super::axis_pva(&shaped.axes[0], t0).1,
+        0.0,
+        "fixture must place the vx zero exactly on the support start"
+    );
+    let at_start = breaks.iter().filter(|&&t| (t - t0).abs() <= 1e-12).count();
+    assert_eq!(at_start, 1, "endpoint root duplicated in {breaks:?}");
 }

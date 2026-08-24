@@ -1,5 +1,5 @@
 //! Production [`SegmentSink`]: anchors committed motion to the MCU clock,
-//! splits it into per-axis pieces, and hands each piece to the pump.
+//! splits it into per-axis clocked spans, and hands each span to the pump.
 
 use crate::lock_ext::LockExt;
 use std::sync::Arc;
@@ -8,15 +8,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
-use motion_pipeline::NudgePiece;
-use trajectory::ShapedSegment;
+use trajectory::{
+    ContinuousAxis, ContinuousSegment, MotorGroup, MotorSpan, MotorTerm, NudgeProfile,
+};
 
 use super::CommittedFrontier;
 use super::dispatch::{DispatchError, SegmentSink};
 
-/// State a committed `ShapedSegment` needs to reach the pump: per-MCU clock
-/// anchoring/projection, the axis-lane split, and the motion-history store
-/// whose retained pieces a re-anchor invalidates.
+/// State a committed `ContinuousSegment` needs to reach the pump: per-MCU
+/// clock anchoring/projection, the axis-lane split, and the motion-history
+/// store whose retained spans a re-anchor invalidates.
 pub(crate) struct PumpSink {
     pub(crate) transports: Arc<crate::axis_transport::AxisTransports>,
     pub(crate) router: Arc<Mutex<host_rt::passthrough_queue::PassthroughRouter>>,
@@ -42,19 +43,14 @@ impl FrozenProjection {
     fn project_exact(self, host_secs: f64) -> f64 {
         self.mcu_ref + (host_secs - self.host_ref) * self.freq
     }
-
-    fn project(self, host_secs: f64) -> u64 {
-        self.project_exact(host_secs).round().max(0.0) as u64
-    }
 }
 
 /// Anchoring context shared by segments and nudges: the timeline origin, the
-/// clock projection, and the drip-mode piece/lead limits.
+/// clock projection, and the drip-mode lead limit.
 struct AnchorPoint {
     t0: f64,
     epoch: crate::anchor::StreamEpoch,
     host_now: f64,
-    max_piece_secs: Option<f64>,
     lead_secs: f64,
 }
 
@@ -75,33 +71,45 @@ impl PumpSink {
     }
 
     /// Whether any lane this mcu serves carries real motion in the segment —
-    /// the same hold test `is_pure_hold` applies to wire pieces, decided on
-    /// the lane curve so a re-anchor can tell a moving lane (whose clocks
-    /// must track the live record) from an idle one (whose step-clock stream
-    /// must not jump).
-    fn mcu_has_motion(&self, cfg: &crate::mcu_config::McuAxisConfig, seg: &ShapedSegment) -> bool {
+    /// the same hold test the wire path applies, decided on the lane span so
+    /// a re-anchor can tell a moving lane (whose clocks must track the live
+    /// record) from an idle one (whose step-clock stream must not jump).
+    fn mcu_has_motion(
+        &self,
+        cfg: &crate::mcu_config::McuAxisConfig,
+        seg: &ContinuousSegment,
+    ) -> bool {
         let module = crate::kinematics::KinematicsModule::from_tag(cfg.kinematics)
             .expect("mcu_configs were validated at build");
         cfg.axes.iter().any(|&axis_idx| {
             if axis_idx >= seg.axes.len() {
                 return false;
             }
-            let curve = crate::enqueue::lane_curve(&module, &seg.axes, axis_idx);
-            !crate::enqueue::lane_curve_is_hold(&curve)
+            !crate::enqueue::lane_span(&module, seg, axis_idx)
+                .is_ok_and(|span| span.is_explicit_hold)
         })
     }
 
-    fn live_projection(&self, mcu_id: u32, host_secs: f64) -> u64 {
+    fn live_clock_record(&self, mcu_id: u32) -> host_rt::passthrough_queue::ClockRecordSnapshot {
         self.router
             .lock_ok()
-            .host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(mcu_id), host_secs)
-            .unwrap_or_else(|e| {
+            .clock_record(crate::types::mcu_handle_from_raw(mcu_id))
+            .unwrap_or_else(|| {
                 panic!(
-                    "mcu {mcu_id} projected a piece with no valid clocksync record ({e}) — \
+                    "mcu {mcu_id} projected a span with no valid clocksync record — \
                      a projection off an invalidated record would send step clocks from the \
                      previous boot epoch"
                 )
             })
+    }
+
+    /// The unrounded host→mcu map every clocked span anchors on. A serial
+    /// lane reads the epoch's frozen slope; only the EtherCAT ring, which
+    /// re-anchors against the grid its endpoint reports, reads the live
+    /// clocksync record.
+    fn live_projection_exact(&self, mcu_id: u32, host_secs: f64) -> f64 {
+        let record = self.live_clock_record(mcu_id);
+        record.last_clock as f64 + ((host_secs - record.clock_offset) * record.clock_freq).max(0.0)
     }
 
     fn reanchor_projection(&self, mcu_id: u32, host_now: f64) -> Result<(), DispatchError> {
@@ -219,38 +227,55 @@ impl PumpSink {
         Ok(())
     }
 
-    fn project(&self, mcu_id: u32, host_secs: f64) -> u64 {
+    fn project_exact(&self, mcu_id: u32, host_secs: f64) -> f64 {
         if !self.freezes_projection(mcu_id) {
-            return self.live_projection(mcu_id, host_secs);
+            return self.live_projection_exact(mcu_id, host_secs);
         }
+        self.frozen_epoch(mcu_id).project_exact(host_secs)
+    }
+
+    fn project(&self, mcu_id: u32, host_secs: f64) -> u64 {
+        self.project_exact(mcu_id, host_secs).round().max(0.0) as u64
+    }
+
+    /// The cycle rate every clocked span on this mcu is cut against: the
+    /// epoch slope the frozen map was anchored on, so a chain of abutting
+    /// spans lands on the same lattice the seams were projected on.
+    fn clock_freq_hz(&self, mcu_id: u32) -> f64 {
+        if !self.freezes_projection(mcu_id) {
+            return self.live_clock_record(mcu_id).clock_freq;
+        }
+        self.frozen_epoch(mcu_id).freq
+    }
+
+    fn frozen_epoch(&self, mcu_id: u32) -> FrozenProjection {
         self.frozen_projection
             .lock_ok()
             .get(&mcu_id)
             .copied()
             .unwrap_or_else(|| {
                 panic!(
-                    "stepcompress mcu {mcu_id} projected a piece before its segment anchored \
+                    "stepcompress mcu {mcu_id} projected a span before its segment anchored \
                      the host→mcu map — reanchor_projection must run before every dispatch"
                 )
             })
-            .project(host_secs)
     }
 
     /// Whether a retimed dispatch must re-base this mcu's frozen host→mcu
     /// projection on the live clocksync record. Moving lanes always re-base:
-    /// their piece clocks must track the clocksync, not a frozen slope that
+    /// their span clocks must track the clocksync, not a frozen slope that
     /// drifted since the last anchor. Hold-only (idle) lanes keep their
     /// frozen domain while it still tracks the live clock — re-basing them
     /// would jump their step-clock stream by the projection's drift for no
     /// motion. But that drift grows without bound while the lane sits parked
     /// (crystal ppm × hours), and once it exceeds the margin floor the
-    /// frozen slope would project even hold pieces into the mcu's past —
+    /// frozen slope would project even hold spans into the mcu's past —
     /// re-base then; the reanchor cut re-bases the seams and a hold carries
     /// no steps, so no motion results.
     pub(crate) fn needs_rebase(
         &self,
         cfg: &crate::mcu_config::McuAxisConfig,
-        seg: &ShapedSegment,
+        seg: &ContinuousSegment,
         retimed: bool,
         prev: Option<FrozenProjection>,
         seam_host: f64,
@@ -291,10 +316,10 @@ impl PumpSink {
     }
 
     /// A nudge-path projection rebase moved this MCU's host→mcu map for
-    /// every lane, but only the nudged lane carries pieces (and so a cut)
+    /// every lane, but only the nudged lane carries spans (and so a cut)
     /// through the pump. Cut every sibling lane at the same clock via the
     /// pump's control channel — otherwise their shim seams keep the previous
-    /// epoch's slope and the next pieces (projected on the new map) miss the
+    /// epoch's slope and the next spans (projected on the new map) miss the
     /// seam by `freq_delta × span` plus the rebase's offset jump.
     fn cut_sibling_lanes_after_rebase(
         &self,
@@ -340,7 +365,6 @@ impl PumpSink {
             t0,
             epoch,
             host_now,
-            max_piece_secs: drip_active.then_some(0.025_f64),
             lead_secs: if drip_active {
                 crate::pump::DRIP_WINDOW_SECS
             } else {
@@ -359,7 +383,7 @@ impl PumpSink {
 }
 
 impl SegmentSink for PumpSink {
-    fn dispatch(&mut self, seg: &ShapedSegment) -> Result<(), DispatchError> {
+    fn dispatch(&mut self, seg: &ContinuousSegment) -> Result<(), DispatchError> {
         tracing::debug!(
             subsystem = "engine",
             event = "dispatch_entered",
@@ -425,11 +449,11 @@ impl SegmentSink for PumpSink {
                 host_now: at.host_now,
                 lead_secs: at.lead_secs,
                 epoch_freq: &epoch_freq_of,
-                project: |mcu_id, host_secs| self.project(mcu_id, host_secs),
-                max_piece_secs: at.max_piece_secs,
+                project_exact: |mcu_id, host_secs| self.project_exact(mcu_id, host_secs),
+                clock_freq_hz: &|mcu_id| self.clock_freq_hz(mcu_id),
                 lane_is_phase: &|key| self.transports.is_phase(key),
             },
-        );
+        )?;
 
         if at.epoch.retimed() {
             self.motion_history.lock_ok().drop_pieces_on_reanchor();
@@ -451,59 +475,74 @@ impl SegmentSink for PumpSink {
     }
 
     /// The single-axis, planner-bypassing sibling of `dispatch`.
-    fn dispatch_nudge(&mut self, mcu_id: u32, np: &NudgePiece) -> Result<(), DispatchError> {
-        let axis = np.axis;
+    fn dispatch_nudge(
+        &mut self,
+        mcu_id: u32,
+        axis: u8,
+        motor_mask: u8,
+        profile: &NudgeProfile,
+    ) -> Result<(), DispatchError> {
+        let axis_idx = axis as usize;
         let lane_present = self
             .mcu_configs
             .iter()
             .filter(|c| c.mcu_id == mcu_id)
-            .any(|c| c.axes.contains(&(axis as usize)));
+            .any(|c| c.axes.contains(&axis_idx));
         if !lane_present {
             return Err(DispatchError::NudgeTargetMissing { mcu_id, axis });
         }
 
-        let at = self.anchor(np.piece.u_start, np.piece.u_end);
+        let at = self.anchor(profile.t_start(), profile.t_end());
         self.anchor.lock_ok().mark_parked();
 
+        let seam_host = at.t0 + profile.t_start();
         let fresh_projection = self.freezes_projection(mcu_id)
             && (at.epoch.retimed() || !self.frozen_projection.lock_ok().contains_key(&mcu_id));
         if fresh_projection {
-            self.reanchor_projection(mcu_id, at.t0 + np.piece.u_start)?;
-            self.cut_sibling_lanes_after_rebase(mcu_id, axis, at.t0 + np.piece.u_start)?;
+            self.reanchor_projection(mcu_id, seam_host)?;
+            self.cut_sibling_lanes_after_rebase(mcu_id, axis, seam_host)?;
         }
 
         if at.epoch.is_fresh() {
-            self.log_seg0_lead(std::iter::once(mcu_id), at.t0 + np.piece.u_start, at.t0);
+            self.log_seg0_lead(std::iter::once(mcu_id), seam_host, at.t0);
         }
 
-        let project = |proj_mcu_id: u32, host_secs: f64| self.project(proj_mcu_id, host_secs);
-        let pieces = crate::enqueue::flatten_bezier_pieces(
-            std::slice::from_ref(&np.piece),
-            &crate::enqueue::FlattenCtx {
+        let epoch_freq = fresh_projection.then(|| self.frozen_epoch(mcu_id).freq);
+        let signal = MotorSpan::try_new(
+            Arc::from(vec![MotorGroup::Independent(MotorTerm {
+                source_axis: axis_idx,
+                axis: ContinuousAxis::Nudge(profile.clone()),
+                scale: 1.0,
+            })]),
+            profile.t_start(),
+            profile.t_end(),
+            motor_mask,
+            u32::MAX,
+            false,
+        )?;
+        let spans = crate::enqueue::clock_span(
+            Arc::new(signal),
+            mcu_id,
+            axis_idx,
+            &crate::enqueue::EnqueueCtx {
                 t0: at.t0,
-                mcu_id,
-                axis_idx: axis as usize,
+                epoch: at.epoch,
                 host_now: at.host_now,
-                project: &project,
-                max_piece_secs: at.max_piece_secs,
-                motor_mask: np.motor_mask,
+                lead_secs: at.lead_secs,
+                epoch_freq: &|_| epoch_freq,
+                project_exact: |proj_mcu_id, host_secs| self.project_exact(proj_mcu_id, host_secs),
+                clock_freq_hz: &|proj_mcu_id| self.clock_freq_hz(proj_mcu_id),
+                lane_is_phase: &|key| self.transports.is_phase(key),
             },
-        );
+        )?;
 
-        if !pieces.is_empty() {
+        if !spans.is_empty() {
             let key = crate::types::AxisKey { mcu_id, axis };
             self.pump_tx
                 .send(crate::pump::EnqueueMsg {
-                    epoch_freq: if fresh_projection {
-                        self.frozen_projection
-                            .lock_ok()
-                            .get(&mcu_id)
-                            .map(|f| f.freq)
-                    } else {
-                        None
-                    },
+                    epoch_freq,
                     key,
-                    pieces,
+                    spans,
                     epoch: at.epoch,
                     lead_secs: at.lead_secs,
                     source_line: u32::MAX,

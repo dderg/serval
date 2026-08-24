@@ -1,3 +1,5 @@
+mod common;
+
 use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -197,7 +199,7 @@ fn spawn_and_claim(tag: &str, extra_args: &[&str]) -> (ChildGuard, McuSerialConn
 
     wait_for_socket(&path, Instant::now() + Duration::from_secs(5));
 
-    let conn = McuSerialConn::connect(&path).expect("McuSerialConn::connect must succeed");
+    let conn = common::connect_until(&path, Instant::now() + Duration::from_secs(5));
     let _reply = do_handshake(&conn);
 
     (guard, conn, path)

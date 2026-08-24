@@ -1,10 +1,11 @@
 use super::*;
 use crate::fitter::{FitReport, UnblendedJunction};
 use crate::frontend::{Move, VelocityLimits};
+use crate::path::lowering::PositionProfile;
 use crate::path::{Arc, Clothoid, Line, PathSegment, Segment};
 use crate::segment::FollowerDemand;
 
-const DEFAULT_JERK_MM_S3: f64 = 100_000.0;
+const DEFAULT_JERK_MM_S3: f64 = f64::INFINITY;
 const DEFAULT_INTEGRATION_TOL: f64 = 1e-7;
 
 fn limits(max_v: f64, accel: f64) -> VelocityLimits {
@@ -83,6 +84,78 @@ fn clothoid_move(kappa_peak: f64, length: f64, feed: f64, accel: f64, line_no: u
     )
     .unwrap();
     spatial_move(Segment::Clothoid(clo), feed, feed, accel, line_no)
+}
+fn continuous_corner_moves(
+    kappa_peak: f64,
+    clothoid_length: f64,
+    arc_length: f64,
+    line_length: f64,
+    feed: f64,
+    accel: f64,
+) -> Vec<Move> {
+    let sigma = kappa_peak / clothoid_length;
+    let incoming = Line::try_new([-line_length, 0.0, 0.0], [0.0, 0.0, 0.0]).unwrap();
+    let up = Clothoid::try_new(
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        0.0,
+        sigma,
+        clothoid_length,
+    )
+    .unwrap();
+    let up_end = up.point_at(clothoid_length);
+    let up_heading = up.heading_at(clothoid_length);
+    let up_normal = [-up_heading[1], up_heading[0], 0.0];
+    let radius = 1.0 / kappa_peak;
+    let center = [
+        up_end[0] + radius * up_normal[0],
+        up_end[1] + radius * up_normal[1],
+        up_end[2],
+    ];
+    let arc = Arc::try_new(
+        center,
+        [-up_normal[0], -up_normal[1], 0.0],
+        up_heading,
+        radius,
+        0.0,
+        arc_length * kappa_peak,
+    )
+    .unwrap();
+    let arc_end = arc.point_at(arc_length);
+    let arc_heading = arc.heading_at(arc_length);
+    let arc_normal = [-arc_heading[1], arc_heading[0], 0.0];
+    let down = Clothoid::try_new(
+        arc_end,
+        arc_heading,
+        arc_normal,
+        kappa_peak,
+        -sigma,
+        clothoid_length,
+    )
+    .unwrap();
+    let down_end = down.point_at(clothoid_length);
+    let down_heading = down.heading_at(clothoid_length);
+    let outgoing = Line::try_new(
+        down_end,
+        [
+            down_end[0] + line_length * down_heading[0],
+            down_end[1] + line_length * down_heading[1],
+            down_end[2] + line_length * down_heading[2],
+        ],
+    )
+    .unwrap();
+    [
+        Segment::Line(incoming),
+        Segment::Clothoid(up),
+        Segment::Arc(arc),
+        Segment::Clothoid(down),
+        Segment::Line(outgoing),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, segment)| spatial_move(segment, feed, feed, accel, i as u32 + 1))
+    .collect()
 }
 
 fn virtual_move(virtual_path: f64, feed: f64, max_v: f64, accel: f64, line_no: u32) -> Move {
@@ -200,44 +273,82 @@ fn seam_velocity_is_continuous_across_the_chain() {
 
 #[test]
 fn clothoid_emitted_accel_is_disk_feasible_and_tracks_velocity() {
-    // The reconstructed tangential accel on a curved member must (a) fit inside the
-    // acceleration disk together with the centripetal share, and (b) be the real
-    // `dv/dt` of the speed profile — not a value bounded loose from it. Verified on
-    // the curved member of a chain, where the seam velocities are feasible.
     let (kappa_peak, length, accel) = (0.2_f64, 4.0_f64, 1000.0_f64);
     let out = outcome(
-        vec![
-            line_move(60.0, 300.0, 300.0, accel, 1),
-            clothoid_move(kappa_peak, length, 300.0, accel, 2),
-            line_move(60.0, 300.0, 300.0, accel, 3),
-        ],
+        continuous_corner_moves(kappa_peak, length, 2.0, 60.0, 300.0, accel),
         Vec::new(),
     );
     let plan = plan(&out).unwrap();
     let sigma = kappa_peak / length;
-    let s = &plan.moves[1].samples;
-    let mut t = vec![0.0_f64];
-    for w in s.windows(2) {
-        t.push(t[t.len() - 1] + 2.0 * (w[1].s - w[0].s) / (w[0].v + w[1].v).max(1e-9));
-    }
-    for (i, p) in s.iter().enumerate() {
-        let a_c = p.v * p.v * (sigma * p.s);
-        let total = (p.a * p.a + a_c * a_c).sqrt();
+    let clothoid = &plan.moves[1];
+    let mut derivative_checks = 0;
+
+    for p in &clothoid.samples {
+        let phase = clothoid
+            .phases
+            .iter()
+            .find(|phase| p.s >= phase.s0 - 1e-9 && p.s <= phase.end_distance() + 1e-9)
+            .expect("every emitted sample must be covered by a phase");
+        let phase_end = phase.end_distance();
+        let t = if p.s <= phase.s0 + 1e-9 {
+            phase.t0
+        } else if p.s >= phase_end - 1e-9 {
+            phase.end_time()
+        } else {
+            phase.time_at_distance(p.s).unwrap()
+        };
+        let (_, phase_v, phase_a) = phase.state_at(t);
         assert!(
-            total <= accel + 1.0,
-            "total accel {total} exceeds a_max at s={}",
+            (p.v - phase_v).abs() <= 1e-6 * (1.0 + p.v),
+            "emitted v={} disagrees with phase v={phase_v} at s={}",
+            p.v,
             p.s
         );
-        if i > 0 && i < s.len() - 1 {
-            let fd = (s[i + 1].v - s[i - 1].v) / (t[i + 1] - t[i - 1]).max(1e-9);
-            assert!(
-                (p.a - fd).abs() <= 0.02 * accel + 1.0,
-                "emitted a={} disagrees with dv/dt={fd} at s={}",
-                p.a,
-                p.s
-            );
+        let a_c = phase_v * phase_v * (sigma * p.s);
+        let total = (p.a * p.a + a_c * a_c).sqrt();
+        assert!(
+            total <= accel + 1e-3,
+            "total accel {total} exceeds a_max at s={} (sample a={}, phase a={phase_a})",
+            p.s,
+            p.a
+        );
+
+        if p.s <= phase.s0 + 1e-9 || p.s >= phase_end - 1e-9 {
+            continue;
         }
+        assert!(
+            (p.a - phase_a).abs() <= 1e-6 * (1.0 + accel),
+            "emitted a={} disagrees with phase a={phase_a} at s={}",
+            p.a,
+            p.s
+        );
     }
+    for phase in &clothoid.phases {
+        if phase.dt <= 1e-12 {
+            continue;
+        }
+        let t = phase.t0 + 0.5 * phase.dt;
+        let (s, v, a) = phase.state_at(t);
+        let h = 0.25 * phase.dt;
+        let (_, v_before, _) = phase.state_at(t - h);
+        let (_, v_after, _) = phase.state_at(t + h);
+        let fd = (v_after - v_before) / (2.0 * h);
+        assert!(
+            (a - fd).abs() <= 1e-6 * (1.0 + accel),
+            "phase a={a} disagrees with dv/dt={fd} at s={s}"
+        );
+        let a_c = v * v * sigma * s;
+        let total = (a * a + a_c * a_c).sqrt();
+        assert!(
+            total <= accel + 1e-3,
+            "phase total accel {total} exceeds a_max at s={s}"
+        );
+        derivative_checks += 1;
+    }
+    assert!(
+        derivative_checks >= 3,
+        "expected at least three phase derivative checks, got {derivative_checks}"
+    );
 }
 
 #[test]
@@ -259,7 +370,7 @@ fn clothoid_rides_the_disk_above_the_old_cruise_ceiling() {
     let line = &plan.moves[0];
     let clothoid = &plan.moves[1];
     let sigma = kappa_peak / length;
-    let old_cruise = libm::cbrt(DEFAULT_JERK_MM_S3 / sigma);
+    let old_cruise = libm::cbrt(100_000.0 / sigma);
     assert!(
         line.exit_v < line.peak_v - 1.0,
         "the approach line must still decelerate into the clothoid"
@@ -331,14 +442,21 @@ fn collinear_junction_is_not_a_stop() {
 }
 
 #[test]
-fn short_move_peak_trimmed_by_jerk_below_accel_apex() {
-    let (len, accel) = (0.5, 1000.0);
-    let out = outcome(vec![line_move(len, 300.0, 300.0, accel, 1)], Vec::new());
-    let plan = plan(&out).unwrap();
-    let m = &plan.moves[0];
-    let accel_apex = (accel * len).sqrt();
-    assert!(m.peak_v < accel_apex);
-    assert_eq!(plan.report.jerk_bound, 1);
+fn finite_jerk_is_rejected_with_configuration_diagnostic() {
+    let jerk = 100_000.0;
+    let out = outcome(
+        with_jerk(vec![line_move(0.5, 300.0, 300.0, 1000.0, 17)], jerk),
+        Vec::new(),
+    );
+    let error = plan(&out).unwrap_err();
+    assert_eq!(
+        error,
+        VelocityError::FiniteJerkUnsupported { line_no: 17, jerk }
+    );
+    assert_eq!(
+        error.to_string(),
+        "line 17: finite max_jerk 100000 is not supported by the continuous trajectory pipeline; set [printer] max_jerk: 0"
+    );
 }
 
 #[test]
@@ -353,6 +471,22 @@ fn infinite_jerk_recovers_constant_accel_apex() {
     let accel_apex = (accel * len).sqrt();
     assert!((m.peak_v - accel_apex).abs() < 1e-6);
     assert_eq!(plan.report.jerk_bound, 0);
+}
+
+#[test]
+fn continuous_moves_emit_non_empty_phases() {
+    let moves = [
+        line_move(20.0, 30.0, 200.0, 1000.0, 1),
+        arc_move(20.0, 1.0, 30.0, 200.0, 1000.0, 2),
+        clothoid_move(0.1, 20.0, 30.0, 1000.0, 3),
+    ];
+    for m in moves {
+        let profile = plan(&outcome(vec![m], Vec::new())).unwrap();
+        let velocity = &profile.moves[0];
+        assert!(move_time(velocity) > 0.0);
+        assert!(!velocity.phases.is_empty());
+        assert!(velocity.phases.iter().map(|phase| phase.dt).sum::<f64>() > 0.0);
+    }
 }
 
 #[test]
@@ -887,7 +1021,7 @@ fn decel_ramp_into_tight_arc() -> Vec<Move> {
 /// carried across the cut — anchored at zero acceleration, the jerk-limited
 /// stop needs more arc than the 0.062 mm move has.
 fn wipe_into_retract() -> (Vec<Move>, Vec<bool>) {
-    let lims = VelocityLimits::try_new(100.0, 1000.0, 30.0, 100_000.0).unwrap();
+    let lims = VelocityLimits::try_new(100.0, 1000.0, 30.0, f64::INFINITY).unwrap();
     let line = |len: f64, line_no: u32| {
         let seg = Segment::Line(Line::try_new([0.0, 0.0, 0.0], [len, 0.0, 0.0]).unwrap());
         Move {
@@ -1004,7 +1138,7 @@ fn replanned_tail_continues_the_uncut_profile() {
 /// followed by an extrude-only retract. The profile crosses the seam entering
 /// that last line already braking for the retract's rest anchor.
 fn graded_wipe_into_retract() -> (Vec<Move>, Vec<bool>) {
-    let lims = VelocityLimits::try_new(400.0, 2000.0, 20.0, 100_000.0).unwrap();
+    let lims = VelocityLimits::try_new(400.0, 2000.0, 20.0, f64::INFINITY).unwrap();
     let line = |len: f64, feed: f64, line_no: u32| {
         let seg = Segment::Line(Line::try_new([0.0, 0.0, 0.0], [len, 0.0, 0.0]).unwrap());
         Move {
@@ -1095,10 +1229,8 @@ fn infinite_jerk_disables_jerk_limiting_and_still_plans_to_rest() {
         line_move(5.0, 100.0, 300.0, 3000.0, 1),
         line_move(5.0, 100.0, 300.0, 3000.0, 2),
     ];
-    let finite = plan(&outcome(with_jerk(moves.clone(), 30_000.0), Vec::new())).unwrap();
     let inf = plan(&outcome(with_jerk(moves, f64::INFINITY), Vec::new())).unwrap();
 
-    assert!(inf.report.traversal_time_s <= finite.report.traversal_time_s + 1e-9);
     assert_eq!(inf.boundaries.last().copied(), Some(BoundaryState::REST));
     let a_rail = 3000.0 * (1.0 + 1e-6);
     for m in &inf.moves {
@@ -1154,7 +1286,7 @@ fn arc_brake_from_curvature_ceiling_emits_consistent_samples() {
                 arc_move(1.0 / kappa, len * kappa, feed, 1000.0, accel, 1),
                 line_move(5.0, 18.365, 1000.0, accel, 2),
             ],
-            2_000_000.0,
+            f64::INFINITY,
         ),
         Vec::new(),
     );
@@ -1223,7 +1355,7 @@ fn window_consistency(m: &MoveVelocity, kappa0: f64, sigma: f64, accel: f64) {
 /// stay within the acceleration disk.
 #[test]
 fn curvature_pinch_corner_plans_with_disk_consistent_samples() {
-    let (accel, jerk) = (1000.0, 1_000_000.0);
+    let (accel, jerk) = (1000.0, f64::INFINITY);
     let feed = 98.871_216_666_666_67;
     let (clo_len, clo_k1) = (0.326_111_947_928_510_2_f64, 1.605_579_859_690_027_5_f64);
     let sigma = clo_k1 / clo_len;

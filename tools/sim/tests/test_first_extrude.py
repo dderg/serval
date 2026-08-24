@@ -19,7 +19,7 @@ serial: {f4_pty}
 [printer]
 max_velocity: 2800
 max_accel: 50000
-max_jerk: 4000000
+max_jerk: 0
 square_corner_velocity: 100
 max_z_velocity: 25
 max_z_accel: 1000

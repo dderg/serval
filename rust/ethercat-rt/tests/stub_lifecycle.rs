@@ -1,3 +1,5 @@
+mod common;
+
 use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -99,7 +101,7 @@ fn stub_claim_succeeds_and_disconnect_terminates_process() {
 
     wait_for_socket(&path, Instant::now() + Duration::from_secs(5));
 
-    let conn = McuSerialConn::connect(&path).expect("McuSerialConn::connect must succeed");
+    let conn = common::connect_until(&path, Instant::now() + Duration::from_secs(5));
     let reply = do_handshake(&conn);
 
     assert_eq!(
@@ -136,7 +138,7 @@ fn stub_fail_bringup_propagates_offline_error() {
 
     wait_for_socket(&path, Instant::now() + Duration::from_secs(5));
 
-    let conn = McuSerialConn::connect(&path).expect("McuSerialConn::connect must succeed");
+    let conn = common::connect_until(&path, Instant::now() + Duration::from_secs(5));
     let reply = do_handshake(&conn);
 
     assert_eq!(

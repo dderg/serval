@@ -18,9 +18,7 @@ fn primed(parked: bool) -> Anchor {
 #[test]
 fn classify_mid_motion_underrun_is_fatal() {
     let a = primed(false);
-    // t0 = 100 + 0.25 - 0 = 100.25; next seg starts at stream-t 1.0 -> abs
-    // 101.25. Playhead at 101.5 has overrun it by 0.25s, mid-motion.
-    let class = a.classify(1.0, 101.5);
+    let class = a.classify(1.0, 101.0 + DEFAULT_LEAD_SECS + 0.25);
     assert!(
         matches!(class, AnchorClass::UnderrunFatal { gap_s, .. } if (gap_s - 0.25).abs() < 1e-9),
         "mid-motion underrun must be fatal, got {class:?}",
@@ -30,9 +28,7 @@ fn classify_mid_motion_underrun_is_fatal() {
 #[test]
 fn classify_mid_motion_low_margin_is_fatal() {
     let a = primed(false);
-    // Abs start 101.25; playhead 101.24 leaves a +0.01s margin, under the
-    // 0.02s floor, mid-motion.
-    let class = a.classify(1.0, 101.24);
+    let class = a.classify(1.0, 101.0 + DEFAULT_LEAD_SECS - 0.01);
     assert!(
         matches!(class, AnchorClass::LowMarginFatal { margin_s, .. }
             if margin_s > 0.0 && margin_s < LOW_MARGIN_WARN_SECS),
@@ -45,7 +41,7 @@ fn classify_same_starvation_from_rest_is_an_idle_resume() {
     // Identical geometry to the underrun case, but the previous segment
     // ended at rest: the very same overrun is a recoverable idle resume.
     let a = primed(true);
-    let class = a.classify(1.0, 101.5);
+    let class = a.classify(1.0, 101.0 + DEFAULT_LEAD_SECS + 0.25);
     assert!(
         matches!(class, AnchorClass::IdleResume { .. }),
         "an overrun from rest must re-anchor, not fault, got {class:?}",
@@ -55,9 +51,8 @@ fn classify_same_starvation_from_rest_is_an_idle_resume() {
 #[test]
 fn classify_healthy_margin_is_a_continuation() {
     let a = primed(false);
-    // Playhead well behind the start (0.25s margin): a healthy continuation.
     assert!(matches!(
-        a.classify(1.0, 101.0),
+        a.classify(1.0, 101.0 + DEFAULT_LEAD_SECS - 0.25),
         AnchorClass::Continuation { .. }
     ));
 }
@@ -215,8 +210,8 @@ fn backward_jump_takes_priority_over_underrun() {
 }
 
 #[test]
-fn default_lead_is_quarter_second_and_shared_with_planner() {
-    assert_eq!(super::DEFAULT_LEAD_SECS, 0.25);
+fn default_lead_covers_continuous_post_processing_and_matches_planner() {
+    assert_eq!(super::DEFAULT_LEAD_SECS, 0.525);
     assert_eq!(crate::worker::lead_secs(), super::DEFAULT_LEAD_SECS);
 }
 

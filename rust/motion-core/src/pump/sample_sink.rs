@@ -1,19 +1,19 @@
 // Sample-stream transport sink.
 //
-// Where the stepcompress sink turns lowered pieces into step/dir volleys, this
-// sink turns the same pieces into `SampleRun`s: uniformly spaced absolute
-// positions on the lane's own fixed-point grid. The quantization is the step
-// path's, entry point for entry point — `arm_piece` + `eval_pos_vel` +
+// Where the stepcompress sink turns clocked motor spans into step/dir volleys,
+// this sink turns the same spans into `SampleRun`s: uniformly spaced absolute
+// positions on the lane's own fixed-point grid. Every value on the wire is one
+// `eval_at_clock` of the active span at a device clock the lane owns, taken
+// once per `sample_period_cycles` tick and quantized with
 // `quantize_step_delta` against the lane's position quantum — so a phase lane
 // driven from samples lands on exactly the microsteps the step path would have
 // pulsed. What the sink drops is the sub-sample crossing arithmetic: the
 // executor receives positions, not edges, and interpolates them itself.
 //
-// Retirement is simpler here than on the stepcompress path, and deliberately
-// so: in sample mode the mcu never holds pieces, only samples, so a piece is
-// retired once it has been sampled. Barriers remain for the one thing that
-// needs a receipt — reconciling a re-anchor cut whose samples already reached
-// the wire.
+// A span is consumed once every sample inside it has been converted and its
+// view released, and retired only once the mcu's own playback clock has
+// carried past its end. Barriers remain for the one thing that needs a
+// receipt — reconciling a re-anchor cut whose samples already reached the wire.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -22,8 +22,6 @@ use std::thread::JoinHandle;
 
 use crossbeam_channel::Sender;
 use host_rt::host_io::parser::ArgValue;
-use runtime::motion_core::{ArmedPiece, arm_piece};
-use runtime::piece_ring::PieceEntry;
 use runtime::sample_run::{
     SAMPLE_RUN_COUNT_MAX, SAMPLE_RUN_DATA_MAX, SampleRunBuf, SampleRunError, delta_bytes,
     encode_deltas,
@@ -33,20 +31,21 @@ use runtime::sample_wire::{
 };
 use runtime::stepping_state::MAX_AXES as HEARTBEAT_AXES;
 use runtime::sub_sample_timing::quantize_step_delta;
+use trajectory::{BuzzProfile, ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm};
 
 use super::barrier_ledger::{AckFault, BarrierId, BarrierLedger};
 use super::pump_loop::pump_past_guard_secs;
 use super::stepcompress_sink::{
     BARRIER_ACK_DEADLINE_SECONDS, ClockSource, FrameEgress, SEND_LEAD_SECONDS,
 };
-use super::{AxisFrame, HeartbeatMsg, PumpMsg, SendError};
+use super::{AxisFrame, BuzzLane, HeartbeatMsg, PumpMsg, SendError};
 use crate::lock_ext::LockExt;
 
-/// Pieces one phase lane may have staged in the pump at a time. A sample lane
-/// keeps no piece ring on the mcu — a piece is retired the moment it has been
-/// sampled — so this is the host's own staging window, not a firmware depth.
-/// The firmware depth the wire must respect is `phase_ring_depth`, which the
-/// mcu advertises as `SAMPLE_RUNS_PER_LANE`.
+/// Spans one phase lane may have staged in the pump at a time. A sample lane
+/// keeps no span ring on the mcu — a span is consumed the moment it has been
+/// sampled through — so this is the host's own staging window, not a firmware
+/// depth. The firmware depth the wire must respect is `phase_ring_depth`,
+/// which the mcu advertises as `SAMPLE_RUNS_PER_LANE`.
 pub const SAMPLE_LANE_PIECE_WINDOW: u32 = 64;
 
 /// A phase lane's mcu ring is measured in single-digit runs, so the top-up
@@ -217,9 +216,9 @@ impl SampleLaneConfig {
     }
 }
 
-/// A piece carrying a `motor_mask` is relativized to start at zero, so its
+/// A span carrying a `motor_mask` is relativized to start at zero, so its
 /// samples ride against their own frame and leave the lane's absolute frame
-/// where the last kinematic piece left it — the same split the step path keeps
+/// where the last kinematic span left it — the same split the step path keeps
 /// between `last_step_count` and `overlay_step_frame`, and the reason overlay
 /// runs leave as `sample_overlay` rather than on the lane's abutting stream.
 #[derive(Clone, Copy, Debug)]
@@ -229,7 +228,22 @@ struct OverlayFrame {
     step_phase: f32,
 }
 
-/// A seam the sink must handle when the marked piece reaches it, in stream
+/// A nonzero motor mask is what marks a view as an overlay: the lane
+/// relativizes it to zero and ships it as `sample_overlay` instead of on the
+/// absolute stream — which is exactly what a buzz is, a displacement around
+/// wherever the trajectory left the lane.
+const BUZZ_OVERLAY_MASK: u8 = 1;
+
+/// The sweep the endpoint currently holds on its lanes. `end_clock` is the
+/// only thing that proves it played out: overlay runs ride the lane's
+/// separate overlay ring, so the heartbeat's retirement count never counts
+/// them and only the mcu's own playback clock can carry past the sweep.
+struct ActiveBuzz {
+    lanes: Vec<usize>,
+    end_clock: u64,
+}
+
+/// A seam the sink must handle when the marked span reaches it, in stream
 /// order. `Cut` is a fresh anchor: stop sampling, re-slope the lane clock,
 /// re-anchor the mcu. `Gap` is a rejoin — a stationary stream-time hole, which
 /// on a sample lane is exactly a sanctioned re-anchor at the same position.
@@ -254,7 +268,7 @@ struct PendingSampleCut {
     cut_at: u64,
     epoch_freq: f64,
     expected_position: i64,
-    held: Vec<PieceEntry>,
+    held: Vec<ClockedMotorSpan>,
 }
 
 /// What the mcu's last `StatusHeartbeat` said about each lane ring: the
@@ -450,8 +464,11 @@ struct ClosedRun {
 struct SampleLane {
     cfg: SampleLaneConfig,
     sample_period_cycles: u32,
-    pieces: VecDeque<PieceEntry>,
-    armed: Option<ArmedPiece>,
+    views: VecDeque<ClockedMotorSpan>,
+    /// The one view the lane is converting right now. It leaves only when
+    /// every sample inside it has been encoded, which is also when the lane
+    /// counts it consumed.
+    active: Option<ClockedMotorSpan>,
     overlay: Option<OverlayFrame>,
     p_prev: f32,
     step_phase: f32,
@@ -483,6 +500,12 @@ struct SampleLane {
     saturated_since: Option<u64>,
     seams: VecDeque<PendingSeam>,
     cut: Option<PendingSampleCut>,
+    /// Monotonic count of views fully converted and released, and the end
+    /// clocks of the released views the mcu's playback has not yet carried
+    /// past. A view is retired only against that clock, so a cut that abandons
+    /// unresolved views credits neither odometer for them.
+    consumed: u32,
+    unretired_view_ends: VecDeque<u64>,
     retired: u32,
 }
 
@@ -492,8 +515,8 @@ impl SampleLane {
         Ok(Self {
             cfg,
             sample_period_cycles,
-            pieces: VecDeque::new(),
-            armed: None,
+            views: VecDeque::new(),
+            active: None,
             overlay: None,
             p_prev: 0.0,
             step_phase: 0.0,
@@ -513,13 +536,10 @@ impl SampleLane {
             saturated_since: None,
             seams: VecDeque::new(),
             cut: None,
+            consumed: 0,
+            unretired_view_ends: VecDeque::new(),
             retired: 0,
         })
-    }
-
-    #[allow(clippy::cast_possible_truncation)]
-    fn cycles_per_second_f32(&self) -> f32 {
-        self.cfg.cycles_per_second as f32
     }
 
     /// A slot is free once the mcu has proven the run in it gone, and either
@@ -537,8 +557,9 @@ impl SampleLane {
     }
 
     /// Consume the mcu's latest reports: drop every in-flight run the reported
-    /// playback clock has carried past, and drop the ones the count alone
-    /// proves gone so the queue never outgrows the ring.
+    /// playback clock has carried past, drop the ones the count alone proves
+    /// gone so the queue never outgrows the ring, and retire every released
+    /// view whose window that same playback clock has closed.
     fn absorb_mcu_reports(&mut self, retired: &RetiredRuns) -> Result<(), SendError> {
         let credit = retired.of_axis(self.cfg.axis)?;
         let playback_clock = retired.playback_clock_of_axis(self.cfg.axis)?;
@@ -556,6 +577,14 @@ impl SampleLane {
                 self.in_flight_end_clocks.pop_front();
             }
             self.clock_retired = credit;
+        }
+        while self
+            .unretired_view_ends
+            .front()
+            .is_some_and(|&end| end <= playback_clock)
+        {
+            self.unretired_view_ends.pop_front();
+            self.retired = self.retired.wrapping_add(1);
         }
         Ok(())
     }
@@ -577,7 +606,7 @@ impl SampleLane {
     }
 
     fn reset_to(&mut self, position: i64, resume_floor: u64) {
-        self.armed = None;
+        self.abandon_views();
         self.overlay = None;
         self.position = position;
         #[allow(clippy::cast_precision_loss)]
@@ -596,64 +625,64 @@ impl SampleLane {
         self.wire_next_clock = None;
     }
 
-    /// Sample every piece the lane holds whose samples land at or before
+    /// Sample every view the lane holds whose samples land at or before
     /// `sample_to`. Closed runs queue in the endpoint's backlog; the mcu's ring
     /// depth paces what leaves it, never what the lane samples.
     fn sample_until(&mut self, sample_to: u64, out: &mut Vec<ClosedRun>) -> Result<(), SendError> {
-        let cps = self.cycles_per_second_f32();
-        while let Some(piece) = self.pieces.front().copied() {
-            let piece_end = match self.pieces.get(1) {
-                Some(next) => piece.end_time(cps).min(next.start_time),
-                None => piece.end_time(cps),
-            };
-            if self
-                .armed
-                .is_none_or(|a| a.piece_start_cycles != piece.start_time)
-            {
-                self.arm(&piece, cps, out)?;
+        loop {
+            if self.active.is_none() && !self.activate_next_view(out)? {
+                return Ok(());
             }
-            let armed = self
-                .armed
-                .ok_or_else(|| self.fatal("the piece armed above is gone"))?;
+            let view_end = self.active_window_end()?;
             loop {
                 let next_sample = self.prev_sample + u64::from(self.sample_period_cycles);
                 if next_sample > sample_to {
                     return Ok(());
                 }
-                if next_sample > piece_end {
+                if next_sample > view_end {
                     break;
                 }
-                self.emit_sample(&armed, next_sample, out)?;
+                self.emit_sample(next_sample, out)?;
                 self.prev_sample = next_sample;
             }
-            self.pieces.pop_front();
-            self.retired = self.retired.wrapping_add(1);
-            self.armed = None;
+            self.release_active_view()?;
         }
-        Ok(())
     }
 
-    fn arm(
-        &mut self,
-        piece: &PieceEntry,
-        cps: f32,
-        out: &mut Vec<ClosedRun>,
-    ) -> Result<(), SendError> {
-        let armed = arm_piece(piece, cps);
-        let overlay_piece = piece.motor_mask != 0;
-        if overlay_piece != self.run_is_overlay {
+    /// Where the active view's samples stop: its own end clock, or the start
+    /// of the view staged behind it when that lands first.
+    fn active_window_end(&self) -> Result<u64, SendError> {
+        let active = self
+            .active
+            .as_ref()
+            .ok_or_else(|| self.fatal("the lane has no active view to sample"))?;
+        Ok(match self.views.front() {
+            Some(next) => active.end_clock.min(next.start_clock),
+            None => active.end_clock,
+        })
+    }
+
+    /// Take the next staged view as the lane's one active view: switch the
+    /// open run's frame with it, and adopt the lane origin when the lane has
+    /// none yet.
+    fn activate_next_view(&mut self, out: &mut Vec<ClosedRun>) -> Result<bool, SendError> {
+        let Some(view) = self.views.pop_front() else {
+            return Ok(false);
+        };
+        let overlay_view = view.signal.motor_mask != 0;
+        if overlay_view != self.run_is_overlay {
             self.close_run(out)?;
-            self.run_is_overlay = overlay_piece;
+            self.run_is_overlay = overlay_view;
         }
-        self.overlay = overlay_piece.then_some(OverlayFrame {
+        self.overlay = overlay_view.then_some(OverlayFrame {
             p_prev: 0.0,
             position: 0,
             step_phase: 0.0,
         });
         if self.origin_clock.is_none() {
-            let begin = piece.start_time.max(self.resume_floor);
+            let begin = view.start_clock.max(self.resume_floor);
             self.prev_sample = begin;
-            let (position, _velocity) = armed.eval_pos_vel(begin);
+            let position = self.eval_view_at(&view, begin)?;
             if !self.positioned {
                 self.p_prev = position;
                 self.positioned = true;
@@ -661,27 +690,60 @@ impl SampleLane {
             self.origin_clock = Some(begin);
         } else {
             let next_sample = self.prev_sample + u64::from(self.sample_period_cycles);
-            if piece.start_time > next_sample {
+            if view.start_clock > next_sample {
                 return Err(self.fatal(&format!(
-                    "piece at clock {} leaves a {} tick hole after the sample at {} — a hole in \
+                    "view at clock {} leaves a {} tick hole after the sample at {} — a hole in \
                      the stream needs an explicit re-anchor, never a padded start",
-                    piece.start_time,
-                    piece.start_time - self.prev_sample,
+                    view.start_clock,
+                    view.start_clock - self.prev_sample,
                     self.prev_sample
                 )));
             }
         }
-        self.armed = Some(armed);
+        self.active = Some(view);
+        Ok(true)
+    }
+
+    /// The active view is spent: it leaves the lane counted consumed, and its
+    /// end clock waits for the mcu's playback to prove it retired.
+    fn release_active_view(&mut self) -> Result<(), SendError> {
+        let view = self
+            .active
+            .take()
+            .ok_or_else(|| self.fatal("the lane released a view it was not converting"))?;
+        self.consumed = self.consumed.wrapping_add(1);
+        self.unretired_view_ends.push_back(view.end_clock);
         Ok(())
     }
 
-    fn emit_sample(
-        &mut self,
-        armed: &ArmedPiece,
-        now: u64,
-        out: &mut Vec<ClosedRun>,
-    ) -> Result<(), SendError> {
-        let (p_end, _v_end) = armed.eval_pos_vel(now);
+    /// Drop everything the lane has not converted. An abandoned view proves
+    /// nothing about the mcu's playback, so neither odometer moves for it.
+    fn abandon_views(&mut self) {
+        self.views.clear();
+        self.active = None;
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn eval_view_at(&self, view: &ClockedMotorSpan, clock: u64) -> Result<f32, SendError> {
+        let pva = view.eval_at_clock(clock).map_err(|error| {
+            self.fatal(&format!(
+                "the view spanning clocks [{}, {}] does not evaluate at clock {clock}: {error}",
+                view.start_clock, view.end_clock
+            ))
+        })?;
+        Ok(pva.position as f32)
+    }
+
+    fn eval_active(&self, clock: u64) -> Result<f32, SendError> {
+        let view = self
+            .active
+            .as_ref()
+            .ok_or_else(|| self.fatal("a sample was demanded with no active view"))?;
+        self.eval_view_at(view, clock)
+    }
+
+    fn emit_sample(&mut self, now: u64, out: &mut Vec<ClosedRun>) -> Result<(), SendError> {
+        let p_end = self.eval_active(now)?;
         let (prev, p_start, step_phase_start) = match self.overlay {
             Some(frame) => (frame.position, frame.p_prev, frame.step_phase),
             None => (self.position, self.p_prev, self.step_phase),
@@ -842,6 +904,7 @@ pub struct SampleEndpoint {
     backlog: VecDeque<OutboundRun>,
     next_outbound_order: u64,
     mcu_retired: Arc<RetiredRuns>,
+    buzz: Option<ActiveBuzz>,
     fatal: Option<String>,
 }
 
@@ -877,6 +940,7 @@ impl SampleEndpoint {
             next_outbound_order: 0,
             mcu_retired: Arc::new(RetiredRuns::new()),
             fatal: None,
+            buzz: None,
         })
     }
 
@@ -890,6 +954,13 @@ impl SampleEndpoint {
 
     pub fn retired_counts(&self) -> Vec<u32> {
         self.lanes.iter().map(|lane| lane.retired).collect()
+    }
+
+    /// Views the lanes have fully converted and released, whatever the mcu has
+    /// since played. This is the odometer that frees the pump's staging
+    /// window; [`SampleEndpoint::retired_counts`] is the one playback proves.
+    pub fn consumed_counts(&self) -> Vec<u32> {
+        self.lanes.iter().map(|lane| lane.consumed).collect()
     }
 
     pub fn lane_positions(&self) -> Vec<i64> {
@@ -1013,7 +1084,7 @@ impl SampleEndpoint {
         let (now, _) = self.clock_now()?;
         for (index, &position) in positions.iter().enumerate() {
             let lane = self.lane_mut(index)?;
-            lane.pieces.clear();
+            lane.abandon_views();
             lane.seams.clear();
             lane.cut = None;
             lane.reset_to(position, now);
@@ -1030,13 +1101,218 @@ impl SampleEndpoint {
         }
         for lane in &self.lanes {
             if lane.cut.is_some()
-                || !lane.pieces.is_empty()
+                || !lane.views.is_empty()
+                || lane.active.is_some()
                 || !lane.seams.is_empty()
                 || lane.open_run_start().is_some()
                 || lane.outstanding_runs(&self.mcu_retired)? != 0
             {
                 return Ok(false);
             }
+        }
+        Ok(true)
+    }
+
+    /// Nothing the lane owes the mcu, and nothing the mcu still owes back: the
+    /// precondition for arming a sweep on it, and the same one for calling the
+    /// sweep played out.
+    fn lane_idle_for_buzz(&self, index: usize) -> Result<bool, SendError> {
+        let lane = self.lane_ref(index)?;
+        Ok(lane.cut.is_none()
+            && lane.views.is_empty()
+            && lane.active.is_none()
+            && lane.seams.is_empty()
+            && lane.open_run_start().is_none()
+            && lane.outstanding_runs(&self.mcu_retired)? == 0
+            && !self.backlog.iter().any(|out| out.lane == index))
+    }
+
+    /// Arm one resonance sweep across `lanes`. Every lane is cleared and every
+    /// overlay view built before any lane is touched, so a refusal leaves the
+    /// endpoint exactly as it was; the seam gap at the anchor makes the sweep's
+    /// start a sanctioned re-anchor rather than a hole in the lane's stream,
+    /// and one egress burst carries every lane so the axes stay in phase.
+    pub fn arm_buzz(
+        &mut self,
+        lanes: &[BuzzLane],
+        profile: &Arc<BuzzProfile>,
+        anchor_clock: u64,
+        clock_freq_hz: f64,
+    ) -> Result<(), SendError> {
+        if let Some(latched) = self.latched_fatal() {
+            return Err(latched);
+        }
+        if lanes.is_empty() {
+            return Err(SendError::Fatal(format!(
+                "sample endpoint mcu {}: a resonance buzz names no lane to drive",
+                self.mcu_id
+            )));
+        }
+        if self.buzz.is_some() {
+            return Err(SendError::Fatal(format!(
+                "sample endpoint mcu {}: a resonance buzz is already armed on these lanes",
+                self.mcu_id
+            )));
+        }
+        if !clock_freq_hz.is_finite() || clock_freq_hz <= 0.0 {
+            return Err(SendError::Fatal(format!(
+                "sample endpoint mcu {}: a resonance buzz cannot be clocked at {clock_freq_hz} Hz",
+                self.mcu_id
+            )));
+        }
+        let (now, _) = self.clock_now()?;
+        if anchor_clock < now {
+            return Err(SendError::Fatal(format!(
+                "sample endpoint mcu {}: resonance buzz anchor clock {anchor_clock} is already \
+                 behind the mcu clock {now}",
+                self.mcu_id
+            )));
+        }
+        let mut indexes: Vec<usize> = Vec::with_capacity(lanes.len());
+        for lane in lanes {
+            if !lane.sign.is_finite() || lane.sign == 0.0 {
+                return Err(SendError::Fatal(format!(
+                    "sample endpoint mcu {}: resonance buzz axis {} is driven with sign {}",
+                    self.mcu_id, lane.axis, lane.sign
+                )));
+            }
+            let index = self.lane_of(lane.axis)?;
+            if indexes.contains(&index) {
+                return Err(SendError::Fatal(format!(
+                    "sample endpoint mcu {}: resonance buzz names axis {} twice",
+                    self.mcu_id, lane.axis
+                )));
+            }
+            if !self.lane_idle_for_buzz(index)? {
+                return Err(SendError::Fatal(format!(
+                    "sample endpoint mcu {}: resonance buzz axis {} still carries trajectory the \
+                     lane has not converted and seen played",
+                    self.mcu_id, lane.axis
+                )));
+            }
+            indexes.push(index);
+        }
+        let mut frames = Vec::with_capacity(lanes.len());
+        let mut end_clock = 0;
+        for lane in lanes {
+            let view = self.buzz_overlay_view(*lane, profile, anchor_clock, clock_freq_hz)?;
+            end_clock = end_clock.max(view.end_clock);
+            frames.push(AxisFrame {
+                axis: lane.axis,
+                spans: vec![view],
+                new_head: 0,
+                room: 0,
+                guard_recorded_ns: 0,
+                guard_mcu_clock: 0,
+            });
+        }
+        for &index in &indexes {
+            self.lane_mut(index)?
+                .seams
+                .push_back(PendingSeam::Gap { at: anchor_clock });
+        }
+        self.buzz = Some(ActiveBuzz {
+            lanes: indexes,
+            end_clock,
+        });
+        self.send_frames_inner(self.mcu_id, &frames)
+            .map_err(|e| self.escalate(e))
+    }
+
+    fn buzz_overlay_view(
+        &self,
+        lane: BuzzLane,
+        profile: &Arc<BuzzProfile>,
+        anchor_clock: u64,
+        clock_freq_hz: f64,
+    ) -> Result<ClockedMotorSpan, SendError> {
+        let axis = lane.axis;
+        let signal = MotorSpan::try_new(
+            Arc::from([MotorGroup::Independent(MotorTerm {
+                source_axis: usize::from(axis),
+                axis: ContinuousAxis::Buzz {
+                    base_position: 0.0,
+                    sign: lane.sign,
+                    profile: Arc::clone(profile),
+                },
+                scale: 1.0,
+            })]),
+            profile.t_start(),
+            profile.t_end(),
+            BUZZ_OVERLAY_MASK,
+            u32::MAX,
+            false,
+        )
+        .map_err(|error| {
+            SendError::Fatal(format!(
+                "sample endpoint mcu {} axis {axis}: the resonance sweep signal is not \
+                 dispatchable: {error}",
+                self.mcu_id
+            ))
+        })?;
+        #[allow(clippy::cast_precision_loss)]
+        let anchor = anchor_clock as f64;
+        ClockedMotorSpan::try_new(
+            Arc::new(signal),
+            profile.t_start(),
+            profile.t_end(),
+            profile.t_start(),
+            profile.t_end(),
+            anchor,
+            clock_freq_hz,
+        )
+        .map_err(|error| {
+            SendError::Fatal(format!(
+                "sample endpoint mcu {} axis {axis}: the resonance sweep view is not clockable: \
+                 {error}",
+                self.mcu_id
+            ))
+        })
+    }
+
+    fn buzz_played_out(&self, buzz: &ActiveBuzz) -> Result<bool, SendError> {
+        for &index in &buzz.lanes {
+            if !self.lane_idle_for_buzz(index)? {
+                return Ok(false);
+            }
+            let axis = self.lane_ref(index)?.cfg.axis;
+            if self.mcu_retired.playback_clock_of_axis(axis)? < buzz.end_clock {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether the armed sweep has left the machine. An unarmed endpoint is
+    /// trivially complete; the armed one releases its lanes only once the mcu's
+    /// playback clock has carried past the sweep's end, and settles each lane
+    /// on its own position so the next absolute span issues a fresh anchor
+    /// instead of trying to abut the overlay.
+    pub fn buzz_complete(&mut self) -> Result<bool, SendError> {
+        if let Some(latched) = self.latched_fatal() {
+            return Err(latched);
+        }
+        let Some(buzz) = self.buzz.take() else {
+            return Ok(true);
+        };
+        let settled = self
+            .clock_now()
+            .and_then(|(now, _)| Ok(self.buzz_played_out(&buzz)?.then_some(now)));
+        let now = match settled {
+            Ok(Some(now)) => now,
+            Ok(None) => {
+                self.buzz = Some(buzz);
+                return Ok(false);
+            }
+            Err(error) => {
+                self.buzz = Some(buzz);
+                return Err(self.escalate(error));
+            }
+        };
+        for &index in &buzz.lanes {
+            let lane = self.lane_mut(index)?;
+            let position = lane.position;
+            lane.reset_to(position, now);
         }
         Ok(true)
     }
@@ -1091,7 +1367,7 @@ impl SampleEndpoint {
         let (now, _) = self.clock_now()?;
         self.backlog.retain(|out| out.lane != index);
         let lane = self.lane_mut(index)?;
-        lane.pieces.clear();
+        lane.abandon_views();
         lane.seams.clear();
         lane.cut = None;
         lane.reset_to(position, now);
@@ -1131,17 +1407,16 @@ impl SampleEndpoint {
     fn next_seam(
         &self,
         index: usize,
-        rest: &[PieceEntry],
+        rest: &[ClockedMotorSpan],
     ) -> Result<Option<(PendingSeam, usize)>, SendError> {
         let lane = self.lane_ref(index)?;
         let Some(seam) = lane.seams.front().copied() else {
             return Ok(None);
         };
         let at = seam.at();
-        let cps = lane.cycles_per_second_f32();
         Ok(rest
             .iter()
-            .position(|piece| piece.start_time >= at || piece.end_time(cps) > at)
+            .position(|view| view.start_clock >= at || view.end_clock > at)
             .map(|split| (seam, split)))
     }
 
@@ -1155,25 +1430,39 @@ impl SampleEndpoint {
         let (now, freq) = self.clock_now()?;
         for frame in frames {
             let index = self.lane_of(frame.axis)?;
+            if let Some(buzz) = self.buzz.as_ref() {
+                if buzz.lanes.contains(&index) {
+                    if let Some(absolute) =
+                        frame.spans.iter().find(|view| view.signal.motor_mask == 0)
+                    {
+                        return Err(SendError::Fatal(format!(
+                            "sample endpoint mcu {}: axis {} carries an armed resonance buzz, so \
+                             the absolute span at clock {} cannot be staged — the sweep has to \
+                             complete before the lane re-anchors",
+                            self.mcu_id, frame.axis, absolute.start_clock
+                        )));
+                    }
+                }
+            }
             if self.lane_ref(index)?.cut.is_some() {
-                let pieces = frame.pieces.clone();
+                let views = frame.spans.clone();
                 if let Some(cut) = self.lane_mut(index)?.cut.as_mut() {
-                    cut.held.extend(pieces);
+                    cut.held.extend(views);
                 }
                 continue;
             }
-            let mut rest: &[PieceEntry] = &frame.pieces;
+            let mut rest: &[ClockedMotorSpan] = &frame.spans;
             loop {
                 let Some((seam, split)) = self.next_seam(index, rest)? else {
                     let tail = rest.to_vec();
-                    self.lane_mut(index)?.pieces.extend(tail);
+                    self.lane_mut(index)?.views.extend(tail);
                     break;
                 };
                 let (head, tail) = rest.split_at(split);
                 {
                     let head = head.to_vec();
                     let lane = self.lane_mut(index)?;
-                    lane.pieces.extend(head);
+                    lane.views.extend(head);
                     lane.seams.pop_front();
                 }
                 if self.apply_seam(index, seam, tail, now, freq)? {
@@ -1186,12 +1475,12 @@ impl SampleEndpoint {
         self.flush(now, freq)
     }
 
-    /// Returns whether the pieces past the seam must wait for a barrier.
+    /// Returns whether the views past the seam must wait for a barrier.
     fn apply_seam(
         &mut self,
         index: usize,
         seam: PendingSeam,
-        tail: &[PieceEntry],
+        tail: &[ClockedMotorSpan],
         now: u64,
         freq: f64,
     ) -> Result<bool, SendError> {
@@ -1229,7 +1518,7 @@ impl SampleEndpoint {
                 if unretired == 0 {
                     self.backlog.retain(|out| out.lane != index);
                     let lane = self.lane_mut(index)?;
-                    lane.pieces.clear();
+                    lane.abandon_views();
                     lane.cfg.cycles_per_second = epoch_freq;
                     lane.sample_period_cycles = lane.cfg.sample_period_cycles()?;
                     let position = lane.position;
@@ -1247,7 +1536,7 @@ impl SampleEndpoint {
                 let expected_position = self.lane_ref(index)?.position;
                 let barrier = self.barriers.issue(oid);
                 let lane = self.lane_mut(index)?;
-                lane.pieces.clear();
+                lane.abandon_views();
                 lane.cut = Some(PendingSampleCut {
                     barrier,
                     cut_at: at,
@@ -1536,12 +1825,13 @@ impl SampleEndpoint {
     }
 
     fn post_heartbeat(&self) -> Result<(), SendError> {
+        let consumed_counts = self.consumed_counts();
         let retired_counts = self.retired_counts();
         self.pump_control
             .send(PumpMsg::Heartbeat(HeartbeatMsg {
                 mcu_id: self.mcu_id,
                 axes: self.lanes.iter().map(|lane| lane.cfg.axis).collect(),
-                consumed_counts: Some(retired_counts.clone()),
+                consumed_counts: Some(consumed_counts),
                 retired_counts,
                 retired_by: super::messages::RetiredBy::Phase,
             }))
@@ -1632,7 +1922,7 @@ impl SampleEndpoint {
         lane.cfg.cycles_per_second = cut.epoch_freq;
         lane.sample_period_cycles = lane.cfg.sample_period_cycles()?;
         lane.reset_to(i64::from(executed_position), cut.cut_at);
-        lane.pieces.extend(cut.held.iter().copied());
+        lane.views.extend(cut.held);
         let (now, freq) = self.clock_now()?;
         self.drain_into_backlog(now, freq)?;
         self.flush(now, freq)

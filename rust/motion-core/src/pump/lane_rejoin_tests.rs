@@ -4,13 +4,19 @@
 //! parked at rest — and stay loud when it did not.
 
 use super::*;
+use crate::lock_ext::LockExt;
 use crossbeam_channel::unbounded;
-use runtime::piece_ring::PieceEntry;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use trajectory::{
+    ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm, NudgeProfile,
+};
 
 const FREQ: f64 = 1_000_000.0;
+const SOURCE_AXIS: usize = 1;
+const SOURCE_LINE: u32 = 42;
+const PARKED_POSITION: f64 = 1.0;
 
 #[derive(Clone, Default)]
 struct MarkRecordingSink {
@@ -18,11 +24,11 @@ struct MarkRecordingSink {
     reanchors: Arc<Mutex<Vec<(AxisKey, u64)>>>,
 }
 
-impl PieceSink for MarkRecordingSink {
+impl SpanSink for MarkRecordingSink {
     fn send_frame(
         &self,
         _key: AxisKey,
-        _pieces: &[PieceEntry],
+        _spans: &[ClockedMotorSpan],
         _new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
@@ -30,35 +36,85 @@ impl PieceSink for MarkRecordingSink {
     }
 
     fn mark_seam_gap(&self, key: AxisKey, at_start_clock: u64) {
-        self.seam_gaps.lock().unwrap().push((key, at_start_clock));
+        self.seam_gaps.lock_ok().push((key, at_start_clock));
     }
 
     fn mark_reanchor(&self, key: AxisKey, at_start_clock: u64, _epoch_freq: Option<f64>) {
-        self.reanchors.lock().unwrap().push((key, at_start_clock));
+        self.reanchors.lock_ok().push((key, at_start_clock));
     }
 }
 
-fn hold_piece(start_time: u64, duration: f32) -> (PieceEntry, f64) {
-    hold_piece_at(start_time, duration, 1.0)
+#[allow(clippy::cast_precision_loss)]
+fn clocked(
+    signal: Arc<MotorSpan>,
+    stream_t_start: f64,
+    stream_t_end: f64,
+    start_clock: u64,
+) -> ClockedMotorSpan {
+    ClockedMotorSpan::try_new(
+        signal,
+        stream_t_start,
+        stream_t_end,
+        stream_t_start,
+        stream_t_end,
+        start_clock as f64,
+        FREQ,
+    )
+    .expect("the projected view spans at least one clock")
 }
 
-fn hold_piece_at(start_time: u64, duration: f32, pos: f32) -> (PieceEntry, f64) {
-    let mut p = PieceEntry::zeroed();
-    p.start_time = start_time;
-    p.duration = duration;
-    p.coeff_count = 1;
-    p.coeffs[0] = pos;
-    (p, start_time as f64 / FREQ)
+fn hold_span(start_clock: u64, secs: f64) -> ClockedMotorSpan {
+    hold_span_at(start_clock, secs, PARKED_POSITION)
 }
 
-fn moving_piece(start_time: u64, duration: f32) -> (PieceEntry, f64) {
-    let mut p = PieceEntry::zeroed();
-    p.start_time = start_time;
-    p.duration = duration;
-    p.coeff_count = 2;
-    p.coeffs[0] = 1.0;
-    p.coeffs[1] = 0.5;
-    (p, start_time as f64 / FREQ)
+#[allow(clippy::cast_precision_loss)]
+fn hold_span_at(start_clock: u64, secs: f64, position: f64) -> ClockedMotorSpan {
+    let t_start = start_clock as f64 / FREQ;
+    let t_end = t_start + secs;
+    let groups: Arc<[MotorGroup]> = Arc::from(vec![MotorGroup::Independent(MotorTerm {
+        source_axis: SOURCE_AXIS,
+        axis: ContinuousAxis::Hold {
+            position,
+            t_start,
+            t_end,
+        },
+        scale: 1.0,
+    })]);
+    let signal = MotorSpan::try_new(groups, t_start, t_end, 0, SOURCE_LINE, true)
+        .expect("a hold motor span is dispatchable");
+    clocked(Arc::new(signal), t_start, t_end, start_clock)
+}
+
+/// A view that ends mid-travel: the lane it belongs to did not park, so a
+/// later hole in its timeline is missing trajectory rather than a dwell.
+#[allow(clippy::cast_precision_loss)]
+fn moving_span(start_clock: u64, secs: f64) -> ClockedMotorSpan {
+    let t_start = start_clock as f64 / FREQ;
+    let profile = NudgeProfile::try_new(1.0, 100.0, 0.0, t_start).expect("cruise profile");
+    let t_end = t_start + profile.duration();
+    assert!(
+        secs < profile.duration(),
+        "the view must end inside the travel, or the lane parks at rest"
+    );
+    let groups: Arc<[MotorGroup]> = Arc::from(vec![
+        MotorGroup::Independent(MotorTerm {
+            source_axis: SOURCE_AXIS,
+            axis: ContinuousAxis::Nudge(profile),
+            scale: 1.0,
+        }),
+        MotorGroup::Independent(MotorTerm {
+            source_axis: SOURCE_AXIS,
+            axis: ContinuousAxis::Hold {
+                position: PARKED_POSITION,
+                t_start,
+                t_end,
+            },
+            scale: 1.0,
+        }),
+    ]);
+    let signal = MotorSpan::try_new(groups, t_start, t_end, 0, SOURCE_LINE, false)
+        .expect("a nudge motor span is dispatchable");
+    clocked(Arc::new(signal), t_start, t_start + secs, start_clock)
 }
 
 fn with_pump(
@@ -92,16 +148,16 @@ fn with_pump(
 fn enqueue(
     data: &crossbeam_channel::Sender<EnqueueMsg>,
     key: AxisKey,
-    pieces: Vec<(PieceEntry, f64)>,
+    spans: Vec<ClockedMotorSpan>,
     epoch: crate::anchor::StreamEpoch,
 ) {
     data.send(EnqueueMsg {
         epoch_freq: None,
         key,
-        pieces,
+        spans,
         epoch,
         lead_secs: MAX_LEAD_SECS,
-        source_line: u32::MAX,
+        source_line: SOURCE_LINE,
         batch_end: true,
     })
     .unwrap();
@@ -115,18 +171,18 @@ fn a_lane_resuming_at_rest_across_a_hole_gets_a_sanctioned_seam_gap() {
         enqueue(
             data,
             key,
-            vec![hold_piece(1_000_000, 0.01)],
+            vec![hold_span(1_000_000, 0.01)],
             crate::anchor::StreamEpoch::Continuation,
         );
         enqueue(
             data,
             key,
-            vec![hold_piece(resume_start, 0.01)],
+            vec![hold_span(resume_start, 0.01)],
             crate::anchor::StreamEpoch::Continuation,
         );
     });
     assert_eq!(
-        sink.seam_gaps.lock().unwrap().as_slice(),
+        sink.seam_gaps.lock_ok().as_slice(),
         &[(key, resume_start)],
         "the ~4s lane-local hole after an at-rest park must be sanctioned"
     );
@@ -135,23 +191,28 @@ fn a_lane_resuming_at_rest_across_a_hole_gets_a_sanctioned_seam_gap() {
 #[test]
 fn a_lane_hole_after_a_moving_park_stays_unmarked() {
     let key = AxisKey { mcu_id: 0, axis: 1 };
+    let travelling = moving_span(1_000_000, 0.005);
+    let resume_position = travelling
+        .signal
+        .position(travelling.stream_t_end)
+        .expect("the view evaluates at its own end");
     let sink = with_pump(|_, data| {
         enqueue(
             data,
             key,
-            vec![moving_piece(1_000_000, 0.01)],
+            vec![travelling],
             crate::anchor::StreamEpoch::Continuation,
         );
         enqueue(
             data,
             key,
-            vec![hold_piece_at(5_000_000, 0.01, 1.5)],
+            vec![hold_span_at(5_000_000, 0.01, resume_position)],
             crate::anchor::StreamEpoch::Continuation,
         );
     });
     assert!(
-        sink.seam_gaps.lock().unwrap().is_empty(),
-        "a hole after a piece that ended in motion is missing trajectory — \
+        sink.seam_gaps.lock_ok().is_empty(),
+        "a hole after a view that ended in motion is missing trajectory — \
          it must stay loud downstream, not be sanctioned"
     );
 }
@@ -159,9 +220,8 @@ fn a_lane_hole_after_a_moving_park_stays_unmarked() {
 #[test]
 fn a_contiguous_continuation_is_never_marked() {
     let key = AxisKey { mcu_id: 0, axis: 1 };
-    let first = hold_piece(1_000_000, 0.01);
-    #[allow(clippy::cast_possible_truncation)]
-    let next_start = first.0.end_time(FREQ as f32);
+    let first = hold_span(1_000_000, 0.01);
+    let next_start = first.end_clock;
     let sink = with_pump(|_, data| {
         enqueue(
             data,
@@ -172,13 +232,13 @@ fn a_contiguous_continuation_is_never_marked() {
         enqueue(
             data,
             key,
-            vec![hold_piece(next_start, 0.01)],
+            vec![hold_span(next_start, 0.01)],
             crate::anchor::StreamEpoch::Continuation,
         );
     });
     assert!(
-        sink.seam_gaps.lock().unwrap().is_empty(),
-        "abutting pieces must not spend the seam guard's strictness"
+        sink.seam_gaps.lock_ok().is_empty(),
+        "abutting views must not spend the seam guard's strictness"
     );
 }
 
@@ -189,22 +249,19 @@ fn a_fresh_epoch_resume_is_marked_as_reanchor_not_gap() {
         enqueue(
             data,
             key,
-            vec![hold_piece(1_000_000, 0.01)],
+            vec![hold_span(1_000_000, 0.01)],
             crate::anchor::StreamEpoch::Continuation,
         );
         enqueue(
             data,
             key,
-            vec![hold_piece(5_000_000, 0.01)],
+            vec![hold_span(5_000_000, 0.01)],
             crate::anchor::StreamEpoch::Reanchor,
         );
     });
     assert!(
-        sink.seam_gaps.lock().unwrap().is_empty(),
+        sink.seam_gaps.lock_ok().is_empty(),
         "a retimed epoch already cuts the seam; gap marking must not double-fire"
     );
-    assert_eq!(
-        sink.reanchors.lock().unwrap().as_slice(),
-        &[(key, 5_000_000)],
-    );
+    assert_eq!(sink.reanchors.lock_ok().as_slice(), &[(key, 5_000_000)],);
 }

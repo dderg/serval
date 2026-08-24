@@ -41,7 +41,7 @@ fn trident_chain_set() -> trajectory::AxisChainSet {
 
 fn trident_config() -> motion_pipeline::StreamConfig {
     let mut cfg = default_stream_config();
-    cfg.limits = geometry::VelocityLimits::try_new(2800.0, 50000.0, 100.0, 4_000_000.0)
+    cfg.limits = geometry::VelocityLimits::try_new(2800.0, 50000.0, 100.0, f64::INFINITY)
         .expect("trident bench limits are valid");
     cfg
 }
@@ -63,7 +63,10 @@ fn colinear_moves_end_at_commanded_extrusion() {
 
     let segs = collect_shaped_segments_from_script(script, cfg, trident_chain_set());
     let last = segs.last().expect("shaped segments emitted");
-    let projected = nurbs::eval::eval(&last.axes[EXTRUDER_AXIS], last.t_end);
+    let projected = last
+        .eval_axis(EXTRUDER_AXIS, last.t_end)
+        .expect("extruder axis evaluates at the terminal rest")
+        .position;
     let commanded = 200.0 * 0.6;
     let error_steps = (commanded - projected).abs() * STEPS_PER_MM;
     eprintln!(

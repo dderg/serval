@@ -1,32 +1,38 @@
-// Compress bench: how well do shaped Serval trajectories compress, and how
-// lossy is each encoder?
+// Compress bench: how well do continuous Serval trajectories compress, and
+// how lossy is each encoder?
 //
 // Route: full pipeline. The bench builds the production stage chain
 // (fit -> planner -> lowerer -> shaper, fit_tol 0.005 as in
 // dump_piece_stats.rs) with an input shaper on X/Y and pressure advance on
 // the E follower, drives a synthetic-but-realistic print (300 mm/s travel,
 // 0.4 mm zigzag infill at 150 mm/s, 60 mm/s perimeter with 90° corners)
-// through it, samples the shaped X track at 20 kHz into a step-clock stream
-// (secant sub-sample crossing times, mirroring the shim's arithmetic), then
-// compresses that stream with the classic encoder at two error budgets and
-// the high-precision encoder, reconstructing each encoder's emitted step
-// times via its own arithmetic (the HP walk is the reference MCU
-// `queue_step_hp` fixed-point walk: interval/add/add2 at 2^shift scale with
-// a half-unit rounding accumulator).
+// through it, signs the shaped X track as a one-term motor span on the
+// device's clock, and lets the shim's own root cursor solve the exact step
+// clocks that span demands. Those roots -- not a sampled grid -- are what the
+// classic encoder at two error budgets and the high-precision encoder then
+// compress, with each encoder's emitted step times reconstructed via its own
+// arithmetic (the HP walk is the reference MCU `queue_step_hp` fixed-point
+// walk: interval/add/add2 at 2^shift scale with a half-unit rounding
+// accumulator).
 //
 //   cargo run --release -p motion-core --example compress_bench
 
+use std::sync::Arc;
 use std::thread;
 
 use geometry::{CornerFitConfig, VelocityLimits};
 use motion_core::classify::build_move;
-use motion_pipeline::{ShapedItem, StreamConfig, setup_stages};
-use nurbs::eval::eval;
+use motion_pipeline::{StreamConfig, TrajectoryItem, setup_stages};
 use step_shim::compress::compress_with_max_error;
 use step_shim::compress_hp::{StepMoveHp, compress_hp};
-use trajectory::{AxisChainSet, CompiledChain, PostProcessorInstance, ShapedSegment};
+use step_shim::ring::SpanQueue;
+use step_shim::root_cursor::StepRootCursor;
+use step_shim::{MotorConfig, StepEncoder};
+use trajectory::{
+    AxisChainSet, ClockedMotorSpan, CompiledChain, ContinuousSegment, MotorGroup, MotorSpan,
+    MotorTerm, PostProcessorInstance,
+};
 
-const SAMPLE_RATE_HZ: f64 = 20_000.0;
 const MICROSTEP_MM: f64 = 0.00078;
 const INFILL_WIDTH_MM: f64 = 0.4;
 const LAYER_HEIGHT_MM: f64 = 0.2;
@@ -63,7 +69,7 @@ fn bench_chains() -> AxisChainSet {
     }
 }
 
-fn run_pipeline() -> Vec<ShapedSegment> {
+fn run_pipeline() -> Vec<ContinuousSegment> {
     // Neptune bench printer.cfg limits (same as dump_piece_stats.rs).
     let limits = VelocityLimits::try_new(300.0, 4000.0, 8.0, 1_000_000.0).unwrap();
     let cfg = StreamConfig {
@@ -80,9 +86,9 @@ fn run_pipeline() -> Vec<ShapedSegment> {
     let handle = setup_stages(cfg, bench_chains(), vec![0.0; 4], 0.0);
     let output = handle.output;
     let collector = thread::spawn(move || {
-        let mut segs: Vec<ShapedSegment> = Vec::new();
+        let mut segs: Vec<ContinuousSegment> = Vec::new();
         while let Ok(item) = output.recv() {
-            if let ShapedItem::Seg(seg) = item {
+            if let TrajectoryItem::Seg(seg) = item {
                 segs.push(seg);
             }
         }
@@ -149,102 +155,94 @@ fn run_pipeline() -> Vec<ShapedSegment> {
     segs
 }
 
-/// Mirror of `runtime::sub_sample_timing::quantize_step_delta` (round to
-/// nearest microstep boundary, snapping exactly-half values down to avoid
-/// double counting a boundary) in f64.
-fn quantize_step_delta(phase: f64) -> i64 {
-    let target = (phase / MICROSTEP_MM).round() as i64;
-    if target > 0 && phase <= (target as f64 - 0.5) * MICROSTEP_MM {
-        target - 1
-    } else if target < 0 && phase >= (target as f64 + 0.5) * MICROSTEP_MM {
-        target + 1
-    } else {
-        target
+fn motor_config(freq: f64) -> MotorConfig {
+    MotorConfig {
+        oid: 0,
+        microstep_distance: MICROSTEP_MM,
+        invert_dir: false,
+        cycles_per_second: freq,
+        encoder: StepEncoder::Classic { max_error_ticks: 0 },
+        min_rearm_cycles: 0,
     }
 }
 
-struct SampledStep {
+/// Sign the shaped `axis` track of every segment as the one-term motor span a
+/// Cartesian lane carries, anchored on the device clock and cut into the
+/// bounded views the transports admit.
+fn motor_views(segs: &[ContinuousSegment], axis: usize, freq: f64) -> Vec<ClockedMotorSpan> {
+    let mut views: Vec<ClockedMotorSpan> = Vec::new();
+    for seg in segs {
+        let groups: Arc<[MotorGroup]> = Arc::from([MotorGroup::Independent(MotorTerm {
+            source_axis: axis,
+            axis: seg.axes[axis].clone(),
+            scale: 1.0,
+        })]);
+        let signal = MotorSpan::try_new(groups, seg.t_start, seg.t_end, 0, seg.source_line, false)
+            .expect("a one-term lane of a shaped segment is dispatchable");
+        let clocked = ClockedMotorSpan::try_new(
+            Arc::new(signal),
+            seg.t_start,
+            seg.t_end,
+            seg.t_start,
+            seg.t_end,
+            seg.t_start * freq,
+            freq,
+        )
+        .expect("a representable clocked view");
+        views.extend(clocked.split_max_duration().expect("bounded views"));
+    }
+    views
+}
+
+struct SolvedStep {
     clock: u64,
     forward: bool,
-    /// Secant velocity over the bracketing sample window, mm/s (signed).
-    v_local: f64,
+    /// The span's own velocity at the root clock, mm/s (signed).
+    velocity: f64,
 }
 
-/// Sample the shaped `axis` track at 20 kHz into a step-clock stream using
-/// the shim's secant sub-sample crossing arithmetic.
-fn sample_steps(segs: &[ShapedSegment], axis: usize, freq: f64) -> Vec<SampledStep> {
-    let t0 = segs.first().expect("non-empty").t_start;
-    let t1 = segs.last().expect("non-empty").t_end;
-    let period = 1.0 / SAMPLE_RATE_HZ;
-    let sample_period_cycles = (freq / SAMPLE_RATE_HZ) as u64;
-    assert_eq!(
-        sample_period_cycles as f64 * SAMPLE_RATE_HZ,
-        freq,
-        "clock variant must divide evenly into 20 kHz samples"
-    );
-    let origin_clock = (t0 * freq) as u64;
-    let n_samples = ((t1 - t0) / period).ceil() as usize + 1;
-
-    let mut out: Vec<SampledStep> = Vec::new();
-    let mut seg_idx = 0usize;
-    let mut prev_p = match segs[0].axes.get(axis) {
-        Some(curve) => eval(curve, t0),
-        None => 0.0,
-    };
-    let mut phase = 0.0_f64;
-    for k in 0..n_samples {
-        let t = (t0 + k as f64 * period).min(t1);
-        while seg_idx + 1 < segs.len() && t > segs[seg_idx + 1].t_start {
-            seg_idx += 1;
+/// Solve the exact step clocks the lane demands: every clock at which the
+/// span's position first reaches the next microstep threshold, as the shim's
+/// root cursor resolves them on the device clock.
+fn solve_roots(views: &[ClockedMotorSpan], freq: f64) -> Vec<SolvedStep> {
+    let cfg = motor_config(freq);
+    let mut cursor = StepRootCursor::new(&cfg);
+    cursor.reset_to(0, 0);
+    let mut queue = SpanQueue::new(4);
+    let mut roots = Vec::new();
+    let mut out = Vec::new();
+    for view in views {
+        queue
+            .push(AXIS, view.clone())
+            .expect("the views of a contiguous stream abut");
+        cursor
+            .advance(AXIS, &cfg, &mut queue, view.end_clock, &mut out)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "root cursor failed on view [{}, {}]: {e}",
+                    view.start_clock, view.end_clock
+                )
+            });
+        for root in out.drain(..) {
+            let pva = view
+                .eval_at_clock(root.clock)
+                .expect("a solved root lies inside the view that produced it");
+            roots.push(SolvedStep {
+                clock: root.clock,
+                forward: root.advance > 0,
+                velocity: pva.velocity,
+            });
         }
-        let p = match segs[seg_idx].axes.get(axis) {
-            Some(curve) => eval(curve, t),
-            None => prev_p,
-        };
-        let phase_end = phase + (p - prev_p);
-        let delta = quantize_step_delta(phase_end);
-        if delta != 0 {
-            let n = delta.unsigned_abs() as usize;
-            let forward = delta > 0;
-            let dir = if forward { 1.0_f64 } else { -1.0_f64 };
-            let disp = p - prev_p;
-            assert!(disp != 0.0, "step delta without displacement");
-            let sample_start_clock = origin_clock + k as u64 * sample_period_cycles;
-            for kk in 0..n {
-                let threshold = (kk as f64 + 0.5) * dir * MICROSTEP_MM;
-                let t_local = (threshold - phase) * period / disp;
-                assert!(
-                    t_local > -period * 1e-9 && t_local < period * (1.0 + 1e-9),
-                    "crossing time {t_local} outside the sample window"
-                );
-                let clock = sample_start_clock + (t_local * freq) as u64;
-                out.push(SampledStep {
-                    clock,
-                    forward,
-                    v_local: disp / period,
-                });
-            }
-            phase = phase_end - delta as f64 * MICROSTEP_MM;
-        } else {
-            phase = phase_end;
-        }
-        prev_p = p;
     }
-    assert!(!out.is_empty(), "axis {axis} produced no steps");
+    assert!(!roots.is_empty(), "axis {AXIS} produced no steps");
     assert!(
-        out[0].clock > 0,
+        roots[0].clock > 0,
         "first step clock must leave room for an anchor"
     );
-    for w in out.windows(2) {
-        assert!(
-            w[1].clock > w[0].clock,
-            "step clocks must be strictly increasing"
-        );
-    }
-    out
+    roots
 }
 
-fn split_runs(steps: &[SampledStep]) -> Vec<(usize, usize)> {
+fn split_runs(steps: &[SolvedStep]) -> Vec<(usize, usize)> {
     let mut runs: Vec<(usize, usize)> = Vec::new();
     let mut start = 0usize;
     for i in 1..=steps.len() {
@@ -299,13 +297,13 @@ impl EncoderStats {
         self.max_steps_in_move = self.max_steps_in_move.max(count);
     }
 
-    fn note_step(&mut self, emitted: u64, want: u64, v_local: f64) {
+    fn note_step(&mut self, emitted: u64, want: u64, velocity: f64) {
         let err = emitted as i64 - want as i64;
         let abs_err = err.unsigned_abs();
         if abs_err as u64 > self.max_err_ticks as u64 {
             self.max_err_ticks = abs_err as i64;
             self.max_err_us = abs_err as f64 / self.freq * 1e6;
-            self.max_pos_err_um = abs_err as f64 / self.freq * v_local * 1e3;
+            self.max_pos_err_um = abs_err as f64 / self.freq * velocity * 1e3;
         }
         self.sum_sq_err_ticks += u128::from(abs_err) * u128::from(abs_err);
         self.steps += 1;
@@ -321,7 +319,7 @@ impl EncoderStats {
 }
 
 fn encode_classic(
-    stream: &[SampledStep],
+    stream: &[SolvedStep],
     runs: &[(usize, usize)],
     freq: f64,
     max_error: u32,
@@ -346,7 +344,7 @@ fn encode_classic(
             for n in 1..=mv.count {
                 let emitted = mv.step_clock(move_anchor, n);
                 let want = stream[start + run_step].clock;
-                stats.note_step(emitted, want, stream[start + run_step].v_local.abs());
+                stats.note_step(emitted, want, stream[start + run_step].velocity.abs());
                 run_step += 1;
             }
             move_anchor = mv.last_clock(move_anchor);
@@ -376,7 +374,7 @@ fn hp_step_offset(mv: &StepMoveHp, n: u32) -> u64 {
     }
 }
 
-fn encode_hp(stream: &[SampledStep], runs: &[(usize, usize)], freq: f64) -> EncoderStats {
+fn encode_hp(stream: &[SolvedStep], runs: &[(usize, usize)], freq: f64) -> EncoderStats {
     let mut anchor = stream[0].clock - 1;
     let mut next_expected_interval: u32 = 0;
     let mut stats = EncoderStats::new(HP_WIRE_BYTES, freq);
@@ -404,7 +402,7 @@ fn encode_hp(stream: &[SampledStep], runs: &[(usize, usize)], freq: f64) -> Enco
             for n in 1..=u32::from(mv.count) {
                 let emitted = move_anchor + hp_step_offset(mv, n);
                 let want = stream[start + run_step].clock;
-                stats.note_step(emitted, want, stream[start + run_step].v_local.abs());
+                stats.note_step(emitted, want, stream[start + run_step].velocity.abs());
                 run_step += 1;
             }
             move_anchor += mv.last_step;
@@ -416,10 +414,15 @@ fn encode_hp(stream: &[SampledStep], runs: &[(usize, usize)], freq: f64) -> Enco
     stats
 }
 
-fn bench_clock(freq: f64, segs: &[ShapedSegment]) {
-    let stream = sample_steps(segs, AXIS, freq);
+fn bench_clock(freq: f64, segs: &[ContinuousSegment]) {
+    let views = motor_views(segs, AXIS, freq);
+    let stream = solve_roots(&views, freq);
     let runs = split_runs(&stream);
     let motion_secs = (stream.last().unwrap().clock - stream[0].clock) as f64 / freq;
+    let peak_velocity = stream
+        .iter()
+        .map(|s| s.velocity.abs())
+        .fold(0.0_f64, f64::max);
     let variants = [
         encode_classic(&stream, &runs, freq, 1600),
         encode_classic(&stream, &runs, freq, (25e-6 * freq) as u32),
@@ -428,12 +431,14 @@ fn bench_clock(freq: f64, segs: &[ShapedSegment]) {
     let names = ["classic 1600t", "classic 25us", "hp"];
 
     println!(
-        "clock {} MHz | axis {} | {} steps | {:.1} s of motion | {} runs | sample 20 kHz | ms 0.00078 mm",
+        "clock {} MHz | axis {} | {} steps | {:.1} s of motion | {} runs | {} views | exact roots | peak {:.0} mm/s | ms 0.00078 mm",
         freq as u64 / 1_000_000,
         AXIS,
         stream.len(),
         motion_secs,
         runs.len(),
+        views.len(),
+        peak_velocity,
     );
     println!(
         "{:<17} {:>7} {:>12} {:>9} {:>11} {:>11} {:>11} {:>10} {:>9} {:>9}",

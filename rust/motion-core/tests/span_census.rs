@@ -1,16 +1,17 @@
-// Offline piece-duration census over a full print replay with the Trident
+// Offline span-duration census over a full print replay with the Trident
 // chain set (X/Y smooth_mzv, E linear PA + smooth_triangle). Quantifies how
-// many wire pieces each axis mints per second and where sub-200 us pieces
+// many wire spans each axis mints per second and where sub-200 us spans
 // cluster, attributing the dense streams that saturate the pump (#405/#408).
 // Gcode path comes from KALICO_REPRO_GCODE; skipped when unset.
 
 use geometry::path::lowering::PositionProfile;
 use motion_core::seam_test_harness::{default_stream_config, parse_gcode_to_moves};
-use motion_pipeline::{ShapedItem, StreamInput, setup_stages};
-use trajectory::ShapedSegment;
+use motion_pipeline::{StreamInput, TrajectoryItem, setup_stages};
+use trajectory::ContinuousSegment;
 
 const AXIS_NAMES: [&str; 4] = ["x", "y", "z", "e"];
 const BUCKETS_US: [f64; 6] = [150.0, 300.0, 600.0, 1200.0, 5000.0, f64::INFINITY];
+const AXIS_MOTION_EPS: f64 = 1e-9;
 
 fn trident_chain_set() -> trajectory::AxisChainSet {
     let sx = trajectory::PostProcessorInstance::new(
@@ -44,10 +45,22 @@ fn trident_chain_set() -> trajectory::AxisChainSet {
     }
 }
 
+fn axis_moves(seg: &ContinuousSegment, axis: usize) -> bool {
+    let Ok(start) = seg.eval_axis(axis, seg.t_start) else {
+        return false;
+    };
+    let Ok(end) = seg.eval_axis(axis, seg.t_end) else {
+        return false;
+    };
+    (end.position - start.position).abs() > AXIS_MOTION_EPS
+        || start.velocity.abs() > AXIS_MOTION_EPS
+        || end.velocity.abs() > AXIS_MOTION_EPS
+}
+
 #[test]
-fn piece_duration_census() {
+fn span_duration_census() {
     let Ok(path) = std::env::var("KALICO_REPRO_GCODE") else {
-        eprintln!("KALICO_REPRO_GCODE unset — skipping census");
+        eprintln!("KALICO_REPRO_GCODE unset — skipping");
         return;
     };
     let source = std::fs::read_to_string(&path).expect("gcode file readable");
@@ -73,9 +86,9 @@ fn piece_duration_census() {
     let handle = setup_stages(cfg, trident_chain_set(), home, 0.0);
     let output = handle.output;
     let collector = std::thread::spawn(move || {
-        let mut segs: Vec<ShapedSegment> = Vec::new();
+        let mut segs: Vec<ContinuousSegment> = Vec::new();
         while let Ok(item) = output.recv() {
-            if let ShapedItem::Seg(seg) = item {
+            if let TrajectoryItem::Seg(seg) = item {
                 segs.push(seg);
             }
         }
@@ -103,23 +116,23 @@ fn piece_duration_census() {
         std::collections::BTreeMap::new();
 
     for seg in &segs {
-        for (axis, curve) in seg.axes.iter().enumerate().take(4) {
-            let pieces = nurbs::bezier::extract_bezier_pieces(curve);
-            for bp in &pieces {
-                let d = bp.u_end - bp.u_start;
-                if d <= 0.0 {
-                    continue;
-                }
-                counts[axis] += 1;
-                time_total[axis] += d;
-                let dus = d * 1e6;
-                let b = BUCKETS_US.iter().position(|&hi| dus <= hi).unwrap();
-                hist[axis][b] += 1;
-                let window = (seg.t_start + bp.u_start).max(0.0) as u64;
-                let e = per_window.entry((window, axis)).or_insert((0, 0));
-                e.0 += 1;
-                e.1 = seg.source_line;
+        let d = seg.t_end - seg.t_start;
+        if d <= 0.0 {
+            continue;
+        }
+        for axis in 0..4 {
+            if !axis_moves(seg, axis) {
+                continue;
             }
+            counts[axis] += 1;
+            time_total[axis] += d;
+            let dus = d * 1e6;
+            let b = BUCKETS_US.iter().position(|&hi| dus <= hi).unwrap();
+            hist[axis][b] += 1;
+            let window = seg.t_start.max(0.0) as u64;
+            let e = per_window.entry((window, axis)).or_insert((0, 0));
+            e.0 += 1;
+            e.1 = seg.source_line;
         }
     }
 
@@ -131,7 +144,7 @@ fn piece_duration_census() {
         }
         let avg_us = time_total[axis] / counts[axis] as f64 * 1e6;
         eprint!(
-            "axis {} ({}): {} pieces, avg piece {:.0}us, mean rate {:.0}/s | buckets ",
+            "axis {} ({}): {} spans, avg span {:.0}us, mean rate {:.0}/s | buckets ",
             axis,
             AXIS_NAMES[axis],
             counts[axis],
@@ -151,16 +164,16 @@ fn piece_duration_census() {
 
     let mut worst: Vec<((u64, usize), (u64, u32))> = per_window.into_iter().collect();
     worst.sort_by(|a, b| b.1.0.cmp(&a.1.0));
-    eprintln!("worst 1s windows (pieces/s per axis):");
+    eprintln!("worst 1s windows (spans/s per axis):");
     for ((t, axis), (n, line)) in worst.iter().take(16) {
         eprintln!(
-            "  t={t}s axis={} pieces={n} (last gcode line {line})",
+            "  t={t}s axis={} spans={n} (last gcode line {line})",
             AXIS_NAMES[*axis]
         );
     }
     let total: u64 = counts.iter().sum();
     eprintln!(
-        "TOTAL pieces {total} over {stream_end:.1}s = {:.0} pieces/s mean",
+        "TOTAL spans {total} over {stream_end:.1}s = {:.0} spans/s mean",
         total as f64 / stream_end.max(1e-9)
     );
 }

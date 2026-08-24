@@ -5,9 +5,11 @@
 // (fit -> planner -> lowerer -> shaper) with an input shaper on X/Y and
 // pressure advance on the E follower, drives the same synthetic-but-realistic
 // print compress_bench uses (300 mm/s travel, 0.4 mm zigzag infill at
-// 150 mm/s, 60 mm/s perimeter with 90 deg corners), then samples the shaped X
-// track onto the phase lane's quantum at 2 kHz and 4 kHz and packs the result
-// into `sample_run` payloads.
+// 150 mm/s, 60 mm/s perimeter with 90 deg corners), signs the shaped X track
+// as a one-term motor span on the device clock, and evaluates it at the device
+// clocks a 2 kHz and a 4 kHz sample lane land on -- position, velocity and
+// acceleration from the same `eval_at_clock` the sample sink calls -- then
+// packs the quantized positions into `sample_run` payloads.
 //
 // Two candidate encodings are measured over identical runs:
 //   varint  - zigzag LEB128 first differences, the codec in
@@ -17,18 +19,22 @@
 //
 //   cargo run --release -p motion-core --example sample_encoding_bench
 
+use std::sync::Arc;
 use std::thread;
 
 use geometry::{CornerFitConfig, VelocityLimits};
 use motion_core::classify::build_move;
-use motion_pipeline::{ShapedItem, StreamConfig, setup_stages};
-use nurbs::eval::eval;
+use motion_pipeline::{StreamConfig, TrajectoryItem, setup_stages};
 use runtime::sample_run::{SAMPLE_RUN_COUNT_MAX, SAMPLE_RUN_DATA_MAX, delta_bytes};
-use trajectory::{AxisChainSet, CompiledChain, PostProcessorInstance, ShapedSegment};
+use runtime::sub_sample_timing::quantize_step_delta;
+use trajectory::{
+    AxisChainSet, ClockedMotorSpan, CompiledChain, ContinuousSegment, MotorGroup, MotorSpan,
+    MotorTerm, PostProcessorInstance,
+};
 
 /// The phase lane's quantum: one LUT phase increment, which at 1024 phases per
 /// electrical cycle is one 256-microstep of the bench motor.
-const PHASE_QUANTUM_MM: f64 = 0.00078;
+const PHASE_QUANTUM_MM: f32 = 0.00078;
 
 const INFILL_WIDTH_MM: f64 = 0.4;
 const LAYER_HEIGHT_MM: f64 = 0.2;
@@ -68,7 +74,7 @@ fn bench_chains() -> AxisChainSet {
     }
 }
 
-fn run_pipeline() -> Vec<ShapedSegment> {
+fn run_pipeline() -> Vec<ContinuousSegment> {
     let limits = VelocityLimits::try_new(300.0, 4000.0, 8.0, 1_000_000.0).unwrap();
     let cfg = StreamConfig {
         corner: CornerFitConfig::default(),
@@ -84,9 +90,9 @@ fn run_pipeline() -> Vec<ShapedSegment> {
     let handle = setup_stages(cfg, bench_chains(), vec![0.0; 4], 0.0);
     let output = handle.output;
     let collector = thread::spawn(move || {
-        let mut segs: Vec<ShapedSegment> = Vec::new();
+        let mut segs: Vec<ContinuousSegment> = Vec::new();
         while let Ok(item) = output.recv() {
-            if let ShapedItem::Seg(seg) = item {
+            if let TrajectoryItem::Seg(seg) = item {
                 segs.push(seg);
             }
         }
@@ -142,47 +148,85 @@ fn run_pipeline() -> Vec<ShapedSegment> {
     segs
 }
 
-/// Mirror of `runtime::sub_sample_timing::quantize_step_delta` in f64: round to
-/// the nearest quantum, snapping exactly-half values down so a boundary is
-/// never counted twice.
-fn quantize(phase: f64) -> i64 {
-    let target = (phase / PHASE_QUANTUM_MM).round() as i64;
-    if target > 0 && phase <= (target as f64 - 0.5) * PHASE_QUANTUM_MM {
-        target - 1
-    } else if target < 0 && phase >= (target as f64 + 0.5) * PHASE_QUANTUM_MM {
-        target + 1
-    } else {
-        target
+/// Sign the shaped `axis` track of every segment as the one-term motor span a
+/// Cartesian lane carries, anchored on the device clock and cut into the
+/// bounded views the transports admit.
+fn motor_views(segs: &[ContinuousSegment], axis: usize) -> Vec<ClockedMotorSpan> {
+    let mut views: Vec<ClockedMotorSpan> = Vec::new();
+    for seg in segs {
+        let groups: Arc<[MotorGroup]> = Arc::from([MotorGroup::Independent(MotorTerm {
+            source_axis: axis,
+            axis: seg.axes[axis].clone(),
+            scale: 1.0,
+        })]);
+        let signal = MotorSpan::try_new(groups, seg.t_start, seg.t_end, 0, seg.source_line, false)
+            .expect("a one-term lane of a shaped segment is dispatchable");
+        let clocked = ClockedMotorSpan::try_new(
+            Arc::new(signal),
+            seg.t_start,
+            seg.t_end,
+            seg.t_start,
+            seg.t_end,
+            seg.t_start * CYCLES_PER_SECOND,
+            CYCLES_PER_SECOND,
+        )
+        .expect("a representable clocked view");
+        views.extend(clocked.split_max_duration().expect("bounded views"));
     }
+    views
 }
 
-/// Sample the shaped `axis` track onto the lane's quantum, exactly as the pump
-/// sample sink does: accumulate the residual phase and quantize the total.
-fn sample_positions(segs: &[ShapedSegment], axis: usize, rate_hz: f64) -> (Vec<i32>, f64) {
-    let t0 = segs.first().expect("non-empty").t_start;
-    let t1 = segs.last().expect("non-empty").t_end;
-    let period = 1.0 / rate_hz;
-    let n_samples = ((t1 - t0) / period).ceil() as usize + 1;
+struct Sampled {
+    positions: Vec<i32>,
+    motion_secs: f64,
+    peak_velocity: f64,
+    peak_acceleration: f64,
+}
 
-    let mut out: Vec<i32> = Vec::with_capacity(n_samples);
-    let mut seg_idx = 0usize;
-    let mut prev_p = segs[0].axes.get(axis).map_or(0.0, |c| eval(c, t0));
-    let mut phase = 0.0f64;
+/// Walk the lane's device clocks and evaluate the signed spans at each, exactly
+/// as the pump's sample sink does: `eval_at_clock` for position, velocity and
+/// acceleration, then the residual phase quantized against the lane's quantum.
+fn sample_positions(views: &[ClockedMotorSpan], interval_cycles: u64) -> Sampled {
+    let first = views[0].start_clock;
+    let last = views[views.len() - 1].end_clock;
+
+    let mut positions: Vec<i32> =
+        Vec::with_capacity(((last - first) / interval_cycles) as usize + 1);
+    let mut view_idx = 0usize;
+    let mut p_prev = views[0]
+        .eval_at_clock(first)
+        .expect("a view evaluates at its own start clock")
+        .position as f32;
+    let mut step_phase = 0f32;
     let mut position = 0i64;
-    for k in 0..n_samples {
-        let t = (t0 + k as f64 * period).min(t1);
-        while seg_idx + 1 < segs.len() && t > segs[seg_idx + 1].t_start {
-            seg_idx += 1;
+    let mut peak_velocity = 0.0f64;
+    let mut peak_acceleration = 0.0f64;
+    let mut clock = first;
+    while clock <= last {
+        while view_idx + 1 < views.len() && clock > views[view_idx].end_clock {
+            view_idx += 1;
         }
-        let p = segs[seg_idx].axes.get(axis).map_or(prev_p, |c| eval(c, t));
-        phase += p - prev_p;
-        prev_p = p;
-        let delta = quantize(phase);
-        phase -= delta as f64 * PHASE_QUANTUM_MM;
-        position += delta;
-        out.push(i32::try_from(position).expect("the bench stays inside the lane's fixed point"));
+        let pva = views[view_idx]
+            .eval_at_clock(clock)
+            .unwrap_or_else(|e| panic!("view {view_idx} does not evaluate at clock {clock}: {e}"));
+        peak_velocity = peak_velocity.max(pva.velocity.abs());
+        peak_acceleration = peak_acceleration.max(pva.acceleration.abs());
+        let p = pva.position as f32;
+        step_phase += p - p_prev;
+        p_prev = p;
+        let delta = quantize_step_delta(step_phase, PHASE_QUANTUM_MM);
+        step_phase -= delta as f32 * PHASE_QUANTUM_MM;
+        position += i64::from(delta);
+        positions
+            .push(i32::try_from(position).expect("the bench stays inside the lane's fixed point"));
+        clock += interval_cycles;
     }
-    (out, t1 - t0)
+    Sampled {
+        positions,
+        motion_secs: (last - first) as f64 / CYCLES_PER_SECOND,
+        peak_velocity,
+        peak_acceleration,
+    }
 }
 
 fn i16_delta_bytes(delta: i64) -> u64 {
@@ -243,19 +287,20 @@ fn pack(positions: &[i32], cost: &dyn Fn(i32, i32) -> u64) -> Packing {
     }
 }
 
-fn interval_varint_len(rate_hz: f64) -> u64 {
-    let mut interval = (CYCLES_PER_SECOND / rate_hz).round() as u64;
+fn varint_len(mut value: u64) -> u64 {
     let mut len = 1;
-    while interval >= 0x80 {
-        interval >>= 7;
+    while value >= 0x80 {
+        value >>= 7;
         len += 1;
     }
     len
 }
 
-fn bench_rate(segs: &[ShapedSegment], rate_hz: f64) {
-    let (positions, motion_secs) = sample_positions(segs, AXIS, rate_hz);
-    let interval_varint = interval_varint_len(rate_hz);
+fn bench_rate(views: &[ClockedMotorSpan], rate_hz: f64) {
+    let interval_cycles = (CYCLES_PER_SECOND / rate_hz).round() as u64;
+    let sampled = sample_positions(views, interval_cycles);
+    let positions = &sampled.positions;
+    let interval_varint = varint_len(interval_cycles);
     let deltas: Vec<i64> = positions
         .iter()
         .scan(0i64, |prev, &p| {
@@ -266,20 +311,23 @@ fn bench_rate(segs: &[ShapedSegment], rate_hz: f64) {
         .collect();
     let peak_delta = deltas.iter().copied().map(i64::abs).max().unwrap_or(0);
 
-    let varint = pack(&positions, &|base, position| {
+    let varint = pack(positions, &|base, position| {
         delta_bytes(base, position).expect("bench deltas stay inside i32") as u64
     });
-    let fixed = pack(&positions, &|base, position| {
+    let fixed = pack(positions, &|base, position| {
         i16_delta_bytes(i64::from(position) - i64::from(base))
     });
 
     let varint_wire = varint.wire_bytes(interval_varint);
     let fixed_wire = fixed.wire_bytes(interval_varint);
+    let motion_secs = sampled.motion_secs;
 
-    println!("=== shaped X track, {rate_hz:.0} Hz sample lane ===");
+    println!("=== continuous X track, {rate_hz:.0} Hz sample lane ===");
     println!(
-        "  motion {motion_secs:.3} s, {} samples, peak delta {peak_delta} quanta/sample",
-        positions.len()
+        "  motion {motion_secs:.3} s, {} samples, peak delta {peak_delta} quanta/sample, peak {:.0} mm/s, {:.0} mm/s^2",
+        positions.len(),
+        sampled.peak_velocity,
+        sampled.peak_acceleration,
     );
     println!(
         "  varint  payload {:>7} B, {:>5} runs ({}..{} samples), wire {:>7} B => {:>8.0} B/s",
@@ -309,6 +357,7 @@ fn bench_rate(segs: &[ShapedSegment], rate_hz: f64) {
 
 fn main() {
     let segs = run_pipeline();
-    bench_rate(&segs, 2_000.0);
-    bench_rate(&segs, 4_000.0);
+    let views = motor_views(&segs, AXIS);
+    bench_rate(&views, 2_000.0);
+    bench_rate(&views, 4_000.0);
 }

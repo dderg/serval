@@ -1,5 +1,7 @@
 import pytest
 
+from klippy.extras import resonance_buzz as resonance_buzz_module
+from klippy.extras import servo_axis
 from klippy.extras.resonance_buzz import (
     ResonanceBuzz,
     buzz_axis_to_motor_mask,
@@ -73,6 +75,8 @@ class FakeBuzzReactor:
 
 
 class FakeBuzzPrinter:
+    command_error = RuntimeError
+
     def __init__(self):
         self.motion = FakeBuzzMotion()
         self._objs = {"toolhead": FakeBuzzToolhead(), "motion": self.motion}
@@ -140,3 +144,95 @@ def test_configured_max_amplitude_bounds_explicit_amplitude():
     with pytest.raises(RuntimeError, match="max_amplitude"):
         buzz.run_sweep(FakeBuzzGcmd(), "x", 100.0, 400.0, 300.0, 0.1, 50.0, 1.0)
     assert buzz.printer.motion.calls == []
+
+
+class FakeBuzzMotor:
+    def __init__(self, motor_name, node_name):
+        self.motor_name = motor_name
+        self.node_name = node_name
+
+    def get_motor_name(self):
+        return self.motor_name
+
+    def get_node_name(self):
+        return self.node_name
+
+
+class FakeBuzzNode:
+    def __init__(self, handle, slots):
+        self.handle = handle
+        self.slots = slots
+
+    def get_engine_handle(self):
+        return self.handle
+
+    def get_slot_for_motor(self, motor_name):
+        return self.slots.get(motor_name)
+
+
+class FakeBuzzKinematics:
+    def __init__(self, rails):
+        self.rails = rails
+
+    def lanes(self):
+        return [(i, "xyz"[i], []) for i in range(len(self.rails))]
+
+
+class FakeBuzzEngine:
+    def __init__(self):
+        self.calls = []
+
+    def resonance_buzz(self, routes, wave):
+        self.calls.append((tuple(routes), tuple(wave)))
+
+
+class FakeBuzzMotionTarget:
+    def __init__(self, rails, nodes):
+        self.printer = FakeBuzzPrinter()
+        for node_name, node in nodes.items():
+            self.printer._objs["ethercat_node " + node_name] = node
+        self.kin = FakeBuzzKinematics(rails)
+        self.engine = FakeBuzzEngine()
+
+
+def _servo_rail(axis, motors):
+    rail = servo_axis.ServoRail.__new__(servo_axis.ServoRail)
+    rail.axis = axis
+    rail.motors = motors
+    return rail
+
+
+WAVE = (40000, 40000, 250000, 1000, 50)
+
+
+def test_mixed_topology_submits_one_atomic_request():
+    motion = FakeBuzzMotionTarget(
+        [_servo_rail("x", [FakeBuzzMotor("servo_x", "node0")]), object()],
+        {"node0": FakeBuzzNode(7, {"servo_x": 2})},
+    )
+    resonance_buzz_module.submit_buzz(motion, 0b011, 0b010, WAVE)
+    assert motion.engine.calls == [
+        (
+            (("ethercat", 7, 0b100, 0b000), ("stepper", 0b010, 0b010)),
+            WAVE,
+        )
+    ]
+
+
+def test_servo_only_topology_emits_no_stepper_route():
+    motion = FakeBuzzMotionTarget(
+        [
+            _servo_rail("x", [FakeBuzzMotor("servo_x", "node0")]),
+            _servo_rail("y", [FakeBuzzMotor("servo_y", "node0")]),
+        ],
+        {"node0": FakeBuzzNode(3, {"servo_x": 0, "servo_y": 1})},
+    )
+    resonance_buzz_module.submit_buzz(motion, 0b011, 0b010, WAVE)
+    assert motion.engine.calls == [((("ethercat", 3, 0b011, 0b010),), WAVE)]
+
+
+def test_empty_axis_mask_refuses_before_any_engine_call():
+    motion = FakeBuzzMotionTarget([object()], {})
+    with pytest.raises(RuntimeError, match="no target engine"):
+        resonance_buzz_module.submit_buzz(motion, 0b000, 0b000, WAVE)
+    assert motion.engine.calls == []

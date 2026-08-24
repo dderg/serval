@@ -1,8 +1,5 @@
 from klippy.extras import stepper_enable as _stepper_enable_mod
-from klippy.mcu import (
-    STEPCOMPRESS_MAX_ERROR_DEFAULT,
-    STEPCOMPRESS_SAMPLE_RATE_HZ,
-)
+from klippy.mcu import STEPCOMPRESS_MAX_ERROR_DEFAULT
 
 
 class _FakeClockSync:
@@ -43,7 +40,6 @@ class FakeMcu:
         state_cmd=None,
         non_critical_disconnected=False,
         clocksync_debug="fake clocksync",
-        stepcompress_sample_rate=STEPCOMPRESS_SAMPLE_RATE_HZ,
         stepcompress_max_error=STEPCOMPRESS_MAX_ERROR_DEFAULT,
         move_queue_slots=0,
         constants=None,
@@ -61,7 +57,6 @@ class FakeMcu:
         self.state_cmd = state_cmd
         self.non_critical_disconnected = non_critical_disconnected
         self._clocksync = _FakeClockSync(clocksync_debug)
-        self._stepcompress_sample_rate = stepcompress_sample_rate
         self._stepcompress_max_error = stepcompress_max_error
         self._move_queue_slots = move_queue_slots
         self._constants = {} if constants is None else dict(constants)
@@ -78,9 +73,6 @@ class FakeMcu:
 
     def get_constants(self):
         return self._constants
-
-    def get_stepcompress_sample_rate(self):
-        return self._stepcompress_sample_rate
 
     def get_stepcompress_max_error(self):
         return self._stepcompress_max_error

@@ -1,3 +1,5 @@
+mod common;
+
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -75,7 +77,7 @@ fn spawn_and_connect(tag: &str) -> (ChildGuard, McuSerialConn, String) {
 
     wait_for_socket(&path, Instant::now() + Duration::from_secs(5));
 
-    let conn = McuSerialConn::connect(&path).expect("connect must succeed");
+    let conn = common::connect_until(&path, Instant::now() + Duration::from_secs(5));
     do_handshake(&conn);
 
     (guard, conn, path)

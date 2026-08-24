@@ -2,21 +2,20 @@ use super::barrier_ledger::{
     BarrierId, barrier_seq_after, barrier_seq_before, barrier_seq_covers, barrier_seq_seed,
 };
 use super::pump_loop::pump_past_guard_secs;
-use super::sched::SeamBasis;
 use super::{AxisFrame, HeartbeatMsg, PumpMsg, SendError};
 use crate::lock_ext::LockExt;
 use crate::mcu_config::{McuAxisConfig, StepcompressEncoder};
 use crossbeam_channel::Sender;
-use ethercat_rt::buzz::{BuzzOsc, MAX_BUZZ_SLOTS};
+use ethercat_rt::buzz::MAX_BUZZ_SLOTS;
 use host_rt::host_io::McuHostIo;
 use host_rt::host_io::parser::ArgValue;
-use runtime::piece_ring::PieceEntry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use step_shim::{MotorConfig, ShimError, StepEncoder, StepFrame, StepShim};
+use trajectory::{BuzzProfile, ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm};
 
 pub const SHIM_RING_DEPTH: u32 = 64;
 const RETIREMENT_BATCH: u32 = SHIM_RING_DEPTH;
@@ -109,14 +108,7 @@ pub fn build_endpoint(
     if !measured_clock_freq.is_finite() || measured_clock_freq <= 0.0 {
         return Err(format!(
             "stepcompress mcu {}: clock estimate {measured_clock_freq} Hz is not a positive \
-             rate; piece spans must use the slope the host projects piece starts with",
-            cfg.mcu_id
-        ));
-    }
-    let sample_rate_hz = cfg.stepcompress_sample_rate;
-    if !sample_rate_hz.is_finite() || sample_rate_hz <= 0.0 {
-        return Err(format!(
-            "stepcompress mcu {}: sample rate {sample_rate_hz} Hz is not a positive rate",
+             rate; every span is clocked on the slope the host projects starts with",
             cfg.mcu_id
         ));
     }
@@ -167,13 +159,12 @@ pub fn build_endpoint(
         let velocity_ceiling = cfg.motor_velocity_ceiling(axis);
         for motor in cfg.motor_range(lane) {
             let microstep_distance = cfg.microstep_distance[motor];
-            let steps_per_sample = (velocity_ceiling / microstep_distance / sample_rate_hz).ceil();
-            let cap = runtime::sub_sample_timing::MAX_STEPS_PER_SAMPLE as f64;
-            if steps_per_sample > cap {
+            let steps_per_second = velocity_ceiling / microstep_distance;
+            if steps_per_second >= cycles_per_second {
                 return Err(format!(
                     "stepcompress mcu {} axis {axis} motor {motor}: {velocity_ceiling} mm/s over \
-                     {microstep_distance} mm microsteps needs {steps_per_sample} steps per \
-                     {sample_rate_hz} Hz sample, above the {cap} the step timing kernel can hold",
+                     {microstep_distance} mm microsteps needs {steps_per_second} steps per \
+                     second, which no longer resolves on a {cycles_per_second} Hz step clock",
                     cfg.mcu_id
                 ));
             }
@@ -187,10 +178,8 @@ pub fn build_endpoint(
             }
             motors.push(MotorConfig {
                 oid: cfg.stepper_oids[motor],
-                microstep_distance: microstep_distance as f32,
+                microstep_distance,
                 invert_dir: cfg.invert_dir[motor],
-                max_steps_per_sample: steps_per_sample as u32,
-                sample_rate_hz: sample_rate_hz as f32,
                 cycles_per_second,
                 min_rearm_cycles: STEP_REARM_PULSES
                     * (step_pulse_seconds * cycles_per_second) as u64,
@@ -242,21 +231,24 @@ struct PendingCut {
     resume_clock: u64,
     epoch_freq: f64,
     expected_count: i64,
-    held: Vec<PieceEntry>,
+    held: Vec<ClockedMotorSpan>,
 }
 
 struct StepBuzz {
-    osc: BuzzOsc,
-    selected: Vec<bool>,
-    signs: Vec<f32>,
-    bases: Vec<f32>,
-    next_clock: u64,
-    sample_period_cycles: u64,
+    signals: Vec<Option<Arc<MotorSpan>>>,
+    anchor_clock_exact: f64,
     cycles_per_second: f64,
-    total_samples: u64,
-    emitted_samples: u64,
-    previous_rel: f32,
+    stream_t_origin: f64,
+    next_stream_t: f64,
+    stream_t_end: f64,
 }
+
+impl StepBuzz {
+    fn clock_at(&self, stream_t: f64) -> f64 {
+        self.anchor_clock_exact + (stream_t - self.stream_t_origin) * self.cycles_per_second
+    }
+}
+
 struct SentBarrier {
     id: BarrierId,
     sent_clock: u64,
@@ -346,12 +338,13 @@ pub struct StepcompressEndpoint {
     barrier_ack_deadline_secs: f64,
     fatal: Option<String>,
     buzz: Option<StepBuzz>,
+    commanded_base: Vec<f64>,
 }
 
 fn shim_error_to_send_error(mcu_id: u32, error: ShimError) -> SendError {
     match error {
-        ShimError::RingFull { motor } => SendError::Transient(format!(
-            "stepcompress mcu {mcu_id} motor {motor}: shim ring full"
+        ShimError::QueueFull { motor } => SendError::Transient(format!(
+            "stepcompress mcu {mcu_id} motor {motor}: shim span queue full"
         )),
         other => SendError::Fatal(format!("stepcompress mcu {mcu_id}: {other:?}")),
     }
@@ -426,6 +419,17 @@ fn queue_step_span(interval: u32, count: u16, add: i16) -> i64 {
     i64::from(interval) * count + i64::from(add) * count * (count - 1) / 2
 }
 
+#[allow(clippy::cast_possible_truncation)]
+fn stepper_sel_from_mask(mask: u8) -> Result<u8, ()> {
+    if mask == 0 {
+        return Ok(0);
+    }
+    if mask.count_ones() != 1 {
+        return Err(());
+    }
+    Ok(mask.trailing_zeros() as u8 + 1)
+}
+
 impl StepcompressEndpoint {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -438,9 +442,10 @@ impl StepcompressEndpoint {
         clock_of: ClockSource,
         budget: u32,
     ) -> Self {
-        let published = shim.retired_counts();
+        let published = shim.consumed_counts();
         let cohort_counts = published.clone();
         let retirement_bias = vec![0; published.len()];
+        let commanded_base = vec![0.0; published.len()];
         let barrier_seq_seed = barrier_seq_seed();
         Self {
             mcu_id,
@@ -473,6 +478,7 @@ impl StepcompressEndpoint {
             barrier_ack_deadline_secs: BARRIER_ACK_DEADLINE_SECONDS,
             fatal: None,
             buzz: None,
+            commanded_base,
         }
     }
 
@@ -492,28 +498,21 @@ impl StepcompressEndpoint {
         self.buzz.is_none()
             && self.backlog.is_empty()
             && self.in_flight.is_empty()
-            && self.shim.queued_pieces() == 0
-            && self.shim.pending_steps() == 0
+            && self.shim.queued_spans() == 0
+            && self.shim.pending_roots() == 0
             && self.pending_retire.is_empty()
             && self.sent_barriers.is_empty()
             && !self.deferred_retirement
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::cast_precision_loss)]
     pub fn arm_buzz(
         &mut self,
         axis_mask: u8,
         sign_mask: u8,
-        freq_start_millihz: u32,
-        freq_end_millihz: u32,
-        amplitude_nm: u32,
-        duration_ms: u32,
-        ramp_ms: u32,
+        profile: &Arc<BuzzProfile>,
+        start_clock: u64,
     ) -> Result<(), SendError> {
-        if amplitude_nm == 0 || duration_ms == 0 || axis_mask == 0 {
-            self.buzz = None;
-            return Ok(());
-        }
         if self.buzz.is_some() {
             return Err(SendError::Fatal(format!(
                 "stepcompress mcu {}: resonance buzz is already active",
@@ -522,8 +521,8 @@ impl StepcompressEndpoint {
         }
         if !self.backlog.is_empty()
             || !self.in_flight.is_empty()
-            || self.shim.queued_pieces() != 0
-            || self.shim.pending_steps() != 0
+            || self.shim.queued_spans() != 0
+            || self.shim.pending_roots() != 0
             || !self.pending_retire.is_empty()
         {
             return Err(SendError::Fatal(format!(
@@ -538,72 +537,49 @@ impl StepcompressEndpoint {
                 self.oids.len()
             )));
         }
-        let mut selected = Vec::with_capacity(self.axes.len());
-        let mut signs = Vec::with_capacity(self.axes.len());
-        let mut bases = Vec::with_capacity(self.axes.len());
-        let mut slot_mask = 0u8;
-        let mut slot_sign_mask = 0u8;
+        let mut signals: Vec<Option<Arc<MotorSpan>>> = Vec::with_capacity(self.axes.len());
+        let mut driven = 0usize;
         for motor in 0..self.axes.len() {
             let axis = self.axes[motor];
-            let drives = axis < 8 && axis_mask & (1 << axis) != 0;
-            selected.push(drives);
-            let negative = axis < 8 && sign_mask & (1 << axis) != 0;
-            signs.push(if negative { -1.0 } else { 1.0 });
-            bases.push(self.shim.commanded_position(motor));
-            if drives {
-                slot_mask |= 1 << motor;
-                if negative {
-                    slot_sign_mask |= 1 << motor;
-                }
-                self.shim
-                    .detach_piece_seam(motor)
-                    .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
+            if axis >= 8 || axis_mask & (1 << axis) == 0 {
+                signals.push(None);
+                continue;
             }
+            driven += 1;
+            let sign = if sign_mask & (1 << axis) == 0 {
+                1.0
+            } else {
+                -1.0
+            };
+            let signal =
+                buzz_signal(profile, self.commanded_base[motor], sign).map_err(|error| {
+                    SendError::Fatal(format!(
+                        "stepcompress mcu {}: resonance buzz signal is not dispatchable: {error}",
+                        self.mcu_id
+                    ))
+                })?;
+            signals.push(Some(Arc::new(signal)));
         }
-        if slot_mask == 0 {
+        if driven == 0 {
             return Err(SendError::Fatal(format!(
                 "stepcompress mcu {}: resonance buzz axis mask 0x{axis_mask:02x} selects no motor",
                 self.mcu_id
             )));
         }
-        let mut osc = BuzzOsc::new();
-        let result = osc.arm(
-            self.oids.len() as u8,
-            slot_mask,
-            slot_sign_mask,
-            freq_start_millihz,
-            freq_end_millihz,
-            amplitude_nm,
-            duration_ms,
-            ramp_ms,
-            [0; MAX_BUZZ_SLOTS],
-        );
-        if result != 0 {
-            return Err(SendError::Fatal(format!(
-                "stepcompress mcu {}: resonance buzz rejected with result {result}",
-                self.mcu_id
-            )));
+        for motor in 0..self.axes.len() {
+            if signals[motor].is_some() {
+                self.shim
+                    .detach_span_seam(motor)
+                    .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
+            }
         }
-        let (now, freq) = self.clock_now()?;
-        let sample_period_cycles = u64::from(self.shim.motor_sample_period_cycles(0));
-        let cycles_per_second = self.shim.motor_cycles_per_second(0);
-        let anchor_clock = now.saturating_add((freq * SEND_LEAD_SECONDS) as u64);
-        let total_samples = ((f64::from(duration_ms) * 1.0e-3 * cycles_per_second)
-            / sample_period_cycles as f64)
-            .ceil()
-            .max(1.0) as u64;
-        let _ = osc.eval(0);
         self.buzz = Some(StepBuzz {
-            cycles_per_second,
-            osc,
-            selected,
-            signs,
-            bases,
-            next_clock: anchor_clock,
-            sample_period_cycles,
-            total_samples,
-            emitted_samples: 0,
-            previous_rel: 0.0,
+            signals,
+            anchor_clock_exact: start_clock as f64,
+            cycles_per_second: self.shim.motor_cycles_per_second(0),
+            stream_t_origin: profile.t_start(),
+            next_stream_t: profile.t_start(),
+            stream_t_end: profile.t_end(),
         });
         Ok(())
     }
@@ -680,7 +656,7 @@ impl StepcompressEndpoint {
     }
 
     pub fn ring_depth(&self) -> u32 {
-        self.shim.ring_depth()
+        self.shim.queue_depth()
     }
 
     /// Whether this endpoint owns `axis` as one of its pulse lanes. The pump
@@ -742,7 +718,7 @@ impl StepcompressEndpoint {
     }
 
     fn sync_retirement_baseline(&mut self) {
-        self.published = self.shim.retired_counts();
+        self.published = self.shim.consumed_counts();
         self.cohort_counts.clone_from(&self.published);
         self.pending_retire.clear();
         self.deferred_retirement = false;
@@ -753,6 +729,7 @@ impl StepcompressEndpoint {
             .halt_at(motor, u64::MAX)
             .map_err(|e| format!("stepcompress mcu {}: {e}", self.mcu_id))?;
         self.shim.reset_position(motor, count);
+        self.commanded_base[motor] = self.shim.commanded_position(motor);
         self.sync_retirement_baseline();
         self.post_heartbeat().map_err(|e| e.to_string())
     }
@@ -805,8 +782,8 @@ impl StepcompressEndpoint {
             && self.in_flight.is_empty()
             && self.pending_cuts.is_empty()
             && self.pending_seams.values().all(VecDeque::is_empty)
-            && self.shim.queued_pieces() == 0
-            && self.shim.pending_steps() == 0
+            && self.shim.queued_spans() == 0
+            && self.shim.pending_roots() == 0
     }
 
     /// The mcu's own executed step count for `axis` in trajectory steps,
@@ -866,6 +843,7 @@ impl StepcompressEndpoint {
             self.shim
                 .halt_at(motor, now)
                 .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
+            self.commanded_base[motor] = self.shim.commanded_position(motor);
         }
         self.sync_retirement_baseline();
         self.post_heartbeat()
@@ -909,7 +887,7 @@ impl StepcompressEndpoint {
                     axis,
                     "reanchor thawed a frozen motor"
                 );
-                let snapshot = self.shim.retired_counts();
+                let snapshot = self.shim.consumed_counts();
                 let target = self
                     .motors_of(axis)
                     .expect("the routed axis was validated above")
@@ -941,40 +919,6 @@ impl StepcompressEndpoint {
         }
     }
 
-    /// How the shim will reproject this axis' piece ends once the pieces being
-    /// staged now reach it: the epoch slope of a marked but not-yet-applied
-    /// cut, otherwise the slope the shim currently holds. Frames already
-    /// egressed carry clocks derived from it, so it cannot be retimed after
-    /// the fact — upstream must adopt it, not the other way round.
-    ///
-    /// The merge spends at most half the shim's flat seam allowance, measured
-    /// against the end of the piece it absorbs. The shim measures the merged
-    /// piece against the start of the piece that follows, so it sees that
-    /// spend plus the absorbed piece's own f32 reprojection — which its
-    /// tolerance covers separately, scaled to the merged piece's span. Half
-    /// the flat allowance therefore leaves the shim's check its meaning.
-    pub fn seam_basis(&self, axis: u8) -> Option<SeamBasis> {
-        let motor = self.axes.iter().position(|&a| a == usize::from(axis))?;
-        let pending_cut_freq = self
-            .pending_seams
-            .get(&motor)
-            .into_iter()
-            .flatten()
-            .rev()
-            .find_map(|s| match *s {
-                PendingSeam::Cut { epoch_freq, .. } => Some(epoch_freq),
-                PendingSeam::Gap { .. } => None,
-            });
-        let freq = match pending_cut_freq {
-            Some(Some(epoch_freq)) => epoch_freq,
-            _ => self.shim.motor_cycles_per_second(motor),
-        };
-        Some(SeamBasis {
-            freq,
-            skew_budget_cycles: step_shim::MAX_SEAM_SKEW_CYCLES / 2,
-        })
-    }
-
     fn cut_stream_unsent(
         &mut self,
         motor: usize,
@@ -988,7 +932,7 @@ impl StepcompressEndpoint {
             mcu = self.mcu_id,
             motor,
             cut_at,
-            "[reanchor] cutting unsent shim pieces"
+            "[reanchor] cutting unsent shim spans"
         );
         let (_expected, tail) = self
             .shim
@@ -996,6 +940,7 @@ impl StepcompressEndpoint {
             .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
         self.queue_step_volley(now, tail)?;
         self.shim.set_motor_cycles_per_second(motor, freq);
+        self.commanded_base[motor] = self.shim.commanded_position(motor);
         Ok(())
     }
 
@@ -1004,7 +949,7 @@ impl StepcompressEndpoint {
         motor: usize,
         cut_at: u64,
         epoch_freq: f64,
-        held: &[PieceEntry],
+        held: &[ClockedMotorSpan],
         now: u64,
     ) -> Result<(), SendError> {
         if self.pending_cuts.contains_key(&motor) {
@@ -1096,14 +1041,15 @@ impl StepcompressEndpoint {
         }
         self.queue_step_volley(cut.resume_clock, tail)?;
         self.shim.set_motor_cycles_per_second(motor, cut.epoch_freq);
+        self.commanded_base[motor] = self.shim.commanded_position(motor);
         if !cut.held.is_empty() {
             let (now, freq) = self.clock_now()?;
             #[allow(clippy::cast_possible_truncation)]
             let axis = self.axes[motor] as u8;
-            self.push_motor_pieces(motor, &cut.held, true, axis, now, freq)?;
+            self.push_motor_spans(motor, &cut.held, true, axis, now, freq)?;
         }
         let (now, freq) = self.clock_now()?;
-        let snapshot = self.shim.retired_counts();
+        let snapshot = self.shim.consumed_counts();
         self.publish_retirement(&snapshot, now);
         self.drain_into_backlog(now, freq)?;
         self.flush(now, freq)
@@ -1203,7 +1149,9 @@ impl StepcompressEndpoint {
         self.backlog
             .iter()
             .find_map(|out| match out.frame {
-                Outbound::Barrier(queued) if queued == id => Some(out.queued_clock),
+                Outbound::Barrier(queued) if queued == id => {
+                    Some(out.queued_clock.max(out.start_clock))
+                }
                 _ => None,
             })
             .map_or(BarrierWait::Lost, BarrierWait::Queued)
@@ -1211,7 +1159,7 @@ impl StepcompressEndpoint {
 
     /// A cohort barrier the mcu never acks parks `pending_retire` forever, and
     /// with it every drain waiting on the retirement it gates; a cut barrier
-    /// parks the held pieces of a whole lane. Wait no longer than
+    /// parks the held spans of a whole lane. Wait no longer than
     /// [`BARRIER_ACK_DEADLINE_SECONDS`] of mcu clock, then name what is missing
     /// and what did come back.
     ///
@@ -1450,7 +1398,7 @@ impl StepcompressEndpoint {
                 self.backlog.len()
             )));
         }
-        let snapshot = self.shim.retired_counts();
+        let snapshot = self.shim.consumed_counts();
         if publish && self.retirement_batch_ready(&snapshot) {
             self.publish_retirement(&snapshot, now);
         } else if snapshot != self.cohort_counts {
@@ -1469,7 +1417,7 @@ impl StepcompressEndpoint {
         let mut burst: Vec<(&'static str, Vec<(String, ArgValue)>)> = Vec::new();
         let mut reclaim_clocks: Vec<u64> = Vec::new();
         let mut sent_boundaries: Vec<(u32, u64)> = Vec::new();
-        let mut sent_barriers: Vec<BarrierId> = Vec::new();
+        let mut sent_barriers: Vec<(BarrierId, u64)> = Vec::new();
         let mut stale: Option<SendError> = None;
         let mut in_flight = self.in_flight.len() as u32;
         for out in &self.backlog {
@@ -1532,7 +1480,7 @@ impl StepcompressEndpoint {
                 sent_boundaries.push((oid, out.end_clock));
             }
             if let Outbound::Barrier(id) = out.frame {
-                sent_barriers.push(id);
+                sent_barriers.push((id, out.end_clock));
             }
             if consumes_slot {
                 reclaim_clocks.push(out.start_clock);
@@ -1550,8 +1498,8 @@ impl StepcompressEndpoint {
             for (oid, end_clock) in sent_boundaries {
                 self.last_sent_boundary.insert(oid, end_clock);
             }
-            for id in sent_barriers {
-                self.note_barrier_sent(id, now);
+            for (id, execution_clock) in sent_barriers {
+                self.note_barrier_sent(id, now.max(execution_clock));
             }
         }
         if let Some(error) = stale {
@@ -1564,76 +1512,51 @@ impl StepcompressEndpoint {
         let Some(mut buzz) = self.buzz.take() else {
             return Ok(());
         };
-        let lead_end = now.saturating_add((freq * SEND_LEAD_SECONDS) as u64);
-        while buzz.emitted_samples < buzz.total_samples && buzz.next_clock < lead_end {
-            let remaining = buzz.total_samples - buzz.emitted_samples;
-            let available = lead_end
-                .saturating_sub(buzz.next_clock)
-                .div_ceil(buzz.sample_period_cycles);
-            let count = remaining.min(available).min(u64::from(SHIM_RING_DEPTH));
-            if count == 0 {
+        let lead_end = now.saturating_add((freq * SEND_LEAD_SECONDS) as u64) as f64;
+        while buzz.next_stream_t < buzz.stream_t_end {
+            let chunk_start = buzz.next_stream_t;
+            if buzz.clock_at(chunk_start) >= lead_end {
                 break;
             }
-            let mut relative = Vec::with_capacity(count as usize + 1);
-            relative.push(buzz.previous_rel);
-            for offset in 1..=count {
-                let sample = buzz.emitted_samples + offset;
-                let value = if sample == buzz.total_samples {
-                    0.0
-                } else {
-                    let elapsed_cycles = sample.saturating_mul(buzz.sample_period_cycles);
-                    let elapsed_ns =
-                        (elapsed_cycles as f64 / buzz.cycles_per_second * 1.0e9) as u64;
-                    buzz.osc.eval(elapsed_ns).map_or(0.0, |sample| sample.0)
-                };
-                relative.push(value);
-            }
+            let chunk_end = (chunk_start + trajectory::MAX_SPAN_SECS).min(buzz.stream_t_end);
             for motor in 0..self.oids.len() {
-                if !buzz.selected[motor] {
+                let Some(signal) = buzz.signals[motor].clone() else {
                     continue;
-                }
-                let mut pieces = Vec::with_capacity(count as usize);
-                for index in 0..count as usize {
-                    let start = buzz.bases[motor] + buzz.signs[motor] * relative[index];
-                    let end = buzz.bases[motor] + buzz.signs[motor] * relative[index + 1];
-                    let mut piece = PieceEntry::zeroed();
-                    piece.start_time = buzz.next_clock + index as u64 * buzz.sample_period_cycles;
-                    piece.duration =
-                        buzz.sample_period_cycles as f32 / buzz.cycles_per_second as f32;
-                    piece.coeff_count = 2;
-                    piece.coeffs[0] = 0.5 * (start + end);
-                    piece.coeffs[1] = 0.5 * (end - start);
-                    pieces.push(piece);
-                }
+                };
+                let view = ClockedMotorSpan::try_new(
+                    signal,
+                    chunk_start,
+                    chunk_end,
+                    chunk_start,
+                    chunk_end,
+                    buzz.clock_at(chunk_start),
+                    buzz.cycles_per_second,
+                )
+                .map_err(|error| {
+                    SendError::Fatal(format!(
+                        "stepcompress mcu {}: resonance buzz view {chunk_start}..{chunk_end} s \
+                         cannot be clocked: {error}",
+                        self.mcu_id
+                    ))
+                })?;
+                let chunk_end_clock = view.end_clock;
                 self.shim
-                    .push_pieces(motor, &pieces)
+                    .push_spans(motor, &[view])
                     .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
-                self.retirement_bias[motor] =
-                    self.retirement_bias[motor].wrapping_sub(count as u32);
+                self.retirement_bias[motor] = self.retirement_bias[motor].wrapping_sub(1);
+                let frames = self
+                    .shim
+                    .drain(chunk_end_clock)
+                    .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
+                self.queue_step_volley(now, frames)?;
             }
-            let chunk_end = buzz
-                .next_clock
-                .saturating_add(count.saturating_mul(buzz.sample_period_cycles));
-            let frames = self
-                .shim
-                .drain(chunk_end.saturating_add(buzz.sample_period_cycles))
-                .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
-            self.queue_step_volley(now, frames)?;
-            buzz.emitted_samples += count;
-            buzz.next_clock = chunk_end;
-            buzz.previous_rel = *relative.last().expect("one endpoint sample");
+            buzz.next_stream_t = chunk_end;
         }
-        if buzz.emitted_samples == buzz.total_samples {
-            if buzz.previous_rel != 0.0 {
-                return Err(SendError::Fatal(format!(
-                    "stepcompress mcu {}: resonance buzz ended away from its base",
-                    self.mcu_id
-                )));
-            }
+        if buzz.next_stream_t >= buzz.stream_t_end {
             for motor in 0..self.oids.len() {
-                if buzz.selected[motor] {
+                if buzz.signals[motor].is_some() {
                     self.shim
-                        .detach_piece_seam(motor)
+                        .detach_span_seam(motor)
                         .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
                 }
             }
@@ -1673,7 +1596,7 @@ impl StepcompressEndpoint {
 
     fn post_heartbeat(&self) -> Result<(), SendError> {
         let mcu_id = self.mcu_id;
-        let (axes, consumed) = self.counts_by_axis(&self.shim.retired_counts());
+        let (axes, consumed) = self.counts_by_axis(&self.shim.consumed_counts());
         let (_, retired) = self.counts_by_axis(&self.published);
         self.pump_control
             .send(PumpMsg::Heartbeat(HeartbeatMsg {
@@ -1755,8 +1678,8 @@ impl StepcompressEndpoint {
         }
         if self.backlog.is_empty()
             && self.in_flight.is_empty()
-            && self.shim.queued_pieces() == 0
-            && self.shim.pending_steps() == 0
+            && self.shim.queued_spans() == 0
+            && self.shim.pending_roots() == 0
             && self.pending_retire.is_empty()
             && !self.deferred_retirement
             && self.buzz.is_none()
@@ -1766,7 +1689,7 @@ impl StepcompressEndpoint {
         let (now, freq) = self.clock_now()?;
         self.generate_buzz(now, freq)?;
         self.drain_into_backlog(now, freq)?;
-        if self.shim.queued_pieces() == 0 && self.shim.pending_steps() > 0 {
+        if self.shim.queued_spans() == 0 && self.shim.pending_roots() > 0 {
             for motor in 0..self.oids.len() {
                 let tail = self
                     .shim
@@ -1778,15 +1701,15 @@ impl StepcompressEndpoint {
         }
         let transport_quiescent = self.backlog.is_empty()
             && self.in_flight.is_empty()
-            && self.shim.queued_pieces() == 0
-            && self.shim.pending_steps() == 0;
+            && self.shim.queued_spans() == 0
+            && self.shim.pending_roots() == 0;
         self.retirement_idle_ticks = if transport_quiescent {
             self.retirement_idle_ticks.saturating_add(1)
         } else {
             0
         };
         if self.pending_retire.is_empty() && self.deferred_retirement && transport_quiescent {
-            let snapshot = self.shim.retired_counts();
+            let snapshot = self.shim.consumed_counts();
             if self.retirement_batch_ready(&snapshot)
                 || self.retirement_idle_ticks >= RETIREMENT_IDLE_TICKS
             {
@@ -1799,14 +1722,18 @@ impl StepcompressEndpoint {
 
     fn frame_motors(&self, frame: &AxisFrame) -> Result<Vec<usize>, SendError> {
         let motors = self.motors_of(frame.axis)?;
-        let mask = frame.pieces.first().map_or(0, |piece| piece.motor_mask);
-        if frame.pieces.iter().any(|piece| piece.motor_mask != mask) {
+        let mask = frame.spans.first().map_or(0, |span| span.signal.motor_mask);
+        if frame
+            .spans
+            .iter()
+            .any(|span| span.signal.motor_mask != mask)
+        {
             return Err(SendError::Fatal(format!(
                 "stepcompress mcu {} axis {}: one frame mixes motor selectors",
                 self.mcu_id, frame.axis
             )));
         }
-        let selector = runtime::piece_ring::stepper_sel_from_mask(mask).map_err(|()| {
+        let selector = stepper_sel_from_mask(mask).map_err(|()| {
             SendError::Fatal(format!(
                 "stepcompress mcu {} axis {}: motor mask {mask:#010b} selects multiple motors",
                 self.mcu_id, frame.axis
@@ -1844,12 +1771,12 @@ impl StepcompressEndpoint {
     }
 
     fn credit_unselected_motors(&mut self, frame: &AxisFrame, selected: &[usize]) {
-        let mask = frame.pieces.first().map_or(0, |piece| piece.motor_mask);
+        let mask = frame.spans.first().map_or(0, |span| span.signal.motor_mask);
         if mask == 0 {
             return;
         }
-        let count = u32::try_from(frame.pieces.len())
-            .expect("one axis frame cannot contain more than u32::MAX pieces");
+        let count = u32::try_from(frame.spans.len())
+            .expect("one axis frame cannot contain more than u32::MAX spans");
         let motors = self
             .motors_of(frame.axis)
             .unwrap_or_else(|error| panic!("frame motors were already validated: {error}"));
@@ -1873,72 +1800,93 @@ impl StepcompressEndpoint {
             self.credit_unselected_motors(frame, &frame_motors);
             for motor in frame_motors {
                 if let Some(cut) = self.pending_cuts.get_mut(&motor) {
-                    cut.held.extend_from_slice(&frame.pieces);
+                    cut.held.extend_from_slice(&frame.spans);
                     continue;
                 }
-                self.push_motor_pieces(motor, &frame.pieces, false, frame.axis, now, freq)?;
+                self.push_motor_spans(motor, &frame.spans, false, frame.axis, now, freq)?;
             }
         }
         self.drain_into_backlog(now, freq)?;
         self.flush(now, freq)
     }
 
-    /// Push one motor's pieces through the pending-seam ladder: validate and
+    /// Queue one run of lane views and carry the exact position the last of
+    /// them commands. A masked view is an overlay that returns the motor to
+    /// the lane it started from, so only unmasked views move the base; a
+    /// resonance buzz then starts from the sampled base instead of the
+    /// microstep lattice the shim happens to have reached.
+    fn push_lane_spans(
+        &mut self,
+        motor: usize,
+        spans: &[ClockedMotorSpan],
+    ) -> Result<(), SendError> {
+        self.shim
+            .push_spans(motor, spans)
+            .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
+        let Some(view) = spans.iter().rev().find(|view| view.signal.motor_mask == 0) else {
+            return Ok(());
+        };
+        let pva = view.eval_at_clock(view.end_clock).map_err(|error| {
+            SendError::Fatal(format!(
+                "stepcompress mcu {} motor {motor}: queued view does not evaluate at its own \
+                 end clock {}: {error}",
+                self.mcu_id, view.end_clock
+            ))
+        })?;
+        self.commanded_base[motor] = pva.position;
+        Ok(())
+    }
+
+    /// Push one motor's views through the pending-seam ladder: validate and
     /// push up to each marked seam, apply the seam (cut or sanctioned gap),
     /// continue with the remainder as a fresh run. A sent-boundary cut defers
     /// the remainder into `pending_cuts.held`; [`Self::complete_cut`] replays
     /// it through this same path, so seams marked while a cut awaited its
     /// barrier are applied instead of the held run being validated as one
     /// contiguous stream.
-    fn push_motor_pieces(
+    fn push_motor_spans(
         &mut self,
         motor: usize,
-        pieces: &[PieceEntry],
+        spans: &[ClockedMotorSpan],
         mut fresh_head: bool,
         axis: u8,
         now: u64,
         freq: f64,
     ) -> Result<(), SendError> {
         let mcu_id = self.mcu_id;
-        let mut rest: &[PieceEntry] = pieces;
+        let mut rest: &[ClockedMotorSpan] = spans;
         loop {
             let seam = self
                 .pending_seams
                 .get(&motor)
                 .and_then(VecDeque::front)
                 .copied();
-            #[allow(clippy::cast_possible_truncation)]
-            let cps = self.shim.motor_cycles_per_second(motor) as f32;
             let seam_index = seam.and_then(|s| {
                 let at = s.at();
                 rest.iter()
-                    .position(|p| p.start_time >= at || p.end_time(cps) > at)
+                    .position(|view| view.start_clock >= at || view.end_clock > at)
             });
             let Some(index) = seam_index else {
                 if fresh_head {
                     self.shim
-                        .validate_fresh_pieces(motor, rest)
+                        .validate_fresh_spans(motor, rest)
                         .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
                 }
-                self.shim
-                    .push_pieces(motor, rest)
-                    .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
+                self.push_lane_spans(motor, rest)?;
                 return Ok(());
             };
             let seam = seam.expect("seam_index implies a pending seam");
             let (head, tail) = rest.split_at(index);
             if fresh_head {
                 self.shim
-                    .validate_fresh_pieces(motor, head)
+                    .validate_fresh_spans(motor, head)
                     .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
             } else {
                 self.shim
-                    .validate_pieces_public(motor, head)
+                    .validate_spans(motor, head)
                     .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
             }
-            self.shim
-                .push_pieces(motor, head)
-                .map_err(|e| shim_error_to_send_error(mcu_id, e))?;
+            self.push_lane_spans(motor, head)?;
             let mut defer_tail = false;
             match seam {
                 PendingSeam::Cut { at, epoch_freq } => {
@@ -1988,6 +1936,29 @@ impl StepcompressEndpoint {
             fresh_head = true;
         }
     }
+}
+
+fn buzz_signal(
+    profile: &Arc<BuzzProfile>,
+    base_position: f64,
+    sign: f64,
+) -> Result<MotorSpan, trajectory::ContinuousError> {
+    MotorSpan::try_new(
+        Arc::from([MotorGroup::Independent(MotorTerm {
+            source_axis: 0,
+            axis: ContinuousAxis::Buzz {
+                base_position,
+                sign,
+                profile: Arc::clone(profile),
+            },
+            scale: 1.0,
+        })]),
+        profile.t_start(),
+        profile.t_end(),
+        0,
+        0,
+        false,
+    )
 }
 
 pub struct StepcompressPacer {

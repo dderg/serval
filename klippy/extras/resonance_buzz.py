@@ -26,11 +26,11 @@ def buzz_axis_to_motor_mask(axis, coupled):
     return mapping[axis]
 
 
-def _servo_buzz_targets(motion, axis_mask, sign_mask):
+def _ethercat_slot_masks(motion, axis_mask, sign_mask):
     from . import servo_axis
 
     stepper_mask = axis_mask
-    servo_targets = {}
+    slot_masks_by_handle = {}
     if motion.kin is not None:
         for lane_idx, _axis_name, _motors in motion.kin.lanes():
             rail = motion.kin.rails[lane_idx]
@@ -49,7 +49,7 @@ def _servo_buzz_targets(motion, axis_mask, sign_mask):
                     "RESONANCE_BUZZ: servo axis %s has no live EtherCAT "
                     "engine handle" % rail.axis
                 )
-            slot_masks = servo_targets.setdefault(handle, [0, 0])
+            slot_masks = slot_masks_by_handle.setdefault(handle, [0, 0])
             for motor in rail.get_motors():
                 slot = node.get_slot_for_motor(motor.get_motor_name())
                 if slot is None:
@@ -69,50 +69,29 @@ def _servo_buzz_targets(motion, axis_mask, sign_mask):
                 slot_masks[0] |= slot_bit
                 if sign_mask & rail_mask:
                     slot_masks[1] |= slot_bit
-    return stepper_mask, servo_targets
+    return stepper_mask, slot_masks_by_handle
 
 
-def submit_buzz(
-    motion,
-    axis_mask,
-    sign_mask,
-    freq_start_millihz,
-    freq_end_millihz,
-    amplitude_nm,
-    duration_ms,
-    ramp_ms,
-):
-    stepper_mask, servo_targets = _servo_buzz_targets(
+def buzz_routes(motion, axis_mask, sign_mask):
+    stepper_mask, slot_masks_by_handle = _ethercat_slot_masks(
         motion, axis_mask, sign_mask
     )
-    sent = False
-    for handle, (slot_mask, slot_sign_mask) in servo_targets.items():
-        motion.engine.resonance_buzz(
-            handle,
-            slot_mask,
-            slot_sign_mask,
-            freq_start_millihz,
-            freq_end_millihz,
-            amplitude_nm,
-            duration_ms,
-            ramp_ms,
-        )
-        sent = True
+    routes = [
+        ("ethercat", handle, slot_mask, slot_sign_mask)
+        for handle, (slot_mask, slot_sign_mask) in slot_masks_by_handle.items()
+    ]
     if stepper_mask:
-        motion.engine.stepper_resonance_buzz(
-            stepper_mask,
-            sign_mask,
-            freq_start_millihz,
-            freq_end_millihz,
-            amplitude_nm,
-            duration_ms,
-            ramp_ms,
-        )
-        sent = True
-    if not sent:
+        routes.append(("stepper", stepper_mask, sign_mask))
+    return routes
+
+
+def submit_buzz(motion, axis_mask, sign_mask, wave):
+    routes = buzz_routes(motion, axis_mask, sign_mask)
+    if not routes:
         raise motion.printer.command_error(
             "RESONANCE_BUZZ: no target engine for axis_mask=0x%02x" % axis_mask
         )
+    motion.engine.resonance_buzz(routes, wave)
 
 
 def servo_buzz_motor_names(printer, axis_name):
@@ -231,11 +210,13 @@ class ResonanceBuzz:
         motion.submit_resonance_buzz(
             axis_mask,
             sign_mask,
-            int(round(freq_start * 1000.0)),
-            int(round(freq_end * 1000.0)),
-            int(round(amplitude_mm * 1e6)),
-            int(round(duration * 1000.0)),
-            int(round(ramp * 1000.0)),
+            (
+                int(round(freq_start * 1000.0)),
+                int(round(freq_end * 1000.0)),
+                int(round(amplitude_mm * 1e6)),
+                int(round(duration * 1000.0)),
+                int(round(ramp * 1000.0)),
+            ),
         )
         phasing = ""
         if coupled and axis_name in ("x", "y"):
@@ -287,9 +268,9 @@ class ResonanceBuzz:
         )
 
     cmd_RESONANCE_BUZZ_SWEEP_help = (
-        "Sweep a frequency band on one axis via the engine-resident sweep "
-        "generator (one fade-in/out for the whole sweep). Phase-stepping axes "
-        "run a continuous chirp; STEP/DIR axes run a fixed-frequency staircase."
+        "Sweep a frequency band on one axis as a continuous chirp with one "
+        "fade-in/out for the whole sweep, across every transport the axis "
+        "spans"
     )
 
     def cmd_RESONANCE_BUZZ_SWEEP(self, gcmd):

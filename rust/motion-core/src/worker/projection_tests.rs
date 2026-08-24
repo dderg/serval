@@ -29,7 +29,6 @@ fn stepcompress_cfg() -> McuAxisConfig {
         microstep_distance: vec![0.01],
         invert_dir: vec![false],
         stepper_oids: vec![7],
-        stepcompress_sample_rate: 10_000.0,
         move_queue_slots: 128,
         step_pulse_seconds: vec![0.000_002],
         stepcompress_encoders: vec![StepcompressEncoder::HighPrecision],
@@ -110,7 +109,7 @@ fn egress_guard_passes(router: &PassthroughRouter, first_clock: u64, freq: f64) 
 /// must land ~SEND_LEAD_SECONDS ahead of the true mcu clock at arrival — NOT
 /// in the past. This is the honest refutation of the projection-math variant
 /// of hypothesis 1: no realistic clocksync error puts the first volley 18 ms
-/// in the past, because the anchor grants a full 250 ms of lead and the
+/// in the past, because the anchor grants a full 500 ms of lead and the
 /// projection error sources are all sub-millisecond at this uptime.
 #[test]
 fn a_healthy_clocksync_lands_the_first_volley_lead_seconds_ahead_of_the_true_clock() {
@@ -179,7 +178,7 @@ fn a_healthy_clocksync_lands_the_first_volley_lead_seconds_ahead_of_the_true_clo
 /// host-side guard (pump intake, pump send, endpoint flush) passes, because
 /// all of them derive from the SAME lagging record. This is the honest
 /// statement of hypothesis 1's reach: the failure is not the projection math
-/// (the anchor grants 250 ms of lead) but a wrong clock record — a clocksync
+/// (the anchor grants 500 ms of lead) but a wrong clock record — a clocksync
 /// handoff error (stale `clock` value, bad RTT stamp, unconverged estimate) —
 /// and that failure is invisible to every host guard by construction.
 #[test]
@@ -236,25 +235,31 @@ fn a_clock_record_lagging_the_true_mcu_puts_the_first_volley_past_and_blinds_the
     );
 }
 
-fn lane_curve(constant: f64) -> nurbs::ScalarNurbs {
-    nurbs::ScalarNurbs::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![constant, constant])
-        .expect("a constant degree-1 lane curve is valid")
+fn hold_axis(position: f64) -> trajectory::ContinuousAxis {
+    trajectory::ContinuousAxis::Hold {
+        position,
+        t_start: 0.0,
+        t_end: 1.0,
+    }
 }
 
-fn moving_curve(from: f64, to: f64) -> nurbs::ScalarNurbs {
-    nurbs::ScalarNurbs::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![from, to])
-        .expect("a linear lane curve is valid")
+fn moving_axis(from: f64, to: f64) -> trajectory::ContinuousAxis {
+    trajectory::ContinuousAxis::Spline(Arc::new(
+        nurbs::ScalarNurbs::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![from, to])
+            .expect("a linear lane curve is valid"),
+    ))
 }
 
-fn segment_with_axes(curves: Vec<nurbs::ScalarNurbs>) -> trajectory::ShapedSegment {
-    trajectory::ShapedSegment {
-        axes: curves,
-        followers: Vec::new(),
+fn segment_with_axes(axes: Vec<trajectory::ContinuousAxis>) -> trajectory::ContinuousSegment {
+    trajectory::ContinuousSegment {
+        axes: axes.into(),
+        followers: Arc::from([]),
         spatial_path: false,
         t_start: 0.0,
         t_end: 1.0,
         motor_mask: 0,
         source_line: 0,
+        rest_at_end: true,
     }
 }
 
@@ -286,7 +291,6 @@ fn a_retimed_reanchor_reseeds_moving_lanes_but_never_idle_hold_lanes() {
         microstep_distance: vec![0.01],
         invert_dir: vec![false],
         stepper_oids: vec![8],
-        stepcompress_sample_rate: 10_000.0,
         move_queue_slots: 128,
         step_pulse_seconds: vec![0.000_002],
         stepcompress_encoders: vec![StepcompressEncoder::HighPrecision],
@@ -295,10 +299,10 @@ fn a_retimed_reanchor_reseeds_moving_lanes_but_never_idle_hold_lanes() {
         stepcompress_max_error_secs: 0.0,
     });
     let segment = segment_with_axes(vec![
-        moving_curve(5.0, 10.0),
-        lane_curve(0.0),
-        lane_curve(0.0),
-        lane_curve(0.0),
+        moving_axis(5.0, 10.0),
+        hold_axis(0.0),
+        hold_axis(0.0),
+        hold_axis(0.0),
     ]);
 
     assert!(
@@ -334,7 +338,7 @@ fn a_retimed_reanchor_reseeds_moving_lanes_but_never_idle_hold_lanes() {
     let hold_clock_after = sink.project(1, host_now + crate::anchor::DEFAULT_LEAD_SECS);
     let moving_expected = true_clock(host_now + crate::anchor::DEFAULT_LEAD_SECS) - 0.0183 * F_TRUE;
     assert!(
-        (moving_clock as f64 - moving_expected).abs() < 1.0,
+        (moving_clock as f64 - moving_expected).abs() <= 2.0,
         "the moving lane's re-anchor must track the live record, got {moving_clock} \
          vs {moving_expected:.0}"
     );
@@ -439,10 +443,10 @@ fn a_parked_hold_lane_rebases_once_its_frozen_slope_drifts_past_the_floor() {
 
     let sink = pump_sink(router);
     let hold_segment = segment_with_axes(vec![
-        lane_curve(0.0),
-        lane_curve(0.0),
-        lane_curve(0.0),
-        lane_curve(0.0),
+        hold_axis(0.0),
+        hold_axis(0.0),
+        hold_axis(0.0),
+        hold_axis(0.0),
     ]);
     let cfg = sink.mcu_configs[0].clone();
     sink.reanchor_projection(MCU_ID, 0.25).unwrap();

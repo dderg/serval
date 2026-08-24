@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
 use geometry::{CornerFitConfig, Move, MoveVelocity, SurfaceTransform, VelocityLimits};
-use trajectory::{AxisChainSet, ShapedSegment};
+use trajectory::{AxisChainSet, ContinuousSegment, NudgeProfile};
 
 pub const CONTIGUITY_EPS_MM: f64 = 1e-6;
 
@@ -73,6 +73,51 @@ pub enum PostProcessError {
     MissingHistory { axis: usize, t: f64 },
     #[error("axis {axis}: shaping window needs unavailable lookahead at t={t}")]
     MissingLookahead { axis: usize, t: f64 },
+    #[error(
+        "axis {axis} ({fit_context}): fit tolerance failed after {attempted_spans} span attempts on \
+         [{t_start}, {t_end}], nearest seeds [{lower_seed} ({lower_seed_provenance}), \
+         {upper_seed} ({upper_seed_provenance})], at u={probe_u}, t={probe_t}: \
+         position error {position_error}/{position_budget}, velocity error \
+         {velocity_error}/{velocity_budget}, acceleration error \
+         {acceleration_error}/{acceleration_budget}, \
+         inward-left=({left_position}, {left_velocity}, {left_acceleration}), \
+         inward-right=({right_position}, {right_velocity}, {right_acceleration}), \
+         source=({source_position}, {source_velocity}, {source_acceleration}), \
+         candidate=({candidate_position}, {candidate_velocity}, {candidate_acceleration}), \
+         signal_detail={signal_detail:?}"
+    )]
+    FitTolerance {
+        axis: usize,
+        fit_context: &'static str,
+        signal_detail: Option<String>,
+        t_start: f64,
+        t_end: f64,
+        probe_u: f64,
+        lower_seed: f64,
+        upper_seed: f64,
+        lower_seed_provenance: &'static str,
+        upper_seed_provenance: &'static str,
+        probe_t: f64,
+        attempted_spans: usize,
+        position_error: f64,
+        position_budget: f64,
+        velocity_error: f64,
+        velocity_budget: f64,
+        acceleration_error: f64,
+        acceleration_budget: f64,
+        source_position: f64,
+        source_velocity: f64,
+        source_acceleration: f64,
+        left_position: f64,
+        left_velocity: f64,
+        left_acceleration: f64,
+        right_position: f64,
+        right_velocity: f64,
+        right_acceleration: f64,
+        candidate_position: f64,
+        candidate_velocity: f64,
+        candidate_acceleration: f64,
+    },
     #[error("axis {axis}: shaped sample is non-finite at t={t}")]
     NonFiniteSample { axis: usize, t: f64 },
 }
@@ -82,17 +127,13 @@ pub struct PlannedMove {
     pub velocity: MoveVelocity,
 }
 
-/// Lowerer output: a dispatchable segment plus whether the trajectory is at
-/// rest at its end — the shaper may clamp its convolution window past a rest
-/// point (the signal is constant there), never past a moving end.
-pub struct LoweredSegment {
-    pub seg: ShapedSegment,
-    pub rest_at_end: bool,
+pub struct BaseSegment {
+    pub segment: ContinuousSegment,
 }
 
 pub struct PipelineHandle {
     pub input: Sender<StreamInput>,
-    pub output: Receiver<ShapedItem>,
+    pub output: Receiver<TrajectoryItem>,
     pub threads: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -151,21 +192,14 @@ pub enum Control {
     /// the stream clock over the nudge's duration.
     Nudge {
         mcu_id: u32,
-        pieces: Vec<NudgePiece>,
+        axis: u8,
+        motor_mask: u8,
+        profile: NudgeProfile,
     },
     /// Acknowledged by the dispatcher once everything ahead of it has been
     /// dispatched (or discarded): the pipeline-wide "everything before this
     /// point is done" fence.
     Barrier(Sender<BarrierAck>),
-}
-
-/// One phase of a nudge profile: a polynomial piece for a single axis,
-/// already in stream time.
-#[derive(Debug, Clone)]
-pub struct NudgePiece {
-    pub axis: u8,
-    pub motor_mask: u8,
-    pub piece: nurbs::bezier::BezierPiece,
 }
 
 /// The dispatcher's answer to a `Barrier`.
@@ -194,18 +228,15 @@ pub enum PlannedItem {
 }
 
 /// Lowerer → shaper.
-pub enum LoweredItem {
-    Seg(LoweredSegment),
+pub enum BaseItem {
+    Seg(BaseSegment),
     Drain,
     Control(Control),
 }
 
 /// Shaper → dispatcher.
-pub enum ShapedItem {
-    Seg(ShapedSegment),
-    /// Everything before it is committed and planned to rest, with the
-    /// chains' trailing decay carried to rest with it: the machine is stopped
-    /// at the last segment's end.
+pub enum TrajectoryItem {
+    Seg(ContinuousSegment),
     Parked,
     Control(Control),
 }

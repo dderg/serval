@@ -5,12 +5,7 @@ import pytest
 
 from klippy import mcu as mcu_mod
 from klippy import motion_setup
-from klippy.mcu import (
-    MCU,
-    SAMPLE_COMMANDS,
-    STEPCOMPRESS_MAX_ERROR_DEFAULT,
-    STEPCOMPRESS_SAMPLE_RATE_HZ,
-)
+from klippy.mcu import MCU, SAMPLE_COMMANDS, STEPCOMPRESS_MAX_ERROR_DEFAULT
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 WIRE_HEADER = REPO / "src" / "sample_wire.h"
@@ -66,7 +61,6 @@ def make_mcu(options=None):
 
 def test_stepcompress_defaults_to_classic_error_budget():
     mcu = make_mcu()
-    assert mcu.get_stepcompress_sample_rate() == STEPCOMPRESS_SAMPLE_RATE_HZ
     assert mcu.get_stepcompress_max_error() == STEPCOMPRESS_MAX_ERROR_DEFAULT
 
 
@@ -85,7 +79,6 @@ def test_the_deleted_mcu_keys_are_never_consumed():
     mcu = MCU.__new__(MCU)
     mcu._init_stepcompress(config)
     assert config.accessed.isdisjoint(DELETED_MCU_KEYS)
-    assert mcu.get_stepcompress_sample_rate() == STEPCOMPRESS_SAMPLE_RATE_HZ
 
 
 class FakePrinter:

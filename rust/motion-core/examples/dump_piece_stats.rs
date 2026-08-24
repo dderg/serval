@@ -1,6 +1,6 @@
 // Replays a gcode file through the streaming pipeline and reports per-axis
-// piece statistics (knot spans of the shaped segments — what the dispatcher
-// flattens 1:1 into pump pieces). Bench-repro tool for the Neptune
+// span statistics: the motor spans the dispatcher hands the endpoint, and the
+// breakpoint segments inside them. Bench-repro tool for the Neptune
 // pump_piece_in_past crash: compares E-axis fragmentation across branches.
 //
 //   cargo run --release -p motion-engine --example dump_piece_stats -- <file.gcode>
@@ -8,11 +8,14 @@
 use std::env;
 use std::fs;
 use std::process;
+use std::sync::Arc;
 
 use geometry::{CornerFitConfig, VelocityLimits};
 use motion_core::classify::build_move;
-use motion_pipeline::{StreamConfig, setup_stages};
-use trajectory::{AxisChainSet, ShapedSegment};
+use motion_pipeline::{StreamConfig, TrajectoryItem, setup_stages};
+use trajectory::{
+    AxisChainSet, ContinuousAxis, ContinuousSegment, MotorGroup, MotorSpan, MotorTerm,
+};
 
 struct Pos {
     pos: [f64; 3],
@@ -61,6 +64,41 @@ impl Pos {
     }
 }
 
+fn axis_kind(axis: &ContinuousAxis) -> &'static str {
+    match axis {
+        ContinuousAxis::Analytic { .. } => "analytic",
+        ContinuousAxis::Spline(_) => "spline",
+        ContinuousAxis::RelativeSpline { .. } => "relative_spline",
+        ContinuousAxis::PiecewiseRelativeSpline(_) => "piecewise_relative_spline",
+        ContinuousAxis::Hold { .. } => "hold",
+        ContinuousAxis::Nudge(_) => "nudge",
+        ContinuousAxis::Buzz { .. } => "buzz",
+    }
+}
+
+fn lane_span(seg: &ContinuousSegment, axis: usize) -> MotorSpan {
+    let term = MotorTerm {
+        source_axis: axis,
+        axis: seg.axes[axis].clone(),
+        scale: 1.0,
+    };
+    MotorSpan::try_new(
+        Arc::from([MotorGroup::Independent(term)]),
+        seg.t_start,
+        seg.t_end,
+        seg.motor_mask,
+        seg.source_line,
+        false,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!(
+            "axis {axis} line {}: undispatchable span: {e}",
+            seg.source_line
+        );
+        process::exit(1);
+    })
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
@@ -73,7 +111,7 @@ fn main() {
     });
 
     // Neptune bench printer.cfg limits.
-    let limits = VelocityLimits::try_new(300.0, 4000.0, 8.0, 1_000_000.0).unwrap();
+    let limits = VelocityLimits::try_new(300.0, 4000.0, 8.0, f64::INFINITY).unwrap();
     let cfg = StreamConfig {
         corner: CornerFitConfig::default(),
         integration_tol: 1e-4,
@@ -89,9 +127,9 @@ fn main() {
     let handle = setup_stages(cfg, AxisChainSet::default(), vec![0.0; 4], 0.0);
     let output = handle.output;
     let collector = std::thread::spawn(move || {
-        let mut segs: Vec<ShapedSegment> = Vec::new();
+        let mut segs: Vec<ContinuousSegment> = Vec::new();
         while let Ok(item) = output.recv() {
-            if let motion_pipeline::ShapedItem::Seg(seg) = item {
+            if let TrajectoryItem::Seg(seg) = item {
                 segs.push(seg);
             }
         }
@@ -172,32 +210,60 @@ fn main() {
         segs.len()
     );
     for axis in 0..n_axes {
-        let mut durs: Vec<f64> = Vec::new();
+        let mut kinds: Vec<(&'static str, usize)> = Vec::new();
+        let mut span_durs: Vec<f64> = Vec::new();
+        let mut seg_durs: Vec<f64> = Vec::new();
+        let mut speed_max = 0.0f64;
+        let mut accel_max = 0.0f64;
         for seg in &segs {
-            let Some(curve) = seg.axes.get(axis) else {
+            let Some(source) = seg.axes.get(axis) else {
                 continue;
             };
-            let knots = curve.knots();
-            for w in knots.windows(2) {
+            let kind = axis_kind(source);
+            match kinds.iter_mut().find(|(name, _)| *name == kind) {
+                Some((_, count)) => *count += 1,
+                None => kinds.push((kind, 1)),
+            }
+            let span = lane_span(seg, axis);
+            span_durs.push(span.t_end - span.t_start);
+            for w in span.breakpoints.windows(2) {
                 let d = w[1] - w[0];
                 if d > 0.0 {
-                    durs.push(d);
+                    seg_durs.push(d);
                 }
             }
+            let bounds = span
+                .pva_bounds(span.t_start, span.t_end)
+                .unwrap_or_else(|e| {
+                    eprintln!("axis {axis} line {}: bounds failed: {e}", seg.source_line);
+                    process::exit(1);
+                });
+            speed_max = speed_max
+                .max(bounds.velocity_max.abs())
+                .max(bounds.velocity_min.abs());
+            accel_max = accel_max.max(bounds.acceleration_abs_max);
         }
-        if durs.is_empty() {
-            println!("axis {axis}: no pieces");
+        if seg_durs.is_empty() {
+            println!("axis {axis}: no spans");
             continue;
         }
-        durs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let n = durs.len();
-        let sub200 = durs.iter().filter(|d| **d < 200e-6).count();
-        let sub1ms = durs.iter().filter(|d| **d < 1e-3).count();
+        seg_durs.sort_by(f64::total_cmp);
+        span_durs.sort_by(f64::total_cmp);
+        let n = seg_durs.len();
+        let sub200 = seg_durs.iter().filter(|d| **d < 200e-6).count();
+        let sub1ms = seg_durs.iter().filter(|d| **d < 1e-3).count();
+        let kind_mix = kinds
+            .iter()
+            .map(|(name, count)| format!("{name}={count}"))
+            .collect::<Vec<_>>()
+            .join(",");
         println!(
-            "axis {axis}: pieces={n} rate={:.0}/traj-s min={:.1}us p50={:.1}us sub200us={sub200} sub1ms={sub1ms}",
+            "axis {axis} [{kind_mix}]: spans={} span_p50={:.1}us segments={n} rate={:.0}/traj-s min={:.1}us p50={:.1}us sub200us={sub200} sub1ms={sub1ms} vmax={speed_max:.1}mm/s amax={accel_max:.0}mm/s2",
+            span_durs.len(),
+            span_durs[span_durs.len() / 2] * 1e6,
             n as f64 / t_total,
-            durs[0] * 1e6,
-            durs[n / 2] * 1e6,
+            seg_durs[0] * 1e6,
+            seg_durs[n / 2] * 1e6,
         );
     }
 }

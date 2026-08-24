@@ -34,6 +34,7 @@ libm = { version = "0.2", default-features = false }
 runtime = { path = "../runtime", default-features = false, features = ["host"] }  # servo node: no stepper dispatch
 mcu-protocol = { path = "../mcu-protocol" }
 mcu-transport = { path = "../mcu-transport" }
+trajectory = { path = "../trajectory" }
 libc = "0.2"                                       # raw clock_gettime(CLOCK_MONOTONIC)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter", "std"] }
@@ -51,6 +52,7 @@ cc = "1"                                            # compiles csrc/libecrt_igh.
 [dev-dependencies]
 host-rt = { path = "../host-rt" }
 parking_lot = "0.12"
+nurbs = { path = "../nurbs" }                       # spline test spans: exact quadratic position laws
 
 [lints]
 workspace = true

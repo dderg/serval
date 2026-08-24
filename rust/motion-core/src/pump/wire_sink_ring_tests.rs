@@ -1,16 +1,18 @@
 use super::{EtherCatRing, RingFiller, WireSink};
 use crate::lock_ext::LockExt;
-use crate::pump::{AxisFrame, AxisKey, PieceSink, SendError};
+use crate::pump::{AxisFrame, AxisKey, SendError, SpanSink};
 use ethercat_rt::server::FrameServer;
-use ethercat_rt::setpoint_fill::{ChainFiller, LaneSpec};
+use ethercat_rt::setpoint_fill::{CLOCK_FREQ_HZ, ChainFiller, LaneSpec};
 use ethercat_rt::wire::{Command, push_sample_runs_response_frame};
 use host_rt::mcu_serial_conn::McuSerialConn;
 use mcu_protocol::messages::{LANE_RUN_FLAG_REANCHOR, LANE_RUN_FLAG_TAIL, LaneRun};
-use runtime::piece_ring::PieceEntry;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use trajectory::{
+    ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm, NudgeProfile,
+};
 
 const MCU_ID: u32 = 4;
 const AXIS: u8 = 0;
@@ -18,8 +20,13 @@ const INTERVAL_NS: u64 = 250_000;
 const CPM: f64 = 3_276.8;
 const GRID_INDEX: u64 = 1_000;
 const GRID_CLOCK: u64 = 8_000_000_000;
-const PIECE_SECS: f32 = 0.010;
-const PIECE_NS: u64 = 10_000_000;
+const SPAN_SECS: f64 = 0.010;
+const SPAN_NS: u64 = 10_000_000;
+/// Two of these overrun one fill window (256 cycles = 64 ms), so the tail of
+/// the pair stays staged after the first drain — a lane only ever holds the
+/// active view plus one successor, so depth comes from length, not count.
+const DEEP_SPAN_SECS: f64 = 0.040;
+const DEEP_SPAN_NS: u64 = 40_000_000;
 
 /// The fake endpoint: serves the kalico socket, answers every
 /// `PushSampleRuns` with the grid pair it is told to report, and keeps every
@@ -43,6 +50,7 @@ impl RingEndpoint {
         let free_cycles = Arc::new(AtomicU32::new(1024));
         let reject = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
 
         let thread = {
             let (path, received, grid_index, free_cycles, reject, stop) = (
@@ -55,6 +63,7 @@ impl RingEndpoint {
             );
             std::thread::spawn(move || {
                 let mut server = FrameServer::bind(&path).expect("endpoint: bind");
+                ready_tx.send(()).expect("endpoint readiness receiver");
                 while !stop.load(Ordering::Relaxed) {
                     for cmd in server.poll_commands() {
                         if let Command::PushSampleRuns {
@@ -88,11 +97,9 @@ impl RingEndpoint {
             })
         };
 
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !std::path::Path::new(&socket_path).exists() {
-            assert!(Instant::now() < deadline, "endpoint socket never appeared");
-            std::thread::sleep(Duration::from_millis(2));
-        }
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("endpoint socket never appeared");
         Self {
             received,
             grid_index,
@@ -166,22 +173,61 @@ fn harness(name: &str) -> Harness {
     }
 }
 
-fn linear_piece(start_ns: u64, from_mm: f32, to_mm: f32) -> PieceEntry {
-    let mut entry = PieceEntry {
-        start_time: start_ns,
-        duration: PIECE_SECS,
-        coeff_count: 2,
-        ..PieceEntry::zeroed()
-    };
-    entry.coeffs[0] = (from_mm + to_mm) / 2.0;
-    entry.coeffs[1] = (to_mm - from_mm) / 2.0;
-    entry
+fn span(start_ns: u64, duration_s: f64, from_mm: f64, to_mm: f64) -> ClockedMotorSpan {
+    let delta = to_mm - from_mm;
+    let profile =
+        NudgeProfile::try_new(delta, delta.abs() / duration_s, 0.0, 0.0).expect("cruise profile");
+    let duration = profile.duration();
+    let groups: Arc<[MotorGroup]> = Arc::from([
+        MotorGroup::Independent(MotorTerm {
+            source_axis: 0,
+            axis: ContinuousAxis::Hold {
+                position: from_mm,
+                t_start: 0.0,
+                t_end: duration,
+            },
+            scale: 1.0,
+        }),
+        MotorGroup::Independent(MotorTerm {
+            source_axis: 0,
+            axis: ContinuousAxis::Nudge(profile),
+            scale: 1.0,
+        }),
+    ]);
+    let signal =
+        Arc::new(MotorSpan::try_new(groups, 0.0, duration, 0, 0, false).expect("motor span"));
+    #[allow(clippy::cast_precision_loss)]
+    let start_clock_exact = start_ns as f64;
+    let start_host = start_clock_exact / CLOCK_FREQ_HZ;
+    ClockedMotorSpan::try_new(
+        Arc::clone(&signal),
+        signal.t_start,
+        signal.t_end,
+        start_host,
+        start_host + duration,
+        start_clock_exact,
+        CLOCK_FREQ_HZ,
+    )
+    .expect("a positive-duration view on the nanosecond DC clock")
 }
 
-fn frame(pieces: Vec<PieceEntry>) -> AxisFrame {
+fn linear_span(start_ns: u64, from_mm: f64, to_mm: f64) -> ClockedMotorSpan {
+    span(start_ns, SPAN_SECS, from_mm, to_mm)
+}
+
+/// The deep stage: one lane's two slots filled with long views, so the fill
+/// cannot ship all of it in a single window.
+fn deep_spans(start_ns: u64) -> Vec<ClockedMotorSpan> {
+    vec![
+        span(start_ns, DEEP_SPAN_SECS, 0.0, 4.0),
+        span(start_ns + DEEP_SPAN_NS, DEEP_SPAN_SECS, 4.0, 8.0),
+    ]
+}
+
+fn frame(spans: Vec<ClockedMotorSpan>) -> AxisFrame {
     AxisFrame {
         axis: AXIS,
-        pieces,
+        spans,
         new_head: 0,
         room: 1024,
         guard_recorded_ns: 0,
@@ -197,15 +243,15 @@ fn key() -> AxisKey {
 }
 
 #[test]
-fn a_ring_endpoint_receives_abutting_sample_runs_for_a_two_piece_trajectory() {
+fn a_ring_endpoint_receives_abutting_sample_runs_for_a_two_span_trajectory() {
     let h = harness("abut");
     let start = GRID_CLOCK + INTERVAL_NS * 8;
     h.sink
         .send_mcu_frames(
             MCU_ID,
             &[frame(vec![
-                linear_piece(start, 0.0, 1.0),
-                linear_piece(start + PIECE_NS, 1.0, 3.0),
+                linear_span(start, 0.0, 1.0),
+                linear_span(start + SPAN_NS, 1.0, 3.0),
             ])],
         )
         .expect("the ring endpoint accepts the fill");
@@ -215,7 +261,7 @@ fn a_ring_endpoint_receives_abutting_sample_runs_for_a_two_piece_trajectory() {
     assert_eq!(
         runs[0].start_index,
         GRID_INDEX + 8,
-        "the first run starts on the grid index covering the first piece"
+        "the first run starts on the grid index covering the first view"
     );
     assert_eq!(
         runs[0].flags & LANE_RUN_FLAG_REANCHOR,
@@ -239,8 +285,8 @@ fn a_ring_endpoint_receives_abutting_sample_runs_for_a_two_piece_trajectory() {
     let covered: usize = runs.iter().map(|r| r.samples.len()).sum();
     assert_eq!(
         covered,
-        (2 * PIECE_NS / INTERVAL_NS) as usize,
-        "the two pieces are sampled once per DC cycle end to end"
+        (2 * SPAN_NS / INTERVAL_NS) as usize,
+        "the two views are sampled once per DC cycle end to end"
     );
     let last = runs.last().expect("at least one run");
     assert_eq!(
@@ -258,12 +304,11 @@ fn a_ring_endpoint_receives_abutting_sample_runs_for_a_two_piece_trajectory() {
         "a monotonically rising trajectory yields monotonically rising counts"
     );
     let last_clock = start + INTERVAL_NS * (positions.len() as u64 - 1);
-    let tail = linear_piece(start + PIECE_NS, 1.0, 3.0);
-    let expected_mm = f64::from(
-        runtime::motion_core::arm_piece(&tail, ethercat_rt::setpoint_fill::CLOCK_FREQ_HZ)
-            .eval_pos_vel(last_clock)
-            .0,
-    );
+    let tail = linear_span(start + SPAN_NS, 1.0, 3.0);
+    let expected_mm = tail
+        .eval_at_clock(last_clock)
+        .expect("the last grid clock lies inside the tail view")
+        .position;
     let span_mm = f64::from(*positions.last().unwrap()) / CPM;
     assert!(
         (span_mm - expected_mm).abs() < 1.0 / CPM,
@@ -272,7 +317,7 @@ fn a_ring_endpoint_receives_abutting_sample_runs_for_a_two_piece_trajectory() {
     );
 }
 
-/// The EtherCAT piece transport carries a fresh-epoch discontinuity on the
+/// The EtherCAT span transport carries a fresh-epoch discontinuity on the
 /// wire and lets the endpoint re-create its count map, so `mark_reanchor` and
 /// `mark_seam_gap` are no-ops for it. The ring must reach the same place from
 /// the stream alone: the run before the hole declares the hold, the run after
@@ -282,7 +327,7 @@ fn a_stream_time_hole_closes_one_run_and_re_anchors_the_next() {
     let h = harness("gap");
     let start = GRID_CLOCK + INTERVAL_NS * 8;
     h.sink
-        .send_mcu_frames(MCU_ID, &[frame(vec![linear_piece(start, 0.0, 1.0)])])
+        .send_mcu_frames(MCU_ID, &[frame(vec![linear_span(start, 0.0, 1.0)])])
         .expect("the pre-hole stream is accepted");
     let before = h.endpoint.runs();
     assert_eq!(
@@ -291,9 +336,9 @@ fn a_stream_time_hole_closes_one_run_and_re_anchors_the_next() {
         "the run reaching the hole declares the hold"
     );
 
-    let rejoin = start + PIECE_NS + INTERVAL_NS * 40;
+    let rejoin = start + SPAN_NS + INTERVAL_NS * 40;
     h.sink
-        .send_mcu_frames(MCU_ID, &[frame(vec![linear_piece(rejoin, 1.0, 2.0)])])
+        .send_mcu_frames(MCU_ID, &[frame(vec![linear_span(rejoin, 1.0, 2.0)])])
         .expect("the post-hole stream is accepted");
     let resumed = &h.endpoint.runs()[before.len()];
     assert_eq!(
@@ -303,7 +348,7 @@ fn a_stream_time_hole_closes_one_run_and_re_anchors_the_next() {
     );
     assert_eq!(
         resumed.start_index,
-        GRID_INDEX + 8 + PIECE_NS / INTERVAL_NS + 40,
+        GRID_INDEX + 8 + SPAN_NS / INTERVAL_NS + 40,
         "it starts on the grid index covering the rejoin clock"
     );
 }
@@ -313,7 +358,7 @@ fn grid_feedback_advances_the_filler_so_a_later_fill_lands_on_the_reported_grid(
     let h = harness("grid");
     let start = GRID_CLOCK + INTERVAL_NS * 8;
     h.sink
-        .send_mcu_frames(MCU_ID, &[frame(vec![linear_piece(start, 0.0, 1.0)])])
+        .send_mcu_frames(MCU_ID, &[frame(vec![linear_span(start, 0.0, 1.0)])])
         .expect("first fill accepted");
     let first_len: u64 = h
         .endpoint
@@ -331,7 +376,7 @@ fn grid_feedback_advances_the_filler_so_a_later_fill_lands_on_the_reported_grid(
     h.filler.lock_ok().cut_axis(AXIS);
     let far = GRID_CLOCK + u64::from(advance) * INTERVAL_NS + INTERVAL_NS * 16;
     h.sink
-        .send_mcu_frames(MCU_ID, &[frame(vec![linear_piece(far, 5.0, 6.0)])])
+        .send_mcu_frames(MCU_ID, &[frame(vec![linear_span(far, 5.0, 6.0)])])
         .expect("a fill against the advanced grid");
     let last = h.endpoint.runs().last().cloned().expect("runs exist");
     assert_eq!(
@@ -347,14 +392,14 @@ fn a_grid_that_regresses_is_fatal_rather_than_a_silent_reindex() {
     h.endpoint.grid_index.store(500, Ordering::Relaxed);
     let start = GRID_CLOCK + 500 * INTERVAL_NS + INTERVAL_NS * 8;
     h.sink
-        .send_mcu_frames(MCU_ID, &[frame(vec![linear_piece(start, 0.0, 1.0)])])
+        .send_mcu_frames(MCU_ID, &[frame(vec![linear_span(start, 0.0, 1.0)])])
         .expect("the advanced grid is accepted");
 
     h.endpoint.grid_index.store(0, Ordering::Relaxed);
     h.filler.lock_ok().cut_axis(AXIS);
     let error = h
         .sink
-        .send_mcu_frames(MCU_ID, &[frame(vec![linear_piece(start, 0.0, 1.0)])])
+        .send_mcu_frames(MCU_ID, &[frame(vec![linear_span(start, 0.0, 1.0)])])
         .expect_err("a grid index below the last observed one must not be adopted");
     let SendError::Fatal(message) = error else {
         panic!("a grid regression must be fatal, got {error:?}");
@@ -369,13 +414,9 @@ fn a_grid_that_regresses_is_fatal_rather_than_a_silent_reindex() {
 fn a_cut_drops_the_staged_runs_and_the_lane_re_anchors_loudly() {
     let h = harness("cut");
     let start = GRID_CLOCK + INTERVAL_NS * 8;
-    // Deep enough that one fill window cannot cover it: the tail stays staged.
-    let pieces: Vec<PieceEntry> = (0..8)
-        .map(|i| linear_piece(start + i * PIECE_NS, i as f32, i as f32 + 1.0))
-        .collect();
     h.endpoint.free_cycles.store(0, Ordering::Relaxed);
     h.sink
-        .send_mcu_frames(MCU_ID, &[frame(pieces)])
+        .send_mcu_frames(MCU_ID, &[frame(deep_spans(start))])
         .expect("the first window is accepted");
     assert!(
         h.filler.lock_ok().wants_drain(),
@@ -386,13 +427,13 @@ fn a_cut_drops_the_staged_runs_and_the_lane_re_anchors_loudly() {
     h.sink.flush_keys(&[key()]).expect("flush is accepted");
     assert!(
         !h.filler.lock_ok().wants_drain(),
-        "a cut must drop every staged piece — nothing may still reach the ring"
+        "a cut must drop every staged view — nothing may still reach the ring"
     );
 
     h.endpoint.free_cycles.store(1024, Ordering::Relaxed);
     let resumed = GRID_CLOCK + INTERVAL_NS * 4_000;
     h.sink
-        .send_mcu_frames(MCU_ID, &[frame(vec![linear_piece(resumed, 42.0, 43.0)])])
+        .send_mcu_frames(MCU_ID, &[frame(vec![linear_span(resumed, 42.0, 43.0)])])
         .expect("post-cut motion is accepted");
     let runs = h.endpoint.runs();
     assert!(
@@ -420,16 +461,13 @@ fn a_cut_drops_the_staged_runs_and_the_lane_re_anchors_loudly() {
 fn a_halt_cuts_the_staged_lane_through_the_pump_sink_hook() {
     let h = harness("halt");
     let start = GRID_CLOCK + INTERVAL_NS * 8;
-    let pieces: Vec<PieceEntry> = (0..8)
-        .map(|i| linear_piece(start + i * PIECE_NS, i as f32, i as f32 + 1.0))
-        .collect();
     h.endpoint.free_cycles.store(0, Ordering::Relaxed);
     h.sink
-        .send_mcu_frames(MCU_ID, &[frame(pieces)])
+        .send_mcu_frames(MCU_ID, &[frame(deep_spans(start))])
         .expect("the first window is accepted");
     assert!(h.filler.lock_ok().wants_drain());
 
-    h.sink.cut_staged(&[key()]);
+    h.sink.cut_staged(&[key()]).expect("halt cut");
     assert!(
         !h.filler.lock_ok().wants_drain(),
         "the halt hook must drop the stage exactly as flush does"
@@ -439,7 +477,7 @@ fn a_halt_cuts_the_staged_lane_through_the_pump_sink_hook() {
 #[test]
 fn a_frame_for_an_axis_the_filler_does_not_drive_is_fatal() {
     let h = harness("unknown-axis");
-    let mut stray = frame(vec![linear_piece(GRID_CLOCK + INTERVAL_NS * 8, 0.0, 1.0)]);
+    let mut stray = frame(vec![linear_span(GRID_CLOCK + INTERVAL_NS * 8, 0.0, 1.0)]);
     stray.axis = AXIS + 7;
     let error = h
         .sink
@@ -469,12 +507,9 @@ fn the_drain_tick_only_covers_ring_endpoints_and_only_while_they_owe_samples() {
     );
 
     let start = GRID_CLOCK + INTERVAL_NS * 8;
-    let pieces: Vec<PieceEntry> = (0..8)
-        .map(|i| linear_piece(start + i * PIECE_NS, i as f32, i as f32 + 1.0))
-        .collect();
     h.endpoint.free_cycles.store(0, Ordering::Relaxed);
     h.sink
-        .send_mcu_frames(MCU_ID, &[frame(pieces)])
+        .send_mcu_frames(MCU_ID, &[frame(deep_spans(start))])
         .expect("the first window is accepted");
     let after_send = h.endpoint.runs().len();
     assert!(h.sink.wants_drain_tick(MCU_ID));
@@ -492,20 +527,18 @@ fn the_drain_tick_only_covers_ring_endpoints_and_only_while_they_owe_samples() {
 }
 
 /// The pump re-sends a failed bundle byte-identically. A staged sample stream
-/// is not idempotent the way a slot-addressed `PushPieces` is, so a rejected
+/// is not idempotent the way a slot-addressed ring write is, so a rejected
 /// fill must leave the lane with nothing staged — the retry restages from
 /// scratch and its run re-anchors.
 #[test]
 fn a_rejected_fill_drops_the_stage_so_the_retry_re_anchors() {
     let h = harness("reject");
     let start = GRID_CLOCK + INTERVAL_NS * 8;
-    let pieces: Vec<PieceEntry> = (0..8)
-        .map(|i| linear_piece(start + i * PIECE_NS, i as f32, i as f32 + 1.0))
-        .collect();
+    let spans = deep_spans(start);
     h.endpoint.reject.store(true, Ordering::Relaxed);
     let error = h
         .sink
-        .send_mcu_frames(MCU_ID, &[frame(pieces.clone())])
+        .send_mcu_frames(MCU_ID, &[frame(spans.clone())])
         .expect_err("an endpoint reject must surface");
     assert!(
         matches!(error, SendError::Transient(_) | SendError::Fatal(_)),
@@ -513,13 +546,13 @@ fn a_rejected_fill_drops_the_stage_so_the_retry_re_anchors() {
     );
     assert!(
         !h.filler.lock_ok().wants_drain(),
-        "the failed bundle must not leave pieces staged for a non-idempotent re-send"
+        "the failed bundle must not leave views staged for a non-idempotent re-send"
     );
 
     h.endpoint.reject.store(false, Ordering::Relaxed);
     let before = h.endpoint.runs().len();
     h.sink
-        .send_mcu_frames(MCU_ID, &[frame(pieces)])
+        .send_mcu_frames(MCU_ID, &[frame(spans)])
         .expect("the retry is accepted");
     let runs = h.endpoint.runs();
     assert!(runs.len() > before, "the retry must reach the endpoint");
@@ -531,6 +564,6 @@ fn a_rejected_fill_drops_the_stage_so_the_retry_re_anchors() {
     assert_eq!(
         runs[before].start_index,
         GRID_INDEX + 8,
-        "the retry restages the whole bundle from its first piece"
+        "the retry restages the whole bundle from its first view"
     );
 }

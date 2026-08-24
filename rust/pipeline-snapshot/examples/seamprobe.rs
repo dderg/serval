@@ -15,7 +15,7 @@ fn main() {
             max_accel: 3000.0,
             square_corner_velocity: 5.0,
             corner_deviation: None,
-            max_jerk: 100_000.0,
+            max_jerk: f64::INFINITY,
             max_extrude_only_velocity: None,
             max_extrude_only_accel: None,
             max_path_deviation: None,

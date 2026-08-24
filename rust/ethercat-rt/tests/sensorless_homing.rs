@@ -1,3 +1,5 @@
+mod common;
+
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -104,7 +106,7 @@ fn spawn_stub(tag: &str) -> (ChildGuard, McuSerialConn) {
         .expect("spawn ethercat-rt-stub");
     let guard = ChildGuard { child: Some(child) };
     wait_for_socket(&socket, Instant::now() + Duration::from_secs(5));
-    let conn = McuSerialConn::connect(&socket).expect("connect to stub socket");
+    let conn = common::connect_until(&socket, Instant::now() + Duration::from_secs(5));
     do_handshake(&conn);
     (guard, conn)
 }

@@ -108,8 +108,6 @@ fn quadrature_rule(product_degree: usize) -> (&'static [f64], &'static [f64]) {
     }
 }
 
-const CUT_DEDUP_EPS_S: f64 = 1e-12;
-
 type MomentEvaluator<'a> = dyn Fn(f64, f64, usize, f64, &mut [f64]) -> bool + 'a;
 
 /// The convolution `(input ∗ kernel)(t)`, evaluated exactly: both factors are
@@ -118,6 +116,8 @@ type MomentEvaluator<'a> = dyn Fn(f64, f64, usize, f64, &mut [f64]) -> bool + 'a
 /// previous sampled rectangle-rule evaluator corrugated the result at the
 /// sample wavelength — noise invisible in position but fatal to the refit's
 /// second-difference acceleration probes, which chased it into subdividing
+const PVA_MEMO_SLOTS: usize = 256;
+
 /// every span to the floor.
 pub struct ShapedSignal<'a, F = Box<dyn Fn(f64) -> f64 + 'a>> {
     eval_input: F,
@@ -135,7 +135,7 @@ pub struct ShapedSignal<'a, F = Box<dyn Fn(f64) -> f64 + 'a>> {
     /// times (a segment's end is the next segment's start, and bisection
     /// re-evaluates its parent's endpoints), so a tiny exact-`t` memo removes
     /// whole convolution passes without changing any computed value.
-    pva_memo: std::cell::RefCell<[Option<(u64, (f64, f64, f64))>; 4]>,
+    pva_memo: std::cell::RefCell<[Option<(u64, (f64, f64, f64))>; PVA_MEMO_SLOTS]>,
     pva_memo_next: std::cell::Cell<usize>,
     kernel: &'a PiecewisePolynomialKernel,
     /// `k′` and `k″` as piecewise polynomials over the same support, plus the
@@ -154,13 +154,103 @@ impl<'a> ShapedSignal<'a> {
     #[cfg(test)]
     pub fn new(padded: &'a ScalarNurbs, kernel: &'a PiecewisePolynomialKernel) -> Self {
         let mut breaks = padded.knots().to_vec();
-        breaks.dedup_by(|a, b| (*a - *b).abs() <= CUT_DEDUP_EPS_S);
+        breaks.dedup();
         Self::new_from_evaluator(
             kernel,
             Box::new(move |t| eval_clamped(padded, t)),
             breaks,
             padded.degree() as usize,
         )
+    }
+}
+
+fn ordered_f64_key(value: f64) -> u64 {
+    let bits = value.to_bits();
+    if bits >> 63 == 0 {
+        bits | (1_u64 << 63)
+    } else {
+        !bits
+    }
+}
+
+fn f64_from_ordered_key(key: u64) -> f64 {
+    let bits = if key >> 63 == 0 {
+        !key
+    } else {
+        key & !(1_u64 << 63)
+    };
+    f64::from_bits(bits)
+}
+
+fn first_time_satisfying(predicate: impl Fn(f64) -> bool) -> f64 {
+    let mut lower = ordered_f64_key(-f64::MAX);
+    let mut upper = ordered_f64_key(f64::MAX);
+    assert!(!predicate(-f64::MAX));
+    assert!(predicate(f64::MAX));
+    while upper - lower > 1 {
+        let middle = lower + (upper - lower) / 2;
+        if predicate(f64_from_ordered_key(middle)) {
+            upper = middle;
+        } else {
+            lower = middle;
+        }
+    }
+    f64_from_ordered_key(upper)
+}
+
+impl ShapedSignal<'_> {
+    /// The cut boundaries `merge_cuts` walks, in the order it walks them: every
+    /// kernel piece start followed by the support's upper edge.
+    pub fn kernel_cut_boundaries<'k>(
+        kernel: &'k PiecewisePolynomialKernel,
+    ) -> impl Iterator<Item = f64> + 'k {
+        kernel
+            .pieces
+            .iter()
+            .map(|piece| piece.u_start)
+            .chain(std::iter::once(kernel.support().1))
+    }
+
+    /// Every output time at which the cut list `merge_cuts` builds changes
+    /// shape because of this `(input_break, kernel_break)` pair, appended to
+    /// `transitions`.
+    ///
+    /// `merge_cuts` decides ownership with `t - input_break >= kernel_break`
+    /// and window membership with `input_break <= t - k_hi` /
+    /// `input_break < t - k_lo`. Those three comparisons round differently from
+    /// the algebraically equivalent `t >= input_break + kernel_break`, so the
+    /// transition is found by bisecting the comparison itself over the ordered
+    /// f64 key space — 64 steps, and the answer is the first `t` the evaluator
+    /// actually treats as being on the far side. Each returned time is
+    /// right-owned: the discontinuity belongs to the span starting there.
+    ///
+    /// At the support edges the ownership comparison and the window-membership
+    /// comparison are the same branch of the evaluator — a break crossing
+    /// `k_lo` either leaves the window or is placed below the first kernel
+    /// piece, and the interval between the two roundings is narrower than one
+    /// ulp, so it carries no integral. Both roundings therefore collapse to
+    /// the later one, the first time every comparison agrees on the far side;
+    /// emitting both would seed the refit with an ulp-wide span whose knots
+    /// make de Boor divide by the span width.
+    pub fn output_cut_transitions(
+        kernel: &PiecewisePolynomialKernel,
+        input_break: f64,
+        kernel_break: f64,
+        transitions: &mut Vec<f64>,
+    ) {
+        let (k_lo, k_hi) = kernel.support();
+        let owned = first_time_satisfying(|t| t - input_break >= kernel_break);
+        let window_edge = if kernel_break == k_lo {
+            Some(first_time_satisfying(|t| input_break < t - k_lo))
+        } else if kernel_break == k_hi {
+            Some(first_time_satisfying(|t| input_break <= t - k_hi))
+        } else {
+            None
+        };
+        transitions.push(match window_edge {
+            Some(edge) => owned.max(edge),
+            None => owned,
+        });
     }
 }
 
@@ -220,8 +310,8 @@ where
             input_degree + kernel_degree
         );
         let (gauss_nodes, gauss_weights) = quadrature_rule(input_degree + kernel_degree);
-        input_breaks.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        input_breaks.dedup_by(|a, b| (*a - *b).abs() <= CUT_DEDUP_EPS_S);
+        input_breaks.sort_by(f64::total_cmp);
+        input_breaks.dedup();
         let d_kernel = PiecewisePolynomialKernel {
             pieces: kernel.pieces.iter().map(|p| p.differentiate()).collect(),
         };
@@ -257,7 +347,7 @@ where
             gauss_weights,
             input_breaks,
             cuts: std::cell::RefCell::new(Vec::new()),
-            pva_memo: std::cell::RefCell::new([None; 4]),
+            pva_memo: std::cell::RefCell::new([None; PVA_MEMO_SLOTS]),
             pva_memo_next: std::cell::Cell::new(0),
             kernel,
             d_kernel,
@@ -310,7 +400,7 @@ where
             .unwrap_or_else(|| self.convolve_pva_quadrature(t));
         let slot = self.pva_memo_next.get();
         self.pva_memo.borrow_mut()[slot] = Some((key, value));
-        self.pva_memo_next.set((slot + 1) % 4);
+        self.pva_memo_next.set((slot + 1) % PVA_MEMO_SLOTS);
         value
     }
 
@@ -406,15 +496,11 @@ where
     /// iterated in reverse), deduplicating on the fly — no per-call sort.
     fn merge_cuts(&self, t: f64, cuts: &mut Vec<f64>) {
         cuts.clear();
-        let b_lo = self
-            .input_breaks
-            .partition_point(|&b| b <= t - self.k_hi + CUT_DEDUP_EPS_S);
-        let b_hi = self
-            .input_breaks
-            .partition_point(|&b| b < t - self.k_lo - CUT_DEDUP_EPS_S);
+        let b_lo = self.input_breaks.partition_point(|&b| b <= t - self.k_hi);
+        let b_hi = self.input_breaks.partition_point(|&b| b < t - self.k_lo);
         let mut breaks = self.input_breaks[b_lo..b_hi].iter().rev().peekable();
         let push = |v: f64, cuts: &mut Vec<f64>| {
-            if cuts.last().is_none_or(|&last| v - last > CUT_DEDUP_EPS_S) {
+            if cuts.last().is_none_or(|&last| v > last) {
                 cuts.push(v);
             }
         };

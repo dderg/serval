@@ -145,7 +145,12 @@ pub fn bezier_pieces_to_nurbs(pieces: &[BezierPiece]) -> ScalarNurbs {
     assert!(!pieces.is_empty(), "bezier_pieces_to_nurbs: empty input");
     let p = pieces[0].degree();
     for w in pieces.windows(2) {
-        assert!(w[0].u_end == w[1].u_start, "non-contiguous Bezier pieces");
+        assert!(
+            w[0].u_end == w[1].u_start,
+            "non-contiguous Bezier pieces: {} != {}",
+            w[0].u_end,
+            w[1].u_start
+        );
         assert!(w[1].degree() == p, "inconsistent degrees");
     }
 

@@ -184,6 +184,9 @@ pub struct PyMotionEngine {
     axis_transports: Mutex<Arc<crate::axis_transport::AxisTransports>>,
     stepcompress_endpoints: Arc<Mutex<HashMap<u32, Arc<Mutex<crate::pump::StepcompressEndpoint>>>>>,
     sample_endpoints: Arc<Mutex<HashMap<u32, Arc<Mutex<crate::pump::SampleEndpoint>>>>>,
+    /// The sweep the last `resonance_buzz` armed, kept so completion is asked
+    /// of the routes it actually drove.
+    pub(crate) buzz_token: Mutex<Option<crate::pump::BuzzToken>>,
     dispatched_segments: Arc<AtomicU64>,
     dispatch_anchor: Arc<Mutex<crate::anchor::Anchor>>,
     fallback_clock_conversions: Arc<AtomicU64>,
@@ -227,6 +230,7 @@ impl PyMotionEngine {
             axis_transports: Mutex::new(Arc::new(crate::axis_transport::AxisTransports::default())),
             stepcompress_endpoints: Arc::new(Mutex::new(HashMap::new())),
             sample_endpoints: Arc::new(Mutex::new(HashMap::new())),
+            buzz_token: Mutex::new(None),
             dispatched_segments: Arc::new(AtomicU64::new(0)),
             dispatch_anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
             fallback_clock_conversions: Arc::new(AtomicU64::new(0)),

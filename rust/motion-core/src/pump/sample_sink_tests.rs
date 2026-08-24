@@ -1,6 +1,8 @@
 use super::*;
+use nurbs::ScalarNurbs;
 use runtime::sample_run::decode_deltas;
 use std::sync::atomic::AtomicU64;
+use trajectory::{MotorGroup, MotorSpan};
 
 const MCU_ID: u32 = 3;
 const OID: u32 = 7;
@@ -119,27 +121,74 @@ fn harness(lanes: &[SampleLaneConfig]) -> Harness {
     }
 }
 
-/// One piece per call, chained so consecutive pieces abut.
-fn piece(start_time: u64, from_mm: f32, to_mm: f32, duration: f32) -> PieceEntry {
-    let mut entry = PieceEntry::zeroed();
-    entry.start_time = start_time;
-    entry.duration = duration;
-    entry.coeff_count = 2;
-    entry.coeffs[0] = 0.5 * (from_mm + to_mm);
-    entry.coeffs[1] = 0.5 * (to_mm - from_mm);
-    entry
+/// A straight-line motor signal in stream time: degree one over two control
+/// points is exactly the constant-velocity ramp these lanes stream.
+fn linear_signal(
+    from_mm: f64,
+    to_mm: f64,
+    t_start: f64,
+    t_end: f64,
+    motor_mask: u8,
+) -> Arc<MotorSpan> {
+    let curve = ScalarNurbs::try_new(
+        1,
+        vec![t_start, t_start, t_end, t_end],
+        vec![from_mm, to_mm],
+    )
+    .expect("a degree-one curve over two control points");
+    Arc::new(
+        MotorSpan::try_new(
+            Arc::from([MotorGroup::Spline {
+                curve: Arc::new(curve),
+                summed_scale: 1.0,
+            }]),
+            t_start,
+            t_end,
+            motor_mask,
+            0,
+            false,
+        )
+        .expect("a linear motor span"),
+    )
 }
 
-fn overlay_piece(start_time: u64, to_mm: f32, duration: f32) -> PieceEntry {
-    let mut entry = piece(start_time, 0.0, to_mm, duration);
-    entry.motor_mask = 1;
-    entry
+fn masked_span(
+    start_clock: u64,
+    from_mm: f64,
+    to_mm: f64,
+    duration: f64,
+    motor_mask: u8,
+) -> ClockedMotorSpan {
+    #[allow(clippy::cast_precision_loss)]
+    let start_clock_exact = start_clock as f64;
+    let t_start = start_clock_exact / CYCLES_PER_SECOND;
+    let t_end = t_start + duration;
+    ClockedMotorSpan::try_new(
+        linear_signal(from_mm, to_mm, t_start, t_end, motor_mask),
+        t_start,
+        t_end,
+        t_start,
+        t_end,
+        start_clock_exact,
+        CYCLES_PER_SECOND,
+    )
+    .expect("a representable clocked view")
 }
 
-fn frame(axis: u8, pieces: Vec<PieceEntry>) -> AxisFrame {
+/// One view per call, clocked on the lane's own timeline so consecutive views
+/// abut.
+fn span(start_clock: u64, from_mm: f64, to_mm: f64, duration: f64) -> ClockedMotorSpan {
+    masked_span(start_clock, from_mm, to_mm, duration, 0)
+}
+
+fn overlay_span(start_clock: u64, to_mm: f64, duration: f64) -> ClockedMotorSpan {
+    masked_span(start_clock, 0.0, to_mm, duration, 1)
+}
+
+fn frame(axis: u8, spans: Vec<ClockedMotorSpan>) -> AxisFrame {
     AxisFrame {
         axis,
-        pieces,
+        spans,
         new_head: 0,
         room: 64,
         guard_recorded_ns: 0,
@@ -166,8 +215,8 @@ fn reconstruct(runs: &[Sent], anchor: i32) -> Vec<i32> {
 fn a_lane_anchors_once_then_streams_abutting_runs() {
     let mut h = harness(&[lane_cfg(0, OID)]);
     h.endpoint
-        .send_frames(MCU_ID, &[frame(0, vec![piece(0, 0.0, 10.0, 0.05)])])
-        .expect("pieces accepted");
+        .send_frames(MCU_ID, &[frame(0, vec![span(0, 0.0, 10.0, 0.05)])])
+        .expect("spans accepted");
     h.advance((CYCLES_PER_SECOND * 0.1) as u64);
     h.endpoint.tick().expect("tick");
 
@@ -204,12 +253,12 @@ fn runs_abut_exactly_on_the_wire() {
             &[frame(
                 0,
                 vec![
-                    piece(0, 0.0, 20.0, 0.05),
-                    piece((CYCLES_PER_SECOND * 0.05) as u64, 20.0, 60.0, 0.05),
+                    span(0, 0.0, 20.0, 0.05),
+                    span((CYCLES_PER_SECOND * 0.05) as u64, 20.0, 60.0, 0.05),
                 ],
             )],
         )
-        .expect("pieces accepted");
+        .expect("spans accepted");
     h.advance((CYCLES_PER_SECOND * 0.2) as u64);
     h.endpoint.tick().expect("tick");
 
@@ -241,8 +290,8 @@ fn runs_abut_exactly_on_the_wire() {
 fn samples_land_on_the_lane_quantum_and_track_the_trajectory() {
     let mut h = harness(&[lane_cfg(0, OID)]);
     h.endpoint
-        .send_frames(MCU_ID, &[frame(0, vec![piece(0, 0.0, 10.0, 0.05)])])
-        .expect("pieces accepted");
+        .send_frames(MCU_ID, &[frame(0, vec![span(0, 0.0, 10.0, 0.05)])])
+        .expect("spans accepted");
     h.advance((CYCLES_PER_SECOND * 0.1) as u64);
     h.endpoint.tick().expect("tick");
     let sent = h.taken();
@@ -276,17 +325,17 @@ fn the_lane_never_outruns_the_advertised_ring_depth_and_resumes_on_retirement() 
     let mut cfg = lane_cfg(0, OID);
     cfg.ring_depth = DEPTH;
     let mut h = harness(&[cfg]);
-    let mut pieces = Vec::new();
+    let mut spans = Vec::new();
     let mut start = 0u64;
-    let mut from = 0.0f32;
+    let mut from = 0.0f64;
     for _ in 0..40 {
-        pieces.push(piece(start, from, from + 5.0, 0.05));
+        spans.push(span(start, from, from + 5.0, 0.05));
         start += (CYCLES_PER_SECOND * 0.05) as u64;
         from += 5.0;
     }
     h.endpoint
-        .send_frames(MCU_ID, &[frame(0, pieces)])
-        .expect("pieces accepted");
+        .send_frames(MCU_ID, &[frame(0, spans)])
+        .expect("spans accepted");
     for _ in 0..8 {
         h.endpoint.tick().expect("tick");
     }
@@ -325,17 +374,17 @@ fn the_lane_never_outruns_the_advertised_ring_depth_and_resumes_on_retirement() 
 #[test]
 fn a_stalled_lane_never_outruns_the_send_lead() {
     let mut h = harness(&[lane_cfg(0, OID)]);
-    let mut pieces = Vec::new();
+    let mut spans = Vec::new();
     let mut start = 0u64;
-    let mut from = 0.0f32;
+    let mut from = 0.0f64;
     for _ in 0..200 {
-        pieces.push(piece(start, from, from + 5.0, 0.05));
+        spans.push(span(start, from, from + 5.0, 0.05));
         start += (CYCLES_PER_SECOND * 0.05) as u64;
         from += 5.0;
     }
     h.endpoint
-        .send_frames(MCU_ID, &[frame(0, pieces)])
-        .expect("pieces accepted");
+        .send_frames(MCU_ID, &[frame(0, spans)])
+        .expect("spans accepted");
     let sent = h.taken();
     let lead_ticks = (CYCLES_PER_SECOND * SEND_LEAD_SECONDS) as u64;
     let furthest = sent
@@ -351,11 +400,11 @@ fn a_stalled_lane_never_outruns_the_send_lead() {
 }
 
 #[test]
-fn an_overlay_piece_rides_its_own_relativized_run() {
+fn an_overlay_span_rides_its_own_relativized_run() {
     let mut h = harness(&[lane_cfg(0, OID)]);
     h.endpoint
-        .send_frames(MCU_ID, &[frame(0, vec![piece(0, 0.0, 10.0, 0.05)])])
-        .expect("kinematic pieces accepted");
+        .send_frames(MCU_ID, &[frame(0, vec![span(0, 0.0, 10.0, 0.05)])])
+        .expect("kinematic spans accepted");
     let before = h.endpoint.lane_positions();
     h.taken();
 
@@ -363,7 +412,7 @@ fn an_overlay_piece_rides_its_own_relativized_run() {
     h.endpoint
         .send_frames(
             MCU_ID,
-            &[frame(0, vec![overlay_piece(overlay_start, 0.5, 0.02)])],
+            &[frame(0, vec![overlay_span(overlay_start, 0.5, 0.02)])],
         )
         .expect("overlay accepted");
     h.endpoint.tick().expect("tick");
@@ -375,7 +424,7 @@ fn an_overlay_piece_rides_its_own_relativized_run() {
         .collect();
     assert!(
         !overlays.is_empty(),
-        "a motor_mask piece leaves as sample_overlay, not on the abutting stream"
+        "a motor_mask span leaves as sample_overlay, not on the abutting stream"
     );
     let first = overlays[0];
     let count = usize::try_from(first.int("count")).expect("count fits");
@@ -398,15 +447,15 @@ fn an_overlay_piece_rides_its_own_relativized_run() {
 fn a_seam_gap_re_anchors_the_lane() {
     let mut h = harness(&[lane_cfg(0, OID)]);
     h.endpoint
-        .send_frames(MCU_ID, &[frame(0, vec![piece(0, 0.0, 10.0, 0.05)])])
-        .expect("pieces accepted");
+        .send_frames(MCU_ID, &[frame(0, vec![span(0, 0.0, 10.0, 0.05)])])
+        .expect("spans accepted");
     h.taken();
 
     let rejoin = (CYCLES_PER_SECOND * 0.2) as u64;
     h.endpoint.mark_seam_gap(0, rejoin).expect("axis exists");
     h.endpoint
-        .send_frames(MCU_ID, &[frame(0, vec![piece(rejoin, 10.0, 20.0, 0.05)])])
-        .expect("pieces past the gap accepted");
+        .send_frames(MCU_ID, &[frame(0, vec![span(rejoin, 10.0, 20.0, 0.05)])])
+        .expect("spans past the gap accepted");
     h.endpoint.tick().expect("tick");
 
     let sent = h.taken();
@@ -434,8 +483,8 @@ fn an_unsent_reanchor_cut_needs_no_barrier() {
         .mark_reanchor(0, cut_at, Some(CYCLES_PER_SECOND))
         .expect("axis exists");
     h.endpoint
-        .send_frames(MCU_ID, &[frame(0, vec![piece(cut_at, 0.0, 10.0, 0.05)])])
-        .expect("pieces accepted");
+        .send_frames(MCU_ID, &[frame(0, vec![span(cut_at, 0.0, 10.0, 0.05)])])
+        .expect("spans accepted");
     let sent = h.taken();
     assert!(
         sent.iter().all(|s| s.name != SAMPLE_BARRIER_NAME),
@@ -445,7 +494,7 @@ fn an_unsent_reanchor_cut_needs_no_barrier() {
 }
 
 #[test]
-fn a_fresh_epoch_cut_stages_the_pieces_past_it_exactly_once() {
+fn a_fresh_epoch_cut_stages_the_spans_past_it_exactly_once() {
     let mut h = harness(&[lane_cfg(0, OID)]);
     let cut_at = (CYCLES_PER_SECOND * 0.02) as u64;
     h.endpoint
@@ -457,17 +506,17 @@ fn a_fresh_epoch_cut_stages_the_pieces_past_it_exactly_once() {
             &[frame(
                 0,
                 vec![
-                    piece(cut_at, 0.0, 10.0, 0.05),
-                    piece(cut_at + (CYCLES_PER_SECOND * 0.05) as u64, 10.0, 20.0, 0.05),
+                    span(cut_at, 0.0, 10.0, 0.05),
+                    span(cut_at + (CYCLES_PER_SECOND * 0.05) as u64, 10.0, 20.0, 0.05),
                 ],
             )],
         )
-        .expect("pieces accepted");
+        .expect("spans accepted");
     assert_eq!(
-        h.endpoint.retired_counts(),
+        h.endpoint.consumed_counts(),
         vec![2],
-        "the lane consumed the 2 pieces past the seam once each; staging them a second time \
-         credits retirement the pump never pushed and wedges its drain"
+        "the lane converted the 2 views past the seam once each; staging them a second time \
+         credits consumption the pump never pushed and wedges its drain"
     );
     h.drain_control();
 }
@@ -476,8 +525,8 @@ fn a_fresh_epoch_cut_stages_the_pieces_past_it_exactly_once() {
 fn a_sent_reanchor_cut_parks_the_lane_until_the_barrier_reconciles() {
     let mut h = harness(&[lane_cfg(0, OID)]);
     h.endpoint
-        .send_frames(MCU_ID, &[frame(0, vec![piece(0, 0.0, 10.0, 0.05)])])
-        .expect("pieces accepted");
+        .send_frames(MCU_ID, &[frame(0, vec![span(0, 0.0, 10.0, 0.05)])])
+        .expect("spans accepted");
     let parked_at = h.endpoint.lane_positions()[0];
     h.taken();
 
@@ -486,8 +535,8 @@ fn a_sent_reanchor_cut_parks_the_lane_until_the_barrier_reconciles() {
         .mark_reanchor(0, cut_at, Some(CYCLES_PER_SECOND))
         .expect("axis exists");
     h.endpoint
-        .send_frames(MCU_ID, &[frame(0, vec![piece(cut_at, 10.0, 30.0, 0.05)])])
-        .expect("pieces held behind the cut");
+        .send_frames(MCU_ID, &[frame(0, vec![span(cut_at, 10.0, 30.0, 0.05)])])
+        .expect("spans held behind the cut");
     let sent = h.taken();
     let barrier = sent
         .iter()
@@ -512,7 +561,7 @@ fn a_sent_reanchor_cut_parks_the_lane_until_the_barrier_reconciles() {
     );
     assert!(
         sent.iter().any(|s| s.name == SAMPLE_RUN_NAME),
-        "the held pieces resume streaming"
+        "the held spans resume streaming"
     );
     h.drain_control();
 }
@@ -521,8 +570,8 @@ fn a_sent_reanchor_cut_parks_the_lane_until_the_barrier_reconciles() {
 fn a_readback_disagreeing_with_the_host_is_fatal() {
     let mut h = harness(&[lane_cfg(0, OID)]);
     h.endpoint
-        .send_frames(MCU_ID, &[frame(0, vec![piece(0, 0.0, 10.0, 0.05)])])
-        .expect("pieces accepted");
+        .send_frames(MCU_ID, &[frame(0, vec![span(0, 0.0, 10.0, 0.05)])])
+        .expect("spans accepted");
     let parked_at = h.endpoint.lane_positions()[0];
     h.taken();
 
@@ -531,8 +580,8 @@ fn a_readback_disagreeing_with_the_host_is_fatal() {
         .mark_reanchor(0, cut_at, Some(CYCLES_PER_SECOND))
         .expect("axis exists");
     h.endpoint
-        .send_frames(MCU_ID, &[frame(0, vec![piece(cut_at, 10.0, 30.0, 0.05)])])
-        .expect("pieces held");
+        .send_frames(MCU_ID, &[frame(0, vec![span(cut_at, 10.0, 30.0, 0.05)])])
+        .expect("spans held");
     let seq = h
         .taken()
         .iter()
@@ -578,7 +627,7 @@ fn frames_for_a_foreign_mcu_are_fatal() {
     let mut h = harness(&[lane_cfg(0, OID)]);
     let error = h
         .endpoint
-        .send_frames(MCU_ID + 1, &[frame(0, vec![piece(0, 0.0, 1.0, 0.01)])])
+        .send_frames(MCU_ID + 1, &[frame(0, vec![span(0, 0.0, 1.0, 0.01)])])
         .expect_err("a misaddressed bundle is never silently absorbed");
     assert!(matches!(error, SendError::Fatal(_)));
     h.drain_control();
@@ -589,7 +638,7 @@ fn an_unconfigured_axis_is_fatal() {
     let mut h = harness(&[lane_cfg(0, OID)]);
     let error = h
         .endpoint
-        .send_frames(MCU_ID, &[frame(3, vec![piece(0, 0.0, 1.0, 0.01)])])
+        .send_frames(MCU_ID, &[frame(3, vec![span(0, 0.0, 1.0, 0.01)])])
         .expect_err("an unknown lane is never guessed at");
     let SendError::Fatal(message) = error else {
         panic!("an unknown axis must be fatal");
@@ -608,7 +657,7 @@ fn a_move_faster_than_the_lane_cap_is_fatal() {
     let mut h = harness(&[cfg]);
     let error = h
         .endpoint
-        .send_frames(MCU_ID, &[frame(0, vec![piece(0, 0.0, 100.0, 0.05)])])
+        .send_frames(MCU_ID, &[frame(0, vec![span(0, 0.0, 100.0, 0.05)])])
         .expect_err("a lane never quietly drops motion it cannot represent");
     let SendError::Fatal(message) = error else {
         panic!("exceeding the lane cap must be fatal");
@@ -669,8 +718,8 @@ fn two_lanes_stream_independently() {
         .send_frames(
             MCU_ID,
             &[
-                frame(0, vec![piece(0, 0.0, 10.0, 0.05)]),
-                frame(1, vec![piece(0, 0.0, -4.0, 0.05)]),
+                frame(0, vec![span(0, 0.0, 10.0, 0.05)]),
+                frame(1, vec![span(0, 0.0, -4.0, 0.05)]),
             ],
         )
         .expect("both lanes accepted");
@@ -695,7 +744,7 @@ fn two_lanes_stream_independently() {
 }
 
 #[test]
-fn retirement_counts_the_pieces_the_lane_has_consumed() {
+fn consumption_counts_converted_views_and_retirement_waits_for_playback() {
     let mut h = harness(&[lane_cfg(0, OID)]);
     assert_eq!(h.endpoint.retired_counts(), vec![0]);
     h.endpoint
@@ -704,18 +753,32 @@ fn retirement_counts_the_pieces_the_lane_has_consumed() {
             &[frame(
                 0,
                 vec![
-                    piece(0, 0.0, 5.0, 0.02),
-                    piece((CYCLES_PER_SECOND * 0.02) as u64, 5.0, 10.0, 0.02),
+                    span(0, 0.0, 5.0, 0.02),
+                    span((CYCLES_PER_SECOND * 0.02) as u64, 5.0, 10.0, 0.02),
                 ],
             )],
         )
-        .expect("pieces accepted");
+        .expect("spans accepted");
     h.advance((CYCLES_PER_SECOND * 0.1) as u64);
+    h.endpoint.tick().expect("tick");
+    assert_eq!(
+        h.endpoint.consumed_counts(),
+        vec![2],
+        "both views were converted through"
+    );
+    assert_eq!(
+        h.endpoint.retired_counts(),
+        vec![0],
+        "conversion is not playback — nothing retires until the mcu says it played"
+    );
+
+    let past_both = (CYCLES_PER_SECOND * 0.04) as u64;
+    h.endpoint.mcu_retired().record(&[0], &[past_both]);
     h.endpoint.tick().expect("tick");
     assert_eq!(
         h.endpoint.retired_counts(),
         vec![2],
-        "both pieces were sampled through"
+        "a playback clock past both view windows retires exactly those two"
     );
     h.drain_control();
 }
@@ -723,18 +786,18 @@ fn retirement_counts_the_pieces_the_lane_has_consumed() {
 #[test]
 fn every_payload_fits_one_wire_block() {
     let mut h = harness(&[lane_cfg(0, OID)]);
-    let mut pieces = Vec::new();
+    let mut spans = Vec::new();
     let mut start = 0u64;
-    let mut from = 0.0f32;
+    let mut from = 0.0f64;
     for index in 0..30 {
         let to = from + if index % 2 == 0 { 30.0 } else { -30.0 };
-        pieces.push(piece(start, from, to, 0.02));
+        spans.push(span(start, from, to, 0.02));
         start += (CYCLES_PER_SECOND * 0.02) as u64;
         from = to;
     }
     h.endpoint
-        .send_frames(MCU_ID, &[frame(0, pieces)])
-        .expect("pieces accepted");
+        .send_frames(MCU_ID, &[frame(0, spans)])
+        .expect("spans accepted");
     for _ in 0..6 {
         h.advance((CYCLES_PER_SECOND * 0.05) as u64);
         h.endpoint.tick().expect("tick");
@@ -754,12 +817,12 @@ fn every_payload_fits_one_wire_block() {
 fn a_stream_hole_without_a_seam_marker_is_fatal() {
     let mut h = harness(&[lane_cfg(0, OID)]);
     h.endpoint
-        .send_frames(MCU_ID, &[frame(0, vec![piece(0, 0.0, 10.0, 0.05)])])
-        .expect("pieces accepted");
+        .send_frames(MCU_ID, &[frame(0, vec![span(0, 0.0, 10.0, 0.05)])])
+        .expect("spans accepted");
     let hole = (CYCLES_PER_SECOND * 0.2) as u64;
     let error = h
         .endpoint
-        .send_frames(MCU_ID, &[frame(0, vec![piece(hole, 10.0, 20.0, 0.05)])])
+        .send_frames(MCU_ID, &[frame(0, vec![span(hole, 10.0, 20.0, 0.05)])])
         .expect_err("an unsanctioned hole is never padded over");
     let SendError::Fatal(message) = error else {
         panic!("a stream hole must be fatal");
@@ -785,17 +848,17 @@ fn a_stream_hole_without_a_seam_marker_is_fatal() {
 #[test]
 fn a_moving_lane_packs_runs_by_payload_bytes_not_by_the_sample_cap() {
     let mut h = harness(&[lane_cfg(0, OID)]);
-    let mut pieces = Vec::new();
+    let mut spans = Vec::new();
     let mut start = 0u64;
-    let mut from = 0.0f32;
+    let mut from = 0.0f64;
     for _ in 0..40 {
-        pieces.push(piece(start, from, from + 100.0, 0.05));
+        spans.push(span(start, from, from + 100.0, 0.05));
         start += (CYCLES_PER_SECOND * 0.05) as u64;
         from += 100.0;
     }
     h.endpoint
-        .send_frames(MCU_ID, &[frame(0, pieces)])
-        .expect("pieces accepted");
+        .send_frames(MCU_ID, &[frame(0, spans)])
+        .expect("spans accepted");
     let runs = h.runs();
     assert!(
         runs.len() > 4,

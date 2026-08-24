@@ -1,15 +1,92 @@
 use super::pump_loop::{
     PUMP_INTAKE_BACKLOG_HARD_CAP, PUMP_INTAKE_BACKLOG_SOFT_CAP, PUMP_INTAKE_MIN_RUNWAY_SECS, Pump,
-    wants_pieces,
+    wants_spans,
 };
 use super::*;
+use crate::lock_ext::LockExt;
 use crossbeam_channel::unbounded;
-use runtime::piece_ring::PieceEntry;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use trajectory::{ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm};
+
+/// The default fixture clock: one tick per microsecond, so a span's start
+/// clock is its start time in microseconds and [`SPAN_SECS`] is [`SPAN_TICKS`].
+const FREQ: f64 = 1_000_000.0;
+const SPAN_SECS: f64 = 0.001;
+const SPAN_TICKS: u64 = 1_000;
+
+fn hold_span(
+    start_clock: u64,
+    secs: f64,
+    freq: f64,
+    position: f64,
+    motor_mask: u8,
+) -> ClockedMotorSpan {
+    let t_start = start_clock as f64 / freq;
+    let t_end = t_start + secs;
+    let groups: Arc<[MotorGroup]> = Arc::from(vec![MotorGroup::Independent(MotorTerm {
+        source_axis: 0,
+        axis: ContinuousAxis::Hold {
+            position,
+            t_start,
+            t_end,
+        },
+        scale: 1.0,
+    })]);
+    let signal = MotorSpan::try_new(groups, t_start, t_end, motor_mask, u32::MAX, true)
+        .expect("a hold motor span is dispatchable");
+    ClockedMotorSpan::try_new(
+        Arc::new(signal),
+        t_start,
+        t_end,
+        t_start,
+        t_end,
+        start_clock as f64,
+        freq,
+    )
+    .expect("the projected view spans at least one clock")
+}
+
+fn moving_span(
+    start_clock: u64,
+    secs: f64,
+    freq: f64,
+    from: f64,
+    to: f64,
+    motor_mask: u8,
+) -> ClockedMotorSpan {
+    let t_start = start_clock as f64 / freq;
+    let t_end = t_start + secs;
+    let curve =
+        nurbs::ScalarNurbs::try_new(1, vec![t_start, t_start, t_end, t_end], vec![from, to])
+            .expect("a linear lane curve is valid");
+    let groups: Arc<[MotorGroup]> = Arc::from(vec![MotorGroup::Independent(MotorTerm {
+        source_axis: 0,
+        axis: ContinuousAxis::Spline(Arc::new(curve)),
+        scale: 1.0,
+    })]);
+    let signal = MotorSpan::try_new(groups, t_start, t_end, motor_mask, u32::MAX, false)
+        .expect("a spline motor span is dispatchable");
+    ClockedMotorSpan::try_new(
+        Arc::new(signal),
+        t_start,
+        t_end,
+        t_start,
+        t_end,
+        start_clock as f64,
+        freq,
+    )
+    .expect("the projected view spans at least one clock")
+}
+
+/// Distinct hold positions per index, so the queue's hold coalescing cannot
+/// merge the views a count-based assertion tracks one by one.
+fn make_span(index: u64) -> ClockedMotorSpan {
+    hold_span(index * SPAN_TICKS, SPAN_SECS, FREQ, index as f64, 0)
+}
 
 fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -24,13 +101,13 @@ fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
 
 fn make_enqueue(
     key: AxisKey,
-    pieces: Vec<(PieceEntry, f64)>,
+    spans: Vec<ClockedMotorSpan>,
     epoch: crate::anchor::StreamEpoch,
 ) -> EnqueueMsg {
     EnqueueMsg {
         epoch_freq: None,
         key,
-        pieces,
+        spans,
         epoch,
         lead_secs: MAX_LEAD_SECS,
         source_line: u32::MAX,
@@ -49,7 +126,7 @@ fn room_full_then_drains() {
 }
 
 #[test]
-fn consumed_pieces_reopen_capacity_before_execution_retires_them() {
+fn consumed_spans_reopen_capacity_before_execution_retires_them() {
     let mut q = AxisQueue::new(64);
     q.pushed = 64;
     q.consumed = 64;
@@ -68,7 +145,7 @@ fn room_correct_across_u32_wrap() {
         q.room(),
         5,
         "legitimate counter rollover: consumed is numerically larger than pushed only because \
-         the u32 odometer wrapped, so 3 pieces are genuinely awaiting consumption. wrapping_sub \
+         the u32 odometer wrapped, so 3 spans are genuinely awaiting consumption. wrapping_sub \
          recovers 3; saturating subtraction would wrongly report a drained ring."
     );
 }
@@ -92,7 +169,7 @@ fn schedule_resends_orphan_when_consumed_overtook_pushed() {
     let mut q = AxisQueue::new(8);
     q.pushed = 100;
     q.consumed = 101;
-    q.pieces.push_back(make_piece(101));
+    q.spans.push_back(make_span(101));
     let mut queues: BTreeMap<AxisKey, AxisQueue> = BTreeMap::new();
     queues.insert(key, q);
 
@@ -100,8 +177,7 @@ fn schedule_resends_orphan_when_consumed_overtook_pushed() {
     match schedule(
         &queues,
         |_| crate::pump::BundleLimits {
-            wire_budget: usize::MAX,
-            pieces_per_axis: MAX_PER_FRAME,
+            spans_per_axis: MAX_PER_FRAME,
         },
         |_, _| None,
         |_| usize::MAX,
@@ -117,7 +193,7 @@ fn schedule_resends_orphan_when_consumed_overtook_pushed() {
 }
 
 #[test]
-fn run_pump_delivers_piece_despite_retired_over_pushed_inversion() {
+fn run_pump_delivers_span_despite_retired_over_pushed_inversion() {
     const RING_DEPTH: u32 = 8;
     let key = AxisKey { mcu_id: 1, axis: 0 };
 
@@ -139,13 +215,13 @@ fn run_pump_delivers_piece_despite_retired_over_pushed_inversion() {
 
     data.send(make_enqueue(
         key,
-        vec![make_piece(0)],
+        vec![make_span(0)],
         crate::anchor::StreamEpoch::Continuation,
     ))
     .unwrap();
     wait_until(
         || sink.recorded().len() == 1,
-        "first piece delivered, creating the axis queue with pushed=1 (a heartbeat \
+        "first span delivered, creating the axis queue with pushed=1 (a heartbeat \
          for an axis with no queue yet is dropped)",
     );
 
@@ -165,13 +241,13 @@ fn run_pump_delivers_piece_despite_retired_over_pushed_inversion() {
 
     data.send(make_enqueue(
         key,
-        vec![make_piece(1)],
+        vec![moving_span(SPAN_TICKS, SPAN_SECS, FREQ, 0.0, 1.0, 0)],
         crate::anchor::StreamEpoch::Continuation,
     ))
     .unwrap();
     wait_until(
         || sink.recorded().len() == 2,
-        "second piece delivered despite retired(2) > pushed(1): buggy room() \
+        "second span delivered despite retired(2) > pushed(1): buggy room() \
          underflows to 0 and wedges here; the fix reopens room",
     );
 
@@ -180,18 +256,13 @@ fn run_pump_delivers_piece_despite_retired_over_pushed_inversion() {
 }
 
 #[test]
-fn history_records_pieces_at_send_time_not_enqueue_time() {
+fn history_records_spans_at_send_time_not_enqueue_time() {
     const RING_DEPTH: u32 = 8;
     let key = AxisKey { mcu_id: 1, axis: 0 };
 
     let store = Arc::new(Mutex::new(crate::motion_history::HistoryStore::default()));
-    let nominal_freqs = Arc::new(Mutex::new(std::collections::HashMap::from([(
-        1u32,
-        50_000_000u32,
-    )])));
     let history = HistoryRecorder {
         store: Arc::clone(&store),
-        nominal_freqs,
     };
 
     let sink = RecordingSink::new();
@@ -211,30 +282,18 @@ fn history_records_pieces_at_send_time_not_enqueue_time() {
     });
 
     let host_t = 2.5_f64;
-    let piece = (
-        PieceEntry {
-            start_time: 100,
-            duration: 0.001,
-            ..PieceEntry::zeroed()
-        },
-        host_t,
-    );
+    let span = hold_span((host_t * FREQ) as u64, SPAN_SECS, FREQ, 0.0, 0);
+    assert!((span.start_host - host_t).abs() < 1e-12);
     data.send(make_enqueue(
         key,
-        vec![piece],
+        vec![span],
         crate::anchor::StreamEpoch::Continuation,
     ))
     .unwrap();
-    wait_until(|| sink.recorded().len() == 1, "piece sent to the MCU");
+    wait_until(|| sink.recorded().len() == 1, "span sent to the MCU");
     wait_until(
-        || {
-            store
-                .lock()
-                .unwrap()
-                .state_at_host(key, host_t, None)
-                .is_ok()
-        },
-        "sent piece recorded into motion history with its host key",
+        || store.lock_ok().state_at_host(key, host_t, None).is_ok(),
+        "sent span recorded into motion history with its host key",
     );
 
     ctl.send(PumpMsg::Shutdown).unwrap();
@@ -253,47 +312,31 @@ impl RecordingSink {
         }
     }
     fn recorded(&self) -> Vec<u32> {
-        self.calls.lock().unwrap().clone()
+        self.calls.lock_ok().clone()
     }
 }
 
-impl PieceSink for RecordingSink {
+impl SpanSink for RecordingSink {
     fn send_frame(
         &self,
         _key: AxisKey,
-        _pieces: &[PieceEntry],
+        _spans: &[ClockedMotorSpan],
         new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
-        self.calls.lock().unwrap().push(new_head);
+        self.calls.lock_ok().push(new_head);
         Ok(mcu_protocol::result_codes::OK)
     }
 }
 
-fn make_piece(t: u64) -> (PieceEntry, f64) {
-    (
-        PieceEntry {
-            start_time: t,
-            duration: 0.001,
-            ..PieceEntry::zeroed()
-        },
-        t as f64,
-    )
-}
-
-fn staged_axis(piece_count: u64, runway_secs: f64) -> AxisQueue {
-    let duration = runway_secs / piece_count as f64;
+fn staged_axis(span_count: u64, runway_secs: f64) -> AxisQueue {
+    let secs = runway_secs / span_count as f64;
+    let ticks = (secs * FREQ) as u64;
+    assert!(ticks > 0, "a staged view must span at least one clock");
     let mut queue = AxisQueue::new(u32::MAX);
-    queue.pieces.extend((0..piece_count).map(|index| {
-        (
-            PieceEntry {
-                start_time: index,
-                duration: duration as f32,
-                ..PieceEntry::zeroed()
-            },
-            index as f64 * duration,
-        )
-    }));
+    queue
+        .spans
+        .extend((0..span_count).map(|index| hold_span(index * ticks, secs, FREQ, index as f64, 0)));
     queue
 }
 
@@ -307,7 +350,7 @@ fn pump_intake_uses_runway_only_below_the_hard_cap() {
             PUMP_INTAKE_MIN_RUNWAY_SECS * 2.0,
         ),
     )]);
-    assert!(wants_pieces(&below_soft_cap));
+    assert!(wants_spans(&below_soft_cap));
 
     let one_axis_shallow = BTreeMap::from([
         (
@@ -325,7 +368,7 @@ fn pump_intake_uses_runway_only_below_the_hard_cap() {
             ),
         ),
     ]);
-    assert!(wants_pieces(&one_axis_shallow));
+    assert!(wants_spans(&one_axis_shallow));
 
     let all_axes_ready = BTreeMap::from([
         (
@@ -343,7 +386,7 @@ fn pump_intake_uses_runway_only_below_the_hard_cap() {
             ),
         ),
     ]);
-    assert!(!wants_pieces(&all_axes_ready));
+    assert!(!wants_spans(&all_axes_ready));
 
     let shallow_at_hard_cap = BTreeMap::from([(
         key(0),
@@ -352,38 +395,12 @@ fn pump_intake_uses_runway_only_below_the_hard_cap() {
             PUMP_INTAKE_MIN_RUNWAY_SECS * 0.5,
         ),
     )]);
-    assert!(!wants_pieces(&shallow_at_hard_cap));
-}
-
-fn make_piece_pos(t: u64, mask: u8, c0: f32, c3: f32) -> (PieceEntry, f64) {
-    let d = 0.001_f64;
-    let (b0, b1, b2, b3) = (c0 as f64, c0 as f64, c3 as f64, c3 as f64);
-    let mono = [
-        b0,
-        3.0 * (b1 - b0) / d,
-        3.0 * (b2 - 2.0 * b1 + b0) / (d * d),
-        (b3 - 3.0 * b2 + 3.0 * b1 - b0) / (d * d * d),
-    ];
-    let cheb = nurbs::chebyshev::monomial_tau_to_chebyshev(&mono, d);
-    let mut coeffs = [0.0_f32; runtime::piece_ring::MAX_PIECE_COEFFS];
-    for (dst, src) in coeffs.iter_mut().zip(&cheb) {
-        *dst = *src as f32;
-    }
-    (
-        PieceEntry {
-            start_time: t,
-            duration: d as f32,
-            motor_mask: mask,
-            coeff_count: cheb.len() as u8,
-            coeffs,
-            ..PieceEntry::zeroed()
-        },
-        t as f64,
-    )
+    assert!(!wants_spans(&shallow_at_hard_cap));
 }
 
 #[test]
-fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
+fn overlay_span_after_move_is_exempt_from_junction_continuity() {
+    const JUNCTION_FREQ: f64 = 180_000_000.0;
     let sink = RecordingSink::new();
     let (ctl, control_rx) = unbounded::<PumpMsg>();
     let (data, data_rx) = unbounded::<EnqueueMsg>();
@@ -394,7 +411,7 @@ fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
             data_rx,
             sink_clone,
             PumpCallbacks {
-                mcu_clock_of: Box::new(|_mcu| Some((0u64, 180_000_000.0))),
+                mcu_clock_of: Box::new(|_mcu| Some((0u64, JUNCTION_FREQ))),
                 ..PumpCallbacks::noop(8)
             },
             None,
@@ -403,10 +420,11 @@ fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
         );
     });
     let key = AxisKey { mcu_id: 1, axis: 2 };
+    let move_ticks = (SPAN_SECS * JUNCTION_FREQ) as u64;
 
     data.send(make_enqueue(
         key,
-        vec![make_piece_pos(0, 0, 0.0, 11.0)],
+        vec![moving_span(0, SPAN_SECS, JUNCTION_FREQ, 0.0, 11.0, 0)],
         crate::anchor::StreamEpoch::Continuation,
     ))
     .unwrap();
@@ -414,14 +432,23 @@ fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
     while sink.recorded().is_empty() {
         assert!(
             std::time::Instant::now() < deadline,
-            "first piece never sent"
+            "first span never sent"
         );
         std::thread::yield_now();
     }
 
+    // The overlay restarts from 0.0 while the move ended at 11.0: an 11 mm
+    // position jump that would be fatal on a bare (mask 0) seam.
     data.send(make_enqueue(
         key,
-        vec![make_piece_pos(10_000, 0b10, 0.0, 0.5)],
+        vec![moving_span(
+            move_ticks,
+            SPAN_SECS,
+            JUNCTION_FREQ,
+            0.0,
+            0.5,
+            0b10,
+        )],
         crate::anchor::StreamEpoch::Continuation,
     ))
     .unwrap();
@@ -429,14 +456,14 @@ fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
     while sink.recorded().len() < 2 {
         assert!(
             std::time::Instant::now() < deadline,
-            "overlay piece never sent — pump likely panicked on the junction check"
+            "overlay span never sent — pump likely panicked on the junction check"
         );
         std::thread::yield_now();
     }
 
     ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
-    assert_eq!(sink.recorded().len(), 2, "both pieces dispatched, no panic");
+    assert_eq!(sink.recorded().len(), 2, "both spans dispatched, no panic");
 }
 
 #[test]
@@ -461,11 +488,11 @@ fn junction_jumps_math() {
 
 struct NullSink;
 
-impl PieceSink for NullSink {
+impl SpanSink for NullSink {
     fn send_frame(
         &self,
         _key: AxisKey,
-        _pieces: &[PieceEntry],
+        _spans: &[ClockedMotorSpan],
         _new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
@@ -475,11 +502,11 @@ impl PieceSink for NullSink {
 
 struct HaltedSink;
 
-impl PieceSink for HaltedSink {
+impl SpanSink for HaltedSink {
     fn send_frame(
         &self,
         _key: AxisKey,
-        _pieces: &[PieceEntry],
+        _spans: &[ClockedMotorSpan],
         _new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
@@ -487,8 +514,17 @@ impl PieceSink for HaltedSink {
     }
 }
 
+/// The four gated views a Flush must drop, on a 1 kHz fixture clock where one
+/// view is exactly one tick. Distinct hold positions keep the queue's hold
+/// coalescing from collapsing them into one.
+fn gated_spans(gated_tick: u64, freq: f64) -> Vec<ClockedMotorSpan> {
+    (0u64..4)
+        .map(|i| hold_span(gated_tick + i, 1.0 / freq, freq, 1.0 + i as f64, 0))
+        .collect()
+}
+
 #[test]
-fn flush_clears_queued_pieces_and_junctions() {
+fn flush_clears_queued_spans_and_junctions() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let (ctl, control_rx) = unbounded::<PumpMsg>();
     let (data, data_rx) = unbounded::<EnqueueMsg>();
@@ -508,7 +544,7 @@ fn flush_clears_queued_pieces_and_junctions() {
             data_rx,
             sink_pump,
             PumpCallbacks {
-                mcu_clock_of: Box::new(move |_mcu| *clock_pump.lock().unwrap()),
+                mcu_clock_of: Box::new(move |_mcu| *clock_pump.lock_ok()),
                 ..PumpCallbacks::noop(64)
             },
             None,
@@ -520,19 +556,7 @@ fn flush_clears_queued_pieces_and_junctions() {
     data.send(EnqueueMsg {
         epoch_freq: None,
         key,
-        pieces: (0u64..4)
-            .map(|i| {
-                let mut p = PieceEntry {
-                    start_time: gated_tick + i,
-                    duration: 0.001,
-                    ..PieceEntry::zeroed()
-                };
-                // Distinct hold values so enqueue's hold merging cannot
-                // coalesce the gated pieces this test counts one by one.
-                p.coeffs[0] = 1.0 + i as f32;
-                (p, (gated_tick + i) as f64)
-            })
-            .collect(),
+        spans: gated_spans(gated_tick, freq),
         epoch: crate::anchor::StreamEpoch::Reposition,
         lead_secs,
         source_line: u32::MAX,
@@ -545,21 +569,14 @@ fn flush_clears_queued_pieces_and_junctions() {
     ctl.send(PumpMsg::Flush(vec![key])).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
 
-    *clock.lock().unwrap() = Some((gated_tick + 1_000, freq));
+    *clock.lock_ok() = Some((gated_tick + 1_000, freq));
 
     data.send(EnqueueMsg {
         epoch_freq: None,
         key,
-        pieces: vec![(
-            PieceEntry {
-                // A deliverable "now" probe (== the advanced clock), not a stale
-                // past piece — the pump's in-past guard aborts on past start_times.
-                start_time: gated_tick + 1_000,
-                duration: 0.001,
-                ..PieceEntry::zeroed()
-            },
-            (gated_tick + 1_000) as f64,
-        )],
+        // A deliverable "now" probe (== the advanced clock), not a stale past
+        // view — the pump's in-past guard aborts on past start clocks.
+        spans: vec![hold_span(gated_tick + 1_000, 1.0 / freq, freq, 0.0, 0)],
         epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs,
         source_line: u32::MAX,
@@ -571,7 +588,7 @@ fn flush_clears_queued_pieces_and_junctions() {
         while sink.recorded().is_empty() {
             assert!(
                 std::time::Instant::now() < deadline,
-                "pump never sent the post-flush probe piece — deadlocked"
+                "pump never sent the post-flush probe span — deadlocked"
             );
             std::thread::yield_now();
         }
@@ -584,15 +601,15 @@ fn flush_clears_queued_pieces_and_junctions() {
     assert_eq!(
         recorded.len(),
         1,
-        "sink must see only the post-flush probe piece; \
-         {} sends means the {} gated pieces survived Flush",
+        "sink must see only the post-flush probe span; \
+         {} sends means the {} gated spans survived Flush",
         recorded.len(),
         4
     );
 }
 
 #[test]
-fn on_abandon_reports_flushed_not_pushed_pieces() {
+fn on_abandon_reports_flushed_not_pushed_spans() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let (ctl, control_rx) = unbounded::<PumpMsg>();
     let (data, data_rx) = unbounded::<EnqueueMsg>();
@@ -614,9 +631,9 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
             data_rx,
             sink_pump,
             PumpCallbacks {
-                mcu_clock_of: Box::new(move |_mcu| *clock_pump.lock().unwrap()),
+                mcu_clock_of: Box::new(move |_mcu| *clock_pump.lock_ok()),
                 on_abandon: Box::new(move |_k: AxisKey, n: u32| {
-                    *abandoned_pump.lock().unwrap() += n;
+                    *abandoned_pump.lock_ok() += n;
                 }),
                 ..PumpCallbacks::noop(64)
             },
@@ -629,19 +646,7 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
     data.send(EnqueueMsg {
         epoch_freq: None,
         key,
-        pieces: (0u64..4)
-            .map(|i| {
-                let mut p = PieceEntry {
-                    start_time: gated_tick + i,
-                    duration: 0.001,
-                    ..PieceEntry::zeroed()
-                };
-                // Distinct hold values so enqueue's hold merging cannot
-                // coalesce the gated pieces this test counts one by one.
-                p.coeffs[0] = 1.0 + i as f32;
-                (p, (gated_tick + i) as f64)
-            })
-            .collect(),
+        spans: gated_spans(gated_tick, freq),
         epoch: crate::anchor::StreamEpoch::Reposition,
         lead_secs,
         source_line: u32::MAX,
@@ -652,21 +657,12 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
     std::thread::sleep(std::time::Duration::from_millis(30));
     ctl.send(PumpMsg::Flush(vec![key])).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
-    *clock.lock().unwrap() = Some((gated_tick + 1_000, freq));
+    *clock.lock_ok() = Some((gated_tick + 1_000, freq));
 
     data.send(EnqueueMsg {
         epoch_freq: None,
         key,
-        pieces: vec![(
-            PieceEntry {
-                // A deliverable "now" probe (== the advanced clock), not a stale
-                // past piece — the pump's in-past guard aborts on past start_times.
-                start_time: gated_tick + 1_000,
-                duration: 0.001,
-                ..PieceEntry::zeroed()
-            },
-            (gated_tick + 1_000) as f64,
-        )],
+        spans: vec![hold_span(gated_tick + 1_000, 1.0 / freq, freq, 0.0, 0)],
         epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs,
         source_line: u32::MAX,
@@ -678,7 +674,7 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
         while sink.recorded().is_empty() {
             assert!(
                 std::time::Instant::now() < deadline,
-                "pump never sent the post-flush probe piece — deadlocked"
+                "pump never sent the post-flush probe span — deadlocked"
             );
             std::thread::yield_now();
         }
@@ -688,9 +684,9 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
     handle.join().unwrap();
 
     assert_eq!(
-        *abandoned_total.lock().unwrap(),
+        *abandoned_total.lock_ok(),
         4,
-        "on_abandon must report the 4 Flush-dropped pieces and not the pushed probe"
+        "on_abandon must report the 4 Flush-dropped spans and not the pushed probe"
     );
 }
 
@@ -744,13 +740,13 @@ fn barrier_ack_means_flushed_axes_emit_nothing() {
 
     data.send(make_enqueue(
         key,
-        (0..3).map(|i| make_piece(i as u64)).collect(),
+        (0..3).map(make_span).collect(),
         crate::anchor::StreamEpoch::Continuation,
     ))
     .unwrap();
     poll_until(
         || backlog.load(Ordering::Acquire) == 3,
-        "ring-full pump never staged the 3 un-pushed pieces",
+        "ring-full pump never staged the 3 un-pushed spans",
     );
 
     ctl.send(PumpMsg::Flush(vec![key])).unwrap();
@@ -771,7 +767,7 @@ fn barrier_ack_means_flushed_axes_emit_nothing() {
 
     assert!(
         sink.recorded().is_empty(),
-        "pieces flushed before the barrier must never reach the sink; got {:?}",
+        "spans flushed before the barrier must never reach the sink; got {:?}",
         sink.recorded()
     );
 }
@@ -809,7 +805,7 @@ fn poll_until<F: Fn() -> bool>(pred: F, what: &str) {
 }
 
 #[test]
-fn pump_backlog_reflects_unpushed_pieces() {
+fn pump_backlog_reflects_unpushed_spans() {
     let backlog = Arc::new(AtomicU64::new(0));
     let backlog_thread = Arc::clone(&backlog);
     let (ctl, control_rx) = unbounded::<PumpMsg>();
@@ -828,14 +824,14 @@ fn pump_backlog_reflects_unpushed_pieces() {
 
     data.send(make_enqueue(
         AxisKey { mcu_id: 1, axis: 0 },
-        (0..3).map(|i| make_piece(i as u64)).collect(),
+        (0..3).map(make_span).collect(),
         crate::anchor::StreamEpoch::Continuation,
     ))
     .unwrap();
 
     poll_until(
         || backlog.load(Ordering::Acquire) == 3,
-        "ring-full pump never reported the 3 unpushed pieces",
+        "ring-full pump never reported the 3 unpushed spans",
     );
 
     ctl.send(PumpMsg::Shutdown).unwrap();
@@ -864,22 +860,22 @@ fn pump_backlog_drains_to_zero_when_pushed() {
 
     data.send(make_enqueue(
         AxisKey { mcu_id: 1, axis: 0 },
-        (0..3).map(|i| make_piece(i as u64)).collect(),
+        (0..3).map(make_span).collect(),
         crate::anchor::StreamEpoch::Continuation,
     ))
     .unwrap();
 
-    poll_until(|| !sink.recorded().is_empty(), "pump never pushed pieces");
+    poll_until(|| !sink.recorded().is_empty(), "pump never pushed spans");
     poll_until(
         || backlog.load(Ordering::Acquire) == 0,
-        "backlog never returned to zero after the ring consumed the pieces",
+        "backlog never returned to zero after the ring consumed the spans",
     );
 
     ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 }
 
-fn queue_pump<S: PieceSink>(
+fn queue_pump<S: SpanSink>(
     key: AxisKey,
     consumption_stall_fatal: Duration,
     on_drip_stall: impl Fn(String) + Send + 'static,
@@ -889,7 +885,7 @@ fn queue_pump<S: PieceSink>(
     let mut q = AxisQueue::new(1);
     q.pushed = 1;
     q.retired = 0;
-    q.pieces.push_back(make_piece(0));
+    q.spans.push_back(make_span(0));
     queues.insert(key, q);
     Pump {
         queues,
@@ -928,11 +924,11 @@ fn send_pass_deadline_yields_with_work_pending() {
     let mut pump = queue_pump(key, Duration::from_secs(1), |_| {}, sink.clone());
     let q = pump.queues.get_mut(&key).unwrap();
     q.pushed = 0;
-    q.pieces.clear();
+    q.spans.clear();
     q.ring_depth = 4_000;
     let queued: u64 = 3_000;
     for i in 0..queued {
-        q.pieces.push_back(make_piece(i * 1_000));
+        q.spans.push_back(make_span(i));
     }
 
     assert_eq!(pump.send_ready_until(std::time::Instant::now()), Ok(true));
@@ -942,7 +938,7 @@ fn send_pass_deadline_yields_with_work_pending() {
         1,
         "an expired pass deadline still sends exactly one bundle"
     );
-    let remaining = pump.queues[&key].pieces.len() as u64;
+    let remaining = pump.queues[&key].spans.len() as u64;
     assert!(
         remaining > 0 && remaining < queued,
         "one bundle went out, the rest waits so intake can interleave (remaining={remaining})"
@@ -953,13 +949,13 @@ fn send_pass_deadline_yields_with_work_pending() {
         Ok(true)
     );
     assert!(
-        pump.queues[&key].pieces.is_empty(),
+        pump.queues[&key].spans.is_empty(),
         "a roomy deadline drains the queue"
     );
 }
 
 #[test]
-fn halt_drops_queued_and_new_pieces_until_resume() {
+fn halt_drops_queued_and_new_spans_until_resume() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let (escalated_tx, escalated_rx) = mpsc::channel();
     let mut pump = stalled_queue_pump(key, Duration::from_secs(1), move |message| {
@@ -972,13 +968,13 @@ fn halt_drops_queued_and_new_pieces_until_resume() {
         ack: ack_tx,
     });
     assert!(pump.halted.contains_key(&key));
-    assert!(pump.queues[&key].pieces.is_empty());
+    assert!(pump.queues[&key].spans.is_empty());
     pump.enqueue(make_enqueue(
         key,
-        vec![make_piece(10)],
+        vec![make_span(10)],
         crate::anchor::StreamEpoch::Continuation,
     ));
-    assert!(pump.queues[&key].pieces.is_empty());
+    assert!(pump.queues[&key].spans.is_empty());
     assert!(matches!(
         escalated_rx.try_recv(),
         Err(mpsc::TryRecvError::Empty)
@@ -987,10 +983,10 @@ fn halt_drops_queued_and_new_pieces_until_resume() {
     pump.handle_control_msg(PumpMsg::Resume(vec![key]));
     pump.enqueue(make_enqueue(
         key,
-        vec![make_piece(20)],
+        vec![make_span(20)],
         crate::anchor::StreamEpoch::Continuation,
     ));
-    assert_eq!(pump.queues[&key].pieces.len(), 1);
+    assert_eq!(pump.queues[&key].spans.len(), 1);
 }
 
 /// A halted axis' motion is discarded on the endpoint, so a transport that
@@ -1002,19 +998,20 @@ struct CutRecordingSink {
     cut: Arc<Mutex<Vec<AxisKey>>>,
 }
 
-impl PieceSink for CutRecordingSink {
+impl SpanSink for CutRecordingSink {
     fn send_frame(
         &self,
         _key: AxisKey,
-        _pieces: &[PieceEntry],
+        _spans: &[ClockedMotorSpan],
         _new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
         Ok(mcu_protocol::result_codes::OK)
     }
 
-    fn cut_staged(&self, keys: &[AxisKey]) {
-        self.cut.lock().unwrap().extend_from_slice(keys);
+    fn cut_staged(&self, keys: &[AxisKey]) -> Result<(), SendError> {
+        self.cut.lock_ok().extend_from_slice(keys);
+        Ok(())
     }
 }
 
@@ -1034,7 +1031,7 @@ fn halting_an_axis_cuts_the_transport_s_staged_motion() {
     });
 
     assert_eq!(
-        *cut.lock().unwrap(),
+        *cut.lock_ok(),
         vec![key],
         "the halted key must reach the sink's stage-cut hook"
     );
@@ -1066,7 +1063,7 @@ fn send_rejected_while_halted_discards_bundle_and_infers_halt() {
     assert_eq!(pump.send_ready(), Ok(true));
 
     assert!(matches!(pump.halted.get(&key), Some(Some(_))));
-    assert!(pump.queues[&key].pieces.is_empty());
+    assert!(pump.queues[&key].spans.is_empty());
     assert_eq!(abandoned_rx.recv().unwrap(), (key, 1));
 }
 
@@ -1084,7 +1081,7 @@ fn inferred_halt_without_host_ack_escalates() {
 
     pump.enqueue(make_enqueue(
         key,
-        vec![make_piece(10)],
+        vec![make_span(10)],
         crate::anchor::StreamEpoch::Continuation,
     ));
 
@@ -1099,7 +1096,7 @@ fn consumption_stall_past_threshold_with_frozen_counter_escalates() {
     let escalated: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let escalated_cb = Arc::clone(&escalated);
     let mut pump = stalled_queue_pump(key, threshold, move |msg: String| {
-        escalated_cb.lock().unwrap().push(msg)
+        escalated_cb.lock_ok().push(msg)
     });
 
     assert_eq!(
@@ -1107,7 +1104,7 @@ fn consumption_stall_past_threshold_with_frozen_counter_escalates() {
             .expect("first stall observation is not fatal"),
         false
     );
-    assert!(escalated.lock().unwrap().is_empty());
+    assert!(escalated.lock_ok().is_empty());
 
     std::thread::sleep(threshold * 2);
 
@@ -1116,7 +1113,7 @@ fn consumption_stall_past_threshold_with_frozen_counter_escalates() {
         result.is_err(),
         "consumed count frozen past the threshold must escalate and stop the pump loop"
     );
-    let msgs = escalated.lock().unwrap();
+    let msgs = escalated.lock_ok();
     assert_eq!(msgs.len(), 1, "on_drip_stall must fire exactly once");
     assert!(
         msgs[0].contains("consumption stall"),
@@ -1132,7 +1129,7 @@ fn consumption_stall_resets_when_heartbeat_advances_counter() {
     let escalated: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let escalated_cb = Arc::clone(&escalated);
     let mut pump = stalled_queue_pump(key, threshold, move |msg: String| {
-        escalated_cb.lock().unwrap().push(msg)
+        escalated_cb.lock_ok().push(msg)
     });
     pump.queues.get_mut(&key).unwrap().ring_depth = 2;
     pump.queues.get_mut(&key).unwrap().pushed = 2;
@@ -1160,7 +1157,7 @@ fn consumption_stall_resets_when_heartbeat_advances_counter() {
         "consumption advancing before the threshold must not escalate"
     );
     assert!(
-        escalated.lock().unwrap().is_empty(),
+        escalated.lock_ok().is_empty(),
         "no escalation once consumption progressed"
     );
     let (tracked_key, tracked_consumed, _) = pump
@@ -1179,7 +1176,7 @@ fn consumption_stall_resets_when_heartbeat_advances_counter() {
         result.is_ok(),
         "elapsed time since the reset is still under the threshold"
     );
-    assert!(escalated.lock().unwrap().is_empty());
+    assert!(escalated.lock_ok().is_empty());
 }
 
 #[test]
@@ -1189,7 +1186,7 @@ fn non_stallfull_outcome_between_stalls_resets_the_timer() {
     let escalated: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let escalated_cb = Arc::clone(&escalated);
     let mut pump = stalled_queue_pump(key, threshold, move |msg: String| {
-        escalated_cb.lock().unwrap().push(msg)
+        escalated_cb.lock_ok().push(msg)
     });
 
     pump.send_ready().unwrap();
@@ -1197,7 +1194,7 @@ fn non_stallfull_outcome_between_stalls_resets_the_timer() {
 
     std::thread::sleep(threshold * 2);
 
-    pump.queues.get_mut(&key).unwrap().pieces.clear();
+    pump.queues.get_mut(&key).unwrap().spans.clear();
     let result = pump.send_ready();
     assert!(result.is_ok());
     assert!(
@@ -1209,14 +1206,14 @@ fn non_stallfull_outcome_between_stalls_resets_the_timer() {
     pump.queues
         .get_mut(&key)
         .unwrap()
-        .pieces
-        .push_back(make_piece(0));
+        .spans
+        .push_back(make_span(0));
     let result = pump.send_ready();
     assert!(
         result.is_ok(),
         "the timer restarts fresh after the Idle outcome, so this new \
          StallFull observation is not immediately fatal"
     );
-    assert!(escalated.lock().unwrap().is_empty());
+    assert!(escalated.lock_ok().is_empty());
     assert!(pump.consumption_stall.started().is_some());
 }

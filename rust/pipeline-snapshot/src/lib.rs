@@ -10,7 +10,7 @@ use geometry::path::CurvatureProfile;
 use geometry::path::lowering::PositionProfile;
 use nurbs::bezier::extract_bezier_pieces;
 use serde::Serialize;
-use trajectory::{AxisChainSet, ShapedSegment};
+use trajectory::{AxisChainSet, ContinuousAxis, ContinuousSegment};
 
 pub mod audit;
 pub mod waypoints;
@@ -18,7 +18,7 @@ pub mod waypoints;
 use motion_pipeline::fit_stage::{FitDriver, FitStage};
 use motion_pipeline::planner::Planner;
 use motion_pipeline::{
-    FitTol, LoweredItem, Lowerer, PlannedItem, ShapedItem, Shaper, StreamConfig, StreamInput,
+    BaseItem, FitTol, Lowerer, PlannedItem, Shaper, StreamConfig, StreamInput, TrajectoryItem,
 };
 
 pub use planner_config::{AxisDecl, PostProcessorDecl};
@@ -204,8 +204,8 @@ pub fn pipeline_snapshot_streaming(
 
 fn snapshot_from_segments(
     raw_points: &[(f64, f64)],
-    shaped: &[ShapedSegment],
-    toolhead: Option<&[ShapedSegment]>,
+    shaped: &[ContinuousSegment],
+    toolhead: Option<&[ContinuousSegment]>,
 ) -> Snapshot {
     let traj = collect_trajectory_pieces(shaped);
     let seams = seam_metrics(&traj);
@@ -378,8 +378,8 @@ pub fn run_pipeline(
     axis_chains: AxisChainSet,
 ) -> (
     Vec<geometry::Move>,
-    Vec<ShapedSegment>,
-    Option<Vec<ShapedSegment>>,
+    Vec<ContinuousSegment>,
+    Option<Vec<ContinuousSegment>>,
 ) {
     run_pipeline_streaming(moves, config, axis_chains, |_, _| {})
 }
@@ -395,11 +395,11 @@ pub fn run_pipeline_streaming(
     moves: &[geometry::Move],
     config: StreamConfig,
     axis_chains: AxisChainSet,
-    mut on_progress: impl FnMut(&[ShapedSegment], Option<&[ShapedSegment]>),
+    mut on_progress: impl FnMut(&[ContinuousSegment], Option<&[ContinuousSegment]>),
 ) -> (
     Vec<geometry::Move>,
-    Vec<ShapedSegment>,
-    Option<Vec<ShapedSegment>>,
+    Vec<ContinuousSegment>,
+    Option<Vec<ContinuousSegment>>,
 ) {
     let spatial_home = moves
         .iter()
@@ -412,7 +412,13 @@ pub fn run_pipeline_streaming(
     let (lowered_tx, lowered_rx) = unbounded();
     let (shaped_tx, shaped_rx) = unbounded();
     let capture_toolhead = axis_chains.has_motor_side_stages();
-    let mut shaper = Shaper::new(axis_chains.clone());
+    let mut shaper = Shaper::new(
+        axis_chains.clone(),
+        FitTol {
+            pos_mm: config.fit_tol_mm,
+            accel_mm_s2: config.fit_tol_accel_mm_s2,
+        },
+    );
     let toolhead_rx = if capture_toolhead {
         let (toolhead_tx, toolhead_rx) = unbounded();
         shaper = shaper.with_toolhead_tap(toolhead_tx);
@@ -427,15 +433,7 @@ pub fn run_pipeline_streaming(
         planner: Planner::new(config),
         planned_tx,
         planned_rx,
-        lowerer: Lowerer::new(
-            FitTol {
-                pos_mm: config.fit_tol_mm,
-                accel_mm_s2: config.fit_tol_accel_mm_s2,
-            },
-            axis_chains,
-            home_pos,
-            0.0,
-        ),
+        lowerer: Lowerer::new(axis_chains, home_pos, 0.0),
         lowered_tx,
         lowered_rx,
         shaper,
@@ -494,15 +492,15 @@ struct PipelineDrive {
     planned_tx: Sender<PlannedItem>,
     planned_rx: Receiver<PlannedItem>,
     lowerer: Lowerer,
-    lowered_tx: Sender<LoweredItem>,
-    lowered_rx: Receiver<LoweredItem>,
+    lowered_tx: Sender<BaseItem>,
+    lowered_rx: Receiver<BaseItem>,
     shaper: Shaper,
-    shaped_tx: Sender<ShapedItem>,
-    shaped_rx: Receiver<ShapedItem>,
-    toolhead_rx: Option<Receiver<ShapedSegment>>,
+    shaped_tx: Sender<TrajectoryItem>,
+    shaped_rx: Receiver<TrajectoryItem>,
+    toolhead_rx: Option<Receiver<ContinuousSegment>>,
     fitted: Vec<geometry::Move>,
-    shaped: Vec<ShapedSegment>,
-    toolhead: Vec<ShapedSegment>,
+    shaped: Vec<ContinuousSegment>,
+    toolhead: Vec<ContinuousSegment>,
 }
 
 impl PipelineDrive {
@@ -529,7 +527,7 @@ impl PipelineDrive {
             );
         }
         while let Ok(item) = self.shaped_rx.try_recv() {
-            if let ShapedItem::Seg(seg) = item {
+            if let TrajectoryItem::Seg(seg) = item {
                 self.shaped.push(seg);
             }
         }
@@ -558,25 +556,7 @@ pub struct TrajectoryPieces {
     pub t_end: f64,
 }
 
-pub fn collect_trajectory_pieces(shaped: &[ShapedSegment]) -> TrajectoryPieces {
-    fn collect(dst: &mut Vec<Vec<f64>>, axis: Option<&nurbs::ScalarNurbs>) {
-        let Some(axis) = axis else { return };
-        for p in extract_bezier_pieces(axis) {
-            let scale = p.coeffs.iter().fold(0.0_f64, |m, c| m.max(c.abs()));
-            let mut coeffs = p.coeffs.clone();
-            while coeffs.len() > 1
-                && coeffs
-                    .last()
-                    .is_some_and(|c| c.abs() <= 1e-12 * (scale + 1.0))
-            {
-                coeffs.pop();
-            }
-            let mut row = vec![p.u_start, p.u_end];
-            row.extend_from_slice(&coeffs);
-            dst.push(row);
-        }
-    }
-
+pub fn collect_trajectory_pieces(shaped: &[ContinuousSegment]) -> TrajectoryPieces {
     let mut out = TrajectoryPieces {
         x: Vec::new(),
         y: Vec::new(),
@@ -585,13 +565,251 @@ pub fn collect_trajectory_pieces(shaped: &[ShapedSegment]) -> TrajectoryPieces {
         t_end: 0.0,
     };
     for seg in shaped {
-        collect(&mut out.x, seg.axes.first());
-        collect(&mut out.y, seg.axes.get(1));
-        collect(&mut out.z, seg.axes.get(2));
-        collect(&mut out.e, seg.axes.get(3));
+        for (axis, dst) in [&mut out.x, &mut out.y, &mut out.z, &mut out.e]
+            .into_iter()
+            .enumerate()
+        {
+            if let Some(source) = seg.axes.get(axis) {
+                collect_axis_pieces(dst, seg, axis, source);
+            }
+        }
         out.t_end = seg.t_end;
     }
+    for dst in [&mut out.x, &mut out.y, &mut out.z, &mut out.e] {
+        absorb_trailing_sliver(dst);
+    }
     out
+}
+
+/// A spline-carried axis is already piecewise-polynomial in time, so its
+/// Bezier pieces are the trajectory verbatim. Every other carrier — the
+/// analytic move span, a hold, a nudge or buzz profile — is not a polynomial
+/// of `t` in general (an arc's per-axis position never is), so it is
+/// converted by matching the carrier's exact position/velocity/acceleration
+/// at each piece boundary, refining until the interpolant tracks the carrier
+/// to `SAMPLED_PIECE_TOL_MM`. On a straight move that reproduces the
+/// jerk-limited phase polynomials exactly (they are cubics, the quintic
+/// interpolant's error is zero), so no refinement happens and the emitted
+/// piece is the phase itself.
+fn collect_axis_pieces(
+    dst: &mut Vec<Vec<f64>>,
+    seg: &ContinuousSegment,
+    axis: usize,
+    source: &ContinuousAxis,
+) {
+    match source {
+        ContinuousAxis::Spline(curve) => push_spline_pieces(dst, curve, 0.0, None),
+        ContinuousAxis::RelativeSpline {
+            base_position,
+            curve,
+        } => push_spline_pieces(dst, curve, *base_position, None),
+        ContinuousAxis::PiecewiseRelativeSpline(pieces) => {
+            let mut owned_from = f64::NEG_INFINITY;
+            for piece in pieces.iter() {
+                let window_start = piece.t_start.max(owned_from);
+                if piece.t_end > window_start {
+                    push_spline_pieces(
+                        dst,
+                        &piece.curve,
+                        piece.base_position,
+                        Some((window_start, piece.t_end)),
+                    );
+                }
+                owned_from = piece.t_end.max(owned_from);
+            }
+        }
+        _ => push_sampled_pieces(dst, seg, axis, source),
+    }
+}
+
+/// The shortest window a snapshot row may carry: the device's step-time
+/// resolution. Anything narrower is a numerical sliver of a clipped fit
+/// window, and differentiating it manufactures derivative magnitudes the
+/// firmware never executes, so it is coalesced into the row that owns the
+/// instant on its right — the same ownership `owning_piece` applies at a
+/// piecewise seam.
+const MIN_PIECE_DURATION_S: f64 = 2e-9;
+
+/// `owned` clips a windowed curve to the time range the piece owns: the fit
+/// windows the shaper carries extend past their own span, and emitting those
+/// tails would overlap the neighbouring piece's rows. The clip is a Taylor
+/// re-expansion about the retained window's start, so the polynomial — and
+/// with it every position, velocity and acceleration the row reports — is the
+/// carrier's own, never a resampling of it.
+fn push_spline_pieces(
+    dst: &mut Vec<Vec<f64>>,
+    curve: &nurbs::ScalarNurbs,
+    base_position: f64,
+    owned: Option<(f64, f64)>,
+) {
+    for p in extract_bezier_pieces(curve) {
+        let (mut t0, mut t1) = (p.u_start, p.u_end);
+        if let Some((window_start, window_end)) = owned {
+            t0 = t0.max(window_start);
+            t1 = t1.min(window_end);
+        }
+        if t1 <= t0 {
+            continue;
+        }
+        let mut coeffs = shift_monomial(&p.coeffs, t0 - p.u_start);
+        if let Some(c0) = coeffs.first_mut() {
+            *c0 += base_position;
+        }
+        push_piece(dst, t0, t1, coeffs);
+    }
+}
+
+/// Re-expands `coeffs` (ascending monomials in `tau`) about `tau = delta` by
+/// iterated synthetic division, exactly reproducing the same polynomial in
+/// the shifted local time.
+fn shift_monomial(coeffs: &[f64], delta: f64) -> Vec<f64> {
+    if delta == 0.0 || coeffs.len() < 2 {
+        return coeffs.to_vec();
+    }
+    let mut descending: Vec<f64> = coeffs.iter().rev().copied().collect();
+    let mut shifted = Vec::with_capacity(coeffs.len());
+    while descending.len() > 1 {
+        let mut quotient = Vec::with_capacity(descending.len() - 1);
+        let mut acc = descending[0];
+        for &next in &descending[1..] {
+            quotient.push(acc);
+            acc = next + acc * delta;
+        }
+        shifted.push(acc);
+        descending = quotient;
+    }
+    shifted.push(descending[0]);
+    shifted
+}
+
+const SAMPLED_PIECE_TOL_MM: f64 = 1e-6;
+const SAMPLED_PIECE_MAX_DEPTH: u32 = 10;
+
+fn push_sampled_pieces(
+    dst: &mut Vec<Vec<f64>>,
+    seg: &ContinuousSegment,
+    axis: usize,
+    source: &ContinuousAxis,
+) {
+    let mut breaks = vec![seg.t_start, seg.t_end];
+    match source {
+        ContinuousAxis::Analytic { span, .. } => breaks.extend(
+            span.phases
+                .iter()
+                .flat_map(|phase| [span.t_start + phase.t0, span.t_start + phase.end_time()]),
+        ),
+        ContinuousAxis::Nudge(profile) => breaks.extend_from_slice(profile.breakpoints()),
+        ContinuousAxis::Buzz { profile, .. } => breaks.extend_from_slice(profile.breakpoints()),
+        _ => {}
+    }
+    breaks.retain(|t| *t > seg.t_start && *t < seg.t_end);
+    breaks.push(seg.t_start);
+    breaks.push(seg.t_end);
+    breaks.sort_by(f64::total_cmp);
+    breaks.dedup();
+    for w in breaks.windows(2) {
+        if w[1] > w[0] {
+            push_interpolated_piece(dst, seg, axis, w[0], w[1], 0);
+        }
+    }
+}
+
+fn push_interpolated_piece(
+    dst: &mut Vec<Vec<f64>>,
+    seg: &ContinuousSegment,
+    axis: usize,
+    t0: f64,
+    t1: f64,
+    depth: u32,
+) {
+    let coeffs = quintic_hermite(
+        t1 - t0,
+        sample_axis(seg, axis, t0),
+        sample_axis(seg, axis, t1),
+    );
+    let mid = 0.5 * (t0 + t1);
+    let deviation = (eval_monomial(&coeffs, mid - t0) - sample_axis(seg, axis, mid).position).abs();
+    if depth < SAMPLED_PIECE_MAX_DEPTH && deviation > SAMPLED_PIECE_TOL_MM && mid > t0 && mid < t1 {
+        push_interpolated_piece(dst, seg, axis, t0, mid, depth + 1);
+        push_interpolated_piece(dst, seg, axis, mid, t1, depth + 1);
+        return;
+    }
+    push_piece(dst, t0, t1, coeffs);
+}
+
+fn sample_axis(seg: &ContinuousSegment, axis: usize, t: f64) -> trajectory::Pva {
+    seg.eval_axis(axis, t)
+        .unwrap_or_else(|e| panic!("snapshot: axis {axis} at t={t} is not evaluable: {e}"))
+}
+
+/// The unique degree-5 polynomial in `tau = t - t0` matching position,
+/// velocity and acceleration at both ends of a span of width `h`.
+fn quintic_hermite(h: f64, start: trajectory::Pva, end: trajectory::Pva) -> Vec<f64> {
+    let d0 =
+        end.position - (start.position + start.velocity * h + 0.5 * start.acceleration * h * h);
+    let d1 = end.velocity - (start.velocity + start.acceleration * h);
+    let d2 = end.acceleration - start.acceleration;
+    let h2 = h * h;
+    let h3 = h2 * h;
+    vec![
+        start.position,
+        start.velocity,
+        0.5 * start.acceleration,
+        (20.0 * d0 - 8.0 * d1 * h + d2 * h2) / (2.0 * h3),
+        (-30.0 * d0 + 14.0 * d1 * h - 2.0 * d2 * h2) / (2.0 * h3 * h),
+        (12.0 * d0 - 6.0 * d1 * h + d2 * h2) / (2.0 * h3 * h2),
+    ]
+}
+
+fn eval_monomial(coeffs: &[f64], tau: f64) -> f64 {
+    coeffs.iter().rev().fold(0.0, |acc, &c| acc * tau + c)
+}
+
+/// A row narrower than the device resolution is dropped and its window handed
+/// to the row on its right, which is re-expanded about the earlier start so
+/// its position, velocity and acceleration stay exactly the carrier's.
+fn push_piece(dst: &mut Vec<Vec<f64>>, t0: f64, t1: f64, coeffs: Vec<f64>) {
+    let mut t0 = t0;
+    let mut coeffs = coeffs;
+    while dst
+        .last()
+        .is_some_and(|row| row[1] - row[0] < MIN_PIECE_DURATION_S && row[0] <= t0)
+    {
+        let absorbed_start = dst.pop().expect("last row present")[0];
+        coeffs = shift_monomial(&coeffs, absorbed_start - t0);
+        t0 = absorbed_start;
+    }
+    let mut row = vec![t0, t1];
+    row.extend_from_slice(&trim_trailing_zeros(coeffs));
+    dst.push(row);
+}
+
+/// The trailing row has no right neighbour to hand a sliver window to, so a
+/// sliver there extends the row on its left instead.
+fn absorb_trailing_sliver(dst: &mut Vec<Vec<f64>>) {
+    while dst.len() > 1
+        && dst
+            .last()
+            .is_some_and(|row| row[1] - row[0] < MIN_PIECE_DURATION_S)
+    {
+        let t_end = dst.pop().expect("last row present")[1];
+        dst.last_mut().expect("previous row present")[1] = t_end;
+    }
+}
+
+/// Trailing coefficients are trimmed against the magnitude of the *dynamic*
+/// terms, never the folded-in base position, so a large offset cannot swallow
+/// a real high-order term.
+fn trim_trailing_zeros(mut coeffs: Vec<f64>) -> Vec<f64> {
+    let scale = coeffs.iter().skip(1).fold(0.0_f64, |m, c| m.max(c.abs()));
+    while coeffs.len() > 1
+        && coeffs
+            .last()
+            .is_some_and(|c| c.abs() <= 1e-12 * (scale + 1.0))
+    {
+        coeffs.pop();
+    }
+    coeffs
 }
 
 pub struct SeamMetrics {

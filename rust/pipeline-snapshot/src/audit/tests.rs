@@ -145,3 +145,44 @@ fn sliver_piece_jerk_spike_is_target() {
     );
     assert!(report.extrema[0].min_piece_duration_s <= dt);
 }
+
+#[test]
+fn velocity_above_limit_is_target_without_jerk_limiting() {
+    let cfg = config(f64::INFINITY);
+    let report = audit_x(vec![vec![0.0, 0.1, 0.0, 150.0]], &cfg);
+    assert!(report.hard_ok(), "{report}");
+    assert_eq!(kinds(&report.target), [ViolationKind::Velocity]);
+}
+
+#[test]
+fn interior_accel_spike_is_allowed_without_jerk_limiting() {
+    let cfg = config(f64::INFINITY);
+    let report = audit_x(vec![vec![0.0, 0.2, 0.0, 0.0, 2000.0, -10000.0]], &cfg);
+    assert!(report.hard_ok(), "{report}");
+    assert!(
+        !kinds(&report.target).contains(&ViolationKind::Accel),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_row_narrower_than_the_device_resolution_is_hard() {
+    let cfg = config(f64::INFINITY);
+    let sliver_end = 0.1 + 1e-12;
+    let report = audit_x(
+        vec![
+            vec![0.0, 0.1, 0.0, 1.0],
+            vec![0.1, sliver_end, 0.1, 1.0],
+            vec![sliver_end, 0.2, 0.1, 1.0],
+        ],
+        &cfg,
+    );
+    assert_eq!(kinds(&report.hard), [ViolationKind::SliverSpan]);
+}
+
+#[test]
+fn a_lone_row_narrower_than_the_device_resolution_is_the_whole_lane() {
+    let cfg = config(f64::INFINITY);
+    let report = audit_x(vec![vec![0.0, 1e-12, 0.0, 1.0]], &cfg);
+    assert!(report.hard_ok(), "{report}");
+}

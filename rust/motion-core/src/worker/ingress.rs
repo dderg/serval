@@ -353,6 +353,10 @@ impl Ingress {
                 let result = self.run_nudge(&params);
                 let _ = notify.send(result);
             }
+            StreamMsg::Buzz { params, notify } => {
+                let result = self.run_buzz(params);
+                let _ = notify.send(result);
+            }
             StreamMsg::Shutdown => {
                 self.drain_and_fence();
                 return true;
@@ -369,8 +373,8 @@ impl Ingress {
         if tx.send(crate::pump::PumpMsg::Barrier(ack_tx)).is_err() {
             fatal("pump control channel closed — the pump thread died");
         }
-        if ack_rx.recv_timeout(Duration::from_secs(5)).is_err() {
-            fatal("pump did not acknowledge the flush barrier within 5s");
+        if ack_rx.recv_timeout(Duration::from_secs(30)).is_err() {
+            fatal("pump did not acknowledge the flush barrier within 30s");
         }
     }
 
@@ -426,24 +430,47 @@ impl Ingress {
     /// advances the stream clock over the nudge's duration.
     fn run_nudge(&mut self, p: &NudgeParams) -> Result<(), String> {
         self.drain_and_fence();
-        let pieces = crate::nudge::plan_nudge_profile(
-            p.axis,
-            p.delta_mm,
-            p.speed,
-            p.accel,
-            p.motor_mask,
-            self.t_next,
-        )?;
-        let total_dur: f64 = pieces.iter().map(|s| s.piece.u_end - s.piece.u_start).sum();
+        let profile =
+            crate::nudge::plan_nudge_profile(p.axis, p.delta_mm, p.speed, p.accel, self.t_next)?;
+        let total_dur = profile.duration();
         self.send(StreamInput::Control(Control::Nudge {
             mcu_id: p.mcu_id,
-            pieces,
+            axis: p.axis,
+            motor_mask: p.motor_mask,
+            profile,
         }));
         if total_dur > 0.0 {
             self.send(StreamInput::Control(Control::Dwell { secs: total_dur }));
         }
         self.t_next += total_dur;
         self.barrier().result.map_err(|e| format!("nudge: {e}"))
+    }
+
+    /// Arm every route of one buzz request. The pipeline is drained and the
+    /// pump fenced exactly once before the request goes out, so no route can
+    /// be holding queued trajectory when the pump validates it; the pump then
+    /// answers with a single token spanning the whole route set, or an error
+    /// with nothing armed.
+    fn run_buzz(
+        &mut self,
+        params: crate::pump::BuzzParams,
+    ) -> Result<crate::pump::BuzzToken, String> {
+        self.drain_and_fence();
+        self.pump_barrier();
+        let tx = self.pump_control.as_ref().ok_or_else(|| {
+            "buzz: no pump control channel — the pipeline has no pump".to_string()
+        })?;
+        let (reply, verdict) = std::sync::mpsc::sync_channel(1);
+        if tx
+            .send(crate::pump::PumpMsg::Buzz { params, reply })
+            .is_err()
+        {
+            fatal("pump control channel closed — the pump thread died");
+        }
+        match verdict.recv_timeout(Duration::from_secs(5)) {
+            Ok(result) => result,
+            Err(_) => fatal("pump did not answer the buzz request within 5s"),
+        }
     }
 }
 

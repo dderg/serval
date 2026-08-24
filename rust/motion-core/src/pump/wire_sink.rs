@@ -1,6 +1,6 @@
 use super::sample_sink::SampleEndpoint;
 use super::stepcompress_sink::StepcompressEndpoint;
-use super::{AxisFrame, AxisKey, PieceSink, SendError};
+use super::{AxisFrame, AxisKey, SendError, SpanSink};
 use crate::axis_transport::AxisTransports;
 use crate::lock_ext::LockExt;
 use ethercat_rt::setpoint_fill::ChainFiller;
@@ -9,17 +9,29 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
 use std::time::Duration;
+use trajectory::ClockedMotorSpan;
 
 /// An EtherCAT endpoint's host-side setpoint filler: it turns the staged
-/// pieces into one entry per DC cycle, which is the only thing the endpoint
+/// spans into one entry per DC cycle, which is the only thing the endpoint
 /// executes.
 pub type RingFiller = Arc<Mutex<ChainFiller>>;
+
+/// The node stamps its DC grid in nanoseconds, so the anchor the pump reads
+/// for an EtherCAT mcu is only a grid clock when the router clocks that mcu
+/// at 1 GHz. Anything else means the arming instant and the grid it must be
+/// placed on are two different clocks.
+pub const DC_GRID_CLOCK_FREQ_HZ: f64 = ethercat_rt::setpoint_fill::CLOCK_FREQ_HZ;
 
 /// Cycles the filler covers in one `PushSampleRuns`, and therefore the ring
 /// headroom a lane must report before the pump ships another window. The
 /// endpoint refuses a larger block outright, so this is a wire limit, not a
 /// tuning knob.
 const FILL_WINDOW_CYCLES: u32 = ethercat_rt::setpoint::MAX_FILL_CYCLES as u32;
+
+/// Views one EtherCAT lane may hold staged at once: the one it is converting
+/// and its successor, which is the whole depth `ChainFiller::free_span_slots`
+/// reports.
+const ETHERCAT_SPAN_SLOTS_PER_LANE: usize = 2;
 
 /// Lane groups the pump must not mix in one transaction, because a bundle is
 /// atomic per endpoint. Only their inequality matters to the pump.
@@ -102,14 +114,14 @@ impl WireSink {
         })
     }
 
-    /// Stage the frames' pieces in the filler, then ship contiguous per-lane
+    /// Stage the frames' spans in the filler, then ship contiguous per-lane
     /// runs until the endpoint's reported headroom no longer covers another
     /// full fill window. The headroom is the only pacing signal — the filler
     /// samples the whole staged trajectory, so without it a deep bundle would
     /// overrun the ring instead of arriving one window at a time.
     ///
     /// A failed bundle is re-sent byte-identically by the pump, and a staged
-    /// sample stream is not idempotent — the pieces are already in the filler
+    /// sample stream is not idempotent — the views are already in the filler
     /// and its lanes have already moved on. So every error path drops the
     /// stage of the axes it touched: the re-send restages them and the
     /// resulting run re-anchors, discarding whatever the endpoint accepted
@@ -160,7 +172,13 @@ impl WireSink {
                     frame.axis
                 )));
             }
-            filler.push_pieces(frame.axis, &frame.pieces);
+            filler.push_spans(frame.axis, &frame.spans).map_err(|e| {
+                SendError::Fatal(format!(
+                    "ethercat mcu {mcu_id}: axis {} cannot stage its spans ({}): {e:?}",
+                    frame.axis,
+                    e.as_str()
+                ))
+            })?;
         }
         loop {
             let lanes = filler.drain().map_err(|e| {
@@ -224,19 +242,19 @@ impl WireSink {
     }
 }
 
-impl PieceSink for WireSink {
+impl SpanSink for WireSink {
     /// Single-axis convenience — the pump drives WireSink via `send_mcu_frames`;
     /// this exists only to satisfy the trait and routes through the same path.
     fn send_frame(
         &self,
         key: AxisKey,
-        pieces: &[runtime::piece_ring::PieceEntry],
+        spans: &[ClockedMotorSpan],
         new_head: u32,
         room: u32,
     ) -> Result<i32, SendError> {
         let frame = AxisFrame {
             axis: key.axis,
-            pieces: pieces.to_vec(),
+            spans: spans.to_vec(),
             new_head,
             room,
             guard_recorded_ns: 0,
@@ -246,11 +264,13 @@ impl PieceSink for WireSink {
             .map(|()| mcu_protocol::result_codes::OK)
     }
 
+    /// The filler holds one active view and one successor per lane, so a
+    /// bundle may not carry more than that: past it `push_spans` refuses the
+    /// stage outright.
     fn bundle_limits(&self, mcu_id: u32) -> super::BundleLimits {
         if self.ethercat.contains_key(&mcu_id) {
             return super::BundleLimits {
-                wire_budget: 8192,
-                pieces_per_axis: FILL_WINDOW_CYCLES as usize,
+                spans_per_axis: ETHERCAT_SPAN_SLOTS_PER_LANE,
             };
         }
         super::messages::SERIAL_BUNDLE_LIMITS
@@ -308,15 +328,6 @@ impl PieceSink for WireSink {
         }
     }
 
-    fn seam_basis(&self, key: AxisKey) -> Option<super::sched::SeamBasis> {
-        if !self.drives_pulse_lane(key) {
-            return None;
-        }
-        let endpoint = self.stepcompress_of(key.mcu_id)?;
-        let endpoint = endpoint.lock_ok();
-        endpoint.seam_basis(key.axis)
-    }
-
     fn on_barrier_ack(&self, mcu_id: u32, oid: u8, seq: u32) -> Result<(), SendError> {
         let oid = u32::from(oid);
         if let Some(endpoint) = self.stepcompress_of(mcu_id) {
@@ -354,8 +365,8 @@ impl PieceSink for WireSink {
         Ok(())
     }
 
-    fn cut_staged(&self, keys: &[AxisKey]) {
-        self.cut_ring_lanes(keys);
+    fn cut_staged(&self, keys: &[AxisKey]) -> Result<(), SendError> {
+        self.flush_keys(keys)
     }
 
     fn drain_tick_mcus(&self) -> Vec<u32> {

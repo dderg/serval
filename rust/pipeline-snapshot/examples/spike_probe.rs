@@ -10,11 +10,12 @@ use geometry::path::CurvatureProfile;
 use geometry::path::lowering::PositionProfile;
 use motion_pipeline::fit_stage::FitStage;
 use motion_pipeline::planner::Planner;
-use motion_pipeline::{PlannedItem, StreamConfig, StreamInput};
+use motion_pipeline::types::PlannedMove;
+use motion_pipeline::{BaseItem, Lowerer, PlannedItem, StreamConfig, StreamInput};
 use pipeline_snapshot::waypoints::parse_gcode;
 use pipeline_snapshot::{
     SNAPSHOT_MAX_BUFFER_MOVES, TRAJECTORY_FIT_TOL_ACCEL_MM_S2, TRAJECTORY_FIT_TOL_MM,
-    VELOCITY_INTEGRATION_TOL, build_moves,
+    VELOCITY_INTEGRATION_TOL, build_moves, collect_trajectory_pieces,
 };
 
 fn main() {
@@ -152,79 +153,42 @@ fn main() {
     }
 
     // Whole-file lowering audit: max per-axis acceleration of every lowered
-    // piece, with the worst offenders listed.
+    // segment, with the worst offenders listed.
     if std::env::var("AUDIT_ALL").is_ok() {
-        let fit_tol = motion_pipeline::lowering::FitTol {
-            pos_mm: TRAJECTORY_FIT_TOL_MM,
-            accel_mm_s2: TRAJECTORY_FIT_TOL_ACCEL_MM_S2,
-        };
-        let chains: Vec<trajectory::CompiledChain> = vec![trajectory::CompiledChain::default(); 4];
-        let acc_extreme = |c: &[f64], h: f64| -> f64 {
-            let acc = |tau: f64| -> f64 {
-                (2..c.len())
-                    .map(|k| c[k] * (k * (k - 1)) as f64 * tau.powi(k as i32 - 2))
-                    .sum()
-            };
-            (0..=16)
-                .map(|k| acc(h * k as f64 / 16.0).abs())
-                .fold(0.0, f64::max)
-        };
-        let jerk_extreme = |c: &[f64], h: f64| -> f64 {
-            let jrk = |tau: f64| -> f64 {
-                (3..c.len())
-                    .map(|k| c[k] * (k * (k - 1) * (k - 2)) as f64 * tau.powi(k as i32 - 3))
-                    .sum()
-            };
-            (0..=16)
-                .map(|k| jrk(h * k as f64 / 16.0).abs())
-                .fold(0.0, f64::max)
-        };
         let mut worst_jerk = 0.0_f64;
         let mut worst_acc: Vec<(f64, u32)> = Vec::new();
-        for pm in planned.iter() {
-            let Some(seg) = pm.geometry.segment.spatial.as_ref() else {
-                continue;
-            };
-            let mut start_pos = vec![0.0_f64; 4];
-            start_pos[..3].copy_from_slice(&seg.point_at(0.0));
-            let (pieces, _) = motion_pipeline::lowering::lower_move_pieces(
-                &pm.geometry,
-                &pm.velocity,
-                0.0,
-                &start_pos,
-                fit_tol,
-                &chains,
-                None,
-            )
-            .expect("lower");
+        for segment in lower_run(&planned) {
+            let traj = collect_trajectory_pieces(std::slice::from_ref(&segment));
             let mut mv_max = 0.0_f64;
-            for ps in pieces.iter().take(3) {
-                for p in ps {
-                    mv_max = mv_max.max(acc_extreme(&p.coeffs, p.u_end - p.u_start));
-                    worst_jerk = worst_jerk.max(jerk_extreme(&p.coeffs, p.u_end - p.u_start));
+            let mut mv_jerk = 0.0_f64;
+            for pieces in [&traj.x, &traj.y, &traj.z] {
+                for p in pieces {
+                    let h = p[1] - p[0];
+                    mv_max = mv_max.max(acc_extreme(&p[2..], h));
+                    mv_jerk = mv_jerk.max(jerk_extreme(&p[2..], h));
                 }
             }
+            worst_jerk = worst_jerk.max(mv_jerk);
             if std::env::var_os("AUDIT_KIND").is_some() {
-                let kind = match seg {
-                    geometry::path::Segment::Line(_) => "line",
-                    geometry::path::Segment::Arc(_) => "arc",
-                    geometry::path::Segment::Clothoid(_) => "clothoid",
-                };
-                let mut mv_jerk = 0.0_f64;
-                for ps in pieces.iter().take(3) {
-                    for p in ps {
-                        mv_jerk = mv_jerk.max(jerk_extreme(&p.coeffs, p.u_end - p.u_start));
-                    }
-                }
+                let source = planned
+                    .iter()
+                    .find(|pm| pm.geometry.source.start_line == segment.source_line);
+                let kind = source
+                    .and_then(|pm| pm.geometry.segment.spatial.as_ref())
+                    .map_or("virtual", |s| match s {
+                        geometry::path::Segment::Line(_) => "line",
+                        geometry::path::Segment::Arc(_) => "arc",
+                        geometry::path::Segment::Clothoid(_) => "clothoid",
+                    });
                 println!(
                     "  move kind={kind} line={} len={:.6} entry={:.4} exit={:.4} max={mv_max:.1} jmax={mv_jerk:.3e}",
-                    pm.geometry.source.start_line,
-                    pm.geometry.segment.s_len(),
-                    pm.velocity.entry_v,
-                    pm.velocity.exit_v
+                    segment.source_line,
+                    source.map_or(0.0, |pm| pm.geometry.segment.s_len()),
+                    source.map_or(0.0, |pm| pm.velocity.entry_v),
+                    source.map_or(0.0, |pm| pm.velocity.exit_v)
                 );
             }
-            worst_acc.push((mv_max, pm.geometry.source.start_line));
+            worst_acc.push((mv_max, segment.source_line));
         }
         worst_acc.sort_by(|a, b| b.0.total_cmp(&a.0));
         println!(
@@ -243,117 +207,110 @@ fn main() {
     if detail_lines.is_empty() {
         return;
     }
-    let fit_tol = motion_pipeline::lowering::FitTol {
-        pos_mm: TRAJECTORY_FIT_TOL_MM,
-        accel_mm_s2: TRAJECTORY_FIT_TOL_ACCEL_MM_S2,
-    };
-    let chains: Vec<trajectory::CompiledChain> = vec![trajectory::CompiledChain::default(); 4];
-    let mut start_pos = vec![0.0_f64; 4];
-    if let Some(seg) = planned
-        .iter()
-        .find_map(|pm| pm.geometry.segment.spatial.as_ref())
-    {
-        let p = seg.point_at(0.0);
-        start_pos[..3].copy_from_slice(&p);
-    }
+    let segments = lower_run(&planned);
     for pm in planned.iter() {
         let line = pm.geometry.source.start_line;
-        if detail_lines.contains(&line) {
-            let seg = pm.geometry.segment.spatial.as_ref();
-            let kind = seg.map_or("virtual", |s| match s {
-                geometry::path::Segment::Line(_) => "line",
-                geometry::path::Segment::Arc(_) => "arc",
-                geometry::path::Segment::Clothoid(_) => "clothoid",
-            });
-            let (k0, k1) = seg.map_or((0.0, 0.0), |s| s.kappa_endpoints());
+        if !detail_lines.contains(&line) {
+            continue;
+        }
+        let seg = pm.geometry.segment.spatial.as_ref();
+        let kind = seg.map_or("virtual", |s| match s {
+            geometry::path::Segment::Line(_) => "line",
+            geometry::path::Segment::Arc(_) => "arc",
+            geometry::path::Segment::Clothoid(_) => "clothoid",
+        });
+        let (k0, k1) = seg.map_or((0.0, 0.0), |s| s.kappa_endpoints());
+        println!(
+            "\n== line {line} {kind} len={:.6} k0={:.4} k1={:.4} entry_v={:.3} exit_v={:.3} peak_v={:.3} samples={} phases={}",
+            pm.geometry.segment.s_len(),
+            k0,
+            k1,
+            pm.velocity.entry_v,
+            pm.velocity.exit_v,
+            pm.velocity.peak_v,
+            pm.velocity.samples.len(),
+            pm.velocity.phases.len(),
+        );
+        for s in &pm.velocity.samples {
+            println!("   sample s={:.6} v={:.4} a={:.2}", s.s, s.v, s.a);
+        }
+        for segment in segments.iter().filter(|s| s.source_line == line) {
+            let traj = collect_trajectory_pieces(std::slice::from_ref(segment));
             println!(
-                "\n== line {line} {kind} len={:.6} k0={:.4} k1={:.4} entry_v={:.3} exit_v={:.3} peak_v={:.3} samples={} phases={}",
-                pm.geometry.segment.s_len(),
-                k0,
-                k1,
-                pm.velocity.entry_v,
-                pm.velocity.exit_v,
-                pm.velocity.peak_v,
-                pm.velocity.samples.len(),
-                pm.velocity.phases.len(),
+                "   lowered: t=[{:.6},{:.6}]",
+                segment.t_start, segment.t_end
             );
-            for s in &pm.velocity.samples {
-                println!("   sample s={:.6} v={:.4} a={:.2}", s.s, s.v, s.a);
-            }
-            let acc_extreme = |c: &[f64], h: f64| -> f64 {
+            for p in &traj.x {
+                let h = p[1] - p[0];
+                let c = &p[2..];
                 let acc = |tau: f64| -> f64 {
                     (2..c.len())
                         .map(|k| c[k] * (k * (k - 1)) as f64 * tau.powi(k as i32 - 2))
                         .sum()
                 };
-                (0..=16)
-                    .map(|k| acc(h * k as f64 / 16.0).abs())
-                    .fold(0.0, f64::max)
-            };
-            let seg_lowered = motion_pipeline::lowering::lower_move(
-                &pm.geometry,
-                &pm.velocity,
-                0.0,
-                &start_pos,
-                fit_tol,
-                &chains,
-                None,
-            )
-            .expect("lower_move");
-            for (axis, curve) in seg_lowered.axes.iter().enumerate().take(2) {
-                for p in nurbs::bezier::extract_bezier_pieces(curve) {
-                    let h = p.u_end - p.u_start;
-                    let amax = acc_extreme(&p.coeffs, h);
-                    if axis == 0 {
-                        println!(
-                            "   ROUNDTRIP PIECE axis {axis} u=[{:.6},{:.6}] h={:.3e} deg={} amax={:.0}",
-                            p.u_start,
-                            p.u_end,
-                            h,
-                            p.coeffs.len() - 1,
-                            amax
-                        );
-                    }
-                }
-            }
-            let (pieces, total_t) = motion_pipeline::lowering::lower_move_pieces(
-                &pm.geometry,
-                &pm.velocity,
-                0.0,
-                &start_pos,
-                fit_tol,
-                &chains,
-                None,
-            )
-            .expect("lower");
-            println!("   lowered: total_t={total_t:.6}");
-            for (axis, ps) in pieces.iter().enumerate().take(2) {
-                for p in ps {
-                    let h = p.u_end - p.u_start;
-                    let c = &p.coeffs;
-                    let acc = |tau: f64| -> f64 {
-                        (2..c.len())
-                            .map(|k| c[k] * (k * (k - 1)) as f64 * tau.powi(k as i32 - 2))
-                            .sum()
-                    };
-                    let a0 = acc(0.0);
-                    let am = acc(h / 2.0);
-                    let a1 = acc(h);
-                    let _amax = a0.abs().max(am.abs()).max(a1.abs());
-                    if axis == 0 {
-                        println!(
-                            "   PIECE axis {axis} u=[{:.6},{:.6}] h={:.3e} deg={} a0={:.0} amid={:.0} a1={:.0}",
-                            p.u_start,
-                            p.u_end,
-                            h,
-                            c.len() - 1,
-                            a0,
-                            am,
-                            a1
-                        );
-                    }
-                }
+                println!(
+                    "   PIECE axis 0 u=[{:.6},{:.6}] h={:.3e} deg={} a0={:.0} amid={:.0} a1={:.0} amax={:.0}",
+                    p[0],
+                    p[1],
+                    h,
+                    c.len() - 1,
+                    acc(0.0),
+                    acc(h / 2.0),
+                    acc(h),
+                    acc_extreme(c, h)
+                );
             }
         }
     }
+}
+
+/// Lowers a whole planned run through the production lowerer and hands back
+/// the continuous segments it emitted.
+fn lower_run(planned: &[PlannedMove]) -> Vec<trajectory::ContinuousSegment> {
+    let mut home = vec![0.0_f64; 4];
+    if let Some(seg) = planned
+        .iter()
+        .find_map(|pm| pm.geometry.segment.spatial.as_ref())
+    {
+        home[..3].copy_from_slice(&seg.point_at(0.0));
+    }
+    let (lowered_tx, lowered_rx) = unbounded();
+    let mut lowerer = Lowerer::new(trajectory::AxisChainSet::default(), home, 0.0);
+    for pm in planned {
+        let item = PlannedItem::Move(PlannedMove {
+            geometry: pm.geometry.clone(),
+            velocity: pm.velocity.clone(),
+        });
+        assert!(lowerer.feed(item, &lowered_tx), "lowerer rejected input");
+    }
+    drop(lowered_tx);
+    lowered_rx
+        .into_iter()
+        .filter_map(|item| match item {
+            BaseItem::Seg(seg) => Some(seg.segment),
+            _ => None,
+        })
+        .collect()
+}
+
+fn acc_extreme(c: &[f64], h: f64) -> f64 {
+    derivative_extreme(c, h, 2)
+}
+
+fn jerk_extreme(c: &[f64], h: f64) -> f64 {
+    derivative_extreme(c, h, 3)
+}
+
+fn derivative_extreme(c: &[f64], h: f64, deriv: usize) -> f64 {
+    let eval = |tau: f64| -> f64 {
+        (deriv..c.len())
+            .map(|k| {
+                let scale: usize = (k - deriv + 1..=k).product();
+                c[k] * scale as f64 * tau.powi((k - deriv) as i32)
+            })
+            .sum()
+    };
+    (0..=16)
+        .map(|k| eval(h * k as f64 / 16.0).abs())
+        .fold(0.0, f64::max)
 }

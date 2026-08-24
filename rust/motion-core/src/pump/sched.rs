@@ -1,7 +1,10 @@
 use super::messages::RetiredBy;
 use super::{AxisKey, MAX_LEAD_SECS};
-use runtime::piece_ring::PieceEntry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
+use trajectory::{
+    ClockedMotorSpan, ContinuousAxis, MAX_SPAN_SECS, MotorGroup, MotorSpan, MotorTerm,
+};
 
 /// One reporting transport's odometers for one axis.
 #[derive(Debug, Default, Clone, Copy)]
@@ -12,10 +15,10 @@ struct WireCredit {
 
 #[derive(Debug)]
 pub struct AxisQueue {
-    pub pieces: VecDeque<(PieceEntry, f64)>,
+    pub spans: VecDeque<ClockedMotorSpan>,
     pub pushed: u32,
     /// `consumed` and `retired` are the axis totals: the sum of `credits`,
-    /// recomputed on every report. `pushed` counts the pieces the pump handed
+    /// recomputed on every report. `pushed` counts the views the pump handed
     /// to whichever transport owned the axis at the time, so only the sum of
     /// every transport's credit is comparable with it.
     pub consumed: u32,
@@ -23,14 +26,15 @@ pub struct AxisQueue {
     credits: [WireCredit; RetiredBy::COUNT],
     pub ring_depth: u32,
     pub lead_secs: f64,
-    /// Staged pieces that carry motion (`!is_hold_piece`), maintained
+    /// Staged views that carry motion (`!is_hold_span`), maintained
     /// incrementally so the per-loop ledger publish never scans the queue.
     pub staged_motion: u32,
-    /// Consecutive hold pieces at the pushed (wire) tail; any non-hold send
+    /// Consecutive hold views at the pushed (wire) tail; any non-hold send
     /// resets it. Feeds the drain ledger's motion-only drained condition.
     pub wire_hold_tail: u32,
-    /// Projected MCU-clock end of the last enqueued piece and whether that
-    /// piece parked the lane at rest. A later enqueue whose first piece
+    pub wire_end_clock: Option<u64>,
+    /// Projected MCU-clock end of the last enqueued view and whether that
+    /// view parked the lane at rest. A later enqueue whose first view
     /// starts past this by more than the rejoin floor is a lane-local hole
     /// (single-lane nudge traffic advanced the stream while this lane sat
     /// out); the pump sanctions it as a forward seam gap iff the lane was
@@ -39,25 +43,34 @@ pub struct AxisQueue {
     pub seam_end_at_rest: bool,
 }
 
-/// A constant-position piece: one coefficient, so zero velocity everywhere.
-/// These are dwell / idle-blanket coverage, not motion.
-pub fn is_hold_piece(p: &PieceEntry) -> bool {
-    p.coeff_count == 1
+/// A view whose every contributing term holds one position: dwell / idle-blanket
+/// coverage, not motion.
+#[must_use]
+pub fn is_hold_span(span: &ClockedMotorSpan) -> bool {
+    span.signal.is_explicit_hold
 }
 
 /// A lane-local forward hole wider than this is a genuine sat-out gap
-/// (single-lane nudge traffic), not seam skew: legitimate f32 seam
-/// reprojection error is span-scaled and stays in the microseconds.
+/// (single-lane nudge traffic), not seam skew: legitimate seam reprojection
+/// error is span-scaled and stays in the microseconds.
 pub const LANE_REJOIN_GAP_FLOOR_SECS: f64 = 1e-3;
 
-/// A lane whose last piece ends slower than this parked at rest — the same
-/// wire velocity resolution the flattener truncates below.
-pub const LANE_REJOIN_REST_VEL_MM_S: f32 = 1e-3;
+/// A lane whose last view ends slower than this parked at rest.
+pub const LANE_REJOIN_REST_VEL_MM_S: f64 = 1e-3;
+
+#[must_use]
+pub fn span_ends_at_rest(span: &ClockedMotorSpan) -> bool {
+    is_hold_span(span)
+        || span
+            .signal
+            .eval_pva(span.stream_t_end)
+            .is_ok_and(|pva| pva.velocity.abs() <= LANE_REJOIN_REST_VEL_MM_S)
+}
 
 impl AxisQueue {
     pub fn new(ring_depth: u32) -> Self {
         Self {
-            pieces: VecDeque::new(),
+            spans: VecDeque::new(),
             pushed: 0,
             consumed: 0,
             retired: 0,
@@ -65,6 +78,7 @@ impl AxisQueue {
             lead_secs: MAX_LEAD_SECS,
             staged_motion: 0,
             wire_hold_tail: 0,
+            wire_end_clock: None,
             seam_end_clock: None,
             seam_end_at_rest: false,
             credits: [WireCredit::default(); RetiredBy::COUNT],
@@ -94,98 +108,84 @@ impl AxisQueue {
     }
 }
 
-// Merged holds keep f32 `duration` rounding of `end_time` far inside the
-// walker's 200 µs start-in-past budget (ulp(30 s) ≈ 3.8 µs).
-pub const MAX_MERGED_HOLD_SECS: f64 = 30.0;
-
-// Consecutive segments project to abutting ticks; anything wider than this is
-// a genuine gap (dwell, stream restart) and must stay a separate piece.
-const HOLD_MERGE_SEAM_SLOP_SECS: f64 = 2e-6;
-
-// What the mcu piece walker tolerates when a piece starts before the clock it
-// is handed to. A transport that ships pieces to the walker untouched has no
-// host-side seam projector, so this is the only bound on a merged duration.
-const WIRE_WALKER_START_SLOP_SECS: f64 = 200e-6;
-
-/// How the consumer of a piece seam turns `duration` back into clock ticks.
-/// A merge rewrites the tail's `duration` from a tick span, and both the
-/// span-to-seconds and the seconds-to-ticks halves of that round trip must
-/// use `freq` or the merged piece reprojects somewhere the following piece
-/// does not start. `skew_budget_cycles` bounds what is left after the round
-/// trip: `duration` is an f32, so past ~2^24 ticks the reprojection is
-/// quantized coarser than a seam check can accept and the merge is refused.
-#[derive(Debug, Clone, Copy)]
-pub struct SeamBasis {
-    pub freq: f64,
-    pub skew_budget_cycles: u64,
+fn hold_position(span: &ClockedMotorSpan) -> Option<f64> {
+    span.signal
+        .eval_pva(span.stream_t_start)
+        .ok()
+        .map(|pva| pva.position)
 }
 
-impl SeamBasis {
-    /// The basis for a transport that hands pieces straight to the mcu walker.
-    #[must_use]
-    pub fn wire_walker(freq: f64) -> Self {
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        Self {
-            freq,
-            skew_budget_cycles: (freq * WIRE_WALKER_START_SLOP_SECS) as u64,
-        }
+fn merged_hold_span(last: &ClockedMotorSpan, next: &ClockedMotorSpan) -> Option<ClockedMotorSpan> {
+    if !last.signal.is_explicit_hold || !next.signal.is_explicit_hold {
+        return None;
     }
+    if last.signal.motor_mask != next.signal.motor_mask
+        || last.clock_freq_hz != next.clock_freq_hz
+        || last.end_clock != next.start_clock
+    {
+        return None;
+    }
+    let position = hold_position(last)?;
+    if position.to_bits() != hold_position(next)?.to_bits() {
+        return None;
+    }
+    let merged_secs =
+        (last.stream_t_end - last.stream_t_start) + (next.stream_t_end - next.stream_t_start);
+    if merged_secs > MAX_SPAN_SECS {
+        return None;
+    }
+    let t_start = last.stream_t_start;
+    let t_end = t_start + merged_secs;
+    let groups: Arc<[MotorGroup]> = Arc::from(vec![MotorGroup::Independent(MotorTerm {
+        source_axis: last.signal.first_source_axis(),
+        axis: ContinuousAxis::Hold {
+            position,
+            t_start,
+            t_end,
+        },
+        scale: 1.0,
+    })]);
+    let signal = MotorSpan::try_new(
+        groups,
+        t_start,
+        t_end,
+        last.signal.motor_mask,
+        last.signal.source_line,
+        true,
+    )
+    .ok()?;
+    let merged = ClockedMotorSpan::try_new(
+        Arc::new(signal),
+        t_start,
+        t_end,
+        last.start_host,
+        next.end_host,
+        last.start_clock_exact,
+        last.clock_freq_hz,
+    )
+    .ok()?;
+    (merged.start_clock == last.start_clock && merged.end_clock == next.end_clock).then_some(merged)
 }
 
-fn try_extend_hold(last: &mut PieceEntry, next: &PieceEntry, basis: SeamBasis) -> bool {
-    let same_hold = last.coeff_count == 1
-        && next.coeff_count == 1
-        && last.motor_mask == next.motor_mask
-        && last.coeffs[0].to_bits() == next.coeffs[0].to_bits();
-    if !same_hold {
-        return false;
-    }
-    #[allow(clippy::cast_possible_truncation)]
-    let freq32 = basis.freq as f32;
-    let last_end = last.end_time(freq32);
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    let slop = (basis.freq * HOLD_MERGE_SEAM_SLOP_SECS) as u64;
-    if last_end.abs_diff(next.start_time) > slop {
-        return false;
-    }
-    #[allow(clippy::cast_precision_loss)]
-    let merged_secs = next.start_time.saturating_sub(last.start_time) as f64 / basis.freq
-        + f64::from(next.duration);
-    if merged_secs > MAX_MERGED_HOLD_SECS {
-        return false;
-    }
-    #[allow(clippy::cast_possible_truncation)]
-    let merged_duration = merged_secs as f32;
-    let merged_end = PieceEntry {
-        duration: merged_duration,
-        ..*last
-    }
-    .end_time(freq32);
-    if merged_end.abs_diff(next.end_time(freq32)) > basis.skew_budget_cycles {
-        return false;
-    }
-    last.duration = merged_duration;
-    true
-}
-
-/// Append `pieces`, coalescing runs of bit-identical constant (hold) pieces
-/// with the queue tail — a stationary axis otherwise ships one 20-byte wire
-/// entry per planner segment. `allow_tail_merge=false` fences the first
-/// incoming piece from a pre-existing tail (fresh stream re-anchor).
-pub fn append_pieces_merging_holds(
-    queue: &mut VecDeque<(PieceEntry, f64)>,
-    pieces: Vec<(PieceEntry, f64)>,
-    basis: SeamBasis,
+/// Append `spans`, coalescing runs of abutting bit-identical hold views with
+/// the queue tail — a stationary axis otherwise ships one wire entry per
+/// planner segment. `allow_tail_merge=false` fences the first incoming view
+/// from a pre-existing tail (fresh stream re-anchor).
+pub fn append_spans_merging_holds(
+    queue: &mut VecDeque<ClockedMotorSpan>,
+    spans: Vec<ClockedMotorSpan>,
     allow_tail_merge: bool,
 ) {
     let mut merge_with_tail = allow_tail_merge;
-    for (piece, host) in pieces {
-        let merged = merge_with_tail
-            && queue
-                .back_mut()
-                .is_some_and(|(last, _)| try_extend_hold(last, &piece, basis));
-        if !merged {
-            queue.push_back((piece, host));
+    for span in spans {
+        let merged = if merge_with_tail {
+            queue.back().and_then(|last| merged_hold_span(last, &span))
+        } else {
+            None
+        };
+        match merged {
+            Some(merged) => *queue.back_mut().expect("a merge requires a tail") = merged,
+            None => queue.push_back(span),
         }
         merge_with_tail = true;
     }
@@ -194,15 +194,15 @@ pub fn append_pieces_merging_holds(
 #[derive(Debug)]
 pub struct FramePlan {
     pub key: AxisKey,
-    pub pieces: Vec<PieceEntry>,
+    pub spans: Vec<ClockedMotorSpan>,
 }
 
-/// One axis' pieces within a single-MCU bundle, carrying the wire bookkeeping
+/// One axis' views within a single-MCU bundle, carrying the wire bookkeeping
 /// the transport needs. `schedule()` only ever groups axes of one MCU into a
 /// `Send`, so a slice of these is exactly the work for one MCU transaction.
 pub struct AxisFrame {
     pub axis: u8,
-    pub pieces: Vec<PieceEntry>,
+    pub spans: Vec<ClockedMotorSpan>,
     pub new_head: u32,
     pub room: u32,
     pub guard_recorded_ns: u64,
@@ -231,10 +231,10 @@ pub fn schedule(
     let head_key = loop {
         let candidate = queues
             .iter()
-            .filter(|(k, q)| !q.pieces.is_empty() && !cap_skipped.contains(*k))
+            .filter(|(k, q)| !q.spans.is_empty() && !cap_skipped.contains(*k))
             .min_by(|(ka, qa), (kb, qb)| {
-                let host_a = qa.pieces.front().unwrap().1;
-                let host_b = qb.pieces.front().unwrap().1;
+                let host_a = qa.spans.front().unwrap().start_host;
+                let host_b = qb.spans.front().unwrap().start_host;
                 host_a.total_cmp(&host_b).then(ka.cmp(kb))
             });
         let (&k, q) = match candidate {
@@ -266,9 +266,9 @@ pub fn schedule(
             continue;
         }
 
-        let head_start_ticks = q.pieces.front().unwrap().0.start_time;
+        let head_start_clock = q.spans.front().unwrap().start_clock;
         if let Some(horizon) = horizon_of(&k, q) {
-            if head_start_ticks > horizon {
+            if head_start_clock > horizon {
                 if stall_ahead_candidate.is_none() {
                     stall_ahead_candidate = Some(k);
                 }
@@ -280,14 +280,10 @@ pub fn schedule(
         break k;
     };
 
-    let super::BundleLimits {
-        wire_budget: bundle_wire_budget,
-        pieces_per_axis,
-    } = limits_of(head_key.mcu_id);
-    let max_per_frame = pieces_per_axis.min(u8::MAX as usize);
+    let super::BundleLimits { spans_per_axis } = limits_of(head_key.mcu_id);
+    let max_per_frame = spans_per_axis.min(u8::MAX as usize);
     let mut taken: BTreeMap<AxisKey, usize> = BTreeMap::new();
     let mut maxed: BTreeSet<AxisKey> = cap_skipped;
-    let mut bundle_bytes = 0usize;
     loop {
         let next = queues
             .iter()
@@ -296,18 +292,15 @@ pub fn schedule(
                     return None;
                 }
                 let already = taken.get(k).copied().unwrap_or(0);
-                q.pieces
+                q.spans
                     .get(already)
-                    .map(|&(ref p, host)| (*k, p.start_time, host, p.wire_len()))
+                    .map(|span| (*k, span.start_clock, span.start_host))
             })
-            .min_by(|(ka, _, ha, _), (kb, _, hb, _)| ha.total_cmp(hb).then(ka.cmp(kb)));
-        let (k, start_ticks, _host, wire_len) = match next {
+            .min_by(|(ka, _, ha), (kb, _, hb)| ha.total_cmp(hb).then(ka.cmp(kb)));
+        let (k, start_clock, _host) = match next {
             Some(n) => n,
             None => break,
         };
-        if !taken.is_empty() && bundle_bytes + wire_len > bundle_wire_budget {
-            break;
-        }
         let already = taken.get(&k).copied().unwrap_or(0);
         let q = &queues[&k];
         let room = q.room() as usize;
@@ -317,7 +310,7 @@ pub fn schedule(
             continue;
         }
         if let Some(horizon) = horizon_of(&k, q) {
-            if start_ticks > horizon {
+            if start_clock > horizon {
                 if stall_ahead_candidate.is_none() {
                     stall_ahead_candidate = Some(k);
                 }
@@ -325,7 +318,6 @@ pub fn schedule(
                 continue;
             }
         }
-        bundle_bytes += wire_len;
         *taken.entry(k).or_insert(0) += 1;
     }
 
@@ -341,7 +333,7 @@ pub fn schedule(
         .filter(|(_, n)| *n > 0)
         .map(|(k, n)| FramePlan {
             key: k,
-            pieces: queues[&k].pieces.iter().take(n).map(|(p, _)| *p).collect(),
+            spans: queues[&k].spans.iter().take(n).cloned().collect(),
         })
         .collect();
     debug_assert!(!frames.is_empty());

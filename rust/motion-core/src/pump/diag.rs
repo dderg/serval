@@ -1,34 +1,28 @@
-use runtime::piece_ring::PieceEntry;
+use trajectory::ClockedMotorSpan;
 
 use super::junction::{JunctionSeam, junction_jumps};
 
-pub(super) fn log_piece_submit(
+pub(super) fn log_span_submit(
     mcu_id: u32,
     axis: u8,
-    freq: Option<f32>,
-    piece: &PieceEntry,
+    span: &ClockedMotorSpan,
     prev_end: Option<u64>,
 ) -> Option<u64> {
-    let end_ticks: u64 = freq.map_or(0, |f| piece.end_time(f));
-    let gap_ticks_in_frame: i64 = prev_end.map_or(0, |pe| piece.start_time as i64 - pe as i64);
+    let gap_ticks_in_frame: i64 = prev_end.map_or(0, |pe| span.start_clock as i64 - pe as i64);
     tracing::trace!(
         subsystem = "motion",
-        event = "pump_piece_submit",
+        event = "pump_span_submit",
         mcu = mcu_id,
         axis = axis,
-        start_time = piece.start_time,
-        duration_s = piece.duration,
-        end_ticks,
+        start_clock = span.start_clock,
+        duration_s = span.stream_t_end - span.stream_t_start,
+        end_clock = span.end_clock,
         gap_ticks_in_frame,
-        motor_mask = piece.motor_mask,
-        "[pump-submit] piece submitted to MCU \
+        motor_mask = span.signal.motor_mask,
+        "[pump-submit] span submitted to MCU \
          (gap_ticks_in_frame: 0=contiguous, <0=overlap, >0=gap)"
     );
-    if freq.is_some() {
-        Some(end_ticks)
-    } else {
-        prev_end
-    }
+    Some(span.end_clock)
 }
 
 /// Classifies the tick/host jump across a stream seam and logs it. A jump that

@@ -10,24 +10,25 @@ use super::drip::DripCohort;
 use super::junction::{JunctionTracker, check_junction_position_continuity};
 use super::memstat::MemPressureProbe;
 use super::messages::{
-    EnqueueMsg, HeartbeatMsg, HistoryRecorder, PieceSink, PumpCallbacks, PumpMsg, SendError,
+    BuzzParams, BuzzToken, EnqueueMsg, HeartbeatMsg, HistoryRecorder, PumpCallbacks, PumpMsg,
+    SendError, SpanSink,
 };
 use super::sched::{
-    AxisFrame, AxisQueue, FramePlan, Schedule, append_pieces_merging_holds, schedule,
+    AxisFrame, AxisQueue, FramePlan, Schedule, append_spans_merging_holds, schedule,
 };
 use super::stall::ConsumptionStallWatch;
 use crate::types::AxisKey;
 
-// How far ahead of the MCU playhead the pump pushes pieces — the depth of the
-// host-side buffer that absorbs scheduling hiccups. A piece whose start_time
+// How far ahead of the MCU playhead the pump pushes views — the depth of the
+// host-side buffer that absorbs scheduling hiccups. A view whose start_clock
 // has already passed cannot be executed, so this must exceed the worst-case
 // host stall between pump pushes. Each transport's own depth (`room()`) is the
 // hard cap; for dense streams the pump stalls on a full endpoint well before
 // this horizon, so raising it only deepens the buffer for sparse (long, slow)
-// moves where stalls are otherwise most likely to slip a piece into the past.
+// moves where stalls are otherwise most likely to slip a view into the past.
 pub const MAX_LEAD_SECS: f64 = 2.0;
 
-// Bound on the planner→pump piece-data channel. When the pump stops pulling
+// Bound on the planner→pump span-data channel. When the pump stops pulling
 // (ring full or at the lead horizon), the planner's dispatch send blocks once
 // this many axis-lane messages are queued — propagating backpressure to the
 // input channel and the gcode reader. It only needs to cover the pump's own
@@ -41,11 +42,11 @@ pub(super) const PUMP_INTAKE_BACKLOG_HARD_CAP: u64 = 8192;
 pub(super) const PUMP_INTAKE_MIN_RUNWAY_SECS: f64 = 5.0;
 
 fn staged_axis_runway_secs(queue: &AxisQueue) -> f64 {
-    let Some((_, start_host)) = queue.pieces.front() else {
+    let Some(first) = queue.spans.front() else {
         return 0.0;
     };
-    let (last, last_start_host) = queue.pieces.back().expect("nonempty queue has a tail");
-    let runway = last_start_host + f64::from(last.duration) - start_host;
+    let last = queue.spans.back().expect("nonempty queue has a tail");
+    let runway = last.end_host - first.start_host;
     assert!(
         runway.is_finite() && runway >= 0.0,
         "pump staged axis runway must be finite and nonnegative, got {runway}"
@@ -61,8 +62,8 @@ fn minimum_staged_runway_secs(queues: &BTreeMap<AxisKey, AxisQueue>) -> f64 {
         .unwrap_or(0.0)
 }
 
-pub(super) fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
-    let staged: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
+pub(super) fn wants_spans(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
+    let staged: u64 = queues.values().map(|q| q.spans.len() as u64).sum();
     staged < PUMP_INTAKE_BACKLOG_SOFT_CAP
         || (staged < PUMP_INTAKE_BACKLOG_HARD_CAP
             && minimum_staged_runway_secs(queues) < PUMP_INTAKE_MIN_RUNWAY_SECS)
@@ -108,10 +109,14 @@ pub(super) struct Pump<S> {
     pub(super) mem_probe: MemPressureProbe,
 }
 
-impl<S: PieceSink> Pump<S> {
-    fn halt_keys(&mut self, keys: impl IntoIterator<Item = AxisKey>, inferred: bool) {
+impl<S: SpanSink> Pump<S> {
+    fn halt_keys(
+        &mut self,
+        keys: impl IntoIterator<Item = AxisKey>,
+        inferred: bool,
+    ) -> Result<(), SendError> {
         let keys: Vec<AxisKey> = keys.into_iter().collect();
-        self.sink.cut_staged(&keys);
+        self.sink.cut_staged(&keys)?;
         let inferred_at = inferred.then(Instant::now);
         for key in keys {
             if inferred {
@@ -120,9 +125,11 @@ impl<S: PieceSink> Pump<S> {
                 self.halted.insert(key, None);
             }
             if let Some(q) = self.queues.get_mut(&key) {
-                let dropped = q.pieces.len() as u32;
-                q.pieces.clear();
+                let dropped = q.spans.len() as u32;
+                q.spans.clear();
                 q.staged_motion = 0;
+                q.wire_hold_tail = 0;
+                q.wire_end_clock = None;
                 q.seam_end_clock = None;
                 if dropped > 0 {
                     (self.callbacks.on_abandon)(key, dropped);
@@ -130,6 +137,7 @@ impl<S: PieceSink> Pump<S> {
             }
             self.junctions.forget(key);
         }
+        Ok(())
     }
 
     pub(super) fn handle_control_msg(&mut self, msg: PumpMsg) -> bool {
@@ -150,8 +158,8 @@ impl<S: PieceSink> Pump<S> {
                 }
                 for key in keys {
                     if let Some(q) = self.queues.get_mut(&key) {
-                        let dropped = q.pieces.len() as u32;
-                        q.pieces.clear();
+                        let dropped = q.spans.len() as u32;
+                        q.spans.clear();
                         q.staged_motion = 0;
                         q.seam_end_clock = None;
                         if dropped > 0 {
@@ -162,7 +170,18 @@ impl<S: PieceSink> Pump<S> {
                 }
             }
             PumpMsg::Halt { keys, ack } => {
-                self.halt_keys(keys, false);
+                if let Err(error) = self.halt_keys(keys.clone(), false) {
+                    tracing::error!(
+                        subsystem = "motion",
+                        event = "halt_cut_fatal",
+                        error = ?error,
+                        "endpoint rejected the halt cut"
+                    );
+                    for key in keys {
+                        (self.callbacks.on_fatal_transport)(key);
+                    }
+                    return false;
+                }
                 self.pending_barrier_acks.push(ack);
             }
             PumpMsg::Resume(keys) => {
@@ -283,6 +302,18 @@ impl<S: PieceSink> Pump<S> {
                     q.seam_end_clock = None;
                 }
             }
+            PumpMsg::Buzz { params, reply } => {
+                let armed = self.arm_buzz(&params);
+                if let Err(error) = &armed {
+                    tracing::warn!(
+                        subsystem = "motion",
+                        event = "resonance_buzz_rejected",
+                        error,
+                        "[buzz] arming refused — no transport was touched"
+                    );
+                }
+                let _ = reply.send(armed);
+            }
             PumpMsg::Barrier(ack) => {
                 self.pending_barrier_acks.push(ack);
             }
@@ -290,10 +321,46 @@ impl<S: PieceSink> Pump<S> {
         true
     }
 
+    /// Arm one sweep across every transport it names. The whole point of
+    /// routing it here is that the pump is the only thread allowed to touch
+    /// a transport while it is streaming: it clears every route first, so a
+    /// machine whose Y is a servo, Z a pulse lane and X a phase lane either
+    /// starts all three off one profile or starts none of them.
+    fn arm_buzz(&mut self, params: &BuzzParams) -> Result<BuzzToken, String> {
+        if params.routes.is_empty() {
+            return Err("resonance buzz names no transport to drive".to_string());
+        }
+        let profile = Arc::new(
+            params
+                .wave
+                .profile()
+                .map_err(|error| format!("resonance buzz profile rejected: {error}"))?,
+        );
+        let clock_of = &*self.callbacks.mcu_clock_of;
+        let mut starts = Vec::with_capacity(params.routes.len());
+        for route in params.routes.iter() {
+            let mcu_id = route.mcu_id();
+            if self
+                .queues
+                .iter()
+                .any(|(key, queue)| key.mcu_id == mcu_id && !queue.spans.is_empty())
+            {
+                return Err(format!(
+                    "resonance buzz rejected: mcu {mcu_id} still has trajectory staged in the pump"
+                ));
+            }
+            starts.push(route.ready(clock_of, super::stepcompress_sink::SEND_LEAD_SECONDS)?);
+        }
+        for (route, start) in params.routes.iter().zip(starts) {
+            route.arm(&profile, params.wave, start)?;
+        }
+        Ok(BuzzToken::new(Arc::clone(&params.routes)))
+    }
+
     pub(super) fn enqueue(&mut self, msg: EnqueueMsg) {
         let EnqueueMsg {
             key,
-            pieces,
+            spans,
             epoch,
             lead_secs,
             source_line,
@@ -301,7 +368,7 @@ impl<S: PieceSink> Pump<S> {
             batch_end: _,
         } = msg;
         if let Some(inferred_at) = self.halted.get(&key).copied() {
-            let dropped = pieces.len() as u32;
+            let dropped = spans.len() as u32;
             if dropped > 0 {
                 (self.callbacks.on_abandon)(key, dropped);
             }
@@ -332,46 +399,43 @@ impl<S: PieceSink> Pump<S> {
             }
         }
         if epoch.is_fresh() {
-            if let Some((first, _)) = pieces.first() {
+            if let Some(first) = spans.first() {
                 if epoch == crate::anchor::StreamEpoch::Rejoin {
                     tracing::info!(
                         subsystem = "motion",
                         event = "seam_gap_mark",
                         mcu = key.mcu_id,
                         axis = key.axis,
-                        at_start_clock = first.start_time,
+                        at_start_clock = first.start_clock,
                         "[rejoin] marking a sanctioned forward seam gap"
                     );
-                    self.sink.mark_seam_gap(key, first.start_time);
+                    self.sink.mark_seam_gap(key, first.start_clock);
                 } else {
                     tracing::info!(
                         subsystem = "motion",
                         event = "reanchor_mark",
                         mcu = key.mcu_id,
                         axis = key.axis,
-                        at_start_clock = first.start_time,
+                        at_start_clock = first.start_clock,
                         "[reanchor] marking fresh-epoch cut"
                     );
-                    self.sink.mark_reanchor(key, first.start_time, epoch_freq);
+                    self.sink.mark_reanchor(key, first.start_clock, epoch_freq);
                 }
             }
         }
         if epoch.position_redefined() {
             self.junctions.forget(key);
         }
-        if !pieces.is_empty() {
+        if let Some(seam) = self.junctions.observe(key, &spans, source_line) {
+            check_junction_position_continuity(&seam);
             if let Some((_ack_now, freq)) = (self.callbacks.mcu_clock_of)(key.mcu_id) {
-                if let Some(seam) = self.junctions.observe(key, &pieces, source_line, freq) {
-                    check_junction_position_continuity(&seam);
-                    diag::log_junction_jump(&seam, source_line, epoch.is_fresh(), freq);
-                }
+                diag::log_junction_jump(&seam, source_line, epoch.is_fresh(), freq);
             }
         }
-        if !pieces.is_empty() {
+        if let Some(first) = spans.first() {
             if let Some((ack_now, freq)) = (self.callbacks.mcu_clock_of)(key.mcu_id) {
                 if freq > 0.0 {
-                    let (first, _) = &pieces[0];
-                    let margin_s = (first.start_time as i64 - ack_now as i64) as f64 / freq;
+                    let margin_s = (first.start_clock as i64 - ack_now as i64) as f64 / freq;
                     let warn_floor = crate::anchor::LOW_MARGIN_WARN_SECS - pump_past_guard_secs();
                     if margin_s < warn_floor {
                         tracing::warn!(
@@ -380,15 +444,15 @@ impl<S: PieceSink> Pump<S> {
                             mcu = key.mcu_id,
                             axis = key.axis,
                             margin_us = margin_s * 1e6,
-                            start_time = first.start_time,
+                            start_clock = first.start_clock,
                             ack_now,
                             ?epoch,
                             lead_secs,
                             source_line,
-                            n_pieces = pieces.len(),
-                            first_is_hold = super::sched::is_hold_piece(first),
-                            first_duration_s = f64::from(first.duration),
-                            "[pump-enqueue] pieces arrived with less lead than \
+                            n_spans = spans.len(),
+                            first_is_hold = super::sched::is_hold_span(first),
+                            first_duration_s = first.stream_t_end - first.stream_t_start,
+                            "[pump-enqueue] spans arrived with less lead than \
                              the low-margin floor — -308 precursor, with \
                              provenance"
                         );
@@ -397,19 +461,17 @@ impl<S: PieceSink> Pump<S> {
             }
         }
         let ring_depth = (self.callbacks.ring_depth_of)(key);
-        let lane_freq = (self.callbacks.mcu_clock_of)(key.mcu_id)
-            .map(|(_, freq)| freq)
-            .filter(|freq| *freq > 0.0);
         if !epoch.is_fresh() {
-            if let (Some((first, _)), Some(freq)) = (pieces.first(), lane_freq) {
+            if let Some(first) = spans.first() {
                 let seam = self
                     .queues
                     .get(&key)
                     .and_then(|q| q.seam_end_clock.map(|end| (end, q.seam_end_at_rest)));
                 if let Some((end, at_rest)) = seam {
                     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-                    let floor = (freq * super::sched::LANE_REJOIN_GAP_FLOOR_SECS) as u64;
-                    if first.start_time > end.saturating_add(floor) {
+                    let floor =
+                        (first.clock_freq_hz * super::sched::LANE_REJOIN_GAP_FLOOR_SECS) as u64;
+                    if first.start_clock > end.saturating_add(floor) {
                         if at_rest {
                             tracing::info!(
                                 subsystem = "motion",
@@ -417,11 +479,11 @@ impl<S: PieceSink> Pump<S> {
                                 mcu = key.mcu_id,
                                 axis = key.axis,
                                 seam_end = end,
-                                at_start_clock = first.start_time,
+                                at_start_clock = first.start_clock,
                                 "[rejoin] lane sat out single-lane traffic at rest — \
                                  sanctioning its forward seam gap"
                             );
-                            self.sink.mark_seam_gap(key, first.start_time);
+                            self.sink.mark_seam_gap(key, first.start_clock);
                         } else {
                             tracing::error!(
                                 subsystem = "motion",
@@ -429,8 +491,8 @@ impl<S: PieceSink> Pump<S> {
                                 mcu = key.mcu_id,
                                 axis = key.axis,
                                 seam_end = end,
-                                at_start_clock = first.start_time,
-                                "[rejoin] forward lane hole while the lane's last piece \
+                                at_start_clock = first.start_clock,
+                                "[rejoin] forward lane hole while the lane's last span \
                                  ended in motion — trajectory content is missing; the \
                                  endpoint seam guard will fail loud"
                             );
@@ -439,33 +501,12 @@ impl<S: PieceSink> Pump<S> {
                 }
             }
         }
-        let lane_seam_track = match (pieces.last(), lane_freq) {
-            (Some((last, _)), Some(freq)) => {
-                #[allow(clippy::cast_possible_truncation)]
-                let end = last.end_time(freq as f32);
-                let at_rest = super::sched::is_hold_piece(last)
-                    || last.vel_end().abs() <= super::sched::LANE_REJOIN_REST_VEL_MM_S;
-                Some((end, at_rest))
-            }
-            _ => None,
-        };
+        let lane_seam_track = spans
+            .last()
+            .map(|last| (last.end_clock, super::sched::span_ends_at_rest(last)));
         // Hold merging is off during drip cohorts: their release floor is
-        // piece-count-based and coalescing would starve it. Without a synced
-        // clock there is no freq to prove seam contiguity, so append as-is.
-        //
-        // A merge rewrites the tail's `duration` from a tick span, so the
-        // basis must be the slope the seam is later projected on. For a
-        // stepcompress transport that is the shim's frozen epoch slope, not
-        // the continuously re-estimated clock: over a lane held for the whole
-        // first layer the two diverge by far more than the seam tolerance.
-        let hold_merge_basis = if self.cohort.is_none() {
-            self.sink.seam_basis(key).or_else(|| {
-                (self.callbacks.mcu_clock_of)(key.mcu_id)
-                    .map(|(_, freq)| super::sched::SeamBasis::wire_walker(freq))
-            })
-        } else {
-            None
-        };
+        // view-count-based and coalescing would starve it.
+        let merge_holds = self.cohort.is_none();
         let q = self
             .queues
             .entry(key)
@@ -474,18 +515,15 @@ impl<S: PieceSink> Pump<S> {
         if let Some((end, at_rest)) = lane_seam_track {
             q.seam_end_clock = Some(end);
             q.seam_end_at_rest = at_rest;
-        } else if !pieces.is_empty() {
-            q.seam_end_clock = None;
         }
-        q.staged_motion += pieces
+        q.staged_motion += spans
             .iter()
-            .filter(|(p, _)| !super::sched::is_hold_piece(p))
+            .filter(|span| !super::sched::is_hold_span(span))
             .count() as u32;
-        match hold_merge_basis {
-            Some(basis) => {
-                append_pieces_merging_holds(&mut q.pieces, pieces, basis, !epoch.is_fresh());
-            }
-            None => q.pieces.extend(pieces),
+        if merge_holds {
+            append_spans_merging_holds(&mut q.spans, spans, !epoch.is_fresh());
+        } else {
+            q.spans.extend(spans);
         }
     }
 
@@ -513,7 +551,7 @@ impl<S: PieceSink> Pump<S> {
             && self
                 .queues
                 .values()
-                .any(|q| q.lead_secs < 0.1 && !q.pieces.is_empty());
+                .any(|q| q.lead_secs < 0.1 && !q.spans.is_empty());
         if short_lead || cohort_active { 10 } else { 50 }
     }
 
@@ -536,7 +574,7 @@ impl<S: PieceSink> Pump<S> {
 
     fn drain_data(&mut self, data_rx: &Receiver<EnqueueMsg>) -> bool {
         let mut activity = false;
-        while self.data_open && (self.intake_batch_open || wants_pieces(&self.queues)) {
+        while self.data_open && (self.intake_batch_open || wants_spans(&self.queues)) {
             match data_rx.try_recv() {
                 Ok(e) => {
                     activity = true;
@@ -575,7 +613,7 @@ impl<S: PieceSink> Pump<S> {
         let fully_executed = co.participants.iter().all(|k| {
             self.queues
                 .get(k)
-                .is_none_or(|q| q.pieces.is_empty() && q.pushed == q.retired)
+                .is_none_or(|q| q.spans.is_empty() && q.pushed == q.retired)
         });
         if fully_executed {
             tracing::warn!(
@@ -599,7 +637,7 @@ impl<S: PieceSink> Pump<S> {
                     k.mcu_id,
                     k.axis,
                     co.executed(k, &self.queues),
-                    self.queues.get(k).map_or(0, |q| q.pieces.len()),
+                    self.queues.get(k).map_or(0, |q| q.spans.len()),
                     self.queues
                         .get(k)
                         .map_or(0, |q| q.pushed.wrapping_sub(q.retired)),
@@ -622,6 +660,15 @@ impl<S: PieceSink> Pump<S> {
             return Ok(());
         };
         let current_consumed = q.consumed;
+        if let (Some((mcu_clock, _)), Some(wire_end_clock)) = (
+            (self.callbacks.mcu_clock_of)(stall_key.mcu_id),
+            q.wire_end_clock,
+        ) {
+            if mcu_clock <= wire_end_clock {
+                self.consumption_stall.reset();
+                return Ok(());
+            }
+        }
         let observation = self
             .consumption_stall
             .observe(stall_key, current_consumed, now);
@@ -638,8 +685,8 @@ impl<S: PieceSink> Pump<S> {
                 awaiting_consumption,
                 ring_depth = q.ring_depth,
                 room = q.room(),
-                pending = q.pieces.len(),
-                "pump StallFull (room==0): endpoint has not consumed the next piece"
+                pending = q.spans.len(),
+                "pump StallFull (room==0): endpoint has not consumed the next span"
             );
         }
         if let Some(stalled_secs) = observation.stalled_secs {
@@ -652,9 +699,9 @@ impl<S: PieceSink> Pump<S> {
                 consumed = q.consumed,
                 retired = q.retired,
                 ring_depth = q.ring_depth,
-                pending = q.pieces.len(),
+                pending = q.spans.len(),
                 stalled_secs,
-                "endpoint stopped consuming pieces on this axis while heartbeats continued"
+                "endpoint stopped consuming spans on this axis while heartbeats continued"
             );
             (self.callbacks.on_drip_stall)(format!(
                 "pump consumption stall: mcu{} axis{} consumed stuck at {} for \
@@ -665,7 +712,7 @@ impl<S: PieceSink> Pump<S> {
                 q.pushed,
                 q.retired,
                 q.ring_depth,
-                q.pieces.len(),
+                q.spans.len(),
             ));
             return Err(());
         }
@@ -676,13 +723,13 @@ impl<S: PieceSink> Pump<S> {
         frames
             .into_iter()
             .map(|f| {
-                let n = f.pieces.len() as u32;
+                let n = f.spans.len() as u32;
                 let q = self.queues.get(&f.key).expect("planned key exists");
                 AxisFrame {
                     axis: f.key.axis,
                     new_head: q.pushed.wrapping_add(n),
                     room: q.room(),
-                    pieces: f.pieces,
+                    spans: f.spans,
                     guard_recorded_ns: 0,
                     guard_mcu_clock: 0,
                 }
@@ -690,13 +737,13 @@ impl<S: PieceSink> Pump<S> {
             .collect()
     }
 
-    // Host-side guard: refuse to submit a piece whose start_time is already in
+    // Host-side guard: refuse to submit a view whose start_clock is already in
     // the MCU's past. Catching it here fails loud on the host with the
     // offending mcu/axis/deficit instead of letting the MCU (or the EtherCAT
-    // endpoint ring) trip a cryptic -308 PieceStartInPast after the fact.
+    // endpoint ring) trip a cryptic -308 start-in-past after the fact.
     // Mirrors the MCU's MAX_START_IN_PAST_SECS=200us threshold with a margin
     // above host-projection jitter so a healthy print never false-aborts.
-    fn guard_pieces_not_in_past(&self, mcu_id: u32, bundle: &mut [AxisFrame], context: &str) {
+    fn guard_spans_not_in_past(&self, mcu_id: u32, bundle: &mut [AxisFrame], context: &str) {
         let guard_recorded_ns = super::transit_trace::trace_now_ns();
         if let Some((mcu_now, freq)) = (self.callbacks.mcu_clock_of)(mcu_id) {
             for frame in &mut *bundle {
@@ -706,54 +753,51 @@ impl<S: PieceSink> Pump<S> {
             if freq > 0.0 {
                 let guard_ticks = (pump_past_guard_secs() * freq) as u64;
                 for af in bundle {
-                    for (piece_idx, piece) in af.pieces.iter().enumerate() {
-                        if piece.start_time + guard_ticks < mcu_now {
+                    for (span_idx, span) in af.spans.iter().enumerate() {
+                        if span.start_clock + guard_ticks < mcu_now {
                             let deficit_us =
-                                ((mcu_now - piece.start_time) as f64 / freq * 1e6) as u64;
+                                ((mcu_now - span.start_clock) as f64 / freq * 1e6) as u64;
                             let key = AxisKey {
                                 mcu_id,
                                 axis: af.axis,
                             };
                             let (queue_lead_secs, queue_pending, queue_staged_motion) =
                                 self.queues.get(&key).map_or((f64::NAN, 0, 0), |q| {
-                                    (q.lead_secs, q.pieces.len(), q.staged_motion)
+                                    (q.lead_secs, q.spans.len(), q.staged_motion)
                                 });
                             tracing::error!(
                                 subsystem = "motion",
-                                event = "pump_piece_in_past",
+                                event = "pump_span_in_past",
                                 mcu = mcu_id,
                                 axis = af.axis,
-                                start_time = piece.start_time,
+                                start_clock = span.start_clock,
                                 mcu_now,
                                 deficit_us,
                                 context,
-                                piece_idx,
-                                is_hold = super::sched::is_hold_piece(piece),
-                                duration_s = f64::from(piece.duration),
-                                coeff_count = piece.coeff_count,
+                                span_idx,
+                                is_hold = super::sched::is_hold_span(span),
+                                duration_s = span.stream_t_end - span.stream_t_start,
                                 queue_lead_secs,
                                 queue_pending,
                                 queue_staged_motion,
                                 cohort_active = self.cohort.is_some(),
-                                "[pump-guard] piece already in the MCU's past {context} — failing loud on host before the MCU/endpoint trips -308"
+                                "[pump-guard] span already in the MCU's past {context} — failing loud on host before the MCU/endpoint trips -308"
                             );
                             eprintln!(
-                                "pump: piece in past {context} — mcu {mcu_id} axis {} start_time={} mcu_now={mcu_now} deficit_us={deficit_us} piece_idx={piece_idx} is_hold={} duration_s={} coeff_count={} cohort_active={}",
+                                "pump: span in past {context} — mcu {mcu_id} axis {} start_clock={} mcu_now={mcu_now} deficit_us={deficit_us} span_idx={span_idx} is_hold={} duration_s={} cohort_active={}",
                                 af.axis,
-                                piece.start_time,
-                                super::sched::is_hold_piece(piece),
-                                f64::from(piece.duration),
-                                piece.coeff_count,
+                                span.start_clock,
+                                super::sched::is_hold_span(span),
+                                span.stream_t_end - span.stream_t_start,
                                 self.cohort.is_some(),
                             );
                             for (queue_key, q) in &self.queues {
-                                let head_start =
-                                    q.pieces.front().map_or(0, |(piece, _)| piece.start_time);
+                                let head_start = q.spans.front().map_or(0, |span| span.start_clock);
                                 eprintln!(
                                     "pump-queue: mcu{} axis{} pending={} staged_motion={} pushed={} retired={} ring_depth={} lead_secs={} head_start={head_start}",
                                     queue_key.mcu_id,
                                     queue_key.axis,
-                                    q.pieces.len(),
+                                    q.spans.len(),
                                     q.staged_motion,
                                     q.pushed,
                                     q.retired,
@@ -815,28 +859,31 @@ impl<S: PieceSink> Pump<S> {
                 mcu_id,
                 axis: af.axis,
             };
-            let measured_freq = (self.callbacks.mcu_clock_of)(mcu_id).map(|(_, f)| f);
-            #[allow(clippy::cast_possible_truncation)]
-            let diag_freq = measured_freq.map(|f| f as f32);
             let mut prev_end: Option<u64> = None;
-            for piece in &af.pieces {
-                prev_end = diag::log_piece_submit(mcu_id, af.axis, diag_freq, piece, prev_end);
+            for span in &af.spans {
+                prev_end = diag::log_span_submit(mcu_id, af.axis, span, prev_end);
             }
-            let n = af.pieces.len() as u32;
+            let n = af.spans.len() as u32;
             let q = self.queues.get_mut(&key).expect("planned key exists");
-            for _ in 0..af.pieces.len() {
-                let (piece, host_t) = q
-                    .pieces
+            for _ in 0..af.spans.len() {
+                let span = q
+                    .spans
                     .pop_front()
                     .expect("sent frame outran its axis queue");
-                if super::sched::is_hold_piece(&piece) {
+                q.wire_end_clock = Some(span.end_clock);
+                if super::sched::is_hold_span(&span) {
                     q.wire_hold_tail += 1;
                 } else {
                     q.wire_hold_tail = 0;
                     q.staged_motion = q.staged_motion.saturating_sub(1);
                 }
                 if let Some(history) = &self.history {
-                    history.record(key, &piece, measured_freq, host_t);
+                    if let Err(error) = history.record(key, span) {
+                        panic!(
+                            "mcu{} axis{}: motion history rejected a dispatched span: {error}",
+                            key.mcu_id, key.axis
+                        );
+                    }
                 }
             }
             q.pushed = q.pushed.wrapping_add(n);
@@ -845,7 +892,7 @@ impl<S: PieceSink> Pump<S> {
 
     // A send pass monopolizes the loop while its synchronous wire round-trips
     // run (~2 ms per EtherCAT bundle, ~20 ms per 1 KiB serial bundle at
-    // 500 kbaud), while newly produced earlier-deadline pieces for another
+    // 500 kbaud), while newly produced earlier-deadline views for another
     // axis wait in the data channel (observed: a 130 ms pass aged a z-hop
     // burst 53 ms into the MCU past). A wall-clock deadline bounds intake and
     // control latency identically on every transport; the deadline is checked
@@ -861,11 +908,22 @@ impl<S: PieceSink> Pump<S> {
         loop {
             let sched = {
                 let hz_of = |k: &AxisKey, q: &AxisQueue| self.horizon_of(k, q);
+                let releasable_cap = |key: &AxisKey| {
+                    if self
+                        .cohort
+                        .as_ref()
+                        .is_some_and(|cohort| cohort.participants.contains(key))
+                    {
+                        1
+                    } else {
+                        usize::MAX
+                    }
+                };
                 schedule(
                     &self.queues,
                     |mcu_id| self.sink.bundle_limits(mcu_id),
                     hz_of,
-                    |_| usize::MAX,
+                    releasable_cap,
                 )
             };
             match sched {
@@ -932,7 +990,7 @@ impl<S: PieceSink> Pump<S> {
     /// `Ok(true)` keeps the send pass going; `Ok(false)` ends it (the endpoint
     /// halted, or the transport gave no answer); `Err(())` is fatal.
     fn send_bundle(&mut self, mcu_id: u32, mut bundle: Vec<AxisFrame>) -> Result<bool, ()> {
-        self.guard_pieces_not_in_past(mcu_id, &mut bundle, "at send");
+        self.guard_spans_not_in_past(mcu_id, &mut bundle, "at send");
         let send_started_ns = super::transit_trace::trace_now_ns();
         let send_started_at = Instant::now();
         let outcome = self.send_bundle_logged(mcu_id, &bundle);
@@ -947,13 +1005,13 @@ impl<S: PieceSink> Pump<S> {
                 sequence: 0,
                 mcu_id,
                 axis: frame.axis,
-                piece_count: frame.pieces.len() as u32,
+                piece_count: frame.spans.len() as u32,
                 room: frame.room,
                 guard_recorded_ns: frame.guard_recorded_ns,
                 guard_mcu_clock: frame.guard_mcu_clock,
                 send_started_ns,
                 send_elapsed_ns,
-                host_front_start_time: frame.pieces.first().map_or(0, |piece| piece.start_time),
+                host_front_start_time: frame.spans.first().map_or(0, |span| span.start_clock),
                 result,
             });
         }
@@ -984,13 +1042,26 @@ impl<S: PieceSink> Pump<S> {
                     error = %e,
                     "pump frame met an endpoint halt and was discarded"
                 );
-                self.halt_keys(
+                if let Err(error) = self.halt_keys(
                     bundle.iter().map(|frame| AxisKey {
                         mcu_id,
                         axis: frame.axis,
                     }),
                     true,
-                );
+                ) {
+                    tracing::error!(
+                        subsystem = "motion",
+                        event = "halt_cut_fatal",
+                        mcu = mcu_id,
+                        error = ?error,
+                        "endpoint rejected the inferred halt cut"
+                    );
+                    (self.callbacks.on_fatal_transport)(AxisKey {
+                        mcu_id,
+                        axis: bundle.first().map_or(0, |frame| frame.axis),
+                    });
+                    return Err(());
+                }
                 Ok(false)
             }
             Err(SendError::Transient(e)) => {
@@ -1001,11 +1072,11 @@ impl<S: PieceSink> Pump<S> {
                     error = %e,
                     "pump send_mcu_frames failed"
                 );
-                self.guard_pieces_not_in_past(
+                self.guard_spans_not_in_past(
                     mcu_id,
                     &mut bundle,
                     "after a failed send (transport gave no response \
-                     while the piece's scheduling lead ran out)",
+                     while the view's scheduling lead ran out)",
                 );
                 Ok(false)
             }
@@ -1020,7 +1091,7 @@ impl<S: PieceSink> Pump<S> {
     ) -> Result<(), ()> {
         let mut sel = Select::new();
         let ctrl_op = sel.recv(control_rx);
-        let want_data = self.data_open && (self.intake_batch_open || wants_pieces(&self.queues));
+        let want_data = self.data_open && (self.intake_batch_open || wants_spans(&self.queues));
         let data_op = if want_data {
             sel.recv(data_rx)
         } else {
@@ -1069,7 +1140,7 @@ impl<S: PieceSink> Pump<S> {
                 (
                     (k.mcu_id, k.axis),
                     crate::drain::AxisDrainState {
-                        pending: q.pieces.len() as u32,
+                        pending: q.spans.len() as u32,
                         pushed: q.pushed,
                         retired: q.retired,
                         staged_motion: q.staged_motion,
@@ -1097,6 +1168,11 @@ impl<S: PieceSink> Pump<S> {
 
             activity |= self.drain_data(data_rx);
 
+            self.publish_ledger();
+            for ack in self.pending_barrier_acks.drain(..) {
+                let _ = ack.send(());
+            }
+
             self.check_cohort_deadline();
 
             self.holding_ahead = false;
@@ -1122,13 +1198,8 @@ impl<S: PieceSink> Pump<S> {
                 }
             }
 
-            let unpushed: u64 = self.queues.values().map(|q| q.pieces.len() as u64).sum();
+            let unpushed: u64 = self.queues.values().map(|q| q.spans.len() as u64).sum();
             self.backlog.store(unpushed, Ordering::Release);
-
-            self.publish_ledger();
-            for ack in self.pending_barrier_acks.drain(..) {
-                let _ = ack.send(());
-            }
 
             if activity {
                 continue;
@@ -1141,7 +1212,7 @@ impl<S: PieceSink> Pump<S> {
     }
 }
 
-pub fn run_pump<S: PieceSink>(
+pub fn run_pump<S: SpanSink>(
     control_rx: Receiver<PumpMsg>,
     data_rx: Receiver<EnqueueMsg>,
     sink: S,

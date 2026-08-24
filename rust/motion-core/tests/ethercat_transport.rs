@@ -5,20 +5,43 @@ use std::time::Duration;
 
 use motion_core::drain::DrainLedger;
 use motion_core::pump::{
-    AxisKey, EnqueueMsg, HeartbeatMsg, PieceSink, PumpCallbacks, PumpMsg, RetiredBy, SendError,
+    AxisKey, EnqueueMsg, HeartbeatMsg, PumpCallbacks, PumpMsg, RetiredBy, SendError, SpanSink,
     WireSink, run_pump,
 };
-use runtime::piece_ring::PieceEntry;
+use trajectory::{ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm};
 
-fn piece(t: u64) -> (PieceEntry, f64) {
-    let mut entry = PieceEntry {
-        start_time: t,
-        duration: 0.001,
-        coeff_count: 2,
-        ..PieceEntry::zeroed()
-    };
-    entry.coeffs[1] = 1.0;
-    (entry, t as f64)
+const FREQ: f64 = 1e6;
+const SPAN_SECS: f64 = 0.001;
+const SPAN_TICKS: u64 = 1000;
+const SOURCE_LINE: u32 = u32::MAX;
+
+#[allow(clippy::cast_precision_loss)]
+fn span(start_clock: u64) -> ClockedMotorSpan {
+    let t_start = start_clock as f64 / FREQ;
+    let t_end = t_start + SPAN_SECS;
+    let curve = nurbs::ScalarNurbs::try_new(
+        1,
+        vec![t_start, t_start, t_end, t_end],
+        vec![t_start, t_end],
+    )
+    .expect("a linear lane curve is valid");
+    let groups: Arc<[MotorGroup]> = Arc::from(vec![MotorGroup::Independent(MotorTerm {
+        source_axis: 0,
+        axis: ContinuousAxis::Spline(Arc::new(curve)),
+        scale: 1.0,
+    })]);
+    let signal = MotorSpan::try_new(groups, t_start, t_end, 0, SOURCE_LINE, false)
+        .expect("a spline motor span is dispatchable");
+    ClockedMotorSpan::try_new(
+        Arc::new(signal),
+        t_start,
+        t_end,
+        t_start,
+        t_end,
+        start_clock as f64,
+        FREQ,
+    )
+    .expect("the projected view spans at least one clock")
 }
 
 #[test]
@@ -34,13 +57,12 @@ fn wire_sink_lane_with_no_endpoint_is_hard_error() {
             &[],
         )),
     };
-    let (p, _) = piece(0);
     let result = sink.send_frame(
         AxisKey {
             mcu_id: 99,
             axis: 0,
         },
-        &[p],
+        &[span(0)],
         1,
         8,
     );
@@ -69,11 +91,11 @@ impl PerMcuCountSink {
     }
 }
 
-impl PieceSink for PerMcuCountSink {
+impl SpanSink for PerMcuCountSink {
     fn send_frame(
         &self,
         key: AxisKey,
-        _pieces: &[PieceEntry],
+        _spans: &[ClockedMotorSpan],
         _new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
@@ -104,20 +126,20 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
     data.send(EnqueueMsg {
         epoch_freq: None,
         key: AxisKey { mcu_id: 1, axis: 0 },
-        pieces: vec![piece(0)],
+        spans: vec![span(0)],
         epoch: motion_core::anchor::StreamEpoch::Continuation,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
-        source_line: u32::MAX,
+        source_line: SOURCE_LINE,
         batch_end: true,
     })
     .unwrap();
     data.send(EnqueueMsg {
         epoch_freq: None,
         key: AxisKey { mcu_id: 2, axis: 0 },
-        pieces: vec![piece(1)],
+        spans: vec![span(SPAN_TICKS)],
         epoch: motion_core::anchor::StreamEpoch::Continuation,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
-        source_line: u32::MAX,
+        source_line: SOURCE_LINE,
         batch_end: true,
     })
     .unwrap();
@@ -187,17 +209,17 @@ fn heartbeat_retirement_drains_pump_ledger() {
             mcu_id: 42,
             axis: 0,
         },
-        pieces: vec![piece(0)],
+        spans: vec![span(0)],
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
-        source_line: u32::MAX,
+        source_line: SOURCE_LINE,
         batch_end: true,
     })
     .unwrap();
     barrier(&ctl);
     assert!(
         !ledger.drained(),
-        "a pushed but unretired wire piece must keep the ledger undrained"
+        "a pushed but unretired wire span must keep the ledger undrained"
     );
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {

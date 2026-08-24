@@ -130,8 +130,8 @@ fn move_time_s(mv: &MoveVelocity) -> f64 {
     }
 }
 
-fn stream_config(jerk: f64) -> StreamConfig {
-    let limits = geometry::VelocityLimits::try_new(MAX_VELOCITY, MAX_ACCEL, SCV, jerk)
+fn stream_config() -> StreamConfig {
+    let limits = geometry::VelocityLimits::try_new(MAX_VELOCITY, MAX_ACCEL, SCV, f64::INFINITY)
         .expect("valid limits");
     StreamConfig {
         corner: geometry::CornerFitConfig::default(),
@@ -206,13 +206,13 @@ fn run_planner(items: Vec<StreamInput>, config: StreamConfig, trickle: bool) -> 
     }
 }
 
-fn bench(name: &str, waypoints: &[Waypoint], jerk: f64, trickle: bool) {
-    let config = stream_config(jerk);
+fn bench(name: &str, waypoints: &[Waypoint], trickle: bool) {
+    let config = stream_config();
     let moves = pipeline_snapshot::build_moves(waypoints, config.limits).expect("valid waypoints");
     let fit_start = Instant::now();
     let fitted = run_fitter(&moves, &config);
     let fit_wall = fit_start.elapsed().as_secs_f64();
-    let r = run_planner(fitted, stream_config(jerk), trickle);
+    let r = run_planner(fitted, stream_config(), trickle);
     let ratio = r.motion_s / r.wall_s;
     let plan_mean_ms = if r.plans > 0 {
         r.plan_us_total as f64 / r.plans as f64 / 1e3
@@ -220,7 +220,7 @@ fn bench(name: &str, waypoints: &[Waypoint], jerk: f64, trickle: bool) {
         0.0
     };
     println!(
-        "{name:<18} jerk={jerk:>7.1e} feed={:<9} moves_in={:<4} planned={:<4} plans={:<4} \
+        "{name:<18} feed={:<9} moves_in={:<4} planned={:<4} plans={:<4} \
          fit={:>6.1}ms plan_wall={:>9.1}ms plan_mean={:>8.1}ms plan_max={:>8.1}ms \
          motion={:>7.1}ms realtime_x={ratio:>7.2} {}",
         if trickle { "trickle" } else { "saturated" },
@@ -242,10 +242,8 @@ fn main() {
     let zigzag = zigzag_infill(100, 40.0, 0.4);
 
     for &trickle in &[false, true] {
-        for &jerk in &[10_000_000.0_f64, f64::INFINITY] {
-            bench("faceted-circles", &circles, jerk, trickle);
-            bench("zigzag-infill", &zigzag, jerk, trickle);
-        }
+        bench("faceted-circles", &circles, trickle);
+        bench("zigzag-infill", &zigzag, trickle);
         println!();
     }
 }

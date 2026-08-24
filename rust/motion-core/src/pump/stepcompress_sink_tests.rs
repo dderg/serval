@@ -1,12 +1,17 @@
 use super::*;
 use crate::mcu_config::{LaneKind, McuAxisConfig};
-use runtime::piece_ring::PieceEntry;
 use std::sync::atomic::{AtomicI64, AtomicU64};
+use trajectory::{ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm};
 
 const MCU_ID: u32 = 3;
 const OID: u32 = 7;
 const CYCLES_PER_SECOND: f64 = 1_000_000.0;
 const BUDGET: u32 = 4;
+const MICROSTEP: f64 = 0.01;
+
+/// How far past a resuming move's start clock a mid-stream re-anchor may
+/// land: the first step of a 100 mm/s run at [`MICROSTEP`] resolution.
+const RESUME_ANCHOR_SLACK_CYCLES: u64 = 200;
 
 /// The harness teleports its mcu clock by whole seconds to force a drain, so
 /// every barrier looks arbitrarily old. Tests that mean to exercise the ack
@@ -32,16 +37,38 @@ struct Harness {
 fn motor_cfg_for(oid: u32) -> MotorConfig {
     MotorConfig {
         oid,
-        microstep_distance: 0.01,
+        microstep_distance: MICROSTEP,
         invert_dir: false,
-        max_steps_per_sample: 16,
-        sample_rate_hz: 10_000.0,
         cycles_per_second: CYCLES_PER_SECOND,
         min_rearm_cycles: 0,
         encoder: StepEncoder::Classic {
             max_error_ticks: step_shim::compress::DEFAULT_MAX_ERROR_TICKS,
         },
     }
+}
+
+fn buzz_profile(
+    freq_start_millihz: u32,
+    freq_end_millihz: u32,
+    amplitude_nm: u32,
+    duration_ms: u32,
+    ramp_ms: u32,
+) -> Arc<BuzzProfile> {
+    Arc::new(
+        crate::pump::BuzzWave {
+            freq_start_millihz,
+            freq_end_millihz,
+            amplitude_nm,
+            duration_ms,
+            ramp_ms,
+        }
+        .profile()
+        .expect("the wave describes a buzz"),
+    )
+}
+
+fn buzz_start(h: &Harness) -> u64 {
+    h.now.load(Ordering::Relaxed) + (CYCLES_PER_SECOND * SEND_LEAD_SECONDS) as u64
 }
 
 fn harness(budget: u32) -> Harness {
@@ -204,25 +231,148 @@ impl Harness {
     }
 }
 
-/// One piece per call, chained so the shim's contiguity check passes.
-fn piece(start_time: u64, from_mm: f32, to_mm: f32, duration: f32) -> PieceEntry {
-    let mut entry = PieceEntry::zeroed();
-    entry.start_time = start_time;
-    entry.duration = duration;
-    entry.coeff_count = 2;
-    entry.coeffs[0] = 0.5 * (from_mm + to_mm);
-    entry.coeffs[1] = 0.5 * (to_mm - from_mm);
-    entry
+/// One clocked view per call, chained so the shim's seam check passes. A view
+/// whose endpoints match is an explicit hold; anything else is a linear ramp
+/// the shim samples onto the microstep grid.
+fn span_on(
+    start_clock: u64,
+    from_mm: f64,
+    to_mm: f64,
+    secs: f64,
+    freq: f64,
+    motor_mask: u8,
+) -> ClockedMotorSpan {
+    let t_start = start_clock as f64 / freq;
+    let t_end = t_start + secs;
+    let is_hold = from_mm.to_bits() == to_mm.to_bits();
+    let axis = if is_hold {
+        ContinuousAxis::Hold {
+            position: from_mm,
+            t_start,
+            t_end,
+        }
+    } else {
+        ContinuousAxis::Spline(Arc::new(
+            nurbs::ScalarNurbs::try_new(
+                1,
+                vec![t_start, t_start, t_end, t_end],
+                vec![from_mm, to_mm],
+            )
+            .expect("a linear lane curve is valid"),
+        ))
+    };
+    let signal = MotorSpan::try_new(
+        Arc::from(vec![MotorGroup::Independent(MotorTerm {
+            source_axis: 0,
+            axis,
+            scale: 1.0,
+        })]),
+        t_start,
+        t_end,
+        motor_mask,
+        u32::MAX,
+        is_hold,
+    )
+    .expect("a single-term motor span is dispatchable");
+    ClockedMotorSpan::try_new(
+        Arc::new(signal),
+        t_start,
+        t_end,
+        t_start,
+        t_end,
+        start_clock as f64,
+        freq,
+    )
+    .expect("the projected view spans at least one clock")
 }
 
-fn axis_frame(pieces: Vec<PieceEntry>) -> AxisFrame {
-    frame_for_axis(0, pieces)
+fn reversing_spline_span(start_clock: u64) -> ClockedMotorSpan {
+    let t_start = start_clock as f64 / CYCLES_PER_SECOND;
+    let t_end = t_start + 0.01;
+    let curve = nurbs::ScalarNurbs::try_new(
+        3,
+        vec![
+            t_start, t_start, t_start, t_start, t_end, t_end, t_end, t_end,
+        ],
+        vec![0.0, 0.04, 0.04, 0.0],
+    )
+    .unwrap();
+    let signal = MotorSpan::try_new(
+        Arc::from([MotorGroup::Independent(MotorTerm {
+            source_axis: 0,
+            axis: ContinuousAxis::Spline(Arc::new(curve)),
+            scale: 1.0,
+        })]),
+        t_start,
+        t_end,
+        0,
+        u32::MAX,
+        false,
+    )
+    .unwrap();
+    ClockedMotorSpan::try_new(
+        Arc::new(signal),
+        t_start,
+        t_end,
+        t_start,
+        t_end,
+        start_clock as f64,
+        CYCLES_PER_SECOND,
+    )
+    .unwrap()
 }
 
-fn frame_for_axis(axis: u8, pieces: Vec<PieceEntry>) -> AxisFrame {
+fn span(start_clock: u64, from_mm: f64, to_mm: f64, secs: f64) -> ClockedMotorSpan {
+    span_on(start_clock, from_mm, to_mm, secs, CYCLES_PER_SECOND, 0)
+}
+
+fn hold_span(start_clock: u64, at_mm: f64, secs: f64, freq: f64) -> ClockedMotorSpan {
+    span_on(start_clock, at_mm, at_mm, secs, freq, 0)
+}
+
+/// The same views re-signed with a motor mask: the mask selects which motors
+/// of a grouped axis a view actually drives.
+fn masked(spans: Vec<ClockedMotorSpan>, motor_mask: u8) -> Vec<ClockedMotorSpan> {
+    spans
+        .into_iter()
+        .map(|view| {
+            let signal = MotorSpan::try_new(
+                Arc::clone(&view.signal.groups),
+                view.signal.t_start,
+                view.signal.t_end,
+                motor_mask,
+                view.signal.source_line,
+                view.signal.is_explicit_hold,
+            )
+            .expect("re-signing a valid span keeps it dispatchable");
+            ClockedMotorSpan::try_new(
+                Arc::new(signal),
+                view.stream_t_start,
+                view.stream_t_end,
+                view.start_host,
+                view.end_host,
+                view.start_clock_exact,
+                view.clock_freq_hz,
+            )
+            .expect("re-signing a valid view keeps its clock range")
+        })
+        .collect()
+}
+
+fn span_end_mm(view: &ClockedMotorSpan) -> f64 {
+    view.signal
+        .position(view.stream_t_end)
+        .expect("a staged view evaluates at its own end")
+}
+
+fn axis_frame(spans: Vec<ClockedMotorSpan>) -> AxisFrame {
+    frame_for_axis(0, spans)
+}
+
+fn frame_for_axis(axis: u8, spans: Vec<ClockedMotorSpan>) -> AxisFrame {
     AxisFrame {
         axis,
-        pieces,
+        spans,
         new_head: 0,
         room: SHIM_RING_DEPTH,
         guard_recorded_ns: 0,
@@ -230,54 +380,90 @@ fn frame_for_axis(axis: u8, pieces: Vec<PieceEntry>) -> AxisFrame {
     }
 }
 
-/// Pieces whose speed changes every piece, so `compress` cannot merge them
-/// into one long move and the endpoint really has a queue of moves to pace.
-fn ramp(start_time: u64, count: usize) -> Vec<PieceEntry> {
-    ramp_from(start_time, count, 0.0)
-}
-
-fn ramp_from(start_time: u64, count: usize, start_mm: f32) -> Vec<PieceEntry> {
-    let dur = 0.002_f32;
-    let span = (f64::from(dur) * CYCLES_PER_SECOND) as u64;
+/// The positions a ramp of `count` views walks through, endpoints included.
+fn ramp_positions(count: usize, start_mm: f64, direction: f64) -> Vec<f64> {
     let mut at = start_mm;
+    let mut out = Vec::with_capacity(count + 1);
+    out.push(at);
+    for i in 0..count {
+        at += direction * 0.05 * (1 + (i % 4)) as f64;
+        out.push(at);
+    }
+    out
+}
+
+/// Views whose speed changes every view, so `compress` cannot merge them into
+/// one long move and the endpoint really has a queue of moves to pace.
+fn ramp(start_clock: u64, count: usize) -> Vec<ClockedMotorSpan> {
+    ramp_from(start_clock, count, 0.0)
+}
+
+fn ramp_from(start_clock: u64, count: usize, start_mm: f64) -> Vec<ClockedMotorSpan> {
+    epoch_ramp_from(start_clock, count, CYCLES_PER_SECOND, start_mm, 1.0)
+}
+
+/// [`ramp_from`] on an arbitrary epoch slope: a lane that resumed on its own
+/// re-anchored epoch carries views clocked with that epoch's freq, not the
+/// endpoint's live clock rate.
+fn epoch_ramp(start_clock: u64, count: usize, freq: f64) -> Vec<ClockedMotorSpan> {
+    epoch_ramp_from(start_clock, count, freq, 0.0, 1.0)
+}
+
+fn epoch_ramp_from(
+    start_clock: u64,
+    count: usize,
+    freq: f64,
+    start_mm: f64,
+    direction: f64,
+) -> Vec<ClockedMotorSpan> {
+    let secs = 0.002;
+    let stride = (secs * freq) as u64;
+    let positions = ramp_positions(count, start_mm, direction);
     (0..count)
         .map(|i| {
-            let from = at;
-            at += 0.05 * (1 + (i % 4)) as f32;
-            piece(start_time + span * i as u64, from, at, dur)
+            span_on(
+                start_clock + stride * i as u64,
+                positions[i],
+                positions[i + 1],
+                secs,
+                freq,
+                0,
+            )
         })
         .collect()
 }
 
-/// A straight constant-speed run from `from_mm` to `to_mm` split into
-/// `pieces` contiguous segments. The sampler quantizes positions to the
-/// microstep grid, so a run over an exact step multiple yields an exact step
-/// count.
-fn linear_run(start_time: u64, from_mm: f32, to_mm: f32, pieces: usize) -> Vec<PieceEntry> {
-    let dur = 0.01_f32;
-    let span = (f64::from(dur) * CYCLES_PER_SECOND) as u64;
-    let step_mm = (to_mm - from_mm) / pieces as f32;
-    (0..pieces)
+/// A straight constant-speed run from `from_mm` to `to_mm` split into `count`
+/// contiguous views. The shim samples positions onto the microstep grid, so a
+/// run over an exact step multiple yields an exact step count.
+fn linear_run(start_clock: u64, from_mm: f64, to_mm: f64, count: usize) -> Vec<ClockedMotorSpan> {
+    let secs = 0.01;
+    let stride = (secs * CYCLES_PER_SECOND) as u64;
+    let step_mm = (to_mm - from_mm) / count as f64;
+    (0..count)
         .map(|i| {
-            let from = from_mm + step_mm * i as f32;
-            piece(start_time + span * i as u64, from, from + step_mm, dur)
+            let from = from_mm + step_mm * i as f64;
+            span(start_clock + stride * i as u64, from, from + step_mm, secs)
         })
         .collect()
 }
 
-/// A ramp whose pieces are long enough that a few in-flight moves buffer more
+/// A ramp whose views are long enough that a few in-flight moves buffer more
 /// mcu time than the budget tests advance the clock per tick. `ramp`'s 2 ms
-/// pieces cannot: four slots hold 8 ms of motion, so a 10 ms tick leaves the
+/// views cannot: four slots hold 8 ms of motion, so a 10 ms tick leaves the
 /// backlog head behind the mcu clock — a pipe no host could deliver through.
-fn paceable_ramp(start_time: u64, count: usize) -> Vec<PieceEntry> {
-    let dur = 0.02_f32;
-    let span = (f64::from(dur) * CYCLES_PER_SECOND) as u64;
-    let mut at = 0.0_f32;
+fn paceable_ramp(start_clock: u64, count: usize) -> Vec<ClockedMotorSpan> {
+    let secs = 0.02;
+    let stride = (secs * CYCLES_PER_SECOND) as u64;
+    let positions = ramp_positions(count, 0.0, 1.0);
     (0..count)
         .map(|i| {
-            let from = at;
-            at += 0.05 * (1 + (i % 4)) as f32;
-            piece(start_time + span * i as u64, from, at, dur)
+            span(
+                start_clock + stride * i as u64,
+                positions[i],
+                positions[i + 1],
+                secs,
+            )
         })
         .collect()
 }
@@ -331,6 +517,28 @@ fn grouped_axis_fans_out_to_every_motor_and_publishes_one_axis_credit() {
 }
 
 #[test]
+fn one_view_preserves_crossings_after_an_internal_direction_reversal() {
+    let mut h = harness(BUDGET);
+    h.now.store(1_000, Ordering::Relaxed);
+
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(vec![reversing_spline_span(2_000)])])
+        .unwrap();
+
+    let steps: u32 = h
+        .sent
+        .lock_ok()
+        .iter()
+        .map(|frame| match frame {
+            StepFrame::QueueStep { count, .. } => u32::from(*count),
+            _ => 0,
+        })
+        .sum();
+    assert_eq!(steps, 6);
+    assert_eq!(h.endpoint.shim.commanded_steps(0), 0);
+}
+
+#[test]
 fn a_reseeded_grouped_axis_still_steps_every_motor() {
     let mut h = harness_axes(16, vec![0, 0], vec![7, 8]);
     h.now.store(1_000, Ordering::Relaxed);
@@ -377,12 +585,9 @@ fn a_transport_reseed_reaches_every_motor_of_a_grouped_axis() {
 fn selected_motor_frame_advances_grouped_axis_credit() {
     let mut h = harness_axes(16, vec![0, 0], vec![7, 8]);
     h.now.store(1_000, Ordering::Relaxed);
-    let mut pieces = linear_run(2_000, 0.0, 0.2, 2);
-    for piece in &mut pieces {
-        piece.motor_mask = 0b0000_0001;
-    }
+    let spans = masked(linear_run(2_000, 0.0, 0.2, 2), 0b0000_0001);
     h.endpoint
-        .send_frames(MCU_ID, &[axis_frame(pieces)])
+        .send_frames(MCU_ID, &[axis_frame(spans)])
         .unwrap();
 
     let heartbeat = h
@@ -497,19 +702,19 @@ fn barriers_hold_move_slots_until_the_mcu_loads_them() {
 }
 
 #[test]
-fn retirement_only_counts_fully_sent_pieces_and_never_regresses() {
+fn retirement_only_counts_fully_sent_views_and_never_regresses() {
     let mut h = harness(BUDGET);
     h.now.store(1_000, Ordering::Relaxed);
     h.endpoint
         .send_frames(MCU_ID, &[axis_frame(paceable_ramp(2_000, 12))])
         .unwrap();
 
-    let shim_retired = h.endpoint.shim.retired_counts();
+    let shim_consumed = h.endpoint.shim.consumed_counts();
     let published = h.latest_retired().expect("a heartbeat is always posted");
     assert!(
-        published[0] < shim_retired[0],
+        published[0] < shim_consumed[0],
         "retirement must lag the shim while frames are still unsent ({published:?} vs \
-         {shim_retired:?})"
+         {shim_consumed:?})"
     );
 
     let mut last = published[0];
@@ -529,7 +734,7 @@ fn retirement_only_counts_fully_sent_pieces_and_never_regresses() {
     assert!(h.endpoint.backlog.is_empty(), "backlog must drain");
     assert_eq!(
         last,
-        h.endpoint.shim.retired_counts()[0],
+        h.endpoint.shim.consumed_counts()[0],
         "once everything is sent, retirement must catch up to the shim"
     );
 }
@@ -808,7 +1013,7 @@ fn abort_outbound_discards_unsent_frames() {
 }
 
 #[test]
-fn an_unmarked_overlap_is_a_loud_piece_gap() {
+fn an_unmarked_overlap_is_a_loud_span_gap() {
     let mut h = harness(1024);
     h.now.store(1_000, Ordering::Relaxed);
     h.endpoint
@@ -818,8 +1023,8 @@ fn an_unmarked_overlap_is_a_loud_piece_gap() {
     let gap = h
         .endpoint
         .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
-        .expect_err("an unmarked overlap is a loud PieceGap");
-    assert!(format!("{gap:?}").contains("PieceGap"), "{gap:?}");
+        .expect_err("an unmarked overlap is a loud SpanGap");
+    assert!(format!("{gap:?}").contains("SpanGap"), "{gap:?}");
 }
 
 #[test]
@@ -899,9 +1104,9 @@ fn a_sent_cut_count_mismatch_is_fatal() {
 /// A second idle-resume may be marked while a sent-frame cut still awaits its
 /// barrier ack (the QGL probe cadence on a real transport): its frames are
 /// swallowed into the pending cut's `held` run together with the first
-/// resume's pieces, with an idle hole between them. Completing the cut must
+/// resume's views, with an idle hole between them. Completing the cut must
 /// replay `held` through the pending-seam ladder — validating it as one
-/// contiguous fresh stream is the bench `PieceGap` fatal.
+/// contiguous fresh stream is the bench `SpanGap` fatal.
 #[test]
 fn a_resume_marked_while_a_cut_awaits_its_ack_replays_through_its_own_seam() {
     let mut h = harness(1024);
@@ -924,7 +1129,7 @@ fn a_resume_marked_while_a_cut_awaits_its_ack_replays_through_its_own_seam() {
     assert_eq!(
         h.endpoint.pending_cuts[&0].held.len(),
         16,
-        "both resumes' pieces ride the pending cut"
+        "both resumes' views ride the pending cut"
     );
 
     let expected = h.endpoint.pending_cuts[&0].expected_count;
@@ -1023,7 +1228,7 @@ fn an_unsent_only_cut_does_not_query_the_mcu() {
 }
 
 #[test]
-fn a_bundle_spanning_the_epoch_boundary_is_cut_at_the_marked_piece() {
+fn a_bundle_spanning_the_epoch_boundary_is_cut_at_the_marked_view() {
     let mut h = harness(1024);
     h.now.store(1_000, Ordering::Relaxed);
     h.endpoint
@@ -1042,9 +1247,9 @@ fn a_bundle_spanning_the_epoch_boundary_is_cut_at_the_marked_piece() {
 #[test]
 fn two_marked_gaps_in_one_buffered_stretch_both_apply_in_order() {
     // Two dwells inside one buffered stream (G4 G4, or stepper-enable
-    // stalls) mark two seam gaps before any of their pieces reach the
+    // stalls) mark two seam gaps before any of their views reach the
     // endpoint. Both must survive queued — a single-slot mark would drop
-    // the first seam and die on its PieceGap.
+    // the first seam and die on its SpanGap.
     let mut h = harness(1024);
     h.now.store(1_000, Ordering::Relaxed);
     h.endpoint
@@ -1113,7 +1318,7 @@ fn a_seam_gap_cannot_sanction_a_backward_overlap() {
         .endpoint
         .send_frames(MCU_ID, &[axis_frame(ramp_from(40_000, 4, 5.0))])
         .expect_err("a backward jump is an overlap, not a gap");
-    assert!(format!("{err:?}").contains("PieceGap"), "{err:?}");
+    assert!(format!("{err:?}").contains("SpanGap"), "{err:?}");
 }
 
 #[test]
@@ -1148,7 +1353,7 @@ fn a_mark_that_never_matches_leaves_the_stream_alone() {
         .unwrap();
     h.endpoint
         .send_frames(MCU_ID, &[axis_frame(ramp_from(18_000, 8, 1.0))])
-        .expect("contiguous pieces still flow with an unmatched mark outstanding");
+        .expect("contiguous views still flow with an unmatched mark outstanding");
 }
 #[test]
 fn reset_position_drops_the_stale_stream_and_re_emits_a_step_clock_reset() {
@@ -1170,7 +1375,7 @@ fn reset_position_drops_the_stale_stream_and_re_emits_a_step_clock_reset() {
     assert_eq!(
         h.latest_retired(),
         Some(vec![40]),
-        "aborted pieces must retire immediately so a position reseed can drain"
+        "aborted views must retire immediately so a position reseed can drain"
     );
 
     h.sent.lock_ok().clear();
@@ -1186,7 +1391,7 @@ fn reset_position_drops_the_stale_stream_and_re_emits_a_step_clock_reset() {
     );
 }
 #[test]
-fn abort_axes_retires_flushed_pieces_immediately() {
+fn abort_axes_retires_flushed_views_immediately() {
     let mut h = harness(BUDGET);
     h.now.store(1_000, Ordering::Relaxed);
     h.endpoint
@@ -1228,10 +1433,9 @@ fn stepcompress_cfg(move_queue_slots: u32) -> McuAxisConfig {
         ethercat: false,
         lane_kinds: vec![LaneKind::Pulse],
         motor_counts: vec![1],
-        microstep_distance: vec![0.01],
+        microstep_distance: vec![MICROSTEP],
         invert_dir: vec![false],
         stepper_oids: vec![OID],
-        stepcompress_sample_rate: 20_000.0,
         move_queue_slots,
         step_pulse_seconds: vec![2e-6],
         stepcompress_encoders: vec![StepcompressEncoder::Classic],
@@ -1354,10 +1558,10 @@ fn queue_step_span_matches_the_mcu_stepper_loop() {
 fn ticks_alone_carry_a_finished_stream_to_full_retirement() {
     let mut h = harness(1024);
     h.now.store(1_000, Ordering::Relaxed);
-    let pieces = ramp(2_000, 10);
+    let spans = ramp(2_000, 10);
     let last_end = 2_000 + 2_000 * 10;
     h.endpoint
-        .send_frames(MCU_ID, &[axis_frame(pieces)])
+        .send_frames(MCU_ID, &[axis_frame(spans)])
         .unwrap();
 
     let mut now = 1_000_u64;
@@ -1371,9 +1575,9 @@ fn ticks_alone_carry_a_finished_stream_to_full_retirement() {
     assert_eq!(
         h.latest_retired().expect("ticks post heartbeats"),
         vec![10],
-        "every pushed piece must retire once the clock passes the stream end"
+        "every pushed view must retire once the clock passes the stream end"
     );
-    assert_eq!(h.endpoint.shim.queued_pieces(), 0);
+    assert_eq!(h.endpoint.shim.queued_spans(), 0);
 }
 
 #[test]
@@ -1650,33 +1854,28 @@ fn a_barrier_ack_for_an_unknown_oid_is_fatal() {
 }
 
 #[test]
-fn the_seam_basis_is_the_slope_the_shim_will_hold_when_the_pieces_land() {
-    let mut h = harness(1024);
-    let basis = h.endpoint.seam_basis(0).expect("axis 0 is configured");
-    assert_eq!(basis.freq, CYCLES_PER_SECOND);
-    assert_eq!(
-        basis.skew_budget_cycles,
-        step_shim::MAX_SEAM_SKEW_CYCLES / 2,
-        "a duration rewrite may spend at most half the seam tolerance, so the shim's check \
-         still has room to catch a real break"
-    );
-
+fn views_staged_after_a_mark_must_carry_the_incoming_epoch_slope() {
     const EPOCH_FREQ: f64 = CYCLES_PER_SECOND * 1.000_002;
-    h.endpoint.mark_reanchor(0, 9_000, Some(EPOCH_FREQ));
+    let mut h = harness(1024);
     assert_eq!(
-        h.endpoint.seam_basis(0).unwrap().freq,
-        EPOCH_FREQ,
-        "pieces staged after a mark belong to the incoming epoch and must be merged on its slope"
+        h.endpoint.shim.motor_cycles_per_second(0),
+        CYCLES_PER_SECOND
     );
 
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint.mark_reanchor(0, 2_000, Some(EPOCH_FREQ));
+    let err = h
+        .endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 4))])
+        .expect_err("views clocked on the outgoing slope belong to the previous epoch");
     assert!(
-        h.endpoint.seam_basis(1).is_none(),
-        "an axis this endpoint does not carry has no seam here"
+        format!("{err:?}").contains("SpanFrequencyMismatch"),
+        "{err:?}"
     );
 }
 
 #[test]
-fn a_cut_moves_the_seam_basis_onto_the_adopted_epoch_slope() {
+fn a_cut_moves_the_motor_onto_the_adopted_epoch_slope() {
     const EPOCH_FREQ: f64 = CYCLES_PER_SECOND * 1.000_002;
     let mut h = harness(1024);
     h.now.store(1_000, Ordering::Relaxed);
@@ -1685,12 +1884,15 @@ fn a_cut_moves_the_seam_basis_onto_the_adopted_epoch_slope() {
         .unwrap();
     h.endpoint.mark_reanchor(0, 50_000, Some(EPOCH_FREQ));
     h.endpoint
-        .send_frames(MCU_ID, &[axis_frame(ramp_from(50_000, 4, 1.0))])
+        .send_frames(
+            MCU_ID,
+            &[axis_frame(epoch_ramp_from(50_000, 4, EPOCH_FREQ, 1.0, 1.0))],
+        )
         .unwrap();
     assert_eq!(
-        h.endpoint.seam_basis(0).unwrap().freq,
+        h.endpoint.shim.motor_cycles_per_second(0),
         EPOCH_FREQ,
-        "the shim adopted the epoch slope at the cut; the basis reports it without the mark"
+        "the shim adopted the epoch slope at the cut"
     );
 }
 
@@ -1700,21 +1902,22 @@ fn a_cut_moves_the_seam_basis_onto_the_adopted_epoch_slope() {
 /// retiring and barrier-acking exactly as before the re-anchor.
 #[test]
 fn a_lane_parked_past_the_encoder_window_re_anchors_mid_stream() {
-    #[allow(clippy::cast_possible_truncation)]
-    let cps = CYCLES_PER_SECOND as f32;
-    let hold_secs = (step_shim::compress::CLOCK_DIFF_MAX as f32 / cps).ceil() + 60.0;
+    let hold_secs = (step_shim::compress::CLOCK_DIFF_MAX as f64 / CYCLES_PER_SECOND).ceil() + 60.0;
     let mut h = harness(1024);
     h.now.store(1_000, Ordering::Relaxed);
 
-    let lift = piece(2_000, 0.0, 1.0, 0.010);
-    let hold = piece(lift.end_time(cps), 1.0, 1.0, hold_secs);
-    let resume = piece(hold.end_time(cps), 1.0, 2.0, 0.010);
-    let end = resume.end_time(cps);
+    let lift = span(2_000, 0.0, 1.0, 0.010);
+    let hold = span(lift.end_clock, 1.0, 1.0, hold_secs);
+    let resume = span(hold.end_clock, 1.0, 2.0, 0.010);
+    let end = resume.end_clock;
     h.endpoint
-        .send_frames(MCU_ID, &[axis_frame(vec![lift, hold, resume])])
+        .send_frames(
+            MCU_ID,
+            &[axis_frame(vec![lift.clone(), hold.clone(), resume.clone()])],
+        )
         .unwrap();
 
-    for now in [lift.end_time(cps), hold.end_time(cps), end + 1_000_000] {
+    for now in [lift.end_clock, hold.end_clock, end + 1_000_000] {
         h.now.store(now, Ordering::Relaxed);
         h.endpoint.tick().unwrap();
         h.ack_sent_barriers();
@@ -1737,13 +1940,13 @@ fn a_lane_parked_past_the_encoder_window_re_anchors_mid_stream() {
         2,
         "the parked lane must be re-anchored exactly once: {resets:?}"
     );
-    let sample_period = (CYCLES_PER_SECOND / 10_000.0) as u64;
     assert!(
-        resets[1] >= resume.start_time && resets[1] < resume.start_time + 2 * sample_period,
+        resets[1] >= resume.start_clock
+            && resets[1] < resume.start_clock + RESUME_ANCHOR_SLACK_CYCLES,
         "the re-anchor must land at the first step of the resuming move, not at \
          some stale cursor: anchor {}, move starts {}",
         resets[1],
-        resume.start_time
+        resume.start_clock
     );
     let steps: u32 = sent
         .iter()
@@ -1818,16 +2021,7 @@ fn the_mcu_horizon_admits_the_endpoints_full_send_lead() {
 /// fire on a wrong host record, never on healthy pacing.
 #[test]
 fn no_emitted_step_clock_leaves_the_mcu_sync_horizon() {
-    let dur = 0.020_f32;
-    let span = (f64::from(dur) * CYCLES_PER_SECOND) as u64;
-    let mut at = 0.0_f32;
-    let slow_ramp: Vec<PieceEntry> = (0..48)
-        .map(|i| {
-            let from = at;
-            at += 0.05 * (1 + (i % 4)) as f32;
-            piece(2_000 + span * i as u64, from, at, dur)
-        })
-        .collect();
+    let slow_ramp = paceable_ramp(2_000, 48);
     let mut h = harness(64);
     h.now.store(1_000, Ordering::Relaxed);
     h.endpoint
@@ -1907,7 +2101,7 @@ fn four_motor_harness() -> (Harness, Vec<u32>) {
 
 /// Drive one retirement cohort across all four lanes and return the barriers
 /// the endpoint put on the wire for it.
-fn run_cohort(h: &mut Harness, start: u64, from_mm: f32) -> Vec<(u32, u32)> {
+fn run_cohort(h: &mut Harness, start: u64, from_mm: f64) -> Vec<(u32, u32)> {
     h.now.store(start.saturating_sub(1_000), Ordering::Relaxed);
     h.endpoint
         .send_frames(
@@ -1930,7 +2124,7 @@ fn every_cohort_addresses_each_oid_with_exactly_one_barrier() {
     let (mut h, oids) = four_motor_harness();
     let mut all = Vec::new();
     let mut start = 2_000u64;
-    let mut from_mm = 0.0_f32;
+    let mut from_mm = 0.0_f64;
     for cohort in 0..3 {
         let issued = run_cohort(&mut h, start, from_mm);
         assert_eq!(
@@ -2042,41 +2236,6 @@ fn a_lost_barrier_ack_trips_the_deadline_instead_of_waiting_forever() {
     );
 }
 
-fn hold_piece(start_time: u64, at_mm: f32, secs: f32) -> PieceEntry {
-    let mut entry = PieceEntry::zeroed();
-    entry.start_time = start_time;
-    entry.duration = secs;
-    entry.coeff_count = 1;
-    entry.coeffs[0] = at_mm;
-    entry
-}
-
-/// [`ramp_from`] on an arbitrary epoch slope: a lane that resumed on its own
-/// re-anchored epoch carries piece spans measured with that epoch's freq, not
-/// the endpoint's live clock rate.
-fn epoch_ramp(start_time: u64, count: usize, freq: f64) -> Vec<PieceEntry> {
-    epoch_ramp_from(start_time, count, freq, 0.0, 1.0)
-}
-
-fn epoch_ramp_from(
-    start_time: u64,
-    count: usize,
-    freq: f64,
-    start_mm: f32,
-    direction: f32,
-) -> Vec<PieceEntry> {
-    let dur = 0.002_f32;
-    let span = (f64::from(dur) * freq) as u64;
-    let mut at = start_mm;
-    (0..count)
-        .map(|i| {
-            let from = at;
-            at += direction * 0.05 * (1 + (i % 4)) as f32;
-            piece(start_time + span * i as u64, from, at, dur)
-        })
-        .collect()
-}
-
 /// The pacer used to only log a fatal tick, so a frame the egress guard
 /// refused was retried every 10 ms forever: the backlog froze, the retirement
 /// cohort never released and klippy's `wait_moves` hung with the hotend parked
@@ -2170,7 +2329,7 @@ fn the_pacer_stops_ticking_an_endpoint_that_went_fatal() {
 #[test]
 fn a_lane_that_holds_before_it_steps_resumes_on_a_punctual_reset() {
     const EPOCH_FREQ: f64 = CYCLES_PER_SECOND * 1.000_002;
-    const HOLD_SECS: f32 = 5.0;
+    const HOLD_SECS: f64 = 5.0;
     let anchor = 10_000_000_u64;
     let anchor_lead = (0.5 * CYCLES_PER_SECOND) as u64;
     let send_lead = (SEND_LEAD_SECONDS * CYCLES_PER_SECOND) as u64;
@@ -2180,13 +2339,12 @@ fn a_lane_that_holds_before_it_steps_resumes_on_a_punctual_reset() {
     h.now.store(anchor - anchor_lead, Ordering::Relaxed);
     h.endpoint.mark_reanchor(0, anchor, Some(EPOCH_FREQ));
 
-    let hold = hold_piece(anchor, 0.0, HOLD_SECS);
-    #[allow(clippy::cast_possible_truncation)]
-    let motion_start = hold.end_time(EPOCH_FREQ as f32);
-    let mut pieces = vec![hold];
-    pieces.extend(epoch_ramp(motion_start, 8, EPOCH_FREQ));
+    let hold = hold_span(anchor, 0.0, HOLD_SECS, EPOCH_FREQ);
+    let motion_start = hold.end_clock;
+    let mut spans = vec![hold];
+    spans.extend(epoch_ramp(motion_start, 8, EPOCH_FREQ));
     h.endpoint
-        .send_frames(MCU_ID, &[axis_frame(pieces)])
+        .send_frames(MCU_ID, &[axis_frame(spans)])
         .expect("a marked fresh epoch may start at any clock");
 
     let mut emitted = None;
@@ -2227,7 +2385,7 @@ fn a_lane_that_holds_before_it_steps_resumes_on_a_punctual_reset() {
 #[test]
 fn a_lane_that_reverses_after_a_hold_times_its_dir_frame_by_the_step_it_heads() {
     const EPOCH_FREQ: f64 = CYCLES_PER_SECOND * 1.000_002;
-    const HOLD_SECS: f32 = 5.0;
+    const HOLD_SECS: f64 = 5.0;
     const RISE: usize = 6;
     let anchor = 10_000_000_u64;
     let anchor_lead = (0.5 * CYCLES_PER_SECOND) as u64;
@@ -2237,15 +2395,13 @@ fn a_lane_that_reverses_after_a_hold_times_its_dir_frame_by_the_step_it_heads() 
     h.now.store(anchor - anchor_lead, Ordering::Relaxed);
     h.endpoint.mark_reanchor(0, anchor, Some(EPOCH_FREQ));
 
-    let mut pieces = epoch_ramp(anchor, RISE, EPOCH_FREQ);
-    let top_mm = pieces.last().map(|p| p.coeffs[0] + p.coeffs[1]).unwrap();
-    #[allow(clippy::cast_possible_truncation)]
-    let hold_start = pieces.last().unwrap().end_time(EPOCH_FREQ as f32);
-    let hold = hold_piece(hold_start, top_mm, HOLD_SECS);
-    #[allow(clippy::cast_possible_truncation)]
-    let resume_start = hold.end_time(EPOCH_FREQ as f32);
-    pieces.push(hold);
-    pieces.extend(epoch_ramp_from(
+    let mut spans = epoch_ramp(anchor, RISE, EPOCH_FREQ);
+    let top_mm = span_end_mm(spans.last().expect("the rise carries views"));
+    let hold_start = spans.last().expect("the rise carries views").end_clock;
+    let hold = hold_span(hold_start, top_mm, HOLD_SECS, EPOCH_FREQ);
+    let resume_start = hold.end_clock;
+    spans.push(hold);
+    spans.extend(epoch_ramp_from(
         resume_start,
         RISE,
         EPOCH_FREQ,
@@ -2253,7 +2409,7 @@ fn a_lane_that_reverses_after_a_hold_times_its_dir_frame_by_the_step_it_heads() 
         -1.0,
     ));
     h.endpoint
-        .send_frames(MCU_ID, &[axis_frame(pieces)])
+        .send_frames(MCU_ID, &[axis_frame(spans)])
         .expect("a marked fresh epoch may start at any clock");
 
     let mut reversed_at = None;
@@ -2365,12 +2521,12 @@ fn a_cut_barrier_that_never_reaches_the_wire_trips_the_deadline() {
         h.endpoint.pending_cuts.contains_key(&0),
         "the seam falls inside sent frames, so the cut must reconcile"
     );
-    let queued_clock = h
+    let eligible_clock = h
         .endpoint
         .backlog
         .iter()
         .find_map(|out| match out.frame {
-            Outbound::Barrier(_) => Some(out.queued_clock),
+            Outbound::Barrier(_) => Some(out.queued_clock.max(out.start_clock)),
             Outbound::Step(_) => None,
         })
         .expect("the saturated budget holds the cut barrier in the backlog");
@@ -2379,17 +2535,14 @@ fn a_cut_barrier_that_never_reaches_the_wire_trips_the_deadline() {
         "the barrier must not have reached the wire"
     );
 
-    h.now
-        .store(queued_clock + deadline_ticks - 1, Ordering::Relaxed);
+    let before_deadline = eligible_clock + deadline_ticks - 1;
     h.endpoint
-        .tick()
+        .check_barrier_deadline(before_deadline, CYCLES_PER_SECOND)
         .expect("inside the deadline a backlogged barrier is merely waiting on a slot");
 
-    h.now
-        .store(queued_clock + deadline_ticks, Ordering::Relaxed);
     let err = h
         .endpoint
-        .tick()
+        .check_barrier_deadline(eligible_clock + deadline_ticks, CYCLES_PER_SECOND)
         .expect_err("a barrier that never reaches the wire must not park the lane forever");
     let SendError::Fatal(message) = err else {
         panic!("a wedged cut is unrecoverable: {err:?}");
@@ -2401,8 +2554,9 @@ fn a_cut_barrier_that_never_reaches_the_wire_trips_the_deadline() {
 #[test]
 fn host_buzz_returns_to_base_without_advancing_retirement() {
     let mut h = harness(1024);
+    let profile = buzz_profile(50_000, 50_000, 100_000, 20, 2);
     h.endpoint
-        .arm_buzz(0b001, 0, 50_000, 50_000, 100_000, 20, 2)
+        .arm_buzz(0b001, 0, &profile, buzz_start(&h))
         .expect("idle pulse lane accepts a buzz");
     for tick in 1..=20 {
         h.now
@@ -2412,7 +2566,9 @@ fn host_buzz_returns_to_base_without_advancing_retirement() {
     assert!(h.endpoint.buzz.is_none());
     assert_eq!(h.endpoint.shim.commanded_steps(0), 0);
     assert!(h.sent_moves() > 0);
-    let (_, retired) = h.endpoint.counts_by_axis(&h.endpoint.shim.retired_counts());
+    let (_, retired) = h
+        .endpoint
+        .counts_by_axis(&h.endpoint.shim.consumed_counts());
     assert_eq!(retired, vec![0]);
 }
 
@@ -2420,22 +2576,28 @@ fn host_buzz_returns_to_base_without_advancing_retirement() {
 fn host_buzz_anchors_to_the_sampled_position_not_quantized_steps() {
     let mut h = harness(1024);
     h.endpoint
-        .shim
-        .push_pieces(0, &[piece(100_000, 0.0, 0.004, 0.01)])
+        .send_frames(MCU_ID, &[axis_frame(vec![span(100_000, 0.0, 0.004, 0.01)])])
         .expect("stage a sub-step move");
-    assert!(
-        h.endpoint
-            .shim
-            .drain(u64::MAX)
-            .expect("sample the sub-step move")
-            .is_empty()
-    );
+    h.now.store(2 * CYCLES_PER_SECOND as u64, Ordering::Relaxed);
+    h.endpoint.tick().expect("drain the sub-step move");
+    h.ack_sent_barriers();
     assert_eq!(h.endpoint.shim.commanded_steps(0), 0);
+    assert_eq!(h.endpoint.shim.queued_spans(), 0);
+    let profile = buzz_profile(70_000, 230_000, 23_500, 6, 1);
     h.endpoint
-        .arm_buzz(0b001, 0, 70_000, 230_000, 23_500, 6, 1)
+        .arm_buzz(0b001, 0, &profile, buzz_start(&h))
         .expect("idle lane accepts the chirp");
-    let base = h.endpoint.buzz.as_ref().expect("armed buzz").bases[0];
-    assert!((base - 0.004).abs() < f32::EPSILON);
+    let signal = h.endpoint.buzz.as_ref().expect("armed buzz").signals[0]
+        .as_ref()
+        .expect("the driven motor carries a buzz signal");
+    let base = signal
+        .position(signal.t_start)
+        .expect("the buzz signal evaluates at its own start");
+    assert!((base - 0.004).abs() < 1e-12);
+    let end = signal
+        .position(signal.t_end)
+        .expect("the buzz signal evaluates at its own end");
+    assert!((end - 0.004).abs() < 1e-12);
 }
 
 #[test]
@@ -2443,11 +2605,12 @@ fn host_buzz_rejects_a_lane_with_queued_trajectory() {
     let mut h = harness(1024);
     h.endpoint
         .shim
-        .push_pieces(0, &[piece(100_000, 0.0, 1.0, 0.01)])
+        .push_spans(0, &[span(100_000, 0.0, 1.0, 0.01)])
         .expect("stage trajectory");
+    let profile = buzz_profile(50_000, 50_000, 100_000, 20, 2);
     let error = h
         .endpoint
-        .arm_buzz(0b001, 0, 50_000, 50_000, 100_000, 20, 2)
+        .arm_buzz(0b001, 0, &profile, buzz_start(&h))
         .expect_err("queued trajectory must reject a buzz");
     assert!(error.to_string().contains("trajectory remains queued"));
 }

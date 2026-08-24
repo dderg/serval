@@ -287,9 +287,17 @@ class EndstopPulser:
     """Cycles endstop GPIO lines low/high so a homing move always sees a
     trigger within ~1s and a clear retract window, mimicking a switch."""
 
-    def __init__(self, control: SimControl, endstop_pins: list):
+    def __init__(
+        self,
+        control: SimControl,
+        endstop_pins: list,
+        initial_delay: float = 0.5,
+        low_duration: float = 1.0,
+    ):
         self.control = control
         self.endstop_pins = endstop_pins
+        self.initial_delay = initial_delay
+        self.low_duration = low_duration
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -307,11 +315,11 @@ class EndstopPulser:
 
     def _run(self):
         # The MCU must be fully up before GPIO commands stick.
-        time.sleep(0.5)
+        time.sleep(self.initial_delay)
         while not self._stop.is_set():
             for chip, line in self.endstop_pins:
                 self.control.set_gpio_input(chip, line, 0)
-            if self._stop.wait(1.0):
+            if self._stop.wait(self.low_duration):
                 break
             for chip, line in self.endstop_pins:
                 self.control.set_gpio_input(chip, line, 1)

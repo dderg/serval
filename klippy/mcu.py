@@ -28,7 +28,6 @@ from .mcu_pins import (  # noqa: F401
 )
 
 STEPCOMPRESS_MAX_ERROR_DEFAULT = 0.000025
-STEPCOMPRESS_SAMPLE_RATE_HZ = 20000.0
 
 # Mirrors src/sample_wire.h / rust/runtime/src/sample_wire.rs. The wire
 # contract lives in one place per language and test_sample_wire.py asserts the
@@ -136,7 +135,6 @@ class MCU:
         self._init_event_handlers()
 
     def _init_stepcompress(self, config):
-        self._stepcompress_sample_rate = STEPCOMPRESS_SAMPLE_RATE_HZ
         max_error = config.getfloat(
             "stepcompress_max_error", STEPCOMPRESS_MAX_ERROR_DEFAULT
         )
@@ -147,9 +145,6 @@ class MCU:
                 % (config.get_name(), max_error)
             )
         self._stepcompress_max_error = max_error
-
-    def get_stepcompress_sample_rate(self):
-        return self._stepcompress_sample_rate
 
     def get_stepcompress_max_error(self):
         return self._stepcompress_max_error
