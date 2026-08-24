@@ -134,7 +134,7 @@ fn leader_velocity_sign_change_is_seeded_as_a_construction_breakpoint() {
     let raw = shaped.clone();
     let state = FollowerState::default();
     let sig = FollowerSignal::new(&shaped, &raw, 3, &[0, 1], &state, 0.0);
-    let breaks = sig.construction_breakpoints(&raw.axes[3]);
+    let breaks = sig.construction_breakpoints(&raw.axes[3]).fit_seeds;
     let vx = |t: f64| super::axis_pva(&shaped.axes[0], t).1;
     let seeded = breaks
         .iter()
@@ -158,7 +158,7 @@ fn endpoint_velocity_zero_dedups_against_the_support_grid() {
     let raw = shaped.clone();
     let state = FollowerState::default();
     let sig = FollowerSignal::new(&shaped, &raw, 3, &[0, 1], &state, 0.0);
-    let breaks = sig.construction_breakpoints(&raw.axes[3]);
+    let breaks = sig.construction_breakpoints(&raw.axes[3]).fit_seeds;
     assert_eq!(
         super::axis_pva(&shaped.axes[0], t0).1,
         0.0,

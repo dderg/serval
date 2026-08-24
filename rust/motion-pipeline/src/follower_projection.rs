@@ -135,27 +135,30 @@ pub(crate) fn project_followers(
                 "follower axis {axis} has no support in segment"
             );
             let base_position = state.e_end.unwrap_or_else(|| axis_pva(raw_axis, t_start).0);
-            let projected = if projecting {
-                let (track, s_end, e_end_relative) = {
+            let (projected, projected_cuts) = if projecting {
+                let (track, s_end, e_end_relative, semantic) = {
                     let sig = FollowerSignal::new(&frontier[i], raw, axis, leaders, &*state, 0.0);
                     let breakpoints = sig.construction_breakpoints(raw_axis);
                     let track = fit_axis_from_signal(
                         axis,
                         t_start,
                         t_end,
-                        &breakpoints,
+                        &breakpoints.fit_seeds,
                         &sig,
                         follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5),
                         "follower_source",
                     )?;
                     let e_end_relative = nurbs::eval::eval(&track.as_view(), t_end);
-                    (track, sig.s_end(), e_end_relative)
+                    (track, sig.s_end(), e_end_relative, breakpoints.semantic)
                 };
                 state.s_shaped = s_end;
                 state.e_end = Some(base_position + e_end_relative);
-                track
+                (track, Some(semantic))
             } else {
-                fit_continuous_axis(axis, raw_axis, base_position, t_start, t_end, fit_tol)?
+                (
+                    fit_continuous_axis(axis, raw_axis, base_position, t_start, t_end, fit_tol)?,
+                    None,
+                )
             };
             let track = apply_leading_stages(
                 chain,
@@ -170,6 +173,7 @@ pub(crate) fn project_followers(
                     t: raw.t_start,
                 });
             }
+            let semantic_cuts = projected_cuts.unwrap_or_else(|| piece_boundaries(&track));
             let track_start = nurbs::eval::eval(&track.as_view(), t_start);
             let output_base = state.projected_output_end.unwrap_or(base_position) - track_start;
             state.projected_output_end =
@@ -180,6 +184,7 @@ pub(crate) fn project_followers(
                 t_end,
                 base: output_base,
                 track,
+                semantic_cuts,
             });
         }
         let kernel_tracks = match kernel {
@@ -203,6 +208,7 @@ pub(crate) fn project_followers(
                     return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
                 }
                 let mut input_pieces = Vec::new();
+                let mut semantic_cuts = Vec::new();
                 let mut carried = 0.0;
                 let mut input_end = None;
                 for segment in &state.projected {
@@ -226,8 +232,12 @@ pub(crate) fn project_followers(
                     let tail = pieces.last().expect("a projected track has pieces");
                     carried = polynomial_pva(&tail.coeffs, tail.u_end - tail.u_start).0;
                     input_pieces.extend(pieces);
+                    semantic_cuts.extend_from_slice(&segment.semantic_cuts);
+                    semantic_cuts.extend([segment.t_start, segment.t_end]);
                     input_end = Some(segment.t_end);
                 }
+                semantic_cuts.sort_by(f64::total_cmp);
+                semantic_cuts.dedup();
                 for piece in &mut input_pieces {
                     piece.coeffs.resize(piece.coeffs.len().max(6), 0.0);
                 }
@@ -310,17 +320,22 @@ pub(crate) fn project_followers(
                     .with_piece_moments(kernel_degree),
                 );
                 let input_degree = table.max_degree();
-                let input_breaks = gained_pieces
+                let exact_input_breaks = gained_pieces
                     .iter()
                     .flat_map(|piece| [piece.u_start, piece.u_end])
                     .collect::<Vec<_>>();
-                let shaped_breaks = shaped_signal_breakpoints(kernel, &input_breaks);
+                let shaped_break_seeds = if gained_input {
+                    &exact_input_breaks
+                } else {
+                    &semantic_cuts
+                };
+                let shaped_breaks = shaped_signal_breakpoints(kernel, shaped_break_seeds);
                 let eval_table = Rc::clone(&table);
                 let moment_table = Rc::clone(&table);
                 let sig = ShapedSignal::new_from_polynomial_evaluator(
                     kernel,
                     move |t| eval_table.eval(t),
-                    input_breaks,
+                    exact_input_breaks,
                     input_degree,
                     move |lo, hi, degree, origin, moments| {
                         moment_table.integrate_moments(lo, hi, degree, origin, moments)
@@ -472,6 +487,16 @@ fn apply_leading_stages(
     Ok(track)
 }
 
+/// The convolution-relevant cuts of a projected follower source, split by
+/// role: `semantic` carries the discontinuities the shaped output inherits
+/// (raw axis knots, support grid, speed-zero slivers, ratio-span
+/// boundaries), `fit_seeds` adds the component velocity roots that only help
+/// the pre-kernel fit resolve the projected signal.
+struct FollowerBreakpoints {
+    semantic: Vec<f64>,
+    fit_seeds: Vec<f64>,
+}
+
 /// One raw segment's projected pre-kernel follower track, cached so the
 /// follower's own convolution windows read identical inputs on every emit.
 #[derive(Debug)]
@@ -480,6 +505,7 @@ struct ProjSeg {
     t_end: f64,
     base: f64,
     track: ScalarNurbs,
+    semantic_cuts: Vec<f64>,
 }
 
 /// One segment's stretch of path: shaped arc length `[s0, s1]` carrying a
@@ -1147,7 +1173,7 @@ impl<'a> FollowerSignal<'a> {
     fn s_end(&self) -> f64 {
         self.s_start + self.cumulative.last().copied().expect("cumulative seeded")
     }
-    fn construction_breakpoints(&self, raw_axis: &ContinuousAxis) -> Vec<f64> {
+    fn construction_breakpoints(&self, raw_axis: &ContinuousAxis) -> FollowerBreakpoints {
         let mut breaks = axis_breakpoints(raw_axis);
         breaks.extend_from_slice(&self.grid);
         let s_end = self.s_end();
@@ -1194,11 +1220,15 @@ impl<'a> FollowerSignal<'a> {
         }
         breaks.sort_by(f64::total_cmp);
         breaks.dedup_by(|left, right| (*left - *right).abs() <= GRID_DEDUP_EPS_S);
+        let semantic = breaks.clone();
         let zeros = self.velocity_component_zeros(&breaks, support_start, support_end);
         breaks.extend(zeros);
         breaks.sort_by(f64::total_cmp);
         breaks.dedup_by(|left, right| (*left - *right).abs() <= GRID_DEDUP_EPS_S);
-        breaks
+        FollowerBreakpoints {
+            semantic,
+            fit_seeds: breaks,
+        }
     }
 
     fn velocity_component_zeros(
@@ -1386,6 +1416,16 @@ fn localize_pieces(base: f64, pieces: &[BezierPiece]) -> Arc<[RelativeSplinePiec
         origin += travel;
     }
     Arc::from(out)
+}
+
+fn piece_boundaries(track: &ScalarNurbs) -> Vec<f64> {
+    let mut breaks = extract_bezier_pieces(track)
+        .iter()
+        .flat_map(|piece| [piece.u_start, piece.u_end])
+        .collect::<Vec<_>>();
+    breaks.sort_by(f64::total_cmp);
+    breaks.dedup();
+    breaks
 }
 
 fn piece_run_start(pieces: &[BezierPiece]) -> f64 {

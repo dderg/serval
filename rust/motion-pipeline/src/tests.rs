@@ -3072,10 +3072,38 @@ fn voron0_stream() -> (Vec<f64>, Vec<StreamInput>) {
         )
     };
     let items = vec![
-        mv(1, [60.0, 60.0, 20.0], [100.0, 100.0, 20.0], 0.0, 300.0, xy_limits),
-        mv(2, [100.0, 100.0, 20.0], [20.0, 100.0, 20.0], 0.0, 300.0, xy_limits),
-        mv(3, [20.0, 100.0, 20.0], [20.0, 100.0, 10.0], 0.0, 20.0, z_limits),
-        mv(4, [20.0, 100.0, 10.0], [60.0, 60.0, 10.0], 2.0, 100.0, xy_limits),
+        mv(
+            1,
+            [60.0, 60.0, 20.0],
+            [100.0, 100.0, 20.0],
+            0.0,
+            300.0,
+            xy_limits,
+        ),
+        mv(
+            2,
+            [100.0, 100.0, 20.0],
+            [20.0, 100.0, 20.0],
+            0.0,
+            300.0,
+            xy_limits,
+        ),
+        mv(
+            3,
+            [20.0, 100.0, 20.0],
+            [20.0, 100.0, 10.0],
+            0.0,
+            20.0,
+            z_limits,
+        ),
+        mv(
+            4,
+            [20.0, 100.0, 10.0],
+            [60.0, 60.0, 10.0],
+            2.0,
+            100.0,
+            xy_limits,
+        ),
         StreamInput::Drain,
     ];
     (vec![60.0, 60.0, 20.0, 0.0], items)
@@ -3174,34 +3202,80 @@ fn total_track_breakpoints(items: &[TrajectoryItem]) -> usize {
         .sum()
 }
 
+const KNOT_MERGE_S: f64 = 1e-9;
+const SAMPLABLE_GAP_S: f64 = 1e-6;
+
+/// Both arms' knot times inside one segment on one axis, plus interior
+/// samples strictly inside every gap wide enough to belong to one fitted
+/// piece in both arms.
+///
+/// Knots are where a refit first shows up. Position and velocity are
+/// continuous across a fitted piece boundary, so they are comparable at the
+/// knots themselves; acceleration steps there and `eval_axis` resolves a knot
+/// to one side of the step, so two arms that partition the column differently
+/// are only comparable on acceleration away from either partition's knots —
+/// hence the gap floor, three orders of magnitude above the merge radius and
+/// two below the fitted piece spacing this fixture produces.
+fn batching_comparison_times(
+    burst: &ContinuousSegment,
+    single: &ContinuousSegment,
+    axis: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    let mut knots = axis_breakpoints(&burst.axes[axis]).0;
+    knots.extend(axis_breakpoints(&single.axes[axis]).0);
+    knots.retain(|t| *t > burst.t_start && *t < burst.t_end);
+    knots.push(burst.t_start);
+    knots.push(burst.t_end);
+    knots.sort_by(f64::total_cmp);
+    knots.dedup_by(|later, earlier| *later - *earlier <= KNOT_MERGE_S);
+
+    let mut interior = Vec::with_capacity(3 * knots.len());
+    for pair in knots.windows(2) {
+        let gap = pair[1] - pair[0];
+        if gap > SAMPLABLE_GAP_S {
+            interior.extend([0.25, 0.5, 0.75].map(|fraction| pair[0] + gap * fraction));
+        }
+    }
+    (knots, interior)
+}
+
 /// Chunking the shaper's input must be a scheduling detail, never a semantic
 /// one: the burst driver and the one-item-at-a-time driver group the same
 /// lowered segments into different emit windows, and the trajectory they
-/// produce must have the same structure, the same sampled motion, and the
-/// same order of magnitude of fitted pieces.
+/// produce must have the same structure, the same motion, and the same
+/// fitted piece count on every axis.
 ///
-/// Piece count is asserted against a fixed budget rather than a recomputed
-/// expectation, so the test cannot drift with the fitter it guards. Batching
-/// is not free today, and the cost is not spread evenly: the leaders are
-/// exactly batch-invariant because the shaped-leader cache fits each segment
-/// once, while the projected follower costs ~2.8x more pieces one-at-a-time
-/// than bursted. The follower's post-kernel fit is the only stage without
-/// that cache — it reruns on every emit over the committed range alone, so a
-/// one-segment commit re-partitions what a wide column would have shared.
-/// The per-axis bound pins that attribution; the total bound trips on
-/// genuine multiplication.
+/// Motion is compared at the union of both arms' knot times plus interior
+/// samples: position everywhere, acceleration strictly inside the pieces both
+/// partitions share, since a fitted piece boundary is an acceleration step.
 ///
-/// The one-at-a-time arm is the production-representative one, not the
+/// The piece bound is per axis so a failure names the cache that broke. A
+/// leader axis spreading means the shaped-leader cache stopped being reused
+/// across emit windows; the follower axis spreading means its post-kernel
+/// fit is being redone over each committed prefix instead of reusing the
+/// already fitted target. The latter is what this test was written for: the
+/// follower cost 16_578 pieces bursted against 45_882 one-at-a-time, a 2.77x
+/// multiplication, while x and y were bit-identical at 1540 and 1296 and z
+/// spread 692 to 712 (2.9%) — measured before the Z column here was given
+/// the bench's own limits, which moves the counts but not the mechanism.
+///
+/// The one-at-a-time arm is the production-representative one, not a
 /// pessimistic one. The live pipeline runs `Shaper::run`, but segments
-/// trickle in rather than arriving pre-filled, so its real commit counts are
-/// a handful of segments: the sim-e2e run of the same voron0 sequence this
-/// fixture replays logs `follower_projection` taking 6.7 s at `commit = 4`
-/// and 3.3 s at `commit = 2`, pinning the shape thread at 100% until the
-/// producer falls behind playback and the stream dies on anchor underrun.
-/// So the budgets below are not headroom over a hypothetical worst case —
-/// they sit just under a cost that is already fatal on real hardware, and
-/// they must be tightened, never raised, once the follower's post-kernel fit
-/// spans the frontier column the way the leaders' already does.
+/// trickle in rather than arriving pre-filled, so its real commits are a
+/// handful of segments: the sim-e2e run of this very sequence logged
+/// `follower_projection` at 6.7 s for a 4-segment commit and 3.3 s for a
+/// 2-segment one, pinning the shape thread until playback outran the
+/// producer and the stream died on anchor underrun. Piece count is the
+/// cause; timing is not asserted here.
+///
+/// A relative spread bound alone is satisfied by both arms becoming equally
+/// expensive, so the follower axes also carry an absolute ceiling of 30_000
+/// pieces. That number sits between the two measured populations of this
+/// fixture: healthy and burst-driven follower fits ran 16_578-21_348 pieces,
+/// while the one-at-a-time refit pathology ran 45_882-50_670. A converged
+/// pair above the ceiling is a structural regression even when the two arms
+/// agree, and the failure names every axis so the counts identify which
+/// cache stopped being reused.
 #[test]
 fn voron0_shaper_output_is_independent_of_input_batching() {
     let config = voron0_config();
@@ -3247,17 +3321,35 @@ fn voron0_shaper_output_is_independent_of_input_batching() {
         );
     }
 
-    let budget = 4.0 * config.fit_tol_mm;
+    let pos_budget_mm = 4.0 * config.fit_tol_mm;
+    let accel_budget_mm_s2 = 4.0 * config.fit_tol_accel_mm_s2;
     for (i, (b, s)) in burst_segs.iter().zip(&single_segs).enumerate() {
         assert_eq!(b.axes.len(), s.axes.len(), "segment {i} axis count changed");
         for axis in 0..b.axes.len() {
-            for k in 0..=8 {
-                let t = b.t_start + (b.t_end - b.t_start) * f64::from(k) / 8.0;
-                let pb = eval_segment_axis(b, axis, t);
-                let ps = eval_segment_axis(s, axis, t);
+            let (knots, interior) = batching_comparison_times(b, s, axis);
+            for t in knots.iter().chain(&interior) {
+                let pb = b.eval_axis(axis, *t).expect("bursted axis evaluates");
+                let ps = s.eval_axis(axis, *t).expect("one-at-a-time axis evaluates");
                 assert!(
-                    (pb - ps).abs() <= budget,
-                    "segment {i} axis {axis} moved with batching at t={t}: {pb} vs {ps}"
+                    (pb.position - ps.position).abs() <= pos_budget_mm,
+                    "segment {i} axis {axis} position moved with batching at t={t}: {} vs {}",
+                    pb.position,
+                    ps.position
+                );
+            }
+            for t in interior {
+                let burst_accel = b
+                    .eval_axis(axis, t)
+                    .expect("bursted axis evaluates")
+                    .acceleration;
+                let single_accel = s
+                    .eval_axis(axis, t)
+                    .expect("one-at-a-time axis evaluates")
+                    .acceleration;
+                assert!(
+                    (burst_accel - single_accel).abs() <= accel_budget_mm_s2,
+                    "segment {i} axis {axis} acceleration moved with batching at t={t}: \
+                     {burst_accel} vs {single_accel}"
                 );
             }
         }
@@ -3271,44 +3363,63 @@ fn voron0_shaper_output_is_independent_of_input_batching() {
             .map(|seg| axis_breakpoints(&seg.axes[axis]).0.len())
             .sum()
     };
+    let axis_role = |axis: usize| {
+        if chains.followers.iter().any(|(target, _)| *target == axis) {
+            "follower"
+        } else {
+            "leader"
+        }
+    };
+    let per_axis_counts = || {
+        (0..chains.chains.len())
+            .map(|axis| {
+                format!(
+                    "{} axis {axis} {}/{}",
+                    axis_role(axis),
+                    axis_pieces(&burst, axis),
+                    axis_pieces(&single, axis)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
 
-    // Leaders are fitted once into the shaper's shaped-leader cache and
-    // reused bit-identically by every later emit, so their piece counts do
-    // not depend on how the input was chunked at all: measured 1540/1540 on
-    // x and 1296/1296 on y, with z at 712 against 692. Anything beyond a few
-    // percent here means that cache stopped being reused.
-    for axis in 0..3 {
+    const PIECE_SPREAD_PERCENT: usize = 10;
+    for axis in 0..chains.chains.len() {
         let (b, s) = (axis_pieces(&burst, axis), axis_pieces(&single, axis));
         let (lo, hi) = (b.min(s), b.max(s));
         assert!(
-            hi <= lo + lo / 10,
-            "leader axis {axis} refitted with batching: {b} bursted vs {s} one-at-a-time — \
-             the shaped-leader cache is no longer reused across emit windows"
+            hi * 100 <= lo * (100 + PIECE_SPREAD_PERCENT),
+            "{} axis {axis} was refitted per emit window: {b} pieces bursted vs {s} \
+             one-at-a-time ({:.2}x, allowed {PIECE_SPREAD_PERCENT}% spread) — a fitted \
+             target must be cached under its own support times and reused once a later \
+             emit commits a wider prefix. Totals across all axes: {} bursted, {} \
+             one-at-a-time",
+            axis_role(axis),
+            hi as f64 / lo.max(1) as f64,
+            total_track_breakpoints(&burst),
+            total_track_breakpoints(&single)
         );
     }
 
-    let burst_pieces = total_track_breakpoints(&burst);
-    let single_pieces = total_track_breakpoints(&single);
-    // Measured on this sequence (12 segments): 20_126 bursted, 49_410
-    // one-at-a-time. The spread is entirely the projected follower, whose
-    // post-kernel fit — unlike the leaders' — is redone on every emit over
-    // the committed range only, costing 16_578 bursted against 45_882
-    // one-at-a-time. The budget is a tripwire with headroom over the worse
-    // arm, not a golden number; the ratio bound admits today's follower
-    // spread and should tighten once that fit spans the frontier column.
-    const PIECE_BUDGET: usize = 80_000;
-    assert!(
-        burst_pieces <= PIECE_BUDGET && single_pieces <= PIECE_BUDGET,
-        "fitted piece count ran away: {burst_pieces} bursted, {single_pieces} one-at-a-time, \
-         budget {PIECE_BUDGET}"
-    );
-    let (lo, hi) = (
-        burst_pieces.min(single_pieces),
-        burst_pieces.max(single_pieces),
-    );
-    assert!(
-        hi <= 3 * lo,
-        "batching multiplied the fitted pieces: {burst_pieces} bursted vs {single_pieces} \
-         one-at-a-time"
-    );
+    const FOLLOWER_PIECE_CEILING: usize = 30_000;
+    for axis in 0..chains.chains.len() {
+        if axis_role(axis) != "follower" {
+            continue;
+        }
+        let (b, s) = (axis_pieces(&burst, axis), axis_pieces(&single, axis));
+        assert!(
+            b.max(s) <= FOLLOWER_PIECE_CEILING,
+            "follower axis {axis} fit is structurally too fine: {b} pieces bursted vs \
+             {s} one-at-a-time, ceiling {FOLLOWER_PIECE_CEILING}. Healthy and \
+             burst-driven runs of this fixture measured 16_578-21_348 follower pieces; \
+             the one-at-a-time refit pathology measured 45_882-50_670, so both arms \
+             converging above the ceiling is a regression even when they agree. \
+             Per-axis counts (bursted/one-at-a-time): {}. Totals across all axes: {} \
+             bursted, {} one-at-a-time",
+            per_axis_counts(),
+            total_track_breakpoints(&burst),
+            total_track_breakpoints(&single)
+        );
+    }
 }
