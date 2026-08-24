@@ -3041,10 +3041,18 @@ fn voron0_config() -> StreamConfig {
 
 /// `SET_KINEMATIC_POSITION X=60 Y=60 Z=20` then the migration test's move
 /// sequence: two F18000 travels, an F1200 Z drop, an F6000 extruding
-/// diagonal, and the `M400` drain.
+/// diagonal, and the `M400` drain. The Z drop rides the bench's
+/// `max_z_velocity`/`max_z_accel` (20 mm/s, 500 mm/s²), not the XY pair, so
+/// the shaped Z column here has the same length the bench produces.
 fn voron0_stream() -> (Vec<f64>, Vec<StreamInput>) {
-    let limits = voron0_config().limits;
-    let mv = |line_no: u32, start: [f64; 3], end: [f64; 3], e: f64, feed: f64| {
+    let xy_limits = voron0_config().limits;
+    let z_limits = VelocityLimits::try_new(20.0, 500.0, 0.04, f64::INFINITY).unwrap();
+    let mv = |line_no: u32,
+              start: [f64; 3],
+              end: [f64; 3],
+              e: f64,
+              feed: f64,
+              limits: VelocityLimits| {
         StreamInput::Move(
             line_move(
                 start,
@@ -3064,10 +3072,10 @@ fn voron0_stream() -> (Vec<f64>, Vec<StreamInput>) {
         )
     };
     let items = vec![
-        mv(1, [60.0, 60.0, 20.0], [100.0, 100.0, 20.0], 0.0, 300.0),
-        mv(2, [100.0, 100.0, 20.0], [20.0, 100.0, 20.0], 0.0, 300.0),
-        mv(3, [20.0, 100.0, 20.0], [20.0, 100.0, 10.0], 0.0, 20.0),
-        mv(4, [20.0, 100.0, 10.0], [60.0, 60.0, 10.0], 2.0, 100.0),
+        mv(1, [60.0, 60.0, 20.0], [100.0, 100.0, 20.0], 0.0, 300.0, xy_limits),
+        mv(2, [100.0, 100.0, 20.0], [20.0, 100.0, 20.0], 0.0, 300.0, xy_limits),
+        mv(3, [20.0, 100.0, 20.0], [20.0, 100.0, 10.0], 0.0, 20.0, z_limits),
+        mv(4, [20.0, 100.0, 10.0], [60.0, 60.0, 10.0], 2.0, 100.0, xy_limits),
         StreamInput::Drain,
     ];
     (vec![60.0, 60.0, 20.0, 0.0], items)
@@ -3182,6 +3190,18 @@ fn total_track_breakpoints(items: &[TrajectoryItem]) -> usize {
 /// one-segment commit re-partitions what a wide column would have shared.
 /// The per-axis bound pins that attribution; the total bound trips on
 /// genuine multiplication.
+///
+/// The one-at-a-time arm is the production-representative one, not the
+/// pessimistic one. The live pipeline runs `Shaper::run`, but segments
+/// trickle in rather than arriving pre-filled, so its real commit counts are
+/// a handful of segments: the sim-e2e run of the same voron0 sequence this
+/// fixture replays logs `follower_projection` taking 6.7 s at `commit = 4`
+/// and 3.3 s at `commit = 2`, pinning the shape thread at 100% until the
+/// producer falls behind playback and the stream dies on anchor underrun.
+/// So the budgets below are not headroom over a hypothetical worst case —
+/// they sit just under a cost that is already fatal on real hardware, and
+/// they must be tightened, never raised, once the follower's post-kernel fit
+/// spans the frontier column the way the leaders' already does.
 #[test]
 fn voron0_shaper_output_is_independent_of_input_batching() {
     let config = voron0_config();
