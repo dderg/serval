@@ -2171,6 +2171,20 @@ impl NonlinearAdvanceSignal {
         }
         (p, v, 2.0 * a, 6.0 * j)
     }
+
+    fn resolution_owned_curvature_velocity(&self, t: f64, velocity: f64, acceleration: f64) -> f64 {
+        if acceleration == 0.0 || (velocity / acceleration).abs() >= MIN_DEVICE_INTERVAL_S {
+            return velocity;
+        }
+        let piece = self.piece_at(t);
+        if t <= self.ends[piece] && self.ends[piece] - t < MIN_DEVICE_INTERVAL_S {
+            return velocity.abs().copysign(-acceleration);
+        }
+        if t >= self.starts[piece] && t - self.starts[piece] < MIN_DEVICE_INTERVAL_S {
+            return velocity.abs().copysign(acceleration);
+        }
+        velocity
+    }
 }
 
 impl TrackSignal for NonlinearAdvanceSignal {
@@ -2186,24 +2200,29 @@ impl TrackSignal for NonlinearAdvanceSignal {
 
     fn second_deriv(&self, t: f64) -> f64 {
         let (_, v, a, j) = self.input_state(t);
+        let curvature_velocity = self.resolution_owned_curvature_velocity(t, v, a);
         self.adv
-            .curvature(v)
+            .curvature(curvature_velocity)
             .mul_add(a * a, self.adv.slope(v).mul_add(j, a))
     }
 
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let (p, v, a, j) = self.input_state(t);
         let slope = self.adv.slope(v);
+        let curvature_velocity = self.resolution_owned_curvature_velocity(t, v, a);
         (
             p + self.adv.advance(v),
             slope.mul_add(a, v),
-            self.adv.curvature(v).mul_add(a * a, slope.mul_add(j, a)),
+            self.adv
+                .curvature(curvature_velocity)
+                .mul_add(a * a, slope.mul_add(j, a)),
         )
     }
 
     fn diagnostic(&self, t: f64) -> Option<String> {
         let piece = self.piece_at(t);
         let (p, v, a, j) = self.input_state(t);
+        let curvature_velocity = self.resolution_owned_curvature_velocity(t, v, a);
         Some(format!(
             "nonlinear advance piece {piece}/{} on [{}, {}], input (p, v, a, j)=({p}, {v}, {a}, {j}), \
              slope={}, curvature={}",
@@ -2211,7 +2230,7 @@ impl TrackSignal for NonlinearAdvanceSignal {
             self.starts[piece],
             self.ends[piece],
             self.adv.slope(v),
-            self.adv.curvature(v),
+            self.adv.curvature(curvature_velocity),
         ))
     }
 }

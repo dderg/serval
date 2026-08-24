@@ -487,6 +487,61 @@ fn all_post_processor_types_are_reachable() {
 }
 
 #[test]
+fn reciprocal_advance_handles_a_fast_corner_endpoint_transition() {
+    let waypoints = vec![
+        (0.0, 0.0, 0.0, 0.0, 200.0, 3000.0),
+        (60.0, 0.0, 0.0, 3.0, 200.0, 3000.0),
+        (60.0, 60.0, 0.0, 6.0, 200.0, 3000.0),
+    ];
+    let mut params = default_axis_snapshot_params();
+    let mut e = axis("e", &["x", "y", "z"]);
+    e.post_processors = vec!["pa".to_string()];
+    params.axis_decls = vec![e];
+    params.post_processor_decls = vec![pp(
+        "pa",
+        "recipr_pressure_advance",
+        &[
+            ("linear_advance", 0.0),
+            ("nonlinear_offset", 0.06),
+            ("linearization_velocity", 2.0),
+        ],
+    )];
+    pipeline_snapshot(&waypoints, params)
+        .expect("a sub-resolution reciprocal transition must not fail the snapshot");
+}
+
+#[test]
+fn nonlinear_advance_before_follower_smoothing_preserves_input_seams() {
+    let waypoints = vec![
+        (0.0, 0.0, 0.0, 0.0, 300.0, 3000.0),
+        (40.0, 0.0, 0.0, 2.0, 300.0, 3000.0),
+        (40.0, 40.0, 0.0, 4.0, 300.0, 3000.0),
+    ];
+    let mut params = default_axis_snapshot_params();
+    let mut x = axis("x", &[]);
+    x.post_processors = vec!["shaper".to_string()];
+    let mut y = axis("y", &[]);
+    y.post_processors = vec!["shaper".to_string()];
+    let mut e = axis("e", &["x", "y", "z"]);
+    e.post_processors = vec!["pa".to_string(), "st_e".to_string()];
+    params.axis_decls = vec![x, y, e];
+    params.post_processor_decls = vec![
+        pp("shaper", "smooth_bell", &[("smooth_time", 0.02390625)]),
+        pp(
+            "pa",
+            "tanh_pressure_advance",
+            &[
+                ("linear_advance", 0.01),
+                ("nonlinear_offset", 0.06),
+                ("linearization_velocity", 2.0),
+            ],
+        ),
+        pp("st_e", "smooth_bell", &[("smooth_time", 0.02675)]),
+    ];
+    pipeline_snapshot(&waypoints, params)
+        .expect("segment-local nonlinear offsets must preserve projected input seams");
+}
+#[test]
 fn mode_inverse_is_reachable_after_a_kernel() {
     pipeline_snapshot(&square_waypoints(), mode_inverse_on_x_params())
         .unwrap_or_else(|e| panic!("mode_inverse after a kernel should compile: {e}"));

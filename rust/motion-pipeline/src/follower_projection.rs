@@ -233,8 +233,10 @@ pub(crate) fn project_followers(
                         }
                     }
                     let mut pieces = extract_bezier_pieces(&segment.track);
+                    let head = pieces.first().expect("a projected track has pieces").coeffs[0];
+                    let segment_offset = input_end.map_or(0.0, |_| carried - head);
                     for piece in &mut pieces {
-                        piece.coeffs[0] += carried;
+                        piece.coeffs[0] += segment_offset;
                     }
                     let tail = pieces.last().expect("a projected track has pieces");
                     carried = polynomial_pva(&tail.coeffs, tail.u_end - tail.u_start).0;
