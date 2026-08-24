@@ -724,11 +724,11 @@ fn capture_message_kinds_round_trip_u16() {
 fn lane(axis_idx: u8, sample_count: u16) -> LaneRun {
     LaneRun {
         axis_idx,
+        slot_idx: axis_idx,
         flags: LANE_RUN_FLAG_REANCHOR,
         origin_mm_q16: -3 * 65_536,
         start_index: 9_000 + u64::from(axis_idx),
         interval_ticks: 1_600,
-        sample_count,
         samples: (0..sample_count)
             .map(|i| SetpointSample {
                 pos_counts: 100 * i32::from(i),
@@ -775,18 +775,33 @@ fn push_sample_runs_decode_zero_lane_count_is_err() {
 }
 
 #[test]
-fn push_sample_runs_decode_duplicate_axis_is_err() {
+fn push_sample_runs_decode_duplicate_slot_is_err() {
     let mut buf = PushSampleRuns {
         lanes: vec![lane(1, 1), lane(2, 1)],
     }
     .encoded_to_vec();
-    buf[1 + LANE_RUN_HEADER_LEN + SETPOINT_SAMPLE_LEN] = 1;
+    buf[1 + LANE_RUN_HEADER_LEN + SETPOINT_SAMPLE_LEN + 1] = 1;
     assert_eq!(
         PushSampleRuns::decode(&buf).unwrap_err(),
         DecodeError::DuplicateField {
-            field: "PushSampleRuns.axis_idx"
+            field: "PushSampleRuns.slot_idx"
         }
     );
+}
+
+/// An AWD axis is claimed by several drive slots, and each slot's run carries
+/// that slot's own counts: the wire has to keep them apart.
+#[test]
+fn push_sample_runs_carries_two_slots_of_one_axis() {
+    let left = lane(0, 2);
+    let mut right = lane(0, 2);
+    right.slot_idx = 1;
+    right.samples[0].pos_counts = -777;
+    let msg = PushSampleRuns {
+        lanes: vec![left.clone(), right.clone()],
+    };
+    let decoded = roundtrip(&msg);
+    assert_eq!(decoded.lanes, vec![left, right]);
 }
 
 #[test]
@@ -805,15 +820,76 @@ fn push_sample_runs_decode_zero_sample_count_is_err() {
 }
 
 #[test]
-fn push_sample_runs_decode_truncated_is_err() {
+fn push_sample_runs_decode_truncated_sample_block_is_err() {
     let full = PushSampleRuns {
         lanes: vec![lane(0, 2)],
     }
     .encoded_to_vec();
     assert_eq!(
         PushSampleRuns::decode(&full[..full.len() - 3]).unwrap_err(),
+        DecodeError::ArrayLengthExceedsBuffer {
+            claimed: 2,
+            available: 2 * SETPOINT_SAMPLE_LEN - 3
+        }
+    );
+}
+
+#[test]
+fn push_sample_runs_decode_truncated_second_lane_header_is_err() {
+    let full = PushSampleRuns {
+        lanes: vec![lane(0, 1), lane(1, 1)],
+    }
+    .encoded_to_vec();
+    assert_eq!(
+        PushSampleRuns::decode(&full[..full.len() - SETPOINT_SAMPLE_LEN - 1]).unwrap_err(),
         DecodeError::UnexpectedEof
     );
+}
+
+#[test]
+fn push_sample_runs_decode_rejects_sample_count_beyond_the_payload() {
+    let mut buf = PushSampleRuns {
+        lanes: vec![lane(0, 1)],
+    }
+    .encoded_to_vec();
+    buf.truncate(1 + LANE_RUN_HEADER_LEN);
+    buf[1 + LANE_RUN_HEADER_LEN - 2..].copy_from_slice(&u16::MAX.to_le_bytes());
+    assert_eq!(
+        PushSampleRuns::decode(&buf).unwrap_err(),
+        DecodeError::ArrayLengthExceedsBuffer {
+            claimed: u32::from(u16::MAX),
+            available: 0
+        }
+    );
+}
+
+#[test]
+fn push_sample_runs_decode_rejects_lane_count_beyond_the_payload() {
+    assert_eq!(
+        PushSampleRuns::decode(&[8u8]).unwrap_err(),
+        DecodeError::ArrayLengthExceedsBuffer {
+            claimed: 8,
+            available: 0
+        }
+    );
+}
+
+#[test]
+fn push_sample_runs_encodes_the_count_it_actually_carries() {
+    let mut lane = lane(3, 5);
+    lane.samples.truncate(2);
+    let buf = PushSampleRuns {
+        lanes: vec![lane.clone()],
+    }
+    .encoded_to_vec();
+    assert_eq!(buf.len(), 1 + LANE_RUN_HEADER_LEN + 2 * SETPOINT_SAMPLE_LEN);
+    let count_at = 1 + LANE_RUN_HEADER_LEN - 2;
+    assert_eq!(
+        u16::from_le_bytes([buf[count_at], buf[count_at + 1]]),
+        2,
+        "the wire count is the samples actually written, not a stale field"
+    );
+    assert_eq!(PushSampleRuns::decode(&buf).unwrap().lanes, vec![lane]);
 }
 
 #[test]

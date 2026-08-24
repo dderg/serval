@@ -90,11 +90,18 @@ pub(crate) fn project_followers(
                     ChainStage::DerivativeGains { .. } | ChainStage::SmoothKernel(_)
                 )
             });
-        let leaders_changed = base.iter().zip(frontier).any(|(raw, shaped)| {
-            leaders
-                .iter()
-                .any(|&leader| raw.axes[leader] != shaped.axes[leader])
+        let leaders_transformed = leaders.iter().any(|&leader| {
+            chains
+                .chains
+                .get(leader)
+                .is_some_and(CompiledChain::is_zero_support_only)
         });
+        let leaders_changed = leaders_transformed
+            || base.iter().zip(frontier).any(|(raw, shaped)| {
+                leaders
+                    .iter()
+                    .any(|&leader| raw.axes[leader] != shaped.axes[leader])
+            });
         let state = &mut states[axis];
         let projecting = leaders_changed || state.active;
         if !projecting && chain.is_empty() {
@@ -398,7 +405,7 @@ pub(crate) fn project_followers(
             }
             _ => None,
         };
-        let mut emitted_output_end = state.emitted_output_end;
+        let mut emitted_pv = state.emitted_output_pv;
         let emit_window = (commit_count > 0).then(|| {
             (
                 projection_support(&base[0], &frontier[0], axis, leaders).0,
@@ -411,7 +418,7 @@ pub(crate) fn project_followers(
                 .1,
             )
         });
-        let mut correction: Option<(f64, f64, f64)> = None;
+        let mut batch_weld: Option<SeamWeld> = None;
         for i in 0..commit_count {
             let raw = &base[i];
             let (t_start, t_end) = projection_support(raw, &frontier[i], axis, leaders);
@@ -423,32 +430,34 @@ pub(crate) fn project_followers(
                 |(batch_base, bases, tracks)| (*batch_base + bases[i], tracks[i].clone()),
             );
             if i == 0 {
-                if let (Some(previous_end), Some((emit_start, emit_end))) =
-                    (emitted_output_end, emit_window)
-                {
-                    let start_correction =
-                        previous_end - (base_position + piece_run_start(&pieces));
-                    correction = Some((
+                if let (Some(previous), Some((emit_start, emit_end))) = (emitted_pv, emit_window) {
+                    batch_weld = Some(SeamWeld::spanning(
                         emit_start,
-                        start_correction,
-                        -start_correction / (emit_end - emit_start),
+                        emit_end,
+                        previous,
+                        base_position,
+                        &pieces,
                     ));
                 }
             }
-            if let Some((emit_start, start_correction, slope)) = correction {
+            if let Some(weld) = batch_weld {
                 for piece in &mut pieces {
-                    if piece.coeffs.len() < 2 {
-                        piece.coeffs.resize(2, 0.0);
-                    }
-                    piece.coeffs[0] += start_correction + slope * (piece.u_start - emit_start);
-                    piece.coeffs[1] += slope;
+                    weld.apply(piece);
                 }
             }
-            emitted_output_end = Some(base_position + piece_run_end(&pieces));
+            if i > 0 {
+                let previous = emitted_pv.expect("an earlier commit emitted its endpoint state");
+                let weld = SeamWeld::spanning(t_start, t_end, previous, base_position, &pieces);
+                for piece in &mut pieces {
+                    weld.apply(piece);
+                }
+            }
+            let (run_end, velocity_end) = piece_run_end_pv(&pieces);
+            emitted_pv = Some((base_position + run_end, velocity_end));
             Arc::make_mut(&mut out[i].axes)[axis] =
                 ContinuousAxis::PiecewiseRelativeSpline(localize_pieces(base_position, &pieces));
         }
-        state.emitted_output_end = emitted_output_end;
+        state.emitted_output_pv = emitted_pv;
         if commit_count > 0 {
             let emitted_through = base[commit_count - 1].t_end;
             let back = kernel.map_or(0.0, |k| k.support().1.max(0.0));
@@ -551,7 +560,7 @@ pub(crate) struct FollowerState {
     s_shaped: f64,
     e_end: Option<f64>,
     projected_output_end: Option<f64>,
-    emitted_output_end: Option<f64>,
+    emitted_output_pv: Option<(f64, f64)>,
     projected: Vec<ProjSeg>,
     projected_through_t: Option<f64>,
     projected_trimmed: bool,
@@ -570,7 +579,7 @@ impl FollowerState {
         self.s_shaped = 0.0;
         self.e_end = None;
         self.projected_output_end = None;
-        self.emitted_output_end = None;
+        self.emitted_output_pv = None;
         self.projected.clear();
         self.projected_through_t = None;
         self.projected_trimmed = false;
@@ -1428,14 +1437,79 @@ fn piece_boundaries(track: &ScalarNurbs) -> Vec<f64> {
     breaks
 }
 
+fn piece_run_start_pv(pieces: &[BezierPiece]) -> (f64, f64) {
+    let first = pieces.first().expect("a fitted target has pieces");
+    polynomial_pv(&first.coeffs, 0.0)
+}
+
+fn piece_run_end_pv(pieces: &[BezierPiece]) -> (f64, f64) {
+    let last = pieces.last().expect("a fitted target has pieces");
+    polynomial_pv(&last.coeffs, last.u_end - last.u_start)
+}
+
 fn piece_run_start(pieces: &[BezierPiece]) -> f64 {
-    pieces.first().expect("a fitted target has pieces").coeffs[0]
+    piece_run_start_pv(pieces).0
 }
 
 fn piece_run_end(pieces: &[BezierPiece]) -> f64 {
     pieces.last().map_or(0.0, |last| {
         polynomial_pv(&last.coeffs, last.u_end - last.u_start).0
     })
+}
+
+/// Every emitted follower track continues one the pipeline already handed
+/// downstream, and adjacent stretches are fitted independently, so each one
+/// opens a fit residual away from the state already emitted. Welding only
+/// position leaves that residual's slope behind as a velocity step at the
+/// seam — a batch boundary in the leading case, a committed segment boundary
+/// inside the batch.
+///
+/// The unique cubic with `c(0) = dp`, `c'(0) = dv` and `c(L) = c'(L) = 0`
+/// carries the whole correction: the stretch opens on the emitted position
+/// *and* velocity, its settled total is untouched, and it closes on the
+/// natural endpoint state, so nothing downstream inherits a residual ramp and
+/// the correction cannot accumulate.
+#[derive(Clone, Copy)]
+struct SeamWeld {
+    origin: f64,
+    coeffs: [f64; 4],
+}
+
+impl SeamWeld {
+    fn spanning(
+        start: f64,
+        end: f64,
+        emitted: (f64, f64),
+        base_position: f64,
+        pieces: &[BezierPiece],
+    ) -> Self {
+        let length = end - start;
+        assert!(
+            length > 0.0,
+            "follower weld window [{start}, {end}] has no length"
+        );
+        let (run_start, velocity_start) = piece_run_start_pv(pieces);
+        let dp = emitted.0 - (base_position + run_start);
+        let dv = emitted.1 - velocity_start;
+        let cubic = (2.0 * dp + dv * length) / (length * length * length);
+        let quadratic = -(3.0 * dp + 2.0 * dv * length) / (length * length);
+        Self {
+            origin: start,
+            coeffs: [dp, dv, quadratic, cubic],
+        }
+    }
+
+    fn apply(&self, piece: &mut BezierPiece) {
+        if piece.coeffs.len() < 4 {
+            piece.coeffs.resize(4, 0.0);
+        }
+        let d = piece.u_start - self.origin;
+        let [c0, c1, c2, c3] = self.coeffs;
+        piece.coeffs[0] += c0 + d * (c1 + d * (c2 + d * c3));
+        piece.coeffs[1] += c1 + d * (2.0 * c2 + 3.0 * c3 * d);
+        piece.coeffs[2] += c2 + 3.0 * c3 * d;
+        piece.coeffs[3] += c3;
+    }
 }
 
 fn project_monotone(

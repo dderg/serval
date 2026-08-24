@@ -24,7 +24,7 @@ use geometry::{CornerFitConfig, VelocityLimits};
 use motion_core::classify::build_move;
 use motion_pipeline::{StreamConfig, TrajectoryItem, setup_stages};
 use step_shim::compress::compress_with_max_error;
-use step_shim::compress_hp::{StepMoveHp, compress_hp};
+use step_shim::compress_hp::{HpScratch, StepMoveHp, compress_hp};
 use step_shim::ring::SpanQueue;
 use step_shim::root_cursor::StepRootCursor;
 use step_shim::{MotorConfig, StepEncoder};
@@ -378,10 +378,12 @@ fn encode_hp(stream: &[SolvedStep], runs: &[(usize, usize)], freq: f64) -> Encod
     let mut anchor = stream[0].clock - 1;
     let mut next_expected_interval: u32 = 0;
     let mut stats = EncoderStats::new(HP_WIRE_BYTES, freq);
+    let mut scratch = HpScratch::new();
     for &(start, end) in runs {
         let clocks: Vec<u64> = stream[start..end].iter().map(|s| s.clock).collect();
-        let (moves, covered, carry) = compress_hp(&clocks, anchor, next_expected_interval)
-            .unwrap_or_else(|e| panic!("hp failed on run {start}..{end}: {e}"));
+        let (moves, covered, carry) =
+            compress_hp(&mut scratch, &clocks, anchor, next_expected_interval)
+                .unwrap_or_else(|e| panic!("hp failed on run {start}..{end}: {e}"));
         assert_eq!(covered, clocks.len(), "hp covered fewer steps than the run");
         let mut move_anchor = anchor;
         let mut run_step = 0usize;

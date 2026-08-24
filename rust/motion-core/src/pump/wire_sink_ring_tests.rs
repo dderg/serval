@@ -275,7 +275,6 @@ fn a_ring_endpoint_receives_abutting_sample_runs_for_a_two_span_trajectory() {
             "every run belongs to the endpoint's only lane"
         );
         assert_eq!(run.interval_ticks, INTERVAL_NS as u32);
-        assert_eq!(run.sample_count as usize, run.samples.len());
         assert_eq!(
             run.start_index, next_index,
             "successive runs must abut on the grid without a gap or an overlap"

@@ -127,10 +127,8 @@ impl StepRootCursor {
                     got: view.clock_freq_hz,
                 });
             }
-            let begin = view
-                .start_clock
-                .max(self.resume_floor())
-                .max(self.frontier.unwrap_or(0));
+            let signal_start = view.start_clock.max(self.resume_floor());
+            let begin = signal_start.max(self.frontier.unwrap_or(0));
             if begin > view.end_clock {
                 queue.release_active();
                 continue;
@@ -139,7 +137,7 @@ impl StepRootCursor {
             if last_clock < begin {
                 return Ok(());
             }
-            self.enter(motor, &view, begin)?;
+            self.enter(motor, &view, signal_start, begin)?;
             self.emit_roots(motor, cfg, &view, begin, last_clock, out)?;
             self.frontier = Some(last_clock + 1);
             if last_clock < view.end_clock {
@@ -154,6 +152,7 @@ impl StepRootCursor {
         &mut self,
         motor: usize,
         view: &ClockedMotorSpan,
+        signal_start: u64,
         begin: u64,
     ) -> Result<(), ShimError> {
         if view.signal.motor_mask == 0 {
@@ -162,7 +161,7 @@ impl StepRootCursor {
         } else {
             let signal_id = std::sync::Arc::as_ptr(&view.signal) as usize;
             if self.overlay_signal_id != Some(signal_id) {
-                let position = self.eval(motor, view, begin)?.position;
+                let position = self.eval(motor, view, signal_start)?.position;
                 self.overlay = Some(Lattice {
                     origin_mm: position,
                     step_count: 0,

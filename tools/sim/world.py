@@ -248,6 +248,21 @@ class SimControl:
             )
         return int(response.split()[0].split("=", 1)[1])
 
+    def gpio_output(self, chip: int, line: int) -> int:
+        response = self.send(f"get_gpio_output chip={chip} line={line}")
+        if not response.startswith("value="):
+            raise SimError(
+                f"get_gpio_output chip={chip} line={line}: {response!r}"
+            )
+        return int(response.split()[0].split("=", 1)[1])
+
+    def step_position(self, line: int) -> dict[str, int]:
+        response = self.send(f"get_steps line={line}")
+        values = dict(item.split("=", 1) for item in response.split())
+        if values.keys() != {"steps", "min", "max", "vt"}:
+            raise SimError(f"unexpected get_steps reply: {response!r}")
+        return {name: int(value) for name, value in values.items()}
+
     def set_endstop_wall(self, line: int, steps: int) -> None:
         response = self.send(f"set_endstop_wall line={line} steps={steps}")
         if response != "ok":

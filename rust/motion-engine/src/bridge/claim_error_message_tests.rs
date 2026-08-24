@@ -1,4 +1,5 @@
 use super::{EndpointClaimError, ReportedExecutor, message_for_claim_error};
+use host_rt::transport::TransportError;
 
 #[test]
 fn bus_dead_ec_init_failure() {
@@ -125,13 +126,71 @@ fn executor_mismatch_unsupported_blames_the_stale_endpoint_binary() {
         "node_x",
         "eth0",
         &EndpointClaimError::ExecutorMismatch {
-            reported: ReportedExecutor::Unsupported("QuerySampleGrid call failed: Timeout".into()),
+            reported: ReportedExecutor::Unsupported(
+                "expected SampleGridResponse (0x0065), got 0x0061".into(),
+            ),
         },
     );
     assert_eq!(
         msg,
         "ethercat node_x: executor mismatch — the endpoint could not report its executor \
-         (QuerySampleGrid call failed: Timeout); the endpoint binary predates the sample-stream \
-         executor — rebuild rust/ethercat-rt, then FIRMWARE_RESTART"
+         (expected SampleGridResponse (0x0065), got 0x0061); the endpoint binary predates the \
+         sample-stream executor — rebuild rust/ethercat-rt, then FIRMWARE_RESTART"
     );
+}
+
+#[test]
+fn a_timed_out_call_names_the_call_not_a_stale_binary() {
+    let msg = message_for_claim_error(
+        "node_x",
+        "eth0",
+        &EndpointClaimError::Transport {
+            call: "QuerySampleGrid",
+            cause: TransportError::Timeout,
+        },
+    );
+    assert_eq!(
+        msg,
+        "ethercat node_x: endpoint on eth0 did not answer QuerySampleGrid before the claim \
+         deadline — the endpoint process is up but not servicing control frames (RT-starved, \
+         wedged, or a binary that ignores QuerySampleGrid); check the endpoint's stderr and \
+         rebuild rust/ethercat-rt, then FIRMWARE_RESTART"
+    );
+}
+
+#[test]
+fn a_closed_socket_blames_the_endpoint_exit() {
+    let msg = message_for_claim_error(
+        "node_x",
+        "eth0",
+        &EndpointClaimError::Transport {
+            call: "ClaimHandshake",
+            cause: TransportError::Closed,
+        },
+    );
+    assert_eq!(
+        msg,
+        "ethercat node_x: endpoint on eth0 closed the control socket during ClaimHandshake — \
+         the endpoint exited before answering; check its stderr for the bringup failure, then \
+         FIRMWARE_RESTART"
+    );
+}
+
+#[test]
+fn an_io_failure_carries_the_os_error() {
+    let msg = message_for_claim_error(
+        "node_x",
+        "eth0",
+        &EndpointClaimError::Transport {
+            call: "QuerySampleGrid",
+            cause: TransportError::Io(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+        },
+    );
+    assert!(
+        msg.starts_with(
+            "ethercat node_x: control-socket I/O error on eth0 during QuerySampleGrid — "
+        ),
+        "got: {msg}"
+    );
+    assert!(msg.ends_with(", then FIRMWARE_RESTART"), "got: {msg}");
 }

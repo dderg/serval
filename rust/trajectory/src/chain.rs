@@ -267,6 +267,20 @@ impl CompiledChain {
         })
     }
 
+    /// Whether this chain transforms its axis with zero-support stages alone.
+    /// Nothing widens the shaping window, so the shaper never refits the
+    /// column: the transform is baked into the materialized source before the
+    /// shaped frontier exists, and an axis riding this one as a leader cannot
+    /// see it by comparing raw against shaped.
+    #[must_use]
+    pub fn is_zero_support_only(&self) -> bool {
+        !self.stages.is_empty()
+            && self
+                .stages
+                .iter()
+                .all(|stage| !matches!(stage, ChainStage::SmoothKernel(_)))
+    }
+
     #[must_use]
     pub fn kernel_variance_s2(&self) -> f64 {
         self.stages

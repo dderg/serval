@@ -82,18 +82,22 @@ runtime_diag_progress(uint32_t tag, uint32_t stage, uint32_t value)
 }
 
 // Advances regardless of engine state, unlike the ISR-published widened_now,
-// so this is the only clock a classic-stepping build can widen. Callable from
-// an ISR: stats_task's two-store epoch bump can only be caught mid-update in
-// the instruction pair around a 32-bit wrap.
+// so this is the only clock a classic-stepping build can widen. ISR-safe: the
+// epoch pair is sampled before the low word and under the same irq guard
+// stats_update publishes it with, so no caller can splice a pre-wrap low word
+// onto a post-wrap epoch.
 __attribute__((used, externally_visible))
 uint64_t
 runtime_widened_host_clock(void)
 {
     extern uint32_t stats_send_time;
     extern uint32_t stats_send_time_high;
+    irqstatus_t flag = irq_save();
+    uint32_t last = stats_send_time;
+    uint32_t high = stats_send_time_high;
     uint32_t cur = timer_read_time();
-    uint32_t high = stats_send_time_high + (cur < stats_send_time);
-    return ((uint64_t)high << 32) | (uint64_t)cur;
+    irq_restore(flag);
+    return ((uint64_t)(high + (cur < last)) << 32) | (uint64_t)cur;
 }
 
 #if CONFIG_MOTION_RUNTIME

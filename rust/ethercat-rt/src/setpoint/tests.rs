@@ -279,3 +279,36 @@ fn grid_indices_come_off_the_dc_period_exactly() {
         })
     );
 }
+
+/// The host retires a run once playback has reached its exclusive
+/// `end_clock`, so consuming the last entry of a run starting at 100 with 3
+/// entries has to leave the cursor at 103, not 102.
+#[test]
+fn the_played_cursor_is_exclusive() {
+    let mut r = final_run_at(100, 3, 0);
+    assert_eq!(r.played_cursor(), None, "nothing has played yet");
+    for step in 0..3u64 {
+        assert!(matches!(r.play(100 + step), Played::Entry(_)));
+        assert_eq!(r.played_cursor(), Some(101 + step));
+    }
+    r.play(103);
+    assert_eq!(
+        r.played_cursor(),
+        Some(103),
+        "a drained cycle plays nothing, so the cursor stays where the run ended"
+    );
+}
+
+#[test]
+fn a_run_refused_before_staging_latches_the_fill_cap() {
+    let mut r = anchored_at(100, 4, 0);
+    let fault = r.reject_oversized(MAX_FILL_CYCLES as u32 + 1);
+    assert_eq!(
+        fault,
+        RingFault::FillTooLarge {
+            asked: MAX_FILL_CYCLES as u32 + 1
+        }
+    );
+    assert_eq!(r.len(), 4, "nothing was queued");
+    assert_eq!(r.take_fault(), Some(fault.reg_value()));
+}

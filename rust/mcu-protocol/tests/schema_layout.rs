@@ -300,11 +300,11 @@ fn every_schema_field_type_parses() {
 fn sample_lane(axis_idx: u8, sample_count: u16) -> LaneRun {
     LaneRun {
         axis_idx,
+        slot_idx: axis_idx,
         flags: 1,
         origin_mm_q16: -65_536,
         start_index: 4096 + u64::from(axis_idx),
         interval_ticks: 1000,
-        sample_count,
         samples: (0..sample_count)
             .map(|i| SetpointSample {
                 pos_counts: i32::from(i) * 7,

@@ -344,12 +344,17 @@ void
 command_queue_step(uint32_t *args)
 {
     struct stepper *s = stepper_oid_lookup(args[0]);
+    uint32_t count = args[2];
+    if (!count || count > UINT16_MAX)
+        shutdown("Invalid count parameter");
+    int32_t add = (int32_t)args[3];
+    if (add < INT16_MIN || add > INT16_MAX)
+        shutdown("Invalid add parameter");
+
     struct stepper_move *m = move_alloc();
     m->interval = args[1];
-    m->count = args[2];
-    if (!m->count)
-        shutdown("Invalid count parameter");
-    m->add = args[3];
+    m->count = count;
+    m->add = add;
     m->flags = 0;
 
     enqueue_move(s, m, args[0]);
@@ -357,22 +362,36 @@ command_queue_step(uint32_t *args)
 DECL_COMMAND(command_queue_step,
              "queue_step oid=%c interval=%u count=%hu add=%hi");
 #if CONFIG_HIGH_PREC_STEP
+// The wire domain the host encoder emits (rust/step-shim/src/compress_hp.rs).
+// A value outside it is a version-skewed or corrupt frame, and every one of
+// them would otherwise reach a C shift with an out-of-range or overflowing
+// operand.
+#define STEP_HP_SHIFT_MIN (-8)
+#define STEP_HP_SHIFT_MAX 16
+
 void
 command_queue_step_hp(uint32_t *args)
 {
     struct stepper *s = stepper_oid_lookup(args[0]);
-    struct stepper_move *m = move_alloc();
-    m->count = args[2];
-    if (!m->count || m->count >= 0x8000)
+    uint32_t count = args[2];
+    if (!count || count >= 0x8000)
         shutdown("Invalid count parameter");
+    int32_t shift = (int32_t)args[5];
+    if (shift < STEP_HP_SHIFT_MIN || shift > STEP_HP_SHIFT_MAX)
+        shutdown("Invalid shift parameter");
+    int32_t add = (int32_t)args[3], add2 = (int32_t)args[4];
+    if (add < INT16_MIN || add > INT16_MAX
+        || add2 < INT16_MIN || add2 > INT16_MAX)
+        shutdown("Invalid add parameter");
+
+    struct stepper_move *m = move_alloc();
+    m->count = count;
     uint32_t interval = args[1];
-    int32_t add = args[3];
-    int32_t add2 = args[4];
-    int8_t shift = args[5];
     if (shift <= 0) {
-        interval <<= -shift;
-        add = add >= 0 ? add << -shift : -(-add << -shift);
-        add2 = add2 >= 0 ? add2 << -shift : -(-add2 << -shift);
+        uint_fast8_t amount = (uint_fast8_t)-shift;
+        interval <<= amount;
+        add = add >= 0 ? add << amount : -(-add << amount);
+        add2 = add2 >= 0 ? add2 << amount : -(-add2 << amount);
         m->next_interval = interval + add;
         m->add = add + add2;
         m->add2 = add2;
@@ -380,14 +399,14 @@ command_queue_step_hp(uint32_t *args)
         m->interval = interval;
         m->shift = 0;
     } else {
+        uint_fast8_t amount = (uint_fast8_t)shift;
         m->next_interval = interval + add;
         m->add = add + add2;
         m->add2 = add2;
-        m->int_low_acc = 1 << (shift - 1);
-        interval += m->int_low_acc;
-        m->interval = interval >> shift;
-        m->int_low_acc = interval - ((interval >> shift) << shift);
-        m->shift = shift;
+        interval += 1u << (amount - 1);
+        m->interval = interval >> amount;
+        m->int_low_acc = interval - ((interval >> amount) << amount);
+        m->shift = amount;
     }
     m->flags = SF_HIGH_PREC_STEP;
     enqueue_move(s, m, args[0]);

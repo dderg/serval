@@ -404,8 +404,8 @@ fn a_wire_clock_just_before_a_wrap_widens_downward() {
 fn a_barrier_on_an_idle_lane_is_receipted_immediately() {
     let mut lane = SampleLane::new();
     lane.anchor(0, 1_000, 0).expect("anchor accepted");
-    lane.push_barrier(2_000, 9).expect("barrier accepted");
-    assert_eq!(lane.take_passed_barrier(), Some(9));
+    lane.push_barrier(2_000, 4, 9).expect("barrier accepted");
+    assert_eq!(lane.take_passed_barrier(), Some((4, 9)));
     assert_eq!(lane.take_passed_barrier(), None);
 }
 
@@ -415,27 +415,27 @@ fn a_barrier_waits_for_playback_to_pass_the_fence() {
     let shared = shared();
     lane.anchor(0, 1_000, 0).expect("anchor accepted");
     push(&mut lane, 0, 0, &[0, 10, 20, 30]);
-    lane.push_barrier(0, 5).expect("barrier accepted");
+    lane.push_barrier(0, 4, 5).expect("barrier accepted");
     assert_eq!(lane.take_passed_barrier(), None);
 
     let _ = position(&mut lane, &shared, 1_200);
     assert_eq!(lane.take_passed_barrier(), None);
     let _ = position(&mut lane, &shared, 1_400);
-    assert_eq!(lane.take_passed_barrier(), Some(5));
+    assert_eq!(lane.take_passed_barrier(), Some((4, 5)));
 }
 
 #[test]
-fn barriers_are_receipted_in_arrival_order() {
+fn barriers_are_receipted_in_arrival_order_under_their_own_oids() {
     let mut lane = SampleLane::new();
     let shared = shared();
     lane.anchor(0, 1_000, 0).expect("anchor accepted");
     push(&mut lane, 0, 0, &[0, 10]);
-    lane.push_barrier(0, 1).expect("first barrier");
+    lane.push_barrier(0, 4, 1).expect("first barrier");
     push(&mut lane, 0, 10, &[20, 30]);
-    lane.push_barrier(0, 2).expect("second barrier");
+    lane.push_barrier(0, 6, 2).expect("second barrier");
     let _ = position(&mut lane, &shared, 1_400);
-    assert_eq!(lane.take_passed_barrier(), Some(1));
-    assert_eq!(lane.take_passed_barrier(), Some(2));
+    assert_eq!(lane.take_passed_barrier(), Some((4, 1)));
+    assert_eq!(lane.take_passed_barrier(), Some((6, 2)));
     assert_eq!(lane.take_passed_barrier(), None);
 }
 
@@ -445,10 +445,10 @@ fn a_halt_completes_the_fences_it_discarded() {
     let shared = shared();
     lane.anchor(0, 1_000, 0).expect("anchor accepted");
     push(&mut lane, 0, 0, &[0, 100, 200, 300]);
-    lane.push_barrier(0, 3).expect("barrier accepted");
+    lane.push_barrier(0, 4, 3).expect("barrier accepted");
     assert_eq!(lane.take_passed_barrier(), None);
     lane.halt(1_050, &shared, 0);
-    assert_eq!(lane.take_passed_barrier(), Some(3));
+    assert_eq!(lane.take_passed_barrier(), Some((4, 3)));
 }
 
 #[test]
@@ -456,10 +456,10 @@ fn a_re_anchor_completes_the_fences_it_discarded() {
     let mut lane = SampleLane::new();
     lane.anchor(0, 1_000, 0).expect("anchor accepted");
     push(&mut lane, 0, 0, &[0, 100, 200]);
-    lane.push_barrier(0, 4).expect("barrier accepted");
+    lane.push_barrier(0, 4, 4).expect("barrier accepted");
     assert_eq!(lane.take_passed_barrier(), None);
     lane.anchor(0, 5_000, 200).expect("re-anchor accepted");
-    assert_eq!(lane.take_passed_barrier(), Some(4));
+    assert_eq!(lane.take_passed_barrier(), Some((4, 4)));
 }
 
 #[test]
@@ -469,11 +469,11 @@ fn too_many_unacked_barriers_is_a_loud_fault() {
     push(&mut lane, 0, 0, &[0, 10, 20, 30]);
     for seq in 0..crate::sample_exec::SAMPLE_BARRIERS_PER_LANE {
         #[allow(clippy::cast_possible_truncation)]
-        lane.push_barrier(0, seq as u32)
+        lane.push_barrier(0, 4, seq as u32)
             .expect("barrier inside capacity");
     }
     assert_eq!(
-        lane.push_barrier(0, 99),
+        lane.push_barrier(0, 4, 99),
         Err(SampleLaneFault::BarrierOverflow)
     );
 }

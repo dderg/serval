@@ -1,6 +1,6 @@
 use super::{
-    EthercatDrive, endpoint_args, handshake_ethercat_endpoint, poll_socket_ready, slots_for_axis,
-    spawn_ethercat_endpoint,
+    EndpointClaimError, EthercatDrive, endpoint_args, handshake_ethercat_endpoint,
+    poll_socket_ready, slots_for_axis, spawn_ethercat_endpoint, verify_sample_grid,
 };
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
@@ -448,5 +448,84 @@ fn handshake_connect_refused_is_not_immediately_fatal() {
             !msg.to_ascii_lowercase().contains("connection refused"),
             "handshake must retry past ConnectionRefused, not fail immediately; got: {msg}"
         );
+    }
+}
+
+fn serve_one_grid_reply(
+    path: &str,
+    reply_of: Option<fn(u32) -> Vec<u8>>,
+) -> std::thread::JoinHandle<()> {
+    use std::os::unix::net::UnixListener;
+
+    let _ = std::fs::remove_file(path);
+    let listener = UnixListener::bind(path).unwrap_or_else(|e| panic!("bind {path}: {e}"));
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            if let Ok(n) = stream.read(&mut buf) {
+                if let Some(reply_of) = reply_of {
+                    let cid = extract_correlation_id(&buf[..n]);
+                    let _ = stream.write_all(&reply_of(cid));
+                }
+            }
+            let _ = stream.read(&mut buf);
+        }
+    })
+}
+
+fn grid_reply_with_zero_depth(cid: u32) -> Vec<u8> {
+    ethercat_rt::wire::sample_grid_response_frame(
+        cid,
+        ethercat_rt::setpoint::EXECUTOR_SETPOINT_RING,
+        250_000,
+        0,
+        (42, 10_500_000),
+    )
+}
+
+#[test]
+fn a_zero_deep_ring_is_refused_at_claim_time() {
+    let path = format!("/tmp/kalico_test_zero_depth_{}.sock", std::process::id());
+    let server = serve_one_grid_reply(&path, Some(grid_reply_with_zero_depth));
+
+    let conn = host_rt::mcu_serial_conn::McuSerialConn::connect(&path)
+        .unwrap_or_else(|e| panic!("connect {path}: {e}"));
+    let err = verify_sample_grid(&conn, Instant::now() + Duration::from_secs(5))
+        .expect_err("a zero-deep ring must fail the claim");
+    drop(conn);
+    let _ = server.join();
+    let _ = std::fs::remove_file(&path);
+
+    match err {
+        EndpointClaimError::Protocol(detail) => assert!(
+            detail.contains("zero cycles"),
+            "the message must name the empty ring; got: {detail}"
+        ),
+        other => panic!("expected a protocol error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_silent_endpoint_reports_a_timeout_not_a_stale_binary() {
+    let path = format!("/tmp/kalico_test_grid_silent_{}.sock", std::process::id());
+    let server = serve_one_grid_reply(&path, None);
+
+    let conn = host_rt::mcu_serial_conn::McuSerialConn::connect(&path)
+        .unwrap_or_else(|e| panic!("connect {path}: {e}"));
+    let err = verify_sample_grid(&conn, Instant::now() + Duration::from_millis(200))
+        .expect_err("an unanswered QuerySampleGrid must fail the claim");
+    drop(conn);
+    let _ = server.join();
+    let _ = std::fs::remove_file(&path);
+
+    match err {
+        EndpointClaimError::Transport { call, cause } => {
+            assert_eq!(call, "QuerySampleGrid");
+            assert!(
+                matches!(cause, host_rt::transport::TransportError::Timeout),
+                "expected a timeout, got {cause:?}"
+            );
+        }
+        other => panic!("expected a transport error, got {other:?}"),
     }
 }

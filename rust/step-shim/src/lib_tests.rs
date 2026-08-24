@@ -136,6 +136,22 @@ fn cancelling_span(
     )
 }
 
+/// A motor-local overlay (`motor_mask != 0`): the cursor walks it on its own
+/// lattice, seeded where the overlay signal starts rather than where the drain
+/// happens to resume.
+fn overlay_span(start_clock: u64, position: f64, delta_mm: f64, cycles: u64) -> ClockedMotorSpan {
+    let (t_start, t_end) = window(start_clock, cycles);
+    let groups = vec![
+        base_group(position, t_start, t_end),
+        ramp_group(delta_mm, t_end - t_start, t_start, 1.0),
+    ];
+    clocked(
+        signal(groups, t_start, t_end, 1),
+        start_clock,
+        CYCLES_PER_SECOND,
+    )
+}
+
 fn queue_step_count(frames: &[StepFrame]) -> u32 {
     frames
         .iter()
@@ -754,4 +770,40 @@ fn finish_drains_every_pending_root() {
     assert!(shim.finish(0).unwrap().is_empty());
     assert_eq!(shim.emitted_clock(0), 1_975);
     assert_eq!(shim.motor_microstep_distance(0), MICROSTEP);
+}
+
+/// A new overlay is entered one clock after its signal starts: the seam clock
+/// belongs to the previous view, so the drain resumes at `start_clock + 1`.
+/// Seeding the overlay lattice there would swallow the first clock of travel —
+/// at 0.985 microsteps per clock that is a whole crossing, and every remaining
+/// crossing slides a clock late.
+#[test]
+fn an_overlay_keeps_the_travel_of_its_first_clock() {
+    let overlay_start = 2_000;
+    let cycles = 100;
+    let mut shim = seeded(cfg(), 8);
+    shim.push_spans(
+        0,
+        &[
+            hold_span(1_000, 0.0, 1_000),
+            overlay_span(overlay_start, 0.0, 0.985, cycles),
+        ],
+    )
+    .unwrap();
+    let frames = shim.drain(u64::MAX).unwrap();
+
+    let expected: Vec<u64> = (1..=98)
+        .map(|k| overlay_start + (200 * k + 196) / 197)
+        .collect();
+    assert_eq!(
+        replayed_step_clocks(&frames),
+        expected,
+        "every microstep the overlay travels is a crossing, counted from the \
+         overlay's own start clock"
+    );
+    assert_eq!(
+        shim.commanded_steps(0),
+        0,
+        "an overlay walks its own lattice and never moves the commanded lane"
+    );
 }

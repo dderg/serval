@@ -12,7 +12,7 @@ mod generated;
 pub use generated::*;
 
 /// Bytes of one wire `LaneRun` header — everything before the sample block.
-pub const LANE_RUN_HEADER_LEN: usize = 20;
+pub const LANE_RUN_HEADER_LEN: usize = 21;
 
 /// Bytes of one wire `SetpointSample`, packed with no padding.
 pub const SETPOINT_SAMPLE_LEN: usize = 14;
@@ -26,18 +26,22 @@ pub struct SetpointSample {
     pub acc_mm_s2: f32,
 }
 
-/// One axis' contiguous run of setpoints. `start_index` is an absolute DC-cycle
-/// grid index — one ring entry per cycle — not a clock. `flags` bit 0 re-anchors
-/// the lane at `start_index`. `origin_mm_q16` is the host-frame position in
-/// mm × 65536 that `pos_counts == 0` denotes for this lane's anchor epoch.
+/// One drive slot's contiguous run of setpoints. `slot_idx` names the endpoint
+/// slot the run commands and `axis_idx` the motion axis that slot follows: an
+/// AWD axis is claimed by several slots, and each one's counts, torque and
+/// origin are computed for that slot alone, so a run may never be applied to
+/// its siblings. `start_index` is an absolute DC-cycle grid index — one ring
+/// entry per cycle — not a clock. `flags` bit 0 re-anchors the lane at
+/// `start_index`. `origin_mm_q16` is the host-frame position in mm × 65536
+/// that `pos_counts == 0` denotes for this lane's anchor epoch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LaneRun {
     pub axis_idx: u8,
+    pub slot_idx: u8,
     pub flags: u8,
     pub origin_mm_q16: i32,
     pub start_index: u64,
     pub interval_ticks: u32,
-    pub sample_count: u16,
     pub samples: Vec<SetpointSample>,
 }
 
@@ -60,14 +64,19 @@ pub struct PushSampleRuns {
 
 impl Encode for PushSampleRuns {
     fn encode(&self, out: &mut Vec<u8>) {
-        put_u8(out, self.lanes.len() as u8);
+        let lane_count =
+            u8::try_from(self.lanes.len()).expect("PushSampleRuns lane count must fit the wire u8");
+        put_u8(out, lane_count);
         for lane in &self.lanes {
+            let sample_count = u16::try_from(lane.samples.len())
+                .expect("LaneRun sample count must fit the wire u16");
             put_u8(out, lane.axis_idx);
+            put_u8(out, lane.slot_idx);
             put_u8(out, lane.flags);
             put_i32(out, lane.origin_mm_q16);
             put_u64(out, lane.start_index);
             put_u32(out, lane.interval_ticks);
-            put_u16(out, lane.sample_count);
+            put_u16(out, sample_count);
             for s in &lane.samples {
                 put_i32(out, s.pos_counts);
                 put_i32(out, s.vel_ff);
@@ -86,22 +95,35 @@ impl Decode for PushSampleRuns {
                 field: "PushSampleRuns.lanes",
             });
         }
+        if usize::from(lane_count) * LANE_RUN_HEADER_LEN > c.remaining() {
+            return Err(DecodeError::ArrayLengthExceedsBuffer {
+                claimed: u32::from(lane_count),
+                available: c.remaining(),
+            });
+        }
         let mut lanes: Vec<LaneRun> = Vec::with_capacity(lane_count as usize);
         for _ in 0..lane_count {
             let axis_idx = get_u8(c)?;
+            let slot_idx = get_u8(c)?;
             let flags = get_u8(c)?;
             let origin_mm_q16 = get_i32(c)?;
             let start_index = get_u64(c)?;
             let interval_ticks = get_u32(c)?;
             let sample_count = get_u16(c)?;
-            if lanes.iter().any(|l| l.axis_idx == axis_idx) {
+            if lanes.iter().any(|l| l.slot_idx == slot_idx) {
                 return Err(DecodeError::DuplicateField {
-                    field: "PushSampleRuns.axis_idx",
+                    field: "PushSampleRuns.slot_idx",
                 });
             }
             if sample_count == 0 {
                 return Err(DecodeError::EmptyArray {
                     field: "PushSampleRuns.samples",
+                });
+            }
+            if usize::from(sample_count) * SETPOINT_SAMPLE_LEN > c.remaining() {
+                return Err(DecodeError::ArrayLengthExceedsBuffer {
+                    claimed: u32::from(sample_count),
+                    available: c.remaining(),
                 });
             }
             let mut samples: Vec<SetpointSample> = Vec::with_capacity(sample_count as usize);
@@ -115,11 +137,11 @@ impl Decode for PushSampleRuns {
             }
             lanes.push(LaneRun {
                 axis_idx,
+                slot_idx,
                 flags,
                 origin_mm_q16,
                 start_index,
                 interval_ticks,
-                sample_count,
                 samples,
             });
         }

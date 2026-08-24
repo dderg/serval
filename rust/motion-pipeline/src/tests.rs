@@ -2267,12 +2267,12 @@ fn a_smooth_cusp_fits_below_the_high_degree_floor_without_bump_corrections() {
 /// A constant-acceleration span whose duration is a resolution-scale 6.9e-8
 /// riding a carrier near 24 mm: one ulp of the carrier is 8e-4 of the span's
 /// own travel. The cubic hands that ulp to the acceleration three times over
-/// through `c3` and the delta-built quadratic spends it once, while the
-/// left-Taylor quadratic never touches the delta at all and reproduces a
-/// constant acceleration exactly — so below the high-degree floor a degree-2
-/// rung holds a -3000 mm/s² span of this length, and the travel it carries
-/// can only agree with a delta recovered by subtracting absolute endpoints to
-/// within the carrier's own rounding.
+/// through `c3` and the delta-built quadratic spends it once, while the rung
+/// carrying the sampled acceleration spends it on the endpoint velocities
+/// instead — so below the high-degree floor a degree-2 rung holds a
+/// -3000 mm/s² span of this length with both seams anchored in position, and
+/// the travel it carries can only agree with a delta recovered by subtracting
+/// absolute endpoints to within the carrier's own rounding.
 #[test]
 fn a_constant_acceleration_resolution_span_fits_the_anchored_quadratic() {
     let t0 = 0.8300123879637047;
@@ -2360,8 +2360,9 @@ fn a_constant_acceleration_resolution_span_fits_the_anchored_quadratic() {
     let coefficient_left_velocity = (fit[1] - 2.0 * fit[2]) * (2.0 / h);
     let coefficient_left_error = (coefficient_left_velocity - v_start).abs();
     assert!(
-        coefficient_left_error <= 1e-12,
-        "the fit must match the left seam velocity exactly, off by {coefficient_left_error}"
+        coefficient_left_error <= velocity_budget,
+        "the fit must hold the left seam velocity inside the validated budget, off by \
+         {coefficient_left_error} > {velocity_budget}"
     );
     let coefficient_delta = 2.0 * fit[1];
     let subtracted_delta = truth_p(1.0) - truth_p(-1.0);
@@ -2383,6 +2384,163 @@ fn a_constant_acceleration_resolution_span_fits_the_anchored_quadratic() {
         right_velocity_error <= velocity_budget,
         "the right seam velocity must stay inside the validated budget, off by \
          {right_velocity_error} > {velocity_budget}"
+    );
+}
+
+/// An endpoint-anchored rung owns the seam continuity of the piece it hands
+/// back, so it may not buy its accuracy with a position step: a jerk-carrying
+/// span whose probes a left-extrapolated quadratic passes still has to land on
+/// the signal's own right endpoint, not on `p₀ + v₀h + a·h²/2`.
+#[test]
+fn an_endpoint_anchored_fit_never_steps_the_right_seam() {
+    let t0 = 0.31;
+    let h = 1e-3;
+    let t1 = t0 + h;
+    let p_start = 18.5;
+    let v_start = 42.0;
+    let a_start = -900.0;
+    let jerk = 6e4;
+    let position = |t: f64| {
+        let d = t - t0;
+        p_start + d * (v_start + d * (0.5 * a_start + d * jerk / 6.0))
+    };
+    let velocity = |t: f64| {
+        let d = t - t0;
+        v_start + d * (a_start + 0.5 * jerk * d)
+    };
+    let acceleration = |t: f64| a_start + jerk * (t - t0);
+    let t_of = |u: f64| nurbs::fmadd(0.5 * (u + 1.0), h, t0);
+    let truth_p = |u: f64| position(t_of(u));
+    let truth_v = |u: f64| velocity(t_of(u));
+    let truth_a = |u: f64| acceleration(t_of(u));
+    let tolerance = crate::lowering::FitTol {
+        pos_mm: 5e-5,
+        accel_mm_s2: 50.0,
+    };
+    let base = crate::lowering::quintic_in_u(
+        (truth_p(-1.0), truth_v(-1.0), truth_a(-1.0)),
+        (truth_p(1.0), truth_v(1.0), truth_a(1.0)),
+        h,
+    );
+    let left_extrapolation = p_start + h * (v_start + 0.5 * h * acceleration(t_of(0.0)));
+    let extrapolation_step = (left_extrapolation - position(t1)).abs();
+    assert!(
+        extrapolation_step > 1e-6 && extrapolation_step < tolerance.pos_mm,
+        "the left-extrapolated seam step {extrapolation_step} must be a real step the \
+         position probes still accept"
+    );
+    assert!(
+        0.5 * jerk * h < tolerance.accel_mm_s2,
+        "the span's acceleration swing must leave a constant-acceleration rung admissible"
+    );
+    let fit = crate::lowering::ladder_fit(
+        &base,
+        h,
+        tolerance,
+        &truth_p,
+        &truth_a,
+        &truth_v,
+        truth_p(1.0) - truth_p(-1.0),
+        f64::INFINITY,
+        crate::lowering::LadderPolicy {
+            endpoint_anchored: true,
+            enforce_velocity_sign: true,
+            high_degree_span_floor: 0.0,
+        },
+    )
+    .unwrap_or_else(|failure| {
+        panic!(
+            "a smooth jerk span must fit: u={}, position error {}, acceleration error {}",
+            failure.u, failure.position_error, failure.acceleration_error
+        )
+    });
+    assert_eq!(
+        fit.len(),
+        3,
+        "a degree-2 rung must hold this span, or the seam check proves nothing"
+    );
+    let eval_mono_u = |x: f64| fit.iter().rev().fold(0.0, |acc, &ck| acc * x + ck);
+    for (u, truth) in [(-1.0, position(t0)), (1.0, position(t1))] {
+        let seam_step = (eval_mono_u(u) - truth).abs();
+        assert!(
+            seam_step <= 8.0 * f64::EPSILON * p_start.abs(),
+            "endpoint u={u} must be anchored, stepped by {seam_step}"
+        );
+    }
+}
+
+struct SineTrackSignal {
+    amplitude: f64,
+    omega: f64,
+}
+
+impl crate::shaper::TrackSignal for SineTrackSignal {
+    fn eval(&self, t: f64) -> f64 {
+        self.amplitude * libm::sin(self.omega * t)
+    }
+    fn deriv(&self, t: f64) -> f64 {
+        self.amplitude * self.omega * libm::cos(self.omega * t)
+    }
+    fn second_deriv(&self, t: f64) -> f64 {
+        -self.amplitude * self.omega * self.omega * libm::sin(self.omega * t)
+    }
+}
+
+/// The fit budget bounds runaway bisection, so seed intervals the ladder
+/// already accepted may not spend it: a wide span must refine into the same
+/// pieces whether it is fitted on its own or after hundreds of accepted seed
+/// intervals, wherever it sits in the seed order.
+#[test]
+fn accepted_seed_intervals_do_not_spend_the_split_budget() {
+    let sig = SineTrackSignal {
+        amplitude: 1.0,
+        omega: 300.0,
+    };
+    let tolerance = crate::lowering::FitTol {
+        pos_mm: 5e-5,
+        accel_mm_s2: 50.0,
+    };
+    let dense = |from: f64, to: f64| -> Vec<f64> {
+        (0..=600)
+            .map(|k| from + (to - from) * f64::from(k) / 600.0)
+            .collect()
+    };
+    let fit = |t_start: f64, t_end: f64, seeds: &[f64]| {
+        crate::shaper::fit_axis_from_signal(0, t_start, t_end, seeds, &sig, tolerance, "test fit")
+            .expect("the sine track must fit")
+    };
+    let pieces_in = |track: &nurbs::ScalarNurbs, from: f64, to: f64| -> usize {
+        let mut boundaries: Vec<f64> = track
+            .knots()
+            .iter()
+            .copied()
+            .filter(|knot| *knot > from && *knot < to)
+            .collect();
+        boundaries.dedup();
+        boundaries.len() + 1
+    };
+    let tail_alone = pieces_in(&fit(0.9, 1.0, &[]), 0.9, 1.0);
+    assert!(
+        tail_alone > 1,
+        "the wide span must need refinement for this test to mean anything"
+    );
+    let with_leading_grid = fit(0.0, 1.0, &dense(0.0, 0.9));
+    assert_eq!(
+        pieces_in(&with_leading_grid, 0.0, 0.9),
+        600,
+        "the dense seed grid must be accepted without refinement"
+    );
+    assert_eq!(
+        pieces_in(&with_leading_grid, 0.9, 1.0),
+        tail_alone,
+        "600 accepted seed intervals spent the trailing span's split budget"
+    );
+    let head_alone = pieces_in(&fit(0.0, 0.1, &[]), 0.0, 0.1);
+    let with_trailing_grid = fit(0.0, 1.0, &dense(0.1, 1.0));
+    assert_eq!(
+        pieces_in(&with_trailing_grid, 0.0, 0.1),
+        head_alone,
+        "a leading wide span refined differently inside the dense grid"
     );
 }
 
@@ -3422,4 +3580,169 @@ fn voron0_shaper_output_is_independent_of_input_batching() {
             total_track_breakpoints(&single)
         );
     }
+}
+
+/// The worst position and velocity step across the emitted segment seams of
+/// one axis, each with the seam it happened at. Interior piece boundaries are
+/// deliberately excluded: a fitted piece boundary is C0 to the fit's own
+/// accuracy, while a segment seam is a handoff the pipeline owns exactly.
+fn worst_segment_seam_step(segs: &[ContinuousSegment], axis: usize) -> ((f64, f64), (f64, f64)) {
+    let mut position = (0.0, f64::NAN);
+    let mut velocity = (0.0, f64::NAN);
+    for pair in segs.windows(2) {
+        let left = pair[0]
+            .eval_axis(axis, pair[0].t_end)
+            .expect("the left segment evaluates at its end");
+        let right = pair[1]
+            .eval_axis(axis, pair[1].t_start)
+            .expect("the right segment evaluates at its start");
+        for (worst, step) in [
+            (&mut position, (right.position - left.position).abs()),
+            (&mut velocity, (right.velocity - left.velocity).abs()),
+        ] {
+            if step > worst.0 {
+                *worst = (step, pair[0].t_end);
+            }
+        }
+    }
+    (position, velocity)
+}
+
+fn projected_follower_arms(chains: &AxisChainSet) -> (Vec<TrajectoryItem>, Vec<TrajectoryItem>) {
+    let config = cfg();
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5),
+        line(2, [30.0, 0.0, 0.0], [30.0, 30.0, 0.0], 1.5),
+        line(3, [30.0, 30.0, 0.0], [60.0, 30.0, 0.0], 1.5),
+        line(4, [60.0, 30.0, 0.0], [60.0, 60.0, 0.0], 1.5),
+        line(5, [60.0, 60.0, 0.0], [90.0, 60.0, 0.0], 1.5),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let items = || -> Vec<StreamInput> { moves.iter().map(|m| m.clone().into()).collect() };
+    let lowered = || lower_to_base_items(config, chains, &home, items());
+    (
+        shape_in_bursts(chains.clone(), fit_tol(config), lowered()),
+        shape_one_at_a_time(chains.clone(), fit_tol(config), lowered()),
+    )
+}
+
+fn leader_zero_support_chains(advance_s: f64) -> AxisChainSet {
+    let gained = trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
+        "lead_gain",
+        &trajectory::algos::LinearPressureAdvance,
+        vec![advance_s],
+    )])
+    .expect("a kernel-free derivative-gain chain compiles");
+    AxisChainSet {
+        chains: vec![
+            gained,
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::default(),
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    }
+}
+
+/// A leader whose chain is nothing but zero-support stages still moves the
+/// toolhead the follower rides: those stages carry no kernel, so nothing
+/// widens the shaping window and the shaper never refits the leader column —
+/// the transform is baked into the materialized source before the frontier
+/// exists. Activating the projection on `raw.axes[leader] != shaped[leader]`
+/// alone therefore never fires, and the follower keeps the planner's raw
+/// track, laid out against a path the toolhead no longer takes: measured
+/// bit-identical to the untransformed baseline, every sample.
+#[test]
+fn follower_observes_a_zero_support_leader_transform() {
+    let (_, baseline) = projected_follower_arms(&follower_chains_without_kernels());
+    let (_, gained) = projected_follower_arms(&leader_zero_support_chains(0.004));
+    let owned = |items: &[TrajectoryItem]| -> Vec<ContinuousSegment> {
+        trajectory_segments(items)
+            .iter()
+            .map(|seg| (*seg).clone())
+            .collect()
+    };
+    let (baseline, gained) = (owned(&baseline), owned(&gained));
+    assert_eq!(
+        baseline.len(),
+        gained.len(),
+        "a toolhead-side leader gain must not change the emitted segment count"
+    );
+
+    let mut worst = (0.0_f64, f64::NAN);
+    for (plain, shaped) in baseline.iter().zip(&gained) {
+        assert_segment_axes_finite(shaped);
+        for i in 0..=40 {
+            let t = plain.t_start + (plain.t_end - plain.t_start) * f64::from(i) / 40.0;
+            let delta = (eval_segment_axis(plain, 3, t) - eval_segment_axis(shaped, 3, t)).abs();
+            if delta > worst.0 {
+                worst = (delta, t);
+            }
+        }
+    }
+    assert!(
+        worst.0 > 20.0 * fit_tol(cfg()).pos_mm,
+        "the follower ignored the leader's derivative gain: worst extruder \
+         deviation from the ungained baseline is {} mm at t={}",
+        worst.0,
+        worst.1
+    );
+
+    let (_, (step, t)) = worst_segment_seam_step(&gained, 3);
+    assert!(
+        step < 1e-9,
+        "the projected follower riding a gained leader steps {step} mm/s at the \
+         t={t} seam"
+    );
+    assert_extruder_continuous_and_monotone(&gained);
+}
+
+/// Chunking the shaper's input is a scheduling detail, so where an emit batch
+/// happens to end may not show up in the motion. Each committed stretch of a
+/// projected follower is fitted on its own, so it opens a fit residual away
+/// from the state already emitted; welding that seam in position alone spends
+/// the residual as a velocity step. Measured on this fixture before the
+/// endpoint-state weld: 4.7e-2 mm/s at a batch seam and 1.3e-3 mm/s at the
+/// committed-segment seams inside a batch, both moving with the batching.
+#[test]
+fn projected_follower_seams_hold_velocity_across_emit_batches() {
+    let chains = follower_kernel_chains(Some(0.044583333333333336), None, 0.02675);
+    let (burst, single) = projected_follower_arms(&chains);
+    for (label, items) in [("bursted", &burst), ("one-at-a-time", &single)] {
+        let segs: Vec<ContinuousSegment> = trajectory_segments(items)
+            .iter()
+            .map(|seg| (*seg).clone())
+            .collect();
+        assert!(segs.len() >= 5, "{label}: the fixture must emit a chain");
+        let ((position_step, position_t), (step, t)) = worst_segment_seam_step(&segs, 3);
+        assert!(
+            position_step < 1e-9,
+            "{label}: the follower position seam at t={position_t} steps by \
+             {position_step} mm"
+        );
+        assert!(
+            step < 1e-9,
+            "{label}: the follower velocity seam at t={t} steps by {step} mm/s — a \
+             position-only weld leaves the fit residual's slope behind"
+        );
+    }
+    let (burst_total, single_total) = (
+        extruder_end(
+            &trajectory_segments(&burst)
+                .iter()
+                .map(|seg| (*seg).clone())
+                .collect::<Vec<_>>(),
+        ),
+        extruder_end(
+            &trajectory_segments(&single)
+                .iter()
+                .map(|seg| (*seg).clone())
+                .collect::<Vec<_>>(),
+        ),
+    );
+    assert!(
+        (burst_total - single_total).abs() <= fit_tol(cfg()).pos_mm,
+        "the weld moved the settled total with the batching: {burst_total} vs \
+         {single_total}"
+    );
 }

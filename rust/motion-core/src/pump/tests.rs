@@ -1217,3 +1217,225 @@ fn non_stallfull_outcome_between_stalls_resets_the_timer() {
     assert!(escalated.lock_ok().is_empty());
     assert!(pump.consumption_stall.started().is_some());
 }
+
+const BUZZ_MCU: u32 = 9;
+const BUZZ_CYCLES_PER_SECOND: f64 = 1_000_000.0;
+
+struct BuzzFixture {
+    pump: Pump<NullSink>,
+    control: crossbeam_channel::Sender<PumpMsg>,
+    _control_rx: crossbeam_channel::Receiver<PumpMsg>,
+    clock_queries: Arc<Mutex<Vec<u32>>>,
+}
+
+/// A pump whose mcu clock walks forward one second on every query, so two
+/// routes that each resolved their own start would be armed a second apart.
+fn buzz_fixture() -> BuzzFixture {
+    let clock_queries: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+    let queries_for_clock = Arc::clone(&clock_queries);
+    let pump = Pump {
+        queues: BTreeMap::new(),
+        junctions: JunctionTracker::default(),
+        cohort: None,
+        halted: BTreeMap::new(),
+        sink: NullSink,
+        callbacks: PumpCallbacks {
+            mcu_clock_of: Box::new(move |mcu_id| {
+                let mut queries = queries_for_clock.lock_ok();
+                queries.push(mcu_id);
+                #[allow(clippy::cast_possible_truncation)]
+                let now = queries.len() as u64 * BUZZ_CYCLES_PER_SECOND as u64;
+                Some((now, BUZZ_CYCLES_PER_SECOND))
+            }),
+            ..PumpCallbacks::noop(super::stepcompress_sink::SHIM_RING_DEPTH)
+        },
+        history: None,
+        ledger: Arc::new(crate::drain::DrainLedger::new()),
+        pending_barrier_acks: Vec::new(),
+        backlog: Arc::new(AtomicU64::new(0)),
+        holding_ahead: false,
+        data_open: true,
+        intake_batch_open: false,
+        consumption_stall: super::stall::ConsumptionStallWatch::new(Duration::from_secs(60)),
+        mem_probe: super::memstat::MemPressureProbe::new(),
+    };
+    let (control, control_rx) = crossbeam_channel::unbounded();
+    BuzzFixture {
+        pump,
+        control,
+        _control_rx: control_rx,
+        clock_queries,
+    }
+}
+
+fn buzz_wave() -> BuzzWave {
+    BuzzWave {
+        freq_start_millihz: 40_000,
+        freq_end_millihz: 40_000,
+        amplitude_nm: 20_000,
+        duration_ms: 100,
+        ramp_ms: 5,
+    }
+}
+
+fn pulse_endpoint(
+    control: &crossbeam_channel::Sender<PumpMsg>,
+    axis: usize,
+    oid: u32,
+) -> Arc<Mutex<StepcompressEndpoint>> {
+    let clock_of: ClockSource = Arc::new(|_| Some((0, BUZZ_CYCLES_PER_SECOND)));
+    let egress: FrameEgress = Arc::new(|_| Ok(()));
+    let motors = vec![step_shim::MotorConfig {
+        oid,
+        microstep_distance: 0.01,
+        invert_dir: false,
+        cycles_per_second: BUZZ_CYCLES_PER_SECOND,
+        min_rearm_cycles: 0,
+        encoder: step_shim::StepEncoder::Classic {
+            max_error_ticks: step_shim::compress::DEFAULT_MAX_ERROR_TICKS,
+        },
+    }];
+    Arc::new(Mutex::new(StepcompressEndpoint::new(
+        BUZZ_MCU,
+        step_shim::StepShim::new(motors, super::stepcompress_sink::SHIM_RING_DEPTH),
+        vec![axis],
+        vec![oid],
+        egress,
+        control.clone(),
+        clock_of,
+        4,
+    )))
+}
+
+fn phase_endpoint(
+    control: &crossbeam_channel::Sender<PumpMsg>,
+    axis: u8,
+    oid: u32,
+) -> Arc<Mutex<SampleEndpoint>> {
+    let clock_of: ClockSource = Arc::new(|_| Some((0, BUZZ_CYCLES_PER_SECOND)));
+    let egress: FrameEgress = Arc::new(|_| Ok(()));
+    let lanes = vec![SampleLaneConfig {
+        axis,
+        oid,
+        cycles_per_second: BUZZ_CYCLES_PER_SECOND,
+        sample_rate_hz: 2_000,
+        position_quantum_mm: 0.01,
+        max_units_per_sample: 4_096,
+        ring_depth: 64,
+    }];
+    let endpoint = SampleEndpoint::new(BUZZ_MCU, &lanes, egress, clock_of, control.clone())
+        .expect("the lane config is representable");
+    Arc::new(Mutex::new(endpoint))
+}
+
+fn submit_buzz(pump: &mut Pump<NullSink>, routes: Vec<BuzzRoute>) -> Result<BuzzToken, String> {
+    let (reply, answer) = mpsc::sync_channel(1);
+    pump.handle_control_msg(PumpMsg::Buzz {
+        params: BuzzParams {
+            routes: routes.into(),
+            wave: buzz_wave(),
+        },
+        reply,
+    });
+    answer.recv().expect("the pump answers every arming")
+}
+
+/// The same pulse endpoint named twice used to pass preflight — every route
+/// looked idle — and then arm once before the duplicate found the endpoint
+/// already sweeping, leaving one transport in motion off a refused request.
+#[test]
+fn a_transport_named_twice_is_refused_with_nothing_armed() {
+    let mut fixture = buzz_fixture();
+    let endpoint = pulse_endpoint(&fixture.control, 0, 7);
+    let route = || BuzzRoute::Pulse {
+        mcu_id: BUZZ_MCU,
+        endpoint: Arc::clone(&endpoint),
+        axis_mask: 0b001,
+        sign_mask: 0,
+    };
+    let error = submit_buzz(&mut fixture.pump, vec![route(), route()])
+        .expect_err("one arming may name a transport once");
+    assert!(
+        error.contains("named twice"),
+        "the duplicate must be named as the reason: {error}"
+    );
+    assert!(
+        endpoint.lock_ok().buzz_complete(),
+        "a refused arming leaves the endpoint untouched"
+    );
+}
+
+/// A phase lane driven with a sign of zero is refused by the endpoint at arm
+/// time. Preflight has to catch it, or the routes ahead of it are already
+/// sweeping when the refusal arrives.
+#[test]
+fn an_invalid_lane_sign_is_refused_before_any_route_is_armed() {
+    let mut fixture = buzz_fixture();
+    let pulse = pulse_endpoint(&fixture.control, 0, 7);
+    let phase = phase_endpoint(&fixture.control, 1, 8);
+    let error = submit_buzz(
+        &mut fixture.pump,
+        vec![
+            BuzzRoute::Pulse {
+                mcu_id: BUZZ_MCU,
+                endpoint: Arc::clone(&pulse),
+                axis_mask: 0b001,
+                sign_mask: 0,
+            },
+            BuzzRoute::Phase {
+                mcu_id: BUZZ_MCU,
+                endpoint: Arc::clone(&phase),
+                lanes: vec![BuzzLane { axis: 1, sign: 0.0 }],
+            },
+        ],
+    )
+    .expect_err("a lane driven with sign 0 drives nothing");
+    assert!(
+        error.contains("sign 0"),
+        "the refusal must name the sign: {error}"
+    );
+    assert!(
+        pulse.lock_ok().buzz_complete(),
+        "the route ahead of the invalid one must not have been armed"
+    );
+}
+
+/// Two transports of one mcu are one sweep: they must be anchored on the one
+/// start the pump resolved for that mcu, not on whatever instant the pump
+/// happened to reach each transport at.
+#[test]
+fn routes_on_one_mcu_are_armed_from_a_single_resolved_start() {
+    let mut fixture = buzz_fixture();
+    let pulse = pulse_endpoint(&fixture.control, 0, 7);
+    let phase = phase_endpoint(&fixture.control, 1, 8);
+    submit_buzz(
+        &mut fixture.pump,
+        vec![
+            BuzzRoute::Pulse {
+                mcu_id: BUZZ_MCU,
+                endpoint: Arc::clone(&pulse),
+                axis_mask: 0b001,
+                sign_mask: 0,
+            },
+            BuzzRoute::Phase {
+                mcu_id: BUZZ_MCU,
+                endpoint: Arc::clone(&phase),
+                lanes: vec![BuzzLane { axis: 1, sign: 1.0 }],
+            },
+        ],
+    )
+    .expect("both idle transports accept one sweep");
+    assert_eq!(
+        *fixture.clock_queries.lock_ok(),
+        vec![BUZZ_MCU],
+        "the start of one mcu is resolved once and shared by its routes"
+    );
+    assert!(
+        !pulse.lock_ok().buzz_complete(),
+        "the pulse lane is sweeping"
+    );
+    assert!(
+        !phase.lock_ok().buzz_complete().expect("no latched fatal"),
+        "the phase lane is sweeping"
+    );
+}

@@ -166,11 +166,14 @@ struct Halt {
 /// most a couple of cuts; more than this is a host bug, not backpressure.
 pub const SAMPLE_BARRIERS_PER_LANE: usize = 4;
 
-/// A fence the host wants receipted once playback has passed `fence_clock`.
-/// `fence_clock == 0` is already satisfied — the fence was behind the playback
-/// clock when it arrived, which is the idle-lane case.
+/// A fence the host wants receipted once playback has passed `fence_clock`,
+/// tagged with the stepper oid the host addressed it by so the receipt names
+/// the lane identity that submitted it. `fence_clock == 0` is already
+/// satisfied — the fence was behind the playback clock when it arrived, which
+/// is the idle-lane case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Barrier {
+    oid: u8,
     seq: u32,
     fence_clock: u64,
 }
@@ -207,6 +210,7 @@ impl SampleLane {
             played_clock: 0,
             halt: None,
             barriers: [Barrier {
+                oid: 0,
                 seq: 0,
                 fence_clock: 0,
             }; SAMPLE_BARRIERS_PER_LANE],
@@ -387,7 +391,7 @@ impl SampleLane {
     /// passed the clock the next run would start at. A fence already behind the
     /// playback clock — an idle or empty lane — is satisfied on arrival, so the
     /// host's ack deadline cannot strand it.
-    pub fn push_barrier(&mut self, now: u64, seq: u32) -> Result<(), SampleLaneFault> {
+    pub fn push_barrier(&mut self, now: u64, oid: u8, seq: u32) -> Result<(), SampleLaneFault> {
         if self.barrier_len >= SAMPLE_BARRIERS_PER_LANE {
             return Err(SampleLaneFault::BarrierOverflow);
         }
@@ -399,14 +403,18 @@ impl SampleLane {
             .barriers
             .get_mut(self.barrier_len)
             .ok_or(SampleLaneFault::BarrierOverflow)?;
-        *slot = Barrier { seq, fence_clock };
+        *slot = Barrier {
+            oid,
+            seq,
+            fence_clock,
+        };
         self.barrier_len += 1;
         Ok(())
     }
 
     /// Pop the oldest fence playback has passed. Foreground-only; the caller
     /// loops until it returns `None` and sends one `sample_barrier_ack` each.
-    pub fn take_passed_barrier(&mut self) -> Option<u32> {
+    pub fn take_passed_barrier(&mut self) -> Option<(u8, u32)> {
         if self.barrier_len == 0 {
             return None;
         }
@@ -416,7 +424,7 @@ impl SampleLane {
         }
         self.barriers.copy_within(1..self.barrier_len, 0);
         self.barrier_len -= 1;
-        Some(head.seq)
+        Some((head.oid, head.seq))
     }
 
     /// A cut completes every fence it discarded: the runs they fenced are gone

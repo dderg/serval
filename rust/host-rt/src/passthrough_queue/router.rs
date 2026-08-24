@@ -22,6 +22,13 @@ impl McuHandle {
 pub enum RouterError {
     UnknownMcu(McuHandle),
     NoClockEstimate(McuHandle),
+    /// A published estimate carries a capture stamp ahead of the router's own
+    /// CLOCK_MONOTONIC_RAW read: the publisher is not in the RAW domain, so the
+    /// record's age cannot be measured and must not be guessed.
+    ClockEstStampAhead {
+        mcu: McuHandle,
+        skew_secs: f64,
+    },
 }
 
 impl std::fmt::Display for RouterError {
@@ -33,6 +40,13 @@ impl std::fmt::Display for RouterError {
                 "mcu handle {} has no valid clocksync record — the record was \
                  invalidated by a (re)connect and no fresh estimate has arrived",
                 h.raw()
+            ),
+            Self::ClockEstStampAhead { mcu, skew_secs } => write!(
+                f,
+                "mcu handle {} published a clock estimate stamped {skew_secs:.6}s \
+                 ahead of the router's CLOCK_MONOTONIC_RAW read — host_now_raw is \
+                 not a CLOCK_MONOTONIC_RAW instant",
+                mcu.raw()
             ),
         }
     }
@@ -241,16 +255,20 @@ impl PassthroughRouter {
     ///
     /// `offset_raw` is `time_avg + min_half_rtt` in CLOCK_MONOTONIC_RAW seconds
     /// (what Python's `_handle_clock` computes and the mirror callback exports).
-    /// `host_now_raw` is accepted for API compatibility but is NOT used in the
-    /// projection — using it would embed the Python→Rust GIL-hop latency ε
-    /// directly into `clock_offset`, biasing every subsequent projection by ε
-    /// (up to tens of ms on a loaded Pi 3B).
+    /// `host_now_raw` is the CLOCK_MONOTONIC_RAW instant at which the publisher
+    /// captured the estimate. It is kept out of `clock_offset` — using it there
+    /// would embed the Python→Rust GIL-hop latency ε directly into the
+    /// projection anchor, biasing every subsequent projection by ε (up to tens
+    /// of ms on a loaded Pi 3B). It defines `updated_at` instead, so an estimate
+    /// that spent ε in transit reads ε old rather than being reborn fresh at
+    /// delivery.
     ///
     /// Instead, `CLOCK_MONOTONIC_RAW` is read here in Rust at the same instant
     /// as `instant_to_f64(self.clock.now())`, so the conversion constant
     /// `raw_at_anchor = raw_now - instant_now` is computed without any
-    /// cross-runtime latency and `clock_offset = offset_raw - raw_at_anchor`
-    /// is exact up to µs sample skew.
+    /// cross-runtime latency and both `clock_offset = offset_raw -
+    /// raw_at_anchor` and `updated_at = host_now_raw - raw_at_anchor` are exact
+    /// up to µs sample skew.
     pub fn set_clock_est_rebased(
         &mut self,
         mcu: McuHandle,
@@ -258,11 +276,20 @@ impl PassthroughRouter {
         offset_raw: f64,
         last_clock: u64,
         converged: bool,
-        _host_now_raw: f64,
+        host_now_raw: f64,
     ) -> Result<(), RouterError> {
         let bridge_now_instant = instant_to_f64(self.clock.now());
         let bridge_now_raw = crate::clock::monotonic_raw_secs();
-        let clock_offset = offset_raw - (bridge_now_raw - bridge_now_instant);
+        let raw_at_anchor = bridge_now_raw - bridge_now_instant;
+        let clock_offset = offset_raw - raw_at_anchor;
+        let source_age_secs = bridge_now_raw - host_now_raw;
+        if !source_age_secs.is_finite() || source_age_secs < 0.0 {
+            return Err(RouterError::ClockEstStampAhead {
+                mcu,
+                skew_secs: -source_age_secs,
+            });
+        }
+        let updated_at = host_now_raw - raw_at_anchor;
         tracing::debug!(
             subsystem = "clocksync",
             event = "set_clock_est_rebased",
@@ -272,6 +299,9 @@ impl PassthroughRouter {
             bridge_now_raw,
             bridge_now_instant,
             clock_offset,
+            host_now_raw,
+            source_age_secs,
+            updated_at,
             last_clock,
             converged,
             "[clock-seed] set_clock_est_rebased"
@@ -285,7 +315,7 @@ impl PassthroughRouter {
             clock_offset,
             last_clock,
             converged,
-            updated_at: bridge_now_instant,
+            updated_at,
         });
         Ok(())
     }

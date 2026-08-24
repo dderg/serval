@@ -74,8 +74,8 @@ pub enum PostProcessError {
     #[error("axis {axis}: shaping window needs unavailable lookahead at t={t}")]
     MissingLookahead { axis: usize, t: f64 },
     #[error(
-        "axis {axis} ({fit_context}): fit tolerance failed after {attempted_spans} span attempts on \
-         [{t_start}, {t_end}], nearest seeds [{lower_seed} ({lower_seed_provenance}), \
+        "axis {axis} ({fit_context}): fit tolerance failed after {refinement_splits} refinement \
+         splits on [{t_start}, {t_end}], nearest seeds [{lower_seed} ({lower_seed_provenance}), \
          {upper_seed} ({upper_seed_provenance})], at u={probe_u}, t={probe_t}: \
          position error {position_error}/{position_budget}, velocity error \
          {velocity_error}/{velocity_budget}, acceleration error \
@@ -98,7 +98,7 @@ pub enum PostProcessError {
         lower_seed_provenance: &'static str,
         upper_seed_provenance: &'static str,
         probe_t: f64,
-        attempted_spans: usize,
+        refinement_splits: usize,
         position_error: f64,
         position_budget: f64,
         velocity_error: f64,

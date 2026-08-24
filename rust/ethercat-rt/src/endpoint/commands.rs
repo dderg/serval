@@ -9,7 +9,8 @@ use crate::dynamics::{DynamicsModel, ERR_DYNAMICS_BAD_DIM, ERR_DYNAMICS_REJECTED
 use crate::mailbox::{LimitEntry, MailboxReply, MailboxRequest};
 use crate::sensorless::{ERR_ARM_SENSORLESS_AMBIGUOUS_PAIR, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
 use crate::setpoint::{
-    RunHeader, SetpointEntry, ERR_BUZZ_IN_RING_MODE, EXECUTOR_SETPOINT_RING, RING_DEPTH_CYCLES,
+    RunHeader, SetpointEntry, ERR_BUZZ_IN_RING_MODE, ERR_LANE_SLOT_MISMATCH,
+    EXECUTOR_SETPOINT_RING, MAX_FILL_CYCLES, RING_DEPTH_CYCLES,
 };
 use crate::strain_comp::ERR_COMP_BAD_LANE;
 use crate::torque::{CommandAction, TorqueState, ERR_ENABLE_FAILED, ERR_PIECES_WHILE_FAULTED};
@@ -96,6 +97,9 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
                 msg,
             } => {
                 let spans = handle_push_sample_runs(ctx, correlation_id, &msg);
+                let free_start = std::time::Instant::now();
+                ctx.reclaim.dispose(msg);
+                let free_ns = free_start.elapsed().as_nanos() as i64;
                 if cmd_started.elapsed().as_nanos() > DISPATCH_BUDGET_NS {
                     tracing::warn!(
                         subsystem = "ethercat",
@@ -104,6 +108,7 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
                         map_ns = spans.map_ns,
                         fill_ns = spans.fill_ns,
                         respond_ns = spans.respond_ns,
+                        free_ns,
                         "PushSampleRuns exceeded the dispatch budget — the frame \
                          carried more ring depth than the budget affords"
                     );
@@ -308,7 +313,7 @@ fn handle_push_sample_runs(
     let lanes: Vec<(u8, u32)> = msg
         .lanes
         .iter()
-        .map(|lane| (lane.axis_idx, lane_free_cycles(ctx, lane.axis_idx)))
+        .map(|lane| (lane.axis_idx, lane_free_cycles(ctx, lane)))
         .collect();
     let grid = cycle::grid_now(ctx);
     ctx.server.respond(&push_sample_runs_response_frame(
@@ -326,15 +331,63 @@ fn handle_push_sample_runs(
     }
 }
 
-/// Copy one frame's lane runs into the setpoint rings, fanning each lane out
-/// to every slot claiming its axis. Returns the frame result and how many
-/// entries were copied. Every rejection is latched in the ring it hit, so the
-/// heartbeat reports it and the drives park.
+/// Copy one frame's lane runs into the setpoint rings. A run is computed for
+/// one drive — its counts, torque feedforward and count origin are that
+/// slot's alone — so it goes to the slot it names and never to a sibling
+/// sharing its axis. Returns the frame result and how many entries were
+/// copied. Every rejection is latched in the ring it hit, so the heartbeat
+/// reports it and the drives park.
 pub(super) fn fill_lane_runs(ctx: &mut EndpointCtx, lanes: &[LaneRun]) -> (i32, u32) {
     let mut result = 0i32;
     let mut entries = 0u32;
     let mut scratch = std::mem::take(&mut ctx.sp_fill_scratch);
     for lane in lanes {
+        let Some(slot) = lane_slot(ctx, lane) else {
+            result = ERR_LANE_SLOT_MISMATCH;
+            crate::rt_eprintln!(
+                "ec-rt: FAULT sample_lane_slot_mismatch slot {} axis {} — endpoint has \
+                 {} slots with axes {:?}",
+                lane.slot_idx,
+                lane.axis_idx,
+                ctx.num_slaves,
+                ctx.slave_axes
+            );
+            tracing::error!(
+                subsystem = "ethercat",
+                event = "sample_lane_slot_mismatch",
+                slot = lane.slot_idx,
+                axis = lane.axis_idx,
+                num_slaves = ctx.num_slaves,
+                "a lane run named a slot this endpoint does not drive on that \
+                 axis — the frame is refused rather than applied to a sibling"
+            );
+            continue;
+        };
+        if lane.samples.len() > MAX_FILL_CYCLES {
+            let asked = lane.samples.len() as u32;
+            let fault = ctx.sp_rings[slot].reject_oversized(asked);
+            result = fault.code();
+            crate::rt_eprintln!(
+                "ec-rt: FAULT {} on slot {slot} axis {} start_index {} count {asked} \
+                 — refused before staging",
+                fault.as_str(),
+                lane.axis_idx,
+                lane.start_index
+            );
+            tracing::error!(
+                subsystem = "ethercat",
+                event = "sample_fill_rejected",
+                reason = fault.as_str(),
+                slot,
+                axis = lane.axis_idx,
+                start_index = lane.start_index,
+                count = asked,
+                fault_code = fault.code(),
+                "a lane run asked for more cycles than one frame may carry — \
+                 nothing was copied on the DC thread"
+            );
+            continue;
+        }
         scratch.clear();
         scratch.extend(lane.samples.iter().map(|s| SetpointEntry {
             pos_counts: s.pos_counts,
@@ -350,50 +403,49 @@ pub(super) fn fill_lane_runs(ctx: &mut EndpointCtx, lanes: &[LaneRun]) -> (i32, 
             anchor: lane.flags & LANE_RUN_FLAG_REANCHOR != 0,
             final_run: lane.flags & LANE_RUN_FLAG_TAIL != 0,
         };
-        for slot in 0..ctx.num_slaves {
-            if ctx.slave_axes[slot] != lane.axis_idx {
-                continue;
-            }
-            if header.anchor {
-                ctx.ring_origin[slot] = None;
-            }
-            if let Err(fault) = ctx.sp_rings[slot].fill(&header, &scratch) {
-                result = fault.code();
-                crate::rt_eprintln!(
-                    "ec-rt: FAULT {} on slot {slot} axis {} start_index {} count {} — {:?}",
-                    fault.as_str(),
-                    lane.axis_idx,
-                    lane.start_index,
-                    scratch.len(),
-                    fault
-                );
-                tracing::error!(
-                    subsystem = "ethercat",
-                    event = "sample_fill_rejected",
-                    reason = fault.as_str(),
-                    slot,
-                    axis = lane.axis_idx,
-                    start_index = lane.start_index,
-                    count = scratch.len(),
-                    fault_code = fault.code(),
-                    "setpoint ring rejected a run — the fault is latched for the \
-                     heartbeat and the drives park"
-                );
-            }
+        if header.anchor {
+            ctx.ring_origin[slot] = None;
+        }
+        if let Err(fault) = ctx.sp_rings[slot].fill(&header, &scratch) {
+            result = fault.code();
+            crate::rt_eprintln!(
+                "ec-rt: FAULT {} on slot {slot} axis {} start_index {} count {} — {:?}",
+                fault.as_str(),
+                lane.axis_idx,
+                lane.start_index,
+                scratch.len(),
+                fault
+            );
+            tracing::error!(
+                subsystem = "ethercat",
+                event = "sample_fill_rejected",
+                reason = fault.as_str(),
+                slot,
+                axis = lane.axis_idx,
+                start_index = lane.start_index,
+                count = scratch.len(),
+                fault_code = fault.code(),
+                "setpoint ring rejected a run — the fault is latched for the \
+                 heartbeat and the drives park"
+            );
         }
     }
     ctx.sp_fill_scratch = scratch;
     (result, entries)
 }
 
-/// An AWD axis fans one lane's runs out to every slot claiming it, so the
-/// lane's headroom is the tightest of those slots.
-fn lane_free_cycles(ctx: &EndpointCtx, axis: u8) -> u32 {
-    (0..ctx.num_slaves)
-        .filter(|&slot| ctx.slave_axes[slot] == axis)
-        .map(|slot| ctx.sp_rings[slot].free() as u32)
-        .min()
-        .unwrap_or(0)
+/// The slot a run commands, or `None` when the endpoint has no such slot or
+/// that slot follows a different axis than the run claims — a routing bug the
+/// frame must fail on rather than silently retarget.
+fn lane_slot(ctx: &EndpointCtx, lane: &LaneRun) -> Option<usize> {
+    let slot = usize::from(lane.slot_idx);
+    (slot < ctx.num_slaves && ctx.slave_axes[slot] == lane.axis_idx).then_some(slot)
+}
+
+/// Headroom of the one slot the run addresses; a frame carrying every slot of
+/// an AWD axis reports each of them, and the host takes the tightest.
+fn lane_free_cycles(ctx: &EndpointCtx, lane: &LaneRun) -> u32 {
+    lane_slot(ctx, lane).map_or(0, |slot| ctx.sp_rings[slot].free() as u32)
 }
 
 fn handle_query_sample_grid(ctx: &mut EndpointCtx, correlation_id: u32) {
@@ -516,6 +568,10 @@ fn handle_set_drive_limits(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetD
     }
 }
 
+/// The lead is applied where the feedforward is computed — the host filler —
+/// so the endpoint only proves the slot exists. The host installs the lead on
+/// this acknowledgement, which is why an unknown slot must be rejected here
+/// rather than silently accepted.
 pub(super) fn handle_set_ff_lead(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetFfLead) {
     let num_slaves = ctx.num_slaves;
     if msg.slot as usize >= num_slaves {
@@ -527,7 +583,6 @@ pub(super) fn handle_set_ff_lead(ctx: &mut EndpointCtx, correlation_id: u32, msg
             .respond(&set_ff_lead_response_frame(correlation_id, -309));
         return;
     }
-    ctx.ff_lead_ns[msg.slot as usize] = msg.lead_ns;
     crate::rt_eprintln!(
         "ec-rt: SetFfLead slot={} lead_ns={} rc=0",
         msg.slot,
@@ -538,7 +593,7 @@ pub(super) fn handle_set_ff_lead(ctx: &mut EndpointCtx, correlation_id: u32, msg
         event = "set_ff_lead",
         slot = msg.slot,
         lead_ns = msg.lead_ns,
-        "feedforward lead updated"
+        "feedforward lead acknowledged for the host filler"
     );
     ctx.server
         .respond(&set_ff_lead_response_frame(correlation_id, 0));

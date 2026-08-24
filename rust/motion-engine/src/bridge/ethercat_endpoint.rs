@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use host_rt::mcu_serial_conn::McuSerialConn;
+use host_rt::transport::TransportError;
 
 use super::abort_after_tracing_appender_drains;
 use super::state::EthercatDrive;
@@ -81,9 +82,21 @@ pub(crate) enum ReportedExecutor {
 
 #[derive(Debug)]
 pub(crate) enum EndpointClaimError {
-    DriveOffline { slave_idx: u8, fault_code: u16 },
-    DriveFault { slave_idx: u8, fault_code: u16 },
-    ExecutorMismatch { reported: ReportedExecutor },
+    DriveOffline {
+        slave_idx: u8,
+        fault_code: u16,
+    },
+    DriveFault {
+        slave_idx: u8,
+        fault_code: u16,
+    },
+    ExecutorMismatch {
+        reported: ReportedExecutor,
+    },
+    Transport {
+        call: &'static str,
+        cause: TransportError,
+    },
     Protocol(String),
 }
 
@@ -133,6 +146,30 @@ pub(crate) fn message_for_claim_error(
                 "ethercat {label}: executor mismatch — the endpoint could not report its \
                  executor ({detail}); the endpoint binary predates the sample-stream executor \
                  — rebuild rust/ethercat-rt, then FIRMWARE_RESTART"
+            ),
+        },
+        EndpointClaimError::Transport { call, cause } => match cause {
+            TransportError::Timeout => format!(
+                "ethercat {label}: endpoint on {interface} did not answer {call} before the \
+                 claim deadline — the endpoint process is up but not servicing control frames \
+                 (RT-starved, wedged, or a binary that ignores {call}); check the endpoint's \
+                 stderr and rebuild rust/ethercat-rt, then FIRMWARE_RESTART"
+            ),
+            TransportError::Closed => format!(
+                "ethercat {label}: endpoint on {interface} closed the control socket during \
+                 {call} — the endpoint exited before answering; check its stderr for the \
+                 bringup failure, then FIRMWARE_RESTART"
+            ),
+            TransportError::Io(e) => format!(
+                "ethercat {label}: control-socket I/O error on {interface} during {call} — \
+                 {e}, then FIRMWARE_RESTART"
+            ),
+            other @ (TransportError::Parse(_)
+            | TransportError::DispatcherTimeout
+            | TransportError::Backpressure
+            | TransportError::McuShutdown(_)) => format!(
+                "ethercat {label}: control transport failed on {interface} during {call} — \
+                 {other}, then FIRMWARE_RESTART"
             ),
         },
         EndpointClaimError::Protocol(s) => {
@@ -302,7 +339,10 @@ pub(crate) fn handshake_ethercat_endpoint(
     let remaining = deadline.saturating_duration_since(Instant::now());
     let (kind, body) = conn
         .mcu_call(MessageKind::ClaimHandshake, Vec::new(), remaining)
-        .map_err(|e| EndpointClaimError::Protocol(format!("ClaimHandshake call: {e:?}")))?;
+        .map_err(|cause| EndpointClaimError::Transport {
+            call: "ClaimHandshake",
+            cause,
+        })?;
 
     if kind != MessageKind::ClaimHandshakeReply {
         return Err(EndpointClaimError::Protocol(format!(
@@ -348,8 +388,9 @@ pub(crate) struct SampleGrid {
 }
 
 /// Ask the endpoint which executor it runs and refuse the claim on any answer
-/// that is not the setpoint ring. An endpoint that does not understand
-/// `QuerySampleGrid` is a mismatch too: its binary predates the sample stream.
+/// that is not a usable setpoint ring. A reply that is not a
+/// `SampleGridResponse` proves the endpoint cannot execute the sample stream;
+/// a call that never completes is a transport failure and is reported as one.
 pub(crate) fn verify_sample_grid(
     conn: &McuSerialConn,
     deadline: Instant,
@@ -364,10 +405,9 @@ pub(crate) fn verify_sample_grid(
     let remaining = deadline.saturating_duration_since(Instant::now());
     let (kind, body) = conn
         .mcu_call(MessageKind::QuerySampleGrid, Vec::new(), remaining)
-        .map_err(|e| {
-            mismatch(ReportedExecutor::Unsupported(format!(
-                "QuerySampleGrid call failed: {e:?}"
-            )))
+        .map_err(|cause| EndpointClaimError::Transport {
+            call: "QuerySampleGrid",
+            cause,
         })?;
 
     if kind != MessageKind::SampleGridResponse {
@@ -378,14 +418,19 @@ pub(crate) fn verify_sample_grid(
         ))));
     }
 
-    let reply = SampleGridResponse::decode_from(&mut Cursor::new(&body)).map_err(|e| {
-        mismatch(ReportedExecutor::Unsupported(format!(
-            "decode SampleGridResponse: {e:?}"
-        )))
-    })?;
+    let reply = SampleGridResponse::decode_from(&mut Cursor::new(&body))
+        .map_err(|e| EndpointClaimError::Protocol(format!("decode SampleGridResponse: {e:?}")))?;
 
     if reply.executor != ethercat_rt::setpoint::EXECUTOR_SETPOINT_RING {
         return Err(mismatch(ReportedExecutor::Code(reply.executor)));
+    }
+
+    if reply.ring_depth_cycles == 0 {
+        return Err(EndpointClaimError::Protocol(
+            "endpoint reports a setpoint ring of zero cycles — the pump cannot pace a ring \
+             with no slots; rebuild rust/ethercat-rt, then FIRMWARE_RESTART"
+                .to_owned(),
+        ));
     }
 
     Ok(SampleGrid {

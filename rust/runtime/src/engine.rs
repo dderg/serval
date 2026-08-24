@@ -134,6 +134,8 @@ impl Engine {
                 axis.reset_isr_cache();
             }
         }
+        #[cfg(feature = "sample-stepping")]
+        self.sample_force_idle(shared);
         if self.status() != RuntimeStatus::Fault {
             self.status
                 .store(RuntimeStatus::Idle as u8, Ordering::Release);

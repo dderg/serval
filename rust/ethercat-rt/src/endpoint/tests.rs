@@ -18,9 +18,13 @@ use std::sync::{
 };
 
 use mcu_protocol::{
-    messages::{SetTorque, StepperSuppress},
+    messages::{
+        LaneRun, SetTorque, SetpointSample, StepperSuppress, LANE_RUN_FLAG_REANCHOR,
+        LANE_RUN_FLAG_TAIL,
+    },
     Decode, Encode,
 };
+use runtime::error::RUNTIME_ERR_SAMPLE_RING_FULL;
 use trajectory::{
     ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm, NudgeProfile,
 };
@@ -36,6 +40,7 @@ use crate::mailbox::{MailboxWorker, WorkerScheduling};
 use crate::sdo::SdoBus;
 use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
+use crate::setpoint::Played;
 use crate::setpoint_fill::{ChainFiller, LaneSpec, CLOCK_FREQ_HZ};
 use crate::stream_halt::StreamHalt;
 use crate::torque::{TorqueGate, TorqueState};
@@ -368,7 +373,6 @@ fn raw_ctx(name: &str, drive: impl DriveChain + 'static) -> EndpointCtx {
         slave_axes: vec![0, 1],
         velocity_ff: vec![false; NUM_SLAVES],
         torque_clamp_tenths: vec![0; NUM_SLAVES],
-        ff_lead_ns: vec![0; NUM_SLAVES],
         jump_log_counts: vec![1638; NUM_SLAVES],
         cycle_ns: CYCLE_NS as i64,
         group_delay_ns: 0,
@@ -384,7 +388,8 @@ fn raw_ctx(name: &str, drive: impl DriveChain + 'static) -> EndpointCtx {
         grid: crate::setpoint::SampleGrid::new(CYCLE_NS),
         ring_origin: vec![None; NUM_SLAVES],
         sp_play_scratch: vec![None; NUM_SLAVES],
-        sp_fill_scratch: Vec::new(),
+        sp_fill_scratch: Vec::with_capacity(crate::setpoint::MAX_FILL_CYCLES),
+        reclaim: crate::reclaim::Reclaim::spawn(),
         last_grid_index: 0,
         last_grid_clock: 0,
         damper: DiffDamperBank::new(CYCLE_NS as i64),
@@ -1270,7 +1275,7 @@ fn read_set_ff_lead_response(
 }
 
 #[test]
-fn handle_set_ff_lead_updates_slot_and_responds_ok() {
+fn handle_set_ff_lead_acknowledges_a_known_slot() {
     let name = "ff-lead-ok";
     let mut ctx = test_ctx(name);
     let mut client = connect_test_client(&mut ctx, name);
@@ -1279,13 +1284,11 @@ fn handle_set_ff_lead_updates_slot_and_responds_ok() {
         lead_ns: 12_345,
     };
     super::commands::handle_set_ff_lead(&mut ctx, 9, msg);
-    assert_eq!(ctx.ff_lead_ns[0], 12_345);
-    assert_eq!(ctx.ff_lead_ns[1], 0);
     assert_eq!(read_set_ff_lead_response(&mut client).result, 0);
 }
 
 #[test]
-fn handle_set_ff_lead_invalid_slot_leaves_vector_untouched() {
+fn handle_set_ff_lead_rejects_an_unknown_slot() {
     let name = "ff-lead-bad-slot";
     let mut ctx = test_ctx(name);
     let mut client = connect_test_client(&mut ctx, name);
@@ -1294,7 +1297,6 @@ fn handle_set_ff_lead_invalid_slot_leaves_vector_untouched() {
         lead_ns: 999,
     };
     super::commands::handle_set_ff_lead(&mut ctx, 3, msg);
-    assert_eq!(ctx.ff_lead_ns, vec![0; NUM_SLAVES]);
     assert_eq!(read_set_ff_lead_response(&mut client).result, -309);
 }
 
@@ -2191,4 +2193,101 @@ fn suppress_maps_stepper_index_within_a_shared_axis() {
         vec![false, true],
         "an unknown stepper index must be rejected, not clamped"
     );
+}
+
+fn lane_run(axis_idx: u8, slot_idx: u8, start_index: u64, samples: &[i32]) -> LaneRun {
+    LaneRun {
+        axis_idx,
+        slot_idx,
+        flags: LANE_RUN_FLAG_REANCHOR | LANE_RUN_FLAG_TAIL,
+        origin_mm_q16: 0,
+        start_index,
+        interval_ticks: CYCLE_NS as u32,
+        samples: samples
+            .iter()
+            .map(|&pos_counts| SetpointSample {
+                pos_counts,
+                vel_ff: 0,
+                torque_ff: 0,
+                acc_mm_s2: 0.0,
+            })
+            .collect(),
+    }
+}
+
+/// An AWD axis is claimed by two drive slots and each slot's run carries that
+/// slot's own counts: applying one to both would command the same target on
+/// drives whose inverts and origins differ.
+#[test]
+fn each_awd_slot_plays_only_its_own_run() {
+    let mut ctx = test_ctx("awd-slot-identity");
+    ctx.slave_axes = vec![0, 0];
+    let runs = vec![
+        lane_run(0, 0, 40, &[10, 11]),
+        lane_run(0, 1, 40, &[-10, -11]),
+    ];
+    assert_eq!(super::commands::fill_lane_runs(&mut ctx, &runs).0, 0);
+    let played: Vec<Vec<i32>> = (0..NUM_SLAVES)
+        .map(|slot| {
+            (40..42)
+                .map(|index| match ctx.sp_rings[slot].play(index) {
+                    Played::Entry(entry) => entry.pos_counts,
+                    Played::Drained => panic!("slot {slot} received no run"),
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(played, vec![vec![10, 11], vec![-10, -11]]);
+}
+
+#[test]
+fn a_run_naming_a_slot_off_its_axis_is_refused() {
+    let mut ctx = test_ctx("awd-slot-mismatch");
+    let runs = vec![lane_run(0, 1, 40, &[10])];
+    assert_eq!(
+        super::commands::fill_lane_runs(&mut ctx, &runs).0,
+        crate::setpoint::ERR_LANE_SLOT_MISMATCH
+    );
+    assert!(
+        ctx.sp_rings.iter().all(|r| r.is_empty()),
+        "a misrouted run may not reach any ring"
+    );
+}
+
+#[test]
+fn a_run_past_the_frame_cap_never_reaches_the_dc_scratch() {
+    let mut ctx = test_ctx("oversized-run");
+    let capacity = ctx.sp_fill_scratch.capacity();
+    let samples = vec![0i32; crate::setpoint::MAX_FILL_CYCLES + 1];
+    let runs = vec![lane_run(0, 0, 40, &samples)];
+    let (result, entries) = super::commands::fill_lane_runs(&mut ctx, &runs);
+    assert_eq!(result, RUNTIME_ERR_SAMPLE_RING_FULL);
+    assert_eq!(entries, 0, "nothing was copied");
+    assert_eq!(
+        ctx.sp_fill_scratch.capacity(),
+        capacity,
+        "an oversized frame may not reallocate on the DC thread"
+    );
+    assert!(ctx.sp_rings.iter().all(|r| r.is_empty()));
+}
+
+/// The host retires a run once playback passes its exclusive `end_clock`, so
+/// the heartbeat reports the cursor in the trajectory nanoseconds the grid
+/// stamps: a run of three cycles from index 40 retires at the clock of 43.
+#[test]
+fn the_playback_clock_is_the_exclusive_cursor_in_trajectory_nanoseconds() {
+    let mut ctx = test_ctx("playback-cursor");
+    let runs = vec![lane_run(0, 0, 40, &[1, 2, 3])];
+    assert_eq!(super::commands::fill_lane_runs(&mut ctx, &runs).0, 0);
+    assert_eq!(
+        super::lane_playback_clocks(&ctx)[0],
+        0,
+        "an unplayed lane has no cursor"
+    );
+    for index in 40..43 {
+        ctx.last_grid_index = index;
+        ctx.last_grid_clock = index * CYCLE_NS;
+        assert!(matches!(ctx.sp_rings[0].play(index), Played::Entry(_)));
+    }
+    assert_eq!(super::lane_playback_clocks(&ctx)[0], 43 * CYCLE_NS);
 }

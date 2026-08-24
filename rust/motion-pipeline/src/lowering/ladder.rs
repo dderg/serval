@@ -39,11 +39,22 @@ pub(crate) fn eval_mono_dd(c: &[f64], x: f64) -> f64 {
     acc
 }
 
-fn left_taylor_quadratic_in_u(p_start: f64, v_start: f64, acceleration: f64, h: f64) -> Vec<f64> {
+/// Monomial-in-u quadratic that reproduces the left endpoint position and
+/// `endpoint_delta` — the span's own relative travel — exactly, and carries
+/// the *sampled* midpoint acceleration instead of solving one from the
+/// endpoints. That keeps both seams anchored while the delta's error reaches
+/// the fit as `Δ/h` of velocity rather than `2Δ/h²` of acceleration, which is
+/// the only reading a resolution-scale span still resolves.
+pub(crate) fn anchored_acceleration_quadratic_in_u(
+    p_start: f64,
+    acceleration: f64,
+    h: f64,
+    endpoint_delta: f64,
+) -> Vec<f64> {
     let curvature = acceleration * h * h / 8.0;
     vec![
-        p_start + 0.5 * v_start * h + curvature,
-        0.5 * v_start * h + 2.0 * curvature,
+        p_start + 0.5 * endpoint_delta - curvature,
+        0.5 * endpoint_delta,
         curvature,
     ]
 }
@@ -286,9 +297,9 @@ fn preserves_certified_velocity_sign(mono_u: &[f64], truth_v: &dyn Fn(f64) -> f6
 }
 
 /// An endpoint-anchored rung is only allowed to hand its caller a piece whose
-/// right endpoint velocity is still the signal's: the position and
-/// acceleration probes pass a velocity step at `u = 1` that a rung matching
-/// only the left `(p, v)` and the relative travel is free to leave there.
+/// endpoint velocities are still the signal's: the position and acceleration
+/// probes pass a velocity step at either end that a rung solved from the
+/// relative travel is free to leave there.
 fn candidate_ok(
     mono_u: &[f64],
     h: f64,
@@ -300,9 +311,11 @@ fn candidate_ok(
     policy: LadderPolicy,
 ) -> bool {
     let dd_scale = (2.0 / h) * (2.0 / h);
-    let right_velocity_anchored = !policy.endpoint_anchored
-        || (eval_mono_d(mono_u, 1.0) * (2.0 / h) - truth_v(1.0)).abs() <= velocity_budget;
-    right_velocity_anchored
+    let endpoint_velocity_anchored = !policy.endpoint_anchored
+        || [-1.0, 1.0]
+            .into_iter()
+            .all(|u| (eval_mono_d(mono_u, u) * (2.0 / h) - truth_v(u)).abs() <= velocity_budget);
+    endpoint_velocity_anchored
         && (!policy.enforce_velocity_sign || preserves_certified_velocity_sign(mono_u, truth_v))
         && LADDER_PROBES_U.iter().all(|&u| {
             (eval_mono(mono_u, u) - truth_p(u)).abs() <= tol.pos_mm
@@ -351,19 +364,19 @@ pub(crate) fn ladder_fit(
         }
     }
     if policy.endpoint_anchored {
-        let taylor_quadratic =
-            left_taylor_quadratic_in_u(truth_p(-1.0), truth_v(-1.0), truth_a(0.0), h);
+        let anchored_acceleration_quadratic =
+            anchored_acceleration_quadratic_in_u(truth_p(-1.0), truth_a(0.0), h, endpoint_delta);
         if candidate_ok(
-            &taylor_quadratic,
+            &anchored_acceleration_quadratic,
             h,
             tol,
             truth_p,
             truth_v,
             truth_a,
-            velocity_budget.min(tol.accel_mm_s2 * h),
+            velocity_budget,
             policy,
         ) {
-            return Ok(taylor_quadratic);
+            return Ok(anchored_acceleration_quadratic);
         }
         let anchored_quadratic = quadratic_in_u(truth_p(-1.0), truth_v(-1.0), h, endpoint_delta);
         if candidate_ok(

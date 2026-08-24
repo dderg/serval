@@ -599,9 +599,8 @@ pub fn build_serial_seed_sends<S: ::std::hash::BuildHasher>(
     ethercat_mcu_ids: &HashSet<u32, S>,
     pos: geometry::MachinePos,
 ) -> Vec<SeedSend> {
-    let takes_runtime_seed = |cfg: &&McuAxisConfig| {
-        !ethercat_mcu_ids.contains(&cfg.mcu_id) && cfg.lane_kinds.contains(&LaneKind::Phase)
-    };
+    let takes_runtime_seed =
+        |cfg: &&McuAxisConfig| !ethercat_mcu_ids.contains(&cfg.mcu_id) && cfg.has_phase_lanes();
     configs
         .iter()
         .filter(takes_runtime_seed)

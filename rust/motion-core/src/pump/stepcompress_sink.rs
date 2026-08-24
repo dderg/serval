@@ -493,6 +493,12 @@ impl StepcompressEndpoint {
             .any(|&axis| axis < 8 && axis_mask & (1 << axis) != 0)
     }
 
+    /// How many motor slots one arming of this endpoint would occupy.
+    #[must_use]
+    pub fn buzz_slot_count(&self) -> usize {
+        self.oids.len()
+    }
+
     #[must_use]
     pub fn buzz_complete(&self) -> bool {
         self.buzz.is_none()

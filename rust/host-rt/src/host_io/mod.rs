@@ -42,6 +42,7 @@ pub struct McuHostIoConfig {
     pub trace_capacity: usize,
     pub host_event_capacity: usize,
     pub runtime_event_capacity: usize,
+    pub runtime_event_bulk_capacity: usize,
     pub default_call_timeout: Duration,
     pub identify_timeout: Duration,
     pub default_dispatcher_timeout: Duration,
@@ -54,6 +55,7 @@ impl Default for McuHostIoConfig {
             trace_capacity: 256,
             host_event_capacity: 64,
             runtime_event_capacity: 512,
+            runtime_event_bulk_capacity: 4096,
             default_call_timeout: Duration::from_millis(100),
             identify_timeout: Duration::from_millis(15_000),
             default_dispatcher_timeout: Duration::from_secs(30),
@@ -107,7 +109,7 @@ pub enum ReactorCommand {
     },
     SubscribeRuntimeEvents {
         priority: SyncSender<RuntimeEvent>,
-        bulk: Sender<RuntimeEvent>,
+        bulk: SyncSender<RuntimeEvent>,
         reply: SyncSender<Result<(), SubscribeError>>,
     },
     SubscribeHostEvents {
@@ -122,8 +124,12 @@ pub enum ReactorCommand {
     },
     /// A burst of encoded commands to pack into as few Klipper message
     /// blocks as the 64-byte block allows before it reaches the wire.
+    /// `reserved_blocks` is the admission capacity the sender claimed on
+    /// [`FireAndForgetDepth`]; the reactor releases it once the burst is
+    /// queued or abandoned.
     FireAndForgetBatch {
         payloads: Vec<Vec<u8>>,
+        reserved_blocks: usize,
     },
     McuIdentify {
         completion:
@@ -653,7 +659,8 @@ impl McuHostIo {
     > {
         let cap = self.config.runtime_event_capacity;
         let (priority_tx, priority_rx) = std::sync::mpsc::sync_channel(cap);
-        let (bulk_tx, bulk_rx) = std::sync::mpsc::channel();
+        let (bulk_tx, bulk_rx) =
+            std::sync::mpsc::sync_channel(self.config.runtime_event_bulk_capacity);
         let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
         self.submission_tx
             .send(ReactorCommand::SubscribeRuntimeEvents {
@@ -787,24 +794,35 @@ impl McuHostIo {
     /// that treats [`TransportError::Backpressure`] as retryable re-offers the
     /// identical burst in the identical order. Any burst the reactor does
     /// accept reaches the wire; the reactor has no discard path.
+    ///
+    /// Admission claims the burst's block capacity atomically, so concurrent
+    /// senders cannot each read the same sub-high-water depth and overshoot
+    /// it together. A closed reactor refuses with [`TransportError::Closed`].
     pub fn send_args_batch(
         &self,
         frames: &[(&str, Vec<(String, crate::host_io::parser::ArgValue)>)],
     ) -> Result<(), TransportError> {
-        if self.fire_and_forget_depth.at_high_water() {
-            return Err(TransportError::Backpressure);
-        }
+        let reserved_blocks = frames.len();
+        self.fire_and_forget_depth.reserve(reserved_blocks)?;
         let mut payloads = Vec::with_capacity(frames.len());
         for (name, args) in frames {
-            payloads.push(
-                self.parser
-                    .encode_args(name, args)
-                    .map_err(|e| TransportError::Parse(format!("{name}: {e:?}")))?,
-            );
+            match self.parser.encode_args(name, args) {
+                Ok(payload) => payloads.push(payload),
+                Err(e) => {
+                    self.fire_and_forget_depth.release(reserved_blocks);
+                    return Err(TransportError::Parse(format!("{name}: {e:?}")));
+                }
+            }
         }
         self.submission_tx
-            .send(ReactorCommand::FireAndForgetBatch { payloads })
-            .map_err(|_| TransportError::Closed)
+            .send(ReactorCommand::FireAndForgetBatch {
+                payloads,
+                reserved_blocks,
+            })
+            .map_err(|_| {
+                self.fire_and_forget_depth.release(reserved_blocks);
+                TransportError::Closed
+            })
     }
 
     pub fn call_args(

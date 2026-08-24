@@ -819,10 +819,19 @@ fn validate_axis_for_dispatch(axis: &ContinuousAxis) -> Result<(), ContinuousErr
             }
         }
         ContinuousAxis::PiecewiseRelativeSpline(pieces) => validate_relative_pieces(pieces)?,
-        ContinuousAxis::Hold { position, .. } => {
+        ContinuousAxis::Hold {
+            position,
+            t_start,
+            t_end,
+        } => {
             if !position.is_finite() {
                 return Err(ContinuousError::InvalidSpan {
                     reason: "hold position must be finite",
+                });
+            }
+            if !t_start.is_finite() || !t_end.is_finite() || t_end <= t_start {
+                return Err(ContinuousError::InvalidSpan {
+                    reason: "hold time range must be finite and positive",
                 });
             }
         }
@@ -1094,6 +1103,11 @@ fn checked_clamped_time(t: f64, start: f64, end: f64) -> Result<f64, ContinuousE
     if !t.is_finite() {
         return Err(ContinuousError::NonFinite { t });
     }
+    if !start.is_finite() || !end.is_finite() || end < start {
+        return Err(ContinuousError::InvalidSpan {
+            reason: "span time range must be finite and ordered",
+        });
+    }
     let magnitude = t.abs().max(start.abs()).max(end.abs());
     let slack = 1e-12_f64.max(8.0 * f64::EPSILON * magnitude);
     if t < start - slack || t > end + slack {
@@ -1160,7 +1174,8 @@ fn analytic_group_pva(
     let local_t = checked_clamped_time(t, span.t_start, span.t_end)
         .map_err(|error| (error, source_axis))?
         - span.t_start;
-    let (s, velocity, acceleration) = active_phase(&span.phases, local_t).state_at(local_t);
+    let (phase_s, velocity, acceleration) = active_phase(&span.phases, local_t).state_at(local_t);
+    let s = phase_s - span.source_distance_origin;
     let length = span.source.segment.s_len();
     let mut spatial = [0.0; 3];
     let mut follower_position = 0.0;
@@ -1658,8 +1673,10 @@ where
     let mut follower_end = 0.0;
     let mut follower_slope = 0.0;
     let length = span.source.segment.s_len();
-    let (s0, _, _) = active_phase(&span.phases, local0).state_at(local0);
-    let (s1, _, _) = active_phase(&span.phases, local1).state_at(local1);
+    let (phase_s0, _, _) = active_phase(&span.phases, local0).state_at(local0);
+    let (phase_s1, _, _) = active_phase(&span.phases, local1).state_at(local1);
+    let s0 = phase_s0 - span.source_distance_origin;
+    let s1 = phase_s1 - span.source_distance_origin;
     let s_lo = s0.min(s1);
     let s_hi = s0.max(s1);
     for (axis, raw_coefficient) in axes {

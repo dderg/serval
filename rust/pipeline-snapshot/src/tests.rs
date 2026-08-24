@@ -733,3 +733,50 @@ fn default_gcode_circle_loops_stay_concentric_across_corner_deviation() {
         );
     }
 }
+
+/// A carrier that is point-symmetric about the piece midpoint is met exactly
+/// there by its own quintic Hermite interpolant, so a midpoint-only check
+/// reports zero error for a span the interpolant tracks nowhere else.
+#[test]
+fn symmetric_curved_carrier_cannot_evade_the_interior_check() {
+    let h = 0.02;
+    let w = 2.0 * std::f64::consts::PI / h;
+    let carrier = |tau: f64| libm::sin(w * tau);
+    let ends = |tau: f64| trajectory::Pva {
+        position: carrier(tau),
+        velocity: w * libm::cos(w * tau),
+        acceleration: -w * w * libm::sin(w * tau),
+    };
+    let coeffs = quintic_hermite(h, ends(0.0), ends(h));
+
+    let midpoint_only = (eval_monomial(&coeffs, 0.5 * h) - carrier(0.5 * h)).abs();
+    assert!(
+        midpoint_only <= SAMPLED_PIECE_TOL_MM,
+        "midpoint check must be blind here, got {midpoint_only:e}"
+    );
+    assert!(
+        interior_deviation(&coeffs, h, carrier) > SAMPLED_PIECE_TOL_MM,
+        "interior nodes must see the carrier departing from the interpolant"
+    );
+}
+
+#[test]
+fn a_high_order_term_that_displaces_nothing_over_a_short_row_is_trimmed() {
+    let h = 1e-4;
+    let trimmed = trim_trailing_zeros(vec![0.0, 50.0, 0.0, 0.0, 0.0, 1e3], h);
+    assert_eq!(trimmed, vec![0.0, 50.0]);
+}
+
+#[test]
+fn a_small_coefficient_whose_long_row_contribution_matters_is_retained() {
+    let h = 10.0;
+    let coeffs = vec![0.0, 1.0, 0.0, 0.0, 0.0, 1e-13];
+    let trimmed = trim_trailing_zeros(coeffs.clone(), h);
+    assert_eq!(
+        trimmed.len(),
+        6,
+        "quintic term carries {} mm",
+        1e-13 * h.powi(5)
+    );
+    assert_eq!(trimmed, coeffs);
+}

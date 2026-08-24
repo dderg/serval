@@ -12,6 +12,7 @@ CONFIGURE_AXIS_ARGSTRING = (
     " stepper_count=%c steppers=%*s"
 )
 SLOT_NAMES = ("a", "b", "z")
+PHASE_BUS_RATE_HZ = 2_000_000
 
 
 class RecordingCommand:
@@ -116,6 +117,7 @@ def test_a_pulse_only_mcu_takes_the_stepcompress_path():
     assert configure_axis_sends(mcu) == []
     assert mcu.looked_up == []
     assert engine.phase_motors == []
+    assert engine.phase_buses == []
     assert set(motion._motor_bindings) == set(SLOT_NAMES)
 
 
@@ -127,6 +129,7 @@ def test_a_mixed_mcu_splits_lanes_between_both_transports():
     assert [args[0] for args in sends] == [0]
     assert [args[1] for args in sends] == [motion_setup.MODE_PHASE]
     assert engine.phase_motors == [(7, 0, 0, 5, 0)]
+    assert engine.phase_buses == [(7, 0, PHASE_BUS_RATE_HZ)]
     assert tmc.phase_stepper_oid == 10
     assert set(motion._motor_bindings) == set(SLOT_NAMES)
 
@@ -142,6 +145,7 @@ def test_a_stallguard_homed_phase_lane_is_bound_to_both_transports():
     assert [args[0] for args in sends] == [0]
     assert [args[1] for args in sends] == [motion_setup.MODE_PHASE]
     assert engine.phase_motors == [(7, 0, 0, 5, 0)]
+    assert engine.phase_buses == [(7, 0, PHASE_BUS_RATE_HZ)]
     assert set(motion._motor_bindings) == set(SLOT_NAMES)
 
 
@@ -151,3 +155,26 @@ def test_the_configure_axis_command_carries_no_ring_depth():
     assert CONFIGURE_AXIS_ARGSTRING in mcu.looked_up
     assert not any("ring_depth" in fmt for fmt in mcu.looked_up)
     assert all(len(args) == 6 for args in configure_axis_sends(mcu))
+
+
+def test_phase_lanes_on_one_bus_register_that_bus_once():
+    tmcs = {
+        "a": FakeTmc(bus_id=1, cs_pin_id=5),
+        "b": FakeTmc(bus_id=1, cs_pin_id=6, spi_oid=32),
+    }
+    _motion, _printer, engine, _mcu = build(phase_slots=(0, 1), tmcs=tmcs)
+    assert engine.phase_buses == [(7, 1, PHASE_BUS_RATE_HZ)]
+    assert engine.phase_motors == [(7, 0, 1, 5, 0), (7, 1, 1, 6, 1)]
+
+
+def test_phase_lanes_on_separate_buses_each_register_at_the_sample_rate():
+    tmcs = {
+        "a": FakeTmc(bus_id=0, cs_pin_id=5),
+        "b": FakeTmc(bus_id=1, cs_pin_id=6, spi_oid=32),
+    }
+    _motion, _printer, engine, _mcu = build(phase_slots=(0, 1), tmcs=tmcs)
+    assert engine.phase_buses == [
+        (7, 0, PHASE_BUS_RATE_HZ),
+        (7, 1, PHASE_BUS_RATE_HZ),
+    ]
+    assert engine.phase_motors == [(7, 0, 0, 5, 0), (7, 1, 1, 6, 1)]

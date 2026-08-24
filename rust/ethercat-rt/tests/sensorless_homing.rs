@@ -111,8 +111,13 @@ fn spawn_stub(tag: &str) -> (ChildGuard, McuSerialConn) {
     (guard, conn)
 }
 
-/// One anchored, final sample run a few cycles ahead of the endpoint's live
-/// grid index — the smallest thing the pump can put in the ring.
+/// Cycles of lead for the queued run. The stub's grid cycle is 1 ms, so the
+/// run is still in the ring when the homing trip resets it, and the lead stays
+/// inside `RING_DEPTH_CYCLES`.
+const QUEUED_LEAD_CYCLES: u64 = 512;
+
+/// One anchored, final sample run that stays queued for the whole test — the
+/// smallest thing the pump can put in the ring.
 fn push_one_run(conn: &McuSerialConn) -> i32 {
     let (kind, resp) = conn
         .mcu_call(
@@ -125,11 +130,11 @@ fn push_one_run(conn: &McuSerialConn) -> i32 {
     let grid = SampleGridResponse::decode(&resp).expect("SampleGridResponse must decode");
     let lane = LaneRun {
         axis_idx: 0,
+        slot_idx: 0,
         flags: LANE_RUN_FLAG_REANCHOR | LANE_RUN_FLAG_TAIL,
         origin_mm_q16: 0,
-        start_index: grid.grid_index + 5,
+        start_index: grid.grid_index + QUEUED_LEAD_CYCLES,
         interval_ticks: grid.cycle_ticks,
-        sample_count: 1,
         samples: vec![SetpointSample {
             pos_counts: 0,
             vel_ff: 0,

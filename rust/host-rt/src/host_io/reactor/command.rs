@@ -69,9 +69,10 @@ impl Reactor {
             ReactorCommand::FireAndForgetTyped { payload } => {
                 self.handle_fire_and_forget_typed(payload)
             }
-            ReactorCommand::FireAndForgetBatch { payloads } => {
-                self.handle_fire_and_forget_batch(&payloads)
-            }
+            ReactorCommand::FireAndForgetBatch {
+                payloads,
+                reserved_blocks,
+            } => self.handle_fire_and_forget_batch(&payloads, reserved_blocks),
             ReactorCommand::McuIdentify {
                 completion,
                 deadline: _,
@@ -176,7 +177,7 @@ impl Reactor {
     fn handle_subscribe_runtime_events(
         &mut self,
         priority: std::sync::mpsc::SyncSender<crate::host_io::runtime_events::RuntimeEvent>,
-        bulk: std::sync::mpsc::Sender<crate::host_io::runtime_events::RuntimeEvent>,
+        bulk: std::sync::mpsc::SyncSender<crate::host_io::runtime_events::RuntimeEvent>,
         reply: std::sync::mpsc::SyncSender<Result<(), crate::transport::SubscribeError>>,
     ) {
         let result = self
@@ -242,10 +243,11 @@ impl Reactor {
         }
     }
 
-    fn handle_fire_and_forget_batch(&mut self, payloads: &[Vec<u8>]) {
+    fn handle_fire_and_forget_batch(&mut self, payloads: &[Vec<u8>], reserved_blocks: usize) {
         let blocks = match crate::host_io::wire::pack_blocks(payloads) {
             Ok(blocks) => blocks,
             Err(detail) => {
+                self.outbound.fire_and_forget_depth.release(reserved_blocks);
                 tracing::error!(
                     subsystem = "mcu-comms",
                     event = "fire_and_forget_batch_pack_error",
@@ -257,6 +259,7 @@ impl Reactor {
         };
         for block in blocks {
             if let Err(e) = self.dispatch_fire_and_forget(block, false) {
+                self.outbound.fire_and_forget_depth.release(reserved_blocks);
                 tracing::error!(
                     subsystem = "mcu-comms",
                     event = "fire_and_forget_batch_send_error",
@@ -268,6 +271,7 @@ impl Reactor {
                 return;
             }
         }
+        self.outbound.fire_and_forget_depth.release(reserved_blocks);
     }
 
     fn handle_mcu_identify(

@@ -53,6 +53,7 @@ impl Reactor {
         }
         self.outbound.pending_fire_and_forget.clear();
         self.outbound.pending_outbound_order.clear();
+        self.outbound.fire_and_forget_depth.close();
 
         let drained: Vec<PendingMcuCall> = self
             .transport_state

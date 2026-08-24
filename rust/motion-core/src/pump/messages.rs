@@ -1,6 +1,7 @@
 use crate::lock_ext::LockExt;
 use std::sync::Arc;
 
+use ethercat_rt::buzz::MAX_BUZZ_SLOTS;
 use trajectory::continuous::ProfileError;
 use trajectory::{BuzzProfile, ClockedMotorSpan};
 
@@ -164,6 +165,16 @@ pub struct BuzzStart {
     pub clock_freq_hz: f64,
 }
 
+/// Which transport a route drives. One arming may name a given transport of a
+/// given mcu once: a second route onto the same endpoint would find it already
+/// armed and refuse mid-pass, with the earlier routes already sweeping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BuzzTransport {
+    Pulse,
+    Phase,
+    Ethercat,
+}
+
 /// One transport a resonance sweep drives. A machine mixes them freely — a
 /// servo Y beside a pulsed Z beside a phase-stepped X — and all three are
 /// armed from one wave in one pass, so the axes of one buzz stay in phase.
@@ -231,15 +242,36 @@ impl BuzzRoute {
         }
     }
 
+    #[must_use]
+    pub fn transport(&self) -> BuzzTransport {
+        match self {
+            Self::Pulse { .. } => BuzzTransport::Pulse,
+            Self::Phase { .. } => BuzzTransport::Phase,
+            Self::Ethercat { .. } => BuzzTransport::Ethercat,
+        }
+    }
+
+    /// The bits this route drives on its transport: axes for the two host
+    /// transports, drive slots for the EtherCAT node. Two routes of one
+    /// arming that claim a bit twice would fight over the same motor.
+    #[must_use]
+    pub fn driven_mask(&self) -> u8 {
+        match self {
+            Self::Pulse { axis_mask, .. } => *axis_mask,
+            Self::Phase { lanes, .. } => lanes
+                .iter()
+                .filter(|lane| lane.axis < 8)
+                .fold(0u8, |bits, lane| bits | (1 << lane.axis)),
+            Self::Ethercat { slot_mask, .. } => *slot_mask,
+        }
+    }
+
     /// Everything the route can be held to before it is touched: it names a
     /// motor the transport actually drives, the transport is idle, and the
-    /// anchor it will start on resolves. The resolved start is the proof, so
-    /// the pump can clear every route of one buzz before arming the first.
-    pub fn ready(
-        &self,
-        clock_of: &dyn Fn(u32) -> Option<(u64, f64)>,
-        lead_secs: f64,
-    ) -> Result<BuzzStart, String> {
+    /// start it was handed is one the transport can be armed on. Every
+    /// condition `arm` would refuse is checked here, so the pump can clear
+    /// every route of one buzz before arming the first.
+    pub fn ready(&self, start: BuzzStart) -> Result<(), String> {
         match self {
             Self::Pulse {
                 mcu_id,
@@ -254,12 +286,19 @@ impl BuzzRoute {
                          0x{axis_mask:02x}"
                     ));
                 }
+                let motors = endpoint.buzz_slot_count();
+                if motors > MAX_BUZZ_SLOTS {
+                    return Err(format!(
+                        "resonance buzz: mcu {mcu_id} carries {motors} pulse motors, above the \
+                         {MAX_BUZZ_SLOTS}-motor buzz limit"
+                    ));
+                }
                 if !endpoint.buzz_complete() {
                     return Err(format!(
                         "resonance buzz rejected: mcu {mcu_id} pulse endpoint is still busy"
                     ));
                 }
-                anchored_start(*mcu_id, clock_of, lead_secs)
+                Ok(())
             }
             Self::Phase {
                 mcu_id,
@@ -272,13 +311,34 @@ impl BuzzRoute {
                     ));
                 }
                 let mut endpoint = endpoint.lock_ok();
+                let mut seen = 0u8;
                 for lane in lanes {
+                    if !lane.sign.is_finite() || lane.sign == 0.0 {
+                        return Err(format!(
+                            "resonance buzz: mcu {mcu_id} drives axis {} with sign {}",
+                            lane.axis, lane.sign
+                        ));
+                    }
                     if !endpoint.drives_axis(lane.axis) {
                         return Err(format!(
                             "resonance buzz: mcu {mcu_id} sample endpoint drives no axis {}",
                             lane.axis
                         ));
                     }
+                    if lane.axis >= 8 {
+                        return Err(format!(
+                            "resonance buzz: mcu {mcu_id} phase route names axis {}, above the \
+                             eight axes one arming can address",
+                            lane.axis
+                        ));
+                    }
+                    if seen & (1 << lane.axis) != 0 {
+                        return Err(format!(
+                            "resonance buzz: mcu {mcu_id} phase route names axis {} twice",
+                            lane.axis
+                        ));
+                    }
+                    seen |= 1 << lane.axis;
                 }
                 if !endpoint
                     .buzz_complete()
@@ -296,7 +356,7 @@ impl BuzzRoute {
                         "resonance buzz rejected: mcu {mcu_id} phase lanes still carry trajectory"
                     ));
                 }
-                anchored_start(*mcu_id, clock_of, lead_secs)
+                Ok(())
             }
             Self::Ethercat {
                 mcu_id,
@@ -309,13 +369,20 @@ impl BuzzRoute {
                         "resonance buzz: mcu {mcu_id} ethercat route selects no drive slot"
                     ));
                 }
+                if start.clock_freq_hz != super::wire_sink::DC_GRID_CLOCK_FREQ_HZ {
+                    return Err(format!(
+                        "resonance buzz: mcu {mcu_id} is clocked at {} Hz, so its arming instant \
+                         is not on the node's nanosecond DC grid",
+                        start.clock_freq_hz
+                    ));
+                }
                 let filler = filler.lock_ok();
                 if filler.buzz_active() || filler.wants_drain() {
                     return Err(format!(
                         "resonance buzz rejected: mcu {mcu_id} setpoint filler is still busy"
                     ));
                 }
-                anchored_start(*mcu_id, clock_of, lead_secs)
+                Ok(())
             }
         }
     }
@@ -363,13 +430,6 @@ impl BuzzRoute {
                 slot_mask,
                 sign_mask,
             } => {
-                if start.clock_freq_hz != super::wire_sink::DC_GRID_CLOCK_FREQ_HZ {
-                    return Err(format!(
-                        "resonance buzz: mcu {mcu_id} is clocked at {} Hz, so its arming instant \
-                         is not on the node's nanosecond DC grid",
-                        start.clock_freq_hz
-                    ));
-                }
                 let result = filler.lock_ok().arm_buzz(
                     *slot_mask,
                     *sign_mask,
@@ -407,7 +467,9 @@ impl BuzzRoute {
     }
 }
 
-fn anchored_start(
+/// The one instant every route of one mcu starts on, resolved once per mcu so
+/// pulse, phase and EtherCAT lanes of one sweep stay in phase.
+pub(super) fn anchored_start(
     mcu_id: u32,
     clock_of: &dyn Fn(u32) -> Option<(u64, f64)>,
     lead_secs: f64,
@@ -415,6 +477,12 @@ fn anchored_start(
     let (now, clock_freq_hz) = clock_of(mcu_id).ok_or_else(|| {
         format!("resonance buzz: mcu {mcu_id} has no synced clock to anchor the sweep on")
     })?;
+    if !clock_freq_hz.is_finite() || clock_freq_hz <= 0.0 {
+        return Err(format!(
+            "resonance buzz: mcu {mcu_id} reports a clock frequency of {clock_freq_hz} Hz, so no \
+             start instant can be anchored on it"
+        ));
+    }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let clock = now.saturating_add((clock_freq_hz * lead_secs) as u64);
     Ok(BuzzStart {

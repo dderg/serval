@@ -490,6 +490,34 @@ fn build_serial_seed_sends_skips_a_pulse_only_mcu() {
 }
 
 #[test]
+fn build_serial_seed_sends_covers_a_dual_transport_only_mcu() {
+    let dual_cfg = McuAxisConfig {
+        ethercat: false,
+        mcu_id: 7,
+        axes: vec![AXIS_Y, AXIS_Z],
+        kinematics: 1,
+        max_motor_velocity: Vec::new(),
+        lane_kinds: vec![LaneKind::PhaseWithPulse; 2],
+        ..Default::default()
+    };
+    let sends = build_serial_seed_sends(
+        &[dual_cfg],
+        &HashSet::<u32>::new(),
+        geometry::MachinePos([100.0, 50.0, 10.0]),
+    );
+    assert_eq!(
+        sends.len(),
+        1,
+        "a lane that alternates between phase and pulse still owns an mcu-side \
+         phase position that must be seeded; got {sends:?}"
+    );
+    assert_eq!(sends[0].mcu_id, 7);
+    assert_eq!(sends[0].x_q16, encode_q16(100.0));
+    assert_eq!(sends[0].y_q16, encode_q16(50.0));
+    assert_eq!(sends[0].z_q16, encode_q16(10.0));
+}
+
+#[test]
 fn build_serial_seed_sends_all_serial_matches_build_seed_sends() {
     let configs = vec![corexy_cfg(), cartesian_z_cfg()];
     let ethercat_mcu_ids: HashSet<u32> = HashSet::new();

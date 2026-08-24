@@ -91,8 +91,9 @@ Add a buzz source that feeds the same shim:
   identical quantization and encoder (`hp`/`classic`) as normal motion. No new
   wire commands; the MCU sees plain `queue_step` frames.
 - Arm/disarm mirrors EtherCAT `arm_buzz` rules exactly:
-  - reject while the lane still has queued trajectory (loud error, no
-    padding);
+  - reject while any lane of the endpoint still has queued trajectory (loud
+    error, no padding) — a sweep owns the whole fill window and suppresses
+    every undriven lane, so it may not swallow unrelated motion;
   - reject a second buzz while one is active (`ERR_BUZZ_BUSY` equivalent);
   - `amplitude == 0` form disarms.
 - The buzz anchors on the lane's current held position and its own epoch

@@ -260,7 +260,7 @@ fn emitted_moves_stay_in_windows_in_c_model_domain() {
         &decel_to_zero(42_000, 4, 2_000),
     ];
     for source in sources {
-        let (moves, covered, _) = compress_hp(source, 0, 0).unwrap();
+        let (moves, covered, _) = compress_hp(&mut HpScratch::new(), source, 0, 0).unwrap();
         assert_eq!(covered, source.len());
         let mut cursor = 0_u64;
         let mut input_pos = 0usize;
@@ -310,7 +310,7 @@ fn storm_guard_emitted_moves_never_decode_to_sub_floor_intervals() {
         &decel_to_zero(42_000, 4, 2_000),
     ];
     for source in sources {
-        let (moves, covered, _) = compress_hp(source, 0, 0).unwrap();
+        let (moves, covered, _) = compress_hp(&mut HpScratch::new(), source, 0, 0).unwrap();
         assert_eq!(covered, source.len());
         let mut cursor = 0_u64;
         let mut input_pos = 0usize;
@@ -342,7 +342,7 @@ fn storm_guard_emitted_moves_never_decode_to_sub_floor_intervals() {
 #[test]
 fn storm_guard_wrap_decode_is_rejected_not_emitted() {
     let wrap_source: Vec<u64> = (1..=64).map(|i| i * (1_u64 << 32) + i as u64).collect();
-    let result = compress_hp(&wrap_source, 0, 0);
+    let result = compress_hp(&mut HpScratch::new(), &wrap_source, 0, 0);
     if let Ok((moves, covered, _)) = result {
         assert_eq!(covered, wrap_source.len());
         let mut cursor = 0_u64;

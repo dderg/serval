@@ -873,6 +873,89 @@ fn holds_use_stream_time_and_reject_outside_samples() {
 }
 
 #[test]
+fn holds_with_unordered_or_non_finite_times_fail_loudly() {
+    for (t_start, t_end) in [(f64::NAN, 1.0), (0.0, f64::NAN), (1.0, 0.0)] {
+        let axis = ContinuousAxis::Hold {
+            position: 4.0,
+            t_start,
+            t_end,
+        };
+        assert!(matches!(
+            axis.eval_pva(0.5),
+            Err(ContinuousError::InvalidSpan { .. })
+        ));
+        assert!(matches!(
+            axis.pva_bounds(0.25, 0.75),
+            Err(ContinuousError::InvalidSpan { .. })
+        ));
+    }
+    assert!(matches!(
+        MotorSpan::try_new(
+            Arc::from([independent(
+                ContinuousAxis::Hold {
+                    position: 4.0,
+                    t_start: 0.0,
+                    t_end: 0.0,
+                },
+                0,
+            )]),
+            0.0,
+            1.0,
+            1,
+            41,
+            true,
+        ),
+        Err(ContinuousError::InvalidSpan { .. })
+    ));
+}
+
+#[test]
+fn analytic_motor_groups_respect_the_phase_distance_origin() {
+    let span = Arc::new(
+        AnalyticMoveSpan::try_new(
+            move_with(
+                Segment::Line(Line::try_new([10.0, 0.0, 0.0], [12.0, 0.0, 0.0]).unwrap()),
+                vec![FollowerDemand::ramp(3, 0.0, 2.0)],
+            ),
+            Arc::from([StraightPhase {
+                t0: 0.0,
+                dt: 2.0,
+                s0: 7.0,
+                v0: 1.0,
+                a0: 0.0,
+                j: 0.0,
+            }]),
+            7.0,
+            10.0,
+            12.0,
+            Arc::from([0.0, 0.0, 0.0, 5.0]),
+            SurfaceMode::None,
+        )
+        .unwrap(),
+    );
+    for axis in [0, 3] {
+        let terms = [MotorTerm {
+            source_axis: axis,
+            axis: ContinuousAxis::Analytic {
+                span: Arc::clone(&span),
+                axis,
+            },
+            scale: 1.0,
+        }];
+        let group = analytic_group_pva(&span, &terms, 11.0).unwrap();
+        let direct = span.eval_axis(axis, 11.0).unwrap();
+        close(group.position, direct.position);
+        close(group.velocity, direct.velocity);
+        close(group.acceleration, direct.acceleration);
+    }
+    close(span.eval_axis(3, 11.0).unwrap().position, 5.5);
+    let bounds = analytic_group_bounds(&span, std::iter::once((3, 1.0)), 10.0, 12.0).unwrap();
+    close(bounds.velocity_min, 0.0);
+    close(bounds.velocity_max, 2.0);
+    close(bounds.acceleration_abs_max, 1.0);
+}
+
+#[test]
 fn fractional_clock_mapping_uses_exact_anchor_and_rounds_boundaries() {
     let profile = NudgeProfile::try_new(10.0, 10.0, 0.0, 0.0).unwrap();
     let signal = motor_span(ContinuousAxis::Nudge(profile), 0.0, 1.0);
@@ -1029,6 +1112,33 @@ fn buzz_has_ramp_knees_position_continuity_and_exact_zero_endpoints() {
         assert!((buzz.eval(knee - 1e-9).position - at).abs() < 1e-6);
         assert!((buzz.eval(knee + 1e-9).position - at).abs() < 1e-6);
     }
+}
+
+#[test]
+fn zero_ramp_buzz_is_a_finite_rectangular_envelope() {
+    let amplitude = 0.5;
+    let frequency = 5.0;
+    let duration = 4.0;
+    let buzz = BuzzProfile::try_new(amplitude, frequency, frequency, duration, 0.0, 2.0).unwrap();
+    assert_eq!(buzz.breakpoints(), &[2.0, 6.0]);
+    let omega = 2.0 * PI * frequency;
+    let local = 0.05;
+    let sample = buzz.eval(2.0 + local);
+    close(sample.position, amplitude * libm::sin(omega * local));
+    close(
+        sample.velocity,
+        amplitude * omega * libm::cos(omega * local),
+    );
+    close(
+        sample.acceleration,
+        -amplitude * omega * omega * libm::sin(omega * local),
+    );
+    let (velocity_min, velocity_max) = buzz.velocity_bounds();
+    let (acceleration_min, acceleration_max) = buzz.acceleration_bounds();
+    close_relative(velocity_max, amplitude * omega, 1e-6);
+    close_relative(velocity_min, -amplitude * omega, 1e-6);
+    close_relative(acceleration_max, amplitude * omega * omega, 1e-6);
+    close_relative(acceleration_min, -amplitude * omega * omega, 1e-6);
 }
 
 #[test]

@@ -41,7 +41,6 @@ pub struct EndpointCtx {
     slave_axes: Vec<u8>,
     velocity_ff: Vec<bool>,
     torque_clamp_tenths: Vec<i16>,
-    ff_lead_ns: Vec<u64>,
     jump_log_counts: Vec<i64>,
     cycle_ns: i64,
     group_delay_ns: u64,
@@ -70,6 +69,10 @@ pub struct EndpointCtx {
     /// Reused decode buffer for one lane block of a `PushSampleRuns` fill, so
     /// the command path allocates nothing per frame.
     sp_fill_scratch: Vec<SetpointEntry>,
+    /// Consumed `PushSampleRuns` payloads leave the DC thread here: their
+    /// vectors were allocated by the socket reader, so freeing them inline
+    /// would take that thread's allocator arena lock.
+    reclaim: crate::reclaim::Reclaim,
     last_grid_index: u64,
     last_grid_clock: u64,
     damper: DiffDamperBank,
@@ -197,11 +200,29 @@ pub(super) fn lane_progress(ctx: &EndpointCtx) -> Vec<u32> {
         .collect()
 }
 
-/// Per-lane playback clock the heartbeat carries beside the progress counts.
+/// Trajectory clock the DC grid stamps `index` with, off the same
+/// `(grid_index, grid_clock)` pair every `PushSampleRunsResponse` echoes, so
+/// the host's span clocks and this endpoint's cursor share one domain.
+fn grid_clock_of(ctx: &EndpointCtx, index: u64) -> u64 {
+    let interval_ns = ctx.grid.interval_ns();
+    if index >= ctx.last_grid_index {
+        ctx.last_grid_clock + (index - ctx.last_grid_index) * interval_ns
+    } else {
+        ctx.last_grid_clock
+            .saturating_sub((ctx.last_grid_index - index) * interval_ns)
+    }
+}
+
+/// Per-lane playback clock the heartbeat carries beside the progress counts:
+/// the exclusive cursor in trajectory nanoseconds, so the host retires a run
+/// exactly when its `end_clock` has been consumed. Zero until a lane plays.
 pub(super) fn lane_playback_clocks(ctx: &EndpointCtx) -> Vec<u64> {
     ctx.sp_rings
         .iter()
-        .map(SetpointRing::playback_clock)
+        .map(|ring| {
+            ring.played_cursor()
+                .map_or(0, |index| grid_clock_of(ctx, index))
+        })
         .collect()
 }
 

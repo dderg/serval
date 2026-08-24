@@ -91,7 +91,6 @@ fn a_lane_run_starts_anchored_on_the_grid_index_covering_the_span() {
     assert_eq!(run.start_index, GRID_INDEX + 4);
     assert_eq!(run.interval_ticks, INTERVAL as u32);
     assert_eq!(run.flags & LANE_RUN_FLAG_REANCHOR, LANE_RUN_FLAG_REANCHOR);
-    assert_eq!(run.sample_count as usize, run.samples.len());
     assert_eq!(run.samples.len(), 4);
     assert_eq!(run.samples[0].pos_counts, 0);
 }
@@ -129,7 +128,7 @@ fn the_next_drain_abuts_without_re_anchoring() {
     f.push_spans(0, &[linear_span(start, 0.001, 0.0, 1.0)])
         .expect("stage");
     let first = f.drain().expect("first fill");
-    let next_index = first[0].start_index + u64::from(first[0].sample_count);
+    let next_index = first[0].start_index + first[0].samples.len() as u64;
     f.push_spans(0, &[linear_span(start + 1_000_000, 0.001, 1.0, 2.0)])
         .expect("stage the successor once the first is consumed");
     let second = f.drain().expect("second fill");
@@ -234,10 +233,27 @@ fn a_buzz_opens_on_the_first_grid_cycle_at_or_after_the_pump_anchor() {
 }
 
 #[test]
+fn a_buzz_is_refused_while_any_lane_still_has_trajectory_queued() {
+    let mut f = filler(2);
+    f.push_spans(1, &[linear_span(GRID_CLOCK + INTERVAL, 0.001, 0.0, 1.0)])
+        .expect("stage trajectory on the lane the sweep leaves alone");
+    let start = GRID_CLOCK + INTERVAL * 400;
+    assert_eq!(
+        f.arm_buzz(0b01, 0, 40_000, 40_000, 20_000, 500, 5, start),
+        crate::buzz::ERR_BUZZ_STREAMING,
+        "a sweep suppresses every undriven lane, so it may not swallow queued motion"
+    );
+    assert!(!f.buzz_active());
+    assert!(f.wants_drain(), "the queued lane keeps its views");
+}
+
+#[test]
 fn an_undriven_lane_cannot_pull_the_buzz_anchor_earlier() {
     let mut f = filler(2);
     f.push_spans(1, &[linear_span(GRID_CLOCK + INTERVAL, 0.001, 0.0, 1.0)])
         .expect("stage trajectory on the lane the sweep leaves alone");
+    f.drain().expect("convert the idle lane's view whole");
+    assert!(!f.wants_drain());
     let start = GRID_CLOCK + INTERVAL * 400;
     assert_eq!(
         f.arm_buzz(0b01, 0, 40_000, 40_000, 20_000, 500, 5, start),
@@ -248,7 +264,7 @@ fn an_undriven_lane_cannot_pull_the_buzz_anchor_earlier() {
     assert_eq!(
         runs[0].start_index,
         GRID_INDEX + 400,
-        "the sweep starts on the instant it was armed on, not on the idle lane's index"
+        "the sweep starts on the instant it was armed on, not on the other lane's index"
     );
 }
 
@@ -486,4 +502,118 @@ fn the_feedforward_lead_reaches_across_into_the_successor() {
         lead_pva.velocity > 1_500.0,
         "the successor must be moving faster than the active view for this to bite"
     );
+}
+
+fn grid_clock_at(index: u64) -> u64 {
+    GRID_CLOCK + (index - GRID_INDEX) * INTERVAL
+}
+
+const SCALAR_PROFILE: &str = r#"
+version = 6
+axes = ["x"]
+modes = ["x"]
+frame = [[1.0]]
+mass = [0.0123]
+viscous = [0.0045]
+coulomb = [1.2]
+fit_rms_residual = [0.8]
+"#;
+
+#[test]
+#[allow(clippy::cast_possible_truncation)]
+fn a_lead_installed_while_quiescent_shapes_every_later_sample() {
+    let mut f = filler(1);
+    assert!(f.quiescent(), "a freshly gridded filler owes nothing");
+    assert_eq!(f.set_ff_lead(0, INTERVAL * 2), 0);
+    let start = GRID_CLOCK + INTERVAL * 4;
+    let span = linear_span(start, 0.001, 0.0, 1.0);
+    f.push_spans(0, std::slice::from_ref(&span)).expect("stage");
+    let runs = f.drain().expect("fill");
+    let lead_pva = span
+        .eval_at_clock(start + INTERVAL * 2)
+        .expect("the lead lands inside the span");
+    assert_eq!(
+        runs[0].samples[0].vel_ff,
+        (lead_pva.velocity * CPM).round() as i32,
+        "the first sample already carries the lead the reconfiguration installed"
+    );
+}
+
+#[test]
+fn a_reconfiguration_is_refused_while_a_view_is_still_staged() {
+    let mut f = filler(1);
+    let start = GRID_CLOCK + INTERVAL * 4;
+    f.push_spans(0, &[linear_span(start, 0.001, 0.0, 1.0)])
+        .expect("stage");
+    assert!(!f.quiescent());
+    assert_eq!(f.set_ff_lead(0, INTERVAL), ERR_RECONFIG_STREAMING);
+    let model = crate::dynamics::DynamicsModel::from_toml_str(SCALAR_PROFILE).expect("profile");
+    assert_eq!(f.install_dynamics(model), ERR_RECONFIG_STREAMING);
+}
+
+#[test]
+fn a_reconfiguration_is_refused_until_the_grid_passes_the_samples_emitted() {
+    let start = GRID_CLOCK + INTERVAL * 4;
+    let mut f = filler(1);
+    f.push_spans(0, &[linear_span(start, 0.001, 0.0, 1.0)])
+        .expect("stage");
+    let runs = f.drain().expect("fill");
+    let last = runs[0].start_index + runs[0].samples.len() as u64 - 1;
+    assert!(!f.wants_drain(), "the view was converted whole");
+    assert_eq!(
+        f.set_ff_lead(0, INTERVAL),
+        ERR_RECONFIG_STREAMING,
+        "the endpoint has not reached the samples the host already handed it"
+    );
+    f.observe_grid(last, grid_clock_at(last))
+        .expect("the grid only advances");
+    assert_eq!(f.set_ff_lead(0, INTERVAL), ERR_RECONFIG_STREAMING);
+    f.observe_grid(last + 1, grid_clock_at(last + 1))
+        .expect("the grid only advances");
+    assert_eq!(f.set_ff_lead(0, INTERVAL), 0);
+}
+
+#[test]
+fn a_buzz_blocks_a_reconfiguration_for_its_whole_sweep() {
+    let mut f = filler(1);
+    assert_eq!(
+        f.arm_buzz(0b01, 0, 40_000, 40_000, 20_000, 500, 5, GRID_CLOCK),
+        0
+    );
+    assert_eq!(f.set_ff_lead(0, INTERVAL), ERR_RECONFIG_STREAMING);
+}
+
+#[test]
+fn a_lead_for_a_slot_the_chain_has_no_lane_for_is_refused() {
+    let mut f = filler(1);
+    assert_eq!(f.set_ff_lead(1, INTERVAL), ERR_RECONFIG_UNKNOWN_SLOT);
+}
+
+#[test]
+#[allow(clippy::cast_possible_truncation)]
+fn an_installed_model_computes_the_torque_feedforward_of_every_later_sample() {
+    let mut f = filler(1);
+    let model = crate::dynamics::DynamicsModel::from_toml_str(SCALAR_PROFILE).expect("profile");
+    assert_eq!(f.install_dynamics(model), 0);
+    let start = GRID_CLOCK + INTERVAL * 4;
+    let span = linear_span(start, 0.001, 0.0, 1.0);
+    f.push_spans(0, std::slice::from_ref(&span)).expect("stage");
+    let runs = f.drain().expect("fill");
+    let reference = crate::dynamics::DynamicsModel::from_toml_str(SCALAR_PROFILE).expect("profile");
+    let pva = span
+        .eval_at_clock(start + INTERVAL * 2)
+        .expect("inside the span");
+    let expected = reference.torque_ff(0, &[pva.acceleration as f32], &[pva.velocity as f32]);
+    assert_eq!(runs[0].samples[2].torque_ff, expected.round() as i16);
+    assert_ne!(
+        runs[0].samples[2].torque_ff, 0,
+        "a moving lane under a real model carries torque"
+    );
+}
+
+#[test]
+fn a_model_that_does_not_cover_every_lane_is_refused() {
+    let mut f = filler(2);
+    let model = crate::dynamics::DynamicsModel::from_toml_str(SCALAR_PROFILE).expect("profile");
+    assert_eq!(f.install_dynamics(model), ERR_RECONFIG_BAD_DIM);
 }

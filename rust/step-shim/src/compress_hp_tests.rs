@@ -136,7 +136,7 @@ fn mcu_walk_matches_reference_fixed_point_emulator() {
 #[test]
 fn constant_velocity_compresses_many_steps_per_move() {
     let steps = constant_interval(5_000, 1_000, 0);
-    let (moves, covered, carry) = compress_hp(&steps, 0, 0).unwrap();
+    let (moves, covered, carry) = compress_hp(&mut HpScratch::new(), &steps, 0, 0).unwrap();
     assert_eq!(covered, steps.len());
     assert_eq!(carry, 0);
     assert!(
@@ -157,7 +157,7 @@ fn accelerating_ramp_uses_quadratic_wire_parameters() {
         clock += interval;
         steps.push(clock);
     }
-    let (moves, covered, _) = compress_hp(&steps, 0, 0).unwrap();
+    let (moves, covered, _) = compress_hp(&mut HpScratch::new(), &steps, 0, 0).unwrap();
     assert_eq!(covered, steps.len());
     assert!(
         moves.iter().any(|m| m.add2 != 0 || m.shift > 0),
@@ -176,7 +176,7 @@ fn jerk_profile_stays_inside_every_local_window() {
         clock += interval.max(200);
         steps.push(clock);
     }
-    let (moves, covered, _) = compress_hp(&steps, 0, 0).unwrap();
+    let (moves, covered, _) = compress_hp(&mut HpScratch::new(), &steps, 0, 0).unwrap();
     assert_eq!(covered, steps.len());
     assert_within_windows(&steps, 0, &moves);
 }
@@ -184,13 +184,15 @@ fn jerk_profile_stays_inside_every_local_window() {
 #[test]
 fn next_expected_interval_preserves_batch_junction_window() {
     let first = constant_interval(1_000, 700, 10_000);
-    let (first_moves, first_covered, carry) = compress_hp(&first, 10_000, 1_000).unwrap();
+    let (first_moves, first_covered, carry) =
+        compress_hp(&mut HpScratch::new(), &first, 10_000, 1_000).unwrap();
     assert_eq!(first_covered, first.len());
     let first_end = reconstruct(&first_moves, 10_000).last().copied().unwrap();
 
     let second = constant_interval(1_001, 700, first.last().copied().unwrap());
 
-    let (second_moves, second_covered, _) = compress_hp(&second, first_end, carry).unwrap();
+    let (second_moves, second_covered, _) =
+        compress_hp(&mut HpScratch::new(), &second, first_end, carry).unwrap();
     assert_eq!(second_covered, second.len());
     assert_within_windows(&second, first_end, &second_moves);
 }
@@ -203,6 +205,7 @@ fn terminal_error_window_never_extends_past_the_requested_clock() {
 
 #[test]
 fn terminal_step_never_crosses_an_unseen_direction_boundary() {
+    let mut scratch = HpScratch::new();
     for initial_interval in 70_u64..300 {
         for delta in -2_i64..=2 {
             let mut clock = 10_000_u64;
@@ -212,7 +215,7 @@ fn terminal_step_never_crosses_an_unseen_direction_boundary() {
                 clock += interval;
                 steps.push(clock);
             }
-            let Ok((moves, covered, _)) = compress_hp(&steps, 10_000, 0) else {
+            let Ok((moves, covered, _)) = compress_hp(&mut scratch, &steps, 10_000, 0) else {
                 continue;
             };
             assert_eq!(covered, steps.len());
@@ -227,15 +230,36 @@ fn terminal_step_never_crosses_an_unseen_direction_boundary() {
 
 #[test]
 fn degenerate_inputs_are_explicit() {
-    let (single, covered, _) = compress_hp(&[900], 400, 0).unwrap();
+    let (single, covered, _) = compress_hp(&mut HpScratch::new(), &[900], 400, 0).unwrap();
     assert_eq!(covered, 1);
     assert_eq!(single.len(), 1);
     assert_eq!(single[0].count, 1);
 
-    let (two, covered, _) = compress_hp(&[1_000, 2_000], 0, 0).unwrap();
+    let (two, covered, _) = compress_hp(&mut HpScratch::new(), &[1_000, 2_000], 0, 0).unwrap();
     assert_eq!(covered, 2);
     assert_within_windows(&[1_000, 2_000], 0, &two);
 
-    let error = compress_hp(&[], 0, 0).unwrap_err();
+    let error = compress_hp(&mut HpScratch::new(), &[], 0, 0).unwrap_err();
     assert!(error.detail.contains("empty input"));
+}
+
+/// The compressor's least-squares and error-window scratch is owned by the
+/// caller and reused across runs; a reused buffer must encode exactly what a
+/// freshly allocated one does.
+#[test]
+fn a_reused_scratch_encodes_the_same_wire_as_a_fresh_one() {
+    let runs = [
+        constant_interval(400, 1_000, 0),
+        constant_interval(37, 91, 5_000),
+        (0..600).map(|i| 10_000 + i * i + 7 * i).collect::<Vec<_>>(),
+    ];
+    let mut scratch = HpScratch::new();
+    for _ in 0..3 {
+        for steps in &runs {
+            let anchor = steps[0] - 1;
+            let reused = compress_hp(&mut scratch, steps, anchor, 0).unwrap();
+            let fresh = compress_hp(&mut HpScratch::new(), steps, anchor, 0).unwrap();
+            assert_eq!(reused, fresh);
+        }
+    }
 }

@@ -93,6 +93,7 @@ fn a_batch_accepted_past_the_high_water_mark_keeps_every_block_in_order() {
     h.submission_tx
         .send(ReactorCommand::FireAndForgetBatch {
             payloads: burst.clone(),
+            reserved_blocks: 0,
         })
         .expect("the reactor is listening");
     h.tick();
@@ -164,4 +165,79 @@ fn a_batch_is_refused_whole_while_the_reactor_is_at_its_high_water_mark() {
         !matches!(admitted, Err(TransportError::Backpressure)),
         "below the high water mark the gate must let the burst through, got {admitted:?}"
     );
+}
+
+#[test]
+fn concurrent_admissions_cannot_collectively_pass_the_high_water_mark() {
+    use crate::host_io::fire_and_forget_depth::FireAndForgetDepth;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let depth = Arc::new(FireAndForgetDepth::default());
+    let admitted = Arc::new(AtomicUsize::new(0));
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            let depth = Arc::clone(&depth);
+            let admitted = Arc::clone(&admitted);
+            std::thread::spawn(move || {
+                for _ in 0..FIRE_AND_FORGET_HIGH_WATER {
+                    if depth.reserve(1).is_ok() {
+                        admitted.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().expect("no reserver panics");
+    }
+
+    assert_eq!(
+        admitted.load(Ordering::Relaxed),
+        FIRE_AND_FORGET_HIGH_WATER,
+        "racing senders must not admit more single-block bursts than the high water mark"
+    );
+    assert_eq!(depth.queued_blocks(), FIRE_AND_FORGET_HIGH_WATER);
+    assert!(depth.at_high_water());
+}
+
+#[test]
+fn a_reservation_the_reactor_processed_reopens_the_gate() {
+    use crate::host_io::fire_and_forget_depth::FireAndForgetDepth;
+
+    let depth = FireAndForgetDepth::default();
+    depth
+        .reserve(FIRE_AND_FORGET_HIGH_WATER)
+        .expect("the first burst is admitted");
+    assert!(depth.at_high_water());
+    let refused = depth.reserve(1).expect_err("the gate is shut");
+    assert!(
+        matches!(refused, TransportError::Backpressure),
+        "{refused:?}"
+    );
+
+    depth.release(FIRE_AND_FORGET_HIGH_WATER);
+
+    assert_eq!(depth.queued_blocks(), 0);
+    depth.reserve(1).expect("the gate reopened");
+}
+
+#[test]
+fn shutdown_zeroes_the_depth_and_refuses_later_bursts() {
+    let mut h = ReactorHarness::new();
+    fill_window(&mut h);
+    fill_to_high_water(&mut h);
+
+    h.submission_tx
+        .send(ReactorCommand::Shutdown)
+        .expect("the reactor is listening");
+    h.tick();
+
+    let depth = &h.reactor.outbound.fire_and_forget_depth;
+    assert_eq!(depth.queued_blocks(), 0, "shutdown must publish zero");
+    assert!(!depth.at_high_water());
+    let refused = depth
+        .reserve(1)
+        .expect_err("a closed reactor admits nothing");
+    assert!(matches!(refused, TransportError::Closed), "{refused:?}");
 }

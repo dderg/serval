@@ -20,6 +20,11 @@ pub const EXECUTOR_SETPOINT_RING: u8 = 1;
 /// the host and streamed through the ring like any other motion.
 pub const ERR_BUZZ_IN_RING_MODE: i32 = -838;
 
+/// A `PushSampleRuns` lane named a drive slot this endpoint does not have, or
+/// one bound to a different axis than the run claims. Each run carries one
+/// slot's own counts and torque, so retargeting it is never an option.
+pub const ERR_LANE_SLOT_MISMATCH: i32 = -844;
+
 /// Ring depth in DC cycles. At the 250 µs default cycle this is 256 ms of
 /// motion, past the pump's 100 ms drip lead and its 250 ms post-re-anchor
 /// lead, so lead — not depth — stays the binding constraint.
@@ -251,11 +256,12 @@ impl SetpointRing {
         self.played
     }
 
-    /// The DC grid index this ring last played; every entry at or before it has
-    /// left the ring. Zero before the first played cycle.
+    /// Exclusive DC grid cursor: every entry before it has left the ring, so
+    /// a run whose end index is at or below it has played out in full. `None`
+    /// until the first played cycle.
     #[must_use]
-    pub fn playback_clock(&self) -> u64 {
-        self.last_played.unwrap_or(0)
+    pub fn played_cursor(&self) -> Option<u64> {
+        self.last_played.map(|index| index + 1)
     }
 
     #[must_use]
@@ -266,6 +272,12 @@ impl SetpointRing {
     #[must_use]
     pub fn next_index(&self) -> u64 {
         self.queue_base + self.len as u64
+    }
+
+    /// Latch a run the caller refused before staging it: its count is past
+    /// [`MAX_FILL_CYCLES`], so nothing was copied and nothing was queued.
+    pub fn reject_oversized(&mut self, asked: u32) -> RingFault {
+        self.latch(RingFault::FillTooLarge { asked })
     }
 
     /// Queue one run. `header.anchor` restarts the lane (stream start,

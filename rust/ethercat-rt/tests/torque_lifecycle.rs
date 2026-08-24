@@ -151,9 +151,22 @@ fn now_ns() -> u64 {
     ethercat_rt::clock::monotonic_ns()
 }
 
-/// One anchored, final sample run a few cycles ahead of the endpoint's live
-/// grid index — the smallest thing the pump can put in the ring.
+/// Cycles of lead for a run that must still be sitting in the ring when the
+/// operation under test runs. The stub's grid cycle is 1 ms, so this outlives
+/// every wait a test performs before asserting, and stays inside
+/// `RING_DEPTH_CYCLES`.
+const QUEUED_LEAD_CYCLES: u64 = 512;
+
+/// Cycles of lead for a run the test wants played promptly.
+const PLAYED_LEAD_CYCLES: u64 = 5;
+
 fn push_one_run(conn: &McuSerialConn) -> i32 {
+    push_run_with_lead(conn, QUEUED_LEAD_CYCLES)
+}
+
+/// One anchored, final sample run `lead_cycles` ahead of the endpoint's live
+/// grid index — the smallest thing the pump can put in the ring.
+fn push_run_with_lead(conn: &McuSerialConn, lead_cycles: u64) -> i32 {
     let (kind, resp) = conn
         .mcu_call(
             MessageKind::QuerySampleGrid,
@@ -165,11 +178,11 @@ fn push_one_run(conn: &McuSerialConn) -> i32 {
     let grid = SampleGridResponse::decode(&resp).expect("SampleGridResponse must decode");
     let lane = LaneRun {
         axis_idx: 0,
+        slot_idx: 0,
         flags: LANE_RUN_FLAG_REANCHOR | LANE_RUN_FLAG_TAIL,
         origin_mm_q16: 0,
-        start_index: grid.grid_index + 5,
+        start_index: grid.grid_index + lead_cycles,
         interval_ticks: grid.cycle_ticks,
-        sample_count: 1,
         samples: vec![SetpointSample {
             pos_counts: 0,
             vel_ff: 0,
@@ -397,7 +410,7 @@ fn simulated_drive_fault_parks_keeps_serving_and_recovers() {
 
     let r = set_torque(&conn, true, now_ns() + 50_000_000);
     assert_eq!(r, 0);
-    push_one_run(&conn);
+    push_run_with_lead(&conn, PLAYED_LEAD_CYCLES);
 
     let fault_deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -405,7 +418,7 @@ fn simulated_drive_fault_parks_keeps_serving_and_recovers() {
             Instant::now() < fault_deadline,
             "stub never simulated the drive fault"
         );
-        let result = push_one_run(&conn);
+        let result = push_run_with_lead(&conn, PLAYED_LEAD_CYCLES);
         match result {
             0 => thread::sleep(Duration::from_millis(20)),
             ERR_PIECES_WHILE_FAULTED => break,

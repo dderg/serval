@@ -1521,7 +1521,7 @@ fn eval_segment_axis(seg: &ContinuousSegment, axis: usize, t: f64) -> f64 {
         .position
 }
 
-const MAX_FIT_ATTEMPTS: usize = 512;
+const MAX_FIT_REFINEMENT_SPLITS: usize = 512;
 const MIN_DEVICE_INTERVAL_S: f64 = 2e-9;
 
 /// A span's acceleration is read off a quintic whose odd coefficients are
@@ -1657,7 +1657,7 @@ fn fit_axis_from_signal_with_velocity_budget<S: TrackSignal>(
     let floors = ladder_resolution_floor(sig, &seeds, time_scale, fit_tol);
     coalesce_degenerate_seeds(&mut seeds, floors.cubic);
     let max_depth = libm::log2((t_end - t_start) / floors.cubic).ceil().max(0.0) as u32;
-    let mut attempted_spans = 0;
+    let mut refinement_splits = 0;
     let mut pieces = Vec::with_capacity(seeds.len());
     for span in seeds.windows(2) {
         refine_shaped_span(
@@ -1673,7 +1673,7 @@ fn fit_axis_from_signal_with_velocity_budget<S: TrackSignal>(
             0,
             span[0],
             span[1],
-            &mut attempted_spans,
+            &mut refinement_splits,
             &mut pieces,
         )?;
     }
@@ -1844,10 +1844,9 @@ fn refine_shaped_span<S: TrackSignal>(
     depth: u32,
     lower_seed: f64,
     upper_seed: f64,
-    attempted_spans: &mut usize,
+    refinement_splits: &mut usize,
     out: &mut Vec<BezierPiece>,
 ) -> Result<(), PostProcessError> {
-    *attempted_spans += 1;
     let enforce_velocity_sign = false;
     let (mono_u, failure) = shaped_ladder(
         axis,
@@ -1866,7 +1865,7 @@ fn refine_shaped_span<S: TrackSignal>(
     let tm = 0.5 * t0 + 0.5 * t1;
     if t1 - t0 <= floors.cubic
         || depth >= max_depth
-        || *attempted_spans >= MAX_FIT_ATTEMPTS
+        || *refinement_splits >= MAX_FIT_REFINEMENT_SPLITS
         || tm <= t0
         || tm >= t1
     {
@@ -1892,7 +1891,7 @@ fn refine_shaped_span<S: TrackSignal>(
             position_error: failure.position_error,
             position_budget: fit_tol.pos_mm,
             fit_context,
-            attempted_spans: *attempted_spans,
+            refinement_splits: *refinement_splits,
             velocity_error: failure.velocity_error,
             velocity_budget,
             acceleration_error: failure.acceleration_error,
@@ -1905,6 +1904,7 @@ fn refine_shaped_span<S: TrackSignal>(
             candidate_acceleration: failure.candidate_acceleration,
         });
     }
+    *refinement_splits += 1;
     refine_shaped_span(
         axis,
         sig,
@@ -1918,7 +1918,7 @@ fn refine_shaped_span<S: TrackSignal>(
         depth + 1,
         lower_seed,
         upper_seed,
-        attempted_spans,
+        refinement_splits,
         out,
     )?;
     refine_shaped_span(
@@ -1934,7 +1934,7 @@ fn refine_shaped_span<S: TrackSignal>(
         depth + 1,
         lower_seed,
         upper_seed,
-        attempted_spans,
+        refinement_splits,
         out,
     )
 }
@@ -1960,7 +1960,7 @@ fn fit_tolerance_without_probe(axis: usize, t_start: f64, t_end: f64) -> PostPro
         right_acceleration: f64::NAN,
         position_error: f64::NAN,
         position_budget: f64::NAN,
-        attempted_spans: 0,
+        refinement_splits: 0,
         velocity_error: f64::NAN,
         velocity_budget: f64::NAN,
         acceleration_error: f64::NAN,

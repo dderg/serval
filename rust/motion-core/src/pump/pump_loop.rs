@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -10,8 +10,8 @@ use super::drip::DripCohort;
 use super::junction::{JunctionTracker, check_junction_position_continuity};
 use super::memstat::MemPressureProbe;
 use super::messages::{
-    BuzzParams, BuzzToken, EnqueueMsg, HeartbeatMsg, HistoryRecorder, PumpCallbacks, PumpMsg,
-    SendError, SpanSink,
+    BuzzParams, BuzzStart, BuzzToken, BuzzTransport, EnqueueMsg, HeartbeatMsg, HistoryRecorder,
+    PumpCallbacks, PumpMsg, SendError, SpanSink,
 };
 use super::sched::{
     AxisFrame, AxisQueue, FramePlan, Schedule, append_spans_merging_holds, schedule,
@@ -325,7 +325,9 @@ impl<S: SpanSink> Pump<S> {
     /// routing it here is that the pump is the only thread allowed to touch
     /// a transport while it is streaming: it clears every route first, so a
     /// machine whose Y is a servo, Z a pulse lane and X a phase lane either
-    /// starts all three off one profile or starts none of them.
+    /// starts all three off one profile or starts none of them. Every route
+    /// of one mcu is anchored on the one start resolved for that mcu, so the
+    /// axes of one sweep stay in phase across transports.
     fn arm_buzz(&mut self, params: &BuzzParams) -> Result<BuzzToken, String> {
         if params.routes.is_empty() {
             return Err("resonance buzz names no transport to drive".to_string());
@@ -337,9 +339,30 @@ impl<S: SpanSink> Pump<S> {
                 .map_err(|error| format!("resonance buzz profile rejected: {error}"))?,
         );
         let clock_of = &*self.callbacks.mcu_clock_of;
-        let mut starts = Vec::with_capacity(params.routes.len());
+        let mut starts: HashMap<u32, BuzzStart> = HashMap::new();
+        let mut transports: HashSet<(u32, BuzzTransport)> = HashSet::new();
+        let mut host_axes: HashMap<u32, u8> = HashMap::new();
         for route in params.routes.iter() {
             let mcu_id = route.mcu_id();
+            let transport = route.transport();
+            if !transports.insert((mcu_id, transport)) {
+                return Err(format!(
+                    "resonance buzz rejected: mcu {mcu_id} {transport:?} transport is named twice \
+                     in one arming"
+                ));
+            }
+            if transport != BuzzTransport::Ethercat {
+                let driven = route.driven_mask();
+                let claimed = host_axes.entry(mcu_id).or_default();
+                let clash = *claimed & driven;
+                if clash != 0 {
+                    return Err(format!(
+                        "resonance buzz rejected: mcu {mcu_id} axis mask 0x{clash:02x} is driven \
+                         by more than one route of this arming"
+                    ));
+                }
+                *claimed |= driven;
+            }
             if self
                 .queues
                 .iter()
@@ -349,9 +372,22 @@ impl<S: SpanSink> Pump<S> {
                     "resonance buzz rejected: mcu {mcu_id} still has trajectory staged in the pump"
                 ));
             }
-            starts.push(route.ready(clock_of, super::stepcompress_sink::SEND_LEAD_SECONDS)?);
+            let start = match starts.get(&mcu_id) {
+                Some(start) => *start,
+                None => {
+                    let start = super::messages::anchored_start(
+                        mcu_id,
+                        clock_of,
+                        super::stepcompress_sink::SEND_LEAD_SECONDS,
+                    )?;
+                    starts.insert(mcu_id, start);
+                    start
+                }
+            };
+            route.ready(start)?;
         }
-        for (route, start) in params.routes.iter().zip(starts) {
+        for route in params.routes.iter() {
+            let start = starts[&route.mcu_id()];
             route.arm(&profile, params.wave, start)?;
         }
         Ok(BuzzToken::new(Arc::clone(&params.routes)))

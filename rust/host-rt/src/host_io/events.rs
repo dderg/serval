@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
@@ -102,23 +102,64 @@ impl TraceRing {
     }
 }
 
+/// The bulk lane is bounded exactly like the priority lane: the reactor thread
+/// also drives the wire, so a stalled subscriber must never be allowed to
+/// block it or to grow the queue without bound. Excess bulk samples are
+/// dropped and counted.
 #[derive(Debug, Default)]
 pub struct RuntimeEventDispatcher {
     priority: Option<SyncSender<RuntimeEvent>>,
-    bulk: Option<Sender<RuntimeEvent>>,
+    bulk: Option<SyncSender<RuntimeEvent>>,
     priority_overflow: bool,
+    bulk_overflow: bool,
+    bulk_dropped: u64,
 }
 
 impl RuntimeEventDispatcher {
     pub fn dispatch(&mut self, event: RuntimeEvent) {
         if event.is_bulk_data() {
-            if let Some(tx) = self.bulk.as_ref() {
-                if tx.send(event).is_err() {
-                    self.bulk = None;
-                }
-            }
+            self.send_bulk(event);
         } else {
             self.send_priority(event);
+        }
+    }
+
+    fn send_bulk(&mut self, event: RuntimeEvent) {
+        let Some(tx) = self.bulk.as_ref() else {
+            return;
+        };
+        match tx.try_send(event) {
+            Ok(()) => {
+                if self.bulk_overflow {
+                    tracing::warn!(
+                        subsystem = "mcu-comms",
+                        event = "runtime_event_subscriber_recovered",
+                        lane = "bulk",
+                        dropped_total = self.bulk_dropped,
+                        "bulk runtime-event subscriber is draining again"
+                    );
+                }
+                self.bulk_overflow = false;
+            }
+            Err(TrySendError::Full(event)) => {
+                self.bulk_dropped += 1;
+                if !self.bulk_overflow {
+                    tracing::error!(
+                        subsystem = "mcu-comms",
+                        event = "runtime_event_subscriber_overflow",
+                        lane = "bulk",
+                        dropped = runtime_event_name(&event),
+                        dropped_total = self.bulk_dropped,
+                        "bulk runtime-event subscriber stalled; dropping rather than stalling the \
+                         reactor"
+                    );
+                }
+                self.bulk_overflow = true;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.bulk = None;
+                self.bulk_overflow = false;
+            }
         }
     }
 
@@ -150,7 +191,7 @@ impl RuntimeEventDispatcher {
     pub fn subscribe(
         &mut self,
         priority: SyncSender<RuntimeEvent>,
-        bulk: Sender<RuntimeEvent>,
+        bulk: SyncSender<RuntimeEvent>,
     ) -> Result<(), crate::transport::SubscribeError> {
         if self.priority.is_some() || self.bulk.is_some() {
             return Err(crate::transport::SubscribeError::AlreadySubscribed {
@@ -160,6 +201,7 @@ impl RuntimeEventDispatcher {
         self.priority = Some(priority);
         self.bulk = Some(bulk);
         self.priority_overflow = false;
+        self.bulk_overflow = false;
         Ok(())
     }
 }

@@ -45,6 +45,17 @@ pub const ERR_BUZZ_UNGRIDDED_START: i32 = -839;
 /// echoed is past it, so no cycle of this sweep could carry its first sample.
 pub const ERR_BUZZ_START_IN_PAST: i32 = -840;
 
+/// A feedforward reconfiguration reached the filler while it still owed the
+/// endpoint samples, or while samples it already emitted had not played.
+pub const ERR_RECONFIG_STREAMING: i32 = -841;
+
+/// The reconfigured slot is not a lane of this chain.
+pub const ERR_RECONFIG_UNKNOWN_SLOT: i32 = -842;
+
+/// The offered dynamics model covers a different number of slots than the
+/// chain has lanes.
+pub const ERR_RECONFIG_BAD_DIM: i32 = -843;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LaneSpec {
     pub axis: u8,
@@ -295,6 +306,10 @@ impl ChainFiller {
         interval_ns: u64,
         lead_cycles: u64,
     ) -> Self {
+        assert!(
+            u8::try_from(specs.len()).is_ok(),
+            "an endpoint's drive slots must fit the wire's u8 slot index"
+        );
         let n = specs.len();
         Self {
             lanes: specs.iter().copied().map(Lane::new).collect(),
@@ -333,6 +348,11 @@ impl ChainFiller {
         }
         self.grid = Some((grid_index, grid_clock));
         Ok(())
+    }
+
+    #[must_use]
+    pub fn lane_count(&self) -> usize {
+        self.lanes.len()
     }
 
     #[must_use]
@@ -403,8 +423,10 @@ impl ChainFiller {
     /// evaluation of its own. `start_clock_ns` is that anchor on this node's
     /// DC clock; the sweep opens on the first grid cycle at or after it, so
     /// every transport of one arming starts at the same instant snapped to
-    /// its own device grid. Rejected while a driven lane still has trajectory
-    /// queued, exactly as the endpoint's own oscillator was.
+    /// its own device grid. Rejected while any lane still has trajectory
+    /// queued: the sweep replaces the whole window, suppressing every
+    /// undriven lane for its full duration, so an unrelated lane's queued
+    /// motion would be swallowed instead of played.
     #[allow(clippy::too_many_arguments, clippy::cast_possible_truncation)]
     pub fn arm_buzz(
         &mut self,
@@ -420,16 +442,12 @@ impl ChainFiller {
         if self.buzz.active() {
             return crate::buzz::ERR_BUZZ_BUSY;
         }
+        if self.lanes.iter().any(Lane::has_pending) {
+            return crate::buzz::ERR_BUZZ_STREAMING;
+        }
         let driven: Vec<bool> = (0..self.lanes.len())
             .map(|slot| slot < MAX_BUZZ_SLOTS && slot_mask & (1 << slot) != 0)
             .collect();
-        if driven
-            .iter()
-            .zip(&self.lanes)
-            .any(|(driven, lane)| *driven && lane.has_pending())
-        {
-            return crate::buzz::ERR_BUZZ_STREAMING;
-        }
         let Some((_, grid_clock)) = self.grid else {
             return ERR_BUZZ_UNGRIDDED_START;
         };
@@ -482,6 +500,52 @@ impl ChainFiller {
         self.buzz.active() || self.lanes.iter().any(Lane::has_pending)
     }
 
+    /// Nothing the endpoint can still play is outstanding: no view is staged,
+    /// no buzz is armed, and the grid the endpoint last reported has passed
+    /// every sample the lanes emitted. Only here does a feedforward change
+    /// land whole — the samples already on the wire carry the model they were
+    /// computed with and the endpoint plays them unchanged.
+    #[must_use]
+    pub fn quiescent(&self) -> bool {
+        let Some((grid_index, _)) = self.grid else {
+            return false;
+        };
+        !self.wants_drain()
+            && self
+                .lanes
+                .iter()
+                .all(|lane| lane.next_index.is_none_or(|next| next <= grid_index))
+    }
+
+    /// Retarget one lane's feedforward lead. The lead shifts every sample's
+    /// velocity and torque feedforward, so applying it to the tail of a
+    /// stream would step both mid-motion.
+    pub fn set_ff_lead(&mut self, slot: usize, lead_ns: u64) -> i32 {
+        if slot >= self.lanes.len() {
+            return ERR_RECONFIG_UNKNOWN_SLOT;
+        }
+        if !self.quiescent() {
+            return ERR_RECONFIG_STREAMING;
+        }
+        self.lanes[slot].spec.ff_lead_ns = lead_ns;
+        0
+    }
+
+    /// Swap the coupled dynamics model every lane's torque feedforward is
+    /// computed from. One model covers the whole chain, so a swap that
+    /// reached only part of a stream would leave the coupling terms of one
+    /// motion computed from two different models.
+    pub fn install_dynamics(&mut self, model: DynamicsModel) -> i32 {
+        if model.n_slots != self.lanes.len() {
+            return ERR_RECONFIG_BAD_DIM;
+        }
+        if !self.quiescent() {
+            return ERR_RECONFIG_STREAMING;
+        }
+        self.dynamics = Some(model);
+        0
+    }
+
     /// Abandon every view, the buzz and every anchor: the next run on each
     /// lane must re-anchor. The Stop / homing-trip / drive-fault path.
     /// Nothing abandoned here is credited as retired.
@@ -532,12 +596,11 @@ impl ChainFiller {
             self.append_samples(index)?;
         }
         for slot in 0..self.lanes.len() {
-            let tail = window_exhausted || self.closed[slot];
+            if !(window_exhausted || self.closed[slot]) {
+                continue;
+            }
             if let Some(run) = &mut self.runs[slot] {
-                run.sample_count = u16::try_from(run.samples.len()).unwrap_or(u16::MAX);
-                if tail {
-                    run.flags |= LANE_RUN_FLAG_TAIL;
-                }
+                run.flags |= LANE_RUN_FLAG_TAIL;
             }
         }
         if buzzing && !self.buzz.active() {
@@ -721,11 +784,11 @@ impl ChainFiller {
                 None => {
                     self.runs[slot] = Some(LaneRun {
                         axis_idx: lane.spec.axis,
+                        slot_idx: slot as u8,
                         flags: if anchor { LANE_RUN_FLAG_REANCHOR } else { 0 },
                         origin_mm_q16: (origin_mm * 65536.0).round() as i32,
                         start_index: index,
                         interval_ticks: self.interval_ns as u32,
-                        sample_count: 0,
                         samples: vec![sample],
                     });
                 }

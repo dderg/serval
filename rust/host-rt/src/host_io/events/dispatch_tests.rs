@@ -81,7 +81,7 @@ fn status_watermark_advance_synthesizes_credit_freed() {
     let mut d = make_dispatcher();
 
     let (tx, rx) = sync_channel::<RuntimeEvent>(8);
-    let (bulk_tx, _bulk_rx) = std::sync::mpsc::channel::<RuntimeEvent>();
+    let (bulk_tx, _bulk_rx) = sync_channel::<RuntimeEvent>(8);
     d.runtime_event_dispatcher.subscribe(tx, bulk_tx).unwrap();
 
     d.dispatch(status_with_watermark(2, 5));
@@ -105,7 +105,7 @@ fn status_watermark_unchanged_does_not_synthesize() {
     let mut d = make_dispatcher();
 
     let (tx, rx) = sync_channel::<RuntimeEvent>(8);
-    let (bulk_tx, _bulk_rx) = std::sync::mpsc::channel::<RuntimeEvent>();
+    let (bulk_tx, _bulk_rx) = sync_channel::<RuntimeEvent>(8);
     d.runtime_event_dispatcher.subscribe(tx, bulk_tx).unwrap();
 
     d.dispatch(status_with_watermark(0, 5));
@@ -126,7 +126,7 @@ fn status_watermark_regression_does_not_synthesize() {
     let mut d = make_dispatcher();
 
     let (tx, rx) = sync_channel::<RuntimeEvent>(8);
-    let (bulk_tx, _bulk_rx) = std::sync::mpsc::channel::<RuntimeEvent>();
+    let (bulk_tx, _bulk_rx) = sync_channel::<RuntimeEvent>(8);
     d.runtime_event_dispatcher.subscribe(tx, bulk_tx).unwrap();
 
     d.dispatch(status_with_watermark(0, 10));
@@ -173,7 +173,7 @@ fn heartbeat_is_not_forwarded_to_runtime_rx() {
     let mut d = EventDispatcher::new(status, 16, 8);
 
     let (tx, rx) = sync_channel::<RuntimeEvent>(8);
-    let (bulk_tx, _bulk_rx) = std::sync::mpsc::channel::<RuntimeEvent>();
+    let (bulk_tx, _bulk_rx) = sync_channel::<RuntimeEvent>(8);
     d.runtime_event_dispatcher.subscribe(tx, bulk_tx).unwrap();
 
     d.dispatch(RuntimeEvent::Heartbeat {
@@ -247,7 +247,7 @@ fn mcu_log_also_forwarded_to_runtime_rx() {
     let mut dispatcher = EventDispatcher::new(snapshot, 16, 8);
 
     let (tx, rx) = sync_channel::<RuntimeEvent>(8);
-    let (bulk_tx, _bulk_rx) = std::sync::mpsc::channel::<RuntimeEvent>();
+    let (bulk_tx, _bulk_rx) = sync_channel::<RuntimeEvent>(8);
     dispatcher
         .runtime_event_dispatcher
         .subscribe(tx, bulk_tx)
@@ -292,7 +292,7 @@ fn clock_reaches_priority_lane_even_when_bulk_dispatched_first() {
     use std::sync::mpsc::sync_channel;
     let mut d = make_dispatcher();
     let (pri_tx, pri_rx) = sync_channel::<RuntimeEvent>(8);
-    let (bulk_tx, bulk_rx) = std::sync::mpsc::channel::<RuntimeEvent>();
+    let (bulk_tx, bulk_rx) = sync_channel::<RuntimeEvent>(8);
     d.runtime_event_dispatcher
         .subscribe(pri_tx, bulk_tx)
         .unwrap();
@@ -321,13 +321,14 @@ fn clock_reaches_priority_lane_even_when_bulk_dispatched_first() {
 }
 
 #[test]
-fn bulk_lane_preserves_stream_bursts_larger_than_runtime_capacity() {
+fn a_stalled_bulk_subscriber_bounds_the_queue_without_stalling_the_reactor() {
     use crate::transport::MessageParams;
-    use std::sync::mpsc::{channel, sync_channel};
+    use std::sync::mpsc::sync_channel;
 
+    const BULK_CAPACITY: usize = 8;
     let mut d = make_dispatcher();
     let (priority_tx, _priority_rx) = sync_channel::<RuntimeEvent>(1);
-    let (bulk_tx, bulk_rx) = channel::<RuntimeEvent>();
+    let (bulk_tx, bulk_rx) = sync_channel::<RuntimeEvent>(BULK_CAPACITY);
     d.runtime_event_dispatcher
         .subscribe(priority_tx, bulk_tx)
         .unwrap();
@@ -339,6 +340,19 @@ fn bulk_lane_preserves_stream_bursts_larger_than_runtime_capacity() {
         });
     }
 
-    let received = bulk_rx.try_iter().count();
-    assert_eq!(received, 1024);
+    assert_eq!(
+        bulk_rx.try_iter().count(),
+        BULK_CAPACITY,
+        "a subscriber that never reads must not accumulate more than the lane's bound"
+    );
+
+    d.dispatch(RuntimeEvent::PassthroughResponse {
+        name: "beacon_data".into(),
+        params: MessageParams::new(),
+    });
+    assert_eq!(
+        bulk_rx.try_iter().count(),
+        1,
+        "the lane must resume delivering once the subscriber drains"
+    );
 }

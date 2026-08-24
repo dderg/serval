@@ -10,6 +10,7 @@ pub mod ffi;
 pub mod live_tap;
 pub mod mailbox;
 pub mod obs;
+pub mod reclaim;
 pub mod rt_log;
 pub mod scale;
 pub mod sdo;

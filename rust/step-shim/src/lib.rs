@@ -203,6 +203,7 @@ struct MotorState {
     needs_reset: bool,
     last_dir: Option<u8>,
     next_expected_interval: u32,
+    hp_scratch: Option<compress_hp::HpScratch>,
 }
 
 impl MotorState {
@@ -216,6 +217,8 @@ impl MotorState {
             needs_reset: true,
             last_dir: None,
             next_expected_interval: 0,
+            hp_scratch: matches!(cfg.encoder, StepEncoder::HighPrecision)
+                .then(compress_hp::HpScratch::new),
         }
     }
 
@@ -290,13 +293,17 @@ impl MotorState {
                     Encoded::Classic(moves, covered)
                 }
                 StepEncoder::HighPrecision => {
-                    let (moves, covered, carry_out) =
-                        compress_hp::compress_hp(&clocks, base_clock, hp_carry).map_err(|e| {
-                            ShimError::CompressFailure {
-                                motor,
-                                detail: e.detail,
-                            }
-                        })?;
+                    let scratch = self
+                        .hp_scratch
+                        .as_mut()
+                        .expect("high-precision motors own their compressor scratch");
+                    let (moves, covered, carry_out) = compress_hp::compress_hp(
+                        scratch, &clocks, base_clock, hp_carry,
+                    )
+                    .map_err(|e| ShimError::CompressFailure {
+                        motor,
+                        detail: e.detail,
+                    })?;
                     Encoded::Hp(moves, covered, carry_out)
                 }
             };

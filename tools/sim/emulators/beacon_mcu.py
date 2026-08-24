@@ -44,6 +44,9 @@ APPROACH_FROM_ABOVE_Z_MM = 10.0
 
 class BeaconMcuStub:
     SAMPLE_RATE_HZ = 1600.0
+    BATCH_HZ = 200.0
+    SAMPLES_PER_BATCH = 8
+    BATCH_PERIOD_S = 1.0 / BATCH_HZ
     IDENTIFY_BLOB = IDENTIFY_BLOB
     CLOCK_FREQ = CLOCK_FREQ
     STUB_NAME = "beacon-stub"
@@ -114,6 +117,8 @@ class BeaconMcuStub:
         self._accel_thread: Optional[threading.Thread] = None
         self._accel_clock_at_last_emit: int = 0
         self._sample_index: int = 0
+        self._next_batch_vt: float = 0.0
+        self._last_batch_vt: Optional[float] = None
         self._clock_origin = self._monotonic()
 
         self._homing_trigger_delay: float = 0.5
@@ -855,32 +860,48 @@ class BeaconMcuStub:
         sock.connect(self._step_sock_path)
         return sock
 
-    def _sample_loop(self) -> None:
-        BATCH_HZ = 200.0
-        SAMPLES_PER_BATCH = 8
-        STATUS_HZ = 10.0
-        batch_period = 1.0 / BATCH_HZ
-        status_period = 1.0 / STATUS_HZ
-        RESYNC_GAP_S = 0.5
+    def _due_batch_vt(self, now_vt: float) -> float:
+        """A stall that swallows whole batch periods cannot be replayed:
+        the samples those periods would have carried were never taken.
+        Replaying the backlog emits several batches at one clock, each
+        stamped with the current Z, which reads downstream as scheduled
+        history. The schedule resynchronizes to now exactly once
+        instead."""
+        if now_vt - self._next_batch_vt >= self.BATCH_PERIOD_S:
+            return now_vt
+        return self._next_batch_vt
 
-        next_batch = self._monotonic()
+    def _commit_batch_vt(self, batch_vt: float) -> None:
+        last = self._last_batch_vt
+        min_advance = self.BATCH_PERIOD_S / 2
+        if last is not None and batch_vt - last < min_advance:
+            raise RuntimeError(
+                "beacon-stub: batch clocks collided: "
+                f"{batch_vt!r} follows {last!r}, less than half of the "
+                f"{self.BATCH_PERIOD_S}s batch period apart"
+            )
+        self._last_batch_vt = batch_vt
+        self._next_batch_vt = batch_vt + self.BATCH_PERIOD_S
+
+    def _sample_loop(self) -> None:
+        STATUS_HZ = 10.0
+        status_period = 1.0 / STATUS_HZ
+
+        self._next_batch_vt = self._monotonic()
+        self._last_batch_vt = None
         next_status = time.monotonic()
-        last_data_value = 0
         loop_iter_count = 0
         batch_sock = None
 
         while not self._stop.is_set() and self._stream_en:
             now_vt = self._monotonic()
             now = time.monotonic()
-            if now_vt < next_batch and now < next_status:
+            if now_vt < self._next_batch_vt and now < next_status:
                 time.sleep(0.001)
                 continue
 
-            if now_vt >= next_batch:
-                if now_vt - next_batch > RESYNC_GAP_S:
-                    next_batch = now_vt
-                batch_vt = next_batch
-                next_batch += batch_period
+            if now_vt >= self._next_batch_vt:
+                batch_vt = self._due_batch_vt(now_vt)
 
                 z_at_batch = None
                 if self._step_tracking:
@@ -901,6 +922,7 @@ class BeaconMcuStub:
                             except OSError:
                                 pass
                             batch_sock = None
+                self._commit_batch_vt(batch_vt)
                 if z_at_batch is None:
                     if self._home_active and not self._step_tracking:
                         elapsed = batch_vt - self._homing_start_time
@@ -920,7 +942,7 @@ class BeaconMcuStub:
                 buf = bytearray()
                 decoder_baseline = 0
                 last_data_value = decoder_baseline
-                for i in range(SAMPLES_PER_BATCH):
+                for i in range(self.SAMPLES_PER_BATCH):
                     delta = data_value - last_data_value
                     fits_two_byte_twos_complement = -16384 <= delta <= 16383
                     if fits_two_byte_twos_complement:
@@ -939,17 +961,20 @@ class BeaconMcuStub:
                     last_data_value = data_value
 
                 delta_clock = (
-                    int(self.CLOCK_FREQ / (BATCH_HZ * SAMPLES_PER_BATCH))
-                    * SAMPLES_PER_BATCH
+                    int(
+                        self.CLOCK_FREQ
+                        / (self.BATCH_HZ * self.SAMPLES_PER_BATCH)
+                    )
+                    * self.SAMPLES_PER_BATCH
                 )
                 self._send_msg(
                     "beacon_data data=%*s samples=%c start_clock=%u delta_clock=%u",
                     data=list(buf),
-                    samples=SAMPLES_PER_BATCH,
+                    samples=self.SAMPLES_PER_BATCH,
                     start_clock=start_clock,
                     delta_clock=delta_clock,
                 )
-                self.tx_sample_count += SAMPLES_PER_BATCH
+                self.tx_sample_count += self.SAMPLES_PER_BATCH
                 loop_iter_count += 1
 
                 # Thresholds arrive from klippy already in counts, not Hz.

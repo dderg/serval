@@ -80,15 +80,10 @@ fn set_clock_est_rebased_advances_with_mock_clock() {
     let (mut router, clock) = make_router();
     let mcu = router.claim_mcu("mcu");
 
-    // `offset_raw` must be in the same RAW-domain epoch as `bridge_now_raw`
-    // inside `set_clock_est_rebased`.  Capture it here so the conversion
-    // `raw_at_anchor = bridge_now_raw - bridge_now_instant` yields a small,
-    // positive number and `clock_offset` lands near the mock clock's current
-    // Instant value.
-    let offset_raw = crate::clock::monotonic_raw_secs();
+    let now_raw = crate::clock::monotonic_raw_secs();
 
     router
-        .set_clock_est_rebased(mcu, 1_000_000.0, offset_raw, 10_000_000, true, 0.0)
+        .set_clock_est_rebased(mcu, 1_000_000.0, now_raw, 10_000_000, true, now_raw)
         .unwrap();
 
     let ack0 = router.compute_ack_clock(mcu).unwrap();
@@ -106,8 +101,9 @@ fn set_clock_est_rebased_advances_with_mock_clock() {
 #[test]
 fn set_clock_est_rebased_epsilon_independent() {
     let freq = 1_000_000.0_f64;
-    let offset_raw = 990.0_f64;
     let last_clock = 10_000_000_u64;
+    let now_raw = crate::clock::monotonic_raw_secs();
+    let offset_raw = now_raw - 10.0;
 
     let (mut router_a, _clock_a) = make_router();
     let mcu_a = router_a.claim_mcu("mcu_a");
@@ -116,11 +112,11 @@ fn set_clock_est_rebased_epsilon_independent() {
     let mcu_b = router_b.claim_mcu("mcu_b");
 
     router_a
-        .set_clock_est_rebased(mcu_a, freq, offset_raw, last_clock, true, 1000.0)
+        .set_clock_est_rebased(mcu_a, freq, offset_raw, last_clock, true, now_raw)
         .unwrap();
 
     router_b
-        .set_clock_est_rebased(mcu_b, freq, offset_raw, last_clock, true, 1000.0 - 0.050)
+        .set_clock_est_rebased(mcu_b, freq, offset_raw, last_clock, true, now_raw - 0.050)
         .unwrap();
 
     let ack_a = router_a.compute_ack_clock(mcu_a).unwrap();

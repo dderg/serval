@@ -416,25 +416,54 @@ struct WalkFailure {
     detail: &'static str,
 }
 
+pub struct HpScratch {
+    rhs: Box<[Rhs3; MAX_COUNT_LSM]>,
+    errb: Box<[Points; MAX_COUNT_LSM]>,
+}
+
+impl HpScratch {
+    pub fn new() -> Self {
+        Self {
+            rhs: Box::new([Rhs3::default(); MAX_COUNT_LSM]),
+            errb: Box::new([Points::default(); MAX_COUNT_LSM]),
+        }
+    }
+}
+
+impl Default for HpScratch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for HpScratch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HpScratch")
+    }
+}
+
 struct Compressor<'a> {
     steps: &'a [u64],
     pos: usize,
     last_step_clock: u64,
     next_expected_interval: u32,
-    rhs_cache: Box<[Rhs3; MAX_COUNT_LSM]>,
-    errb_cache: Box<[Points; MAX_COUNT_LSM]>,
+    scratch: &'a mut HpScratch,
     cached_count: usize,
 }
 
 impl<'a> Compressor<'a> {
-    fn new(steps: &'a [u64], last_step_clock: u64, next_expected_interval: u32) -> Self {
+    fn new(
+        scratch: &'a mut HpScratch,
+        steps: &'a [u64],
+        last_step_clock: u64,
+        next_expected_interval: u32,
+    ) -> Self {
         Self {
             steps,
             pos: 0,
             last_step_clock,
             next_expected_interval,
-            rhs_cache: Box::new([Rhs3::default(); MAX_COUNT_LSM]),
-            errb_cache: Box::new([Points::default(); MAX_COUNT_LSM]),
+            scratch,
             cached_count: 0,
         }
     }
@@ -465,14 +494,15 @@ impl<'a> Compressor<'a> {
     fn update_caches_to_count(&mut self, count: usize) {
         assert!(count <= MAX_COUNT_LSM);
         if self.cached_count == 0 {
-            self.rhs_cache[0] = self.compute_rhs(1, None);
-            self.errb_cache[0] = minmax_point(self.steps, self.pos, self.pos, self.last_step_clock);
+            self.scratch.rhs[0] = self.compute_rhs(1, None);
+            self.scratch.errb[0] =
+                minmax_point(self.steps, self.pos, self.pos, self.last_step_clock);
             self.cached_count = 1;
         }
         for i in self.cached_count + 1..=count {
-            let previous = self.rhs_cache[i - 2];
-            self.rhs_cache[i - 1] = self.compute_rhs(i, Some(previous));
-            self.errb_cache[i - 1] =
+            let previous = self.scratch.rhs[i - 2];
+            self.scratch.rhs[i - 1] = self.compute_rhs(i, Some(previous));
+            self.scratch.errb[i - 1] =
                 minmax_point(self.steps, self.pos + i - 1, self.pos, self.last_step_clock);
         }
         self.cached_count = self.cached_count.max(count);
@@ -480,7 +510,7 @@ impl<'a> Compressor<'a> {
 
     fn point_for(&self, index: usize) -> Points {
         if index < self.cached_count {
-            self.errb_cache[index]
+            self.scratch.errb[index]
         } else {
             minmax_point(self.steps, self.pos + index, self.pos, self.last_step_clock)
         }
@@ -583,13 +613,13 @@ impl<'a> Compressor<'a> {
                 last_step: 0,
             };
         }
-        let mut rhs = self.rhs_cache[count - 1];
+        let mut rhs = self.scratch.rhs[count - 1];
         solve_3x3(&least_squares_ldl()[count - 1], &mut rhs);
         let regular = step_move_encode(count, &rhs)
             .map(|candidate| self.test_candidate(candidate))
             .unwrap_or_default();
         if count > 20 && (regular.count as usize) < count / 4 {
-            let mut extra_rhs = self.rhs_cache[count - 1];
+            let mut extra_rhs = self.scratch.rhs[count - 1];
             extra_rhs.b0 += EXTRA_FIRST_STEP_BIAS * f64::from(self.next_expected_interval);
             solve_3x3(&least_squares_efsb_ldl()[count - 1], &mut extra_rhs);
             let extra = step_move_encode(count, &extra_rhs)
@@ -705,6 +735,7 @@ fn validate_monotonic(steps: &[u64], last_step_clock: u64) -> Result<(), Compres
 }
 
 pub fn compress_hp(
+    scratch: &mut HpScratch,
     steps: &[u64],
     last_step_clock: u64,
     next_expected_interval: u32,
@@ -713,7 +744,7 @@ pub fn compress_hp(
         return Err(points_error("stepcompress hp: empty input"));
     }
     validate_monotonic(steps, last_step_clock)?;
-    let mut compressor = Compressor::new(steps, last_step_clock, next_expected_interval);
+    let mut compressor = Compressor::new(scratch, steps, last_step_clock, next_expected_interval);
     let mut moves = Vec::new();
     let mut pos = 0usize;
     let mut lsc = last_step_clock;

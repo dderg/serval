@@ -138,7 +138,7 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
             SchemaField { name: "lane_count", ty: "u8" },
             SchemaField {
                 name: "lanes",
-                ty: "array<lane_run{axis_idx:u8,flags:u8,origin_mm_q16:i32,start_index:u64,interval_ticks:u32,sample_count:u16,samples:array<setpoint_sample{pos_counts:i32,vel_ff:i32,torque_ff:i16,acc_mm_s2:f32}>}>",
+                ty: "array<lane_run{axis_idx:u8,slot_idx:u8,flags:u8,origin_mm_q16:i32,start_index:u64,interval_ticks:u32,sample_count:u16,samples:array<setpoint_sample{pos_counts:i32,vel_ff:i32,torque_ff:i16,acc_mm_s2:f32}>}>",
             },
         ],
     },

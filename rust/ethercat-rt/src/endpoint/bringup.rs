@@ -157,16 +157,11 @@ struct SlaveColumns {
     axes: Vec<u8>,
     velocity_ff: Vec<bool>,
     torque_clamp_tenths: Vec<i16>,
-    ff_lead_ns: Vec<u64>,
     jump_log_counts: Vec<i64>,
 }
 
 impl SlaveColumns {
-    fn from(
-        slaves: &[SlaveCfg],
-        cycle_us: i64,
-        dynamics: Option<&crate::dynamics::DynamicsModel>,
-    ) -> Self {
+    fn from(slaves: &[SlaveCfg], cycle_us: i64) -> Self {
         let cmd_counts_per_mm: Vec<f64> = slaves
             .iter()
             .map(|s| {
@@ -191,9 +186,6 @@ impl SlaveColumns {
             axes: slaves.iter().map(|s| s.axis).collect(),
             velocity_ff: slaves.iter().map(|s| s.velocity_ff).collect(),
             torque_clamp_tenths: slaves.iter().map(|s| s.torque_clamp_tenths).collect(),
-            ff_lead_ns: dynamics
-                .map(|d| d.ff_lead_ns())
-                .unwrap_or_else(|| vec![0u64; slaves.len()]),
             jump_log_counts,
         }
     }
@@ -273,7 +265,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
 
     let num_slaves = slaves.len();
     let mut drive: Box<dyn DriveChain> = Box::new(FfiDriveChain);
-    let columns = SlaveColumns::from(&slaves, cycle_us, dynamics.as_ref());
+    let columns = SlaveColumns::from(&slaves, cycle_us);
 
     let cycle_ns = cycle_us * 1000;
     let telemetry_period = u64::try_from(cycle_us)
@@ -302,13 +294,14 @@ pub fn bringup(args: Args) -> EndpointCtx {
     let last_sent_retired: u32 = 0;
     let heartbeat_sent = false;
 
-    // The capture-io and live-tap thread spawns and their ring buffers are
-    // multi-millisecond stalls under mlockall(MCL_FUTURE); they must happen
-    // before ec_rt_bringup_preop, while no drive is DC-synced and no park
-    // cycle is being pumped on this thread (claim-time Capture::new stalled
-    // the park loop past the sync watchdog and halted the bus at every claim,
-    // bench 2026-07-06).
+    // The capture-io, live-tap and reclaim thread spawns and their ring
+    // buffers are multi-millisecond stalls under mlockall(MCL_FUTURE); they
+    // must happen before ec_rt_bringup_preop, while no drive is DC-synced and
+    // no park cycle is being pumped on this thread (claim-time Capture::new
+    // stalled the park loop past the sync watchdog and halted the bus at every
+    // claim, bench 2026-07-06).
     let capture = Capture::new();
+    let reclaim = crate::reclaim::Reclaim::spawn();
     let live_tap = LiveTap::spawn(
         &format!("{socket}.live"),
         live_tap::slot_configs(
@@ -470,7 +463,6 @@ pub fn bringup(args: Args) -> EndpointCtx {
         axes: slave_axes,
         velocity_ff,
         torque_clamp_tenths,
-        ff_lead_ns,
         jump_log_counts,
     } = columns;
 
@@ -492,7 +484,6 @@ pub fn bringup(args: Args) -> EndpointCtx {
         slave_axes,
         velocity_ff,
         torque_clamp_tenths,
-        ff_lead_ns,
         jump_log_counts,
         cycle_ns,
         group_delay_ns,
@@ -511,6 +502,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
         ring_origin: vec![None; num_slaves],
         sp_play_scratch: vec![None; num_slaves],
         sp_fill_scratch: Vec::with_capacity(crate::setpoint::MAX_FILL_CYCLES),
+        reclaim,
         last_grid_index: 0,
         last_grid_clock: 0,
         damper,

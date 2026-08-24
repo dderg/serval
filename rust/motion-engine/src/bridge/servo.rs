@@ -8,6 +8,7 @@ use crate::types::AxisKey;
 use pyo3::types::PyAnyMethods;
 use pyo3::{Bound, PyAny};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[pymethods]
 impl PyMotionEngine {
@@ -511,6 +512,7 @@ impl PyMotionEngine {
     }
     fn set_ff_lead(&self, py: Python<'_>, mcu_handle: u32, slot: u8, lead_ns: u64) -> PyResult<()> {
         let conn = self.ethercat_conn(mcu_handle, "set_ff_lead")?;
+        let ring = self.ring_filler(mcu_handle, "set_ff_lead")?;
         tracing::info!(
             subsystem = "engine",
             event = "servo_set_ff_lead",
@@ -519,20 +521,19 @@ impl PyMotionEngine {
             lead_ns,
             "servo feedforward lead"
         );
-        let result = py
-            .detach(|| {
-                crate::servo_torque::send_set_ff_lead(
-                    &conn,
-                    mcu_protocol::messages::SetFfLead { slot, lead_ns },
-                )
+        py.detach(|| {
+            reconfigure_feedforward(&conn, &ring, "set_ff_lead", |filler| {
+                require_endpoint_ok(
+                    crate::servo_torque::send_set_ff_lead(
+                        &conn,
+                        mcu_protocol::messages::SetFfLead { slot, lead_ns },
+                    )?,
+                    "set_ff_lead",
+                )?;
+                require_filler_ok(filler.set_ff_lead(slot as usize, lead_ns), "set_ff_lead")
             })
-            .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "set_ff_lead: endpoint rejected (result {result})"
-            )));
-        }
-        Ok(())
+        })
+        .map_err(PyRuntimeError::new_err)
     }
     #[allow(clippy::too_many_arguments)]
     fn set_strain_comp(
@@ -692,7 +693,32 @@ impl PyMotionEngine {
         }
         let wire_pairs = validate_dynamics_pairs(&frame, modes, slots, &pairs, &direction_split)
             .map_err(PyRuntimeError::new_err)?;
+        let pair_specs: Vec<ethercat_rt::dynamics::PairSpec> = wire_pairs
+            .iter()
+            .map(|pair| ethercat_rt::dynamics::PairSpec {
+                first: pair.first as usize,
+                second: pair.second as usize,
+                direction_split: pair.direction_split,
+            })
+            .collect();
+        let host_model = ethercat_rt::dynamics::DynamicsModel::from_parts(
+            slots,
+            modes,
+            &frame,
+            &mass,
+            &viscous,
+            &coulomb,
+            &compliance,
+            &pin_mass,
+            &pin_zeta,
+            f64::from(pin_lead_us),
+            &pair_specs,
+        )
+        .map_err(|e| {
+            PyRuntimeError::new_err(format!("set_dynamics_model: model rejected: {e:?}"))
+        })?;
         let conn = self.ethercat_conn(mcu_handle, "set_dynamics_model")?;
+        let ring = self.ring_filler(mcu_handle, "set_dynamics_model")?;
         tracing::info!(
             subsystem = "engine",
             event = "servo_set_dynamics_model",
@@ -702,32 +728,37 @@ impl PyMotionEngine {
             pairs = wire_pairs.len(),
             "servo dynamics feedforward model upload"
         );
-        let result = py
-            .detach(|| {
-                crate::servo_torque::send_set_dynamics_model(
-                    &conn,
-                    mcu_protocol::messages::SetDynamicsModel {
-                        slots_count,
-                        modes_count,
-                        frame,
-                        mass,
-                        viscous,
-                        coulomb,
-                        compliance,
-                        pin_mass,
-                        pin_zeta,
-                        pin_lead_us,
-                        pairs: wire_pairs,
-                    },
-                )
+        let msg = mcu_protocol::messages::SetDynamicsModel {
+            slots_count,
+            modes_count,
+            frame,
+            mass,
+            viscous,
+            coulomb,
+            compliance,
+            pin_mass,
+            pin_zeta,
+            pin_lead_us,
+            pairs: wire_pairs,
+        };
+        py.detach(|| {
+            reconfigure_feedforward(&conn, &ring, "set_dynamics_model", |filler| {
+                if host_model.n_slots != filler.lane_count() {
+                    return Err(format!(
+                        "set_dynamics_model: the model covers {} slots but the endpoint's \
+                         filler drives {} lanes",
+                        host_model.n_slots,
+                        filler.lane_count()
+                    ));
+                }
+                require_endpoint_ok(
+                    crate::servo_torque::send_set_dynamics_model(&conn, msg)?,
+                    "set_dynamics_model",
+                )?;
+                require_filler_ok(filler.install_dynamics(host_model), "set_dynamics_model")
             })
-            .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "set_dynamics_model: endpoint rejected (result {result})"
-            )));
-        }
-        Ok(())
+        })
+        .map_err(PyRuntimeError::new_err)
     }
 }
 
@@ -807,6 +838,21 @@ pub(super) fn buzz_lanes(axis_bits: u8, sign_mask: u8) -> Vec<BuzzLane> {
 }
 
 impl PyMotionEngine {
+    /// The host-side setpoint filler of a claimed EtherCAT node. Only an
+    /// EtherCAT connection has one, so a handle without a filler cannot
+    /// execute setpoints at all.
+    fn ring_filler(&self, mcu_handle: u32, what: &str) -> PyResult<crate::pump::RingFiller> {
+        self.mcus
+            .lock_ok()
+            .get(&mcu_handle)
+            .and_then(|mcu| mcu.ring_filler.clone())
+            .ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "{what}: mcu_handle {mcu_handle} has no EtherCAT setpoint filler"
+                ))
+            })
+    }
+
     /// Resolve every spec into a live endpoint handle. Every lookup happens
     /// here, before the request leaves the Python thread, so a missing
     /// endpoint or an empty mask is a loud failure with nothing armed.
@@ -825,17 +871,7 @@ impl PyMotionEngine {
                             "resonance_buzz: ethercat route has an empty slot mask",
                         ));
                     }
-                    let filler = self
-                        .mcus
-                        .lock_ok()
-                        .get(&mcu_handle)
-                        .and_then(|mcu| mcu.ring_filler.clone())
-                        .ok_or_else(|| {
-                            PyRuntimeError::new_err(format!(
-                                "resonance_buzz: mcu_handle {mcu_handle} has no \
-                                 EtherCAT setpoint filler"
-                            ))
-                        })?;
+                    let filler = self.ring_filler(mcu_handle, "resonance_buzz")?;
                     routes.push(BuzzRoute::Ethercat {
                         mcu_id: mcu_handle,
                         filler,
@@ -998,4 +1034,48 @@ fn require_endpoint_ok(result: i32, context: &str) -> Result<(), String> {
         return Err(format!("{context}: endpoint result {result}"));
     }
     Ok(())
+}
+
+fn require_filler_ok(result: i32, context: &str) -> Result<(), String> {
+    if result != 0 {
+        return Err(format!(
+            "{context}: host filler refused it (result {result})"
+        ));
+    }
+    Ok(())
+}
+
+/// Reading the endpoint's grid is one control call, so it gets the same
+/// budget as the reconfiguration it precedes.
+const RECONFIG_GRID_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A feedforward change has to land on one side of every sample: the filler
+/// computes each sample's velocity and torque feedforward, the endpoint only
+/// clamps it and adds the pin. The grid is re-read first — the pair the filler
+/// holds was reported at fill time, so nothing else tells it whether the
+/// samples it already emitted have played — and the endpoint call plus the
+/// filler update run under the filler lock, so no drain can slip a sample of
+/// the old configuration in between. Motion still outstanding is refused, not
+/// split.
+fn reconfigure_feedforward<T>(
+    conn: &host_rt::mcu_serial_conn::McuSerialConn,
+    ring: &crate::pump::RingFiller,
+    what: &str,
+    apply: impl FnOnce(&mut ethercat_rt::setpoint_fill::ChainFiller) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut filler = ring.lock_ok();
+    let grid =
+        super::ethercat_endpoint::verify_sample_grid(conn, Instant::now() + RECONFIG_GRID_TIMEOUT)
+            .map_err(|e| format!("{what}: the endpoint's sample grid is unreadable: {e:?}"))?;
+    filler
+        .observe_grid(grid.grid_index, grid.grid_clock)
+        .map_err(|e| format!("{what}: the endpoint's sample grid was refused: {e:?}"))?;
+    if !filler.quiescent() {
+        return Err(format!(
+            "{what}: the endpoint still has setpoints outstanding — changing the feedforward \
+             mid-stream would step the velocity and torque feedforward; wait for the motion to \
+             finish"
+        ));
+    }
+    apply(&mut filler)
 }

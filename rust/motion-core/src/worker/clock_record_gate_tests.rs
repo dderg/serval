@@ -70,10 +70,17 @@ fn publish_with_centroid_lag(
     converged: bool,
     centroid_lag_secs: f64,
 ) {
-    let offset_raw = host_rt::clock::monotonic_raw_secs() - centroid_lag_secs;
+    let now_raw = host_rt::clock::monotonic_raw_secs();
     router
         .lock_ok()
-        .set_clock_est_rebased(handle, FREQ, offset_raw, last_clock, converged, 0.0)
+        .set_clock_est_rebased(
+            handle,
+            FREQ,
+            now_raw - centroid_lag_secs,
+            last_clock,
+            converged,
+            now_raw,
+        )
         .unwrap();
 }
 

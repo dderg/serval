@@ -310,7 +310,7 @@ impl BuzzProfile {
         if !omega_start.is_finite() || !omega_end.is_finite() || !sweep_rate.is_finite() {
             return Err(ProfileError::NonFinite("derived buzz frequency"));
         }
-        let ramp = ramp.min(0.5 * duration).max(f64::MIN_POSITIVE);
+        let ramp = ramp.min(0.5 * duration);
         let mut breakpoints = Vec::with_capacity(4);
         breakpoints.push(t_start);
         let first_knee = t_start + ramp;
@@ -432,12 +432,19 @@ impl BuzzProfile {
         self.acceleration_bounds
     }
 
-    fn sample_local(&self, t: f64, interval: EnvelopeInterval) -> ProfileSample {
-        let (envelope, envelope_rate) = match interval {
+    fn envelope_at(&self, t: f64, interval: EnvelopeInterval) -> (f64, f64) {
+        if self.ramp == 0.0 {
+            return (1.0, 0.0);
+        }
+        match interval {
             EnvelopeInterval::Rising => (t / self.ramp, 1.0 / self.ramp),
             EnvelopeInterval::Flat => (1.0, 0.0),
             EnvelopeInterval::Falling => ((self.duration - t) / self.ramp, -1.0 / self.ramp),
-        };
+        }
+    }
+
+    fn sample_local(&self, t: f64, interval: EnvelopeInterval) -> ProfileSample {
+        let (envelope, envelope_rate) = self.envelope_at(t, interval);
         let omega = self.omega_start + self.sweep_rate * t;
         let amplitude = if self.sweep_rate == 0.0 {
             self.amplitude_mm
@@ -596,11 +603,7 @@ impl BuzzProfile {
     }
 
     fn jerk_local(&self, t: f64, interval: EnvelopeInterval) -> f64 {
-        let (envelope, envelope_rate) = match interval {
-            EnvelopeInterval::Rising => (t / self.ramp, 1.0 / self.ramp),
-            EnvelopeInterval::Flat => (1.0, 0.0),
-            EnvelopeInterval::Falling => ((self.duration - t) / self.ramp, -1.0 / self.ramp),
-        };
+        let (envelope, envelope_rate) = self.envelope_at(t, interval);
         let omega = self.omega_start + self.sweep_rate * t;
         let base = self.amplitude_mm * self.omega_start;
         let (amplitude, amplitude_rate, amplitude_accel, amplitude_jerk) = if self.sweep_rate == 0.0

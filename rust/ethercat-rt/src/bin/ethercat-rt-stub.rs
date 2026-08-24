@@ -63,6 +63,13 @@ fn grid_now(base_ns: u64) -> (u64, u64) {
     (index, base_ns + index * STUB_CYCLE_NS as u64)
 }
 
+/// The ring's exclusive playback cursor in the stub grid's clock domain — the
+/// same map `grid_now` echoes, so the host retires a run at its `end_clock`.
+fn playback_clock(base_ns: u64, ring: &SetpointRing) -> u64 {
+    ring.played_cursor()
+        .map_or(0, |index| base_ns + index * STUB_CYCLE_NS as u64)
+}
+
 const STUB_PROBE_COUNTER_INDEX: u16 = 0x5FFF;
 const TXPDO_TORQUE_ACTUAL_INDEX: u16 = 0x6077;
 
@@ -574,7 +581,7 @@ fn main() {
                     ENGINE_STATE_FAULT,
                     0,
                     &[ring.played_count()],
-                    &[ring.playback_clock()],
+                    &[playback_clock(grid_base_ns, &ring)],
                     0,
                 ));
                 std::process::exit(1);
@@ -625,7 +632,7 @@ fn main() {
                             0,
                             0x8611,
                             &[ring.played_count()],
-                            &[ring.playback_clock()],
+                            &[playback_clock(grid_base_ns, &ring)],
                             0,
                         ));
                         last_sent_retired = ring.played_count();
@@ -681,7 +688,7 @@ fn main() {
                 ENGINE_STATE_FAULT,
                 fault_code_u16,
                 &[current_played],
-                &[ring.playback_clock()],
+                &[playback_clock(grid_base_ns, &ring)],
                 0,
             ));
             last_sent_retired = current_played;
@@ -696,7 +703,7 @@ fn main() {
                 engine_state,
                 0,
                 &[current_played],
-                &[ring.playback_clock()],
+                &[playback_clock(grid_base_ns, &ring)],
                 0,
             ));
             last_sent_retired = current_played;

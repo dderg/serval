@@ -84,36 +84,18 @@ impl Engine {
         let Some((lane_idx, lane)) = self.lane_mut(oid, shared) else {
             return;
         };
-        if let Err(fault) = lane.push_barrier(now, seq) {
+        if let Err(fault) = lane.push_barrier(now, oid, seq) {
             fault.latch(shared, lane_idx);
         }
     }
 
     /// Pop one passed fence across every lane, tagged with the stepper oid the
-    /// host addressed it by. Foreground-only; the caller loops until `None` and
-    /// sends one `sample_barrier_ack` per result.
+    /// host submitted it under. Foreground-only; the caller loops until `None`
+    /// and sends one `sample_barrier_ack` per result.
     pub fn sample_take_barrier_ack(&mut self) -> Option<(u8, u32)> {
-        for lane_idx in 0..self.sample_lanes.len() {
-            let Some(oid) = self.sample_lane_oid(lane_idx) else {
-                continue;
-            };
-            let Some(lane) = self.sample_lanes.get_mut(lane_idx) else {
-                continue;
-            };
-            if let Some(seq) = lane.take_passed_barrier() {
-                return Some((oid, seq));
-            }
-        }
-        None
-    }
-
-    fn sample_lane_oid(&self, lane_idx: usize) -> Option<u8> {
-        self.stepping_axes
-            .get(lane_idx)?
-            .as_ref()?
-            .steppers
-            .first()
-            .map(|stepper| stepper.stepper_oid)
+        self.sample_lanes
+            .iter_mut()
+            .find_map(SampleLane::take_passed_barrier)
     }
 
     /// Publish a trip halt from a context that may not touch `IsrState`. The
@@ -141,6 +123,19 @@ impl Engine {
         }
         for (lane_idx, lane) in self.sample_lanes.iter_mut().enumerate() {
             lane.halt(halt_clock, shared, lane_idx);
+        }
+    }
+
+    /// Force idle abandons the whole stream, so no lane may keep playing host
+    /// samples across it: a pending trip request halts on its own clock, and
+    /// every remaining lane freezes at what it has executed by `now`. Each
+    /// lane holds that position until the host re-anchors, and the discarded
+    /// fences are receipted rather than stranded.
+    pub(crate) fn sample_force_idle(&mut self, shared: &SharedState) {
+        self.sample_take_halt_request(shared);
+        let now = read_widened_now(shared);
+        for (lane_idx, lane) in self.sample_lanes.iter_mut().enumerate() {
+            lane.halt(now, shared, lane_idx);
         }
     }
 

@@ -16,9 +16,9 @@ fn router() -> (PassthroughRouter, Arc<MockClock>) {
 /// A rebased estimate needs its offset in the same CLOCK_MONOTONIC_RAW epoch
 /// the router reads inside `set_clock_est_rebased`.
 fn publish(router: &mut PassthroughRouter, mcu: McuHandle, last_clock: u64, converged: bool) {
-    let offset_raw = crate::clock::monotonic_raw_secs();
+    let now_raw = crate::clock::monotonic_raw_secs();
     router
-        .set_clock_est_rebased(mcu, FREQ, offset_raw, last_clock, converged, 0.0)
+        .set_clock_est_rebased(mcu, FREQ, now_raw, last_clock, converged, now_raw)
         .unwrap();
 }
 

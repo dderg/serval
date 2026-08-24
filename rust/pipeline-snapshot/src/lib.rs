@@ -714,6 +714,20 @@ fn push_sampled_pieces(
     }
 }
 
+/// Interior stations, as fractions of the piece, the interpolant is checked
+/// against the carrier at. A lone midpoint check is blind to a carrier that
+/// is point-symmetric about that midpoint: the quintic inherits the symmetry
+/// and meets the carrier exactly there while departing from it across the
+/// rest of the piece, so a curved span would pass validation unrefined.
+const SAMPLED_PIECE_PROBES: [f64; 5] = [1.0 / 6.0, 1.0 / 3.0, 0.5, 2.0 / 3.0, 5.0 / 6.0];
+
+fn interior_deviation(coeffs: &[f64], h: f64, carrier: impl Fn(f64) -> f64) -> f64 {
+    SAMPLED_PIECE_PROBES.iter().fold(0.0_f64, |worst, &frac| {
+        let tau = frac * h;
+        worst.max((eval_monomial(coeffs, tau) - carrier(tau)).abs())
+    })
+}
+
 fn push_interpolated_piece(
     dst: &mut Vec<Vec<f64>>,
     seg: &ContinuousSegment,
@@ -722,13 +736,10 @@ fn push_interpolated_piece(
     t1: f64,
     depth: u32,
 ) {
-    let coeffs = quintic_hermite(
-        t1 - t0,
-        sample_axis(seg, axis, t0),
-        sample_axis(seg, axis, t1),
-    );
+    let h = t1 - t0;
+    let coeffs = quintic_hermite(h, sample_axis(seg, axis, t0), sample_axis(seg, axis, t1));
+    let deviation = interior_deviation(&coeffs, h, |tau| sample_axis(seg, axis, t0 + tau).position);
     let mid = 0.5 * (t0 + t1);
-    let deviation = (eval_monomial(&coeffs, mid - t0) - sample_axis(seg, axis, mid).position).abs();
     if depth < SAMPLED_PIECE_MAX_DEPTH && deviation > SAMPLED_PIECE_TOL_MM && mid > t0 && mid < t1 {
         push_interpolated_piece(dst, seg, axis, t0, mid, depth + 1);
         push_interpolated_piece(dst, seg, axis, mid, t1, depth + 1);
@@ -780,7 +791,7 @@ fn push_piece(dst: &mut Vec<Vec<f64>>, t0: f64, t1: f64, coeffs: Vec<f64>) {
         t0 = absorbed_start;
     }
     let mut row = vec![t0, t1];
-    row.extend_from_slice(&trim_trailing_zeros(coeffs));
+    row.extend_from_slice(&trim_trailing_zeros(coeffs, t1 - t0));
     dst.push(row);
 }
 
@@ -797,15 +808,21 @@ fn absorb_trailing_sliver(dst: &mut Vec<Vec<f64>>) {
     }
 }
 
-/// Trailing coefficients are trimmed against the magnitude of the *dynamic*
-/// terms, never the folded-in base position, so a large offset cannot swallow
-/// a real high-order term.
-fn trim_trailing_zeros(mut coeffs: Vec<f64>) -> Vec<f64> {
-    let scale = coeffs.iter().skip(1).fold(0.0_f64, |m, c| m.max(c.abs()));
-    while coeffs.len() > 1
-        && coeffs
-            .last()
-            .is_some_and(|c| c.abs() <= 1e-12 * (scale + 1.0))
+/// Trailing coefficients are trimmed by what they actually displace over the
+/// piece's own duration — `|c_k| * h^k` millimetres — not by raw magnitude:
+/// on a short row a numerically large high-order coefficient moves the
+/// toolhead by nothing, while on a long row a tiny one still carries the
+/// endpoint. The base position is excluded from the scale so a large offset
+/// cannot swallow a real high-order term.
+fn trim_trailing_zeros(mut coeffs: Vec<f64>, duration_s: f64) -> Vec<f64> {
+    let contribution = |power: usize, c: f64| c.abs() * duration_s.powi(power as i32);
+    let scale = coeffs
+        .iter()
+        .enumerate()
+        .skip(1)
+        .fold(0.0_f64, |m, (power, &c)| m.max(contribution(power, c)));
+    let negligible = 1e-12 * (scale + 1.0);
+    while coeffs.len() > 1 && contribution(coeffs.len() - 1, coeffs[coeffs.len() - 1]) <= negligible
     {
         coeffs.pop();
     }

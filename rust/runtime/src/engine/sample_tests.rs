@@ -241,3 +241,70 @@ fn a_halted_lane_swallows_runs_that_raced_the_trip() {
     assert_eq!(stepper_position(&engine), 58, "re-anchor resumes playback");
     assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
 }
+
+#[test]
+fn force_idle_freezes_every_sample_lane() {
+    let (mut engine, shared) = phase_engine();
+    engine.sample_anchor(&shared, OID, ANCHOR, 0);
+    feed(&mut engine, &shared, 0, &[0, 100, 200, 300]);
+
+    let flush_clock = ANCHOR + u64::from(INTERVAL);
+    engine.tick(flush_clock, &shared);
+    assert_eq!(stepper_position(&engine), 100);
+
+    crate::clock::publish_widened_now(&shared, flush_clock);
+    engine.runtime_force_idle(&shared);
+    assert_eq!(engine.sample_executed(OID), Some((flush_clock, 100)));
+
+    for step in 2..6 {
+        engine.tick(ANCHOR + step * u64::from(INTERVAL), &shared);
+        assert_eq!(
+            stepper_position(&engine),
+            100,
+            "no queued sample may execute after force idle"
+        );
+    }
+    assert_eq!(engine.sample_executed(OID), Some((flush_clock, 100)));
+    assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn force_idle_receipts_the_fences_it_discarded() {
+    let (mut engine, shared) = phase_engine();
+    engine.sample_anchor(&shared, OID, ANCHOR, 0);
+    feed(&mut engine, &shared, 0, &[0, 100, 200, 300]);
+    engine.sample_push_barrier(&shared, OID, 77);
+    assert_eq!(engine.sample_take_barrier_ack(), None);
+
+    crate::clock::publish_widened_now(&shared, ANCHOR);
+    engine.runtime_force_idle(&shared);
+    assert_eq!(engine.sample_take_barrier_ack(), Some((OID, 77)));
+}
+
+#[test]
+fn a_barrier_ack_names_the_stepper_oid_that_submitted_it() {
+    let mut engine = Engine::new(520_000_000, 40_000);
+    let shared = SharedState::new();
+    let bindings = [
+        StepperBindingRust {
+            stepper_oid: OID,
+            tmc_cs_oid: TMC_CS_OID_NONE,
+            _pad: [0; 2],
+        },
+        StepperBindingRust {
+            stepper_oid: OID + 1,
+            tmc_cs_oid: TMC_CS_OID_NONE,
+            _pad: [0; 2],
+        },
+    ];
+    assert_eq!(
+        engine.configure_axis(0, StepMode::Phase, 0.00078125, &bindings),
+        RUNTIME_OK
+    );
+    engine.sample_anchor(&shared, OID, ANCHOR, 0);
+
+    engine.sample_push_barrier(&shared, OID + 1, 42);
+    assert_eq!(engine.sample_take_barrier_ack(), Some((OID + 1, 42)));
+    assert_eq!(engine.sample_take_barrier_ack(), None);
+    assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
+}
