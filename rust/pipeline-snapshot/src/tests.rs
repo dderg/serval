@@ -588,7 +588,7 @@ fn clothoid_disk_ride_tracks_scalar_acceleration_without_phase_steps() {
         }
     }
     assert!(
-        minimum >= 950.0 && maximum <= 1005.0 && maximum - minimum <= 55.0,
+        minimum >= 988.5 && maximum <= 1001.5 && maximum - minimum <= 13.0,
         "scalar acceleration left the 1000 mm/s² disk: [{minimum}, {maximum}]"
     );
 
@@ -606,6 +606,52 @@ fn clothoid_disk_ride_tracks_scalar_acceleration_without_phase_steps() {
         );
         assert!(jump < 1e-3, "acceleration stepped by {jump} at t={t}");
     }
+}
+
+/// A rest-to-rest corner at a low feed used to fall back to the first-order
+/// staircase reconstruction (per-cell constant-acceleration steps), because
+/// the apex landing guard scaled its zero-headroom exception with the run's
+/// feed ceiling. The disk ride must hold this corner too.
+#[test]
+fn low_feed_corner_from_rest_rides_the_disk() {
+    let waypoints = vec![
+        (0.0, 0.0, 0.0, 0.0, 4.5, 1000.0),
+        (0.5, 0.0, 0.0, 0.0, 4.5, 1000.0),
+        (0.5, 0.5, 0.0, 0.0, 4.5, 1000.0),
+    ];
+    let mut params = default_axis_snapshot_params();
+    params.max_velocity = 4.5;
+    params.max_accel = 1000.0;
+    params.square_corner_velocity = 5.0;
+    let snap = pipeline_snapshot(&waypoints, params).unwrap();
+    let clothoids: Vec<(f64, f64)> = snap
+        .trajectory
+        .spans
+        .iter()
+        .filter_map(|span| {
+            matches!(span.spatial, Some(Spatial::Clothoid { .. }))
+                .then_some((span.t_start, span.t_end))
+        })
+        .collect();
+    assert_eq!(clothoids.len(), 2);
+    let mut worst = 0.0_f64;
+    for &(t0, t1) in &clothoids {
+        for i in 1..256 {
+            let t = t0 + (t1 - t0) * f64::from(i) / 256.0;
+            let x = snap.trajectory.eval_axis(0, t, SampleSide::Right).unwrap();
+            let y = snap.trajectory.eval_axis(1, t, SampleSide::Right).unwrap();
+            let v = libm::hypot(x.velocity, y.velocity);
+            if v < 0.5 || v >= 4.5 * (1.0 - 1e-3) {
+                continue;
+            }
+            let scalar = libm::hypot(x.acceleration, y.acceleration);
+            worst = worst.max((1000.0 - scalar).abs());
+        }
+    }
+    assert!(
+        worst <= 25.0,
+        "low-feed corner left the 1000 mm/s² disk by {worst}"
+    );
 }
 
 /// The schema is the whole trajectory: a snapshot that has been through JSON

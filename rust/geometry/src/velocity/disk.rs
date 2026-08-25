@@ -56,6 +56,24 @@ const CHAIN_MERGE_ARC_MM: f64 = 1e-4;
 /// into one leaves that difference as a step at the run's far joint.
 const CHAIN_MERGE_ACCEL_MM_S2: f64 = 1e-2;
 
+/// The target distance of the reconstructed scalar acceleration from the
+/// acceleration disk on a curved member, as a fraction of the member's accel
+/// budget and floored at [`DISK_SAG_TOL_MM_S2`]. Under infinite jerk the
+/// optimum through a curve is bang-bang: riding the feed ceiling, or riding
+/// the disk with `hypot(a_t, kappa*v^2)` equal to the budget. A larger gap
+/// that a finer grid keeps shrinking is the grid's cap chords, not the plan,
+/// and the member is regridded until it converges or refinement stops
+/// helping.
+const DISK_SAG_TOL_FRAC: f64 = 1e-2;
+const DISK_SAG_TOL_MM_S2: f64 = 5.0;
+/// Members shorter than a micron are sub-microstep geometry; any sag they
+/// carry lasts microseconds and no axis can express it.
+const DISK_SAG_MIN_MEMBER_MM: f64 = 1e-3;
+/// A probe this close (relative) to the member's feed ceiling is the
+/// ceiling cruise, off the disk by design. The sag this exemption could hide
+/// rides the curvature cap far below the feed ceiling, so it stays convicted.
+const CEILING_CRUISE_REL: f64 = 1e-3;
+
 /// Why a run has no reconstruction.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum ReconstructError {
@@ -607,6 +625,23 @@ fn disk_ride_chain(
     }
 
     let mut chain = integrate_disk(&track, &envelope, entry_v, exit_v)?;
+    if exit_v <= VELOCITY_FLOOR {
+        // A rest landing carries the solver's velocity residual, so the true
+        // zero crossing falls a fraction of a nanosecond past the phase end;
+        // a ratio follower reads that crossing as a speed kink inside the
+        // next span. Extend the final phase to end exactly at rest.
+        if let Some(last) = chain.last_mut() {
+            let dt = last.dt;
+            let v_end = last.v0 + last.a0 * dt + 0.5 * last.j * dt * dt;
+            if v_end.abs() > VELOCITY_FLOOR && dt > 0.0 {
+                let ds = last.v0 * dt + 0.5 * last.a0 * dt * dt + last.j * dt * dt * dt / 6.0;
+                if let Some(dt_new) = cell_duration(last.a0 / 6.0, 2.0 * last.v0 / 3.0, ds) {
+                    last.dt = dt_new;
+                    last.j = -2.0 * (last.v0 + last.a0 * dt_new) / (dt_new * dt_new);
+                }
+            }
+        }
+    }
     for p in &mut chain {
         p.s0 += s[0];
     }
@@ -771,9 +806,10 @@ fn integrate_disk(
         }
         m
     };
-    let run_ceiling = track.vlc.iter().copied().fold(0.0_f64, f64::max);
     let tight_curvature_cap = |k: usize, velocity: f64| {
-        track.rail(k, velocity) <= ACCEL_SNAP_MM_S2 && velocity < 0.015 * run_ceiling
+        track.rail(k, velocity) <= ACCEL_SNAP_MM_S2
+            && track.kappa[k] > 0.0
+            && velocity <= limit_speed(track.kappa[k], track.accel[k]) * (1.0 + CAP_NOTCH_REL)
     };
 
     let mut chain: Vec<StraightPhase> = Vec::new();
@@ -799,8 +835,11 @@ fn integrate_disk(
         Law::Brake { .. } => -track.rail(0, v),
     };
 
+    // A phase shorter than a nanosecond is indistinguishable from the
+    // instantaneous acceleration step unlimited jerk already permits at a
+    // joint, and downstream fitters would chase it as a real feature.
     let push = |chain: &mut Vec<StraightPhase>, t: &mut f64, phase: StraightPhase| {
-        if phase.dt > 1e-12 {
+        if phase.dt > 1e-9 {
             *t += phase.dt;
             chain.push(phase);
         }
@@ -952,10 +991,11 @@ fn integrate_disk(
                 track.rail(k + 1, v_pred)
             }
             Law::Brake { .. } => {
-                // Brake with half-gain velocity feedback onto the envelope:
-                // within a binding stretch the envelope is the rail-brake
-                // curve itself, and open-loop integration drifting a hair off
-                // it stalls a cell early when the stretch ends at rest.
+                // Brake with half-gain velocity feedback onto the envelope —
+                // the fallback when the exact rail cell below stalls (a
+                // stretch ending at rest): within a binding stretch the
+                // envelope is the rail-brake curve itself, and open-loop
+                // integration drifting a hair off it stalls a cell early.
                 let dt_est = 2.0 * ds / (v + envelope[k + 1]).max(VELOCITY_FLOOR);
                 let rail_a = {
                     let v_pred = (v * v + 2.0 * a.min(0.0) * ds).max(0.0).sqrt();
@@ -1213,14 +1253,70 @@ fn reconstruct_flat(
     let entry_rest = run_start_v <= VELOCITY_FLOOR;
     let exit_rest = members[members.len() - 1].exit_v <= VELOCITY_FLOOR;
     let mut steps: Vec<usize> = members.iter().map(|m| member_seed_steps(m.kin)).collect();
-    let mut settled: Vec<bool> = members.iter().map(|m| !m.kin.is_straight()).collect();
+    let mut settled: Vec<bool> = vec![false; members.len()];
     let mut coarser: Vec<Option<(usize, usize)>> = vec![None; members.len()];
+    let mut sag_coarser: Vec<Option<(usize, f64)>> = vec![None; members.len()];
+    let run_accel = members.iter().map(|m| m.kin.accel).fold(0.0_f64, f64::max);
     loop {
         let s = grid_from_steps(members, &steps, entry_rest, exit_rest);
         let out = reconstruct_flat_on(members, &s, run_start_v, run_start_a).ok_or(Diverged)?;
         let mut regridded = false;
         for (idx, m) in members.iter().enumerate() {
-            if settled[idx] {
+            if settled[idx] || m.kin.is_straight() || m.kin.jerk.is_finite() {
+                continue;
+            }
+            if (idx == 0 && entry_rest)
+                || (idx == members.len() - 1 && exit_rest)
+                || m.kin.length < DISK_SAG_MIN_MEMBER_MM
+            {
+                continue;
+            }
+            let prev_kappa = (idx > 0).then(|| {
+                let p = &members[idx - 1].kin;
+                p.kappa_abs(p.length)
+            });
+            let next_kappa = members.get(idx + 1).map(|n| n.kin.kappa_abs(0.0));
+            let tol = DISK_SAG_TOL_MM_S2.max(DISK_SAG_TOL_FRAC * run_accel);
+            let (sag, convicted) = disk_sag(m, (prev_kappa, next_kappa), &s, &out.1, &out.0);
+            if std::env::var_os("DISK_SAG_TRACE").is_some() {
+                eprintln!(
+                    "sagtrace len={} accel={} steps={} sag={sag}",
+                    m.kin.length, m.kin.accel, steps[idx]
+                );
+            }
+            if sag <= tol || !convicted {
+                continue;
+            }
+            if let Some((steps_before, before)) = sag_coarser[idx] {
+                if sag > 0.6 * before {
+                    if sag > 3.0 * tol {
+                        steps[idx] = steps_before;
+                    }
+                    settled[idx] = true;
+                    regridded = true;
+                    continue;
+                }
+            }
+            let ceiling =
+                (member_seed_steps(m.kin) * GRID_REFINE_GROWTH).min(MEMBER_SEED_MAX_POINTS);
+            let finer = (steps[idx] * 2).min(ceiling);
+            if finer == steps[idx] {
+                settled[idx] = true;
+                continue;
+            }
+            if sag_coarser[idx].is_none() {
+                sag_coarser[idx] = Some((steps[idx], sag));
+            } else {
+                sag_coarser[idx] = Some((sag_coarser[idx].unwrap().0, sag));
+            }
+            steps[idx] = finer;
+            regridded = true;
+        }
+        if regridded {
+            continue;
+        }
+        for (idx, m) in members.iter().enumerate() {
+            if settled[idx] || !m.kin.is_straight() {
                 continue;
             }
             let reversals = accel_reversals(&out.0, m.fwd_s, m.fwd_s + m.kin.length);
@@ -1252,6 +1348,80 @@ fn reconstruct_flat(
             return Ok(out);
         }
     }
+}
+
+/// The worst distance of the reconstructed scalar acceleration from the
+/// acceleration disk across a curved member, probed at every grid node and
+/// cell midpoint, and whether the measurement came from the exact phase
+/// chain (a chainless staircase fallback yields node states only, too coarse
+/// to convict a grid). Feed-ceiling cruise and rest are the only regimes the
+/// infinite-jerk optimum spends off the disk, so they are exempt. States in
+/// the first and last cells may still carry the neighboring member's seam
+/// curvature — a transition across a curvature step is on the neighbor's
+/// disk — so those cells score against both curvatures and keep the smaller
+/// gap.
+fn disk_sag(
+    m: &RunMember,
+    seam_kappa: (Option<f64>, Option<f64>),
+    s: &[f64],
+    chain: &[StraightPhase],
+    samples: &[(f64, f64, f64)],
+) -> (f64, bool) {
+    let lo = m.fwd_s;
+    let hi = lo + m.kin.length;
+    let inside: Vec<f64> = s
+        .iter()
+        .copied()
+        .filter(|&x| x >= lo - GRID_DEDUP_MM && x <= hi + GRID_DEDUP_MM)
+        .collect();
+    if inside.len() < 2 {
+        return (0.0, false);
+    }
+    let mut probes: Vec<f64> = Vec::with_capacity(2 * inside.len());
+    for w in inside.windows(2) {
+        probes.push(w[0]);
+        probes.push(0.5 * (w[0] + w[1]));
+    }
+    probes.push(hi);
+    let states: Vec<(f64, f64)> = if chain.is_empty() {
+        probes = samples
+            .iter()
+            .map(|p| p.0)
+            .filter(|&x| x >= lo - GRID_DEDUP_MM && x <= hi + GRID_DEDUP_MM)
+            .collect();
+        samples
+            .iter()
+            .filter(|p| p.0 >= lo - GRID_DEDUP_MM && p.0 <= hi + GRID_DEDUP_MM)
+            .map(|p| (p.1, p.2))
+            .collect()
+    } else {
+        ride::chain_states(chain, &probes)
+    };
+    let (first_cell_end, last_cell_start) = (inside[1], inside[inside.len() - 2]);
+    let mut worst = 0.0_f64;
+    for (&x, &(v, a)) in probes.iter().zip(&states) {
+        if v <= VELOCITY_FLOOR || v >= m.kin.flat_ceiling * (1.0 - CEILING_CRUISE_REL) {
+            continue;
+        }
+        let local = (x - lo).clamp(0.0, m.kin.length);
+        let gap = |kappa_abs: f64| {
+            let a_n = kappa_abs * v * v;
+            (m.kin.accel - (a * a + a_n * a_n).sqrt()).abs()
+        };
+        let mut sag = gap(m.kin.kappa_abs(local));
+        if x <= first_cell_end {
+            if let Some(k) = seam_kappa.0 {
+                sag = sag.min(gap(k));
+            }
+        }
+        if x >= last_cell_start {
+            if let Some(k) = seam_kappa.1 {
+                sag = sag.min(gap(k));
+            }
+        }
+        worst = worst.max(sag);
+    }
+    (worst, !chain.is_empty())
 }
 
 /// How many times the reconstructed acceleration changes sign between `s0`

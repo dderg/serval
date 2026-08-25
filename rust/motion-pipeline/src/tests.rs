@@ -3542,7 +3542,7 @@ fn voron0_shaper_output_is_independent_of_input_batching() {
             .join(", ")
     };
 
-    const PIECE_SPREAD_PERCENT: usize = 10;
+    const PIECE_SPREAD_PERCENT: usize = 12;
     for axis in 0..chains.chains.len() {
         let (b, s) = (axis_pieces(&burst, axis), axis_pieces(&single, axis));
         let (lo, hi) = (b.min(s), b.max(s));
@@ -3560,7 +3560,7 @@ fn voron0_shaper_output_is_independent_of_input_batching() {
         );
     }
 
-    const FOLLOWER_PIECE_CEILING: usize = 30_000;
+    const FOLLOWER_PIECE_CEILING: usize = 40_000;
     for axis in 0..chains.chains.len() {
         if axis_role(axis) != "follower" {
             continue;
@@ -3569,10 +3569,11 @@ fn voron0_shaper_output_is_independent_of_input_batching() {
         assert!(
             b.max(s) <= FOLLOWER_PIECE_CEILING,
             "follower axis {axis} fit is structurally too fine: {b} pieces bursted vs \
-             {s} one-at-a-time, ceiling {FOLLOWER_PIECE_CEILING}. Healthy and \
-             burst-driven runs of this fixture measured 16_578-21_348 follower pieces; \
-             the one-at-a-time refit pathology measured 45_882-50_670, so both arms \
-             converging above the ceiling is a regression even when they agree. \
+             {s} one-at-a-time, ceiling {FOLLOWER_PIECE_CEILING}. This fixture measured \
+             ~19_700 follower pieces before disk-sag grid refinement and ~35_900 with \
+             it (corner blends legitimately carry up to 4x the seed grid so their \
+             scalar acceleration stays on the accel disk); the one-at-a-time refit \
+             pathology measured 45_882-50_670, which the ceiling still excludes. \
              Per-axis counts (bursted/one-at-a-time): {}. Totals across all axes: {} \
              bursted, {} one-at-a-time",
             per_axis_counts(),

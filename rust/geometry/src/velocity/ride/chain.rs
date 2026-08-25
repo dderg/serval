@@ -69,7 +69,7 @@ pub(in crate::velocity) fn clip_phases(
         } else {
             time_to_cross(st, p.j, s_hi - p.s0).unwrap_or(p.dt)
         };
-        if exit <= entry + 1e-15 {
+        if exit <= entry + 1e-9 {
             continue;
         }
         let at = advance(st, p.j, entry);

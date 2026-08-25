@@ -748,8 +748,15 @@ fn reversals_the_grid_cannot_retire_keep_the_seeded_grid() {
     let (kins, exits) = ceiling_riding_straight(200_000.0);
     let members = blended_run(&kins, &exits);
     let seeded: Vec<usize> = kins.iter().map(member_seed_steps).collect();
-    let seed_nodes = grid_from_steps(&members, &seeded, false, false).len();
+    let seed_grid_nodes = grid_from_steps(&members, &seeded, false, false);
     let straight = &members[2];
+    let within = |nodes: &[f64]| {
+        nodes
+            .iter()
+            .filter(|&&x| x >= straight.fwd_s && x <= straight.fwd_s + straight.kin.length)
+            .count()
+    };
+    let seed_nodes = within(&seed_grid_nodes);
     let samples = reconstruct_flat(&members, 60.0, 0.0).unwrap().0;
     assert!(
         accel_reversals(
@@ -759,12 +766,13 @@ fn reversals_the_grid_cannot_retire_keep_the_seeded_grid() {
         ) > PROFILE_REVERSALS_MAX,
         "fixture must be one the grid cannot fix"
     );
+    let sample_arcs: Vec<f64> = samples.iter().map(|p| p.0).collect();
     assert_eq!(
-        samples.len(),
+        within(&sample_arcs),
         seed_nodes,
         "a member the grid cannot help kept {} nodes instead of the seeded \
          {seed_nodes}",
-        samples.len()
+        within(&sample_arcs)
     );
 }
 
