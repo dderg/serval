@@ -547,6 +547,67 @@ fn curved_analytic_carriers_keep_their_geometry() {
     );
 }
 
+#[test]
+fn clothoid_disk_ride_tracks_scalar_acceleration_without_phase_steps() {
+    let waypoints = vec![
+        (0.0, 0.0, 0.0, 0.0, 300.0, 1000.0),
+        (10.0, 0.0, 0.0, 0.0, 300.0, 1000.0),
+        (10.0, 10.0, 0.0, 0.0, 300.0, 1000.0),
+    ];
+    let mut params = default_axis_snapshot_params();
+    params.max_velocity = 300.0;
+    params.max_accel = 1000.0;
+    params.square_corner_velocity = 5.0;
+    let snap = pipeline_snapshot(&waypoints, params).unwrap();
+    let clothoids: Vec<(f64, f64)> = snap
+        .trajectory
+        .spans
+        .iter()
+        .filter_map(|span| {
+            matches!(span.spatial, Some(Spatial::Clothoid { .. }))
+                .then_some((span.t_start, span.t_end))
+        })
+        .collect();
+    assert_eq!(clothoids.len(), 2);
+
+    let mut minimum = f64::INFINITY;
+    let mut maximum = 0.0_f64;
+    for &(t0, t1) in &clothoids {
+        for i in 0..=256 {
+            let t = t0 + (t1 - t0) * f64::from(i) / 256.0;
+            let side = if i == 256 {
+                SampleSide::Left
+            } else {
+                SampleSide::Right
+            };
+            let x = snap.trajectory.eval_axis(0, t, side).unwrap();
+            let y = snap.trajectory.eval_axis(1, t, side).unwrap();
+            let scalar = libm::hypot(x.acceleration, y.acceleration);
+            minimum = minimum.min(scalar);
+            maximum = maximum.max(scalar);
+        }
+    }
+    assert!(
+        minimum >= 950.0 && maximum <= 1005.0 && maximum - minimum <= 55.0,
+        "scalar acceleration left the 1000 mm/s² disk: [{minimum}, {maximum}]"
+    );
+
+    for t in snap.trajectory.breakpoints() {
+        if !clothoids.iter().any(|&(t0, t1)| t > t0 && t < t1) {
+            continue;
+        }
+        let left_x = snap.trajectory.eval_axis(0, t, SampleSide::Left).unwrap();
+        let left_y = snap.trajectory.eval_axis(1, t, SampleSide::Left).unwrap();
+        let right_x = snap.trajectory.eval_axis(0, t, SampleSide::Right).unwrap();
+        let right_y = snap.trajectory.eval_axis(1, t, SampleSide::Right).unwrap();
+        let jump = libm::hypot(
+            right_x.acceleration - left_x.acceleration,
+            right_y.acceleration - left_y.acceleration,
+        );
+        assert!(jump < 1e-3, "acceleration stepped by {jump} at t={t}");
+    }
+}
+
 /// The schema is the whole trajectory: a snapshot that has been through JSON
 /// evaluates identically to the one that never left memory.
 #[test]

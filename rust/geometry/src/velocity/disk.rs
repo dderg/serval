@@ -42,10 +42,6 @@ const GRID_ACCEL_TOL_MM_S2: f64 = 50.0;
 /// the way off, and nowhere else. Two is therefore the physics; the third
 /// crossing is the grid.
 const PROFILE_REVERSALS_MAX: usize = 2;
-/// Refining a ringing member goes straight to [`GRID_STEP_MM`] — the pitch
-/// the seed cap widened away from — and then halves that up to this multiple.
-/// Four times the pitch resolves a jerk swing at 20 mm/s into hundreds of
-/// cells; a member still hunting there is not under-sampled.
 const GRID_REFINE_GROWTH: usize = 4;
 /// How far a chained run of near-constant-acceleration phases may bend away
 /// from the arc its members describe: a fiftieth of the lowering's own
@@ -449,9 +445,6 @@ fn pinned_samples(
     samples
 }
 
-/// The pre-integrator reconstruction, kept as the bail-out: forward–backward
-/// `v²` sweeps give grid velocities, lowered as merged zero-jerk spans — a
-/// staircase in acceleration wherever the rail varies.
 fn staircase_profile(
     s: &[f64],
     vlc: &[f64],
@@ -504,8 +497,6 @@ fn staircase_profile(
     (samples, chain)
 }
 
-/// Merges maximal equal-`v²`-slope spans into single constant-acceleration
-/// phases; an interior rest leaves no chain.
 const INFINITE_JERK_SLOPE_MERGE_REL_TOL: f64 = 1e-6;
 
 fn zero_jerk_chain(s: &[f64], v: &[f64]) -> Vec<StraightPhase> {
@@ -780,6 +771,10 @@ fn integrate_disk(
         }
         m
     };
+    let run_ceiling = track.vlc.iter().copied().fold(0.0_f64, f64::max);
+    let tight_curvature_cap = |k: usize, velocity: f64| {
+        track.rail(k, velocity) <= ACCEL_SNAP_MM_S2 && velocity < 0.015 * run_ceiling
+    };
 
     let mut chain: Vec<StraightPhase> = Vec::new();
     let mut t = 0.0;
@@ -867,7 +862,16 @@ fn integrate_disk(
                         return None;
                     }
                 } else if a_end > rail {
-                    return None;
+                    if rail > ACCEL_SNAP_MM_S2 || !tight_curvature_cap(k + 1, v_land) {
+                        return None;
+                    }
+                    let landed = cell_toward_disk_rail(track, k + 1, v, a, ds, 1.0)?;
+                    dt = landed.0;
+                    v_land = landed.1;
+                    a_end = landed.2;
+                    if v_land > track.vlc[k + 1] + VELOCITY_FLOOR {
+                        return None;
+                    }
                 }
             }
             if last_cell {
@@ -914,7 +918,14 @@ fn integrate_disk(
             let v_pred = v + 0.5 * dt_est * (a + track.cap_a[k + 1]);
             track.cap_a[k + 1] + (track.vlc[k + 1] - v_pred) / dt_est
         };
-        if matches!(law, Law::Cap) && cap_target(v, a) > track.rail(k + 1, track.vlc[k + 1]) {
+        let cap_rail = track.rail(k + 1, track.vlc[k + 1]);
+        let rail_headroom =
+            if tight_curvature_cap(k + 1, track.vlc[k + 1]) && track.vlc[k + 1] > track.vlc[k] {
+                track.rail(k + 1, v)
+            } else {
+                cap_rail
+            };
+        if matches!(law, Law::Cap) && cap_target(v, a) > rail_headroom {
             // The cap (with its catch-up correction) outruns the disk: fall
             // behind onto the rail rather than accumulate drift chasing it.
             law = Law::Rail;
