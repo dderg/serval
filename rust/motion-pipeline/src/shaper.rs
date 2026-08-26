@@ -513,7 +513,7 @@ fn materialize_changed_sources(
                                 transition.s >= phase.s0 && transition.s <= phase.end_distance()
                             }) {
                                 let local_t =
-                                    phase.time_at_distance(transition.s).map_err(|_| {
+                                    phase.time_at_distance(transition.s).ok_or_else(|| {
                                         fit_tolerance_without_probe(
                                             axis,
                                             segment.t_start,
@@ -1072,7 +1072,9 @@ pub(crate) fn shaped_signal_breakpoints(
     breaks
 }
 
-const MOMENT_POWER_CAPACITY: usize = 16;
+/// Sized for the deepest fit-ladder rung (degree 13, 14 coefficients) times
+/// the widest kernel moment window the shaper builds.
+const MOMENT_POWER_CAPACITY: usize = 24;
 
 fn accumulate_translated_moments(
     source_origin: f64,
@@ -1870,6 +1872,13 @@ fn refine_shaped_span<S: TrackSignal>(
         || tm >= t1
     {
         let failure = failure.expect("failed fit has no ladder diagnostic");
+        if failure.position_error <= fit_tol.pos_mm
+            && failure.velocity_error <= velocity_budget
+            && t1 - t0 <= floors.high_degree
+        {
+            out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
+            return Ok(());
+        }
         let probe_t = nurbs::fmadd(0.5 * (failure.u + 1.0), t1 - t0, t0);
         return Err(PostProcessError::FitTolerance {
             axis,

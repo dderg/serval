@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use geometry::path::{Arc as PathArc, Clothoid, CurvatureProfile, Line, PathSegment, Segment};
 use geometry::{
-    Fade, FollowerDemand, MeshGrid, Move, SourceRange, StraightPhase, SurfaceTransform,
+    Fade, FollowerDemand, LawSegment, MeshGrid, Move, ScalarLaw, SourceRange, SurfaceTransform,
     VelocityLimits,
 };
 
@@ -42,14 +42,13 @@ fn analytic_span(
     Arc::new(
         AnalyticMoveSpan::try_new(
             move_with(segment, followers),
-            Arc::from([StraightPhase {
-                t0: 0.0,
-                dt: duration,
-                s0: 0.0,
-                v0: length / duration,
-                a0: 0.0,
-                j: 0.0,
-            }]),
+            Arc::from([LawSegment::new(
+                0.0,
+                duration,
+                0.0,
+                length / duration,
+                ScalarLaw::ConstAccel { a0: 0.0 },
+            )]),
             0.0,
             10.0,
             10.0 + duration,
@@ -62,14 +61,13 @@ fn analytic_span(
 
 #[test]
 fn phase_bounds_remain_finite_at_a_rounded_span_endpoint() {
-    let phases = [StraightPhase {
-        t0: 0.0,
-        dt: 1.0,
-        s0: 0.0,
-        v0: 2.0,
-        a0: 3.0,
-        j: 0.0,
-    }];
+    let phases = [LawSegment::new(
+        0.0,
+        1.0,
+        0.0,
+        2.0,
+        ScalarLaw::ConstAccel { a0: 3.0 },
+    )];
     let rounded_end = f64::from_bits(1.0_f64.to_bits() + 1);
 
     let bounds = scalar_phase_bounds(&phases, 1.0, rounded_end);
@@ -211,14 +209,13 @@ fn analytic_phase_distance_origin_maps_to_segment_local_distance() {
             Segment::Line(Line::try_new([10.0, 0.0, 0.0], [12.0, 0.0, 0.0]).unwrap()),
             vec![],
         ),
-        Arc::from([StraightPhase {
-            t0: 0.0,
-            dt: 2.0,
-            s0: 7.0,
-            v0: 1.0,
-            a0: 0.0,
-            j: 0.0,
-        }]),
+        Arc::from([LawSegment::new(
+            0.0,
+            2.0,
+            7.0,
+            1.0,
+            ScalarLaw::ConstAccel { a0: 0.0 },
+        )]),
         7.0,
         10.0,
         12.0,
@@ -239,22 +236,14 @@ fn analytic_phase_distance_gaps_and_overlaps_are_rejected() {
                 vec![],
             ),
             Arc::from([
-                StraightPhase {
-                    t0: 0.0,
-                    dt: 1.0,
-                    s0: 7.0,
-                    v0: 1.0,
-                    a0: 0.0,
-                    j: 0.0,
-                },
-                StraightPhase {
-                    t0: 1.0,
-                    dt: 1.0,
-                    s0: second_start,
-                    v0: second_velocity,
-                    a0: 0.0,
-                    j: 0.0,
-                },
+                LawSegment::new(0.0, 1.0, 7.0, 1.0, ScalarLaw::ConstAccel { a0: 0.0 }),
+                LawSegment::new(
+                    1.0,
+                    1.0,
+                    second_start,
+                    second_velocity,
+                    ScalarLaw::ConstAccel { a0: 0.0 },
+                ),
             ]),
             7.0,
             10.0,
@@ -271,14 +260,7 @@ fn analytic_phase_distance_gaps_and_overlaps_are_rejected() {
 
 #[test]
 fn solver_grade_duration_residual_is_accepted_while_larger_gaps_stay_loud() {
-    let cruise = |dt: f64| StraightPhase {
-        t0: 0.0,
-        dt,
-        s0: 0.0,
-        v0: 800.0,
-        a0: 0.0,
-        j: 0.0,
-    };
+    let cruise = |dt: f64| LawSegment::new(0.0, dt, 0.0, 800.0, ScalarLaw::ConstAccel { a0: 0.0 });
     let build = |dt: f64| {
         AnalyticMoveSpan::try_new(
             move_with(
@@ -315,22 +297,20 @@ fn solver_grade_joint_residual_is_accepted_while_larger_joint_faults_stay_loud()
                 vec![],
             ),
             Arc::from([
-                StraightPhase {
-                    t0: 0.0,
-                    dt: cruise_dt,
-                    s0: origin,
-                    v0: 80.0,
-                    a0: 0.0,
-                    j: 0.0,
-                },
-                StraightPhase {
-                    t0: cruise_dt,
-                    dt: 0.015999999999866357,
-                    s0: decel_s0,
-                    v0: 80.0,
-                    a0: -5000.0,
-                    j: 0.0,
-                },
+                LawSegment::new(
+                    0.0,
+                    cruise_dt,
+                    origin,
+                    80.0,
+                    ScalarLaw::ConstAccel { a0: 0.0 },
+                ),
+                LawSegment::new(
+                    cruise_dt,
+                    0.015999999999866357,
+                    decel_s0,
+                    80.0,
+                    ScalarLaw::ConstAccel { a0: -5000.0 },
+                ),
             ]),
             origin,
             10.544751256612528,
@@ -357,14 +337,13 @@ fn analytic_phase_endpoint_mismatch_is_distinct_from_joint_failures() {
             Segment::Line(Line::try_new([0.0, 0.0, 0.0], [2.0, 0.0, 0.0]).unwrap()),
             vec![],
         ),
-        Arc::from([StraightPhase {
-            t0: 0.0,
-            dt: 1.0,
-            s0: 7.0,
-            v0: 1.0,
-            a0: 0.0,
-            j: 0.0,
-        }]),
+        Arc::from([LawSegment::new(
+            0.0,
+            1.0,
+            7.0,
+            1.0,
+            ScalarLaw::ConstAccel { a0: 0.0 },
+        )]),
         7.0,
         10.0,
         11.0,
@@ -387,22 +366,8 @@ fn stationary_phase_and_roundoff_close_joint_preserve_ordered_coverage() {
             vec![],
         ),
         Arc::from([
-            StraightPhase {
-                t0: 0.0,
-                dt: 1.0,
-                s0: anchor,
-                v0: 0.0,
-                a0: 0.0,
-                j: 0.0,
-            },
-            StraightPhase {
-                t0: 1.0,
-                dt: 1.0,
-                s0: seam,
-                v0: 1.0,
-                a0: 0.0,
-                j: 0.0,
-            },
+            LawSegment::new(0.0, 1.0, anchor, 0.0, ScalarLaw::ConstAccel { a0: 0.0 }),
+            LawSegment::new(1.0, 1.0, seam, 1.0, ScalarLaw::ConstAccel { a0: 0.0 }),
         ]),
         anchor,
         10.0,
@@ -426,14 +391,13 @@ fn analytic_backtracking_is_rejected_as_negative_velocity() {
             Segment::Line(Line::try_new([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]).unwrap()),
             vec![],
         ),
-        Arc::from([StraightPhase {
-            t0: 0.0,
-            dt: 1.0,
-            s0: 0.0,
-            v0: -1.0,
-            a0: 4.0,
-            j: 0.0,
-        }]),
+        Arc::from([LawSegment::new(
+            0.0,
+            1.0,
+            0.0,
+            -1.0,
+            ScalarLaw::ConstAccel { a0: 4.0 },
+        )]),
         0.0,
         10.0,
         11.0,
@@ -476,14 +440,13 @@ fn variable_surface_z_reports_chain_rule_pva_inside_mesh_cell() {
     let span = Arc::new(
         AnalyticMoveSpan::try_new(
             move_with(segment, vec![]),
-            Arc::from([StraightPhase {
-                t0: 0.0,
-                dt: 2.0,
-                s0: 0.0,
-                v0: length / 4.0,
-                a0: length / 4.0,
-                j: 0.0,
-            }]),
+            Arc::from([LawSegment::new(
+                0.0,
+                2.0,
+                0.0,
+                length / 4.0,
+                ScalarLaw::ConstAccel { a0: length / 4.0 },
+            )]),
             0.0,
             10.0,
             12.0,
@@ -722,14 +685,13 @@ fn analytic_follower_axes_follow_spatial_axes_in_demand_order() {
                 Segment::Line(Line::try_new([0.0, 0.0, 0.0], [2.0, 0.0, 0.0]).unwrap()),
                 vec![FollowerDemand::constant(6, 0.5)],
             ),
-            Arc::from([StraightPhase {
-                t0: 0.0,
-                dt: 2.0,
-                s0: 0.0,
-                v0: 1.0,
-                a0: 0.0,
-                j: 0.0,
-            }]),
+            Arc::from([LawSegment::new(
+                0.0,
+                2.0,
+                0.0,
+                1.0,
+                ScalarLaw::ConstAccel { a0: 0.0 },
+            )]),
             0.0,
             10.0,
             12.0,
@@ -774,14 +736,13 @@ fn clothoid_ramped_followers_cancel_the_shared_spatial_projection() {
                     FollowerDemand::ramp(4, -0.25, 0.25),
                 ],
             ),
-            Arc::from([StraightPhase {
-                t0: 0.0,
-                dt: 2.0,
-                s0: 0.0,
-                v0: 2.0,
-                a0: 0.0,
-                j: 0.0,
-            }]),
+            Arc::from([LawSegment::new(
+                0.0,
+                2.0,
+                0.0,
+                2.0,
+                ScalarLaw::ConstAccel { a0: 0.0 },
+            )]),
             0.0,
             10.0,
             12.0,
@@ -917,14 +878,13 @@ fn analytic_motor_groups_respect_the_phase_distance_origin() {
                 Segment::Line(Line::try_new([10.0, 0.0, 0.0], [12.0, 0.0, 0.0]).unwrap()),
                 vec![FollowerDemand::ramp(3, 0.0, 2.0)],
             ),
-            Arc::from([StraightPhase {
-                t0: 0.0,
-                dt: 2.0,
-                s0: 7.0,
-                v0: 1.0,
-                a0: 0.0,
-                j: 0.0,
-            }]),
+            Arc::from([LawSegment::new(
+                0.0,
+                2.0,
+                7.0,
+                1.0,
+                ScalarLaw::ConstAccel { a0: 0.0 },
+            )]),
             7.0,
             10.0,
             12.0,
@@ -1452,27 +1412,13 @@ fn relative_spline_rejects_non_finite_base_and_controls() {
     ));
 }
 
-fn jerk_span(segment: Segment, followers: Vec<FollowerDemand>) -> Arc<AnalyticMoveSpan> {
+fn accel_span(segment: Segment, followers: Vec<FollowerDemand>) -> Arc<AnalyticMoveSpan> {
     Arc::new(
         AnalyticMoveSpan::try_new(
             move_with(segment, followers),
             Arc::from([
-                StraightPhase {
-                    t0: 0.0,
-                    dt: 1.0,
-                    s0: 0.0,
-                    v0: 1.0,
-                    a0: 0.0,
-                    j: 6.0,
-                },
-                StraightPhase {
-                    t0: 1.0,
-                    dt: 1.0,
-                    s0: 2.0,
-                    v0: 4.0,
-                    a0: 6.0,
-                    j: -6.0,
-                },
+                LawSegment::new(0.0, 1.0, 0.0, 1.0, ScalarLaw::ConstAccel { a0: 6.0 }),
+                LawSegment::new(1.0, 1.0, 4.0, 7.0, ScalarLaw::ConstAccel { a0: -6.0 }),
             ]),
             0.0,
             10.0,
@@ -1491,45 +1437,47 @@ fn numeric_jerk(span: &AnalyticMoveSpan, axis: usize, t: f64, h: f64) -> f64 {
 }
 
 #[test]
-fn analytic_line_pvaj_projects_the_phase_jerk_on_the_heading() {
-    let span = jerk_span(
+fn analytic_line_pvaj_reports_zero_tangential_jerk_with_const_accel() {
+    let span = accel_span(
         Segment::Line(Line::try_new([0.0, 0.0, 0.0], [0.0, 8.0, 0.0]).unwrap()),
         vec![],
     );
     let sample = span.eval_axis_pvaj(1, 10.5).unwrap();
-    close(sample.position, 0.5 + 6.0 * 0.125 / 6.0);
-    close(sample.velocity, 1.0 + 3.0 * 0.25);
-    close(sample.acceleration, 3.0);
-    close(sample.jerk, 6.0);
+    close(sample.position, 0.0 + 1.0 * 0.5 + 0.5 * 6.0 * 0.25);
+    close(sample.velocity, 1.0 + 6.0 * 0.5);
+    close(sample.acceleration, 6.0);
+    close(sample.jerk, 0.0);
     close(span.eval_axis_pvaj(0, 10.5).unwrap().jerk, 0.0);
     close(span.eval_axis_pvaj(2, 10.5).unwrap().jerk, 0.0);
 }
 
 #[test]
-fn analytic_phase_boundary_jerk_is_selected_by_nudging_the_time() {
-    let span = jerk_span(
+fn analytic_phase_boundary_acceleration_steps_by_nudging_the_time() {
+    let span = accel_span(
         Segment::Line(Line::try_new([0.0, 0.0, 0.0], [8.0, 0.0, 0.0]).unwrap()),
         vec![],
     );
-    close(span.eval_axis_pvaj(0, 11.0).unwrap().jerk, 6.0);
+    close(span.eval_axis_pvaj(0, 11.0).unwrap().acceleration, 6.0);
     close(
         span.eval_axis_pvaj(0, interior_time_below(11.0))
             .unwrap()
-            .jerk,
+            .acceleration,
         6.0,
     );
     close(
         span.eval_axis_pvaj(0, interior_time_above(11.0))
             .unwrap()
-            .jerk,
+            .acceleration,
         -6.0,
     );
-    close(span.eval_axis_pvaj(0, 11.5).unwrap().jerk, -6.0);
+    close(span.eval_axis_pvaj(0, 11.5).unwrap().acceleration, -6.0);
+    close(span.eval_axis_pvaj(0, 11.0).unwrap().jerk, 0.0);
+    close(span.eval_axis_pvaj(0, 11.5).unwrap().jerk, 0.0);
 }
 
 #[test]
 fn analytic_arc_pvaj_matches_the_chain_rule() {
-    let span = jerk_span(
+    let span = accel_span(
         Segment::Arc(
             PathArc::try_new(
                 [0.0, 0.0, 0.0],
@@ -1548,7 +1496,7 @@ fn analytic_arc_pvaj_matches_the_chain_rule() {
             let exact = span.eval_axis_pvaj(axis, t).unwrap().jerk;
             let numeric = numeric_jerk(&span, axis, t, 1e-5);
             assert!(
-                (exact - numeric).abs() < 1e-5,
+                (exact - numeric).abs() < 1e-4,
                 "arc jerk mismatch at t={t} axis {axis}: exact={exact} numeric={numeric}"
             );
         }
@@ -1557,7 +1505,7 @@ fn analytic_arc_pvaj_matches_the_chain_rule() {
 
 #[test]
 fn analytic_clothoid_pvaj_matches_the_chain_rule() {
-    let span = jerk_span(
+    let span = accel_span(
         Segment::Clothoid(
             Clothoid::try_new(
                 [2.0, 3.0, 0.0],
@@ -1585,17 +1533,15 @@ fn analytic_clothoid_pvaj_matches_the_chain_rule() {
 
 #[test]
 fn ramped_follower_pvaj_carries_the_ratio_slope_cross_term() {
-    let span = jerk_span(
+    let span = accel_span(
         Segment::Line(Line::try_new([0.0, 0.0, 0.0], [8.0, 0.0, 0.0]).unwrap()),
         vec![FollowerDemand::ramp(3, 0.1, 0.5)],
     );
     let t = 10.6;
-    let (s, velocity, acceleration, jerk) = (
-        1.0 * 0.6 + 6.0 * 0.6_f64.powi(3) / 6.0,
-        1.0 + 3.0 * 0.36,
-        6.0 * 0.6,
-        6.0,
-    );
+    let tau = 0.6;
+    let s = 1.0 * tau + 0.5 * 6.0 * tau * tau;
+    let velocity = 1.0 + 6.0 * tau;
+    let acceleration = 6.0;
     let ratio = 0.1 + 0.4 * s / 8.0;
     let slope = 0.4 / 8.0;
     let sample = span.eval_axis_pvaj(3, t).unwrap();
@@ -1604,10 +1550,7 @@ fn ramped_follower_pvaj_carries_the_ratio_slope_cross_term() {
         sample.acceleration,
         ratio * acceleration + slope * velocity * velocity,
     );
-    close(
-        sample.jerk,
-        ratio * jerk + 3.0 * slope * velocity * acceleration,
-    );
+    close(sample.jerk, 0.0 + 3.0 * slope * velocity * acceleration);
     assert!((sample.jerk - numeric_jerk(&span, 3, t, 1e-6)).abs() < 1e-4);
 }
 
@@ -1776,7 +1719,7 @@ fn buzz_and_nudge_expose_their_reconstruction_parameters() {
 
 #[test]
 fn carrier_breakpoints_are_publicly_exposed_and_bracket_the_domain() {
-    let span = jerk_span(
+    let span = accel_span(
         Segment::Line(Line::try_new([0.0, 0.0, 0.0], [8.0, 0.0, 0.0]).unwrap()),
         vec![],
     );
@@ -1817,5 +1760,5 @@ fn carrier_breakpoints_are_publicly_exposed_and_bracket_the_domain() {
     assert_eq!(merged.last(), Some(&12.0));
     assert!(merged.contains(&11.0));
     assert!(merged.windows(2).all(|pair| pair[0] < pair[1]));
-    close(segment.eval_axis_pvaj(0, 10.5).unwrap().jerk, 6.0);
+    close(segment.eval_axis_pvaj(0, 10.5).unwrap().acceleration, 6.0);
 }

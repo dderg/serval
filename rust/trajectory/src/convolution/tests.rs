@@ -34,10 +34,10 @@ fn degree_thirteen_convolution_is_exact() {
 }
 
 #[test]
-#[should_panic(expected = "exceeds exact quadrature degree 13")]
+#[should_panic(expected = "exceeds exact quadrature degree 19")]
 fn convolution_rejects_unrepresentable_product_degree() {
     let kernel = degree_six_kernel();
-    let _ = ShapedSignal::new_from_evaluator(&kernel, |t| t.powi(8), Vec::new(), 8);
+    let _ = ShapedSignal::new_from_evaluator(&kernel, |t| t.powi(14), Vec::new(), 14);
 }
 
 fn previous_f64(value: f64) -> f64 {

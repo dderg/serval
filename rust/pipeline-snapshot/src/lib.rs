@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{Arc as ArcSegment, Clothoid, CurvatureProfile, Line, PathSegment, Segment};
-use geometry::{FollowerDemand, Move, SourceRange, StraightPhase, VelocityLimits};
+use geometry::{FollowerDemand, LawSegment, Move, ScalarLaw, SourceRange, VelocityLimits};
 use nurbs::ScalarNurbs;
 use serde::{Deserialize, Serialize};
 /// The exact state every consumer reads a carrier through. Owned by
@@ -34,7 +34,7 @@ use motion_pipeline::{
 
 pub use planner_config::{AxisDecl, PostProcessorDecl};
 
-pub const SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 /// The E lane rides as axis 3, past the three spatial axes — the same index the
 /// production bridge and the seam harness assign the extruder.
 pub const EXTRUDER_AXIS: usize = 3;
@@ -625,13 +625,29 @@ pub struct SplineCurve {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "law", rename_all = "snake_case")]
+pub enum PhaseLaw {
+    ConstAccel {
+        a0: f64,
+    },
+    DiskRail {
+        accel: f64,
+        kappa0: f64,
+        sigma: f64,
+        brake: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Phase {
     pub t0: f64,
     pub dt: f64,
     pub s0: f64,
     pub v0: f64,
-    pub a0: f64,
-    pub j: f64,
+    pub ds: f64,
+    pub v1: f64,
+    #[serde(flatten)]
+    pub law: PhaseLaw,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -676,8 +692,8 @@ pub enum Spatial {
     },
 }
 
-/// A jerk-limited phase law over one move's spatial geometry: the executable
-/// carrier, as its constructor parameters. Rebuilt through
+/// A scalar-law phase sequence over one move's spatial geometry: the
+/// executable carrier, as its constructor parameters. Rebuilt through
 /// `AnalyticMoveSpan::try_new`, so a consumer evaluates the very curve the
 /// planner emitted — an arc's per-axis position is never a polynomial of
 /// time, and this schema never pretends otherwise.
@@ -1180,13 +1196,31 @@ impl AnalyticSpan {
             phases: span
                 .phases
                 .iter()
-                .map(|phase| Phase {
-                    t0: phase.t0,
-                    dt: phase.dt,
-                    s0: phase.s0,
-                    v0: phase.v0,
-                    a0: phase.a0,
-                    j: phase.j,
+                .map(|seg| {
+                    let (end_s, v1, _) = seg.end_state();
+                    let ds = end_s - seg.s0;
+                    Phase {
+                        t0: seg.t0,
+                        dt: seg.dt,
+                        s0: seg.s0,
+                        v0: seg.v0,
+                        ds,
+                        v1,
+                        law: match seg.law {
+                            ScalarLaw::ConstAccel { a0 } => PhaseLaw::ConstAccel { a0 },
+                            ScalarLaw::DiskRail {
+                                accel,
+                                kappa0,
+                                sigma,
+                                brake,
+                            } => PhaseLaw::DiskRail {
+                                accel,
+                                kappa0,
+                                sigma,
+                                brake,
+                            },
+                        },
+                    }
                 })
                 .collect(),
             axis_start_positions: span.axis_start_positions.to_vec(),
@@ -1248,13 +1282,47 @@ impl AnalyticSpan {
             source,
             self.phases
                 .iter()
-                .map(|phase| StraightPhase {
-                    t0: phase.t0,
-                    dt: phase.dt,
-                    s0: phase.s0,
-                    v0: phase.v0,
-                    a0: phase.a0,
-                    j: phase.j,
+                .map(|phase| {
+                    let law = match phase.law {
+                        PhaseLaw::ConstAccel { a0 } => ScalarLaw::ConstAccel { a0 },
+                        PhaseLaw::DiskRail {
+                            accel,
+                            kappa0,
+                            sigma,
+                            brake,
+                        } => ScalarLaw::DiskRail {
+                            accel,
+                            kappa0,
+                            sigma,
+                            brake,
+                        },
+                    };
+                    match law {
+                        ScalarLaw::ConstAccel { .. } => {
+                            LawSegment::new(phase.t0, phase.dt, phase.s0, phase.v0, law)
+                        }
+                        ScalarLaw::DiskRail { brake: true, .. } => {
+                            LawSegment::brake_to(phase.t0, phase.s0, law, phase.ds, phase.v1)
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "snapshot rebuild: brake segment cannot land v1={} over \
+                                         ds={}",
+                                        phase.v1, phase.ds
+                                    )
+                                })
+                                .0
+                        }
+                        ScalarLaw::DiskRail { .. } => {
+                            LawSegment::until_arc(phase.t0, phase.s0, phase.v0, law, phase.ds)
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "snapshot rebuild: DiskRail segment stalled before \
+                                         covering ds={} from v0={}",
+                                        phase.ds, phase.v0
+                                    )
+                                })
+                        }
+                    }
                 })
                 .collect(),
             self.source_distance_origin,

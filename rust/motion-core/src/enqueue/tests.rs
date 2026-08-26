@@ -2,7 +2,7 @@ use super::*;
 use crate::kinematics::KinematicsModule;
 use crate::mcu_config::{AXIS_X, AXIS_Y, KINEMATICS_COREXY};
 use geometry::path::{Line, PathSegment, Segment};
-use geometry::{Move, SourceRange, StraightPhase, VelocityLimits};
+use geometry::{LawSegment, Move, ScalarLaw, SourceRange, VelocityLimits};
 use trajectory::{MAX_SPAN_SECS, SurfaceMode};
 
 const CLOCK_FREQ_HZ: f64 = 1_000_000.0;
@@ -23,14 +23,13 @@ fn linear_span(delta: [f64; 3], duration: f64) -> Arc<AnalyticMoveSpan> {
     Arc::new(
         AnalyticMoveSpan::try_new(
             source,
-            Arc::from([StraightPhase {
-                t0: 0.0,
-                dt: duration,
-                s0: 0.0,
-                v0: length / duration,
-                a0: 0.0,
-                j: 0.0,
-            }]),
+            Arc::from([LawSegment::new(
+                0.0,
+                duration,
+                0.0,
+                length / duration,
+                ScalarLaw::ConstAccel { a0: 0.0 },
+            )]),
             0.0,
             0.0,
             duration,

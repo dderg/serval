@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use geometry::path::lowering::PositionProfile;
 use geometry::path::Segment;
-use geometry::{FollowerDemand, Move, StraightPhase, SurfaceTransform};
+use geometry::{FollowerDemand, LawSegment, Move, ScalarLaw, SurfaceTransform};
 use nurbs::ScalarNurbs;
 use thiserror::Error;
 
@@ -47,7 +47,7 @@ pub enum SurfaceMode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnalyticMoveSpan {
     pub source: Move,
-    pub phases: Arc<[StraightPhase]>,
+    pub phases: Arc<[LawSegment]>,
     pub source_distance_origin: f64,
     pub t_start: f64,
     pub t_end: f64,
@@ -186,7 +186,7 @@ pub enum ContinuousError {
 impl AnalyticMoveSpan {
     pub fn try_new(
         source: Move,
-        phases: Arc<[StraightPhase]>,
+        phases: Arc<[LawSegment]>,
         source_distance_origin: f64,
         t_start: f64,
         t_end: f64,
@@ -213,11 +213,20 @@ impl AnalyticMoveSpan {
                 });
             }
         }
-        if phases.iter().any(|phase| {
-            ![phase.t0, phase.dt, phase.s0, phase.v0, phase.a0, phase.j]
+        if phases.iter().any(|segment| {
+            ![segment.t0, segment.dt, segment.s0, segment.v0]
                 .into_iter()
                 .all(f64::is_finite)
-                || phase.dt <= 0.0
+                || !match segment.law {
+                    ScalarLaw::ConstAccel { a0 } => a0.is_finite(),
+                    ScalarLaw::DiskRail {
+                        accel,
+                        kappa0,
+                        sigma,
+                        ..
+                    } => accel.is_finite() && kappa0.is_finite() && sigma.is_finite(),
+                }
+                || segment.dt <= 0.0
         }) {
             return Err(ContinuousError::InvalidSpan {
                 reason: "analytic phases must be finite and positive-duration",
@@ -256,9 +265,9 @@ impl AnalyticMoveSpan {
             }),
             distance_slack,
         )?;
-        for phase in phases.iter() {
-            let minimum_velocity = phase_minimum_velocity(phase);
-            let velocity_slack = phase_velocity_solver_slack(phase, distance_slack);
+        for segment in phases.iter() {
+            let minimum_velocity = segment.min_velocity();
+            let velocity_slack = phase_velocity_solver_slack(segment, distance_slack);
             if minimum_velocity < -velocity_slack {
                 return Err(ContinuousError::NegativeVelocity {
                     velocity: minimum_velocity,
@@ -353,13 +362,28 @@ impl AnalyticMoveSpan {
 
     fn tangential_state(&self, t: f64) -> (f64, f64, f64, f64) {
         let local_t = (t - self.t_start).clamp(0.0, self.t_end - self.t_start);
-        let phase = active_phase(&self.phases, local_t);
-        let (phase_s, velocity, acceleration) = phase.state_at(local_t);
+        let segment = active_phase(&self.phases, local_t);
+        let (phase_s, velocity, acceleration) = segment.state_at(local_t);
+        let jerk = match segment.law {
+            ScalarLaw::ConstAccel { .. } => 0.0,
+            ScalarLaw::DiskRail { kappa0, sigma, .. } => {
+                if acceleration.abs() < 1e-15 {
+                    0.0
+                } else {
+                    let ds = phase_s - segment.s0;
+                    let kappa = kappa0 + sigma * ds;
+                    -kappa
+                        * velocity.powi(3)
+                        * (sigma * velocity * velocity + 2.0 * kappa * acceleration)
+                        / acceleration
+                }
+            }
+        };
         (
             phase_s - self.source_distance_origin,
             velocity,
             acceleration,
-            phase.j,
+            jerk,
         )
     }
 
@@ -1127,14 +1151,10 @@ const PHASE_DISTANCE_ROOT_ABS_EPS_MM: f64 = 1e-10;
 const PHASE_DISTANCE_ACCUMULATION_ULPS: f64 = 64.0;
 const PHASE_DURATION_ACCUMULATION_ULPS: f64 = 8.0;
 
-fn phase_distance_solver_slack(
-    phases: &[StraightPhase],
-    distance_scale: f64,
-    time_scale: f64,
-) -> f64 {
-    let velocity_scale = phases.iter().fold(0.0_f64, |scale, phase| {
-        let end_velocity = phase.v0 + phase.a0 * phase.dt + 0.5 * phase.j * phase.dt * phase.dt;
-        scale.max(phase.v0.abs()).max(end_velocity.abs())
+fn phase_distance_solver_slack(phases: &[LawSegment], distance_scale: f64, time_scale: f64) -> f64 {
+    let velocity_scale = phases.iter().fold(0.0_f64, |scale, segment| {
+        let (_, end_v, _) = segment.end_state();
+        scale.max(segment.v0.abs()).max(end_v.abs())
     });
     let duration_accumulation =
         PHASE_DURATION_ACCUMULATION_ULPS * f64::EPSILON * time_scale.abs().max(1.0);
@@ -1145,14 +1165,14 @@ fn phase_distance_solver_slack(
 
 const PHASE_JOINT_INVERSION_REL_TOL: f64 = 1e-9;
 
-fn phase_reconstructed_arc(phase: &StraightPhase) -> f64 {
-    let end_velocity = phase.v0 + phase.a0 * phase.dt + 0.5 * phase.j * phase.dt * phase.dt;
-    phase.v0.abs().max(end_velocity.abs()) * phase.dt
+fn phase_reconstructed_arc(segment: &LawSegment) -> f64 {
+    let (_, end_v, _) = segment.end_state();
+    segment.v0.abs().max(end_v.abs()) * segment.dt
 }
 
 fn phase_joint_distance_slack(
-    previous: &StraightPhase,
-    next: &StraightPhase,
+    previous: &LawSegment,
+    next: &LawSegment,
     distance_slack: f64,
 ) -> f64 {
     distance_slack
@@ -1160,10 +1180,12 @@ fn phase_joint_distance_slack(
             * phase_reconstructed_arc(previous).max(phase_reconstructed_arc(next))
 }
 
-fn phase_velocity_solver_slack(phase: &StraightPhase, distance_slack: f64) -> f64 {
-    let end_acceleration = phase.a0 + phase.j * phase.dt;
-    let acceleration_scale = phase.a0.abs().max(end_acceleration.abs());
-    distance_slack / phase.dt + (2.0 * acceleration_scale * distance_slack).sqrt()
+fn phase_velocity_solver_slack(segment: &LawSegment, distance_slack: f64) -> f64 {
+    let acceleration_scale = match segment.law {
+        ScalarLaw::ConstAccel { a0 } => a0.abs(),
+        ScalarLaw::DiskRail { accel, .. } => accel,
+    };
+    distance_slack / segment.dt + (2.0 * acceleration_scale * distance_slack).sqrt()
 }
 
 fn validate_ordered_coverage(
@@ -1209,22 +1231,8 @@ fn validate_ordered_coverage(
     Ok(())
 }
 
-fn phase_minimum_velocity(phase: &StraightPhase) -> f64 {
-    let end_velocity = phase.v0 + phase.a0 * phase.dt + 0.5 * phase.j * phase.dt * phase.dt;
-    let mut minimum_velocity = phase.v0.min(end_velocity);
-    if phase.j != 0.0 {
-        let turning_time = -phase.a0 / phase.j;
-        if turning_time > 0.0 && turning_time < phase.dt {
-            minimum_velocity = minimum_velocity.min(
-                phase.v0 + phase.a0 * turning_time + 0.5 * phase.j * turning_time * turning_time,
-            );
-        }
-    }
-    minimum_velocity
-}
-
-fn active_phase(phases: &[StraightPhase], local_t: f64) -> &StraightPhase {
-    let index = phases.partition_point(|phase| phase.end_time() < local_t);
+fn active_phase(phases: &[LawSegment], local_t: f64) -> &LawSegment {
+    let index = phases.partition_point(|segment| segment.end_time() < local_t);
     &phases[index.min(phases.len() - 1)]
 }
 
@@ -1928,31 +1936,23 @@ where
     }
 }
 
-fn scalar_phase_bounds(phases: &[StraightPhase], t0: f64, t1: f64) -> (f64, f64, f64) {
+fn scalar_phase_bounds(phases: &[LawSegment], t0: f64, t1: f64) -> (f64, f64, f64) {
     let (_, velocity0, acceleration0) = active_phase(phases, t0).state_at(t0);
     let (_, velocity1, acceleration1) = active_phase(phases, t1).state_at(t1);
     let mut velocity_min = velocity0.min(velocity1);
     let mut velocity_max = velocity0.max(velocity1);
     let mut acceleration_abs_max = acceleration0.abs().max(acceleration1.abs());
-    for phase in phases {
-        let lo = t0.max(phase.t0);
-        let hi = t1.min(phase.end_time());
+    for segment in phases {
+        let lo = t0.max(segment.t0);
+        let hi = t1.min(segment.end_time());
         if lo > hi {
             continue;
         }
         for time in [lo, hi] {
-            let (_, velocity, acceleration) = phase.state_at(time);
+            let (_, velocity, acceleration) = segment.state_at(time);
             velocity_min = velocity_min.min(velocity);
             velocity_max = velocity_max.max(velocity);
             acceleration_abs_max = acceleration_abs_max.max(acceleration.abs());
-        }
-        if phase.j != 0.0 {
-            let vertex = phase.t0 - phase.a0 / phase.j;
-            if vertex > lo && vertex < hi {
-                let (_, velocity, _) = phase.state_at(vertex);
-                velocity_min = velocity_min.min(velocity);
-                velocity_max = velocity_max.max(velocity);
-            }
         }
     }
     (velocity_min, velocity_max, acceleration_abs_max)

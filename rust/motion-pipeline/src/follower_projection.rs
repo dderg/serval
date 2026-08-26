@@ -1185,7 +1185,8 @@ impl<'a> FollowerSignal<'a> {
         self.s_start + self.cumulative.last().copied().expect("cumulative seeded")
     }
     fn construction_breakpoints(&self, raw_axis: &ContinuousAxis) -> FollowerBreakpoints {
-        let mut breaks = axis_breakpoints(raw_axis);
+        let raw_breaks = axis_breakpoints(raw_axis);
+        let mut breaks = raw_breaks.clone();
         breaks.extend_from_slice(&self.grid);
         let s_end = self.s_end();
         let support_start = *self.grid.first().expect("follower grid is seeded");
@@ -1231,11 +1232,24 @@ impl<'a> FollowerSignal<'a> {
         }
         breaks.sort_by(f64::total_cmp);
         breaks.dedup_by(|left, right| (*left - *right).abs() <= GRID_DEDUP_EPS_S);
+        for b in breaks.iter_mut() {
+            for &rb in &raw_breaks {
+                if (*b - rb).abs() <= GRID_DEDUP_EPS_S && *b != rb {
+                    *b = rb;
+                }
+            }
+        }
+        breaks.sort_by(f64::total_cmp);
+        breaks.dedup();
         let semantic = breaks.clone();
         let zeros = self.velocity_component_zeros(&breaks, support_start, support_end);
-        breaks.extend(zeros);
+        for zero in zeros {
+            let dominated = breaks.iter().any(|&b| (b - zero).abs() <= GRID_DEDUP_EPS_S);
+            if !dominated {
+                breaks.push(zero);
+            }
+        }
         breaks.sort_by(f64::total_cmp);
-        breaks.dedup_by(|left, right| (*left - *right).abs() <= GRID_DEDUP_EPS_S);
         FollowerBreakpoints {
             semantic,
             fit_seeds: breaks,

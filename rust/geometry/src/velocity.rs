@@ -10,11 +10,11 @@ use crate::path::Segment;
 use crate::segment::SourceRange;
 
 mod disk;
-mod profile;
-mod ride;
+pub mod law;
+mod reconstruct;
 mod scurve;
 
-pub use profile::{PhaseSolveError, StraightPhase};
+pub use law::{LawSegment, ScalarLaw};
 
 use disk::Kinematics;
 
@@ -36,7 +36,7 @@ pub struct MoveVelocity {
     pub exit_v: f64,
     pub peak_v: f64,
     pub samples: Vec<VelSample>,
-    pub phases: Vec<StraightPhase>,
+    pub phases: Vec<LawSegment>,
     pub accel: f64,
     pub jerk: f64,
     pub length: f64,
@@ -124,14 +124,13 @@ pub enum VelocityError {
         line_no: u32,
         v: f64,
     },
-    /// The integration grid could not be refined into a reconstruction the
-    /// lowering can fit: member `member` of the run still rings `reversals`
-    /// times across `nodes` nodes.
-    GridBudget {
+    /// The seam plan handed a member an entry/exit pair its own exact disk
+    /// reach cannot connect — a planning bug, not a numeric residue.
+    Infeasible {
         line_no: u32,
-        nodes: usize,
-        reversals: usize,
         member: usize,
+        entry_v: f64,
+        exit_v: f64,
     },
     InvalidConfig,
 }
@@ -550,35 +549,68 @@ fn reconstruct_runs(
         while run_end < n && !is_anchor[run_end] {
             run_end += 1;
         }
-        let members: Vec<disk::RunMember> = (run_start..run_end)
+        let run_members: Vec<disk::RunMember> = (run_start..run_end)
             .map(|j| disk::RunMember {
                 kin: &caps[j].kin,
                 exit_v: v[j + 1],
-                fwd_s: geo.arc_from_run_start[j],
             })
             .collect();
         let run_start_line = moves[run_start].source.start_line;
-        let (reconstructed, run_exit_states, reconstructed_phases) = disk::reconstruct_run(
-            &members,
-            geo.run_start_v[run_start],
-            geo.run_start_a[run_start],
-            tol,
-        )
-        .map_err(|e| match e {
-            disk::ReconstructError::Diverged => VelocityError::Diverged {
-                line_no: run_start_line,
-            },
-            disk::ReconstructError::GridBudget {
-                nodes,
-                reversals,
-                member,
-            } => VelocityError::GridBudget {
-                line_no: run_start_line,
-                nodes,
-                reversals,
-                member,
-            },
-        })?;
+        let mut reconstructed_phases: Vec<Vec<LawSegment>> = Vec::with_capacity(run_members.len());
+        for (idx, member) in run_members.iter().enumerate() {
+            let entry = if idx == 0 {
+                geo.run_start_v[run_start]
+            } else {
+                run_members[idx - 1].exit_v
+            };
+            let profile = reconstruct::member_profile(idx, member, entry, member.exit_v).map_err(
+                |e| match e {
+                    reconstruct::ReconstructError::Diverged => VelocityError::Diverged {
+                        line_no: run_start_line,
+                    },
+                    reconstruct::ReconstructError::Infeasible {
+                        member,
+                        entry_v,
+                        exit_v,
+                    } => VelocityError::Infeasible {
+                        line_no: run_start_line,
+                        member,
+                        entry_v,
+                        exit_v,
+                    },
+                },
+            )?;
+            reconstructed_phases.push(profile);
+        }
+        let reconstructed: Vec<Vec<(f64, f64, f64)>> = reconstructed_phases
+            .iter()
+            .enumerate()
+            .map(|(idx, segments)| {
+                let mut samples = sample_segments(segments);
+                let entry = if idx == 0 {
+                    geo.run_start_v[run_start]
+                } else {
+                    run_members[idx - 1].exit_v
+                };
+                if let Some(first) = samples.first_mut() {
+                    first.1 = entry;
+                }
+                if let Some(last) = samples.last_mut() {
+                    last.1 = run_members[idx].exit_v;
+                }
+                samples
+            })
+            .collect();
+        let run_exit_states: Vec<(f64, f64)> = reconstructed_phases
+            .iter()
+            .map(|segments| {
+                let (_, v, a) = segments
+                    .last()
+                    .expect("a member profile always carries at least one segment")
+                    .end_state();
+                (v, a)
+            })
+            .collect();
 
         for (idx, j) in (run_start..run_end).enumerate() {
             let kin = &caps[j].kin;
@@ -649,6 +681,26 @@ fn reconstruct_runs(
     }
 
     Ok((out, boundaries))
+}
+
+/// Dense-enough exact samples off a member's law segments: the segment
+/// boundaries plus uniform interior points, every one evaluated from the law.
+fn sample_segments(segments: &[LawSegment]) -> Vec<(f64, f64, f64)> {
+    const INTERIOR: usize = 8;
+    let mut out = Vec::with_capacity(segments.len() * (INTERIOR + 1) + 1);
+    for seg in segments {
+        for i in 0..=INTERIOR {
+            let t = seg.t0 + seg.dt * (i as f64) / INTERIOR as f64;
+            let (s, v, a) = seg.state_at(t);
+            if out
+                .last()
+                .is_none_or(|&(prev_s, _, _): &(f64, f64, f64)| s > prev_s + 1e-12)
+            {
+                out.push((s, v, a));
+            }
+        }
+    }
+    out
 }
 
 fn first_negative_velocity(samples: &[VelSample]) -> Option<f64> {
