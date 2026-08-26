@@ -1939,6 +1939,48 @@ fn derivative_gains_track_transform_combines_both_gains() {
 }
 
 #[test]
+fn linear_advance_on_a_feed_step_primes_forward() {
+    // Raw follower track: cruise 0.5 mm/s for 4 ms, ramp to 1.5 mm/s over
+    // 6.67 ms at 150 mm/s^2, cruise 1.5 mm/s for 100 ms.
+    let h_ramp = 1.0 / 150.0;
+    let p0 = nurbs::bezier::BezierPiece {
+        u_start: 0.0,
+        u_end: 0.004,
+        coeffs: vec![0.0, 0.5, 0.0],
+    };
+    let p0_end = 0.5 * 0.004;
+    let p1 = nurbs::bezier::BezierPiece {
+        u_start: 0.004,
+        u_end: 0.004 + h_ramp,
+        coeffs: vec![p0_end, 0.5, 75.0],
+    };
+    let p1_end = p0_end + 0.5 * h_ramp + 75.0 * h_ramp * h_ramp;
+    let p2 = nurbs::bezier::BezierPiece {
+        u_start: 0.004 + h_ramp,
+        u_end: 0.104 + h_ramp,
+        coeffs: vec![p1_end, 1.5, 0.0],
+    };
+    let track = nurbs::bezier::bezier_pieces_to_nurbs(&[p0, p1, p2]);
+    let adv = trajectory::NonlinearAdvance {
+        model: trajectory::AdvanceModel::Tanh,
+        linear_advance: 0.03,
+        nonlinear_offset: 0.0,
+        linearization_velocity: 1.0,
+    };
+    let out = crate::shaper::apply_nonlinear_advance_to_track(3, &track, adv, fit_tol(cfg()))
+        .expect("linear advance refits the feed step");
+    let vel = nurbs::eval::derivative(&out);
+    for i in 0..=200 {
+        let t = 0.004 + h_ramp + 1e-6 + (0.0999 * i as f64 / 200.0);
+        let v = eval(&vel, t);
+        assert!(
+            (v - 1.5).abs() < 1e-6,
+            "cruise after the feed step must extrude at 1.5 mm/s, got {v} at t={t}"
+        );
+    }
+}
+
+#[test]
 fn nonlinear_advance_track_transform_matches_the_advance_law() {
     let piece = nurbs::bezier::BezierPiece {
         u_start: 0.0,

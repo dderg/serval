@@ -167,6 +167,8 @@ pub(crate) fn project_followers(
                     None,
                 )
             };
+            let input_start = pvaj_of_track(&projected, t_start);
+            let input_end = pvaj_of_track(&projected, t_end);
             let track = apply_leading_stages(
                 chain,
                 axis,
@@ -190,6 +192,8 @@ pub(crate) fn project_followers(
                 t_start,
                 t_end,
                 base: output_base,
+                input_start,
+                input_end,
                 track,
                 semantic_cuts,
             });
@@ -408,6 +412,7 @@ pub(crate) fn project_followers(
             _ => None,
         };
         let mut emitted_pv = state.emitted_output_pv;
+        let mut committed_input_end = state.committed_input_end;
         let emit_window = (commit_count > 0).then(|| {
             (
                 projection_support(&base[0], &frontier[0], axis, leaders).0,
@@ -424,19 +429,31 @@ pub(crate) fn project_followers(
         for i in 0..commit_count {
             let raw = &base[i];
             let (t_start, t_end) = projection_support(raw, &frontier[i], axis, leaders);
+            let cached = state.cached_projection(t_start, t_end);
+            let (input_start, input_end) = (cached.input_start, cached.input_end);
             let (base_position, mut pieces) = kernel_tracks.as_ref().map_or_else(
-                || {
-                    let cached = state.cached_projection(t_start, t_end);
-                    (cached.base, extract_bezier_pieces(&cached.track))
-                },
+                || (cached.base, extract_bezier_pieces(&cached.track)),
                 |(batch_base, bases, tracks)| (*batch_base + bases[i], tracks[i].clone()),
             );
+            let law_step = |previous_input: Option<Pvaj4>| {
+                if kernel.is_some() {
+                    return 0.0;
+                }
+                let previous = previous_input
+                    .expect("an emitted endpoint always records its pre-transform state");
+                let shared_v = previous.1;
+                let (_, _, a_r, j_r) = input_start;
+                let (_, _, a_l, j_l) = previous;
+                chain_output_velocity(chain, shared_v, a_r, j_r)
+                    - chain_output_velocity(chain, shared_v, a_l, j_l)
+            };
             if i == 0 {
                 if let (Some(previous), Some((emit_start, emit_end))) = (emitted_pv, emit_window) {
                     batch_weld = Some(SeamWeld::spanning(
                         emit_start,
                         emit_end,
                         previous,
+                        law_step(committed_input_end),
                         base_position,
                         &pieces,
                     ));
@@ -449,17 +466,26 @@ pub(crate) fn project_followers(
             }
             if i > 0 {
                 let previous = emitted_pv.expect("an earlier commit emitted its endpoint state");
-                let weld = SeamWeld::spanning(t_start, t_end, previous, base_position, &pieces);
+                let weld = SeamWeld::spanning(
+                    t_start,
+                    t_end,
+                    previous,
+                    law_step(committed_input_end),
+                    base_position,
+                    &pieces,
+                );
                 for piece in &mut pieces {
                     weld.apply(piece);
                 }
             }
+            committed_input_end = Some(input_end);
             let (run_end, velocity_end) = piece_run_end_pv(&pieces);
             emitted_pv = Some((base_position + run_end, velocity_end));
             Arc::make_mut(&mut out[i].axes)[axis] =
                 ContinuousAxis::PiecewiseRelativeSpline(localize_pieces(base_position, &pieces));
         }
         state.emitted_output_pv = emitted_pv;
+        state.committed_input_end = committed_input_end;
         if commit_count > 0 {
             let emitted_through = base[commit_count - 1].t_end;
             let back = kernel.map_or(0.0, |k| k.support().1.max(0.0));
@@ -470,6 +496,48 @@ pub(crate) fn project_followers(
         }
     }
     Ok(())
+}
+
+type Pvaj4 = (f64, f64, f64, f64);
+
+fn pvaj_of_track(track: &ScalarNurbs, t: f64) -> Pvaj4 {
+    let mut state = [nurbs::eval::eval(&track.as_view(), t), 0.0, 0.0, 0.0];
+    let mut current = track.clone();
+    for slot in state.iter_mut().skip(1) {
+        if current.degree() == 0 {
+            break;
+        }
+        current = nurbs::eval::derivative(&current);
+        *slot = nurbs::eval::eval(&current.as_view(), t);
+    }
+    (state[0], state[1], state[2], state[3])
+}
+
+/// The transformed output velocity the pre-kernel chain commands for a
+/// one-sided input `(a, j)` at a shared seam velocity `v` — the seam-side law
+/// value, so a weld can tell the law's own velocity step (driven by the input
+/// acceleration jumping across the seam) apart from the pipeline's fit
+/// residual (which lives in `v` and stays welded).
+fn chain_output_velocity(chain: &CompiledChain, v: f64, a: f64, j: f64) -> f64 {
+    let (mut v, mut a, j) = (v, a, j);
+    for stage in &chain.stages {
+        match stage {
+            ChainStage::SmoothKernel(_) => break,
+            ChainStage::DerivativeGains { k1, k2 } => {
+                let (nv, na) = (v + k1 * a + k2 * j, a + k1 * j);
+                (v, a) = (nv, na);
+            }
+            ChainStage::NonlinearAdvance(adv) => {
+                let (nv, na) = (
+                    v + adv.slope(v) * a,
+                    adv.curvature(v) * a * a + adv.slope(v) * j + a,
+                );
+                (v, a) = (nv, na);
+            }
+        }
+    }
+    let _ = (a, j);
+    v
 }
 
 /// The chain stages ahead of the follower's kernel (all of them when it has
@@ -515,6 +583,8 @@ struct ProjSeg {
     t_start: f64,
     t_end: f64,
     base: f64,
+    input_start: Pvaj4,
+    input_end: Pvaj4,
     track: ScalarNurbs,
     semantic_cuts: Vec<f64>,
 }
@@ -563,6 +633,7 @@ pub(crate) struct FollowerState {
     e_end: Option<f64>,
     projected_output_end: Option<f64>,
     emitted_output_pv: Option<(f64, f64)>,
+    committed_input_end: Option<Pvaj4>,
     projected: Vec<ProjSeg>,
     projected_through_t: Option<f64>,
     projected_trimmed: bool,
@@ -582,6 +653,7 @@ impl FollowerState {
         self.e_end = None;
         self.projected_output_end = None;
         self.emitted_output_pv = None;
+        self.committed_input_end = None;
         self.projected.clear();
         self.projected_through_t = None;
         self.projected_trimmed = false;
@@ -1496,6 +1568,7 @@ impl SeamWeld {
         start: f64,
         end: f64,
         emitted: (f64, f64),
+        law_step: f64,
         base_position: f64,
         pieces: &[BezierPiece],
     ) -> Self {
@@ -1506,7 +1579,7 @@ impl SeamWeld {
         );
         let (run_start, velocity_start) = piece_run_start_pv(pieces);
         let dp = emitted.0 - (base_position + run_start);
-        let dv = emitted.1 - velocity_start;
+        let dv = emitted.1 + law_step - velocity_start;
         let cubic = (2.0 * dp + dv * length) / (length * length * length);
         let quadratic = -(3.0 * dp + 2.0 * dv * length) / (length * length);
         Self {

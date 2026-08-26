@@ -799,6 +799,43 @@ fn all_post_processor_types_are_reachable() {
 }
 
 #[test]
+fn linear_advance_speed_ramp_never_retracts() {
+    let waypoints = vec![
+        (0.0, 0.0, 0.0, 0.0, 10.0, 3000.0),
+        (40.0, 0.0, 0.0, 2.0, 10.0, 3000.0),
+        (80.0, 0.0, 0.0, 4.0, 30.0, 3000.0),
+        (120.0, 0.0, 0.0, 6.0, 80.0, 3000.0),
+    ];
+    let mut params = default_axis_snapshot_params();
+    let mut e = axis("e", &["x", "y", "z"]);
+    e.post_processors = vec!["pa".to_string()];
+    params.axis_decls = vec![e];
+    params.post_processor_decls = vec![pp("pa", "linear_pressure_advance", &[("k", 0.03)])];
+    let snap = pipeline_snapshot(&waypoints, params).unwrap();
+    let rows = snap.trajectory.rows(3);
+    let decel_to_rest_start = 5.82;
+    let t_end = rows.last().unwrap().t1.min(decel_to_rest_start);
+    let mut previous: Option<(f64, f64)> = None;
+    let mut t = 1e-4;
+    while t < t_end - 1e-4 {
+        let state = snap.trajectory.eval_axis(3, t, SampleSide::Left).unwrap();
+        let (p, v) = (state.position, state.velocity);
+        if let Some((prev_t, prev_p)) = previous {
+            assert!(
+                p >= prev_p - 1e-4,
+                "extruder retracted from {prev_p} at t={prev_t} to {p} at t={t}"
+            );
+        }
+        assert!(
+            v > -0.05,
+            "extruder velocity {v} reversed at t={t} on a monotone speed ramp"
+        );
+        previous = Some((t, p));
+        t += 5e-4;
+    }
+}
+
+#[test]
 fn reciprocal_advance_handles_a_fast_corner_endpoint_transition() {
     let waypoints = vec![
         (0.0, 0.0, 0.0, 0.0, 200.0, 3000.0),
