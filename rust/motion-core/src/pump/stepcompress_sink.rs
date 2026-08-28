@@ -30,7 +30,7 @@ pub const CONSUMED_MARGIN_SECONDS: f64 = 0.010;
 /// Sending a motion frame with less execution margin than this is one host
 /// hiccup away from the MCU's "Timer too close" shutdown; worth a warn even
 /// when the send succeeds.
-pub const SEND_MARGIN_WARN_FLOOR_SECS: f64 = 0.050;
+pub const SEND_MARGIN_WARN_FLOOR_SECS: f64 = 0.100;
 
 /// A barrier the mcu never acks would otherwise park the retirement cohort —
 /// and every drain waiting on it — forever. One transport RTO ceiling past the
@@ -1439,7 +1439,7 @@ impl StepcompressEndpoint {
         let mut sent_barriers: Vec<(BarrierId, u64)> = Vec::new();
         let mut stale: Option<SendError> = None;
         let mut in_flight = self.in_flight.len() as u32;
-        let mut worst_margin_clocks: Option<i64> = None;
+        let mut worst_margin_clocks: Option<(i64, i64, u32)> = None;
         for out in &self.backlog {
             let consumes_slot = matches!(
                 &out.frame,
@@ -1490,8 +1490,10 @@ impl StepcompressEndpoint {
             }
             if motion_frame {
                 let margin = out.start_clock as i64 - now as i64;
-                if worst_margin_clocks.is_none_or(|w| margin < w) {
-                    worst_margin_clocks = Some(margin);
+                if worst_margin_clocks.is_none_or(|(w, _, _)| margin < w) {
+                    let entry_margin = out.start_clock as i64 - out.queued_clock as i64;
+                    let oid = out.frame.oid();
+                    worst_margin_clocks = Some((margin, entry_margin, oid));
                 }
             }
             burst.push(frame_args(&out.frame));
@@ -1513,14 +1515,16 @@ impl StepcompressEndpoint {
                 in_flight += 1;
             }
         }
-        if let Some(margin) = worst_margin_clocks {
+        if let Some((margin, entry_margin, oid)) = worst_margin_clocks {
             let margin_secs = margin as f64 / freq;
             if margin_secs < SEND_MARGIN_WARN_FLOOR_SECS {
                 tracing::warn!(
                     subsystem = "pump",
                     event = "step_send_margin_low",
                     mcu = self.mcu_id,
+                    oid,
                     margin_us = (margin_secs * 1e6) as i64,
+                    backlog_entry_margin_us = (entry_margin as f64 / freq * 1e6) as i64,
                     backlog = self.backlog.len() as u64,
                     in_flight = self.in_flight.len() as u64,
                     budget = self.budget,
