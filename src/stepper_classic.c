@@ -519,7 +519,7 @@ command_kalico_wire_probe(uint32_t *args)
     diag_note_wire_probe(delta);
     if (delta > (int32_t)timer_from_us(5000))
         event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_MOTION,
-                       EVENT_LOG_EVENT_MOTION_WIRE_PROBE_LATE,
+                       EVENT_LOG_EVENT_MOTION_WIRE_PROBE_LATE, 0,
                        (uint32_t)delta, claimed);
 }
 DECL_COMMAND(command_kalico_wire_probe, "kalico_wire_probe clock=%u");
