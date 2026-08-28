@@ -50,6 +50,11 @@ impl Lattice {
 
 const BISECTION_SAFEGUARD_PERIOD: u32 = 3;
 
+thread_local! {
+    pub static EVAL_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub static BOUNDS_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Debug)]
 pub struct StepRootCursor {
     microstep_mm: f64,
@@ -350,6 +355,7 @@ impl StepRootCursor {
         from: u64,
         to: u64,
     ) -> Result<bool, ShimError> {
+        BOUNDS_COUNT.with(|c| c.set(c.get() + 1));
         let t_from = self.stream_time(motor, view, from)?;
         let t_to = self.stream_time(motor, view, to)?;
         let bounds = view
@@ -384,6 +390,7 @@ impl StepRootCursor {
         from: u64,
         to: u64,
     ) -> Result<Option<Slope>, ShimError> {
+        BOUNDS_COUNT.with(|c| c.set(c.get() + 1));
         let t_from = self.stream_time(motor, view, from)?;
         let t_to = self.stream_time(motor, view, to)?;
         let bounds = view
@@ -431,6 +438,7 @@ impl StepRootCursor {
     }
 
     fn eval(&self, motor: usize, view: &ClockedMotorSpan, clock: u64) -> Result<Pva, ShimError> {
+        EVAL_COUNT.with(|c| c.set(c.get() + 1));
         view.eval_at_clock(clock)
             .map_err(|error| ShimError::SpanEval { motor, error })
     }

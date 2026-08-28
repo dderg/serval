@@ -506,14 +506,21 @@ impl StepShim {
             state.emit(motor, &mut frames)?;
             let elapsed = motor_started.elapsed();
             if elapsed > std::time::Duration::from_millis(4) {
+                let evals = crate::root_cursor::EVAL_COUNT.with(std::cell::Cell::take);
+                let bounds = crate::root_cursor::BOUNDS_COUNT.with(std::cell::Cell::take);
                 tracing::warn!(
                     subsystem = "pump",
                     event = "shim_motor_drain_slow",
                     motor,
                     elapsed_us = elapsed.as_micros() as u64,
                     queued_before,
+                    evals,
+                    bounds,
                     "one motor's root search dominated the shim drain"
                 );
+            } else {
+                crate::root_cursor::EVAL_COUNT.with(std::cell::Cell::take);
+                crate::root_cursor::BOUNDS_COUNT.with(std::cell::Cell::take);
             }
         }
         Ok(frames)
