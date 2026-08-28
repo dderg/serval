@@ -8,6 +8,7 @@ description = "Host-side stepcompress shim: clocked motor spans -> step roots ->
 license.workspace = true
 
 [dependencies]
+tracing = { workspace = true }
 trajectory = { path = "../trajectory" }
 libm = { version = "0.2", default-features = false }
 
