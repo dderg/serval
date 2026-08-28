@@ -130,6 +130,7 @@ pub enum ReactorCommand {
     FireAndForgetBatch {
         payloads: Vec<Vec<u8>>,
         reserved_blocks: usize,
+        enqueued_at: std::time::Instant,
     },
     McuIdentify {
         completion:
@@ -818,6 +819,7 @@ impl McuHostIo {
             .send(ReactorCommand::FireAndForgetBatch {
                 payloads,
                 reserved_blocks,
+                enqueued_at: std::time::Instant::now(),
             })
             .map_err(|_| {
                 self.fire_and_forget_depth.release(reserved_blocks);

@@ -72,7 +72,24 @@ impl Reactor {
             ReactorCommand::FireAndForgetBatch {
                 payloads,
                 reserved_blocks,
-            } => self.handle_fire_and_forget_batch(&payloads, reserved_blocks),
+                enqueued_at,
+            } => {
+                let waited = enqueued_at.elapsed();
+                if waited > std::time::Duration::from_millis(10)
+                    && self.last_channel_wait_warn.elapsed().as_millis() >= 500
+                {
+                    self.last_channel_wait_warn = std::time::Instant::now();
+                    tracing::warn!(
+                        subsystem = "mcu-comms",
+                        event = "channel_wait_high",
+                        mcu = %self.mcu_label,
+                        waited_ms = waited.as_millis() as u64,
+                        blocks = payloads.len(),
+                        "batch sat this long in the submission channel before the reactor took it"
+                    );
+                }
+                self.handle_fire_and_forget_batch(&payloads, reserved_blocks)
+            }
             ReactorCommand::McuIdentify {
                 completion,
                 deadline: _,
