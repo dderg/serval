@@ -139,8 +139,7 @@ fn a8_past_the_high_water_mark_every_payload_still_queues() {
         h.reactor.outbound.pending_fire_and_forget.len(),
         FIRE_AND_FORGET_HIGH_WATER + 1,
     );
-    assert_eq!(
-        h.reactor.outbound.pending_fire_and_forget.back(),
-        Some(&(vec![0x02], false)),
-    );
+    let (payload, is_get_clock, _) = h.reactor.outbound.pending_fire_and_forget.back().unwrap();
+    assert_eq!(payload, &vec![0x02u8]);
+    assert!(!is_get_clock);
 }

@@ -109,7 +109,7 @@ fn a_batch_accepted_past_the_high_water_mark_keeps_every_block_in_order() {
             .pending_fire_and_forget
             .iter()
             .skip(FIRE_AND_FORGET_HIGH_WATER)
-            .map(|(payload, _)| payload.clone())
+            .map(|(payload, _, _)| payload.clone())
             .collect::<Vec<_>>(),
         blocks,
         "the batch must queue behind the backlog in packing order"
