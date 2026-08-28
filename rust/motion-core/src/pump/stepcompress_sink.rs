@@ -1411,10 +1411,22 @@ impl StepcompressEndpoint {
         drain_to: u64,
         publish: bool,
     ) -> Result<(), SendError> {
+        let drain_started = std::time::Instant::now();
         let frames = self
             .shim
             .drain(drain_to)
             .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
+        let drain_elapsed = drain_started.elapsed();
+        if drain_elapsed > std::time::Duration::from_millis(5) {
+            tracing::warn!(
+                subsystem = "pump",
+                event = "shim_drain_slow",
+                mcu = self.mcu_id,
+                elapsed_us = drain_elapsed.as_micros() as u64,
+                frames = frames.len(),
+                "step compression consumed this much real time inside one send pass"
+            );
+        }
         self.queue_step_volley(now, frames)?;
         if self.backlog.len() > BACKLOG_CEILING_FRAMES {
             return Err(SendError::Fatal(format!(
@@ -1541,7 +1553,19 @@ impl StepcompressEndpoint {
             }
         }
         if !burst.is_empty() {
+            let egress_started = std::time::Instant::now();
             (self.egress)(&burst)?;
+            let egress_elapsed = egress_started.elapsed();
+            if egress_elapsed > std::time::Duration::from_millis(5) {
+                tracing::warn!(
+                    subsystem = "pump",
+                    event = "egress_slow",
+                    mcu = self.mcu_id,
+                    elapsed_us = egress_elapsed.as_micros() as u64,
+                    burst = burst.len(),
+                    "handing this burst to the transport blocked the send pass"
+                );
+            }
             self.backlog.drain(..burst.len());
             self.in_flight.extend(
                 reclaim_clocks
