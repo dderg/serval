@@ -300,3 +300,32 @@ fn every_fresh_anchor_uses_the_default_lead() {
         a.mark_parked();
     }
 }
+
+#[test]
+fn parked_continuation_below_the_rest_floor_reanchors_forward() {
+    let mut a = Anchor::new();
+    let (t0, _) = a.anchor_segment(0.0, 1.0, 100.0);
+    a.mark_parked();
+    let decayed_now = t0 + 1.0 - 0.060;
+    let (t0_new, epoch) = a.anchor_segment(1.0, 2.0, decayed_now);
+    assert_eq!(
+        epoch,
+        StreamEpoch::Reanchor,
+        "a 60ms margin at rest is one trip-congested USB spike from a late \
+         re-arm; the anchor must refresh it"
+    );
+    assert!((t0_new + 1.0 - (decayed_now + DEFAULT_LEAD_SECS)).abs() < 1e-9);
+}
+
+#[test]
+fn parked_continuation_with_ample_margin_keeps_the_standing_anchor() {
+    let mut a = Anchor::new();
+    let (t0, _) = a.anchor_segment(0.0, 1.0, 100.0);
+    a.mark_parked();
+    let (t0_new, epoch) = a.anchor_segment(1.0, 2.0, t0 + 1.0 - 0.200);
+    assert_eq!(epoch, StreamEpoch::Continuation);
+    assert_eq!(
+        t0_new, t0,
+        "no pause is inserted while the margin is healthy"
+    );
+}
