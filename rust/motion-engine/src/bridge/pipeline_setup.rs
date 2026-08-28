@@ -436,7 +436,22 @@ impl PyMotionEngine {
                                  mcu stamped on a barrier ack — negative means the projection \
                                  lags reality and every send margin is thinner than believed"
                             );
+                        } else {
+                            tracing::info!(
+                                subsystem = "pump",
+                                event = "clock_projection_skew_sample",
+                                mcu = mcu_id,
+                                skew_us = (skew_secs * 1e6) as i64,
+                                "in-bounds projection skew sample from a barrier ack clock echo"
+                            );
                         }
+                    } else {
+                        tracing::warn!(
+                            subsystem = "pump",
+                            event = "clock_projection_skew_no_estimate",
+                            mcu = mcu_id,
+                            "barrier ack clock echo arrived but the router has no clock estimate"
+                        );
                     }
                 }
                 let _ = ack_tx.send(crate::pump::PumpMsg::StepcompressBarrierAck {
