@@ -60,6 +60,8 @@ pub struct Reactor {
     pub(crate) transport_state: McuTransportState,
     pub(crate) interceptors: crate::host_io::interceptor::InterceptorTable,
     pub(crate) mcu_label: Arc<str>,
+    pub(crate) last_ack_age_warn: Instant,
+    pub(crate) last_ff_wait_warn: Instant,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -127,6 +129,8 @@ impl Reactor {
             clock,
             transport_state: McuTransportState::default(),
             interceptors: crate::host_io::interceptor::InterceptorTable::new(),
+            last_ack_age_warn: Instant::now(),
+            last_ff_wait_warn: Instant::now(),
             mcu_label,
         }
     }

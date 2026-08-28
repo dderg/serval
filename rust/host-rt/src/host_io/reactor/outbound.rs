@@ -25,7 +25,7 @@ pub(crate) struct OutboundQueues {
     pub(crate) pending_submissions: VecDeque<PendingSubmission>,
     /// Queued fire-and-forget payloads; the bool marks a `get_clock` frame
     /// whose RAW send stamp is captured at the actual wire write.
-    pub(crate) pending_fire_and_forget: VecDeque<(Vec<u8>, bool)>,
+    pub(crate) pending_fire_and_forget: VecDeque<(Vec<u8>, bool, Instant)>,
     pub(crate) pending_outbound_order: VecDeque<PendingOutboundKind>,
     pub(crate) fire_and_forget_depth: Arc<FireAndForgetDepth>,
 }
@@ -48,13 +48,13 @@ impl OutboundQueues {
 
     pub(crate) fn enqueue_fire_and_forget(&mut self, payload: Vec<u8>, is_get_clock: bool) {
         self.pending_fire_and_forget
-            .push_back((payload, is_get_clock));
+            .push_back((payload, is_get_clock, Instant::now()));
         self.pending_outbound_order
             .push_back(PendingOutboundKind::FireAndForget);
         self.publish_fire_and_forget_depth();
     }
 
-    pub(crate) fn pop_fire_and_forget(&mut self) -> Option<(Vec<u8>, bool)> {
+    pub(crate) fn pop_fire_and_forget(&mut self) -> Option<(Vec<u8>, bool, Instant)> {
         let front = self.pending_fire_and_forget.pop_front();
         self.publish_fire_and_forget_depth();
         front
@@ -261,7 +261,9 @@ impl Reactor {
                     }
                 }
                 PendingOutboundKind::FireAndForget => {
-                    let Some((payload, is_get_clock)) = self.outbound.pop_fire_and_forget() else {
+                    let Some((payload, is_get_clock, enqueued_at)) =
+                        self.outbound.pop_fire_and_forget()
+                    else {
                         tracing::error!(
                             subsystem = "mcu-comms",
                             event = "outbound_order_missing_fire_and_forget",
@@ -269,6 +271,20 @@ impl Reactor {
                         );
                         continue;
                     };
+                    let waited = enqueued_at.elapsed();
+                    if waited > std::time::Duration::from_millis(20)
+                        && self.last_ff_wait_warn.elapsed().as_millis() >= 500
+                    {
+                        self.last_ff_wait_warn = std::time::Instant::now();
+                        tracing::warn!(
+                            subsystem = "mcu-comms",
+                            event = "ff_queue_wait_high",
+                            mcu = %self.mcu_label,
+                            waited_ms = waited.as_millis() as u64,
+                            queued = self.outbound.pending_fire_and_forget.len(),
+                            "fire-and-forget frame sat this long behind the unacked window"
+                        );
+                    }
                     if let Err(e) = self.dispatch_fire_and_forget(payload, is_get_clock) {
                         if self.close_if_io_fault("drain_pending_submissions/fire_and_forget", &e) {
                             return;

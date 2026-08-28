@@ -77,6 +77,28 @@ impl Reactor {
             return Ok(());
         }
         let popped = self.unacked_window.pop_acked(rseq);
+        if let Some(oldest) = popped.first() {
+            let now = self.clock.now();
+            let age = now - oldest.sent_at;
+            if age > std::time::Duration::from_millis(20)
+                && now
+                    .duration_since(self.last_ack_age_warn)
+                    .as_millis()
+                    >= 500
+            {
+                self.last_ack_age_warn = now;
+                tracing::warn!(
+                    subsystem = "mcu-comms",
+                    event = "ack_age_high",
+                    mcu = %self.mcu_label,
+                    age_ms = age.as_millis() as u64,
+                    popped = popped.len(),
+                    unacked_after = self.unacked_window.len(),
+                    "oldest unacked frame waited this long for its ack - the \
+                     12-frame window turns over at this cadence"
+                );
+            }
+        }
         for entry in &popped {
             if self.seq_window.rtt_sample_matches(entry.seq) {
                 let rtt = self.clock.now() - entry.sent_at;
