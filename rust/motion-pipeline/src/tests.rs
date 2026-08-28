@@ -3789,3 +3789,56 @@ fn projected_follower_seams_hold_velocity_across_emit_batches() {
          {single_total}"
     );
 }
+
+/// A follower that never extrudes must not inherit the kernel-shaped leader
+/// lattice: travel and homing windows project as one constant piece, not
+/// hundreds of flat spline pieces — that fit starved real-time drip streams
+/// on small hosts (StallGuard false triggers during sensorless homing).
+#[test]
+fn idle_follower_projects_as_a_single_constant_piece() {
+    let config = cfg();
+    let pa = trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
+        "linear_pressure_advance",
+        &trajectory::algos::LinearPressureAdvance,
+        vec![0.04],
+    )])
+    .unwrap();
+    let kernel = smooth_x_chains(0.044583333333333336).chains[0].clone();
+    let chains = AxisChainSet {
+        chains: vec![
+            kernel.clone(),
+            kernel,
+            trajectory::CompiledChain::default(),
+            pa,
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    };
+    let mut segs: Vec<geometry::Move> = Vec::new();
+    for i in 0..8u32 {
+        let x0 = f64::from(i) * 5.0;
+        let y0 = f64::from(i % 2);
+        let y1 = f64::from((i + 1) % 2);
+        segs.push(line(i + 1, [x0, y0, 0.0], [x0 + 5.0, y1, 0.0], 0.0));
+    }
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let items: Vec<StreamInput> = segs.iter().map(|m| m.clone().into()).collect();
+    let lowered = lower_to_base_items(config, &chains, &home, items);
+    let shaped = shape_one_at_a_time(chains, fit_tol(config), lowered);
+    for seg in trajectory_segments(&shaped) {
+        let e = &seg.axes[3];
+        if let ContinuousAxis::PiecewiseRelativeSpline(pieces) = e {
+            assert!(
+                pieces.len() <= 2,
+                "idle follower window [{}, {}] burst into {} pieces",
+                seg.t_start,
+                seg.t_end,
+                pieces.len()
+            );
+        }
+        for i in 0..=20 {
+            let t = seg.t_start + (seg.t_end - seg.t_start) * f64::from(i) / 20.0;
+            let v = eval_segment_axis(seg, 3, t);
+            assert!(v.abs() < 1e-9, "idle follower moved to {v} at t={t}");
+        }
+    }
+}

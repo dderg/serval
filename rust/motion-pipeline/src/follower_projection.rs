@@ -146,15 +146,25 @@ pub(crate) fn project_followers(
                 let (track, s_end, e_end_relative, semantic) = {
                     let sig = FollowerSignal::new(&frontier[i], raw, axis, leaders, &*state, 0.0);
                     let breakpoints = sig.construction_breakpoints(raw_axis);
-                    let track = fit_axis_from_signal(
-                        axis,
-                        t_start,
-                        t_end,
-                        &breakpoints.fit_seeds,
-                        &sig,
-                        follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5),
-                        "follower_source",
-                    )?;
+                    let track = match sig.constant_value() {
+                        Some(value) => nurbs::bezier::bezier_pieces_to_nurbs(&[BezierPiece {
+                            u_start: t_start,
+                            u_end: t_end,
+                            coeffs: vec![value, value],
+                        }]),
+                        None => fit_axis_from_signal(
+                            axis,
+                            t_start,
+                            t_end,
+                            &breakpoints.fit_seeds,
+                            &sig,
+                            follower_fit_tol(
+                                fit_tol,
+                                follower_tol_scale(&raw.followers, axis) * 0.5,
+                            ),
+                            "follower_source",
+                        )?,
+                    };
                     let e_end_relative = nurbs::eval::eval(&track.as_view(), t_end);
                     (track, sig.s_end(), e_end_relative, breakpoints.semantic)
                 };
@@ -1256,6 +1266,35 @@ impl<'a> FollowerSignal<'a> {
     fn s_end(&self) -> f64 {
         self.s_start + self.cumulative.last().copied().expect("cumulative seeded")
     }
+    /// The exact value of an identically-constant window — a follower whose
+    /// span table commands zero extrusion ratio across the whole owned range
+    /// and whose raw axis contributes no extrude-only motion (every travel
+    /// and homing move). Constant input needs no fit: the kernel-shaped
+    /// leader lattice would otherwise seed hundreds of pieces of flat spline,
+    /// starving real-time drip streams on small hosts.
+    fn constant_value(&self) -> Option<f64> {
+        if let Some((axis, _)) = self.raw_delta {
+            if !matches!(axis, ContinuousAxis::Hold { .. }) {
+                return None;
+            }
+        }
+        let s_lo = self.s_start;
+        let s_hi = self.s_end().max(self.s_owned_end.min(f64::MAX));
+        let overlapping_zero = self
+            .state
+            .spans
+            .iter()
+            .filter(|span| {
+                span.s1 >= s_lo - SPAN_LOOKUP_SLACK_MM && span.s0 <= s_hi + SPAN_LOOKUP_SLACK_MM
+            })
+            .all(|span| span.r0 == 0.0 && span.r1 == 0.0);
+        let tail_zero = match self.state.spans.last() {
+            Some(last) if s_hi + SPAN_LOOKUP_SLACK_MM > last.s1 => last.r1 == 0.0,
+            _ => true,
+        };
+        (overlapping_zero && tail_zero).then(|| self.eval(self.grid[0]))
+    }
+
     fn construction_breakpoints(&self, raw_axis: &ContinuousAxis) -> FollowerBreakpoints {
         let raw_breaks = axis_breakpoints(raw_axis);
         let mut breaks = raw_breaks.clone();
