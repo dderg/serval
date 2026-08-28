@@ -670,6 +670,7 @@ fn move_slots_reclaim_when_the_mcu_loads_the_run() {
     assert_eq!(h.sent_moves(), 1);
 
     let margin = (CYCLES_PER_SECOND * CONSUMED_MARGIN_SECONDS) as u64;
+    h.now.store(1_000 + margin, Ordering::Relaxed);
     h.endpoint.flush(1_000 + margin, CYCLES_PER_SECOND).unwrap();
     assert_eq!(h.sent_moves(), 2);
 }
@@ -700,6 +701,7 @@ fn barriers_hold_move_slots_until_the_mcu_loads_them() {
     assert_eq!(h.sent_moves(), 0);
 
     let margin = (CYCLES_PER_SECOND * CONSUMED_MARGIN_SECONDS) as u64;
+    h.now.store(1_000 + margin, Ordering::Relaxed);
     h.endpoint.flush(1_000 + margin, CYCLES_PER_SECOND).unwrap();
     assert_eq!(h.sent_moves(), 1);
 }

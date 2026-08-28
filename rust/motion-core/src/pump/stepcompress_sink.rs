@@ -1064,8 +1064,9 @@ impl StepcompressEndpoint {
                 self.mcu_id, cut.cut_at, cut.expected_count, expected
             )));
         }
-        let (now, _freq) = self.clock_now()?;
+        let (now, freq) = self.clock_now()?;
         self.queue_step_volley(now, tail)?;
+        self.flush(now, freq)?;
         self.shim.set_motor_cycles_per_second(motor, cut.epoch_freq);
         self.commanded_base[motor] = self.shim.commanded_position(motor);
         if !cut.held.is_empty() {
@@ -1445,7 +1446,18 @@ impl StepcompressEndpoint {
         Ok(())
     }
 
-    fn flush(&mut self, now: u64, freq: f64) -> Result<(), SendError> {
+    fn flush(&mut self, stamped_now: u64, freq: f64) -> Result<(), SendError> {
+        let (now, _) = self.clock_now()?;
+        let worked_secs = now.saturating_sub(stamped_now) as f64 / freq;
+        if worked_secs > 0.050 {
+            tracing::warn!(
+                subsystem = "pump",
+                event = "send_pass_worked_long",
+                mcu = self.mcu_id,
+                worked_us = (worked_secs * 1e6) as u64,
+                "host work between clock sampling and egress consumed this much                  real margin in one send pass"
+            );
+        }
         let margin = (freq * CONSUMED_MARGIN_SECONDS) as u64;
         let cutoff = now.saturating_sub(margin);
         self.in_flight.retain(|e| e.reclaim_clock > cutoff);
@@ -1585,26 +1597,10 @@ impl StepcompressEndpoint {
         let probe_interval = (freq * WIRE_PROBE_INTERVAL_SECS) as u64;
         if now >= self.last_wire_probe_clock.saturating_add(probe_interval) {
             self.last_wire_probe_clock = now;
-            let (fresh_now, _) = self.clock_now()?;
-            let stale_secs = fresh_now.saturating_sub(now) as f64 / freq;
-            if stale_secs > 0.005 {
-                tracing::warn!(
-                    subsystem = "pump",
-                    event = "flush_now_stale",
-                    mcu = self.mcu_id,
-                    stale_us = (stale_secs * 1e6) as u64,
-                    backlog = self.backlog.len(),
-                    "the clock this flush stamped and guarded against is this stale by \
-                     egress time - work inside the send pass ate real margin"
-                );
-            }
             #[allow(clippy::cast_possible_truncation)]
             (self.egress)(&[(
                 "kalico_wire_probe",
-                vec![(
-                    "clock".to_string(),
-                    ArgValue::Int(i64::from(fresh_now as u32)),
-                )],
+                vec![("clock".to_string(), ArgValue::Int(i64::from(now as u32)))],
             )])?;
         }
         self.release_retirements();
