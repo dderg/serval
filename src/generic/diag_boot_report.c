@@ -175,6 +175,8 @@ fault_handler_report_boot_init(uint32_t now)
     live_snap.rearm_min_waketime   = 0;
     live_snap.rearm_min_last_reset = 0;
     live_snap.rearm_min_discards   = 0;
+    live_snap.wire_probe_worst     = 0;
+    live_snap.wire_probe_count     = 0;
     live_snap.rearm_armed          = 0;
     live_snap.rearm_below_floor    = 0;
     live_snap.worst_timer_func     = 0;
@@ -380,6 +382,9 @@ fault_handler_report_emit(uint32_t now)
            prior_snap.ttc_func,
            prior_snap.ttc_late,
            prior_snap.ttc_count);
+    output("wire_probe worst_cyc %i count %u",
+           (int32_t)prior_snap.wire_probe_worst,
+           prior_snap.wire_probe_count);
     output("step_rearm count %u min_margin_cyc %i armed %u below_floor %u"
            " oid %u waketime %u last_reset %u discards %u",
            prior_snap.rearm_count,

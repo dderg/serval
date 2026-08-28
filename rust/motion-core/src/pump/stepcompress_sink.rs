@@ -32,6 +32,11 @@ pub const CONSUMED_MARGIN_SECONDS: f64 = 0.010;
 /// when the send succeeds.
 pub const SEND_MARGIN_WARN_FLOOR_SECS: f64 = 0.100;
 
+/// How often the endpoint stamps its projected clock into a
+/// `kalico_wire_probe`; the mcu's receipt delta measures host->mcu wire and
+/// demux latency, the direction the barrier-ack clock echo cannot see.
+pub const WIRE_PROBE_INTERVAL_SECS: f64 = 0.050;
+
 /// A barrier the mcu never acks would otherwise park the retirement cohort —
 /// and every drain waiting on it — forever. One transport RTO ceiling past the
 /// send is far beyond any legitimate wait: a barrier only leaves the backlog
@@ -328,6 +333,7 @@ pub struct StepcompressEndpoint {
     last_sent_boundary: HashMap<u32, u64>,
     pending_cuts: HashMap<usize, PendingCut>,
     step_clock: HashMap<u32, u64>,
+    last_wire_probe_clock: u64,
     pending_seams: HashMap<usize, VecDeque<PendingSeam>>,
     frozen_motors: HashSet<usize>,
     pending_retire: VecDeque<PendingRetire>,
@@ -468,6 +474,7 @@ impl StepcompressEndpoint {
             last_sent_boundary: HashMap::new(),
             pending_cuts: HashMap::new(),
             step_clock: HashMap::new(),
+            last_wire_probe_clock: 0,
             pending_seams: HashMap::new(),
             frozen_motors: HashSet::new(),
             pending_retire: VecDeque::new(),
@@ -1550,6 +1557,15 @@ impl StepcompressEndpoint {
         }
         if let Some(error) = stale {
             return Err(error);
+        }
+        let probe_interval = (freq * WIRE_PROBE_INTERVAL_SECS) as u64;
+        if now >= self.last_wire_probe_clock.saturating_add(probe_interval) {
+            self.last_wire_probe_clock = now;
+            #[allow(clippy::cast_possible_truncation)]
+            (self.egress)(&[(
+                "kalico_wire_probe",
+                vec![("clock".to_string(), ArgValue::Int(i64::from(now as u32)))],
+            )])?;
         }
         self.release_retirements();
         self.post_heartbeat()

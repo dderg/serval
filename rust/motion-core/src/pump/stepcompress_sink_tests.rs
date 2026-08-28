@@ -129,6 +129,9 @@ fn harness_axes(budget: u32, axes: Vec<usize>, oids: Vec<u32>) -> Harness {
                         .push((arg("oid") as u32, arg("seq") as u32));
                     continue;
                 }
+                if *name == "kalico_wire_probe" {
+                    continue;
+                }
                 if *name == "stepcompress_set_position" {
                     seeds_for_egress
                         .lock_ok()
@@ -2695,6 +2698,9 @@ fn h7_harness(oids: Vec<u32>) -> Harness {
                     barriers_for_egress
                         .lock_ok()
                         .push((arg("oid") as u32, arg("seq") as u32));
+                    continue;
+                }
+                if *name == "kalico_wire_probe" {
                     continue;
                 }
                 if *name == "stepcompress_set_position" {

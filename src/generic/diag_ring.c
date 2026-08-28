@@ -184,6 +184,17 @@ diag_note_shutdown_reset(void)
 #define REARM_ARMED_US 1000
 __attribute__((used, externally_visible))
 void
+diag_note_wire_probe(int32_t delta)
+{
+    live_snap.wire_probe_count++;
+    if (delta > (int32_t)live_snap.wire_probe_worst) {
+        live_snap.wire_probe_worst = (uint32_t)delta;
+        diag_cache_clean();
+    }
+}
+
+__attribute__((used, externally_visible))
+void
 diag_note_step_rearm(int32_t margin, uint32_t oid, uint32_t waketime,
                      uint32_t last_reset, uint32_t discards)
 {

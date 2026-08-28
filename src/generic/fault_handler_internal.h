@@ -64,6 +64,8 @@ struct live_snapshot {
     uint32_t rearm_min_waketime;
     uint32_t rearm_min_last_reset;
     uint32_t rearm_min_discards;
+    uint32_t wire_probe_worst;
+    uint32_t wire_probe_count;
     uint32_t rearm_armed;
     uint32_t rearm_below_floor;
     uint32_t worst_timer_func;

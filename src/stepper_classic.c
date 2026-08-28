@@ -506,6 +506,24 @@ command_reset_step_clock(uint32_t *args)
 }
 DECL_COMMAND(command_reset_step_clock, "reset_step_clock oid=%c clock=%u");
 
+// The host stamps its projected mcu clock into this probe; the receipt
+// delta is the one-way host->mcu wire+demux latency plus projection error,
+// the direction the barrier-ack clock echo cannot see. The reset-surviving
+// worst latch feeds the crash replay; big deltas also emit live.
+void
+command_kalico_wire_probe(uint32_t *args)
+{
+    uint32_t claimed = args[0];
+    int32_t delta = (int32_t)(timer_read_time() - claimed);
+    extern void diag_note_wire_probe(int32_t delta);
+    diag_note_wire_probe(delta);
+    if (delta > (int32_t)timer_from_us(5000))
+        event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_MOTION,
+                       EVENT_LOG_EVENT_MOTION_WIRE_PROBE_LATE,
+                       (uint32_t)delta, claimed);
+}
+DECL_COMMAND(command_kalico_wire_probe, "kalico_wire_probe clock=%u");
+
 // Return the current stepper position.  Caller must disable irqs.
 uint32_t
 stepper_get_position(struct stepper *s)
