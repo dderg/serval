@@ -80,7 +80,7 @@ impl Reactor {
         if let Some(oldest) = popped.first() {
             let now = self.clock.now();
             let age = now - oldest.sent_at;
-            if age > std::time::Duration::from_millis(20)
+            if age > std::time::Duration::from_millis(1)
                 && now
                     .duration_since(self.last_ack_age_warn)
                     .as_millis()

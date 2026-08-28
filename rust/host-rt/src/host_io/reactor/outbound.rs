@@ -272,7 +272,7 @@ impl Reactor {
                         continue;
                     };
                     let waited = enqueued_at.elapsed();
-                    if waited > std::time::Duration::from_millis(20)
+                    if waited > std::time::Duration::from_millis(5)
                         && self.last_ff_wait_warn.elapsed().as_millis() >= 500
                     {
                         self.last_ff_wait_warn = std::time::Instant::now();

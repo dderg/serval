@@ -75,7 +75,7 @@ impl Reactor {
                 enqueued_at,
             } => {
                 let waited = enqueued_at.elapsed();
-                if waited > std::time::Duration::from_millis(10)
+                if waited > std::time::Duration::from_millis(5)
                     && self.last_channel_wait_warn.elapsed().as_millis() >= 500
                 {
                     self.last_channel_wait_warn = std::time::Instant::now();
