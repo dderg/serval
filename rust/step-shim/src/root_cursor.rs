@@ -194,8 +194,19 @@ impl StepRootCursor {
         }
         let mut boundaries = vec![view.start_clock, view.end_clock];
         let breakpoints = &view.signal.breakpoints;
-        let first = breakpoints.partition_point(|&t| t <= view.stream_t_start);
-        let last = breakpoints.partition_point(|&t| t < view.stream_t_end);
+        let stream_t_at = |clock: u64| {
+            (view.stream_t_start + (clock as f64 - view.start_clock_exact) / view.clock_freq_hz)
+                .clamp(view.stream_t_start, view.stream_t_end)
+        };
+        let t_begin = stream_t_at(begin);
+        let t_last = stream_t_at(last_clock);
+        let view_first = breakpoints.partition_point(|&t| t <= view.stream_t_start);
+        let view_last = breakpoints.partition_point(|&t| t < view.stream_t_end);
+        let first = breakpoints
+            .partition_point(|&t| t < t_begin)
+            .saturating_sub(1)
+            .max(view_first);
+        let last = (breakpoints.partition_point(|&t| t <= t_last) + 1).min(view_last);
         for &t in &breakpoints[first..last] {
             boundaries.push(
                 view.clock_at_stream_time(t)

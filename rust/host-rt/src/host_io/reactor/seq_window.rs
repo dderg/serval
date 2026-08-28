@@ -83,11 +83,7 @@ impl Reactor {
             if age > self.worst_ack_age {
                 self.worst_ack_age = age;
             }
-            if now
-                .duration_since(self.last_ack_age_warn)
-                .as_millis()
-                >= 500
-            {
+            if now.duration_since(self.last_ack_age_warn).as_millis() >= 500 {
                 let worst = self.worst_ack_age;
                 self.last_ack_age_warn = now;
                 self.worst_ack_age = std::time::Duration::ZERO;

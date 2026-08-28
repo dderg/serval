@@ -84,6 +84,47 @@ fn clocked(signal: Arc<MotorSpan>, start_clock: u64, freq: f64) -> ClockedMotorS
     .expect("a representable clocked view")
 }
 
+#[test]
+#[ignore = "manual perf probe: cargo test -p step-shim drain_speed_probe -- --ignored --nocapture"]
+fn drain_speed_probe() {
+    const FREQ: f64 = 520_000_000.0;
+    let motor_cfg = MotorConfig {
+        cycles_per_second: FREQ,
+        ..cfg()
+    };
+    let mut shim = StepShim::new(vec![motor_cfg], 4096);
+    shim.reset_position(0, 0);
+    let duration = 0.1_f64;
+    let cycles = (duration * FREQ) as u64;
+    let t_start = 0.0;
+    let t_end = duration;
+    let groups = vec![
+        base_group(0.0, t_start, t_end),
+        ramp_group(4.0, duration, t_start, 1.0),
+    ];
+    let view = ClockedMotorSpan::try_new(
+        signal(groups, t_start, t_end, 0),
+        t_start,
+        t_end,
+        t_start,
+        t_end,
+        0.0,
+        FREQ,
+    )
+    .expect("clocked");
+    shim.push_spans(0, &[view]).expect("push");
+    let started = std::time::Instant::now();
+    let frames = shim.drain(cycles).expect("drain");
+    let elapsed = started.elapsed();
+    let roots = 400;
+    println!(
+        "drain of {duration}s / ~{roots} steps took {:?} ({:.1} us/step, {} frames)",
+        elapsed,
+        elapsed.as_secs_f64() * 1e6 / roots as f64,
+        frames.len()
+    );
+}
+
 fn window(start_clock: u64, cycles: u64) -> (f64, f64) {
     let t_start = start_clock as f64 / CYCLES_PER_SECOND;
     (t_start, t_start + cycles as f64 / CYCLES_PER_SECOND)

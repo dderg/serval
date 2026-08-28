@@ -1601,7 +1601,10 @@ impl StepcompressEndpoint {
             #[allow(clippy::cast_possible_truncation)]
             (self.egress)(&[(
                 "kalico_wire_probe",
-                vec![("clock".to_string(), ArgValue::Int(i64::from(fresh_now as u32)))],
+                vec![(
+                    "clock".to_string(),
+                    ArgValue::Int(i64::from(fresh_now as u32)),
+                )],
             )])?;
         }
         self.release_retirements();
