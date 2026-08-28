@@ -114,7 +114,7 @@ kalico_console_write_raw(const uint8_t *buf, uint16_t len)
  ****************************************************************/
 
 static struct task_wake usb_bulk_out_wake;
-static uint8_t receive_buf[128], receive_pos;
+static uint8_t receive_buf[256], receive_pos;
 
 void
 usb_notify_bulk_out(void)
@@ -134,18 +134,25 @@ usb_bulk_out_task(void)
                         diag_slot_usb_out_max_gap(),
                         timer_from_us(20000),
                         DIAG_EV_USB_OUT_GAP);
-    // Read data
+    // Drain every buffered packet: the endpoint only re-arms inside
+    // usb_read_bulk_out, so reading one packet per task pass caps the
+    // host->mcu link at one packet per scheduler round - measured as
+    // 20-103 ms delivery backlogs during endstop reconciles, which is
+    // where the "Timer too close" late re-arms came from.
     uint_fast8_t rpos = receive_pos;
-    if (rpos + USB_CDC_EP_BULK_OUT_SIZE <= sizeof(receive_buf)) {
+    for (;;) {
+        if (rpos + USB_CDC_EP_BULK_OUT_SIZE > sizeof(receive_buf)) {
+            usb_notify_bulk_out();
+            break;
+        }
         int_fast8_t ret = usb_read_bulk_out(
             &receive_buf[rpos], USB_CDC_EP_BULK_OUT_SIZE);
-        if (ret > 0) (*diag_slot_read_data())++;
-        else         (*diag_slot_read_zero())++;
-        if (ret > 0) {
-            rpos += ret;
-            usb_notify_bulk_out();
+        if (ret <= 0) {
+            (*diag_slot_read_zero())++;
+            break;
         }
-    } else {
+        (*diag_slot_read_data())++;
+        rpos += ret;
         usb_notify_bulk_out();
     }
     mcu_demux_pump(receive_buf, rpos);
