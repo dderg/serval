@@ -100,14 +100,22 @@ usb_diag_poll_task(void)
 }
 DECL_TASK(usb_diag_poll_task);
 
+// Number of bulk OUT packets armed per transfer and buffered in the
+// shared Rx fifo.  One-packet arming caps the host->mcu link at one
+// packet per scheduler round (measured 20-127ms delivery backlogs on
+// the H723 -> "Timer too close" late step re-arms); the core NAKs on
+// fifo-full, so multi-packet arming keeps hardware flow control.
+#define RX_PACKET_SLOTS 8
+
 // Setup the USB fifos
 static void
 fifo_configure(void)
 {
-    // Reserve memory for Rx fifo
+    // Reserve memory for Rx fifo: setup + per-packet data words plus a
+    // status word per buffered packet.
     uint32_t sz = ((4 * 1 + 6)
-                   + 4 * ((USB_CDC_EP_BULK_OUT_SIZE / 4) + 1)
-                   + (2 * 1));
+                   + RX_PACKET_SLOTS * ((USB_CDC_EP_BULK_OUT_SIZE / 4) + 1)
+                   + (2 * RX_PACKET_SLOTS));
     OTG->GRXFSIZ = sz;
 
     // Tx fifos
@@ -188,7 +196,8 @@ enable_rx_endpoint(uint32_t ep)
     uint32_t ctl = epo->DOEPCTL;
     if (!(ctl & USB_OTG_DOEPCTL_EPENA) || ctl & USB_OTG_DOEPCTL_NAKSTS) {
         (*diag_slot_enable_rx_rearm())++;
-        epo->DOEPTSIZ = 64 | (1 << USB_OTG_DOEPTSIZ_PKTCNT_Pos);
+        epo->DOEPTSIZ = ((RX_PACKET_SLOTS * USB_CDC_EP_BULK_OUT_SIZE)
+                         | (RX_PACKET_SLOTS << USB_OTG_DOEPTSIZ_PKTCNT_Pos));
         epo->DOEPCTL = ctl | USB_OTG_DOEPCTL_EPENA | USB_OTG_DOEPCTL_CNAK;
     }
 }
@@ -394,7 +403,8 @@ usb_set_configure(void)
 
     // Configure and enable USB_CDC_EP_BULK_OUT
     USB_OTG_OUTEndpointTypeDef *epo = EPOUT(USB_CDC_EP_BULK_OUT);
-    epo->DOEPTSIZ = 64 | (1 << USB_OTG_DOEPTSIZ_PKTCNT_Pos);
+    epo->DOEPTSIZ = ((RX_PACKET_SLOTS * USB_CDC_EP_BULK_OUT_SIZE)
+                     | (RX_PACKET_SLOTS << USB_OTG_DOEPTSIZ_PKTCNT_Pos));
     epo->DOEPCTL = (
         USB_OTG_DOEPCTL_CNAK | USB_OTG_DOEPCTL_USBAEP | USB_OTG_DOEPCTL_EPENA
         | (0x02 << USB_OTG_DOEPCTL_EPTYP_Pos) | USB_OTG_DOEPCTL_SD0PID_SEVNFRM
