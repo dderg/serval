@@ -971,7 +971,14 @@ impl StepcompressEndpoint {
             )));
         }
         let oid = self.oids[motor];
-        let resume_clock = self.step_clock.get(&oid).copied().unwrap_or(0);
+        let resume_clock = self.step_clock.get(&oid).copied().ok_or_else(|| {
+            SendError::Fatal(format!(
+                "stepcompress mcu {} motor {motor} oid {oid}: begin_cut has no step_clock \
+                 cursor — abort_outbound cleared it without a subsequent drain resetting it; \
+                 the host cannot determine where the MCU's stepper timeline is anchored",
+                self.mcu_id
+            ))
+        })?;
         let seq = {
             let next = self
                 .next_barrier_seq
@@ -1050,7 +1057,8 @@ impl StepcompressEndpoint {
                 self.mcu_id, cut.cut_at, cut.expected_count, expected
             )));
         }
-        self.queue_step_volley(cut.resume_clock, tail)?;
+        let (now, _freq) = self.clock_now()?;
+        self.queue_step_volley(now, tail)?;
         self.shim.set_motor_cycles_per_second(motor, cut.epoch_freq);
         self.commanded_base[motor] = self.shim.commanded_position(motor);
         if !cut.held.is_empty() {

@@ -2614,3 +2614,341 @@ fn host_buzz_rejects_a_lane_with_queued_trajectory() {
         .expect_err("queued trajectory must reject a buzz");
     assert!(error.to_string().contains("trajectory remains queued"));
 }
+
+const H7_FREQ: f64 = 520_000_000.0;
+const H7_HALF_WRAP_SECS: f64 = (1u64 << 31) as f64 / H7_FREQ;
+
+struct McuStepper {
+    base: u32,
+    need_reset: bool,
+}
+
+impl McuStepper {
+    fn new() -> Self {
+        Self {
+            base: 0,
+            need_reset: true,
+        }
+    }
+
+    fn reset_clock(&mut self, clock: u32) {
+        self.base = clock;
+        self.need_reset = false;
+    }
+
+    fn halt(&mut self) {
+        self.need_reset = true;
+    }
+
+    fn queue_step(&mut self, interval: u32, count: u16, add: i16) -> Option<u32> {
+        if self.need_reset {
+            return None;
+        }
+        let first = self.base.wrapping_add(interval);
+        let span = queue_step_span(interval, count, add);
+        self.base = self.base.wrapping_add(span as u32);
+        Some(first)
+    }
+}
+
+fn h7_harness(oids: Vec<u32>) -> Harness {
+    let axis = 2usize;
+    let axes: Vec<usize> = vec![axis; oids.len()];
+    let now = Arc::new(AtomicU64::new(0));
+    let now_for_clock = Arc::clone(&now);
+    let clock_calls = Arc::new(AtomicU64::new(0));
+    let clock_calls_for_clock = Arc::clone(&clock_calls);
+    let clock_of: ClockSource = Arc::new(move |_| {
+        clock_calls_for_clock.fetch_add(1, Ordering::Relaxed);
+        Some((now_for_clock.load(Ordering::Relaxed), H7_FREQ))
+    });
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let fail_sends = Arc::new(AtomicBool::new(false));
+    let query_count = Arc::new(AtomicI64::new(0));
+    let auto_query = Arc::new(AtomicBool::new(true));
+    let query_calls = Arc::new(AtomicU64::new(0));
+    let sent_for_egress = Arc::clone(&sent);
+    let barriers = Arc::new(Mutex::new(Vec::new()));
+    let barriers_for_egress = Arc::clone(&barriers);
+    let seeds = Arc::new(Mutex::new(Vec::new()));
+    let seeds_for_egress = Arc::clone(&seeds);
+    let fail_for_egress = Arc::clone(&fail_sends);
+    let bursts = Arc::new(Mutex::new(Vec::new()));
+    let bursts_for_egress = Arc::clone(&bursts);
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let attempts_for_egress = Arc::clone(&attempts);
+    let egress: FrameEgress =
+        Arc::new(move |frames: &[(&'static str, Vec<(String, ArgValue)>)]| {
+            attempts_for_egress.lock_ok().push(
+                frames
+                    .iter()
+                    .map(|(name, args)| format!("{name}{args:?}"))
+                    .collect(),
+            );
+            if fail_for_egress.load(Ordering::Relaxed) {
+                return Err(SendError::Transient("egress down".into()));
+            }
+            bursts_for_egress.lock_ok().push(frames.len());
+            for (name, args) in frames {
+                let arg = |key: &str| -> i64 {
+                    match args.iter().find(|(k, _)| k == key).map(|(_, v)| v) {
+                        Some(ArgValue::Int(v)) => *v,
+                        other => panic!("missing int arg {key}: {other:?}"),
+                    }
+                };
+                if *name == "stepcompress_barrier" {
+                    barriers_for_egress
+                        .lock_ok()
+                        .push((arg("oid") as u32, arg("seq") as u32));
+                    continue;
+                }
+                if *name == "stepcompress_set_position" {
+                    seeds_for_egress
+                        .lock_ok()
+                        .push((arg("oid") as u32, arg("pos")));
+                    continue;
+                }
+                let frame = match *name {
+                    "queue_step" => StepFrame::QueueStep {
+                        oid: arg("oid") as u32,
+                        interval: arg("interval") as u32,
+                        count: arg("count") as u16,
+                        add: arg("add") as i16,
+                    },
+                    "set_next_step_dir" => StepFrame::SetNextStepDir {
+                        oid: arg("oid") as u32,
+                        dir: arg("dir") as u8,
+                    },
+                    "reset_step_clock" => StepFrame::ResetStepClock {
+                        oid: arg("oid") as u32,
+                        clock: arg("clock") as u32,
+                    },
+                    other => panic!("unexpected command {other}"),
+                };
+                sent_for_egress.lock_ok().push(frame);
+            }
+            Ok(())
+        });
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let query_for_endpoint = Arc::clone(&query_count);
+    let calls_for_query = Arc::clone(&query_calls);
+    let motors: Vec<MotorConfig> = oids
+        .iter()
+        .map(|&oid| MotorConfig {
+            oid,
+            microstep_distance: MICROSTEP,
+            invert_dir: false,
+            cycles_per_second: H7_FREQ,
+            min_rearm_cycles: 0,
+            encoder: StepEncoder::Classic {
+                max_error_ticks: step_shim::compress::DEFAULT_MAX_ERROR_TICKS,
+            },
+        })
+        .collect();
+    let mut endpoint = StepcompressEndpoint::new(
+        MCU_ID,
+        StepShim::new(motors, SHIM_RING_DEPTH),
+        axes,
+        oids,
+        egress,
+        tx,
+        clock_of,
+        1024,
+    );
+    endpoint.set_step_count_query(Arc::new(move |_| {
+        calls_for_query.fetch_add(1, Ordering::Relaxed);
+        Ok(query_for_endpoint.load(Ordering::Relaxed))
+    }));
+    endpoint.barrier_ack_deadline_secs = TELEPORTING_CLOCK_ACK_DEADLINE_SECONDS;
+    Harness {
+        endpoint,
+        now,
+        sent,
+        barriers,
+        seeds,
+        heartbeats: rx,
+        bursts,
+        attempts,
+        fail_sends,
+        query_calls,
+        query_count,
+        auto_query,
+        clock_calls,
+    }
+}
+
+fn h7_span(
+    start_clock: u64,
+    from_mm: f64,
+    to_mm: f64,
+    secs: f64,
+) -> ClockedMotorSpan {
+    span_on(start_clock, from_mm, to_mm, secs, H7_FREQ, 0)
+}
+
+fn h7_ramp(start_clock: u64, count: usize, start_mm: f64, direction: f64) -> Vec<ClockedMotorSpan> {
+    epoch_ramp_from(start_clock, count, H7_FREQ, start_mm, direction)
+}
+
+fn verify_mcu_agreement(
+    frames: &[StepFrame],
+    host_step_clock: &HashMap<u32, u64>,
+    mcu: &mut HashMap<u32, McuStepper>,
+    _mcu_now_u32: u32,
+) -> Result<(), String> {
+    for (idx, frame) in frames.iter().enumerate() {
+        match *frame {
+            StepFrame::ResetStepClock { oid, clock } => {
+                let stepper = mcu.entry(oid).or_insert_with(McuStepper::new);
+                stepper.reset_clock(clock);
+            }
+            StepFrame::SetNextStepDir { .. } => {}
+            StepFrame::QueueStep {
+                oid,
+                interval,
+                count,
+                add,
+            } => {
+                let stepper = mcu.entry(oid).or_insert_with(McuStepper::new);
+                if stepper.need_reset {
+                    return Err(format!(
+                        "oid {oid} frame {idx}: queue_step arrived while mcu stepper \
+                         still needs reset — reset_step_clock was either not sent or \
+                         sorted behind this frame due to a stale start_clock"
+                    ));
+                }
+                stepper.queue_step(interval, count, add);
+            }
+            StepFrame::QueueStepHp { .. } => {}
+        }
+    }
+    for (&oid, stepper) in mcu.iter() {
+        if stepper.need_reset {
+            continue;
+        }
+        let host_cursor = host_step_clock.get(&oid).copied().unwrap_or(0);
+        if host_cursor as u32 != stepper.base {
+            return Err(format!(
+                "oid {oid}: host/mcu base divergence: host step_clock low32={} \
+                 mcu base={}, host_64={host_cursor}, delta={}",
+                host_cursor as u32,
+                stepper.base,
+                (host_cursor as u32 as i64) - (stepper.base as i64)
+            ));
+        }
+    }
+    Ok(())
+}
+/// Drives a Z_TILT_ADJUST–shaped sequence through the endpoint at H7 clock
+/// frequency (520 MHz, 32-bit half-wrap 4.13 s).  The crux: an outstanding
+/// `begin_cut` holds `resume_clock = step_clock[oid]` captured seconds before
+/// `complete_cut` runs.  When the gap exceeds the 32-bit half-wrap,
+/// `complete_cut → queue_step_volley(resume_clock, tail)` hands `frame_clocks`
+/// a reference so stale that `expand_clock32` picks the wrong 2³²-multiple,
+/// mis-sorting the new epoch's `ResetStepClock` behind its own `QueueStep`
+/// frames in the deadline-ordered backlog.
+#[test]
+fn repeated_probe_trips_with_h7_half_wrap_idle_gaps() {
+    let oids = vec![5u32, 6, 7];
+    let mut h = h7_harness(oids.clone());
+    let axis: u8 = 2;
+
+    let mut mcu: HashMap<u32, McuStepper> = HashMap::new();
+    for &oid in &oids {
+        mcu.insert(oid, McuStepper::new());
+    }
+
+    let idle_gap = (H7_FREQ * 6.3) as u64;
+    let view_stride = (0.002 * H7_FREQ) as u64;
+    let tick_step = (H7_FREQ * 0.010) as u64;
+
+    let mut position_mm = 0.0f64;
+    let mut now: u64 = (H7_FREQ * 2.0) as u64;
+    h.now.store(now, Ordering::Relaxed);
+
+    let gradual_ticks = |h: &mut Harness, now: &mut u64, count: usize| {
+        for _ in 0..count {
+            *now += tick_step;
+            h.now.store(*now, Ordering::Relaxed);
+            h.endpoint.tick().unwrap();
+            h.ack_sent_barriers_result().unwrap();
+        }
+    };
+
+    let verify = |h: &mut Harness,
+                  mcu: &mut HashMap<u32, McuStepper>,
+                  now: u64,
+                  label: &str| {
+        let frames: Vec<StepFrame> = std::mem::take(&mut h.sent.lock_ok());
+        verify_mcu_agreement(&frames, &h.endpoint.step_clock, mcu, now as u32)
+            .unwrap_or_else(|e| panic!("{label}: {e}"));
+    };
+
+    for probe in 0..3usize {
+        // ---- Motion volley, paced far enough that the reanchor cut
+        //      lands inside the already-sent region → begin_cut.
+        let volley_start = now + (H7_FREQ * 0.01) as u64;
+        h.endpoint.mark_reanchor(axis, volley_start, Some(H7_FREQ));
+        let volley_views = 50;
+        let volley = h7_ramp(volley_start, volley_views, position_mm, 1.0);
+        let volley_end_mm = span_end_mm(volley.last().unwrap());
+        h.endpoint
+            .send_frames(MCU_ID, &[frame_for_axis(axis, volley)])
+            .unwrap_or_else(|e| panic!("probe {probe} volley: {e}"));
+
+        gradual_ticks(&mut h, &mut now, 15);
+
+        // ---- Reanchor inside the sent region → begin_cut fires.
+        let cut_at = volley_start + view_stride * 16;
+        assert!(
+            h.endpoint
+                .last_sent_boundary
+                .get(&oids[0])
+                .is_some_and(|&b| cut_at <= b),
+            "probe {probe}: cut_at must be inside the sent region"
+        );
+
+        h.endpoint.mark_reanchor(axis, cut_at, Some(H7_FREQ));
+
+        let cut_frac = 16.0 / volley_views as f64;
+        let pos_at_cut = position_mm + (volley_end_mm - position_mm) * cut_frac;
+        let resume = h7_ramp(cut_at, 12, pos_at_cut, -1.0);
+        let resume_end_mm = span_end_mm(resume.last().unwrap());
+        h.endpoint
+            .send_frames(MCU_ID, &[frame_for_axis(axis, resume)])
+            .unwrap_or_else(|e| panic!("probe {probe} resume send: {e}"));
+
+        assert!(
+            !h.endpoint.pending_cuts.is_empty(),
+            "probe {probe}: begin_cut must have fired"
+        );
+
+        // ---- KEY: let >half-wrap of time elapse while the cut is
+        //      pending, making resume_clock stale.
+        verify(&mut h, &mut mcu, now, &format!("probe {probe} pre-idle"));
+
+        now += idle_gap;
+        h.now.store(now, Ordering::Relaxed);
+
+        // Complete the cut. complete_cut uses cut.resume_clock as the
+        // `now` for queue_step_volley, but the clock has wrapped.
+        let cuts: Vec<usize> = h.endpoint.pending_cuts.keys().copied().collect();
+        for &motor in &cuts {
+            let expected = h.endpoint.pending_cuts[&motor].expected_count;
+            h.auto_query.store(false, Ordering::Relaxed);
+            h.query_count.store(expected, Ordering::Relaxed);
+        }
+        h.ack_sent_barriers_result()
+            .unwrap_or_else(|e| panic!("probe {probe} cut ack: {e}"));
+
+        gradual_ticks(&mut h, &mut now, 30);
+        verify(
+            &mut h,
+            &mut mcu,
+            now,
+            &format!("probe {probe} post-cut"),
+        );
+
+        position_mm = resume_end_mm;
+    }
+}
