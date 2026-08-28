@@ -493,7 +493,9 @@ impl StepShim {
     pub fn drain(&mut self, up_to_clock: u64) -> Result<Vec<StepFrame>, ShimError> {
         let mut frames = Vec::new();
         for motor in 0..self.motors.len() {
+            let motor_started = std::time::Instant::now();
             let state = &mut self.motors[motor];
+            let queued_before = state.queue.len();
             state.cursor.advance(
                 motor,
                 &state.cfg,
@@ -502,6 +504,17 @@ impl StepShim {
                 &mut state.pending,
             )?;
             state.emit(motor, &mut frames)?;
+            let elapsed = motor_started.elapsed();
+            if elapsed > std::time::Duration::from_millis(4) {
+                tracing::warn!(
+                    subsystem = "pump",
+                    event = "shim_motor_drain_slow",
+                    motor,
+                    elapsed_us = elapsed.as_micros() as u64,
+                    queued_before,
+                    "one motor's root search dominated the shim drain"
+                );
+            }
         }
         Ok(frames)
     }
