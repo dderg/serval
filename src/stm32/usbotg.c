@@ -104,12 +104,9 @@ DECL_TASK(usb_diag_poll_task);
 static void
 fifo_configure(void)
 {
-    // Reserve memory for Rx fifo: four armed bulk packets (matching the
-    // DOEPTSIZ PKTCNT arming) plus a status word per packet and the
-    // global/setup entries.
+    // Reserve memory for Rx fifo
     uint32_t sz = ((4 * 1 + 6)
                    + 4 * ((USB_CDC_EP_BULK_OUT_SIZE / 4) + 1)
-                   + 8
                    + (2 * 1));
     OTG->GRXFSIZ = sz;
 
@@ -191,8 +188,7 @@ enable_rx_endpoint(uint32_t ep)
     uint32_t ctl = epo->DOEPCTL;
     if (!(ctl & USB_OTG_DOEPCTL_EPENA) || ctl & USB_OTG_DOEPCTL_NAKSTS) {
         (*diag_slot_enable_rx_rearm())++;
-        epo->DOEPTSIZ = ((4 * USB_CDC_EP_BULK_OUT_SIZE)
-                         | (4 << USB_OTG_DOEPTSIZ_PKTCNT_Pos));
+        epo->DOEPTSIZ = 64 | (1 << USB_OTG_DOEPTSIZ_PKTCNT_Pos);
         epo->DOEPCTL = ctl | USB_OTG_DOEPCTL_EPENA | USB_OTG_DOEPCTL_CNAK;
     }
 }
@@ -398,8 +394,7 @@ usb_set_configure(void)
 
     // Configure and enable USB_CDC_EP_BULK_OUT
     USB_OTG_OUTEndpointTypeDef *epo = EPOUT(USB_CDC_EP_BULK_OUT);
-    epo->DOEPTSIZ = ((4 * USB_CDC_EP_BULK_OUT_SIZE)
-                     | (4 << USB_OTG_DOEPTSIZ_PKTCNT_Pos));
+    epo->DOEPTSIZ = 64 | (1 << USB_OTG_DOEPTSIZ_PKTCNT_Pos);
     epo->DOEPCTL = (
         USB_OTG_DOEPCTL_CNAK | USB_OTG_DOEPCTL_USBAEP | USB_OTG_DOEPCTL_EPENA
         | (0x02 << USB_OTG_DOEPCTL_EPTYP_Pos) | USB_OTG_DOEPCTL_SD0PID_SEVNFRM
