@@ -319,6 +319,7 @@ enqueue_move(struct stepper *s, struct stepper_move *m, uint8_t oid)
         // Discarding is only correct for the steps already on the wire when an
         // endstop trip halted the lane: the host cannot recall those. Past its
         // reconcile it owes a reset ahead of every further step.
+        s->need_reset_discards++;
         move_free(m);
         if (flags & SF_RESET_FENCED)
             shutdown("queue_step for a stepper awaiting reset_step_clock");
@@ -327,9 +328,11 @@ enqueue_move(struct stepper *s, struct stepper_move *m, uint8_t oid)
         move_queue_push(&m->node, &s->mq);
         stepper_load_next(s);
         extern void diag_note_step_rearm(int32_t margin, uint32_t oid,
-                                         uint32_t waketime);
+                                         uint32_t waketime, uint32_t last_reset,
+                                         uint32_t discards);
         int32_t margin = (int32_t)(s->time.waketime - timer_read_time());
-        diag_note_step_rearm(margin, oid, s->time.waketime);
+        diag_note_step_rearm(margin, oid, s->time.waketime,
+                             s->last_reset_clock, s->need_reset_discards);
         step_clock_check_horizon(margin, s->time.waketime, oid);
         if (unlikely(margin < 0))
             event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_MOTION,
@@ -497,6 +500,7 @@ command_reset_step_clock(uint32_t *args)
     if (s->count)
         shutdown("Can't reset time when stepper active");
     s->next_step_time = s->time.waketime = waketime;
+    s->last_reset_clock = waketime;
     s->flags &= ~(SF_NEED_RESET | SF_RESET_FENCED);
     irq_enable();
 }

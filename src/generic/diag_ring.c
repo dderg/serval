@@ -184,13 +184,16 @@ diag_note_shutdown_reset(void)
 #define REARM_ARMED_US 1000
 __attribute__((used, externally_visible))
 void
-diag_note_step_rearm(int32_t margin, uint32_t oid, uint32_t waketime)
+diag_note_step_rearm(int32_t margin, uint32_t oid, uint32_t waketime,
+                     uint32_t last_reset, uint32_t discards)
 {
     live_snap.rearm_count++;
     if (margin < (int32_t)live_snap.rearm_min_margin) {
         live_snap.rearm_min_margin = (uint32_t)margin;
         live_snap.rearm_min_oid = oid;
         live_snap.rearm_min_waketime = waketime;
+        live_snap.rearm_min_last_reset = last_reset;
+        live_snap.rearm_min_discards = discards;
     }
     if (margin < (int32_t)timer_from_us(REARM_FLOOR_US)) {
         live_snap.rearm_below_floor++;

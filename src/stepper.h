@@ -65,6 +65,8 @@ struct stepper {
     uint32_t step_pulse_ticks;
     uint8_t step_both_edge, step_idle_level;
     struct trsync_signal stop_signal;
+    uint32_t last_reset_clock;
+    uint16_t need_reset_discards;
 };
 
 void command_config_stepper(uint32_t *args);
