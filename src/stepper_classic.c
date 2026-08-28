@@ -326,9 +326,10 @@ enqueue_move(struct stepper *s, struct stepper_move *m, uint8_t oid)
         s->flags = flags;
         move_queue_push(&m->node, &s->mq);
         stepper_load_next(s);
-        extern void diag_note_step_rearm(int32_t margin);
+        extern void diag_note_step_rearm(int32_t margin, uint32_t oid,
+                                         uint32_t waketime);
         int32_t margin = (int32_t)(s->time.waketime - timer_read_time());
-        diag_note_step_rearm(margin);
+        diag_note_step_rearm(margin, oid, s->time.waketime);
         step_clock_check_horizon(margin, s->time.waketime, oid);
         if (unlikely(margin < 0))
             event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_MOTION,

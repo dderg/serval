@@ -171,6 +171,8 @@ fault_handler_report_boot_init(uint32_t now)
     live_snap.ttc_count            = 0;
     live_snap.rearm_count          = 0;
     live_snap.rearm_min_margin     = (uint32_t)INT32_MAX;
+    live_snap.rearm_min_oid        = 0;
+    live_snap.rearm_min_waketime   = 0;
     live_snap.rearm_armed          = 0;
     live_snap.rearm_below_floor    = 0;
     live_snap.worst_timer_func     = 0;
@@ -376,11 +378,14 @@ fault_handler_report_emit(uint32_t now)
            prior_snap.ttc_func,
            prior_snap.ttc_late,
            prior_snap.ttc_count);
-    output("step_rearm count %u min_margin_cyc %i armed %u below_floor %u",
+    output("step_rearm count %u min_margin_cyc %i armed %u below_floor %u"
+           " oid %u waketime %u",
            prior_snap.rearm_count,
            (int32_t)prior_snap.rearm_min_margin,
            prior_snap.rearm_armed,
-           prior_snap.rearm_below_floor);
+           prior_snap.rearm_below_floor,
+           prior_snap.rearm_min_oid,
+           prior_snap.rearm_min_waketime);
     output("sched_timer_worst func %u cyc %u",
            prior_snap.worst_timer_func,
            prior_snap.worst_timer_cyc);

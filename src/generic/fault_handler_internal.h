@@ -60,6 +60,8 @@ struct live_snapshot {
     uint32_t ttc_count;
     uint32_t rearm_count;
     uint32_t rearm_min_margin;
+    uint32_t rearm_min_oid;
+    uint32_t rearm_min_waketime;
     uint32_t rearm_armed;
     uint32_t rearm_below_floor;
     uint32_t worst_timer_func;
