@@ -2616,7 +2616,6 @@ fn host_buzz_rejects_a_lane_with_queued_trajectory() {
 }
 
 const H7_FREQ: f64 = 520_000_000.0;
-const H7_HALF_WRAP_SECS: f64 = (1u64 << 31) as f64 / H7_FREQ;
 
 struct McuStepper {
     base: u32,
@@ -2634,10 +2633,6 @@ impl McuStepper {
     fn reset_clock(&mut self, clock: u32) {
         self.base = clock;
         self.need_reset = false;
-    }
-
-    fn halt(&mut self) {
-        self.need_reset = true;
     }
 
     fn queue_step(&mut self, interval: u32, count: u16, add: i16) -> Option<u32> {
@@ -2777,15 +2772,6 @@ fn h7_harness(oids: Vec<u32>) -> Harness {
     }
 }
 
-fn h7_span(
-    start_clock: u64,
-    from_mm: f64,
-    to_mm: f64,
-    secs: f64,
-) -> ClockedMotorSpan {
-    span_on(start_clock, from_mm, to_mm, secs, H7_FREQ, 0)
-}
-
 fn h7_ramp(start_clock: u64, count: usize, start_mm: f64, direction: f64) -> Vec<ClockedMotorSpan> {
     epoch_ramp_from(start_clock, count, H7_FREQ, start_mm, direction)
 }
@@ -2875,10 +2861,7 @@ fn repeated_probe_trips_with_h7_half_wrap_idle_gaps() {
         }
     };
 
-    let verify = |h: &mut Harness,
-                  mcu: &mut HashMap<u32, McuStepper>,
-                  now: u64,
-                  label: &str| {
+    let verify = |h: &mut Harness, mcu: &mut HashMap<u32, McuStepper>, now: u64, label: &str| {
         let frames: Vec<StepFrame> = std::mem::take(&mut h.sent.lock_ok());
         verify_mcu_agreement(&frames, &h.endpoint.step_clock, mcu, now as u32)
             .unwrap_or_else(|e| panic!("{label}: {e}"));
@@ -2942,12 +2925,7 @@ fn repeated_probe_trips_with_h7_half_wrap_idle_gaps() {
             .unwrap_or_else(|e| panic!("probe {probe} cut ack: {e}"));
 
         gradual_ticks(&mut h, &mut now, 30);
-        verify(
-            &mut h,
-            &mut mcu,
-            now,
-            &format!("probe {probe} post-cut"),
-        );
+        verify(&mut h, &mut mcu, now, &format!("probe {probe} post-cut"));
 
         position_mm = resume_end_mm;
     }
