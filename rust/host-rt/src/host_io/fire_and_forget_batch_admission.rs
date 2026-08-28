@@ -94,6 +94,7 @@ fn a_batch_accepted_past_the_high_water_mark_keeps_every_block_in_order() {
         .send(ReactorCommand::FireAndForgetBatch {
             payloads: burst.clone(),
             reserved_blocks: 0,
+            enqueued_at: std::time::Instant::now(),
         })
         .expect("the reactor is listening");
     h.tick();
