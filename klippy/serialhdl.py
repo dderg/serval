@@ -459,9 +459,11 @@ class EngineCommandChannel:
         try:
             params = self.engine_mcu.call_args(name, args, response)
         except RuntimeError as e:
-            if not self._is_engine_transport_drop(e):
-                raise
-            raise error("serial connection closed")
+            if self._is_engine_transport_drop(e):
+                raise error("serial connection closed")
+            if "is in shutdown state" in str(e):
+                raise error(str(e))
+            raise
         return self._stamp_response_times(params)
 
     def _stamp_response_times(self, params):

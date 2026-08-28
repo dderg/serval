@@ -211,7 +211,7 @@ fn backward_jump_takes_priority_over_underrun() {
 
 #[test]
 fn default_lead_covers_continuous_post_processing_and_matches_planner() {
-    assert_eq!(super::DEFAULT_LEAD_SECS, 0.525);
+    assert_eq!(super::DEFAULT_LEAD_SECS, 0.25);
     assert_eq!(crate::worker::lead_secs(), super::DEFAULT_LEAD_SECS);
 }
 

@@ -27,6 +27,11 @@ pub const SEND_LEAD_SECONDS: f64 = 2.0 * (host_rt::host_io::rtt::MIN_RTO_MS as f
 
 pub const CONSUMED_MARGIN_SECONDS: f64 = 0.010;
 
+/// Sending a motion frame with less execution margin than this is one host
+/// hiccup away from the MCU's "Timer too close" shutdown; worth a warn even
+/// when the send succeeds.
+pub const SEND_MARGIN_WARN_FLOOR_SECS: f64 = 0.050;
+
 /// A barrier the mcu never acks would otherwise park the retirement cohort —
 /// and every drain waiting on it — forever. One transport RTO ceiling past the
 /// send is far beyond any legitimate wait: a barrier only leaves the backlog
@@ -1426,6 +1431,7 @@ impl StepcompressEndpoint {
         let mut sent_barriers: Vec<(BarrierId, u64)> = Vec::new();
         let mut stale: Option<SendError> = None;
         let mut in_flight = self.in_flight.len() as u32;
+        let mut worst_margin_clocks: Option<i64> = None;
         for out in &self.backlog {
             let consumes_slot = matches!(
                 &out.frame,
@@ -1474,6 +1480,12 @@ impl StepcompressEndpoint {
                 )));
                 break;
             }
+            if motion_frame {
+                let margin = out.start_clock as i64 - now as i64;
+                if worst_margin_clocks.is_none_or(|w| margin < w) {
+                    worst_margin_clocks = Some(margin);
+                }
+            }
             burst.push(frame_args(&out.frame));
             let oid = match &out.frame {
                 Outbound::Step(StepFrame::QueueStep { oid, .. })
@@ -1491,6 +1503,22 @@ impl StepcompressEndpoint {
             if consumes_slot {
                 reclaim_clocks.push(out.start_clock);
                 in_flight += 1;
+            }
+        }
+        if let Some(margin) = worst_margin_clocks {
+            let margin_secs = margin as f64 / freq;
+            if margin_secs < SEND_MARGIN_WARN_FLOOR_SECS {
+                tracing::warn!(
+                    subsystem = "pump",
+                    event = "step_send_margin_low",
+                    mcu = self.mcu_id,
+                    margin_us = (margin_secs * 1e6) as i64,
+                    backlog = self.backlog.len() as u64,
+                    in_flight = self.in_flight.len() as u64,
+                    budget = self.budget,
+                    "a motion frame is being sent with almost no execution margin — one \
+                     host hiccup from the mcu's Timer too close shutdown"
+                );
             }
         }
         if !burst.is_empty() {
