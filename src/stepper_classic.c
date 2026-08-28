@@ -465,7 +465,8 @@ stepcompress_barrier_ack_task(void)
             uint32_t seq = m->interval;
             move_free(m);
             irq_enable();
-            sendf("stepcompress_barrier_ack oid=%c barrier_seq=%u", oid, seq);
+            sendf("stepcompress_barrier_ack oid=%c barrier_seq=%u clock=%u"
+                  , oid, seq, timer_read_time());
         }
     }
 }

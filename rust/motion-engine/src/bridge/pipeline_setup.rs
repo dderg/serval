@@ -275,6 +275,7 @@ impl PyMotionEngine {
                     "stepcompress_barrier_ack",
                     "barrier_seq",
                     pump_control,
+                    Some(Arc::clone(&clock_of)),
                 )?;
                 let depth = endpoint.ring_depth();
                 for axis in cfg.pulse_capable_axes() {
@@ -309,6 +310,7 @@ impl PyMotionEngine {
                     runtime::sample_wire::SAMPLE_BARRIER_ACK_NAME,
                     "seq",
                     pump_control,
+                    None,
                 )?;
                 for axis in phase_lanes {
                     ring_depth_table
@@ -405,6 +407,7 @@ impl PyMotionEngine {
         frame: &'static str,
         seq_field: &'static str,
         pump_control: &crossbeam_channel::Sender<crate::pump::PumpMsg>,
+        clock_of: Option<crate::pump::ClockSource>,
     ) -> PyResult<()> {
         let ack_tx = pump_control.clone();
         io.register_frame_interceptor(
@@ -417,6 +420,25 @@ impl PyMotionEngine {
                 let seq = params.try_get_u32(seq_field).unwrap_or_else(|| {
                     panic!("mcu {mcu_id}: {frame} carried no {seq_field} parameter")
                 });
+                if let (Some(clock_of), Some(mcu_clock)) =
+                    (clock_of.as_ref(), params.try_get_u32("clock"))
+                {
+                    if let Some((projected, freq)) = clock_of(mcu_id) {
+                        let skew_ticks = (projected as u32).wrapping_sub(mcu_clock) as i32;
+                        let skew_secs = f64::from(skew_ticks) / freq;
+                        if !(-0.001..=0.020).contains(&skew_secs) {
+                            tracing::warn!(
+                                subsystem = "pump",
+                                event = "clock_projection_skew",
+                                mcu = mcu_id,
+                                skew_us = (skew_secs * 1e6) as i64,
+                                "the host's projected mcu clock disagrees with the clock the \
+                                 mcu stamped on a barrier ack — negative means the projection \
+                                 lags reality and every send margin is thinner than believed"
+                            );
+                        }
+                    }
+                }
                 let _ = ack_tx.send(crate::pump::PumpMsg::StepcompressBarrierAck {
                     mcu_id,
                     oid: oid as u8,
