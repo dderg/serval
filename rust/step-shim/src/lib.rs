@@ -371,6 +371,7 @@ impl MotorState {
 pub struct StepShim {
     motors: Vec<MotorState>,
     queue_depth: u32,
+    drain_rotation: usize,
 }
 
 impl StepShim {
@@ -381,6 +382,7 @@ impl StepShim {
                 .map(|cfg| MotorState::new(cfg, queue_depth))
                 .collect(),
             queue_depth,
+            drain_rotation: 0,
         }
     }
 
@@ -505,7 +507,15 @@ impl StepShim {
         deadline: Option<std::time::Instant>,
     ) -> Result<Vec<StepFrame>, ShimError> {
         let mut frames = Vec::new();
-        for motor in 0..self.motors.len() {
+        let count = self.motors.len();
+        let start = if count == 0 {
+            0
+        } else {
+            self.drain_rotation = (self.drain_rotation + 1) % count;
+            self.drain_rotation
+        };
+        for offset in 0..count {
+            let motor = (start + offset) % count;
             let motor_started = std::time::Instant::now();
             let state = &mut self.motors[motor];
             let queued_before = state.queue.len();

@@ -555,7 +555,53 @@ impl ContinuousAxis {
     }
 
     pub fn position(&self, t: f64) -> Result<f64, ContinuousError> {
-        Ok(self.eval_pva(t)?.position)
+        if !t.is_finite() {
+            return Err(ContinuousError::NonFinite { t });
+        }
+        let result = match self {
+            Self::Analytic { span, axis } => span.eval_axis(*axis, t)?.position,
+            Self::Spline(curve) => {
+                let t = spline_evaluation_time(curve, t)?;
+                nurbs::eval::eval(&curve.as_view(), t)
+            }
+            Self::RelativeSpline {
+                base_position,
+                curve,
+            } => {
+                let t = spline_evaluation_time(curve, t)?;
+                base_position + nurbs::eval::eval(&curve.as_view(), t)
+            }
+            Self::PiecewiseRelativeSpline(pieces) => {
+                let piece = owning_piece(pieces, t)?;
+                let t = spline_evaluation_time(&piece.curve, t)?;
+                piece.base_position + nurbs::eval::eval(&piece.curve.as_view(), t)
+            }
+            Self::Hold {
+                position,
+                t_start,
+                t_end,
+            } => {
+                checked_clamped_time(t, *t_start, *t_end)?;
+                *position
+            }
+            Self::Nudge(profile) => {
+                let t = checked_clamped_time(t, profile.t_start(), profile.t_end())?;
+                profile.eval(t).position
+            }
+            Self::Buzz {
+                base_position,
+                sign,
+                profile,
+            } => {
+                let t = checked_clamped_time(t, profile.t_start(), profile.t_end())?;
+                base_position + sign * profile.eval(t).position
+            }
+        };
+        if result.is_finite() {
+            Ok(result)
+        } else {
+            Err(ContinuousError::NonFinite { t })
+        }
     }
 
     pub fn pva_bounds(&self, t0: f64, t1: f64) -> Result<PvaBounds, ContinuousError> {
@@ -744,7 +790,22 @@ impl MotorSpan {
     }
 
     pub fn position(&self, t: f64) -> Result<f64, ContinuousError> {
-        Ok(self.eval_pva(t)?.position)
+        let source_axis = self.first_source_axis();
+        if !t.is_finite() {
+            return Err(ContinuousError::NonFiniteEvaluation { source_axis, t });
+        }
+        let t = checked_clamped_time(t, self.t_start, self.t_end)?;
+        let mut result = 0.0;
+        for group in self.groups.iter() {
+            result += group
+                .eval_position(t)
+                .map_err(|(error, source_axis)| with_source_axis(error, source_axis, t))?;
+        }
+        if result.is_finite() {
+            Ok(result)
+        } else {
+            Err(ContinuousError::NonFiniteEvaluation { source_axis, t })
+        }
     }
 
     pub fn pva_bounds(&self, t0: f64, t1: f64) -> Result<PvaBounds, ContinuousError> {
@@ -807,6 +868,34 @@ impl MotorGroup {
                 .axis
                 .eval_pva(t)
                 .map(|value| scale_pva(value, term.scale))
+                .map_err(|error| (error, term.source_axis)),
+        }
+    }
+
+    fn eval_position(&self, t: f64) -> Result<f64, (ContinuousError, usize)> {
+        match self {
+            Self::Analytic { span, terms } => {
+                analytic_group_pva(span, terms, t).map(|value| value.position)
+            }
+            Self::Spline {
+                curve,
+                summed_scale,
+            } => {
+                let t = spline_evaluation_time(curve, t).map_err(|error| (error, 0))?;
+                Ok(summed_scale * nurbs::eval::eval(&curve.as_view(), t))
+            }
+            Self::RelativeSpline {
+                curve,
+                base_position,
+                summed_scale,
+            } => {
+                let t = spline_evaluation_time(curve, t).map_err(|error| (error, 0))?;
+                Ok(summed_scale * (base_position + nurbs::eval::eval(&curve.as_view(), t)))
+            }
+            Self::Independent(term) => term
+                .axis
+                .position(t)
+                .map(|value| value * term.scale)
                 .map_err(|error| (error, term.source_axis)),
         }
     }
@@ -1096,6 +1185,10 @@ impl ClockedMotorSpan {
 
     pub fn eval_at_clock(&self, clock: u64) -> Result<Pva, ContinuousError> {
         self.signal.eval_pva(self.stream_time_at_clock(clock)?)
+    }
+
+    pub fn position_at_clock(&self, clock: u64) -> Result<f64, ContinuousError> {
+        self.signal.position(self.stream_time_at_clock(clock)?)
     }
 
     pub fn split_max_duration(&self) -> Result<Vec<Self>, ContinuousError> {

@@ -182,7 +182,7 @@ impl StepRootCursor {
         } else {
             let signal_id = std::sync::Arc::as_ptr(&view.signal) as usize;
             if self.overlay_signal_id != Some(signal_id) {
-                let position = self.eval(motor, view, signal_start)?.position;
+                let position = self.position_at(motor, view, signal_start)?;
                 self.overlay = Some(Lattice {
                     origin_mm: position,
                     step_count: 0,
@@ -192,7 +192,7 @@ impl StepRootCursor {
         }
         if self.origin_clock.is_none() {
             if !self.positioned {
-                let position = self.eval(motor, view, begin)?.position;
+                let position = self.position_at(motor, view, begin)?;
                 self.lane.origin_mm = position - self.lane.step_count as f64 * self.microstep_mm;
                 self.positioned = true;
             }
@@ -261,7 +261,7 @@ impl StepRootCursor {
         slope: Slope,
         out: &mut Vec<StepRoot>,
     ) -> Result<(), ShimError> {
-        let run_end = self.eval(motor, view, hi)?.position;
+        let run_end = self.position_at(motor, view, hi)?;
         let mut search_from = lo;
         let mut roots_since_check = 0_u32;
         loop {
@@ -298,11 +298,12 @@ impl StepRootCursor {
         slope: Slope,
     ) -> Result<u64, ShimError> {
         let mut low = lo;
-        let mut low_pva = self.eval(motor, view, low)?;
-        if slope.reached(low_pva.position, level) {
+        let mut low_position = self.position_at(motor, view, low)?;
+        if slope.reached(low_position, level) {
             return Ok(low);
         }
         let mut high = hi;
+        let mut high_position = self.position_at(motor, view, high)?;
         let mut iteration = 0_u32;
         while high - low > 1 {
             let bisection = low + (high - low) / 2;
@@ -311,14 +312,15 @@ impl StepRootCursor {
             let candidate = if safeguarded {
                 bisection
             } else {
-                newton_candidate(low, high, low_pva, level, view.clock_freq_hz).unwrap_or(bisection)
+                secant_candidate(low, high, low_position, high_position, level).unwrap_or(bisection)
             };
-            let pva = self.eval(motor, view, candidate)?;
-            if slope.reached(pva.position, level) {
+            let position = self.position_at(motor, view, candidate)?;
+            if slope.reached(position, level) {
                 high = candidate;
+                high_position = position;
             } else {
                 low = candidate;
-                low_pva = pva;
+                low_position = position;
             }
             iteration = iteration.wrapping_add(1);
         }
@@ -371,8 +373,7 @@ impl StepRootCursor {
             return Ok(());
         }
         if to - from <= 1 {
-            let rise =
-                self.eval(motor, view, to)?.position - self.eval(motor, view, from)?.position;
+            let rise = self.position_at(motor, view, to)? - self.position_at(motor, view, from)?;
             let slope = if rise >= 0.0 {
                 Slope::Rising
             } else {
@@ -402,8 +403,8 @@ impl StepRootCursor {
             .signal
             .pva_bounds(t_from, t_to)
             .map_err(|error| ShimError::SpanEval { motor, error })?;
-        let from_position = self.eval(motor, view, from)?.position;
-        let to_position = self.eval(motor, view, to)?.position;
+        let from_position = self.position_at(motor, view, from)?;
+        let to_position = self.position_at(motor, view, to)?;
         let duration = (to - from) as f64 / view.clock_freq_hz;
         let scale = from_position
             .abs()
@@ -483,6 +484,17 @@ impl StepRootCursor {
             .map_err(|error| ShimError::SpanEval { motor, error })
     }
 
+    fn position_at(
+        &self,
+        motor: usize,
+        view: &ClockedMotorSpan,
+        clock: u64,
+    ) -> Result<f64, ShimError> {
+        EVAL_COUNT.with(|c| c.set(c.get() + 1));
+        view.position_at_clock(clock)
+            .map_err(|error| ShimError::SpanEval { motor, error })
+    }
+
     fn stream_time(
         &self,
         motor: usize,
@@ -494,14 +506,15 @@ impl StepRootCursor {
     }
 }
 
-fn newton_candidate(
+fn secant_candidate(
     low: u64,
     high: u64,
-    low_pva: Pva,
+    low_position: f64,
+    high_position: f64,
     level: f64,
-    clock_freq_hz: f64,
 ) -> Option<u64> {
-    let clocks = (level - low_pva.position) / low_pva.velocity * clock_freq_hz;
+    let rise = high_position - low_position;
+    let clocks = (level - low_position) / rise * (high - low) as f64;
     if !clocks.is_finite() || clocks <= 0.0 {
         return None;
     }
