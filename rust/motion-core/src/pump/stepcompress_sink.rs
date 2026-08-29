@@ -230,6 +230,7 @@ pub fn build_endpoint(
         budget,
     );
     endpoint.set_step_count_query(query);
+    endpoint.set_drain_pass_budget(DRAIN_PASS_BUDGET);
     Ok(endpoint)
 }
 
@@ -357,6 +358,7 @@ pub struct StepcompressEndpoint {
     fatal: Option<String>,
     buzz: Option<StepBuzz>,
     commanded_base: Vec<f64>,
+    drain_pass_budget: Option<std::time::Duration>,
 }
 
 fn shim_error_to_send_error(mcu_id: u32, error: ShimError) -> SendError {
@@ -498,7 +500,15 @@ impl StepcompressEndpoint {
             fatal: None,
             buzz: None,
             commanded_base,
+            drain_pass_budget: None,
         }
+    }
+
+    /// Cap the wall time one send pass may spend in the step root search.
+    /// Production sets [`DRAIN_PASS_BUDGET`]; tests leave the search
+    /// unbounded so mock-clock scenarios drain deterministically.
+    pub fn set_drain_pass_budget(&mut self, budget: std::time::Duration) {
+        self.drain_pass_budget = Some(budget);
     }
 
     fn set_step_count_query(&mut self, query: StepCountQuery) {
@@ -1420,10 +1430,12 @@ impl StepcompressEndpoint {
         publish: bool,
     ) -> Result<(), SendError> {
         let drain_started = std::time::Instant::now();
-        let deadline = std::time::Instant::now() + DRAIN_PASS_BUDGET;
+        let deadline = self
+            .drain_pass_budget
+            .map(|budget| std::time::Instant::now() + budget);
         let frames = self
             .shim
-            .drain_budgeted(drain_to, Some(deadline))
+            .drain_budgeted(drain_to, deadline)
             .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
         let drain_elapsed = drain_started.elapsed();
         if drain_elapsed > std::time::Duration::from_millis(5) {
@@ -1526,15 +1538,19 @@ impl StepcompressEndpoint {
                     Outbound::Step(StepFrame::QueueStepHp { .. }) => "queue_step_hp",
                     Outbound::Barrier(_) => unreachable!("barriers are exempt above"),
                 };
+                let oid = out.frame.oid();
+                let sent_horizon = self.last_sent_boundary.get(&oid).copied();
                 stale = Some(SendError::Fatal(format!(
-                    "stepcompress mcu {}: {kind} at clock {} is {late_us:.0} us behind the \
-                     projected mcu clock {now} — a deficit of {late_us:.0} us past the \
-                     {guard_secs} s floor margin. The mcu shuts down on any \
-                     late stepper re-arm (\"Stepper too far in past\"/\"Rescheduled timer in \
-                     the past\"). {SEND_LEAD_SECONDS} s of lead was not delivered: {} frames \
-                     backlogged, {in_flight}/{} move slots in flight",
+                    "stepcompress mcu {}: {kind} oid {oid} at clock {} is {late_us:.0} us \
+                     behind the projected mcu clock {now} — a deficit of {late_us:.0} us past \
+                     the {guard_secs} s floor margin (sent horizon {sent_horizon:?}, queued at \
+                     clock {}). The mcu shuts down on any late stepper re-arm (\"Stepper too \
+                     far in past\"/\"Rescheduled timer in the past\"). {SEND_LEAD_SECONDS} s \
+                     of lead was not delivered: {} frames backlogged, {in_flight}/{} move \
+                     slots in flight",
                     self.mcu_id,
                     out.start_clock,
+                    out.queued_clock,
                     self.backlog.len(),
                     self.budget
                 )));
