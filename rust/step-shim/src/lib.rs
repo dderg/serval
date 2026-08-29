@@ -532,6 +532,9 @@ impl StepShim {
             if elapsed > std::time::Duration::from_millis(4) {
                 let evals = crate::root_cursor::EVAL_COUNT.with(std::cell::Cell::take);
                 let bounds = crate::root_cursor::BOUNDS_COUNT.with(std::cell::Cell::take);
+                let windows = crate::root_cursor::WINDOW_COUNT.with(std::cell::Cell::take);
+                let cert_none = crate::root_cursor::CERT_NONE_COUNT.with(std::cell::Cell::take);
+                let pruned = crate::root_cursor::PRUNE_COUNT.with(std::cell::Cell::take);
                 tracing::warn!(
                     subsystem = "pump",
                     event = "shim_motor_drain_slow",
@@ -540,11 +543,17 @@ impl StepShim {
                     queued_before,
                     evals,
                     bounds,
+                    windows,
+                    cert_none,
+                    pruned,
                     "one motor's root search dominated the shim drain"
                 );
             } else {
                 crate::root_cursor::EVAL_COUNT.with(std::cell::Cell::take);
                 crate::root_cursor::BOUNDS_COUNT.with(std::cell::Cell::take);
+                crate::root_cursor::WINDOW_COUNT.with(std::cell::Cell::take);
+                crate::root_cursor::CERT_NONE_COUNT.with(std::cell::Cell::take);
+                crate::root_cursor::PRUNE_COUNT.with(std::cell::Cell::take);
             }
         }
         Ok(frames)

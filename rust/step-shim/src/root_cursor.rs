@@ -60,6 +60,9 @@ const BISECTION_SAFEGUARD_PERIOD: u32 = 3;
 thread_local! {
     pub static EVAL_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub static BOUNDS_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub static WINDOW_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub static CERT_NONE_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub static PRUNE_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[derive(Debug)]
@@ -247,6 +250,7 @@ impl StepRootCursor {
         boundaries.extend([begin, last_clock]);
         boundaries.sort_unstable();
         boundaries.dedup();
+        WINDOW_COUNT.with(|c| c.set(c.get() + boundaries.len() as u64 - 1));
         let mut index = 0;
         while index + 1 < boundaries.len() {
             let from = boundaries[index];
@@ -425,7 +429,9 @@ impl StepRootCursor {
         if let Some(slope) = self.certified_slope(motor, view, from, to)? {
             return self.emit_run(motor, cfg, view, from, to, slope, out);
         }
+        CERT_NONE_COUNT.with(|c| c.set(c.get() + 1));
         if !self.interval_can_reach_next_lattice(motor, view, from, to)? {
+            PRUNE_COUNT.with(|c| c.set(c.get() + 1));
             return Ok(());
         }
         if to - from <= 1 {
