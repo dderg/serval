@@ -1074,12 +1074,64 @@ impl SpeedZeroSliver {
     }
 }
 
+struct LeaderPieces {
+    base: f64,
+    pieces: Vec<BezierPiece>,
+}
+
+impl LeaderPieces {
+    fn of(axis: &ContinuousAxis) -> Option<Self> {
+        match axis {
+            ContinuousAxis::Spline(curve) => Some(Self {
+                base: 0.0,
+                pieces: extract_bezier_pieces(curve),
+            }),
+            ContinuousAxis::RelativeSpline {
+                base_position,
+                curve,
+            } => Some(Self {
+                base: *base_position,
+                pieces: extract_bezier_pieces(curve),
+            }),
+            ContinuousAxis::PiecewiseRelativeSpline(relative_pieces) => {
+                let mut pieces = Vec::new();
+                for relative in relative_pieces.iter() {
+                    for mut piece in extract_bezier_pieces(&relative.curve) {
+                        piece.coeffs[0] += relative.base_position;
+                        pieces.push(piece);
+                    }
+                }
+                let contiguous = pieces
+                    .windows(2)
+                    .all(|pair| pair[0].u_end == pair[1].u_start);
+                contiguous.then_some(Self { base: 0.0, pieces })
+            }
+            _ => None,
+        }
+    }
+
+    fn pva(&self, t: f64) -> Option<(f64, f64, f64)> {
+        let index = self
+            .pieces
+            .partition_point(|piece| piece.u_end < t)
+            .min(self.pieces.len().saturating_sub(1));
+        let piece = self.pieces.get(index)?;
+        let slack = 1e-9 * (piece.u_end - piece.u_start).max(1.0);
+        if t < piece.u_start - slack || t > piece.u_end + slack {
+            return None;
+        }
+        let (p, v, a) = polynomial_pva(&piece.coeffs, t - piece.u_start);
+        Some((self.base + p, v, a))
+    }
+}
+
 pub(crate) struct FollowerSignal<'a> {
     state: &'a FollowerState,
     e_start: f64,
     s_start: f64,
     e_spans_start: f64,
     shaped_axes: Vec<&'a ContinuousAxis>,
+    leader_pieces: Vec<Option<LeaderPieces>>,
     raw_delta: Option<(&'a ContinuousAxis, f64)>,
     grid: Vec<f64>,
     cumulative: Vec<f64>,
@@ -1099,7 +1151,12 @@ impl<'a> FollowerSignal<'a> {
         e_start: f64,
     ) -> Self {
         let (t0, t1) = projection_support(raw, shaped, axis, leaders);
-        let shaped_axes = leaders.iter().map(|&leader| &shaped.axes[leader]).collect();
+        let shaped_axes: Vec<&'a ContinuousAxis> =
+            leaders.iter().map(|&leader| &shaped.axes[leader]).collect();
+        let leader_pieces = shaped_axes
+            .iter()
+            .map(|axis| LeaderPieces::of(axis))
+            .collect();
         let raw_delta =
             (!raw.spatial_path).then(|| (&raw.axes[axis], axis_pva(&raw.axes[axis], t0).0));
         let mut grid = vec![t0, t1];
@@ -1117,6 +1174,7 @@ impl<'a> FollowerSignal<'a> {
             s_start: state.aligned_span_start(state.s_shaped),
             e_spans_start: state.spans_e(state.aligned_span_start(state.s_shaped)),
             shaped_axes,
+            leader_pieces,
             raw_delta,
             grid,
             cumulative: Vec::new(),
@@ -1140,11 +1198,19 @@ impl<'a> FollowerSignal<'a> {
         sig
     }
 
+    fn leader_pva(&self, index: usize, t: f64) -> (f64, f64, f64) {
+        if let Some(Some(pieces)) = self.leader_pieces.get(index) {
+            if let Some(value) = pieces.pva(t) {
+                return value;
+            }
+        }
+        axis_pva(self.shaped_axes[index], t)
+    }
+
     fn raw_shaped_speed(&self, t: f64) -> f64 {
-        self.shaped_axes
-            .iter()
-            .map(|axis| {
-                let velocity = axis_pva(axis, t).1;
+        (0..self.shaped_axes.len())
+            .map(|index| {
+                let velocity = self.leader_pva(index, t).1;
                 velocity * velocity
             })
             .sum::<f64>()
@@ -1155,10 +1221,9 @@ impl<'a> FollowerSignal<'a> {
         if speed == 0.0 {
             return 0.0;
         }
-        self.shaped_axes
-            .iter()
-            .map(|axis| {
-                let (_, velocity, acceleration) = axis_pva(axis, t);
+        (0..self.shaped_axes.len())
+            .map(|index| {
+                let (_, velocity, acceleration) = self.leader_pva(index, t);
                 velocity * acceleration
             })
             .sum::<f64>()
@@ -1166,10 +1231,9 @@ impl<'a> FollowerSignal<'a> {
     }
 
     fn raw_shaped_accel_norm(&self, t: f64) -> f64 {
-        self.shaped_axes
-            .iter()
-            .map(|axis| {
-                let acceleration = axis_pva(axis, t).2;
+        (0..self.shaped_axes.len())
+            .map(|index| {
+                let acceleration = self.leader_pva(index, t).2;
                 acceleration * acceleration
             })
             .sum::<f64>()
@@ -1298,7 +1362,8 @@ impl<'a> FollowerSignal<'a> {
     fn construction_breakpoints(&self, raw_axis: &ContinuousAxis) -> FollowerBreakpoints {
         let raw_breaks = axis_breakpoints(raw_axis);
         let mut breaks = raw_breaks.clone();
-        breaks.extend_from_slice(&self.grid);
+        breaks.push(*self.grid.first().expect("follower grid is seeded"));
+        breaks.push(*self.grid.last().expect("follower grid is seeded"));
         let s_end = self.s_end();
         let support_start = *self.grid.first().expect("follower grid is seeded");
         let support_end = *self.grid.last().expect("follower grid is seeded");

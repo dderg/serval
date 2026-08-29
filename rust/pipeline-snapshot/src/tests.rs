@@ -799,6 +799,59 @@ fn all_post_processor_types_are_reachable() {
 }
 
 #[test]
+#[ignore = "manual perf probe: cargo test -p pipeline-snapshot --release follower_projection_scaling -- --ignored --nocapture"]
+fn follower_projection_scaling() {
+    for (label, e_pps) in [
+        ("pa+smooth", vec!["pa", "st"]),
+        ("pa only", vec!["pa"]),
+        ("smooth only", vec!["st"]),
+        ("bare follower", vec![]),
+    ] {
+        for count in [100_usize] {
+            let mut waypoints = vec![(0.0, 0.0, 0.0, 0.0, 100.0, 3000.0)];
+            let mut e = 0.0;
+            let mut x = 0.0_f64;
+            let mut y = 0.0_f64;
+            for i in 0..count {
+                let angle = i as f64 * 0.37;
+                x += 0.6 * libm::cos(angle);
+                y += 0.6 * libm::sin(angle);
+                if i % 24 == 23 {
+                    e -= 0.8;
+                    waypoints.push((x, y, 0.0, e, 35.0, 3000.0));
+                    e += 0.8;
+                    waypoints.push((x, y, 0.0, e, 35.0, 3000.0));
+                }
+                e += 0.025;
+                waypoints.push((x, y, 0.0, e, 120.0, 3000.0));
+            }
+            let mut params = default_axis_snapshot_params();
+            let mut x = axis("x", &[]);
+            x.post_processors = vec!["shx".to_string()];
+            let mut y = axis("y", &[]);
+            y.post_processors = vec!["shy".to_string()];
+            let mut ax = axis("e", &["x", "y", "z"]);
+            ax.post_processors = e_pps.iter().map(|s| s.to_string()).collect();
+            params.axis_decls = vec![x, y, ax];
+            params.post_processor_decls = vec![
+                pp("shx", "smooth_mzv", &[("frequency_hz", 191.0)]),
+                pp("shy", "smooth_mzv", &[("frequency_hz", 129.4)]),
+                pp("pa", "linear_pressure_advance", &[("k", 0.04)]),
+                pp("st", "smooth_bell", &[("smooth_time", 0.013)]),
+            ];
+            let started = std::time::Instant::now();
+            pipeline_snapshot(&waypoints, params).expect("snapshot");
+            let elapsed = started.elapsed();
+            println!(
+                "{label}: {count} moves: {:?} ({:.2} ms/move)",
+                elapsed,
+                elapsed.as_secs_f64() * 1e3 / count as f64
+            );
+        }
+    }
+}
+
+#[test]
 fn linear_advance_speed_ramp_never_retracts() {
     let waypoints = vec![
         (0.0, 0.0, 0.0, 0.0, 10.0, 3000.0),
