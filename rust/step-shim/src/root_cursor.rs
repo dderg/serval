@@ -247,12 +247,35 @@ impl StepRootCursor {
         boundaries.extend([begin, last_clock]);
         boundaries.sort_unstable();
         boundaries.dedup();
-        for window in boundaries.windows(2) {
-            self.emit_interval(motor, cfg, view, window[0], window[1], out)?;
+        let mut index = 0;
+        while index + 1 < boundaries.len() {
+            let from = boundaries[index];
+            let mut end_index = index + 1;
+            match self.certified_slope(motor, view, from, boundaries[end_index])? {
+                Some(mut slope) => {
+                    let mut stride = 1;
+                    while end_index < boundaries.len() - 1 {
+                        let probe = (end_index + stride).min(boundaries.len() - 1);
+                        match self.certified_slope(motor, view, from, boundaries[probe])? {
+                            Some(merged) => {
+                                slope = merged;
+                                end_index = probe;
+                                stride *= 2;
+                            }
+                            None => break,
+                        }
+                    }
+                    self.emit_run(motor, cfg, view, from, boundaries[end_index], slope, out)?;
+                }
+                None => {
+                    self.emit_interval(motor, cfg, view, from, boundaries[end_index], out)?;
+                }
+            }
             if self.drain_halted {
                 return Ok(());
             }
-            self.frontier = Some(window[1] + 1);
+            self.frontier = Some(boundaries[end_index] + 1);
+            index = end_index;
         }
         self.frontier = Some(last_clock + 1);
         Ok(())
