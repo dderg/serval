@@ -230,7 +230,9 @@ pub fn build_endpoint(
         budget,
     );
     endpoint.set_step_count_query(query);
-    endpoint.set_drain_pass_budget(DRAIN_PASS_BUDGET);
+    if std::env::var_os("MCU_SIM_SOCK_DIR").is_none() {
+        endpoint.set_drain_pass_budget(DRAIN_PASS_BUDGET);
+    }
     Ok(endpoint)
 }
 
