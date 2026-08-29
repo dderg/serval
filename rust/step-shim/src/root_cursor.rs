@@ -57,6 +57,8 @@ thread_local! {
 
 #[derive(Debug)]
 pub struct StepRootCursor {
+    drain_deadline: Option<std::time::Instant>,
+    drain_halted: bool,
     microstep_mm: f64,
     lane: Lattice,
     overlay: Option<Lattice>,
@@ -71,6 +73,8 @@ pub struct StepRootCursor {
 impl StepRootCursor {
     pub fn new(cfg: &MotorConfig) -> Self {
         Self {
+            drain_deadline: None,
+            drain_halted: false,
             microstep_mm: cfg.microstep_distance,
             lane: Lattice {
                 origin_mm: 0.0,
@@ -129,6 +133,8 @@ impl StepRootCursor {
         out: &mut Vec<StepRoot>,
         deadline: Option<std::time::Instant>,
     ) -> Result<(), ShimError> {
+        self.drain_deadline = deadline;
+        self.drain_halted = false;
         while let Some(view) = queue.active().cloned() {
             if view.clock_freq_hz != cfg.cycles_per_second {
                 return Err(ShimError::SpanFrequencyMismatch {
@@ -148,8 +154,9 @@ impl StepRootCursor {
                 return Ok(());
             }
             self.enter(motor, &view, signal_start, begin)?;
-            let completed = self.emit_roots(motor, cfg, &view, begin, last_clock, out, deadline)?;
-            if !completed {
+            self.emit_roots(motor, cfg, &view, begin, last_clock, out)?;
+            if self.drain_halted {
+                self.drain_deadline = None;
                 return Ok(());
             }
             self.frontier = Some(last_clock + 1);
@@ -158,6 +165,7 @@ impl StepRootCursor {
             }
             queue.release_active();
         }
+        self.drain_deadline = None;
         Ok(())
     }
 
@@ -201,12 +209,11 @@ impl StepRootCursor {
         begin: u64,
         last_clock: u64,
         out: &mut Vec<StepRoot>,
-        deadline: Option<std::time::Instant>,
-    ) -> Result<bool, ShimError> {
+    ) -> Result<(), ShimError> {
         if begin == last_clock {
             self.emit_interval(motor, cfg, view, begin, last_clock, out)?;
             self.frontier = Some(last_clock + 1);
-            return Ok(true);
+            return Ok(());
         }
         let mut boundaries = vec![view.start_clock, view.end_clock];
         let breakpoints = &view.signal.breakpoints;
@@ -235,13 +242,13 @@ impl StepRootCursor {
         boundaries.dedup();
         for window in boundaries.windows(2) {
             self.emit_interval(motor, cfg, view, window[0], window[1], out)?;
-            self.frontier = Some(window[1] + 1);
-            if deadline.is_some_and(|d| std::time::Instant::now() >= d) && window[1] < last_clock {
-                return Ok(false);
+            if self.drain_halted {
+                return Ok(());
             }
+            self.frontier = Some(window[1] + 1);
         }
         self.frontier = Some(last_clock + 1);
-        Ok(true)
+        Ok(())
     }
 
     fn emit_run(
@@ -256,6 +263,7 @@ impl StepRootCursor {
     ) -> Result<(), ShimError> {
         let run_end = self.eval(motor, view, hi)?.position;
         let mut search_from = lo;
+        let mut roots_since_check = 0_u32;
         loop {
             let level = self.frame().threshold(self.microstep_mm, slope);
             if !slope.reached(run_end, level) {
@@ -264,6 +272,19 @@ impl StepRootCursor {
             let clock = self.solve_crossing(motor, view, search_from, hi, level, slope)?;
             self.push_root(motor, cfg, clock, slope, out)?;
             search_from = clock;
+            roots_since_check += 1;
+            if roots_since_check == 32 {
+                roots_since_check = 0;
+                if self
+                    .drain_deadline
+                    .is_some_and(|d| std::time::Instant::now() >= d)
+                    && clock < hi
+                {
+                    self.drain_halted = true;
+                    self.frontier = Some(clock + 1);
+                    return Ok(());
+                }
+            }
         }
     }
 
@@ -361,6 +382,9 @@ impl StepRootCursor {
         }
         let mid = from + (to - from) / 2;
         self.emit_interval(motor, cfg, view, from, mid, out)?;
+        if self.drain_halted {
+            return Ok(());
+        }
         self.emit_interval(motor, cfg, view, mid, to, out)
     }
 
