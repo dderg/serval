@@ -30,6 +30,13 @@ impl Slope {
             Self::Falling => position <= level,
         }
     }
+
+    fn deficit(self, position: f64, level: f64) -> f64 {
+        match self {
+            Self::Rising => level - position,
+            Self::Falling => position - level,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -263,15 +270,24 @@ impl StepRootCursor {
     ) -> Result<(), ShimError> {
         let run_end = self.position_at(motor, view, hi)?;
         let mut search_from = lo;
+        let mut search_position = self.position_at(motor, view, lo)?;
         let mut roots_since_check = 0_u32;
         loop {
             let level = self.frame().threshold(self.microstep_mm, slope);
             if !slope.reached(run_end, level) {
                 return Ok(());
             }
-            let clock = self.solve_crossing(motor, view, search_from, hi, level, slope)?;
+            let (clock, position) = self.solve_crossing(
+                motor,
+                view,
+                (search_from, search_position),
+                (hi, run_end),
+                level,
+                slope,
+            )?;
             self.push_root(motor, cfg, clock, slope, out)?;
             search_from = clock;
+            search_position = position;
             roots_since_check += 1;
             if roots_since_check == 32 {
                 roots_since_check = 0;
@@ -292,39 +308,56 @@ impl StepRootCursor {
         &self,
         motor: usize,
         view: &ClockedMotorSpan,
-        lo: u64,
-        hi: u64,
+        (lo, lo_position): (u64, f64),
+        (hi, hi_position): (u64, f64),
         level: f64,
         slope: Slope,
-    ) -> Result<u64, ShimError> {
-        let mut low = lo;
-        let mut low_position = self.position_at(motor, view, low)?;
-        if slope.reached(low_position, level) {
-            return Ok(low);
+    ) -> Result<(u64, f64), ShimError> {
+        if slope.reached(lo_position, level) {
+            return Ok((lo, lo_position));
         }
+        let mut low = lo;
+        let mut deficit_low = slope.deficit(lo_position, level);
         let mut high = hi;
-        let mut high_position = self.position_at(motor, view, high)?;
+        let mut surplus_high = -slope.deficit(hi_position, level);
+        let mut high_position = hi_position;
+        let mut previous_side: Option<bool> = None;
         let mut iteration = 0_u32;
         while high - low > 1 {
-            let bisection = low + (high - low) / 2;
+            let span = high - low;
+            let bisection = low + span / 2;
             let safeguarded =
                 iteration % BISECTION_SAFEGUARD_PERIOD == BISECTION_SAFEGUARD_PERIOD - 1;
             let candidate = if safeguarded {
                 bisection
             } else {
-                secant_candidate(low, high, low_position, high_position, level).unwrap_or(bisection)
+                let fraction = deficit_low / (deficit_low + surplus_high);
+                if fraction.is_finite() && fraction > 0.0 && fraction < 1.0 {
+                    low + ((fraction * span as f64).ceil() as u64).clamp(1, span - 1)
+                } else {
+                    bisection
+                }
             };
             let position = self.position_at(motor, view, candidate)?;
-            if slope.reached(position, level) {
+            let reached = slope.reached(position, level);
+            if reached {
                 high = candidate;
                 high_position = position;
+                surplus_high = -slope.deficit(position, level);
+                if previous_side == Some(true) {
+                    deficit_low *= 0.5;
+                }
             } else {
                 low = candidate;
-                low_position = position;
+                deficit_low = slope.deficit(position, level);
+                if previous_side == Some(false) {
+                    surplus_high *= 0.5;
+                }
             }
+            previous_side = Some(reached);
             iteration = iteration.wrapping_add(1);
         }
-        Ok(high)
+        Ok((high, high_position))
     }
 
     fn push_root(
@@ -504,24 +537,4 @@ impl StepRootCursor {
         view.stream_time_at_clock(clock)
             .map_err(|error| ShimError::SpanEval { motor, error })
     }
-}
-
-fn secant_candidate(
-    low: u64,
-    high: u64,
-    low_position: f64,
-    high_position: f64,
-    level: f64,
-) -> Option<u64> {
-    let rise = high_position - low_position;
-    let clocks = (level - low_position) / rise * (high - low) as f64;
-    if !clocks.is_finite() || clocks <= 0.0 {
-        return None;
-    }
-    let span = high - low;
-    if clocks >= span as f64 {
-        return None;
-    }
-    let offset = (clocks.ceil() as u64).clamp(1, span - 1);
-    Some(low + offset)
 }
