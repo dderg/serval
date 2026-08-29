@@ -87,7 +87,7 @@ impl Reactor {
                 let worst = self.worst_ack_age;
                 self.last_ack_age_warn = now;
                 self.worst_ack_age = std::time::Duration::ZERO;
-                if worst > std::time::Duration::from_millis(1) {
+                if worst > std::time::Duration::from_millis(10) {
                     tracing::warn!(
                         subsystem = "mcu-comms",
                         event = "ack_age_high",

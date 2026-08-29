@@ -437,7 +437,7 @@ impl PyMotionEngine {
                                  lags reality and every send margin is thinner than believed"
                             );
                         } else {
-                            tracing::warn!(
+                            tracing::debug!(
                                 subsystem = "pump",
                                 event = "clock_projection_skew_sample",
                                 mcu = mcu_id,

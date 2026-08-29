@@ -37,7 +37,7 @@ pub const CONSUMED_MARGIN_SECONDS: f64 = 0.010;
 /// Sending a motion frame with less execution margin than this is one host
 /// hiccup away from the MCU's "Timer too close" shutdown; worth a warn even
 /// when the send succeeds.
-pub const SEND_MARGIN_WARN_FLOOR_SECS: f64 = 0.100;
+pub const SEND_MARGIN_WARN_FLOOR_SECS: f64 = 0.050;
 
 /// How often the endpoint stamps its projected clock into a
 /// `kalico_wire_probe`; the mcu's receipt delta measures host->mcu wire and
