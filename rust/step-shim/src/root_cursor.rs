@@ -295,6 +295,9 @@ impl StepRootCursor {
         slope: Slope,
         out: &mut Vec<StepRoot>,
     ) -> Result<(), ShimError> {
+        if self.halt_if_past_deadline(lo) {
+            return Ok(());
+        }
         let run_end = self.position_at(motor, view, hi)?;
         let mut search_from = lo;
         let mut search_position = self.position_at(motor, view, lo)?;
@@ -426,6 +429,9 @@ impl StepRootCursor {
         to: u64,
         out: &mut Vec<StepRoot>,
     ) -> Result<(), ShimError> {
+        if self.halt_if_past_deadline(from) {
+            return Ok(());
+        }
         if let Some(slope) = self.certified_slope(motor, view, from, to)? {
             return self.emit_run(motor, cfg, view, from, to, slope, out);
         }
@@ -527,6 +533,18 @@ impl StepRootCursor {
             return Ok(Some(Slope::Falling));
         }
         Ok(None)
+    }
+
+    fn halt_if_past_deadline(&mut self, resume_clock: u64) -> bool {
+        if self
+            .drain_deadline
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
+            self.drain_halted = true;
+            self.frontier = Some(resume_clock);
+            return true;
+        }
+        false
     }
 
     fn frame(&self) -> Lattice {
