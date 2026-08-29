@@ -1018,6 +1018,37 @@ fn split_views_absorb_a_final_sub_clock_tail() {
 }
 
 #[test]
+fn split_views_fold_a_sub_ulp_tail_into_the_previous_view() {
+    let t_start = 1000.0_f64;
+    let duration = 2.0 * MAX_SPAN_SECS + 1e-14;
+    let t_end = t_start + duration;
+    assert!(t_start + 2.0 * MAX_SPAN_SECS == t_end, "sub-ulp premise");
+    let signal = motor_span(
+        ContinuousAxis::Hold {
+            position: 4.0,
+            t_start,
+            t_end,
+        },
+        t_start,
+        t_end,
+    );
+    let clocked = ClockedMotorSpan::try_new(
+        signal,
+        t_start,
+        t_end,
+        3.0,
+        3.0 + duration,
+        500.25,
+        1_000_000.0,
+    )
+    .unwrap();
+    let views = clocked.split_max_duration().unwrap();
+    assert_eq!(views.len(), 2);
+    assert_eq!(views.last().unwrap().stream_t_end, t_end);
+    assert_eq!(views.last().unwrap().end_clock, clocked.end_clock);
+}
+
+#[test]
 fn split_views_skip_the_fp_edge_phantom_tail() {
     let duration = 3.0f64 * MAX_SPAN_SECS;
     assert!((duration / MAX_SPAN_SECS).ceil() > 3.0, "fp edge premise");

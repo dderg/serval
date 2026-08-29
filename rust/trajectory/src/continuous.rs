@@ -1133,6 +1133,17 @@ impl ClockedMotorSpan {
             || stream_t_end <= stream_t_start
             || clock_freq_hz <= 0.0
         {
+            tracing::error!(
+                subsystem = "motion",
+                event = "clocked_view_rejected",
+                stream_t_start,
+                stream_t_end,
+                start_host,
+                end_host,
+                start_clock_exact,
+                clock_freq_hz,
+                "clocked view rejected"
+            );
             return Err(ContinuousError::InvalidSpan {
                 reason: "clocked view requires finite positive ranges and frequency",
             });
@@ -1192,27 +1203,40 @@ impl ClockedMotorSpan {
     }
 
     pub fn split_max_duration(&self) -> Result<Vec<Self>, ContinuousError> {
-        let mut views = Vec::new();
+        let mut views: Vec<Self> = Vec::new();
         let duration = self.stream_t_end - self.stream_t_start;
         let count = (duration / MAX_SPAN_SECS).ceil() as usize;
         let host_rate = (self.end_host - self.start_host) / duration;
         for index in 0..count {
             let offset_start = (index as f64 * MAX_SPAN_SECS).min(duration);
             let offset_end = ((index + 1) as f64 * MAX_SPAN_SECS).min(duration);
-            if offset_end <= offset_start {
+            let t_lo = self.stream_t_start + offset_start;
+            let (t_hi, host_hi) = if index + 1 == count {
+                (self.stream_t_end, self.end_host)
+            } else {
+                (
+                    self.stream_t_start + offset_end,
+                    self.start_host + offset_end * host_rate,
+                )
+            };
+            if t_hi <= t_lo {
                 debug_assert!(
                     index + 1 == count,
-                    "only the fp-edge phantom tail chunk may collapse"
+                    "only the fp-edge tail chunk may collapse below one ulp"
                 );
+                let last = views.last_mut().expect("original clocked span has a clock");
+                last.stream_t_end = self.stream_t_end;
+                last.end_host = self.end_host;
+                last.end_clock = self.end_clock;
                 continue;
             }
             let exact = self.start_clock_exact + offset_start * self.clock_freq_hz;
             match Self::try_new(
                 Arc::clone(&self.signal),
-                self.stream_t_start + offset_start,
-                self.stream_t_start + offset_end,
+                t_lo,
+                t_hi,
                 self.start_host + offset_start * host_rate,
-                self.start_host + offset_end * host_rate,
+                host_hi,
                 exact,
                 self.clock_freq_hz,
             ) {

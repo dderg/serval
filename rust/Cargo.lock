@@ -1589,6 +1589,7 @@ dependencies = [
  "libm",
  "nurbs",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
