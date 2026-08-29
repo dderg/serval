@@ -4,6 +4,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
+import os
 import traceback
 
 from .extras.danger_options import get_danger_options
@@ -19,6 +20,9 @@ class ClockSync:
         self.serial = None
         self.get_clock_timer = reactor.register_timer(self._get_clock_event)
         self.queries_pending = 0
+        self._max_queries_pending = (
+            30 if os.environ.get("MCU_SIM_SOCK_DIR") else 4
+        )
         self.mcu_freq = 1.0
         self.clock_est = (0.0, 0.0, 0.0)
         stable_ppm = get_danger_options().clock_sync_stable_ppm * 1e-6
@@ -213,7 +217,7 @@ class ClockSync:
         return last_clock + clock_diff
 
     def is_active(self):
-        return self.queries_pending <= 4
+        return self.queries_pending <= self._max_queries_pending
 
     def is_synced(self):
         return self._synced
