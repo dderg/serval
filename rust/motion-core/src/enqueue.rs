@@ -330,7 +330,24 @@ where
         Err(ContinuousError::InvalidSpan {
             reason: "positive-duration clocked view must span at least one clock",
         }) => return Ok(Vec::new()),
-        Err(error) => return Err(error),
+        Err(error) => {
+            tracing::error!(
+                subsystem = "motion",
+                event = "clock_span_rejected",
+                mcu_id,
+                axis = axis_idx,
+                stream_t_start,
+                stream_t_end,
+                start_host,
+                end_host,
+                start_clock_exact,
+                clock_freq_hz = (ctx.clock_freq_hz)(mcu_id),
+                t0 = ctx.t0,
+                host_now = ctx.host_now,
+                "clocked view rejected at enqueue"
+            );
+            return Err(error);
+        }
     };
     let views = view.split_max_duration()?;
 

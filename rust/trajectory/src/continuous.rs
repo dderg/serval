@@ -1199,6 +1199,13 @@ impl ClockedMotorSpan {
         for index in 0..count {
             let offset_start = (index as f64 * MAX_SPAN_SECS).min(duration);
             let offset_end = ((index + 1) as f64 * MAX_SPAN_SECS).min(duration);
+            if offset_end <= offset_start {
+                debug_assert!(
+                    index + 1 == count,
+                    "only the fp-edge phantom tail chunk may collapse"
+                );
+                continue;
+            }
             let exact = self.start_clock_exact + offset_start * self.clock_freq_hz;
             match Self::try_new(
                 Arc::clone(&self.signal),

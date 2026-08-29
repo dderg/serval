@@ -1018,6 +1018,34 @@ fn split_views_absorb_a_final_sub_clock_tail() {
 }
 
 #[test]
+fn split_views_skip_the_fp_edge_phantom_tail() {
+    let duration = 3.0f64 * MAX_SPAN_SECS;
+    assert!((duration / MAX_SPAN_SECS).ceil() > 3.0, "fp edge premise");
+    let signal = motor_span(
+        ContinuousAxis::Hold {
+            position: 4.0,
+            t_start: 0.0,
+            t_end: duration,
+        },
+        0.0,
+        duration,
+    );
+    let clocked = ClockedMotorSpan::try_new(
+        signal,
+        0.0,
+        duration,
+        3.0,
+        3.0 + duration,
+        500.25,
+        1_000_000.0,
+    )
+    .unwrap();
+    let views = clocked.split_max_duration().unwrap();
+    assert_eq!(views.len(), 3);
+    assert_eq!(views.last().unwrap().stream_t_end, duration);
+}
+
+#[test]
 fn nudges_have_exact_endpoints_and_required_breakpoints() {
     let accelerated = NudgeProfile::try_new(10.0, 4.0, 2.0, 5.0).unwrap();
     assert_eq!(accelerated.breakpoints(), &[5.0, 7.0, 7.5, 9.5]);
