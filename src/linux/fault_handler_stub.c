@@ -153,9 +153,15 @@ void diag_note_demux(uint32_t backlog, uint32_t msgs)
     (void)backlog; (void)msgs;
 }
 
-void diag_note_step_rearm(int32_t margin)
+void diag_note_step_rearm(int32_t margin, uint32_t oid, uint32_t waketime,
+                          uint32_t last_reset, uint32_t discards)
 {
-    (void)margin;
+    (void)margin; (void)oid; (void)waketime; (void)last_reset; (void)discards;
+}
+
+void diag_note_wire_probe(int32_t delta)
+{
+    (void)delta;
 }
 
 void diag_note_timer_duration(uint32_t dur_cyc, uint32_t func)
