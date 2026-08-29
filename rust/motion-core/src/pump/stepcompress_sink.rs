@@ -1504,7 +1504,20 @@ impl StepcompressEndpoint {
             if consumes_slot && in_flight >= self.budget {
                 break;
             }
-            if motion_frame && out.start_clock.saturating_add(stale_by) < now {
+            let late = motion_frame && out.start_clock.saturating_add(stale_by) < now;
+            // A late continuation is harmless while the mcu still holds
+            // queued motion past `now` on that oid: the stepper is armed and
+            // executing, so a catch-up queue_step extends the queue rather
+            // than re-arming an idle timer. Only a volley head
+            // (reset_step_clock) or a frame past its own sent horizon can
+            // hit the mcu's late re-arm shutdown.
+            let covered_by_queued_motion = late
+                && !matches!(out.frame, Outbound::Step(StepFrame::ResetStepClock { .. }))
+                && self
+                    .last_sent_boundary
+                    .get(&out.frame.oid())
+                    .is_some_and(|&sent_horizon| now.saturating_add(stale_by) < sent_horizon);
+            if late && !covered_by_queued_motion {
                 let late_us = (now - out.start_clock) as f64 * 1e6 / freq;
                 let kind = match out.frame {
                     Outbound::Step(StepFrame::ResetStepClock { .. }) => "reset_step_clock",
