@@ -604,8 +604,22 @@ def arg_dictionary(option, opt_str, value, parser):
     parser.values.dictionary[key] = fname
 
 
+def _make_debugger_attachable():
+    """Ambient capabilities (rtprio) mark the process non-dumpable, which
+    blocks same-uid ptrace - py-spy and gdb cannot attach to a wedged klippy.
+    Restore dumpability; secrets are not a concern for a printer host."""
+    try:
+        import ctypes
+
+        PR_SET_DUMPABLE = 4
+        ctypes.CDLL(None, use_errno=True).prctl(PR_SET_DUMPABLE, 1, 0, 0, 0)
+    except (OSError, AttributeError):
+        pass
+
+
 def main():
     usage = "%prog [options] <config file>"
+    _make_debugger_attachable()
     opts = optparse.OptionParser(usage, prog="klippy")
     opts.add_option(
         "-i",
