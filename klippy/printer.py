@@ -604,22 +604,21 @@ def arg_dictionary(option, opt_str, value, parser):
     parser.values.dictionary[key] = fname
 
 
-def _make_debugger_attachable():
-    """Ambient capabilities (rtprio) mark the process non-dumpable, which
-    blocks same-uid ptrace - py-spy and gdb cannot attach to a wedged klippy.
-    Restore dumpability; secrets are not a concern for a printer host."""
-    try:
-        import ctypes
+def _register_stack_dump_signal():
+    """klippy's rtprio capability defeats same-uid ptrace, so py-spy and gdb
+    cannot inspect a wedged process. faulthandler dumps every thread's Python
+    stack straight from the C signal handler - it works even while the main
+    thread is parked inside a native call holding the GIL:
+    kill -USR2 <pid>, stacks land on stderr (the journal)."""
+    import faulthandler
+    import signal
 
-        PR_SET_DUMPABLE = 4
-        ctypes.CDLL(None, use_errno=True).prctl(PR_SET_DUMPABLE, 1, 0, 0, 0)
-    except (OSError, AttributeError):
-        pass
+    faulthandler.register(signal.SIGUSR2, all_threads=True)
 
 
 def main():
     usage = "%prog [options] <config file>"
-    _make_debugger_attachable()
+    _register_stack_dump_signal()
     opts = optparse.OptionParser(usage, prog="klippy")
     opts.add_option(
         "-i",
