@@ -232,6 +232,8 @@ pub fn build_endpoint(
     endpoint.set_step_count_query(query);
     if std::env::var_os("MCU_SIM_SOCK_DIR").is_none() {
         endpoint.set_drain_pass_budget(DRAIN_PASS_BUDGET);
+    } else {
+        endpoint.barrier_ack_deadline_secs = 60.0;
     }
     Ok(endpoint)
 }
