@@ -98,6 +98,10 @@ impl StepRootCursor {
         self.resume_floor.unwrap_or(0)
     }
 
+    pub fn drain_base(&self) -> Option<u64> {
+        self.frontier
+    }
+
     pub fn origin_clock(&self) -> Option<u64> {
         self.origin_clock
     }
@@ -123,6 +127,7 @@ impl StepRootCursor {
         queue: &mut SpanQueue,
         up_to_clock: u64,
         out: &mut Vec<StepRoot>,
+        deadline: Option<std::time::Instant>,
     ) -> Result<(), ShimError> {
         while let Some(view) = queue.active().cloned() {
             if view.clock_freq_hz != cfg.cycles_per_second {
@@ -143,7 +148,10 @@ impl StepRootCursor {
                 return Ok(());
             }
             self.enter(motor, &view, signal_start, begin)?;
-            self.emit_roots(motor, cfg, &view, begin, last_clock, out)?;
+            let completed = self.emit_roots(motor, cfg, &view, begin, last_clock, out, deadline)?;
+            if !completed {
+                return Ok(());
+            }
             self.frontier = Some(last_clock + 1);
             if last_clock < view.end_clock {
                 return Ok(());
@@ -193,9 +201,12 @@ impl StepRootCursor {
         begin: u64,
         last_clock: u64,
         out: &mut Vec<StepRoot>,
-    ) -> Result<(), ShimError> {
+        deadline: Option<std::time::Instant>,
+    ) -> Result<bool, ShimError> {
         if begin == last_clock {
-            return self.emit_interval(motor, cfg, view, begin, last_clock, out);
+            self.emit_interval(motor, cfg, view, begin, last_clock, out)?;
+            self.frontier = Some(last_clock + 1);
+            return Ok(true);
         }
         let mut boundaries = vec![view.start_clock, view.end_clock];
         let breakpoints = &view.signal.breakpoints;
@@ -224,8 +235,13 @@ impl StepRootCursor {
         boundaries.dedup();
         for window in boundaries.windows(2) {
             self.emit_interval(motor, cfg, view, window[0], window[1], out)?;
+            self.frontier = Some(window[1] + 1);
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) && window[1] < last_clock {
+                return Ok(false);
+            }
         }
-        Ok(())
+        self.frontier = Some(last_clock + 1);
+        Ok(true)
     }
 
     fn emit_run(

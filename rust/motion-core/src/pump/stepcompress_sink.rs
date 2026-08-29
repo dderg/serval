@@ -23,6 +23,13 @@ const RETIREMENT_IDLE_TICKS: u32 = 10;
 
 pub const MOVE_SLOT_RESERVE: u32 = 16;
 
+/// The most wall time one send pass may spend in the step root search. Bulk
+/// refills (rebuilding the 0.25s send lead after a reconcile cut) amortize
+/// across pacer ticks; a pass that compressed the whole lead synchronously
+/// consumed the resume volley's real delivery margin - the "Timer too
+/// close" trips.
+pub const DRAIN_PASS_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
+
 pub const SEND_LEAD_SECONDS: f64 = 2.0 * (host_rt::host_io::rtt::MIN_RTO_MS as f64) / 1000.0;
 
 pub const CONSUMED_MARGIN_SECONDS: f64 = 0.010;
@@ -1413,9 +1420,10 @@ impl StepcompressEndpoint {
         publish: bool,
     ) -> Result<(), SendError> {
         let drain_started = std::time::Instant::now();
+        let deadline = std::time::Instant::now() + DRAIN_PASS_BUDGET;
         let frames = self
             .shim
-            .drain(drain_to)
+            .drain_budgeted(drain_to, Some(deadline))
             .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
         let drain_elapsed = drain_started.elapsed();
         if drain_elapsed > std::time::Duration::from_millis(5) {
@@ -1446,9 +1454,9 @@ impl StepcompressEndpoint {
         Ok(())
     }
 
-    fn flush(&mut self, stamped_now: u64, freq: f64) -> Result<(), SendError> {
-        let (now, _) = self.clock_now()?;
-        let worked_secs = now.saturating_sub(stamped_now) as f64 / freq;
+    fn flush(&mut self, now: u64, freq: f64) -> Result<(), SendError> {
+        let (fresh_now, _) = self.clock_now()?;
+        let worked_secs = fresh_now.saturating_sub(now) as f64 / freq;
         if worked_secs > 0.050 {
             tracing::warn!(
                 subsystem = "pump",

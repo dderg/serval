@@ -491,6 +491,19 @@ impl StepShim {
     }
 
     pub fn drain(&mut self, up_to_clock: u64) -> Result<Vec<StepFrame>, ShimError> {
+        self.drain_budgeted(up_to_clock, None)
+    }
+
+    /// Like [`Self::drain`], but the root search stops emitting new windows
+    /// once `deadline` passes; the per-motor frontier persists, so later
+    /// calls resume where this one stopped. A bulk refill (post-cut lead
+    /// rebuild) then amortizes across pacer ticks instead of consuming the
+    /// resume volley's delivery margin in one synchronous pass.
+    pub fn drain_budgeted(
+        &mut self,
+        up_to_clock: u64,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Vec<StepFrame>, ShimError> {
         let mut frames = Vec::new();
         for motor in 0..self.motors.len() {
             let motor_started = std::time::Instant::now();
@@ -502,6 +515,7 @@ impl StepShim {
                 &mut state.queue,
                 up_to_clock,
                 &mut state.pending,
+                deadline,
             )?;
             state.emit(motor, &mut frames)?;
             let elapsed = motor_started.elapsed();

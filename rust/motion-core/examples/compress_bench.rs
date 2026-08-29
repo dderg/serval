@@ -216,7 +216,7 @@ fn solve_roots(views: &[ClockedMotorSpan], freq: f64) -> Vec<SolvedStep> {
             .push(AXIS, view.clone())
             .expect("the views of a contiguous stream abut");
         cursor
-            .advance(AXIS, &cfg, &mut queue, view.end_clock, &mut out)
+            .advance(AXIS, &cfg, &mut queue, view.end_clock, &mut out, None)
             .unwrap_or_else(|e| {
                 panic!(
                     "root cursor failed on view [{}, {}]: {e}",
