@@ -1944,7 +1944,22 @@ impl StepcompressEndpoint {
             }
         }
         self.drain_into_backlog(now, freq)?;
-        self.flush(now, freq)
+        match self.flush(now, freq) {
+            Err(SendError::Transient(error)) => {
+                tracing::warn!(
+                    subsystem = "pump",
+                    event = "egress_backpressure_absorbed",
+                    mcu = self.mcu_id,
+                    backlog = self.backlog.len() as u64,
+                    error = %error,
+                    "egress pushed back after the spans were consumed into the shim - \
+                     the compiled frames stay in the backlog for the pacer; failing the \
+                     bundle would make the pump replay already-consumed spans"
+                );
+                Ok(())
+            }
+            other => other,
+        }
     }
 
     /// Queue one run of lane views and carry the exact position the last of

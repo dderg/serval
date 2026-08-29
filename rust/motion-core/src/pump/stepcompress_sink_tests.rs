@@ -956,17 +956,35 @@ fn the_host_guard_rejects_a_stale_queue_step_before_the_send_lead_is_gone() {
 }
 
 #[test]
-fn a_dead_egress_surfaces_instead_of_dropping_frames() {
+fn a_dead_egress_retains_frames_without_failing_the_bundle() {
     let mut h = harness(BUDGET);
     h.now.store(1_000, Ordering::Relaxed);
     h.fail_sends.store(true, Ordering::Relaxed);
-    let err = h
-        .endpoint
+    h.endpoint
         .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 4))])
-        .unwrap_err();
-    assert!(matches!(err, SendError::Transient(_)), "{err:?}");
+        .expect("the spans were consumed into the shim - failing the bundle would replay them");
     assert_eq!(h.sent_moves(), 0);
     assert!(!h.endpoint.backlog.is_empty());
+}
+
+#[test]
+fn a_backpressured_bundle_is_not_replayed_into_a_span_gap() {
+    let mut h = harness(BUDGET);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.fail_sends.store(true, Ordering::Relaxed);
+    let first = ramp(2_000, 4);
+    let resume_clock = first.last().expect("ramp emits views").end_clock;
+    let resume_mm = *ramp_positions(4, 0.0, 1.0).last().expect("positions");
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(first)])
+        .expect("backpressure after consumption is absorbed");
+
+    h.fail_sends.store(false, Ordering::Relaxed);
+    let second = ramp_from(resume_clock, 4, resume_mm);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(second)])
+        .expect("the contiguous follow-up must not trip a span gap");
+    assert!(h.sent_moves() > 0);
 }
 
 #[test]
@@ -976,7 +994,7 @@ fn a_refused_burst_is_retried_verbatim_with_nothing_duplicated() {
     h.fail_sends.store(true, Ordering::Relaxed);
     h.endpoint
         .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 8))])
-        .expect_err("a refused burst must surface");
+        .expect("a refused burst is retained, not failed");
     let refused = h.attempts.lock_ok().clone();
     assert_eq!(refused.len(), 1, "{refused:?}");
     assert!(refused[0].len() > 1, "{refused:?}");
