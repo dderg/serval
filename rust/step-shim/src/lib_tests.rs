@@ -128,6 +128,7 @@ fn fast_print_drain_probe() {
     );
 }
 
+#[test]
 #[ignore = "manual perf probe: cargo test -p step-shim drain_speed_probe -- --ignored --nocapture"]
 fn drain_speed_probe() {
     const FREQ: f64 = 520_000_000.0;
