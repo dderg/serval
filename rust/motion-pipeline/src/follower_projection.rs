@@ -1,5 +1,4 @@
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use nurbs::ScalarNurbs;
@@ -358,7 +357,7 @@ pub(crate) fn project_followers(
                     .map(|piece| piece.degree())
                     .max()
                     .expect("shaper kernel has no pieces");
-                let table = Rc::new(
+                let table = Arc::new(
                     AxisSignalTable::from_tracks(
                         std::iter::once(&kernel_input),
                         first_t,
@@ -381,41 +380,87 @@ pub(crate) fn project_followers(
                 let breaks_started = crate::timing::stopwatch();
                 let shaped_breaks = shaped_signal_breakpoints(kernel, shaped_break_seeds);
                 timing.breakpoints_us += breaks_started.elapsed_us();
-                let eval_table = Rc::clone(&table);
-                let moment_table = Rc::clone(&table);
-                let sig = ShapedSignal::new_from_polynomial_evaluator(
-                    kernel,
-                    move |t| eval_table.eval(t),
-                    exact_input_breaks,
-                    input_degree,
-                    move |lo, hi, degree, origin, moments| {
-                        moment_table.integrate_moments(lo, hi, degree, origin, moments)
-                    },
-                );
+                let make_sig = || {
+                    let eval_table = Arc::clone(&table);
+                    let moment_table = Arc::clone(&table);
+                    ShapedSignal::new_from_polynomial_evaluator(
+                        kernel,
+                        move |t| eval_table.eval(t),
+                        exact_input_breaks.clone(),
+                        input_degree,
+                        move |lo, hi, degree, origin, moments| {
+                            moment_table.integrate_moments(lo, hi, degree, origin, moments)
+                        },
+                    )
+                };
                 let tol_scale = (0..commit_count)
                     .map(|i| follower_tol_scale(&base[i].followers, axis))
                     .fold(1.0, f64::min);
                 let target_tol = follower_fit_tol(fit_tol, tol_scale);
+                let monotone_output = nonnegative_demand && !gained_input;
+                let kernel_started = crate::timing::stopwatch();
+                timing.kernel_fits += supports.len();
+                let workers = if cfg!(target_arch = "wasm32") {
+                    1
+                } else {
+                    std::thread::available_parallelism()
+                        .map_or(1, |cores| cores.get().min(supports.len()))
+                };
+                let fitted: Vec<Result<(f64, Vec<BezierPiece>), PostProcessError>> = if workers > 1
+                {
+                    std::thread::scope(|scope| {
+                        let make_sig = &make_sig;
+                        let shaped_breaks = &shaped_breaks;
+                        let handles: Vec<_> = supports
+                            .chunks(supports.len().div_ceil(workers))
+                            .map(|chunk| {
+                                scope.spawn(move || {
+                                    let sig = make_sig();
+                                    chunk
+                                        .iter()
+                                        .map(|&(start, end)| {
+                                            fit_kernel_window(
+                                                axis,
+                                                start,
+                                                end,
+                                                shaped_breaks,
+                                                &sig,
+                                                target_tol,
+                                                monotone_output,
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                            })
+                            .collect();
+                        handles
+                            .into_iter()
+                            .flat_map(|handle| {
+                                handle.join().expect("follower kernel fit thread panicked")
+                            })
+                            .collect()
+                    })
+                } else {
+                    let sig = make_sig();
+                    supports
+                        .iter()
+                        .map(|&(start, end)| {
+                            fit_kernel_window(
+                                axis,
+                                start,
+                                end,
+                                &shaped_breaks,
+                                &sig,
+                                target_tol,
+                                monotone_output,
+                            )
+                        })
+                        .collect()
+                };
                 let mut bases = Vec::with_capacity(supports.len());
                 let mut tracks: Vec<Vec<BezierPiece>> = Vec::with_capacity(supports.len());
-                let kernel_started = crate::timing::stopwatch();
-                for &(start, end) in &supports {
-                    timing.kernel_fits += 1;
-                    let local_base = TrackSignal::eval(&sig, start);
-                    let local = ShiftedTrackSignal::new(&sig, local_base);
-                    let track = fit_axis_from_signal(
-                        axis,
-                        start,
-                        end,
-                        &shaped_breaks,
-                        &local,
-                        target_tol,
-                        "follower_kernel",
-                    )?;
-                    let mut pieces = extract_bezier_pieces(&track);
-                    if nonnegative_demand && !gained_input {
-                        project_monotone(axis, "shaped output", &mut pieces, target_tol);
-                    }
+                for result in fitted {
+                    let (local_base, pieces) = result?;
                     bases.push(local_base);
                     tracks.push(pieces);
                 }
@@ -537,6 +582,33 @@ pub(crate) fn project_followers(
         }
     }
     Ok(())
+}
+
+fn fit_kernel_window<S: TrackSignal>(
+    axis: usize,
+    start: f64,
+    end: f64,
+    shaped_breaks: &[f64],
+    sig: &S,
+    target_tol: FitTol,
+    monotone_output: bool,
+) -> Result<(f64, Vec<BezierPiece>), PostProcessError> {
+    let local_base = TrackSignal::eval(sig, start);
+    let local = ShiftedTrackSignal::new(sig, local_base);
+    let track = fit_axis_from_signal(
+        axis,
+        start,
+        end,
+        shaped_breaks,
+        &local,
+        target_tol,
+        "follower_kernel",
+    )?;
+    let mut pieces = extract_bezier_pieces(&track);
+    if monotone_output {
+        project_monotone(axis, "shaped output", &mut pieces, target_tol);
+    }
+    Ok((local_base, pieces))
 }
 
 type Pvaj4 = (f64, f64, f64, f64);
@@ -1165,7 +1237,8 @@ pub(crate) struct FollowerSignal<'a> {
     leader_pieces: Vec<Option<LeaderPieces>>,
     raw_delta: Option<(&'a ContinuousAxis, f64)>,
     grid: Vec<f64>,
-    cumulative: Vec<f64>,
+    dense_t: Vec<f64>,
+    dense_s: Vec<f64>,
     s_owned_end: f64,
     start_sliver: Option<SpeedZeroSliver>,
     end_sliver: Option<SpeedZeroSliver>,
@@ -1208,7 +1281,8 @@ impl<'a> FollowerSignal<'a> {
             leader_pieces,
             raw_delta,
             grid,
-            cumulative: Vec::new(),
+            dense_t: Vec::new(),
+            dense_s: Vec::new(),
             s_owned_end: f64::INFINITY,
             start_sliver: None,
             end_sliver: None,
@@ -1217,14 +1291,23 @@ impl<'a> FollowerSignal<'a> {
         let (start_sliver, end_sliver) = sig.speed_zero_slivers();
         sig.start_sliver = start_sliver;
         sig.end_sliver = end_sliver;
-        let mut cumulative = Vec::with_capacity(sig.grid.len());
+        let mut dense_t = Vec::with_capacity(sig.grid.len());
+        let mut dense_s = Vec::with_capacity(sig.grid.len());
+        dense_t.push(sig.grid[0]);
+        dense_s.push(0.0);
         let mut acc = 0.0;
-        cumulative.push(0.0);
         for w in sig.grid.windows(2) {
-            acc += integrate(&|t| sig.shaped_speed(t), w[0], w[1]);
-            cumulative.push(acc);
+            integrate_recording(
+                &|t| sig.shaped_speed(t),
+                w[0],
+                w[1],
+                &mut acc,
+                &mut dense_t,
+                &mut dense_s,
+            );
         }
-        sig.cumulative = cumulative;
+        sig.dense_t = dense_t;
+        sig.dense_s = dense_s;
         sig.s_owned_end = state.owned_span_end(sig.s_start, sig.s_end());
         sig
     }
@@ -1335,17 +1418,17 @@ impl<'a> FollowerSignal<'a> {
         } else {
             t
         };
-        match self.grid.binary_search_by(|grid_t| grid_t.total_cmp(&t)) {
-            Ok(index) => self.cumulative[index],
+        match self.dense_t.binary_search_by(|dense| dense.total_cmp(&t)) {
+            Ok(index) => self.dense_s[index],
             Err(insertion) => {
                 assert!(
-                    insertion > 0 && insertion < self.grid.len(),
+                    insertion > 0 && insertion < self.dense_t.len(),
                     "follower distance query {t} outside [{}, {}]",
                     self.grid[0],
                     self.grid[self.grid.len() - 1]
                 );
                 let index = insertion - 1;
-                self.cumulative[index] + integrate(&|u| self.shaped_speed(u), self.grid[index], t)
+                self.dense_s[index] + integrate(&|u| self.shaped_speed(u), self.dense_t[index], t)
             }
         }
     }
@@ -1359,7 +1442,7 @@ impl<'a> FollowerSignal<'a> {
         self.s_offset(t).min(self.s_owned_end - self.s_start)
     }
     fn s_end(&self) -> f64 {
-        self.s_start + self.cumulative.last().copied().expect("cumulative seeded")
+        self.s_start + self.dense_s.last().copied().expect("odometer knots seeded")
     }
     /// The exact value of an identically-constant window — a follower whose
     /// span table commands zero extrusion ratio across the whole owned range
@@ -1896,6 +1979,98 @@ fn integrate(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
         INTEGRAL_TOL_MM,
         INTEGRAL_MAX_DEPTH,
     )
+}
+
+/// `integrate`, but the converged leaves of the adaptive recursion are kept
+/// as odometer knots: `dense_t`/`dense_s` receive each leaf's right endpoint
+/// with the running prefix sum in `acc`, so later point queries integrate
+/// only the short residual past the nearest knot instead of re-descending
+/// the whole refinement tree from a grid boundary.
+fn integrate_recording(
+    f: &impl Fn(f64) -> f64,
+    a: f64,
+    b: f64,
+    acc: &mut f64,
+    dense_t: &mut Vec<f64>,
+    dense_s: &mut Vec<f64>,
+) {
+    if b - a <= 0.0 {
+        return;
+    }
+    let m = 0.5 * (a + b);
+    let (fa, fm, fb) = (f(a), f(m), f(b));
+    let whole = (b - a) / 6.0 * (fa + 4.0 * fm + fb);
+    adaptive_simpson_recording(
+        f,
+        a,
+        b,
+        fa,
+        fm,
+        fb,
+        whole,
+        INTEGRAL_TOL_MM,
+        INTEGRAL_MAX_DEPTH,
+        acc,
+        dense_t,
+        dense_s,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn adaptive_simpson_recording(
+    f: &impl Fn(f64) -> f64,
+    a: f64,
+    b: f64,
+    fa: f64,
+    fm: f64,
+    fb: f64,
+    whole: f64,
+    tol: f64,
+    depth: u32,
+    acc: &mut f64,
+    dense_t: &mut Vec<f64>,
+    dense_s: &mut Vec<f64>,
+) {
+    let m = 0.5 * (a + b);
+    let (lm, rm) = (0.5 * (a + m), 0.5 * (m + b));
+    let (flm, frm) = (f(lm), f(rm));
+    let left = (m - a) / 6.0 * (fa + 4.0 * flm + fm);
+    let right = (b - m) / 6.0 * (fm + 4.0 * frm + fb);
+    let delta = left + right - whole;
+    if depth == 0 || delta.abs() <= 15.0 * tol {
+        *acc += left + right + delta / 15.0;
+        dense_t.push(b);
+        dense_s.push(*acc);
+        return;
+    }
+    adaptive_simpson_recording(
+        f,
+        a,
+        m,
+        fa,
+        flm,
+        fm,
+        left,
+        0.5 * tol,
+        depth - 1,
+        acc,
+        dense_t,
+        dense_s,
+    );
+    adaptive_simpson_recording(
+        f,
+        m,
+        b,
+        fm,
+        frm,
+        fb,
+        right,
+        0.5 * tol,
+        depth - 1,
+        acc,
+        dense_t,
+        dense_s,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
