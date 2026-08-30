@@ -346,7 +346,7 @@ impl StepRootCursor {
                 level,
                 slope,
             )?;
-            self.push_root(motor, cfg, clock, slope, out)?;
+            self.push_root(motor, cfg, view, clock, slope, out)?;
             search_from = clock;
             search_position = position;
             roots_since_check += 1;
@@ -425,6 +425,7 @@ impl StepRootCursor {
         &mut self,
         motor: usize,
         cfg: &MotorConfig,
+        view: &ClockedMotorSpan,
         clock: u64,
         slope: Slope,
         out: &mut Vec<StepRoot>,
@@ -433,6 +434,7 @@ impl StepRootCursor {
         if let Some(previous_clock) = self.last_root_clock.filter(|&last| clock <= last) {
             return Err(ShimError::StepClockRegression {
                 motor,
+                source_line: view.signal.source_line,
                 previous_clock,
                 clock,
                 step_count: self.frame().step_count,

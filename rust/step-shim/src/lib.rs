@@ -73,6 +73,7 @@ pub enum ShimError {
     },
     StepClockRegression {
         motor: usize,
+        source_line: u32,
         previous_clock: u64,
         clock: u64,
         step_count: i64,
@@ -119,14 +120,15 @@ impl std::fmt::Display for ShimError {
             Self::QueueFull { motor } => write!(f, "motor {motor}: span queue full"),
             Self::StepClockRegression {
                 motor,
+                source_line,
                 previous_clock,
                 clock,
                 step_count,
                 advance,
             } => write!(
                 f,
-                "motor {motor}: step root {clock} did not advance past {previous_clock} \
-                 at step count {step_count} with advance {advance}"
+                "motor {motor}: line {source_line} step root {clock} did not advance past \
+                 {previous_clock} at step count {step_count} with advance {advance}"
             ),
             Self::SpanGap {
                 motor,

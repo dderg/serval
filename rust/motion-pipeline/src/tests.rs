@@ -1209,6 +1209,36 @@ fn mesh_warp_tracks_across_a_fenced_move_sequence() {
     );
 }
 
+#[test]
+fn small_mesh_variations_stay_continuous_across_move_boundaries() {
+    let mut mesh =
+        geometry::MeshGrid::new(0.0, 0.0, 100.0, 100.0, 2, 2, vec![0.0, 0.1, 0.0, 0.1], 0.2)
+            .unwrap();
+    mesh.zero_at(0.0, 0.0);
+    let transform = std::sync::Arc::new(geometry::SurfaceTransform::new(
+        mesh,
+        geometry::Fade::disabled(),
+    ));
+    let points = [[10.0, 50.0, 0.2], [11.0, 50.0, 0.2], [12.0, 50.0, 0.2]];
+    let inputs = vec![
+        StreamInput::Control(Control::SetMesh {
+            mesh: Some(transform),
+            gcode_z_rebase: 0.2,
+        }),
+        StreamInput::Move(line_move(points[0], points[1], 0.0, ctx(1, 50.0)).unwrap()),
+        StreamInput::Drain,
+        StreamInput::Move(line_move(points[1], points[2], 0.0, ctx(2, 50.0)).unwrap()),
+        StreamInput::Drain,
+    ];
+    let segs = replay_inputs(
+        cfg_bench(),
+        AxisChainSet::default(),
+        &[10.0, 50.0, 0.2, 0.0],
+        inputs,
+    );
+    assert_position_contiguous(&segs);
+}
+
 fn xy_shaper_follower_chains(smooth_time: f64) -> AxisChainSet {
     let bell = |name: &str| {
         trajectory::CompiledChain::compile(&[PostProcessorInstance::new(

@@ -8,7 +8,6 @@ use trajectory::{AnalyticMoveSpan, AxisChainSet, ContinuousAxis, ContinuousSegme
 use crate::types::{BaseItem, BaseSegment, Control, PlannedItem, PlannedMove};
 
 const REST_EPS_MM_S: f64 = 1e-9;
-const WARP_CONST_EPS_MM: f64 = 2e-3;
 const WARP_BBOX_SAMPLES: usize = 8;
 
 pub fn run_lowerer(
@@ -263,7 +262,7 @@ fn classify_surface(
         lo[2] - pad,
         hi[2] + pad,
     );
-    if spread <= WARP_CONST_EPS_MM {
+    if spread == 0.0 {
         let point = spatial.point_at(0.0);
         SurfaceMode::Constant(surface.correction_at(point[0], point[1], point[2]))
     } else {
