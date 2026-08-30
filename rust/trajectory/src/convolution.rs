@@ -252,11 +252,45 @@ fn f64_from_ordered_key(key: u64) -> f64 {
     f64::from_bits(bits)
 }
 
-fn first_time_satisfying(predicate: impl Fn(f64) -> bool) -> f64 {
-    let mut lower = ordered_f64_key(-f64::MAX);
-    let mut upper = ordered_f64_key(f64::MAX);
+/// The transition of a monotone float comparison, found from a caller-supplied
+/// guess. Every predicate here compares `t - break` against a constant, so the
+/// flip sits within a few ulps of the algebraic sum: walk outward from the
+/// guess to bracket it (doubling the ulp stride), then bisect the remaining
+/// gap. Equivalent to a full 64-step ordered-key bisection, at a handful of
+/// probes for a good guess.
+fn first_time_satisfying(guess: f64, predicate: impl Fn(f64) -> bool) -> f64 {
     assert!(!predicate(-f64::MAX));
     assert!(predicate(f64::MAX));
+    let guess_key = ordered_f64_key(guess.clamp(-f64::MAX, f64::MAX));
+    let (mut lower, mut upper);
+    if predicate(f64_from_ordered_key(guess_key)) {
+        upper = guess_key;
+        let mut stride = 1u64;
+        loop {
+            let candidate = upper.saturating_sub(stride).max(ordered_f64_key(-f64::MAX));
+            if !predicate(f64_from_ordered_key(candidate)) {
+                lower = candidate;
+                break;
+            }
+            upper = candidate;
+            if candidate == ordered_f64_key(-f64::MAX) {
+                return f64_from_ordered_key(upper);
+            }
+            stride <<= 1;
+        }
+    } else {
+        lower = guess_key;
+        let mut stride = 1u64;
+        loop {
+            let candidate = lower.saturating_add(stride).min(ordered_f64_key(f64::MAX));
+            if predicate(f64_from_ordered_key(candidate)) {
+                upper = candidate;
+                break;
+            }
+            lower = candidate;
+            stride <<= 1;
+        }
+    }
     while upper - lower > 1 {
         let middle = lower + (upper - lower) / 2;
         if predicate(f64_from_ordered_key(middle)) {
@@ -309,11 +343,12 @@ impl ShapedSignal<'_> {
         transitions: &mut Vec<f64>,
     ) {
         let (k_lo, k_hi) = kernel.support();
-        let owned = first_time_satisfying(|t| t - input_break >= kernel_break);
+        let guess = input_break + kernel_break;
+        let owned = first_time_satisfying(guess, |t| t - input_break >= kernel_break);
         let window_edge = if kernel_break == k_lo {
-            Some(first_time_satisfying(|t| input_break < t - k_lo))
+            Some(first_time_satisfying(guess, |t| input_break < t - k_lo))
         } else if kernel_break == k_hi {
-            Some(first_time_satisfying(|t| input_break <= t - k_hi))
+            Some(first_time_satisfying(guess, |t| input_break <= t - k_hi))
         } else {
             None
         };
