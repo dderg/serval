@@ -69,17 +69,20 @@ pub(crate) struct ProjectionTiming {
     pub breakpoints_us: u128,
     pub kernel_fit_us: u128,
     pub kernel_fits: usize,
+    pub kernel_fit_max_us: u128,
 }
 
 impl ProjectionTiming {
     pub fn detail(&self) -> String {
         format!(
-            "source_fit_us={} source_fits={} breakpoints_us={} kernel_fit_us={} kernel_fits={}",
+            "source_fit_us={} source_fits={} breakpoints_us={} kernel_fit_us={} kernel_fits={} \
+             kernel_fit_max_us={}",
             self.source_fit_us,
             self.source_fits,
             self.breakpoints_us,
             self.kernel_fit_us,
-            self.kernel_fits
+            self.kernel_fits,
+            self.kernel_fit_max_us
         )
     }
 }
@@ -403,22 +406,33 @@ pub(crate) fn project_followers(
                 let workers = if cfg!(target_arch = "wasm32") {
                     1
                 } else {
-                    std::thread::available_parallelism()
-                        .map_or(1, |cores| cores.get().min(supports.len()))
+                    std::thread::available_parallelism().map_or(1, |cores| {
+                        cores.get().saturating_sub(1).max(1).min(supports.len())
+                    })
                 };
-                let fitted: Vec<Result<(f64, Vec<BezierPiece>), PostProcessError>> = if workers > 1
-                {
+                let mut fitted: Vec<(
+                    usize,
+                    Result<(f64, Vec<BezierPiece>, u128), PostProcessError>,
+                )> = if workers > 1 {
+                    let next_window = std::sync::atomic::AtomicUsize::new(0);
                     std::thread::scope(|scope| {
+                        let next_window = &next_window;
+                        let supports = &supports;
                         let make_sig = &make_sig;
                         let shaped_breaks = &shaped_breaks;
-                        let handles: Vec<_> = supports
-                            .chunks(supports.len().div_ceil(workers))
-                            .map(|chunk| {
+                        let handles: Vec<_> = (0..workers)
+                            .map(|_| {
                                 scope.spawn(move || {
                                     let sig = make_sig();
-                                    chunk
-                                        .iter()
-                                        .map(|&(start, end)| {
+                                    let mut done = Vec::new();
+                                    loop {
+                                        let index = next_window
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        let Some(&(start, end)) = supports.get(index) else {
+                                            return done;
+                                        };
+                                        done.push((
+                                            index,
                                             fit_kernel_window(
                                                 axis,
                                                 start,
@@ -427,9 +441,9 @@ pub(crate) fn project_followers(
                                                 &sig,
                                                 target_tol,
                                                 monotone_output,
-                                            )
-                                        })
-                                        .collect::<Vec<_>>()
+                                            ),
+                                        ));
+                                    }
                                 })
                             })
                             .collect();
@@ -444,23 +458,29 @@ pub(crate) fn project_followers(
                     let sig = make_sig();
                     supports
                         .iter()
-                        .map(|&(start, end)| {
-                            fit_kernel_window(
-                                axis,
-                                start,
-                                end,
-                                &shaped_breaks,
-                                &sig,
-                                target_tol,
-                                monotone_output,
+                        .enumerate()
+                        .map(|(index, &(start, end))| {
+                            (
+                                index,
+                                fit_kernel_window(
+                                    axis,
+                                    start,
+                                    end,
+                                    &shaped_breaks,
+                                    &sig,
+                                    target_tol,
+                                    monotone_output,
+                                ),
                             )
                         })
                         .collect()
                 };
+                fitted.sort_by_key(|(index, _)| *index);
                 let mut bases = Vec::with_capacity(supports.len());
                 let mut tracks: Vec<Vec<BezierPiece>> = Vec::with_capacity(supports.len());
-                for result in fitted {
-                    let (local_base, pieces) = result?;
+                for (_, result) in fitted {
+                    let (local_base, pieces, window_us) = result?;
+                    timing.kernel_fit_max_us = timing.kernel_fit_max_us.max(window_us);
                     bases.push(local_base);
                     tracks.push(pieces);
                 }
@@ -592,7 +612,8 @@ fn fit_kernel_window<S: TrackSignal>(
     sig: &S,
     target_tol: FitTol,
     monotone_output: bool,
-) -> Result<(f64, Vec<BezierPiece>), PostProcessError> {
+) -> Result<(f64, Vec<BezierPiece>, u128), PostProcessError> {
+    let started = crate::timing::stopwatch();
     let local_base = TrackSignal::eval(sig, start);
     let local = ShiftedTrackSignal::new(sig, local_base);
     let track = fit_axis_from_signal(
@@ -608,7 +629,7 @@ fn fit_kernel_window<S: TrackSignal>(
     if monotone_output {
         project_monotone(axis, "shaped output", &mut pieces, target_tol);
     }
-    Ok((local_base, pieces))
+    Ok((local_base, pieces, started.elapsed_us()))
 }
 
 type Pvaj4 = (f64, f64, f64, f64);
