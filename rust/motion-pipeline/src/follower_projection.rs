@@ -63,6 +63,28 @@ fn follower_fit_tol(fit_tol: FitTol, position_scale: f64) -> FitTol {
 /// (`out.len() >= commit_count` segments), caching one fitted pre-kernel
 /// track per raw segment; each is computed exactly once, which keeps every
 /// emit reading bit-identical convolution inputs.
+#[derive(Default)]
+pub(crate) struct ProjectionTiming {
+    pub source_fit_us: u128,
+    pub source_fits: usize,
+    pub breakpoints_us: u128,
+    pub kernel_fit_us: u128,
+    pub kernel_fits: usize,
+}
+
+impl ProjectionTiming {
+    pub fn detail(&self) -> String {
+        format!(
+            "source_fit_us={} source_fits={} breakpoints_us={} kernel_fit_us={} kernel_fits={}",
+            self.source_fit_us,
+            self.source_fits,
+            self.breakpoints_us,
+            self.kernel_fit_us,
+            self.kernel_fits
+        )
+    }
+}
+
 pub(crate) fn project_followers(
     base: &[ContinuousSegment],
     frontier: &[ContinuousSegment],
@@ -72,6 +94,7 @@ pub(crate) fn project_followers(
     chains: &AxisChainSet,
     fit_tol: FitTol,
     states: &mut Vec<FollowerState>,
+    timing: &mut ProjectionTiming,
 ) -> Result<(), PostProcessError> {
     assert!(frontier.len() >= commit_count && out.len() == commit_count);
     if states.len() < chains.n_axes() {
@@ -143,6 +166,8 @@ pub(crate) fn project_followers(
             );
             let base_position = state.e_end.unwrap_or_else(|| axis_pva(raw_axis, t_start).0);
             let (projected, projected_cuts) = if projecting {
+                let source_started = crate::timing::stopwatch();
+                timing.source_fits += 1;
                 let (track, s_end, e_end_relative, semantic) = {
                     let sig = FollowerSignal::new(&frontier[i], raw, axis, leaders, &*state, 0.0);
                     let breakpoints = sig.construction_breakpoints(raw_axis);
@@ -170,6 +195,7 @@ pub(crate) fn project_followers(
                 };
                 state.s_shaped = s_end;
                 state.e_end = Some(base_position + e_end_relative);
+                timing.source_fit_us += source_started.elapsed_us();
                 (track, Some(semantic))
             } else {
                 (
@@ -352,7 +378,9 @@ pub(crate) fn project_followers(
                 } else {
                     &semantic_cuts
                 };
+                let breaks_started = crate::timing::stopwatch();
                 let shaped_breaks = shaped_signal_breakpoints(kernel, shaped_break_seeds);
+                timing.breakpoints_us += breaks_started.elapsed_us();
                 let eval_table = Rc::clone(&table);
                 let moment_table = Rc::clone(&table);
                 let sig = ShapedSignal::new_from_polynomial_evaluator(
@@ -370,7 +398,9 @@ pub(crate) fn project_followers(
                 let target_tol = follower_fit_tol(fit_tol, tol_scale);
                 let mut bases = Vec::with_capacity(supports.len());
                 let mut tracks: Vec<Vec<BezierPiece>> = Vec::with_capacity(supports.len());
+                let kernel_started = crate::timing::stopwatch();
                 for &(start, end) in &supports {
+                    timing.kernel_fits += 1;
                     let local_base = TrackSignal::eval(&sig, start);
                     let local = ShiftedTrackSignal::new(&sig, local_base);
                     let track = fit_axis_from_signal(
@@ -389,6 +419,7 @@ pub(crate) fn project_followers(
                     bases.push(local_base);
                     tracks.push(pieces);
                 }
+                timing.kernel_fit_us += kernel_started.elapsed_us();
                 bases[0] -= piece_run_start(&tracks[0]);
                 for i in 1..tracks.len() {
                     bases[i] =

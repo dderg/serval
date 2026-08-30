@@ -632,6 +632,7 @@ fn apply_axis_chains(
     let frontier = &shaped_cache.make_contiguous()[..window];
     let mut out: Vec<ContinuousSegment> = frontier.iter().take(commit_count).cloned().collect();
     let projection_started = crate::timing::stopwatch();
+    let mut projection_timing = crate::follower_projection::ProjectionTiming::default();
     project_followers(
         base,
         frontier,
@@ -641,6 +642,7 @@ fn apply_axis_chains(
         chains,
         fit_tol,
         follower_states,
+        &mut projection_timing,
     )?;
     let projection_us = projection_started.elapsed_us();
     if crate::timing::is_slow_phase(projection_us) {
@@ -652,7 +654,7 @@ fn apply_axis_chains(
                 axes: follower_states.iter().filter(|s| s.is_active()).count(),
                 ..work
             },
-            "",
+            &projection_timing.detail(),
         );
     }
     send_toolhead(toolhead_tap, &out);
