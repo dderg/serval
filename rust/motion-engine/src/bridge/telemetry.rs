@@ -53,19 +53,14 @@ impl PyMotionEngine {
             &format!("(motor_idx={motor_idx} bus_id={bus_id} cs_pin_id={cs_pin_id})"),
         )
     }
+    /// Blocking on the planner mutex while the GIL is held deadlocks against
+    /// any path that holds the mutex across a GIL re-attach, so the lock is
+    /// only ever taken inside the detached closure.
     fn wait_moves(&self, py: Python<'_>) -> PyResult<()> {
-        let guard = self.planner.lock_ok();
-        let planner = guard.as_ref().ok_or_else(|| {
-            PyRuntimeError::new_err("planner not initialized — call init_planner first")
-        })?;
-        py.detach(|| planner.flush()).map_err(planner_err)
+        py.detach(|| flush_planner_detached(&self.planner))
     }
     fn drain_motion(&self, py: Python<'_>) -> PyResult<()> {
-        let guard = self.planner.lock_ok();
-        let planner = guard.as_ref().ok_or_else(|| {
-            PyRuntimeError::new_err("planner not initialized — call init_planner first")
-        })?;
-        py.detach(|| planner.flush()).map_err(planner_err)?;
+        py.detach(|| flush_planner_detached(&self.planner))?;
         let drain = self.drain.clone();
         py.detach(|| drain.wait_drained(DRAIN_TIMEOUT))
             .map_err(PyRuntimeError::new_err)
@@ -77,6 +72,7 @@ impl PyMotionEngine {
         pending.insert(id, FlushWait { rx, deadline: None });
         Ok(id)
     }
+
     fn wait_moves_poll(&self, flush_id: u64) -> PyResult<bool> {
         let started_rx = {
             let pending = self.flush.pending.lock_ok();
@@ -488,4 +484,14 @@ impl PyMotionEngine {
             Err(e) => Err(planner_err(e)),
         }
     }
+}
+
+fn flush_planner_detached(
+    planner: &std::sync::Mutex<Option<motion_core::worker::StreamWorkerHandle>>,
+) -> PyResult<()> {
+    let guard = planner.lock_ok();
+    let handle = guard.as_ref().ok_or_else(|| {
+        PyRuntimeError::new_err("planner not initialized — call init_planner first")
+    })?;
+    handle.flush().map_err(planner_err)
 }

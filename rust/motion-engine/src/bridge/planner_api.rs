@@ -669,13 +669,15 @@ impl PyMotionEngine {
         gcode: geometry::GcodePos,
         machine: geometry::MachinePos,
     ) -> PyResult<()> {
-        {
+        let flushed = py.detach(|| {
             let planner_guard = self.planner.lock_ok();
-            if let Some(planner) = planner_guard.as_ref() {
-                py.detach(|| planner.flush()).map_err(planner_err)?;
-            } else {
-                return Ok(());
+            match planner_guard.as_ref() {
+                Some(planner) => planner.flush().map(|()| true),
+                None => Ok(false),
             }
+        });
+        if !flushed.map_err(planner_err)? {
+            return Ok(());
         }
         {
             let drain = self.drain.clone();
