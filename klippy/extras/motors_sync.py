@@ -387,7 +387,7 @@ class StepperManualMove:
             self.toolhead.submit_nudge(
                 mcu_id, axis_idx, motor_idx, dist,
                 self.travel_speed, self.travel_accel)
-        self.toolhead.wait_moves()
+        self.toolhead.flush_step_generation()
 
 
 # Base helper class for bulk sensors readings that measure the degree
