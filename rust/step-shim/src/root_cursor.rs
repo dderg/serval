@@ -73,6 +73,15 @@ pub struct StepRootCursor {
     lane: Lattice,
     overlay: Option<Lattice>,
     overlay_signal_id: Option<usize>,
+    /// The sub-microstep remainder the last overlay left unstepped: its final
+    /// continuous position minus the last lattice threshold it actually
+    /// crossed. A relative overlay signal restarts its coordinate frame at
+    /// zero, but the rotor holds where the previous overlay stepped it - a
+    /// fresh lattice anchored at the raw signal origin would silently discard
+    /// this remainder at every seam, and motors_sync-style buzz waveforms
+    /// (dozens of fractional-amplitude nudges) integrate the discards into
+    /// real drift.
+    overlay_carry_mm: f64,
     positioned: bool,
     resume_floor: Option<u64>,
     origin_clock: Option<u64>,
@@ -92,6 +101,7 @@ impl StepRootCursor {
             },
             overlay: None,
             overlay_signal_id: None,
+            overlay_carry_mm: 0.0,
             positioned: false,
             resume_floor: None,
             origin_clock: None,
@@ -127,6 +137,7 @@ impl StepRootCursor {
         };
         self.overlay = None;
         self.overlay_signal_id = None;
+        self.overlay_carry_mm = 0.0;
         self.positioned = true;
         self.resume_floor = Some(resume_floor);
         self.origin_clock = resume_floor.checked_sub(1);
@@ -173,6 +184,10 @@ impl StepRootCursor {
             if last_clock < view.end_clock {
                 return Ok(());
             }
+            if let Some(overlay) = self.overlay {
+                let end_position = self.position_at(motor, &view, view.end_clock)?;
+                self.overlay_carry_mm = end_position - overlay.nominal_position(self.microstep_mm);
+            }
             queue.release_active();
         }
         self.drain_deadline = None;
@@ -194,7 +209,7 @@ impl StepRootCursor {
             if self.overlay_signal_id != Some(signal_id) {
                 let position = self.position_at(motor, view, signal_start)?;
                 self.overlay = Some(Lattice {
-                    origin_mm: position,
+                    origin_mm: position - self.overlay_carry_mm,
                     step_count: 0,
                 });
                 self.overlay_signal_id = Some(signal_id);

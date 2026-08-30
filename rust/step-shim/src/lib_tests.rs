@@ -237,6 +237,124 @@ fn overlay_span(start_clock: u64, position: f64, delta_mm: f64, cycles: u64) -> 
     )
 }
 
+/// Production nudge traffic: `dispatch_nudge` builds the span from the bare
+/// relative profile - no base hold, `motor_mask` set - so every nudge opens a
+/// fresh overlay lattice. Symmetric pairs with a fractional microstep
+/// amplitude must still return the motor to its starting step.
+fn nudge_span(start_clock: u64, delta_mm: f64, cycles: u64) -> ClockedMotorSpan {
+    let (t_start, t_end) = window(start_clock, cycles);
+    let profile = NudgeProfile::try_new(delta_mm, delta_mm.abs() / (t_end - t_start), 0.0, t_start)
+        .expect("a constant-velocity nudge");
+    let groups = vec![MotorGroup::Independent(MotorTerm {
+        source_axis: 0,
+        axis: ContinuousAxis::Nudge(profile),
+        scale: 1.0,
+    })];
+    clocked(
+        signal(groups, t_start, t_end, 1),
+        start_clock,
+        CYCLES_PER_SECOND,
+    )
+}
+
+#[test]
+fn motors_sync_buzz_waveform_returns_to_base() {
+    // The exact fading-oscillation waveform motors_sync buzzes with
+    // (rel_buzz_d = 1.0mm at 100 microsteps/mm here): 50 back-to-back
+    // relative nudges whose sub-microstep remainders must carry across
+    // overlay seams instead of being discarded per nudge. On the Trident
+    // this waveform nets -1..-2 microsteps per buzz (TMC MSCNT), walking
+    // the belts apart during every measurement cycle.
+    let mut shim = seeded(cfg(), 8192);
+    let rel_buzz_d = 1.0;
+    let mut moves = Vec::new();
+    let mut last = 0.0_f64;
+    for osc in (0..25).rev() {
+        let mut abs_pos = rel_buzz_d * f64::from(osc) / 25.0;
+        for _ in 0..2 {
+            moves.push(abs_pos - last);
+            last = abs_pos;
+            abs_pos = -abs_pos;
+        }
+    }
+    let mut clock = 1_000_u64;
+    let mut net_by_buzz = Vec::new();
+    for _ in 0..5 {
+        let mut views = Vec::new();
+        for &delta in &moves {
+            if delta.abs() < 0.00001 {
+                continue;
+            }
+            let cycles = ((delta.abs() / 0.1) * CYCLES_PER_SECOND) as u64;
+            views.push(nudge_span(clock, delta, cycles));
+            clock += cycles;
+        }
+        views.push(hold_span(clock, 0.0, 50_000));
+        clock += 50_000;
+        shim.push_spans(0, &views).unwrap();
+        let frames = shim.drain(u64::MAX).unwrap();
+        net_by_buzz.push(net_steps(&frames));
+    }
+    let total: i64 = net_by_buzz.iter().sum();
+    assert!(
+        total.abs() <= 1,
+        "5 fading buzz waveforms must not walk the motor: nets {net_by_buzz:?} total {total}"
+    );
+}
+
+fn net_steps(frames: &[StepFrame]) -> i64 {
+    let mut dir: i64 = 1;
+    let mut net: i64 = 0;
+    for frame in frames {
+        match frame {
+            StepFrame::SetNextStepDir { dir: d, .. } => dir = if *d == 1 { 1 } else { -1 },
+            StepFrame::QueueStep { count, .. } | StepFrame::QueueStepHp { count, .. } => {
+                net += dir * i64::from(*count)
+            }
+            _ => {}
+        }
+    }
+    net
+}
+
+#[test]
+fn symmetric_fractional_nudge_pairs_return_to_base() {
+    symmetric_fractional_nudge_pairs(cfg());
+}
+
+#[test]
+fn symmetric_fractional_nudge_pairs_return_to_base_inverted_dir() {
+    symmetric_fractional_nudge_pairs(MotorConfig {
+        invert_dir: true,
+        ..cfg()
+    });
+}
+
+fn symmetric_fractional_nudge_pairs(cfg: MotorConfig) {
+    let invert = cfg.invert_dir;
+    let mut shim = seeded(cfg, 4096);
+    let delta = 0.373;
+    let nudge_cycles = 40_000;
+    let gap_cycles = 10_000;
+    let mut clock = 1_000;
+    let mut views = Vec::new();
+    for _ in 0..10 {
+        for delta in [delta, -delta] {
+            views.push(nudge_span(clock, delta, nudge_cycles));
+            clock += nudge_cycles;
+            views.push(hold_span(clock, 0.0, gap_cycles));
+            clock += gap_cycles;
+        }
+    }
+    shim.push_spans(0, &views).unwrap();
+    let frames = shim.drain(u64::MAX).unwrap();
+    let net = net_steps(&frames) * if invert { -1 } else { 1 };
+    assert!(
+        net.abs() <= 1,
+        "20 symmetric fractional nudges drifted the motor by {net} microsteps"
+    );
+}
+
 fn queue_step_count(frames: &[StepFrame]) -> u32 {
     frames
         .iter()
