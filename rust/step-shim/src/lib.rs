@@ -649,15 +649,18 @@ impl StepShim {
         }
         let count = state.cursor.step_count();
         let floor = state.cursor.resume_floor();
+        let carry = state.cursor.step_remainder();
         state.cfg.cycles_per_second = freq;
         state.cursor = StepRootCursor::new(&state.cfg);
         state.cursor.reset_to(count, floor);
+        state.cursor.set_step_remainder(carry);
     }
 
     pub fn reset_position(&mut self, motor: usize, count: i64) {
         let state = self.motor_mut(motor);
         state.pending.clear();
         state.cursor.reset_to(count, 0);
+        state.cursor.clear_step_remainder();
         state.last_step_clock = 0;
         state.needs_reset = true;
         state.last_dir = None;

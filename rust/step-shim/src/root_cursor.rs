@@ -130,6 +130,23 @@ impl StepRootCursor {
         self.origin_clock
     }
 
+    /// The unstepped sub-microstep remainder of the last completed overlay.
+    /// It survives [`Self::reset_to`]: a cut re-anchors the bookkeeping while
+    /// the rotor stays put, so the remainder is still physically real. Only an
+    /// external position reseed (homing, counter handover) redefines the
+    /// rotor's truth and clears it via [`Self::clear_step_remainder`].
+    pub fn step_remainder(&self) -> f64 {
+        self.overlay_carry_mm
+    }
+
+    pub fn set_step_remainder(&mut self, carry_mm: f64) {
+        self.overlay_carry_mm = carry_mm;
+    }
+
+    pub fn clear_step_remainder(&mut self) {
+        self.overlay_carry_mm = 0.0;
+    }
+
     pub fn reset_to(&mut self, count: i64, resume_floor: u64) {
         self.lane = Lattice {
             origin_mm: 0.0,
@@ -137,7 +154,6 @@ impl StepRootCursor {
         };
         self.overlay = None;
         self.overlay_signal_id = None;
-        self.overlay_carry_mm = 0.0;
         self.positioned = true;
         self.resume_floor = Some(resume_floor);
         self.origin_clock = resume_floor.checked_sub(1);

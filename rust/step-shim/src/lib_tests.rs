@@ -302,6 +302,50 @@ fn motors_sync_buzz_waveform_returns_to_base() {
     );
 }
 
+#[test]
+fn reanchor_cut_between_buzzes_keeps_the_step_remainder() {
+    // The bench pattern: every buzz starts with a fresh-epoch reanchor cut
+    // (halt_at + resumed stream). The cut re-anchors bookkeeping while the
+    // rotor stays put, so the sub-microstep remainder must survive it -
+    // clearing it re-loses a microstep on every single buzz.
+    let mut shim = seeded(cfg(), 8192);
+    let rel_buzz_d = 1.0;
+    let mut moves = Vec::new();
+    let mut last = 0.0_f64;
+    for osc in (0..25).rev() {
+        let mut abs_pos = rel_buzz_d * f64::from(osc) / 25.0;
+        for _ in 0..2 {
+            moves.push(abs_pos - last);
+            last = abs_pos;
+            abs_pos = -abs_pos;
+        }
+    }
+    let mut clock = 1_000_u64;
+    let mut net_by_buzz = Vec::new();
+    for _ in 0..5 {
+        let mut views = Vec::new();
+        for &delta in &moves {
+            if delta.abs() < 0.00001 {
+                continue;
+            }
+            let cycles = ((delta.abs() / 0.1) * CYCLES_PER_SECOND) as u64;
+            views.push(nudge_span(clock, delta, cycles));
+            clock += cycles;
+        }
+        shim.push_spans(0, &views).unwrap();
+        let frames = shim.drain(u64::MAX).unwrap();
+        net_by_buzz.push(net_steps(&frames));
+        let (_executed, tail) = shim.halt_at(0, clock).unwrap();
+        net_by_buzz.push(net_steps(&tail));
+        clock += 2_000_000;
+    }
+    let total: i64 = net_by_buzz.iter().sum();
+    assert!(
+        total.abs() <= 1,
+        "buzzes separated by reanchor cuts must not walk the motor: nets {net_by_buzz:?} total {total}"
+    );
+}
+
 fn net_steps(frames: &[StepFrame]) -> i64 {
     let mut dir: i64 = 1;
     let mut net: i64 = 0;
