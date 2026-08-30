@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use trajectory::{
     ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm, NudgeProfile,
 };
@@ -344,6 +345,89 @@ fn reanchor_cut_between_buzzes_keeps_the_step_remainder() {
         total.abs() <= 1,
         "buzzes separated by reanchor cuts must not walk the motor: nets {net_by_buzz:?} total {total}"
     );
+}
+
+/// A bare-lane span that holds LATTICE_OFFSET, then sheds `drop_mm` over
+/// three tenths of one clock tick mid-span, and holds the lower value - the
+/// sub-tick sliver piece shape a degenerate lowering emits.
+fn sliver_drop_span(start_clock: u64, cycles: u64, drop_mm: f64) -> ClockedMotorSpan {
+    let (t_start, t_end) = window(start_clock, cycles);
+    let sliver_start = t_start + 500.4 / CYCLES_PER_SECOND;
+    let sliver_len = 0.3 / CYCLES_PER_SECOND;
+    let curve = bezier_pieces_to_nurbs(&[
+        BezierPiece {
+            u_start: t_start,
+            u_end: sliver_start,
+            coeffs: vec![LATTICE_OFFSET, 0.0],
+        },
+        BezierPiece {
+            u_start: sliver_start,
+            u_end: sliver_start + sliver_len,
+            coeffs: vec![LATTICE_OFFSET, drop_mm / sliver_len],
+        },
+        BezierPiece {
+            u_start: sliver_start + sliver_len,
+            u_end: t_end,
+            coeffs: vec![LATTICE_OFFSET + drop_mm, 0.0],
+        },
+    ]);
+    let groups = vec![MotorGroup::Independent(MotorTerm {
+        source_axis: 0,
+        axis: ContinuousAxis::Spline(Arc::new(curve)),
+        scale: 1.0,
+    })];
+    clocked(
+        signal(groups, t_start, t_end, 0),
+        start_clock,
+        CYCLES_PER_SECOND,
+    )
+}
+
+/// The Trident first-layer fatal signature: StepClockRegression with
+/// previous_clock == clock and advance -1 on a bare lane. A position curve
+/// that sheds a full microstep inside one clock tick makes two lattice
+/// crossings resolve to the same integer clock - an unexecutable same-clock
+/// step pair - and the strict root ordering must refuse it loudly. Any
+/// planner-side piece with a super-microstep excursion over a sub-tick
+/// duration reaches this; the physical motor cannot move a microstep in one
+/// clock cycle, so such a piece is always an upstream lowering defect.
+#[test]
+fn a_sub_tick_sliver_dropping_full_microsteps_fails_loud_with_a_same_clock_root() {
+    let start = 1_000_u64;
+    let cycles = 1_000_u64;
+    let view = sliver_drop_span(start, cycles, -0.025);
+    let mut shim = seeded(cfg(), 8);
+    shim.push_spans(0, &[view]).unwrap();
+    let err = shim.drain(u64::MAX).unwrap_err();
+    match err {
+        ShimError::StepClockRegression {
+            previous_clock,
+            clock,
+            advance,
+            ..
+        } => {
+            assert_eq!(
+                previous_clock, clock,
+                "the sliver's two crossings must collide on one clock"
+            );
+            assert_eq!(advance, -1);
+        }
+        other => panic!("expected StepClockRegression, got {other:?}"),
+    }
+}
+
+/// The boundary of the same-clock refusal: a sub-tick drop smaller than one
+/// microstep cannot cross two levels, and from a quarter-step offset it stays
+/// inside the reverse-hysteresis band entirely - no roots, no error.
+#[test]
+fn a_sub_tick_sliver_below_one_microstep_is_absorbed_by_hysteresis() {
+    let start = 1_000_u64;
+    let cycles = 1_000_u64;
+    let view = sliver_drop_span(start, cycles, -0.009);
+    let mut shim = seeded(cfg(), 8);
+    shim.push_spans(0, &[view]).unwrap();
+    let frames = shim.drain(u64::MAX).unwrap();
+    assert_eq!(net_steps(&frames), 0);
 }
 
 fn net_steps(frames: &[StepFrame]) -> i64 {

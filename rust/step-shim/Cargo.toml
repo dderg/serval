@@ -12,5 +12,8 @@ tracing = "0.1"
 trajectory = { path = "../trajectory" }
 libm = { version = "0.2", default-features = false }
 
+[dev-dependencies]
+nurbs = { path = "../nurbs" }
+
 [lints]
 workspace = true
