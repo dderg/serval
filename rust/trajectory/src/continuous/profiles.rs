@@ -224,11 +224,6 @@ impl NudgeProfile {
     }
 
     #[must_use]
-    pub fn position_bounds(&self) -> (f64, f64) {
-        (self.delta_mm.min(0.0), self.delta_mm.max(0.0))
-    }
-
-    #[must_use]
     pub fn velocity_bounds(&self) -> (f64, f64) {
         let signed_peak = self.delta_mm.signum() * self.peak_speed_mm_s;
         (signed_peak.min(0.0), signed_peak.max(0.0))
@@ -241,21 +236,6 @@ impl NudgeProfile {
         } else {
             (-self.accel_mm_s2, self.accel_mm_s2)
         }
-    }
-
-    #[must_use]
-    pub fn position_extrema(&self) -> (f64, f64) {
-        self.position_bounds()
-    }
-
-    #[must_use]
-    pub fn velocity_extrema(&self) -> (f64, f64) {
-        self.velocity_bounds()
-    }
-
-    #[must_use]
-    pub fn acceleration_extrema(&self) -> (f64, f64) {
-        self.acceleration_bounds()
     }
 
     fn validate_eval_time(&self, t: f64) {
@@ -276,7 +256,6 @@ enum EnvelopeInterval {
 
 #[derive(Clone, Copy)]
 enum Derivative {
-    Position,
     Velocity,
     Acceleration,
     Jerk,
@@ -291,10 +270,8 @@ pub struct BuzzProfile {
     ramp: f64,
     t_start: f64,
     breakpoints: Vec<f64>,
-    position_extrema_times: Vec<f64>,
     velocity_extrema_times: Vec<f64>,
     acceleration_extrema_times: Vec<f64>,
-    position_bounds: (f64, f64),
     velocity_bounds: (f64, f64),
     acceleration_bounds: (f64, f64),
 }
@@ -354,17 +331,13 @@ impl BuzzProfile {
             ramp,
             t_start,
             breakpoints,
-            position_extrema_times: Vec::new(),
             velocity_extrema_times: Vec::new(),
             acceleration_extrema_times: Vec::new(),
-            position_bounds: (0.0, 0.0),
             velocity_bounds: (0.0, 0.0),
             acceleration_bounds: (0.0, 0.0),
         };
-        profile.position_extrema_times = profile.isolate_extrema(Derivative::Velocity);
         profile.velocity_extrema_times = profile.isolate_extrema(Derivative::Acceleration);
         profile.acceleration_extrema_times = profile.isolate_extrema(Derivative::Jerk);
-        profile.position_bounds = profile.compute_bounds(Derivative::Position);
         profile.velocity_bounds = profile.compute_bounds(Derivative::Velocity);
         profile.acceleration_bounds = profile.compute_bounds(Derivative::Acceleration);
         Ok(profile)
@@ -453,26 +426,6 @@ impl BuzzProfile {
     #[must_use]
     pub fn breakpoints(&self) -> &[f64] {
         &self.breakpoints
-    }
-
-    #[must_use]
-    pub fn position_extrema_times(&self) -> &[f64] {
-        &self.position_extrema_times
-    }
-
-    #[must_use]
-    pub fn position_bounds(&self) -> (f64, f64) {
-        self.position_bounds
-    }
-
-    #[must_use]
-    pub fn velocity_extrema_times(&self) -> &[f64] {
-        &self.velocity_extrema_times
-    }
-
-    #[must_use]
-    pub fn acceleration_extrema_times(&self) -> &[f64] {
-        &self.acceleration_extrema_times
     }
 
     #[must_use]
@@ -619,7 +572,6 @@ impl BuzzProfile {
 
     fn compute_bounds(&self, derivative: Derivative) -> (f64, f64) {
         let extrema = match derivative {
-            Derivative::Position => &self.position_extrema_times,
             Derivative::Velocity => &self.velocity_extrema_times,
             Derivative::Acceleration => &self.acceleration_extrema_times,
             Derivative::Jerk => unreachable!(),
@@ -648,7 +600,6 @@ impl BuzzProfile {
     fn value_local(&self, t: f64, interval: EnvelopeInterval, derivative: Derivative) -> f64 {
         let sample = self.sample_local(t, interval);
         match derivative {
-            Derivative::Position => sample.position,
             Derivative::Velocity => sample.velocity,
             Derivative::Acceleration => sample.acceleration,
             Derivative::Jerk => self.jerk_local(t, interval),

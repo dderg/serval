@@ -400,13 +400,6 @@ impl LawSegment {
             .get()
             .expect("a DiskRail segment always carries its dense solution")
     }
-
-    pub fn knot_times(&self) -> Vec<f64> {
-        match &self.law {
-            ScalarLaw::DiskRail { .. } => self.rail_knots().iter().map(|k| self.t0 + k.t).collect(),
-            ScalarLaw::ConstAccel { .. } => vec![self.t0, self.t0 + self.dt],
-        }
-    }
 }
 
 fn quintic(p0: f64, m0: f64, c0: f64, p1: f64, m1: f64, c1: f64, u: f64) -> f64 {
