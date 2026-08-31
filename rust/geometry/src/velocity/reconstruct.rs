@@ -15,6 +15,7 @@ use super::disk::{Kinematics, RunMember};
 use super::law::{LawSegment, ScalarLaw};
 
 const ONSET_BISECT_ITERS: u32 = 60;
+const ONSET_EXACT_REFINE_ITERS: u32 = 20;
 /// Slack (relative to speed scale) for seam-plan feasibility checks: an
 /// entry/exit pair outside the member's own reach by more than this is not a
 /// float residue, it is a planning bug upstream.
@@ -93,8 +94,49 @@ pub(super) fn member_profile(
         entry_v,
         exit_v,
     };
-    let fwd_end = forward_speed(kin, entry_v, len).ok_or(ReconstructError::Diverged)?;
-    let bwd_start = backward_speed(kin, exit_v, 0.0).ok_or(ReconstructError::Diverged)?;
+    let reversed = Kinematics {
+        length: kin.length,
+        accel: kin.accel,
+        jerk: kin.jerk,
+        kappa0: kin.kappa0 + kin.sigma * kin.length,
+        sigma: -kin.sigma,
+        flat_ceiling: kin.flat_ceiling,
+    };
+    let forward_profile = if kin.is_straight() || entry_v >= kin.flat_ceiling {
+        None
+    } else {
+        Some(
+            LawSegment::until_arc(0.0, 0.0, entry_v, member_law(kin, 0.0, false), len)
+                .ok_or(ReconstructError::Diverged)?,
+        )
+    };
+    let backward_profile = if kin.is_straight() {
+        None
+    } else {
+        Some(
+            LawSegment::until_arc(0.0, 0.0, exit_v, member_law(&reversed, 0.0, false), len)
+                .ok_or(ReconstructError::Diverged)?,
+        )
+    };
+    let forward_at = |x: f64| {
+        if entry_v >= kin.flat_ceiling {
+            return Some(kin.flat_ceiling);
+        }
+        match &forward_profile {
+            Some(profile) => profile
+                .time_at_distance(x)
+                .map(|t| profile.state_at(t).1.min(kin.flat_ceiling)),
+            None => forward_speed(kin, entry_v, x),
+        }
+    };
+    let backward_at = |x: f64| match &backward_profile {
+        Some(profile) => profile
+            .time_at_distance(len - x)
+            .map(|t| profile.state_at(t).1),
+        None => backward_speed(kin, exit_v, x),
+    };
+    let fwd_end = forward_at(len).ok_or(ReconstructError::Diverged)?;
+    let bwd_start = backward_at(0.0).ok_or(ReconstructError::Diverged)?;
     if exit_v > fwd_end + slack || entry_v > bwd_start + slack {
         return Err(infeasible());
     }
@@ -113,9 +155,7 @@ pub(super) fn member_profile(
     // snapped, or it would mint a nanosecond accelerate/brake wedge whose
     // acceleration flip downstream fitters chase as a real feature.
     let joint_tol = |v: f64| SEAM_SLACK_REL * (1.0 + v) + 1e-6;
-    let g = |x: f64| -> Option<f64> {
-        Some(forward_speed(kin, entry_v, x)? - backward_speed(kin, exit_v, x)?)
-    };
+    let g = |x: f64| -> Option<f64> { Some(forward_at(x)? - backward_at(x)?) };
     let onset = if g(len).ok_or(ReconstructError::Diverged)? <= 0.0 {
         len
     } else if g(0.0).ok_or(ReconstructError::Diverged)? >= -joint_tol(entry_v) {
@@ -130,7 +170,31 @@ pub(super) fn member_profile(
                 hi = mid;
             }
         }
-        let solved = 0.5 * (lo + hi);
+        let mut solved = 0.5 * (lo + hi);
+        if !kin.is_straight() {
+            let exact_g = |x: f64| -> Option<f64> {
+                Some(forward_speed(kin, entry_v, x)? - backward_speed(kin, exit_v, x)?)
+            };
+            let radius = 1e-3 * (1.0 + len);
+            let local_lo = (solved - radius).max(0.0);
+            let local_hi = (solved + radius).min(len);
+            let local_brackets = exact_g(local_lo).ok_or(ReconstructError::Diverged)? <= 0.0
+                && exact_g(local_hi).ok_or(ReconstructError::Diverged)? >= 0.0;
+            let (mut exact_lo, mut exact_hi, iterations) = if local_brackets {
+                (local_lo, local_hi, ONSET_EXACT_REFINE_ITERS)
+            } else {
+                (0.0, len, ONSET_BISECT_ITERS)
+            };
+            for _ in 0..iterations {
+                let mid = 0.5 * (exact_lo + exact_hi);
+                if exact_g(mid).ok_or(ReconstructError::Diverged)? <= 0.0 {
+                    exact_lo = mid;
+                } else {
+                    exact_hi = mid;
+                }
+            }
+            solved = 0.5 * (exact_lo + exact_hi);
+        }
         if g(len).ok_or(ReconstructError::Diverged)? <= joint_tol(exit_v) {
             len
         } else {
@@ -142,10 +206,10 @@ pub(super) fn member_profile(
     // (before the onset, else there is no cruise).
     let flat_contact = if entry_v >= kin.flat_ceiling * (1.0 - 1e-12) {
         0.0
-    } else if forward_speed(kin, entry_v, onset).ok_or(ReconstructError::Diverged)?
+    } else if forward_at(onset).ok_or(ReconstructError::Diverged)?
         >= kin.flat_ceiling * (1.0 - 1e-12)
     {
-        let reach = |x: f64| LawSegment::reach_over(member_law(kin, 0.0, false), entry_v, x);
+        let reach = &forward_at;
         let (mut lo, mut hi) = (0.0_f64, onset);
         for _ in 0..ONSET_BISECT_ITERS {
             let mid = 0.5 * (lo + hi);
