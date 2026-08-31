@@ -236,6 +236,29 @@ pub fn plan_velocity_stops_reconstruct_prefix(
     entry: BoundaryState,
     reconstruct_count: usize,
 ) -> Result<VelocityProfile, VelocityError> {
+    plan_velocity_stops_select_prefix(
+        moves,
+        stop_before,
+        integration_tol,
+        max_extrude_only_velocity_mm_s,
+        max_extrude_only_accel_mm_s2,
+        entry,
+        |_| reconstruct_count,
+    )
+}
+
+pub fn plan_velocity_stops_select_prefix<F>(
+    moves: &[crate::Move],
+    stop_before: &[bool],
+    integration_tol: f64,
+    max_extrude_only_velocity_mm_s: f64,
+    max_extrude_only_accel_mm_s2: f64,
+    entry: BoundaryState,
+    select_prefix: F,
+) -> Result<VelocityProfile, VelocityError>
+where
+    F: FnOnce(usize) -> usize,
+{
     let tol = integration_tol;
     validate_config(
         tol,
@@ -246,10 +269,6 @@ pub fn plan_velocity_stops_reconstruct_prefix(
 
     let n = moves.len();
     assert_eq!(stop_before.len(), n, "one stop flag per move");
-    assert!(
-        reconstruct_count <= n,
-        "cannot reconstruct {reconstruct_count} moves from a {n}-move plan"
-    );
     if let Some(m) = moves.iter().find(|m| m.limits.max_jerk_mm_s3.is_finite()) {
         return Err(VelocityError::FiniteJerkUnsupported {
             line_no: m.source.start_line,
@@ -279,6 +298,11 @@ pub fn plan_velocity_stops_reconstruct_prefix(
     forward_pass(moves, &caps, &geo, &mut plan.v, tol)?;
     let (barrier, v_barrier) = reverse_brake_envelope(moves, &caps, &geo, &mut plan.v, tol)?;
     check_entry_brake(moves, &caps, &geo, &plan.v, entry, tol)?;
+    let reconstruct_count = select_prefix(barrier);
+    assert!(
+        reconstruct_count <= n,
+        "cannot reconstruct {reconstruct_count} moves from a {n}-move plan"
+    );
     let (out, boundaries) = reconstruct_runs(
         &moves[..reconstruct_count],
         &caps[..reconstruct_count],

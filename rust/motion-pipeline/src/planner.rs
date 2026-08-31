@@ -1,7 +1,7 @@
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{CurvatureProfile, Segment};
-use geometry::{BoundaryState, Move, VelocityProfile, plan_velocity_stops_reconstruct_prefix};
+use geometry::{BoundaryState, Move, VelocityProfile, plan_velocity_stops_select_prefix};
 
 use crate::types::{
     Control, PlannedItem, PlannedMove, StreamConfig, StreamInput, jerk_limited_brake_time,
@@ -169,18 +169,25 @@ impl Planner {
     }
 
     fn plan(&self, reconstruct_count: usize) -> VelocityProfile {
+        self.plan_selected(|_| reconstruct_count)
+    }
+
+    fn plan_selected<F>(&self, select_prefix: F) -> VelocityProfile
+    where
+        F: FnOnce(usize) -> usize,
+    {
         let stop_before: Vec<bool> = (0..self.moves.len())
             .map(|i| i > 0 && self.stop_at_seam(i))
             .collect();
         let clock = crate::timing::stopwatch();
-        let profile = plan_velocity_stops_reconstruct_prefix(
+        let profile = plan_velocity_stops_select_prefix(
             &self.moves,
             &stop_before,
             self.config.integration_tol,
             self.config.max_extrude_only_velocity_mm_s,
             self.config.max_extrude_only_accel_mm_s2,
             self.entry,
-            reconstruct_count,
+            select_prefix,
         )
         .unwrap_or_else(|e| panic!("planner: velocity plan failed: {e:?}"));
         tracing::debug!(
@@ -216,18 +223,20 @@ impl Planner {
     /// Emit the prefix up to the furthest-forward clean seam that is inside
     /// the finality barrier and clear of the brake-to-rest setback.
     fn emit_committable(&mut self, output: &Sender<PlannedItem>) -> bool {
-        let envelope = self.plan(0);
         let horizon = self.terminal_independent_seam();
-        let mut chosen = 0usize;
-        for i in 1..=envelope.barrier.min(horizon) {
-            if self.is_clean_seam(i) {
-                chosen = i;
+        let profile = self.plan_selected(|barrier| {
+            let mut chosen = 0usize;
+            for i in 1..=barrier.min(horizon) {
+                if self.is_clean_seam(i) {
+                    chosen = i;
+                }
             }
-        }
+            chosen
+        });
+        let chosen = profile.moves.len();
         if chosen == 0 {
             return true;
         }
-        let profile = self.plan(chosen);
         self.emit(chosen, &profile, output)
     }
 
