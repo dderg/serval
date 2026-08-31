@@ -87,6 +87,51 @@ impl ProjectionTiming {
     }
 }
 
+struct SourceProjection {
+    track: ScalarNurbs,
+    s_end: f64,
+    e_end_relative: f64,
+    semantic_cuts: Vec<f64>,
+}
+
+fn fit_source_projection(
+    shaped: &ContinuousSegment,
+    raw: &ContinuousSegment,
+    axis: usize,
+    leaders: &[usize],
+    state: &FollowerState,
+    s_start: f64,
+    fit_tol: FitTol,
+) -> Result<SourceProjection, PostProcessError> {
+    let raw_axis = &raw.axes[axis];
+    let (t_start, t_end) = projection_support(raw, shaped, axis, leaders);
+    let sig = FollowerSignal::new(shaped, raw, axis, leaders, state, s_start, 0.0);
+    let breakpoints = sig.construction_breakpoints(raw_axis);
+    let track = match sig.constant_value() {
+        Some(value) => bezier_pieces_to_nurbs(&[BezierPiece {
+            u_start: t_start,
+            u_end: t_end,
+            coeffs: vec![value, value],
+        }]),
+        None => fit_axis_from_signal(
+            axis,
+            t_start,
+            t_end,
+            &breakpoints.fit_seeds,
+            &sig,
+            follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5),
+            "follower_source",
+        )?,
+    };
+    let e_end_relative = nurbs::eval::eval(&track.as_view(), t_end);
+    Ok(SourceProjection {
+        track,
+        s_end: sig.s_end(),
+        e_end_relative,
+        semantic_cuts: breakpoints.semantic,
+    })
+}
+
 pub(crate) fn project_followers(
     base: &[ContinuousSegment],
     frontier: &[ContinuousSegment],
@@ -132,12 +177,88 @@ pub(crate) fn project_followers(
         if !projecting && chain.is_empty() {
             continue;
         }
+        let mut source_jobs = Vec::new();
         if projecting {
             state.active = true;
+            let mut next_s = state.s_shaped;
             for (i, shaped) in frontier.iter().enumerate() {
-                state.ingest(&base[i], shaped, axis, leaders, &base[i + 1..]);
+                if let Some(shaped_ds) =
+                    state.ingest(&base[i], shaped, axis, leaders, &base[i + 1..])
+                {
+                    let s_start = state.aligned_span_start(next_s);
+                    source_jobs.push((i, s_start));
+                    next_s = s_start + shaped_ds;
+                }
             }
         }
+        let source_started = crate::timing::stopwatch();
+        timing.source_fits += source_jobs.len();
+        let workers = if cfg!(target_arch = "wasm32") {
+            1
+        } else {
+            std::thread::available_parallelism().map_or(1, |cores| {
+                cores.get().saturating_sub(1).max(1).min(source_jobs.len())
+            })
+        };
+        let state_ref: &FollowerState = &*state;
+        let mut source_fits = if workers > 1 {
+            let next_job = std::sync::atomic::AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                let next_job = &next_job;
+                let source_jobs = &source_jobs;
+                let handles = (0..workers)
+                    .map(|_| {
+                        scope.spawn(move || {
+                            let mut done = Vec::new();
+                            loop {
+                                let job =
+                                    next_job.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let Some(&(index, s_start)) = source_jobs.get(job) else {
+                                    return done;
+                                };
+                                done.push((
+                                    index,
+                                    fit_source_projection(
+                                        &frontier[index],
+                                        &base[index],
+                                        axis,
+                                        leaders,
+                                        state_ref,
+                                        s_start,
+                                        fit_tol,
+                                    ),
+                                ));
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .flat_map(|handle| handle.join().expect("follower source fit thread panicked"))
+                    .collect::<Vec<_>>()
+            })
+        } else {
+            source_jobs
+                .iter()
+                .map(|&(index, s_start)| {
+                    (
+                        index,
+                        fit_source_projection(
+                            &frontier[index],
+                            &base[index],
+                            axis,
+                            leaders,
+                            state_ref,
+                            s_start,
+                            fit_tol,
+                        ),
+                    )
+                })
+                .collect()
+        };
+        source_fits.sort_by_key(|(index, _)| *index);
+        timing.source_fit_us += source_started.elapsed_us();
+        let mut source_fits = source_fits.into_iter();
         for i in 0..frontier.len() {
             let raw = &base[i];
             if axis >= raw.axes.len() {
@@ -168,37 +289,22 @@ pub(crate) fn project_followers(
             );
             let base_position = state.e_end.unwrap_or_else(|| axis_pva(raw_axis, t_start).0);
             let (projected, projected_cuts) = if projecting {
-                let source_started = crate::timing::stopwatch();
-                timing.source_fits += 1;
-                let (track, s_end, e_end_relative, semantic) = {
-                    let sig = FollowerSignal::new(&frontier[i], raw, axis, leaders, &*state, 0.0);
-                    let breakpoints = sig.construction_breakpoints(raw_axis);
-                    let track = match sig.constant_value() {
-                        Some(value) => nurbs::bezier::bezier_pieces_to_nurbs(&[BezierPiece {
-                            u_start: t_start,
-                            u_end: t_end,
-                            coeffs: vec![value, value],
-                        }]),
-                        None => fit_axis_from_signal(
-                            axis,
-                            t_start,
-                            t_end,
-                            &breakpoints.fit_seeds,
-                            &sig,
-                            follower_fit_tol(
-                                fit_tol,
-                                follower_tol_scale(&raw.followers, axis) * 0.5,
-                            ),
-                            "follower_source",
-                        )?,
-                    };
-                    let e_end_relative = nurbs::eval::eval(&track.as_view(), t_end);
-                    (track, sig.s_end(), e_end_relative, breakpoints.semantic)
-                };
+                let (source_index, source_result) = source_fits
+                    .next()
+                    .expect("every unprojected follower segment has a source fit");
+                assert_eq!(
+                    source_index, i,
+                    "follower source fit index {source_index} does not match segment {i}"
+                );
+                let SourceProjection {
+                    track,
+                    s_end,
+                    e_end_relative,
+                    semantic_cuts,
+                } = source_result?;
                 state.s_shaped = s_end;
                 state.e_end = Some(base_position + e_end_relative);
-                timing.source_fit_us += source_started.elapsed_us();
-                (track, Some(semantic))
+                (track, Some(semantic_cuts))
             } else {
                 (
                     fit_continuous_axis(axis, raw_axis, base_position, t_start, t_end, fit_tol)?,
@@ -236,6 +342,10 @@ pub(crate) fn project_followers(
                 semantic_cuts,
             });
         }
+        assert!(
+            source_fits.next().is_none(),
+            "follower source fit has no matching projection segment"
+        );
         let kernel_tracks = match kernel {
             Some(kernel) if commit_count > 0 => {
                 let first = state.projected.first().expect("cache covers commits");
@@ -839,10 +949,10 @@ impl FollowerState {
         axis: usize,
         leaders: &[usize],
         upcoming: &[ContinuousSegment],
-    ) {
+    ) -> Option<f64> {
         if let Some(through) = self.ingested_through_t {
             if raw.t_end <= through + GRID_DEDUP_EPS_S {
-                return;
+                return None;
             }
             assert!(
                 raw.t_start >= through - GRID_DEDUP_EPS_S,
@@ -855,7 +965,7 @@ impl FollowerState {
         self.ingested_through_t = Some(raw.t_end);
         let shaped_ds = leader_arc_length(shaped, leaders);
         if shaped_ds <= SPAN_MIN_LEN_MM {
-            return;
+            return Some(shaped_ds);
         }
         let raw_ds = leader_arc_length(raw, leaders);
         if raw_ds > SPAN_MIN_LEN_MM {
@@ -866,14 +976,14 @@ impl FollowerState {
                 .filter(|_| raw.spatial_path)
                 .map_or((0.0, 0.0), |f| (f.ratio, f.ratio_end));
             self.push_span(shaped_ds, r0, r1);
-            return;
+            return Some(shaped_ds);
         }
         let tail = leader_distance(shaped, raw, leaders).min(shaped_ds);
         let lead = shaped_ds - tail;
         let tail_ratio = self.spans.last().map_or(0.0, |span| span.r1);
         if lead <= SPAN_LOOKUP_SLACK_MM {
             self.push_span(shaped_ds, tail_ratio, tail_ratio);
-            return;
+            return Some(shaped_ds);
         }
         if tail > SPAN_MIN_LEN_MM {
             self.push_span(tail, tail_ratio, tail_ratio);
@@ -884,6 +994,7 @@ impl FollowerState {
             .and_then(|seg| seg.followers.iter().find(|f| f.axis_index == axis))
             .map_or(0.0, |f| f.ratio);
         self.push_span(lead, lead_ratio, lead_ratio);
+        Some(shaped_ds)
     }
 
     /// A span shorter than the odometer's float resolution cannot advance
@@ -1299,6 +1410,7 @@ impl<'a> FollowerSignal<'a> {
         axis: usize,
         leaders: &[usize],
         state: &'a FollowerState,
+        s_start: f64,
         e_start: f64,
     ) -> Self {
         let (t0, t1) = projection_support(raw, shaped, axis, leaders);
@@ -1322,8 +1434,8 @@ impl<'a> FollowerSignal<'a> {
         let mut sig = Self {
             state,
             e_start,
-            s_start: state.aligned_span_start(state.s_shaped),
-            e_spans_start: state.spans_e(state.aligned_span_start(state.s_shaped)),
+            s_start,
+            e_spans_start: state.spans_e(s_start),
             shaped_axes,
             leader_pieces,
             raw_delta,

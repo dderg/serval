@@ -89,7 +89,7 @@ fn incremental_arc_cache_matches_direct_integration_in_any_query_order() {
     };
     let raw = shaped.clone();
     let state = FollowerState::default();
-    let sig = FollowerSignal::new(&shaped, &raw, 3, &[0, 1], &state, 0.0);
+    let sig = FollowerSignal::new(&shaped, &raw, 3, &[0, 1], &state, 0.0, 0.0);
     for fraction in [0.85_f64, 0.15, 0.65, 0.35, 0.95, 0.05, 0.5, 0.15] {
         let t = fraction.mul_add(t1 - t0, t0);
         let expected = integrate(&|u| sig.shaped_speed(u), t0, t);
@@ -133,7 +133,7 @@ fn leader_velocity_sign_change_is_seeded_as_a_construction_breakpoint() {
     let shaped = cusp_segment(vec![1.0, -16.0, 1_000.0], vec![2.0, 1e-3], t0, t1);
     let raw = shaped.clone();
     let state = FollowerState::default();
-    let sig = FollowerSignal::new(&shaped, &raw, 3, &[0, 1], &state, 0.0);
+    let sig = FollowerSignal::new(&shaped, &raw, 3, &[0, 1], &state, 0.0, 0.0);
     let breaks = sig.construction_breakpoints(&raw.axes[3]).fit_seeds;
     let vx = |t: f64| super::axis_pva(&shaped.axes[0], t).1;
     let seeded = breaks
@@ -157,7 +157,7 @@ fn endpoint_velocity_zero_dedups_against_the_support_grid() {
     let shaped = cusp_segment(vec![1.0, 0.0, 1_000.0], vec![2.0, 1e-3], t0, t1);
     let raw = shaped.clone();
     let state = FollowerState::default();
-    let sig = FollowerSignal::new(&shaped, &raw, 3, &[0, 1], &state, 0.0);
+    let sig = FollowerSignal::new(&shaped, &raw, 3, &[0, 1], &state, 0.0, 0.0);
     let breaks = sig.construction_breakpoints(&raw.axes[3]).fit_seeds;
     assert_eq!(
         super::axis_pva(&shaped.axes[0], t0).1,
