@@ -214,15 +214,6 @@ mcu_demux_pump(const uint8_t *buf, uint16_t len)
             break;
         case MCU_DEMUX_OUT_KLIPPER: {
             mcu_demux_out_klipper_total++;
-#if CONFIG_MACH_LINUX
-            {
-                const uint8_t *kb = mcu_demux_klipper_buf();
-                uint8_t kl = mcu_demux_klipper_len();
-                fprintf(stderr, "[mcu-demux] KLIPPER len=%u seq=0x%02x total=%u\n",
-                        kl, kl >= 2 ? kb[1] : 0, mcu_demux_out_klipper_total);
-                fflush(stderr);
-            }
-#endif
             const uint8_t *kbuf = mcu_demux_klipper_buf();
             uint8_t klen = mcu_demux_klipper_len();
             if (CONFIG_HAVE_BOOTLOADER_REQUEST && klen == 32

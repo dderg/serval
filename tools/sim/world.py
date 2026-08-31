@@ -27,6 +27,7 @@ VTIME_SHM_SIZE = 256
 VTIME_STRUCT_FMT = "<QIIII"
 
 READY_POLL_S = 0.05
+PRINT_POLL_S = 0.2
 CLOCK_SYNC_BOOT_TIMEOUT = 120.0
 
 _vtime_shm_counter = itertools.count()
@@ -775,13 +776,29 @@ class SimWorld:
 
     def wait_print_done(self, timeout: float = 600.0) -> None:
         deadline = time.monotonic() + timeout
+        log_offset = (
+            self.klippy_log.stat().st_size if self.klippy_log.exists() else 0
+        )
+        log_remainder = ""
         while time.monotonic() < deadline:
             if self.klippy_proc.poll() is not None:
                 raise SimError("klippy exited during print")
-            shutdown_line = self.shutdown_line()
-            if shutdown_line:
-                raise SimError(f"printer shutdown: {shutdown_line}")
-            ps = self.status().get("print_stats", {})
+            if self.klippy_log.exists():
+                with self.klippy_log.open("rb") as log:
+                    log.seek(log_offset)
+                    appended = log.read()
+                    log_offset = log.tell()
+                text = log_remainder + appended.decode(errors="replace")
+                lines = text.splitlines(keepends=True)
+                log_remainder = (
+                    lines.pop()
+                    if lines and not lines[-1].endswith(("\n", "\r"))
+                    else ""
+                )
+                for line in lines:
+                    if "shutdown:" in line.lower():
+                        raise SimError(f"printer shutdown: {line.strip()}")
+            ps = self.status({"print_stats": None}).get("print_stats", {})
             state = ps.get("state", "")
             if state == "complete":
                 return
@@ -789,7 +806,7 @@ class SimWorld:
                 raise SimError(f"print error: {ps.get('message', '')}")
             if state == "cancelled":
                 raise SimError("print cancelled")
-            time.sleep(READY_POLL_S)
+            time.sleep(PRINT_POLL_S)
         raise SimError(f"print did not finish within {timeout}s")
 
     def print_file(
@@ -803,7 +820,7 @@ class SimWorld:
             shutil.copy2(gcode_path, dest)
         self.gcode_ok(f"SDCARD_PRINT_FILE FILENAME={gcode_path.name}")
         self.wait_print_done(timeout=timeout)
-        ps = self.status().get("print_stats", {})
+        ps = self.status({"print_stats": None}).get("print_stats", {})
         return ps.get("total_duration") or ps.get("print_duration") or 0.0
 
     # -------------------------------------------------------- inspect

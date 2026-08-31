@@ -844,7 +844,6 @@ static int gpio_handle_get_linehandle(int chip_fd, struct gpiohandle_request *re
 
 static void auto_endstop_advance(int chip_id, int offset, long delta,
                                  uint64_t step_ns, uint64_t step_cycle) {
-    static long last_log_pos[MAX_AUTO_ENDSTOPS];
     uint64_t now_ns = step_ns;
     pthread_mutex_lock(&auto_endstop_mtx);
     for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
@@ -863,11 +862,6 @@ static void auto_endstop_advance(int chip_id, int offset, long delta,
         ae->pos += delta;
         if (ae->pos < ae->min_pos) ae->min_pos = ae->pos;
         if (ae->pos > ae->max_pos) ae->max_pos = ae->pos;
-        if (labs(ae->pos - last_log_pos[i]) >= 800) {
-            last_log_pos[i] = ae->pos;
-            fprintf(stderr, "[auto-endstop] line=%d pos=%ld (moving)\n",
-                    ae->endstop_line, ae->pos);
-        }
         if (labs(ae->pos) < ae->wall_steps)
             ae->latch_armed = 1;
         if (ae->toward_sign == 0 && ae->latch_armed
@@ -887,14 +881,6 @@ static void auto_endstop_advance(int chip_id, int offset, long delta,
             pthread_mutex_lock(&gpio_state_mtx);
             gpio_lines[ae->endstop_chip][ae->endstop_line].value = trig;
             pthread_mutex_unlock(&gpio_state_mtx);
-            struct timespec vt;
-            clock_gettime(CLOCK_MONOTONIC, &vt);
-            fprintf(stderr,
-                    "[auto-endstop] line=%d pos=%ld toward=%d trig=%d"
-                    " vt_ns=%llu\n",
-                    ae->endstop_line, ae->pos, ae->toward_sign, trig,
-                    (unsigned long long)vt.tv_sec * 1000000000ULL
-                        + (unsigned long long)vt.tv_nsec);
         }
     }
     pthread_mutex_unlock(&auto_endstop_mtx);
