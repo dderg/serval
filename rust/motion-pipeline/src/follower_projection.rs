@@ -64,6 +64,8 @@ fn follower_fit_tol(fit_tol: FitTol, position_scale: f64) -> FitTol {
 /// emit reading bit-identical convolution inputs.
 #[derive(Default)]
 pub(crate) struct ProjectionTiming {
+    pub ingest_us: u128,
+    pub ingests: usize,
     pub source_fit_us: u128,
     pub source_fits: usize,
     pub breakpoints_us: u128,
@@ -75,8 +77,10 @@ pub(crate) struct ProjectionTiming {
 impl ProjectionTiming {
     pub fn detail(&self) -> String {
         format!(
-            "source_fit_us={} source_fits={} breakpoints_us={} kernel_fit_us={} kernel_fits={} \
-             kernel_fit_max_us={}",
+            "ingest_us={} ingests={} source_fit_us={} source_fits={} breakpoints_us={} \
+             kernel_fit_us={} kernel_fits={} kernel_fit_max_us={}",
+            self.ingest_us,
+            self.ingests,
             self.source_fit_us,
             self.source_fits,
             self.breakpoints_us,
@@ -180,16 +184,27 @@ pub(crate) fn project_followers(
         let mut source_jobs = Vec::new();
         if projecting {
             state.active = true;
+            let ingest_started = crate::timing::stopwatch();
+            let first_new = state.ingested_through_t.map_or(0, |through| {
+                base[..frontier.len()]
+                    .partition_point(|raw| raw.t_end <= through + GRID_DEDUP_EPS_S)
+            });
+            let lengths = leader_arc_lengths(
+                &base[first_new..frontier.len()],
+                &frontier[first_new..],
+                leaders,
+            );
+            timing.ingests += lengths.len();
             let mut next_s = state.s_shaped;
-            for (i, shaped) in frontier.iter().enumerate() {
-                if let Some(shaped_ds) =
-                    state.ingest(&base[i], shaped, axis, leaders, &base[i + 1..])
-                {
-                    let s_start = state.aligned_span_start(next_s);
-                    source_jobs.push((i, s_start));
-                    next_s = s_start + shaped_ds;
-                }
+            for (offset, &arc) in lengths.iter().enumerate() {
+                let i = first_new + offset;
+                let shaped_ds =
+                    state.ingest(&base[i], &frontier[i], axis, leaders, &base[i + 1..], arc);
+                let s_start = state.aligned_span_start(next_s);
+                source_jobs.push((i, s_start));
+                next_s = s_start + shaped_ds;
             }
+            timing.ingest_us += ingest_started.elapsed_us();
         }
         let source_started = crate::timing::stopwatch();
         timing.source_fits += source_jobs.len();
@@ -949,11 +964,16 @@ impl FollowerState {
         axis: usize,
         leaders: &[usize],
         upcoming: &[ContinuousSegment],
-    ) -> Option<f64> {
+        (shaped_ds, raw_ds): (f64, f64),
+    ) -> f64 {
         if let Some(through) = self.ingested_through_t {
-            if raw.t_end <= through + GRID_DEDUP_EPS_S {
-                return None;
-            }
+            assert!(
+                raw.t_end > through + GRID_DEDUP_EPS_S,
+                "follower span ingestion saw an already-ingested segment: \
+                 t_end {} within ingested-through {}",
+                raw.t_end,
+                through
+            );
             assert!(
                 raw.t_start >= through - GRID_DEDUP_EPS_S,
                 "follower span ingestion saw an out-of-order segment: \
@@ -963,11 +983,9 @@ impl FollowerState {
             );
         }
         self.ingested_through_t = Some(raw.t_end);
-        let shaped_ds = leader_arc_length(shaped, leaders);
         if shaped_ds <= SPAN_MIN_LEN_MM {
-            return Some(shaped_ds);
+            return shaped_ds;
         }
-        let raw_ds = leader_arc_length(raw, leaders);
         if raw_ds > SPAN_MIN_LEN_MM {
             let (r0, r1) = raw
                 .followers
@@ -976,14 +994,14 @@ impl FollowerState {
                 .filter(|_| raw.spatial_path)
                 .map_or((0.0, 0.0), |f| (f.ratio, f.ratio_end));
             self.push_span(shaped_ds, r0, r1);
-            return Some(shaped_ds);
+            return shaped_ds;
         }
         let tail = leader_distance(shaped, raw, leaders).min(shaped_ds);
         let lead = shaped_ds - tail;
         let tail_ratio = self.spans.last().map_or(0.0, |span| span.r1);
         if lead <= SPAN_LOOKUP_SLACK_MM {
             self.push_span(shaped_ds, tail_ratio, tail_ratio);
-            return Some(shaped_ds);
+            return shaped_ds;
         }
         if tail > SPAN_MIN_LEN_MM {
             self.push_span(tail, tail_ratio, tail_ratio);
@@ -994,7 +1012,7 @@ impl FollowerState {
             .and_then(|seg| seg.followers.iter().find(|f| f.axis_index == axis))
             .map_or(0.0, |f| f.ratio);
         self.push_span(lead, lead_ratio, lead_ratio);
-        Some(shaped_ds)
+        shaped_ds
     }
 
     /// A span shorter than the odometer's float resolution cannot advance
@@ -1243,6 +1261,58 @@ fn leader_arc_length(seg: &ContinuousSegment, leaders: &[usize]) -> f64 {
         .windows(2)
         .map(|window| integrate(&speed, window[0], window[1]))
         .sum()
+}
+
+/// Shaped and raw leader arc lengths for each newly ingested segment. The
+/// integrals are pure per-segment work, so they fan out across cores; results
+/// are ordered by segment and bit-identical to serial evaluation.
+fn leader_arc_lengths(
+    raw: &[ContinuousSegment],
+    shaped: &[ContinuousSegment],
+    leaders: &[usize],
+) -> Vec<(f64, f64)> {
+    assert_eq!(raw.len(), shaped.len());
+    let measure = |i: usize| {
+        (
+            leader_arc_length(&shaped[i], leaders),
+            leader_arc_length(&raw[i], leaders),
+        )
+    };
+    let workers = if cfg!(target_arch = "wasm32") {
+        1
+    } else {
+        std::thread::available_parallelism().map_or(1, |cores| {
+            cores.get().saturating_sub(1).max(1).min(raw.len())
+        })
+    };
+    if workers <= 1 {
+        return (0..raw.len()).map(measure).collect();
+    }
+    let next_job = std::sync::atomic::AtomicUsize::new(0);
+    let mut out: Vec<(usize, (f64, f64))> = std::thread::scope(|scope| {
+        let next_job = &next_job;
+        let measure = &measure;
+        let handles = (0..workers)
+            .map(|_| {
+                scope.spawn(move || {
+                    let mut done = Vec::new();
+                    loop {
+                        let job = next_job.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if job >= raw.len() {
+                            return done;
+                        }
+                        done.push((job, measure(job)));
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("leader arc length thread panicked"))
+            .collect()
+    });
+    out.sort_by_key(|(index, _)| *index);
+    out.into_iter().map(|(_, lengths)| lengths).collect()
 }
 
 fn leader_distance(a: &ContinuousSegment, b: &ContinuousSegment, leaders: &[usize]) -> f64 {
