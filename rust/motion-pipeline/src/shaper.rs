@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, Sender};
@@ -817,7 +817,7 @@ fn fit_axis_column(
     axis: usize,
     force: bool,
     at_stream_boundary: bool,
-    _parallel_targets: bool,
+    target_workers: usize,
     chain: &CompiledChain,
     fit_tol: FitTol,
 ) -> Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError> {
@@ -876,6 +876,7 @@ fn fit_axis_column(
         shaped_breaks,
         input_degree,
         fit_tol,
+        target_workers,
     )
     .map(Some)
 }
@@ -889,37 +890,314 @@ fn fit_axis_targets(
     shaped_breaks: Vec<f64>,
     input_degree: usize,
     fit_tol: FitTol,
+    target_workers: usize,
 ) -> Result<Vec<nurbs::ScalarNurbs>, PostProcessError> {
-    let eval_table = Arc::clone(&table);
-    let sig = ShapedSignal::new_from_polynomial_evaluator(
-        kernel,
-        move |t| eval_table.eval(t),
-        input_breaks,
-        input_degree,
-        move |lo, hi, degree, origin, moments| {
-            table.integrate_moments(lo, hi, degree, origin, moments)
-        },
-    );
-    let mut column = Vec::with_capacity(targets.len());
-    for seg in targets {
-        let track = fit_axis_from_signal(
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let make_sig = || {
+        let eval_table = Arc::clone(&table);
+        let moment_table = Arc::clone(&table);
+        ShapedSignal::new_from_polynomial_evaluator(
+            kernel,
+            move |t| eval_table.eval(t),
+            input_breaks.clone(),
+            input_degree,
+            move |lo, hi, degree, origin, moments| {
+                moment_table.integrate_moments(lo, hi, degree, origin, moments)
+            },
+        )
+    };
+    let max_seed_spans = targets
+        .iter()
+        .map(|target| {
+            let first = shaped_breaks.partition_point(|time| *time <= target.t_start);
+            let last = shaped_breaks.partition_point(|time| *time < target.t_end);
+            last.saturating_sub(first) + 1
+        })
+        .max()
+        .unwrap_or(0);
+    if max_seed_spans < LEADER_SPAN_PARALLEL_THRESHOLD {
+        let fit_target = |target: &ContinuousSegment, sig: &_| {
+            let track = fit_axis_from_signal(
+                axis,
+                target.t_start,
+                target.t_end,
+                &shaped_breaks,
+                sig,
+                fit_tol,
+                "smooth_kernel_target",
+            )?;
+            if !track.control_points().iter().all(|value| value.is_finite()) {
+                return Err(PostProcessError::NonFiniteSample {
+                    axis,
+                    t: target.t_start,
+                });
+            }
+            Ok(track)
+        };
+        let workers = target_workers.max(1).min(targets.len());
+        let mut fitted = if workers > 1 {
+            let next_target = std::sync::atomic::AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                let next_target = &next_target;
+                let fit_target = &fit_target;
+                let handles: Vec<_> = (0..workers)
+                    .map(|_| {
+                        scope.spawn(move || {
+                            let sig = make_sig();
+                            let mut done = Vec::new();
+                            loop {
+                                let index =
+                                    next_target.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let Some(target) = targets.get(index) else {
+                                    return done;
+                                };
+                                done.push((index, fit_target(target, &sig)));
+                            }
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .flat_map(|handle| handle.join().expect("leader target fit thread panicked"))
+                    .collect::<Vec<_>>()
+            })
+        } else {
+            let sig = make_sig();
+            targets
+                .iter()
+                .enumerate()
+                .map(|(index, target)| (index, fit_target(target, &sig)))
+                .collect()
+        };
+        fitted.sort_by_key(|(index, _)| *index);
+        return fitted.into_iter().map(|(_, result)| result).collect();
+    }
+    let plan_started = crate::timing::stopwatch();
+    let seed_sets = targets
+        .iter()
+        .map(|target| fit_seed_times(axis, target.t_start, target.t_end, &shaped_breaks))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut scale_times = seed_sets
+        .iter()
+        .flat_map(|seeds| seeds.iter().copied())
+        .collect::<Vec<_>>();
+    scale_times.sort_by(f64::total_cmp);
+    scale_times.dedup();
+    let plan_workers = target_workers.max(1).min(scale_times.len());
+    let scale_samples = if plan_workers > 1 {
+        let next_time = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let next_time = &next_time;
+            let scale_times = &scale_times;
+            let handles: Vec<_> = (0..plan_workers)
+                .map(|_| {
+                    scope.spawn(move || {
+                        let sig = make_sig();
+                        let mut done = Vec::new();
+                        loop {
+                            let index =
+                                next_time.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(&t) = scale_times.get(index) else {
+                                return done;
+                            };
+                            let (position, velocity, _) = sig.eval_pva(t);
+                            done.push((t.to_bits(), (position, velocity)));
+                        }
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().expect("leader scale probe thread panicked"))
+                .collect::<Vec<_>>()
+        })
+    } else {
+        let sig = make_sig();
+        scale_times
+            .iter()
+            .map(|&t| {
+                let (position, velocity, _) = sig.eval_pva(t);
+                (t.to_bits(), (position, velocity))
+            })
+            .collect()
+    };
+    let scale_cache = scale_samples.into_iter().collect::<HashMap<_, _>>();
+    let mut plans = Vec::with_capacity(targets.len());
+    for (target, seeds) in targets.iter().zip(seed_sets) {
+        let (mut position_scale, mut velocity_scale) = (0.0_f64, 0.0_f64);
+        for &t in &seeds {
+            let &(position, velocity) = scale_cache
+                .get(&t.to_bits())
+                .expect("leader scale probe is missing");
+            if position.is_finite() {
+                position_scale = position_scale.max(position.abs());
+            }
+            if velocity.is_finite() {
+                velocity_scale = velocity_scale.max(velocity.abs());
+            }
+        }
+        let time_scale = target.t_start.abs().max(target.t_end.abs());
+        let floors = ladder_resolution_floor_from_scales(
+            position_scale,
+            velocity_scale,
+            time_scale,
+            fit_tol,
+        );
+        plans.push(fit_plan_from_seeds(
+            seeds,
+            floors,
+            target.t_start,
+            target.t_end,
+        ));
+    }
+    let jobs = plans
+        .iter()
+        .enumerate()
+        .flat_map(|(target_index, plan)| {
+            (0..plan.seeds.len() - 1).map(move |span_index| (target_index, span_index))
+        })
+        .collect::<Vec<_>>();
+    let plan_us = plan_started.elapsed_us();
+    if crate::timing::is_slow_phase(plan_us) {
+        crate::timing::log_slow_phase(
+            "leader_plan",
+            plan_us,
+            crate::timing::PhaseWorkload {
+                segments: targets.len(),
+                axes: 1,
+                pieces: jobs.len(),
+                ..Default::default()
+            },
+            &format!("axis={axis}"),
+        );
+    }
+    let fit_span = |target_index: usize, span_index: usize, sig: &_| {
+        let plan = &plans[target_index];
+        let t_start = plan.seeds[span_index];
+        let t_end = plan.seeds[span_index + 1];
+        let mut refinement_splits = 0;
+        let mut pieces = Vec::new();
+        refine_shaped_span(
             axis,
-            seg.t_start,
-            seg.t_end,
-            &shaped_breaks,
-            &sig,
+            sig,
+            t_start,
+            t_end,
             fit_tol,
             "smooth_kernel_target",
-        )?;
-        if !track.control_points().iter().all(|v| v.is_finite()) {
+            f64::INFINITY,
+            plan.floors,
+            plan.max_depth,
+            0,
+            t_start,
+            t_end,
+            &mut refinement_splits,
+            &mut pieces,
+        )
+        .map(|()| (pieces, refinement_splits))
+    };
+    type SpanFit = Result<(Vec<BezierPiece>, usize), PostProcessError>;
+    let workers = target_workers.max(1).min(jobs.len());
+    let spans_started = crate::timing::stopwatch();
+    let mut fitted: Vec<(usize, usize, SpanFit)> = if workers > 1 {
+        let next_job = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let next_job = &next_job;
+            let fit_span = &fit_span;
+            let jobs = &jobs;
+            let handles: Vec<_> = (0..workers)
+                .map(|_| {
+                    scope.spawn(move || {
+                        let sig = make_sig();
+                        let mut done = Vec::new();
+                        loop {
+                            let index = next_job.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(&(target_index, span_index)) = jobs.get(index) else {
+                                return done;
+                            };
+                            done.push((
+                                target_index,
+                                span_index,
+                                fit_span(target_index, span_index, &sig),
+                            ));
+                        }
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().expect("leader span fit thread panicked"))
+                .collect()
+        })
+    } else {
+        let sig = make_sig();
+        jobs.iter()
+            .map(|&(target_index, span_index)| {
+                (
+                    target_index,
+                    span_index,
+                    fit_span(target_index, span_index, &sig),
+                )
+            })
+            .collect()
+    };
+    fitted.sort_by_key(|(target_index, span_index, _)| (*target_index, *span_index));
+    let spans_us = spans_started.elapsed_us();
+    if crate::timing::is_slow_phase(spans_us) {
+        crate::timing::log_slow_phase(
+            "leader_spans",
+            spans_us,
+            crate::timing::PhaseWorkload {
+                segments: targets.len(),
+                axes: 1,
+                pieces: jobs.len(),
+                ..Default::default()
+            },
+            &format!("axis={axis} workers={workers}"),
+        );
+    }
+    let mut grouped: Vec<Vec<SpanFit>> = (0..targets.len()).map(|_| Vec::new()).collect();
+    for (target_index, _, result) in fitted {
+        grouped[target_index].push(result);
+    }
+    let mut tracks = Vec::with_capacity(targets.len());
+    for (target_index, results) in grouped.into_iter().enumerate() {
+        let mut pieces = Vec::with_capacity(plans[target_index].seeds.len());
+        let mut refinement_splits = 0;
+        let mut needs_serial_fit = false;
+        for result in results {
+            match result {
+                Ok((mut span_pieces, splits)) => {
+                    refinement_splits += splits;
+                    pieces.append(&mut span_pieces);
+                }
+                Err(_) => needs_serial_fit = true,
+            }
+        }
+        let track = if needs_serial_fit || refinement_splits > MAX_FIT_REFINEMENT_SPLITS {
+            let sig = make_sig();
+            fit_axis_from_signal(
+                axis,
+                targets[target_index].t_start,
+                targets[target_index].t_end,
+                &shaped_breaks,
+                &sig,
+                fit_tol,
+                "smooth_kernel_target",
+            )?
+        } else {
+            fit_pieces_to_nurbs(axis, pieces)?
+        };
+        if !track.control_points().iter().all(|value| value.is_finite()) {
             return Err(PostProcessError::NonFiniteSample {
                 axis,
-                t: seg.t_start,
+                t: targets[target_index].t_start,
             });
         }
-        column.push(track);
+        tracks.push(track);
     }
-    Ok(column)
+    Ok(tracks)
 }
 
 fn fit_leader_axes(
@@ -946,9 +1224,15 @@ fn fit_leader_axes(
         u128,
     );
     let parallel = cfg!(not(target_arch = "wasm32")) && axis_chains.len() > 1 && !fresh.is_empty();
-    let parallel_targets = cfg!(not(target_arch = "wasm32"))
-        && fresh.len() >= 4
-        && std::thread::available_parallelism().is_ok_and(|cores| cores.get() >= 4);
+    let target_workers = if cfg!(target_arch = "wasm32") || fresh.len() < 4 {
+        1
+    } else {
+        std::thread::available_parallelism()
+            .map_or(1, |cores| cores.get())
+            .div_ceil(axis_chains.len().max(1))
+            .min(4)
+            .min(fresh.len())
+    };
     let columns: Vec<TimedColumn> = if parallel {
         let fresh_ref: &[ContinuousSegment] = fresh;
         std::thread::scope(|scope| {
@@ -964,7 +1248,7 @@ fn fit_leader_axes(
                             axis,
                             force,
                             at_stream_boundary,
-                            parallel_targets,
+                            target_workers,
                             chain,
                             fit_tol,
                         );
@@ -989,7 +1273,7 @@ fn fit_leader_axes(
                     axis,
                     force,
                     at_stream_boundary,
-                    parallel_targets,
+                    target_workers,
                     chain,
                     fit_tol,
                 );
@@ -1526,6 +1810,7 @@ fn eval_segment_axis(seg: &ContinuousSegment, axis: usize, t: f64) -> f64 {
 }
 
 const MAX_FIT_REFINEMENT_SPLITS: usize = 512;
+const LEADER_SPAN_PARALLEL_THRESHOLD: usize = 512;
 const MIN_DEVICE_INTERVAL_S: f64 = 2e-9;
 
 /// A span's acceleration is read off a quintic whose odd coefficients are
@@ -1569,6 +1854,15 @@ fn ladder_resolution_floor<S: TrackSignal>(
             velocity_scale = velocity_scale.max(velocity.abs());
         }
     }
+    ladder_resolution_floor_from_scales(position_scale, velocity_scale, time_scale, fit_tol)
+}
+
+fn ladder_resolution_floor_from_scales(
+    position_scale: f64,
+    velocity_scale: f64,
+    time_scale: f64,
+    fit_tol: FitTol,
+) -> LadderFloors {
     let sample_noise = f64::EPSILON * nurbs::fmadd(time_scale, velocity_scale, position_scale);
     let representable = MIN_DEVICE_INTERVAL_S.max(8.0 * f64::EPSILON * time_scale);
     LadderFloors {
@@ -1606,6 +1900,88 @@ fn coalesce_degenerate_seeds(seeds: &mut Vec<f64>, minimum_span: f64) {
     *seeds = kept;
 }
 
+struct FitPlan {
+    seeds: Vec<f64>,
+    floors: LadderFloors,
+    max_depth: u32,
+}
+
+fn fit_seed_times(
+    axis: usize,
+    t_start: f64,
+    t_end: f64,
+    seed_breakpoints: &[f64],
+) -> Result<Vec<f64>, PostProcessError> {
+    if !t_start.is_finite() || !t_end.is_finite() || t_end <= t_start {
+        return Err(PostProcessError::DegenerateAxisTrack { axis });
+    }
+    let mut seeds = Vec::with_capacity(seed_breakpoints.len() + 2);
+    seeds.push(t_start);
+    seeds.extend(
+        seed_breakpoints
+            .iter()
+            .copied()
+            .filter(|time| *time > t_start && *time < t_end && time.is_finite()),
+    );
+    seeds.push(t_end);
+    seeds.sort_by(f64::total_cmp);
+    seeds.dedup();
+    *seeds.first_mut().expect("fit seeds are empty") = t_start;
+    if seeds.len() == 1 {
+        seeds.push(t_end);
+    } else {
+        *seeds.last_mut().expect("fit seeds are empty") = t_end;
+    }
+    Ok(seeds)
+}
+
+fn fit_plan_from_seeds(
+    mut seeds: Vec<f64>,
+    floors: LadderFloors,
+    t_start: f64,
+    t_end: f64,
+) -> FitPlan {
+    coalesce_degenerate_seeds(&mut seeds, floors.cubic);
+    let max_depth = libm::log2((t_end - t_start) / floors.cubic).ceil().max(0.0) as u32;
+    FitPlan {
+        seeds,
+        floors,
+        max_depth,
+    }
+}
+
+fn prepare_fit_plan<S: TrackSignal>(
+    axis: usize,
+    t_start: f64,
+    t_end: f64,
+    seed_breakpoints: &[f64],
+    sig: &S,
+    fit_tol: FitTol,
+) -> Result<FitPlan, PostProcessError> {
+    let seeds = fit_seed_times(axis, t_start, t_end, seed_breakpoints)?;
+    let time_scale = t_start.abs().max(t_end.abs());
+    let floors = ladder_resolution_floor(sig, &seeds, time_scale, fit_tol);
+    Ok(fit_plan_from_seeds(seeds, floors, t_start, t_end))
+}
+
+fn fit_pieces_to_nurbs(
+    axis: usize,
+    mut pieces: Vec<nurbs::bezier::BezierPiece>,
+) -> Result<nurbs::ScalarNurbs, PostProcessError> {
+    if pieces.is_empty() {
+        return Err(PostProcessError::DegenerateAxisTrack { axis });
+    }
+    let max_len = pieces
+        .iter()
+        .map(|piece| piece.coeffs.len())
+        .max()
+        .unwrap_or(1);
+    for piece in &mut pieces {
+        piece.coeffs.resize(max_len, 0.0);
+    }
+    Ok(bezier_pieces_to_nurbs(&pieces))
+}
+
 pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
     axis: usize,
     t_start: f64,
@@ -1637,33 +2013,10 @@ fn fit_axis_from_signal_with_velocity_budget<S: TrackSignal>(
     fit_context: &'static str,
     velocity_budget: f64,
 ) -> Result<nurbs::ScalarNurbs, PostProcessError> {
-    if !t_start.is_finite() || !t_end.is_finite() || t_end <= t_start {
-        return Err(PostProcessError::DegenerateAxisTrack { axis });
-    }
-    let mut seeds = Vec::with_capacity(seed_breakpoints.len() + 2);
-    seeds.push(t_start);
-    seeds.extend(
-        seed_breakpoints
-            .iter()
-            .copied()
-            .filter(|time| *time > t_start && *time < t_end && time.is_finite()),
-    );
-    seeds.push(t_end);
-    seeds.sort_by(f64::total_cmp);
-    seeds.dedup();
-    *seeds.first_mut().expect("fit seeds are empty") = t_start;
-    if seeds.len() == 1 {
-        seeds.push(t_end);
-    } else {
-        *seeds.last_mut().expect("fit seeds are empty") = t_end;
-    }
-    let time_scale = t_start.abs().max(t_end.abs());
-    let floors = ladder_resolution_floor(sig, &seeds, time_scale, fit_tol);
-    coalesce_degenerate_seeds(&mut seeds, floors.cubic);
-    let max_depth = libm::log2((t_end - t_start) / floors.cubic).ceil().max(0.0) as u32;
+    let plan = prepare_fit_plan(axis, t_start, t_end, seed_breakpoints, sig, fit_tol)?;
     let mut refinement_splits = 0;
-    let mut pieces = Vec::with_capacity(seeds.len());
-    for span in seeds.windows(2) {
+    let mut pieces = Vec::with_capacity(plan.seeds.len());
+    for span in plan.seeds.windows(2) {
         refine_shaped_span(
             axis,
             sig,
@@ -1672,8 +2025,8 @@ fn fit_axis_from_signal_with_velocity_budget<S: TrackSignal>(
             fit_tol,
             fit_context,
             velocity_budget,
-            floors,
-            max_depth,
+            plan.floors,
+            plan.max_depth,
             0,
             span[0],
             span[1],
@@ -1681,18 +2034,7 @@ fn fit_axis_from_signal_with_velocity_budget<S: TrackSignal>(
             &mut pieces,
         )?;
     }
-    if pieces.is_empty() {
-        return Err(PostProcessError::DegenerateAxisTrack { axis });
-    }
-    let max_len = pieces
-        .iter()
-        .map(|piece| piece.coeffs.len())
-        .max()
-        .unwrap_or(1);
-    for piece in &mut pieces {
-        piece.coeffs.resize(max_len, 0.0);
-    }
-    Ok(bezier_pieces_to_nurbs(&pieces))
+    fit_pieces_to_nurbs(axis, pieces)
 }
 
 struct SpanTruth {

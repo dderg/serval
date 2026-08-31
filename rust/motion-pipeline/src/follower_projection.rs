@@ -1205,7 +1205,7 @@ struct LeaderPieces {
 
 impl LeaderPieces {
     fn of(axis: &ContinuousAxis) -> Option<Self> {
-        match axis {
+        let candidate = match axis {
             ContinuousAxis::Spline(curve) => Some(Self {
                 base: 0.0,
                 pieces: extract_bezier_pieces(curve),
@@ -1231,7 +1231,33 @@ impl LeaderPieces {
                 contiguous.then_some(Self { base: 0.0, pieces })
             }
             _ => None,
-        }
+        }?;
+        candidate.matches(axis).then_some(candidate)
+    }
+
+    fn matches(&self, axis: &ContinuousAxis) -> bool {
+        const PROBES: [f64; 3] = [0.211_324_865_405_187_13, 0.5, 0.788_675_134_594_812_9];
+        self.pieces.iter().all(|piece| {
+            let duration = piece.u_end - piece.u_start;
+            duration.is_finite()
+                && duration > 0.0
+                && PROBES.into_iter().all(|fraction| {
+                    let t = piece.u_start + fraction * duration;
+                    let (position, velocity, acceleration) =
+                        polynomial_pva(&piece.coeffs, t - piece.u_start);
+                    let cached = [self.base + position, velocity, acceleration];
+                    let direct = axis_pva(axis, t);
+                    cached
+                        .into_iter()
+                        .zip([direct.0, direct.1, direct.2])
+                        .all(|(left, right)| {
+                            left.is_finite()
+                                && right.is_finite()
+                                && (left - right).abs()
+                                    <= 1e-8 * left.abs().max(right.abs()).max(1.0)
+                        })
+                })
+        })
     }
 
     fn pva(&self, t: f64) -> Option<(f64, f64, f64)> {
@@ -1715,7 +1741,8 @@ impl TrackSignal for FollowerSignal<'_> {
         let leaders = self
             .shaped_axes
             .iter()
-            .map(|axis| (axis_pva(axis, t), axis.domain()))
+            .enumerate()
+            .map(|(index, axis)| (axis_pva(axis, t), self.leader_pva(index, t), axis.domain()))
             .collect::<Vec<_>>();
         let raw = self
             .raw_delta

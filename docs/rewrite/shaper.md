@@ -264,6 +264,18 @@ of dividing by a near-zero duration. Finally
 sees one degree per segment. Matching endpoint `(p, v, a)` per span keeps
 the emitted track C² at every seam by construction.
 
+Leader refits use ordered parallel work without changing the fitted signal.
+Axes run concurrently. Ordinary windows distribute whole target segments;
+a target with at least 512 exact cut spans distributes those spans instead.
+If the parallel spans exceed the global refinement budget, that target is
+rerun serially so failure behavior stays deterministic.
+
+Follower projection may evaluate a leader through cached local Bezier power
+polynomials. Every cache candidate is checked against the original NURBS at
+interior points before use. An ill-conditioned conversion falls back to direct
+NURBS evaluation; it must never inject false velocity or acceleration into the
+follower source.
+
 ## Corner deviation and kernel smoothing are separate knobs
 
 Kernels round corners: convolving a corner traversed at accel `a` with a
