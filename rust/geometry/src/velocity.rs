@@ -22,6 +22,7 @@ const VELOCITY_EPS_MM_S: f64 = 1e-9;
 const MIN_INTEGRATION_TOL: f64 = 1e-9;
 const NEGATIVE_VELOCITY_TOL_MM_S: f64 = 1e-6;
 const CONSISTENCY_TOL: f64 = 1e-6;
+const RECONSTRUCT_WORKERS_MAX: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VelSample {
@@ -215,6 +216,26 @@ pub fn plan_velocity_stops(
     max_extrude_only_accel_mm_s2: f64,
     entry: BoundaryState,
 ) -> Result<VelocityProfile, VelocityError> {
+    plan_velocity_stops_reconstruct_prefix(
+        moves,
+        stop_before,
+        integration_tol,
+        max_extrude_only_velocity_mm_s,
+        max_extrude_only_accel_mm_s2,
+        entry,
+        moves.len(),
+    )
+}
+
+pub fn plan_velocity_stops_reconstruct_prefix(
+    moves: &[crate::Move],
+    stop_before: &[bool],
+    integration_tol: f64,
+    max_extrude_only_velocity_mm_s: f64,
+    max_extrude_only_accel_mm_s2: f64,
+    entry: BoundaryState,
+    reconstruct_count: usize,
+) -> Result<VelocityProfile, VelocityError> {
     let tol = integration_tol;
     validate_config(
         tol,
@@ -225,6 +246,10 @@ pub fn plan_velocity_stops(
 
     let n = moves.len();
     assert_eq!(stop_before.len(), n, "one stop flag per move");
+    assert!(
+        reconstruct_count <= n,
+        "cannot reconstruct {reconstruct_count} moves from a {n}-move plan"
+    );
     if let Some(m) = moves.iter().find(|m| m.limits.max_jerk_mm_s3.is_finite()) {
         return Err(VelocityError::FiniteJerkUnsupported {
             line_no: m.source.start_line,
@@ -254,7 +279,15 @@ pub fn plan_velocity_stops(
     forward_pass(moves, &caps, &geo, &mut plan.v, tol)?;
     let (barrier, v_barrier) = reverse_brake_envelope(moves, &caps, &geo, &mut plan.v, tol)?;
     check_entry_brake(moves, &caps, &geo, &plan.v, entry, tol)?;
-    let (out, boundaries) = reconstruct_runs(moves, &caps, &plan, &geo, entry, tol, &mut report)?;
+    let (out, boundaries) = reconstruct_runs(
+        &moves[..reconstruct_count],
+        &caps[..reconstruct_count],
+        &plan,
+        &geo,
+        entry,
+        tol,
+        &mut report,
+    )?;
 
     Ok(VelocityProfile {
         moves: out,
@@ -556,15 +589,76 @@ fn reconstruct_runs(
             })
             .collect();
         let run_start_line = moves[run_start].source.start_line;
-        let mut reconstructed_phases: Vec<Vec<LawSegment>> = Vec::with_capacity(run_members.len());
-        for (idx, member) in run_members.iter().enumerate() {
-            let entry = if idx == 0 {
-                geo.run_start_v[run_start]
-            } else {
-                run_members[idx - 1].exit_v
-            };
-            let profile = reconstruct::member_profile(idx, member, entry, member.exit_v).map_err(
-                |e| match e {
+        let entries = (0..run_members.len())
+            .map(|idx| {
+                if idx == 0 {
+                    geo.run_start_v[run_start]
+                } else {
+                    run_members[idx - 1].exit_v
+                }
+            })
+            .collect::<Vec<_>>();
+        let workers = if cfg!(not(target_arch = "wasm32")) {
+            std::thread::available_parallelism()
+                .map_or(1, |cores| cores.get())
+                .min(RECONSTRUCT_WORKERS_MAX)
+                .min(run_members.len())
+        } else {
+            1
+        };
+        let mut indexed_profiles = if workers > 1 {
+            let next_member = std::sync::atomic::AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                let next_member = &next_member;
+                let handles = (0..workers)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            let mut profiles = Vec::new();
+                            loop {
+                                let idx =
+                                    next_member.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let Some(member) = run_members.get(idx) else {
+                                    return profiles;
+                                };
+                                profiles.push((
+                                    idx,
+                                    reconstruct::member_profile(
+                                        idx,
+                                        member,
+                                        entries[idx],
+                                        member.exit_v,
+                                    ),
+                                ));
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .flat_map(|handle| {
+                        handle
+                            .join()
+                            .expect("velocity reconstruction thread panicked")
+                    })
+                    .collect::<Vec<_>>()
+            })
+        } else {
+            run_members
+                .iter()
+                .enumerate()
+                .map(|(idx, member)| {
+                    (
+                        idx,
+                        reconstruct::member_profile(idx, member, entries[idx], member.exit_v),
+                    )
+                })
+                .collect()
+        };
+        indexed_profiles.sort_by_key(|(idx, _)| *idx);
+        let reconstructed_phases = indexed_profiles
+            .into_iter()
+            .map(|(_, result)| {
+                result.map_err(|error| match error {
                     reconstruct::ReconstructError::Diverged => VelocityError::Diverged {
                         line_no: run_start_line,
                     },
@@ -578,10 +672,9 @@ fn reconstruct_runs(
                         entry_v,
                         exit_v,
                     },
-                },
-            )?;
-            reconstructed_phases.push(profile);
-        }
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let reconstructed: Vec<Vec<(f64, f64, f64)>> = reconstructed_phases
             .iter()
             .enumerate()

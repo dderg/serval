@@ -33,5 +33,5 @@ pub use surface::{
 };
 pub use velocity::{
     BoundaryState, LawSegment, MoveVelocity, ScalarLaw, VelSample, VelocityError, VelocityProfile,
-    VelocityReport, plan_velocity_stops,
+    VelocityReport, plan_velocity_stops, plan_velocity_stops_reconstruct_prefix,
 };

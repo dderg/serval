@@ -1051,6 +1051,28 @@ fn plan_stops_full(
 }
 
 #[test]
+fn reconstructed_prefix_matches_full_plan() {
+    let (moves, stop_before) = wipe_into_retract();
+    let full = plan_stops_full(&moves, &stop_before, BoundaryState::REST).unwrap();
+    for count in 0..=moves.len() {
+        let prefix = plan_velocity_stops_reconstruct_prefix(
+            &moves,
+            &stop_before,
+            1e-4,
+            25.0,
+            1000.0,
+            BoundaryState::REST,
+            count,
+        )
+        .unwrap();
+        assert_eq!(prefix.barrier, full.barrier);
+        assert_eq!(prefix.v_barrier, full.v_barrier);
+        assert_eq!(prefix.moves, full.moves[..count]);
+        assert_eq!(prefix.boundaries, full.boundaries[..=count]);
+    }
+}
+
+#[test]
 fn mid_brake_seam_replans_from_the_carried_state() {
     let (moves, stop_before) = wipe_into_retract();
     let p = plan_stops_full(&moves, &stop_before, BoundaryState::REST).unwrap();

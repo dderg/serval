@@ -1,7 +1,7 @@
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{CurvatureProfile, Segment};
-use geometry::{BoundaryState, Move, VelocityProfile, plan_velocity_stops};
+use geometry::{BoundaryState, Move, VelocityProfile, plan_velocity_stops_reconstruct_prefix};
 
 use crate::types::{
     Control, PlannedItem, PlannedMove, StreamConfig, StreamInput, jerk_limited_brake_time,
@@ -168,18 +168,19 @@ impl Planner {
         true
     }
 
-    fn plan(&self) -> VelocityProfile {
+    fn plan(&self, reconstruct_count: usize) -> VelocityProfile {
         let stop_before: Vec<bool> = (0..self.moves.len())
             .map(|i| i > 0 && self.stop_at_seam(i))
             .collect();
         let clock = crate::timing::stopwatch();
-        let profile = plan_velocity_stops(
+        let profile = plan_velocity_stops_reconstruct_prefix(
             &self.moves,
             &stop_before,
             self.config.integration_tol,
             self.config.max_extrude_only_velocity_mm_s,
             self.config.max_extrude_only_accel_mm_s2,
             self.entry,
+            reconstruct_count,
         )
         .unwrap_or_else(|e| panic!("planner: velocity plan failed: {e:?}"));
         tracing::debug!(
@@ -188,6 +189,7 @@ impl Planner {
             line_lo = self.moves.first().map_or(0, |m| m.source.start_line),
             line_hi = self.moves.last().map_or(0, |m| m.source.start_line),
             n = self.moves.len(),
+            reconstructed = profile.moves.len(),
             barrier = profile.barrier,
             v_barrier = profile.v_barrier,
             entry_v = self.entry.v,
@@ -206,7 +208,7 @@ impl Planner {
         if self.moves.is_empty() {
             return true;
         }
-        let profile = self.plan();
+        let profile = self.plan(self.moves.len());
         let n = self.moves.len();
         self.emit(n, &profile, output)
     }
@@ -214,10 +216,10 @@ impl Planner {
     /// Emit the prefix up to the furthest-forward clean seam that is inside
     /// the finality barrier and clear of the brake-to-rest setback.
     fn emit_committable(&mut self, output: &Sender<PlannedItem>) -> bool {
-        let profile = self.plan();
+        let envelope = self.plan(0);
         let horizon = self.terminal_independent_seam();
         let mut chosen = 0usize;
-        for i in 1..=profile.barrier.min(horizon) {
+        for i in 1..=envelope.barrier.min(horizon) {
             if self.is_clean_seam(i) {
                 chosen = i;
             }
@@ -225,6 +227,7 @@ impl Planner {
         if chosen == 0 {
             return true;
         }
+        let profile = self.plan(chosen);
         self.emit(chosen, &profile, output)
     }
 
@@ -266,7 +269,7 @@ impl Planner {
         profile: &VelocityProfile,
         output: &Sender<PlannedItem>,
     ) -> bool {
-        debug_assert_eq!(profile.moves.len(), self.moves.len());
+        debug_assert_eq!(profile.moves.len(), count);
         self.entry = profile.boundaries[count];
         for (geometry, velocity) in self.moves.drain(..count).zip(profile.moves.iter().cloned()) {
             if output
