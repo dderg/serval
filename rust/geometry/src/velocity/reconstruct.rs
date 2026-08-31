@@ -175,25 +175,32 @@ pub(super) fn member_profile(
             let exact_g = |x: f64| -> Option<f64> {
                 Some(forward_speed(kin, entry_v, x)? - backward_speed(kin, exit_v, x)?)
             };
-            let radius = 1e-3 * (1.0 + len);
-            let local_lo = (solved - radius).max(0.0);
-            let local_hi = (solved + radius).min(len);
-            let local_brackets = exact_g(local_lo).ok_or(ReconstructError::Diverged)? <= 0.0
-                && exact_g(local_hi).ok_or(ReconstructError::Diverged)? >= 0.0;
-            let (mut exact_lo, mut exact_hi, iterations) = if local_brackets {
-                (local_lo, local_hi, ONSET_EXACT_REFINE_ITERS)
-            } else {
-                (0.0, len, ONSET_BISECT_ITERS)
-            };
-            for _ in 0..iterations {
-                let mid = 0.5 * (exact_lo + exact_hi);
-                if exact_g(mid).ok_or(ReconstructError::Diverged)? <= 0.0 {
-                    exact_lo = mid;
+            let candidate_forward =
+                forward_speed(kin, entry_v, solved).ok_or(ReconstructError::Diverged)?;
+            let candidate_backward =
+                backward_speed(kin, exit_v, solved).ok_or(ReconstructError::Diverged)?;
+            let candidate_residual = candidate_forward - candidate_backward;
+            if candidate_residual.abs() > 0.25 * joint_tol(candidate_forward) {
+                let radius = 1e-3 * (1.0 + len);
+                let local_lo = (solved - radius).max(0.0);
+                let local_hi = (solved + radius).min(len);
+                let local_brackets = exact_g(local_lo).ok_or(ReconstructError::Diverged)? <= 0.0
+                    && exact_g(local_hi).ok_or(ReconstructError::Diverged)? >= 0.0;
+                let (mut exact_lo, mut exact_hi, iterations) = if local_brackets {
+                    (local_lo, local_hi, ONSET_EXACT_REFINE_ITERS)
                 } else {
-                    exact_hi = mid;
+                    (0.0, len, ONSET_BISECT_ITERS)
+                };
+                for _ in 0..iterations {
+                    let mid = 0.5 * (exact_lo + exact_hi);
+                    if exact_g(mid).ok_or(ReconstructError::Diverged)? <= 0.0 {
+                        exact_lo = mid;
+                    } else {
+                        exact_hi = mid;
+                    }
                 }
+                solved = 0.5 * (exact_lo + exact_hi);
             }
-            solved = 0.5 * (exact_lo + exact_hi);
         }
         if g(len).ok_or(ReconstructError::Diverged)? <= joint_tol(exit_v) {
             len
