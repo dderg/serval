@@ -130,6 +130,56 @@ fn fast_print_drain_probe() {
 }
 
 #[test]
+fn budgeted_multi_motor_drain_matches_serial_output() {
+    let configs = (0..4)
+        .map(|motor| MotorConfig {
+            oid: OID + motor,
+            ..cfg()
+        })
+        .collect::<Vec<_>>();
+    let mut serial = StepShim::new(configs.clone(), 8);
+    let mut budgeted = StepShim::new(configs, 8);
+    let view = span(1_000, LATTICE_OFFSET, 0.5, 50_000);
+    for motor in 0..4 {
+        serial.reset_position(motor, 0);
+        budgeted.reset_position(motor, 0);
+        serial.push_spans(motor, &[view.clone()]).unwrap();
+        budgeted.push_spans(motor, &[view.clone()]).unwrap();
+    }
+
+    let serial_frames = serial.drain(u64::MAX).unwrap();
+    let budgeted_frames = budgeted
+        .drain_budgeted(
+            u64::MAX,
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(1)),
+        )
+        .unwrap();
+    let for_oid = |frames: &[StepFrame], oid: u32| {
+        frames
+            .iter()
+            .copied()
+            .filter(|frame| match frame {
+                StepFrame::ResetStepClock { oid: frame_oid, .. }
+                | StepFrame::SetNextStepDir { oid: frame_oid, .. }
+                | StepFrame::QueueStep { oid: frame_oid, .. }
+                | StepFrame::QueueStepHp { oid: frame_oid, .. } => *frame_oid == oid,
+            })
+            .collect::<Vec<_>>()
+    };
+    for motor in 0..4 {
+        let oid = OID + motor;
+        assert_eq!(
+            replayed_step_clocks(&for_oid(&budgeted_frames, oid)),
+            replayed_step_clocks(&for_oid(&serial_frames, oid))
+        );
+        assert_eq!(
+            budgeted.commanded_steps(motor as usize),
+            serial.commanded_steps(motor as usize)
+        );
+    }
+}
+
+#[test]
 #[ignore = "manual perf probe: cargo test -p step-shim drain_speed_probe -- --ignored --nocapture"]
 fn drain_speed_probe() {
     const FREQ: f64 = 520_000_000.0;

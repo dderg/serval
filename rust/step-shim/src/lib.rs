@@ -369,6 +369,50 @@ impl MotorState {
     }
 }
 
+fn drain_motor(
+    motor: usize,
+    state: &mut MotorState,
+    up_to_clock: u64,
+    deadline: Option<std::time::Instant>,
+) -> Result<Vec<StepFrame>, ShimError> {
+    let started = std::time::Instant::now();
+    let queued_before = state.queue.len();
+    let mut frames = Vec::new();
+    let result = state
+        .cursor
+        .advance(
+            motor,
+            &state.cfg,
+            &mut state.queue,
+            up_to_clock,
+            &mut state.pending,
+            deadline,
+        )
+        .and_then(|()| state.emit(motor, &mut frames));
+    let elapsed = started.elapsed();
+    let evals = crate::root_cursor::EVAL_COUNT.with(std::cell::Cell::take);
+    let bounds = crate::root_cursor::BOUNDS_COUNT.with(std::cell::Cell::take);
+    let windows = crate::root_cursor::WINDOW_COUNT.with(std::cell::Cell::take);
+    let cert_none = crate::root_cursor::CERT_NONE_COUNT.with(std::cell::Cell::take);
+    let pruned = crate::root_cursor::PRUNE_COUNT.with(std::cell::Cell::take);
+    if elapsed > std::time::Duration::from_millis(4) {
+        tracing::warn!(
+            subsystem = "pump",
+            event = "shim_motor_drain_slow",
+            motor,
+            elapsed_us = elapsed.as_micros() as u64,
+            queued_before,
+            evals,
+            bounds,
+            windows,
+            cert_none,
+            pruned,
+            "one motor's root search dominated the shim drain"
+        );
+    }
+    result.map(|()| frames)
+}
+
 #[derive(Debug)]
 pub struct StepShim {
     motors: Vec<MotorState>,
@@ -508,7 +552,28 @@ impl StepShim {
         up_to_clock: u64,
         deadline: Option<std::time::Instant>,
     ) -> Result<Vec<StepFrame>, ShimError> {
-        let mut frames = Vec::new();
+        let parallel = deadline.is_some()
+            && cfg!(not(target_arch = "wasm32"))
+            && self.motors.len() > 1
+            && std::thread::available_parallelism().is_ok_and(|cores| cores.get() > 1);
+        if parallel {
+            return std::thread::scope(|scope| {
+                let handles = self
+                    .motors
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(motor, state)| {
+                        scope.spawn(move || drain_motor(motor, state, up_to_clock, deadline))
+                    })
+                    .collect::<Vec<_>>();
+                let mut frames = Vec::new();
+                for handle in handles {
+                    frames.extend(handle.join().expect("motor root search thread panicked")?);
+                }
+                Ok(frames)
+            });
+        }
+
         let count = self.motors.len();
         let start = if count == 0 {
             0
@@ -516,47 +581,15 @@ impl StepShim {
             self.drain_rotation = (self.drain_rotation + 1) % count;
             self.drain_rotation
         };
+        let mut frames = Vec::new();
         for offset in 0..count {
             let motor = (start + offset) % count;
-            let motor_started = std::time::Instant::now();
-            let state = &mut self.motors[motor];
-            let queued_before = state.queue.len();
-            state.cursor.advance(
+            frames.extend(drain_motor(
                 motor,
-                &state.cfg,
-                &mut state.queue,
+                &mut self.motors[motor],
                 up_to_clock,
-                &mut state.pending,
                 deadline,
-            )?;
-            state.emit(motor, &mut frames)?;
-            let elapsed = motor_started.elapsed();
-            if elapsed > std::time::Duration::from_millis(4) {
-                let evals = crate::root_cursor::EVAL_COUNT.with(std::cell::Cell::take);
-                let bounds = crate::root_cursor::BOUNDS_COUNT.with(std::cell::Cell::take);
-                let windows = crate::root_cursor::WINDOW_COUNT.with(std::cell::Cell::take);
-                let cert_none = crate::root_cursor::CERT_NONE_COUNT.with(std::cell::Cell::take);
-                let pruned = crate::root_cursor::PRUNE_COUNT.with(std::cell::Cell::take);
-                tracing::warn!(
-                    subsystem = "pump",
-                    event = "shim_motor_drain_slow",
-                    motor,
-                    elapsed_us = elapsed.as_micros() as u64,
-                    queued_before,
-                    evals,
-                    bounds,
-                    windows,
-                    cert_none,
-                    pruned,
-                    "one motor's root search dominated the shim drain"
-                );
-            } else {
-                crate::root_cursor::EVAL_COUNT.with(std::cell::Cell::take);
-                crate::root_cursor::BOUNDS_COUNT.with(std::cell::Cell::take);
-                crate::root_cursor::WINDOW_COUNT.with(std::cell::Cell::take);
-                crate::root_cursor::CERT_NONE_COUNT.with(std::cell::Cell::take);
-                crate::root_cursor::PRUNE_COUNT.with(std::cell::Cell::take);
-            }
+            )?);
         }
         Ok(frames)
     }
