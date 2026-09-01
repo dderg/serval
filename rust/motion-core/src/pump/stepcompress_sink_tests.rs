@@ -1,5 +1,6 @@
 use super::*;
 use crate::mcu_config::{LaneKind, McuAxisConfig};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicU64};
 use trajectory::{ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm};
 
@@ -163,21 +164,27 @@ fn harness_axes(budget: u32, axes: Vec<usize>, oids: Vec<u32>) -> Harness {
     let query_for_endpoint = Arc::clone(&query_count);
     let calls_for_query = Arc::clone(&query_calls);
     let motors = oids.iter().copied().map(motor_cfg_for).collect();
-    let mut endpoint = StepcompressEndpoint::new(
+    let lanes: Vec<StepLaneConfig> = axes
+        .iter()
+        .zip(&oids)
+        .map(|(&axis, &oid)| StepLaneConfig { axis, oid })
+        .collect();
+    let endpoint = StepcompressEndpoint::new(
         MCU_ID,
         StepShim::new(motors, SHIM_RING_DEPTH),
-        axes,
-        oids,
+        &lanes,
         egress,
         tx,
         clock_of,
         budget,
-    );
-    endpoint.set_step_count_query(Arc::new(move |_| {
-        calls_for_query.fetch_add(1, Ordering::Relaxed);
-        Ok(query_for_endpoint.load(Ordering::Relaxed))
-    }));
-    endpoint.barrier_ack_deadline_secs = TELEPORTING_CLOCK_ACK_DEADLINE_SECONDS;
+        Arc::new(move |_| {
+            calls_for_query.fetch_add(1, Ordering::Relaxed);
+            Ok(query_for_endpoint.load(Ordering::Relaxed))
+        }),
+        None,
+        TELEPORTING_CLOCK_ACK_DEADLINE_SECONDS,
+    )
+    .expect("one motor per axis builds a stepcompress endpoint");
     Harness {
         endpoint,
         now,
@@ -644,6 +651,7 @@ fn in_flight_drains_as_the_clock_advances_and_sending_resumes() {
 fn move_slots_reclaim_when_the_mcu_loads_the_run() {
     let mut h = harness(1);
     h.endpoint.queue_outbound(
+        0,
         Outbound::Step(StepFrame::QueueStep {
             oid: 6,
             interval: 10,
@@ -655,6 +663,7 @@ fn move_slots_reclaim_when_the_mcu_loads_the_run() {
         0,
     );
     h.endpoint.queue_outbound(
+        0,
         Outbound::Step(StepFrame::QueueStep {
             oid: 7,
             interval: 10,
@@ -666,12 +675,22 @@ fn move_slots_reclaim_when_the_mcu_loads_the_run() {
         0,
     );
 
-    h.endpoint.flush(0, CYCLES_PER_SECOND).unwrap();
+    h.endpoint
+        .flush(McuClock {
+            now: 0,
+            freq: CYCLES_PER_SECOND,
+        })
+        .unwrap();
     assert_eq!(h.sent_moves(), 1);
 
     let margin = (CYCLES_PER_SECOND * CONSUMED_MARGIN_SECONDS) as u64;
     h.now.store(1_000 + margin, Ordering::Relaxed);
-    h.endpoint.flush(1_000 + margin, CYCLES_PER_SECOND).unwrap();
+    h.endpoint
+        .flush(McuClock {
+            now: 1_000 + margin,
+            freq: CYCLES_PER_SECOND,
+        })
+        .unwrap();
     assert_eq!(h.sent_moves(), 2);
 }
 
@@ -679,12 +698,14 @@ fn move_slots_reclaim_when_the_mcu_loads_the_run() {
 fn barriers_hold_move_slots_until_the_mcu_loads_them() {
     let mut h = harness(1);
     h.endpoint.queue_outbound(
+        0,
         Outbound::Barrier(BarrierId { oid: OID, seq: 1 }),
         1_000,
         1_000,
         0,
     );
     h.endpoint.queue_outbound(
+        0,
         Outbound::Step(StepFrame::QueueStep {
             oid: OID,
             interval: 10,
@@ -696,13 +717,23 @@ fn barriers_hold_move_slots_until_the_mcu_loads_them() {
         0,
     );
 
-    h.endpoint.flush(0, CYCLES_PER_SECOND).unwrap();
+    h.endpoint
+        .flush(McuClock {
+            now: 0,
+            freq: CYCLES_PER_SECOND,
+        })
+        .unwrap();
     assert_eq!(h.barriers.lock_ok().as_slice(), &[(OID, 1)]);
     assert_eq!(h.sent_moves(), 0);
 
     let margin = (CYCLES_PER_SECOND * CONSUMED_MARGIN_SECONDS) as u64;
     h.now.store(1_000 + margin, Ordering::Relaxed);
-    h.endpoint.flush(1_000 + margin, CYCLES_PER_SECOND).unwrap();
+    h.endpoint
+        .flush(McuClock {
+            now: 1_000 + margin,
+            freq: CYCLES_PER_SECOND,
+        })
+        .unwrap();
     assert_eq!(h.sent_moves(), 1);
 }
 
@@ -751,6 +782,7 @@ fn backlog_ceiling_breach_is_fatal() {
     h.endpoint
         .backlog
         .extend((0..BACKLOG_CEILING_FRAMES).map(|_| OutboundFrame {
+            lane: 0,
             frame: Outbound::Step(StepFrame::QueueStep {
                 oid: OID,
                 interval: 10,
@@ -777,6 +809,7 @@ fn backlog_ceiling_breach_is_fatal() {
 
 fn stale_queue_step(start_clock: u64) -> OutboundFrame {
     OutboundFrame {
+        lane: 0,
         frame: Outbound::Step(StepFrame::QueueStep {
             oid: OID,
             interval: 10,
@@ -824,6 +857,7 @@ fn a_queue_step_within_the_projection_guard_still_goes_out() {
 
 fn stale_reset_step_clock(start_clock: u64) -> OutboundFrame {
     OutboundFrame {
+        lane: 0,
         frame: Outbound::Step(StepFrame::ResetStepClock {
             oid: OID,
             clock: start_clock as u32,
@@ -837,6 +871,7 @@ fn stale_reset_step_clock(start_clock: u64) -> OutboundFrame {
 
 fn stale_set_next_step_dir(start_clock: u64) -> OutboundFrame {
     OutboundFrame {
+        lane: 0,
         frame: Outbound::Step(StepFrame::SetNextStepDir { oid: OID, dir: 1 }),
         start_clock,
         end_clock: start_clock,
@@ -907,6 +942,7 @@ fn multi_lane_commands_leave_in_step_deadline_order() {
     let mut h = harness(8);
     for (oid, start_clock) in [(6, 100), (6, 400), (7, 200), (8, 300)] {
         h.endpoint.queue_outbound(
+            0,
             Outbound::Step(StepFrame::QueueStep {
                 oid,
                 interval: 10,
@@ -919,7 +955,12 @@ fn multi_lane_commands_leave_in_step_deadline_order() {
         );
     }
 
-    h.endpoint.flush(0, CYCLES_PER_SECOND).unwrap();
+    h.endpoint
+        .flush(McuClock {
+            now: 0,
+            freq: CYCLES_PER_SECOND,
+        })
+        .unwrap();
 
     let sent_oids: Vec<u32> = h
         .sent
@@ -1084,14 +1125,18 @@ fn a_sent_cut_reseeds_from_the_mcu_executed_count() {
         .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
         .unwrap();
 
-    let expected = h.endpoint.pending_cuts[&0].expected_count;
+    let expected = h.endpoint.lanes[0]
+        .pending_cut
+        .as_ref()
+        .expect("the cut is awaiting reconciliation")
+        .expected_count;
     h.auto_query.store(false, Ordering::Relaxed);
     h.query_count.store(expected, Ordering::Relaxed);
     h.ack_sent_barriers_result()
         .expect("the injected MCU count matches the host expectation");
 
     assert_eq!(h.query_calls.load(Ordering::Relaxed), 1);
-    assert!(!h.endpoint.pending_cuts.contains_key(&0));
+    assert!(h.endpoint.lanes[0].pending_cut.is_none());
     assert!(
         h.sent
             .lock_ok()
@@ -1112,7 +1157,11 @@ fn a_sent_cut_count_mismatch_is_fatal() {
         .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
         .unwrap();
 
-    let expected = h.endpoint.pending_cuts[&0].expected_count;
+    let expected = h.endpoint.lanes[0]
+        .pending_cut
+        .as_ref()
+        .expect("the cut is awaiting reconciliation")
+        .expected_count;
     h.auto_query.store(false, Ordering::Relaxed);
     h.query_count.store(expected + 1, Ordering::Relaxed);
     let err = h
@@ -1142,7 +1191,7 @@ fn a_resume_marked_while_a_cut_awaits_its_ack_replays_through_its_own_seam() {
     h.endpoint
         .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
         .unwrap();
-    assert!(h.endpoint.pending_cuts.contains_key(&0));
+    assert!(h.endpoint.lanes[0].pending_cut.is_some());
 
     h.endpoint
         .mark_reanchor(0, 500_000, Some(CYCLES_PER_SECOND));
@@ -1150,23 +1199,32 @@ fn a_resume_marked_while_a_cut_awaits_its_ack_replays_through_its_own_seam() {
         .send_frames(MCU_ID, &[axis_frame(ramp_from(500_000, 8, 6.0))])
         .unwrap();
     assert_eq!(
-        h.endpoint.pending_cuts[&0].held.len(),
+        h.endpoint.lanes[0]
+            .pending_cut
+            .as_ref()
+            .expect("the cut is awaiting reconciliation")
+            .held
+            .len(),
         16,
         "both resumes' views ride the pending cut"
     );
 
-    let expected = h.endpoint.pending_cuts[&0].expected_count;
+    let expected = h.endpoint.lanes[0]
+        .pending_cut
+        .as_ref()
+        .expect("the cut is awaiting reconciliation")
+        .expected_count;
     h.auto_query.store(false, Ordering::Relaxed);
     h.query_count.store(expected, Ordering::Relaxed);
     h.ack_sent_barriers_result()
         .expect("held frames replay through their own pending seam, not as one stream");
 
     assert!(
-        h.endpoint.pending_cuts.is_empty(),
+        h.endpoint.lanes.iter().all(|l| l.pending_cut.is_none()),
         "the second resume's cut was unsent and resolves host-exact"
     );
     assert!(
-        h.endpoint.pending_seams.is_empty(),
+        h.endpoint.lanes.iter().all(|l| l.seams.is_empty()),
         "the second resume's seam mark was consumed by the held replay"
     );
 }
@@ -1204,13 +1262,19 @@ fn trip_halt_reseed_retract_then_cut_re_approach_preserve_net_position() {
     // The re-approach starts a fresh epoch on the exact clock the sent
     // stream ended: the seam falls inside frames the mcu already received,
     // so the cut must reconcile through the mcu executed count.
-    let seam = h.endpoint.step_clock[&OID];
+    let seam = h.endpoint.lanes[0]
+        .step_clock
+        .expect("the sent volley anchored the lane's step clock");
     h.endpoint.mark_reanchor(0, seam, Some(CYCLES_PER_SECOND));
     h.endpoint
         .send_frames(MCU_ID, &[axis_frame(linear_run(100_000, 0.5, 0.0, 5))])
         .unwrap();
 
-    let expected = h.endpoint.pending_cuts[&0].expected_count;
+    let expected = h.endpoint.lanes[0]
+        .pending_cut
+        .as_ref()
+        .expect("the cut is awaiting reconciliation")
+        .expected_count;
     assert_eq!(
         expected, 50,
         "the host expectation is the reseeded origin plus the retract motion"
@@ -1221,7 +1285,7 @@ fn trip_halt_reseed_retract_then_cut_re_approach_preserve_net_position() {
         .expect("the mcu executed count matches the host bookkeeping");
 
     assert!(
-        h.endpoint.pending_cuts.is_empty(),
+        h.endpoint.lanes.iter().all(|l| l.pending_cut.is_none()),
         "the cut must complete once the barrier acks"
     );
     assert_eq!(
@@ -1246,7 +1310,7 @@ fn an_unsent_only_cut_does_not_query_the_mcu() {
         .send_frames(MCU_ID, &[axis_frame(ramp_from(500_000, 4, 1.0))])
         .expect("an unsent-only cut remains host-exact");
 
-    assert!(h.endpoint.pending_cuts.is_empty());
+    assert!(h.endpoint.lanes.iter().all(|l| l.pending_cut.is_none()));
     assert_eq!(h.query_calls.load(Ordering::Relaxed), 0);
 }
 
@@ -1288,7 +1352,7 @@ fn two_marked_gaps_in_one_buffered_stretch_both_apply_in_order() {
         .send_frames(MCU_ID, &[axis_frame(spanning)])
         .expect("both marked seam gaps must be sanctioned, in order");
     assert!(
-        !h.endpoint.pending_seams.contains_key(&0),
+        h.endpoint.lanes[0].seams.is_empty(),
         "both gaps must be consumed"
     );
 }
@@ -1533,6 +1597,30 @@ fn hp_encoder_builds_an_endpoint_without_a_max_error_budget() {
     cfg.stepcompress_max_error_secs = 0.0;
     build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of)
         .expect("hp ignores the max_error budget and must build");
+}
+
+/// One logical axis owns one contiguous run of motors. Two runs would route
+/// frames to the union while crediting retirement per run, so the mismatch is
+/// refused where it is configured rather than diagnosed from a stalled cohort.
+#[test]
+fn an_axis_split_across_two_motor_runs_is_a_build_error() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let clock_of: ClockSource = Arc::new(|_| Some((0, CYCLES_PER_SECOND)));
+    let mut cfg = stepcompress_cfg(128);
+    cfg.axes = vec![0, 1, 0];
+    cfg.max_motor_velocity = vec![100.0; 3];
+    cfg.lane_kinds = vec![LaneKind::Pulse; 3];
+    cfg.motor_counts = vec![1; 3];
+    cfg.microstep_distance = vec![MICROSTEP; 3];
+    cfg.invert_dir = vec![false; 3];
+    cfg.stepper_oids = vec![OID, OID + 1, OID + 2];
+    cfg.step_pulse_seconds = vec![2e-6; 3];
+    cfg.stepcompress_encoders = vec![StepcompressEncoder::Classic; 3];
+    let err = match build_endpoint(&cfg, Weak::new(), tx, CYCLES_PER_SECOND, clock_of) {
+        Err(e) => e,
+        Ok(_) => panic!("an axis in two motor runs must not build an endpoint"),
+    };
+    assert!(err.contains("two separate motor runs"), "{err}");
 }
 
 #[test]
@@ -1825,7 +1913,12 @@ fn barrier_acknowledgements_cross_rollover_and_ignore_pre_wrap_replay() {
     for (index, seq) in [u32::MAX - 1, u32::MAX, 0].into_iter().enumerate() {
         let retired = (index + 1) as u32;
         h.endpoint.publish_retirement(&[retired], 0);
-        h.endpoint.flush(0, CYCLES_PER_SECOND).unwrap();
+        h.endpoint
+            .flush(McuClock {
+                now: 0,
+                freq: CYCLES_PER_SECOND,
+            })
+            .unwrap();
         let issued: Vec<(u32, u32)> = std::mem::take(&mut h.barriers.lock_ok());
         assert_eq!(issued, vec![(OID, seq)]);
         h.endpoint.on_barrier_ack(OID, seq).unwrap();
@@ -2482,7 +2575,7 @@ fn a_cut_pending_lane_sends_nothing_before_its_reset() {
     h.endpoint
         .send_frames(MCU_ID, &[axis_frame(ramp_from(81_834, 8, 5.0))])
         .unwrap();
-    assert!(h.endpoint.pending_cuts.contains_key(&0));
+    assert!(h.endpoint.lanes[0].pending_cut.is_some());
 
     let parked = h.sent.lock_ok().len();
     for _ in 0..20 {
@@ -2497,7 +2590,11 @@ fn a_cut_pending_lane_sends_nothing_before_its_reset() {
         &h.sent.lock_ok()[parked..],
     );
 
-    let expected = h.endpoint.pending_cuts[&0].expected_count;
+    let expected = h.endpoint.lanes[0]
+        .pending_cut
+        .as_ref()
+        .expect("the cut is awaiting reconciliation")
+        .expected_count;
     h.query_count.store(expected, Ordering::Relaxed);
     h.ack_sent_barriers_result()
         .expect("the injected mcu count matches the host expectation");
@@ -2533,7 +2630,9 @@ fn a_cut_barrier_that_never_reaches_the_wire_trips_the_deadline() {
         .send_frames(MCU_ID, &[axis_frame(ramp(2_000, 40))])
         .unwrap();
 
-    let boundary = h.endpoint.last_sent_boundary[&OID];
+    let boundary = h.endpoint.lanes[0]
+        .last_sent_boundary
+        .expect("the run reached the wire");
     h.endpoint
         .mark_reanchor(0, boundary, Some(CYCLES_PER_SECOND));
     h.auto_query.store(false, Ordering::Relaxed);
@@ -2541,7 +2640,7 @@ fn a_cut_barrier_that_never_reaches_the_wire_trips_the_deadline() {
         .send_frames(MCU_ID, &[axis_frame(ramp_from(boundary, 8, 5.0))])
         .unwrap();
     assert!(
-        h.endpoint.pending_cuts.contains_key(&0),
+        h.endpoint.lanes[0].pending_cut.is_some(),
         "the seam falls inside sent frames, so the cut must reconcile"
     );
     let eligible_clock = h
@@ -2560,12 +2659,18 @@ fn a_cut_barrier_that_never_reaches_the_wire_trips_the_deadline() {
 
     let before_deadline = eligible_clock + deadline_ticks - 1;
     h.endpoint
-        .check_barrier_deadline(before_deadline, CYCLES_PER_SECOND)
+        .check_barrier_deadline(McuClock {
+            now: before_deadline,
+            freq: CYCLES_PER_SECOND,
+        })
         .expect("inside the deadline a backlogged barrier is merely waiting on a slot");
 
     let err = h
         .endpoint
-        .check_barrier_deadline(eligible_clock + deadline_ticks, CYCLES_PER_SECOND)
+        .check_barrier_deadline(McuClock {
+            now: eligible_clock + deadline_ticks,
+            freq: CYCLES_PER_SECOND,
+        })
         .expect_err("a barrier that never reaches the wire must not park the lane forever");
     let SendError::Fatal(message) = err else {
         panic!("a wedged cut is unrecoverable: {err:?}");
@@ -2766,21 +2871,27 @@ fn h7_harness(oids: Vec<u32>) -> Harness {
             },
         })
         .collect();
-    let mut endpoint = StepcompressEndpoint::new(
+    let lanes: Vec<StepLaneConfig> = axes
+        .iter()
+        .zip(&oids)
+        .map(|(&axis, &oid)| StepLaneConfig { axis, oid })
+        .collect();
+    let endpoint = StepcompressEndpoint::new(
         MCU_ID,
         StepShim::new(motors, SHIM_RING_DEPTH),
-        axes,
-        oids,
+        &lanes,
         egress,
         tx,
         clock_of,
         1024,
-    );
-    endpoint.set_step_count_query(Arc::new(move |_| {
-        calls_for_query.fetch_add(1, Ordering::Relaxed);
-        Ok(query_for_endpoint.load(Ordering::Relaxed))
-    }));
-    endpoint.barrier_ack_deadline_secs = TELEPORTING_CLOCK_ACK_DEADLINE_SECONDS;
+        Arc::new(move |_| {
+            calls_for_query.fetch_add(1, Ordering::Relaxed);
+            Ok(query_for_endpoint.load(Ordering::Relaxed))
+        }),
+        None,
+        TELEPORTING_CLOCK_ACK_DEADLINE_SECONDS,
+    )
+    .expect("three motors on one axis build a stepcompress endpoint");
     Harness {
         endpoint,
         now,
@@ -2804,7 +2915,7 @@ fn h7_ramp(start_clock: u64, count: usize, start_mm: f64, direction: f64) -> Vec
 
 fn verify_mcu_agreement(
     frames: &[StepFrame],
-    host_step_clock: &HashMap<u32, u64>,
+    lanes: &[Lane],
     mcu: &mut HashMap<u32, McuStepper>,
     _mcu_now_u32: u32,
 ) -> Result<(), String> {
@@ -2838,7 +2949,11 @@ fn verify_mcu_agreement(
         if stepper.need_reset {
             continue;
         }
-        let host_cursor = host_step_clock.get(&oid).copied().unwrap_or(0);
+        let host_cursor = lanes
+            .iter()
+            .find(|lane| lane.oid == oid)
+            .and_then(|lane| lane.step_clock)
+            .unwrap_or(0);
         if host_cursor as u32 != stepper.base {
             return Err(format!(
                 "oid {oid}: host/mcu base divergence: host step_clock low32={} \
@@ -2853,8 +2968,8 @@ fn verify_mcu_agreement(
 }
 /// Drives a Z_TILT_ADJUST–shaped sequence through the endpoint at H7 clock
 /// frequency (520 MHz, 32-bit half-wrap 4.13 s).  The crux: an outstanding
-/// `begin_cut` holds `resume_clock = step_clock[oid]` captured seconds before
-/// `complete_cut` runs.  When the gap exceeds the 32-bit half-wrap,
+/// `begin_cut` holds `resume_clock = lanes[motor].step_clock` captured seconds
+/// before `complete_cut` runs.  When the gap exceeds the 32-bit half-wrap,
 /// `complete_cut → queue_step_volley(resume_clock, tail)` hands `frame_clocks`
 /// a reference so stale that `expand_clock32` picks the wrong 2³²-multiple,
 /// mis-sorting the new epoch's `ResetStepClock` behind its own `QueueStep`
@@ -2889,7 +3004,7 @@ fn repeated_probe_trips_with_h7_half_wrap_idle_gaps() {
 
     let verify = |h: &mut Harness, mcu: &mut HashMap<u32, McuStepper>, now: u64, label: &str| {
         let frames: Vec<StepFrame> = std::mem::take(&mut h.sent.lock_ok());
-        verify_mcu_agreement(&frames, &h.endpoint.step_clock, mcu, now as u32)
+        verify_mcu_agreement(&frames, &h.endpoint.lanes, mcu, now as u32)
             .unwrap_or_else(|e| panic!("{label}: {e}"));
     };
 
@@ -2910,10 +3025,9 @@ fn repeated_probe_trips_with_h7_half_wrap_idle_gaps() {
         // ---- Reanchor inside the sent region → begin_cut fires.
         let cut_at = volley_start + view_stride * 16;
         assert!(
-            h.endpoint
+            h.endpoint.lanes[0]
                 .last_sent_boundary
-                .get(&oids[0])
-                .is_some_and(|&b| cut_at <= b),
+                .is_some_and(|b| cut_at <= b),
             "probe {probe}: cut_at must be inside the sent region"
         );
 
@@ -2928,7 +3042,7 @@ fn repeated_probe_trips_with_h7_half_wrap_idle_gaps() {
             .unwrap_or_else(|e| panic!("probe {probe} resume send: {e}"));
 
         assert!(
-            !h.endpoint.pending_cuts.is_empty(),
+            h.endpoint.lanes.iter().any(|l| l.pending_cut.is_some()),
             "probe {probe}: begin_cut must have fired"
         );
 
@@ -2941,9 +3055,15 @@ fn repeated_probe_trips_with_h7_half_wrap_idle_gaps() {
 
         // Complete the cut. complete_cut uses cut.resume_clock as the
         // `now` for queue_step_volley, but the clock has wrapped.
-        let cuts: Vec<usize> = h.endpoint.pending_cuts.keys().copied().collect();
+        let cuts: Vec<usize> = (0..h.endpoint.lanes.len())
+            .filter(|&motor| h.endpoint.lanes[motor].pending_cut.is_some())
+            .collect();
         for &motor in &cuts {
-            let expected = h.endpoint.pending_cuts[&motor].expected_count;
+            let expected = h.endpoint.lanes[motor]
+                .pending_cut
+                .as_ref()
+                .expect("the cut was just observed")
+                .expected_count;
             h.auto_query.store(false, Ordering::Relaxed);
             h.query_count.store(expected, Ordering::Relaxed);
         }

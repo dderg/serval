@@ -895,6 +895,30 @@ fn a_collapsed_clock_range_fails_loud() {
     }
 }
 
+/// A malformed view outranks a full ring. `QueueFull` is backpressure the
+/// caller retries; a collapsed clock range is a producer bug the caller must
+/// not absorb, so a batch that is both must report the bug.
+#[test]
+fn a_collapsed_range_outranks_a_full_queue() {
+    let mut collapsed = span(3_000, 0.2 + LATTICE_OFFSET, 0.1, 1_000);
+    collapsed.end_clock = collapsed.start_clock;
+    let spans = [
+        span(1_000, LATTICE_OFFSET, 0.1, 1_000),
+        span(2_000, 0.1 + LATTICE_OFFSET, 0.1, 1_000),
+        collapsed,
+    ];
+    let mut shim = seeded(cfg(), 2);
+
+    match shim.push_spans(0, &spans).unwrap_err() {
+        ShimError::SpanClockDegenerate {
+            motor,
+            start_clock,
+            end_clock,
+        } => assert_eq!((motor, start_clock, end_clock), (0, 3_000, 3_000)),
+        other => panic!("expected SpanClockDegenerate, got {other}"),
+    }
+}
+
 #[test]
 fn a_span_on_a_foreign_clock_slope_fails_loud() {
     let mut shim = seeded(cfg(), 8);

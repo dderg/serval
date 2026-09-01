@@ -352,6 +352,7 @@ impl MotorState {
                 frames.push(StepFrame::SetNextStepDir { oid, dir });
                 self.last_dir = Some(dir);
             }
+            let run_start = frames.len();
             let (covered, reconstructed) = self
                 .encoder
                 .encode(oid, &clocks, base_clock, frames)
@@ -368,6 +369,12 @@ impl MotorState {
                     ),
                 });
             }
+            assert!(
+                frames.len() > run_start,
+                "motor {motor}: encoder covered {covered} of {run_len} step roots without \
+                 emitting a move; a set_next_step_dir heading this run would reach the host \
+                 unclocked"
+            );
 
             self.stepped_clock = Some(reconstructed);
             self.pending.drain(..covered);
@@ -439,33 +446,19 @@ impl StepShim {
         }
     }
 
+    /// Admit a whole run or none of it: the batch is validated against the
+    /// motor's seam and remaining room before the first view is queued.
     pub fn push_spans(
         &mut self,
         motor: usize,
         views: &[ClockedMotorSpan],
     ) -> Result<(), ShimError> {
-        self.validate_spans(motor, views)?;
         let state = self.motor_mut(motor);
+        state.queue.validate(motor, views)?;
         for view in views {
             state.queue.push(motor, view.clone())?;
         }
         Ok(())
-    }
-
-    pub fn validate_fresh_spans(
-        &self,
-        motor: usize,
-        views: &[ClockedMotorSpan],
-    ) -> Result<(), ShimError> {
-        self.motors[motor].queue.validate(motor, views, false)
-    }
-
-    pub fn validate_spans(
-        &self,
-        motor: usize,
-        views: &[ClockedMotorSpan],
-    ) -> Result<(), ShimError> {
-        self.motors[motor].queue.validate(motor, views, true)
     }
 
     /// Sanction a forward-only seam jump: the stream time crossed a

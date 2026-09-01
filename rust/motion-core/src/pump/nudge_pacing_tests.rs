@@ -77,13 +77,19 @@ fn bench() -> Bench {
     let endpoint = StepcompressEndpoint::new(
         MCU_ID,
         StepShim::new(vec![motor], SHIM_RING_DEPTH),
-        vec![AXIS as usize],
-        vec![OID],
+        &[StepLaneConfig {
+            axis: AXIS as usize,
+            oid: OID,
+        }],
         egress,
         tx,
         clock_of,
         1024,
-    );
+        Arc::new(|_| Ok(0)),
+        None,
+        BARRIER_ACK_DEADLINE_SECONDS,
+    )
+    .expect("one motor on one axis builds a stepcompress endpoint");
     Bench {
         endpoint,
         now,

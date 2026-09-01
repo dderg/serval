@@ -38,24 +38,18 @@ impl SpanQueue {
         Ok(())
     }
 
-    pub fn validate(
-        &self,
-        motor: usize,
-        views: &[ClockedMotorSpan],
-        continues_stream: bool,
-    ) -> Result<(), ShimError> {
-        let occupied = if continues_stream {
-            self.views.len()
-        } else {
-            0
-        };
-        if occupied + views.len() > self.capacity as usize {
-            return Err(ShimError::QueueFull { motor });
-        }
-        let mut seam = if continues_stream { self.seam } else { None };
+    /// Whether this run may be appended as one batch. The admissibility walk
+    /// runs first so a malformed view is reported as such even when the batch
+    /// also overflows the ring: a degenerate clock range is a producer bug,
+    /// while a full queue is backpressure the caller retries.
+    pub fn validate(&self, motor: usize, views: &[ClockedMotorSpan]) -> Result<(), ShimError> {
+        let mut seam = self.seam;
         for view in views {
             admissible(motor, view, seam)?;
             seam = Some(view.end_clock);
+        }
+        if self.views.len() + views.len() > self.capacity as usize {
+            return Err(ShimError::QueueFull { motor });
         }
         Ok(())
     }

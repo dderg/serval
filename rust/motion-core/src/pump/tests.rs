@@ -1306,16 +1306,21 @@ fn pulse_endpoint(
             max_error_ticks: step_shim::compress::DEFAULT_MAX_ERROR_TICKS,
         },
     }];
-    Arc::new(Mutex::new(StepcompressEndpoint::new(
-        BUZZ_MCU,
-        step_shim::StepShim::new(motors, super::stepcompress_sink::SHIM_RING_DEPTH),
-        vec![axis],
-        vec![oid],
-        egress,
-        control.clone(),
-        clock_of,
-        4,
-    )))
+    Arc::new(Mutex::new(
+        StepcompressEndpoint::new(
+            BUZZ_MCU,
+            step_shim::StepShim::new(motors, super::stepcompress_sink::SHIM_RING_DEPTH),
+            &[crate::pump::StepLaneConfig { axis, oid }],
+            egress,
+            control.clone(),
+            clock_of,
+            4,
+            Arc::new(|_| Ok(0)),
+            None,
+            super::stepcompress_sink::BARRIER_ACK_DEADLINE_SECONDS,
+        )
+        .expect("one motor on one axis builds a stepcompress endpoint"),
+    ))
 }
 
 fn phase_endpoint(

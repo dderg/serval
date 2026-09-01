@@ -36,8 +36,8 @@ pub use sched::{
     schedule,
 };
 pub use stepcompress_sink::{
-    BACKLOG_CEILING_FRAMES, ClockSource, FrameEgress, MOVE_SLOT_RESERVE, StepcompressEndpoint,
-    StepcompressPacer, build_endpoint,
+    BACKLOG_CEILING_FRAMES, ClockSource, FrameEgress, MOVE_SLOT_RESERVE, StepLaneConfig,
+    StepcompressEndpoint, StepcompressPacer, build_endpoint,
 };
 pub use transit_trace::emit_fault_snapshot;
 pub use wire_sink::{EtherCatRing, LANE_GROUP_PHASE, LANE_GROUP_PULSE, RingFiller, WireSink};
