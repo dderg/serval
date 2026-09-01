@@ -270,10 +270,6 @@ impl HostEventDispatcher {
         self.subscriber = Some(tx);
         Ok(())
     }
-
-    pub fn sender_handle(&self) -> Option<SyncSender<HostEvent>> {
-        self.subscriber.clone()
-    }
 }
 
 // Manual Debug — heartbeat_callback and mcu_log_hook are trait objects and cannot derive.

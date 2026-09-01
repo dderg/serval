@@ -154,14 +154,6 @@ impl MessageParams {
         }
     }
 
-    pub fn try_get_u64(&self, k: &str) -> Option<u64> {
-        match self.fields.get(k)? {
-            MessageValue::U64(v) => Some(*v),
-            MessageValue::U32(v) => Some(u64::from(*v)),
-            _ => None,
-        }
-    }
-
     pub fn get_bytes(&self, k: &str) -> Option<&[u8]> {
         match self.fields.get(k) {
             Some(MessageValue::Bytes(b)) => Some(b.as_slice()),

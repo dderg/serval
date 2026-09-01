@@ -547,10 +547,6 @@ mod linux {
             self.rx_id
         }
 
-        pub fn frame_format(&self) -> FrameFormat {
-            self.format
-        }
-
         pub fn try_enable_fd(&mut self, mcu_data_rate_hz: u32) -> io::Result<bool> {
             if self.format == FrameFormat::Fd {
                 return Ok(true);
