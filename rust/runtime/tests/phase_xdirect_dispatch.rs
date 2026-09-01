@@ -1,37 +1,28 @@
 #![cfg(feature = "motion-module-stepper")]
 #![allow(clippy::unwrap_used)]
 
-use core::sync::atomic::{AtomicI16, AtomicI32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, Ordering};
 use heapless::Vec;
 
 use runtime::dispatch_stepper::write_phase_coils;
 use runtime::phase_lut::PHASE_LUT;
 use runtime::state::{MAX_STEPPER_OIDS, SharedState};
-use runtime::stepping_state::{AxisConfig, MAX_STEPPERS_PER_AXIS, StepMode, StepperRef};
+use runtime::stepping_state::{AxisState, MAX_STEPPERS_PER_AXIS, StepMode, StepperRef};
 use runtime::test_xdirect_capture;
 
 fn make_phase_stepper(stepper_oid: u8, tmc_cs_oid: u8) -> StepperRef {
-    StepperRef {
-        stepper_oid,
-        position_count: AtomicI32::new(0),
-        tmc_cs_oid: Some(tmc_cs_oid),
-        last_coil_A: AtomicI16::new(0),
-        last_coil_B: AtomicI16::new(0),
-        phase_offset_microsteps: AtomicI32::new(0),
-        phase_offset_target: AtomicI32::new(0),
-        last_phase_target: AtomicI32::new(0),
-    }
+    StepperRef::new(stepper_oid, Some(tmc_cs_oid))
 }
 
-fn make_phase_axis(microstep_distance: f32, stepper: StepperRef, position: i32) -> AxisConfig {
+fn make_phase_axis(microstep_distance: f32, stepper: StepperRef, position: i32) -> AxisState {
     let mut steppers: Vec<StepperRef, MAX_STEPPERS_PER_AXIS> = Vec::new();
     let _ = steppers.push(stepper);
-    AxisConfig {
+    AxisState {
         mode: AtomicU8::new(StepMode::Phase as u8),
         steppers,
         microstep_distance,
         last_step_count: position,
-        ..AxisConfig::new_unconfigured()
+        ..AxisState::new_unconfigured()
     }
 }
 
@@ -104,16 +95,7 @@ fn phase_dispatch_no_capture_for_pulse_only_stepper() {
     test_xdirect_capture::clear();
 
     let shared = SharedState::new();
-    let stepper = StepperRef {
-        stepper_oid: 0,
-        position_count: AtomicI32::new(0),
-        tmc_cs_oid: None,
-        last_coil_A: AtomicI16::new(0),
-        last_coil_B: AtomicI16::new(0),
-        phase_offset_microsteps: AtomicI32::new(0),
-        phase_offset_target: AtomicI32::new(0),
-        last_phase_target: AtomicI32::new(0),
-    };
+    let stepper = StepperRef::new(0, None);
 
     configure_phase_slot(&shared, 0, 0);
     let axis = make_phase_axis(0.0125, stepper, 256);
@@ -124,15 +106,12 @@ fn phase_dispatch_no_capture_for_pulse_only_stepper() {
         records.is_empty(),
         "Pulse-only stepper must not produce a capture"
     );
-    let (expected_a, expected_b) = PHASE_LUT[256];
     assert_eq!(
-        axis.steppers[0].last_coil_A.load(Ordering::Acquire),
-        expected_a
+        axis.steppers[0].last_phase_target.load(Ordering::Acquire),
+        256,
+        "a Pulse-only stepper still tracks its phase target"
     );
-    assert_eq!(
-        axis.steppers[0].last_coil_B.load(Ordering::Acquire),
-        expected_b
-    );
+    assert_eq!(axis.steppers[0].position_count.load(Ordering::Acquire), 256);
 }
 
 #[test]
@@ -148,12 +127,12 @@ fn phase_dispatch_two_steppers_two_captures() {
     let _ = steppers.push(make_phase_stepper(0, 3));
     let _ = steppers.push(make_phase_stepper(1, 4));
 
-    let axis = AxisConfig {
+    let axis = AxisState {
         mode: AtomicU8::new(StepMode::Phase as u8),
         steppers,
         microstep_distance: 0.0125,
         last_step_count: 256,
-        ..AxisConfig::new_unconfigured()
+        ..AxisState::new_unconfigured()
     };
 
     write_phase_coils(0, &axis, &shared, 0);

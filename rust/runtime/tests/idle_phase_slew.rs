@@ -4,8 +4,7 @@ use core::sync::atomic::Ordering;
 
 use runtime::engine::Engine;
 use runtime::state::SharedState;
-use runtime::step_queue::StepQueue;
-use runtime::stepping_state::{MAX_AXES, StepMode, StepperBindingRust};
+use runtime::stepping_state::{StepMode, StepperBindingRust};
 
 const CLOCK_FREQ: u32 = 520_000_000;
 const SAMPLE_RATE: u32 = 40_000;
@@ -23,17 +22,9 @@ fn make_engine(mode: StepMode) -> Engine {
     engine
 }
 
-fn install_queues(engine: &mut Engine, q0: &mut StepQueue) {
-    let mut qs: [*mut StepQueue; MAX_AXES] = [core::ptr::null_mut(); MAX_AXES];
-    qs[0] = q0;
-    engine.test_install_step_queues(qs);
-}
-
 #[test]
 fn jog_slews_to_target_while_no_lane_is_anchored() {
     let mut engine = make_engine(StepMode::Phase);
-    let mut q0 = StepQueue::new();
-    install_queues(&mut engine, &mut q0);
     let shared = SharedState::new();
     shared.phase_motor_count.store(1, Ordering::Release);
     shared.phase_slot_idx[0].store(0, Ordering::Release);
@@ -66,25 +57,19 @@ fn jog_slews_to_target_while_no_lane_is_anchored() {
 #[test]
 fn a_settled_phase_axis_does_not_claim_the_tick() {
     let mut engine = make_engine(StepMode::Phase);
-    let mut q0 = StepQueue::new();
-    install_queues(&mut engine, &mut q0);
     let shared = SharedState::new();
 
     assert!(
         !engine.tick(TICK_CYCLES, &shared),
         "no pending slew means no work"
     );
-    assert_eq!(q0.tail, q0.head, "phase slew never enqueues step pulses");
 }
 
 #[test]
 fn idle_pulse_axis_does_not_dispatch() {
     let mut engine = make_engine(StepMode::Pulse);
-    let mut q0 = StepQueue::new();
-    install_queues(&mut engine, &mut q0);
     let shared = SharedState::new();
 
     let active = engine.tick(TICK_CYCLES, &shared);
     assert!(!active, "idle pulse axis must not report active");
-    assert_eq!(q0.tail, q0.head, "no steps enqueued while idle");
 }

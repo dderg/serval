@@ -244,8 +244,6 @@ fault_handler_report_boot_init(uint32_t now)
         prior_diag.ring_overflow        = diag.ring_overflow;
         prior_diag.boot_count           = diag.boot_count;
         prior_diag.systick_max_cyc        = diag.systick_max_cyc;
-        prior_diag.stepout_max_cyc        = diag.stepout_max_cyc;
-        prior_diag.stepout_burst_max_cyc  = diag.stepout_burst_max_cyc;
         prior_diag.usb_burst_max_cyc      = diag.usb_burst_max_cyc;
         prior_diag.tim5_ia_min_cyc        = diag.tim5_ia_min_cyc;
         prior_diag.tim5_ia_max_cyc        = diag.tim5_ia_max_cyc;
@@ -261,16 +259,6 @@ fault_handler_report_boot_init(uint32_t now)
         prior_diag.usb_out_doepint        = diag.usb_out_doepint;
         prior_diag.out_unarmed_worst_cyc  = diag.out_unarmed_worst_cyc;
         prior_diag.out_unarmed_worst_end  = diag.out_unarmed_worst_end;
-#if CONFIG_MOTION_RUNTIME
-        {
-            extern void kalico_stepout_late_get(uint32_t *out_max_late,
-                                                uint32_t *out_late_count,
-                                                uint32_t *out_max_drained);
-            kalico_stepout_late_get(&prior_diag.stepout_late_max_cyc,
-                                    &prior_diag.stepout_late_count,
-                                    &prior_diag.stepout_late_max_drained);
-        }
-#endif
         for (uint32_t i = 0; i < DIAG_RING_LEN; i++) {
             prior_ring[i].tag       = diag_ring[i].tag;
             prior_ring[i]._pad0     = diag_ring[i]._pad0;
@@ -481,11 +469,8 @@ fault_handler_report_emit(uint32_t now)
                prior_diag.otg_irq_cycles_max,
                (uint32_t)(prior_diag.otg_irq_cycles_total & 0xFFFFFFFFu),
                (uint32_t)(prior_diag.otg_irq_cycles_total >> 32));
-        output("prior_diag_summary_block systick %u stepout %u"
-               " stepout_burst %u usb_burst %u",
+        output("prior_diag_summary_block systick %u usb_burst %u",
                prior_diag.systick_max_cyc,
-               prior_diag.stepout_max_cyc,
-               prior_diag.stepout_burst_max_cyc,
                prior_diag.usb_burst_max_cyc);
         output("prior_diag_summary_tim5ia min %u max %u last %u period %u",
                prior_diag.tim5_ia_min_cyc,

@@ -92,7 +92,7 @@ job_rust_loom() {
         --test loom_force_idle
 }
 
-MCU_ENV=(RUNTIME_STORAGE_SIZE=32768 RUNTIME_SAMPLE_RATE_HZ=10000)
+MCU_ENV=(RUNTIME_STORAGE_SIZE=32768)
 
 job_rust_mcu_h7() {
     cd "$RUST"
@@ -125,7 +125,6 @@ job_rust_mcu_f1() {
     cd "$RUST"
     env CARGO_TARGET_DIR=target-f1 \
         RUNTIME_STORAGE_SIZE=10240 \
-        RUNTIME_SAMPLE_RATE_HZ=2000 \
         cargo build -p c-api --no-default-features \
         --features mcu-f1,header-runtime,motion-module-stepper \
         --target thumbv7m-none-eabi --release

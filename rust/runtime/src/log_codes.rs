@@ -52,7 +52,6 @@ pub const EVENT_RUNTIME_ISR_PHASE: u16 = 11;
 pub const EVENT_RUNTIME_BLOCK_SOURCE: u16 = 12;
 pub const EVENT_RUNTIME_TIM5_IA: u16 = 13;
 pub const EVENT_RUNTIME_DIAG_DUMP: u16 = 14;
-pub const EVENT_RUNTIME_STEPOUT_LATE: u16 = 15;
 pub const EVENT_RUNTIME_RING_STATE: u16 = 16;
 pub const EVENT_RUNTIME_FG_TASK: u16 = 17;
 pub const EVENT_RUNTIME_FG_MSG: u16 = 18;
@@ -151,10 +150,9 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_ISR_PHASE) => {
             ("runtime.isr_phase", "isr phase={arg0} ring_overflow={arg1}")
         }
-        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_BLOCK_SOURCE) => (
-            "runtime.block_source",
-            "block usb_burst={arg0} cyc stepout_burst={arg1} cyc",
-        ),
+        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_BLOCK_SOURCE) => {
+            ("runtime.block_source", "block usb_burst={arg0} cyc")
+        }
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_TIM5_IA) => (
             "runtime.tim5_ia",
             "tim5 inter-arrival min={arg0} max={arg1} cyc",
@@ -162,10 +160,6 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_DIAG_DUMP) => (
             "runtime.diag_dump",
             "live diag dump uptime_us={arg0} ring_seq={arg1}",
-        ),
-        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_STEPOUT_LATE) => (
-            "runtime.stepout_late",
-            "stepout late max_late_cyc={arg0} late_count<<16|max_drained={arg1}",
         ),
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_RING_STATE) => (
             "runtime.ring_state",

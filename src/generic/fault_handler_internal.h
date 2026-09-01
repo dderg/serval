@@ -240,8 +240,6 @@ struct diag_counters {
     uint32_t peek_data_n;
 
     uint32_t systick_max_cyc;
-    uint32_t stepout_max_cyc;
-    uint32_t stepout_burst_max_cyc;
     uint32_t usb_burst_max_cyc;
 
     uint32_t tim5_ia_min_cyc;
@@ -259,10 +257,6 @@ struct diag_counters {
     uint32_t usb_out_doepint;
     uint32_t out_unarmed_worst_cyc;
     uint32_t out_unarmed_worst_end;
-
-    uint32_t stepout_late_max_cyc;
-    uint32_t stepout_late_count;
-    uint32_t stepout_late_max_drained;
 };
 
 extern volatile struct diag_counters diag;

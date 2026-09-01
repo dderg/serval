@@ -6,8 +6,7 @@ use runtime::clock::WidenState;
 use runtime::engine::Engine;
 use runtime::error::FaultCode;
 use runtime::state::{IsrState, SharedState};
-use runtime::step_queue::StepQueue;
-use runtime::stepping_state::{MAX_AXES, StepMode, StepperBindingRust, TMC_CS_OID_NONE};
+use runtime::stepping_state::{StepMode, StepperBindingRust, TMC_CS_OID_NONE};
 use runtime::tick::isr_sample_tick;
 
 const CLOCK_FREQ: u32 = 520_000_000;
@@ -37,39 +36,28 @@ fn engine_with_axis0(mode: StepMode) -> Engine {
     engine
 }
 
-fn install_queue(engine: &mut Engine) -> ([*mut StepQueue; MAX_AXES], StepQueue) {
-    let mut q0 = StepQueue::new();
-    let mut qs: [*mut StepQueue; MAX_AXES] = [core::ptr::null_mut(); MAX_AXES];
-    qs[0] = &mut q0;
-    engine.test_install_step_queues(qs);
-    (qs, q0)
-}
-
 /// An idle runtime: a Pulse axis with nothing queued claims no tick.
-fn idle_isr() -> (IsrState, StepQueue) {
-    let mut engine = engine_with_axis0(StepMode::Pulse);
-    let (_qs, q0) = install_queue(&mut engine);
-    (make_isr(engine), q0)
+fn idle_isr() -> IsrState {
+    make_isr(engine_with_axis0(StepMode::Pulse))
 }
 
 /// An active runtime: a Phase axis slewing one microstep per sample toward a
 /// target far enough away that every tick in these tests claims the axis.
-fn active_isr(shared: &SharedState) -> (IsrState, StepQueue) {
-    let mut engine = engine_with_axis0(StepMode::Phase);
-    let (_qs, q0) = install_queue(&mut engine);
+fn active_isr(shared: &SharedState) -> IsrState {
+    let engine = engine_with_axis0(StepMode::Phase);
     shared
         .max_phase_offset_ramp_per_sample
         .store(1, Ordering::Release);
     engine.stepping_axes[0].as_ref().expect("axis").steppers[0]
         .phase_offset_target
         .store(1_000_000, Ordering::Release);
-    (make_isr(engine), q0)
+    make_isr(engine)
 }
 
 #[test]
 fn idle_ticks_never_fault_even_with_large_gap() {
     let shared = SharedState::new();
-    let (mut isr, _q0) = idle_isr();
+    let mut isr = idle_isr();
 
     isr_sample_tick(&mut isr, &shared, 0);
     assert_eq!(
@@ -100,7 +88,7 @@ fn idle_ticks_never_fault_even_with_large_gap() {
 #[test]
 fn active_motion_gap_latches_tick_interval_exceeded() {
     let shared = SharedState::new();
-    let (mut isr, _q0) = active_isr(&shared);
+    let mut isr = active_isr(&shared);
 
     isr_sample_tick(&mut isr, &shared, 0);
     assert_eq!(
@@ -124,7 +112,7 @@ fn active_motion_gap_latches_tick_interval_exceeded() {
 #[test]
 fn steady_cadence_of_active_ticks_never_faults() {
     let shared = SharedState::new();
-    let (mut isr, _q0) = active_isr(&shared);
+    let mut isr = active_isr(&shared);
 
     for i in 0u32..60 {
         isr_sample_tick(&mut isr, &shared, TICK_CYCLES * i);
@@ -139,7 +127,7 @@ fn steady_cadence_of_active_ticks_never_faults() {
 #[test]
 fn an_active_tick_after_an_idle_one_rebaselines_instead_of_faulting() {
     let shared = SharedState::new();
-    let (mut isr, _q0) = active_isr(&shared);
+    let mut isr = active_isr(&shared);
 
     isr_sample_tick(&mut isr, &shared, TICK_CYCLES);
     assert!(isr.last_tick_now.is_some());
@@ -161,7 +149,7 @@ fn an_active_tick_after_an_idle_one_rebaselines_instead_of_faulting() {
 #[test]
 fn gap_exactly_2x_period_does_not_fault() {
     let shared = SharedState::new();
-    let (mut isr, _q0) = active_isr(&shared);
+    let mut isr = active_isr(&shared);
 
     isr_sample_tick(&mut isr, &shared, 0);
     assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
@@ -178,7 +166,7 @@ fn gap_exactly_2x_period_does_not_fault() {
 #[test]
 fn large_gap_saturates_fault_detail_to_0xffff() {
     let shared = SharedState::new();
-    let (mut isr, _q0) = active_isr(&shared);
+    let mut isr = active_isr(&shared);
 
     isr_sample_tick(&mut isr, &shared, 0);
     assert_eq!(shared.last_error.load(Ordering::Acquire), 0);

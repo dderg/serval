@@ -32,7 +32,6 @@ pub mod error;
 pub mod fault_helpers;
 pub(crate) mod isr_phase;
 pub mod log_codes;
-pub mod per_axis_timer;
 pub mod phase_handover;
 pub mod phase_lut;
 #[cfg(feature = "sample-stepping")]
@@ -41,7 +40,6 @@ pub mod sample_run;
 pub mod sample_wire;
 pub mod state;
 pub use state::{SetStepModeError, StepMode, set_step_mode};
-pub mod step_queue;
 pub mod stepping_state;
 pub mod sub_sample_timing;
 pub mod test_xdirect_capture;

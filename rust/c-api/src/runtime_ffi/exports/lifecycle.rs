@@ -141,8 +141,6 @@ pub unsafe extern "C" fn runtime_reset(rt: *mut Runtime) -> i32 {
             m.store(runtime::state::StepMode::StepTime as u8, Ordering::Release);
         }
     }
-    #[cfg(not(any(test, feature = "host")))]
-    runtime::step_queue::reset_all_queues();
     RUNTIME_OK
 }
 

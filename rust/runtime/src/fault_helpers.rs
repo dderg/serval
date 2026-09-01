@@ -42,20 +42,6 @@ fn emit_fault_log(fault: FaultCode, detail: u32) {
 }
 
 #[inline]
-pub fn raise_step_queue_overflow(shared: &SharedState, axis_idx: usize) {
-    let detail = (axis_idx as u32 & 0xFF) << 16;
-    shared.fault_detail.store(detail, Ordering::Release);
-    shared
-        .last_error
-        .store(FaultCode::StepQueueOverflow.as_i32(), Ordering::Release);
-    emit_fault_log(FaultCode::StepQueueOverflow, detail);
-    if axis_idx < 4 {
-        #[allow(clippy::indexing_slicing)]
-        shared.queue_overflow_count[axis_idx].fetch_add(1, Ordering::Release);
-    }
-}
-
-#[inline]
 pub fn raise_position_count_overflow(shared: &SharedState, axis_idx: usize) {
     let detail = (axis_idx as u32 & 0xFF) << 16;
     shared.fault_detail.store(detail, Ordering::Release);
@@ -103,17 +89,6 @@ pub fn raise_tick_interval_exceeded(shared: &SharedState, gap_ticks: u32) {
         .last_error
         .store(FaultCode::TickIntervalExceeded.as_i32(), Ordering::Release);
     emit_fault_log(FaultCode::TickIntervalExceeded, detail);
-}
-
-#[inline]
-pub fn raise_steps_per_sample_exceeded(shared: &SharedState, axis_idx: usize, abs_steps: u32) {
-    let detail = ((axis_idx as u32 & 0xFF) << 16) | abs_steps.min(0xFFFF);
-    shared.fault_detail.store(detail, Ordering::Release);
-    shared.last_error.store(
-        FaultCode::StepsPerSampleExceeded.as_i32(),
-        Ordering::Release,
-    );
-    emit_fault_log(FaultCode::StepsPerSampleExceeded, detail);
 }
 
 #[inline]

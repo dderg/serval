@@ -11,8 +11,6 @@ extern const uint32_t runtime_clock_freq;
 
 extern void* runtime_handle;
 
-static void step_output_timer_init(void);
-
 // Accounts for the APB timer-doubler (TIMxCLK = 2*PCLKx when the APB
 // prescaler != 1); runtime_clock_freq does not and gives the wrong rate.
 static uint32_t
@@ -88,16 +86,12 @@ runtime_tick_init(void)
     DWT->CYCCNT = 0;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 
-    // TIM5 and the step-output timer must be EQUAL priority — the SPSC
-    // same-priority invariant (see motion_nvic_prio.h).
     NVIC_SetPriority(TIM5_IRQn, MOTION_NVIC_PRIO);
 
     TIM5->EGR  = TIM_EGR_UG;
     TIM5->SR   = ~TIM_SR_UIF;
     TIM5->CR1 |= TIM_CR1_CEN;
     NVIC_EnableIRQ(TIM5_IRQn);
-
-    step_output_timer_init();
 }
 
 // Written only by the naked asm wrapper below; must not be static or
@@ -171,107 +165,5 @@ TIM5_IRQHandler_body(uint32_t *frame)
 }
 
 DECL_ARMCM_IRQ(TIM5_IRQHandler, TIM5_IRQn);
-
-#define STEP_OUT_MAX_DELTA 0x7000u
-_Static_assert(STEP_OUT_MAX_DELTA < 0x8000u,
-               "missed-compare passed-test needs int16 half-range headroom");
-
-static volatile uint32_t step_out_target;
-static volatile uint8_t  step_out_running;
-static uint32_t          step_out_clkdiv = 1;
-
-static inline void
-step_output_program_delta(uint32_t dwt_delta)
-{
-    uint32_t delta = dwt_delta / step_out_clkdiv;
-    if (delta > STEP_OUT_MAX_DELTA)
-        delta = STEP_OUT_MAX_DELTA;
-    if (delta == 0)
-        delta = 1;
-    TIM3->SR = (uint16_t)~TIM_SR_CC1IF;
-    uint16_t ccr = (uint16_t)(TIM3->CNT + (uint16_t)delta);
-    TIM3->CCR1 = ccr;
-    TIM3->DIER |= TIM_DIER_CC1IE;
-    if ((int16_t)((uint16_t)TIM3->CNT - ccr) >= 0)
-        NVIC_SetPendingIRQ(TIM3_IRQn);
-}
-
-__attribute__((used, externally_visible))
-void
-step_output_timer_arm(uint32_t cycle_abs)
-{
-    if (cycle_abs == STEP_OUTPUT_DISABLE) {
-        TIM3->DIER &= ~TIM_DIER_CC1IE;
-        step_out_running = 0;
-        return;
-    }
-    step_out_target = cycle_abs;
-    step_out_running = 1;
-    uint32_t now = runtime_cyccnt_read();
-    uint32_t delta = cycle_abs - now;     // wrap-safe; >2^31 ⇒ already due
-    if ((int32_t)delta <= 0)
-        delta = 1;
-    step_output_program_delta(delta);
-}
-
-__attribute__((used, externally_visible))
-uint32_t
-step_output_timer_armed_target(void)
-{
-    return step_out_target;
-}
-
-__attribute__((used, externally_visible))
-uint8_t
-step_output_timer_is_running(void)
-{
-    return step_out_running;
-}
-
-static void
-step_output_timer_init(void)
-{
-    NVIC_DisableIRQ(TIM3_IRQn);
-
-    // Clock-on before any TIM3 register access.
-    RCC->APB1LENR |= RCC_APB1LENR_TIM3EN;
-    __DSB();
-
-    TIM3->CR1 &= ~TIM_CR1_CEN;
-    TIM3->SR = 0;
-    TIM3->PSC = 0;
-    TIM3->ARR = 0xFFFF;
-    TIM3->CCMR1 = 0;
-    TIM3->CCR1 = 0;
-    TIM3->DIER = 0;
-    TIM3->CR1 = TIM_CR1_ARPE;
-    TIM3->EGR = TIM_EGR_UG;
-    TIM3->SR = 0;
-    TIM3->CR1 |= TIM_CR1_CEN;
-
-    step_out_running = 0;
-    step_out_target = 0;
-    step_out_clkdiv = CONFIG_CLOCK_FREQ / motion_timer_clk();
-
-    NVIC_SetPriority(TIM3_IRQn, MOTION_NVIC_PRIO);
-    NVIC_EnableIRQ(TIM3_IRQn);
-}
-
-void
-TIM3_IRQHandler(void)
-{
-    extern void diag_stepout_account(uint32_t enter, uint32_t exit);
-    uint32_t diag_enter = DWT->CYCCNT;
-
-    TIM3->SR = (uint16_t)~TIM_SR_CC1IF;
-
-    extern uint32_t step_output_event(void *rt);
-    uint32_t next = step_output_event(runtime_handle);
-    step_output_timer_arm(next);
-
-    diag_stepout_account(diag_enter, DWT->CYCCNT);
-}
-
-DECL_ARMCM_IRQ(TIM3_IRQHandler, TIM3_IRQn);
 
 #endif

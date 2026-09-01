@@ -4,8 +4,6 @@ use crate::clock::TickCounter;
 use crate::state::SharedState;
 use crate::stepping_state::{AxisState, MAX_AXES};
 
-pub use crate::stepping_state::N_AXES;
-
 mod config;
 mod manual;
 mod query;
@@ -43,9 +41,6 @@ pub struct Engine {
     pub cycles_per_second: f32,
     pub stepping_axes: [Option<AxisState>; MAX_AXES],
     pub num_axes: u8,
-    pub tick_caches: crate::stepping_state::TickCaches,
-    #[cfg(any(test, feature = "host"))]
-    test_queue_ptrs: [*mut crate::step_queue::StepQueue; MAX_AXES],
     #[cfg(feature = "sample-stepping")]
     pub(crate) sample_lanes: [crate::sample_exec::SampleLane; MAX_AXES],
 }
@@ -61,9 +56,6 @@ impl Engine {
             cycles_per_second: clock_freq as f32,
             stepping_axes: [const { None }; MAX_AXES],
             num_axes: 0,
-            tick_caches: crate::stepping_state::TickCaches::new(),
-            #[cfg(any(test, feature = "host"))]
-            test_queue_ptrs: [core::ptr::null_mut(); MAX_AXES],
             #[cfg(feature = "sample-stepping")]
             sample_lanes: [const { crate::sample_exec::SampleLane::new() }; MAX_AXES],
         }
@@ -95,9 +87,6 @@ impl Engine {
             addr_of_mut!((*ptr).cycles_per_second).write(clock_freq as f32);
             addr_of_mut!((*ptr).stepping_axes).write([const { None }; MAX_AXES]);
             addr_of_mut!((*ptr).num_axes).write(0);
-            addr_of_mut!((*ptr).tick_caches).write(crate::stepping_state::TickCaches::new());
-            #[cfg(any(test, feature = "host"))]
-            addr_of_mut!((*ptr).test_queue_ptrs).write([core::ptr::null_mut(); MAX_AXES]);
             #[cfg(feature = "sample-stepping")]
             addr_of_mut!((*ptr).sample_lanes)
                 .write([const { crate::sample_exec::SampleLane::new() }; MAX_AXES]);
@@ -118,7 +107,6 @@ impl Engine {
     pub fn reset(&mut self) {
         self.stepping_axes = [const { None }; MAX_AXES];
         self.num_axes = 0;
-        self.tick_caches = crate::stepping_state::TickCaches::new();
         self.status
             .store(RuntimeStatus::Idle as u8, Ordering::Release);
         self.last_error.store(0, Ordering::Release);
@@ -141,14 +129,6 @@ impl Engine {
                 .store(RuntimeStatus::Idle as u8, Ordering::Release);
         }
         shared.acked_force_idle.store(true, Ordering::Release);
-    }
-
-    #[cfg(any(test, feature = "host"))]
-    pub fn test_install_step_queues(
-        &mut self,
-        queues: [*mut crate::step_queue::StepQueue; MAX_AXES],
-    ) {
-        self.test_queue_ptrs = queues;
     }
 }
 

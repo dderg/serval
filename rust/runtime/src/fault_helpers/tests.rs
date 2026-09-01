@@ -1,30 +1,6 @@
 use super::*;
 
 #[test]
-fn step_queue_overflow_publishes_code_and_bumps_counter() {
-    let shared = SharedState::new();
-    raise_step_queue_overflow(&shared, 2);
-    assert_eq!(
-        shared.last_error.load(Ordering::Acquire),
-        FaultCode::StepQueueOverflow.as_i32()
-    );
-    assert_eq!(shared.fault_detail.load(Ordering::Acquire), 0x0002_0000);
-    assert_eq!(shared.queue_overflow_count[2].load(Ordering::Acquire), 1);
-    assert_eq!(shared.queue_overflow_count[0].load(Ordering::Acquire), 0);
-}
-
-#[test]
-fn step_queue_overflow_out_of_range_axis_does_not_panic() {
-    let shared = SharedState::new();
-    raise_step_queue_overflow(&shared, 7);
-    assert_eq!(
-        shared.last_error.load(Ordering::Acquire),
-        FaultCode::StepQueueOverflow.as_i32()
-    );
-    assert_eq!(shared.fault_detail.load(Ordering::Acquire), 0x0007_0000);
-}
-
-#[test]
 fn position_count_overflow_publishes_code_and_detail() {
     let shared = SharedState::new();
     raise_position_count_overflow(&shared, 1);
@@ -81,17 +57,6 @@ fn tick_interval_exceeded_publishes_code_and_saturated_detail() {
     let shared2 = SharedState::new();
     raise_tick_interval_exceeded(&shared2, 0x1_0000);
     assert_eq!(shared2.fault_detail.load(Ordering::Acquire), 0xFFFF);
-}
-
-#[test]
-fn steps_per_sample_exceeded_publishes_code_and_detail() {
-    let shared = SharedState::new();
-    raise_steps_per_sample_exceeded(&shared, 3, 200);
-    assert_eq!(
-        shared.last_error.load(Ordering::Acquire),
-        FaultCode::StepsPerSampleExceeded.as_i32()
-    );
-    assert_eq!(shared.fault_detail.load(Ordering::Acquire), (3 << 16) | 200);
 }
 
 #[test]

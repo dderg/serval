@@ -102,9 +102,8 @@ boundary honest.
   miscompile). The generic type parameter surfaces only at the `EngineImpl` alias.
 - **The timer call-path is not abstracted.** C scheduler timer (MCU) vs. RT-Linux
   cyclic loop (EtherCAT) are different event models; unifying them buys nothing.
-- **`seed_position`, `set_axis_mode`, `step_queue` reset, `TickCaches`/`last_motors`/
-  `StepMotorState`** are stepper-specific — kept concrete / `#[cfg]`-gated, never in
-  a shared trait.
+- **`seed_position`, `set_axis_mode`, `last_motors`/`StepMotorState`** are
+  stepper-specific — kept concrete / `#[cfg]`-gated, never in a shared trait.
 
 ## Kconfig dispatch-module selection
 

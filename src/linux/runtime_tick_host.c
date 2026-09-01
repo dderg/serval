@@ -1,12 +1,10 @@
 #include "generic/runtime_tick.h"
 
 #include <dlfcn.h>
-#include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -14,7 +12,6 @@
 #include "autoconf.h"
 #include "runtime.h"
 #include "sched.h"
-#include "step_queue.h"
 
 extern void *runtime_handle;
 
@@ -71,100 +68,12 @@ runtime_host_widened_clock_now(void)
 }
 
 #if CONFIG_MCU_SIM
-static const int step_gpio_lines[N_AXIS_STEP_QUEUES] = { 18, 7, 15, 20 };
-
-static void (*sim_notify_step)(int chip, int line, int32_t n_steps,
-                               uint64_t sched_vtime_ns, uint64_t sched_cycle);
-
 // libvtime pacer API: while registered, virtual time cannot advance past
 // this thread's floor, so no motion sample period is ever skipped.
 static int (*vtime_pacer_register)(uint64_t period_ns);
 static void (*vtime_pacer_advance)(int slot, uint64_t target_ns,
                                    uint64_t period_ns);
 static int vtime_pacer_slot = -1;
-
-extern void runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps,
-                                     uint8_t stepper_sel);
-
-// Off by default: pulsing the real step pins costs an ioctl per edge and a
-// spinning emitter, which distorts every other sim world's timing. The shim's
-// `set_step_emit enable=1` control verb arms it for tests that must observe
-// per-stepper suppression on the physical pins.
-//
-// runtime_emit_step_pulses paces its edges by spinning on the virtual clock.
-// The tick thread holds the vtime pacer floor, so a spin there stalls the very
-// clock it waits on: the physical step/dir pins are driven from this ring by a
-// thread that holds no floor.
-#define SIM_STEP_EMIT_DEPTH 4096
-struct sim_step_emit {
-    uint8_t motor;
-    int8_t  dir;
-    uint8_t stepper_sel;
-};
-static struct sim_step_emit sim_step_emit_ring[SIM_STEP_EMIT_DEPTH];
-static atomic_uint sim_step_emit_head;
-static atomic_uint sim_step_emit_tail;
-static pthread_t sim_step_emit_thread;
-static int (*sim_step_emit_enabled)(void);
-static atomic_int sim_step_emit_started;
-
-static void
-sim_step_emit_push(uint8_t motor, int8_t dir, uint8_t stepper_sel)
-{
-    unsigned tail = atomic_load_explicit(&sim_step_emit_tail,
-                                         memory_order_relaxed);
-    unsigned head = atomic_load_explicit(&sim_step_emit_head,
-                                         memory_order_acquire);
-    if (tail - head >= SIM_STEP_EMIT_DEPTH) {
-        fprintf(stderr, "[sim-step-emit] ring overflow motor=%u backlog=%u\n",
-                (unsigned)motor, tail - head);
-        abort();
-    }
-    sim_step_emit_ring[tail & (SIM_STEP_EMIT_DEPTH - 1)] =
-        (struct sim_step_emit){ .motor = motor, .dir = dir,
-                                .stepper_sel = stepper_sel };
-    atomic_store_explicit(&sim_step_emit_tail, tail + 1, memory_order_release);
-}
-
-static void *
-sim_step_emit_main(void *arg)
-{
-    (void)arg;
-    while (1) {
-        unsigned head = atomic_load_explicit(&sim_step_emit_head,
-                                             memory_order_relaxed);
-        if (head == atomic_load_explicit(&sim_step_emit_tail,
-                                         memory_order_acquire)) {
-            // Raw syscall: a libvtime-intercepted sleep would advance the
-            // virtual clock from a thread that has no work to pace.
-            struct timespec idle = { 0, 200000 };
-            syscall(SYS_clock_nanosleep, CLOCK_MONOTONIC, 0, &idle, NULL);
-            continue;
-        }
-        struct sim_step_emit entry =
-            sim_step_emit_ring[head & (SIM_STEP_EMIT_DEPTH - 1)];
-        runtime_emit_step_pulses(entry.motor, entry.dir, entry.stepper_sel);
-        atomic_store_explicit(&sim_step_emit_head, head + 1,
-                              memory_order_release);
-    }
-    return NULL;
-}
-
-static int
-sim_step_emit_active(void)
-{
-    if (!sim_step_emit_enabled || !sim_step_emit_enabled())
-        return 0;
-    if (atomic_exchange(&sim_step_emit_started, 1))
-        return 1;
-    int rc = pthread_create(&sim_step_emit_thread, NULL, sim_step_emit_main,
-                            NULL);
-    if (rc != 0) {
-        fprintf(stderr, "[sim-step-emit] pthread_create failed: %d\n", rc);
-        abort();
-    }
-    return 1;
-}
 #endif
 
 #define TICK_TRACE_DEPTH 16
@@ -191,9 +100,6 @@ host_tick_main(void *arg)
     // This thread paces virtual time (its pacer floor bounds the vtime
     // driver), so it must not be demoted: every starved tick is a span
     // where the whole simulated world stands still against real time.
-    sim_notify_step = dlsym(RTLD_DEFAULT, "sim_intercept_notify_step");
-    sim_step_emit_enabled = dlsym(RTLD_DEFAULT,
-                                  "sim_intercept_step_emit_enabled");
     vtime_pacer_register = dlsym(RTLD_DEFAULT, "vtime_pacer_register");
     vtime_pacer_advance = dlsym(RTLD_DEFAULT, "vtime_pacer_advance");
     if (vtime_pacer_register && vtime_pacer_advance)
@@ -278,49 +184,6 @@ host_tick_main(void *arg)
             runtime_cyccnt_read();
         tick_trace_seq++;
         runtime_tick_sample(runtime_handle);
-
-        // Must drain every tick or the queue overflows (StepQueueOverflow).
-        // The shim wants each step's SCHEDULED sub-sample time, not this
-        // drain tick: the sim outputs a whole sample burst at once, so the
-        // dispatch lag lives only in each entry's cycle_abs. Reconstruct the
-        // absolute virtual time from cycle_abs against the current 64-bit
-        // clock and this tick's virtual clock.
-#if CONFIG_MCU_SIM
-        struct timespec sim_vt;
-        clock_gettime(CLOCK_MONOTONIC, &sim_vt);
-        uint64_t sim_vt_ns = (uint64_t)sim_vt.tv_sec * 1000000000ULL
-                             + (uint64_t)sim_vt.tv_nsec;
-        uint64_t sim_now_cyc = timer_read_time_u64();
-        const int64_t sim_ns_per_tick = 1000000000LL / CONFIG_CLOCK_FREQ;
-        const int emit_step_pins = sim_step_emit_active();
-#endif
-        for (int axis = 0; axis < N_AXIS_STEP_QUEUES; axis++) {
-            StepQueue *q = &step_queues[axis];
-            while (q->head != q->tail) {
-#if CONFIG_MCU_SIM
-                uint16_t idx = q->head & (STEP_QUEUE_DEPTH - 1);
-                int8_t signed_step_delta = q->buf[idx].dir;
-                uint8_t stepper_sel = q->buf[idx].stepper_sel;
-                uint32_t sched_lo = q->buf[idx].cycle_abs;
-                int32_t sched_delta = (int32_t)(sched_lo - (uint32_t)sim_now_cyc);
-                uint64_t sched_vtime_ns =
-                    sim_vt_ns + (uint64_t)((int64_t)sched_delta * sim_ns_per_tick);
-#endif
-                q->head++;
-#if CONFIG_MCU_SIM
-                if (sim_notify_step && step_gpio_lines[axis] >= 0) {
-                    uint64_t sched_cycle =
-                        (uint64_t)((int64_t)sim_now_cyc + sched_delta);
-                    sim_notify_step(0, step_gpio_lines[axis],
-                                    signed_step_delta, sched_vtime_ns,
-                                    sched_cycle);
-                }
-                if (emit_step_pins)
-                    sim_step_emit_push((uint8_t)axis, signed_step_delta,
-                                       stepper_sel);
-#endif
-            }
-        }
     }
     return NULL;
 }
@@ -359,8 +222,6 @@ runtime_tick_enable(void)
         uint32_t high = stats_send_time_high + (low < stats_send_time);
         uint64_t baseline = ((uint64_t)high) << 32 | (uint64_t)low;
         runtime_handle_seed_widen(runtime_handle, baseline);
-        runtime_install_step_queues(runtime_handle,
-                                           (uint8_t *)step_queues);
     }
     atomic_store_explicit(&host_tick_enabled, 1, memory_order_release);
 }
@@ -369,24 +230,4 @@ __attribute__((used)) void
 runtime_tick_disable(void)
 {
     atomic_store_explicit(&host_tick_enabled, 0, memory_order_release);
-}
-
-static uint32_t host_step_out_target;
-
-__attribute__((used)) void
-step_output_timer_arm(uint32_t cycle_abs)
-{
-    host_step_out_target = cycle_abs;
-}
-
-__attribute__((used)) uint32_t
-step_output_timer_armed_target(void)
-{
-    return host_step_out_target;
-}
-
-__attribute__((used)) uint8_t
-step_output_timer_is_running(void)
-{
-    return 0;
 }

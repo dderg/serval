@@ -12,10 +12,6 @@ pub(crate) const RT_PHASE_TICK: u32 = 4;
 #[allow(dead_code)]
 pub(crate) const RT_PHASE_STEP_ENQ: u32 = 8;
 pub(crate) const RT_PHASE_ISR_EXIT: u32 = 9;
-pub(crate) const RT_PHASE_STEPOUT_ENTER: u32 = 10;
-pub(crate) const RT_PHASE_STEPOUT_POP: u32 = 11;
-pub(crate) const RT_PHASE_STEPOUT_EMIT: u32 = 12;
-pub(crate) const RT_PHASE_STEPOUT_EXIT: u32 = 13;
 
 #[cfg(not(any(test, feature = "host")))]
 unsafe extern "C" {

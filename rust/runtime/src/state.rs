@@ -113,8 +113,6 @@ pub struct SharedState {
     pub isr_arm_cycles_max: AtomicU32,
     pub isr_eval_cycles_max: AtomicU32,
 
-    pub queue_overflow_count: [AtomicU32; 4],
-
     pub sample_period_cycles: AtomicU32,
 
     pub max_phase_offset_ramp_per_sample: AtomicU16,
@@ -202,9 +200,6 @@ impl SharedState {
             isr_widen_cycles_max: AtomicU32::new(0),
             isr_arm_cycles_max: AtomicU32::new(0),
             isr_eval_cycles_max: AtomicU32::new(0),
-
-            queue_overflow_count: [const { AtomicU32::new(0) }; 4],
-
             sample_period_cycles: AtomicU32::new(0),
 
             max_phase_offset_ramp_per_sample: AtomicU16::new(0),

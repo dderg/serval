@@ -1,10 +1,7 @@
-use core::sync::atomic::{AtomicI16, AtomicI32, AtomicU8};
+use core::sync::atomic::{AtomicI32, AtomicU8};
 use heapless::Vec;
 
 pub const MAX_AXES: usize = 8;
-
-/// Legacy alias kept for FFI call sites that reference N_AXES.
-pub const N_AXES: usize = MAX_AXES;
 
 pub const MAX_STEPPERS_PER_AXIS: usize = 4;
 
@@ -15,7 +12,6 @@ pub enum StepMode {
     Phase = 1,
 }
 
-#[allow(non_snake_case)]
 #[derive(Debug)]
 pub struct StepperRef {
     pub stepper_oid: u8,
@@ -23,8 +19,6 @@ pub struct StepperRef {
     /// OID of `command_config_spi` for this stepper's TMC driver.
     /// `None` means Pulse-only (no SPI traffic for this stepper).
     pub tmc_cs_oid: Option<u8>,
-    pub last_coil_A: AtomicI16,
-    pub last_coil_B: AtomicI16,
     pub phase_offset_microsteps: AtomicI32,
     pub phase_offset_target: AtomicI32,
     pub last_phase_target: AtomicI32,
@@ -36,8 +30,6 @@ impl StepperRef {
             stepper_oid,
             position_count: AtomicI32::new(0),
             tmc_cs_oid,
-            last_coil_A: AtomicI16::new(0),
-            last_coil_B: AtomicI16::new(0),
             phase_offset_microsteps: AtomicI32::new(0),
             phase_offset_target: AtomicI32::new(0),
             last_phase_target: AtomicI32::new(0),
@@ -68,10 +60,6 @@ pub struct AxisState {
     pub last_step_count: i32,
     pub p_prev: f32,
     pub v_prev: f32,
-    /// Steps this axis may emit in one sample before -310 latches. Computed
-    /// from the motor's pulse timing (edge mode + pulse width) at configure
-    /// time; conservative default until then.
-    pub max_steps_per_sample: u32,
 }
 
 impl AxisState {
@@ -83,7 +71,6 @@ impl AxisState {
             last_step_count: 0,
             p_prev: 0.0,
             v_prev: 0.0,
-            max_steps_per_sample: crate::sub_sample_timing::DEFAULT_MAX_STEPS_PER_SAMPLE,
         }
     }
 
@@ -91,29 +78,5 @@ impl AxisState {
         self.last_step_count = 0;
         self.p_prev = 0.0;
         self.v_prev = 0.0;
-    }
-}
-
-/// Backward-compat alias for call sites that still reference the old name.
-pub type AxisConfig = AxisState;
-
-#[derive(Debug)]
-pub struct TickCaches {
-    pub p_prev: [f32; MAX_AXES],
-    pub v_prev: [f32; MAX_AXES],
-}
-
-impl TickCaches {
-    pub const fn new() -> Self {
-        Self {
-            p_prev: [0.0; MAX_AXES],
-            v_prev: [0.0; MAX_AXES],
-        }
-    }
-}
-
-impl Default for TickCaches {
-    fn default() -> Self {
-        Self::new()
     }
 }

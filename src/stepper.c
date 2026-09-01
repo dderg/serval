@@ -14,15 +14,14 @@
 #include "trsync.h" // trsync_add_signal
 #if CONFIG_MOTION_RUNTIME
 #include "runtime.h" // StepperBindingRust
-#include "step_queue.h" // RUNTIME_MAX_STEPS_PER_SAMPLE
 #endif
 #include "event_log.h" // event_log_emit (mcu structured-log ready marker)
 #include "generic/fault_handler.h" // kalico_diag_emit_prior_crash (Stage 5)
 #include "stepper.h"
 
 #if CONFIG_MOTION_RUNTIME
-// Minimum spacing between successive step edges enforced by
-// runtime_emit_step_pulses (~1 us), in CONFIG_CLOCK_FREQ ticks.
+// 1 us single-edge floor per step, in CONFIG_CLOCK_FREQ ticks: the physical
+// cadence ceiling the configure-time step-width guard is derived against.
 #define STEP_MIN_EDGE_DWT ((CONFIG_CLOCK_FREQ) / 1000000u)
 #endif
 
@@ -177,12 +176,6 @@ struct runtime_motor_stepper {
 static struct runtime_motor_stepper runtime_motor_steppers[RUNTIME_MOTOR_COUNT]
                                                           [RUNTIME_MAX_STEPPERS_PER_MOTOR];
 static uint8_t runtime_motor_stepper_count[RUNTIME_MOTOR_COUNT];
-static uint8_t runtime_motor_both_edge[RUNTIME_MOTOR_COUNT];
-static uint32_t runtime_motor_pulse_ticks[RUNTIME_MOTOR_COUNT];
-static int8_t runtime_motor_last_dir[RUNTIME_MOTOR_COUNT] = { -1, -1, -1, -1 };
-
-volatile uint32_t runtime_emit_calls __attribute__((used, externally_visible));
-volatile uint32_t runtime_emit_pulses __attribute__((used, externally_visible));
 
 __attribute__((used, externally_visible))
 uint8_t
@@ -295,29 +288,18 @@ command_kalico_configure_axis(uint32_t *args)
         runtime_motor_steppers[axis_idx][i].stepper = staged[i].stepper;
         runtime_motor_steppers[axis_idx][i].invert_dir = staged[i].invert_dir;
     }
-    runtime_motor_both_edge[axis_idx] = motor_both_edge;
-    runtime_motor_pulse_ticks[axis_idx] = motor_pulse_ticks;
-    runtime_motor_last_dir[axis_idx] = -1;
     runtime_motor_suppress_mask[axis_idx] = 0;
     (void)extrusion_bits;
 
-    // The per-sample step budget this motor can physically emit: half the
-    // sample window (the step ISR is shared across axes) divided by the cost
-    // of one step — the 1us edge floor, plus the pulse-width busy-wait when
-    // the driver only steps on rising edges (no dedge).
+    // Guard the motor's physical step cadence: half the sample window (the
+    // step ISR is shared across axes) must fit at least one step — the 1us
+    // edge floor, plus the pulse-width busy-wait when the driver only steps
+    // on rising edges (no dedge).
     uint32_t sample_ticks = CONFIG_CLOCK_FREQ / CONFIG_MOTION_SAMPLE_RATE_HZ;
     uint32_t per_step_ticks = STEP_MIN_EDGE_DWT
         + (motor_both_edge ? 0 : motor_pulse_ticks);
-    uint32_t step_budget = (sample_ticks / 2) / per_step_ticks;
-    if (step_budget < 1)
+    if ((sample_ticks / 2) / per_step_ticks < 1)
         shutdown("configure_axis step pulse wider than the sample budget");
-    if (step_budget > RUNTIME_MAX_STEPS_PER_SAMPLE)
-        step_budget = RUNTIME_MAX_STEPS_PER_SAMPLE;
-    if (runtime_set_axis_step_budget(runtime_handle, axis_idx, step_budget))
-        shutdown("configure_axis step budget rejected by runtime");
-
-    extern void arm_per_axis_step_timer(uint8_t axis_idx);
-    arm_per_axis_step_timer(axis_idx);
 
     extern void runtime_tick_enable(void);
     runtime_tick_enable();
@@ -409,6 +391,8 @@ command_kalico_set_axis_mode(uint32_t *args)
         shutdown("kalico_set_axis_mode before runtime init");
     uint8_t axis_idx = args[0];
     uint8_t mode = args[1];
+    if (axis_idx >= RUNTIME_MOTOR_COUNT)
+        shutdown("kalico_set_axis_mode axis_idx out of range");
     int32_t rc = runtime_set_axis_mode(runtime_handle, axis_idx, mode);
     if (rc == -2)
         shutdown("kalico_set_axis_mode rejected: sample playback active");
@@ -490,79 +474,5 @@ command_kalico_get_phase_state(uint32_t *args)
 }
 DECL_COMMAND(command_kalico_get_phase_state,
              "kalico_get_phase_state oid=%c");
-
-static uint32_t step_last_edge_dwt[RUNTIME_MOTOR_COUNT];
-
-__attribute__((used, externally_visible))
-void
-runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps, uint8_t stepper_sel)
-{
-    runtime_emit_calls++;
-    if (motor_idx >= RUNTIME_MOTOR_COUNT)
-        return;
-    uint8_t cnt = runtime_motor_stepper_count[motor_idx];
-    if (cnt == 0)
-        return;
-    if (n_steps == 0)
-        return;
-    runtime_emit_pulses += (n_steps < 0) ? (uint32_t)-n_steps : (uint32_t)n_steps;
-    uint8_t suppress = runtime_motor_suppress_mask[motor_idx];
-
-    uint8_t j_begin = 0, j_end = cnt;
-    if (stepper_sel != 0) {
-        if (stepper_sel > cnt)
-            shutdown("correction stepper_sel out of range");
-        j_begin = stepper_sel - 1;
-        j_end = stepper_sel;
-    }
-
-    int8_t want_dir = (n_steps < 0) ? 1 : 0;
-    uint32_t count = (n_steps < 0) ? (uint32_t)-n_steps : (uint32_t)n_steps;
-
-    if (stepper_sel != 0 || runtime_motor_last_dir[motor_idx] != want_dir) {
-        for (uint8_t j = j_begin; j < j_end; j++) {
-            uint8_t bench_verified_not_want_dir_xor_invert
-                = (uint8_t)(!want_dir)
-                ^ runtime_motor_steppers[motor_idx][j].invert_dir;
-            gpio_out_write(runtime_motor_steppers[motor_idx][j].stepper->dir_pin,
-                           bench_verified_not_want_dir_xor_invert);
-        }
-        runtime_motor_last_dir[motor_idx] = (stepper_sel != 0) ? -1 : want_dir;
-    }
-
-    extern uint32_t runtime_cyccnt_read(void);
-    uint32_t last = step_last_edge_dwt[motor_idx];
-    uint8_t both_edge = runtime_motor_both_edge[motor_idx];
-    uint32_t pulse_ticks = runtime_motor_pulse_ticks[motor_idx];
-
-    for (uint32_t i = 0; i < count; i++) {
-        uint32_t now = runtime_cyccnt_read();
-        uint32_t elapsed = now - last;
-        if (last != 0 && elapsed < STEP_MIN_EDGE_DWT) {
-            uint32_t target = last + STEP_MIN_EDGE_DWT;
-            while ((int32_t)(runtime_cyccnt_read() - target) < 0)
-                ;
-        }
-        for (uint8_t j = j_begin; j < j_end; j++) {
-            if (suppress & (uint8_t)(1u << j))
-                continue;
-            gpio_out_toggle_noirq(runtime_motor_steppers[motor_idx][j].stepper->step_pin);
-        }
-        if (!both_edge) {
-            uint32_t fall_at = runtime_cyccnt_read() + pulse_ticks;
-            while ((int32_t)(runtime_cyccnt_read() - fall_at) < 0)
-                ;
-            for (uint8_t j = j_begin; j < j_end; j++) {
-                if (suppress & (uint8_t)(1u << j))
-                    continue;
-                gpio_out_toggle_noirq(
-                    runtime_motor_steppers[motor_idx][j].stepper->step_pin);
-            }
-        }
-        last = runtime_cyccnt_read();
-    }
-
-    step_last_edge_dwt[motor_idx] = last;
-}
 
 #endif

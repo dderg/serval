@@ -76,22 +76,6 @@ pub unsafe extern "C" fn runtime_set_axis_mode(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn runtime_set_axis_step_budget(
-    rt: *mut Runtime,
-    axis_idx: u8,
-    max_steps_per_sample: u32,
-) -> i32 {
-    let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
-    // SAFETY: foreground-only; §11.2 raw-pointer projection.
-    unsafe {
-        let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
-        (*isr_ptr)
-            .engine
-            .set_axis_step_budget(axis_idx, max_steps_per_sample)
-    }
-}
-
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn runtime_set_stepper_offset(
     rt: *mut Runtime,
     stepper_idx: u8,
@@ -111,32 +95,4 @@ pub unsafe extern "C" fn runtime_set_stepper_offset(
             max_microsteps_per_sample,
         )
     }
-}
-
-#[cfg(feature = "host")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn runtime_install_step_queues(rt: *mut Runtime, queues: *mut u8) -> i32 {
-    if rt.is_null() || queues.is_null() {
-        return RUNTIME_ERR_NULL_PTR;
-    }
-    if !INIT_DONE.load(Ordering::Acquire) {
-        return RUNTIME_ERR_NOT_INIT;
-    }
-    let ctx = rt.cast::<RuntimeContext>();
-    unsafe {
-        let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
-        let q0 = queues.cast::<runtime::step_queue::StepQueue>();
-        let ptrs: [*mut runtime::step_queue::StepQueue; runtime::stepping_state::N_AXES] = [
-            q0,
-            q0.add(1),
-            q0.add(2),
-            q0.add(3),
-            q0.add(4),
-            q0.add(5),
-            q0.add(6),
-            q0.add(7),
-        ];
-        (*isr_ptr).engine.test_install_step_queues(ptrs);
-    }
-    RUNTIME_OK
 }

@@ -400,57 +400,6 @@ runtime_status_drain(void)
 }
 DECL_TASK(runtime_status_drain);
 
-extern void runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps,
-                                     uint8_t stepper_sel);
-
-// Step-output timer wiring (TIM3 on H7, TIM2 on F4). Step-output ISR runs at
-// the same NVIC priority as TIM5, so the kick from the TIM5 ISR is SPSC-safe
-// (see motion_nvic_prio.h).
-
-extern void step_output_timer_arm(uint32_t cycle_abs);
-extern uint32_t step_output_timer_armed_target(void);
-extern uint8_t step_output_timer_is_running(void);
-
-// Read by Rust to scope the soonest-across scan.
-static uint8_t step_output_owned_mask;
-
-// used,externally_visible: Rust-only caller; must survive --gc-sections LTO.
-__attribute__((used, externally_visible))
-uint8_t
-kalico_step_output_owned_mask(void)
-{
-    return step_output_owned_mask;
-}
-
-// Idempotent; does NOT arm the timer.
-void
-arm_per_axis_step_timer(uint8_t axis_idx)
-{
-    if (axis_idx >= 4)
-        return;
-    step_output_owned_mask |= (uint8_t)(1u << axis_idx);
-}
-
-// Producer kick from the TIM5 ISR; same-priority as the step-output ISR, so the
-// compare write is non-racing. used,externally_visible: Rust-only caller.
-__attribute__((used, externally_visible))
-void
-kalico_kick_step_output(uint8_t axis_idx, uint32_t cycle_abs)
-{
-    if (axis_idx >= 4)
-        return;
-    step_output_owned_mask |= (uint8_t)(1u << axis_idx);
-
-    if (!step_output_timer_is_running()) {
-        step_output_timer_arm(cycle_abs);
-        return;
-    }
-    // Pull compare forward only if the new step is sooner (wrap-safe).
-    uint32_t cur = step_output_timer_armed_target();
-    if ((int32_t)(cycle_abs - cur) < 0)
-        step_output_timer_arm(cycle_abs);
-}
-
 #else
 
 // MOTION_RUNTIME=n build: no MCU-side motion engine. The Kalico envelope

@@ -4,44 +4,44 @@
 use super::ramp_phase_offset;
 use super::write_phase_coils;
 use crate::state::SharedState;
-use crate::stepping_state::{AxisConfig, StepMode, StepperRef};
-use core::sync::atomic::{AtomicI16, AtomicI32, AtomicU8, Ordering};
+use crate::stepping_state::{AxisState, StepMode, StepperRef};
+use crate::test_xdirect_capture;
+use core::sync::atomic::{AtomicU8, Ordering};
 use heapless::Vec;
 
-fn make_stepper() -> StepperRef {
-    StepperRef {
-        stepper_oid: 0,
-        position_count: AtomicI32::new(0),
-        tmc_cs_oid: None,
-        last_coil_A: AtomicI16::new(0),
-        last_coil_B: AtomicI16::new(0),
-        phase_offset_microsteps: AtomicI32::new(0),
-        phase_offset_target: AtomicI32::new(0),
-        last_phase_target: AtomicI32::new(0),
-    }
-}
-
-fn make_axis(mode: StepMode, microstep_distance: f32) -> AxisConfig {
+fn make_axis(mode: StepMode, microstep_distance: f32, tmc_cs_oid: Option<u8>) -> AxisState {
     let mut steppers: Vec<StepperRef, 4> = Vec::new();
-    let _ = steppers.push(make_stepper());
-    AxisConfig {
+    let _ = steppers.push(StepperRef::new(0, tmc_cs_oid));
+    AxisState {
         mode: AtomicU8::new(mode as u8),
         steppers,
         microstep_distance,
-        ..AxisConfig::new_unconfigured()
+        ..AxisState::new_unconfigured()
     }
+}
+
+fn map_one_phase_motor(shared: &SharedState) {
+    shared.phase_motor_count.store(1, Ordering::Release);
+    shared.phase_slot_idx[0].store(0, Ordering::Release);
 }
 
 #[test]
 fn write_phase_coils_publishes_lut_pair_and_advances_position() {
+    let _guard = test_xdirect_capture::lock_for_test();
+    test_xdirect_capture::clear();
+
     let shared = SharedState::new();
-    let mut axis = make_axis(StepMode::Phase, 0.0125);
+    map_one_phase_motor(&shared);
+    let mut axis = make_axis(StepMode::Phase, 0.0125, Some(3));
     axis.last_step_count = 256;
 
     write_phase_coils(0, &axis, &shared, 0);
 
-    assert_eq!(axis.steppers[0].last_coil_A.load(Ordering::Acquire), 0);
-    assert_eq!(axis.steppers[0].last_coil_B.load(Ordering::Acquire), 248);
+    let records = test_xdirect_capture::drain();
+    assert_eq!(records.len(), 1, "one TMC stepper → one XDIRECT write");
+    assert_eq!(records[0].motor_idx, 0);
+    assert_eq!(records[0].coil_a, 0);
+    assert_eq!(records[0].coil_b, 248);
     assert_eq!(
         axis.steppers[0].last_phase_target.load(Ordering::Acquire),
         256
@@ -53,7 +53,7 @@ fn write_phase_coils_publishes_lut_pair_and_advances_position() {
 #[test]
 fn write_phase_coils_honors_phase_offset() {
     let shared = SharedState::new();
-    let mut axis = make_axis(StepMode::Phase, 0.0125);
+    let mut axis = make_axis(StepMode::Phase, 0.0125, None);
     axis.last_step_count = 256;
     axis.steppers[0]
         .phase_offset_microsteps
@@ -71,7 +71,7 @@ fn write_phase_coils_honors_phase_offset() {
 #[test]
 fn write_phase_coils_adds_the_buzz_offset() {
     let shared = SharedState::new();
-    let mut axis = make_axis(StepMode::Phase, 0.0125);
+    let mut axis = make_axis(StepMode::Phase, 0.0125, None);
     axis.last_step_count = 256;
 
     write_phase_coils(0, &axis, &shared, -6);
@@ -86,7 +86,7 @@ fn write_phase_coils_adds_the_buzz_offset() {
 #[cfg(feature = "motion-module-stepper")]
 #[test]
 fn ramp_phase_offset_advances_at_most_max_per_sample() {
-    let axis = make_axis(StepMode::Phase, 0.0125);
+    let axis = make_axis(StepMode::Phase, 0.0125, None);
     axis.steppers[0]
         .phase_offset_target
         .store(10, Ordering::Release);
@@ -105,7 +105,7 @@ fn ramp_phase_offset_advances_at_most_max_per_sample() {
 #[cfg(feature = "motion-module-stepper")]
 #[test]
 fn ramp_phase_offset_ramps_down_toward_a_lower_target() {
-    let axis = make_axis(StepMode::Phase, 0.0125);
+    let axis = make_axis(StepMode::Phase, 0.0125, None);
     axis.steppers[0]
         .phase_offset_microsteps
         .store(10, Ordering::Release);
@@ -127,7 +127,7 @@ fn ramp_phase_offset_ramps_down_toward_a_lower_target() {
 #[cfg(feature = "motion-module-stepper")]
 #[test]
 fn ramp_phase_offset_is_a_noop_when_max_per_sample_is_zero() {
-    let axis = make_axis(StepMode::Phase, 0.0125);
+    let axis = make_axis(StepMode::Phase, 0.0125, None);
     axis.steppers[0]
         .phase_offset_microsteps
         .store(3, Ordering::Release);

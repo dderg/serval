@@ -8,8 +8,6 @@ use crate::state::SharedState;
 #[cfg(feature = "motion-module-stepper")]
 pub use crate::dispatch_stepper::DISPLACEMENT_THRESHOLD_MM;
 
-pub use crate::stepping_state::N_AXES;
-
 // C-side scheduler accessor for the most-recently-dispatched timer func.
 // Read only on the `-311` fault path. MCU/sim link only; host/test → 0.
 #[cfg(any(not(any(test, feature = "host")), feature = "mcu-sim"))]

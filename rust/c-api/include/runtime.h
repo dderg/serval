@@ -88,8 +88,6 @@ uint32_t runtime_handle_tick_blocker_pc(struct Runtime *rt);
 
 uint32_t runtime_handle_tick_counter(struct Runtime *rt);
 
-int32_t runtime_install_step_queues(struct Runtime *rt, uint8_t *queues);
-
 uint64_t runtime_now_ticks(struct Runtime *rt);
 
 int32_t runtime_phase_align_to(struct Runtime *rt, uint8_t stepper_oid, uint16_t target_phase);
@@ -152,10 +150,6 @@ int32_t runtime_seed_axis_count(struct Runtime *rt, uint8_t axis_idx, int32_t co
 int32_t runtime_seed_position(struct Runtime *rt, int32_t x_q16, int32_t y_q16, int32_t z_q16);
 
 int32_t runtime_set_axis_mode(struct Runtime *rt, uint8_t axis_idx, uint8_t new_mode);
-
-int32_t runtime_set_axis_step_budget(struct Runtime *rt,
-                                     uint8_t axis_idx,
-                                     uint32_t max_steps_per_sample);
 
 int32_t runtime_set_stepper_offset(struct Runtime *rt,
                                    uint8_t stepper_idx,

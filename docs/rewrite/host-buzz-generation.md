@@ -3,13 +3,15 @@
 ## Problem
 
 The stepqueue branch makes classic `queue_step` the single MCU motion path and
-deletes the MCU-resident sample/piece machinery. The resonance buzz is the last
-consumer of MCU-side waveform math: `kalico_resonance_buzz` arms an on-MCU tone
-generator (`rust/runtime/src/buzz_gen.rs` + `buzz_stream.rs` + `buzz_sweep.rs` +
-`buzz_xdirect.rs`) that injects edges into the same runtime step queues that
-classic motion uses. That cohabitation is structurally fragile (lane/step-queue
-rejection checks, xdirect routing bits, refill-fault latch, foreground refill
-hook in `engine/tick.rs`) and blocks deleting the runtime step queues.
+deletes the MCU-resident sample/piece machinery. The resonance buzz was the last
+consumer of MCU-side waveform math: `kalico_resonance_buzz` armed an on-MCU tone
+generator that injected edges into the runtime step queues classic motion also
+used. That cohabitation blocked deleting the runtime step queues.
+
+Both halves are now gone. The MCU tone generator moved host-side, and with its
+last cohabitant removed the runtime step-output path — `step_queues`, the
+per-axis step-output timer, `runtime_emit_step_pulses` — was deleted outright.
+Classic `queue_step` (`src/stepper_classic.c`) is the only MCU pulse path.
 
 EtherCAT already solved this the right way: the endpoint **rejects**
 `ResonanceBuzz` (`ERR_BUZZ_IN_RING_MODE`, `ethercat-rt/src/endpoint/commands.rs`)

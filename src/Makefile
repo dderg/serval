@@ -3,8 +3,7 @@
 src-y += sched.c command.c basecmd.c debugcmds.c
 # Kalico-native transport — stream-level demuxer + Layer 4 dispatcher.
 src-y += mcu_demux.c mcu_transport_dispatch.c event_log.c
-src-$(CONFIG_MOTION_RUNTIME) += runtime_storage.c \
-    runtime_panic.c step_queue.c spi_queue.c
+src-$(CONFIG_MOTION_RUNTIME) += runtime_storage.c runtime_panic.c spi_queue.c
 src-$(CONFIG_SAMPLE_STEPPING) += sample_commands.c
 src-$(CONFIG_HAVE_GPIO) += initial_pins.c gpiocmds.c stepper.c trsync.c endstop.c \
     stepper_classic.c
@@ -107,7 +106,6 @@ $(MCU_RUST_LIB): FORCE
 			cargo clean -p runtime 2>/dev/null || true; \
 		fi && \
 		RUNTIME_STORAGE_SIZE=$(CONFIG_RUNTIME_STORAGE_SIZE) \
-		RUNTIME_SAMPLE_RATE_HZ=$(CONFIG_MOTION_SAMPLE_RATE_HZ) \
 		RUNTIME_SAMPLE_RUNS_PER_LANE=$(CONFIG_RUNTIME_SAMPLE_RUNS_PER_LANE) \
 		RUNTIME_SAMPLE_OVERLAY_RUNS_PER_LANE=$(CONFIG_RUNTIME_SAMPLE_OVERLAY_RUNS_PER_LANE) \
 		cargo build -p c-api \
@@ -155,7 +153,6 @@ $(MCU_RUST_LIB): FORCE
 			cargo clean -p runtime 2>/dev/null || true; \
 		fi && \
 		RUNTIME_STORAGE_SIZE=$(CONFIG_RUNTIME_STORAGE_SIZE) \
-		RUNTIME_SAMPLE_RATE_HZ=$(CONFIG_MOTION_SAMPLE_RATE_HZ) \
 		RUNTIME_SAMPLE_RUNS_PER_LANE=$(CONFIG_RUNTIME_SAMPLE_RUNS_PER_LANE) \
 		RUNTIME_SAMPLE_OVERLAY_RUNS_PER_LANE=$(CONFIG_RUNTIME_SAMPLE_OVERLAY_RUNS_PER_LANE) \
 		cargo build -p c-api \

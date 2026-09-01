@@ -218,7 +218,7 @@ fn event_info_new_runtime_crash_discriminators() {
 
     let (name, tmpl) = event_info(SUBSYSTEM_RUNTIME, EVENT_RUNTIME_BLOCK_SOURCE);
     assert_eq!(name, "runtime.block_source");
-    assert!(tmpl.contains("{arg0}") && tmpl.contains("{arg1}"));
+    assert!(tmpl.contains("{arg0}"));
 
     let (name, tmpl) = event_info(SUBSYSTEM_RUNTIME, EVENT_RUNTIME_TIM5_IA);
     assert_eq!(name, "runtime.tim5_ia");
