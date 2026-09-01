@@ -179,6 +179,35 @@ fn budgeted_multi_motor_drain_matches_serial_output() {
     }
 }
 
+/// A budget that expires on a zero-width window — `up_to_clock` landing
+/// exactly on the resume frontier — must leave the frontier where the halt put
+/// it. Advancing it past the clock the halt never searched forfeits that clock:
+/// a crossing sitting on it lands late, or disappears outright when the curve
+/// retreats before the next drain resumes. Nothing is logged either way.
+#[test]
+fn a_budget_expiring_on_a_zero_width_window_keeps_its_root() {
+    let view = span(1_000, LATTICE_OFFSET, 0.1, 1_000);
+    let first_root = 1_075;
+
+    let mut reference = seeded(cfg(), 8);
+    reference.push_spans(0, &[view.clone()]).unwrap();
+    let whole = replayed_step_clocks(&reference.drain(u64::MAX).unwrap());
+    assert_eq!(whole.first(), Some(&first_root));
+
+    let mut shim = seeded(cfg(), 8);
+    shim.push_spans(0, &[view]).unwrap();
+    let mut frames = shim.drain_budgeted(first_root - 1, None).unwrap();
+    assert!(frames.is_empty(), "the first root is one clock ahead");
+    frames.extend(
+        shim.drain_budgeted(first_root, Some(std::time::Instant::now()))
+            .unwrap(),
+    );
+    frames.extend(shim.drain_budgeted(u64::MAX, None).unwrap());
+
+    assert_eq!(replayed_step_clocks(&frames), whole);
+    assert_eq!(shim.commanded_steps(0), reference.commanded_steps(0));
+}
+
 #[test]
 #[ignore = "manual perf probe: cargo test -p step-shim drain_speed_probe -- --ignored --nocapture"]
 fn drain_speed_probe() {
@@ -1141,16 +1170,36 @@ fn classic_and_hp_request_the_same_step_clocks() {
     assert_eq!(hp_shim.motor_encoder(0), StepEncoder::HighPrecision);
 }
 
+/// `emit` is total: every root the cursor solved reaches the wire inside the
+/// call that solved it. The hard case is a run whose tail sits further from the
+/// committed clock than the encoder can reach — the classic compressor stops on
+/// the `CLOCK_DIFF_MAX` gap after consuming the prefix, and the same drain has
+/// to re-anchor and finish the rest rather than park it for a later sweep.
 #[test]
-fn finish_drains_every_pending_root() {
+fn a_drain_lands_a_run_the_encoder_cannot_reach_in_one_volley() {
+    let far = 1_000_000_000_u64;
+    assert!(far - 1_975 > super::compress::CLOCK_DIFF_MAX);
     let mut shim = seeded(cfg(), 8);
     shim.push_spans(0, &[span(1_000, LATTICE_OFFSET, 0.1, 1_000)])
         .unwrap();
-    shim.drain(u64::MAX).unwrap();
+    shim.accept_forward_seam_gap(0, far).unwrap();
+    shim.push_spans(0, &[span(far, 0.1 + LATTICE_OFFSET, 0.1, 1_000)])
+        .unwrap();
+
+    let frames = shim.drain(u64::MAX).unwrap();
     assert_eq!(shim.pending_roots(), 0);
-    assert!(shim.finish(0).unwrap().is_empty());
-    assert_eq!(shim.emitted_clock(0), 1_975);
-    assert_eq!(shim.motor_microstep_distance(0), MICROSTEP);
+    assert_eq!(shim.commanded_steps(0), 20);
+    let clocks = replayed_step_clocks(&frames);
+    assert_eq!(
+        clocks[..10],
+        (1..=10).map(|k| 1_000 + 100 * k - 25).collect::<Vec<u64>>()[..]
+    );
+    assert_eq!(clocks.len(), 20);
+    assert_eq!(
+        reset_clocks(&frames),
+        vec![1_074, far + 74],
+        "the unreachable tail re-anchors on its own first step"
+    );
 }
 
 /// A new overlay is entered one clock after its signal starts: the seam clock

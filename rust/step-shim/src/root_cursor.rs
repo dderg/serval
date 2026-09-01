@@ -55,6 +55,15 @@ impl Lattice {
     }
 }
 
+/// A motor-local signal's own step lattice, tied to the signal that opened it:
+/// the overlay walks that lattice instead of the lane's while the signal is
+/// active, and a different signal opens a fresh one.
+#[derive(Debug, Clone, Copy)]
+struct Overlay {
+    signal_id: usize,
+    lattice: Lattice,
+}
+
 const BISECTION_SAFEGUARD_PERIOD: u32 = 3;
 
 thread_local! {
@@ -71,8 +80,7 @@ pub struct StepRootCursor {
     drain_halted: bool,
     microstep_mm: f64,
     lane: Lattice,
-    overlay: Option<Lattice>,
-    overlay_signal_id: Option<usize>,
+    overlay: Option<Overlay>,
     /// The sub-microstep remainder the last overlay left unstepped: its final
     /// continuous position minus the last lattice threshold it actually
     /// crossed. A relative overlay signal restarts its coordinate frame at
@@ -83,9 +91,9 @@ pub struct StepRootCursor {
     /// real drift.
     overlay_carry_mm: f64,
     positioned: bool,
-    resume_floor: Option<u64>,
+    resume_floor: u64,
     origin_clock: Option<u64>,
-    frontier: Option<u64>,
+    frontier: u64,
     last_root_clock: Option<u64>,
 }
 
@@ -100,12 +108,11 @@ impl StepRootCursor {
                 step_count: 0,
             },
             overlay: None,
-            overlay_signal_id: None,
             overlay_carry_mm: 0.0,
             positioned: false,
-            resume_floor: None,
+            resume_floor: 0,
             origin_clock: None,
-            frontier: None,
+            frontier: 0,
             last_root_clock: None,
         }
     }
@@ -119,7 +126,7 @@ impl StepRootCursor {
     }
 
     pub fn resume_floor(&self) -> u64 {
-        self.resume_floor.unwrap_or(0)
+        self.resume_floor
     }
 
     pub fn origin_clock(&self) -> Option<u64> {
@@ -145,12 +152,23 @@ impl StepRootCursor {
             step_count: count,
         };
         self.overlay = None;
-        self.overlay_signal_id = None;
         self.positioned = true;
-        self.resume_floor = Some(resume_floor);
+        self.resume_floor = resume_floor;
         self.origin_clock = resume_floor.checked_sub(1);
         self.last_root_clock = None;
-        self.frontier = None;
+        self.frontier = 0;
+    }
+
+    /// The lane's clock slope changed epoch, so every clock the cursor holds
+    /// belongs to the old one. The step lattice and its unstepped remainder are
+    /// physical and survive.
+    pub fn retime(&mut self, cfg: &MotorConfig) {
+        let count = self.lane.step_count;
+        let resume_floor = self.resume_floor;
+        let carry = self.overlay_carry_mm;
+        *self = Self::new(cfg);
+        self.reset_to(count, resume_floor);
+        self.overlay_carry_mm = carry;
     }
 
     pub fn advance(
@@ -173,7 +191,7 @@ impl StepRootCursor {
                 });
             }
             let signal_start = view.start_clock.max(self.resume_floor());
-            let begin = signal_start.max(self.frontier.unwrap_or(0));
+            let begin = signal_start.max(self.frontier);
             if begin > view.end_clock {
                 queue.release_active();
                 continue;
@@ -188,13 +206,14 @@ impl StepRootCursor {
                 self.drain_deadline = None;
                 return Ok(());
             }
-            self.frontier = Some(last_clock + 1);
+            self.frontier = last_clock + 1;
             if last_clock < view.end_clock {
                 return Ok(());
             }
             if let Some(overlay) = self.overlay {
                 let end_position = self.position_at(motor, &view, view.end_clock)?;
-                self.overlay_carry_mm = end_position - overlay.nominal_position(self.microstep_mm);
+                self.overlay_carry_mm =
+                    end_position - overlay.lattice.nominal_position(self.microstep_mm);
             }
             queue.release_active();
         }
@@ -211,16 +230,20 @@ impl StepRootCursor {
     ) -> Result<(), ShimError> {
         if view.signal.motor_mask == 0 {
             self.overlay = None;
-            self.overlay_signal_id = None;
         } else {
             let signal_id = std::sync::Arc::as_ptr(&view.signal) as usize;
-            if self.overlay_signal_id != Some(signal_id) {
+            if self
+                .overlay
+                .is_none_or(|overlay| overlay.signal_id != signal_id)
+            {
                 let position = self.position_at(motor, view, signal_start)?;
-                self.overlay = Some(Lattice {
-                    origin_mm: position - self.overlay_carry_mm,
-                    step_count: 0,
+                self.overlay = Some(Overlay {
+                    signal_id,
+                    lattice: Lattice {
+                        origin_mm: position - self.overlay_carry_mm,
+                        step_count: 0,
+                    },
                 });
-                self.overlay_signal_id = Some(signal_id);
             }
         }
         if self.origin_clock.is_none() {
@@ -244,11 +267,9 @@ impl StepRootCursor {
         out: &mut Vec<StepRoot>,
     ) -> Result<(), ShimError> {
         if begin == last_clock {
-            self.emit_interval(motor, cfg, view, begin, last_clock, out)?;
-            self.frontier = Some(last_clock + 1);
-            return Ok(());
+            return self.emit_window(motor, cfg, view, begin, last_clock, out);
         }
-        let mut boundaries = vec![view.start_clock, view.end_clock];
+        let mut boundaries = vec![begin, last_clock];
         let breakpoints = &view.signal.breakpoints;
         let stream_t_at = |clock: u64| {
             (view.stream_t_start + (clock as f64 - view.start_clock_exact) / view.clock_freq_hz)
@@ -270,7 +291,6 @@ impl StepRootCursor {
             );
         }
         boundaries.retain(|clock| *clock >= begin && *clock <= last_clock);
-        boundaries.extend([begin, last_clock]);
         boundaries.sort_unstable();
         boundaries.dedup();
         WINDOW_COUNT.with(|c| c.set(c.get() + boundaries.len() as u64 - 1));
@@ -295,16 +315,14 @@ impl StepRootCursor {
                     self.emit_run(motor, cfg, view, from, boundaries[end_index], slope, out)?;
                 }
                 None => {
-                    self.emit_interval(motor, cfg, view, from, boundaries[end_index], out)?;
+                    self.subdivide(motor, cfg, view, from, boundaries[end_index], out)?;
                 }
             }
             if self.drain_halted {
                 return Ok(());
             }
-            self.frontier = Some(boundaries[end_index] + 1);
             index = end_index;
         }
-        self.frontier = Some(last_clock + 1);
         Ok(())
     }
 
@@ -350,7 +368,7 @@ impl StepRootCursor {
                     && clock < hi
                 {
                     self.drain_halted = true;
-                    self.frontier = Some(clock + 1);
+                    self.frontier = clock + 1;
                     return Ok(());
                 }
             }
@@ -445,41 +463,55 @@ impl StepRootCursor {
         Ok(())
     }
 
-    fn emit_interval(
+    fn emit_window(
         &mut self,
         motor: usize,
         cfg: &MotorConfig,
         view: &ClockedMotorSpan,
-        from: u64,
-        to: u64,
+        lo: u64,
+        hi: u64,
         out: &mut Vec<StepRoot>,
     ) -> Result<(), ShimError> {
-        if self.halt_if_past_deadline(from) {
+        match self.certified_slope(motor, view, lo, hi)? {
+            Some(slope) => self.emit_run(motor, cfg, view, lo, hi, slope, out),
+            None => self.subdivide(motor, cfg, view, lo, hi, out),
+        }
+    }
+
+    /// The window carries no certified slope, so it is halved until one half
+    /// does — or until a single clock is left and the rise decides.
+    fn subdivide(
+        &mut self,
+        motor: usize,
+        cfg: &MotorConfig,
+        view: &ClockedMotorSpan,
+        lo: u64,
+        hi: u64,
+        out: &mut Vec<StepRoot>,
+    ) -> Result<(), ShimError> {
+        if self.halt_if_past_deadline(lo) {
             return Ok(());
         }
-        if let Some(slope) = self.certified_slope(motor, view, from, to)? {
-            return self.emit_run(motor, cfg, view, from, to, slope, out);
-        }
         CERT_NONE_COUNT.with(|c| c.set(c.get() + 1));
-        if !self.interval_can_reach_next_lattice(motor, view, from, to)? {
+        if !self.interval_can_reach_next_lattice(motor, view, lo, hi)? {
             PRUNE_COUNT.with(|c| c.set(c.get() + 1));
             return Ok(());
         }
-        if to - from <= 1 {
-            let rise = self.position_at(motor, view, to)? - self.position_at(motor, view, from)?;
+        if hi - lo <= 1 {
+            let rise = self.position_at(motor, view, hi)? - self.position_at(motor, view, lo)?;
             let slope = if rise >= 0.0 {
                 Slope::Rising
             } else {
                 Slope::Falling
             };
-            return self.emit_run(motor, cfg, view, from, to, slope, out);
+            return self.emit_run(motor, cfg, view, lo, hi, slope, out);
         }
-        let mid = from + (to - from) / 2;
-        self.emit_interval(motor, cfg, view, from, mid, out)?;
+        let mid = lo + (hi - lo) / 2;
+        self.emit_window(motor, cfg, view, lo, mid, out)?;
         if self.drain_halted {
             return Ok(());
         }
-        self.emit_interval(motor, cfg, view, mid, to, out)
+        self.emit_window(motor, cfg, view, mid, hi, out)
     }
 
     fn interval_can_reach_next_lattice(
@@ -566,19 +598,19 @@ impl StepRootCursor {
             .is_some_and(|deadline| std::time::Instant::now() >= deadline)
         {
             self.drain_halted = true;
-            self.frontier = Some(resume_clock);
+            self.frontier = resume_clock;
             return true;
         }
         false
     }
 
     fn frame(&self) -> Lattice {
-        self.overlay.unwrap_or(self.lane)
+        self.overlay.map_or(self.lane, |overlay| overlay.lattice)
     }
 
     fn frame_mut(&mut self) -> &mut Lattice {
         match &mut self.overlay {
-            Some(overlay) => overlay,
+            Some(overlay) => &mut overlay.lattice,
             None => &mut self.lane,
         }
     }

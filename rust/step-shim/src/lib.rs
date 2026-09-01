@@ -179,19 +179,88 @@ impl std::fmt::Display for ShimError {
 
 impl std::error::Error for ShimError {}
 
-/// A run's compressed moves, in emission order. The classic and high-precision
-/// encoders produce different move types; the emit loop dispatches on this so
-/// the reset/dir/drain tail is shared.
-enum Encoded {
-    Classic(Vec<compress::StepMove>, usize),
-    Hp(Vec<compress_hp::StepMoveHp>, usize, u32),
+/// The compressor a motor drives, plus whatever it carries between runs. The
+/// classic packer starts every run from the base clock alone; the
+/// high-precision one owns its least-squares scratch and the interval its next
+/// run seeds from.
+#[derive(Debug)]
+enum Encoder {
+    Classic {
+        max_error_ticks: u32,
+    },
+    HighPrecision {
+        scratch: compress_hp::HpScratch,
+        carry: u32,
+    },
 }
 
-impl Encoded {
-    fn covered(&self) -> usize {
-        match self {
-            Self::Classic(_, covered) | Self::Hp(_, covered, _) => *covered,
+impl Encoder {
+    fn new(encoder: StepEncoder) -> Self {
+        match encoder {
+            StepEncoder::Classic { max_error_ticks } => Self::Classic { max_error_ticks },
+            StepEncoder::HighPrecision => Self::HighPrecision {
+                scratch: compress_hp::HpScratch::new(),
+                carry: 0,
+            },
         }
+    }
+
+    /// A volley that re-anchors the mcu's step clock starts from silence, so
+    /// nothing a previous run carried applies to it.
+    fn rearm(&mut self) {
+        match self {
+            Self::Classic { .. } => {}
+            Self::HighPrecision { carry, .. } => *carry = 0,
+        }
+    }
+
+    /// Packs the run into wire moves, appends them in emission order, and
+    /// answers how many of `clocks` they cover plus the clock the last packed
+    /// step lands on.
+    fn encode(
+        &mut self,
+        oid: u32,
+        clocks: &[u64],
+        base_clock: u64,
+        frames: &mut Vec<StepFrame>,
+    ) -> Result<(usize, u64), compress::CompressError> {
+        let mut clock = base_clock;
+        let covered = match self {
+            Self::Classic { max_error_ticks } => {
+                let (moves, covered) =
+                    compress_with_max_error(clocks, base_clock, *max_error_ticks)?;
+                for mv in &moves {
+                    frames.push(StepFrame::QueueStep {
+                        oid,
+                        interval: mv.interval,
+                        count: mv.count,
+                        add: mv.add,
+                    });
+                    clock = mv.last_clock(clock);
+                }
+                covered
+            }
+            Self::HighPrecision { scratch, carry } => {
+                let (moves, covered, carry_out) =
+                    compress_hp::compress_hp(scratch, clocks, base_clock, *carry)?;
+                *carry = carry_out;
+                for mv in &moves {
+                    frames.push(StepFrame::QueueStepHp {
+                        oid,
+                        interval: mv.interval,
+                        count: mv.count,
+                        add: mv.add,
+                        add2: mv.add2,
+                        shift: mv.shift,
+                        first_step: mv.first_step,
+                        last_step: mv.last_step,
+                    });
+                    clock = mv.last_clock(clock);
+                }
+                covered
+            }
+        };
+        Ok((covered, clock))
     }
 }
 
@@ -201,11 +270,9 @@ struct MotorState {
     queue: SpanQueue,
     cursor: StepRootCursor,
     pending: Vec<StepRoot>,
-    last_step_clock: u64,
-    needs_reset: bool,
+    stepped_clock: Option<u64>,
     last_dir: Option<u8>,
-    next_expected_interval: u32,
-    hp_scratch: Option<compress_hp::HpScratch>,
+    encoder: Encoder,
 }
 
 impl MotorState {
@@ -215,12 +282,9 @@ impl MotorState {
             cfg,
             queue: SpanQueue::new(queue_depth),
             pending: Vec::new(),
-            last_step_clock: 0,
-            needs_reset: true,
+            stepped_clock: None,
             last_dir: None,
-            next_expected_interval: 0,
-            hp_scratch: matches!(cfg.encoder, StepEncoder::HighPrecision)
-                .then(compress_hp::HpScratch::new),
+            encoder: Encoder::new(cfg.encoder),
         }
     }
 
@@ -231,30 +295,26 @@ impl MotorState {
             let run_len = self.pending.iter().take_while(|s| s.dir == dir).count();
             let clocks: Vec<u64> = self.pending[..run_len].iter().map(|s| s.clock).collect();
 
-            let committed = if self.needs_reset {
-                self.cursor
-                    .origin_clock()
-                    .expect("origin clock is set before any root is solved")
-            } else {
-                self.last_step_clock
+            let (committed, min_rearm) = match self.stepped_clock {
+                Some(clock) => (clock, self.cfg.min_rearm_cycles),
+                None => (
+                    self.cursor
+                        .origin_clock()
+                        .expect("origin clock is set before any root is solved"),
+                    0,
+                ),
             };
             if clocks[0] <= committed {
                 return Err(ShimError::CompressFailure {
                     motor,
                     detail: format!(
                         "step clock regression: first step of this run is at {} but the \
-                         stream is already committed to {committed} (needs_reset={}, \
-                         last_step_clock={}, run_len={run_len}, dir={dir})",
-                        clocks[0], self.needs_reset, self.last_step_clock
+                         stream is already committed to {committed} \
+                         (stepped_clock={:?}, run_len={run_len}, dir={dir})",
+                        clocks[0], self.stepped_clock
                     ),
                 });
             }
-
-            let min_rearm = if self.needs_reset {
-                0
-            } else {
-                self.cfg.min_rearm_cycles
-            };
             if clocks[0] - committed < min_rearm {
                 return Err(ShimError::StepTooSoon {
                     motor,
@@ -264,11 +324,11 @@ impl MotorState {
                 });
             }
 
-            let out_of_reach = clocks[0] - committed >= compress::CLOCK_DIFF_MAX;
-            let re_anchoring = self.needs_reset || out_of_reach;
+            let re_anchoring =
+                self.stepped_clock.is_none() || clocks[0] - committed >= compress::CLOCK_DIFF_MAX;
             // `committed` is where the stream is guaranteed silent, not where
-            // the volley starts: a lane that holds before it steps keeps
-            // `needs_reset` for the whole hold, so its origin clock is the
+            // the volley starts: a lane that holds before it steps has no
+            // stepped clock for the whole hold, so its committed clock is the
             // seam the hold began on — seconds or minutes behind the first
             // step. reset_step_clock heads the volley and the mcu shuts down
             // on a late stepper re-arm ("Rescheduled timer in the past"), so
@@ -278,49 +338,13 @@ impl MotorState {
             } else {
                 committed
             };
-            let hp_carry = if re_anchoring {
-                0
-            } else {
-                self.next_expected_interval
-            };
-            let encoded = match self.cfg.encoder {
-                StepEncoder::Classic { max_error_ticks } => {
-                    let (moves, covered) =
-                        compress_with_max_error(&clocks, base_clock, max_error_ticks).map_err(
-                            |e| ShimError::CompressFailure {
-                                motor,
-                                detail: e.detail,
-                            },
-                        )?;
-                    Encoded::Classic(moves, covered)
-                }
-                StepEncoder::HighPrecision => {
-                    let scratch = self
-                        .hp_scratch
-                        .as_mut()
-                        .expect("high-precision motors own their compressor scratch");
-                    let (moves, covered, carry_out) = compress_hp::compress_hp(
-                        scratch, &clocks, base_clock, hp_carry,
-                    )
-                    .map_err(|e| ShimError::CompressFailure {
-                        motor,
-                        detail: e.detail,
-                    })?;
-                    Encoded::Hp(moves, covered, carry_out)
-                }
-            };
-            let covered = encoded.covered();
-            if covered == 0 {
-                break;
-            }
-
             if re_anchoring {
                 frames.push(StepFrame::ResetStepClock {
                     oid,
                     clock: base_clock as u32,
                 });
-                if self.needs_reset {
-                    self.needs_reset = false;
+                self.encoder.rearm();
+                if self.stepped_clock.is_none() {
                     self.last_dir = None;
                 }
             }
@@ -328,42 +352,25 @@ impl MotorState {
                 frames.push(StepFrame::SetNextStepDir { oid, dir });
                 self.last_dir = Some(dir);
             }
-            let mut reconstructed = base_clock;
-            match encoded {
-                Encoded::Classic(moves, _) => {
-                    for mv in &moves {
-                        frames.push(StepFrame::QueueStep {
-                            oid,
-                            interval: mv.interval,
-                            count: mv.count,
-                            add: mv.add,
-                        });
-                        reconstructed = mv.last_clock(reconstructed);
-                    }
-                }
-                Encoded::Hp(moves, _, carry_out) => {
-                    for mv in &moves {
-                        frames.push(StepFrame::QueueStepHp {
-                            oid,
-                            interval: mv.interval,
-                            count: mv.count,
-                            add: mv.add,
-                            add2: mv.add2,
-                            shift: mv.shift,
-                            first_step: mv.first_step,
-                            last_step: mv.last_step,
-                        });
-                        reconstructed = reconstructed.wrapping_add(mv.last_step);
-                    }
-                    self.next_expected_interval = carry_out;
-                }
+            let (covered, reconstructed) = self
+                .encoder
+                .encode(oid, &clocks, base_clock, frames)
+                .map_err(|e| ShimError::CompressFailure {
+                    motor,
+                    detail: e.detail,
+                })?;
+            if covered == 0 {
+                return Err(ShimError::CompressFailure {
+                    motor,
+                    detail: format!(
+                        "encoder covered none of the {run_len} step roots of this run \
+                         from base clock {base_clock}"
+                    ),
+                });
             }
 
-            self.last_step_clock = reconstructed;
+            self.stepped_clock = Some(reconstructed);
             self.pending.drain(..covered);
-            if covered < run_len {
-                break;
-            }
         }
         Ok(())
     }
@@ -496,20 +503,10 @@ impl StepShim {
         self.motors[motor].cfg.encoder
     }
 
-    /// The clock the last emitted step of this motor lands on. Every frame
-    /// batch re-anchors from it; the sink mirrors it from the frame clocks.
-    pub fn emitted_clock(&self, motor: usize) -> u64 {
-        self.motors[motor].last_step_clock
-    }
-
     /// The clock slope this motor's spans must carry. A view clocked on any
     /// other slope belongs to a different epoch and is refused.
     pub fn motor_cycles_per_second(&self, motor: usize) -> f64 {
         self.motors[motor].cfg.cycles_per_second
-    }
-
-    pub fn motor_microstep_distance(&self, motor: usize) -> f64 {
-        self.motors[motor].cfg.microstep_distance
     }
 
     pub fn pending_roots(&self) -> usize {
@@ -518,24 +515,6 @@ impl StepShim {
 
     pub fn queued_spans(&self) -> usize {
         self.motors.iter().map(|m| m.queue.len()).sum()
-    }
-
-    pub fn finish(&mut self, motor: usize) -> Result<Vec<StepFrame>, ShimError> {
-        let state = self.motor_mut(motor);
-        let mut frames = Vec::new();
-        loop {
-            let before = state.pending.len();
-            if before == 0 {
-                return Ok(frames);
-            }
-            state.emit(motor, &mut frames)?;
-            if state.pending.len() == before {
-                return Err(ShimError::CompressFailure {
-                    motor,
-                    detail: format!("{before} step roots cannot be compressed at stream end"),
-                });
-            }
-        }
     }
 
     pub fn drain(&mut self, up_to_clock: u64) -> Result<Vec<StepFrame>, ShimError> {
@@ -650,30 +629,12 @@ impl StepShim {
         let state = self.motor_mut(motor);
         state.pending.retain(|root| root.clock <= clock);
         let mut frames = Vec::new();
-        loop {
-            let before = state.pending.len();
-            if before == 0 {
-                break;
-            }
-            state.emit(motor, &mut frames)?;
-            if state.pending.len() == before {
-                return Err(ShimError::CompressFailure {
-                    motor,
-                    detail: format!(
-                        "{before} step roots at or before the cut clock {clock} cannot be \
-                         compressed; cutting here would drop executed motion"
-                    ),
-                });
-            }
-        }
-        let state = self.motor_mut(motor);
-        state.pending.clear();
+        state.emit(motor, &mut frames)?;
         state.queue.abandon_all();
         state.cursor.reset_to(executed, clock.saturating_add(1));
-        state.last_step_clock = 0;
-        state.needs_reset = true;
+        state.stepped_clock = None;
         state.last_dir = None;
-        state.next_expected_interval = 0;
+        state.encoder.rearm();
         Ok(frames)
     }
 
@@ -682,13 +643,8 @@ impl StepShim {
         if state.cfg.cycles_per_second == freq {
             return;
         }
-        let count = state.cursor.step_count();
-        let floor = state.cursor.resume_floor();
-        let carry = state.cursor.step_remainder();
         state.cfg.cycles_per_second = freq;
-        state.cursor = StepRootCursor::new(&state.cfg);
-        state.cursor.reset_to(count, floor);
-        state.cursor.set_step_remainder(carry);
+        state.cursor.retime(&state.cfg);
     }
 
     pub fn reset_position(&mut self, motor: usize, count: i64) {
@@ -696,10 +652,9 @@ impl StepShim {
         state.pending.clear();
         state.cursor.reset_to(count, 0);
         state.cursor.set_step_remainder(0.0);
-        state.last_step_clock = 0;
-        state.needs_reset = true;
+        state.stepped_clock = None;
         state.last_dir = None;
-        state.next_expected_interval = 0;
+        state.encoder.rearm();
     }
 
     fn motor_mut(&mut self, motor: usize) -> &mut MotorState {

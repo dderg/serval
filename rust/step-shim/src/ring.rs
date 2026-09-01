@@ -12,7 +12,6 @@ pub const SEAM_ROUNDING_CYCLES: u64 = 2;
 pub struct SpanQueue {
     views: VecDeque<ClockedMotorSpan>,
     capacity: u32,
-    pushed: u32,
     converted: u32,
     abandoned: u32,
     seam: Option<u64>,
@@ -23,7 +22,6 @@ impl SpanQueue {
         Self {
             views: VecDeque::with_capacity(capacity as usize),
             capacity,
-            pushed: 0,
             converted: 0,
             abandoned: 0,
             seam: None,
@@ -37,7 +35,6 @@ impl SpanQueue {
         admissible(motor, &view, self.seam)?;
         self.seam = Some(view.end_clock);
         self.views.push_back(view);
-        self.pushed = self.pushed.wrapping_add(1);
         Ok(())
     }
 
@@ -67,13 +64,6 @@ impl SpanQueue {
         self.views.front()
     }
 
-    /// The view behind the active one. Only a transport that fills a ring
-    /// ahead of playback needs it; the pulse path converts the active view
-    /// alone.
-    pub fn successor(&self) -> Option<&ClockedMotorSpan> {
-        self.views.get(1)
-    }
-
     pub fn release_active(&mut self) {
         if self.views.pop_front().is_some() {
             self.converted = self.converted.wrapping_add(1);
@@ -87,10 +77,6 @@ impl SpanQueue {
         self.views.clear();
         self.abandoned = self.abandoned.wrapping_add(dropped);
         self.seam = None;
-    }
-
-    pub fn seam(&self) -> Option<u64> {
-        self.seam
     }
 
     pub fn accept_forward_gap(
@@ -124,20 +110,12 @@ impl SpanQueue {
         self.converted.wrapping_add(self.abandoned)
     }
 
-    pub fn pushed(&self) -> u32 {
-        self.pushed
-    }
-
     pub fn len(&self) -> usize {
         self.views.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.views.is_empty()
-    }
-
-    pub fn capacity(&self) -> u32 {
-        self.capacity
     }
 }
 

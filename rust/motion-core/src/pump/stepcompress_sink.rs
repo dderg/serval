@@ -1841,16 +1841,6 @@ impl StepcompressEndpoint {
         let (now, freq) = self.clock_now()?;
         self.generate_buzz(now, freq)?;
         self.drain_into_backlog(now, freq)?;
-        if self.shim.queued_spans() == 0 && self.shim.pending_roots() > 0 {
-            for motor in 0..self.oids.len() {
-                let tail = self
-                    .shim
-                    .finish(motor)
-                    .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
-                self.queue_step_volley(now, tail)?;
-            }
-            self.deferred_retirement = true;
-        }
         let transport_quiescent = self.backlog.is_empty()
             && self.in_flight.is_empty()
             && self.shim.queued_spans() == 0

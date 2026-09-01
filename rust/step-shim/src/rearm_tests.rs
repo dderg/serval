@@ -84,17 +84,14 @@ fn shim_for(min_rearm_cycles: u64) -> StepShim {
     shim
 }
 
-fn drain_all(shim: &mut StepShim) -> Result<Vec<StepFrame>, ShimError> {
-    let mut frames = shim.drain(START + 300)?;
-    frames.extend(shim.finish(0)?);
-    Ok(frames)
-}
-
 #[test]
 fn a_reversal_inside_the_re_arm_window_is_refused() {
     let mut shim = shim_for(MIN_REARM_CYCLES);
 
-    match drain_all(&mut shim).expect_err("the mcu cannot re-arm this fast") {
+    match shim
+        .drain(START + 300)
+        .expect_err("the mcu cannot re-arm this fast")
+    {
         ShimError::StepTooSoon {
             motor,
             first,
@@ -117,7 +114,9 @@ fn a_reversal_inside_the_re_arm_window_is_refused() {
 fn a_reversal_is_emitted_when_the_mcu_needs_no_re_arm() {
     let mut shim = shim_for(0);
 
-    let frames = drain_all(&mut shim).expect("a zero re-arm mcu takes this stream");
+    let frames = shim
+        .drain(START + 300)
+        .expect("a zero re-arm mcu takes this stream");
     let dirs: Vec<u8> = frames
         .iter()
         .filter_map(|f| match f {

@@ -2342,7 +2342,7 @@ fn the_pacer_stops_ticking_an_endpoint_that_went_fatal() {
 }
 
 /// A lane holds — Z or the extruder between layer changes — for minutes
-/// before it steps again, and `needs_reset` stays latched for the whole hold:
+/// before it steps again, and the shim carries no stepped clock for the hold:
 /// the stream's committed origin is the seam the hold began on. Basing the
 /// resumed volley's reset_step_clock on that origin hands the mcu a frame
 /// minutes in the past; the egress guard then refuses the head of the volley

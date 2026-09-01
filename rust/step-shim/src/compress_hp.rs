@@ -28,10 +28,6 @@ pub struct StepMoveHp {
 }
 
 impl StepMoveHp {
-    pub fn first_clock(&self, last_step_clock: u64) -> u64 {
-        last_step_clock.wrapping_add(self.first_step)
-    }
-
     pub fn last_clock(&self, last_step_clock: u64) -> u64 {
         last_step_clock.wrapping_add(self.last_step)
     }
@@ -150,15 +146,7 @@ fn round_i64(value: f64) -> Option<i64> {
 }
 
 fn step_move_encode(count: usize, f: &Rhs3) -> Option<StepMoveHp> {
-    let mut result = StepMoveHp {
-        interval: 0,
-        count: 0,
-        add: 0,
-        add2: 0,
-        shift: 0,
-        first_step: 0,
-        last_step: 0,
-    };
+    let mut result = StepMoveHp::default();
     let mut interval = f.b0;
     let mut add = f.b1;
     let mut add2 = f.b2;
@@ -311,7 +299,7 @@ struct StepperMoves {
     first: u32,
 }
 
-fn fill_stepper_moves(m: &StepMoveHp) -> Result<StepperMoves, &'static str> {
+fn fill_stepper_moves(m: &StepMoveHp) -> StepperMoves {
     if m.shift <= 0 {
         let amount = (-m.shift) as u32;
         let interval = m.interval.wrapping_shl(amount);
@@ -325,26 +313,26 @@ fn fill_stepper_moves(m: &StepMoveHp) -> Result<StepperMoves, &'static str> {
         } else {
             -(-(m.add2 as i32) << amount)
         };
-        Ok(StepperMoves {
+        StepperMoves {
             interval: interval.wrapping_add(add as u32),
             add: add.wrapping_add(add2),
             add2,
             shift: 0,
             int_low_acc: 0,
             first: interval,
-        })
+        }
     } else {
         let shift = m.shift as u32;
         let seed = 1_u32 << (shift - 1);
         let first = m.interval.wrapping_add(seed) >> shift;
-        Ok(StepperMoves {
+        StepperMoves {
             interval: m.interval.wrapping_add(m.add as u32),
             add: i32::from(m.add).wrapping_add(i32::from(m.add2)),
             add2: i32::from(m.add2),
             shift: shift as u8,
             int_low_acc: m.interval.wrapping_add(seed) - (first << shift),
             first,
-        })
+        }
     }
 }
 
@@ -388,7 +376,7 @@ fn validate_wire(m: &StepMoveHp) -> Result<(), &'static str> {
 #[cfg(test)]
 fn mcu_walk_offsets(m: &StepMoveHp) -> Result<Vec<u64>, &'static str> {
     validate_wire(m)?;
-    let mut s = fill_stepper_moves(m)?;
+    let mut s = fill_stepper_moves(m);
     let mut time = 0_u32;
     let mut offsets = Vec::with_capacity(m.count as usize);
     for step in 0..m.count as usize {
@@ -409,10 +397,11 @@ struct WalkedMove {
     next_step_interval: u32,
 }
 
+/// The step the fixed-point walk could not place, which is also the count that
+/// did walk cleanly: the failure is always at the first bad step.
 #[derive(Debug, Clone, Copy)]
 struct WalkFailure {
     step_index: usize,
-    covered: usize,
     detail: &'static str,
 }
 
@@ -524,15 +513,10 @@ impl<'a> Compressor<'a> {
         if let Err(detail) = validate_wire(&move_out) {
             return Err(WalkFailure {
                 step_index: 0,
-                covered: 0,
                 detail,
             });
         }
-        let mut s = fill_stepper_moves(&move_out).map_err(|detail| WalkFailure {
-            step_index: 0,
-            covered: 0,
-            detail,
-        })?;
+        let mut s = fill_stepper_moves(&move_out);
         let mut cur_step = 0_u32;
         let mut prev_step = 0_u32;
         let mut trunc_pos = 0usize;
@@ -550,7 +534,6 @@ impl<'a> Compressor<'a> {
             if (cur_step as i64) < point.minp || (cur_step as i64) > point.maxp {
                 return Err(WalkFailure {
                     step_index: i,
-                    covered: i,
                     detail: "step is outside its error window",
                 });
             }
@@ -582,36 +565,21 @@ impl<'a> Compressor<'a> {
             next_step_interval,
         })
     }
+
     fn test_candidate(&self, mut candidate: StepMoveHp) -> StepMoveHp {
         match self.test_move(candidate, false) {
             Ok(walked) => walked.move_out,
-            Err(failure) if failure.covered != 0 => {
-                candidate.count = failure.covered as u16;
+            Err(failure) if failure.step_index != 0 => {
+                candidate.count = failure.step_index as u16;
                 candidate
             }
-            Err(_) => StepMoveHp {
-                interval: 0,
-                count: 0,
-                add: 0,
-                add2: 0,
-                shift: 0,
-                first_step: 0,
-                last_step: 0,
-            },
+            Err(_) => StepMoveHp::default(),
         }
     }
 
     fn test_step_count(&self, count: usize) -> StepMoveHp {
         if count == 0 || count > MAX_COUNT_LSM || self.cached_count < count {
-            return StepMoveHp {
-                interval: 0,
-                count: 0,
-                add: 0,
-                add2: 0,
-                shift: 0,
-                first_step: 0,
-                last_step: 0,
-            };
+            return StepMoveHp::default();
         }
         let mut rhs = self.scratch.rhs[count - 1];
         solve_3x3(&least_squares_ldl()[count - 1], &mut rhs);
@@ -661,15 +629,7 @@ impl<'a> Compressor<'a> {
 
     fn compress_bisect_count(&mut self) -> Option<StepMoveHp> {
         let queue_size = (self.steps.len() - self.pos).min(MAX_COUNT);
-        let mut best = StepMoveHp {
-            interval: 0,
-            count: 0,
-            add: 0,
-            add2: 0,
-            shift: 0,
-            first_step: 0,
-            last_step: 0,
-        };
+        let mut best = StepMoveHp::default();
         let mut left = 0usize;
         let mut right = 8usize;
         while right <= MAX_COUNT_LSM && right <= queue_size {
@@ -776,20 +736,7 @@ pub fn compress_hp(
                 failure.detail
             ))
         })?;
-        if walked.move_out.count == 0 {
-            return Err(points_error(format!(
-                "stepcompress hp move {} step 1: encoder covered zero steps",
-                moves.len()
-            )));
-        }
         let covered = usize::from(walked.move_out.count);
-        if pos + covered > steps.len() {
-            return Err(points_error(format!(
-                "stepcompress hp move {} step {}: covered count exceeds input",
-                moves.len(),
-                covered
-            )));
-        }
         lsc = lsc.checked_add(walked.move_out.last_step).ok_or_else(|| {
             points_error(format!(
                 "stepcompress hp move {} step {}: last step clock overflow",
