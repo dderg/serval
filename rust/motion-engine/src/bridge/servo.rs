@@ -103,12 +103,9 @@ impl PyMotionEngine {
         );
         let result = crate::servo_capture::send_start_capture(&conn, &path, &started_utc, &drives)
             .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "servo capture start failed: endpoint result {result}"
-            )));
-        }
-        Ok(())
+        require_py_endpoint_ok(result, |result| {
+            format!("servo capture start failed: endpoint result {result}")
+        })
     }
     fn stop_servo_capture(&self, mcu_handle: u32) -> PyResult<(i32, u64, Option<u64>)> {
         let conn = self.ethercat_conn(mcu_handle, "stop_servo_capture")?;
@@ -185,19 +182,14 @@ impl PyMotionEngine {
             "servo motion discarded on shutdown"
         );
         let result = crate::servo_torque::send_stop(&conn).map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "stop_node: endpoint rejected Stop: result {result}"
-            )));
-        }
+        require_py_endpoint_ok(result, |result| {
+            format!("stop_node: endpoint rejected Stop: result {result}")
+        })?;
         let result = crate::servo_torque::send_set_torque(&conn, false, 0)
             .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "stop_node: endpoint rejected torque disable: result {result}"
-            )));
-        }
-        Ok(())
+        require_py_endpoint_ok(result, |result| {
+            format!("stop_node: endpoint rejected torque disable: result {result}")
+        })
     }
     fn arm_sensorless_endstop_start(
         &self,
@@ -503,12 +495,9 @@ impl PyMotionEngine {
                 )
             })
             .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "set_diff_damper: endpoint rejected (result {result})"
-            )));
-        }
-        Ok(())
+        require_py_endpoint_ok(result, |result| {
+            format!("set_diff_damper: endpoint rejected (result {result})")
+        })
     }
     fn set_ff_lead(&self, py: Python<'_>, mcu_handle: u32, slot: u8, lead_ns: u64) -> PyResult<()> {
         let conn = self.ethercat_conn(mcu_handle, "set_ff_lead")?;
@@ -582,12 +571,9 @@ impl PyMotionEngine {
             },
         )
         .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "set_strain_comp: endpoint result {result}"
-            )));
-        }
-        Ok(())
+        require_py_endpoint_ok(result, |result| {
+            format!("set_strain_comp: endpoint result {result}")
+        })
     }
     fn set_diff_trim(
         &self,
@@ -628,12 +614,9 @@ impl PyMotionEngine {
                 )
             })
             .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "set_diff_trim: endpoint rejected (result {result})"
-            )));
-        }
-        Ok(())
+        require_py_endpoint_ok(result, |result| {
+            format!("set_diff_trim: endpoint rejected (result {result})")
+        })
     }
     #[allow(clippy::too_many_arguments)]
     fn set_dynamics_model(
@@ -1027,6 +1010,12 @@ pub(super) fn validate_dynamics_pairs(
         }
     }
     Ok(wire_pairs)
+}
+
+fn require_py_endpoint_ok(result: i32, error: impl FnOnce(i32) -> String) -> PyResult<()> {
+    (result == 0)
+        .then_some(())
+        .ok_or_else(|| PyRuntimeError::new_err(error(result)))
 }
 
 fn require_endpoint_ok(result: i32, context: &str) -> Result<(), String> {
