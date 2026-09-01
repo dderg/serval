@@ -996,8 +996,10 @@ impl SampleEndpoint {
         self.lanes.iter().any(|lane| lane.cfg.oid == oid)
     }
 
-    fn latched_fatal(&self) -> Option<SendError> {
-        self.fatal.clone().map(SendError::Fatal)
+    fn reject_latched_fatal(&self) -> Result<(), SendError> {
+        self.fatal
+            .as_ref()
+            .map_or(Ok(()), |message| Err(SendError::Fatal(message.clone())))
     }
 
     /// Latch a fatal, tell the pump once, then refuse to run again so the
@@ -1139,9 +1141,7 @@ impl SampleEndpoint {
         anchor_clock: u64,
         clock_freq_hz: f64,
     ) -> Result<(), SendError> {
-        if let Some(latched) = self.latched_fatal() {
-            return Err(latched);
-        }
+        self.reject_latched_fatal()?;
         if lanes.is_empty() {
             return Err(SendError::Fatal(format!(
                 "sample endpoint mcu {}: a resonance buzz names no lane to drive",
@@ -1289,9 +1289,7 @@ impl SampleEndpoint {
     /// on its own position so the next absolute span issues a fresh anchor
     /// instead of trying to abut the overlay.
     pub fn buzz_complete(&mut self) -> Result<bool, SendError> {
-        if let Some(latched) = self.latched_fatal() {
-            return Err(latched);
-        }
+        self.reject_latched_fatal()?;
         let Some(buzz) = self.buzz.take() else {
             return Ok(true);
         };
@@ -1397,9 +1395,7 @@ impl SampleEndpoint {
     }
 
     pub fn send_frames(&mut self, mcu_id: u32, frames: &[AxisFrame]) -> Result<(), SendError> {
-        if let Some(latched) = self.latched_fatal() {
-            return Err(latched);
-        }
+        self.reject_latched_fatal()?;
         self.send_frames_inner(mcu_id, frames)
             .map_err(|e| self.escalate(e))
     }
@@ -1844,9 +1840,7 @@ impl SampleEndpoint {
     }
 
     pub fn on_barrier_ack(&mut self, oid: u32, seq: u32) -> Result<(), SendError> {
-        if let Some(latched) = self.latched_fatal() {
-            return Err(latched);
-        }
+        self.reject_latched_fatal()?;
         self.on_barrier_ack_inner(oid, seq)
             .map_err(|e| self.escalate(e))
     }
@@ -1952,9 +1946,7 @@ impl SampleEndpoint {
     }
 
     pub fn tick(&mut self) -> Result<(), SendError> {
-        if let Some(latched) = self.latched_fatal() {
-            return Err(latched);
-        }
+        self.reject_latched_fatal()?;
         let (now, freq) = self.clock_now()?;
         self.check_barrier_deadline(now, freq)
             .and_then(|()| self.drain_into_backlog(now, freq))
