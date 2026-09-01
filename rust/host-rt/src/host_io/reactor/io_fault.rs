@@ -3,6 +3,16 @@ use crate::transport::TransportError;
 use runtime::error::FaultCode;
 
 impl Reactor {
+    pub(crate) fn close_with_host_fault(&mut self, fault_code: FaultCode, fault_detail: u32) {
+        self.pending_host_fault = Some(crate::host_io::runtime_events::FaultEvent {
+            fault_code: fault_code.as_u16(),
+            fault_detail,
+            segment_id: 0,
+            synthesized: false,
+        });
+        self.state = ReactorState::Closed;
+    }
+
     pub(crate) fn transition_closed_on_io_fault(
         &mut self,
         context: &'static str,
@@ -35,14 +45,10 @@ impl Reactor {
             "transport IO fault; transitioning Closed"
         );
         if self.pending_host_fault.is_none() {
-            self.pending_host_fault = Some(crate::host_io::runtime_events::FaultEvent {
-                fault_code: FaultCode::HostDisconnect.as_u16(),
-                fault_detail: 0,
-                segment_id: 0,
-                synthesized: false,
-            });
+            self.close_with_host_fault(FaultCode::HostDisconnect, 0);
+        } else {
+            self.state = ReactorState::Closed;
         }
-        self.state = ReactorState::Closed;
     }
 
     pub(crate) fn close_if_io_fault(
