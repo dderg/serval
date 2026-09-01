@@ -115,18 +115,15 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
                 }
             }
             Command::QuerySampleGrid { correlation_id } => {
-                handle_query_sample_grid(ctx, correlation_id);
+                handle_query_sample_grid(ctx, correlation_id)
             }
-            Command::QueryRuntimeCaps { correlation_id } => {
-                ctx.server
-                    .respond(&runtime_caps_response_frame(correlation_id));
-            }
+            Command::QueryRuntimeCaps { correlation_id } => ctx
+                .server
+                .respond(&runtime_caps_response_frame(correlation_id)),
             Command::SetTorque {
                 correlation_id,
                 msg,
-            } => {
-                handle_set_torque(ctx, correlation_id, msg);
-            }
+            } => handle_set_torque(ctx, correlation_id, msg),
             Command::Stop { correlation_id } => {
                 let now_ns = monotonic_ns();
                 discard_motion(ctx);
@@ -140,9 +137,7 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             Command::StartCapture {
                 correlation_id,
                 msg,
-            } => {
-                handle_start_capture(ctx, correlation_id, msg);
-            }
+            } => handle_start_capture(ctx, correlation_id, msg),
             Command::StopCapture { correlation_id } => {
                 let pending = ctx.capture.stop_async();
                 ctx.pending_stops.push((correlation_id, pending));
@@ -168,9 +163,7 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             Command::StepperSuppress {
                 correlation_id,
                 msg,
-            } => {
-                handle_stepper_suppress(ctx, correlation_id, msg);
-            }
+            } => handle_stepper_suppress(ctx, correlation_id, msg),
             Command::ClaimHandshake { .. } => {
                 crate::rt_eprintln!(
                     "ec-rt: protocol violation: ClaimHandshake after handshake \
@@ -181,78 +174,54 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             Command::SetDriveLimits {
                 correlation_id,
                 msg,
-            } => {
-                handle_set_drive_limits(ctx, correlation_id, msg);
-            }
+            } => handle_set_drive_limits(ctx, correlation_id, msg),
             Command::RestoreDriveLimits {
                 correlation_id,
                 slot_mask,
-            } => {
-                handle_restore_drive_limits(ctx, correlation_id, slot_mask);
-            }
+            } => handle_restore_drive_limits(ctx, correlation_id, slot_mask),
             Command::SeedServoHome {
                 correlation_id,
                 slot,
                 home_q16,
-            } => {
-                handle_seed_servo_home(ctx, correlation_id, slot, home_q16);
-            }
+            } => handle_seed_servo_home(ctx, correlation_id, slot, home_q16),
             Command::ArmSensorlessEndstop {
                 correlation_id,
                 msg,
-            } => {
-                handle_arm_sensorless_endstop(ctx, correlation_id, msg);
-            }
+            } => handle_arm_sensorless_endstop(ctx, correlation_id, msg),
             Command::ResonanceBuzz {
                 correlation_id,
                 msg,
-            } => {
-                handle_resonance_buzz(ctx, correlation_id, msg);
-            }
+            } => handle_resonance_buzz(ctx, correlation_id, msg),
             Command::SetDiffDamper {
                 correlation_id,
                 msg,
-            } => {
-                handle_set_diff_damper(ctx, correlation_id, msg);
-            }
+            } => handle_set_diff_damper(ctx, correlation_id, msg),
             Command::SetDiffTrim {
                 correlation_id,
                 msg,
-            } => {
-                handle_set_diff_trim(ctx, correlation_id, msg);
-            }
+            } => handle_set_diff_trim(ctx, correlation_id, msg),
             Command::SetStrainComp {
                 correlation_id,
                 prepared,
-            } => {
-                handle_set_strain_comp(ctx, correlation_id, prepared);
-            }
+            } => handle_set_strain_comp(ctx, correlation_id, prepared),
             Command::SetDynamicsModel {
                 correlation_id,
                 msg,
-            } => {
-                handle_set_dynamics_model(ctx, correlation_id, msg);
-            }
+            } => handle_set_dynamics_model(ctx, correlation_id, msg),
             Command::SetFfLead {
                 correlation_id,
                 msg,
-            } => {
-                handle_set_ff_lead(ctx, correlation_id, msg);
-            }
+            } => handle_set_ff_lead(ctx, correlation_id, msg),
             Command::SdoRead {
                 correlation_id,
                 msg,
-            } => {
-                handle_sdo_read(ctx, correlation_id, msg);
-            }
+            } => handle_sdo_read(ctx, correlation_id, msg),
             Command::SdoWrite {
                 correlation_id,
                 msg,
-            } => {
-                handle_sdo_write(ctx, correlation_id, msg);
-            }
+            } => handle_sdo_write(ctx, correlation_id, msg),
             Command::QueryMotorState { correlation_id } => {
-                handle_query_motor_state(ctx, correlation_id);
+                handle_query_motor_state(ctx, correlation_id)
             }
             Command::Unknown { kind_raw, .. } => {
                 crate::rt_eprintln!("ec-rt: ignoring kind 0x{kind_raw:04x}");
@@ -855,17 +824,15 @@ fn handle_resonance_buzz(ctx: &mut EndpointCtx, correlation_id: u32, _msg: Reson
 }
 
 fn handle_set_diff_damper(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDiffDamper) {
-    let rc = {
-        ctx.damper.set(
-            ctx.num_slaves,
-            msg.slot_a,
-            msg.slot_b,
-            msg.gain_milli,
-            msg.clamp_tenths,
-            msg.lpf_millihz,
-            msg.lead_us,
-        )
-    };
+    let rc = ctx.damper.set(
+        ctx.num_slaves,
+        msg.slot_a,
+        msg.slot_b,
+        msg.gain_milli,
+        msg.clamp_tenths,
+        msg.lpf_millihz,
+        msg.lead_us,
+    );
     crate::rt_eprintln!(
         "ec-rt: SetDiffDamper slots=({},{}) gain_milli={} clamp={} 0.1% \
          lpf={} mHz lead={} us rc={rc}",
@@ -893,17 +860,15 @@ fn handle_set_diff_damper(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDi
 }
 
 fn handle_set_diff_trim(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDiffTrim) {
-    let rc = {
-        ctx.trim.set(
-            ctx.num_slaves,
-            msg.slot_a,
-            msg.slot_b,
-            msg.gain_micro,
-            msg.clamp_um,
-            msg.lpf_millihz,
-            msg.settle_ms,
-        )
-    };
+    let rc = ctx.trim.set(
+        ctx.num_slaves,
+        msg.slot_a,
+        msg.slot_b,
+        msg.gain_micro,
+        msg.clamp_um,
+        msg.lpf_millihz,
+        msg.settle_ms,
+    );
     crate::rt_eprintln!(
         "ec-rt: SetDiffTrim slots=({},{}) gain_micro={} clamp={} um lpf={} mHz \
          settle={} ms rc={rc}",
