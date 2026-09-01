@@ -21,8 +21,8 @@ pub use junction::{
 };
 pub use messages::{
     BundleLimits, BuzzLane, BuzzParams, BuzzRoute, BuzzStart, BuzzToken, BuzzTransport, BuzzWave,
-    EnqueueMsg, HeartbeatMsg, HistoryRecorder, PumpCallbacks, PumpMsg, RetiredBy, SendError,
-    SpanSink,
+    DrainTick, EnqueueMsg, HeartbeatMsg, HistoryRecorder, PumpCallbacks, PumpMsg, RetiredBy,
+    SendError, SpanSink,
 };
 #[cfg(test)]
 pub(crate) use pump_loop::pump_past_guard_secs;
@@ -31,7 +31,10 @@ pub use sample_sink::{
     RetiredRuns, SAMPLE_BACKLOG_CEILING_RUNS, SAMPLE_LANE_PIECE_WINDOW, SampleEndpoint,
     SampleLaneConfig, SamplePacer, SamplePositionQuery, build_sample_endpoint,
 };
-pub use sched::{AxisFrame, AxisQueue, FramePlan, Schedule, append_spans_merging_holds, schedule};
+pub use sched::{
+    AxisFrame, AxisQueue, FramePlan, ReleaseHorizons, Schedule, append_spans_merging_holds,
+    schedule,
+};
 pub use stepcompress_sink::{
     BACKLOG_CEILING_FRAMES, ClockSource, FrameEgress, MOVE_SLOT_RESERVE, StepcompressEndpoint,
     StepcompressPacer, build_endpoint,

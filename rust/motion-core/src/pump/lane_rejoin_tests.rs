@@ -265,3 +265,43 @@ fn a_fresh_epoch_resume_is_marked_as_reanchor_not_gap() {
     );
     assert_eq!(sink.reanchors.lock_ok().as_slice(), &[(key, 5_000_000)],);
 }
+
+/// The EtherCAT explicit-hold `Reposition` (`enqueue.rs`) carries no views at
+/// all: its whole job is to retire the lane's junction across a redefined
+/// position. The committed seam it leaves behind belongs to the timeline that
+/// just retired, so the next continuation must not be measured against it —
+/// doing so sanctions a hole that is not one (at rest) or reports missing
+/// trajectory that is not missing (mid-motion).
+#[test]
+fn a_fresh_epoch_without_views_retires_the_committed_seam() {
+    let key = AxisKey { mcu_id: 0, axis: 1 };
+    let sink = with_pump(|_, data| {
+        enqueue(
+            data,
+            key,
+            vec![hold_span(1_000_000, 0.01)],
+            crate::anchor::StreamEpoch::Continuation,
+        );
+        enqueue(
+            data,
+            key,
+            Vec::new(),
+            crate::anchor::StreamEpoch::Reposition,
+        );
+        enqueue(
+            data,
+            key,
+            vec![hold_span(5_000_000, 0.01)],
+            crate::anchor::StreamEpoch::Continuation,
+        );
+    });
+    assert!(
+        sink.seam_gaps.lock_ok().is_empty(),
+        "the seam the reposition retired must not make the next continuation \
+         look like a sat-out lane hole"
+    );
+    assert!(
+        sink.reanchors.lock_ok().is_empty(),
+        "a reposition with no views names no clock to cut the stream at"
+    );
+}

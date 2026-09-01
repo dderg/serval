@@ -1,6 +1,6 @@
 use super::sample_sink::SampleEndpoint;
 use super::stepcompress_sink::StepcompressEndpoint;
-use super::{AxisFrame, AxisKey, SendError, SpanSink};
+use super::{AxisFrame, AxisKey, DrainTick, SendError, SpanSink};
 use crate::axis_transport::AxisTransports;
 use crate::lock_ext::LockExt;
 use ethercat_rt::setpoint_fill::ChainFiller;
@@ -369,23 +369,22 @@ impl SpanSink for WireSink {
         self.flush_keys(keys)
     }
 
-    fn drain_tick_mcus(&self) -> Vec<u32> {
-        self.ethercat.keys().copied().collect()
-    }
-
-    fn drain_tick(&self, mcu_id: u32) -> Result<(), SendError> {
-        match self.ethercat.get(&mcu_id) {
-            Some(ec) if ec.ring.lock_ok().wants_drain() => {
-                self.send_sample_runs(mcu_id, &[], &ec.ring)
+    fn drain_tick(&self) -> DrainTick {
+        let mut pending = false;
+        for (&mcu_id, ec) in &self.ethercat {
+            if !ec.ring.lock_ok().wants_drain() {
+                continue;
             }
-            _ => Ok(()),
+            if let Err(error) = self.send_sample_runs(mcu_id, &[], &ec.ring) {
+                return DrainTick::Failed { mcu_id, error };
+            }
+            pending |= ec.ring.lock_ok().wants_drain();
         }
-    }
-
-    fn wants_drain_tick(&self, mcu_id: u32) -> bool {
-        self.ethercat
-            .get(&mcu_id)
-            .is_some_and(|ec| ec.ring.lock_ok().wants_drain())
+        if pending {
+            DrainTick::Pending
+        } else {
+            DrainTick::Quiet
+        }
     }
 
     fn send_mcu_frames(&self, mcu_id: u32, frames: &[AxisFrame]) -> Result<(), SendError> {

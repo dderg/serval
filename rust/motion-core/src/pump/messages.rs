@@ -562,6 +562,16 @@ pub struct BundleLimits {
 /// its own advertised room before accepting the batch.
 pub const SERIAL_BUNDLE_LIMITS: BundleLimits = BundleLimits { spans_per_axis: 8 };
 
+/// What one sweep of [`SpanSink::drain_tick`] found: nothing left staged
+/// anywhere, at least one endpoint still owing a further window, or the mcu
+/// whose window the transport refused.
+#[derive(Debug)]
+pub enum DrainTick {
+    Quiet,
+    Pending,
+    Failed { mcu_id: u32, error: SendError },
+}
+
 pub trait SpanSink: Send {
     fn send_frame(
         &self,
@@ -638,23 +648,12 @@ pub trait SpanSink: Send {
         Ok(())
     }
 
-    /// The mcus that can owe their endpoint a drain tick at all. Empty for
-    /// a transport that commits everything it is handed.
-    fn drain_tick_mcus(&self) -> Vec<u32> {
-        Vec::new()
-    }
-
-    /// True while `mcu_id` still owes its endpoint samples the pump has not
-    /// shipped — a host-generated source (a buzz) or trajectory left over past
-    /// one fill window.
-    fn wants_drain_tick(&self, _mcu_id: u32) -> bool {
-        false
-    }
-
-    /// Ship one further window for `mcu_id` without new views, draining what
-    /// [`SpanSink::wants_drain_tick`] reported.
-    fn drain_tick(&self, _mcu_id: u32) -> Result<(), SendError> {
-        Ok(())
+    /// Ship one further window to every endpoint still holding samples the
+    /// pump has not shipped — a host-generated source (a buzz) or trajectory
+    /// left over past one fill window — and report whether any endpoint owes
+    /// another window after that.
+    fn drain_tick(&self) -> DrainTick {
+        DrainTick::Quiet
     }
 
     /// Routes a classic-stepping `stepcompress_barrier_ack` to the endpoint

@@ -57,16 +57,44 @@ fn limits(spans_per_axis: usize) -> impl Fn(u32) -> BundleLimits {
     move |_| BundleLimits { spans_per_axis }
 }
 
+/// The one-instant snapshot `schedule` judges a pass against, derived from a
+/// per-lane rule the way the pump derives it from a live clock read.
+fn horizons(
+    queues: &BTreeMap<AxisKey, AxisQueue>,
+    of: impl Fn(&AxisKey, &AxisQueue) -> Option<u64>,
+) -> ReleaseHorizons {
+    let mut horizons = ReleaseHorizons::default();
+    horizons.resample(queues, |_| None, |key, q, _| of(key, q));
+    horizons
+}
+
+fn unbounded(queues: &BTreeMap<AxisKey, AxisQueue>) -> ReleaseHorizons {
+    horizons(queues, |_, _| None)
+}
+
+/// The pump's own rule: one clock reading per mcu, each lane's horizon
+/// derived from its own staged lead.
+fn lead_horizons(queues: &BTreeMap<AxisKey, AxisQueue>, ack_now: u64) -> ReleaseHorizons {
+    let mut horizons = ReleaseHorizons::default();
+    horizons.resample(
+        queues,
+        |_| Some((ack_now, FREQ)),
+        |_, q, clock| {
+            clock.map(|(ack, freq)| {
+                #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                let lead_ticks = (q.lead_secs * freq) as u64;
+                ack + lead_ticks
+            })
+        },
+    );
+    horizons
+}
+
 #[test]
 fn idle_when_empty() {
     let queues: BTreeMap<AxisKey, AxisQueue> = BTreeMap::new();
     assert!(matches!(
-        schedule(
-            &queues,
-            limits(255),
-            |_: &AxisKey, _: &AxisQueue| None,
-            no_cap
-        ),
+        schedule(&queues, limits(255), &unbounded(&queues), no_cap),
         Schedule::Idle
     ));
 }
@@ -78,12 +106,7 @@ fn full_ring_does_not_block_another_mcu() {
     a.pushed = 2;
     queues.insert(AxisKey { mcu_id: 1, axis: 0 }, a);
     queues.insert(AxisKey { mcu_id: 2, axis: 0 }, q_with(8, &[20]));
-    match schedule(
-        &queues,
-        limits(255),
-        |_: &AxisKey, _: &AxisQueue| None,
-        no_cap,
-    ) {
+    match schedule(&queues, limits(255), &unbounded(&queues), no_cap) {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1);
             assert_eq!(frames[0].key, AxisKey { mcu_id: 2, axis: 0 });
@@ -102,12 +125,7 @@ fn stalls_when_every_ring_is_full() {
     b.pushed = 3;
     queues.insert(AxisKey { mcu_id: 2, axis: 0 }, b);
     assert!(matches!(
-        schedule(
-            &queues,
-            limits(255),
-            |_: &AxisKey, _: &AxisQueue| None,
-            no_cap
-        ),
+        schedule(&queues, limits(255), &unbounded(&queues), no_cap),
         Schedule::StallFull(AxisKey { mcu_id: 1, axis: 0 })
     ));
 }
@@ -123,22 +141,12 @@ fn a_consumed_view_frees_the_ring_slot_ahead_of_retirement() {
     q.pushed = 1;
     queues.insert(key, q);
     assert!(matches!(
-        schedule(
-            &queues,
-            limits(255),
-            |_: &AxisKey, _: &AxisQueue| None,
-            no_cap
-        ),
+        schedule(&queues, limits(255), &unbounded(&queues), no_cap),
         Schedule::StallFull(_)
     ));
 
     queues.get_mut(&key).unwrap().credit(RetiredBy::Pulse, 1, 0);
-    match schedule(
-        &queues,
-        limits(255),
-        |_: &AxisKey, _: &AxisQueue| None,
-        no_cap,
-    ) {
+    match schedule(&queues, limits(255), &unbounded(&queues), no_cap) {
         Schedule::Send(frames) => assert_eq!(frames[0].key, key),
         other => panic!("a consumed view must free its slot before playback, got {other:?}"),
     }
@@ -150,12 +158,7 @@ fn batches_head_mcu_past_other_mcu_interleave() {
     queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with(8, &[0, 3]));
     queues.insert(AxisKey { mcu_id: 1, axis: 1 }, q_with(8, &[1]));
     queues.insert(AxisKey { mcu_id: 2, axis: 0 }, q_with(8, &[2]));
-    let s = schedule(
-        &queues,
-        limits(255),
-        |_: &AxisKey, _: &AxisQueue| None,
-        no_cap,
-    );
+    let s = schedule(&queues, limits(255), &unbounded(&queues), no_cap);
     match s {
         Schedule::Send(frames) => {
             let ax: Vec<_> = frames.iter().map(|f| (f.key, f.spans.len())).collect();
@@ -184,12 +187,7 @@ fn fanned_out_trajectory_still_batches_full_frames() {
             queues.insert(AxisKey { mcu_id, axis }, q_with(64, &starts));
         }
     }
-    let s = schedule(
-        &queues,
-        limits(32),
-        |_: &AxisKey, _: &AxisQueue| None,
-        no_cap,
-    );
+    let s = schedule(&queues, limits(32), &unbounded(&queues), no_cap);
     match s {
         Schedule::Send(frames) => {
             assert!(frames.iter().all(|f| f.key.mcu_id == 1));
@@ -211,12 +209,7 @@ fn fanned_out_trajectory_still_batches_full_frames() {
 fn frame_cap_splits() {
     let mut queues = BTreeMap::new();
     queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with(8, &[0, 1, 2, 3]));
-    let s = schedule(
-        &queues,
-        limits(2),
-        |_: &AxisKey, _: &AxisQueue| None,
-        no_cap,
-    );
+    let s = schedule(&queues, limits(2), &unbounded(&queues), no_cap);
     match s {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1);
@@ -234,7 +227,7 @@ fn serial_limits_amortize_one_transaction_across_each_axis_queue() {
     match schedule(
         &queues,
         |_| super::messages::SERIAL_BUNDLE_LIMITS,
-        |_: &AxisKey, _: &AxisQueue| None,
+        &unbounded(&queues),
         no_cap,
     ) {
         Schedule::Send(frames) => {
@@ -254,7 +247,7 @@ fn full_axis_does_not_block_same_mcu_sibling() {
     xq.pushed = 1;
     q.insert(AxisKey { mcu_id: 1, axis: 1 }, yq);
     q.insert(AxisKey { mcu_id: 1, axis: 0 }, xq);
-    match schedule(&q, limits(255), |_: &AxisKey, _: &AxisQueue| None, no_cap) {
+    match schedule(&q, limits(255), &unbounded(&q), no_cap) {
         Schedule::Send(frames) => {
             let yf = frames
                 .iter()
@@ -279,7 +272,7 @@ fn time_gate_blocks_span_beyond_horizon() {
     match schedule(
         &queues,
         limits(255),
-        |_: &AxisKey, _: &AxisQueue| Some(150),
+        &horizons(&queues, |_, _| Some(150)),
         no_cap,
     ) {
         Schedule::Send(frames) => {
@@ -300,7 +293,7 @@ fn all_beyond_horizon_returns_stall_ahead() {
             schedule(
                 &queues,
                 limits(255),
-                |_: &AxisKey, _: &AxisQueue| Some(500),
+                &horizons(&queues, |_, _| Some(500)),
                 no_cap
             ),
             Schedule::StallAhead(AxisKey { mcu_id: 1, axis: 0 })
@@ -313,12 +306,7 @@ fn all_beyond_horizon_returns_stall_ahead() {
 fn no_horizon_none_uses_count_only_gate() {
     let mut queues = BTreeMap::new();
     queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with(8, &[1 << 40]));
-    match schedule(
-        &queues,
-        limits(255),
-        |_: &AxisKey, _: &AxisQueue| None,
-        no_cap,
-    ) {
+    match schedule(&queues, limits(255), &unbounded(&queues), no_cap) {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1);
             assert_eq!(frames[0].spans.len(), 1);
@@ -345,15 +333,15 @@ fn cross_mcu_host_time_ordering_bench_regression() {
         q_with_host(8, &[(h7_tick, h7_host)]),
     );
 
-    let horizon_of = |k: &AxisKey, _q: &AxisQueue| -> Option<u64> {
+    let horizons = horizons(&queues, |k, _| {
         if k.mcu_id == 0 {
             Some(h7_tick + 1_000_000)
         } else {
             Some(f446_tick - 1)
         }
-    };
+    });
 
-    match schedule(&queues, limits(255), horizon_of, no_cap) {
+    match schedule(&queues, limits(255), &horizons, no_cap) {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1);
             assert_eq!(
@@ -380,15 +368,12 @@ fn homing_lead_gates_span_release() {
     q.lead_secs = 0.05;
     queues.insert(key, q);
 
-    let horizon_of = |k: &AxisKey, q: &AxisQueue| -> Option<u64> {
-        if k.mcu_id == 1 {
-            Some(ack_now + (q.lead_secs * FREQ) as u64)
-        } else {
-            None
-        }
-    };
-
-    match schedule(&queues, limits(255), &horizon_of, no_cap) {
+    match schedule(
+        &queues,
+        limits(255),
+        &lead_horizons(&queues, ack_now),
+        no_cap,
+    ) {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1);
             assert_eq!(
@@ -406,7 +391,12 @@ fn homing_lead_gates_span_release() {
     q2.lead_secs = MAX_LEAD_SECS;
     queues2.insert(key, q2);
 
-    match schedule(&queues2, limits(255), &horizon_of, no_cap) {
+    match schedule(
+        &queues2,
+        limits(255),
+        &lead_horizons(&queues2, ack_now),
+        no_cap,
+    ) {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1);
             assert_eq!(
@@ -436,11 +426,12 @@ fn cross_lead_per_queue_horizon_independent() {
     qb.lead_secs = MAX_LEAD_SECS;
     queues.insert(key_b, qb);
 
-    let horizon_of = |_k: &AxisKey, q: &AxisQueue| -> Option<u64> {
-        Some(ack_now + (q.lead_secs * FREQ) as u64)
-    };
-
-    match schedule(&queues, limits(255), &horizon_of, no_cap) {
+    match schedule(
+        &queues,
+        limits(255),
+        &lead_horizons(&queues, ack_now),
+        no_cap,
+    ) {
         Schedule::Send(frames) => {
             let a_frame = frames
                 .iter()
@@ -483,12 +474,7 @@ fn full_earliest_ring_does_not_starve_later_mcu() {
 
     queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with_host(8, &[(50, 5.0)]));
 
-    match schedule(
-        &queues,
-        limits(255),
-        |_: &AxisKey, _: &AxisQueue| None,
-        no_cap,
-    ) {
+    match schedule(&queues, limits(255), &unbounded(&queues), no_cap) {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1);
             assert_eq!(frames[0].key, AxisKey { mcu_id: 1, axis: 0 });
@@ -505,23 +491,13 @@ fn releasable_cap_bounds_the_frame() {
     let mut queues = BTreeMap::new();
     queues.insert(key, q_with(8, &[0, 1, 2]));
 
-    match schedule(
-        &queues,
-        limits(255),
-        |_: &AxisKey, _: &AxisQueue| None,
-        |_| 2,
-    ) {
+    match schedule(&queues, limits(255), &unbounded(&queues), |_| 2) {
         Schedule::Send(frames) => assert_eq!(frames[0].spans.len(), 2),
         other => panic!("expected Send bounded by the cap, got {other:?}"),
     }
 
     assert!(matches!(
-        schedule(
-            &queues,
-            limits(255),
-            |_: &AxisKey, _: &AxisQueue| None,
-            |_| 0
-        ),
+        schedule(&queues, limits(255), &unbounded(&queues), |_| 0),
         Schedule::StallAhead(_)
     ));
 }

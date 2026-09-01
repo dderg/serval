@@ -1,6 +1,6 @@
 use super::{EtherCatRing, RingFiller, WireSink};
 use crate::lock_ext::LockExt;
-use crate::pump::{AxisFrame, AxisKey, SendError, SpanSink};
+use crate::pump::{AxisFrame, AxisKey, DrainTick, SendError, SpanSink};
 use ethercat_rt::server::FrameServer;
 use ethercat_rt::setpoint_fill::{CLOCK_FREQ_HZ, ChainFiller, LaneSpec};
 use ethercat_rt::wire::{Command, push_sample_runs_response_frame};
@@ -221,6 +221,17 @@ fn deep_spans(start_ns: u64) -> Vec<ClockedMotorSpan> {
     vec![
         span(start_ns, DEEP_SPAN_SECS, 0.0, 4.0),
         span(start_ns + DEEP_SPAN_NS, DEEP_SPAN_SECS, 4.0, 8.0),
+    ]
+}
+
+/// A stage three fill windows deep, so a tick that ships one window still
+/// leaves the endpoint owing another.
+fn very_deep_spans(start_ns: u64) -> Vec<ClockedMotorSpan> {
+    const SECS: f64 = 0.070;
+    const NS: u64 = 70_000_000;
+    vec![
+        span(start_ns, SECS, 0.0, 7.0),
+        span(start_ns + NS, SECS, 7.0, 14.0),
     ]
 }
 
@@ -492,14 +503,12 @@ fn a_frame_for_an_axis_the_filler_does_not_drive_is_fatal() {
 }
 
 #[test]
-fn the_drain_tick_only_covers_ring_endpoints_and_only_while_they_owe_samples() {
+fn the_drain_tick_ships_a_window_at_a_time_until_the_stage_is_empty() {
     let h = harness("tick");
-    assert_eq!(h.sink.drain_tick_mcus(), vec![MCU_ID]);
     assert!(
-        !h.sink.wants_drain_tick(MCU_ID),
+        matches!(h.sink.drain_tick(), DrainTick::Quiet),
         "an endpoint with nothing staged owes no tick"
     );
-    h.sink.drain_tick(MCU_ID).expect("an idle tick is a no-op");
     assert!(
         h.endpoint.runs().is_empty(),
         "an idle tick must not put anything on the wire"
@@ -508,20 +517,28 @@ fn the_drain_tick_only_covers_ring_endpoints_and_only_while_they_owe_samples() {
     let start = GRID_CLOCK + INTERVAL_NS * 8;
     h.endpoint.free_cycles.store(0, Ordering::Relaxed);
     h.sink
-        .send_mcu_frames(MCU_ID, &[frame(deep_spans(start))])
+        .send_mcu_frames(MCU_ID, &[frame(very_deep_spans(start))])
         .expect("the first window is accepted");
     let after_send = h.endpoint.runs().len();
-    assert!(h.sink.wants_drain_tick(MCU_ID));
 
-    h.endpoint.free_cycles.store(1024, Ordering::Relaxed);
-    h.sink.drain_tick(MCU_ID).expect("the tick ships the rest");
     assert!(
-        h.endpoint.runs().len() > after_send,
+        matches!(h.sink.drain_tick(), DrainTick::Pending),
+        "a stage deeper than two windows still owes one after this tick"
+    );
+    let after_tick = h.endpoint.runs().len();
+    assert!(
+        after_tick > after_send,
         "the tick must ship the trajectory left over past the first window"
     );
+
+    h.endpoint.free_cycles.store(1024, Ordering::Relaxed);
     assert!(
-        !h.sink.wants_drain_tick(MCU_ID),
+        matches!(h.sink.drain_tick(), DrainTick::Quiet),
         "once the stage is empty the endpoint owes no further tick"
+    );
+    assert!(
+        h.endpoint.runs().len() > after_tick,
+        "the roomy tick ships the remainder"
     );
 }
 

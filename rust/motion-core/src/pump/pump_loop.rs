@@ -10,14 +10,16 @@ use super::drip::DripCohort;
 use super::junction::{JunctionTracker, check_junction_position_continuity};
 use super::memstat::MemPressureProbe;
 use super::messages::{
-    BuzzParams, BuzzStart, BuzzToken, BuzzTransport, EnqueueMsg, HeartbeatMsg, HistoryRecorder,
-    PumpCallbacks, PumpMsg, SendError, SpanSink,
+    BuzzParams, BuzzStart, BuzzToken, BuzzTransport, DrainTick, EnqueueMsg, HeartbeatMsg,
+    HistoryRecorder, PumpCallbacks, PumpMsg, SendError, SpanSink,
 };
 use super::sched::{
-    AxisFrame, AxisQueue, FramePlan, Schedule, append_spans_merging_holds, schedule,
+    AxisFrame, AxisQueue, FramePlan, ReleaseHorizons, Schedule, append_spans_merging_holds,
+    schedule,
 };
 use super::stall::ConsumptionStallWatch;
 use crate::types::AxisKey;
+use trajectory::ClockedMotorSpan;
 
 // How far ahead of the MCU playhead the pump pushes views — the depth of the
 // host-side buffer that absorbs scheduling hiccups. A view whose start_clock
@@ -88,21 +90,53 @@ pub(crate) fn pump_past_guard_secs() -> f64 {
     })
 }
 
+/// How a lane came to be halted. An acknowledged halt supersedes an inferred
+/// one; an inferred one never overwrites an acknowledgement.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum HaltKind {
+    Inferred(Instant),
+    Acknowledged,
+}
+
+/// Why a send pass stopped, and whether it shipped anything.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PassEnd {
+    pub(super) sent: bool,
+    pub(super) waiting_on_clock: bool,
+}
+
+/// What the lane's committed wire stream must do at the first incoming view.
+#[derive(Clone, Copy, Debug)]
+enum LaneCut {
+    /// A retimed epoch: the incoming clock bears no relation to the timeline
+    /// the transport still holds, so it cuts its stream at this view.
+    Reanchor { at_start_clock: u64 },
+    /// A `Rejoin` epoch: stream time itself jumped a drained-to-rest hole.
+    RejoinGap { at_start_clock: u64 },
+    /// A continuation resuming past a lane-local hole it sat out at rest.
+    SatOutGap { seam_end: u64, at_start_clock: u64 },
+    /// A continuation resuming past a hole its last view left mid-motion:
+    /// trajectory content is missing, so the gap is never sanctioned.
+    HoleMidMotion { seam_end: u64, at_start_clock: u64 },
+    /// A retimed epoch carrying no view: the committed seam belongs to the
+    /// timeline that just retired and can gate nothing.
+    RetireSeam,
+    /// The committed stream runs straight into this view.
+    Continues,
+}
+
 pub(super) struct Pump<S> {
     pub(super) queues: BTreeMap<AxisKey, AxisQueue>,
     pub(super) junctions: JunctionTracker,
     pub(super) cohort: Option<DripCohort>,
-    pub(super) halted: BTreeMap<AxisKey, Option<Instant>>,
+    pub(super) halted: BTreeMap<AxisKey, HaltKind>,
     pub(super) sink: S,
     pub(super) callbacks: PumpCallbacks,
     pub(super) history: Option<HistoryRecorder>,
     pub(super) ledger: Arc<crate::drain::DrainLedger>,
-    /// Barrier acks are held until the end of the loop iteration, after
-    /// intake and the ledger publish — so a caller that receives the ack has
-    /// a ledger covering everything it enqueued before sending the barrier.
     pub(super) pending_barrier_acks: Vec<std::sync::mpsc::SyncSender<()>>,
     pub(super) backlog: Arc<AtomicU64>,
-    pub(super) holding_ahead: bool,
+    pub(super) horizons: ReleaseHorizons,
     pub(super) data_open: bool,
     pub(super) intake_batch_open: bool,
     pub(super) consumption_stall: ConsumptionStallWatch,
@@ -110,32 +144,43 @@ pub(super) struct Pump<S> {
 }
 
 impl<S: SpanSink> Pump<S> {
+    /// This key's staged work is void: drop it, tell the host what it lost,
+    /// and forget the junction so the next view is not held contiguous with
+    /// motion that never ran.
+    fn abandon_staged(&mut self, key: AxisKey) {
+        if let Some(q) = self.queues.get_mut(&key) {
+            let dropped = q.spans.len() as u32;
+            q.spans.clear();
+            q.staged_motion = 0;
+            q.seam_end_clock = None;
+            if dropped > 0 {
+                (self.callbacks.on_abandon)(key, dropped);
+            }
+        }
+        self.junctions.forget(key);
+    }
+
     fn halt_keys(
         &mut self,
         keys: impl IntoIterator<Item = AxisKey>,
-        inferred: bool,
+        kind: HaltKind,
     ) -> Result<(), SendError> {
         let keys: Vec<AxisKey> = keys.into_iter().collect();
         self.sink.cut_staged(&keys)?;
-        let inferred_at = inferred.then(Instant::now);
         for key in keys {
-            if inferred {
-                self.halted.entry(key).or_insert(inferred_at);
-            } else {
-                self.halted.insert(key, None);
-            }
-            if let Some(q) = self.queues.get_mut(&key) {
-                let dropped = q.spans.len() as u32;
-                q.spans.clear();
-                q.staged_motion = 0;
-                q.wire_hold_tail = 0;
-                q.wire_end_clock = None;
-                q.seam_end_clock = None;
-                if dropped > 0 {
-                    (self.callbacks.on_abandon)(key, dropped);
+            match kind {
+                HaltKind::Inferred(_) => {
+                    self.halted.entry(key).or_insert(kind);
+                }
+                HaltKind::Acknowledged => {
+                    self.halted.insert(key, kind);
                 }
             }
-            self.junctions.forget(key);
+            if let Some(q) = self.queues.get_mut(&key) {
+                q.wire_hold_tail = 0;
+                q.wire_end_clock = None;
+            }
+            self.abandon_staged(key);
         }
         Ok(())
     }
@@ -157,20 +202,11 @@ impl<S: SpanSink> Pump<S> {
                     return false;
                 }
                 for key in keys {
-                    if let Some(q) = self.queues.get_mut(&key) {
-                        let dropped = q.spans.len() as u32;
-                        q.spans.clear();
-                        q.staged_motion = 0;
-                        q.seam_end_clock = None;
-                        if dropped > 0 {
-                            (self.callbacks.on_abandon)(key, dropped);
-                        }
-                    }
-                    self.junctions.forget(key);
+                    self.abandon_staged(key);
                 }
             }
             PumpMsg::Halt { keys, ack } => {
-                if let Err(error) = self.halt_keys(keys.clone(), false) {
+                if let Err(error) = self.halt_keys(keys.clone(), HaltKind::Acknowledged) {
                     tracing::error!(
                         subsystem = "motion",
                         event = "halt_cut_fatal",
@@ -297,10 +333,7 @@ impl<S: SpanSink> Pump<S> {
                     at_start_clock,
                     "[reanchor] projection rebase cut a sibling lane without pieces"
                 );
-                self.sink.mark_reanchor(key, at_start_clock, epoch_freq);
-                if let Some(q) = self.queues.get_mut(&key) {
-                    q.seam_end_clock = None;
-                }
+                self.cut_lane_at(key, at_start_clock, epoch_freq);
             }
             PumpMsg::Buzz { params, reply } => {
                 let armed = self.arm_buzz(&params);
@@ -403,13 +436,13 @@ impl<S: SpanSink> Pump<S> {
             epoch_freq,
             batch_end: _,
         } = msg;
-        if let Some(inferred_at) = self.halted.get(&key).copied() {
+        if let Some(kind) = self.halted.get(&key).copied() {
             let dropped = spans.len() as u32;
             if dropped > 0 {
                 (self.callbacks.on_abandon)(key, dropped);
             }
             self.junctions.forget(key);
-            if let Some(halted_at) = inferred_at {
+            if let HaltKind::Inferred(halted_at) = kind {
                 if halted_at.elapsed() >= INFERRED_HALT_FATAL {
                     (self.callbacks.on_drip_stall)(format!(
                         "mcu{} axis{} endpoint halt was not acknowledged by the host within {}ms",
@@ -434,30 +467,64 @@ impl<S: SpanSink> Pump<S> {
                 return;
             }
         }
-        if epoch.is_fresh() {
-            if let Some(first) = spans.first() {
-                if epoch == crate::anchor::StreamEpoch::Rejoin {
-                    tracing::info!(
-                        subsystem = "motion",
-                        event = "seam_gap_mark",
-                        mcu = key.mcu_id,
-                        axis = key.axis,
-                        at_start_clock = first.start_clock,
-                        "[rejoin] marking a sanctioned forward seam gap"
-                    );
-                    self.sink.mark_seam_gap(key, first.start_clock);
-                } else {
-                    tracing::info!(
-                        subsystem = "motion",
-                        event = "reanchor_mark",
-                        mcu = key.mcu_id,
-                        axis = key.axis,
-                        at_start_clock = first.start_clock,
-                        "[reanchor] marking fresh-epoch cut"
-                    );
-                    self.sink.mark_reanchor(key, first.start_clock, epoch_freq);
-                }
+        let first = spans.first();
+        match self.lane_cut_for(key, epoch, first) {
+            LaneCut::Reanchor { at_start_clock } => {
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "reanchor_mark",
+                    mcu = key.mcu_id,
+                    axis = key.axis,
+                    at_start_clock,
+                    "[reanchor] marking fresh-epoch cut"
+                );
+                self.cut_lane_at(key, at_start_clock, epoch_freq);
             }
+            LaneCut::RejoinGap { at_start_clock } => {
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "seam_gap_mark",
+                    mcu = key.mcu_id,
+                    axis = key.axis,
+                    at_start_clock,
+                    "[rejoin] marking a sanctioned forward seam gap"
+                );
+                self.sink.mark_seam_gap(key, at_start_clock);
+            }
+            LaneCut::SatOutGap {
+                seam_end,
+                at_start_clock,
+            } => {
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "lane_rejoin_gap_mark",
+                    mcu = key.mcu_id,
+                    axis = key.axis,
+                    seam_end,
+                    at_start_clock,
+                    "[rejoin] lane sat out single-lane traffic at rest — \
+                     sanctioning its forward seam gap"
+                );
+                self.sink.mark_seam_gap(key, at_start_clock);
+            }
+            LaneCut::HoleMidMotion {
+                seam_end,
+                at_start_clock,
+            } => {
+                tracing::error!(
+                    subsystem = "motion",
+                    event = "lane_hole_mid_motion",
+                    mcu = key.mcu_id,
+                    axis = key.axis,
+                    seam_end,
+                    at_start_clock,
+                    "[rejoin] forward lane hole while the lane's last span \
+                     ended in motion — trajectory content is missing; the \
+                     endpoint seam guard will fail loud"
+                );
+            }
+            LaneCut::RetireSeam => self.clear_lane_seam(key),
+            LaneCut::Continues => {}
         }
         if epoch.position_redefined() {
             self.junctions.forget(key);
@@ -468,7 +535,7 @@ impl<S: SpanSink> Pump<S> {
                 diag::log_junction_jump(&seam, source_line, epoch.is_fresh(), freq);
             }
         }
-        if let Some(first) = spans.first() {
+        if let Some(first) = first {
             if let Some((ack_now, freq)) = (self.callbacks.mcu_clock_of)(key.mcu_id) {
                 if freq > 0.0 {
                     let margin_s = (first.start_clock as i64 - ack_now as i64) as f64 / freq;
@@ -497,46 +564,6 @@ impl<S: SpanSink> Pump<S> {
             }
         }
         let ring_depth = (self.callbacks.ring_depth_of)(key);
-        if !epoch.is_fresh() {
-            if let Some(first) = spans.first() {
-                let seam = self
-                    .queues
-                    .get(&key)
-                    .and_then(|q| q.seam_end_clock.map(|end| (end, q.seam_end_at_rest)));
-                if let Some((end, at_rest)) = seam {
-                    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-                    let floor =
-                        (first.clock_freq_hz * super::sched::LANE_REJOIN_GAP_FLOOR_SECS) as u64;
-                    if first.start_clock > end.saturating_add(floor) {
-                        if at_rest {
-                            tracing::info!(
-                                subsystem = "motion",
-                                event = "lane_rejoin_gap_mark",
-                                mcu = key.mcu_id,
-                                axis = key.axis,
-                                seam_end = end,
-                                at_start_clock = first.start_clock,
-                                "[rejoin] lane sat out single-lane traffic at rest — \
-                                 sanctioning its forward seam gap"
-                            );
-                            self.sink.mark_seam_gap(key, first.start_clock);
-                        } else {
-                            tracing::error!(
-                                subsystem = "motion",
-                                event = "lane_hole_mid_motion",
-                                mcu = key.mcu_id,
-                                axis = key.axis,
-                                seam_end = end,
-                                at_start_clock = first.start_clock,
-                                "[rejoin] forward lane hole while the lane's last span \
-                                 ended in motion — trajectory content is missing; the \
-                                 endpoint seam guard will fail loud"
-                            );
-                        }
-                    }
-                }
-            }
-        }
         let lane_seam_track = spans
             .last()
             .map(|last| (last.end_clock, super::sched::span_ends_at_rest(last)));
@@ -563,32 +590,114 @@ impl<S: SpanSink> Pump<S> {
         }
     }
 
-    fn horizon_of(&self, k: &AxisKey, q: &AxisQueue) -> Option<u64> {
-        match (self.callbacks.mcu_clock_of)(k.mcu_id) {
-            Some((ack_now, freq)) =>
-            {
-                #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-                Some(ack_now + (q.lead_secs * freq) as u64)
+    fn lane_cut_for(
+        &self,
+        key: AxisKey,
+        epoch: crate::anchor::StreamEpoch,
+        first: Option<&ClockedMotorSpan>,
+    ) -> LaneCut {
+        let Some(first) = first else {
+            return if epoch.is_fresh() {
+                LaneCut::RetireSeam
+            } else {
+                LaneCut::Continues
+            };
+        };
+        let at_start_clock = first.start_clock;
+        if epoch.is_fresh() {
+            return if epoch == crate::anchor::StreamEpoch::Rejoin {
+                LaneCut::RejoinGap { at_start_clock }
+            } else {
+                LaneCut::Reanchor { at_start_clock }
+            };
+        }
+        let Some((seam_end, at_rest)) = self
+            .queues
+            .get(&key)
+            .and_then(|q| q.seam_end_clock.map(|end| (end, q.seam_end_at_rest)))
+        else {
+            return LaneCut::Continues;
+        };
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let floor = (first.clock_freq_hz * super::sched::LANE_REJOIN_GAP_FLOOR_SECS) as u64;
+        if at_start_clock <= seam_end.saturating_add(floor) {
+            return LaneCut::Continues;
+        }
+        if at_rest {
+            LaneCut::SatOutGap {
+                seam_end,
+                at_start_clock,
             }
-            None if self
-                .cohort
-                .as_ref()
-                .map_or(false, |co| co.participants.contains(k)) =>
-            {
-                Some(0)
+        } else {
+            LaneCut::HoleMidMotion {
+                seam_end,
+                at_start_clock,
             }
-            None => None,
         }
     }
 
-    fn poll_ms(&self) -> u64 {
+    fn cut_lane_at(&mut self, key: AxisKey, at_start_clock: u64, epoch_freq: Option<f64>) {
+        self.sink.mark_reanchor(key, at_start_clock, epoch_freq);
+        self.clear_lane_seam(key);
+    }
+
+    fn clear_lane_seam(&mut self, key: AxisKey) {
+        if let Some(q) = self.queues.get_mut(&key) {
+            q.seam_end_clock = None;
+        }
+    }
+
+    /// Sample every mcu's clock once and derive each staged lane's release
+    /// horizon from that one reading: the scheduling pass that follows judges
+    /// one instant.
+    fn resample_horizons(&mut self) {
+        let Self {
+            queues,
+            horizons,
+            callbacks,
+            cohort,
+            ..
+        } = self;
+        horizons.resample(
+            queues,
+            |mcu_id| (callbacks.mcu_clock_of)(mcu_id),
+            |key, q, clock| match clock {
+                Some((ack_now, freq)) =>
+                {
+                    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                    Some(ack_now + (q.lead_secs * freq) as u64)
+                }
+                None if cohort
+                    .as_ref()
+                    .is_some_and(|co| co.participants.contains(key)) =>
+                {
+                    Some(0)
+                }
+                None => None,
+            },
+        );
+    }
+
+    /// `None` parks on the channels alone; `Some(d)` parks with a deadline
+    /// because only elapsed time can unblock the loop.
+    fn wake_after(&self, deferred_work: bool) -> Option<Duration> {
         let cohort_active = self.cohort.is_some();
-        let short_lead = (self.holding_ahead || cohort_active)
-            && self
-                .queues
-                .values()
-                .any(|q| q.lead_secs < 0.1 && !q.spans.is_empty());
-        if short_lead || cohort_active { 10 } else { 50 }
+        if !(deferred_work || cohort_active) {
+            return None;
+        }
+        let short_lead = self
+            .queues
+            .values()
+            .any(|q| q.lead_secs < 0.1 && !q.spans.is_empty());
+        Some(Duration::from_millis(if cohort_active || short_lead {
+            10
+        } else {
+            50
+        }))
+    }
+
+    fn wants_more_data(&self) -> bool {
+        self.data_open && (self.intake_batch_open || wants_spans(&self.queues))
     }
 
     fn drain_control(&mut self, control_rx: &Receiver<PumpMsg>) -> Result<bool, ()> {
@@ -610,7 +719,7 @@ impl<S: SpanSink> Pump<S> {
 
     fn drain_data(&mut self, data_rx: &Receiver<EnqueueMsg>) -> bool {
         let mut activity = false;
-        while self.data_open && (self.intake_batch_open || wants_spans(&self.queues)) {
+        while self.wants_more_data() {
             match data_rx.try_recv() {
                 Ok(e) => {
                     activity = true;
@@ -692,9 +801,10 @@ impl<S: SpanSink> Pump<S> {
 
     fn handle_stall_full(&mut self, stall_key: AxisKey) -> Result<(), ()> {
         let now = std::time::Instant::now();
-        let Some(q) = self.queues.get(&stall_key) else {
-            return Ok(());
-        };
+        let q = self
+            .queues
+            .get(&stall_key)
+            .expect("the scheduler stalls on a queue it found");
         let current_consumed = q.consumed;
         if let (Some((mcu_clock, _)), Some(wire_end_clock)) = (
             (self.callbacks.mcu_clock_of)(stall_key.mcu_id),
@@ -935,15 +1045,18 @@ impl<S: SpanSink> Pump<S> {
     // after each bundle, so every pass sends at least one.
     const SEND_PASS_BUDGET: Duration = Duration::from_millis(10);
 
-    pub(super) fn send_ready(&mut self) -> Result<bool, ()> {
+    pub(super) fn send_ready(&mut self) -> Result<PassEnd, ()> {
         self.send_ready_until(Instant::now() + Self::SEND_PASS_BUDGET)
     }
 
-    pub(super) fn send_ready_until(&mut self, pass_deadline: Instant) -> Result<bool, ()> {
-        let mut activity = false;
+    pub(super) fn send_ready_until(&mut self, pass_deadline: Instant) -> Result<PassEnd, ()> {
+        let mut pass = PassEnd {
+            sent: false,
+            waiting_on_clock: false,
+        };
         loop {
+            self.resample_horizons();
             let sched = {
-                let hz_of = |k: &AxisKey, q: &AxisQueue| self.horizon_of(k, q);
                 let releasable_cap = |key: &AxisKey| {
                     if self
                         .cohort
@@ -958,30 +1071,25 @@ impl<S: SpanSink> Pump<S> {
                 schedule(
                     &self.queues,
                     |mcu_id| self.sink.bundle_limits(mcu_id),
-                    hz_of,
+                    &self.horizons,
                     releasable_cap,
                 )
             };
+            if !matches!(sched, Schedule::StallFull(_)) {
+                self.consumption_stall.reset();
+            }
             match sched {
-                Schedule::Idle => {
-                    self.consumption_stall.reset();
-                    break;
-                }
+                Schedule::Idle => break,
                 Schedule::StallFull(stall_key) => {
                     self.handle_stall_full(stall_key)?;
                     break;
                 }
                 Schedule::StallAhead(_stall_key) => {
-                    self.consumption_stall.reset();
-                    self.holding_ahead = true;
+                    pass.waiting_on_clock = true;
                     break;
                 }
                 Schedule::Send(frames) => {
-                    self.consumption_stall.reset();
-                    if frames.is_empty() {
-                        break;
-                    }
-                    activity = true;
+                    pass.sent = true;
                     let mcu_id = frames[0].key.mcu_id;
                     let bundle = self.build_bundle(frames);
                     if !self.send_bundle_grouped(mcu_id, bundle)? {
@@ -993,7 +1101,27 @@ impl<S: SpanSink> Pump<S> {
                 break;
             }
         }
-        Ok(activity)
+        Ok(pass)
+    }
+
+    /// `Ok(true)` while an endpoint still owes another window after this one;
+    /// `Err(())` is fatal.
+    fn drain_ticks(&mut self) -> Result<bool, ()> {
+        match self.sink.drain_tick() {
+            DrainTick::Quiet => Ok(false),
+            DrainTick::Pending => Ok(true),
+            DrainTick::Failed { mcu_id, error } => {
+                tracing::error!(
+                    subsystem = "motion",
+                    event = "setpoint_drain_tick_failed",
+                    mcu = mcu_id,
+                    error = ?error,
+                    "setpoint-ring drain tick failed — invoking fatal-transport action"
+                );
+                (self.callbacks.on_fatal_transport)(AxisKey { mcu_id, axis: 0 });
+                Err(())
+            }
+        }
     }
 
     /// A bundle is atomic per endpoint, so a mixed-lane mcu (a pulse lane
@@ -1083,7 +1211,7 @@ impl<S: SpanSink> Pump<S> {
                         mcu_id,
                         axis: frame.axis,
                     }),
-                    true,
+                    HaltKind::Inferred(Instant::now()),
                 ) {
                     tracing::error!(
                         subsystem = "motion",
@@ -1119,53 +1247,28 @@ impl<S: SpanSink> Pump<S> {
         }
     }
 
-    fn idle_wait(
-        &mut self,
+    /// Block until a channel has something for the next intake pass, or until
+    /// `timeout` elapses. Consumes nothing: `drain_control` and `drain_data`
+    /// are the only readers, so the intake machine exists exactly once.
+    fn park(
+        &self,
         control_rx: &Receiver<PumpMsg>,
         data_rx: &Receiver<EnqueueMsg>,
-        poll_ms: u64,
-    ) -> Result<(), ()> {
+        timeout: Option<Duration>,
+    ) {
         let mut sel = Select::new();
-        let ctrl_op = sel.recv(control_rx);
-        let want_data = self.data_open && (self.intake_batch_open || wants_spans(&self.queues));
-        let data_op = if want_data {
-            sel.recv(data_rx)
-        } else {
-            usize::MAX
-        };
-        let selected = if self.holding_ahead || self.cohort.is_some() {
-            sel.select_timeout(Duration::from_millis(poll_ms))
-        } else {
-            Ok(sel.select())
-        };
-        if let Ok(op) = selected {
-            let idx = op.index();
-            if idx == ctrl_op {
-                match op.recv(control_rx) {
-                    Ok(m) => {
-                        if !self.handle_control_msg(m) {
-                            return Err(());
-                        }
-                    }
-                    Err(_) => return Err(()),
-                }
-            } else if idx == data_op {
-                match op.recv(data_rx) {
-                    Ok(e) => {
-                        self.intake_batch_open = !e.batch_end;
-                        self.enqueue(e);
-                    }
-                    Err(_) => {
-                        assert!(
-                            !self.intake_batch_open,
-                            "pump data channel disconnected before the projection batch ended"
-                        );
-                        self.data_open = false;
-                    }
-                }
+        sel.recv(control_rx);
+        if self.wants_more_data() {
+            sel.recv(data_rx);
+        }
+        match timeout {
+            Some(timeout) => {
+                let _ = sel.ready_timeout(timeout);
+            }
+            None => {
+                sel.ready();
             }
         }
-        Ok(())
     }
 
     pub(super) fn publish_ledger(&self) {
@@ -1211,28 +1314,16 @@ impl<S: SpanSink> Pump<S> {
 
             self.check_cohort_deadline();
 
-            self.holding_ahead = false;
-            match self.send_ready() {
-                Ok(a) => activity |= a,
+            let pass = match self.send_ready() {
+                Ok(pass) => pass,
                 Err(()) => return,
-            }
+            };
+            activity |= pass.sent;
 
-            for mcu_id in self.sink.drain_tick_mcus() {
-                if let Err(e) = self.sink.drain_tick(mcu_id) {
-                    tracing::error!(
-                        subsystem = "motion",
-                        event = "setpoint_drain_tick_failed",
-                        mcu = mcu_id,
-                        error = ?e,
-                        "setpoint-ring drain tick failed — invoking fatal-transport action"
-                    );
-                    (self.callbacks.on_fatal_transport)(AxisKey { mcu_id, axis: 0 });
-                    return;
-                }
-                if self.sink.wants_drain_tick(mcu_id) {
-                    self.holding_ahead = true;
-                }
-            }
+            let owes_window = match self.drain_ticks() {
+                Ok(owes) => owes,
+                Err(()) => return,
+            };
 
             let unpushed: u64 = self.queues.values().map(|q| q.spans.len() as u64).sum();
             self.backlog.store(unpushed, Ordering::Release);
@@ -1241,9 +1332,11 @@ impl<S: SpanSink> Pump<S> {
                 continue;
             }
 
-            if self.idle_wait(control_rx, data_rx, self.poll_ms()).is_err() {
-                return;
-            }
+            self.park(
+                control_rx,
+                data_rx,
+                self.wake_after(pass.waiting_on_clock || owes_window),
+            );
         }
     }
 }
@@ -1268,7 +1361,7 @@ pub fn run_pump<S: SpanSink>(
         ledger,
         pending_barrier_acks: Vec::new(),
         backlog,
-        holding_ahead: false,
+        horizons: ReleaseHorizons::default(),
         data_open: true,
         intake_batch_open: false,
         consumption_stall: ConsumptionStallWatch::new(CONSUMPTION_STALL_FATAL),

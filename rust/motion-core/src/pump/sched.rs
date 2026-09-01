@@ -217,11 +217,55 @@ pub enum Schedule {
     Idle,
 }
 
+/// Every staged lane's release horizon as of one instant. [`schedule`] judges
+/// a whole pass against this one reading, so its two selection loops cannot
+/// disagree about which lanes are releasable; the egress guard deliberately
+/// re-judges against a live clock at send time.
+#[derive(Debug, Default)]
+pub struct ReleaseHorizons {
+    clocks: Vec<(u32, Option<(u64, f64)>)>,
+    lanes: Vec<(AxisKey, Option<u64>)>,
+}
+
+impl ReleaseHorizons {
+    /// Read each mcu named by `queues` exactly once, then derive every lane's
+    /// horizon from that reading. Reuses its buffers, so a warm pass
+    /// allocates nothing.
+    pub fn resample(
+        &mut self,
+        queues: &BTreeMap<AxisKey, AxisQueue>,
+        clock_of: impl Fn(u32) -> Option<(u64, f64)>,
+        horizon_of: impl Fn(&AxisKey, &AxisQueue, Option<(u64, f64)>) -> Option<u64>,
+    ) {
+        self.clocks.clear();
+        self.lanes.clear();
+        for (key, q) in queues {
+            let clock = match self.clocks.last() {
+                Some(&(mcu_id, clock)) if mcu_id == key.mcu_id => clock,
+                _ => {
+                    let clock = clock_of(key.mcu_id);
+                    self.clocks.push((key.mcu_id, clock));
+                    clock
+                }
+            };
+            self.lanes.push((*key, horizon_of(key, q, clock)));
+        }
+    }
+
+    fn of(&self, key: &AxisKey) -> Option<u64> {
+        let index = self
+            .lanes
+            .binary_search_by(|(lane, _)| lane.cmp(key))
+            .expect("every staged lane was sampled this pass");
+        self.lanes[index].1
+    }
+}
+
 #[must_use]
 pub fn schedule(
     queues: &BTreeMap<AxisKey, AxisQueue>,
     limits_of: impl Fn(u32) -> super::BundleLimits,
-    horizon_of: impl Fn(&AxisKey, &AxisQueue) -> Option<u64>,
+    horizons: &ReleaseHorizons,
     releasable_cap_of: impl Fn(&AxisKey) -> usize,
 ) -> Schedule {
     let mut stall_ahead_candidate: Option<AxisKey> = None;
@@ -267,7 +311,7 @@ pub fn schedule(
         }
 
         let head_start_clock = q.spans.front().unwrap().start_clock;
-        if let Some(horizon) = horizon_of(&k, q) {
+        if let Some(horizon) = horizons.of(&k) {
             if head_start_clock > horizon {
                 if stall_ahead_candidate.is_none() {
                     stall_ahead_candidate = Some(k);
@@ -309,11 +353,8 @@ pub fn schedule(
             maxed.insert(k);
             continue;
         }
-        if let Some(horizon) = horizon_of(&k, q) {
+        if let Some(horizon) = horizons.of(&k) {
             if start_clock > horizon {
-                if stall_ahead_candidate.is_none() {
-                    stall_ahead_candidate = Some(k);
-                }
                 maxed.insert(k);
                 continue;
             }
@@ -321,21 +362,17 @@ pub fn schedule(
         *taken.entry(k).or_insert(0) += 1;
     }
 
-    if taken.is_empty() {
-        if let Some(k) = stall_ahead_candidate {
-            return Schedule::StallAhead(k);
-        }
-        return Schedule::StallFull(head_key);
-    }
-
     let frames: Vec<FramePlan> = taken
         .into_iter()
-        .filter(|(_, n)| *n > 0)
         .map(|(k, n)| FramePlan {
             key: k,
             spans: queues[&k].spans.iter().take(n).cloned().collect(),
         })
         .collect();
-    debug_assert!(!frames.is_empty());
+    assert!(
+        !frames.is_empty(),
+        "the head lane cleared room, cap and horizon, so the frame pass must take at least one \
+         view from it"
+    );
     Schedule::Send(frames)
 }

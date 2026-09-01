@@ -174,12 +174,14 @@ fn schedule_resends_orphan_when_consumed_overtook_pushed() {
     queues.insert(key, q);
 
     const MAX_PER_FRAME: usize = 32;
+    let mut horizons = crate::pump::ReleaseHorizons::default();
+    horizons.resample(&queues, |_| None, |_, _, _| None);
     match schedule(
         &queues,
         |_| crate::pump::BundleLimits {
             spans_per_axis: MAX_PER_FRAME,
         },
-        |_, _| None,
+        &horizons,
         |_| usize::MAX,
     ) {
         Schedule::Send(frames) => {
@@ -901,7 +903,7 @@ fn queue_pump<S: SpanSink>(
         ledger: Arc::new(crate::drain::DrainLedger::new()),
         pending_barrier_acks: Vec::new(),
         backlog: Arc::new(AtomicU64::new(0)),
-        holding_ahead: false,
+        horizons: crate::pump::ReleaseHorizons::default(),
         data_open: true,
         intake_batch_open: false,
         consumption_stall: super::stall::ConsumptionStallWatch::new(consumption_stall_fatal),
@@ -931,7 +933,11 @@ fn send_pass_deadline_yields_with_work_pending() {
         q.spans.push_back(make_span(i));
     }
 
-    assert_eq!(pump.send_ready_until(std::time::Instant::now()), Ok(true));
+    assert!(
+        pump.send_ready_until(std::time::Instant::now())
+            .expect("an expired deadline is not fatal")
+            .sent
+    );
 
     assert_eq!(
         sink.recorded().len(),
@@ -944,9 +950,10 @@ fn send_pass_deadline_yields_with_work_pending() {
         "one bundle went out, the rest waits so intake can interleave (remaining={remaining})"
     );
 
-    assert_eq!(
-        pump.send_ready_until(std::time::Instant::now() + Duration::from_secs(60)),
-        Ok(true)
+    assert!(
+        pump.send_ready_until(std::time::Instant::now() + Duration::from_secs(60))
+            .expect("a roomy deadline is not fatal")
+            .sent
     );
     assert!(
         pump.queues[&key].spans.is_empty(),
@@ -1060,9 +1067,12 @@ fn send_rejected_while_halted_discards_bundle_and_infers_halt() {
     pump.callbacks.on_abandon =
         Box::new(move |abandoned_key, count| abandoned_tx.send((abandoned_key, count)).unwrap());
 
-    assert_eq!(pump.send_ready(), Ok(true));
+    assert!(pump.send_ready().expect("a halted send is not fatal").sent);
 
-    assert!(matches!(pump.halted.get(&key), Some(Some(_))));
+    assert!(matches!(
+        pump.halted.get(&key),
+        Some(super::pump_loop::HaltKind::Inferred(_))
+    ));
     assert!(pump.queues[&key].spans.is_empty());
     assert_eq!(abandoned_rx.recv().unwrap(), (key, 1));
 }
@@ -1076,7 +1086,7 @@ fn inferred_halt_without_host_ack_escalates() {
     });
     pump.halted.insert(
         key,
-        Some(std::time::Instant::now() - Duration::from_secs(2)),
+        super::pump_loop::HaltKind::Inferred(std::time::Instant::now() - Duration::from_secs(2)),
     );
 
     pump.enqueue(make_enqueue(
@@ -1099,10 +1109,11 @@ fn consumption_stall_past_threshold_with_frozen_counter_escalates() {
         escalated_cb.lock_ok().push(msg)
     });
 
-    assert_eq!(
-        pump.send_ready()
-            .expect("first stall observation is not fatal"),
-        false
+    assert!(
+        !pump
+            .send_ready()
+            .expect("first stall observation is not fatal")
+            .sent
     );
     assert!(escalated.lock_ok().is_empty());
 
@@ -1253,7 +1264,7 @@ fn buzz_fixture() -> BuzzFixture {
         ledger: Arc::new(crate::drain::DrainLedger::new()),
         pending_barrier_acks: Vec::new(),
         backlog: Arc::new(AtomicU64::new(0)),
-        holding_ahead: false,
+        horizons: crate::pump::ReleaseHorizons::default(),
         data_open: true,
         intake_batch_open: false,
         consumption_stall: super::stall::ConsumptionStallWatch::new(Duration::from_secs(60)),
