@@ -988,15 +988,7 @@ impl MotorGroup {
                         reason: "summed spline scale must be finite",
                     });
                 }
-                if curve
-                    .control_points()
-                    .iter()
-                    .any(|value| !value.is_finite())
-                {
-                    return Err(ContinuousError::InvalidSpan {
-                        reason: "spline control points must be finite",
-                    });
-                }
+                validate_spline_control_points(curve)?;
                 let (start, end) = spline_domain(curve);
                 checked_clamped_time(t_start, start, end)?;
                 checked_clamped_time(t_end, start, end)?;
@@ -1011,15 +1003,7 @@ impl MotorGroup {
                         reason: "relative spline base and summed scale must be finite",
                     });
                 }
-                if curve
-                    .control_points()
-                    .iter()
-                    .any(|value| !value.is_finite())
-                {
-                    return Err(ContinuousError::InvalidSpan {
-                        reason: "spline control points must be finite",
-                    });
-                }
+                validate_spline_control_points(curve)?;
                 let (start, end) = spline_domain(curve);
                 checked_clamped_time(t_start, start, end)?;
                 checked_clamped_time(t_end, start, end)?;
@@ -1582,6 +1566,19 @@ fn scale_bounds(bounds: PvaBounds, scale: f64) -> Result<PvaBounds, ContinuousEr
         velocity_max: a.max(b),
         acceleration_abs_max: scale.abs() * bounds.acceleration_abs_max,
     })
+}
+
+fn validate_spline_control_points(curve: &ScalarNurbs) -> Result<(), ContinuousError> {
+    if curve
+        .control_points()
+        .iter()
+        .any(|value| !value.is_finite())
+    {
+        return Err(ContinuousError::InvalidSpan {
+            reason: "spline control points must be finite",
+        });
+    }
+    Ok(())
 }
 
 fn spline_domain(curve: &ScalarNurbs) -> (f64, f64) {
