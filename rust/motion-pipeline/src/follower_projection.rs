@@ -610,10 +610,10 @@ pub(crate) fn project_followers(
                     tracks.push(pieces);
                 }
                 timing.kernel_fit_us += kernel_started.elapsed_us();
-                bases[0] -= piece_run_start(&tracks[0]);
+                bases[0] -= piece_run_start_pv(&tracks[0]).0;
                 for i in 1..tracks.len() {
-                    bases[i] =
-                        bases[i - 1] + piece_run_end(&tracks[i - 1]) - piece_run_start(&tracks[i]);
+                    bases[i] = bases[i - 1] + piece_run_end(&tracks[i - 1])
+                        - piece_run_start_pv(&tracks[i]).0;
                 }
                 for (i, pair) in tracks.windows(2).enumerate() {
                     let t = supports[i].1;
@@ -1131,9 +1131,6 @@ impl FollowerState {
             .max(s_start)
     }
 }
-fn axis_support(axis: &ContinuousAxis) -> (f64, f64) {
-    axis.domain()
-}
 
 fn projection_support(
     raw: &ContinuousSegment,
@@ -1141,10 +1138,10 @@ fn projection_support(
     axis: usize,
     leaders: &[usize],
 ) -> (f64, f64) {
-    let (axis_start, axis_end) = axis_support(&raw.axes[axis]);
+    let (axis_start, axis_end) = raw.axes[axis].domain();
     let (mut start, mut end) = (raw.t_start.max(axis_start), raw.t_end.min(axis_end));
     for &leader in leaders {
-        let (leader_start, leader_end) = axis_support(&shaped.axes[leader]);
+        let (leader_start, leader_end) = shaped.axes[leader].domain();
         start = start.max(leader_start);
         end = end.min(leader_end);
     }
@@ -1320,8 +1317,8 @@ fn leader_distance(a: &ContinuousSegment, b: &ContinuousSegment, leaders: &[usiz
         .iter()
         .fold(a.t_start.max(b.t_start), |start, &axis| {
             start
-                .max(axis_support(&a.axes[axis]).0)
-                .max(axis_support(&b.axes[axis]).0)
+                .max(a.axes[axis].domain().0)
+                .max(b.axes[axis].domain().0)
         });
     leaders
         .iter()
@@ -1336,7 +1333,7 @@ fn leader_distance(a: &ContinuousSegment, b: &ContinuousSegment, leaders: &[usiz
 fn axis_grid(seg: &ContinuousSegment, axes: &[usize]) -> Vec<f64> {
     let (mut support_start, mut support_end) = (seg.t_start, seg.t_end);
     for &axis in axes {
-        let (start, end) = axis_support(&seg.axes[axis]);
+        let (start, end) = seg.axes[axis].domain();
         support_start = support_start.max(start);
         support_end = support_end.min(end);
     }
@@ -1981,10 +1978,6 @@ fn piece_run_start_pv(pieces: &[BezierPiece]) -> (f64, f64) {
 fn piece_run_end_pv(pieces: &[BezierPiece]) -> (f64, f64) {
     let last = pieces.last().expect("a fitted target has pieces");
     polynomial_pv(&last.coeffs, last.u_end - last.u_start)
-}
-
-fn piece_run_start(pieces: &[BezierPiece]) -> f64 {
-    piece_run_start_pv(pieces).0
 }
 
 fn piece_run_end(pieces: &[BezierPiece]) -> f64 {
