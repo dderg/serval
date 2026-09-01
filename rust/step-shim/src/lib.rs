@@ -695,7 +695,7 @@ impl StepShim {
         let state = self.motor_mut(motor);
         state.pending.clear();
         state.cursor.reset_to(count, 0);
-        state.cursor.clear_step_remainder();
+        state.cursor.set_step_remainder(0.0);
         state.last_step_clock = 0;
         state.needs_reset = true;
         state.last_dir = None;

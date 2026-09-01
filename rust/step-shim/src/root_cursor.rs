@@ -122,10 +122,6 @@ impl StepRootCursor {
         self.resume_floor.unwrap_or(0)
     }
 
-    pub fn drain_base(&self) -> Option<u64> {
-        self.frontier
-    }
-
     pub fn origin_clock(&self) -> Option<u64> {
         self.origin_clock
     }
@@ -134,17 +130,13 @@ impl StepRootCursor {
     /// It survives [`Self::reset_to`]: a cut re-anchors the bookkeeping while
     /// the rotor stays put, so the remainder is still physically real. Only an
     /// external position reseed (homing, counter handover) redefines the
-    /// rotor's truth and clears it via [`Self::clear_step_remainder`].
+    /// rotor's truth and clears it via [`Self::set_step_remainder`].
     pub fn step_remainder(&self) -> f64 {
         self.overlay_carry_mm
     }
 
     pub fn set_step_remainder(&mut self, carry_mm: f64) {
         self.overlay_carry_mm = carry_mm;
-    }
-
-    pub fn clear_step_remainder(&mut self) {
-        self.overlay_carry_mm = 0.0;
     }
 
     pub fn reset_to(&mut self, count: i64, resume_floor: u64) {
