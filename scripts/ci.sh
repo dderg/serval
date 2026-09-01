@@ -261,6 +261,16 @@ job_sim() {
 
 job_sim_e2e() { "$ROOT/tools/sim/run.sh" test "$@"; }
 
+# The producer must outrun the printer everywhere; the committed asset is the
+# dense top-layer region that exhausted the bench's 0.25 s anchor lead. The
+# 1.3x floor is deliberately loose — a healthy pipeline clears 2.5x on the
+# slowest CI runner while the underrun class lands under 1x — so a red gate
+# means "this would crash a print", not "the runner was busy".
+job_replay_budget() {
+    cd "$RUST" && cargo run --release -p motion-core --example gcode_replay_bench -- \
+        "$ROOT/tools/sim/gcode/voron_dense_top_layers.gcode" --min-worst-x 1.3
+}
+
 job_docs() { cd "$ROOT/docs/_kalico" && uv run mkdocs build --strict; }
 
 job_snapshot() {
@@ -328,6 +338,7 @@ run_all() {
         run_check "py-typecheck"    job_py_typecheck
         run_check "sim"             job_sim
         run_check "snapshot"        job_snapshot
+        run_check "replay-budget"   job_replay_budget
     fi
     echo "────────────────────────────────────────"
     printf '  %s   %s\n' "$(green "$PASS pass")" "$([ "$FAIL" -gt 0 ] && red "$FAIL fail" || echo "0 fail")"
@@ -391,6 +402,7 @@ case "$name" in
     docs)             job=(job_docs) ;;
     sim)              job=(job_sim) ;;
     sim-e2e)          job=(job_sim_e2e ${@+"$@"}) ;;
+    replay-budget)    job=(job_replay_budget) ;;
     snapshot)         job=(job_snapshot) ;;
     *) echo "unknown job: $name" >&2; usage >&2; exit 2 ;;
 esac

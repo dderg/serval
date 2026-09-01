@@ -254,6 +254,33 @@ jobs:
       - name: Build release staticlib + run c_smoke_build test
         run: ./scripts/ci.sh c-smoke
 
+  # Producer-throughput floor: replay the committed bench-killer gcode region
+  # (dense Voron-cube top layers) through the full release pipeline and fail
+  # if the worst 5 s stream window drops below 1.3x realtime. The gap is wide
+  # by construction — healthy code clears 2.5x on the slowest runner, the
+  # anchor-underrun class lands under 1x — so this can block merges without
+  # flaking. The gcode path also triggers the `rust` filter via scripts/ci.sh.
+  rust-replay-budget:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          printf 'https://archive.ubuntu.com/ubuntu/\tpriority:1\n' \
+            | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=15 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=15 install -y libudev-dev lld
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: replay-budget
+      - name: Replay the bench-killer region against the 1.3x floor
+        run: ./scripts/ci.sh replay-budget
+
   rust-ethercat-hw:
     needs: changes
     if: needs.changes.outputs.rust == 'true'

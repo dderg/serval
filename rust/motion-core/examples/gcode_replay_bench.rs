@@ -93,9 +93,15 @@ fn trident_chains() -> AxisChainSet {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let mut args: Vec<String> = env::args().collect();
+    let min_worst_x = args.iter().position(|a| a == "--min-worst-x").map(|i| {
+        args.remove(i);
+        args.remove(i)
+            .parse::<f64>()
+            .expect("--min-worst-x takes a number")
+    });
     if args.len() < 2 {
-        eprintln!("usage: gcode_replay_bench <in.gcode> [t_lo t_hi]");
+        eprintln!("usage: gcode_replay_bench <in.gcode> [t_lo t_hi] [--min-worst-x <x>]");
         process::exit(1);
     }
     let source = fs::read_to_string(&args[1]).unwrap_or_else(|e| {
@@ -251,5 +257,13 @@ fn main() {
             }
         }
         println!("highlight {h_lo:.1}..{h_hi:.1}: worst realtime_x={worst:.2}");
+    }
+    if let Some(floor) = min_worst_x {
+        let worst = windows.first().map_or(f64::INFINITY, |&(_, _, x)| x);
+        if !(worst >= floor) {
+            eprintln!("FAIL: worst window {worst:.2}x is below the {floor:.2}x floor");
+            process::exit(1);
+        }
+        println!("budget ok: worst window {worst:.2}x >= {floor:.2}x floor");
     }
 }
