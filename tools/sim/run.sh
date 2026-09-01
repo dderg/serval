@@ -30,6 +30,10 @@ BRANCH=""
 GCODE=""
 EXTRA_ARGS=()
 DOCKER_ARGS=(--rm --ulimit memlock=-1:-1)
+# SIM_DOCKER_CPUS=N caps the container's CPU quota — the lever for
+# reproducing starvation-class failures (transport wedge, clocksync skew)
+# deterministically instead of waiting for ambient host load.
+[[ -n "${SIM_DOCKER_CPUS:-}" ]] && DOCKER_ARGS+=(--cpus "$SIM_DOCKER_CPUS")
 DOCKER_BUILD_ARGS=()
 KEEP_LOGS=""
 VERBOSE=""

@@ -387,10 +387,14 @@ runtime_status_drain(void)
     int32_t c2 = runtime_get_stepper_count(runtime_handle, 2);
     extern uint32_t runtime_get_xdirect_write_count(void);
     uint32_t spi_writes = runtime_get_xdirect_write_count();
+    extern uint64_t console_rx_bytes, console_tx_bytes, console_tx_drops;
     fprintf(stderr,
         "[sim-progress] status=%u counts=[%d,%d,%d]"
-        " spi_writes=%u\n",
-        status, c0, c1, c2, spi_writes);
+        " spi_writes=%u rx=%llu tx=%llu tx_drops=%llu\n",
+        status, c0, c1, c2, spi_writes,
+        (unsigned long long)console_rx_bytes,
+        (unsigned long long)console_tx_bytes,
+        (unsigned long long)console_tx_drops);
     fflush(stderr);
 #endif
 }

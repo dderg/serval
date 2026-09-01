@@ -5,6 +5,7 @@ pub mod events;
 pub mod fire_and_forget_depth;
 pub mod identify;
 pub(crate) mod interceptor;
+pub mod link_health;
 pub mod mcu_session;
 pub mod parser;
 pub mod reactor;
@@ -47,6 +48,7 @@ pub struct McuHostIoConfig {
     pub identify_timeout: Duration,
     pub default_dispatcher_timeout: Duration,
     pub mcu_label: Option<String>,
+    pub link_health: Arc<crate::host_io::link_health::LinkHealth>,
 }
 
 impl Default for McuHostIoConfig {
@@ -60,6 +62,7 @@ impl Default for McuHostIoConfig {
             identify_timeout: Duration::from_millis(15_000),
             default_dispatcher_timeout: Duration::from_secs(30),
             mcu_label: None,
+            link_health: Arc::new(crate::host_io::link_health::LinkHealth::default()),
         }
     }
 }
@@ -605,6 +608,10 @@ impl McuHostIo {
 
     pub fn is_critical(&self) -> bool {
         self.is_critical.load(Ordering::Acquire)
+    }
+
+    pub fn link_health(&self) -> Arc<crate::host_io::link_health::LinkHealth> {
+        Arc::clone(&self.config.link_health)
     }
 
     pub fn attach_heartbeat_callback(&self, cb: Arc<dyn Fn(&[u32], &[u64]) + Send + Sync>) {

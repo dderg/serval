@@ -64,6 +64,8 @@ pub struct Reactor {
     pub(crate) worst_ack_age: std::time::Duration,
     pub(crate) last_ff_wait_warn: Instant,
     pub(crate) last_channel_wait_warn: Instant,
+    pub(crate) link_health: Arc<crate::host_io::link_health::LinkHealth>,
+    pub(crate) link_epoch: Instant,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -104,6 +106,7 @@ impl Reactor {
         clock: Arc<dyn Clock>,
         fire_and_forget_depth: Arc<FireAndForgetDepth>,
     ) -> Self {
+        let link_health = Arc::clone(&config.link_health);
         let mcu_label: Arc<str> = config.mcu_label.as_deref().unwrap_or("unknown").into();
         let event_dispatcher = EventDispatcher::new(
             Arc::clone(&status_snapshot),
@@ -128,6 +131,8 @@ impl Reactor {
             last_recv_time: clock.now(),
             last_write_time: clock.now(),
             zero_byte_consec: 0,
+            link_health,
+            link_epoch: clock.now(),
             clock,
             transport_state: McuTransportState::default(),
             interceptors: crate::host_io::interceptor::InterceptorTable::new(),
@@ -175,13 +180,16 @@ pub enum RetransmitTrigger {
 }
 
 const PENDING_SUBMISSION_CEILING: usize = 256;
-const MAX_RETRY_COUNT: u32 = 8;
+const MAX_RETRY_COUNT: u32 = 6;
 
 // Retry exhaustion alone is not sufficient to declare Closed: under Renode
 // (1 µs quantum) a long-running MCU command can stall status emission for
 // several seconds wall while the wire remains healthy. Only close when
-// retry exhaustion coincides with genuine MCU silence.
-const MCU_SILENCE_FOR_CLOSE: Duration = Duration::from_secs(120);
+// retry exhaustion coincides with genuine MCU silence. Ten seconds is still
+// several times any legitimate stall, but bounded enough that a dead link
+// gets named as one instead of hiding behind whichever downstream deadline
+// (stepcompress deficit, barrier ack) starves first.
+const MCU_SILENCE_FOR_CLOSE: Duration = Duration::from_secs(10);
 
 const MAX_SUBMITS_PER_ITER: usize = 4;
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1);
@@ -231,6 +239,15 @@ impl Reactor {
         self.drain_pending_submissions();
         let t_step3 = s3.elapsed();
 
+        let vitals_now = self.clock.now();
+        self.link_health.publish(
+            vitals_now.duration_since(self.link_epoch).as_millis() as u64,
+            self.last_recv_time
+                .saturating_duration_since(self.link_epoch)
+                .as_millis() as u64,
+            self.unacked_window.len() as u32,
+            self.unacked_window.front().map_or(0, |f| f.retry_count),
+        );
         let s4 = std::time::Instant::now();
         if let Some(front) = self.unacked_window.front() {
             let now = self.clock.now();

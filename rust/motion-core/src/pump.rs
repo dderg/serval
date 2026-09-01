@@ -38,6 +38,7 @@ pub use stepcompress_sink::{
 };
 pub use transit_trace::emit_fault_snapshot;
 pub use wire_sink::{EtherCatRing, LANE_GROUP_PHASE, LANE_GROUP_PULSE, RingFiller, WireSink};
+pub mod skew_monitor;
 
 #[cfg(test)]
 mod drip_tests;
@@ -51,6 +52,8 @@ mod lane_rejoin_tests;
 mod memstat_tests;
 #[cfg(test)]
 mod sched_tests;
+#[cfg(test)]
+mod skew_monitor_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

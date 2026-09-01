@@ -410,6 +410,16 @@ impl PyMotionEngine {
         clock_of: Option<crate::pump::ClockSource>,
     ) -> PyResult<()> {
         let ack_tx = pump_control.clone();
+        let skew_monitor = Mutex::new(crate::pump::skew_monitor::SkewMonitor::default());
+        let death_latch = Arc::clone(&self.latched.endpoint_death);
+        // The simulator splits clock domains on purpose: klippy runs on the
+        // real kernel clock while the MCU processes live on the shared virtual
+        // clock, whose effective speed wobbles whenever a pacer holds it back.
+        // That genuinely breaks the constant-frequency projection model, so a
+        // sim world logs the divergence instead of killing the endpoint; on
+        // hardware the mcu crystal is constant and sustained divergence means
+        // the clock model is broken for real.
+        let divergence_is_fatal = std::env::var_os("MCU_SIM_SOCK_DIR").is_none();
         io.register_frame_interceptor(
             frame,
             None,
@@ -424,26 +434,51 @@ impl PyMotionEngine {
                     (clock_of.as_ref(), params.try_get_u32("clock"))
                 {
                     if let Some((projected, freq)) = clock_of(mcu_id) {
+                        use crate::pump::skew_monitor::SkewVerdict;
                         let skew_ticks = (projected as u32).wrapping_sub(mcu_clock) as i32;
                         let skew_secs = f64::from(skew_ticks) / freq;
-                        if !(-0.001..=0.020).contains(&skew_secs) {
-                            tracing::warn!(
-                                subsystem = "pump",
-                                event = "clock_projection_skew",
-                                mcu = mcu_id,
-                                skew_us = (skew_secs * 1e6) as i64,
-                                "the host's projected mcu clock disagrees with the clock the \
-                                 mcu stamped on a barrier ack — negative means the projection \
-                                 lags reality and every send margin is thinner than believed"
-                            );
-                        } else {
-                            tracing::debug!(
-                                subsystem = "pump",
-                                event = "clock_projection_skew_sample",
-                                mcu = mcu_id,
-                                skew_us = (skew_secs * 1e6) as i64,
-                                "in-bounds projection skew sample from a barrier ack clock echo"
-                            );
+                        match skew_monitor.lock_ok().observe(skew_secs) {
+                            SkewVerdict::Fatal => {
+                                tracing::error!(
+                                    subsystem = "pump",
+                                    event = "clock_projection_divergence",
+                                    mcu = mcu_id,
+                                    skew_us = (skew_secs * 1e6) as i64,
+                                    escalated = divergence_is_fatal,
+                                    "the host's projected mcu clock has disagreed with the \
+                                     mcu's own barrier-ack clock stamp beyond the fatal bound \
+                                     on consecutive echoes — every send margin and lateness \
+                                     guard is computed from a broken clock model"
+                                );
+                                if divergence_is_fatal {
+                                    escalate_endpoint_death(
+                                        &death_latch,
+                                        mcu_id,
+                                        "clock projection diverged from the mcu's own clock \
+                                         stamps — see the clock_projection_divergence log",
+                                    );
+                                }
+                            }
+                            SkewVerdict::Warn => {
+                                tracing::warn!(
+                                    subsystem = "pump",
+                                    event = "clock_projection_skew",
+                                    mcu = mcu_id,
+                                    skew_us = (skew_secs * 1e6) as i64,
+                                    "the host's projected mcu clock disagrees with the clock the \
+                                     mcu stamped on a barrier ack — negative means the projection \
+                                     lags reality and every send margin is thinner than believed"
+                                );
+                            }
+                            SkewVerdict::InBounds => {
+                                tracing::debug!(
+                                    subsystem = "pump",
+                                    event = "clock_projection_skew_sample",
+                                    mcu = mcu_id,
+                                    skew_us = (skew_secs * 1e6) as i64,
+                                    "in-bounds projection skew sample from a barrier ack clock echo"
+                                );
+                            }
                         }
                     } else {
                         tracing::warn!(

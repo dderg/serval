@@ -134,3 +134,29 @@ fn max_retry_count_closes_with_fault_and_completes_pending() {
     let fc = latched.expect("fault latched").fault_code;
     assert_eq!(fc, FaultCode::HostRetransmitExhausted.as_u16());
 }
+
+#[test]
+fn silent_link_closes_before_downstream_deficit_deadlines() {
+    let mut h = ReactorHarness::new();
+    submit_one(&mut h, 1);
+    h.tick();
+    let mut advanced = Duration::ZERO;
+    while h.reactor.state != ReactorState::Closed {
+        assert!(
+            advanced <= Duration::from_secs(15),
+            "a fully silent link must be declared dead within ~13 s — before the \
+             stepcompress deficit floor turns it into a misattributed pipeline fatal"
+        );
+        h.advance_clock(Duration::from_secs(1));
+        h.tick();
+        advanced += Duration::from_secs(1);
+    }
+    let latched = h.reactor.event_dispatcher.fault_latch.cell.as_ref();
+    let fc = latched.expect("fault latched").fault_code;
+    assert_eq!(fc, FaultCode::HostRetransmitExhausted.as_u16());
+    assert!(
+        h.reactor.link_health.silence_ms() >= 9_000,
+        "published link vitals must reflect the silence: {}",
+        h.reactor.link_health.describe()
+    );
+}

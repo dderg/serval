@@ -219,6 +219,7 @@ pub fn build_endpoint(
         ));
     }
     let query = host_io_step_count_query(cfg.mcu_id, host_io.clone());
+    let link_health = host_io.upgrade().map(|io| io.link_health());
     let mut endpoint = StepcompressEndpoint::new(
         cfg.mcu_id,
         StepShim::new(motors, SHIM_RING_DEPTH),
@@ -230,6 +231,7 @@ pub fn build_endpoint(
         budget,
     );
     endpoint.set_step_count_query(query);
+    endpoint.link_health = link_health;
     if std::env::var_os("MCU_SIM_SOCK_DIR").is_none() {
         endpoint.set_drain_pass_budget(DRAIN_PASS_BUDGET);
     } else {
@@ -363,6 +365,7 @@ pub struct StepcompressEndpoint {
     buzz: Option<StepBuzz>,
     commanded_base: Vec<f64>,
     drain_pass_budget: Option<std::time::Duration>,
+    link_health: Option<Arc<host_rt::host_io::link_health::LinkHealth>>,
 }
 
 fn shim_error_to_send_error(mcu_id: u32, error: ShimError) -> SendError {
@@ -505,7 +508,14 @@ impl StepcompressEndpoint {
             buzz: None,
             commanded_base,
             drain_pass_budget: None,
+            link_health: None,
         }
+    }
+
+    fn link_line(&self) -> String {
+        self.link_health
+            .as_ref()
+            .map_or_else(|| "link: no vitals attached".to_string(), |l| l.describe())
     }
 
     /// Cap the wall time one send pass may spend in the step root search.
@@ -1246,13 +1256,14 @@ impl StepcompressEndpoint {
             "stepcompress mcu {}: barrier deadline of {:.3} s of mcu clock expired — [{missing}]; \
              received acks: [{}]. {} frames backlogged, {} move slots in flight of {}. The \
              retirement cohort, every cut awaiting reconciliation, and every drain behind them \
-             cannot be released",
+             cannot be released. {}",
             self.mcu_id,
             self.barrier_ack_deadline_secs,
             self.barrier_ack_ledger(),
             self.backlog.len(),
             self.in_flight.len(),
-            self.budget
+            self.budget,
+            self.link_line()
         )))
     }
 
@@ -1456,9 +1467,10 @@ impl StepcompressEndpoint {
         if self.backlog.len() > BACKLOG_CEILING_FRAMES {
             return Err(SendError::Fatal(format!(
                 "stepcompress mcu {}: {} outbound step frames waiting on move-queue budget, \
-                 above the {BACKLOG_CEILING_FRAMES} ceiling — the mcu is not consuming moves",
+                 above the {BACKLOG_CEILING_FRAMES} ceiling — the mcu is not consuming moves. {}",
                 self.mcu_id,
-                self.backlog.len()
+                self.backlog.len(),
+                self.link_line()
             )));
         }
         let snapshot = self.shim.consumed_counts();
@@ -1551,12 +1563,13 @@ impl StepcompressEndpoint {
                      clock {}). The mcu shuts down on any late stepper re-arm (\"Stepper too \
                      far in past\"/\"Rescheduled timer in the past\"). {SEND_LEAD_SECONDS} s \
                      of lead was not delivered: {} frames backlogged, {in_flight}/{} move \
-                     slots in flight",
+                     slots in flight. {}",
                     self.mcu_id,
                     out.start_clock,
                     out.queued_clock,
                     self.backlog.len(),
-                    self.budget
+                    self.budget,
+                    self.link_line()
                 )));
                 break;
             }
