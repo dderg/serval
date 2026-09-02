@@ -35,6 +35,8 @@ pub use sched::{
     AxisFrame, AxisQueue, FramePlan, LaneRelease, ReleasePlan, Schedule,
     append_spans_merging_holds, schedule,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use stepcompress_sink::clock_probe;
 pub use stepcompress_sink::{
     BACKLOG_CEILING_FRAMES, ClockSource, FrameEgress, MOVE_SLOT_RESERVE, StepLaneConfig,
     StepcompressEndpoint, StepcompressPacer, build_endpoint,

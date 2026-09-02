@@ -319,6 +319,41 @@ impl McuClock {
     }
 }
 
+/// The endpoint's two clock maps, reachable from an integration test without
+/// publishing the pacing state they belong to.
+#[cfg(any(test, feature = "test-support"))]
+pub mod clock_probe {
+    use super::{McuClock, StepBuzz};
+
+    #[must_use]
+    pub fn mcu_ticks(freq: f64, secs: f64) -> u64 {
+        McuClock { now: 0, freq }.ticks(secs)
+    }
+
+    #[must_use]
+    pub fn mcu_secs(freq: f64, ticks: u64) -> f64 {
+        McuClock { now: 0, freq }.secs(ticks)
+    }
+
+    #[must_use]
+    pub fn buzz_clock_at(
+        anchor_clock_exact: f64,
+        cycles_per_second: f64,
+        stream_t_origin: f64,
+        stream_t: f64,
+    ) -> f64 {
+        StepBuzz {
+            signals: Vec::new(),
+            anchor_clock_exact,
+            cycles_per_second,
+            stream_t_origin,
+            next_stream_t: stream_t_origin,
+            stream_t_end: stream_t_origin,
+        }
+        .clock_at(stream_t)
+    }
+}
+
 /// Whether a drain may open a fresh retirement cohort. Deferring is what the
 /// seam ladder needs: the spans it is mid-way through pushing are not a
 /// retirable unit until the seam is applied.

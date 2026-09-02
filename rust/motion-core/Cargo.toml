@@ -28,6 +28,7 @@ test-support = []
 
 [dev-dependencies]
 proptest = "1"
+libm = { version = "0.2", default-features = false }
 host-rt = { path = "../host-rt", features = ["test-harness"] }
 motion-core = { path = ".", features = ["test-support"] }
 serialport = "4"
