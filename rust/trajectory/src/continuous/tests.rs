@@ -1135,6 +1135,39 @@ fn buzz_has_ramp_knees_position_continuity_and_exact_zero_endpoints() {
 }
 
 #[test]
+fn buzz_bounds_stay_ordered_across_an_envelope_knee() {
+    let profile = Arc::new(BuzzProfile::try_new(0.001, 1.0, 1.0, 1e-4, 5e-5, 0.0).unwrap());
+    let axis = ContinuousAxis::Buzz {
+        base_position: 0.0,
+        sign: -1.0,
+        profile: Arc::clone(&profile),
+    };
+    let span = MotorSpan::try_new(
+        Arc::from([MotorGroup::Independent(MotorTerm {
+            source_axis: 0,
+            axis: axis.clone(),
+            scale: 1.0,
+        })]),
+        0.0,
+        1e-4,
+        0,
+        0,
+        false,
+    )
+    .unwrap();
+    let knee = profile.breakpoints()[1];
+
+    let across_knee = span.pva_bounds(0.3e-4, 0.7e-4).unwrap();
+    assert!(!across_knee.velocity_continuous);
+    assert!(across_knee.velocity_min <= across_knee.velocity_max);
+    for t in [0.3e-4, knee - 1e-9, knee, knee + 1e-9, 0.7e-4] {
+        let velocity = span.eval_pva(t).unwrap().velocity;
+        assert!(velocity >= across_knee.velocity_min && velocity <= across_knee.velocity_max);
+    }
+    assert!(axis.pva_bounds(0.0, knee).unwrap().velocity_continuous);
+}
+
+#[test]
 fn zero_ramp_buzz_is_a_finite_rectangular_envelope() {
     let amplitude = 0.5;
     let frequency = 5.0;

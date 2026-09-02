@@ -428,6 +428,15 @@ impl BuzzProfile {
         &self.breakpoints
     }
 
+    /// The trapezoid envelope's slope steps at each knee, so velocity jumps
+    /// there.
+    #[must_use]
+    pub fn envelope_knee_inside(&self, t0: f64, t1: f64) -> bool {
+        self.breakpoints[1..self.breakpoints.len() - 1]
+            .iter()
+            .any(|&knee| knee > t0 && knee < t1)
+    }
+
     #[must_use]
     pub fn velocity_bounds(&self) -> (f64, f64) {
         self.velocity_bounds

@@ -11,5 +11,8 @@ geometry = { path = "../geometry" }
 thiserror.workspace = true
 libm = { version = "0.2", default-features = false }
 
+[dev-dependencies]
+proptest = "1"
+
 [lints]
 workspace = true

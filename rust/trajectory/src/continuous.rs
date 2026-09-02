@@ -620,9 +620,14 @@ impl ContinuousAxis {
             Self::Nudge(profile) => Ok(profile_bounds(
                 profile.velocity_bounds(),
                 profile.acceleration_bounds(),
+                true,
             )),
             Self::Buzz { sign, profile, .. } => scale_bounds(
-                profile_bounds(profile.velocity_bounds(), profile.acceleration_bounds()),
+                profile_bounds(
+                    profile.velocity_bounds(),
+                    profile.acceleration_bounds(),
+                    !profile.envelope_knee_inside(t0, t1),
+                ),
                 *sign,
             ),
         }
@@ -1549,12 +1554,16 @@ fn zero_bounds() -> PvaBounds {
         velocity_continuous: true,
     }
 }
-fn profile_bounds(velocity: (f64, f64), acceleration: (f64, f64)) -> PvaBounds {
+fn profile_bounds(
+    velocity: (f64, f64),
+    acceleration: (f64, f64),
+    velocity_continuous: bool,
+) -> PvaBounds {
     PvaBounds {
         velocity_min: velocity.0,
         velocity_max: velocity.1,
         acceleration_abs_max: acceleration.0.abs().max(acceleration.1.abs()),
-        velocity_continuous: true,
+        velocity_continuous,
     }
 }
 
