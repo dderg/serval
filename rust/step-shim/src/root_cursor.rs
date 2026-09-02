@@ -566,6 +566,12 @@ impl StepRootCursor {
         let from_pva = self.eval(motor, view, from)?;
         let to_pva = self.eval(motor, view, to)?;
         let duration = (to - from) as f64 / view.clock_freq_hz;
+        let position_scale = from_pva
+            .position
+            .abs()
+            .max(to_pva.position.abs())
+            .max(self.microstep_mm);
+        let position_rate_scale = position_scale / duration.max(view.clock_freq_hz.recip());
         let velocity_scale = bounds
             .velocity_min
             .abs()
@@ -573,6 +579,7 @@ impl StepRootCursor {
             .max(from_pva.velocity.abs())
             .max(to_pva.velocity.abs())
             .max(bounds.acceleration_abs_max * duration)
+            .max(position_rate_scale)
             .max(1.0);
         let tolerance = 256.0 * f64::EPSILON * velocity_scale;
         if bounds.velocity_min >= -tolerance && to_pva.position >= from_pva.position {
@@ -642,3 +649,7 @@ impl StepRootCursor {
             .map_err(|error| ShimError::SpanEval { motor, error })
     }
 }
+
+#[cfg(test)]
+#[path = "root_cursor_tests.rs"]
+mod tests;
