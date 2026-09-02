@@ -106,8 +106,11 @@ class MotionEndstop:
 
     def _trip_stop_oids(self):
         registered = stepcompress_stepper_oids(self.mcu.get_printer(), self.mcu)
-        if self.binding is None or self.binding.mcu is not self.mcu:
+        if self.binding is None:
             return registered
+        bound_motor_steps_elsewhere = self.binding.mcu is not self.mcu
+        if bound_motor_steps_elsewhere:
+            return []
         if self.binding.stepper_oid not in registered:
             return []
         return [self.binding.stepper_oid]

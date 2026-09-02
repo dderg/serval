@@ -318,6 +318,31 @@ def test_cross_mcu_staggered_trip_suppresses_only_the_tripped_motor(
     )
 
 
+def test_cross_mcu_switches_leave_the_switch_mcus_own_lanes_alone(sim_world):
+    """Issue #420: both X switches sit on the aux MCU, which also drives a
+    stepper of its own (Z). A switch bound to a motor on another MCU must
+    not arm the aux MCU's local lanes as a stand-in trip stop -- two switches
+    doing so collide on the same stepper's trsync signal and the aux MCU
+    shuts down before the first step."""
+    world = sim_world(
+        lambda w: configs.dual_motor_xy_cross_mcu_config(
+            w.h7_pty, w.f4_pty, str(w.gcode_dir), z_on_endstop_mcu=True
+        ),
+        dual_mcu=True,
+    )
+    control = world.sim_control("h7")
+    control.enable_step_pin_emit()
+    switch_control = world.sim_control("f4")
+    _home_with_staggered_trips(
+        world,
+        control,
+        "X",
+        0,
+        switch_control=switch_control,
+        max_overshoot_mm=CROSS_MCU_MAX_STOP_OVERSHOOT_MM,
+    )
+
+
 def test_abort_after_first_trip_leaves_no_suppression(sim_world):
     """One switch of the pair never closes. The approach runs out of travel
     and the host fails loudly -- naming the sibling it is still waiting on --

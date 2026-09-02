@@ -725,11 +725,15 @@ rotation_distance: 4
 
 
 def dual_motor_xy_cross_mcu_config(
-    h7_pty: str, f4_pty: str, gcode_dir: str
+    h7_pty: str, f4_pty: str, gcode_dir: str, z_on_endstop_mcu: bool = False
 ) -> str:
     """dual_motor_xy_config with every X/Y endstop switch wired to a second
     MCU while the motors stay on the main one: the per-motor freeze must
-    travel host-side (StepperSuppress) instead of the same-MCU fast path."""
+    travel host-side (StepperSuppress) instead of the same-MCU fast path.
+    `z_on_endstop_mcu` gives the switch MCU a step/dir lane of its own, the
+    shape where a switch bound to a remote motor must not claim the local
+    lanes."""
+    z_chip = "aux:gpiochip0" if z_on_endstop_mcu else "gpiochip0"
     motor_sections = ""
     lane_motors = DUAL_MOTOR_X_MOTORS + DUAL_MOTOR_Y_MOTORS
     step_pins = DUAL_MOTOR_X_STEP_PINS + DUAL_MOTOR_Y_STEP_PINS
@@ -797,9 +801,9 @@ homing_speed: 5
 {motor_sections}
 [motor z]
 drive: stepper
-step_pin: gpiochip0/gpio50
-dir_pin: gpiochip0/gpio51
-enable_pin: !gpiochip0/gpio52
+step_pin: {z_chip}/gpio50
+dir_pin: {z_chip}/gpio51
+enable_pin: !{z_chip}/gpio52
 microsteps: 16
 rotation_distance: 4
 {_tail(gcode_dir)}"""
