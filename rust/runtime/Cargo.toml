@@ -26,6 +26,9 @@ libm = { version = "0.2", default-features = false }
 [target.'cfg(loom)'.dev-dependencies]
 loom = "0.7"
 
+[target.'cfg(not(target_os = "none"))'.dev-dependencies]
+proptest = "1"
+
 [features]
 default = ["host", "motion-module-stepper", "sample-stepping"]
 host = []

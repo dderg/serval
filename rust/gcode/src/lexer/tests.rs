@@ -133,12 +133,12 @@ fn numeric_token_without_letter_returns_error() {
 }
 
 #[test]
-fn lowercase_param_letter_returns_error() {
+fn lowercase_param_letter_is_normalized() {
     let toks = collect("G1 x10\n");
     assert_eq!(toks.len(), 1);
     match &toks[0] {
-        Err(ParseError::MalformedNumber { line_no: 1, .. }) => {}
-        other => panic!("expected MalformedNumber for lowercase param letter, got {other:?}"),
+        Ok(Token::Command { params, .. }) => assert_eq!(params.x(), Some(10.0)),
+        other => panic!("expected normalized parameter, got {other:?}"),
     }
 }
 
@@ -291,4 +291,17 @@ fn lone_uppercase_letter_is_still_an_error() {
         &toks[0],
         Err(ParseError::UnrecognizedHead { line_no: 1, .. })
     ));
+}
+
+#[test]
+fn lowercase_commands_and_parameters_are_normalized() {
+    let tokens = collect("g1 x1.25 y-2\n");
+    match &tokens[0] {
+        Ok(Token::Command { letter, params, .. }) => {
+            assert_eq!(*letter, b'G');
+            assert_eq!(params.x(), Some(1.25));
+            assert_eq!(params.y(), Some(-2.0));
+        }
+        other => panic!("expected normalized command, got {other:?}"),
+    }
 }

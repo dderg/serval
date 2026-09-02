@@ -61,7 +61,7 @@ fn tokenize_command_line(line: &str, line_no: u32) -> Result<Token, ParseError> 
     let Some((_, head_char)) = chars.next() else {
         return Err(ParseError::EmptyCommand { line_no });
     };
-    if !head_char.is_ascii_uppercase() {
+    if !head_char.is_ascii_alphabetic() {
         return Err(ParseError::UnrecognizedHead {
             line_no,
             head: line
@@ -72,7 +72,7 @@ fn tokenize_command_line(line: &str, line_no: u32) -> Result<Token, ParseError> 
                 .into_boxed_str(),
         });
     }
-    let head_byte = head_char as u8;
+    let head_byte = head_char.to_ascii_uppercase() as u8;
 
     let after_letter_idx = chars.next().map_or(line.len(), |(i, _)| i);
     let after_letter = &line[after_letter_idx..];
@@ -85,9 +85,13 @@ fn tokenize_command_line(line: &str, line_no: u32) -> Result<Token, ParseError> 
         if head_word.len() >= 2
             && head_word
                 .bytes()
-                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+                .all(|b| b.is_ascii_alphabetic() || b.is_ascii_digit() || b == b'_')
         {
-            return tokenize_extended_line(head_word, &line[head_word.len()..], line_no);
+            return tokenize_extended_line(
+                &head_word.to_ascii_uppercase(),
+                &line[head_word.len()..],
+                line_no,
+            );
         }
         return Err(ParseError::UnrecognizedHead {
             line_no,
@@ -102,13 +106,13 @@ fn tokenize_command_line(line: &str, line_no: u32) -> Result<Token, ParseError> 
     for tok in line[after_head_idx..].split_whitespace() {
         let mut tc = tok.chars();
         let Some(letter_ch) = tc.next() else { continue };
-        if !letter_ch.is_ascii_uppercase() {
+        if !letter_ch.is_ascii_alphabetic() {
             return Err(ParseError::MalformedNumber {
                 line_no,
                 text: tok.to_string().into_boxed_str(),
             });
         }
-        let letter = letter_ch as u8;
+        let letter = letter_ch.to_ascii_uppercase() as u8;
         let num_str = &tok[letter_ch.len_utf8()..];
         let value: f64 = num_str.parse().map_err(|_| ParseError::MalformedNumber {
             line_no,
