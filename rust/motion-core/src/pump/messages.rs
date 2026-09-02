@@ -669,7 +669,7 @@ pub trait SpanSink: Send {
 pub struct PumpCallbacks {
     pub ring_depth_of: Box<dyn Fn(AxisKey) -> u32 + Send>,
     pub mcu_clock_of: Box<dyn Fn(u32) -> Option<(u64, f64)> + Send>,
-    pub on_fatal_transport: Box<dyn Fn(AxisKey) + Send>,
+    pub on_fatal_transport: Box<dyn Fn(AxisKey, &str) + Send>,
     pub on_abandon: Box<dyn Fn(AxisKey, u32) + Send>,
     pub on_drip_stall: Box<dyn Fn(String) + Send>,
 }
@@ -679,7 +679,7 @@ impl PumpCallbacks {
         Self {
             ring_depth_of: Box::new(move |_| ring_depth),
             mcu_clock_of: Box::new(|_| None),
-            on_fatal_transport: Box::new(|_| {}),
+            on_fatal_transport: Box::new(|_, _| {}),
             on_abandon: Box::new(|_, _| {}),
             on_drip_stall: Box::new(|_| {}),
         }

@@ -623,7 +623,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
                 sink,
                 PumpCallbacks {
                     mcu_clock_of: Box::new(mcu_clock_of),
-                    on_fatal_transport: Box::new(move |_key: AxisKey| {
+                    on_fatal_transport: Box::new(move |_key: AxisKey, _reason: &str| {
                         fatal_flag.store(true, Ordering::SeqCst);
                     }),
                     ..PumpCallbacks::noop(256)
@@ -814,13 +814,13 @@ fn partial_state_teardown_at_exit() {
 }
 
 #[test]
-fn report_ethercat_endpoint_death_latches_203_and_first_cause_wins() {
+fn report_endpoint_death_latches_203_and_first_cause_wins() {
     let latch: Arc<std::sync::Mutex<std::collections::HashMap<u32, String>>> =
         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-    let first = super::report_ethercat_endpoint_death(&latch, 5, "conn EOF");
+    let first = super::report_endpoint_death(&latch, 5, "conn EOF");
     // A later writer (e.g. the supervisor after the pump already latched) must
     // not overwrite the first surfaced cause.
-    let second = super::report_ethercat_endpoint_death(&latch, 5, "later transport fatal");
+    let second = super::report_endpoint_death(&latch, 5, "later transport fatal");
     assert!(
         first,
         "the first call latches the cause and arms the backstop"

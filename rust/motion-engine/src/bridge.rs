@@ -46,8 +46,8 @@ use endstop::{TripDeps, dispatch_endstop_trip};
 use ethercat_endpoint::{EndpointClaimError, ReportedExecutor, endpoint_args};
 use ethercat_endpoint::{
     SampleGrid, arm_endpoint_death_watchdog, build_ring_filler, handshake_ethercat_endpoint,
-    message_for_claim_error, poll_socket_ready, report_ethercat_endpoint_death,
-    spawn_ethercat_endpoint, verify_sample_grid,
+    message_for_claim_error, poll_socket_ready, report_endpoint_death, spawn_ethercat_endpoint,
+    verify_sample_grid,
 };
 use motion_caps::{drip_cohort_participants, require_events_dir_for_mcu_transport};
 #[cfg(test)]

@@ -4,11 +4,11 @@ use super::{
     PyMotionEngine, PyResult, PyRuntimeError, PyValueError, STREAM_INTEGRATION_TOL,
     STREAM_MAX_BUFFER_MOVES, abort_after_tracing_appender_drains, arm_endpoint_death_watchdog,
     build_mcu_configs, collect_motor_positions_inner, config, dispatch_endstop_trip,
-    mcu_handle_from_raw, query_ethercat_runtime_caps, report_ethercat_endpoint_death,
+    mcu_handle_from_raw, query_ethercat_runtime_caps, report_endpoint_death,
 };
 use crate::lock_ext::LockExt;
 fn escalate_endpoint_death(latch: &Arc<Mutex<HashMap<u32, String>>>, mcu_id: u32, reason: &str) {
-    if report_ethercat_endpoint_death(latch, mcu_id, reason) {
+    if report_endpoint_death(latch, mcu_id, reason) {
         arm_endpoint_death_watchdog(Arc::clone(latch), mcu_id);
     }
 }
@@ -377,13 +377,8 @@ impl PyMotionEngine {
                     let r = router_for_pump.lock_ok();
                     r.ack_clock_and_freq(mcu_handle_from_raw(mcu_id))
                 }),
-                on_fatal_transport: Box::new(move |key: crate::types::AxisKey| {
-                    escalate_endpoint_death(
-                        &endpoint_death_for_pump,
-                        key.mcu_id,
-                        "pump transport went fatal (broken pipe / endpoint gone) \
-                         — see the send_frame_fatal log for the exact transport error",
-                    );
+                on_fatal_transport: Box::new(move |key: crate::types::AxisKey, reason: &str| {
+                    escalate_endpoint_death(&endpoint_death_for_pump, key.mcu_id, reason);
                 }),
                 on_abandon: Box::new(log_abandoned_spans),
                 on_drip_stall: Box::new(abort_on_drip_stall),

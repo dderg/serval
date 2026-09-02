@@ -77,6 +77,9 @@ class EngineMcu:
     def take_runtime_event(self):
         return self._engine.take_runtime_event(self._handle)
 
+    def take_endpoint_death(self):
+        return self._engine.take_endpoint_death(self._handle)
+
     def get_clock_async(self):
         self._engine.engine_get_clock_async(self._handle)
 

@@ -516,6 +516,42 @@ impl SpanSink for HaltedSink {
     }
 }
 
+#[test]
+fn endpoint_fatal_hands_its_reason_to_the_fatal_transport_action() {
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (_data, data_rx) = unbounded::<EnqueueMsg>();
+    let latched: Arc<Mutex<Vec<(AxisKey, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let latched_pump = Arc::clone(&latched);
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            control_rx,
+            data_rx,
+            NullSink,
+            PumpCallbacks {
+                on_fatal_transport: Box::new(move |key, reason| {
+                    latched_pump.lock_ok().push((key, reason.to_string()));
+                }),
+                ..PumpCallbacks::noop(64)
+            },
+            None,
+            Arc::new(crate::drain::DrainLedger::new()),
+            Arc::new(AtomicU64::new(0)),
+        );
+    });
+    let error = "queue_step oid 9 is 2077 us behind the projected mcu clock".to_string();
+    ctl.send(PumpMsg::StepcompressFatal {
+        mcu_id: 3,
+        error: error.clone(),
+    })
+    .unwrap();
+    handle.join().unwrap();
+    assert_eq!(
+        *latched.lock_ok(),
+        vec![(AxisKey { mcu_id: 3, axis: 0 }, error)],
+        "the operator-facing latch must carry the endpoint's own fatal text"
+    );
+}
+
 /// The four gated views a Flush must drop, on a 1 kHz fixture clock where one
 /// view is exactly one tick. Distinct hold positions keep the queue's hold
 /// coalescing from collapsing them into one.

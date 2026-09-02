@@ -196,8 +196,9 @@ impl<S: SpanSink> Pump<S> {
                         error = ?e,
                         "stepcompress flush rejected — invoking fatal-transport action"
                     );
+                    let reason = e.to_string();
                     for key in keys {
-                        (self.callbacks.on_fatal_transport)(key);
+                        (self.callbacks.on_fatal_transport)(key, &reason);
                     }
                     return false;
                 }
@@ -213,8 +214,9 @@ impl<S: SpanSink> Pump<S> {
                         error = ?error,
                         "endpoint rejected the halt cut"
                     );
+                    let reason = format!("endpoint rejected the halt cut: {error:?}");
                     for key in keys {
-                        (self.callbacks.on_fatal_transport)(key);
+                        (self.callbacks.on_fatal_transport)(key, &reason);
                     }
                     return false;
                 }
@@ -304,7 +306,10 @@ impl<S: SpanSink> Pump<S> {
                         error = ?e,
                         "stepcompress barrier ack rejected — invoking fatal-transport action"
                     );
-                    (self.callbacks.on_fatal_transport)(AxisKey { mcu_id, axis: 0 });
+                    (self.callbacks.on_fatal_transport)(
+                        AxisKey { mcu_id, axis: 0 },
+                        &format!("barrier ack oid={oid} seq={seq} rejected: {e}"),
+                    );
                     return false;
                 }
             }
@@ -317,7 +322,7 @@ impl<S: SpanSink> Pump<S> {
                     "stepcompress endpoint reported a fatal condition — invoking \
                      fatal-transport action"
                 );
-                (self.callbacks.on_fatal_transport)(AxisKey { mcu_id, axis: 0 });
+                (self.callbacks.on_fatal_transport)(AxisKey { mcu_id, axis: 0 }, &error);
                 return false;
             }
             PumpMsg::MarkReanchor {
@@ -1118,7 +1123,10 @@ impl<S: SpanSink> Pump<S> {
                     error = ?error,
                     "setpoint-ring drain tick failed — invoking fatal-transport action"
                 );
-                (self.callbacks.on_fatal_transport)(AxisKey { mcu_id, axis: 0 });
+                (self.callbacks.on_fatal_transport)(
+                    AxisKey { mcu_id, axis: 0 },
+                    &format!("setpoint-ring drain tick failed: {error}"),
+                );
                 Err(())
             }
         }
@@ -1192,10 +1200,13 @@ impl<S: SpanSink> Pump<S> {
                     error = %e,
                     "pump send_mcu_frames FATAL transport error — invoking fatal-transport action"
                 );
-                (self.callbacks.on_fatal_transport)(AxisKey {
-                    mcu_id,
-                    axis: bundle.first().map_or(0, |f| f.axis),
-                });
+                (self.callbacks.on_fatal_transport)(
+                    AxisKey {
+                        mcu_id,
+                        axis: bundle.first().map_or(0, |f| f.axis),
+                    },
+                    &e,
+                );
                 Err(())
             }
             Err(SendError::Halted(e)) => {
@@ -1220,10 +1231,13 @@ impl<S: SpanSink> Pump<S> {
                         error = ?error,
                         "endpoint rejected the inferred halt cut"
                     );
-                    (self.callbacks.on_fatal_transport)(AxisKey {
-                        mcu_id,
-                        axis: bundle.first().map_or(0, |frame| frame.axis),
-                    });
+                    (self.callbacks.on_fatal_transport)(
+                        AxisKey {
+                            mcu_id,
+                            axis: bundle.first().map_or(0, |frame| frame.axis),
+                        },
+                        &format!("endpoint rejected the inferred halt cut: {error:?}"),
+                    );
                     return Err(());
                 }
                 Ok(false)

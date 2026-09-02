@@ -11,23 +11,24 @@ use super::state::EthercatDrive;
 
 /// How long the host waits for klippy to consume the latched endpoint-death
 /// cause (clean shutdown) before the watchdog forces a last-resort abort. Sized
-/// well above the `DRIVE_FAULT_POLL_PERIOD` (1 s) so a healthy reactor always
-/// shuts down cleanly first; the abort only fires if the reactor is wedged.
+/// well above the 1 s klippy poll periods (`mcu.py` for stepper mcus,
+/// `ethercat_node.py` for drives) so a healthy reactor always shuts down cleanly
+/// first; the abort only fires if the reactor is wedged.
 const ENDPOINT_DEATH_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
-/// Latch an EtherCAT-endpoint-death cause for klippy to surface as the shutdown
-/// reason (first cause wins), and log it. Deliberately does NOT abort here: the
-/// host shuts down cleanly via `ethercat_node._poll_drive_fault` →
-/// `invoke_shutdown` so the operator sees the real cause and runs
-/// `FIRMWARE_RESTART` (no silent auto-restart). Returns `true` when this call
-/// latched the first cause, so the caller arms the safety watchdog exactly once.
-pub(crate) fn report_ethercat_endpoint_death(
+/// Latch an endpoint-death cause for klippy to surface as the shutdown reason
+/// (first cause wins), and log it. Deliberately does NOT abort here: klippy
+/// polls the latch per mcu handle and shuts down cleanly via `invoke_shutdown`
+/// so the operator sees the real cause and runs `FIRMWARE_RESTART` (no silent
+/// auto-restart). Returns `true` when this call latched the first cause, so the
+/// caller arms the safety watchdog exactly once.
+pub(crate) fn report_endpoint_death(
     latch: &Arc<Mutex<HashMap<u32, String>>>,
     mcu_id: u32,
     reason: &str,
 ) -> bool {
     let code = runtime::error::FaultCode::EthercatEndpointDied.as_i32();
-    let message = format!("EtherCAT endpoint died mid-session (fault {code}): {reason}");
+    let message = format!("motion endpoint died mid-session (fault {code}): {reason}");
     let mut guard = latch.lock_ok();
     // First cause wins for BOTH the latched (operator-surfaced) message and the
     // log: a later writer (e.g. the supervisor after the pump already latched)
@@ -35,12 +36,12 @@ pub(crate) fn report_ethercat_endpoint_death(
     if let std::collections::hash_map::Entry::Vacant(slot) = guard.entry(mcu_id) {
         slot.insert(message);
         tracing::error!(
-            subsystem = "ethercat",
+            subsystem = "motion",
             event = "endpoint_death",
             mcu_id,
             fault_code = code,
             reason,
-            "EtherCAT endpoint died mid-session — latched for klippy; clean shutdown, no abort"
+            "motion endpoint died mid-session — latched for klippy; clean shutdown, no abort"
         );
         true
     } else {
@@ -61,11 +62,11 @@ pub(crate) fn arm_endpoint_death_watchdog(latch: Arc<Mutex<HashMap<u32, String>>
             let unhandled = latch.lock_ok().contains_key(&mcu_id);
             if unhandled {
                 tracing::error!(
-                    subsystem = "ethercat",
+                    subsystem = "motion",
                     event = "endpoint_death_watchdog_abort",
                     mcu_id,
                     grace_secs = ENDPOINT_DEATH_SHUTDOWN_GRACE.as_secs(),
-                    "klippy did not act on the latched EtherCAT endpoint death within the grace \
+                    "klippy did not act on the latched endpoint death within the grace \
                      — aborting as a last-resort safety stop"
                 );
                 abort_after_tracing_appender_drains();

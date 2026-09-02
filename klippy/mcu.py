@@ -56,6 +56,7 @@ class error(Exception):
     pass
 
 
+ENDPOINT_DEATH_POLL_PERIOD = 1.0
 # Minimum time host needs to get scheduled events queued into mcu
 MIN_SCHEDULE_TIME = 0.100
 # Maximum time all MCUs can internally schedule into the future.
@@ -726,6 +727,21 @@ class MCU:
                 calc_freq_mhz,
             )
             pconfig.runtime_warning(msg)
+        self._reactor.register_timer(
+            self._poll_endpoint_death,
+            self._reactor.monotonic() + ENDPOINT_DEATH_POLL_PERIOD,
+        )
+
+    def _poll_endpoint_death(self, eventtime):
+        if not self.engine_mcu.is_claimed():
+            return self._reactor.NEVER
+        death = self.engine_mcu.take_endpoint_death()
+        if death is None:
+            return eventtime + ENDPOINT_DEATH_POLL_PERIOD
+        self._printer.invoke_shutdown(
+            "MCU '%s' motion endpoint died: %s" % (self._name, death)
+        )
+        return self._reactor.NEVER
 
     # Config creation helpers
     def setup_pin(self, pin_type, pin_params):
