@@ -40,7 +40,7 @@ fn pump_with_pushed(pushed: u32) -> Pump<NullSink> {
         ledger: Arc::new(crate::drain::DrainLedger::new()),
         pending_barrier_acks: Vec::new(),
         backlog: Arc::new(AtomicU64::new(0)),
-        horizons: crate::pump::ReleaseHorizons::default(),
+        release_plan: crate::pump::ReleasePlan::default(),
         data_open: true,
         intake_batch_open: false,
         consumption_stall: super::stall::ConsumptionStallWatch::new(Duration::from_secs(60)),

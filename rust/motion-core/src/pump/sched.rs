@@ -212,30 +212,48 @@ pub struct AxisFrame {
 #[derive(Debug)]
 pub enum Schedule {
     Send(Vec<FramePlan>),
-    StallFull(AxisKey),
-    StallAhead(AxisKey),
-    Idle,
+    /// Nothing shipped this pass: `full` names the earliest lane whose
+    /// endpoint ring is full — the consumption-stall watch's subject — and
+    /// `holding` marks any lane whose views only elapsed time can release.
+    Stall {
+        full: Option<AxisKey>,
+        holding: bool,
+    },
 }
 
-/// Every staged lane's release horizon as of one instant. [`schedule`] judges
-/// a whole pass against this one reading, so its two selection loops cannot
+/// What one lane may release: views starting past `horizon` stay staged, and
+/// at most `cap` of them go out this pass.
+#[derive(Debug, Clone, Copy)]
+pub struct LaneRelease {
+    pub horizon: Option<u64>,
+    pub cap: usize,
+}
+
+/// Every staged lane's release bounds as of one instant. [`schedule`] judges a
+/// whole pass against this one reading, so its two selection phases cannot
 /// disagree about which lanes are releasable; the egress guard deliberately
 /// re-judges against a live clock at send time.
 #[derive(Debug, Default)]
-pub struct ReleaseHorizons {
+pub struct ReleasePlan {
     clocks: Vec<(u32, Option<(u64, f64)>)>,
-    lanes: Vec<(AxisKey, Option<u64>)>,
+    lanes: Vec<(AxisKey, LaneRelease)>,
 }
 
-impl ReleaseHorizons {
+enum Verdict {
+    Ready,
+    NoRoom,
+    Held,
+}
+
+impl ReleasePlan {
     /// Read each mcu named by `queues` exactly once, then derive every lane's
-    /// horizon from that reading. Reuses its buffers, so a warm pass
+    /// release bounds from that reading. Reuses its buffers, so a warm pass
     /// allocates nothing.
     pub fn resample(
         &mut self,
         queues: &BTreeMap<AxisKey, AxisQueue>,
         clock_of: impl Fn(u32) -> Option<(u64, f64)>,
-        horizon_of: impl Fn(&AxisKey, &AxisQueue, Option<(u64, f64)>) -> Option<u64>,
+        release_of: impl Fn(&AxisKey, &AxisQueue, Option<(u64, f64)>) -> LaneRelease,
     ) {
         self.clocks.clear();
         self.lanes.clear();
@@ -248,16 +266,59 @@ impl ReleaseHorizons {
                     clock
                 }
             };
-            self.lanes.push((*key, horizon_of(key, q, clock)));
+            self.lanes.push((*key, release_of(key, q, clock)));
         }
     }
 
-    fn of(&self, key: &AxisKey) -> Option<u64> {
+    fn of(&self, key: &AxisKey) -> LaneRelease {
         let index = self
             .lanes
             .binary_search_by(|(lane, _)| lane.cmp(key))
             .expect("every staged lane was sampled this pass");
         self.lanes[index].1
+    }
+
+    /// Whether the lane may release the view at index `already`, which starts
+    /// at `start_clock`. Both selection phases judge with this one test; the
+    /// head phase passes `max_per_frame = usize::MAX` because the bundle's
+    /// mcu — and so its limits — is what that phase is choosing.
+    fn verdict(
+        &self,
+        key: &AxisKey,
+        q: &AxisQueue,
+        start_clock: u64,
+        already: usize,
+        max_per_frame: usize,
+    ) -> Verdict {
+        let LaneRelease { horizon, cap } = self.of(key);
+        if already >= q.room() as usize {
+            return Verdict::NoRoom;
+        }
+        if already >= cap
+            || already >= max_per_frame
+            || horizon.is_some_and(|horizon| start_clock > horizon)
+        {
+            return Verdict::Held;
+        }
+        Verdict::Ready
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Candidate {
+    key: AxisKey,
+    start_host: f64,
+}
+
+fn keep_earliest(best: &mut Option<Candidate>, next: Candidate) {
+    let earlier = best.as_ref().is_none_or(|best| {
+        next.start_host
+            .total_cmp(&best.start_host)
+            .then(next.key.cmp(&best.key))
+            .is_lt()
+    });
+    if earlier {
+        *best = Some(next);
     }
 }
 
@@ -265,74 +326,54 @@ impl ReleaseHorizons {
 pub fn schedule(
     queues: &BTreeMap<AxisKey, AxisQueue>,
     limits_of: impl Fn(u32) -> super::BundleLimits,
-    horizons: &ReleaseHorizons,
-    releasable_cap_of: impl Fn(&AxisKey) -> usize,
+    plan: &ReleasePlan,
 ) -> Schedule {
-    let mut stall_ahead_candidate: Option<AxisKey> = None;
-    let mut cap_skipped: BTreeSet<AxisKey> = BTreeSet::new();
-    let mut stall_full_candidate: Option<AxisKey> = None;
+    let mut head: Option<Candidate> = None;
+    let mut full: Option<Candidate> = None;
+    let mut holding = false;
+    let mut blocked: BTreeSet<AxisKey> = BTreeSet::new();
 
-    let head_key = loop {
-        let candidate = queues
-            .iter()
-            .filter(|(k, q)| !q.spans.is_empty() && !cap_skipped.contains(*k))
-            .min_by(|(ka, qa), (kb, qb)| {
-                let host_a = qa.spans.front().unwrap().start_host;
-                let host_b = qb.spans.front().unwrap().start_host;
-                host_a.total_cmp(&host_b).then(ka.cmp(kb))
-            });
-        let (&k, q) = match candidate {
-            None => {
-                if let Some(k) = stall_full_candidate {
-                    return Schedule::StallFull(k);
-                }
-                if let Some(k) = stall_ahead_candidate {
-                    return Schedule::StallAhead(k);
-                }
-                return Schedule::Idle;
-            }
-            Some(c) => c,
+    for (&key, q) in queues {
+        let Some(span) = q.spans.front() else {
+            continue;
         };
-
-        if q.room() == 0 {
-            if stall_full_candidate.is_none() {
-                stall_full_candidate = Some(k);
+        let candidate = Candidate {
+            key,
+            start_host: span.start_host,
+        };
+        match plan.verdict(&key, q, span.start_clock, 0, usize::MAX) {
+            Verdict::Ready => keep_earliest(&mut head, candidate),
+            Verdict::NoRoom => {
+                keep_earliest(&mut full, candidate);
+                blocked.insert(key);
             }
-            cap_skipped.insert(k);
-            continue;
-        }
-
-        if releasable_cap_of(&k) == 0 {
-            if stall_ahead_candidate.is_none() {
-                stall_ahead_candidate = Some(k);
-            }
-            cap_skipped.insert(k);
-            continue;
-        }
-
-        let head_start_clock = q.spans.front().unwrap().start_clock;
-        if let Some(horizon) = horizons.of(&k) {
-            if head_start_clock > horizon {
-                if stall_ahead_candidate.is_none() {
-                    stall_ahead_candidate = Some(k);
-                }
-                cap_skipped.insert(k);
-                continue;
+            Verdict::Held => {
+                holding = true;
+                blocked.insert(key);
             }
         }
+    }
 
-        break k;
+    let Some(head) = head else {
+        return Schedule::Stall {
+            full: full.map(|candidate| candidate.key),
+            holding,
+        };
     };
 
-    let super::BundleLimits { spans_per_axis } = limits_of(head_key.mcu_id);
+    let super::BundleLimits { spans_per_axis } = limits_of(head.key.mcu_id);
     let max_per_frame = spans_per_axis.min(u8::MAX as usize);
+    assert!(
+        max_per_frame > 0,
+        "a transport admitting no view per frame could never ship the head lane"
+    );
     let mut taken: BTreeMap<AxisKey, usize> = BTreeMap::new();
-    let mut maxed: BTreeSet<AxisKey> = cap_skipped;
+    let mut maxed: BTreeSet<AxisKey> = blocked;
     loop {
         let next = queues
             .iter()
             .filter_map(|(k, q)| {
-                if k.mcu_id != head_key.mcu_id || maxed.contains(k) {
+                if k.mcu_id != head.key.mcu_id || maxed.contains(k) {
                     return None;
                 }
                 let already = taken.get(k).copied().unwrap_or(0);
@@ -341,25 +382,16 @@ pub fn schedule(
                     .map(|span| (*k, span.start_clock, span.start_host))
             })
             .min_by(|(ka, _, ha), (kb, _, hb)| ha.total_cmp(hb).then(ka.cmp(kb)));
-        let (k, start_clock, _host) = match next {
-            Some(n) => n,
-            None => break,
+        let Some((k, start_clock, _)) = next else {
+            break;
         };
         let already = taken.get(&k).copied().unwrap_or(0);
-        let q = &queues[&k];
-        let room = q.room() as usize;
-        let cap = releasable_cap_of(&k);
-        if already >= room || already >= max_per_frame || already >= cap {
-            maxed.insert(k);
-            continue;
-        }
-        if let Some(horizon) = horizons.of(&k) {
-            if start_clock > horizon {
+        match plan.verdict(&k, &queues[&k], start_clock, already, max_per_frame) {
+            Verdict::Ready => *taken.entry(k).or_insert(0) += 1,
+            Verdict::NoRoom | Verdict::Held => {
                 maxed.insert(k);
-                continue;
             }
         }
-        *taken.entry(k).or_insert(0) += 1;
     }
 
     let frames: Vec<FramePlan> = taken

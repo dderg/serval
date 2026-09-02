@@ -14,8 +14,8 @@ use super::messages::{
     HistoryRecorder, PumpCallbacks, PumpMsg, SendError, SpanSink,
 };
 use super::sched::{
-    AxisFrame, AxisQueue, FramePlan, ReleaseHorizons, Schedule, append_spans_merging_holds,
-    schedule,
+    AxisFrame, AxisQueue, FramePlan, LaneRelease, ReleasePlan, Schedule,
+    append_spans_merging_holds, schedule,
 };
 use super::stall::ConsumptionStallWatch;
 use crate::types::AxisKey;
@@ -102,7 +102,10 @@ pub(super) enum HaltKind {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct PassEnd {
     pub(super) sent: bool,
-    pub(super) waiting_on_clock: bool,
+    /// Only elapsed time can carry this pass further: a lane holds views its
+    /// horizon or cap has not released, or the consumption-stall watch is
+    /// armed and escalates on its own timer.
+    pub(super) deferred: bool,
 }
 
 /// What the lane's committed wire stream must do at the first incoming view.
@@ -136,7 +139,7 @@ pub(super) struct Pump<S> {
     pub(super) ledger: Arc<crate::drain::DrainLedger>,
     pub(super) pending_barrier_acks: Vec<std::sync::mpsc::SyncSender<()>>,
     pub(super) backlog: Arc<AtomicU64>,
-    pub(super) horizons: ReleaseHorizons,
+    pub(super) release_plan: ReleasePlan,
     pub(super) data_open: bool,
     pub(super) intake_batch_open: bool,
     pub(super) consumption_stall: ConsumptionStallWatch,
@@ -653,32 +656,38 @@ impl<S: SpanSink> Pump<S> {
     }
 
     /// Sample every mcu's clock once and derive each staged lane's release
-    /// horizon from that one reading: the scheduling pass that follows judges
-    /// one instant.
-    fn resample_horizons(&mut self) {
+    /// horizon and cap from that one reading: the scheduling pass that follows
+    /// judges one instant. A drip participant releases one view per pass, and
+    /// none at all until its mcu clock is readable.
+    fn resample_release_plan(&mut self) {
         let Self {
             queues,
-            horizons,
+            release_plan,
             callbacks,
             cohort,
             ..
         } = self;
-        horizons.resample(
+        release_plan.resample(
             queues,
             |mcu_id| (callbacks.mcu_clock_of)(mcu_id),
-            |key, q, clock| match clock {
-                Some((ack_now, freq)) =>
-                {
-                    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-                    Some(ack_now + (q.lead_secs * freq) as u64)
-                }
-                None if cohort
+            |key, q, clock| {
+                let dripping = cohort
                     .as_ref()
-                    .is_some_and(|co| co.participants.contains(key)) =>
-                {
-                    Some(0)
+                    .is_some_and(|co| co.participants.contains(key));
+                match clock {
+                    Some((ack_now, freq)) => {
+                        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                        let lead_ticks = (q.lead_secs * freq) as u64;
+                        LaneRelease {
+                            horizon: Some(ack_now + lead_ticks),
+                            cap: if dripping { 1 } else { usize::MAX },
+                        }
+                    }
+                    None => LaneRelease {
+                        horizon: None,
+                        cap: if dripping { 0 } else { usize::MAX },
+                    },
                 }
-                None => None,
             },
         );
     }
@@ -804,7 +813,10 @@ impl<S: SpanSink> Pump<S> {
         self.cohort = None;
     }
 
-    fn handle_stall_full(&mut self, stall_key: AxisKey) -> Result<(), ()> {
+    /// `Ok(true)` while the consumption-stall watch is armed: only elapsed
+    /// time can escalate it, so the loop must keep re-observing this lane even
+    /// with both channels silent. `Err(())` is fatal.
+    fn handle_stall_full(&mut self, stall_key: AxisKey) -> Result<bool, ()> {
         let now = std::time::Instant::now();
         let q = self
             .queues
@@ -817,7 +829,7 @@ impl<S: SpanSink> Pump<S> {
         ) {
             if mcu_clock <= wire_end_clock {
                 self.consumption_stall.reset();
-                return Ok(());
+                return Ok(false);
             }
         }
         let observation = self
@@ -867,7 +879,7 @@ impl<S: SpanSink> Pump<S> {
             ));
             return Err(());
         }
-        Ok(())
+        Ok(true)
     }
 
     fn build_bundle(&self, frames: Vec<FramePlan>) -> Vec<AxisFrame> {
@@ -1057,43 +1069,29 @@ impl<S: SpanSink> Pump<S> {
     pub(super) fn send_ready_until(&mut self, pass_deadline: Instant) -> Result<PassEnd, ()> {
         let mut pass = PassEnd {
             sent: false,
-            waiting_on_clock: false,
+            deferred: false,
         };
         loop {
-            self.resample_horizons();
-            let sched = {
-                let releasable_cap = |key: &AxisKey| {
-                    if self
-                        .cohort
-                        .as_ref()
-                        .is_some_and(|cohort| cohort.participants.contains(key))
-                    {
-                        1
-                    } else {
-                        usize::MAX
-                    }
-                };
-                schedule(
-                    &self.queues,
-                    |mcu_id| self.sink.bundle_limits(mcu_id),
-                    &self.horizons,
-                    releasable_cap,
-                )
-            };
-            if !matches!(sched, Schedule::StallFull(_)) {
-                self.consumption_stall.reset();
-            }
+            self.resample_release_plan();
+            let sched = schedule(
+                &self.queues,
+                |mcu_id| self.sink.bundle_limits(mcu_id),
+                &self.release_plan,
+            );
             match sched {
-                Schedule::Idle => break,
-                Schedule::StallFull(stall_key) => {
-                    self.handle_stall_full(stall_key)?;
-                    break;
-                }
-                Schedule::StallAhead(_stall_key) => {
-                    pass.waiting_on_clock = true;
+                Schedule::Stall { full, holding } => {
+                    let watching = match full {
+                        Some(stall_key) => self.handle_stall_full(stall_key)?,
+                        None => {
+                            self.consumption_stall.reset();
+                            false
+                        }
+                    };
+                    pass.deferred = holding || watching;
                     break;
                 }
                 Schedule::Send(frames) => {
+                    self.consumption_stall.reset();
                     pass.sent = true;
                     let mcu_id = frames[0].key.mcu_id;
                     let bundle = self.build_bundle(frames);
@@ -1349,7 +1347,7 @@ impl<S: SpanSink> Pump<S> {
             self.park(
                 control_rx,
                 data_rx,
-                self.wake_after(pass.waiting_on_clock || owes_window),
+                self.wake_after(pass.deferred || owes_window),
             );
         }
     }
@@ -1375,7 +1373,7 @@ pub fn run_pump<S: SpanSink>(
         ledger,
         pending_barrier_acks: Vec::new(),
         backlog,
-        horizons: ReleaseHorizons::default(),
+        release_plan: ReleasePlan::default(),
         data_open: true,
         intake_batch_open: false,
         consumption_stall: ConsumptionStallWatch::new(CONSUMPTION_STALL_FATAL),

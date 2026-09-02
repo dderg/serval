@@ -191,7 +191,7 @@ fn pump_with(callbacks: PumpCallbacks) -> Pump<NullSink> {
         ledger: Arc::new(crate::drain::DrainLedger::new()),
         pending_barrier_acks: Vec::new(),
         backlog: Arc::new(AtomicU64::new(0)),
-        horizons: crate::pump::ReleaseHorizons::default(),
+        release_plan: crate::pump::ReleasePlan::default(),
         data_open: true,
         intake_batch_open: false,
         consumption_stall: ConsumptionStallWatch::new(std::time::Duration::from_secs(60)),

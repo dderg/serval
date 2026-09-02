@@ -174,15 +174,21 @@ fn schedule_resends_orphan_when_consumed_overtook_pushed() {
     queues.insert(key, q);
 
     const MAX_PER_FRAME: usize = 32;
-    let mut horizons = crate::pump::ReleaseHorizons::default();
-    horizons.resample(&queues, |_| None, |_, _, _| None);
+    let mut plan = crate::pump::ReleasePlan::default();
+    plan.resample(
+        &queues,
+        |_| None,
+        |_, _, _| crate::pump::LaneRelease {
+            horizon: None,
+            cap: usize::MAX,
+        },
+    );
     match schedule(
         &queues,
         |_| crate::pump::BundleLimits {
             spans_per_axis: MAX_PER_FRAME,
         },
-        &horizons,
-        |_| usize::MAX,
+        &plan,
     ) {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1, "exactly the inverted axis is scheduled");
@@ -939,7 +945,7 @@ fn queue_pump<S: SpanSink>(
         ledger: Arc::new(crate::drain::DrainLedger::new()),
         pending_barrier_acks: Vec::new(),
         backlog: Arc::new(AtomicU64::new(0)),
-        horizons: crate::pump::ReleaseHorizons::default(),
+        release_plan: crate::pump::ReleasePlan::default(),
         data_open: true,
         intake_batch_open: false,
         consumption_stall: super::stall::ConsumptionStallWatch::new(consumption_stall_fatal),
@@ -1265,6 +1271,25 @@ fn non_stallfull_outcome_between_stalls_resets_the_timer() {
     assert!(pump.consumption_stall.started().is_some());
 }
 
+#[test]
+fn run_loop_re_observes_a_wedged_ring_with_both_channels_silent() {
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    let (escalated_tx, escalated_rx) = mpsc::channel();
+    let mut pump = stalled_queue_pump(key, Duration::from_millis(50), move |msg: String| {
+        escalated_tx.send(msg).unwrap();
+    });
+    let (_ctl, control_rx) = unbounded::<PumpMsg>();
+    let (_data, data_rx) = unbounded::<EnqueueMsg>();
+
+    let pumping = std::thread::spawn(move || pump.run(control_rx, data_rx));
+
+    let message = escalated_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the pump must re-observe a wedged ring on a timer instead of parking");
+    assert!(message.contains("pump consumption stall"), "{message}");
+    pumping.join().unwrap();
+}
+
 const BUZZ_MCU: u32 = 9;
 const BUZZ_CYCLES_PER_SECOND: f64 = 1_000_000.0;
 
@@ -1300,7 +1325,7 @@ fn buzz_fixture() -> BuzzFixture {
         ledger: Arc::new(crate::drain::DrainLedger::new()),
         pending_barrier_acks: Vec::new(),
         backlog: Arc::new(AtomicU64::new(0)),
-        horizons: crate::pump::ReleaseHorizons::default(),
+        release_plan: crate::pump::ReleasePlan::default(),
         data_open: true,
         intake_batch_open: false,
         consumption_stall: super::stall::ConsumptionStallWatch::new(Duration::from_secs(60)),
