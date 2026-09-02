@@ -217,3 +217,76 @@ fn an_on_lattice_ramp_solves_each_root_within_a_constant_probe_budget() {
          whose far end is already the answer"
     );
 }
+
+#[test]
+fn a_single_clock_window_keeps_the_last_root_of_a_decel_to_rest() {
+    const FREQ: f64 = 1_000_000.0;
+    const MICROSTEP_MM: f64 = 0.25;
+    let travel_mm = -4.0 * MICROSTEP_MM;
+    let profile =
+        NudgeProfile::try_new(travel_mm, 100.0, 10_000.0, 0.0).expect("a triangular nudge");
+    let duration = profile.duration();
+    let cycles = (duration * FREQ).round() as u64;
+    let signal = Arc::new(
+        MotorSpan::try_new(
+            Arc::from([MotorGroup::Independent(MotorTerm {
+                source_axis: 0,
+                axis: ContinuousAxis::Nudge(profile),
+                scale: 1.0,
+            })]),
+            0.0,
+            duration,
+            0,
+            0,
+            false,
+        )
+        .expect("a dispatchable motor span"),
+    );
+    let view = |from: u64, to: u64| {
+        ClockedMotorSpan::try_new(
+            Arc::clone(&signal),
+            from as f64 / FREQ,
+            (to as f64 / FREQ).min(duration),
+            0.0,
+            0.0,
+            from as f64,
+            FREQ,
+        )
+        .expect("a clocked sub-view")
+    };
+    let config = MotorConfig {
+        oid: 5,
+        microstep_distance: MICROSTEP_MM,
+        invert_dir: false,
+        cycles_per_second: FREQ,
+        encoder: StepEncoder::Classic { max_error_ticks: 0 },
+        min_rearm_cycles: 0,
+    };
+    let solve = |views: &[ClockedMotorSpan]| {
+        let mut queue = SpanQueue::new(4);
+        for view in views {
+            queue.push(0, view.clone()).expect("an admissible view");
+        }
+        let mut cursor = StepRootCursor::new(&config);
+        cursor.reset_to(0, 0);
+        let mut roots = Vec::new();
+        cursor
+            .advance(0, &config, &mut queue, u64::MAX, &mut roots, None)
+            .expect("a drainable nudge");
+        (roots, cursor.step_count())
+    };
+    let whole = view(0, cycles);
+    assert_eq!(whole.eval_at_clock(cycles).unwrap().velocity, 0.0);
+    assert!(position_at(&whole, cycles) <= travel_mm);
+
+    let (whole_roots, whole_count) = solve(&[whole]);
+    let (split_roots, split_count) = solve(&[view(0, cycles - 1), view(cycles - 1, cycles)]);
+
+    assert_eq!(whole_count, -4);
+    assert_eq!(whole_roots.last().map(|root| root.clock), Some(cycles));
+    assert_eq!(
+        split_roots, whole_roots,
+        "the rest clock in its own view must still carry the fourth root"
+    );
+    assert_eq!(split_count, whole_count);
+}

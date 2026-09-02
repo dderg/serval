@@ -469,10 +469,36 @@ impl StepRootCursor {
         hi: u64,
         out: &mut Vec<StepRoot>,
     ) -> Result<(), ShimError> {
+        if lo == hi {
+            return self.emit_single_clock(motor, cfg, view, lo, out);
+        }
         match self.certified_slope(motor, view, lo, hi)? {
             Some(slope) => self.emit_run(motor, cfg, view, lo, hi, slope, out),
             None => self.subdivide(motor, cfg, view, lo, hi, out),
         }
+    }
+
+    /// One clock carries no rise and no signed duration, so neither the
+    /// velocity bounds nor the endpoint difference can name its direction: the
+    /// lattice threshold the position has reached is the only thing that can.
+    fn emit_single_clock(
+        &mut self,
+        motor: usize,
+        cfg: &MotorConfig,
+        view: &ClockedMotorSpan,
+        clock: u64,
+        out: &mut Vec<StepRoot>,
+    ) -> Result<(), ShimError> {
+        let position = self.position_at(motor, view, clock)?;
+        let lattice = self.frame();
+        let slope = if position >= lattice.threshold(self.microstep_mm, Slope::Rising) {
+            Slope::Rising
+        } else if position <= lattice.threshold(self.microstep_mm, Slope::Falling) {
+            Slope::Falling
+        } else {
+            return Ok(());
+        };
+        self.emit_run(motor, cfg, view, clock, clock, slope, out)
     }
 
     /// The window carries no certified slope, so it is halved until one half

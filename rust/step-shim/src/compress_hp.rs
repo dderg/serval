@@ -252,6 +252,13 @@ fn rounded_window_error(delta: u64) -> u64 {
     }
 }
 
+/// The widest either window over one gap may be: a step placed this early and
+/// its neighbour placed this late still land on different clocks, so a decoded
+/// stream stays strictly increasing however small the gap is.
+fn crowding_limit(delta: u64) -> u64 {
+    delta.saturating_sub(1) / 2
+}
+
 fn minmax_point(steps: &[u64], index: usize, queue_pos: usize, last_step_clock: u64) -> Points {
     let point = steps[index]
         .checked_sub(last_step_clock)
@@ -263,20 +270,23 @@ fn minmax_point(steps: &[u64], index: usize, queue_pos: usize, last_step_clock: 
     } else {
         point
     };
-    let mut max_bck_error = rounded_window_error(previous_delta).max(MIN_STEP_ERR);
-    max_bck_error = max_bck_error.min(u64::from(DEFAULT_MAX_ERROR_TICKS));
+    let mut max_bck_error = rounded_window_error(previous_delta)
+        .max(MIN_STEP_ERR)
+        .min(u64::from(DEFAULT_MAX_ERROR_TICKS))
+        .min(crowding_limit(previous_delta));
 
-    let mut max_frw_error = if index + 1 < steps.len() {
-        rounded_window_error(
-            steps[index + 1]
-                .checked_sub(steps[index])
-                .expect("monotonic step clock validation precedes minmax_point"),
-        )
+    let next_delta = if index + 1 < steps.len() {
+        steps[index + 1]
+            .checked_sub(steps[index])
+            .expect("monotonic step clock validation precedes minmax_point")
     } else {
         0
     };
+    let mut max_frw_error = rounded_window_error(next_delta);
     if max_frw_error != 0 {
-        max_frw_error = max_frw_error.max(MIN_STEP_ERR);
+        max_frw_error = max_frw_error
+            .max(MIN_STEP_ERR)
+            .min(crowding_limit(next_delta));
         let shared = max_bck_error.min(max_frw_error);
         max_bck_error = shared;
         max_frw_error = shared;

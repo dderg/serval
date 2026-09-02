@@ -148,24 +148,36 @@ fn arb_case() -> impl Strategy<Value = Case> {
                 (
                     log_amplitude,
                     prop::collection::vec(-1.0..=1.0, control_points),
-                    prop::collection::vec(1..clocks, 1..4),
+                    prop::collection::vec((1..clocks, any::<bool>()), 1..4),
+                    any::<bool>(),
                 )
-                    .prop_map(move |(log_amplitude, offsets, mut cuts)| {
-                        cuts.sort_unstable();
-                        cuts.dedup();
-                        Case {
-                            clock_freq_hz,
-                            clocks,
-                            microstep_mm,
-                            base_mm,
-                            degree,
-                            segments,
-                            amplitude_mm: libm::pow(10.0, log_amplitude),
-                            offsets,
-                            anchor,
-                            cuts,
-                        }
-                    })
+                    .prop_map(
+                        move |(log_amplitude, offsets, cut_pairs, cut_before_last)| {
+                            let mut cuts = cut_pairs
+                                .into_iter()
+                                .flat_map(|(clock, adjacent)| {
+                                    [Some(clock), adjacent.then_some(clock + 1)]
+                                })
+                                .flatten()
+                                .chain(cut_before_last.then_some(clocks - 1))
+                                .filter(|&clock| clock < clocks)
+                                .collect::<Vec<u64>>();
+                            cuts.sort_unstable();
+                            cuts.dedup();
+                            Case {
+                                clock_freq_hz,
+                                clocks,
+                                microstep_mm,
+                                base_mm,
+                                degree,
+                                segments,
+                                amplitude_mm: libm::pow(10.0, log_amplitude),
+                                offsets,
+                                anchor,
+                                cuts,
+                            }
+                        },
+                    )
             },
         )
 }

@@ -203,6 +203,38 @@ fn terminal_error_window_never_extends_past_the_requested_clock() {
     assert_eq!(terminal.maxp, 200);
 }
 
+/// Steps a tick or two apart leave no room for the three-tick error floor: a
+/// window reaching back past the previous step let the encoder emit a move
+/// whose first step fires on the clock the mcu had already stepped on.
+#[test]
+fn crowded_steps_never_decode_onto_the_same_clock() {
+    let steps = [1_u64, 2, 3, 43, 44, 45, 46, 47];
+    let (moves, covered, _) = compress_hp(&mut HpScratch::new(), &steps, 0, 2).unwrap();
+
+    assert_eq!(covered, steps.len());
+    let clocks = reconstruct(&moves, 0);
+    let mut previous = 0_u64;
+    for (index, &clock) in clocks.iter().enumerate() {
+        assert!(
+            clock > previous,
+            "decoded step {index} at {clock} does not advance past {previous}: {moves:?}"
+        );
+        previous = clock;
+    }
+    assert_within_windows(&steps, 0, &moves);
+}
+
+#[test]
+fn a_one_tick_gap_leaves_no_error_allowance_at_all() {
+    let steps = [10_u64, 11, 12];
+    let crowded = minmax_point(&steps, 1, 0, 0);
+    assert_eq!((crowded.minp, crowded.maxp), (11, 11));
+
+    let roomy = [10_u64, 210, 410];
+    let spaced = minmax_point(&roomy, 1, 0, 0);
+    assert_eq!((spaced.minp, spaced.maxp), (207, 213));
+}
+
 #[test]
 fn terminal_step_never_crosses_an_unseen_direction_boundary() {
     let mut scratch = HpScratch::new();
