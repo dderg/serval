@@ -143,13 +143,14 @@ fault_handler_report_boot_init(uint32_t now)
             prior_snap.cur_task_func = preboot_cur_task_func;
             prior_snap.cur_msg_kind = preboot_cur_msg_kind;
         } else {
-            prior_snap.magic = 0;
+            memset(&prior_snap, 0, sizeof(prior_snap));
         }
         if (ended_diag_present) {
             memcpy(&prior_diag, (const void *)&diag, sizeof(prior_diag));
             memcpy(prior_ring, (const void *)diag_ring, sizeof(prior_ring));
         } else {
-            prior_diag.magic = 0;
+            memset(&prior_diag, 0, sizeof(prior_diag));
+            memset(prior_ring, 0, sizeof(prior_ring));
         }
         prior_state.magic = PRIOR_MAGIC;
         prior_state.reported = 0;
