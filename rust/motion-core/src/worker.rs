@@ -194,6 +194,15 @@ pub struct MotionPipeline {
     pub pump_thread: JoinHandle<()>,
 }
 
+/// The ingress's out-of-band handle on the pump, paired with the reason the
+/// pump stopped when it died on a latched endpoint fatal: a closed control
+/// channel is then a halt to ride out while klippy shuts down, not a stage
+/// death to abort on.
+pub struct PumpLink {
+    pub control: Sender<crate::pump::PumpMsg>,
+    pub transport_fatal: Arc<Mutex<Option<String>>>,
+}
+
 /// Boot-time constructor of the entire motion pipeline:
 /// fit stage → planner → lowerer → shaper → dispatcher → pump, wired once and
 /// never torn down. Everything downstream of the ingress — including the pump
@@ -213,6 +222,17 @@ pub fn setup_pipeline(
     let (pump_control, control_rx) = pump_channel;
     let (pump_data, data_rx) =
         bounded::<crate::pump::EnqueueMsg>(crate::pump::PUMP_DATA_CHANNEL_CAP);
+    let transport_fatal: Arc<Mutex<Option<String>>> = Arc::default();
+    let mut callbacks = pump.callbacks;
+    let latch_fatal = callbacks.on_fatal_transport;
+    let transport_fatal_for_pump = Arc::clone(&transport_fatal);
+    let transport_fatal_for_ingress = Arc::clone(&transport_fatal);
+    callbacks.on_fatal_transport = Box::new(move |key, reason| {
+        transport_fatal_for_pump
+            .lock_ok()
+            .get_or_insert_with(|| reason.to_string());
+        latch_fatal(key, reason);
+    });
     let pump_thread = thread::Builder::new()
         .name("push-pieces-pump".into())
         .spawn(move || {
@@ -224,7 +244,7 @@ pub fn setup_pipeline(
                 control_rx,
                 data_rx,
                 pump.sink,
-                pump.callbacks,
+                callbacks,
                 Some(pump.history),
                 pump.drain,
                 pump.backlog,
@@ -245,6 +265,7 @@ pub fn setup_pipeline(
         motion_history: dispatch.motion_history,
         frontier: Arc::clone(&frontier),
         frozen_projection: Mutex::new(std::collections::HashMap::new()),
+        transport_fatal,
     };
     let worker = StreamWorkerHandle::spawn(
         config,
@@ -252,7 +273,10 @@ pub fn setup_pipeline(
         home_pos,
         sink,
         frontier,
-        Some(pump_control.clone()),
+        Some(PumpLink {
+            control: pump_control.clone(),
+            transport_fatal: transport_fatal_for_ingress,
+        }),
     );
     MotionPipeline {
         worker,
@@ -272,7 +296,7 @@ impl StreamWorkerHandle {
         home_pos: Vec<f64>,
         sink: impl SegmentSink,
         frontier: Arc<CommittedFrontier>,
-        pump_control: Option<Sender<crate::pump::PumpMsg>>,
+        pump: Option<PumpLink>,
     ) -> Self {
         let (tx, rx) = bounded(INPUT_CHANNEL_CAP);
         let links = Arc::new(WorkerLinks::default());
@@ -298,7 +322,7 @@ impl StreamWorkerHandle {
             intake: ingress::IntakeState::default(),
             reserve: ingress::DrainReserve::new(),
             last_line: 0,
-            pump_control,
+            pump,
         };
         let join = thread::Builder::new()
             .name("kalico-stream-worker".to_string())

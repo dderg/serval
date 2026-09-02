@@ -64,6 +64,8 @@ pub enum DispatchError {
     ConnectionDropped(u32),
     #[error("piece pump thread is gone; cannot dispatch")]
     PumpGone,
+    #[error("pump stopped on a fatal endpoint condition, latched for klippy: {0}")]
+    TransportFatal(String),
     #[error("nudge target mcu_id={mcu_id} axis={axis} not present in mcu_configs")]
     NudgeTargetMissing { mcu_id: u32, axis: u8 },
     #[error("enqueue: {0}")]
@@ -120,6 +122,9 @@ pub(crate) struct Dispatcher<S> {
     sync_instant: Option<Instant>,
     dispatched_through: Option<f64>,
     pending_error: Option<String>,
+    /// The pump died on an endpoint fatal that klippy has been handed; every
+    /// later segment is dropped while the host runs its clean shutdown.
+    transport_halted: bool,
 }
 
 impl<S: SegmentSink> Dispatcher<S> {
@@ -131,6 +136,7 @@ impl<S: SegmentSink> Dispatcher<S> {
             sync_instant: None,
             dispatched_through: None,
             pending_error: None,
+            transport_halted: false,
         }
     }
 
@@ -148,6 +154,7 @@ impl<S: SegmentSink> Dispatcher<S> {
         if self.links.discard.load(Ordering::Acquire)
             || self.links.shutting_down.load(Ordering::Acquire)
             || self.pending_error.is_some()
+            || self.transport_halted
         {
             return;
         }
@@ -170,6 +177,16 @@ impl<S: SegmentSink> Dispatcher<S> {
             }
             Err(e) if self.links.capture_errors.load(Ordering::Acquire) => {
                 self.pending_error = Some(format!("dispatch failed: {e}"));
+            }
+            Err(DispatchError::TransportFatal(reason)) => {
+                tracing::error!(
+                    subsystem = "motion",
+                    event = "dispatch_halted_by_transport_fatal",
+                    error = %reason,
+                    "the pump died on an endpoint fatal — dropping further segments while \
+                     klippy shuts down on the latched cause"
+                );
+                self.transport_halted = true;
             }
             Err(e) => fatal(&format!("dispatch failed: {e}")),
         }

@@ -52,6 +52,31 @@ impl Capture {
     }
 }
 
+/// Fails every dispatch the way `PumpSink` does once the pump has died on a
+/// latched endpoint fatal, counting the attempts that reach it.
+#[derive(Clone, Default)]
+struct DeadPumpSink {
+    attempts: Arc<Mutex<usize>>,
+}
+
+impl SegmentSink for DeadPumpSink {
+    fn dispatch(&mut self, _seg: &ContinuousSegment) -> Result<(), DispatchError> {
+        *self.attempts.lock_ok() += 1;
+        Err(DispatchError::TransportFatal(
+            "queue_step oid 9 is 2077 us behind the projected mcu clock".into(),
+        ))
+    }
+    fn dispatch_nudge(
+        &mut self,
+        _mcu_id: u32,
+        _axis: u8,
+        _motor_mask: u8,
+        _profile: &NudgeProfile,
+    ) -> Result<(), DispatchError> {
+        Ok(())
+    }
+}
+
 fn cfg() -> StreamConfig {
     cfg_cap(64)
 }
@@ -219,6 +244,55 @@ fn streams_collinear_moves_to_a_contiguous_trajectory() {
     h.shutdown();
 }
 
+#[test]
+fn a_transport_fatal_halts_dispatch_without_aborting_the_process() {
+    let sink = DeadPumpSink::default();
+    let mut h = StreamWorkerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        sink.clone(),
+        Arc::default(),
+        None,
+    );
+
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    h.submit_move(line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0]))
+        .unwrap();
+    h.submit_move(line(3, [60.0, 0.0, 0.0], [90.0, 0.0, 0.0]))
+        .unwrap();
+    h.flush().unwrap();
+
+    assert_eq!(
+        *sink.attempts.lock_ok(),
+        1,
+        "the first failed dispatch halts the dispatcher; later segments are dropped, \
+         not retried against a dead pump"
+    );
+    h.shutdown();
+}
+
+#[test]
+fn a_flush_after_a_latched_pump_death_returns_instead_of_aborting() {
+    let (control, control_rx) = crossbeam_channel::unbounded::<crate::pump::PumpMsg>();
+    drop(control_rx);
+    let mut h = StreamWorkerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        Capture::default(),
+        Arc::default(),
+        Some(PumpLink {
+            control,
+            transport_fatal: Arc::new(Mutex::new(Some("endpoint went fatal".into()))),
+        }),
+    );
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    h.flush().unwrap();
+    h.shutdown();
+}
 #[test]
 fn dwell_inserts_a_time_gap_then_resumes() {
     let cap = Capture::default();

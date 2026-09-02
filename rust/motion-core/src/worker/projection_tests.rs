@@ -52,6 +52,7 @@ fn pump_sink(router: PassthroughRouter) -> PumpSink {
         motion_history: Arc::new(Mutex::new(crate::motion_history::HistoryStore::default())),
         frontier: Arc::new(super::super::CommittedFrontier::default()),
         frozen_projection: Mutex::new(std::collections::HashMap::new()),
+        transport_fatal: Arc::default(),
     }
 }
 

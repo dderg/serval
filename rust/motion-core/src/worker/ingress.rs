@@ -15,6 +15,7 @@
 //! The stages downstream (fit stage → planner → lowerer → shaper) never consult
 //! a clock; time lives here and in the dispatcher.
 
+use crate::lock_ext::LockExt;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -139,7 +140,7 @@ pub(super) struct Ingress {
     /// so a completed flush guarantees the pump has ingested everything
     /// dispatched and published a current drain ledger. `None` only in the
     /// pump-less test seam.
-    pub(super) pump_control: Option<crossbeam_channel::Sender<crate::pump::PumpMsg>>,
+    pub(super) pump: Option<super::PumpLink>,
 }
 
 impl Ingress {
@@ -365,15 +366,34 @@ impl Ingress {
         false
     }
 
+    /// A pump that stopped on a latched endpoint fatal is not a dead stage:
+    /// klippy is being handed the cause and will shut down. Returns the halt
+    /// reason so the caller can decline the work instead of aborting.
+    fn pump_halted(&self) -> Option<String> {
+        self.pump
+            .as_ref()
+            .and_then(|pump| pump.transport_fatal.lock_ok().clone())
+    }
+
     fn pump_barrier(&self) {
-        let Some(tx) = &self.pump_control else {
+        let Some(pump) = &self.pump else {
             return;
         };
         let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
-        if tx.send(crate::pump::PumpMsg::Barrier(ack_tx)).is_err() {
+        if pump
+            .control
+            .send(crate::pump::PumpMsg::Barrier(ack_tx))
+            .is_err()
+        {
+            if self.pump_halted().is_some() {
+                return;
+            }
             fatal("pump control channel closed — the pump thread died");
         }
         if ack_rx.recv_timeout(Duration::from_secs(30)).is_err() {
+            if self.pump_halted().is_some() {
+                return;
+            }
             fatal("pump did not acknowledge the flush barrier within 30s");
         }
     }
@@ -457,19 +477,24 @@ impl Ingress {
     ) -> Result<crate::pump::BuzzToken, String> {
         self.drain_and_fence();
         self.pump_barrier();
-        let tx = self.pump_control.as_ref().ok_or_else(|| {
+        let pump = self.pump.as_ref().ok_or_else(|| {
             "buzz: no pump control channel — the pipeline has no pump".to_string()
         })?;
         let (reply, verdict) = std::sync::mpsc::sync_channel(1);
-        if tx
+        if pump
+            .control
             .send(crate::pump::PumpMsg::Buzz { params, reply })
             .is_err()
         {
-            fatal("pump control channel closed — the pump thread died");
+            return Err(self
+                .pump_halted()
+                .unwrap_or_else(|| fatal("pump control channel closed — the pump thread died")));
         }
         match verdict.recv_timeout(Duration::from_secs(5)) {
             Ok(result) => result,
-            Err(_) => fatal("pump did not answer the buzz request within 5s"),
+            Err(_) => Err(self
+                .pump_halted()
+                .unwrap_or_else(|| fatal("pump did not answer the buzz request within 5s"))),
         }
     }
 }

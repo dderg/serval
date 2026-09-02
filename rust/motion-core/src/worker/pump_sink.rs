@@ -30,6 +30,19 @@ pub(crate) struct PumpSink {
     pub(crate) motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
     pub(crate) frontier: Arc<CommittedFrontier>,
     pub(crate) frozen_projection: Mutex<std::collections::HashMap<u32, FrozenProjection>>,
+    /// Set by the pump's fatal-transport action before the pump thread exits,
+    /// so a closed enqueue channel is reported as the endpoint fatal it is
+    /// rather than as a vanished thread.
+    pub(crate) transport_fatal: Arc<Mutex<Option<String>>>,
+}
+
+impl PumpSink {
+    fn pump_gone(&self) -> DispatchError {
+        match self.transport_fatal.lock_ok().clone() {
+            Some(reason) => DispatchError::TransportFatal(reason),
+            None => DispatchError::PumpGone,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -348,7 +361,7 @@ impl PumpSink {
                         at_start_clock,
                         epoch_freq,
                     })
-                    .map_err(|_| DispatchError::PumpGone)?;
+                    .map_err(|_| self.pump_gone())?;
             }
         }
         Ok(())
@@ -459,7 +472,7 @@ impl SegmentSink for PumpSink {
             self.motion_history.lock_ok().drop_pieces_on_reanchor();
         }
         for m in msgs {
-            self.pump_tx.send(m).map_err(|_| DispatchError::PumpGone)?;
+            self.pump_tx.send(m).map_err(|_| self.pump_gone())?;
         }
 
         tracing::trace!(
@@ -548,7 +561,7 @@ impl SegmentSink for PumpSink {
                     source_line: u32::MAX,
                     batch_end: true,
                 })
-                .map_err(|_| DispatchError::PumpGone)?;
+                .map_err(|_| self.pump_gone())?;
         }
 
         self.counter.fetch_add(1, Ordering::Relaxed);
