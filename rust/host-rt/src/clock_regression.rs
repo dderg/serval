@@ -132,6 +132,20 @@ pub struct ClockSyncEstimator {
     synced: bool,
 }
 
+/// The host instant that stamps a `clock` response for the 64-bit
+/// reconstruction. serialhdl zeroes `#sent_time` on a sample it could not time
+/// — a fabricated round trip would poison `min_half_rtt` — but always carries
+/// `#receive_time`, and the two name the sample within one round trip while the
+/// reconstruction rounds over a half-wrap window seconds wide, so either
+/// resolves the `2^32` ambiguity to the same wrap count.
+fn wrap_anchor_time(sent_time: f64, receive_time: f64) -> f64 {
+    if sent_time != 0.0 {
+        sent_time
+    } else {
+        receive_time
+    }
+}
+
 impl ClockSyncEstimator {
     #[must_use]
     pub fn new(
@@ -174,8 +188,9 @@ impl ClockSyncEstimator {
         let last_clock = self.last_clock;
         let clock_delta = u64::from(raw_clock_low.wrapping_sub(last_clock as u32));
         let mut clock = last_clock + clock_delta;
-        if sent_time != 0.0 {
-            let exp_clock = (sent_time - self.core.x_avg()) * prev_freq + self.core.y_avg();
+        let wrap_anchor = wrap_anchor_time(sent_time, receive_time);
+        if wrap_anchor != 0.0 {
+            let exp_clock = (wrap_anchor - self.core.x_avg()) * prev_freq + self.core.y_avg();
             #[allow(clippy::cast_precision_loss)]
             let wraps_lost = ((exp_clock - clock as f64) / TWO_POW_32).round();
             if wraps_lost > 0.0 {
