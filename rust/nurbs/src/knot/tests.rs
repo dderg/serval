@@ -68,6 +68,27 @@ fn remove_knot_returns_zero_when_tolerance_not_met() {
     assert_eq!(result.knots(), curve.knots());
 }
 
+fn curve_with_one_interior_knot() -> ScalarNurbs {
+    ScalarNurbs::try_new(
+        2,
+        vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0],
+        vec![0.0, 1.0, 2.0, 3.0],
+    )
+    .unwrap()
+}
+
+#[test]
+#[should_panic(expected = "clamped boundary")]
+fn remove_knot_rejects_the_start_boundary_knot() {
+    remove_knot(&curve_with_one_interior_knot(), 0.0, 1, 1e-9);
+}
+
+#[test]
+#[should_panic(expected = "clamped boundary")]
+fn remove_knot_rejects_the_end_boundary_knot() {
+    remove_knot(&curve_with_one_interior_knot(), 1.0, 1, 2.0);
+}
+
 #[test]
 fn remove_knot_undoes_insertion_within_tolerance() {
     let curve =

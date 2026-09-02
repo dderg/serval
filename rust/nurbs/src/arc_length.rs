@@ -40,12 +40,14 @@ pub(crate) fn integrate_arc_length<F: Fn(f64) -> f64>(
 
 use crate::eval::{vector_derivative, vector_eval};
 
+/// Parametric speed is only piecewise analytic: it jumps across a knot of
+/// multiplicity `degree` and kinks across lower ones, so a Gauss-Legendre panel
+/// straddling a knot converges at first order instead of geometrically. Every
+/// panel therefore stays inside one knot span. A single level-to-level
+/// difference bounds the refinement error only once the rule's geometric rate
+/// has established itself, so the gate must hold on two successive differences.
 #[must_use]
 pub fn path_arc_length(xyz: &crate::VectorNurbs<3>) -> f64 {
-    let knots = xyz.knots();
-    let u_start = knots[0];
-    let u_end = knots[knots.len() - 1];
-
     let deriv = vector_derivative(xyz);
 
     let speed = |u: f64| -> f64 {
@@ -53,23 +55,32 @@ pub fn path_arc_length(xyz: &crate::VectorNurbs<3>) -> f64 {
         (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
     };
 
-    let span = u_end - u_start;
     let mut prev_estimate: Option<f64> = None;
+    let mut prev_delta: Option<f64> = None;
     let mut subintervals: usize = 1;
 
     loop {
         let mut sum = 0.0_f64;
-        for i in 0..subintervals {
-            let a = u_start + span * (i as f64) / (subintervals as f64);
-            let b = u_start + span * ((i + 1) as f64) / (subintervals as f64);
-            sum += integrate_arc_length(speed, a, b, 5);
+        for knot_pair in xyz.knots().windows(2) {
+            let u_start = knot_pair[0];
+            let span = knot_pair[1] - u_start;
+            if span <= 0.0 {
+                continue;
+            }
+            for i in 0..subintervals {
+                let a = u_start + span * (i as f64) / (subintervals as f64);
+                let b = u_start + span * ((i + 1) as f64) / (subintervals as f64);
+                sum += integrate_arc_length(speed, a, b, 5);
+            }
         }
 
         if let Some(prev) = prev_estimate {
+            let delta = (sum - prev).abs();
             let tol = 1e-9 * sum.abs().max(1e-300);
-            if (sum - prev).abs() < tol {
+            if delta < tol && prev_delta.is_some_and(|earlier| earlier < tol) {
                 return sum;
             }
+            prev_delta = Some(delta);
         }
 
         if subintervals >= 64 {

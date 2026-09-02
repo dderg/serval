@@ -276,6 +276,13 @@ pub fn remove_knot(curve: &ScalarNurbs, u: f64, count: usize, tol: f64) -> (Scal
     if s == 0 {
         return (curve.clone(), 0);
     }
+    assert!(
+        u > knots[0] && u < knots[knots.len() - 1],
+        "remove_knot: knot {u} is a clamped boundary of [{}, {}] and carries the curve's end \
+         conditions; only interior knots are removable",
+        knots[0],
+        knots[knots.len() - 1]
+    );
     let r = find_knot_span(knots, p, n, u);
 
     let num = count.min(s);
