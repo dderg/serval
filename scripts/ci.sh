@@ -80,6 +80,21 @@ job_rust_test() {
     run_quiet host_cargo test --workspace --doc
 }
 
+# Every proptest suite (tests/*fuzz*.rs, *proptest*.rs, property_*.rs) at a
+# case count far above the per-file default, with a fresh random seed per
+# run. rust-test already runs the same suites at their defaults; this gate is
+# the one that keeps exploring. Suites that run the whole streaming pipeline
+# per case cost ~20 ms each, so they take a 64th of the count.
+job_rust_fuzz() {
+    cd "$RUST"
+    local cases="${PROPTEST_CASES:-20000}"
+    local pipeline='binary(seam_schedule_fuzz) | binary(planner_fuzz)'
+    PROPTEST_CASES="$cases" host_cargo nextest run --workspace --profile ci \
+        -E "binary(/fuzz|proptest|^property_/) - ($pipeline)" || return 1
+    PROPTEST_CASES="$((cases / 64))" host_cargo nextest run --workspace --profile ci \
+        -E "$pipeline"
+}
+
 job_rust_clippy() { cd "$RUST" && cargo clippy --workspace --all-targets -- -D warnings; }
 job_rust_fmt()    { cd "$RUST" && cargo fmt --all -- --check; }
 
@@ -338,6 +353,7 @@ run_all() {
         run_check "sim"             job_sim
         run_check "snapshot"        job_snapshot
         run_check "replay-budget"   job_replay_budget
+        run_check "rust-fuzz"       job_rust_fuzz
     fi
     echo "────────────────────────────────────────"
     printf '  %s   %s\n' "$(green "$PASS pass")" "$([ "$FAIL" -gt 0 ] && red "$FAIL fail" || echo "0 fail")"
@@ -380,6 +396,7 @@ case "$name" in
     rust-host)        job=(job_rust_host) ;;
     rust-build)       job=(job_rust_build) ;;
     rust-test)        job=(job_rust_test) ;;
+    rust-fuzz)        job=(job_rust_fuzz) ;;
     rust-clippy)      job=(job_rust_clippy) ;;
     rust-fmt)         job=(job_rust_fmt) ;;
     rust-loom)        job=(job_rust_loom) ;;
