@@ -407,6 +407,7 @@ version = "0.1.0"
 dependencies = [
  "libm",
  "nurbs",
+ "proptest",
  "thiserror",
 ]
 
@@ -673,6 +674,7 @@ dependencies = [
  "gcode",
  "geometry",
  "host-rt",
+ "libm",
  "mcu-protocol",
  "motion-core",
  "motion-pipeline",
@@ -1116,6 +1118,7 @@ dependencies = [
  "libm",
  "loom",
  "portable-atomic",
+ "proptest",
 ]
 
 [[package]]

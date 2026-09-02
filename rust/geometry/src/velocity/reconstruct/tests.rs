@@ -138,3 +138,36 @@ fn infeasible_seam_pair_fails_loudly() {
     let err = member_profile(0, &m, 0.0, 200.0).unwrap_err();
     assert!(matches!(err, ReconstructError::Infeasible { .. }));
 }
+
+/// The onset is solved in arc but consumed as a speed seam, and `dv/ds = a/v`
+/// converts one into the other. At a high budget and a low ceiling the brake
+/// span is short enough that a fixed-iteration bracket left ~3e-8 mm of arc
+/// open, which the conversion turned into 9.4e-5 mm/s at the seam — four times
+/// the slack the brake check allows — and the member came back `Infeasible`.
+#[test]
+fn a_short_brake_span_at_a_high_budget_still_closes_its_seam() {
+    let kin = clothoid(14.953550178205024, 1.0, 0.0, 18.93733259936017, 216193.6);
+    let segments = profile(&kin, 0.0, 0.0);
+    let mut arc = 0.0;
+    for seg in &segments {
+        assert!(
+            (seg.s0 - arc).abs() <= 1e-9 * (1.0 + arc),
+            "arc gap at {arc}"
+        );
+        arc = seg.end_distance();
+    }
+    assert!(
+        (arc - kin.length).abs() <= 1e-9 * kin.length,
+        "profile covers {arc} of {}",
+        kin.length
+    );
+    let peak = segments
+        .iter()
+        .map(|seg| seg.end_state().1)
+        .fold(0.0_f64, f64::max);
+    assert!(
+        (peak - kin.flat_ceiling).abs() < 1e-5 * kin.flat_ceiling,
+        "profile peaked at {peak}, not the ceiling {}",
+        kin.flat_ceiling
+    );
+}

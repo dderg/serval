@@ -15,7 +15,6 @@ use super::disk::{Kinematics, RunMember};
 use super::law::{LawSegment, ScalarLaw};
 
 const ONSET_BISECT_ITERS: u32 = 60;
-const ONSET_EXACT_REFINE_ITERS: u32 = 20;
 /// Slack (relative to speed scale) for seam-plan feasibility checks: an
 /// entry/exit pair outside the member's own reach by more than this is not a
 /// float residue, it is a planning bug upstream.
@@ -186,12 +185,22 @@ pub(super) fn member_profile(
                 let local_hi = (solved + radius).min(len);
                 let local_brackets = exact_g(local_lo).ok_or(ReconstructError::Diverged)? <= 0.0
                     && exact_g(local_hi).ok_or(ReconstructError::Diverged)? >= 0.0;
-                let (mut exact_lo, mut exact_hi, iterations) = if local_brackets {
-                    (local_lo, local_hi, ONSET_EXACT_REFINE_ITERS)
+                let (mut exact_lo, mut exact_hi) = if local_brackets {
+                    (local_lo, local_hi)
                 } else {
-                    (0.0, len, ONSET_BISECT_ITERS)
+                    (0.0, len)
                 };
-                for _ in 0..iterations {
+                // The onset is solved in arc but consumed as a speed seam, and
+                // `dv/ds = a/v` converts one into the other: at a high budget
+                // and a low speed an arc bracket that looks closed still leaves
+                // the seam speeds a slack apart.
+                let onset_arc_tol =
+                    0.25 * joint_tol(candidate_forward) * candidate_forward.max(VELOCITY_FLOOR)
+                        / kin.accel;
+                for _ in 0..ONSET_BISECT_ITERS {
+                    if exact_hi - exact_lo <= onset_arc_tol {
+                        break;
+                    }
                     let mid = 0.5 * (exact_lo + exact_hi);
                     if exact_g(mid).ok_or(ReconstructError::Diverged)? <= 0.0 {
                         exact_lo = mid;
