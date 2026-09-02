@@ -60,6 +60,9 @@ pub const EVENT_RUNTIME_FG_MSG_HEAD: u16 = 20;
 pub const EVENT_RUNTIME_TIMER_TOO_CLOSE: u16 = 21;
 pub const EVENT_RUNTIME_TIMER_TOO_CLOSE_LATE: u16 = 22;
 pub const EVENT_RUNTIME_PRIOR_RUN: u16 = 23;
+pub const EVENT_RUNTIME_PRIOR_LIVE: u16 = 24;
+pub const EVENT_RUNTIME_PRIOR_USB_OUT: u16 = 25;
+pub const EVENT_RUNTIME_PRIOR_TASK_GAPS: u16 = 26;
 
 pub const EVENT_MOTION_AXIS_STALLED: u16 = 3;
 pub const EVENT_MOTION_AXIS_STALLED_HEAD: u16 = 4;
@@ -193,6 +196,18 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_PRIOR_RUN) => (
             "runtime.prior_run",
             "crash replay describes boot {arg0}; {arg1} later hostless boot(s) were skipped to keep it",
+        ),
+        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_PRIOR_LIVE) => (
+            "runtime.prior_live",
+            "held run ended with engine_status={arg0} liveness_ok={arg1} (0 = the firmware stopped feeding the iwdg on purpose)",
+        ),
+        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_PRIOR_USB_OUT) => (
+            "runtime.prior_usb_out",
+            "held run's worst usb OUT episode: endpoint unarmed {arg0} cyc, bulk-out task gap {arg1} ticks",
+        ),
+        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_PRIOR_TASK_GAPS) => (
+            "runtime.prior_task_gaps",
+            "held run's worst foreground gaps: runtime_drain {arg0} ticks, usb bulk-in {arg1} ticks",
         ),
         (SUBSYSTEM_DIAG, EVENT_DIAG_TIM5_LONG) => {
             ("diag.tim5_long", "TIM5 ISR long {arg0} cyc at t={arg1}")

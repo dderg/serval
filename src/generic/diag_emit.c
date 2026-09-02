@@ -50,6 +50,11 @@ kalico_diag_emit_prior_crash(void)
                                             : EVENT_LOG_LEVEL_DEBUG,
                     EVENT_LOG_SUBSYS_RUNTIME, EVENT_LOG_EVENT_RUNTIME_PRIOR_RUN,
                     0, prior_diag.boot_count, prior_state.runs_skipped);
+    if (prior_snap.magic == LIVE_MAGIC) {
+        event_log_emit(abnormal ? EVENT_LOG_LEVEL_WARN : EVENT_LOG_LEVEL_DEBUG,
+                        EVENT_LOG_SUBSYS_RUNTIME, EVENT_LOG_EVENT_RUNTIME_PRIOR_LIVE,
+                        0, prior_snap.engine_status, prior_snap.live);
+    }
 
     if (had_fault) {
         event_log_emit(EVENT_LOG_LEVEL_ERROR, EVENT_LOG_SUBSYS_RUNTIME,
@@ -136,6 +141,14 @@ kalico_diag_emit_prior_crash(void)
                             EVENT_LOG_EVENT_RUNTIME_TIM5_IA, 0,
                             prior_diag.tim5_ia_min_cyc,
                             prior_diag.tim5_ia_max_cyc);
+            event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
+                            EVENT_LOG_EVENT_RUNTIME_PRIOR_USB_OUT, 0,
+                            prior_diag.out_unarmed_worst_cyc,
+                            prior_diag.usb_out_max_gap_ticks);
+            event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
+                            EVENT_LOG_EVENT_RUNTIME_PRIOR_TASK_GAPS, 0,
+                            prior_diag.runtime_drain_max_gap_ticks,
+                            prior_diag.usb_in_max_gap_ticks);
 
             uint32_t head = prior_diag.ring_head & DIAG_RING_MASK;
             for (uint32_t i = 0; i < DIAG_RING_LEN; i++) {
