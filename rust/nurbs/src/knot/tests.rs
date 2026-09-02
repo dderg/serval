@@ -382,3 +382,15 @@ fn insert_knot_into_simple_curve_preserves_evaluation() {
         );
     }
 }
+
+#[test]
+#[should_panic(expected = "multiplicity 3 above the degree 2")]
+fn refinement_rejects_an_interior_knot_above_the_degree() {
+    let discontinuous = ScalarNurbs::try_new(
+        2,
+        vec![0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 1.0, 1.0, 1.0],
+        vec![0.0, 1.0, 2.0, 10.0, 11.0, 12.0],
+    )
+    .unwrap();
+    refined_to_full_multiplicity(&discontinuous);
+}
