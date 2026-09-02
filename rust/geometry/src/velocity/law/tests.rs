@@ -45,6 +45,38 @@ fn disk_rail_scalar_acceleration_is_exactly_the_budget() {
 }
 
 #[test]
+fn a_rail_entered_just_above_rest_keeps_its_time_and_its_arc() {
+    let accel = 1000.0;
+    let kappa = 10.0;
+    let ds = 0.0405;
+    let rest_start = rail(0.0, accel, kappa, 0.0, false, ds);
+    let creeping_start = rail(0.1, accel, kappa, 0.0, false, ds);
+    assert!(
+        creeping_start.dt < rest_start.dt,
+        "entering faster must not take longer: {} vs {}",
+        creeping_start.dt,
+        rest_start.dt
+    );
+    for seg in [&rest_start, &creeping_start] {
+        let mut previous_s = seg.s0;
+        for i in 0..=4096 {
+            let t = seg.dt * f64::from(i) / 4096.0;
+            let (s, v, a) = seg.state_at(t);
+            assert!(
+                s >= previous_s && s <= seg.s0 + ds,
+                "arc {s} left [0, {ds}] at t={t}"
+            );
+            let load = (a * a + (kappa * v * v) * (kappa * v * v)).sqrt();
+            assert!(
+                (load - accel).abs() / accel < 1e-9,
+                "load {load} off the disk at t={t} (v={v}, s={s})"
+            );
+            previous_s = s;
+        }
+    }
+}
+
+#[test]
 fn disk_rail_on_a_straight_degenerates_to_constant_accel() {
     let seg = rail(5.0, 1000.0, 0.0, 0.0, false, 0.1);
     let (s, v, a) = seg.state_at(seg.dt);

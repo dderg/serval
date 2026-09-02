@@ -4,9 +4,10 @@
 //! (`disk_reach_v` in both directions), so every member arrives here with a
 //! feasible `(entry_v, exit_v)` pair and the time-optimal interior under
 //! unlimited jerk is fully local: accelerate on the rail, cruise at the feed
-//! ceiling if it binds, brake on the rail to land the exit exactly. Curvature
-//! caps never bind in a member's interior — `κ(s)` is linear, so `|κ|` peaks
-//! at a member end and the seam plan has already capped both ends.
+//! ceiling if it binds, brake on the rail to land the exit exactly. `κ(s)` is
+//! linear, so the curvature cap is lowest at a member end and the seam plan
+//! has already capped both ends; a rail that meets the cap on its way to such
+//! an end settles onto it inside the law itself, so no fourth regime exists.
 //!
 //! Each regime is one exact [`LawSegment`]; a member emits at most three.
 
@@ -219,7 +220,10 @@ pub(super) fn member_profile(
     };
 
     // Flat contact: where the accelerating rail reaches the feed ceiling
-    // (before the onset, else there is no cruise).
+    // (before the onset, else there is no cruise). Solved on the interpolated
+    // profile, then closed on the rail's own integration over the contact arc
+    // — the one the accelerating segment is built from — so the segment lands
+    // on the ceiling the cruise starts at.
     let flat_contact = if entry_v >= kin.flat_ceiling * (1.0 - 1e-12) {
         0.0
     } else if forward_at(onset).ok_or(ReconstructError::Diverged)?
@@ -235,7 +239,36 @@ pub(super) fn member_profile(
                 hi = mid;
             }
         }
-        let contact = 0.5 * (lo + hi);
+        let mut contact = 0.5 * (lo + hi);
+        if !kin.is_straight() {
+            let exact_reach = |x: f64| {
+                LawSegment::reach_over(member_law(kin, 0.0, false), entry_v, x)
+                    .ok_or(ReconstructError::Diverged)
+            };
+            let radius = 1e-3 * (1.0 + len);
+            let local_lo = (contact - radius).max(0.0);
+            let local_hi = (contact + radius).min(onset);
+            let (mut exact_lo, mut exact_hi) = if exact_reach(local_lo)? < kin.flat_ceiling
+                && exact_reach(local_hi)? >= kin.flat_ceiling
+            {
+                (local_lo, local_hi)
+            } else {
+                (0.0, onset)
+            };
+            let contact_arc_tol = 0.25 * joint_tol(kin.flat_ceiling) * kin.flat_ceiling / kin.accel;
+            for _ in 0..ONSET_BISECT_ITERS {
+                if exact_hi - exact_lo <= contact_arc_tol {
+                    break;
+                }
+                let mid = 0.5 * (exact_lo + exact_hi);
+                if exact_reach(mid)? < kin.flat_ceiling {
+                    exact_lo = mid;
+                } else {
+                    exact_hi = mid;
+                }
+            }
+            contact = 0.5 * (exact_lo + exact_hi);
+        }
         if onset - contact < 1e-9 {
             onset
         } else {
@@ -274,6 +307,9 @@ pub(super) fn member_profile(
         let seg = LawSegment::until_arc(t, 0.0, v, member_law(kin, 0.0, false), flat_contact)
             .ok_or(ReconstructError::Diverged)?;
         let (_, v_end, _) = seg.end_state();
+        if onset > flat_contact && (v_end - kin.flat_ceiling).abs() > joint_tol(kin.flat_ceiling) {
+            return Err(infeasible());
+        }
         t = seg.end_time();
         v = v_end;
         push(&mut out, seg);

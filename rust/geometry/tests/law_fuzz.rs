@@ -5,11 +5,9 @@
 //! and, on the disk rail, `a² + (κ·v²)² = A²` — evaluated by quadrature and
 //! finite differences that never touch the crate's interpolation.
 
-use geometry::path::{Arc, Clothoid, CurvatureProfile, Line, PathSegment, Segment};
+use geometry::path::{Arc, Clothoid, Line, PathSegment, Segment};
 use geometry::velocity::law::{LawSegment, ScalarLaw};
-use geometry::{
-    BoundaryState, Move, MoveVelocity, SourceRange, VelocityLimits, plan_velocity_stops,
-};
+use geometry::{BoundaryState, Move, SourceRange, VelocityLimits, plan_velocity_stops};
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 
@@ -71,20 +69,9 @@ impl Rail {
     }
 }
 
-/// The knot grid is arc-uniform at `RAIL_KNOT_DS`, capped at `RAIL_KNOTS_MAX`
-/// knots, so no knot spans more arc than this.
-const MAX_KNOT_ARC_MM: f64 = 6.2e-4;
-/// The most a single knot may move the speed, as a fraction of the speed it
-/// starts at. Past this the arc-uniform grid no longer resolves the rail — see
-/// the near-standstill finding in the campaign report — so rails are generated
-/// inside the regime the dense solution is built for.
-const RESOLVED_KNOT_SPEED_STEP: f64 = 0.05;
-
-/// Slowest speed a rail may touch and still be resolved by one knot step.
-fn resolved_speed_floor(accel: f64) -> f64 {
-    let growth = (1.0 + RESOLVED_KNOT_SPEED_STEP).powi(2) - 1.0;
-    (2.0 * accel * MAX_KNOT_ARC_MM / growth).sqrt()
-}
+/// Rails may be entered at rest or a hair above it: the dense solution's knot
+/// durations are self-consistent with its interpolant at any speed ratio.
+const MIN_RAIL_SPEED: f64 = 0.0;
 
 fn arb_rail() -> impl Strategy<Value = Rail> {
     (
@@ -104,13 +91,12 @@ fn arb_rail() -> impl Strategy<Value = Rail> {
                 } else {
                     MAX_FEED_MM_S
                 };
-                let floor = resolved_speed_floor(accel);
-                let slow = floor + slow_fraction * (cap - floor);
+                let slow = MIN_RAIL_SPEED + slow_fraction * (cap - MIN_RAIL_SPEED);
                 let fast = slow + span_fraction * (cap - slow);
                 // A rail's tangential accel never exceeds the budget, so the
                 // straight-line span at that budget covers at least as much
                 // speed: sizing the arc from it keeps both ends inside the cap
-                // and above the resolution floor whichever way the rail runs.
+                // whichever way the rail runs.
                 let arc = ((fast * fast - slow * slow) / (2.0 * accel)).min(MAX_ARC_MM);
                 if !(arc > 0.0) {
                     return None;
@@ -275,23 +261,9 @@ fn arb_plan_case() -> impl Strategy<Value = PlanCase> {
         prop_oneof![3 => Just(0.0), 2 => 0.0f64..1.0],
     )
         .prop_map(|(segments, accel, feed, stops, entry_fraction)| {
-            // A member whose interior curvature cap dips below the feed
-            // ceiling has to ride that cap, and the three-phase reconstruction
-            // has no phase for it — see the cap-riding finding in the campaign
-            // report. The generated feed stays under every cap, with margin, so
-            // the rails under test keep their tangential branch away from zero.
-            let curvature_floor = segments
-                .iter()
-                .map(|spatial| {
-                    let (_, kappa_peak) = spatial.kappa_peak();
-                    if kappa_peak > 0.0 {
-                        DISK_LOAD_MARGIN * (accel / kappa_peak).sqrt()
-                    } else {
-                        f64::INFINITY
-                    }
-                })
-                .fold(f64::INFINITY, f64::min);
-            let feed = feed.min(curvature_floor);
+            // The feed may exceed a member's curvature caps: the brake into a
+            // tighter end then hugs the cap, which the rail must follow
+            // smoothly enough for its seams to close.
             let limits = VelocityLimits::try_new(MAX_FEED_MM_S, accel, 0.02, f64::INFINITY)
                 .expect("planner limits");
             let moves: Vec<Move> = segments
@@ -334,19 +306,6 @@ fn arb_plan_case() -> impl Strategy<Value = PlanCase> {
         })
 }
 
-/// Every phase of a planned move, sampled at its own boundaries and interior.
-fn phase_samples(mv: &MoveVelocity, per_phase: usize) -> Vec<(f64, f64, f64)> {
-    mv.phases
-        .iter()
-        .flat_map(|phase| {
-            sample_times(phase, per_phase)
-                .into_iter()
-                .map(|t| phase.state_at(t))
-                .collect::<Vec<_>>()
-        })
-        .collect()
-}
-
 /// `SEAM_SLACK_REL·(1 + v) + 1e-6` — the slack `velocity/reconstruct.rs`
 /// enforces on its own brake seam, and therefore the continuity the phase
 /// chain promises.
@@ -363,11 +322,7 @@ proptest! {
         ..ProptestConfig::default()
     })]
 
-    /// A phase's arc is the time integral of the velocity it reports. The
-    /// dense rail's knot times and its state interpolant are two different
-    /// approximations of the same solution, so they agree only to the knot
-    /// rule's own accuracy — measured worst over 4k cases: 3.1e-8 relative,
-    /// on the fastest-turning rails.
+    /// A phase's arc is the time integral of the velocity it reports.
     #[test]
     fn phase_arc_is_the_time_integral_of_its_velocity(
         rail in arb_rail(),
@@ -380,7 +335,7 @@ proptest! {
                 "integrated velocity",
                 integrated_velocity(segment, PANELS),
                 covered,
-                3e-7 * covered.abs(),
+                1e-8 * covered.abs(),
             )?;
         }
     }
@@ -424,9 +379,9 @@ proptest! {
     ///
     /// The branch, budget and monotonicity are exact consequences of the law
     /// and are checked as such. The disk residual is not: `a` between knots is
-    /// a quintic in time, not a re-evaluation of the law, and on the
-    /// fastest-turning rails it drifts — measured worst over 4k cases, 1.9e-5
-    /// relative at `|σ| ~ 1e4` and 0.86 of the budget in the normal load.
+    /// the derivative of the quintic in time, not a re-evaluation of the law,
+    /// and on the fastest-turning rails (`|σ| ~ 1e4`) it drifts by up to
+    /// ~2e-5 of the budget.
     #[test]
     fn disk_rail_states_stay_on_the_acceleration_disk(rail in arb_rail()) {
         const SAMPLES: usize = 512;
@@ -495,11 +450,8 @@ proptest! {
     /// Speed seams are held to the slack the reconstruction declares for them
     /// (`SEAM_SLACK_REL·(1 + v) + 1e-6` in `velocity/reconstruct.rs`), which is
     /// the tolerance its own brake-seam check enforces; the seam and endpoint
-    /// arcs are exact, since every phase is built to cover a computed arc.
-    /// The *interior* arc of a phase is deliberately not asserted here: on a
-    /// curved member entered a hair above rest the dense rail's knot times are
-    /// far too long and `state_at` walks the arc well past the member and back
-    /// — the near-standstill finding in the campaign report, left unfixed.
+    /// arcs are exact, since every phase is built to cover a computed arc, and
+    /// every interior state stays inside its own phase's arc.
     #[test]
     fn planned_phase_chain_is_c1_and_lands_its_endpoints(case in arb_plan_case()) {
         let profile = match case.plan() {
@@ -523,9 +475,15 @@ proptest! {
             let last = phases.last().expect("a move always carries a phase");
             fail("chain covers the move", last.end_distance(), mv.length, 1e-9 * mv.length)?;
             fail("chain lands the exit speed", last.end_state().1, mv.exit_v, seam_slack(speed_scale))?;
-            for (_, v, a) in phase_samples(mv, 16) {
-                at_most("phase speed below zero", -v, 1e-9 * speed_scale)?;
-                at_most("phase accel over the move limit", a.abs(), mv.accel * (1.0 + 1e-6))?;
+            for phase in phases {
+                let (arc_lo, arc_hi) = (phase.s0, phase.end_distance());
+                for t in sample_times(phase, 16) {
+                    let (s, v, a) = phase.state_at(t);
+                    at_most("phase speed below zero", -v, 1e-9 * speed_scale)?;
+                    at_most("phase accel over the move limit", a.abs(), mv.accel * (1.0 + 1e-6))?;
+                    at_most("phase arc before its start", arc_lo - s, 1e-9 * mv.length)?;
+                    at_most("phase arc past its end", s - arc_hi, 1e-9 * mv.length)?;
+                }
             }
         }
     }

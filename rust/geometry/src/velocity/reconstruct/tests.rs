@@ -171,3 +171,103 @@ fn a_short_brake_span_at_a_high_budget_still_closes_its_seam() {
         kin.flat_ceiling
     );
 }
+
+/// The knots never exceed the cap; between the last knot below it and the
+/// first on it the quintic in time cannot carry the square-root approach and
+/// overshoots by a sixteenth of that final gap.
+fn assert_never_over_the_cap(
+    segments: &[super::super::law::LawSegment],
+    kin: &Kinematics,
+    samples: usize,
+) {
+    for seg in segments {
+        for i in 0..=samples {
+            let (s, v, _) = seg.state_at(seg.t0 + seg.dt * i as f64 / samples as f64);
+            let cap = super::super::disk::limit_speed(kin.kappa_abs(s), kin.accel);
+            assert!(
+                v <= cap * (1.0 + 1e-5),
+                "speed {v} over the cap {cap} at arc {s}"
+            );
+        }
+    }
+}
+
+/// The feed sits between the two end caps, so the brake into the tighter end
+/// hugs its cap for most of the member. The reversed rail integrating that
+/// brake used to overshoot the cap by ~2e-5 with a fixed-step overshoot that
+/// depended on the step count, so the brake's entry speed and the cruise it
+/// had to meet disagreed by more than the seam slack.
+#[test]
+fn a_brake_hugging_the_cap_still_meets_the_cruise() {
+    let kin = clothoid(
+        7.245762259004547,
+        0.0,
+        6.6248300011163614,
+        43.108293553355324,
+        85464.7,
+    );
+    let segments = profile(&kin, 0.0, 0.0);
+    assert_tiles(&segments, kin.length);
+    assert_never_over_the_cap(&segments, &kin, 512);
+    assert!(
+        segments
+            .iter()
+            .any(|seg| matches!(seg.law, ScalarLaw::ConstAccel { a0 } if a0 == 0.0)),
+        "the feed binds before the cap does, so the member cruises"
+    );
+}
+
+/// A tight arc at a feed far above its constant cap: both rails settle onto
+/// the cap, and the accelerate/brake seam sits on it.
+#[test]
+fn a_rest_to_rest_arc_above_its_cap_cruises_on_the_cap() {
+    let kappa = 1.0 / 0.024823023551351353;
+    let kin = clothoid(
+        5.57026221417865 * 0.024823023551351353,
+        kappa,
+        0.0,
+        10.0,
+        100.0,
+    );
+    let segments = profile(&kin, 0.0, 0.0);
+    assert_tiles(&segments, kin.length);
+    assert_never_over_the_cap(&segments, &kin, 512);
+    let cap = (100.0_f64 / kappa).sqrt();
+    let peak = segments
+        .iter()
+        .map(|seg| seg.end_state().1)
+        .fold(0.0_f64, f64::max);
+    assert!(
+        (peak - cap).abs() < 1e-6 * cap,
+        "profile peaked at {peak}, not the cap {cap}"
+    );
+}
+
+/// Entered on its cap with the cap rising away, the rail reaches the feed
+/// ceiling while still hugging it. The contact used to be read off the
+/// interpolated profile, whose quintic overshoots between knots there, so the
+/// accelerating segment built over that arc landed above the ceiling by more
+/// than the seam slack — and nothing checked the accelerate/cruise seam.
+#[test]
+fn the_accelerate_to_cruise_seam_closes_off_a_rising_cap() {
+    let kin = clothoid(
+        2.0650975858530343,
+        37.3767719082361,
+        -18.03351395912919,
+        32.5462164415722,
+        39073.12145416431,
+    );
+    let entry = (kin.accel / kin.kappa0).sqrt();
+    let segments = profile(&kin, entry, 0.0);
+    assert_tiles(&segments, kin.length);
+    let cruise = segments
+        .iter()
+        .position(|seg| matches!(seg.law, ScalarLaw::ConstAccel { a0 } if a0 == 0.0))
+        .expect("the ceiling binds, so the member cruises");
+    let accelerate_end = segments[cruise - 1].end_state().1;
+    assert!(
+        (accelerate_end - kin.flat_ceiling).abs() <= 1e-6 * (1.0 + kin.flat_ceiling) + 1e-6,
+        "the accelerating rail ends at {accelerate_end}, off the ceiling {}",
+        kin.flat_ceiling
+    );
+}

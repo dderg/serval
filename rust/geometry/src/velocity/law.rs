@@ -109,6 +109,39 @@ impl ScalarLaw {
             }
         }
     }
+
+    /// Where a fixed-step solution that crossed the curvature cap `A/|κ|`
+    /// between `from` and `to` actually is. The rail's slope vanishes as a
+    /// square root at the cap, so a cap holding or rising ahead of the state
+    /// draws it on with unbounded strength and the true solution settles on
+    /// the `v²` whose remaining tangential budget is exactly the cap's own
+    /// slope `A·|σ|/κ²`: the step overshot, the state did not cross. A cap
+    /// that falls toward the state, or one rising faster than any rail can
+    /// climb (`|σ| ≥ 2κ²`), has no such curve; the step stands as a
+    /// reachability bound.
+    fn settle_crossed_cap(&self, from: f64, to: f64, w_next: f64) -> f64 {
+        let ScalarLaw::DiskRail {
+            accel,
+            kappa0,
+            sigma,
+            ..
+        } = *self
+        else {
+            return w_next;
+        };
+        let kappa = (kappa0 + sigma * to).abs();
+        let cap = if kappa > 0.0 {
+            accel / kappa
+        } else {
+            f64::INFINITY
+        };
+        let falling = kappa > (kappa0 + sigma * from).abs();
+        let follow = 0.5 * sigma / (kappa * kappa);
+        if w_next <= cap || falling || follow.abs() >= 1.0 {
+            return w_next;
+        }
+        cap * (1.0 - follow * follow).sqrt()
+    }
 }
 
 impl LawSegment {
@@ -447,22 +480,12 @@ fn hermite(p0: f64, m0: f64, p1: f64, m1: f64, u: f64) -> f64 {
 const RAIL_KNOT_DS: f64 = 2.5e-4;
 
 /// Dense arc-uniform solution of the rail ODE `d(v²)/ds = 2·a(s, v)` from
-/// `(0, v0)` over `ds`, with time accumulated per knot pair through the
-/// trapezoid `Δt = 2Δs/(v_lo + v_hi)` — exact for the constant-acceleration
-/// motion each sub-arc approaches. `None` when the speed folds to rest
-/// strictly inside the span.
+/// `(0, v0)` over `ds`. Each knot pair's duration is the one under which the
+/// quintic state interpolant [`LawSegment::state_at`] reads between them
+/// covers exactly the pair's arc, so the knot times, the interpolated
+/// velocity and the interpolated arc describe one motion. `None` when the
+/// speed folds to rest strictly inside the span.
 fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<[RailKnot]>> {
-    integrate_rail_arc_mode(law, v0, ds, false)
-}
-
-/// `clamp_cap` holds the solution at the local curvature cap — a reachability
-/// bound, not executable motion; emitted segments must never use it.
-fn integrate_rail_arc_mode(
-    law: &ScalarLaw,
-    v0: f64,
-    ds: f64,
-    clamp_cap: bool,
-) -> Option<Arc<[RailKnot]>> {
     if ds <= 0.0 {
         let knot = RailKnot {
             t: 0.0,
@@ -499,7 +522,8 @@ fn integrate_rail_arc_mode(
         let k2 = f(s + 0.5 * h, w + 0.5 * h * k1);
         let k3 = f(s + 0.5 * h, w + 0.5 * h * k2);
         let k4 = f(s + h, w + h * k3);
-        let w_next = w + h * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
+        let w_next =
+            law.settle_crossed_cap(s, s + h, w + h * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0);
         let last = i == n - 1;
         if w_next <= 0.0 && !last {
             return None;
@@ -509,30 +533,12 @@ fn integrate_rail_arc_mode(
         if v_lo + v_hi <= 0.0 {
             return None;
         }
-        let floor = 1e-9 * (1.0 + v_lo.max(v_hi));
-        if v_lo > floor && v_hi > floor {
-            let m_lo = law.accel_at(s, v_lo) / v_lo * h;
-            let m_hi = law.accel_at(s + h, v_hi) / v_hi * h;
-            let v_mid = hermite(v_lo, m_lo, v_hi, m_hi, 0.5).max(floor);
-            t += h * (1.0 / v_lo + 4.0 / v_mid + 1.0 / v_hi) / 6.0;
-        } else {
-            t += 2.0 * h / (v_lo + v_hi);
-        }
+        let a_lo = law.accel_at(s, v_lo);
+        let a_hi = law.accel_at(s + h, v_hi);
+        let r_lo = law.accel_rate_at(s, v_lo, a_lo);
+        let r_hi = law.accel_rate_at(s + h, v_hi, a_hi);
+        t += knot_duration(h, (v_lo, a_lo, r_lo), (v_hi, a_hi, r_hi));
         w = w_next.max(0.0);
-        if clamp_cap {
-            if let ScalarLaw::DiskRail {
-                accel,
-                kappa0,
-                sigma,
-                ..
-            } = law
-            {
-                let kappa = (kappa0 + sigma * arc_at(i + 1)).abs();
-                if kappa > 0.0 {
-                    w = w.min(accel / kappa);
-                }
-            }
-        }
         knots.push(RailKnot {
             t,
             s: arc_at(i + 1),
@@ -540,6 +546,37 @@ fn integrate_rail_arc_mode(
         });
     }
     Some(Arc::from(knots))
+}
+
+/// The duration `τ` under which the quintic Hermite through `(v, a, ȧ)` at
+/// both ends integrates to exactly `ds`:
+/// `ds = τ·(v_lo+v_hi)/2 + τ²·(a_lo−a_hi)/10 + τ³·(ȧ_lo+ȧ_hi)/120`.
+/// The leading term alone is the trapezoid, exact for constant acceleration
+/// at any speed ratio — including a rest end, where a quadrature in `1/v`
+/// diverges; the corrections carry the acceleration's change across the pair.
+fn knot_duration(
+    ds: f64,
+    (v_lo, a_lo, r_lo): (f64, f64, f64),
+    (v_hi, a_hi, r_hi): (f64, f64, f64),
+) -> f64 {
+    let c1 = 0.5 * (v_lo + v_hi);
+    let c2 = (a_lo - a_hi) / 10.0;
+    let c3 = (r_lo + r_hi) / 120.0;
+    let mut tau = ds / c1;
+    for _ in 0..8 {
+        let residual = ((c3 * tau + c2) * tau + c1) * tau - ds;
+        let slope = (3.0 * c3 * tau + 2.0 * c2) * tau + c1;
+        let next = tau - residual / slope;
+        if !(next > 0.0) || (next - tau).abs() <= 4.0 * f64::EPSILON * tau {
+            break;
+        }
+        tau = next;
+    }
+    assert!(
+        tau.is_finite() && tau > 0.0,
+        "rail knot over {ds} of arc from v={v_lo} to v={v_hi} has no positive duration"
+    );
+    tau
 }
 
 /// Positive root of `c2·τ² + c1·τ − ds = 0`, cancellation-stable.
