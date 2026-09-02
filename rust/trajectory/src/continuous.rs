@@ -620,13 +620,13 @@ impl ContinuousAxis {
             Self::Nudge(profile) => Ok(profile_bounds(
                 profile.velocity_bounds(),
                 profile.acceleration_bounds(),
-                true,
+                !profile.velocity_step_inside(t0, t1),
             )),
             Self::Buzz { sign, profile, .. } => scale_bounds(
                 profile_bounds(
                     profile.velocity_bounds(),
                     profile.acceleration_bounds(),
-                    !profile.envelope_knee_inside(t0, t1),
+                    !profile.velocity_step_inside(t0, t1),
                 ),
                 *sign,
             ),
@@ -2102,14 +2102,44 @@ fn scalar_phase_bounds(phases: &[LawSegment], t0: f64, t1: f64) -> (f64, f64, f6
         if lo > hi {
             continue;
         }
-        for time in [lo, hi] {
-            let (_, velocity, acceleration) = segment.state_at(time);
+        let mut arc = [0.0_f64; 2];
+        let mut speed = [0.0_f64; 2];
+        for (slot, time) in [lo, hi].into_iter().enumerate() {
+            let (distance, velocity, acceleration) = segment.state_at(time);
             velocity_min = velocity_min.min(velocity);
             velocity_max = velocity_max.max(velocity);
             acceleration_abs_max = acceleration_abs_max.max(acceleration.abs());
+            arc[slot] = distance - segment.s0;
+            speed[slot] = velocity;
         }
+        acceleration_abs_max =
+            acceleration_abs_max.max(rail_acceleration_ceiling(&segment.law, arc, speed));
     }
     (velocity_min, velocity_max, acceleration_abs_max)
+}
+
+/// The rail spends its budget as `|a_t| = sqrt(A² − (κ·v²)²)`, which grows as
+/// the normal load `|κ|·v²` falls: the tangential peak sits strictly inside the
+/// interval whenever the curvature crosses zero there, so both endpoints
+/// report the smallest accelerations of the phase.
+fn rail_acceleration_ceiling(law: &ScalarLaw, arc: [f64; 2], speed: [f64; 2]) -> f64 {
+    let ScalarLaw::DiskRail {
+        accel,
+        kappa0,
+        sigma,
+        ..
+    } = *law
+    else {
+        return 0.0;
+    };
+    let curvature = arc.map(|distance| kappa0 + sigma * distance);
+    let curvature_abs_min = if curvature[0] * curvature[1] <= 0.0 {
+        0.0
+    } else {
+        curvature[0].abs().min(curvature[1].abs())
+    };
+    let normal_load = curvature_abs_min * speed[0].min(speed[1]).powi(2);
+    (accel * accel - normal_load * normal_load).max(0.0).sqrt()
 }
 
 fn projection_bounds(

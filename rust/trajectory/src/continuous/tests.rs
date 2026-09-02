@@ -679,6 +679,76 @@ fn multi_revolution_arc_bounds_include_late_extrema_families() {
 }
 
 #[test]
+fn rail_bounds_cover_the_inflection_acceleration_peak() {
+    let kappa = 1.0_f64;
+    let accel = 10_000.0_f64;
+    let length = 0.13_f64;
+    let sigma = 2.0 * kappa / length;
+    let entry_speed = (0.64 * accel / kappa).sqrt();
+    let segment = Segment::Clothoid(
+        Clothoid::try_new(
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            -kappa,
+            sigma,
+            length,
+        )
+        .unwrap(),
+    );
+    let phase = LawSegment::until_arc(
+        0.0,
+        0.0,
+        entry_speed,
+        ScalarLaw::DiskRail {
+            accel,
+            kappa0: -kappa,
+            sigma,
+            brake: false,
+        },
+        length,
+    )
+    .unwrap();
+    let duration = phase.end_time();
+    let inflection_time = phase.time_at_distance(0.5 * length).unwrap();
+    let span = Arc::new(
+        AnalyticMoveSpan::try_new(
+            move_with(segment, vec![FollowerDemand::constant(3, 0.5)]),
+            Arc::from([phase]),
+            0.0,
+            10.0,
+            10.0 + duration,
+            Arc::from([0.0, 0.0, 0.0, 0.0]),
+            SurfaceMode::None,
+        )
+        .unwrap(),
+    );
+    let follower = ContinuousAxis::Analytic {
+        span: Arc::clone(&span),
+        axis: 3,
+    };
+    let peak = follower
+        .eval_pva(10.0 + inflection_time)
+        .unwrap()
+        .acceleration
+        .abs();
+    let entry_acceleration = follower.eval_pva(10.0).unwrap().acceleration.abs();
+    assert!(
+        peak > 0.99 * 0.5 * accel,
+        "zero curvature frees the whole budget, got {peak}"
+    );
+    assert!(
+        entry_acceleration < 0.8 * peak,
+        "the phase ends must under-report the interior peak, got {entry_acceleration}"
+    );
+    let bounds = follower.pva_bounds(span.t_start, span.t_end).unwrap();
+    assert!(
+        bounds.acceleration_abs_max >= peak,
+        "{bounds:?} miss the inflection peak {peak}"
+    );
+}
+
+#[test]
 fn analytic_follower_axes_follow_spatial_axes_in_demand_order() {
     let span = Arc::new(
         AnalyticMoveSpan::try_new(
@@ -1165,6 +1235,137 @@ fn buzz_bounds_stay_ordered_across_an_envelope_knee() {
         assert!(velocity >= across_knee.velocity_min && velocity <= across_knee.velocity_max);
     }
     assert!(axis.pva_bounds(0.0, knee).unwrap().velocity_continuous);
+}
+
+#[test]
+fn buzz_parks_its_ends_when_the_duration_does_not_round_back() {
+    let t_start = 485.95112428689174;
+    let duration = 1e-4;
+    let buzz = BuzzProfile::try_new(1e-4, 1.0, 1.0, duration, 0.0, t_start).unwrap();
+    assert_ne!(
+        buzz.t_end() - t_start,
+        duration,
+        "premise: the phase-local duration does not survive the round trip"
+    );
+
+    let zero = super::profiles::ProfileSample {
+        position: 0.0,
+        velocity: 0.0,
+        acceleration: 0.0,
+    };
+    assert_eq!(buzz.eval(t_start), zero);
+    assert_eq!(buzz.eval(buzz.t_end()), zero);
+    assert_eq!(buzz.jerk(buzz.t_end()), 0.0);
+}
+
+#[test]
+fn nudge_keeps_its_direction_at_the_last_interior_instant() {
+    let profile = NudgeProfile::try_new(
+        15.501053586067302,
+        3.605105648728627,
+        68884.36159762547,
+        2.61042184509826,
+    )
+    .unwrap();
+    let last_inside = interior_time_below(profile.t_end());
+    assert!(last_inside > profile.t_start() && last_inside < profile.t_end());
+    assert_eq!(
+        profile.duration() - (last_inside - profile.t_start()),
+        0.0,
+        "premise: the phase-local tail collapses to nothing"
+    );
+
+    let sample = profile.eval(last_inside);
+    assert!(
+        sample.velocity > 0.0,
+        "the nudge must still be advancing one ulp before it lands, got {}",
+        sample.velocity
+    );
+    assert_eq!(profile.eval(profile.t_end()).velocity, 0.0);
+}
+
+fn assert_velocity_inside_bounds(span: &MotorSpan, bounds: &PvaBounds, times: &[f64]) {
+    for &t in times {
+        let velocity = span.eval_pva(t).unwrap().velocity;
+        assert!(
+            velocity >= bounds.velocity_min && velocity <= bounds.velocity_max,
+            "velocity {velocity} at t={t} escapes {bounds:?}"
+        );
+    }
+}
+
+#[test]
+fn buzz_bounds_cover_the_parked_endpoints_and_the_carrier() {
+    let profile = Arc::new(
+        BuzzProfile::try_new(
+            1.4124001114309144,
+            1.0,
+            1.0,
+            0.14308608675012613,
+            0.0,
+            0.08106040699307364,
+        )
+        .unwrap(),
+    );
+    let (t_start, t_end) = (profile.t_start(), profile.t_end());
+    let span = motor_span(
+        ContinuousAxis::Buzz {
+            base_position: 0.0,
+            sign: -1.0,
+            profile: Arc::clone(&profile),
+        },
+        t_start,
+        t_end,
+    );
+
+    let whole = span.pva_bounds(t_start, t_end).unwrap();
+    assert!(!whole.velocity_continuous);
+    assert!(whole.velocity_min <= whole.velocity_max);
+    assert_velocity_inside_bounds(
+        &span,
+        &whole,
+        &[
+            t_start,
+            interior_time_above(t_start),
+            0.5 * (t_start + t_end),
+            interior_time_below(t_end),
+            t_end,
+        ],
+    );
+
+    let inside = span
+        .pva_bounds(
+            t_start + 0.25 * profile.duration(),
+            t_end - 0.25 * profile.duration(),
+        )
+        .unwrap();
+    assert!(inside.velocity_continuous);
+}
+
+#[test]
+fn cruise_nudge_bounds_cover_the_parked_endpoints_and_the_cruise() {
+    let profile = NudgeProfile::try_new(-6.0, 3.0, 0.0, 2.0).unwrap();
+    let (t_start, t_end) = (profile.t_start(), profile.t_end());
+    let span = motor_span(ContinuousAxis::Nudge(profile), t_start, t_end);
+
+    let whole = span.pva_bounds(t_start, t_end).unwrap();
+    assert!(!whole.velocity_continuous);
+    assert!(whole.velocity_min <= whole.velocity_max);
+    assert_velocity_inside_bounds(
+        &span,
+        &whole,
+        &[
+            t_start,
+            interior_time_above(t_start),
+            3.0,
+            interior_time_below(t_end),
+            t_end,
+        ],
+    );
+
+    let inside = span.pva_bounds(2.5, 3.5).unwrap();
+    assert!(inside.velocity_continuous);
+    assert_velocity_inside_bounds(&span, &inside, &[2.5, 3.0, 3.5]);
 }
 
 #[test]

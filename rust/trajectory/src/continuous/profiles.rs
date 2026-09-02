@@ -152,7 +152,7 @@ impl NudgeProfile {
                 acceleration: 0.0,
             };
         }
-        let remaining = self.duration - local_t;
+        let remaining = self.t_end() - t;
         ProfileSample {
             position: self.delta_mm - sign * 0.5 * self.accel_mm_s2 * remaining * remaining,
             velocity: sign * self.accel_mm_s2 * remaining,
@@ -221,6 +221,18 @@ impl NudgeProfile {
     #[must_use]
     pub fn breakpoints(&self) -> &[f64] {
         &self.breakpoints
+    }
+
+    /// A nudge without acceleration cruises at `sign*speed` from the first
+    /// instant, while `eval` parks a zero sample at both domain ends: velocity
+    /// jumps at each end. A ramped nudge leaves and lands at rest, so its
+    /// velocity is continuous everywhere.
+    #[must_use]
+    pub fn velocity_step_inside(&self, t0: f64, t1: f64) -> bool {
+        self.accel_mm_s2 == 0.0
+            && [self.t_start, self.t_end()]
+                .into_iter()
+                .any(|end| end >= t0 && end <= t1)
     }
 
     #[must_use]
@@ -346,16 +358,22 @@ impl BuzzProfile {
     #[must_use]
     pub fn eval(&self, t: f64) -> ProfileSample {
         self.validate_eval_time(t);
-        let local_t = t - self.t_start;
-        if local_t == 0.0 || local_t == self.duration {
+        if self.at_a_domain_end(t) {
             return ProfileSample {
                 position: 0.0,
                 velocity: 0.0,
                 acceleration: 0.0,
             };
         }
+        let local_t = t - self.t_start;
         let interval = self.interval_at(local_t);
         self.sample_local(local_t, interval)
+    }
+
+    /// `t_end() - t_start` is only `duration` when the sum is exact, so the
+    /// parked ends are recognised by the times themselves.
+    fn at_a_domain_end(&self, t: f64) -> bool {
+        t == self.t_start || t == self.t_end()
     }
 
     #[must_use]
@@ -376,10 +394,10 @@ impl BuzzProfile {
     #[must_use]
     pub fn jerk(&self, t: f64) -> f64 {
         self.validate_eval_time(t);
-        let local_t = t - self.t_start;
-        if local_t == 0.0 || local_t == self.duration {
+        if self.at_a_domain_end(t) {
             return 0.0;
         }
+        let local_t = t - self.t_start;
         self.jerk_local(local_t, self.interval_at(local_t))
     }
 
@@ -428,13 +446,24 @@ impl BuzzProfile {
         &self.breakpoints
     }
 
-    /// The trapezoid envelope's slope steps at each knee, so velocity jumps
-    /// there.
+    /// The trapezoid envelope's slope steps at each knee, and `eval` parks a
+    /// zero sample at both domain ends while the carrier arrives there with
+    /// `envelope_rate*A*sin(phase) + envelope*A*omega*cos(phase)`: velocity
+    /// jumps at every such instant.
     #[must_use]
-    pub fn envelope_knee_inside(&self, t0: f64, t1: f64) -> bool {
+    pub fn velocity_step_inside(&self, t0: f64, t1: f64) -> bool {
         self.breakpoints[1..self.breakpoints.len() - 1]
             .iter()
             .any(|&knee| knee > t0 && knee < t1)
+            || [0.0, self.duration].into_iter().any(|local_t| {
+                let end = self.t_start + local_t;
+                end >= t0 && end <= t1 && self.carrier_velocity_at(local_t) != 0.0
+            })
+    }
+
+    fn carrier_velocity_at(&self, local_t: f64) -> f64 {
+        self.sample_local(local_t, self.interval_at(local_t))
+            .velocity
     }
 
     #[must_use]
