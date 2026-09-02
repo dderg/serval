@@ -562,6 +562,44 @@ fn symmetric_fractional_nudge_pairs(cfg: MotorConfig) {
     );
 }
 
+#[test]
+fn a_nudge_per_drain_cycle_never_inherits_the_retired_overlay_lattice() {
+    let delta = 0.373;
+    let nudge_cycles = 40_000;
+    let rounds = 8;
+    let nudge = |round: u64| {
+        nudge_span(
+            1_000 + round * nudge_cycles,
+            if round % 2 == 0 { delta } else { -delta },
+            nudge_cycles,
+        )
+    };
+
+    let batch = (0..rounds).map(nudge).collect::<Vec<_>>();
+    let mut reference = seeded(cfg(), 64);
+    reference.push_spans(0, &batch).unwrap();
+    let expected = replayed_step_clocks(&reference.drain(u64::MAX).unwrap());
+    assert!(!expected.is_empty(), "the reference nudges must step");
+
+    let mut shim = seeded(cfg(), 8);
+    let mut frames = Vec::new();
+    for round in 0..rounds {
+        shim.push_spans(0, &[nudge(round)]).unwrap();
+        frames.extend(shim.drain(u64::MAX).unwrap());
+    }
+
+    assert_eq!(
+        replayed_step_clocks(&frames),
+        expected,
+        "a recycled signal address must still open a fresh overlay lattice"
+    );
+    assert_eq!(
+        shim.commanded_steps(0),
+        0,
+        "an overlay walks its own lattice and never moves the commanded lane"
+    );
+}
+
 fn queue_step_count(frames: &[StepFrame]) -> u32 {
     frames
         .iter()

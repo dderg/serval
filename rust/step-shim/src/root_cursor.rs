@@ -1,4 +1,6 @@
-use trajectory::{ClockedMotorSpan, Pva};
+use std::sync::Arc;
+
+use trajectory::{ClockedMotorSpan, MotorSpan, Pva};
 
 use crate::ring::SpanQueue;
 use crate::{MotorConfig, ShimError};
@@ -58,9 +60,9 @@ impl Lattice {
 /// A motor-local signal's own step lattice, tied to the signal that opened it:
 /// the overlay walks that lattice instead of the lane's while the signal is
 /// active, and a different signal opens a fresh one.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 struct Overlay {
-    signal_id: usize,
+    signal: Arc<MotorSpan>,
     lattice: Lattice,
 }
 
@@ -210,10 +212,10 @@ impl StepRootCursor {
             if last_clock < view.end_clock {
                 return Ok(());
             }
-            if let Some(overlay) = self.overlay {
+            if let Some(overlay) = &self.overlay {
+                let nominal = overlay.lattice.nominal_position(self.microstep_mm);
                 let end_position = self.position_at(motor, &view, view.end_clock)?;
-                self.overlay_carry_mm =
-                    end_position - overlay.lattice.nominal_position(self.microstep_mm);
+                self.overlay_carry_mm = end_position - nominal;
             }
             queue.release_active();
         }
@@ -231,14 +233,14 @@ impl StepRootCursor {
         if view.signal.motor_mask == 0 {
             self.overlay = None;
         } else {
-            let signal_id = std::sync::Arc::as_ptr(&view.signal) as usize;
-            if self
+            let continues_signal = self
                 .overlay
-                .is_none_or(|overlay| overlay.signal_id != signal_id)
-            {
+                .as_ref()
+                .is_some_and(|overlay| Arc::ptr_eq(&overlay.signal, &view.signal));
+            if !continues_signal {
                 let position = self.position_at(motor, view, signal_start)?;
                 self.overlay = Some(Overlay {
-                    signal_id,
+                    signal: Arc::clone(&view.signal),
                     lattice: Lattice {
                         origin_mm: position - self.overlay_carry_mm,
                         step_count: 0,
@@ -396,18 +398,13 @@ impl StepRootCursor {
         let mut iteration = 0_u32;
         while high - low > 1 {
             let span = high - low;
-            let bisection = low + span / 2;
             let safeguarded =
                 iteration % BISECTION_SAFEGUARD_PERIOD == BISECTION_SAFEGUARD_PERIOD - 1;
             let candidate = if safeguarded {
-                bisection
+                low + span / 2
             } else {
                 let fraction = deficit_low / (deficit_low + surplus_high);
-                if fraction.is_finite() && fraction > 0.0 && fraction < 1.0 {
-                    low + ((fraction * span as f64).ceil() as u64).clamp(1, span - 1)
-                } else {
-                    bisection
-                }
+                low + ((fraction * span as f64).ceil() as u64).clamp(1, span - 1)
             };
             let position = self.position_at(motor, view, candidate)?;
             let reached = slope.reached(position, level);
@@ -612,7 +609,9 @@ impl StepRootCursor {
     }
 
     fn frame(&self) -> Lattice {
-        self.overlay.map_or(self.lane, |overlay| overlay.lattice)
+        self.overlay
+            .as_ref()
+            .map_or(self.lane, |overlay| overlay.lattice)
     }
 
     fn frame_mut(&mut self) -> &mut Lattice {
