@@ -585,6 +585,9 @@ impl StepRootCursor {
         if bounds.velocity_max <= tolerance && to_pva.position <= from_pva.position {
             return Ok(Some(Slope::Falling));
         }
+        if !bounds.velocity_continuous {
+            return Ok(None);
+        }
         let mean_velocity = 0.5 * (from_pva.velocity + to_pva.velocity);
         let dip = 0.5 * bounds.acceleration_abs_max * duration;
         if mean_velocity - dip >= -tolerance {

@@ -35,6 +35,9 @@ pub struct PvaBounds {
     pub velocity_min: f64,
     pub velocity_max: f64,
     pub acceleration_abs_max: f64,
+    /// Velocity has no jump inside the interval, so `acceleration_abs_max`
+    /// bounds how far it can drift from either endpoint's velocity.
+    pub velocity_continuous: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -822,18 +825,21 @@ impl MotorSpan {
             result.velocity_min += bounds.velocity_min;
             result.velocity_max += bounds.velocity_max;
             result.acceleration_abs_max += bounds.acceleration_abs_max;
+            result.velocity_continuous &= bounds.velocity_continuous;
         }
-        let radius = result.acceleration_abs_max * (t1 - t0);
-        let start_velocity = self.eval_pva(next_toward(t0, t1))?.velocity;
-        let end_velocity = self.eval_pva(next_toward(t1, t0))?.velocity;
-        result.velocity_min = result
-            .velocity_min
-            .max(start_velocity - radius)
-            .max(end_velocity - radius);
-        result.velocity_max = result
-            .velocity_max
-            .min(start_velocity + radius)
-            .min(end_velocity + radius);
+        if result.velocity_continuous {
+            let radius = result.acceleration_abs_max * (t1 - t0);
+            let start_velocity = self.eval_pva(next_toward(t0, t1))?.velocity;
+            let end_velocity = self.eval_pva(next_toward(t1, t0))?.velocity;
+            result.velocity_min = result
+                .velocity_min
+                .max(start_velocity - radius)
+                .max(end_velocity - radius);
+            result.velocity_max = result
+                .velocity_max
+                .min(start_velocity + radius)
+                .min(end_velocity + radius);
+        }
         Ok(result)
     }
 }
@@ -1540,6 +1546,7 @@ fn zero_bounds() -> PvaBounds {
         velocity_min: 0.0,
         velocity_max: 0.0,
         acceleration_abs_max: 0.0,
+        velocity_continuous: true,
     }
 }
 fn profile_bounds(velocity: (f64, f64), acceleration: (f64, f64)) -> PvaBounds {
@@ -1547,6 +1554,7 @@ fn profile_bounds(velocity: (f64, f64), acceleration: (f64, f64)) -> PvaBounds {
         velocity_min: velocity.0,
         velocity_max: velocity.1,
         acceleration_abs_max: acceleration.0.abs().max(acceleration.1.abs()),
+        velocity_continuous: true,
     }
 }
 
@@ -1565,6 +1573,7 @@ fn scale_bounds(bounds: PvaBounds, scale: f64) -> Result<PvaBounds, ContinuousEr
         velocity_min: a.min(b),
         velocity_max: a.max(b),
         acceleration_abs_max: scale.abs() * bounds.acceleration_abs_max,
+        velocity_continuous: bounds.velocity_continuous,
     })
 }
 
@@ -1830,7 +1839,8 @@ fn spline_bounds(
         velocity_min = 0.0;
         velocity_max = 0.0;
     }
-    if degree > 0 {
+    let velocity_continuous = velocity_continuous_within(knots, degree, t0, t1);
+    if degree > 0 && velocity_continuous {
         let radius = acceleration_abs_max * (t1 - t0);
         let start_velocity = spline_pv(curve, next_toward(t0, t1)).1;
         let end_velocity = spline_pv(curve, next_toward(t1, t0)).1;
@@ -1846,9 +1856,20 @@ fn spline_bounds(
             velocity_min,
             velocity_max,
             acceleration_abs_max,
+            velocity_continuous,
         },
         scale,
     )
+}
+
+/// An interior knot of multiplicity `degree` is a C0 joint: velocity jumps there.
+fn velocity_continuous_within(knots: &[f64], degree: usize, t0: f64, t1: f64) -> bool {
+    let start = knots.partition_point(|&t| t <= t0);
+    let end = knots.partition_point(|&t| t < t1).max(start);
+    let interior = &knots[start..end];
+    interior
+        .chunk_by(|a, b| a == b)
+        .all(|run| run.len() < degree)
 }
 
 const EMPTY_PIECES: ContinuousError = ContinuousError::InvalidSpan {
@@ -1948,6 +1969,7 @@ fn piecewise_relative_bounds(
         velocity_min: f64::INFINITY,
         velocity_max: f64::NEG_INFINITY,
         acceleration_abs_max: 0.0,
+        velocity_continuous: first == last,
     };
     for piece in &pieces[first..=last] {
         let lo = t0.max(piece.t_start);
@@ -1959,6 +1981,7 @@ fn piecewise_relative_bounds(
         result.velocity_min = result.velocity_min.min(bounds.velocity_min);
         result.velocity_max = result.velocity_max.max(bounds.velocity_max);
         result.acceleration_abs_max = result.acceleration_abs_max.max(bounds.acceleration_abs_max);
+        result.velocity_continuous &= bounds.velocity_continuous;
     }
     Ok(result)
 }
@@ -2040,6 +2063,7 @@ where
             velocity_min,
             velocity_max,
             acceleration_abs_max,
+            velocity_continuous: true,
         },
         scale,
     )?;

@@ -572,7 +572,8 @@ fn correlated_corexy_cancellation_has_zero_value_and_bounds() {
         PvaBounds {
             velocity_min: 0.0,
             velocity_max: 0.0,
-            acceleration_abs_max: 0.0
+            acceleration_abs_max: 0.0,
+            velocity_continuous: true,
         }
     );
 }
@@ -1652,6 +1653,51 @@ fn spline_pvaj_reports_the_exact_cubic_third_derivative() {
     for t in [0.0, 0.25, 0.75, 1.0] {
         close(axis.eval_pvaj(t).unwrap().jerk, 30.0);
     }
+}
+
+#[test]
+fn bounds_across_a_c0_knot_keep_both_slopes_and_report_the_jump() {
+    let tent = ContinuousAxis::Spline(Arc::new(
+        ScalarNurbs::try_new(1, vec![0.0, 0.0, 0.5, 1.0, 1.0], vec![0.0, 1.0, 0.0]).unwrap(),
+    ));
+
+    let across = tent.pva_bounds(0.0, 1.0).unwrap();
+    assert_eq!(
+        across,
+        PvaBounds {
+            velocity_min: -2.0,
+            velocity_max: 2.0,
+            acceleration_abs_max: 0.0,
+            velocity_continuous: false,
+        }
+    );
+    let within = tent.pva_bounds(0.0, 0.5).unwrap();
+    assert_eq!(
+        within,
+        PvaBounds {
+            velocity_min: 2.0,
+            velocity_max: 2.0,
+            acceleration_abs_max: 0.0,
+            velocity_continuous: true,
+        }
+    );
+}
+
+#[test]
+fn a_simple_interior_knot_keeps_velocity_continuous() {
+    let arch = ContinuousAxis::Spline(Arc::new(
+        ScalarNurbs::try_new(
+            2,
+            vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0],
+            vec![0.0, 1.0, 1.0, 0.0],
+        )
+        .unwrap(),
+    ));
+
+    let across = arch.pva_bounds(0.0, 1.0).unwrap();
+    assert!(across.velocity_continuous);
+    assert!(across.velocity_min <= arch.eval_pva(0.9).unwrap().velocity);
+    assert!(across.velocity_max >= arch.eval_pva(0.1).unwrap().velocity);
 }
 
 #[test]

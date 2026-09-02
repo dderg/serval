@@ -55,6 +55,61 @@ fn endpoint_roundoff_does_not_hide_a_monotonic_spline() {
     );
 }
 
+#[test]
+fn a_c0_reversal_between_pieces_emits_every_root_on_both_slopes() {
+    const FREQ: f64 = 1_000_000.0;
+    const MICROSTEP_MM: f64 = 0.0025;
+    const DEPTH_MM: f64 = 0.15;
+    let duration = 0.001;
+    let curve = ScalarNurbs::try_new(
+        1,
+        vec![0.0, 0.0, duration / 2.0, duration, duration],
+        vec![0.0, -DEPTH_MM, 0.0],
+    )
+    .expect("a linear tent");
+    let signal = Arc::new(
+        MotorSpan::try_new(
+            Arc::from([MotorGroup::Spline {
+                curve: Arc::new(curve),
+                summed_scale: 1.0,
+            }]),
+            0.0,
+            duration,
+            0,
+            0,
+            false,
+        )
+        .expect("a dispatchable motor span"),
+    );
+    let view = ClockedMotorSpan::try_new(signal, 0.0, duration, 0.0, duration, 0.0, FREQ)
+        .expect("a clocked motor span");
+    let config = MotorConfig {
+        oid: 0,
+        microstep_distance: MICROSTEP_MM,
+        invert_dir: false,
+        cycles_per_second: FREQ,
+        encoder: StepEncoder::Classic { max_error_ticks: 0 },
+        min_rearm_cycles: 0,
+    };
+    let mut queue = SpanQueue::new(1);
+    queue.push(0, view).expect("an admissible view");
+    let mut cursor = StepRootCursor::new(&config);
+    let mut roots = Vec::new();
+
+    cursor
+        .advance(0, &config, &mut queue, u64::MAX, &mut roots, None)
+        .expect("a drainable tent");
+
+    let steps_per_slope = (DEPTH_MM / MICROSTEP_MM) as usize;
+    let advances = roots.iter().map(|root| root.advance).collect::<Vec<i8>>();
+    assert_eq!(
+        advances,
+        [vec![-1; steps_per_slope], vec![1; steps_per_slope]].concat(),
+        "the tent descends {steps_per_slope} steps then climbs back"
+    );
+    assert_eq!(cursor.step_count(), 0);
+}
+
 fn constant_velocity_ramp(travel_mm: f64, speed_mm_s: f64, freq: f64) -> ClockedMotorSpan {
     let duration = travel_mm / speed_mm_s;
     let profile =
