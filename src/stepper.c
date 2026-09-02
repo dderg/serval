@@ -28,6 +28,23 @@
 volatile uint32_t config_stepper_oids_seen
     __attribute__((used, externally_visible));
 
+// The config phase runs after the host's identify/attach handshake has
+// installed the mcu-log hook; emitting at boot races the host and the frame
+// is lost. Whichever config command the host sends first (config_stepper for
+// classic/stepcompress lanes, kalico_configure_axis for engine lanes) fires
+// the ready marker and replays the prior boot's crash forensics.
+static void
+emit_mcu_ready_once(void)
+{
+    static uint8_t emitted;
+    if (emitted)
+        return;
+    emitted = 1;
+    event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
+                   EVENT_LOG_EVENT_RUNTIME_MCU_READY, 0, 0, 0);
+    kalico_diag_emit_prior_crash();
+}
+
 void
 command_config_stepper(uint32_t *args)
 {
@@ -67,19 +84,7 @@ command_config_stepper(uint32_t *args)
     } else if (!CONFIG_INLINE_STEPPER_HACK) {
         s->time.func = stepper_event_full;
     }
-#if !CONFIG_MOTION_RUNTIME
-    // The config phase runs after the host's identify/attach handshake has
-    // installed the mcu-log hook; emitting at boot races the host and the
-    // frame is lost. A MOTION_RUNTIME build hangs this off
-    // kalico_configure_axis.
-    static uint8_t event_log_ready_emitted;
-    if (!event_log_ready_emitted) {
-        event_log_ready_emitted = 1;
-        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
-                       EVENT_LOG_EVENT_RUNTIME_MCU_READY, 0, 0, 0);
-        kalico_diag_emit_prior_crash();
-    }
-#endif
+    emit_mcu_ready_once();
 }
 DECL_COMMAND(command_config_stepper, "config_stepper oid=%c step_pin=%c"
              " dir_pin=%c invert_step=%c step_pulse_ticks=%u");
@@ -304,17 +309,7 @@ command_kalico_configure_axis(uint32_t *args)
     extern void runtime_tick_enable(void);
     runtime_tick_enable();
 
-    // Emit only after the first configure_axis: the config phase runs after the
-    // host's identify/attach handshake installs the mcu-log hook. Emitting at
-    // MCU boot / first drain races ahead of the host connecting; the frame is
-    // lost.
-    static uint8_t event_log_ready_emitted;
-    if (!event_log_ready_emitted) {
-        event_log_ready_emitted = 1;
-        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
-                        EVENT_LOG_EVENT_RUNTIME_MCU_READY, 0, 0, 0);
-        kalico_diag_emit_prior_crash();
-    }
+    emit_mcu_ready_once();
 }
 DECL_COMMAND(command_kalico_configure_axis,
              "kalico_configure_axis axis_idx=%c mode=%c microstep_distance=%u"

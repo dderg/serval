@@ -263,11 +263,21 @@ extern volatile struct diag_counters diag;
 extern struct diag_counters prior_diag;
 extern uint32_t prior_diag_present;
 
+// Which prior run `prior_snap`/`prior_diag`/`prior_ring` describe. A run's
+// forensics stay held (surviving further resets) until a connected host has
+// replayed them: klippy's connect resets the mcu, so a crash followed by a
+// hostless boot would otherwise be overwritten by that idle boot's stats.
+#define PRIOR_MAGIC 0x50524952u
+struct prior_report_state {
+    uint32_t magic;
+    uint32_t reported;
+    uint32_t reset_cause;
+    uint32_t runs_skipped;
+};
+extern volatile struct prior_report_state prior_state;
+
 extern uint32_t boot_tick_initialized;
 extern uint32_t boot_first_tick;
 extern uint32_t reset_cause_snapshot;
-extern uint32_t prior_run_froze;
-extern uint32_t saved_prior_last_dispatch_func;
-extern uint32_t saved_prior_last_dispatch_addr;
 
 #endif

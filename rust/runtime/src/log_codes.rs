@@ -59,6 +59,7 @@ pub const EVENT_RUNTIME_FG_DEMUX: u16 = 19;
 pub const EVENT_RUNTIME_FG_MSG_HEAD: u16 = 20;
 pub const EVENT_RUNTIME_TIMER_TOO_CLOSE: u16 = 21;
 pub const EVENT_RUNTIME_TIMER_TOO_CLOSE_LATE: u16 = 22;
+pub const EVENT_RUNTIME_PRIOR_RUN: u16 = 23;
 
 pub const EVENT_MOTION_AXIS_STALLED: u16 = 3;
 pub const EVENT_MOTION_AXIS_STALLED_HEAD: u16 = 4;
@@ -188,6 +189,10 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_TIMER_TOO_CLOSE_LATE) => (
             "runtime.timer_too_close_late",
             "timer too close late_cyc={arg0} count={arg1}",
+        ),
+        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_PRIOR_RUN) => (
+            "runtime.prior_run",
+            "crash replay describes boot {arg0}; {arg1} later hostless boot(s) were skipped to keep it",
         ),
         (SUBSYSTEM_DIAG, EVENT_DIAG_TIM5_LONG) => {
             ("diag.tim5_long", "TIM5 ISR long {arg0} cyc at t={arg1}")

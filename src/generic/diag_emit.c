@@ -36,16 +36,20 @@ kalico_diag_emit_prior_crash(void)
 #endif
     uint8_t had_fault = (fault_rec.magic == FAULT_MAGIC) ? 1u : 0u;
     // klippy's connect-reset overwrites the RCC cause with SFTRST, so a real
-    // foreground freeze survives only via prior_run_froze (in BKPSRAM); do not
+    // foreground freeze survives only via this_run_froze (in BKPSRAM); do not
     // drop it from this condition.
     // A "Timer too close" run must also replay the deep forensics (ring,
     // block_source, tim5_ia) — it is a clean shutdown, not an iwdg/fault.
-    uint8_t abnormal = iwdg || had_fault || prior_run_froze
+    uint8_t abnormal = iwdg || had_fault || prior_snap.this_run_froze
                        || prior_snap.ttc_count != 0;
 
     event_log_emit(abnormal ? EVENT_LOG_LEVEL_WARN : EVENT_LOG_LEVEL_DEBUG,
                     EVENT_LOG_SUBSYS_RUNTIME, EVENT_LOG_EVENT_RUNTIME_MCU_RESET,
                     0, reset_cause_snapshot, live_snap.iwdg_reset_count);
+    event_log_emit(prior_state.runs_skipped ? EVENT_LOG_LEVEL_WARN
+                                            : EVENT_LOG_LEVEL_DEBUG,
+                    EVENT_LOG_SUBSYS_RUNTIME, EVENT_LOG_EVENT_RUNTIME_PRIOR_RUN,
+                    0, prior_diag.boot_count, prior_state.runs_skipped);
 
     if (had_fault) {
         event_log_emit(EVENT_LOG_LEVEL_ERROR, EVENT_LOG_SUBSYS_RUNTIME,
@@ -118,8 +122,8 @@ kalico_diag_emit_prior_crash(void)
 
         event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
                         EVENT_LOG_EVENT_RUNTIME_LAST_DISPATCH, 0,
-                        saved_prior_last_dispatch_func,
-                        saved_prior_last_dispatch_addr);
+                        prior_snap.last_dispatch_func,
+                        prior_snap.last_dispatch_addr);
 
         if (prior_diag_present) {
             event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
@@ -144,6 +148,8 @@ kalico_diag_emit_prior_crash(void)
             }
         }
     }
+    prior_state.reported = 1;
+    diag_cache_clean();
 }
 
 void
