@@ -219,63 +219,29 @@ pub(super) fn member_profile(
         }
     };
 
-    // Flat contact: where the accelerating rail reaches the feed ceiling
-    // (before the onset, else there is no cruise). Solved on the interpolated
-    // profile, then closed on the rail's own integration over the contact arc
-    // — the one the accelerating segment is built from — so the segment lands
-    // on the ceiling the cruise starts at.
-    let flat_contact = if entry_v >= kin.flat_ceiling * (1.0 - 1e-12) {
-        0.0
-    } else if forward_at(onset).ok_or(ReconstructError::Diverged)?
-        >= kin.flat_ceiling * (1.0 - 1e-12)
+    // The accelerating rail cut where it first reaches the feed ceiling,
+    // when it does so before the onset: the cruise then starts on the speed
+    // that segment ends at. A contact within a nanometre of the onset is the
+    // onset - there is no cruise to start.
+    let accelerate = if entry_v < kin.flat_ceiling * (1.0 - 1e-12)
+        && forward_at(onset).ok_or(ReconstructError::Diverged)? >= kin.flat_ceiling * (1.0 - 1e-12)
     {
-        let reach = &forward_at;
-        let (mut lo, mut hi) = (0.0_f64, onset);
-        for _ in 0..ONSET_BISECT_ITERS {
-            let mid = 0.5 * (lo + hi);
-            if reach(mid).ok_or(ReconstructError::Diverged)? < kin.flat_ceiling {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        let mut contact = 0.5 * (lo + hi);
-        if !kin.is_straight() {
-            let exact_reach = |x: f64| {
-                LawSegment::reach_over(member_law(kin, 0.0, false), entry_v, x)
-                    .ok_or(ReconstructError::Diverged)
-            };
-            let radius = 1e-3 * (1.0 + len);
-            let local_lo = (contact - radius).max(0.0);
-            let local_hi = (contact + radius).min(onset);
-            let (mut exact_lo, mut exact_hi) = if exact_reach(local_lo)? < kin.flat_ceiling
-                && exact_reach(local_hi)? >= kin.flat_ceiling
-            {
-                (local_lo, local_hi)
-            } else {
-                (0.0, onset)
-            };
-            let contact_arc_tol = 0.25 * joint_tol(kin.flat_ceiling) * kin.flat_ceiling / kin.accel;
-            for _ in 0..ONSET_BISECT_ITERS {
-                if exact_hi - exact_lo <= contact_arc_tol {
-                    break;
-                }
-                let mid = 0.5 * (exact_lo + exact_hi);
-                if exact_reach(mid)? < kin.flat_ceiling {
-                    exact_lo = mid;
-                } else {
-                    exact_hi = mid;
-                }
-            }
-            contact = 0.5 * (exact_lo + exact_hi);
-        }
-        if onset - contact < 1e-9 {
-            onset
-        } else {
-            contact
-        }
+        LawSegment::until_speed(
+            0.0,
+            0.0,
+            entry_v,
+            member_law(kin, 0.0, false),
+            kin.flat_ceiling,
+            onset,
+        )
+        .filter(|seg| onset - seg.end_distance() >= 1e-9)
     } else {
-        onset
+        None
+    };
+    let flat_contact = match &accelerate {
+        Some(seg) => seg.end_distance(),
+        None if entry_v >= kin.flat_ceiling * (1.0 - 1e-12) => 0.0,
+        None => onset,
     };
 
     let mut t = 0.0_f64;
@@ -304,12 +270,12 @@ pub(super) fn member_profile(
         return Ok(out);
     }
     if flat_contact > 0.0 {
-        let seg = LawSegment::until_arc(t, 0.0, v, member_law(kin, 0.0, false), flat_contact)
-            .ok_or(ReconstructError::Diverged)?;
+        let seg = match accelerate {
+            Some(seg) => seg,
+            None => LawSegment::until_arc(t, 0.0, v, member_law(kin, 0.0, false), flat_contact)
+                .ok_or(ReconstructError::Diverged)?,
+        };
         let (_, v_end, _) = seg.end_state();
-        if onset > flat_contact && (v_end - kin.flat_ceiling).abs() > joint_tol(kin.flat_ceiling) {
-            return Err(infeasible());
-        }
         t = seg.end_time();
         v = v_end;
         push(&mut out, seg);

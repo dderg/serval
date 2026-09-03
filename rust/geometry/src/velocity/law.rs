@@ -349,6 +349,68 @@ impl LawSegment {
         }
     }
 
+    /// The segment from `(s0, v0)` to the first arc, within `max_ds`, where
+    /// the law's speed reaches `target`; `None` when it never does. The rail
+    /// is integrated once over `max_ds` and cut at the knot pair carrying
+    /// the crossing, with the crossing solved on that pair's own
+    /// interpolant, so the segment ends at `target` exactly and its interior
+    /// is the same motion a longer segment over the same grid describes.
+    pub fn until_speed(
+        t0: f64,
+        s0: f64,
+        v0: f64,
+        law: ScalarLaw,
+        target: f64,
+        max_ds: f64,
+    ) -> Option<LawSegment> {
+        if v0 >= target {
+            return Some(LawSegment::new(t0, 0.0, s0, v0, law));
+        }
+        match law {
+            ScalarLaw::ConstAccel { a0 } => {
+                if a0 <= 0.0 {
+                    return None;
+                }
+                let dt = (target - v0) / a0;
+                let ds = (target * target - v0 * v0) / (2.0 * a0);
+                (ds <= max_ds).then(|| LawSegment::new(t0, dt, s0, v0, law))
+            }
+            ScalarLaw::DiskRail { .. } => {
+                let whole = Self::until_arc(t0, s0, v0, law, max_ds)?;
+                let knots = whole.rail_knots();
+                let reached = knots.iter().position(|knot| knot.v >= target)?;
+                let (lo, hi) = (knots[reached - 1], knots[reached]);
+                let (mut t_lo, mut t_hi) = (lo.t, hi.t);
+                for _ in 0..64 {
+                    let mid = 0.5 * (t_lo + t_hi);
+                    if whole.state_at(t0 + mid).1 < target {
+                        t_lo = mid;
+                    } else {
+                        t_hi = mid;
+                    }
+                }
+                let (s, _, _) = whole.state_at(t0 + t_hi);
+                let crossing = RailKnot {
+                    t: t_hi,
+                    s: s - s0,
+                    v: target,
+                };
+                let mut cut = knots[..reached].to_vec();
+                cut.push(crossing);
+                let seg = LawSegment {
+                    t0,
+                    dt: t_hi,
+                    s0,
+                    v0,
+                    law,
+                    dense: OnceLock::new(),
+                };
+                let _ = seg.dense.set(Arc::from(cut));
+                Some(seg)
+            }
+        }
+    }
+
     /// Speed after covering `ds` of arc under `law` from `(0, v0)`, or `None`
     /// on a stall before the end.
     pub fn reach_over(law: ScalarLaw, v0: f64, ds: f64) -> Option<f64> {

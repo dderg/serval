@@ -271,3 +271,33 @@ fn the_accelerate_to_cruise_seam_closes_off_a_rising_cap() {
         kin.flat_ceiling
     );
 }
+
+/// Entered on its cap with the cap rising, the rail hugs the cap up to the
+/// feed ceiling, and the fixed-step integration jitters there by more than
+/// the seam slack from one cut arc to the next. The contact used to be
+/// bisected over that jitter and the accelerating segment re-integrated to
+/// the found arc, landing off the ceiling; it is now the rail cut where it
+/// first reaches the ceiling.
+#[test]
+fn a_rail_hugging_its_cap_meets_the_ceiling_exactly() {
+    let kin = clothoid(
+        3.1277409790611603,
+        -29.141597325558312,
+        9.362797258954922,
+        15.46691300072049,
+        6366.620569989854,
+    );
+    let entry = (kin.accel / kin.kappa0.abs()).sqrt();
+    let segments = profile(&kin, entry, 0.0);
+    assert_tiles(&segments, kin.length);
+    let cruise = segments
+        .iter()
+        .position(|seg| matches!(seg.law, ScalarLaw::ConstAccel { a0 } if a0 == 0.0))
+        .expect("the member cruises at the feed");
+    assert!(cruise > 0, "the rail accelerates onto the ceiling first");
+    let landing = segments[cruise - 1].end_state().1;
+    assert_eq!(
+        landing, kin.flat_ceiling,
+        "the accelerating rail ends on the ceiling the cruise starts at"
+    );
+}
