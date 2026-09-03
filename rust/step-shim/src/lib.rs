@@ -79,9 +79,10 @@ pub enum ShimError {
         step_count: i64,
         advance: i8,
     },
-    /// A run ended with the signal a whole microstep or more from the lattice
-    /// its roots had walked to: the roots emitted inside it did not track the
-    /// signal.
+    /// A run ended with the signal two microsteps or more from the lattice
+    /// its roots had walked to: a signal resting exactly one step away owes
+    /// that step, but further than that the roots emitted so far did not
+    /// track the signal.
     LatticeDrift {
         motor: usize,
         source_line: u32,

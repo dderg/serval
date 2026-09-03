@@ -26,6 +26,13 @@ impl Slope {
         }
     }
 
+    fn opposite(self) -> Self {
+        match self {
+            Self::Rising => Self::Falling,
+            Self::Falling => Self::Rising,
+        }
+    }
+
     fn reached(self, position: f64, level: f64) -> bool {
         match self {
             Self::Rising => position >= level,
@@ -389,17 +396,35 @@ impl StepRootCursor {
         loop {
             let level = self.frame().threshold(self.microstep_mm, slope);
             if !slope.reached(run_end, level) {
-                let nominal = self.frame().nominal_position(self.microstep_mm);
-                if (run_end - nominal).abs() >= self.microstep_mm {
+                let opposite = slope.opposite();
+                let opposite_level = self.frame().threshold(self.microstep_mm, opposite);
+                if !opposite.reached(run_end, opposite_level) {
+                    return Ok(());
+                }
+                let level_after_one_step =
+                    opposite_level + f64::from(opposite.advance()) * self.microstep_mm;
+                if opposite.reached(run_end, level_after_one_step) {
                     return Err(ShimError::LatticeDrift {
                         motor,
                         source_line: view.signal.source_line,
                         clock: hi,
                         position: run_end,
-                        nominal,
+                        nominal: self.frame().nominal_position(self.microstep_mm),
                     });
                 }
-                return Ok(());
+                let (clock, position) = self.solve_crossing(
+                    motor,
+                    view,
+                    (search_from, search_position),
+                    (hi, run_end),
+                    opposite_level,
+                    opposite,
+                    None,
+                )?;
+                self.push_root(motor, cfg, view, clock, opposite, out)?;
+                search_from = clock;
+                search_position = position;
+                continue;
             }
             let (clock, position) = self.solve_crossing(
                 motor,

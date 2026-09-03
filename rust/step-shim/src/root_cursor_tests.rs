@@ -7,7 +7,7 @@ use trajectory::{
 
 use super::{EVAL_COUNT, Slope, StepRootCursor};
 use crate::ring::SpanQueue;
-use crate::{MotorConfig, StepEncoder};
+use crate::{MotorConfig, ShimError, StepEncoder};
 
 #[test]
 fn endpoint_roundoff_does_not_hide_a_monotonic_spline() {
@@ -371,4 +371,123 @@ fn a_spline_sweep_settles_its_roots_on_the_polynomial_alone() {
         "{evals} carrier evaluations for {steps} roots: the polynomial should settle \
          nearly every crossing outside its noise band"
     );
+}
+
+fn spatial_view(axis: ContinuousAxis, t_start: f64, t_end: f64, freq: f64) -> ClockedMotorSpan {
+    let signal = Arc::new(
+        MotorSpan::try_new(
+            Arc::from([MotorGroup::Independent(MotorTerm {
+                source_axis: 2,
+                axis,
+                scale: 1.0,
+            })]),
+            t_start,
+            t_end,
+            0,
+            0,
+            false,
+        )
+        .expect("a dispatchable motor span"),
+    );
+    ClockedMotorSpan::try_new(signal, t_start, t_end, t_start, t_end, t_start * freq, freq)
+        .expect("a clocked motor span")
+}
+
+/// The bench: Z descended to 2.0 mm through a spline whose endpoint carries
+/// roundoff just above 2.0, so the last falling step stayed pending, then a
+/// hold parked the axis at exactly 2.0 - the pending step's own threshold.
+/// A hold certifies as rising, and the rising threshold is never reached,
+/// so the run must still notice the falling step that is due at its first
+/// clock instead of reporting the lattice adrift by one microstep.
+#[test]
+fn a_hold_resting_on_the_falling_threshold_emits_the_pending_step() {
+    const FREQ: f64 = 1_000_000.0;
+    const MICROSTEP_MM: f64 = 0.001_25;
+    let descent = 0.01;
+    let landing = 2.0 + 4.0 * f64::EPSILON;
+    let curve = ScalarNurbs::try_new(1, vec![0.0, 0.0, descent, descent], vec![2.5, landing])
+        .expect("a linear descent");
+    let fall = spatial_view(ContinuousAxis::Spline(Arc::new(curve)), 0.0, descent, FREQ);
+    let hold = spatial_view(
+        ContinuousAxis::Hold {
+            position: 2.0,
+            t_start: descent,
+            t_end: 2.0 * descent,
+        },
+        descent,
+        2.0 * descent,
+        FREQ,
+    );
+    let config = MotorConfig {
+        oid: 0,
+        microstep_distance: MICROSTEP_MM,
+        invert_dir: false,
+        cycles_per_second: FREQ,
+        encoder: StepEncoder::Classic { max_error_ticks: 0 },
+        min_rearm_cycles: 0,
+    };
+    let mut queue = SpanQueue::new(2);
+    let hold_first_clock = fall.end_clock + 1;
+    queue.push(0, fall).expect("an admissible view");
+    queue.push(0, hold).expect("an admissible view");
+    let mut cursor = StepRootCursor::new(&config);
+    cursor.reset_to(2000, 0);
+    let mut roots = Vec::new();
+
+    cursor
+        .advance(0, &config, &mut queue, u64::MAX, &mut roots, None)
+        .expect("a descent and a hold drain without drift");
+
+    assert_eq!(
+        cursor.step_count(),
+        1600,
+        "the motor rests on the hold's position"
+    );
+    let last = roots.last().expect("roots");
+    assert_eq!(
+        (last.clock, last.advance),
+        (hold_first_clock, -1),
+        "the pending falling step lands on the hold's first clock"
+    );
+}
+
+#[test]
+fn a_signal_two_steps_off_the_lattice_is_drift_not_a_burst_of_steps() {
+    const FREQ: f64 = 1_000_000.0;
+    const MICROSTEP_MM: f64 = 0.001_25;
+    let config = MotorConfig {
+        oid: 0,
+        microstep_distance: MICROSTEP_MM,
+        invert_dir: false,
+        cycles_per_second: FREQ,
+        encoder: StepEncoder::Classic { max_error_ticks: 0 },
+        min_rearm_cycles: 0,
+    };
+    let drain = |position: f64| {
+        let hold = spatial_view(
+            ContinuousAxis::Hold {
+                position,
+                t_start: 0.0,
+                t_end: 0.01,
+            },
+            0.0,
+            0.01,
+            FREQ,
+        );
+        let mut queue = SpanQueue::new(1);
+        queue.push(0, hold).expect("an admissible view");
+        let mut cursor = StepRootCursor::new(&config);
+        cursor.reset_to(2000, 0);
+        let mut roots = Vec::new();
+        cursor
+            .advance(0, &config, &mut queue, u64::MAX, &mut roots, None)
+            .map(|()| roots.iter().map(|root| root.advance).collect::<Vec<i8>>())
+    };
+
+    assert_eq!(drain(2.5 - MICROSTEP_MM).unwrap(), vec![-1]);
+    assert_eq!(drain(2.5 + MICROSTEP_MM).unwrap(), vec![1]);
+    assert!(matches!(
+        drain(2.5 - 2.0 * MICROSTEP_MM),
+        Err(ShimError::LatticeDrift { position, .. }) if position == 2.5 - 2.0 * MICROSTEP_MM
+    ));
 }
