@@ -2309,3 +2309,35 @@ fn local_polynomial_ranges_contain_every_sample_and_tighten_with_the_interval() 
     }
     assert_eq!(span.local_polynomial(0.004).unwrap().valid_until(), 0.011);
 }
+
+/// A triangular envelope on a sweeping carrier puts two jerk zeros inside
+/// one phase partition: the acceleration peaks, dips and peaks again within
+/// a twentieth of a period. Endpoint signs alone missed the pair and the
+/// reported ceiling sat below the true peak.
+#[test]
+fn buzz_bounds_capture_extrema_hidden_between_partition_ends() {
+    let duration = 0.0005825005105908128;
+    let profile = BuzzProfile::try_new(
+        0.0001,
+        332.80330052258523,
+        215.57899910528388,
+        duration,
+        0.07712915297999383,
+        0.0,
+    )
+    .unwrap();
+    let (_, ceiling) = profile.acceleration_bounds();
+    let mut peak = f64::NEG_INFINITY;
+    for i in 0..=200_000 {
+        let t = duration * i as f64 / 200_000.0;
+        peak = peak.max(profile.eval(t).acceleration);
+    }
+    assert!(
+        ceiling >= peak,
+        "reported ceiling {ceiling} sits below the sampled peak {peak}"
+    );
+    assert!(
+        ceiling - peak < 1e-6 * peak,
+        "ceiling {ceiling} is loose against the peak {peak}"
+    );
+}

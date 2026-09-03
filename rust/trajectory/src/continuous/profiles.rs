@@ -266,6 +266,11 @@ enum EnvelopeInterval {
     Falling,
 }
 
+/// Halvings a same-sign partition may undergo before its midpoint is taken
+/// as an extremum candidate outright: a zero hidden past this depth sits
+/// within `width / 2^depth` of a candidate the bound already samples.
+const ZERO_ISOLATION_MAX_DEPTH: u32 = 40;
+
 #[derive(Clone, Copy)]
 enum Derivative {
     Velocity,
@@ -551,6 +556,11 @@ impl BuzzProfile {
         extrema
     }
 
+    /// Every zero of `derivative` on `[left, right]`, found where its sign
+    /// changes between partition ends. A partition whose ends share a sign
+    /// may still hide an even number of zeros, so it is only passed over
+    /// once a Lipschitz bound on `derivative` shows neither end can reach
+    /// zero inside it; otherwise it is split.
     fn isolate_zeros(
         &self,
         left: f64,
@@ -569,15 +579,95 @@ impl BuzzProfile {
             if y0 == 0.0 {
                 push_distinct(roots, self.t_start + x0);
             }
-            if y0.signum() != y1.signum() {
-                let root = self.bisect_zero(x0, x1, y0, interval, derivative);
-                push_distinct(roots, self.t_start + root);
-            }
+            self.isolate_zeros_within(x0, y0, x1, y1, interval, derivative, 0, roots);
             x0 = x1;
             y0 = y1;
         }
         if y0 == 0.0 {
             push_distinct(roots, self.t_start + right);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn isolate_zeros_within(
+        &self,
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+        interval: EnvelopeInterval,
+        derivative: Derivative,
+        depth: u32,
+        roots: &mut Vec<f64>,
+    ) {
+        if y0.signum() != y1.signum() {
+            let root = self.bisect_zero(x0, x1, y0, interval, derivative);
+            push_distinct(roots, self.t_start + root);
+            return;
+        }
+        let half_width = 0.5 * (x1 - x0);
+        let slope = self.slope_bound(x0, x1, interval, derivative);
+        if y0.abs().min(y1.abs()) > slope * half_width {
+            return;
+        }
+        let mid = x0 + half_width;
+        if depth == ZERO_ISOLATION_MAX_DEPTH || mid <= x0 || mid >= x1 {
+            push_distinct(roots, self.t_start + mid);
+            return;
+        }
+        let ym = self.value_local(mid, interval, derivative);
+        if ym == 0.0 {
+            push_distinct(roots, self.t_start + mid);
+        }
+        self.isolate_zeros_within(x0, y0, mid, ym, interval, derivative, depth + 1, roots);
+        self.isolate_zeros_within(mid, ym, x1, y1, interval, derivative, depth + 1, roots);
+    }
+
+    /// A bound on `|d/dt derivative|` over `[x0, x1]`. The carrier
+    /// coefficient `b = envelope·amplitude` and its derivatives are products
+    /// of the linear envelope and powers of `1/ω`, each monotone on the
+    /// partition, so their magnitudes are bounded by the ends.
+    fn slope_bound(
+        &self,
+        x0: f64,
+        x1: f64,
+        interval: EnvelopeInterval,
+        derivative: Derivative,
+    ) -> f64 {
+        let (e0, e_rate) = self.envelope_at(x0, interval);
+        let (e1, _) = self.envelope_at(x1, interval);
+        let e = e0.abs().max(e1.abs());
+        let e_rate = e_rate.abs();
+        let omega0 = self.omega_start + self.sweep_rate * x0;
+        let omega1 = self.omega_start + self.sweep_rate * x1;
+        let (omega_min, omega_max) = (omega0.min(omega1), omega0.max(omega1));
+        let kappa = self.sweep_rate.abs();
+        let base = self.amplitude_mm.abs() * self.omega_start;
+        let amplitude = |order: u32| -> f64 {
+            if order > 0 && kappa == 0.0 {
+                return 0.0;
+            }
+            let factorial = (1..=order).map(f64::from).product::<f64>();
+            factorial * base * kappa.powi(order as i32) / omega_min.powi(order as i32 + 1)
+        };
+        let b = e * amplitude(0);
+        let b1 = e_rate * amplitude(0) + e * amplitude(1);
+        let b2 = 2.0 * e_rate * amplitude(1) + e * amplitude(2);
+        let b3 = 3.0 * e_rate * amplitude(2) + e * amplitude(3);
+        let b4 = 4.0 * e_rate * amplitude(3) + e * amplitude(4);
+        let w = omega_max;
+        let jerk_sin = b3 + 3.0 * b1 * w * w + 3.0 * b * w * kappa;
+        let jerk_cos = 3.0 * b2 * w + 3.0 * b1 * kappa + b * w * w * w;
+        match derivative {
+            Derivative::Velocity => unreachable!(),
+            Derivative::Acceleration => jerk_sin + jerk_cos,
+            Derivative::Jerk => {
+                let snap_sin =
+                    b4 + 3.0 * b2 * w * w + 9.0 * b1 * w * kappa + 3.0 * b * kappa * kappa;
+                let snap_cos =
+                    3.0 * b3 * w + 6.0 * b2 * kappa + b1 * w * w * w + 3.0 * b * w * w * kappa;
+                snap_sin + jerk_cos * w + snap_cos + jerk_sin * w
+            }
         }
     }
 
