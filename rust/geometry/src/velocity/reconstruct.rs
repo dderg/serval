@@ -49,37 +49,12 @@ fn member_law(kin: &Kinematics, local: f64, brake: bool) -> ScalarLaw {
     }
 }
 
-/// Speed of the accelerate-then-cruise profile from `(0, v0)` at local arc
-/// `x`, capped by the member's feed ceiling.
-fn forward_speed(kin: &Kinematics, v0: f64, x: f64) -> Option<f64> {
-    if v0 >= kin.flat_ceiling {
-        return Some(kin.flat_ceiling);
-    }
-    let v = LawSegment::reach_over(member_law(kin, 0.0, false), v0, x)?;
-    Some(v.min(kin.flat_ceiling))
-}
-
-/// Entry speed at local arc `x` of the brake that lands `v_end` at the member
-/// end.
-fn backward_speed(kin: &Kinematics, v_end: f64, x: f64) -> Option<f64> {
-    let reversed_local = 0.0;
-    let rev = Kinematics {
-        length: kin.length,
-        accel: kin.accel,
-        jerk: kin.jerk,
-        kappa0: kin.kappa0 + kin.sigma * kin.length,
-        sigma: -kin.sigma,
-        flat_ceiling: kin.flat_ceiling,
-    };
-    LawSegment::reach_over(
-        member_law(&rev, reversed_local, false),
-        v_end,
-        kin.length - x,
-    )
-}
-
 /// The member's exact profile as at most three law segments in member-local
-/// time and arc, plus the exit state.
+/// time and arc: the forward rail from the entry, the reversed rail from the
+/// exit, each integrated once over the whole member, and the cuts of those
+/// two that meet at the onset. Every seam is closed on the interpolant the
+/// onset was solved on, so no seam depends on re-integrating a rail over a
+/// different grid.
 pub(super) fn member_profile(
     idx: usize,
     m: &RunMember,
@@ -88,12 +63,14 @@ pub(super) fn member_profile(
 ) -> Result<Vec<LawSegment>, ReconstructError> {
     let kin = m.kin;
     let len = kin.length;
+    let ceiling = kin.flat_ceiling;
     let slack = SEAM_SLACK_REL * (1.0 + entry_v.max(exit_v));
     let infeasible = || ReconstructError::Infeasible {
         member: idx,
         entry_v,
         exit_v,
     };
+    let joint_tol = |v: f64| SEAM_SLACK_REL * (1.0 + v) + 1e-6;
     let reversed = Kinematics {
         length: kin.length,
         accel: kin.accel,
@@ -102,7 +79,8 @@ pub(super) fn member_profile(
         sigma: -kin.sigma,
         flat_ceiling: kin.flat_ceiling,
     };
-    let forward_profile = if kin.is_straight() || entry_v >= kin.flat_ceiling {
+    let at_ceiling = entry_v >= ceiling * (1.0 - 1e-12);
+    let forward = if at_ceiling {
         None
     } else {
         Some(
@@ -110,42 +88,23 @@ pub(super) fn member_profile(
                 .ok_or(ReconstructError::Diverged)?,
         )
     };
-    let backward_profile = if kin.is_straight() {
-        None
-    } else {
-        Some(
-            LawSegment::until_arc(0.0, 0.0, exit_v, member_law(&reversed, 0.0, false), len)
-                .ok_or(ReconstructError::Diverged)?,
-        )
+    let backward = LawSegment::until_arc(0.0, 0.0, exit_v, member_law(&reversed, 0.0, false), len)
+        .ok_or(ReconstructError::Diverged)?;
+    let forward_at = |x: f64| -> Option<f64> {
+        let Some(forward) = &forward else {
+            return Some(ceiling);
+        };
+        let t = forward.time_at_distance(x)?;
+        Some(forward.state_at(t).1.min(ceiling))
     };
-    let forward_at = |x: f64| {
-        if entry_v >= kin.flat_ceiling {
-            return Some(kin.flat_ceiling);
-        }
-        match &forward_profile {
-            Some(profile) => profile
-                .time_at_distance(x)
-                .map(|t| profile.state_at(t).1.min(kin.flat_ceiling)),
-            None => forward_speed(kin, entry_v, x),
-        }
-    };
-    let backward_at = |x: f64| match &backward_profile {
-        Some(profile) => profile
-            .time_at_distance(len - x)
-            .map(|t| profile.state_at(t).1),
-        None => backward_speed(kin, exit_v, x),
+    let backward_at = |x: f64| -> Option<f64> {
+        let t = backward.time_at_distance(len - x)?;
+        Some(backward.state_at(t).1)
     };
     let fwd_end = forward_at(len).ok_or(ReconstructError::Diverged)?;
     let bwd_start = backward_at(0.0).ok_or(ReconstructError::Diverged)?;
     if exit_v > fwd_end + slack || entry_v > bwd_start + slack {
         return Err(infeasible());
-    }
-
-    let mut out: Vec<LawSegment> = Vec::with_capacity(3);
-    fn push(out: &mut Vec<LawSegment>, seg: LawSegment) {
-        if seg.dt > 0.0 {
-            out.push(seg);
-        }
     }
 
     // Onset: the arc where the forward accelerate/cruise curve meets the
@@ -154,9 +113,8 @@ pub(super) fn member_profile(
     // seam slack of a member end is integrator noise, not a bang-bang peak:
     // snapped, or it would mint a nanosecond accelerate/brake wedge whose
     // acceleration flip downstream fitters chase as a real feature.
-    let joint_tol = |v: f64| SEAM_SLACK_REL * (1.0 + v) + 1e-6;
     let g = |x: f64| -> Option<f64> { Some(forward_at(x)? - backward_at(x)?) };
-    let onset = if g(len).ok_or(ReconstructError::Diverged)? <= 0.0 {
+    let onset = if g(len).ok_or(ReconstructError::Diverged)? <= joint_tol(exit_v) {
         len
     } else if g(0.0).ok_or(ReconstructError::Diverged)? >= -joint_tol(entry_v) {
         0.0
@@ -170,118 +128,52 @@ pub(super) fn member_profile(
                 hi = mid;
             }
         }
-        let mut solved = 0.5 * (lo + hi);
-        if !kin.is_straight() {
-            let exact_g = |x: f64| -> Option<f64> {
-                Some(forward_speed(kin, entry_v, x)? - backward_speed(kin, exit_v, x)?)
-            };
-            let candidate_forward =
-                forward_speed(kin, entry_v, solved).ok_or(ReconstructError::Diverged)?;
-            let candidate_backward =
-                backward_speed(kin, exit_v, solved).ok_or(ReconstructError::Diverged)?;
-            let candidate_residual = candidate_forward - candidate_backward;
-            if candidate_residual.abs() > 0.25 * joint_tol(candidate_forward) {
-                let radius = 1e-3 * (1.0 + len);
-                let local_lo = (solved - radius).max(0.0);
-                let local_hi = (solved + radius).min(len);
-                let local_brackets = exact_g(local_lo).ok_or(ReconstructError::Diverged)? <= 0.0
-                    && exact_g(local_hi).ok_or(ReconstructError::Diverged)? >= 0.0;
-                let (mut exact_lo, mut exact_hi) = if local_brackets {
-                    (local_lo, local_hi)
-                } else {
-                    (0.0, len)
-                };
-                // The onset is solved in arc but consumed as a speed seam, and
-                // `dv/ds = a/v` converts one into the other: at a high budget
-                // and a low speed an arc bracket that looks closed still leaves
-                // the seam speeds a slack apart.
-                let onset_arc_tol =
-                    0.25 * joint_tol(candidate_forward) * candidate_forward.max(VELOCITY_FLOOR)
-                        / kin.accel;
-                for _ in 0..ONSET_BISECT_ITERS {
-                    if exact_hi - exact_lo <= onset_arc_tol {
-                        break;
-                    }
-                    let mid = 0.5 * (exact_lo + exact_hi);
-                    if exact_g(mid).ok_or(ReconstructError::Diverged)? <= 0.0 {
-                        exact_lo = mid;
-                    } else {
-                        exact_hi = mid;
-                    }
+        0.5 * (lo + hi)
+    };
+
+    let mut out: Vec<LawSegment> = Vec::with_capacity(3);
+    fn push(out: &mut Vec<LawSegment>, seg: LawSegment) {
+        if seg.dt > 0.0 {
+            out.push(seg);
+        }
+    }
+
+    // The forward rail up to the onset: cut where it first reaches the
+    // ceiling when that comes before the onset, else at the onset itself. A
+    // contact within a nanometre of the onset is the onset - there is no
+    // cruise to start.
+    let (accelerate, flat_contact) = match &forward {
+        None => (None, 0.0),
+        Some(forward) => {
+            let contact = forward
+                .cut_at_speed(ceiling)
+                .filter(|seg| onset - seg.end_distance() >= 1e-9);
+            match contact {
+                Some(seg) => {
+                    let contact = seg.end_distance();
+                    (Some(seg), contact)
                 }
-                solved = 0.5 * (exact_lo + exact_hi);
+                None => (
+                    Some(
+                        forward
+                            .cut_at_arc(onset)
+                            .ok_or(ReconstructError::Diverged)?,
+                    ),
+                    onset,
+                ),
             }
         }
-        if g(len).ok_or(ReconstructError::Diverged)? <= joint_tol(exit_v) {
-            len
-        } else {
-            solved
-        }
     };
-
-    // The accelerating rail cut where it first reaches the feed ceiling,
-    // when it does so before the onset: the cruise then starts on the speed
-    // that segment ends at. A contact within a nanometre of the onset is the
-    // onset - there is no cruise to start.
-    let accelerate = if entry_v < kin.flat_ceiling * (1.0 - 1e-12)
-        && forward_at(onset).ok_or(ReconstructError::Diverged)? >= kin.flat_ceiling * (1.0 - 1e-12)
-    {
-        LawSegment::until_speed(
-            0.0,
-            0.0,
-            entry_v,
-            member_law(kin, 0.0, false),
-            kin.flat_ceiling,
-            onset,
-        )
-        .filter(|seg| onset - seg.end_distance() >= 1e-9)
-    } else {
-        None
-    };
-    let flat_contact = match &accelerate {
-        Some(seg) => seg.end_distance(),
-        None if entry_v >= kin.flat_ceiling * (1.0 - 1e-12) => 0.0,
-        None => onset,
-    };
-
     let mut t = 0.0_f64;
     let mut v = entry_v;
-    let forward_gain =
-        forward_speed(kin, entry_v, onset).ok_or(ReconstructError::Diverged)? - entry_v;
-    if onset > 0.0 && forward_gain <= joint_tol(entry_v) {
-        let seg = LawSegment::new(
-            0.0,
-            onset / entry_v.max(VELOCITY_FLOOR),
-            0.0,
-            entry_v,
-            ScalarLaw::ConstAccel { a0: 0.0 },
-        );
-        t = seg.end_time();
-        push(&mut out, seg);
-        if onset < len {
-            let (seg, v0) =
-                LawSegment::brake_to(t, onset, member_law(kin, onset, true), len - onset, exit_v)
-                    .ok_or(ReconstructError::Diverged)?;
-            if (v0 - v).abs() > joint_tol(v) {
-                return Err(infeasible());
-            }
-            push(&mut out, seg);
-        }
-        return Ok(out);
-    }
-    if flat_contact > 0.0 {
-        let seg = match accelerate {
-            Some(seg) => seg,
-            None => LawSegment::until_arc(t, 0.0, v, member_law(kin, 0.0, false), flat_contact)
-                .ok_or(ReconstructError::Diverged)?,
-        };
+    if let Some(seg) = accelerate {
         let (_, v_end, _) = seg.end_state();
         t = seg.end_time();
         v = v_end;
         push(&mut out, seg);
     }
     if onset > flat_contact {
-        v = kin.flat_ceiling;
+        v = ceiling;
         let seg = LawSegment::new(
             t,
             (onset - flat_contact) / v.max(VELOCITY_FLOOR),
@@ -293,10 +185,10 @@ pub(super) fn member_profile(
         push(&mut out, seg);
     }
     if onset < len {
-        let (seg, v0) =
-            LawSegment::brake_to(t, onset, member_law(kin, onset, true), len - onset, exit_v)
-                .ok_or(ReconstructError::Diverged)?;
-        if (v0 - v).abs() > SEAM_SLACK_REL * (1.0 + v) + 1e-6 {
+        let (seg, v0) = backward
+            .flipped_cut(t, onset, member_law(kin, onset, true), len - onset)
+            .ok_or(ReconstructError::Diverged)?;
+        if (v0 - v).abs() > joint_tol(v) {
             return Err(infeasible());
         }
         push(&mut out, seg);

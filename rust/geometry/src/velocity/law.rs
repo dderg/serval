@@ -296,7 +296,16 @@ impl LawSegment {
                     let slope = (v_u * h).max(1e-12);
                     u = (u - (s_u - ds) / slope).clamp(0.0, 1.0);
                 }
-                Some(self.t0 + (lo.t + u * h).min(self.dt))
+                // The cubic above seeds Newton on the arc `state_at` itself
+                // reports, so the time found is the one whose interpolated
+                // state sits at `s`.
+                let mut tau = lo.t + u * h;
+                for _ in 0..3 {
+                    let (s_at, v_at, _) = self.state_at(self.t0 + tau);
+                    let slope = v_at.max(1e-12);
+                    tau = (tau - (s_at - self.s0 - ds) / slope).clamp(lo.t, hi.t);
+                }
+                Some(self.t0 + tau.min(self.dt))
             }
         }
     }
@@ -349,66 +358,146 @@ impl LawSegment {
         }
     }
 
-    /// The segment from `(s0, v0)` to the first arc, within `max_ds`, where
-    /// the law's speed reaches `target`; `None` when it never does. The rail
-    /// is integrated once over `max_ds` and cut at the knot pair carrying
-    /// the crossing, with the crossing solved on that pair's own
-    /// interpolant, so the segment ends at `target` exactly and its interior
-    /// is the same motion a longer segment over the same grid describes.
-    pub fn until_speed(
-        t0: f64,
-        s0: f64,
-        v0: f64,
-        law: ScalarLaw,
-        target: f64,
-        max_ds: f64,
-    ) -> Option<LawSegment> {
-        if v0 >= target {
-            return Some(LawSegment::new(t0, 0.0, s0, v0, law));
-        }
-        match law {
+    /// This rail cut at the first time its speed reaches `target`, on its
+    /// own interpolant, so the cut ends at `target` exactly while its interior
+    /// stays the motion this segment describes. `None` when the speed never
+    /// gets there.
+    pub fn cut_at_speed(&self, target: f64) -> Option<LawSegment> {
+        match self.law {
             ScalarLaw::ConstAccel { a0 } => {
-                if a0 <= 0.0 {
-                    return None;
+                if self.v0 >= target {
+                    return Some(LawSegment::new(self.t0, 0.0, self.s0, self.v0, self.law));
                 }
-                let dt = (target - v0) / a0;
-                let ds = (target * target - v0 * v0) / (2.0 * a0);
-                (ds <= max_ds).then(|| LawSegment::new(t0, dt, s0, v0, law))
+                let dt = (target - self.v0) / a0;
+                (a0 > 0.0 && dt <= self.dt)
+                    .then(|| LawSegment::new(self.t0, dt, self.s0, self.v0, self.law))
             }
             ScalarLaw::DiskRail { .. } => {
-                let whole = Self::until_arc(t0, s0, v0, law, max_ds)?;
-                let knots = whole.rail_knots();
+                let knots = self.rail_knots();
                 let reached = knots.iter().position(|knot| knot.v >= target)?;
-                let (lo, hi) = (knots[reached - 1], knots[reached]);
-                let (mut t_lo, mut t_hi) = (lo.t, hi.t);
-                for _ in 0..64 {
-                    let mid = 0.5 * (t_lo + t_hi);
-                    if whole.state_at(t0 + mid).1 < target {
-                        t_lo = mid;
-                    } else {
-                        t_hi = mid;
-                    }
+                if reached == 0 {
+                    return Some(self.cut_at_time(0.0));
                 }
-                let (s, _, _) = whole.state_at(t0 + t_hi);
-                let crossing = RailKnot {
-                    t: t_hi,
-                    s: s - s0,
-                    v: target,
-                };
-                let mut cut = knots[..reached].to_vec();
-                cut.push(crossing);
-                let seg = LawSegment {
-                    t0,
-                    dt: t_hi,
-                    s0,
-                    v0,
-                    law,
-                    dense: OnceLock::new(),
-                };
-                let _ = seg.dense.set(Arc::from(cut));
-                Some(seg)
+                let tau = self.solve_in_pair(reached, |state| state.1 >= target);
+                Some(self.cut_at_time(tau))
             }
         }
+    }
+
+    /// This rail cut where it has covered `ds` of arc, on its own
+    /// interpolant.
+    pub fn cut_at_arc(&self, ds: f64) -> Option<LawSegment> {
+        match self.law {
+            ScalarLaw::ConstAccel { .. } => {
+                let t = self.time_at_distance(self.s0 + ds)?;
+                Some(LawSegment::new(
+                    self.t0,
+                    t - self.t0,
+                    self.s0,
+                    self.v0,
+                    self.law,
+                ))
+            }
+            ScalarLaw::DiskRail { .. } => {
+                let knots = self.rail_knots();
+                let reached = knots.iter().position(|knot| knot.s >= ds)?;
+                if reached == 0 {
+                    return Some(self.cut_at_time(0.0));
+                }
+                let tau = self.solve_in_pair(reached, |state| state.0 >= ds);
+                Some(self.cut_at_time(tau))
+            }
+        }
+    }
+
+    /// This rail, integrated in the reversed frame from a landing, cut where
+    /// it has covered `ds` of reversed arc and flipped into forward time from
+    /// `(t0, s0)` under `law`: the braking segment that lands where this one
+    /// started. Returns the segment and its entry speed.
+    pub fn flipped_cut(
+        &self,
+        t0: f64,
+        s0: f64,
+        law: ScalarLaw,
+        ds: f64,
+    ) -> Option<(LawSegment, f64)> {
+        if let ScalarLaw::ConstAccel { .. } = self.law {
+            return Self::brake_to(t0, s0, law, ds, self.v0);
+        }
+        let reversed = self.cut_at_arc(ds)?;
+        let rev = reversed.rail_knots();
+        let n = rev.len();
+        let total_t = rev[n - 1].t;
+        let v0 = rev[n - 1].v;
+        let knots: Vec<RailKnot> = (0..n)
+            .map(|i| {
+                let k = &rev[n - 1 - i];
+                RailKnot {
+                    t: total_t - k.t,
+                    s: ds - k.s,
+                    v: k.v,
+                }
+            })
+            .collect();
+        let seg = LawSegment {
+            t0,
+            dt: total_t,
+            s0,
+            v0,
+            law,
+            dense: OnceLock::new(),
+        };
+        let _ = seg.dense.set(Arc::from(knots));
+        Some((seg, v0))
+    }
+
+    /// The segment-local time inside knot pair `(reached - 1, reached)` at
+    /// which `reached` first holds on the interpolated `(s, v, a)`; the pair's
+    /// far knot already satisfies it.
+    fn solve_in_pair(&self, reached: usize, holds: impl Fn((f64, f64, f64)) -> bool) -> f64 {
+        let knots = self.rail_knots();
+        let (mut t_lo, mut t_hi) = (knots[reached - 1].t, knots[reached].t);
+        for _ in 0..64 {
+            let mid = 0.5 * (t_lo + t_hi);
+            let mut state = self.state_at(self.t0 + mid);
+            state.0 -= self.s0;
+            if holds(state) {
+                t_hi = mid;
+            } else {
+                t_lo = mid;
+            }
+        }
+        t_hi
+    }
+
+    /// This rail truncated at segment-local time `tau`: the knots before it
+    /// and one knot at the interpolated state there.
+    fn cut_at_time(&self, tau: f64) -> LawSegment {
+        let knots = self.rail_knots();
+        let (s, v, _) = self.state_at(self.t0 + tau);
+        let mut cut: Vec<RailKnot> = knots
+            .iter()
+            .take_while(|knot| knot.t < tau)
+            .copied()
+            .collect();
+        cut.push(RailKnot {
+            t: tau,
+            s: s - self.s0,
+            v,
+        });
+        if cut.len() == 1 {
+            cut.insert(0, cut[0]);
+        }
+        let seg = LawSegment {
+            t0: self.t0,
+            dt: tau,
+            s0: self.s0,
+            v0: self.v0,
+            law: self.law,
+            dense: OnceLock::new(),
+        };
+        let _ = seg.dense.set(Arc::from(cut));
+        seg
     }
 
     /// Speed after covering `ds` of arc under `law` from `(0, v0)`, or `None`
