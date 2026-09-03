@@ -79,6 +79,16 @@ pub enum ShimError {
         step_count: i64,
         advance: i8,
     },
+    /// A run ended with the signal a whole microstep or more from the lattice
+    /// its roots had walked to: the roots emitted inside it did not track the
+    /// signal.
+    LatticeDrift {
+        motor: usize,
+        source_line: u32,
+        clock: u64,
+        position: f64,
+        nominal: f64,
+    },
     SpanGap {
         motor: usize,
         expected: u64,
@@ -129,6 +139,17 @@ impl std::fmt::Display for ShimError {
                 f,
                 "motor {motor}: line {source_line} step root {clock} did not advance past \
                  {previous_clock} at step count {step_count} with advance {advance}"
+            ),
+            Self::LatticeDrift {
+                motor,
+                source_line,
+                clock,
+                position,
+                nominal,
+            } => write!(
+                f,
+                "motor {motor}: line {source_line} run ended at clock {clock} with the signal at \
+                 {position} while its step roots had walked the lattice to {nominal}"
             ),
             Self::SpanGap {
                 motor,
@@ -264,6 +285,39 @@ impl Encoder {
     }
 }
 
+/// Root-search work one motor has done since construction: signal
+/// evaluations, interval bounds, search windows opened, windows whose slope
+/// could not be certified and had to split, and splits pruned as unable to
+/// reach the next lattice level.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DrainStats {
+    pub evals: u64,
+    pub bounds: u64,
+    pub windows: u64,
+    pub cert_none: u64,
+    pub pruned: u64,
+}
+
+impl DrainStats {
+    fn take_thread_counters() -> Self {
+        Self {
+            evals: crate::root_cursor::EVAL_COUNT.with(std::cell::Cell::take),
+            bounds: crate::root_cursor::BOUNDS_COUNT.with(std::cell::Cell::take),
+            windows: crate::root_cursor::WINDOW_COUNT.with(std::cell::Cell::take),
+            cert_none: crate::root_cursor::CERT_NONE_COUNT.with(std::cell::Cell::take),
+            pruned: crate::root_cursor::PRUNE_COUNT.with(std::cell::Cell::take),
+        }
+    }
+
+    fn add(&mut self, other: Self) {
+        self.evals += other.evals;
+        self.bounds += other.bounds;
+        self.windows += other.windows;
+        self.cert_none += other.cert_none;
+        self.pruned += other.pruned;
+    }
+}
+
 #[derive(Debug)]
 struct MotorState {
     cfg: MotorConfig,
@@ -273,6 +327,7 @@ struct MotorState {
     stepped_clock: Option<u64>,
     last_dir: Option<u8>,
     encoder: Encoder,
+    stats: DrainStats,
 }
 
 impl MotorState {
@@ -285,6 +340,7 @@ impl MotorState {
             stepped_clock: None,
             last_dir: None,
             encoder: Encoder::new(cfg.encoder),
+            stats: DrainStats::default(),
         }
     }
 
@@ -404,11 +460,8 @@ fn drain_motor(
         )
         .and_then(|()| state.emit(motor, &mut frames));
     let elapsed = started.elapsed();
-    let evals = crate::root_cursor::EVAL_COUNT.with(std::cell::Cell::take);
-    let bounds = crate::root_cursor::BOUNDS_COUNT.with(std::cell::Cell::take);
-    let windows = crate::root_cursor::WINDOW_COUNT.with(std::cell::Cell::take);
-    let cert_none = crate::root_cursor::CERT_NONE_COUNT.with(std::cell::Cell::take);
-    let pruned = crate::root_cursor::PRUNE_COUNT.with(std::cell::Cell::take);
+    let pass = DrainStats::take_thread_counters();
+    state.stats.add(pass);
     if elapsed > std::time::Duration::from_millis(4) {
         tracing::warn!(
             subsystem = "pump",
@@ -416,11 +469,11 @@ fn drain_motor(
             motor,
             elapsed_us = elapsed.as_micros() as u64,
             queued_before,
-            evals,
-            bounds,
-            windows,
-            cert_none,
-            pruned,
+            evals = pass.evals,
+            bounds = pass.bounds,
+            windows = pass.windows,
+            cert_none = pass.cert_none,
+            pruned = pass.pruned,
             "one motor's root search dominated the shim drain"
         );
     }
@@ -508,6 +561,10 @@ impl StepShim {
 
     pub fn queued_spans(&self) -> usize {
         self.motors.iter().map(|m| m.queue.len()).sum()
+    }
+
+    pub fn drain_stats(&self, motor: usize) -> DrainStats {
+        self.motors[motor].stats
     }
 
     pub fn drain(&mut self, up_to_clock: u64) -> Result<Vec<StepFrame>, ShimError> {

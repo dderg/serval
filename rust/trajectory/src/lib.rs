@@ -11,8 +11,8 @@ pub use chain::{
 };
 pub use continuous::{
     AnalyticMoveSpan, BuzzProfile, ClockedMotorSpan, ContinuousAxis, ContinuousError,
-    ContinuousSegment, MotorGroup, MotorSpan, MotorTerm, NudgeProfile, Pva, PvaBounds, Pvaj,
-    RelativeSplinePiece, SurfaceMode, MAX_SPAN_SECS,
+    ContinuousSegment, LocalPolynomial, MotorGroup, MotorSpan, MotorTerm, NudgeProfile, Pva,
+    PvaBounds, Pvaj, RelativeSplinePiece, SurfaceMode, MAX_SPAN_SECS,
 };
 pub use convolution::ShapedSignal;
 pub use kernel::{

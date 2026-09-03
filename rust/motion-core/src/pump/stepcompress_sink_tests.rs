@@ -3015,7 +3015,6 @@ fn repeated_probe_trips_with_h7_half_wrap_idle_gaps() {
         h.endpoint.mark_reanchor(axis, volley_start, Some(H7_FREQ));
         let volley_views = 50;
         let volley = h7_ramp(volley_start, volley_views, position_mm, 1.0);
-        let volley_end_mm = span_end_mm(volley.last().unwrap());
         h.endpoint
             .send_frames(MCU_ID, &[frame_for_axis(axis, volley)])
             .unwrap_or_else(|e| panic!("probe {probe} volley: {e}"));
@@ -3033,10 +3032,11 @@ fn repeated_probe_trips_with_h7_half_wrap_idle_gaps() {
 
         h.endpoint.mark_reanchor(axis, cut_at, Some(H7_FREQ));
 
-        let cut_frac = 16.0 / volley_views as f64;
-        let pos_at_cut = position_mm + (volley_end_mm - position_mm) * cut_frac;
+        // The barrier sits at the end of the sent region and the mcu reports
+        // having executed all of it, so the motor physically rests where the
+        // shim has walked it: the resume signal starts there.
+        let pos_at_cut = h.endpoint.shim.commanded_position(0);
         let resume = h7_ramp(cut_at, 12, pos_at_cut, -1.0);
-        let resume_end_mm = span_end_mm(resume.last().unwrap());
         h.endpoint
             .send_frames(MCU_ID, &[frame_for_axis(axis, resume)])
             .unwrap_or_else(|e| panic!("probe {probe} resume send: {e}"));
@@ -3073,6 +3073,8 @@ fn repeated_probe_trips_with_h7_half_wrap_idle_gaps() {
         gradual_ticks(&mut h, &mut now, 30);
         verify(&mut h, &mut mcu, now, &format!("probe {probe} post-cut"));
 
-        position_mm = resume_end_mm;
+        // The resume lay inside the region the mcu had already executed, so
+        // the shim dropped it; the next volley starts where the motor is.
+        position_mm = h.endpoint.shim.commanded_position(0);
     }
 }

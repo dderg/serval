@@ -49,7 +49,7 @@ fn endpoint_roundoff_does_not_hide_a_monotonic_spline() {
 
     assert_eq!(
         cursor
-            .certified_slope(0, &view, view.start_clock, view.end_clock)
+            .certified_slope(0, &view, view.start_clock, view.end_clock, None)
             .unwrap(),
         Some(Slope::Rising)
     );
@@ -289,4 +289,86 @@ fn a_single_clock_window_keeps_the_last_root_of_a_decel_to_rest() {
         "the rest clock in its own view must still carry the fourth root"
     );
     assert_eq!(split_count, whole_count);
+}
+
+/// A monotone degree-9 spline sweeping four thousand microsteps through a
+/// few knots, the shape a shaped move lowers to.
+fn spline_sweep(travel_mm: f64, duration: f64) -> ClockedMotorSpan {
+    let degree = 9;
+    let interior = [0.3, 0.3, 0.55, 0.7].map(|fraction| fraction * duration);
+    let mut knots = vec![0.0; degree + 1];
+    knots.extend(interior);
+    knots.extend(vec![duration; degree + 1]);
+    let count = knots.len() - degree - 1;
+    let control_points = (0..count)
+        .map(|i| {
+            let fraction = i as f64 / (count - 1) as f64;
+            travel_mm * fraction * fraction * (3.0 - 2.0 * fraction)
+        })
+        .collect::<Vec<f64>>();
+    let curve = ScalarNurbs::try_new(degree as u8, knots, control_points).expect("a valid curve");
+    let signal = Arc::new(
+        MotorSpan::try_new(
+            Arc::from([MotorGroup::Spline {
+                curve: Arc::new(curve),
+                summed_scale: 1.0,
+            }]),
+            0.0,
+            duration,
+            0,
+            0,
+            false,
+        )
+        .expect("a dispatchable motor span"),
+    );
+    ClockedMotorSpan::try_new(signal, 0.0, duration, 0.0, duration, 0.0, 520_000_000.0)
+        .expect("a clocked motor span")
+}
+
+#[test]
+fn a_spline_sweep_settles_its_roots_on_the_polynomial_alone() {
+    const MICROSTEP_MM: f64 = 0.001;
+    const TRAVEL_MM: f64 = 4.0;
+    let view = spline_sweep(TRAVEL_MM, 0.05);
+    let steps = (TRAVEL_MM / MICROSTEP_MM) as u64;
+    let expected = (1..steps)
+        .map(|step| least_clock_reaching(&view, step as f64 * MICROSTEP_MM))
+        .collect::<Vec<u64>>();
+
+    let config = MotorConfig {
+        oid: 3,
+        microstep_distance: MICROSTEP_MM,
+        invert_dir: false,
+        cycles_per_second: 520_000_000.0,
+        encoder: StepEncoder::HighPrecision,
+        min_rearm_cycles: 0,
+    };
+    let mut queue = SpanQueue::new(4);
+    queue.push(0, view.clone()).expect("an admissible view");
+    let mut cursor = StepRootCursor::new(&config);
+    cursor.reset_to(0, 0);
+    let mut roots = Vec::new();
+    let evals_before = EVAL_COUNT.with(std::cell::Cell::get);
+
+    cursor
+        .advance(0, &config, &mut queue, u64::MAX, &mut roots, None)
+        .expect("a drainable sweep");
+
+    let evals = EVAL_COUNT.with(std::cell::Cell::get) - evals_before;
+    let clocks = roots.iter().map(|root| root.clock).collect::<Vec<u64>>();
+    assert_eq!(
+        clocks.len(),
+        expected.len() + 1,
+        "the sweep ends exactly on its last level"
+    );
+    assert_eq!(
+        clocks[..expected.len()],
+        expected,
+        "every root must be the first clock whose position reaches its level"
+    );
+    assert!(
+        evals <= 64,
+        "{evals} carrier evaluations for {steps} roots: the polynomial should settle \
+         nearly every crossing outside its noise band"
+    );
 }

@@ -299,5 +299,64 @@ pub fn curvature_from_derivs<const N: usize>(
     cross_norm / speed_cubed.max(floor)
 }
 
+/// Derivatives `C(u), C'(u), …, C^(order)(u)` into `out[..=order]` from one
+/// knot-span lookup. Each order is de Boor on the local hodograph, so the
+/// control-point differences are formed before any basis weight touches
+/// them and a curve carrying a large offset keeps small derivatives exact;
+/// `out[0]` is bit-identical to [`eval`]. Orders past the degree are zero.
+/// At a knot the right-hand piece is differentiated, matching [`eval`]'s
+/// span choice.
+pub fn eval_derivatives(
+    cps: &[f64],
+    knots: &[f64],
+    degree: u8,
+    u: f64,
+    order: usize,
+    out: &mut [f64],
+) {
+    debug_assert!((degree as usize) <= MAX_DEGREE);
+    debug_assert!(knots.len() == cps.len() + (degree as usize) + 1);
+    assert!(
+        out.len() > order,
+        "derivative output holds orders 0..={order}"
+    );
+    let p = degree as usize;
+    let n = cps.len();
+    let span = find_knot_span(knots, p, n, u);
+    out[..=order].fill(0.0);
+
+    let mut hodograph = [0.0; WORKSPACE_SIZE];
+    hodograph[..=p].copy_from_slice(&cps[span - p..=span]);
+    for k in 0..=order.min(p) {
+        let reduced = p - k;
+        if k > 0 {
+            let factor = (reduced + 1) as f64;
+            for j in 0..=reduced {
+                let denominator = knots[span + j + 1] - knots[span - p + j + k];
+                hodograph[j] = if denominator > 0.0 {
+                    factor * (hodograph[j + 1] - hodograph[j]) / denominator
+                } else {
+                    0.0
+                };
+            }
+        }
+        let mut d = hodograph;
+        for r in 1..=reduced {
+            for j in (r..=reduced).rev() {
+                let knot_lo = knots[span - p + k + j];
+                let knot_hi = knots[span + 1 + j - r];
+                let denominator = knot_hi - knot_lo;
+                let alpha = if denominator > 0.0 {
+                    (u - knot_lo) / denominator
+                } else {
+                    0.0
+                };
+                d[j] = crate::fmadd(d[j] - d[j - 1], alpha, d[j - 1]);
+            }
+        }
+        out[k] = d[reduced];
+    }
+}
+
 #[cfg(test)]
 mod tests;

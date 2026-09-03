@@ -1607,32 +1607,37 @@ fn spline_domain(curve: &ScalarNurbs) -> (f64, f64) {
     )
 }
 
+fn spline_derivatives<const ORDERS: usize>(curve: &ScalarNurbs, t: f64) -> [f64; ORDERS] {
+    let mut out = [0.0; ORDERS];
+    nurbs::eval::eval_derivatives(
+        curve.control_points(),
+        curve.knots(),
+        curve.degree(),
+        t,
+        ORDERS - 1,
+        &mut out,
+    );
+    out
+}
+
 fn spline_pva(curve: &ScalarNurbs, t: f64) -> Result<Pva, ContinuousError> {
     let t = spline_evaluation_time(curve, t)?;
+    let [position, velocity, acceleration] = spline_derivatives(curve, t);
     Ok(Pva {
-        position: nurbs::eval::eval(&curve.as_view(), t),
-        velocity: nurbs::eval::eval_derivative(
-            curve.control_points(),
-            curve.knots(),
-            curve.degree(),
-            t,
-        ),
-        acceleration: spline_nth_derivative(curve, 2, t),
+        position,
+        velocity,
+        acceleration,
     })
 }
 
 fn spline_pvaj(curve: &ScalarNurbs, t: f64) -> Result<Pvaj, ContinuousError> {
     let t = spline_evaluation_time(curve, t)?;
+    let [position, velocity, acceleration, jerk] = spline_derivatives(curve, t);
     Ok(Pvaj {
-        position: nurbs::eval::eval(&curve.as_view(), t),
-        velocity: nurbs::eval::eval_derivative(
-            curve.control_points(),
-            curve.knots(),
-            curve.degree(),
-            t,
-        ),
-        acceleration: spline_nth_derivative(curve, 2, t),
-        jerk: spline_nth_derivative(curve, 3, t),
+        position,
+        velocity,
+        acceleration,
+        jerk,
     })
 }
 
@@ -1654,10 +1659,8 @@ fn degenerate_knot_span(knots: &[f64], span: usize) -> bool {
 }
 
 fn spline_pv(curve: &ScalarNurbs, t: f64) -> (f64, f64) {
-    (
-        nurbs::eval::eval(&curve.as_view(), t),
-        nurbs::eval::eval_derivative(curve.control_points(), curve.knots(), curve.degree(), t),
-    )
+    let [position, velocity] = spline_derivatives(curve, t);
+    (position, velocity)
 }
 
 fn spline_pv_continuous(curve: &ScalarNurbs, left: f64, right: f64) -> bool {
@@ -1728,35 +1731,247 @@ fn spline_owned_time(curve: &ScalarNurbs, t: f64) -> f64 {
     }
 }
 
-fn spline_nth_derivative(curve: &ScalarNurbs, order: usize, t: f64) -> f64 {
-    let degree = curve.degree() as usize;
-    if order > degree {
-        return 0.0;
+/// The signal on `[t0, valid_until)` as one Taylor polynomial about `t0`:
+/// exact for spline and hold carriers between two of their breakpoints, so a
+/// root search can predict crossings without touching the spline.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LocalPolynomial {
+    t0: f64,
+    valid_until: f64,
+    degree: usize,
+    coefficients: [f64; nurbs::WORKSPACE_SIZE],
+    /// The largest operand the carrier's own evaluation handles - its local
+    /// control points and base - which its rounding scales with.
+    operand_scale: f64,
+}
+
+impl LocalPolynomial {
+    pub fn t0(&self) -> f64 {
+        self.t0
     }
-    let cps = curve.control_points();
-    let knots = curve.knots();
-    let reduced_degree = degree - order;
-    let reduced_knots = &knots[order..knots.len() - order];
-    let reduced_count = cps.len() - order;
-    let span = nurbs::knot::find_knot_span(reduced_knots, reduced_degree, reduced_count, t);
-    let mut values = [0.0; nurbs::WORKSPACE_SIZE];
-    for index in 0..=reduced_degree {
-        values[index] =
-            derivative_control(cps, knots, degree, order, span - reduced_degree + index);
+
+    pub fn valid_until(&self) -> f64 {
+        self.valid_until
     }
-    for level in 1..=reduced_degree {
-        for index in (level..=reduced_degree).rev() {
-            let low = reduced_knots[span - reduced_degree + index];
-            let high = reduced_knots[span + 1 + index - level];
-            let alpha = if high > low {
-                (t - low) / (high - low)
-            } else {
-                0.0
-            };
-            values[index] = values[index - 1] + alpha * (values[index] - values[index - 1]);
+
+    /// An interval certainly containing every position on `[t_from, t_to]`:
+    /// the Bernstein hull on that interval, widened by its own roundoff.
+    pub fn position_range(&self, t_from: f64, t_to: f64) -> (f64, f64) {
+        bernstein_hull(
+            &self.coefficients[..=self.degree],
+            t_from - self.t0,
+            t_to - self.t0,
+        )
+    }
+
+    /// An interval certainly containing every velocity on `[t_from, t_to]`.
+    pub fn velocity_range(&self, t_from: f64, t_to: f64) -> (f64, f64) {
+        if self.degree == 0 {
+            return (0.0, 0.0);
+        }
+        let mut derivative = [0.0; nurbs::WORKSPACE_SIZE];
+        for order in 1..=self.degree {
+            derivative[order - 1] = self.coefficients[order] * order as f64;
+        }
+        bernstein_hull(&derivative[..self.degree], t_from - self.t0, t_to - self.t0)
+    }
+
+    /// How far this polynomial and the carrier it expands can disagree at
+    /// `t` once both have been rounded: the carrier's evaluation rounds
+    /// against its control points, the expansion against its Taylor terms,
+    /// each through about `degree` operations; sixty-four times that.
+    pub fn noise_band(&self, t: f64) -> f64 {
+        let local = (t - self.t0).abs();
+        let mut magnitude = self.operand_scale;
+        let mut power = 1.0;
+        for &coefficient in &self.coefficients[..=self.degree] {
+            magnitude = magnitude.max(coefficient.abs() * power);
+            power *= local;
+        }
+        64.0 * (self.degree + 1) as f64 * f64::EPSILON * magnitude
+    }
+
+    pub fn position(&self, t: f64) -> f64 {
+        let local = t - self.t0;
+        let mut acc = self.coefficients[self.degree];
+        for &coefficient in self.coefficients[..self.degree].iter().rev() {
+            acc = acc * local + coefficient;
+        }
+        acc
+    }
+
+    pub fn velocity(&self, t: f64) -> f64 {
+        if self.degree == 0 {
+            return 0.0;
+        }
+        let local = t - self.t0;
+        let mut acc = self.coefficients[self.degree] * self.degree as f64;
+        for order in (1..self.degree).rev() {
+            acc = acc * local + self.coefficients[order] * order as f64;
+        }
+        acc
+    }
+
+    fn constant(t0: f64, valid_until: f64, value: f64) -> Self {
+        let mut coefficients = [0.0; nurbs::WORKSPACE_SIZE];
+        coefficients[0] = value;
+        Self {
+            t0,
+            valid_until,
+            degree: 0,
+            coefficients,
+            operand_scale: value.abs(),
         }
     }
-    values[reduced_degree]
+
+    fn add_scaled(&mut self, other: &Self, scale: f64) {
+        for order in 0..=other.degree {
+            self.coefficients[order] += scale * other.coefficients[order];
+        }
+        self.degree = self.degree.max(other.degree);
+        self.valid_until = self.valid_until.min(other.valid_until);
+        self.operand_scale = self.operand_scale.max(scale.abs() * other.operand_scale);
+    }
+
+    fn scaled(self, scale: f64) -> Self {
+        let mut result = Self::constant(self.t0, self.valid_until, 0.0);
+        result.add_scaled(&self, scale);
+        result
+    }
+}
+
+/// Every value of the power-basis polynomial `coefficients` on `[a, b]` lies
+/// between the least and greatest of its Bernstein coefficients on that
+/// interval. Every intermediate of the shift to `a`, the scale by `b - a`
+/// and the basis change is bounded by `Σ|c_k|·(2·max(|a|,|b|))^k`, so the
+/// hull is widened by that many roundings of it.
+fn bernstein_hull(coefficients: &[f64], a: f64, b: f64) -> (f64, f64) {
+    let degree = coefficients.len() - 1;
+    let width = b - a;
+    let reach = 2.0 * a.abs().max(b.abs());
+    let mut shifted = [0.0; nurbs::WORKSPACE_SIZE];
+    shifted[..=degree].copy_from_slice(coefficients);
+    let mut magnitude = 0.0;
+    let mut reach_power = 1.0;
+    for &coefficient in coefficients {
+        magnitude += coefficient.abs() * reach_power;
+        reach_power *= reach;
+    }
+    for level in 0..degree {
+        for index in (level..degree).rev() {
+            shifted[index] += a * shifted[index + 1];
+        }
+    }
+    let mut width_power = 1.0;
+    for coefficient in shifted[..=degree].iter_mut() {
+        *coefficient *= width_power;
+        width_power *= width;
+    }
+    let (mut low, mut high) = (f64::INFINITY, f64::NEG_INFINITY);
+    for j in 0..=degree {
+        let mut value = shifted[0];
+        let mut weight = 1.0;
+        for k in 1..=j {
+            weight *= (j + 1 - k) as f64 / (degree + 1 - k) as f64;
+            value += weight * shifted[k];
+        }
+        low = low.min(value);
+        high = high.max(value);
+    }
+    let operations = ((degree + 1) * (degree + 1)) as f64;
+    let margin = 4.0 * operations * f64::EPSILON * magnitude;
+    (low - margin, high + margin)
+}
+
+fn spline_local_polynomial(curve: &ScalarNurbs, base: f64, t0: f64) -> LocalPolynomial {
+    let degree = curve.degree() as usize;
+    let knots = curve.knots();
+    let count = curve.control_points().len();
+    let span = nurbs::knot::find_knot_span(knots, degree, count, t0);
+    let valid_until = knots[span + 1..=count]
+        .iter()
+        .copied()
+        .find(|&knot| knot > t0)
+        .unwrap_or(knots[count]);
+    let mut coefficients = [0.0; nurbs::WORKSPACE_SIZE];
+    nurbs::eval::eval_derivatives(
+        curve.control_points(),
+        knots,
+        curve.degree(),
+        t0,
+        degree,
+        &mut coefficients,
+    );
+    let mut factorial = 1.0;
+    for (order, coefficient) in coefficients.iter_mut().enumerate().take(degree + 1).skip(1) {
+        factorial *= order as f64;
+        *coefficient /= factorial;
+    }
+    coefficients[0] += base;
+    let operand_scale = curve.control_points()[span - degree..=span]
+        .iter()
+        .fold(base.abs(), |scale, point| scale.max(point.abs()));
+    LocalPolynomial {
+        t0,
+        valid_until,
+        degree,
+        coefficients,
+        operand_scale,
+    }
+}
+
+impl ContinuousAxis {
+    fn local_polynomial(&self, t0: f64) -> Option<LocalPolynomial> {
+        match self {
+            Self::Spline(curve) => Some(spline_local_polynomial(curve, 0.0, t0)),
+            Self::RelativeSpline {
+                base_position,
+                curve,
+            } => Some(spline_local_polynomial(curve, *base_position, t0)),
+            Self::PiecewiseRelativeSpline(pieces) => {
+                let piece = owning_piece(pieces, t0).ok()?;
+                let mut polynomial = spline_local_polynomial(&piece.curve, piece.base_position, t0);
+                polynomial.valid_until = polynomial.valid_until.min(piece.t_end);
+                Some(polynomial)
+            }
+            Self::Hold {
+                position, t_end, ..
+            } => Some(LocalPolynomial::constant(t0, *t_end, *position)),
+            Self::Analytic { .. } | Self::Nudge(_) | Self::Buzz { .. } => None,
+        }
+    }
+}
+
+impl MotorGroup {
+    fn local_polynomial(&self, t0: f64) -> Option<LocalPolynomial> {
+        match self {
+            Self::Spline {
+                curve,
+                summed_scale,
+            } => Some(spline_local_polynomial(curve, 0.0, t0).scaled(*summed_scale)),
+            Self::RelativeSpline {
+                curve,
+                base_position,
+                summed_scale,
+            } => Some(spline_local_polynomial(curve, *base_position, t0).scaled(*summed_scale)),
+            Self::Independent(term) => Some(term.axis.local_polynomial(t0)?.scaled(term.scale)),
+            Self::Analytic { .. } => None,
+        }
+    }
+}
+
+impl MotorSpan {
+    /// The signal from `t0` to the nearest breakpoint after it as one exact
+    /// polynomial, when every carrier is polynomial there. Analytic and
+    /// oscillating carriers have none.
+    pub fn local_polynomial(&self, t0: f64) -> Option<LocalPolynomial> {
+        let t0 = checked_clamped_time(t0, self.t_start, self.t_end).ok()?;
+        let mut total = LocalPolynomial::constant(t0, self.t_end, 0.0);
+        for group in self.groups.iter() {
+            total.add_scaled(&group.local_polynomial(t0)?, 1.0);
+        }
+        (total.valid_until > t0).then_some(total)
+    }
 }
 
 /// The `order`-th hodograph control point `Q^(order)_index`, from the standard

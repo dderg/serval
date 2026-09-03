@@ -2101,3 +2101,211 @@ fn carrier_breakpoints_are_publicly_exposed_and_bracket_the_domain() {
     assert!(merged.windows(2).all(|pair| pair[0] < pair[1]));
     close(segment.eval_axis_pvaj(0, 10.5).unwrap().acceleration, 6.0);
 }
+
+/// A degree-9 curve with interior knots, the shape a shaped move lowers to.
+fn lumpy_degree_nine() -> Arc<ScalarNurbs> {
+    let degree = 9;
+    let interior = [0.004, 0.004, 0.011, 0.017];
+    let mut knots = vec![0.0; degree + 1];
+    knots.extend(interior);
+    knots.extend(vec![0.025; degree + 1]);
+    let control_points = (0..knots.len() - degree - 1)
+        .map(|i| libm::sin(i as f64 * 0.7) * 3.0 + 140.0)
+        .collect();
+    Arc::new(ScalarNurbs::try_new(degree as u8, knots, control_points).unwrap())
+}
+
+#[test]
+fn local_polynomial_matches_the_spline_up_to_the_next_knot() {
+    let curve = lumpy_degree_nine();
+    let span = MotorSpan::try_new(
+        Arc::from(vec![MotorGroup::Spline {
+            curve: Arc::clone(&curve),
+            summed_scale: -0.5,
+        }]),
+        0.0,
+        0.025,
+        0,
+        7,
+        false,
+    )
+    .unwrap();
+    for t0 in [0.0, 0.0031, 0.004, 0.0119, 0.017, 0.0249] {
+        let polynomial = span
+            .local_polynomial(t0)
+            .expect("a spline carrier is polynomial");
+        let next_knot = curve
+            .knots()
+            .iter()
+            .copied()
+            .find(|&knot| knot > t0)
+            .unwrap();
+        assert_eq!(polynomial.valid_until(), next_knot, "validity from {t0}");
+        for i in 0..64 {
+            let t = t0 + (next_knot - t0) * i as f64 / 64.0;
+            let exact = span.eval_pva(t).unwrap();
+            assert!(
+                (polynomial.position(t) - exact.position).abs()
+                    <= 1e-9 * (1.0 + exact.position.abs()),
+                "position at {t} from {t0}: {} vs {}",
+                polynomial.position(t),
+                exact.position
+            );
+            assert!(
+                (polynomial.velocity(t) - exact.velocity).abs()
+                    <= 1e-7 * (1.0 + exact.velocity.abs()),
+                "velocity at {t} from {t0}: {} vs {}",
+                polynomial.velocity(t),
+                exact.velocity
+            );
+        }
+    }
+    assert!(
+        span.local_polynomial(0.025).is_none(),
+        "nothing lies past the domain end"
+    );
+}
+
+#[test]
+fn local_polynomial_sums_carriers_and_stops_at_a_piece_seam() {
+    let curve = lumpy_degree_nine();
+    let pieces: Arc<[RelativeSplinePiece]> = Arc::from(vec![
+        RelativeSplinePiece {
+            base_position: 2.0,
+            curve: cubic_bezier(vec![0.0, 1.0, 0.0, 2.0]),
+            t_start: 0.0,
+            t_end: 1.0,
+        },
+        RelativeSplinePiece {
+            base_position: 4.0,
+            curve: Arc::new(
+                ScalarNurbs::try_new(
+                    3,
+                    vec![1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0],
+                    vec![0.0, -1.0, 0.0, 1.0],
+                )
+                .unwrap(),
+            ),
+            t_start: 1.0,
+            t_end: 2.0,
+        },
+    ]);
+    let span = MotorSpan::try_new(
+        Arc::from(vec![
+            MotorGroup::Independent(MotorTerm {
+                source_axis: 3,
+                axis: ContinuousAxis::PiecewiseRelativeSpline(Arc::clone(&pieces)),
+                scale: 2.0,
+            }),
+            MotorGroup::Independent(MotorTerm {
+                source_axis: 0,
+                axis: ContinuousAxis::Hold {
+                    position: 5.0,
+                    t_start: 0.0,
+                    t_end: 2.0,
+                },
+                scale: 1.0,
+            }),
+        ]),
+        0.0,
+        2.0,
+        0,
+        7,
+        false,
+    )
+    .unwrap();
+    let polynomial = span.local_polynomial(0.25).unwrap();
+    assert_eq!(polynomial.valid_until(), 1.0);
+    for i in 0..16 {
+        let t = 0.25 + 0.75 * i as f64 / 16.0;
+        let exact = span.eval_pva(t).unwrap();
+        assert!((polynomial.position(t) - exact.position).abs() <= 1e-12);
+        assert!(
+            (polynomial.velocity(t) - exact.velocity).abs() <= 1e-10,
+            "v at {t}: {} vs {}",
+            polynomial.velocity(t),
+            exact.velocity
+        );
+    }
+    let analytic = MotorSpan::try_new(
+        Arc::from(vec![
+            MotorGroup::Independent(MotorTerm {
+                source_axis: 0,
+                axis: ContinuousAxis::Spline(curve),
+                scale: 1.0,
+            }),
+            MotorGroup::Independent(MotorTerm {
+                source_axis: 1,
+                axis: ContinuousAxis::Nudge(NudgeProfile::try_new(0.2, 10.0, 400.0, 0.0).unwrap()),
+                scale: 1.0,
+            }),
+        ]),
+        0.0,
+        0.025,
+        0,
+        7,
+        false,
+    )
+    .unwrap();
+    assert!(
+        analytic.local_polynomial(0.001).is_none(),
+        "a nudge carrier has no polynomial"
+    );
+}
+
+#[test]
+fn local_polynomial_ranges_contain_every_sample_and_tighten_with_the_interval() {
+    let curve = lumpy_degree_nine();
+    let span = MotorSpan::try_new(
+        Arc::from(vec![MotorGroup::Spline {
+            curve: Arc::clone(&curve),
+            summed_scale: 1.0,
+        }]),
+        0.0,
+        0.025,
+        0,
+        7,
+        false,
+    )
+    .unwrap();
+    for t0 in [0.0, 0.004, 0.011, 0.017] {
+        let polynomial = span.local_polynomial(t0).unwrap();
+        let end = polynomial.valid_until();
+        let mut previous_width = f64::INFINITY;
+        for halvings in 0..8 {
+            let t1 = t0 + (end - t0) / f64::from(1 << halvings);
+            let (position_low, position_high) = polynomial.position_range(t0, t1);
+            let (velocity_low, velocity_high) = polynomial.velocity_range(t0, t1);
+            let mut sampled = (f64::INFINITY, f64::NEG_INFINITY);
+            for i in 0..=200 {
+                let t = t0 + (t1 - t0) * i as f64 / 200.0;
+                let exact = span.eval_pva(t).unwrap();
+                assert!(
+                    (position_low..=position_high).contains(&exact.position),
+                    "position {} at {t} escapes [{position_low}, {position_high}]",
+                    exact.position
+                );
+                assert!(
+                    (velocity_low..=velocity_high).contains(&exact.velocity),
+                    "velocity {} at {t} escapes [{velocity_low}, {velocity_high}]",
+                    exact.velocity
+                );
+                sampled = (sampled.0.min(exact.velocity), sampled.1.max(exact.velocity));
+            }
+            let width = velocity_high - velocity_low;
+            assert!(
+                width <= previous_width * 1.0000001,
+                "hull widened on halving {halvings}"
+            );
+            previous_width = width;
+            if halvings == 7 {
+                let sampled_width = sampled.1 - sampled.0;
+                assert!(
+                    width <= sampled_width + 1e-3 * (1.0 + sampled.0.abs().max(sampled.1.abs())),
+                    "hull {width} stays far above the sampled spread {sampled_width} on a short interval"
+                );
+            }
+        }
+    }
+    assert_eq!(span.local_polynomial(0.004).unwrap().valid_until(), 0.011);
+}
