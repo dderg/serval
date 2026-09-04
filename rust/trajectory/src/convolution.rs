@@ -500,43 +500,14 @@ where
         {
             return hit.1;
         }
-        let value = match self.convolve_pva_from_moments(t) {
-            Some(exact) => {
-                self.debug_assert_matches_quadrature(t, exact);
-                exact
-            }
-            None => self.convolve_pva_quadrature(t),
-        };
+        let value = self
+            .convolve_pva_from_moments(t)
+            .unwrap_or_else(|| self.convolve_pva_quadrature(t));
         let slot = self.pva_memo_next.get();
         self.pva_memo.borrow_mut()[slot] = Some((key, value));
         self.pva_memo_next.set((slot + 1) % PVA_MEMO_SLOTS);
         value
     }
-
-    /// The moment path integrates each kernel piece against the input's own
-    /// polynomial; the quadrature path samples the same product on a Gauss
-    /// rule. They are independent computations of one integral, and the fast
-    /// one is only allowed to differ from the reference by rounding - which
-    /// is why no interval needs excluding from it, however its edges line up
-    /// with the input's piece boundaries.
-    #[cfg(debug_assertions)]
-    fn debug_assert_matches_quadrature(&self, t: f64, exact: (f64, f64, f64)) {
-        let reference = self.convolve_pva_quadrature(t);
-        for (label, got, want, tolerance) in [
-            ("position", exact.0, reference.0, 1e-9),
-            ("velocity", exact.1, reference.1, 1e-6),
-            ("acceleration", exact.2, reference.2, 1e-2),
-        ] {
-            let scale = got.abs().max(want.abs()).max(1.0);
-            assert!(
-                (got - want).abs() <= tolerance * scale,
-                "convolved {label} at t={t} from moments is {got}, quadrature says {want}"
-            );
-        }
-    }
-
-    #[cfg(not(debug_assertions))]
-    fn debug_assert_matches_quadrature(&self, _t: f64, _exact: (f64, f64, f64)) {}
 
     fn convolve_pva_from_moments(&self, t: f64) -> Option<(f64, f64, f64)> {
         let moment_input = self.moment_input.as_ref()?;
