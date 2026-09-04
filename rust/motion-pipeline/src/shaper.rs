@@ -899,6 +899,7 @@ fn fit_axis_targets(
     if targets.is_empty() {
         return Ok(Vec::new());
     }
+    let slope_jumps = table.slope_jumps().to_vec();
     let make_sig = || {
         let eval_table = Arc::clone(&table);
         let moment_table = Arc::clone(&table);
@@ -908,9 +909,10 @@ fn fit_axis_targets(
             move |t| eval_table.eval_hinted(t, &piece_hint),
             input_breaks.clone(),
             input_degree,
-            move |lo, hi, degree, origin, moments| {
-                moment_table.integrate_moments(lo, hi, degree, origin, moments)
+            move |lo, hi, degree, origin, orders| {
+                moment_table.integrate_moments(lo, hi, degree, origin, orders)
             },
+            slope_jumps.clone(),
         )
     };
     let max_seed_spans = targets
@@ -1367,6 +1369,23 @@ pub(crate) fn shaped_signal_breakpoints(
 /// the widest kernel moment window the shaper builds.
 const MOMENT_POWER_CAPACITY: usize = 24;
 
+/// The signal's `order`-th derivative on one piece, written into `out`;
+/// returns its coefficient count, zero once the derivative vanishes.
+fn differentiate_into(coefficients: &[f64], order: usize, out: &mut [f64]) -> usize {
+    let mut length = coefficients.len();
+    out[..length].copy_from_slice(coefficients);
+    for _ in 0..order {
+        if length <= 1 {
+            return 0;
+        }
+        for power in 1..length {
+            out[power - 1] = out[power] * power as f64;
+        }
+        length -= 1;
+    }
+    length
+}
+
 fn accumulate_translated_moments(
     source_origin: f64,
     source: &[f64],
@@ -1415,7 +1434,7 @@ struct MomentTree {
 }
 
 impl MomentTree {
-    fn build(table: &AxisSignalTable, degree: usize) -> Self {
+    fn build(table: &AxisSignalTable, degree: usize, order: usize) -> Self {
         let stride = degree + 1;
         assert!(
             stride <= MOMENT_POWER_CAPACITY,
@@ -1430,8 +1449,13 @@ impl MomentTree {
             let node = leaf_count + i;
             let origin = table.starts[i] + 0.5 * (table.ends[i] - table.starts[i]);
             origins[node] = origin;
+            let mut derivative = [0.0; MOMENT_POWER_CAPACITY];
+            let length = differentiate_into(&table.coeffs[i], order, &mut derivative);
+            if length == 0 {
+                continue;
+            }
             AxisSignalTable::accumulate_polynomial_moments(
-                &table.coeffs[i],
+                &derivative[..length],
                 table.starts[i],
                 table.starts[i],
                 table.ends[i],
@@ -1522,8 +1546,19 @@ pub(crate) struct AxisSignalTable {
     last_t: f64,
     at_stream_boundary: bool,
     force: bool,
-    moment_tree: Option<MomentTree>,
+    /// Moments of the signal, its slope and its curvature, each about its own
+    /// piece midpoints. The convolution needs all three because it integrates
+    /// the *signal's* derivatives against the kernel rather than the signal
+    /// against the kernel's: `(f*k)'' = f''*k + sum df'.k` keeps every term
+    /// the size of the answer, where `f*k''` builds two terms four orders
+    /// larger that must then cancel.
+    moment_trees: Option<[MomentTree; MOMENT_ORDERS]>,
+    /// Where the signal's slope steps, and by how much - the deltas
+    /// `f''` carries that no polynomial piece does.
+    slope_jumps: Vec<(f64, f64)>,
 }
+
+const MOMENT_ORDERS: usize = 3;
 
 impl AxisSignalTable {
     fn build(
@@ -1561,7 +1596,8 @@ impl AxisSignalTable {
             last_t,
             at_stream_boundary,
             force,
-            moment_tree: None,
+            moment_trees: None,
+            slope_jumps: Vec::new(),
         };
         for track in tracks {
             for piece in extract_bezier_pieces(track) {
@@ -1596,8 +1632,50 @@ impl AxisSignalTable {
             .expect("empty signal window")
     }
     pub(crate) fn with_piece_moments(mut self, degree: usize) -> Self {
-        self.moment_tree = Some(MomentTree::build(&self, degree));
+        let trees = std::array::from_fn(|order| MomentTree::build(&self, degree, order));
+        let slope_jumps = self.collect_slope_jumps();
+        self.moment_trees = Some(trees);
+        self.slope_jumps = slope_jumps;
         self
+    }
+
+    pub(crate) fn slope_jumps(&self) -> &[(f64, f64)] {
+        &self.slope_jumps
+    }
+
+    fn slope_at(&self, piece: usize, at: f64) -> f64 {
+        let mut derivative = [0.0; MOMENT_POWER_CAPACITY];
+        let length = differentiate_into(&self.coeffs[piece], 1, &mut derivative);
+        if length == 0 {
+            return 0.0;
+        }
+        let tau = (at - self.starts[piece]).clamp(0.0, self.ends[piece] - self.starts[piece]);
+        derivative[..length]
+            .iter()
+            .rev()
+            .fold(0.0_f64, |acc, &c| nurbs::fmadd(acc, tau, c))
+    }
+
+    /// Both ends of the window hold their edge value, so the signal's slope
+    /// steps to zero there just as it steps between pieces.
+    fn collect_slope_jumps(&self) -> Vec<(f64, f64)> {
+        let mut jumps = Vec::new();
+        let entering = self.slope_at(0, self.first_t);
+        if entering != 0.0 {
+            jumps.push((self.first_t, entering));
+        }
+        for piece in 1..self.coeffs.len() {
+            let seam = self.starts[piece];
+            let step = self.slope_at(piece, seam) - self.slope_at(piece - 1, seam);
+            if step != 0.0 {
+                jumps.push((seam, step));
+            }
+        }
+        let leaving = self.slope_at(self.coeffs.len() - 1, self.last_t);
+        if leaving != 0.0 {
+            jumps.push((self.last_t, -leaving));
+        }
+        jumps
     }
     pub(crate) fn integrate_moments(
         &self,
@@ -1605,17 +1683,16 @@ impl AxisSignalTable {
         hi: f64,
         degree: usize,
         origin: f64,
-        moments: &mut [f64],
+        orders: [&mut [f64]; MOMENT_ORDERS],
     ) -> bool {
-        assert_eq!(moments.len(), degree + 1);
-        let tree = self
-            .moment_tree
+        let trees = self
+            .moment_trees
             .as_ref()
             .expect("moment integration requested before moments were built");
         assert!(
-            degree <= tree.degree,
+            degree <= trees[0].degree,
             "requested moment degree {degree} exceeds prepared degree {}",
-            tree.degree
+            trees[0].degree
         );
         if !lo.is_finite() || !hi.is_finite() || !origin.is_finite() || lo > hi {
             return false;
@@ -1623,83 +1700,79 @@ impl AxisSignalTable {
         if (lo < self.first_t && !self.at_stream_boundary) || (hi > self.last_t && !self.force) {
             return false;
         }
-        let near_boundary = |time: f64, boundaries: &[f64]| {
-            let index = boundaries.partition_point(|&boundary| boundary < time);
-            [
-                index.checked_sub(1),
-                (index < boundaries.len()).then_some(index),
-            ]
-            .into_iter()
-            .flatten()
-            .any(|candidate| {
-                ordered_f64_key(boundaries[candidate]).abs_diff(ordered_f64_key(time)) <= 8
-            })
-        };
-        if near_boundary(lo, &self.starts)
-            || near_boundary(lo, &self.ends)
-            || near_boundary(hi, &self.starts)
-            || near_boundary(hi, &self.ends)
-        {
-            return false;
-        }
-        moments.fill(0.0);
-        if lo < self.first_t {
-            let held = [self.piece_at(0, self.first_t)];
-            Self::accumulate_polynomial_moments(
-                &held,
-                lo,
-                lo,
-                hi.min(self.first_t),
-                origin,
-                moments,
-            );
-        }
         let interior_lo = lo.max(self.first_t);
         let interior_hi = hi.min(self.last_t);
-        if interior_hi > interior_lo {
+        let interior = (interior_hi > interior_lo).then(|| {
             let first_piece = self.ends.partition_point(|&end| end <= interior_lo);
             let end_piece = self.starts.partition_point(|&start| start < interior_hi);
             let mut full_start = first_piece;
             let mut full_end = end_piece;
-            if self.starts[first_piece] < interior_lo {
-                Self::accumulate_polynomial_moments(
-                    &self.coeffs[first_piece],
-                    self.starts[first_piece],
-                    interior_lo,
-                    interior_hi.min(self.ends[first_piece]),
-                    origin,
-                    moments,
-                );
+            let left_partial = (self.starts[first_piece] < interior_lo).then(|| {
                 full_start += 1;
-            }
-            let right_partial = if full_start < full_end && self.ends[full_end - 1] > interior_hi {
-                full_end -= 1;
-                Some(full_end)
-            } else {
-                None
-            };
-            tree.accumulate(full_start, full_end, degree, origin, moments);
-            if let Some(piece) = right_partial {
+                first_piece
+            });
+            let right_partial = (full_start < full_end && self.ends[full_end - 1] > interior_hi)
+                .then(|| {
+                    full_end -= 1;
+                    full_end
+                });
+            (left_partial, full_start, full_end, right_partial)
+        });
+        let mut derivative = [0.0; MOMENT_POWER_CAPACITY];
+        for (order, moments) in orders.into_iter().enumerate() {
+            assert_eq!(moments.len(), degree + 1);
+            moments.fill(0.0);
+            if lo < self.first_t && order == 0 {
+                let held = [self.piece_at(0, self.first_t)];
                 Self::accumulate_polynomial_moments(
-                    &self.coeffs[piece],
-                    self.starts[piece],
-                    self.starts[piece],
-                    interior_hi,
+                    &held,
+                    lo,
+                    lo,
+                    hi.min(self.first_t),
                     origin,
                     moments,
                 );
             }
-        }
-        if hi > self.last_t {
-            let held = [self.piece_at(self.coeffs.len() - 1, self.last_t)];
-            Self::accumulate_polynomial_moments(
-                &held,
-                self.last_t,
-                lo.max(self.last_t),
-                hi,
-                origin,
-                moments,
-            );
+            if let Some((left_partial, full_start, full_end, right_partial)) = interior {
+                if let Some(piece) = left_partial {
+                    let length = differentiate_into(&self.coeffs[piece], order, &mut derivative);
+                    if length > 0 {
+                        Self::accumulate_polynomial_moments(
+                            &derivative[..length],
+                            self.starts[piece],
+                            interior_lo,
+                            interior_hi.min(self.ends[piece]),
+                            origin,
+                            moments,
+                        );
+                    }
+                }
+                trees[order].accumulate(full_start, full_end, degree, origin, moments);
+                if let Some(piece) = right_partial {
+                    let length = differentiate_into(&self.coeffs[piece], order, &mut derivative);
+                    if length > 0 {
+                        Self::accumulate_polynomial_moments(
+                            &derivative[..length],
+                            self.starts[piece],
+                            self.starts[piece],
+                            interior_hi,
+                            origin,
+                            moments,
+                        );
+                    }
+                }
+            }
+            if hi > self.last_t && order == 0 {
+                let held = [self.piece_at(self.coeffs.len() - 1, self.last_t)];
+                Self::accumulate_polynomial_moments(
+                    &held,
+                    self.last_t,
+                    lo.max(self.last_t),
+                    hi,
+                    origin,
+                    moments,
+                );
+            }
         }
         true
     }

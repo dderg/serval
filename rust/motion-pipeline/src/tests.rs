@@ -810,86 +810,121 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
     }
 }
 
-#[test]
-fn polynomial_moment_convolution_matches_quadrature() {
-    use std::rc::Rc;
+/// A signal with a hold between two high-degree pieces, convolved with a
+/// real shaper kernel: enough structure that the moment path exercises
+/// partial pieces, a whole-piece span and both held extensions.
+struct MomentSamplerInput {
+    tracks: [nurbs::ScalarNurbs; 2],
+    kernel: nurbs::algebra::PiecewisePolynomialKernel,
+    breaks: Vec<f64>,
+    signal_degree: usize,
+    kernel_degree: usize,
+    first_t: f64,
+    last_t: f64,
+}
 
-    use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
+impl MomentSamplerInput {
+    fn new() -> Self {
+        use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 
-    let first_t = 300.0;
-    let first_end = 300.004;
-    let second_start = 300.006;
-    let last_t = 300.012;
-    let first_track = bezier_pieces_to_nurbs(&[BezierPiece {
-        u_start: first_t,
-        u_end: first_end,
-        coeffs: vec![
-            10.0, 4.0, -30.0, 200.0, -1_000.0, 5_000.0, -20_000.0, 40_000.0,
-        ],
-    }]);
-    let held = eval(&first_track, first_end);
-    let second_track = bezier_pieces_to_nurbs(&[BezierPiece {
-        u_start: second_start,
-        u_end: last_t,
-        coeffs: vec![held, -3.0, 20.0, -100.0, 400.0, -1_000.0, 2_000.0, -3_000.0],
-    }]);
-    let kernel = trajectory::build_smooth_mzv_kernel(90.2);
-    let kernel_degree = kernel
-        .pieces
-        .iter()
-        .map(|piece| piece.degree())
-        .max()
-        .unwrap();
-    let mut breaks = first_track.knots().to_vec();
-    breaks.extend_from_slice(second_track.knots());
-
-    let oracle_table = Rc::new(crate::shaper::AxisSignalTable::from_tracks(
-        [&first_track, &second_track],
-        first_t,
-        last_t,
-        true,
-        true,
-    ));
-    let oracle_eval = Rc::clone(&oracle_table);
-    let oracle_hint = std::cell::Cell::new(0);
-    let oracle = trajectory::ShapedSignal::new_from_evaluator(
-        &kernel,
-        move |t| oracle_eval.eval_hinted(t, &oracle_hint),
-        breaks.clone(),
-        oracle_table.max_degree(),
-    );
-
-    let fast_table = Rc::new(
-        crate::shaper::AxisSignalTable::from_tracks(
+        let first_t = 300.0;
+        let first_end = 300.004;
+        let second_start = 300.006;
+        let last_t = 300.012;
+        let first_track = bezier_pieces_to_nurbs(&[BezierPiece {
+            u_start: first_t,
+            u_end: first_end,
+            coeffs: vec![
+                10.0, 4.0, -30.0, 200.0, -1_000.0, 5_000.0, -20_000.0, 40_000.0,
+            ],
+        }]);
+        let held = eval(&first_track, first_end);
+        let second_track = bezier_pieces_to_nurbs(&[BezierPiece {
+            u_start: second_start,
+            u_end: last_t,
+            coeffs: vec![held, -3.0, 20.0, -100.0, 400.0, -1_000.0, 2_000.0, -3_000.0],
+        }]);
+        let kernel = trajectory::build_smooth_mzv_kernel(90.2);
+        let kernel_degree = kernel
+            .pieces
+            .iter()
+            .map(|piece| piece.degree())
+            .max()
+            .unwrap();
+        let mut breaks = first_track.knots().to_vec();
+        breaks.extend_from_slice(second_track.knots());
+        let signal_degree = crate::shaper::AxisSignalTable::from_tracks(
             [&first_track, &second_track],
             first_t,
             last_t,
             true,
             true,
         )
-        .with_piece_moments(kernel_degree),
-    );
-    let fast_eval = Rc::clone(&fast_table);
-    let fast_moments = Rc::clone(&fast_table);
-    let fast_hint = std::cell::Cell::new(0);
-    let fast = trajectory::ShapedSignal::new_from_polynomial_evaluator(
-        &kernel,
-        move |t| fast_eval.eval_hinted(t, &fast_hint),
-        breaks,
-        fast_table.max_degree(),
-        move |lo, hi, degree, origin, moments| {
-            fast_moments.integrate_moments(lo, hi, degree, origin, moments)
-        },
-    );
+        .max_degree();
+        Self {
+            tracks: [first_track, second_track],
+            kernel,
+            breaks,
+            signal_degree,
+            kernel_degree,
+            first_t,
+            last_t,
+        }
+    }
+
+    fn table(&self) -> crate::shaper::AxisSignalTable {
+        crate::shaper::AxisSignalTable::from_tracks(
+            [&self.tracks[0], &self.tracks[1]],
+            self.first_t,
+            self.last_t,
+            true,
+            true,
+        )
+    }
+
+    fn quadrature_signal(&self) -> trajectory::ShapedSignal<'_, impl Fn(f64) -> f64> {
+        let table = self.table();
+        let hint = std::cell::Cell::new(0);
+        trajectory::ShapedSignal::new_from_evaluator(
+            &self.kernel,
+            move |t| table.eval_hinted(t, &hint),
+            self.breaks.clone(),
+            self.signal_degree,
+        )
+    }
+
+    fn moment_signal(&self) -> trajectory::ShapedSignal<'_, impl Fn(f64) -> f64> {
+        let table = std::rc::Rc::new(self.table().with_piece_moments(self.kernel_degree));
+        let slope_jumps = table.slope_jumps().to_vec();
+        let for_moments = std::rc::Rc::clone(&table);
+        let hint = std::cell::Cell::new(0);
+        trajectory::ShapedSignal::new_from_polynomial_evaluator(
+            &self.kernel,
+            move |t| table.eval_hinted(t, &hint),
+            self.breaks.clone(),
+            self.signal_degree,
+            move |lo, hi, degree, origin, orders| {
+                for_moments.integrate_moments(lo, hi, degree, origin, orders)
+            },
+            slope_jumps,
+        )
+    }
+}
+
+#[test]
+fn polynomial_moment_convolution_matches_quadrature() {
+    let input = MomentSamplerInput::new();
+    let fast = input.moment_signal();
+    let oracle = input.quadrature_signal();
 
     for t in [
-        first_t,
+        input.first_t,
         300.001,
-        first_end,
+        300.004,
         300.005,
-        second_start,
+        300.006,
         300.009,
-        last_t,
+        input.last_t,
     ] {
         let got = fast.eval_pva(t);
         let want = oracle.eval_pva(t);
@@ -906,6 +941,51 @@ fn polynomial_moment_convolution_matches_quadrature() {
             "acceleration at {t}: {got:?} vs {want:?}"
         );
     }
+}
+
+/// Agreement at a handful of chosen times does not police a sampler; the
+/// follower projection sweeps whole kernel windows, and it was a systematic
+/// disagreement across such a sweep - invisible to every seam metric,
+/// amplified into extruder acceleration ripple by pressure advance
+/// differentiating the projection - that made `f*k''` untenable.
+///
+/// The second derivative is the demanding one: it is the difference of terms
+/// far larger than itself, so a formulation that differentiates the kernel
+/// rather than the input loses an ulp of window placement into it. This sweep
+/// held 3.2e-4 of acceleration disagreement under `f*k''` and holds 6e-7
+/// under `f''*k`, which is quadrature's own distance from exact arithmetic.
+#[test]
+fn the_moment_path_agrees_with_quadrature_across_a_swept_window() {
+    const SAMPLES: u32 = 200_000;
+    const POSITION_TOL: f64 = 1e-10;
+    const VELOCITY_TOL: f64 = 1e-8;
+    const ACCELERATION_TOL: f64 = 1e-5;
+
+    let input = MomentSamplerInput::new();
+    let fast = input.moment_signal();
+    let oracle = input.quadrature_signal();
+    let mut worst = (0.0, 0.0, 0.0, 0.0);
+    for sample in 0..SAMPLES {
+        let t = input.first_t
+            + (input.last_t - input.first_t) * f64::from(sample) / f64::from(SAMPLES)
+            + 1.7e-9;
+        let (got_p, got_v, got_a) = fast.eval_pva(t);
+        let (want_p, want_v, want_a) = oracle.eval_pva(t);
+        if (got_a - want_a).abs() > worst.3 {
+            worst = (
+                t,
+                (got_p - want_p).abs(),
+                (got_v - want_v).abs(),
+                (got_a - want_a).abs(),
+            );
+        }
+    }
+    let (t, position, velocity, acceleration) = worst;
+    assert!(
+        position < POSITION_TOL && velocity < VELOCITY_TOL && acceleration < ACCELERATION_TOL,
+        "moment path drifts from quadrature at t={t}: \
+         dp={position:.3e} dv={velocity:.3e} da={acceleration:.3e}"
+    );
 }
 
 #[test]

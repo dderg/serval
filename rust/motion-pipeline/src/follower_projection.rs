@@ -508,6 +508,7 @@ pub(crate) fn project_followers(
                 let breaks_started = crate::timing::stopwatch();
                 let shaped_breaks = shaped_signal_breakpoints(kernel, shaped_break_seeds);
                 timing.breakpoints_us += breaks_started.elapsed_us();
+                let slope_jumps = table.slope_jumps().to_vec();
                 let make_sig = || {
                     let eval_table = Arc::clone(&table);
                     let moment_table = Arc::clone(&table);
@@ -517,9 +518,10 @@ pub(crate) fn project_followers(
                         move |t| eval_table.eval_hinted(t, &piece_hint),
                         exact_input_breaks.clone(),
                         input_degree,
-                        move |lo, hi, degree, origin, moments| {
-                            moment_table.integrate_moments(lo, hi, degree, origin, moments)
+                        move |lo, hi, degree, origin, orders| {
+                            moment_table.integrate_moments(lo, hi, degree, origin, orders)
                         },
+                        slope_jumps.clone(),
                     )
                 };
                 let tol_scale = (0..commit_count)

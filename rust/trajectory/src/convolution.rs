@@ -178,7 +178,9 @@ fn quadrature_rule(product_degree: usize) -> (&'static [f64], &'static [f64]) {
     }
 }
 
-type MomentEvaluator<'a> = dyn Fn(f64, f64, usize, f64, &mut [f64]) -> bool + 'a;
+const MOMENT_ORDERS: usize = 3;
+
+type MomentEvaluator<'a> = dyn Fn(f64, f64, usize, f64, [&mut [f64]; MOMENT_ORDERS]) -> bool + 'a;
 
 /// The convolution `(input ∗ kernel)(t)`, evaluated exactly: both factors are
 /// piecewise polynomials, so integrating between their breakpoints with a
@@ -216,6 +218,11 @@ pub struct ShapedSignal<'a, F = Box<dyn Fn(f64) -> f64 + 'a>> {
     d_kernel: PiecewisePolynomialKernel,
     dd_kernel: PiecewisePolynomialKernel,
     d_kernel_jumps: Vec<(f64, f64)>,
+    /// Where the input's slope steps, and by how much. The moment path
+    /// integrates `f''` against `k`, and `f''` carries a delta at every such
+    /// step; the quadrature path never needs them because it differentiates
+    /// the kernel instead.
+    slope_jumps: Vec<(f64, f64)>,
     k_lo: f64,
     k_hi: f64,
 }
@@ -369,7 +376,7 @@ where
         input_breaks: Vec<f64>,
         input_degree: usize,
     ) -> Self {
-        Self::new_with_moments(kernel, eval, input_breaks, input_degree, None)
+        Self::new_with_moments(kernel, eval, input_breaks, input_degree, None, Vec::new())
     }
 
     pub fn new_from_polynomial_evaluator<M>(
@@ -378,9 +385,10 @@ where
         input_breaks: Vec<f64>,
         input_degree: usize,
         moments: M,
+        slope_jumps: Vec<(f64, f64)>,
     ) -> Self
     where
-        M: Fn(f64, f64, usize, f64, &mut [f64]) -> bool + 'a,
+        M: Fn(f64, f64, usize, f64, [&mut [f64]; MOMENT_ORDERS]) -> bool + 'a,
     {
         Self::new_with_moments(
             kernel,
@@ -388,6 +396,7 @@ where
             input_breaks,
             input_degree,
             Some(Box::new(moments)),
+            slope_jumps,
         )
     }
 
@@ -397,6 +406,7 @@ where
         mut input_breaks: Vec<f64>,
         input_degree: usize,
         moment_input: Option<Box<MomentEvaluator<'a>>>,
+        mut slope_jumps: Vec<(f64, f64)>,
     ) -> Self {
         let (k_lo, k_hi) = kernel.support();
         assert!(
@@ -458,29 +468,25 @@ where
             d_kernel,
             dd_kernel,
             d_kernel_jumps,
+            slope_jumps: {
+                slope_jumps.sort_by(|a, b| a.0.total_cmp(&b.0));
+                slope_jumps
+            },
             k_lo,
             k_hi,
         }
     }
 
     pub fn eval(&self, t: f64) -> f64 {
-        self.convolve(t, self.kernel)
+        self.eval_pva(t).0
     }
 
-    /// `(f∗k)′(t) = (f∗k′)(t)` — exact because `k` is continuous and vanishes
-    /// at its support edges.
     pub fn deriv(&self, t: f64) -> f64 {
-        self.convolve(t, &self.d_kernel)
+        self.eval_pva(t).1
     }
 
-    /// `(f∗k)″(t) = (f∗k″)(t) + Σ Δk′(τ)·f(t−τ)` — the sum carries the deltas
-    /// a piecewise `k′` puts into `k″` at its jump points.
     pub fn second_deriv(&self, t: f64) -> f64 {
-        let mut acc = self.convolve(t, &self.dd_kernel);
-        for &(tau, jump) in &self.d_kernel_jumps {
-            acc += jump * (self.eval_input)(t - tau);
-        }
-        acc
+        self.eval_pva(t).2
     }
 
     /// `(eval, deriv, second_deriv)` at `t` in one pass: the three kernels
@@ -509,35 +515,99 @@ where
         value
     }
 
+    /// `(f*k)` and its derivatives with every derivative taken on the
+    /// *input*: `f*k`, `f'*k`, and `f''*k + sum df'(b).k(t-b)`.
+    ///
+    /// The textbook alternative differentiates the kernel instead, but
+    /// `f*k'' + sum dk'.f` forms two terms four orders larger than the second
+    /// derivative they must cancel down to, and `k''` reaches ~1e9 at the
+    /// support edges, so an ulp of the window's placement lands in the answer
+    /// at 1e-4. Keeping the derivatives on the input leaves every term the
+    /// size of the answer.
     fn convolve_pva_from_moments(&self, t: f64) -> Option<(f64, f64, f64)> {
         let moment_input = self.moment_input.as_ref()?;
         let (mut p, mut v, mut a) = (0.0, 0.0, 0.0);
-        for ((kernel, d_kernel), dd_kernel) in self
-            .kernel
-            .pieces
-            .iter()
-            .zip(&self.d_kernel.pieces)
-            .zip(&self.dd_kernel.pieces)
-        {
+        for kernel in &self.kernel.pieces {
             let degree = kernel.degree();
-            let mut moments = [0.0; MAX_EXACT_PRODUCT_DEGREE + 1];
+            let mut position = [0.0; MAX_EXACT_PRODUCT_DEGREE + 1];
+            let mut velocity = [0.0; MAX_EXACT_PRODUCT_DEGREE + 1];
+            let mut acceleration = [0.0; MAX_EXACT_PRODUCT_DEGREE + 1];
+            let piece_origin = t - kernel.u_start;
             if !moment_input(
                 t - kernel.u_end,
-                t - kernel.u_start,
+                piece_origin,
                 degree,
-                t,
-                &mut moments[..=degree],
+                piece_origin,
+                [
+                    &mut position[..=degree],
+                    &mut velocity[..=degree],
+                    &mut acceleration[..=degree],
+                ],
             ) {
                 return None;
             }
-            p += self.integrate_kernel_piece(kernel, &moments);
-            v += self.integrate_kernel_piece(d_kernel, &moments);
-            a += self.integrate_kernel_piece(dd_kernel, &moments);
+            p += Self::integrate_kernel_piece(kernel, &position);
+            v += Self::integrate_kernel_piece(kernel, &velocity);
+            a += Self::integrate_kernel_piece(kernel, &acceleration);
         }
-        for &(tau, jump) in &self.d_kernel_jumps {
-            a += jump * (self.eval_input)(t - tau);
+        for &(break_t, jump) in self.slope_jumps_in_support(t) {
+            a += jump * eval_kernel(self.kernel, t - break_t);
         }
         Some((p, v, a))
+    }
+
+    fn slope_jumps_in_support(&self, t: f64) -> &[(f64, f64)] {
+        let lo = self
+            .slope_jumps
+            .partition_point(|&(break_t, _)| break_t < t - self.k_hi);
+        let hi = self
+            .slope_jumps
+            .partition_point(|&(break_t, _)| break_t <= t - self.k_lo);
+        &self.slope_jumps[lo..hi]
+    }
+
+    /// A kernel piece's coefficients are a power basis in `tau - u_start` and
+    /// the moments arrive about that same origin, so substituting
+    /// `x = t - tau` turns the piece's contribution into one alternating dot
+    /// product.
+    fn integrate_kernel_piece(kernel: &nurbs::bezier::BezierPiece, moments: &[f64]) -> f64 {
+        let mut value = 0.0;
+        for (power, (coefficient, moment)) in kernel.coeffs.iter().zip(moments).enumerate() {
+            let term = coefficient * moment;
+            value += if power % 2 == 0 { term } else { -term };
+        }
+        value
+    }
+
+    /// Merge the kernel-piece boundaries (ascending by construction) with the
+    /// in-window input breaks (`t - b` is ascending over `input_breaks`
+    /// iterated in reverse), deduplicating on the fly — no per-call sort.
+    fn merge_cuts(&self, t: f64, cuts: &mut Vec<f64>) {
+        cuts.clear();
+        let b_lo = self.input_breaks.partition_point(|&b| b <= t - self.k_hi);
+        let b_hi = self.input_breaks.partition_point(|&b| b < t - self.k_lo);
+        let mut breaks = self.input_breaks[b_lo..b_hi].iter().rev().peekable();
+        let push = |v: f64, cuts: &mut Vec<f64>| {
+            if cuts.last().is_none_or(|&last| v > last) {
+                cuts.push(v);
+            }
+        };
+        for boundary in self
+            .kernel
+            .pieces
+            .iter()
+            .map(|p| p.u_start)
+            .chain(std::iter::once(self.k_hi))
+        {
+            while let Some(&&b) = breaks.peek() {
+                if t - b >= boundary {
+                    break;
+                }
+                push(t - b, cuts);
+                breaks.next();
+            }
+            push(boundary, cuts);
+        }
     }
 
     fn convolve_pva_quadrature(&self, t: f64) -> (f64, f64, f64) {
@@ -576,107 +646,6 @@ where
             a += jump * (self.eval_input)(t - tau);
         }
         (p, v, a)
-    }
-
-    fn integrate_kernel_piece(&self, kernel: &nurbs::bezier::BezierPiece, moments: &[f64]) -> f64 {
-        let shifted_t = -kernel.u_start;
-        let mut value = 0.0;
-        for (power, coefficient) in kernel.coeffs.iter().copied().enumerate() {
-            let mut choose = 1.0;
-            let mut expanded = 0.0;
-            for (moment_power, moment) in moments.iter().copied().enumerate().take(power + 1) {
-                let sign = if moment_power % 2 == 0 { 1.0 } else { -1.0 };
-                expanded += sign * choose * shifted_t.powi((power - moment_power) as i32) * moment;
-                if moment_power < power {
-                    choose *= (power - moment_power) as f64 / (moment_power + 1) as f64;
-                }
-            }
-            value += coefficient * expanded;
-        }
-        value
-    }
-
-    /// Merge the kernel-piece boundaries (ascending by construction) with the
-    /// in-window input breaks (`t - b` is ascending over `input_breaks`
-    /// iterated in reverse), deduplicating on the fly — no per-call sort.
-    fn merge_cuts(&self, t: f64, cuts: &mut Vec<f64>) {
-        cuts.clear();
-        let b_lo = self.input_breaks.partition_point(|&b| b <= t - self.k_hi);
-        let b_hi = self.input_breaks.partition_point(|&b| b < t - self.k_lo);
-        let mut breaks = self.input_breaks[b_lo..b_hi].iter().rev().peekable();
-        let push = |v: f64, cuts: &mut Vec<f64>| {
-            if cuts.last().is_none_or(|&last| v > last) {
-                cuts.push(v);
-            }
-        };
-        for boundary in self
-            .kernel
-            .pieces
-            .iter()
-            .map(|p| p.u_start)
-            .chain(std::iter::once(self.k_hi))
-        {
-            while let Some(&&b) = breaks.peek() {
-                if t - b >= boundary {
-                    break;
-                }
-                push(t - b, cuts);
-                breaks.next();
-            }
-            push(boundary, cuts);
-        }
-    }
-
-    fn convolve_from_moments(&self, t: f64, kernel: &PiecewisePolynomialKernel) -> Option<f64> {
-        let moment_input = self.moment_input.as_ref()?;
-        let mut value = 0.0;
-        for piece in &kernel.pieces {
-            let degree = piece.degree();
-            let mut moments = [0.0; MAX_EXACT_PRODUCT_DEGREE + 1];
-            if !moment_input(
-                t - piece.u_end,
-                t - piece.u_start,
-                degree,
-                t,
-                &mut moments[..=degree],
-            ) {
-                return None;
-            }
-            value += self.integrate_kernel_piece(piece, &moments);
-        }
-        Some(value)
-    }
-    fn convolve(&self, t: f64, kernel: &PiecewisePolynomialKernel) -> f64 {
-        if let Some(value) = self.convolve_from_moments(t, kernel) {
-            return value;
-        }
-        let mut cuts = self.cuts.borrow_mut();
-        self.merge_cuts(t, &mut cuts);
-
-        let mut kernel_idx = 0usize;
-        let mut acc = 0.0_f64;
-        for w in cuts.windows(2) {
-            let (lo, hi) = (w[0], w[1]);
-            let half = 0.5 * (hi - lo);
-            if half <= 0.0 {
-                continue;
-            }
-            let mid = 0.5 * (lo + hi);
-            // Every interval lies inside one kernel piece: the merge kept all
-            // piece boundaries, so advancing past pieces ending at or before
-            // `mid` lands on the covering piece without a per-node scan.
-            while kernel_idx + 1 < kernel.pieces.len() && kernel.pieces[kernel_idx].u_end <= mid {
-                kernel_idx += 1;
-            }
-            let piece = &kernel.pieces[kernel_idx];
-            let mut sub = 0.0_f64;
-            for (node, weight) in self.gauss_nodes.iter().zip(self.gauss_weights) {
-                let tau = nurbs::fmadd(*node, half, mid);
-                sub += weight * (self.eval_input)(t - tau) * piece.evaluate(tau);
-            }
-            acc += sub * half;
-        }
-        acc
     }
 }
 
