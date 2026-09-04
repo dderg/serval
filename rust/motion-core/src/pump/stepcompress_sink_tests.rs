@@ -2745,8 +2745,11 @@ fn host_buzz_rejects_a_lane_with_queued_trajectory() {
 
 const H7_FREQ: f64 = 520_000_000.0;
 
+/// The mcu stepper's step-clock walk, kept in the full 64-bit clock the wire's
+/// 32-bit clocks are unwrapped into around the receipt time, so idle gaps past
+/// the half-wrap read as elapsed rather than as pending.
 struct McuStepper {
-    base: u32,
+    base: u64,
     need_reset: bool,
 }
 
@@ -2758,20 +2761,33 @@ impl McuStepper {
         }
     }
 
-    fn reset_clock(&mut self, clock: u32) {
-        self.base = clock;
+    fn reset_clock(&mut self, clock: u32, now: u64) {
+        self.base = unwrap_clock32(clock, now);
         self.need_reset = false;
     }
 
-    fn queue_step(&mut self, interval: u32, count: u16, add: i16) -> Option<u32> {
+    /// `command_reset_step_clock` shuts the mcu down while the stepper still
+    /// holds queued steps; the last queued step clock is when it goes idle.
+    fn active_at(&self, now: u64) -> bool {
+        !self.need_reset && self.base > now
+    }
+
+    fn queue_step(&mut self, interval: u32, count: u16, add: i16) -> Option<u64> {
         if self.need_reset {
             return None;
         }
-        let first = self.base.wrapping_add(interval);
+        let first = self.base + u64::from(interval);
         let span = queue_step_span(interval, count, add);
-        self.base = self.base.wrapping_add(span as u32);
+        self.base += span as u64;
         Some(first)
     }
+}
+
+fn unwrap_clock32(clock: u32, near: u64) -> u64 {
+    let low = near as u32;
+    let delta = i64::from(clock.wrapping_sub(low) as i32);
+    near.checked_add_signed(delta)
+        .expect("a wire clock near the mcu's present")
 }
 
 fn h7_harness(oids: Vec<u32>) -> Harness {
@@ -2917,13 +2933,32 @@ fn verify_mcu_agreement(
     frames: &[StepFrame],
     lanes: &[Lane],
     mcu: &mut HashMap<u32, McuStepper>,
-    _mcu_now_u32: u32,
+    mcu_now: u64,
+) -> Result<(), String> {
+    play_frames_on_mcu(frames, mcu, mcu_now)?;
+    verify_mcu_bases(lanes, mcu)
+}
+
+/// Feed the frames one send burst carried to the modelled mcu steppers, in
+/// wire order, as the mcu would receive them at clock `mcu_now`.
+fn play_frames_on_mcu(
+    frames: &[StepFrame],
+    mcu: &mut HashMap<u32, McuStepper>,
+    mcu_now: u64,
 ) -> Result<(), String> {
     for (idx, frame) in frames.iter().enumerate() {
         match *frame {
             StepFrame::ResetStepClock { oid, clock } => {
                 let stepper = mcu.entry(oid).or_insert_with(McuStepper::new);
-                stepper.reset_clock(clock);
+                if stepper.active_at(mcu_now) {
+                    return Err(format!(
+                        "oid {oid} frame {idx}: reset_step_clock reached the mcu at clock \
+                         {mcu_now} while its last queued step at {} was still ahead — \
+                         the mcu shuts down with \"Can't reset time when stepper active\"",
+                        stepper.base
+                    ));
+                }
+                stepper.reset_clock(clock, mcu_now);
             }
             StepFrame::SetNextStepDir { .. } => {}
             StepFrame::QueueStep {
@@ -2945,6 +2980,12 @@ fn verify_mcu_agreement(
             StepFrame::QueueStepHp { .. } => {}
         }
     }
+    Ok(())
+}
+
+/// Every lane the mcu has stepped sits where the host's cursor says it does;
+/// only meaningful once nothing for that lane is still waiting in the backlog.
+fn verify_mcu_bases(lanes: &[Lane], mcu: &HashMap<u32, McuStepper>) -> Result<(), String> {
     for (&oid, stepper) in mcu.iter() {
         if stepper.need_reset {
             continue;
@@ -2954,13 +2995,12 @@ fn verify_mcu_agreement(
             .find(|lane| lane.oid == oid)
             .and_then(|lane| lane.step_clock)
             .unwrap_or(0);
-        if host_cursor as u32 != stepper.base {
+        if host_cursor != stepper.base {
             return Err(format!(
-                "oid {oid}: host/mcu base divergence: host step_clock low32={} \
-                 mcu base={}, host_64={host_cursor}, delta={}",
-                host_cursor as u32,
+                "oid {oid}: host/mcu base divergence: host step_clock={host_cursor} \
+                 mcu base={}, delta={}",
                 stepper.base,
-                (host_cursor as u32 as i64) - (stepper.base as i64)
+                host_cursor as i64 - stepper.base as i64
             ));
         }
     }
@@ -3004,7 +3044,7 @@ fn repeated_probe_trips_with_h7_half_wrap_idle_gaps() {
 
     let verify = |h: &mut Harness, mcu: &mut HashMap<u32, McuStepper>, now: u64, label: &str| {
         let frames: Vec<StepFrame> = std::mem::take(&mut h.sent.lock_ok());
-        verify_mcu_agreement(&frames, &h.endpoint.lanes, mcu, now as u32)
+        verify_mcu_agreement(&frames, &h.endpoint.lanes, mcu, now)
             .unwrap_or_else(|e| panic!("{label}: {e}"));
     };
 
@@ -3077,4 +3117,87 @@ fn repeated_probe_trips_with_h7_half_wrap_idle_gaps() {
         // the shim dropped it; the next volley starts where the motor is.
         position_mm = h.endpoint.shim.commanded_position(0);
     }
+}
+
+/// The reporter's mid-print shutdown: the planner drained to rest and the
+/// next segment arrived under the parked re-anchor floor, so the anchor
+/// re-anchored forward while the mcu still had the last 50 ms of the old
+/// stream queued. The fresh epoch's volley heads with `reset_step_clock`,
+/// which the mcu refuses while its stepper is active; the reset must wait
+/// for the lane's last sent step to execute, with the rest of the lane's
+/// volley behind it.
+#[test]
+fn an_idle_resume_reset_waits_for_the_mcu_stepper_to_finish_the_old_stream() {
+    let mut h = h7_harness(vec![6]);
+    let axis: u8 = 2;
+    let mut mcu: HashMap<u32, McuStepper> = HashMap::new();
+    let tick_step = (H7_FREQ * 0.010) as u64;
+    let lead = (H7_FREQ * SEND_LEAD_SECONDS) as u64;
+
+    let mut now: u64 = (H7_FREQ * 2.0) as u64;
+    h.now.store(now, Ordering::Relaxed);
+    let old_start = now + lead;
+    let old_views = 50;
+    h.endpoint.mark_reanchor(axis, old_start, Some(H7_FREQ));
+    h.endpoint
+        .send_frames(
+            MCU_ID,
+            &[frame_for_axis(
+                axis,
+                h7_ramp(old_start, old_views, 0.0, 1.0),
+            )],
+        )
+        .unwrap();
+    for _ in 0..30 {
+        now += tick_step;
+        h.now.store(now, Ordering::Relaxed);
+        h.endpoint.tick().unwrap();
+        h.ack_sent_barriers();
+    }
+    let frames: Vec<StepFrame> = std::mem::take(&mut h.sent.lock_ok());
+    verify_mcu_agreement(&frames, &h.endpoint.lanes, &mut mcu, now).unwrap();
+    let last_step = h.endpoint.lanes[0]
+        .last_sent_boundary
+        .expect("the old stream is on the wire");
+    assert!(
+        last_step > now,
+        "the old stream must still be executing on the mcu"
+    );
+
+    let resume_at = now + lead;
+    h.endpoint.mark_reanchor(axis, resume_at, Some(H7_FREQ));
+    let position = h.endpoint.shim.commanded_position(0);
+    h.endpoint
+        .send_frames(
+            MCU_ID,
+            &[frame_for_axis(axis, h7_ramp(resume_at, 12, position, -1.0))],
+        )
+        .unwrap();
+    let mut reset_sent_at = None;
+    while now < resume_at {
+        now += tick_step;
+        h.now.store(now, Ordering::Relaxed);
+        h.endpoint.tick().unwrap();
+        h.ack_sent_barriers();
+        let frames: Vec<StepFrame> = std::mem::take(&mut h.sent.lock_ok());
+        if reset_sent_at.is_none()
+            && frames
+                .iter()
+                .any(|frame| matches!(frame, StepFrame::ResetStepClock { .. }))
+        {
+            reset_sent_at = Some(now);
+        }
+        play_frames_on_mcu(&frames, &mut mcu, now)
+            .unwrap_or_else(|e| panic!("at mcu clock {now}: {e}"));
+    }
+    let reset_sent_at = reset_sent_at.expect("the resume volley re-anchors the lane");
+    assert!(
+        reset_sent_at >= last_step,
+        "reset went out at {reset_sent_at}, before the old stream's last step at {last_step}"
+    );
+    assert!(
+        h.endpoint.backlog.is_empty(),
+        "the resume volley drained behind its reset"
+    );
+    verify_mcu_bases(&h.endpoint.lanes, &mcu).unwrap();
 }

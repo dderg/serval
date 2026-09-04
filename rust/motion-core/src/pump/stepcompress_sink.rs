@@ -67,6 +67,13 @@ const SIM_BARRIER_ACK_DEADLINE_SECONDS: f64 = 60.0;
 /// unstep — see `src/stepper_classic.c`.
 pub const STEP_REARM_PULSES: u64 = 2;
 
+/// The mcu refuses `reset_step_clock` while its stepper still holds queued
+/// steps ("Can't reset time when stepper active"), so a lane's reset waits
+/// until this long after its last sent step clock, covering the projection
+/// error of the host's mcu-clock estimate. A resume from planned rest arrives
+/// with up to `PARKED_REANCHOR_FLOOR_SECS` of motion still executing.
+pub const RESET_AFTER_LAST_STEP_SECS: f64 = 0.002;
+
 pub const BACKLOG_CEILING_FRAMES: usize = 8192;
 
 /// How often the pacer tops the mcu's move queue back up to
@@ -958,11 +965,15 @@ impl StepcompressEndpoint {
         self.deferred_retirement = false;
     }
 
+    /// Re-origin one lane whose mcu stepper is halted: the reconcile that
+    /// reads the executed count only runs once the mcu has stopped stepping,
+    /// so nothing sent to this lane is still executing.
     pub fn reset_motor_position(&mut self, motor: usize, count: i64) -> Result<(), String> {
         self.shim
             .halt_at(motor, u64::MAX)
             .map_err(|e| format!("stepcompress mcu {}: {e}", self.mcu_id))?;
         self.shim.reset_position(motor, count);
+        self.lanes[motor].last_sent_boundary = None;
         self.lanes[motor].commanded_base = self.shim.commanded_position(motor);
         self.sync_retirement_baseline();
         self.post_heartbeat().map_err(|e| e.to_string())
@@ -1221,6 +1232,7 @@ impl StepcompressEndpoint {
         let Some(cut) = self.lanes[motor].pending_cut.take() else {
             return Err(self.motor_fatal(motor, "cut completion has no pending cut"));
         };
+        self.lanes[motor].last_sent_boundary = None;
         let wire_count = (self.step_count_query)(cut.barrier.oid).map_err(|error| {
             self.motor_fatal(
                 motor,
@@ -1678,10 +1690,19 @@ impl StepcompressEndpoint {
         let mut stale: Option<SendError> = None;
         let mut in_flight = self.in_flight.len() as u32;
         let mut worst_margin_clocks: Option<(i64, i64, u32)> = None;
-        for out in &self.backlog {
+        let idle_after = clock.ticks(RESET_AFTER_LAST_STEP_SECS);
+        let mut held_lanes: Vec<usize> = Vec::new();
+        let mut held_indices: Vec<usize> = Vec::new();
+        let mut scanned = 0usize;
+        for (index, out) in self.backlog.iter().enumerate() {
             let kind = out.frame.kind();
             if kind.consumes_move_slot() && in_flight >= self.budget {
                 break;
+            }
+            if held_lanes.contains(&out.lane) {
+                held_indices.push(index);
+                scanned = index + 1;
+                continue;
             }
             let late = kind.is_motion() && out.start_clock.saturating_add(stale_by) < clock.now;
             let covered_by_queued_motion = late
@@ -1711,6 +1732,16 @@ impl StepcompressEndpoint {
                     self.link_line()
                 )));
                 break;
+            }
+            scanned = index + 1;
+            if kind.rearms_an_idle_timer()
+                && self.lanes[out.lane]
+                    .last_sent_boundary
+                    .is_some_and(|last_step| clock.now < last_step.saturating_add(idle_after))
+            {
+                held_lanes.push(out.lane);
+                held_indices.push(index);
+                continue;
             }
             if kind.is_motion() {
                 let margin = out.start_clock as i64 - clock.now as i64;
@@ -1764,7 +1795,12 @@ impl StepcompressEndpoint {
                     "handing this burst to the transport blocked the send pass"
                 );
             }
-            self.backlog.drain(..burst.len());
+            let mut index = 0usize;
+            self.backlog.retain(|_| {
+                let keep = index >= scanned || held_indices.contains(&index);
+                index += 1;
+                keep
+            });
             self.in_flight.extend(
                 reclaim_clocks
                     .into_iter()
