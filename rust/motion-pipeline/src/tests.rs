@@ -851,9 +851,10 @@ fn polynomial_moment_convolution_matches_quadrature() {
         true,
     ));
     let oracle_eval = Rc::clone(&oracle_table);
+    let oracle_hint = std::cell::Cell::new(0);
     let oracle = trajectory::ShapedSignal::new_from_evaluator(
         &kernel,
-        move |t| oracle_eval.eval(t),
+        move |t| oracle_eval.eval_hinted(t, &oracle_hint),
         breaks.clone(),
         oracle_table.max_degree(),
     );
@@ -870,9 +871,10 @@ fn polynomial_moment_convolution_matches_quadrature() {
     );
     let fast_eval = Rc::clone(&fast_table);
     let fast_moments = Rc::clone(&fast_table);
+    let fast_hint = std::cell::Cell::new(0);
     let fast = trajectory::ShapedSignal::new_from_polynomial_evaluator(
         &kernel,
-        move |t| fast_eval.eval(t),
+        move |t| fast_eval.eval_hinted(t, &fast_hint),
         breaks,
         fast_table.max_degree(),
         move |lo, hi, degree, origin, moments| {

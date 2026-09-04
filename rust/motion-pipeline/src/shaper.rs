@@ -902,9 +902,10 @@ fn fit_axis_targets(
     let make_sig = || {
         let eval_table = Arc::clone(&table);
         let moment_table = Arc::clone(&table);
+        let piece_hint = std::cell::Cell::new(0);
         ShapedSignal::new_from_polynomial_evaluator(
             kernel,
-            move |t| eval_table.eval(t),
+            move |t| eval_table.eval_hinted(t, &piece_hint),
             input_breaks.clone(),
             input_degree,
             move |lo, hi, degree, origin, moments| {
@@ -1759,7 +1760,13 @@ impl AxisSignalTable {
             .fold(0.0_f64, |acc, &c| nurbs::fmadd(acc, tau, c))
     }
 
-    pub(crate) fn eval(&self, t: f64) -> f64 {
+    /// Every Gauss node of one convolution cut window lands in the same
+    /// piece - `merge_cuts` puts a cut at every input break - so one sampler
+    /// walking a window resolves the piece once and pays two comparisons for
+    /// the rest. The hint belongs to the sampler, not the table: the table is
+    /// shared by every worker and a hint inside it would trade the search for
+    /// cache-line contention.
+    pub(crate) fn eval_hinted(&self, t: f64, hint: &std::cell::Cell<usize>) -> f64 {
         if t < self.first_t {
             if !self.at_stream_boundary {
                 return f64::NAN;
@@ -1772,10 +1779,7 @@ impl AxisSignalTable {
             }
             return self.piece_at(self.coeffs.len() - 1, self.last_t);
         }
-        let i = self
-            .ends
-            .partition_point(|&end| end < t)
-            .min(self.coeffs.len() - 1);
+        let i = self.piece_covering(t, hint);
         if t >= self.starts[i] - SEGMENT_TIME_EPS_S {
             return self.piece_at(i, t);
         }
@@ -1783,6 +1787,19 @@ impl AxisSignalTable {
             return self.piece_at(i - 1, self.ends[i - 1]);
         }
         f64::NAN
+    }
+
+    fn piece_covering(&self, t: f64, hint: &std::cell::Cell<usize>) -> usize {
+        let at = hint.get();
+        if at < self.coeffs.len() && t >= self.starts[at] && t <= self.ends[at] {
+            return at;
+        }
+        let found = self
+            .ends
+            .partition_point(|&end| end < t)
+            .min(self.coeffs.len() - 1);
+        hint.set(found);
+        found
     }
 }
 

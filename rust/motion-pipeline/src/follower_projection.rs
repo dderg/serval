@@ -511,9 +511,10 @@ pub(crate) fn project_followers(
                 let make_sig = || {
                     let eval_table = Arc::clone(&table);
                     let moment_table = Arc::clone(&table);
+                    let piece_hint = std::cell::Cell::new(0);
                     ShapedSignal::new_from_polynomial_evaluator(
                         kernel,
-                        move |t| eval_table.eval(t),
+                        move |t| eval_table.eval_hinted(t, &piece_hint),
                         exact_input_breaks.clone(),
                         input_degree,
                         move |lo, hi, degree, origin, moments| {
