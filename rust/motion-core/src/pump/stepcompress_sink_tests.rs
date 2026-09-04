@@ -10,6 +10,9 @@ const CYCLES_PER_SECOND: f64 = 1_000_000.0;
 const BUDGET: u32 = 4;
 const MICROSTEP: f64 = 0.01;
 
+/// One view of every ramp the harness builds.
+const RAMP_VIEW_SECS: f64 = 0.002;
+
 /// How far past a resuming move's start clock a mid-stream re-anchor may
 /// land: the first step of a 100 mm/s run at [`MICROSTEP`] resolution.
 const RESUME_ANCHOR_SLACK_CYCLES: u64 = 200;
@@ -426,7 +429,7 @@ fn epoch_ramp_from(
     start_mm: f64,
     direction: f64,
 ) -> Vec<ClockedMotorSpan> {
-    let secs = 0.002;
+    let secs = RAMP_VIEW_SECS;
     let stride = (secs * freq) as u64;
     let positions = ramp_positions(count, start_mm, direction);
     (0..count)
@@ -2751,6 +2754,12 @@ const H7_FREQ: f64 = 520_000_000.0;
 struct McuStepper {
     base: u64,
     need_reset: bool,
+    dir: i8,
+    /// The signed step count `stepper_get_position` reads back: every pulse
+    /// the stepper has been handed, in the direction latched when it arrived.
+    /// A barrier ack is the proof that the whole sent region executed, so the
+    /// readback that follows one covers all of it.
+    position: i64,
 }
 
 impl McuStepper {
@@ -2758,6 +2767,8 @@ impl McuStepper {
         Self {
             base: 0,
             need_reset: true,
+            dir: 1,
+            position: 0,
         }
     }
 
@@ -2779,6 +2790,7 @@ impl McuStepper {
         let first = self.base + u64::from(interval);
         let span = queue_step_span(interval, count, add);
         self.base += span as u64;
+        self.position += i64::from(self.dir) * i64::from(count);
         Some(first)
     }
 }
@@ -2960,7 +2972,10 @@ fn play_frames_on_mcu(
                 }
                 stepper.reset_clock(clock, mcu_now);
             }
-            StepFrame::SetNextStepDir { .. } => {}
+            StepFrame::SetNextStepDir { oid, dir } => {
+                let stepper = mcu.entry(oid).or_insert_with(McuStepper::new);
+                stepper.dir = if dir == 1 { 1 } else { -1 };
+            }
             StepFrame::QueueStep {
                 oid,
                 interval,
@@ -3201,3 +3216,6 @@ fn an_idle_resume_reset_waits_for_the_mcu_stepper_to_finish_the_old_stream() {
     );
     verify_mcu_bases(&h.endpoint.lanes, &mcu).unwrap();
 }
+
+#[path = "stepcompress_sink_fuzz.rs"]
+mod stepcompress_sink_fuzz;
