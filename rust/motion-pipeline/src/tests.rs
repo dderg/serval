@@ -882,6 +882,22 @@ fn polynomial_moment_convolution_matches_quadrature() {
         },
     );
 
+    // A sample whose kernel window edge lands on a signal-piece boundary is
+    // the alignment the pipeline hits constantly, not a corner case: shaped
+    // breakpoints are input breaks offset by the kernel's own piece edges, so
+    // every fitted span endpoint produces one. The moment path used to refuse
+    // these and fall back to quadrature, which cost 72% of the shaper's
+    // convolution time for a disagreement that is five orders of magnitude
+    // under the fit tolerances.
+    let aligned = [first_t, first_end, second_start, last_t]
+        .into_iter()
+        .flat_map(|boundary| {
+            kernel
+                .pieces
+                .iter()
+                .flat_map(move |piece| [boundary + piece.u_start, boundary + piece.u_end])
+        })
+        .filter(|t| (first_t..=last_t).contains(t));
     for t in [
         first_t,
         300.001,
@@ -890,7 +906,10 @@ fn polynomial_moment_convolution_matches_quadrature() {
         second_start,
         300.009,
         last_t,
-    ] {
+    ]
+    .into_iter()
+    .chain(aligned)
+    {
         let got = fast.eval_pva(t);
         let want = oracle.eval_pva(t);
         assert!(

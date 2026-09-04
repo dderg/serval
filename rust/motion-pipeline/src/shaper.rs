@@ -1623,25 +1623,6 @@ impl AxisSignalTable {
         if (lo < self.first_t && !self.at_stream_boundary) || (hi > self.last_t && !self.force) {
             return false;
         }
-        let near_boundary = |time: f64, boundaries: &[f64]| {
-            let index = boundaries.partition_point(|&boundary| boundary < time);
-            [
-                index.checked_sub(1),
-                (index < boundaries.len()).then_some(index),
-            ]
-            .into_iter()
-            .flatten()
-            .any(|candidate| {
-                ordered_f64_key(boundaries[candidate]).abs_diff(ordered_f64_key(time)) <= 8
-            })
-        };
-        if near_boundary(lo, &self.starts)
-            || near_boundary(lo, &self.ends)
-            || near_boundary(hi, &self.starts)
-            || near_boundary(hi, &self.ends)
-        {
-            return false;
-        }
         moments.fill(0.0);
         if lo < self.first_t {
             let held = [self.piece_at(0, self.first_t)];
