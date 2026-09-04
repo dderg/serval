@@ -18,8 +18,12 @@ pub(crate) trait TrackSignal {
     fn eval(&self, t: f64) -> f64;
     fn deriv(&self, t: f64) -> f64;
     fn second_deriv(&self, t: f64) -> f64;
-    fn position_delta(&self, t0: f64, t1: f64) -> f64 {
-        self.eval(t1) - self.eval(t0)
+    /// The travel between two points the caller has already sampled; a
+    /// signal with a better-conditioned delta than the difference of its
+    /// samples integrates it from `t0` to `t1` instead.
+    fn position_delta(&self, (t0, p0): (f64, f64), (t1, p1): (f64, f64)) -> f64 {
+        let _ = (t0, t1);
+        p1 - p0
     }
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         (self.eval(t), self.deriv(t), self.second_deriv(t))
@@ -93,8 +97,8 @@ impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<'_, S> {
         self.inner.second_deriv(t)
     }
 
-    fn position_delta(&self, t0: f64, t1: f64) -> f64 {
-        self.inner.position_delta(t0, t1)
+    fn position_delta(&self, from: (f64, f64), to: (f64, f64)) -> f64 {
+        self.inner.position_delta(from, to)
     }
 
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
@@ -2111,31 +2115,35 @@ fn shaped_ladder<S: TrackSignal>(
     let v1 = exact_value(axis, v1, t1_inside)?;
     let a1 = exact_value(axis, a1, t1_inside)?;
     let base = quintic_in_u((p0, v0, a0), (p1, v1, a1), h);
-    let endpoint_delta = exact_value(axis, sig.position_delta(t0, t1), t1)?;
+    let endpoint_delta = exact_value(axis, sig.position_delta((t0, p0), (t1, p1)), t1)?;
 
     let mut truth = SpanTruth {
         pos: Vec::with_capacity(LADDER_FIT_NODES_U.len() + LADDER_PROBES_U.len()),
         vel: Vec::with_capacity(LADDER_PROBES_U.len()),
         acc: Vec::with_capacity(LADDER_PROBES_U.len()),
     };
-    for &u in &LADDER_FIT_NODES_U {
-        truth
-            .pos
-            .push((u, finite_sample(axis, sig, interior_t_of(u))?));
-    }
     for &u in &LADDER_PROBES_U {
-        let t = interior_t_of(u);
-        let pos = if u == -1.0 {
-            p0
-        } else if u == 1.0 {
-            p1
-        } else {
-            exact_value(axis, sig.eval(t), t)?
+        let (pos, vel, acc) = match u {
+            -1.0 => (p0, v0, a0),
+            1.0 => (p1, v1, a1),
+            _ => {
+                let t = t_of(u);
+                let (pos, vel, acc) = sig.eval_pva(t);
+                (
+                    exact_value(axis, pos, t)?,
+                    exact_value(axis, vel, t)?,
+                    exact_value(axis, acc, t)?,
+                )
+            }
         };
-        let (_, vel, acc) = sig.eval_pva(t);
         truth.pos.push((u, pos));
-        truth.vel.push((u, exact_value(axis, vel, t)?));
-        truth.acc.push((u, exact_value(axis, acc, t)?));
+        truth.vel.push((u, vel));
+        truth.acc.push((u, acc));
+    }
+    for &u in &LADDER_FIT_NODES_U {
+        if !LADDER_PROBES_U.contains(&u) {
+            truth.pos.push((u, finite_sample(axis, sig, t_of(u))?));
+        }
     }
 
     match ladder_fit(

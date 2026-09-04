@@ -1213,10 +1213,6 @@ impl TrackSignal for AxisSignal<'_> {
         axis_pva(self.axis, t).2
     }
 
-    fn position_delta(&self, t0: f64, t1: f64) -> f64 {
-        axis_pva(self.axis, t1).0 - axis_pva(self.axis, t0).0
-    }
-
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let (position, velocity, acceleration) = axis_pva(self.axis, t);
         (position - self.base, velocity, acceleration)
@@ -1861,7 +1857,7 @@ impl TrackSignal for FollowerSignal<'_> {
     /// an odometer tick wide is rounding noise. The span table integrates the
     /// ratio over the shaped distance actually travelled instead, and the raw
     /// track contributes its own relative delta.
-    fn position_delta(&self, t0: f64, t1: f64) -> f64 {
+    fn position_delta(&self, (t0, _): (f64, f64), (t1, _): (f64, f64)) -> f64 {
         let spans = self.state.spans_delta_e(
             self.s_start,
             self.s_owned_offset(t0),
