@@ -2058,34 +2058,43 @@ fn fit_axis_from_signal_with_velocity_budget<S: TrackSignal>(
     fit_pieces_to_nurbs(axis, pieces)
 }
 
+/// The convolution samples one span is fitted against, held by node rather
+/// than searched for: the ladder reads every rung off these, so a lookup runs
+/// once per rung per node and used to be a linear scan of three heap vectors
+/// allocated for every span.
 struct SpanTruth {
-    pos: Vec<(f64, f64)>,
-    vel: Vec<(f64, f64)>,
-    acc: Vec<(f64, f64)>,
+    pos: [f64; LADDER_PROBES_U.len()],
+    vel: [f64; LADDER_PROBES_U.len()],
+    acc: [f64; LADDER_PROBES_U.len()],
+    fit_pos: [f64; LADDER_FIT_NODES_U.len()],
 }
 
 impl SpanTruth {
-    fn pos_at(&self, u: f64) -> f64 {
-        self.pos
-            .iter()
-            .find(|(uu, _)| *uu == u)
-            .unwrap_or_else(|| panic!("ladder probed unsampled node u={u}"))
-            .1
+    fn probe_index(u: f64) -> Option<usize> {
+        LADDER_PROBES_U.iter().position(|&node| node == u)
     }
-    fn vel_at(&self, u: f64) -> f64 {
-        self.vel
+
+    fn pos_at(&self, u: f64) -> f64 {
+        if let Some(index) = Self::probe_index(u) {
+            return self.pos[index];
+        }
+        let index = LADDER_FIT_NODES_U
             .iter()
-            .find(|(uu, _)| *uu == u)
-            .unwrap_or_else(|| panic!("ladder probed unsampled velocity node u={u}"))
-            .1
+            .position(|&node| node == u)
+            .unwrap_or_else(|| panic!("ladder probed unsampled node u={u}"));
+        self.fit_pos[index]
+    }
+
+    fn vel_at(&self, u: f64) -> f64 {
+        let index = Self::probe_index(u)
+            .unwrap_or_else(|| panic!("ladder probed unsampled velocity node u={u}"));
+        self.vel[index]
     }
 
     fn acc_at(&self, u: f64) -> f64 {
-        self.acc
-            .iter()
-            .find(|(uu, _)| *uu == u)
-            .unwrap_or_else(|| panic!("ladder probed unsampled accel node u={u}"))
-            .1
+        let index = Self::probe_index(u)
+            .unwrap_or_else(|| panic!("ladder probed unsampled accel node u={u}"));
+        self.acc[index]
     }
 }
 
@@ -2135,11 +2144,12 @@ fn shaped_ladder<S: TrackSignal>(
     let endpoint_delta = exact_value(axis, sig.position_delta((t0, p0), (t1, p1)), t1)?;
 
     let mut truth = SpanTruth {
-        pos: Vec::with_capacity(LADDER_FIT_NODES_U.len() + LADDER_PROBES_U.len()),
-        vel: Vec::with_capacity(LADDER_PROBES_U.len()),
-        acc: Vec::with_capacity(LADDER_PROBES_U.len()),
+        pos: [f64::NAN; LADDER_PROBES_U.len()],
+        vel: [f64::NAN; LADDER_PROBES_U.len()],
+        acc: [f64::NAN; LADDER_PROBES_U.len()],
+        fit_pos: [f64::NAN; LADDER_FIT_NODES_U.len()],
     };
-    for &u in &LADDER_PROBES_U {
+    for (index, &u) in LADDER_PROBES_U.iter().enumerate() {
         let (pos, vel, acc) = match u {
             -1.0 => (p0, v0, a0),
             1.0 => (p1, v1, a1),
@@ -2153,14 +2163,15 @@ fn shaped_ladder<S: TrackSignal>(
                 )
             }
         };
-        truth.pos.push((u, pos));
-        truth.vel.push((u, vel));
-        truth.acc.push((u, acc));
+        truth.pos[index] = pos;
+        truth.vel[index] = vel;
+        truth.acc[index] = acc;
     }
-    for &u in &LADDER_FIT_NODES_U {
-        if !LADDER_PROBES_U.contains(&u) {
-            truth.pos.push((u, finite_sample(axis, sig, t_of(u))?));
-        }
+    for (index, &u) in LADDER_FIT_NODES_U.iter().enumerate() {
+        truth.fit_pos[index] = match SpanTruth::probe_index(u) {
+            Some(probe) => truth.pos[probe],
+            None => finite_sample(axis, sig, t_of(u))?,
+        };
     }
 
     match ladder_fit(
