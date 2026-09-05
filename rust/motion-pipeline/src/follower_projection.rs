@@ -96,6 +96,8 @@ struct SourceProjection {
     s_end: f64,
     e_end_relative: f64,
     semantic_cuts: Vec<f64>,
+    input_start: Pvaj4,
+    input_end: Pvaj4,
 }
 
 fn fit_source_projection(
@@ -106,33 +108,57 @@ fn fit_source_projection(
     state: &FollowerState,
     s_start: f64,
     fit_tol: FitTol,
+    leading_stage: Option<&ChainStage>,
 ) -> Result<SourceProjection, PostProcessError> {
     let raw_axis = &raw.axes[axis];
     let (t_start, t_end) = projection_support(raw, shaped, axis, leaders);
     let sig = FollowerSignal::new(shaped, raw, axis, leaders, state, s_start, 0.0);
     let breakpoints = sig.construction_breakpoints(raw_axis);
-    let track = match sig.constant_value() {
-        Some(value) => bezier_pieces_to_nurbs(&[BezierPiece {
+    let input_state = |t| {
+        let (p, v, a) = sig.eval_pva(t);
+        (p, v, a, sig.jerk(t))
+    };
+    let input_start = input_state(t_start);
+    let input_end = input_state(t_end);
+    let tolerance = follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5);
+    let track = if let Some(value) = sig.constant_value() {
+        bezier_pieces_to_nurbs(&[BezierPiece {
             u_start: t_start,
             u_end: t_end,
             coeffs: vec![value, value],
-        }]),
-        None => fit_axis_from_signal(
+        }])
+    } else if let Some(stage) = leading_stage {
+        fit_axis_from_signal(
+            axis,
+            t_start,
+            t_end,
+            &breakpoints.fit_seeds,
+            &AdvancedFollowerSignal {
+                source: &sig,
+                stage,
+            },
+            tolerance,
+            "advanced_follower_source",
+        )?
+    } else {
+        fit_axis_from_signal(
             axis,
             t_start,
             t_end,
             &breakpoints.fit_seeds,
             &sig,
-            follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5),
+            tolerance,
             "follower_source",
-        )?,
+        )?
     };
-    let e_end_relative = nurbs::eval::eval(&track.as_view(), t_end);
+    let e_end_relative = sig.eval(t_end);
     Ok(SourceProjection {
         track,
         s_end: sig.s_end(),
         e_end_relative,
         semantic_cuts: breakpoints.semantic,
+        input_start,
+        input_end,
     })
 }
 
@@ -164,6 +190,10 @@ pub(crate) fn project_followers(
                     ChainStage::DerivativeGains { .. } | ChainStage::SmoothKernel(_)
                 )
             });
+        let leading_stage = (!defer_linear_prefix)
+            .then(|| chain.stages.first())
+            .flatten()
+            .filter(|stage| !matches!(stage, ChainStage::SmoothKernel(_)));
         let leaders_transformed = leaders.iter().any(|&leader| {
             chains
                 .chains
@@ -241,6 +271,7 @@ pub(crate) fn project_followers(
                                         state_ref,
                                         s_start,
                                         fit_tol,
+                                        leading_stage,
                                     ),
                                 ));
                             }
@@ -266,6 +297,7 @@ pub(crate) fn project_followers(
                             state_ref,
                             s_start,
                             fit_tol,
+                            leading_stage,
                         ),
                     )
                 })
@@ -303,7 +335,7 @@ pub(crate) fn project_followers(
                 "follower axis {axis} has no support in segment"
             );
             let base_position = state.e_end.unwrap_or_else(|| axis_pva(raw_axis, t_start).0);
-            let (projected, projected_cuts) = if projecting {
+            let (projected, projected_cuts, input_states) = if projecting {
                 let (source_index, source_result) = source_fits
                     .next()
                     .expect("every unprojected follower segment has a source fit");
@@ -316,25 +348,36 @@ pub(crate) fn project_followers(
                     s_end,
                     e_end_relative,
                     semantic_cuts,
+                    input_start,
+                    input_end,
                 } = source_result?;
                 state.s_shaped = s_end;
                 state.e_end = Some(base_position + e_end_relative);
-                (track, Some(semantic_cuts))
+                (track, Some(semantic_cuts), Some((input_start, input_end)))
             } else {
                 (
                     fit_continuous_axis(axis, raw_axis, base_position, t_start, t_end, fit_tol)?,
                     None,
+                    None,
                 )
             };
-            let input_start = pvaj_of_track(&projected, t_start);
-            let input_end = pvaj_of_track(&projected, t_end);
-            let track = apply_leading_stages(
-                chain,
-                axis,
-                projected,
-                follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis)),
-                defer_linear_prefix,
-            )?;
+            let (input_start, input_end) = input_states.unwrap_or_else(|| {
+                (
+                    pvaj_of_track(&projected, t_start),
+                    pvaj_of_track(&projected, t_end),
+                )
+            });
+            let track = if projecting {
+                projected
+            } else {
+                apply_leading_stages(
+                    chain,
+                    axis,
+                    projected,
+                    follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis)),
+                    defer_linear_prefix,
+                )?
+            };
             if !track.control_points().iter().all(|v| v.is_finite()) {
                 return Err(PostProcessError::NonFiniteSample {
                     axis,
@@ -508,7 +551,7 @@ pub(crate) fn project_followers(
                 let breaks_started = crate::timing::stopwatch();
                 let shaped_breaks = shaped_signal_breakpoints(kernel, shaped_break_seeds);
                 timing.breakpoints_us += breaks_started.elapsed_us();
-                let slope_jumps = table.slope_jumps().to_vec();
+                let input_jumps = table.input_jumps().to_vec();
                 let make_sig = || {
                     let eval_table = Arc::clone(&table);
                     let moment_table = Arc::clone(&table);
@@ -521,7 +564,7 @@ pub(crate) fn project_followers(
                         move |lo, hi, degree, origin, orders| {
                             moment_table.integrate_moments(lo, hi, degree, origin, orders)
                         },
-                        slope_jumps.clone(),
+                        input_jumps.clone(),
                     )
                 };
                 let tol_scale = (0..commit_count)
@@ -1627,6 +1670,33 @@ impl<'a> FollowerSignal<'a> {
         }
     }
 
+    fn jerk(&self, t: f64) -> f64 {
+        let speed = self.shaped_speed(t);
+        let speed_derivative = self.shaped_speed_deriv_from_speed(t, speed);
+        let speed_second = if speed == 0.0 || self.speed_zero_sliver(t).is_some() {
+            0.0
+        } else {
+            let numerator = self
+                .shaped_axes
+                .iter()
+                .map(|axis| {
+                    let pvaj = axis
+                        .eval_pvaj(t)
+                        .expect("follower leader has exact derivatives");
+                    pvaj.acceleration * pvaj.acceleration + pvaj.velocity * pvaj.jerk
+                })
+                .sum::<f64>();
+            (numerator - speed_derivative * speed_derivative) / speed
+        };
+        let (ratio, slope) = self.state.ratio_and_slope(self.s_owned(t));
+        let raw = self.raw_delta.map_or(0.0, |(axis, _)| {
+            axis.eval_pvaj(t)
+                .expect("follower raw axis has exact derivatives")
+                .jerk
+        });
+        ratio * speed_second + 3.0 * slope * speed * speed_derivative + raw
+    }
+
     fn s_offset(&self, t: f64) -> f64 {
         let start = self.grid[0];
         let end = self.grid[self.grid.len() - 1];
@@ -1930,6 +2000,54 @@ impl TrackSignal for FollowerSignal<'_> {
              ratio={ratio} slope={slope} speed={speed} speed_deriv={speed_deriv} \
              leaders={leaders:?} raw={raw:?}"
         ))
+    }
+}
+
+struct AdvancedFollowerSignal<'a, 'b> {
+    source: &'a FollowerSignal<'b>,
+    stage: &'a ChainStage,
+}
+
+impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
+    fn eval(&self, t: f64) -> f64 {
+        self.eval_pva(t).0
+    }
+
+    fn deriv(&self, t: f64) -> f64 {
+        self.eval_pva(t).1
+    }
+
+    fn second_deriv(&self, t: f64) -> f64 {
+        self.eval_pva(t).2
+    }
+
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let (p, v, a) = self.source.eval_pva(t);
+        let j = self.source.jerk(t);
+        match self.stage {
+            ChainStage::DerivativeGains { k1, k2 } => {
+                assert_eq!(*k2, 0.0, "leading acceleration gain is not supported");
+                (p + k1 * v, v + k1 * a, a + k1 * j)
+            }
+            ChainStage::NonlinearAdvance(advance) => (
+                p + advance.advance(v),
+                v + advance.slope(v) * a,
+                a + advance.slope(v) * j + advance.curvature(v) * a * a,
+            ),
+            ChainStage::SmoothKernel(_) => unreachable!("a leading advance is not a kernel"),
+        }
+    }
+
+    fn position_delta(&self, (t0, _): (f64, f64), (t1, _): (f64, f64)) -> f64 {
+        let delta = self.source.position_delta((t0, 0.0), (t1, 0.0));
+        let v0 = self.source.deriv(t0);
+        let v1 = self.source.deriv(t1);
+        delta
+            + match self.stage {
+                ChainStage::DerivativeGains { k1, .. } => k1 * (v1 - v0),
+                ChainStage::NonlinearAdvance(advance) => advance.advance(v1) - advance.advance(v0),
+                ChainStage::SmoothKernel(_) => unreachable!("a leading advance is not a kernel"),
+            }
     }
 }
 

@@ -119,29 +119,32 @@ pub fn extract_bezier_pieces(curve: &ScalarNurbs) -> Vec<BezierPiece> {
     let knots = refined.knots();
     let cps = refined.control_points();
 
-    let mut breakpoints: Vec<f64> = Vec::new();
-    let mut last: Option<f64> = None;
-    for k in knots {
-        if last.is_none_or(|l| *k != l) {
-            breakpoints.push(*k);
-            last = Some(*k);
+    let mut pieces = Vec::new();
+    for span in p..cps.len() {
+        let u_start = knots[span];
+        let u_end = knots[span + 1];
+        if u_start == u_end {
+            continue;
         }
-    }
-
-    let mut pieces = Vec::with_capacity(breakpoints.len() - 1);
-    let mut cp_idx = 0;
-    for window in breakpoints.windows(2) {
-        let u_start = window[0];
-        let u_end = window[1];
-        let bernstein: Vec<f64> = cps[cp_idx..=(cp_idx + p)].to_vec();
-        pieces.push(BezierPiece::from_bernstein(&bernstein, u_start, u_end));
-        cp_idx += p;
+        pieces.push(BezierPiece::from_bernstein(
+            &cps[span - p..=span],
+            u_start,
+            u_end,
+        ));
     }
 
     pieces
 }
 
 pub fn bezier_pieces_to_nurbs(pieces: &[BezierPiece]) -> ScalarNurbs {
+    assemble_bezier_pieces(pieces, false)
+}
+
+pub fn bezier_pieces_to_discontinuous_nurbs(pieces: &[BezierPiece]) -> ScalarNurbs {
+    assemble_bezier_pieces(pieces, true)
+}
+
+fn assemble_bezier_pieces(pieces: &[BezierPiece], discontinuous: bool) -> ScalarNurbs {
     assert!(!pieces.is_empty(), "bezier_pieces_to_nurbs: empty input");
     let p = pieces[0].degree();
     for w in pieces.windows(2) {
@@ -154,12 +157,13 @@ pub fn bezier_pieces_to_nurbs(pieces: &[BezierPiece]) -> ScalarNurbs {
         assert!(w[1].degree() == p, "inconsistent degrees");
     }
 
-    let mut knots = Vec::with_capacity((pieces.len() + 1) * p + 2);
+    let stride = p + usize::from(discontinuous);
+    let mut knots = Vec::with_capacity((pieces.len() - 1) * stride + 2 * (p + 1));
     for _ in 0..=p {
         knots.push(pieces[0].u_start);
     }
     for piece in &pieces[..pieces.len() - 1] {
-        for _ in 0..p {
+        for _ in 0..stride {
             knots.push(piece.u_end);
         }
     }
@@ -167,10 +171,10 @@ pub fn bezier_pieces_to_nurbs(pieces: &[BezierPiece]) -> ScalarNurbs {
         knots.push(pieces[pieces.len() - 1].u_end);
     }
 
-    let mut cps: Vec<f64> = Vec::with_capacity(pieces.len() * p + 1);
+    let mut cps: Vec<f64> = Vec::with_capacity((pieces.len() - 1) * stride + p + 1);
     for (i, piece) in pieces.iter().enumerate() {
         let bernstein = piece.to_bernstein();
-        if i == 0 {
+        if i == 0 || discontinuous {
             cps.extend_from_slice(&bernstein);
         } else {
             cps.extend_from_slice(&bernstein[1..]);

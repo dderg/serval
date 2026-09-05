@@ -28,6 +28,9 @@ pub(crate) trait TrackSignal {
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         (self.eval(t), self.deriv(t), self.second_deriv(t))
     }
+    fn acceleration_monotonicity(&self, _start: f64, _end: f64) -> Option<bool> {
+        None
+    }
     fn diagnostic(&self, _t: f64) -> Option<String> {
         None
     }
@@ -899,7 +902,7 @@ fn fit_axis_targets(
     if targets.is_empty() {
         return Ok(Vec::new());
     }
-    let slope_jumps = table.slope_jumps().to_vec();
+    let input_jumps = table.input_jumps().to_vec();
     let make_sig = || {
         let eval_table = Arc::clone(&table);
         let moment_table = Arc::clone(&table);
@@ -912,7 +915,7 @@ fn fit_axis_targets(
             move |lo, hi, degree, origin, orders| {
                 moment_table.integrate_moments(lo, hi, degree, origin, orders)
             },
-            slope_jumps.clone(),
+            input_jumps.clone(),
         )
     };
     let max_seed_spans = targets
@@ -1546,16 +1549,8 @@ pub(crate) struct AxisSignalTable {
     last_t: f64,
     at_stream_boundary: bool,
     force: bool,
-    /// Moments of the signal, its slope and its curvature, each about its own
-    /// piece midpoints. The convolution needs all three because it integrates
-    /// the *signal's* derivatives against the kernel rather than the signal
-    /// against the kernel's: `(f*k)'' = f''*k + sum df'.k` keeps every term
-    /// the size of the answer, where `f*k''` builds two terms four orders
-    /// larger that must then cancel.
     moment_trees: Option<[MomentTree; MOMENT_ORDERS]>,
-    /// Where the signal's slope steps, and by how much - the deltas
-    /// `f''` carries that no polynomial piece does.
-    slope_jumps: Vec<(f64, f64)>,
+    input_jumps: Vec<(f64, f64, f64)>,
 }
 
 const MOMENT_ORDERS: usize = 3;
@@ -1597,7 +1592,7 @@ impl AxisSignalTable {
             at_stream_boundary,
             force,
             moment_trees: None,
-            slope_jumps: Vec::new(),
+            input_jumps: Vec::new(),
         };
         for track in tracks {
             for piece in extract_bezier_pieces(track) {
@@ -1633,14 +1628,14 @@ impl AxisSignalTable {
     }
     pub(crate) fn with_piece_moments(mut self, degree: usize) -> Self {
         let trees = std::array::from_fn(|order| MomentTree::build(&self, degree, order));
-        let slope_jumps = self.collect_slope_jumps();
+        let input_jumps = self.collect_input_jumps();
         self.moment_trees = Some(trees);
-        self.slope_jumps = slope_jumps;
+        self.input_jumps = input_jumps;
         self
     }
 
-    pub(crate) fn slope_jumps(&self) -> &[(f64, f64)] {
-        &self.slope_jumps
+    pub(crate) fn input_jumps(&self) -> &[(f64, f64, f64)] {
+        &self.input_jumps
     }
 
     fn slope_at(&self, piece: usize, at: f64) -> f64 {
@@ -1656,24 +1651,23 @@ impl AxisSignalTable {
             .fold(0.0_f64, |acc, &c| nurbs::fmadd(acc, tau, c))
     }
 
-    /// Both ends of the window hold their edge value, so the signal's slope
-    /// steps to zero there just as it steps between pieces.
-    fn collect_slope_jumps(&self) -> Vec<(f64, f64)> {
+    fn collect_input_jumps(&self) -> Vec<(f64, f64, f64)> {
         let mut jumps = Vec::new();
         let entering = self.slope_at(0, self.first_t);
         if entering != 0.0 {
-            jumps.push((self.first_t, entering));
+            jumps.push((self.first_t, 0.0, entering));
         }
         for piece in 1..self.coeffs.len() {
             let seam = self.starts[piece];
-            let step = self.slope_at(piece, seam) - self.slope_at(piece - 1, seam);
-            if step != 0.0 {
-                jumps.push((seam, step));
+            let position_jump = self.piece_at(piece, seam) - self.piece_at(piece - 1, seam);
+            let slope_jump = self.slope_at(piece, seam) - self.slope_at(piece - 1, seam);
+            if position_jump != 0.0 || slope_jump != 0.0 {
+                jumps.push((seam, position_jump, slope_jump));
             }
         }
         let leaving = self.slope_at(self.coeffs.len() - 1, self.last_t);
         if leaving != 0.0 {
-            jumps.push((self.last_t, -leaving));
+            jumps.push((self.last_t, 0.0, -leaving));
         }
         jumps
     }
@@ -2171,6 +2165,85 @@ impl SpanTruth {
     }
 }
 
+fn acceleration_error_witness<S: TrackSignal>(
+    sig: &S,
+    coefficients: &[f64],
+    t0: f64,
+    t1: f64,
+    budget: f64,
+) -> Option<f64> {
+    sig.acceleration_monotonicity(next_toward(t0, t1), next_toward(t1, t0))?;
+    let h = t1 - t0;
+    let acceleration = exact_piece(coefficients, 0.0, h, h)
+        .differentiate()
+        .differentiate()
+        .to_bernstein();
+    let start_acceleration = sig.second_deriv(next_toward(t0, t1));
+    let end_acceleration = sig.second_deriv(next_toward(t1, t0));
+    acceleration_interval_witness(
+        sig,
+        (t0, h, budget),
+        (0.0, 1.0),
+        (start_acceleration, end_acceleration),
+        &acceleration,
+        0,
+    )
+}
+
+fn acceleration_interval_witness<S: TrackSignal>(
+    sig: &S,
+    (t0, h, budget): (f64, f64, f64),
+    (left, right): (f64, f64),
+    (a_left, a_right): (f64, f64),
+    controls: &[f64],
+    depth: u32,
+) -> Option<f64> {
+    let candidate_min = controls.iter().copied().fold(f64::INFINITY, f64::min);
+    let candidate_max = controls.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if candidate_max - a_left.min(a_right) <= budget
+        && a_left.max(a_right) - candidate_min <= budget
+    {
+        return None;
+    }
+    let mid = 0.5 * (left + right);
+    let truth = sig.second_deriv(nurbs::fmadd(mid, h, t0));
+    let n = controls.len();
+    let mut work = [0.0; 14];
+    let mut lower = [0.0; 14];
+    let mut upper = [0.0; 14];
+    work[..n].copy_from_slice(controls);
+    lower[0] = work[0];
+    upper[n - 1] = work[n - 1];
+    for remaining in (1..n).rev() {
+        for index in 0..remaining {
+            work[index] = 0.5 * work[index] + 0.5 * work[index + 1];
+        }
+        lower[n - remaining] = work[0];
+        upper[remaining - 1] = work[remaining - 1];
+    }
+    if !truth.is_finite() || (work[0] - truth).abs() > budget || depth == 12 {
+        return Some(2.0 * mid - 1.0);
+    }
+    acceleration_interval_witness(
+        sig,
+        (t0, h, budget),
+        (left, mid),
+        (a_left, truth),
+        &lower[..n],
+        depth + 1,
+    )
+    .or_else(|| {
+        acceleration_interval_witness(
+            sig,
+            (t0, h, budget),
+            (mid, right),
+            (truth, a_right),
+            &upper[..n],
+            depth + 1,
+        )
+    })
+}
+
 const LADDER_FIT_NODES_U: [f64; 3] = [0.0, 0.5, -0.5];
 
 /// Ladder fit of the shaped signal over one span: the endpoint-anchored
@@ -2259,10 +2332,46 @@ fn shaped_ladder<S: TrackSignal>(
         LadderPolicy {
             endpoint_anchored: true,
             enforce_velocity_sign,
+            acceleration_monotonicity: sig.acceleration_monotonicity(t0_inside, t1_inside),
             high_degree_span_floor,
         },
     ) {
-        Ok(coefficients) => Ok((coefficients, None)),
+        Ok(coefficients) => {
+            let Some(u) =
+                acceleration_error_witness(sig, &coefficients, t0, t1, fit_tol.accel_mm_s2)
+            else {
+                return Ok((coefficients, None));
+            };
+            let t = t_of(u);
+            let (source_position, source_velocity, source_acceleration) = sig.eval_pva(t);
+            let piece = exact_piece(&coefficients, t0, t1, h);
+            let velocity = piece.differentiate();
+            let acceleration = velocity.differentiate();
+            let candidate_position = piece.evaluate(t);
+            let candidate_velocity = velocity.evaluate(t);
+            let candidate_acceleration = acceleration.evaluate(t);
+            Ok((
+                coefficients,
+                Some(LadderFailure {
+                    u,
+                    position_error: (candidate_position - source_position).abs(),
+                    velocity_error: (candidate_velocity - source_velocity).abs(),
+                    acceleration_error: (candidate_acceleration - source_acceleration).abs(),
+                    source_position,
+                    source_velocity,
+                    source_acceleration,
+                    candidate_position,
+                    candidate_velocity,
+                    candidate_acceleration,
+                    left_position: p0,
+                    left_velocity: v0,
+                    left_acceleration: a0,
+                    right_position: p1,
+                    right_velocity: v1,
+                    right_acceleration: a1,
+                }),
+            ))
+        }
         Err(failure) => Ok((base, Some(failure))),
     }
 }
@@ -2328,6 +2437,9 @@ fn refine_shaped_span<S: TrackSignal>(
         if failure.position_error <= fit_tol.pos_mm
             && failure.velocity_error <= velocity_budget
             && t1 - t0 <= floors.high_degree
+            && sig
+                .acceleration_monotonicity(next_toward(t0, t1), next_toward(t1, t0))
+                .is_none()
         {
             out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
             return Ok(());
@@ -2437,13 +2549,33 @@ fn fit_tolerance_without_probe(axis: usize, t_start: f64, t_end: f64) -> PostPro
     }
 }
 
-/// The reciprocal shape's curvature flips sign with the input velocity, so
-/// every velocity zero of the *normalized* signal is a one-sided acceleration
-/// seam. The roots must come from the same C0-patched coefficients the signal
-/// evaluates, not from the raw track pieces.
+fn tanh_acceleration_extremum_velocity(advance: trajectory::NonlinearAdvance) -> f64 {
+    advance.linearization_velocity * libm::atanh(1.0 / libm::sqrt(3.0))
+}
+
 fn nonlinear_transition_breakpoints(sig: &NonlinearAdvanceSignal) -> Vec<f64> {
-    if sig.adv.model != trajectory::AdvanceModel::Reciprocal {
-        return Vec::new();
+    if sig.adv.model == trajectory::AdvanceModel::Tanh {
+        let extremum = tanh_acceleration_extremum_velocity(sig.adv);
+        let mut roots = Vec::new();
+        for (piece, coefficients) in sig.coeffs.iter().enumerate() {
+            if coefficients.len() < 3
+                || coefficients[2] == 0.0
+                || coefficients
+                    .iter()
+                    .skip(3)
+                    .any(|&coefficient| coefficient != 0.0)
+            {
+                continue;
+            }
+            for velocity in [-extremum, extremum] {
+                let time =
+                    sig.starts[piece] + (velocity - coefficients[1]) / (2.0 * coefficients[2]);
+                if sig.starts[piece] < time && time < sig.ends[piece] {
+                    roots.push(time);
+                }
+            }
+        }
+        return roots;
     }
     let mut roots = Vec::new();
     for (piece, coeffs) in sig.coeffs.iter().enumerate() {
@@ -2544,11 +2676,6 @@ pub(crate) fn apply_nonlinear_advance_to_track(
         .u_start;
     let t_end = pieces.last().expect("nonlinear advance: empty track").u_end;
     let mut breakpoints = track.knots().to_vec();
-    breakpoints.extend(
-        pieces[..pieces.len().saturating_sub(1)]
-            .iter()
-            .map(|piece| f64_from_ordered_key(ordered_f64_key(piece.u_end) + 1)),
-    );
     breakpoints.extend(nonlinear_transition_breakpoints(&sig));
     fit_axis_from_signal(
         axis,
@@ -2608,7 +2735,7 @@ impl NonlinearAdvanceSignal {
 
     fn piece_at(&self, t: f64) -> usize {
         let mut i = self.cursor.get().min(self.coeffs.len() - 1);
-        while i > 0 && self.starts[i] > t {
+        while i > 0 && self.starts[i] >= t {
             i -= 1;
         }
         while i + 1 < self.coeffs.len() && self.ends[i] < t {
@@ -2681,6 +2808,43 @@ impl TrackSignal for NonlinearAdvanceSignal {
         )
     }
 
+    fn acceleration_monotonicity(&self, start: f64, end: f64) -> Option<bool> {
+        let piece = self.piece_at(start);
+        if self.piece_at(end) != piece
+            || self.coeffs[piece]
+                .iter()
+                .skip(3)
+                .any(|&coefficient| coefficient != 0.0)
+        {
+            return None;
+        }
+        let (_, start_velocity, acceleration, _) = self.input_state(start);
+        let (_, end_velocity, _, _) = self.input_state(end);
+        if acceleration == 0.0 || self.adv.nonlinear_offset == 0.0 {
+            return Some(true);
+        }
+        let direction = acceleration * self.adv.nonlinear_offset;
+        match self.adv.model {
+            trajectory::AdvanceModel::Reciprocal => {
+                (start_velocity * end_velocity > 0.0).then_some(direction > 0.0)
+            }
+            trajectory::AdvanceModel::Tanh => {
+                let extremum = tanh_acceleration_extremum_velocity(self.adv);
+                let initial_velocity = self.coeffs[piece][1];
+                let first = self.starts[piece] + (-extremum - initial_velocity) / acceleration;
+                let second = self.starts[piece] + (extremum - initial_velocity) / acceleration;
+                let lower = first.min(second);
+                let upper = first.max(second);
+                if end <= lower || start >= upper {
+                    Some(direction > 0.0)
+                } else if start >= lower && end <= upper {
+                    Some(direction < 0.0)
+                } else {
+                    None
+                }
+            }
+        }
+    }
     fn diagnostic(&self, t: f64) -> Option<String> {
         let piece = self.piece_at(t);
         let (p, v, a, j) = self.input_state(t);
@@ -2703,29 +2867,28 @@ pub(crate) fn apply_derivative_gains_to_track(
     k2: f64,
 ) -> nurbs::ScalarNurbs {
     let pieces = extract_bezier_pieces(track);
-    let out_pieces: Vec<BezierPiece> = pieces
-        .iter()
-        .map(|piece| {
-            let derivative = piece.differentiate();
-            let second = (k2 != 0.0).then(|| derivative.differentiate());
-            let coeffs: Vec<f64> = piece
-                .coeffs
-                .iter()
-                .enumerate()
-                .map(|(i, c)| {
-                    let with_k1 = c + k1 * derivative.coeffs.get(i).copied().unwrap_or(0.0);
-                    match &second {
-                        Some(dd) => with_k1 + k2 * dd.coeffs.get(i).copied().unwrap_or(0.0),
-                        None => with_k1,
-                    }
-                })
-                .collect();
-            BezierPiece {
-                u_start: piece.u_start,
-                u_end: piece.u_end,
-                coeffs,
-            }
-        })
-        .collect();
-    bezier_pieces_to_nurbs(&out_pieces)
+    let mut out_pieces = Vec::with_capacity(pieces.len());
+    for piece in &pieces {
+        let derivative = piece.differentiate();
+        let second = (k2 != 0.0).then(|| derivative.differentiate());
+        let coeffs: Vec<f64> = piece
+            .coeffs
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let with_k1 = c + k1 * derivative.coeffs.get(i).copied().unwrap_or(0.0);
+                match &second {
+                    Some(dd) => with_k1 + k2 * dd.coeffs.get(i).copied().unwrap_or(0.0),
+                    None => with_k1,
+                }
+            })
+            .collect();
+
+        out_pieces.push(BezierPiece {
+            u_start: piece.u_start,
+            u_end: piece.u_end,
+            coeffs,
+        });
+    }
+    nurbs::bezier::bezier_pieces_to_discontinuous_nurbs(&out_pieces)
 }

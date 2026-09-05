@@ -198,11 +198,10 @@ fn build_refinement_vector(knots: &[f64], p: usize) -> Vec<f64> {
             s += 1;
         }
         assert!(
-            s <= p,
-            "interior knot {u} has multiplicity {s} above the degree {p}: the curve is \
-             discontinuous there and has no Bezier decomposition"
+            s <= p + 1,
+            "interior knot {u} has multiplicity {s} above degree + 1"
         );
-        let deficit = p - s;
+        let deficit = p.saturating_sub(s);
         for _ in 0..deficit {
             x.push(u);
         }

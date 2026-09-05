@@ -725,6 +725,7 @@ dependencies = [
  "libc",
  "libm",
  "nurbs",
+ "proptest",
  "thiserror",
  "tracing",
  "trajectory",

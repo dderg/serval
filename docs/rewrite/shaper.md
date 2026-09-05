@@ -106,11 +106,53 @@ Roster (`rust/trajectory/src/algos/`):
   ladder budgets the convolution refit uses, and a move carrying one
   pre-kernel takes the sampled lowering path rather than the closed-form
   per-piece one.
+  Piece boundaries retain their exact times; derivatives are sampled from
+  inside each fit interval, with deterministic left ownership at a shared
+  knot. On constant-acceleration input, the nonlinear law also certifies
+  acceleration monotonicity: tanh changes direction at
+  `v = ±linearization_velocity·atanh(1/√3)`, while reciprocal has fixed
+  direction on each side of zero velocity. The fitter seeds those
+  transitions and classifies intervals using those same root times, avoiding
+  endpoint-velocity roundoff that could remove the certificate. Candidates'
+  Bernstein jerk controls must prove the certified sign within the floating-point
+  basis-conversion error bound, not the physical fit budget. Nonconstant certified
+  spans use endpoint-P/V/A Hermite rungs, so a low-order plateau cannot spend the
+  acceleration budget as a jump between pieces. A bounded adaptive interval check
+  bounds acceleration error between probes using the candidate's Bernstein hull
+  and the monotone signal's endpoint values; inconclusive intervals request
+  refinement. The span floor cannot bypass this check. General polynomial input
+  supplies no such certificate and retains the ordinary fitting contract.
 - `mode_inverse` (`frequency_hz`, `damping_ratio`) —
   `DerivativeGains { k1: 2ζ/ω, k2: 1/ω² }` with `ω = 2πf`.
 
 A kernel's *variance* (second moment, `kernel_variance_s2`) is its one
 number the planner needs — see the corner budget section.
+
+Moment convolution differentiates the input polynomials, not the kernel. At
+input joins, position jumps contribute `Δp·k(t−b)` to output velocity and
+`Δp·k'(t−b)` to acceleration; slope jumps contribute `Δv·k(t−b)` to
+acceleration. All three terms are required when derivative gains produce
+genuine discontinuities. Preserving their polynomial pieces without these
+terms would make the convolved position, velocity, and acceleration inconsistent.
+
+### Oscillation property tests
+
+`motion-pipeline/src/phase_ripple_fuzz.rs` checks flat cruise velocity and
+acceleration before a changing phase, through both the shared axis fitter and
+nonlinear advance. `nonlinear_ripple_fuzz.rs` checks analytic ramp fit budgets,
+acceleration direction inside pieces, and velocity/acceleration behavior at joins.
+The generators vary axis labels, flow direction, phase durations, time origins,
+velocity scales, and tanh/reciprocal parameters, including velocity-zero crossings.
+The oracles differentiate native Bernstein controls rather than unstable
+position-power conversions; the ramp oracle searches jerk extrema independently
+of the fitter's sign certificate.
+
+Both modules retain shrinking/replay seeds in `motion-pipeline/proptest-regressions/`.
+Normal Rust tests run 128 cases per property; `./scripts/ci.sh rust-fuzz` includes
+them at `PROPTEST_CASES` (20,000 by default). Axis labels exercise shared scalar
+fitting, not full kinematic routing or physical resonance response. These tests
+reject invented oscillations where the analytic signal supplies a shape contract;
+they do not forbid legitimate oscillatory motion.
 
 ## Composition rules
 

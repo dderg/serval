@@ -194,6 +194,52 @@ X/Y `seam_max_da` 52.5/20.0 → 13.1/15.4, `printer/discontinuity` Y
 22.4 → 17.4. The remaining X/Y seams and the E-axis ones (follower model)
 are separate stories.
 
+**Follower pressure advance has a separate derivative contract.** In
+`post_processor/chained_shaper_pa/extruding_corner`, fitting the unadvanced
+follower position and acceleration first admitted quadratic pieces. Their
+zero interior jerk erased the intended `k·E'''` contribution to advanced
+acceleration. Leading linear and nonlinear advance now transform the
+analytic follower P/V/A/J before fitting, so the existing position and
+acceleration budgets apply to the actual motor command. Separately,
+polynomial derivative-gain assembly preserves discontinuities with
+degree-plus-one knot multiplicity instead of altering the next piece's
+first control point; Bezier extraction and refinement support those seams.
+No fit tolerance or snapshot baseline was changed.
+
+For that case, at 10,001 uniform samples over `[0.32615, 0.3297245]` seconds,
+the advanced E-acceleration error against
+`0.05·(d|v_XY|/dt + 0.04·d²|v_XY|/dt²)` fell from max/RMS
+`1789.65/1581.38` to `25.04/9.87` mm/s². The case-wide E acceleration seam
+maximum fell from `30795.38` to `160.48` mm/s². Nonzero residuals remain:
+this is tolerance-bounded fitting, not an exact analytic output curve, and
+the leader spline's own derivative seams remain part of the input.
+
+**The unshaped tanh fast corner had two additional fitting defects.**
+In `nonlinear_pa/tanh/fast_corner`, a synthetic one-ULP-after-knot seed was
+coalesced into the preceding fit interval. Its supposedly interior
+endpoint then sampled the next phase's acceleration, making a flat
+cruise ring toward the next phase's −150 mm/s² state. Exact-knot selection
+also depended on the signal cursor's previous location. Keeping the
+original knots and deterministic one-sided ownership removes that source
+contamination.
+
+The remaining acceleration waves were legal under the ordinary residual
+budget but invented extrema absent from the analytic law. Constant-
+acceleration nonlinear input now provides an analytic monotonicity
+certificate, checked over each candidate's entire jerk polynomial using
+its Bernstein controls. The certificate requires endpoint-P/V/A rungs
+on nonconstant spans and seeds tanh's analytic acceleration extrema;
+unsupported input keeps the ordinary fit contract.
+
+Fresh exact-case evaluation, without regenerating a baseline, reduces
+the maximum E-acceleration residual on `[0.27, 0.29998]` from
+148.7001 to `2.41e-9` mm/s². On `[0.39, 0.43]`, it falls from
+45.9746 to 0.001370 mm/s²; velocity and position residuals are at most
+`3.77e-6` mm/s and `1.13e-8` mm. A dense scan including both sides of
+internal fitted seams has no negative jerk or decreasing acceleration
+through 0.43198 s. These are finite-precision polynomial approximations,
+not exact analytic curves; no tolerance or baseline changed.
+
 Also pre-existing (baseline, not these changes): the arc_fit cases
 overshoot the accel limit at arc-to-arc junctions (max |a_XY| up to ~1750
 against `max_accel: 1000`, e.g. `arc_fit/printer/circle` t≈1.4729).

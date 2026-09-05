@@ -264,6 +264,7 @@ pub(crate) struct LadderFailure {
 pub(crate) struct LadderPolicy {
     pub endpoint_anchored: bool,
     pub enforce_velocity_sign: bool,
+    pub acceleration_monotonicity: Option<bool>,
     pub high_degree_span_floor: f64,
 }
 
@@ -296,6 +297,44 @@ fn preserves_certified_velocity_sign(mono_u: &[f64], truth_v: &dyn Fn(f64) -> f6
     })
 }
 
+fn preserves_acceleration_monotonicity(mono_u: &[f64], increasing: bool) -> bool {
+    if mono_u.len() <= 3 {
+        return true;
+    }
+    let jerk: Vec<f64> = mono_u
+        .iter()
+        .enumerate()
+        .skip(3)
+        .map(|(power, &coefficient)| (power * (power - 1) * (power - 2)) as f64 * coefficient)
+        .collect();
+    let degree = (mono_u.len() - 1) as f64;
+    let conversion_operations = (degree + 1.0) * (degree + 2.0);
+    let accumulated_epsilon = conversion_operations * f64::EPSILON;
+    let conversion_gamma = accumulated_epsilon / (1.0 - accumulated_epsilon);
+    let absolute_conversion_sum = mono_u.iter().rev().fold(0.0_f64, |sum, coefficient| {
+        sum.mul_add(3.0, coefficient.abs())
+    });
+    let third_difference_scale = degree * (degree - 1.0) * (degree - 2.0);
+    let roundoff = conversion_gamma * absolute_conversion_sum * third_difference_scale;
+    if !roundoff.is_finite() {
+        return false;
+    }
+    BezierPiece {
+        u_start: -1.0,
+        u_end: 1.0,
+        coeffs: taylor_shift(&jerk, -1.0),
+    }
+    .to_bernstein()
+    .iter()
+    .all(|&value| {
+        if increasing {
+            value >= -roundoff
+        } else {
+            value <= roundoff
+        }
+    })
+}
+
 /// An endpoint-anchored rung is only allowed to hand its caller a piece whose
 /// endpoint velocities are still the signal's: the position and acceleration
 /// probes pass a velocity step at either end that a rung solved from the
@@ -317,6 +356,9 @@ fn candidate_ok(
             .all(|u| (eval_mono_d(mono_u, u) * (2.0 / h) - truth_v(u)).abs() <= velocity_budget);
     endpoint_velocity_anchored
         && (!policy.enforce_velocity_sign || preserves_certified_velocity_sign(mono_u, truth_v))
+        && policy
+            .acceleration_monotonicity
+            .is_none_or(|increasing| preserves_acceleration_monotonicity(mono_u, increasing))
         && LADDER_PROBES_U.iter().all(|&u| {
             (eval_mono(mono_u, u) - truth_p(u)).abs() <= tol.pos_mm
                 && (eval_mono_dd(mono_u, u) * dd_scale - truth_a(u)).abs() <= tol.accel_mm_s2
@@ -363,7 +405,9 @@ pub(crate) fn ladder_fit(
             return Ok(quadratic);
         }
     }
-    if policy.endpoint_anchored {
+    if policy.endpoint_anchored
+        && (policy.acceleration_monotonicity.is_none() || truth_a(-1.0) == truth_a(1.0))
+    {
         let anchored_acceleration_quadratic =
             anchored_acceleration_quadratic_in_u(truth_p(-1.0), truth_a(0.0), h, endpoint_delta);
         if candidate_ok(

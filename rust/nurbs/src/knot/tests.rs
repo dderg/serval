@@ -384,13 +384,22 @@ fn insert_knot_into_simple_curve_preserves_evaluation() {
 }
 
 #[test]
-#[should_panic(expected = "multiplicity 3 above the degree 2")]
-fn refinement_rejects_an_interior_knot_above_the_degree() {
+fn refinement_preserves_discontinuous_piece_values() {
     let discontinuous = ScalarNurbs::try_new(
         2,
-        vec![0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 1.0, 1.0, 1.0],
-        vec![0.0, 1.0, 2.0, 10.0, 11.0, 12.0],
+        vec![0.0, 0.0, 0.0, 0.25, 0.5, 0.5, 0.5, 1.0, 1.0, 1.0],
+        vec![0.0, 0.5, 1.0, 2.0, 10.0, 11.0, 12.0],
     )
     .unwrap();
-    refined_to_full_multiplicity(&discontinuous);
+    let refined = refined_to_full_multiplicity(&discontinuous);
+    let pieces = crate::bezier::extract_bezier_pieces(&refined);
+    for piece in pieces {
+        for fraction in [0.1, 0.5, 0.9] {
+            let t = piece.u_start + fraction * (piece.u_end - piece.u_start);
+            assert!(
+                (piece.evaluate(t) - crate::eval::eval(&discontinuous.as_view(), t)).abs() < 1e-12
+            );
+        }
+    }
+    assert_eq!(crate::eval::eval(&refined.as_view(), 0.5), 10.0);
 }

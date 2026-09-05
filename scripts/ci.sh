@@ -90,7 +90,7 @@ job_rust_fuzz() {
     local cases="${PROPTEST_CASES:-20000}"
     local pipeline='binary(seam_schedule_fuzz) | binary(planner_fuzz)'
     PROPTEST_CASES="$cases" host_cargo nextest run --workspace --profile ci \
-        -E "binary(/fuzz|proptest|^property_/) - ($pipeline)" || return 1
+        -E "(binary(/fuzz|proptest|^property_/) | test(/ripple_fuzz::/)) - ($pipeline)" || return 1
     PROPTEST_CASES="$((cases / 64))" host_cargo nextest run --workspace --profile ci \
         -E "$pipeline"
 }

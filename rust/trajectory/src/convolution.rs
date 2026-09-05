@@ -218,11 +218,7 @@ pub struct ShapedSignal<'a, F = Box<dyn Fn(f64) -> f64 + 'a>> {
     d_kernel: PiecewisePolynomialKernel,
     dd_kernel: PiecewisePolynomialKernel,
     d_kernel_jumps: Vec<(f64, f64)>,
-    /// Where the input's slope steps, and by how much. The moment path
-    /// integrates `f''` against `k`, and `f''` carries a delta at every such
-    /// step; the quadrature path never needs them because it differentiates
-    /// the kernel instead.
-    slope_jumps: Vec<(f64, f64)>,
+    input_jumps: Vec<(f64, f64, f64)>,
     k_lo: f64,
     k_hi: f64,
 }
@@ -385,7 +381,7 @@ where
         input_breaks: Vec<f64>,
         input_degree: usize,
         moments: M,
-        slope_jumps: Vec<(f64, f64)>,
+        input_jumps: Vec<(f64, f64, f64)>,
     ) -> Self
     where
         M: Fn(f64, f64, usize, f64, [&mut [f64]; MOMENT_ORDERS]) -> bool + 'a,
@@ -396,7 +392,7 @@ where
             input_breaks,
             input_degree,
             Some(Box::new(moments)),
-            slope_jumps,
+            input_jumps,
         )
     }
 
@@ -406,7 +402,7 @@ where
         mut input_breaks: Vec<f64>,
         input_degree: usize,
         moment_input: Option<Box<MomentEvaluator<'a>>>,
-        mut slope_jumps: Vec<(f64, f64)>,
+        mut input_jumps: Vec<(f64, f64, f64)>,
     ) -> Self {
         let (k_lo, k_hi) = kernel.support();
         assert!(
@@ -468,9 +464,9 @@ where
             d_kernel,
             dd_kernel,
             d_kernel_jumps,
-            slope_jumps: {
-                slope_jumps.sort_by(|a, b| a.0.total_cmp(&b.0));
-                slope_jumps
+            input_jumps: {
+                input_jumps.sort_by(|a, b| a.0.total_cmp(&b.0));
+                input_jumps
             },
             k_lo,
             k_hi,
@@ -515,15 +511,6 @@ where
         value
     }
 
-    /// `(f*k)` and its derivatives with every derivative taken on the
-    /// *input*: `f*k`, `f'*k`, and `f''*k + sum df'(b).k(t-b)`.
-    ///
-    /// The textbook alternative differentiates the kernel instead, but
-    /// `f*k'' + sum dk'.f` forms two terms four orders larger than the second
-    /// derivative they must cancel down to, and `k''` reaches ~1e9 at the
-    /// support edges, so an ulp of the window's placement lands in the answer
-    /// at 1e-4. Keeping the derivatives on the input leaves every term the
-    /// size of the answer.
     fn convolve_pva_from_moments(&self, t: f64) -> Option<(f64, f64, f64)> {
         let moment_input = self.moment_input.as_ref()?;
         let (mut p, mut v, mut a) = (0.0, 0.0, 0.0);
@@ -550,20 +537,23 @@ where
             v += Self::integrate_kernel_piece(kernel, &velocity);
             a += Self::integrate_kernel_piece(kernel, &acceleration);
         }
-        for &(break_t, jump) in self.slope_jumps_in_support(t) {
-            a += jump * eval_kernel(self.kernel, t - break_t);
+        for &(break_t, position_jump, slope_jump) in self.input_jumps_in_support(t) {
+            let offset = t - break_t;
+            let kernel = eval_kernel(self.kernel, offset);
+            v += position_jump * kernel;
+            a += slope_jump * kernel + position_jump * eval_kernel(&self.d_kernel, offset);
         }
         Some((p, v, a))
     }
 
-    fn slope_jumps_in_support(&self, t: f64) -> &[(f64, f64)] {
+    fn input_jumps_in_support(&self, t: f64) -> &[(f64, f64, f64)] {
         let lo = self
-            .slope_jumps
-            .partition_point(|&(break_t, _)| break_t < t - self.k_hi);
+            .input_jumps
+            .partition_point(|&(break_t, _, _)| break_t < t - self.k_hi);
         let hi = self
-            .slope_jumps
-            .partition_point(|&(break_t, _)| break_t <= t - self.k_lo);
-        &self.slope_jumps[lo..hi]
+            .input_jumps
+            .partition_point(|&(break_t, _, _)| break_t <= t - self.k_lo);
+        &self.input_jumps[lo..hi]
     }
 
     /// A kernel piece's coefficients are a power basis in `tau - u_start` and

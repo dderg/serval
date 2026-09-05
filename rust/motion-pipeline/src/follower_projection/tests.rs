@@ -128,6 +128,60 @@ fn cusp_segment(x_coeffs: Vec<f64>, y_coeffs: Vec<f64>, t0: f64, t1: f64) -> Con
 }
 
 #[test]
+fn follower_advance_fits_the_transformed_acceleration() {
+    let shaped = cusp_segment(vec![0.0, 10.0], vec![0.0, 0.0, 500.0], 0.0, 0.02);
+    let mut state = FollowerState::default();
+    state.push_span(1.0, 0.05, 0.05);
+    let stages = [
+        trajectory::ChainStage::DerivativeGains { k1: 0.04, k2: 0.0 },
+        trajectory::ChainStage::NonlinearAdvance(trajectory::NonlinearAdvance {
+            model: trajectory::AdvanceModel::Tanh,
+            linear_advance: 0.02,
+            nonlinear_offset: 0.03,
+            linearization_velocity: 1.0,
+        }),
+    ];
+    for stage in stages {
+        let fitted = super::fit_source_projection(
+            &shaped,
+            &shaped,
+            3,
+            &[0, 1],
+            &state,
+            0.0,
+            crate::lowering::FitTol {
+                pos_mm: 5e-5,
+                accel_mm_s2: 0.5,
+            },
+            Some(&stage),
+        )
+        .unwrap();
+        let acceleration = nurbs::eval::derivative(&nurbs::eval::derivative(&fitted.track));
+        for index in 1..200 {
+            let t = f64::from(index) * 0.0001;
+            let speed = (100.0 + 1e6 * t * t).sqrt();
+            let velocity = 0.05 * speed;
+            let raw_acceleration = 0.05 * 1e6 * t / speed;
+            let jerk = 0.05 * 1e8 / speed.powi(3);
+            let expected = match stage {
+                trajectory::ChainStage::DerivativeGains { k1, .. } => raw_acceleration + k1 * jerk,
+                trajectory::ChainStage::NonlinearAdvance(advance) => {
+                    raw_acceleration
+                        + advance.slope(velocity) * jerk
+                        + advance.curvature(velocity) * raw_acceleration * raw_acceleration
+                }
+                _ => unreachable!(),
+            };
+            let actual = nurbs::eval::eval(&acceleration.as_view(), t);
+            assert!(
+                (actual - expected).abs() <= 0.5,
+                "advanced acceleration at {t}: {actual} != {expected}"
+            );
+        }
+    }
+}
+
+#[test]
 fn leader_velocity_sign_change_is_seeded_as_a_construction_breakpoint() {
     let (t0, t1) = (300.0, 300.02);
     let shaped = cusp_segment(vec![1.0, -16.0, 1_000.0], vec![2.0, 1e-3], t0, t1);

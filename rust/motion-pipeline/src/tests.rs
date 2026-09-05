@@ -895,7 +895,7 @@ impl MomentSamplerInput {
 
     fn moment_signal(&self) -> trajectory::ShapedSignal<'_, impl Fn(f64) -> f64> {
         let table = std::rc::Rc::new(self.table().with_piece_moments(self.kernel_degree));
-        let slope_jumps = table.slope_jumps().to_vec();
+        let input_jumps = table.input_jumps().to_vec();
         let for_moments = std::rc::Rc::clone(&table);
         let hint = std::cell::Cell::new(0);
         trajectory::ShapedSignal::new_from_polynomial_evaluator(
@@ -906,7 +906,7 @@ impl MomentSamplerInput {
             move |lo, hi, degree, origin, orders| {
                 for_moments.integrate_moments(lo, hi, degree, origin, orders)
             },
-            slope_jumps,
+            input_jumps,
         )
     }
 }
@@ -940,6 +940,77 @@ fn polynomial_moment_convolution_matches_quadrature() {
             (got.2 - want.2).abs() < 1e-3,
             "acceleration at {t}: {got:?} vs {want:?}"
         );
+    }
+}
+
+#[test]
+fn moment_convolution_preserves_position_and_slope_jump_derivatives() {
+    use nurbs::algebra::PiecewisePolynomialKernel;
+    use nurbs::bezier::{BezierPiece, bezier_pieces_to_discontinuous_nurbs};
+
+    let kernel = PiecewisePolynomialKernel {
+        pieces: vec![BezierPiece {
+            u_start: -1.0,
+            u_end: 1.0,
+            coeffs: vec![0.0, 0.0, 15.0 / 4.0, -15.0 / 4.0, 15.0 / 16.0],
+        }],
+    };
+    for sign in [-1.0, 1.0] {
+        let jump = 2.0 * sign;
+        let slope = -0.75 * sign;
+        let track = bezier_pieces_to_discontinuous_nurbs(&[
+            BezierPiece {
+                u_start: -4.0,
+                u_end: 0.0,
+                coeffs: vec![0.0, 0.0],
+            },
+            BezierPiece {
+                u_start: 0.0,
+                u_end: 4.0,
+                coeffs: vec![jump, slope],
+            },
+        ]);
+        let table = std::rc::Rc::new(
+            crate::shaper::AxisSignalTable::from_tracks([&track], -4.0, 4.0, true, true)
+                .with_piece_moments(4),
+        );
+        let input_jumps = table.input_jumps().to_vec();
+        let moments = std::rc::Rc::clone(&table);
+        let hint = std::cell::Cell::new(0);
+        let signal = trajectory::ShapedSignal::new_from_polynomial_evaluator(
+            &kernel,
+            move |t| table.eval_hinted(t, &hint),
+            vec![-4.0, 0.0, 4.0],
+            1,
+            move |lo, hi, degree, origin, orders| {
+                moments.integrate_moments(lo, hi, degree, origin, orders)
+            },
+            input_jumps,
+        );
+        for t in [-2.0_f64, -1.0, -0.999, -0.5, 0.0, 0.5, 0.999, 1.0, 2.0] {
+            let x = t.clamp(-1.0, 1.0);
+            let cdf = 15.0 / 16.0 * (x - 2.0 * x.powi(3) / 3.0 + x.powi(5) / 5.0 + 8.0 / 15.0);
+            let first_moment =
+                15.0 / 16.0 * (x.powi(2) / 2.0 - x.powi(4) / 2.0 + x.powi(6) / 6.0 - 1.0 / 6.0);
+            let density = 15.0 / 16.0 * (1.0 - x * x).powi(2);
+            let density_derivative = -15.0 / 4.0 * x * (1.0 - x * x);
+            let expected = (
+                jump * cdf + slope * (t * cdf - first_moment),
+                jump * density + slope * cdf,
+                jump * density_derivative + slope * density,
+            );
+            let actual = signal.eval_pva(t);
+            for (got, want) in [
+                (actual.0, expected.0),
+                (actual.1, expected.1),
+                (actual.2, expected.2),
+            ] {
+                assert!(
+                    (got - want).abs() <= 1e-11,
+                    "sign={sign} t={t}: {actual:?} != {expected:?}"
+                );
+            }
+        }
     }
 }
 
@@ -2093,6 +2164,98 @@ fn linear_advance_on_a_feed_step_primes_forward() {
 }
 
 #[test]
+fn nonlinear_advance_keeps_cruise_acceleration_zero_before_a_phase_boundary() {
+    let boundary = 0.299_987_113_843_926_7;
+    let track = nurbs::bezier::bezier_pieces_to_nurbs(&[
+        nurbs::bezier::BezierPiece {
+            u_start: 0.0,
+            u_end: boundary,
+            coeffs: vec![0.0, 10.0, 0.0],
+        },
+        nurbs::bezier::BezierPiece {
+            u_start: boundary,
+            u_end: boundary + 0.06,
+            coeffs: vec![10.0 * boundary, 10.0, -75.0],
+        },
+    ]);
+    let advance = trajectory::NonlinearAdvance {
+        model: trajectory::AdvanceModel::Tanh,
+        linear_advance: 0.0,
+        nonlinear_offset: 0.06,
+        linearization_velocity: 2.0,
+    };
+    let output =
+        crate::shaper::apply_nonlinear_advance_to_track(3, &track, advance, fit_tol(cfg()))
+            .expect("a cruise followed by deceleration fits its one-sided phase states");
+    let velocity = nurbs::eval::derivative(&output);
+    let acceleration = nurbs::eval::derivative(&velocity);
+    let roundoff =
+        512.0 * f64::EPSILON * (10.0 / boundary + advance.nonlinear_offset / boundary.powi(2));
+    for sample in 1..1000 {
+        let time = boundary * sample as f64 / 1000.0;
+        assert!(
+            eval(&acceleration, time).abs() <= roundoff,
+            "deceleration contaminated cruise at {time}: {}",
+            eval(&acceleration, time)
+        );
+    }
+}
+
+#[test]
+fn nonlinear_advance_preserves_monotone_acceleration_on_a_constant_acceleration_ramp() {
+    let start = 0.367_775_696_804_275_4;
+    let end = 0.431_989_680_542_433_9;
+    for model in [
+        trajectory::AdvanceModel::Tanh,
+        trajectory::AdvanceModel::Reciprocal,
+    ] {
+        for direction in [-1.0, 1.0] {
+            let initial_velocity = direction * 0.367_902_439_276_219_1;
+            let acceleration = direction * 150.0;
+            let track = nurbs::bezier::bezier_pieces_to_nurbs(&[nurbs::bezier::BezierPiece {
+                u_start: start,
+                u_end: end,
+                coeffs: vec![0.0, initial_velocity, 0.5 * acceleration],
+            }]);
+            let advance = trajectory::NonlinearAdvance {
+                model,
+                linear_advance: 0.0,
+                nonlinear_offset: 0.06,
+                linearization_velocity: 2.0,
+            };
+            let output =
+                crate::shaper::apply_nonlinear_advance_to_track(3, &track, advance, fit_tol(cfg()))
+                    .expect("nonlinear ramp fits without inventing acceleration extrema");
+            let output_velocity = nurbs::eval::derivative(&output);
+            let output_acceleration = nurbs::eval::derivative(&output_velocity);
+            let output_jerk = nurbs::eval::derivative(&output_acceleration);
+            let tolerance = fit_tol(cfg());
+            let mut previous = f64::NEG_INFINITY;
+            for sample in 0..=2000 {
+                let time = 0.39 + 0.04 * sample as f64 / 2000.0;
+                let velocity = initial_velocity + acceleration * (time - start);
+                let expected_acceleration =
+                    acceleration + advance.curvature(velocity) * acceleration * acceleration;
+                let actual_acceleration = eval(&output_acceleration, time);
+                assert!(
+                    (actual_acceleration - expected_acceleration).abs() <= tolerance.accel_mm_s2,
+                    "{model:?} ramp acceleration exceeds its fit budget at {time}"
+                );
+                assert!(
+                    direction * eval(&output_jerk, time) >= 0.0,
+                    "{model:?} ramp invented an acceleration extremum at {time}"
+                );
+                assert!(
+                    direction * actual_acceleration >= previous,
+                    "{model:?} ramp acceleration reversed at a fitted seam at {time}"
+                );
+                previous = direction * actual_acceleration;
+            }
+        }
+    }
+}
+
+#[test]
 fn nonlinear_advance_track_transform_matches_the_advance_law() {
     let piece = nurbs::bezier::BezierPiece {
         u_start: 0.0,
@@ -2259,6 +2422,7 @@ fn the_ladder_fits_a_resolution_scale_span_without_high_degree_amplification() {
         crate::lowering::LadderPolicy {
             endpoint_anchored: true,
             enforce_velocity_sign: true,
+            acceleration_monotonicity: None,
             high_degree_span_floor: 0.0,
         },
     );
@@ -2356,6 +2520,7 @@ fn a_smooth_cusp_fits_below_the_high_degree_floor_without_bump_corrections() {
             crate::lowering::LadderPolicy {
                 endpoint_anchored: true,
                 enforce_velocity_sign: true,
+                acceleration_monotonicity: None,
                 high_degree_span_floor,
             },
         );
@@ -2466,6 +2631,7 @@ fn a_constant_acceleration_resolution_span_fits_the_anchored_quadratic() {
         crate::lowering::LadderPolicy {
             endpoint_anchored: true,
             enforce_velocity_sign: true,
+            acceleration_monotonicity: None,
             high_degree_span_floor: 3.6e-7,
         },
     )
@@ -2599,6 +2765,7 @@ fn an_endpoint_anchored_fit_never_steps_the_right_seam() {
         crate::lowering::LadderPolicy {
             endpoint_anchored: true,
             enforce_velocity_sign: true,
+            acceleration_monotonicity: None,
             high_degree_span_floor: 0.0,
         },
     )
@@ -3951,6 +4118,64 @@ fn idle_follower_projects_as_a_single_constant_piece() {
             let t = seg.t_start + (seg.t_end - seg.t_start) * f64::from(i) / 20.0;
             let v = eval_segment_axis(seg, 3, t);
             assert!(v.abs() < 1e-9, "idle follower moved to {v} at t={t}");
+        }
+    }
+}
+
+#[test]
+fn derivative_gain_weld_does_not_turn_a_slope_residual_into_acceleration_ripple() {
+    let seam = 0.329_724_526_418_917_6;
+    let width = 3e-5;
+    let pieces = [
+        nurbs::bezier::BezierPiece {
+            u_start: seam - width,
+            u_end: seam,
+            coeffs: vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+        },
+        nurbs::bezier::BezierPiece {
+            u_start: seam,
+            u_end: seam + width,
+            coeffs: vec![width, 1.0 + 1e-10, 0.0, 0.0, 0.0, 0.0],
+        },
+    ];
+    let source = nurbs::bezier::bezier_pieces_to_nurbs(&pieces);
+    let gained = crate::shaper::apply_derivative_gains_to_track(&source, 0.04, 0.0);
+    let acceleration = nurbs::eval::derivative(&nurbs::eval::derivative(&gained));
+    let quarter_into_right = seam + 0.25 * width;
+    let ripple = eval(&acceleration, quarter_into_right).abs();
+    assert!(
+        ripple < 0.01,
+        "C0 welding amplified the PA slope residual to {ripple} mm/s²"
+    );
+}
+
+#[test]
+fn derivative_gains_preserve_one_sided_polynomial_law() {
+    let pieces = [
+        nurbs::bezier::BezierPiece {
+            u_start: 0.0,
+            u_end: 1.0,
+            coeffs: vec![0.0, 1.0, 2.0],
+        },
+        nurbs::bezier::BezierPiece {
+            u_start: 1.0,
+            u_end: 2.0,
+            coeffs: vec![3.0, 7.0, -1.0],
+        },
+    ];
+    let source = nurbs::bezier::bezier_pieces_to_nurbs(&pieces);
+    for (k1, k2) in [(0.04, 0.0), (0.0, 0.02), (0.04, 0.02)] {
+        let gained = crate::shaper::apply_derivative_gains_to_track(&source, k1, k2);
+        let recovered = nurbs::bezier::extract_bezier_pieces(&gained);
+        for (piece, output) in pieces.iter().zip(&recovered) {
+            for fraction in [0.0, 0.1, 0.5, 0.9] {
+                let t = piece.u_start + fraction * (piece.u_end - piece.u_start);
+                let expected = piece.evaluate(t)
+                    + k1 * piece.differentiate().evaluate(t)
+                    + k2 * piece.differentiate().differentiate().evaluate(t);
+                assert!((output.evaluate(t) - expected).abs() < 1e-12);
+                assert!((eval(&gained, t) - expected).abs() < 1e-12);
+            }
         }
     }
 }

@@ -91,3 +91,8 @@ fn spawn_stage(name: &str, f: impl FnOnce() + Send + 'static) -> thread::JoinHan
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod nonlinear_ripple_fuzz;
+#[cfg(test)]
+mod phase_ripple_fuzz;
