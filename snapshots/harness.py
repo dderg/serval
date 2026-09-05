@@ -47,13 +47,6 @@ BASELINE_SUFFIX = ".baseline.json.gz"
 # and the Linux CI runner. A sample passes if it is within the absolute OR the
 # relative tolerance — far below any meaningful trajectory change, above libm
 # noise. Structure and integer counts still compare exactly.
-#
-# The absolute floor also has to absorb a near-zero lowered-trajectory
-# coefficient: an all-but-constant-acceleration cubic piece has a jerk term (c3)
-# that is a catastrophic-cancellation difference of near-equal quantities, so it
-# lands a couple ulp either side of zero across platforms — sub-µm/s³, utterly
-# meaningless, but larger in absolute terms than the relative tolerance can reach
-# that close to zero.
 FLOAT_ATOL = 1e-6
 FLOAT_RTOL = 1e-7
 
@@ -62,6 +55,13 @@ FLOAT_RTOL = 1e-7
 class PrinterConfigData:
     max_velocity: float
     max_accel: float
+    square_corner_velocity: float | None
+    corner_deviation: float | None
+    max_jerk: float
+    max_path_deviation: float
+    max_accel_deviation: float
+    max_extrude_only_velocity: float | None
+    max_extrude_only_accel: float | None
     config_text: str
 
 
@@ -76,9 +76,35 @@ def read_printer_config(cfg_path: Path) -> PrinterConfigData:
     loader.printer = None
     config = loader.read_config(str(cfg_path))
     printer = config.getsection("printer")
+    extruder = (
+        config.getsection("extruder")
+        if config.has_section("extruder")
+        else None
+    )
     return PrinterConfigData(
         max_velocity=printer.getfloat("max_velocity", above=0.0),
         max_accel=printer.getfloat("max_accel", above=0.0),
+        square_corner_velocity=printer.getfloat(
+            "square_corner_velocity", None, minval=0.0
+        ),
+        corner_deviation=printer.getfloat("corner_deviation", None, minval=0.0),
+        max_jerk=printer.getfloat("max_jerk", 0.0, minval=0.0),
+        max_path_deviation=printer.getfloat(
+            "max_path_deviation", 0.005, above=0.0
+        ),
+        max_accel_deviation=printer.getfloat(
+            "max_accel_deviation", 50.0, above=0.0
+        ),
+        max_extrude_only_velocity=(
+            extruder.getfloat("max_extrude_only_velocity", None, above=0.0)
+            if extruder
+            else None
+        ),
+        max_extrude_only_accel=(
+            extruder.getfloat("max_extrude_only_accel", None, above=0.0)
+            if extruder
+            else None
+        ),
         config_text=config.fileconfig.write_string(),
     )
 
@@ -493,7 +519,13 @@ def drift_envelope(a: object, b: object, tiny: float = 1e-3) -> dict:
     values need and the atol the near-zero values (where rtol is useless) need —
     and points at the exact field, not just a magnitude.
     """
-    worst = {"rel": 0.0, "rel_at": "", "abs": 0.0, "abs_at": ""}
+    worst = {
+        "rel": 0.0,
+        "rel_at": "",
+        "abs": 0.0,
+        "abs_at": "",
+        "schema_at": "",
+    }
     numeric = (int, float)
 
     def walk(a: object, b: object, path: str) -> None:
@@ -515,12 +547,22 @@ def drift_envelope(a: object, b: object, tiny: float = 1e-3) -> dict:
                     worst["abs"] = d
                     worst["abs_at"] = f"{path} ({a!r} vs {b!r})"
             return
-        if isinstance(a, dict) and isinstance(b, dict) and a.keys() == b.keys():
+        if isinstance(a, dict) and isinstance(b, dict):
+            if a.keys() != b.keys():
+                if not worst["schema_at"]:
+                    worst["schema_at"] = path or "<root>"
+                return
             for k in a:
                 walk(a[k], b[k], f"{path}.{k}" if path else str(k))
-        elif isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+        elif isinstance(a, list) and isinstance(b, list):
+            if len(a) != len(b):
+                if not worst["schema_at"]:
+                    worst["schema_at"] = path or "<root>"
+                return
             for i, (x, y) in enumerate(zip(a, b)):
                 walk(x, y, f"{path}[{i}]")
+        elif type(a) is not type(b) and not worst["schema_at"]:
+            worst["schema_at"] = path or "<root>"
 
     walk(a, b, "")
     return worst

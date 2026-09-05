@@ -1,27 +1,26 @@
 use super::{
     Arc, Duration, ETHERCAT_CLOCK_FREQ_HZ, HashMap, HashSet, HomingRun, HomingState, Instant,
-    McuAxisConfig, McuCaps, McuConnection, McuHostIo, McuSerialConn, McuTopologyInput, Mutex,
+    McuAxisConfig, McuConnection, McuHostIo, McuSerialConn, McuTopologyInput, Mutex,
     PyMotionEngine, PyResult, PyRuntimeError, PyValueError, STREAM_INTEGRATION_TOL,
     STREAM_MAX_BUFFER_MOVES, abort_after_tracing_appender_drains, arm_endpoint_death_watchdog,
-    axis_ring_depth, build_mcu_configs, collect_motor_positions_inner, config,
-    dispatch_endstop_trip, mcu_handle_from_raw, query_ethercat_runtime_caps,
-    report_ethercat_endpoint_death, resolve_motion_caps,
+    build_mcu_configs, collect_motor_positions_inner, config, dispatch_endstop_trip,
+    mcu_handle_from_raw, query_ethercat_runtime_caps, report_endpoint_death,
 };
 use crate::lock_ext::LockExt;
 fn escalate_endpoint_death(latch: &Arc<Mutex<HashMap<u32, String>>>, mcu_id: u32, reason: &str) {
-    if report_ethercat_endpoint_death(latch, mcu_id, reason) {
+    if report_endpoint_death(latch, mcu_id, reason) {
         arm_endpoint_death_watchdog(Arc::clone(latch), mcu_id);
     }
 }
 
-fn log_abandoned_pieces(key: crate::types::AxisKey, dropped: u32) {
+fn log_abandoned_spans(key: crate::types::AxisKey, dropped: u32) {
     tracing::warn!(
         subsystem = "motion",
         event = "pump_abandon_unpushed",
         mcu = key.mcu_id,
         axis = key.axis,
         dropped,
-        "pump dropped staged pieces that never reached the wire — motion was lost"
+        "pump dropped staged spans that never reached the wire — motion was lost"
     );
 }
 
@@ -36,8 +35,20 @@ fn abort_on_drip_stall(msg: String) {
     abort_after_tracing_appender_drains();
 }
 
-fn build_stream_config(cfg: &config::PlannerConfig) -> PyResult<motion_pipeline::StreamConfig> {
+pub(super) fn require_unlimited_config_jerk(max_jerk: f64) -> Result<(), &'static str> {
+    if max_jerk.is_finite() {
+        return Err(
+            "finite [printer] max_jerk is not supported by the continuous trajectory pipeline; set max_jerk: 0",
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn build_stream_config(
+    cfg: &config::PlannerConfig,
+) -> PyResult<motion_pipeline::StreamConfig> {
     let cart = cfg.cartesian;
+    require_unlimited_config_jerk(cart.max_jerk).map_err(PyValueError::new_err)?;
     Ok(motion_pipeline::StreamConfig {
         corner: cfg.corner,
         integration_tol: STREAM_INTEGRATION_TOL,
@@ -84,13 +95,6 @@ impl PyMotionEngine {
                                  RuntimeCapsResponse; is ethercat-rt running?"
                         ))
                     })?;
-                tracing::debug!(
-                    subsystem = "engine",
-                    event = "init_planner_ethercat_caps",
-                    mcu_id,
-                    total_piece_memory = caps.total_piece_memory,
-                    "[caps-trace] init_planner: ethercat mcu caps"
-                );
                 {
                     let mut mcus_lock = self.mcus.lock_ok();
                     if let Some(c) = mcus_lock.get_mut(&mcu_id) {
@@ -102,28 +106,13 @@ impl PyMotionEngine {
             out
         };
 
-        let caps_by_handle: std::collections::HashMap<u32, McuCaps> = {
-            let mcus_lock = self.mcus.lock_ok();
-            mcus.iter()
-                .map(|topology| {
-                    let conn = mcus_lock.get(&topology.mcu_id).ok_or_else(|| {
-                        PyRuntimeError::new_err(format!(
-                            "init_planner: unknown mcu_handle {}",
-                            topology.mcu_id
-                        ))
-                    })?;
-                    let caps = resolve_motion_caps(conn.runtime_caps, &conn.label, topology.mcu_id)
-                        .map_err(PyRuntimeError::new_err)?;
-                    Ok((topology.mcu_id, caps))
-                })
-                .collect::<PyResult<_>>()?
-        };
-        let mut mcu_configs = build_mcu_configs(mcus, &caps_by_handle)
+        let ethercat_mcu_ids: HashSet<u32> = ec_conns.keys().copied().collect();
+        let mcu_configs = build_mcu_configs(mcus, &ethercat_mcu_ids)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        for cfg in &mut mcu_configs {
-            cfg.ethercat = ec_conns.contains_key(&cfg.mcu_id);
-        }
         *self.mcu_axis_configs.lock_ok() = mcu_configs.clone();
+        *self.axis_transports.lock_ok() = Arc::new(
+            crate::axis_transport::AxisTransports::from_configs(&mcu_configs),
+        );
 
         Ok((ec_conns, mcu_configs))
     }
@@ -131,22 +120,12 @@ impl PyMotionEngine {
     pub(super) fn build_transport_maps(
         &self,
         mcu_configs: &[McuAxisConfig],
-    ) -> PyResult<(
-        HashSet<u32>,
-        HashMap<u32, Arc<McuHostIo>>,
-        HashMap<crate::types::AxisKey, u32>,
-    )> {
-        let ethercat_mcu_ids: HashSet<u32> = {
-            let mcus = self.mcus.lock_ok();
-            mcu_configs
-                .iter()
-                .filter(|c| {
-                    mcus.get(&c.mcu_id)
-                        .map_or(false, |conn| conn.ethercat_socket.is_some())
-                })
-                .map(|c| c.mcu_id)
-                .collect()
-        };
+    ) -> PyResult<(HashSet<u32>, HashMap<u32, Arc<McuHostIo>>)> {
+        let ethercat_mcu_ids: HashSet<u32> = mcu_configs
+            .iter()
+            .filter(|c| c.ethercat)
+            .map(|c| c.mcu_id)
+            .collect();
 
         let host_ios: HashMap<u32, Arc<McuHostIo>> = {
             let mcus = self.mcus.lock_ok();
@@ -172,26 +151,7 @@ impl PyMotionEngine {
             out
         };
 
-        let ring_depth_table: HashMap<crate::types::AxisKey, u32> = {
-            let mut t = HashMap::new();
-            for cfg_mcu in mcu_configs {
-                let total = cfg_mcu.caps.total_pieces() as u32;
-                let n = cfg_mcu.axes.len() as u32;
-                let depth = axis_ring_depth(total, n);
-                for &axis in &cfg_mcu.axes {
-                    t.insert(
-                        crate::types::AxisKey {
-                            mcu_id: cfg_mcu.mcu_id,
-                            axis: axis as u8,
-                        },
-                        depth,
-                    );
-                }
-            }
-            t
-        };
-
-        Ok((ethercat_mcu_ids, host_ios, ring_depth_table))
+        Ok((ethercat_mcu_ids, host_ios))
     }
 
     pub(super) fn seed_ethercat_clock_estimates(&self, ethercat_mcu_ids: &HashSet<u32>) {
@@ -208,153 +168,332 @@ impl PyMotionEngine {
         }
     }
 
+    /// Build one endpoint per transport per mcu and index them by mcu for the
+    /// pump. A board with both lane kinds gets both endpoints, and so does a
+    /// single dual-transport lane: a phase motor homed on StallGuard streams
+    /// through the sample executor while printing and through the classic step
+    /// queue while the trip is armed. Which one owns a lane at any instant is
+    /// [`AxisTransports`], not membership. Each endpoint also declares the
+    /// depth its own buffer gives the lanes it owns — the pacing signal the
+    /// pump's `room()` uses — so a dual lane carries one depth per transport.
     fn build_pump_resources(
         &self,
-        cfg: &config::PlannerConfig,
         mcu_configs: &[McuAxisConfig],
         host_ios: &HashMap<u32, Arc<McuHostIo>>,
         ec_conns: &HashMap<u32, Arc<McuSerialConn>>,
-        mut ring_depth_table: HashMap<crate::types::AxisKey, u32>,
         pump_control: &crossbeam_channel::Sender<crate::pump::PumpMsg>,
     ) -> PyResult<crate::worker::PumpResources> {
-        let mut wire_transports: HashMap<u32, crate::pump::McuTransport> = HashMap::new();
         let router_for_clock = Arc::clone(&self.router);
         let clock_of: crate::pump::ClockSource = Arc::new(move |mcu_id: u32| {
             let r = router_for_clock.lock_ok();
             r.ack_clock_and_freq(mcu_handle_from_raw(mcu_id))
         });
-        let mut paced_endpoints = Vec::new();
-        for (&id, io) in host_ios {
-            wire_transports.insert(id, crate::pump::McuTransport::Serial(Arc::downgrade(io)));
-        }
-        for (&id, conn) in ec_conns {
-            wire_transports.insert(
-                id,
-                crate::pump::McuTransport::EtherCat(Arc::downgrade(conn)),
-            );
-        }
-        for cfg in mcu_configs {
-            if cfg.stepping_mode != crate::mcu_config::SteppingMode::Stepcompress {
-                continue;
-            }
-            let io = host_ios.get(&cfg.mcu_id).ok_or_else(|| {
+
+        let transports = Arc::clone(&self.axis_transports.lock_ok());
+        let mut stepcompress = HashMap::new();
+        let mut samples = HashMap::new();
+        let mut ethercat = HashMap::new();
+        let mut ring_depth_table: HashMap<crate::types::AxisKey, [u32; 2]> = HashMap::new();
+        let mut paced_step = Vec::new();
+        let mut paced_sample = Vec::new();
+
+        for cfg in mcu_configs.iter().filter(|cfg| cfg.ethercat) {
+            let conn = ec_conns.get(&cfg.mcu_id).ok_or_else(|| {
                 PyRuntimeError::new_err(format!(
-                    "stepcompress mcu {} has no serial transport",
+                    "init_planner: ethercat mcu {} has no endpoint connection",
                     cfg.mcu_id
                 ))
             })?;
-            let measured_freq = clock_of(cfg.mcu_id).map(|(_, f)| f).ok_or_else(|| {
-                PyRuntimeError::new_err(format!(
-                    "stepcompress mcu {} has no clock estimate; the shim's piece spans must \
-                     use the same slope the host projects piece starts with",
-                    cfg.mcu_id
-                ))
-            })?;
-            let endpoint = crate::pump::build_endpoint(
-                cfg,
-                Arc::downgrade(io),
-                pump_control.clone(),
-                measured_freq,
-                Arc::clone(&clock_of),
-            )
-            .map_err(PyRuntimeError::new_err)?;
-            let ack_tx = pump_control.clone();
-            let ack_mcu_id = cfg.mcu_id;
-            io.register_frame_interceptor(
-                "stepcompress_barrier_ack",
-                None,
-                Box::new(move |params| {
-                    let oid = params.try_get_u32("oid").unwrap_or_else(|| {
-                        panic!(
-                            "stepcompress mcu {ack_mcu_id}: barrier ack frame carried no oid \
-                             parameter"
-                        )
-                    });
-                    let seq = params.try_get_u32("barrier_seq").unwrap_or_else(|| {
-                        panic!(
-                            "stepcompress mcu {ack_mcu_id}: barrier ack frame carried no \
-                             barrier_seq parameter"
-                        )
-                    });
-                    let _ = ack_tx.send(crate::pump::PumpMsg::StepcompressBarrierAck {
-                        mcu_id: ack_mcu_id,
-                        oid: oid as u8,
-                        seq,
-                    });
-                }),
-            )
-            .map_err(|e| {
-                PyRuntimeError::new_err(format!(
-                    "stepcompress mcu {}: cannot intercept stepcompress_barrier_ack: {e:?}",
-                    cfg.mcu_id
-                ))
-            })?;
-            let depth = endpoint.ring_depth();
+            let (ring, depth) = {
+                let mcus = self.mcus.lock_ok();
+                let mcu = mcus.get(&cfg.mcu_id).ok_or_else(|| {
+                    PyRuntimeError::new_err(format!(
+                        "init_planner: unknown mcu_handle {}",
+                        cfg.mcu_id
+                    ))
+                })?;
+                let grid = mcu.sample_grid.ok_or_else(|| {
+                    PyRuntimeError::new_err(format!(
+                        "init_planner: ethercat mcu {} retained no setpoint grid from its \
+                         claim — the pump cannot pace a ring whose depth it does not know",
+                        cfg.mcu_id
+                    ))
+                })?;
+                let ring = mcu.ring_filler.clone().ok_or_else(|| {
+                    PyRuntimeError::new_err(format!(
+                        "init_planner: ethercat mcu {} built no setpoint filler at claim time",
+                        cfg.mcu_id
+                    ))
+                })?;
+                (ring, grid.ring_depth_cycles)
+            };
             for &axis in &cfg.axes {
                 ring_depth_table.insert(
                     crate::types::AxisKey {
                         mcu_id: cfg.mcu_id,
                         axis: axis as u8,
                     },
-                    depth,
+                    [depth; 2],
                 );
             }
-            let shared = Arc::new(Mutex::new(endpoint));
-            self.stepcompress_endpoints
-                .lock_ok()
-                .insert(cfg.mcu_id, Arc::clone(&shared));
-            paced_endpoints.push(Arc::clone(&shared));
-            wire_transports.insert(cfg.mcu_id, crate::pump::McuTransport::Stepcompress(shared));
+            ethercat.insert(
+                cfg.mcu_id,
+                crate::pump::EtherCatRing {
+                    conn: Arc::downgrade(conn),
+                    ring,
+                },
+            );
         }
 
-        *self.pump.pacer.lock_ok() = if paced_endpoints.is_empty() {
+        for cfg in mcu_configs.iter().filter(|cfg| !cfg.ethercat) {
+            let io = host_ios.get(&cfg.mcu_id).ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "init_planner: serial mcu {} has no host transport",
+                    cfg.mcu_id
+                ))
+            })?;
+            let measured_freq = clock_of(cfg.mcu_id).map(|(_, f)| f).ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "init_planner: mcu {} has no clock estimate; a lane's spans must use the \
+                     same slope the host projects its starts with",
+                    cfg.mcu_id
+                ))
+            })?;
+
+            if cfg.has_pulse_lanes() {
+                let endpoint = crate::pump::build_endpoint(
+                    cfg,
+                    Arc::downgrade(io),
+                    pump_control.clone(),
+                    measured_freq,
+                    Arc::clone(&clock_of),
+                )
+                .map_err(PyRuntimeError::new_err)?;
+                self.register_barrier_ack_interceptor(
+                    io,
+                    cfg.mcu_id,
+                    "stepcompress_barrier_ack",
+                    "barrier_seq",
+                    pump_control,
+                    Some(Arc::clone(&clock_of)),
+                )?;
+                let depth = endpoint.ring_depth();
+                for axis in cfg.pulse_capable_axes() {
+                    ring_depth_table
+                        .entry(crate::types::AxisKey {
+                            mcu_id: cfg.mcu_id,
+                            axis: axis as u8,
+                        })
+                        .or_default()[crate::axis_transport::TRANSPORT_PULSE as usize] = depth;
+                }
+                let shared = Arc::new(Mutex::new(endpoint));
+                self.stepcompress_endpoints
+                    .lock_ok()
+                    .insert(cfg.mcu_id, Arc::clone(&shared));
+                paced_step.push(Arc::clone(&shared));
+                stepcompress.insert(cfg.mcu_id, shared);
+            }
+
+            let phase_lanes = cfg.phase_capable_axes();
+            if !phase_lanes.is_empty() {
+                let endpoint = crate::pump::build_sample_endpoint(
+                    cfg,
+                    Arc::downgrade(io),
+                    pump_control.clone(),
+                    measured_freq,
+                    Arc::clone(&clock_of),
+                )
+                .map_err(PyRuntimeError::new_err)?;
+                self.register_barrier_ack_interceptor(
+                    io,
+                    cfg.mcu_id,
+                    runtime::sample_wire::SAMPLE_BARRIER_ACK_NAME,
+                    "seq",
+                    pump_control,
+                    None,
+                )?;
+                for axis in phase_lanes {
+                    ring_depth_table
+                        .entry(crate::types::AxisKey {
+                            mcu_id: cfg.mcu_id,
+                            axis: axis as u8,
+                        })
+                        .or_default()[crate::axis_transport::TRANSPORT_PHASE as usize] =
+                        crate::pump::SAMPLE_LANE_PIECE_WINDOW;
+                }
+                let mcu_retired = endpoint.mcu_retired();
+                io.attach_heartbeat_callback(Arc::new(move |counts: &[u32], clocks: &[u64]| {
+                    mcu_retired.record(counts, clocks)
+                }));
+                let shared = Arc::new(Mutex::new(endpoint));
+                self.sample_endpoints
+                    .lock_ok()
+                    .insert(cfg.mcu_id, Arc::clone(&shared));
+                paced_sample.push(Arc::clone(&shared));
+                samples.insert(cfg.mcu_id, shared);
+            }
+        }
+
+        *self.pump.pacer.lock_ok() = if paced_step.is_empty() {
             None
         } else {
-            Some(crate::pump::StepcompressPacer::spawn(paced_endpoints))
+            Some(crate::pump::StepcompressPacer::spawn(paced_step))
+        };
+        *self.pump.sample_pacer.lock_ok() = if paced_sample.is_empty() {
+            None
+        } else {
+            Some(crate::pump::SamplePacer::spawn(paced_sample))
         };
 
         let ring_depth_table_for_pump = ring_depth_table;
         let router_for_pump = Arc::clone(&self.router);
         let drain_for_pump = self.drain.clone();
         let endpoint_death_for_pump = Arc::clone(&self.latched.endpoint_death);
+        let transports_for_depth = Arc::clone(&transports);
         Ok(crate::worker::PumpResources {
             sink: crate::pump::WireSink {
-                transports: wire_transports,
+                stepcompress,
+                samples,
+                ethercat,
+                transports,
                 timeout: Duration::from_secs(5),
-                clock_of: Arc::clone(&clock_of),
-                serial_limits: crate::pump::BundleLimits {
-                    wire_budget: cfg.pieces_wire_budget,
-                    pieces_per_axis: (cfg.pieces_wire_budget * 32 / 1024).clamp(32, 255),
-                },
-                serial_window: cfg.pieces_inflight,
             },
             callbacks: crate::pump::PumpCallbacks {
                 ring_depth_of: Box::new(move |k| {
-                    *ring_depth_table_for_pump
+                    let slots = ring_depth_table_for_pump
                         .get(&k)
-                        .unwrap_or_else(|| panic!("pump axis {k:?} has no validated ring depth"))
+                        .unwrap_or_else(|| panic!("pump axis {k:?} has no validated ring depth"));
+                    let mode = transports_for_depth.mode(k);
+                    let depth = slots[mode as usize];
+                    assert!(
+                        depth != 0,
+                        "pump axis {k:?} has no ring depth for the {} transport it is routed \
+                         through",
+                        crate::axis_transport::transport_name(mode)
+                    );
+                    depth
                 }),
                 mcu_clock_of: Box::new(move |mcu_id: u32| {
                     let r = router_for_pump.lock_ok();
                     r.ack_clock_and_freq(mcu_handle_from_raw(mcu_id))
                 }),
-                on_fatal_transport: Box::new(move |key: crate::types::AxisKey| {
-                    escalate_endpoint_death(
-                        &endpoint_death_for_pump,
-                        key.mcu_id,
-                        "pump transport went fatal (broken pipe / endpoint gone) \
-                         — see the send_frame_fatal log for the exact transport error",
-                    );
+                on_fatal_transport: Box::new(move |key: crate::types::AxisKey, reason: &str| {
+                    escalate_endpoint_death(&endpoint_death_for_pump, key.mcu_id, reason);
                 }),
-                on_abandon: Box::new(log_abandoned_pieces),
+                on_abandon: Box::new(log_abandoned_spans),
                 on_drip_stall: Box::new(abort_on_drip_stall),
             },
             history: crate::pump::HistoryRecorder {
                 store: Arc::clone(&self.motion_history),
-                nominal_freqs: Arc::clone(&self.nominal_clock_freqs),
             },
             drain: drain_for_pump,
             backlog: Arc::clone(&self.pump.backlog),
+        })
+    }
+
+    /// Route an endpoint's barrier receipt back to the pump. Both serial
+    /// transports issue barriers and both name the stepper oid they belong to,
+    /// so the pump's single ack message carries whichever frame arrived and
+    /// `WireSink` resolves the owning endpoint by that oid.
+    fn register_barrier_ack_interceptor(
+        &self,
+        io: &Arc<McuHostIo>,
+        mcu_id: u32,
+        frame: &'static str,
+        seq_field: &'static str,
+        pump_control: &crossbeam_channel::Sender<crate::pump::PumpMsg>,
+        clock_of: Option<crate::pump::ClockSource>,
+    ) -> PyResult<()> {
+        let ack_tx = pump_control.clone();
+        let skew_monitor = Mutex::new(crate::pump::skew_monitor::SkewMonitor::default());
+        let death_latch = Arc::clone(&self.latched.endpoint_death);
+        // The simulator splits clock domains on purpose: klippy runs on the
+        // real kernel clock while the MCU processes live on the shared virtual
+        // clock, whose effective speed wobbles whenever a pacer holds it back.
+        // That genuinely breaks the constant-frequency projection model, so a
+        // sim world logs the divergence instead of killing the endpoint; on
+        // hardware the mcu crystal is constant and sustained divergence means
+        // the clock model is broken for real.
+        let divergence_is_fatal = std::env::var_os("MCU_SIM_SOCK_DIR").is_none();
+        io.register_frame_interceptor(
+            frame,
+            None,
+            Box::new(move |params| {
+                let oid = params
+                    .try_get_u32("oid")
+                    .unwrap_or_else(|| panic!("mcu {mcu_id}: {frame} carried no oid parameter"));
+                let seq = params.try_get_u32(seq_field).unwrap_or_else(|| {
+                    panic!("mcu {mcu_id}: {frame} carried no {seq_field} parameter")
+                });
+                if let (Some(clock_of), Some(mcu_clock)) =
+                    (clock_of.as_ref(), params.try_get_u32("clock"))
+                {
+                    if let Some((projected, freq)) = clock_of(mcu_id) {
+                        use crate::pump::skew_monitor::SkewVerdict;
+                        let skew_ticks = (projected as u32).wrapping_sub(mcu_clock) as i32;
+                        let skew_secs = f64::from(skew_ticks) / freq;
+                        match skew_monitor.lock_ok().observe(skew_secs) {
+                            SkewVerdict::Fatal => {
+                                tracing::error!(
+                                    subsystem = "pump",
+                                    event = "clock_projection_divergence",
+                                    mcu = mcu_id,
+                                    skew_us = (skew_secs * 1e6) as i64,
+                                    escalated = divergence_is_fatal,
+                                    "the host's projected mcu clock has disagreed with the \
+                                     mcu's own barrier-ack clock stamp beyond the fatal bound \
+                                     on consecutive echoes — every send margin and lateness \
+                                     guard is computed from a broken clock model"
+                                );
+                                if divergence_is_fatal {
+                                    escalate_endpoint_death(
+                                        &death_latch,
+                                        mcu_id,
+                                        "clock projection diverged from the mcu's own clock \
+                                         stamps — see the clock_projection_divergence log",
+                                    );
+                                }
+                            }
+                            SkewVerdict::Warn => {
+                                tracing::warn!(
+                                    subsystem = "pump",
+                                    event = "clock_projection_skew",
+                                    mcu = mcu_id,
+                                    skew_us = (skew_secs * 1e6) as i64,
+                                    "the host's projected mcu clock disagrees with the clock the \
+                                     mcu stamped on a barrier ack — negative means the projection \
+                                     lags reality and every send margin is thinner than believed"
+                                );
+                            }
+                            SkewVerdict::InBounds => {
+                                tracing::debug!(
+                                    subsystem = "pump",
+                                    event = "clock_projection_skew_sample",
+                                    mcu = mcu_id,
+                                    skew_us = (skew_secs * 1e6) as i64,
+                                    "in-bounds projection skew sample from a barrier ack clock echo"
+                                );
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            subsystem = "pump",
+                            event = "clock_projection_skew_no_estimate",
+                            mcu = mcu_id,
+                            "barrier ack clock echo arrived but the router has no clock estimate"
+                        );
+                    }
+                }
+                let _ = ack_tx.send(crate::pump::PumpMsg::StepcompressBarrierAck {
+                    mcu_id,
+                    oid: oid as u8,
+                    seq,
+                });
+            }),
+        )
+        .map(|_| ())
+        .map_err(|e| {
+            PyRuntimeError::new_err(format!("mcu {mcu_id}: cannot intercept {frame}: {e:?}"))
         })
     }
 
@@ -364,24 +503,18 @@ impl PyMotionEngine {
         mcu_configs: &[McuAxisConfig],
         host_ios: &HashMap<u32, Arc<McuHostIo>>,
         ec_conns: &HashMap<u32, Arc<McuSerialConn>>,
-        ring_depth_table: HashMap<crate::types::AxisKey, u32>,
     ) -> PyResult<crossbeam_channel::Sender<crate::pump::PumpMsg>> {
         let counter = Arc::clone(&self.dispatched_segments);
         let router_arc = Arc::clone(&self.router);
 
         let (pump_tx, pump_rx) = crossbeam_channel::unbounded::<crate::pump::PumpMsg>();
-        let pump_resources = self.build_pump_resources(
-            cfg,
-            mcu_configs,
-            host_ios,
-            ec_conns,
-            ring_depth_table,
-            &pump_tx,
-        )?;
+        let pump_resources =
+            self.build_pump_resources(mcu_configs, host_ios, ec_conns, &pump_tx)?;
 
         let anchor_mutex = Arc::clone(&self.dispatch_anchor);
         *anchor_mutex.lock_ok() = crate::anchor::Anchor::new();
         let dispatch_resources = crate::worker::DispatchResources {
+            transports: Arc::clone(&self.axis_transports.lock_ok()),
             router: Arc::clone(&router_arc),
             anchor: anchor_mutex,
             mcu_configs: mcu_configs.to_vec(),
@@ -499,17 +632,10 @@ impl PyMotionEngine {
         mcu_configs: &[McuAxisConfig],
         ethercat_mcu_ids: &HashSet<u32>,
         ec_conns: &HashMap<u32, Arc<McuSerialConn>>,
-        host_ios: &HashMap<u32, Arc<McuHostIo>>,
         pump_control: crossbeam_channel::Sender<crate::pump::PumpMsg>,
     ) {
         for cfg_mcu in mcu_configs {
-            self.wire_mcu_supervision_for(
-                cfg_mcu,
-                ethercat_mcu_ids,
-                ec_conns,
-                host_ios,
-                &pump_control,
-            );
+            self.wire_mcu_supervision_for(cfg_mcu, ethercat_mcu_ids, ec_conns, &pump_control);
         }
     }
 
@@ -518,7 +644,6 @@ impl PyMotionEngine {
         cfg_mcu: &McuAxisConfig,
         ethercat_mcu_ids: &HashSet<u32>,
         ec_conns: &HashMap<u32, Arc<McuSerialConn>>,
-        host_ios: &HashMap<u32, Arc<McuHostIo>>,
         pump_control: &crossbeam_channel::Sender<crate::pump::PumpMsg>,
     ) {
         let mcu_id = cfg_mcu.mcu_id;
@@ -558,23 +683,14 @@ impl PyMotionEngine {
                 Arc::clone(&self.mcus),
                 Arc::clone(&self.latched.endpoint_death),
             );
-        } else if cfg_mcu.stepping_mode == crate::mcu_config::SteppingMode::Stepcompress {
+        } else {
             tracing::info!(
                 subsystem = "motion",
-                event = "stepcompress_heartbeat_suppressed",
+                event = "serial_heartbeat_suppressed",
                 mcu_id,
-                "stepcompress mcu retires host-computed step frames, not piece-ring \
-                 slots — the step shim is the sole source of pump credit"
+                "serial mcu retires host-computed frames — the step shim and the sample \
+                 endpoint are the sole sources of pump credit"
             );
-        } else {
-            let io = host_ios
-                .get(&mcu_id)
-                .expect("host_io map built from mcu_configs")
-                .clone();
-            let pump_tx = pump_control.clone();
-            io.attach_heartbeat_callback(Arc::new(move |retired: &[u32]| {
-                forward_retired_heartbeat(&pump_tx, mcu_id, retired.to_vec());
-            }));
         }
     }
 
@@ -588,7 +704,7 @@ impl PyMotionEngine {
 }
 
 /// Re-index an EtherCAT endpoint's per-SLOT retired counters into the pump's
-/// per-AXIS view. With AWD several slots retire the same axis's pieces; the
+/// per-AXIS view. With AWD several slots retire the same axis's spans; the
 /// minimum is the axis's true progress — capacity accounting must wait for the
 /// laggard ring.
 pub(super) fn retired_by_axis(slot_axes: &[usize], retired_slots: &[u32]) -> Vec<u32> {
@@ -614,8 +730,11 @@ fn forward_retired_heartbeat(
 ) {
     let _ = pump_tx.send(crate::pump::PumpMsg::Heartbeat(crate::pump::HeartbeatMsg {
         mcu_id,
+        #[allow(clippy::cast_possible_truncation)]
+        axes: (0..retired_counts.len() as u8).collect(),
         consumed_counts: None,
         retired_counts,
+        retired_by: crate::pump::RetiredBy::EtherCat,
     }));
 }
 

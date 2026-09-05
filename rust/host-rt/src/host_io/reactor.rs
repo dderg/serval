@@ -7,6 +7,7 @@ use arc_swap::ArcSwap;
 use crate::clock::{Clock, RealClock};
 use crate::host_io::ReactorCommand;
 use crate::host_io::events::EventDispatcher;
+use crate::host_io::fire_and_forget_depth::FireAndForgetDepth;
 use crate::host_io::identify::IdentifySeqState;
 use crate::host_io::mcu_session::McuTransportState;
 use crate::host_io::parser::MsgProtoParser;
@@ -59,6 +60,12 @@ pub struct Reactor {
     pub(crate) transport_state: McuTransportState,
     pub(crate) interceptors: crate::host_io::interceptor::InterceptorTable,
     pub(crate) mcu_label: Arc<str>,
+    pub(crate) last_ack_age_warn: Instant,
+    pub(crate) worst_ack_age: std::time::Duration,
+    pub(crate) last_ff_wait_warn: Instant,
+    pub(crate) last_channel_wait_warn: Instant,
+    pub(crate) link_health: Arc<crate::host_io::link_health::LinkHealth>,
+    pub(crate) link_epoch: Instant,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -75,6 +82,7 @@ impl Reactor {
         status_snapshot: Arc<ArcSwap<StatusEvent>>,
         seq: IdentifySeqState,
         config: crate::host_io::McuHostIoConfig,
+        fire_and_forget_depth: Arc<FireAndForgetDepth>,
     ) -> Self {
         Self::new_with_clock(
             io,
@@ -84,6 +92,7 @@ impl Reactor {
             seq,
             config,
             Arc::new(RealClock),
+            fire_and_forget_depth,
         )
     }
 
@@ -95,7 +104,9 @@ impl Reactor {
         seq: IdentifySeqState,
         config: crate::host_io::McuHostIoConfig,
         clock: Arc<dyn Clock>,
+        fire_and_forget_depth: Arc<FireAndForgetDepth>,
     ) -> Self {
+        let link_health = Arc::clone(&config.link_health);
         let mcu_label: Arc<str> = config.mcu_label.as_deref().unwrap_or("unknown").into();
         let event_dispatcher = EventDispatcher::new(
             Arc::clone(&status_snapshot),
@@ -115,14 +126,20 @@ impl Reactor {
             closed_via_shutdown: false,
             pending_host_fault: None,
             pending_clock_sent_raw: None,
-            outbound: OutboundQueues::default(),
+            outbound: OutboundQueues::new(fire_and_forget_depth),
             zero_byte_first_seen: None,
             last_recv_time: clock.now(),
             last_write_time: clock.now(),
             zero_byte_consec: 0,
+            link_health,
+            link_epoch: clock.now(),
             clock,
             transport_state: McuTransportState::default(),
             interceptors: crate::host_io::interceptor::InterceptorTable::new(),
+            last_ack_age_warn: Instant::now(),
+            worst_ack_age: std::time::Duration::ZERO,
+            last_ff_wait_warn: Instant::now(),
+            last_channel_wait_warn: Instant::now(),
             mcu_label,
         }
     }
@@ -151,6 +168,7 @@ impl Reactor {
             },
             config,
             clock,
+            Arc::new(FireAndForgetDepth::default()),
         )
     }
 }
@@ -162,23 +180,16 @@ pub enum RetransmitTrigger {
 }
 
 const PENDING_SUBMISSION_CEILING: usize = 256;
-pub const PENDING_FIRE_AND_FORGET_CEILING: usize = 256;
-pub(crate) const PENDING_PIECE_FRAMES_CEILING: usize = 64;
-
-/// Max bytes of kalico (piece) traffic allowed in the kernel tty out-buffer
-/// before further kalico frames are held back. Klipper-channel control
-/// commands write unconditionally, so this is the most piece traffic a
-/// control frame can ever be queued behind — small enough to bound control
-/// latency to a few ms of wire time, large enough (vs the ~1 ms reactor
-/// tick) to keep the wire saturated with pieces when nothing else wants it.
-pub(crate) const PIECE_OUTQ_BUDGET_BYTES: u32 = 2048;
-const MAX_RETRY_COUNT: u32 = 8;
+const MAX_RETRY_COUNT: u32 = 6;
 
 // Retry exhaustion alone is not sufficient to declare Closed: under Renode
 // (1 µs quantum) a long-running MCU command can stall status emission for
 // several seconds wall while the wire remains healthy. Only close when
-// retry exhaustion coincides with genuine MCU silence.
-const MCU_SILENCE_FOR_CLOSE: Duration = Duration::from_secs(120);
+// retry exhaustion coincides with genuine MCU silence. Ten seconds is still
+// several times any legitimate stall, but bounded enough that a dead link
+// gets named as one instead of hiding behind whichever downstream deadline
+// (stepcompress deficit, barrier ack) starves first.
+const MCU_SILENCE_FOR_CLOSE: Duration = Duration::from_secs(10);
 
 const MAX_SUBMITS_PER_ITER: usize = 4;
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1);
@@ -228,10 +239,15 @@ impl Reactor {
         self.drain_pending_submissions();
         let t_step3 = s3.elapsed();
 
-        let s3b = std::time::Instant::now();
-        self.drain_piece_frames();
-        let t_step3b = s3b.elapsed();
-
+        let vitals_now = self.clock.now();
+        self.link_health.publish(
+            vitals_now.duration_since(self.link_epoch).as_millis() as u64,
+            self.last_recv_time
+                .saturating_duration_since(self.link_epoch)
+                .as_millis() as u64,
+            self.unacked_window.len() as u32,
+            self.unacked_window.front().map_or(0, |f| f.retry_count),
+        );
         let s4 = std::time::Instant::now();
         if let Some(front) = self.unacked_window.front() {
             let now = self.clock.now();
@@ -296,7 +312,6 @@ impl Reactor {
                 step1_ms = t_step1.as_secs_f64() * 1000.0,
                 step2_ms = t_step2.as_secs_f64() * 1000.0,
                 step3_ms = t_step3.as_secs_f64() * 1000.0,
-                step3b_ms = t_step3b.as_secs_f64() * 1000.0,
                 step4_ms = t_step4.as_secs_f64() * 1000.0,
                 "tick_once exceeded 5ms"
             );
@@ -319,9 +334,6 @@ mod a4_nak_submit_race;
 
 #[cfg(test)]
 mod a3_awaiting_response_gc;
-
-#[cfg(test)]
-mod piece_priority;
 
 #[cfg(test)]
 mod a8_fire_and_forget_backpressure;

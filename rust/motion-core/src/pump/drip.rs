@@ -33,7 +33,7 @@ impl DripCohort {
             .filter(|k| {
                 queues
                     .get(k)
-                    .is_some_and(|q| !q.pieces.is_empty() || q.pushed != q.retired)
+                    .is_some_and(|q| !q.spans.is_empty() || q.pushed != q.retired)
             })
             .map(|k| self.executed(k, queues))
             .min()

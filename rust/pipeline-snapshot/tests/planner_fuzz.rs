@@ -1,23 +1,30 @@
-//! Property-based fuzz of the full fitter → planner → lowerer → shaper
-//! pipeline: random adversarial move streams (micro-segments, exact
-//! reversals, collinear runs, feed jumps) under random valid configs, with
-//! the lowered trajectory checked against the kinematic-invariant oracle in
-//! `pipeline_snapshot::audit`.
+//! Property-based fuzz of the full fitter → planner → continuous-trajectory
+//! pipeline: random adversarial move streams under random valid configs,
+//! checked against the kinematic-invariant oracle in `pipeline_snapshot::audit`.
+//!
+//! Every case runs at infinite jerk, the configuration the continuous
+//! pipeline ships. Acceleration steps are the plan, so the oracle's per-axis
+//! acceleration and jerk rails do not apply. Carrier states must remain finite
+//! over contiguous time, with no interval narrower than device step-time
+//! resolution, no acceleration explosion, C0 position seams, and valid
+//! velocity bounds.
 //!
 //! `hard_invariants_hold` runs in CI on a fixed RNG seed — a deterministic
 //! 256-case corpus verified green — so CI never flakes on a fresh fuzz
 //! discovery. Hunting happens on the `#[ignore]`d `target_budgets_hold`,
 //! which uses random seeds, fuzzes the full input space (including the
 //! known-broken families the CI tier steers around), and additionally
-//! asserts the intended smoothness budgets (seam C1/C2, velocity/accel/jerk
-//! limits) that current lowering is known to violate. Run it with
+//! asserts the intended smoothness budgets (seam C0/C1, velocity limits)
+//! that current lowering is known to violate. Run it with
 //! `cargo nextest run -p pipeline-snapshot --run-ignored all`, ideally with
 //! a large `PROPTEST_CASES`. Every bug it finds gets pinned below as an
 //! `#[ignore]`d regression test until fixed.
 
-use pipeline_snapshot::audit::{AuditBudgets, AuditReport, audit_trajectory};
+use pipeline_snapshot::audit::{
+    AuditBudgets, AuditReport, Violation, ViolationKind, audit_trajectory,
+};
 use pipeline_snapshot::{
-    SnapshotParams, TRAJECTORY_FIT_TOL_ACCEL_MM_S2, TRAJECTORY_FIT_TOL_MM, TrajectoryPieces,
+    ExactTrajectory, SnapshotParams, TRAJECTORY_FIT_TOL_ACCEL_MM_S2, TRAJECTORY_FIT_TOL_MM,
     VELOCITY_INTEGRATION_TOL, pipeline_snapshot,
 };
 use proptest::prelude::*;
@@ -28,7 +35,6 @@ struct FuzzLimits {
     max_velocity: f64,
     max_accel: f64,
     square_corner_velocity: f64,
-    max_jerk: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -57,13 +63,10 @@ fn limits_strategy(full: bool) -> impl Strategy<Value = FuzzLimits> {
     } else {
         prop_oneof![1 => Just(0.0), 9 => 0.5..20.0_f64].boxed()
     };
-    (20.0..600.0_f64, 500.0..50_000.0_f64, scv, 5.0..7.0_f64).prop_map(|(v, a, scv, log_jerk)| {
-        FuzzLimits {
-            max_velocity: v,
-            max_accel: a,
-            square_corner_velocity: scv.min(v / 4.0),
-            max_jerk: libm::pow(10.0, log_jerk),
-        }
+    (20.0..600.0_f64, 500.0..50_000.0_f64, scv).prop_map(|(v, a, scv)| FuzzLimits {
+        max_velocity: v,
+        max_accel: a,
+        square_corner_velocity: scv.min(v / 4.0),
     })
 }
 
@@ -120,20 +123,20 @@ fn waypoints(moves: &[MoveSpec], max_accel: f64) -> Vec<pipeline_snapshot::waypo
     points
 }
 
-fn run_case(limits: FuzzLimits, moves: &[MoveSpec]) -> (TrajectoryPieces, AuditReport) {
+fn run_case(limits: FuzzLimits, moves: &[MoveSpec]) -> (ExactTrajectory, AuditReport) {
     run_waypoints(limits, &waypoints(moves, limits.max_accel))
 }
 
 fn run_waypoints(
     limits: FuzzLimits,
     waypoints: &[pipeline_snapshot::waypoints::Waypoint],
-) -> (TrajectoryPieces, AuditReport) {
+) -> (ExactTrajectory, AuditReport) {
     let params = SnapshotParams {
         max_velocity: limits.max_velocity,
         max_accel: limits.max_accel,
         square_corner_velocity: limits.square_corner_velocity,
         corner_deviation: None,
-        max_jerk: limits.max_jerk,
+        max_jerk: f64::INFINITY,
         max_extrude_only_velocity: None,
         max_extrude_only_accel: None,
         max_path_deviation: None,
@@ -142,13 +145,7 @@ fn run_waypoints(
         post_processor_decls: Vec::new(),
     };
     let snapshot = pipeline_snapshot(waypoints, params).expect("valid fuzz input");
-    let traj = TrajectoryPieces {
-        x: snapshot.traj_x_pieces,
-        y: snapshot.traj_y_pieces,
-        z: snapshot.traj_z_pieces,
-        e: snapshot.traj_e_pieces,
-        t_end: snapshot.traj_t_end,
-    };
+    let traj = snapshot.trajectory;
     let config = motion_pipeline::StreamConfig {
         corner: geometry::CornerFitConfig::default(),
         integration_tol: VELOCITY_INTEGRATION_TOL,
@@ -161,12 +158,29 @@ fn run_waypoints(
             limits.max_velocity,
             limits.max_accel,
             limits.square_corner_velocity,
-            limits.max_jerk,
+            f64::INFINITY,
         )
         .expect("strategy generates valid limits"),
     };
     let report = audit_trajectory(&traj, &config, &AuditBudgets::for_config(&config));
     (traj, report)
+}
+
+/// The smoothness budgets that still bind under infinite jerk: a seam
+/// velocity step and the velocity rail. Per-axis accel and jerk rails are the
+/// oracle's jerk-limited tier and say nothing here.
+fn xy_smoothness_spikes(report: &AuditReport) -> Vec<&Violation> {
+    report
+        .target
+        .iter()
+        .filter(|v| {
+            v.axis < 2
+                && matches!(
+                    v.kind,
+                    ViolationKind::SeamVelocity | ViolationKind::Velocity
+                )
+        })
+        .collect()
 }
 
 proptest! {
@@ -182,7 +196,7 @@ proptest! {
         moves in prop::collection::vec(move_strategy(false), 2..40),
     ) {
         let (traj, report) = run_case(limits, &moves);
-        prop_assert!(!traj.x.is_empty(), "pipeline produced no X trajectory");
+        prop_assert!(!traj.rows(0).is_empty(), "pipeline produced no X trajectory");
         prop_assert!(report.hard_ok(), "{report}");
     }
 }
@@ -212,7 +226,6 @@ fn reversal_with_z_step_makes_velocity_plan_non_finite() {
         max_velocity: 20.0,
         max_accel: 47789.160095826584,
         square_corner_velocity: 0.07502855438839308,
-        max_jerk: 100000.0,
     };
     let moves = [
         MoveSpec {
@@ -246,7 +259,6 @@ fn z_step_then_micro_reversal_escapes_profile_window() {
         max_velocity: 20.0,
         max_accel: 7891.0876463579025,
         square_corner_velocity: 0.010488666819287094,
-        max_jerk: 100000.0,
     };
     let moves = [
         MoveSpec {
@@ -281,7 +293,6 @@ fn near_reversal_planar_corner_makes_velocity_plan_non_finite() {
         max_velocity: 20.0,
         max_accel: 33192.99751381838,
         square_corner_velocity: 0.047081100007714954,
-        max_jerk: 100000.0,
     };
     let moves = [
         MoveSpec {
@@ -323,7 +334,6 @@ fn feed_drop_with_z_step_escapes_profile_window() {
         max_velocity: 315.10075079011057,
         max_accel: 33143.074041397005,
         square_corner_velocity: 16.354159311305455,
-        max_jerk: 100000.0,
     };
     let moves = [
         MoveSpec {
@@ -346,8 +356,8 @@ fn feed_drop_with_z_step_escapes_profile_window() {
 }
 
 /// Found by `hard_invariants_hold`: purely planar, scv exactly 0, a 37 µm
-/// move at feed 451 mm/s decelerating into a 1 mm/s move under high accel
-/// and jerk limits made the quintic arc-length profile dip below its window.
+/// move at feed 451 mm/s decelerating into a 1 mm/s move under a high accel
+/// limit made the quintic arc-length profile dip below its window.
 /// Root cause was the brake-chain splice rejecting on chord sag, leaving the
 /// ride as per-cell chord phases whose staircase acceleration produced
 /// kinematically impossible `(v, a)` sample pairs; fixed by deriving the
@@ -358,7 +368,6 @@ fn planar_micro_move_decel_escapes_profile_window() {
         max_velocity: 20.0,
         max_accel: 26083.903689944673,
         square_corner_velocity: 0.0,
-        max_jerk: 9598005.419204166,
     };
     let moves = [
         MoveSpec {
@@ -382,23 +391,25 @@ fn planar_micro_move_decel_escapes_profile_window() {
 
 /// The corner-shoulder accel cliff (was defect 4's open residual in
 /// ride-pass-known-defects.md): 90-degree corners at printer-scale limits
-/// stepped the X/Y acceleration at the blend-boundary seams (~1-3 mm/s2
-/// against the 0.5 mm/s2 audit budget) and the final brake to rest by ~11,
-/// scaling linearly with feed. Root cause was the straight lowering's
-/// micro-phase merge: absorbing a leading nanosecond phase extended the
-/// host span without rebasing the host's coefficients, time-shifting it by
-/// the merged duration; the resulting `v * lead` position gap at the next
-/// joint was then welded shut by the NURBS packing, which converts a C0 gap
-/// into a `6 * gap / h^2` acceleration corruption of the short jerk-swing
-/// piece that follows. Fixed by Taylor-shifting the host coefficients to
-/// the span start.
+/// stepped the X/Y acceleration at the blend-boundary seams and the final
+/// brake to rest by ~11, scaling linearly with feed. Root cause was the
+/// straight lowering's micro-phase merge: absorbing a leading nanosecond
+/// phase extended the host span without rebasing the host's coefficients,
+/// time-shifting it by the merged duration; the resulting `v * lead` position
+/// gap at the next joint was then welded shut by the NURBS packing, which
+/// converts a C0 gap into a `6 * gap / h^2` acceleration corruption of the
+/// short piece that follows. Fixed by Taylor-shifting the host coefficients
+/// to the span start. Under infinite jerk that corruption shows up as the
+/// welded C0 gap and the explosion it drives — both `hard` — plus the seam
+/// velocity step; the per-axis accel rail is not asserted, since an
+/// infinite-jerk plan bounds the scalar path's acceleration, not each axis'
+/// reconstruction of it.
 #[test]
-fn perpendicular_corners_step_seam_accel() {
+fn perpendicular_corners_keep_seams_and_velocity_in_budget() {
     let limits = FuzzLimits {
         max_velocity: 100.0,
         max_accel: 1000.0,
         square_corner_velocity: 8.0,
-        max_jerk: 1e6,
     };
     let corner = std::f64::consts::FRAC_PI_2;
     let moves = [
@@ -433,27 +444,20 @@ fn perpendicular_corners_step_seam_accel() {
     ];
     let (_, report) = run_case(limits, &moves);
     assert!(report.hard_ok(), "{report}");
-    let xy_seam_accel: Vec<_> = report
-        .target
-        .iter()
-        .filter(|v| {
-            matches!(v.kind, pipeline_snapshot::audit::ViolationKind::SeamAccel) && v.axis < 2
-        })
-        .collect();
+    let spikes = xy_smoothness_spikes(&report);
     assert!(
-        xy_seam_accel.is_empty(),
-        "X/Y seam accel steps past budget: {xy_seam_accel:?}"
+        spikes.is_empty(),
+        "X/Y seam-velocity or velocity past budget: {spikes:?}\n{report}"
     );
 }
 
 /// A slow sharp corner whose blend exits with acceleration a fraction of a
 /// mm/s² below the rail: the following straight move closes that gap with a
-/// jerk-limited ramp lasting well under a microsecond (here ~130 ns for a
-/// 0.13 mm/s² step). Lowered as its own Bézier piece, the NURBS pack/extract
-/// round trip reconstructed that piece from Bernstein control points that
-/// carry the absolute ~120 mm position, so ulp-level rounding divided by h³
-/// came back as ~1e8 mm/s³ of phantom jerk — 100× the configured limit —
-/// and ±10 mm/s² acceleration steps at both seams. Fixed by merging phases
+/// ramp lasting well under a microsecond (here ~130 ns for a 0.13 mm/s²
+/// step). Lowered as its own Bézier piece, the NURBS pack/extract round trip
+/// reconstructed that piece from Bernstein control points that carry the
+/// absolute ~120 mm position, so ulp-level rounding divided by h³ came back
+/// as ±10 mm/s² acceleration steps at both seams. Fixed by merging phases
 /// below the Bernstein corruption floor (`MIN_PHASE_PIECE_S`) into a
 /// neighbor. The waypoints are lifted verbatim from the neptune_cube layer_5
 /// snapshot case; the epsilon-under-the-rail blend exit only occurs for
@@ -464,7 +468,6 @@ fn slow_corner_rail_ramp_survives_nurbs_round_trip() {
         max_velocity: 100.0,
         max_accel: 1000.0,
         square_corner_velocity: 8.0,
-        max_jerk: 1e6,
     };
     let feed = 5932.264 / 60.0;
     let waypoints = [
@@ -474,20 +477,9 @@ fn slow_corner_rail_ramp_survives_nurbs_round_trip() {
     ];
     let (_, report) = run_waypoints(limits, &waypoints);
     assert!(report.hard_ok(), "{report}");
-    let xy_spikes: Vec<_> = report
-        .target
-        .iter()
-        .filter(|v| {
-            v.axis < 2
-                && matches!(
-                    v.kind,
-                    pipeline_snapshot::audit::ViolationKind::Jerk
-                        | pipeline_snapshot::audit::ViolationKind::SeamAccel
-                )
-        })
-        .collect();
+    let spikes = xy_smoothness_spikes(&report);
     assert!(
-        xy_spikes.is_empty(),
-        "X/Y jerk or seam-accel past budget: {xy_spikes:?}\n{report}"
+        spikes.is_empty(),
+        "X/Y seam-velocity or velocity past budget: {spikes:?}\n{report}"
     );
 }

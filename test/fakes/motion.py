@@ -168,28 +168,8 @@ class FakeEngine:
     def shutdown(self):
         return self._call("shutdown")
 
-    def resonance_buzz(
-        self,
-        handle,
-        slot_mask,
-        slot_sign_mask,
-        freq_start_millihz,
-        freq_end_millihz,
-        amplitude_nm,
-        duration_ms,
-        ramp_ms,
-    ):
-        return self._call(
-            "resonance_buzz",
-            handle,
-            slot_mask,
-            slot_sign_mask,
-            freq_start_millihz,
-            freq_end_millihz,
-            amplitude_nm,
-            duration_ms,
-            ramp_ms,
-        )
+    def resonance_buzz(self, routes, wave):
+        return self._call("resonance_buzz", tuple(routes), tuple(wave))
 
     def set_torque(self, handle, value, print_time):
         return self._call("set_torque", handle, value, print_time)

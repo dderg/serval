@@ -26,17 +26,17 @@ These rules apply to every new piece of shared state added to the MCU. If you fi
 
 ### B1. Entry points are explicit; logical entry-point count is small
 
-The C side calls Rust through a small, named list of *logical* entry points. The count of *physical* `extern "C"` symbols is larger (~40 today, after the 2026-07 dead-export sweep) because of the opaque-handle API pattern: many functions sharing one handle constitute one cohesive seam. New seams require justification; new methods on an existing handle do not. Current inventory:
+The C side calls Rust through a small, named list of *logical* entry points. The count of *physical* `extern "C"` symbols is larger (32 today, after the 2026-07 dead-export sweep and the step-output path deletion) because of the opaque-handle API pattern: many functions sharing one handle constitute one cohesive seam. New seams require justification; new methods on an existing handle do not. Current inventory:
 
 - **`runtime_tick`** — scheduled by the C timer. The per-sample motion path hangs off this one call. Reentrant-safe by being non-reentrant (the C scheduler serializes calls).
-- **`runtime_handle_create` + the `Runtime` opaque-handle API.** One init-once function plus the family of accessor / operation functions taking `*mut Runtime` (see `rust/c-api/src/runtime_ffi.rs` for the full inventory — currently 33 entries). Counted as one logical seam for the discipline this rule is enforcing.
+- **`runtime_handle_create` + the `Runtime` opaque-handle API.** One init-once function plus the family of accessor / operation functions taking `*mut Runtime` (see `rust/c-api/src/runtime_ffi/exports/` for the full inventory — currently 31 entries). Counted as one logical seam for the discipline this rule is enforcing.
 - (Add new entries above this line, with a one-sentence justification. A new accessor on the existing handle is not a new entry; a fundamentally new seam is.)
 
 Anything else — heater readback, pin events, USB byte arrival, command-table dispatch — stays inside C and is **not** routed through Rust. The motion engine is a tenant on the MCU, not the MCU's main loop.
 
 ### B2. Shared state lives in C, in C-owned sections
 
-Anything visible to both languages — the segment SPSC queue, `.persistent_diag`, `RT_CELL`, future telemetry rings, future step-output queues — is **defined in a `.c` file, placed via the C linker script, with a sized symbol the Rust side imports via `extern "C"` and a `#[repr(C)]` mirror.**
+Anything visible to both languages — the segment SPSC queue, `.persistent_diag`, `RT_CELL`, future telemetry rings — is **defined in a `.c` file, placed via the C linker script, with a sized symbol the Rust side imports via `extern "C"` and a `#[repr(C)]` mirror.**
 
 Operational consequences:
 
@@ -71,7 +71,8 @@ The MCU side already has a memory model (ARMv7-M with explicit `__DMB` / `__DSB`
 | Command-table dispatch (msgid → handler) | C | Klipper as-is. The bridge enters through the existing command path. |
 | Scheduler timer | C | Calls `runtime_tick`. |
 | Watchdog (IWDG) | C | Petted from the scheduler; pacing actuals are Step 7-D scope. |
-| Motion engine — per-sample NURBS eval, kinematics, step output | Rust | The reason the boundary exists. |
+| Motion engine — per-sample NURBS eval, kinematics, phase-stepping coil synthesis | Rust | The reason the boundary exists. |
+| Step/dir pulse output | C | Classic `queue_step` (`src/stepper_classic.c`). The Rust-side step-output queue and its per-axis timer were deleted once the buzz generator moved host-side. |
 | Segment queue (host → MCU) | C struct in regular `.bss` (DTCM on H7), Rust producer + Rust consumer | The 2026-05-18 SPSC fix. DTCM placement on H7 is deliberate: non-cached, eliminates cache-coherency concerns. NOT in `.axi_bss`. |
 | `.persistent_diag` region | C struct, C-allocated, both sides read/write | 2026-05-12 fix anchors the placement. |
 | `.axi_bss` occupants (H7-only) | All C-declared today: `kalico_buf` (`src/mcu_demux.c`), `receive_buf` (`src/generic/serial_irq.c`). Each tagged `__attribute__((section(".axi_bss")))` under `#if CONFIG_MACH_STM32H7`. | These rely on AXI SRAM at 0x24000000 because DTCM (128 KB) is saturated by the rest of Klipper. **The low ~2 KB of AXI is not yours:** the bootloader at `CONFIG_FLASH_BOOT_ADDRESS` runs before the application on every reset and takes its stack from the region base (initial SP `0x24000738` on the Octopus Pro H723), so anything linked there is destroyed before `armcm_main` runs. Live statics tolerate this because they are initialised at startup; anything that must survive a reset MUST NOT be placed there. |

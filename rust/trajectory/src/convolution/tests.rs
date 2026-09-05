@@ -34,8 +34,76 @@ fn degree_thirteen_convolution_is_exact() {
 }
 
 #[test]
-#[should_panic(expected = "exceeds exact quadrature degree 13")]
+#[should_panic(expected = "exceeds exact quadrature degree 19")]
 fn convolution_rejects_unrepresentable_product_degree() {
     let kernel = degree_six_kernel();
-    let _ = ShapedSignal::new_from_evaluator(&kernel, |t| t.powi(8), Vec::new(), 8);
+    let _ = ShapedSignal::new_from_evaluator(&kernel, |t| t.powi(14), Vec::new(), 14);
+}
+
+fn previous_f64(value: f64) -> f64 {
+    if value > 0.0 {
+        f64::from_bits(value.to_bits() - 1)
+    } else if value == 0.0 {
+        -f64::from_bits(1)
+    } else {
+        f64::from_bits(value.to_bits() + 1)
+    }
+}
+
+#[test]
+fn cut_transitions_land_on_the_exact_evaluator_comparison_flip() {
+    let kernel = crate::kernel::build_smooth_mzv_kernel(22.428_571_428_571_43);
+    let (k_lo, k_hi) = kernel.support();
+    let kernel_breaks: Vec<f64> = ShapedSignal::kernel_cut_boundaries(&kernel).collect();
+    assert_eq!(kernel_breaks.first().copied(), Some(k_lo));
+    assert_eq!(kernel_breaks.last().copied(), Some(k_hi));
+    let mut shifted_alignments = 0;
+    let mut window_edges_past_ownership = 0;
+    for input_break in [
+        0.0,
+        0.271_374_837_662_063_9,
+        0.705_162_418_830_348_1,
+        3.012_830_318_217_121_7,
+        18.451_759_619_643_7,
+    ] {
+        for &kernel_break in &kernel_breaks {
+            let mut transitions = Vec::new();
+            ShapedSignal::output_cut_transitions(
+                &kernel,
+                input_break,
+                kernel_break,
+                &mut transitions,
+            );
+            assert_eq!(transitions.len(), 1);
+            let cut = transitions[0];
+            let owned = |t: f64| t - input_break >= kernel_break;
+            let inside_window = |t: f64| {
+                if kernel_break == k_lo {
+                    input_break < t - k_lo
+                } else if kernel_break == k_hi {
+                    input_break <= t - k_hi
+                } else {
+                    true
+                }
+            };
+            assert!(owned(cut) && inside_window(cut));
+            let before = previous_f64(cut);
+            assert!(!owned(before) || !inside_window(before));
+            if cut != input_break + kernel_break {
+                shifted_alignments += 1;
+            }
+            if owned(before) {
+                assert!(kernel_break == k_lo || kernel_break == k_hi);
+                window_edges_past_ownership += 1;
+            }
+        }
+    }
+    assert!(
+        shifted_alignments > 0,
+        "kernel/input pair set never exercises a cancellation-shifted cut alignment"
+    );
+    assert!(
+        window_edges_past_ownership > 0,
+        "kernel/input pair set never exercises a window edge later than the ownership flip"
+    );
 }

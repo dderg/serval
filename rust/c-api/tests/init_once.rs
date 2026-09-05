@@ -45,8 +45,6 @@ pub extern "C" fn timer_read_time() -> u32 {
 pub extern "C" fn timer_is_before(_a: u32, _b: u32) -> u8 {
     0
 }
-#[unsafe(no_mangle)]
-pub extern "C" fn runtime_emit_step_pulses(_axis_idx: u8, _n_steps: i32, _stepper_sel: u8) {}
 
 #[test]
 fn second_init_returns_null() {
@@ -58,7 +56,6 @@ fn second_init_returns_null() {
 
 #[test]
 fn null_handle_returns_null_ptr_error() {
-    let piece = [0u8; 32];
-    let r = unsafe { c_api::runtime_write_piece(std::ptr::null_mut(), 0, 0, 0, piece.as_ptr()) };
+    let r = unsafe { c_api::runtime_set_axis_mode(std::ptr::null_mut(), 0, 0) };
     assert_eq!(r, c_api::RUNTIME_ERR_NULL_PTR);
 }

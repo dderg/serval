@@ -604,8 +604,21 @@ def arg_dictionary(option, opt_str, value, parser):
     parser.values.dictionary[key] = fname
 
 
+def _register_stack_dump_signal():
+    """klippy's rtprio capability defeats same-uid ptrace, so py-spy and gdb
+    cannot inspect a wedged process. faulthandler dumps every thread's Python
+    stack straight from the C signal handler - it works even while the main
+    thread is parked inside a native call holding the GIL:
+    kill -USR2 <pid>, stacks land on stderr (the journal)."""
+    import faulthandler
+    import signal
+
+    faulthandler.register(signal.SIGUSR2, all_threads=True)
+
+
 def main():
     usage = "%prog [options] <config file>"
+    _register_stack_dump_signal()
     opts = optparse.OptionParser(usage, prog="klippy")
     opts.add_option(
         "-i",

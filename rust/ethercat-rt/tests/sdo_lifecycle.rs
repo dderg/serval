@@ -1,3 +1,5 @@
+mod common;
+
 use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -35,12 +37,15 @@ fn spawn_and_claim(tag: &str) -> (ChildGuard, McuSerialConn) {
         .expect("stub binary must spawn");
     let guard = ChildGuard { child: Some(child) };
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let socket_deadline = Instant::now() + Duration::from_secs(5);
     while !std::path::Path::new(&path).exists() {
-        assert!(Instant::now() < deadline, "stub socket did not appear");
+        assert!(
+            Instant::now() < socket_deadline,
+            "stub socket did not appear"
+        );
         thread::sleep(Duration::from_millis(10));
     }
-    let conn = McuSerialConn::connect(&path).expect("connect must succeed");
+    let conn = common::connect_until(&path, Instant::now() + Duration::from_secs(5));
     let (kind, _) = conn
         .mcu_call(
             MessageKind::ClaimHandshake,

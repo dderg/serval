@@ -581,6 +581,67 @@ impl DynamicsModel {
     }
 }
 
+/// Build the chain's dynamics model from the same profile inputs the endpoint
+/// takes on its command line: one node-wide profile, or one profile per drive
+/// combined block-diagonally. Fallible so the host — which must load the very
+/// same model to compute torque feedforward at fill time — reports a bad
+/// profile through its own error path instead of exiting the process.
+pub fn chain_model_from_profiles(
+    node_profile: Option<&str>,
+    per_slot: &[Option<String>],
+    num_slaves: usize,
+) -> Result<Option<DynamicsModel>, String> {
+    let load = |path: &str| -> Result<DynamicsModel, String> {
+        let text =
+            std::fs::read_to_string(path).map_err(|e| format!("dynamics profile {path}: {e}"))?;
+        DynamicsModel::from_toml_str(&text).map_err(|e| match e {
+            ProfileError::Version(v) => format!(
+                "dynamics profile {path} is version {v}, expected 6 — refit with \
+                 SERVO_FIT_DYNAMICS"
+            ),
+            other => format!("dynamics profile {path} invalid: {other:?}"),
+        })
+    };
+    if per_slot.iter().any(Option::is_some) {
+        if node_profile.is_some() {
+            return Err(
+                "a node-wide dynamics profile and per-slave dynamics profiles are mutually \
+                 exclusive"
+                    .to_owned(),
+            );
+        }
+        let mut parts = Vec::with_capacity(per_slot.len());
+        for slot in per_slot {
+            let path = slot.as_deref().ok_or_else(|| {
+                "per-slave dynamics profiles must cover every drive or none".to_owned()
+            })?;
+            parts.push(load(path)?);
+        }
+        let model = DynamicsModel::block_diagonal(parts)
+            .map_err(|e| format!("per-slave dynamics profiles invalid: {e:?}"))?;
+        if model.n_slots != num_slaves {
+            return Err(format!(
+                "per-slave dynamics profiles cover {} axes, endpoint drives {num_slaves}",
+                model.n_slots
+            ));
+        }
+        return Ok(Some(model));
+    }
+    match node_profile {
+        None => Ok(None),
+        Some(path) => {
+            let model = load(path)?;
+            if model.n_slots != num_slaves {
+                return Err(format!(
+                    "dynamics profile {path} has {} axes, endpoint drives {num_slaves}",
+                    model.n_slots
+                ));
+            }
+            Ok(Some(model))
+        }
+    }
+}
+
 /// Right pseudo-inverse rows `W = (F·Fᵀ)⁻¹·F` (row-major n_modes × n_slots)
 /// of the validated, full-row-rank frame — one Cholesky solve per slot
 /// column against the SPD Gram matrix `F·Fᵀ`. `F⁺ = Fᵀ(FFᵀ)⁻¹ = Wᵀ`, so the

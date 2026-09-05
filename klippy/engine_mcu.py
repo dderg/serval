@@ -77,6 +77,9 @@ class EngineMcu:
     def take_runtime_event(self):
         return self._engine.take_runtime_event(self._handle)
 
+    def take_endpoint_death(self):
+        return self._engine.take_endpoint_death(self._handle)
+
     def get_clock_async(self):
         self._engine.engine_get_clock_async(self._handle)
 
@@ -98,14 +101,18 @@ class EngineMcu:
             )
         )
 
-    def set_clock_est(self, freq, offset, last_clock, host_now_raw):
+    def set_clock_est(self, freq, offset, last_clock, converged, host_now_raw):
         self._engine.set_clock_est(
             self._handle,
             float(freq),
             float(offset),
             int(last_clock),
-            host_now_raw,
+            bool(converged),
+            float(host_now_raw),
         )
+
+    def invalidate_clock_est(self):
+        self._engine.invalidate_clock_est(self._handle)
 
     def set_nominal_clock_freq(self, freq_hz):
         self._engine.set_nominal_clock_freq(self._handle, freq_hz)

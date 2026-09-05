@@ -3,29 +3,21 @@ use std::sync::Arc;
 use crossbeam_channel::{Receiver, Sender};
 use geometry::path::lowering::PositionProfile;
 use geometry::{Move, SurfaceTransform};
-use trajectory::AxisChainSet;
+use trajectory::{AnalyticMoveSpan, AxisChainSet, ContinuousAxis, ContinuousSegment, SurfaceMode};
 
-use crate::lowering::{FitTol, lower_move};
-use crate::types::{Control, LoweredItem, LoweredSegment, PlannedItem};
+use crate::types::{BaseItem, BaseSegment, Control, PlannedItem, PlannedMove};
 
 const REST_EPS_MM_S: f64 = 1e-9;
+const WARP_BBOX_SAMPLES: usize = 8;
 
-/// Third pipeline stage: lowers each planned move into a dispatchable
-/// `ShapedSegment`. It is the persistent owner of the trajectory clock and
-/// odometer: `Dwell` advances the clock without motion, `Reset` restarts the
-/// timeline at rest at the given position, `SetAxisChains` swaps the chain
-/// set future moves are lowered against, `SetMesh` swaps the bed surface
-/// transform. The odometer and everything upstream are gcode space; the
-/// emitted segments are machine space — this stage owns the warp.
 pub fn run_lowerer(
     input: Receiver<PlannedItem>,
-    output: Sender<LoweredItem>,
-    fit_tol: FitTol,
+    output: Sender<BaseItem>,
     axis_chains: AxisChainSet,
     home_pos: Vec<f64>,
     t_start: f64,
 ) {
-    let mut lowerer = Lowerer::new(fit_tol, axis_chains, home_pos, t_start);
+    let mut lowerer = Lowerer::new(axis_chains, home_pos, t_start);
     while let Ok(item) = input.recv() {
         if !lowerer.feed(item, &output) {
             return;
@@ -33,12 +25,8 @@ pub fn run_lowerer(
     }
 }
 
-/// The lowering stage's persistent state, driveable item by item by
-/// single-threaded hosts; [`run_lowerer`] is the channel loop over it.
 pub struct Lowerer {
-    fit_tol: FitTol,
     axis_chains: AxisChainSet,
-    lower_chains: Vec<trajectory::CompiledChain>,
     odometer: Vec<f64>,
     t: f64,
     rest_hold_pending: bool,
@@ -47,15 +35,8 @@ pub struct Lowerer {
 }
 
 impl Lowerer {
-    pub fn new(
-        fit_tol: FitTol,
-        axis_chains: AxisChainSet,
-        home_pos: Vec<f64>,
-        t_start: f64,
-    ) -> Self {
+    pub fn new(axis_chains: AxisChainSet, home_pos: Vec<f64>, t_start: f64) -> Self {
         Self {
-            fit_tol,
-            lower_chains: lowering_chains(&axis_chains),
             axis_chains,
             odometer: home_pos,
             t: t_start,
@@ -65,7 +46,7 @@ impl Lowerer {
         }
     }
 
-    pub fn feed(&mut self, item: PlannedItem, output: &Sender<LoweredItem>) -> bool {
+    pub fn feed(&mut self, item: PlannedItem, output: &Sender<BaseItem>) -> bool {
         let planned = match item {
             PlannedItem::Move(planned) => planned,
             PlannedItem::Drain => {
@@ -73,10 +54,10 @@ impl Lowerer {
                     return false;
                 }
                 self.rest_hold_pending = true;
-                return output.send(LoweredItem::Drain).is_ok();
+                return output.send(BaseItem::Drain).is_ok();
             }
-            PlannedItem::Control(ctrl) => {
-                match &ctrl {
+            PlannedItem::Control(control) => {
+                match &control {
                     Control::Dwell { secs } => {
                         assert!(*secs >= 0.0, "lowerer: negative dwell {secs}");
                         self.t += secs;
@@ -88,211 +69,215 @@ impl Lowerer {
                         self.has_motion_history = false;
                     }
                     Control::SetAxisChains(chains) => {
-                        // The committed track just before the swap still
-                        // carries the deceleration transient through the old
-                        // kernels' windows (the extruder's pre-kernel PA term
-                        // above all). A different kernel weighs that transient
-                        // differently, so swapping at the bare rest point
-                        // steps the track by ~k·ė — a one-sample burst on the
-                        // MCU. Hold the rest as real trajectory until both
-                        // eras' windows see only rest, then swap.
                         let settle = self.axis_chains.back_support().max(chains.back_support());
-                        if self.has_motion_history && settle > 0.0 {
-                            let hold = rest_hold_segment(
-                                &self.odometer,
-                                rest_z_warp(self.mesh.as_deref(), &self.odometer),
-                                self.t,
-                                self.t + settle,
-                                self.odometer.len(),
-                                0,
-                            );
-                            if output
-                                .send(LoweredItem::Seg(LoweredSegment {
-                                    seg: hold,
-                                    rest_at_end: true,
-                                }))
-                                .is_err()
-                            {
-                                return false;
-                            }
-                            self.t += settle;
+                        if self.has_motion_history
+                            && settle > 0.0
+                            && !self.emit_hold(self.t + settle, 0, output)
+                        {
+                            return false;
                         }
                         self.axis_chains = chains.clone();
-                        self.lower_chains = lowering_chains(&self.axis_chains);
                     }
                     Control::SetMesh {
-                        mesh: m,
+                        mesh,
                         gcode_z_rebase,
                     } => {
-                        self.mesh = m.clone();
+                        self.mesh = mesh.clone();
                         if let Some(z) = self.odometer.get_mut(2) {
                             *z = *gcode_z_rebase;
                         }
                     }
                     Control::Nudge { .. } | Control::Barrier(_) => {}
                 }
-                return output.send(LoweredItem::Control(ctrl)).is_ok();
+                return output.send(BaseItem::Control(control)).is_ok();
             }
         };
+        self.emit_move(planned, output)
+    }
+
+    fn emit_move(&mut self, planned: PlannedMove, output: &Sender<BaseItem>) -> bool {
         let hold_pad = if self.rest_hold_pending {
             self.axis_chains.forward_support()
         } else {
             0.0
         };
         self.rest_hold_pending = false;
-        let clock = crate::timing::stopwatch();
-        let mut seg = lower_move(
-            &planned.geometry,
-            &planned.velocity,
-            self.t + hold_pad,
-            &self.odometer,
-            self.fit_tol,
-            &self.lower_chains,
-            self.mesh.as_deref(),
-        )
-        .unwrap_or_else(|e| panic!("lowerer: line {}: {e}", planned.geometry.source.start_line));
-        seg.source_line = planned.geometry.source.start_line;
-        if hold_pad > 0.0 {
-            let hold = rest_hold_segment(
-                &self.odometer,
-                rest_z_warp(self.mesh.as_deref(), &self.odometer),
-                self.t,
-                seg.t_start,
-                seg.axes.len(),
-                seg.source_line,
-            );
-            if output
-                .send(LoweredItem::Seg(LoweredSegment {
-                    seg: hold,
-                    rest_at_end: true,
-                }))
-                .is_err()
-            {
-                return false;
-            }
+        if hold_pad > 0.0
+            && !self.emit_hold(
+                self.t + hold_pad,
+                planned.geometry.source.start_line,
+                output,
+            )
+        {
+            return false;
         }
 
-        self.t = seg.t_end;
-        self.has_motion_history = true;
-        advance_odometer(&mut self.odometer, &planned.geometry);
-        tracing::debug!(
-            subsystem = "motion",
-            event = "pipe_lower",
-            line = seg.source_line,
-            lower_us = clock.elapsed_us(),
-            n_pieces = seg
-                .axes
-                .iter()
-                .map(|a| nurbs::bezier::extract_bezier_pieces(a).len())
-                .max()
-                .unwrap_or(0),
-            t_us = crate::timing::mono_us(),
-            "[pipe] lower"
+        let source_distance_origin = planned
+            .velocity
+            .phases
+            .first()
+            .expect("lowerer: planned move must contain analytic phases")
+            .s0;
+        let duration: f64 = planned.velocity.phases.iter().map(|phase| phase.dt).sum();
+        let t_start = self.t;
+        let t_end = t_start + duration;
+        let axis_count = planned
+            .geometry
+            .segment
+            .followers
+            .iter()
+            .map(|follower| follower.axis_index + 1)
+            .max()
+            .unwrap_or(3)
+            .max(self.odometer.len())
+            .max(3);
+        let mut starts = self.odometer.clone();
+        starts.resize(axis_count, 0.0);
+        let surface = classify_surface(self.mesh.as_ref(), &planned.geometry, &starts);
+        let source_line = planned.geometry.source.start_line;
+        let span = Arc::new(
+            AnalyticMoveSpan::try_new(
+                planned.geometry,
+                Arc::from(planned.velocity.phases),
+                source_distance_origin,
+                t_start,
+                t_end,
+                Arc::from(starts),
+                surface,
+            )
+            .unwrap_or_else(|error| panic!("lowerer: line {source_line}: {error}")),
         );
-
-        let rest_at_end = planned.velocity.exit_v <= REST_EPS_MM_S;
-        output
-            .send(LoweredItem::Seg(LoweredSegment { seg, rest_at_end }))
-            .is_ok()
+        let axes = (0..axis_count)
+            .map(|axis| {
+                if axis < 3 && span.source.segment.spatial.is_none() {
+                    let surface_offset = if axis == 2 {
+                        match &span.surface {
+                            SurfaceMode::Constant(offset) => *offset,
+                            SurfaceMode::None => 0.0,
+                            SurfaceMode::Variable(_) => unreachable!(),
+                        }
+                    } else {
+                        0.0
+                    };
+                    ContinuousAxis::Hold {
+                        position: span.axis_start_positions[axis] + surface_offset,
+                        t_start,
+                        t_end,
+                    }
+                } else {
+                    ContinuousAxis::Analytic {
+                        span: Arc::clone(&span),
+                        axis,
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        let segment = ContinuousSegment {
+            axes: Arc::from(axes),
+            followers: Arc::from(span.source.segment.followers.clone()),
+            spatial_path: span.source.segment.spatial.is_some(),
+            t_start,
+            t_end,
+            motor_mask: 0,
+            source_line,
+            rest_at_end: planned.velocity.exit_v <= REST_EPS_MM_S,
+        };
+        self.t = t_end;
+        self.has_motion_history = true;
+        advance_odometer(&mut self.odometer, &span.source);
+        output.send(BaseItem::Seg(BaseSegment { segment })).is_ok()
     }
 
-    /// The shaped output keeps decaying for the chains' trailing support after
-    /// the raw trajectory rests (the extruder's PA unwind above all), and a
-    /// drain flush commits the track only through the last raw instant. Hold
-    /// the rest as real trajectory through that decay before the marker —
-    /// otherwise the MCU parks mid-decay, and any clock jump before the next
-    /// move (a dwell, a stream end) makes the resumed track re-enter at the
-    /// settled value: a one-sample multi-step burst.
-    fn emit_settle_hold(&mut self, output: &Sender<LoweredItem>) -> bool {
+    fn emit_settle_hold(&mut self, output: &Sender<BaseItem>) -> bool {
         let settle = self.axis_chains.back_support();
         if self.rest_hold_pending || !self.has_motion_history || settle <= 0.0 {
             return true;
         }
-        let hold = rest_hold_segment(
-            &self.odometer,
-            rest_z_warp(self.mesh.as_deref(), &self.odometer),
-            self.t,
-            self.t + settle,
-            self.odometer.len(),
-            0,
-        );
-        if output
-            .send(LoweredItem::Seg(LoweredSegment {
-                seg: hold,
-                rest_at_end: true,
-            }))
-            .is_err()
-        {
+        self.emit_hold(self.t + settle, 0, output)
+    }
+
+    fn emit_hold(&mut self, t_end: f64, source_line: u32, output: &Sender<BaseItem>) -> bool {
+        let t_start = self.t;
+        let z_warp = rest_z_warp(self.mesh.as_deref(), &self.odometer);
+        let axes = (0..self.odometer.len())
+            .map(|axis| ContinuousAxis::Hold {
+                position: self.odometer[axis] + if axis == 2 { z_warp } else { 0.0 },
+                t_start,
+                t_end,
+            })
+            .collect::<Vec<_>>();
+        let segment = ContinuousSegment {
+            axes: Arc::from(axes),
+            followers: Arc::from([]),
+            spatial_path: false,
+            t_start,
+            t_end,
+            motor_mask: 0,
+            source_line,
+            rest_at_end: true,
+        };
+        if output.send(BaseItem::Seg(BaseSegment { segment })).is_err() {
             return false;
         }
-        self.t += settle;
+        self.t = t_end;
         true
     }
 }
 
-/// The chains the lowerer bakes into raw tracks. A projected follower's whole
-/// chain applies in the shaper after re-projection onto its leaders' shaped
-/// motion, so its slot is emptied here — baking it against the raw profile
-/// would double-apply it.
-fn lowering_chains(axis_chains: &AxisChainSet) -> Vec<trajectory::CompiledChain> {
-    axis_chains
-        .chains
-        .iter()
-        .enumerate()
-        .map(|(axis, chain)| {
-            if axis_chains.is_projected_follower(axis) {
-                trajectory::CompiledChain::default()
-            } else {
-                chain.clone()
-            }
-        })
-        .collect()
+fn classify_surface(
+    mesh: Option<&Arc<SurfaceTransform>>,
+    movement: &Move,
+    start_pos: &[f64],
+) -> SurfaceMode {
+    let Some(surface) = mesh else {
+        return SurfaceMode::None;
+    };
+    let Some(spatial) = movement.segment.spatial.as_ref() else {
+        return SurfaceMode::Constant(surface.correction_at(
+            start_pos[0],
+            start_pos[1],
+            start_pos[2],
+        ));
+    };
+    let length = movement.segment.s_len();
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for sample in 0..=WARP_BBOX_SAMPLES {
+        let point = spatial.point_at(length * sample as f64 / WARP_BBOX_SAMPLES as f64);
+        for axis in 0..3 {
+            lo[axis] = lo[axis].min(point[axis]);
+            hi[axis] = hi[axis].max(point[axis]);
+        }
+    }
+    let ds = length / WARP_BBOX_SAMPLES as f64;
+    let pad = {
+        use geometry::path::CurvatureProfile;
+        spatial.kappa_peak().1.abs() * ds * ds / 8.0
+    };
+    let spread = surface.correction_spread_over(
+        lo[0] - pad,
+        hi[0] + pad,
+        lo[1] - pad,
+        hi[1] + pad,
+        lo[2] - pad,
+        hi[2] + pad,
+    );
+    if spread == 0.0 {
+        let point = spatial.point_at(0.0);
+        SurfaceMode::Constant(surface.correction_at(point[0], point[1], point[2]))
+    } else {
+        SurfaceMode::Variable(Arc::clone(surface))
+    }
 }
 
-/// The gcode-space odometer is warped like any commanded position when a
-/// segment holds it as machine-space output.
 fn rest_z_warp(mesh: Option<&SurfaceTransform>, odometer: &[f64]) -> f64 {
-    mesh.map_or(0.0, |t| {
-        t.correction_at(
+    mesh.map_or(0.0, |surface| {
+        surface.correction_at(
             odometer.first().copied().unwrap_or(0.0),
             odometer.get(1).copied().unwrap_or(0.0),
             odometer.get(2).copied().unwrap_or(0.0),
         )
     })
-}
-
-/// The rest the shaper's drain flush clamped against, materialized as real
-/// trajectory once the next move is known: the shaped output creeps toward
-/// the resumed motion inside this window, and that creep must be emitted,
-/// not skipped over by a bare clock jump.
-fn rest_hold_segment(
-    odometer: &[f64],
-    z_warp: f64,
-    t_start: f64,
-    t_end: f64,
-    n_axes: usize,
-    source_line: u32,
-) -> trajectory::ShapedSegment {
-    use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
-    let axes = (0..n_axes)
-        .map(|axis| {
-            let warp = if axis == 2 { z_warp } else { 0.0 };
-            bezier_pieces_to_nurbs(&[BezierPiece {
-                u_start: t_start,
-                u_end: t_end,
-                coeffs: vec![odometer.get(axis).copied().unwrap_or(0.0) + warp],
-            }])
-        })
-        .collect();
-    trajectory::ShapedSegment {
-        axes,
-        followers: Vec::new(),
-        spatial_path: false,
-        t_start,
-        t_end,
-        motor_mask: 0,
-        source_line,
-    }
 }
 
 pub fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -302,17 +287,17 @@ pub fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {
     (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
-pub fn advance_odometer(pos: &mut [f64], gm: &Move) {
-    let s_len = gm.segment.s_len();
-    if let Some(seg) = &gm.segment.spatial {
-        let end = seg.point_at(s_len);
+pub fn advance_odometer(pos: &mut [f64], movement: &Move) {
+    let length = movement.segment.s_len();
+    if let Some(segment) = &movement.segment.spatial {
+        let end = segment.point_at(length);
         for axis in 0..3.min(pos.len()) {
             pos[axis] = end[axis];
         }
     }
-    for f in &gm.segment.followers {
-        if let Some(slot) = pos.get_mut(f.axis_index) {
-            *slot += f.delta_over(s_len);
+    for follower in &movement.segment.followers {
+        if let Some(slot) = pos.get_mut(follower.axis_index) {
+            *slot += follower.delta_over(length);
         }
     }
 }

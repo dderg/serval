@@ -149,7 +149,7 @@ fn start_capture_transport_error_is_err() {
 fn start_capture_wrong_kind_response_is_rejected() {
     let (client, server) = UnixStream::pair().unwrap();
     let _rx =
-        spawn_start_endpoint_with_kind(server, MessageKind::PushPiecesResponse, vec![0u8; 20]);
+        spawn_start_endpoint_with_kind(server, MessageKind::PushSampleRunsResponse, vec![0u8; 20]);
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
     let err = send_start_capture(
         &conn,
@@ -204,7 +204,8 @@ fn stop_capture_transport_error_is_err() {
 #[test]
 fn stop_capture_wrong_kind_response_is_rejected() {
     let (client, server) = UnixStream::pair().unwrap();
-    let _rx = spawn_stop_endpoint_with_kind(server, MessageKind::PushPiecesResponse, vec![0u8; 20]);
+    let _rx =
+        spawn_stop_endpoint_with_kind(server, MessageKind::PushSampleRunsResponse, vec![0u8; 20]);
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
     let err = send_stop_capture(&conn).expect_err("should error on wrong kind");
     assert!(err.contains("unexpected response kind"));

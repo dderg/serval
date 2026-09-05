@@ -5,22 +5,11 @@
 
 #define MCU_CHANNEL_CONTROL 0x00
 #define MCU_CHANNEL_EVENTS  0x01
-#define MCU_CHANNEL_PIECES  0x02
 
-// Transport framing constants shared by the dispatcher and piece_sink.
 #define MCU_TX_BUF_SIZE 256
 // type:u16_le | version:u8 | corr_id:u32_le.
 #define PER_MESSAGE_HEADER_LEN 7
 #define MESSAGE_VERSION_DEFAULT 0x01
-
-// Runtime result codes mirrored from rust/runtime/src/error.rs; keep in sync.
-#define RUNTIME_ERR_INVALID_CURVE          -2
-#define RUNTIME_ERR_NOT_INIT               -7
-#define RUNTIME_ERR_MOTION_RUNTIME_ABSENT -400
-
-void piece_sink_begin(void);
-void piece_sink_feed(uint8_t b);
-void piece_sink_commit(void);
 
 void mcu_transport_dispatch_frame(uint8_t channel, const uint8_t *payload,
                            uint16_t payload_len);

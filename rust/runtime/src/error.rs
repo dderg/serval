@@ -50,7 +50,6 @@ pub const RUNTIME_ERR_TRACE_OVERFLOW: i32 = -133;
 pub const RUNTIME_ERR_STREAM_STATE_VIOLATION: i32 = -140;
 pub const RUNTIME_ERR_SEGMENT_ID_NON_MONOTONIC: i32 = -141;
 pub const RUNTIME_ERR_STREAM_HALTED: i32 = -142;
-pub const RUNTIME_ERR_MULTI_MOTOR_MASK: i32 = -143;
 
 pub const RUNTIME_ERR_T_START_IN_PAST: i32 = -150;
 pub const RUNTIME_ERR_T_END_BEFORE_T_START: i32 = -151;
@@ -86,36 +85,39 @@ pub const RUNTIME_ERR_MOTION_IN_PROGRESS: i32 = -31;
 pub const RUNTIME_ERR_STEP_QUEUE_OVERFLOW: i32 = -300;
 pub const RUNTIME_ERR_SPI_QUEUE_OVERFLOW: i32 = -301;
 pub const RUNTIME_ERR_MATH_NON_FINITE: i32 = -302;
-pub const RUNTIME_ERR_PIECE_ADVANCE_UNDERFLOW: i32 = -303;
 pub const RUNTIME_ERR_SAMPLE_RATE_MISCONFIGURED: i32 = -304;
 pub const RUNTIME_ERR_POSITION_COUNT_OVERFLOW: i32 = -305;
 pub const RUNTIME_ERR_JOG_PARAMETERS_INVALID: i32 = -306;
 pub const RUNTIME_ERR_STEP_RATE_EXCEEDS_MCU_CEILING: i32 = -307;
-/// ISR reached a piece whose `start_time` is more than 2 ISR ticks in the
-/// past — MCU was not fed in time. Hard fault.
-pub const RUNTIME_ERR_PIECE_START_IN_PAST: i32 = -308;
-pub const RUNTIME_ERR_RING_FULL: i32 = -309;
 /// Steps-per-sample limit exceeded — unrecoverable position-baseline discontinuity.
 pub const RUNTIME_ERR_STEPS_PER_SAMPLE_EXCEEDED: i32 = -310;
 /// TIM5 inter-arrival gap exceeded the allowed multiple of `sample_period_cycles`.
 /// ISR was starved; fail loud before acting on stale time.
 pub const RUNTIME_ERR_TICK_INTERVAL_EXCEEDED: i32 = -311;
-/// Firmware was built with `CONFIG_CLASSIC_STEPPING` — it has no MCU-side
-/// motion runtime, so every piece-stream and phase-stepping request is
-/// rejected instead of silently ignored.
-pub const RUNTIME_ERR_MOTION_RUNTIME_ABSENT: i32 = -400;
-/// `dispatch_axis` encountered a `StepMode` byte that is not `Pulse` (0) or
-/// `Phase` (1). Detail: `((axis_idx & 0xFF) << 16) | (mode & 0xFF)`.
-pub const RUNTIME_ERR_UNKNOWN_STEP_MODE: i32 = -312;
-/// `dispatch_phase` found a Phase-mode stepper with a TMC CS binding but no
+/// `write_phase_coils` found a Phase-mode stepper with a TMC CS binding but no
 /// entry in `phase_slot_idx[0..phase_motor_count]` maps it to a registered
 /// SPI motor. Detail: `((axis_idx & 0xFF) << 16) | stepper_oid`.
 pub const RUNTIME_ERR_PHASE_MOTOR_UNMAPPED: i32 = -313;
 pub const RUNTIME_ERR_OVERLAY_UNSUPPORTED: i32 = -314;
-/// A windowed `PushPieces` frame is not contiguous with the ring head — an
-/// earlier in-flight frame was lost (CRC drop). The frame is refused so the
-/// head never advances over unwritten slots; the host replays from the gap.
-pub const RUNTIME_ERR_PIECE_SLOT_GAP: i32 = -317;
+/// Sample-stream run reached the lane after its start clock had already
+/// passed the playback clock — the host was not feeding in time.
+/// Detail: `((lane_idx & 0xFF) << 16) | deficit_ticks`.
+pub const RUNTIME_ERR_SAMPLE_RUN_LATE: i32 = -317;
+/// A sample lane's run ring drained while its trajectory still had velocity.
+/// Detail: `((lane_idx & 0xFF) << 16) | tail_delta_quanta`.
+pub const RUNTIME_ERR_SAMPLE_RING_UNDERRUN: i32 = -318;
+/// A `sample_run` / `sample_overlay` arrived for a lane whose run ring is
+/// already full. Detail: `(lane_idx & 0xFF) << 16`.
+pub const RUNTIME_ERR_SAMPLE_RING_FULL: i32 = -319;
+/// A sample command named an oid that is not bound to any configured lane.
+/// Detail: `(0xFF << 16) | oid`.
+pub const RUNTIME_ERR_SAMPLE_LANE_UNKNOWN: i32 = -320;
+/// `sample_run.rs` rejected the run itself (abutment, decode, degenerate
+/// header). Detail: `((lane_idx & 0xFF) << 16) | SampleRunError::fault_code()`.
+pub const RUNTIME_ERR_SAMPLE_RUN_REJECTED: i32 = -321;
+/// More unacked `sample_barrier` receipts on one lane than it can hold.
+/// Detail: `(lane_idx & 0xFF) << 16`.
+pub const RUNTIME_ERR_SAMPLE_BARRIER_OVERFLOW: i32 = -322;
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,7 +153,6 @@ pub enum FaultCode {
 
     StreamStateViolation = -140,
     SegmentIdNonMonotonic = -141,
-    MultiMotorMask = -143,
 
     TStartInPast = -150,
     TEndBeforeTStart = -151,
@@ -188,20 +189,20 @@ pub enum FaultCode {
     StepQueueOverflow = -300,
     SpiQueueOverflow = -301,
     MathNonFinite = -302,
-    PieceAdvanceUnderflow = -303,
     SampleRateMisconfigured = -304,
     PositionCountOverflow = -305,
     JogParametersInvalid = -306,
     StepRateExceedsMcuCeiling = -307,
-    PieceStartInPast = -308,
-    RingFull = -309,
     StepsPerSampleExceeded = -310,
     TickIntervalExceeded = -311,
-    UnknownStepMode = -312,
     PhaseMotorUnmapped = -313,
     OverlayUnsupported = -314,
-    BuzzAxisConflict = -315,
-    BuzzInPhaseMode = -316,
+    SampleRunLate = -317,
+    SampleRingUnderrun = -318,
+    SampleRingFull = -319,
+    SampleLaneUnknown = -320,
+    SampleRunRejected = -321,
+    SampleBarrierOverflow = -322,
 }
 
 impl FaultCode {
@@ -226,9 +227,8 @@ impl FaultCode {
     /// ```
     /// # use runtime::error::FaultCode;
     /// assert_eq!(FaultCode::from_u16(0), Some(FaultCode::None));
-    /// assert_eq!(FaultCode::from_u16(-308i16 as u16), Some(FaultCode::PieceStartInPast));
+    /// assert_eq!(FaultCode::from_u16(-310i16 as u16), Some(FaultCode::StepsPerSampleExceeded));
     /// assert_eq!(FaultCode::from_u16(-311i16 as u16), Some(FaultCode::TickIntervalExceeded));
-    /// assert_eq!(FaultCode::from_u16(-312i16 as u16), Some(FaultCode::UnknownStepMode));
     /// assert_eq!(FaultCode::from_u16(-313i16 as u16), Some(FaultCode::PhaseMotorUnmapped));
     /// assert_eq!(FaultCode::from_u16(-314i16 as u16), Some(FaultCode::OverlayUnsupported));
     /// assert_eq!(FaultCode::from_u16(1), None);
@@ -273,7 +273,6 @@ impl FaultCode {
             -133 => Self::TraceOverflow,
             -140 => Self::StreamStateViolation,
             -141 => Self::SegmentIdNonMonotonic,
-            -143 => Self::MultiMotorMask,
             -150 => Self::TStartInPast,
             -151 => Self::TEndBeforeTStart,
             -152 => Self::SegmentTooShort,
@@ -291,20 +290,20 @@ impl FaultCode {
             -300 => Self::StepQueueOverflow,
             -301 => Self::SpiQueueOverflow,
             -302 => Self::MathNonFinite,
-            -303 => Self::PieceAdvanceUnderflow,
             -304 => Self::SampleRateMisconfigured,
             -305 => Self::PositionCountOverflow,
             -306 => Self::JogParametersInvalid,
             -307 => Self::StepRateExceedsMcuCeiling,
-            -308 => Self::PieceStartInPast,
-            -309 => Self::RingFull,
             -310 => Self::StepsPerSampleExceeded,
             -311 => Self::TickIntervalExceeded,
-            -312 => Self::UnknownStepMode,
             -313 => Self::PhaseMotorUnmapped,
             -314 => Self::OverlayUnsupported,
-            -315 => Self::BuzzAxisConflict,
-            -316 => Self::BuzzInPhaseMode,
+            -317 => Self::SampleRunLate,
+            -318 => Self::SampleRingUnderrun,
+            -319 => Self::SampleRingFull,
+            -320 => Self::SampleLaneUnknown,
+            -321 => Self::SampleRunRejected,
+            -322 => Self::SampleBarrierOverflow,
             _ => return None,
         })
     }
@@ -316,7 +315,7 @@ impl FaultCode {
     /// ```
     /// # use runtime::error::FaultCode;
     /// assert_eq!(FaultCode::None.code_name(), "None");
-    /// assert_eq!(FaultCode::PieceStartInPast.code_name(), "PieceStartInPast");
+    /// assert_eq!(FaultCode::StepsPerSampleExceeded.code_name(), "StepsPerSampleExceeded");
     /// assert_eq!(FaultCode::TickIntervalExceeded.code_name(), "TickIntervalExceeded");
     /// assert_eq!(FaultCode::OverlayUnsupported.code_name(), "OverlayUnsupported");
     /// ```
@@ -358,7 +357,6 @@ impl FaultCode {
             Self::TraceOverflow => "TraceOverflow",
             Self::StreamStateViolation => "StreamStateViolation",
             Self::SegmentIdNonMonotonic => "SegmentIdNonMonotonic",
-            Self::MultiMotorMask => "MultiMotorMask",
             Self::TStartInPast => "TStartInPast",
             Self::TEndBeforeTStart => "TEndBeforeTStart",
             Self::SegmentTooShort => "SegmentTooShort",
@@ -376,20 +374,20 @@ impl FaultCode {
             Self::StepQueueOverflow => "StepQueueOverflow",
             Self::SpiQueueOverflow => "SpiQueueOverflow",
             Self::MathNonFinite => "MathNonFinite",
-            Self::PieceAdvanceUnderflow => "PieceAdvanceUnderflow",
             Self::SampleRateMisconfigured => "SampleRateMisconfigured",
             Self::PositionCountOverflow => "PositionCountOverflow",
             Self::JogParametersInvalid => "JogParametersInvalid",
             Self::StepRateExceedsMcuCeiling => "StepRateExceedsMcuCeiling",
-            Self::PieceStartInPast => "PieceStartInPast",
-            Self::RingFull => "RingFull",
             Self::StepsPerSampleExceeded => "StepsPerSampleExceeded",
             Self::TickIntervalExceeded => "TickIntervalExceeded",
-            Self::UnknownStepMode => "UnknownStepMode",
             Self::PhaseMotorUnmapped => "PhaseMotorUnmapped",
             Self::OverlayUnsupported => "OverlayUnsupported",
-            Self::BuzzAxisConflict => "BuzzAxisConflict",
-            Self::BuzzInPhaseMode => "BuzzInPhaseMode",
+            Self::SampleRunLate => "SampleRunLate",
+            Self::SampleRingUnderrun => "SampleRingUnderrun",
+            Self::SampleRingFull => "SampleRingFull",
+            Self::SampleLaneUnknown => "SampleLaneUnknown",
+            Self::SampleRunRejected => "SampleRunRejected",
+            Self::SampleBarrierOverflow => "SampleBarrierOverflow",
         }
     }
 }

@@ -102,9 +102,8 @@ boundary honest.
   miscompile). The generic type parameter surfaces only at the `EngineImpl` alias.
 - **The timer call-path is not abstracted.** C scheduler timer (MCU) vs. RT-Linux
   cyclic loop (EtherCAT) are different event models; unifying them buys nothing.
-- **`seed_position`, `set_axis_mode`, `step_queue` reset, `TickCaches`/`last_motors`/
-  `StepMotorState`** are stepper-specific — kept concrete / `#[cfg]`-gated, never in
-  a shared trait.
+- **`seed_position`, `set_axis_mode`, `last_motors`/`StepMotorState`** are
+  stepper-specific — kept concrete / `#[cfg]`-gated, never in a shared trait.
 
 ## Kconfig dispatch-module selection
 
@@ -128,8 +127,8 @@ Verified runnable on macOS (`thumbv7em-none-eabi` installed, `/usr/bin/objdump`
 Apple LLVM 21 is Thumb-capable). Baseline captured to `/tmp/mnu-disasm/before_*`.
 
 ```
-# build (H7); STORAGE/RING/RATE env are mandatory on bare-metal targets
-cd rust && RUNTIME_STORAGE_SIZE=122880 RUNTIME_PIECE_RING_SIZE=63488 \
+# build (H7); STORAGE/RATE env are mandatory on bare-metal targets
+cd rust && RUNTIME_STORAGE_SIZE=32768 \
   RUNTIME_SAMPLE_RATE_HZ=40000 cargo build -p c-api \
   --no-default-features --features mcu-h7,header-nurbs,header-runtime \
   --target thumbv7em-none-eabi --release

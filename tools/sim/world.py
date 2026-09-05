@@ -27,9 +27,130 @@ VTIME_SHM_SIZE = 256
 VTIME_STRUCT_FMT = "<QIIII"
 
 READY_POLL_S = 0.05
+PRINT_POLL_S = 0.2
 CLOCK_SYNC_BOOT_TIMEOUT = 120.0
 
 _vtime_shm_counter = itertools.count()
+
+_AUTO_ENDSTOP_LINES = {
+    "x": 200,
+    "a": 200,
+    "y": 201,
+    "b": 201,
+    "z": 202,
+    "e": 210,
+}
+
+
+def _config_sections(config_text: str) -> dict[str, dict[str, str]]:
+    sections: dict[str, dict[str, str]] = {}
+    current: Optional[dict[str, str]] = None
+    for raw_line in config_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current = sections.setdefault(line[1:-1].strip(), {})
+            continue
+        if current is None or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        current[key.strip()] = value.strip()
+    return sections
+
+
+def _parse_gpio_pin(pin: str) -> tuple[str, int, int]:
+    normalized = pin.lstrip("!^~")
+    mcu, separator, gpio = normalized.partition(":")
+    if not separator:
+        mcu, gpio = "", mcu
+    chip, separator, line = gpio.partition("/")
+    if (
+        not separator
+        or not chip.startswith("gpiochip")
+        or not line.startswith("gpio")
+    ):
+        raise SimError(f"unsupported simulated motor pin {pin!r}")
+    return mcu, int(chip[8:]), int(line[4:])
+
+
+def configured_step_tracks(
+    config_text: str,
+) -> dict[str, list[tuple[int, int, int, int, int, int, int, int]]]:
+    sections = _config_sections(config_text)
+    motor_axes: dict[str, str] = {}
+    kinematics = sections.get("kinematics", {})
+    for axis in ("x", "a", "y", "b", "z"):
+        for motor in kinematics.get(f"{axis}_motors", "").split(","):
+            if motor.strip():
+                motor_axes[motor.strip()] = axis
+    for section_name, values in sections.items():
+        if not section_name.startswith("axis "):
+            continue
+        axis = section_name[5:].strip()
+        for motor in values.get("motors", "").split(","):
+            if motor.strip():
+                motor_axes[motor.strip()] = axis
+
+    tmc_motors = {
+        section_name.split(None, 1)[1].strip()
+        for section_name in sections
+        if section_name.split(None, 1)[0].startswith("tmc")
+        and len(section_name.split(None, 1)) == 2
+    }
+    tracks: dict[str, list[tuple[int, int, int, int, int, int, int, int]]] = {}
+    wall_owners: set[tuple[str, str]] = set()
+    for section_name, values in sections.items():
+        if (
+            not section_name.startswith("motor ")
+            or values.get("drive") != "stepper"
+        ):
+            continue
+        motor = section_name[6:].strip()
+        axis = motor_axes.get(motor)
+        if axis is None:
+            axis = next(
+                (
+                    candidate
+                    for candidate in _AUTO_ENDSTOP_LINES
+                    if motor.startswith(candidate)
+                ),
+                "",
+            )
+        if axis not in _AUTO_ENDSTOP_LINES:
+            continue
+        step_mcu, step_chip, step_line = _parse_gpio_pin(values["step_pin"])
+        dir_mcu, dir_chip, dir_line = _parse_gpio_pin(values["dir_pin"])
+        dir_invert = values["dir_pin"].lstrip().startswith("!")
+        pulse_duration = float(values.get("step_pulse_duration", 1e-7))
+        both_edge = motor in tmc_motors and pulse_duration <= 5e-7
+        if step_mcu != dir_mcu:
+            raise SimError(
+                f"motor {motor!r} step_pin and dir_pin use different MCUs"
+            )
+        mcu_name = step_mcu or "h7"
+        wall_key = (mcu_name, axis)
+        if wall_key in wall_owners:
+            endstop_lines = [210]
+        else:
+            wall_owners.add(wall_key)
+            endstop_lines = (
+                [202, 203] if axis == "z" else [_AUTO_ENDSTOP_LINES[axis]]
+            )
+        for endstop_line in endstop_lines:
+            tracks.setdefault(mcu_name, []).append(
+                (
+                    step_chip,
+                    step_line,
+                    dir_chip,
+                    dir_line,
+                    int(dir_invert),
+                    0,
+                    endstop_line,
+                    int(both_edge),
+                )
+            )
+    return tracks
 
 
 class SimError(Exception):
@@ -128,6 +249,28 @@ class SimControl:
             )
         return int(response.split()[0].split("=", 1)[1])
 
+    def gpio_output(self, chip: int, line: int) -> int:
+        response = self.send(f"get_gpio_output chip={chip} line={line}")
+        if not response.startswith("value="):
+            raise SimError(
+                f"get_gpio_output chip={chip} line={line}: {response!r}"
+            )
+        return int(response.split()[0].split("=", 1)[1])
+
+    def step_position(self, line: int) -> dict[str, int]:
+        response = self.send(f"get_steps line={line}")
+        values = dict(item.split("=", 1) for item in response.split())
+        if values.keys() != {"steps", "min", "max", "vt"}:
+            raise SimError(f"unexpected get_steps reply: {response!r}")
+        return {name: int(value) for name, value in values.items()}
+
+    def set_endstop_wall(self, line: int, steps: int) -> None:
+        response = self.send(f"set_endstop_wall line={line} steps={steps}")
+        if response != "ok":
+            raise SimError(
+                f"set_endstop_wall line={line} steps={steps}: {response!r}"
+            )
+
     def enable_step_pin_emit(self) -> None:
         """Arm the runtime's physical per-stepper step/dir pin output. Off
         by default: the ioctl-per-edge traffic distorts sim timing."""
@@ -160,9 +303,17 @@ class EndstopPulser:
     """Cycles endstop GPIO lines low/high so a homing move always sees a
     trigger within ~1s and a clear retract window, mimicking a switch."""
 
-    def __init__(self, control: SimControl, endstop_pins: list):
+    def __init__(
+        self,
+        control: SimControl,
+        endstop_pins: list,
+        initial_delay: float = 0.5,
+        low_duration: float = 1.0,
+    ):
         self.control = control
         self.endstop_pins = endstop_pins
+        self.initial_delay = initial_delay
+        self.low_duration = low_duration
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -180,11 +331,11 @@ class EndstopPulser:
 
     def _run(self):
         # The MCU must be fully up before GPIO commands stick.
-        time.sleep(0.5)
+        time.sleep(self.initial_delay)
         while not self._stop.is_set():
             for chip, line in self.endstop_pins:
                 self.control.set_gpio_input(chip, line, 0)
-            if self._stop.wait(1.0):
+            if self._stop.wait(self.low_duration):
                 break
             for chip, line in self.endstop_pins:
                 self.control.set_gpio_input(chip, line, 1)
@@ -241,6 +392,10 @@ class SimWorld:
         self.cartographer = None
         self._log_offset = 0
         self._started = False
+        self._step_tracks: dict[
+            str, list[tuple[int, int, int, int, int, int, int, int]]
+        ] = {}
+        self._z_step_lines: dict[str, int] = {}
 
     # ------------------------------------------------------------- boot
 
@@ -255,6 +410,25 @@ class SimWorld:
         self._started = True
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.gcode_dir.mkdir(parents=True, exist_ok=True)
+        aliases = configured_step_tracks(config_text)
+        config_sections = _config_sections(config_text)
+        for alias, tracks in aliases.items():
+            if alias == "h7":
+                process_name = "h7"
+            else:
+                serial = config_sections.get(f"mcu {alias}", {}).get("serial")
+                if serial == self.h7_pty:
+                    process_name = "h7"
+                elif serial == self.f4_pty:
+                    process_name = "f4"
+                else:
+                    raise SimError(f"unknown MCU prefix {alias!r} on motor pin")
+            self._step_tracks.setdefault(process_name, []).extend(tracks)
+            for step_chip, step_line, _, _, _, _, endstop_line, _ in tracks:
+                if endstop_line == 202:
+                    if step_chip != 0:
+                        raise SimError("probe emulators require Z on gpiochip0")
+                    self._z_step_lines.setdefault(process_name, step_line)
 
         shim_so, vtime_so = self._ensure_shims_built()
         vtime_create(self.vtime_shm_name)
@@ -368,8 +542,11 @@ class SimWorld:
             "VTIME_SPEED", str(self.vtime_speed)
         )
         env["MCU_SIM_SOCK_DIR"] = str(sock_dir)
-        if self.sc_mcu and name == "f4":
-            env["MCU_SIM_GPIO_STEP_TRACKING"] = "1"
+        env["MCU_SIM_GPIO_STEP_TRACKING"] = "1"
+        tracks = self._step_tracks.get(name, [])
+        env["MCU_SIM_STEP_TRACKS"] = ";".join(
+            ",".join(str(value) for value in track) for track in tracks
+        )
         if self.verbose:
             env["MCU_SIM_SHIM_VERBOSE"] = "1"
             env["VTIME_DEBUG"] = "1"
@@ -443,10 +620,12 @@ class SimWorld:
         from tools.sim.emulators.beacon_mcu import BeaconMcuStub
 
         z_mcu = self.mcus[1] if self.dual_mcu else self.mcus[0]
+        z_step_line = self._z_step_lines.get(z_mcu.name, 15)
         self.beacon = BeaconMcuStub(
             self.beacon_pty,
             log_path=str(self.log_dir / "beacon_traffic.log"),
             step_sock_path=z_mcu.sim_control,
+            z_step_line=z_step_line,
             vtime_shm_name=self.vtime_shm_name,
         )
         self.beacon.start_sample_stream(z_target_mm=10.0, rate_hz=200)
@@ -455,10 +634,12 @@ class SimWorld:
         from tools.sim.emulators.cartographer_mcu import CartographerMcuStub
 
         z_mcu = self.mcus[1] if self.dual_mcu else self.mcus[0]
+        z_step_line = self._z_step_lines.get(z_mcu.name, 15)
         self.cartographer = CartographerMcuStub(
             self.cartographer_pty,
             log_path=str(self.log_dir / "cartographer_traffic.log"),
             step_sock_path=z_mcu.sim_control,
+            z_step_line=z_step_line,
             vtime_shm_name=self.vtime_shm_name,
         )
         self.cartographer.start_sample_stream(z_target_mm=10.0, rate_hz=200)
@@ -595,13 +776,29 @@ class SimWorld:
 
     def wait_print_done(self, timeout: float = 600.0) -> None:
         deadline = time.monotonic() + timeout
+        log_offset = (
+            self.klippy_log.stat().st_size if self.klippy_log.exists() else 0
+        )
+        log_remainder = ""
         while time.monotonic() < deadline:
             if self.klippy_proc.poll() is not None:
                 raise SimError("klippy exited during print")
-            shutdown_line = self.shutdown_line()
-            if shutdown_line:
-                raise SimError(f"printer shutdown: {shutdown_line}")
-            ps = self.status().get("print_stats", {})
+            if self.klippy_log.exists():
+                with self.klippy_log.open("rb") as log:
+                    log.seek(log_offset)
+                    appended = log.read()
+                    log_offset = log.tell()
+                text = log_remainder + appended.decode(errors="replace")
+                lines = text.splitlines(keepends=True)
+                log_remainder = (
+                    lines.pop()
+                    if lines and not lines[-1].endswith(("\n", "\r"))
+                    else ""
+                )
+                for line in lines:
+                    if "shutdown:" in line.lower():
+                        raise SimError(f"printer shutdown: {line.strip()}")
+            ps = self.status({"print_stats": None}).get("print_stats", {})
             state = ps.get("state", "")
             if state == "complete":
                 return
@@ -609,7 +806,7 @@ class SimWorld:
                 raise SimError(f"print error: {ps.get('message', '')}")
             if state == "cancelled":
                 raise SimError("print cancelled")
-            time.sleep(READY_POLL_S)
+            time.sleep(PRINT_POLL_S)
         raise SimError(f"print did not finish within {timeout}s")
 
     def print_file(
@@ -623,7 +820,7 @@ class SimWorld:
             shutil.copy2(gcode_path, dest)
         self.gcode_ok(f"SDCARD_PRINT_FILE FILENAME={gcode_path.name}")
         self.wait_print_done(timeout=timeout)
-        ps = self.status().get("print_stats", {})
+        ps = self.status({"print_stats": None}).get("print_stats", {})
         return ps.get("total_duration") or ps.get("print_duration") or 0.0
 
     # -------------------------------------------------------- inspect

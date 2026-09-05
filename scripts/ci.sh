@@ -80,6 +80,21 @@ job_rust_test() {
     run_quiet host_cargo test --workspace --doc
 }
 
+# Every proptest suite (tests/*fuzz*.rs, *proptest*.rs, property_*.rs) at a
+# case count far above the per-file default, with a fresh random seed per
+# run. rust-test already runs the same suites at their defaults; this gate is
+# the one that keeps exploring. Suites that run the whole streaming pipeline
+# per case cost ~20 ms each, so they take a 64th of the count.
+job_rust_fuzz() {
+    cd "$RUST"
+    local cases="${PROPTEST_CASES:-20000}"
+    local pipeline='binary(seam_schedule_fuzz) | binary(planner_fuzz)'
+    PROPTEST_CASES="$cases" host_cargo nextest run --workspace --profile ci \
+        -E "(binary(/fuzz|proptest|^property_/) | test(/ripple_fuzz::/)) - ($pipeline)" || return 1
+    PROPTEST_CASES="$((cases / 64))" host_cargo nextest run --workspace --profile ci \
+        -E "$pipeline"
+}
+
 job_rust_clippy() { cd "$RUST" && cargo clippy --workspace --all-targets -- -D warnings; }
 job_rust_fmt()    { cd "$RUST" && cargo fmt --all -- --check; }
 
@@ -92,7 +107,7 @@ job_rust_loom() {
         --test loom_force_idle
 }
 
-MCU_ENV=(RUNTIME_STORAGE_SIZE=122880 RUNTIME_PIECE_RING_SIZE=63488 RUNTIME_SAMPLE_RATE_HZ=10000)
+MCU_ENV=(RUNTIME_STORAGE_SIZE=32768)
 
 job_rust_mcu_h7() {
     cd "$RUST"
@@ -124,9 +139,7 @@ job_rust_mcu_g0() {
 job_rust_mcu_f1() {
     cd "$RUST"
     env CARGO_TARGET_DIR=target-f1 \
-        RUNTIME_STORAGE_SIZE=16384 \
-        RUNTIME_PIECE_RING_SIZE=4096 \
-        RUNTIME_SAMPLE_RATE_HZ=2000 \
+        RUNTIME_STORAGE_SIZE=10240 \
         cargo build -p c-api --no-default-features \
         --features mcu-f1,header-runtime,motion-module-stepper \
         --target thumbv7m-none-eabi --release
@@ -262,6 +275,16 @@ job_sim() {
 
 job_sim_e2e() { "$ROOT/tools/sim/run.sh" test "$@"; }
 
+# The producer must outrun the printer everywhere; the committed asset is the
+# dense top-layer region that exhausted the bench's 0.25 s anchor lead. The
+# 1.3x floor is deliberately loose — a healthy pipeline clears 2.5x on the
+# slowest CI runner while the underrun class lands under 1x — so a red gate
+# means "this would crash a print", not "the runner was busy".
+job_replay_budget() {
+    cd "$RUST" && cargo run --release -p motion-core --example gcode_replay_bench -- \
+        "$ROOT/tools/sim/gcode/voron_dense_top_layers.gcode" --min-worst-x 1.3
+}
+
 job_docs() { cd "$ROOT/docs/_kalico" && uv run mkdocs build --strict; }
 
 job_snapshot() {
@@ -329,6 +352,8 @@ run_all() {
         run_check "py-typecheck"    job_py_typecheck
         run_check "sim"             job_sim
         run_check "snapshot"        job_snapshot
+        run_check "replay-budget"   job_replay_budget
+        run_check "rust-fuzz"       job_rust_fuzz
     fi
     echo "────────────────────────────────────────"
     printf '  %s   %s\n' "$(green "$PASS pass")" "$([ "$FAIL" -gt 0 ] && red "$FAIL fail" || echo "0 fail")"
@@ -371,6 +396,7 @@ case "$name" in
     rust-host)        job=(job_rust_host) ;;
     rust-build)       job=(job_rust_build) ;;
     rust-test)        job=(job_rust_test) ;;
+    rust-fuzz)        job=(job_rust_fuzz) ;;
     rust-clippy)      job=(job_rust_clippy) ;;
     rust-fmt)         job=(job_rust_fmt) ;;
     rust-loom)        job=(job_rust_loom) ;;
@@ -392,6 +418,7 @@ case "$name" in
     docs)             job=(job_docs) ;;
     sim)              job=(job_sim) ;;
     sim-e2e)          job=(job_sim_e2e ${@+"$@"}) ;;
+    replay-budget)    job=(job_replay_budget) ;;
     snapshot)         job=(job_snapshot) ;;
     *) echo "unknown job: $name" >&2; usage >&2; exit 2 ;;
 esac

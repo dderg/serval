@@ -9,6 +9,14 @@ pub const DEFAULT_LEAD_SECS: f64 = 0.25;
 /// hitting it mid-motion means continuous motion is already lost — fatal.
 pub const LOW_MARGIN_WARN_SECS: f64 = 0.020;
 
+/// A stream resuming across a drain-to-rest keeps its standing anchor only
+/// while the decayed margin still clears this floor; below it the segment
+/// re-anchors forward, which loses nothing at rest. Sized for the measured
+/// worst case around endstop reconciles, where the mcu-bound USB link
+/// backs up for 50-100 ms and a post-probe continuation sent with the 20 ms
+/// mid-motion floor arrives behind its own start clock ("Timer too close").
+pub const PARKED_REANCHOR_FLOOR_SECS: f64 = 0.150;
+
 /// How a segment relates to the anchored stream it lands in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamEpoch {
@@ -113,7 +121,12 @@ impl Anchor {
         }
         let margin_s = t0 + seg_t_start - host_now;
         let hole_s = seg_t_start - self.last_t_end;
-        if margin_s >= LOW_MARGIN_WARN_SECS {
+        let floor_s = if self.parked {
+            PARKED_REANCHOR_FLOOR_SECS
+        } else {
+            LOW_MARGIN_WARN_SECS
+        };
+        if margin_s >= floor_s {
             if hole_s <= CONTIGUITY_EPS {
                 AnchorClass::Continuation { margin_s }
             } else if self.parked {

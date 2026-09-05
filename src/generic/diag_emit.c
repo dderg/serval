@@ -36,16 +36,25 @@ kalico_diag_emit_prior_crash(void)
 #endif
     uint8_t had_fault = (fault_rec.magic == FAULT_MAGIC) ? 1u : 0u;
     // klippy's connect-reset overwrites the RCC cause with SFTRST, so a real
-    // foreground freeze survives only via prior_run_froze (in BKPSRAM); do not
+    // foreground freeze survives only via this_run_froze (in BKPSRAM); do not
     // drop it from this condition.
     // A "Timer too close" run must also replay the deep forensics (ring,
     // block_source, tim5_ia) — it is a clean shutdown, not an iwdg/fault.
-    uint8_t abnormal = iwdg || had_fault || prior_run_froze
+    uint8_t abnormal = iwdg || had_fault || prior_snap.this_run_froze
                        || prior_snap.ttc_count != 0;
 
     event_log_emit(abnormal ? EVENT_LOG_LEVEL_WARN : EVENT_LOG_LEVEL_DEBUG,
                     EVENT_LOG_SUBSYS_RUNTIME, EVENT_LOG_EVENT_RUNTIME_MCU_RESET,
                     0, reset_cause_snapshot, live_snap.iwdg_reset_count);
+    event_log_emit(prior_state.runs_skipped ? EVENT_LOG_LEVEL_WARN
+                                            : EVENT_LOG_LEVEL_DEBUG,
+                    EVENT_LOG_SUBSYS_RUNTIME, EVENT_LOG_EVENT_RUNTIME_PRIOR_RUN,
+                    0, prior_diag.boot_count, prior_state.runs_skipped);
+    if (prior_snap.magic == LIVE_MAGIC) {
+        event_log_emit(abnormal ? EVENT_LOG_LEVEL_WARN : EVENT_LOG_LEVEL_DEBUG,
+                        EVENT_LOG_SUBSYS_RUNTIME, EVENT_LOG_EVENT_RUNTIME_PRIOR_LIVE,
+                        0, prior_snap.engine_status, prior_snap.live);
+    }
 
     if (had_fault) {
         event_log_emit(EVENT_LOG_LEVEL_ERROR, EVENT_LOG_SUBSYS_RUNTIME,
@@ -118,8 +127,8 @@ kalico_diag_emit_prior_crash(void)
 
         event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
                         EVENT_LOG_EVENT_RUNTIME_LAST_DISPATCH, 0,
-                        saved_prior_last_dispatch_func,
-                        saved_prior_last_dispatch_addr);
+                        prior_snap.last_dispatch_func,
+                        prior_snap.last_dispatch_addr);
 
         if (prior_diag_present) {
             event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
@@ -127,19 +136,19 @@ kalico_diag_emit_prior_crash(void)
                             prior_diag.rt_isr_phase, prior_diag.ring_overflow);
             event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
                             EVENT_LOG_EVENT_RUNTIME_BLOCK_SOURCE, 0,
-                            prior_diag.usb_burst_max_cyc,
-                            prior_diag.stepout_burst_max_cyc);
+                            prior_diag.usb_burst_max_cyc, 0);
             event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
                             EVENT_LOG_EVENT_RUNTIME_TIM5_IA, 0,
                             prior_diag.tim5_ia_min_cyc,
                             prior_diag.tim5_ia_max_cyc);
-            {
-                uint32_t packed = (prior_diag.stepout_late_count << 16)
-                                  | (prior_diag.stepout_late_max_drained & 0xFFFFu);
-                event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
-                                EVENT_LOG_EVENT_RUNTIME_STEPOUT_LATE, 0,
-                                prior_diag.stepout_late_max_cyc, packed);
-            }
+            event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
+                            EVENT_LOG_EVENT_RUNTIME_PRIOR_USB_OUT, 0,
+                            prior_diag.out_unarmed_worst_cyc,
+                            prior_diag.usb_out_max_gap_ticks);
+            event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
+                            EVENT_LOG_EVENT_RUNTIME_PRIOR_TASK_GAPS, 0,
+                            prior_diag.runtime_drain_max_gap_ticks,
+                            prior_diag.usb_in_max_gap_ticks);
 
             uint32_t head = prior_diag.ring_head & DIAG_RING_MASK;
             for (uint32_t i = 0; i < DIAG_RING_LEN; i++) {
@@ -152,6 +161,8 @@ kalico_diag_emit_prior_crash(void)
             }
         }
     }
+    prior_state.reported = 1;
+    diag_cache_clean();
 }
 
 void
@@ -182,26 +193,10 @@ kalico_diag_emit_live(void)
                     diag.rt_isr_phase, ring_overflow);
     event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
                     EVENT_LOG_EVENT_RUNTIME_BLOCK_SOURCE, 0,
-                    diag.usb_burst_max_cyc, diag.stepout_burst_max_cyc);
+                    diag.usb_burst_max_cyc, 0);
     event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
                     EVENT_LOG_EVENT_RUNTIME_TIM5_IA, 0,
                     diag.tim5_ia_min_cyc, diag.tim5_ia_max_cyc);
-#if CONFIG_MOTION_RUNTIME
-    {
-        extern void kalico_stepout_late_get(uint32_t *out_max_late,
-                                            uint32_t *out_late_count,
-                                            uint32_t *out_max_drained);
-        uint32_t late_max = 0, late_count = 0, late_drained = 0;
-        kalico_stepout_late_get(&late_max, &late_count, &late_drained);
-        diag.stepout_late_max_cyc    = late_max;
-        diag.stepout_late_count      = late_count;
-        diag.stepout_late_max_drained = late_drained;
-        uint32_t packed = (late_count << 16) | (late_drained & 0xFFFFu);
-        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
-                        EVENT_LOG_EVENT_RUNTIME_STEPOUT_LATE, 0,
-                        late_max, packed);
-    }
-#endif
 
     if (live_snap.worst_fg_stall_ticks) {
         event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,

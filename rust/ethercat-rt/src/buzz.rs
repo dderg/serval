@@ -1,45 +1,34 @@
-use runtime::buzz::Buzz;
-use runtime::buzz_gen::{sample_rel, ToneParams};
+use trajectory::BuzzProfile;
 
 pub const ERR_BUZZ_NOT_ENABLED: i32 = -828;
 pub const ERR_BUZZ_STREAMING: i32 = -829;
 pub const ERR_BUZZ_BUSY: i32 = -830;
+pub const ERR_BUZZ_AXIS_MASK: i32 = -2;
+pub const ERR_BUZZ_FREQ_ZERO: i32 = -3;
+pub const ERR_BUZZ_PROFILE: i32 = -4;
 
 pub const MAX_BUZZ_SLOTS: usize = 8;
 
-#[allow(missing_debug_implementations)]
+#[derive(Debug)]
 pub struct BuzzOsc {
-    params: ToneParams,
+    profile: Option<BuzzProfile>,
     slot_mask: u8,
     sign_mask: u8,
     base_counts: [i32; MAX_BUZZ_SLOTS],
     anchor_ns: u64,
     anchored: bool,
-    active: bool,
 }
 
 impl BuzzOsc {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            params: ToneParams {
-                omega: 0.0,
-                mu: 0.0,
-                amplitude_mm: 0.0,
-                sign: 1.0,
-                base_mm: 0.0,
-                microstep_distance: 1.0,
-                anchor_cycle: 0,
-                cycles_per_second: 1.0,
-                total_seconds: 0.0,
-                ramp_seconds: 0.0,
-            },
+            profile: None,
             slot_mask: 0,
             sign_mask: 0,
             base_counts: [0; MAX_BUZZ_SLOTS],
             anchor_ns: 0,
             anchored: false,
-            active: false,
         }
     }
 
@@ -56,43 +45,52 @@ impl BuzzOsc {
         ramp_ms: u32,
         base_counts: [i32; MAX_BUZZ_SLOTS],
     ) -> i32 {
-        self.active = false;
-        let mut buzz = Buzz::new();
-        let rc = buzz.arm(
-            num_slots,
-            slot_mask,
-            sign_mask,
-            freq_start_millihz,
-            freq_end_millihz,
-            amplitude_nm,
-            duration_ms,
-            ramp_ms,
-        );
-        if rc != 0 {
-            return rc;
+        self.profile = None;
+        let disarm = amplitude_nm == 0 || duration_ms == 0 || slot_mask == 0;
+        if disarm {
+            return if slot_mask == 0 && amplitude_nm != 0 && duration_ms != 0 {
+                -1
+            } else {
+                0
+            };
         }
-        let excitations = buzz.take_excitations();
-        let Some(first) = excitations.first() else {
-            return -1;
+        let slot_bits = if num_slots >= 8 {
+            u8::MAX
+        } else {
+            (1u8 << num_slots) - 1
         };
-        self.params = (*first).into_params(0.0, 1.0, 1.0, 0);
-        self.params.sign = 1.0;
+        if slot_mask & !slot_bits != 0 {
+            return ERR_BUZZ_AXIS_MASK;
+        }
+        if freq_start_millihz == 0 || freq_end_millihz == 0 {
+            return ERR_BUZZ_FREQ_ZERO;
+        }
+        let Ok(profile) = BuzzProfile::try_new(
+            f64::from(amplitude_nm) * 1.0e-6,
+            f64::from(freq_start_millihz) * 1.0e-3,
+            f64::from(freq_end_millihz) * 1.0e-3,
+            f64::from(duration_ms) * 1.0e-3,
+            f64::from(ramp_ms) * 1.0e-3,
+            0.0,
+        ) else {
+            return ERR_BUZZ_PROFILE;
+        };
+        self.profile = Some(profile);
         self.slot_mask = slot_mask;
         self.sign_mask = sign_mask;
         self.base_counts = base_counts;
         self.anchored = false;
-        self.active = true;
         0
     }
 
     #[must_use]
     pub fn active(&self) -> bool {
-        self.active
+        self.profile.is_some()
     }
 
     #[must_use]
     pub fn drives_slot(&self, slot: usize) -> bool {
-        self.active && slot < MAX_BUZZ_SLOTS && self.slot_mask & (1 << slot) != 0
+        self.active() && slot < MAX_BUZZ_SLOTS && self.slot_mask & (1 << slot) != 0
     }
 
     #[must_use]
@@ -110,24 +108,27 @@ impl BuzzOsc {
     }
 
     pub fn clear(&mut self) {
-        self.active = false;
+        self.profile = None;
     }
 
     #[allow(clippy::cast_possible_truncation)]
     pub fn eval(&mut self, now_ns: u64) -> Option<(f32, f32, f32)> {
-        if !self.active {
-            return None;
-        }
+        let duration = self.profile.as_ref()?.duration();
         if !self.anchored {
             self.anchor_ns = now_ns;
             self.anchored = true;
         }
         let t = now_ns.saturating_sub(self.anchor_ns) as f64 * 1.0e-9;
-        if t as f32 >= self.params.total_seconds {
-            self.active = false;
+        if t >= duration {
+            self.profile = None;
             return None;
         }
-        Some(sample_rel(&self.params, t as f32))
+        let sample = self.profile.as_ref()?.eval(t);
+        Some((
+            sample.position as f32,
+            sample.velocity as f32,
+            sample.acceleration as f32,
+        ))
     }
 }
 

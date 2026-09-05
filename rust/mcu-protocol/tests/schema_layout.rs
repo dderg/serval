@@ -11,10 +11,10 @@
 
 use mcu_protocol::Encode;
 use mcu_protocol::messages::{
-    AxisDiag, AxisPieces, CaptureDrive, ClaimHandshakeReply, ConfigureAxes, DriveLimitEntry,
-    DynamicsPair, McuLog, MotorSample, MotorStateResponse, PushPieces, PushPiecesResponse,
-    SdoReadResponse, SdoWrite, SetDriveLimits, SetDynamicsModel, SetStrainComp, SlaveState,
-    SlaveStatus, StartCapture, StatusHeartbeat,
+    CaptureDrive, ClaimHandshakeReply, ConfigureAxes, DriveLimitEntry, DynamicsPair, LaneDepth,
+    LaneRun, McuLog, MotorSample, MotorStateResponse, PushSampleRuns, PushSampleRunsResponse,
+    SdoReadResponse, SdoWrite, SetDriveLimits, SetDynamicsModel, SetStrainComp, SetpointSample,
+    SlaveState, SlaveStatus, StartCapture, StatusHeartbeat,
 };
 
 include!("../schema_def.rs");
@@ -25,6 +25,7 @@ enum Scalar {
     U16,
     U32,
     U64,
+    I16,
     I32,
     I64,
     F32,
@@ -34,7 +35,7 @@ impl Scalar {
     fn size(self) -> usize {
         match self {
             Scalar::U8 => 1,
-            Scalar::U16 => 2,
+            Scalar::U16 | Scalar::I16 => 2,
             Scalar::U32 | Scalar::I32 | Scalar::F32 => 4,
             Scalar::U64 | Scalar::I64 => 8,
         }
@@ -69,6 +70,7 @@ fn parse_scalar(s: &str) -> Scalar {
         "u16" => Scalar::U16,
         "u32" => Scalar::U32,
         "u64" => Scalar::U64,
+        "i16" => Scalar::I16,
         "i32" => Scalar::I32,
         "i64" => Scalar::I64,
         "f32" => Scalar::F32,
@@ -275,18 +277,12 @@ fn reference_decode(name: &str, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn one_piece(fill: u8, coeff_count: u8) -> Vec<u8> {
-    let mut v = vec![fill; 16];
-    v[13] = coeff_count;
-    v.extend(std::iter::repeat_n(fill, 4 * coeff_count as usize));
-    v
-}
-
 fn sample_heartbeat() -> StatusHeartbeat {
     StatusHeartbeat {
         engine_state: 1,
         fault_code: 2,
         retired_counts: vec![7, 8, 9],
+        playback_clocks: vec![10, 11, 12],
         ff_saturation_count: 5,
     }
 }
@@ -301,46 +297,52 @@ fn every_schema_field_type_parses() {
     assert!(!canonicalize_schema(SCHEMA_MESSAGES).is_empty());
 }
 
-#[test]
-fn push_pieces_matches_schema_layout() {
-    let msg = PushPieces {
-        axes: vec![
-            AxisPieces {
-                axis_idx: 0,
-                piece_count: 2,
-                start_slot: 3,
-                new_head: 9,
-                pieces_bytes: [one_piece(0x11, 4), one_piece(0x22, 8)].concat(),
-            },
-            AxisPieces {
-                axis_idx: 1,
-                piece_count: 1,
-                start_slot: 0,
-                new_head: 5,
-                pieces_bytes: one_piece(0x33, 1),
-            },
-        ],
-    };
-    reference_decode("PushPieces", &msg.encoded_to_vec()).unwrap();
+fn sample_lane(axis_idx: u8, sample_count: u16) -> LaneRun {
+    LaneRun {
+        axis_idx,
+        slot_idx: axis_idx,
+        flags: 1,
+        origin_mm_q16: -65_536,
+        start_index: 4096 + u64::from(axis_idx),
+        interval_ticks: 1000,
+        samples: (0..sample_count)
+            .map(|i| SetpointSample {
+                pos_counts: i32::from(i) * 7,
+                vel_ff: -i32::from(i),
+                torque_ff: i as i16,
+                acc_mm_s2: f32::from(i) * 0.5,
+            })
+            .collect(),
+    }
 }
 
 #[test]
-fn push_pieces_response_matches_schema_layout() {
-    let msg = PushPiecesResponse {
-        result: -309,
+fn push_sample_runs_matches_schema_layout() {
+    let msg = PushSampleRuns {
+        lanes: vec![sample_lane(0, 3), sample_lane(1, 1)],
+    };
+    reference_decode("PushSampleRuns", &msg.encoded_to_vec()).unwrap();
+}
+
+#[test]
+fn push_sample_runs_response_matches_schema_layout() {
+    let msg = PushSampleRunsResponse {
+        result: -315,
         arrival_clock: 0x0102_0304_0506_0708,
-        axes: vec![
-            AxisDiag {
+        grid_index: 987_654,
+        grid_clock: 0x0A0B_0C0D_0E0F_1011,
+        lanes: vec![
+            LaneDepth {
                 axis_idx: 0,
-                front_start_time: 111,
+                free_cycles: 128,
             },
-            AxisDiag {
+            LaneDepth {
                 axis_idx: 1,
-                front_start_time: 222,
+                free_cycles: 64,
             },
         ],
     };
-    reference_decode("PushPiecesResponse", &msg.encoded_to_vec()).unwrap();
+    reference_decode("PushSampleRunsResponse", &msg.encoded_to_vec()).unwrap();
 }
 
 #[test]
@@ -518,11 +520,4 @@ fn codec_bytes_missing_from_the_schema_layout_are_caught() {
     bytes.pop();
     let err = reference_decode("StatusHeartbeat", &bytes).unwrap_err();
     assert!(err.contains("EOF"), "got: {err}");
-}
-
-#[test]
-fn schema_array_bounds_are_enforced() {
-    let msg = PushPieces::single(0, 1, 0, 0, one_piece(0, 0));
-    let err = reference_decode("PushPieces", &msg.encoded_to_vec()).unwrap_err();
-    assert!(err.contains("outside"), "got: {err}");
 }

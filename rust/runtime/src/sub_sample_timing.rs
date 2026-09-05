@@ -1,51 +1,6 @@
-// Sub-sample step times via secant-slope linear interpolation.
-//
-// Within one ISR sample period the position trajectory is approximated as a
-// straight line between the previous-sample's position `P_start` and the
-// current-sample's position `P_end`. The k-th step's cycle-counter time is:
-//
-//     t_k = (step_pos_k - P_start) · sample_period / (P_end - P_start)
-//
-// When the net displacement falls below `displacement_threshold` the inversion
-// is numerically unstable; falls back to uniform spacing across the sample
-// window (`t_k = sample_period · (k+1) / (n+1)`).
-//
-// All cycle-counter arithmetic uses `wrapping_add` so the 32-bit MCU
-// cycle counter wrap is handled by construction.
-
-use heapless::Vec;
-
-/// Storage ceiling on the per-sample step count: the inline capacity of the
-/// timestamp vectors below (4 bytes per slot on the ISR stack). Derived in
-/// build.rs as `ceil(500 kHz / sample_rate)` clamped to [16, 256], so slower
-/// ticks get proportionally larger bursts. The enforced limit is per-axis
-/// (`AxisState::max_steps_per_sample`), computed from the motor's real pulse
-/// timing and always ≤ this capacity.
-pub const MAX_STEPS_PER_SAMPLE: usize = crate::sizing::MAX_STEPS_PER_SAMPLE;
-
-/// Per-axis enforced limit when the motor's pulse timing is unknown: the
-/// conservative single-edge budget (16 steps / 100 µs sample = 160 k steps/s).
-pub const DEFAULT_MAX_STEPS_PER_SAMPLE: u32 = 16;
-
-#[derive(Clone, Copy, Debug)]
-pub struct StepTimeInputs {
-    pub p_start: f32,
-    pub p_end: f32,
-    pub step_delta: i32,
-    pub microstep_distance: f32,
-    pub sample_period_sec: f32,
-    pub sample_start_cycles: u32,
-    pub cycles_per_second: f32,
-    pub displacement_threshold: f32,
-}
-
-#[derive(Debug)]
-pub enum StepTimingResult {
-    SecantSlope(Vec<u32, MAX_STEPS_PER_SAMPLE>),
-    Uniform(Vec<u32, MAX_STEPS_PER_SAMPLE>),
-    NoSteps,
-}
-
+/// Microsteps to emit for `step_phase` mm of accumulated, not-yet-emitted
+/// displacement, with half-quantum hysteresis so a phase sitting exactly on a
+/// boundary never rounds past it.
 #[must_use]
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 pub fn quantize_step_delta(step_phase: f32, microstep_distance: f32) -> i32 {
@@ -57,61 +12,4 @@ pub fn quantize_step_delta(step_phase: f32, microstep_distance: f32) -> i32 {
     } else {
         target
     }
-}
-
-#[must_use]
-pub fn compute_step_times(inp: &StepTimeInputs) -> StepTimingResult {
-    let signed_steps = inp.step_delta;
-    if signed_steps == 0 {
-        return StepTimingResult::NoSteps;
-    }
-    let sign: i32 = if signed_steps > 0 { 1 } else { -1 };
-    let n_steps: usize = signed_steps.unsigned_abs() as usize;
-
-    let displacement = inp.p_end - inp.p_start;
-
-    // f32 → u32: product is the cycle count for one sample window
-    // (e.g. 50 µs × 520 MHz = 26_000 cycles), always non-negative and
-    // far below u32::MAX. Sign-loss / truncation are safe here.
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    let sample_period_cycles = (inp.sample_period_sec * inp.cycles_per_second) as u32;
-
-    let mut times: Vec<u32, MAX_STEPS_PER_SAMPLE> = Vec::new();
-
-    let abs_disp = if displacement >= 0.0 {
-        displacement
-    } else {
-        -displacement
-    };
-
-    if abs_disp <= inp.displacement_threshold {
-        let n_plus_1 = (n_steps as u64) + 1;
-        for k in 0..n_steps {
-            // Integer division is intentional: computing a uniformly-spaced
-            // cycle offset; residue is sub-cycle (< 1 cycle of jitter).
-            #[allow(clippy::integer_division)]
-            let dt_cycles = u64::from(sample_period_cycles) * ((k as u64) + 1) / n_plus_1;
-            // dt_cycles ≤ sample_period_cycles by construction; u64 → u32 is lossless.
-            #[allow(clippy::cast_possible_truncation)]
-            let _ = times.push(inp.sample_start_cycles.wrapping_add(dt_cycles as u32));
-        }
-        return StepTimingResult::Uniform(times);
-    }
-
-    #[allow(clippy::cast_precision_loss)]
-    let direction = sign as f32;
-
-    for k in 0..n_steps {
-        #[allow(clippy::cast_precision_loss)]
-        let threshold_from_previous_step = (k as f32 + 0.5) * direction * inp.microstep_distance;
-        let t_local_sec =
-            (threshold_from_previous_step - inp.p_start) * inp.sample_period_sec / displacement;
-        // f32 → u32: t_local_sec ∈ [0, sample_period_sec], bounded well below u32::MAX.
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let cycle_abs = inp
-            .sample_start_cycles
-            .wrapping_add((t_local_sec * inp.cycles_per_second) as u32);
-        let _ = times.push(cycle_abs);
-    }
-    StepTimingResult::SecantSlope(times)
 }

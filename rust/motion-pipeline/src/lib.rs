@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use std::thread;
 
 use crossbeam_channel::bounded;
@@ -21,8 +23,8 @@ pub use lower_stage::{Lowerer, advance_odometer, dist3, run_lowerer};
 pub use lowering::FitTol;
 pub use shaper::Shaper;
 pub use types::{
-    BarrierAck, CONTIGUITY_EPS_MM, Control, LoweredItem, NudgePiece, PlannedItem, ShapedItem,
-    StreamConfig, StreamError, StreamInput,
+    BarrierAck, BaseItem, BaseSegment, CONTIGUITY_EPS_MM, Control, PlannedItem, StreamConfig,
+    StreamError, StreamInput, TrajectoryItem,
 };
 
 /// Inter-stage channels only smooth scheduling jitter between stage threads;
@@ -50,8 +52,8 @@ pub fn setup_stages(
     let (raw_tx, raw_rx) = bounded::<StreamInput>(RAW_CHANNEL_CAP);
     let (fitted_tx, fitted_rx) = bounded::<StreamInput>(STAGE_CHANNEL_CAP);
     let (planned_tx, planned_rx) = bounded::<PlannedItem>(STAGE_CHANNEL_CAP);
-    let (lowered_tx, lowered_rx) = bounded::<LoweredItem>(STAGE_CHANNEL_CAP);
-    let (shaped_tx, shaped_rx) = bounded::<ShapedItem>(STAGE_CHANNEL_CAP);
+    let (lowered_tx, lowered_rx) = bounded::<BaseItem>(STAGE_CHANNEL_CAP);
+    let (shaped_tx, shaped_rx) = bounded::<TrajectoryItem>(STAGE_CHANNEL_CAP);
 
     let mut corner = config.corner;
     corner.ramp_accel_budget_mm_s2 = config.max_extrude_only_accel_mm_s2;
@@ -67,17 +69,10 @@ pub fn setup_stages(
     };
     let lower_chains = axis_chains.clone();
     let lower_thread = spawn_stage("kalico-lower", move || {
-        run_lowerer(
-            planned_rx,
-            lowered_tx,
-            fit_tol,
-            lower_chains,
-            home_pos,
-            t_start,
-        );
+        run_lowerer(planned_rx, lowered_tx, lower_chains, home_pos, t_start);
     });
 
-    let shaper = Shaper::new(axis_chains);
+    let shaper = Shaper::new(axis_chains, fit_tol);
     let shaper_thread = spawn_stage("kalico-shape", move || shaper.run(lowered_rx, shaped_tx));
 
     PipelineHandle {
@@ -96,3 +91,8 @@ fn spawn_stage(name: &str, f: impl FnOnce() + Send + 'static) -> thread::JoinHan
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod nonlinear_ripple_fuzz;
+#[cfg(test)]
+mod phase_ripple_fuzz;

@@ -14,20 +14,36 @@
 #include "trsync.h" // trsync_add_signal
 #if CONFIG_MOTION_RUNTIME
 #include "runtime.h" // StepperBindingRust
-#include "step_queue.h" // RUNTIME_MAX_STEPS_PER_SAMPLE
 #endif
 #include "event_log.h" // event_log_emit (mcu structured-log ready marker)
 #include "generic/fault_handler.h" // kalico_diag_emit_prior_crash (Stage 5)
 #include "stepper.h"
 
 #if CONFIG_MOTION_RUNTIME
-// Minimum spacing between successive step edges enforced by
-// runtime_emit_step_pulses (~1 us), in CONFIG_CLOCK_FREQ ticks.
+// 1 us single-edge floor per step, in CONFIG_CLOCK_FREQ ticks: the physical
+// cadence ceiling the configure-time step-width guard is derived against.
 #define STEP_MIN_EDGE_DWT ((CONFIG_CLOCK_FREQ) / 1000000u)
 #endif
 
 volatile uint32_t config_stepper_oids_seen
     __attribute__((used, externally_visible));
+
+// The config phase runs after the host's identify/attach handshake has
+// installed the mcu-log hook; emitting at boot races the host and the frame
+// is lost. Whichever config command the host sends first (config_stepper for
+// classic/stepcompress lanes, kalico_configure_axis for engine lanes) fires
+// the ready marker and replays the prior boot's crash forensics.
+static void
+emit_mcu_ready_once(void)
+{
+    static uint8_t emitted;
+    if (emitted)
+        return;
+    emitted = 1;
+    event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
+                   EVENT_LOG_EVENT_RUNTIME_MCU_READY, 0, 0, 0);
+    kalico_diag_emit_prior_crash();
+}
 
 void
 command_config_stepper(uint32_t *args)
@@ -50,7 +66,6 @@ command_config_stepper(uint32_t *args)
     s->step_pulse_ticks = args[4];
     s->step_pin = gpio_out_setup(args[1], s->step_idle_level);
     s->dir_pin = gpio_out_setup(args[2], 0);
-#if CONFIG_CLASSIC_STEPPING
     s->position = -POSITION_BIAS;
     if (s->step_both_edge)
         s->flags |= SF_SINGLE_SCHED;
@@ -69,19 +84,7 @@ command_config_stepper(uint32_t *args)
     } else if (!CONFIG_INLINE_STEPPER_HACK) {
         s->time.func = stepper_event_full;
     }
-#endif
-#if !CONFIG_MOTION_RUNTIME
-    // The config phase runs after the host's identify/attach handshake has
-    // installed the mcu-log hook; emitting at boot races the host and the
-    // frame is lost. The piece build hangs this off kalico_configure_axis.
-    static uint8_t event_log_ready_emitted;
-    if (!event_log_ready_emitted) {
-        event_log_ready_emitted = 1;
-        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
-                       EVENT_LOG_EVENT_RUNTIME_MCU_READY, 0, 0, 0);
-        kalico_diag_emit_prior_crash();
-    }
-#endif
+    emit_mcu_ready_once();
 }
 DECL_COMMAND(command_config_stepper, "config_stepper oid=%c step_pin=%c"
              " dir_pin=%c invert_step=%c step_pulse_ticks=%u");
@@ -96,11 +99,10 @@ static void
 stepper_stop(struct trsync_signal *tss, uint8_t reason)
 {
     struct stepper *s = container_of(tss, struct stepper, stop_signal);
-#if CONFIG_CLASSIC_STEPPING
     stepper_classic_halt(s);
-#else
-    gpio_out_write(s->dir_pin, 0);
-    gpio_out_write(s->step_pin, s->step_idle_level);
+#if CONFIG_SAMPLE_STEPPING
+    extern void sample_stepping_halt(void);
+    sample_stepping_halt();
 #endif
 }
 
@@ -179,12 +181,6 @@ struct runtime_motor_stepper {
 static struct runtime_motor_stepper runtime_motor_steppers[RUNTIME_MOTOR_COUNT]
                                                           [RUNTIME_MAX_STEPPERS_PER_MOTOR];
 static uint8_t runtime_motor_stepper_count[RUNTIME_MOTOR_COUNT];
-static uint8_t runtime_motor_both_edge[RUNTIME_MOTOR_COUNT];
-static uint32_t runtime_motor_pulse_ticks[RUNTIME_MOTOR_COUNT];
-static int8_t runtime_motor_last_dir[RUNTIME_MOTOR_COUNT] = { -1, -1, -1, -1 };
-
-volatile uint32_t runtime_emit_calls __attribute__((used, externally_visible));
-volatile uint32_t runtime_emit_pulses __attribute__((used, externally_visible));
 
 __attribute__((used, externally_visible))
 uint8_t
@@ -229,9 +225,8 @@ command_kalico_configure_axis(uint32_t *args)
     uint32_t mstep_bits     = args[2];
     uint32_t extrusion_bits = args[3];
     uint8_t stepper_count   = args[4];
-    uint16_t ring_depth     = (uint16_t)args[5];
-    uint16_t blob_len       = (uint16_t)args[6];
-    const uint8_t *blob     = command_decode_ptr(args[7]);
+    uint16_t blob_len       = (uint16_t)args[5];
+    const uint8_t *blob     = command_decode_ptr(args[6]);
 
     if (axis_idx >= RUNTIME_MOTOR_COUNT)
         shutdown("configure_axis axis_idx out of range");
@@ -241,8 +236,6 @@ command_kalico_configure_axis(uint32_t *args)
         shutdown("configure_axis too many steppers per axis");
     if (blob_len != (uint16_t)stepper_count * 4)
         shutdown("configure_axis blob length mismatch");
-    if (ring_depth == 0)
-        shutdown("configure_axis ring_depth must be nonzero");
     if (!runtime_handle)
         shutdown("configure_axis before runtime init");
 
@@ -280,7 +273,6 @@ command_kalico_configure_axis(uint32_t *args)
     }
     int32_t rc = runtime_configure_axis(
         runtime_handle, axis_idx, mode, mstep_bits,
-        ring_depth,
         stepper_count > 0 ? bindings : 0,
         stepper_count);
     if (rc != 0)
@@ -301,49 +293,27 @@ command_kalico_configure_axis(uint32_t *args)
         runtime_motor_steppers[axis_idx][i].stepper = staged[i].stepper;
         runtime_motor_steppers[axis_idx][i].invert_dir = staged[i].invert_dir;
     }
-    runtime_motor_both_edge[axis_idx] = motor_both_edge;
-    runtime_motor_pulse_ticks[axis_idx] = motor_pulse_ticks;
-    runtime_motor_last_dir[axis_idx] = -1;
     runtime_motor_suppress_mask[axis_idx] = 0;
     (void)extrusion_bits;
 
-    // The per-sample step budget this motor can physically emit: half the
-    // sample window (the step ISR is shared across axes) divided by the cost
-    // of one step — the 1us edge floor, plus the pulse-width busy-wait when
-    // the driver only steps on rising edges (no dedge).
+    // Guard the motor's physical step cadence: half the sample window (the
+    // step ISR is shared across axes) must fit at least one step — the 1us
+    // edge floor, plus the pulse-width busy-wait when the driver only steps
+    // on rising edges (no dedge).
     uint32_t sample_ticks = CONFIG_CLOCK_FREQ / CONFIG_MOTION_SAMPLE_RATE_HZ;
     uint32_t per_step_ticks = STEP_MIN_EDGE_DWT
         + (motor_both_edge ? 0 : motor_pulse_ticks);
-    uint32_t step_budget = (sample_ticks / 2) / per_step_ticks;
-    if (step_budget < 1)
+    if ((sample_ticks / 2) / per_step_ticks < 1)
         shutdown("configure_axis step pulse wider than the sample budget");
-    if (step_budget > RUNTIME_MAX_STEPS_PER_SAMPLE)
-        step_budget = RUNTIME_MAX_STEPS_PER_SAMPLE;
-    if (runtime_set_axis_step_budget(runtime_handle, axis_idx, step_budget))
-        shutdown("configure_axis step budget rejected by runtime");
-
-    extern void arm_per_axis_step_timer(uint8_t axis_idx);
-    arm_per_axis_step_timer(axis_idx);
 
     extern void runtime_tick_enable(void);
     runtime_tick_enable();
 
-    // Emit only after the first configure_axis: the config phase runs after the
-    // host's identify/attach handshake installs the mcu-log hook. Emitting at
-    // MCU boot / first drain races ahead of the host connecting; the frame is
-    // lost.
-    static uint8_t event_log_ready_emitted;
-    if (!event_log_ready_emitted) {
-        event_log_ready_emitted = 1;
-        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
-                        EVENT_LOG_EVENT_RUNTIME_MCU_READY, 0, 0, 0);
-        kalico_diag_emit_prior_crash();
-    }
+    emit_mcu_ready_once();
 }
 DECL_COMMAND(command_kalico_configure_axis,
              "kalico_configure_axis axis_idx=%c mode=%c microstep_distance=%u"
-             " extrusion_per_xy_mm=%u stepper_count=%c ring_depth=%hu"
-             " steppers=%*s");
+             " extrusion_per_xy_mm=%u stepper_count=%c steppers=%*s");
 
 void
 command_runtime_reset(uint32_t *args)
@@ -391,6 +361,24 @@ command_kalico_phase_stepping_disable_spi(uint32_t *args)
 DECL_COMMAND(command_kalico_phase_stepping_disable_spi,
              "kalico_phase_stepping_disable_spi");
 
+// A mode switch hands the axis between the classic executor and the
+// runtime's sample walker. Both drive the same motor, so on entry into
+// Phase mode the runtime adopts the classic executor's step count -
+// otherwise the host's later transport seed shifts the phase readout
+// out from under the freshly aligned coils.
+static void
+runtime_adopt_classic_count(uint8_t axis_idx)
+{
+    if (axis_idx >= RUNTIME_MOTOR_COUNT
+        || !runtime_motor_stepper_count[axis_idx])
+        return;
+    struct runtime_motor_stepper *rms = &runtime_motor_steppers[axis_idx][0];
+    int32_t wire = stepper_classic_wire_position(rms->stepper);
+    int32_t count = rms->invert_dir ? -wire : wire;
+    if (runtime_seed_axis_count(runtime_handle, axis_idx, count) != 0)
+        shutdown("kalico_set_axis_mode count seed rejected");
+}
+
 void
 command_kalico_set_axis_mode(uint32_t *args)
 {
@@ -398,9 +386,15 @@ command_kalico_set_axis_mode(uint32_t *args)
         shutdown("kalico_set_axis_mode before runtime init");
     uint8_t axis_idx = args[0];
     uint8_t mode = args[1];
+    if (axis_idx >= RUNTIME_MOTOR_COUNT)
+        shutdown("kalico_set_axis_mode axis_idx out of range");
     int32_t rc = runtime_set_axis_mode(runtime_handle, axis_idx, mode);
+    if (rc == -2)
+        shutdown("kalico_set_axis_mode rejected: sample playback active");
     if (rc != 0)
-        shutdown("kalico_set_axis_mode rejected (motion in progress or bad arg)");
+        shutdown("kalico_set_axis_mode rejected: bad axis or mode");
+    if (mode == 1)
+        runtime_adopt_classic_count(axis_idx);
 }
 DECL_COMMAND(command_kalico_set_axis_mode,
              "kalico_set_axis_mode axis_idx=%c mode=%c");
@@ -422,28 +416,6 @@ DECL_COMMAND(command_kalico_set_stepper_offset,
              "kalico_set_stepper_offset stepper_idx=%c delta_microsteps=%i"
              " max_microsteps_per_sample=%hu");
 
-void
-command_kalico_resonance_buzz(uint32_t *args)
-{
-    if (!runtime_handle)
-        shutdown("kalico_resonance_buzz before runtime init");
-    uint8_t axis_mask = args[0];
-    uint8_t sign_mask = args[1];
-    uint32_t freq_start_millihz = args[2];
-    uint32_t freq_end_millihz = args[3];
-    uint32_t amplitude_nm = args[4];
-    uint32_t duration_ms = args[5];
-    uint32_t ramp_ms = args[6];
-    int32_t rc = runtime_resonance_buzz(
-        runtime_handle, axis_mask, sign_mask, freq_start_millihz,
-        freq_end_millihz, amplitude_nm, duration_ms, ramp_ms);
-    if (rc != 0)
-        shutdown("kalico_resonance_buzz rejected (bad parameters)");
-}
-DECL_COMMAND(command_kalico_resonance_buzz,
-             "kalico_resonance_buzz axis_mask=%c sign_mask=%c"
-             " freq_start_millihz=%u freq_end_millihz=%u amplitude_nm=%u"
-             " duration_ms=%u ramp_ms=%u");
 
 void
 command_kalico_phase_jog_to(uint32_t *args)
@@ -471,8 +443,11 @@ command_kalico_phase_align_to(uint32_t *args)
     uint16_t target_phase = args[1];
     int32_t rc = runtime_phase_align_to(
         runtime_handle, stepper_oid, target_phase);
+    if (rc == -2)
+        shutdown("kalico_phase_align_to rejected: sample playback active");
     if (rc != 0)
-        shutdown("kalico_phase_align_to rejected (motion in progress or bad args)");
+        shutdown("kalico_phase_align_to rejected: unknown stepper oid"
+                 " or bad target_phase");
 }
 DECL_COMMAND(command_kalico_phase_align_to,
              "kalico_phase_align_to oid=%c target_phase=%hu");
@@ -494,79 +469,5 @@ command_kalico_get_phase_state(uint32_t *args)
 }
 DECL_COMMAND(command_kalico_get_phase_state,
              "kalico_get_phase_state oid=%c");
-
-static uint32_t step_last_edge_dwt[RUNTIME_MOTOR_COUNT];
-
-__attribute__((used, externally_visible))
-void
-runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps, uint8_t stepper_sel)
-{
-    runtime_emit_calls++;
-    if (motor_idx >= RUNTIME_MOTOR_COUNT)
-        return;
-    uint8_t cnt = runtime_motor_stepper_count[motor_idx];
-    if (cnt == 0)
-        return;
-    if (n_steps == 0)
-        return;
-    runtime_emit_pulses += (n_steps < 0) ? (uint32_t)-n_steps : (uint32_t)n_steps;
-    uint8_t suppress = runtime_motor_suppress_mask[motor_idx];
-
-    uint8_t j_begin = 0, j_end = cnt;
-    if (stepper_sel != 0) {
-        if (stepper_sel > cnt)
-            shutdown("correction stepper_sel out of range");
-        j_begin = stepper_sel - 1;
-        j_end = stepper_sel;
-    }
-
-    int8_t want_dir = (n_steps < 0) ? 1 : 0;
-    uint32_t count = (n_steps < 0) ? (uint32_t)-n_steps : (uint32_t)n_steps;
-
-    if (stepper_sel != 0 || runtime_motor_last_dir[motor_idx] != want_dir) {
-        for (uint8_t j = j_begin; j < j_end; j++) {
-            uint8_t bench_verified_not_want_dir_xor_invert
-                = (uint8_t)(!want_dir)
-                ^ runtime_motor_steppers[motor_idx][j].invert_dir;
-            gpio_out_write(runtime_motor_steppers[motor_idx][j].stepper->dir_pin,
-                           bench_verified_not_want_dir_xor_invert);
-        }
-        runtime_motor_last_dir[motor_idx] = (stepper_sel != 0) ? -1 : want_dir;
-    }
-
-    extern uint32_t runtime_cyccnt_read(void);
-    uint32_t last = step_last_edge_dwt[motor_idx];
-    uint8_t both_edge = runtime_motor_both_edge[motor_idx];
-    uint32_t pulse_ticks = runtime_motor_pulse_ticks[motor_idx];
-
-    for (uint32_t i = 0; i < count; i++) {
-        uint32_t now = runtime_cyccnt_read();
-        uint32_t elapsed = now - last;
-        if (last != 0 && elapsed < STEP_MIN_EDGE_DWT) {
-            uint32_t target = last + STEP_MIN_EDGE_DWT;
-            while ((int32_t)(runtime_cyccnt_read() - target) < 0)
-                ;
-        }
-        for (uint8_t j = j_begin; j < j_end; j++) {
-            if (suppress & (uint8_t)(1u << j))
-                continue;
-            gpio_out_toggle_noirq(runtime_motor_steppers[motor_idx][j].stepper->step_pin);
-        }
-        if (!both_edge) {
-            uint32_t fall_at = runtime_cyccnt_read() + pulse_ticks;
-            while ((int32_t)(runtime_cyccnt_read() - fall_at) < 0)
-                ;
-            for (uint8_t j = j_begin; j < j_end; j++) {
-                if (suppress & (uint8_t)(1u << j))
-                    continue;
-                gpio_out_toggle_noirq(
-                    runtime_motor_steppers[motor_idx][j].stepper->step_pin);
-            }
-        }
-        last = runtime_cyccnt_read();
-    }
-
-    step_last_edge_dwt[motor_idx] = last;
-}
 
 #endif

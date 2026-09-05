@@ -12,5 +12,8 @@ libm = { version = "0.2", default-features = false }
 nurbs = { path = "../nurbs" }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+proptest = "1"
+
 [lints]
 workspace = true

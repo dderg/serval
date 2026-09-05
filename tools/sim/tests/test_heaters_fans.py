@@ -210,3 +210,43 @@ def test_mpc_heater(sim_world):
     )
     world.gcode_ok("M105")
     assert world.shutdown_line() is None
+
+
+def _cfg_heater_only_controller_fan(world):
+    return (
+        configs.heaters_config(world.h7_pty, str(world.gcode_dir))
+        + """
+[controller_fan heater_only_fan]
+pin: gpiochip0/gpio24
+heater: extruder
+idle_timeout: 60
+stepper:
+"""
+    )
+
+
+def _wait_gpio_high(control, chip, line, timeout=15.0):
+    deadline = time.monotonic() + timeout
+    value = control.gpio_output(chip, line)
+    while not value and time.monotonic() < deadline:
+        time.sleep(0.1)
+        value = control.gpio_output(chip, line)
+    return value
+
+
+def test_controller_fan_empty_stepper_is_heater_only(sim_world):
+    """An explicitly empty `stepper:` list makes controller_fan follow
+    heaters alone - no placeholder [motor] needed (the upstream
+    manual_stepper fake-stepper trick has no fork equivalent since
+    orphan motors are a config error)."""
+    world = sim_world(_cfg_heater_only_controller_fan, dual_mcu=False)
+    control = world.sim_control("h7")
+    assert control.gpio_output(0, 24) == 0
+    world.gcode_ok("SET_HEATER_TEMPERATURE HEATER=extruder TARGET=60")
+    # The follow loop only re-evaluates once a second, so the pin comes up
+    # after the command returns; fan_speed defaults to 1.0, which the
+    # firmware serves as a statically high pin rather than a soft-PWM
+    # toggle. A controller_fan that ignores heaters leaves it low.
+    assert _wait_gpio_high(control, 0, 24) == 1
+    world.gcode_ok("SET_HEATER_TEMPERATURE HEATER=extruder TARGET=0")
+    assert world.shutdown_line() is None

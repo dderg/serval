@@ -1,5 +1,5 @@
 use crate::host_io::mcu_session::{McuDispatchResult, dispatch_mcu_frame};
-use crate::host_io::reactor::{READ_TIMEOUT, Reactor, ReactorState, ZERO_BYTE_DEBOUNCE};
+use crate::host_io::reactor::{READ_TIMEOUT, Reactor, ZERO_BYTE_DEBOUNCE};
 use crate::transport::TransportError;
 use mcu_transport::demux::{Frame, KlipperFrame, PollOutcome};
 use runtime::error::FaultCode;
@@ -251,13 +251,7 @@ impl Reactor {
                         debounce = ?ZERO_BYTE_DEBOUNCE,
                         "[usb-drop] PhantomZero (Ok(0) past debounce window)"
                     );
-                    self.pending_host_fault = Some(crate::host_io::runtime_events::FaultEvent {
-                        fault_code: FaultCode::HostDisconnect.as_u16(),
-                        fault_detail: 0,
-                        segment_id: 0,
-                        synthesized: false,
-                    });
-                    self.state = ReactorState::Closed;
+                    self.close_with_host_fault(FaultCode::HostDisconnect, 0);
                 }
             }
             Err(e) => {
@@ -280,13 +274,7 @@ impl Reactor {
                     error = ?e,
                     "[usb-drop] poll error"
                 );
-                self.pending_host_fault = Some(crate::host_io::runtime_events::FaultEvent {
-                    fault_code: FaultCode::HostDisconnect.as_u16(),
-                    fault_detail: 0,
-                    segment_id: 0,
-                    synthesized: false,
-                });
-                self.state = ReactorState::Closed;
+                self.close_with_host_fault(FaultCode::HostDisconnect, 0);
             }
         }
     }

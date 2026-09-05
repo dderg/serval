@@ -17,36 +17,59 @@ impl Engine {
         self.tick_counter.snapshot()
     }
 
+    #[cfg(feature = "sample-stepping")]
     pub fn retired_counts(&self) -> [u32; MAX_AXES] {
         let mut out = [0u32; MAX_AXES];
-        for (slot, entry) in out.iter_mut().zip(self.stepping_axes.iter()) {
-            if let Some(axis) = entry {
-                *slot = axis.ring.retired_count();
-            }
+        for (slot, lane) in out.iter_mut().zip(self.sample_lanes.iter()) {
+            *slot = lane.retired();
         }
         out
     }
 
-    pub fn armed_window(&self, axis_idx: usize) -> Option<(u64, u64)> {
-        self.stepping_axes
-            .get(axis_idx)?
-            .as_ref()?
-            .armed
-            .as_ref()
-            .map(|p| (p.piece_start_cycles, p.piece_end_cycles))
+    #[cfg(not(feature = "sample-stepping"))]
+    pub fn retired_counts(&self) -> [u32; MAX_AXES] {
+        [0u32; MAX_AXES]
     }
 
+    #[cfg(feature = "sample-stepping")]
+    pub fn playback_clocks(&self) -> [u64; MAX_AXES] {
+        let mut out = [0u64; MAX_AXES];
+        for (slot, lane) in out.iter_mut().zip(self.sample_lanes.iter()) {
+            *slot = lane.playback_clock();
+        }
+        out
+    }
+
+    #[cfg(not(feature = "sample-stepping"))]
+    pub fn playback_clocks(&self) -> [u64; MAX_AXES] {
+        [0u64; MAX_AXES]
+    }
+
+    #[cfg(feature = "sample-stepping")]
     pub fn occupancy_counts(&self) -> [u32; MAX_AXES] {
         let mut out = [0u32; MAX_AXES];
-        for (slot, entry) in out.iter_mut().zip(self.stepping_axes.iter()) {
-            if let Some(axis) = entry {
-                #[allow(clippy::cast_possible_truncation)]
-                {
-                    *slot = axis.ring.len() as u32;
-                }
+        for (slot, lane) in out.iter_mut().zip(self.sample_lanes.iter()) {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                *slot = lane.depth() as u32;
             }
         }
         out
+    }
+
+    #[cfg(not(feature = "sample-stepping"))]
+    pub fn occupancy_counts(&self) -> [u32; MAX_AXES] {
+        [0u32; MAX_AXES]
+    }
+
+    #[cfg(feature = "sample-stepping")]
+    pub fn head_window(&self, axis_idx: usize) -> Option<(u64, u64)> {
+        self.sample_lanes.get(axis_idx)?.front_window()
+    }
+
+    #[cfg(not(feature = "sample-stepping"))]
+    pub fn head_window(&self, _axis_idx: usize) -> Option<(u64, u64)> {
+        None
     }
 
     pub fn motor_state(&self, i: usize) -> Option<(f32, f32)> {

@@ -68,6 +68,27 @@ fn remove_knot_returns_zero_when_tolerance_not_met() {
     assert_eq!(result.knots(), curve.knots());
 }
 
+fn curve_with_one_interior_knot() -> ScalarNurbs {
+    ScalarNurbs::try_new(
+        2,
+        vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0],
+        vec![0.0, 1.0, 2.0, 3.0],
+    )
+    .unwrap()
+}
+
+#[test]
+#[should_panic(expected = "clamped boundary")]
+fn remove_knot_rejects_the_start_boundary_knot() {
+    remove_knot(&curve_with_one_interior_knot(), 0.0, 1, 1e-9);
+}
+
+#[test]
+#[should_panic(expected = "clamped boundary")]
+fn remove_knot_rejects_the_end_boundary_knot() {
+    remove_knot(&curve_with_one_interior_knot(), 1.0, 1, 2.0);
+}
+
 #[test]
 fn remove_knot_undoes_insertion_within_tolerance() {
     let curve =
@@ -360,4 +381,25 @@ fn insert_knot_into_simple_curve_preserves_evaluation() {
             "u={u}: before={before}, after={after}"
         );
     }
+}
+
+#[test]
+fn refinement_preserves_discontinuous_piece_values() {
+    let discontinuous = ScalarNurbs::try_new(
+        2,
+        vec![0.0, 0.0, 0.0, 0.25, 0.5, 0.5, 0.5, 1.0, 1.0, 1.0],
+        vec![0.0, 0.5, 1.0, 2.0, 10.0, 11.0, 12.0],
+    )
+    .unwrap();
+    let refined = refined_to_full_multiplicity(&discontinuous);
+    let pieces = crate::bezier::extract_bezier_pieces(&refined);
+    for piece in pieces {
+        for fraction in [0.1, 0.5, 0.9] {
+            let t = piece.u_start + fraction * (piece.u_end - piece.u_start);
+            assert!(
+                (piece.evaluate(t) - crate::eval::eval(&discontinuous.as_view(), t)).abs() < 1e-12
+            );
+        }
+    }
+    assert_eq!(crate::eval::eval(&refined.as_view(), 0.5), 10.0);
 }

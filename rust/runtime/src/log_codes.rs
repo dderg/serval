@@ -52,7 +52,6 @@ pub const EVENT_RUNTIME_ISR_PHASE: u16 = 11;
 pub const EVENT_RUNTIME_BLOCK_SOURCE: u16 = 12;
 pub const EVENT_RUNTIME_TIM5_IA: u16 = 13;
 pub const EVENT_RUNTIME_DIAG_DUMP: u16 = 14;
-pub const EVENT_RUNTIME_STEPOUT_LATE: u16 = 15;
 pub const EVENT_RUNTIME_RING_STATE: u16 = 16;
 pub const EVENT_RUNTIME_FG_TASK: u16 = 17;
 pub const EVENT_RUNTIME_FG_MSG: u16 = 18;
@@ -60,9 +59,11 @@ pub const EVENT_RUNTIME_FG_DEMUX: u16 = 19;
 pub const EVENT_RUNTIME_FG_MSG_HEAD: u16 = 20;
 pub const EVENT_RUNTIME_TIMER_TOO_CLOSE: u16 = 21;
 pub const EVENT_RUNTIME_TIMER_TOO_CLOSE_LATE: u16 = 22;
+pub const EVENT_RUNTIME_PRIOR_RUN: u16 = 23;
+pub const EVENT_RUNTIME_PRIOR_LIVE: u16 = 24;
+pub const EVENT_RUNTIME_PRIOR_USB_OUT: u16 = 25;
+pub const EVENT_RUNTIME_PRIOR_TASK_GAPS: u16 = 26;
 
-pub const EVENT_MOTION_PIECE_START_PAST: u16 = 1;
-pub const EVENT_MOTION_RING_FULL: u16 = 2;
 pub const EVENT_MOTION_AXIS_STALLED: u16 = 3;
 pub const EVENT_MOTION_AXIS_STALLED_HEAD: u16 = 4;
 pub const EVENT_MOTION_STEP_LOAD_LATE: u16 = 5;
@@ -70,6 +71,8 @@ pub const EVENT_MOTION_STEP_REARM: u16 = 6;
 pub const EVENT_MOTION_STEP_REARM_TIGHT: u16 = 7;
 pub const EVENT_MOTION_STEP_REARM_LATE: u16 = 8;
 pub const EVENT_MOTION_STEP_HALT: u16 = 9;
+pub const EVENT_MOTION_STEP_CLOCK_HORIZON: u16 = 10;
+pub const EVENT_MOTION_WIRE_PROBE_LATE: u16 = 11;
 
 pub const EVENT_TICK_INTERVAL_EXCEEDED: u16 = 1;
 pub const EVENT_TICK_UNDERRUN: u16 = 2;
@@ -151,10 +154,9 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_ISR_PHASE) => {
             ("runtime.isr_phase", "isr phase={arg0} ring_overflow={arg1}")
         }
-        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_BLOCK_SOURCE) => (
-            "runtime.block_source",
-            "block usb_burst={arg0} cyc stepout_burst={arg1} cyc",
-        ),
+        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_BLOCK_SOURCE) => {
+            ("runtime.block_source", "block usb_burst={arg0} cyc")
+        }
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_TIM5_IA) => (
             "runtime.tim5_ia",
             "tim5 inter-arrival min={arg0} max={arg1} cyc",
@@ -162,10 +164,6 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_DIAG_DUMP) => (
             "runtime.diag_dump",
             "live diag dump uptime_us={arg0} ring_seq={arg1}",
-        ),
-        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_STEPOUT_LATE) => (
-            "runtime.stepout_late",
-            "stepout late max_late_cyc={arg0} late_count<<16|max_drained={arg1}",
         ),
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_RING_STATE) => (
             "runtime.ring_state",
@@ -195,6 +193,22 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
             "runtime.timer_too_close_late",
             "timer too close late_cyc={arg0} count={arg1}",
         ),
+        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_PRIOR_RUN) => (
+            "runtime.prior_run",
+            "crash replay describes boot {arg0}; {arg1} later hostless boot(s) were skipped to keep it",
+        ),
+        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_PRIOR_LIVE) => (
+            "runtime.prior_live",
+            "held run ended with engine_status={arg0} liveness_ok={arg1} (0 = the firmware stopped feeding the iwdg on purpose)",
+        ),
+        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_PRIOR_USB_OUT) => (
+            "runtime.prior_usb_out",
+            "held run's worst usb OUT episode: endpoint unarmed {arg0} cyc, bulk-out task gap {arg1} ticks",
+        ),
+        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_PRIOR_TASK_GAPS) => (
+            "runtime.prior_task_gaps",
+            "held run's worst foreground gaps: runtime_drain {arg0} ticks, usb bulk-in {arg1} ticks",
+        ),
         (SUBSYSTEM_DIAG, EVENT_DIAG_TIM5_LONG) => {
             ("diag.tim5_long", "TIM5 ISR long {arg0} cyc at t={arg1}")
         }
@@ -223,20 +237,13 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         (SUBSYSTEM_DIAG, EVENT_DIAG_RUST_FAULT) => {
             ("diag.rust_fault", "rust fault err={arg0} detail={arg1}")
         }
-        (SUBSYSTEM_MOTION, EVENT_MOTION_PIECE_START_PAST) => (
-            "motion.piece_start_past",
-            "piece start in past start_time={arg0} now={arg1}",
-        ),
-        (SUBSYSTEM_MOTION, EVENT_MOTION_RING_FULL) => {
-            ("motion.ring_full", "axis ring full axis={arg0}")
-        }
         (SUBSYSTEM_MOTION, EVENT_MOTION_AXIS_STALLED) => (
             "motion.axis_stalled",
-            "axis retirement stalled with pieces pending axis={arg0:hi16} occupancy={arg0:lo16} stalled_ms={arg1}",
+            "axis retirement stalled with runs pending axis={arg0:hi16} occupancy={arg0:lo16} stalled_ms={arg1}",
         ),
         (SUBSYSTEM_MOTION, EVENT_MOTION_AXIS_STALLED_HEAD) => (
             "motion.axis_stalled_head",
-            "stalled axis armed piece window vs now start-now={arg0:i32}ms end-now={arg1:i32}ms",
+            "front sample-run window vs now start-now={arg0:i32}ms end-now={arg1:i32}ms",
         ),
         (SUBSYSTEM_MOTION, EVENT_MOTION_STEP_LOAD_LATE) => (
             "motion.step_load_late",
@@ -257,6 +264,14 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         (SUBSYSTEM_MOTION, EVENT_MOTION_STEP_HALT) => (
             "motion.step_halt",
             "classic stepper halted flags={arg0} pending_events={arg1}",
+        ),
+        (SUBSYSTEM_MOTION, EVENT_MOTION_WIRE_PROBE_LATE) => (
+            "motion.wire_probe_late",
+            "host->mcu wire probe arrived late by delta={arg0:i32} cyc (claimed clock={arg1})",
+        ),
+        (SUBSYSTEM_MOTION, EVENT_MOTION_STEP_CLOCK_HORIZON) => (
+            "motion.step_clock_horizon",
+            "step clock {arg1} is distance={arg0:i32} cyc from the mcu clock, beyond the sync horizon",
         ),
         (SUBSYSTEM_TICK, EVENT_TICK_INTERVAL_EXCEEDED) => (
             "tick.interval_exceeded",

@@ -1,3 +1,5 @@
+mod common;
+
 use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -8,11 +10,11 @@ use host_rt::mcu_call::McuCall;
 use host_rt::mcu_serial_conn::McuSerialConn;
 use mcu_protocol::codec::{Cursor, Decode, Encode};
 use mcu_protocol::messages::{
-    ClaimHandshakeReply, DriveLimitEntry, MessageKind, PushPieces, PushPiecesResponse,
-    RestoreDriveLimits, RestoreDriveLimitsResponse, ResumeStreamResponse, SetDriveLimits,
-    SetDriveLimitsResponse, SetTorque, SetTorqueResponse, StopResponse,
+    ClaimHandshakeReply, DriveLimitEntry, LaneRun, MessageKind, PushSampleRuns,
+    PushSampleRunsResponse, RestoreDriveLimits, RestoreDriveLimitsResponse, ResumeStreamResponse,
+    SampleGridResponse, SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse,
+    SetpointSample, StopResponse, LANE_RUN_FLAG_REANCHOR, LANE_RUN_FLAG_TAIL,
 };
-use runtime::piece_ring::PieceEntry;
 
 const STUB_BIN: &str = env!("CARGO_BIN_EXE_ethercat-rt-stub");
 
@@ -149,21 +151,51 @@ fn now_ns() -> u64 {
     ethercat_rt::clock::monotonic_ns()
 }
 
-fn push_one_piece(conn: &McuSerialConn, start_time: u64) -> i32 {
-    let entry = PieceEntry {
-        start_time,
-        duration: 0.001,
-        ..PieceEntry::zeroed()
+/// Cycles of lead for a run that must still be sitting in the ring when the
+/// operation under test runs. The stub's grid cycle is 1 ms, so this outlives
+/// every wait a test performs before asserting, and stays inside
+/// `RING_DEPTH_CYCLES`.
+const QUEUED_LEAD_CYCLES: u64 = 512;
+
+/// Cycles of lead for a run the test wants played promptly.
+const PLAYED_LEAD_CYCLES: u64 = 5;
+
+fn push_one_run(conn: &McuSerialConn) -> i32 {
+    push_run_with_lead(conn, QUEUED_LEAD_CYCLES)
+}
+
+/// One anchored, final sample run `lead_cycles` ahead of the endpoint's live
+/// grid index — the smallest thing the pump can put in the ring.
+fn push_run_with_lead(conn: &McuSerialConn, lead_cycles: u64) -> i32 {
+    let (kind, resp) = conn
+        .mcu_call(
+            MessageKind::QuerySampleGrid,
+            Vec::new(),
+            Duration::from_secs(5),
+        )
+        .expect("QuerySampleGrid call must succeed");
+    assert_eq!(kind, MessageKind::SampleGridResponse);
+    let grid = SampleGridResponse::decode(&resp).expect("SampleGridResponse must decode");
+    let lane = LaneRun {
+        axis_idx: 0,
+        slot_idx: 0,
+        flags: LANE_RUN_FLAG_REANCHOR | LANE_RUN_FLAG_TAIL,
+        origin_mm_q16: 0,
+        start_index: grid.grid_index + lead_cycles,
+        interval_ticks: grid.cycle_ticks,
+        samples: vec![SetpointSample {
+            pos_counts: 0,
+            vel_ff: 0,
+            torque_ff: 0,
+            acc_mm_s2: 0.0,
+        }],
     };
-    let mut pieces_bytes = Vec::with_capacity(20);
-    entry.to_wire_bytes(&mut pieces_bytes);
-    let msg = PushPieces::single(0, 1, 0, 1, pieces_bytes);
-    let body = msg.encoded_to_vec();
+    let body = PushSampleRuns { lanes: vec![lane] }.encoded_to_vec();
     let (_, resp) = conn
-        .mcu_call(MessageKind::PushPieces, body, Duration::from_secs(5))
-        .expect("PushPieces call must succeed");
-    PushPiecesResponse::decode(&resp)
-        .expect("PushPiecesResponse must decode")
+        .mcu_call(MessageKind::PushSampleRuns, body, Duration::from_secs(5))
+        .expect("PushSampleRuns call must succeed");
+    PushSampleRunsResponse::decode(&resp)
+        .expect("PushSampleRunsResponse must decode")
         .result
 }
 
@@ -180,7 +212,7 @@ fn spawn_and_claim(tag: &str, extra_args: &[&str]) -> (ChildGuard, McuSerialConn
 
     wait_for_socket(&path, Instant::now() + Duration::from_secs(5));
 
-    let conn = McuSerialConn::connect(&path).expect("McuSerialConn::connect must succeed");
+    let conn = common::connect_until(&path, Instant::now() + Duration::from_secs(5));
     let _reply = do_handshake(&conn);
 
     (guard, conn, path)
@@ -282,10 +314,10 @@ fn reenable_with_pending_disable_cancels_it() {
 }
 
 #[test]
-fn pieces_while_parked_fault_exits() {
+fn sample_runs_while_parked_fault_exits() {
     let (mut guard, conn, path) = spawn_and_claim("tq-pcs-park", &[]);
 
-    push_one_piece(&conn, now_ns());
+    push_one_run(&conn);
 
     let mut child = guard.defuse();
     wait_for_exit(&mut child, Instant::now() + Duration::from_secs(5));
@@ -374,11 +406,11 @@ fn drive_limits_set_and_restore_round_trip() {
 #[test]
 fn simulated_drive_fault_parks_keeps_serving_and_recovers() {
     let (mut guard, conn, path) =
-        spawn_and_claim("drive-fault", &["--drive-fault-after-pieces", "1"]);
+        spawn_and_claim("drive-fault", &["--drive-fault-after-cycles", "1"]);
 
     let r = set_torque(&conn, true, now_ns() + 50_000_000);
     assert_eq!(r, 0);
-    push_one_piece(&conn, now_ns());
+    push_run_with_lead(&conn, PLAYED_LEAD_CYCLES);
 
     let fault_deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -386,11 +418,11 @@ fn simulated_drive_fault_parks_keeps_serving_and_recovers() {
             Instant::now() < fault_deadline,
             "stub never simulated the drive fault"
         );
-        let result = push_one_piece(&conn, now_ns() + 60_000_000_000);
+        let result = push_run_with_lead(&conn, PLAYED_LEAD_CYCLES);
         match result {
             0 => thread::sleep(Duration::from_millis(20)),
             ERR_PIECES_WHILE_FAULTED => break,
-            other => panic!("unexpected PushPieces result while polling for fault: {other}"),
+            other => panic!("unexpected PushSampleRuns result while polling for fault: {other}"),
         }
     }
 
@@ -412,13 +444,13 @@ fn stop_halts_stream_until_resume() {
     let r = set_torque(&conn, true, now_ns() + 50_000_000);
     assert_eq!(r, 0, "enable must return 0, got {r}");
 
-    let r = push_one_piece(&conn, now_ns() + 10_000_000_000);
+    let r = push_one_run(&conn);
     assert_eq!(r, 0, "push before Stop must be accepted, got {r}");
 
     let (result, _clock) = send_stop(&conn);
     assert_eq!(result, 0, "Stop must return 0, got {result}");
 
-    let r = push_one_piece(&conn, now_ns() + 10_000_000_000);
+    let r = push_one_run(&conn);
     assert_eq!(
         r, ERR_PIECES_WHILE_HALTED,
         "push while halted must be rejected, got {r}"
@@ -427,7 +459,7 @@ fn stop_halts_stream_until_resume() {
     let r = send_resume_stream(&conn);
     assert_eq!(r, 0, "ResumeStream after Stop must return 0, got {r}");
 
-    let r = push_one_piece(&conn, now_ns() + 10_000_000_000);
+    let r = push_one_run(&conn);
     assert_eq!(r, 0, "push after ResumeStream must be accepted, got {r}");
 
     drop(conn);
@@ -451,13 +483,13 @@ fn resume_stream_without_halt_is_rejected() {
 }
 
 #[test]
-fn stop_discards_queued_pieces_and_keeps_torque() {
+fn stop_discards_queued_setpoints_and_keeps_torque() {
     let (mut guard, conn, path) = spawn_and_claim("stop-discard", &[]);
 
     let r = set_torque(&conn, true, now_ns() + 50_000_000);
     assert_eq!(r, 0, "enable must return 0, got {r}");
 
-    push_one_piece(&conn, now_ns() + 10_000_000_000);
+    push_one_run(&conn);
 
     let (result, _clock) = send_stop(&conn);
     assert_eq!(result, 0, "Stop mid-stream must return 0, got {result}");

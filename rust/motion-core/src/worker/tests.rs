@@ -5,8 +5,7 @@ use super::*;
 use geometry::segment::SourceRange;
 use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
 use motion_pipeline::StreamConfig;
-use nurbs::eval::eval;
-use trajectory::ShapedSegment;
+use trajectory::{ContinuousSegment, NudgeProfile};
 
 #[derive(Clone, Default)]
 struct Capture {
@@ -15,22 +14,23 @@ struct Capture {
 }
 
 impl SegmentSink for Capture {
-    fn dispatch(&mut self, seg: &ShapedSegment) -> Result<(), DispatchError> {
-        let x_end = eval(&seg.axes[0], seg.t_end);
-        self.segs
-            .lock()
-            .unwrap()
-            .push((seg.t_start, seg.t_end, x_end));
+    fn dispatch(&mut self, seg: &ContinuousSegment) -> Result<(), DispatchError> {
+        let x_end = seg
+            .eval_axis(0, seg.t_end)
+            .expect("axis 0 evaluates")
+            .position;
+        self.segs.lock_ok().push((seg.t_start, seg.t_end, x_end));
         Ok(())
     }
     fn dispatch_nudge(
         &mut self,
         _mcu_id: u32,
-        piece: &motion_pipeline::NudgePiece,
+        axis: u8,
+        _motor_mask: u8,
+        profile: &NudgeProfile,
     ) -> Result<(), DispatchError> {
-        let bp = &piece.piece;
-        let travel = bp.evaluate(bp.u_end) - bp.evaluate(bp.u_start);
-        self.nudges.lock_ok().push((piece.axis, travel));
+        let travel = profile.position(profile.t_end()) - profile.position(profile.t_start());
+        self.nudges.lock_ok().push((axis, travel));
         Ok(())
     }
 }
@@ -52,6 +52,31 @@ impl Capture {
     }
 }
 
+/// Fails every dispatch the way `PumpSink` does once the pump has died on a
+/// latched endpoint fatal, counting the attempts that reach it.
+#[derive(Clone, Default)]
+struct DeadPumpSink {
+    attempts: Arc<Mutex<usize>>,
+}
+
+impl SegmentSink for DeadPumpSink {
+    fn dispatch(&mut self, _seg: &ContinuousSegment) -> Result<(), DispatchError> {
+        *self.attempts.lock_ok() += 1;
+        Err(DispatchError::TransportFatal(
+            "queue_step oid 9 is 2077 us behind the projected mcu clock".into(),
+        ))
+    }
+    fn dispatch_nudge(
+        &mut self,
+        _mcu_id: u32,
+        _axis: u8,
+        _motor_mask: u8,
+        _profile: &NudgeProfile,
+    ) -> Result<(), DispatchError> {
+        Ok(())
+    }
+}
+
 fn cfg() -> StreamConfig {
     cfg_cap(64)
 }
@@ -65,7 +90,7 @@ fn cfg_cap(max_buffer_moves: usize) -> StreamConfig {
         fit_tol_mm: 1e-3,
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves,
-        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
+        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, f64::INFINITY).unwrap(),
     }
 }
 
@@ -73,7 +98,7 @@ fn ctx(line_no: u32) -> MoveContext {
     MoveContext {
         extruder_axis: 3,
         feedrate_mm_s: 80.0,
-        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
+        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, f64::INFINITY).unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -219,6 +244,55 @@ fn streams_collinear_moves_to_a_contiguous_trajectory() {
     h.shutdown();
 }
 
+#[test]
+fn a_transport_fatal_halts_dispatch_without_aborting_the_process() {
+    let sink = DeadPumpSink::default();
+    let mut h = StreamWorkerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        sink.clone(),
+        Arc::default(),
+        None,
+    );
+
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    h.submit_move(line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0]))
+        .unwrap();
+    h.submit_move(line(3, [60.0, 0.0, 0.0], [90.0, 0.0, 0.0]))
+        .unwrap();
+    h.flush().unwrap();
+
+    assert_eq!(
+        *sink.attempts.lock_ok(),
+        1,
+        "the first failed dispatch halts the dispatcher; later segments are dropped, \
+         not retried against a dead pump"
+    );
+    h.shutdown();
+}
+
+#[test]
+fn a_flush_after_a_latched_pump_death_returns_instead_of_aborting() {
+    let (control, control_rx) = crossbeam_channel::unbounded::<crate::pump::PumpMsg>();
+    drop(control_rx);
+    let mut h = StreamWorkerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        Capture::default(),
+        Arc::default(),
+        Some(PumpLink {
+            control,
+            transport_fatal: Arc::new(Mutex::new(Some("endpoint went fatal".into()))),
+        }),
+    );
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    h.flush().unwrap();
+    h.shutdown();
+}
 #[test]
 fn dwell_inserts_a_time_gap_then_resumes() {
     let cap = Capture::default();
@@ -413,7 +487,7 @@ fn home_drip_moves_to_the_travel_endpoint_on_the_new_pipeline() {
 }
 
 #[test]
-fn nudge_dispatches_pieces_and_advances_time() {
+fn nudge_dispatches_the_profile_and_advances_time() {
     let cap = Capture::default();
     let mut h = StreamWorkerHandle::spawn(
         cfg(),
@@ -434,7 +508,7 @@ fn nudge_dispatches_pieces_and_advances_time() {
         })
         .unwrap();
     assert!(rx.recv().unwrap().is_ok());
-    assert!(cap.nudge_count() > 0, "no nudge pieces dispatched");
+    assert!(cap.nudge_count() > 0, "no nudge profile dispatched");
     assert!(
         h.last_move_time() > 0.0,
         "time did not advance past the nudge"
@@ -464,7 +538,10 @@ fn nudge_on_the_extruder_lane_travels_the_requested_distance() {
         })
         .unwrap();
     assert!(rx.recv().unwrap().is_ok(), "extruder nudge was rejected");
-    assert!(cap.nudge_count() > 0, "no extruder nudge pieces dispatched");
+    assert!(
+        cap.nudge_count() > 0,
+        "no extruder nudge profile dispatched"
+    );
     assert!(
         (cap.nudge_travel(3) - 5.0).abs() < 1e-6,
         "extruder lane travelled {} mm, expected 5",
@@ -589,16 +666,22 @@ fn co_move(line_no: u32, start: [f64; 3], end: [f64; 3], e_delta: f64) -> geomet
 fn live_retune_pressure_advance_applies_to_plans_after_the_swap() {
     struct ExtruderDeltaSink(Arc<Mutex<Vec<f64>>>);
     impl SegmentSink for ExtruderDeltaSink {
-        fn dispatch(&mut self, seg: &ShapedSegment) -> Result<(), DispatchError> {
+        fn dispatch(&mut self, seg: &ContinuousSegment) -> Result<(), DispatchError> {
             let t_mid = 0.5 * (seg.t_start + seg.t_end);
-            let de = eval(&seg.axes[3], t_mid) - eval(&seg.axes[3], seg.t_start);
-            self.0.lock().unwrap().push(de);
+            let at = |t: f64| {
+                seg.eval_axis(3, t)
+                    .expect("the extruder lane evaluates")
+                    .position
+            };
+            self.0.lock_ok().push(at(t_mid) - at(seg.t_start));
             Ok(())
         }
         fn dispatch_nudge(
             &mut self,
             _mcu_id: u32,
-            _piece: &motion_pipeline::NudgePiece,
+            _axis: u8,
+            _motor_mask: u8,
+            _profile: &NudgeProfile,
         ) -> Result<(), DispatchError> {
             Ok(())
         }
@@ -877,67 +960,51 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
         overspeed: Arc<std::sync::atomic::AtomicUsize>,
     }
     impl SegmentSink for MaxV {
-        fn dispatch(&mut self, seg: &ShapedSegment) -> Result<(), DispatchError> {
+        fn dispatch(&mut self, seg: &ContinuousSegment) -> Result<(), DispatchError> {
             // The corexy_fast world's exact motor config: CoreXY mixing, the
-            // 2083 mm/s per-motor step ceiling from its pulse timing. The
-            // wire-piece build panics on any -307-class overspeed track,
+            // 2083 mm/s per-motor step ceiling from its pulse timing.
+            // The enqueue path rejects any -307-class overspeed track,
             // exactly like the live dispatch stage.
             let cfg = vec![crate::mcu_config::McuAxisConfig {
                 ethercat: false,
                 mcu_id: 0,
                 axes: vec![0, 1, 2],
                 kinematics: crate::mcu_config::KINEMATICS_COREXY,
-                caps: crate::mcu_config::McuCaps {
-                    total_piece_memory: 62 * 1024,
-                },
                 max_motor_velocity: vec![2083.3, 2083.3, 208.3],
                 ..Default::default()
             }];
-            let seg_clone = seg.clone();
-            let cfg_clone = cfg.clone();
-            let result = std::panic::catch_unwind(move || {
-                crate::enqueue::enqueue_segment(
-                    &seg_clone,
-                    &cfg_clone,
-                    &crate::enqueue::EnqueueCtx {
-                        epoch_freq: &|_| None,
-                        t0: seg_clone.t_start,
-                        epoch: crate::anchor::StreamEpoch::Reposition,
-                        host_now: 0.0,
-                        lead_secs: crate::pump::MAX_LEAD_SECS,
-                        project: |_mcu, hs| (hs * 1_000_000.0) as u64,
-                        max_piece_secs: None,
-                    },
-                )
-            });
-            if result.is_err() {
+            let enqueued = crate::enqueue::enqueue_segment(
+                seg,
+                &cfg,
+                &crate::enqueue::EnqueueCtx {
+                    epoch_freq: &|_| None,
+                    clock_freq_hz: &|_| 1_000_000.0,
+                    lane_is_phase: &|_| false,
+                    t0: 1.0,
+                    epoch: crate::anchor::StreamEpoch::Reposition,
+                    host_now: 0.0,
+                    lead_secs: crate::pump::MAX_LEAD_SECS,
+                    project_exact: |_mcu, hs: f64| hs * 1_000_000.0,
+                },
+            );
+            if let Err(e) = enqueued {
                 eprintln!(
-                    "OVERSPEED seg line={} t=[{}..{}]",
+                    "OVERSPEED seg line={} t=[{}..{}]: {e}",
                     seg.source_line, seg.t_start, seg.t_end
                 );
-                for (axis, curve) in seg.axes.iter().enumerate().take(2) {
-                    for bp in nurbs::bezier::extract_bezier_pieces(curve) {
-                        let dur = bp.u_end - bp.u_start;
-                        let c1 = bp.coeffs.get(1).copied().unwrap_or(0.0);
-                        if dur < 1e-3 || c1.abs() / dur.max(1e-12) > 4000.0 {
-                            eprintln!(
-                                "  axis{axis} piece u=[{:.9}..{:.9}] dur={dur:.3e} coeffs={:?}",
-                                bp.u_start, bp.u_end, bp.coeffs
-                            );
-                        }
-                    }
-                }
                 self.overspeed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            let mut worst = self.worst.lock().unwrap();
+            let mut worst = self.worst.lock_ok();
             for axis in 0..seg.axes.len().min(2) {
-                let h = 1e-5;
                 let steps = 64;
                 for i in 0..steps {
-                    let t = seg.t_start
-                        + (seg.t_end - seg.t_start - h) * f64::from(i) / f64::from(steps);
-                    let v = (eval(&seg.axes[axis], t + h) - eval(&seg.axes[axis], t)) / h;
+                    let t =
+                        seg.t_start + (seg.t_end - seg.t_start) * f64::from(i) / f64::from(steps);
+                    let v = seg
+                        .eval_axis(axis, t)
+                        .expect("a dispatched lane evaluates on its own domain")
+                        .velocity;
                     if v.abs() > worst.0.abs() {
                         *worst = (v, t, axis);
                     }
@@ -948,7 +1015,9 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
         fn dispatch_nudge(
             &mut self,
             _mcu_id: u32,
-            _piece: &motion_pipeline::NudgePiece,
+            _axis: u8,
+            _motor_mask: u8,
+            _profile: &NudgeProfile,
         ) -> Result<(), DispatchError> {
             Ok(())
         }
@@ -969,7 +1038,7 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
         .expect("compiles"),
         trajectory::CompiledChain::default(),
     );
-    let limits = VelocityLimits::try_new(2800.0, 100000.0, 0.695, 1_000_000.0).unwrap();
+    let limits = VelocityLimits::try_new(2800.0, 100000.0, 0.695, f64::INFINITY).unwrap();
     let config = StreamConfig {
         corner: CornerFitConfig::default(),
         integration_tol: 1e-4,

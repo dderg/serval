@@ -60,12 +60,14 @@ pub unsafe extern "C" fn runtime_get_heartbeat(
     out_engine_state: *mut u8,
     out_fault_code: *mut u16,
     out_retired: *mut u32,
+    out_playback_clock: *mut u64,
     max_axes: usize,
 ) -> i32 {
     if rt.is_null()
         || out_engine_state.is_null()
         || out_fault_code.is_null()
         || out_retired.is_null()
+        || out_playback_clock.is_null()
     {
         return RUNTIME_ERR_NULL_PTR;
     }
@@ -81,12 +83,14 @@ pub unsafe extern "C" fn runtime_get_heartbeat(
         let fault_code = (engine.last_error() as u32 & 0xFFFF) as u16;
         let num_axes = engine.num_axes as usize;
         let counts = engine.retired_counts();
+        let clocks = engine.playback_clocks();
         let n_write = num_axes.min(max_axes);
 
         core::ptr::write(out_engine_state, engine_state);
         core::ptr::write(out_fault_code, fault_code);
         for i in 0..n_write {
             out_retired.add(i).write(counts[i]);
+            out_playback_clock.add(i).write(clocks[i]);
         }
         #[allow(clippy::cast_possible_truncation)]
         let result = n_write as i32;
@@ -94,10 +98,10 @@ pub unsafe extern "C" fn runtime_get_heartbeat(
     }
 }
 
-/// Foreground-only, call under `irq_save` — the ISR mutates the armed
-/// piece and a torn u64 read would fabricate a bogus stall window.
-/// Returns 1 with the armed piece window, 0 when nothing is armed,
-/// negative on error. `out_occupancy` is the axis ring depth in pieces.
+/// Foreground-only, call under `irq_save` — the ISR mutates the front sample
+/// run and a torn u64 read would fabricate a bogus stall window.
+/// Returns 1 with the front sample-run window, 0 when the lane is empty,
+/// negative on error. `out_occupancy` is the axis's queued sample-run count.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn runtime_axis_head_window(
     rt: *mut Runtime,
@@ -121,8 +125,8 @@ pub unsafe extern "C" fn runtime_axis_head_window(
         if idx >= engine.num_axes as usize {
             return RUNTIME_ERR_INVALID_ARG;
         }
-        *out_occupancy = engine.occupancy_counts().get(idx).copied().unwrap_or(0);
-        match engine.armed_window(idx) {
+        *out_occupancy = engine.occupancy_counts()[idx];
+        match engine.head_window(idx) {
             Some((start, end)) => {
                 *out_start = start;
                 *out_end = end;

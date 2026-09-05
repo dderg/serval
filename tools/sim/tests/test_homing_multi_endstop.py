@@ -13,10 +13,9 @@ Driving those pins is off in every other sim world -- an ioctl per edge
 distorts timing -- so _boot arms it through the shim's `set_step_emit`
 control verb before any motion.
 
-Every window is measured against the lane counter's own progress, never
-against wall-clock: the simulated world runs on a virtual clock that
-stalls under host load, so a fixed real-time window can catch a span in
-which nothing moved at all and read like a frozen motor.
+Every observation window follows the peer motor's physical step-pin edge
+counter. A suppressed primary motor no longer advances its corrected physical
+tracker, while the peer counter proves that the simulated world is moving.
 
 homing_retract_dist is 0 in the config, so each G28 is a single approach
 and the switches can be driven by hand from the test.
@@ -33,48 +32,32 @@ from tools.sim import configs
 
 pytestmark = pytest.mark.needs_elf
 
-# Runtime step-queue notification lines (src/linux/runtime_tick_host.c
-# step_gpio_lines): cartesian X lane -> gpio18, Y lane -> gpio7.
-X_LANE_LINE = 18
-Y_LANE_LINE = 7
 
 AXES = {
     "X": (
         0,
-        X_LANE_LINE,
         configs.DUAL_MOTOR_X_ENDSTOPS,
         configs.DUAL_MOTOR_X_STEP_PINS,
     ),
     "Y": (
         1,
-        Y_LANE_LINE,
         configs.DUAL_MOTOR_Y_ENDSTOPS,
         configs.DUAL_MOTOR_Y_STEP_PINS,
     ),
 }
 
-STEPS_PER_MM = (
-    configs.DUAL_MOTOR_MICROSTEPS * 200 / configs.DUAL_MOTOR_ROTATION_DISTANCE
+PHYSICAL_STEPS_PER_MM = (
+    2
+    * configs.DUAL_MOTOR_MICROSTEPS
+    * 200
+    / configs.DUAL_MOTOR_ROTATION_DISTANCE
 )
-MOVING_STEPS = int(0.5 * STEPS_PER_MM)
-# Steps already pulsed between the switch closing and the mcu applying the
-# suppress bit: one endstop poll period (1 ms) of travel at homing speed,
-# with margin. Drained from the lane before any suppression baseline.
-SUPPRESSED_EDGE_SLOP = 4
-# The freeze lands after a real-time delay the virtual clock does not wait
-# for: one endstop poll period on the same-MCU fast path, a full host round
-# trip (EndstopTrip on the switch MCU -> engine -> StepperSuppress to the
-# motor MCU) on the cross-MCU path. The settle loop keeps sampling lane
-# windows until the bound pin goes quiet or this budget runs out.
+MOVING_STEPS = int(0.5 * PHYSICAL_STEPS_PER_MM)
+SUPPRESSED_EDGE_SLOP = int(0.05 * PHYSICAL_STEPS_PER_MM)
 SUPPRESS_LATENCY_TIMEOUT_S = 30.0
-# A running motor pulses at least one edge per lane step; the lane and the
-# edge counters are read in separate round trips, so allow the same slop.
 RUNNING_EDGE_MIN = MOVING_STEPS - SUPPRESSED_EDGE_SLOP
-# Deceleration after the final Stop is ~40 steps at homing speed, so a bound
-# this tight separates "still suppressed through the stop" from "the mask was
-# dropped and the queued lane steps reached the motor".
-POST_STOP_EDGE_SLOP = 8
-LANE_PROGRESS_TIMEOUT_S = 60.0
+POST_STOP_EDGE_SLOP = int(0.1 * PHYSICAL_STEPS_PER_MM)
+EDGE_PROGRESS_TIMEOUT_S = 60.0
 HOME_TIMEOUT_S = 300.0
 POSITION_TOLERANCE_MM = 0.1
 MAX_STOP_OVERSHOOT_MM = 1.0
@@ -93,36 +76,22 @@ def _boot(sim_world):
     return world, control
 
 
-def _lane_steps(control, line: int) -> int:
-    resp = control.send(f"get_steps line={line}")
-    if not resp.startswith("steps="):
-        raise AssertionError(f"get_steps line={line}: {resp!r}")
-    return int(resp.split()[0].split("=", 1)[1])
-
-
 def _edges(control, pins) -> list[int]:
     return [control.gpio_edges(chip, line) for chip, line in pins]
 
 
-def _sample_while_lane_advances(control, pins, line, lane_target):
-    """Step-pin edges accumulated over exactly the span in which the lane
-    counter advances `lane_target` steps. Returns (lane_advanced, edges)
-    so a caller can tell "this motor is frozen" apart from "the whole
-    simulated world stopped moving"."""
-    lane_start = _lane_steps(control, line)
+def _sample_while_peer_advances(control, pins, peer_target):
     start = _edges(control, pins)
-    lane_advanced = 0
     advanced = [0] * len(pins)
-    deadline = time.monotonic() + LANE_PROGRESS_TIMEOUT_S
+    deadline = time.monotonic() + EDGE_PROGRESS_TIMEOUT_S
     while time.monotonic() < deadline:
-        lane_advanced = abs(_lane_steps(control, line) - lane_start)
         advanced = [
             value - base for value, base in zip(_edges(control, pins), start)
         ]
-        if lane_advanced >= lane_target:
+        if advanced[1] >= peer_target:
             break
         time.sleep(0.01)
-    return lane_advanced, advanced
+    return advanced
 
 
 def _wait_for_edges(control, pins, start, minimum, timeout=60.0) -> list[int]:
@@ -138,14 +107,13 @@ def _wait_for_edges(control, pins, start, minimum, timeout=60.0) -> list[int]:
     return advanced
 
 
-def _wait_until_moving(control, line: int, timeout: float = 60.0) -> None:
-    start = _lane_steps(control, line)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if abs(_lane_steps(control, line) - start) >= MOVING_STEPS:
-            return
-        time.sleep(0.01)
-    raise AssertionError(f"lane on line {line} never started stepping")
+def _wait_until_moving(control, pins, timeout: float = 60.0) -> None:
+    start = _edges(control, pins)
+    advanced = _wait_for_edges(control, pins, start, MOVING_STEPS, timeout)
+    if not all(value >= MOVING_STEPS for value in advanced):
+        raise AssertionError(
+            f"motors on step pins {pins} never started stepping: {advanced}"
+        )
 
 
 class _GcodeThread(threading.Thread):
@@ -165,17 +133,15 @@ class _GcodeThread(threading.Thread):
             self.failure = exc
 
 
-def _assert_split_after_trip(
-    label, switch, lane_advanced, bound_pin, bound, peer_pin, peer
-):
+def _assert_split_after_trip(label, switch, bound_pin, bound, peer_pin, peer):
     report = (
-        f"lane advanced {lane_advanced} steps, bound motor {bound_pin}"
-        f" {bound} edges, peer motor {peer_pin} {peer} edges"
+        f"bound motor {bound_pin} {bound} edges, peer motor {peer_pin}"
+        f" {peer} edges"
     )
-    assert lane_advanced >= MOVING_STEPS, (
-        f"{label}: the lane stopped streaming after only switch {switch}"
-        f" of the group tripped -- the run must continue until the last"
-        f" switch ({report})"
+    assert peer >= MOVING_STEPS, (
+        f"{label}: the peer motor stopped streaming after only switch"
+        f" {switch} of the group tripped -- the run must continue until"
+        f" the last switch ({report})"
     )
     assert bound <= SUPPRESSED_EDGE_SLOP, (
         f"{label}: the motor carrying switch {switch} kept pulsing step pin"
@@ -224,7 +190,7 @@ def _home_with_staggered_trips(
     max_overshoot_mm=MAX_STOP_OVERSHOOT_MM,
 ):
     switch_control = switch_control if switch_control is not None else control
-    axis_index, lane_line, endstops, step_pins = AXES[axis]
+    axis_index, endstops, step_pins = AXES[axis]
     first_switch, last_switch = endstops[first_index], endstops[1 - first_index]
     bound_pin, peer_pin = step_pins[first_index], step_pins[1 - first_index]
     watched = (bound_pin, peer_pin)
@@ -232,21 +198,21 @@ def _home_with_staggered_trips(
     homing = _GcodeThread(world, f"G28 {axis}")
     homing.start()
     try:
-        _wait_until_moving(control, lane_line)
-        lane_pre, (bound_pre, peer_pre) = _sample_while_lane_advances(
-            control, watched, lane_line, MOVING_STEPS
+        _wait_until_moving(control, step_pins)
+        bound_pre, peer_pre = _sample_while_peer_advances(
+            control, watched, MOVING_STEPS
         )
         assert bound_pre >= RUNNING_EDGE_MIN and peer_pre >= RUNNING_EDGE_MIN, (
-            f"{axis} approach must pulse both motors before any trip: lane"
-            f" advanced {lane_pre} steps, {bound_pin} advanced {bound_pre}"
-            f" edges, {peer_pin} advanced {peer_pre}"
+            f"{axis} approach must pulse both motors before any trip:"
+            f" {bound_pin} advanced {bound_pre} edges, {peer_pin} advanced"
+            f" {peer_pre}"
         )
 
         switch_control.set_gpio_input(*first_switch, 1)
         deadline = time.monotonic() + SUPPRESS_LATENCY_TIMEOUT_S
         while True:
-            lane_post, (bound_post, peer_post) = _sample_while_lane_advances(
-                control, watched, lane_line, MOVING_STEPS
+            bound_post, peer_post = _sample_while_peer_advances(
+                control, watched, MOVING_STEPS
             )
             if bound_post <= SUPPRESSED_EDGE_SLOP:
                 break
@@ -255,7 +221,6 @@ def _home_with_staggered_trips(
         _assert_split_after_trip(
             f"G28 {axis}",
             first_switch,
-            lane_post,
             bound_pin,
             bound_post,
             peer_pin,
@@ -353,6 +318,31 @@ def test_cross_mcu_staggered_trip_suppresses_only_the_tripped_motor(
     )
 
 
+def test_cross_mcu_switches_leave_the_switch_mcus_own_lanes_alone(sim_world):
+    """Issue #420: both X switches sit on the aux MCU, which also drives a
+    stepper of its own (Z). A switch bound to a motor on another MCU must
+    not arm the aux MCU's local lanes as a stand-in trip stop -- two switches
+    doing so collide on the same stepper's trsync signal and the aux MCU
+    shuts down before the first step."""
+    world = sim_world(
+        lambda w: configs.dual_motor_xy_cross_mcu_config(
+            w.h7_pty, w.f4_pty, str(w.gcode_dir), z_on_endstop_mcu=True
+        ),
+        dual_mcu=True,
+    )
+    control = world.sim_control("h7")
+    control.enable_step_pin_emit()
+    switch_control = world.sim_control("f4")
+    _home_with_staggered_trips(
+        world,
+        control,
+        "X",
+        0,
+        switch_control=switch_control,
+        max_overshoot_mm=CROSS_MCU_MAX_STOP_OVERSHOOT_MM,
+    )
+
+
 def test_abort_after_first_trip_leaves_no_suppression(sim_world):
     """One switch of the pair never closes. The approach runs out of travel
     and the host fails loudly -- naming the sibling it is still waiting on --
@@ -360,7 +350,7 @@ def test_abort_after_first_trip_leaves_no_suppression(sim_world):
     disarm is what clears the first motor's suppress bit; if it leaks, the
     motor stays silent for the rest of the session."""
     world, control = _boot(sim_world)
-    _axis_index, lane_line, endstops, step_pins = AXES["X"]
+    _axis_index, endstops, step_pins = AXES["X"]
     first_switch = endstops[0]
     bound_pin, peer_pin = step_pins[0], step_pins[1]
 
@@ -371,12 +361,12 @@ def test_abort_after_first_trip_leaves_no_suppression(sim_world):
     )
     homing.start()
     try:
-        _wait_until_moving(control, lane_line)
+        _wait_until_moving(control, step_pins)
         control.set_gpio_input(*first_switch, 1)
         deadline = time.monotonic() + SUPPRESS_LATENCY_TIMEOUT_S
         while True:
-            lane_post, (bound_post, peer_post) = _sample_while_lane_advances(
-                control, (bound_pin, peer_pin), lane_line, MOVING_STEPS
+            bound_post, peer_post = _sample_while_peer_advances(
+                control, (bound_pin, peer_pin), MOVING_STEPS
             )
             if bound_post <= SUPPRESSED_EDGE_SLOP:
                 break
@@ -385,7 +375,6 @@ def test_abort_after_first_trip_leaves_no_suppression(sim_world):
         _assert_split_after_trip(
             "_HOME_TEST AXIS=X",
             first_switch,
-            lane_post,
             bound_pin,
             bound_post,
             peer_pin,

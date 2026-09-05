@@ -54,7 +54,7 @@ class MotionDebugCommands:
         gcode.register_command(
             "MCU_SIM_ARMED_WINDOW",
             self.cmd_MCU_SIM_ARMED_WINDOW,
-            desc="[sim] Report the armed piece MCU-clock window for an axis",
+            desc="[sim] Report the front sample-run window for an axis",
         )
         gcode.register_command(
             "DIAG_DUMP",

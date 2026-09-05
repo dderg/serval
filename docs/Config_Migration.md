@@ -243,7 +243,7 @@ they belong to.
 | `[input_shaper] shaper_type*`, `shaper_freq*` | Named smoothing post-processors on the axis chains. `shaper_type: mzv` + `shaper_freq: F` maps to `type: smooth_mzv` + `frequency_hz: F`. No EI-family kernel exists. |
 | `[tmc2209 stepper_x]`, `[tmc5160 stepper_y]`, `[tmc2130 ...]` | Rename the suffix to the motor's name (`[tmc2209 a_motor]`). Driver options are unchanged. |
 | `endstop_pin: tmc2209_stepper_x:virtual_endstop` | `endstop_pin: tmc2209_<motor>:virtual_endstop` on `[axis <name>]`. |
-| `high_precision_step_compress` (any section) | **No equivalent.** Delete it. The MCU plays trajectory pieces, so there is no step compression to tune. |
+| `[stepper_*] high_precision_step_compress` | Same opt-in, moved with the stepper fields to `[motor <name>] high_precision_step_compress: True`. Motors default to classic compression. |
 | `[extruder] pressure_advance` | `[post_processor <name>] type: linear_pressure_advance`, `k: ...`; put its name in the extruder axis chain. |
 | `[extruder] pressure_advance_smooth_time` | `[post_processor <name>] type: smooth_triangle`, `smooth_time: ...`; put its name in the extruder axis chain. |
 | `[extruder] max_extrude_cross_section`, `max_extrude_only_distance`, `instantaneous_corner_velocity` | **Rejected loudly** — "the planner has no such concept". Delete them. |

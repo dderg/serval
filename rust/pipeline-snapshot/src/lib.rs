@@ -5,12 +5,23 @@
 //! its intermediate fitted-stage output (pre-axis-split spatial geometry)
 //! tapped alongside the final shaped output.
 
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use geometry::path::CurvatureProfile;
 use geometry::path::lowering::PositionProfile;
-use nurbs::bezier::extract_bezier_pieces;
-use serde::Serialize;
-use trajectory::{AxisChainSet, ShapedSegment};
+use geometry::path::{Arc as ArcSegment, Clothoid, CurvatureProfile, Line, PathSegment, Segment};
+use geometry::{FollowerDemand, LawSegment, Move, ScalarLaw, SourceRange, VelocityLimits};
+use nurbs::ScalarNurbs;
+use serde::{Deserialize, Serialize};
+/// The exact state every consumer reads a carrier through. Owned by
+/// `trajectory`; re-exported so a snapshot consumer needs this crate only.
+pub use trajectory::continuous::Pvaj;
+use trajectory::continuous::{
+    AnalyticMoveSpan, BuzzProfile, NudgeProfile, SurfaceMode, interior_time_above,
+    interior_time_below,
+};
+use trajectory::{AxisChainSet, ContinuousAxis, ContinuousSegment};
 
 pub mod audit;
 pub mod waypoints;
@@ -18,15 +29,16 @@ pub mod waypoints;
 use motion_pipeline::fit_stage::{FitDriver, FitStage};
 use motion_pipeline::planner::Planner;
 use motion_pipeline::{
-    FitTol, LoweredItem, Lowerer, PlannedItem, ShapedItem, Shaper, StreamConfig, StreamInput,
+    BaseItem, FitTol, Lowerer, PlannedItem, Shaper, StreamConfig, StreamInput, TrajectoryItem,
 };
 
 pub use planner_config::{AxisDecl, PostProcessorDecl};
 
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 /// The E lane rides as axis 3, past the three spatial axes — the same index the
 /// production bridge and the seam harness assign the extruder.
 pub const EXTRUDER_AXIS: usize = 3;
-// Position tolerance for the cubic lowering — the same order the streamer ships.
+// Position tolerance used when a post-processor must fit a non-polynomial signal.
 pub const TRAJECTORY_FIT_TOL_MM: f64 = 0.005;
 pub const TRAJECTORY_FIT_TOL_ACCEL_MM_S2: f64 = 50.0;
 pub const VELOCITY_INTEGRATION_TOL: f64 = 1e-7;
@@ -72,7 +84,7 @@ pub struct SnapshotParams {
     pub post_processor_decls: Vec<PostProcessorDecl>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SeamMetric {
     pub t: f64,
     pub axis: usize,
@@ -81,29 +93,20 @@ pub struct SeamMetric {
     pub da: f64,
 }
 
-/// The full snapshot dict: raw input path, the lowered per-axis polynomial
-/// trajectory the firmware actually executes (each piece `[t0, t1, c0, c1,
-/// ..., cn]` — monomial coefficients in local time `tau = t - t0`, trailing
-/// near-zero coefficients trimmed), and the seam continuity metrics computed
-/// from those pieces. Serializes to the exact JSON schema the snapshot
-/// baselines and the web viewers consume.
-#[derive(Debug, Serialize)]
+/// The full snapshot dict: the raw input path plus the exact trajectory the
+/// firmware executes — the shaped carriers themselves, serialized verbatim,
+/// never a polynomial fit of them — and the seam continuity metrics measured
+/// from one-sided carrier evaluation.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Snapshot {
+    pub schema_version: u32,
     pub raw_x: Vec<f64>,
     pub raw_y: Vec<f64>,
-    pub traj_x_pieces: Vec<Vec<f64>>,
-    pub traj_y_pieces: Vec<Vec<f64>>,
-    pub traj_z_pieces: Vec<Vec<f64>>,
-    pub traj_e_pieces: Vec<Vec<f64>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub toolhead_x_pieces: Option<Vec<Vec<f64>>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub toolhead_y_pieces: Option<Vec<Vec<f64>>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub toolhead_z_pieces: Option<Vec<Vec<f64>>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub toolhead_e_pieces: Option<Vec<Vec<f64>>>,
-    pub traj_t_end: f64,
+    pub trajectory: ExactTrajectory,
+    /// The shaped signal before the motor-side derivative-gain stages,
+    /// present exactly when some chain makes the motor command depart from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolhead: Option<ExactTrajectory>,
     pub traversal_time_s: f64,
     pub seam_max_dp: [f64; 4],
     pub seam_max_dv: [f64; 4],
@@ -204,31 +207,32 @@ pub fn pipeline_snapshot_streaming(
 
 fn snapshot_from_segments(
     raw_points: &[(f64, f64)],
-    shaped: &[ShapedSegment],
-    toolhead: Option<&[ShapedSegment]>,
+    shaped: &[ContinuousSegment],
+    toolhead: Option<&[ContinuousSegment]>,
 ) -> Snapshot {
-    let traj = collect_trajectory_pieces(shaped);
-    let seams = seam_metrics(&traj);
-    let toolhead_traj = toolhead.map(collect_trajectory_pieces);
+    let trajectory = exact_trajectory(shaped);
+    let seams = seam_metrics(&trajectory);
 
     Snapshot {
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
         raw_x: raw_points.iter().map(|p| p.0).collect(),
         raw_y: raw_points.iter().map(|p| p.1).collect(),
-        traj_x_pieces: traj.x,
-        traj_y_pieces: traj.y,
-        traj_z_pieces: traj.z,
-        traj_e_pieces: traj.e,
-        toolhead_x_pieces: toolhead_traj.as_ref().map(|t| t.x.clone()),
-        toolhead_y_pieces: toolhead_traj.as_ref().map(|t| t.y.clone()),
-        toolhead_z_pieces: toolhead_traj.as_ref().map(|t| t.z.clone()),
-        toolhead_e_pieces: toolhead_traj.map(|t| t.e),
-        traj_t_end: traj.t_end,
-        traversal_time_s: traj.t_end,
+        traversal_time_s: trajectory.t_end(),
+        trajectory,
+        toolhead: toolhead.map(exact_trajectory),
         seam_max_dp: seams.max_dp,
         seam_max_dv: seams.max_dv,
         seam_max_da: seams.max_da,
         worst_seams: seams.worst,
     }
+}
+
+/// The shaped output is the pipeline's own, so a carrier it cannot represent
+/// exactly is a pipeline bug, not a caller error: the snapshot refuses to
+/// approximate it.
+fn exact_trajectory(shaped: &[ContinuousSegment]) -> ExactTrajectory {
+    ExactTrajectory::from_segments(shaped)
+        .unwrap_or_else(|error| panic!("pipeline-snapshot: {error}"))
 }
 
 pub fn build_moves(
@@ -378,8 +382,8 @@ pub fn run_pipeline(
     axis_chains: AxisChainSet,
 ) -> (
     Vec<geometry::Move>,
-    Vec<ShapedSegment>,
-    Option<Vec<ShapedSegment>>,
+    Vec<ContinuousSegment>,
+    Option<Vec<ContinuousSegment>>,
 ) {
     run_pipeline_streaming(moves, config, axis_chains, |_, _| {})
 }
@@ -395,11 +399,11 @@ pub fn run_pipeline_streaming(
     moves: &[geometry::Move],
     config: StreamConfig,
     axis_chains: AxisChainSet,
-    mut on_progress: impl FnMut(&[ShapedSegment], Option<&[ShapedSegment]>),
+    mut on_progress: impl FnMut(&[ContinuousSegment], Option<&[ContinuousSegment]>),
 ) -> (
     Vec<geometry::Move>,
-    Vec<ShapedSegment>,
-    Option<Vec<ShapedSegment>>,
+    Vec<ContinuousSegment>,
+    Option<Vec<ContinuousSegment>>,
 ) {
     let spatial_home = moves
         .iter()
@@ -412,7 +416,13 @@ pub fn run_pipeline_streaming(
     let (lowered_tx, lowered_rx) = unbounded();
     let (shaped_tx, shaped_rx) = unbounded();
     let capture_toolhead = axis_chains.has_motor_side_stages();
-    let mut shaper = Shaper::new(axis_chains.clone());
+    let mut shaper = Shaper::new(
+        axis_chains.clone(),
+        FitTol {
+            pos_mm: config.fit_tol_mm,
+            accel_mm_s2: config.fit_tol_accel_mm_s2,
+        },
+    );
     let toolhead_rx = if capture_toolhead {
         let (toolhead_tx, toolhead_rx) = unbounded();
         shaper = shaper.with_toolhead_tap(toolhead_tx);
@@ -427,15 +437,7 @@ pub fn run_pipeline_streaming(
         planner: Planner::new(config),
         planned_tx,
         planned_rx,
-        lowerer: Lowerer::new(
-            FitTol {
-                pos_mm: config.fit_tol_mm,
-                accel_mm_s2: config.fit_tol_accel_mm_s2,
-            },
-            axis_chains,
-            home_pos,
-            0.0,
-        ),
+        lowerer: Lowerer::new(axis_chains, home_pos, 0.0),
         lowered_tx,
         lowered_rx,
         shaper,
@@ -494,15 +496,15 @@ struct PipelineDrive {
     planned_tx: Sender<PlannedItem>,
     planned_rx: Receiver<PlannedItem>,
     lowerer: Lowerer,
-    lowered_tx: Sender<LoweredItem>,
-    lowered_rx: Receiver<LoweredItem>,
+    lowered_tx: Sender<BaseItem>,
+    lowered_rx: Receiver<BaseItem>,
     shaper: Shaper,
-    shaped_tx: Sender<ShapedItem>,
-    shaped_rx: Receiver<ShapedItem>,
-    toolhead_rx: Option<Receiver<ShapedSegment>>,
+    shaped_tx: Sender<TrajectoryItem>,
+    shaped_rx: Receiver<TrajectoryItem>,
+    toolhead_rx: Option<Receiver<ContinuousSegment>>,
     fitted: Vec<geometry::Move>,
-    shaped: Vec<ShapedSegment>,
-    toolhead: Vec<ShapedSegment>,
+    shaped: Vec<ContinuousSegment>,
+    toolhead: Vec<ContinuousSegment>,
 }
 
 impl PipelineDrive {
@@ -529,7 +531,7 @@ impl PipelineDrive {
             );
         }
         while let Ok(item) = self.shaped_rx.try_recv() {
-            if let ShapedItem::Seg(seg) = item {
+            if let TrajectoryItem::Seg(seg) = item {
                 self.shaped.push(seg);
             }
         }
@@ -541,57 +543,874 @@ impl PipelineDrive {
     }
 }
 
-/// The trajectory the firmware actually executes: the host lowering's own
-/// per-axis polynomial pieces of position-versus-time. Each row is
-/// `[t0, t1, c0, c1, ..., cn]` — monomial coefficients in local time
-/// `tau = t - t0`, trailing near-zero coefficients trimmed so each piece's
-/// true degree is visible in the snapshot. The visualizer differentiates
-/// these analytically, so every derivative is exact and continuous — no
-/// position sampling, and nothing copied from the planner's own acceleration,
-/// so it stays an independent check.
-#[derive(Debug)]
-pub struct TrajectoryPieces {
-    pub x: Vec<Vec<f64>>,
-    pub y: Vec<Vec<f64>>,
-    pub z: Vec<Vec<f64>>,
-    pub e: Vec<Vec<f64>>,
+/// The exact trajectory the firmware executes: the shaped carriers
+/// themselves. One analytic move span drives every axis of its move and one
+/// shaper fit window is shared by consecutive segments, so spans and spline
+/// curves are interned into tables the per-axis rows index. Tables and lanes
+/// grow in emission order only, so a streaming prefix snapshot is a literal
+/// prefix of the final one.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExactTrajectory {
+    pub spans: Vec<AnalyticSpan>,
+    pub curves: Vec<SplineCurve>,
+    pub axes: [Vec<CarrierRow>; 4],
+    t_start: f64,
+    t_end: f64,
+    #[serde(skip)]
+    runtime: OnceLock<Result<Runtime, ExactEvalError>>,
+}
+
+/// The window of the trajectory a carrier owns. A shaper fit window reaches
+/// past the segment that carries it; the row is the part this lane answers
+/// for, and both sides of every seam are read from the row that owns the
+/// instant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CarrierRow {
+    pub t0: f64,
+    pub t1: f64,
+    pub carrier: Carrier,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Carrier {
+    Analytic {
+        span: usize,
+        axis: usize,
+    },
+    Spline {
+        curve: usize,
+    },
+    RelativeSpline {
+        base_position: f64,
+        curve: usize,
+    },
+    PiecewiseRelativeSpline {
+        pieces: Vec<RelativeSplinePiece>,
+    },
+    Hold {
+        position: f64,
+    },
+    Nudge {
+        delta_mm: f64,
+        speed_mm_s: f64,
+        accel_mm_s2: f64,
+        t_start: f64,
+    },
+    Buzz {
+        base_position: f64,
+        sign: f64,
+        amplitude_mm: f64,
+        freq_start_hz: f64,
+        freq_end_hz: f64,
+        duration: f64,
+        ramp: f64,
+        t_start: f64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RelativeSplinePiece {
+    pub base_position: f64,
+    pub curve: usize,
+    pub t_start: f64,
     pub t_end: f64,
 }
 
-pub fn collect_trajectory_pieces(shaped: &[ShapedSegment]) -> TrajectoryPieces {
-    fn collect(dst: &mut Vec<Vec<f64>>, axis: Option<&nurbs::ScalarNurbs>) {
-        let Some(axis) = axis else { return };
-        for p in extract_bezier_pieces(axis) {
-            let scale = p.coeffs.iter().fold(0.0_f64, |m, c| m.max(c.abs()));
-            let mut coeffs = p.coeffs.clone();
-            while coeffs.len() > 1
-                && coeffs
-                    .last()
-                    .is_some_and(|c| c.abs() <= 1e-12 * (scale + 1.0))
-            {
-                coeffs.pop();
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SplineCurve {
+    pub degree: u8,
+    pub knots: Vec<f64>,
+    pub control_points: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "law", rename_all = "snake_case")]
+pub enum PhaseLaw {
+    ConstAccel {
+        a0: f64,
+    },
+    DiskRail {
+        accel: f64,
+        kappa0: f64,
+        sigma: f64,
+        brake: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Phase {
+    pub t0: f64,
+    pub dt: f64,
+    pub s0: f64,
+    pub v0: f64,
+    pub ds: f64,
+    pub v1: f64,
+    #[serde(flatten)]
+    pub law: PhaseLaw,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Follower {
+    pub axis_index: usize,
+    pub ratio: f64,
+    pub ratio_end: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Limits {
+    pub max_velocity_mm_s: f64,
+    pub accel_mm_s2: f64,
+    pub corner_deviation_mm: f64,
+    /// `None` is jerk limiting off: an infinite bound is JSON `null` on the
+    /// way out and unrecoverable on the way back.
+    pub max_jerk_mm_s3: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Spatial {
+    Line {
+        start: [f64; 3],
+        end: [f64; 3],
+    },
+    Arc {
+        origin: [f64; 3],
+        u: [f64; 3],
+        v: [f64; 3],
+        radius: f64,
+        start_angle: f64,
+        sweep: f64,
+    },
+    Clothoid {
+        start_pose: [f64; 3],
+        u: [f64; 3],
+        v: [f64; 3],
+        kappa_0: f64,
+        sigma: f64,
+        length: f64,
+    },
+}
+
+/// A scalar-law phase sequence over one move's spatial geometry: the
+/// executable carrier, as its constructor parameters. Rebuilt through
+/// `AnalyticMoveSpan::try_new`, so a consumer evaluates the very curve the
+/// planner emitted — an arc's per-axis position is never a polynomial of
+/// time, and this schema never pretends otherwise.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnalyticSpan {
+    pub t_start: f64,
+    pub t_end: f64,
+    pub source_distance_origin: f64,
+    pub phases: Vec<Phase>,
+    pub axis_start_positions: Vec<f64>,
+    pub surface_z_offset: Option<f64>,
+    pub spatial: Option<Spatial>,
+    pub virtual_path_mm: Option<f64>,
+    pub followers: Vec<Follower>,
+    pub feedrate_mm_s: f64,
+    pub limits: Limits,
+    pub source_start_line: u32,
+    pub source_end_line: u32,
+}
+
+/// Which carrier owns an instant that two of them meet at. `Left` is the
+/// limit from below, `Right` the limit from above, both evaluated
+/// infinitesimally inside the owning row so a phase joint, a knot or a seam
+/// reports the jump it really executes instead of one side of it twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SampleSide {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum ExactEvalError {
+    #[error("axis {axis} is outside the snapshot's four lanes")]
+    AxisOutOfRange { axis: usize },
+    #[error("axis {axis} has no carrier covering t={t}")]
+    OutsideDomain { axis: usize, t: f64 },
+    #[error("axis {axis} carrier at t={t}: {source}")]
+    Carrier {
+        axis: usize,
+        t: f64,
+        source: trajectory::ContinuousError,
+    },
+    #[error("{location} cannot be represented exactly: {reason}")]
+    Unrepresentable { location: String, reason: String },
+}
+
+/// The carriers the rows index. In-process this is the live carrier set the
+/// shaper emitted; after a round trip through the schema it is rebuilt
+/// through the runtime constructors, so evaluation runs the same code either
+/// way.
+#[derive(Debug)]
+struct Runtime {
+    axes: [Vec<ContinuousAxis>; 4],
+}
+
+/// How far outside a row's window a sample may land before it is a domain
+/// error rather than the rounding of a display grid: the device's step-time
+/// resolution.
+const ROW_DOMAIN_SLACK_S: f64 = 1e-9;
+
+impl ExactTrajectory {
+    pub fn from_segments(shaped: &[ContinuousSegment]) -> Result<Self, ExactEvalError> {
+        let mut spans = Vec::new();
+        let mut curves = Vec::new();
+        let mut span_slots = HashMap::new();
+        let mut curve_slots = HashMap::new();
+        let mut axes: [Vec<CarrierRow>; 4] = std::array::from_fn(|_| Vec::new());
+        let mut carriers: [Vec<ContinuousAxis>; 4] = std::array::from_fn(|_| Vec::new());
+        for seg in shaped {
+            for axis in 0..4 {
+                let Some(source) = seg.axes.get(axis) else {
+                    continue;
+                };
+                let carrier = capture_carrier(
+                    source,
+                    &mut spans,
+                    &mut span_slots,
+                    &mut curves,
+                    &mut curve_slots,
+                )
+                .map_err(|reason| ExactEvalError::Unrepresentable {
+                    location: format!("axis {axis} carrier at t={}", seg.t_start),
+                    reason,
+                })?;
+                axes[axis].push(CarrierRow {
+                    t0: seg.t_start,
+                    t1: seg.t_end,
+                    carrier,
+                });
+                carriers[axis].push(source.clone());
             }
-            let mut row = vec![p.u_start, p.u_end];
-            row.extend_from_slice(&coeffs);
-            dst.push(row);
+        }
+        let runtime = OnceLock::new();
+        runtime
+            .set(Ok(Runtime { axes: carriers }))
+            .expect("freshly created cell is empty");
+        Ok(Self {
+            spans,
+            curves,
+            axes,
+            t_start: shaped.first().map_or(0.0, |seg| seg.t_start),
+            t_end: shaped.last().map_or(0.0, |seg| seg.t_end),
+            runtime,
+        })
+    }
+
+    /// Rows and tables as given, with the bounds the rows themselves span.
+    /// Carriers are rebuilt from the tables on first evaluation, so this
+    /// assembles trajectories the pipeline never emitted — including the
+    /// malformed ones an oracle has to be tested against.
+    pub fn from_parts(
+        spans: Vec<AnalyticSpan>,
+        curves: Vec<SplineCurve>,
+        axes: [Vec<CarrierRow>; 4],
+    ) -> Self {
+        let t_start = axes
+            .iter()
+            .filter_map(|rows| rows.first())
+            .map(|row| row.t0)
+            .filter(|t| t.is_finite())
+            .fold(f64::INFINITY, f64::min);
+        let t_end = axes
+            .iter()
+            .filter_map(|rows| rows.last())
+            .map(|row| row.t1)
+            .filter(|t| t.is_finite())
+            .fold(f64::NEG_INFINITY, f64::max);
+        Self {
+            spans,
+            curves,
+            axes,
+            t_start: if t_start.is_finite() { t_start } else { 0.0 },
+            t_end: if t_end.is_finite() { t_end } else { 0.0 },
+            runtime: OnceLock::new(),
         }
     }
 
-    let mut out = TrajectoryPieces {
-        x: Vec::new(),
-        y: Vec::new(),
-        z: Vec::new(),
-        e: Vec::new(),
-        t_end: 0.0,
-    };
-    for seg in shaped {
-        collect(&mut out.x, seg.axes.first());
-        collect(&mut out.y, seg.axes.get(1));
-        collect(&mut out.z, seg.axes.get(2));
-        collect(&mut out.e, seg.axes.get(3));
-        out.t_end = seg.t_end;
+    pub fn t_start(&self) -> f64 {
+        self.t_start
     }
-    out
+
+    pub fn t_end(&self) -> f64 {
+        self.t_end
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.axes.iter().all(|rows| rows.is_empty())
+    }
+
+    pub fn rows(&self, axis: usize) -> &[CarrierRow] {
+        self.axes.get(axis).map_or(&[], Vec::as_slice)
+    }
+
+    /// Every instant at which some axis changes carrier, phase, knot or
+    /// profile interval — the grid a consumer must land on to see the
+    /// trajectory's real corners.
+    pub fn breakpoints(&self) -> Vec<f64> {
+        let mut out = Vec::new();
+        for axis in 0..4 {
+            self.append_axis_breakpoints(axis, &mut out);
+        }
+        sorted_dedup(out)
+    }
+
+    pub fn axis_breakpoints(&self, axis: usize) -> Vec<f64> {
+        let mut out = Vec::new();
+        self.append_axis_breakpoints(axis, &mut out);
+        sorted_dedup(out)
+    }
+
+    /// The row's own window plus the carrier's breakpoints strictly inside
+    /// it: a fit window's knots beyond the window belong to whichever row
+    /// owns them.
+    pub fn row_breakpoints(&self, axis: usize, row: usize) -> Vec<f64> {
+        let window = &self.rows(axis)[row];
+        let mut out = vec![window.t0, window.t1];
+        out.extend(
+            self.carrier(axis, row)
+                .breakpoints()
+                .into_iter()
+                .filter(|t| *t > window.t0 && *t < window.t1),
+        );
+        sorted_dedup(out)
+    }
+
+    pub fn eval_axis(&self, axis: usize, t: f64, side: SampleSide) -> Result<Pvaj, ExactEvalError> {
+        if axis >= 4 {
+            return Err(ExactEvalError::AxisOutOfRange { axis });
+        }
+        let rows = self.rows(axis);
+        if rows.is_empty() {
+            return Err(ExactEvalError::OutsideDomain { axis, t });
+        }
+        let row = match side {
+            SampleSide::Left => rows.partition_point(|row| row.t0 < t).saturating_sub(1),
+            SampleSide::Right => rows.partition_point(|row| row.t1 <= t).min(rows.len() - 1),
+        };
+        self.eval_row(axis, row, t, side)
+    }
+
+    /// The one-sided state of a named row, for a caller that already knows
+    /// which side of a seam it stands on — across a hold gap the two sides
+    /// live at different instants, so the row cannot be searched for.
+    pub fn eval_row(
+        &self,
+        axis: usize,
+        row: usize,
+        t: f64,
+        side: SampleSide,
+    ) -> Result<Pvaj, ExactEvalError> {
+        let window = self
+            .axes
+            .get(axis)
+            .and_then(|rows| rows.get(row))
+            .ok_or(ExactEvalError::AxisOutOfRange { axis })?;
+        if t < window.t0 - ROW_DOMAIN_SLACK_S || t > window.t1 + ROW_DOMAIN_SLACK_S {
+            return Err(ExactEvalError::OutsideDomain { axis, t });
+        }
+        let first_interior = interior_time_above(window.t0);
+        let last_interior = interior_time_below(window.t1);
+        let t_eval = match side {
+            SampleSide::Left => interior_time_below(t),
+            SampleSide::Right => interior_time_above(t),
+        }
+        .clamp(
+            first_interior.min(last_interior),
+            first_interior.max(last_interior),
+        );
+        self.runtime()?.axes[axis][row]
+            .eval_pvaj(t_eval)
+            .map_err(|source| ExactEvalError::Carrier {
+                axis,
+                t: t_eval,
+                source,
+            })
+    }
+
+    fn append_axis_breakpoints(&self, axis: usize, out: &mut Vec<f64>) {
+        for row in 0..self.rows(axis).len() {
+            out.extend(self.row_breakpoints(axis, row));
+        }
+    }
+
+    fn carrier(&self, axis: usize, row: usize) -> &ContinuousAxis {
+        &self
+            .runtime()
+            .unwrap_or_else(|error| {
+                panic!("pipeline-snapshot: exact trajectory is not evaluable: {error}")
+            })
+            .axes[axis][row]
+    }
+
+    fn runtime(&self) -> Result<&Runtime, ExactEvalError> {
+        self.runtime
+            .get_or_init(|| self.rebuild())
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    fn rebuild(&self) -> Result<Runtime, ExactEvalError> {
+        let unrepresentable = |location: String| {
+            move |reason: String| ExactEvalError::Unrepresentable { location, reason }
+        };
+        let mut spans = Vec::with_capacity(self.spans.len());
+        for (index, span) in self.spans.iter().enumerate() {
+            spans.push(Arc::new(
+                span.rebuild()
+                    .map_err(unrepresentable(format!("analytic span {index}")))?,
+            ));
+        }
+        let mut curves = Vec::with_capacity(self.curves.len());
+        for (index, curve) in self.curves.iter().enumerate() {
+            curves.push(Arc::new(
+                curve
+                    .rebuild()
+                    .map_err(unrepresentable(format!("spline curve {index}")))?,
+            ));
+        }
+        let mut axes: [Vec<ContinuousAxis>; 4] = std::array::from_fn(|_| Vec::new());
+        for (axis, rows) in self.axes.iter().enumerate() {
+            for (index, row) in rows.iter().enumerate() {
+                axes[axis].push(
+                    row.rebuild(&spans, &curves)
+                        .map_err(unrepresentable(format!("axis {axis} row {index}")))?,
+                );
+            }
+        }
+        Ok(Runtime { axes })
+    }
+}
+
+fn sorted_dedup(mut values: Vec<f64>) -> Vec<f64> {
+    values.sort_by(f64::total_cmp);
+    values.dedup();
+    values
+}
+
+/// Interning is by carrier identity, not by value: the shaped segments own
+/// every `Arc` for the length of the walk, so an address identifies one
+/// carrier, and two numerically equal spans of different moves stay distinct
+/// entries of the table.
+fn capture_carrier(
+    source: &ContinuousAxis,
+    spans: &mut Vec<AnalyticSpan>,
+    span_slots: &mut HashMap<usize, usize>,
+    curves: &mut Vec<SplineCurve>,
+    curve_slots: &mut HashMap<usize, usize>,
+) -> Result<Carrier, String> {
+    let mut intern_curve = |curve: &Arc<ScalarNurbs>| {
+        intern(curve_slots, curves, Arc::as_ptr(curve) as usize, || {
+            Ok(SplineCurve::capture(curve))
+        })
+        .expect("capturing a spline curve cannot fail")
+    };
+    Ok(match source {
+        ContinuousAxis::Analytic { span, axis } => Carrier::Analytic {
+            span: intern(span_slots, spans, Arc::as_ptr(span) as usize, || {
+                AnalyticSpan::capture(span)
+            })?,
+            axis: *axis,
+        },
+        ContinuousAxis::Spline(curve) => Carrier::Spline {
+            curve: intern_curve(curve),
+        },
+        ContinuousAxis::RelativeSpline {
+            base_position,
+            curve,
+        } => Carrier::RelativeSpline {
+            base_position: *base_position,
+            curve: intern_curve(curve),
+        },
+        ContinuousAxis::PiecewiseRelativeSpline(pieces) => Carrier::PiecewiseRelativeSpline {
+            pieces: pieces
+                .iter()
+                .map(|piece| RelativeSplinePiece {
+                    base_position: piece.base_position,
+                    curve: intern_curve(&piece.curve),
+                    t_start: piece.t_start,
+                    t_end: piece.t_end,
+                })
+                .collect(),
+        },
+        ContinuousAxis::Hold { position, .. } => Carrier::Hold {
+            position: *position,
+        },
+        ContinuousAxis::Nudge(profile) => Carrier::Nudge {
+            delta_mm: profile.delta_mm(),
+            speed_mm_s: profile.speed_mm_s(),
+            accel_mm_s2: profile.accel_mm_s2(),
+            t_start: profile.t_start(),
+        },
+        ContinuousAxis::Buzz {
+            base_position,
+            sign,
+            profile,
+        } => Carrier::Buzz {
+            base_position: *base_position,
+            sign: *sign,
+            amplitude_mm: profile.amplitude_mm(),
+            freq_start_hz: profile.freq_start_hz(),
+            freq_end_hz: profile.freq_end_hz(),
+            duration: profile.duration(),
+            ramp: profile.ramp(),
+            t_start: profile.t_start(),
+        },
+    })
+}
+
+fn intern<T>(
+    slots: &mut HashMap<usize, usize>,
+    table: &mut Vec<T>,
+    identity: usize,
+    capture: impl FnOnce() -> Result<T, String>,
+) -> Result<usize, String> {
+    if let Some(slot) = slots.get(&identity) {
+        return Ok(*slot);
+    }
+    let slot = table.len();
+    table.push(capture()?);
+    slots.insert(identity, slot);
+    Ok(slot)
+}
+
+impl CarrierRow {
+    fn rebuild(
+        &self,
+        spans: &[Arc<AnalyticMoveSpan>],
+        curves: &[Arc<ScalarNurbs>],
+    ) -> Result<ContinuousAxis, String> {
+        let curve_at = |slot: usize| {
+            curves
+                .get(slot)
+                .cloned()
+                .ok_or_else(|| format!("spline curve {slot} is not in the curve table"))
+        };
+        match &self.carrier {
+            Carrier::Analytic { span, axis } => Ok(ContinuousAxis::Analytic {
+                span: spans
+                    .get(*span)
+                    .cloned()
+                    .ok_or_else(|| format!("analytic span {span} is not in the span table"))?,
+                axis: *axis,
+            }),
+            Carrier::Spline { curve } => Ok(ContinuousAxis::Spline(curve_at(*curve)?)),
+            Carrier::RelativeSpline {
+                base_position,
+                curve,
+            } => Ok(ContinuousAxis::RelativeSpline {
+                base_position: *base_position,
+                curve: curve_at(*curve)?,
+            }),
+            Carrier::PiecewiseRelativeSpline { pieces } => {
+                let rebuilt = pieces
+                    .iter()
+                    .map(|piece| {
+                        Ok(trajectory::RelativeSplinePiece {
+                            base_position: piece.base_position,
+                            curve: curve_at(piece.curve)?,
+                            t_start: piece.t_start,
+                            t_end: piece.t_end,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                ContinuousAxis::try_piecewise_relative_spline(rebuilt.into())
+                    .map_err(|error| error.to_string())
+            }
+            Carrier::Hold { position } => Ok(ContinuousAxis::Hold {
+                position: *position,
+                t_start: self.t0,
+                t_end: self.t1,
+            }),
+            Carrier::Nudge {
+                delta_mm,
+                speed_mm_s,
+                accel_mm_s2,
+                t_start,
+            } => NudgeProfile::try_new(*delta_mm, *speed_mm_s, *accel_mm_s2, *t_start)
+                .map(ContinuousAxis::Nudge)
+                .map_err(|error| format!("{error:?}")),
+            Carrier::Buzz {
+                base_position,
+                sign,
+                amplitude_mm,
+                freq_start_hz,
+                freq_end_hz,
+                duration,
+                ramp,
+                t_start,
+            } => BuzzProfile::try_new(
+                *amplitude_mm,
+                *freq_start_hz,
+                *freq_end_hz,
+                *duration,
+                *ramp,
+                *t_start,
+            )
+            .map(|profile| ContinuousAxis::Buzz {
+                base_position: *base_position,
+                sign: *sign,
+                profile: Arc::new(profile),
+            })
+            .map_err(|error| format!("{error:?}")),
+        }
+    }
+}
+
+impl SplineCurve {
+    fn capture(curve: &ScalarNurbs) -> Self {
+        Self {
+            degree: curve.degree(),
+            knots: curve.knots().to_vec(),
+            control_points: curve.control_points().to_vec(),
+        }
+    }
+
+    fn rebuild(&self) -> Result<ScalarNurbs, String> {
+        ScalarNurbs::try_new(self.degree, self.knots.clone(), self.control_points.clone())
+            .map_err(|error| format!("{error:?}"))
+    }
+}
+
+impl AnalyticSpan {
+    fn capture(span: &AnalyticMoveSpan) -> Result<Self, String> {
+        let surface_z_offset = match &span.surface {
+            SurfaceMode::None => None,
+            SurfaceMode::Constant(offset) => Some(*offset),
+            SurfaceMode::Variable(_) => {
+                return Err(
+                    "a variable surface transform has no exact jerk; the shaper must \
+                            materialize it as a spline axis before the snapshot serializes it"
+                        .to_string(),
+                );
+            }
+        };
+        Ok(Self {
+            t_start: span.t_start,
+            t_end: span.t_end,
+            source_distance_origin: span.source_distance_origin,
+            phases: span
+                .phases
+                .iter()
+                .map(|seg| {
+                    let (end_s, v1, _) = seg.end_state();
+                    let ds = end_s - seg.s0;
+                    Phase {
+                        t0: seg.t0,
+                        dt: seg.dt,
+                        s0: seg.s0,
+                        v0: seg.v0,
+                        ds,
+                        v1,
+                        law: match seg.law {
+                            ScalarLaw::ConstAccel { a0 } => PhaseLaw::ConstAccel { a0 },
+                            ScalarLaw::DiskRail {
+                                accel,
+                                kappa0,
+                                sigma,
+                                brake,
+                            } => PhaseLaw::DiskRail {
+                                accel,
+                                kappa0,
+                                sigma,
+                                brake,
+                            },
+                        },
+                    }
+                })
+                .collect(),
+            axis_start_positions: span.axis_start_positions.to_vec(),
+            surface_z_offset,
+            spatial: span.source.segment.spatial.as_ref().map(Spatial::capture),
+            virtual_path_mm: span.source.segment.virtual_path_mm,
+            followers: span
+                .source
+                .segment
+                .followers
+                .iter()
+                .map(|follower| Follower {
+                    axis_index: follower.axis_index,
+                    ratio: follower.ratio,
+                    ratio_end: follower.ratio_end,
+                })
+                .collect(),
+            feedrate_mm_s: span.source.feedrate_mm_s,
+            limits: Limits::capture(span.source.limits),
+            source_start_line: span.source.source.start_line,
+            source_end_line: span.source.source.end_line,
+        })
+    }
+
+    fn rebuild(&self) -> Result<AnalyticMoveSpan, String> {
+        let followers: Vec<FollowerDemand> = self
+            .followers
+            .iter()
+            .map(|follower| FollowerDemand {
+                axis_index: follower.axis_index,
+                ratio: follower.ratio,
+                ratio_end: follower.ratio_end,
+            })
+            .collect();
+        let segment = match (&self.spatial, self.virtual_path_mm) {
+            (Some(spatial), None) => PathSegment::try_new(spatial.rebuild()?, followers),
+            (None, Some(virtual_path_mm)) => {
+                PathSegment::try_new_virtual(followers, virtual_path_mm)
+            }
+            _ => {
+                return Err(
+                    "an analytic span carries exactly one of a spatial segment or a \
+                            virtual path length"
+                        .to_string(),
+                );
+            }
+        }
+        .map_err(|error| format!("{error:?}"))?;
+        let source = Move {
+            segment,
+            feedrate_mm_s: self.feedrate_mm_s,
+            limits: self.limits.rebuild().map_err(str::to_string)?,
+            source: SourceRange {
+                start_line: self.source_start_line,
+                end_line: self.source_end_line,
+            },
+        };
+        AnalyticMoveSpan::try_new(
+            source,
+            self.phases
+                .iter()
+                .map(|phase| {
+                    let law = match phase.law {
+                        PhaseLaw::ConstAccel { a0 } => ScalarLaw::ConstAccel { a0 },
+                        PhaseLaw::DiskRail {
+                            accel,
+                            kappa0,
+                            sigma,
+                            brake,
+                        } => ScalarLaw::DiskRail {
+                            accel,
+                            kappa0,
+                            sigma,
+                            brake,
+                        },
+                    };
+                    match law {
+                        ScalarLaw::ConstAccel { .. } => {
+                            LawSegment::new(phase.t0, phase.dt, phase.s0, phase.v0, law)
+                        }
+                        ScalarLaw::DiskRail { brake: true, .. } => {
+                            LawSegment::brake_to(phase.t0, phase.s0, law, phase.ds, phase.v1)
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "snapshot rebuild: brake segment cannot land v1={} over \
+                                         ds={}",
+                                        phase.v1, phase.ds
+                                    )
+                                })
+                                .0
+                        }
+                        ScalarLaw::DiskRail { .. } => {
+                            LawSegment::until_arc(phase.t0, phase.s0, phase.v0, law, phase.ds)
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "snapshot rebuild: DiskRail segment stalled before \
+                                         covering ds={} from v0={}",
+                                        phase.ds, phase.v0
+                                    )
+                                })
+                        }
+                    }
+                })
+                .collect(),
+            self.source_distance_origin,
+            self.t_start,
+            self.t_end,
+            self.axis_start_positions.iter().copied().collect(),
+            match self.surface_z_offset {
+                Some(offset) => SurfaceMode::Constant(offset),
+                None => SurfaceMode::None,
+            },
+        )
+        .map_err(|error| error.to_string())
+    }
+}
+
+impl Limits {
+    fn capture(limits: VelocityLimits) -> Self {
+        Self {
+            max_velocity_mm_s: limits.max_velocity_mm_s,
+            accel_mm_s2: limits.accel_mm_s2,
+            corner_deviation_mm: limits.corner_deviation_mm,
+            max_jerk_mm_s3: limits
+                .max_jerk_mm_s3
+                .is_finite()
+                .then_some(limits.max_jerk_mm_s3),
+        }
+    }
+
+    fn rebuild(&self) -> Result<VelocityLimits, &'static str> {
+        VelocityLimits::try_new(
+            self.max_velocity_mm_s,
+            self.accel_mm_s2,
+            self.corner_deviation_mm,
+            self.max_jerk_mm_s3.unwrap_or(f64::INFINITY),
+        )
+    }
+}
+
+impl Spatial {
+    fn capture(segment: &Segment) -> Self {
+        match segment {
+            Segment::Line(line) => Self::Line {
+                start: line.start,
+                end: line.end,
+            },
+            Segment::Arc(arc) => Self::Arc {
+                origin: arc.origin,
+                u: arc.u,
+                v: arc.v,
+                radius: arc.radius,
+                start_angle: arc.start_angle,
+                sweep: arc.sweep,
+            },
+            Segment::Clothoid(clothoid) => Self::Clothoid {
+                start_pose: clothoid.start_pose,
+                u: clothoid.u,
+                v: clothoid.v,
+                kappa_0: clothoid.kappa_0,
+                sigma: clothoid.sigma,
+                length: clothoid.length,
+            },
+        }
+    }
+
+    fn rebuild(&self) -> Result<Segment, String> {
+        match self {
+            Self::Line { start, end } => Line::try_new(*start, *end).map(Segment::Line),
+            Self::Arc {
+                origin,
+                u,
+                v,
+                radius,
+                start_angle,
+                sweep,
+            } => ArcSegment::try_new(*origin, *u, *v, *radius, *start_angle, *sweep)
+                .map(Segment::Arc),
+            Self::Clothoid {
+                start_pose,
+                u,
+                v,
+                kappa_0,
+                sigma,
+                length,
+            } => Clothoid::try_new(*start_pose, *u, *v, *kappa_0, *sigma, *length)
+                .map(Segment::Clothoid),
+        }
+        .map_err(|error| format!("{error:?}"))
+    }
 }
 
 pub struct SeamMetrics {
@@ -603,54 +1422,28 @@ pub struct SeamMetrics {
 
 const WORST_SEAM_COUNT: usize = 10;
 
-fn piece_state_at(p: &[f64], tau: f64) -> (f64, f64, f64) {
-    let c = &p[2..];
-    let mut pos = 0.0;
-    let mut vel = 0.0;
-    let mut acc = 0.0;
-    for (k, &ck) in c.iter().enumerate().rev() {
-        pos = pos * tau + ck;
-        if k >= 1 {
-            vel = vel * tau + k as f64 * ck;
-        }
-        if k >= 2 {
-            acc = acc * tau + (k * (k - 1)) as f64 * ck;
-        }
-    }
-    (pos, vel, acc)
-}
-
-fn piece_end_state(p: &[f64]) -> (f64, f64, f64) {
-    piece_state_at(p, p[1] - p[0])
-}
-
-fn piece_start_state(p: &[f64]) -> (f64, f64, f64) {
-    piece_state_at(p, 0.0)
-}
-
-pub fn seam_metrics(traj: &TrajectoryPieces) -> SeamMetrics {
-    let axes = [&traj.x, &traj.y, &traj.z, &traj.e];
+/// Every instant two carriers — or two phases of one carrier — meet at,
+/// measured as the jump between the exact one-sided states there. Nothing is
+/// differentiated or sampled: both sides come from the carrier that owns
+/// them.
+pub fn seam_metrics(traj: &ExactTrajectory) -> SeamMetrics {
     let mut out = SeamMetrics {
         max_dp: [0.0; 4],
         max_dv: [0.0; 4],
         max_da: [0.0; 4],
         worst: Vec::new(),
     };
-    for (axis, pieces) in axes.iter().enumerate() {
-        for w in pieces.windows(2) {
-            let (lp, lv, la) = piece_end_state(&w[0]);
-            let (rp, rv, ra) = piece_start_state(&w[1]);
-            let seam = SeamMetric {
-                t: w[1][0],
-                axis,
-                dp: (rp - lp).abs(),
-                dv: (rv - lv).abs(),
-                da: (ra - la).abs(),
-            };
-            out.max_dp[axis] = out.max_dp[axis].max(seam.dp);
-            out.max_dv[axis] = out.max_dv[axis].max(seam.dv);
-            out.max_da[axis] = out.max_da[axis].max(seam.da);
-            out.worst.push(seam);
+    for axis in 0..4 {
+        let rows = traj.rows(axis);
+        for (index, row) in rows.iter().enumerate() {
+            for t in traj.row_breakpoints(axis, index) {
+                if t > row.t0 && t < row.t1 {
+                    out.record(seam_at(traj, axis, (index, t), (index, t)));
+                }
+            }
+            if let Some(next) = rows.get(index + 1) {
+                out.record(seam_at(traj, axis, (index, row.t1), (index + 1, next.t0)));
+            }
         }
     }
     out.worst.sort_by(|a, b| {
@@ -661,6 +1454,38 @@ pub fn seam_metrics(traj: &TrajectoryPieces) -> SeamMetrics {
     });
     out.worst.truncate(WORST_SEAM_COUNT);
     out
+}
+
+impl SeamMetrics {
+    fn record(&mut self, seam: SeamMetric) {
+        self.max_dp[seam.axis] = self.max_dp[seam.axis].max(seam.dp);
+        self.max_dv[seam.axis] = self.max_dv[seam.axis].max(seam.dv);
+        self.max_da[seam.axis] = self.max_da[seam.axis].max(seam.da);
+        self.worst.push(seam);
+    }
+}
+
+fn seam_at(
+    traj: &ExactTrajectory,
+    axis: usize,
+    left: (usize, f64),
+    right: (usize, f64),
+) -> SeamMetric {
+    let before = one_sided(traj, axis, left.0, left.1, SampleSide::Left);
+    let after = one_sided(traj, axis, right.0, right.1, SampleSide::Right);
+    SeamMetric {
+        t: right.1,
+        axis,
+        dp: (after.position - before.position).abs(),
+        dv: (after.velocity - before.velocity).abs(),
+        da: (after.acceleration - before.acceleration).abs(),
+    }
+}
+
+fn one_sided(traj: &ExactTrajectory, axis: usize, row: usize, t: f64, side: SampleSide) -> Pvaj {
+    traj.eval_row(axis, row, t, side).unwrap_or_else(|error| {
+        panic!("pipeline-snapshot: seam probe on axis {axis} row {row} at t={t}: {error}")
+    })
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 use super::drip_cohort_participants;
-use crate::mcu_config::{AXIS_X, AXIS_Y, AXIS_Z, McuAxisConfig, McuCaps};
+use crate::mcu_config::{AXIS_X, AXIS_Y, AXIS_Z, McuAxisConfig};
 use crate::types::AxisKey;
 
 const FOLLOWER_E: usize = 3;
@@ -9,9 +9,6 @@ fn cfg(mcu_id: u32, axes: Vec<usize>) -> McuAxisConfig {
         max_motor_velocity: Vec::new(),
         mcu_id,
         axes,
-        caps: McuCaps {
-            total_piece_memory: 0,
-        },
         kinematics: 1,
         ethercat: false,
         ..Default::default()

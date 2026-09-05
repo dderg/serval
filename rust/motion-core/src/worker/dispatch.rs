@@ -9,9 +9,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
 use crossbeam_channel::Receiver;
-use trajectory::ShapedSegment;
+use trajectory::{ContinuousSegment, NudgeProfile};
 
-use motion_pipeline::{BarrierAck, Control, NudgePiece, ShapedItem};
+use motion_pipeline::{BarrierAck, Control, TrajectoryItem};
 
 use super::{CommittedFrontier, fatal};
 
@@ -37,20 +37,53 @@ pub enum DispatchError {
         mcu_id: u32,
         mcu_handle: host_rt::passthrough_queue::McuHandle,
     },
+    #[error(
+        "mcu {mcu_id} (mcu_h={mcu_handle:?}) has no converged clocksync record — \
+         refusing to anchor a step stream on it. The record is invalidated by every \
+         (re)connect and re-armed only by a converged clocksync estimate; anchoring \
+         without one sends step clocks from the previous boot epoch."
+    )]
+    ClockRecordUnusable {
+        mcu_id: u32,
+        mcu_handle: host_rt::passthrough_queue::McuHandle,
+    },
+    #[error(
+        "mcu {mcu_id} (mcu_h={mcu_handle:?}) clocksync record is {age_secs:.3}s old \
+         (limit {max_age_secs:.3}s) — clocksync has stopped feeding the router, so \
+         anchoring would project the step stream off a dead estimate. Note that a \
+         healthy record's regression centroid legitimately trails now by up to 30 \
+         get_clock periods; this age counts only the missed router updates."
+    )]
+    ClockRecordStale {
+        mcu_id: u32,
+        mcu_handle: host_rt::passthrough_queue::McuHandle,
+        age_secs: f64,
+        max_age_secs: f64,
+    },
     #[error("MCU {0}: connection dropped during dispatch")]
     ConnectionDropped(u32),
     #[error("piece pump thread is gone; cannot dispatch")]
     PumpGone,
+    #[error("pump stopped on a fatal endpoint condition, latched for klippy: {0}")]
+    TransportFatal(String),
     #[error("nudge target mcu_id={mcu_id} axis={axis} not present in mcu_configs")]
     NudgeTargetMissing { mcu_id: u32, axis: u8 },
+    #[error("enqueue: {0}")]
+    Enqueue(#[from] trajectory::ContinuousError),
 }
 
 /// Where committed motion goes when it reaches the end of the pipeline.
 /// Production uses [`super::pump_sink::PumpSink`] (clock anchoring + per-axis
-/// piece enqueue into the pump); tests substitute a capture.
+/// span enqueue into the pump); tests substitute a capture.
 pub trait SegmentSink: Send + 'static {
-    fn dispatch(&mut self, seg: &ShapedSegment) -> Result<(), DispatchError>;
-    fn dispatch_nudge(&mut self, mcu_id: u32, piece: &NudgePiece) -> Result<(), DispatchError>;
+    fn dispatch(&mut self, seg: &ContinuousSegment) -> Result<(), DispatchError>;
+    fn dispatch_nudge(
+        &mut self,
+        mcu_id: u32,
+        axis: u8,
+        motor_mask: u8,
+        profile: &NudgeProfile,
+    ) -> Result<(), DispatchError>;
     /// The committed trajectory is planned to rest through its end; a resume
     /// across the idle gap that follows may re-anchor the timeline forward.
     fn mark_parked(&mut self) {}
@@ -89,6 +122,9 @@ pub(crate) struct Dispatcher<S> {
     sync_instant: Option<Instant>,
     dispatched_through: Option<f64>,
     pending_error: Option<String>,
+    /// The pump died on an endpoint fatal that klippy has been handed; every
+    /// later segment is dropped while the host runs its clean shutdown.
+    transport_halted: bool,
 }
 
 impl<S: SegmentSink> Dispatcher<S> {
@@ -100,23 +136,25 @@ impl<S: SegmentSink> Dispatcher<S> {
             sync_instant: None,
             dispatched_through: None,
             pending_error: None,
+            transport_halted: false,
         }
     }
 
-    pub(crate) fn run(mut self, input: &Receiver<ShapedItem>) {
+    pub(crate) fn run(mut self, input: &Receiver<TrajectoryItem>) {
         while let Ok(item) = input.recv() {
             match item {
-                ShapedItem::Seg(seg) => self.handle_segment(&seg),
-                ShapedItem::Parked => self.sink.mark_parked(),
-                ShapedItem::Control(ctrl) => self.handle_control(ctrl),
+                TrajectoryItem::Seg(seg) => self.handle_segment(&seg),
+                TrajectoryItem::Parked => self.sink.mark_parked(),
+                TrajectoryItem::Control(ctrl) => self.handle_control(ctrl),
             }
         }
     }
 
-    fn handle_segment(&mut self, seg: &ShapedSegment) {
+    fn handle_segment(&mut self, seg: &ContinuousSegment) {
         if self.links.discard.load(Ordering::Acquire)
             || self.links.shutting_down.load(Ordering::Acquire)
             || self.pending_error.is_some()
+            || self.transport_halted
         {
             return;
         }
@@ -139,6 +177,16 @@ impl<S: SegmentSink> Dispatcher<S> {
             }
             Err(e) if self.links.capture_errors.load(Ordering::Acquire) => {
                 self.pending_error = Some(format!("dispatch failed: {e}"));
+            }
+            Err(DispatchError::TransportFatal(reason)) => {
+                tracing::error!(
+                    subsystem = "motion",
+                    event = "dispatch_halted_by_transport_fatal",
+                    error = %reason,
+                    "the pump died on an endpoint fatal — dropping further segments while \
+                     klippy shuts down on the latched cause"
+                );
+                self.transport_halted = true;
             }
             Err(e) => fatal(&format!("dispatch failed: {e}")),
         }
@@ -182,36 +230,38 @@ impl<S: SegmentSink> Dispatcher<S> {
                         .store(t.to_bits(), Ordering::Release);
                 }
             }
-            Control::Nudge { mcu_id, pieces } => self.handle_nudge(mcu_id, &pieces),
+            Control::Nudge {
+                mcu_id,
+                axis,
+                motor_mask,
+                profile,
+            } => self.handle_nudge(mcu_id, axis, motor_mask, &profile),
             Control::SetAxisChains(_) | Control::SetMesh { .. } => {}
         }
     }
 
     /// Nudge errors are never fatal: the sender always follows a nudge with a
     /// `Barrier`, so the error reaches the caller through the ack.
-    fn handle_nudge(&mut self, mcu_id: u32, pieces: &[NudgePiece]) {
+    fn handle_nudge(&mut self, mcu_id: u32, axis: u8, motor_mask: u8, profile: &NudgeProfile) {
         if self.pending_error.is_some() {
             return;
         }
-        for p in pieces {
-            if let Err(e) = self.sink.dispatch_nudge(mcu_id, p) {
-                self.pending_error = Some(format!("nudge dispatch: {e}"));
-                return;
-            }
+        if let Err(e) = self.sink.dispatch_nudge(mcu_id, axis, motor_mask, profile) {
+            self.pending_error = Some(format!("nudge dispatch: {e}"));
+            return;
         }
-        if let Some(t_end) = pieces.last().map(|p| p.piece.u_end) {
-            self.links
-                .last_move_time_bits
-                .store(t_end.to_bits(), Ordering::Release);
-        }
+        self.links
+            .last_move_time_bits
+            .store(profile.t_end().to_bits(), Ordering::Release);
     }
 }
 
-fn log_dispatch(seg: &ShapedSegment) {
+fn log_dispatch(seg: &ContinuousSegment) {
     let n_ax = seg.axes.len();
     let end_of = |i: usize| {
         if n_ax > i {
-            nurbs::eval::eval(&seg.axes[i], seg.t_end)
+            seg.eval_axis(i, seg.t_end)
+                .map_or(f64::NAN, |pva| pva.position)
         } else {
             0.0
         }

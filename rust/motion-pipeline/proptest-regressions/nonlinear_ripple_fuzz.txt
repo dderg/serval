@@ -1,0 +1,12 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 87b06fbcd8ec87bc60c466cc71fabd71083c7ab836af1da96dd93da7917cbf2e # shrinks to axis = 0, reciprocal = false, reverse = false, decelerate = false, crosses_zero = true, initial_fraction = 0.13176384206021963, velocity_sweep = 5.744026400653625, velocity_scale = 2.6313413950694255, duration = 0.04335343589818328, origin = 0.0, offset = 0.02, linear_gain = 0.0020509329737657756
+cc 43d0f3c7d772b203229c3ec47f30e7a5f31a98de34c690043e3c4b806cd6b16a # shrinks to axis = 0, reciprocal = false, reverse = false, decelerate = false, crosses_zero = true, initial_fraction = 0.38586431187892806, velocity_sweep = 5.557151104943096, velocity_scale = 3.145848827251502, duration = 0.19587610903270686, origin = 0.0, offset = 0.02, linear_gain = 0.0
+cc f10510b82f71da3624e714b8feab037839854c6179811ede881d36612d57a5f3 # shrinks to axis = 0, reciprocal = false, reverse = false, decelerate = true, crosses_zero = true, initial_fraction = 0.15943695721842463, velocity_sweep = 4.195205170395677, velocity_scale = 7.308012301948066, duration = 0.17047975253539355, origin = 0.23858847730910024, offset = 0.08895318940551597, linear_gain = 0.0033324510113844903
+cc 98a2bc3871718f0566ee77dd58fcbe6d9dab9f119dcad266e1907c6b495a8214 # shrinks to axis = 0, reciprocal = false, reverse = false, decelerate = false, crosses_zero = false, initial_fraction = 0.025, velocity_sweep = 2.0, velocity_scale = 0.5, duration = 0.19743993537217605, origin = 0.0, offset = 0.02, linear_gain = 0.0
+cc c31f9b030be93c268fb556fd033c0df39cfadacbd99a0ed2dfc6cad1f819213c # shrinks to axis = 0, reciprocal = false, reverse = false, decelerate = true, crosses_zero = true, initial_fraction = 0.04472153577922869, velocity_sweep = 4.502338074091575, velocity_scale = 5.308444388803962, duration = 0.15720130103149219, origin = 0.023236288637521293, offset = 0.02, linear_gain = 0.0
+cc 8536fce1881a1512cba336ffc0fe5c5aaa29a59fcc1caed2bfe0b22007c78e92 # shrinks to axis = 0, reciprocal = false, reverse = false, decelerate = false, crosses_zero = true, initial_fraction = 0.06753713751216432, velocity_sweep = 3.781217518232045, velocity_scale = 0.5, duration = 0.023140036550141456, origin = 0.0, offset = 0.07632706800887024, linear_gain = 0.0

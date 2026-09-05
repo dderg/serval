@@ -3,71 +3,102 @@
 //! inside that window is loaded behind it — `motion.step_load_late`, then
 //! "Stepper too far in past". The shim owes the caller that distance.
 
-use super::{MotorConfig, ShimError, StepFrame, StepShim};
-use runtime::piece_ring::PieceEntry;
+use std::sync::Arc;
+
+use trajectory::{
+    ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm, NudgeProfile,
+};
+
+use super::{MotorConfig, ShimError, StepEncoder, StepFrame, StepShim};
 
 const CYCLES_PER_SECOND: f64 = 1_000_000.0;
-const SAMPLE_RATE_HZ: f32 = 10_000.0;
-const SAMPLE_CYCLES: u64 = 100;
-const MICROSTEP: f32 = 0.01;
+const MICROSTEP: f64 = 0.01;
 const OID: u32 = 7;
 const MIN_REARM_CYCLES: u64 = 200;
+const LATTICE_OFFSET: f64 = 0.00255;
+const START: u64 = 1_000;
 
 fn cfg(min_rearm_cycles: u64) -> MotorConfig {
     MotorConfig {
         oid: OID,
         microstep_distance: MICROSTEP,
         invert_dir: false,
-        max_steps_per_sample: 16,
-        sample_rate_hz: SAMPLE_RATE_HZ,
         cycles_per_second: CYCLES_PER_SECOND,
+        encoder: StepEncoder::Classic {
+            max_error_ticks: super::compress::DEFAULT_MAX_ERROR_TICKS,
+        },
         min_rearm_cycles,
     }
 }
 
-fn linear_piece(start_time: u64, from_mm: f32, to_mm: f32, duration: f32) -> PieceEntry {
-    let mut entry = PieceEntry::zeroed();
-    entry.start_time = start_time;
-    entry.duration = duration;
-    entry.coeff_count = 2;
-    entry.coeffs[0] = 0.5 * (from_mm + to_mm);
-    entry.coeffs[1] = 0.5 * (to_mm - from_mm);
-    entry
+fn ramp(start_clock: u64, from_mm: f64, delta_mm: f64, cycles: u64) -> ClockedMotorSpan {
+    let t_start = start_clock as f64 / CYCLES_PER_SECOND;
+    let t_end = t_start + cycles as f64 / CYCLES_PER_SECOND;
+    let profile = NudgeProfile::try_new(delta_mm, delta_mm.abs() / (t_end - t_start), 0.0, t_start)
+        .expect("a constant-velocity nudge");
+    let groups: Arc<[MotorGroup]> = Arc::from([
+        MotorGroup::Independent(MotorTerm {
+            source_axis: 0,
+            axis: ContinuousAxis::Hold {
+                position: from_mm,
+                t_start,
+                t_end,
+            },
+            scale: 1.0,
+        }),
+        MotorGroup::Independent(MotorTerm {
+            source_axis: 0,
+            axis: ContinuousAxis::Nudge(profile),
+            scale: 1.0,
+        }),
+    ]);
+    let signal = Arc::new(
+        MotorSpan::try_new(groups, t_start, t_end, 0, 0, false).expect("a dispatchable motor span"),
+    );
+    ClockedMotorSpan::try_new(
+        signal,
+        t_start,
+        t_end,
+        t_start,
+        t_end,
+        start_clock as f64,
+        CYCLES_PER_SECOND,
+    )
+    .expect("a representable clocked view")
 }
 
-/// One microstep out and straight back, a sample apart: the reversal splits
-/// the stream into two runs whose steps are one sample period apart — inside
-/// the mcu's two-pulse re-arm window.
-fn reversal_pieces(start: u64) -> Vec<PieceEntry> {
-    let sample_secs = SAMPLE_CYCLES as f32 / CYCLES_PER_SECOND as f32;
+/// One microstep out and straight back: the reversal splits the stream into
+/// two runs 151 cycles apart — inside the mcu's two-pulse re-arm window.
+fn reversal() -> Vec<ClockedMotorSpan> {
     vec![
-        linear_piece(start, 0.0, MICROSTEP, sample_secs),
-        linear_piece(start + SAMPLE_CYCLES, MICROSTEP, 0.0, sample_secs),
+        ramp(START, LATTICE_OFFSET, MICROSTEP, 100),
+        ramp(START + 100, LATTICE_OFFSET + MICROSTEP, -0.02, 200),
     ]
 }
 
-fn drain_all(shim: &mut StepShim, start: u64) -> Result<Vec<StepFrame>, ShimError> {
-    let mut frames = shim.drain(start + 8 * SAMPLE_CYCLES)?;
-    frames.extend(shim.finish(0)?);
-    Ok(frames)
+fn shim_for(min_rearm_cycles: u64) -> StepShim {
+    let mut shim = StepShim::new(vec![cfg(min_rearm_cycles)], 8);
+    shim.reset_position(0, 0);
+    shim.push_spans(0, &reversal())
+        .expect("a contiguous stream");
+    shim
 }
 
 #[test]
 fn a_reversal_inside_the_re_arm_window_is_refused() {
-    let start = 10_000;
-    let mut shim = StepShim::new(vec![cfg(MIN_REARM_CYCLES)], 16);
-    shim.push_pieces(0, &reversal_pieces(start)).unwrap();
+    let mut shim = shim_for(MIN_REARM_CYCLES);
 
-    let err = drain_all(&mut shim, start).expect_err("the mcu cannot re-arm this fast");
-    match err {
+    match shim
+        .drain(START + 300)
+        .expect_err("the mcu cannot re-arm this fast")
+    {
         ShimError::StepTooSoon {
             motor,
             first,
             committed,
             min_rearm,
         } => {
-            assert_eq!(motor, 0);
-            assert_eq!(min_rearm, MIN_REARM_CYCLES);
+            assert_eq!((motor, min_rearm), (0, MIN_REARM_CYCLES));
             assert!(
                 first > committed && first - committed < MIN_REARM_CYCLES,
                 "the refused run must be the one inside the window: {first} vs {committed}"
@@ -81,17 +112,18 @@ fn a_reversal_inside_the_re_arm_window_is_refused() {
 /// and so owes nothing beyond strict monotonicity.
 #[test]
 fn a_reversal_is_emitted_when_the_mcu_needs_no_re_arm() {
-    let start = 10_000;
-    let mut shim = StepShim::new(vec![cfg(0)], 16);
-    shim.push_pieces(0, &reversal_pieces(start)).unwrap();
+    let mut shim = shim_for(0);
 
-    let frames = drain_all(&mut shim, start).expect("a zero re-arm mcu takes this stream");
-    let dir_changes = frames
+    let frames = shim
+        .drain(START + 300)
+        .expect("a zero re-arm mcu takes this stream");
+    let dirs: Vec<u8> = frames
         .iter()
-        .filter(|f| matches!(f, StepFrame::SetNextStepDir { .. }))
-        .count();
-    assert_eq!(
-        dir_changes, 2,
-        "the stream must actually reverse: {frames:?}"
-    );
+        .filter_map(|f| match f {
+            StepFrame::SetNextStepDir { dir, .. } => Some(*dir),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dirs, vec![1, 0], "the stream must actually reverse");
+    assert_eq!(shim.commanded_steps(0), 0);
 }

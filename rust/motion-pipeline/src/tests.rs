@@ -4,7 +4,9 @@ use crossbeam_channel::unbounded;
 use geometry::segment::SourceRange;
 use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
 use nurbs::eval::eval;
-use trajectory::{AxisChainSet, PostProcessorInstance, ShapedSegment};
+use std::sync::Arc;
+
+use trajectory::{AxisChainSet, ContinuousAxis, ContinuousSegment, PostProcessorInstance};
 
 fn cfg() -> StreamConfig {
     StreamConfig {
@@ -19,9 +21,73 @@ fn cfg() -> StreamConfig {
             300.0,
             5000.0,
             geometry::corner_deviation_from_scv(5.0, 5000.0),
-            100_000.0,
+            f64::INFINITY,
         )
         .unwrap(),
+    }
+}
+fn fit_tol(config: StreamConfig) -> FitTol {
+    FitTol {
+        pos_mm: config.fit_tol_mm,
+        accel_mm_s2: config.fit_tol_accel_mm_s2,
+    }
+}
+
+fn eval_segment_axis(segment: &ContinuousSegment, axis: usize, t: f64) -> f64 {
+    segment.eval_axis(axis, t).unwrap().position
+}
+fn assert_segment_axes_finite(segment: &ContinuousSegment) {
+    for (axis, source) in segment.axes.iter().enumerate() {
+        match source {
+            ContinuousAxis::Spline(curve) | ContinuousAxis::RelativeSpline { curve, .. } => {
+                assert!(curve.control_points().iter().all(|v| v.is_finite()));
+            }
+            ContinuousAxis::PiecewiseRelativeSpline(pieces) => {
+                for piece in pieces.iter() {
+                    assert!(piece.base_position.is_finite());
+                    assert!(piece.curve.control_points().iter().all(|v| v.is_finite()));
+                }
+            }
+            _ => {}
+        }
+        for t in [
+            segment.t_start,
+            0.5 * (segment.t_start + segment.t_end),
+            segment.t_end,
+        ] {
+            let value = segment.eval_axis(axis, t).expect("axis evaluates");
+            assert!(value.position.is_finite());
+            assert!(value.velocity.is_finite());
+            assert!(value.acceleration.is_finite());
+        }
+    }
+}
+fn axis_breakpoints(axis: &ContinuousAxis) -> (Vec<f64>, usize) {
+    match axis {
+        ContinuousAxis::Analytic { span, .. } => (
+            span.phases
+                .iter()
+                .flat_map(|phase| [span.t_start + phase.t0, span.t_start + phase.end_time()])
+                .collect(),
+            3,
+        ),
+        ContinuousAxis::Spline(curve) | ContinuousAxis::RelativeSpline { curve, .. } => {
+            (curve.knots().to_vec(), curve.degree() as usize)
+        }
+        ContinuousAxis::PiecewiseRelativeSpline(pieces) => (
+            pieces
+                .iter()
+                .flat_map(|piece| piece.curve.knots().iter().copied())
+                .collect(),
+            pieces
+                .iter()
+                .map(|piece| piece.curve.degree() as usize)
+                .max()
+                .expect("a piecewise relative spline has pieces"),
+        ),
+        ContinuousAxis::Hold { t_start, t_end, .. } => (vec![*t_start, *t_end], 0),
+        ContinuousAxis::Nudge(profile) => (profile.breakpoints().to_vec(), 3),
+        ContinuousAxis::Buzz { profile, .. } => (profile.breakpoints().to_vec(), 3),
     }
 }
 
@@ -33,7 +99,7 @@ fn ctx(line_no: u32, feed: f64) -> MoveContext {
             300.0,
             5000.0,
             geometry::corner_deviation_from_scv(5.0, 5000.0),
-            100_000.0,
+            f64::INFINITY,
         )
         .unwrap(),
         source: SourceRange {
@@ -60,7 +126,7 @@ fn cfg_bench() -> StreamConfig {
             100.0,
             1000.0,
             geometry::corner_deviation_from_scv(5.0, 1000.0),
-            1_000_000.0,
+            f64::INFINITY,
         )
         .unwrap(),
     }
@@ -74,7 +140,7 @@ fn line_bench(line_no: u32, start: [f64; 3], end: [f64; 3]) -> geometry::Move {
             100.0,
             1000.0,
             geometry::corner_deviation_from_scv(5.0, 1000.0),
-            1_000_000.0,
+            f64::INFINITY,
         )
         .unwrap(),
         source: SourceRange {
@@ -96,7 +162,7 @@ fn replay(
     home: &[f64],
     t_start: f64,
     moves: &[geometry::Move],
-) -> Vec<ShapedSegment> {
+) -> Vec<ContinuousSegment> {
     replay_stream(
         config,
         chains,
@@ -106,8 +172,8 @@ fn replay(
     )
     .into_iter()
     .filter_map(|item| match item {
-        ShapedItem::Seg(seg) => Some(seg),
-        ShapedItem::Parked | ShapedItem::Control(_) => None,
+        TrajectoryItem::Seg(seg) => Some(seg),
+        TrajectoryItem::Parked | TrajectoryItem::Control(_) => None,
     })
     .collect()
 }
@@ -120,7 +186,7 @@ fn replay_stream(
     home: &[f64],
     t_start: f64,
     items: Vec<StreamInput>,
-) -> Vec<ShapedItem> {
+) -> Vec<TrajectoryItem> {
     let (raw_tx, raw_rx) = unbounded();
     for item in items {
         raw_tx.send(item).unwrap();
@@ -133,39 +199,36 @@ fn replay_stream(
     let (planned_tx, planned_rx) = unbounded();
     Planner::new(config).run(fitted_rx, planned_tx);
 
+    let fit_tol = fit_tol(config);
     let (lowered_tx, lowered_rx) = unbounded();
     run_lowerer(
         planned_rx,
         lowered_tx,
-        FitTol {
-            pos_mm: config.fit_tol_mm,
-            accel_mm_s2: config.fit_tol_accel_mm_s2,
-        },
         chains.clone(),
         home.to_vec(),
         t_start,
     );
 
     let (shaped_tx, shaped_rx) = unbounded();
-    Shaper::new(chains).run(lowered_rx, shaped_tx);
+    Shaper::new(chains, fit_tol).run(lowered_rx, shaped_tx);
 
     shaped_rx.into_iter().collect()
 }
 
-fn boundary_speed(prev: &ShapedSegment, next: &ShapedSegment) -> f64 {
+fn boundary_speed(prev: &ContinuousSegment, next: &ContinuousSegment) -> f64 {
     let h = 1e-6;
     let axes = prev.axes.len().min(3);
     let mut v2 = 0.0;
     for axis in 0..axes {
-        let a = eval(&prev.axes[axis], prev.t_end - h);
-        let b = eval(&next.axes[axis], next.t_start + h);
+        let a = eval_segment_axis(prev, axis, prev.t_end - h);
+        let b = eval_segment_axis(next, axis, next.t_start + h);
         let v = (b - a) / (2.0 * h);
         v2 += v * v;
     }
     v2.sqrt()
 }
 
-fn assert_time_contiguous(segs: &[ShapedSegment]) {
+fn assert_time_contiguous(segs: &[ContinuousSegment]) {
     for w in segs.windows(2) {
         assert!(
             (w[1].t_start - w[0].t_end).abs() < 1e-9,
@@ -176,11 +239,11 @@ fn assert_time_contiguous(segs: &[ShapedSegment]) {
     }
 }
 
-fn assert_position_contiguous(segs: &[ShapedSegment]) {
+fn assert_position_contiguous(segs: &[ContinuousSegment]) {
     for w in segs.windows(2) {
         for axis in 0..w[0].axes.len() {
-            let a = eval(&w[0].axes[axis], w[0].t_end);
-            let b = eval(&w[1].axes[axis], w[1].t_start);
+            let a = eval_segment_axis(&w[0], axis, w[0].t_end);
+            let b = eval_segment_axis(&w[1], axis, w[1].t_start);
             assert!(
                 (a - b).abs() < 1e-6,
                 "axis {axis} position gap at t={}: {a} vs {b}",
@@ -233,8 +296,8 @@ fn voron_cube_perimeter_replays_contiguously() {
     assert_position_contiguous(&segs);
     let last = segs.last().unwrap();
     let (x_end, y_end, _) = VORON_PERIMETER[VORON_PERIMETER.len() - 1];
-    assert!((eval(&last.axes[0], last.t_end) - x_end).abs() < 1e-4);
-    assert!((eval(&last.axes[1], last.t_end) - y_end).abs() < 1e-4);
+    assert!((eval_segment_axis(last, 0, last.t_end) - x_end).abs() < 1e-4);
+    assert!((eval_segment_axis(last, 1, last.t_end) - y_end).abs() < 1e-4);
 }
 
 #[test]
@@ -374,10 +437,10 @@ fn collinear_jogs_cruise_through_the_seam() {
     );
     assert!(!segs.is_empty());
     let last = segs.last().unwrap();
-    assert!((eval(&last.axes[0], last.t_end) - 100.0).abs() < 1e-6);
+    assert!((eval_segment_axis(last, 0, last.t_end) - 100.0).abs() < 1e-6);
     // The seam at x=50 is interior; the toolhead must cruise through it.
     for w in segs.windows(2) {
-        let x = eval(&w[0].axes[0], w[0].t_end);
+        let x = eval_segment_axis(&w[0], 0, w[0].t_end);
         if (x - 50.0).abs() < 1e-6 {
             let v = boundary_speed(&w[0], &w[1]);
             assert!(v > 1.0, "collinear seam stalled: {v} mm/s at x={x}");
@@ -406,8 +469,8 @@ fn blended_corner_is_rounded_not_stopped() {
         assert!(v > 1.0, "interior boundary stalled at {v} mm/s");
     }
     let last = segs.last().unwrap();
-    assert!((eval(&last.axes[0], last.t_end) - 50.0).abs() < 1e-6);
-    assert!((eval(&last.axes[1], last.t_end) - 50.0).abs() < 1e-6);
+    assert!((eval_segment_axis(last, 0, last.t_end) - 50.0).abs() < 1e-6);
+    assert!((eval_segment_axis(last, 1, last.t_end) - 50.0).abs() < 1e-6);
 }
 
 #[test]
@@ -459,14 +522,15 @@ fn extrusion_is_conserved_and_continuous_across_blends() {
     assert_position_contiguous(&segs);
     let last = segs.last().unwrap();
     assert!(
-        (eval(&last.axes[3], last.t_end) - 15.0).abs() < 1e-3,
+        (eval_segment_axis(last, 3, last.t_end) - 15.0).abs() < 1e-3,
         "total extrusion must be conserved"
     );
 }
 
-fn axis_velocity(seg: &ShapedSegment, axis: usize, t: f64) -> f64 {
-    let h = 1e-6;
-    (eval(&seg.axes[axis], t + h) - eval(&seg.axes[axis], t - h)) / (2.0 * h)
+fn axis_velocity(seg: &ContinuousSegment, axis: usize, t: f64) -> f64 {
+    seg.eval_axis(axis, t)
+        .unwrap_or_else(|error| panic!("axis {axis} evaluation failed at {t}: {error}"))
+        .velocity
 }
 
 #[test]
@@ -504,7 +568,7 @@ fn extrusion_velocity_is_continuous_across_a_ramped_blend() {
         "extrusion velocity discontinuous across blend: {worst} mm/s"
     );
     let last = segs.last().unwrap();
-    assert!((eval(&last.axes[3], last.t_end) - 17.65).abs() < 1e-3);
+    assert!((eval_segment_axis(last, 3, last.t_end) - 17.65).abs() < 1e-3);
 }
 
 #[test]
@@ -546,7 +610,7 @@ fn odometer_accumulates_extrusion_across_emissions() {
         &moves,
     );
     let last = segs.last().unwrap();
-    assert!((eval(&last.axes[3], last.t_end) - 8.0).abs() < 1e-3);
+    assert!((eval_segment_axis(last, 3, last.t_end) - 8.0).abs() < 1e-3);
 }
 
 #[test]
@@ -606,8 +670,8 @@ fn drained_prefix_is_invariant_under_append() {
         assert!((a.t_start - b.t_start).abs() < 1e-3);
         assert!((a.t_end - b.t_end).abs() < 1e-3);
         for axis in 0..2 {
-            let da = eval(&a.axes[axis], a.t_end);
-            let db = eval(&b.axes[axis], b.t_end);
+            let da = eval_segment_axis(a, axis, a.t_end);
+            let db = eval_segment_axis(b, axis, b.t_end);
             assert!(
                 (da - db).abs() < 1e-9,
                 "seg {compared} axis {axis}: {da} vs {db}"
@@ -646,12 +710,10 @@ fn asymmetric_kernel_survives_history_trimming_across_many_segments() {
     let segs = replay(cfg(), chains, &[0.0, 0.0, 0.0], 0.0, &moves);
     assert!(!segs.is_empty());
     for seg in &segs {
-        for curve in &seg.axes {
-            assert!(curve.control_points().iter().all(|v| v.is_finite()));
-        }
+        assert_segment_axes_finite(seg);
     }
     let last = segs.last().expect("non-empty");
-    let final_x = eval(&last.axes[0], last.t_end);
+    let final_x = eval_segment_axis(last, 0, last.t_end);
     let shaped_fit_budget = 1e-3;
     assert!(
         (final_x - 80.0).abs() < shaped_fit_budget,
@@ -711,7 +773,7 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
     let last = base.last().unwrap().t_end;
     let input_degree = base
         .iter()
-        .map(|segment| segment.axes[0].degree() as usize)
+        .map(|segment| axis_breakpoints(&segment.axes[0]).1)
         .max()
         .expect("non-empty base");
 
@@ -719,7 +781,7 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
         let mut breaks: Vec<f64> = Vec::new();
         for seg in &base {
             breaks.push(seg.t_start);
-            breaks.extend_from_slice(seg.axes[0].knots());
+            breaks.extend(axis_breakpoints(&seg.axes[0]).0);
             breaks.push(seg.t_end);
         }
         let sig = trajectory::ShapedSignal::new_from_evaluator(
@@ -729,8 +791,8 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
                 base.iter()
                     .find(|seg| clamped >= seg.t_start && clamped <= seg.t_end)
                     .map_or_else(
-                        || eval(&base.last().unwrap().axes[0], clamped),
-                        |seg| eval(&seg.axes[0], clamped),
+                        || eval_segment_axis(base.last().unwrap(), 0, clamped),
+                        |seg| eval_segment_axis(seg, 0, clamped),
                     )
             },
             breaks,
@@ -738,7 +800,7 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
         );
         for frac in [0.1_f64, 0.3, 0.5, 0.7, 0.9] {
             let t = frac.mul_add(base_seg.t_end - base_seg.t_start, base_seg.t_start);
-            let got = eval(&shaped_seg.axes[0], t + pad);
+            let got = eval_segment_axis(shaped_seg, 0, t + pad);
             let want = sig.eval(t);
             assert!(
                 (got - want).abs() < 5e-2,
@@ -748,84 +810,121 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
     }
 }
 
-#[test]
-fn polynomial_moment_convolution_matches_quadrature() {
-    use std::rc::Rc;
+/// A signal with a hold between two high-degree pieces, convolved with a
+/// real shaper kernel: enough structure that the moment path exercises
+/// partial pieces, a whole-piece span and both held extensions.
+struct MomentSamplerInput {
+    tracks: [nurbs::ScalarNurbs; 2],
+    kernel: nurbs::algebra::PiecewisePolynomialKernel,
+    breaks: Vec<f64>,
+    signal_degree: usize,
+    kernel_degree: usize,
+    first_t: f64,
+    last_t: f64,
+}
 
-    use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
+impl MomentSamplerInput {
+    fn new() -> Self {
+        use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 
-    let first_t = 300.0;
-    let first_end = 300.004;
-    let second_start = 300.006;
-    let last_t = 300.012;
-    let first_track = bezier_pieces_to_nurbs(&[BezierPiece {
-        u_start: first_t,
-        u_end: first_end,
-        coeffs: vec![
-            10.0, 4.0, -30.0, 200.0, -1_000.0, 5_000.0, -20_000.0, 40_000.0,
-        ],
-    }]);
-    let held = eval(&first_track, first_end);
-    let second_track = bezier_pieces_to_nurbs(&[BezierPiece {
-        u_start: second_start,
-        u_end: last_t,
-        coeffs: vec![held, -3.0, 20.0, -100.0, 400.0, -1_000.0, 2_000.0, -3_000.0],
-    }]);
-    let kernel = trajectory::build_smooth_mzv_kernel(90.2);
-    let kernel_degree = kernel
-        .pieces
-        .iter()
-        .map(|piece| piece.degree())
-        .max()
-        .unwrap();
-    let mut breaks = first_track.knots().to_vec();
-    breaks.extend_from_slice(second_track.knots());
-
-    let oracle_table = Rc::new(crate::shaper::AxisSignalTable::from_tracks(
-        [&first_track, &second_track],
-        first_t,
-        last_t,
-        true,
-        true,
-    ));
-    let oracle_eval = Rc::clone(&oracle_table);
-    let oracle = trajectory::ShapedSignal::new_from_evaluator(
-        &kernel,
-        move |t| oracle_eval.eval(t),
-        breaks.clone(),
-        oracle_table.max_degree(),
-    );
-
-    let fast_table = Rc::new(
-        crate::shaper::AxisSignalTable::from_tracks(
+        let first_t = 300.0;
+        let first_end = 300.004;
+        let second_start = 300.006;
+        let last_t = 300.012;
+        let first_track = bezier_pieces_to_nurbs(&[BezierPiece {
+            u_start: first_t,
+            u_end: first_end,
+            coeffs: vec![
+                10.0, 4.0, -30.0, 200.0, -1_000.0, 5_000.0, -20_000.0, 40_000.0,
+            ],
+        }]);
+        let held = eval(&first_track, first_end);
+        let second_track = bezier_pieces_to_nurbs(&[BezierPiece {
+            u_start: second_start,
+            u_end: last_t,
+            coeffs: vec![held, -3.0, 20.0, -100.0, 400.0, -1_000.0, 2_000.0, -3_000.0],
+        }]);
+        let kernel = trajectory::build_smooth_mzv_kernel(90.2);
+        let kernel_degree = kernel
+            .pieces
+            .iter()
+            .map(|piece| piece.degree())
+            .max()
+            .unwrap();
+        let mut breaks = first_track.knots().to_vec();
+        breaks.extend_from_slice(second_track.knots());
+        let signal_degree = crate::shaper::AxisSignalTable::from_tracks(
             [&first_track, &second_track],
             first_t,
             last_t,
             true,
             true,
         )
-        .with_piece_moments(kernel_degree),
-    );
-    let fast_eval = Rc::clone(&fast_table);
-    let fast_moments = Rc::clone(&fast_table);
-    let fast = trajectory::ShapedSignal::new_from_polynomial_evaluator(
-        &kernel,
-        move |t| fast_eval.eval(t),
-        breaks,
-        fast_table.max_degree(),
-        move |lo, hi, degree, origin, moments| {
-            fast_moments.integrate_moments(lo, hi, degree, origin, moments)
-        },
-    );
+        .max_degree();
+        Self {
+            tracks: [first_track, second_track],
+            kernel,
+            breaks,
+            signal_degree,
+            kernel_degree,
+            first_t,
+            last_t,
+        }
+    }
+
+    fn table(&self) -> crate::shaper::AxisSignalTable {
+        crate::shaper::AxisSignalTable::from_tracks(
+            [&self.tracks[0], &self.tracks[1]],
+            self.first_t,
+            self.last_t,
+            true,
+            true,
+        )
+    }
+
+    fn quadrature_signal(&self) -> trajectory::ShapedSignal<'_, impl Fn(f64) -> f64> {
+        let table = self.table();
+        let hint = std::cell::Cell::new(0);
+        trajectory::ShapedSignal::new_from_evaluator(
+            &self.kernel,
+            move |t| table.eval_hinted(t, &hint),
+            self.breaks.clone(),
+            self.signal_degree,
+        )
+    }
+
+    fn moment_signal(&self) -> trajectory::ShapedSignal<'_, impl Fn(f64) -> f64> {
+        let table = std::rc::Rc::new(self.table().with_piece_moments(self.kernel_degree));
+        let input_jumps = table.input_jumps().to_vec();
+        let for_moments = std::rc::Rc::clone(&table);
+        let hint = std::cell::Cell::new(0);
+        trajectory::ShapedSignal::new_from_polynomial_evaluator(
+            &self.kernel,
+            move |t| table.eval_hinted(t, &hint),
+            self.breaks.clone(),
+            self.signal_degree,
+            move |lo, hi, degree, origin, orders| {
+                for_moments.integrate_moments(lo, hi, degree, origin, orders)
+            },
+            input_jumps,
+        )
+    }
+}
+
+#[test]
+fn polynomial_moment_convolution_matches_quadrature() {
+    let input = MomentSamplerInput::new();
+    let fast = input.moment_signal();
+    let oracle = input.quadrature_signal();
 
     for t in [
-        first_t,
+        input.first_t,
         300.001,
-        first_end,
+        300.004,
         300.005,
-        second_start,
+        300.006,
         300.009,
-        last_t,
+        input.last_t,
     ] {
         let got = fast.eval_pva(t);
         let want = oracle.eval_pva(t);
@@ -842,6 +941,122 @@ fn polynomial_moment_convolution_matches_quadrature() {
             "acceleration at {t}: {got:?} vs {want:?}"
         );
     }
+}
+
+#[test]
+fn moment_convolution_preserves_position_and_slope_jump_derivatives() {
+    use nurbs::algebra::PiecewisePolynomialKernel;
+    use nurbs::bezier::{BezierPiece, bezier_pieces_to_discontinuous_nurbs};
+
+    let kernel = PiecewisePolynomialKernel {
+        pieces: vec![BezierPiece {
+            u_start: -1.0,
+            u_end: 1.0,
+            coeffs: vec![0.0, 0.0, 15.0 / 4.0, -15.0 / 4.0, 15.0 / 16.0],
+        }],
+    };
+    for sign in [-1.0, 1.0] {
+        let jump = 2.0 * sign;
+        let slope = -0.75 * sign;
+        let track = bezier_pieces_to_discontinuous_nurbs(&[
+            BezierPiece {
+                u_start: -4.0,
+                u_end: 0.0,
+                coeffs: vec![0.0, 0.0],
+            },
+            BezierPiece {
+                u_start: 0.0,
+                u_end: 4.0,
+                coeffs: vec![jump, slope],
+            },
+        ]);
+        let table = std::rc::Rc::new(
+            crate::shaper::AxisSignalTable::from_tracks([&track], -4.0, 4.0, true, true)
+                .with_piece_moments(4),
+        );
+        let input_jumps = table.input_jumps().to_vec();
+        let moments = std::rc::Rc::clone(&table);
+        let hint = std::cell::Cell::new(0);
+        let signal = trajectory::ShapedSignal::new_from_polynomial_evaluator(
+            &kernel,
+            move |t| table.eval_hinted(t, &hint),
+            vec![-4.0, 0.0, 4.0],
+            1,
+            move |lo, hi, degree, origin, orders| {
+                moments.integrate_moments(lo, hi, degree, origin, orders)
+            },
+            input_jumps,
+        );
+        for t in [-2.0_f64, -1.0, -0.999, -0.5, 0.0, 0.5, 0.999, 1.0, 2.0] {
+            let x = t.clamp(-1.0, 1.0);
+            let cdf = 15.0 / 16.0 * (x - 2.0 * x.powi(3) / 3.0 + x.powi(5) / 5.0 + 8.0 / 15.0);
+            let first_moment =
+                15.0 / 16.0 * (x.powi(2) / 2.0 - x.powi(4) / 2.0 + x.powi(6) / 6.0 - 1.0 / 6.0);
+            let density = 15.0 / 16.0 * (1.0 - x * x).powi(2);
+            let density_derivative = -15.0 / 4.0 * x * (1.0 - x * x);
+            let expected = (
+                jump * cdf + slope * (t * cdf - first_moment),
+                jump * density + slope * cdf,
+                jump * density_derivative + slope * density,
+            );
+            let actual = signal.eval_pva(t);
+            for (got, want) in [
+                (actual.0, expected.0),
+                (actual.1, expected.1),
+                (actual.2, expected.2),
+            ] {
+                assert!(
+                    (got - want).abs() <= 1e-11,
+                    "sign={sign} t={t}: {actual:?} != {expected:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Agreement at a handful of chosen times does not police a sampler; the
+/// follower projection sweeps whole kernel windows, and it was a systematic
+/// disagreement across such a sweep - invisible to every seam metric,
+/// amplified into extruder acceleration ripple by pressure advance
+/// differentiating the projection - that made `f*k''` untenable.
+///
+/// The second derivative is the demanding one: it is the difference of terms
+/// far larger than itself, so a formulation that differentiates the kernel
+/// rather than the input loses an ulp of window placement into it. This sweep
+/// held 3.2e-4 of acceleration disagreement under `f*k''` and holds 6e-7
+/// under `f''*k`, which is quadrature's own distance from exact arithmetic.
+#[test]
+fn the_moment_path_agrees_with_quadrature_across_a_swept_window() {
+    const SAMPLES: u32 = 200_000;
+    const POSITION_TOL: f64 = 1e-10;
+    const VELOCITY_TOL: f64 = 1e-8;
+    const ACCELERATION_TOL: f64 = 1e-5;
+
+    let input = MomentSamplerInput::new();
+    let fast = input.moment_signal();
+    let oracle = input.quadrature_signal();
+    let mut worst = (0.0, 0.0, 0.0, 0.0);
+    for sample in 0..SAMPLES {
+        let t = input.first_t
+            + (input.last_t - input.first_t) * f64::from(sample) / f64::from(SAMPLES)
+            + 1.7e-9;
+        let (got_p, got_v, got_a) = fast.eval_pva(t);
+        let (want_p, want_v, want_a) = oracle.eval_pva(t);
+        if (got_a - want_a).abs() > worst.3 {
+            worst = (
+                t,
+                (got_p - want_p).abs(),
+                (got_v - want_v).abs(),
+                (got_a - want_a).abs(),
+            );
+        }
+    }
+    let (t, position, velocity, acceleration) = worst;
+    assert!(
+        position < POSITION_TOL && velocity < VELOCITY_TOL && acceleration < ACCELERATION_TOL,
+        "moment path drifts from quadrature at t={t}: \
+         dp={position:.3e} dv={velocity:.3e} da={acceleration:.3e}"
+    );
 }
 
 #[test]
@@ -883,58 +1098,65 @@ fn smooth_shaper_second_batch_window_before_stream_start_clamps() {
     let t0 = 1.0;
     let step = 0.4 * back;
 
-    let constant_seg = |t_start: f64, t_end: f64| ShapedSegment {
-        axes: (0..3)
-            .map(|_| {
-                nurbs::bezier::bezier_pieces_to_nurbs(&[nurbs::bezier::BezierPiece {
-                    u_start: t_start,
-                    u_end: t_end,
-                    coeffs: vec![150.0],
-                }])
-            })
-            .collect(),
-        followers: vec![],
+    let constant_seg = |t_start: f64, t_end: f64| ContinuousSegment {
+        axes: Arc::from(
+            (0..3)
+                .map(|_| {
+                    ContinuousAxis::Spline(Arc::new(nurbs::bezier::bezier_pieces_to_nurbs(&[
+                        nurbs::bezier::BezierPiece {
+                            u_start: t_start,
+                            u_end: t_end,
+                            coeffs: vec![150.0],
+                        },
+                    ])))
+                })
+                .collect::<Vec<_>>(),
+        ),
+        followers: Arc::from([]),
         spatial_path: false,
         t_start,
         t_end,
         motor_mask: 0,
         source_line: 1,
+        rest_at_end: true,
     };
 
     let (lowered_tx, lowered_rx) = unbounded();
     for i in 0..8 {
         let (a, b) = (i as f64, (i + 1) as f64);
         lowered_tx
-            .send(LoweredItem::Seg(LoweredSegment {
-                seg: constant_seg(a.mul_add(step, t0), b.mul_add(step, t0)),
-                rest_at_end: true,
+            .send(BaseItem::Seg(BaseSegment {
+                segment: constant_seg(a.mul_add(step, t0), b.mul_add(step, t0)),
             }))
             .unwrap();
     }
     drop(lowered_tx);
 
     let (shaped_tx, shaped_rx) = unbounded();
-    Shaper::new(chains).run(lowered_rx, shaped_tx);
+    Shaper::new(chains, fit_tol(cfg())).run(lowered_rx, shaped_tx);
 
-    let segs: Vec<ShapedSegment> = shaped_rx
+    let segs: Vec<ContinuousSegment> = shaped_rx
         .into_iter()
         .filter_map(|item| match item {
-            ShapedItem::Seg(seg) => Some(seg),
-            ShapedItem::Parked | ShapedItem::Control(_) => None,
+            TrajectoryItem::Seg(seg) => Some(seg),
+            TrajectoryItem::Parked | TrajectoryItem::Control(_) => None,
         })
         .collect();
     assert_eq!(segs.len(), 8);
     for seg in &segs {
         let mid = 0.5 * (seg.t_start + seg.t_end);
-        let got = eval(&seg.axes[0], mid);
+        let got = eval_segment_axis(seg, 0, mid);
         assert!(
             (got - 150.0).abs() < 1e-3,
             "seg [{}, {}]: shaped constant drifted to {got}",
             seg.t_start,
             seg.t_end,
         );
+        let ContinuousAxis::Spline(curve) = &seg.axes[0] else {
+            panic!("a changed smooth-kernel axis must be a spline");
+        };
         assert_eq!(
-            seg.axes[0].control_points(),
+            curve.control_points(),
             &[150.0],
             "stationary shaped axes must retain their constant representation"
         );
@@ -962,7 +1184,7 @@ fn arc_run_into_sharp_corner_stays_contiguous_at_high_scv() {
         100.0,
         1000.0,
         geometry::corner_deviation_from_scv(25.0, 1000.0),
-        1_000_000.0,
+        f64::INFINITY,
     )
     .unwrap();
     let config = StreamConfig {
@@ -1007,7 +1229,7 @@ fn blends_consuming_a_full_arc_emit_no_degenerate_remainder() {
         100.0,
         1000.0,
         geometry::corner_deviation_from_scv(25.0, 1000.0),
-        1_000_000.0,
+        f64::INFINITY,
     )
     .unwrap();
     let config = StreamConfig {
@@ -1056,7 +1278,7 @@ fn replay_inputs(
     chains: AxisChainSet,
     home: &[f64],
     inputs: Vec<StreamInput>,
-) -> Vec<ShapedSegment> {
+) -> Vec<ContinuousSegment> {
     let (raw_tx, raw_rx) = unbounded();
     for item in inputs {
         raw_tx.send(item).unwrap();
@@ -1066,25 +1288,16 @@ fn replay_inputs(
     FitStage::new(config.corner).run(raw_rx, fitted_tx);
     let (planned_tx, planned_rx) = unbounded();
     Planner::new(config).run(fitted_rx, planned_tx);
+    let fit_tol = fit_tol(config);
     let (lowered_tx, lowered_rx) = unbounded();
-    run_lowerer(
-        planned_rx,
-        lowered_tx,
-        FitTol {
-            pos_mm: config.fit_tol_mm,
-            accel_mm_s2: config.fit_tol_accel_mm_s2,
-        },
-        chains.clone(),
-        home.to_vec(),
-        0.0,
-    );
+    run_lowerer(planned_rx, lowered_tx, chains.clone(), home.to_vec(), 0.0);
     let (shaped_tx, shaped_rx) = unbounded();
-    Shaper::new(chains).run(lowered_rx, shaped_tx);
+    Shaper::new(chains, fit_tol).run(lowered_rx, shaped_tx);
     shaped_rx
         .into_iter()
         .filter_map(|item| match item {
-            ShapedItem::Seg(seg) => Some(seg),
-            ShapedItem::Parked | ShapedItem::Control(_) => None,
+            TrajectoryItem::Seg(seg) => Some(seg),
+            TrajectoryItem::Parked | TrajectoryItem::Control(_) => None,
         })
         .collect()
 }
@@ -1135,9 +1348,9 @@ fn mesh_warp_tracks_across_a_fenced_move_sequence() {
 
     let last = segs.last().unwrap();
     let t_end = last.t_end;
-    let x = eval(&last.axes[0], t_end);
-    let y = eval(&last.axes[1], t_end);
-    let z_machine = eval(&last.axes[2], t_end);
+    let x = eval_segment_axis(last, 0, t_end);
+    let y = eval_segment_axis(last, 1, t_end);
+    let z_machine = eval_segment_axis(last, 2, t_end);
     let expected = 0.5 + t.correction_at(220.0, 220.0, 0.5);
     assert!(
         (x - 220.0).abs() < 1e-2 && (y - 220.0).abs() < 1e-2,
@@ -1147,6 +1360,36 @@ fn mesh_warp_tracks_across_a_fenced_move_sequence() {
         (z_machine - expected).abs() < 5e-3,
         "final machine Z {z_machine} should be {expected}"
     );
+}
+
+#[test]
+fn small_mesh_variations_stay_continuous_across_move_boundaries() {
+    let mut mesh =
+        geometry::MeshGrid::new(0.0, 0.0, 100.0, 100.0, 2, 2, vec![0.0, 0.1, 0.0, 0.1], 0.2)
+            .unwrap();
+    mesh.zero_at(0.0, 0.0);
+    let transform = std::sync::Arc::new(geometry::SurfaceTransform::new(
+        mesh,
+        geometry::Fade::disabled(),
+    ));
+    let points = [[10.0, 50.0, 0.2], [11.0, 50.0, 0.2], [12.0, 50.0, 0.2]];
+    let inputs = vec![
+        StreamInput::Control(Control::SetMesh {
+            mesh: Some(transform),
+            gcode_z_rebase: 0.2,
+        }),
+        StreamInput::Move(line_move(points[0], points[1], 0.0, ctx(1, 50.0)).unwrap()),
+        StreamInput::Drain,
+        StreamInput::Move(line_move(points[1], points[2], 0.0, ctx(2, 50.0)).unwrap()),
+        StreamInput::Drain,
+    ];
+    let segs = replay_inputs(
+        cfg_bench(),
+        AxisChainSet::default(),
+        &[10.0, 50.0, 0.2, 0.0],
+        inputs,
+    );
+    assert_position_contiguous(&segs);
 }
 
 fn xy_shaper_follower_chains(smooth_time: f64) -> AxisChainSet {
@@ -1221,25 +1464,25 @@ fn a_drain_declares_the_park_after_its_last_segment() {
     );
 
     assert!(
-        matches!(items.last(), Some(ShapedItem::Parked)),
+        matches!(items.last(), Some(TrajectoryItem::Parked)),
         "the drain must declare the park after its last segment"
     );
     assert!(
         items[..items.len() - 1]
             .iter()
-            .all(|item| !matches!(item, ShapedItem::Parked)),
+            .all(|item| !matches!(item, TrajectoryItem::Parked)),
         "only the drain parks: no marker may precede its segments"
     );
 }
 
-fn sampled_planar_path_length(segs: &[ShapedSegment]) -> f64 {
+fn sampled_planar_path_length(segs: &[ContinuousSegment]) -> f64 {
     const SAMPLES_PER_SEG: usize = 2000;
     let mut length = 0.0;
     let mut prev: Option<(f64, f64)> = None;
     for seg in segs {
         for i in 0..=SAMPLES_PER_SEG {
             let t = seg.t_start + (seg.t_end - seg.t_start) * i as f64 / SAMPLES_PER_SEG as f64;
-            let p = (eval(&seg.axes[0], t), eval(&seg.axes[1], t));
+            let p = (eval_segment_axis(seg, 0, t), eval_segment_axis(seg, 1, t));
             if let Some(q) = prev {
                 length += ((p.0 - q.0).powi(2) + (p.1 - q.1).powi(2)).sqrt();
             }
@@ -1249,20 +1492,25 @@ fn sampled_planar_path_length(segs: &[ShapedSegment]) -> f64 {
     length
 }
 
-fn extruder_end(segs: &[ShapedSegment]) -> f64 {
+fn extruder_end(segs: &[ContinuousSegment]) -> f64 {
     let last = segs.last().expect("segments emitted");
-    eval(&last.axes[3], last.t_end)
+    eval_segment_axis(last, 3, last.t_end)
 }
 
-fn assert_extruder_continuous_and_monotone(segs: &[ShapedSegment]) {
+fn assert_extruder_continuous_and_monotone(segs: &[ContinuousSegment]) {
+    let tolerance = fit_tol(cfg()).scaled(
+        segs.iter()
+            .map(|seg| crate::lowering::follower_tol_scale(&seg.followers, 3))
+            .fold(1.0, f64::min),
+    );
     let mut prev_val: Option<f64> = None;
     for seg in segs {
         for i in 0..=200 {
             let t = seg.t_start + (seg.t_end - seg.t_start) * i as f64 / 200.0;
-            let v = eval(&seg.axes[3], t);
+            let v = eval_segment_axis(seg, 3, t);
             if let Some(p) = prev_val {
                 assert!(
-                    v >= p - 1e-6,
+                    v >= p - tolerance.pos_mm,
                     "extruder track regressed from {p} to {v} at t={t}"
                 );
                 assert!(
@@ -1400,8 +1648,10 @@ fn follower_projects_onto_toolhead_signal_not_motor_command() {
     for (p, q) in plain.iter().zip(&inverted) {
         for i in 0..=100 {
             let t = p.t_start + (p.t_end - p.t_start) * f64::from(i) / 100.0;
-            max_e_diff = max_e_diff.max((eval(&p.axes[3], t) - eval(&q.axes[3], t)).abs());
-            max_x_diff = max_x_diff.max((eval(&p.axes[0], t) - eval(&q.axes[0], t)).abs());
+            max_e_diff =
+                max_e_diff.max((eval_segment_axis(p, 3, t) - eval_segment_axis(q, 3, t)).abs());
+            max_x_diff =
+                max_x_diff.max((eval_segment_axis(p, 0, t) - eval_segment_axis(q, 0, t)).abs());
         }
     }
     assert!(
@@ -1483,22 +1733,27 @@ fn follower_frontier_waits_for_exact_kernel_lookahead() {
     assert!(target_end + own_hi > frontier_end);
     assert!(target_end + own_hi <= frontier_end + 1e-12);
 
-    let segment = |t_start: f64, t_end: f64| ShapedSegment {
-        axes: (0..4)
-            .map(|axis| {
-                nurbs::bezier::bezier_pieces_to_nurbs(&[nurbs::bezier::BezierPiece {
-                    u_start: t_start,
-                    u_end: t_end,
-                    coeffs: vec![f64::from(axis)],
-                }])
-            })
-            .collect(),
-        followers: vec![],
+    let segment = |t_start: f64, t_end: f64| ContinuousSegment {
+        axes: Arc::from(
+            (0..4)
+                .map(|axis| {
+                    ContinuousAxis::Spline(Arc::new(nurbs::bezier::bezier_pieces_to_nurbs(&[
+                        nurbs::bezier::BezierPiece {
+                            u_start: t_start,
+                            u_end: t_end,
+                            coeffs: vec![f64::from(axis)],
+                        },
+                    ])))
+                })
+                .collect::<Vec<_>>(),
+        ),
+        followers: Arc::from([]),
         spatial_path: false,
         t_start,
         t_end,
         motor_mask: 0,
         source_line: 1,
+        rest_at_end: false,
     };
     let (lowered_tx, lowered_rx) = unbounded();
     for (t_start, t_end) in [
@@ -1508,19 +1763,18 @@ fn follower_frontier_waits_for_exact_kernel_lookahead() {
         (buffered_end, last_end),
     ] {
         lowered_tx
-            .send(LoweredItem::Seg(LoweredSegment {
-                seg: segment(t_start, t_end),
-                rest_at_end: false,
+            .send(BaseItem::Seg(BaseSegment {
+                segment: segment(t_start, t_end),
             }))
             .unwrap();
     }
     drop(lowered_tx);
 
     let (shaped_tx, shaped_rx) = unbounded();
-    Shaper::new(chains).run(lowered_rx, shaped_tx);
+    Shaper::new(chains, fit_tol(cfg())).run(lowered_rx, shaped_tx);
     let emitted = shaped_rx
         .into_iter()
-        .filter(|item| matches!(item, ShapedItem::Seg(_)))
+        .filter(|item| matches!(item, TrajectoryItem::Seg(_)))
         .count();
     assert_eq!(emitted, 4);
 }
@@ -1547,27 +1801,41 @@ fn nonlinear_e_chain(
     trajectory::CompiledChain::compile(&instances).expect("nonlinear pa + kernel compiles")
 }
 
-fn sample_extruder(segs: &[ShapedSegment]) -> Vec<(f64, f64)> {
+fn sample_extruder(segs: &[ContinuousSegment]) -> Vec<(f64, f64)> {
     let mut samples = Vec::new();
     for seg in segs {
         for i in 0..=200 {
             let t = seg.t_start + (seg.t_end - seg.t_start) * i as f64 / 200.0;
-            samples.push((t, eval(&seg.axes[3], t)));
+            samples.push((t, eval_segment_axis(seg, 3, t)));
         }
     }
     samples
 }
 
-fn assert_extruder_has_no_jumps(segs: &[ShapedSegment]) {
-    let mut prev: Option<(f64, f64)> = None;
-    for (t, v) in sample_extruder(segs) {
-        if let Some((_, p)) = prev {
+fn assert_extruder_has_no_jumps(segs: &[ContinuousSegment]) {
+    let tolerance = fit_tol(cfg()).pos_mm;
+    for pair in segs.windows(2) {
+        let left = pair[0].eval_axis(3, pair[0].t_end).unwrap();
+        let right = pair[1].eval_axis(3, pair[1].t_start).unwrap();
+        assert!(
+            (left.position - right.position).abs() <= tolerance,
+            "extruder seam at {}: left {} vs right {}",
+            pair[0].t_end,
+            left.position,
+            right.position
+        );
+    }
+    for seg in segs {
+        for i in 0..=200 {
+            let t = seg.t_start + (seg.t_end - seg.t_start) * i as f64 / 200.0;
+            let pva = seg.eval_axis(3, t).unwrap();
             assert!(
-                (v - p).abs() < 0.05,
-                "extruder track jumped from {p} to {v} at t={t}"
+                [pva.position, pva.velocity, pva.acceleration]
+                    .into_iter()
+                    .all(f64::is_finite),
+                "extruder PVA is non-finite at {t}: {pva:?}"
             );
         }
-        prev = Some((t, v));
     }
 }
 
@@ -1632,6 +1900,75 @@ fn follower_kernel_rides_the_projection_through_a_corner() {
         "kernelled follower must still ride the shaped arc length: e_end \
          {e_end} vs 0.05 × {shaped_len} = {}",
         0.05 * shaped_len
+    );
+}
+
+/// Late in a print the follower's cumulative position is tens of
+/// millimetres, and a kernel fit that carried it absolutely would spend its
+/// whole positional budget on the base — the ladder then bisects toward
+/// subpicosecond spans chasing a relative residual it can never resolve.
+/// Every emitted target must carry its own base, leaving the fitted curve
+/// near zero, while the evaluated track stays absolute and continuous.
+#[test]
+fn follower_kernel_targets_carry_their_own_base_late_in_a_print() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5),
+        line(2, [30.0, 0.0, 0.0], [30.0, 30.0, 0.0], 1.5),
+        line(3, [30.0, 30.0, 0.0], [0.0, 30.0, 0.0], 1.5),
+        line(4, [0.0, 30.0, 0.0], [0.0, 0.0, 0.0], 1.5),
+    ];
+    let start_e = 24.0;
+    let home = [0.0, 0.0, 0.0, start_e];
+    let shaped = replay(
+        cfg(),
+        follower_kernel_chains(Some(0.044583333333333336), None, 0.02675),
+        &home,
+        0.0,
+        &moves,
+    );
+    assert!(
+        shaped.len() >= 4,
+        "expected several emitted targets, got {}",
+        shaped.len()
+    );
+    for seg in &shaped {
+        let ContinuousAxis::PiecewiseRelativeSpline(pieces) = &seg.axes[3] else {
+            panic!("a kerneled follower emits a piecewise relative spline");
+        };
+        assert!(!pieces.is_empty());
+        for piece in pieces.iter() {
+            let source_extent = piece
+                .curve
+                .control_points()
+                .iter()
+                .fold(0.0_f64, |extent, value| extent.max(value.abs()));
+            assert!(
+                source_extent < 2.0,
+                "kernel fit source must stay near zero: extent {source_extent} \
+                 over base {} at t={}",
+                piece.base_position,
+                piece.t_start,
+            );
+            assert!(
+                piece.base_position >= start_e - 1e-6,
+                "each piece base must carry the cumulative position: {} at t={}",
+                piece.base_position,
+                piece.t_start,
+            );
+        }
+    }
+    assert_extruder_continuous_and_monotone(&shaped);
+    let first = shaped.first().expect("segments emitted");
+    let track_start = eval_segment_axis(first, 3, first.t_start);
+    assert!(
+        (track_start - start_e).abs() <= 0.05 * fit_tol(cfg()).pos_mm,
+        "absolute track must still start at the print's cumulative position: \
+         {track_start} vs {start_e}"
+    );
+    assert!(
+        extruder_end(&shaped) > start_e + 5.0,
+        "the print must extrude on top of its base: {}",
+        extruder_end(&shaped)
     );
 }
 
@@ -1707,7 +2044,7 @@ fn nonlinear_pressure_advance_saturates_against_the_matched_linear_model() {
     let tanh = saturating(&trajectory::algos::TanhPressureAdvance);
     let recipr = saturating(&trajectory::algos::ReciprPressureAdvance);
 
-    let lead = |pa: &[ShapedSegment]| {
+    let lead = |pa: &[ContinuousSegment]| {
         sample_extruder(pa)
             .iter()
             .zip(sample_extruder(&plain))
@@ -1785,6 +2122,140 @@ fn derivative_gains_track_transform_combines_both_gains() {
 }
 
 #[test]
+fn linear_advance_on_a_feed_step_primes_forward() {
+    // Raw follower track: cruise 0.5 mm/s for 4 ms, ramp to 1.5 mm/s over
+    // 6.67 ms at 150 mm/s^2, cruise 1.5 mm/s for 100 ms.
+    let h_ramp = 1.0 / 150.0;
+    let p0 = nurbs::bezier::BezierPiece {
+        u_start: 0.0,
+        u_end: 0.004,
+        coeffs: vec![0.0, 0.5, 0.0],
+    };
+    let p0_end = 0.5 * 0.004;
+    let p1 = nurbs::bezier::BezierPiece {
+        u_start: 0.004,
+        u_end: 0.004 + h_ramp,
+        coeffs: vec![p0_end, 0.5, 75.0],
+    };
+    let p1_end = p0_end + 0.5 * h_ramp + 75.0 * h_ramp * h_ramp;
+    let p2 = nurbs::bezier::BezierPiece {
+        u_start: 0.004 + h_ramp,
+        u_end: 0.104 + h_ramp,
+        coeffs: vec![p1_end, 1.5, 0.0],
+    };
+    let track = nurbs::bezier::bezier_pieces_to_nurbs(&[p0, p1, p2]);
+    let adv = trajectory::NonlinearAdvance {
+        model: trajectory::AdvanceModel::Tanh,
+        linear_advance: 0.03,
+        nonlinear_offset: 0.0,
+        linearization_velocity: 1.0,
+    };
+    let out = crate::shaper::apply_nonlinear_advance_to_track(3, &track, adv, fit_tol(cfg()))
+        .expect("linear advance refits the feed step");
+    let vel = nurbs::eval::derivative(&out);
+    for i in 0..=200 {
+        let t = 0.004 + h_ramp + 1e-6 + (0.0999 * i as f64 / 200.0);
+        let v = eval(&vel, t);
+        assert!(
+            (v - 1.5).abs() < 1e-6,
+            "cruise after the feed step must extrude at 1.5 mm/s, got {v} at t={t}"
+        );
+    }
+}
+
+#[test]
+fn nonlinear_advance_keeps_cruise_acceleration_zero_before_a_phase_boundary() {
+    let boundary = 0.299_987_113_843_926_7;
+    let track = nurbs::bezier::bezier_pieces_to_nurbs(&[
+        nurbs::bezier::BezierPiece {
+            u_start: 0.0,
+            u_end: boundary,
+            coeffs: vec![0.0, 10.0, 0.0],
+        },
+        nurbs::bezier::BezierPiece {
+            u_start: boundary,
+            u_end: boundary + 0.06,
+            coeffs: vec![10.0 * boundary, 10.0, -75.0],
+        },
+    ]);
+    let advance = trajectory::NonlinearAdvance {
+        model: trajectory::AdvanceModel::Tanh,
+        linear_advance: 0.0,
+        nonlinear_offset: 0.06,
+        linearization_velocity: 2.0,
+    };
+    let output =
+        crate::shaper::apply_nonlinear_advance_to_track(3, &track, advance, fit_tol(cfg()))
+            .expect("a cruise followed by deceleration fits its one-sided phase states");
+    let velocity = nurbs::eval::derivative(&output);
+    let acceleration = nurbs::eval::derivative(&velocity);
+    let roundoff =
+        512.0 * f64::EPSILON * (10.0 / boundary + advance.nonlinear_offset / boundary.powi(2));
+    for sample in 1..1000 {
+        let time = boundary * sample as f64 / 1000.0;
+        assert!(
+            eval(&acceleration, time).abs() <= roundoff,
+            "deceleration contaminated cruise at {time}: {}",
+            eval(&acceleration, time)
+        );
+    }
+}
+
+#[test]
+fn nonlinear_advance_preserves_monotone_acceleration_on_a_constant_acceleration_ramp() {
+    let start = 0.367_775_696_804_275_4;
+    let end = 0.431_989_680_542_433_9;
+    for model in [
+        trajectory::AdvanceModel::Tanh,
+        trajectory::AdvanceModel::Reciprocal,
+    ] {
+        for direction in [-1.0, 1.0] {
+            let initial_velocity = direction * 0.367_902_439_276_219_1;
+            let acceleration = direction * 150.0;
+            let track = nurbs::bezier::bezier_pieces_to_nurbs(&[nurbs::bezier::BezierPiece {
+                u_start: start,
+                u_end: end,
+                coeffs: vec![0.0, initial_velocity, 0.5 * acceleration],
+            }]);
+            let advance = trajectory::NonlinearAdvance {
+                model,
+                linear_advance: 0.0,
+                nonlinear_offset: 0.06,
+                linearization_velocity: 2.0,
+            };
+            let output =
+                crate::shaper::apply_nonlinear_advance_to_track(3, &track, advance, fit_tol(cfg()))
+                    .expect("nonlinear ramp fits without inventing acceleration extrema");
+            let output_velocity = nurbs::eval::derivative(&output);
+            let output_acceleration = nurbs::eval::derivative(&output_velocity);
+            let output_jerk = nurbs::eval::derivative(&output_acceleration);
+            let tolerance = fit_tol(cfg());
+            let mut previous = f64::NEG_INFINITY;
+            for sample in 0..=2000 {
+                let time = 0.39 + 0.04 * sample as f64 / 2000.0;
+                let velocity = initial_velocity + acceleration * (time - start);
+                let expected_acceleration =
+                    acceleration + advance.curvature(velocity) * acceleration * acceleration;
+                let actual_acceleration = eval(&output_acceleration, time);
+                assert!(
+                    (actual_acceleration - expected_acceleration).abs() <= tolerance.accel_mm_s2,
+                    "{model:?} ramp acceleration exceeds its fit budget at {time}"
+                );
+                assert!(
+                    direction * eval(&output_jerk, time) >= 0.0,
+                    "{model:?} ramp invented an acceleration extremum at {time}"
+                );
+                assert!(
+                    direction * actual_acceleration >= previous,
+                    "{model:?} ramp acceleration reversed at a fitted seam at {time}"
+                );
+                previous = direction * actual_acceleration;
+            }
+        }
+    }
+}
+
+#[test]
 fn nonlinear_advance_track_transform_matches_the_advance_law() {
     let piece = nurbs::bezier::BezierPiece {
         u_start: 0.0,
@@ -1802,39 +2273,659 @@ fn nonlinear_advance_track_transform_matches_the_advance_law() {
             nonlinear_offset: 0.08,
             linearization_velocity: 5.0,
         };
-        let out = crate::shaper::apply_nonlinear_advance_to_track(3, &track, adv)
+        let out = crate::shaper::apply_nonlinear_advance_to_track(3, &track, adv, fit_tol(cfg()))
             .expect("nonlinear advance refits a polynomial track");
-        let mut worst: f64 = 0.0;
-        let mut worst_offset_term: f64 = 0.0;
-        for i in 0..=20 {
-            let t = 0.1 * i as f64 / 20.0;
-            let pos = 1.0 + 2.0 * t + 3.0 * t * t + 4.0 * t * t * t;
-            let vel = 2.0 + 6.0 * t + 12.0 * t * t;
-            let offset_term = adv.advance(vel) - 0.03 * vel;
-            let expected = pos + 0.03 * vel + offset_term;
-            worst = worst.max((eval(&out, t) - expected).abs());
-            worst_offset_term = worst_offset_term.max(offset_term);
+        let tolerance = fit_tol(cfg());
+        let first_derivative = nurbs::eval::derivative(&out);
+        let second_derivative = nurbs::eval::derivative(&first_derivative);
+        for output_piece in nurbs::bezier::extract_bezier_pieces(&out) {
+            let duration = output_piece.u_end - output_piece.u_start;
+            for &u in &crate::lowering::LADDER_PROBES_U {
+                let t = nurbs::fmadd(0.5 * (u + 1.0), duration, output_piece.u_start);
+                let position = 1.0 + 2.0 * t + 3.0 * t * t + 4.0 * t * t * t;
+                let velocity = 2.0 + 6.0 * t + 12.0 * t * t;
+                let acceleration = 6.0 + 24.0 * t;
+                let expected_position = position + adv.advance(velocity);
+                let expected_acceleration = acceleration
+                    + adv.curvature(velocity) * acceleration * acceleration
+                    + adv.slope(velocity) * 24.0;
+                let position_error = (eval(&out, t) - expected_position).abs();
+                let acceleration_error =
+                    (eval(&second_derivative, t) - expected_acceleration).abs();
+                assert!(
+                    position_error <= tolerance.pos_mm,
+                    "{model:?}: position probe u={u} at t={t} exceeds budget: \
+                     {position_error} > {}",
+                    tolerance.pos_mm
+                );
+                assert!(
+                    acceleration_error <= tolerance.accel_mm_s2,
+                    "{model:?}: acceleration probe u={u} at t={t} exceeds budget: \
+                     {acceleration_error} > {}",
+                    tolerance.accel_mm_s2
+                );
+            }
         }
+        for i in 0..=100 {
+            let t = 0.1 * i as f64 / 100.0;
+            assert!(eval(&out, t).is_finite());
+            assert!(eval(&first_derivative, t).is_finite());
+            assert!(eval(&second_derivative, t).is_finite());
+        }
+    }
+}
+
+/// The advance signal joins the track's pieces at shared position and
+/// velocity, so the second piece's velocity zero moves away from the raw
+/// piece's own root. `Reciprocal` flips its curvature sign there, and that
+/// one-sided acceleration is only representable if the seam is seeded from
+/// the joined coefficients.
+#[test]
+fn nonlinear_advance_seeds_the_joined_velocity_zero() {
+    let track = nurbs::bezier::bezier_pieces_to_nurbs(&[
+        nurbs::bezier::BezierPiece {
+            u_start: 0.0,
+            u_end: 1.0,
+            coeffs: vec![0.0, 1.0, -0.4995],
+        },
+        nurbs::bezier::BezierPiece {
+            u_start: 1.0,
+            u_end: 2.0,
+            coeffs: vec![0.5005, 50.0, -10.0],
+        },
+    ]);
+    let adv = trajectory::NonlinearAdvance {
+        model: trajectory::AdvanceModel::Reciprocal,
+        linear_advance: 0.0,
+        nonlinear_offset: 0.08,
+        linearization_velocity: 5.0,
+    };
+    let out = crate::shaper::apply_nonlinear_advance_to_track(3, &track, adv, fit_tol(cfg()))
+        .expect("the joined velocity zero is seeded, so every span fits");
+    let joined = |t: f64| {
+        if t <= 1.0 {
+            (t * (1.0 - 0.4995 * t), 1.0 - 0.999 * t)
+        } else {
+            let tau = t - 1.0;
+            (0.5005 + tau * (0.001 - 10.0 * tau), 0.001 - 20.0 * tau)
+        }
+    };
+    let tolerance = fit_tol(cfg()).pos_mm;
+    let pieces = nurbs::bezier::extract_bezier_pieces(&out);
+    for output_piece in &pieces {
+        let duration = output_piece.u_end - output_piece.u_start;
         assert!(
-            worst < 1e-4,
-            "{model:?}: refit of x + a(x') must hold the shaper's position \
-             budget, worst {worst}"
+            duration > 0.0,
+            "no zero-width sliver may reach the fitter, piece at {}",
+            output_piece.u_start
+        );
+        for &u in crate::lowering::LADDER_PROBES_U
+            .iter()
+            .filter(|u| u.abs() < 1.0)
+        {
+            let t = nurbs::fmadd(0.5 * (u + 1.0), duration, output_piece.u_start);
+            let (position, velocity) = joined(t);
+            let error = (eval(&out, t) - (position + adv.advance(velocity))).abs();
+            assert!(
+                error <= tolerance,
+                "joined advance position at t={t}: {error} > {tolerance}"
+            );
+        }
+    }
+    let root = 1.0 + 0.001 / 20.0;
+    assert!(
+        pieces
+            .iter()
+            .any(|piece| (piece.u_start - root).abs() <= 1e-9),
+        "the joined velocity zero must own a piece boundary"
+    );
+}
+
+#[test]
+fn the_ladder_fits_a_resolution_scale_span_without_high_degree_amplification() {
+    let t0 = 0.028_682_476_406_763_253;
+    let t1 = 0.028_682_534_800_374_4;
+    let h = t1 - t0;
+    let jerk = 2850.0;
+    let position = |t: f64| {
+        let d = t - t0;
+        0.077_158_500_926_177_32
+            + d * (4.348_350_763_482_099 + d * (62.593_446_449_829_32 + d * jerk / 6.0))
+    };
+    let velocity = |t: f64| {
+        let d = t - t0;
+        4.348_350_763_482_099 + d * (125.186_892_899_658_64 + d * jerk / 2.0)
+    };
+    let acceleration = |t: f64| 125.186_892_899_658_64 + (t - t0) * jerk;
+    let t_of = |u: f64| nurbs::fmadd(0.5 * (u + 1.0), h, t0);
+    let truth_p = |u: f64| position(t_of(u));
+    let truth_v = |u: f64| velocity(t_of(u));
+    let truth_a = |u: f64| acceleration(t_of(u));
+    let tolerance = crate::lowering::FitTol {
+        pos_mm: 5e-5,
+        accel_mm_s2: 2.5,
+    };
+    let base = crate::lowering::quintic_in_u(
+        (truth_p(-1.0), truth_v(-1.0), truth_a(-1.0)),
+        (truth_p(1.0), truth_v(1.0), truth_a(1.0)),
+        h,
+    );
+    let attempt = crate::lowering::ladder_fit(
+        &base,
+        h,
+        tolerance,
+        &truth_p,
+        &truth_a,
+        &truth_v,
+        truth_p(1.0) - truth_p(-1.0),
+        f64::INFINITY,
+        crate::lowering::LadderPolicy {
+            endpoint_anchored: true,
+            enforce_velocity_sign: true,
+            acceleration_monotonicity: None,
+            high_degree_span_floor: 0.0,
+        },
+    );
+    let fit = match attempt {
+        Ok(fit) => fit,
+        Err(failure) => panic!(
+            "a resolution-scale span must fit without midpoint shortcuts: u={}, \
+             position error {}, acceleration error {}",
+            failure.u, failure.position_error, failure.acceleration_error
+        ),
+    };
+    let track =
+        nurbs::bezier::bezier_pieces_to_nurbs(&[crate::lowering::exact_piece(&fit, t0, t1, h)]);
+    let first_derivative = nurbs::eval::derivative(&track);
+    let second_derivative = nurbs::eval::derivative(&first_derivative);
+    for &u in &crate::lowering::LADDER_PROBES_U {
+        let t = t_of(u);
+        let position_error = (eval(&track, t) - position(t)).abs();
+        let acceleration_error = (eval(&second_derivative, t) - acceleration(t)).abs();
+        assert!(
+            position_error <= tolerance.pos_mm,
+            "probe u={u}: position error {position_error} > {}",
+            tolerance.pos_mm
         );
         assert!(
-            worst_offset_term > 100.0 * worst,
-            "{model:?}: the saturating term ({worst_offset_term}) must dominate \
-             the fit error ({worst}), otherwise this test would pass on the \
-             linear model too"
+            acceleration_error <= tolerance.accel_mm_s2,
+            "probe u={u}: acceleration error {acceleration_error} > {}, \
+             the rung amplified endpoint rounding noise by (2/h)^2",
+            tolerance.accel_mm_s2
+        );
+    }
+    for t in [t0, t1] {
+        let position_error = (eval(&track, t) - position(t)).abs();
+        let velocity_error = (eval(&first_derivative, t) - velocity(t)).abs();
+        assert!(
+            position_error <= 1e-12,
+            "endpoint t={t} must be anchored in position, off by {position_error}"
+        );
+        assert!(
+            velocity_error <= 1e-6,
+            "endpoint t={t} must be anchored in velocity, off by {velocity_error}"
         );
     }
 }
 
-fn eval_axis_at(segs: &[ShapedSegment], axis: usize, t: f64) -> f64 {
+#[test]
+fn a_smooth_cusp_fits_below_the_high_degree_floor_without_bump_corrections() {
+    let t0 = 0.028_682_476_406_763_253;
+    let seed_span = 2.691_631_367_790_492_4e-7;
+    let t1 = t0 + seed_span;
+    let cusp_time = t1 + 2.562_573_106_7e-7;
+    let cusp_accel = 1200.0;
+    let cusp_speed = 3.0e-4;
+    let base_speed = 4.348_350_763_482_099;
+    let base_position = 0.077_158_500_926_177_32;
+    let ramp = |t: f64| (cusp_speed * cusp_speed + (cusp_accel * (t - cusp_time)).powi(2)).sqrt();
+    let position = |t: f64| {
+        let d = t - cusp_time;
+        base_position
+            + base_speed * d
+            + 0.5
+                * (d * ramp(t)
+                    + (cusp_speed * cusp_speed / cusp_accel)
+                        * (cusp_accel * d / cusp_speed).asinh())
+    };
+    let velocity = |t: f64| base_speed + ramp(t);
+    let acceleration = |t: f64| cusp_accel * cusp_accel * (t - cusp_time) / ramp(t);
+    let tolerance = crate::lowering::FitTol {
+        pos_mm: 5e-5,
+        accel_mm_s2: 1.5,
+    };
+    let high_degree_span_floor = 3.6e-7;
+    let mut span_start = t0;
+    let span_end = t1;
+    let fit = loop {
+        let h = span_end - span_start;
+        let t_of = |u: f64| nurbs::fmadd(0.5 * (u + 1.0), h, span_start);
+        let truth_p = |u: f64| position(t_of(u));
+        let truth_v = |u: f64| velocity(t_of(u));
+        let truth_a = |u: f64| acceleration(t_of(u));
+        let base = crate::lowering::quintic_in_u(
+            (truth_p(-1.0), truth_v(-1.0), truth_a(-1.0)),
+            (truth_p(1.0), truth_v(1.0), truth_a(1.0)),
+            h,
+        );
+        let attempt = crate::lowering::ladder_fit(
+            &base,
+            h,
+            tolerance,
+            &truth_p,
+            &truth_a,
+            &truth_v,
+            truth_p(1.0) - truth_p(-1.0),
+            f64::INFINITY,
+            crate::lowering::LadderPolicy {
+                endpoint_anchored: true,
+                enforce_velocity_sign: true,
+                acceleration_monotonicity: None,
+                high_degree_span_floor,
+            },
+        );
+        match attempt {
+            Ok(fit) => break fit,
+            Err(failure) => {
+                assert!(
+                    h > 2e-8,
+                    "the cusp must fit by the 3e-8 decade, still failing at h={h}: \
+                     u={}, acceleration error {} > {}",
+                    failure.u,
+                    failure.acceleration_error,
+                    tolerance.accel_mm_s2
+                );
+                span_start = 0.5 * (span_start + span_end);
+            }
+        }
+    };
+    let h = span_end - span_start;
+    assert!(
+        h < high_degree_span_floor,
+        "the span must sit below the high-degree floor for this test to mean anything"
+    );
+    assert!(
+        fit.len() <= 6,
+        "below the high-degree floor no bump-corrected rung may be accepted, got degree {}",
+        fit.len() - 1
+    );
+    let track = nurbs::bezier::bezier_pieces_to_nurbs(&[crate::lowering::exact_piece(
+        &fit, span_start, span_end, h,
+    )]);
+    let first_derivative = nurbs::eval::derivative(&track);
+    let second_derivative = nurbs::eval::derivative(&first_derivative);
+    for &u in &crate::lowering::LADDER_PROBES_U {
+        let t = nurbs::fmadd(0.5 * (u + 1.0), h, span_start);
+        let position_error = (eval(&track, t) - position(t)).abs();
+        let acceleration_error = (eval(&second_derivative, t) - acceleration(t)).abs();
+        assert!(
+            position_error <= tolerance.pos_mm,
+            "probe u={u}: position error {position_error} > {}",
+            tolerance.pos_mm
+        );
+        assert!(
+            acceleration_error <= tolerance.accel_mm_s2,
+            "probe u={u}: acceleration error {acceleration_error} > {}",
+            tolerance.accel_mm_s2
+        );
+    }
+    for t in [span_start, span_end] {
+        let position_error = (eval(&track, t) - position(t)).abs();
+        let velocity_error = (eval(&first_derivative, t) - velocity(t)).abs();
+        assert!(
+            position_error <= 1e-12,
+            "endpoint t={t} must be anchored in position, off by {position_error}"
+        );
+        assert!(
+            velocity_error <= 1e-6,
+            "endpoint t={t} must be anchored in velocity, off by {velocity_error}"
+        );
+    }
+}
+
+/// A constant-acceleration span whose duration is a resolution-scale 6.9e-8
+/// riding a carrier near 24 mm: one ulp of the carrier is 8e-4 of the span's
+/// own travel. The cubic hands that ulp to the acceleration three times over
+/// through `c3` and the delta-built quadratic spends it once, while the rung
+/// carrying the sampled acceleration spends it on the endpoint velocities
+/// instead — so below the high-degree floor a degree-2 rung holds a
+/// -3000 mm/s² span of this length with both seams anchored in position, and
+/// the travel it carries can only agree with a delta recovered by subtracting
+/// absolute endpoints to within the carrier's own rounding.
+#[test]
+fn a_constant_acceleration_resolution_span_fits_the_anchored_quadratic() {
+    let t0 = 0.8300123879637047;
+    let t1 = 0.8300124568154544;
+    let h = t1 - t0;
+    let p_start = 23.994882985793687;
+    let v_start = 4.56395463731461;
+    let accel = -3000.0;
+    let position = |t: f64| {
+        let d = t - t0;
+        p_start + d * (v_start + 0.5 * accel * d)
+    };
+    let velocity = |t: f64| v_start + accel * (t - t0);
+    let t_of = |u: f64| nurbs::fmadd(0.5 * (u + 1.0), h, t0);
+    let truth_p = |u: f64| position(t_of(u));
+    let truth_v = |u: f64| velocity(t_of(u));
+    let truth_a = |_: f64| accel;
+    let tolerance = crate::lowering::FitTol {
+        pos_mm: 3e-5,
+        accel_mm_s2: 1.5,
+    };
+    let velocity_budget = 1e-6;
+    let base = crate::lowering::quintic_in_u(
+        (truth_p(-1.0), truth_v(-1.0), truth_a(-1.0)),
+        (truth_p(1.0), truth_v(1.0), truth_a(1.0)),
+        h,
+    );
+    let fit = crate::lowering::ladder_fit(
+        &base,
+        h,
+        tolerance,
+        &truth_p,
+        &truth_a,
+        &truth_v,
+        truth_p(1.0) - truth_p(-1.0),
+        velocity_budget,
+        crate::lowering::LadderPolicy {
+            endpoint_anchored: true,
+            enforce_velocity_sign: true,
+            acceleration_monotonicity: None,
+            high_degree_span_floor: 3.6e-7,
+        },
+    )
+    .unwrap_or_else(|failure| {
+        panic!(
+            "a constant-acceleration resolution span must fit: u={}, position error {}, \
+             velocity error {}, acceleration error {} > {}",
+            failure.u,
+            failure.position_error,
+            failure.velocity_error,
+            failure.acceleration_error,
+            tolerance.accel_mm_s2
+        )
+    });
+    assert_eq!(
+        fit.len(),
+        3,
+        "a degree-2 rung must hold this span inside the accel budget"
+    );
+    let track =
+        nurbs::bezier::bezier_pieces_to_nurbs(&[crate::lowering::exact_piece(&fit, t0, t1, h)]);
+    let first_derivative = nurbs::eval::derivative(&track);
+    let second_derivative = nurbs::eval::derivative(&first_derivative);
+    for &u in &crate::lowering::LADDER_PROBES_U {
+        let t = t_of(u);
+        let position_error = (eval(&track, t) - position(t)).abs();
+        let acceleration_error = (eval(&second_derivative, t) - accel).abs();
+        assert!(
+            position_error <= tolerance.pos_mm,
+            "probe u={u}: position error {position_error} > {}",
+            tolerance.pos_mm
+        );
+        assert!(
+            acceleration_error <= tolerance.accel_mm_s2,
+            "probe u={u}: acceleration error {acceleration_error} > {}",
+            tolerance.accel_mm_s2
+        );
+    }
+    for t in [t0, t1] {
+        let position_error = (eval(&track, t) - position(t)).abs();
+        assert!(
+            position_error <= 1e-12,
+            "endpoint t={t} must be anchored in position, off by {position_error}"
+        );
+    }
+    let coefficient_left_velocity = (fit[1] - 2.0 * fit[2]) * (2.0 / h);
+    let coefficient_left_error = (coefficient_left_velocity - v_start).abs();
+    assert!(
+        coefficient_left_error <= velocity_budget,
+        "the fit must hold the left seam velocity inside the validated budget, off by \
+         {coefficient_left_error} > {velocity_budget}"
+    );
+    let coefficient_delta = 2.0 * fit[1];
+    let subtracted_delta = truth_p(1.0) - truth_p(-1.0);
+    let delta_error = (coefficient_delta - subtracted_delta).abs();
+    let carrier_rounding = 4.0 * f64::EPSILON * p_start.abs();
+    assert!(
+        delta_error <= carrier_rounding,
+        "the fit must carry the span's travel to within the carrier's rounding, off by \
+         {delta_error} > {carrier_rounding}"
+    );
+    let left_velocity_error = (eval(&first_derivative, t0) - v_start).abs();
+    assert!(
+        left_velocity_error <= velocity_budget,
+        "the left seam velocity must stay inside the validated budget, off by \
+         {left_velocity_error} > {velocity_budget}"
+    );
+    let right_velocity_error = (eval(&first_derivative, t1) - velocity(t1)).abs();
+    assert!(
+        right_velocity_error <= velocity_budget,
+        "the right seam velocity must stay inside the validated budget, off by \
+         {right_velocity_error} > {velocity_budget}"
+    );
+}
+
+/// An endpoint-anchored rung owns the seam continuity of the piece it hands
+/// back, so it may not buy its accuracy with a position step: a jerk-carrying
+/// span whose probes a left-extrapolated quadratic passes still has to land on
+/// the signal's own right endpoint, not on `p₀ + v₀h + a·h²/2`.
+#[test]
+fn an_endpoint_anchored_fit_never_steps_the_right_seam() {
+    let t0 = 0.31;
+    let h = 1e-3;
+    let t1 = t0 + h;
+    let p_start = 18.5;
+    let v_start = 42.0;
+    let a_start = -900.0;
+    let jerk = 6e4;
+    let position = |t: f64| {
+        let d = t - t0;
+        p_start + d * (v_start + d * (0.5 * a_start + d * jerk / 6.0))
+    };
+    let velocity = |t: f64| {
+        let d = t - t0;
+        v_start + d * (a_start + 0.5 * jerk * d)
+    };
+    let acceleration = |t: f64| a_start + jerk * (t - t0);
+    let t_of = |u: f64| nurbs::fmadd(0.5 * (u + 1.0), h, t0);
+    let truth_p = |u: f64| position(t_of(u));
+    let truth_v = |u: f64| velocity(t_of(u));
+    let truth_a = |u: f64| acceleration(t_of(u));
+    let tolerance = crate::lowering::FitTol {
+        pos_mm: 5e-5,
+        accel_mm_s2: 50.0,
+    };
+    let base = crate::lowering::quintic_in_u(
+        (truth_p(-1.0), truth_v(-1.0), truth_a(-1.0)),
+        (truth_p(1.0), truth_v(1.0), truth_a(1.0)),
+        h,
+    );
+    let left_extrapolation = p_start + h * (v_start + 0.5 * h * acceleration(t_of(0.0)));
+    let extrapolation_step = (left_extrapolation - position(t1)).abs();
+    assert!(
+        extrapolation_step > 1e-6 && extrapolation_step < tolerance.pos_mm,
+        "the left-extrapolated seam step {extrapolation_step} must be a real step the \
+         position probes still accept"
+    );
+    assert!(
+        0.5 * jerk * h < tolerance.accel_mm_s2,
+        "the span's acceleration swing must leave a constant-acceleration rung admissible"
+    );
+    let fit = crate::lowering::ladder_fit(
+        &base,
+        h,
+        tolerance,
+        &truth_p,
+        &truth_a,
+        &truth_v,
+        truth_p(1.0) - truth_p(-1.0),
+        f64::INFINITY,
+        crate::lowering::LadderPolicy {
+            endpoint_anchored: true,
+            enforce_velocity_sign: true,
+            acceleration_monotonicity: None,
+            high_degree_span_floor: 0.0,
+        },
+    )
+    .unwrap_or_else(|failure| {
+        panic!(
+            "a smooth jerk span must fit: u={}, position error {}, acceleration error {}",
+            failure.u, failure.position_error, failure.acceleration_error
+        )
+    });
+    assert_eq!(
+        fit.len(),
+        3,
+        "a degree-2 rung must hold this span, or the seam check proves nothing"
+    );
+    let eval_mono_u = |x: f64| fit.iter().rev().fold(0.0, |acc, &ck| acc * x + ck);
+    for (u, truth) in [(-1.0, position(t0)), (1.0, position(t1))] {
+        let seam_step = (eval_mono_u(u) - truth).abs();
+        assert!(
+            seam_step <= 8.0 * f64::EPSILON * p_start.abs(),
+            "endpoint u={u} must be anchored, stepped by {seam_step}"
+        );
+    }
+}
+
+struct SineTrackSignal {
+    amplitude: f64,
+    omega: f64,
+}
+
+impl crate::shaper::TrackSignal for SineTrackSignal {
+    fn eval(&self, t: f64) -> f64 {
+        self.amplitude * libm::sin(self.omega * t)
+    }
+    fn deriv(&self, t: f64) -> f64 {
+        self.amplitude * self.omega * libm::cos(self.omega * t)
+    }
+    fn second_deriv(&self, t: f64) -> f64 {
+        -self.amplitude * self.omega * self.omega * libm::sin(self.omega * t)
+    }
+}
+
+/// The fit budget bounds runaway bisection, so seed intervals the ladder
+/// already accepted may not spend it: a wide span must refine into the same
+/// pieces whether it is fitted on its own or after hundreds of accepted seed
+/// intervals, wherever it sits in the seed order.
+#[test]
+fn accepted_seed_intervals_do_not_spend_the_split_budget() {
+    let sig = SineTrackSignal {
+        amplitude: 1.0,
+        omega: 300.0,
+    };
+    let tolerance = crate::lowering::FitTol {
+        pos_mm: 5e-5,
+        accel_mm_s2: 50.0,
+    };
+    let dense = |from: f64, to: f64| -> Vec<f64> {
+        (0..=600)
+            .map(|k| from + (to - from) * f64::from(k) / 600.0)
+            .collect()
+    };
+    let fit = |t_start: f64, t_end: f64, seeds: &[f64]| {
+        crate::shaper::fit_axis_from_signal(0, t_start, t_end, seeds, &sig, tolerance, "test fit")
+            .expect("the sine track must fit")
+    };
+    let pieces_in = |track: &nurbs::ScalarNurbs, from: f64, to: f64| -> usize {
+        let mut boundaries: Vec<f64> = track
+            .knots()
+            .iter()
+            .copied()
+            .filter(|knot| *knot > from && *knot < to)
+            .collect();
+        boundaries.dedup();
+        boundaries.len() + 1
+    };
+    let tail_alone = pieces_in(&fit(0.9, 1.0, &[]), 0.9, 1.0);
+    assert!(
+        tail_alone > 1,
+        "the wide span must need refinement for this test to mean anything"
+    );
+    let with_leading_grid = fit(0.0, 1.0, &dense(0.0, 0.9));
+    assert_eq!(
+        pieces_in(&with_leading_grid, 0.0, 0.9),
+        600,
+        "the dense seed grid must be accepted without refinement"
+    );
+    assert_eq!(
+        pieces_in(&with_leading_grid, 0.9, 1.0),
+        tail_alone,
+        "600 accepted seed intervals spent the trailing span's split budget"
+    );
+    let head_alone = pieces_in(&fit(0.0, 0.1, &[]), 0.0, 0.1);
+    let with_trailing_grid = fit(0.0, 1.0, &dense(0.1, 1.0));
+    assert_eq!(
+        pieces_in(&with_trailing_grid, 0.0, 0.1),
+        head_alone,
+        "a leading wide span refined differently inside the dense grid"
+    );
+}
+
+fn eval_axis_at(segs: &[ContinuousSegment], axis: usize, t: f64) -> f64 {
     let seg = segs
         .iter()
         .find(|seg| t >= seg.t_start && t <= seg.t_end)
         .expect("t inside emitted trajectory");
-    eval(&seg.axes[axis], t)
+    eval_segment_axis(seg, axis, t)
+}
+
+/// The exact convolution cut transitions land one ulp away from the segment
+/// edges and from each other, and the ModeInverse chain differentiates the
+/// fitted track twice. An ulp-wide knot span therefore does not merely fit
+/// badly — de Boor divides by the knot spacing and the *neighbouring*
+/// full-width span evaluates to ~1e14 mm, which is what drove the mode-inverse
+/// residual to 1.5e16. Every emitted knot span must be wide enough to carry a
+/// polynomial.
+#[test]
+fn mode_inverse_cut_transitions_leave_no_degenerate_knot_spans() {
+    let (frequency_hz, damping_ratio) = (30.0, 0.05);
+    let smooth_time = 0.0015;
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 0.0),
+        line(2, [40.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let inverted = replay(
+        cfg(),
+        x_kernel_chains(smooth_time, Some((frequency_hz, damping_ratio))),
+        &home,
+        0.0,
+        &moves,
+    );
+    for seg in &inverted {
+        let ContinuousAxis::Spline(curve) = &seg.axes[0] else {
+            continue;
+        };
+        let knots = curve.knots();
+        for pair in knots.windows(2) {
+            let gap = pair[1] - pair[0];
+            let floor = 1e-12_f64.max(8.0 * f64::EPSILON * pair[1].abs());
+            assert!(
+                gap == 0.0 || gap >= floor,
+                "degenerate knot span {pair:?} (gap {gap:e}) in segment \
+                 [{}, {}]",
+                seg.t_start,
+                seg.t_end
+            );
+        }
+        let n = 512;
+        for j in 0..=n {
+            let t = seg.t_start + (seg.t_end - seg.t_start) * j as f64 / n as f64;
+            let pva = seg
+                .eval_axis(0, t)
+                .expect("mode-inverse command evaluates inside its own segment");
+            assert!(
+                pva.position.abs() < 1e3
+                    && pva.velocity.is_finite()
+                    && pva.acceleration.is_finite(),
+                "mode-inverse command blew up at t={t}: {pva:?}"
+            );
+        }
+    }
 }
 
 fn extruder_gain_kernel_chains(
@@ -1855,6 +2946,47 @@ fn extruder_gain_kernel_chains(
         leader_smooth_time.map_or_else(follower_chains_without_kernels, xy_shaper_follower_chains);
     chains.chains[3] = trajectory::CompiledChain { stages };
     chains
+}
+
+#[test]
+fn shaped_seeds_carry_every_cut_transition_exactly_once() {
+    let kernel = trajectory::build_smooth_mzv_kernel(22.428_571_428_571_43);
+    let input_breaks = [
+        0.0,
+        0.2713748376620639,
+        0.7051624188303481,
+        3.0128303182171217,
+        18.4517596196437,
+    ];
+    let seeds = crate::shaper::shaped_signal_breakpoints(&kernel, &input_breaks);
+    assert!(seeds.windows(2).all(|pair| pair[0] < pair[1]));
+    let mut transitions = Vec::new();
+    for &input_break in &input_breaks {
+        for kernel_break in trajectory::ShapedSignal::kernel_cut_boundaries(&kernel) {
+            trajectory::ShapedSignal::output_cut_transitions(
+                &kernel,
+                input_break,
+                kernel_break,
+                &mut transitions,
+            );
+        }
+    }
+    transitions.sort_by(f64::total_cmp);
+    transitions.dedup();
+    assert_eq!(seeds, transitions);
+    let shifted = transitions
+        .iter()
+        .filter(|transition| {
+            input_breaks.iter().all(|input_break| {
+                trajectory::ShapedSignal::kernel_cut_boundaries(&kernel)
+                    .all(|kernel_break| **transition != input_break + kernel_break)
+            })
+        })
+        .count();
+    assert!(
+        shifted > 0,
+        "no seed exercises a cancellation-shifted cut alignment"
+    );
 }
 
 fn assert_gain_kernel_orders_commute(leader_smooth_time: Option<f64>) {
@@ -1962,7 +3094,7 @@ fn x_kernel_chains(smooth_time: f64, mode: Option<(f64, f64)>) -> AxisChainSet {
 /// mode `z̈ + 2ζω·ż + ω²·z = ω²·x_cmd(t)` (toolhead z behind belt compliance),
 /// integrated with RK4 at fine dt over the emitted trajectory.
 fn integrate_mode_response(
-    cmd: &[ShapedSegment],
+    cmd: &[ContinuousSegment],
     frequency_hz: f64,
     damping_ratio: f64,
     t0: f64,
@@ -2068,12 +3200,12 @@ fn replay_items(
     chains: AxisChainSet,
     home: &[f64],
     items: Vec<StreamInput>,
-) -> Vec<ShapedSegment> {
+) -> Vec<ContinuousSegment> {
     replay_stream(config, chains, home, 0.0, items)
         .into_iter()
         .filter_map(|item| match item {
-            ShapedItem::Seg(seg) => Some(seg),
-            ShapedItem::Parked | ShapedItem::Control(_) => None,
+            TrajectoryItem::Seg(seg) => Some(seg),
+            TrajectoryItem::Parked | TrajectoryItem::Control(_) => None,
         })
         .collect()
 }
@@ -2099,7 +3231,7 @@ fn stroke_dwell_stroke_keeps_shaper_history() {
         .expect("compiles"),
         trajectory::CompiledChain::default(),
     );
-    let limits = VelocityLimits::try_new(1000.0, 10000.0, 0.21, 20000.0).unwrap();
+    let limits = VelocityLimits::try_new(1000.0, 10000.0, 0.21, f64::INFINITY).unwrap();
     let config = StreamConfig {
         corner: CornerFitConfig::default(),
         integration_tol: 1e-4,
@@ -2148,8 +3280,8 @@ fn stroke_dwell_stroke_keeps_shaper_history() {
             continue;
         }
         for axis in 0..w[0].axes.len() {
-            let a = eval(&w[0].axes[axis], w[0].t_end);
-            let b = eval(&w[1].axes[axis], w[1].t_start);
+            let a = eval_segment_axis(&w[0], axis, w[0].t_end);
+            let b = eval_segment_axis(&w[1], axis, w[1].t_start);
             // The force-flushed kernel tail may sit a sub-micron shy of
             // rest; anything beyond the fit budget is a real weld.
             assert!(
@@ -2160,9 +3292,7 @@ fn stroke_dwell_stroke_keeps_shaper_history() {
         }
     }
     for seg in &segs {
-        for curve in &seg.axes {
-            assert!(curve.control_points().iter().all(|v| v.is_finite()));
-        }
+        assert_segment_axes_finite(seg);
     }
 }
 
@@ -2188,7 +3318,7 @@ fn beacon_scan_path_shaped_velocity_stays_bounded() {
         .expect("compiles"),
         trajectory::CompiledChain::default(),
     );
-    let limits = VelocityLimits::try_new(2800.0, 100000.0, 0.695, 1000000.0).unwrap();
+    let limits = VelocityLimits::try_new(2800.0, 100000.0, 0.695, f64::INFINITY).unwrap();
     let config = StreamConfig {
         corner: CornerFitConfig::default(),
         integration_tol: 1e-4,
@@ -2243,7 +3373,7 @@ fn beacon_scan_path_shaped_velocity_stays_bounded() {
             let h = 1e-5;
             let mut t = seg.t_start;
             while t < seg.t_end - h {
-                let v = (eval(&seg.axes[axis], t + h) - eval(&seg.axes[axis], t)) / h;
+                let v = (eval_segment_axis(seg, axis, t + h) - eval_segment_axis(seg, axis, t)) / h;
                 if v.abs() > worst.0.abs() {
                     worst = (v, t, axis);
                 }
@@ -2258,4 +3388,794 @@ fn beacon_scan_path_shaped_velocity_stays_bounded() {
         worst.2,
         worst.1
     );
+}
+
+fn worst_seam_jump(segs: &[ContinuousSegment], axis: usize) -> (f64, f64) {
+    const PROBE: f64 = 1e-8;
+    let mut worst = (0.0, f64::NAN);
+    let mut record = |jump: f64, t: f64| {
+        if jump > worst.0 {
+            worst = (jump, t);
+        }
+    };
+    for seg in segs {
+        let (breakpoints, _) = axis_breakpoints(&seg.axes[axis]);
+        for t in breakpoints {
+            if t - PROBE <= seg.t_start || t + PROBE >= seg.t_end {
+                continue;
+            }
+            let left = eval_segment_axis(seg, axis, t - PROBE);
+            let right = eval_segment_axis(seg, axis, t + PROBE);
+            record((right - left).abs(), t);
+        }
+    }
+    for pair in segs.windows(2) {
+        let left = eval_segment_axis(&pair[0], axis, pair[0].t_end);
+        let right = eval_segment_axis(&pair[1], axis, pair[1].t_start);
+        record((right - left).abs(), pair[0].t_end);
+    }
+    worst
+}
+
+/// A moving leader carried across a short follower hold, with pressure
+/// advance on the projected follower. The zero-extrusion middle move is
+/// shorter than the leader kernel's support, so the shaped spans straddling
+/// it are exactly where a midpoint constant/quadratic ladder rung used to
+/// win: those rungs match `(p, v, a)` at `u = 0` only, so accepting one
+/// spends the whole position budget as a step at the span seam. With every
+/// accepted rung endpoint-anchored the seams stay C0, and the extruder still
+/// lands on the commanded total — pressure advance included, since a
+/// derivative gain nets to zero between rest and rest.
+#[test]
+fn moving_leader_across_a_short_follower_hold_keeps_c0_seams_and_total() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 1.0),
+        line(2, [20.0, 0.0, 0.0], [20.6, 0.0, 0.0], 0.0),
+        line(3, [20.6, 0.0, 0.0], [40.6, 0.0, 0.0], 1.0),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let leader_smooth = 0.044583333333333336;
+
+    let with_pa = replay(
+        cfg(),
+        follower_kernel_chains(Some(leader_smooth), Some(0.04), 0.02675),
+        &home,
+        0.0,
+        &moves,
+    );
+    let without_pa = replay(
+        cfg(),
+        follower_kernel_chains(Some(leader_smooth), None, 0.02675),
+        &home,
+        0.0,
+        &moves,
+    );
+    assert!(with_pa.len() >= 3 && without_pa.len() >= 3);
+    for (label, segs) in [("with pa", &with_pa), ("without pa", &without_pa)] {
+        for axis in [0, 3] {
+            let (jump, t) = worst_seam_jump(segs, axis);
+            assert!(
+                jump < 1e-5,
+                "{label}: axis {axis} seam at t={t} steps by {jump} mm — an \
+                 accepted fit spent its budget as an endpoint jump"
+            );
+        }
+    }
+
+    let first = with_pa.first().expect("segments emitted");
+    let last = with_pa.last().expect("segments emitted");
+    let x_span =
+        eval_segment_axis(last, 0, last.t_end) - eval_segment_axis(first, 0, first.t_start);
+    assert!(
+        (x_span - 40.6).abs() < 1e-2,
+        "the leader must traverse the whole path across the hold, got {x_span}"
+    );
+
+    let e_with = extruder_end(&with_pa);
+    let e_without = extruder_end(&without_pa);
+    assert!(
+        (e_with - e_without).abs() <= 0.1 * fit_tol(cfg()).pos_mm,
+        "pressure advance must not move the total: {e_with} vs {e_without}"
+    );
+    assert!(
+        (e_with - 2.0).abs() < 2e-3,
+        "the follower must still deliver the commanded 2.0 mm total, got {e_with}"
+    );
+}
+
+/// The voron0 bench chain set (`tools/sim/tests/test_voron0_migration.py`):
+/// smooth_mzv on the CoreXY leaders at the measured belt frequencies, a
+/// smooth_bell on the gear-reduced Z, and a smooth_triangle on the extruder
+/// declared as a follower of x/y/z.
+fn voron0_chains() -> AxisChainSet {
+    let compile = |name: &str,
+                   algo: &'static dyn trajectory::algos::PostProcessorAlgo,
+                   param: f64| {
+        trajectory::CompiledChain::compile(&[PostProcessorInstance::new(name, algo, vec![param])])
+            .expect("single post-processor always compiles")
+    };
+    AxisChainSet {
+        chains: vec![
+            compile("x_shaping", &trajectory::algos::SmoothMzv, 112.8),
+            compile("y_shaping", &trajectory::algos::SmoothMzv, 90.2),
+            compile("z_shaping", &trajectory::algos::SmoothBell, 0.025),
+            compile("e_smoothing", &trajectory::algos::SmoothTriangle, 0.01),
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    }
+}
+
+fn voron0_config() -> StreamConfig {
+    StreamConfig {
+        corner: CornerFitConfig::default(),
+        integration_tol: 1e-4,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
+        fit_tol_mm: 0.005,
+        fit_tol_accel_mm_s2: 50.0,
+        max_buffer_moves: 128,
+        limits: VelocityLimits::try_new(600.0, 20000.0, 0.04, f64::INFINITY).unwrap(),
+    }
+}
+
+/// `SET_KINEMATIC_POSITION X=60 Y=60 Z=20` then the migration test's move
+/// sequence: two F18000 travels, an F1200 Z drop, an F6000 extruding
+/// diagonal, and the `M400` drain. The Z drop rides the bench's
+/// `max_z_velocity`/`max_z_accel` (20 mm/s, 500 mm/s²), not the XY pair, so
+/// the shaped Z column here has the same length the bench produces.
+fn voron0_stream() -> (Vec<f64>, Vec<StreamInput>) {
+    let xy_limits = voron0_config().limits;
+    let z_limits = VelocityLimits::try_new(20.0, 500.0, 0.04, f64::INFINITY).unwrap();
+    let mv = |line_no: u32,
+              start: [f64; 3],
+              end: [f64; 3],
+              e: f64,
+              feed: f64,
+              limits: VelocityLimits| {
+        StreamInput::Move(
+            line_move(
+                start,
+                end,
+                e,
+                MoveContext {
+                    extruder_axis: 3,
+                    feedrate_mm_s: feed,
+                    limits,
+                    source: SourceRange {
+                        start_line: line_no,
+                        end_line: line_no,
+                    },
+                },
+            )
+            .unwrap(),
+        )
+    };
+    let items = vec![
+        mv(
+            1,
+            [60.0, 60.0, 20.0],
+            [100.0, 100.0, 20.0],
+            0.0,
+            300.0,
+            xy_limits,
+        ),
+        mv(
+            2,
+            [100.0, 100.0, 20.0],
+            [20.0, 100.0, 20.0],
+            0.0,
+            300.0,
+            xy_limits,
+        ),
+        mv(
+            3,
+            [20.0, 100.0, 20.0],
+            [20.0, 100.0, 10.0],
+            0.0,
+            20.0,
+            z_limits,
+        ),
+        mv(
+            4,
+            [20.0, 100.0, 10.0],
+            [60.0, 60.0, 10.0],
+            2.0,
+            100.0,
+            xy_limits,
+        ),
+        StreamInput::Drain,
+    ];
+    (vec![60.0, 60.0, 20.0, 0.0], items)
+}
+
+/// Everything ahead of the shaper, run to completion — the lowered stream is
+/// the shaper's input and is identical no matter how the shaper consumes it.
+fn lower_to_base_items(
+    config: StreamConfig,
+    chains: &AxisChainSet,
+    home: &[f64],
+    items: Vec<StreamInput>,
+) -> Vec<BaseItem> {
+    let (raw_tx, raw_rx) = unbounded();
+    for item in items {
+        raw_tx.send(item).unwrap();
+    }
+    drop(raw_tx);
+
+    let (fitted_tx, fitted_rx) = unbounded();
+    FitStage::new(config.corner).run(raw_rx, fitted_tx);
+
+    let (planned_tx, planned_rx) = unbounded();
+    Planner::new(config).run(fitted_rx, planned_tx);
+
+    let (lowered_tx, lowered_rx) = unbounded();
+    run_lowerer(planned_rx, lowered_tx, chains.clone(), home.to_vec(), 0.0);
+    lowered_rx.into_iter().collect()
+}
+
+/// `Shaper::run` over a pre-filled closed channel: the loop's `try_recv`
+/// burst buffers up to `STAGE_CHANNEL_CAP` lowered segments before each emit,
+/// so every emit window covers many segments at once.
+fn shape_in_bursts(
+    chains: AxisChainSet,
+    fit_tol: FitTol,
+    items: Vec<BaseItem>,
+) -> Vec<TrajectoryItem> {
+    let (in_tx, in_rx) = unbounded();
+    for item in items {
+        in_tx.send(item).unwrap();
+    }
+    drop(in_tx);
+    let (out_tx, out_rx) = unbounded();
+    Shaper::new(chains, fit_tol).run(in_rx, out_tx);
+    out_rx.into_iter().collect()
+}
+
+/// `Shaper::feed` per item — the single-threaded host driver, which forces an
+/// emit decision after every single lowered segment.
+fn shape_one_at_a_time(
+    chains: AxisChainSet,
+    fit_tol: FitTol,
+    items: Vec<BaseItem>,
+) -> Vec<TrajectoryItem> {
+    let (out_tx, out_rx) = unbounded();
+    let mut shaper = Shaper::new(chains, fit_tol);
+    for item in items {
+        assert!(shaper.feed(item, &out_tx), "the collector never hangs up");
+    }
+    shaper.finish(&out_tx);
+    drop(out_tx);
+    out_rx.into_iter().collect()
+}
+
+fn item_kind(item: &TrajectoryItem) -> (&'static str, f64, f64) {
+    match item {
+        TrajectoryItem::Seg(seg) => ("seg", seg.t_start, seg.t_end),
+        TrajectoryItem::Parked => ("parked", 0.0, 0.0),
+        TrajectoryItem::Control(_) => ("control", 0.0, 0.0),
+    }
+}
+
+fn trajectory_segments(items: &[TrajectoryItem]) -> Vec<&ContinuousSegment> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            TrajectoryItem::Seg(seg) => Some(seg),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every knot / phase boundary the emitted tracks carry, summed over all axes
+/// — the quantity that explodes when a fit ladder bisects away or when an
+/// emit window is re-fitted per batch instead of reused.
+fn total_track_breakpoints(items: &[TrajectoryItem]) -> usize {
+    trajectory_segments(items)
+        .iter()
+        .map(|seg| {
+            seg.axes
+                .iter()
+                .map(|axis| axis_breakpoints(axis).0.len())
+                .sum::<usize>()
+        })
+        .sum()
+}
+
+const KNOT_MERGE_S: f64 = 1e-9;
+const SAMPLABLE_GAP_S: f64 = 1e-6;
+
+/// Both arms' knot times inside one segment on one axis, plus interior
+/// samples strictly inside every gap wide enough to belong to one fitted
+/// piece in both arms.
+///
+/// Knots are where a refit first shows up. Position and velocity are
+/// continuous across a fitted piece boundary, so they are comparable at the
+/// knots themselves; acceleration steps there and `eval_axis` resolves a knot
+/// to one side of the step, so two arms that partition the column differently
+/// are only comparable on acceleration away from either partition's knots —
+/// hence the gap floor, three orders of magnitude above the merge radius and
+/// two below the fitted piece spacing this fixture produces.
+fn batching_comparison_times(
+    burst: &ContinuousSegment,
+    single: &ContinuousSegment,
+    axis: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    let mut knots = axis_breakpoints(&burst.axes[axis]).0;
+    knots.extend(axis_breakpoints(&single.axes[axis]).0);
+    knots.retain(|t| *t > burst.t_start && *t < burst.t_end);
+    knots.push(burst.t_start);
+    knots.push(burst.t_end);
+    knots.sort_by(f64::total_cmp);
+    knots.dedup_by(|later, earlier| *later - *earlier <= KNOT_MERGE_S);
+
+    let mut interior = Vec::with_capacity(3 * knots.len());
+    for pair in knots.windows(2) {
+        let gap = pair[1] - pair[0];
+        if gap > SAMPLABLE_GAP_S {
+            interior.extend([0.25, 0.5, 0.75].map(|fraction| pair[0] + gap * fraction));
+        }
+    }
+    (knots, interior)
+}
+
+/// Chunking the shaper's input must be a scheduling detail, never a semantic
+/// one: the burst driver and the one-item-at-a-time driver group the same
+/// lowered segments into different emit windows, and the trajectory they
+/// produce must have the same structure, the same motion, and the same
+/// fitted piece count on every axis.
+///
+/// Motion is compared at the union of both arms' knot times plus interior
+/// samples: position everywhere, acceleration strictly inside the pieces both
+/// partitions share, since a fitted piece boundary is an acceleration step.
+///
+/// The piece bound is per axis so a failure names the cache that broke. A
+/// leader axis spreading means the shaped-leader cache stopped being reused
+/// across emit windows; the follower axis spreading means its post-kernel
+/// fit is being redone over each committed prefix instead of reusing the
+/// already fitted target. The latter is what this test was written for: the
+/// follower cost 16_578 pieces bursted against 45_882 one-at-a-time, a 2.77x
+/// multiplication, while x and y were bit-identical at 1540 and 1296 and z
+/// spread 692 to 712 (2.9%) — measured before the Z column here was given
+/// the bench's own limits, which moves the counts but not the mechanism.
+///
+/// The one-at-a-time arm is the production-representative one, not a
+/// pessimistic one. The live pipeline runs `Shaper::run`, but segments
+/// trickle in rather than arriving pre-filled, so its real commits are a
+/// handful of segments: the sim-e2e run of this very sequence logged
+/// `follower_projection` at 6.7 s for a 4-segment commit and 3.3 s for a
+/// 2-segment one, pinning the shape thread until playback outran the
+/// producer and the stream died on anchor underrun. Piece count is the
+/// cause; timing is not asserted here.
+///
+/// A relative spread bound alone is satisfied by both arms becoming equally
+/// expensive, so the follower axes also carry an absolute ceiling of 30_000
+/// pieces. That number sits between the two measured populations of this
+/// fixture: healthy and burst-driven follower fits ran 16_578-21_348 pieces,
+/// while the one-at-a-time refit pathology ran 45_882-50_670. A converged
+/// pair above the ceiling is a structural regression even when the two arms
+/// agree, and the failure names every axis so the counts identify which
+/// cache stopped being reused.
+#[test]
+fn voron0_shaper_output_is_independent_of_input_batching() {
+    let config = voron0_config();
+    let chains = voron0_chains();
+    let (home, items) = voron0_stream();
+
+    let burst = shape_in_bursts(
+        chains.clone(),
+        fit_tol(config),
+        lower_to_base_items(config, &chains, &home, items),
+    );
+    let single = shape_one_at_a_time(
+        chains.clone(),
+        fit_tol(config),
+        lower_to_base_items(config, &chains, &home, voron0_stream().1),
+    );
+
+    let burst_segs = trajectory_segments(&burst);
+    let single_segs = trajectory_segments(&single);
+    assert!(
+        !burst_segs.is_empty(),
+        "the voron0 sequence must produce a trajectory"
+    );
+
+    let burst_kinds: Vec<_> = burst.iter().map(item_kind).collect();
+    let single_kinds: Vec<_> = single.iter().map(item_kind).collect();
+    assert_eq!(
+        burst_kinds.len(),
+        single_kinds.len(),
+        "batching changed the emitted item count: {} vs {}",
+        burst_kinds.len(),
+        single_kinds.len()
+    );
+    for (i, (b, s)) in burst_kinds.iter().zip(&single_kinds).enumerate() {
+        assert_eq!(b.0, s.0, "item {i} kind changed with batching");
+        assert!(
+            (b.1 - s.1).abs() < 1e-12 && (b.2 - s.2).abs() < 1e-12,
+            "item {i} time span changed with batching: [{}, {}] vs [{}, {}]",
+            b.1,
+            b.2,
+            s.1,
+            s.2
+        );
+    }
+
+    let pos_budget_mm = 4.0 * config.fit_tol_mm;
+    let accel_budget_mm_s2 = 4.0 * config.fit_tol_accel_mm_s2;
+    for (i, (b, s)) in burst_segs.iter().zip(&single_segs).enumerate() {
+        assert_eq!(b.axes.len(), s.axes.len(), "segment {i} axis count changed");
+        for axis in 0..b.axes.len() {
+            let (knots, interior) = batching_comparison_times(b, s, axis);
+            for t in knots.iter().chain(&interior) {
+                let pb = b.eval_axis(axis, *t).expect("bursted axis evaluates");
+                let ps = s.eval_axis(axis, *t).expect("one-at-a-time axis evaluates");
+                assert!(
+                    (pb.position - ps.position).abs() <= pos_budget_mm,
+                    "segment {i} axis {axis} position moved with batching at t={t}: {} vs {}",
+                    pb.position,
+                    ps.position
+                );
+            }
+            for t in interior {
+                let burst_accel = b
+                    .eval_axis(axis, t)
+                    .expect("bursted axis evaluates")
+                    .acceleration;
+                let single_accel = s
+                    .eval_axis(axis, t)
+                    .expect("one-at-a-time axis evaluates")
+                    .acceleration;
+                assert!(
+                    (burst_accel - single_accel).abs() <= accel_budget_mm_s2,
+                    "segment {i} axis {axis} acceleration moved with batching at t={t}: \
+                     {burst_accel} vs {single_accel}"
+                );
+            }
+        }
+        assert_segment_axes_finite(b);
+        assert_segment_axes_finite(s);
+    }
+
+    let axis_pieces = |items: &[TrajectoryItem], axis: usize| -> usize {
+        trajectory_segments(items)
+            .iter()
+            .map(|seg| axis_breakpoints(&seg.axes[axis]).0.len())
+            .sum()
+    };
+    let axis_role = |axis: usize| {
+        if chains.followers.iter().any(|(target, _)| *target == axis) {
+            "follower"
+        } else {
+            "leader"
+        }
+    };
+    let per_axis_counts = || {
+        (0..chains.chains.len())
+            .map(|axis| {
+                format!(
+                    "{} axis {axis} {}/{}",
+                    axis_role(axis),
+                    axis_pieces(&burst, axis),
+                    axis_pieces(&single, axis)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    const PIECE_SPREAD_PERCENT: usize = 12;
+    for axis in 0..chains.chains.len() {
+        let (b, s) = (axis_pieces(&burst, axis), axis_pieces(&single, axis));
+        let (lo, hi) = (b.min(s), b.max(s));
+        assert!(
+            hi * 100 <= lo * (100 + PIECE_SPREAD_PERCENT),
+            "{} axis {axis} was refitted per emit window: {b} pieces bursted vs {s} \
+             one-at-a-time ({:.2}x, allowed {PIECE_SPREAD_PERCENT}% spread) — a fitted \
+             target must be cached under its own support times and reused once a later \
+             emit commits a wider prefix. Totals across all axes: {} bursted, {} \
+             one-at-a-time",
+            axis_role(axis),
+            hi as f64 / lo.max(1) as f64,
+            total_track_breakpoints(&burst),
+            total_track_breakpoints(&single)
+        );
+    }
+
+    const FOLLOWER_PIECE_CEILING: usize = 40_000;
+    for axis in 0..chains.chains.len() {
+        if axis_role(axis) != "follower" {
+            continue;
+        }
+        let (b, s) = (axis_pieces(&burst, axis), axis_pieces(&single, axis));
+        assert!(
+            b.max(s) <= FOLLOWER_PIECE_CEILING,
+            "follower axis {axis} fit is structurally too fine: {b} pieces bursted vs \
+             {s} one-at-a-time, ceiling {FOLLOWER_PIECE_CEILING}. This fixture measured \
+             ~19_700 follower pieces before disk-sag grid refinement and ~35_900 with \
+             it (corner blends legitimately carry up to 4x the seed grid so their \
+             scalar acceleration stays on the accel disk); the one-at-a-time refit \
+             pathology measured 45_882-50_670, which the ceiling still excludes. \
+             Per-axis counts (bursted/one-at-a-time): {}. Totals across all axes: {} \
+             bursted, {} one-at-a-time",
+            per_axis_counts(),
+            total_track_breakpoints(&burst),
+            total_track_breakpoints(&single)
+        );
+    }
+}
+
+/// The worst position and velocity step across the emitted segment seams of
+/// one axis, each with the seam it happened at. Interior piece boundaries are
+/// deliberately excluded: a fitted piece boundary is C0 to the fit's own
+/// accuracy, while a segment seam is a handoff the pipeline owns exactly.
+fn worst_segment_seam_step(segs: &[ContinuousSegment], axis: usize) -> ((f64, f64), (f64, f64)) {
+    let mut position = (0.0, f64::NAN);
+    let mut velocity = (0.0, f64::NAN);
+    for pair in segs.windows(2) {
+        let left = pair[0]
+            .eval_axis(axis, pair[0].t_end)
+            .expect("the left segment evaluates at its end");
+        let right = pair[1]
+            .eval_axis(axis, pair[1].t_start)
+            .expect("the right segment evaluates at its start");
+        for (worst, step) in [
+            (&mut position, (right.position - left.position).abs()),
+            (&mut velocity, (right.velocity - left.velocity).abs()),
+        ] {
+            if step > worst.0 {
+                *worst = (step, pair[0].t_end);
+            }
+        }
+    }
+    (position, velocity)
+}
+
+fn projected_follower_arms(chains: &AxisChainSet) -> (Vec<TrajectoryItem>, Vec<TrajectoryItem>) {
+    let config = cfg();
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5),
+        line(2, [30.0, 0.0, 0.0], [30.0, 30.0, 0.0], 1.5),
+        line(3, [30.0, 30.0, 0.0], [60.0, 30.0, 0.0], 1.5),
+        line(4, [60.0, 30.0, 0.0], [60.0, 60.0, 0.0], 1.5),
+        line(5, [60.0, 60.0, 0.0], [90.0, 60.0, 0.0], 1.5),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let items = || -> Vec<StreamInput> { moves.iter().map(|m| m.clone().into()).collect() };
+    let lowered = || lower_to_base_items(config, chains, &home, items());
+    (
+        shape_in_bursts(chains.clone(), fit_tol(config), lowered()),
+        shape_one_at_a_time(chains.clone(), fit_tol(config), lowered()),
+    )
+}
+
+fn leader_zero_support_chains(advance_s: f64) -> AxisChainSet {
+    let gained = trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
+        "lead_gain",
+        &trajectory::algos::LinearPressureAdvance,
+        vec![advance_s],
+    )])
+    .expect("a kernel-free derivative-gain chain compiles");
+    AxisChainSet {
+        chains: vec![
+            gained,
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::default(),
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    }
+}
+
+/// A leader whose chain is nothing but zero-support stages still moves the
+/// toolhead the follower rides: those stages carry no kernel, so nothing
+/// widens the shaping window and the shaper never refits the leader column —
+/// the transform is baked into the materialized source before the frontier
+/// exists. Activating the projection on `raw.axes[leader] != shaped[leader]`
+/// alone therefore never fires, and the follower keeps the planner's raw
+/// track, laid out against a path the toolhead no longer takes: measured
+/// bit-identical to the untransformed baseline, every sample.
+#[test]
+fn follower_observes_a_zero_support_leader_transform() {
+    let (_, baseline) = projected_follower_arms(&follower_chains_without_kernels());
+    let (_, gained) = projected_follower_arms(&leader_zero_support_chains(0.004));
+    let owned = |items: &[TrajectoryItem]| -> Vec<ContinuousSegment> {
+        trajectory_segments(items)
+            .iter()
+            .map(|seg| (*seg).clone())
+            .collect()
+    };
+    let (baseline, gained) = (owned(&baseline), owned(&gained));
+    assert_eq!(
+        baseline.len(),
+        gained.len(),
+        "a toolhead-side leader gain must not change the emitted segment count"
+    );
+
+    let mut worst = (0.0_f64, f64::NAN);
+    for (plain, shaped) in baseline.iter().zip(&gained) {
+        assert_segment_axes_finite(shaped);
+        for i in 0..=40 {
+            let t = plain.t_start + (plain.t_end - plain.t_start) * f64::from(i) / 40.0;
+            let delta = (eval_segment_axis(plain, 3, t) - eval_segment_axis(shaped, 3, t)).abs();
+            if delta > worst.0 {
+                worst = (delta, t);
+            }
+        }
+    }
+    assert!(
+        worst.0 > 20.0 * fit_tol(cfg()).pos_mm,
+        "the follower ignored the leader's derivative gain: worst extruder \
+         deviation from the ungained baseline is {} mm at t={}",
+        worst.0,
+        worst.1
+    );
+
+    let (_, (step, t)) = worst_segment_seam_step(&gained, 3);
+    assert!(
+        step < 1e-9,
+        "the projected follower riding a gained leader steps {step} mm/s at the \
+         t={t} seam"
+    );
+    assert_extruder_continuous_and_monotone(&gained);
+}
+
+/// Chunking the shaper's input is a scheduling detail, so where an emit batch
+/// happens to end may not show up in the motion. Each committed stretch of a
+/// projected follower is fitted on its own, so it opens a fit residual away
+/// from the state already emitted; welding that seam in position alone spends
+/// the residual as a velocity step. Measured on this fixture before the
+/// endpoint-state weld: 4.7e-2 mm/s at a batch seam and 1.3e-3 mm/s at the
+/// committed-segment seams inside a batch, both moving with the batching.
+#[test]
+fn projected_follower_seams_hold_velocity_across_emit_batches() {
+    let chains = follower_kernel_chains(Some(0.044583333333333336), None, 0.02675);
+    let (burst, single) = projected_follower_arms(&chains);
+    for (label, items) in [("bursted", &burst), ("one-at-a-time", &single)] {
+        let segs: Vec<ContinuousSegment> = trajectory_segments(items)
+            .iter()
+            .map(|seg| (*seg).clone())
+            .collect();
+        assert!(segs.len() >= 5, "{label}: the fixture must emit a chain");
+        let ((position_step, position_t), (step, t)) = worst_segment_seam_step(&segs, 3);
+        assert!(
+            position_step < 1e-9,
+            "{label}: the follower position seam at t={position_t} steps by \
+             {position_step} mm"
+        );
+        assert!(
+            step < 1e-9,
+            "{label}: the follower velocity seam at t={t} steps by {step} mm/s — a \
+             position-only weld leaves the fit residual's slope behind"
+        );
+    }
+    let (burst_total, single_total) = (
+        extruder_end(
+            &trajectory_segments(&burst)
+                .iter()
+                .map(|seg| (*seg).clone())
+                .collect::<Vec<_>>(),
+        ),
+        extruder_end(
+            &trajectory_segments(&single)
+                .iter()
+                .map(|seg| (*seg).clone())
+                .collect::<Vec<_>>(),
+        ),
+    );
+    assert!(
+        (burst_total - single_total).abs() <= fit_tol(cfg()).pos_mm,
+        "the weld moved the settled total with the batching: {burst_total} vs \
+         {single_total}"
+    );
+}
+
+/// A follower that never extrudes must not inherit the kernel-shaped leader
+/// lattice: travel and homing windows project as one constant piece, not
+/// hundreds of flat spline pieces — that fit starved real-time drip streams
+/// on small hosts (StallGuard false triggers during sensorless homing).
+#[test]
+fn idle_follower_projects_as_a_single_constant_piece() {
+    let config = cfg();
+    let pa = trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
+        "linear_pressure_advance",
+        &trajectory::algos::LinearPressureAdvance,
+        vec![0.04],
+    )])
+    .unwrap();
+    let kernel = smooth_x_chains(0.044583333333333336).chains[0].clone();
+    let chains = AxisChainSet {
+        chains: vec![
+            kernel.clone(),
+            kernel,
+            trajectory::CompiledChain::default(),
+            pa,
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    };
+    let mut segs: Vec<geometry::Move> = Vec::new();
+    for i in 0..8u32 {
+        let x0 = f64::from(i) * 5.0;
+        let y0 = f64::from(i % 2);
+        let y1 = f64::from((i + 1) % 2);
+        segs.push(line(i + 1, [x0, y0, 0.0], [x0 + 5.0, y1, 0.0], 0.0));
+    }
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let items: Vec<StreamInput> = segs.iter().map(|m| m.clone().into()).collect();
+    let lowered = lower_to_base_items(config, &chains, &home, items);
+    let shaped = shape_one_at_a_time(chains, fit_tol(config), lowered);
+    for seg in trajectory_segments(&shaped) {
+        let e = &seg.axes[3];
+        if let ContinuousAxis::PiecewiseRelativeSpline(pieces) = e {
+            assert!(
+                pieces.len() <= 2,
+                "idle follower window [{}, {}] burst into {} pieces",
+                seg.t_start,
+                seg.t_end,
+                pieces.len()
+            );
+        }
+        for i in 0..=20 {
+            let t = seg.t_start + (seg.t_end - seg.t_start) * f64::from(i) / 20.0;
+            let v = eval_segment_axis(seg, 3, t);
+            assert!(v.abs() < 1e-9, "idle follower moved to {v} at t={t}");
+        }
+    }
+}
+
+#[test]
+fn derivative_gain_weld_does_not_turn_a_slope_residual_into_acceleration_ripple() {
+    let seam = 0.329_724_526_418_917_6;
+    let width = 3e-5;
+    let pieces = [
+        nurbs::bezier::BezierPiece {
+            u_start: seam - width,
+            u_end: seam,
+            coeffs: vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+        },
+        nurbs::bezier::BezierPiece {
+            u_start: seam,
+            u_end: seam + width,
+            coeffs: vec![width, 1.0 + 1e-10, 0.0, 0.0, 0.0, 0.0],
+        },
+    ];
+    let source = nurbs::bezier::bezier_pieces_to_nurbs(&pieces);
+    let gained = crate::shaper::apply_derivative_gains_to_track(&source, 0.04, 0.0);
+    let acceleration = nurbs::eval::derivative(&nurbs::eval::derivative(&gained));
+    let quarter_into_right = seam + 0.25 * width;
+    let ripple = eval(&acceleration, quarter_into_right).abs();
+    assert!(
+        ripple < 0.01,
+        "C0 welding amplified the PA slope residual to {ripple} mm/s²"
+    );
+}
+
+#[test]
+fn derivative_gains_preserve_one_sided_polynomial_law() {
+    let pieces = [
+        nurbs::bezier::BezierPiece {
+            u_start: 0.0,
+            u_end: 1.0,
+            coeffs: vec![0.0, 1.0, 2.0],
+        },
+        nurbs::bezier::BezierPiece {
+            u_start: 1.0,
+            u_end: 2.0,
+            coeffs: vec![3.0, 7.0, -1.0],
+        },
+    ];
+    let source = nurbs::bezier::bezier_pieces_to_nurbs(&pieces);
+    for (k1, k2) in [(0.04, 0.0), (0.0, 0.02), (0.04, 0.02)] {
+        let gained = crate::shaper::apply_derivative_gains_to_track(&source, k1, k2);
+        let recovered = nurbs::bezier::extract_bezier_pieces(&gained);
+        for (piece, output) in pieces.iter().zip(&recovered) {
+            for fraction in [0.0, 0.1, 0.5, 0.9] {
+                let t = piece.u_start + fraction * (piece.u_end - piece.u_start);
+                let expected = piece.evaluate(t)
+                    + k1 * piece.differentiate().evaluate(t)
+                    + k2 * piece.differentiate().differentiate().evaluate(t);
+                assert!((output.evaluate(t) - expected).abs() < 1e-12);
+                assert!((eval(&gained, t) - expected).abs() < 1e-12);
+            }
+        }
+    }
 }

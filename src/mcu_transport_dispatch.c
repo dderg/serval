@@ -15,9 +15,11 @@
 extern void *runtime_handle;
 #endif
 
-#if CONFIG_CLASSIC_STEPPING
-extern uint64_t runtime_widened_host_clock(void);
+#if CONFIG_SAMPLE_STEPPING
+int32_t runtime_sample_halt(struct Runtime *rt, uint64_t halt_clock);
 #endif
+
+extern uint64_t runtime_widened_host_clock(void);
 
 extern int kalico_console_write_raw(const uint8_t *buf, uint16_t len);
 
@@ -25,8 +27,8 @@ extern int kalico_console_write_raw(const uint8_t *buf, uint16_t len);
 
 #define IDENTIFY_RESPONSE_BODY_LEN 81
 
-// MCU_TX_BUF_SIZE, PER_MESSAGE_HEADER_LEN, MESSAGE_VERSION_DEFAULT and the
-// RUNTIME_ERR_* codes live in mcu_transport_dispatch.h (shared with piece_sink).
+// MCU_TX_BUF_SIZE, PER_MESSAGE_HEADER_LEN and MESSAGE_VERSION_DEFAULT live in
+// mcu_transport_dispatch.h.
 static uint8_t tx_buf[MCU_TX_BUF_SIZE];
 
 static uint32_t reset_epoch;
@@ -35,10 +37,8 @@ static void handle_query_runtime_caps(uint32_t correlation_id, const uint8_t *bo
 static void handle_query_motor_state(uint32_t correlation_id, const uint8_t *body, uint16_t body_len);
 static void handle_stop(uint32_t correlation_id);
 static void handle_resume_stream(uint32_t correlation_id);
-#if CONFIG_MOTION_RUNTIME
 static void handle_stepper_suppress(uint32_t correlation_id,
                                      const uint8_t *body, uint16_t body_len);
-#endif
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <fcntl.h>
@@ -194,11 +194,9 @@ mcu_transport_dispatch_frame(uint8_t channel, const uint8_t *payload,
     case MCU_MSG_RESUME_STREAM:
         handle_resume_stream(correlation_id);
         return;
-#if CONFIG_MOTION_RUNTIME
     case MCU_MSG_STEPPER_SUPPRESS:
         handle_stepper_suppress(correlation_id, body, body_len);
         return;
-#endif
     default:
         return;
     }
@@ -214,22 +212,9 @@ handle_query_runtime_caps(uint32_t correlation_id, const uint8_t *body,
 {
     (void)body;
     (void)body_len;
-    uint8_t payload[PER_MESSAGE_HEADER_LEN + 4];
+    uint8_t payload[PER_MESSAGE_HEADER_LEN];
     encode_message_header(payload, MCU_MSG_RUNTIME_CAPS_RESPONSE,
                           MESSAGE_VERSION_DEFAULT, correlation_id);
-    uint8_t *b = &payload[PER_MESSAGE_HEADER_LEN];
-    // u32 total_piece_memory (bytes); host divides by 32 (PieceEntry size)
-    // and axis count for per-axis ring depth. Zero on a classic-stepping
-    // build: there is no piece ring to fill.
-#if CONFIG_MOTION_RUNTIME
-    uint32_t total_piece_memory = (uint32_t)CONFIG_RUNTIME_PIECE_RING_SIZE;
-#else
-    uint32_t total_piece_memory = 0;
-#endif
-    b[0] = (uint8_t)(total_piece_memory & 0xFF);
-    b[1] = (uint8_t)((total_piece_memory >> 8) & 0xFF);
-    b[2] = (uint8_t)((total_piece_memory >> 16) & 0xFF);
-    b[3] = (uint8_t)((total_piece_memory >> 24) & 0xFF);
     mcu_transport_send_frame(MCU_CHANNEL_CONTROL,
                                 payload, sizeof(payload));
 }
@@ -278,10 +263,6 @@ handle_query_motor_state(uint32_t correlation_id, const uint8_t *body,
     mcu_transport_send_frame(MCU_CHANNEL_CONTROL, payload, used);
 }
 
-// The PushPieces piece_sink (multi-axis streaming parser + frame-level response)
-// lives in src/piece_sink.c so it is host-fuzzable in isolation; it builds on
-// the transport seam declared in mcu_transport_dispatch.h.
-
 void
 send_status_heartbeat(void)
 {
@@ -292,14 +273,16 @@ send_status_heartbeat(void)
     uint8_t st = 0;
     uint16_t fc = 0;
     uint32_t counts[8];
+    uint64_t playback[8];
     int32_t n = runtime_get_heartbeat(runtime_handle,
-                                             &st, &fc, counts, 8);
+                                             &st, &fc, counts, playback, 8);
     if (n < 0)
         return;
 #else
     uint8_t st = 0;
     uint16_t fc = 0;
     uint32_t counts[8];
+    uint64_t playback[8];
     int32_t n = 0;
 #endif
 
@@ -322,6 +305,11 @@ send_status_heartbeat(void)
         payload[off++] = (uint8_t)((v >> 8) & 0xFF);
         payload[off++] = (uint8_t)((v >> 16) & 0xFF);
         payload[off++] = (uint8_t)((v >> 24) & 0xFF);
+    }
+    for (int i = 0; i < n; i++) {
+        uint64_t c = playback[i];
+        for (int b = 0; b < 8; b++)
+            payload[off++] = (uint8_t)((c >> (8 * b)) & 0xFF);
     }
     uint32_t ff_saturation_count = 0;
     payload[off++] = (uint8_t)(ff_saturation_count & 0xFF);
@@ -387,14 +375,10 @@ send_stop_response(uint32_t correlation_id, int32_t result, uint64_t discard_clo
 // Stamping each Stop with a fresh clock would place the halt several ms
 // of travel past where the steppers actually stopped, and every probe
 // seeds the toolhead frame from the position reconstructed at this clock.
-#if CONFIG_MOTION_RUNTIME || CONFIG_CLASSIC_STEPPING
+#if CONFIG_HAVE_GPIO
 static uint64_t stop_halt_clock;
-#endif
-#if CONFIG_CLASSIC_STEPPING
 static uint8_t stop_gated;
-#endif
 
-#if CONFIG_CLASSIC_STEPPING
 void
 classic_stop_gate_at(uint64_t halt_clock)
 {
@@ -417,30 +401,19 @@ int32_t
 handle_stop_inner(uint64_t *discard_clock)
 {
     *discard_clock = 0;
-#if CONFIG_MOTION_RUNTIME
-    int32_t rc = RUNTIME_ERR_NOT_INIT;
-    if (runtime_handle) {
-        irqstatus_t flag = irq_save();
-        int32_t was_gated = runtime_pieces_gated(runtime_handle);
-        rc = runtime_gate_pieces(runtime_handle);
-        if (was_gated <= 0)
-            stop_halt_clock = runtime_now_ticks(runtime_handle);
-        *discard_clock = stop_halt_clock;
-        irq_restore(flag);
-    }
-#elif CONFIG_CLASSIC_STEPPING
-    // The host-computed step stream has no MCU-side gate to close: the
-    // halt IS discarding every queued move, and SF_NEED_RESET keeps later
-    // queue_step frames out until the host re-anchors with reset_step_clock.
-    int32_t rc = 0;
+#if CONFIG_HAVE_GPIO
     classic_stop_gate_at(runtime_widened_host_clock());
     irqstatus_t flag = irq_save();
     *discard_clock = stop_halt_clock;
     irq_restore(flag);
-#else
-    int32_t rc = RUNTIME_ERR_MOTION_RUNTIME_ABSENT;
+#if CONFIG_SAMPLE_STEPPING
+    if (runtime_handle)
+        runtime_sample_halt(runtime_handle, stop_halt_clock);
 #endif
-    return rc;
+    return 0;
+#else
+    shutdown("stop without any motion executor");
+#endif
 }
 
 static void
@@ -465,7 +438,6 @@ send_resume_stream_response(uint32_t correlation_id, int32_t result)
     mcu_transport_send_frame(MCU_CHANNEL_CONTROL, payload, sizeof(payload));
 }
 
-#if CONFIG_MOTION_RUNTIME
 static void
 send_stepper_suppress_response(uint32_t correlation_id,
                                uint32_t effective_clock)
@@ -492,28 +464,17 @@ handle_stepper_suppress(uint32_t correlation_id, const uint8_t *body,
     else
         stepper_suppress_set(body[0], body[1]);
     send_stepper_suppress_response(
-        correlation_id, (uint32_t)runtime_now_ticks(runtime_handle));
+        correlation_id, (uint32_t)runtime_widened_host_clock());
 }
-#endif
 
 static void
 handle_resume_stream(uint32_t correlation_id)
 {
     stepper_suppress_clear_all();
-#if CONFIG_MOTION_RUNTIME
-    int32_t rc = RUNTIME_ERR_NOT_INIT;
-    if (runtime_handle) {
-        irqstatus_t flag = irq_save();
-        rc = runtime_ungate_pieces(runtime_handle);
-        irq_restore(flag);
-    }
-#elif CONFIG_CLASSIC_STEPPING
-    int32_t rc = 0;
+#if CONFIG_HAVE_GPIO
     irqstatus_t flag = irq_save();
     stop_gated = 0;
     irq_restore(flag);
-#else
-    int32_t rc = RUNTIME_ERR_MOTION_RUNTIME_ABSENT;
 #endif
-    send_resume_stream_response(correlation_id, rc);
+    send_resume_stream_response(correlation_id, 0);
 }

@@ -42,20 +42,6 @@ fn emit_fault_log(fault: FaultCode, detail: u32) {
 }
 
 #[inline]
-pub fn raise_step_queue_overflow(shared: &SharedState, axis_idx: usize) {
-    let detail = (axis_idx as u32 & 0xFF) << 16;
-    shared.fault_detail.store(detail, Ordering::Release);
-    shared
-        .last_error
-        .store(FaultCode::StepQueueOverflow.as_i32(), Ordering::Release);
-    emit_fault_log(FaultCode::StepQueueOverflow, detail);
-    if axis_idx < 4 {
-        #[allow(clippy::indexing_slicing)]
-        shared.queue_overflow_count[axis_idx].fetch_add(1, Ordering::Release);
-    }
-}
-
-#[inline]
 pub fn raise_position_count_overflow(shared: &SharedState, axis_idx: usize) {
     let detail = (axis_idx as u32 & 0xFF) << 16;
     shared.fault_detail.store(detail, Ordering::Release);
@@ -73,16 +59,6 @@ pub fn raise_math_non_finite(shared: &SharedState, axis_idx: usize) {
         .last_error
         .store(FaultCode::MathNonFinite.as_i32(), Ordering::Release);
     emit_fault_log(FaultCode::MathNonFinite, detail);
-}
-
-#[inline]
-pub fn raise_piece_advance_underflow(shared: &SharedState, axis_idx: usize) {
-    let detail = (axis_idx as u32 & 0xFF) << 16;
-    shared.fault_detail.store(detail, Ordering::Release);
-    shared
-        .last_error
-        .store(FaultCode::PieceAdvanceUnderflow.as_i32(), Ordering::Release);
-    emit_fault_log(FaultCode::PieceAdvanceUnderflow, detail);
 }
 
 #[inline]
@@ -106,16 +82,6 @@ pub fn raise_jog_parameters_invalid(shared: &SharedState) {
 }
 
 #[inline]
-pub fn raise_piece_start_in_past(shared: &SharedState, axis_idx: usize, deficit_us: u32) {
-    let detail = ((axis_idx as u32 & 0xFF) << 16) | deficit_us.min(0xFFFF);
-    shared.fault_detail.store(detail, Ordering::Release);
-    shared
-        .last_error
-        .store(FaultCode::PieceStartInPast.as_i32(), Ordering::Release);
-    emit_fault_log(FaultCode::PieceStartInPast, detail);
-}
-
-#[inline]
 pub fn raise_tick_interval_exceeded(shared: &SharedState, gap_ticks: u32) {
     let detail = gap_ticks.min(0xFFFF);
     shared.fault_detail.store(detail, Ordering::Release);
@@ -123,17 +89,6 @@ pub fn raise_tick_interval_exceeded(shared: &SharedState, gap_ticks: u32) {
         .last_error
         .store(FaultCode::TickIntervalExceeded.as_i32(), Ordering::Release);
     emit_fault_log(FaultCode::TickIntervalExceeded, detail);
-}
-
-#[inline]
-pub fn raise_steps_per_sample_exceeded(shared: &SharedState, axis_idx: usize, abs_steps: u32) {
-    let detail = ((axis_idx as u32 & 0xFF) << 16) | abs_steps.min(0xFFFF);
-    shared.fault_detail.store(detail, Ordering::Release);
-    shared.last_error.store(
-        FaultCode::StepsPerSampleExceeded.as_i32(),
-        Ordering::Release,
-    );
-    emit_fault_log(FaultCode::StepsPerSampleExceeded, detail);
 }
 
 #[inline]
@@ -147,26 +102,6 @@ pub fn raise_internal_invariant(shared: &SharedState, axis_idx: usize, invariant
 }
 
 #[inline]
-pub fn raise_multi_motor_mask(shared: &SharedState, axis_idx: usize, mask: u8) {
-    let detail = ((axis_idx as u32 & 0xFF) << 16) | u32::from(mask);
-    shared.fault_detail.store(detail, Ordering::Release);
-    shared
-        .last_error
-        .store(FaultCode::MultiMotorMask.as_i32(), Ordering::Release);
-    emit_fault_log(FaultCode::MultiMotorMask, detail);
-}
-
-#[inline]
-pub fn raise_unknown_step_mode(shared: &SharedState, axis_idx: usize, mode: u8) {
-    let detail = ((axis_idx as u32 & 0xFF) << 16) | u32::from(mode);
-    shared.fault_detail.store(detail, Ordering::Release);
-    shared
-        .last_error
-        .store(FaultCode::UnknownStepMode.as_i32(), Ordering::Release);
-    emit_fault_log(FaultCode::UnknownStepMode, detail);
-}
-
-#[inline]
 pub fn raise_phase_motor_unmapped(shared: &SharedState, axis_idx: usize, stepper_oid: u8) {
     let detail = ((axis_idx as u32 & 0xFF) << 16) | u32::from(stepper_oid);
     shared.fault_detail.store(detail, Ordering::Release);
@@ -177,16 +112,6 @@ pub fn raise_phase_motor_unmapped(shared: &SharedState, axis_idx: usize, stepper
 }
 
 #[inline]
-pub fn raise_buzz_axis_conflict(shared: &SharedState, axis_idx: usize) {
-    let detail = (axis_idx as u32 & 0xFF) << 16;
-    shared.fault_detail.store(detail, Ordering::Release);
-    shared
-        .last_error
-        .store(FaultCode::BuzzAxisConflict.as_i32(), Ordering::Release);
-    emit_fault_log(FaultCode::BuzzAxisConflict, detail);
-}
-
-#[inline]
 pub fn raise_overlay_unsupported(shared: &SharedState, axis_idx: usize, mask: u8) {
     let detail = ((axis_idx as u32 & 0xFF) << 16) | u32::from(mask);
     shared.fault_detail.store(detail, Ordering::Release);
@@ -194,6 +119,49 @@ pub fn raise_overlay_unsupported(shared: &SharedState, axis_idx: usize, mask: u8
         .last_error
         .store(FaultCode::OverlayUnsupported.as_i32(), Ordering::Release);
     emit_fault_log(FaultCode::OverlayUnsupported, detail);
+}
+
+#[inline]
+fn raise_lane_fault(shared: &SharedState, fault: FaultCode, lane_idx: usize, payload: u32) {
+    let detail = ((lane_idx as u32 & 0xFF) << 16) | (payload & 0xFFFF);
+    shared.fault_detail.store(detail, Ordering::Release);
+    shared.last_error.store(fault.as_i32(), Ordering::Release);
+    emit_fault_log(fault, detail);
+}
+
+#[inline]
+pub fn raise_sample_run_late(shared: &SharedState, lane_idx: usize, deficit_ticks: u32) {
+    raise_lane_fault(shared, FaultCode::SampleRunLate, lane_idx, deficit_ticks);
+}
+
+#[inline]
+pub fn raise_sample_ring_underrun(shared: &SharedState, lane_idx: usize, tail_delta: u32) {
+    raise_lane_fault(shared, FaultCode::SampleRingUnderrun, lane_idx, tail_delta);
+}
+
+#[inline]
+pub fn raise_sample_ring_full(shared: &SharedState, lane_idx: usize) {
+    raise_lane_fault(shared, FaultCode::SampleRingFull, lane_idx, 0);
+}
+
+#[inline]
+pub fn raise_sample_lane_unknown(shared: &SharedState, oid: u8) {
+    raise_lane_fault(shared, FaultCode::SampleLaneUnknown, 0xFF, u32::from(oid));
+}
+
+#[inline]
+pub fn raise_sample_run_rejected(shared: &SharedState, lane_idx: usize, sample_fault: u16) {
+    raise_lane_fault(
+        shared,
+        FaultCode::SampleRunRejected,
+        lane_idx,
+        u32::from(sample_fault),
+    );
+}
+
+#[inline]
+pub fn raise_sample_barrier_overflow(shared: &SharedState, lane_idx: usize) {
+    raise_lane_fault(shared, FaultCode::SampleBarrierOverflow, lane_idx, 0);
 }
 
 #[cfg(test)]

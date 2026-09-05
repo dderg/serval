@@ -5,20 +5,20 @@ use std::collections::BTreeMap;
 pub use geometry::Move;
 use geometry::path::lowering::PositionProfile;
 use geometry::{CornerFitConfig, VelocityLimits};
-use runtime::piece_ring::PieceEntry;
-use trajectory::{AxisChainSet, ShapedSegment};
+use trajectory::{AxisChainSet, ClockedMotorSpan, ContinuousSegment};
 
 use crate::classify::build_move;
 use crate::enqueue::enqueue_segment;
-use crate::mcu_config::{McuAxisConfig, McuCaps};
+use crate::mcu_config::McuAxisConfig;
 use crate::pump::{
     JUNCTION_POSITION_FATAL_MM, JUNCTION_POSITION_LOG_MM, JunctionTracker, MAX_LEAD_SECS,
 };
 use crate::types::AxisKey;
-use motion_pipeline::{StreamConfig, setup_stages};
+use motion_pipeline::{StreamConfig, TrajectoryItem, setup_stages};
 
 const HARNESS_MCU_ID: u32 = 0;
-const HARNESS_MCU_FREQ_HZ: f64 = 1.0e6;
+const HARNESS_MCU_FREQ_HZ: f64 = 64.0e6;
+const HARNESS_T0_SECS: f64 = 1.0;
 const EXTRUDER_AXIS: usize = 3;
 
 #[must_use]
@@ -35,9 +35,9 @@ pub fn default_stream_config() -> StreamConfig {
             100.0,
             1000.0,
             geometry::corner_deviation_from_scv(5.0, 1000.0),
-            100_000.0,
+            f64::INFINITY,
         )
-        .expect("bench limits (max_v=100 accel=1000 scv=5 jerk=100000) are valid"),
+        .expect("bench limits (max_v=100 accel=1000 scv=5 jerk=inf) are valid"),
     }
 }
 
@@ -47,9 +47,6 @@ fn harness_mcu_configs() -> Vec<McuAxisConfig> {
         mcu_id: HARNESS_MCU_ID,
         axes: vec![0, 1, 2],
         kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![f64::INFINITY; 3],
         ..Default::default()
     }]
@@ -59,14 +56,14 @@ fn harness_mcu_configs() -> Vec<McuAxisConfig> {
 pub struct SeamDescriptor {
     pub mcu_id: u32,
     pub axis: u8,
-    pub delta_mm: f32,
-    pub prev_pos: f32,
-    pub next_pos: f32,
+    pub delta_mm: f64,
+    pub prev_pos: f64,
+    pub next_pos: f64,
     pub prev_host_t: f64,
     pub next_host_t: f64,
     pub prev_source_line: u32,
     pub next_source_line: u32,
-    pub vel_jump: Option<f32>,
+    pub vel_jump: Option<f64>,
     pub commit_index: usize,
 }
 
@@ -92,11 +89,11 @@ impl SeamReport {
     }
 
     #[must_use]
-    pub fn worst(&self) -> f32 {
+    pub fn worst(&self) -> f64 {
         self.boundaries
             .iter()
             .map(|b| b.delta_mm)
-            .fold(0.0, f32::max)
+            .fold(0.0, f64::max)
     }
 
     #[must_use]
@@ -227,18 +224,17 @@ pub fn parse_gcode_to_moves(source: &str, limits: VelocityLimits) -> Vec<Move> {
     moves
 }
 
-fn endpoint_velocity_out(p: &PieceEntry) -> f32 {
-    p.vel_end()
-}
-
-fn endpoint_velocity_in(p: &PieceEntry) -> f32 {
-    p.vel_start()
+fn span_velocity(span: &ClockedMotorSpan, t: f64) -> f64 {
+    span.signal
+        .eval_pva(t)
+        .expect("dispatched span evaluates inside its own stream domain")
+        .velocity
 }
 
 struct Ingestor {
     mcu_configs: Vec<McuAxisConfig>,
     tracker: JunctionTracker,
-    prev_last: BTreeMap<AxisKey, PieceEntry>,
+    prev_last: BTreeMap<AxisKey, ClockedMotorSpan>,
     first_enqueue: bool,
     report: SeamReport,
 }
@@ -254,7 +250,7 @@ impl Ingestor {
         }
     }
 
-    fn ingest(&mut self, segments: &[ShapedSegment], commit_index: usize) {
+    fn ingest(&mut self, segments: &[ContinuousSegment], commit_index: usize) {
         for seg in segments {
             self.report.segments += 1;
             let epoch = if self.first_enqueue {
@@ -268,29 +264,30 @@ impl Ingestor {
                 &self.mcu_configs,
                 &crate::enqueue::EnqueueCtx {
                     epoch_freq: &|_| None,
-                    t0: 0.0,
+                    lane_is_phase: &|_| false,
+                    t0: HARNESS_T0_SECS,
                     epoch,
                     host_now: 0.0,
                     lead_secs: MAX_LEAD_SECS,
-                    project: |_mcu, hs| (hs * HARNESS_MCU_FREQ_HZ) as u64,
-                    max_piece_secs: None,
+                    project_exact: |_mcu, hs: f64| hs * HARNESS_MCU_FREQ_HZ,
+                    clock_freq_hz: &|_| HARNESS_MCU_FREQ_HZ,
                 },
-            );
+            )
+            .expect("harness lanes enqueue without a continuous error");
             for msg in msgs {
                 if msg.epoch.position_redefined() {
                     self.prev_last.remove(&msg.key);
                 }
-                if let Some(seam) = self.tracker.observe_msg(
-                    msg.key,
-                    &msg.pieces,
-                    msg.epoch,
-                    msg.source_line,
-                    Some(HARNESS_MCU_FREQ_HZ),
-                ) {
+                if let Some(seam) =
+                    self.tracker
+                        .observe_msg(msg.key, &msg.spans, msg.epoch, msg.source_line)
+                {
                     if seam.jump() >= JUNCTION_POSITION_LOG_MM {
-                        let first_piece = &msg.pieces.first().unwrap().0;
+                        let first = msg.spans.first().unwrap();
                         let vel_jump = self.prev_last.get(&msg.key).map(|prev| {
-                            (endpoint_velocity_out(prev) - endpoint_velocity_in(first_piece)).abs()
+                            (span_velocity(prev, prev.stream_t_end)
+                                - span_velocity(first, first.stream_t_start))
+                            .abs()
                         });
                         self.report.boundaries.push(SeamDescriptor {
                             mcu_id: seam.key.mcu_id,
@@ -307,8 +304,13 @@ impl Ingestor {
                         });
                     }
                 }
-                if msg.pieces.first().is_some_and(|(p, _)| p.motor_mask == 0) {
-                    self.prev_last.insert(msg.key, msg.pieces.last().unwrap().0);
+                if msg
+                    .spans
+                    .first()
+                    .is_some_and(|span| span.signal.motor_mask == 0)
+                {
+                    self.prev_last
+                        .insert(msg.key, msg.spans.last().unwrap().clone());
                 }
             }
         }
@@ -351,7 +353,7 @@ pub fn run_moves_with_chains(
 
 /// Feed the moves through the full streaming pipeline and return the shaped
 /// segments it emits — the trajectory enqueue would dispatch.
-pub fn collect_shaped_segments(moves: &[Move], config: StreamConfig) -> Vec<ShapedSegment> {
+pub fn collect_shaped_segments(moves: &[Move], config: StreamConfig) -> Vec<ContinuousSegment> {
     collect_shaped_segments_scripted(moves, config, AxisChainSet::default(), None)
 }
 
@@ -360,7 +362,7 @@ pub fn collect_shaped_segments_scripted(
     config: StreamConfig,
     chains: AxisChainSet,
     drain_every: Option<usize>,
-) -> Vec<ShapedSegment> {
+) -> Vec<ContinuousSegment> {
     let mut script: Vec<motion_pipeline::StreamInput> = Vec::new();
     for (i, m) in moves.iter().cloned().enumerate() {
         script.push(m.into());
@@ -378,7 +380,7 @@ pub fn collect_shaped_segments_from_script(
     script: Vec<motion_pipeline::StreamInput>,
     config: StreamConfig,
     chains: AxisChainSet,
-) -> Vec<ShapedSegment> {
+) -> Vec<ContinuousSegment> {
     let spatial_home = script
         .iter()
         .find_map(|item| match item {
@@ -391,9 +393,9 @@ pub fn collect_shaped_segments_from_script(
     let handle = setup_stages(config, chains, home, 0.0);
     let output = handle.output;
     let collector = std::thread::spawn(move || {
-        let mut segs: Vec<ShapedSegment> = Vec::new();
+        let mut segs: Vec<ContinuousSegment> = Vec::new();
         while let Ok(item) = output.recv() {
-            if let motion_pipeline::ShapedItem::Seg(seg) = item {
+            if let TrajectoryItem::Seg(seg) = item {
                 segs.push(seg);
             }
         }

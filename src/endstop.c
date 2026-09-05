@@ -11,12 +11,7 @@
 
 #define ENDSTOP_UNBOUND 0xFF
 
-#if CONFIG_MOTION_RUNTIME
-#include "runtime.h"
-extern void *runtime_handle;
-#else
 extern uint64_t runtime_widened_host_clock(void);
-#endif
 
 struct endstop {
     struct timer time;
@@ -48,26 +43,26 @@ endstop_event(struct timer *t)
     uint8_t active = raw ^ e->invert;
     uint32_t obs_clock = timer_read_time();
     if (active && e->armed) {
-#if CONFIG_MOTION_RUNTIME
-        uint64_t now64 = runtime_now_ticks(runtime_handle);
-#else
         uint64_t now64 = runtime_widened_host_clock();
-#endif
         uint32_t gap = obs_clock - e->last_clear_clock;
         uint32_t mid32 = e->last_clear_clock + gap / 2;
         int32_t mid_delta = (int32_t)(mid32 - (uint32_t)now64);
         e->trip_clock = now64 + (int64_t)mid_delta;
         if (e->group && e->motor != ENDSTOP_UNBOUND) {
-            stepper_suppress_set(e->motor, e->stepper);
+            uint8_t binding_count = runtime_motor_binding_count(e->motor);
+            if (binding_count) {
+                if (e->stepper >= binding_count)
+                    shutdown("bad endstop binding");
+                stepper_suppress_set(e->motor, e->stepper);
+            }
             e->trip_clock = now64;
         }
         e->armed = 0;
         e->trip_pending = 1;
         e->tripped = 1;
         if (e->ts) {
-#if CONFIG_CLASSIC_STEPPING
-            classic_stop_gate_at(now64);
-#endif
+            if (!e->group)
+                classic_stop_gate_at(now64);
             trsync_do_trigger(e->ts, e->trigger_reason);
         }
         sched_wake_task(&endstop_trip_wake);
@@ -130,9 +125,6 @@ command_query_endstop(uint32_t *args)
         e->armed = 0;
         return;
     }
-    if (e->motor != ENDSTOP_UNBOUND
-        && e->stepper >= runtime_motor_binding_count(e->motor))
-        shutdown("bad endstop binding");
     e->tripped = 0;
     e->armed = 1;
     e->last_clear_clock = timer_read_time();

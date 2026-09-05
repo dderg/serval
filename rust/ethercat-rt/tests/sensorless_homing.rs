@@ -1,3 +1,5 @@
+mod common;
+
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -9,11 +11,11 @@ use host_rt::mcu_call::McuCall;
 use host_rt::mcu_serial_conn::McuSerialConn;
 use mcu_protocol::codec::{Cursor, Decode, Encode};
 use mcu_protocol::messages::{
-    ArmSensorlessEndstop, ArmSensorlessEndstopResponse, ClaimHandshakeReply, MessageKind,
-    PushPieces, PushPiecesResponse, ResumeStreamResponse, SdoWrite, SdoWriteResponse, SetTorque,
-    SetTorqueResponse,
+    ArmSensorlessEndstop, ArmSensorlessEndstopResponse, ClaimHandshakeReply, LaneRun, MessageKind,
+    PushSampleRuns, PushSampleRunsResponse, ResumeStreamResponse, SampleGridResponse, SdoWrite,
+    SdoWriteResponse, SetTorque, SetTorqueResponse, SetpointSample, LANE_RUN_FLAG_REANCHOR,
+    LANE_RUN_FLAG_TAIL,
 };
-use runtime::piece_ring::PieceEntry;
 
 const STUB_BIN: &str = env!("CARGO_BIN_EXE_ethercat-rt-stub");
 const TORQUE_ACTUAL_INDEX: u16 = 0x6077;
@@ -104,26 +106,48 @@ fn spawn_stub(tag: &str) -> (ChildGuard, McuSerialConn) {
         .expect("spawn ethercat-rt-stub");
     let guard = ChildGuard { child: Some(child) };
     wait_for_socket(&socket, Instant::now() + Duration::from_secs(5));
-    let conn = McuSerialConn::connect(&socket).expect("connect to stub socket");
+    let conn = common::connect_until(&socket, Instant::now() + Duration::from_secs(5));
     do_handshake(&conn);
     (guard, conn)
 }
 
-fn push_one_piece(conn: &McuSerialConn, start_time: u64) -> i32 {
-    let entry = PieceEntry {
-        start_time,
-        duration: 0.001,
-        ..PieceEntry::zeroed()
+/// Cycles of lead for the queued run. The stub's grid cycle is 1 ms, so the
+/// run is still in the ring when the homing trip resets it, and the lead stays
+/// inside `RING_DEPTH_CYCLES`.
+const QUEUED_LEAD_CYCLES: u64 = 512;
+
+/// One anchored, final sample run that stays queued for the whole test — the
+/// smallest thing the pump can put in the ring.
+fn push_one_run(conn: &McuSerialConn) -> i32 {
+    let (kind, resp) = conn
+        .mcu_call(
+            MessageKind::QuerySampleGrid,
+            Vec::new(),
+            Duration::from_secs(5),
+        )
+        .expect("QuerySampleGrid call must succeed");
+    assert_eq!(kind, MessageKind::SampleGridResponse);
+    let grid = SampleGridResponse::decode(&resp).expect("SampleGridResponse must decode");
+    let lane = LaneRun {
+        axis_idx: 0,
+        slot_idx: 0,
+        flags: LANE_RUN_FLAG_REANCHOR | LANE_RUN_FLAG_TAIL,
+        origin_mm_q16: 0,
+        start_index: grid.grid_index + QUEUED_LEAD_CYCLES,
+        interval_ticks: grid.cycle_ticks,
+        samples: vec![SetpointSample {
+            pos_counts: 0,
+            vel_ff: 0,
+            torque_ff: 0,
+            acc_mm_s2: 0.0,
+        }],
     };
-    let mut pieces_bytes = Vec::with_capacity(20);
-    entry.to_wire_bytes(&mut pieces_bytes);
-    let msg = PushPieces::single(0, 1, 0, 1, pieces_bytes);
-    let body = msg.encoded_to_vec();
+    let body = PushSampleRuns { lanes: vec![lane] }.encoded_to_vec();
     let (_, resp) = conn
-        .mcu_call(MessageKind::PushPieces, body, Duration::from_secs(5))
-        .expect("PushPieces call must succeed");
-    PushPiecesResponse::decode(&resp)
-        .expect("PushPiecesResponse must decode")
+        .mcu_call(MessageKind::PushSampleRuns, body, Duration::from_secs(5))
+        .expect("PushSampleRuns call must succeed");
+    PushSampleRunsResponse::decode(&resp)
+        .expect("PushSampleRunsResponse must decode")
         .result
 }
 
@@ -168,7 +192,7 @@ fn trip_halts_stream_until_resume() {
         fired_w.store(true, Ordering::SeqCst);
     }));
 
-    let r = push_one_piece(&conn, ethercat_rt::clock::monotonic_ns() + 10_000_000_000);
+    let r = push_one_run(&conn);
     assert_eq!(r, 0, "push before the trip must be accepted, got {r}");
 
     arm_sensorless(&conn, 4, 500, true);
@@ -183,7 +207,7 @@ fn trip_halts_stream_until_resume() {
         thread::sleep(Duration::from_millis(2));
     }
 
-    let r = push_one_piece(&conn, ethercat_rt::clock::monotonic_ns() + 10_000_000_000);
+    let r = push_one_run(&conn);
     assert_eq!(
         r, ERR_PIECES_WHILE_HALTED,
         "push after the trip must be rejected until ResumeStream, got {r}"
@@ -192,7 +216,7 @@ fn trip_halts_stream_until_resume() {
     let r = send_resume_stream(&conn);
     assert_eq!(r, 0, "ResumeStream after the trip must return 0, got {r}");
 
-    let r = push_one_piece(&conn, ethercat_rt::clock::monotonic_ns() + 10_000_000_000);
+    let r = push_one_run(&conn);
     assert_eq!(r, 0, "push after ResumeStream must be accepted, got {r}");
 }
 

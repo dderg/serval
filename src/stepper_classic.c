@@ -26,6 +26,41 @@ DECL_CONSTANT("STEPPER_STEP_BOTH_EDGE", 1);
 
 static struct task_wake barrier_ack_wake;
 
+// The host paces every step frame within SEND_LEAD_SECONDS (0.25 s) of the
+// mcu clock, so no legitimate step clock is ever CLOCK_DIFF_MAX from the
+// reading of timer_read_time() at command execution. One that is means the
+// host's clocksync record — not the scheduler — is wrong.
+#define STEP_CLOCK_HORIZON_TICKS ((int32_t)(3u << 28))
+
+static void
+step_clock_check_horizon(int32_t distance, uint32_t clock, uint8_t oid)
+{
+    if (likely(distance <= STEP_CLOCK_HORIZON_TICKS
+               && distance >= -STEP_CLOCK_HORIZON_TICKS))
+        return;
+    event_log_emit(EVENT_LOG_LEVEL_ERROR, EVENT_LOG_SUBSYS_MOTION,
+                   EVENT_LOG_EVENT_MOTION_STEP_CLOCK_HORIZON, oid,
+                   (uint32_t)distance, clock);
+    shutdown("Step clock beyond sync horizon");
+}
+
+#if CONFIG_HIGH_PREC_STEP
+static inline void
+add_interval(uint32_t *time, struct stepper *s)
+{
+    uint32_t interval = s->interval + s->int_low_acc;
+    *time += interval >> s->shift;
+    s->int_low_acc = interval - ((interval >> s->shift) << s->shift);
+}
+
+static inline void
+inc_interval(struct stepper *s)
+{
+    s->interval += s->add;
+    s->add += s->add2;
+}
+#endif
+
 static uint_fast8_t
 stepper_next_is_barrier(struct stepper *s)
 {
@@ -51,9 +86,24 @@ stepper_load_next(struct stepper *s)
 
     struct move_node *mn = move_queue_pop(&s->mq);
     struct stepper_move *m = container_of(mn, struct stepper_move, node);
+    uint32_t move_first_interval = m->interval;
+#if CONFIG_HIGH_PREC_STEP
+    uint_fast8_t high_precision = m->flags & SF_HIGH_PREC_STEP;
+    uint32_t move_interval = high_precision ? m->next_interval : m->interval;
+    int32_t move_add = m->add;
+    int32_t move_add2;
+    uint_fast8_t move_shift;
+    uint16_t move_int_low_acc;
+    if (high_precision) {
+        move_add2 = m->add2;
+        move_shift = m->shift;
+        move_int_low_acc = m->int_low_acc;
+    }
+#else
     uint32_t move_interval = m->interval;
-    uint_fast16_t move_count = m->count;
     int_fast16_t move_add = m->add;
+#endif
+    uint_fast16_t move_count = m->count;
     uint_fast8_t need_dir_change = m->flags & MF_DIR;
     move_free(m);
 
@@ -62,10 +112,23 @@ stepper_load_next(struct stepper *s)
 
     // Load next move into 'struct stepper'
     s->add = move_add;
+#if CONFIG_HIGH_PREC_STEP
+    if (high_precision) {
+        s->add2 = move_add2;
+        s->shift = move_shift;
+        s->int_low_acc = move_int_low_acc;
+        s->interval = move_interval;
+        s->flags |= SF_HIGH_PREC_STEP;
+    } else {
+        s->interval = move_interval + move_add;
+        s->flags &= ~SF_HIGH_PREC_STEP;
+    }
+#else
     s->interval = move_interval + move_add;
+#endif
     if (HAVE_OPTIMIZED_PATH && s->flags & SF_OPTIMIZED_PATH) {
         // Using optimized stepper_event_edge() or stepper_event_avr()
-        s->time.waketime += move_interval;
+        s->time.waketime += move_first_interval;
         if (HAVE_AVR_OPTIMIZATION)
             s->flags = (move_add ? s->flags | SF_HAVE_ADD
                         : s->flags & ~SF_HAVE_ADD);
@@ -75,7 +138,7 @@ stepper_load_next(struct stepper *s)
         // may be called twice for each step)
         uint_fast8_t was_active = !!s->count;
         uint32_t min_next_time = s->time.waketime;
-        s->next_step_time += move_interval;
+        s->next_step_time += move_first_interval;
         s->time.waketime = s->next_step_time;
         s->count = (s->flags & SF_SINGLE_SCHED ? move_count
                     : (uint32_t)move_count * 2);
@@ -90,10 +153,25 @@ stepper_load_next(struct stepper *s)
             s->time.waketime = min_next_time;
         }
         if (was_active && need_dir_change) {
-            // Must ensure minimum time between step change and dir change
-            if (s->flags & SF_SINGLE_SCHED)
-                while (timer_is_before(timer_read_time(), min_next_time))
+            // Must ensure minimum time between step change and dir change.
+            // The settle window is measured from the fresh clock, never from
+            // min_next_time: that waketime is the reset-step-clock anchor
+            // when a halted stepper re-arms mid-volley, and a stale-future
+            // anchor would hold the ISR until the clock caught it (the
+            // session-stable ~144 ms "Rescheduled timer in the past" at the
+            // post-trip retract). Bounded to step_pulse_ticks by construction.
+            if (s->flags & SF_SINGLE_SCHED) {
+                uint32_t now = timer_read_time();
+                uint32_t spin_until = now + s->step_pulse_ticks;
+                uint32_t stale_ahead = 0;
+                if (timer_is_before(spin_until, min_next_time))
+                    stale_ahead = min_next_time - spin_until;
+                while (timer_is_before(timer_read_time(), spin_until))
                     ;
+                extern void diag_note_step_spin(uint32_t dur_cyc,
+                                                uint32_t stale_ahead);
+                diag_note_step_spin(timer_read_time() - now, stale_ahead);
+            }
             gpio_out_toggle_noirq(s->dir_pin);
 #if CONFIG_MCU_SIM
             // The sim's virtual clock races arbitrarily far ahead of a
@@ -127,8 +205,18 @@ stepper_event_edge(struct timer *t)
     uint32_t count = s->count - 1;
     if (likely(count)) {
         s->count = count;
+#if CONFIG_HIGH_PREC_STEP
+        if (s->flags & SF_HIGH_PREC_STEP) {
+            add_interval(&s->time.waketime, s);
+            inc_interval(s);
+        } else {
+            s->time.waketime += s->interval;
+            s->interval += s->add;
+        }
+#else
         s->time.waketime += s->interval;
         s->interval += s->add;
+#endif
         return SF_RESCHEDULE;
     }
     return stepper_load_next(s);
@@ -175,8 +263,18 @@ stepper_event_full(struct timer *t)
         // Schedule unstep event
         goto reschedule_min;
     if (likely(count)) {
+#if CONFIG_HIGH_PREC_STEP
+        if (s->flags & SF_HIGH_PREC_STEP) {
+            add_interval(&s->next_step_time, s);
+            inc_interval(s);
+        } else {
+            s->next_step_time += s->interval;
+            s->interval += s->add;
+        }
+#else
         s->next_step_time += s->interval;
         s->interval += s->add;
+#endif
         if (unlikely(timer_is_before(s->next_step_time, min_next_time)))
             // The next step event is too close - push it back
             goto reschedule_min;
@@ -205,20 +303,9 @@ stepper_event(struct timer *t)
 
 // Record late idle re-arms before the scheduler applies its canonical
 // near-time policy.
-
-// Schedule a set of steps with a given timing
-void
-command_queue_step(uint32_t *args)
+static void
+enqueue_move(struct stepper *s, struct stepper_move *m, uint8_t oid)
 {
-    struct stepper *s = stepper_oid_lookup(args[0]);
-    struct stepper_move *m = move_alloc();
-    m->interval = args[1];
-    m->count = args[2];
-    if (!m->count)
-        shutdown("Invalid count parameter");
-    m->add = args[3];
-    m->flags = 0;
-
     irq_disable();
     uint8_t flags = s->flags;
     if (!!(flags & SF_LAST_DIR) != !!(flags & SF_NEXT_DIR)) {
@@ -229,24 +316,109 @@ command_queue_step(uint32_t *args)
         s->flags = flags;
         move_queue_push(&m->node, &s->mq);
     } else if (flags & SF_NEED_RESET) {
+        // Discarding is only correct for the steps already on the wire when an
+        // endstop trip halted the lane: the host cannot recall those. Past its
+        // reconcile it owes a reset ahead of every further step.
+        s->need_reset_discards++;
         move_free(m);
+        if (flags & SF_RESET_FENCED)
+            shutdown("queue_step for a stepper awaiting reset_step_clock");
     } else {
         s->flags = flags;
         move_queue_push(&m->node, &s->mq);
         stepper_load_next(s);
-        extern void diag_note_step_rearm(int32_t margin);
+        extern void diag_note_step_rearm(int32_t margin, uint32_t oid,
+                                         uint32_t waketime, uint32_t last_reset,
+                                         uint32_t discards);
         int32_t margin = (int32_t)(s->time.waketime - timer_read_time());
-        diag_note_step_rearm(margin);
+        diag_note_step_rearm(margin, oid, s->time.waketime,
+                             s->last_reset_clock, s->need_reset_discards);
+        step_clock_check_horizon(margin, s->time.waketime, oid);
         if (unlikely(margin < 0))
             event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_MOTION,
-                           EVENT_LOG_EVENT_MOTION_STEP_REARM_LATE, args[0],
+                           EVENT_LOG_EVENT_MOTION_STEP_REARM_LATE, oid,
                            (uint32_t)margin, s->time.waketime);
         sched_add_timer(&s->time);
     }
     irq_enable();
 }
+
+// Schedule a set of steps with a given timing
+void
+command_queue_step(uint32_t *args)
+{
+    struct stepper *s = stepper_oid_lookup(args[0]);
+    uint32_t count = args[2];
+    if (!count || count > UINT16_MAX)
+        shutdown("Invalid count parameter");
+    int32_t add = (int32_t)args[3];
+    if (add < INT16_MIN || add > INT16_MAX)
+        shutdown("Invalid add parameter");
+
+    struct stepper_move *m = move_alloc();
+    m->interval = args[1];
+    m->count = count;
+    m->add = add;
+    m->flags = 0;
+
+    enqueue_move(s, m, args[0]);
+}
 DECL_COMMAND(command_queue_step,
              "queue_step oid=%c interval=%u count=%hu add=%hi");
+#if CONFIG_HIGH_PREC_STEP
+// The wire domain the host encoder emits (rust/step-shim/src/compress_hp.rs).
+// A value outside it is a version-skewed or corrupt frame, and every one of
+// them would otherwise reach a C shift with an out-of-range or overflowing
+// operand.
+#define STEP_HP_SHIFT_MIN (-8)
+#define STEP_HP_SHIFT_MAX 16
+
+void
+command_queue_step_hp(uint32_t *args)
+{
+    struct stepper *s = stepper_oid_lookup(args[0]);
+    uint32_t count = args[2];
+    if (!count || count >= 0x8000)
+        shutdown("Invalid count parameter");
+    int32_t shift = (int32_t)args[5];
+    if (shift < STEP_HP_SHIFT_MIN || shift > STEP_HP_SHIFT_MAX)
+        shutdown("Invalid shift parameter");
+    int32_t add = (int32_t)args[3], add2 = (int32_t)args[4];
+    if (add < INT16_MIN || add > INT16_MAX
+        || add2 < INT16_MIN || add2 > INT16_MAX)
+        shutdown("Invalid add parameter");
+
+    struct stepper_move *m = move_alloc();
+    m->count = count;
+    uint32_t interval = args[1];
+    if (shift <= 0) {
+        uint_fast8_t amount = (uint_fast8_t)-shift;
+        interval <<= amount;
+        add = add >= 0 ? add << amount : -(-add << amount);
+        add2 = add2 >= 0 ? add2 << amount : -(-add2 << amount);
+        m->next_interval = interval + add;
+        m->add = add + add2;
+        m->add2 = add2;
+        m->int_low_acc = 0;
+        m->interval = interval;
+        m->shift = 0;
+    } else {
+        uint_fast8_t amount = (uint_fast8_t)shift;
+        m->next_interval = interval + add;
+        m->add = add + add2;
+        m->add2 = add2;
+        interval += 1u << (amount - 1);
+        m->interval = interval >> amount;
+        m->int_low_acc = interval - ((interval >> amount) << amount);
+        m->shift = amount;
+    }
+    m->flags = SF_HIGH_PREC_STEP;
+    enqueue_move(s, m, args[0]);
+}
+DECL_COMMAND(command_queue_step_hp,
+             "queue_step_hp oid=%c interval=%u count=%hu add=%hi "
+             "add2=%hi shift=%hi");
+#endif
 
 void
 command_stepcompress_barrier(uint32_t *args)
@@ -277,6 +449,11 @@ stepcompress_barrier_ack_task(void)
 {
     if (!sched_check_wake(&barrier_ack_wake))
         return;
+    // A shutdown runs move_reset(), which relinks every move node — including
+    // the ones parked in completed_barriers — into the free list. Popping them
+    // afterwards walks the free list and reports acks the host never earned.
+    if (sched_is_shutdown())
+        return;
     uint8_t oid;
     struct stepper *s;
     foreach_oid(oid, s, command_config_stepper) {
@@ -292,7 +469,8 @@ stepcompress_barrier_ack_task(void)
             uint32_t seq = m->interval;
             move_free(m);
             irq_enable();
-            sendf("stepcompress_barrier_ack oid=%c barrier_seq=%u", oid, seq);
+            sendf("stepcompress_barrier_ack oid=%c barrier_seq=%u clock=%u"
+                  , oid, seq, timer_read_time());
         }
     }
 }
@@ -316,14 +494,35 @@ command_reset_step_clock(uint32_t *args)
 {
     struct stepper *s = stepper_oid_lookup(args[0]);
     uint32_t waketime = args[1];
+    step_clock_check_horizon((int32_t)(waketime - timer_read_time()), waketime,
+                             args[0]);
     irq_disable();
     if (s->count)
         shutdown("Can't reset time when stepper active");
     s->next_step_time = s->time.waketime = waketime;
-    s->flags &= ~SF_NEED_RESET;
+    s->last_reset_clock = waketime;
+    s->flags &= ~(SF_NEED_RESET | SF_RESET_FENCED);
     irq_enable();
 }
 DECL_COMMAND(command_reset_step_clock, "reset_step_clock oid=%c clock=%u");
+
+// The host stamps its projected mcu clock into this probe; the receipt
+// delta is the one-way host->mcu wire+demux latency plus projection error,
+// the direction the barrier-ack clock echo cannot see. The reset-surviving
+// worst latch feeds the crash replay; big deltas also emit live.
+void
+command_kalico_wire_probe(uint32_t *args)
+{
+    uint32_t claimed = args[0];
+    int32_t delta = (int32_t)(timer_read_time() - claimed);
+    extern void diag_note_wire_probe(int32_t delta);
+    diag_note_wire_probe(delta);
+    if (delta > (int32_t)timer_from_us(5000))
+        event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_MOTION,
+                       EVENT_LOG_EVENT_MOTION_WIRE_PROBE_LATE, 0,
+                       (uint32_t)delta, claimed);
+}
+DECL_COMMAND(command_kalico_wire_probe, "kalico_wire_probe clock=%u");
 
 // Return the current stepper position.  Caller must disable irqs.
 uint32_t
@@ -354,6 +553,17 @@ command_stepper_get_position(uint32_t *args)
 }
 DECL_COMMAND(command_stepper_get_position, "stepper_get_position oid=%c");
 
+// Bias-corrected signed wire count, for handing the classic executor's
+// position to the runtime at a mode switch. Caller must not hold irqs off.
+int32_t
+stepper_classic_wire_position(struct stepper *s)
+{
+    irq_disable();
+    uint32_t position = stepper_get_position(s);
+    irq_enable();
+    return (int32_t)(position - POSITION_BIAS);
+}
+
 // Seed the absolute step counter so the host's reconcile can compare the
 // mcu's executed position against its own step-stream bookkeeping.
 //
@@ -361,6 +571,10 @@ DECL_COMMAND(command_stepper_get_position, "stepper_get_position oid=%c");
 // it is set the counter is stored negated and load_next adds step counts
 // downward. Seeding must re-encode into whichever flavour is live, or every
 // later step lands with the sign flipped.
+//
+// The host only reseeds after discarding every unsent frame, so this is also
+// the fence past which a step arriving ahead of reset_step_clock is an ordering
+// bug rather than the in-flight tail of a trip.
 void
 command_stepcompress_set_position(uint32_t *args)
 {
@@ -370,6 +584,7 @@ command_stepcompress_set_position(uint32_t *args)
         shutdown("Can't set position when stepper active");
     uint32_t position = args[1] + POSITION_BIAS;
     s->position = s->position & 0x80000000 ? -position : position;
+    s->flags |= SF_RESET_FENCED;
     irq_enable();
 }
 DECL_COMMAND(command_stepcompress_set_position,
@@ -388,6 +603,19 @@ stepper_classic_halt(struct stepper *s)
     s->next_step_time = s->time.waketime = 0;
     s->position = -stepper_get_position(s);
     s->count = 0;
+    // Drop the fixed-point step accumulator wholesale: a resumed stream
+    // re-anchors with reset_step_clock and the first load overwrites every
+    // field, but a stale add/shift/int_low_acc surviving the halt would let
+    // a stray event between halt and re-anchor walk a dead step chain.
+    s->interval = 0;
+#if CONFIG_HIGH_PREC_STEP
+    s->add = 0;
+    s->add2 = 0;
+    s->shift = 0;
+    s->int_low_acc = 0;
+#else
+    s->add = 0;
+#endif
     s->flags = (s->flags & (SF_OPTIMIZED_PATH | SF_SINGLE_SCHED))
         | SF_NEED_RESET;
     while (!move_queue_empty(&s->mq)) {

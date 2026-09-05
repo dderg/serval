@@ -201,6 +201,95 @@ fn ac_pos2_heading_is_unit_and_matches_position_derivative() {
     }
 }
 
+fn numeric_d2heading_ds2(profile: &dyn PositionProfile, s: f64, h: f64) -> [f64; 3] {
+    let plus = profile.dheading_ds(s + h);
+    let minus = profile.dheading_ds(s - h);
+    [
+        (plus[0] - minus[0]) / (2.0 * h),
+        (plus[1] - minus[1]) / (2.0 * h),
+        (plus[2] - minus[2]) / (2.0 * h),
+    ]
+}
+
+#[test]
+fn ac_pos3_d2heading_matches_numeric_derivative_of_dheading() {
+    let cases: Vec<(Box<dyn PositionProfile>, f64)> = vec![
+        (Box::new(make_line()), make_line().s_len()),
+        (Box::new(make_arc(3.0, -1.2)), make_arc(3.0, -1.2).s_len()),
+        (Box::new(make_arc(0.7, 2.4)), make_arc(0.7, 2.4).s_len()),
+        (Box::new(make_clothoid(0.1, 0.05, 3.0)), 3.0),
+        (Box::new(make_clothoid(0.0, 0.5, 2.0)), 2.0),
+        (Box::new(make_clothoid(-0.6, -0.4, 2.5)), 2.5),
+    ];
+    for (geom, l) in cases.iter() {
+        let h = 1e-4 * l;
+        for i in 1..10 {
+            let s = l * (i as f64) / 10.0;
+            let analytic = geom.d2heading_ds2(s);
+            let numeric = numeric_d2heading_ds2(geom.as_ref(), s, h);
+            for j in 0..3 {
+                assert!(
+                    (analytic[j] - numeric[j]).abs() < 1e-6,
+                    "d2heading_ds2 mismatch at s={s} axis {j}: analytic={} numeric={}",
+                    analytic[j],
+                    numeric[j]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn ac_pos3_line_d2heading_is_zero() {
+    let line = make_line();
+    for i in 0..5 {
+        assert_eq!(
+            line.d2heading_ds2(line.s_len() * i as f64 / 4.0),
+            [0.0, 0.0, 0.0]
+        );
+    }
+}
+
+#[test]
+fn ac_pos3_arc_d2heading_is_minus_kappa_squared_heading() {
+    for sweep in [-1.2, 2.4] {
+        let arc = make_arc(1.7, sweep);
+        let kappa2 = 1.0 / (1.7 * 1.7);
+        for i in 1..8 {
+            let s = arc.s_len() * i as f64 / 8.0;
+            let heading = arc.heading_at(s);
+            let analytic = arc.d2heading_ds2(s);
+            for j in 0..3 {
+                assert!(
+                    (analytic[j] + kappa2 * heading[j]).abs() < 1e-12,
+                    "arc d2heading is not -kappa^2*heading at s={s} axis {j}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn ac_pos3_clothoid_d2heading_splits_into_sigma_normal_and_kappa_squared_heading() {
+    let (kappa_0, sigma, length) = (0.2, 0.35, 3.0);
+    let clothoid = make_clothoid(kappa_0, sigma, length);
+    for i in 0..=8 {
+        let s = length * i as f64 / 8.0;
+        let kappa = kappa_0 + sigma * s;
+        let heading = clothoid.heading_at(s);
+        let normal = [-heading[1], heading[0], 0.0];
+        let analytic = clothoid.d2heading_ds2(s);
+        for j in 0..3 {
+            let expected = sigma * normal[j] - kappa * kappa * heading[j];
+            assert!(
+                (analytic[j] - expected).abs() < 1e-12,
+                "clothoid d2heading mismatch at s={s} axis {j}: {} vs {expected}",
+                analytic[j]
+            );
+        }
+    }
+}
+
 #[test]
 fn ac_fres1_clothoid_offset_matches_quadrature() {
     let cases = [
@@ -219,6 +308,54 @@ fn ac_fres1_clothoid_offset_matches_quadrature() {
         assert!(
             (cx - rx).abs() < 1e-9 && (cy - ry).abs() < 1e-9,
             "offset mismatch k0={kappa_0} sigma={sigma}: ({cx},{cy}) vs ({rx},{ry})"
+        );
+    }
+}
+
+/// A clothoid whose curvature barely moves sits `κ₀/σ` away from the spiral
+/// centre. Completing the square there loses the whole segment inside that
+/// offset: at `σ = 5e-17` the Fresnel difference used to report `cx = 0.4905`
+/// for a 0.3 mm segment whose true reach is 0.2998 mm.
+#[test]
+fn ac_fres1_near_arc_clothoid_offset_survives_the_spiral_offset() {
+    let (kappa_0, s) = (0.2, 0.3);
+    for sigma in [5e-17, -5e-17, 1e-14, -1e-12, 6.67e-9, -6.67e-7] {
+        let (cx, cy) = clothoid_offset(kappa_0, sigma, s);
+        let (rx, ry) = gauss_legendre_offset(kappa_0, sigma, s);
+        assert!(
+            (cx - rx).abs() < 1e-14 * s && (cy - ry).abs() < 1e-14 * s,
+            "offset mismatch sigma={sigma}: ({cx},{cy}) vs ({rx},{ry})"
+        );
+    }
+}
+
+/// The offset is a smooth function of `σ`, so a curvature rate that is pure
+/// float residue must land on the circular arc it is a residue of.
+#[test]
+fn ac_fres1_clothoid_offset_is_continuous_as_sigma_vanishes() {
+    let (kappa_0, s) = (0.2, 0.3);
+    let (arc_x, arc_y) = clothoid_offset(kappa_0, 0.0, s);
+    for sigma in [1e-18, -1e-18, 1e-16, -1e-16, 1e-13, -1e-13] {
+        let (cx, cy) = clothoid_offset(kappa_0, sigma, s);
+        assert!(
+            (cx - arc_x).abs() < 1e-12 * s && (cy - arc_y).abs() < 1e-12 * s,
+            "sigma={sigma} left the arc: ({cx},{cy}) vs ({arc_x},{arc_y})"
+        );
+    }
+}
+
+/// The sagitta of a barely-turning arc is `κ₀·s²/2`; taking it through
+/// `1 − cos` throws away every digit the cancellation eats.
+#[test]
+fn ac_fres1_constant_curvature_sagitta_survives_a_vanishing_turn() {
+    let s = 1.0;
+    for turn in [1e-6, 1e-7, 1e-8, 1e-9] {
+        let kappa_0 = turn / s;
+        let (_, cy) = clothoid_offset(kappa_0, 0.0, s);
+        let sagitta = 0.5 * kappa_0 * s * s;
+        assert!(
+            (cy - sagitta).abs() < 1e-12 * sagitta,
+            "turn={turn}: sagitta {cy} vs {sagitta}"
         );
     }
 }

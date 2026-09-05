@@ -1,30 +1,6 @@
 use super::*;
 
 #[test]
-fn step_queue_overflow_publishes_code_and_bumps_counter() {
-    let shared = SharedState::new();
-    raise_step_queue_overflow(&shared, 2);
-    assert_eq!(
-        shared.last_error.load(Ordering::Acquire),
-        FaultCode::StepQueueOverflow.as_i32()
-    );
-    assert_eq!(shared.fault_detail.load(Ordering::Acquire), 0x0002_0000);
-    assert_eq!(shared.queue_overflow_count[2].load(Ordering::Acquire), 1);
-    assert_eq!(shared.queue_overflow_count[0].load(Ordering::Acquire), 0);
-}
-
-#[test]
-fn step_queue_overflow_out_of_range_axis_does_not_panic() {
-    let shared = SharedState::new();
-    raise_step_queue_overflow(&shared, 7);
-    assert_eq!(
-        shared.last_error.load(Ordering::Acquire),
-        FaultCode::StepQueueOverflow.as_i32()
-    );
-    assert_eq!(shared.fault_detail.load(Ordering::Acquire), 0x0007_0000);
-}
-
-#[test]
 fn position_count_overflow_publishes_code_and_detail() {
     let shared = SharedState::new();
     raise_position_count_overflow(&shared, 1);
@@ -44,17 +20,6 @@ fn math_non_finite_publishes_code_and_detail() {
         FaultCode::MathNonFinite.as_i32()
     );
     assert_eq!(shared.fault_detail.load(Ordering::Acquire), 0x0003_0000);
-}
-
-#[test]
-fn piece_advance_underflow_publishes_code_and_detail() {
-    let shared = SharedState::new();
-    raise_piece_advance_underflow(&shared, 0);
-    assert_eq!(
-        shared.last_error.load(Ordering::Acquire),
-        FaultCode::PieceAdvanceUnderflow.as_i32()
-    );
-    assert_eq!(shared.fault_detail.load(Ordering::Acquire), 0x0000_0000);
 }
 
 #[test]
@@ -80,24 +45,6 @@ fn jog_parameters_invalid_publishes_code_and_zero_detail() {
 }
 
 #[test]
-fn piece_start_in_past_publishes_code_and_detail() {
-    let shared = SharedState::new();
-    raise_piece_start_in_past(&shared, 2, 500);
-    assert_eq!(
-        shared.last_error.load(Ordering::Acquire),
-        FaultCode::PieceStartInPast.as_i32()
-    );
-    assert_eq!(shared.fault_detail.load(Ordering::Acquire), (2 << 16) | 500);
-}
-
-#[test]
-fn piece_start_in_past_saturates_deficit_at_65535() {
-    let shared = SharedState::new();
-    raise_piece_start_in_past(&shared, 0, 0x1_0000);
-    assert_eq!(shared.fault_detail.load(Ordering::Acquire) & 0xFFFF, 0xFFFF);
-}
-
-#[test]
 fn tick_interval_exceeded_publishes_code_and_saturated_detail() {
     let shared = SharedState::new();
     raise_tick_interval_exceeded(&shared, 42);
@@ -113,17 +60,6 @@ fn tick_interval_exceeded_publishes_code_and_saturated_detail() {
 }
 
 #[test]
-fn steps_per_sample_exceeded_publishes_code_and_detail() {
-    let shared = SharedState::new();
-    raise_steps_per_sample_exceeded(&shared, 3, 200);
-    assert_eq!(
-        shared.last_error.load(Ordering::Acquire),
-        FaultCode::StepsPerSampleExceeded.as_i32()
-    );
-    assert_eq!(shared.fault_detail.load(Ordering::Acquire), (3 << 16) | 200);
-}
-
-#[test]
 fn internal_invariant_publishes_code_axis_and_reason() {
     let shared = SharedState::new();
     raise_internal_invariant(&shared, 2, 7);
@@ -132,34 +68,6 @@ fn internal_invariant_publishes_code_axis_and_reason() {
         FaultCode::InternalInvariant.as_i32()
     );
     assert_eq!(shared.fault_detail.load(Ordering::Acquire), (2 << 16) | 7);
-}
-
-#[test]
-fn unknown_step_mode_publishes_code_and_detail() {
-    let shared = SharedState::new();
-    raise_unknown_step_mode(&shared, 1, 0xAB);
-    assert_eq!(
-        shared.last_error.load(Ordering::Acquire),
-        FaultCode::UnknownStepMode.as_i32()
-    );
-    assert_eq!(
-        shared.fault_detail.load(Ordering::Acquire),
-        (1 << 16) | 0xAB
-    );
-}
-
-#[test]
-fn multi_motor_mask_publishes_code_and_detail() {
-    let shared = SharedState::new();
-    raise_multi_motor_mask(&shared, 1, 0b0000_0011);
-    assert_eq!(
-        shared.last_error.load(Ordering::Acquire),
-        FaultCode::MultiMotorMask.as_i32()
-    );
-    assert_eq!(
-        shared.fault_detail.load(Ordering::Acquire),
-        (1 << 16) | 0b0000_0011
-    );
 }
 
 #[test]
@@ -178,5 +86,5 @@ fn overlay_unsupported_publishes_code_and_detail() {
 
 #[test]
 fn emit_fault_log_stub_does_not_panic() {
-    emit_fault_log(FaultCode::PieceStartInPast, 0x1_0000);
+    emit_fault_log(FaultCode::StepsPerSampleExceeded, 0x1_0000);
 }

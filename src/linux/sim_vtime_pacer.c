@@ -1,12 +1,12 @@
-// libvtime pacer for CLASSIC_STEPPING simulator builds.
+// libvtime pacer for simulator builds without CONFIG_MOTION_RUNTIME.
 //
-// Piece mode gets its pacer from the motion tick thread in
-// runtime_tick_host.c; a classic build has no such thread, so nothing bounds
-// how far the shared virtual clock may run ahead of this MCU process. When
-// the host deschedules the process, virtual time keeps running at the speed
-// cap and the step queue wakes to a clock that already passed its scheduled
-// step - stepper_load_next() then (correctly) shuts down on lateness that
-// exists only in the simulator.
+// A MOTION_RUNTIME build gets its pacer from the motion tick thread in
+// runtime_tick_host.c; without that thread nothing bounds how far the shared
+// virtual clock may run ahead of this MCU process. When the host deschedules
+// the process, virtual time keeps running at the speed cap and the step queue
+// wakes to a clock that already passed its scheduled step -
+// stepper_load_next() then (correctly) shuts down on lateness that exists only
+// in the simulator.
 //
 // While this pacer is registered, no participant may raise virtual time past
 // the period this thread is about to execute, so a descheduled MCU holds the

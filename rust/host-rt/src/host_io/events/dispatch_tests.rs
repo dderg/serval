@@ -142,23 +142,27 @@ fn status_watermark_regression_does_not_synthesize() {
 }
 
 #[test]
-fn heartbeat_callback_fires_with_retired_counts() {
+fn heartbeat_callback_fires_with_retired_counts_and_playback_clocks() {
     let status = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
     let mut d = EventDispatcher::new(status, 16, 8);
 
-    let recorder: Arc<Mutex<Vec<Vec<u32>>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder: Arc<Mutex<Vec<(Vec<u32>, Vec<u64>)>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder2 = Arc::clone(&recorder);
-    d.heartbeat_callback = Some(Arc::new(move |counts: &[u32]| {
-        recorder2.lock().unwrap().push(counts.to_vec());
+    d.heartbeat_callback = Some(Arc::new(move |counts: &[u32], clocks: &[u64]| {
+        recorder2
+            .lock()
+            .unwrap()
+            .push((counts.to_vec(), clocks.to_vec()));
     }));
 
     d.dispatch(RuntimeEvent::Heartbeat {
         retired_counts: vec![5, 1],
+        playback_clocks: vec![4_000, 900],
     });
 
     let got = recorder.lock().unwrap();
     assert_eq!(got.len(), 1, "callback must fire exactly once");
-    assert_eq!(got[0], vec![5, 1]);
+    assert_eq!(got[0], (vec![5, 1], vec![4_000, 900]));
 }
 
 #[test]
@@ -174,6 +178,7 @@ fn heartbeat_is_not_forwarded_to_runtime_rx() {
 
     d.dispatch(RuntimeEvent::Heartbeat {
         retired_counts: vec![3, 7],
+        playback_clocks: vec![0, 0],
     });
 
     assert!(
@@ -313,4 +318,41 @@ fn clock_reaches_priority_lane_even_when_bulk_dispatched_first() {
         Ok(RuntimeEvent::PassthroughResponse { name, .. }) => assert_eq!(name, "beacon_data"),
         other => panic!("expected accel on bulk lane, got {other:?}"),
     }
+}
+
+#[test]
+fn a_stalled_bulk_subscriber_bounds_the_queue_without_stalling_the_reactor() {
+    use crate::transport::MessageParams;
+    use std::sync::mpsc::sync_channel;
+
+    const BULK_CAPACITY: usize = 8;
+    let mut d = make_dispatcher();
+    let (priority_tx, _priority_rx) = sync_channel::<RuntimeEvent>(1);
+    let (bulk_tx, bulk_rx) = sync_channel::<RuntimeEvent>(BULK_CAPACITY);
+    d.runtime_event_dispatcher
+        .subscribe(priority_tx, bulk_tx)
+        .unwrap();
+
+    for _ in 0..1024 {
+        d.dispatch(RuntimeEvent::PassthroughResponse {
+            name: "beacon_data".into(),
+            params: MessageParams::new(),
+        });
+    }
+
+    assert_eq!(
+        bulk_rx.try_iter().count(),
+        BULK_CAPACITY,
+        "a subscriber that never reads must not accumulate more than the lane's bound"
+    );
+
+    d.dispatch(RuntimeEvent::PassthroughResponse {
+        name: "beacon_data".into(),
+        params: MessageParams::new(),
+    });
+    assert_eq!(
+        bulk_rx.try_iter().count(),
+        1,
+        "the lane must resume delivering once the subscriber drains"
+    );
 }

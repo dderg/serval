@@ -10,6 +10,47 @@
 /// can undershoot the true extrema by a sliver.
 const BOUND_SAMPLES_PER_CELL: usize = 16;
 
+use crate::path::Segment;
+use crate::path::lowering::PositionProfile;
+use crate::path::profile::CurvatureProfile;
+
+const TRANSITION_SOLVE_ITERATIONS: usize = 80;
+const TRANSITION_S_TOLERANCE: f64 = 1e-11;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceContinuity {
+    C1,
+    C0,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceTransition {
+    pub s: f64,
+    pub continuity: SurfaceContinuity,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SurfaceTransitionError {
+    NonFiniteSegment,
+    UnresolvedCrossing { axis: usize, boundary: f64 },
+}
+
+impl std::fmt::Display for SurfaceTransitionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonFiniteSegment => write!(f, "surface transition path is not finite"),
+            Self::UnresolvedCrossing { axis, boundary } => {
+                write!(
+                    f,
+                    "surface transition crossing unresolved on axis {axis} at {boundary}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for SurfaceTransitionError {}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SurfaceError {
     GridTooSmall { nx: usize, ny: usize },
@@ -351,6 +392,150 @@ pub struct SurfaceTransform {
     bounds: SurfaceBounds,
 }
 
+fn push_partition(partitions: &mut Vec<f64>, s: f64, length: f64) {
+    if s.is_finite() && s > 0.0 && s < length {
+        partitions.push(s);
+    }
+}
+
+fn periodic_values_between(alpha: f64, low: f64, high: f64) -> Vec<f64> {
+    let pi = std::f64::consts::PI;
+    let first = libm::ceil((low - alpha) / pi);
+    let last = libm::floor((high - alpha) / pi);
+    let mut values = Vec::new();
+    let mut k = first;
+    while k <= last {
+        values.push(alpha + k * pi);
+        k += 1.0;
+    }
+    values
+}
+
+fn heading_partitions(segment: &Segment, axis: usize, length: f64) -> Vec<f64> {
+    let mut partitions = vec![0.0, length];
+    match segment {
+        Segment::Line(_) => {}
+        Segment::Arc(arc) => {
+            let u = arc.u[axis];
+            let v = arc.v[axis];
+            if u != 0.0 || v != 0.0 {
+                let theta_end = arc.start_angle + arc.sweep;
+                let alpha = libm::atan2(v, u);
+                for theta in periodic_values_between(
+                    alpha,
+                    arc.start_angle.min(theta_end),
+                    arc.start_angle.max(theta_end),
+                ) {
+                    push_partition(
+                        &mut partitions,
+                        (theta - arc.start_angle) * arc.radius / arc.sweep.signum(),
+                        length,
+                    );
+                }
+            }
+        }
+        Segment::Clothoid(clothoid) => {
+            let u = clothoid.u[axis];
+            let v = clothoid.v[axis];
+            if u != 0.0 || v != 0.0 {
+                let phi = |s: f64| clothoid.kappa_0 * s + 0.5 * clothoid.sigma * s * s;
+                let mut low = phi(0.0).min(phi(length));
+                let mut high = phi(0.0).max(phi(length));
+                if clothoid.sigma != 0.0 {
+                    let vertex = -clothoid.kappa_0 / clothoid.sigma;
+                    if vertex > 0.0 && vertex < length {
+                        low = low.min(phi(vertex));
+                        high = high.max(phi(vertex));
+                    }
+                }
+                let alpha = libm::atan2(-u, v);
+                for target in periodic_values_between(alpha, low, high) {
+                    if clothoid.sigma == 0.0 {
+                        if clothoid.kappa_0 != 0.0 {
+                            push_partition(&mut partitions, target / clothoid.kappa_0, length);
+                        }
+                    } else {
+                        let discriminant =
+                            clothoid.kappa_0 * clothoid.kappa_0 + 2.0 * clothoid.sigma * target;
+                        if discriminant >= 0.0 {
+                            let root = libm::sqrt(discriminant);
+                            push_partition(
+                                &mut partitions,
+                                (-clothoid.kappa_0 - root) / clothoid.sigma,
+                                length,
+                            );
+                            push_partition(
+                                &mut partitions,
+                                (-clothoid.kappa_0 + root) / clothoid.sigma,
+                                length,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    partitions.sort_by(f64::total_cmp);
+    partitions.dedup_by(|a, b| (*a - *b).abs() <= TRANSITION_S_TOLERANCE * (1.0 + length));
+    partitions
+}
+
+fn solve_crossing(
+    segment: &Segment,
+    axis: usize,
+    boundary: f64,
+    mut lo: f64,
+    mut hi: f64,
+    length: f64,
+) -> Result<f64, SurfaceTransitionError> {
+    let value = |s: f64| segment.point_at(s)[axis] - boundary;
+    let mut flo = value(lo);
+    let fhi = value(hi);
+    if !(flo.is_finite() && fhi.is_finite() && flo * fhi < 0.0) {
+        return Err(SurfaceTransitionError::UnresolvedCrossing { axis, boundary });
+    }
+    let tolerance = TRANSITION_S_TOLERANCE * (1.0 + length);
+    let mut s = 0.5 * (lo + hi);
+    for _ in 0..TRANSITION_SOLVE_ITERATIONS {
+        let f = value(s);
+        let derivative = segment.heading_at(s)[axis];
+        if !(f.is_finite() && derivative.is_finite()) {
+            return Err(SurfaceTransitionError::NonFiniteSegment);
+        }
+        if f == 0.0 || hi - lo <= tolerance {
+            return Ok(s);
+        }
+        if flo.signum() == f.signum() {
+            lo = s;
+            flo = f;
+        } else {
+            hi = s;
+        }
+        let newton = s - f / derivative;
+        s = if derivative != 0.0 && newton.is_finite() && newton > lo && newton < hi {
+            newton
+        } else {
+            0.5 * (lo + hi)
+        };
+    }
+    Err(SurfaceTransitionError::UnresolvedCrossing { axis, boundary })
+}
+
+fn transition_boundaries(
+    min: f64,
+    spacing: f64,
+    count: usize,
+) -> impl Iterator<Item = (f64, SurfaceContinuity)> {
+    (0..count).map(move |index| {
+        let continuity = if index == 0 || index + 1 == count {
+            SurfaceContinuity::C0
+        } else {
+            SurfaceContinuity::C1
+        };
+        (min + spacing * index as f64, continuity)
+    })
+}
+
 impl SurfaceTransform {
     pub fn new(mesh: MeshGrid, fade: Fade) -> Self {
         let bounds = mesh.bounds();
@@ -367,6 +552,99 @@ impl SurfaceTransform {
 
     pub fn bounds(&self) -> SurfaceBounds {
         self.bounds
+    }
+
+    pub fn path_transition_distances(
+        &self,
+        segment: &Segment,
+    ) -> Result<Vec<SurfaceTransition>, SurfaceTransitionError> {
+        let length = segment.s_len();
+        if !(length.is_finite() && length > 0.0) {
+            return Err(SurfaceTransitionError::NonFiniteSegment);
+        }
+        for s in [0.0, length] {
+            if segment
+                .point_at(s)
+                .into_iter()
+                .chain(segment.heading_at(s))
+                .any(|value| !value.is_finite())
+            {
+                return Err(SurfaceTransitionError::NonFiniteSegment);
+            }
+        }
+
+        let mut transitions = Vec::new();
+        for (axis, boundaries) in [
+            transition_boundaries(self.mesh.x_min, self.mesh.dx, self.mesh.nx).collect::<Vec<_>>(),
+            transition_boundaries(self.mesh.y_min, self.mesh.dy, self.mesh.ny).collect::<Vec<_>>(),
+            if self.fade.is_disabled() {
+                Vec::new()
+            } else {
+                vec![
+                    (self.fade.start, SurfaceContinuity::C0),
+                    (self.fade.end, SurfaceContinuity::C0),
+                ]
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let partitions = heading_partitions(segment, axis, length);
+            if partitions.iter().any(|s| {
+                !s.is_finite()
+                    || !segment.point_at(*s)[axis].is_finite()
+                    || !segment.heading_at(*s)[axis].is_finite()
+            }) {
+                return Err(SurfaceTransitionError::NonFiniteSegment);
+            }
+            for (boundary, continuity) in boundaries {
+                for interval in partitions.windows(2) {
+                    let lo = interval[0];
+                    let hi = interval[1];
+                    let flo = segment.point_at(lo)[axis] - boundary;
+                    let fhi = segment.point_at(hi)[axis] - boundary;
+                    if !(flo.is_finite() && fhi.is_finite()) {
+                        return Err(SurfaceTransitionError::NonFiniteSegment);
+                    }
+                    if flo * fhi < 0.0 {
+                        transitions.push(SurfaceTransition {
+                            s: solve_crossing(segment, axis, boundary, lo, hi, length)?,
+                            continuity,
+                        });
+                    }
+                }
+                for index in 1..partitions.len() - 1 {
+                    let s = partitions[index];
+                    let at = segment.point_at(s)[axis] - boundary;
+                    let before =
+                        segment.point_at(0.5 * (partitions[index - 1] + s))[axis] - boundary;
+                    let after =
+                        segment.point_at(0.5 * (s + partitions[index + 1]))[axis] - boundary;
+                    if !(at.is_finite() && before.is_finite() && after.is_finite()) {
+                        return Err(SurfaceTransitionError::NonFiniteSegment);
+                    }
+                    let coordinate_tolerance = TRANSITION_S_TOLERANCE * (1.0 + boundary.abs());
+                    if at.abs() <= coordinate_tolerance && before * after < 0.0 {
+                        transitions.push(SurfaceTransition { s, continuity });
+                    }
+                }
+            }
+        }
+
+        transitions.sort_by(|a, b| a.s.total_cmp(&b.s));
+        let tolerance = TRANSITION_S_TOLERANCE * (1.0 + length);
+        let mut deduplicated: Vec<SurfaceTransition> = Vec::with_capacity(transitions.len());
+        for transition in transitions {
+            match deduplicated.last_mut() {
+                Some(previous) if (previous.s - transition.s).abs() <= tolerance => {
+                    if transition.continuity == SurfaceContinuity::C0 {
+                        previous.continuity = SurfaceContinuity::C0;
+                    }
+                }
+                _ => deduplicated.push(transition),
+            }
+        }
+        Ok(deduplicated)
     }
 
     /// Sound bound on how much the correction can vary over a gcode-space

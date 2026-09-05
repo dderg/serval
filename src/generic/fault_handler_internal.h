@@ -24,7 +24,7 @@ extern volatile struct fault_record fault_rec;
 // Bump on any live_snapshot layout change so a reflash (RAM survives, old magic
 // still matches) can't seed the new fields with stale bytes — a mismatch forces
 // the cold-init zero pass.
-#define LIVE_MAGIC 0x4C495647u
+#define LIVE_MAGIC 0x4C495648u
 
 struct live_snapshot {
     uint32_t magic;
@@ -60,8 +60,21 @@ struct live_snapshot {
     uint32_t ttc_count;
     uint32_t rearm_count;
     uint32_t rearm_min_margin;
+    uint32_t rearm_min_oid;
+    uint32_t rearm_min_waketime;
+    uint32_t rearm_min_last_reset;
+    uint32_t rearm_min_discards;
+    uint32_t wire_probe_worst;
+    uint32_t wire_probe_count;
     uint32_t rearm_armed;
     uint32_t rearm_below_floor;
+    uint32_t worst_timer_func;
+    uint32_t worst_timer_cyc;
+    uint32_t step_spin_count;
+    uint32_t step_spin_worst_cyc;
+    uint32_t step_spin_stale_count;
+    uint32_t step_spin_stale_max;
+    uint32_t step_spin_stale_first;
 };
 
 extern volatile struct live_snapshot live_snap;
@@ -227,8 +240,6 @@ struct diag_counters {
     uint32_t peek_data_n;
 
     uint32_t systick_max_cyc;
-    uint32_t stepout_max_cyc;
-    uint32_t stepout_burst_max_cyc;
     uint32_t usb_burst_max_cyc;
 
     uint32_t tim5_ia_min_cyc;
@@ -246,21 +257,27 @@ struct diag_counters {
     uint32_t usb_out_doepint;
     uint32_t out_unarmed_worst_cyc;
     uint32_t out_unarmed_worst_end;
-
-    uint32_t stepout_late_max_cyc;
-    uint32_t stepout_late_count;
-    uint32_t stepout_late_max_drained;
 };
 
 extern volatile struct diag_counters diag;
 extern struct diag_counters prior_diag;
 extern uint32_t prior_diag_present;
 
+// Which prior run `prior_snap`/`prior_diag`/`prior_ring` describe. A run's
+// forensics stay held (surviving further resets) until a connected host has
+// replayed them: klippy's connect resets the mcu, so a crash followed by a
+// hostless boot would otherwise be overwritten by that idle boot's stats.
+#define PRIOR_MAGIC 0x50524952u
+struct prior_report_state {
+    uint32_t magic;
+    uint32_t reported;
+    uint32_t reset_cause;
+    uint32_t runs_skipped;
+};
+extern volatile struct prior_report_state prior_state;
+
 extern uint32_t boot_tick_initialized;
 extern uint32_t boot_first_tick;
 extern uint32_t reset_cause_snapshot;
-extern uint32_t prior_run_froze;
-extern uint32_t saved_prior_last_dispatch_func;
-extern uint32_t saved_prior_last_dispatch_addr;
 
 #endif

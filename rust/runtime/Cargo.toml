@@ -19,13 +19,6 @@ portable-atomic = { version = "1", default-features = false, features = ["fallba
 # / `f64::cbrt` (which live on the inherent impl in `std`) are unavailable.
 libm = { version = "0.2", default-features = false }
 
-[dev-dependencies]
-nurbs = { path = "../nurbs" }
-proptest = "1.5"
-static_assertions = "1.1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
 # Loom is gated on `cfg(loom)` so it never enters the regular dev/test
 # graph. Run loom tests with:
 #   RUSTFLAGS="--cfg loom" cargo test -p runtime --release \
@@ -33,8 +26,11 @@ serde_json = "1"
 [target.'cfg(loom)'.dev-dependencies]
 loom = "0.7"
 
+[target.'cfg(not(target_os = "none"))'.dev-dependencies]
+proptest = "1"
+
 [features]
-default = ["host", "motion-module-stepper"]
+default = ["host", "motion-module-stepper", "sample-stepping"]
 host = []
 mcu-h7 = []
 mcu-f4 = []
@@ -56,6 +52,10 @@ motion-module-stepper = []
 # tick paths active in sim firmware (see tick.rs cfg gates). Never in
 # production firmware.
 mcu-sim = []
+# Sample-stream execution for phase-stepped lanes (CONFIG_SAMPLE_STEPPING).
+# With the feature off, none of the sample ring storage or playback code is
+# compiled in.
+sample-stepping = []
 
 [lints]
 workspace = true

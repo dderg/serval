@@ -5,16 +5,13 @@ use std::sync::atomic::Ordering;
 
 use super::drive::{DriveChain, FfiDriveChain};
 use super::{EndpointCtx, SIGTERM_RECEIVED};
-use crate::buzz::BuzzOsc;
 use crate::capture::{Capture, PendingStart, PendingStop};
 use crate::claim::{all_slaves_reply, single_slave_reply, wait_for_claim, wait_for_claim_pumping};
 use crate::cli::{Args, SlaveCfg};
-use crate::curves::AxisRing;
 use crate::damper::DiffDamperBank;
 use crate::ffi;
 use crate::live_tap::{self, LiveTap};
 use crate::mailbox::{MailboxWorker, WorkerScheduling};
-use crate::scale::CountMap;
 use crate::sdo::SdoBus;
 use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
@@ -160,16 +157,11 @@ struct SlaveColumns {
     axes: Vec<u8>,
     velocity_ff: Vec<bool>,
     torque_clamp_tenths: Vec<i16>,
-    ff_lead_ns: Vec<u64>,
     jump_log_counts: Vec<i64>,
 }
 
 impl SlaveColumns {
-    fn from(
-        slaves: &[SlaveCfg],
-        cycle_us: i64,
-        dynamics: Option<&crate::dynamics::DynamicsModel>,
-    ) -> Self {
+    fn from(slaves: &[SlaveCfg], cycle_us: i64) -> Self {
         let cmd_counts_per_mm: Vec<f64> = slaves
             .iter()
             .map(|s| {
@@ -194,9 +186,6 @@ impl SlaveColumns {
             axes: slaves.iter().map(|s| s.axis).collect(),
             velocity_ff: slaves.iter().map(|s| s.velocity_ff).collect(),
             torque_clamp_tenths: slaves.iter().map(|s| s.torque_clamp_tenths).collect(),
-            ff_lead_ns: dynamics
-                .map(|d| d.ff_lead_ns())
-                .unwrap_or_else(|| vec![0u64; slaves.len()]),
             jump_log_counts,
         }
     }
@@ -276,40 +265,41 @@ pub fn bringup(args: Args) -> EndpointCtx {
 
     let num_slaves = slaves.len();
     let mut drive: Box<dyn DriveChain> = Box::new(FfiDriveChain);
-    let columns = SlaveColumns::from(&slaves, cycle_us, dynamics.as_ref());
+    let columns = SlaveColumns::from(&slaves, cycle_us);
 
     let cycle_ns = cycle_us * 1000;
     let telemetry_period = u64::try_from(cycle_us)
         .map(|u| (500_000u64 / u).max(1))
         .unwrap_or(500);
 
-    let rings: Vec<AxisRing> = (0..num_slaves).map(AxisRing::with_slot).collect();
-    let buzz = BuzzOsc::new();
+    let sp_rings: Vec<crate::setpoint::SetpointRing> = (0..num_slaves)
+        .map(|slot| crate::setpoint::SetpointRing::new(slot, cycle_ns as u32))
+        .collect();
+    let grid = crate::setpoint::SampleGrid::new(cycle_ns as u64);
     let damper = DiffDamperBank::new(cycle_ns);
     let trim = DiffTrimBank::new(cycle_ns);
     let comp = crate::strain_comp::StrainCompBank::new(cycle_ns);
-    let cmaps: Vec<Option<CountMap>> = (0..num_slaves).map(|_| None).collect();
     let last_counts: Vec<Option<i32>> = vec![None; num_slaves];
     // Per-slot report frame: (counts, host mm) captured at the homing finalize.
     // Maps the drive's raw encoder counts into the host frame for
     // QueryMotorState — the drive's own coordinate frame is never touched,
     // exactly like a stepper's step counter. The counts side of the pair is the
     // last COMMANDED target, not position_actual: at finalize the ring is empty
-    // (pieces retired by time) but the servo may still be settling several mm
-    // behind, and anchoring against a lagging actual bakes that transient in as
-    // a permanent report offset.
+    // but the servo may still be settling several mm behind, and anchoring
+    // against a lagging actual bakes that transient in as a permanent report
+    // offset.
     let report_anchor: Vec<Option<(i32, f64)>> = vec![None; num_slaves];
     let last_streamed_target: Vec<Option<i32>> = vec![None; num_slaves];
     let suppressed: Vec<bool> = vec![false; num_slaves];
     let last_sent_retired: u32 = 0;
     let heartbeat_sent = false;
 
-    // The capture-io, live-tap, and reclaim thread spawns and their ring
+    // The capture-io, live-tap and reclaim thread spawns and their ring
     // buffers are multi-millisecond stalls under mlockall(MCL_FUTURE); they
-    // must happen before ec_rt_bringup_preop, while no drive is DC-synced
-    // and no park cycle is being pumped on this thread (claim-time
-    // Capture::new stalled the park loop past the sync watchdog and halted
-    // the bus at every claim, bench 2026-07-06).
+    // must happen before ec_rt_bringup_preop, while no drive is DC-synced and
+    // no park cycle is being pumped on this thread (claim-time Capture::new
+    // stalled the park loop past the sync watchdog and halted the bus at every
+    // claim, bench 2026-07-06).
     let capture = Capture::new();
     let reclaim = crate::reclaim::Reclaim::spawn();
     let live_tap = LiveTap::spawn(
@@ -473,7 +463,6 @@ pub fn bringup(args: Args) -> EndpointCtx {
         axes: slave_axes,
         velocity_ff,
         torque_clamp_tenths,
-        ff_lead_ns,
         jump_log_counts,
     } = columns;
 
@@ -495,7 +484,6 @@ pub fn bringup(args: Args) -> EndpointCtx {
         slave_axes,
         velocity_ff,
         torque_clamp_tenths,
-        ff_lead_ns,
         jump_log_counts,
         cycle_ns,
         group_delay_ns,
@@ -509,12 +497,17 @@ pub fn bringup(args: Args) -> EndpointCtx {
         drive_scratch: super::cycle::DriveScratch::new(num_slaves),
         dynamics,
         run_limits,
-        rings,
-        buzz,
+        sp_rings,
+        grid,
+        ring_origin: vec![None; num_slaves],
+        sp_play_scratch: vec![None; num_slaves],
+        sp_fill_scratch: Vec::with_capacity(crate::setpoint::MAX_FILL_CYCLES),
+        reclaim,
+        last_grid_index: 0,
+        last_grid_clock: 0,
         damper,
         trim,
         comp,
-        cmaps,
         last_counts,
         last_written_offset: vec![0; num_slaves],
         report_anchor,
@@ -525,7 +518,6 @@ pub fn bringup(args: Args) -> EndpointCtx {
         gate,
         capture,
         live_tap,
-        reclaim,
         tap_slots,
         cycle_index,
         mailbox,

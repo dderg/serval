@@ -3,6 +3,12 @@ use super::{
     slots_for_axis,
 };
 use crate::lock_ext::LockExt;
+use crate::pump::{BuzzLane, BuzzParams, BuzzRoute, BuzzWave};
+use crate::types::AxisKey;
+use pyo3::types::PyAnyMethods;
+use pyo3::{Bound, PyAny};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[pymethods]
 impl PyMotionEngine {
@@ -97,12 +103,9 @@ impl PyMotionEngine {
         );
         let result = crate::servo_capture::send_start_capture(&conn, &path, &started_utc, &drives)
             .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "servo capture start failed: endpoint result {result}"
-            )));
-        }
-        Ok(())
+        require_py_endpoint_ok(result, |result| {
+            format!("servo capture start failed: endpoint result {result}")
+        })
     }
     fn stop_servo_capture(&self, mcu_handle: u32) -> PyResult<(i32, u64, Option<u64>)> {
         let conn = self.ethercat_conn(mcu_handle, "stop_servo_capture")?;
@@ -179,19 +182,14 @@ impl PyMotionEngine {
             "servo motion discarded on shutdown"
         );
         let result = crate::servo_torque::send_stop(&conn).map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "stop_node: endpoint rejected Stop: result {result}"
-            )));
-        }
+        require_py_endpoint_ok(result, |result| {
+            format!("stop_node: endpoint rejected Stop: result {result}")
+        })?;
         let result = crate::servo_torque::send_set_torque(&conn, false, 0)
             .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "stop_node: endpoint rejected torque disable: result {result}"
-            )));
-        }
-        Ok(())
+        require_py_endpoint_ok(result, |result| {
+            format!("stop_node: endpoint rejected torque disable: result {result}")
+        })
     }
     fn arm_sensorless_endstop_start(
         &self,
@@ -397,55 +395,65 @@ impl PyMotionEngine {
         }
         Ok((r.readback_size, u32::from_le_bytes(r.readback_data)))
     }
-    #[allow(clippy::too_many_arguments)]
+    /// One request covers every route the caller named, whatever transport
+    /// each rides. Nothing arms until the pipeline is drained, the pump is
+    /// fenced, and every route has validated, so a mixed pulse/phase/EtherCAT
+    /// sweep either starts together or not at all.
+    ///
+    /// `wave` is `(freq_start_millihz, freq_end_millihz, amplitude_nm,
+    /// duration_ms, ramp_ms)`. Each route is a tagged tuple, either
+    /// `("ethercat", mcu_handle, slot_mask, slot_sign_mask)` or
+    /// `("stepper", axis_mask, sign_mask)`; the stepper route is split into
+    /// pulse and phase endpoints here, by the axis transport bindings.
     fn resonance_buzz(
         &self,
         py: Python<'_>,
-        mcu_handle: u32,
-        axis_mask: u8,
-        sign_mask: u8,
-        freq_start_millihz: u32,
-        freq_end_millihz: u32,
-        amplitude_nm: u32,
-        duration_ms: u32,
-        ramp_ms: u32,
+        routes: Vec<Bound<'_, PyAny>>,
+        wave: (u32, u32, u32, u32, u32),
     ) -> PyResult<()> {
-        let conn = self.ethercat_conn(mcu_handle, "resonance_buzz")?;
-        tracing::info!(
-            subsystem = "engine",
-            event = "servo_resonance_buzz",
-            mcu_handle,
-            axis_mask,
-            sign_mask,
-            freq_start_millihz,
-            freq_end_millihz,
-            amplitude_nm,
-            duration_ms,
-            ramp_ms,
-            "servo resonance buzz"
-        );
-        let result = py
-            .detach(|| {
-                crate::servo_torque::send_resonance_buzz(
-                    &conn,
-                    mcu_protocol::messages::ResonanceBuzz {
-                        axis_mask,
-                        sign_mask,
-                        freq_start_millihz,
-                        freq_end_millihz,
-                        amplitude_nm,
-                        duration_ms,
-                        ramp_ms,
-                    },
+        let specs = parse_buzz_routes(&routes)?;
+        let params = BuzzParams {
+            routes: self.build_buzz_routes(&specs)?,
+            wave: BuzzWave {
+                freq_start_millihz: wave.0,
+                freq_end_millihz: wave.1,
+                amplitude_nm: wave.2,
+                duration_ms: wave.3,
+                ramp_ms: wave.4,
+            },
+        };
+        let rx = {
+            let guard = self.planner.lock_ok();
+            let planner = guard.as_ref().ok_or_else(|| {
+                PyRuntimeError::new_err(
+                    "resonance_buzz: planner not initialized — call init_planner first",
                 )
-            })
-            .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "resonance_buzz: endpoint rejected (result {result})"
-            )));
-        }
+            })?;
+            planner
+                .submit_buzz(params)
+                .map_err(|e| PyRuntimeError::new_err(format!("resonance_buzz: {e}")))?
+        };
+        let token = py
+            .detach(|| rx.recv())
+            .map_err(|_| PyRuntimeError::new_err("resonance_buzz: notify dropped"))?
+            .map_err(|e| PyRuntimeError::new_err(format!("resonance_buzz: {e}")))?;
+        *self.buzz_token.lock_ok() = Some(token);
         Ok(())
+    }
+
+    /// Polls the one token the last [`Self::resonance_buzz`] handed back, so
+    /// completion spans every route that request armed.
+    fn resonance_buzz_done(&self) -> PyResult<bool> {
+        self.buzz_token
+            .lock_ok()
+            .as_ref()
+            .ok_or_else(|| {
+                PyRuntimeError::new_err(
+                    "resonance_buzz_done: no buzz has been armed on this engine",
+                )
+            })?
+            .complete()
+            .map_err(|e| PyRuntimeError::new_err(format!("resonance_buzz_done: {e}")))
     }
     #[allow(clippy::too_many_arguments)]
     fn set_diff_damper(
@@ -487,15 +495,13 @@ impl PyMotionEngine {
                 )
             })
             .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "set_diff_damper: endpoint rejected (result {result})"
-            )));
-        }
-        Ok(())
+        require_py_endpoint_ok(result, |result| {
+            format!("set_diff_damper: endpoint rejected (result {result})")
+        })
     }
     fn set_ff_lead(&self, py: Python<'_>, mcu_handle: u32, slot: u8, lead_ns: u64) -> PyResult<()> {
         let conn = self.ethercat_conn(mcu_handle, "set_ff_lead")?;
+        let ring = self.ring_filler(mcu_handle, "set_ff_lead")?;
         tracing::info!(
             subsystem = "engine",
             event = "servo_set_ff_lead",
@@ -504,20 +510,19 @@ impl PyMotionEngine {
             lead_ns,
             "servo feedforward lead"
         );
-        let result = py
-            .detach(|| {
-                crate::servo_torque::send_set_ff_lead(
-                    &conn,
-                    mcu_protocol::messages::SetFfLead { slot, lead_ns },
-                )
+        py.detach(|| {
+            reconfigure_feedforward(&conn, &ring, "set_ff_lead", |filler| {
+                require_endpoint_ok(
+                    crate::servo_torque::send_set_ff_lead(
+                        &conn,
+                        mcu_protocol::messages::SetFfLead { slot, lead_ns },
+                    )?,
+                    "set_ff_lead",
+                )?;
+                require_filler_ok(filler.set_ff_lead(slot as usize, lead_ns), "set_ff_lead")
             })
-            .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "set_ff_lead: endpoint rejected (result {result})"
-            )));
-        }
-        Ok(())
+        })
+        .map_err(PyRuntimeError::new_err)
     }
     #[allow(clippy::too_many_arguments)]
     fn set_strain_comp(
@@ -566,12 +571,9 @@ impl PyMotionEngine {
             },
         )
         .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "set_strain_comp: endpoint result {result}"
-            )));
-        }
-        Ok(())
+        require_py_endpoint_ok(result, |result| {
+            format!("set_strain_comp: endpoint result {result}")
+        })
     }
     fn set_diff_trim(
         &self,
@@ -612,12 +614,9 @@ impl PyMotionEngine {
                 )
             })
             .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "set_diff_trim: endpoint rejected (result {result})"
-            )));
-        }
-        Ok(())
+        require_py_endpoint_ok(result, |result| {
+            format!("set_diff_trim: endpoint rejected (result {result})")
+        })
     }
     #[allow(clippy::too_many_arguments)]
     fn set_dynamics_model(
@@ -677,7 +676,32 @@ impl PyMotionEngine {
         }
         let wire_pairs = validate_dynamics_pairs(&frame, modes, slots, &pairs, &direction_split)
             .map_err(PyRuntimeError::new_err)?;
+        let pair_specs: Vec<ethercat_rt::dynamics::PairSpec> = wire_pairs
+            .iter()
+            .map(|pair| ethercat_rt::dynamics::PairSpec {
+                first: pair.first as usize,
+                second: pair.second as usize,
+                direction_split: pair.direction_split,
+            })
+            .collect();
+        let host_model = ethercat_rt::dynamics::DynamicsModel::from_parts(
+            slots,
+            modes,
+            &frame,
+            &mass,
+            &viscous,
+            &coulomb,
+            &compliance,
+            &pin_mass,
+            &pin_zeta,
+            f64::from(pin_lead_us),
+            &pair_specs,
+        )
+        .map_err(|e| {
+            PyRuntimeError::new_err(format!("set_dynamics_model: model rejected: {e:?}"))
+        })?;
         let conn = self.ethercat_conn(mcu_handle, "set_dynamics_model")?;
+        let ring = self.ring_filler(mcu_handle, "set_dynamics_model")?;
         tracing::info!(
             subsystem = "engine",
             event = "servo_set_dynamics_model",
@@ -687,32 +711,224 @@ impl PyMotionEngine {
             pairs = wire_pairs.len(),
             "servo dynamics feedforward model upload"
         );
-        let result = py
-            .detach(|| {
-                crate::servo_torque::send_set_dynamics_model(
-                    &conn,
-                    mcu_protocol::messages::SetDynamicsModel {
-                        slots_count,
-                        modes_count,
-                        frame,
-                        mass,
-                        viscous,
-                        coulomb,
-                        compliance,
-                        pin_mass,
-                        pin_zeta,
-                        pin_lead_us,
-                        pairs: wire_pairs,
-                    },
-                )
+        let msg = mcu_protocol::messages::SetDynamicsModel {
+            slots_count,
+            modes_count,
+            frame,
+            mass,
+            viscous,
+            coulomb,
+            compliance,
+            pin_mass,
+            pin_zeta,
+            pin_lead_us,
+            pairs: wire_pairs,
+        };
+        py.detach(|| {
+            reconfigure_feedforward(&conn, &ring, "set_dynamics_model", |filler| {
+                if host_model.n_slots != filler.lane_count() {
+                    return Err(format!(
+                        "set_dynamics_model: the model covers {} slots but the endpoint's \
+                         filler drives {} lanes",
+                        host_model.n_slots,
+                        filler.lane_count()
+                    ));
+                }
+                require_endpoint_ok(
+                    crate::servo_torque::send_set_dynamics_model(&conn, msg)?,
+                    "set_dynamics_model",
+                )?;
+                require_filler_ok(filler.install_dynamics(host_model), "set_dynamics_model")
             })
-            .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "set_dynamics_model: endpoint rejected (result {result})"
-            )));
+        })
+        .map_err(PyRuntimeError::new_err)
+    }
+}
+
+/// One route as Python named it, before any endpoint is resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BuzzRouteSpec {
+    Ethercat {
+        mcu_handle: u32,
+        slot_mask: u8,
+        sign_mask: u8,
+    },
+    Stepper {
+        axis_mask: u8,
+        sign_mask: u8,
+    },
+}
+
+fn parse_buzz_routes(routes: &[Bound<'_, PyAny>]) -> PyResult<Vec<BuzzRouteSpec>> {
+    if routes.is_empty() {
+        return Err(PyRuntimeError::new_err(
+            "resonance_buzz: no routes given — nothing to buzz",
+        ));
+    }
+    let mut specs = Vec::with_capacity(routes.len());
+    for route in routes {
+        let arity = route.len()?;
+        let kind: String = route.get_item(0)?.extract()?;
+        specs.push(match (kind.as_str(), arity) {
+            ("ethercat", 4) => BuzzRouteSpec::Ethercat {
+                mcu_handle: route.get_item(1)?.extract()?,
+                slot_mask: route.get_item(2)?.extract()?,
+                sign_mask: route.get_item(3)?.extract()?,
+            },
+            ("stepper", 3) => BuzzRouteSpec::Stepper {
+                axis_mask: route.get_item(1)?.extract()?,
+                sign_mask: route.get_item(2)?.extract()?,
+            },
+            ("ethercat" | "stepper", n) => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "resonance_buzz: route kind '{kind}' takes \
+                     {} elements, got {n}",
+                    if kind == "ethercat" { 4 } else { 3 }
+                )));
+            }
+            (other, _) => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "resonance_buzz: unknown route kind '{other}' \
+                     (expected 'ethercat' or 'stepper')"
+                )));
+            }
+        });
+    }
+    Ok(specs)
+}
+
+/// The subset of `axis_mask` an endpoint actually owns for this buzz.
+pub(super) fn buzz_axis_bits(axis_mask: u8, keep: impl Fn(u8) -> bool) -> u8 {
+    (0u8..8)
+        .filter(|&axis| axis_mask & (1 << axis) != 0 && keep(axis))
+        .fold(0u8, |bits, axis| bits | (1 << axis))
+}
+
+/// A phase route names its lanes outright: the sign mask is a per-axis
+/// direction flip, not a mask of anything the endpoint has to decode.
+pub(super) fn buzz_lanes(axis_bits: u8, sign_mask: u8) -> Vec<BuzzLane> {
+    (0u8..8)
+        .filter(|&axis| axis_bits & (1 << axis) != 0)
+        .map(|axis| BuzzLane {
+            axis,
+            sign: if sign_mask & (1 << axis) != 0 {
+                -1.0
+            } else {
+                1.0
+            },
+        })
+        .collect()
+}
+
+impl PyMotionEngine {
+    /// The host-side setpoint filler of a claimed EtherCAT node. Only an
+    /// EtherCAT connection has one, so a handle without a filler cannot
+    /// execute setpoints at all.
+    fn ring_filler(&self, mcu_handle: u32, what: &str) -> PyResult<crate::pump::RingFiller> {
+        self.mcus
+            .lock_ok()
+            .get(&mcu_handle)
+            .and_then(|mcu| mcu.ring_filler.clone())
+            .ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "{what}: mcu_handle {mcu_handle} has no EtherCAT setpoint filler"
+                ))
+            })
+    }
+
+    /// Resolve every spec into a live endpoint handle. Every lookup happens
+    /// here, before the request leaves the Python thread, so a missing
+    /// endpoint or an empty mask is a loud failure with nothing armed.
+    fn build_buzz_routes(&self, specs: &[BuzzRouteSpec]) -> PyResult<Arc<[BuzzRoute]>> {
+        let transports = Arc::clone(&self.axis_transports.lock_ok());
+        let mut routes: Vec<BuzzRoute> = Vec::new();
+        for spec in specs {
+            match *spec {
+                BuzzRouteSpec::Ethercat {
+                    mcu_handle,
+                    slot_mask,
+                    sign_mask,
+                } => {
+                    if slot_mask == 0 {
+                        return Err(PyRuntimeError::new_err(
+                            "resonance_buzz: ethercat route has an empty slot mask",
+                        ));
+                    }
+                    let filler = self.ring_filler(mcu_handle, "resonance_buzz")?;
+                    routes.push(BuzzRoute::Ethercat {
+                        mcu_id: mcu_handle,
+                        filler,
+                        slot_mask,
+                        sign_mask,
+                    });
+                }
+                BuzzRouteSpec::Stepper {
+                    axis_mask,
+                    sign_mask,
+                } => {
+                    if axis_mask == 0 {
+                        return Err(PyRuntimeError::new_err(
+                            "resonance_buzz: stepper route has an empty axis mask",
+                        ));
+                    }
+                    let selected = routes.len();
+                    let mut pulse: Vec<_> = self
+                        .stepcompress_endpoints
+                        .lock_ok()
+                        .iter()
+                        .map(|(&mcu_id, endpoint)| (mcu_id, Arc::clone(endpoint)))
+                        .collect();
+                    pulse.sort_by_key(|(mcu_id, _)| *mcu_id);
+                    for (mcu_id, endpoint) in pulse {
+                        let bits = {
+                            let ep = endpoint.lock_ok();
+                            buzz_axis_bits(axis_mask, |axis| {
+                                ep.drives_axis(axis)
+                                    && !transports.is_phase(AxisKey { mcu_id, axis })
+                            })
+                        };
+                        if bits != 0 {
+                            routes.push(BuzzRoute::Pulse {
+                                mcu_id,
+                                endpoint,
+                                axis_mask: bits,
+                                sign_mask,
+                            });
+                        }
+                    }
+                    let mut phase: Vec<_> = self
+                        .sample_endpoints
+                        .lock_ok()
+                        .iter()
+                        .map(|(&mcu_id, endpoint)| (mcu_id, Arc::clone(endpoint)))
+                        .collect();
+                    phase.sort_by_key(|(mcu_id, _)| *mcu_id);
+                    for (mcu_id, endpoint) in phase {
+                        let bits = {
+                            let ep = endpoint.lock_ok();
+                            buzz_axis_bits(axis_mask, |axis| {
+                                ep.drives_axis(axis)
+                                    && transports.is_phase(AxisKey { mcu_id, axis })
+                            })
+                        };
+                        if bits != 0 {
+                            routes.push(BuzzRoute::Phase {
+                                mcu_id,
+                                endpoint,
+                                lanes: buzz_lanes(bits, sign_mask),
+                            });
+                        }
+                    }
+                    if routes.len() == selected {
+                        return Err(PyRuntimeError::new_err(format!(
+                            "resonance_buzz: axis mask 0x{axis_mask:02x} selects no \
+                             pulse or phase endpoint"
+                        )));
+                    }
+                }
+            }
         }
-        Ok(())
+        Ok(routes.into())
     }
 }
 
@@ -796,9 +1012,59 @@ pub(super) fn validate_dynamics_pairs(
     Ok(wire_pairs)
 }
 
+fn require_py_endpoint_ok(result: i32, error: impl FnOnce(i32) -> String) -> PyResult<()> {
+    (result == 0)
+        .then_some(())
+        .ok_or_else(|| PyRuntimeError::new_err(error(result)))
+}
+
 fn require_endpoint_ok(result: i32, context: &str) -> Result<(), String> {
     if result != 0 {
         return Err(format!("{context}: endpoint result {result}"));
     }
     Ok(())
+}
+
+fn require_filler_ok(result: i32, context: &str) -> Result<(), String> {
+    if result != 0 {
+        return Err(format!(
+            "{context}: host filler refused it (result {result})"
+        ));
+    }
+    Ok(())
+}
+
+/// Reading the endpoint's grid is one control call, so it gets the same
+/// budget as the reconfiguration it precedes.
+const RECONFIG_GRID_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A feedforward change has to land on one side of every sample: the filler
+/// computes each sample's velocity and torque feedforward, the endpoint only
+/// clamps it and adds the pin. The grid is re-read first — the pair the filler
+/// holds was reported at fill time, so nothing else tells it whether the
+/// samples it already emitted have played — and the endpoint call plus the
+/// filler update run under the filler lock, so no drain can slip a sample of
+/// the old configuration in between. Motion still outstanding is refused, not
+/// split.
+fn reconfigure_feedforward<T>(
+    conn: &host_rt::mcu_serial_conn::McuSerialConn,
+    ring: &crate::pump::RingFiller,
+    what: &str,
+    apply: impl FnOnce(&mut ethercat_rt::setpoint_fill::ChainFiller) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut filler = ring.lock_ok();
+    let grid =
+        super::ethercat_endpoint::verify_sample_grid(conn, Instant::now() + RECONFIG_GRID_TIMEOUT)
+            .map_err(|e| format!("{what}: the endpoint's sample grid is unreadable: {e:?}"))?;
+    filler
+        .observe_grid(grid.grid_index, grid.grid_clock)
+        .map_err(|e| format!("{what}: the endpoint's sample grid was refused: {e:?}"))?;
+    if !filler.quiescent() {
+        return Err(format!(
+            "{what}: the endpoint still has setpoints outstanding — changing the feedforward \
+             mid-stream would step the velocity and torque feedforward; wait for the motion to \
+             finish"
+        ));
+    }
+    apply(&mut filler)
 }

@@ -77,21 +77,22 @@ static uint32_t last_emit_tick;
 static uint32_t emits_done;
 uint32_t reset_cause_snapshot;
 static uint32_t reset_cause_raw;
-static uint32_t prior_live_present_at_boot;
-static uint32_t saved_prior_live;
-static uint32_t saved_prior_engine;
-static uint32_t saved_prior_tick;
-static uint32_t saved_prior_last_run_tick;
-static uint32_t saved_prior_samples;
-uint32_t prior_run_froze;
-uint32_t saved_prior_last_dispatch_func;
-uint32_t saved_prior_last_dispatch_addr;
-// Full copy of the crashed run's live_snap, taken at boot before the per-run
-// fields are zeroed; all "prior run" reporting reads this, never live_snap.
-struct live_snapshot prior_snap;
 
+#if CONFIG_MACH_STM32H7
+#define PRIOR_SECTION ".bkp_bss"
+#else
+#define PRIOR_SECTION ".persistent_diag"
+#endif
+// The held run's live_snap, taken at boot before the per-run fields are
+// zeroed; all "prior run" reporting reads this, never live_snap.
+__attribute__((section(PRIOR_SECTION), used))
+struct live_snapshot prior_snap;
+__attribute__((section(PRIOR_SECTION), used))
 struct diag_counters prior_diag;
+__attribute__((section(PRIOR_SECTION), used))
 struct diag_event    prior_ring[DIAG_RING_LEN];
+__attribute__((section(PRIOR_SECTION), used))
+volatile struct prior_report_state prior_state;
 uint32_t             prior_diag_present;
 
 #if CONFIG_MACH_STM32H7
@@ -129,22 +130,37 @@ fault_handler_report_boot_init(uint32_t now)
     reset_cause_snapshot = read_reset_cause();
     reset_cause_raw = reset_cause_snapshot;
     clear_reset_cause();
-    if (live_snap.magic == LIVE_MAGIC) {
-        prior_live_present_at_boot = 1;
-        memcpy(&prior_snap, (const void *)&live_snap, sizeof(prior_snap));
-        prior_snap.cur_task_func = preboot_cur_task_func;
-        prior_snap.cur_msg_kind = preboot_cur_msg_kind;
-        saved_prior_live          = live_snap.live;
-        saved_prior_engine        = live_snap.engine_status;
-        saved_prior_tick          = live_snap.tick_counter;
-        saved_prior_last_run_tick = live_snap.last_engine_running_tick;
-        saved_prior_samples       = live_snap.samples_taken;
-        prior_run_froze           = live_snap.this_run_froze;
-        saved_prior_last_dispatch_func = live_snap.last_dispatch_func;
-        saved_prior_last_dispatch_addr = live_snap.last_dispatch_addr;
+    uint32_t ended_run_present = live_snap.magic == LIVE_MAGIC;
+    uint32_t ended_diag_present = diag.magic == DIAG_MAGIC;
+    uint32_t ended_boot_count = ended_diag_present ? diag.boot_count : 0;
+    uint32_t holding_unreported = prior_state.magic == PRIOR_MAGIC
+                                  && !prior_state.reported;
+    if (holding_unreported) {
+        prior_state.runs_skipped++;
     } else {
-        live_snap.iwdg_reset_count = 0;
+        if (ended_run_present) {
+            memcpy(&prior_snap, (const void *)&live_snap, sizeof(prior_snap));
+            prior_snap.cur_task_func = preboot_cur_task_func;
+            prior_snap.cur_msg_kind = preboot_cur_msg_kind;
+        } else {
+            memset(&prior_snap, 0, sizeof(prior_snap));
+        }
+        if (ended_diag_present) {
+            memcpy(&prior_diag, (const void *)&diag, sizeof(prior_diag));
+            memcpy(prior_ring, (const void *)diag_ring, sizeof(prior_ring));
+        } else {
+            memset(&prior_diag, 0, sizeof(prior_diag));
+            memset(prior_ring, 0, sizeof(prior_ring));
+        }
+        prior_state.magic = PRIOR_MAGIC;
+        prior_state.reported = 0;
+        prior_state.reset_cause = reset_cause_raw;
+        prior_state.runs_skipped = 0;
     }
+    reset_cause_snapshot = prior_state.reset_cause;
+    prior_diag_present = prior_diag.magic == DIAG_MAGIC;
+    if (!ended_run_present)
+        live_snap.iwdg_reset_count = 0;
     // Per-run stats: replay the prior run's values (prior_snap) at boot,
     // then start this run from zero so each boot reports its own run.
     live_snap.worst_fg_stall_ticks = 0;
@@ -171,8 +187,21 @@ fault_handler_report_boot_init(uint32_t now)
     live_snap.ttc_count            = 0;
     live_snap.rearm_count          = 0;
     live_snap.rearm_min_margin     = (uint32_t)INT32_MAX;
+    live_snap.rearm_min_oid        = 0;
+    live_snap.rearm_min_waketime   = 0;
+    live_snap.rearm_min_last_reset = 0;
+    live_snap.rearm_min_discards   = 0;
+    live_snap.wire_probe_worst     = 0;
+    live_snap.wire_probe_count     = 0;
     live_snap.rearm_armed          = 0;
     live_snap.rearm_below_floor    = 0;
+    live_snap.worst_timer_func     = 0;
+    live_snap.worst_timer_cyc      = 0;
+    live_snap.step_spin_count      = 0;
+    live_snap.step_spin_worst_cyc  = 0;
+    live_snap.step_spin_stale_count = 0;
+    live_snap.step_spin_stale_max  = 0;
+    live_snap.step_spin_stale_first = 0;
 #if CONFIG_MACH_STM32H7
     if (reset_cause_raw & RCC_RSR_IWDG1RSTF)
         live_snap.iwdg_reset_count++;
@@ -182,94 +211,9 @@ fault_handler_report_boot_init(uint32_t now)
 #endif
     live_snap.samples_taken = 0;
 
-    if (diag.magic == DIAG_MAGIC) {
-        prior_diag_present = 1;
-        prior_diag.magic                = diag.magic;
-        prior_diag.tim5_irq_count       = diag.tim5_irq_count;
-        prior_diag.tim5_irq_cycles_total = diag.tim5_irq_cycles_total;
-        prior_diag.tim5_irq_cycles_max  = diag.tim5_irq_cycles_max;
-        prior_diag.otg_irq_count        = diag.otg_irq_count;
-        prior_diag.otg_irq_cycles_total = diag.otg_irq_cycles_total;
-        prior_diag.otg_irq_cycles_max   = diag.otg_irq_cycles_max;
-        prior_diag.rt_tick_count        = diag.rt_tick_count;
-        prior_diag.rt_tick_cycles_max   = diag.rt_tick_cycles_max;
-        prior_diag.rt_tick_cycles_total = diag.rt_tick_cycles_total;
-        prior_diag.rt_eval_n            = diag.rt_eval_n;
-        prior_diag.rt_eval_cycles_max   = diag.rt_eval_cycles_max;
-        prior_diag.rt_eval_cycles_total = diag.rt_eval_cycles_total;
-        prior_diag.rt_dvel_n            = diag.rt_dvel_n;
-        prior_diag.rt_dvel_cycles_max   = diag.rt_dvel_cycles_max;
-        prior_diag.rt_dvel_cycles_total = diag.rt_dvel_cycles_total;
-        prior_diag.walk_cycles_max      = diag.walk_cycles_max;
-        prior_diag.walk_n               = diag.walk_n;
-        prior_diag.monomial_cycles_max  = diag.monomial_cycles_max;
-        prior_diag.monomial_n           = diag.monomial_n;
-        prior_diag.rt_isr_phase         = diag.rt_isr_phase;
-        for (uint32_t axis = 0; axis < 3; axis++) {
-            prior_diag.rt_curve_degree[axis]    = diag.rt_curve_degree[axis];
-            prior_diag.rt_curve_cps_len[axis]   = diag.rt_curve_cps_len[axis];
-            prior_diag.rt_curve_knots_len[axis] = diag.rt_curve_knots_len[axis];
-        }
-        for (uint32_t i = 0; i < DIAG_HIST_NBUCKETS; i++) {
-            prior_diag.tim5_irq_buckets[i] = diag.tim5_irq_buckets[i];
-            prior_diag.rt_tick_buckets[i]  = diag.rt_tick_buckets[i];
-        }
-        prior_diag.usb_out_calls        = diag.usb_out_calls;
-        prior_diag.usb_out_max_gap_ticks = diag.usb_out_max_gap_ticks;
-        prior_diag.usb_in_calls         = diag.usb_in_calls;
-        prior_diag.usb_in_max_gap_ticks  = diag.usb_in_max_gap_ticks;
-        prior_diag.runtime_drain_calls   = diag.runtime_drain_calls;
-        prior_diag.runtime_drain_max_gap_ticks = diag.runtime_drain_max_gap_ticks;
-        prior_diag.runtime_status_calls   = diag.runtime_status_calls;
-        prior_diag.runtime_status_max_gap_ticks = diag.runtime_status_max_gap_ticks;
-        prior_diag.tx_drops_kalico        = diag.tx_drops_kalico;
-        prior_diag.tx_drops_klipper       = diag.tx_drops_klipper;
-        prior_diag.tx_drops_transport_last_len = diag.tx_drops_transport_last_len;
-        prior_diag.tx_drops_klipper_last_max = diag.tx_drops_klipper_last_max;
-        prior_diag.ring_head            = diag.ring_head;
-        prior_diag.ring_seq             = diag.ring_seq;
-        prior_diag.ring_overflow        = diag.ring_overflow;
-        prior_diag.boot_count           = diag.boot_count;
-        prior_diag.systick_max_cyc        = diag.systick_max_cyc;
-        prior_diag.stepout_max_cyc        = diag.stepout_max_cyc;
-        prior_diag.stepout_burst_max_cyc  = diag.stepout_burst_max_cyc;
-        prior_diag.usb_burst_max_cyc      = diag.usb_burst_max_cyc;
-        prior_diag.tim5_ia_min_cyc        = diag.tim5_ia_min_cyc;
-        prior_diag.tim5_ia_max_cyc        = diag.tim5_ia_max_cyc;
-        prior_diag.tim5_ia_last_cyc       = diag.tim5_ia_last_cyc;
-        prior_diag.usb_in_busy_n          = diag.usb_in_busy_n;
-        prior_diag.usb_gintsts_sticky     = diag.usb_gintsts_sticky;
-        prior_diag.usb_gintsts_now        = diag.usb_gintsts_now;
-        prior_diag.usb_gintmsk_now        = diag.usb_gintmsk_now;
-        prior_diag.usb_in_diepctl         = diag.usb_in_diepctl;
-        prior_diag.usb_in_diepint         = diag.usb_in_diepint;
-        prior_diag.usb_in_dtxfsts         = diag.usb_in_dtxfsts;
-        prior_diag.usb_out_doepctl        = diag.usb_out_doepctl;
-        prior_diag.usb_out_doepint        = diag.usb_out_doepint;
-        prior_diag.out_unarmed_worst_cyc  = diag.out_unarmed_worst_cyc;
-        prior_diag.out_unarmed_worst_end  = diag.out_unarmed_worst_end;
-#if CONFIG_MOTION_RUNTIME
-        {
-            extern void kalico_stepout_late_get(uint32_t *out_max_late,
-                                                uint32_t *out_late_count,
-                                                uint32_t *out_max_drained);
-            kalico_stepout_late_get(&prior_diag.stepout_late_max_cyc,
-                                    &prior_diag.stepout_late_count,
-                                    &prior_diag.stepout_late_max_drained);
-        }
-#endif
-        for (uint32_t i = 0; i < DIAG_RING_LEN; i++) {
-            prior_ring[i].tag       = diag_ring[i].tag;
-            prior_ring[i]._pad0     = diag_ring[i]._pad0;
-            prior_ring[i].seq       = diag_ring[i].seq;
-            prior_ring[i].timestamp = diag_ring[i].timestamp;
-            prior_ring[i].a         = diag_ring[i].a;
-            prior_ring[i].b         = diag_ring[i].b;
-        }
-    }
     memset((void *)&diag, 0, sizeof(diag));
     diag.magic = DIAG_MAGIC;
-    diag.boot_count = prior_diag_present ? (prior_diag.boot_count + 1) : 1;
+    diag.boot_count = ended_boot_count + 1;
     for (uint32_t i = 0; i < DIAG_RING_LEN; i++) {
         diag_ring[i].tag = DIAG_EV_NONE;
         diag_ring[i].seq = 0;
@@ -338,11 +282,14 @@ fault_handler_report_emit(uint32_t now)
            emits_done, since_boot_us, reset_cause_raw,
            (uint32_t)(fault_rec.magic == FAULT_MAGIC),
            live_snap.live, live_snap.engine_status, live_snap.tick_counter);
-    if (prior_live_present_at_boot) {
+    output("prior_run rcc %u reported %u runs_skipped %u",
+           prior_state.reset_cause, prior_state.reported,
+           prior_state.runs_skipped);
+    if (prior_snap.magic == LIVE_MAGIC) {
         output("prior_live live %u engine %u tick %u last_run_tick %u samples %u",
-               saved_prior_live, saved_prior_engine,
-               saved_prior_tick, saved_prior_last_run_tick,
-               saved_prior_samples);
+               prior_snap.live, prior_snap.engine_status,
+               prior_snap.tick_counter, prior_snap.last_engine_running_tick,
+               prior_snap.samples_taken);
     }
     output("fg_freeze stall_ticks %u pc %u exc %u iwdg %u last_disp_func %u last_disp_addr %u",
            prior_snap.worst_fg_stall_ticks,
@@ -369,11 +316,29 @@ fault_handler_report_emit(uint32_t now)
            prior_snap.ttc_func,
            prior_snap.ttc_late,
            prior_snap.ttc_count);
-    output("step_rearm count %u min_margin_cyc %i armed %u below_floor %u",
+    output("wire_probe worst_cyc %i count %u",
+           (int32_t)prior_snap.wire_probe_worst,
+           prior_snap.wire_probe_count);
+    output("step_rearm count %u min_margin_cyc %i armed %u below_floor %u"
+           " oid %u waketime %u last_reset %u discards %u",
            prior_snap.rearm_count,
            (int32_t)prior_snap.rearm_min_margin,
            prior_snap.rearm_armed,
-           prior_snap.rearm_below_floor);
+           prior_snap.rearm_below_floor,
+           prior_snap.rearm_min_oid,
+           prior_snap.rearm_min_waketime,
+           prior_snap.rearm_min_last_reset,
+           prior_snap.rearm_min_discards);
+    output("sched_timer_worst func %u cyc %u",
+           prior_snap.worst_timer_func,
+           prior_snap.worst_timer_cyc);
+    output("step_spin count %u worst_cyc %u stale_count %u stale_max %u"
+           " stale_first %u",
+           prior_snap.step_spin_count,
+           prior_snap.step_spin_worst_cyc,
+           prior_snap.step_spin_stale_count,
+           prior_snap.step_spin_stale_max,
+           prior_snap.step_spin_stale_first);
     if (fault_rec.magic == FAULT_MAGIC) {
         output("prior_fault kind %u count %u pc %u lr %u psr %u"
                " r0 %u r1 %u r2 %u r3 %u r12 %u",
@@ -450,11 +415,8 @@ fault_handler_report_emit(uint32_t now)
                prior_diag.otg_irq_cycles_max,
                (uint32_t)(prior_diag.otg_irq_cycles_total & 0xFFFFFFFFu),
                (uint32_t)(prior_diag.otg_irq_cycles_total >> 32));
-        output("prior_diag_summary_block systick %u stepout %u"
-               " stepout_burst %u usb_burst %u",
+        output("prior_diag_summary_block systick %u usb_burst %u",
                prior_diag.systick_max_cyc,
-               prior_diag.stepout_max_cyc,
-               prior_diag.stepout_burst_max_cyc,
                prior_diag.usb_burst_max_cyc);
         output("prior_diag_summary_tim5ia min %u max %u last %u period %u",
                prior_diag.tim5_ia_min_cyc,

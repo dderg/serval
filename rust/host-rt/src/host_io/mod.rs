@@ -2,8 +2,10 @@ pub mod byte_link;
 pub mod call_handle;
 pub mod can_link;
 pub mod events;
+pub mod fire_and_forget_depth;
 pub mod identify;
 pub(crate) mod interceptor;
+pub mod link_health;
 pub mod mcu_session;
 pub mod parser;
 pub mod reactor;
@@ -20,19 +22,19 @@ pub mod wire;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Sender, SyncSender};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 
 use crate::host_io::events::HostEvent;
+use crate::host_io::fire_and_forget_depth::FireAndForgetDepth;
 use crate::host_io::parser::MsgProtoParser;
 use crate::host_io::runtime_events::{
     FaultEvent, McuLogEvent, RuntimeEvent, StatusEvent, TraceEvent,
 };
 use crate::transport::{MessageParams, SubscribeError, Transport, TransportError};
-use std::sync::mpsc::SyncSender;
 
 const DEFAULT_BAUD: u32 = 250_000;
 
@@ -41,10 +43,12 @@ pub struct McuHostIoConfig {
     pub trace_capacity: usize,
     pub host_event_capacity: usize,
     pub runtime_event_capacity: usize,
+    pub runtime_event_bulk_capacity: usize,
     pub default_call_timeout: Duration,
     pub identify_timeout: Duration,
     pub default_dispatcher_timeout: Duration,
     pub mcu_label: Option<String>,
+    pub link_health: Arc<crate::host_io::link_health::LinkHealth>,
 }
 
 impl Default for McuHostIoConfig {
@@ -53,15 +57,17 @@ impl Default for McuHostIoConfig {
             trace_capacity: 256,
             host_event_capacity: 64,
             runtime_event_capacity: 512,
+            runtime_event_bulk_capacity: 4096,
             default_call_timeout: Duration::from_millis(100),
             identify_timeout: Duration::from_millis(15_000),
             default_dispatcher_timeout: Duration::from_secs(30),
             mcu_label: None,
+            link_health: Arc::new(crate::host_io::link_health::LinkHealth::default()),
         }
     }
 }
 
-pub struct HeartbeatCallback(pub Arc<dyn Fn(&[u32]) + Send + Sync>);
+pub struct HeartbeatCallback(pub Arc<dyn Fn(&[u32], &[u64]) + Send + Sync>);
 
 impl std::fmt::Debug for HeartbeatCallback {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -121,8 +127,13 @@ pub enum ReactorCommand {
     },
     /// A burst of encoded commands to pack into as few Klipper message
     /// blocks as the 64-byte block allows before it reaches the wire.
+    /// `reserved_blocks` is the admission capacity the sender claimed on
+    /// [`FireAndForgetDepth`]; the reactor releases it once the burst is
+    /// queued or abandoned.
     FireAndForgetBatch {
         payloads: Vec<Vec<u8>>,
+        reserved_blocks: usize,
+        enqueued_at: std::time::Instant,
     },
     McuIdentify {
         completion:
@@ -130,7 +141,6 @@ pub enum ReactorCommand {
         deadline: std::time::Instant,
     },
     McuCall {
-        channel: u8,
         kind: mcu_protocol::MessageKind,
         body: Vec<u8>,
         completion: SyncSender<Result<crate::host_io::mcu_session::McuCallOutcome, TransportError>>,
@@ -168,6 +178,7 @@ pub struct McuHostIo {
     clock: Arc<dyn crate::clock::Clock>,
     raw_identify_bytes: Vec<u8>,
     is_critical: Arc<AtomicBool>,
+    fire_and_forget_depth: Arc<FireAndForgetDepth>,
 }
 
 impl std::fmt::Debug for McuHostIo {
@@ -377,6 +388,8 @@ impl McuHostIo {
         let reactor_clock = Arc::clone(&clock);
         let is_critical = Arc::new(AtomicBool::new(true));
         let reactor_is_critical = Arc::clone(&is_critical);
+        let fire_and_forget_depth = Arc::new(FireAndForgetDepth::default());
+        let reactor_fire_and_forget_depth = Arc::clone(&fire_and_forget_depth);
         let reactor_handle = std::thread::spawn(move || {
             tracing::info!(
                 subsystem = "mcu-comms",
@@ -392,6 +405,7 @@ impl McuHostIo {
                 identify_seq,
                 reactor_config,
                 reactor_clock,
+                reactor_fire_and_forget_depth,
             );
             reactor.run();
             if !reactor.exited_gracefully() {
@@ -432,6 +446,7 @@ impl McuHostIo {
             clock,
             raw_identify_bytes,
             is_critical,
+            fire_and_forget_depth,
         })
     }
 
@@ -461,6 +476,8 @@ impl McuHostIo {
         let reactor_config = config.clone();
         let reactor_clock = Arc::clone(&clock);
         let is_critical = Arc::new(AtomicBool::new(false));
+        let fire_and_forget_depth = Arc::new(FireAndForgetDepth::default());
+        let reactor_fire_and_forget_depth = Arc::clone(&fire_and_forget_depth);
         let reactor_handle = std::thread::spawn(move || {
             let mut reactor = crate::host_io::reactor::Reactor::new_with_clock(
                 io,
@@ -470,6 +487,7 @@ impl McuHostIo {
                 identify_seq,
                 reactor_config,
                 reactor_clock,
+                reactor_fire_and_forget_depth,
             );
             reactor.run();
         });
@@ -484,7 +502,12 @@ impl McuHostIo {
             clock,
             raw_identify_bytes: Vec::new(),
             is_critical,
+            fire_and_forget_depth,
         }
+    }
+
+    pub fn fire_and_forget_depth(&self) -> &Arc<FireAndForgetDepth> {
+        &self.fire_and_forget_depth
     }
 }
 
@@ -587,7 +610,11 @@ impl McuHostIo {
         self.is_critical.load(Ordering::Acquire)
     }
 
-    pub fn attach_heartbeat_callback(&self, cb: Arc<dyn Fn(&[u32]) + Send + Sync>) {
+    pub fn link_health(&self) -> Arc<crate::host_io::link_health::LinkHealth> {
+        Arc::clone(&self.config.link_health)
+    }
+
+    pub fn attach_heartbeat_callback(&self, cb: Arc<dyn Fn(&[u32], &[u64]) + Send + Sync>) {
         let _ = self
             .submission_tx
             .send(ReactorCommand::AttachHeartbeatCallback(HeartbeatCallback(
@@ -640,7 +667,8 @@ impl McuHostIo {
     > {
         let cap = self.config.runtime_event_capacity;
         let (priority_tx, priority_rx) = std::sync::mpsc::sync_channel(cap);
-        let (bulk_tx, bulk_rx) = std::sync::mpsc::sync_channel(cap);
+        let (bulk_tx, bulk_rx) =
+            std::sync::mpsc::sync_channel(self.config.runtime_event_bulk_capacity);
         let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
         self.submission_tx
             .send(ReactorCommand::SubscribeRuntimeEvents {
@@ -768,21 +796,42 @@ impl McuHostIo {
     /// pack them into full message blocks. Sending them one at a time
     /// through `send_args` would let the reactor drain the channel between
     /// them and frame each command on its own block.
+    ///
+    /// Rejected wholesale — nothing encoded, nothing queued — once the
+    /// reactor's fire-and-forget queue is at its high water mark, so a caller
+    /// that treats [`TransportError::Backpressure`] as retryable re-offers the
+    /// identical burst in the identical order. Any burst the reactor does
+    /// accept reaches the wire; the reactor has no discard path.
+    ///
+    /// Admission claims the burst's block capacity atomically, so concurrent
+    /// senders cannot each read the same sub-high-water depth and overshoot
+    /// it together. A closed reactor refuses with [`TransportError::Closed`].
     pub fn send_args_batch(
         &self,
         frames: &[(&str, Vec<(String, crate::host_io::parser::ArgValue)>)],
     ) -> Result<(), TransportError> {
+        let reserved_blocks = frames.len();
+        self.fire_and_forget_depth.reserve(reserved_blocks)?;
         let mut payloads = Vec::with_capacity(frames.len());
         for (name, args) in frames {
-            payloads.push(
-                self.parser
-                    .encode_args(name, args)
-                    .map_err(|e| TransportError::Parse(format!("{name}: {e:?}")))?,
-            );
+            match self.parser.encode_args(name, args) {
+                Ok(payload) => payloads.push(payload),
+                Err(e) => {
+                    self.fire_and_forget_depth.release(reserved_blocks);
+                    return Err(TransportError::Parse(format!("{name}: {e:?}")));
+                }
+            }
         }
         self.submission_tx
-            .send(ReactorCommand::FireAndForgetBatch { payloads })
-            .map_err(|_| TransportError::Closed)
+            .send(ReactorCommand::FireAndForgetBatch {
+                payloads,
+                reserved_blocks,
+                enqueued_at: std::time::Instant::now(),
+            })
+            .map_err(|_| {
+                self.fire_and_forget_depth.release(reserved_blocks);
+                TransportError::Closed
+            })
     }
 
     pub fn call_args(
@@ -851,47 +900,16 @@ impl McuHostIo {
         body: Vec<u8>,
         timeout: Duration,
     ) -> Result<(mcu_protocol::MessageKind, Vec<u8>), TransportError> {
-        self.kalico_call_on_channel(mcu_transport::CHANNEL_CONTROL, kind, body, timeout)
-    }
-
-    /// Submit a kalico call without waiting: the returned receiver resolves
-    /// with the response (or transport error) when the reactor matches the
-    /// correlation id. Enables windowed `PushPieces` — several calls may be
-    /// in flight at once; the reactor's pending map keys them independently.
-    pub fn kalico_submit_on_channel(
-        &self,
-        channel: u8,
-        kind: mcu_protocol::MessageKind,
-        body: Vec<u8>,
-        timeout: Duration,
-    ) -> Result<
-        std::sync::mpsc::Receiver<
-            Result<crate::host_io::mcu_session::McuCallOutcome, TransportError>,
-        >,
-        TransportError,
-    > {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let deadline = self.clock.now() + timeout;
         self.submission_tx
             .send(ReactorCommand::McuCall {
-                channel,
                 kind,
                 body,
                 completion: tx,
                 deadline,
             })
             .map_err(|_| TransportError::Closed)?;
-        Ok(rx)
-    }
-
-    pub fn kalico_call_on_channel(
-        &self,
-        channel: u8,
-        kind: mcu_protocol::MessageKind,
-        body: Vec<u8>,
-        timeout: Duration,
-    ) -> Result<(mcu_protocol::MessageKind, Vec<u8>), TransportError> {
-        let rx = self.kalico_submit_on_channel(channel, kind, body, timeout)?;
         match rx.recv_timeout(timeout) {
             Ok(Ok(crate::host_io::mcu_session::McuCallOutcome::Response { kind, body })) => {
                 Ok((kind, body))
@@ -924,9 +942,13 @@ impl McuHostIo {
             clock: Arc::new(crate::clock::RealClock),
             raw_identify_bytes: Vec::new(),
             is_critical: Arc::new(AtomicBool::new(false)),
+            fire_and_forget_depth: Arc::new(FireAndForgetDepth::default()),
         })
     }
 }
 
 #[cfg(test)]
 mod test_internals;
+
+#[cfg(test)]
+mod fire_and_forget_batch_admission;

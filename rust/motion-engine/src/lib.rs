@@ -4,8 +4,8 @@ pub mod viz;
 
 #[doc(hidden)]
 pub use motion_core::{
-    anchor, classify, config, drain, enqueue, fence, homing, kinematics, lock_ext, mcu_config,
-    motion_history, nudge, pump, timing, types, worker,
+    anchor, axis_transport, classify, config, drain, enqueue, fence, homing, kinematics, lock_ext,
+    mcu_config, motion_history, nudge, pump, timing, types, worker,
 };
 
 #[doc(hidden)]

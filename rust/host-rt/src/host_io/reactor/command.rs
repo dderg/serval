@@ -3,7 +3,7 @@ use std::time::Instant;
 use crate::host_io::mcu_session::{
     PendingMcuCall, build_kalico_frame, build_kalico_identify_frame,
 };
-use crate::host_io::reactor::{PENDING_PIECE_FRAMES_CEILING, Reactor, ReactorState};
+use crate::host_io::reactor::{Reactor, ReactorState};
 use crate::transport::TransportError;
 
 impl Reactor {
@@ -69,20 +69,37 @@ impl Reactor {
             ReactorCommand::FireAndForgetTyped { payload } => {
                 self.handle_fire_and_forget_typed(payload)
             }
-            ReactorCommand::FireAndForgetBatch { payloads } => {
-                self.handle_fire_and_forget_batch(&payloads)
+            ReactorCommand::FireAndForgetBatch {
+                payloads,
+                reserved_blocks,
+                enqueued_at,
+            } => {
+                let waited = enqueued_at.elapsed();
+                if waited > std::time::Duration::from_millis(20)
+                    && self.last_channel_wait_warn.elapsed().as_millis() >= 500
+                {
+                    self.last_channel_wait_warn = std::time::Instant::now();
+                    tracing::warn!(
+                        subsystem = "mcu-comms",
+                        event = "channel_wait_high",
+                        mcu = %self.mcu_label,
+                        waited_ms = waited.as_millis() as u64,
+                        blocks = payloads.len(),
+                        "batch sat this long in the submission channel before the reactor took it"
+                    );
+                }
+                self.handle_fire_and_forget_batch(&payloads, reserved_blocks)
             }
             ReactorCommand::McuIdentify {
                 completion,
                 deadline: _,
             } => self.handle_mcu_identify(completion),
             ReactorCommand::McuCall {
-                channel,
                 kind,
                 body,
                 completion,
                 deadline,
-            } => self.handle_mcu_call(channel, kind, body, completion, deadline),
+            } => self.handle_mcu_call(kind, body, completion, deadline),
             ReactorCommand::GetClockAndDeliver => self.handle_get_clock_and_deliver(),
             ReactorCommand::Noop => {}
             ReactorCommand::RegisterInterceptor {
@@ -243,10 +260,11 @@ impl Reactor {
         }
     }
 
-    fn handle_fire_and_forget_batch(&mut self, payloads: &[Vec<u8>]) {
+    fn handle_fire_and_forget_batch(&mut self, payloads: &[Vec<u8>], reserved_blocks: usize) {
         let blocks = match crate::host_io::wire::pack_blocks(payloads) {
             Ok(blocks) => blocks,
             Err(detail) => {
+                self.outbound.fire_and_forget_depth.release(reserved_blocks);
                 tracing::error!(
                     subsystem = "mcu-comms",
                     event = "fire_and_forget_batch_pack_error",
@@ -258,17 +276,19 @@ impl Reactor {
         };
         for block in blocks {
             if let Err(e) = self.dispatch_fire_and_forget(block, false) {
-                tracing::warn!(
+                self.outbound.fire_and_forget_depth.release(reserved_blocks);
+                tracing::error!(
                     subsystem = "mcu-comms",
                     event = "fire_and_forget_batch_send_error",
                     error = %e,
-                    "FireAndForgetBatch: send error"
+                    "FireAndForgetBatch: block write failed; abandoning the rest of the burst \
+                     rather than putting later blocks on the wire ahead of it"
                 );
-                if self.close_if_io_fault("handle_command/fire_and_forget_batch", &e) {
-                    return;
-                }
+                self.close_if_io_fault("handle_command/fire_and_forget_batch", &e);
+                return;
             }
         }
+        self.outbound.fire_and_forget_depth.release(reserved_blocks);
     }
 
     fn handle_mcu_identify(
@@ -294,7 +314,6 @@ impl Reactor {
 
     fn handle_mcu_call(
         &mut self,
-        channel: u8,
         kind: mcu_protocol::MessageKind,
         body: Vec<u8>,
         completion: std::sync::mpsc::SyncSender<
@@ -308,12 +327,8 @@ impl Reactor {
             )));
             return;
         }
-        if self.outbound.pending_piece_frames.len() >= PENDING_PIECE_FRAMES_CEILING {
-            let _ = completion.send(Err(TransportError::Backpressure));
-            return;
-        }
         let cid = self.transport_state.allocate_correlation_id();
-        let frame = build_kalico_frame(channel, kind, cid, &body);
+        let frame = build_kalico_frame(mcu_transport::CHANNEL_CONTROL, kind, cid, &body);
         self.transport_state.pending.insert(
             cid,
             PendingMcuCall {
@@ -321,8 +336,12 @@ impl Reactor {
                 deadline,
             },
         );
-        self.outbound.pending_piece_frames.push_back((cid, frame));
-        self.drain_piece_frames();
+        if let Err(e) = self.write_frame(&frame) {
+            self.close_if_io_fault("handle_command/mcu_call", &e);
+            if let Some(p) = self.transport_state.pending.remove(&cid) {
+                let _ = p.completion.send(Err(e));
+            }
+        }
     }
 
     fn handle_get_clock_and_deliver(&mut self) {

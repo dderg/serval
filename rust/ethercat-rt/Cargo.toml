@@ -11,7 +11,7 @@ crate-type = ["rlib"]
 
 # `hw` gates the EtherCAT FFI (`ffi` module) and the build.rs compile + link of the
 # IgH master backend (csrc/libecrt_igh.c, -lethercat) over the ec_rt_* surface. OFF
-# by default so the pure scale/wire/curves unit tests build and run on any machine
+# by default so the pure scale/wire/setpoint unit tests build and run on any machine
 # (and in CI) without a master library installed.
 [features]
 default = []
@@ -22,11 +22,6 @@ hw = []
 name = "ethercat-rt"
 path = "src/bin/ethercat-rt.rs"
 required-features = ["hw"]
-
-# The test client speaks the socket protocol only (no FFI) — builds without `hw`.
-[[bin]]
-name = "ec-test-client"
-path = "src/bin/ec-test-client.rs"
 
 # No-hardware stub: serves the kalico-native socket and answers the protocol
 # without driving EtherCAT. For drive-off integration testing. No `hw` feature.
@@ -39,6 +34,7 @@ libm = { version = "0.2", default-features = false }
 runtime = { path = "../runtime", default-features = false, features = ["host"] }  # servo node: no stepper dispatch
 mcu-protocol = { path = "../mcu-protocol" }
 mcu-transport = { path = "../mcu-transport" }
+trajectory = { path = "../trajectory" }
 libc = "0.2"                                       # raw clock_gettime(CLOCK_MONOTONIC)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter", "std"] }
@@ -56,6 +52,7 @@ cc = "1"                                            # compiles csrc/libecrt_igh.
 [dev-dependencies]
 host-rt = { path = "../host-rt" }
 parking_lot = "0.12"
+nurbs = { path = "../nurbs" }                       # spline test spans: exact quadratic position laws
 
 [lints]
 workspace = true

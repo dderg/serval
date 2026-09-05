@@ -30,6 +30,23 @@ Two frequencies exist per MCU and they are not interchangeable:
   `PassthroughRouter` record (`set_clock_est_rebased`), so both sides project
   with the same numbers. The router is the Rust-side authority; do not carry
   your own `(freq, offset, last_clock)` anywhere else.
+  The record belongs to one MCU boot epoch: every `_mcu_identify` calls
+  `invalidate_clock_est`, and until a *converged* estimate arrives every
+  projection is a loud error (`RouterError::NoClockEstimate`) and the
+  stepcompress anchor refuses to run (`DispatchError::ClockRecordUnusable`).
+  A record surviving a reflash would project clocks ahead of the restarted
+  MCU counter by the previous boot's uptime.
+  Two different quantities describe that record, and confusing them costs
+  hours: `clock_offset` is the regression's decay-weighted sample **centroid**,
+  which on a perfectly live record trails now by up to `1/DECAY` get_clock
+  periods (~30 s), so `host_now - clock_offset` (`centroid_lag_secs`) is the
+  projection's lever arm, not staleness. The record's **age** is
+  `host_now - updated_at`: how long since the router last accepted an estimate.
+  Both are on every `reanchor_record` event. The anchor warns past
+  `DEGRADED_CLOCK_RECORD_AGE_SECS` (3 periods; measured healthy worlds gap up
+  to ~10 s, so this is not a stop) and refuses past
+  `MAX_CLOCK_RECORD_AGE_SECS` (the full regression window) with
+  `DispatchError::ClockRecordStale`.
 - print_time ↔ MCU clock: multiply/divide by **nominal** `CLOCK_FREQ`
   (secondary MCUs additionally go through `SecondarySync.clock_adj`,
   Python-side).
@@ -68,8 +85,13 @@ the primary's clock. Passing a secondary's handle gives you that MCU's
 2. **Never compose `estimated_print_time(now) + lead`.** That sum samples
    "now" through one clock path and the lead through another. The one
    sanctioned composition is the *schedule floor* in
-   `Motion.get_last_move_time` — a `max()` of absolutes over all engine
-   MCUs, which is drift-safe because max cannot accumulate error.
+   `Motion.get_last_move_time` — a `max()` of absolutes over every connected
+   MCU, which is drift-safe because max cannot accumulate error. It must
+   span every MCU, not just the ones running kinematic lanes: a follower
+   lane's enable pin, a fan, or a heater on a secondary MCU is validated
+   against *that* MCU's estimate, and `SecondarySync` deliberately skews its
+   frequency to converge seconds ahead, so its estimate at `now` can sit
+   over a second away from the primary's.
 3. **Scheduling after motion**: call `toolhead.get_last_move_time()` if you
    also want mainline's flush-to-rest semantics (most G-code handlers do),
    or `engine.frontier_print_time(...)` if committed motion is the right
@@ -93,7 +115,9 @@ the primary's clock. Passing a secondary's handle gives you that MCU's
 - `get_last_move_time` returned `est_main(now₁) + max(lead(now₂), 0.25)` —
   two nows, two clock paths, and only the main MCU's estimate while callers
   scheduled on secondary MCUs → sporadic "scheduled with stale print_time"
-  shutdowns.
+  shutdowns. The floor later became a `max()` of absolutes, but over
+  kinematic-stepper MCUs only, which still excluded follower-lane and
+  peripheral-only MCUs.
 - Lookahead callbacks fired with `est(now)+lead` at resolution time, which
   could be behind moves queued after registration → out-of-order pin/LED
   scheduling.

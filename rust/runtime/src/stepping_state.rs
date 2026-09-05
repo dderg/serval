@@ -1,13 +1,7 @@
-use core::sync::atomic::{AtomicI16, AtomicI32, AtomicU8, AtomicU32};
+use core::sync::atomic::{AtomicI32, AtomicU8};
 use heapless::Vec;
 
-use crate::motion_core::ArmedPiece;
-use crate::piece_ring::RingDescriptor;
-
 pub const MAX_AXES: usize = 8;
-
-/// Legacy alias kept for FFI / tick.rs call sites that reference N_AXES.
-pub const N_AXES: usize = MAX_AXES;
 
 pub const MAX_STEPPERS_PER_AXIS: usize = 4;
 
@@ -18,18 +12,13 @@ pub enum StepMode {
     Phase = 1,
 }
 
-#[allow(non_snake_case)]
 #[derive(Debug)]
 pub struct StepperRef {
     pub stepper_oid: u8,
     pub position_count: AtomicI32,
-    pub overlay_step_frame: AtomicI32,
-    pub overlay_step_phase_bits: AtomicU32,
     /// OID of `command_config_spi` for this stepper's TMC driver.
     /// `None` means Pulse-only (no SPI traffic for this stepper).
     pub tmc_cs_oid: Option<u8>,
-    pub last_coil_A: AtomicI16,
-    pub last_coil_B: AtomicI16,
     pub phase_offset_microsteps: AtomicI32,
     pub phase_offset_target: AtomicI32,
     pub last_phase_target: AtomicI32,
@@ -40,11 +29,7 @@ impl StepperRef {
         Self {
             stepper_oid,
             position_count: AtomicI32::new(0),
-            overlay_step_frame: AtomicI32::new(0),
-            overlay_step_phase_bits: AtomicU32::new(0),
             tmc_cs_oid,
-            last_coil_A: AtomicI16::new(0),
-            last_coil_B: AtomicI16::new(0),
             phase_offset_microsteps: AtomicI32::new(0),
             phase_offset_target: AtomicI32::new(0),
             last_phase_target: AtomicI32::new(0),
@@ -72,17 +57,9 @@ pub struct AxisState {
     pub mode: AtomicU8,
     pub steppers: Vec<StepperRef, MAX_STEPPERS_PER_AXIS>,
     pub microstep_distance: f32,
-    pub ring: RingDescriptor,
-    pub armed: Option<ArmedPiece>,
     pub last_step_count: i32,
-    pub step_phase: f32,
     pub p_prev: f32,
     pub v_prev: f32,
-    pub overlay_last_p: f32,
-    /// Steps this axis may emit in one sample before -310 latches. Computed
-    /// from the motor's pulse timing (edge mode + pulse width) at configure
-    /// time; conservative default until then.
-    pub max_steps_per_sample: u32,
 }
 
 impl AxisState {
@@ -91,47 +68,15 @@ impl AxisState {
             mode: AtomicU8::new(StepMode::Pulse as u8),
             steppers: Vec::new(),
             microstep_distance: 0.0,
-            ring: RingDescriptor::new_unconfigured(),
-            armed: None,
             last_step_count: 0,
-            step_phase: 0.0,
             p_prev: 0.0,
             v_prev: 0.0,
-            overlay_last_p: 0.0,
-            max_steps_per_sample: crate::sub_sample_timing::DEFAULT_MAX_STEPS_PER_SAMPLE,
         }
     }
 
     pub fn reset_isr_cache(&mut self) {
-        self.armed = None;
         self.last_step_count = 0;
-        self.step_phase = 0.0;
         self.p_prev = 0.0;
         self.v_prev = 0.0;
-        self.overlay_last_p = 0.0;
-    }
-}
-
-/// Backward-compat alias for call sites in tick.rs that still reference the old name.
-pub type AxisConfig = AxisState;
-
-#[derive(Debug)]
-pub struct TickCaches {
-    pub p_prev: [f32; MAX_AXES],
-    pub v_prev: [f32; MAX_AXES],
-}
-
-impl TickCaches {
-    pub const fn new() -> Self {
-        Self {
-            p_prev: [0.0; MAX_AXES],
-            v_prev: [0.0; MAX_AXES],
-        }
-    }
-}
-
-impl Default for TickCaches {
-    fn default() -> Self {
-        Self::new()
     }
 }

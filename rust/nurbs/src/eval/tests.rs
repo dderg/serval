@@ -250,3 +250,66 @@ fn curvature_of_arc_matches_known_value() {
     assert!(k > 0.0, "expected positive curvature, got {k}");
     assert!(k.is_finite(), "curvature should be finite");
 }
+
+fn lumpy_curve(degree: usize) -> crate::ScalarNurbs {
+    let interior = [0.3, 0.3, 0.55, 0.7];
+    let mut knots = vec![0.0; degree + 1];
+    knots.extend(interior);
+    knots.extend(vec![1.0; degree + 1]);
+    let control_points = (0..knots.len() - degree - 1)
+        .map(|i| libm::sin(i as f64 * 0.9) * 2.0 + 0.1 * i as f64)
+        .collect();
+    crate::ScalarNurbs::try_new(degree as u8, knots, control_points).unwrap()
+}
+
+#[test]
+fn eval_derivatives_match_the_hodograph_curves_at_every_order() {
+    for degree in [1usize, 2, 3, 5, 9, 11] {
+        let curve = lumpy_curve(degree);
+        let mut hodographs = vec![curve.clone()];
+        for _ in 0..degree {
+            hodographs.push(derivative(hodographs.last().unwrap()));
+        }
+        for i in 0..=40 {
+            let u = i as f64 / 40.0;
+            let mut out = [0.0; WORKSPACE_SIZE];
+            eval_derivatives(
+                curve.control_points(),
+                curve.knots(),
+                curve.degree(),
+                u,
+                degree + 2,
+                &mut out,
+            );
+            for (order, hodograph) in hodographs.iter().enumerate() {
+                let expected = eval(&hodograph.as_view(), u);
+                let scale = 1.0 + expected.abs();
+                assert!(
+                    (out[order] - expected).abs() <= 1e-9 * scale,
+                    "degree {degree} order {order} at {u}: {} vs {expected}",
+                    out[order]
+                );
+            }
+            assert_eq!(out[degree + 1], 0.0);
+            assert_eq!(out[degree + 2], 0.0);
+        }
+    }
+}
+
+#[test]
+fn eval_derivatives_take_the_right_hand_piece_at_a_c0_knot() {
+    let curve = crate::ScalarNurbs::try_new(
+        2,
+        vec![0.0, 0.0, 0.0, 0.5, 0.5, 1.0, 1.0, 1.0],
+        vec![0.0, 1.0, 0.0, 3.0, 0.0],
+    )
+    .unwrap();
+    let mut out = [0.0; WORKSPACE_SIZE];
+    eval_derivatives(curve.control_points(), curve.knots(), 2, 0.5, 1, &mut out);
+    assert_eq!(out[0], 0.0);
+    assert!(
+        (out[1] - 12.0).abs() < 1e-12,
+        "right-hand slope 2·(3−0)/0.5, got {}",
+        out[1]
+    );
+}

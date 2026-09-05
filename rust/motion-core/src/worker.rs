@@ -120,6 +120,15 @@ pub enum StreamMsg {
         params: NudgeParams,
         notify: Sender<Result<(), String>>,
     },
+    /// Arm a resonance buzz across every configured route in one atomic
+    /// request. The ingress drains the pipeline and fences the pump once, so
+    /// every route starts from a quiescent lane; the pump validates all
+    /// routes before it mutates any of them and returns a single token that
+    /// covers the whole set.
+    Buzz {
+        params: crate::pump::BuzzParams,
+        notify: Sender<Result<crate::pump::BuzzToken, String>>,
+    },
     Shutdown,
 }
 
@@ -174,6 +183,7 @@ pub struct DispatchResources {
     pub counter: Arc<AtomicU64>,
     pub active_drip_cohort: Arc<Mutex<Option<u64>>>,
     pub motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
+    pub transports: Arc<crate::axis_transport::AxisTransports>,
 }
 
 pub struct MotionPipeline {
@@ -182,6 +192,15 @@ pub struct MotionPipeline {
     /// paths that must act while the in-band stream is gated or stalled.
     pub pump_control: Sender<crate::pump::PumpMsg>,
     pub pump_thread: JoinHandle<()>,
+}
+
+/// The ingress's out-of-band handle on the pump, paired with the reason the
+/// pump stopped when it died on a latched endpoint fatal: a closed control
+/// channel is then a halt to ride out while klippy shuts down, not a stage
+/// death to abort on.
+pub struct PumpLink {
+    pub control: Sender<crate::pump::PumpMsg>,
+    pub transport_fatal: Arc<Mutex<Option<String>>>,
 }
 
 /// Boot-time constructor of the entire motion pipeline:
@@ -203,6 +222,17 @@ pub fn setup_pipeline(
     let (pump_control, control_rx) = pump_channel;
     let (pump_data, data_rx) =
         bounded::<crate::pump::EnqueueMsg>(crate::pump::PUMP_DATA_CHANNEL_CAP);
+    let transport_fatal: Arc<Mutex<Option<String>>> = Arc::default();
+    let mut callbacks = pump.callbacks;
+    let latch_fatal = callbacks.on_fatal_transport;
+    let transport_fatal_for_pump = Arc::clone(&transport_fatal);
+    let transport_fatal_for_ingress = Arc::clone(&transport_fatal);
+    callbacks.on_fatal_transport = Box::new(move |key, reason| {
+        transport_fatal_for_pump
+            .lock_ok()
+            .get_or_insert_with(|| reason.to_string());
+        latch_fatal(key, reason);
+    });
     let pump_thread = thread::Builder::new()
         .name("push-pieces-pump".into())
         .spawn(move || {
@@ -214,7 +244,7 @@ pub fn setup_pipeline(
                 control_rx,
                 data_rx,
                 pump.sink,
-                pump.callbacks,
+                callbacks,
                 Some(pump.history),
                 pump.drain,
                 pump.backlog,
@@ -224,15 +254,18 @@ pub fn setup_pipeline(
     let frontier: Arc<CommittedFrontier> = Arc::default();
     stage_cpu::spawn_sampler(Arc::downgrade(&frontier));
     let sink = PumpSink {
+        transports: dispatch.transports,
         router: dispatch.router,
         anchor: dispatch.anchor,
         mcu_configs: dispatch.mcu_configs,
         pump_tx: pump_data,
+        pump_control: Some(pump_control.clone()),
         counter: dispatch.counter,
         active_drip_cohort: dispatch.active_drip_cohort,
         motion_history: dispatch.motion_history,
         frontier: Arc::clone(&frontier),
         frozen_projection: Mutex::new(std::collections::HashMap::new()),
+        transport_fatal,
     };
     let worker = StreamWorkerHandle::spawn(
         config,
@@ -240,7 +273,10 @@ pub fn setup_pipeline(
         home_pos,
         sink,
         frontier,
-        Some(pump_control.clone()),
+        Some(PumpLink {
+            control: pump_control.clone(),
+            transport_fatal: transport_fatal_for_ingress,
+        }),
     );
     MotionPipeline {
         worker,
@@ -260,7 +296,7 @@ impl StreamWorkerHandle {
         home_pos: Vec<f64>,
         sink: impl SegmentSink,
         frontier: Arc<CommittedFrontier>,
-        pump_control: Option<Sender<crate::pump::PumpMsg>>,
+        pump: Option<PumpLink>,
     ) -> Self {
         let (tx, rx) = bounded(INPUT_CHANNEL_CAP);
         let links = Arc::new(WorkerLinks::default());
@@ -286,7 +322,7 @@ impl StreamWorkerHandle {
             intake: ingress::IntakeState::default(),
             reserve: ingress::DrainReserve::new(),
             last_line: 0,
-            pump_control,
+            pump,
         };
         let join = thread::Builder::new()
             .name("kalico-stream-worker".to_string())
@@ -436,6 +472,23 @@ impl StreamWorkerHandle {
         let (notify, result) = crossbeam_channel::bounded(1);
         self.sender
             .send(StreamMsg::Nudge { params, notify })
+            .map_err(|_| StreamWorkerError::ChannelClosed)?;
+        Ok(result)
+    }
+
+    /// Queue one buzz request behind everything already submitted. The
+    /// receiver yields the pump's single verdict: a token covering every
+    /// route, or the first route that failed validation with nothing armed.
+    pub fn submit_buzz(
+        &self,
+        params: crate::pump::BuzzParams,
+    ) -> Result<
+        crossbeam_channel::Receiver<Result<crate::pump::BuzzToken, String>>,
+        StreamWorkerError,
+    > {
+        let (notify, result) = crossbeam_channel::bounded(1);
+        self.sender
+            .send(StreamMsg::Buzz { params, notify })
             .map_err(|_| StreamWorkerError::ChannelClosed)?;
         Ok(result)
     }

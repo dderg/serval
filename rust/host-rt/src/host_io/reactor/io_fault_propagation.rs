@@ -2,7 +2,6 @@ use super::*;
 use crate::host_io::ReactorCommand;
 use crate::host_io::reactor::outbound::{PendingOutboundKind, PendingSubmission};
 use crate::host_io::test_harness::ReactorHarness;
-use mcu_transport;
 use runtime::error::FaultCode;
 use std::sync::Arc;
 use std::sync::mpsc::sync_channel;
@@ -199,9 +198,8 @@ fn kalico_call_io_error_transitions_closed() {
 
     let (completion_tx, completion_rx) = sync_channel(1);
     tx.send(ReactorCommand::McuCall {
-        channel: mcu_transport::CHANNEL_CONTROL,
-        kind: MessageKind::PushPieces,
-        body: vec![0; 16],
+        kind: MessageKind::QueryRuntimeCaps,
+        body: Vec::new(),
         completion: completion_tx,
         deadline: Instant::now() + Duration::from_secs(1),
     })

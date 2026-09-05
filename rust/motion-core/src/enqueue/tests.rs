@@ -1,104 +1,129 @@
 use super::*;
 use crate::kinematics::KinematicsModule;
-use crate::mcu_config::{AXIS_X, AXIS_Y, KINEMATICS_COREXY, McuCaps};
+use crate::mcu_config::{AXIS_X, AXIS_Y, KINEMATICS_COREXY};
+use geometry::path::{Line, PathSegment, Segment};
+use geometry::{LawSegment, Move, ScalarLaw, SourceRange, VelocityLimits};
+use trajectory::{MAX_SPAN_SECS, SurfaceMode};
 
-fn constant_axis(value: f64, n_pieces: usize, piece_dur: f64) -> ScalarNurbs {
-    let bern = [value; 4];
-    let mut pieces = Vec::with_capacity(n_pieces);
-    let mut u = 0.0_f64;
-    for _ in 0..n_pieces {
-        let u_end = u + piece_dur;
-        pieces.push(nurbs::bezier::BezierPiece::from_bernstein(&bern, u, u_end));
-        u = u_end;
+const CLOCK_FREQ_HZ: f64 = 1_000_000.0;
+const T0: f64 = 100.0;
+
+fn linear_span(delta: [f64; 3], duration: f64) -> Arc<AnalyticMoveSpan> {
+    let line = Line::try_new([0.0, 0.0, 0.0], delta).expect("a nonzero line");
+    let length = line.length();
+    let source = Move {
+        segment: PathSegment::try_new(Segment::Line(line), vec![]).expect("a follower-free path"),
+        feedrate_mm_s: 100.0,
+        limits: VelocityLimits::try_new(100.0, 1_000.0, 0.1, f64::INFINITY).expect("limits"),
+        source: SourceRange {
+            start_line: 0,
+            end_line: 0,
+        },
+    };
+    Arc::new(
+        AnalyticMoveSpan::try_new(
+            source,
+            Arc::from([LawSegment::new(
+                0.0,
+                duration,
+                0.0,
+                length / duration,
+                ScalarLaw::ConstAccel { a0: 0.0 },
+            )]),
+            0.0,
+            0.0,
+            duration,
+            Arc::from([0.0, 0.0, 0.0, 0.0]),
+            SurfaceMode::None,
+        )
+        .expect("a constant-velocity line span"),
+    )
+}
+
+fn analytic_seg(delta: [f64; 3], duration: f64, motor_mask: u8) -> ContinuousSegment {
+    let span = linear_span(delta, duration);
+    ContinuousSegment {
+        axes: (0..3)
+            .map(|axis| ContinuousAxis::Analytic {
+                span: Arc::clone(&span),
+                axis,
+            })
+            .collect(),
+        followers: Arc::from([]),
+        spatial_path: true,
+        t_start: 0.0,
+        t_end: duration,
+        motor_mask,
+        source_line: 0,
+        rest_at_end: true,
     }
-    nurbs::bezier::bezier_pieces_to_nurbs(&pieces)
 }
 
-fn multi_piece_axis(pieces_bern: &[([f64; 4], f64)]) -> ScalarNurbs {
-    let mut pieces = Vec::with_capacity(pieces_bern.len());
-    let mut u = 0.0_f64;
-    for (bern, dur) in pieces_bern {
-        let u_end = u + dur;
-        pieces.push(nurbs::bezier::BezierPiece::from_bernstein(bern, u, u_end));
-        u = u_end;
-    }
-    nurbs::bezier::bezier_pieces_to_nurbs(&pieces)
-}
-
-fn linear_axis(p0: f64, p1: f64) -> ScalarNurbs {
-    let d = p1 - p0;
-    let bern = [p0, p0 + d / 3.0, p0 + 2.0 * d / 3.0, p1];
-    let piece = nurbs::bezier::BezierPiece::from_bernstein(&bern, 0.0_f64, 1.0_f64);
-    nurbs::bezier::bezier_pieces_to_nurbs(&[piece])
-}
-
-fn seg_x_move() -> ShapedSegment {
-    ShapedSegment {
-        axes: vec![
-            linear_axis(0.0, 10.0),
-            linear_axis(0.0, 0.0),
-            linear_axis(0.0, 0.0),
-        ],
-        followers: vec![],
+fn hold_seg(positions: [f64; 3], duration: f64) -> ContinuousSegment {
+    ContinuousSegment {
+        axes: positions
+            .into_iter()
+            .map(|position| ContinuousAxis::Hold {
+                position,
+                t_start: 0.0,
+                t_end: duration,
+            })
+            .collect(),
+        followers: Arc::from([]),
         spatial_path: false,
         t_start: 0.0,
-        t_end: 1.0,
+        t_end: duration,
         motor_mask: 0,
         source_line: 0,
+        rest_at_end: true,
     }
 }
 
-#[test]
-fn cartesian_x_axis_yields_pieces_with_projected_start_time() {
-    let cfg = vec![McuAxisConfig {
+fn constant_spline(value: f64, duration: f64) -> ScalarNurbs {
+    ScalarNurbs::try_new(1, vec![0.0, 0.0, duration, duration], vec![value, value])
+        .expect("a degree-1 constant spline")
+}
+
+fn seg_x_move() -> ContinuousSegment {
+    analytic_seg([10.0, 0.0, 0.0], 1.0, 0)
+}
+
+fn ctx_projected<P: Fn(u32, f64) -> f64>(
+    epoch: crate::anchor::StreamEpoch,
+    project_exact: P,
+) -> EnqueueCtx<'static, P> {
+    EnqueueCtx {
+        epoch_freq: &|_| None,
+        clock_freq_hz: &|_| CLOCK_FREQ_HZ,
+        lane_is_phase: &|_| false,
+        t0: T0,
+        epoch,
+        host_now: 0.0,
+        lead_secs: crate::pump::MAX_LEAD_SECS,
+        project_exact,
+    }
+}
+
+fn ctx_with_epoch(
+    epoch: crate::anchor::StreamEpoch,
+) -> EnqueueCtx<'static, impl Fn(u32, f64) -> f64> {
+    ctx_projected(epoch, |_mcu, host_secs| host_secs * CLOCK_FREQ_HZ)
+}
+
+fn test_ctx() -> EnqueueCtx<'static, impl Fn(u32, f64) -> f64> {
+    ctx_with_epoch(crate::anchor::StreamEpoch::Reposition)
+}
+
+fn cartesian_cfg(mcu_id: u32, axes: Vec<usize>, ceiling: f64) -> Vec<McuAxisConfig> {
+    let count = axes.len();
+    vec![McuAxisConfig {
         ethercat: false,
-        mcu_id: 7,
-        axes: vec![AXIS_X, AXIS_Y, 2],
+        mcu_id,
+        axes,
         kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
-        max_motor_velocity: vec![f64::INFINITY; 3],
+        max_motor_velocity: vec![ceiling; count],
         ..Default::default()
-    }];
-
-    let msgs = enqueue_segment(
-        &seg_x_move(),
-        &cfg,
-        &crate::enqueue::EnqueueCtx {
-            epoch_freq: &|_| None,
-            t0: 100.0,
-            epoch: crate::anchor::StreamEpoch::Reposition,
-            host_now: 0.0,
-            lead_secs: crate::pump::MAX_LEAD_SECS,
-            project: |_mcu, hs| (hs * 1_000.0) as u64,
-            max_piece_secs: None,
-        },
-    );
-
-    let x = msgs
-        .iter()
-        .find(|m| m.key == AxisKey { mcu_id: 7, axis: 0 })
-        .expect("X axis EnqueueMsg must be present");
-
-    assert!(!x.pieces.is_empty(), "X must have at least one piece");
-    assert_eq!(
-        x.pieces[0].0.start_time, 100_000,
-        "start_time = (t0=100) * 1000 = 100_000"
-    );
-    assert!(
-        x.pieces.iter().all(|(p, _)| p.duration > 0.0),
-        "all piece durations must be positive"
-    );
-
-    assert!(
-        msgs.iter().any(|m| m.key == AxisKey { mcu_id: 7, axis: 1 }),
-        "Y axis must be emitted"
-    );
-    assert!(
-        msgs.iter().any(|m| m.key == AxisKey { mcu_id: 7, axis: 2 }),
-        "Z axis must be emitted"
-    );
+    }]
 }
 
 fn ec_cfg() -> Vec<McuAxisConfig> {
@@ -107,1077 +132,413 @@ fn ec_cfg() -> Vec<McuAxisConfig> {
         mcu_id: 9,
         axes: vec![AXIS_X, AXIS_Y],
         kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![f64::INFINITY; 2],
         ..Default::default()
     }]
 }
 
-fn test_ctx() -> crate::enqueue::EnqueueCtx<'static, impl Fn(u32, f64) -> u64> {
-    ctx_with_epoch(crate::anchor::StreamEpoch::Reposition)
-}
-
-fn ctx_with_epoch(
-    epoch: crate::anchor::StreamEpoch,
-) -> crate::enqueue::EnqueueCtx<'static, impl Fn(u32, f64) -> u64> {
-    crate::enqueue::EnqueueCtx {
-        epoch_freq: &|_| None,
-        t0: 100.0,
-        epoch,
-        host_now: 0.0,
-        lead_secs: crate::pump::MAX_LEAD_SECS,
-        project: |_mcu, hs| (hs * 1_000.0) as u64,
-        max_piece_secs: None,
-    }
-}
-
-/// An E-only (or otherwise servo-stationary) segment must enqueue no pieces
-/// for an ethercat lane: a parked drive receiving hold pieces trips the
-/// torque gate's pieces-while-parked fault, and an enabled drive already
-/// holds that exact target.
 #[test]
-fn ethercat_pure_hold_lane_is_skipped() {
-    let seg = ShapedSegment {
-        axes: vec![
-            constant_axis(25.0, 3, 0.4),
-            constant_axis(-7.5, 3, 0.4),
-            constant_axis(0.0, 3, 0.4),
-        ],
-        followers: vec![],
-        spatial_path: false,
-        t_start: 0.0,
-        t_end: 1.2,
-        motor_mask: 0,
-        source_line: 0,
-    };
-    let msgs = enqueue_segment(
-        &seg,
-        &ec_cfg(),
-        &ctx_with_epoch(crate::anchor::StreamEpoch::Continuation),
-    );
-    assert!(
-        msgs.is_empty(),
-        "constant ethercat lanes must enqueue nothing on a continuation, got {} msgs",
-        msgs.len()
-    );
-
-    let msgs = enqueue_segment(&seg, &ec_cfg(), &test_ctx());
-    assert_eq!(
-        msgs.len(),
-        2,
-        "a Reposition must reach every ethercat lane so the pump forgets its junction baseline"
-    );
-    assert!(
-        msgs.iter().all(|m| m.pieces.is_empty()
-            && m.epoch == crate::anchor::StreamEpoch::Reposition
-            && m.key.mcu_id == 9),
-        "pure-hold Reposition carriers must be piece-free epoch markers"
-    );
-}
-
-#[test]
-fn ethercat_moving_lane_still_streams() {
-    let msgs = enqueue_segment(
-        &seg_x_move(),
-        &ec_cfg(),
-        &ctx_with_epoch(crate::anchor::StreamEpoch::Continuation),
-    );
-    assert!(
-        msgs.iter().any(|m| m.key == AxisKey { mcu_id: 9, axis: 0 }),
-        "moving X lane must stream to the ethercat slot"
-    );
-    assert!(
-        !msgs.iter().any(|m| m.key == AxisKey { mcu_id: 9, axis: 1 }),
-        "stationary Y lane must be skipped while X moves"
-    );
-}
-
-#[test]
-fn serial_pure_hold_lane_still_streams() {
-    let mut cfg = ec_cfg();
-    cfg[0].ethercat = false;
-    let seg = ShapedSegment {
-        axes: vec![
-            constant_axis(25.0, 3, 0.4),
-            constant_axis(-7.5, 3, 0.4),
-            constant_axis(0.0, 3, 0.4),
-        ],
-        followers: vec![],
-        spatial_path: false,
-        t_start: 0.0,
-        t_end: 1.2,
-        motor_mask: 0,
-        source_line: 0,
-    };
-    let msgs = enqueue_segment(&seg, &cfg, &test_ctx());
-    assert!(
-        msgs.iter().any(|m| m.key == AxisKey { mcu_id: 9, axis: 0 }),
-        "serial stepper lanes keep their hold pieces byte-for-byte"
-    );
-}
-
-#[test]
-fn corexy_x_slot_is_x_plus_y() {
-    let cfg = vec![McuAxisConfig {
-        ethercat: false,
-        mcu_id: 1,
-        axes: vec![AXIS_X, AXIS_Y],
-        kinematics: KINEMATICS_COREXY,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
-        max_motor_velocity: vec![f64::INFINITY; 2],
-        ..Default::default()
-    }];
-
-    let seg = ShapedSegment {
-        axes: vec![
-            linear_axis(0.0, 10.0),
-            linear_axis(0.0, 4.0),
-            linear_axis(0.0, 0.0),
-        ],
-        followers: vec![],
-        spatial_path: false,
-        t_start: 0.0,
-        t_end: 1.0,
-        motor_mask: 0,
-        source_line: 0,
-    };
-
-    let msgs = enqueue_segment(
-        &seg,
-        &cfg,
-        &crate::enqueue::EnqueueCtx {
-            epoch_freq: &|_| None,
-            t0: 0.0,
-            epoch: crate::anchor::StreamEpoch::Reposition,
-            host_now: 0.0,
-            lead_secs: crate::pump::MAX_LEAD_SECS,
-            project: |_mcu, hs| (hs * 1_000.0) as u64,
-            max_piece_secs: None,
-        },
-    );
-
-    let a = msgs
-        .iter()
-        .find(|m| m.key == AxisKey { mcu_id: 1, axis: 0 })
-        .expect("motor-A (AXIS_X slot) must be present");
-
-    let last_pos = a.pieces.last().unwrap().0.pos_end();
-    assert!(
-        (last_pos - 14.0_f32).abs() < 1e-3,
-        "motor-A endpoint expected ≈14, got {last_pos}"
-    );
-
-    let b = msgs
-        .iter()
-        .find(|m| m.key == AxisKey { mcu_id: 1, axis: 1 })
-        .expect("motor-B (AXIS_Y slot) must be present");
-
-    let b_last = b.pieces.last().unwrap().0.pos_end();
-    assert!(
-        (b_last - 6.0_f32).abs() < 1e-3,
-        "motor-B endpoint expected ≈6, got {b_last}"
-    );
-}
-
-#[test]
-fn subdivide_preserves_curve_and_continuity() {
-    let bern = [1.0_f64, 4.0, 2.0, 8.0];
-    let d = 0.2_f64;
-    let mono = [
-        bern[0],
-        3.0 * (bern[1] - bern[0]) / d,
-        3.0 * (bern[2] - 2.0 * bern[1] + bern[0]) / d.powi(2),
-        (bern[3] - 3.0 * bern[2] + 3.0 * bern[1] - bern[0]) / d.powi(3),
-    ];
-    let pieces = subdivide_monomial(&mono, d, 0.025);
-    assert_eq!(pieces.len(), 8);
-    let total: f64 = pieces.iter().map(|(_, d)| *d).sum();
-    assert!((total - d).abs() < 1e-12);
-
-    let horner = |c: &[f64], tau: f64| c.iter().rev().fold(0.0_f64, |acc, &x| acc * tau + x);
-
-    for w in pieces.windows(2) {
-        let (c0, d0) = w[0].clone();
-        let (c1, _) = w[1].clone();
-        assert!((horner(&c0, d0) - horner(&c1, 0.0)).abs() < 1e-9);
-    }
-    for s in [0.0, 0.07, 0.13, 0.2] {
-        let direct = horner(&mono, s);
-        let mut acc = 0.0;
-        let mut found = None;
-        for (c, dur) in &pieces {
-            if s <= acc + dur + 1e-12 {
-                found = Some(horner(c, (s - acc).clamp(0.0, *dur)));
-                break;
-            }
-            acc += dur;
-        }
-        assert!((found.unwrap() - direct).abs() < 1e-9);
-    }
-}
-
-#[test]
-fn short_pieces_pass_through_unsplit() {
-    let pieces = subdivide_monomial(&[0.0, 1.0, 2.0, 3.0], 0.02, 0.025);
-    assert_eq!(pieces.len(), 1);
-}
-
-#[test]
-fn flatten_axis_max_piece_secs_splits_long_piece() {
-    let cfg = vec![McuAxisConfig {
-        ethercat: false,
-        mcu_id: 7,
-        axes: vec![AXIS_X],
-        kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
-        max_motor_velocity: vec![f64::INFINITY],
-        ..Default::default()
-    }];
-
-    fn linear_axis_scaled(p0: f64, p1: f64, duration: f64) -> ScalarNurbs {
-        let d = p1 - p0;
-        let bern = [p0, p0 + d / 3.0, p0 + 2.0 * d / 3.0, p1];
-        let piece = nurbs::bezier::BezierPiece::from_bernstein(&bern, 0.0_f64, duration);
-        nurbs::bezier::bezier_pieces_to_nurbs(&[piece])
-    }
-
-    let seg = ShapedSegment {
-        axes: vec![
-            linear_axis_scaled(0.0, 10.0, 0.2),
-            linear_axis_scaled(0.0, 0.0, 0.2),
-            linear_axis_scaled(0.0, 0.0, 0.2),
-        ],
-        followers: vec![],
-        spatial_path: false,
-        t_start: 0.0,
-        t_end: 0.2,
-        motor_mask: 0,
-        source_line: 0,
-    };
-
-    let msgs = enqueue_segment(
-        &seg,
-        &cfg,
-        &crate::enqueue::EnqueueCtx {
-            epoch_freq: &|_| None,
-            t0: 100.0,
-            epoch: crate::anchor::StreamEpoch::Reposition,
-            host_now: 0.0,
-            lead_secs: crate::pump::MAX_LEAD_SECS,
-            project: |_mcu, hs| (hs * 1_000.0) as u64,
-            max_piece_secs: Some(0.025),
-        },
-    );
+fn cartesian_x_axis_yields_views_anchored_on_the_exact_projection() {
+    let cfg = cartesian_cfg(7, vec![AXIS_X, AXIS_Y, 2], f64::INFINITY);
+    let msgs = enqueue_segment(&seg_x_move(), &cfg, &test_ctx()).expect("enqueue must succeed");
 
     let x = msgs
         .iter()
         .find(|m| m.key == AxisKey { mcu_id: 7, axis: 0 })
         .expect("X axis EnqueueMsg must be present");
 
-    assert_eq!(x.pieces.len(), 8, "0.2s / 0.025s = 8 sub-pieces");
+    let first = x.spans.first().expect("X must have at least one view");
+    assert_eq!(
+        first.start_clock,
+        (T0 * CLOCK_FREQ_HZ) as u64,
+        "the first view must start at project_exact(t0)"
+    );
+    assert!(
+        x.spans
+            .iter()
+            .all(|v| v.end_clock > v.start_clock && v.stream_t_end > v.stream_t_start),
+        "every view must span a positive duration and at least one clock"
+    );
+    assert!(
+        msgs.iter().any(|m| m.key == AxisKey { mcu_id: 7, axis: 1 }),
+        "Y axis must be emitted"
+    );
+    assert!(
+        msgs.iter().any(|m| m.key == AxisKey { mcu_id: 7, axis: 2 }),
+        "Z axis must be emitted"
+    );
+    assert!(
+        msgs.last().expect("at least one msg").batch_end,
+        "only the last message closes the batch"
+    );
+    assert_eq!(
+        msgs.iter().filter(|m| m.batch_end).count(),
+        1,
+        "exactly one batch_end per dispatch"
+    );
+}
 
-    for (p, _) in &x.pieces {
+/// An explicitly held (or otherwise servo-stationary) lane must enqueue no
+/// views for an ethercat lane: a parked drive receiving them trips the torque
+/// gate's motion-while-parked fault, and an enabled drive already holds that
+/// exact target.
+#[test]
+fn ethercat_explicit_hold_lane_is_skipped() {
+    let seg = hold_seg([25.0, -7.5, 0.0], 1.2);
+    let msgs = enqueue_segment(
+        &seg,
+        &ec_cfg(),
+        &ctx_with_epoch(crate::anchor::StreamEpoch::Continuation),
+    )
+    .expect("enqueue must succeed");
+    assert!(
+        msgs.is_empty(),
+        "explicitly held ethercat lanes must enqueue nothing on a continuation, got {} msgs",
+        msgs.len()
+    );
+
+    let msgs = enqueue_segment(&seg, &ec_cfg(), &test_ctx()).expect("enqueue must succeed");
+    assert_eq!(
+        msgs.len(),
+        2,
+        "a Reposition must reach every ethercat lane so the pump forgets its junction baseline"
+    );
+    assert!(
+        msgs.iter().all(|m| m.spans.is_empty()
+            && m.epoch == crate::anchor::StreamEpoch::Reposition
+            && m.key.mcu_id == 9),
+        "held Reposition carriers must be view-free epoch markers"
+    );
+}
+
+/// A lane whose analytic projection happens to be zero is not an explicit
+/// hold: the endpoint still owns a trajectory it must evaluate on its own
+/// clock, and hold merging may not rewrite its time domain.
+#[test]
+fn ethercat_analytic_lanes_always_stream_even_when_projection_is_zero() {
+    let msgs = enqueue_segment(
+        &seg_x_move(),
+        &ec_cfg(),
+        &ctx_with_epoch(crate::anchor::StreamEpoch::Continuation),
+    )
+    .expect("enqueue must succeed");
+    for axis in [0u8, 1] {
+        let msg = msgs
+            .iter()
+            .find(|m| m.key == AxisKey { mcu_id: 9, axis })
+            .unwrap_or_else(|| panic!("analytic lane {axis} must stream to the ethercat slot"));
+        assert!(!msg.spans.is_empty());
         assert!(
-            p.duration <= 0.025 + 1e-6,
-            "each piece duration must be ≤ 0.025+ε, got {}",
-            p.duration
-        );
-        assert!(p.duration > 0.0, "piece duration must be positive");
-    }
-
-    let times: Vec<u64> = x.pieces.iter().map(|(p, _)| p.start_time).collect();
-    for w in times.windows(2) {
-        assert!(w[1] > w[0], "start_times must be strictly increasing");
-    }
-
-    let host_sidecars: Vec<f64> = x.pieces.iter().map(|(_, hs)| *hs).collect();
-    for w in host_sidecars.windows(2) {
-        assert!(
-            (w[1] - w[0] - 0.025).abs() < 1e-9,
-            "host-time sidecar must advance by sub_dur=0.025, got delta {}",
-            w[1] - w[0]
+            !msg.spans[0].signal.is_explicit_hold,
+            "an analytic lane is never classified as an explicit hold"
         );
     }
 }
 
-fn axis_cfg_single(axis: usize) -> Vec<McuAxisConfig> {
-    vec![McuAxisConfig {
+#[test]
+fn serial_explicit_hold_lane_still_streams() {
+    let mut cfg = ec_cfg();
+    cfg[0].ethercat = false;
+    let msgs = enqueue_segment(&hold_seg([25.0, -7.5, 0.0], 1.2), &cfg, &test_ctx())
+        .expect("enqueue must succeed");
+    let held = msgs
+        .iter()
+        .find(|m| m.key == AxisKey { mcu_id: 9, axis: 0 })
+        .expect("serial stepper lanes keep their held views");
+    assert!(!held.spans.is_empty());
+    assert!(held.spans.iter().all(|v| v.signal.is_explicit_hold));
+}
+
+#[test]
+fn corexy_motor_lanes_are_the_sum_and_difference_of_the_axes() {
+    let cfg = vec![McuAxisConfig {
         ethercat: false,
         mcu_id: 1,
-        axes: vec![axis],
-        kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
-        max_motor_velocity: vec![f64::INFINITY],
+        axes: vec![AXIS_X, AXIS_Y],
+        kinematics: KINEMATICS_COREXY,
+        max_motor_velocity: vec![f64::INFINITY; 2],
         ..Default::default()
-    }]
-}
+    }];
+    let seg = analytic_seg([10.0, 4.0, 0.0], 1.0, 0);
+    let msgs = enqueue_segment(&seg, &cfg, &test_ctx()).expect("enqueue must succeed");
 
-#[test]
-fn constant_follower_axis_merges_all_knots_to_one_piece() {
-    let n_knots = 50;
-    let piece_dur = 0.43e-3_f64;
-    let total = n_knots as f64 * piece_dur;
-    let curve = constant_axis(5.0, n_knots, piece_dur);
-
-    let seg = ShapedSegment {
-        axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
-        followers: vec![],
-        spatial_path: false,
-        t_start: 0.0,
-        t_end: total,
-        motor_mask: 0,
-        source_line: 0,
-    };
-
-    let msgs = enqueue_segment(
-        &seg,
-        &axis_cfg_single(0),
-        &crate::enqueue::EnqueueCtx {
-            epoch_freq: &|_| None,
-            t0: 0.0,
-            epoch: crate::anchor::StreamEpoch::Reposition,
-            host_now: 0.0,
-            lead_secs: crate::pump::MAX_LEAD_SECS,
-            project: |_, hs| (hs * 1e9) as u64,
-            max_piece_secs: Some(0.025),
-        },
-    );
-
-    let axis = msgs
-        .iter()
-        .find(|m| m.key == AxisKey { mcu_id: 1, axis: 0 })
-        .expect("axis 0 must be present");
-
-    assert_eq!(
-        axis.pieces.len(),
-        1,
-        "{n_knots} constant knot pieces must merge to exactly 1 piece, got {}",
-        axis.pieces.len()
-    );
-
-    let (piece, host_secs) = &axis.pieces[0];
-    assert_eq!(*host_secs, 0.0, "merged piece host_secs must be t0=0");
-    assert!(
-        (piece.duration as f64 - total).abs() < 1e-9,
-        "merged duration must equal sum of knot durations {total}, got {}",
-        piece.duration
-    );
-    assert_eq!(piece.coeff_count, 1, "merged constant run must be degree 0");
-    assert!(
-        (piece.coeffs[0] - 5.0_f32).abs() < 1e-5,
-        "constant coefficient must equal 5.0, got {}",
-        piece.coeffs[0]
-    );
-}
-
-#[test]
-fn motion_constant_motion_merges_only_the_constant_run() {
-    let motion_up: [f64; 4] = [0.0, 1.0, 2.0, 3.0];
-    let const_at_3: [f64; 4] = [3.0, 3.0, 3.0, 3.0];
-    let motion_up2: [f64; 4] = [3.0, 4.0, 5.0, 6.0];
-    let dur = 0.01_f64;
-
-    let curve = multi_piece_axis(&[
-        (motion_up, dur),
-        (const_at_3, dur),
-        (const_at_3, dur),
-        (const_at_3, dur),
-        (motion_up2, dur),
-    ]);
-
-    let seg = ShapedSegment {
-        axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
-        followers: vec![],
-        spatial_path: false,
-        t_start: 0.0,
-        t_end: 5.0 * dur,
-        motor_mask: 0,
-        source_line: 0,
-    };
-
-    let msgs = enqueue_segment(
-        &seg,
-        &axis_cfg_single(0),
-        &crate::enqueue::EnqueueCtx {
-            epoch_freq: &|_| None,
-            t0: 0.0,
-            epoch: crate::anchor::StreamEpoch::Reposition,
-            host_now: 0.0,
-            lead_secs: crate::pump::MAX_LEAD_SECS,
-            project: |_, hs| (hs * 1e9) as u64,
-            max_piece_secs: None,
-        },
-    );
-
-    let axis = msgs
-        .iter()
-        .find(|m| m.key == AxisKey { mcu_id: 1, axis: 0 })
-        .expect("axis 0 must be present");
-
-    assert_eq!(
-        axis.pieces.len(),
-        3,
-        "motion + merged-constant + motion = 3 pieces, got {}",
-        axis.pieces.len()
-    );
-
-    let (_, host0) = axis.pieces[0];
-    let (merged, host1) = axis.pieces[1];
-    let (_, host2) = axis.pieces[2];
-
-    assert!(
-        (host0 - 0.0).abs() < 1e-12,
-        "first piece host_secs must be 0.0"
-    );
-    assert!(
-        (host1 - dur).abs() < 1e-12,
-        "constant run starts at t=dur, got {host1}"
-    );
-    assert!(
-        (merged.duration as f64 - 3.0 * dur).abs() < 1e-6,
-        "merged constant run duration must be 3*dur, got {}",
-        merged.duration
-    );
-    assert!(
-        (host2 - 4.0 * dur).abs() < 1e-12,
-        "second motion piece host_secs must be 4*dur, got {host2}"
-    );
-}
-
-#[test]
-fn constant_runs_at_different_values_do_not_merge_across_motion_boundary() {
-    let const_a: [f64; 4] = [2.0, 2.0, 2.0, 2.0];
-    let transition: [f64; 4] = [2.0, 3.0, 4.0, 5.0];
-    let const_b: [f64; 4] = [5.0, 5.0, 5.0, 5.0];
-    let dur = 0.01_f64;
-
-    let curve = multi_piece_axis(&[
-        (const_a, dur),
-        (const_a, dur),
-        (transition, dur),
-        (const_b, dur),
-        (const_b, dur),
-    ]);
-
-    let seg = ShapedSegment {
-        axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
-        followers: vec![],
-        spatial_path: false,
-        t_start: 0.0,
-        t_end: 4.0 * dur,
-        motor_mask: 0,
-        source_line: 0,
-    };
-
-    let msgs = enqueue_segment(
-        &seg,
-        &axis_cfg_single(0),
-        &crate::enqueue::EnqueueCtx {
-            epoch_freq: &|_| None,
-            t0: 0.0,
-            epoch: crate::anchor::StreamEpoch::Reposition,
-            host_now: 0.0,
-            lead_secs: crate::pump::MAX_LEAD_SECS,
-            project: |_, hs| (hs * 1e9) as u64,
-            max_piece_secs: None,
-        },
-    );
-
-    let axis = msgs
-        .iter()
-        .find(|m| m.key == AxisKey { mcu_id: 1, axis: 0 })
-        .expect("axis 0 must be present");
-
-    assert_eq!(
-        axis.pieces.len(),
-        3,
-        "const@2×2 + motion + const@5×2 → 3 pieces (two merged constant runs + one motion), got {}",
-        axis.pieces.len()
-    );
-
-    let (pa, _) = axis.pieces[0];
-    let (pb, _) = axis.pieces[1];
-    let (pc, _) = axis.pieces[2];
-
-    assert!(
-        (pa.coeffs[0] - 2.0_f32).abs() < 1e-5,
-        "first merged run must hold value 2.0, got {}",
-        pa.coeffs[0]
-    );
-    assert!(
-        (pa.duration as f64 - 2.0 * dur).abs() < 1e-9,
-        "first merged duration must be 2*dur, got {}",
-        pa.duration
-    );
-
-    assert!(
-        pb.coeff_count > 1,
-        "middle piece (transition) must not be constant, got coeff_count={}",
-        pb.coeff_count
-    );
-    assert!(
-        (pb.duration as f64 - dur).abs() < 1e-9,
-        "transition piece duration must be 1*dur, got {}",
-        pb.duration
-    );
-
-    assert!(
-        (pc.coeffs[0] - 5.0_f32).abs() < 1e-5,
-        "second merged run must hold value 5.0, got {}",
-        pc.coeffs[0]
-    );
-    assert!(
-        (pc.duration as f64 - 2.0 * dur).abs() < 1e-9,
-        "second merged duration must be 2*dur, got {}",
-        pc.duration
-    );
-}
-
-#[test]
-fn constant_run_subdivides_under_max_piece_secs_after_merging() {
-    let n_knots = 20;
-    let piece_dur = 0.005_f64;
-    let total = n_knots as f64 * piece_dur;
-    let curve = constant_axis(3.0, n_knots, piece_dur);
-
-    let seg = ShapedSegment {
-        axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
-        followers: vec![],
-        spatial_path: false,
-        t_start: 0.0,
-        t_end: total,
-        motor_mask: 0,
-        source_line: 0,
-    };
-
-    let max_piece = 0.025_f64;
-    let msgs = enqueue_segment(
-        &seg,
-        &axis_cfg_single(0),
-        &crate::enqueue::EnqueueCtx {
-            epoch_freq: &|_| None,
-            t0: 0.0,
-            epoch: crate::anchor::StreamEpoch::Reposition,
-            host_now: 0.0,
-            lead_secs: crate::pump::DRIP_WINDOW_SECS,
-            project: |_, hs| (hs * 1e9) as u64,
-            max_piece_secs: Some(max_piece),
-        },
-    );
-
-    let axis = msgs
-        .iter()
-        .find(|m| m.key == AxisKey { mcu_id: 1, axis: 0 })
-        .expect("axis 0 must be present");
-
-    let min_expected = (total / max_piece).floor() as usize;
-    assert!(
-        axis.pieces.len() >= min_expected,
-        "a homing follower's constant run must drip in <= max_piece_secs \
-         pieces (a whole-move piece never retires, pinning the cohort \
-         watchdog and escaping the dead-man leash); got {} pieces",
-        axis.pieces.len()
-    );
-    let sum: f64 = axis.pieces.iter().map(|(p, _)| p.duration as f64).sum();
-    assert!(
-        (sum - total).abs() < 1e-5,
-        "durations must sum to {total}, got {sum}"
-    );
-    for (p, _) in &axis.pieces {
-        assert!(p.duration as f64 <= max_piece + 1e-6);
-        assert_eq!(p.coeff_count, 1, "constant sub-piece must be degree 0");
-        assert!((f64::from(p.coeffs[0]) - 3.0).abs() < 1e-6);
-    }
-}
-
-#[test]
-fn constant_at_or_under_max_piece_secs_stays_whole() {
-    let subs = subdivide_monomial(&[2.0], 0.020, 0.025);
-    assert_eq!(subs.len(), 1);
-    assert_eq!(subs[0], (vec![2.0], 0.020));
-}
-
-fn shifted_axis(pieces_bern: &[([f64; 4], f64)], u_base: f64) -> ScalarNurbs {
-    let mut pieces = Vec::with_capacity(pieces_bern.len());
-    let mut u = u_base;
-    for (bern, dur) in pieces_bern {
-        let u_end = u + dur;
-        pieces.push(nurbs::bezier::BezierPiece::from_bernstein(bern, u, u_end));
-        u = u_end;
-    }
-    nurbs::bezier::bezier_pieces_to_nurbs(&pieces)
-}
-
-#[test]
-fn nonzero_curve_base_preserves_host_times() {
-    const U_BASE: f64 = 10.0;
-    let curve = shifted_axis(
-        &[
-            ([5.0; 4], 0.4),
-            ([5.0; 4], 0.4),
-            ([1.0, 2.0, 3.0, 4.0], 0.2),
-        ],
-        U_BASE,
-    );
-    let total = 1.0;
-
-    let seg = ShapedSegment {
-        axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
-        followers: vec![],
-        spatial_path: false,
-        t_start: U_BASE,
-        t_end: U_BASE + total,
-        motor_mask: 0,
-        source_line: 0,
-    };
-
-    let t0 = 100.0;
-    let msgs = enqueue_segment(
-        &seg,
-        &axis_cfg_single(0),
-        &crate::enqueue::EnqueueCtx {
-            epoch_freq: &|_| None,
-            t0,
-            epoch: crate::anchor::StreamEpoch::Reposition,
-            host_now: 0.0,
-            lead_secs: crate::pump::MAX_LEAD_SECS,
-            project: |_, hs| (hs * 1e9) as u64,
-            max_piece_secs: None,
-        },
-    );
-    let axis = msgs
-        .iter()
-        .find(|m| m.key == AxisKey { mcu_id: 1, axis: 0 })
-        .expect("axis 0 must be present");
-
-    assert_eq!(
-        axis.pieces.len(),
-        2,
-        "two constant knots merge, motion stays"
-    );
-    let host0 = axis.pieces[0].1;
-    let host1 = axis.pieces[1].1;
-    assert!(
-        (host0 - (t0 + U_BASE)).abs() < 1e-9,
-        "merged constant must start at t0 + u_base = {}, got {host0}",
-        t0 + U_BASE
-    );
-    assert!(
-        (host1 - (t0 + U_BASE + 0.8)).abs() < 1e-9,
-        "motion piece must start at t0 + u_base + 0.8 = {}, got {host1}",
-        t0 + U_BASE + 0.8
-    );
-}
-
-#[test]
-fn cartesian_lanes_are_bitwise_passthrough() {
-    let cartesian = KinematicsModule::from_tag(1).unwrap();
-    let seg_axes = vec![
-        linear_axis(0.0, 10.0),
-        linear_axis(0.0, 4.0),
-        linear_axis(0.0, 7.0),
-    ];
-    for lane in [AXIS_X, AXIS_Y, 2] {
-        assert_eq!(
-            lane_curve(&cartesian, &seg_axes, lane),
-            seg_axes[lane],
-            "cartesian lane {lane} must be a bit-identical clone of the source axis"
+    for (axis, expected) in [(0u8, 14.0_f64), (1, 6.0)] {
+        let msg = msgs
+            .iter()
+            .find(|m| m.key == AxisKey { mcu_id: 1, axis })
+            .unwrap_or_else(|| panic!("motor lane {axis} must be present"));
+        let signal = &msg.spans.last().expect("a trailing view").signal;
+        let end = signal.position(signal.t_end).expect("finite endpoint");
+        assert!(
+            (end - expected).abs() < 1e-9,
+            "motor-{axis} endpoint expected {expected}, got {end}"
         );
     }
 }
 
 #[test]
-fn corexy_lane_combine_matches_legacy_sum_difference() {
-    let corexy = KinematicsModule::from_tag(KINEMATICS_COREXY).unwrap();
-    let x = linear_axis(0.0, 10.0);
-    let y = linear_axis(0.0, 4.0);
-    let seg_axes = vec![x.clone(), y.clone(), linear_axis(0.0, 0.0)];
+fn corexy_lane_is_one_correlated_analytic_group() {
+    let module = KinematicsModule::from_tag(KINEMATICS_COREXY).expect("corexy tag");
+    let seg = analytic_seg([10.0, 4.0, 0.0], 1.0, 0);
 
-    let legacy_a = nurbs::algebra::add_with_knot_union(&x, &y).unwrap();
-    let legacy_b =
-        nurbs::algebra::add_with_knot_union(&x, &nurbs::algebra::scalar_multiply(&y, -1.0))
-            .unwrap();
+    for (lane, expected) in [
+        (AXIS_X, vec![(0usize, 1.0_f64), (1, 1.0)]),
+        (AXIS_Y, vec![(0, 1.0), (1, -1.0)]),
+    ] {
+        let span = lane_span(&module, &seg, lane).expect("a valid motor span");
+        assert_eq!(
+            span.groups.len(),
+            1,
+            "both terms share one AnalyticMoveSpan, so they must coalesce into one group"
+        );
+        match &span.groups[0] {
+            MotorGroup::Analytic { terms, .. } => assert_eq!(
+                terms
+                    .iter()
+                    .map(|t| (t.source_axis, t.scale))
+                    .collect::<Vec<_>>(),
+                expected,
+                "lane {lane} must carry the kinematic weights as correlated terms"
+            ),
+            other => panic!("lane {lane} must be one analytic group, got {other:?}"),
+        }
+    }
+}
 
-    assert_eq!(
-        lane_curve(&corexy, &seg_axes, AXIS_X),
-        legacy_a,
-        "corexy motor-A lane must match legacy add_with_knot_union(x, y) bit-for-bit"
-    );
-    assert_eq!(
-        lane_curve(&corexy, &seg_axes, AXIS_Y),
-        legacy_b,
-        "corexy motor-B lane must match legacy add_with_knot_union(x, -y) bit-for-bit"
-    );
+/// The correlation must survive into the bounds: a pure-Z move leaves both
+/// CoreXY motors exactly stationary, and independent per-axis boxes would
+/// instead bound them by the sum of two full spatial projections.
+#[test]
+fn corexy_pure_z_move_cancels_exactly_in_both_motor_lanes() {
+    let module = KinematicsModule::from_tag(KINEMATICS_COREXY).expect("corexy tag");
+    let seg = analytic_seg([0.0, 0.0, 5.0], 0.5, 0);
+
+    for lane in [AXIS_X, AXIS_Y] {
+        let span = lane_span(&module, &seg, lane).expect("a valid motor span");
+        let bounds = span.pva_bounds(span.t_start, span.t_end).expect("bounds");
+        assert_eq!(
+            (bounds.velocity_min, bounds.velocity_max),
+            (0.0, 0.0),
+            "lane {lane} must cancel to exactly zero velocity"
+        );
+        assert_eq!(bounds.acceleration_abs_max, 0.0);
+        assert!(
+            !span.is_explicit_hold,
+            "kinematic cancellation must not become hold-merge eligible"
+        );
+    }
+}
+
+#[test]
+fn cartesian_lane_is_a_single_unweighted_term_of_its_own_axis() {
+    let module = KinematicsModule::from_tag(1).expect("cartesian tag");
+    let seg = analytic_seg([10.0, 4.0, 7.0], 1.0, 0);
+    for lane in [AXIS_X, AXIS_Y, 2] {
+        let span = lane_span(&module, &seg, lane).expect("a valid motor span");
+        match &span.groups[..] {
+            [MotorGroup::Analytic { terms, .. }] => {
+                assert_eq!(terms.len(), 1);
+                assert_eq!((terms[0].source_axis, terms[0].scale), (lane, 1.0));
+                assert_eq!(terms[0].axis, seg.axes[lane]);
+            }
+            other => panic!("cartesian lane {lane} must pass its axis through, got {other:?}"),
+        }
+    }
 }
 
 #[test]
 fn follower_lanes_never_pass_through_the_spatial_matrix() {
-    let corexy = KinematicsModule::from_tag(KINEMATICS_COREXY).unwrap();
-    let seg_axes = vec![
-        linear_axis(0.0, 10.0),
-        linear_axis(0.0, 4.0),
-        linear_axis(0.0, 7.0),
-        linear_axis(0.0, 2.0),
-    ];
-    assert_eq!(
-        lane_curve(&corexy, &seg_axes, 3),
-        seg_axes[3],
-        "follower lane 3 must be the raw source curve, untouched by the spatial matrix"
+    let module = KinematicsModule::from_tag(KINEMATICS_COREXY).expect("corexy tag");
+    let mut seg = analytic_seg([10.0, 4.0, 7.0], 1.0, 0);
+    let mut axes = seg.axes.to_vec();
+    axes.push(ContinuousAxis::Spline(Arc::new(constant_spline(2.0, 1.0))));
+    seg.axes = axes.into();
+
+    let span = lane_span(&module, &seg, 3).expect("a valid motor span");
+    match &span.groups[..] {
+        [
+            MotorGroup::Spline {
+                curve,
+                summed_scale,
+            },
+        ] => {
+            assert_eq!(**curve, constant_spline(2.0, 1.0));
+            assert_eq!(*summed_scale, 1.0);
+        }
+        other => panic!("follower lane 3 must bypass the spatial matrix, got {other:?}"),
+    }
+}
+
+#[test]
+fn only_time_domain_holds_and_bit_identical_splines_are_explicit_holds() {
+    let module = KinematicsModule::from_tag(1).expect("cartesian tag");
+    let duration = 0.4;
+
+    let held = hold_seg([5.0, 5.0, 5.0], duration);
+    assert!(
+        lane_span(&module, &held, AXIS_X)
+            .expect("span")
+            .is_explicit_hold,
+        "a time-domain hold is an explicit hold"
     );
-}
 
-fn test_mcu_configs_one_axis(axis: usize) -> Vec<McuAxisConfig> {
-    vec![McuAxisConfig {
-        ethercat: false,
-        mcu_id: 1,
-        axes: vec![axis],
-        kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
-        max_motor_velocity: vec![f64::INFINITY],
-        ..Default::default()
-    }]
-}
+    let mut spline_seg = held.clone();
+    spline_seg.axes = (0..3)
+        .map(|_| ContinuousAxis::Spline(Arc::new(constant_spline(5.0, duration))))
+        .collect();
+    assert!(
+        lane_span(&module, &spline_seg, AXIS_X)
+            .expect("span")
+            .is_explicit_hold,
+        "a spline whose control points are bit-identical is an explicit hold"
+    );
 
-fn test_shaped_segment_single_axis(axis: usize, motor_mask: u8) -> ShapedSegment {
-    let mut axes: Vec<_> = (0..=axis)
-        .map(|i| {
-            if i == axis {
-                linear_axis(0.0, 10.0)
-            } else {
-                linear_axis(0.0, 0.0)
-            }
+    let mut drifting = held.clone();
+    drifting.axes = (0..3)
+        .map(|_| {
+            ContinuousAxis::Spline(Arc::new(
+                ScalarNurbs::try_new(
+                    1,
+                    vec![0.0, 0.0, duration, duration],
+                    vec![5.0, 5.000_000_001],
+                )
+                .expect("a degree-1 spline"),
+            ))
         })
         .collect();
-    if axes.len() < 3 {
-        while axes.len() < 3 {
-            axes.push(linear_axis(0.0, 0.0));
-        }
-    }
-    ShapedSegment {
-        axes,
-        followers: vec![],
-        spatial_path: false,
-        t_start: 0.0,
-        t_end: 1.0,
-        motor_mask,
-        source_line: 0,
-    }
-}
-
-#[test]
-fn enqueue_stamps_motor_mask_onto_every_piece() {
-    let seg = test_shaped_segment_single_axis(2, 0b0000_0010);
-    let cfgs = test_mcu_configs_one_axis(2);
-    let msgs = enqueue_segment(
-        &seg,
-        &cfgs,
-        &crate::enqueue::EnqueueCtx {
-            epoch_freq: &|_| None,
-            t0: 0.0,
-            epoch: crate::anchor::StreamEpoch::Reposition,
-            host_now: 0.0,
-            lead_secs: 0.25,
-            project: |_id, s| (s * 1e6) as u64,
-            max_piece_secs: None,
-        },
-    );
-    let all_pieces: Vec<_> = msgs.iter().flat_map(|m| m.pieces.iter()).collect();
-    assert!(!all_pieces.is_empty());
-    assert!(all_pieces.iter().all(|(p, _)| p.motor_mask == 0b0000_0010));
-}
-
-#[test]
-fn overlay_pieces_are_relativized_to_start_at_zero() {
-    let b0 = 0.5_f64;
-    let b3 = 0.6_f64;
-    let bern: [f64; 4] = [b0, b0 + (b3 - b0) / 3.0, b0 + 2.0 * (b3 - b0) / 3.0, b3];
-    let piece = nurbs::bezier::BezierPiece::from_bernstein(&bern, 0.0_f64, 0.5_f64);
-    let curve = nurbs::bezier::bezier_pieces_to_nurbs(&[piece]);
-
-    let make_seg = |motor_mask: u8| ShapedSegment {
-        axes: vec![curve.clone(), linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
-        followers: vec![],
-        spatial_path: false,
-        t_start: 0.0,
-        t_end: 0.5,
-        motor_mask,
-        source_line: 0,
-    };
-
-    let cfg = axis_cfg_single(0);
-
-    let overlay_msgs = enqueue_segment(
-        &make_seg(0b0000_0001),
-        &cfg,
-        &crate::enqueue::EnqueueCtx {
-            epoch_freq: &|_| None,
-            t0: 0.0,
-            epoch: crate::anchor::StreamEpoch::Reposition,
-            host_now: 0.0,
-            lead_secs: crate::pump::MAX_LEAD_SECS,
-            project: |_, hs| (hs * 1e9) as u64,
-            max_piece_secs: None,
-        },
-    );
-    let overlay_piece = &overlay_msgs[0].pieces[0].0;
     assert!(
-        overlay_piece.pos_start().abs() < 1e-6,
-        "overlay piece must start at 0, got {}",
-        overlay_piece.pos_start()
-    );
-    let span = overlay_piece.pos_end() - overlay_piece.pos_start();
-    let expected_span = (b3 - b0) as f32;
-    assert!(
-        (span - expected_span).abs() < 1e-5,
-        "overlay span must equal original displacement {expected_span}, got {span}"
+        !lane_span(&module, &drifting, AXIS_X)
+            .expect("span")
+            .is_explicit_hold,
+        "a super-resolution constant step is real motion, not a hold"
     );
 
-    let normal_msgs = enqueue_segment(
-        &make_seg(0),
-        &cfg,
-        &crate::enqueue::EnqueueCtx {
-            epoch_freq: &|_| None,
-            t0: 0.0,
-            epoch: crate::anchor::StreamEpoch::Reposition,
-            host_now: 0.0,
-            lead_secs: crate::pump::MAX_LEAD_SECS,
-            project: |_, hs| (hs * 1e9) as u64,
-            max_piece_secs: None,
-        },
-    );
-    let normal_piece = &normal_msgs[0].pieces[0].0;
+    let tiny = analytic_seg([1e-9, 0.0, 0.0], duration, 0);
     assert!(
-        (normal_piece.pos_start() - b0 as f32).abs() < 1e-5,
-        "normal piece must keep absolute b0={b0}, got {}",
-        normal_piece.pos_start()
-    );
-    assert!(
-        (normal_piece.pos_end() - b3 as f32).abs() < 1e-5,
-        "normal piece must keep absolute b3={b3}, got {}",
-        normal_piece.pos_end()
+        !lane_span(&module, &tiny, AXIS_X)
+            .expect("span")
+            .is_explicit_hold,
+        "a numerically small analytic move must not be classified as a hold"
     );
 }
 
 #[test]
-fn overlay_multi_piece_cumulative_positions_produce_individual_spans() {
-    let accel_end = 0.2_f64;
-    let cruise_span = 0.6_f64;
-    let decel_span = 0.2_f64;
-
-    let mk = |p0: f64, p1: f64, dur: f64| {
-        let d = p1 - p0;
-        let bern = [p0, p0 + d / 3.0, p0 + 2.0 * d / 3.0, p1];
-        nurbs::bezier::BezierPiece::from_bernstein(&bern, 0.0_f64, dur)
-    };
-
-    let accel = mk(0.0, accel_end, 0.1);
-    let cruise = mk(accel_end, accel_end + cruise_span, 0.2);
-    let decel = mk(
-        accel_end + cruise_span,
-        accel_end + cruise_span + decel_span,
-        0.1,
-    );
-
-    let mut u = 0.0_f64;
-    let pieces_with_u: Vec<nurbs::bezier::BezierPiece> =
-        [(accel, 0.1_f64), (cruise, 0.2), (decel, 0.1)]
-            .iter()
-            .map(|(bp, dur)| {
-                let p = nurbs::bezier::BezierPiece::from_bernstein(&bp.to_bernstein(), u, u + dur);
-                u += dur;
-                p
-            })
-            .collect();
-    let curve = nurbs::bezier::bezier_pieces_to_nurbs(&pieces_with_u);
-
-    let seg = ShapedSegment {
-        axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
-        followers: vec![],
-        spatial_path: false,
-        t_start: 0.0,
-        t_end: 0.4,
-        motor_mask: 0b0000_0001,
-        source_line: 0,
-    };
-
-    let cfg = axis_cfg_single(0);
-    let msgs = enqueue_segment(
-        &seg,
-        &cfg,
-        &crate::enqueue::EnqueueCtx {
-            epoch_freq: &|_| None,
-            t0: 0.0,
-            epoch: crate::anchor::StreamEpoch::Reposition,
-            host_now: 0.0,
-            lead_secs: crate::pump::MAX_LEAD_SECS,
-            project: |_, hs| (hs * 1e9) as u64,
-            max_piece_secs: None,
-        },
-    );
-    let all_pieces: Vec<_> = msgs.iter().flat_map(|m| m.pieces.iter()).collect();
-    assert_eq!(all_pieces.len(), 3, "trapezoid must yield 3 pieces");
-
-    let spans: Vec<f32> = all_pieces
+fn views_are_bounded_at_25ms_and_share_one_signal() {
+    let cfg = cartesian_cfg(7, vec![AXIS_X], f64::INFINITY);
+    let msgs = enqueue_segment(&analytic_seg([10.0, 0.0, 0.0], 0.2, 0), &cfg, &test_ctx())
+        .expect("enqueue must succeed");
+    let spans = &msgs
         .iter()
-        .map(|(p, _)| p.pos_end() - p.pos_start())
-        .collect();
-    let expected = [accel_end as f32, cruise_span as f32, decel_span as f32];
+        .find(|m| m.key == AxisKey { mcu_id: 7, axis: 0 })
+        .expect("X axis must be present")
+        .spans;
 
-    for (i, (got, &exp)) in spans.iter().zip(expected.iter()).enumerate() {
-        assert!(
-            (got - exp).abs() < 1e-5,
-            "piece {i} span must be {exp}, got {got}"
+    assert_eq!(spans.len(), 8, "0.2 s / 0.025 s = 8 views");
+    let signal = Arc::clone(&spans[0].signal);
+    for view in spans {
+        assert!(Arc::ptr_eq(&view.signal, &signal), "views are zero-copy");
+        assert!(view.stream_t_end - view.stream_t_start <= MAX_SPAN_SECS + 1e-12);
+    }
+    for pair in spans.windows(2) {
+        assert_eq!(
+            pair[0].end_clock, pair[1].start_clock,
+            "abutting views must share their seam clock exactly"
         );
-        let b0 = all_pieces[i].0.pos_start();
+        assert_eq!(pair[0].stream_t_end, pair[1].stream_t_start);
+    }
+    assert_eq!(spans[0].stream_t_start, 0.0);
+    assert!((spans[7].stream_t_end - 0.2).abs() < 1e-12);
+}
+
+#[test]
+fn rounded_endpoints_come_from_the_exact_anchor_not_from_each_other() {
+    let cfg = cartesian_cfg(7, vec![AXIS_X], f64::INFINITY);
+    let ctx = ctx_projected(
+        crate::anchor::StreamEpoch::Reposition,
+        |_mcu, host_secs: f64| host_secs * CLOCK_FREQ_HZ + 0.5,
+    );
+    let msgs = enqueue_segment(&analytic_seg([10.0, 0.0, 0.0], 0.07, 0), &cfg, &ctx)
+        .expect("enqueue must succeed");
+    let spans = &msgs[0].spans;
+
+    let base = (T0 * CLOCK_FREQ_HZ) + 0.5;
+    for view in spans {
+        assert_eq!(view.start_clock, view.start_clock_exact.round() as u64);
+        let expected_end =
+            view.start_clock_exact + (view.stream_t_end - view.stream_t_start) * view.clock_freq_hz;
+        assert_eq!(view.end_clock, expected_end.round() as u64);
         assert!(
-            b0.abs() < 1e-6,
-            "piece {i} must start at 0 (relativized), got b0={b0}"
+            (view.start_clock_exact - (base + view.stream_t_start * CLOCK_FREQ_HZ)).abs() < 1e-6,
+            "every view's exact anchor stays on the dispatch's affine map"
         );
     }
+}
+
+#[test]
+fn a_nonpositive_projected_clock_is_rejected() {
+    let cfg = cartesian_cfg(7, vec![AXIS_X], f64::INFINITY);
+    let ctx = ctx_projected(
+        crate::anchor::StreamEpoch::Reposition,
+        |_mcu, _host_secs| 0.0,
+    );
+    assert!(
+        matches!(
+            enqueue_segment(&seg_x_move(), &cfg, &ctx),
+            Err(ContinuousError::InvalidSpan {
+                reason: "projected start clock must be positive"
+            })
+        ),
+        "a clock at or before zero is not a dispatchable anchor"
+    );
+}
+
+#[test]
+fn a_sub_clock_span_emits_no_device_view() {
+    let cfg = cartesian_cfg(7, vec![AXIS_X], f64::INFINITY);
+    let mut ctx = test_ctx();
+    ctx.clock_freq_hz = &|_| 1.0;
+    let messages = enqueue_segment(&analytic_seg([10.0, 0.0, 0.0], 0.02, 0), &cfg, &ctx).unwrap();
+    assert!(messages.is_empty());
+}
+
+#[test]
+fn enqueue_stamps_the_motor_mask_onto_every_view() {
+    let cfg = cartesian_cfg(1, vec![2], f64::INFINITY);
+    let msgs = enqueue_segment(
+        &analytic_seg([0.0, 0.0, 10.0], 0.1, 0b0000_0010),
+        &cfg,
+        &test_ctx(),
+    )
+    .expect("enqueue must succeed");
+    let spans: Vec<_> = msgs.iter().flat_map(|m| m.spans.iter()).collect();
+    assert!(!spans.is_empty());
+    assert!(spans.iter().all(|v| v.signal.motor_mask == 0b0000_0010));
 }
 
 #[test]
 fn step_rate_within_ceiling_enqueues() {
-    let cfg = vec![McuAxisConfig {
-        ethercat: false,
-        mcu_id: 7,
-        axes: vec![AXIS_X, AXIS_Y, 2],
-        kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
-        max_motor_velocity: vec![50.0, 50.0, 50.0],
-        ..Default::default()
-    }];
-    // seg_x_move covers 10 mm in 1 s — 10 mm/s, comfortably under 50 mm/s.
-    let msgs = enqueue_segment(
-        &seg_x_move(),
-        &cfg,
-        &crate::enqueue::EnqueueCtx {
-            epoch_freq: &|_| None,
-            t0: 100.0,
-            epoch: crate::anchor::StreamEpoch::Reposition,
-            host_now: 0.0,
-            lead_secs: crate::pump::MAX_LEAD_SECS,
-            project: |_mcu, hs| (hs * 1_000.0) as u64,
-            max_piece_secs: None,
-        },
-    );
-    assert!(!msgs.is_empty());
+    let cfg = cartesian_cfg(7, vec![AXIS_X, AXIS_Y, 2], 50.0);
+    let msgs = enqueue_segment(&seg_x_move(), &cfg, &test_ctx()).expect("enqueue must succeed");
+    assert!(!msgs.is_empty(), "10 mm/s is comfortably under 50 mm/s");
 }
 
 #[test]
 #[should_panic(expected = "step rate exceeds MCU ceiling (-307)")]
 fn step_rate_over_ceiling_fails_loud() {
-    let cfg = vec![McuAxisConfig {
-        ethercat: false,
-        mcu_id: 7,
-        axes: vec![AXIS_X, AXIS_Y, 2],
-        kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
-        max_motor_velocity: vec![5.0, 5.0, 5.0],
-        ..Default::default()
-    }];
-    // 10 mm/s demand against a 5 mm/s ceiling must abort before the MCU
-    // would latch -310.
-    let _ = enqueue_segment(
-        &seg_x_move(),
-        &cfg,
-        &crate::enqueue::EnqueueCtx {
-            epoch_freq: &|_| None,
-            t0: 100.0,
-            epoch: crate::anchor::StreamEpoch::Reposition,
-            host_now: 0.0,
-            lead_secs: crate::pump::MAX_LEAD_SECS,
-            project: |_mcu, hs| (hs * 1_000.0) as u64,
-            max_piece_secs: None,
-        },
-    );
+    let cfg = cartesian_cfg(7, vec![AXIS_X, AXIS_Y, 2], 5.0);
+    let _ = enqueue_segment(&seg_x_move(), &cfg, &test_ctx());
 }
 
 #[test]
-fn wire_conversion_is_stable_for_degenerate_monomial_pieces() {
-    // Dumped from the beacon scan world: micron-scale wiggles carried by
-    // astronomically large high-order monomial coefficients (the Bernstein
-    // -> monomial form of short refit pieces). The wire path must reproduce
-    // the endpoint velocities, not amplify the representation.
-    let cases: [(&[f64], f64); 3] = [
-        (
-            &[
-                283.5219666246614,
-                766.0457904603335,
-                -8006.749983414673,
-                -896999.3794658832,
-                -43366405.328479744,
-                971766147.459237,
-                109018350026.89812,
-                -3283770381114.973,
-            ],
-            1.292e-2,
-        ),
-        (
-            &[
-                110.52631578947295,
-                725.5774209211204,
-                -2.0711482881069907e-7,
-                -1795460.2955709593,
-                7447230.794832499,
-                -1038860882.9561985,
-                234602761710.78116,
-                60.611655939161174,
-            ],
-            6.459e-3,
-        ),
-        (
-            &[
-                104.25336672135639,
-                137.37878622547987,
-                22057.916795512243,
-                1245412.0450424282,
-                -22810635.154832594,
-                -5634773910.426252,
-                164843014187.2756,
-                121.22331187832235,
-            ],
-            6.459e-3,
-        ),
-    ];
-    for (coeffs, dur) in cases {
-        // f64 truth at the endpoints.
-        let vel_true_start = coeffs[1];
-        let mut vel_true_end = 0.0;
-        for (k, &c) in coeffs.iter().enumerate().skip(1) {
-            vel_true_end += (k as f64) * c * dur.powi(k as i32 - 1);
-        }
-        let cheb = nurbs::chebyshev::monomial_tau_to_chebyshev(coeffs, dur);
-        let cheb = nurbs::chebyshev::truncate_chebyshev_c2(&cheb, dur, 1e-6, 1e-3, 0.1);
-        let mut entry = runtime::piece_ring::PieceEntry::zeroed();
-        entry.duration = dur as f32;
-        entry.coeff_count = cheb.len() as u8;
-        for (dst, &c) in entry.coeffs.iter_mut().zip(&cheb) {
-            *dst = c as f32;
-        }
-        assert!(
-            (f64::from(entry.vel_start()) - vel_true_start).abs() < 1.0,
-            "vel_start {} != {vel_true_start}",
-            entry.vel_start()
-        );
-        assert!(
-            (f64::from(entry.vel_end()) - vel_true_end).abs() < 1.0,
-            "vel_end {} != {vel_true_end}",
-            entry.vel_end()
-        );
-    }
+fn step_rate_over_ceiling_is_ignored_on_a_phase_routed_lane() {
+    // The Trident full-G28 crash of 2026-08-20: the pulse-path step-rate
+    // ceiling (step-pulse cost) does not bound a lane executing on the
+    // phase transport - coil writes carry no step pulses. The same
+    // over-ceiling demand that aborts a pulse lane must enqueue cleanly
+    // when the lane is phase-routed.
+    let cfg = cartesian_cfg(7, vec![AXIS_X, AXIS_Y, 2], 5.0);
+    let mut ctx = test_ctx();
+    ctx.lane_is_phase = &|_| true;
+    let msgs = enqueue_segment(&seg_x_move(), &cfg, &ctx).expect("enqueue must succeed");
+    assert!(!msgs.is_empty());
 }

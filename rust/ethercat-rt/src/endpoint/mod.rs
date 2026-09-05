@@ -1,15 +1,13 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::buzz::BuzzOsc;
 use crate::capture::{Capture, PendingStart, PendingStop};
-use crate::curves::AxisRing;
 use crate::damper::DiffDamperBank;
 use crate::dynamics::DynamicsModel;
 use crate::live_tap::LiveTap;
 use crate::mailbox::MailboxWorker;
-use crate::scale::CountMap;
 use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
+use crate::setpoint::{SampleGrid, SetpointEntry, SetpointRing};
 use crate::strain_comp::StrainCompBank;
 use crate::stream_halt::StreamHalt;
 use crate::torque::TorqueGate;
@@ -43,7 +41,6 @@ pub struct EndpointCtx {
     slave_axes: Vec<u8>,
     velocity_ff: Vec<bool>,
     torque_clamp_tenths: Vec<i16>,
-    ff_lead_ns: Vec<u64>,
     jump_log_counts: Vec<i64>,
     cycle_ns: i64,
     group_delay_ns: u64,
@@ -61,12 +58,26 @@ pub struct EndpointCtx {
     drive_scratch: cycle::DriveScratch,
     run_limits: Vec<(u32, u16)>,
 
-    rings: Vec<AxisRing>,
-    buzz: BuzzOsc,
+    sp_rings: Vec<SetpointRing>,
+    grid: SampleGrid,
+    /// Drive-frame counts that a lane's `pos_counts == 0` maps to, latched at
+    /// the first entry of each anchor epoch.
+    ring_origin: Vec<Option<i32>>,
+    /// Reused per-cycle buffer of the entries played this cycle, so the DC
+    /// path allocates nothing.
+    sp_play_scratch: Vec<Option<SetpointEntry>>,
+    /// Reused decode buffer for one lane block of a `PushSampleRuns` fill, so
+    /// the command path allocates nothing per frame.
+    sp_fill_scratch: Vec<SetpointEntry>,
+    /// Consumed `PushSampleRuns` payloads leave the DC thread here: their
+    /// vectors were allocated by the socket reader, so freeing them inline
+    /// would take that thread's allocator arena lock.
+    reclaim: crate::reclaim::Reclaim,
+    last_grid_index: u64,
+    last_grid_clock: u64,
     damper: DiffDamperBank,
     trim: DiffTrimBank,
     comp: StrainCompBank,
-    cmaps: Vec<Option<CountMap>>,
     last_counts: Vec<Option<i32>>,
     last_written_offset: Vec<i32>,
     report_anchor: Vec<Option<(i32, f64)>>,
@@ -79,7 +90,6 @@ pub struct EndpointCtx {
     gate: TorqueGate,
     capture: Capture,
     live_tap: LiveTap,
-    reclaim: crate::reclaim::Reclaim,
     tap_slots: Vec<u8>,
     cycle_index: u64,
     mailbox: MailboxWorker,
@@ -182,32 +192,71 @@ pub fn run(ctx: &mut EndpointCtx) {
     eprintln!("ec-rt: shutdown complete");
 }
 
+/// Per-lane progress the host paces its stream against: played ring cycles.
+pub(super) fn lane_progress(ctx: &EndpointCtx) -> Vec<u32> {
+    ctx.sp_rings
+        .iter()
+        .map(SetpointRing::played_count)
+        .collect()
+}
+
+/// Trajectory clock the DC grid stamps `index` with, off the same
+/// `(grid_index, grid_clock)` pair every `PushSampleRunsResponse` echoes, so
+/// the host's span clocks and this endpoint's cursor share one domain.
+fn grid_clock_of(ctx: &EndpointCtx, index: u64) -> u64 {
+    let interval_ns = ctx.grid.interval_ns();
+    if index >= ctx.last_grid_index {
+        ctx.last_grid_clock + (index - ctx.last_grid_index) * interval_ns
+    } else {
+        ctx.last_grid_clock
+            .saturating_sub((ctx.last_grid_index - index) * interval_ns)
+    }
+}
+
+/// Per-lane playback clock the heartbeat carries beside the progress counts:
+/// the exclusive cursor in trajectory nanoseconds, so the host retires a run
+/// exactly when its `end_clock` has been consumed. Zero until a lane plays.
+pub(super) fn lane_playback_clocks(ctx: &EndpointCtx) -> Vec<u64> {
+    ctx.sp_rings
+        .iter()
+        .map(|ring| {
+            ring.played_cursor()
+                .map_or(0, |index| grid_clock_of(ctx, index))
+        })
+        .collect()
+}
+
+pub(super) fn all_lanes_idle(ctx: &EndpointCtx) -> bool {
+    ctx.sp_rings.iter().all(SetpointRing::is_empty)
+}
+
 pub(super) fn respond_fault_heartbeat(
     ctx: &mut EndpointCtx,
     engine_state: u8,
     error_code: u16,
 ) -> Vec<u32> {
-    let retired: Vec<u32> = ctx.rings.iter().map(|r| r.retired_count()).collect();
+    let retired = lane_progress(ctx);
+    let playback = lane_playback_clocks(ctx);
     ctx.server.respond(&status_heartbeat_frame(
         engine_state,
         error_code,
         &retired,
+        &playback,
         ctx.ff_saturation,
     ));
     retired
 }
 
 pub(super) fn discard_motion(ctx: &mut EndpointCtx) {
-    for r in &mut ctx.rings {
+    for r in &mut ctx.sp_rings {
         r.reset();
     }
-    for c in &mut ctx.cmaps {
-        *c = None;
+    for o in &mut ctx.ring_origin {
+        *o = None;
     }
     for lc in &mut ctx.last_counts {
         *lc = None;
     }
-    ctx.buzz.clear();
     // A discard re-anchors the commanded frame (homing trip, stop, sensorless
     // trip), so the pin oscillator's predicted deflection is stale — restart
     // it clean.

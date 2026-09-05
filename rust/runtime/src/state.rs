@@ -1,23 +1,12 @@
 #![allow(unsafe_code)]
 
 use core::cell::UnsafeCell;
-use portable_atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU16, AtomicU32};
+use portable_atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU16, AtomicU32, AtomicU64};
 
 use crate::clock::WidenState;
 use crate::engine::Engine;
-use crate::piece_ring::PieceEntry;
 
 pub use crate::sizing::RT_STORAGE_SIZE;
-
-pub use crate::sizing::TOTAL_RING_PIECES;
-
-pub use crate::sizing::PIECE_RING_SIZE;
-
-// Guard against divisor drift between build.rs (which computes
-// TOTAL_RING_PIECES from the byte budget) and the actual PieceEntry size.
-#[allow(dead_code, clippy::integer_division)]
-const RING_PIECES_FROM_BYTES: usize = PIECE_RING_SIZE / core::mem::size_of::<PieceEntry>();
-const _: () = assert!(RING_PIECES_FROM_BYTES == TOTAL_RING_PIECES);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -123,28 +112,20 @@ pub struct SharedState {
     pub isr_widen_cycles_max: AtomicU32,
     pub isr_arm_cycles_max: AtomicU32,
     pub isr_eval_cycles_max: AtomicU32,
-    /// Increments per ISR that exceeds 30000 cycles (~58 µs) of total body
-    /// time — circuit-breaker signal.
-    pub isr_overrun_count: AtomicU32,
-    pub isr_last_t_start_lo: AtomicU32,
-    pub isr_last_p_end_bits: AtomicU32,
-    pub isr_last_microstep_bits: AtomicU32,
-    pub isr_step_push_count: AtomicU32,
-    pub isr_last_signed_steps: AtomicU32,
-    pub isr_pulse_call_count: AtomicU32,
-    pub isr_pulse_zero_step_count: AtomicU32,
-    pub isr_pulse_bad_mstep_count: AtomicU32,
-    pub isr_phase_call_count: AtomicU32,
-    /// Packed `(axis_idx << 16) | raw_mode_byte` from the most recent
-    /// `dispatch_axis` call.
-    pub isr_last_axis_mode_packed: AtomicU32,
-
-    pub queue_overflow_count: [AtomicU32; 4],
 
     pub sample_period_cycles: AtomicU32,
 
     pub max_phase_offset_ramp_per_sample: AtomicU16,
+
+    /// trsync trip handshake. The trip runs at a lower NVIC priority than
+    /// TIM5, so it may not touch `IsrState`: it publishes the halt clock here
+    /// and the next tick performs the halt. [`NO_HALT_REQUEST`] means idle, and
+    /// the first requester wins so a trip that signals every stepper still
+    /// halts every lane at one clock.
+    pub sample_halt_clock: AtomicU64,
 }
+
+pub const NO_HALT_REQUEST: u64 = u64::MAX;
 
 impl SharedState {
     pub const fn new() -> Self {
@@ -219,23 +200,11 @@ impl SharedState {
             isr_widen_cycles_max: AtomicU32::new(0),
             isr_arm_cycles_max: AtomicU32::new(0),
             isr_eval_cycles_max: AtomicU32::new(0),
-            isr_overrun_count: AtomicU32::new(0),
-            isr_last_t_start_lo: AtomicU32::new(0),
-            isr_last_p_end_bits: AtomicU32::new(0),
-            isr_last_microstep_bits: AtomicU32::new(0),
-            isr_step_push_count: AtomicU32::new(0),
-            isr_last_signed_steps: AtomicU32::new(0),
-            isr_pulse_call_count: AtomicU32::new(0),
-            isr_pulse_zero_step_count: AtomicU32::new(0),
-            isr_pulse_bad_mstep_count: AtomicU32::new(0),
-            isr_phase_call_count: AtomicU32::new(0),
-            isr_last_axis_mode_packed: AtomicU32::new(0),
-
-            queue_overflow_count: [const { AtomicU32::new(0) }; 4],
-
             sample_period_cycles: AtomicU32::new(0),
 
             max_phase_offset_ramp_per_sample: AtomicU16::new(0),
+
+            sample_halt_clock: AtomicU64::new(NO_HALT_REQUEST),
         }
     }
 }
@@ -252,17 +221,11 @@ impl Default for SharedState {
 /// `&mut RuntimeContext`. At most ONE `&mut FgState` OR `&mut IsrState`
 /// (disjoint memory) exists at a time. `shared` uses no `UnsafeCell` — all
 /// writes go through atomics.
-///
-/// C/Rust boundary: `piece_storage` lives inside the C-declared `rt_storage`
-/// buffer; C owns linker-section placement on the MCU
-/// (docs/rewrite/mcu-c-rust-boundary.md rule B2). No additional
-/// `#[link_section]` is needed here.
 #[allow(missing_debug_implementations)]
 pub struct RuntimeContext {
     pub fg: UnsafeCell<FgState>,
     pub isr: UnsafeCell<IsrState>,
     pub shared: SharedState,
-    pub piece_storage: UnsafeCell<[PieceEntry; TOTAL_RING_PIECES]>,
 }
 
 // SAFETY: `UnsafeCell` is `!Sync` by default — we provide `Sync` for
@@ -292,17 +255,6 @@ impl RuntimeContext {
         unsafe {
             let shared_ptr = core::ptr::addr_of_mut!((*rt_ptr).shared);
             shared_ptr.write(SharedState::new());
-
-            // `UnsafeCell` is `#[repr(transparent)]`; writing zeroes is safe
-            // because `PieceEntry` is `#[repr(C)]` with no padding and
-            // all-zero is a valid bit pattern.
-            let ps_ptr = core::ptr::addr_of_mut!((*rt_ptr).piece_storage);
-            core::ptr::write_bytes(
-                ps_ptr.cast::<u8>(),
-                0u8,
-                core::mem::size_of::<UnsafeCell<[crate::piece_ring::PieceEntry; TOTAL_RING_PIECES]>>(
-                ),
-            );
 
             let freq = core::ptr::read_volatile(core::ptr::addr_of!(runtime_clock_freq));
             let sample_rate_hz =
@@ -370,7 +322,7 @@ pub fn set_step_mode(
     Ok(())
 }
 
-/// Install the `motor_idx → kinematic slot` mapping `dispatch_phase` uses to
+/// Install the `motor_idx → kinematic slot` mapping `write_phase_coils` uses to
 /// address XDIRECT SPI writes, and mark the slot Modulated. Called from the
 /// foreground command path (C `runtime_register_phase_motor`), never the ISR.
 /// `Release` stores pair with the ISR's `Acquire` loads.

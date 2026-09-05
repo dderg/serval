@@ -225,28 +225,13 @@ class Motion:
             mcu_id, axis_idx, motor_mask, delta_mm, speed, accel
         )
 
-    def submit_resonance_buzz(
-        self,
-        axis_mask,
-        sign_mask,
-        freq_start_millihz,
-        freq_end_millihz,
-        amplitude_nm,
-        duration_ms,
-        ramp_ms,
-    ):
+    def submit_resonance_buzz(self, axis_mask, sign_mask, wave):
         from .extras import resonance_buzz
 
-        return resonance_buzz.submit_buzz(
-            self,
-            axis_mask,
-            sign_mask,
-            freq_start_millihz,
-            freq_end_millihz,
-            amplitude_nm,
-            duration_ms,
-            ramp_ms,
-        )
+        return resonance_buzz.submit_buzz(self, axis_mask, sign_mask, wave)
+
+    def resonance_buzz_done(self):
+        return self.engine.resonance_buzz_done()
 
     def set_extruder(self, extruder, extrude_pos):
         self.extruder = extruder
@@ -630,10 +615,17 @@ class Motion:
                 interval_s=0.010,
             )
 
+    def _schedulable_mcus(self):
+        return [
+            m
+            for m in self.all_mcus
+            if m is self.mcu or not m.non_critical_disconnected
+        ]
+
     def _schedule_floor(self):
         now = self.reactor.monotonic()
         return (
-            max(m.estimated_print_time(now) for m in self._engine_mcus())
+            max(m.estimated_print_time(now) for m in self._schedulable_mcus())
             + self.motion_lead
         )
 

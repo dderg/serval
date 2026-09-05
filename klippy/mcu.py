@@ -27,18 +27,36 @@ from .mcu_pins import (  # noqa: F401
     MCU_pwm,
 )
 
-STEPPING_MODE_PIECE = 0
-STEPPING_MODE_STEPCOMPRESS = 1
-STEPPING_MODES = {
-    "piece": STEPPING_MODE_PIECE,
-    "stepcompress": STEPPING_MODE_STEPCOMPRESS,
-}
+STEPCOMPRESS_MAX_ERROR_DEFAULT = 0.000025
+
+# Mirrors src/sample_wire.h / rust/runtime/src/sample_wire.rs. The wire
+# contract lives in one place per language and test_sample_wire.py asserts the
+# three copies agree.
+SAMPLE_ANCHOR_CMD = "sample_anchor oid=%c clock=%u position=%i"
+SAMPLE_RUN_CMD = "sample_run oid=%c interval=%u count=%c data=%*s"
+SAMPLE_OVERLAY_CMD = (
+    "sample_overlay oid=%c clock=%u interval=%u count=%c data=%*s"
+)
+SAMPLE_BARRIER_CMD = "sample_barrier oid=%c seq=%u"
+SAMPLE_BARRIER_ACK_MSG = "sample_barrier_ack oid=%c seq=%u"
+SAMPLE_GET_POSITION_CMD = "sample_get_position oid=%c"
+SAMPLE_POSITION_MSG = "sample_position oid=%c clock=%u position=%i"
+SAMPLE_COMMANDS = (
+    SAMPLE_ANCHOR_CMD,
+    SAMPLE_RUN_CMD,
+    SAMPLE_OVERLAY_CMD,
+    SAMPLE_BARRIER_CMD,
+    SAMPLE_GET_POSITION_CMD,
+)
+SAMPLE_RUN_DATA_MAX = 48
+SAMPLE_RUN_COUNT_MAX = 48
 
 
 class error(Exception):
     pass
 
 
+ENDPOINT_DEATH_POLL_PERIOD = 1.0
 # Minimum time host needs to get scheduled events queued into mcu
 MIN_SCHEDULE_TIME = 0.100
 # Maximum time all MCUs can internally schedule into the future.
@@ -47,26 +65,35 @@ MAX_NOMINAL_DURATION = 3.0
 
 # Wire-stable runtime fault codes; mirrors rust/runtime/src/error.rs FaultCode
 RUNTIME_FAULT_NAMES = {
-    -300: "StepQueueOverflow",
+    -29: "PhaseModeNotAvailable",
     -301: "SpiQueueOverflow",
     -302: "MathNonFinite",
-    -303: "PieceAdvanceUnderflow",
     -304: "SampleRateMisconfigured",
     -305: "PositionCountOverflow",
     -306: "JogParametersInvalid",
     -307: "StepRateExceedsMcuCeiling",
-    -308: "PieceStartInPast",
-    -309: "RingFull",
     -310: "StepsPerSampleExceeded",
     -311: "TickIntervalExceeded",
-    -312: "UnknownStepMode",
     -313: "PhaseMotorUnmapped",
     -314: "OverlayUnsupported",
-    -315: "BuzzAxisConflict",
-    -316: "BuzzInPhaseMode",
+    -317: "SampleRunLate",
+    -318: "SampleRingUnderrun",
+    -319: "SampleRingFull",
+    -320: "SampleLaneUnknown",
+    -321: "SampleRunRejected",
+    -322: "SampleBarrierOverflow",
 }
 # Faults whose detail packs (axis << 16) | value
-RUNTIME_FAULT_AXIS_DETAIL = frozenset([-308, -310, -312, -313])
+RUNTIME_FAULT_AXIS_DETAIL = frozenset([-29, -310, -313])
+# Sample-lane faults: detail packs (lane << 16) | value; the name is what the
+# low half counts, None when the code carries no value.
+RUNTIME_FAULT_LANE_DETAIL = {
+    -317: "deficit_ticks",
+    -318: "tail_delta_quanta",
+    -319: None,
+    -321: "run_fault",
+    -322: None,
+}
 
 
 def format_runtime_fault(fault_code, fault_detail, segment_id):
@@ -74,14 +101,16 @@ def format_runtime_fault(fault_code, fault_detail, segment_id):
     name = RUNTIME_FAULT_NAMES.get(code, "unknown fault")
     axis = (fault_detail >> 16) & 0xFF
     value = fault_detail & 0xFFFF
-    if code == -310:
-        at_least = "at least " if value == 0xFFFF else ""
-        info = (
-            "axis %d demanded %s%d steps in one sample, more than its "
-            "motor's per-sample step budget" % (axis, at_least, value)
-        )
-    elif code == -311:
+    if code == -311:
         info = "tick blocker pc=0x%08x" % (segment_id,)
+    elif code == -320:
+        info = "oid %d" % (value,)
+    elif code in RUNTIME_FAULT_LANE_DETAIL:
+        detail_name = RUNTIME_FAULT_LANE_DETAIL[code]
+        if detail_name is None:
+            info = "lane %d" % (axis,)
+        else:
+            info = "lane %d, %s %d" % (axis, detail_name, value)
     elif code in RUNTIME_FAULT_AXIS_DETAIL:
         info = "axis %d, detail %d" % (axis, value)
     else:
@@ -102,35 +131,24 @@ class MCU:
         self._init_serial_port(config)
         self._init_restart_state(config)
         self._init_config_state()
-        self._init_stepping_mode(config)
+        self._init_stepcompress(config)
         self._init_non_critical(config)
         self._init_event_handlers()
 
-    def _init_stepping_mode(self, config):
-        self._stepping_mode = config.getchoice(
-            "stepping_mode", STEPPING_MODES, "piece"
+    def _init_stepcompress(self, config):
+        max_error = config.getfloat(
+            "stepcompress_max_error", STEPCOMPRESS_MAX_ERROR_DEFAULT
         )
-        self._stepcompress_sample_rate = 0.0
-        if self._stepping_mode != STEPPING_MODE_STEPCOMPRESS:
-            return
-        rate = config.getfloat("stepcompress_sample_rate", None)
-        if rate is None:
+        if not math.isfinite(max_error) or max_error <= 0.0:
             raise config.error(
-                "mcu '%s': stepping_mode: stepcompress requires "
-                "stepcompress_sample_rate (Hz)" % (config.get_name(),)
+                "mcu '%s': stepcompress_max_error must be a finite "
+                "positive number of seconds, got %r"
+                % (config.get_name(), max_error)
             )
-        if not math.isfinite(rate) or rate <= 0.0:
-            raise config.error(
-                "mcu '%s': stepcompress_sample_rate must be a finite "
-                "positive frequency in Hz, got %r" % (config.get_name(), rate)
-            )
-        self._stepcompress_sample_rate = rate
+        self._stepcompress_max_error = max_error
 
-    def get_stepping_mode(self):
-        return self._stepping_mode
-
-    def get_stepcompress_sample_rate(self):
-        return self._stepcompress_sample_rate
+    def get_stepcompress_max_error(self):
+        return self._stepcompress_max_error
 
     def get_move_queue_slots(self):
         return self._move_queue_slots
@@ -670,6 +688,11 @@ class MCU:
                     raw_dict = raw_dict.encode("utf-8")
                 self.engine_mcu.set_msgproto_dict(raw_dict)
             self.engine_mcu.claim(self._serialport or "", int(self._baud or 0))
+            # This MCU just booted (or rebooted): its tick counter restarted,
+            # so any record from the previous boot epoch projects clocks that
+            # are wrong by the previous boot's uptime. Drop it; the clocksync
+            # callback below re-arms it once the regression converges.
+            self.engine_mcu.invalidate_clock_est()
             if not self._mcu_freq:
                 raise error(
                     "MCU '%s': CLOCK_FREQ unknown at engine claim time"
@@ -681,12 +704,9 @@ class MCU:
             reactor = self._reactor
 
             def _engine_clock_est_cb(
-                freq, offset, last_clock, e=emcu, r=reactor
+                freq, offset, last_clock, synced, e=emcu, r=reactor
             ):
-                try:
-                    e.set_clock_est(freq, offset, last_clock, r.monotonic())
-                except Exception:
-                    logging.exception("motion_engine: set_clock_est failed")
+                e.set_clock_est(freq, offset, last_clock, synced, r.monotonic())
 
             self._clocksync.set_clock_est_callback(_engine_clock_est_cb)
 
@@ -707,6 +727,21 @@ class MCU:
                 calc_freq_mhz,
             )
             pconfig.runtime_warning(msg)
+        self._reactor.register_timer(
+            self._poll_endpoint_death,
+            self._reactor.monotonic() + ENDPOINT_DEATH_POLL_PERIOD,
+        )
+
+    def _poll_endpoint_death(self, eventtime):
+        if not self.engine_mcu.is_claimed():
+            return self._reactor.NEVER
+        death = self.engine_mcu.take_endpoint_death()
+        if death is None:
+            return eventtime + ENDPOINT_DEATH_POLL_PERIOD
+        self._printer.invoke_shutdown(
+            "MCU '%s' motion endpoint died: %s" % (self._name, death)
+        )
+        return self._reactor.NEVER
 
     # Config creation helpers
     def setup_pin(self, pin_type, pin_params):

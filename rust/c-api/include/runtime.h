@@ -27,18 +27,11 @@ typedef struct StepperBindingRust {
   uint8_t _pad[2];
 } StepperBindingRust;
 
-extern void event_log_emit(uint8_t level,
-                           uint8_t subsystem,
-                           uint16_t event,
-                           uint16_t code,
-                           uint32_t arg0,
-                           uint32_t arg1);
-
 /**
- * Foreground-only, call under `irq_save` — the ISR mutates the armed
- * piece and a torn u64 read would fabricate a bogus stall window.
- * Returns 1 with the armed piece window, 0 when nothing is armed,
- * negative on error. `out_occupancy` is the axis ring depth in pieces.
+ * Foreground-only, call under `irq_save` — the ISR mutates the front sample
+ * run and a torn u64 read would fabricate a bogus stall window.
+ * Returns 1 with the front sample-run window, 0 when the lane is empty,
+ * negative on error. `out_occupancy` is the axis's queued sample-run count.
  */
 int32_t runtime_axis_head_window(struct Runtime *rt,
                                  uint32_t axis_idx,
@@ -54,37 +47,20 @@ int32_t runtime_clock_sync_request(struct Runtime *rt,
                                    uint32_t host_send_time_hi,
                                    uint64_t *out_mcu_clock);
 
-int32_t runtime_commit_head(struct Runtime *rt,
-                            uint8_t axis_idx,
-                            uint16_t start_slot,
-                            uint8_t piece_count,
-                            uint32_t new_head);
-
 int32_t runtime_configure_axis(struct Runtime *rt,
                                uint8_t axis_idx,
                                uint8_t mode,
                                uint32_t microstep_distance_f32_bits,
-                               uint16_t ring_depth,
                                const struct StepperBindingRust *bindings_ptr,
                                uint8_t stepper_count);
 
 extern uint32_t runtime_cyccnt_read(void);
 
-/**
- * Step-output consumer entry for a phase-mode buzz: drive `axis_idx`'s coils
- * to base + `offset_steps` via XDIRECT. Called from `step_output_event` (TIM3
- * ISR), which forwards the runtime handle. Safe against the motion tick: TIM3
- * and TIM5 share NVIC priority (cannot interleave) and the tick skips its
- * phase dispatch for an XDIRECT-buzzing axis, so this is the sole coil writer.
- */
-void runtime_emit_xdirect(struct Runtime *rt, uint8_t axis_idx, int32_t offset_steps);
-
-int32_t runtime_gate_pieces(struct Runtime *rt);
-
 int32_t runtime_get_heartbeat(struct Runtime *rt,
                               uint8_t *out_engine_state,
                               uint16_t *out_fault_code,
                               uint32_t *out_retired,
+                              uint64_t *out_playback_clock,
                               uintptr_t max_axes);
 
 int32_t runtime_get_phase_state(struct Runtime *rt,
@@ -112,8 +88,6 @@ uint32_t runtime_handle_tick_blocker_pc(struct Runtime *rt);
 
 uint32_t runtime_handle_tick_counter(struct Runtime *rt);
 
-int32_t runtime_install_step_queues(struct Runtime *rt, uint8_t *queues);
-
 uint64_t runtime_now_ticks(struct Runtime *rt);
 
 int32_t runtime_phase_align_to(struct Runtime *rt, uint8_t stepper_oid, uint16_t target_phase);
@@ -123,8 +97,6 @@ int32_t runtime_phase_jog_to(struct Runtime *rt,
                              uint16_t target_phase,
                              uint16_t max_microsteps_per_sample);
 
-int32_t runtime_pieces_gated(struct Runtime *rt);
-
 int32_t runtime_query_motor_state(struct Runtime *rt,
                                   uint8_t *out_slots,
                                   int32_t *out_pos_q16,
@@ -133,22 +105,51 @@ int32_t runtime_query_motor_state(struct Runtime *rt,
 
 int32_t runtime_reset(struct Runtime *rt);
 
-int32_t runtime_resonance_buzz(struct Runtime *rt,
-                               uint8_t axis_mask,
-                               uint8_t sign_mask,
-                               uint32_t freq_start_millihz,
-                               uint32_t freq_end_millihz,
-                               uint32_t amplitude_nm,
-                               uint32_t duration_ms,
-                               uint32_t ramp_ms);
+int32_t runtime_sample_anchor(struct Runtime *rt, uint8_t oid, uint32_t clock, int32_t position);
+
+int32_t runtime_sample_barrier(struct Runtime *rt, uint8_t oid, uint32_t seq);
+
+/**
+ * trsync trip: publish a halt at `halt_clock`. Safe from the trip's IRQ
+ * context — the next tick applies it, so `IsrState` is never touched here.
+ */
+int32_t runtime_sample_halt(struct Runtime *rt, uint64_t halt_clock);
+
+int32_t runtime_sample_overlay(struct Runtime *rt,
+                               uint8_t oid,
+                               uint32_t clock,
+                               uint32_t interval_ticks,
+                               uint8_t count,
+                               const uint8_t *data,
+                               uint16_t data_len);
+
+/**
+ * Executed position for `sample_get_position`. Mirrors `stepper_get_position`:
+ * what actually reached the coils, not what is queued.
+ */
+int32_t runtime_sample_query(struct Runtime *rt,
+                             uint8_t oid,
+                             uint64_t *out_clock,
+                             int32_t *out_position);
+
+int32_t runtime_sample_run(struct Runtime *rt,
+                           uint8_t oid,
+                           uint32_t interval_ticks,
+                           uint8_t count,
+                           const uint8_t *data,
+                           uint16_t data_len);
+
+/**
+ * Pop one fence playback has passed. Returns 1 when one was written to the
+ * out params, 0 when none is ready. The caller loops until 0.
+ */
+int32_t runtime_sample_take_barrier_ack(struct Runtime *rt, uint8_t *out_oid, uint32_t *out_seq);
+
+int32_t runtime_seed_axis_count(struct Runtime *rt, uint8_t axis_idx, int32_t count);
 
 int32_t runtime_seed_position(struct Runtime *rt, int32_t x_q16, int32_t y_q16, int32_t z_q16);
 
 int32_t runtime_set_axis_mode(struct Runtime *rt, uint8_t axis_idx, uint8_t new_mode);
-
-int32_t runtime_set_axis_step_budget(struct Runtime *rt,
-                                     uint8_t axis_idx,
-                                     uint32_t max_steps_per_sample);
 
 int32_t runtime_set_stepper_offset(struct Runtime *rt,
                                    uint8_t stepper_idx,
@@ -156,13 +157,5 @@ int32_t runtime_set_stepper_offset(struct Runtime *rt,
                                    uint16_t max_microsteps_per_sample);
 
 void runtime_tick_sample(struct Runtime *rt);
-
-int32_t runtime_ungate_pieces(struct Runtime *rt);
-
-int32_t runtime_write_piece(struct Runtime *rt,
-                            uint8_t axis_idx,
-                            uint16_t start_slot,
-                            uint8_t index,
-                            const uint8_t *piece_ptr);
 
 #endif  /* RUNTIME_H */

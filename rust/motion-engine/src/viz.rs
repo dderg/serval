@@ -1,5 +1,7 @@
+use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use serde_json::Value;
 
 use snapshot_core::SnapshotParams;
 
@@ -36,30 +38,50 @@ pub(crate) fn pipeline_snapshot(
     )
     .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
+    let value = serde_json::to_value(&snap)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let Value::Object(fields) = value else {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "snapshot must serialize as a JSON object",
+        ));
+    };
     let dict = PyDict::new(py);
-    dict.set_item("raw_x", snap.raw_x)?;
-    dict.set_item("raw_y", snap.raw_y)?;
-
-    dict.set_item("traj_x_pieces", snap.traj_x_pieces)?;
-    dict.set_item("traj_y_pieces", snap.traj_y_pieces)?;
-    dict.set_item("traj_z_pieces", snap.traj_z_pieces)?;
-    dict.set_item("traj_e_pieces", snap.traj_e_pieces)?;
-    dict.set_item("traj_t_end", snap.traj_t_end)?;
-    dict.set_item("traversal_time_s", snap.traversal_time_s)?;
-
-    dict.set_item("seam_max_dp", snap.seam_max_dp.to_vec())?;
-    dict.set_item("seam_max_dv", snap.seam_max_dv.to_vec())?;
-    dict.set_item("seam_max_da", snap.seam_max_da.to_vec())?;
-    let worst = PyList::empty(py);
-    for s in &snap.worst_seams {
-        let d = PyDict::new(py);
-        d.set_item("t", s.t)?;
-        d.set_item("axis", s.axis)?;
-        d.set_item("dp", s.dp)?;
-        d.set_item("dv", s.dv)?;
-        d.set_item("da", s.da)?;
-        worst.append(d)?;
+    for (key, field) in &fields {
+        dict.set_item(key, json_to_py(py, field)?)?;
     }
-    dict.set_item("worst_seams", worst)?;
     Ok(dict.into())
+}
+
+/// The snapshot schema lives in `pipeline-snapshot`; the binding mirrors
+/// whatever it serializes, so a schema change never needs a field list here.
+fn json_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
+    Ok(match value {
+        Value::Null => py.None(),
+        Value::Bool(b) => b.into_py_any(py)?,
+        Value::Number(n) => match (n.as_i64(), n.as_u64()) {
+            (Some(i), _) => i.into_py_any(py)?,
+            (_, Some(u)) => u.into_py_any(py)?,
+            _ => n
+                .as_f64()
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!("unrepresentable number {n}"))
+                })?
+                .into_py_any(py)?,
+        },
+        Value::String(s) => s.into_py_any(py)?,
+        Value::Array(items) => {
+            let list = PyList::empty(py);
+            for item in items {
+                list.append(json_to_py(py, item)?)?;
+            }
+            list.into_py_any(py)?
+        }
+        Value::Object(map) => {
+            let dict = PyDict::new(py);
+            for (key, field) in map {
+                dict.set_item(key, json_to_py(py, field)?)?;
+            }
+            dict.into_py_any(py)?
+        }
+    })
 }

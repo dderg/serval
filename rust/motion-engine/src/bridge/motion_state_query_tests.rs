@@ -4,7 +4,10 @@ use super::{
 };
 use crate::kinematics::KinematicsKind;
 use crate::{motion_history::HistoryStore, types::AxisKey};
-use runtime::piece_ring::{MAX_PIECE_COEFFS, PieceEntry};
+use std::sync::Arc;
+use trajectory::{
+    ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm, NudgeProfile,
+};
 
 #[test]
 fn unfiltered_query_requires_every_motor_axis() {
@@ -58,18 +61,35 @@ fn history_rebases_use_the_router_clock_domain() {
 #[test]
 fn same_mcu_query_uses_wire_clock_instead_of_stale_host_projection() {
     let key = AxisKey { mcu_id: 7, axis: 3 };
-    let mut coeffs = [0.0; MAX_PIECE_COEFFS];
-    coeffs[0] = 5.0;
-    coeffs[1] = 5.0;
-    let piece = PieceEntry {
-        start_time: 0,
-        duration: 1.0,
-        coeff_count: 2,
-        coeffs,
-        ..PieceEntry::zeroed()
-    };
+    const FREQ_HZ: f64 = 1_000.0;
+    const START_HOST: f64 = 0.04;
+    let profile = NudgeProfile::try_new(10.0, 10.0, 0.0, 0.0).expect("cruise-only nudge profile");
+    let t_end = profile.t_end();
+    let signal = MotorSpan::try_new(
+        Arc::from([MotorGroup::Independent(MotorTerm {
+            source_axis: 0,
+            axis: ContinuousAxis::Nudge(profile),
+            scale: 1.0,
+        })]),
+        0.0,
+        t_end,
+        0,
+        0,
+        false,
+    )
+    .expect("a cruise ramp is dispatchable");
+    let span = ClockedMotorSpan::try_new(
+        Arc::new(signal),
+        0.0,
+        t_end,
+        START_HOST,
+        START_HOST + t_end,
+        0.0,
+        FREQ_HZ,
+    )
+    .expect("the projected view spans at least one clock");
     let mut store = HistoryStore::default();
-    store.record(key, &piece, 1_000.0, 0.04);
+    store.record(key, span).expect("history accepts the view");
 
     let exact = history_state_at_query(&store, key, 7, 500, 0.5, f64::INFINITY).unwrap();
     let projected = history_state_at_query(&store, key, 8, 500, 0.5, f64::INFINITY).unwrap();

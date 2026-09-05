@@ -1,4 +1,5 @@
 use super::*;
+use crate::host_io::fire_and_forget_depth::FIRE_AND_FORGET_HIGH_WATER;
 use crate::host_io::reactor::outbound::PendingOutboundKind;
 use crate::host_io::test_harness::ReactorHarness;
 use crate::host_io::window::MAX_PENDING_BLOCKS;
@@ -116,27 +117,29 @@ fn a8_pending_fire_and_submission_drain_in_fifo_order() {
 }
 
 #[test]
-fn a8_overflow_returns_backpressure_error() {
+fn a8_past_the_high_water_mark_every_payload_still_queues() {
     let mut h = ReactorHarness::new();
     fill_window(&mut h);
 
-    for _ in 0..PENDING_FIRE_AND_FORGET_CEILING {
+    for _ in 0..FIRE_AND_FORGET_HIGH_WATER {
         h.reactor
             .dispatch_fire_and_forget(vec![0x01], false)
-            .expect("enqueue should succeed up to ceiling");
+            .expect("enqueue should succeed up to the high water mark");
     }
     assert_eq!(
         h.reactor.outbound.pending_fire_and_forget.len(),
-        PENDING_FIRE_AND_FORGET_CEILING,
+        FIRE_AND_FORGET_HIGH_WATER,
     );
+    assert!(h.reactor.outbound.fire_and_forget_depth.at_high_water());
 
-    let result = h.reactor.dispatch_fire_and_forget(vec![0x02], false);
-    assert!(
-        matches!(result, Err(TransportError::Backpressure)),
-        "overflow must return Backpressure, got {result:?}",
-    );
+    h.reactor
+        .dispatch_fire_and_forget(vec![0x02], false)
+        .expect("the high water mark gates senders, it never discards a payload");
     assert_eq!(
         h.reactor.outbound.pending_fire_and_forget.len(),
-        PENDING_FIRE_AND_FORGET_CEILING,
+        FIRE_AND_FORGET_HIGH_WATER + 1,
     );
+    let (payload, is_get_clock, _) = h.reactor.outbound.pending_fire_and_forget.back().unwrap();
+    assert_eq!(payload, &vec![0x02u8]);
+    assert!(!is_get_clock);
 }

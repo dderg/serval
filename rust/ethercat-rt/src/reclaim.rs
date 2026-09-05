@@ -9,17 +9,18 @@
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use mcu_protocol::messages::PushPieces;
+use mcu_protocol::messages::PushSampleRuns;
 
 use crate::thread_prio::demote_to_normal_scheduling;
 
-/// PushPieces arrive at ~100 Hz during a print and the janitor drains every
-/// poll, so depth beyond a couple of poll intervals is dead weight.
+/// Sample-run frames arrive at a few hundred hertz during a print and the
+/// janitor drains every poll, so depth beyond a couple of poll intervals is
+/// dead weight.
 const RECLAIM_RING_CAPACITY: usize = 256;
 const RECLAIM_POLL: Duration = Duration::from_millis(10);
 
 pub struct Reclaim {
-    tx: Option<rtrb::Producer<PushPieces>>,
+    tx: Option<rtrb::Producer<PushSampleRuns>>,
     service: Option<JoinHandle<()>>,
 }
 
@@ -27,6 +28,7 @@ impl Reclaim {
     /// Spawn during bringup: under mlockall(MCL_FUTURE) a thread spawn
     /// prefaults and locks its stack, which is milliseconds — banned on the
     /// DC thread.
+    #[must_use]
     pub fn spawn() -> Self {
         let (tx, mut rx) = rtrb::RingBuffer::new(RECLAIM_RING_CAPACITY);
         let service = std::thread::Builder::new()
@@ -50,7 +52,7 @@ impl Reclaim {
 
     /// DC-thread side: wait-free. A full ring drops inline — rare, and the
     /// caller's `free_ns` span exposes it.
-    pub fn dispose(&mut self, msg: PushPieces) {
+    pub fn dispose(&mut self, msg: PushSampleRuns) {
         if let Some(tx) = &mut self.tx {
             let _ = tx.push(msg);
         }

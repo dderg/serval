@@ -7,11 +7,11 @@
 
 use motion_core::classify::build_move;
 use motion_core::enqueue::{EnqueueCtx, enqueue_segment};
-use motion_core::mcu_config::{McuAxisConfig, McuCaps};
+use motion_core::mcu_config::McuAxisConfig;
 use motion_core::seam_test_harness::{collect_shaped_segments_from_script, default_stream_config};
 use motion_pipeline::{Control, StreamInput};
-use runtime::piece_ring::PieceEntry;
 use std::collections::BTreeMap;
+use trajectory::{ClockedMotorSpan, ContinuousSegment};
 
 const SAMPLE_PERIOD_S: f64 = 250e-6;
 const STROKE_MM: f64 = 60.0;
@@ -28,18 +28,19 @@ struct Sample {
     source_line: u32,
 }
 
-fn sample_segments(segs: &[trajectory::ShapedSegment]) -> Vec<Sample> {
+fn sample_segments(segs: &[ContinuousSegment]) -> Vec<Sample> {
     let mut out = Vec::new();
     for seg in segs {
         let mut t = seg.t_start;
         while t < seg.t_end {
+            let axis_pos = |axis: usize| {
+                seg.eval_axis(axis, t)
+                    .expect("shaped axis evaluates inside its own segment domain")
+                    .position
+            };
             out.push(Sample {
                 t,
-                pos: [
-                    nurbs::eval::eval(&seg.axes[0], t),
-                    nurbs::eval::eval(&seg.axes[1], t),
-                    nurbs::eval::eval(&seg.axes[2], t),
-                ],
+                pos: [axis_pos(0), axis_pos(1), axis_pos(2)],
                 source_line: seg.source_line,
             });
             t += SAMPLE_PERIOD_S;
@@ -100,53 +101,33 @@ fn ident_script(limits: geometry::VelocityLimits) -> Vec<StreamInput> {
 
 const LANE_TICK_HZ: f64 = 1.0e6;
 const LANE_SAMPLE_TICKS: u64 = 250;
-
-fn eval_piece(p: &PieceEntry, u: f64) -> f64 {
-    let n = (p.coeff_count as usize).clamp(1, p.coeffs.len());
-    let (mut sum, mut t_prev, mut t_cur) = (0.0_f64, 1.0_f64, u);
-    for (k, &a) in p.coeffs[..n].iter().enumerate() {
-        let tk = match k {
-            0 => 1.0,
-            1 => u,
-            _ => {
-                let t = 2.0 * u * t_cur - t_prev;
-                t_prev = t_cur;
-                t_cur = t;
-                t
-            }
-        };
-        sum += f64::from(a) * tk;
-    }
-    sum
-}
+const LANE_T0_SECS: f64 = 1.0;
 
 /// Reconstruct a lane's commanded position exactly like the EtherCAT walker
-/// samples the piece stream at the DC cycle: inside a piece evaluate its
-/// Chebyshev polynomial, between pieces hold the last commanded position —
+/// samples the dispatched span stream at the DC cycle: inside a span evaluate
+/// it at the cycle's clock, between spans hold the last commanded position —
 /// so a seam gap becomes a single-sample jump, the bench weld signature.
-fn sample_lane(pieces: &[PieceEntry]) -> Vec<Sample> {
+fn sample_lane(spans: &[ClockedMotorSpan]) -> Vec<Sample> {
+    let at = |span: &ClockedMotorSpan, clock: u64| {
+        span.eval_at_clock(clock)
+            .expect("dispatched span evaluates inside its own clock domain")
+            .position
+    };
     let mut out = Vec::new();
-    let mut pos = f64::from(pieces[0].pos_start());
-    let end = pieces.last().unwrap().end_time(LANE_TICK_HZ as f32);
+    let mut pos = at(&spans[0], spans[0].start_clock);
+    let end = spans.last().unwrap().end_clock;
     let mut idx = 0;
-    let mut tick = pieces[0].start_time;
+    let mut tick = spans[0].start_clock;
     while tick <= end {
-        while idx < pieces.len() && pieces[idx].end_time(LANE_TICK_HZ as f32) <= tick {
-            pos = f64::from(pieces[idx].pos_end());
+        while idx < spans.len() && spans[idx].end_clock <= tick {
+            pos = at(&spans[idx], spans[idx].end_clock);
             idx += 1;
         }
-        if idx < pieces.len() {
-            let p = &pieces[idx];
-            if tick >= p.start_time {
-                let u = ((tick - p.start_time) as f64 / (f64::from(p.duration) * LANE_TICK_HZ))
-                    .clamp(0.0, 1.0)
-                    * 2.0
-                    - 1.0;
-                pos = eval_piece(p, u);
-            }
+        if idx < spans.len() && tick >= spans[idx].start_clock {
+            pos = at(&spans[idx], tick);
         }
         out.push(Sample {
-            t: tick as f64 / LANE_TICK_HZ,
+            t: tick as f64 / LANE_TICK_HZ - LANE_T0_SECS,
             pos: [pos, 0.0, 0.0],
             source_line: 0,
         });
@@ -155,37 +136,34 @@ fn sample_lane(pieces: &[PieceEntry]) -> Vec<Sample> {
     out
 }
 
-fn corexy_lane_pieces(segs: &[trajectory::ShapedSegment]) -> BTreeMap<u8, Vec<PieceEntry>> {
+fn corexy_lane_spans(segs: &[ContinuousSegment]) -> BTreeMap<u8, Vec<ClockedMotorSpan>> {
     let cfgs = vec![McuAxisConfig {
         ethercat: false,
         mcu_id: 0,
         axes: vec![0, 1],
         kinematics: 0,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
         max_motor_velocity: vec![f64::INFINITY; 2],
         ..Default::default()
     }];
-    let mut lanes: BTreeMap<u8, Vec<PieceEntry>> = BTreeMap::new();
+    let mut lanes: BTreeMap<u8, Vec<ClockedMotorSpan>> = BTreeMap::new();
     for seg in segs {
-        for msg in enqueue_segment(
+        let msgs = enqueue_segment(
             seg,
             &cfgs,
             &EnqueueCtx {
                 epoch_freq: &|_| None,
-                t0: 0.0,
+                lane_is_phase: &|_| false,
+                t0: LANE_T0_SECS,
                 epoch: motion_core::anchor::StreamEpoch::Continuation,
                 host_now: 0.0,
                 lead_secs: 0.25,
-                project: |_mcu, hs: f64| (hs * LANE_TICK_HZ) as u64,
-                max_piece_secs: None,
+                project_exact: |_mcu, hs: f64| hs * LANE_TICK_HZ,
+                clock_freq_hz: &|_| LANE_TICK_HZ,
             },
-        ) {
-            lanes
-                .entry(msg.key.axis)
-                .or_default()
-                .extend(msg.pieces.into_iter().map(|(p, _)| p));
+        )
+        .expect("corexy lanes enqueue without a continuous error");
+        for msg in msgs {
+            lanes.entry(msg.key.axis).or_default().extend(msg.spans);
         }
     }
     lanes
@@ -194,8 +172,13 @@ fn corexy_lane_pieces(segs: &[trajectory::ShapedSegment]) -> BTreeMap<u8, Vec<Pi
 #[test]
 fn ident_stroke_dwell_pattern_has_no_position_weld() {
     let mut cfg = default_stream_config();
-    cfg.limits = geometry::VelocityLimits::try_new(2800.0, 50000.0, 5.0, 100_000.0)
-        .expect("trident bench limits are valid");
+    cfg.limits = geometry::VelocityLimits::try_new(
+        2800.0,
+        50000.0,
+        geometry::corner_deviation_from_scv(5.0, 50000.0),
+        f64::INFINITY,
+    )
+    .expect("trident bench limits are valid");
 
     let segs = collect_shaped_segments_from_script(
         ident_script(cfg.limits),
@@ -224,11 +207,11 @@ fn ident_stroke_dwell_pattern_has_no_position_weld() {
         all.extend(welds.into_iter().map(|w| (axis, w)));
     }
 
-    for (lane, pieces) in corexy_lane_pieces(&segs) {
-        let lane_samples = sample_lane(&pieces);
+    for (lane, spans) in corexy_lane_spans(&segs) {
+        let lane_samples = sample_lane(&spans);
         eprintln!(
-            "lane {lane}: {} pieces, {} samples",
-            pieces.len(),
+            "lane {lane}: {} spans, {} samples",
+            spans.len(),
             lane_samples.len()
         );
         let welds = isolated_welds(&lane_samples, 0);

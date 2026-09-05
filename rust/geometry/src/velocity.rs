@@ -10,11 +10,11 @@ use crate::path::Segment;
 use crate::segment::SourceRange;
 
 mod disk;
-mod profile;
-mod ride;
+pub mod law;
+mod reconstruct;
 mod scurve;
 
-pub use profile::StraightPhase;
+pub use law::{LawSegment, ScalarLaw};
 
 use disk::Kinematics;
 
@@ -22,6 +22,7 @@ const VELOCITY_EPS_MM_S: f64 = 1e-9;
 const MIN_INTEGRATION_TOL: f64 = 1e-9;
 const NEGATIVE_VELOCITY_TOL_MM_S: f64 = 1e-6;
 const CONSISTENCY_TOL: f64 = 1e-6;
+const RECONSTRUCT_WORKERS_MAX: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VelSample {
@@ -36,12 +37,7 @@ pub struct MoveVelocity {
     pub exit_v: f64,
     pub peak_v: f64,
     pub samples: Vec<VelSample>,
-    /// Closed-form jerk phases in move-local time/arc-length. Present for
-    /// straight moves (the lowering emits one exact cubic per phase) and for
-    /// curved moves planned without a jerk limit (the lowering fits axis
-    /// positions against the phases' exact scalar profile instead of quintic
-    /// windows over `samples`). Empty for finite-jerk curved moves.
-    pub phases: Vec<StraightPhase>,
+    pub phases: Vec<LawSegment>,
     pub accel: f64,
     pub jerk: f64,
     pub length: f64,
@@ -103,6 +99,10 @@ impl BoundaryState {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VelocityError {
+    FiniteJerkUnsupported {
+        line_no: u32,
+        jerk: f64,
+    },
     Inconsistent {
         line_no: u32,
     },
@@ -125,17 +125,30 @@ pub enum VelocityError {
         line_no: u32,
         v: f64,
     },
-    /// The integration grid could not be refined into a reconstruction the
-    /// lowering can fit: member `member` of the run still rings `reversals`
-    /// times across `nodes` nodes.
-    GridBudget {
+    /// The seam plan handed a member an entry/exit pair its own exact disk
+    /// reach cannot connect — a planning bug, not a numeric residue.
+    Infeasible {
         line_no: u32,
-        nodes: usize,
-        reversals: usize,
         member: usize,
+        entry_v: f64,
+        exit_v: f64,
     },
     InvalidConfig,
 }
+
+impl std::fmt::Display for VelocityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FiniteJerkUnsupported { line_no, jerk } => write!(
+                f,
+                "line {line_no}: finite max_jerk {jerk} is not supported by the continuous trajectory pipeline; set [printer] max_jerk: 0"
+            ),
+            other => write!(f, "{other:?}"),
+        }
+    }
+}
+
+impl std::error::Error for VelocityError {}
 
 const REST_ANCHOR_ACCEL_EPS: f64 = 1e-3;
 
@@ -203,6 +216,49 @@ pub fn plan_velocity_stops(
     max_extrude_only_accel_mm_s2: f64,
     entry: BoundaryState,
 ) -> Result<VelocityProfile, VelocityError> {
+    plan_velocity_stops_reconstruct_prefix(
+        moves,
+        stop_before,
+        integration_tol,
+        max_extrude_only_velocity_mm_s,
+        max_extrude_only_accel_mm_s2,
+        entry,
+        moves.len(),
+    )
+}
+
+pub fn plan_velocity_stops_reconstruct_prefix(
+    moves: &[crate::Move],
+    stop_before: &[bool],
+    integration_tol: f64,
+    max_extrude_only_velocity_mm_s: f64,
+    max_extrude_only_accel_mm_s2: f64,
+    entry: BoundaryState,
+    reconstruct_count: usize,
+) -> Result<VelocityProfile, VelocityError> {
+    plan_velocity_stops_select_prefix(
+        moves,
+        stop_before,
+        integration_tol,
+        max_extrude_only_velocity_mm_s,
+        max_extrude_only_accel_mm_s2,
+        entry,
+        |_| reconstruct_count,
+    )
+}
+
+pub fn plan_velocity_stops_select_prefix<F>(
+    moves: &[crate::Move],
+    stop_before: &[bool],
+    integration_tol: f64,
+    max_extrude_only_velocity_mm_s: f64,
+    max_extrude_only_accel_mm_s2: f64,
+    entry: BoundaryState,
+    select_prefix: F,
+) -> Result<VelocityProfile, VelocityError>
+where
+    F: FnOnce(usize) -> usize,
+{
     let tol = integration_tol;
     validate_config(
         tol,
@@ -213,6 +269,12 @@ pub fn plan_velocity_stops(
 
     let n = moves.len();
     assert_eq!(stop_before.len(), n, "one stop flag per move");
+    if let Some(m) = moves.iter().find(|m| m.limits.max_jerk_mm_s3.is_finite()) {
+        return Err(VelocityError::FiniteJerkUnsupported {
+            line_no: m.source.start_line,
+            jerk: m.limits.max_jerk_mm_s3,
+        });
+    }
     if n == 0 {
         return Ok(VelocityProfile {
             moves: Vec::new(),
@@ -236,7 +298,20 @@ pub fn plan_velocity_stops(
     forward_pass(moves, &caps, &geo, &mut plan.v, tol)?;
     let (barrier, v_barrier) = reverse_brake_envelope(moves, &caps, &geo, &mut plan.v, tol)?;
     check_entry_brake(moves, &caps, &geo, &plan.v, entry, tol)?;
-    let (out, boundaries) = reconstruct_runs(moves, &caps, &plan, &geo, entry, tol, &mut report)?;
+    let reconstruct_count = select_prefix(barrier);
+    assert!(
+        reconstruct_count <= n,
+        "cannot reconstruct {reconstruct_count} moves from a {n}-move plan"
+    );
+    let (out, boundaries) = reconstruct_runs(
+        &moves[..reconstruct_count],
+        &caps[..reconstruct_count],
+        &plan,
+        &geo,
+        entry,
+        tol,
+        &mut report,
+    )?;
 
     Ok(VelocityProfile {
         moves: out,
@@ -531,35 +606,128 @@ fn reconstruct_runs(
         while run_end < n && !is_anchor[run_end] {
             run_end += 1;
         }
-        let members: Vec<disk::RunMember> = (run_start..run_end)
+        let run_members: Vec<disk::RunMember> = (run_start..run_end)
             .map(|j| disk::RunMember {
                 kin: &caps[j].kin,
                 exit_v: v[j + 1],
-                fwd_s: geo.arc_from_run_start[j],
             })
             .collect();
         let run_start_line = moves[run_start].source.start_line;
-        let (reconstructed, run_exit_states, reconstructed_phases) = disk::reconstruct_run(
-            &members,
-            geo.run_start_v[run_start],
-            geo.run_start_a[run_start],
-            tol,
-        )
-        .map_err(|e| match e {
-            disk::ReconstructError::Diverged => VelocityError::Diverged {
-                line_no: run_start_line,
-            },
-            disk::ReconstructError::GridBudget {
-                nodes,
-                reversals,
-                member,
-            } => VelocityError::GridBudget {
-                line_no: run_start_line,
-                nodes,
-                reversals,
-                member,
-            },
-        })?;
+        let entries = (0..run_members.len())
+            .map(|idx| {
+                if idx == 0 {
+                    geo.run_start_v[run_start]
+                } else {
+                    run_members[idx - 1].exit_v
+                }
+            })
+            .collect::<Vec<_>>();
+        let workers = if cfg!(not(target_arch = "wasm32")) {
+            std::thread::available_parallelism()
+                .map_or(1, |cores| cores.get())
+                .min(RECONSTRUCT_WORKERS_MAX)
+                .min(run_members.len())
+        } else {
+            1
+        };
+        let mut indexed_profiles = if workers > 1 {
+            let next_member = std::sync::atomic::AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                let next_member = &next_member;
+                let handles = (0..workers)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            let mut profiles = Vec::new();
+                            loop {
+                                let idx =
+                                    next_member.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let Some(member) = run_members.get(idx) else {
+                                    return profiles;
+                                };
+                                profiles.push((
+                                    idx,
+                                    reconstruct::member_profile(
+                                        idx,
+                                        member,
+                                        entries[idx],
+                                        member.exit_v,
+                                    ),
+                                ));
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .flat_map(|handle| {
+                        handle
+                            .join()
+                            .expect("velocity reconstruction thread panicked")
+                    })
+                    .collect::<Vec<_>>()
+            })
+        } else {
+            run_members
+                .iter()
+                .enumerate()
+                .map(|(idx, member)| {
+                    (
+                        idx,
+                        reconstruct::member_profile(idx, member, entries[idx], member.exit_v),
+                    )
+                })
+                .collect()
+        };
+        indexed_profiles.sort_by_key(|(idx, _)| *idx);
+        let reconstructed_phases = indexed_profiles
+            .into_iter()
+            .map(|(_, result)| {
+                result.map_err(|error| match error {
+                    reconstruct::ReconstructError::Diverged => VelocityError::Diverged {
+                        line_no: run_start_line,
+                    },
+                    reconstruct::ReconstructError::Infeasible {
+                        member,
+                        entry_v,
+                        exit_v,
+                    } => VelocityError::Infeasible {
+                        line_no: run_start_line,
+                        member,
+                        entry_v,
+                        exit_v,
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let reconstructed: Vec<Vec<(f64, f64, f64)>> = reconstructed_phases
+            .iter()
+            .enumerate()
+            .map(|(idx, segments)| {
+                let mut samples = sample_segments(segments);
+                let entry = if idx == 0 {
+                    geo.run_start_v[run_start]
+                } else {
+                    run_members[idx - 1].exit_v
+                };
+                if let Some(first) = samples.first_mut() {
+                    first.1 = entry;
+                }
+                if let Some(last) = samples.last_mut() {
+                    last.1 = run_members[idx].exit_v;
+                }
+                samples
+            })
+            .collect();
+        let run_exit_states: Vec<(f64, f64)> = reconstructed_phases
+            .iter()
+            .map(|segments| {
+                let (_, v, a) = segments
+                    .last()
+                    .expect("a member profile always carries at least one segment")
+                    .end_state();
+                (v, a)
+            })
+            .collect();
 
         for (idx, j) in (run_start..run_end).enumerate() {
             let kin = &caps[j].kin;
@@ -582,14 +750,11 @@ fn reconstruct_runs(
             }
             let peak_v = samples.iter().fold(0.0_f64, |acc, p| acc.max(p.v));
             let phases = reconstructed_phases[idx].clone();
-            // A straight move's phases give the exact traversal time; the sampled
-            // estimate mistimes the jerk-from-rest at v = 0 (the singularity the
-            // closed-form profile avoids), so prefer the phases when present.
-            report.traversal_time_s += if phases.is_empty() {
-                traversal_time(&samples)
-            } else {
-                phases.iter().map(|p| p.dt).sum()
-            };
+            assert!(
+                !phases.is_empty(),
+                "line {line_no}: non-zero-duration velocity move has no phases"
+            );
+            report.traversal_time_s += phases.iter().map(|p| p.dt).sum::<f64>();
 
             let disk_only = disk::disk_reach_v(kin, entry_v, kin.length, tol)
                 .ok_or(VelocityError::Diverged { line_no })?;
@@ -635,6 +800,26 @@ fn reconstruct_runs(
     Ok((out, boundaries))
 }
 
+/// Dense-enough exact samples off a member's law segments: the segment
+/// boundaries plus uniform interior points, every one evaluated from the law.
+fn sample_segments(segments: &[LawSegment]) -> Vec<(f64, f64, f64)> {
+    const INTERIOR: usize = 8;
+    let mut out = Vec::with_capacity(segments.len() * (INTERIOR + 1) + 1);
+    for seg in segments {
+        for i in 0..=INTERIOR {
+            let t = seg.t0 + seg.dt * (i as f64) / INTERIOR as f64;
+            let (s, v, a) = seg.state_at(t);
+            if out
+                .last()
+                .is_none_or(|&(prev_s, _, _): &(f64, f64, f64)| s > prev_s + 1e-12)
+            {
+                out.push((s, v, a));
+            }
+        }
+    }
+    out
+}
+
 fn first_negative_velocity(samples: &[VelSample]) -> Option<f64> {
     samples
         .iter()
@@ -642,6 +827,7 @@ fn first_negative_velocity(samples: &[VelSample]) -> Option<f64> {
         .find(|&v| v < -NEGATIVE_VELOCITY_TOL_MM_S)
 }
 
+#[cfg(test)]
 fn traversal_time(samples: &[VelSample]) -> f64 {
     samples
         .windows(2)
