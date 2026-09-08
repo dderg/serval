@@ -49,11 +49,10 @@ Three tiers, honestly applied:
 
 ## Known limits
 
-- **Jerk on corner blends: enforced, with one soft spot.** The jerk limit
-  applies through clothoid blends, including the rotating acceleration's
-  normal component. Where blend geometry makes the jerk budget infeasible
-  outright, the planner follows the hard acceleration limit instead and
-  jerk goes soft there (`rust/geometry/src/velocity/ride.rs`).
+- **No jerk limit.** The planner is second-order: velocity and
+  acceleration along the path, with the acceleration limit applied through
+  clothoid corner blends including the rotating acceleration's normal
+  component. Smoothness beyond that is the post-processor chains' job.
 - **No per-axis XY limits.** Global limits plus Z-only caps, nothing
   finer.
 - **Kinematics:** cartesian and corexy only.

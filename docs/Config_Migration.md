@@ -1,6 +1,6 @@
 # Migrating a printer configuration
 
-This guide covers the configuration changes required to run a mainline Klipper/Kalico printer configuration on this fork. The motion planner was replaced with a Rust jerk-limited streaming planner. Its motion topology is declared explicitly with `[kinematics]`, `[motor <name>]`, `[axis <name>]`, and `[post_processor <name>]` sections.
+This guide covers the configuration changes required to run a mainline Klipper/Kalico printer configuration on this fork. The motion planner was replaced with a Rust streaming planner. Its motion topology is declared explicitly with `[kinematics]`, `[motor <name>]`, `[axis <name>]`, and `[post_processor <name>]` sections.
 
 The old role-encoded `[stepper_x]`, `[stepper_y]`, and similar sections are rejected. `[printer] kinematics` is also rejected. A configuration with either form must be converted rather than carried forward.
 
