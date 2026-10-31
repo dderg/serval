@@ -15,6 +15,8 @@ mod tests;
 
 pub const MAX_SPAN_SECS: f64 = 0.025;
 
+const REST_VELOCITY_MM_S: f64 = 1e-3;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pva {
     pub position: f64,
@@ -1232,6 +1234,18 @@ impl ClockedMotorSpan {
 
     pub fn position_at_clock(&self, clock: u64) -> Result<f64, ContinuousError> {
         self.signal.position(self.stream_time_at_clock(clock)?)
+    }
+
+    // TODO(#424): a pressure-advance extruder stop parks with commanded velocity k·ë above
+    // REST_VELOCITY_MM_S. The drain knows it parked (Projection::mark_parked) but never tells
+    // the view, so this reports motion and the cursor samples that stop's end clock short of t_end.
+    #[must_use]
+    pub fn ends_at_rest(&self) -> bool {
+        self.signal.is_explicit_hold
+            || self
+                .signal
+                .eval_pva(self.stream_t_end)
+                .is_ok_and(|pva| pva.velocity.abs() <= REST_VELOCITY_MM_S)
     }
 
     pub fn split_max_duration(&self) -> Result<Vec<Self>, ContinuousError> {

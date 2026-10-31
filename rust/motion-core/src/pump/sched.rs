@@ -41,18 +41,6 @@ pub fn is_hold_span(span: &ClockedMotorSpan) -> bool {
 /// error is span-scaled and stays in the microseconds.
 pub const LANE_REJOIN_GAP_FLOOR_SECS: f64 = 1e-3;
 
-/// A lane whose last view ends slower than this parked at rest.
-pub const LANE_REJOIN_REST_VEL_MM_S: f64 = 1e-3;
-
-#[must_use]
-pub fn span_ends_at_rest(span: &ClockedMotorSpan) -> bool {
-    is_hold_span(span)
-        || span
-            .signal
-            .eval_pva(span.stream_t_end)
-            .is_ok_and(|pva| pva.velocity.abs() <= LANE_REJOIN_REST_VEL_MM_S)
-}
-
 impl AxisQueue {
     pub fn new(ring_depth: u32) -> Self {
         Self {

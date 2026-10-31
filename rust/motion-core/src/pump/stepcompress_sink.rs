@@ -1854,6 +1854,12 @@ impl StepcompressEndpoint {
                          {error}"
                     ))
                 })?;
+                if chunk_end == buzz.stream_t_end && !view.ends_at_rest() {
+                    return Err(self.fatal(&format!(
+                        "resonance buzz closes at {chunk_end} s still moving: the shim would \
+                         not sample its end, and the motor would rest off the base it closes on"
+                    )));
+                }
                 let chunk_end_clock = view.end_clock;
                 self.shim
                     .push_spans(motor, &[view])
@@ -2131,16 +2137,16 @@ impl StepcompressEndpoint {
         let Some(view) = spans.iter().rev().find(|view| view.signal.motor_mask == 0) else {
             return Ok(());
         };
-        let pva = view.eval_at_clock(view.end_clock).map_err(|error| {
+        let end = view.signal.position(view.stream_t_end).map_err(|error| {
             self.motor_fatal(
                 motor,
                 &format!(
-                    "queued view does not evaluate at its own end clock {}: {error}",
-                    view.end_clock
+                    "queued view does not evaluate at its own end {} s: {error}",
+                    view.stream_t_end
                 ),
             )
         })?;
-        self.lanes[motor].commanded_base = pva.position;
+        self.lanes[motor].commanded_base = end;
         Ok(())
     }
 

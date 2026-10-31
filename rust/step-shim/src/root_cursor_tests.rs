@@ -51,6 +51,7 @@ fn endpoint_roundoff_does_not_hide_a_monotonic_spline() {
         motor: 0,
         cfg: &config,
         view: &view,
+        rests_at_end: view.ends_at_rest(),
     };
     assert_eq!(
         cursor
