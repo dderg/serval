@@ -184,7 +184,6 @@ COPY --from=firmware /kalico/klippy/chelper/ /kalico/klippy/chelper/
 # Preload shims
 COPY --from=firmware \
     /kalico/tools/sim/preload/libvtime.so \
-    /kalico/tools/sim/preload/libvtime_clock_only.so \
     /kalico/tools/sim/preload/libsim_intercept.so \
     /kalico/tools/sim/preload/
 

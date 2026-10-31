@@ -5,15 +5,20 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/futex.h>
 #include <poll.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/select.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -36,6 +41,21 @@ static int (*real_ppoll)(struct pollfd *, nfds_t, const struct timespec *,
                           const sigset_t *) = NULL;
 static int (*real_select)(int, fd_set *, fd_set *, fd_set *,
                            struct timeval *) = NULL;
+static int (*real_pselect)(int, fd_set *, fd_set *, fd_set *,
+                            const struct timespec *, const sigset_t *) = NULL;
+static int (*real_epoll_pwait)(int, struct epoll_event *, int, int,
+                                const sigset_t *) = NULL;
+static int (*real_epoll_pwait2)(int, struct epoll_event *, int,
+                                 const struct timespec *,
+                                 const sigset_t *) = NULL;
+static long (*real_syscall)(long, ...) = NULL;
+static int (*real_pthread_cond_timedwait)(pthread_cond_t *, pthread_mutex_t *,
+                                          const struct timespec *) = NULL;
+static int (*real_pthread_cond_clockwait)(pthread_cond_t *, pthread_mutex_t *,
+                                          clockid_t,
+                                          const struct timespec *) = NULL;
+static int (*real_sem_clockwait)(sem_t *, clockid_t,
+                                 const struct timespec *) = NULL;
 static int (*real_timer_create)(clockid_t, struct sigevent *,
                                  timer_t *) = NULL;
 static int (*real_timer_settime)(timer_t, int, const struct itimerspec *,
@@ -167,15 +187,80 @@ vtime_advance_to(uint64_t target_ns)
     }
 }
 
-static uint64_t
-vtime_advance_by(uint64_t delta_ns)
+static void vtimer_check_and_fire(void);
+
+// Non-blocking: raise virtual time toward `target` as far as the speed cap
+// and every pacer floor allow.
+static void
+vtime_nudge(uint64_t target)
 {
-    uint64_t target = vtime_now() + delta_ns;
-    vtime_advance_to(target);
-    return target;
+    uint64_t bound = vtime_speed_cap();
+    uint64_t floor = pacer_floor_min();
+    if (floor < bound)
+        bound = floor;
+    vtime_raise_to(target < bound ? target : bound);
 }
 
-static void vtimer_check_and_fire(void);
+#define WAIT_SLICE_MIN_NS 50000ULL
+#define WAIT_SLICE_MAX_NS 20000000ULL
+#define NO_DEADLINE UINT64_MAX
+
+// A timed wait in the thread that owns the virtual timer (the MCU main
+// thread sleeping in ppoll until SIGALRM) must also stop at that timer.
+static uint64_t
+wait_target(uint64_t deadline)
+{
+    pthread_mutex_lock(&vtimer.lock);
+    if (vtimer.armed && pthread_equal(vtimer.owner, pthread_self())
+        && vtimer.target_ns < deadline)
+        deadline = vtimer.target_ns;
+    pthread_mutex_unlock(&vtimer.lock);
+    return deadline;
+}
+
+// One step of every timed wait on a virtual-clock deadline: advance virtual
+// time toward it, fire a due virtual timer, and return how long to block in
+// real time before re-checking — 0 once the deadline has passed. Virtual time
+// moves at most vtime_speed x real, so blocking remaining/speed never sleeps
+// past the deadline.
+static uint64_t
+wait_step(uint64_t deadline)
+{
+    uint64_t target = wait_target(deadline);
+    vtime_nudge(target);
+    vtimer_check_and_fire();
+    uint64_t now = vtime_now();
+    if (now >= deadline)
+        return 0;
+    double slice = target > now ? (double)(target - now) / vtime_speed : 0;
+    if (slice < WAIT_SLICE_MIN_NS)
+        return WAIT_SLICE_MIN_NS;
+    if (slice > WAIT_SLICE_MAX_NS)
+        return WAIT_SLICE_MAX_NS;
+    return (uint64_t)slice;
+}
+
+static uint64_t
+deadline_after(uint64_t delta_ns)
+{
+    uint64_t now = vtime_now();
+    return delta_ns > NO_DEADLINE - now ? NO_DEADLINE : now + delta_ns;
+}
+
+static struct timespec
+real_deadline_after(uint64_t slice_ns)
+{
+    struct timespec ts;
+    ns_to_ts(real_monotonic_ns() + slice_ns, &ts);
+    return ts;
+}
+
+static int
+is_monotonic(clockid_t clk)
+{
+    return clk == CLOCK_MONOTONIC || clk == CLOCK_MONOTONIC_RAW
+           || clk == CLOCK_MONOTONIC_COARSE;
+}
 
 // Steady wall driver: raises virtual time toward the speed cap every 1ms
 // so vtime is a linear function of real time (speed x real) instead of
@@ -310,6 +395,14 @@ vtime_init(void)
     real_poll = dlsym(RTLD_NEXT, "poll");
     real_ppoll = dlsym(RTLD_NEXT, "ppoll");
     real_select = dlsym(RTLD_NEXT, "select");
+    real_pselect = dlsym(RTLD_NEXT, "pselect");
+    real_epoll_pwait = dlsym(RTLD_NEXT, "epoll_pwait");
+    real_epoll_pwait2 = dlsym(RTLD_NEXT, "epoll_pwait2");
+    if (!real_syscall)
+        real_syscall = dlsym(RTLD_NEXT, "syscall");
+    real_pthread_cond_timedwait = dlsym(RTLD_NEXT, "pthread_cond_timedwait");
+    real_pthread_cond_clockwait = dlsym(RTLD_NEXT, "pthread_cond_clockwait");
+    real_sem_clockwait = dlsym(RTLD_NEXT, "sem_clockwait");
     real_timer_create = dlsym(RTLD_NEXT, "timer_create");
     real_timer_settime = dlsym(RTLD_NEXT, "timer_settime");
     real_usleep = dlsym(RTLD_NEXT, "usleep");
@@ -359,42 +452,49 @@ vtime_init(void)
 int
 clock_gettime(clockid_t clk_id, struct timespec *tp)
 {
-    if (!vshm || !tp)
+    if (!vshm || !tp || !is_monotonic(clk_id))
         return real_clock_gettime(clk_id, tp);
+    ns_to_ts(vtime_now(), tp);
+    return 0;
+}
 
-    if (clk_id == CLOCK_MONOTONIC || clk_id == CLOCK_MONOTONIC_RAW
-        || clk_id == CLOCK_MONOTONIC_COARSE) {
-        ns_to_ts(vtime_now(), tp);
-        return 0;
+// A signal interrupts a virtual sleep exactly as it would a real one.
+static int
+sleep_until(uint64_t deadline)
+{
+    for (;;) {
+        uint64_t slice = wait_step(deadline);
+        if (!slice)
+            return 0;
+        struct timespec ts;
+        ns_to_ts(slice, &ts);
+        int ret = real_clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, NULL);
+        if (ret)
+            return ret;
     }
-    return real_clock_gettime(clk_id, tp);
+}
+
+static void
+store_remaining(uint64_t deadline, struct timespec *rem)
+{
+    if (!rem)
+        return;
+    uint64_t now = vtime_now();
+    ns_to_ts(deadline > now ? deadline - now : 0, rem);
 }
 
 int
 clock_nanosleep(clockid_t clk_id, int flags, const struct timespec *req,
                 struct timespec *rem)
 {
-    if (!vshm)
+    if (!vshm || !is_monotonic(clk_id))
         return real_clock_nanosleep(clk_id, flags, req, rem);
-
-    if (clk_id == CLOCK_MONOTONIC || clk_id == CLOCK_MONOTONIC_RAW) {
-        if (flags & TIMER_ABSTIME) {
-            uint64_t target = ts_to_ns(req);
-            vtime_advance_to(target);
-        } else {
-            uint64_t delta = ts_to_ns(req);
-            if (delta > 0)
-                vtime_advance_by(delta);
-        }
-        vtimer_check_and_fire();
-        sched_yield();
-        if (rem) {
-            rem->tv_sec = 0;
-            rem->tv_nsec = 0;
-        }
-        return 0;
-    }
-    return real_clock_nanosleep(clk_id, flags, req, rem);
+    uint64_t deadline = flags & TIMER_ABSTIME ? ts_to_ns(req)
+                                              : deadline_after(ts_to_ns(req));
+    int ret = sleep_until(deadline);
+    if (ret && !(flags & TIMER_ABSTIME))
+        store_remaining(deadline, rem);
+    return ret;
 }
 
 int
@@ -402,17 +502,13 @@ nanosleep(const struct timespec *req, struct timespec *rem)
 {
     if (!vshm)
         return real_nanosleep(req, rem);
-
-    uint64_t delta = ts_to_ns(req);
-    if (delta > 0)
-        vtime_advance_by(delta);
-    vtimer_check_and_fire();
-    sched_yield();
-    if (rem) {
-        rem->tv_sec = 0;
-        rem->tv_nsec = 0;
-    }
-    return 0;
+    uint64_t deadline = deadline_after(ts_to_ns(req));
+    int ret = sleep_until(deadline);
+    if (!ret)
+        return 0;
+    store_remaining(deadline, rem);
+    errno = ret;
+    return -1;
 }
 
 int
@@ -420,71 +516,17 @@ usleep(useconds_t usec)
 {
     if (!vshm)
         return real_usleep(usec);
-
-    uint64_t delta = (uint64_t)usec * 1000ULL;
-    if (delta > 0)
-        vtime_advance_by(delta);
-    vtimer_check_and_fire();
-    sched_yield();
-    return 0;
+    int ret = sleep_until(deadline_after((uint64_t)usec * 1000ULL));
+    if (!ret)
+        return 0;
+    errno = ret;
+    return -1;
 }
 
-int
-poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
+static uint64_t
+deadline_from_ts(const struct timespec *timeout)
 {
-    if (!vshm)
-        return real_poll(fds, nfds, timeout_ms);
-
-    int ret = real_poll(fds, nfds, 0);
-    if (ret != 0 || timeout_ms == 0)
-        return ret;
-
-    uint64_t deadline_ns;
-    if (timeout_ms < 0) {
-        deadline_ns = UINT64_MAX;
-    } else {
-        deadline_ns = vtime_now() + (uint64_t)timeout_ms * 1000000ULL;
-    }
-
-    struct timespec spin = { .tv_sec = 0, .tv_nsec = 100000 };
-    for (int i = 0; i < 10000; i++) {
-        ret = real_poll(fds, nfds, 0);
-        if (ret != 0)
-            return ret;
-
-        if (vtime_now() >= deadline_ns)
-            return 0;
-
-        pthread_mutex_lock(&vtimer.lock);
-        int armed = vtimer.armed;
-        uint64_t target = vtimer.target_ns;
-        pthread_mutex_unlock(&vtimer.lock);
-
-        if (armed && target <= deadline_ns) {
-            while (vtime_now() < target) {
-                uint64_t chunk = vtime_now() + 1000000ULL;
-                vtime_advance_to(chunk < target ? chunk : target);
-                ret = real_poll(fds, nfds, 0);
-                if (ret != 0)
-                    return ret;
-            }
-            pthread_mutex_lock(&vtimer.lock);
-            int fire = vtimer.armed && vtimer.target_ns == target;
-            if (fire)
-                vtimer.armed = 0;
-            pthread_mutex_unlock(&vtimer.lock);
-            if (fire) {
-                raise(SIGALRM);
-                errno = EINTR;
-                return -1;
-            }
-            continue;
-        }
-
-        real_nanosleep(&spin, NULL);
-    }
-    vtime_advance_to(deadline_ns);
-    return 0;
+    return timeout ? deadline_after(ts_to_ns(timeout)) : NO_DEADLINE;
 }
 
 int
@@ -493,27 +535,52 @@ ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout,
 {
     if (!vshm)
         return real_ppoll(fds, nfds, timeout, sigmask);
-
-    struct timespec zero = { 0, 0 };
-    int ret = real_ppoll(fds, nfds, &zero, sigmask);
-    if (ret != 0)
-        return ret;
-
-    uint64_t deadline_ns;
-    if (!timeout) {
-        deadline_ns = UINT64_MAX;
-    } else {
-        deadline_ns = vtime_now() + ts_to_ns(timeout);
-    }
-
+    uint64_t deadline = deadline_from_ts(timeout);
     for (;;) {
-        if (vtime_now() >= deadline_ns)
-            return 0;
-
-        struct timespec one_ms = { .tv_sec = 0, .tv_nsec = 1000000 };
-        ret = real_ppoll(fds, nfds, &one_ms, sigmask);
-        if (ret != 0)
+        uint64_t slice = wait_step(deadline);
+        struct timespec ts;
+        ns_to_ts(slice, &ts);
+        int ret = real_ppoll(fds, nfds, &ts, sigmask);
+        if (ret || !slice)
             return ret;
+    }
+}
+
+int
+poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
+{
+    if (!vshm || timeout_ms == 0)
+        return real_poll(fds, nfds, timeout_ms);
+    struct timespec ts;
+    ns_to_ts((uint64_t)timeout_ms * 1000000ULL, &ts);
+    return ppoll(fds, nfds, timeout_ms > 0 ? &ts : NULL, NULL);
+}
+
+static int
+pselect_until(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
+              uint64_t deadline, const sigset_t *sigmask)
+{
+    fd_set r0, w0, e0;
+    if (readfds)
+        r0 = *readfds;
+    if (writefds)
+        w0 = *writefds;
+    if (exceptfds)
+        e0 = *exceptfds;
+    for (;;) {
+        uint64_t slice = wait_step(deadline);
+        struct timespec ts;
+        ns_to_ts(slice, &ts);
+        int ret = real_pselect(nfds, readfds, writefds, exceptfds, &ts,
+                               sigmask);
+        if (ret || !slice)
+            return ret;
+        if (readfds)
+            *readfds = r0;
+        if (writefds)
+            *writefds = w0;
+        if (exceptfds)
+            *exceptfds = e0;
     }
 }
 
@@ -521,51 +588,181 @@ int
 select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
        struct timeval *timeout)
 {
-    if (!vshm)
+    if (!vshm || (timeout && !timeout->tv_sec && !timeout->tv_usec))
         return real_select(nfds, readfds, writefds, exceptfds, timeout);
-
-    // select modifies fd_sets, so we need copies for retry
-    fd_set r_copy, w_copy, e_copy;
-    if (readfds) r_copy = *readfds;
-    if (writefds) w_copy = *writefds;
-    if (exceptfds) e_copy = *exceptfds;
-
-    struct timeval zero = { 0, 0 };
-    int ret = real_select(nfds, readfds, writefds, exceptfds, &zero);
-    if (ret != 0)
-        return ret;
-
-    if (timeout && timeout->tv_sec == 0 && timeout->tv_usec == 0)
-        return 0;
-
-    uint64_t deadline_ns;
-    if (!timeout) {
-        deadline_ns = UINT64_MAX;
-    } else {
-        deadline_ns = vtime_now()
-            + (uint64_t)timeout->tv_sec * 1000000000ULL
-            + (uint64_t)timeout->tv_usec * 1000ULL;
+    uint64_t deadline = NO_DEADLINE;
+    if (timeout)
+        deadline = deadline_after((uint64_t)timeout->tv_sec * 1000000000ULL
+                                  + (uint64_t)timeout->tv_usec * 1000ULL);
+    int ret = pselect_until(nfds, readfds, writefds, exceptfds, deadline,
+                            NULL);
+    if (timeout) {
+        struct timespec rem;
+        store_remaining(deadline, &rem);
+        timeout->tv_sec = rem.tv_sec;
+        timeout->tv_usec = rem.tv_nsec / 1000;
     }
+    return ret;
+}
 
-    for (int i = 0; i < 30000; i++) {
-        if (readfds) *readfds = r_copy;
-        if (writefds) *writefds = w_copy;
-        if (exceptfds) *exceptfds = e_copy;
+int
+pselect(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
+        const struct timespec *timeout, const sigset_t *sigmask)
+{
+    if (!vshm)
+        return real_pselect(nfds, readfds, writefds, exceptfds, timeout,
+                            sigmask);
+    return pselect_until(nfds, readfds, writefds, exceptfds,
+                         deadline_from_ts(timeout), sigmask);
+}
 
-        struct timeval one_ms = { .tv_sec = 0, .tv_usec = 1000 };
-        ret = real_select(nfds, readfds, writefds, exceptfds, &one_ms);
-        if (ret != 0)
-            return ret;
-
-        if (vtime_now() >= deadline_ns) {
-            if (timeout) {
-                timeout->tv_sec = 0;
-                timeout->tv_usec = 0;
-            }
-            return 0;
+int
+epoll_pwait2(int epfd, struct epoll_event *events, int maxevents,
+             const struct timespec *timeout, const sigset_t *sigmask)
+{
+    if (!vshm)
+        return real_epoll_pwait2(epfd, events, maxevents, timeout, sigmask);
+    uint64_t deadline = deadline_from_ts(timeout);
+    for (;;) {
+        uint64_t slice = wait_step(deadline);
+        int ret;
+        if (real_epoll_pwait2) {
+            struct timespec ts;
+            ns_to_ts(slice, &ts);
+            ret = real_epoll_pwait2(epfd, events, maxevents, &ts, sigmask);
+        } else {
+            ret = real_epoll_pwait(epfd, events, maxevents,
+                                   (int)((slice + 999999ULL) / 1000000ULL),
+                                   sigmask);
         }
+        if (ret || !slice)
+            return ret;
+    }
+}
 
-        vtimer_check_and_fire();
+int
+epoll_pwait(int epfd, struct epoll_event *events, int maxevents,
+            int timeout_ms, const sigset_t *sigmask)
+{
+    if (!vshm || timeout_ms == 0)
+        return real_epoll_pwait(epfd, events, maxevents, timeout_ms, sigmask);
+    struct timespec ts;
+    ns_to_ts((uint64_t)timeout_ms * 1000000ULL, &ts);
+    return epoll_pwait2(epfd, events, maxevents, timeout_ms > 0 ? &ts : NULL,
+                        sigmask);
+}
+
+int
+epoll_wait(int epfd, struct epoll_event *events, int maxevents,
+           int timeout_ms)
+{
+    return epoll_pwait(epfd, events, maxevents, timeout_ms, NULL);
+}
+
+// Rust std (park, Condvar, channel timeouts) and parking_lot wait through
+// raw futex syscalls; the bitset form takes an absolute CLOCK_MONOTONIC
+// deadline that Rust computed from the virtual clock.
+static long
+futex_wait_until(uint32_t *uaddr, int op, uint32_t val, uint64_t deadline,
+                 uint32_t bitset)
+{
+    int bitset_op = (op & ~FUTEX_CMD_MASK) | FUTEX_WAIT_BITSET;
+    for (;;) {
+        uint64_t slice = wait_step(deadline);
+        if (!slice) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        struct timespec ts = real_deadline_after(slice);
+        long ret = real_syscall(SYS_futex, uaddr, bitset_op, val, &ts, NULL,
+                                bitset);
+        if (ret == 0 || errno != ETIMEDOUT)
+            return ret;
+    }
+}
+
+long
+syscall(long number, ...)
+{
+    va_list ap;
+    va_start(ap, number);
+    long a1 = va_arg(ap, long), a2 = va_arg(ap, long), a3 = va_arg(ap, long);
+    long a4 = va_arg(ap, long), a5 = va_arg(ap, long), a6 = va_arg(ap, long);
+    va_end(ap);
+    if (!real_syscall)
+        real_syscall = dlsym(RTLD_NEXT, "syscall");
+    if (vshm && number == SYS_futex) {
+        int op = (int)a2, cmd = op & FUTEX_CMD_MASK;
+        const struct timespec *timeout = (const struct timespec *)a4;
+        if (timeout && !(op & FUTEX_CLOCK_REALTIME)
+            && (cmd == FUTEX_WAIT || cmd == FUTEX_WAIT_BITSET)) {
+            uint64_t deadline = cmd == FUTEX_WAIT
+                                    ? deadline_after(ts_to_ns(timeout))
+                                    : ts_to_ns(timeout);
+            uint32_t bitset = cmd == FUTEX_WAIT ? FUTEX_BITSET_MATCH_ANY
+                                                : (uint32_t)a6;
+            return futex_wait_until((uint32_t *)a1, op, (uint32_t)a3,
+                                    deadline, bitset);
+        }
+    }
+    return real_syscall(number, a1, a2, a3, a4, a5, a6);
+}
+
+static int
+cond_wait_until(pthread_cond_t *cond, pthread_mutex_t *mutex,
+                uint64_t deadline)
+{
+    for (;;) {
+        uint64_t slice = wait_step(deadline);
+        if (!slice)
+            return ETIMEDOUT;
+        struct timespec ts = real_deadline_after(slice);
+        int ret = real_pthread_cond_clockwait(cond, mutex, CLOCK_MONOTONIC,
+                                              &ts);
+        if (ret != ETIMEDOUT)
+            return ret;
+    }
+}
+
+// CPython's GIL hand-off waits on a CLOCK_MONOTONIC condvar; glibc records
+// the condvar's clock in bit 1 of __wrefs.
+int
+pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
+                       const struct timespec *abstime)
+{
+    if (!vshm || !(cond->__data.__wrefs & 2))
+        return real_pthread_cond_timedwait(cond, mutex, abstime);
+    return cond_wait_until(cond, mutex, ts_to_ns(abstime));
+}
+
+int
+pthread_cond_clockwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
+                       clockid_t clockid, const struct timespec *abstime)
+{
+    if (!vshm || !is_monotonic(clockid))
+        return real_pthread_cond_clockwait(cond, mutex, clockid, abstime);
+    return cond_wait_until(cond, mutex, ts_to_ns(abstime));
+}
+
+// CPython's timed lock acquire (queue.get, Event.wait, Lock.acquire).
+int
+sem_clockwait(sem_t *sem, clockid_t clockid, const struct timespec *abstime)
+{
+    if (!vshm || !is_monotonic(clockid))
+        return real_sem_clockwait(sem, clockid, abstime);
+    uint64_t deadline = ts_to_ns(abstime);
+    for (;;) {
+        uint64_t slice = wait_step(deadline);
+        if (!slice) {
+            if (sem_trywait(sem) == 0)
+                return 0;
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        struct timespec ts = real_deadline_after(slice);
+        int ret = real_sem_clockwait(sem, CLOCK_MONOTONIC, &ts);
+        if (ret == 0 || errno != ETIMEDOUT)
+            return ret;
     }
 }
 
