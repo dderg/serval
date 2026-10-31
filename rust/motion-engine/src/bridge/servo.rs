@@ -1,8 +1,74 @@
 use super::{
-    PyMotionEngine, PyResult, PyRuntimeError, Python, mcu_handle_from_raw, pymethods,
-    slots_for_axis,
+    McuHandle, PyMotionEngine, PyResult, PyRuntimeError, Python, pymethods, slots_for_axis,
 };
-use crate::lock_ext::LockExt;
+use motion_core::lock_ext::LockExt;
+use motion_core::pump::{BuzzParams, BuzzRoute, BuzzWave, EndpointBuzzSpec, EndpointCommand};
+use pyo3::types::PyAnyMethods;
+use pyo3::{Bound, FromPyObject, PyAny};
+use std::sync::Arc;
+
+/// The two drive slots one differential control acts across, and the lanes
+/// and kinematics tag that place them in the machine frame.
+#[derive(Debug, Clone, Copy, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(super) struct StrainCompPair {
+    slot_a: u8,
+    slot_b: u8,
+    lane_a: u8,
+    lane_b: u8,
+    kinematics: u8,
+}
+
+/// The sampled strain map itself: a `nx` by `ny` grid of micrometre offsets
+/// anchored at (`x0`, `y0`) with `dx`/`dy` spacing.
+#[derive(Debug, Clone, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(super) struct StrainCompGrid {
+    nx: u16,
+    ny: u16,
+    x0: f32,
+    y0: f32,
+    dx: f32,
+    dy: f32,
+    values_um: Vec<i32>,
+}
+
+/// One dynamics feedforward model as klippy assembles it: the mode shapes
+/// (`frame`), the per-mode physical terms, and the slot pairing.
+#[derive(Debug, Clone, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(super) struct DynamicsModelRequest {
+    frame: Vec<f32>,
+    mass: Vec<f32>,
+    viscous: Vec<f32>,
+    coulomb: Vec<f32>,
+    compliance: Vec<f32>,
+    pin_mass: Vec<f32>,
+    pin_zeta: Vec<f32>,
+    pin_lead_us: f32,
+    pairs: Vec<u32>,
+    direction_split: Vec<f32>,
+}
+
+/// The gains one differential damper runs with.
+#[derive(Debug, Clone, Copy, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(super) struct DiffDamperGains {
+    gain_milli: u32,
+    clamp_tenths: u16,
+    lpf_millihz: u32,
+    lead_us: u16,
+}
+
+/// The gains one differential trim runs with.
+#[derive(Debug, Clone, Copy, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(super) struct DiffTrimGains {
+    gain_micro: u32,
+    clamp_um: u16,
+    lpf_millihz: u32,
+    settle_ms: u32,
+}
 
 #[pymethods]
 impl PyMotionEngine {
@@ -30,7 +96,7 @@ impl PyMotionEngine {
         let execute_at_ns = {
             let router = self.router.lock_ok();
             let host_secs = router
-                .print_time_to_host_secs(mcu_handle_from_raw(reference_mcu), print_time)
+                .print_time_to_host_secs(McuHandle::from_raw(reference_mcu), print_time)
                 .ok_or_else(|| {
                     PyRuntimeError::new_err(format!(
                         "set_torque: reference mcu {reference_mcu} clock not synced — \
@@ -38,7 +104,7 @@ impl PyMotionEngine {
                     ))
                 })?;
             router
-                .host_time_to_mcu_clock(mcu_handle_from_raw(mcu_handle), host_secs)
+                .host_time_to_mcu_clock(McuHandle::from_raw(mcu_handle), host_secs)
                 .map_err(|e| {
                     PyRuntimeError::new_err(format!(
                         "set_torque: no clock mapping for mcu {mcu_handle}: {e:?}"
@@ -62,7 +128,8 @@ impl PyMotionEngine {
             "servo torque command"
         );
         Ok(self.endpoint_calls.start("set_torque", move || {
-            let result = crate::servo_torque::send_set_torque(&conn, value, execute_at_ns)?;
+            let result =
+                motion_services::servo_torque::send_set_torque(&conn, value, execute_at_ns)?;
             if result != 0 {
                 tracing::error!(
                     subsystem = "engine",
@@ -95,14 +162,12 @@ impl PyMotionEngine {
             path,
             "servo capture start"
         );
-        let result = crate::servo_capture::send_start_capture(&conn, &path, &started_utc, &drives)
-            .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "servo capture start failed: endpoint result {result}"
-            )));
-        }
-        Ok(())
+        let result =
+            motion_services::servo_capture::send_start_capture(&conn, &path, &started_utc, &drives)
+                .map_err(PyRuntimeError::new_err)?;
+        require_py_endpoint_ok(result, |result| {
+            format!("servo capture start failed: endpoint result {result}")
+        })
     }
     fn stop_servo_capture(&self, mcu_handle: u32) -> PyResult<(i32, u64, Option<u64>)> {
         let conn = self.ethercat_conn(mcu_handle, "stop_servo_capture")?;
@@ -112,8 +177,8 @@ impl PyMotionEngine {
             mcu_handle,
             "servo capture stop"
         );
-        let resp =
-            crate::servo_capture::send_stop_capture(&conn).map_err(PyRuntimeError::new_err)?;
+        let resp = motion_services::servo_capture::send_stop_capture(&conn)
+            .map_err(PyRuntimeError::new_err)?;
         tracing::info!(
             subsystem = "engine",
             event = "servo_capture_stopped",
@@ -151,7 +216,7 @@ impl PyMotionEngine {
             })
             .collect();
         Ok(self.endpoint_calls.start("set_drive_limits", move || {
-            let result = crate::servo_torque::send_drive_limits(&conn, entries)?;
+            let result = motion_services::servo_torque::send_drive_limits(&conn, entries)?;
             require_endpoint_ok(result, "set_drive_limits: SDO write failed")
         }))
     }
@@ -166,7 +231,8 @@ impl PyMotionEngine {
         );
         let slot_mask = slots.iter().fold(0u32, |m, &s| m | (1 << s));
         Ok(self.endpoint_calls.start("restore_drive_limits", move || {
-            let result = crate::servo_torque::send_restore_drive_limits(&conn, slot_mask)?;
+            let result =
+                motion_services::servo_torque::send_restore_drive_limits(&conn, slot_mask)?;
             require_endpoint_ok(result, "restore_drive_limits: SDO write failed")
         }))
     }
@@ -178,20 +244,16 @@ impl PyMotionEngine {
             mcu_handle,
             "servo motion discarded on shutdown"
         );
-        let result = crate::servo_torque::send_stop(&conn).map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "stop_node: endpoint rejected Stop: result {result}"
-            )));
-        }
-        let result = crate::servo_torque::send_set_torque(&conn, false, 0)
+        let result =
+            motion_services::servo_torque::send_stop(&conn).map_err(PyRuntimeError::new_err)?;
+        require_py_endpoint_ok(result, |result| {
+            format!("stop_node: endpoint rejected Stop: result {result}")
+        })?;
+        let result = motion_services::servo_torque::send_set_torque(&conn, false, 0)
             .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "stop_node: endpoint rejected torque disable: result {result}"
-            )));
-        }
-        Ok(())
+        require_py_endpoint_ok(result, |result| {
+            format!("stop_node: endpoint rejected torque disable: result {result}")
+        })
     }
     fn arm_sensorless_endstop_start(
         &self,
@@ -218,7 +280,7 @@ impl PyMotionEngine {
         Ok(self
             .endpoint_calls
             .start("arm_sensorless_endstop", move || {
-                let result = crate::servo_torque::send_arm_sensorless_endstop(
+                let result = motion_services::servo_torque::send_arm_sensorless_endstop(
                     &conn,
                     slot,
                     endstop_id,
@@ -253,9 +315,9 @@ impl PyMotionEngine {
                     ))
                 })?
         };
-        let motor = crate::mcu_config::motor_frame(&cfg, pos_mm);
+        let motor = motion_core::mcu_config::motor_frame(&cfg, pos_mm);
         let seed_lanes: &[usize] =
-            if cfg.kinematics == crate::mcu_config::KINEMATICS_COREXY && axis <= 1 {
+            if cfg.hw.kinematics == motion_core::mcu_config::KINEMATICS_COREXY && axis <= 1 {
                 &[0, 1]
             } else {
                 &[axis]
@@ -284,7 +346,7 @@ impl PyMotionEngine {
                             mc.ethercat_slot_axes
                         )));
                     }
-                    let home_q16 = crate::mcu_config::encode_q16(motor[lane]);
+                    let home_q16 = motion_core::mcu_config::encode_q16(motor[lane]);
                     Ok(slots.into_iter().map(move |slot| (slot, home_q16)))
                 })
                 .collect::<PyResult<Vec<_>>>()?
@@ -307,8 +369,9 @@ impl PyMotionEngine {
         let timeout = std::time::Duration::from_secs_f64(timeout_s);
         Ok(self.endpoint_calls.start("finalize_homed_axis", move || {
             for (slot, home_q16) in seeds {
-                let result =
-                    crate::servo_torque::send_seed_servo_home(&conn, slot, home_q16, timeout)?;
+                let result = motion_services::servo_torque::send_seed_servo_home(
+                    &conn, slot, home_q16, timeout,
+                )?;
                 require_endpoint_ok(
                     result,
                     &format!("finalize_homed_axis: method-35 home-set failed for slot {slot}"),
@@ -334,7 +397,7 @@ impl PyMotionEngine {
             subindex,
             "servo SDO read"
         );
-        let r = crate::servo_sdo::send_sdo_read(&conn, slot, index, subindex)
+        let r = motion_services::servo_sdo::send_sdo_read(&conn, slot, index, subindex)
             .map_err(PyRuntimeError::new_err)?;
         if r.result != 0 {
             tracing::error!(
@@ -348,7 +411,7 @@ impl PyMotionEngine {
             );
             return Err(PyRuntimeError::new_err(format!(
                 "SDO read 0x{index:04x}.{subindex}: {}",
-                crate::servo_sdo::failure_text(r.result)
+                motion_services::servo_sdo::failure_text(r.result)
             )));
         }
         Ok((r.size, u32::from_le_bytes(r.data)))
@@ -374,8 +437,9 @@ impl PyMotionEngine {
             value,
             "servo SDO write"
         );
-        let r = crate::servo_sdo::send_sdo_write(&conn, slot, index, subindex, size, value)
-            .map_err(PyRuntimeError::new_err)?;
+        let r =
+            motion_services::servo_sdo::send_sdo_write(&conn, slot, index, subindex, size, value)
+                .map_err(PyRuntimeError::new_err)?;
         if r.result != 0 {
             tracing::error!(
                 subsystem = "engine",
@@ -392,74 +456,86 @@ impl PyMotionEngine {
             return Err(PyRuntimeError::new_err(format!(
                 "SDO write 0x{index:04x}.{subindex} = {value} (size {size}): {} \
                  (drive reports raw 0x{readback:x})",
-                crate::servo_sdo::failure_text(r.result)
+                motion_services::servo_sdo::failure_text(r.result)
             )));
         }
         Ok((r.readback_size, u32::from_le_bytes(r.readback_data)))
     }
-    #[allow(clippy::too_many_arguments)]
+    /// One request covers every route the caller named, whatever transport
+    /// each rides. Nothing arms until the pipeline is drained, the pump is
+    /// fenced, and every route has validated, so a mixed pulse/phase/EtherCAT
+    /// sweep either starts together or not at all.
+    ///
+    /// `wave` is `(freq_start_millihz, freq_end_millihz, amplitude_nm,
+    /// duration_ms, ramp_ms)`. Each route is a tagged tuple, either
+    /// `("ethercat", mcu_handle, slot_mask, slot_sign_mask)` or
+    /// `("stepper", axis_mask, sign_mask)`; the stepper route is split into
+    /// pulse and phase endpoints here, by the axis transport bindings.
     fn resonance_buzz(
         &self,
         py: Python<'_>,
-        mcu_handle: u32,
-        axis_mask: u8,
-        sign_mask: u8,
-        freq_start_millihz: u32,
-        freq_end_millihz: u32,
-        amplitude_nm: u32,
-        duration_ms: u32,
-        ramp_ms: u32,
+        routes: Vec<Bound<'_, PyAny>>,
+        wave: (u32, u32, u32, u32, u32),
     ) -> PyResult<()> {
-        let conn = self.ethercat_conn(mcu_handle, "resonance_buzz")?;
-        tracing::info!(
-            subsystem = "engine",
-            event = "servo_resonance_buzz",
-            mcu_handle,
-            axis_mask,
-            sign_mask,
-            freq_start_millihz,
-            freq_end_millihz,
-            amplitude_nm,
-            duration_ms,
-            ramp_ms,
-            "servo resonance buzz"
-        );
-        let result = py
-            .detach(|| {
-                crate::servo_torque::send_resonance_buzz(
-                    &conn,
-                    mcu_protocol::messages::ResonanceBuzz {
-                        axis_mask,
-                        sign_mask,
-                        freq_start_millihz,
-                        freq_end_millihz,
-                        amplitude_nm,
-                        duration_ms,
-                        ramp_ms,
-                    },
+        let specs = parse_buzz_routes(&routes)?;
+        let params = BuzzParams {
+            routes: self.build_buzz_routes(&specs)?,
+            wave: BuzzWave {
+                freq_start_millihz: wave.0,
+                freq_end_millihz: wave.1,
+                amplitude_nm: wave.2,
+                duration_ms: wave.3,
+                ramp_ms: wave.4,
+            },
+        };
+        let rx = {
+            let guard = self.planner.lock_ok();
+            let planner = guard.as_ref().ok_or_else(|| {
+                PyRuntimeError::new_err(
+                    "resonance_buzz: planner not initialized — call init_planner first",
                 )
-            })
-            .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "resonance_buzz: endpoint rejected (result {result})"
-            )));
-        }
+            })?;
+            planner
+                .submit_buzz(params)
+                .map_err(|e| PyRuntimeError::new_err(format!("resonance_buzz: {e}")))?
+        };
+        let token = py
+            .detach(|| rx.recv())
+            .map_err(|_| PyRuntimeError::new_err("resonance_buzz: notify dropped"))?
+            .map_err(|e| PyRuntimeError::new_err(format!("resonance_buzz: {e}")))?;
+        *self.buzz_token.lock_ok() = Some(token);
         Ok(())
     }
-    #[allow(clippy::too_many_arguments)]
+
+    /// Polls the one token the last [`Self::resonance_buzz`] handed back, so
+    /// completion spans every route that request armed.
+    fn resonance_buzz_done(&self) -> PyResult<bool> {
+        self.buzz_token
+            .lock_ok()
+            .as_ref()
+            .ok_or_else(|| {
+                PyRuntimeError::new_err(
+                    "resonance_buzz_done: no buzz has been armed on this engine",
+                )
+            })?
+            .complete()
+            .map_err(|e| PyRuntimeError::new_err(format!("resonance_buzz_done: {e}")))
+    }
     fn set_diff_damper(
         &self,
         py: Python<'_>,
         mcu_handle: u32,
         slot_a: u8,
         slot_b: u8,
-        gain_milli: u32,
-        clamp_tenths: u16,
-        lpf_millihz: u32,
-        lead_us: u16,
+        gains: DiffDamperGains,
     ) -> PyResult<()> {
         let conn = self.ethercat_conn(mcu_handle, "set_diff_damper")?;
+        let DiffDamperGains {
+            gain_milli,
+            clamp_tenths,
+            lpf_millihz,
+            lead_us,
+        } = gains;
         tracing::info!(
             subsystem = "engine",
             event = "servo_set_diff_damper",
@@ -474,7 +550,7 @@ impl PyMotionEngine {
         );
         let result = py
             .detach(|| {
-                crate::servo_torque::send_set_diff_damper(
+                motion_services::servo_torque::send_set_diff_damper(
                     &conn,
                     mcu_protocol::messages::SetDiffDamper {
                         slot_a,
@@ -487,15 +563,11 @@ impl PyMotionEngine {
                 )
             })
             .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "set_diff_damper: endpoint rejected (result {result})"
-            )));
-        }
-        Ok(())
+        require_py_endpoint_ok(result, |result| {
+            format!("set_diff_damper: endpoint rejected (result {result})")
+        })
     }
     fn set_ff_lead(&self, py: Python<'_>, mcu_handle: u32, slot: u8, lead_ns: u64) -> PyResult<()> {
-        let conn = self.ethercat_conn(mcu_handle, "set_ff_lead")?;
         tracing::info!(
             subsystem = "engine",
             event = "servo_set_ff_lead",
@@ -504,39 +576,37 @@ impl PyMotionEngine {
             lead_ns,
             "servo feedforward lead"
         );
-        let result = py
-            .detach(|| {
-                crate::servo_torque::send_set_ff_lead(
-                    &conn,
-                    mcu_protocol::messages::SetFfLead { slot, lead_ns },
-                )
+        py.detach(|| {
+            self.endpoint_command(EndpointCommand::SetFfLead {
+                mcu_id: mcu_handle,
+                lead: mcu_protocol::messages::SetFfLead { slot, lead_ns },
             })
-            .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "set_ff_lead: endpoint rejected (result {result})"
-            )));
-        }
-        Ok(())
+        })
+        .map_err(PyRuntimeError::new_err)
     }
-    #[allow(clippy::too_many_arguments)]
     fn set_strain_comp(
         &self,
         mcu_handle: u32,
-        slot_a: u8,
-        slot_b: u8,
-        lane_a: u8,
-        lane_b: u8,
-        kinematics: u8,
-        nx: u16,
-        ny: u16,
-        x0: f32,
-        y0: f32,
-        dx: f32,
-        dy: f32,
-        values_um: Vec<i32>,
+        pair: StrainCompPair,
+        grid: StrainCompGrid,
     ) -> PyResult<()> {
         let conn = self.ethercat_conn(mcu_handle, "set_strain_comp")?;
+        let StrainCompPair {
+            slot_a,
+            slot_b,
+            lane_a,
+            lane_b,
+            kinematics,
+        } = pair;
+        let StrainCompGrid {
+            nx,
+            ny,
+            x0,
+            y0,
+            dx,
+            dy,
+            values_um,
+        } = grid;
         tracing::info!(
             subsystem = "engine",
             event = "servo_strain_comp",
@@ -548,7 +618,7 @@ impl PyMotionEngine {
             values = values_um.len(),
             "servo strain compensation map upload"
         );
-        let result = crate::servo_torque::send_set_strain_comp(
+        let result = motion_services::servo_torque::send_set_strain_comp(
             &conn,
             mcu_protocol::messages::SetStrainComp {
                 slot_a,
@@ -566,12 +636,9 @@ impl PyMotionEngine {
             },
         )
         .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "set_strain_comp: endpoint result {result}"
-            )));
-        }
-        Ok(())
+        require_py_endpoint_ok(result, |result| {
+            format!("set_strain_comp: endpoint result {result}")
+        })
     }
     fn set_diff_trim(
         &self,
@@ -579,11 +646,14 @@ impl PyMotionEngine {
         mcu_handle: u32,
         slot_a: u8,
         slot_b: u8,
-        gain_micro: u32,
-        clamp_um: u16,
-        lpf_millihz: u32,
-        settle_ms: u32,
+        gains: DiffTrimGains,
     ) -> PyResult<()> {
+        let DiffTrimGains {
+            gain_micro,
+            clamp_um,
+            lpf_millihz,
+            settle_ms,
+        } = gains;
         let conn = self.ethercat_conn(mcu_handle, "set_diff_trim")?;
         tracing::info!(
             subsystem = "engine",
@@ -599,7 +669,7 @@ impl PyMotionEngine {
         );
         let result = py
             .detach(|| {
-                crate::servo_torque::send_set_diff_trim(
+                motion_services::servo_torque::send_set_diff_trim(
                     &conn,
                     mcu_protocol::messages::SetDiffTrim {
                         slot_a,
@@ -612,29 +682,28 @@ impl PyMotionEngine {
                 )
             })
             .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "set_diff_trim: endpoint rejected (result {result})"
-            )));
-        }
-        Ok(())
+        require_py_endpoint_ok(result, |result| {
+            format!("set_diff_trim: endpoint rejected (result {result})")
+        })
     }
-    #[allow(clippy::too_many_arguments)]
     fn set_dynamics_model(
         &self,
         py: Python<'_>,
         mcu_handle: u32,
-        frame: Vec<f32>,
-        mass: Vec<f32>,
-        viscous: Vec<f32>,
-        coulomb: Vec<f32>,
-        compliance: Vec<f32>,
-        pin_mass: Vec<f32>,
-        pin_zeta: Vec<f32>,
-        pin_lead_us: f32,
-        pairs: Vec<u32>,
-        direction_split: Vec<f32>,
+        model: DynamicsModelRequest,
     ) -> PyResult<()> {
+        let DynamicsModelRequest {
+            frame,
+            mass,
+            viscous,
+            coulomb,
+            compliance,
+            pin_mass,
+            pin_zeta,
+            pin_lead_us,
+            pairs,
+            direction_split,
+        } = model;
         let modes = mass.len();
         if modes == 0 {
             return Err(PyRuntimeError::new_err(
@@ -677,7 +746,36 @@ impl PyMotionEngine {
         }
         let wire_pairs = validate_dynamics_pairs(&frame, modes, slots, &pairs, &direction_split)
             .map_err(PyRuntimeError::new_err)?;
-        let conn = self.ethercat_conn(mcu_handle, "set_dynamics_model")?;
+        let pair_specs: Vec<ethercat_setpoint::dynamics::PairSpec> = wire_pairs
+            .iter()
+            .map(|pair| ethercat_setpoint::dynamics::PairSpec {
+                first: pair.first as usize,
+                second: pair.second as usize,
+                direction_split: pair.direction_split,
+            })
+            .collect();
+        let host_model = ethercat_setpoint::dynamics::DynamicsModel::from_parts(
+            ethercat_setpoint::dynamics::FrameParts {
+                n_slots: slots,
+                n_modes: modes,
+                frame: &frame,
+            },
+            ethercat_setpoint::dynamics::ModeParts {
+                mass: &mass,
+                viscous: &viscous,
+                coulomb: &coulomb,
+                compliance: &compliance,
+            },
+            ethercat_setpoint::dynamics::PinParts {
+                mass: &pin_mass,
+                zeta: &pin_zeta,
+                lead_us: f64::from(pin_lead_us),
+            },
+            &pair_specs,
+        )
+        .map_err(|e| {
+            PyRuntimeError::new_err(format!("set_dynamics_model: model rejected: {e:?}"))
+        })?;
         tracing::info!(
             subsystem = "engine",
             event = "servo_set_dynamics_model",
@@ -687,32 +785,78 @@ impl PyMotionEngine {
             pairs = wire_pairs.len(),
             "servo dynamics feedforward model upload"
         );
-        let result = py
-            .detach(|| {
-                crate::servo_torque::send_set_dynamics_model(
-                    &conn,
-                    mcu_protocol::messages::SetDynamicsModel {
-                        slots_count,
-                        modes_count,
-                        frame,
-                        mass,
-                        viscous,
-                        coulomb,
-                        compliance,
-                        pin_mass,
-                        pin_zeta,
-                        pin_lead_us,
-                        pairs: wire_pairs,
-                    },
-                )
+        let msg = mcu_protocol::messages::SetDynamicsModel {
+            slots_count,
+            modes_count,
+            frame,
+            mass,
+            viscous,
+            coulomb,
+            compliance,
+            pin_mass,
+            pin_zeta,
+            pin_lead_us,
+            pairs: wire_pairs,
+        };
+        py.detach(|| {
+            self.endpoint_command(EndpointCommand::SetDynamicsModel {
+                mcu_id: mcu_handle,
+                models: Box::new((msg, host_model)),
             })
-            .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "set_dynamics_model: endpoint rejected (result {result})"
-            )));
-        }
-        Ok(())
+        })
+        .map_err(PyRuntimeError::new_err)
+    }
+}
+
+fn parse_buzz_routes(routes: &[Bound<'_, PyAny>]) -> PyResult<Vec<EndpointBuzzSpec>> {
+    if routes.is_empty() {
+        return Err(PyRuntimeError::new_err(
+            "resonance_buzz: no routes given — nothing to buzz",
+        ));
+    }
+    let mut specs = Vec::with_capacity(routes.len());
+    for route in routes {
+        let arity = route.len()?;
+        let kind: String = route.get_item(0)?.extract()?;
+        specs.push(match (kind.as_str(), arity) {
+            ("ethercat", 4) => EndpointBuzzSpec::Ethercat {
+                mcu_handle: route.get_item(1)?.extract()?,
+                slot_mask: route.get_item(2)?.extract()?,
+                sign_mask: route.get_item(3)?.extract()?,
+            },
+            ("stepper", 3) => EndpointBuzzSpec::Stepper {
+                axis_mask: route.get_item(1)?.extract()?,
+                sign_mask: route.get_item(2)?.extract()?,
+            },
+            ("ethercat" | "stepper", n) => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "resonance_buzz: route kind '{kind}' takes \
+                     {} elements, got {n}",
+                    if kind == "ethercat" { 4 } else { 3 }
+                )));
+            }
+            (other, _) => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "resonance_buzz: unknown route kind '{other}' \
+                     (expected 'ethercat' or 'stepper')"
+                )));
+            }
+        });
+    }
+    Ok(specs)
+}
+
+impl PyMotionEngine {
+    fn build_buzz_routes(&self, specs: &[EndpointBuzzSpec]) -> PyResult<Arc<[BuzzRoute]>> {
+        let (routes, resolved) = std::sync::mpsc::sync_channel(1);
+        self.endpoint_command(EndpointCommand::BuzzRoutes {
+            specs: specs.to_vec(),
+            routes,
+        })
+        .map_err(PyRuntimeError::new_err)?;
+        resolved.recv().map(Arc::from).map_err(|e| {
+            PyRuntimeError::new_err(format!("resonance_buzz: route result channel closed: {e}"))
+        })
     }
 }
 
@@ -794,6 +938,12 @@ pub(super) fn validate_dynamics_pairs(
         }
     }
     Ok(wire_pairs)
+}
+
+fn require_py_endpoint_ok(result: i32, error: impl FnOnce(i32) -> String) -> PyResult<()> {
+    (result == 0)
+        .then_some(())
+        .ok_or_else(|| PyRuntimeError::new_err(error(result)))
 }
 
 fn require_endpoint_ok(result: i32, context: &str) -> Result<(), String> {

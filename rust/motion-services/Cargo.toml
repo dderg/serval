@@ -4,14 +4,13 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 publish = false
-description = "PyO3-free engine services: servo calls, background endpoint calls, structured logging, position queries, remote triggers."
+description = "PyO3-free engine services: servo calls, background endpoint calls, structured logging, remote triggers."
 license.workspace = true
 
 [dependencies]
-motion-core = { path = "../motion-core" }
 host-rt = { path = "../host-rt" }
 mcu-protocol = { path = "../mcu-protocol" }
-runtime = { path = "../runtime" }
+runtime-contract = { path = "../runtime-contract" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter", "std", "fmt"] }
 tracing-appender = "0.2"

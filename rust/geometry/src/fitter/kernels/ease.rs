@@ -24,12 +24,16 @@ pub(in crate::fitter) struct Neighbor {
     followers: Vec<FollowerDemand>,
 }
 
-pub(in crate::fitter) fn neighbor(m: &Move, head: bool) -> Option<Neighbor> {
+pub(in crate::fitter) enum RunEnd {
+    Head,
+    Tail,
+}
+
+pub(in crate::fitter) fn neighbor(m: &Move, end: RunEnd) -> Option<Neighbor> {
     let l = line_of(m)?;
-    let (vertex, dir) = if head {
-        (l.point_at(l.s_len()), l.heading_at(l.s_len()))
-    } else {
-        (l.point_at(0.0), l.heading_at(0.0))
+    let (vertex, dir) = match end {
+        RunEnd::Head => (l.point_at(l.s_len()), l.heading_at(l.s_len())),
+        RunEnd::Tail => (l.point_at(0.0), l.heading_at(0.0)),
     };
     Some(Neighbor {
         dir,
@@ -51,13 +55,38 @@ pub(in crate::fitter) fn ease_run(
     let tail_epmm = epmm(facets.last().expect("run has facets"));
     let line_no = facets[0].source.start_line;
     let verts = run_vertices(facets);
-    let pn = normalize(cross(recon.arc.u, recon.arc.v));
-    let sgn = recon.arc.sweep.signum();
-    let o0 = recon.arc.origin;
-    let r0 = recon.arc.radius;
+    let arc = ArcFrame {
+        origin: recon.arc.origin,
+        radius: recon.arc.radius,
+        u: recon.arc.u,
+        v: recon.arc.v,
+        sweep: recon.arc.sweep,
+        plane_n: normalize(cross(recon.arc.u, recon.arc.v)),
+    };
+    let sgn = arc.sweep.signum();
 
-    let head_max = head.and_then(|n| ease_plan(n, n.dir, sgn, head_epmm, pn, o0, r0));
-    let tail_max = tail.and_then(|n| ease_plan(n, scale(n.dir, -1.0), -sgn, tail_epmm, pn, o0, r0));
+    let head_max = head.and_then(|n| {
+        ease_plan(
+            n,
+            Spiral {
+                dir: n.dir,
+                curve_sgn: sgn,
+            },
+            head_epmm,
+            &arc,
+        )
+    });
+    let tail_max = tail.and_then(|n| {
+        ease_plan(
+            n,
+            Spiral {
+                dir: scale(n.dir, -1.0),
+                curve_sgn: -sgn,
+            },
+            tail_epmm,
+            &arc,
+        )
+    });
     if head_max.is_none() && tail_max.is_none() {
         return Ok(());
     }
@@ -88,21 +117,17 @@ pub(in crate::fitter) fn ease_run(
             {
                 break;
             }
-            let attempt = try_ease(
-                hp.as_ref(),
-                tp.as_ref(),
-                head_len,
-                tail_len,
-                o0,
-                r0,
-                recon.arc.u,
-                recon.arc.v,
-                recon.arc.sweep,
-                &verts,
-                tol,
-                pn,
-            )
-            .map_err(internal(line_no))?;
+            let ends = EaseEnds {
+                head: hp.map(|plan| EaseEnd {
+                    plan,
+                    line_len: head_len,
+                }),
+                tail: tp.map(|plan| EaseEnd {
+                    plan,
+                    line_len: tail_len,
+                }),
+            };
+            let attempt = try_ease(ends, &arc, &verts, tol).map_err(internal(line_no))?;
             if let Some(f) = attempt {
                 fit = Some(f);
                 break 'search;
@@ -153,11 +178,40 @@ pub(in crate::fitter::kernels) struct EasedEnd<'a> {
 }
 
 #[derive(Clone, Copy)]
-struct EndPlan {
-    spiral_dir: [f64; 3],
+struct Spiral {
+    dir: [f64; 3],
     curve_sgn: f64,
+}
+
+#[derive(Clone, Copy)]
+struct EndPlan {
+    spiral: Spiral,
     phi: f64,
     vertex: [f64; 3],
+}
+
+/// A planned eased end together with the neighbor line the spiral trims.
+#[derive(Clone, Copy)]
+struct EaseEnd {
+    plan: EndPlan,
+    line_len: f64,
+}
+
+#[derive(Clone, Copy)]
+struct EaseEnds {
+    head: Option<EaseEnd>,
+    tail: Option<EaseEnd>,
+}
+
+/// The circle the run reconstructed to, in its own plane.
+#[derive(Clone, Copy)]
+struct ArcFrame {
+    origin: [f64; 3],
+    radius: f64,
+    u: [f64; 3],
+    v: [f64; 3],
+    sweep: f64,
+    plane_n: [f64; 3],
 }
 
 struct SpiralFit {
@@ -180,39 +234,36 @@ struct EaseFit {
 /// sweep that runs backward — rejects the whole attempt: the caller retries
 /// with a smaller lead angle or fewer eased ends, because the refit circle is
 /// only valid together with the spirals it was solved for.
-#[allow(clippy::too_many_arguments)]
 fn try_ease(
-    hp: Option<&EndPlan>,
-    tp: Option<&EndPlan>,
-    head_len: f64,
-    tail_len: f64,
-    o0: [f64; 3],
-    r0: f64,
-    u: [f64; 3],
-    v: [f64; 3],
-    sweep0: f64,
+    ends: EaseEnds,
+    arc: &ArcFrame,
     verts: &[[f64; 3]],
     tol: f64,
-    pn: [f64; 3],
 ) -> Result<Option<EaseFit>, GeometryError> {
-    let consumed = hp.map_or(0.0, |p| p.phi) + tp.map_or(0.0, |p| p.phi);
+    let sweep0 = arc.sweep;
+    let pn = arc.plane_n;
+    let consumed = ends.head.map_or(0.0, |e| e.plan.phi) + ends.tail.map_or(0.0, |e| e.plan.phi);
     let expected_sweep = sweep0 - sweep0.signum() * consumed;
     if expected_sweep * sweep0 <= 0.0 {
         return Ok(None);
     }
-    let Some((origin, radius)) = ease_circle(hp, tp, o0, r0, u, v, verts, tol) else {
+    let Some((origin, radius)) = ease_circle(ends, arc, verts, tol) else {
         return Ok(None);
     };
-    let head = match hp {
-        Some(p) => match build_spiral(origin, radius, p, pn)? {
-            Some((clo, b, trim)) if within_line(trim, head_len) => Some(SpiralFit { clo, b, trim }),
+    let head = match ends.head {
+        Some(e) => match build_spiral(origin, radius, &e.plan, pn)? {
+            Some((clo, b, trim)) if within_line(trim, e.line_len) => {
+                Some(SpiralFit { clo, b, trim })
+            }
             _ => return Ok(None),
         },
         None => None,
     };
-    let tail = match tp {
-        Some(p) => match build_spiral(origin, radius, p, pn)? {
-            Some((clo, b, trim)) if within_line(trim, tail_len) => Some(SpiralFit { clo, b, trim }),
+    let tail = match ends.tail {
+        Some(e) => match build_spiral(origin, radius, &e.plan, pn)? {
+            Some((clo, b, trim)) if within_line(trim, e.line_len) => {
+                Some(SpiralFit { clo, b, trim })
+            }
             _ => return Ok(None),
         },
         None => None,
@@ -235,90 +286,84 @@ fn max_ease_angle(radius: f64, neighbor_len: f64) -> f64 {
     (0.45 * neighbor_len / radius).min(EASE_LEAD_MAX_RAD)
 }
 
-fn ease_plan(
-    n: &Neighbor,
-    spiral_dir: [f64; 3],
-    curve_sgn: f64,
-    run_epmm: f64,
-    pn: [f64; 3],
-    origin: [f64; 3],
-    radius: f64,
-) -> Option<EndPlan> {
+fn ease_plan(n: &Neighbor, spiral: Spiral, run_epmm: f64, arc: &ArcFrame) -> Option<EndPlan> {
     if run_epmm > EPMM_MIN && (n.epmm - run_epmm).abs() > EPMM_REL_TOL * run_epmm {
         return None;
     }
-    let phi = max_ease_angle(radius, n.length);
+    let phi = max_ease_angle(arc.radius, n.length);
     if phi < ANGLE_EPS_RAD {
         return None;
     }
-    let normal = scale(normalize(cross(pn, spiral_dir)), curve_sgn);
-    if dot(normal, sub(origin, n.vertex)) <= 0.0 {
+    let normal = scale(normalize(cross(arc.plane_n, spiral.dir)), spiral.curve_sgn);
+    if dot(normal, sub(arc.origin, n.vertex)) <= 0.0 {
         return None;
     }
     Some(EndPlan {
-        spiral_dir,
-        curve_sgn,
+        spiral,
         phi,
         vertex: n.vertex,
     })
 }
 
-fn spiral_center_dist(
-    radius: f64,
-    line_dir: [f64; 3],
-    curve_sgn: f64,
-    phi: f64,
-    pn: [f64; 3],
-) -> Option<f64> {
-    let g = probe_geometry(radius, line_dir, curve_sgn, phi, pn)?;
-    let normal = scale(g.v, curve_sgn);
+fn spiral_center_dist(radius: f64, spiral: Spiral, phi: f64, pn: [f64; 3]) -> Option<f64> {
+    let g = probe_geometry(radius, spiral, phi, pn)?;
+    let normal = scale(g.v, spiral.curve_sgn);
     Some(dot(g.center, normal))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn ease_circle(
-    head: Option<&EndPlan>,
-    tail: Option<&EndPlan>,
-    o0: [f64; 3],
-    r0: f64,
-    u: [f64; 3],
-    v: [f64; 3],
+    ends: EaseEnds,
+    arc: &ArcFrame,
     verts: &[[f64; 3]],
     tol: f64,
 ) -> Option<([f64; 3], f64)> {
-    let pn = normalize(cross(u, v));
-    let radius = r0;
-    match (head, tail) {
+    let pn = arc.plane_n;
+    let radius = arc.radius;
+    match (ends.head, ends.tail) {
         (Some(h), Some(t)) => {
-            let dh = spiral_center_dist(radius, h.spiral_dir, h.curve_sgn, h.phi, pn)?;
-            let dt = spiral_center_dist(radius, t.spiral_dir, t.curve_sgn, t.phi, pn)?;
-            let nh = scale(normalize(cross(pn, h.spiral_dir)), h.curve_sgn);
-            let nt = scale(normalize(cross(pn, t.spiral_dir)), t.curve_sgn);
-            let origin = solve_center(nh, h.vertex, dh, nt, t.vertex, dt, o0, u, v)?;
+            let h = h.plan;
+            let t = t.plan;
+            let dh = spiral_center_dist(radius, h.spiral, h.phi, pn)?;
+            let dt = spiral_center_dist(radius, t.spiral, t.phi, pn)?;
+            let nh = scale(normalize(cross(pn, h.spiral.dir)), h.spiral.curve_sgn);
+            let nt = scale(normalize(cross(pn, t.spiral.dir)), t.spiral.curve_sgn);
+            let origin = solve_center(
+                CenterConstraint {
+                    normal: nh,
+                    vertex: h.vertex,
+                    offset: dh,
+                },
+                CenterConstraint {
+                    normal: nt,
+                    vertex: t.vertex,
+                    offset: dt,
+                },
+                arc,
+            )?;
             if interior_residual(&origin, radius, verts) <= tol {
                 Some((origin, radius))
             } else {
                 None
             }
         }
-        (Some(e), None) => one_end_center(e, *verts.last().unwrap(), radius, o0, pn, verts, tol),
-        (None, Some(e)) => one_end_center(e, verts[0], radius, o0, pn, verts, tol),
+        (Some(e), None) => one_end_center(&e.plan, *verts.last().unwrap(), arc, verts, tol),
+        (None, Some(e)) => one_end_center(&e.plan, verts[0], arc, verts, tol),
         (None, None) => None,
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn one_end_center(
     e: &EndPlan,
     bare_vertex: [f64; 3],
-    radius: f64,
-    o0: [f64; 3],
-    pn: [f64; 3],
+    arc: &ArcFrame,
     verts: &[[f64; 3]],
     tol: f64,
 ) -> Option<([f64; 3], f64)> {
-    let d = spiral_center_dist(radius, e.spiral_dir, e.curve_sgn, e.phi, pn)?;
-    let normal = scale(normalize(cross(pn, e.spiral_dir)), e.curve_sgn);
+    let radius = arc.radius;
+    let o0 = arc.origin;
+    let pn = arc.plane_n;
+    let d = spiral_center_dist(radius, e.spiral, e.phi, pn)?;
+    let normal = scale(normalize(cross(pn, e.spiral.dir)), e.spiral.curve_sgn);
     let base = add(e.vertex, scale(normal, d));
     let t = normalize(cross(pn, normal));
     let w = sub(base, bare_vertex);
@@ -347,20 +392,27 @@ fn one_end_center(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// One end's demand on the refit center: it must sit `offset` along `normal`
+/// from the end's own line vertex.
+#[derive(Clone, Copy)]
+struct CenterConstraint {
+    normal: [f64; 3],
+    vertex: [f64; 3],
+    offset: f64,
+}
+
 fn solve_center(
-    nh: [f64; 3],
-    ph: [f64; 3],
-    dh: f64,
-    nt: [f64; 3],
-    pt: [f64; 3],
-    dt: f64,
-    o0: [f64; 3],
-    u: [f64; 3],
-    v: [f64; 3],
+    head: CenterConstraint,
+    tail: CenterConstraint,
+    arc: &ArcFrame,
 ) -> Option<[f64; 3]> {
+    let (o0, u, v) = (arc.origin, arc.u, arc.v);
+    let (nh, nt) = (head.normal, tail.normal);
     let a = [[dot(nh, u), dot(nh, v)], [dot(nt, u), dot(nt, v)]];
-    let b = [dot(nh, sub(ph, o0)) + dh, dot(nt, sub(pt, o0)) + dt];
+    let b = [
+        dot(nh, sub(head.vertex, o0)) + head.offset,
+        dot(nt, sub(tail.vertex, o0)) + tail.offset,
+    ];
     let det = a[0][0] * a[1][1] - a[0][1] * a[1][0];
     if det.abs() < 1e-12 {
         return None;
@@ -388,20 +440,14 @@ struct ProbeGeometry {
     center: [f64; 3],
 }
 
-fn probe_geometry(
-    radius: f64,
-    line_dir: [f64; 3],
-    curve_sgn: f64,
-    phi: f64,
-    pn: [f64; 3],
-) -> Option<ProbeGeometry> {
+fn probe_geometry(radius: f64, spiral: Spiral, phi: f64, pn: [f64; 3]) -> Option<ProbeGeometry> {
     let length = 2.0 * radius * phi;
     if !(length.is_finite() && length > BUDGET_EPS_MM) {
         return None;
     }
-    let sigma = curve_sgn / (radius * length);
-    let v = normalize(cross(pn, line_dir));
-    let probe = Clothoid::try_new([0.0; 3], line_dir, v, 0.0, sigma, length).ok()?;
+    let sigma = spiral.curve_sgn / (radius * length);
+    let v = normalize(cross(pn, spiral.dir));
+    let probe = Clothoid::try_new([0.0; 3], spiral.dir, v, 0.0, sigma, length).ok()?;
     let end = probe.point_at(length);
     let t_end = probe.heading_at(length);
     let center = madd(end, 1.0 / (sigma * length), cross(pn, t_end));
@@ -420,17 +466,17 @@ fn build_spiral(
     p: &EndPlan,
     pn: [f64; 3],
 ) -> Result<Option<(Clothoid, [f64; 3], f64)>, GeometryError> {
-    let Some(g) = probe_geometry(radius, p.spiral_dir, p.curve_sgn, p.phi, pn) else {
+    let Some(g) = probe_geometry(radius, p.spiral, p.phi, pn) else {
         return Ok(None);
     };
     let a = sub(origin, g.center);
     let b = add(a, g.end);
-    let line_trim = dot(sub(p.vertex, a), p.spiral_dir);
-    let off_line = sub(sub(p.vertex, a), scale(p.spiral_dir, line_trim));
+    let line_trim = dot(sub(p.vertex, a), p.spiral.dir);
+    let off_line = sub(sub(p.vertex, a), scale(p.spiral.dir, line_trim));
     if norm(off_line) > super::super::SEAM_CLOSURE_EPS_MM {
         return Ok(None);
     }
-    let clo = Clothoid::try_new(a, p.spiral_dir, g.v, 0.0, g.sigma, g.length)?;
+    let clo = Clothoid::try_new(a, p.spiral.dir, g.v, 0.0, g.sigma, g.length)?;
     Ok(Some((clo, b, line_trim)))
 }
 

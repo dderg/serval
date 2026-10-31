@@ -25,7 +25,6 @@ import gzip
 import json
 import math
 import os
-import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,13 +46,6 @@ BASELINE_SUFFIX = ".baseline.json.gz"
 # and the Linux CI runner. A sample passes if it is within the absolute OR the
 # relative tolerance — far below any meaningful trajectory change, above libm
 # noise. Structure and integer counts still compare exactly.
-#
-# The absolute floor also has to absorb a near-zero lowered-trajectory
-# coefficient: an all-but-constant-acceleration cubic piece has a jerk term (c3)
-# that is a catastrophic-cancellation difference of near-equal quantities, so it
-# lands a couple ulp either side of zero across platforms — sub-µm/s³, utterly
-# meaningless, but larger in absolute terms than the relative tolerance can reach
-# that close to zero.
 FLOAT_ATOL = 1e-6
 FLOAT_RTOL = 1e-7
 
@@ -62,6 +54,13 @@ FLOAT_RTOL = 1e-7
 class PrinterConfigData:
     max_velocity: float
     max_accel: float
+    square_corner_velocity: float | None
+    corner_deviation: float | None
+    max_jerk: float
+    max_path_deviation: float
+    max_accel_deviation: float
+    max_extrude_only_velocity: float | None
+    max_extrude_only_accel: float | None
     config_text: str
 
 
@@ -76,145 +75,37 @@ def read_printer_config(cfg_path: Path) -> PrinterConfigData:
     loader.printer = None
     config = loader.read_config(str(cfg_path))
     printer = config.getsection("printer")
+    extruder = (
+        config.getsection("extruder")
+        if config.has_section("extruder")
+        else None
+    )
     return PrinterConfigData(
         max_velocity=printer.getfloat("max_velocity", above=0.0),
         max_accel=printer.getfloat("max_accel", above=0.0),
+        square_corner_velocity=printer.getfloat(
+            "square_corner_velocity", None, minval=0.0
+        ),
+        corner_deviation=printer.getfloat("corner_deviation", None, minval=0.0),
+        max_jerk=printer.getfloat("max_jerk", 0.0, minval=0.0),
+        max_path_deviation=printer.getfloat(
+            "max_path_deviation", 0.005, above=0.0
+        ),
+        max_accel_deviation=printer.getfloat(
+            "max_accel_deviation", 50.0, above=0.0
+        ),
+        max_extrude_only_velocity=(
+            extruder.getfloat("max_extrude_only_velocity", None, above=0.0)
+            if extruder
+            else None
+        ),
+        max_extrude_only_accel=(
+            extruder.getfloat("max_extrude_only_accel", None, above=0.0)
+            if extruder
+            else None
+        ),
         config_text=config.fileconfig.write_string(),
     )
-
-
-def parse_gcode(
-    path: Path, max_velocity: float, max_accel: float
-) -> list[tuple[float, float, float, float, float, float]]:
-    # Waypoints carry absolute (x, y, z, e, feedrate, accel). E rides as a
-    # fifth coordinate so retracts (E-only moves) and extruding moves flow
-    # through the pipeline as followers; the engine differences consecutive E
-    # to a per-move delta. The sixth coordinate is the acceleration limit in
-    # force for the move ending at that waypoint — max_accel until a
-    # `SET_VELOCITY_LIMIT ACCEL=` line changes it. Extruder mode is M82
-    # (absolute) / M83 (relative), independent of the G90/G91 flag that
-    # governs X/Y/Z; under G91 an undeclared extruder rides along as
-    # relative, and an E word with no mode declared at all is refused rather
-    # than guessed. G92 resets any axis's position (commonly `G92 E0`)
-    # without emitting a move.
-    waypoints: list[tuple[float, float, float, float, float, float]] = []
-    x, y, z, e = 0.0, 0.0, 0.0, 0.0
-    feedrate = max_velocity
-    accel = max_accel
-    relative = False
-    e_relative: bool | None = None
-    motion_cmd = re.compile(r"^G0?([0-3])\b", re.IGNORECASE)
-    mode_cmd = re.compile(r"^G(90|91)\b", re.IGNORECASE)
-    set_pos_cmd = re.compile(r"^G92\b", re.IGNORECASE)
-    e_mode_cmd = re.compile(r"^M(82|83)\b", re.IGNORECASE)
-    velocity_limit_cmd = re.compile(
-        r"^SET_VELOCITY_LIMIT\b(.*)$", re.IGNORECASE
-    )
-    coord = re.compile(r"([XYZEFIJ])([-+]?[0-9]*\.?[0-9]+)", re.IGNORECASE)
-
-    def params_of(line: str) -> dict[str, float]:
-        return {
-            c.group(1).upper(): float(c.group(2)) for c in coord.finditer(line)
-        }
-
-    for line in path.read_text().splitlines():
-        line = line.split(";", 1)[0].strip()
-
-        mm = mode_cmd.match(line)
-        if mm:
-            relative = mm.group(1) == "91"
-            continue
-
-        em = e_mode_cmd.match(line)
-        if em:
-            e_relative = em.group(1) == "83"
-            continue
-
-        if set_pos_cmd.match(line):
-            params = params_of(line)
-            x = params.get("X", x)
-            y = params.get("Y", y)
-            z = params.get("Z", z)
-            e = params.get("E", e)
-            continue
-
-        vl = velocity_limit_cmd.match(line)
-        if vl:
-            for arg in vl.group(1).split():
-                key, sep, value = arg.partition("=")
-                if not sep:
-                    raise ValueError(
-                        f"{path.name}: malformed SET_VELOCITY_LIMIT argument "
-                        f"{arg!r} — expected KEY=VALUE"
-                    )
-                if key.upper() != "ACCEL":
-                    raise ValueError(
-                        f"{path.name}: SET_VELOCITY_LIMIT {key}=… is not "
-                        "supported here — only ACCEL is wired through the "
-                        "snapshot waypoints; silently ignoring the parameter "
-                        "would let a case claim limits it never exercised"
-                    )
-                accel = float(value)
-                if not (accel > 0.0 and accel != float("inf")):
-                    raise ValueError(
-                        f"{path.name}: SET_VELOCITY_LIMIT ACCEL={value} must "
-                        "be a positive finite number"
-                    )
-            continue
-
-        m = motion_cmd.match(line)
-        if not m:
-            continue
-        cmd = int(m.group(1))
-        params = params_of(line)
-        has_position = any(axis in params for axis in ("X", "Y", "Z"))
-        has_extrusion = "E" in params
-
-        if relative:
-            nx = x + params.get("X", 0.0)
-            ny = y + params.get("Y", 0.0)
-            nz = z + params.get("Z", 0.0)
-        else:
-            nx = params.get("X", x)
-            ny = params.get("Y", y)
-            nz = params.get("Z", z)
-
-        if has_extrusion:
-            if e_relative is None and not relative:
-                raise ValueError(
-                    f"{path.name}: E word before any M82/M83 (or G91) — the "
-                    "extruder mode is ambiguous, and guessing absolute turns "
-                    "relative-E slicer output into garbage extrusion ratios. "
-                    "Declare the mode (slicer excerpts printed with relative "
-                    "extrusion need an 'M83' line at the top)."
-                )
-            e_is_relative = True if e_relative is None else e_relative
-            ne = e + params["E"] if e_is_relative else params["E"]
-        else:
-            ne = e
-
-        if cmd in (2, 3):
-            raise ValueError(
-                f"G{cmd} arc command is not supported: the motion engine has no "
-                "native arc ingestion yet, and silently linearizing it here would "
-                "let a snapshot claim to exercise an arc while feeding the engine "
-                "straight segments"
-            )
-        if cmd == 1:
-            feedrate = params.get("F", feedrate * 60.0) / 60.0
-        if not (has_position or ne != e):
-            continue
-        x, y, z, e = nx, ny, nz, ne
-        if not waypoints and not has_position:
-            # A prime or retract before any positional command: there is no
-            # known toolhead position yet, so anchoring a waypoint would invent
-            # a move from the parser's arbitrary origin. Fold the E change into
-            # the state; the first positional waypoint carries it.
-            continue
-        move_feedrate = max_velocity if cmd == 0 else feedrate
-        waypoints.append((x, y, z, e, move_feedrate, accel))
-
-    return waypoints
 
 
 class Status(enum.Enum):
@@ -314,7 +205,7 @@ def _import_engine():
             "_motion_engine not built — build it with: "
             "make -f Makefile.rust motion-engine-fast"
         ) from exc
-    if not hasattr(_motion_engine, "pipeline_snapshot"):
+    if not hasattr(_motion_engine, "parse_gcode"):
         raise ImportError(
             "_motion_engine was built without the `snapshot` cargo feature — "
             "pipeline_snapshot is unavailable. Rebuild with: "
@@ -332,15 +223,17 @@ def run_case(case: Case) -> dict:
         )
 
     cfg = read_printer_config(case.config_path)
-    waypoints = parse_gcode(case.gcode_path, cfg.max_velocity, cfg.max_accel)
+    engine = _import_engine()
+    waypoints = engine.parse_gcode(
+        case.gcode_path.read_text(), cfg.max_velocity, cfg.max_accel
+    )
     if len(waypoints) < 2:
         raise ValueError(
             f"case '{case.name}': fewer than two spatial moves in "
             f"{case.gcode_path.name}"
         )
 
-    engine = _import_engine()
-    return engine.pipeline_snapshot(waypoints, cfg.config_text)
+    return json.loads(engine.pipeline_snapshot(waypoints, cfg.config_text))
 
 
 def _run_case_named(case: Case) -> tuple[str, dict]:
@@ -493,7 +386,13 @@ def drift_envelope(a: object, b: object, tiny: float = 1e-3) -> dict:
     values need and the atol the near-zero values (where rtol is useless) need —
     and points at the exact field, not just a magnitude.
     """
-    worst = {"rel": 0.0, "rel_at": "", "abs": 0.0, "abs_at": ""}
+    worst = {
+        "rel": 0.0,
+        "rel_at": "",
+        "abs": 0.0,
+        "abs_at": "",
+        "schema_at": "",
+    }
     numeric = (int, float)
 
     def walk(a: object, b: object, path: str) -> None:
@@ -515,12 +414,22 @@ def drift_envelope(a: object, b: object, tiny: float = 1e-3) -> dict:
                     worst["abs"] = d
                     worst["abs_at"] = f"{path} ({a!r} vs {b!r})"
             return
-        if isinstance(a, dict) and isinstance(b, dict) and a.keys() == b.keys():
+        if isinstance(a, dict) and isinstance(b, dict):
+            if a.keys() != b.keys():
+                if not worst["schema_at"]:
+                    worst["schema_at"] = path or "<root>"
+                return
             for k in a:
                 walk(a[k], b[k], f"{path}.{k}" if path else str(k))
-        elif isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+        elif isinstance(a, list) and isinstance(b, list):
+            if len(a) != len(b):
+                if not worst["schema_at"]:
+                    worst["schema_at"] = path or "<root>"
+                return
             for i, (x, y) in enumerate(zip(a, b)):
                 walk(x, y, f"{path}[{i}]")
+        elif type(a) is not type(b) and not worst["schema_at"]:
+            worst["schema_at"] = path or "<root>"
 
     walk(a, b, "")
     return worst

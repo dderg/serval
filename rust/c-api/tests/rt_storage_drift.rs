@@ -22,7 +22,7 @@ fn rt_storage_size_within_plausible_bounds() {
 }
 
 #[test]
-fn runtime_context_fits_in_rt_storage() {
+fn runtime_context_size_within_measured_bounds() {
     let ctx_size = core::mem::size_of::<RuntimeContext>();
     assert!(
         ctx_size <= RT_STORAGE_SIZE,
@@ -30,6 +30,19 @@ fn runtime_context_fits_in_rt_storage() {
          bump CONFIG_RUNTIME_STORAGE_SIZE in src/Kconfig.",
         ctx_size,
         RT_STORAGE_SIZE
+    );
+    let ceiling = if runtime::sizing::SAMPLE_RUNS_PER_LANE > 0 {
+        32 * 1024
+    } else {
+        4 * 1024
+    };
+    assert!(
+        ctx_size <= ceiling,
+        "RuntimeContext grew to {} bytes, past the {}-byte ceiling for this \
+         feature set (measured: 1568 without sample-stepping, 28256 with it). \
+         A jump this large means a per-axis array or lane ring changed size.",
+        ctx_size,
+        ceiling
     );
 }
 

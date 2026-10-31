@@ -241,6 +241,28 @@ class FakeCurrentHelper:
         return (0.8, 0.5, 0.5, 2.0, 0.8)
 
 
+class FakeMotionEngine:
+    """The host-side transport router. A phase-mode flip is a transport
+    handover, so the switch lands on the same timeline as the wire traffic it
+    has to be ordered against."""
+
+    def __init__(self, wire_log):
+        self._log = wire_log
+        self.switches = []
+
+    def switch_axis_transport(self, mcu_handle, axis_idx, transport):
+        self.switches.append((mcu_handle, axis_idx, transport))
+        self._log.append(
+            (
+                "transport",
+                "switch_axis_transport",
+                mcu_handle,
+                axis_idx,
+                transport,
+            )
+        )
+
+
 def writes(wire_log):
     return [entry for entry in wire_log if entry[0] == "write"]
 

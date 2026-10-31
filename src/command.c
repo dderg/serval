@@ -314,19 +314,6 @@ command_find_block(uint8_t *buf, uint_fast8_t buf_len, uint_fast8_t *pop_count)
         goto nak;
     }
     next_sequence = ((msgseq + 1) & MESSAGE_SEQ_MASK) | MESSAGE_DEST;
-#if CONFIG_MACH_LINUX
-    {
-        uint8_t *p = &buf[MESSAGE_HEADER_SIZE];
-        uint_fast16_t cmdid = 0;
-        if (msglen > MESSAGE_MIN) {
-            cmdid = *p;
-            if (cmdid >= 0x80) cmdid = (cmdid & 0x7f) | (*++p << 7);
-        }
-        fprintf(stderr, "[mcu-seq] OK msgseq=0x%02x cmdid=%u msglen=%u\n",
-                msgseq, (unsigned)cmdid, msglen);
-        fflush(stderr);
-    }
-#endif
     return 1;
 
 need_more_data:
@@ -376,14 +363,6 @@ command_dispatch(uint8_t *buf, uint_fast8_t msglen)
             sched_report_shutdown();
             continue;
         }
-#if CONFIG_MACH_LINUX
-        {
-            void (*fn)(uint32_t*) = READP(cp->func);
-            fprintf(stderr, "[mcu-dispatch] CALL cmdid=%u func=%p\n",
-                    (unsigned)cmdid, (void*)fn);
-            fflush(stderr);
-        }
-#endif
         irq_poll();
         void (*func)(uint32_t*) = READP(cp->func);
         func(args);

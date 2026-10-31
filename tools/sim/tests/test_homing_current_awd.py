@@ -87,7 +87,7 @@ def test_home_x_switches_current_on_all_four_awd_motors(sim_world):
             f"motor {motor} did not boot at run current"
         )
 
-    with EndstopPulser(world.sim_control("h7"), [(0, 10)]):
+    with EndstopPulser(world.sim_control("h7"), [(0, 10)], low_duration=3.0):
         world.gcode_ok("G28 X", timeout=120)
     _wait_for_restore(world, boot_counts)
     assert world.shutdown_line() is None

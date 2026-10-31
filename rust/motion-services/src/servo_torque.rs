@@ -4,11 +4,10 @@ use host_rt::mcu_serial_conn::McuSerialConn;
 use mcu_protocol::codec::Encode as _;
 use mcu_protocol::messages::{
     ArmSensorlessEndstop, ArmSensorlessEndstopResponse, DriveLimitEntry, MessageKind,
-    ResonanceBuzz, ResonanceBuzzResponse, RestoreDriveLimits, RestoreDriveLimitsResponse,
-    SeedServoHome, SeedServoHomeResponse, SetDiffDamper, SetDiffDamperResponse, SetDiffTrim,
-    SetDiffTrimResponse, SetDriveLimits, SetDriveLimitsResponse, SetDynamicsModel,
-    SetDynamicsModelResponse, SetFfLead, SetFfLeadResponse, SetStrainComp, SetStrainCompResponse,
-    SetTorque, SetTorqueResponse, StopResponse,
+    RestoreDriveLimits, RestoreDriveLimitsResponse, SeedServoHome, SeedServoHomeResponse,
+    SetDiffDamper, SetDiffDamperResponse, SetDiffTrim, SetDiffTrimResponse, SetDriveLimits,
+    SetDriveLimitsResponse, SetStrainComp, SetStrainCompResponse, SetTorque, SetTorqueResponse,
+    StopResponse,
 };
 
 use crate::servo_call::mcu_typed_call;
@@ -127,21 +126,6 @@ pub fn send_stop(conn: &McuSerialConn) -> Result<i32, String> {
     Ok(r.result)
 }
 
-const RESONANCE_BUZZ_TIMEOUT: Duration = Duration::from_secs(5);
-
-pub fn send_resonance_buzz(conn: &McuSerialConn, buzz: ResonanceBuzz) -> Result<i32, String> {
-    let body = buzz.encoded_to_vec();
-    let r: ResonanceBuzzResponse = mcu_typed_call(
-        conn,
-        "ResonanceBuzz",
-        MessageKind::ResonanceBuzz,
-        MessageKind::ResonanceBuzzResponse,
-        body,
-        RESONANCE_BUZZ_TIMEOUT,
-    )?;
-    Ok(r.result)
-}
-
 const SET_DIFF_DAMPER_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn send_set_diff_damper(conn: &McuSerialConn, damper: SetDiffDamper) -> Result<i32, String> {
@@ -153,21 +137,6 @@ pub fn send_set_diff_damper(conn: &McuSerialConn, damper: SetDiffDamper) -> Resu
         MessageKind::SetDiffDamperResponse,
         body,
         SET_DIFF_DAMPER_TIMEOUT,
-    )?;
-    Ok(r.result)
-}
-
-const SET_FF_LEAD_TIMEOUT: Duration = Duration::from_secs(5);
-
-pub fn send_set_ff_lead(conn: &McuSerialConn, lead: SetFfLead) -> Result<i32, String> {
-    let body = lead.encoded_to_vec();
-    let r: SetFfLeadResponse = mcu_typed_call(
-        conn,
-        "SetFfLead",
-        MessageKind::SetFfLead,
-        MessageKind::SetFfLeadResponse,
-        body,
-        SET_FF_LEAD_TIMEOUT,
     )?;
     Ok(r.result)
 }
@@ -198,24 +167,6 @@ pub fn send_set_strain_comp(conn: &McuSerialConn, comp: SetStrainComp) -> Result
         MessageKind::SetStrainCompResponse,
         body,
         SET_STRAIN_COMP_TIMEOUT,
-    )?;
-    Ok(r.result)
-}
-
-const SET_DYNAMICS_MODEL_TIMEOUT: Duration = Duration::from_secs(5);
-
-pub fn send_set_dynamics_model(
-    conn: &McuSerialConn,
-    model: SetDynamicsModel,
-) -> Result<i32, String> {
-    let body = model.encoded_to_vec();
-    let r: SetDynamicsModelResponse = mcu_typed_call(
-        conn,
-        "SetDynamicsModel",
-        MessageKind::SetDynamicsModel,
-        MessageKind::SetDynamicsModelResponse,
-        body,
-        SET_DYNAMICS_MODEL_TIMEOUT,
     )?;
     Ok(r.result)
 }

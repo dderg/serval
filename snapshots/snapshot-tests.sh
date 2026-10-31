@@ -47,9 +47,18 @@ WASM_OUT="$SCRIPT_DIR/web/static/wasm"
 WP="${WASM_PACK:-wasm-pack}"
 command -v "$WP" &>/dev/null || WP="$HOME/.cargo/bin/wasm-pack"
 
-# Build the WASM interactive viewer if output is missing or source is newer
-if [ ! -f "$WASM_OUT/snapshot_viewer_bg.wasm" ] || \
-   [ "$SNAPSHOT_VIEWER/src/lib.rs" -nt "$WASM_OUT/snapshot_viewer_bg.wasm" ]; then
+viewer_stale() {
+  [ ! -f "$WASM_OUT/snapshot_viewer_bg.wasm" ] && return 0
+  local newer
+  newer=$(find "$SCRIPT_DIR/../rust" \
+    \( -path "*/snapshot-viewer/src/*" -o -path "*/pipeline-snapshot/src/*" \
+       -o -path "*/motion-pipeline/src/*" -o -path "*/geometry/src/*" \
+       -o -path "*/trajectory/src/*" -o -path "*/nurbs/src/*" \
+       -o -path "*/gcode/src/*" \) \
+    -name "*.rs" -newer "$WASM_OUT/snapshot_viewer_bg.wasm" -print -quit)
+  [ -n "$newer" ]
+}
+if viewer_stale; then
   echo "building snapshot-viewer WASM..."
   "$WP" build --target web --release --out-dir "$WASM_OUT" "$SNAPSHOT_VIEWER" 2>&1
 fi
@@ -98,15 +107,21 @@ if [ "$view_baselines" = 1 ]; then
   exec "$PYTHON" "$SCRIPT_DIR/web/server.py" --mode baselines --port "$PORT"
 fi
 
-if [ "$ci" = 1 ]; then
-  exec "$PYTHON" "$SCRIPT_DIR/run.py" "${run_args[@]}"
+RESULTS_DIR="${SNAPSHOT_RESULTS_DIR:-$(mktemp -d -t snapshot-results)}"
+if [ -n "${SNAPSHOT_RESULTS_DIR:-}" ]; then
+  mkdir -p "$RESULTS_DIR"
+else
+  trap 'rm -rf "$RESULTS_DIR"' EXIT
 fi
 
-RESULTS_DIR="$(mktemp -d -t snapshot-results)"
-trap 'rm -rf "$RESULTS_DIR"' EXIT
+if [ "$ci" = 1 ]; then
+  exec "$PYTHON" "$SCRIPT_DIR/run.py" --results-dir "$RESULTS_DIR" "${run_args[@]}"
+fi
 
-if "$PYTHON" "$SCRIPT_DIR/run.py" --results-dir "$RESULTS_DIR" "${run_args[@]}"; then
-  exit 0
+"$PYTHON" "$SCRIPT_DIR/run.py" --results-dir "$RESULTS_DIR" "${run_args[@]}"
+status=$?
+if [ "$status" -ne 1 ]; then
+  exit "$status"
 fi
 
 url="http://127.0.0.1:$PORT"

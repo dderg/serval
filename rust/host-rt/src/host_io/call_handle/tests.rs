@@ -10,7 +10,7 @@ fn drop_without_defuse_sends_abandon() {
     drop(handle);
     match rx.recv().expect("channel must have a message") {
         ReactorCommand::Abandon(id) => assert_eq!(id, 42),
-        other => panic!("expected Abandon(42), got {:?}", other),
+        _ => panic!("expected Abandon(42)"),
     }
     assert!(rx.try_recv().is_err(), "channel must be empty after drain");
 }

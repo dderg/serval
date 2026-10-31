@@ -866,7 +866,7 @@ def cmd_resolve(args, vl_url):
     )
     if not records:
         print(
-            "code %s not seen in %s; canonical table: rust/runtime/src/log_codes.rs"
+            "code %s not seen in %s; canonical table: rust/runtime-contract/src/log_codes.rs"
             % (args.code, args.since)
         )
         return 0

@@ -1,4 +1,3 @@
-use crossbeam_channel::{Receiver, Sender};
 use geometry::fitter::{
     JunctionPlan, RunFit, arc_candidate_fits, blend_moves, consumption_moves,
     facet_consumption_candidate, is_travel, merge_collinear_lines, plan_facet_consumption,
@@ -7,7 +6,7 @@ use geometry::fitter::{
 use geometry::path::{Line, PathSegment, Segment};
 use geometry::{CornerFitConfig, Move};
 
-use crate::{CONTIGUITY_EPS_MM, Control, StreamInput, dist3};
+use crate::{CONTIGUITY_EPS_MM, Control, StreamInput};
 
 const ALIGN_EPS_MM: f64 = 1e-9;
 const MIN_RUN_FACETS: usize = 3;
@@ -125,27 +124,17 @@ impl FitStage {
         self.tail.push(m);
     }
 
-    pub fn run(self, input: Receiver<StreamInput>, output: Sender<StreamInput>) {
-        let mut driver = self.into_driver(output);
-        while let Ok(item) = input.recv() {
-            if !driver.feed(item) {
-                return;
-            }
-        }
-        driver.finish();
-    }
-
-    pub fn into_driver(self, output: Sender<StreamInput>) -> FitDriver {
+    pub fn into_driver(self) -> FitDriver {
         FitDriver {
             stage: self,
-            out: TravelAligningSender::new(output),
+            alignment: TravelAlignment::default(),
         }
     }
 
     /// `Reset` drops all buffered fit state and forgets the emitted-geometry
     /// anchor (the timeline restarts elsewhere); every other token requires
     /// the fit buffers to have been drained first.
-    fn forward_control(&mut self, ctrl: Control, out: &mut TravelAligningSender) -> bool {
+    fn forward_control(&mut self, ctrl: Control, out: &mut TravelAligningSender<'_>) -> bool {
         match &ctrl {
             Control::Reset { .. } => {
                 self.decided.clear();
@@ -159,8 +148,7 @@ impl FitStage {
             Control::Dwell { .. }
             | Control::SetAxisChains(_)
             | Control::SetMesh { .. }
-            | Control::Nudge { .. }
-            | Control::Barrier(_) => {
+            | Control::Dispatch(_) => {
                 assert!(
                     self.decided.is_empty() && self.tail.is_empty(),
                     "fit_stage: control token arrived with undrained moves — a Drain must precede it"
@@ -178,7 +166,7 @@ impl FitStage {
     /// are known, resolve boundary blends, and emit the finished prefix. With
     /// `eof` the input ran empty (or closed), so everything decides and emits
     /// now rather than waiting for moves that may never come.
-    fn resolve(&mut self, eof: bool, out: &mut TravelAligningSender) -> bool {
+    fn resolve(&mut self, eof: bool, out: &mut TravelAligningSender<'_>) -> bool {
         self.decide_kinds(eof);
         self.resolve_runs(eof);
         let ok = self.emit_ready(eof, out);
@@ -342,7 +330,7 @@ impl FitStage {
     /// and, for the easing budget reduction, the reconstruction of a run
     /// starting one move further. A run needs its reconstruction and both
     /// boundary blends.
-    fn emit_ready(&mut self, eof: bool, out: &mut TravelAligningSender) -> bool {
+    fn emit_ready(&mut self, eof: bool, out: &mut TravelAligningSender<'_>) -> bool {
         loop {
             match self.decided.first() {
                 None => return true,
@@ -421,7 +409,7 @@ impl FitStage {
 
     /// Emit the front piece's body and its exit-junction blend against the
     /// piece after it, carrying the blend trim to that piece's head.
-    fn emit_pairwise(&mut self, out_reduction: f64, out: &mut TravelAligningSender) -> bool {
+    fn emit_pairwise(&mut self, out_reduction: f64, out: &mut TravelAligningSender<'_>) -> bool {
         let (Some(m), Some(next)) = (piece_of(&self.decided[0]), piece_of(&self.decided[1])) else {
             unreachable!("caller matched two front pieces")
         };
@@ -505,7 +493,11 @@ impl FitStage {
     /// re-earns longer prefixes one junction at a time and never re-pays for
     /// lengths that just failed. Returns the send result, or `None` when no
     /// prefix is consumable.
-    fn try_consumption(&mut self, max_mids: usize, out: &mut TravelAligningSender) -> Option<bool> {
+    fn try_consumption(
+        &mut self,
+        max_mids: usize,
+        out: &mut TravelAligningSender<'_>,
+    ) -> Option<bool> {
         let start_mids = max_mids
             .min(self.consume_scan_start.saturating_add(1))
             .max(1);
@@ -537,7 +529,7 @@ impl FitStage {
         &mut self,
         fc: geometry::fitter::FacetConsumption,
         n_mids: usize,
-        out: &mut TravelAligningSender,
+        out: &mut TravelAligningSender<'_>,
     ) -> bool {
         let Element::Piece(front) = self.decided.remove(0) else {
             unreachable!("caller matched a front piece")
@@ -582,7 +574,7 @@ impl FitStage {
     }
 
     /// Emit the front piece's body with the given tail trim and drop it.
-    fn emit_front_piece(&mut self, trim_end: f64, out: &mut TravelAligningSender) -> bool {
+    fn emit_front_piece(&mut self, trim_end: f64, out: &mut TravelAligningSender<'_>) -> bool {
         let Element::Piece(m) = self.decided.remove(0) else {
             unreachable!("caller matched a front piece")
         };
@@ -601,7 +593,7 @@ impl FitStage {
     /// Emit a fully resolved run: the first facet's remaining head stub, the
     /// reconstruction pieces, the last facet's tail stub, and the tail
     /// boundary blend — then carry the easing trims to the next element.
-    fn emit_front_run(&mut self, out: &mut TravelAligningSender) -> bool {
+    fn emit_front_run(&mut self, out: &mut TravelAligningSender<'_>) -> bool {
         let Element::Run(re) = self.decided.remove(0) else {
             unreachable!("caller matched a front run")
         };
@@ -641,33 +633,43 @@ impl FitStage {
     }
 }
 
-/// Per-item drive of the fit stage for single-threaded hosts (the snapshot
-/// harness, wasm): `feed` is one iteration of [`FitStage::run`]'s loop,
-/// `finish` is its input-closed path — resolve and flush everything without
-/// forwarding a `Drain`.
 pub struct FitDriver {
     stage: FitStage,
-    out: TravelAligningSender,
+    alignment: TravelAlignment,
 }
 
 impl FitDriver {
-    pub fn feed(&mut self, item: StreamInput) -> bool {
-        match item {
+    pub fn feed(
+        &mut self,
+        item: StreamInput,
+        output: &mut impl FnMut(StreamInput) -> bool,
+    ) -> bool {
+        let mut out = TravelAligningSender {
+            tx: output,
+            alignment: std::mem::take(&mut self.alignment),
+        };
+        let ok = match item {
             StreamInput::Move(m) => {
                 self.stage.ingest(m);
-                self.stage.resolve(false, &mut self.out)
+                self.stage.resolve(false, &mut out)
             }
             StreamInput::Drain => {
-                self.stage.resolve(true, &mut self.out)
-                    && self.out.release(None)
-                    && self.out.forward_drain()
+                self.stage.resolve(true, &mut out) && out.release(None) && out.forward_drain()
             }
-            StreamInput::Control(ctrl) => self.stage.forward_control(ctrl, &mut self.out),
-        }
+            StreamInput::Control(ctrl) => self.stage.forward_control(ctrl, &mut out),
+        };
+        self.alignment = out.alignment;
+        ok
     }
 
-    pub fn finish(&mut self) -> bool {
-        self.stage.resolve(true, &mut self.out) && self.out.release(None)
+    pub fn finish(&mut self, output: &mut impl FnMut(StreamInput) -> bool) -> bool {
+        let mut out = TravelAligningSender {
+            tx: output,
+            alignment: std::mem::take(&mut self.alignment),
+        };
+        let ok = self.stage.resolve(true, &mut out) && out.release(None);
+        self.alignment = out.alignment;
+        ok
     }
 }
 
@@ -678,40 +680,36 @@ impl FitDriver {
 /// arrives (non-spatial pieces queue behind it to preserve order); `release`
 /// with no anchor keeps the travel's own end, exactly as the batch fit does at
 /// the end of its window.
-struct TravelAligningSender {
-    tx: Sender<StreamInput>,
+#[derive(Default)]
+struct TravelAlignment {
     last_spatial_end: Option<[f64; 3]>,
     parked_travel: Option<Move>,
     parked_tail: Vec<Move>,
 }
 
-impl TravelAligningSender {
-    fn new(tx: Sender<StreamInput>) -> Self {
-        Self {
-            tx,
-            last_spatial_end: None,
-            parked_travel: None,
-            parked_tail: Vec::new(),
-        }
-    }
+struct TravelAligningSender<'a> {
+    tx: &'a mut dyn FnMut(StreamInput) -> bool,
+    alignment: TravelAlignment,
+}
 
+impl TravelAligningSender<'_> {
     fn send(&mut self, m: Move) -> bool {
         let Some(start) = spatial_start(&m) else {
-            if self.parked_travel.is_some() {
-                self.parked_tail.push(m);
+            if self.alignment.parked_travel.is_some() {
+                self.alignment.parked_tail.push(m);
                 return true;
             }
-            return self.tx.send(m.into()).is_ok();
+            return (self.tx)(m.into());
         };
         if !self.release(Some(start)) {
             return false;
         }
         if is_travel(&m) {
-            self.parked_travel = Some(m);
+            self.alignment.parked_travel = Some(m);
             return true;
         }
-        if let Some(prev_end) = self.last_spatial_end {
-            let gap = dist3(prev_end, start);
+        if let Some(prev_end) = self.alignment.last_spatial_end {
+            let gap = geometry::vec3::dist(prev_end, start);
             assert!(
                 gap <= CONTIGUITY_EPS_MM,
                 "fit_stage emitted discontinuous geometry at line {}: previous piece ends at \
@@ -719,52 +717,58 @@ impl TravelAligningSender {
                 m.source.start_line
             );
         }
-        self.last_spatial_end = spatial_end(&m);
-        self.tx.send(m.into()).is_ok()
+        self.alignment.last_spatial_end = spatial_end(&m);
+        (self.tx)(m.into())
     }
 
     fn release(&mut self, next_start: Option<[f64; 3]>) -> bool {
-        let Some(travel) = self.parked_travel.take() else {
-            debug_assert!(self.parked_tail.is_empty());
+        let Some(travel) = self.alignment.parked_travel.take() else {
+            debug_assert!(self.alignment.parked_tail.is_empty());
             return true;
         };
-        let travel = align_travel(travel, self.last_spatial_end, next_start);
-        self.last_spatial_end = spatial_end(&travel);
-        if self.tx.send(travel.into()).is_err() {
+        let travel = align_travel(travel, self.alignment.last_spatial_end, next_start);
+        self.alignment.last_spatial_end = spatial_end(&travel);
+        if !(self.tx)(travel.into()) {
             return false;
         }
-        for m in self.parked_tail.drain(..) {
-            if self.tx.send(m.into()).is_err() {
+        for m in self.alignment.parked_tail.drain(..) {
+            if !(self.tx)(m.into()) {
                 return false;
             }
         }
         true
     }
 
-    fn forward_drain(&self) -> bool {
-        debug_assert!(self.parked_travel.is_none() && self.parked_tail.is_empty());
-        self.tx.send(StreamInput::Drain).is_ok()
+    fn forward_drain(&mut self) -> bool {
+        debug_assert!(
+            self.alignment.parked_travel.is_none() && self.alignment.parked_tail.is_empty()
+        );
+        (self.tx)(StreamInput::Drain)
     }
 
-    fn forward(&self, item: StreamInput) -> bool {
-        debug_assert!(self.parked_travel.is_none() && self.parked_tail.is_empty());
-        self.tx.send(item).is_ok()
+    fn forward(&mut self, item: StreamInput) -> bool {
+        debug_assert!(
+            self.alignment.parked_travel.is_none() && self.alignment.parked_tail.is_empty()
+        );
+        (self.tx)(item)
     }
 
     /// A mesh swap renames the resting point's gcode Z (the machine position
     /// is invariant); the emitted-geometry anchor must adopt the new name or
     /// the next move looks discontinuous against a stale coordinate.
     fn rebase_gcode_z(&mut self, z: f64) {
-        debug_assert!(self.parked_travel.is_none() && self.parked_tail.is_empty());
-        if let Some(end) = self.last_spatial_end.as_mut() {
+        debug_assert!(
+            self.alignment.parked_travel.is_none() && self.alignment.parked_tail.is_empty()
+        );
+        if let Some(end) = self.alignment.last_spatial_end.as_mut() {
             end[2] = z;
         }
     }
 
     fn reset(&mut self) {
-        self.last_spatial_end = None;
-        self.parked_travel = None;
-        self.parked_tail.clear();
+        self.alignment.last_spatial_end = None;
+        self.alignment.parked_travel = None;
+        self.alignment.parked_tail.clear();
     }
 }
 
@@ -774,7 +778,9 @@ fn align_travel(m: Move, prev_end: Option<[f64; 3]>, next_start: Option<[f64; 3]
     };
     let a = prev_end.unwrap_or(line.start);
     let b = next_start.unwrap_or(line.end);
-    if dist3(a, line.start) <= ALIGN_EPS_MM && dist3(b, line.end) <= ALIGN_EPS_MM {
+    if geometry::vec3::dist(a, line.start) <= ALIGN_EPS_MM
+        && geometry::vec3::dist(b, line.end) <= ALIGN_EPS_MM
+    {
         return m;
     }
     let line_no = m.source.start_line;

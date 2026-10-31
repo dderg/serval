@@ -241,6 +241,9 @@ def PrinterStepper(config, units_in_radians=False, name=None):
         units_in_radians,
     )
     mcu_stepper.phase_stepping = config.getboolean("phase_stepping", False)
+    mcu_stepper.high_precision_step_compress = config.getboolean(
+        "high_precision_step_compress", False
+    )
     for mname in ["stepper_enable", "force_move", "motion_report"]:
         m = printer.load_object(config, mname)
         m.register_stepper(config, mcu_stepper)

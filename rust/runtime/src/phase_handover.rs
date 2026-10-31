@@ -1,7 +1,8 @@
 use core::sync::atomic::Ordering;
 
 use crate::state::SharedState;
-use crate::stepping_state::{AxisState, StepMode, StepperRef};
+use crate::stepping_state::{AxisState, StepperRef};
+use runtime_contract::axes::StepMode;
 
 pub const PHASE_PERIOD: i32 = 1024;
 pub const PHASE_MASK: i32 = PHASE_PERIOD - 1;
@@ -80,12 +81,6 @@ pub fn jog_to(
 pub fn align_to(axes: &[Option<AxisState>], stepper_oid: u8, target_phase: u16) -> i32 {
     if i32::from(target_phase) >= PHASE_PERIOD {
         return -1;
-    }
-    let motion_active = axes
-        .iter()
-        .any(|a| a.as_ref().map_or(false, |ax| ax.armed.is_some()));
-    if motion_active {
-        return -2;
     }
     let Some((_, axis, stepper)) = find_stepper(axes, stepper_oid) else {
         return -1;

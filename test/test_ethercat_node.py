@@ -340,3 +340,23 @@ def test_dynamics_profile_option_existing_file_passes(tmp_path):
     assert servo_axis.read_dynamics_profile_option(
         FakeOptionConfig(str(path))
     ) == str(path)
+
+
+class FakeChoiceConfig:
+    """Mirrors ConfigWrapper.getchoice for the string-keyed case: the raw value
+    must be a key of the mapping, otherwise it is a config error."""
+
+    error = FakeConfigError
+    section = "ethercat_node node_x"
+
+    def __init__(self, raw=None):
+        self._raw = raw
+
+    def getchoice(self, option, choices, default):
+        value = default if self._raw is None else self._raw
+        if value not in choices:
+            raise FakeConfigError(
+                "Choice '%s' for option '%s' in section '%s' is not a valid "
+                "choice" % (value, option, self.section)
+            )
+        return choices[value]

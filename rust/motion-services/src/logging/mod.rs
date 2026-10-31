@@ -57,17 +57,5 @@ pub fn init_logging(events_dir: &Path) -> Result<(), LogInitError> {
     Ok(())
 }
 
-#[macro_export]
-macro_rules! klog {
-    ($level:ident, $subsystem:expr, $event:expr, $msg:expr $(; $($k:ident = $v:expr),* $(,)?)?) => {
-        tracing::$level!(
-            subsystem = $subsystem,
-            event = $event,
-            $($($k = $v,)*)?
-            $msg
-        );
-    };
-}
-
 #[cfg(test)]
 mod tests;

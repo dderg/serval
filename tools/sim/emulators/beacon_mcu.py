@@ -44,6 +44,9 @@ APPROACH_FROM_ABOVE_Z_MM = 10.0
 
 class BeaconMcuStub:
     SAMPLE_RATE_HZ = 1600.0
+    BATCH_HZ = 200.0
+    SAMPLES_PER_BATCH = 8
+    BATCH_PERIOD_S = 1.0 / BATCH_HZ
     IDENTIFY_BLOB = IDENTIFY_BLOB
     CLOCK_FREQ = CLOCK_FREQ
     STUB_NAME = "beacon-stub"
@@ -114,6 +117,8 @@ class BeaconMcuStub:
         self._accel_thread: Optional[threading.Thread] = None
         self._accel_clock_at_last_emit: int = 0
         self._sample_index: int = 0
+        self._next_batch_vt: float = 0.0
+        self._last_batch_vt: Optional[float] = None
         self._clock_origin = self._monotonic()
 
         self._homing_trigger_delay: float = 0.5
@@ -132,6 +137,8 @@ class BeaconMcuStub:
         self._z_current: float = 10.0
         self._prev_poll_time: Optional[float] = None
         self._prev_poll_z: float = 10.0
+        self._prev2_poll_time: Optional[float] = None
+        self._prev2_poll_z: float = 10.0
         self._freq_base: int = 5_183_000
         self._freq_coeff: float = 763_000.0
         self._freq_offset: float = 2.857
@@ -240,6 +247,7 @@ class BeaconMcuStub:
                 else:
                     probe_lines = [15, 18, 7]
                 readings = {}
+                reading_vts = {}
                 for ln in probe_lines:
                     sock.sendall(b"get_steps line=%d\n" % ln)
                     while b"\n" not in buf:
@@ -249,7 +257,14 @@ class BeaconMcuStub:
                         buf += chunk
                     resp, _, buf = buf.partition(b"\n")
                     if resp.startswith(b"steps="):
-                        readings[ln] = int(resp[6:].split()[0])
+                        fields = dict(
+                            kv.split(b"=", 1)
+                            for kv in resp.split()
+                            if b"=" in kv
+                        )
+                        readings[ln] = int(fields[b"steps"])
+                        if b"vt" in fields:
+                            reading_vts[ln] = int(fields[b"vt"]) / 1e9
                 if not self._z_line_locked:
                     for ln, val in readings.items():
                         if val != self._line_baselines.get(ln, val):
@@ -261,6 +276,7 @@ class BeaconMcuStub:
                             )
                             break
                         self._line_baselines[ln] = val
+                line_vt = reading_vts.get(self._z_step_line)
                 line = (
                     b"steps=%d" % readings[self._z_step_line]
                     if self._z_step_line in readings
@@ -274,7 +290,9 @@ class BeaconMcuStub:
                 sock = None
                 continue
             if line.startswith(b"steps="):
-                sampled_at = self._monotonic()
+                sampled_at = (
+                    line_vt if line_vt is not None else self._monotonic()
+                )
                 steps = int(line[6:])
                 self._steps_now = steps
                 if self._z_line_locked and not self._step_tracking:
@@ -292,9 +310,11 @@ class BeaconMcuStub:
                         self._fire_contact_trigger(
                             self._bed_crossing_time(sampled_at, z)
                         )
+                    self._prev2_poll_time = self._prev_poll_time
+                    self._prev2_poll_z = self._prev_poll_z
                     self._prev_poll_time = sampled_at
                     self._prev_poll_z = z
-            time.sleep(0.005)
+            time.sleep(0.001)
 
     def _bed_crossing_time(self, sampled_at: float, z: float) -> float:
         """The poll that sees z <= 0 runs up to one poll period after the
@@ -669,6 +689,15 @@ class BeaconMcuStub:
             if trigger_time is None
             else self._clock_at(trigger_time)
         )
+        contact_line = (
+            f"CONTACT steps={self._steps_now} z={self._z_current:.6f}"
+            f" trigger_time={trigger_time!r}"
+            f" clock={self._contact_trigger_clock}\n"
+        )
+        logging.info("beacon-stub: %s", contact_line.strip())
+        if self._log_path:
+            with open(self._log_path, "a") as f:
+                f.write(contact_line)
         self._contact_trigger_sample = self._sample_index
         self._contact_trigger_freq = self._z_to_frequency(0.0)
         self._trsync_can_trigger[self._contact_trsync_oid] = False
@@ -798,45 +827,122 @@ class BeaconMcuStub:
         # No-op: the loop exits when _stream_en flips false, and stop() joins.
         return
 
+    def _project_z(self, at_vt: float) -> float:
+        last_t, last_z = self._prev_poll_time, self._prev_poll_z
+        prev_t, prev_z = self._prev2_poll_time, self._prev2_poll_z
+        if last_t is None or prev_t is None or last_t <= prev_t:
+            return self._z_current
+        if at_vt <= last_t:
+            return last_z
+        horizon = min(at_vt - last_t, last_t - prev_t)
+        slope = (last_z - prev_z) / (last_t - prev_t)
+        return max(0.0, last_z + slope * horizon)
+
+    def _query_steps_now(self, sock) -> tuple:
+        sock.sendall(b"get_steps line=%d\n" % self._z_step_line)
+        buf = b""
+        while b"\n" not in buf:
+            chunk = sock.recv(64)
+            if not chunk:
+                raise OSError("closed")
+            buf += chunk
+        resp, _, _ = buf.partition(b"\n")
+        if not resp.startswith(b"steps="):
+            raise OSError("bad get_steps response")
+        fields = dict(kv.split(b"=", 1) for kv in resp.split() if b"=" in kv)
+        return int(fields[b"steps"]), int(fields[b"vt"]) / 1e9
+
+    def _batch_sock(self):
+        import socket as _socket
+
+        sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        sock.settimeout(1.0)
+        sock.connect(self._step_sock_path)
+        return sock
+
+    def _due_batch_vt(self, now_vt: float) -> float:
+        """A stall that swallows whole batch periods cannot be replayed:
+        the samples those periods would have carried were never taken.
+        Replaying the backlog emits several batches at one clock, each
+        stamped with the current Z, which reads downstream as scheduled
+        history. The schedule resynchronizes to now exactly once
+        instead."""
+        if now_vt - self._next_batch_vt >= self.BATCH_PERIOD_S:
+            return now_vt
+        return self._next_batch_vt
+
+    def _commit_batch_vt(self, batch_vt: float) -> None:
+        last = self._last_batch_vt
+        min_advance = self.BATCH_PERIOD_S / 2
+        if last is not None and batch_vt - last < min_advance:
+            raise RuntimeError(
+                "beacon-stub: batch clocks collided: "
+                f"{batch_vt!r} follows {last!r}, less than half of the "
+                f"{self.BATCH_PERIOD_S}s batch period apart"
+            )
+        self._last_batch_vt = batch_vt
+        self._next_batch_vt = batch_vt + self.BATCH_PERIOD_S
+
     def _sample_loop(self) -> None:
-        BATCH_HZ = 200.0
-        SAMPLES_PER_BATCH = 8
         STATUS_HZ = 10.0
-        batch_period = 1.0 / BATCH_HZ
         status_period = 1.0 / STATUS_HZ
 
-        next_batch = time.monotonic()
+        self._next_batch_vt = self._monotonic()
+        self._last_batch_vt = None
         next_status = time.monotonic()
-        last_data_value = 0
         loop_iter_count = 0
+        batch_sock = None
 
         while not self._stop.is_set() and self._stream_en:
+            now_vt = self._monotonic()
             now = time.monotonic()
-            next_event = min(next_batch, next_status)
-            sleep_for = next_event - now
-            if sleep_for > 0:
-                time.sleep(min(sleep_for, batch_period))
+            if now_vt < self._next_batch_vt and now < next_status:
+                time.sleep(0.001)
                 continue
 
-            if now >= next_batch:
-                next_batch += batch_period
-                start_clock = self._now_clock()
+            if now_vt >= self._next_batch_vt:
+                batch_vt = self._due_batch_vt(now_vt)
 
-                if self._home_active and not self._step_tracking:
-                    elapsed = now - self._homing_start_time
-                    self._z_current = max(
-                        0.0,
-                        self._homing_start_z
-                        - elapsed * self._homing_approach_speed,
-                    )
+                z_at_batch = None
+                if self._step_tracking:
+                    try:
+                        if batch_sock is None:
+                            batch_sock = self._batch_sock()
+                        steps, batch_vt = self._query_steps_now(batch_sock)
+                        z_at_batch = (
+                            self._z_anchor_mm
+                            + self._z_step_sign
+                            * (steps - self._z_anchor_steps)
+                            / self._z_steps_per_mm
+                        )
+                    except OSError:
+                        if batch_sock is not None:
+                            try:
+                                batch_sock.close()
+                            except OSError:
+                                pass
+                            batch_sock = None
+                self._commit_batch_vt(batch_vt)
+                if z_at_batch is None:
+                    if self._home_active and not self._step_tracking:
+                        elapsed = batch_vt - self._homing_start_time
+                        self._z_current = max(
+                            0.0,
+                            self._homing_start_z
+                            - elapsed * self._homing_approach_speed,
+                        )
+                        z_at_batch = self._z_current
+                    else:
+                        z_at_batch = self._project_z(batch_vt)
+                start_clock = self._clock_at(batch_vt)
 
-                freq = self._z_to_frequency(self._z_current)
+                freq = self._z_to_frequency(z_at_batch)
                 data_value = self._freq_to_count(freq)
 
                 buf = bytearray()
                 decoder_baseline = 0
                 last_data_value = decoder_baseline
-                for i in range(SAMPLES_PER_BATCH):
+                for i in range(self.SAMPLES_PER_BATCH):
                     delta = data_value - last_data_value
                     fits_two_byte_twos_complement = -16384 <= delta <= 16383
                     if fits_two_byte_twos_complement:
@@ -855,17 +961,20 @@ class BeaconMcuStub:
                     last_data_value = data_value
 
                 delta_clock = (
-                    int(self.CLOCK_FREQ / (BATCH_HZ * SAMPLES_PER_BATCH))
-                    * SAMPLES_PER_BATCH
+                    int(
+                        self.CLOCK_FREQ
+                        / (self.BATCH_HZ * self.SAMPLES_PER_BATCH)
+                    )
+                    * self.SAMPLES_PER_BATCH
                 )
                 self._send_msg(
                     "beacon_data data=%*s samples=%c start_clock=%u delta_clock=%u",
                     data=list(buf),
-                    samples=SAMPLES_PER_BATCH,
+                    samples=self.SAMPLES_PER_BATCH,
                     start_clock=start_clock,
                     delta_clock=delta_clock,
                 )
-                self.tx_sample_count += SAMPLES_PER_BATCH
+                self.tx_sample_count += self.SAMPLES_PER_BATCH
                 loop_iter_count += 1
 
                 # Thresholds arrive from klippy already in counts, not Hz.
@@ -903,6 +1012,11 @@ class BeaconMcuStub:
                     coil_temp=143_640,  # ~25C at BEACON_ADC_SMOOTH_COUNT=200
                     status=0,
                 )
+        if batch_sock is not None:
+            try:
+                batch_sock.close()
+            except OSError:
+                pass
 
     def _z_to_frequency(self, z_mm: float) -> int:
         if z_mm < 0:

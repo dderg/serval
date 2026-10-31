@@ -11,14 +11,19 @@ fn status_heartbeat_lifts_to_runtime_event() {
         engine_state: 1,
         fault_code: 0,
         retired_counts: vec![7, 0, 3],
+        playback_clocks: vec![5_000, 0, 1_200],
         ff_saturation_count: 0,
     };
     let mut body = Vec::new();
     hb.encode(&mut body);
     let mut st = make_state();
     match lift_event_to_runtime_event(&mut st, MessageKind::StatusHeartbeat, &body) {
-        McuDispatchResult::Event(RuntimeEvent::Heartbeat { retired_counts }) => {
+        McuDispatchResult::Event(RuntimeEvent::Heartbeat {
+            retired_counts,
+            playback_clocks,
+        }) => {
             assert_eq!(retired_counts, vec![7, 0, 3]);
+            assert_eq!(playback_clocks, vec![5_000, 0, 1_200]);
         }
         other => panic!("expected Heartbeat event, got {other:?}"),
     }

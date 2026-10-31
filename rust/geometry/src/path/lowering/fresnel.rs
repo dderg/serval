@@ -86,6 +86,10 @@ const GD: [f64; 11] = [
     1.86958710162783236342e-22,
 ];
 
+/// Cephes switches `C`/`S` from the origin polynomials to the auxiliary pair
+/// at this squared argument.
+const AUXILIARY_X2: f64 = 2.5625;
+
 fn polevl(x: f64, coef: &[f64]) -> f64 {
     coef.iter().fold(0.0, |acc, &c| acc * x + c)
 }
@@ -94,11 +98,23 @@ fn p1evl(x: f64, coef: &[f64]) -> f64 {
     coef.iter().fold(1.0, |acc, &c| acc * x + c)
 }
 
+/// The Cephes auxiliary pair: for `x² >= AUXILIARY_X2`,
+/// `C(x) = ½ + (f·sin a − g·cos a)/(πx)` and
+/// `S(x) = ½ − (f·cos a + g·sin a)/(πx)`, with `a = πx²/2`.
+fn auxiliary(x2: f64) -> (f64, f64) {
+    let pix2 = PI * x2;
+    let u = 1.0 / (pix2 * pix2);
+    let inv = 1.0 / pix2;
+    let f = 1.0 - u * polevl(u, &FN) / p1evl(u, &FD);
+    let g = inv * polevl(u, &GN) / p1evl(u, &GD);
+    (f, g)
+}
+
 fn fresnel_cs(x: f64) -> (f64, f64) {
     let ax = x.abs();
     let x2 = ax * ax;
 
-    let (c, s) = if x2 < 2.5625 {
+    let (c, s) = if x2 < AUXILIARY_X2 {
         let t = x2 * x2;
         let s = ax * x2 * polevl(t, &SN) / p1evl(t, &SD);
         let c = ax * polevl(t, &CN) / polevl(t, &CD);
@@ -106,11 +122,7 @@ fn fresnel_cs(x: f64) -> (f64, f64) {
     } else if ax > 36974.0 {
         (0.5, 0.5)
     } else {
-        let pix2 = PI * x2;
-        let u = 1.0 / (pix2 * pix2);
-        let inv = 1.0 / pix2;
-        let f = 1.0 - u * polevl(u, &FN) / p1evl(u, &FD);
-        let g = inv * polevl(u, &GN) / p1evl(u, &GD);
+        let (f, g) = auxiliary(x2);
         let arg = FRAC_PI_2 * x2;
         let (sin_a, cos_a) = libm::sincos(arg);
         let pix = PI * ax;
@@ -124,30 +136,74 @@ fn fresnel_cs(x: f64) -> (f64, f64) {
 
 pub(super) fn clothoid_offset(kappa_0: f64, sigma: f64, s: f64) -> (f64, f64) {
     if sigma == 0.0 {
-        if kappa_0 == 0.0 {
-            return (s, 0.0);
-        }
-        return (
-            libm::sin(kappa_0 * s) / kappa_0,
-            (1.0 - libm::cos(kappa_0 * s)) / kappa_0,
-        );
+        return constant_curvature_offset(kappa_0, s);
+    }
+    if sigma < 0.0 {
+        let (cx, cy) = rising_curvature_offset(-kappa_0, -sigma, s);
+        return (cx, -cy);
+    }
+    rising_curvature_offset(kappa_0, sigma, s)
+}
+
+/// `∫₀ˢ (cos, sin)(κ₀·t) dt`. The sagitta is taken through the half-angle
+/// sine, which keeps its relative accuracy as the turn `κ₀·s` vanishes —
+/// `1 − cos` does not.
+fn constant_curvature_offset(kappa_0: f64, s: f64) -> (f64, f64) {
+    if kappa_0 == 0.0 {
+        return (s, 0.0);
+    }
+    let half_turn_sin = libm::sin(0.5 * kappa_0 * s);
+    (
+        libm::sin(kappa_0 * s) / kappa_0,
+        2.0 * half_turn_sin * half_turn_sin / kappa_0,
+    )
+}
+
+/// `∫₀ˢ (cos, sin)(κ₀·t + σ·t²/2) dt` for `σ > 0`.
+///
+/// Completing the square moves the integral onto the Cornu spiral centred at
+/// arc `−κ₀/σ`, where it is a difference of Fresnel values. That difference
+/// is only well conditioned while the segment spans the spiral centre or
+/// stays near it: further out, `s + κ₀/σ` loses `s` to the offset and each
+/// Fresnel value is a `½` pedestal plus a vanishing tail. The endpoint
+/// curvatures carry the same geometry with neither cancellation, so the
+/// segment is evaluated from its two tails there.
+fn rising_curvature_offset(kappa_0: f64, sigma: f64, s: f64) -> (f64, f64) {
+    let kappa_1 = kappa_0 + sigma * s;
+    let inv_spiral_scale = 1.0 / (PI * sigma).sqrt();
+    let x0 = kappa_0 * inv_spiral_scale;
+    let x1 = kappa_1 * inv_spiral_scale;
+    if x0 * x1 > 0.0 && x0 * x0 >= AUXILIARY_X2 && x1 * x1 >= AUXILIARY_X2 {
+        let turn = kappa_0 * s + 0.5 * sigma * s * s;
+        return tail_offset(kappa_0, kappa_1, x0 * x0, x1 * x1, turn);
     }
 
-    let abs_sigma = sigma.abs();
-    let sign = sigma.signum();
-    let a = kappa_0 * kappa_0 / (2.0 * sigma);
-    let scale = (abs_sigma / PI).sqrt();
-    let w0 = kappa_0 / sigma;
-    let w1 = s + kappa_0 / sigma;
-
-    let (c0, s0) = fresnel_cs(w0 * scale);
-    let (c1, s1) = fresnel_cs(w1 * scale);
+    let spiral_scale = (sigma / PI).sqrt();
+    let centre_arc = kappa_0 / sigma;
+    let (c0, s0) = fresnel_cs(centre_arc * spiral_scale);
+    let (c1, s1) = fresnel_cs((s + centre_arc) * spiral_scale);
     let d_c = c1 - c0;
     let d_s = s1 - s0;
 
-    let k = (PI / abs_sigma).sqrt();
-    let (sin_a, cos_a) = libm::sincos(a);
-    let cx = k * (cos_a * d_c + sign * sin_a * d_s);
-    let cy = k * (sign * cos_a * d_s - sin_a * d_c);
-    (cx, cy)
+    let k = (PI / sigma).sqrt();
+    let (sin_a, cos_a) = libm::sincos(kappa_0 * kappa_0 / (2.0 * sigma));
+    (
+        k * (cos_a * d_c + sin_a * d_s),
+        k * (cos_a * d_s - sin_a * d_c),
+    )
+}
+
+/// `∫₀ˢ e^{i(κ₀t + σt²/2)} dt = (g₀ + i·f₀)/κ₀ − (g₁ + i·f₁)·e^{i·turn}/κ₁`
+/// for a segment that stays on one arm of the spiral: the spiral-centre phase
+/// `κ₀²/(2σ)` — unbounded as `σ → 0`, and meaningless modulo 2π once it is —
+/// cancels analytically between the two endpoint tails, leaving only the
+/// segment's own turn.
+fn tail_offset(kappa_0: f64, kappa_1: f64, x0_sq: f64, x1_sq: f64, turn: f64) -> (f64, f64) {
+    let (f0, g0) = auxiliary(x0_sq);
+    let (f1, g1) = auxiliary(x1_sq);
+    let (sin_turn, cos_turn) = libm::sincos(turn);
+    (
+        g0 / kappa_0 - (g1 * cos_turn - f1 * sin_turn) / kappa_1,
+        f0 / kappa_0 - (f1 * cos_turn + g1 * sin_turn) / kappa_1,
+    )
 }

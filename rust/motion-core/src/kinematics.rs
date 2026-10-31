@@ -1,11 +1,10 @@
-use runtime::segment::KinematicTag;
-
 pub const SPATIAL_AXES: usize = 3;
 
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KinematicsKind {
-    CoreXy,
-    Cartesian,
+    CoreXy = 0,
+    Cartesian = 1,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -43,13 +42,13 @@ fn matrix_vector(
 
 impl KinematicsModule {
     pub fn from_tag(tag: u8) -> Result<Self, UnknownKinematicsTag> {
-        if tag == KinematicTag::CoreXy as u8 {
+        if tag == KinematicsKind::CoreXy as u8 {
             Ok(Self {
                 kind: KinematicsKind::CoreXy,
                 axis_to_motor: COREXY_AXIS_TO_MOTOR,
                 motor_to_axis: COREXY_MOTOR_TO_AXIS,
             })
-        } else if tag == KinematicTag::Cartesian as u8 {
+        } else if tag == KinematicsKind::Cartesian as u8 {
             Ok(Self {
                 kind: KinematicsKind::Cartesian,
                 axis_to_motor: IDENTITY,
@@ -62,13 +61,6 @@ impl KinematicsModule {
 
     pub fn kind(&self) -> KinematicsKind {
         self.kind
-    }
-
-    pub fn tag(&self) -> u8 {
-        match self.kind {
-            KinematicsKind::CoreXy => KinematicTag::CoreXy as u8,
-            KinematicsKind::Cartesian => KinematicTag::Cartesian as u8,
-        }
     }
 
     pub fn lane_weights(&self, lane: usize) -> [f64; SPATIAL_AXES] {

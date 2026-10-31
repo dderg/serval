@@ -12,10 +12,10 @@ fn entry(seq: u64) -> UnackedEntry {
 #[test]
 fn pop_acked_strict_less_than() {
     let mut w = UnackedWindow::default();
-    w.push(entry(1));
-    w.push(entry(2));
-    w.push(entry(3));
-    let popped = w.pop_acked(2);
+    w.push_back(entry(1));
+    w.push_back(entry(2));
+    w.push_back(entry(3));
+    let popped = pop_acked(&mut w, 2);
     assert_eq!(popped.len(), 1);
     assert_eq!(popped[0].seq, 1);
     assert_eq!(w.len(), 2);

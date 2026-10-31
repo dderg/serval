@@ -1,10 +1,8 @@
 """min_home_dist early-trigger guard on positive-direction AWD CoreXY.
 
-Each test emulates a physical endstop switch as a *positional wall*: a
-thread watches the shim's per-lane step counters, converts them to
-cartesian XY, and drives the endstop GPIO high exactly while the axis
-sits at/past the wall — the same behavior a real switch (or a StallGuard
-trip at a hard stop) has.
+The long-Y tests use the shim's in-intercept positional wall. It observes
+executed motor steps and asserts the endstop in the same callback, before the
+virtual clock can advance queued motion beyond the trip point.
 
 Scenario from the bench: sensorless AWD CoreXY homing toward
 position_max. X starts near its endstop, so the first X approach trips
@@ -36,6 +34,9 @@ STEPS_PER_MM = 16 * 200 / 40.0
 
 X_ENDSTOP = (0, 10)
 Y_ENDSTOP = (0, 11)
+AUTO_Y_ENDSTOP_LINE = 201
+LONG_Y_WALL_MM = 60.0
+LONG_Y_WALL_STEPS = int(LONG_Y_WALL_MM * STEPS_PER_MM)
 
 NEEDS_REHOME_RE = re.compile(
     r"homing: (?P<axis>[XYZ]) needs rehome: (?P<verdict>True|False) "
@@ -103,26 +104,35 @@ class EndstopWall:
             time.sleep(0.01)
 
 
-def _boot(sim_world):
-    world = sim_world(
-        lambda w: configs.awd_corexy_positive_dir_config(
-            w.h7_pty, str(w.gcode_dir)
-        ),
-        dual_mcu=False,
-    )
+def _boot(sim_world, auto_y_wall=False):
+    def config(world):
+        text = configs.awd_corexy_positive_dir_config(
+            world.h7_pty, str(world.gcode_dir)
+        )
+        if auto_y_wall:
+            text = text.replace(
+                "endstop_pin: ^gpiochip0/gpio11",
+                f"endstop_pin: ^gpiochip0/gpio{AUTO_Y_ENDSTOP_LINE}",
+                1,
+            )
+        return text
+
+    world = sim_world(config, dual_mcu=False)
     control = world.sim_control("h7")
+    if auto_y_wall:
+        control.set_endstop_wall(AUTO_Y_ENDSTOP_LINE, LONG_Y_WALL_STEPS)
     return world, control, XyTracker(control)
 
 
-def _home_y_against_wall_at_60(world, control, tracker):
-    """G28 Y with the wall 60mm out; returns the guard's first decision.
+def _home_y_against_wall_at_60(world):
+    """G28 Y against the in-intercept wall 60mm out; returns the guard's
+    first decision.
 
-    The G28 response is collected non-fatally: when the guard misfires
-    the follow-up rehome can itself error out, and the decision record
-    is the evidence this test is after.
+    The G28 response is collected non-fatally: when the guard misfires the
+    follow-up rehome can itself error out, and the decision record is the
+    evidence this test is after.
     """
-    with EndstopWall(tracker, control, 1, Y_ENDSTOP, wall_mm=60.0):
-        resp = world.gcode("G28 Y", timeout=300)
+    resp = world.gcode("G28 Y", timeout=300)
     records = _needs_rehome_records(world.log_tail(), "Y")
     assert records, (
         f"no needs_rehome decision logged for Y; G28 response: {resp}"
@@ -137,9 +147,9 @@ def _home_y_against_wall_at_60(world, control, tracker):
 
 
 def test_long_travel_y_is_not_an_early_trigger(sim_world):
-    world, control, tracker = _boot(sim_world)
+    world, _, _ = _boot(sim_world, auto_y_wall=True)
     world.mark_log()
-    _home_y_against_wall_at_60(world, control, tracker)
+    _home_y_against_wall_at_60(world)
     assert world.shutdown_line() is None
 
 
@@ -200,7 +210,7 @@ def test_false_trigger_far_from_endstop_fails_loudly(sim_world):
 
 
 def test_long_travel_y_after_x_early_rehome(sim_world):
-    world, control, tracker = _boot(sim_world)
+    world, control, tracker = _boot(sim_world, auto_y_wall=True)
 
     world.mark_log()
     with EndstopWall(tracker, control, 0, X_ENDSTOP, wall_mm=3.0):
@@ -211,5 +221,60 @@ def test_long_travel_y_after_x_early_rehome(sim_world):
         f"have taken the rehome path; decisions: {x_records}"
     )
 
-    _home_y_against_wall_at_60(world, control, tracker)
+    _home_y_against_wall_at_60(world)
+    assert world.shutdown_line() is None
+
+
+def test_false_trigger_with_real_endstop_beyond_window_still_fails(sim_world):
+    """The re-approach window is deliberately capped at 2*min_home_dist:
+    it exists to verify the first trigger happened at the actual end of
+    travel. A false trigger ~0.5mm in with the real switch 60mm out must
+    therefore fail loudly — a "generous" full-travel re-approach would
+    find the far switch, accept an origin the first trigger never
+    vouched for, and silently mask the misfire (attempted 2026-08-20,
+    reverted). This test pins the capped window as intentional."""
+    world, control, tracker = _boot(sim_world)
+    world.mark_log()
+
+    resp = {}
+    g28 = threading.Thread(
+        target=lambda: resp.update(world.gcode("G28 Y", timeout=300))
+    )
+    y_start = tracker.xy()[1]
+    g28.start()
+
+    _wait_until(
+        lambda: tracker.xy()[1] >= y_start + 0.5, 90, "Y approach motion"
+    )
+    control.set_gpio_input(*Y_ENDSTOP, 1)
+    y_peak = tracker.xy()[1]
+
+    def backoff_started():
+        nonlocal y_peak
+        y = tracker.xy()[1]
+        y_peak = max(y_peak, y)
+        return y <= y_peak - 0.5
+
+    _wait_until(backoff_started, 60, "min_home_dist backoff after the trip")
+    control.set_gpio_input(*Y_ENDSTOP, 0)
+
+    with EndstopWall(tracker, control, 1, Y_ENDSTOP, wall_mm=y_start + 60.0):
+        g28.join(timeout=200)
+    assert not g28.is_alive(), "G28 Y did not finish"
+
+    records = _needs_rehome_records(world.log_tail(), "Y")
+    assert records and records[0][0], (
+        f"the staged false trigger should have tripped the guard: {records}"
+    )
+    error = resp.get("error")
+    assert error and "did not trigger within" in str(error), (
+        f"the re-approach must stay inside the 2*min_home_dist window and "
+        f"fail loudly, not hunt down the far switch; G28 response: {resp}"
+    )
+    y_final = tracker.xy()[1]
+    assert y_final < y_start + 30.0, (
+        f"the re-approach overran the capped window: reached "
+        f"{y_final - y_start:.1f}mm past the start (cap is backoff + "
+        f"2*min_home_dist = 10mm)"
+    )
     assert world.shutdown_line() is None

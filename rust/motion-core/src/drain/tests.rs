@@ -5,6 +5,7 @@ fn axis(pending: u32, pushed: u32, retired: u32) -> AxisDrainState {
         pending,
         pushed,
         retired,
+        abandoned: 0,
         staged_motion: pending,
         hold_tail: 0,
     }
@@ -65,6 +66,7 @@ fn trailing_hold_coverage_does_not_gate_drain() {
         pending: 0,
         pushed: 10,
         retired: 9,
+        abandoned: 0,
         staged_motion: 0,
         hold_tail: 1,
     };
@@ -85,23 +87,32 @@ fn trailing_hold_coverage_does_not_gate_drain() {
 }
 
 #[test]
-fn staged_holds_do_not_gate_but_staged_motion_does() {
+fn staged_holds_gate_reseed_until_the_pump_hands_them_to_the_endpoint() {
     let d = DrainLedger::new();
     let staged_holds = AxisDrainState {
         pending: 3,
         pushed: 5,
         retired: 5,
+        abandoned: 0,
         staged_motion: 0,
         hold_tail: 0,
     };
     d.publish(snapshot(&[((0, 0), staged_holds)]));
-    assert!(d.drained(), "staged hold coverage is not motion");
-    let staged_motion = AxisDrainState {
-        staged_motion: 1,
+    assert!(
+        !d.drained(),
+        "a reseed must not overtake staged holds and orphan their seam mark"
+    );
+    let handed_to_endpoint = AxisDrainState {
+        pending: 0,
+        pushed: 8,
+        hold_tail: 3,
         ..staged_holds
     };
-    d.publish(snapshot(&[((0, 0), staged_motion)]));
-    assert!(!d.drained(), "staged motion gates the drain");
+    d.publish(snapshot(&[((0, 0), handed_to_endpoint)]));
+    assert!(
+        d.drained(),
+        "wire-side trailing holds need not execute before reseed"
+    );
 }
 
 #[test]

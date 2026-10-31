@@ -9,9 +9,8 @@
 
 use config_doc::Document;
 
-use crate::{AxisDecl, CartesianLimits, PostProcessorDecl};
+use crate::{AxisDecl, CartesianLimits, DEFAULT_SQUARE_CORNER_VELOCITY_MM_S, PostProcessorDecl};
 
-const DEFAULT_SQUARE_CORNER_VELOCITY: f64 = 5.0;
 const UNSUPPORTED_PRINTER_KEYS: [&str; 2] = ["max_accel_to_decel", "minimum_cruise_ratio"];
 const LEGACY_STEPPER_AXES: [char; 5] = ['x', 'y', 'z', 'a', 'b'];
 const LEGACY_SERVO_SECTIONS: [&str; 3] = ["servo_x", "servo_y", "servo_z"];
@@ -92,8 +91,6 @@ pub struct MotionSettings {
     pub cartesian: CartesianLimits,
     pub fit_tolerance_mm: f64,
     pub fit_tolerance_accel_mm_s2: f64,
-    pub pieces_wire_budget: usize,
-    pub pieces_inflight: usize,
     pub max_extrude_only_velocity: Option<f64>,
     pub max_extrude_only_accel: Option<f64>,
 }
@@ -124,7 +121,6 @@ pub fn read_motion_settings(
     };
 
     let (cartesian, fit_tolerance_mm, fit_tolerance_accel_mm_s2) = reader.printer_section()?;
-    let (pieces_wire_budget, pieces_inflight) = reader.transport_section()?;
     let axes = reader.axis_sections()?;
     let kinematics = reader.kinematics_section(&axes)?;
     let post_processors = reader.post_processor_sections(&axes)?;
@@ -138,8 +134,6 @@ pub fn read_motion_settings(
             cartesian,
             fit_tolerance_mm,
             fit_tolerance_accel_mm_s2,
-            pieces_wire_budget,
-            pieces_inflight,
             max_extrude_only_velocity,
             max_extrude_only_accel,
         },
@@ -178,8 +172,6 @@ pub fn planner_config_from_settings(
     cfg.max_extrude_only_accel = settings.max_extrude_only_accel;
     cfg.fit_tolerance_mm = settings.fit_tolerance_mm;
     cfg.fit_tolerance_accel_mm_s2 = settings.fit_tolerance_accel_mm_s2;
-    cfg.pieces_wire_budget = settings.pieces_wire_budget;
-    cfg.pieces_inflight = settings.pieces_inflight;
     Ok(cfg)
 }
 
@@ -359,7 +351,7 @@ impl Reader<'_> {
             }
             (_, Some(deviation)) => deviation,
             (scv, None) => {
-                let scv = scv.unwrap_or(DEFAULT_SQUARE_CORNER_VELOCITY);
+                let scv = scv.unwrap_or(DEFAULT_SQUARE_CORNER_VELOCITY_MM_S);
                 geometry::corner_deviation_from_scv(scv, max_accel)
             }
         };
@@ -404,27 +396,6 @@ impl Reader<'_> {
             fit_tolerance_mm,
             fit_tolerance_accel_mm_s2,
         ))
-    }
-
-    /// `[printer]` transport experiment knobs for the piece stream — sized
-    /// so people seeing send-margin erosion can experiment without a
-    /// rebuild. Bounds keep one frame within the MCU foreground's proven
-    /// stall budget and the window within the reactor's pending-call map.
-    fn transport_section(&mut self) -> Result<(usize, usize), String> {
-        let wire_budget = self.getfloat_or(
-            "printer",
-            "pieces_wire_budget",
-            1024.0,
-            Bounds::min(256.0).max(8192.0),
-        )?;
-        let inflight = self.getfloat_or(
-            "printer",
-            "pieces_inflight",
-            12.0,
-            Bounds::min(1.0).max(16.0),
-        )?;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        Ok((wire_budget.round() as usize, inflight.round() as usize))
     }
 
     fn get_str_required(&mut self, section: &str, option: &str) -> Result<String, String> {

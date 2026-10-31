@@ -1,5 +1,3 @@
-import collections
-
 from .. import pins
 from ..motion_endstop import allocate_provider_id, entry_endstops
 from ..rail import BaseRail
@@ -52,22 +50,6 @@ class ServoVirtualEndstop:
 
     def disarm(self):
         pass
-
-
-_homing_info = collections.namedtuple(
-    "homing_info",
-    [
-        "speed",
-        "position_endstop",
-        "retract_speed",
-        "retract_dist",
-        "positive_dir",
-        "second_homing_speed",
-        "use_sensorless_homing",
-        "min_home_dist",
-        "accel",
-    ],
-)
 
 
 def infer_positive_dir(

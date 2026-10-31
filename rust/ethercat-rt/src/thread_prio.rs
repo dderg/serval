@@ -7,17 +7,9 @@
 //!   cores, so the FIFO DC thread preempts them unconditionally and they stay
 //!   off the isolated (`isolcpus`/`nohz_full`) cores.
 //!
-//! * The CoE mailbox helper shares the EtherCAT master with the DC loop. With
-//!   the in-kernel IgH master that access is serialized in the kernel and the
-//!   SDO call sleeps, so the helper also uses [`demote_to_normal_scheduling`]
-//!   by default. [`assume_companion_rt_scheduling`] is the opt-in fallback (via
-//!   `--mailbox-cpu`) for a SOEM-style master, whose SDO busy-polls a raw
-//!   socket shared with the DC loop: there a SCHED_OTHER helper descheduled
-//!   mid-transaction traps the DC thread's process-data frame for a whole
-//!   scheduling latency, the cycle reads WKC -1, and two such cycles halt the
-//!   endpoint (bench 2026-06-11: every ErC1.1 that evening had a mailbox SDO in
-//!   flight). Pinned SCHED_FIFO below the DC priority on an isolated companion
-//!   core closes that window.
+//! * The CoE mailbox helper shares the EtherCAT master with the DC loop, but
+//!   the in-kernel IgH master serializes that access itself and the SDO call
+//!   sleeps, so the helper uses [`demote_to_normal_scheduling`] too.
 
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
@@ -43,36 +35,6 @@ pub fn demote_to_normal_scheduling() {
             }
         }
         libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpus);
-    }
-}
-
-/// SCHED_FIFO at `priority` pinned to `cpu`. For helper threads that share
-/// the EtherCAT master with the DC loop: `priority` must sit below the DC
-/// thread's (so it can never starve the cycle) and below the threaded NIC
-/// IRQ's (so frame delivery preempts the helper's busy-poll), and `cpu`
-/// should be an isolated core the DC thread does not own.
-///
-/// Panics on failure: the endpoint only reaches this after go_realtime
-/// succeeded, so the capabilities are already proven present.
-#[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
-pub fn assume_companion_rt_scheduling(cpu: usize, priority: i32) {
-    unsafe {
-        let mut cpus: libc::cpu_set_t = std::mem::zeroed();
-        libc::CPU_SET(cpu, &mut cpus);
-        if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpus) != 0 {
-            panic!(
-                "ec-rt companion thread: pin to CPU {cpu} failed (errno {})",
-                std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
-            );
-        }
-        let param = libc::sched_param {
-            sched_priority: priority,
-        };
-        let rc = libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param);
-        if rc != 0 {
-            panic!("ec-rt companion thread: SCHED_FIFO({priority}) failed (errno {rc})");
-        }
     }
 }
 
@@ -107,9 +69,6 @@ fn parse_cpu_list(list: &str) -> Vec<usize> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn demote_to_normal_scheduling() {}
-
-#[cfg(not(target_os = "linux"))]
-pub fn assume_companion_rt_scheduling(_cpu: usize, _priority: i32) {}
 
 #[cfg(test)]
 mod tests;

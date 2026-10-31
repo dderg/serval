@@ -57,6 +57,7 @@ impl FenceRegistry {
         inner.armed.push(Armed { id, after_line });
     }
 
+    #[cfg(test)]
     pub fn has_armed(&self) -> bool {
         !self.inner.lock_ok().armed.is_empty()
     }

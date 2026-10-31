@@ -131,45 +131,72 @@ pub(super) fn solve_consume_chain(
     }
     let plane_n = normalize(cross(t_a, t_b));
 
-    // Every probe below solves near-identical geometry: the converged
-    // solution in the chord-normalized frame (which barely moves with the
-    // contact reach) seeds the next probe's Newton — including probes whose
-    // blend converged but failed the deviation check, and the split-depth
-    // rescan, which revisits the same reaches.
+    let reach = ChainReach {
+        vertices,
+        t_a,
+        t_b,
+        t_cap,
+        delta,
+        plane_n,
+    };
     let mut hint = None;
-    [0, CONSUME_SPLIT_DEPTH].into_iter().find_map(|depth| {
-        scan_consume_reach(vertices, t_a, t_b, delta, t_cap, plane_n, depth, &mut hint)
-    })
+    [0, CONSUME_SPLIT_DEPTH]
+        .into_iter()
+        .find_map(|depth| scan_consume_reach(&reach, depth, &mut hint))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn scan_consume_reach(
-    vertices: &[[f64; 3]],
+struct DeviationTube<'a> {
+    chain: &'a [[f64; 3]],
+    delta: f64,
+    plane_n: [f64; 3],
+}
+
+#[derive(Clone, Copy)]
+struct ChainReach<'a> {
+    vertices: &'a [[f64; 3]],
     t_a: [f64; 3],
     t_b: [f64; 3],
-    delta: f64,
     t_cap: f64,
+    delta: f64,
     plane_n: [f64; 3],
+}
+
+fn scan_consume_reach(
+    reach: &ChainReach<'_>,
     depth: usize,
     hint: &mut Option<[f64; 3]>,
 ) -> Option<ChainBlend> {
+    let ChainReach {
+        vertices,
+        t_a,
+        t_b,
+        t_cap,
+        delta,
+        plane_n,
+    } = *reach;
     let mut eval = |t: f64| -> Option<Vec<ClothoidPair>> {
         let a = madd(vertices[0], -t, t_a);
         let b = madd(vertices[vertices.len() - 1], t, t_b);
-        let mut tube = Vec::with_capacity(vertices.len() + 2);
-        tube.push(a);
-        tube.extend_from_slice(vertices);
-        tube.push(b);
-        let start = ChainState {
-            pos: a,
+        let mut chain = Vec::with_capacity(vertices.len() + 2);
+        chain.push(a);
+        chain.extend_from_slice(vertices);
+        chain.push(b);
+        let start = Anchor {
+            pose: a,
             tangent: t_a,
+            kappa: 0.0,
         };
-        let end = ChainState {
-            pos: b,
+        let end = Anchor {
+            pose: b,
             tangent: t_b,
+            kappa: 0.0,
         };
-        let (pairs, solved) =
-            consume_pairs(&start, &end, vertices, &tube, delta, plane_n, depth, *hint);
+        let tube = DeviationTube {
+            chain: &chain,
+            delta,
+            plane_n,
+        };
+        let (pairs, solved) = consume_pairs(&start, &end, vertices, &tube, depth, *hint);
         *hint = solved.or(*hint);
         pairs
     };
@@ -209,41 +236,24 @@ fn scan_consume_reach(
     })
 }
 
-struct ChainState {
-    pos: [f64; 3],
-    tangent: [f64; 3],
-}
-
 /// Solve `start → end` (both curvature-free states) as one clothoid pair
-/// within `delta` of `tube`, or split at a mid-chain facet anchor and solve
-/// each side. `interior` is the polyline strictly between the two states.
-/// The second element is this level's converged chord-normalized Newton
-/// solution whether or not the blend passed the deviation check — the
-/// caller's warm-start for the next near-identical probe.
-#[allow(clippy::too_many_arguments)]
+/// within the tube, or split at a mid-chain facet anchor and solve each
+/// side. `interior` is the polyline strictly between the two states. The
+/// second element is this level's converged chord-normalized Newton solution
+/// whether or not the blend passed the deviation check — the caller's
+/// warm-start for the next near-identical probe.
 fn consume_pairs(
-    start: &ChainState,
-    end: &ChainState,
+    start: &Anchor,
+    end: &Anchor,
     interior: &[[f64; 3]],
-    tube: &[[f64; 3]],
-    delta: f64,
-    plane_n: [f64; 3],
+    tube: &DeviationTube<'_>,
     depth: usize,
     hint: Option<[f64; 3]>,
 ) -> (Option<Vec<ClothoidPair>>, Option<[f64; 3]>) {
-    let solved = hermite_g2_hinted(
-        start.pos,
-        start.tangent,
-        0.0,
-        end.pos,
-        end.tangent,
-        0.0,
-        plane_n,
-        hint,
-    );
+    let solved = hermite_g2_hinted(*start, *end, tube.plane_n, hint);
     let top_hint = solved.as_ref().map(|(_, x)| *x);
     if let Some((pair, _)) = solved {
-        if max_dev_from_chain(&pair, tube) <= delta {
+        if max_dev_from_chain(&pair, tube.chain) <= tube.delta {
             return (Some(vec![pair]), top_hint);
         }
     }
@@ -259,8 +269,6 @@ fn consume_pairs(
         &anchor,
         &interior[..=facet_idx],
         tube,
-        delta,
-        plane_n,
         depth - 1,
         None,
     );
@@ -272,8 +280,6 @@ fn consume_pairs(
         end,
         &interior[facet_idx + 1..],
         tube,
-        delta,
-        plane_n,
         depth - 1,
         None,
     );
@@ -289,19 +295,19 @@ fn consume_pairs(
 /// through, so anchoring there is always inside the tube. Returns the facet's
 /// leading vertex index in `interior`.
 fn mid_facet_anchor(
-    start: &ChainState,
-    end: &ChainState,
+    start: &Anchor,
+    end: &Anchor,
     interior: &[[f64; 3]],
-) -> Option<(usize, ChainState)> {
-    let total: f64 = std::iter::once(start.pos)
+) -> Option<(usize, Anchor)> {
+    let total: f64 = std::iter::once(start.pose)
         .chain(interior.iter().copied())
-        .chain(std::iter::once(end.pos))
+        .chain(std::iter::once(end.pose))
         .collect::<Vec<_>>()
         .windows(2)
         .map(|w| dist(w[0], w[1]))
         .sum();
 
-    let mut cum = dist(start.pos, interior[0]);
+    let mut cum = dist(start.pose, interior[0]);
     let mut best: Option<(usize, f64)> = None;
     for i in 0..interior.len() - 1 {
         let len = dist(interior[i], interior[i + 1]);
@@ -318,9 +324,10 @@ fn mid_facet_anchor(
     let dir = normalize(sub(interior[i + 1], interior[i]));
     Some((
         i,
-        ChainState {
-            pos: scale(add(interior[i], interior[i + 1]), 0.5),
+        Anchor {
+            pose: scale(add(interior[i], interior[i + 1]), 0.5),
             tangent: dir,
+            kappa: 0.0,
         },
     ))
 }
@@ -391,14 +398,8 @@ fn inplane_rot90(w: [f64; 3], u: [f64; 3], v: [f64; 3]) -> [f64; 3] {
     ]
 }
 
-struct Endpoint {
-    pose: [f64; 3],
-    tangent: [f64; 3],
-    kappa: f64,
-}
-
 fn build_pair(
-    start: &Endpoint,
+    start: &Anchor,
     kappa_b: f64,
     plane_n: [f64; 3],
     kappa_peak: f64,
@@ -426,7 +427,7 @@ fn pair_end(pair: &ClothoidPair) -> ([f64; 3], [f64; 3]) {
 
 fn residual(
     pair: &ClothoidPair,
-    end: &Endpoint,
+    end: &Anchor,
     e1: [f64; 3],
     e2: [f64; 3],
     plane_n: [f64; 3],
@@ -449,14 +450,14 @@ fn residual_norm(r: [f64; 3]) -> f64 {
 }
 
 fn newton_pair(
-    start: &Endpoint,
-    end: &Endpoint,
-    kappa_b: f64,
+    start: &Anchor,
+    end: &Anchor,
     plane_n: [f64; 3],
     e1: [f64; 3],
     e2: [f64; 3],
     mut x: [f64; 3],
 ) -> Option<[f64; 3]> {
+    let kappa_b = end.kappa;
     let pair = build_pair(start, kappa_b, plane_n, x[0], x[1], x[2])?;
     let mut r = residual(&pair, end, e1, e2, plane_n);
     let mut lambda = 1e-3;
@@ -537,36 +538,31 @@ fn newton_pair(
 /// in turns-per-chord — so tolerances are relative and the Newton iteration
 /// is equally conditioned for 0.01mm and 100mm blends. The converged
 /// unknowns rescale back to world units for the returned pair.
-#[allow(clippy::too_many_arguments)]
 fn hermite_g2_hinted(
-    p_a: [f64; 3],
-    t_a: [f64; 3],
-    kappa_a: f64,
-    p_b: [f64; 3],
-    t_b: [f64; 3],
-    kappa_b: f64,
+    a: Anchor,
+    b: Anchor,
     plane_n: [f64; 3],
     hint: Option<[f64; 3]>,
 ) -> Option<(ClothoidPair, [f64; 3])> {
-    let chord = dist(p_a, p_b);
+    let chord = dist(a.pose, b.pose);
     if chord <= DEGENERATE_EPS {
         return None;
     }
     let inv = 1.0 / chord;
-    let start = Endpoint {
-        pose: scale(p_a, inv),
-        tangent: t_a,
-        kappa: kappa_a * chord,
+    let start = Anchor {
+        pose: scale(a.pose, inv),
+        tangent: a.tangent,
+        kappa: a.kappa * chord,
     };
-    let end = Endpoint {
-        pose: scale(p_b, inv),
-        tangent: t_b,
-        kappa: kappa_b * chord,
+    let end = Anchor {
+        pose: scale(b.pose, inv),
+        tangent: b.tangent,
+        kappa: b.kappa * chord,
     };
-    let e1 = t_a;
+    let e1 = a.tangent;
     let e2 = normalize(cross(plane_n, e1));
 
-    let theta = signed_angle(t_a, t_b, plane_n);
+    let theta = signed_angle(a.tangent, b.tangent, plane_n);
     let (ka, kb) = (start.kappa, end.kappa);
     let kp_turn = theta - 0.5 * (ka + kb);
 
@@ -582,21 +578,9 @@ fn hermite_g2_hinted(
         [0.0, 2.0, 2.0],
     ];
     for seed in hint.into_iter().chain(seeds) {
-        if let Some(x) = newton_pair(&start, &end, kb, plane_n, e1, e2, seed) {
-            let world_start = Endpoint {
-                pose: p_a,
-                tangent: t_a,
-                kappa: kappa_a,
-            };
-            let pair = build_pair(
-                &world_start,
-                kappa_b,
-                plane_n,
-                x[0] * inv,
-                x[1] * chord,
-                x[2] * chord,
-            )?;
-            if dist(pair_end(&pair).0, p_b) > super::SEAM_CLOSURE_EPS_MM {
+        if let Some(x) = newton_pair(&start, &end, plane_n, e1, e2, seed) {
+            let pair = build_pair(&a, b.kappa, plane_n, x[0] * inv, x[1] * chord, x[2] * chord)?;
+            if dist(pair_end(&pair).0, b.pose) > super::SEAM_CLOSURE_EPS_MM {
                 continue;
             }
             return Some((pair, x));
@@ -605,16 +589,8 @@ fn hermite_g2_hinted(
     None
 }
 
-pub(super) fn hermite_g2(
-    p_a: [f64; 3],
-    t_a: [f64; 3],
-    kappa_a: f64,
-    p_b: [f64; 3],
-    t_b: [f64; 3],
-    kappa_b: f64,
-    plane_n: [f64; 3],
-) -> Option<ClothoidPair> {
-    hermite_g2_hinted(p_a, t_a, kappa_a, p_b, t_b, kappa_b, plane_n, None).map(|(pair, _)| pair)
+pub(super) fn hermite_g2(a: Anchor, b: Anchor, plane_n: [f64; 3]) -> Option<ClothoidPair> {
+    hermite_g2_hinted(a, b, plane_n, None).map(|(pair, _)| pair)
 }
 
 pub(super) struct GeneralBlend {
@@ -637,34 +613,50 @@ fn rotate_in_plane(w: [f64; 3], ang: f64, n: [f64; 3]) -> [f64; 3] {
     add(scale(w, libm::cos(ang)), scale(cross(n, w), libm::sin(ang)))
 }
 
-fn contact(
-    vertex: [f64; 3],
-    tangent: [f64; 3],
-    kappa: f64,
-    signed_arclen: f64,
-    plane_n: [f64; 3],
-) -> ([f64; 3], [f64; 3]) {
+fn contact(anchor: Anchor, signed_arclen: f64, plane_n: [f64; 3]) -> Anchor {
+    let Anchor {
+        pose,
+        tangent,
+        kappa,
+    } = anchor;
     if kappa.abs() < KAPPA_LINE_EPS {
-        return (madd(vertex, signed_arclen, tangent), tangent);
+        return Anchor {
+            pose: madd(pose, signed_arclen, tangent),
+            tangent,
+            kappa,
+        };
     }
-    let center = madd(vertex, 1.0 / kappa, cross(plane_n, tangent));
+    let center = madd(pose, 1.0 / kappa, cross(plane_n, tangent));
     let ang = kappa * signed_arclen;
-    let radial = sub(vertex, center);
-    (
-        add(center, rotate_in_plane(radial, ang, plane_n)),
-        rotate_in_plane(tangent, ang, plane_n),
-    )
+    let radial = sub(pose, center);
+    Anchor {
+        pose: add(center, rotate_in_plane(radial, ang, plane_n)),
+        tangent: rotate_in_plane(tangent, ang, plane_n),
+        kappa,
+    }
 }
 
-pub(super) fn solve_general(
-    anchor_in: Anchor,
-    anchor_out: Anchor,
-    apex: [f64; 3],
-    plane_n: [f64; 3],
-    delta: f64,
-    budget_in: f64,
-    budget_out: f64,
-) -> Option<GeneralBlend> {
+#[derive(Clone, Copy)]
+pub(super) struct GeneralBlendRequest {
+    pub anchor_in: Anchor,
+    pub anchor_out: Anchor,
+    pub apex: [f64; 3],
+    pub plane_n: [f64; 3],
+    pub delta: f64,
+    pub budget_in: f64,
+    pub budget_out: f64,
+}
+
+pub(super) fn solve_general(req: GeneralBlendRequest) -> Option<GeneralBlend> {
+    let GeneralBlendRequest {
+        anchor_in,
+        anchor_out,
+        apex,
+        plane_n,
+        delta,
+        budget_in,
+        budget_out,
+    } = req;
     if delta <= 0.0 {
         return None;
     }
@@ -674,21 +666,9 @@ pub(super) fn solve_general(
     }
 
     let eval = |rho: f64| -> Option<(ClothoidPair, f64)> {
-        let (a, ta) = contact(
-            anchor_in.pose,
-            anchor_in.tangent,
-            anchor_in.kappa,
-            -rho,
-            plane_n,
-        );
-        let (b, tb) = contact(
-            anchor_out.pose,
-            anchor_out.tangent,
-            anchor_out.kappa,
-            rho,
-            plane_n,
-        );
-        let pair = hermite_g2(a, ta, anchor_in.kappa, b, tb, anchor_out.kappa, plane_n)?;
+        let a = contact(anchor_in, -rho, plane_n);
+        let b = contact(anchor_out, rho, plane_n);
+        let pair = hermite_g2(a, b, plane_n)?;
         let dev = dist(apex, pair.half2.start_pose);
         Some((pair, dev))
     };

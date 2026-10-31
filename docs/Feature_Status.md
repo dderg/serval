@@ -24,7 +24,7 @@ Three tiers, honestly applied:
 | Structured logging / crash forensics | **solid** |
 | Step/dir motor path | **solid** |
 | Phase stepping | **verified in sim (2026-07)**; not recently exercised on real hardware |
-| Explicit `max_jerk` as a first-class limit | **exploratory** — enforced, but whether it earns its keep next to smoothing kernels is open |
+| Explicit `max_jerk` as a first-class limit | **not implemented** — the option still parses, but only `max_jerk: 0` (unlimited) is accepted; a finite jerk limit is rejected at config load |
 | Kinematics beyond cartesian / corexy | **exploratory** |
 | Per-axis-group limit model | **exploratory** |
 | CAN bus micro-controllers | **verified on the test bench (2026-07)**; never driven a real print |
@@ -49,11 +49,10 @@ Three tiers, honestly applied:
 
 ## Known limits
 
-- **Jerk on corner blends: enforced, with one soft spot.** The jerk limit
-  applies through clothoid blends, including the rotating acceleration's
-  normal component. Where blend geometry makes the jerk budget infeasible
-  outright, the planner follows the hard acceleration limit instead and
-  jerk goes soft there (`rust/geometry/src/velocity/ride.rs`).
+- **No jerk limit.** The planner is second-order: velocity and
+  acceleration along the path, with the acceleration limit applied through
+  clothoid corner blends including the rotating acceleration's normal
+  component. Smoothness beyond that is the post-processor chains' job.
 - **No per-axis XY limits.** Global limits plus Z-only caps, nothing
   finer.
 - **Kinematics:** cartesian and corexy only.

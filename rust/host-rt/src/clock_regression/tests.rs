@@ -209,3 +209,43 @@ fn zero_sent_time_sample_is_dropped_without_touching_latch() {
     feed_exact(&mut est, &mut prev_freq, 3.0);
     assert!(est.synced(), "latch resumes across the dropped sample");
 }
+
+/// serialhdl zeroes `#sent_time` on a `clock` sample it could not time but
+/// still stamps `#receive_time`. When such a sample lands after a gap longer
+/// than one `2^32` tick period — the router documents measured healthy gaps up
+/// to ~9 s, which is a whole wrap above 400 MHz — the unsigned 32-bit delta is
+/// short by that wrap, and `last_clock` (so every `clock32_to_clock64` off it)
+/// would read a wrap in the past until the next stamped sample arrived.
+#[test]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn unstamped_sample_recovers_a_lost_wrap_from_the_receive_stamp() {
+    let t0 = 1000.0_f64;
+    let c0 = (MCU_FREQ * t0) as u64;
+    let mut est = seeded(c0, c0 as f64, t0);
+    let mut prev_freq = MCU_FREQ;
+    for step in 1..=4 {
+        feed_exact(&mut est, &mut prev_freq, t0 + f64::from(step));
+    }
+
+    let stalled_at = t0 + 16.0;
+    let truth = (MCU_FREQ * stalled_at) as u64;
+    assert!(
+        truth - est.last_clock() > (1u64 << 32),
+        "the stall must lose a whole wrap for this to test anything"
+    );
+
+    let dropped = est.handle_clock(
+        (truth & 0xFFFF_FFFF) as u32,
+        0.0,
+        stalled_at,
+        MCU_FREQ,
+        prev_freq,
+    );
+
+    assert!(dropped.is_none(), "an unstamped sample must not publish");
+    assert_eq!(
+        est.last_clock(),
+        truth,
+        "the receive stamp must put the lost wrap back"
+    );
+}

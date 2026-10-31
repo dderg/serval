@@ -1,12 +1,15 @@
 pub use crate::types::AxisKey;
 
+mod barrier_ledger;
 mod diag;
 mod drip;
+mod endpoint_control;
+pub mod execution_credit;
+pub use endpoint_control::{EndpointBuzzSpec, EndpointCommand, buzz_axis_bits, buzz_lanes};
 mod junction;
-mod margin;
-mod memstat;
 mod messages;
 mod pump_loop;
+mod sample_sink;
 mod sched;
 mod stall;
 mod stepcompress_sink;
@@ -19,35 +22,47 @@ pub use junction::{
     junction_jumps,
 };
 pub use messages::{
-    BundleLimits, EnqueueMsg, HeartbeatMsg, HistoryRecorder, PendingSend, PieceSink, PumpCallbacks,
-    PumpMsg, ResolvedSend, SERIAL_BUNDLE_LIMITS, SendError,
+    BundleLimits, BuzzLane, BuzzParams, BuzzRoute, BuzzStart, BuzzToken, BuzzTransport, BuzzWave,
+    CutCredit, DrainTick, HeartbeatMsg, LaneProjection, PumpCallbacks, PumpMsg, RetiredBy,
+    SendError, SpanSink,
 };
-pub use pump_loop::{MAX_LEAD_SECS, PUMP_DATA_CHANNEL_CAP, run_pump};
+pub use pump_loop::MAX_LEAD_SECS;
+pub(crate) use pump_loop::Pump;
+#[cfg(test)]
+pub(crate) use pump_loop::pump_past_guard_secs;
+#[cfg(any(test, feature = "test-support"))]
+pub use pump_loop::run_projection_batches;
+pub use sample_sink::{
+    RetiredRuns, SAMPLE_BACKLOG_CEILING_RUNS, SAMPLE_LANE_PIECE_WINDOW, SampleEndpoint,
+    SampleLaneConfig, SamplePacer, SamplePositionQuery, build_sample_endpoint,
+};
 pub use sched::{
-    AxisFrame, AxisQueue, FramePlan, Schedule, SeamBasis, append_pieces_merging_holds, schedule,
+    AxisFrame, AxisQueue, FramePlan, LaneRelease, ReleasePlan, Schedule,
+    append_spans_merging_holds, schedule,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use stepcompress_sink::clock_probe;
 pub use stepcompress_sink::{
-    BACKLOG_CEILING_FRAMES, ClockSource, FrameEgress, MOVE_SLOT_RESERVE, StepcompressEndpoint,
-    StepcompressPacer, build_endpoint,
+    BACKLOG_CEILING_FRAMES, ClockSource, EndpointSpec, FrameEgress, MOVE_SLOT_RESERVE,
+    StepLaneConfig, StepcompressEndpoint, StepcompressPacer, build_endpoint,
 };
 pub use transit_trace::emit_fault_snapshot;
-#[cfg(test)]
-pub(crate) use wire_sink::pushpieces_retransmit_serial;
-pub use wire_sink::{McuTransport, WireSink};
+pub use wire_sink::{EtherCatRing, LANE_GROUP_PHASE, LANE_GROUP_PULSE, RingFiller, WireSink};
+pub mod skew_monitor;
 
 #[cfg(test)]
 mod drip_tests;
 #[cfg(test)]
+mod heartbeat_credit_tests;
+#[cfg(test)]
 mod hold_merge_seam_tests;
 #[cfg(test)]
-mod margin_tests;
-#[cfg(test)]
-mod memstat_tests;
+mod lane_rejoin_tests;
 #[cfg(test)]
 mod sched_tests;
+#[cfg(test)]
+mod skew_monitor_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod transit_trace_tests;
-#[cfg(test)]
-mod window_tests;

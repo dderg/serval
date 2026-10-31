@@ -1,8 +1,8 @@
 use super::{
-    Arc, McuHostIo, PyMotionEngine, PyResult, PyRuntimeError, mcu_handle_from_raw,
-    query_runtime_caps, require_events_dir_for_mcu_transport,
+    Arc, McuHandle, McuHostIo, PyMotionEngine, PyResult, PyRuntimeError, query_runtime_caps,
+    require_events_dir_for_mcu_transport,
 };
-use crate::lock_ext::LockExt;
+use motion_core::lock_ext::LockExt;
 
 impl PyMotionEngine {
     pub(super) fn try_reuse_existing_connection(
@@ -73,7 +73,6 @@ impl PyMotionEngine {
                                 subsystem = "mcu-comms",
                                 event = "attach_runtime_caps_reuse",
                                 serial_path,
-                                total_piece_memory = caps.total_piece_memory,
                                 "[caps-trace] attach_serial reuse: runtime caps"
                             );
                             Some(caps)
@@ -184,7 +183,7 @@ impl PyMotionEngine {
         if mcu_transport_supported {
             let events_dir_guard = self.events_dir.lock_ok();
             if let Some(ref dir) = *events_dir_guard {
-                use crate::logging::writer::{
+                use motion_services::logging::writer::{
                     DEFAULT_BACKUP_COUNT, DEFAULT_MAX_BYTES, FSYNC_INTERVAL, RotatingJsonlWriter,
                 };
                 let source = mcu_label.to_owned();
@@ -196,9 +195,10 @@ impl PyMotionEngine {
                     FSYNC_INTERVAL,
                 ) {
                     Ok(writer) => {
-                        let sink = crate::mcu_log::spawn_jsonl_writer_thread(writer, &source);
-                        let mcu_h = mcu_handle_from_raw(mcu_handle);
-                        let hook = crate::mcu_log::build_mcu_log_hook(
+                        let sink =
+                            motion_services::mcu_log::spawn_jsonl_writer_thread(writer, &source);
+                        let mcu_h = McuHandle::from_raw(mcu_handle);
+                        let hook = motion_services::mcu_log::build_mcu_log_hook(
                             Arc::clone(&self.router),
                             mcu_h,
                             sink,
@@ -285,7 +285,6 @@ fn identify_and_query_caps(
                     subsystem = "mcu-comms",
                     event = "attach_runtime_caps",
                     serial_path,
-                    total_piece_memory = caps.total_piece_memory,
                     "[caps-trace] attach_serial: runtime caps"
                 );
                 Some(caps)

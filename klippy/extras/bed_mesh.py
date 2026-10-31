@@ -276,19 +276,21 @@ class BedMesh:
             fade = (self.fade_start, self.fade_end, self.fade_target)
         try:
             rebase, self.z_budget_report = engine.set_bed_mesh(
-                points,
-                x_min,
-                y_min,
-                dx,
-                dy,
-                nx,
-                ny,
-                params["tension"],
-                fade,
-                zero_ref[0],
-                zero_ref[1],
-                self.z_velocity_limit,
-                self.z_accel_limit,
+                {
+                    "points": points,
+                    "x_min": x_min,
+                    "y_min": y_min,
+                    "dx": dx,
+                    "dy": dy,
+                    "nx": nx,
+                    "ny": ny,
+                    "tension": params["tension"],
+                    "fade": fade,
+                    "zero_ref_x": zero_ref[0],
+                    "zero_ref_y": zero_ref[1],
+                    "z_velocity_limit": self.z_velocity_limit,
+                    "z_accel_limit": self.z_accel_limit,
+                }
             )
             return rebase
         except ValueError as e:

@@ -13,6 +13,15 @@ def test_firmware_crash_survives_host_restart(sim_world):
         dual_mcu=False,
     )
 
+    control = world.sim_control("h7")
+    world.gcode_ok("SET_KINEMATIC_POSITION X=125 Y=125 Z=125")
+    before = control.step_position(18)["steps"]
+    world.gcode_ok("G1 X200 F600")
+    deadline = time.monotonic() + 10.0
+    while control.step_position(18)["steps"] == before:
+        assert time.monotonic() < deadline, "motion never reached the MCU"
+        time.sleep(0.01)
+
     world.gcode("M112")
     assert world.wait_for_log_text("MCU 'mcu' shutdown: Command request")
 

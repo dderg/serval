@@ -1,4 +1,4 @@
-"""Consecutive homes on a CoreXY stepping_mode: stepcompress world.
+"""Consecutive homes on a CoreXY step/dir (stepcompress) world.
 
 On CoreXY a single-axis home moves BOTH belt motors, so G28 X halts A and
 B mid-move and reseeds their step counters from the trip. G28 Y then trips

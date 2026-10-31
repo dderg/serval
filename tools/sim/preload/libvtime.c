@@ -1,15 +1,3 @@
-// LD_PRELOAD shim that replaces wall-clock time with a shared-memory
-// virtual clock for faster-than-real-time Klipper simulation.
-//
-// Intercepts: clock_gettime, clock_nanosleep, nanosleep, ppoll, poll,
-//             select, timer_create, timer_settime.
-//
-// Virtual clock lives in /dev/shm/vtime as an atomic uint64
-// (nanoseconds). Time advances when processes "sleep" — the clock is
-// bumped by the requested amount and the call returns immediately.
-// I/O waits (poll/ppoll/select) do NOT advance virtual time; they
-// busy-poll with brief real sleeps until data arrives or the virtual
-// deadline (set by other processes' clock advances) is reached.
 
 #define _GNU_SOURCE
 #include "vtime.h"
@@ -85,7 +73,7 @@ vtime_speed_cap(void)
 }
 
 static struct {
-    timer_t real_timer;
+    pthread_t owner;
     int armed;
     uint64_t target_ns;
     pthread_mutex_t lock;
@@ -195,12 +183,6 @@ static void vtimer_check_and_fire(void);
 // and then leaps to the cap, which klippy's clocksync tracks as a wildly
 // nonuniform MCU clock — projections made across a leap land seconds off
 // (PieceStartInPast, trip-time resolution failures).
-//
-// The driver honors pacer floors: virtual time never outruns the tick the
-// motion pacer is about to execute. Otherwise a preempted tick thread
-// resumes to a clock that already moved on, replays the gap as one
-// catch-up burst, and every position observed against the virtual clock
-// during that span (endstop walls above all) is late by the whole stall.
 // Time the floor held back is folded into vtime_stall_offset_ns so the
 // cap resumes at the configured speed instead of chasing.
 static void *
@@ -300,8 +282,9 @@ vtimer_check_and_fire(void)
         uint64_t now = vtime_now();
         if (now >= vtimer.target_ns) {
             vtimer.armed = 0;
+            pthread_t owner = vtimer.owner;
             pthread_mutex_unlock(&vtimer.lock);
-            raise(SIGALRM);
+            pthread_kill(owner, SIGALRM);
             return;
         }
     }
@@ -363,8 +346,10 @@ vtime_init(void)
     pthread_t driver;
     if (pthread_create(&driver, NULL, vtime_driver_main, NULL) == 0)
         pthread_detach(driver);
-    else
+    else {
         fprintf(stderr, "[vtime] driver thread create failed\n");
+        abort();
+    }
 
     VLOG("init, participants=%u, vtime=%lu ns, speed=%.0fx",
          atomic_load(&vshm->num_participants),
@@ -514,11 +499,6 @@ ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout,
     if (ret != 0)
         return ret;
 
-    // Klipper's console_sleep calls ppoll(fds, n, NULL, sigmask) to
-    // wait for serial data OR SIGALRM. In virtual time, we advance
-    // the clock to the next virtual timer target and deliver SIGALRM.
-    // This is equivalent to the kernel sleeping until the timer fires.
-
     uint64_t deadline_ns;
     if (!timeout) {
         deadline_ns = UINT64_MAX;
@@ -526,48 +506,15 @@ ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout,
         deadline_ns = vtime_now() + ts_to_ns(timeout);
     }
 
-    for (int i = 0; i < 100000; i++) {
+    for (;;) {
         if (vtime_now() >= deadline_ns)
             return 0;
-
-        pthread_mutex_lock(&vtimer.lock);
-        int armed = vtimer.armed;
-        uint64_t target = vtimer.target_ns;
-        pthread_mutex_unlock(&vtimer.lock);
-
-        if (armed && target <= deadline_ns) {
-            // Advancing to the timer target is no longer instantaneous (the
-            // speed cap and pacer floors stretch it over real time), so it
-            // must stay interruptible: advance in 1 ms virtual chunks and let
-            // freshly arrived fd data preempt the timer, which stays armed.
-            while (vtime_now() < target) {
-                uint64_t chunk = vtime_now() + 1000000ULL;
-                vtime_advance_to(chunk < target ? chunk : target);
-                ret = real_ppoll(fds, nfds, &zero, sigmask);
-                if (ret != 0)
-                    return ret;
-            }
-            pthread_mutex_lock(&vtimer.lock);
-            int fire = vtimer.armed && vtimer.target_ns == target;
-            if (fire)
-                vtimer.armed = 0;
-            pthread_mutex_unlock(&vtimer.lock);
-            if (fire) {
-                raise(SIGALRM);
-                errno = EINTR;
-                return -1;
-            }
-            continue;
-        }
 
         struct timespec one_ms = { .tv_sec = 0, .tv_nsec = 1000000 };
         ret = real_ppoll(fds, nfds, &one_ms, sigmask);
         if (ret != 0)
             return ret;
     }
-    if (deadline_ns < UINT64_MAX)
-        vtime_advance_to(deadline_ns);
-    return 0;
 }
 
 int
@@ -634,6 +581,7 @@ timer_create(clockid_t clk_id, struct sigevent *sevp, timer_t *timerid)
         pthread_mutex_lock(&vtimer.lock);
         vtimer.armed = 0;
         vtimer.target_ns = 0;
+        vtimer.owner = pthread_self();
         pthread_mutex_unlock(&vtimer.lock);
         *timerid = (timer_t)0xCAFE;
         VLOG("timer_create: virtual timer created");

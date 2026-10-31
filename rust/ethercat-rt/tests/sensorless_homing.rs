@@ -1,4 +1,6 @@
-use std::process::{Child, Command};
+mod common;
+
+use common::spawn_and_claim;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -7,56 +9,14 @@ use std::time::{Duration, Instant};
 use ethercat_rt::stream_halt::ERR_PIECES_WHILE_HALTED;
 use host_rt::mcu_call::McuCall;
 use host_rt::mcu_serial_conn::McuSerialConn;
-use mcu_protocol::codec::{Cursor, Decode, Encode};
+use mcu_protocol::codec::{Decode, Encode};
 use mcu_protocol::messages::{
-    ArmSensorlessEndstop, ArmSensorlessEndstopResponse, ClaimHandshakeReply, MessageKind,
-    PushPieces, PushPiecesResponse, ResumeStreamResponse, SdoWrite, SdoWriteResponse, SetTorque,
-    SetTorqueResponse,
+    ArmSensorlessEndstop, ArmSensorlessEndstopResponse, LaneRun, MessageKind, PushSampleRuns,
+    PushSampleRunsResponse, ResumeStreamResponse, SampleGridResponse, SdoWrite, SdoWriteResponse,
+    SetTorque, SetTorqueResponse, SetpointSample, LANE_RUN_FLAG_REANCHOR, LANE_RUN_FLAG_TAIL,
 };
-use runtime::piece_ring::PieceEntry;
 
-const STUB_BIN: &str = env!("CARGO_BIN_EXE_ethercat-rt-stub");
 const TORQUE_ACTUAL_INDEX: u16 = 0x6077;
-
-struct ChildGuard {
-    child: Option<Child>,
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(mut c) = self.child.take() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-    }
-}
-
-fn socket_path(tag: &str) -> String {
-    format!("/tmp/kalico-sl-{}-{}.sock", tag, std::process::id())
-}
-
-fn wait_for_socket(path: &str, deadline: Instant) {
-    while !std::path::Path::new(path).exists() {
-        assert!(
-            Instant::now() < deadline,
-            "stub socket {path:?} did not appear within deadline"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn do_handshake(conn: &McuSerialConn) {
-    let (kind, body) = conn
-        .mcu_call(
-            MessageKind::ClaimHandshake,
-            Vec::new(),
-            Duration::from_secs(5),
-        )
-        .expect("ClaimHandshake mcu_call must succeed");
-    assert_eq!(kind, MessageKind::ClaimHandshakeReply);
-    ClaimHandshakeReply::decode_from(&mut Cursor::new(&body))
-        .expect("ClaimHandshakeReply must decode");
-}
 
 fn arm_sensorless(conn: &McuSerialConn, endstop_id: u8, torque_trip_tenth_pct: u16, enable: bool) {
     let body = ArmSensorlessEndstop {
@@ -95,35 +55,43 @@ fn inject_torque(conn: &McuSerialConn, value: i64) {
     assert_eq!(r.result, 0, "torque injection write must succeed");
 }
 
-fn spawn_stub(tag: &str) -> (ChildGuard, McuSerialConn) {
-    let socket = socket_path(tag);
-    let _ = std::fs::remove_file(&socket);
-    let child = Command::new(STUB_BIN)
-        .args(["--socket", &socket])
-        .spawn()
-        .expect("spawn ethercat-rt-stub");
-    let guard = ChildGuard { child: Some(child) };
-    wait_for_socket(&socket, Instant::now() + Duration::from_secs(5));
-    let conn = McuSerialConn::connect(&socket).expect("connect to stub socket");
-    do_handshake(&conn);
-    (guard, conn)
-}
+/// Cycles of lead for the queued run. The stub's grid cycle is 1 ms, so the
+/// run is still in the ring when the homing trip resets it, and the lead stays
+/// inside `RING_DEPTH_CYCLES`.
+const QUEUED_LEAD_CYCLES: u64 = 512;
 
-fn push_one_piece(conn: &McuSerialConn, start_time: u64) -> i32 {
-    let entry = PieceEntry {
-        start_time,
-        duration: 0.001,
-        ..PieceEntry::zeroed()
+/// One anchored, final sample run that stays queued for the whole test — the
+/// smallest thing the pump can put in the ring.
+fn push_one_run(conn: &McuSerialConn) -> i32 {
+    let (kind, resp) = conn
+        .mcu_call(
+            MessageKind::QuerySampleGrid,
+            Vec::new(),
+            Duration::from_secs(5),
+        )
+        .expect("QuerySampleGrid call must succeed");
+    assert_eq!(kind, MessageKind::SampleGridResponse);
+    let grid = SampleGridResponse::decode(&resp).expect("SampleGridResponse must decode");
+    let lane = LaneRun {
+        axis_idx: 0,
+        slot_idx: 0,
+        flags: LANE_RUN_FLAG_REANCHOR | LANE_RUN_FLAG_TAIL,
+        origin_mm_q16: 0,
+        start_index: grid.grid_index + QUEUED_LEAD_CYCLES,
+        interval_ticks: grid.cycle_ticks,
+        samples: vec![SetpointSample {
+            pos_counts: 0,
+            vel_ff: 0,
+            torque_ff: 0,
+            acc_mm_s2: 0.0,
+        }],
     };
-    let mut pieces_bytes = Vec::with_capacity(20);
-    entry.to_wire_bytes(&mut pieces_bytes);
-    let msg = PushPieces::single(0, 1, 0, 1, pieces_bytes);
-    let body = msg.encoded_to_vec();
+    let body = PushSampleRuns { lanes: vec![lane] }.encoded_to_vec();
     let (_, resp) = conn
-        .mcu_call(MessageKind::PushPieces, body, Duration::from_secs(5))
-        .expect("PushPieces call must succeed");
-    PushPiecesResponse::decode(&resp)
-        .expect("PushPiecesResponse must decode")
+        .mcu_call(MessageKind::PushSampleRuns, body, Duration::from_secs(5))
+        .expect("PushSampleRuns call must succeed");
+    PushSampleRunsResponse::decode(&resp)
+        .expect("PushSampleRunsResponse must decode")
         .result
 }
 
@@ -159,7 +127,7 @@ fn enable_torque(conn: &McuSerialConn) {
 
 #[test]
 fn trip_halts_stream_until_resume() {
-    let (_guard, conn) = spawn_stub("trip-halt");
+    let (_guard, conn, _path) = spawn_and_claim("trip-halt", &[]);
     enable_torque(&conn);
 
     let fired = Arc::new(AtomicBool::new(false));
@@ -168,7 +136,7 @@ fn trip_halts_stream_until_resume() {
         fired_w.store(true, Ordering::SeqCst);
     }));
 
-    let r = push_one_piece(&conn, ethercat_rt::clock::monotonic_ns() + 10_000_000_000);
+    let r = push_one_run(&conn);
     assert_eq!(r, 0, "push before the trip must be accepted, got {r}");
 
     arm_sensorless(&conn, 4, 500, true);
@@ -183,7 +151,7 @@ fn trip_halts_stream_until_resume() {
         thread::sleep(Duration::from_millis(2));
     }
 
-    let r = push_one_piece(&conn, ethercat_rt::clock::monotonic_ns() + 10_000_000_000);
+    let r = push_one_run(&conn);
     assert_eq!(
         r, ERR_PIECES_WHILE_HALTED,
         "push after the trip must be rejected until ResumeStream, got {r}"
@@ -192,13 +160,13 @@ fn trip_halts_stream_until_resume() {
     let r = send_resume_stream(&conn);
     assert_eq!(r, 0, "ResumeStream after the trip must return 0, got {r}");
 
-    let r = push_one_piece(&conn, ethercat_rt::clock::monotonic_ns() + 10_000_000_000);
+    let r = push_one_run(&conn);
     assert_eq!(r, 0, "push after ResumeStream must be accepted, got {r}");
 }
 
 #[test]
 fn armed_torque_cross_emits_endstop_trip() {
-    let (_guard, conn) = spawn_stub("trip");
+    let (_guard, conn, _path) = spawn_and_claim("trip", &[]);
 
     let fired = Arc::new(AtomicBool::new(false));
     let trip_id = Arc::new(AtomicU64::new(u64::MAX));
@@ -229,7 +197,7 @@ fn armed_torque_cross_emits_endstop_trip() {
 
 #[test]
 fn below_threshold_does_not_trip_and_disarm_silences() {
-    let (_guard, conn) = spawn_stub("quiet");
+    let (_guard, conn, _path) = spawn_and_claim("quiet", &[]);
 
     let fired = Arc::new(AtomicBool::new(false));
     let fired_w = Arc::clone(&fired);

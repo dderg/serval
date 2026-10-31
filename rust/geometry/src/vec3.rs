@@ -26,7 +26,7 @@ pub(crate) fn madd(p: [f64; 3], s: f64, d: [f64; 3]) -> [f64; 3] {
     [p[0] + s * d[0], p[1] + s * d[1], p[2] + s * d[2]]
 }
 
-pub(crate) fn dist(a: [f64; 3], b: [f64; 3]) -> f64 {
+pub fn dist(a: [f64; 3], b: [f64; 3]) -> f64 {
     norm(sub(a, b))
 }
 

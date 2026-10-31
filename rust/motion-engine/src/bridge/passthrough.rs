@@ -1,10 +1,10 @@
 use super::{
-    Arc, DataDictionary, MsgProtoParser, Py, PyDict, PyMotionEngine, PyResult, PyRuntimeError,
-    Python, mcu_handle_from_raw, pymethods, router_err,
+    Arc, DataDictionary, McuHandle, MsgProtoParser, Py, PyDict, PyMotionEngine, PyResult,
+    PyRuntimeError, Python, pymethods, router_err,
 };
-use crate::lock_ext::LockExt;
 use host_rt::host_io::parser::ArgValue;
 use host_rt::transport::MessageParams;
+use motion_core::lock_ext::LockExt;
 use pyo3::prelude::*;
 
 /// Command argument as klippy passes it: int (covers bool), str (enum/pin
@@ -81,7 +81,6 @@ impl PyMotionEngine {
         let msg_owned = msg.to_owned();
         let response_owned = response.to_owned();
         let params = py.detach(|| -> PyResult<_> {
-            use host_rt::transport::Transport;
             io.call(
                 &msg_owned,
                 &response_owned,
@@ -179,9 +178,6 @@ impl PyMotionEngine {
                 d.set_item("segment_id", f.segment_id)?;
                 d.set_item("synthesized", f.synthesized)?;
             }
-            RuntimeEvent::Trace(_) => {
-                return Ok(None);
-            }
             RuntimeEvent::Heartbeat { .. } => {
                 return Ok(None);
             }
@@ -226,14 +222,14 @@ impl PyMotionEngine {
         io.mark_expected_disconnect()
             .map_err(|e| PyRuntimeError::new_err(format!("engine_mark_expected_disconnect: {e}")))
     }
-    #[pyo3(signature = (mcu, freq, offset, last_clock, host_now_raw))]
+    #[pyo3(signature = (mcu, freq, offset, last_clock, converged, host_now_raw))]
     fn set_clock_est(
         &self,
-        _py: Python<'_>,
         mcu: u32,
         freq: f64,
         offset: f64,
         last_clock: u64,
+        converged: bool,
         host_now_raw: f64,
     ) -> PyResult<()> {
         self.clock_freqs.lock_ok().insert(mcu, freq);
@@ -250,18 +246,31 @@ impl PyMotionEngine {
                 freq = freq as u64,
                 offset,
                 last_clock,
+                converged,
                 "[engine-trace] set_clock_est"
             );
         }
         let mut router = self.router.lock_ok();
         router
             .set_clock_est_rebased(
-                mcu_handle_from_raw(mcu),
+                McuHandle::from_raw(mcu),
                 freq,
                 offset,
                 last_clock,
+                converged,
                 host_now_raw,
             )
+            .map_err(router_err)?;
+        Ok(())
+    }
+    /// Called by every MCU identify: the board's tick counter restarted, so
+    /// the record from the previous boot epoch must not survive into it.
+    #[pyo3(signature = (mcu))]
+    fn invalidate_clock_est(&self, mcu: u32) -> PyResult<()> {
+        self.clock_freqs.lock_ok().remove(&mcu);
+        self.router
+            .lock_ok()
+            .invalidate_clock_est(McuHandle::from_raw(mcu))
             .map_err(router_err)?;
         Ok(())
     }
@@ -275,7 +284,7 @@ impl PyMotionEngine {
         self.nominal_clock_freqs.lock_ok().insert(mcu, freq_hz);
         self.router
             .lock_ok()
-            .set_nominal_freq(mcu_handle_from_raw(mcu), f64::from(freq_hz))
+            .set_nominal_freq(McuHandle::from_raw(mcu), f64::from(freq_hz))
             .map_err(router_err)?;
         Ok(())
     }

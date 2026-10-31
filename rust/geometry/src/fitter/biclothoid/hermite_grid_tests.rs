@@ -81,7 +81,7 @@ fn run_case(case: Case) -> Option<Outcome> {
         return None;
     }
     let (ka, kb, kp, l1, l2) = case.scaled();
-    let start = Endpoint {
+    let start = Anchor {
         pose: [0.0; 3],
         tangent: X,
         kappa: ka,
@@ -93,7 +93,15 @@ fn run_case(case: Case) -> Option<Outcome> {
         return None;
     }
 
-    let result = match hermite_g2([0.0; 3], X, ka, p_b, t_b, kb, Z) {
+    let result = match hermite_g2(
+        start,
+        Anchor {
+            pose: p_b,
+            tangent: t_b,
+            kappa: kb,
+        },
+        Z,
+    ) {
         None => Err("no convergence"),
         Some(pair) => verify(&pair, ka, p_b, t_b, kb, chord),
     };

@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a3623f3615de23cf58e8f627d94fa98f044d44018c9722bf148cd6a4071b1fdd # shrinks to axis = 0, signal = CruiseRamp { start: 0.0, boundary: 0.17307839784964238, end: 0.21634799731205298, position: -18.67220973847848, velocity: 0.5, acceleration: 1.1555457092556698 }, reciprocal = false, zero_gain = false, linear_advance = 0.014003218772865457, nonlinear_offset = 0.10357594809149492, knee_ratio = 0.25
+cc 33852d54687712eabb76265bce1c95e5bec17d3f4b7ca6c586aab8b4bcf0632c # shrinks to axis = 0, signal = CruiseRamp { start: 0.0, boundary: 0.2999871138439267, end: 0.37498389230490836, position: 0.0, velocity: 0.6215398377855599, acceleration: 3.043238567368551 }, reciprocal = false, zero_gain = false, linear_advance = 0.0, nonlinear_offset = 0.037741203391594834, knee_ratio = 1.8882527906821214
+cc 7185b0dcbf381d6c40e55de329ece61ebd85a60934a5ca5309b5928b21ce184d # shrinks to axis = 0, signal = CruiseRamp { start: 0.0, boundary: 0.2999871138439267, end: 0.37498389230490836, position: -4.691111444176697, velocity: 0.7054192648831094, acceleration: -2.78299246490224 }, reciprocal = false, zero_gain = false, linear_advance = 0.040151305323900696, nonlinear_offset = 0.024515230695650175, knee_ratio = 1.0773887126916943
+cc 78fb99f905af64c43651f78377f1d15922e788c19cf48aaeedcbf7169ffed360 # shrinks to axis = 0, signal = CruiseRamp { start: 0.0, boundary: 0.03125, end: 0.0390625, position: 0.0, velocity: 0.6623581898336727, acceleration: 60.03326072656823 }, reciprocal = false, zero_gain = false, linear_advance = 0.0, nonlinear_offset = 0.001, knee_ratio = 0.25

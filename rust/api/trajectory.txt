@@ -1,0 +1,707 @@
+pub mod trajectory
+pub mod trajectory::algos
+pub enum trajectory::algos::Bound
+pub trajectory::algos::Bound::NonNegative
+pub trajectory::algos::Bound::Positive
+pub trajectory::algos::Bound::UnitInterval
+pub struct trajectory::algos::LinearPressureAdvance
+impl trajectory::algos::PostProcessorAlgo for trajectory::algos::LinearPressureAdvance
+pub fn trajectory::algos::LinearPressureAdvance::compile(&self, &[f64]) -> core::option::Option<trajectory::chain::ChainStage>
+pub fn trajectory::algos::LinearPressureAdvance::params(&self) -> &'static [trajectory::algos::ParamSpec]
+pub fn trajectory::algos::LinearPressureAdvance::type_name(&self) -> &'static str
+pub struct trajectory::algos::ModeInverse
+impl trajectory::algos::PostProcessorAlgo for trajectory::algos::ModeInverse
+pub fn trajectory::algos::ModeInverse::compile(&self, &[f64]) -> core::option::Option<trajectory::chain::ChainStage>
+pub fn trajectory::algos::ModeInverse::params(&self) -> &'static [trajectory::algos::ParamSpec]
+pub fn trajectory::algos::ModeInverse::type_name(&self) -> &'static str
+pub struct trajectory::algos::ParamSpec
+pub trajectory::algos::ParamSpec::bound: trajectory::algos::Bound
+pub trajectory::algos::ParamSpec::key: &'static str
+impl trajectory::algos::ParamSpec
+pub fn trajectory::algos::ParamSpec::check(&self, &str, f64) -> core::result::Result<(), trajectory::chain::PostProcessorError>
+pub struct trajectory::algos::ReciprPressureAdvance
+impl trajectory::algos::PostProcessorAlgo for trajectory::algos::ReciprPressureAdvance
+pub fn trajectory::algos::ReciprPressureAdvance::compile(&self, &[f64]) -> core::option::Option<trajectory::chain::ChainStage>
+pub fn trajectory::algos::ReciprPressureAdvance::params(&self) -> &'static [trajectory::algos::ParamSpec]
+pub fn trajectory::algos::ReciprPressureAdvance::type_name(&self) -> &'static str
+pub struct trajectory::algos::SmoothBell
+impl trajectory::algos::PostProcessorAlgo for trajectory::algos::SmoothBell
+pub fn trajectory::algos::SmoothBell::compile(&self, &[f64]) -> core::option::Option<trajectory::chain::ChainStage>
+pub fn trajectory::algos::SmoothBell::params(&self) -> &'static [trajectory::algos::ParamSpec]
+pub fn trajectory::algos::SmoothBell::type_name(&self) -> &'static str
+pub struct trajectory::algos::SmoothMzv
+impl trajectory::algos::PostProcessorAlgo for trajectory::algos::SmoothMzv
+pub fn trajectory::algos::SmoothMzv::compile(&self, &[f64]) -> core::option::Option<trajectory::chain::ChainStage>
+pub fn trajectory::algos::SmoothMzv::params(&self) -> &'static [trajectory::algos::ParamSpec]
+pub fn trajectory::algos::SmoothMzv::type_name(&self) -> &'static str
+pub struct trajectory::algos::SmoothTriangle
+impl trajectory::algos::PostProcessorAlgo for trajectory::algos::SmoothTriangle
+pub fn trajectory::algos::SmoothTriangle::compile(&self, &[f64]) -> core::option::Option<trajectory::chain::ChainStage>
+pub fn trajectory::algos::SmoothTriangle::params(&self) -> &'static [trajectory::algos::ParamSpec]
+pub fn trajectory::algos::SmoothTriangle::type_name(&self) -> &'static str
+pub struct trajectory::algos::SmoothZv
+impl trajectory::algos::PostProcessorAlgo for trajectory::algos::SmoothZv
+pub fn trajectory::algos::SmoothZv::compile(&self, &[f64]) -> core::option::Option<trajectory::chain::ChainStage>
+pub fn trajectory::algos::SmoothZv::params(&self) -> &'static [trajectory::algos::ParamSpec]
+pub fn trajectory::algos::SmoothZv::type_name(&self) -> &'static str
+pub struct trajectory::algos::TanhPressureAdvance
+impl trajectory::algos::PostProcessorAlgo for trajectory::algos::TanhPressureAdvance
+pub fn trajectory::algos::TanhPressureAdvance::compile(&self, &[f64]) -> core::option::Option<trajectory::chain::ChainStage>
+pub fn trajectory::algos::TanhPressureAdvance::params(&self) -> &'static [trajectory::algos::ParamSpec]
+pub fn trajectory::algos::TanhPressureAdvance::type_name(&self) -> &'static str
+pub static trajectory::algos::REGISTRY: &[&dyn trajectory::algos::PostProcessorAlgo]
+pub trait trajectory::algos::PostProcessorAlgo: core::fmt::Debug + core::marker::Send + core::marker::Sync
+pub fn trajectory::algos::PostProcessorAlgo::compile(&self, &[f64]) -> core::option::Option<trajectory::chain::ChainStage>
+pub fn trajectory::algos::PostProcessorAlgo::params(&self) -> &'static [trajectory::algos::ParamSpec]
+pub fn trajectory::algos::PostProcessorAlgo::type_name(&self) -> &'static str
+impl trajectory::algos::PostProcessorAlgo for trajectory::algos::LinearPressureAdvance
+pub fn trajectory::algos::LinearPressureAdvance::compile(&self, &[f64]) -> core::option::Option<trajectory::chain::ChainStage>
+pub fn trajectory::algos::LinearPressureAdvance::params(&self) -> &'static [trajectory::algos::ParamSpec]
+pub fn trajectory::algos::LinearPressureAdvance::type_name(&self) -> &'static str
+impl trajectory::algos::PostProcessorAlgo for trajectory::algos::ModeInverse
+pub fn trajectory::algos::ModeInverse::compile(&self, &[f64]) -> core::option::Option<trajectory::chain::ChainStage>
+pub fn trajectory::algos::ModeInverse::params(&self) -> &'static [trajectory::algos::ParamSpec]
+pub fn trajectory::algos::ModeInverse::type_name(&self) -> &'static str
+impl trajectory::algos::PostProcessorAlgo for trajectory::algos::ReciprPressureAdvance
+pub fn trajectory::algos::ReciprPressureAdvance::compile(&self, &[f64]) -> core::option::Option<trajectory::chain::ChainStage>
+pub fn trajectory::algos::ReciprPressureAdvance::params(&self) -> &'static [trajectory::algos::ParamSpec]
+pub fn trajectory::algos::ReciprPressureAdvance::type_name(&self) -> &'static str
+impl trajectory::algos::PostProcessorAlgo for trajectory::algos::SmoothBell
+pub fn trajectory::algos::SmoothBell::compile(&self, &[f64]) -> core::option::Option<trajectory::chain::ChainStage>
+pub fn trajectory::algos::SmoothBell::params(&self) -> &'static [trajectory::algos::ParamSpec]
+pub fn trajectory::algos::SmoothBell::type_name(&self) -> &'static str
+impl trajectory::algos::PostProcessorAlgo for trajectory::algos::SmoothMzv
+pub fn trajectory::algos::SmoothMzv::compile(&self, &[f64]) -> core::option::Option<trajectory::chain::ChainStage>
+pub fn trajectory::algos::SmoothMzv::params(&self) -> &'static [trajectory::algos::ParamSpec]
+pub fn trajectory::algos::SmoothMzv::type_name(&self) -> &'static str
+impl trajectory::algos::PostProcessorAlgo for trajectory::algos::SmoothTriangle
+pub fn trajectory::algos::SmoothTriangle::compile(&self, &[f64]) -> core::option::Option<trajectory::chain::ChainStage>
+pub fn trajectory::algos::SmoothTriangle::params(&self) -> &'static [trajectory::algos::ParamSpec]
+pub fn trajectory::algos::SmoothTriangle::type_name(&self) -> &'static str
+impl trajectory::algos::PostProcessorAlgo for trajectory::algos::SmoothZv
+pub fn trajectory::algos::SmoothZv::compile(&self, &[f64]) -> core::option::Option<trajectory::chain::ChainStage>
+pub fn trajectory::algos::SmoothZv::params(&self) -> &'static [trajectory::algos::ParamSpec]
+pub fn trajectory::algos::SmoothZv::type_name(&self) -> &'static str
+impl trajectory::algos::PostProcessorAlgo for trajectory::algos::TanhPressureAdvance
+pub fn trajectory::algos::TanhPressureAdvance::compile(&self, &[f64]) -> core::option::Option<trajectory::chain::ChainStage>
+pub fn trajectory::algos::TanhPressureAdvance::params(&self) -> &'static [trajectory::algos::ParamSpec]
+pub fn trajectory::algos::TanhPressureAdvance::type_name(&self) -> &'static str
+pub fn trajectory::algos::lookup(&str) -> core::option::Option<&'static dyn trajectory::algos::PostProcessorAlgo>
+pub fn trajectory::algos::supported_type_names() -> alloc::vec::Vec<&'static str>
+pub mod trajectory::chain
+pub enum trajectory::chain::AdvanceModel
+pub trajectory::chain::AdvanceModel::Reciprocal
+pub trajectory::chain::AdvanceModel::Tanh
+pub enum trajectory::chain::ChainStage
+pub trajectory::chain::ChainStage::DerivativeGains
+pub trajectory::chain::ChainStage::DerivativeGains::k1: f64
+pub trajectory::chain::ChainStage::DerivativeGains::k2: f64
+pub trajectory::chain::ChainStage::NonlinearAdvance(trajectory::chain::NonlinearAdvance)
+pub trajectory::chain::ChainStage::SmoothKernel(nurbs::algebra::PiecewisePolynomialKernel)
+impl trajectory::chain::ChainStage
+pub fn trajectory::chain::ChainStage::input_window(&self) -> (f64, f64)
+pub fn trajectory::chain::ChainStage::kernel_variance_s2(&self) -> f64
+pub enum trajectory::chain::PostProcessorError
+pub trajectory::chain::PostProcessorError::AccelGainNeedsPrecedingKernel
+pub trajectory::chain::PostProcessorError::AccelGainNeedsPrecedingKernel::k2: f64
+pub trajectory::chain::PostProcessorError::AccelGainNeedsPrecedingKernel::name: alloc::string::String
+pub trajectory::chain::PostProcessorError::BadParam
+pub trajectory::chain::PostProcessorError::BadParam::key: alloc::string::String
+pub trajectory::chain::PostProcessorError::BadParam::name: alloc::string::String
+pub trajectory::chain::PostProcessorError::BadParam::value: f64
+pub trajectory::chain::PostProcessorError::UnknownParam
+pub trajectory::chain::PostProcessorError::UnknownParam::key: alloc::string::String
+pub trajectory::chain::PostProcessorError::UnknownParam::name: alloc::string::String
+pub trajectory::chain::PostProcessorError::UnsupportedComposition
+pub trajectory::chain::PostProcessorError::UnsupportedComposition::detail: alloc::string::String
+pub enum trajectory::chain::TransformPlacement
+pub trajectory::chain::TransformPlacement::AfterKernel
+pub trajectory::chain::TransformPlacement::BeforeKernel
+pub struct trajectory::chain::AxisChainSet
+pub trajectory::chain::AxisChainSet::chains: alloc::vec::Vec<trajectory::chain::CompiledChain>
+pub trajectory::chain::AxisChainSet::followers: alloc::vec::Vec<(usize, alloc::vec::Vec<usize>)>
+impl trajectory::chain::AxisChainSet
+pub fn trajectory::chain::AxisChainSet::axis_support(&self, usize) -> (f64, f64)
+pub fn trajectory::chain::AxisChainSet::back_support(&self) -> f64
+pub fn trajectory::chain::AxisChainSet::direct_forward_support(&self) -> f64
+pub fn trajectory::chain::AxisChainSet::forward_support(&self) -> f64
+pub fn trajectory::chain::AxisChainSet::has_motor_side_stages(&self) -> bool
+pub fn trajectory::chain::AxisChainSet::has_own_kernel(&self, usize) -> bool
+pub fn trajectory::chain::AxisChainSet::is_projected_follower(&self, usize) -> bool
+pub fn trajectory::chain::AxisChainSet::leaders_support(&self, usize) -> (f64, f64)
+pub fn trajectory::chain::AxisChainSet::max_follower_own_forward_support(&self) -> f64
+pub fn trajectory::chain::AxisChainSet::n_axes(&self) -> usize
+pub fn trajectory::chain::AxisChainSet::projected_followers(&self) -> impl core::iter::traits::iterator::Iterator<Item = (usize, &[usize])>
+pub fn trajectory::chain::AxisChainSet::rest_support(&self) -> trajectory::chain::RestSupport
+pub fn trajectory::chain::AxisChainSet::spatial(trajectory::chain::CompiledChain, trajectory::chain::CompiledChain, trajectory::chain::CompiledChain) -> Self
+pub fn trajectory::chain::AxisChainSet::spatial_from_kernels(&[core::option::Option<nurbs::algebra::PiecewisePolynomialKernel>; 4]) -> Self
+pub struct trajectory::chain::CompiledChain
+impl trajectory::chain::CompiledChain
+pub fn trajectory::chain::CompiledChain::compile(&[trajectory::chain::PostProcessorInstance]) -> core::result::Result<Self, trajectory::chain::PostProcessorError>
+pub fn trajectory::chain::CompiledChain::follower_linear_transform(&self) -> bool
+pub fn trajectory::chain::CompiledChain::from_kernel_and_transform(core::option::Option<nurbs::algebra::PiecewisePolynomialKernel>, core::option::Option<(trajectory::chain::TransformPlacement, trajectory::chain::ChainStage)>) -> Self
+pub fn trajectory::chain::CompiledChain::has_motor_side_gains(&self) -> bool
+pub fn trajectory::chain::CompiledChain::is_empty(&self) -> bool
+pub fn trajectory::chain::CompiledChain::is_zero_support_only(&self) -> bool
+pub fn trajectory::chain::CompiledChain::kernel(&self) -> core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>
+pub fn trajectory::chain::CompiledChain::kernel_variance_s2(&self) -> f64
+pub fn trajectory::chain::CompiledChain::leading_transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
+pub fn trajectory::chain::CompiledChain::max_input_window(&self) -> (f64, f64)
+pub fn trajectory::chain::CompiledChain::trailing_transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
+pub fn trajectory::chain::CompiledChain::transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
+pub struct trajectory::chain::NonlinearAdvance
+pub trajectory::chain::NonlinearAdvance::linear_advance: f64
+pub trajectory::chain::NonlinearAdvance::linearization_velocity: f64
+pub trajectory::chain::NonlinearAdvance::model: trajectory::chain::AdvanceModel
+pub trajectory::chain::NonlinearAdvance::nonlinear_offset: f64
+impl trajectory::chain::NonlinearAdvance
+pub fn trajectory::chain::NonlinearAdvance::advance(&self, f64) -> f64
+pub fn trajectory::chain::NonlinearAdvance::curvature(&self, f64) -> f64
+pub fn trajectory::chain::NonlinearAdvance::slope(&self, f64) -> f64
+pub struct trajectory::chain::PostProcessorInstance
+impl trajectory::chain::PostProcessorInstance
+pub fn trajectory::chain::PostProcessorInstance::algo(&self) -> &'static dyn trajectory::algos::PostProcessorAlgo
+pub fn trajectory::chain::PostProcessorInstance::compile_stage(&self) -> core::option::Option<trajectory::chain::ChainStage>
+pub fn trajectory::chain::PostProcessorInstance::name(&self) -> &str
+pub fn trajectory::chain::PostProcessorInstance::new(&str, &'static dyn trajectory::algos::PostProcessorAlgo, alloc::vec::Vec<f64>) -> Self
+pub fn trajectory::chain::PostProcessorInstance::param(&self, &str) -> core::option::Option<f64>
+pub fn trajectory::chain::PostProcessorInstance::set_param(&mut self, &str, f64) -> core::result::Result<(), trajectory::chain::PostProcessorError>
+pub fn trajectory::chain::PostProcessorInstance::validate(&self) -> core::result::Result<(), trajectory::chain::PostProcessorError>
+pub struct trajectory::chain::RestSupport
+pub trajectory::chain::RestSupport::after_motion: f64
+pub trajectory::chain::RestSupport::before_motion: f64
+pub mod trajectory::continuous
+pub enum trajectory::continuous::ContinuousAxis
+pub trajectory::continuous::ContinuousAxis::Analytic
+pub trajectory::continuous::ContinuousAxis::Analytic::axis: usize
+pub trajectory::continuous::ContinuousAxis::Analytic::span: alloc::rcs::arc::Arc<trajectory::continuous::AnalyticMoveSpan>
+pub trajectory::continuous::ContinuousAxis::Buzz
+pub trajectory::continuous::ContinuousAxis::Buzz::base_position: f64
+pub trajectory::continuous::ContinuousAxis::Buzz::profile: alloc::rcs::arc::Arc<trajectory::BuzzProfile>
+pub trajectory::continuous::ContinuousAxis::Buzz::sign: f64
+pub trajectory::continuous::ContinuousAxis::Hold
+pub trajectory::continuous::ContinuousAxis::Hold::position: f64
+pub trajectory::continuous::ContinuousAxis::Hold::t_end: f64
+pub trajectory::continuous::ContinuousAxis::Hold::t_start: f64
+pub trajectory::continuous::ContinuousAxis::Nudge(trajectory::NudgeProfile)
+pub trajectory::continuous::ContinuousAxis::PiecewiseRelativeSpline(alloc::rcs::arc::Arc<[trajectory::continuous::RelativeSplinePiece]>)
+pub trajectory::continuous::ContinuousAxis::RelativeSpline
+pub trajectory::continuous::ContinuousAxis::RelativeSpline::base_position: f64
+pub trajectory::continuous::ContinuousAxis::RelativeSpline::curve: alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>
+pub trajectory::continuous::ContinuousAxis::Spline(alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>)
+impl trajectory::continuous::ContinuousAxis
+pub fn trajectory::continuous::ContinuousAxis::append_breakpoints(&self, &mut alloc::vec::Vec<f64>)
+pub fn trajectory::continuous::ContinuousAxis::breakpoints(&self) -> alloc::vec::Vec<f64>
+pub fn trajectory::continuous::ContinuousAxis::domain(&self) -> (f64, f64)
+pub fn trajectory::continuous::ContinuousAxis::eval_pva(&self, f64) -> core::result::Result<trajectory::continuous::Pva, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ContinuousAxis::eval_pvaj(&self, f64) -> core::result::Result<trajectory::continuous::Pvaj, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ContinuousAxis::position(&self, f64) -> core::result::Result<f64, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ContinuousAxis::pva_bounds(&self, f64, f64) -> core::result::Result<trajectory::continuous::PvaBounds, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ContinuousAxis::try_piecewise_relative_spline(alloc::rcs::arc::Arc<[trajectory::continuous::RelativeSplinePiece]>) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
+pub enum trajectory::continuous::ContinuousError
+pub trajectory::continuous::ContinuousError::AxisOutsideMove
+pub trajectory::continuous::ContinuousError::AxisOutsideMove::axis: usize
+pub trajectory::continuous::ContinuousError::ClockOutsideSpan
+pub trajectory::continuous::ContinuousError::ClockOutsideSpan::clock: u64
+pub trajectory::continuous::ContinuousError::ClockOutsideSpan::end_clock: u64
+pub trajectory::continuous::ContinuousError::ClockOutsideSpan::start_clock: u64
+pub trajectory::continuous::ContinuousError::InvalidSpan
+pub trajectory::continuous::ContinuousError::InvalidSpan::reason: &'static str
+pub trajectory::continuous::ContinuousError::NegativeVelocity
+pub trajectory::continuous::ContinuousError::NegativeVelocity::velocity: f64
+pub trajectory::continuous::ContinuousError::NonFinite
+pub trajectory::continuous::ContinuousError::NonFinite::t: f64
+pub trajectory::continuous::ContinuousError::NonFiniteEvaluation
+pub trajectory::continuous::ContinuousError::NonFiniteEvaluation::source_axis: usize
+pub trajectory::continuous::ContinuousError::NonFiniteEvaluation::t: f64
+pub trajectory::continuous::ContinuousError::PhaseEndpointMismatch
+pub trajectory::continuous::ContinuousError::PhaseEndpointMismatch::actual: f64
+pub trajectory::continuous::ContinuousError::PhaseEndpointMismatch::expected: f64
+pub trajectory::continuous::ContinuousError::PhaseGap
+pub trajectory::continuous::ContinuousError::PhaseGap::next_start: f64
+pub trajectory::continuous::ContinuousError::PhaseGap::previous_end: f64
+pub trajectory::continuous::ContinuousError::PhaseOverlap
+pub trajectory::continuous::ContinuousError::PhaseOverlap::next_start: f64
+pub trajectory::continuous::ContinuousError::PhaseOverlap::previous_end: f64
+pub trajectory::continuous::ContinuousError::PieceGap
+pub trajectory::continuous::ContinuousError::PieceGap::next_start: f64
+pub trajectory::continuous::ContinuousError::PieceGap::previous_end: f64
+pub trajectory::continuous::ContinuousError::PieceOverlap
+pub trajectory::continuous::ContinuousError::PieceOverlap::next_start: f64
+pub trajectory::continuous::ContinuousError::PieceOverlap::previous_end: f64
+pub trajectory::continuous::ContinuousError::TimeOutsideSpan
+pub trajectory::continuous::ContinuousError::TimeOutsideSpan::t: f64
+pub trajectory::continuous::ContinuousError::TimeOutsideSpan::t_end: f64
+pub trajectory::continuous::ContinuousError::TimeOutsideSpan::t_start: f64
+pub trajectory::continuous::ContinuousError::VariableSurfaceBeforeDispatch
+pub enum trajectory::continuous::MotorGroup
+pub trajectory::continuous::MotorGroup::Analytic
+pub trajectory::continuous::MotorGroup::Analytic::span: alloc::rcs::arc::Arc<trajectory::continuous::AnalyticMoveSpan>
+pub trajectory::continuous::MotorGroup::Analytic::terms: alloc::rcs::arc::Arc<[trajectory::continuous::MotorTerm]>
+pub trajectory::continuous::MotorGroup::Independent(trajectory::continuous::MotorTerm)
+pub trajectory::continuous::MotorGroup::RelativeSpline
+pub trajectory::continuous::MotorGroup::RelativeSpline::base_position: f64
+pub trajectory::continuous::MotorGroup::RelativeSpline::curve: alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>
+pub trajectory::continuous::MotorGroup::RelativeSpline::summed_scale: f64
+pub trajectory::continuous::MotorGroup::Spline
+pub trajectory::continuous::MotorGroup::Spline::curve: alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>
+pub trajectory::continuous::MotorGroup::Spline::summed_scale: f64
+pub enum trajectory::continuous::ProfileError
+pub trajectory::continuous::ProfileError::NegativeAcceleration
+pub trajectory::continuous::ProfileError::NegativeRamp
+pub trajectory::continuous::ProfileError::NonFinite(&'static str)
+pub trajectory::continuous::ProfileError::NonPositiveDuration
+pub trajectory::continuous::ProfileError::NonPositiveFrequency
+pub trajectory::continuous::ProfileError::ZeroDisplacement
+pub trajectory::continuous::ProfileError::ZeroSpeed
+pub enum trajectory::continuous::SurfaceMode
+pub trajectory::continuous::SurfaceMode::Constant(f64)
+pub trajectory::continuous::SurfaceMode::None
+pub trajectory::continuous::SurfaceMode::Variable(alloc::rcs::arc::Arc<geometry::surface::SurfaceTransform>)
+pub struct trajectory::continuous::AnalyticMoveSpan
+pub trajectory::continuous::AnalyticMoveSpan::axis_start_positions: alloc::rcs::arc::Arc<[f64]>
+pub trajectory::continuous::AnalyticMoveSpan::phases: alloc::rcs::arc::Arc<[geometry::velocity::law::LawSegment]>
+pub trajectory::continuous::AnalyticMoveSpan::source: geometry::frontend::Move
+pub trajectory::continuous::AnalyticMoveSpan::source_distance_origin: f64
+pub trajectory::continuous::AnalyticMoveSpan::surface: trajectory::continuous::SurfaceMode
+pub trajectory::continuous::AnalyticMoveSpan::t_end: f64
+pub trajectory::continuous::AnalyticMoveSpan::t_start: f64
+impl trajectory::continuous::AnalyticMoveSpan
+pub fn trajectory::continuous::AnalyticMoveSpan::eval_axis(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pva, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::AnalyticMoveSpan::eval_axis_pvaj(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pvaj, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::AnalyticMoveSpan::has_variable_surface(&self) -> bool
+pub fn trajectory::continuous::AnalyticMoveSpan::phase_seam_times(&self) -> impl core::iter::traits::iterator::Iterator<Item = f64> + '_
+pub fn trajectory::continuous::AnalyticMoveSpan::surface_seam_times(&self) -> core::option::Option<alloc::vec::Vec<f64>>
+pub fn trajectory::continuous::AnalyticMoveSpan::try_new(geometry::frontend::Move, alloc::rcs::arc::Arc<[geometry::velocity::law::LawSegment]>, f64, f64, f64, alloc::rcs::arc::Arc<[f64]>, trajectory::continuous::SurfaceMode) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
+pub struct trajectory::continuous::BuzzProfile
+impl trajectory::BuzzProfile
+pub fn trajectory::BuzzProfile::acceleration(&self, f64) -> f64
+pub fn trajectory::BuzzProfile::acceleration_bounds(&self) -> (f64, f64)
+pub fn trajectory::BuzzProfile::amplitude_mm(&self) -> f64
+pub fn trajectory::BuzzProfile::breakpoints(&self) -> &[f64]
+pub fn trajectory::BuzzProfile::duration(&self) -> f64
+pub fn trajectory::BuzzProfile::end_time(&self) -> f64
+pub fn trajectory::BuzzProfile::eval(&self, f64) -> trajectory::continuous::ProfileSample
+pub fn trajectory::BuzzProfile::freq_end_hz(&self) -> f64
+pub fn trajectory::BuzzProfile::freq_start_hz(&self) -> f64
+pub fn trajectory::BuzzProfile::jerk(&self, f64) -> f64
+pub fn trajectory::BuzzProfile::position(&self, f64) -> f64
+pub fn trajectory::BuzzProfile::ramp(&self) -> f64
+pub fn trajectory::BuzzProfile::t_end(&self) -> f64
+pub fn trajectory::BuzzProfile::t_start(&self) -> f64
+pub fn trajectory::BuzzProfile::try_new(f64, f64, f64, f64, f64, f64) -> core::result::Result<Self, trajectory::continuous::ProfileError>
+pub fn trajectory::BuzzProfile::velocity(&self, f64) -> f64
+pub fn trajectory::BuzzProfile::velocity_bounds(&self) -> (f64, f64)
+pub fn trajectory::BuzzProfile::velocity_step_inside(&self, f64, f64) -> bool
+pub struct trajectory::continuous::ClockedMotorSpan
+pub trajectory::continuous::ClockedMotorSpan::clock_freq_hz: f64
+pub trajectory::continuous::ClockedMotorSpan::end_clock: u64
+pub trajectory::continuous::ClockedMotorSpan::end_host: f64
+pub trajectory::continuous::ClockedMotorSpan::signal: alloc::rcs::arc::Arc<trajectory::continuous::MotorSpan>
+pub trajectory::continuous::ClockedMotorSpan::start_clock: u64
+pub trajectory::continuous::ClockedMotorSpan::start_clock_exact: f64
+pub trajectory::continuous::ClockedMotorSpan::start_host: f64
+pub trajectory::continuous::ClockedMotorSpan::stream_t_end: f64
+pub trajectory::continuous::ClockedMotorSpan::stream_t_start: f64
+impl trajectory::continuous::ClockedMotorSpan
+pub fn trajectory::continuous::ClockedMotorSpan::clock_at_stream_time(&self, f64) -> core::result::Result<u64, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ClockedMotorSpan::eval_at_clock(&self, u64) -> core::result::Result<trajectory::continuous::Pva, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ClockedMotorSpan::position_at_clock(&self, u64) -> core::result::Result<f64, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ClockedMotorSpan::split_max_duration(&self) -> core::result::Result<alloc::vec::Vec<Self>, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ClockedMotorSpan::stream_time_at_clock(&self, u64) -> core::result::Result<f64, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ClockedMotorSpan::try_new(alloc::rcs::arc::Arc<trajectory::continuous::MotorSpan>, f64, f64, f64, f64, f64, f64) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
+pub struct trajectory::continuous::ContinuousSegment
+pub trajectory::continuous::ContinuousSegment::axes: alloc::rcs::arc::Arc<[trajectory::continuous::ContinuousAxis]>
+pub trajectory::continuous::ContinuousSegment::followers: alloc::rcs::arc::Arc<[geometry::segment::FollowerDemand]>
+pub trajectory::continuous::ContinuousSegment::motor_mask: u8
+pub trajectory::continuous::ContinuousSegment::rest_at_end: bool
+pub trajectory::continuous::ContinuousSegment::source_line: u32
+pub trajectory::continuous::ContinuousSegment::spatial_path: bool
+pub trajectory::continuous::ContinuousSegment::t_end: f64
+pub trajectory::continuous::ContinuousSegment::t_start: f64
+impl trajectory::continuous::ContinuousSegment
+pub fn trajectory::continuous::ContinuousSegment::breakpoints(&self) -> alloc::vec::Vec<f64>
+pub fn trajectory::continuous::ContinuousSegment::eval_axis(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pva, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ContinuousSegment::eval_axis_pvaj(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pvaj, trajectory::continuous::ContinuousError>
+pub struct trajectory::continuous::LocalPolynomial
+impl trajectory::continuous::LocalPolynomial
+pub fn trajectory::continuous::LocalPolynomial::noise_band(&self, f64) -> f64
+pub fn trajectory::continuous::LocalPolynomial::position(&self, f64) -> f64
+pub fn trajectory::continuous::LocalPolynomial::position_range(&self, f64, f64) -> (f64, f64)
+pub fn trajectory::continuous::LocalPolynomial::t0(&self) -> f64
+pub fn trajectory::continuous::LocalPolynomial::valid_until(&self) -> f64
+pub fn trajectory::continuous::LocalPolynomial::velocity(&self, f64) -> f64
+pub fn trajectory::continuous::LocalPolynomial::velocity_range(&self, f64, f64) -> (f64, f64)
+pub struct trajectory::continuous::MotorSpan
+pub trajectory::continuous::MotorSpan::breakpoints: alloc::rcs::arc::Arc<[f64]>
+pub trajectory::continuous::MotorSpan::groups: alloc::rcs::arc::Arc<[trajectory::continuous::MotorGroup]>
+pub trajectory::continuous::MotorSpan::is_explicit_hold: bool
+pub trajectory::continuous::MotorSpan::motor_mask: u8
+pub trajectory::continuous::MotorSpan::source_line: u32
+pub trajectory::continuous::MotorSpan::t_end: f64
+pub trajectory::continuous::MotorSpan::t_start: f64
+impl trajectory::continuous::MotorSpan
+pub fn trajectory::continuous::MotorSpan::eval_pva(&self, f64) -> core::result::Result<trajectory::continuous::Pva, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::MotorSpan::first_source_axis(&self) -> usize
+pub fn trajectory::continuous::MotorSpan::position(&self, f64) -> core::result::Result<f64, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::MotorSpan::pva_bounds(&self, f64, f64) -> core::result::Result<trajectory::continuous::PvaBounds, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::MotorSpan::try_new(alloc::rcs::arc::Arc<[trajectory::continuous::MotorGroup]>, f64, f64, u8, u32, bool) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
+impl trajectory::continuous::MotorSpan
+pub fn trajectory::continuous::MotorSpan::local_polynomial(&self, f64) -> core::option::Option<trajectory::continuous::LocalPolynomial>
+pub struct trajectory::continuous::MotorTerm
+pub trajectory::continuous::MotorTerm::axis: trajectory::continuous::ContinuousAxis
+pub trajectory::continuous::MotorTerm::scale: f64
+pub trajectory::continuous::MotorTerm::source_axis: usize
+pub struct trajectory::continuous::NudgeProfile
+impl trajectory::NudgeProfile
+pub fn trajectory::NudgeProfile::accel_mm_s2(&self) -> f64
+pub fn trajectory::NudgeProfile::acceleration(&self, f64) -> f64
+pub fn trajectory::NudgeProfile::acceleration_bounds(&self) -> (f64, f64)
+pub fn trajectory::NudgeProfile::breakpoints(&self) -> &[f64]
+pub fn trajectory::NudgeProfile::delta_mm(&self) -> f64
+pub fn trajectory::NudgeProfile::duration(&self) -> f64
+pub fn trajectory::NudgeProfile::end_time(&self) -> f64
+pub fn trajectory::NudgeProfile::eval(&self, f64) -> trajectory::continuous::ProfileSample
+pub fn trajectory::NudgeProfile::jerk(&self, f64) -> f64
+pub fn trajectory::NudgeProfile::position(&self, f64) -> f64
+pub fn trajectory::NudgeProfile::speed_mm_s(&self) -> f64
+pub fn trajectory::NudgeProfile::t_end(&self) -> f64
+pub fn trajectory::NudgeProfile::t_start(&self) -> f64
+pub fn trajectory::NudgeProfile::try_new(f64, f64, f64, f64) -> core::result::Result<Self, trajectory::continuous::ProfileError>
+pub fn trajectory::NudgeProfile::velocity(&self, f64) -> f64
+pub fn trajectory::NudgeProfile::velocity_bounds(&self) -> (f64, f64)
+pub fn trajectory::NudgeProfile::velocity_step_inside(&self, f64, f64) -> bool
+pub struct trajectory::continuous::ProfileSample
+pub trajectory::continuous::ProfileSample::acceleration: f64
+pub trajectory::continuous::ProfileSample::position: f64
+pub trajectory::continuous::ProfileSample::velocity: f64
+pub struct trajectory::continuous::Pva
+pub trajectory::continuous::Pva::acceleration: f64
+pub trajectory::continuous::Pva::position: f64
+pub trajectory::continuous::Pva::velocity: f64
+pub struct trajectory::continuous::PvaBounds
+pub trajectory::continuous::PvaBounds::acceleration_abs_max: f64
+pub trajectory::continuous::PvaBounds::velocity_continuous: bool
+pub trajectory::continuous::PvaBounds::velocity_max: f64
+pub trajectory::continuous::PvaBounds::velocity_min: f64
+pub struct trajectory::continuous::Pvaj
+pub trajectory::continuous::Pvaj::acceleration: f64
+pub trajectory::continuous::Pvaj::jerk: f64
+pub trajectory::continuous::Pvaj::position: f64
+pub trajectory::continuous::Pvaj::velocity: f64
+pub struct trajectory::continuous::RelativeSplinePiece
+pub trajectory::continuous::RelativeSplinePiece::base_position: f64
+pub trajectory::continuous::RelativeSplinePiece::curve: alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>
+pub trajectory::continuous::RelativeSplinePiece::t_end: f64
+pub trajectory::continuous::RelativeSplinePiece::t_start: f64
+pub const trajectory::continuous::MAX_SPAN_SECS: f64
+pub fn trajectory::continuous::analytic_phase_boundary(f64, f64) -> f64
+pub fn trajectory::continuous::interior_time_above(f64) -> f64
+pub fn trajectory::continuous::interior_time_below(f64) -> f64
+pub fn trajectory::continuous::next_toward(f64, f64) -> f64
+pub enum trajectory::AdvanceModel
+pub trajectory::AdvanceModel::Reciprocal
+pub trajectory::AdvanceModel::Tanh
+pub enum trajectory::ChainStage
+pub trajectory::ChainStage::DerivativeGains
+pub trajectory::ChainStage::DerivativeGains::k1: f64
+pub trajectory::ChainStage::DerivativeGains::k2: f64
+pub trajectory::ChainStage::NonlinearAdvance(trajectory::chain::NonlinearAdvance)
+pub trajectory::ChainStage::SmoothKernel(nurbs::algebra::PiecewisePolynomialKernel)
+impl trajectory::chain::ChainStage
+pub fn trajectory::chain::ChainStage::input_window(&self) -> (f64, f64)
+pub fn trajectory::chain::ChainStage::kernel_variance_s2(&self) -> f64
+pub enum trajectory::ContinuousAxis
+pub trajectory::ContinuousAxis::Analytic
+pub trajectory::ContinuousAxis::Analytic::axis: usize
+pub trajectory::ContinuousAxis::Analytic::span: alloc::rcs::arc::Arc<trajectory::continuous::AnalyticMoveSpan>
+pub trajectory::ContinuousAxis::Buzz
+pub trajectory::ContinuousAxis::Buzz::base_position: f64
+pub trajectory::ContinuousAxis::Buzz::profile: alloc::rcs::arc::Arc<trajectory::BuzzProfile>
+pub trajectory::ContinuousAxis::Buzz::sign: f64
+pub trajectory::ContinuousAxis::Hold
+pub trajectory::ContinuousAxis::Hold::position: f64
+pub trajectory::ContinuousAxis::Hold::t_end: f64
+pub trajectory::ContinuousAxis::Hold::t_start: f64
+pub trajectory::ContinuousAxis::Nudge(trajectory::NudgeProfile)
+pub trajectory::ContinuousAxis::PiecewiseRelativeSpline(alloc::rcs::arc::Arc<[trajectory::continuous::RelativeSplinePiece]>)
+pub trajectory::ContinuousAxis::RelativeSpline
+pub trajectory::ContinuousAxis::RelativeSpline::base_position: f64
+pub trajectory::ContinuousAxis::RelativeSpline::curve: alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>
+pub trajectory::ContinuousAxis::Spline(alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>)
+impl trajectory::continuous::ContinuousAxis
+pub fn trajectory::continuous::ContinuousAxis::append_breakpoints(&self, &mut alloc::vec::Vec<f64>)
+pub fn trajectory::continuous::ContinuousAxis::breakpoints(&self) -> alloc::vec::Vec<f64>
+pub fn trajectory::continuous::ContinuousAxis::domain(&self) -> (f64, f64)
+pub fn trajectory::continuous::ContinuousAxis::eval_pva(&self, f64) -> core::result::Result<trajectory::continuous::Pva, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ContinuousAxis::eval_pvaj(&self, f64) -> core::result::Result<trajectory::continuous::Pvaj, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ContinuousAxis::position(&self, f64) -> core::result::Result<f64, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ContinuousAxis::pva_bounds(&self, f64, f64) -> core::result::Result<trajectory::continuous::PvaBounds, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ContinuousAxis::try_piecewise_relative_spline(alloc::rcs::arc::Arc<[trajectory::continuous::RelativeSplinePiece]>) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
+pub enum trajectory::ContinuousError
+pub trajectory::ContinuousError::AxisOutsideMove
+pub trajectory::ContinuousError::AxisOutsideMove::axis: usize
+pub trajectory::ContinuousError::ClockOutsideSpan
+pub trajectory::ContinuousError::ClockOutsideSpan::clock: u64
+pub trajectory::ContinuousError::ClockOutsideSpan::end_clock: u64
+pub trajectory::ContinuousError::ClockOutsideSpan::start_clock: u64
+pub trajectory::ContinuousError::InvalidSpan
+pub trajectory::ContinuousError::InvalidSpan::reason: &'static str
+pub trajectory::ContinuousError::NegativeVelocity
+pub trajectory::ContinuousError::NegativeVelocity::velocity: f64
+pub trajectory::ContinuousError::NonFinite
+pub trajectory::ContinuousError::NonFinite::t: f64
+pub trajectory::ContinuousError::NonFiniteEvaluation
+pub trajectory::ContinuousError::NonFiniteEvaluation::source_axis: usize
+pub trajectory::ContinuousError::NonFiniteEvaluation::t: f64
+pub trajectory::ContinuousError::PhaseEndpointMismatch
+pub trajectory::ContinuousError::PhaseEndpointMismatch::actual: f64
+pub trajectory::ContinuousError::PhaseEndpointMismatch::expected: f64
+pub trajectory::ContinuousError::PhaseGap
+pub trajectory::ContinuousError::PhaseGap::next_start: f64
+pub trajectory::ContinuousError::PhaseGap::previous_end: f64
+pub trajectory::ContinuousError::PhaseOverlap
+pub trajectory::ContinuousError::PhaseOverlap::next_start: f64
+pub trajectory::ContinuousError::PhaseOverlap::previous_end: f64
+pub trajectory::ContinuousError::PieceGap
+pub trajectory::ContinuousError::PieceGap::next_start: f64
+pub trajectory::ContinuousError::PieceGap::previous_end: f64
+pub trajectory::ContinuousError::PieceOverlap
+pub trajectory::ContinuousError::PieceOverlap::next_start: f64
+pub trajectory::ContinuousError::PieceOverlap::previous_end: f64
+pub trajectory::ContinuousError::TimeOutsideSpan
+pub trajectory::ContinuousError::TimeOutsideSpan::t: f64
+pub trajectory::ContinuousError::TimeOutsideSpan::t_end: f64
+pub trajectory::ContinuousError::TimeOutsideSpan::t_start: f64
+pub trajectory::ContinuousError::VariableSurfaceBeforeDispatch
+pub enum trajectory::MotorGroup
+pub trajectory::MotorGroup::Analytic
+pub trajectory::MotorGroup::Analytic::span: alloc::rcs::arc::Arc<trajectory::continuous::AnalyticMoveSpan>
+pub trajectory::MotorGroup::Analytic::terms: alloc::rcs::arc::Arc<[trajectory::continuous::MotorTerm]>
+pub trajectory::MotorGroup::Independent(trajectory::continuous::MotorTerm)
+pub trajectory::MotorGroup::RelativeSpline
+pub trajectory::MotorGroup::RelativeSpline::base_position: f64
+pub trajectory::MotorGroup::RelativeSpline::curve: alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>
+pub trajectory::MotorGroup::RelativeSpline::summed_scale: f64
+pub trajectory::MotorGroup::Spline
+pub trajectory::MotorGroup::Spline::curve: alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>
+pub trajectory::MotorGroup::Spline::summed_scale: f64
+pub enum trajectory::PostProcessorError
+pub trajectory::PostProcessorError::AccelGainNeedsPrecedingKernel
+pub trajectory::PostProcessorError::AccelGainNeedsPrecedingKernel::k2: f64
+pub trajectory::PostProcessorError::AccelGainNeedsPrecedingKernel::name: alloc::string::String
+pub trajectory::PostProcessorError::BadParam
+pub trajectory::PostProcessorError::BadParam::key: alloc::string::String
+pub trajectory::PostProcessorError::BadParam::name: alloc::string::String
+pub trajectory::PostProcessorError::BadParam::value: f64
+pub trajectory::PostProcessorError::UnknownParam
+pub trajectory::PostProcessorError::UnknownParam::key: alloc::string::String
+pub trajectory::PostProcessorError::UnknownParam::name: alloc::string::String
+pub trajectory::PostProcessorError::UnsupportedComposition
+pub trajectory::PostProcessorError::UnsupportedComposition::detail: alloc::string::String
+pub enum trajectory::SurfaceMode
+pub trajectory::SurfaceMode::Constant(f64)
+pub trajectory::SurfaceMode::None
+pub trajectory::SurfaceMode::Variable(alloc::rcs::arc::Arc<geometry::surface::SurfaceTransform>)
+pub struct trajectory::AnalyticMoveSpan
+pub trajectory::AnalyticMoveSpan::axis_start_positions: alloc::rcs::arc::Arc<[f64]>
+pub trajectory::AnalyticMoveSpan::phases: alloc::rcs::arc::Arc<[geometry::velocity::law::LawSegment]>
+pub trajectory::AnalyticMoveSpan::source: geometry::frontend::Move
+pub trajectory::AnalyticMoveSpan::source_distance_origin: f64
+pub trajectory::AnalyticMoveSpan::surface: trajectory::continuous::SurfaceMode
+pub trajectory::AnalyticMoveSpan::t_end: f64
+pub trajectory::AnalyticMoveSpan::t_start: f64
+impl trajectory::continuous::AnalyticMoveSpan
+pub fn trajectory::continuous::AnalyticMoveSpan::eval_axis(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pva, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::AnalyticMoveSpan::eval_axis_pvaj(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pvaj, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::AnalyticMoveSpan::has_variable_surface(&self) -> bool
+pub fn trajectory::continuous::AnalyticMoveSpan::phase_seam_times(&self) -> impl core::iter::traits::iterator::Iterator<Item = f64> + '_
+pub fn trajectory::continuous::AnalyticMoveSpan::surface_seam_times(&self) -> core::option::Option<alloc::vec::Vec<f64>>
+pub fn trajectory::continuous::AnalyticMoveSpan::try_new(geometry::frontend::Move, alloc::rcs::arc::Arc<[geometry::velocity::law::LawSegment]>, f64, f64, f64, alloc::rcs::arc::Arc<[f64]>, trajectory::continuous::SurfaceMode) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
+pub struct trajectory::AxisChainSet
+pub trajectory::AxisChainSet::chains: alloc::vec::Vec<trajectory::chain::CompiledChain>
+pub trajectory::AxisChainSet::followers: alloc::vec::Vec<(usize, alloc::vec::Vec<usize>)>
+impl trajectory::chain::AxisChainSet
+pub fn trajectory::chain::AxisChainSet::axis_support(&self, usize) -> (f64, f64)
+pub fn trajectory::chain::AxisChainSet::back_support(&self) -> f64
+pub fn trajectory::chain::AxisChainSet::direct_forward_support(&self) -> f64
+pub fn trajectory::chain::AxisChainSet::forward_support(&self) -> f64
+pub fn trajectory::chain::AxisChainSet::has_motor_side_stages(&self) -> bool
+pub fn trajectory::chain::AxisChainSet::has_own_kernel(&self, usize) -> bool
+pub fn trajectory::chain::AxisChainSet::is_projected_follower(&self, usize) -> bool
+pub fn trajectory::chain::AxisChainSet::leaders_support(&self, usize) -> (f64, f64)
+pub fn trajectory::chain::AxisChainSet::max_follower_own_forward_support(&self) -> f64
+pub fn trajectory::chain::AxisChainSet::n_axes(&self) -> usize
+pub fn trajectory::chain::AxisChainSet::projected_followers(&self) -> impl core::iter::traits::iterator::Iterator<Item = (usize, &[usize])>
+pub fn trajectory::chain::AxisChainSet::rest_support(&self) -> trajectory::chain::RestSupport
+pub fn trajectory::chain::AxisChainSet::spatial(trajectory::chain::CompiledChain, trajectory::chain::CompiledChain, trajectory::chain::CompiledChain) -> Self
+pub fn trajectory::chain::AxisChainSet::spatial_from_kernels(&[core::option::Option<nurbs::algebra::PiecewisePolynomialKernel>; 4]) -> Self
+pub struct trajectory::BuzzProfile
+impl trajectory::BuzzProfile
+pub fn trajectory::BuzzProfile::acceleration(&self, f64) -> f64
+pub fn trajectory::BuzzProfile::acceleration_bounds(&self) -> (f64, f64)
+pub fn trajectory::BuzzProfile::amplitude_mm(&self) -> f64
+pub fn trajectory::BuzzProfile::breakpoints(&self) -> &[f64]
+pub fn trajectory::BuzzProfile::duration(&self) -> f64
+pub fn trajectory::BuzzProfile::end_time(&self) -> f64
+pub fn trajectory::BuzzProfile::eval(&self, f64) -> trajectory::continuous::ProfileSample
+pub fn trajectory::BuzzProfile::freq_end_hz(&self) -> f64
+pub fn trajectory::BuzzProfile::freq_start_hz(&self) -> f64
+pub fn trajectory::BuzzProfile::jerk(&self, f64) -> f64
+pub fn trajectory::BuzzProfile::position(&self, f64) -> f64
+pub fn trajectory::BuzzProfile::ramp(&self) -> f64
+pub fn trajectory::BuzzProfile::t_end(&self) -> f64
+pub fn trajectory::BuzzProfile::t_start(&self) -> f64
+pub fn trajectory::BuzzProfile::try_new(f64, f64, f64, f64, f64, f64) -> core::result::Result<Self, trajectory::continuous::ProfileError>
+pub fn trajectory::BuzzProfile::velocity(&self, f64) -> f64
+pub fn trajectory::BuzzProfile::velocity_bounds(&self) -> (f64, f64)
+pub fn trajectory::BuzzProfile::velocity_step_inside(&self, f64, f64) -> bool
+pub struct trajectory::ClockedMotorSpan
+pub trajectory::ClockedMotorSpan::clock_freq_hz: f64
+pub trajectory::ClockedMotorSpan::end_clock: u64
+pub trajectory::ClockedMotorSpan::end_host: f64
+pub trajectory::ClockedMotorSpan::signal: alloc::rcs::arc::Arc<trajectory::continuous::MotorSpan>
+pub trajectory::ClockedMotorSpan::start_clock: u64
+pub trajectory::ClockedMotorSpan::start_clock_exact: f64
+pub trajectory::ClockedMotorSpan::start_host: f64
+pub trajectory::ClockedMotorSpan::stream_t_end: f64
+pub trajectory::ClockedMotorSpan::stream_t_start: f64
+impl trajectory::continuous::ClockedMotorSpan
+pub fn trajectory::continuous::ClockedMotorSpan::clock_at_stream_time(&self, f64) -> core::result::Result<u64, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ClockedMotorSpan::eval_at_clock(&self, u64) -> core::result::Result<trajectory::continuous::Pva, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ClockedMotorSpan::position_at_clock(&self, u64) -> core::result::Result<f64, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ClockedMotorSpan::split_max_duration(&self) -> core::result::Result<alloc::vec::Vec<Self>, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ClockedMotorSpan::stream_time_at_clock(&self, u64) -> core::result::Result<f64, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ClockedMotorSpan::try_new(alloc::rcs::arc::Arc<trajectory::continuous::MotorSpan>, f64, f64, f64, f64, f64, f64) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
+pub struct trajectory::CompiledChain
+impl trajectory::chain::CompiledChain
+pub fn trajectory::chain::CompiledChain::compile(&[trajectory::chain::PostProcessorInstance]) -> core::result::Result<Self, trajectory::chain::PostProcessorError>
+pub fn trajectory::chain::CompiledChain::follower_linear_transform(&self) -> bool
+pub fn trajectory::chain::CompiledChain::from_kernel_and_transform(core::option::Option<nurbs::algebra::PiecewisePolynomialKernel>, core::option::Option<(trajectory::chain::TransformPlacement, trajectory::chain::ChainStage)>) -> Self
+pub fn trajectory::chain::CompiledChain::has_motor_side_gains(&self) -> bool
+pub fn trajectory::chain::CompiledChain::is_empty(&self) -> bool
+pub fn trajectory::chain::CompiledChain::is_zero_support_only(&self) -> bool
+pub fn trajectory::chain::CompiledChain::kernel(&self) -> core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>
+pub fn trajectory::chain::CompiledChain::kernel_variance_s2(&self) -> f64
+pub fn trajectory::chain::CompiledChain::leading_transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
+pub fn trajectory::chain::CompiledChain::max_input_window(&self) -> (f64, f64)
+pub fn trajectory::chain::CompiledChain::trailing_transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
+pub fn trajectory::chain::CompiledChain::transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
+pub struct trajectory::ContinuousSegment
+pub trajectory::ContinuousSegment::axes: alloc::rcs::arc::Arc<[trajectory::continuous::ContinuousAxis]>
+pub trajectory::ContinuousSegment::followers: alloc::rcs::arc::Arc<[geometry::segment::FollowerDemand]>
+pub trajectory::ContinuousSegment::motor_mask: u8
+pub trajectory::ContinuousSegment::rest_at_end: bool
+pub trajectory::ContinuousSegment::source_line: u32
+pub trajectory::ContinuousSegment::spatial_path: bool
+pub trajectory::ContinuousSegment::t_end: f64
+pub trajectory::ContinuousSegment::t_start: f64
+impl trajectory::continuous::ContinuousSegment
+pub fn trajectory::continuous::ContinuousSegment::breakpoints(&self) -> alloc::vec::Vec<f64>
+pub fn trajectory::continuous::ContinuousSegment::eval_axis(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pva, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ContinuousSegment::eval_axis_pvaj(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pvaj, trajectory::continuous::ContinuousError>
+pub struct trajectory::LocalPolynomial
+impl trajectory::continuous::LocalPolynomial
+pub fn trajectory::continuous::LocalPolynomial::noise_band(&self, f64) -> f64
+pub fn trajectory::continuous::LocalPolynomial::position(&self, f64) -> f64
+pub fn trajectory::continuous::LocalPolynomial::position_range(&self, f64, f64) -> (f64, f64)
+pub fn trajectory::continuous::LocalPolynomial::t0(&self) -> f64
+pub fn trajectory::continuous::LocalPolynomial::valid_until(&self) -> f64
+pub fn trajectory::continuous::LocalPolynomial::velocity(&self, f64) -> f64
+pub fn trajectory::continuous::LocalPolynomial::velocity_range(&self, f64, f64) -> (f64, f64)
+pub struct trajectory::MotorSpan
+pub trajectory::MotorSpan::breakpoints: alloc::rcs::arc::Arc<[f64]>
+pub trajectory::MotorSpan::groups: alloc::rcs::arc::Arc<[trajectory::continuous::MotorGroup]>
+pub trajectory::MotorSpan::is_explicit_hold: bool
+pub trajectory::MotorSpan::motor_mask: u8
+pub trajectory::MotorSpan::source_line: u32
+pub trajectory::MotorSpan::t_end: f64
+pub trajectory::MotorSpan::t_start: f64
+impl trajectory::continuous::MotorSpan
+pub fn trajectory::continuous::MotorSpan::eval_pva(&self, f64) -> core::result::Result<trajectory::continuous::Pva, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::MotorSpan::first_source_axis(&self) -> usize
+pub fn trajectory::continuous::MotorSpan::position(&self, f64) -> core::result::Result<f64, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::MotorSpan::pva_bounds(&self, f64, f64) -> core::result::Result<trajectory::continuous::PvaBounds, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::MotorSpan::try_new(alloc::rcs::arc::Arc<[trajectory::continuous::MotorGroup]>, f64, f64, u8, u32, bool) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
+impl trajectory::continuous::MotorSpan
+pub fn trajectory::continuous::MotorSpan::local_polynomial(&self, f64) -> core::option::Option<trajectory::continuous::LocalPolynomial>
+pub struct trajectory::MotorTerm
+pub trajectory::MotorTerm::axis: trajectory::continuous::ContinuousAxis
+pub trajectory::MotorTerm::scale: f64
+pub trajectory::MotorTerm::source_axis: usize
+pub struct trajectory::NonlinearAdvance
+pub trajectory::NonlinearAdvance::linear_advance: f64
+pub trajectory::NonlinearAdvance::linearization_velocity: f64
+pub trajectory::NonlinearAdvance::model: trajectory::chain::AdvanceModel
+pub trajectory::NonlinearAdvance::nonlinear_offset: f64
+impl trajectory::chain::NonlinearAdvance
+pub fn trajectory::chain::NonlinearAdvance::advance(&self, f64) -> f64
+pub fn trajectory::chain::NonlinearAdvance::curvature(&self, f64) -> f64
+pub fn trajectory::chain::NonlinearAdvance::slope(&self, f64) -> f64
+pub struct trajectory::NudgeProfile
+impl trajectory::NudgeProfile
+pub fn trajectory::NudgeProfile::accel_mm_s2(&self) -> f64
+pub fn trajectory::NudgeProfile::acceleration(&self, f64) -> f64
+pub fn trajectory::NudgeProfile::acceleration_bounds(&self) -> (f64, f64)
+pub fn trajectory::NudgeProfile::breakpoints(&self) -> &[f64]
+pub fn trajectory::NudgeProfile::delta_mm(&self) -> f64
+pub fn trajectory::NudgeProfile::duration(&self) -> f64
+pub fn trajectory::NudgeProfile::end_time(&self) -> f64
+pub fn trajectory::NudgeProfile::eval(&self, f64) -> trajectory::continuous::ProfileSample
+pub fn trajectory::NudgeProfile::jerk(&self, f64) -> f64
+pub fn trajectory::NudgeProfile::position(&self, f64) -> f64
+pub fn trajectory::NudgeProfile::speed_mm_s(&self) -> f64
+pub fn trajectory::NudgeProfile::t_end(&self) -> f64
+pub fn trajectory::NudgeProfile::t_start(&self) -> f64
+pub fn trajectory::NudgeProfile::try_new(f64, f64, f64, f64) -> core::result::Result<Self, trajectory::continuous::ProfileError>
+pub fn trajectory::NudgeProfile::velocity(&self, f64) -> f64
+pub fn trajectory::NudgeProfile::velocity_bounds(&self) -> (f64, f64)
+pub fn trajectory::NudgeProfile::velocity_step_inside(&self, f64, f64) -> bool
+pub struct trajectory::PostProcessorInstance
+impl trajectory::chain::PostProcessorInstance
+pub fn trajectory::chain::PostProcessorInstance::algo(&self) -> &'static dyn trajectory::algos::PostProcessorAlgo
+pub fn trajectory::chain::PostProcessorInstance::compile_stage(&self) -> core::option::Option<trajectory::chain::ChainStage>
+pub fn trajectory::chain::PostProcessorInstance::name(&self) -> &str
+pub fn trajectory::chain::PostProcessorInstance::new(&str, &'static dyn trajectory::algos::PostProcessorAlgo, alloc::vec::Vec<f64>) -> Self
+pub fn trajectory::chain::PostProcessorInstance::param(&self, &str) -> core::option::Option<f64>
+pub fn trajectory::chain::PostProcessorInstance::set_param(&mut self, &str, f64) -> core::result::Result<(), trajectory::chain::PostProcessorError>
+pub fn trajectory::chain::PostProcessorInstance::validate(&self) -> core::result::Result<(), trajectory::chain::PostProcessorError>
+pub struct trajectory::Pva
+pub trajectory::Pva::acceleration: f64
+pub trajectory::Pva::position: f64
+pub trajectory::Pva::velocity: f64
+pub struct trajectory::PvaBounds
+pub trajectory::PvaBounds::acceleration_abs_max: f64
+pub trajectory::PvaBounds::velocity_continuous: bool
+pub trajectory::PvaBounds::velocity_max: f64
+pub trajectory::PvaBounds::velocity_min: f64
+pub struct trajectory::Pvaj
+pub trajectory::Pvaj::acceleration: f64
+pub trajectory::Pvaj::jerk: f64
+pub trajectory::Pvaj::position: f64
+pub trajectory::Pvaj::velocity: f64
+pub struct trajectory::RelativeSplinePiece
+pub trajectory::RelativeSplinePiece::base_position: f64
+pub trajectory::RelativeSplinePiece::curve: alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>
+pub trajectory::RelativeSplinePiece::t_end: f64
+pub trajectory::RelativeSplinePiece::t_start: f64
+pub struct trajectory::RestSupport
+pub trajectory::RestSupport::after_motion: f64
+pub trajectory::RestSupport::before_motion: f64
+pub struct trajectory::ShapedSignal<'a, F>
+impl trajectory::ShapedSignal<'_>
+pub fn trajectory::ShapedSignal<'_>::kernel_cut_boundaries<'k>(&'k nurbs::algebra::PiecewisePolynomialKernel) -> impl core::iter::traits::iterator::Iterator<Item = f64> + 'k
+pub fn trajectory::ShapedSignal<'_>::output_cut_transitions(&nurbs::algebra::PiecewisePolynomialKernel, f64, f64, &mut alloc::vec::Vec<f64>)
+impl<'a, F> trajectory::ShapedSignal<'a, F> where F: core::ops::function::Fn(f64) -> f64
+pub fn trajectory::ShapedSignal<'a, F>::deriv(&self, f64) -> f64
+pub fn trajectory::ShapedSignal<'a, F>::eval(&self, f64) -> f64
+pub fn trajectory::ShapedSignal<'a, F>::eval_pva(&self, f64) -> (f64, f64, f64)
+pub fn trajectory::ShapedSignal<'a, F>::new_from_evaluator(&'a nurbs::algebra::PiecewisePolynomialKernel, F, alloc::vec::Vec<f64>, usize) -> Self
+pub fn trajectory::ShapedSignal<'a, F>::new_from_polynomial_evaluator<M>(&'a nurbs::algebra::PiecewisePolynomialKernel, F, alloc::vec::Vec<f64>, usize, M, alloc::vec::Vec<(f64, f64, f64)>) -> Self where M: core::ops::function::Fn(f64, f64, usize, f64, [&mut [f64]; 3]) -> bool + 'a
+pub fn trajectory::ShapedSignal<'a, F>::second_deriv(&self, f64) -> f64
+pub const trajectory::MAX_SPAN_SECS: f64
+pub const trajectory::SMOOTH_MZV_DURATION_PER_HZ: f64
+pub const trajectory::SMOOTH_ZV_DURATION_PER_HZ: f64
+pub fn trajectory::build_smooth_mzv_kernel(f64) -> nurbs::algebra::PiecewisePolynomialKernel
+pub fn trajectory::build_smooth_zv_kernel(f64) -> nurbs::algebra::PiecewisePolynomialKernel
+pub fn trajectory::next_toward(f64, f64) -> f64

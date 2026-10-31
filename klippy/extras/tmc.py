@@ -10,6 +10,9 @@ import math
 from klippy import pins, stepper, structured_log
 from klippy.motion_endstop import MotionEndstop, allocate_provider_id
 
+TRANSPORT_PULSE = 0
+TRANSPORT_PHASE = 1
+
 ######################################################################
 # Field helpers
 ######################################################################
@@ -574,6 +577,17 @@ class TMCCommandHelper:
             logging.info(
                 "Enabling TMC virtual enable for '%s'", self.stepper_name
             )
+        # A previous session may have left the firmware's phase ISR
+        # streaming XDIRECT on this SPI bus (klippy restarts do not reset
+        # the mcu); its transfers corrupt the register init below, so
+        # silence it first. Harmless when it is already off.
+        tmc_spi = getattr(self.mcu_tmc, "tmc_spi", None)
+        if tmc_spi is not None:
+            disable_spi = tmc_spi.spi.get_mcu().try_lookup_command(
+                "kalico_phase_stepping_disable_spi"
+            )
+            if disable_spi is not None:
+                disable_spi.send([])
         # Send init
         try:
             if self.mcu_tmc.mcu.non_critical_disconnected:
@@ -668,6 +682,7 @@ class TMCVirtualPinHelper:
         self.mcu_endstop = None
         self.phase_mode_helper = None
         self._reenter_phase = False
+        self._sg_sample_timer = None
         name_parts = config.get_name().split()
         ppins = self.printer.lookup_object("pins")
         ppins.register_chip("%s_%s" % (name_parts[0], name_parts[-1]), self)
@@ -696,6 +711,9 @@ class TMCVirtualPinHelper:
                 diag_params, allocate_provider_id(self.printer)
             )
         return self.mcu_endstop
+
+    def sensorless_homing_configured(self):
+        return self.mcu_endstop is not None
 
     def trip_move_begin(self, entry):
         self.arm()
@@ -752,6 +770,48 @@ class TMCVirtualPinHelper:
             self.mcu_tmc.set_register(
                 thigh_reg, override(thigh_reg, {"thigh": 0})
             )
+        readback = {}
+        name_to_reg = getattr(self.mcu_tmc, "name_to_reg", {})
+        for reg_name in ("GCONF", "CHOPCONF", "DRV_STATUS", "TSTEP"):
+            if reg_name in name_to_reg:
+                readback[reg_name] = "%08x" % (
+                    self.mcu_tmc.get_register(reg_name),
+                )
+        structured_log.event(
+            "phase_stepping",
+            "sg_armed",
+            msg="StallGuard armed register readback",
+            stepper=self.mode_tracker.stepper_name,
+            **readback,
+        )
+        reactor = self.printer.get_reactor()
+        if self._sg_sample_timer is None:
+            self._sg_sample_timer = reactor.register_timer(
+                self._sample_sg_status, reactor.monotonic() + 0.25
+            )
+        else:
+            reactor.update_timer(
+                self._sg_sample_timer, reactor.monotonic() + 0.25
+            )
+
+    def _sample_sg_status(self, eventtime):
+        if self.mode_tracker.mode != TMCModeTracker.SG_HOMING:
+            return self.printer.get_reactor().NEVER
+        name_to_reg = getattr(self.mcu_tmc, "name_to_reg", {})
+        sample = {}
+        for reg_name in ("DRV_STATUS", "TSTEP", "GCONF", "IOIN"):
+            if reg_name in name_to_reg:
+                sample[reg_name] = "%08x" % (
+                    self.mcu_tmc.get_register(reg_name),
+                )
+        structured_log.event(
+            "phase_stepping",
+            "sg_sample",
+            msg="StallGuard homing sample",
+            stepper=self.mode_tracker.stepper_name,
+            **sample,
+        )
+        return eventtime + 0.25
 
     def disarm(self):
         self.mode_tracker.transition(
@@ -908,7 +968,26 @@ class BaseTMCCurrentHelper:
 
     def set_current_for_homing(self, print_time, pre_homing) -> float:
         target = self.req_home_current if pre_homing else self.req_run_current
-        if target == self.actual_current:
+        skipped = target == self.actual_current
+        structured_log.event(
+            "homing",
+            "homing_current",
+            msg="homing current %s %s: %.3fA -> %.3fA%s"
+            % (
+                "set" if pre_homing else "restore",
+                self.name,
+                self.actual_current,
+                target,
+                " (already there, no dwell)" if skipped else "",
+            ),
+            stepper=self.name,
+            pre_homing=pre_homing,
+            target=target,
+            actual=self.actual_current,
+            skipped=skipped,
+            print_time=print_time,
+        )
+        if skipped:
             return 0.0
         self.set_current(target, self.req_hold_current, print_time)
         return self.current_change_dwell_time
@@ -971,6 +1050,51 @@ def validate_phase_stepping_config(config, stepper_section):
         )
 
 
+class PhaseSpiArbiter:
+    """Refcounted foreground ownership of a TMC SPI bus whose ISR streams
+    XDIRECT coil writes. ISR transfers interleaving with a foreground
+    register access shift the TMC response pipeline and corrupt the
+    read-back, so every foreground transfer suspends the ISR writer for
+    its duration. Suspends nest; the writer is re-armed only when the
+    last suspension lifts and a driver is still in phase mode."""
+
+    def __init__(self):
+        self._count = 0
+        self._enable_cmd = None
+        self._disable_cmd = None
+        self._active_cbs = []
+
+    def register(self, enable_cmd, disable_cmd, active_cb):
+        self._enable_cmd = enable_cmd
+        self._disable_cmd = disable_cmd
+        if active_cb not in self._active_cbs:
+            self._active_cbs.append(active_cb)
+
+    def _isr_active(self):
+        return any(cb() for cb in self._active_cbs)
+
+    def suspend(self):
+        self._count += 1
+        if self._count == 1 and self._disable_cmd is not None:
+            if self._isr_active():
+                self._disable_cmd.send([])
+
+    def resume(self):
+        assert self._count > 0, "unbalanced PhaseSpiArbiter.resume"
+        self._count -= 1
+        if self._count == 0 and self._enable_cmd is not None:
+            if self._isr_active():
+                self._enable_cmd.send([])
+
+
+def lookup_phase_spi_arbiter(mcu):
+    arbiter = getattr(mcu, "_tmc_phase_spi_arbiter", None)
+    if arbiter is None:
+        arbiter = PhaseSpiArbiter()
+        mcu._tmc_phase_spi_arbiter = arbiter
+    return arbiter
+
+
 class TMCPhaseStepping:
     """Direct-mode (SPI-driven) phase stepping shared by SPI TMC drivers.
 
@@ -1009,6 +1133,36 @@ class TMCPhaseStepping:
     def set_phase_group(self, tmcs):
         self._phase_group = tmcs
 
+    def needs_pulse_mode_windows(self):
+        return self._virtual_pin_helper.sensorless_homing_configured()
+
+    def _switch_host_transport(self, axis_idx, transport):
+        """Hand the lane between its two mcu bindings on the host side. The
+        engine drains the outgoing transport, reconciles its executed position
+        off the mcu and seeds the incoming one with it, so the host and the mcu
+        change transport on the same position."""
+        engine = self.printer.lookup_object("motion_engine", None)
+        if engine is None:
+            raise self.printer.command_error(
+                "phase_stepping: the motion engine is required to switch "
+                "transport for %s" % (self.name,)
+            )
+        handle = self._phase_mcu().get_engine_handle()
+        if handle is None:
+            raise self.printer.command_error(
+                "phase_stepping: mcu of %s carries no motion engine handle, so "
+                "its lane has no host transport to switch" % (self.name,)
+            )
+        structured_log.event(
+            "phase_stepping",
+            "transport_switch_request",
+            msg="host transport switch requested",
+            stepper=self.name,
+            axis_idx=axis_idx,
+            transport=transport,
+        )
+        engine.switch_axis_transport(handle, axis_idx, transport)
+
     def _phase_group_members(self):
         return self._phase_group or [self]
 
@@ -1017,6 +1171,9 @@ class TMCPhaseStepping:
 
     def phase_stepping_active(self):
         return any(t._in_phase_mode() for t in self._phase_group_members())
+
+    def _phase_spi_arbiter(self):
+        return lookup_phase_spi_arbiter(self._phase_mcu())
 
     def _phase_mcu(self):
         return self.mcu_tmc.tmc_spi.spi.get_mcu()
@@ -1049,6 +1206,9 @@ class TMCPhaseStepping:
                 " settled=%c",
                 oid=self._phase_stepper_oid,
             )
+        lookup_phase_spi_arbiter(mcu_obj).register(
+            enable_spi, disable_spi, self.phase_stepping_active
+        )
         return enable_spi, disable_spi, set_axis_mode, jog, align
 
     def _query_phase_state(self):
@@ -1069,13 +1229,14 @@ class TMCPhaseStepping:
             TMCModeTracker.PHASE_DIRECT,
             "phase mode entry",
         )
-        enable_spi, disable_spi, set_axis_mode, _jog, align = (
+        _enable_spi, _disable_spi, set_axis_mode, _jog, align = (
             self._lookup_phase_commands()
         )
-        # Suppress ISR direct-register writes during our foreground SPI
-        # traffic (the disable command is idempotent; harmless if already
-        # disabled).
-        disable_spi.send([])
+        arbiter = self._phase_spi_arbiter()
+        # Suspend ISR direct-register writes during our foreground SPI
+        # traffic; resume() re-arms the writer since this member is
+        # already tracked as phase-active.
+        arbiter.suspend()
         # CHOPCONF (toff>0) must reach the chip before direct_mode: the
         # bootstrap charge pump depends on the chopper switching, and
         # direct_mode with toff=0 drains the bootstrap caps (uv_cp).
@@ -1102,9 +1263,26 @@ class TMCPhaseStepping:
         )
         state = self._query_phase_state()
         self._phase_axis_idx = state["axis_idx"]
-        align.send([self._phase_stepper_oid, mscnt])
-        enable_spi.send([])
+        # Mode first, then the host transport: the pump anchors the sample
+        # lane the moment the transport switches, and an anchored lane
+        # ticking while the axis mode byte still reads Pulse is a
+        # PhaseModeNotAvailable fault. The reverse order on exit keeps the
+        # same invariant from the other side.
         set_axis_mode.send([self._phase_axis_idx, 1])
+        state = self._query_phase_state()
+        if state["mode"] != 1:
+            raise self.printer.command_error(
+                "phase mode entry: mcu did not apply Phase mode on %s "
+                "(mode=%d)" % (self.name, state["mode"])
+            )
+        # set_axis_mode(1) also seeded the runtime's step count from the
+        # classic executor mcu-side, so the align pins the phase against
+        # the final count and the transport switch's host-side seed is a
+        # no-op rather than a late shift that would drag the coils away
+        # from the preload.
+        align.send([self._phase_stepper_oid, mscnt])
+        arbiter.resume()
+        self._switch_host_transport(self._phase_axis_idx, TRANSPORT_PHASE)
         # The ISR's inline direct-register SPI writes corrupt concurrent
         # foreground register reads (false drv_err/uv_cp shutdowns), so the
         # periodic checks must stay off while phase mode is active.
@@ -1125,7 +1303,7 @@ class TMCPhaseStepping:
                 "exit_phase_mode called but %s is not in phase mode"
                 % (self.name,)
             )
-        _enable_spi, disable_spi, set_axis_mode, _jog, _align = (
+        _enable_spi, _disable_spi, set_axis_mode, _jog, _align = (
             self._lookup_phase_commands()
         )
         for t in active:
@@ -1143,9 +1321,18 @@ class TMCPhaseStepping:
                     "phase mode bookkeeping desync on %s: host=phase mcu=%d"
                     % (t.name, state["mode"])
                 )
-        # All jogs are issued while the axis is still in Phase mode — the
-        # mode flips to Pulse only once, after every motor in the group sits
-        # on its cached MSCNT.
+        # Hand the host transport to the pulse side FIRST: the switch
+        # barriers the pump and verifies the outgoing phase transport is
+        # quiescent, so the mcu lane has finished playing its buffered
+        # sample runs (up to the full scheduling lead) before any jog.
+        # Jogging earlier chased a moving axis: the jog's delta was
+        # computed against a count the still-draining stream kept
+        # advancing, and the phase came to rest far off the cached MSCNT.
+        for axis_idx in sorted({t._phase_axis_idx for t in active}):
+            self._switch_host_transport(axis_idx, TRANSPORT_PULSE)
+        # All jogs are issued while the mcu still executes Phase mode — the
+        # mode byte flips to Pulse only once, after every motor in the group
+        # sits on its cached MSCNT.
         for t in active:
             _e, _d, _s, t_jog, _a = t._lookup_phase_commands()
             t_jog.send(
@@ -1158,8 +1345,10 @@ class TMCPhaseStepping:
         reactor = self.printer.get_reactor()
         deadline = reactor.monotonic() + self.PHASE_SETTLE_TIMEOUT
         for t in active:
+            trail = []
             while True:
                 state = t._query_phase_state()
+                trail.append((state["phase"], state["settled"]))
                 if state["settled"] and state["phase"] == t._cached_mscnt:
                     break
                 if reactor.monotonic() > deadline:
@@ -1171,6 +1360,7 @@ class TMCPhaseStepping:
                         stepper=t.name,
                         phase=state["phase"],
                         target=t._cached_mscnt,
+                        trail=repr(trail[:10] + trail[-10:]),
                     )
                     raise self.printer.command_error(
                         "phase handover jog did not settle on %s "
@@ -1178,7 +1368,8 @@ class TMCPhaseStepping:
                         % (t.name, state["phase"], t._cached_mscnt)
                     )
                 reactor.pause(reactor.monotonic() + 0.005)
-        disable_spi.send([])
+        arbiter = self._phase_spi_arbiter()
+        arbiter.suspend()
         for t in active:
             t.mcu_tmc.set_register("GCONF", t.fields.registers.get("GCONF", 0))
         for axis_idx in sorted({t._phase_axis_idx for t in active}):
@@ -1198,6 +1389,7 @@ class TMCPhaseStepping:
                 axis_idx=t._phase_axis_idx,
                 mscnt=t._cached_mscnt,
             )
+        arbiter.resume()
 
     def get_phase_config(self):
         if not self._phase_stepping:

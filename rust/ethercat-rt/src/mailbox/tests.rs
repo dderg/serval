@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use mcu_protocol::messages::{SdoRead, SdoWrite};
 
-use super::{LimitEntry, MailboxReply, MailboxRequest, MailboxWorker, WorkerScheduling};
+use super::{LimitEntry, MailboxReply, MailboxRequest, MailboxWorker};
 use crate::sdo::{DictObject, DictSdoBus, SdoBus};
 
 fn dict() -> DictSdoBus {
@@ -66,7 +66,6 @@ fn submit_never_blocks_while_transaction_is_slow() {
             delay: Duration::from_millis(50),
         },
         |_, _, _| 0,
-        WorkerScheduling::Normal,
     );
     let start = Instant::now();
     worker.submit(MailboxRequest::SdoWrite {
@@ -125,7 +124,7 @@ fn submit_never_blocks_while_transaction_is_slow() {
 
 #[test]
 fn replies_preserve_submission_order() {
-    let worker = MailboxWorker::spawn(dict(), |_, _, _| 0, WorkerScheduling::Normal);
+    let worker = MailboxWorker::spawn(dict(), |_, _, _| 0);
     for cid in 0..16u32 {
         worker.submit(MailboxRequest::SdoRead {
             correlation_id: cid,
@@ -150,17 +149,13 @@ fn replies_preserve_submission_order() {
 fn write_limits_executes_entries_back_to_back_with_restore_flag() {
     let calls = Arc::new(AtomicU32::new(0));
     let seen = calls.clone();
-    let worker = MailboxWorker::spawn(
-        dict(),
-        move |slot, ferr, tq| {
-            seen.fetch_add(
-                u32::from(slot) * 100 + ferr * 10 + u32::from(tq),
-                Ordering::SeqCst,
-            );
-            0
-        },
-        WorkerScheduling::Normal,
-    );
+    let worker = MailboxWorker::spawn(dict(), move |slot, ferr, tq| {
+        seen.fetch_add(
+            u32::from(slot) * 100 + ferr * 10 + u32::from(tq),
+            Ordering::SeqCst,
+        );
+        0
+    });
     worker.submit(MailboxRequest::WriteLimits {
         correlation_id: 9,
         entries: vec![
@@ -198,14 +193,10 @@ fn write_limits_executes_entries_back_to_back_with_restore_flag() {
 fn write_limits_stops_at_first_failure() {
     let calls = Arc::new(AtomicU32::new(0));
     let seen = calls.clone();
-    let worker = MailboxWorker::spawn(
-        dict(),
-        move |_slot, _ferr, _tq| {
-            seen.fetch_add(1, Ordering::SeqCst);
-            7
-        },
-        WorkerScheduling::Normal,
-    );
+    let worker = MailboxWorker::spawn(dict(), move |_slot, _ferr, _tq| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        7
+    });
     worker.submit(MailboxRequest::WriteLimits {
         correlation_id: 1,
         entries: vec![
@@ -239,7 +230,6 @@ fn drop_joins_the_worker_cleanly() {
             delay: Duration::from_millis(20),
         },
         |_, _, _| 0,
-        WorkerScheduling::Normal,
     );
     worker.submit(MailboxRequest::SdoRead {
         correlation_id: 1,

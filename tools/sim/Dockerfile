@@ -110,8 +110,8 @@ RUN mkdir -p /sim_elfs
 # clean OUT dirs — a fresh ELF whenever any input changed, never a stale
 # incremental one. All are MACH_LINUX sim builds with identical Rust
 # features, so later builds reuse the first's target-linux staticlib.
-# out-sc/ additionally sets CONFIG_CLASSIC_STEPPING=y (host-computed step
-# times via queue_step) — the stepping_mode: stepcompress counterpart.
+# out-sc/ leaves CONFIG_MOTION_RUNTIME off, so it is a step/dir only board:
+# every lane is host-computed step times over queue_step, no sample executor.
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     set -e; \
     cp tools/sim/configs/h7-sim.config .config; \

@@ -1,6 +1,6 @@
 use super::*;
 use crate::host_io::reactor::outbound::{PendingOutboundKind, PendingSubmission};
-use runtime::error::FaultCode;
+use runtime_contract::error::FaultCode;
 use std::sync::{Arc, Mutex};
 
 struct MockPort {
@@ -122,7 +122,6 @@ fn test_reactor_with_inflight(seqs: &[u64]) -> (Reactor, Arc<Mutex<Vec<u8>>>) {
         parser,
         rx,
         status_snapshot,
-        crate::host_io::McuHostIoConfig::default(),
         Arc::new(crate::clock::RealClock),
     );
 
@@ -130,7 +129,7 @@ fn test_reactor_with_inflight(seqs: &[u64]) -> (Reactor, Arc<Mutex<Vec<u8>>>) {
     for &seq in seqs {
         reactor
             .unacked_window
-            .push(crate::host_io::window::UnackedEntry {
+            .push_back(crate::host_io::window::UnackedEntry {
                 seq,
                 frame_bytes: vec![],
                 sent_at: std::time::Instant::now(),
@@ -454,7 +453,6 @@ fn drain_pending_surfaces_write_failure() {
         parser,
         rx,
         status_snapshot,
-        crate::host_io::McuHostIoConfig::default(),
         Arc::new(crate::clock::RealClock),
     );
 
@@ -523,7 +521,6 @@ fn broken_pipe_latches_host_disconnect_fault() {
         parser,
         rx,
         status_snapshot,
-        crate::host_io::McuHostIoConfig::default(),
         Arc::new(crate::clock::RealClock),
     );
 
@@ -537,7 +534,7 @@ fn broken_pipe_latches_host_disconnect_fault() {
     assert_eq!(
         cell.fault_code,
         FaultCode::HostDisconnect.as_u16(),
-        "fault_code must be RUNTIME_ERR_HOST_DISCONNECT"
+        "fault_code must be FaultCode::HostDisconnect"
     );
     assert!(
         !cell.synthesized,

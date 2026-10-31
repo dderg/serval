@@ -4,12 +4,17 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 publish = false
-description = "Host-side stepcompress shim: motion pieces -> classic queue_step frames."
+description = "Host-side stepcompress shim: clocked motor spans -> step roots -> queue_step frames."
 license.workspace = true
 
 [dependencies]
-runtime = { path = "../runtime" }
+tracing = "0.1"
+trajectory = { path = "../trajectory" }
 libm = { version = "0.2", default-features = false }
+
+[dev-dependencies]
+nurbs = { path = "../nurbs" }
+proptest = "1"
 
 [lints]
 workspace = true

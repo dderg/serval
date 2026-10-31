@@ -12,7 +12,19 @@ fn wavy_grid() -> MeshGrid {
             })
         })
         .collect();
-    MeshGrid::new(10.0, 20.0, 25.0, 30.0, nx, ny, z, TENSION).unwrap()
+    MeshGrid::new(
+        MeshGridSpec {
+            x_min: 10.0,
+            y_min: 20.0,
+            dx: 25.0,
+            dy: 30.0,
+            nx,
+            ny,
+            tension: TENSION,
+        },
+        z,
+    )
+    .unwrap()
 }
 
 fn transform(fade: Fade) -> SurfaceTransform {
@@ -41,7 +53,19 @@ fn interpolates_probed_points_exactly_at_nodes() {
 fn matches_mainline_cardinal_spline_along_one_axis() {
     let row = [0.10, -0.05, 0.20, 0.08];
     let z: Vec<f64> = row.iter().chain(row.iter()).copied().collect();
-    let g = MeshGrid::new(0.0, 0.0, 10.0, 10.0, 4, 2, z, TENSION).unwrap();
+    let g = MeshGrid::new(
+        MeshGridSpec {
+            x_min: 0.0,
+            y_min: 0.0,
+            dx: 10.0,
+            dy: 10.0,
+            nx: 4,
+            ny: 2,
+            tension: TENSION,
+        },
+        z,
+    )
+    .unwrap();
     for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
         let m1 = TENSION * (row[2] - row[0]);
         let m2 = TENSION * (row[3] - row[1]);
@@ -257,28 +281,229 @@ fn correction_spread_bounds_true_correction_variation() {
 #[test]
 fn constructor_rejects_bad_grids() {
     assert!(matches!(
-        MeshGrid::new(0.0, 0.0, 1.0, 1.0, 1, 3, vec![0.0; 3], TENSION),
+        MeshGrid::new(
+            MeshGridSpec {
+                x_min: 0.0,
+                y_min: 0.0,
+                dx: 1.0,
+                dy: 1.0,
+                nx: 1,
+                ny: 3,
+                tension: TENSION,
+            },
+            vec![0.0; 3],
+        ),
         Err(SurfaceError::GridTooSmall { .. })
     ));
     assert!(matches!(
-        MeshGrid::new(0.0, 0.0, 1.0, 1.0, 2, 2, vec![0.0; 3], TENSION),
+        MeshGrid::new(
+            MeshGridSpec {
+                x_min: 0.0,
+                y_min: 0.0,
+                dx: 1.0,
+                dy: 1.0,
+                nx: 2,
+                ny: 2,
+                tension: TENSION,
+            },
+            vec![0.0; 3],
+        ),
         Err(SurfaceError::PointCountMismatch { .. })
     ));
     assert!(matches!(
-        MeshGrid::new(0.0, 0.0, 0.0, 1.0, 2, 2, vec![0.0; 4], TENSION),
+        MeshGrid::new(
+            MeshGridSpec {
+                x_min: 0.0,
+                y_min: 0.0,
+                dx: 0.0,
+                dy: 1.0,
+                nx: 2,
+                ny: 2,
+                tension: TENSION,
+            },
+            vec![0.0; 4],
+        ),
         Err(SurfaceError::NonPositiveSpacing { .. })
     ));
     assert!(matches!(
         MeshGrid::new(
-            0.0,
-            0.0,
-            1.0,
-            1.0,
-            2,
-            2,
+            MeshGridSpec {
+                x_min: 0.0,
+                y_min: 0.0,
+                dx: 1.0,
+                dy: 1.0,
+                nx: 2,
+                ny: 2,
+                tension: TENSION,
+            },
             vec![0.0, 1.0, f64::NAN, 0.0],
-            TENSION
         ),
         Err(SurfaceError::NonFinitePoint { index: 2 })
     ));
+}
+
+fn transition_transform(fade: Fade) -> SurfaceTransform {
+    SurfaceTransform::new(
+        MeshGrid::new(
+            MeshGridSpec {
+                x_min: 0.0,
+                y_min: 0.0,
+                dx: 10.0,
+                dy: 10.0,
+                nx: 3,
+                ny: 3,
+                tension: TENSION,
+            },
+            vec![0.0; 9],
+        )
+        .unwrap(),
+        fade,
+    )
+}
+
+fn assert_transition_s(transitions: &[SurfaceTransition], expected: &[(f64, SurfaceContinuity)]) {
+    assert_eq!(transitions.len(), expected.len());
+    for (actual, expected) in transitions.iter().zip(expected) {
+        assert!((actual.s - expected.0).abs() < 1e-8);
+        assert_eq!(actual.continuity, expected.1);
+    }
+}
+
+#[test]
+fn line_transition_distances_classify_internal_and_clamp_boundaries() {
+    let surface = transition_transform(Fade::disabled());
+    let segment = crate::path::Segment::Line(
+        crate::path::Line::try_new([-5.0, 5.0, 0.0], [25.0, 5.0, 0.0]).unwrap(),
+    );
+    let transitions = surface.path_transition_distances(&segment).unwrap();
+    assert_transition_s(
+        &transitions,
+        &[
+            (5.0, SurfaceContinuity::C0),
+            (15.0, SurfaceContinuity::C1),
+            (25.0, SurfaceContinuity::C0),
+        ],
+    );
+}
+
+#[test]
+fn arc_transition_distances_find_crossings_on_monotone_heading_partitions() {
+    use crate::path::lowering::PositionProfile;
+
+    let surface = transition_transform(Fade::disabled());
+    let arc = crate::path::Arc::try_new(
+        [10.0, -30.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        15.0,
+        std::f64::consts::PI,
+        std::f64::consts::PI,
+    )
+    .unwrap();
+    let segment = crate::path::Segment::Arc(arc);
+    let transitions = surface.path_transition_distances(&segment).unwrap();
+    assert_eq!(transitions.len(), 3);
+    assert_eq!(transitions[0].continuity, SurfaceContinuity::C0);
+    assert_eq!(transitions[1].continuity, SurfaceContinuity::C1);
+    assert_eq!(transitions[2].continuity, SurfaceContinuity::C0);
+    for transition in transitions {
+        let x = segment.point_at(transition.s)[0];
+        assert!(
+            [0.0_f64, 10.0, 20.0]
+                .into_iter()
+                .any(|boundary| (x - boundary).abs() < 1e-8)
+        );
+    }
+}
+
+#[test]
+fn clothoid_transition_distance_is_solved_against_the_curve() {
+    use crate::path::lowering::PositionProfile;
+
+    let surface = SurfaceTransform::new(
+        MeshGrid::new(
+            MeshGridSpec {
+                x_min: 0.0,
+                y_min: -10.0,
+                dx: 1.0,
+                dy: 20.0,
+                nx: 3,
+                ny: 2,
+                tension: TENSION,
+            },
+            vec![0.0; 6],
+        )
+        .unwrap(),
+        Fade::disabled(),
+    );
+    let segment = crate::path::Segment::Clothoid(
+        crate::path::Clothoid::try_new(
+            [0.25, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            0.0,
+            0.2,
+            3.0,
+        )
+        .unwrap(),
+    );
+    let transitions = surface.path_transition_distances(&segment).unwrap();
+    assert_eq!(transitions.len(), 2);
+    assert_eq!(transitions[0].continuity, SurfaceContinuity::C1);
+    assert_eq!(transitions[1].continuity, SurfaceContinuity::C0);
+    for (transition, boundary) in transitions.iter().zip([1.0, 2.0]) {
+        assert!((segment.point_at(transition.s)[0] - boundary).abs() < 1e-8);
+    }
+}
+
+#[test]
+fn fade_boundaries_are_c0_transitions() {
+    let surface = SurfaceTransform::new(
+        MeshGrid::new(
+            MeshGridSpec {
+                x_min: 10.0,
+                y_min: 10.0,
+                dx: 10.0,
+                dy: 10.0,
+                nx: 2,
+                ny: 2,
+                tension: TENSION,
+            },
+            vec![0.0; 4],
+        )
+        .unwrap(),
+        Fade::new(0.0, 2.0, 0.0).unwrap(),
+    );
+    let segment = crate::path::Segment::Line(
+        crate::path::Line::try_new([0.0, 0.0, -1.0], [0.0, 0.0, 3.0]).unwrap(),
+    );
+    assert_transition_s(
+        &surface.path_transition_distances(&segment).unwrap(),
+        &[(1.0, SurfaceContinuity::C0), (3.0, SurfaceContinuity::C0)],
+    );
+}
+
+#[test]
+fn coincident_crossings_are_sorted_deduplicated_and_keep_lowest_continuity() {
+    let surface = transition_transform(Fade::new(10.0, 30.0, 0.0).unwrap());
+    let segment = crate::path::Segment::Line(
+        crate::path::Line::try_new([5.0, 5.0, 5.0], [15.0, 15.0, 15.0]).unwrap(),
+    );
+    let transitions = surface.path_transition_distances(&segment).unwrap();
+    assert_eq!(transitions.len(), 1);
+    assert!((transitions[0].s - 5.0_f64 * libm::sqrt(3.0)).abs() < 1e-8);
+    assert_eq!(transitions[0].continuity, SurfaceContinuity::C0);
+}
+
+#[test]
+fn non_finite_segments_fail_loudly() {
+    let surface = transition_transform(Fade::disabled());
+    let segment = crate::path::Segment::Line(crate::path::Line {
+        start: [0.0, 0.0, 0.0],
+        end: [f64::NAN, 1.0, 0.0],
+    });
+    assert_eq!(
+        surface.path_transition_distances(&segment),
+        Err(SurfaceTransitionError::NonFiniteSegment)
+    );
 }

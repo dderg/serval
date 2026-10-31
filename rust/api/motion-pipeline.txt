@@ -1,0 +1,151 @@
+pub mod motion_pipeline
+pub mod motion_pipeline::fit_stage
+pub struct motion_pipeline::fit_stage::FitDriver
+impl motion_pipeline::fit_stage::FitDriver
+pub fn motion_pipeline::fit_stage::FitDriver::feed(&mut self, motion_pipeline::types::StreamInput, &mut impl core::ops::function::FnMut(motion_pipeline::types::StreamInput) -> bool) -> bool
+pub fn motion_pipeline::fit_stage::FitDriver::finish(&mut self, &mut impl core::ops::function::FnMut(motion_pipeline::types::StreamInput) -> bool) -> bool
+pub struct motion_pipeline::fit_stage::FitStage
+impl motion_pipeline::fit_stage::FitStage
+pub fn motion_pipeline::fit_stage::FitStage::into_driver(self) -> motion_pipeline::fit_stage::FitDriver
+pub fn motion_pipeline::fit_stage::FitStage::new(geometry::fitter::config::CornerFitConfig) -> Self
+pub mod motion_pipeline::planner
+pub struct motion_pipeline::planner::Planner
+impl motion_pipeline::planner::Planner
+pub fn motion_pipeline::planner::Planner::feed(&mut self, motion_pipeline::types::StreamInput, &mut impl core::ops::function::FnMut(motion_pipeline::types::PlannedItem) -> bool) -> bool
+pub fn motion_pipeline::planner::Planner::finish(&mut self, &mut impl core::ops::function::FnMut(motion_pipeline::types::PlannedItem) -> bool) -> bool
+pub fn motion_pipeline::planner::Planner::idle(&mut self, &mut impl core::ops::function::FnMut(motion_pipeline::types::PlannedItem) -> bool) -> bool
+pub fn motion_pipeline::planner::Planner::new(motion_pipeline::types::StreamConfig) -> Self
+pub mod motion_pipeline::timing
+pub fn motion_pipeline::timing::mono_us() -> u64
+pub mod motion_pipeline::types
+pub enum motion_pipeline::types::BaseItem
+pub motion_pipeline::types::BaseItem::Control(motion_pipeline::types::Control)
+pub motion_pipeline::types::BaseItem::Drain
+pub motion_pipeline::types::BaseItem::Seg(trajectory::continuous::ContinuousSegment)
+pub enum motion_pipeline::types::Control
+pub motion_pipeline::types::Control::Dispatch(motion_pipeline::types::DispatchCommand)
+pub motion_pipeline::types::Control::Dwell
+pub motion_pipeline::types::Control::Dwell::secs: f64
+pub motion_pipeline::types::Control::Reset
+pub motion_pipeline::types::Control::Reset::pos: alloc::vec::Vec<f64>
+pub motion_pipeline::types::Control::SetAxisChains(trajectory::chain::AxisChainSet)
+pub motion_pipeline::types::Control::SetMesh
+pub motion_pipeline::types::Control::SetMesh::gcode_z_rebase: f64
+pub motion_pipeline::types::Control::SetMesh::mesh: core::option::Option<alloc::rcs::arc::Arc<geometry::surface::SurfaceTransform>>
+pub enum motion_pipeline::types::DispatchCommand
+pub motion_pipeline::types::DispatchCommand::Barrier(crossbeam_channel::channel::Sender<motion_pipeline::types::BarrierAck>)
+pub motion_pipeline::types::DispatchCommand::Nudge
+pub motion_pipeline::types::DispatchCommand::Nudge::axis: u8
+pub motion_pipeline::types::DispatchCommand::Nudge::mcu_id: u32
+pub motion_pipeline::types::DispatchCommand::Nudge::motor_mask: u8
+pub motion_pipeline::types::DispatchCommand::Nudge::profile: trajectory::continuous::profiles::NudgeProfile
+pub enum motion_pipeline::types::PlannedItem
+pub motion_pipeline::types::PlannedItem::Control(motion_pipeline::types::Control)
+pub motion_pipeline::types::PlannedItem::Drain
+pub motion_pipeline::types::PlannedItem::Move(motion_pipeline::types::PlannedMove)
+pub enum motion_pipeline::types::StreamError
+pub motion_pipeline::types::StreamError::Discontinuity
+pub motion_pipeline::types::StreamError::Discontinuity::expected: [f64; 3]
+pub motion_pipeline::types::StreamError::Discontinuity::gap_mm: f64
+pub motion_pipeline::types::StreamError::Discontinuity::got: [f64; 3]
+pub motion_pipeline::types::StreamError::Discontinuity::line_no: u32
+impl core::error::Error for motion_pipeline::types::StreamError
+impl core::fmt::Display for motion_pipeline::types::StreamError
+pub fn motion_pipeline::types::StreamError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum motion_pipeline::types::StreamInput
+pub motion_pipeline::types::StreamInput::Control(motion_pipeline::types::Control)
+pub motion_pipeline::types::StreamInput::Drain
+pub motion_pipeline::types::StreamInput::Move(geometry::frontend::Move)
+impl core::convert::From<geometry::frontend::Move> for motion_pipeline::types::StreamInput
+pub fn motion_pipeline::types::StreamInput::from(geometry::frontend::Move) -> Self
+pub enum motion_pipeline::types::TrajectoryItem
+pub motion_pipeline::types::TrajectoryItem::Control(motion_pipeline::types::Control)
+pub motion_pipeline::types::TrajectoryItem::Parked
+pub motion_pipeline::types::TrajectoryItem::Seg(trajectory::continuous::ContinuousSegment)
+pub struct motion_pipeline::types::BarrierAck
+pub motion_pipeline::types::BarrierAck::dispatched_through: core::option::Option<f64>
+pub motion_pipeline::types::BarrierAck::result: core::result::Result<(), alloc::string::String>
+pub struct motion_pipeline::types::PlannedMove
+pub motion_pipeline::types::PlannedMove::geometry: geometry::frontend::Move
+pub motion_pipeline::types::PlannedMove::velocity: geometry::velocity::MoveVelocity
+pub struct motion_pipeline::types::StreamConfig
+pub motion_pipeline::types::StreamConfig::corner: geometry::fitter::config::CornerFitConfig
+pub motion_pipeline::types::StreamConfig::fit_tol_accel_mm_s2: f64
+pub motion_pipeline::types::StreamConfig::fit_tol_mm: f64
+pub motion_pipeline::types::StreamConfig::integration_tol: f64
+pub motion_pipeline::types::StreamConfig::limits: geometry::frontend::VelocityLimits
+pub motion_pipeline::types::StreamConfig::max_buffer_moves: usize
+pub motion_pipeline::types::StreamConfig::max_extrude_only_accel_mm_s2: f64
+pub motion_pipeline::types::StreamConfig::max_extrude_only_velocity_mm_s: f64
+pub const motion_pipeline::types::CONTIGUITY_EPS_MM: f64
+pub fn motion_pipeline::types::advance_odometer(&mut [f64], &geometry::frontend::Move)
+pub enum motion_pipeline::BaseItem
+pub motion_pipeline::BaseItem::Control(motion_pipeline::types::Control)
+pub motion_pipeline::BaseItem::Drain
+pub motion_pipeline::BaseItem::Seg(trajectory::continuous::ContinuousSegment)
+pub enum motion_pipeline::Control
+pub motion_pipeline::Control::Dispatch(motion_pipeline::types::DispatchCommand)
+pub motion_pipeline::Control::Dwell
+pub motion_pipeline::Control::Dwell::secs: f64
+pub motion_pipeline::Control::Reset
+pub motion_pipeline::Control::Reset::pos: alloc::vec::Vec<f64>
+pub motion_pipeline::Control::SetAxisChains(trajectory::chain::AxisChainSet)
+pub motion_pipeline::Control::SetMesh
+pub motion_pipeline::Control::SetMesh::gcode_z_rebase: f64
+pub motion_pipeline::Control::SetMesh::mesh: core::option::Option<alloc::rcs::arc::Arc<geometry::surface::SurfaceTransform>>
+pub enum motion_pipeline::DispatchCommand
+pub motion_pipeline::DispatchCommand::Barrier(crossbeam_channel::channel::Sender<motion_pipeline::types::BarrierAck>)
+pub motion_pipeline::DispatchCommand::Nudge
+pub motion_pipeline::DispatchCommand::Nudge::axis: u8
+pub motion_pipeline::DispatchCommand::Nudge::mcu_id: u32
+pub motion_pipeline::DispatchCommand::Nudge::motor_mask: u8
+pub motion_pipeline::DispatchCommand::Nudge::profile: trajectory::continuous::profiles::NudgeProfile
+pub enum motion_pipeline::PlannedItem
+pub motion_pipeline::PlannedItem::Control(motion_pipeline::types::Control)
+pub motion_pipeline::PlannedItem::Drain
+pub motion_pipeline::PlannedItem::Move(motion_pipeline::types::PlannedMove)
+pub enum motion_pipeline::StreamError
+pub motion_pipeline::StreamError::Discontinuity
+pub motion_pipeline::StreamError::Discontinuity::expected: [f64; 3]
+pub motion_pipeline::StreamError::Discontinuity::gap_mm: f64
+pub motion_pipeline::StreamError::Discontinuity::got: [f64; 3]
+pub motion_pipeline::StreamError::Discontinuity::line_no: u32
+impl core::error::Error for motion_pipeline::types::StreamError
+impl core::fmt::Display for motion_pipeline::types::StreamError
+pub fn motion_pipeline::types::StreamError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum motion_pipeline::StreamInput
+pub motion_pipeline::StreamInput::Control(motion_pipeline::types::Control)
+pub motion_pipeline::StreamInput::Drain
+pub motion_pipeline::StreamInput::Move(geometry::frontend::Move)
+impl core::convert::From<geometry::frontend::Move> for motion_pipeline::types::StreamInput
+pub fn motion_pipeline::types::StreamInput::from(geometry::frontend::Move) -> Self
+pub enum motion_pipeline::TrajectoryItem
+pub motion_pipeline::TrajectoryItem::Control(motion_pipeline::types::Control)
+pub motion_pipeline::TrajectoryItem::Parked
+pub motion_pipeline::TrajectoryItem::Seg(trajectory::continuous::ContinuousSegment)
+pub struct motion_pipeline::BarrierAck
+pub motion_pipeline::BarrierAck::dispatched_through: core::option::Option<f64>
+pub motion_pipeline::BarrierAck::result: core::result::Result<(), alloc::string::String>
+pub struct motion_pipeline::Lowerer
+impl motion_pipeline::Lowerer
+pub fn motion_pipeline::Lowerer::feed(&mut self, motion_pipeline::types::PlannedItem, &mut impl core::ops::function::FnMut(motion_pipeline::types::BaseItem) -> bool) -> bool
+pub fn motion_pipeline::Lowerer::new(trajectory::chain::RestSupport, alloc::vec::Vec<f64>, f64) -> Self
+pub struct motion_pipeline::Pipeline
+impl motion_pipeline::Pipeline
+pub fn motion_pipeline::Pipeline::feed(&mut self, motion_pipeline::types::StreamInput, &mut impl core::ops::function::FnMut(motion_pipeline::types::TrajectoryItem) -> bool) -> bool
+pub fn motion_pipeline::Pipeline::finish(&mut self, &mut impl core::ops::function::FnMut(motion_pipeline::types::TrajectoryItem) -> bool) -> bool
+pub fn motion_pipeline::Pipeline::idle(&mut self, &mut impl core::ops::function::FnMut(motion_pipeline::types::TrajectoryItem) -> bool) -> bool
+pub fn motion_pipeline::Pipeline::new(motion_pipeline::types::StreamConfig, trajectory::chain::AxisChainSet, alloc::vec::Vec<f64>, f64) -> Self
+pub fn motion_pipeline::Pipeline::with_fitted_tap(self, crossbeam_channel::channel::Sender<geometry::frontend::Move>) -> Self
+pub fn motion_pipeline::Pipeline::with_toolhead_tap(self, crossbeam_channel::channel::Sender<trajectory::continuous::ContinuousSegment>) -> Self
+pub struct motion_pipeline::StreamConfig
+pub motion_pipeline::StreamConfig::corner: geometry::fitter::config::CornerFitConfig
+pub motion_pipeline::StreamConfig::fit_tol_accel_mm_s2: f64
+pub motion_pipeline::StreamConfig::fit_tol_mm: f64
+pub motion_pipeline::StreamConfig::integration_tol: f64
+pub motion_pipeline::StreamConfig::limits: geometry::frontend::VelocityLimits
+pub motion_pipeline::StreamConfig::max_buffer_moves: usize
+pub motion_pipeline::StreamConfig::max_extrude_only_accel_mm_s2: f64
+pub motion_pipeline::StreamConfig::max_extrude_only_velocity_mm_s: f64
+pub const motion_pipeline::CONTIGUITY_EPS_MM: f64
+pub fn motion_pipeline::advance_odometer(&mut [f64], &geometry::frontend::Move)

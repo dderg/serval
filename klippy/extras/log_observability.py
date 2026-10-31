@@ -10,7 +10,7 @@ LAG_THRESHOLD_BYTES = 8 * 1024 * 1024
 
 def host_memory_snapshot(proc="/proc"):
     """Host and own-process memory numbers for the heartbeat. A page-fault
-    stall of the klippy process freezes piece emission and lands queued
+    stall of the klippy process freezes the motion pump and lands queued
     motion in the MCU's past, so memory pressure must be visible in the
     event stream. Anything this kernel does not expose (PSI on older
     kernels, macOS dev boxes) is omitted rather than faked - telemetry
@@ -100,8 +100,8 @@ class LogObservability:
                 "host_memory_pressure",
                 level=logging.WARNING,
                 msg="klippy pages were swapped out since the last heartbeat "
-                "- host memory pressure can stall piece emission "
-                "(PieceStartInPast risk)",
+                "- host memory pressure can stall the motion pump "
+                "(anchor_underrun risk)",
                 own_swap_grew_kb=grew,
                 own_swap_kb=fields.get("own_swap_kb", -1),
                 mem_available_kb=fields.get("mem_available_kb", -1),

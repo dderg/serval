@@ -20,7 +20,7 @@ disagreed with the workflows — that is exactly the failure mode this prevents)
 ./scripts/ci.sh sim        # sim unit tests (tools/sim, no ELF)
 ```
 
-Jobs: `ruff rust-host rust-build rust-test rust-clippy rust-fmt rust-loom
+Jobs: `ruff rust-test rust-clippy rust-fmt rust-loom
 rust-mcu-h7 rust-mcu-f4 cbindgen-drift c-smoke deny miri panic-grep
 watchdog-canary py docs sim`.
 
@@ -135,7 +135,4 @@ problem.** When you want assurance before a direct commit, run `./scripts/ci.sh`
 locally (above).
 
 Branch protection is **not** used and not needed for a solo direct-commit
-workflow. If collaborators are ever added, the optional
-[`scripts/setup-branch-protection.sh`](../../scripts/setup-branch-protection.sh)
-can require these checks on others' PRs — it sets `enforce_admins: false`, so it
-never blocks direct maintainer pushes.
+workflow.

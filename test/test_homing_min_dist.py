@@ -35,10 +35,7 @@ def _hi_for_travel(position_endstop, positive_dir):
         retract_speed=25.0,
         retract_dist=5.0,
         positive_dir=positive_dir,
-        second_homing_speed=50.0,
-        use_sensorless_homing=False,
         min_home_dist=0.0,
-        accel=None,
     )
 
 
@@ -68,10 +65,7 @@ def _hi(min_home_dist=15.0, speed=50.0, retract_speed=25.0, retract_dist=5.0):
         retract_speed=retract_speed,
         retract_dist=retract_dist,
         positive_dir=True,
-        second_homing_speed=speed,
-        use_sensorless_homing=False,
         min_home_dist=min_home_dist,
-        accel=None,
     )
 
 

@@ -1,8 +1,7 @@
 # Serval
 
 Serval is a fork of [Kalico](https://github.com/KalicoCrew/kalico) that
-**replaces the motion stack** with a streaming, jerk-limited planner
-written in Rust.
+**replaces the motion stack** with a streaming planner written in Rust.
 
 **Why:** print faster without giving up quality, by dropping the
 approximations classical planners are built on — trapezoidal profiles,
@@ -92,8 +91,8 @@ down instead:
 point: `setup_pipeline` in `rust/motion-core/src/worker.rs`.
 
 - **Fitter** — turns incoming moves into smooth geometry (above).
-- **Planner** — finds a jerk-limited velocity profile over a lookahead
-  window.
+- **Planner** — finds a velocity profile over a lookahead window that rides
+  the acceleration limit along the whole path.
 - **Lowerer** — emits per-axis piecewise-polynomial position tracks.
 - **Shaper** — applies the per-axis post-processor chains.
 
@@ -102,7 +101,8 @@ What the planner does with limits:
 - **Limits apply along the path, not per move.** Where the gantry's accel
   limit binds, the profile rides it; where an extruder flow limit takes
   over, it rides that instead.
-- **Jerk is currently a per-axis constraint** like velocity and accel.
+- **Limits are velocity and acceleration.** Smoothness beyond that comes
+  from the post-processor chains, not from the planner.
 
 The planned profile over the same square — riding `max_velocity`, dipping
 only as far as each blend's curvature requires:
@@ -110,11 +110,11 @@ only as far as each blend's curvature requires:
 ![velocity profile](docs/img/pipeline-velocity.svg)
 
 **On jerk, honestly:** jerk limiting was the initial aspiration for this
-fork. Recent testing suggests it may not be worth it — it only costs print
-time, while the smoothing post-processors bound the same physical quantity
-more directly, and in practice a short bell kernel (~2 ms) seems to be all
-the smoothing a fast machine needs. Research ongoing; the limit is
-enforced today.
+fork and was implemented and tested. It only cost print time, while the
+smoothing post-processors bound the same physical quantity more directly —
+in practice a short bell kernel (~2 ms) is all the smoothing a fast machine
+needs. The planner is now second-order (velocity + acceleration); `max_jerk`
+is still parsed but only `0` (unlimited) is accepted.
 
 ---
 
@@ -148,8 +148,8 @@ post_processors: pa
   while z-hopping, and extrude-only moves need no special handling — they
   are moves.
 - **Global limits stay classic**, in `[printer]`: `max_velocity`,
-  `max_accel`, `max_jerk`, `square_corner_velocity`, `max_z_velocity`,
-  `max_z_accel`.
+  `max_accel`, `corner_deviation` (or the `square_corner_velocity` alias),
+  `max_z_velocity`, `max_z_accel`.
 
 ---
 

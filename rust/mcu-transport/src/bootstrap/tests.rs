@@ -17,7 +17,13 @@ fn identify_response_roundtrip() {
         capabilities: 0x0000_0000_0000_0001,
         mcu_serial: *b"abcdef012345",
     };
-    let buf = encode_identify_response(7, &resp);
+    let mut buf = encode_message_header(
+        mcu_protocol::MessageKind::IdentifyResponse,
+        MESSAGE_VERSION_DEFAULT,
+        7,
+    )
+    .to_vec();
+    resp.encode_body(&mut buf);
     let (cid, decoded) = decode_identify_response(&buf).unwrap();
     assert_eq!(cid, 7);
     assert_eq!(decoded.proto_version, 0x01);

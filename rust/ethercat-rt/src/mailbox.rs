@@ -13,13 +13,8 @@
 //!
 //! Because the in-kernel IgH master does that serialization itself — the SDO is
 //! a blocking `ecrt_master_sdo_*` call that sleeps while the master FSM pumps
-//! the mailbox over its own cycles — the worker is safe to run as plain
-//! SCHED_OTHER on the housekeeping cores ([`WorkerScheduling::Normal`], the
-//! default). The pinned low-priority SCHED_FIFO companion
-//! ([`WorkerScheduling::RealtimeCompanion`], selected by `--mailbox-cpu`)
-//! exists for the SOEM-style master where the SDO busy-polls a raw socket
-//! shared with the DC loop, so a mid-transaction deschedule traps the cyclic
-//! frame; see [`crate::thread_prio::assume_companion_rt_scheduling`].
+//! the mailbox over its own cycles — the worker runs as plain SCHED_OTHER on
+//! the housekeeping cores.
 
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
@@ -27,12 +22,7 @@ use std::thread::JoinHandle;
 use mcu_protocol::messages::{SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse};
 
 use crate::sdo::{execute_sdo_read, execute_sdo_write, SdoBus};
-use crate::thread_prio::{assume_companion_rt_scheduling, demote_to_normal_scheduling};
-
-pub enum WorkerScheduling {
-    RealtimeCompanion { cpu: usize, priority: i32 },
-    Normal,
-}
+use crate::thread_prio::demote_to_normal_scheduling;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LimitEntry {
@@ -83,7 +73,7 @@ pub struct MailboxWorker {
 }
 
 impl MailboxWorker {
-    pub fn spawn<B, L>(mut bus: B, mut write_limits: L, scheduling: WorkerScheduling) -> Self
+    pub fn spawn<B, L>(mut bus: B, mut write_limits: L) -> Self
     where
         B: SdoBus + Send + 'static,
         L: FnMut(u8, u32, u16) -> i32 + Send + 'static,
@@ -93,12 +83,7 @@ impl MailboxWorker {
         let handle = std::thread::Builder::new()
             .name("ec-rt-mailbox".into())
             .spawn(move || {
-                match scheduling {
-                    WorkerScheduling::RealtimeCompanion { cpu, priority } => {
-                        assume_companion_rt_scheduling(cpu, priority)
-                    }
-                    WorkerScheduling::Normal => demote_to_normal_scheduling(),
-                }
+                demote_to_normal_scheduling();
                 while let Ok(req) = req_rx.recv() {
                     let reply = match req {
                         MailboxRequest::SdoRead {

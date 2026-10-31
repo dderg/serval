@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -77,15 +76,14 @@ def main() -> int:
             if status is harness.Status.CHANGED:
                 baseline = harness.baseline_snapshot(case)
                 d = harness.drift_envelope(baseline, snapshot)
-                print(f"             worst rel {d['rel']:.2e} at {d['rel_at']}")
-                print(f"             worst abs {d['abs']:.2e} at {d['abs_at']}")
-                dump_dir = os.environ.get("SNAPSHOT_DUMP_DIR")
-                if dump_dir:
-                    out = Path(dump_dir) / f"{case.name}.json.gz"
-                    out.parent.mkdir(parents=True, exist_ok=True)
-                    data = (harness.canonical_json(snapshot) + "\n").encode()
-                    out.write_bytes(
-                        gzip.compress(data, compresslevel=9, mtime=0)
+                if d["schema_at"]:
+                    print(f"             schema changed at {d['schema_at']}")
+                else:
+                    print(
+                        f"             worst rel {d['rel']:.2e} at {d['rel_at']}"
+                    )
+                    print(
+                        f"             worst abs {d['abs']:.2e} at {d['abs_at']}"
                     )
     except (ImportError, ValueError) as exc:
         print(f"  ERROR   {exc}")

@@ -100,39 +100,61 @@ class ServoStrainComp:
         return handle
 
     def apply_pair_constant(self, gcmd, pair, value_um):
-        self._set_pair(gcmd, pair, 1, 1, 0.0, 0.0, 1.0, 1.0, [int(value_um)])
+        self._set_pair(
+            gcmd,
+            pair,
+            {
+                "nx": 1,
+                "ny": 1,
+                "x0": 0.0,
+                "y0": 0.0,
+                "dx": 1.0,
+                "dy": 1.0,
+                "values_um": [int(value_um)],
+            },
+        )
 
     def apply_pair_grid(self, gcmd, pair, grid):
         self._set_pair(
             gcmd,
             pair,
-            grid["nx"],
-            grid["ny"],
-            grid["x0"],
-            grid["y0"],
-            grid["dx"],
-            grid["dy"],
-            [int(value) for value in grid["offsets_um"]],
+            {
+                "nx": grid["nx"],
+                "ny": grid["ny"],
+                "x0": grid["x0"],
+                "y0": grid["y0"],
+                "dx": grid["dx"],
+                "dy": grid["dy"],
+                "values_um": [int(value) for value in grid["offsets_um"]],
+            },
         )
 
     def clear_pair_grid(self, gcmd, pair):
-        self._set_pair(gcmd, pair, 0, 0, 0.0, 0.0, 1.0, 1.0, [])
+        self._set_pair(
+            gcmd,
+            pair,
+            {
+                "nx": 0,
+                "ny": 0,
+                "x0": 0.0,
+                "y0": 0.0,
+                "dx": 1.0,
+                "dy": 1.0,
+                "values_um": [],
+            },
+        )
 
-    def _set_pair(self, gcmd, pair, nx, ny, x0, y0, dx, dy, offsets):
+    def _set_pair(self, gcmd, pair, grid):
         self.get_engine().set_strain_comp(
             self.get_engine_handle(gcmd, pair),
-            pair.slots()[0],
-            pair.slots()[1],
-            pair.lane_a,
-            pair.lane_b,
-            pair.kin_tag,
-            nx,
-            ny,
-            x0,
-            y0,
-            dx,
-            dy,
-            offsets,
+            {
+                "slot_a": pair.slots()[0],
+                "slot_b": pair.slots()[1],
+                "lane_a": pair.lane_a,
+                "lane_b": pair.lane_b,
+                "kinematics": pair.kin_tag,
+            },
+            grid,
         )
 
     def measured_stiffness(self):

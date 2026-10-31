@@ -1,7 +1,28 @@
 use super::{
-    StrainCompBank, ERR_COMP_BAD_GRID, ERR_COMP_BAD_KINEMATICS, ERR_COMP_BAD_SLOT,
-    ERR_COMP_SLOT_IN_USE, KIN_CARTESIAN, KIN_COREXY,
+    CompGrid, CompPair, StrainCompBank, ERR_COMP_BAD_GRID, ERR_COMP_BAD_KINEMATICS,
+    ERR_COMP_BAD_SLOT, ERR_COMP_SLOT_IN_USE, KIN_CARTESIAN, KIN_COREXY,
 };
+
+fn pair(slot_a: u8, slot_b: u8, lane_a: u8, lane_b: u8, kinematics: u8) -> CompPair {
+    CompPair {
+        slot_a,
+        slot_b,
+        lane_a,
+        lane_b,
+        kinematics,
+    }
+}
+
+fn grid(nx: u16, ny: u16, x0: f64, y0: f64, dx: f64, dy: f64) -> CompGrid {
+    CompGrid {
+        nx,
+        ny,
+        x0,
+        y0,
+        dx,
+        dy,
+    }
+}
 
 const CYCLE_NS: i64 = 250_000;
 const SLEW_PER_CYCLE_MM: f64 = 1.0 * 250_000.0 * 1e-9;
@@ -26,7 +47,12 @@ fn settle(bank: &mut StrainCompBank, lane_mm: &[Option<f64>], cycles: usize) -> 
 fn constant_grid_slews_to_an_antisymmetric_offset() {
     let mut b = bank();
     assert_eq!(
-        b.set(4, 0, 1, 0, 1, KIN_COREXY, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
+        b.set(
+            4,
+            pair(0, 1, 0, 1, KIN_COREXY),
+            grid(1, 1, 0.0, 0.0, 1.0, 1.0),
+            &[100]
+        ),
         0
     );
     let lanes = [Some(10.0), Some(10.0), Some(4.0), Some(4.0)];
@@ -51,17 +77,8 @@ fn grid_interpolates_bilinearly_in_carriage_coordinates() {
     assert_eq!(
         b.set(
             4,
-            0,
-            1,
-            0,
-            1,
-            KIN_COREXY,
-            2,
-            2,
-            0.0,
-            0.0,
-            100.0,
-            100.0,
+            pair(0, 1, 0, 1, KIN_COREXY),
+            grid(2, 2, 0.0, 0.0, 100.0, 100.0),
             &[0, 200, 0, 200]
         ),
         0
@@ -83,17 +100,8 @@ fn cartesian_kinematics_uses_lane_positions_directly() {
     assert_eq!(
         b.set(
             4,
-            0,
-            1,
-            0,
-            1,
-            KIN_CARTESIAN,
-            2,
-            1,
-            0.0,
-            0.0,
-            100.0,
-            1.0,
+            pair(0, 1, 0, 1, KIN_CARTESIAN),
+            grid(2, 1, 0.0, 0.0, 100.0, 1.0),
             &[0, 100]
         ),
         0
@@ -109,17 +117,8 @@ fn positions_outside_the_grid_clamp_to_the_border() {
     assert_eq!(
         b.set(
             4,
-            0,
-            1,
-            0,
-            1,
-            KIN_COREXY,
-            2,
-            1,
-            0.0,
-            0.0,
-            100.0,
-            1.0,
+            pair(0, 1, 0, 1, KIN_COREXY),
+            grid(2, 1, 0.0, 0.0, 100.0, 1.0),
             &[-100, 100]
         ),
         0
@@ -133,7 +132,12 @@ fn positions_outside_the_grid_clamp_to_the_border() {
 fn idle_lanes_hold_the_last_target() {
     let mut b = bank();
     assert_eq!(
-        b.set(4, 0, 1, 0, 1, KIN_COREXY, 1, 1, 0.0, 0.0, 1.0, 1.0, &[80]),
+        b.set(
+            4,
+            pair(0, 1, 0, 1, KIN_COREXY),
+            grid(1, 1, 0.0, 0.0, 1.0, 1.0),
+            &[80]
+        ),
         0
     );
     let streaming = [Some(0.0), Some(0.0), Some(0.0), Some(0.0)];
@@ -151,13 +155,23 @@ fn idle_lanes_hold_the_last_target() {
 fn clearing_ramps_the_applied_offset_out_before_removal() {
     let mut b = bank();
     assert_eq!(
-        b.set(4, 0, 1, 0, 1, KIN_COREXY, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
+        b.set(
+            4,
+            pair(0, 1, 0, 1, KIN_COREXY),
+            grid(1, 1, 0.0, 0.0, 1.0, 1.0),
+            &[100]
+        ),
         0
     );
     let lanes = [Some(0.0), Some(0.0), Some(0.0), Some(0.0)];
     settle(&mut b, &lanes, 2000);
     assert_eq!(
-        b.set(4, 0, 1, 0, 1, KIN_COREXY, 0, 0, 0.0, 0.0, 0.0, 0.0, &[]),
+        b.set(
+            4,
+            pair(0, 1, 0, 1, KIN_COREXY),
+            grid(0, 0, 0.0, 0.0, 0.0, 0.0),
+            &[]
+        ),
         0
     );
     assert!(
@@ -179,13 +193,23 @@ fn clearing_ramps_the_applied_offset_out_before_removal() {
 fn replacing_a_map_keeps_ramping_from_the_applied_offset() {
     let mut b = bank();
     assert_eq!(
-        b.set(4, 0, 1, 0, 1, KIN_COREXY, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
+        b.set(
+            4,
+            pair(0, 1, 0, 1, KIN_COREXY),
+            grid(1, 1, 0.0, 0.0, 1.0, 1.0),
+            &[100]
+        ),
         0
     );
     let lanes = [Some(0.0), Some(0.0), Some(0.0), Some(0.0)];
     settle(&mut b, &lanes, 2000);
     assert_eq!(
-        b.set(4, 0, 1, 0, 1, KIN_COREXY, 1, 1, 0.0, 0.0, 1.0, 1.0, &[120]),
+        b.set(
+            4,
+            pair(0, 1, 0, 1, KIN_COREXY),
+            grid(1, 1, 0.0, 0.0, 1.0, 1.0),
+            &[120]
+        ),
         0
     );
     let first = settle(&mut b, &lanes, 1);
@@ -200,11 +224,21 @@ fn replacing_a_map_keeps_ramping_from_the_applied_offset() {
 fn two_pairs_compensate_independently() {
     let mut b = bank();
     assert_eq!(
-        b.set(4, 0, 1, 0, 1, KIN_COREXY, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
+        b.set(
+            4,
+            pair(0, 1, 0, 1, KIN_COREXY),
+            grid(1, 1, 0.0, 0.0, 1.0, 1.0),
+            &[100]
+        ),
         0
     );
     assert_eq!(
-        b.set(4, 2, 3, 0, 1, KIN_COREXY, 1, 1, 0.0, 0.0, 1.0, 1.0, &[-40]),
+        b.set(
+            4,
+            pair(2, 3, 0, 1, KIN_COREXY),
+            grid(1, 1, 0.0, 0.0, 1.0, 1.0),
+            &[-40]
+        ),
         0
     );
     let lanes = [Some(0.0), Some(0.0), Some(0.0), Some(0.0)];
@@ -220,43 +254,59 @@ fn bad_inputs_are_rejected() {
     let mut b = bank();
     let ok = &[0i16; 4];
     assert_eq!(
-        b.set(4, 0, 0, 0, 1, KIN_COREXY, 2, 2, 0.0, 0.0, 1.0, 1.0, ok),
+        b.set(
+            4,
+            pair(0, 0, 0, 1, KIN_COREXY),
+            grid(2, 2, 0.0, 0.0, 1.0, 1.0),
+            ok
+        ),
         ERR_COMP_BAD_SLOT
     );
     assert_eq!(
-        b.set(4, 0, 4, 0, 1, KIN_COREXY, 2, 2, 0.0, 0.0, 1.0, 1.0, ok),
+        b.set(
+            4,
+            pair(0, 4, 0, 1, KIN_COREXY),
+            grid(2, 2, 0.0, 0.0, 1.0, 1.0),
+            ok
+        ),
         ERR_COMP_BAD_SLOT
     );
     assert_eq!(
-        b.set(4, 0, 1, 0, 1, 9, 2, 2, 0.0, 0.0, 1.0, 1.0, ok),
+        b.set(4, pair(0, 1, 0, 1, 9), grid(2, 2, 0.0, 0.0, 1.0, 1.0), ok),
         ERR_COMP_BAD_KINEMATICS
     );
     assert_eq!(
-        b.set(4, 0, 1, 0, 1, KIN_COREXY, 2, 2, 0.0, 0.0, 1.0, 1.0, &[0; 3]),
-        ERR_COMP_BAD_GRID
-    );
-    assert_eq!(
-        b.set(4, 0, 1, 0, 1, KIN_COREXY, 2, 2, 0.0, 0.0, 0.0, 1.0, ok),
-        ERR_COMP_BAD_GRID
-    );
-    assert_eq!(
-        b.set(4, 0, 1, 0, 1, KIN_COREXY, 1, 1, 0.0, 0.0, 1.0, 1.0, &[501]),
+        b.set(
+            4,
+            pair(0, 1, 0, 1, KIN_COREXY),
+            grid(2, 2, 0.0, 0.0, 1.0, 1.0),
+            &[0; 3]
+        ),
         ERR_COMP_BAD_GRID
     );
     assert_eq!(
         b.set(
             4,
-            0,
-            1,
-            0,
-            1,
-            KIN_COREXY,
-            2,
-            1,
-            0.0,
-            0.0,
-            1.0,
-            1.0,
+            pair(0, 1, 0, 1, KIN_COREXY),
+            grid(2, 2, 0.0, 0.0, 0.0, 1.0),
+            ok
+        ),
+        ERR_COMP_BAD_GRID
+    );
+    assert_eq!(
+        b.set(
+            4,
+            pair(0, 1, 0, 1, KIN_COREXY),
+            grid(1, 1, 0.0, 0.0, 1.0, 1.0),
+            &[501]
+        ),
+        ERR_COMP_BAD_GRID
+    );
+    assert_eq!(
+        b.set(
+            4,
+            pair(0, 1, 0, 1, KIN_COREXY),
+            grid(2, 1, 0.0, 0.0, 1.0, 1.0),
             &[-300, 300]
         ),
         ERR_COMP_BAD_GRID,
@@ -264,11 +314,21 @@ fn bad_inputs_are_rejected() {
          can apply the full span"
     );
     assert_eq!(
-        b.set(4, 0, 1, 0, 1, KIN_COREXY, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
+        b.set(
+            4,
+            pair(0, 1, 0, 1, KIN_COREXY),
+            grid(1, 1, 0.0, 0.0, 1.0, 1.0),
+            &[100]
+        ),
         0
     );
     assert_eq!(
-        b.set(4, 1, 2, 0, 1, KIN_COREXY, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
+        b.set(
+            4,
+            pair(1, 2, 0, 1, KIN_COREXY),
+            grid(1, 1, 0.0, 0.0, 1.0, 1.0),
+            &[100]
+        ),
         ERR_COMP_SLOT_IN_USE
     );
 }
@@ -280,17 +340,8 @@ fn torque_release_reanchors_the_map_at_the_reengage_position() {
     assert_eq!(
         b.set(
             4,
-            0,
-            1,
-            0,
-            1,
-            KIN_CARTESIAN,
-            2,
-            1,
-            0.0,
-            0.0,
-            100.0,
-            1.0,
+            pair(0, 1, 0, 1, KIN_CARTESIAN),
+            grid(2, 1, 0.0, 0.0, 100.0, 1.0),
             &[0, 100]
         ),
         0
@@ -322,17 +373,8 @@ fn reanchor_survives_a_map_replacement() {
     assert_eq!(
         b.set(
             4,
-            0,
-            1,
-            0,
-            1,
-            KIN_CARTESIAN,
-            2,
-            1,
-            0.0,
-            0.0,
-            100.0,
-            1.0,
+            pair(0, 1, 0, 1, KIN_CARTESIAN),
+            grid(2, 1, 0.0, 0.0, 100.0, 1.0),
             &[0, 100]
         ),
         0
@@ -344,17 +386,8 @@ fn reanchor_survives_a_map_replacement() {
     assert_eq!(
         b.set(
             4,
-            0,
-            1,
-            0,
-            1,
-            KIN_CARTESIAN,
-            2,
-            1,
-            0.0,
-            0.0,
-            100.0,
-            1.0,
+            pair(0, 1, 0, 1, KIN_CARTESIAN),
+            grid(2, 1, 0.0, 0.0, 100.0, 1.0),
             &[0, 200]
         ),
         0
@@ -372,7 +405,12 @@ fn reanchor_survives_a_map_replacement() {
 fn constant_grid_reapplies_after_a_torque_release() {
     let mut b = bank();
     assert_eq!(
-        b.set(4, 0, 1, 0, 1, KIN_COREXY, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
+        b.set(
+            4,
+            pair(0, 1, 0, 1, KIN_COREXY),
+            grid(1, 1, 0.0, 0.0, 1.0, 1.0),
+            &[100]
+        ),
         0
     );
     let idle = [None, None, None, None];
@@ -388,7 +426,12 @@ fn constant_grid_reapplies_after_a_torque_release() {
 fn constant_grid_applies_without_any_lane_data() {
     let mut b = bank();
     assert_eq!(
-        b.set(4, 0, 1, 0, 1, KIN_COREXY, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
+        b.set(
+            4,
+            pair(0, 1, 0, 1, KIN_COREXY),
+            grid(1, 1, 0.0, 0.0, 1.0, 1.0),
+            &[100]
+        ),
         0
     );
     // The stiffness probe runs entirely at standstill: no lane ever streams.
@@ -404,7 +447,12 @@ fn grids_past_the_old_64_cap_are_accepted() {
     let (nx, ny) = (113u16, 109u16);
     let values = vec![0i16; usize::from(nx) * usize::from(ny)];
     assert_eq!(
-        b.set(4, 0, 1, 0, 1, KIN_COREXY, nx, ny, 0.0, 0.0, 2.5, 2.5, &values),
+        b.set(
+            4,
+            pair(0, 1, 0, 1, KIN_COREXY),
+            grid(nx, ny, 0.0, 0.0, 2.5, 2.5),
+            &values
+        ),
         0,
         "a 2.5mm strain map over a 280mm bed must fit"
     );
@@ -416,7 +464,12 @@ fn grid_over_the_memory_budget_is_rejected() {
     let (nx, ny) = (1025u16, 1024u16);
     let values = vec![0i16; usize::from(nx) * usize::from(ny)];
     assert_eq!(
-        b.set(4, 0, 1, 0, 1, KIN_COREXY, nx, ny, 0.0, 0.0, 0.1, 0.1, &values),
+        b.set(
+            4,
+            pair(0, 1, 0, 1, KIN_COREXY),
+            grid(nx, ny, 0.0, 0.0, 0.1, 0.1),
+            &values
+        ),
         ERR_COMP_BAD_GRID,
         "past MAX_COMP_GRID_VALUES the upload must be refused"
     );

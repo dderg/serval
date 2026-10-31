@@ -28,6 +28,30 @@ use move_ops::line_of;
 
 pub(crate) const TURN_NORMAL_EPS: f64 = 1e-9;
 
+/// Whether the toolhead must be at rest across the seam from `prev` into
+/// `next`. Passing through requires both sides to have spatial bodies, the
+/// exit heading of one to be the entry heading of the other within the
+/// collinearity tolerance corners are blended against, and every axis
+/// extruding on both sides to keep `de/ds` within the ramp band — the fit
+/// stage ramps modest steps through its blends, so a blended seam passes by
+/// construction, while an abrupt flow change on a collinear continuation has
+/// no corner to ramp through and would step `ė = r·v` at full speed.
+pub fn seam_requires_stop(prev: &Move, next: &Move, config: CornerFitConfig) -> bool {
+    let (Some(a), Some(b)) = (&prev.segment.spatial, &next.segment.spatial) else {
+        return true;
+    };
+    let t_in = a.heading_at(a.s_len());
+    let t_out = b.heading_at(0.0);
+    if libm::acos(dot(t_in, t_out).clamp(-1.0, 1.0)) > config.theta_min_rad {
+        return true;
+    }
+    emit::extrusion_step(
+        &prev.segment.followers,
+        &next.segment.followers,
+        config.extrusion_ramp_rel_tol,
+    )
+}
+
 /// The fastest the planner can drive a piece: its feedrate, the machine cap,
 /// and the centripetal ceiling `√(A/κ)` at the piece's curvature peak — the
 /// same `disk::limit_speed` bound velocity planning enforces.

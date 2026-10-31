@@ -1,0 +1,11 @@
+[package]
+name = "runtime-contract"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "Dependency-free sample wire, axis configuration, fault and log contracts shared by host and MCU."
+license.workspace = true
+
+[lints]
+workspace = true

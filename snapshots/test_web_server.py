@@ -33,14 +33,16 @@ def test_playground_case_maps_config_shape():
     for key in (
         "max_velocity",
         "max_accel",
-        "square_corner_velocity",
         "max_jerk",
         "max_path_deviation",
         "max_accel_deviation",
         "post_processor_config",
     ):
         assert key in config
-    assert all(isinstance(config[k], float) for k in ("max_velocity",))
+    assert ("corner_deviation" in config) != (
+        "square_corner_velocity" in config
+    )
+    assert isinstance(config["max_velocity"], float)
 
 
 def test_playground_case_extracts_axis_post_processor_text():
@@ -57,3 +59,16 @@ def test_playground_case_extracts_axis_post_processor_text():
 def test_playground_case_unknown_name_raises():
     with pytest.raises(KeyError):
         server.playground_case("no/such/case")
+
+
+def test_snapshot_comparison_requires_matching_schema_version():
+    current = {"schema_version": 2, "trajectory": {}}
+    assert server.snapshots_share_schema(current, current)
+    assert not server.snapshots_share_schema(
+        {"traj_x_pieces": []},
+        current,
+    )
+    assert not server.snapshots_share_schema(
+        {"schema_version": 1},
+        current,
+    )

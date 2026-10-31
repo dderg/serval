@@ -1,15 +1,92 @@
 use super::pump_loop::{
     PUMP_INTAKE_BACKLOG_HARD_CAP, PUMP_INTAKE_BACKLOG_SOFT_CAP, PUMP_INTAKE_MIN_RUNWAY_SECS, Pump,
-    wants_pieces,
+    wants_spans,
 };
 use super::*;
+use crate::lock_ext::LockExt;
 use crossbeam_channel::unbounded;
-use runtime::piece_ring::PieceEntry;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use trajectory::{ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm};
+
+/// The default fixture clock: one tick per microsecond, so a span's start
+/// clock is its start time in microseconds and [`SPAN_SECS`] is [`SPAN_TICKS`].
+const FREQ: f64 = 1_000_000.0;
+const SPAN_SECS: f64 = 0.001;
+const SPAN_TICKS: u64 = 1_000;
+
+fn hold_span(
+    start_clock: u64,
+    secs: f64,
+    freq: f64,
+    position: f64,
+    motor_mask: u8,
+) -> ClockedMotorSpan {
+    let t_start = start_clock as f64 / freq;
+    let t_end = t_start + secs;
+    let groups: Arc<[MotorGroup]> = Arc::from(vec![MotorGroup::Independent(MotorTerm {
+        source_axis: 0,
+        axis: ContinuousAxis::Hold {
+            position,
+            t_start,
+            t_end,
+        },
+        scale: 1.0,
+    })]);
+    let signal = MotorSpan::try_new(groups, t_start, t_end, motor_mask, u32::MAX, true)
+        .expect("a hold motor span is dispatchable");
+    ClockedMotorSpan::try_new(
+        Arc::new(signal),
+        t_start,
+        t_end,
+        t_start,
+        t_end,
+        start_clock as f64,
+        freq,
+    )
+    .expect("the projected view spans at least one clock")
+}
+
+fn moving_span(
+    start_clock: u64,
+    secs: f64,
+    freq: f64,
+    from: f64,
+    to: f64,
+    motor_mask: u8,
+) -> ClockedMotorSpan {
+    let t_start = start_clock as f64 / freq;
+    let t_end = t_start + secs;
+    let curve =
+        nurbs::ScalarNurbs::try_new(1, vec![t_start, t_start, t_end, t_end], vec![from, to])
+            .expect("a linear lane curve is valid");
+    let groups: Arc<[MotorGroup]> = Arc::from(vec![MotorGroup::Independent(MotorTerm {
+        source_axis: 0,
+        axis: ContinuousAxis::Spline(Arc::new(curve)),
+        scale: 1.0,
+    })]);
+    let signal = MotorSpan::try_new(groups, t_start, t_end, motor_mask, u32::MAX, false)
+        .expect("a spline motor span is dispatchable");
+    ClockedMotorSpan::try_new(
+        Arc::new(signal),
+        t_start,
+        t_end,
+        t_start,
+        t_end,
+        start_clock as f64,
+        freq,
+    )
+    .expect("the projected view spans at least one clock")
+}
+
+/// Distinct hold positions per index, so the queue's hold coalescing cannot
+/// merge the views a count-based assertion tracks one by one.
+fn make_span(index: u64) -> ClockedMotorSpan {
+    hold_span(index * SPAN_TICKS, SPAN_SECS, FREQ, index as f64, 0)
+}
 
 fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -24,17 +101,16 @@ fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
 
 fn make_enqueue(
     key: AxisKey,
-    pieces: Vec<(PieceEntry, f64)>,
+    spans: Vec<ClockedMotorSpan>,
     epoch: crate::anchor::StreamEpoch,
-) -> EnqueueMsg {
-    EnqueueMsg {
+) -> LaneProjection {
+    LaneProjection {
         epoch_freq: None,
         key,
-        pieces,
+        spans,
         epoch,
         lead_secs: MAX_LEAD_SECS,
         source_line: u32::MAX,
-        batch_end: true,
     }
 }
 
@@ -42,33 +118,51 @@ fn make_enqueue(
 fn room_full_then_drains() {
     let mut q = AxisQueue::new(4);
     assert_eq!(q.room(), 4);
-    q.pushed = 4;
+    q.credit.accept(4);
     assert_eq!(q.room(), 0);
-    q.consumed = 1;
+    q.credit.observe(
+        RetiredBy::Pulse as usize,
+        crate::pump::execution_credit::Progress {
+            consumed: 1,
+            retired: 0,
+        },
+    );
     assert_eq!(q.room(), 1);
 }
 
 #[test]
-fn consumed_pieces_reopen_capacity_before_execution_retires_them() {
+fn consumed_spans_reopen_capacity_before_execution_retires_them() {
     let mut q = AxisQueue::new(64);
-    q.pushed = 64;
-    q.consumed = 64;
-    q.retired = 0;
+    q.credit.accept(64);
+    q.credit.observe(
+        RetiredBy::Pulse as usize,
+        crate::pump::execution_credit::Progress {
+            consumed: 64,
+            retired: 0,
+        },
+    );
 
     assert_eq!(q.room(), 64);
-    assert_ne!(q.pushed, q.retired);
+    assert_ne!(q.credit.snapshot().pushed, q.credit.snapshot().retired);
 }
 
 #[test]
 fn room_correct_across_u32_wrap() {
     let mut q = AxisQueue::new(8);
-    q.pushed = 2;
-    q.consumed = u32::MAX;
+    q.credit.accept(u32::MAX);
+    q.credit.observe(
+        RetiredBy::Pulse as usize,
+        crate::pump::execution_credit::Progress {
+            consumed: u32::MAX,
+            retired: u32::MAX,
+        },
+    );
+    q.credit.accept(3);
     assert_eq!(
         q.room(),
         5,
         "legitimate counter rollover: consumed is numerically larger than pushed only because \
-         the u32 odometer wrapped, so 3 pieces are genuinely awaiting consumption. wrapping_sub \
+         the u32 odometer wrapped, so 3 spans are genuinely awaiting consumption. wrapping_sub \
          recovers 3; saturating subtraction would wrongly report a drained ring."
     );
 }
@@ -76,8 +170,14 @@ fn room_correct_across_u32_wrap() {
 #[test]
 fn room_recovers_when_consumed_overtakes_pushed() {
     let mut q = AxisQueue::new(4);
-    q.pushed = 100;
-    q.consumed = 101;
+    q.credit.accept(100);
+    q.credit.observe(
+        RetiredBy::Pulse as usize,
+        crate::pump::execution_credit::Progress {
+            consumed: 101,
+            retired: 0,
+        },
+    );
     assert_eq!(
         q.room(),
         4,
@@ -90,21 +190,34 @@ fn room_recovers_when_consumed_overtakes_pushed() {
 fn schedule_resends_orphan_when_consumed_overtook_pushed() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let mut q = AxisQueue::new(8);
-    q.pushed = 100;
-    q.consumed = 101;
-    q.pieces.push_back(make_piece(101));
+    q.credit.accept(100);
+    q.credit.observe(
+        RetiredBy::Pulse as usize,
+        crate::pump::execution_credit::Progress {
+            consumed: 101,
+            retired: 0,
+        },
+    );
+    q.spans.push_back(make_span(101));
     let mut queues: BTreeMap<AxisKey, AxisQueue> = BTreeMap::new();
     queues.insert(key, q);
 
     const MAX_PER_FRAME: usize = 32;
+    let mut plan = crate::pump::ReleasePlan::default();
+    plan.resample(
+        &queues,
+        |_| None,
+        |_, _, _| crate::pump::LaneRelease {
+            horizon: None,
+            cap: usize::MAX,
+        },
+    );
     match schedule(
         &queues,
         |_| crate::pump::BundleLimits {
-            wire_budget: usize::MAX,
-            pieces_per_axis: MAX_PER_FRAME,
+            spans_per_axis: MAX_PER_FRAME,
         },
-        |_, _| None,
-        |_| usize::MAX,
+        &plan,
     ) {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1, "exactly the inverted axis is scheduled");
@@ -117,42 +230,43 @@ fn schedule_resends_orphan_when_consumed_overtook_pushed() {
 }
 
 #[test]
-fn run_pump_delivers_piece_despite_retired_over_pushed_inversion() {
+fn owner_delivers_span_despite_retired_over_pushed_inversion() {
     const RING_DEPTH: u32 = 8;
     let key = AxisKey { mcu_id: 1, axis: 0 };
 
     let sink = RecordingSink::new();
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let sink_clone = sink.clone();
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink_clone,
             PumpCallbacks::noop(RING_DEPTH),
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         );
     });
 
-    data.send(make_enqueue(
+    data.send(vec![make_enqueue(
         key,
-        vec![make_piece(0)],
+        vec![make_span(0)],
         crate::anchor::StreamEpoch::Continuation,
-    ))
+    )])
     .unwrap();
     wait_until(
         || sink.recorded().len() == 1,
-        "first piece delivered, creating the axis queue with pushed=1 (a heartbeat \
+        "first span delivered, creating the axis queue with pushed=1 (a heartbeat \
          for an axis with no queue yet is dropped)",
     );
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
+        axes: vec![0],
         consumed_counts: None,
         retired_counts: vec![2],
+        retired_by: RetiredBy::Pulse,
     }))
     .unwrap();
     let (ack_tx, ack_rx) = mpsc::sync_channel::<()>(1);
@@ -161,15 +275,15 @@ fn run_pump_delivers_piece_despite_retired_over_pushed_inversion() {
         .recv()
         .expect("barrier acks only after the retired=2 heartbeat ahead of it applies");
 
-    data.send(make_enqueue(
+    data.send(vec![make_enqueue(
         key,
-        vec![make_piece(1)],
+        vec![moving_span(SPAN_TICKS, SPAN_SECS, FREQ, 0.0, 1.0, 0)],
         crate::anchor::StreamEpoch::Continuation,
-    ))
+    )])
     .unwrap();
     wait_until(
         || sink.recorded().len() == 2,
-        "second piece delivered despite retired(2) > pushed(1): buggy room() \
+        "second span delivered despite retired(2) > pushed(1): buggy room() \
          underflows to 0 and wedges here; the fix reopens room",
     );
 
@@ -178,80 +292,50 @@ fn run_pump_delivers_piece_despite_retired_over_pushed_inversion() {
 }
 
 #[test]
-fn history_records_pieces_at_send_time_not_enqueue_time() {
+fn history_records_spans_at_send_time_not_enqueue_time() {
     const RING_DEPTH: u32 = 8;
     let key = AxisKey { mcu_id: 1, axis: 0 };
 
     let store = Arc::new(Mutex::new(crate::motion_history::HistoryStore::default()));
-    let nominal_freqs = Arc::new(Mutex::new(std::collections::HashMap::from([(
-        1u32,
-        50_000_000u32,
-    )])));
-    let history = HistoryRecorder {
-        store: Arc::clone(&store),
-        nominal_freqs,
-    };
+    let history = Arc::clone(&store);
 
     let sink = RecordingSink::new();
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let sink_clone = sink.clone();
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink_clone,
             PumpCallbacks::noop(RING_DEPTH),
             Some(history),
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         );
     });
 
     let host_t = 2.5_f64;
-    let piece = (
-        PieceEntry {
-            start_time: 100,
-            duration: 0.001,
-            ..PieceEntry::zeroed()
-        },
-        host_t,
-    );
-    data.send(make_enqueue(
+    let span = hold_span((host_t * FREQ) as u64, SPAN_SECS, FREQ, 0.0, 0);
+    assert!((span.start_host - host_t).abs() < 1e-12);
+    data.send(vec![make_enqueue(
         key,
-        vec![piece],
+        vec![span],
         crate::anchor::StreamEpoch::Continuation,
-    ))
+    )])
     .unwrap();
-    wait_until(|| sink.recorded().len() == 1, "piece sent to the MCU");
+    wait_until(|| sink.recorded().len() == 1, "span sent to the MCU");
     wait_until(
-        || {
-            store
-                .lock()
-                .unwrap()
-                .state_at_host(key, host_t, None)
-                .is_ok()
-        },
-        "sent piece recorded into motion history with its host key",
+        || store.lock_ok().state_at_host(key, host_t, None).is_ok(),
+        "sent span recorded into motion history with its host key",
     );
 
     ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 }
 
-#[test]
-fn physical_write_cursor_advances_and_wraps_at_n() {
-    let mut q = AxisQueue::new(4);
-    assert_eq!(q.physical_write_cursor, 0);
-    q.advance_write_cursor(3);
-    assert_eq!(q.physical_write_cursor, 3);
-    q.advance_write_cursor(3);
-    assert_eq!(q.physical_write_cursor, 2);
-}
-
 #[derive(Clone)]
 struct RecordingSink {
-    calls: Arc<Mutex<Vec<(u16, u32)>>>,
+    calls: Arc<Mutex<Vec<u32>>>,
 }
 
 impl RecordingSink {
@@ -260,49 +344,32 @@ impl RecordingSink {
             calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
-    fn recorded(&self) -> Vec<(u16, u32)> {
-        self.calls.lock().unwrap().clone()
+    fn recorded(&self) -> Vec<u32> {
+        self.calls.lock_ok().clone()
     }
 }
 
-impl PieceSink for RecordingSink {
+impl SpanSink for RecordingSink {
     fn send_frame(
         &self,
         _key: AxisKey,
-        _pieces: &[PieceEntry],
-        start_slot: u16,
+        _spans: &[ClockedMotorSpan],
         new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
-        self.calls.lock().unwrap().push((start_slot, new_head));
+        self.calls.lock_ok().push(new_head);
         Ok(mcu_protocol::result_codes::OK)
     }
 }
 
-fn make_piece(t: u64) -> (PieceEntry, f64) {
-    (
-        PieceEntry {
-            start_time: t,
-            duration: 0.001,
-            ..PieceEntry::zeroed()
-        },
-        t as f64,
-    )
-}
-
-fn staged_axis(piece_count: u64, runway_secs: f64) -> AxisQueue {
-    let duration = runway_secs / piece_count as f64;
+fn staged_axis(span_count: u64, runway_secs: f64) -> AxisQueue {
+    let secs = runway_secs / span_count as f64;
+    let ticks = (secs * FREQ) as u64;
+    assert!(ticks > 0, "a staged view must span at least one clock");
     let mut queue = AxisQueue::new(u32::MAX);
-    queue.pieces.extend((0..piece_count).map(|index| {
-        (
-            PieceEntry {
-                start_time: index,
-                duration: duration as f32,
-                ..PieceEntry::zeroed()
-            },
-            index as f64 * duration,
-        )
-    }));
+    queue
+        .spans
+        .extend((0..span_count).map(|index| hold_span(index * ticks, secs, FREQ, index as f64, 0)));
     queue
 }
 
@@ -316,7 +383,7 @@ fn pump_intake_uses_runway_only_below_the_hard_cap() {
             PUMP_INTAKE_MIN_RUNWAY_SECS * 2.0,
         ),
     )]);
-    assert!(wants_pieces(&below_soft_cap));
+    assert!(wants_spans(&below_soft_cap));
 
     let one_axis_shallow = BTreeMap::from([
         (
@@ -334,7 +401,7 @@ fn pump_intake_uses_runway_only_below_the_hard_cap() {
             ),
         ),
     ]);
-    assert!(wants_pieces(&one_axis_shallow));
+    assert!(wants_spans(&one_axis_shallow));
 
     let all_axes_ready = BTreeMap::from([
         (
@@ -352,7 +419,7 @@ fn pump_intake_uses_runway_only_below_the_hard_cap() {
             ),
         ),
     ]);
-    assert!(!wants_pieces(&all_axes_ready));
+    assert!(!wants_spans(&all_axes_ready));
 
     let shallow_at_hard_cap = BTreeMap::from([(
         key(0),
@@ -361,168 +428,74 @@ fn pump_intake_uses_runway_only_below_the_hard_cap() {
             PUMP_INTAKE_MIN_RUNWAY_SECS * 0.5,
         ),
     )]);
-    assert!(!wants_pieces(&shallow_at_hard_cap));
+    assert!(!wants_spans(&shallow_at_hard_cap));
 }
 
 #[test]
-fn run_pump_sets_start_slot_from_cursor_and_advances_it() {
-    const RING_DEPTH: u32 = 8;
-    const N: u32 = 3;
-
+fn overlay_span_after_move_is_exempt_from_junction_continuity() {
+    const JUNCTION_FREQ: f64 = 180_000_000.0;
     let sink = RecordingSink::new();
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let sink_clone = sink.clone();
     let handle = std::thread::spawn(move || {
-        run_pump(
-            control_rx,
-            data_rx,
-            sink_clone,
-            PumpCallbacks::noop(RING_DEPTH),
-            None,
-            std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
-        );
-    });
-
-    data.send(make_enqueue(
-        AxisKey { mcu_id: 1, axis: 0 },
-        (0..N).map(|i| make_piece(i as u64)).collect(),
-        crate::anchor::StreamEpoch::Continuation,
-    ))
-    .unwrap();
-    {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while sink.recorded().is_empty() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "pump did not drain first batch within deadline"
-            );
-            std::thread::yield_now();
-        }
-    }
-
-    data.send(make_enqueue(
-        AxisKey { mcu_id: 1, axis: 0 },
-        (N..N * 2).map(|i| make_piece(i as u64)).collect(),
-        crate::anchor::StreamEpoch::Continuation,
-    ))
-    .unwrap();
-    {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while sink.recorded().len() < 2 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "pump did not drain second batch within deadline"
-            );
-            std::thread::yield_now();
-        }
-    }
-
-    ctl.send(PumpMsg::Shutdown).unwrap();
-    handle.join().unwrap();
-
-    let recorded = sink.recorded();
-    assert_eq!(
-        recorded.len(),
-        2,
-        "expected exactly 2 sends, got {}",
-        recorded.len()
-    );
-
-    let (s0, h0) = recorded[0];
-    let (s1, h1) = recorded[1];
-
-    assert_eq!(s0, 0, "first start_slot should be 0");
-    assert_eq!(h0, N, "first new_head should be N={N}");
-
-    let expected_s1 = (N % RING_DEPTH) as u16;
-    assert_eq!(s1, expected_s1, "second start_slot should be {expected_s1}");
-    assert_eq!(h1, N * 2, "second new_head should be {}", N * 2);
-}
-
-fn make_piece_pos(t: u64, mask: u8, c0: f32, c3: f32) -> (PieceEntry, f64) {
-    let d = 0.001_f64;
-    let (b0, b1, b2, b3) = (c0 as f64, c0 as f64, c3 as f64, c3 as f64);
-    let mono = [
-        b0,
-        3.0 * (b1 - b0) / d,
-        3.0 * (b2 - 2.0 * b1 + b0) / (d * d),
-        (b3 - 3.0 * b2 + 3.0 * b1 - b0) / (d * d * d),
-    ];
-    let cheb = nurbs::chebyshev::monomial_tau_to_chebyshev(&mono, d);
-    let mut coeffs = [0.0_f32; runtime::piece_ring::MAX_PIECE_COEFFS];
-    for (dst, src) in coeffs.iter_mut().zip(&cheb) {
-        *dst = *src as f32;
-    }
-    (
-        PieceEntry {
-            start_time: t,
-            duration: d as f32,
-            motor_mask: mask,
-            coeff_count: cheb.len() as u8,
-            coeffs,
-            ..PieceEntry::zeroed()
-        },
-        t as f64,
-    )
-}
-
-#[test]
-fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
-    let sink = RecordingSink::new();
-    let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
-    let sink_clone = sink.clone();
-    let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink_clone,
             PumpCallbacks {
-                mcu_clock_of: Box::new(|_mcu| Some((0u64, 180_000_000.0))),
+                mcu_clock_of: Box::new(|_mcu| Some((0u64, JUNCTION_FREQ))),
                 ..PumpCallbacks::noop(8)
             },
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         );
     });
     let key = AxisKey { mcu_id: 1, axis: 2 };
+    let move_ticks = (SPAN_SECS * JUNCTION_FREQ) as u64;
 
-    data.send(make_enqueue(
+    data.send(vec![make_enqueue(
         key,
-        vec![make_piece_pos(0, 0, 0.0, 11.0)],
+        vec![moving_span(0, SPAN_SECS, JUNCTION_FREQ, 0.0, 11.0, 0)],
         crate::anchor::StreamEpoch::Continuation,
-    ))
+    )])
     .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while sink.recorded().is_empty() {
         assert!(
             std::time::Instant::now() < deadline,
-            "first piece never sent"
+            "first span never sent"
         );
         std::thread::yield_now();
     }
 
-    data.send(make_enqueue(
+    // The overlay restarts from 0.0 while the move ended at 11.0: an 11 mm
+    // position jump that would be fatal on a bare (mask 0) seam.
+    data.send(vec![make_enqueue(
         key,
-        vec![make_piece_pos(10_000, 0b10, 0.0, 0.5)],
+        vec![moving_span(
+            move_ticks,
+            SPAN_SECS,
+            JUNCTION_FREQ,
+            0.0,
+            0.5,
+            0b10,
+        )],
         crate::anchor::StreamEpoch::Continuation,
-    ))
+    )])
     .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while sink.recorded().len() < 2 {
         assert!(
             std::time::Instant::now() < deadline,
-            "overlay piece never sent — pump likely panicked on the junction check"
+            "overlay span never sent — pump likely panicked on the junction check"
         );
         std::thread::yield_now();
     }
 
     ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
-    assert_eq!(sink.recorded().len(), 2, "both pieces dispatched, no panic");
+    assert_eq!(sink.recorded().len(), 2, "both spans dispatched, no panic");
 }
 
 #[test]
@@ -545,14 +518,14 @@ fn junction_jumps_math() {
     assert!((host_us3 - 500.0).abs() < 1e-3, "host_jump_us={host_us3}");
 }
 
-struct NullSink;
+#[derive(Clone, Copy, Default)]
+pub(super) struct NullSink;
 
-impl PieceSink for NullSink {
+impl SpanSink for NullSink {
     fn send_frame(
         &self,
         _key: AxisKey,
-        _pieces: &[PieceEntry],
-        _start_slot: u16,
+        _spans: &[ClockedMotorSpan],
         _new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
@@ -562,12 +535,11 @@ impl PieceSink for NullSink {
 
 struct HaltedSink;
 
-impl PieceSink for HaltedSink {
+impl SpanSink for HaltedSink {
     fn send_frame(
         &self,
         _key: AxisKey,
-        _pieces: &[PieceEntry],
-        _start_slot: u16,
+        _spans: &[ClockedMotorSpan],
         _new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
@@ -576,10 +548,55 @@ impl PieceSink for HaltedSink {
 }
 
 #[test]
-fn flush_clears_queued_pieces_and_junctions() {
+fn endpoint_fatal_hands_its_reason_to_the_fatal_transport_action() {
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (_data, data_rx) = unbounded::<Vec<LaneProjection>>();
+    let latched: Arc<Mutex<Vec<(AxisKey, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let latched_pump = Arc::clone(&latched);
+    let handle = std::thread::spawn(move || {
+        run_projection_batches(
+            control_rx,
+            data_rx,
+            NullSink,
+            PumpCallbacks {
+                on_fatal_transport: Box::new(move |key, reason| {
+                    latched_pump.lock_ok().push((key, reason.to_string()));
+                }),
+                ..PumpCallbacks::noop(64)
+            },
+            None,
+            Arc::new(crate::drain::DrainLedger::new()),
+        );
+    });
+    let error = "queue_step oid 9 is 2077 us behind the projected mcu clock".to_string();
+    ctl.send(PumpMsg::StepcompressFatal {
+        mcu_id: 3,
+        error: error.clone(),
+    })
+    .unwrap();
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+    assert_eq!(
+        *latched.lock_ok(),
+        vec![(AxisKey { mcu_id: 3, axis: 0 }, error)],
+        "the operator-facing latch must carry the endpoint's own fatal text"
+    );
+}
+
+/// The four gated views a Flush must drop, on a 1 kHz fixture clock where one
+/// view is exactly one tick. Distinct hold positions keep the queue's hold
+/// coalescing from collapsing them into one.
+fn gated_spans(gated_tick: u64, freq: f64) -> Vec<ClockedMotorSpan> {
+    (0u64..4)
+        .map(|i| hold_span(gated_tick + i, 1.0 / freq, freq, 1.0 + i as f64, 0))
+        .collect()
+}
+
+#[test]
+fn flush_clears_queued_spans_and_junctions() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
 
     let freq: f64 = 1_000.0;
     let lead_secs: f64 = 0.001;
@@ -591,41 +608,27 @@ fn flush_clears_queued_pieces_and_junctions() {
     let sink_pump = sink.clone();
 
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink_pump,
             PumpCallbacks {
-                mcu_clock_of: Box::new(move |_mcu| *clock_pump.lock().unwrap()),
+                mcu_clock_of: Box::new(move |_mcu| *clock_pump.lock_ok()),
                 ..PumpCallbacks::noop(64)
             },
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         );
     });
 
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
-        pieces: (0u64..4)
-            .map(|i| {
-                let mut p = PieceEntry {
-                    start_time: gated_tick + i,
-                    duration: 0.001,
-                    ..PieceEntry::zeroed()
-                };
-                // Distinct hold values so enqueue's hold merging cannot
-                // coalesce the gated pieces this test counts one by one.
-                p.coeffs[0] = 1.0 + i as f32;
-                (p, (gated_tick + i) as f64)
-            })
-            .collect(),
+        spans: gated_spans(gated_tick, freq),
         epoch: crate::anchor::StreamEpoch::Reposition,
         lead_secs,
         source_line: u32::MAX,
-        batch_end: true,
-    })
+    }])
     .unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(30));
@@ -633,33 +636,25 @@ fn flush_clears_queued_pieces_and_junctions() {
     ctl.send(PumpMsg::Flush(vec![key])).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
 
-    *clock.lock().unwrap() = Some((gated_tick + 1_000, freq));
+    *clock.lock_ok() = Some((gated_tick + 1_000, freq));
 
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
-        pieces: vec![(
-            PieceEntry {
-                // A deliverable "now" probe (== the advanced clock), not a stale
-                // past piece — the pump's in-past guard aborts on past start_times.
-                start_time: gated_tick + 1_000,
-                duration: 0.001,
-                ..PieceEntry::zeroed()
-            },
-            (gated_tick + 1_000) as f64,
-        )],
+        // A deliverable "now" probe (== the advanced clock), not a stale past
+        // view — the pump's in-past guard aborts on past start clocks.
+        spans: vec![hold_span(gated_tick + 1_000, 1.0 / freq, freq, 0.0, 0)],
         epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs,
         source_line: u32::MAX,
-        batch_end: true,
-    })
+    }])
     .unwrap();
     {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while sink.recorded().is_empty() {
             assert!(
                 std::time::Instant::now() < deadline,
-                "pump never sent the post-flush probe piece — deadlocked"
+                "pump never sent the post-flush probe span — deadlocked"
             );
             std::thread::yield_now();
         }
@@ -672,18 +667,18 @@ fn flush_clears_queued_pieces_and_junctions() {
     assert_eq!(
         recorded.len(),
         1,
-        "sink must see only the post-flush probe piece; \
-         {} sends means the {} gated pieces survived Flush",
+        "sink must see only the post-flush probe span; \
+         {} sends means the {} gated spans survived Flush",
         recorded.len(),
         4
     );
 }
 
 #[test]
-fn on_abandon_reports_flushed_not_pushed_pieces() {
+fn on_abandon_reports_flushed_not_pushed_spans() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
 
     let freq: f64 = 1_000.0;
     let lead_secs: f64 = 0.001;
@@ -697,76 +692,52 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
     let abandoned_pump = Arc::clone(&abandoned_total);
 
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink_pump,
             PumpCallbacks {
-                mcu_clock_of: Box::new(move |_mcu| *clock_pump.lock().unwrap()),
+                mcu_clock_of: Box::new(move |_mcu| *clock_pump.lock_ok()),
                 on_abandon: Box::new(move |_k: AxisKey, n: u32| {
-                    *abandoned_pump.lock().unwrap() += n;
+                    *abandoned_pump.lock_ok() += n;
                 }),
                 ..PumpCallbacks::noop(64)
             },
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         );
     });
 
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
-        pieces: (0u64..4)
-            .map(|i| {
-                let mut p = PieceEntry {
-                    start_time: gated_tick + i,
-                    duration: 0.001,
-                    ..PieceEntry::zeroed()
-                };
-                // Distinct hold values so enqueue's hold merging cannot
-                // coalesce the gated pieces this test counts one by one.
-                p.coeffs[0] = 1.0 + i as f32;
-                (p, (gated_tick + i) as f64)
-            })
-            .collect(),
+        spans: gated_spans(gated_tick, freq),
         epoch: crate::anchor::StreamEpoch::Reposition,
         lead_secs,
         source_line: u32::MAX,
-        batch_end: true,
-    })
+    }])
     .unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(30));
     ctl.send(PumpMsg::Flush(vec![key])).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
-    *clock.lock().unwrap() = Some((gated_tick + 1_000, freq));
+    *clock.lock_ok() = Some((gated_tick + 1_000, freq));
 
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
-        pieces: vec![(
-            PieceEntry {
-                // A deliverable "now" probe (== the advanced clock), not a stale
-                // past piece — the pump's in-past guard aborts on past start_times.
-                start_time: gated_tick + 1_000,
-                duration: 0.001,
-                ..PieceEntry::zeroed()
-            },
-            (gated_tick + 1_000) as f64,
-        )],
+        spans: vec![hold_span(gated_tick + 1_000, 1.0 / freq, freq, 0.0, 0)],
         epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs,
         source_line: u32::MAX,
-        batch_end: true,
-    })
+    }])
     .unwrap();
     {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while sink.recorded().is_empty() {
             assert!(
                 std::time::Instant::now() < deadline,
-                "pump never sent the post-flush probe piece — deadlocked"
+                "pump never sent the post-flush probe span — deadlocked"
             );
             std::thread::yield_now();
         }
@@ -776,25 +747,24 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
     handle.join().unwrap();
 
     assert_eq!(
-        *abandoned_total.lock().unwrap(),
+        *abandoned_total.lock_ok(),
         4,
-        "on_abandon must report the 4 Flush-dropped pieces and not the pushed probe"
+        "on_abandon must report the 4 Flush-dropped spans and not the pushed probe"
     );
 }
 
 #[test]
 fn flush_unknown_key_is_noop() {
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (_data, data_rx) = unbounded::<EnqueueMsg>();
+    let (_data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             NullSink,
             PumpCallbacks::noop(64),
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -813,32 +783,31 @@ fn barrier_ack_means_flushed_axes_emit_nothing() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let sink = RecordingSink::new();
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
-    let backlog = Arc::new(AtomicU64::new(0));
-    let backlog_pump = Arc::clone(&backlog);
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
+    let ledger = Arc::new(crate::drain::DrainLedger::new());
+    let ledger_pump = Arc::clone(&ledger);
 
     let sink_clone = sink.clone();
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink_clone,
             PumpCallbacks::noop(0),
             None,
-            std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            backlog_pump,
+            ledger_pump,
         );
     });
 
-    data.send(make_enqueue(
+    data.send(vec![make_enqueue(
         key,
-        (0..3).map(|i| make_piece(i as u64)).collect(),
+        (0..3).map(make_span).collect(),
         crate::anchor::StreamEpoch::Continuation,
-    ))
+    )])
     .unwrap();
     poll_until(
-        || backlog.load(Ordering::Acquire) == 3,
-        "ring-full pump never staged the 3 un-pushed pieces",
+        || ledger.staged_total() == 3,
+        "ring-full pump never staged the 3 un-pushed spans",
     );
 
     ctl.send(PumpMsg::Flush(vec![key])).unwrap();
@@ -849,17 +818,14 @@ fn barrier_ack_means_flushed_axes_emit_nothing() {
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("barrier must be acknowledged");
 
-    poll_until(
-        || backlog.load(Ordering::Acquire) == 0,
-        "Flush must clear the staged backlog",
-    );
+    assert_eq!(ledger.staged_total(), 0);
 
     ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 
     assert!(
         sink.recorded().is_empty(),
-        "pieces flushed before the barrier must never reach the sink; got {:?}",
+        "spans flushed before the barrier must never reach the sink; got {:?}",
         sink.recorded()
     );
 }
@@ -867,16 +833,15 @@ fn barrier_ack_means_flushed_axes_emit_nothing() {
 #[test]
 fn barrier_acks_on_idle_pump() {
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (_data, data_rx) = unbounded::<EnqueueMsg>();
+    let (_data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             RecordingSink::new(),
             PumpCallbacks::noop(8),
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         );
     });
     let (ack_tx, ack_rx) = mpsc::sync_channel(1);
@@ -897,77 +862,45 @@ fn poll_until<F: Fn() -> bool>(pred: F, what: &str) {
 }
 
 #[test]
-fn pump_backlog_reflects_unpushed_pieces() {
-    let backlog = Arc::new(AtomicU64::new(0));
-    let backlog_thread = Arc::clone(&backlog);
-    let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
-    let handle = std::thread::spawn(move || {
-        run_pump(
-            control_rx,
-            data_rx,
-            RecordingSink::new(),
-            PumpCallbacks::noop(0),
-            None,
-            std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            backlog_thread,
-        );
-    });
-
-    data.send(make_enqueue(
-        AxisKey { mcu_id: 1, axis: 0 },
-        (0..3).map(|i| make_piece(i as u64)).collect(),
-        crate::anchor::StreamEpoch::Continuation,
-    ))
-    .unwrap();
-
-    poll_until(
-        || backlog.load(Ordering::Acquire) == 3,
-        "ring-full pump never reported the 3 unpushed pieces",
-    );
-
-    ctl.send(PumpMsg::Shutdown).unwrap();
-    handle.join().unwrap();
-}
-
-#[test]
 fn pump_backlog_drains_to_zero_when_pushed() {
-    let backlog = Arc::new(AtomicU64::new(0));
-    let backlog_thread = Arc::clone(&backlog);
+    let ledger = Arc::new(crate::drain::DrainLedger::new());
+    let ledger_thread = Arc::clone(&ledger);
     let sink = RecordingSink::new();
     let sink_clone = sink.clone();
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink_clone,
             PumpCallbacks::noop(8),
             None,
-            std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            backlog_thread,
+            ledger_thread,
         );
     });
 
-    data.send(make_enqueue(
+    data.send(vec![make_enqueue(
         AxisKey { mcu_id: 1, axis: 0 },
-        (0..3).map(|i| make_piece(i as u64)).collect(),
+        (0..3).map(make_span).collect(),
         crate::anchor::StreamEpoch::Continuation,
-    ))
+    )])
     .unwrap();
 
-    poll_until(|| !sink.recorded().is_empty(), "pump never pushed pieces");
     poll_until(
-        || backlog.load(Ordering::Acquire) == 0,
-        "backlog never returned to zero after the ring consumed the pieces",
+        || sink.recorded().last() == Some(&3),
+        "pump never pushed all spans",
+    );
+    poll_until(
+        || ledger.staged_total() == 0,
+        "backlog never returned to zero after the ring consumed the spans",
     );
 
     ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 }
 
-fn queue_pump<S: PieceSink>(
+fn queue_pump<S: SpanSink>(
     key: AxisKey,
     consumption_stall_fatal: Duration,
     on_drip_stall: impl Fn(String) + Send + 'static,
@@ -975,33 +908,20 @@ fn queue_pump<S: PieceSink>(
 ) -> Pump<S> {
     let mut queues = BTreeMap::new();
     let mut q = AxisQueue::new(1);
-    q.pushed = 1;
-    q.retired = 0;
-    q.pieces.push_back(make_piece(0));
+    q.spans.push_back(make_span(0));
     queues.insert(key, q);
-    Pump {
-        queues,
-        junctions: JunctionTracker::default(),
-        cohort: None,
-        halted: BTreeMap::new(),
+    let mut pump = Pump::new(
         sink,
-        callbacks: PumpCallbacks {
+        PumpCallbacks {
             on_drip_stall: Box::new(on_drip_stall),
             ..PumpCallbacks::noop(1)
         },
-        history: None,
-        ledger: Arc::new(crate::drain::DrainLedger::new()),
-        pending_barrier_acks: Vec::new(),
-        backlog: Arc::new(AtomicU64::new(0)),
-        holding_ahead: false,
-        data_open: true,
-        intake_batch_open: false,
-        consumption_stall: super::stall::ConsumptionStallWatch::new(consumption_stall_fatal),
-        mem_probe: super::memstat::MemPressureProbe::new(),
-        margins: super::margin::SendMarginTracker::new(),
-        windows: std::collections::HashMap::new(),
-        resume_epochs: std::collections::HashMap::new(),
-    }
+        None,
+        Arc::new(crate::drain::DrainLedger::new()),
+    );
+    pump.queues = queues;
+    pump.consumption_stall = super::stall::ConsumptionStallWatch::new(consumption_stall_fatal);
+    pump
 }
 
 fn stalled_queue_pump(
@@ -1009,7 +929,9 @@ fn stalled_queue_pump(
     consumption_stall_fatal: Duration,
     on_drip_stall: impl Fn(String) + Send + 'static,
 ) -> Pump<NullSink> {
-    queue_pump(key, consumption_stall_fatal, on_drip_stall, NullSink)
+    let mut pump = queue_pump(key, consumption_stall_fatal, on_drip_stall, NullSink);
+    pump.queues.get_mut(&key).unwrap().credit.accept(1);
+    pump
 }
 
 #[test]
@@ -1018,39 +940,43 @@ fn send_pass_deadline_yields_with_work_pending() {
     let sink = RecordingSink::new();
     let mut pump = queue_pump(key, Duration::from_secs(1), |_| {}, sink.clone());
     let q = pump.queues.get_mut(&key).unwrap();
-    q.pushed = 0;
-    q.pieces.clear();
+    q.spans.clear();
     q.ring_depth = 4_000;
     let queued: u64 = 3_000;
     for i in 0..queued {
-        q.pieces.push_back(make_piece(i * 1_000));
+        q.spans.push_back(make_span(i));
     }
 
-    assert_eq!(pump.send_ready_until(std::time::Instant::now()), Ok(true));
+    assert!(
+        pump.send_ready_until(std::time::Instant::now())
+            .expect("an expired deadline is not fatal")
+            .sent
+    );
 
     assert_eq!(
         sink.recorded().len(),
         1,
         "an expired pass deadline still sends exactly one bundle"
     );
-    let remaining = pump.queues[&key].pieces.len() as u64;
+    let remaining = pump.queues[&key].spans.len() as u64;
     assert!(
         remaining > 0 && remaining < queued,
         "one bundle went out, the rest waits so intake can interleave (remaining={remaining})"
     );
 
-    assert_eq!(
-        pump.send_ready_until(std::time::Instant::now() + Duration::from_secs(60)),
-        Ok(true)
+    assert!(
+        pump.send_ready_until(std::time::Instant::now() + Duration::from_secs(60))
+            .expect("a roomy deadline is not fatal")
+            .sent
     );
     assert!(
-        pump.queues[&key].pieces.is_empty(),
+        pump.queues[&key].spans.is_empty(),
         "a roomy deadline drains the queue"
     );
 }
 
 #[test]
-fn halt_drops_queued_and_new_pieces_until_resume() {
+fn halt_drops_queued_and_new_spans_until_resume() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let (escalated_tx, escalated_rx) = mpsc::channel();
     let mut pump = stalled_queue_pump(key, Duration::from_secs(1), move |message| {
@@ -1063,13 +989,13 @@ fn halt_drops_queued_and_new_pieces_until_resume() {
         ack: ack_tx,
     });
     assert!(pump.halted.contains_key(&key));
-    assert!(pump.queues[&key].pieces.is_empty());
+    assert!(pump.queues[&key].spans.is_empty());
     pump.enqueue(make_enqueue(
         key,
-        vec![make_piece(10)],
+        vec![make_span(10)],
         crate::anchor::StreamEpoch::Continuation,
     ));
-    assert!(pump.queues[&key].pieces.is_empty());
+    assert!(pump.queues[&key].spans.is_empty());
     assert!(matches!(
         escalated_rx.try_recv(),
         Err(mpsc::TryRecvError::Empty)
@@ -1078,10 +1004,52 @@ fn halt_drops_queued_and_new_pieces_until_resume() {
     pump.handle_control_msg(PumpMsg::Resume(vec![key]));
     pump.enqueue(make_enqueue(
         key,
-        vec![make_piece(20)],
+        vec![make_span(20)],
         crate::anchor::StreamEpoch::Continuation,
     ));
-    assert_eq!(pump.queues[&key].pieces.len(), 1);
+    assert_eq!(pump.queues[&key].spans.len(), 1);
+}
+
+struct CutRejectingSink;
+
+impl SpanSink for CutRejectingSink {
+    fn send_frame(
+        &self,
+        _key: AxisKey,
+        _spans: &[ClockedMotorSpan],
+        _new_head: u32,
+        _room: u32,
+    ) -> Result<i32, SendError> {
+        Ok(mcu_protocol::result_codes::OK)
+    }
+
+    fn cut_staged(&self, _keys: &[AxisKey]) -> Result<Vec<CutCredit>, SendError> {
+        Err(SendError::Transient("cut transport unavailable".into()))
+    }
+}
+
+#[test]
+fn rejected_multi_axis_halt_reports_once_and_does_not_acknowledge() {
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    let sibling = AxisKey { mcu_id: 1, axis: 1 };
+    let mut pump = queue_pump(key, Duration::from_secs(1), |_| {}, CutRejectingSink);
+    pump.queues.get_mut(&key).unwrap().credit.accept(1);
+    let (fatal_tx, fatal_rx) = mpsc::channel();
+    pump.callbacks.on_fatal_transport = Box::new(move |key, _| fatal_tx.send(key).unwrap());
+    let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+
+    pump.handle_control_msg(PumpMsg::Halt {
+        keys: vec![key, sibling],
+        ack: ack_tx,
+    });
+
+    assert_eq!(fatal_rx.try_iter().collect::<Vec<_>>(), vec![key]);
+    assert!(matches!(
+        ack_rx.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected)
+    ));
+    assert_eq!(pump.queues[&key].spans.len(), 1);
+    assert_eq!(pump.queues[&key].credit.snapshot().abandoned, 0);
 }
 
 #[test]
@@ -1102,16 +1070,80 @@ fn send_rejected_while_halted_discards_bundle_and_infers_halt() {
     let mut pump = queue_pump(key, Duration::from_secs(1), |_| {}, HaltedSink);
     let queue = pump.queues.get_mut(&key).unwrap();
     queue.ring_depth = 4;
-    queue.pushed = 0;
     let (abandoned_tx, abandoned_rx) = mpsc::channel();
     pump.callbacks.on_abandon =
         Box::new(move |abandoned_key, count| abandoned_tx.send((abandoned_key, count)).unwrap());
 
-    assert_eq!(pump.send_ready(), Ok(true));
+    assert!(pump.send_ready().expect("a halted send is not fatal").sent);
 
-    assert!(matches!(pump.halted.get(&key), Some(Some(_))));
-    assert!(pump.queues[&key].pieces.is_empty());
+    assert!(matches!(
+        pump.halted.get(&key),
+        Some(super::pump_loop::HaltKind::Inferred(_))
+    ));
+    assert!(pump.queues[&key].spans.is_empty());
     assert_eq!(abandoned_rx.recv().unwrap(), (key, 1));
+}
+
+struct OwnershipSink {
+    accepted: Mutex<Vec<u8>>,
+    reject_phase: std::sync::atomic::AtomicBool,
+}
+
+impl SpanSink for OwnershipSink {
+    fn send_frame(
+        &self,
+        key: AxisKey,
+        _spans: &[ClockedMotorSpan],
+        _new_head: u32,
+        _room: u32,
+    ) -> Result<i32, SendError> {
+        if key.axis == 1 && self.reject_phase.load(Ordering::Relaxed) {
+            return Err(SendError::Transient("phase staging full".into()));
+        }
+        self.accepted.lock_ok().push(key.axis);
+        Ok(mcu_protocol::result_codes::OK)
+    }
+
+    fn lane_group(&self, key: AxisKey) -> u8 {
+        key.axis
+    }
+
+    fn progress_mcu(&self, _mcu_id: u32, group: u8) -> Result<(), SendError> {
+        if group == 0 {
+            Err(SendError::Transient(
+                "pulse wire full after acceptance".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[test]
+fn mixed_endpoint_groups_commit_acceptance_not_wire_progress() {
+    let pulse = AxisKey { mcu_id: 1, axis: 0 };
+    let phase = AxisKey { mcu_id: 1, axis: 1 };
+    let sink = OwnershipSink {
+        accepted: Mutex::new(Vec::new()),
+        reject_phase: std::sync::atomic::AtomicBool::new(true),
+    };
+    let mut pump = queue_pump(pulse, Duration::from_secs(1), |_| {}, sink);
+    let mut phase_queue = AxisQueue::new(1);
+    phase_queue.spans.push_back(make_span(0));
+    pump.queues.insert(phase, phase_queue);
+
+    pump.send_ready().unwrap();
+    assert!(pump.queues[&pulse].spans.is_empty());
+    assert_eq!(pump.queues[&pulse].credit.snapshot().pushed, 1);
+    assert_eq!(pump.queues[&pulse].credit.snapshot().retired, 0);
+    pump.send_ready().unwrap();
+    assert_eq!(pump.queues[&phase].spans.len(), 1);
+    assert_eq!(pump.queues[&phase].credit.snapshot().pushed, 0);
+    pump.sink.reject_phase.store(false, Ordering::Relaxed);
+    pump.send_ready().unwrap();
+    assert!(pump.queues[&phase].spans.is_empty());
+    assert_eq!(pump.queues[&phase].credit.snapshot().pushed, 1);
+    assert_eq!(*pump.sink.accepted.lock_ok(), vec![0, 1]);
 }
 
 #[test]
@@ -1123,12 +1155,12 @@ fn inferred_halt_without_host_ack_escalates() {
     });
     pump.halted.insert(
         key,
-        Some(std::time::Instant::now() - Duration::from_secs(2)),
+        super::pump_loop::HaltKind::Inferred(std::time::Instant::now() - Duration::from_secs(2)),
     );
 
     pump.enqueue(make_enqueue(
         key,
-        vec![make_piece(10)],
+        vec![make_span(10)],
         crate::anchor::StreamEpoch::Continuation,
     ));
 
@@ -1143,15 +1175,16 @@ fn consumption_stall_past_threshold_with_frozen_counter_escalates() {
     let escalated: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let escalated_cb = Arc::clone(&escalated);
     let mut pump = stalled_queue_pump(key, threshold, move |msg: String| {
-        escalated_cb.lock().unwrap().push(msg)
+        escalated_cb.lock_ok().push(msg)
     });
 
-    assert_eq!(
-        pump.send_ready()
-            .expect("first stall observation is not fatal"),
-        false
+    assert!(
+        !pump
+            .send_ready()
+            .expect("first stall observation is not fatal")
+            .sent
     );
-    assert!(escalated.lock().unwrap().is_empty());
+    assert!(escalated.lock_ok().is_empty());
 
     std::thread::sleep(threshold * 2);
 
@@ -1160,7 +1193,7 @@ fn consumption_stall_past_threshold_with_frozen_counter_escalates() {
         result.is_err(),
         "consumed count frozen past the threshold must escalate and stop the pump loop"
     );
-    let msgs = escalated.lock().unwrap();
+    let msgs = escalated.lock_ok();
     assert_eq!(msgs.len(), 1, "on_drip_stall must fire exactly once");
     assert!(
         msgs[0].contains("consumption stall"),
@@ -1176,10 +1209,10 @@ fn consumption_stall_resets_when_heartbeat_advances_counter() {
     let escalated: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let escalated_cb = Arc::clone(&escalated);
     let mut pump = stalled_queue_pump(key, threshold, move |msg: String| {
-        escalated_cb.lock().unwrap().push(msg)
+        escalated_cb.lock_ok().push(msg)
     });
     pump.queues.get_mut(&key).unwrap().ring_depth = 2;
-    pump.queues.get_mut(&key).unwrap().pushed = 2;
+    pump.queues.get_mut(&key).unwrap().credit.accept(1);
 
     pump.send_ready().unwrap();
     let (_, consumed_at_onset, _) = pump
@@ -1191,10 +1224,12 @@ fn consumption_stall_resets_when_heartbeat_advances_counter() {
     std::thread::sleep(threshold / 2);
     pump.handle_control_msg(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
+        axes: vec![0],
         consumed_counts: Some(vec![1]),
         retired_counts: vec![0],
+        retired_by: RetiredBy::Pulse,
     }));
-    pump.queues.get_mut(&key).unwrap().pushed = 3;
+    pump.queues.get_mut(&key).unwrap().credit.accept(1);
 
     let result = pump.send_ready();
     assert!(
@@ -1202,7 +1237,7 @@ fn consumption_stall_resets_when_heartbeat_advances_counter() {
         "consumption advancing before the threshold must not escalate"
     );
     assert!(
-        escalated.lock().unwrap().is_empty(),
+        escalated.lock_ok().is_empty(),
         "no escalation once consumption progressed"
     );
     let (tracked_key, tracked_consumed, _) = pump
@@ -1221,7 +1256,7 @@ fn consumption_stall_resets_when_heartbeat_advances_counter() {
         result.is_ok(),
         "elapsed time since the reset is still under the threshold"
     );
-    assert!(escalated.lock().unwrap().is_empty());
+    assert!(escalated.lock_ok().is_empty());
 }
 
 #[test]
@@ -1231,7 +1266,7 @@ fn non_stallfull_outcome_between_stalls_resets_the_timer() {
     let escalated: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let escalated_cb = Arc::clone(&escalated);
     let mut pump = stalled_queue_pump(key, threshold, move |msg: String| {
-        escalated_cb.lock().unwrap().push(msg)
+        escalated_cb.lock_ok().push(msg)
     });
 
     pump.send_ready().unwrap();
@@ -1239,7 +1274,7 @@ fn non_stallfull_outcome_between_stalls_resets_the_timer() {
 
     std::thread::sleep(threshold * 2);
 
-    pump.queues.get_mut(&key).unwrap().pieces.clear();
+    pump.queues.get_mut(&key).unwrap().spans.clear();
     let result = pump.send_ready();
     assert!(result.is_ok());
     assert!(
@@ -1251,148 +1286,270 @@ fn non_stallfull_outcome_between_stalls_resets_the_timer() {
     pump.queues
         .get_mut(&key)
         .unwrap()
-        .pieces
-        .push_back(make_piece(0));
+        .spans
+        .push_back(make_span(0));
     let result = pump.send_ready();
     assert!(
         result.is_ok(),
         "the timer restarts fresh after the Idle outcome, so this new \
          StallFull observation is not immediately fatal"
     );
-    assert!(escalated.lock().unwrap().is_empty());
+    assert!(escalated.lock_ok().is_empty());
     assert!(pump.consumption_stall.started().is_some());
 }
 
-mod pushpieces_retransmit_tests {
-    use super::super::{SendError, pushpieces_retransmit_serial};
-    use host_rt::transport::TransportError;
+#[test]
+fn run_loop_re_observes_a_wedged_ring_with_both_channels_silent() {
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    let (escalated_tx, escalated_rx) = mpsc::channel();
+    let mut pump = stalled_queue_pump(key, Duration::from_millis(50), move |msg: String| {
+        escalated_tx.send(msg).unwrap();
+    });
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (_data, data_rx) = unbounded::<Vec<LaneProjection>>();
 
-    #[test]
-    fn recovers_after_transient_failures_within_budget() {
-        let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 10, None, || {
-            calls += 1;
-            if calls < 3 {
-                Err(TransportError::Timeout)
-            } else {
-                Ok(vec![0xAB, 0xCD])
-            }
-        });
-        assert_eq!(res.expect("should recover"), vec![0xAB, 0xCD]);
-        assert_eq!(
-            calls, 3,
-            "succeeds on the 3rd attempt after 2 transient losses"
-        );
-    }
+    let pumping = std::thread::spawn(move || {
+        pump.run(
+            &control_rx,
+            &data_rx,
+            |batch, pump| {
+                for projection in batch {
+                    pump.enqueue(projection);
+                }
+            },
+            |_, _| false,
+        )
+    });
 
-    #[test]
-    fn first_attempt_success_does_not_retry() {
-        let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 10, None, || {
-            calls += 1;
-            Ok(vec![1, 2, 3])
-        });
-        assert_eq!(res.expect("ok"), vec![1, 2, 3]);
-        assert_eq!(
-            calls, 1,
-            "healthy link: exactly one attempt, no extra latency"
-        );
-    }
+    let message = escalated_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the pump must re-observe a wedged ring on a timer instead of parking");
+    assert!(message.contains("pump consumption stall"), "{message}");
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    pumping.join().unwrap();
+}
 
-    #[test]
-    fn persistent_corruption_gives_up_as_transient_after_budget() {
-        let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 4, None, || {
-            calls += 1;
-            Err(TransportError::Timeout)
-        });
-        assert!(
-            matches!(res, Err(SendError::Transient(_))),
-            "budget exhaustion returns Transient (backstop handles it), not Fatal"
-        );
-        assert_eq!(
-            calls, 4,
-            "exactly max_attempts attempts — no infinite retry"
-        );
-    }
+const BUZZ_MCU: u32 = 9;
+const BUZZ_CYCLES_PER_SECOND: f64 = 1_000_000.0;
 
-    #[test]
-    fn expired_front_lead_stops_retrying_immediately() {
-        let past = std::time::Instant::now() - std::time::Duration::from_millis(1);
-        let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 10, Some(past), || {
-            calls += 1;
-            Err(TransportError::Timeout)
-        });
-        match res {
-            Err(SendError::Transient(msg)) => assert!(
-                msg.contains("transport unresponsive"),
-                "give-up must name the unresponsive transport: {msg}"
-            ),
-            other => panic!("expected Transient, got {other:?}"),
-        }
-        assert_eq!(
-            calls, 1,
-            "retrying past the front piece's lead cannot succeed — one attempt only"
-        );
-    }
+struct BuzzFixture {
+    pump: Pump<NullSink>,
+    control: crossbeam_channel::Sender<PumpMsg>,
+    _control_rx: crossbeam_channel::Receiver<PumpMsg>,
+    clock_queries: Arc<Mutex<Vec<u32>>>,
+}
 
-    #[test]
-    fn distant_deadline_leaves_the_attempt_budget_in_charge() {
-        let far = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 3, Some(far), || {
-            calls += 1;
-            Err(TransportError::Timeout)
-        });
-        assert!(matches!(res, Err(SendError::Transient(_))));
-        assert_eq!(
-            calls, 3,
-            "deep lead: the attempt-count budget still caps retries"
-        );
+/// A pump whose mcu clock walks forward one second on every query, so two
+/// routes that each resolved their own start would be armed a second apart.
+fn buzz_fixture() -> BuzzFixture {
+    let clock_queries: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+    let queries_for_clock = Arc::clone(&clock_queries);
+    let pump = Pump::new(
+        NullSink,
+        PumpCallbacks {
+            mcu_clock_of: Box::new(move |mcu_id| {
+                let mut queries = queries_for_clock.lock_ok();
+                queries.push(mcu_id);
+                #[allow(clippy::cast_possible_truncation)]
+                let now = queries.len() as u64 * BUZZ_CYCLES_PER_SECOND as u64;
+                Some((now, BUZZ_CYCLES_PER_SECOND))
+            }),
+            ..PumpCallbacks::noop(super::stepcompress_sink::SHIM_RING_DEPTH)
+        },
+        None,
+        Arc::new(crate::drain::DrainLedger::new()),
+    );
+    let (control, control_rx) = crossbeam_channel::unbounded();
+    BuzzFixture {
+        pump,
+        control,
+        _control_rx: control_rx,
+        clock_queries,
     }
+}
 
-    #[test]
-    fn dead_transport_closed_fails_fast_no_retry() {
-        let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 10, None, || {
-            calls += 1;
-            Err(TransportError::Closed)
-        });
-        assert!(
-            matches!(res, Err(SendError::Fatal(_))),
-            "Closed = dead transport → Fatal"
-        );
-        assert_eq!(calls, 1, "no retry on a dead transport");
+fn buzz_wave() -> BuzzWave {
+    BuzzWave {
+        freq_start_millihz: 40_000,
+        freq_end_millihz: 40_000,
+        amplitude_nm: 20_000,
+        duration_ms: 100,
+        ramp_ms: 5,
     }
+}
 
-    #[test]
-    fn dead_transport_io_fails_fast_no_retry() {
-        let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 10, None, || {
-            calls += 1;
-            Err(TransportError::Io(std::io::Error::from(
-                std::io::ErrorKind::BrokenPipe,
-            )))
-        });
-        assert!(
-            matches!(res, Err(SendError::Fatal(_))),
-            "Io = dead transport → Fatal"
-        );
-        assert_eq!(calls, 1, "no retry on a dead transport");
-    }
+fn pulse_endpoint(
+    control: &crossbeam_channel::Sender<PumpMsg>,
+    axis: usize,
+    oid: u32,
+) -> Arc<Mutex<StepcompressEndpoint>> {
+    let clock_of: ClockSource = Arc::new(|_| Some((0, BUZZ_CYCLES_PER_SECOND)));
+    let egress: FrameEgress = Arc::new(|_| Ok(()));
+    let motors = vec![step_shim::MotorConfig {
+        oid,
+        microstep_distance: 0.01,
+        invert_dir: false,
+        cycles_per_second: BUZZ_CYCLES_PER_SECOND,
+        min_rearm_cycles: 0,
+        encoder: step_shim::StepEncoder::Classic {
+            max_error_ticks: step_shim::compress::DEFAULT_MAX_ERROR_TICKS,
+        },
+    }];
+    Arc::new(Mutex::new(
+        StepcompressEndpoint::new(
+            EndpointSpec {
+                mcu_id: BUZZ_MCU,
+                shim: step_shim::StepShim::new(motors, super::stepcompress_sink::SHIM_RING_DEPTH),
+                egress,
+                pump_control: control.clone(),
+                clock_of,
+                budget: 4,
+                step_count_query: Arc::new(|_| Ok(0)),
+                link_health: None,
+                barrier_ack_deadline_secs: super::stepcompress_sink::BARRIER_ACK_DEADLINE_SECONDS,
+            },
+            &[crate::pump::StepLaneConfig { axis, oid }],
+        )
+        .expect("one motor on one axis builds a stepcompress endpoint"),
+    ))
+}
 
-    #[test]
-    fn mcu_shutdown_fails_fast_no_retry() {
-        let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 10, None, || {
-            calls += 1;
-            Err(TransportError::McuShutdown("fault -112".into()))
-        });
-        assert!(
-            matches!(res, Err(SendError::Fatal(_))),
-            "McuShutdown is a genuine MCU failure → fail loud, not retry"
-        );
-        assert_eq!(calls, 1, "no retry once the MCU has shut down");
-    }
+fn phase_endpoint(
+    control: &crossbeam_channel::Sender<PumpMsg>,
+    axis: u8,
+    oid: u32,
+) -> Arc<Mutex<SampleEndpoint>> {
+    let clock_of: ClockSource = Arc::new(|_| Some((0, BUZZ_CYCLES_PER_SECOND)));
+    let egress: FrameEgress = Arc::new(|_| Ok(()));
+    let lanes = vec![SampleLaneConfig {
+        axis,
+        oid,
+        cycles_per_second: BUZZ_CYCLES_PER_SECOND,
+        sample_rate_hz: 2_000,
+        position_quantum_mm: 0.01,
+        max_units_per_sample: 4_096,
+        ring_depth: 64,
+    }];
+    let endpoint = SampleEndpoint::new(
+        BUZZ_MCU,
+        &lanes,
+        egress,
+        clock_of,
+        control.clone(),
+        Arc::new(|_| Ok((0, 0))),
+    )
+    .expect("the lane config is representable");
+    Arc::new(Mutex::new(endpoint))
+}
+
+fn submit_buzz(pump: &mut Pump<NullSink>, routes: Vec<BuzzRoute>) -> Result<BuzzToken, String> {
+    let (reply, answer) = mpsc::sync_channel(1);
+    pump.handle_control_msg(PumpMsg::Buzz {
+        params: BuzzParams {
+            routes: routes.into(),
+            wave: buzz_wave(),
+        },
+        reply,
+    });
+    answer.recv().expect("the pump answers every arming")
+}
+
+/// The same pulse endpoint named twice used to pass preflight — every route
+/// looked idle — and then arm once before the duplicate found the endpoint
+/// already sweeping, leaving one transport in motion off a refused request.
+#[test]
+fn a_transport_named_twice_is_refused_with_nothing_armed() {
+    let mut fixture = buzz_fixture();
+    let endpoint = pulse_endpoint(&fixture.control, 0, 7);
+    let route = || BuzzRoute::Pulse {
+        mcu_id: BUZZ_MCU,
+        endpoint: Arc::clone(&endpoint),
+        axis_mask: 0b001,
+        sign_mask: 0,
+    };
+    let error = submit_buzz(&mut fixture.pump, vec![route(), route()])
+        .expect_err("one arming may name a transport once");
+    assert!(
+        error.contains("named twice"),
+        "the duplicate must be named as the reason: {error}"
+    );
+    assert!(
+        endpoint.lock_ok().buzz_complete(),
+        "a refused arming leaves the endpoint untouched"
+    );
+}
+
+/// A phase lane driven with a sign of zero is refused by the endpoint at arm
+/// time. Preflight has to catch it, or the routes ahead of it are already
+/// sweeping when the refusal arrives.
+#[test]
+fn an_invalid_lane_sign_is_refused_before_any_route_is_armed() {
+    let mut fixture = buzz_fixture();
+    let pulse = pulse_endpoint(&fixture.control, 0, 7);
+    let phase = phase_endpoint(&fixture.control, 1, 8);
+    let error = submit_buzz(
+        &mut fixture.pump,
+        vec![
+            BuzzRoute::Pulse {
+                mcu_id: BUZZ_MCU,
+                endpoint: Arc::clone(&pulse),
+                axis_mask: 0b001,
+                sign_mask: 0,
+            },
+            BuzzRoute::Phase {
+                mcu_id: BUZZ_MCU,
+                endpoint: Arc::clone(&phase),
+                lanes: vec![BuzzLane { axis: 1, sign: 0.0 }],
+            },
+        ],
+    )
+    .expect_err("a lane driven with sign 0 drives nothing");
+    assert!(
+        error.contains("sign 0"),
+        "the refusal must name the sign: {error}"
+    );
+    assert!(
+        pulse.lock_ok().buzz_complete(),
+        "the route ahead of the invalid one must not have been armed"
+    );
+}
+
+/// Two transports of one mcu are one sweep: they must be anchored on the one
+/// start the pump resolved for that mcu, not on whatever instant the pump
+/// happened to reach each transport at.
+#[test]
+fn routes_on_one_mcu_are_armed_from_a_single_resolved_start() {
+    let mut fixture = buzz_fixture();
+    let pulse = pulse_endpoint(&fixture.control, 0, 7);
+    let phase = phase_endpoint(&fixture.control, 1, 8);
+    submit_buzz(
+        &mut fixture.pump,
+        vec![
+            BuzzRoute::Pulse {
+                mcu_id: BUZZ_MCU,
+                endpoint: Arc::clone(&pulse),
+                axis_mask: 0b001,
+                sign_mask: 0,
+            },
+            BuzzRoute::Phase {
+                mcu_id: BUZZ_MCU,
+                endpoint: Arc::clone(&phase),
+                lanes: vec![BuzzLane { axis: 1, sign: 1.0 }],
+            },
+        ],
+    )
+    .expect("both idle transports accept one sweep");
+    assert_eq!(
+        *fixture.clock_queries.lock_ok(),
+        vec![BUZZ_MCU],
+        "the start of one mcu is resolved once and shared by its routes"
+    );
+    assert!(
+        !pulse.lock_ok().buzz_complete(),
+        "the pulse lane is sweeping"
+    );
+    assert!(
+        !phase.lock_ok().buzz_complete().expect("no latched fatal"),
+        "the phase lane is sweeping"
+    );
 }

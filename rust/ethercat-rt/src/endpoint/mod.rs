@@ -1,13 +1,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::buzz::BuzzOsc;
 use crate::capture::{Capture, PendingStart, PendingStop};
-use crate::curves::AxisRing;
 use crate::damper::DiffDamperBank;
-use crate::dynamics::DynamicsModel;
 use crate::live_tap::LiveTap;
 use crate::mailbox::MailboxWorker;
-use crate::scale::CountMap;
 use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
 use crate::strain_comp::StrainCompBank;
@@ -15,21 +11,44 @@ use crate::stream_halt::StreamHalt;
 use crate::torque::TorqueGate;
 use crate::trim::DiffTrimBank;
 use crate::wire::status_heartbeat_frame;
+use ethercat_setpoint::dynamics::DynamicsModel;
+use ethercat_setpoint::setpoint::{SampleGrid, SetpointEntry, SetpointRing};
 
 #[cfg(feature = "hw")]
 mod bringup;
 mod commands;
 mod cycle;
 mod drive;
+mod sim;
 #[cfg(test)]
 mod tests;
 
 #[cfg(feature = "hw")]
 pub use bringup::bringup;
+pub use sim::{sim_endpoint, SimConfig, SimDrive};
 
 use drive::DriveChain;
 
-static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
+/// The DC loop's exit latch. Public so a no-hardware endpoint can share it
+/// with the claim wait before `run` takes over.
+pub static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_sigterm(_: libc::c_int) {
+    SIGTERM_RECEIVED.store(true, Ordering::Release);
+}
+
+/// Latch SIGTERM so the DC loop disables the drives and exits cleanly.
+#[allow(unsafe_code)]
+pub fn install_sigterm_handler() {
+    // SAFETY: on_sigterm only touches a static AtomicBool; SA_RESTART (and no
+    // SA_RESETHAND) keeps a second SIGTERM on the clean-shutdown path too.
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = on_sigterm as *const () as libc::sighandler_t;
+        sa.sa_flags = libc::SA_RESTART;
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+    }
+}
 
 pub struct EndpointCtx {
     server: FrameServer,
@@ -43,7 +62,6 @@ pub struct EndpointCtx {
     slave_axes: Vec<u8>,
     velocity_ff: Vec<bool>,
     torque_clamp_tenths: Vec<i16>,
-    ff_lead_ns: Vec<u64>,
     jump_log_counts: Vec<i64>,
     cycle_ns: i64,
     group_delay_ns: u64,
@@ -61,12 +79,26 @@ pub struct EndpointCtx {
     drive_scratch: cycle::DriveScratch,
     run_limits: Vec<(u32, u16)>,
 
-    rings: Vec<AxisRing>,
-    buzz: BuzzOsc,
+    sp_rings: Vec<SetpointRing>,
+    grid: SampleGrid,
+    /// Drive-frame counts that a lane's `pos_counts == 0` maps to, latched at
+    /// the first entry of each anchor epoch.
+    ring_origin: Vec<Option<i32>>,
+    /// Reused per-cycle buffer of the entries played this cycle, so the DC
+    /// path allocates nothing.
+    sp_play_scratch: Vec<Option<SetpointEntry>>,
+    /// Reused decode buffer for one lane block of a `PushSampleRuns` fill, so
+    /// the command path allocates nothing per frame.
+    sp_fill_scratch: Vec<SetpointEntry>,
+    /// Consumed `PushSampleRuns` payloads leave the DC thread here: their
+    /// vectors were allocated by the socket reader, so freeing them inline
+    /// would take that thread's allocator arena lock.
+    reclaim: crate::reclaim::Reclaim,
+    last_grid_index: u64,
+    last_grid_clock: u64,
     damper: DiffDamperBank,
     trim: DiffTrimBank,
     comp: StrainCompBank,
-    cmaps: Vec<Option<CountMap>>,
     last_counts: Vec<Option<i32>>,
     last_written_offset: Vec<i32>,
     report_anchor: Vec<Option<(i32, f64)>>,
@@ -79,7 +111,6 @@ pub struct EndpointCtx {
     gate: TorqueGate,
     capture: Capture,
     live_tap: LiveTap,
-    reclaim: crate::reclaim::Reclaim,
     tap_slots: Vec<u8>,
     cycle_index: u64,
     mailbox: MailboxWorker,
@@ -104,37 +135,15 @@ pub struct EndpointCtx {
     last_dispatch_ns: i64,
     last_pre_work_ns: i64,
     prev_exchange_ns: i64,
-    last_wake_late_ns: i64,
-    last_recv_ns: i64,
-    last_process_ns: i64,
-    last_send_ns: i64,
-    wake_late_max_ns: i64,
-    recv_max_ns: i64,
-    process_max_ns: i64,
-    send_max_ns: i64,
     /// Instant the previous DC exchange returned; the span from here to the
     /// next exchange entry is every non-exchange nanosecond of the loop —
-    /// the region the stage clocks above do not cover.
+    /// the region the stage clocks do not cover.
     prev_exchange_return: Option<std::time::Instant>,
-    last_pre_cycle_ns: i64,
-    last_post_cycle_ns: i64,
-    last_inter_exchange_ns: i64,
-    pre_cycle_max_ns: i64,
-    post_cycle_max_ns: i64,
-    inter_exchange_max_ns: i64,
     last_nivcsw: i64,
-    /// Sub-spans of the post-exchange region — reported on the next cycle's
-    /// fault events so an overrun names the exact call that ate the time.
-    last_fault_ns: i64,
-    last_capture_ns: i64,
-    last_wkc_ns: i64,
-    last_heartbeat_ns: i64,
-    last_telemetry_ns: i64,
-    fault_max_ns: i64,
-    capture_max_ns: i64,
-    wkc_max_ns: i64,
-    heartbeat_max_ns: i64,
-    telemetry_max_ns: i64,
+    /// Per-cycle stage durations and their worst values since the last
+    /// telemetry beat, reported on fault events so an overrun names the
+    /// exact call that ate the time.
+    spans: cycle::CycleSpans,
 }
 
 pub fn run(ctx: &mut EndpointCtx) {
@@ -182,32 +191,71 @@ pub fn run(ctx: &mut EndpointCtx) {
     eprintln!("ec-rt: shutdown complete");
 }
 
+/// Per-lane progress the host paces its stream against: played ring cycles.
+pub(super) fn lane_progress(ctx: &EndpointCtx) -> Vec<u32> {
+    ctx.sp_rings
+        .iter()
+        .map(SetpointRing::played_count)
+        .collect()
+}
+
+/// Trajectory clock the DC grid stamps `index` with, off the same
+/// `(grid_index, grid_clock)` pair every `PushSampleRunsResponse` echoes, so
+/// the host's span clocks and this endpoint's cursor share one domain.
+fn grid_clock_of(ctx: &EndpointCtx, index: u64) -> u64 {
+    let interval_ns = ctx.grid.interval_ns();
+    if index >= ctx.last_grid_index {
+        ctx.last_grid_clock + (index - ctx.last_grid_index) * interval_ns
+    } else {
+        ctx.last_grid_clock
+            .saturating_sub((ctx.last_grid_index - index) * interval_ns)
+    }
+}
+
+/// Per-lane playback clock the heartbeat carries beside the progress counts:
+/// the exclusive cursor in trajectory nanoseconds, so the host retires a run
+/// exactly when its `end_clock` has been consumed. Zero until a lane plays.
+pub(super) fn lane_playback_clocks(ctx: &EndpointCtx) -> Vec<u64> {
+    ctx.sp_rings
+        .iter()
+        .map(|ring| {
+            ring.played_cursor()
+                .map_or(0, |index| grid_clock_of(ctx, index))
+        })
+        .collect()
+}
+
+pub(super) fn all_lanes_idle(ctx: &EndpointCtx) -> bool {
+    ctx.sp_rings.iter().all(SetpointRing::is_empty)
+}
+
 pub(super) fn respond_fault_heartbeat(
     ctx: &mut EndpointCtx,
     engine_state: u8,
     error_code: u16,
 ) -> Vec<u32> {
-    let retired: Vec<u32> = ctx.rings.iter().map(|r| r.retired_count()).collect();
+    let retired = lane_progress(ctx);
+    let playback = lane_playback_clocks(ctx);
     ctx.server.respond(&status_heartbeat_frame(
         engine_state,
         error_code,
         &retired,
+        &playback,
         ctx.ff_saturation,
     ));
     retired
 }
 
 pub(super) fn discard_motion(ctx: &mut EndpointCtx) {
-    for r in &mut ctx.rings {
+    for r in &mut ctx.sp_rings {
         r.reset();
     }
-    for c in &mut ctx.cmaps {
-        *c = None;
+    for o in &mut ctx.ring_origin {
+        *o = None;
     }
     for lc in &mut ctx.last_counts {
         *lc = None;
     }
-    ctx.buzz.clear();
     // A discard re-anchors the commanded frame (homing trip, stop, sensorless
     // trip), so the pin oscillator's predicted deflection is stale — restart
     // it clean.

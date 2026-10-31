@@ -1,9 +1,6 @@
 // STM32F103 (Cortex-M3) motion-engine timer backend. Mirrors runtime_tick_f4.c;
 // high-density F103 (xC/xD/xE) has both TIM5 and DWT, so the structure is
-// identical. The one hardware difference that changes code: every F1 timer is
-// 16-bit, so the step-output compare cannot hold a full 32-bit horizon and
-// far-future targets are chased in <= STEP_OUT_MAX_DELTA hops (see
-// step_output_timer_program).
+// identical.
 
 #include "autoconf.h"
 #include "generic/armcm_boot.h"
@@ -17,8 +14,6 @@
 extern const uint32_t runtime_clock_freq;
 
 extern void* runtime_handle;
-
-static void step_output_timer_init(void);
 
 // Kernel clock accounts for the APB timer-doubler; use this, not
 // runtime_clock_freq, for ARR and delta scaling.
@@ -93,16 +88,12 @@ runtime_tick_init(void)
     DWT->CYCCNT = 0;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 
-    // TIM5 and the step-output timer must be EQUAL priority (SPSC invariant;
-    // see motion_nvic_prio.h).
     NVIC_SetPriority(TIM5_IRQn, MOTION_NVIC_PRIO);
 
     TIM5->EGR  = TIM_EGR_UG;
     TIM5->SR   = ~TIM_SR_UIF;
     TIM5->CR1 |= TIM_CR1_CEN;
     NVIC_EnableIRQ(TIM5_IRQn);
-
-    step_output_timer_init();
 }
 
 // -311 stacked-PC capture (mirror of H7). NOT static: the naked asm is the sole
@@ -172,118 +163,5 @@ TIM5_IRQHandler_body(uint32_t *frame)
 }
 
 DECL_ARMCM_IRQ(TIM5_IRQHandler, TIM5_IRQn);
-
-static volatile uint32_t step_out_target;
-static volatile uint8_t  step_out_running;
-static uint32_t          step_out_clkdiv = 1;
-
-// TIM2 is 16-bit on F1: CNT/CCR1 wrap every 65536 timer ticks, and a wrap-aware
-// signed compare is only unambiguous over half that span. Anything further out
-// is programmed as a partial hop and re-programmed from the handler until the
-// absolute DWT target is reached.
-#define STEP_OUT_MAX_DELTA 0x8000u
-
-static void
-step_output_timer_program(void)
-{
-    uint32_t now = runtime_cyccnt_read();
-    uint32_t dwt_delta = step_out_target - now;
-    if ((int32_t)dwt_delta <= 0)
-        dwt_delta = step_out_clkdiv;
-    uint32_t delta = dwt_delta / step_out_clkdiv;
-    if (delta == 0)
-        delta = 1;
-    if (delta > STEP_OUT_MAX_DELTA)
-        delta = STEP_OUT_MAX_DELTA;
-    TIM2->CCR1 = (TIM2->CNT + delta) & 0xFFFFu;
-    TIM2->SR = ~TIM_SR_CC1IF;
-    TIM2->DIER |= TIM_DIER_CC1IE;
-    // A compare passed between the CNT read above and going live won't match
-    // again for a full wrap; force the handler so a re-arm can never leave
-    // step_out_running=1 with a silent timer (the consumer-stall overflow).
-    if ((int16_t)((uint16_t)TIM2->CNT - (uint16_t)TIM2->CCR1) >= 0)
-        NVIC_SetPendingIRQ(TIM2_IRQn);
-}
-
-// used,externally_visible: Rust-only caller; must survive --gc-sections LTO.
-__attribute__((used, externally_visible))
-void
-step_output_timer_arm(uint32_t cycle_abs)
-{
-    if (cycle_abs == STEP_OUTPUT_DISABLE) {
-        TIM2->DIER &= ~TIM_DIER_CC1IE;
-        step_out_running = 0;
-        return;
-    }
-    step_out_target = cycle_abs;
-    step_out_running = 1;
-    step_output_timer_program();
-}
-
-__attribute__((used, externally_visible))
-uint32_t
-step_output_timer_armed_target(void)
-{
-    return step_out_target;
-}
-
-__attribute__((used, externally_visible))
-uint8_t
-step_output_timer_is_running(void)
-{
-    return step_out_running;
-}
-
-static void
-step_output_timer_init(void)
-{
-    NVIC_DisableIRQ(TIM2_IRQn);
-
-    RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;
-    __DSB();
-
-    TIM2->CR1 &= ~TIM_CR1_CEN;
-    TIM2->SR = 0;
-    TIM2->PSC = 0;
-    TIM2->ARR = 0xFFFFu;
-    TIM2->CCMR1 = 0;
-    TIM2->CCR1 = 0;
-    TIM2->DIER = 0;
-    TIM2->CR1 = TIM_CR1_ARPE;
-    TIM2->EGR = TIM_EGR_UG;
-    TIM2->SR = 0;
-    TIM2->CR1 |= TIM_CR1_CEN;
-
-    step_out_running = 0;
-    step_out_target = 0;
-    step_out_clkdiv = CONFIG_CLOCK_FREQ / motion_timer_clk();
-
-    NVIC_SetPriority(TIM2_IRQn, MOTION_NVIC_PRIO);
-    NVIC_EnableIRQ(TIM2_IRQn);
-}
-
-void
-TIM2_IRQHandler(void)
-{
-    extern void diag_stepout_account(uint32_t enter, uint32_t exit);
-    uint32_t diag_enter = DWT->CYCCNT;
-
-    TIM2->SR = ~TIM_SR_CC1IF;
-
-    if (step_out_running
-        && (int32_t)(step_out_target - runtime_cyccnt_read()) > 0) {
-        step_output_timer_program();
-        diag_stepout_account(diag_enter, DWT->CYCCNT);
-        return;
-    }
-
-    extern uint32_t step_output_event(void *rt);
-    uint32_t next = step_output_event(runtime_handle);
-    step_output_timer_arm(next);
-
-    diag_stepout_account(diag_enter, DWT->CYCCNT);
-}
-
-DECL_ARMCM_IRQ(TIM2_IRQHandler, TIM2_IRQn);
 
 #endif

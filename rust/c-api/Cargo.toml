@@ -35,9 +35,13 @@ mcu-sim = ["runtime/mcu-sim"]
 # runtime crate.  The Makefile appends `motion-module-stepper` to
 # MCU_RUST_FEATURES when CONFIG_MOTION_MODULE_STEPPER=y.
 motion-module-stepper = ["runtime/motion-module-stepper"]
+# Pass-through: sample-stream execution for phase lanes. The Makefile appends
+# `sample-stepping` to MCU_RUST_FEATURES when CONFIG_SAMPLE_STEPPING=y.
+sample-stepping = ["runtime/sample-stepping"]
 
 [dependencies]
 runtime = { path = "../runtime", default-features = false }
+runtime-contract = { path = "../runtime-contract" }
 cbindgen = { version = "0.29", optional = true, package = "cbindgen" }
 # Required for RMW atomic operations on MCU targets: on thumbv7em lowers to
 # native LDREX/STREX; on thumbv6m (STM32G0) uses interrupt-masking fallback.

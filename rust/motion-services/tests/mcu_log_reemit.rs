@@ -89,8 +89,8 @@ fn re_emit_closure_produces_schema_conformant_line() {
     let event = McuLogEvent {
         mcu_tick: 15 * 100_000_000u64,
         level: 2,
-        subsystem: 2,
-        event: 1,
+        subsystem: 0,
+        event: 5,
         code: 0xFEC9,
         seq: 7,
         args: [100, 200],
@@ -104,8 +104,8 @@ fn re_emit_closure_produces_schema_conformant_line() {
 
     assert_eq!(rec["source"], "mcu-h7");
     assert_eq!(rec["level"], "warn");
-    assert_eq!(rec["subsystem"], "tick");
-    assert_eq!(rec["event"], "tick.interval_exceeded");
+    assert_eq!(rec["subsystem"], "runtime");
+    assert_eq!(rec["event"], "runtime.mcu_reset");
     assert_eq!(rec["session_id"], "k-test-session");
     assert_eq!(rec["print_id"], "print-42");
     assert_eq!(rec["seq"], 7);

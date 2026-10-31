@@ -1,7 +1,5 @@
 #![allow(unsafe_code)]
 
-use crate::MIN_PARAMETRIC_SPEED;
-use crate::view::{NurbsView, VectorNurbsView};
 use crate::{MAX_DEGREE, WORKSPACE_SIZE};
 
 pub(crate) use crate::knot::find_knot_span;
@@ -41,13 +39,13 @@ pub(crate) fn de_boor_inner(cps: &[f64], knots: &[f64], degree: u8, u: f64) -> f
 }
 
 #[inline]
-pub fn eval<V: NurbsView>(curve: &V, u: f64) -> f64 {
+pub fn eval(curve: &crate::ScalarNurbs, u: f64) -> f64 {
     debug_assert!((curve.degree() as usize) <= MAX_DEGREE);
     de_boor_inner(curve.control_points(), curve.knots(), curve.degree(), u)
 }
 
 #[inline]
-pub fn vector_eval<V: VectorNurbsView<N>, const N: usize>(curve: &V, u: f64) -> [f64; N] {
+pub fn vector_eval<const N: usize>(curve: &crate::VectorNurbs<N>, u: f64) -> [f64; N] {
     debug_assert!((curve.degree() as usize) <= MAX_DEGREE);
     let p = curve.degree() as usize;
     let knots = curve.knots();
@@ -92,130 +90,6 @@ pub fn vector_eval<V: VectorNurbsView<N>, const N: usize>(curve: &V, u: f64) -> 
         result[axis] = unsafe { *d_axes[axis].get_unchecked(p) };
     }
     result
-}
-
-#[inline]
-pub fn eval_polynomial_with_derivative(
-    cps: &[f64],
-    knots: &[f64],
-    degree: u8,
-    u: f64,
-) -> (f64, f64) {
-    debug_assert!((degree as usize) <= MAX_DEGREE);
-    debug_assert!(knots.len() == cps.len() + (degree as usize) + 1);
-
-    if degree == 0 {
-        let p = 0;
-        let n = cps.len();
-        let k = find_knot_span(knots, p, n, u);
-        debug_assert!(k < n);
-        return (unsafe { *cps.get_unchecked(k) }, 0.0);
-    }
-
-    let p = degree as usize;
-    let n = cps.len();
-    let k = find_knot_span(knots, p, n, u);
-
-    debug_assert!(k >= p && k < n, "find_knot_span invariant: k ∈ [p, n-1]");
-    debug_assert!(knots.len() == n + p + 1, "knots len == n + p + 1");
-
-    let mut d = [0.0; WORKSPACE_SIZE];
-    let mut dd = [0.0; WORKSPACE_SIZE];
-    for j in 0..=p {
-        unsafe { *d.get_unchecked_mut(j) = *cps.get_unchecked(k - p + j) };
-    }
-
-    for r in 1..=p {
-        for j in (r..=p).rev() {
-            let lo = unsafe { *knots.get_unchecked(k - p + j) };
-            let hi = unsafe { *knots.get_unchecked(k + 1 + j - r) };
-            let denom = hi - lo;
-            let old_d_jm1 = unsafe { *d.get_unchecked(j - 1) };
-            let old_d_j = unsafe { *d.get_unchecked(j) };
-            let old_dd_jm1 = unsafe { *dd.get_unchecked(j - 1) };
-            let old_dd_j = unsafe { *dd.get_unchecked(j) };
-            if denom > 0.0 {
-                let inv_denom = 1.0 / denom;
-                let alpha = (u - lo) * inv_denom;
-                let one_minus_alpha = 1.0 - alpha;
-                unsafe {
-                    *dd.get_unchecked_mut(j) = one_minus_alpha * old_dd_jm1
-                        + alpha * old_dd_j
-                        + (old_d_j - old_d_jm1) * inv_denom;
-                    *d.get_unchecked_mut(j) = crate::fmadd(old_d_j - old_d_jm1, alpha, old_d_jm1);
-                }
-            } else {
-                unsafe {
-                    *d.get_unchecked_mut(j) = old_d_jm1;
-                    *dd.get_unchecked_mut(j) = old_dd_jm1;
-                }
-            }
-        }
-    }
-
-    unsafe { (*d.get_unchecked(p), *dd.get_unchecked(p)) }
-}
-
-#[inline]
-pub fn eval_polynomial(cps: &[f64], knots: &[f64], degree: u8, u: f64) -> f64 {
-    debug_assert!((degree as usize) <= MAX_DEGREE);
-    debug_assert!(knots.len() == cps.len() + (degree as usize) + 1);
-    de_boor_inner(cps, knots, degree, u)
-}
-
-#[inline]
-pub fn eval_derivative(cps: &[f64], knots: &[f64], degree: u8, u: f64) -> f64 {
-    debug_assert!((degree as usize) <= MAX_DEGREE);
-    if degree == 0 {
-        return 0.0;
-    }
-    let p = degree as usize;
-    let n = cps.len();
-    if n < 2 || knots.len() < n + p + 1 {
-        return 0.0;
-    }
-    let new_p = p - 1;
-    let new_n = n - 1;
-    let lowered_knots = &knots[1..n + p];
-
-    let k = find_knot_span(lowered_knots, new_p, new_n, u);
-
-    debug_assert!(
-        k >= new_p && k < new_n,
-        "find_knot_span invariant on lowered knots"
-    );
-
-    let mut d = [0.0; WORKSPACE_SIZE];
-    let p_t = f64::from(degree);
-    for j in 0..=new_p {
-        let i = k - new_p + j;
-        let denom = unsafe { *knots.get_unchecked(i + p + 1) - *knots.get_unchecked(i + 1) };
-        unsafe {
-            *d.get_unchecked_mut(j) = if denom > 0.0 {
-                p_t * (*cps.get_unchecked(i + 1) - *cps.get_unchecked(i)) / denom
-            } else {
-                0.0
-            };
-        }
-    }
-
-    for r in 1..=new_p {
-        for j in (r..=new_p).rev() {
-            let knot_lo = unsafe { *lowered_knots.get_unchecked(k - new_p + j) };
-            let knot_hi = unsafe { *lowered_knots.get_unchecked(k + 1 + j - r) };
-            let denom = knot_hi - knot_lo;
-            let alpha = if denom > 0.0 {
-                (u - knot_lo) / denom
-            } else {
-                0.0
-            };
-            let dj = unsafe { *d.get_unchecked(j) };
-            let djm1 = unsafe { *d.get_unchecked(j - 1) };
-            unsafe { *d.get_unchecked_mut(j) = crate::fmadd(dj - djm1, alpha, djm1) };
-        }
-    }
-
-    unsafe { *d.get_unchecked(new_p) }
 }
 
 #[must_use]
@@ -276,27 +150,63 @@ pub fn vector_derivative<const N: usize>(curve: &crate::VectorNurbs<N>) -> crate
         .expect("degree-lowered NURBS satisfies invariants by construction")
 }
 
-pub fn curvature_from_derivs<const N: usize>(
-    first_deriv: &crate::VectorNurbs<N>,
-    second_deriv: &crate::VectorNurbs<N>,
+/// Derivatives `C(u), C'(u), …, C^(order)(u)` into `out[..=order]` from one
+/// knot-span lookup. Each order is de Boor on the local hodograph, so the
+/// control-point differences are formed before any basis weight touches
+/// them and a curve carrying a large offset keeps small derivatives exact;
+/// `out[0]` is bit-identical to [`eval`]. Orders past the degree are zero.
+/// At a knot the right-hand piece is differentiated, matching [`eval`]'s
+/// span choice.
+pub fn eval_derivatives(
+    cps: &[f64],
+    knots: &[f64],
+    degree: u8,
     u: f64,
-) -> f64 {
-    let r_prime = vector_eval(&first_deriv.as_view(), u);
-    let r_double = vector_eval(&second_deriv.as_view(), u);
+    order: usize,
+    out: &mut [f64],
+) {
+    debug_assert!((degree as usize) <= MAX_DEGREE);
+    debug_assert!(knots.len() == cps.len() + (degree as usize) + 1);
+    assert!(
+        out.len() > order,
+        "derivative output holds orders 0..={order}"
+    );
+    let p = degree as usize;
+    let n = cps.len();
+    let span = find_knot_span(knots, p, n, u);
+    out[..=order].fill(0.0);
 
-    assert!(N == 3, "curvature_from_derivs requires N == 3");
-
-    let cx = r_prime[1] * r_double[2] - r_prime[2] * r_double[1];
-    let cy = r_prime[2] * r_double[0] - r_prime[0] * r_double[2];
-    let cz = r_prime[0] * r_double[1] - r_prime[1] * r_double[0];
-    let cross_norm = (cx * cx + cy * cy + cz * cz).sqrt();
-
-    let speed_sq = r_prime[0] * r_prime[0] + r_prime[1] * r_prime[1] + r_prime[2] * r_prime[2];
-    let speed = speed_sq.sqrt();
-    let speed_cubed = speed * speed * speed;
-
-    let floor = MIN_PARAMETRIC_SPEED;
-    cross_norm / speed_cubed.max(floor)
+    let mut hodograph = [0.0; WORKSPACE_SIZE];
+    hodograph[..=p].copy_from_slice(&cps[span - p..=span]);
+    for k in 0..=order.min(p) {
+        let reduced = p - k;
+        if k > 0 {
+            let factor = (reduced + 1) as f64;
+            for j in 0..=reduced {
+                let denominator = knots[span + j + 1] - knots[span - p + j + k];
+                hodograph[j] = if denominator > 0.0 {
+                    factor * (hodograph[j + 1] - hodograph[j]) / denominator
+                } else {
+                    0.0
+                };
+            }
+        }
+        let mut d = hodograph;
+        for r in 1..=reduced {
+            for j in (r..=reduced).rev() {
+                let knot_lo = knots[span - p + k + j];
+                let knot_hi = knots[span + 1 + j - r];
+                let denominator = knot_hi - knot_lo;
+                let alpha = if denominator > 0.0 {
+                    (u - knot_lo) / denominator
+                } else {
+                    0.0
+                };
+                d[j] = crate::fmadd(d[j] - d[j - 1], alpha, d[j - 1]);
+            }
+        }
+        out[k] = d[reduced];
+    }
 }
 
 #[cfg(test)]

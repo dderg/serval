@@ -8,7 +8,7 @@ fn seed_aligns_last_low_so_first_widen_does_not_spuriously_wrap() {
     assert_eq!(state.last_low, 0x4000_0000);
 
     let baseline: u64 = 0x0000_0003_1000_0000;
-    state.seed_high(baseline);
+    state.seed(baseline);
 
     assert_eq!(
         state.last_low, 0x1000_0000,
@@ -39,17 +39,4 @@ fn wrap_increments_high() {
     let _ = state.widen(0xFFFF_FF00);
     let now_post_wrap = state.widen(0x0000_0100);
     assert_eq!(now_post_wrap, (1u64 << 32) | 0x0000_0100);
-}
-
-#[test]
-fn one_tick_cycles_parametric() {
-    assert_eq!(one_tick_cycles(520_000_000), 13_000);
-    assert_eq!(one_tick_cycles(550_000_000), 13_750);
-    assert_eq!(one_tick_cycles(480_000_000), 12_000);
-}
-
-#[test]
-fn min_segment_cycles_is_two_ticks() {
-    assert_eq!(min_segment_cycles(520_000_000), 26_000);
-    assert_eq!(min_segment_cycles(550_000_000), 27_500);
 }

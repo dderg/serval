@@ -36,6 +36,7 @@ jobs:
               tools/sim/tests/test_neptune_print.py
               tools/sim/tests/test_print.py
               tools/sim/tests/test_first_extrude.py
+              tools/sim/tests/test_print_pressure.py
           - shard: beacon
             targets: >-
               tools/sim/tests/test_beacon.py
@@ -53,6 +54,7 @@ jobs:
               --ignore=tools/sim/tests/test_neptune_print.py
               --ignore=tools/sim/tests/test_print.py
               --ignore=tools/sim/tests/test_first_extrude.py
+              --ignore=tools/sim/tests/test_print_pressure.py
               --ignore=tools/sim/tests/test_beacon.py
               --ignore=tools/sim/tests/test_beacon_scan_path.py
               --ignore=tools/sim/tests/test_bed_mesh_transform.py

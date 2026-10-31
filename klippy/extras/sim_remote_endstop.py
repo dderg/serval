@@ -1,22 +1,11 @@
-# Sim-only virtual-endstop provider exercising the Spec B remote-trigger
-# contract end to end: RemoteMotionEndstop arming, trsync relay, terminal
-# reason verification, and the measured-position override. Reference
-# implementation for external-probe providers (Spec D).
 import logging
-import mmap
-import os
-import struct
 
 from klippy import pins
 from klippy.motion_endstop import RemoteMotionEndstop
 
 REASON_ENDSTOP_HIT = 1
-REASON_COMMS_TIMEOUT = 4
 
 MAX_TRIP_TO_STOP_TRAVEL = 0.5
-# The trip and stop positions are reconstructed independently through the
-# motion-history interpolation, so the trip can land a few µm past the stop
-# from float noise alone; only a gross negative indicates a clock-domain bug.
 MIN_TRIP_TO_STOP_TRAVEL = -0.01
 
 
@@ -37,27 +26,9 @@ class SimRemoteEndstop:
         )
         self.oid = self.mcu.create_oid()
         self._trsync_start_cmd = None
-        self._trsync_trigger_cmd = None
+        self._trsync_set_timeout_cmd = None
         self._last_reason = None
-        self._trigger_timer = None
-        self._trigger_deadline_v = None
         self._trip_start_pos = None
-        # trigger_delay emulates a physical event, so it elapses in virtual
-        # time: vtime legally slips against the wall clock while pacer
-        # floors hold it, and a wall-clock delay would fire at a
-        # slip-dependent position. Klippy itself never loads libvtime, so
-        # read the shared clock word directly.
-        self._vtime_map = None
-        shm_name = os.environ.get("VTIME_SHM_NAME")
-        if shm_name:
-            try:
-                with open("/dev/shm" + shm_name, "r+b") as shm_file:
-                    self._vtime_map = mmap.mmap(shm_file.fileno(), 8)
-            except OSError:
-                logging.exception(
-                    "sim_remote_endstop: VTIME_SHM_NAME set but unreadable;"
-                    " falling back to the wall clock"
-                )
         self.mcu.register_config_callback(self._build_config)
         self.mcu.get_command_channel().register_response(
             self._handle_trsync_state, "trsync_state", self.oid
@@ -74,8 +45,8 @@ class SimRemoteEndstop:
             "trsync_start oid=%c report_clock=%u report_ticks=%u"
             " expire_reason=%c"
         )
-        self._trsync_trigger_cmd = self.mcu.lookup_command(
-            "trsync_trigger oid=%c reason=%c"
+        self._trsync_set_timeout_cmd = self.mcu.lookup_command(
+            "trsync_set_timeout oid=%c clock=%u"
         )
 
     def _handle_trsync_state(self, params):
@@ -96,34 +67,20 @@ class SimRemoteEndstop:
     def get_position_endstop(self):
         return self.trigger_height
 
-    def _virtual_now(self):
-        if self._vtime_map is not None:
-            return struct.unpack_from("<Q", self._vtime_map, 0)[0] / 1e9
-        return self.printer.get_reactor().monotonic()
-
     def trip_move_begin(self, entry):
         self._last_reason = None
         toolhead = self.printer.lookup_object("toolhead")
         self._trip_start_pos = list(toolhead.get_position())
-        self._trsync_start_cmd.send([self.oid, 0, 0, REASON_COMMS_TIMEOUT])
         reactor = self.printer.get_reactor()
-        self._trigger_deadline_v = self._virtual_now() + self.trigger_delay
-        self._trigger_timer = reactor.register_timer(
-            self._fire_trigger, reactor.monotonic() + 0.002
+        print_time = self.mcu.estimated_print_time(reactor.monotonic())
+        trigger_clock = self.mcu.get_clocksync().print_time_to_clock(
+            print_time + self.trigger_delay
         )
-
-    def _fire_trigger(self, eventtime):
-        if self._virtual_now() < self._trigger_deadline_v:
-            return eventtime + 0.002
-        logging.info("sim_remote_endstop: firing trsync_trigger")
-        self._trsync_trigger_cmd.send([self.oid, REASON_ENDSTOP_HIT])
-        return self.printer.get_reactor().NEVER
+        self._trsync_start_cmd.send([self.oid, 0, 0, REASON_ENDSTOP_HIT])
+        self._trsync_set_timeout_cmd.send([self.oid, trigger_clock])
 
     def trip_move_end(self, entry):
         reactor = self.printer.get_reactor()
-        if self._trigger_timer is not None:
-            reactor.unregister_timer(self._trigger_timer)
-            self._trigger_timer = None
         deadline = reactor.monotonic() + 2.0
         while self._last_reason is None:
             if reactor.monotonic() > deadline:

@@ -12,9 +12,10 @@ max_velocity: 300
 #   Required. Must be above 0. Cartesian velocity limit in mm/s.
 max_accel: 3000
 #   Required. Must be above 0. Cartesian acceleration limit in mm/s^2.
-#max_jerk: 6000
-#   Optional. Default is 0, i.e. jerk limiting is disabled. Must be
-#   >= 0. A value of 0 is converted to an unlimited jerk value.
+#max_jerk: 0
+#   Optional. Default is 0, i.e. jerk limiting is disabled. Only 0 is
+#   accepted — the continuous trajectory pipeline rejects a finite jerk
+#   limit.
 #square_corner_velocity: 5
 #   Optional legacy alias. Default is 5. Must be >= 0. Set this XOR
 #   corner_deviation; it is converted to the corner-deviation budget.
@@ -29,15 +30,6 @@ max_accel: 3000
 #   Optional. Default is 0.005 mm. Must be > 0 and <= 1.
 #max_accel_deviation: 50
 #   Optional. Default is 50 mm/s^2. Must be > 0.
-#pieces_wire_budget: 1024
-#   Optional. Default is 1024 bytes. Must be 256..8192. Bytes one serial
-#   PushPieces transaction may carry. The default is sized for 500 kbaud
-#   UART; USB CDC transports move ~1 MB/s and can amortize their round
-#   trip over larger frames.
-#pieces_inflight: 12
-#   Optional. Default is 12. Must be 1..16. PushPieces bundles the host
-#   keeps in flight per serial MCU before waiting for the oldest
-#   response. 1 restores classic stop-and-wait delivery.
 ```
 
 `corner_deviation` is the canonical corner budget. Setting both corner options is an error. `max_accel_to_decel` and `minimum_cruise_ratio` are explicitly unsupported rather than ignored.
@@ -198,16 +190,9 @@ position_max: 220
 #   Optional. Default is homing_speed. Must be above 0.
 #min_home_dist: 5
 #   Optional. Default is homing_retract_dist. Must be >= 0.
-#use_sensorless_homing: False
-#   Optional. Default is False unless endstop_pin is a virtual endstop.
-#second_homing_speed: 2.5
-#   Optional. Default is homing_speed / 2, or homing_speed for a virtual
-#   endstop. Must be above 0.
 #homing_positive_dir:
 #   Optional. Default is inferred from position_endstop and the travel range;
 #   an ambiguous interior endstop is an error.
-#homing_accel:
-#   Optional. Default is None. If set, must be above 0.
 ```
 
 A dual-motor axis (one motor per gantry side) can carry one switch per motor.

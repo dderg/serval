@@ -38,16 +38,16 @@ fn spawn_stub(mut peer: UnixStream, reply_kind: MessageKind, reply_body: Vec<u8>
 #[test]
 fn round_trips_a_call_by_correlation_id() {
     let (client, server) = UnixStream::pair().unwrap();
-    spawn_stub(
-        server,
-        MessageKind::PushPiecesResponse,
-        vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    );
+    spawn_stub(server, MessageKind::RuntimeCapsResponse, Vec::new());
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
     let (kind, _body) = conn
-        .mcu_call(MessageKind::PushPieces, vec![0; 8], Duration::from_secs(2))
+        .mcu_call(
+            MessageKind::QueryRuntimeCaps,
+            Vec::new(),
+            Duration::from_secs(2),
+        )
         .expect("call ok");
-    assert_eq!(kind, MessageKind::PushPiecesResponse);
+    assert_eq!(kind, MessageKind::RuntimeCapsResponse);
 }
 
 #[test]
@@ -57,7 +57,11 @@ fn timeout_still_timeout_when_peer_alive_silent() {
     // which would fire on EOF).
     let (client, server) = UnixStream::pair().unwrap();
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
-    let r = conn.mcu_call(MessageKind::PushPieces, vec![], Duration::from_millis(150));
+    let r = conn.mcu_call(
+        MessageKind::QueryRuntimeCaps,
+        Vec::new(),
+        Duration::from_millis(150),
+    );
     assert!(matches!(r, Err(TransportError::Timeout)), "got {r:?}");
     drop(server);
 }
@@ -76,7 +80,11 @@ fn reader_death_wakes_waiter_with_closed() {
     });
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
     let start = Instant::now();
-    let r = conn.mcu_call(MessageKind::PushPieces, vec![0; 8], Duration::from_secs(10));
+    let r = conn.mcu_call(
+        MessageKind::QueryRuntimeCaps,
+        Vec::new(),
+        Duration::from_secs(10),
+    );
     assert!(matches!(r, Err(TransportError::Closed)), "got {r:?}");
     assert!(
         start.elapsed() < Duration::from_secs(2),
@@ -94,6 +102,7 @@ fn make_heartbeat_frame(retired_counts: &[u32]) -> Vec<u8> {
         engine_state: 1,
         fault_code: 0,
         retired_counts: retired_counts.to_vec(),
+        playback_clocks: vec![0; retired_counts.len()],
         ff_saturation_count: 0,
     };
     let body = hb.encoded_to_vec();
@@ -142,8 +151,12 @@ fn spawn_stub_with_event(
 fn heartbeat_event_during_call_invokes_callback() {
     let (client, server) = UnixStream::pair().unwrap();
     let hb_frame = make_heartbeat_frame(&[42u32]);
-    let resp_body = vec![0u8; 20]; // PushPiecesResponse: i32 + u64 + u64
-    spawn_stub_with_event(server, MessageKind::PushPiecesResponse, resp_body, hb_frame);
+    spawn_stub_with_event(
+        server,
+        MessageKind::RuntimeCapsResponse,
+        Vec::new(),
+        hb_frame,
+    );
 
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
     let last_retired = Arc::new(AtomicU32::new(0));
@@ -155,9 +168,13 @@ fn heartbeat_event_during_call_invokes_callback() {
     }));
 
     let (kind, _body) = conn
-        .mcu_call(MessageKind::PushPieces, vec![0; 8], Duration::from_secs(2))
+        .mcu_call(
+            MessageKind::QueryRuntimeCaps,
+            Vec::new(),
+            Duration::from_secs(2),
+        )
         .expect("call ok");
-    assert_eq!(kind, MessageKind::PushPiecesResponse);
+    assert_eq!(kind, MessageKind::RuntimeCapsResponse);
 
     // Callback and response now both land on the reader thread; the callback
     // may fire just after the call returns, so spin briefly.
@@ -173,6 +190,7 @@ fn make_heartbeat_frame_full(engine_state: u8, fault_code: u16, retired_counts: 
         engine_state,
         fault_code,
         retired_counts: retired_counts.to_vec(),
+        playback_clocks: vec![0; retired_counts.len()],
         ff_saturation_count: 0,
     };
     let body = hb.encoded_to_vec();
@@ -356,13 +374,12 @@ fn spawn_streaming_stub(mut peer: UnixStream, hb_period: Duration) {
             for f in frames {
                 if let Frame::Kalico { payload, .. } = f {
                     let (hdr, _b) = decode_message_header(&payload).unwrap();
-                    let mut out = encode_message_header(
-                        MessageKind::PushPiecesResponse,
+                    let out = encode_message_header(
+                        MessageKind::RuntimeCapsResponse,
                         MESSAGE_VERSION_DEFAULT,
                         hdr.correlation_id,
                     )
                     .to_vec();
-                    out.extend_from_slice(&[0u8; 20]);
                     let frame = encode_frame(CHANNEL_CONTROL, &out);
                     if peer.write_all(&frame).is_err() {
                         stop.store(true, Ordering::Release);
@@ -400,9 +417,13 @@ fn concurrent_call_does_not_inflate_rtt_while_heartbeats_flow() {
     let start = Instant::now();
     for _ in 0..CALLS {
         let (kind, _b) = conn
-            .mcu_call(MessageKind::PushPieces, vec![0; 8], Duration::from_secs(2))
+            .mcu_call(
+                MessageKind::QueryRuntimeCaps,
+                Vec::new(),
+                Duration::from_secs(2),
+            )
             .expect("call ok");
-        assert_eq!(kind, MessageKind::PushPiecesResponse);
+        assert_eq!(kind, MessageKind::RuntimeCapsResponse);
     }
     let elapsed = start.elapsed();
     assert!(

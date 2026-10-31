@@ -53,7 +53,7 @@ class ZAdjustHelper:
             if delta < 1e-6:
                 continue
             force_move.manual_move(stepper, delta, speed, accel)
-        toolhead.wait_moves()
+        toolhead.flush_step_generation()
         curpos = toolhead.get_position()
         curpos[2] -= reference
         toolhead.set_position(curpos)

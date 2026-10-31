@@ -15,25 +15,17 @@ fn whitespace_only_yields_nothing() {
 }
 
 #[test]
-fn pure_comment_yields_comment_token() {
-    let toks = collect("; just a comment\n");
-    assert_eq!(toks.len(), 1);
-    match &toks[0] {
-        Ok(Token::Comment { text, line_no }) => {
-            assert_eq!(text.as_ref(), "just a comment");
-            assert_eq!(*line_no, 1);
-        }
-        other => panic!("expected Comment, got {other:?}"),
-    }
+fn comment_lines_yield_no_tokens() {
+    assert!(collect("; just a comment\n").is_empty());
 }
 
 #[test]
 fn line_numbers_are_one_indexed() {
-    let toks = collect("\n\n; third line\n");
+    let toks = collect("\n\n G1 X1\n");
     assert_eq!(toks.len(), 1);
     match &toks[0] {
-        Ok(Token::Comment { line_no, .. }) => assert_eq!(*line_no, 3),
-        other => panic!("expected Comment, got {other:?}"),
+        Ok(Token::Command { line_no, .. }) => assert_eq!(*line_no, 3),
+        other => panic!("expected Command, got {other:?}"),
     }
 }
 
@@ -133,12 +125,12 @@ fn numeric_token_without_letter_returns_error() {
 }
 
 #[test]
-fn lowercase_param_letter_returns_error() {
+fn lowercase_param_letter_is_normalized() {
     let toks = collect("G1 x10\n");
     assert_eq!(toks.len(), 1);
     match &toks[0] {
-        Err(ParseError::MalformedNumber { line_no: 1, .. }) => {}
-        other => panic!("expected MalformedNumber for lowercase param letter, got {other:?}"),
+        Ok(Token::Command { params, .. }) => assert_eq!(params.x(), Some(10.0)),
+        other => panic!("expected normalized parameter, got {other:?}"),
     }
 }
 
@@ -224,22 +216,6 @@ fn parses_t0() {
 }
 
 #[test]
-fn layer_change_comment_is_marker_token() {
-    let toks = collect(";LAYER:5\n");
-    assert_eq!(toks.len(), 1);
-    match &toks[0] {
-        Ok(Token::Marker { kind, line_no }) => {
-            assert_eq!(
-                *kind,
-                crate::marker::MarkerKind::LayerChange { layer: Some(5) }
-            );
-            assert_eq!(*line_no, 1);
-        }
-        other => panic!("expected Marker, got {other:?}"),
-    }
-}
-
-#[test]
 fn extended_command_lexes_name_and_args() {
     let toks = collect("SET_VELOCITY_LIMIT ACCEL=3000 VELOCITY=250.5\n");
     assert_eq!(toks.len(), 1);
@@ -291,4 +267,17 @@ fn lone_uppercase_letter_is_still_an_error() {
         &toks[0],
         Err(ParseError::UnrecognizedHead { line_no: 1, .. })
     ));
+}
+
+#[test]
+fn lowercase_commands_and_parameters_are_normalized() {
+    let tokens = collect("g1 x1.25 y-2\n");
+    match &tokens[0] {
+        Ok(Token::Command { letter, params, .. }) => {
+            assert_eq!(*letter, b'G');
+            assert_eq!(params.x(), Some(1.25));
+            assert_eq!(params.y(), Some(-2.0));
+        }
+        other => panic!("expected normalized command, got {other:?}"),
+    }
 }

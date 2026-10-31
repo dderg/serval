@@ -9,10 +9,7 @@ def make_homing_configured_rail(cls):
     r.homing_retract_speed = 20.0
     r.homing_retract_dist = 3.0
     r.homing_positive_dir = False
-    r.second_homing_speed = 10.0
-    r.use_sensorless_homing = False
     r.min_home_dist = 3.0
-    r.homing_accel = None
     r.position_min = -6.0
     r.position_max = 235.0
     return r
@@ -40,9 +37,5 @@ def test_get_range_is_shared():
         assert r.get_range() == (-6.0, 235.0)
 
 
-def test_base_rail_defaults_legacy_homing_fields():
-    base = rail.BaseRail()
-    assert base.second_homing_speed == 0.0
-    assert base.use_sensorless_homing is False
-    assert base.min_home_dist == 0.0
-    assert base.homing_accel is None
+def test_base_rail_defaults_min_home_dist():
+    assert rail.BaseRail().min_home_dist == 0.0

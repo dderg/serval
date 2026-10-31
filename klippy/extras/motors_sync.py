@@ -102,6 +102,26 @@ class BaseKinematics:
             return
         m.magnitude = m.new_magnitude
 
+    def measure_only(self, axes, repeats):
+        self.home_rails(axes)
+        for m in axes:
+            m.on_start()
+            try:
+                m.move_on_measure_pos()
+                mags = []
+                for r in range(1, repeats + 1):
+                    mags.append(m.measure_deviation())
+                    self.gcode.respond_info(
+                        f'{m.name.upper()}-Measure {r}/{repeats}: '
+                        f'magnitude {mags[-1]:.2f}')
+                lo, hi = min(mags), max(mags)
+                mean = sum(mags) / len(mags)
+                self.gcode.respond_info(
+                    f'{m.name.upper()}-Repeatability: mean {mean:.2f}, '
+                    f'min {lo:.2f}, max {hi:.2f}, spread {hi - lo:.2f}')
+            finally:
+                m.on_done()
+
     def axes_sync(self, axes):
         raise self.gcode.error("Not implemented for this kinematics")
 
@@ -387,7 +407,7 @@ class StepperManualMove:
             self.toolhead.submit_nudge(
                 mcu_id, axis_idx, motor_idx, dist,
                 self.travel_speed, self.travel_accel)
-        self.toolhead.wait_moves()
+        self.toolhead.flush_step_generation()
 
 
 # Base helper class for bulk sensors readings that measure the degree
@@ -1379,6 +1399,9 @@ class MotorsSync:
         self.gcode.register_command('SYNC_MOTORS_CALIBRATE',
                                     self.cmd_SYNC_MOTORS_CALIBRATE,
                                     desc=self.cmd_SYNC_MOTORS_CALIBRATE_help)
+        self.gcode.register_command('SYNC_MOTORS_MEASURE',
+                                    self.cmd_SYNC_MOTORS_MEASURE,
+                                    desc=self.cmd_SYNC_MOTORS_MEASURE_help)
 
     def add_connect_task(self, task):
         self.connect_tasks.append(task)
@@ -1432,6 +1455,25 @@ class MotorsSync:
         self.gcode.respond_info('Motors synchronization started')
         self.kin_helper.start_sync(axes)
         self.status.check_retry_result('done')
+
+    cmd_SYNC_MOTORS_MEASURE_help = ('Repeatedly measure sync deviation '
+                                    'without applying corrections')
+    def cmd_SYNC_MOTORS_MEASURE(self, gcmd):
+        _axes = self.kin_helper.get_motion_axes()
+        axes = list(_axes.values())
+        axes_names = gcmd.get('AXES', None)
+        if axes_names is not None:
+            axes_names = {a.lower() for a in axes_names.split(',')}
+            if any(name not in _axes for name in axes_names):
+                raise self.gcode.error('Invalid axes parameter')
+            axes = [_axes[ax] for ax in _axes if ax in axes_names]
+        repeats = gcmd.get_int('REPEATS', 10, minval=1)
+        try:
+            self.kin_helper.measure_only(axes, repeats)
+        except Exception as e:
+            logging.error(f"motors_sync measure error:\n"
+                          f"{traceback.format_exc()}")
+            raise self.gcode.error(str(e))
 
     cmd_SYNC_MOTORS_CALIBRATE_help = 'Calibrate synchronization process model'
     def cmd_SYNC_MOTORS_CALIBRATE(self, gcmd):

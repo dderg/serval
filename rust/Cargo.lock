@@ -131,6 +131,7 @@ dependencies = [
  "cbindgen",
  "portable-atomic",
  "runtime",
+ "runtime-contract",
 ]
 
 [[package]]
@@ -159,8 +160,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d16d90359e986641506914ba71350897565610e87ce0ad9e6f28569db3dd5c6d"
 dependencies = [
  "find-msvc-tools",
- "jobserver",
- "libc",
  "shlex",
 ]
 
@@ -320,22 +319,39 @@ name = "ethercat-rt"
 version = "0.1.0"
 dependencies = [
  "cc",
- "crossbeam-channel",
+ "ethercat-setpoint",
+ "ethercat-setpoint-fill",
  "host-rt",
  "libc",
  "libm",
  "mcu-protocol",
  "mcu-transport",
- "parking_lot",
+ "nurbs",
  "rtrb",
- "runtime",
- "serde",
+ "runtime-contract",
  "serde_json",
  "time",
- "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
- "zstd",
+ "trajectory",
+]
+
+[[package]]
+name = "ethercat-setpoint"
+version = "0.1.0"
+dependencies = [
+ "runtime-contract",
+ "serde",
+ "toml 0.8.23",
+]
+
+[[package]]
+name = "ethercat-setpoint-fill"
+version = "0.1.0"
+dependencies = [
+ "ethercat-setpoint",
+ "mcu-protocol",
+ "trajectory",
 ]
 
 [[package]]
@@ -405,7 +421,7 @@ version = "0.1.0"
 dependencies = [
  "libm",
  "nurbs",
- "thiserror",
+ "proptest",
 ]
 
 [[package]]
@@ -479,7 +495,7 @@ dependencies = [
  "mcu-protocol",
  "mcu-transport",
  "proptest",
- "runtime",
+ "runtime-contract",
  "serde",
  "serde_json",
  "serialport",
@@ -531,16 +547,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
-name = "jobserver"
-version = "0.1.35"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
-dependencies = [
- "getrandom 0.4.3",
- "libc",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -583,15 +589,6 @@ name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
-
-[[package]]
-name = "lock_api"
-version = "0.4.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
-dependencies = [
- "scopeguard",
-]
 
 [[package]]
 name = "log"
@@ -668,6 +665,8 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "ethercat-rt",
+ "ethercat-setpoint",
+ "ethercat-setpoint-fill",
  "gcode",
  "geometry",
  "host-rt",
@@ -675,10 +674,8 @@ dependencies = [
  "motion-core",
  "motion-pipeline",
  "nurbs",
- "planner-config",
  "proptest",
- "runtime",
- "serialport",
+ "runtime-contract",
  "step-shim",
  "thiserror",
  "tracing",
@@ -691,19 +688,21 @@ version = "0.1.0"
 dependencies = [
  "config-doc",
  "crossbeam-channel",
+ "ethercat-rt",
+ "ethercat-setpoint",
+ "ethercat-setpoint-fill",
  "geometry",
  "host-rt",
  "libc",
  "mcu-protocol",
  "mcu-transport",
  "motion-core",
- "motion-engine",
  "motion-pipeline",
  "motion-services",
  "pipeline-snapshot",
  "planner-config",
  "pyo3",
- "runtime",
+ "runtime-contract",
  "serde_json",
  "serialport",
  "thiserror",
@@ -717,9 +716,9 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "geometry",
- "libc",
  "libm",
  "nurbs",
+ "proptest",
  "thiserror",
  "tracing",
  "trajectory",
@@ -734,8 +733,7 @@ dependencies = [
  "log",
  "mcu-protocol",
  "mcu-transport",
- "motion-core",
- "runtime",
+ "runtime-contract",
  "serde_json",
  "thiserror",
  "time",
@@ -818,37 +816,6 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
-
-[[package]]
-name = "parking_lot"
-version = "0.12.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
-dependencies = [
- "lock_api",
- "parking_lot_core",
-]
-
-[[package]]
-name = "parking_lot_core"
-version = "0.9.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
-dependencies = [
- "cfg-if",
- "libc",
- "redox_syscall",
- "smallvec",
- "windows-link",
-]
-
-[[package]]
-name = "piece-sink-harness"
-version = "0.1.0"
-dependencies = [
- "cc",
- "mcu-protocol",
-]
 
 [[package]]
 name = "pin-project-lite"
@@ -1082,15 +1049,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "redox_syscall"
-version = "0.5.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
-dependencies = [
- "bitflags 2.11.1",
-]
-
-[[package]]
 name = "regex-automata"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1109,9 +1067,9 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "rtrb"
-version = "0.3.4"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ade083ccbb4bf536df69d1f6432cc23deb7acccff86b183f3923a6fd56a1153"
+checksum = "342e1478a6e1c839e7405033eabfdc954d4d5dabd39f34e83420a43a95acfb04"
 
 [[package]]
 name = "runtime"
@@ -1120,13 +1078,14 @@ dependencies = [
  "heapless",
  "libm",
  "loom",
- "nurbs",
  "portable-atomic",
  "proptest",
- "serde",
- "serde_json",
- "static_assertions",
+ "runtime-contract",
 ]
+
+[[package]]
+name = "runtime-contract"
+version = "0.1.0"
 
 [[package]]
 name = "rustfft"
@@ -1321,17 +1280,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
-name = "static_assertions"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
 name = "step-shim"
 version = "0.1.0"
 dependencies = [
  "libm",
- "runtime",
+ "nurbs",
+ "proptest",
+ "tracing",
+ "trajectory",
 ]
 
 [[package]]
@@ -1603,7 +1559,9 @@ dependencies = [
  "geometry",
  "libm",
  "nurbs",
+ "proptest",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -1822,31 +1780,3 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
-
-[[package]]
-name = "zstd"
-version = "0.13.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
-dependencies = [
- "zstd-safe",
-]
-
-[[package]]
-name = "zstd-safe"
-version = "7.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
-dependencies = [
- "zstd-sys",
-]
-
-[[package]]
-name = "zstd-sys"
-version = "2.0.16+zstd.1.5.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
-dependencies = [
- "cc",
- "pkg-config",
-]

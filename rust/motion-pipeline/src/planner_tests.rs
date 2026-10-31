@@ -1,7 +1,6 @@
 //! The commit horizon: how far into its window the streaming planner may cut,
 //! and whether cutting there still reproduces a single-window plan.
 
-use crossbeam_channel::unbounded;
 use geometry::segment::SourceRange;
 use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
 
@@ -10,7 +9,7 @@ use crate::types::{PlannedItem, PlannedMove, StreamConfig, StreamInput};
 
 const MAX_V: f64 = 600.0;
 const ACCEL: f64 = 20_000.0;
-const JERK: f64 = 40_000.0;
+const JERK: f64 = f64::INFINITY;
 const TRAVEL_MM: f64 = 30.0;
 const PRINT_MM: f64 = 0.5;
 const PRINT_V: f64 = 50.0;
@@ -59,26 +58,32 @@ fn travel_then_print(print_moves: usize) -> Vec<geometry::Move> {
     moves
 }
 
-/// `v · t_brake`, the over-estimate of the jerk-limited stopping distance the
-/// setback is sized from.
-fn setback_mm(v: f64) -> f64 {
-    v * crate::types::jerk_limited_brake_time(v, ACCEL, JERK)
+fn stopping_distance_mm(v: f64) -> f64 {
+    let limits = limits();
+    let speed = v.min(limits.max_velocity_mm_s);
+    speed * speed / (2.0 * limits.accel_mm_s2)
 }
 
 fn stream(moves: &[geometry::Move], drain: bool) -> Vec<PlannedMove> {
-    let (tx, rx) = unbounded();
+    let mut out = Vec::new();
+    let mut collect = |item| {
+        out.push(item);
+        true
+    };
     let mut planner = Planner::new(config(4096));
     for m in moves {
         assert!(
-            planner.feed(StreamInput::Move(m.clone()), &tx),
-            "planner output channel closed"
+            planner.feed(StreamInput::Move(m.clone()), &mut collect),
+            "collector rejected planner output"
         );
     }
     if drain {
-        assert!(planner.finish(&tx), "planner output channel closed");
+        assert!(
+            planner.finish(&mut collect),
+            "collector rejected planner output"
+        );
     }
-    drop(tx);
-    rx.into_iter()
+    out.into_iter()
         .filter_map(|item| match item {
             PlannedItem::Move(m) => Some(m),
             PlannedItem::Drain | PlannedItem::Control(_) => None,
@@ -91,22 +96,18 @@ fn commit_horizon_is_set_by_the_open_tails_own_speed() {
     let print_moves = 200;
     let moves = travel_then_print(print_moves);
     let total_arc = 2.0 * TRAVEL_MM + print_moves as f64 * PRINT_MM;
-    // Read off the whole window, the two 600 mm/s travels set a setback that
-    // reaches back past every print move in the stream — the emission
-    // boundary would land inside the travels and not one print move could
-    // commit without a `Drain`. What the window's fictional terminal rest
-    // actually rides is the open tail, and that runs at 50 mm/s.
-    assert!(setback_mm(MAX_V) > total_arc - 2.0 * TRAVEL_MM);
-    assert!(setback_mm(PRINT_V) < 5.0);
+    let fast_stopping_distance = stopping_distance_mm(MAX_V);
+    let tail_stopping_distance = stopping_distance_mm(PRINT_V);
+    assert!(tail_stopping_distance < PRINT_MM);
+    assert!(fast_stopping_distance > tail_stopping_distance);
 
     let emitted = stream(&moves, false);
     let emitted_arc: f64 = emitted.iter().map(|m| m.geometry.segment.s_len()).sum();
     assert!(
-        emitted_arc > 0.75 * total_arc,
-        "committed only {emitted_arc:.2} mm of {total_arc:.2}; the tail's own setback \
-         is {:.2} mm, so the boundary belongs near the window end, not back inside \
-         the travels",
-        setback_mm(PRINT_V)
+        emitted_arc > total_arc - fast_stopping_distance,
+        "committed only {emitted_arc:.2} mm of {total_arc:.2}; the tail's own stopping \
+         distance is {tail_stopping_distance:.2} mm, so the boundary belongs near the \
+         window end, not a fast-tail stopping distance of {fast_stopping_distance:.2} mm back"
     );
 }
 
@@ -117,18 +118,24 @@ fn streamed_commits_reproduce_a_single_window_plan() {
     let whole = {
         // One window: no move is committed until the terminal rest is real,
         // so every body is planned against the true end of the stream.
-        let (tx, rx) = unbounded();
+        let mut out = Vec::new();
+        let mut collect = |item| {
+            out.push(item);
+            true
+        };
         let mut planner = Planner::new(config(4096));
         for m in &moves {
-            assert!(planner.feed(StreamInput::Move(m.clone()), &tx), "closed");
+            assert!(
+                planner.feed(StreamInput::Move(m.clone()), &mut collect),
+                "closed"
+            );
             // Never let the batch trigger fire: `absorb` re-plans every
             // `REPLAN_BATCH_MOVES` arrivals, and the whole point here is to
             // compare against a plan that never cut.
             planner.moves_since_plan = 0;
         }
-        assert!(planner.finish(&tx), "closed");
-        drop(tx);
-        rx.into_iter()
+        assert!(planner.finish(&mut collect), "closed");
+        out.into_iter()
             .filter_map(|item| match item {
                 PlannedItem::Move(m) => Some(m),
                 PlannedItem::Drain | PlannedItem::Control(_) => None,
@@ -156,7 +163,7 @@ const RAMP_FEEDS: [f64; 5] = [10.0, 30.0, 80.0, 200.0, 10.0];
 const RAMP_E_PER_MM: f64 = 0.05;
 
 fn ramp_limits() -> VelocityLimits {
-    VelocityLimits::try_new(300.0, 3000.0, 5.0, 100_000.0).unwrap()
+    VelocityLimits::try_new(300.0, 3000.0, 5.0, f64::INFINITY).unwrap()
 }
 
 /// The speed_ramp shape, repeated: collinear 40 mm extruding moves whose
@@ -198,15 +205,21 @@ fn ramp_config() -> StreamConfig {
 }
 
 fn plan_one_window(moves: &[geometry::Move]) -> Vec<PlannedMove> {
-    let (tx, rx) = unbounded();
+    let mut out = Vec::new();
+    let mut collect = |item| {
+        out.push(item);
+        true
+    };
     let mut planner = Planner::new(ramp_config());
     for m in moves {
-        assert!(planner.feed(StreamInput::Move(m.clone()), &tx), "closed");
+        assert!(
+            planner.feed(StreamInput::Move(m.clone()), &mut collect),
+            "closed"
+        );
         planner.moves_since_plan = 0;
     }
-    assert!(planner.finish(&tx), "closed");
-    drop(tx);
-    rx.into_iter()
+    assert!(planner.finish(&mut collect), "closed");
+    out.into_iter()
         .filter_map(|item| match item {
             PlannedItem::Move(m) => Some(m),
             PlannedItem::Drain | PlannedItem::Control(_) => None,
@@ -215,14 +228,20 @@ fn plan_one_window(moves: &[geometry::Move]) -> Vec<PlannedMove> {
 }
 
 fn stream_ramp(moves: &[geometry::Move]) -> Vec<PlannedMove> {
-    let (tx, rx) = unbounded();
+    let mut out = Vec::new();
+    let mut collect = |item| {
+        out.push(item);
+        true
+    };
     let mut planner = Planner::new(ramp_config());
     for m in moves {
-        assert!(planner.feed(StreamInput::Move(m.clone()), &tx), "closed");
+        assert!(
+            planner.feed(StreamInput::Move(m.clone()), &mut collect),
+            "closed"
+        );
     }
-    assert!(planner.finish(&tx), "closed");
-    drop(tx);
-    rx.into_iter()
+    assert!(planner.finish(&mut collect), "closed");
+    out.into_iter()
         .filter_map(|item| match item {
             PlannedItem::Move(m) => Some(m),
             PlannedItem::Drain | PlannedItem::Control(_) => None,
@@ -235,7 +254,12 @@ fn stream_ramp(moves: &[geometry::Move]) -> Vec<PlannedMove> {
 fn interior_min_velocity(plan: &[PlannedMove]) -> f64 {
     plan[1..plan.len() - 1]
         .iter()
-        .flat_map(|m| m.velocity.samples.iter().map(|s| s.v))
+        .flat_map(|m| {
+            m.velocity.phases.iter().flat_map(|phase| {
+                let end_velocity = phase.state_at(phase.t0 + phase.dt).1;
+                [phase.v0, end_velocity]
+            })
+        })
         .fold(f64::INFINITY, f64::min)
 }
 

@@ -45,7 +45,7 @@ fn full_print_extruder_track_has_no_step_burst() {
     let source = std::fs::read_to_string(&path).expect("gcode file readable");
 
     let mut cfg = default_stream_config();
-    cfg.limits = geometry::VelocityLimits::try_new(2800.0, 50000.0, 5.0, 100_000.0)
+    cfg.limits = geometry::VelocityLimits::try_new(2800.0, 50000.0, 5.0, f64::INFINITY)
         .expect("trident bench limits are valid");
     let moves = parse_gcode_to_moves(&source, cfg.limits);
     eprintln!("parsed {} moves from {path}", moves.len());
@@ -67,7 +67,10 @@ fn full_print_extruder_track_has_no_step_burst() {
     for seg in &segs {
         let mut t = seg.t_start;
         while t < seg.t_end {
-            let pos = nurbs::eval::eval(&seg.axes[EXTRUDER_AXIS], t);
+            let pos = seg
+                .eval_axis(EXTRUDER_AXIS, t)
+                .expect("extruder axis evaluates inside the segment")
+                .position;
             if let Some(p) = prev {
                 let steps = (pos - p).abs() * STEPS_PER_MM;
                 if steps > worst.0 {

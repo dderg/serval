@@ -116,12 +116,14 @@ SECTIONS
         _axi_bss_start = .;
         *(.axi_bss .axi_bss.*)
         // The bootloader at CONFIG_FLASH_BOOT_ADDRESS runs before us on every
-        // reset and takes its stack from the base of AXI SRAM (initial SP
-        // 0x24000738 on this board), so the low ~2 KB of this region is
-        // scratch that cannot carry anything across a reset. `.axi_dfu_flag`
-        // is emitted last, above every live static, which is the only part of
-        // AXI the bootloader never touches.
-        . = ALIGN(32);
+        // reset: it stacks and zeroes its own bss in low AXI SRAM (initial SP
+        // 0x24000738 on this board), so anything below its footprint cannot
+        // carry state across a reset. `.axi_dfu_flag` is emitted last, above
+        // every live static, AND floored at +32 KB - a small image (e.g. the
+        // bootloader shim itself, or a build without the motion runtime) has
+        // almost no .axi_bss, and without the floor the flag would land inside
+        // the bootloader's scratch and be wiped before dfu_reboot_check runs.
+        . = MAX(ABSOLUTE(.), ORIGIN(axi_ram) + 32K);
         *(.axi_dfu_flag)
         . = ALIGN(8);
         _axi_bss_end = .;

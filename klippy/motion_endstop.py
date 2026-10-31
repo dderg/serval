@@ -1,5 +1,3 @@
-from .mcu import STEPPING_MODE_STEPCOMPRESS
-
 AXIS_ENDSTOP_IDS = (0, 1, 2)
 PROVIDER_ID_FIRST = len(AXIS_ENDSTOP_IDS)
 ENDSTOP_ID_MAX = 255
@@ -12,6 +10,7 @@ _TRIP_STOP_OBJECT = "motion_endstop_trip_stop"
 TRIGGER_REASON_ENDSTOP = 1
 TRIGGER_REASON_HOST_DISARM = 2
 DISARM_REST_TICKS = 0
+STEPPER_STOP_ON_TRIGGER_CMD = "stepper_stop_on_trigger oid=%c trsync_oid=%c"
 
 
 def endstop_entry(endstops, provider, trigger_position):
@@ -37,11 +36,12 @@ class MotorBinding:
     endstop's trip freezes only that motor instead of stopping the MCU, which
     is what lets a dual-motor axis square itself against two switches."""
 
-    def __init__(self, lane_idx, stepper_idx, mcu, motor_name):
+    def __init__(self, lane_idx, stepper_idx, mcu, motor_name, stepper_oid):
         self.lane_idx = lane_idx
         self.stepper_idx = stepper_idx
         self.mcu = mcu
         self.motor_name = motor_name
+        self.stepper_oid = stepper_oid
 
 
 class MotionEndstop:
@@ -58,8 +58,6 @@ class MotionEndstop:
         self._query_cmd = None
         self._state_cmd = None
         self._trip_stop = None
-        if self.mcu.get_stepping_mode() == STEPPING_MODE_STEPCOMPRESS:
-            self._trip_stop = _StepcompressTripStop(self.mcu, self.oid)
         self.mcu.register_config_callback(self._build_config)
 
     def _build_config(self):
@@ -91,7 +89,8 @@ class MotionEndstop:
             " trip_clock=%u",
             oid=self.oid,
         )
-        if self._trip_stop is not None:
+        if self.mcu.try_lookup_command(STEPPER_STOP_ON_TRIGGER_CMD) is not None:
+            self._trip_stop = _StepcompressTripStop(self.mcu, self.oid)
             self._trip_stop.build_config()
 
     def is_triggered(self):
@@ -105,6 +104,17 @@ class MotionEndstop:
             "trip_clock": params["trip_clock"],
         }
 
+    def _trip_stop_oids(self):
+        registered = stepcompress_stepper_oids(self.mcu.get_printer(), self.mcu)
+        if self.binding is None:
+            return registered
+        bound_motor_steps_elsewhere = self.binding.mcu is not self.mcu
+        if bound_motor_steps_elsewhere:
+            return []
+        if self.binding.stepper_oid not in registered:
+            return []
+        return [self.binding.stepper_oid]
+
     def arm(self, poll_period):
         rest_ticks = self.mcu.seconds_to_clock(poll_period)
         if rest_ticks <= 0:
@@ -112,8 +122,22 @@ class MotionEndstop:
                 "endstop %d (pin %s): arm rest_ticks must be positive"
                 % (self.endstop_id, self.pin)
             )
-        if self._trip_stop is not None:
-            self._trip_stop.arm()
+        stepper_oids = self._trip_stop_oids()
+        if stepper_oids:
+            if self._trip_stop is None:
+                raise ValueError(
+                    "endstop %d (pin %s): mcu '%s' drives step/dir lanes"
+                    " %s but its firmware has no %s command, so a trip move"
+                    " would run without an mcu-side stop"
+                    % (
+                        self.endstop_id,
+                        self.pin,
+                        self.mcu.get_name(),
+                        stepper_oids,
+                        STEPPER_STOP_ON_TRIGGER_CMD.split(" ")[0],
+                    )
+                )
+            self._trip_stop.arm(stepper_oids)
         engine = self.mcu.get_printer().lookup_object("motion_engine")
         engine.note_endstop_arm(self.engine_mcu_handle(), self.endstop_id)
         self._query_cmd.send([self.oid, rest_ticks])
@@ -136,6 +160,7 @@ class MotionEndstop:
             self.binding.mcu.get_engine_handle(),
             self.binding.lane_idx,
             self.binding.stepper_idx,
+            self.binding.stepper_oid,
         )
 
 
@@ -222,6 +247,10 @@ def register_stepcompress_steppers(printer, mcu, stepper_oids):
     _stepcompress_registry(printer).register(mcu, stepper_oids)
 
 
+def stepcompress_stepper_oids(printer, mcu):
+    return _stepcompress_registry(printer).stepper_oids(mcu)
+
+
 class _StepcompressTripStop:
     """MCU-side trip stop for a stepcompress endstop: the classic step
     queues are cleared inside the endstop's trigger IRQ instead of waiting
@@ -249,7 +278,7 @@ class _StepcompressTripStop:
             "trsync_trigger oid=%c reason=%c"
         )
         self._stop_on_trigger_cmd = self._mcu.lookup_command(
-            "stepper_stop_on_trigger oid=%c trsync_oid=%c"
+            STEPPER_STOP_ON_TRIGGER_CMD
         )
         self._arm_cmd = self._mcu.lookup_command(
             "endstop_arm_trsync oid=%c trsync_oid=%c trigger_reason=%c"
@@ -258,16 +287,7 @@ class _StepcompressTripStop:
             "endstop_clear_trsync oid=%c"
         )
 
-    def arm(self):
-        stepper_oids = _stepcompress_registry(
-            self._mcu.get_printer()
-        ).stepper_oids(self._mcu)
-        if not stepper_oids:
-            raise ValueError(
-                "endstop oid %d: stepcompress mcu '%s' has no classic"
-                " steppers registered; the trip move would run without an"
-                " mcu-side stop" % (self._endstop_oid, self._mcu.get_name())
-            )
+    def arm(self, stepper_oids):
         self._start_cmd.send([self._trsync_oid, 0, 0, 0])
         for oid in stepper_oids:
             self._stop_on_trigger_cmd.send([oid, self._trsync_oid])

@@ -1,138 +1,93 @@
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
-use std::time::Instant;
+use std::sync::mpsc::{SyncSender, TrySendError};
 
 use arc_swap::ArcSwap;
 
 use crate::fault::FaultLatch;
-use crate::host_io::runtime_events::{
-    CreditFreedEvent, McuLogEvent, RuntimeEvent, StatusEvent, TraceEvent,
-};
+use crate::host_io::runtime_events::{CreditFreedEvent, McuLogEvent, RuntimeEvent, StatusEvent};
 
-#[derive(Debug, Clone)]
-pub enum HostEvent {
-    TraceSubscriberOverflow {
-        dropped_count: u64,
-        at: Instant,
-    },
-    TraceSubscriberDisconnected {
-        at: Instant,
-    },
-    TraceSubscriberReattached {
-        events_lost_during_gap: u64,
-        at: Instant,
-    },
-}
-
-#[derive(Debug)]
-pub struct TraceRing {
-    sticky_overflow: bool,
-    subscriber: Option<SyncSender<TraceEvent>>,
-    drop_count_since_event: u64,
-    host_event_tx: Option<SyncSender<HostEvent>>,
-}
-
-impl TraceRing {
-    pub fn new(_capacity: usize) -> Self {
-        Self {
-            sticky_overflow: false,
-            subscriber: None,
-            drop_count_since_event: 0,
-            host_event_tx: None,
-        }
-    }
-
-    pub fn dispatch(&mut self, mut event: TraceEvent) {
-        if self.sticky_overflow {
-            event.flags |= 0x01;
-        }
-
-        match self.subscriber.as_ref() {
-            Some(tx) => match tx.try_send(event) {
-                Ok(()) => {
-                    self.sticky_overflow = false;
-                }
-                Err(TrySendError::Full(_)) => {
-                    self.sticky_overflow = true;
-                    self.drop_count_since_event += 1;
-                    if let Some(host_tx) = &self.host_event_tx {
-                        let _ = host_tx.try_send(HostEvent::TraceSubscriberOverflow {
-                            dropped_count: self.drop_count_since_event,
-                            at: Instant::now(),
-                        });
-                    }
-                }
-                Err(TrySendError::Disconnected(_)) => {
-                    self.subscriber = None;
-                    self.sticky_overflow = false;
-                    self.drop_count_since_event = 1;
-                    if let Some(host_tx) = &self.host_event_tx {
-                        let _ = host_tx.try_send(HostEvent::TraceSubscriberDisconnected {
-                            at: Instant::now(),
-                        });
-                    }
-                }
-            },
-            None => self.drop_count_since_event += 1,
-        }
-    }
-
-    pub fn subscribe(
-        &mut self,
-        tx: SyncSender<TraceEvent>,
-    ) -> Result<(), crate::transport::SubscribeError> {
-        if self.subscriber.is_some() {
-            return Err(crate::transport::SubscribeError::AlreadySubscribed { channel: "trace" });
-        }
-        if self.drop_count_since_event > 0 {
-            if let Some(host_tx) = &self.host_event_tx {
-                let _ = host_tx.try_send(HostEvent::TraceSubscriberReattached {
-                    events_lost_during_gap: self.drop_count_since_event,
-                    at: Instant::now(),
-                });
-            }
-            self.drop_count_since_event = 0;
-        }
-        self.subscriber = Some(tx);
-        Ok(())
-    }
-
-    pub fn set_host_event_tx(&mut self, tx: SyncSender<HostEvent>) {
-        self.host_event_tx = Some(tx);
-    }
-}
-
+/// The bulk lane is bounded exactly like the priority lane: the reactor thread
+/// also drives the wire, so a stalled subscriber must never be allowed to
+/// block it or to grow the queue without bound. Excess bulk samples are
+/// dropped and counted.
 #[derive(Debug, Default)]
 pub struct RuntimeEventDispatcher {
     priority: Option<SyncSender<RuntimeEvent>>,
     bulk: Option<SyncSender<RuntimeEvent>>,
+    priority_overflow: bool,
+    bulk_overflow: bool,
+    bulk_dropped: u64,
 }
 
 impl RuntimeEventDispatcher {
     pub fn dispatch(&mut self, event: RuntimeEvent) {
         if event.is_bulk_data() {
-            Self::send_lane(&mut self.bulk, event, "bulk");
+            self.send_bulk(event);
         } else {
-            Self::send_lane(&mut self.priority, event, "priority");
+            self.send_priority(event);
         }
     }
 
-    fn send_lane(lane: &mut Option<SyncSender<RuntimeEvent>>, event: RuntimeEvent, which: &str) {
-        if let Some(tx) = lane.as_ref() {
-            match tx.try_send(event) {
-                Ok(()) => {}
-                Err(TrySendError::Full(e)) => {
+    fn send_bulk(&mut self, event: RuntimeEvent) {
+        let Some(tx) = self.bulk.as_ref() else {
+            return;
+        };
+        match tx.try_send(event) {
+            Ok(()) => {
+                if self.bulk_overflow {
                     tracing::warn!(
                         subsystem = "mcu-comms",
+                        event = "runtime_event_subscriber_recovered",
+                        lane = "bulk",
+                        dropped_total = self.bulk_dropped,
+                        "bulk runtime-event subscriber is draining again"
+                    );
+                }
+                self.bulk_overflow = false;
+            }
+            Err(TrySendError::Full(event)) => {
+                self.bulk_dropped += 1;
+                if !self.bulk_overflow {
+                    tracing::error!(
+                        subsystem = "mcu-comms",
                         event = "runtime_event_subscriber_overflow",
-                        lane = which,
-                        error = ?e,
+                        lane = "bulk",
+                        dropped = runtime_event_name(&event),
+                        dropped_total = self.bulk_dropped,
+                        "bulk runtime-event subscriber stalled; dropping rather than stalling the \
+                         reactor"
+                    );
+                }
+                self.bulk_overflow = true;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.bulk = None;
+                self.bulk_overflow = false;
+            }
+        }
+    }
+
+    fn send_priority(&mut self, event: RuntimeEvent) {
+        let Some(tx) = self.priority.as_ref() else {
+            return;
+        };
+        match tx.try_send(event) {
+            Ok(()) => self.priority_overflow = false,
+            Err(TrySendError::Full(event)) => {
+                if !self.priority_overflow {
+                    tracing::error!(
+                        subsystem = "mcu-comms",
+                        event = "runtime_event_subscriber_overflow",
+                        lane = "priority",
+                        dropped = runtime_event_name(&event),
                         "runtime-event subscriber overflow; dropping"
                     );
                 }
-                Err(TrySendError::Disconnected(_)) => {
-                    *lane = None;
-                }
+                self.priority_overflow = true;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.priority = None;
+                self.priority_overflow = false;
             }
         }
     }
@@ -149,63 +104,22 @@ impl RuntimeEventDispatcher {
         }
         self.priority = Some(priority);
         self.bulk = Some(bulk);
+        self.priority_overflow = false;
+        self.bulk_overflow = false;
         Ok(())
     }
 }
 
-#[derive(Debug)]
-pub struct HostEventDispatcher {
-    inbox_rx: Receiver<HostEvent>,
-    subscriber: Option<SyncSender<HostEvent>>,
-}
-
-impl HostEventDispatcher {
-    pub fn new(inbox_rx: Receiver<HostEvent>) -> Self {
-        Self {
-            inbox_rx,
-            subscriber: None,
-        }
-    }
-
-    pub fn drain_pending(&mut self) {
-        while let Ok(event) = self.inbox_rx.try_recv() {
-            self.dispatch(event);
-        }
-    }
-
-    pub fn dispatch(&mut self, event: HostEvent) {
-        if let Some(tx) = &self.subscriber {
-            match tx.try_send(event) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
-                    tracing::warn!(
-                        subsystem = "mcu-comms",
-                        event = "host_event_subscriber_overflow",
-                        "host-event subscriber overflow; dropping"
-                    );
-                }
-                Err(TrySendError::Disconnected(_)) => {
-                    self.subscriber = None;
-                }
-            }
-        }
-    }
-
-    pub fn subscribe(
-        &mut self,
-        tx: SyncSender<HostEvent>,
-    ) -> Result<(), crate::transport::SubscribeError> {
-        if self.subscriber.is_some() {
-            return Err(crate::transport::SubscribeError::AlreadySubscribed {
-                channel: "host_event",
-            });
-        }
-        self.subscriber = Some(tx);
-        Ok(())
-    }
-
-    pub fn sender_handle(&self) -> Option<SyncSender<HostEvent>> {
-        self.subscriber.clone()
+fn runtime_event_name(event: &RuntimeEvent) -> &str {
+    match event {
+        RuntimeEvent::CreditFreed(_) => "credit_freed",
+        RuntimeEvent::Fault(_) => "fault",
+        RuntimeEvent::Status(_) => "status",
+        RuntimeEvent::EndstopTrip(_) => "endstop_trip",
+        RuntimeEvent::McuLog(_) => "mcu_log",
+        RuntimeEvent::Heartbeat { .. } => "heartbeat",
+        RuntimeEvent::UnknownOutput { .. } => "unknown_output",
+        RuntimeEvent::PassthroughResponse { name, .. } => name,
     }
 }
 
@@ -214,10 +128,8 @@ impl std::fmt::Debug for EventDispatcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EventDispatcher")
             .field("fault_latch", &self.fault_latch)
-            .field("trace_ring", &self.trace_ring)
             .field("status_snapshot", &"<ArcSwap<StatusEvent>>")
             .field("runtime_event_dispatcher", &self.runtime_event_dispatcher)
-            .field("host_event_dispatcher", &self.host_event_dispatcher)
             .field("status_retired_watermark", &self.status_retired_watermark)
             .field(
                 "heartbeat_callback",
@@ -241,30 +153,19 @@ impl std::fmt::Debug for EventDispatcher {
 
 pub struct EventDispatcher {
     pub fault_latch: FaultLatch,
-    pub trace_ring: TraceRing,
     pub status_snapshot: Arc<ArcSwap<StatusEvent>>,
     pub runtime_event_dispatcher: RuntimeEventDispatcher,
-    pub host_event_dispatcher: HostEventDispatcher,
     status_retired_watermark: u32,
-    pub heartbeat_callback: Option<Arc<dyn Fn(&[u32]) + Send + Sync>>,
+    pub heartbeat_callback: Option<Arc<dyn Fn(&[u32], &[u64]) + Send + Sync>>,
     pub mcu_log_hook: Option<Box<dyn Fn(McuLogEvent) + Send + Sync>>,
 }
 
 impl EventDispatcher {
-    pub fn new(
-        status_snapshot: Arc<ArcSwap<StatusEvent>>,
-        trace_capacity: usize,
-        host_event_capacity: usize,
-    ) -> Self {
-        let (host_tx, host_rx) = sync_channel::<HostEvent>(host_event_capacity);
-        let mut trace_ring = TraceRing::new(trace_capacity);
-        trace_ring.set_host_event_tx(host_tx);
+    pub fn new(status_snapshot: Arc<ArcSwap<StatusEvent>>) -> Self {
         Self {
             fault_latch: FaultLatch::default(),
-            trace_ring,
             status_snapshot,
             runtime_event_dispatcher: RuntimeEventDispatcher::default(),
-            host_event_dispatcher: HostEventDispatcher::new(host_rx),
             status_retired_watermark: 0,
             heartbeat_callback: None,
             mcu_log_hook: None,
@@ -298,7 +199,7 @@ impl EventDispatcher {
                      stacked PC = addr2line target: the instruction the \
                      interrupted context was about to execute, i.e. the code \
                      holding the CPU/PRIMASK across the late tick; 0 for non-311 \
-                     faults; see runtime::error::FaultCode: -308=PieceStartInPast \
+                     faults; see runtime_contract::error::FaultCode: -308=PieceStartInPast \
                      -309=RingFull -310=StepsPerSampleExceeded \
                      -311=TickIntervalExceeded -302=MathNonFinite \
                      -303=PieceAdvanceUnderflow -300=StepQueueOverflow)"
@@ -306,9 +207,6 @@ impl EventDispatcher {
                 self.fault_latch.dispatch(e.clone());
                 self.runtime_event_dispatcher
                     .dispatch(RuntimeEvent::Fault(e));
-            }
-            RuntimeEvent::Trace(e) => {
-                self.trace_ring.dispatch(e);
             }
             RuntimeEvent::Status(e) => {
                 let synth_credit = self.handle_status_frame(&e);
@@ -318,9 +216,12 @@ impl EventDispatcher {
                     self.dispatch(RuntimeEvent::CreditFreed(c));
                 }
             }
-            RuntimeEvent::Heartbeat { retired_counts } => {
+            RuntimeEvent::Heartbeat {
+                retired_counts,
+                playback_clocks,
+            } => {
                 if let Some(cb) = &self.heartbeat_callback {
-                    cb(&retired_counts);
+                    cb(&retired_counts, &playback_clocks);
                 }
             }
             RuntimeEvent::EndstopTrip(_)

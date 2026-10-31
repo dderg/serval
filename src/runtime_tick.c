@@ -81,17 +81,23 @@ runtime_diag_progress(uint32_t tag, uint32_t stage, uint32_t value)
     rt_diag_persistent.last_us = timer_read_time();
 }
 
-// Advances regardless of engine state, unlike the ISR-published widened_now.
-// Foreground-only; do NOT call from ISR.
+// Advances regardless of engine state, unlike the ISR-published widened_now,
+// so this is the only clock a classic-stepping build can widen. ISR-safe: the
+// epoch pair is sampled before the low word and under the same irq guard
+// stats_update publishes it with, so no caller can splice a pre-wrap low word
+// onto a post-wrap epoch.
 __attribute__((used, externally_visible))
 uint64_t
 runtime_widened_host_clock(void)
 {
     extern uint32_t stats_send_time;
     extern uint32_t stats_send_time_high;
+    irqstatus_t flag = irq_save();
+    uint32_t last = stats_send_time;
+    uint32_t high = stats_send_time_high;
     uint32_t cur = timer_read_time();
-    uint32_t high = stats_send_time_high + (cur < stats_send_time);
-    return ((uint64_t)high << 32) | (uint64_t)cur;
+    irq_restore(flag);
+    return ((uint64_t)(high + (cur < last)) << 32) | (uint64_t)cur;
 }
 
 #if CONFIG_MOTION_RUNTIME
@@ -185,8 +191,12 @@ DECL_INIT(runtime_init);
     ((LIVENESS_THRESHOLD_MS) * (CONFIG_CLOCK_FREQ / 1000))
 
 #define FAST_STATUS_MAX_AXES 8
+// A phase lane's sample-run ring holds single-digit runs, and the host may not
+// send past what this heartbeat has retired. The credit therefore has to reach
+// the host in a fraction of the ring's playback time, not the 10 ms a status
+// display would be happy with.
 #define FAST_STATUS_RETIREMENT_MIN_TICKS \
-    ((uint32_t)((CONFIG_CLOCK_FREQ) / 100))
+    ((uint32_t)((CONFIG_CLOCK_FREQ) / 500))
 
 #define AXIS_STALL_DETECT_TICKS ((uint32_t)(CONFIG_CLOCK_FREQ) * 2u)
 #define AXIS_STALL_REPORT_PERIOD_TICKS ((uint32_t)(CONFIG_CLOCK_FREQ) * 5u)
@@ -200,11 +210,10 @@ saturate_ticks_to_ms(int64_t ticks)
     return (int32_t)ms;
 }
 
-// Observability only: an axis with pieces pending whose retired counter has
-// been frozen for AXIS_STALL_DETECT_TICKS gets its armed-piece window
-// reported against the current clock. A far-future start/end here is the
-// silent-hold signature (the ISR arms a future piece and parks at its start
-// position); a long dwell also reports and is benign.
+// Observability only: an axis with runs pending whose retired counter has been
+// frozen for AXIS_STALL_DETECT_TICKS gets its front sample-run window reported
+// against the current clock. A far-future start/end here is the silent-hold
+// signature; a long dwell also reports and is benign.
 static void
 report_stalled_axes(int32_t nr, const uint32_t *retired_change_time,
                     uint32_t *stall_report_time, uint32_t cur_time)
@@ -315,10 +324,11 @@ runtime_drain(void)
         static uint32_t retired_change_time[FAST_STATUS_MAX_AXES];
         static uint32_t stall_report_time[FAST_STATUS_MAX_AXES];
         uint32_t retired[FAST_STATUS_MAX_AXES];
+        uint64_t playback[FAST_STATUS_MAX_AXES];
         uint8_t st = 0;
         uint16_t fc = 0;
         int32_t nr = runtime_get_heartbeat(runtime_handle, &st, &fc,
-                                                  retired,
+                                                  retired, playback,
                                                   FAST_STATUS_MAX_AXES);
         static uint8_t pending_advance;
         if (nr > 0) {
@@ -345,17 +355,6 @@ runtime_drain(void)
 }
 DECL_TASK(runtime_drain);
 
-#if !CONFIG_MACH_LINUX
-extern void runtime_buzz_refill_foreground(void);
-
-void
-runtime_buzz_refill(void)
-{
-    if (!runtime_handle) return;
-    runtime_buzz_refill_foreground();
-}
-DECL_TASK(runtime_buzz_refill);
-#endif
 
 void
 runtime_tick_shutdown(void)
@@ -388,69 +387,22 @@ runtime_status_drain(void)
     int32_t c2 = runtime_get_stepper_count(runtime_handle, 2);
     extern uint32_t runtime_get_xdirect_write_count(void);
     uint32_t spi_writes = runtime_get_xdirect_write_count();
+    extern uint64_t console_rx_bytes, console_tx_bytes, console_tx_drops;
     fprintf(stderr,
         "[sim-progress] status=%u counts=[%d,%d,%d]"
-        " spi_writes=%u\n",
-        status, c0, c1, c2, spi_writes);
+        " spi_writes=%u rx=%llu tx=%llu tx_drops=%llu\n",
+        status, c0, c1, c2, spi_writes,
+        (unsigned long long)console_rx_bytes,
+        (unsigned long long)console_tx_bytes,
+        (unsigned long long)console_tx_drops);
     fflush(stderr);
 #endif
 }
 DECL_TASK(runtime_status_drain);
 
-extern void runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps,
-                                     uint8_t stepper_sel);
-
-// Step-output timer wiring (TIM3 on H7, TIM2 on F4). Step-output ISR runs at
-// the same NVIC priority as TIM5, so the kick from the TIM5 ISR is SPSC-safe
-// (see motion_nvic_prio.h).
-
-extern void step_output_timer_arm(uint32_t cycle_abs);
-extern uint32_t step_output_timer_armed_target(void);
-extern uint8_t step_output_timer_is_running(void);
-
-// Read by Rust to scope the soonest-across scan.
-static uint8_t step_output_owned_mask;
-
-// used,externally_visible: Rust-only caller; must survive --gc-sections LTO.
-__attribute__((used, externally_visible))
-uint8_t
-kalico_step_output_owned_mask(void)
-{
-    return step_output_owned_mask;
-}
-
-// Idempotent; does NOT arm the timer.
-void
-arm_per_axis_step_timer(uint8_t axis_idx)
-{
-    if (axis_idx >= 4)
-        return;
-    step_output_owned_mask |= (uint8_t)(1u << axis_idx);
-}
-
-// Producer kick from the TIM5 ISR; same-priority as the step-output ISR, so the
-// compare write is non-racing. used,externally_visible: Rust-only caller.
-__attribute__((used, externally_visible))
-void
-kalico_kick_step_output(uint8_t axis_idx, uint32_t cycle_abs)
-{
-    if (axis_idx >= 4)
-        return;
-    step_output_owned_mask |= (uint8_t)(1u << axis_idx);
-
-    if (!step_output_timer_is_running()) {
-        step_output_timer_arm(cycle_abs);
-        return;
-    }
-    // Pull compare forward only if the new step is sooner (wrap-safe).
-    uint32_t cur = step_output_timer_armed_target();
-    if ((int32_t)(cycle_abs - cur) < 0)
-        step_output_timer_arm(cycle_abs);
-}
-
 #else
 
-// Classic stepping build: no MCU-side motion engine. The Kalico envelope
+// MOTION_RUNTIME=n build: no MCU-side motion engine. The Kalico envelope
 // stays alive — the status heartbeat and the structured log drain remain the
 // host's health and diagnostics feed.
 

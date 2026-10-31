@@ -56,12 +56,3 @@ fn token_command_round_trip() {
         _ => panic!("expected Command"),
     }
 }
-
-#[test]
-fn marker_kind_layer_change() {
-    let m = MarkerKind::LayerChange { layer: Some(5) };
-    match m {
-        MarkerKind::LayerChange { layer } => assert_eq!(layer, Some(5)),
-        _ => panic!("expected LayerChange"),
-    }
-}

@@ -22,7 +22,7 @@ serial: {h7_pty}
 [printer]
 max_velocity: 600
 max_accel: 20000
-max_jerk: 40000
+max_jerk: 0
 max_z_velocity: 20
 max_z_accel: 500
 corner_deviation: 0.04
@@ -109,7 +109,6 @@ position_min: -5
 position_endstop: 116.100
 position_max: 120
 homing_speed: 40
-second_homing_speed: 3.0
 homing_retract_dist: 3.0
 post_processors: z_shaping
 

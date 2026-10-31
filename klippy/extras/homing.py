@@ -3,7 +3,6 @@ import logging
 
 from klippy import engine_wait, structured_log
 from klippy.extras.danger_options import get_danger_options
-from klippy.mcu import STEPPING_MODE_STEPCOMPRESS
 from klippy.motion_endstop import (
     AXIS_ENDSTOP_IDS,
     MotionEndstop,
@@ -515,13 +514,6 @@ class Homing:
                         lane_mcu.get_name(),
                     )
                 )
-        if lane_mcu.get_stepping_mode() == STEPPING_MODE_STEPCOMPRESS:
-            raise axis_config.error(
-                "[%s] keyed endstop_pin: MCU '%s' runs classic stepcompress"
-                " stepping, whose endstops stop every stepper at once; a keyed"
-                " endstop requires motion-runtime stepping"
-                % (section, lane_mcu.get_name())
-            )
         endstops = []
         for stepper_idx, motor_name in enumerate(motor_names):
             pin_params = ppins.parse_pin(
@@ -553,6 +545,7 @@ class Homing:
                         stepper_idx,
                         steppers[stepper_idx].get_mcu(),
                         motor_name,
+                        steppers[stepper_idx].get_oid(),
                     ),
                     group=True,
                 )
@@ -790,6 +783,13 @@ class Homing:
                 )
         if dwell_time:
             toolhead.dwell(dwell_time)
+            # The register writes are scheduled at print_time, which sits a
+            # full motion_lead (up to seconds) ahead of the MCU clock, and
+            # the homing drip re-anchors past the queued dwell. Without a
+            # real-clock wait the trip move launches at the OLD current and
+            # the change lands mid-approach — a torque collapse StallGuard
+            # reads as a stall.
+            toolhead.wait_until_print_time(print_time + dwell_time)
 
     def _drain_motion_before_arming_device(self, gcmd, engine, axis):
         try:
@@ -897,6 +897,9 @@ class Homing:
                 provider.trip_move_end(entry)
         trip_pos, final_pos, trip_clock = result
         _verify_latched_trips(gcmd, axis, endstops, trip_clock)
+        reconciled = list(toolhead.get_position())
+        reconciled[:3] = final_pos
+        toolhead.set_position(reconciled)
         return trip_pos, final_pos
 
 

@@ -1,24 +1,27 @@
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{Receiver, TrySendError, unbounded};
 use motion_core::pump::{
-    AxisFrame, AxisKey, DripArm, EnqueueMsg, HeartbeatMsg, PieceSink, PumpCallbacks, PumpMsg,
-    SendError, run_pump,
+    AxisFrame, AxisKey, DripArm, HeartbeatMsg, LaneProjection, PumpCallbacks, PumpMsg, RetiredBy,
+    SendError, SpanSink, run_projection_batches,
 };
-use runtime::piece_ring::PieceEntry;
+use trajectory::{ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm};
+
+const FREQ: f64 = 1e6;
+const SPAN_SECS: f64 = 0.001;
+const SPAN_TICKS: u64 = 1000;
+const SOURCE_LINE: u32 = u32::MAX;
 
 struct RecordingSink(Arc<Mutex<Vec<(AxisKey, usize)>>>);
-impl PieceSink for RecordingSink {
+impl SpanSink for RecordingSink {
     fn send_frame(
         &self,
         key: AxisKey,
-        pieces: &[PieceEntry],
-        _start_slot: u16,
+        spans: &[ClockedMotorSpan],
         _new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
-        self.0.lock().unwrap().push((key, pieces.len()));
+        self.0.lock().unwrap().push((key, spans.len()));
         Ok(0)
     }
 }
@@ -27,12 +30,11 @@ impl PieceSink for RecordingSink {
 /// test can assert that same-MCU axes go out together rather than one
 /// round-trip per axis.
 struct BundleSink(Arc<Mutex<Vec<(u32, Vec<u8>)>>>);
-impl PieceSink for BundleSink {
+impl SpanSink for BundleSink {
     fn send_frame(
         &self,
         _key: AxisKey,
-        _pieces: &[PieceEntry],
-        _start_slot: u16,
+        _spans: &[ClockedMotorSpan],
         _new_head: u32,
         _room: u32,
     ) -> Result<i32, SendError> {
@@ -46,160 +48,154 @@ impl PieceSink for BundleSink {
     }
 }
 
-fn p(start: u64) -> (PieceEntry, f64) {
-    (
-        PieceEntry {
-            start_time: start,
-            duration: 0.001,
-            ..PieceEntry::zeroed()
-        },
-        start as f64,
+#[allow(clippy::cast_precision_loss)]
+fn span_at(start_clock: u64, start_host: f64, from_mm: f64, to_mm: f64) -> ClockedMotorSpan {
+    let t_start = start_clock as f64 / FREQ;
+    let t_end = t_start + SPAN_SECS;
+    let curve = nurbs::ScalarNurbs::try_new(
+        1,
+        vec![t_start, t_start, t_end, t_end],
+        vec![from_mm, to_mm],
     )
+    .expect("a linear lane curve is valid");
+    let groups: Arc<[MotorGroup]> = Arc::from(vec![MotorGroup::Independent(MotorTerm {
+        source_axis: 0,
+        axis: ContinuousAxis::Spline(Arc::new(curve)),
+        scale: 1.0,
+    })]);
+    let signal = MotorSpan::try_new(groups, t_start, t_end, 0, SOURCE_LINE, false)
+        .expect("a spline motor span is dispatchable");
+    ClockedMotorSpan::try_new(
+        Arc::new(signal),
+        t_start,
+        t_end,
+        start_host,
+        start_host + SPAN_SECS,
+        start_clock as f64,
+        FREQ,
+    )
+    .expect("the projected view spans at least one clock")
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn span(start_clock: u64) -> ClockedMotorSpan {
+    span_at(start_clock, start_clock as f64 / FREQ, 0.0, 0.0)
 }
 
 #[test]
 fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
     let rec = Arc::new(Mutex::new(Vec::new()));
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let sink = RecordingSink(rec.clone());
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink,
             PumpCallbacks::noop(2),
             None,
             std::sync::Arc::new(motion_core::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         )
     });
 
-    data.send(EnqueueMsg {
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    data.send(vec![LaneProjection {
         epoch_freq: None,
-        key: AxisKey { mcu_id: 1, axis: 0 },
-        pieces: vec![p(0), p(1)],
+        key,
+        spans: vec![span(0), span(SPAN_TICKS)],
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
-        source_line: u32::MAX,
-        batch_end: true,
-    })
+        source_line: SOURCE_LINE,
+    }])
     .unwrap();
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
-        key: AxisKey { mcu_id: 1, axis: 0 },
-        pieces: vec![p(2)],
+        key,
+        spans: vec![span(2 * SPAN_TICKS)],
         epoch: motion_core::anchor::StreamEpoch::Continuation,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
-        source_line: u32::MAX,
-        batch_end: true,
-    })
+        source_line: SOURCE_LINE,
+    }])
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
     assert_eq!(
-        rec.lock().unwrap().len(),
-        1,
-        "first frame (2 pieces) sent, third stalled"
+        rec.lock().unwrap().as_slice(),
+        [(key, 2)],
+        "both depth-2 ring slots fill in one batch, and the third view stalls"
     );
-    assert_eq!(rec.lock().unwrap()[0], (AxisKey { mcu_id: 1, axis: 0 }, 2));
 
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
+        axes: vec![0],
         consumed_counts: None,
         retired_counts: vec![2],
+        retired_by: RetiredBy::Pulse,
     }))
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
-    assert_eq!(rec.lock().unwrap().len(), 2);
-    assert_eq!(rec.lock().unwrap()[1], (AxisKey { mcu_id: 1, axis: 0 }, 1));
+    assert_eq!(
+        rec.lock().unwrap().as_slice(),
+        [(key, 2), (key, 1)],
+        "retirement frees the ring and the stalled view ships"
+    );
 
     ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 }
 
-fn piece_at(start: u64, host: f64, start_pos: f32, end_pos: f32) -> (PieceEntry, f64) {
-    let d = 0.001_f64;
-    let (b0, b1, b2, b3) = (
-        start_pos as f64,
-        start_pos as f64,
-        end_pos as f64,
-        end_pos as f64,
-    );
-    let mono = [
-        b0,
-        3.0 * (b1 - b0) / d,
-        3.0 * (b2 - 2.0 * b1 + b0) / (d * d),
-        (b3 - 3.0 * b2 + 3.0 * b1 - b0) / (d * d * d),
-    ];
-    let cheb = nurbs::chebyshev::monomial_tau_to_chebyshev(&mono, d);
-    let mut coeffs = [0.0_f32; runtime::piece_ring::MAX_PIECE_COEFFS];
-    for (dst, src) in coeffs.iter_mut().zip(&cheb) {
-        *dst = *src as f32;
-    }
-    (
-        PieceEntry {
-            start_time: start,
-            duration: d as f32,
-            coeff_count: cheb.len() as u8,
-            coeffs,
-            ..PieceEntry::zeroed()
-        },
-        host,
-    )
-}
-
-fn run_pump_with_clock(
+fn run_projection_batches_with_clock(
     control_rx: Receiver<PumpMsg>,
-    data_rx: Receiver<EnqueueMsg>,
+    data_rx: Receiver<Vec<LaneProjection>>,
     rec: Arc<Mutex<Vec<(AxisKey, usize)>>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             RecordingSink(rec),
             PumpCallbacks {
-                mcu_clock_of: Box::new(|_mcu| Some((0u64, 1e6_f64))),
+                mcu_clock_of: Box::new(|_mcu| Some((0u64, FREQ))),
                 ..PumpCallbacks::noop(64)
             },
             None,
             std::sync::Arc::new(motion_core::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         )
     })
+}
+
+fn sent_spans(rec: &Arc<Mutex<Vec<(AxisKey, usize)>>>) -> usize {
+    rec.lock().unwrap().iter().map(|(_, n)| n).sum()
 }
 
 #[test]
 fn continuous_junction_position_passes() {
     let rec = Arc::new(Mutex::new(Vec::new()));
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
-    let handle = run_pump_with_clock(control_rx, data_rx, rec.clone());
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
+    let handle = run_projection_batches_with_clock(control_rx, data_rx, rec.clone());
 
     let key = AxisKey { mcu_id: 1, axis: 0 };
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
-        pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
+        spans: vec![span_at(0, 0.0, 10.0, 12.5)],
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
-        source_line: u32::MAX,
-        batch_end: true,
-    })
+        source_line: SOURCE_LINE,
+    }])
     .unwrap();
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
-        pieces: vec![piece_at(2000, 0.002, 12.5, 15.0)],
+        spans: vec![span_at(SPAN_TICKS, SPAN_SECS, 12.5, 15.0)],
         epoch: motion_core::anchor::StreamEpoch::Continuation,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
-        source_line: u32::MAX,
-        batch_end: true,
-    })
+        source_line: SOURCE_LINE,
+    }])
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
-    let sent_pieces: usize = rec.lock().unwrap().iter().map(|(_, n)| n).sum();
-    assert_eq!(sent_pieces, 2);
+    assert_eq!(sent_spans(&rec), 2);
 
     ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
@@ -209,29 +205,27 @@ fn continuous_junction_position_passes() {
 fn junction_position_discontinuity_is_fatal() {
     let rec = Arc::new(Mutex::new(Vec::new()));
     let (_ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
-    let handle = run_pump_with_clock(control_rx, data_rx, rec.clone());
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
+    let handle = run_projection_batches_with_clock(control_rx, data_rx, rec.clone());
 
     let key = AxisKey { mcu_id: 1, axis: 0 };
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
-        pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
+        spans: vec![span_at(0, 0.0, 10.0, 12.5)],
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
-        source_line: u32::MAX,
-        batch_end: true,
-    })
+        source_line: SOURCE_LINE,
+    }])
     .unwrap();
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
-        pieces: vec![piece_at(2000, 0.002, 12.8, 15.0)],
+        spans: vec![span_at(SPAN_TICKS, SPAN_SECS, 12.8, 15.0)],
         epoch: motion_core::anchor::StreamEpoch::Continuation,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
-        source_line: u32::MAX,
-        batch_end: true,
-    })
+        source_line: SOURCE_LINE,
+    }])
     .unwrap();
 
     assert!(
@@ -244,29 +238,27 @@ fn junction_position_discontinuity_is_fatal() {
 fn underrun_reanchor_keeps_junction_continuity_guard_armed() {
     let rec = Arc::new(Mutex::new(Vec::new()));
     let (_ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
-    let handle = run_pump_with_clock(control_rx, data_rx, rec.clone());
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
+    let handle = run_projection_batches_with_clock(control_rx, data_rx, rec.clone());
 
     let key = AxisKey { mcu_id: 1, axis: 0 };
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
-        pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
+        spans: vec![span_at(0, 0.0, 10.0, 12.5)],
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
-        source_line: u32::MAX,
-        batch_end: true,
-    })
+        source_line: SOURCE_LINE,
+    }])
     .unwrap();
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
-        pieces: vec![piece_at(2000, 0.002, 12.8, 15.0)],
+        spans: vec![span_at(SPAN_TICKS, SPAN_SECS, 12.8, 15.0)],
         epoch: motion_core::anchor::StreamEpoch::Reanchor,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
-        source_line: u32::MAX,
-        batch_end: true,
-    })
+        source_line: SOURCE_LINE,
+    }])
     .unwrap();
 
     assert!(
@@ -281,33 +273,30 @@ fn underrun_reanchor_keeps_junction_continuity_guard_armed() {
 fn underrun_reanchor_with_continuous_position_passes() {
     let rec = Arc::new(Mutex::new(Vec::new()));
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
-    let handle = run_pump_with_clock(control_rx, data_rx, rec.clone());
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
+    let handle = run_projection_batches_with_clock(control_rx, data_rx, rec.clone());
 
     let key = AxisKey { mcu_id: 1, axis: 0 };
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
-        pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
+        spans: vec![span_at(0, 0.0, 10.0, 12.5)],
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
-        source_line: u32::MAX,
-        batch_end: true,
-    })
+        source_line: SOURCE_LINE,
+    }])
     .unwrap();
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
-        pieces: vec![piece_at(2000, 0.002, 12.5, 15.0)],
+        spans: vec![span_at(SPAN_TICKS, SPAN_SECS, 12.5, 15.0)],
         epoch: motion_core::anchor::StreamEpoch::Reanchor,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
-        source_line: u32::MAX,
-        batch_end: true,
-    })
+        source_line: SOURCE_LINE,
+    }])
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
-    let sent_pieces: usize = rec.lock().unwrap().iter().map(|(_, n)| n).sum();
-    assert_eq!(sent_pieces, 2);
+    assert_eq!(sent_spans(&rec), 2);
 
     ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
@@ -317,84 +306,77 @@ fn underrun_reanchor_with_continuous_position_passes() {
 fn fresh_stream_resets_junction_position_baseline() {
     let rec = Arc::new(Mutex::new(Vec::new()));
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
-    let handle = run_pump_with_clock(control_rx, data_rx, rec.clone());
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
+    let handle = run_projection_batches_with_clock(control_rx, data_rx, rec.clone());
 
     let key = AxisKey { mcu_id: 1, axis: 0 };
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
-        pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
+        spans: vec![span_at(0, 0.0, 10.0, 12.5)],
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
-        source_line: u32::MAX,
-        batch_end: true,
-    })
+        source_line: SOURCE_LINE,
+    }])
     .unwrap();
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
-        pieces: vec![piece_at(2000, 0.002, 50.0, 55.0)],
+        spans: vec![span_at(SPAN_TICKS, SPAN_SECS, 50.0, 55.0)],
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
-        source_line: u32::MAX,
-        batch_end: true,
-    })
+        source_line: SOURCE_LINE,
+    }])
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
-    let sent_pieces: usize = rec.lock().unwrap().iter().map(|(_, n)| n).sum();
-    assert_eq!(sent_pieces, 2);
+    assert_eq!(sent_spans(&rec), 2);
 
     ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 }
 
-/// A stationary ethercat lane streams no pieces, so a position redefinition
+/// A stationary ethercat lane streams no views, so a position redefinition
 /// (post-homing set_position adopting the measured servo position) reaches it
-/// only as a piece-free Reposition carrier — which must still forget the
+/// only as a span-free Reposition carrier — which must still forget the
 /// junction baseline, or the first real move after it panics on the stale
 /// pre-redefinition end position.
 #[test]
 fn empty_reposition_carrier_resets_junction_position_baseline() {
     let rec = Arc::new(Mutex::new(Vec::new()));
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
-    let handle = run_pump_with_clock(control_rx, data_rx, rec.clone());
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
+    let handle = run_projection_batches_with_clock(control_rx, data_rx, rec.clone());
 
     let key = AxisKey { mcu_id: 1, axis: 0 };
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
-        pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
+        spans: vec![span_at(0, 0.0, 10.0, 12.5)],
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
-        source_line: u32::MAX,
-        batch_end: true,
-    })
+        source_line: SOURCE_LINE,
+    }])
     .unwrap();
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
-        pieces: Vec::new(),
+        spans: Vec::new(),
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
-        source_line: u32::MAX,
-        batch_end: true,
-    })
+        source_line: SOURCE_LINE,
+    }])
     .unwrap();
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
-        pieces: vec![piece_at(2000, 0.002, 50.0, 55.0)],
+        spans: vec![span_at(SPAN_TICKS, SPAN_SECS, 50.0, 55.0)],
         epoch: motion_core::anchor::StreamEpoch::Continuation,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
-        source_line: u32::MAX,
-        batch_end: true,
-    })
+        source_line: SOURCE_LINE,
+    }])
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
-    let sent_pieces: usize = rec.lock().unwrap().iter().map(|(_, n)| n).sum();
-    assert_eq!(sent_pieces, 2);
+    assert_eq!(sent_spans(&rec), 2);
 
     ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
@@ -404,38 +386,32 @@ fn empty_reposition_carrier_resets_junction_position_baseline() {
 fn bundles_same_mcu_axes_into_one_transaction() {
     let rec = Arc::new(Mutex::new(Vec::new()));
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let sink = BundleSink(rec.clone());
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink,
             PumpCallbacks::noop(8),
             None,
             std::sync::Arc::new(motion_core::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         )
     });
 
-    // Three axes on the same MCU, each with a piece eligible to ship now
-    // (mcu_clock_of returns None => no horizon gate).
-    for axis in 0..3u8 {
-        data.send(EnqueueMsg {
-            epoch_freq: None,
-            key: AxisKey { mcu_id: 1, axis },
-            pieces: vec![p(0)],
-            epoch: if axis == 0 {
-                motion_core::anchor::StreamEpoch::Reposition
-            } else {
-                motion_core::anchor::StreamEpoch::Continuation
-            },
-            lead_secs: motion_core::pump::MAX_LEAD_SECS,
-            source_line: u32::MAX,
-            batch_end: true,
-        })
-        .unwrap();
-    }
+    data.send(
+        (0..3u8)
+            .map(|axis| LaneProjection {
+                epoch_freq: None,
+                key: AxisKey { mcu_id: 1, axis },
+                spans: vec![span(0)],
+                epoch: motion_core::anchor::StreamEpoch::Reposition,
+                lead_secs: motion_core::pump::MAX_LEAD_SECS,
+                source_line: SOURCE_LINE,
+            })
+            .collect(),
+    )
+    .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
 
     let calls = rec.lock().unwrap().clone();
@@ -459,86 +435,91 @@ fn bundles_same_mcu_axes_into_one_transaction() {
 
 #[test]
 fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
-    // With the ring full and no retirement, the pump stops pulling once its
-    // total host backlog reaches the cap, so a bounded data channel fills and
-    // the producer's send is refused (backpressure). Retirement lets it push and
-    // pull again, releasing the channel. The flood far exceeds the cap so the
-    // refusal is the cap, not a transient.
     let rec = Arc::new(Mutex::new(Vec::new()));
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = crossbeam_channel::bounded::<EnqueueMsg>(8);
-    let sink = RecordingSink(rec.clone());
+    let (data, data_rx) = crossbeam_channel::bounded::<Vec<LaneProjection>>(8);
+    let ledger = Arc::new(motion_core::drain::DrainLedger::new());
+    let owner_ledger = Arc::clone(&ledger);
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
-            sink,
+            RecordingSink(rec),
             PumpCallbacks::noop(4),
             None,
-            std::sync::Arc::new(motion_core::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
-        )
+            owner_ledger,
+        );
     });
-
     let key = AxisKey { mcu_id: 1, axis: 0 };
-    let mut accepted = 0u32;
-    let mut hit_full = false;
-    let flood = 24000u64; // comfortably above PUMP_INTAKE_BACKLOG_CAP
-    for i in 0..flood {
-        match data.try_send(EnqueueMsg {
+    let batch = |start, count, epoch| {
+        vec![LaneProjection {
             epoch_freq: None,
             key,
-            pieces: vec![p(i)],
-            epoch: if i == 0 {
-                motion_core::anchor::StreamEpoch::Reposition
-            } else {
-                motion_core::anchor::StreamEpoch::Continuation
-            },
+            spans: (start..start + count)
+                .map(|i| span(i * SPAN_TICKS))
+                .collect(),
+            epoch,
             lead_secs: motion_core::pump::MAX_LEAD_SECS,
-            source_line: u32::MAX,
-            batch_end: true,
-        }) {
-            Ok(()) => accepted += 1,
-            Err(TrySendError::Full(_)) => {
-                hit_full = true;
-                break;
-            }
-            Err(TrySendError::Disconnected(_)) => break,
-        }
-        if i % 64 == 0 {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+            source_line: SOURCE_LINE,
+        }]
+    };
+    data.send(batch(0, 5005, motion_core::anchor::StreamEpoch::Reposition))
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while ledger.staged_total() != 5001 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "owner never reached staged runway cap"
+        );
+        std::thread::yield_now();
     }
-    assert!(
-        hit_full,
-        "pump must stop pulling at the backlog cap so the data channel backpressures; accepted={accepted}"
-    );
-    assert!(
-        (accepted as u64) < flood,
-        "intake must be bounded, not drain everything; accepted={accepted}"
-    );
-
+    data.send(batch(
+        5005,
+        1,
+        motion_core::anchor::StreamEpoch::Continuation,
+    ))
+    .unwrap();
+    let (ack, inspected) = std::sync::mpsc::sync_channel(1);
+    ctl.send(PumpMsg::Barrier(ack)).unwrap();
+    inspected
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    for i in 5006..5014 {
+        data.try_send(batch(i, 1, motion_core::anchor::StreamEpoch::Continuation))
+            .unwrap();
+    }
+    let blocked = data.try_send(batch(
+        5014,
+        1,
+        motion_core::anchor::StreamEpoch::Continuation,
+    ));
+    let mut pending = match blocked {
+        Err(TrySendError::Full(pending)) => pending,
+        _ => panic!("full staged runway must backpressure the bounded trajectory queue"),
+    };
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
+        axes: vec![0],
         consumed_counts: None,
         retired_counts: vec![4],
+        retired_by: RetiredBy::Pulse,
     }))
     .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(30));
-    assert!(
-        data.try_send(EnqueueMsg {
-            epoch_freq: None,
-            key,
-            pieces: vec![p(9999)],
-            epoch: motion_core::anchor::StreamEpoch::Continuation,
-            lead_secs: motion_core::pump::MAX_LEAD_SECS,
-            source_line: u32::MAX,
-            batch_end: true,
-        })
-        .is_ok(),
-        "after retirement the pump resumes pulling and the channel drains"
-    );
-
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match data.try_send(pending) {
+            Ok(()) => break,
+            Err(TrySendError::Full(batch)) => {
+                pending = batch;
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "retirement did not reopen intake"
+                );
+                std::thread::yield_now();
+            }
+            Err(TrySendError::Disconnected(_)) => panic!("execution owner died"),
+        }
+    }
     ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 }
@@ -546,18 +527,18 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
 #[test]
 fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
     // Regression: a per-axis ring-room intake gate stalls behind a full axis and
-    // starves axes whose pieces arrive after it on the shared channel — this hung
-    // the homing drip cohort (idle axes got zero pieces, floor pinned at 0).
+    // starves axes whose views arrive after it on the shared channel — this hung
+    // the homing drip cohort (idle axes got zero views, floor pinned at 0).
     // Intake is bounded by TOTAL backlog, so a full axis A must not stop the pump
     // from feeding axis B.
     let rec = Arc::new(Mutex::new(Vec::new()));
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let key_a = AxisKey { mcu_id: 1, axis: 0 };
     let key_b = AxisKey { mcu_id: 1, axis: 1 };
     let sink = RecordingSink(rec.clone());
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink,
@@ -567,42 +548,39 @@ fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
             },
             None,
             std::sync::Arc::new(motion_core::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         )
     });
 
     // Axis A overruns its depth-2 ring with no retirement (stays full), then
-    // axis B's pieces arrive behind A's on the same channel.
+    // axis B's views arrive behind A's on the same channel.
     for i in 0..8u64 {
-        data.send(EnqueueMsg {
+        data.send(vec![LaneProjection {
             epoch_freq: None,
             key: key_a,
-            pieces: vec![p(i)],
+            spans: vec![span(i * SPAN_TICKS)],
             epoch: if i == 0 {
                 motion_core::anchor::StreamEpoch::Reposition
             } else {
                 motion_core::anchor::StreamEpoch::Continuation
             },
             lead_secs: motion_core::pump::MAX_LEAD_SECS,
-            source_line: u32::MAX,
-            batch_end: true,
-        })
+            source_line: SOURCE_LINE,
+        }])
         .unwrap();
     }
     for i in 0..4u64 {
-        data.send(EnqueueMsg {
+        data.send(vec![LaneProjection {
             epoch_freq: None,
             key: key_b,
-            pieces: vec![p(100 + i)],
+            spans: vec![span((100 + i) * SPAN_TICKS)],
             epoch: if i == 0 {
                 motion_core::anchor::StreamEpoch::Reposition
             } else {
                 motion_core::anchor::StreamEpoch::Continuation
             },
             lead_secs: motion_core::pump::MAX_LEAD_SECS,
-            source_line: u32::MAX,
-            batch_end: true,
-        })
+            source_line: SOURCE_LINE,
+        }])
         .unwrap();
     }
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -627,23 +605,22 @@ fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
 fn drip_cohort_finishes_over_cap_projection_batch_before_backpressuring() {
     let rec = Arc::new(Mutex::new(Vec::new()));
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let key_a = AxisKey { mcu_id: 1, axis: 0 };
     let key_b = AxisKey { mcu_id: 1, axis: 1 };
     let sink = RecordingSink(rec.clone());
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink,
             PumpCallbacks {
                 ring_depth_of: Box::new(move |k| if k == key_a { 4 } else { 64 }),
-                mcu_clock_of: Box::new(|_mcu| Some((0u64, 1e6_f64))),
+                mcu_clock_of: Box::new(|_mcu| Some((0u64, FREQ))),
                 ..PumpCallbacks::noop(0)
             },
             None,
             std::sync::Arc::new(motion_core::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         )
     });
 
@@ -654,27 +631,24 @@ fn drip_cohort_finishes_over_cap_projection_batch_before_backpressuring() {
     }))
     .unwrap();
 
-    data.send(EnqueueMsg {
-        epoch_freq: None,
-        key: key_a,
-        pieces: (0..9000u64)
-            .map(|i| piece_at(i, i as f64, 0.0, 0.0))
-            .collect(),
-        epoch: motion_core::anchor::StreamEpoch::Reposition,
-        lead_secs: motion_core::pump::DRIP_WINDOW_SECS,
-        source_line: u32::MAX,
-        batch_end: false,
-    })
-    .unwrap();
-    data.send(EnqueueMsg {
-        epoch_freq: None,
-        key: key_b,
-        pieces: (0..4u64).map(|i| piece_at(i, i as f64, 0.0, 0.0)).collect(),
-        epoch: motion_core::anchor::StreamEpoch::Reposition,
-        lead_secs: motion_core::pump::DRIP_WINDOW_SECS,
-        source_line: u32::MAX,
-        batch_end: true,
-    })
+    data.send(vec![
+        LaneProjection {
+            epoch_freq: None,
+            key: key_a,
+            spans: (0..9000u64).map(span).collect(),
+            epoch: motion_core::anchor::StreamEpoch::Reposition,
+            lead_secs: motion_core::pump::DRIP_WINDOW_SECS,
+            source_line: SOURCE_LINE,
+        },
+        LaneProjection {
+            epoch_freq: None,
+            key: key_b,
+            spans: (0..4u64).map(span).collect(),
+            epoch: motion_core::anchor::StreamEpoch::Reposition,
+            lead_secs: motion_core::pump::DRIP_WINDOW_SECS,
+            source_line: SOURCE_LINE,
+        },
+    ])
     .unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(80));

@@ -197,19 +197,6 @@ diag_systick_account(uint32_t enter_cycles, uint32_t exit_cycles)
 }
 
 void
-diag_stepout_account(uint32_t enter_cycles, uint32_t exit_cycles)
-{
-    static uint32_t burst_start;
-    static uint32_t burst_last_exit;
-    uint32_t dur = exit_cycles - enter_cycles;
-    if (dur > diag.stepout_max_cyc)
-        diag.stepout_max_cyc = dur;
-    diag_burst_fold(&diag.stepout_burst_max_cyc,
-                    &burst_start, &burst_last_exit,
-                    enter_cycles, exit_cycles);
-}
-
-void
 diag_usb_burst_track(uint32_t enter_cycles, uint32_t exit_cycles)
 {
     static uint32_t burst_start;

@@ -4,12 +4,16 @@ from klippy.extras.homing import Homing
 class _FakeToolhead:
     def __init__(self):
         self.dwells = []
+        self.clock_waits = []
 
     def get_last_move_time(self):
         return 7.5
 
     def dwell(self, delay):
         self.dwells.append(delay)
+
+    def wait_until_print_time(self, print_time):
+        self.clock_waits.append(print_time)
 
 
 class _FakeCurrentHelper:
@@ -46,6 +50,11 @@ def test_applies_to_every_helper_and_dwells_for_the_slowest():
     assert fast.calls == [(7.5, True)]
     assert slow.calls == [(7.5, True)]
     assert toolhead.dwells == [1.0]
+    # The current writes land at print_time on the MCU clock; the homing
+    # drip re-anchors past the queued dwell, so the greenlet must block
+    # until write time + dwell has really passed or the trip move launches
+    # at the old current and stalls on the mid-move change.
+    assert toolhead.clock_waits == [7.5 + 1.0]
 
 
 def test_skips_steppers_without_tmc_drivers():

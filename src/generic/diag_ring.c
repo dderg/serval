@@ -73,6 +73,43 @@ diag_note_dispatch(uint32_t func, uint32_t addr)
     live_snap.last_dispatch_addr = addr;
 }
 
+// Called by sched_timer_dispatch around every callback invocation: the
+// longest single timer-handler duration (DWT cycles) plus its function
+// pointer. A "Rescheduled timer in the past" dump names the head timer's
+// lateness; this names the handler that held the dispatch loop, so a
+// busy-wait hog is identified on the first crash replay.
+__attribute__((used, externally_visible))
+void
+diag_note_timer_duration(uint32_t dur_cyc, uint32_t func)
+{
+    if (dur_cyc > live_snap.worst_timer_cyc) {
+        live_snap.worst_timer_cyc = dur_cyc;
+        live_snap.worst_timer_func = func;
+    }
+}
+
+// Called by the classic stepper dir-change settle spin after it exits.
+// dur_cyc is what the spin actually burned; stale_ahead is how far the
+// (possibly stale-future) settle target sat beyond the fresh
+// now + step_pulse_ticks bound — zero in the healthy case, the whole
+// host turnaround when the reset-step-clock anchor leaked into the spin.
+__attribute__((used, externally_visible))
+void
+diag_note_step_spin(uint32_t dur_cyc, uint32_t stale_ahead)
+{
+    live_snap.step_spin_count++;
+    if (dur_cyc > live_snap.step_spin_worst_cyc)
+        live_snap.step_spin_worst_cyc = dur_cyc;
+    if (stale_ahead) {
+        live_snap.step_spin_stale_count++;
+        if (stale_ahead > live_snap.step_spin_stale_max)
+            live_snap.step_spin_stale_max = stale_ahead;
+        if (!live_snap.step_spin_stale_first)
+            live_snap.step_spin_stale_first = timer_read_time();
+        diag_cache_clean();
+    }
+}
+
 static void
 diag_close_task(uint32_t now)
 {
@@ -147,11 +184,28 @@ diag_note_shutdown_reset(void)
 #define REARM_ARMED_US 1000
 __attribute__((used, externally_visible))
 void
-diag_note_step_rearm(int32_t margin)
+diag_note_wire_probe(int32_t delta)
+{
+    live_snap.wire_probe_count++;
+    if (delta > (int32_t)live_snap.wire_probe_worst) {
+        live_snap.wire_probe_worst = (uint32_t)delta;
+        diag_cache_clean();
+    }
+}
+
+__attribute__((used, externally_visible))
+void
+diag_note_step_rearm(int32_t margin, uint32_t oid, uint32_t waketime,
+                     uint32_t last_reset, uint32_t discards)
 {
     live_snap.rearm_count++;
-    if (margin < (int32_t)live_snap.rearm_min_margin)
+    if (margin < (int32_t)live_snap.rearm_min_margin) {
         live_snap.rearm_min_margin = (uint32_t)margin;
+        live_snap.rearm_min_oid = oid;
+        live_snap.rearm_min_waketime = waketime;
+        live_snap.rearm_min_last_reset = last_reset;
+        live_snap.rearm_min_discards = discards;
+    }
     if (margin < (int32_t)timer_from_us(REARM_FLOOR_US)) {
         live_snap.rearm_below_floor++;
         if (margin < (int32_t)timer_from_us(REARM_ARMED_US))

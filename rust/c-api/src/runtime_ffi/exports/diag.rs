@@ -1,7 +1,6 @@
 use super::{
-    INIT_DONE, IsrState, Ordering, RUNTIME_ERR_INVALID_ARG, RUNTIME_ERR_NOT_INIT,
-    RUNTIME_ERR_NULL_PTR, Runtime, RuntimeContext, RuntimeStatus, SharedState, UnsafeCell,
-    guarded_ctx,
+    FaultCode, INIT_DONE, IsrState, Ordering, Runtime, RuntimeContext, RuntimeStatus, SharedState,
+    UnsafeCell, guarded_ctx,
 };
 
 #[unsafe(no_mangle)]
@@ -16,7 +15,7 @@ pub unsafe extern "C" fn runtime_handle_status(rt: *mut Runtime) -> u8 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn runtime_handle_last_error(rt: *mut Runtime) -> i32 {
-    let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
+    let ctx = guarded_ctx!(rt, FaultCode::NullPtr.as_i32(), FaultCode::NotInit.as_i32());
     // SAFETY: read-only SharedState atomics; no &mut.
     unsafe {
         let shared_ptr: *const SharedState = core::ptr::addr_of!((*ctx).shared);
@@ -60,17 +59,19 @@ pub unsafe extern "C" fn runtime_get_heartbeat(
     out_engine_state: *mut u8,
     out_fault_code: *mut u16,
     out_retired: *mut u32,
+    out_playback_clock: *mut u64,
     max_axes: usize,
 ) -> i32 {
     if rt.is_null()
         || out_engine_state.is_null()
         || out_fault_code.is_null()
         || out_retired.is_null()
+        || out_playback_clock.is_null()
     {
-        return RUNTIME_ERR_NULL_PTR;
+        return FaultCode::NullPtr.as_i32();
     }
     if !INIT_DONE.load(Ordering::Acquire) {
-        return RUNTIME_ERR_NOT_INIT;
+        return FaultCode::NotInit.as_i32();
     }
     let ctx = rt.cast::<RuntimeContext>();
     unsafe {
@@ -81,12 +82,14 @@ pub unsafe extern "C" fn runtime_get_heartbeat(
         let fault_code = (engine.last_error() as u32 & 0xFFFF) as u16;
         let num_axes = engine.num_axes as usize;
         let counts = engine.retired_counts();
+        let clocks = engine.playback_clocks();
         let n_write = num_axes.min(max_axes);
 
         core::ptr::write(out_engine_state, engine_state);
         core::ptr::write(out_fault_code, fault_code);
         for i in 0..n_write {
             out_retired.add(i).write(counts[i]);
+            out_playback_clock.add(i).write(clocks[i]);
         }
         #[allow(clippy::cast_possible_truncation)]
         let result = n_write as i32;
@@ -94,10 +97,10 @@ pub unsafe extern "C" fn runtime_get_heartbeat(
     }
 }
 
-/// Foreground-only, call under `irq_save` — the ISR mutates the armed
-/// piece and a torn u64 read would fabricate a bogus stall window.
-/// Returns 1 with the armed piece window, 0 when nothing is armed,
-/// negative on error. `out_occupancy` is the axis ring depth in pieces.
+/// Foreground-only, call under `irq_save` — the ISR mutates the front sample
+/// run and a torn u64 read would fabricate a bogus stall window.
+/// Returns 1 with the front sample-run window, 0 when the lane is empty,
+/// negative on error. `out_occupancy` is the axis's queued sample-run count.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn runtime_axis_head_window(
     rt: *mut Runtime,
@@ -107,10 +110,10 @@ pub unsafe extern "C" fn runtime_axis_head_window(
     out_occupancy: *mut u32,
 ) -> i32 {
     if rt.is_null() || out_start.is_null() || out_end.is_null() || out_occupancy.is_null() {
-        return RUNTIME_ERR_NULL_PTR;
+        return FaultCode::NullPtr.as_i32();
     }
     if !INIT_DONE.load(Ordering::Acquire) {
-        return RUNTIME_ERR_NOT_INIT;
+        return FaultCode::NotInit.as_i32();
     }
     let ctx = rt.cast::<RuntimeContext>();
     // SAFETY: foreground-only; §11.2 raw-pointer projection.
@@ -119,10 +122,10 @@ pub unsafe extern "C" fn runtime_axis_head_window(
         let engine = &(*isr_ptr).engine;
         let idx = axis_idx as usize;
         if idx >= engine.num_axes as usize {
-            return RUNTIME_ERR_INVALID_ARG;
+            return FaultCode::InvalidArg.as_i32();
         }
-        *out_occupancy = engine.occupancy_counts().get(idx).copied().unwrap_or(0);
-        match engine.armed_window(idx) {
+        *out_occupancy = engine.occupancy_counts()[idx];
+        match engine.head_window(idx) {
             Some((start, end)) => {
                 *out_start = start;
                 *out_end = end;
@@ -145,12 +148,12 @@ pub unsafe extern "C" fn runtime_query_motor_state(
     out_vel_q16: *mut i32,
     max: usize,
 ) -> i32 {
-    use runtime::stepping_state::MAX_AXES;
+    use runtime_contract::axes::MAX_AXES;
     if rt.is_null() || out_slots.is_null() || out_pos_q16.is_null() || out_vel_q16.is_null() {
-        return RUNTIME_ERR_NULL_PTR;
+        return FaultCode::NullPtr.as_i32();
     }
     if !INIT_DONE.load(Ordering::Acquire) {
-        return RUNTIME_ERR_NOT_INIT;
+        return FaultCode::NotInit.as_i32();
     }
     let ctx = rt.cast::<RuntimeContext>();
     unsafe {

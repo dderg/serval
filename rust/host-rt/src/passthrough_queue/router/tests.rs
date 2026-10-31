@@ -14,10 +14,14 @@ fn two_mcus_claim_release_independently() {
     let a = router.claim_mcu("mcu_a");
     let b = router.claim_mcu("mcu_b");
     assert_ne!(a, b);
+    router.set_clock_est(b, 48_000_000.0, 0.0, 1000).unwrap();
 
     router.release_mcu(a);
     assert!(router.compute_ack_clock(b).is_ok());
-    assert!(router.compute_ack_clock(a).is_err());
+    assert!(matches!(
+        router.compute_ack_clock(a),
+        Err(RouterError::UnknownMcu(_))
+    ));
 }
 
 #[test]
@@ -25,7 +29,10 @@ fn set_clock_est_stores_values() {
     let (mut router, _) = make_router();
     let mcu = router.claim_mcu("mcu");
 
-    assert_eq!(router.compute_ack_clock(mcu).unwrap(), 0);
+    assert!(matches!(
+        router.compute_ack_clock(mcu),
+        Err(RouterError::NoClockEstimate(_))
+    ));
 
     router.set_clock_est(mcu, 48_000_000.0, 0.0, 1000).unwrap();
 
@@ -73,15 +80,10 @@ fn set_clock_est_rebased_advances_with_mock_clock() {
     let (mut router, clock) = make_router();
     let mcu = router.claim_mcu("mcu");
 
-    // `offset_raw` must be in the same RAW-domain epoch as `bridge_now_raw`
-    // inside `set_clock_est_rebased`.  Capture it here so the conversion
-    // `raw_at_anchor = bridge_now_raw - bridge_now_instant` yields a small,
-    // positive number and `clock_offset` lands near the mock clock's current
-    // Instant value.
-    let offset_raw = crate::clock::monotonic_raw_secs();
+    let now_raw = crate::clock::monotonic_raw_secs();
 
     router
-        .set_clock_est_rebased(mcu, 1_000_000.0, offset_raw, 10_000_000, 0.0)
+        .set_clock_est_rebased(mcu, 1_000_000.0, now_raw, 10_000_000, true, now_raw)
         .unwrap();
 
     let ack0 = router.compute_ack_clock(mcu).unwrap();
@@ -99,33 +101,27 @@ fn set_clock_est_rebased_advances_with_mock_clock() {
 #[test]
 fn set_clock_est_rebased_epsilon_independent() {
     let freq = 1_000_000.0_f64;
-    let offset_raw = 990.0_f64;
     let last_clock = 10_000_000_u64;
+    let now_raw = crate::clock::monotonic_raw_secs();
+    let offset_raw = now_raw - 10.0;
 
-    let (mut router_a, _clock_a) = make_router();
-    let mcu_a = router_a.claim_mcu("mcu_a");
-
-    let (mut router_b, _clock_b) = make_router();
-    let mcu_b = router_b.claim_mcu("mcu_b");
-
-    router_a
-        .set_clock_est_rebased(mcu_a, freq, offset_raw, last_clock, 1000.0)
-        .unwrap();
-
-    router_b
-        .set_clock_est_rebased(mcu_b, freq, offset_raw, last_clock, 1000.0 - 0.050)
-        .unwrap();
-
-    let ack_a = router_a.compute_ack_clock(mcu_a).unwrap();
-    let ack_b = router_b.compute_ack_clock(mcu_b).unwrap();
-
-    let diff = (ack_a as i64 - ack_b as i64).unsigned_abs();
-    assert!(
-        diff <= 2,
-        "compute_ack_clock must not vary with host_now_raw (ε-independence); \
-         host_now_raw differed by 50 ms but ack_clock differed by {diff} ticks \
-         (ack_a={ack_a} ack_b={ack_b})"
-    );
+    for host_now_raw in [now_raw, now_raw - 0.050] {
+        let (mut router, _clock) = make_router();
+        let mcu = router.claim_mcu("mcu");
+        let before = crate::clock::monotonic_raw_secs();
+        router
+            .set_clock_est_rebased(mcu, freq, offset_raw, last_clock, true, host_now_raw)
+            .unwrap();
+        let after = crate::clock::monotonic_raw_secs();
+        let ack = router.compute_ack_clock(mcu).unwrap() as f64;
+        let earliest = (before - offset_raw) * freq + last_clock as f64;
+        let latest = (after - offset_raw) * freq + last_clock as f64;
+        assert!(
+            (earliest - 1.0..=latest + 1.0).contains(&ack),
+            "ack_clock must project the current clock, not the publication timestamp: \
+             ack={ack} expected={earliest}..={latest} published_at={host_now_raw}"
+        );
+    }
 }
 
 #[test]

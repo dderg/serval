@@ -13,9 +13,8 @@
 #include "mcu_transport_dispatch.h"
 #include "mcu_protocol_schema.h"
 #include "event_log.h"
+#include "generic/runtime_tick.h" // runtime_widened_host_clock
 
-// Foreground-safe, defined in src/runtime_tick.c; no public header declares it.
-extern uint64_t runtime_widened_host_clock(void);
 
 #define EVENT_LOG_MSG_VERSION 0x01
 // type(u16) | version(u8) | corr_id(u32).

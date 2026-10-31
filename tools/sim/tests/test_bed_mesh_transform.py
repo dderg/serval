@@ -178,14 +178,6 @@ def test_homing_with_active_mesh_inverts_trigger_z(sim_world):
     assert world.shutdown_line() is None
 
 
-@pytest.mark.xfail(
-    reason="pre-existing simulator limit, unrelated to bed mesh (fails "
-    "without a mesh loaded): clocksync skew accumulates across M400 "
-    "fences until pieces arrive in the MCU past and an axis stalls with "
-    "pieces pending (motion.axis_stalled; PieceStartInPast family in "
-    "sim-trip-time-resolution-handoff.md)",
-    strict=False,
-)
 def test_fenced_move_sequence_executes_all_axes(sim_world):
     world = sim_world(_cfg, dual_mcu=False)
     world.gcode_ok("SET_KINEMATIC_POSITION X=120 Y=120 Z=5")

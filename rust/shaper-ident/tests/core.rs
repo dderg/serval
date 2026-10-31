@@ -1,8 +1,9 @@
 use std::f64::consts::PI;
 
 use _shaper_ident::core::{
-    self, ShaperFreqs, calc_freq_response, estimate_smoother, find_shaper_cfg, find_smoother_cfg,
-    fit_shaper, fit_smoother, get_shaper_smoothing, get_smoother_smoothing, psd, smoother_moments,
+    self, FitParams, ShaperFreqs, calc_freq_response, estimate_smoother, find_shaper_cfg,
+    find_smoother_cfg, fit_shaper, fit_smoother, get_shaper_smoothing, get_smoother_smoothing, psd,
+    smoother_moments,
 };
 
 /// Build a synthetic capture: a decaying sinusoid at `signal_hz` on the X axis
@@ -81,11 +82,10 @@ fn fit_shaper_recommends_frequency_near_the_resonance() {
         &resp.freq_bins,
         &resp.psd_sum,
         &ShaperFreqs::Range(None, None, None),
-        None,
-        5.0,
-        None,
-        None,
-        None,
+        &FitParams {
+            scv: 5.0,
+            ..FitParams::default()
+        },
     )
     .expect("a shaper is selected");
     assert!(res.vibrs >= 0.0 && res.vibrs <= 1.0);
@@ -150,10 +150,10 @@ fn fit_smoother_recommends_frequency_near_the_resonance() {
         &resp.freq_bins,
         &resp.psd_sum,
         &ShaperFreqs::Range(None, None, None),
-        5.0,
-        None,
-        None,
-        None,
+        &FitParams {
+            scv: 5.0,
+            ..FitParams::default()
+        },
     )
     .expect("a smoother is selected");
     assert_eq!(res.name, "smooth_mzv");

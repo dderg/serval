@@ -46,17 +46,11 @@ class FakeEngine(_FakeEngine):
         drained = int(self.reactor.now - self._t0)
         return max(0, self._in_flight0 - drained)
 
-    def queued_motion_secs(self):
-        return float(self._in_flight())
-
     def submit_move(self, dx, dy, dz, de, feedrate):
         if self._in_flight() >= self._capacity:
             return False
         self.accepted += 1
         return True
-
-    def dispatched_lead_secs(self):
-        return 0.0
 
     def get_last_move_time(self):
         return 0.0
@@ -69,22 +63,19 @@ class FakeMotion:
     def __init__(
         self,
         in_flight=0,
-        mcu=True,
-        drip=False,
         stalled=False,
         capacity=64,
         shutdown=False,
     ):
         self.reactor = FakeReactor()
         self.printer = FakePrinter(self.reactor, shutdown=shutdown)
-        self.mcu = FakeMcu() if mcu else None
+        self.mcu = FakeMcu()
         self.engine = FakeEngine(
             self.reactor,
             in_flight=in_flight,
             capacity=capacity,
             stalled=stalled,
         )
-        self._drip_active = drip
         self._last_reactor_yield = 0.0
         self._engine_wakeup = None
 
@@ -136,27 +127,6 @@ def test_full_pipe_parks_on_engine_wakeup_instead_of_polling():
     assert m.engine.accepted == 1
     assert m._engine_wakeup.parks > 0
     assert m.reactor.pauses == 0, "a parked wait must not poll the reactor"
-
-
-def test_drip_submits_without_pacing():
-    m = FakeMotion(in_flight=1, drip=True)
-    m.submit()
-    assert m.engine.accepted == 1
-    assert m.reactor.pauses == 0
-
-
-def test_drip_fails_loud_when_pipe_full():
-    m = FakeMotion(in_flight=64, drip=True)
-    with pytest.raises(FakeCommandError):
-        m.submit()
-    assert m.reactor.pauses == 0
-
-
-def test_no_mcu_submits_without_pacing():
-    m = FakeMotion(in_flight=1, mcu=False)
-    m.submit()
-    assert m.engine.accepted == 1
-    assert m.reactor.pauses == 0
 
 
 def test_shutdown_breaks_the_wait():

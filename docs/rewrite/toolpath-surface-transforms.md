@@ -97,13 +97,13 @@ Mesh-active moves bypass the closed-form straight fast path
 (`lower_straight_from_phases`) and take the sampled path, the same gating
 that already exists for ramped followers.
 
-**Fast path preserved for flat regions:** per move, bound the mesh
-variation over the move's XY extent. If it is below epsilon — flat cell, or
-gcode Z past `fade_end` — treat the correction as a constant offset and
-keep the closed-form path. This is mainline's `split_delta_z` insight
-reincarnated as a warp-or-don't-bother decision instead of a splitting
-loop, and it keeps wire bandwidth and MCU eval cost at baseline for the
-overwhelmingly common case.
+**Fast path preserved only for exact constants:** a move keeps the closed-form
+path when the correction is exactly constant — a flat mesh, motion above
+`fade_end`, or no spatial motion. Any nonzero variation takes the sampled
+path, even when it is below the position-fit tolerance. Freezing each short
+move at its own start correction makes adjacent moves disagree at their
+shared endpoint; those sub-microstep position jumps accumulate in the step
+lattice and eventually demand several roots at one clock.
 
 ## Surface representation
 

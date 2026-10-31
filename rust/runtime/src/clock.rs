@@ -27,11 +27,6 @@ impl WidenState {
         self.last_low = baseline as u32;
     }
 
-    #[inline]
-    pub fn seed_high(&mut self, baseline: u64) {
-        self.seed(baseline);
-    }
-
     pub fn reinit(&mut self, raw: u32, last_widened_now: u64) {
         let captured_low = last_widened_now as u32;
         self.high = last_widened_now & !0xFFFF_FFFFu64;
@@ -51,20 +46,6 @@ impl WidenState {
         self.last_low = raw;
         self.high | u64::from(raw)
     }
-}
-
-/// TEST/SIM ONLY. Whole-cycle count for one `TEST_ONLY_TICK_RATE_HZ` tick.
-/// Integer division is intentional; `TEST_ONLY_TICK_RATE_HZ` divides evenly
-/// into all supported STM32 clock frequencies.
-#[allow(clippy::integer_division)]
-#[inline]
-pub fn one_tick_cycles(clock_freq: u32) -> u32 {
-    clock_freq / TEST_ONLY_TICK_RATE_HZ
-}
-
-#[inline]
-pub fn min_segment_cycles(clock_freq: u32) -> u32 {
-    2 * one_tick_cycles(clock_freq)
 }
 
 /// Shared liveness counter — set once by ISR, read by foreground.
@@ -98,11 +79,6 @@ impl TickCounter {
     #[inline]
     pub fn snapshot(&self) -> u32 {
         self.inner.load(Ordering::Relaxed)
-    }
-
-    #[inline]
-    pub fn inner_atomic(&self) -> &AtomicU32 {
-        &self.inner
     }
 }
 

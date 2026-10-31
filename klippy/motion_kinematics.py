@@ -17,8 +17,6 @@ def load_kinematics(config, motion):
 
 
 class _LinearKinematics:
-    supports_dual_carriage = False
-
     def __init__(self, config, motion, kind, lanes):
         self._motion = motion
         self.kind = kind
@@ -92,9 +90,6 @@ class _LinearKinematics:
 
     def _axis_rails(self):
         return {i: rail for i, rail in enumerate(self.rails)}
-
-    def claimed_axes(self):
-        return [axis_name for _, axis_name, _ in self._lanes]
 
     def lanes(self):
         return self._lanes

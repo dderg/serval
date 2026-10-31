@@ -1,15 +1,16 @@
 //! Regression tests for the stream count-anchor lifecycle.
 //!
 //! The trident bench captures (ident_20260710_002707.scap) showed a silent
-//! one-cycle `target_counts` step at every stroke boundary: re-creating the
-//! `CountMap` after a mid-stream ring gap anchored the commanded frame at
-//! `position_actual`, baking each drive's standing following error into the
-//! command and letting paired drives drift apart. These tests drive
-//! `compute_motion_targets` with a fake drive that tracks with a constant
-//! following error and assert the commanded-counts frame is continuous
-//! across ring gaps AND across discard_motion (homing trips) — falling back
-//! to position_actual only where the rotor genuinely moved uncommanded
-//! (torque cycle, drive fault, sync coast).
+//! one-cycle `target_counts` step at every stroke boundary: re-anchoring the
+//! commanded frame at `position_actual` across a mid-stream ring gap baked
+//! each drive's standing following error into the command and let paired
+//! drives drift apart. These tests drive the setpoint ring — host filler into
+//! `fill_lane_runs`, then `compute_ring_targets` per grid index — with a fake
+//! drive that tracks with a constant following error, and assert the
+//! commanded-counts frame is continuous across ring gaps AND across
+//! discard_motion (homing trips) — falling back to position_actual only where
+//! the rotor genuinely moved uncommanded (torque cycle, drive fault, sync
+//! coast).
 
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -17,120 +18,94 @@ use std::sync::{
 };
 
 use mcu_protocol::{
-    messages::{SetTorque, StepperSuppress},
+    messages::{
+        LaneRun, SetTorque, SetpointSample, StepperSuppress, LANE_RUN_FLAG_REANCHOR,
+        LANE_RUN_FLAG_TAIL,
+    },
     Decode, Encode,
 };
-use runtime::piece_ring::PieceEntry;
+use runtime_contract::error::FaultCode;
+use trajectory::{
+    ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm, NudgeProfile,
+};
 
-use super::cycle::compute_motion_targets;
+use super::cycle::compute_ring_targets;
 use super::drive::DriveChain;
+use super::sim::SimDrive;
 use super::{discard_motion, EndpointCtx};
-use crate::buzz::BuzzOsc;
-use crate::capture::{Capture, CaptureDriveConfig};
-use crate::curves::AxisRing;
-use crate::damper::DiffDamperBank;
+use crate::damper::{DamperGains, SlotPair};
 use crate::ffi::EcTelemetry;
-use crate::live_tap::LiveTap;
-use crate::mailbox::{MailboxWorker, WorkerScheduling};
-use crate::scale::CountMap;
 use crate::sdo::SdoBus;
-use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
-use crate::stream_halt::StreamHalt;
+use crate::strain_comp::{CompGrid, CompPair};
 use crate::torque::{TorqueGate, TorqueState};
-use crate::trim::DiffTrimBank;
+use crate::trim::TrimGains;
+use ethercat_setpoint::dynamics::{FrameParts, ModeParts, PinParts};
+use ethercat_setpoint::setpoint::Played;
+use ethercat_setpoint_fill::buzz::{BuzzRoute, BuzzSweep};
+use ethercat_setpoint_fill::setpoint_fill::{ChainFiller, LaneSpec, CLOCK_FREQ_HZ};
 
 const NUM_SLAVES: usize = 2;
 const COUNTS_PER_MM: f64 = 3276.8;
 const FOLLOWING_ERROR: [i32; NUM_SLAVES] = [40, -25];
 const CYCLE_NS: u64 = 250_000;
 
-struct TrackingLagDrive {
-    targets: Vec<i32>,
-    drift_counts_per_cycle: Vec<f64>,
-    drifted_counts: Vec<f64>,
-    torque_offsets: Vec<i16>,
-    velocity_offsets: Vec<i32>,
-    torques: Vec<i16>,
+fn pair(a: u8, b: u8) -> SlotPair {
+    SlotPair { a, b }
 }
 
-impl TrackingLagDrive {
-    fn at_rest() -> Self {
-        Self::with_drift(vec![0.0; NUM_SLAVES])
-    }
-
-    /// A rotor sliding uncommanded at a constant counts-per-cycle rate on top
-    /// of its tracking lag — the raw-encoder motion the damper differentiates.
-    fn with_drift(drift_counts_per_cycle: Vec<f64>) -> Self {
-        Self {
-            targets: vec![0; NUM_SLAVES],
-            drift_counts_per_cycle,
-            drifted_counts: vec![0.0; NUM_SLAVES],
-            torque_offsets: vec![0; NUM_SLAVES],
-            velocity_offsets: vec![0; NUM_SLAVES],
-            torques: vec![0; NUM_SLAVES],
-        }
-    }
-
-    /// A pair standing in a constant fight, for the trim tests.
-    fn with_torques(torques: Vec<i16>) -> Self {
-        Self {
-            torques,
-            ..Self::at_rest()
-        }
+fn damper_gains(gain_milli: u32, clamp_tenths: u16, lpf_millihz: u32, lead_us: u16) -> DamperGains {
+    DamperGains {
+        gain_milli,
+        clamp_tenths,
+        lpf_millihz,
+        lead_us,
     }
 }
 
-impl DriveChain for TrackingLagDrive {
-    fn cycle_time_ns(&self) -> u64 {
-        0
+fn trim_gains(gain_micro: u32, clamp_um: u16, lpf_millihz: u32, settle_ms: u32) -> TrimGains {
+    TrimGains {
+        gain_micro,
+        clamp_um,
+        lpf_millihz,
+        settle_ms,
     }
-    fn cycle(&mut self) -> (i32, i64) {
-        for (pos, drift) in self
-            .drifted_counts
-            .iter_mut()
-            .zip(&self.drift_counts_per_cycle)
-        {
-            *pos += drift;
-        }
-        (0, 0)
+}
+
+fn comp_pair(slot_a: u8, slot_b: u8, lane_a: u8, lane_b: u8, kinematics: u8) -> CompPair {
+    CompPair {
+        slot_a,
+        slot_b,
+        lane_a,
+        lane_b,
+        kinematics,
     }
-    fn enable_all(&mut self) -> i32 {
-        0
+}
+
+fn grid(nx: u16, ny: u16, x0: f64, y0: f64, dx: f64, dy: f64) -> CompGrid {
+    CompGrid {
+        nx,
+        ny,
+        x0,
+        y0,
+        dx,
+        dy,
     }
-    fn disable_all(&mut self) {}
-    fn shutdown(&mut self) {}
-    fn set_target_position(&mut self, slot: usize, counts: i32) {
-        self.targets[slot] = counts;
-    }
-    fn set_velocity_offset(&mut self, slot: usize, counts_per_s: i32) {
-        self.velocity_offsets[slot] = counts_per_s;
-    }
-    fn set_torque_offset(&mut self, slot: usize, tenths_pct: i16) {
-        self.torque_offsets[slot] = tenths_pct;
-    }
-    fn position_actual(&self, slot: usize) -> i32 {
-        self.targets[slot] - FOLLOWING_ERROR[slot] + self.drifted_counts[slot].round() as i32
-    }
-    fn velocity_actual(&self, _slot: usize) -> i32 {
-        0
-    }
-    fn torque_actual(&self, slot: usize) -> i16 {
-        self.torques[slot]
-    }
-    fn error_code(&self, _slot: usize) -> u16 {
-        0
-    }
-    fn telemetry(&self, slot: usize) -> EcTelemetry {
-        EcTelemetry {
-            target_position: self.targets[slot],
-            position_actual: self.position_actual(slot),
-            torque_offset: self.torque_offsets[slot],
-            velocity_offset: self.velocity_offsets[slot],
-            ..EcTelemetry::default()
-        }
-    }
-    fn dump_al_state(&self) {}
+}
+
+fn at_rest() -> SimDrive {
+    SimDrive::new(NUM_SLAVES).with_following_error(FOLLOWING_ERROR.to_vec())
+}
+
+/// A rotor sliding uncommanded at a constant counts-per-cycle rate on top of
+/// its tracking lag — the raw-encoder motion the damper differentiates.
+fn with_drift(drift_counts_per_cycle: Vec<f64>) -> SimDrive {
+    at_rest().with_drift(drift_counts_per_cycle)
+}
+
+/// A pair standing in a constant fight, for the trim tests.
+fn with_torques(torques: Vec<i16>) -> SimDrive {
+    at_rest().with_torques(torques)
 }
 
 struct TransitionCounts {
@@ -195,116 +170,166 @@ impl SdoBus for NoSdo {
     }
 }
 
-fn test_ctx(name: &str) -> EndpointCtx {
-    test_ctx_with_drive(name, TrackingLagDrive::at_rest())
+/// Endpoint plus the host filler that feeds its setpoint ring, so a test can
+/// stage span trajectories the way the pump does and then play them cycle by
+/// cycle. Derefs to the endpoint: the assertions read `EndpointCtx` directly.
+struct Bench {
+    ctx: EndpointCtx,
+    host: ChainFiller,
+    grid_clock_ns: u64,
 }
 
-fn test_ctx_with_drive(name: &str, drive: impl DriveChain + 'static) -> EndpointCtx {
-    let sock = std::env::temp_dir().join(format!("ec-rt-test-{}-{name}.sock", std::process::id()));
-    let mut gate = TorqueGate::new();
-    let _ = gate.on_set_torque(true, 0);
-    gate.enable_finished(true);
-    EndpointCtx {
-        server: FrameServer::bind(sock.to_str().expect("utf8 socket path"))
-            .expect("bind test socket"),
-        drive: Box::new(drive),
-        num_slaves: NUM_SLAVES,
-        counts_per_mm: vec![COUNTS_PER_MM; NUM_SLAVES],
-        invert: vec![false; NUM_SLAVES],
-        cmd_counts_per_mm: vec![COUNTS_PER_MM; NUM_SLAVES],
-        rotation_distance: vec![40.0; NUM_SLAVES],
-        slave_axes: vec![0, 1],
-        velocity_ff: vec![false; NUM_SLAVES],
-        torque_clamp_tenths: vec![0; NUM_SLAVES],
-        ff_lead_ns: vec![0; NUM_SLAVES],
-        jump_log_counts: vec![1638; NUM_SLAVES],
-        cycle_ns: CYCLE_NS as i64,
-        group_delay_ns: 0,
-        telemetry_period: u64::MAX,
-        dynamics: None,
-        pin: super::cycle::PinState::default(),
-        drive_dirs: vec![1.0; NUM_SLAVES],
-        drive_scratch: super::cycle::DriveScratch::new(NUM_SLAVES),
-        run_limits: Vec::new(),
-        rings: (0..NUM_SLAVES).map(AxisRing::with_slot).collect(),
-        buzz: BuzzOsc::new(),
-        damper: DiffDamperBank::new(CYCLE_NS as i64),
-        trim: DiffTrimBank::new(CYCLE_NS as i64),
-        comp: crate::strain_comp::StrainCompBank::new(CYCLE_NS as i64),
-        cmaps: vec![None; NUM_SLAVES],
-        last_counts: vec![None; NUM_SLAVES],
-        last_written_offset: vec![0; NUM_SLAVES],
-        report_anchor: vec![None; NUM_SLAVES],
-        last_streamed_target: vec![None; NUM_SLAVES],
-        suppressed: vec![false; NUM_SLAVES],
-        last_sent_retired: 0,
-        heartbeat_sent: false,
-        gate,
-        capture: Capture::new(),
-        live_tap: LiveTap::spawn(
-            sock.with_extension("live").to_str().expect("utf8 tap path"),
-            vec![CaptureDriveConfig {
-                slot: 0,
-                name: "slot0".into(),
-                counts_per_mm: COUNTS_PER_MM,
-                rotation_distance: 40.0,
-                invert: false,
-            }],
-            CYCLE_NS as i64,
-        )
-        .expect("bind test tap socket"),
-        reclaim: crate::reclaim::Reclaim::spawn(),
-        tap_slots: (0..NUM_SLAVES as u8).collect(),
-        cycle_index: 0,
-        mailbox: MailboxWorker::spawn(NoSdo, |_, _, _| 0, WorkerScheduling::Normal),
-        pending_starts: Vec::new(),
-        pending_stops: Vec::new(),
-        pending_seed: None,
-        capture_slots: Vec::new(),
-        prdiv: 0,
-        ff_saturation: 0,
-        wkc_consecutive: 0,
-        latched_drive_err: 0,
-        sensorless: SensorlessBank::new(NUM_SLAVES),
-        stream_halt: StreamHalt::default(),
-        late_tolerance_ns: None,
-        timing_armed: true,
-        baseline_reanchor_count: 0,
-        late_frames: 0,
-        late_max_ns: i64::MIN,
-        skip_count_policed: 0,
-        late_frames_total: 0,
-        last_lateness_ns: 0,
-        last_dispatch_ns: 0,
-        last_pre_work_ns: 0,
-        prev_exchange_ns: 0,
-        last_wake_late_ns: 0,
-        last_recv_ns: 0,
-        last_process_ns: 0,
-        last_send_ns: 0,
-        wake_late_max_ns: i64::MIN,
-        recv_max_ns: i64::MIN,
-        process_max_ns: i64::MIN,
-        send_max_ns: i64::MIN,
-        prev_exchange_return: None,
-        last_pre_cycle_ns: 0,
-        last_post_cycle_ns: 0,
-        last_inter_exchange_ns: 0,
-        pre_cycle_max_ns: i64::MIN,
-        post_cycle_max_ns: i64::MIN,
-        inter_exchange_max_ns: i64::MIN,
-        last_nivcsw: 0,
-        last_fault_ns: 0,
-        last_capture_ns: 0,
-        last_wkc_ns: 0,
-        last_heartbeat_ns: 0,
-        last_telemetry_ns: 0,
-        fault_max_ns: i64::MIN,
-        capture_max_ns: i64::MIN,
-        wkc_max_ns: i64::MIN,
-        heartbeat_max_ns: i64::MIN,
-        telemetry_max_ns: i64::MIN,
+impl std::ops::Deref for Bench {
+    type Target = EndpointCtx;
+    fn deref(&self) -> &EndpointCtx {
+        &self.ctx
     }
+}
+
+impl std::ops::DerefMut for Bench {
+    fn deref_mut(&mut self) -> &mut EndpointCtx {
+        &mut self.ctx
+    }
+}
+
+/// A freshly armed buzz is anchored this many cycles ahead of the grid clock
+/// the host last observed, exactly as the pump leads its fills.
+const BUZZ_ARM_LEAD_CYCLES: u64 = 1;
+
+fn lane_specs() -> Vec<LaneSpec> {
+    (0..NUM_SLAVES)
+        .map(|slot| LaneSpec {
+            axis: slot as u8,
+            cmd_counts_per_mm: COUNTS_PER_MM,
+            ff_lead_ns: 0,
+        })
+        .collect()
+}
+
+impl Bench {
+    fn new(ctx: EndpointCtx) -> Self {
+        Self {
+            host: ChainFiller::new(&lane_specs(), None, CYCLE_NS, BUZZ_ARM_LEAD_CYCLES),
+            ctx,
+            grid_clock_ns: 0,
+        }
+    }
+
+    /// Install the same dynamics model on both sides: the host computes the
+    /// torque feedforward at fill time, the endpoint only clamps it and adds
+    /// the pin.
+    fn install_dynamics(&mut self, toml: &str) {
+        let for_host =
+            ethercat_setpoint::dynamics::DynamicsModel::from_toml_str(toml).expect("valid profile");
+        let for_endpoint =
+            ethercat_setpoint::dynamics::DynamicsModel::from_toml_str(toml).expect("valid profile");
+        self.host = ChainFiller::new(
+            &lane_specs(),
+            Some(for_host),
+            CYCLE_NS,
+            BUZZ_ARM_LEAD_CYCLES,
+        );
+        self.ctx.dynamics = Some(for_endpoint);
+    }
+
+    fn push_all(&mut self, span: ClockedMotorSpan) {
+        for axis in 0..NUM_SLAVES as u8 {
+            self.host
+                .push_spans(axis, std::slice::from_ref(&span))
+                .expect("the lane takes the view");
+        }
+    }
+
+    /// Arm the host-generated buzz, the only buzz there is: the endpoint
+    /// plays its samples out of the ring like any other motion.
+    fn arm_buzz(&mut self, route: BuzzRoute, sweep: BuzzSweep) -> i32 {
+        self.host.arm_buzz(
+            route,
+            sweep,
+            self.grid_clock_ns + BUZZ_ARM_LEAD_CYCLES * CYCLE_NS,
+        )
+    }
+
+    /// Drain the host into the rings the way the pump does: while it still
+    /// owes samples and every lane can still take a full block.
+    fn fill(&mut self) {
+        while self.host.wants_drain()
+            && self
+                .ctx
+                .sp_rings
+                .iter()
+                .all(|r| r.free() >= ethercat_setpoint::setpoint::MAX_FILL_CYCLES)
+        {
+            let runs = self.host.drain().expect("host fill");
+            if runs.is_empty() {
+                break;
+            }
+            let (result, _entries) = super::commands::fill_lane_runs(&mut self.ctx, &runs);
+            assert_eq!(result, 0, "endpoint rejected a run");
+        }
+    }
+
+    /// Stage everything the host owes onto the endpoint's rings at the grid
+    /// position `clock_ns` names, without playing a cycle.
+    fn stage_at(&mut self, clock_ns: u64) {
+        let index = clock_ns / CYCLE_NS;
+        assert_eq!(index * CYCLE_NS, clock_ns, "test clocks ride the DC grid");
+        self.host
+            .observe_grid(index, clock_ns)
+            .expect("the grid only advances");
+        self.grid_clock_ns = clock_ns;
+        self.fill();
+    }
+
+    /// One DC cycle at `clock_ns`, which must sit on the test grid (base 0).
+    fn cycle_at(&mut self, clock_ns: u64) {
+        self.stage_at(clock_ns);
+        compute_ring_targets(&mut self.ctx, clock_ns / CYCLE_NS);
+        self.ctx.drive.cycle();
+    }
+
+    fn run_cycles(&mut self, from_ns: u64, to_ns: u64) {
+        let mut t = from_ns;
+        while t <= to_ns {
+            self.cycle_at(t);
+            t += CYCLE_NS;
+        }
+    }
+
+    /// Stop / homing trip / drive fault: both sides drop the epoch.
+    fn discard_motion(&mut self) {
+        discard_motion(&mut self.ctx);
+        self.host.reset();
+    }
+}
+
+fn test_ctx(name: &str) -> Bench {
+    test_ctx_with_drive(name, at_rest())
+}
+
+fn test_ctx_with_drive(name: &str, drive: impl DriveChain + 'static) -> Bench {
+    Bench::new(raw_ctx(name, drive))
+}
+
+fn raw_ctx(name: &str, drive: impl DriveChain + 'static) -> EndpointCtx {
+    let sock = std::env::temp_dir().join(format!("ec-rt-test-{}-{name}.sock", std::process::id()));
+    let sock = sock.to_str().expect("utf8 socket path");
+    let mut ctx = super::sim::sim_endpoint_with_drive(
+        super::SimConfig {
+            server: FrameServer::bind(sock).expect("bind test socket"),
+            live_tap_socket: &format!("{sock}.live"),
+            slave_axes: (0..NUM_SLAVES as u8).collect(),
+            counts_per_mm: vec![COUNTS_PER_MM; NUM_SLAVES],
+            cycle_ns: CYCLE_NS as i64,
+            telemetry_period: u64::MAX,
+        },
+        Box::new(drive),
+        NoSdo,
+    );
+    let _ = ctx.gate.on_set_torque(true, 0);
+    ctx.gate.enable_finished(true);
+    ctx.timing_armed = true;
+    ctx
 }
 
 #[test]
@@ -361,30 +386,86 @@ fn scheduled_torque_disable_uses_one_chain_transition_for_two_slaves() {
     assert_eq!(transitions.disable.load(Ordering::SeqCst), 1);
 }
 
-fn piece(start_ns: u64, duration_s: f32, coeffs: &[f32]) -> PieceEntry {
-    let mut entry = PieceEntry {
-        start_time: start_ns,
-        duration: duration_s,
-        coeff_count: coeffs.len() as u8,
-        ..PieceEntry::zeroed()
-    };
-    entry.coeffs[..coeffs.len()].copy_from_slice(coeffs);
-    entry
+#[allow(clippy::cast_precision_loss)]
+fn clocked(signal: Arc<MotorSpan>, start_ns: u64) -> ClockedMotorSpan {
+    let start_clock_exact = start_ns as f64;
+    let start_host = start_clock_exact / CLOCK_FREQ_HZ;
+    ClockedMotorSpan::try_new(
+        Arc::clone(&signal),
+        signal.t_start,
+        signal.t_end,
+        start_host,
+        start_host + (signal.t_end - signal.t_start),
+        start_clock_exact,
+        CLOCK_FREQ_HZ,
+    )
+    .expect("a positive-duration view on the nanosecond DC clock")
 }
 
-fn push_all(ctx: &mut EndpointCtx, entry: PieceEntry) {
-    for ring in &mut ctx.rings {
-        ring.push_entry(entry).expect("test ring has room");
-    }
+fn one_term_span(axis: ContinuousAxis, duration_s: f64) -> Arc<MotorSpan> {
+    let groups: Arc<[MotorGroup]> = Arc::from([MotorGroup::Independent(MotorTerm {
+        source_axis: 0,
+        axis,
+        scale: 1.0,
+    })]);
+    Arc::new(MotorSpan::try_new(groups, 0.0, duration_s, 0, 0, false).expect("motor span"))
 }
 
-fn run_cycles(ctx: &mut EndpointCtx, from_ns: u64, to_ns: u64) {
-    let mut t = from_ns;
-    while t <= to_ns {
-        compute_motion_targets(ctx, t);
-        ctx.drive.cycle();
-        t += CYCLE_NS;
-    }
+fn hold(start_ns: u64, duration_s: f64, position_mm: f64) -> ClockedMotorSpan {
+    clocked(
+        one_term_span(
+            ContinuousAxis::Hold {
+                position: position_mm,
+                t_start: 0.0,
+                t_end: duration_s,
+            },
+            duration_s,
+        ),
+        start_ns,
+    )
+}
+
+fn ramp(start_ns: u64, duration_s: f64, from_mm: f64, to_mm: f64) -> ClockedMotorSpan {
+    let delta = to_mm - from_mm;
+    let profile =
+        NudgeProfile::try_new(delta, delta.abs() / duration_s, 0.0, 0.0).expect("cruise profile");
+    let duration = profile.duration();
+    let groups: Arc<[MotorGroup]> = Arc::from([
+        MotorGroup::Independent(MotorTerm {
+            source_axis: 0,
+            axis: ContinuousAxis::Hold {
+                position: from_mm,
+                t_start: 0.0,
+                t_end: duration,
+            },
+            scale: 1.0,
+        }),
+        MotorGroup::Independent(MotorTerm {
+            source_axis: 0,
+            axis: ContinuousAxis::Nudge(profile),
+            scale: 1.0,
+        }),
+    ]);
+    clocked(
+        Arc::new(MotorSpan::try_new(groups, 0.0, duration, 0, 0, false).expect("motor span")),
+        start_ns,
+    )
+}
+
+/// The constant-accel law, exact:
+/// p(t) = c2·(2u² − 1) with u = 2t/d − 1, which is the quadratic Bezier
+/// through control points (c2, −3·c2, c2) — accel a constant 16·c2/d².
+fn constant_accel(start_ns: u64, duration_s: f64, c2: f64) -> ClockedMotorSpan {
+    let curve = nurbs::ScalarNurbs::try_new(
+        2,
+        vec![0.0, 0.0, 0.0, duration_s, duration_s, duration_s],
+        vec![c2, -3.0 * c2, c2],
+    )
+    .expect("a quadratic bezier over the span duration");
+    clocked(
+        one_term_span(ContinuousAxis::Spline(Arc::new(curve)), duration_s),
+        start_ns,
+    )
 }
 
 fn targets(ctx: &EndpointCtx) -> Vec<i32> {
@@ -403,17 +484,17 @@ fn target_counts_hold_across_a_mid_stream_ring_gap() {
 
     // Stroke: 0 mm → 5 mm over 10 ms starting at t=1 ms, then a contiguous
     // 10 ms hold at the endpoint — the shape of a stroke braking to rest.
-    push_all(&mut ctx, piece(1_000_000, 0.01, &[2.5, 2.5]));
-    push_all(&mut ctx, piece(11_000_000, 0.01, &[5.0]));
-    run_cycles(&mut ctx, 1_000_000, 20_750_000);
+    ctx.push_all(ramp(1_000_000, 0.01, 0.0, 5.0));
+    ctx.push_all(hold(11_000_000, 0.01, 5.0));
+    ctx.run_cycles(1_000_000, 20_750_000);
     let at_rest = targets(&ctx);
 
     // Ring runs dry for ~1.2 s (the ident dwell + think time).
-    run_cycles(&mut ctx, 21_000_000, 25_000_000);
-    run_cycles(&mut ctx, 1_200_000_000, 1_201_000_000);
+    ctx.run_cycles(21_000_000, 25_000_000);
+    ctx.run_cycles(1_200_000_000, 1_201_000_000);
     for s in 0..NUM_SLAVES {
         assert!(
-            ctx.cmaps[s].is_some(),
+            ctx.ring_origin[s].is_some(),
             "slot {s}: count anchor must survive a mid-stream gap"
         );
         assert!(
@@ -423,8 +504,8 @@ fn target_counts_hold_across_a_mid_stream_ring_gap() {
     }
 
     // Continuation: hold at 5 mm, arriving after the gap.
-    push_all(&mut ctx, piece(1_211_000_000, 0.01, &[5.0]));
-    run_cycles(&mut ctx, 1_211_000_000, 1_212_000_000);
+    ctx.push_all(hold(1_211_000_000, 0.01, 5.0));
+    ctx.run_cycles(1_211_000_000, 1_212_000_000);
 
     let after_gap = targets(&ctx);
     assert_eq!(
@@ -445,13 +526,16 @@ fn target_counts_hold_across_a_mid_stream_ring_gap() {
 fn discard_motion_keeps_commanded_counts_continuous() {
     let mut ctx = test_ctx("discard");
 
-    push_all(&mut ctx, piece(1_000_000, 0.01, &[2.5, 2.5]));
-    run_cycles(&mut ctx, 1_000_000, 11_000_000);
+    ctx.push_all(ramp(1_000_000, 0.01, 0.0, 5.0));
+    ctx.run_cycles(1_000_000, 11_000_000);
     let before = targets(&ctx);
 
-    discard_motion(&mut ctx);
+    ctx.discard_motion();
     for s in 0..NUM_SLAVES {
-        assert!(ctx.cmaps[s].is_none(), "slot {s}: discard drops the anchor");
+        assert!(
+            ctx.ring_origin[s].is_none(),
+            "slot {s}: discard drops the anchor"
+        );
         assert!(
             ctx.last_counts[s].is_none(),
             "slot {s}: discard resets the jump-guard baseline"
@@ -461,8 +545,8 @@ fn discard_motion_keeps_commanded_counts_continuous() {
     // New stream restarts the host frame at 0 mm at the same physical spot:
     // the commanded counts must not move, or the pair's standing following
     // errors ({FOLLOWING_ERROR:?}) become a trapped differential.
-    push_all(&mut ctx, piece(20_000_000, 0.01, &[0.0]));
-    run_cycles(&mut ctx, 20_000_000, 20_500_000);
+    ctx.push_all(hold(20_000_000, 0.01, 0.0));
+    ctx.run_cycles(20_000_000, 20_500_000);
 
     let after = targets(&ctx);
     assert_eq!(
@@ -479,8 +563,8 @@ fn discard_motion_keeps_commanded_counts_continuous() {
 fn torque_disable_voids_the_commanded_anchor() {
     let mut ctx = test_ctx("torque-off");
 
-    push_all(&mut ctx, piece(1_000_000, 0.01, &[2.5, 2.5]));
-    run_cycles(&mut ctx, 1_000_000, 11_000_000);
+    ctx.push_all(ramp(1_000_000, 0.01, 0.0, 5.0));
+    ctx.run_cycles(1_000_000, 11_000_000);
     let before = targets(&ctx);
 
     let _ = ctx.gate.on_set_torque(false, 15_000_000);
@@ -491,7 +575,7 @@ fn torque_disable_voids_the_commanded_anchor() {
             "slot {s}: torque disable must void the commanded anchor"
         );
         assert!(
-            ctx.cmaps[s].is_none(),
+            ctx.ring_origin[s].is_none(),
             "slot {s}: torque disable drops the anchor"
         );
     }
@@ -499,8 +583,8 @@ fn torque_disable_voids_the_commanded_anchor() {
     let _ = ctx.gate.on_set_torque(true, 0);
     ctx.gate.enable_finished(true);
 
-    push_all(&mut ctx, piece(30_000_000, 0.01, &[0.0]));
-    run_cycles(&mut ctx, 30_000_000, 30_500_000);
+    ctx.push_all(hold(30_000_000, 0.01, 0.0));
+    ctx.run_cycles(30_000_000, 30_500_000);
 
     let after = targets(&ctx);
     for s in 0..NUM_SLAVES {
@@ -522,16 +606,16 @@ fn homing_trip_retract_releases_pair_wind_up() {
     let mut ctx = test_ctx("trip-retract");
 
     // Approach: 0 mm -> 5 mm, trip mid-stroke.
-    push_all(&mut ctx, piece(1_000_000, 0.01, &[2.5, 2.5]));
-    run_cycles(&mut ctx, 1_000_000, 6_000_000);
+    ctx.push_all(ramp(1_000_000, 0.01, 0.0, 5.0));
+    ctx.run_cycles(1_000_000, 6_000_000);
     let at_trip = targets(&ctx);
     let pair_offset_at_trip = i64::from(at_trip[0]) - i64::from(at_trip[1]);
 
     // Trip: Stop discards motion; the host rebases its mm frame (the homing
     // set_position) and streams the retract in the new frame.
-    discard_motion(&mut ctx);
-    push_all(&mut ctx, piece(10_000_000, 0.01, &[17.5, -2.5]));
-    run_cycles(&mut ctx, 10_000_000, 20_000_000);
+    ctx.discard_motion();
+    ctx.push_all(ramp(10_000_000, 0.01, 20.0, 15.0));
+    ctx.run_cycles(10_000_000, 20_000_000);
 
     let after_retract = targets(&ctx);
     let pair_offset_after = i64::from(after_retract[0]) - i64::from(after_retract[1]);
@@ -552,12 +636,16 @@ const CYCLES_PER_S: f64 = 1e9 / CYCLE_NS as f64;
 fn damper_writes_antisymmetric_torque_in_the_drive_frame() {
     let host_diff_mm_s = 10.0;
     let drift = 0.5 * host_diff_mm_s * COUNTS_PER_MM / CYCLES_PER_S;
-    let mut ctx = test_ctx_with_drive("damper", TrackingLagDrive::with_drift(vec![drift, drift]));
+    let mut ctx = test_ctx_with_drive("damper", with_drift(vec![drift, drift]));
     ctx.cmd_counts_per_mm[1] = -COUNTS_PER_MM;
     let gain_tenths_per_mm_s = 2.0;
-    assert_eq!(ctx.damper.set(NUM_SLAVES, 0, 1, 2_000, 100, 300_000, 0), 0);
+    assert_eq!(
+        ctx.damper
+            .set(NUM_SLAVES, pair(0, 1), damper_gains(2_000, 100, 300_000, 0)),
+        0
+    );
 
-    run_cycles(&mut ctx, 0, 200 * CYCLE_NS);
+    ctx.run_cycles(0, 200 * CYCLE_NS);
 
     let expected_mech = -gain_tenths_per_mm_s * host_diff_mm_s;
     let offsets: Vec<i16> = (0..NUM_SLAVES)
@@ -581,12 +669,13 @@ fn damper_writes_antisymmetric_torque_in_the_drive_frame() {
 /// target midpoint never moves (carriage-neutral).
 #[test]
 fn trim_zeroes_a_standing_fight_at_commanded_standstill() {
-    let mut ctx = test_ctx_with_drive(
-        "trim-standstill",
-        TrackingLagDrive::with_torques(vec![100, -100]),
+    let mut ctx = test_ctx_with_drive("trim-standstill", with_torques(vec![100, -100]));
+    assert_eq!(
+        ctx.trim
+            .set(NUM_SLAVES, pair(0, 1), trim_gains(200_000, 500, 25_000, 0)),
+        0
     );
-    assert_eq!(ctx.trim.set(NUM_SLAVES, 0, 1, 200_000, 500, 25_000, 0), 0);
-    run_cycles(&mut ctx, 0, 40_000_000);
+    ctx.run_cycles(0, 40_000_000);
     let t = targets(&ctx);
     assert_eq!(
         i64::from(t[0]),
@@ -606,13 +695,14 @@ fn trim_zeroes_a_standing_fight_at_commanded_standstill() {
 /// conversion wrong flips a sign here.
 #[test]
 fn trim_handles_a_mirrored_pair_in_both_frames() {
-    let mut ctx = test_ctx_with_drive(
-        "trim-mirror",
-        TrackingLagDrive::with_torques(vec![100, 100]),
-    );
+    let mut ctx = test_ctx_with_drive("trim-mirror", with_torques(vec![100, 100]));
     ctx.cmd_counts_per_mm[1] = -COUNTS_PER_MM;
-    assert_eq!(ctx.trim.set(NUM_SLAVES, 0, 1, 200_000, 500, 25_000, 0), 0);
-    run_cycles(&mut ctx, 0, 40_000_000);
+    assert_eq!(
+        ctx.trim
+            .set(NUM_SLAVES, pair(0, 1), trim_gains(200_000, 500, 25_000, 0)),
+        0
+    );
+    ctx.run_cycles(0, 40_000_000);
     let t = targets(&ctx);
     assert_eq!(
         t[0], t[1],
@@ -627,22 +717,18 @@ fn trim_handles_a_mirrored_pair_in_both_frames() {
 /// leave the streamed targets untouched.
 #[test]
 fn trim_freezes_while_the_pair_is_streaming() {
-    let mut trimmed = test_ctx_with_drive(
-        "trim-stream-on",
-        TrackingLagDrive::with_torques(vec![100, -100]),
-    );
-    let mut plain = test_ctx_with_drive(
-        "trim-stream-off",
-        TrackingLagDrive::with_torques(vec![100, -100]),
-    );
+    let mut trimmed = test_ctx_with_drive("trim-stream-on", with_torques(vec![100, -100]));
+    let mut plain = test_ctx_with_drive("trim-stream-off", with_torques(vec![100, -100]));
     assert_eq!(
-        trimmed.trim.set(NUM_SLAVES, 0, 1, 200_000, 500, 25_000, 0),
+        trimmed
+            .trim
+            .set(NUM_SLAVES, pair(0, 1), trim_gains(200_000, 500, 25_000, 0)),
         0
     );
 
     for ctx in [&mut trimmed, &mut plain] {
-        push_all(ctx, piece(1_000_000, 0.05, &[2.5, 2.5]));
-        run_cycles(ctx, 1_000_000, 41_000_000);
+        ctx.push_all(ramp(1_000_000, 0.05, 0.0, 5.0));
+        ctx.run_cycles(1_000_000, 41_000_000);
     }
 
     assert_eq!(
@@ -656,23 +742,27 @@ fn trim_freezes_while_the_pair_is_streaming() {
 /// torque telemetry still carries the decel transient.
 #[test]
 fn trim_waits_out_the_settle_window_after_motion() {
-    let mut ctx = test_ctx_with_drive(
-        "trim-settle",
-        TrackingLagDrive::with_torques(vec![100, -100]),
+    let mut ctx = test_ctx_with_drive("trim-settle", with_torques(vec![100, -100]));
+    assert_eq!(
+        ctx.trim.set(
+            NUM_SLAVES,
+            pair(0, 1),
+            trim_gains(200_000, 500, 25_000, 200)
+        ),
+        0
     );
-    assert_eq!(ctx.trim.set(NUM_SLAVES, 0, 1, 200_000, 500, 25_000, 200), 0);
-    push_all(&mut ctx, piece(1_000_000, 0.01, &[2.5, 2.5]));
-    run_cycles(&mut ctx, 1_000_000, 12_000_000);
+    ctx.push_all(ramp(1_000_000, 0.01, 0.0, 5.0));
+    ctx.run_cycles(1_000_000, 12_000_000);
     let at_rest = targets(&ctx);
     // 100 ms of standstill: inside the 200 ms settle window, still blind.
-    run_cycles(&mut ctx, 12_000_000 + CYCLE_NS, 112_000_000);
+    ctx.run_cycles(12_000_000 + CYCLE_NS, 112_000_000);
     assert_eq!(
         targets(&ctx),
         at_rest,
         "trim must stay blind through the settle window"
     );
     // Well past the window the fight starts unwinding.
-    run_cycles(&mut ctx, 112_000_000 + CYCLE_NS, 400_000_000);
+    ctx.run_cycles(112_000_000 + CYCLE_NS, 400_000_000);
     let after = targets(&ctx);
     assert!(
         after[0] < at_rest[0],
@@ -683,13 +773,14 @@ fn trim_waits_out_the_settle_window_after_motion() {
 #[test]
 fn damper_stays_quiet_on_common_mode_velocity() {
     let drift = 25.0 * COUNTS_PER_MM / CYCLES_PER_S;
-    let mut ctx = test_ctx_with_drive(
-        "damper-cm",
-        TrackingLagDrive::with_drift(vec![drift, drift]),
+    let mut ctx = test_ctx_with_drive("damper-cm", with_drift(vec![drift, drift]));
+    assert_eq!(
+        ctx.damper
+            .set(NUM_SLAVES, pair(0, 1), damper_gains(2_000, 100, 300_000, 0)),
+        0
     );
-    assert_eq!(ctx.damper.set(NUM_SLAVES, 0, 1, 2_000, 100, 300_000, 0), 0);
 
-    run_cycles(&mut ctx, 0, 200 * CYCLE_NS);
+    ctx.run_cycles(0, 200 * CYCLE_NS);
 
     for s in 0..NUM_SLAVES {
         assert_eq!(ctx.drive.telemetry(s).torque_offset, 0);
@@ -702,15 +793,19 @@ fn damper_stays_quiet_on_common_mode_velocity() {
 #[test]
 fn strain_comp_moves_held_targets_at_standstill() {
     let mut ctx = test_ctx("comp-hold");
-    push_all(&mut ctx, piece(1_000_000, 0.01, &[0.0]));
-    run_cycles(&mut ctx, 1_000_000, 12_000_000);
+    ctx.push_all(hold(1_000_000, 0.01, 0.0));
+    ctx.run_cycles(1_000_000, 12_000_000);
     let held = targets(&ctx);
     assert_eq!(
-        ctx.comp
-            .set(NUM_SLAVES, 0, 1, 0, 1, 0, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
+        ctx.comp.set(
+            NUM_SLAVES,
+            comp_pair(0, 1, 0, 1, 0),
+            grid(1, 1, 0.0, 0.0, 1.0, 1.0),
+            &[100]
+        ),
         0
     );
-    run_cycles(&mut ctx, 12_250_000, 200_000_000);
+    ctx.run_cycles(12_250_000, 200_000_000);
     let now = targets(&ctx);
     let expect = 0.1 * COUNTS_PER_MM;
     assert!(
@@ -731,17 +826,21 @@ fn strain_comp_moves_held_targets_at_standstill() {
 #[test]
 fn strain_comp_reaches_held_targets_after_a_stop_discard() {
     let mut ctx = test_ctx("comp-stop");
-    push_all(&mut ctx, piece(1_000_000, 0.01, &[0.0]));
-    run_cycles(&mut ctx, 1_000_000, 12_000_000);
-    super::discard_motion(&mut ctx);
+    ctx.push_all(hold(1_000_000, 0.01, 0.0));
+    ctx.run_cycles(1_000_000, 12_000_000);
+    ctx.discard_motion();
     assert!(ctx.last_counts.iter().all(Option::is_none));
     let held = targets(&ctx);
     assert_eq!(
-        ctx.comp
-            .set(NUM_SLAVES, 0, 1, 0, 1, 0, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
+        ctx.comp.set(
+            NUM_SLAVES,
+            comp_pair(0, 1, 0, 1, 0),
+            grid(1, 1, 0.0, 0.0, 1.0, 1.0),
+            &[100]
+        ),
         0
     );
-    run_cycles(&mut ctx, 12_250_000, 200_000_000);
+    ctx.run_cycles(12_250_000, 200_000_000);
     let now = targets(&ctx);
     let expect = 0.1 * COUNTS_PER_MM;
     assert!(
@@ -759,11 +858,15 @@ fn strain_comp_reaches_targets_that_never_streamed() {
     let mut ctx = test_ctx("comp-fresh");
     let held = targets(&ctx);
     assert_eq!(
-        ctx.comp
-            .set(NUM_SLAVES, 0, 1, 0, 1, 0, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
+        ctx.comp.set(
+            NUM_SLAVES,
+            comp_pair(0, 1, 0, 1, 0),
+            grid(1, 1, 0.0, 0.0, 1.0, 1.0),
+            &[100]
+        ),
         0
     );
-    run_cycles(&mut ctx, 1_000_000, 200_000_000);
+    ctx.run_cycles(1_000_000, 200_000_000);
     let now = targets(&ctx);
     let expect = 0.1 * COUNTS_PER_MM;
     assert!(
@@ -782,18 +885,26 @@ fn strain_comp_clear_returns_held_targets_to_base() {
     let mut ctx = test_ctx("comp-clear");
     let held = targets(&ctx);
     assert_eq!(
-        ctx.comp
-            .set(NUM_SLAVES, 0, 1, 0, 1, 0, 1, 1, 0.0, 0.0, 1.0, 1.0, &[-100]),
+        ctx.comp.set(
+            NUM_SLAVES,
+            comp_pair(0, 1, 0, 1, 0),
+            grid(1, 1, 0.0, 0.0, 1.0, 1.0),
+            &[-100]
+        ),
         0
     );
-    run_cycles(&mut ctx, 1_000_000, 200_000_000);
+    ctx.run_cycles(1_000_000, 200_000_000);
     assert_ne!(targets(&ctx), held, "probe offset must be applied first");
     assert_eq!(
-        ctx.comp
-            .set(NUM_SLAVES, 0, 1, 0, 1, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, &[]),
+        ctx.comp.set(
+            NUM_SLAVES,
+            comp_pair(0, 1, 0, 1, 0),
+            grid(0, 0, 0.0, 0.0, 0.0, 0.0),
+            &[]
+        ),
         0
     );
-    run_cycles(&mut ctx, 200_250_000, 400_000_000);
+    ctx.run_cycles(200_250_000, 400_000_000);
     assert_eq!(
         targets(&ctx),
         held,
@@ -819,27 +930,30 @@ fit_rms_residual = [0.1, 0.1]
 #[test]
 fn buzzed_slot_ff_carries_no_coulomb_square_wave() {
     let mut ctx = test_ctx("buzz-coulomb");
-    ctx.dynamics =
-        Some(crate::dynamics::DynamicsModel::from_toml_str(BUZZ_DYNAMICS).expect("valid profile"));
+    ctx.install_dynamics(BUZZ_DYNAMICS);
     ctx.torque_clamp_tenths = vec![300; NUM_SLAVES];
-    let rc = ctx.buzz.arm(
-        NUM_SLAVES as u8,
-        0b01,
-        0,
-        60_000,
-        60_000,
-        100_000,
-        500,
-        20,
-        [0; crate::buzz::MAX_BUZZ_SLOTS],
+    ctx.cycle_at(0);
+    assert_eq!(
+        ctx.arm_buzz(
+            BuzzRoute {
+                slot_mask: 0b01,
+                sign_mask: 0
+            },
+            BuzzSweep {
+                freq_start_millihz: 60_000,
+                freq_end_millihz: 60_000,
+                amplitude_nm: 100_000,
+                duration_ms: 500,
+                ramp_ms: 20
+            },
+        ),
+        0
     );
-    assert_eq!(rc, 0);
 
     let mut max_abs_offset: i16 = 0;
     let mut max_abs_target: i32 = 0;
-    for cycle in 0..1200u64 {
-        compute_motion_targets(&mut ctx, cycle * CYCLE_NS);
-        ctx.drive.cycle();
+    for cycle in 1..1200u64 {
+        ctx.cycle_at(cycle * CYCLE_NS);
         let tel = ctx.drive.telemetry(0);
         max_abs_offset = max_abs_offset.max(tel.torque_offset.abs());
         max_abs_target = max_abs_target.max(tel.target_position.abs());
@@ -857,11 +971,10 @@ fn buzzed_slot_ff_carries_no_coulomb_square_wave() {
 #[test]
 fn streamed_motion_keeps_coulomb_in_the_ff() {
     let mut ctx = test_ctx("stream-coulomb");
-    ctx.dynamics =
-        Some(crate::dynamics::DynamicsModel::from_toml_str(BUZZ_DYNAMICS).expect("valid profile"));
+    ctx.install_dynamics(BUZZ_DYNAMICS);
     ctx.torque_clamp_tenths = vec![300; NUM_SLAVES];
-    push_all(&mut ctx, piece(1_000_000, 0.05, &[0.25, 0.25]));
-    run_cycles(&mut ctx, 1_000_000, 40_000_000);
+    ctx.push_all(ramp(1_000_000, 0.05, 0.0, 0.5));
+    ctx.run_cycles(1_000_000, 40_000_000);
     let offset = ctx.drive.telemetry(0).torque_offset;
     assert!(
         (49..=51).contains(&offset),
@@ -992,7 +1105,8 @@ fn set_dynamics_model_mass_len_mismatch_keeps_no_model() {
 #[test]
 fn seed_defers_while_ring_drains_and_completes_when_empty() {
     let mut ctx = test_ctx("seed-defer");
-    push_all(&mut ctx, piece(1_000_000, 0.01, &[2.5, 2.5]));
+    ctx.push_all(ramp(1_000_000, 0.01, 0.0, 5.0));
+    ctx.stage_at(0);
     super::commands::handle_seed_servo_home(&mut ctx, 7, 0, 65536);
     assert!(ctx.pending_seed.is_some());
     assert!(ctx.report_anchor[0].is_none());
@@ -1001,9 +1115,7 @@ fn seed_defers_while_ring_drains_and_completes_when_empty() {
         ctx.pending_seed.is_some(),
         "ring still occupied — must wait"
     );
-    for ring in &mut ctx.rings {
-        ring.reset();
-    }
+    ctx.discard_motion();
     super::commands::drain_pending_seed(&mut ctx);
     assert!(ctx.pending_seed.is_none());
     let (_counts, anchor_mm) = ctx.report_anchor[0].expect("seed completed");
@@ -1013,7 +1125,8 @@ fn seed_defers_while_ring_drains_and_completes_when_empty() {
 #[test]
 fn seed_fails_when_the_ring_never_drains() {
     let mut ctx = test_ctx("seed-timeout");
-    push_all(&mut ctx, piece(1_000_000, 0.01, &[2.5, 2.5]));
+    ctx.push_all(ramp(1_000_000, 0.01, 0.0, 5.0));
+    ctx.stage_at(0);
     super::commands::handle_seed_servo_home(&mut ctx, 7, 0, 65536);
     let deadline = ctx.pending_seed.as_ref().expect("deferred").deadline_cycle;
     ctx.cycle_index = deadline;
@@ -1067,7 +1180,7 @@ fn read_set_ff_lead_response(
 }
 
 #[test]
-fn handle_set_ff_lead_updates_slot_and_responds_ok() {
+fn handle_set_ff_lead_acknowledges_a_known_slot() {
     let name = "ff-lead-ok";
     let mut ctx = test_ctx(name);
     let mut client = connect_test_client(&mut ctx, name);
@@ -1076,13 +1189,11 @@ fn handle_set_ff_lead_updates_slot_and_responds_ok() {
         lead_ns: 12_345,
     };
     super::commands::handle_set_ff_lead(&mut ctx, 9, msg);
-    assert_eq!(ctx.ff_lead_ns[0], 12_345);
-    assert_eq!(ctx.ff_lead_ns[1], 0);
     assert_eq!(read_set_ff_lead_response(&mut client).result, 0);
 }
 
 #[test]
-fn handle_set_ff_lead_invalid_slot_leaves_vector_untouched() {
+fn handle_set_ff_lead_rejects_an_unknown_slot() {
     let name = "ff-lead-bad-slot";
     let mut ctx = test_ctx(name);
     let mut client = connect_test_client(&mut ctx, name);
@@ -1091,7 +1202,6 @@ fn handle_set_ff_lead_invalid_slot_leaves_vector_untouched() {
         lead_ns: 999,
     };
     super::commands::handle_set_ff_lead(&mut ctx, 3, msg);
-    assert_eq!(ctx.ff_lead_ns, vec![0; NUM_SLAVES]);
     assert_eq!(read_set_ff_lead_response(&mut client).result, -309);
 }
 
@@ -1146,59 +1256,9 @@ fn cycle_skip_faults_even_when_lateness_is_within_tolerance() {
     assert_eq!(ctx.latched_drive_err, super::cycle::CYCLE_SKIP_FAULT_CODE);
 }
 
-/// A pure-T2 piece has constant accel: d²/du²·T2 = 4, so
-/// accel = 4·C2·(2/duration)².
-const T2_C: f32 = 0.625; // accel = 4·0.625·400 = 1000 mm/s² at d = 0.1 s
-
-#[test]
-fn group_delay_leads_curve_sampling_by_one_cycle() {
-    const APPLY_T: u64 = 1_200_000;
-    let vel_piece = piece(1_000_000, 0.1, &[0.0, 1.0]);
-
-    let mut reference = test_ctx("group-delay-ref");
-    push_all(&mut reference, vel_piece);
-    let (pos_t, _, _) = reference.rings[0].sample(APPLY_T).expect("piece covers T");
-    let (pos_lead, _, _) = reference.rings[0]
-        .sample(APPLY_T + CYCLE_NS)
-        .expect("piece covers T+CYCLE_NS");
-    let fixed_map = CountMap::new(COUNTS_PER_MM, 0, 0.0);
-    let expected_lead_counts =
-        fixed_map.target_counts(f64::from(pos_lead)) - fixed_map.target_counts(f64::from(pos_t));
-    assert!(
-        expected_lead_counts != 0,
-        "constant-velocity piece must advance across one cycle"
-    );
-
-    let seed_fixed_map = |ctx: &mut EndpointCtx| {
-        for s in 0..NUM_SLAVES {
-            ctx.cmaps[s] = Some(fixed_map);
-        }
-    };
-
-    let mut unleaded = test_ctx("group-delay-zero");
-    unleaded.group_delay_ns = 0;
-    push_all(&mut unleaded, vel_piece);
-    seed_fixed_map(&mut unleaded);
-    let unleaded_sample = APPLY_T + unleaded.group_delay_ns;
-    compute_motion_targets(&mut unleaded, unleaded_sample);
-    let unleaded_targets = targets(&unleaded);
-
-    let mut leaded = test_ctx("group-delay-cycle");
-    leaded.group_delay_ns = CYCLE_NS;
-    push_all(&mut leaded, vel_piece);
-    seed_fixed_map(&mut leaded);
-    let leaded_sample = APPLY_T + leaded.group_delay_ns;
-    compute_motion_targets(&mut leaded, leaded_sample);
-    let leaded_targets = targets(&leaded);
-
-    for s in 0..NUM_SLAVES {
-        assert_eq!(
-            leaded_targets[s] - unleaded_targets[s],
-            expected_lead_counts,
-            "slot {s}: group delay must lead curve sampling by velocity*CYCLE_NS counts"
-        );
-    }
-}
+/// Curvature of the constant-accel span: accel = 16·c2/d², so
+/// 16·0.625/0.1² = 1000 mm/s² over a 0.1 s span.
+const T2_C: f64 = 0.625;
 
 // ---- pin-rotor (mode A) torque hold -------------------------------------
 
@@ -1216,23 +1276,22 @@ pin_zeta = [0.1, 0.0]
 pin_lead_us = 0.0
 "#;
 
-fn pin_ctx(name: &str, toml: &str) -> EndpointCtx {
+fn pin_ctx(name: &str, toml: &str) -> Bench {
     let mut ctx = test_ctx(name);
-    let model = crate::dynamics::DynamicsModel::from_toml_str(toml).unwrap();
+    ctx.install_dynamics(toml);
+    let model = ethercat_setpoint::dynamics::DynamicsModel::from_toml_str(toml).unwrap();
     ctx.pin = super::cycle::PinState::build(&model, ctx.cycle_ns);
-    ctx.dynamics = Some(model);
     ctx.torque_clamp_tenths = vec![3000; NUM_SLAVES];
     ctx
 }
 
-/// Drive one constant-accel (T2) stroke and return slot-0 torque_offset per
-/// cycle. The stroke stays inside the 0.1 s piece for all `cycles`.
-fn run_accel_collect_torque(ctx: &mut EndpointCtx, cycles: u64) -> Vec<i32> {
-    push_all(ctx, piece(1_000_000, 0.1, &[0.0, 0.0, T2_C]));
+/// Drive one constant-accel stroke and return slot-0 torque_offset per
+/// cycle. The stroke stays inside the 0.1 s span for all `cycles`.
+fn run_accel_collect_torque(ctx: &mut Bench, cycles: u64) -> Vec<i32> {
+    ctx.push_all(constant_accel(1_000_000, 0.1, T2_C));
     let mut out = Vec::with_capacity(cycles as usize);
     for c in 0..cycles {
-        compute_motion_targets(ctx, 1_000_000 + c * CYCLE_NS);
-        ctx.drive.cycle();
+        ctx.cycle_at(1_000_000 + c * CYCLE_NS);
         out.push(i32::from(ctx.drive.telemetry(0).torque_offset));
     }
     out
@@ -1303,24 +1362,28 @@ const BUZZ_AMP_NM: u32 = 100_000; // 0.1 mm
 
 /// Arm a single-tone buzz on slot 0 at `freq_millihz` and run it, returning
 /// the per-cycle slot-0 pin torque contribution and target positions.
-fn run_buzz_collect(ctx: &mut EndpointCtx, freq_millihz: u32, cycles: u64) -> (Vec<f32>, Vec<i32>) {
-    let rc = ctx.buzz.arm(
-        NUM_SLAVES as u8,
-        0b01,
-        0,
-        freq_millihz,
-        freq_millihz,
-        BUZZ_AMP_NM,
-        2000,
-        20,
-        [0; crate::buzz::MAX_BUZZ_SLOTS],
+fn run_buzz_collect(ctx: &mut Bench, freq_millihz: u32, cycles: u64) -> (Vec<f32>, Vec<i32>) {
+    ctx.cycle_at(1_000_000);
+    assert_eq!(
+        ctx.arm_buzz(
+            BuzzRoute {
+                slot_mask: 0b01,
+                sign_mask: 0
+            },
+            BuzzSweep {
+                freq_start_millihz: freq_millihz,
+                freq_end_millihz: freq_millihz,
+                amplitude_nm: BUZZ_AMP_NM,
+                duration_ms: 2000,
+                ramp_ms: 20
+            },
+        ),
+        0
     );
-    assert_eq!(rc, 0);
     let mut pin = Vec::with_capacity(cycles as usize);
     let mut tgt = Vec::with_capacity(cycles as usize);
-    for c in 0..cycles {
-        compute_motion_targets(ctx, 1_000_000 + c * CYCLE_NS);
-        ctx.drive.cycle();
+    for c in 1..=cycles {
+        ctx.cycle_at(1_000_000 + c * CYCLE_NS);
         pin.push(ctx.pin.slot_torque_at(0));
         tgt.push(ctx.drive.telemetry(0).target_position);
     }
@@ -1433,24 +1496,28 @@ fn set_dynamics_model_mid_buzz_rebuilds_pin_cleanly() {
     let mut ctx = pin_ctx("pin-mid-buzz-swap", PIN_IDENTITY);
     // Park the tone on the notch (f_b ≈ 50.3 Hz) and run it live.
     let f_notch = 50_000u32;
-    let rc = ctx.buzz.arm(
-        NUM_SLAVES as u8,
-        0b01,
-        0,
-        f_notch,
-        f_notch,
-        BUZZ_AMP_NM,
-        4000,
-        20,
-        [0; crate::buzz::MAX_BUZZ_SLOTS],
+    ctx.cycle_at(1_000_000);
+    assert_eq!(
+        ctx.arm_buzz(
+            BuzzRoute {
+                slot_mask: 0b01,
+                sign_mask: 0
+            },
+            BuzzSweep {
+                freq_start_millihz: f_notch,
+                freq_end_millihz: f_notch,
+                amplitude_nm: BUZZ_AMP_NM,
+                duration_ms: 4000,
+                ramp_ms: 20
+            },
+        ),
+        0
     );
-    assert_eq!(rc, 0);
     // Run the tone on the original zeta=0.1 model until the pin torque has
     // built up to its on-notch steady amplitude (Q = 1/2ζ = 5).
     let mut pin_before = 0.0f32;
-    for c in 0..2000u64 {
-        compute_motion_targets(&mut ctx, 1_000_000 + c * CYCLE_NS);
-        ctx.drive.cycle();
+    for c in 1..2000u64 {
+        ctx.cycle_at(1_000_000 + c * CYCLE_NS);
         if c >= 1600 {
             pin_before = pin_before.max(ctx.pin.slot_torque_at(0).abs());
         }
@@ -1460,7 +1527,7 @@ fn set_dynamics_model_mid_buzz_rebuilds_pin_cleanly() {
         "pin torque must be live before the swap: {pin_before}"
     );
     assert!(
-        ctx.buzz.active(),
+        ctx.host.buzz_active(),
         "buzz must still be running before the swap"
     );
 
@@ -1484,7 +1551,7 @@ fn set_dynamics_model_mid_buzz_rebuilds_pin_cleanly() {
         "mid-buzz swap must install the new zeta: {}",
         model.pin_zeta[0]
     );
-    assert!(ctx.buzz.active(), "buzz keeps running across the swap");
+    assert!(ctx.host.buzz_active(), "buzz keeps running across the swap");
 
     // The pin state rebuilt: the oscillator + residual demodulator restart
     // from a defined zero state (no carried-over phasor from the old model).
@@ -1498,8 +1565,7 @@ fn set_dynamics_model_mid_buzz_rebuilds_pin_cleanly() {
     // re-accumulates and settles at the new, more-damped steady amplitude.
     let mut pin_after = 0.0f32;
     for c in 2000..4000u64 {
-        compute_motion_targets(&mut ctx, 1_000_000 + c * CYCLE_NS);
-        ctx.drive.cycle();
+        ctx.cycle_at(1_000_000 + c * CYCLE_NS);
         if c >= 3600 {
             pin_after = pin_after.max(ctx.pin.slot_torque_at(0).abs());
         }
@@ -1526,12 +1592,11 @@ fn pin_lead_advances_phase() {
         "pin-lead-1000",
         &PIN_IDENTITY.replace("pin_lead_us = 0.0", "pin_lead_us = 1000.0"),
     );
-    let collect = |ctx: &mut EndpointCtx| -> Vec<f32> {
-        push_all(ctx, piece(1_000_000, 0.1, &[0.0, 0.0, T2_C]));
+    let collect = |ctx: &mut Bench| -> Vec<f32> {
+        ctx.push_all(constant_accel(1_000_000, 0.1, T2_C));
         let mut v = Vec::new();
         for c in 0..200u64 {
-            compute_motion_targets(ctx, 1_000_000 + c * CYCLE_NS);
-            ctx.drive.cycle();
+            ctx.cycle_at(1_000_000 + c * CYCLE_NS);
             v.push(ctx.pin.slot_torque_at(0));
         }
         v
@@ -1624,28 +1689,24 @@ fn pin_residual_demod_converges_and_stays_bounded() {
 /// reference `τ_pin`. A correct lift makes the two equal; a plain Fᵀ lift
 /// attenuates `F·slot` by `F·Fᵀ`.
 fn pin_frame_cancellation(
-    frame: &[f32],
-    n_modes: usize,
-    n_slots: usize,
+    shape: FrameParts<'_>,
     mass: &[f32],
     compliance: &[f32],
-    pin_mass: &[f32],
-    pin_zeta: &[f32],
+    pin_parts: PinParts<'_>,
     acc_seq: &[Vec<f32>],
 ) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
-    use crate::dynamics::DynamicsModel;
+    use ethercat_setpoint::dynamics::DynamicsModel;
+    let (n_modes, n_slots) = (shape.n_modes, shape.n_slots);
     let zeros_m = vec![0.0f32; n_modes];
     let model = DynamicsModel::from_parts(
-        n_slots,
-        n_modes,
-        frame,
-        mass,
-        &zeros_m,
-        &zeros_m,
-        compliance,
-        pin_mass,
-        pin_zeta,
-        0.0,
+        shape,
+        ModeParts {
+            mass,
+            viscous: &zeros_m,
+            coulomb: &zeros_m,
+            compliance,
+        },
+        pin_parts,
         &[],
     )
     .unwrap();
@@ -1655,16 +1716,22 @@ fn pin_frame_cancellation(
     let mut refs: Vec<super::cycle::PinState> = (0..n_modes)
         .map(|k| {
             let m = DynamicsModel::from_parts(
-                1,
-                1,
-                &[1.0],
-                &[mass[k]],
-                &[0.0],
-                &[0.0],
-                &[compliance[k]],
-                &[pin_mass[k]],
-                &[pin_zeta[k]],
-                0.0,
+                FrameParts {
+                    n_slots: 1,
+                    n_modes: 1,
+                    frame: &[1.0],
+                },
+                ModeParts {
+                    mass: &[mass[k]],
+                    viscous: &[0.0],
+                    coulomb: &[0.0],
+                    compliance: &[compliance[k]],
+                },
+                PinParts {
+                    mass: &[pin_parts.mass[k]],
+                    zeta: &[pin_parts.zeta[k]],
+                    lead_us: pin_parts.lead_us,
+                },
                 &[],
             )
             .unwrap();
@@ -1739,17 +1806,23 @@ fn assert_pin_cancels_every_mode(
     let pin_zeta = vec![0.08f32; n_modes];
     // Model handle for the F⁺ excitation columns (min-norm slot accel that
     // realizes a pure mode-k acceleration).
-    let model = crate::dynamics::DynamicsModel::from_parts(
-        n_slots,
-        n_modes,
-        frame,
-        mass,
-        &vec![0.0f32; n_modes],
-        &vec![0.0f32; n_modes],
-        &compliance,
-        &pin_mass,
-        &pin_zeta,
-        0.0,
+    let model = ethercat_setpoint::dynamics::DynamicsModel::from_parts(
+        FrameParts {
+            n_slots,
+            n_modes,
+            frame,
+        },
+        ModeParts {
+            mass,
+            viscous: &vec![0.0f32; n_modes],
+            coulomb: &vec![0.0f32; n_modes],
+            compliance: &compliance,
+        },
+        PinParts {
+            mass: &pin_mass,
+            zeta: &pin_zeta,
+            lead_us: 0.0,
+        },
         &[],
     )
     .unwrap();
@@ -1768,13 +1841,18 @@ fn assert_pin_cancels_every_mode(
             })
             .collect();
         let (achieved, reference) = pin_frame_cancellation(
-            frame,
-            n_modes,
-            n_slots,
+            FrameParts {
+                n_slots,
+                n_modes,
+                frame,
+            },
             mass,
             &compliance,
-            &pin_mass,
-            &pin_zeta,
+            PinParts {
+                mass: &pin_mass,
+                zeta: &pin_zeta,
+                lead_us: 0.0,
+            },
             &acc_seq,
         );
         // Steady-state tail only (skip the ring build-up).
@@ -1943,23 +2021,29 @@ fn pin_residual_demod_is_unbiased_by_zeta() {
 /// and 600 µs), worst exactly where the machine accelerates hardest.
 #[test]
 fn pin_torque_vanishes_at_constant_accel_for_every_lead() {
-    use crate::dynamics::DynamicsModel;
+    use ethercat_setpoint::dynamics::DynamicsModel;
     const A_CMD: f32 = 20_000.0; // mm/s², a hard print acceleration
     const PIN_MASS: f32 = 0.02;
     for &f_b in &[100.0f64, 130.0, 160.0] {
         let compliance = 1.0 / (2.0 * std::f64::consts::PI * f_b).powi(2);
         for &lead_us in &[0.0f64, 300.0, 600.0, 1200.0] {
             let model = DynamicsModel::from_parts(
-                1,
-                1,
-                &[1.0],
-                &[0.04],
-                &[0.0],
-                &[0.0],
-                &[compliance as f32],
-                &[PIN_MASS],
-                &[0.02],
-                lead_us,
+                FrameParts {
+                    n_slots: 1,
+                    n_modes: 1,
+                    frame: &[1.0],
+                },
+                ModeParts {
+                    mass: &[0.04],
+                    viscous: &[0.0],
+                    coulomb: &[0.0],
+                    compliance: &[compliance as f32],
+                },
+                PinParts {
+                    mass: &[PIN_MASS],
+                    zeta: &[0.02],
+                    lead_us,
+                },
                 &[],
             )
             .unwrap();
@@ -1986,8 +2070,8 @@ fn pin_torque_vanishes_at_constant_accel_for_every_lead() {
 fn suppressed_slot_holds_target_while_peer_advances() {
     let mut ctx = test_ctx("suppress-hold");
 
-    push_all(&mut ctx, piece(1_000_000, 0.01, &[2.5, 2.5]));
-    run_cycles(&mut ctx, 1_000_000, 5_000_000);
+    ctx.push_all(ramp(1_000_000, 0.01, 0.0, 5.0));
+    ctx.run_cycles(1_000_000, 5_000_000);
     let mid = targets(&ctx);
 
     super::commands::handle_stepper_suppress(
@@ -1997,9 +2081,10 @@ fn suppressed_slot_holds_target_while_peer_advances() {
             motor: 0,
             stepper: 0,
             engage: 1,
+            stepper_oid: 40,
         },
     );
-    run_cycles(&mut ctx, 5_250_000, 11_000_000);
+    ctx.run_cycles(5_250_000, 11_000_000);
     let end = targets(&ctx);
     assert_eq!(
         end[0], mid[0],
@@ -2014,14 +2099,15 @@ fn suppressed_slot_holds_target_while_peer_advances() {
             motor: 0xFF,
             stepper: 0xFF,
             engage: 0,
+            stepper_oid: 0xFF,
         },
     );
     assert!(
         ctx.suppressed.iter().all(|&s| !s),
         "clear-all must release every slot"
     );
-    push_all(&mut ctx, piece(20_000_000, 0.01, &[9.0]));
-    run_cycles(&mut ctx, 20_000_000, 20_500_000);
+    ctx.push_all(ramp(20_000_000, 0.01, 0.0, 5.0));
+    ctx.run_cycles(20_000_000, 22_000_000);
     assert_ne!(
         targets(&ctx)[0],
         end[0],
@@ -2040,6 +2126,7 @@ fn suppress_maps_stepper_index_within_a_shared_axis() {
             motor: 0,
             stepper: 1,
             engage: 1,
+            stepper_oid: 41,
         },
     );
     assert_eq!(ctx.suppressed, vec![false, true]);
@@ -2050,6 +2137,7 @@ fn suppress_maps_stepper_index_within_a_shared_axis() {
             motor: 0,
             stepper: 2,
             engage: 1,
+            stepper_oid: 42,
         },
     );
     assert_eq!(
@@ -2057,4 +2145,101 @@ fn suppress_maps_stepper_index_within_a_shared_axis() {
         vec![false, true],
         "an unknown stepper index must be rejected, not clamped"
     );
+}
+
+fn lane_run(axis_idx: u8, slot_idx: u8, start_index: u64, samples: &[i32]) -> LaneRun {
+    LaneRun {
+        axis_idx,
+        slot_idx,
+        flags: LANE_RUN_FLAG_REANCHOR | LANE_RUN_FLAG_TAIL,
+        origin_mm_q16: 0,
+        start_index,
+        interval_ticks: CYCLE_NS as u32,
+        samples: samples
+            .iter()
+            .map(|&pos_counts| SetpointSample {
+                pos_counts,
+                vel_ff: 0,
+                torque_ff: 0,
+                acc_mm_s2: 0.0,
+            })
+            .collect(),
+    }
+}
+
+/// An AWD axis is claimed by two drive slots and each slot's run carries that
+/// slot's own counts: applying one to both would command the same target on
+/// drives whose inverts and origins differ.
+#[test]
+fn each_awd_slot_plays_only_its_own_run() {
+    let mut ctx = test_ctx("awd-slot-identity");
+    ctx.slave_axes = vec![0, 0];
+    let runs = vec![
+        lane_run(0, 0, 40, &[10, 11]),
+        lane_run(0, 1, 40, &[-10, -11]),
+    ];
+    assert_eq!(super::commands::fill_lane_runs(&mut ctx, &runs).0, 0);
+    let played: Vec<Vec<i32>> = (0..NUM_SLAVES)
+        .map(|slot| {
+            (40..42)
+                .map(|index| match ctx.sp_rings[slot].play(index) {
+                    Played::Entry(entry) => entry.pos_counts,
+                    Played::Drained => panic!("slot {slot} received no run"),
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(played, vec![vec![10, 11], vec![-10, -11]]);
+}
+
+#[test]
+fn a_run_naming_a_slot_off_its_axis_is_refused() {
+    let mut ctx = test_ctx("awd-slot-mismatch");
+    let runs = vec![lane_run(0, 1, 40, &[10])];
+    assert_eq!(
+        super::commands::fill_lane_runs(&mut ctx, &runs).0,
+        ethercat_setpoint::setpoint::ERR_LANE_SLOT_MISMATCH
+    );
+    assert!(
+        ctx.sp_rings.iter().all(|r| r.is_empty()),
+        "a misrouted run may not reach any ring"
+    );
+}
+
+#[test]
+fn a_run_past_the_frame_cap_never_reaches_the_dc_scratch() {
+    let mut ctx = test_ctx("oversized-run");
+    let capacity = ctx.sp_fill_scratch.capacity();
+    let samples = vec![0i32; ethercat_setpoint::setpoint::MAX_FILL_CYCLES + 1];
+    let runs = vec![lane_run(0, 0, 40, &samples)];
+    let (result, entries) = super::commands::fill_lane_runs(&mut ctx, &runs);
+    assert_eq!(result, FaultCode::SampleRingFull.as_i32());
+    assert_eq!(entries, 0, "nothing was copied");
+    assert_eq!(
+        ctx.sp_fill_scratch.capacity(),
+        capacity,
+        "an oversized frame may not reallocate on the DC thread"
+    );
+    assert!(ctx.sp_rings.iter().all(|r| r.is_empty()));
+}
+
+/// The host retires a run once playback passes its exclusive `end_clock`, so
+/// the heartbeat reports the cursor in the trajectory nanoseconds the grid
+/// stamps: a run of three cycles from index 40 retires at the clock of 43.
+#[test]
+fn the_playback_clock_is_the_exclusive_cursor_in_trajectory_nanoseconds() {
+    let mut ctx = test_ctx("playback-cursor");
+    let runs = vec![lane_run(0, 0, 40, &[1, 2, 3])];
+    assert_eq!(super::commands::fill_lane_runs(&mut ctx, &runs).0, 0);
+    assert_eq!(
+        super::lane_playback_clocks(&ctx)[0],
+        0,
+        "an unplayed lane has no cursor"
+    );
+    for index in 40..43 {
+        ctx.last_grid_index = index;
+        ctx.last_grid_clock = index * CYCLE_NS;
+        assert!(matches!(ctx.sp_rings[0].play(index), Played::Entry(_)));
+    }
+    assert_eq!(super::lane_playback_clocks(&ctx)[0], 43 * CYCLE_NS);
 }

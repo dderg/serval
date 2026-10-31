@@ -144,9 +144,9 @@ async function loadCase(name) {
     document.getElementById("meta").textContent = "Error: failed to load case";
     return;
   }
-  // The baselines gallery has no prior to compare against; skip the fetch
-  // instead of collecting a 404 per case load.
-  const before = readOnly ? null : await fetchSnapshot(name, "before");
+  const entry = currentEntry();
+  const before =
+    readOnly || !entry?.has_before ? null : await fetchSnapshot(name, "before");
   view.setData(after, before);
 }
 

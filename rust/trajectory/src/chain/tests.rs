@@ -40,7 +40,7 @@ fn nonlinear_pa_types_compile_to_their_own_model() {
         (&ReciprPressureAdvance, AdvanceModel::Reciprocal),
     ] {
         let c = CompiledChain::compile(&[nlpa(algo, 0.02, 0.05, 20.0)]).unwrap();
-        let ChainStage::NonlinearAdvance(adv) = c.stages[0] else {
+        let ChainStage::NonlinearAdvance(adv) = c.transform().unwrap().clone() else {
             panic!("{} must compile to an advance stage", algo.type_name());
         };
         assert_eq!(
@@ -60,7 +60,7 @@ fn nonlinear_pa_types_compile_to_their_own_model() {
 fn nonlinear_pa_without_an_offset_is_the_linear_operator() {
     let c = CompiledChain::compile(&[nlpa(&TanhPressureAdvance, 0.02, 0.0, 20.0)]).unwrap();
     assert!(matches!(
-        c.stages[0],
+        c.transform().unwrap().clone(),
         ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.02
     ));
 }
@@ -68,7 +68,7 @@ fn nonlinear_pa_without_an_offset_is_the_linear_operator() {
 #[test]
 fn nonlinear_pa_with_no_advance_at_all_is_a_no_op() {
     let c = CompiledChain::compile(&[nlpa(&ReciprPressureAdvance, 0.0, 0.0, 20.0)]).unwrap();
-    assert!(c.stages.is_empty());
+    assert!(c.is_empty());
 }
 
 #[test]
@@ -136,15 +136,15 @@ fn the_two_shapes_share_a_slope_at_rest_and_a_bound_at_speed() {
 #[test]
 fn compile_empty_chain_is_identity() {
     let c = CompiledChain::compile(&[]).unwrap();
-    assert!(c.stages.is_empty());
+    assert!(c.is_empty());
 }
 
 #[test]
 fn compile_kernel_plus_gain() {
     let c = CompiledChain::compile(&[bell(0.01605), pa(0.04)]).unwrap();
-    assert!(matches!(c.stages[0], ChainStage::SmoothKernel(_)));
+    assert!(c.kernel().is_some());
     assert!(matches!(
-        c.stages[1],
+        c.trailing_transform().unwrap().clone(),
         ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.04
     ));
 }
@@ -153,18 +153,24 @@ fn compile_kernel_plus_gain() {
 fn compile_preserves_declaration_order() {
     let a = CompiledChain::compile(&[bell(0.01605), pa(0.04)]).unwrap();
     let b = CompiledChain::compile(&[pa(0.04), bell(0.01605)]).unwrap();
-    assert!(matches!(a.stages[0], ChainStage::SmoothKernel(_)));
-    assert!(matches!(a.stages[1], ChainStage::DerivativeGains { .. }));
-    assert!(matches!(b.stages[0], ChainStage::DerivativeGains { .. }));
-    assert!(matches!(b.stages[1], ChainStage::SmoothKernel(_)));
+    assert!(a.kernel().is_some());
+    assert!(matches!(
+        a.trailing_transform(),
+        Some(ChainStage::DerivativeGains { .. })
+    ));
+    assert!(matches!(
+        b.leading_transform(),
+        Some(ChainStage::DerivativeGains { .. })
+    ));
+    assert!(b.kernel().is_some());
 }
 
 #[test]
 fn compile_smooth_triangle_plus_gain() {
     let c = CompiledChain::compile(&[st(0.04), pa(0.04)]).unwrap();
-    assert!(matches!(c.stages[0], ChainStage::SmoothKernel(_)));
+    assert!(c.kernel().is_some());
     assert!(matches!(
-        c.stages[1],
+        c.trailing_transform().unwrap().clone(),
         ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.04
     ));
     let (lo, hi) = c.max_input_window();
@@ -174,8 +180,11 @@ fn compile_smooth_triangle_plus_gain() {
 #[test]
 fn compile_gain_before_smooth_triangle_preserves_order() {
     let c = CompiledChain::compile(&[pa(0.04), st(0.04)]).unwrap();
-    assert!(matches!(c.stages[0], ChainStage::DerivativeGains { .. }));
-    assert!(matches!(c.stages[1], ChainStage::SmoothKernel(_)));
+    assert!(matches!(
+        c.leading_transform(),
+        Some(ChainStage::DerivativeGains { .. })
+    ));
+    assert!(c.kernel().is_some());
 }
 
 #[test]
@@ -199,19 +208,16 @@ fn compile_smooth_triangle_and_input_shaper_rejected_as_two_kernels() {
 #[test]
 fn compile_zero_smooth_time_is_passthrough() {
     let c = CompiledChain::compile(&[st(0.0)]).unwrap();
-    assert!(
-        c.stages.is_empty(),
-        "smooth_time=0 must contribute no stage"
-    );
+    assert!(c.is_empty(), "smooth_time=0 must contribute no stage");
     assert_eq!(c.max_input_window(), (0.0, 0.0));
 }
 
 #[test]
 fn compile_zero_smooth_time_leaves_only_the_gain() {
     let c = CompiledChain::compile(&[st(0.0), pa(0.04)]).unwrap();
-    assert_eq!(c.stages.len(), 1);
+    assert!(c.kernel().is_none());
     assert!(matches!(
-        c.stages[0],
+        c.leading_transform().unwrap().clone(),
         ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.04
     ));
 }
@@ -219,8 +225,8 @@ fn compile_zero_smooth_time_leaves_only_the_gain() {
 #[test]
 fn compile_disabled_smooth_triangle_does_not_conflict_with_input_shaper() {
     let c = CompiledChain::compile(&[bell(0.01605), st(0.0)]).unwrap();
-    assert_eq!(c.stages.len(), 1);
-    assert!(matches!(c.stages[0], ChainStage::SmoothKernel(_)));
+    assert!(c.transform().is_none());
+    assert!(c.kernel().is_some());
 }
 
 #[test]
@@ -248,7 +254,9 @@ fn set_param_updates_gain() {
     let mut inst = pa(0.04);
     inst.set_param("k", 0.06).unwrap();
     let c = CompiledChain::compile(std::slice::from_ref(&inst)).unwrap();
-    assert!(matches!(c.stages[0], ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.06));
+    assert!(
+        matches!(c.transform().unwrap().clone(), ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.06)
+    );
 }
 
 #[test]
@@ -271,7 +279,7 @@ fn set_param_rejects_negative_and_non_finite_gain() {
     }
     let c = CompiledChain::compile(std::slice::from_ref(&inst)).unwrap();
     assert!(
-        matches!(c.stages[0], ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.04),
+        matches!(c.transform().unwrap().clone(), ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.04),
         "rejected updates must not mutate the gain"
     );
     inst.set_param("k", 0.0).expect("k=0 is a valid no-op gain");
@@ -290,9 +298,7 @@ fn set_param_rejects_negative_and_non_finite_smooth_time() {
         );
     }
     let c = CompiledChain::compile(std::slice::from_ref(&inst)).unwrap();
-    let ChainStage::SmoothKernel(kernel) = &c.stages[0] else {
-        panic!("expected smooth kernel stage");
-    };
+    let kernel = c.kernel().expect("expected smooth kernel");
     assert_eq!(
         kernel.support(),
         build_smooth_bell_kernel(0.01605).support()
@@ -315,9 +321,9 @@ fn compile_rejects_directly_constructed_bad_params() {
 fn compile_mode_inverse_after_kernel_produces_the_inversion_gains() {
     let c = CompiledChain::compile(&[bell(0.0015), mi(131.0, 0.05)]).unwrap();
     let omega = 2.0 * std::f64::consts::PI * 131.0;
-    assert!(matches!(c.stages[0], ChainStage::SmoothKernel(_)));
+    assert!(c.kernel().is_some());
     assert!(matches!(
-        c.stages[1],
+        c.trailing_transform().unwrap().clone(),
         ChainStage::DerivativeGains { k1, k2 }
             if k1 == 2.0 * 0.05 / omega && k2 == 1.0 / (omega * omega)
     ));
@@ -330,7 +336,6 @@ fn compile_mode_inverse_without_kernel_rejected() {
         err,
         PostProcessorError::AccelGainNeedsPrecedingKernel { .. }
     ));
-    assert!(err.to_string().contains("smoothing kernel"), "got: {err}");
 }
 
 #[test]
@@ -356,7 +361,7 @@ fn compile_mode_inverse_with_zero_damping_keeps_only_the_accel_gain() {
     let c = CompiledChain::compile(&[bell(0.0015), mi(40.0, 0.0)]).unwrap();
     let omega = 2.0 * std::f64::consts::PI * 40.0;
     assert!(matches!(
-        c.stages[1],
+        c.trailing_transform().unwrap().clone(),
         ChainStage::DerivativeGains { k1: 0.0, k2 } if k2 == 1.0 / (omega * omega)
     ));
 }
@@ -369,7 +374,7 @@ fn mode_inverse_set_param_updates_both_keys() {
     let c = CompiledChain::compile(&[bell(0.0015), inst]).unwrap();
     let omega = 2.0 * std::f64::consts::PI * 128.5;
     assert!(matches!(
-        c.stages[1],
+        c.trailing_transform().unwrap().clone(),
         ChainStage::DerivativeGains { k1, k2 }
             if k1 == 2.0 * 0.1 / omega && k2 == 1.0 / (omega * omega)
     ));
@@ -400,7 +405,7 @@ fn mode_inverse_set_param_rejects_out_of_bound_values() {
     let omega = 2.0 * std::f64::consts::PI * 131.0;
     assert!(
         matches!(
-            c.stages[1],
+            c.trailing_transform().unwrap().clone(),
             ChainStage::DerivativeGains { k1, k2 }
                 if k1 == 2.0 * 0.05 / omega && k2 == 1.0 / (omega * omega)
         ),

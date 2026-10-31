@@ -10,11 +10,11 @@ pub mod path;
 pub mod segment;
 pub mod space;
 pub mod surface;
-pub(crate) mod vec3;
+pub mod vec3;
 pub mod velocity;
 
-pub use error::{Fatal, GeometryError, InternalDetails, InternalKind, Recovery, SlotDegeneracy};
-pub use fitter::{CornerFitConfig, FitError, UnblendReason};
+pub use error::GeometryError;
+pub use fitter::{CornerFitConfig, FitError, UnblendReason, seam_requires_stop};
 pub use frontend::{
     CORNER_DEVIATION_SCV_FACTOR, FrontendError, Move, MoveContext, VelocityLimits,
     corner_deviation_from_scv, line_move, scv_from_corner_deviation,
@@ -27,8 +27,12 @@ pub struct FollowerWord {
     pub axis_index: usize,
 }
 pub use space::{GcodePos, MachinePos};
-pub use surface::{Fade, MeshGrid, SurfaceBounds, SurfaceError, SurfaceSample, SurfaceTransform};
+pub use surface::{
+    Fade, MeshGrid, MeshGridSpec, SurfaceBounds, SurfaceContinuity, SurfaceError, SurfaceSample,
+    SurfaceTransform, SurfaceTransition, SurfaceTransitionError,
+};
 pub use velocity::{
-    BoundaryState, MoveVelocity, StraightPhase, VelSample, VelocityError, VelocityProfile,
-    VelocityReport, plan_velocity_stops,
+    LawSegment, MoveVelocity, ScalarLaw, VelSample, VelocityError, VelocityPlanParams,
+    VelocityProfile, VelocityReport, plan_velocity_stops_reconstruct_prefix,
+    plan_velocity_stops_select_prefix,
 };

@@ -1,4 +1,4 @@
-use crate::lock_ext::LockExt;
+use motion_core::lock_ext::LockExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -9,18 +9,18 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use host_rt::clock::RealClock;
-use host_rt::host_io::parser::{DataDictionary, FieldValue, MsgProtoParser};
-use host_rt::host_io::{McuHostIo, McuHostIoConfig};
+use host_rt::host_io::McuHostIo;
+use host_rt::host_io::parser::{ArgValue, DataDictionary, MsgProtoParser};
 use host_rt::mcu_serial_conn::McuSerialConn;
-use host_rt::passthrough_queue::PassthroughRouter;
+use host_rt::passthrough_queue::{McuHandle, PassthroughRouter};
 
-use crate::classify;
-use crate::config::{self, PlannerConfig};
-use crate::mcu_config::{McuAxisConfig, McuCaps, McuTopologyInput, build_mcu_configs};
-use crate::types::mcu_handle_from_raw;
-use crate::worker::{StreamWorkerError, StreamWorkerHandle};
+use motion_core::classify;
+use motion_core::mcu_config::{McuAxisConfig, McuTopologyInput, build_mcu_configs};
+use motion_core::worker::{StreamWorkerError, StreamWorkerHandle};
+use planner_config::PlannerConfig;
 
 mod attach;
+mod axis_transport_api;
 mod clock_regression;
 pub use clock_regression::{PyClockSyncEstimator, PyDecayRegression};
 mod drain_wait;
@@ -42,15 +42,13 @@ mod telemetry;
 
 use endstop::{TripDeps, dispatch_endstop_trip};
 #[cfg(test)]
-use ethercat_endpoint::{EndpointClaimError, endpoint_args};
+use ethercat_endpoint::{EndpointClaimError, ReportedExecutor, SampleGrid, endpoint_args};
 use ethercat_endpoint::{
-    arm_endpoint_death_watchdog, handshake_ethercat_endpoint, message_for_claim_error,
-    poll_socket_ready, report_ethercat_endpoint_death, spawn_ethercat_endpoint,
+    EndpointLaunch, arm_endpoint_death_watchdog, build_ring_filler, handshake_ethercat_endpoint,
+    message_for_claim_error, poll_socket_ready, report_endpoint_death, spawn_ethercat_endpoint,
+    verify_sample_grid,
 };
-use motion_caps::{
-    axis_ring_depth, drip_cohort_participants, require_events_dir_for_mcu_transport,
-    resolve_motion_caps, ring_depth_for_axis_inner,
-};
+use motion_caps::{drip_cohort_participants, require_events_dir_for_mcu_transport};
 #[cfg(test)]
 use runtime_caps::place_motor_response;
 use runtime_caps::{
@@ -58,8 +56,8 @@ use runtime_caps::{
     require_positive, slots_for_axis,
 };
 use state::{
-    EthercatDrive, FlushState, FlushWait, HomingRun, HomingState, LatchedFaults, McuConnection,
-    PositionPoll, PumpHandles, RemoteFreeze, TripMember,
+    EthercatDrive, EthercatNodeClaim, EthercatRegistration, FlushState, HomingRun, HomingState,
+    LatchedFaults, McuConnection, PositionPoll, PumpHandles, RemoteFreeze, TripMember,
 };
 
 fn abort_after_tracing_appender_drains() {
@@ -115,7 +113,7 @@ fn open_serial_with_retry(
     serial_path: &str,
     effective_baud: u32,
     is_pipe: bool,
-    config: &McuHostIoConfig,
+    label: &str,
     deadline: Instant,
     timeout_s: f64,
 ) -> PyResult<McuHostIo> {
@@ -123,14 +121,14 @@ fn open_serial_with_retry(
         if is_pipe {
             #[cfg(target_family = "unix")]
             {
-                McuHostIo::open_pipe_with_config(serial_path, config.clone())
+                McuHostIo::open_pipe_with_label(serial_path, label)
             }
             #[cfg(not(target_family = "unix"))]
             {
-                McuHostIo::open_with_config(serial_path, effective_baud, config.clone())
+                McuHostIo::open_with_label(serial_path, effective_baud, label)
             }
         } else {
-            McuHostIo::open_with_config(serial_path, effective_baud, config.clone())
+            McuHostIo::open_with_label(serial_path, effective_baud, label)
         }
     })
 }
@@ -138,13 +136,13 @@ fn open_serial_with_retry(
 fn open_canbus_with_retry(
     interface: &str,
     uuid: u64,
-    config: &McuHostIoConfig,
+    label: &str,
     deadline: Instant,
     timeout_s: f64,
 ) -> PyResult<McuHostIo> {
     let link_desc = format!("{interface} uuid={uuid:012x}");
     open_link_with_retry("attach_canbus", &link_desc, deadline, timeout_s, || {
-        McuHostIo::open_canbus_with_config(interface, uuid, config.clone())
+        McuHostIo::open_canbus_with_label(interface, uuid, label)
     })
 }
 
@@ -182,17 +180,20 @@ pub struct PyMotionEngine {
     bed_mesh: Mutex<Option<Arc<geometry::SurfaceTransform>>>,
     last_g5_pq: Mutex<Option<(f64, f64)>>,
     mcu_axis_configs: Arc<Mutex<Vec<McuAxisConfig>>>,
-    stepcompress_endpoints: Arc<Mutex<HashMap<u32, Arc<Mutex<crate::pump::StepcompressEndpoint>>>>>,
+    axis_transports: Mutex<Arc<motion_core::axis_transport::AxisTransports>>,
+    /// The sweep the last `resonance_buzz` armed, kept so completion is asked
+    /// of the routes it actually drove.
+    pub(crate) buzz_token: Mutex<Option<motion_core::pump::BuzzToken>>,
     dispatched_segments: Arc<AtomicU64>,
-    dispatch_anchor: Arc<Mutex<crate::anchor::Anchor>>,
+    dispatch_anchor: Arc<Mutex<motion_core::anchor::Anchor>>,
     fallback_clock_conversions: Arc<AtomicU64>,
     clock_freqs: Arc<Mutex<HashMap<u32, f64>>>,
     nominal_clock_freqs: Arc<Mutex<HashMap<u32, u32>>>,
     events_dir: Mutex<Option<std::path::PathBuf>>,
     pump: PumpHandles,
     position_poll: PositionPoll,
-    drain: std::sync::Arc<crate::drain::DrainLedger>,
-    motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
+    drain: std::sync::Arc<motion_core::drain::DrainLedger>,
+    motion_history: Arc<Mutex<motion_core::motion_history::HistoryStore>>,
     homing: Arc<HomingState>,
     flush: FlushState,
     // Monotonic id stamped on every streamed move as its `source.start_line`.
@@ -204,7 +205,7 @@ pub struct PyMotionEngine {
     move_seq: std::sync::atomic::AtomicU64,
     latched: LatchedFaults,
     remote_triggers: Mutex<HashMap<u8, (u32, host_rt::host_io::InterceptorId)>>,
-    endpoint_calls: crate::bg_call::BgCalls,
+    endpoint_calls: motion_services::bg_call::BgCalls,
     shut_down: AtomicBool,
 }
 
@@ -223,23 +224,28 @@ impl PyMotionEngine {
             bed_mesh: Mutex::new(None),
             last_g5_pq: Mutex::new(None),
             mcu_axis_configs: Arc::new(Mutex::new(Vec::new())),
-            stepcompress_endpoints: Arc::new(Mutex::new(HashMap::new())),
+            axis_transports: Mutex::new(Arc::new(
+                motion_core::axis_transport::AxisTransports::default(),
+            )),
+            buzz_token: Mutex::new(None),
             dispatched_segments: Arc::new(AtomicU64::new(0)),
-            dispatch_anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
+            dispatch_anchor: Arc::new(Mutex::new(motion_core::anchor::Anchor::new())),
             fallback_clock_conversions: Arc::new(AtomicU64::new(0)),
             clock_freqs: Arc::new(Mutex::new(HashMap::new())),
             nominal_clock_freqs: Arc::new(Mutex::new(HashMap::new())),
             events_dir: Mutex::new(None),
             pump: PumpHandles::default(),
             position_poll: PositionPoll::default(),
-            drain: std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            motion_history: Arc::new(Mutex::new(crate::motion_history::HistoryStore::default())),
+            drain: std::sync::Arc::new(motion_core::drain::DrainLedger::new()),
+            motion_history: Arc::new(Mutex::new(
+                motion_core::motion_history::HistoryStore::default(),
+            )),
             homing: Arc::new(HomingState::default()),
             flush: FlushState::default(),
             move_seq: std::sync::atomic::AtomicU64::new(0),
             latched: LatchedFaults::default(),
             remote_triggers: Mutex::new(HashMap::new()),
-            endpoint_calls: crate::bg_call::BgCalls::default(),
+            endpoint_calls: motion_services::bg_call::BgCalls::default(),
             shut_down: AtomicBool::new(false),
         }
     }
@@ -250,7 +256,7 @@ impl PyMotionEngine {
 
     fn init_logging(&self, events_dir: String) -> PyResult<()> {
         let path = std::path::Path::new(&events_dir);
-        crate::logging::init_logging(path).map_err(|e| {
+        motion_services::logging::init_logging(path).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("init_logging failed: {e}"))
         })?;
         let mut guard = self.events_dir.lock_ok();
@@ -260,7 +266,7 @@ impl PyMotionEngine {
 
     #[pyo3(signature = (session_id, print_id=String::new()))]
     fn set_session_context(&self, session_id: String, print_id: String) {
-        crate::logging::set_context(session_id, print_id);
+        motion_services::logging::set_context(session_id, print_id);
     }
 
     #[pyo3(signature = (label, serial_path, baud))]
@@ -283,24 +289,31 @@ impl PyMotionEngine {
                 endpoint_process: None,
                 endpoint_conn: None,
                 ethercat_slot_axes: Vec::new(),
+                sample_grid: None,
+                ring_filler: None,
             },
         );
         Ok(raw)
     }
 
-    #[pyo3(signature = (label, socket_path, interface, endpoint_binary, cycle_us, dynamics_profile, drives, late_tolerance_us=None, group_delay_us=None))]
     fn claim_ethercat_node(
         &self,
-        label: &str,
-        socket_path: &str,
-        interface: &str,
-        endpoint_binary: &str,
-        cycle_us: u32,
-        dynamics_profile: Option<String>,
+        claim: EthercatNodeClaim,
         drives: Vec<EthercatDrive>,
-        late_tolerance_us: Option<f64>,
-        group_delay_us: Option<f64>,
     ) -> PyResult<u32> {
+        let EthercatNodeClaim {
+            label,
+            socket_path,
+            interface,
+            endpoint_binary,
+            cycle_us,
+            dynamics_profile,
+            late_tolerance_us,
+            group_delay_us,
+        } = claim;
+        let label = label.as_str();
+        let socket_path = socket_path.as_str();
+        let interface = interface.as_str();
         if drives.is_empty() {
             return Err(PyRuntimeError::new_err(format!(
                 "ethercat {label}: claim received no drives"
@@ -320,14 +333,16 @@ impl PyMotionEngine {
 
         let events_dir = self.events_dir.lock_ok().clone();
         let mut child = spawn_ethercat_endpoint(
-            endpoint_binary,
-            interface,
-            socket_path,
-            cycle_us,
-            dynamics_profile.as_deref(),
-            late_tolerance_us,
-            group_delay_us.unwrap_or(f64::from(cycle_us)),
-            events_dir.as_deref(),
+            &endpoint_binary,
+            EndpointLaunch {
+                interface,
+                socket_path,
+                cycle_us,
+                dynamics_profile: dynamics_profile.as_deref(),
+                late_tolerance_us,
+                group_delay_us: group_delay_us.unwrap_or(f64::from(cycle_us)),
+                events_dir: events_dir.as_deref(),
+            },
             &drives,
         )
         .map_err(|e| {
@@ -350,11 +365,37 @@ impl PyMotionEngine {
             PyRuntimeError::new_err(message_for_claim_error(label, interface, &e))
         })?;
 
+        let sample_grid = verify_sample_grid(&conn, handshake_deadline).map_err(|e| {
+            let _ = child.kill();
+            let _ = child.wait();
+            PyRuntimeError::new_err(message_for_claim_error(label, interface, &e))
+        })?;
+
+        let ring_filler = build_ring_filler(sample_grid, dynamics_profile.as_deref(), &drives)
+            .map_err(|e| {
+                let _ = child.kill();
+                let _ = child.wait();
+                PyRuntimeError::new_err(format!(
+                    "ethercat {label}: the host cannot build the endpoint's setpoint filler — {e}"
+                ))
+            })?;
+
         let mut router = self.router.lock_ok();
         let handle = router.claim_mcu(label);
         let raw = handle.raw();
         drop(router);
-        self.register_ethercat_mcu(raw, label, socket_path, child, conn, slot_axes);
+        self.register_ethercat_mcu(
+            raw,
+            EthercatRegistration {
+                label: label.to_owned(),
+                socket_path: socket_path.to_owned(),
+                child,
+                conn,
+                slot_axes,
+                sample_grid,
+                ring_filler,
+            },
+        );
         Ok(raw)
     }
 
@@ -402,7 +443,7 @@ impl PyMotionEngine {
         drop(conn);
 
         let mut router = self.router.lock_ok();
-        router.release_mcu(mcu_handle_from_raw(handle));
+        router.release_mcu(McuHandle::from_raw(handle));
         Ok(())
     }
 
@@ -424,7 +465,7 @@ impl PyMotionEngine {
         let pump_join = {
             let tx = self.pump.tx.lock_ok().take();
             if let Some(tx) = tx {
-                let _ = tx.send(crate::pump::PumpMsg::Shutdown);
+                let _ = tx.send(motion_core::pump::PumpMsg::Shutdown);
             }
             self.pump.thread.lock_ok().take()
         };
@@ -518,11 +559,6 @@ impl PyMotionEngine {
             },
         )?;
 
-        let config = McuHostIoConfig {
-            mcu_label: Some(mcu_label.clone()),
-            ..McuHostIoConfig::default()
-        };
-
         let is_pipe = baud == 0
             || serial_path.starts_with("/tmp/")
             || serial_path.starts_with("/dev/pts/")
@@ -533,7 +569,7 @@ impl PyMotionEngine {
             serial_path,
             effective_baud,
             is_pipe,
-            &config,
+            &mcu_label,
             deadline,
             timeout_s,
         )?;
@@ -590,12 +626,8 @@ impl PyMotionEngine {
             },
         )?;
 
-        let config = McuHostIoConfig {
-            mcu_label: Some(mcu_label.clone()),
-            ..McuHostIoConfig::default()
-        };
-
-        let host_io = open_canbus_with_retry(interface, uuid_value, &config, deadline, timeout_s)?;
+        let host_io =
+            open_canbus_with_retry(interface, uuid_value, &mcu_label, deadline, timeout_s)?;
 
         self.register_freshly_attached_mcu(
             mcu_handle,
@@ -613,11 +645,6 @@ impl PyMotionEngine {
             |h| format!("get_mcu_capabilities: unknown mcu_handle {h}"),
             |conn| Ok(conn.identify_caps),
         )
-    }
-
-    fn ring_depth_for_axis(&self, mcu_handle: u32, axis: u8) -> PyResult<u16> {
-        let configs = self.mcu_axis_configs.lock_ok();
-        ring_depth_for_axis_inner(&configs, mcu_handle, axis).map_err(PyRuntimeError::new_err)
     }
 }
 
@@ -672,40 +699,45 @@ impl PyMotionEngine {
 }
 
 impl PyMotionEngine {
-    fn register_ethercat_mcu(
-        &self,
-        raw: u32,
-        label: &str,
-        socket_path: &str,
-        child: std::process::Child,
-        conn: McuSerialConn,
-        slot_axes: Vec<usize>,
-    ) {
-        self.mcus.lock_ok().insert(
-            raw,
-            McuConnection {
-                label: label.to_owned(),
-                host_io: None,
-                runtime_rx_priority: None,
-                runtime_rx_bulk: None,
-                runtime_caps: None,
-                identify_caps: 0,
-                mcu_transport_supported: true,
-                ethercat_socket: Some(socket_path.to_owned()),
-                endpoint_process: Some(child),
-                endpoint_conn: Some(Arc::new(conn)),
-                ethercat_slot_axes: slot_axes,
-            },
+    fn register_ethercat_mcu(&self, raw: u32, reg: EthercatRegistration) {
+        let EthercatRegistration {
+            label,
+            socket_path,
+            child,
+            conn,
+            slot_axes,
+            sample_grid,
+            ring_filler,
+        } = reg;
+        let ethercat = McuConnection {
+            label: label.clone(),
+            host_io: None,
+            runtime_rx_priority: None,
+            runtime_rx_bulk: None,
+            runtime_caps: None,
+            identify_caps: 0,
+            mcu_transport_supported: true,
+            ethercat_socket: Some(socket_path),
+            endpoint_process: Some(child),
+            endpoint_conn: Some(Arc::new(conn)),
+            ethercat_slot_axes: slot_axes,
+            sample_grid: Some(sample_grid),
+            ring_filler: Some(ring_filler),
+        };
+        tracing::info!(
+            subsystem = "engine",
+            event = "ethercat_sample_grid",
+            label,
+            sample_grid = ?ethercat.sample_grid,
+            "ethercat endpoint sample grid accepted at claim"
         );
+        self.mcus.lock_ok().insert(raw, ethercat);
         self.nominal_clock_freqs
             .lock_ok()
             .insert(raw, ETHERCAT_CLOCK_FREQ_HZ);
         self.router
             .lock_ok()
-            .set_nominal_freq(
-                crate::types::mcu_handle_from_raw(raw),
-                f64::from(ETHERCAT_CLOCK_FREQ_HZ),
-            )
+            .set_nominal_freq(McuHandle::from_raw(raw), f64::from(ETHERCAT_CLOCK_FREQ_HZ))
             .expect("ethercat mcu handle was claimed on this router");
     }
 }
@@ -720,19 +752,10 @@ mod claim_error_message_tests;
 mod drip_cohort_participants_tests;
 
 #[cfg(test)]
-mod axis_ring_depth_tests;
-
-#[cfg(test)]
-mod ring_depth_for_axis_tests;
-
-#[cfg(test)]
 mod place_motor_response_tests;
 
 #[cfg(test)]
 mod require_events_dir_tests;
-
-#[cfg(test)]
-mod resolve_motion_caps_tests;
 
 #[cfg(test)]
 mod ethercat_endpoint_tests;

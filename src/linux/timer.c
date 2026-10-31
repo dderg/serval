@@ -13,6 +13,7 @@
 #include "command.h" // DECL_CONSTANT
 #include "internal.h" // console_sleep
 #include "sched.h" // DECL_INIT
+#include "sim_vtime_pacer.h"
 
 // Global storage for timer handling
 static struct {
@@ -128,6 +129,10 @@ timer_read_time_u64(void)
 void
 timer_kick(void)
 {
+#if CONFIG_MCU_SIM
+    struct timespec now = timespec_read();
+    sim_vtime_pacer_set_floor((uint64_t)now.tv_sec * NSECS + now.tv_nsec);
+#endif
     struct itimerspec it = { .it_interval = {0, 0}, .it_value = {0, 1} };
     timer_settime(TimerInfo.t_alarm, TIMER_ABSTIME, &it, NULL);
 }
@@ -145,6 +150,11 @@ timer_dispatch(void)
     for (;;) {
         // Run the next software timer
         next = sched_timer_dispatch();
+#if CONFIG_MCU_SIM
+        struct timespec wake = timespec_from_time(next);
+        sim_vtime_pacer_set_floor(
+            (uint64_t)wake.tv_sec * NSECS + wake.tv_nsec);
+#endif
 
         repeat_count--;
         uint32_t lrt = TimerInfo.last_read_time;

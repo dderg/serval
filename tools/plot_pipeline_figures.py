@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Render the README pipeline figures from the real planner.
 
-Drives `_motion_engine.pipeline_snapshot` (the same entry point the snapshot
-harness and the WASM playground use) over a small G-code square and plots the
-stages into `docs/img/pipeline-*.svg`.
+Drives `_motion_engine.pipeline_snapshot_axis_samples` (the same planner the
+snapshot harness and the WASM playground use) over a small G-code square and
+plots the stages into `docs/img/pipeline-*.svg`. The engine evaluates the exact
+carriers the firmware executes and hands back per-axis samples: no polynomial
+refit, no resampling into pieces, no carrier math re-derived here.
 
     make -f Makefile.rust motion-engine-fast
     python3 tools/plot_pipeline_figures.py
@@ -11,13 +13,14 @@ stages into `docs/img/pipeline-*.svg`.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.pyplot as plt
 
 REPO = Path(__file__).resolve().parent.parent
 OUT_DIR = REPO / "docs" / "img"
@@ -27,7 +30,7 @@ CONFIG = """
 max_velocity: 300
 max_accel: 5000
 corner_deviation: 0.2
-max_jerk: 400000
+max_jerk: 0
 """
 
 SHAPED_CHAIN = """
@@ -60,45 +63,17 @@ def load_engine():
             "_motion_engine not importable — build it first:\n"
             "  make -f Makefile.rust motion-engine-fast"
         ) from exc
-    if not hasattr(_motion_engine, "pipeline_snapshot"):
+    if not hasattr(_motion_engine, "pipeline_snapshot_axis_samples"):
         raise SystemExit(
-            "_motion_engine lacks pipeline_snapshot — rebuild with the "
-            "`snapshot` feature: make -f Makefile.rust motion-engine-fast"
+            "_motion_engine lacks pipeline_snapshot_axis_samples — rebuild "
+            "with the `snapshot` feature: "
+            "make -f Makefile.rust motion-engine-fast"
         )
     return _motion_engine
 
 
 def waypoints():
     return [(x, y, 0.0, 0.0, 300.0, 5000.0) for x, y in SQUARE]
-
-
-def derivative(coeffs):
-    return [i * c for i, c in enumerate(coeffs)][1:]
-
-
-def horner(coeffs, tau):
-    acc = 0.0
-    for c in reversed(coeffs):
-        acc = acc * tau + c
-    return acc
-
-
-def sample_axis(pieces, times):
-    """Position, velocity and acceleration of one axis at each time."""
-    pos, vel, acc = [], [], []
-    idx = 0
-    for t in times:
-        while idx + 1 < len(pieces) and pieces[idx + 1][0] <= t:
-            idx += 1
-        p = pieces[idx]
-        c = p[2:]
-        tau = min(max(t - p[0], 0.0), p[1] - p[0])
-        d1 = derivative(c)
-        d2 = derivative(d1)
-        pos.append(horner(c, tau))
-        vel.append(horner(d1, tau) if d1 else 0.0)
-        acc.append(horner(d2, tau) if d2 else 0.0)
-    return pos, vel, acc
 
 
 def curvature(vx, vy, ax, ay):
@@ -141,13 +116,15 @@ def save(fig, name):
 
 def main():
     engine = load_engine()
-    snap = engine.pipeline_snapshot(waypoints(), CONFIG)
-
-    t_end = snap["traj_t_end"]
     n = 4000
+    snap_json, (sx, sy) = engine.pipeline_snapshot_axis_samples(
+        waypoints(), CONFIG, [0, 1], n
+    )
+    snap = json.loads(snap_json)
+    t_end = snap["trajectory"]["t_end"]
     times = [t_end * i / (n - 1) for i in range(n)]
-    px, vx, axx = sample_axis(snap["traj_x_pieces"], times)
-    py, vy, ayy = sample_axis(snap["traj_y_pieces"], times)
+    px, vx, axx = (list(col) for col in zip(*sx))
+    py, vy, ayy = (list(col) for col in zip(*sy))
     speed = [(a * a + b * b) ** 0.5 for a, b in zip(vx, vy)]
     kappa = curvature(vx, vy, axx, ayy)
     s = arclength(px, py)
@@ -248,11 +225,13 @@ def main():
     save(fig, "pipeline-velocity.svg")
 
     # 4 — per-axis tracks the MCUs receive, before and after the shaper chain
-    shaped = engine.pipeline_snapshot(waypoints(), CONFIG + SHAPED_CHAIN)
-    st_end = shaped["traj_t_end"]
+    shaped_json, (ssx, ssy) = engine.pipeline_snapshot_axis_samples(
+        waypoints(), CONFIG + SHAPED_CHAIN, [0, 1], n
+    )
+    st_end = json.loads(shaped_json)["trajectory"]["t_end"]
     stimes = [st_end * i / (n - 1) for i in range(n)]
-    _, svx, saxx = sample_axis(shaped["traj_x_pieces"], stimes)
-    _, svy, sayy = sample_axis(shaped["traj_y_pieces"], stimes)
+    _, svx, saxx = (list(col) for col in zip(*ssx))
+    _, svy, sayy = (list(col) for col in zip(*ssy))
     splot = [t - SMOOTH_TIME / 2.0 for t in stimes]
 
     fig, axes = plt.subplots(2, 1, figsize=(6.4, 4.4), sharex=True)

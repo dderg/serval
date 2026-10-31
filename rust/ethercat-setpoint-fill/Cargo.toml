@@ -1,0 +1,15 @@
+[package]
+name = "ethercat-setpoint-fill"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Host-side trajectory sampling and buzz generation for DC-grid setpoint playback."
+license.workspace = true
+
+[dependencies]
+ethercat-setpoint = { path = "../ethercat-setpoint" }
+mcu-protocol = { path = "../mcu-protocol" }
+trajectory = { path = "../trajectory" }
+
+[lints]
+workspace = true

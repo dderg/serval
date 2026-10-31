@@ -28,7 +28,10 @@ def make_motion():
         get_last_move_time=lambda: 0.0,
         submit_bezier=lambda *a: m.engine.calls.append(("bezier", a)),
     )
-    m.mcu = None
+    m.mcu = types.SimpleNamespace(is_fileoutput=lambda: True)
+    m.reactor = types.SimpleNamespace(monotonic=lambda: 0.0)
+    m._last_reactor_yield = 0.0
+    m._engine_wakeup = None
     m._clock_sync_confirmed = False
     m._fire_active_callbacks = lambda axes_d: None
     m._sync_print_time = lambda: None
@@ -172,14 +175,9 @@ def test_cmd_g5_chained_omits_ij_and_forwards_none():
     # invoke the submit closure and confirm i,j forwarded as None
     submit(10.0, 0.0, 0.0, 0.0, 50.0)
     assert bezier_calls, "submit_bezier should be called"
-    i, j, p, q = (
-        bezier_calls[0][0],
-        bezier_calls[0][1],
-        bezier_calls[0][2],
-        bezier_calls[0][3],
-    )
-    assert i is None and j is None
-    assert p == -3.0 and q == 4.0
+    handles = bezier_calls[0][0]
+    assert handles["i"] is None and handles["j"] is None
+    assert handles["p"] == -3.0 and handles["q"] == 4.0
 
 
 def test_cmd_g5_rejects_i_without_j():

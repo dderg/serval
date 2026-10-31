@@ -1,8 +1,8 @@
 use core::sync::atomic::Ordering;
 
-use crate::error::{RUNTIME_ERR_INVALID_ARG, RUNTIME_ERR_RING_FULL, RUNTIME_OK};
-use crate::state::SharedState;
-use crate::stepping_state::{AxisState, MAX_AXES, StepMode, StepperBindingRust, TMC_CS_OID_NONE};
+use crate::stepping_state::AxisState;
+use runtime_contract::axes::{MAX_AXES, StepMode, StepperBindingRust, TMC_CS_OID_NONE};
+use runtime_contract::error::FaultCode;
 
 use super::Engine;
 
@@ -12,22 +12,14 @@ impl Engine {
         axis_idx: u8,
         mode: StepMode,
         microstep_distance: f32,
-        ring_depth: usize,
         bindings: &[StepperBindingRust],
-        total_ring_pieces: usize,
     ) -> i32 {
         if (axis_idx as usize) >= MAX_AXES {
-            return RUNTIME_ERR_INVALID_ARG;
+            return FaultCode::InvalidArg.as_i32();
         }
         if !microstep_distance.is_finite() || microstep_distance <= 0.0 {
-            return RUNTIME_ERR_INVALID_ARG;
+            return FaultCode::InvalidArg.as_i32();
         }
-        if self.ring_alloc_cursor + ring_depth > total_ring_pieces {
-            return RUNTIME_ERR_RING_FULL;
-        }
-
-        let offset = self.ring_alloc_cursor;
-        self.ring_alloc_cursor += ring_depth;
 
         let idx = axis_idx as usize;
         // SAFETY: `idx < MAX_AXES` is guaranteed by the bounds check above.
@@ -36,7 +28,6 @@ impl Engine {
         let axis = self.stepping_axes[idx].get_or_insert_with(AxisState::new_unconfigured);
 
         axis.microstep_distance = microstep_distance;
-        axis.ring = crate::piece_ring::RingDescriptor::new(offset, ring_depth);
         axis.reset_isr_cache();
         axis.steppers.clear();
         for b in bindings {
@@ -57,41 +48,7 @@ impl Engine {
             }
         }
 
-        RUNTIME_OK
-    }
-
-    pub fn set_axis_step_budget(&mut self, axis_idx: u8, max_steps_per_sample: u32) -> i32 {
-        if max_steps_per_sample == 0
-            || max_steps_per_sample > crate::sub_sample_timing::MAX_STEPS_PER_SAMPLE as u32
-        {
-            return RUNTIME_ERR_INVALID_ARG;
-        }
-        let Some(axis) = self
-            .stepping_axes
-            .get_mut(axis_idx as usize)
-            .and_then(|s| s.as_mut())
-        else {
-            return RUNTIME_ERR_INVALID_ARG;
-        };
-        axis.max_steps_per_sample = max_steps_per_sample;
-        RUNTIME_OK
-    }
-
-    pub fn configure_kinematics(&mut self, k_xy: f32) -> i32 {
-        if !k_xy.is_finite() || k_xy <= 0.0 {
-            return -1;
-        }
-        0
-    }
-
-    pub fn configure_pressure_advance(&mut self, advance_accel: f32, advance_decel: f32) -> i32 {
-        if !advance_accel.is_finite() || !advance_decel.is_finite() {
-            return -1;
-        }
-        if advance_accel < 0.0 || advance_decel < 0.0 {
-            return -1;
-        }
-        0
+        FaultCode::None.as_i32()
     }
 
     pub fn set_axis_mode(&mut self, axis_idx: u8, new_mode_byte: u8) -> i32 {
@@ -103,23 +60,17 @@ impl Engine {
             1 => StepMode::Phase,
             _ => return -1,
         };
-        let motion_active = self
-            .stepping_axes
-            .iter()
-            .any(|a| a.as_ref().map_or(false, |ax| ax.armed.is_some()));
-        if motion_active {
-            return -2;
-        }
-        #[cfg(not(any(test, feature = "host")))]
+        #[cfg(feature = "sample-stepping")]
         {
-            #[allow(unsafe_code)]
+            if self
+                .sample_lanes
+                .iter()
+                .any(crate::sample_exec::SampleLane::has_pending_samples)
             {
-                use crate::step_queue::{StepQueue, step_queues};
-                unsafe {
-                    let q = step_queues.get().cast::<StepQueue>().add(axis_idx as usize);
-                    core::ptr::write_volatile(&mut (*q).head, 0);
-                    core::ptr::write_volatile(&mut (*q).tail, 0);
-                }
+                return -2;
+            }
+            if let Some(lane) = self.sample_lanes.get_mut(axis_idx as usize) {
+                lane.reset_for_mode_switch();
             }
         }
         let Some(axis) = self
@@ -146,12 +97,11 @@ impl Engine {
 
     pub fn set_stepper_offset(
         &mut self,
-        shared: &SharedState,
+        shared: &crate::state::SharedState,
         stepper_idx: u8,
         delta_microsteps: i32,
         max_microsteps_per_sample: u16,
     ) -> i32 {
-        use core::sync::atomic::Ordering;
         if delta_microsteps == 0 {
             return 0;
         }

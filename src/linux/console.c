@@ -132,6 +132,8 @@ static struct task_wake console_wake;
 static uint8_t receive_buf[4096];
 static int receive_pos;
 
+uint64_t console_rx_bytes, console_tx_bytes, console_tx_drops;
+
 void *
 console_receive_buffer(void)
 {
@@ -178,6 +180,8 @@ console_task(void)
 
     if (ret > 0)
         mcu_demux_pump(&receive_buf[receive_pos], (uint16_t)ret);
+    if (ret > 0)
+        console_rx_bytes += (uint64_t)ret;
     receive_pos = 0;
 }
 DECL_TASK(console_task);
@@ -192,8 +196,12 @@ console_sendf(const struct command_encoder *ce, va_list args)
 
     // Transmit message
     int ret = write(main_pfd[MP_TTY_IDX].fd, buf, msglen);
-    if (ret < 0)
+    if (ret < 0) {
+        console_tx_drops++;
         report_errno("write", ret);
+    } else {
+        console_tx_bytes += (uint64_t)ret;
+    }
 }
 
 // Sleep until a signal received (waking early for console input if needed)

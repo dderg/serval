@@ -51,7 +51,7 @@ jobs:
       - name: snapshot tests
         run: ./scripts/ci.sh snapshot
         env:
-          SNAPSHOT_DUMP_DIR: ${{ runner.temp }}/snapshot-dump
+          SNAPSHOT_RESULTS_DIR: ${{ runner.temp }}/snapshot-dump
       - name: upload changed snapshots
         if: failure()
         uses: actions/upload-artifact@v4

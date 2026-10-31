@@ -25,8 +25,8 @@ def test_manual_move_loops_submit_nudge_per_segment_and_filters_zero():
     assert all(
         c[5] == smm.travel_speed and c[6] == smm.travel_accel for c in calls
     )
-    assert [c for c in toolhead.calls if c[0] == "wait_moves"] == [
-        ("wait_moves",)
+    assert [c for c in toolhead.calls if c[0] == "flush_step_generation"] == [
+        ("flush_step_generation",)
     ]
 
 

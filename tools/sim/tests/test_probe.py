@@ -4,6 +4,7 @@ The auto-endstop walls in libsim_intercept.c stand in for physical
 switches: X steps trip gpio200, Y gpio201, Z gpio202+gpio203.
 """
 
+import json
 import re
 
 import pytest
@@ -121,13 +122,6 @@ def test_probe_multi_point_tools(sim_world):
     world.gcode_ok("FORCE_MOVE STEPPER=z DISTANCE=0.5 VELOCITY=5", timeout=60)
     world.gcode_ok("PROBE", timeout=90)
     shifted_z = _last_probe_z(world.expect_log(" is z="))
-    # Tolerances bound the sim's per-trip measurement noise, not the frame
-    # bookkeeping under test: each reading is stamped at the midpoint of
-    # the two endstop polls that bracket the trip, so it carries a
-    # symmetric error of half the poll-observation gap x probe speed —
-    # tens of microns idle, up to ~75 um per probe on a loaded host. The
-    # frame bugs this test exists for (per-probe drift, halt-clock skew)
-    # were 0.2-0.5 mm and systematic.
     assert baseline_z - shifted_z == pytest.approx(0.5, abs=0.2), (
         "FORCE_MOVE must shift the physical frame by exactly its distance"
     )
@@ -146,16 +140,18 @@ def test_probe_multi_point_tools(sim_world):
 
 
 def test_probe_remote_mcu_trsync(sim_world):
-    """Endstop trsync on a different MCU than the steppers."""
     world = sim_world(_cfg("remote"), dual_mcu=True)
     world.mark_log()
     world.gcode_ok("G28 Z", timeout=120)
     world.expect_log("set Z=3.2500")
+    remote_events = [
+        json.loads(line)
+        for line in world.events_text().splitlines()
+        if '"event":"remote_trigger_fired"' in line
+    ]
+    assert len(remote_events) == 1
+    assert remote_events[0]["clock32"] != 0
     out = world.klippy_log_text()
-    assert (
-        "remote trsync terminal report" in out
-        or "sim_remote_endstop: firing" in out
-    )
     m = re.search(r"trip_to_stop_travel=(-?\d+\.\d+)", out)
     assert m, "no trip_to_stop_travel in homing log"
     assert -0.01 <= float(m.group(1)) < 0.5

@@ -35,20 +35,6 @@ impl RttEstimator {
     }
 }
 
-fn secs_mul(d: Duration, f: f64) -> Duration {
-    Duration::from_secs_f64(d.as_secs_f64() * f)
-}
-
-fn clamp(d: Duration, min: Duration, max: Duration) -> Duration {
-    if d < min {
-        min
-    } else if d > max {
-        max
-    } else {
-        d
-    }
-}
-
 impl RttEstimator {
     pub fn update(&mut self, r: Duration) {
         match self.srtt {
@@ -57,20 +43,19 @@ impl RttEstimator {
                 self.rttvar = Some(r / 2);
             }
             Some(srtt) => {
-                let diff = if srtt > r { srtt - r } else { r - srtt };
-                let rttvar_new = secs_mul(self.rttvar.unwrap(), 1.0 - BETA) + secs_mul(diff, BETA);
+                let diff = srtt.abs_diff(r);
+                let rttvar_new = self.rttvar.unwrap().mul_f64(1.0 - BETA) + diff.mul_f64(BETA);
                 self.rttvar = Some(rttvar_new);
-                self.srtt = Some(secs_mul(srtt, 1.0 - ALPHA) + secs_mul(r, ALPHA));
+                self.srtt = Some(srtt.mul_f64(1.0 - ALPHA) + r.mul_f64(ALPHA));
             }
         }
-        let rttvar = self.rttvar.unwrap();
-        let k_rttvar = secs_mul(rttvar, K);
+        let k_rttvar = self.rttvar.unwrap().mul_f64(K);
         let rto_raw = self.srtt.unwrap() + std::cmp::max(G, k_rttvar);
-        self.rto = clamp(rto_raw, MIN_RTO, MAX_RTO);
+        self.rto = rto_raw.clamp(MIN_RTO, MAX_RTO);
     }
 
     pub fn backoff(&mut self) {
-        self.rto = clamp(self.rto * 2, MIN_RTO, MAX_RTO);
+        self.rto = (self.rto * 2).clamp(MIN_RTO, MAX_RTO);
     }
 }
 

@@ -1,0 +1,163 @@
+// Replays a gcode file through the production streaming pipeline (fit ->
+// planner -> lowerer -> shaper, with input shapers on X/Y and PA + smoothing
+// on the E follower) and reports producer throughput as a sliding-window
+// realtime factor over stream time. Bench-repro tool for the Trident cube
+// anchor underrun: finds the gcode region where the producer falls behind
+// playback and how far behind it runs.
+//
+//   cargo run --release -p motion-core --example gcode_replay_bench -- <file.gcode> [t_lo t_hi]
+//
+// With t_lo/t_hi only moves whose stream window overlaps [t_lo, t_hi] stream
+// seconds are interesting; the whole file still replays (stream time only
+// exists downstream), but the report highlights that range.
+
+use std::env;
+use std::fs;
+use std::process;
+use std::time::Instant;
+
+use geometry::{CornerFitConfig, VelocityLimits};
+use motion_core::seam_test_harness::parse_gcode_to_moves;
+use motion_pipeline::{Pipeline, StreamConfig, TrajectoryItem};
+use trajectory::{AxisChainSet, CompiledChain, PostProcessorInstance};
+
+fn trident_chains() -> AxisChainSet {
+    let bell = |name: &str, smooth: f64| {
+        CompiledChain::compile(&[PostProcessorInstance::new(
+            name,
+            &trajectory::algos::SmoothBell,
+            vec![smooth],
+        )])
+        .expect("single post-processor always compiles")
+    };
+    let e = CompiledChain::compile(&[
+        PostProcessorInstance::new("pa", &trajectory::algos::LinearPressureAdvance, vec![0.04]),
+        PostProcessorInstance::new("st", &trajectory::algos::SmoothBell, vec![0.013]),
+    ])
+    .expect("pa + kernel compiles");
+    AxisChainSet {
+        chains: vec![
+            bell("is_x", 0.0105),
+            bell("is_y", 0.0155),
+            CompiledChain::default(),
+            e,
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    }
+}
+
+fn main() {
+    let mut args: Vec<String> = env::args().collect();
+    let min_worst_x = args.iter().position(|a| a == "--min-worst-x").map(|i| {
+        args.remove(i);
+        args.remove(i)
+            .parse::<f64>()
+            .expect("--min-worst-x takes a number")
+    });
+    if args.len() < 2 {
+        eprintln!("usage: gcode_replay_bench <in.gcode> [t_lo t_hi] [--min-worst-x <x>]");
+        process::exit(1);
+    }
+    let source = fs::read_to_string(&args[1]).unwrap_or_else(|e| {
+        eprintln!("cannot read {}: {e}", args[1]);
+        process::exit(1);
+    });
+    let highlight: Option<(f64, f64)> = (args.len() >= 4).then(|| {
+        (
+            args[2].parse().expect("t_lo must be a number"),
+            args[3].parse().expect("t_hi must be a number"),
+        )
+    });
+
+    // Trident bench printer.cfg limits.
+    let corner_deviation = geometry::corner_deviation_from_scv(85.1, 30_000.0);
+    let limits = VelocityLimits::try_new(1_000.0, 30_000.0, corner_deviation, f64::INFINITY)
+        .expect("trident limits");
+    let cfg = StreamConfig {
+        corner: CornerFitConfig::default(),
+        integration_tol: 1e-4,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
+        fit_tol_mm: 0.005,
+        fit_tol_accel_mm_s2: 50.0,
+        max_buffer_moves: 512,
+        limits,
+    };
+
+    let wall = Instant::now();
+    let mut pipeline = Pipeline::new(cfg, trident_chains(), vec![0.0; 4], 0.0);
+    let mut arrivals: Vec<(f64, f64)> = Vec::new();
+    let mut output = |item| {
+        if let TrajectoryItem::Seg(seg) = item {
+            arrivals.push((wall.elapsed().as_secs_f64(), seg.t_end));
+        }
+        true
+    };
+
+    let mut submitted = 0u64;
+    for m in parse_gcode_to_moves(&source, limits) {
+        if !pipeline.feed(m.into(), &mut output) {
+            eprintln!("pipeline input closed at move {submitted}");
+            process::exit(1);
+        }
+        submitted += 1;
+    }
+    assert!(pipeline.finish(&mut output));
+    let wall_s = wall.elapsed().as_secs_f64();
+    let stream_s = arrivals.last().map_or(0.0, |&(_, t)| t);
+    println!(
+        "moves={submitted} segments={} stream_secs={stream_s:.1} wall_secs={wall_s:.1} overall_x={:.2}",
+        arrivals.len(),
+        stream_s / wall_s
+    );
+
+    // Sliding stream-time windows: wall time the producer spent emitting each.
+    const WINDOW_S: f64 = 5.0;
+    let mut windows: Vec<(f64, f64, f64)> = Vec::new();
+    let mut lo = 0usize;
+    for hi in 0..arrivals.len() {
+        while arrivals[hi].1 - arrivals[lo].1 > WINDOW_S {
+            lo += 1;
+        }
+        if hi > lo {
+            let stream = arrivals[hi].1 - arrivals[lo].1;
+            let wall = arrivals[hi].0 - arrivals[lo].0;
+            if wall > 1e-9 && stream >= WINDOW_S * 0.8 {
+                windows.push((arrivals[lo].1, arrivals[hi].1, stream / wall));
+            }
+        }
+    }
+    windows.sort_by(|a, b| a.2.total_cmp(&b.2));
+    println!("worst stream windows (t_lo..t_hi realtime_x):");
+    let mut reported: Vec<(f64, f64, f64)> = Vec::new();
+    for &(t_lo, t_hi, x) in &windows {
+        if reported
+            .iter()
+            .any(|&(r_lo, r_hi, _)| t_lo < r_hi + WINDOW_S && t_hi > r_lo - WINDOW_S)
+        {
+            continue;
+        }
+        reported.push((t_lo, t_hi, x));
+        println!("  {t_lo:9.2}..{t_hi:9.2}  {x:6.2}x");
+        if reported.len() >= 10 {
+            break;
+        }
+    }
+    if let Some((h_lo, h_hi)) = highlight {
+        let mut worst = f64::INFINITY;
+        for &(t_lo, t_hi, x) in &windows {
+            if t_lo < h_hi && t_hi > h_lo {
+                worst = worst.min(x);
+            }
+        }
+        println!("highlight {h_lo:.1}..{h_hi:.1}: worst realtime_x={worst:.2}");
+    }
+    if let Some(floor) = min_worst_x {
+        let worst = windows.first().map_or(f64::INFINITY, |&(_, _, x)| x);
+        if !(worst >= floor) {
+            eprintln!("FAIL: worst window {worst:.2}x is below the {floor:.2}x floor");
+            process::exit(1);
+        }
+        println!("budget ok: worst window {worst:.2}x >= {floor:.2}x floor");
+    }
+}

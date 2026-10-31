@@ -290,6 +290,47 @@ def test_beacon_stream_starts_emitting_data_frames(stub):
         os.close(fd)
 
 
+def _drain_due_batches(s: BeaconMcuStub, now_vt: float) -> list:
+    emitted = []
+    while now_vt >= s._next_batch_vt:
+        batch_vt = s._due_batch_vt(now_vt)
+        s._commit_batch_vt(batch_vt)
+        emitted.append(batch_vt)
+    return emitted
+
+
+def test_batch_schedule_keeps_scheduled_stamp_when_on_time(tmp_path):
+    s = BeaconMcuStub(str(tmp_path / "pty"))
+    period = BeaconMcuStub.BATCH_PERIOD_S
+    s._next_batch_vt = 100.0
+    emitted = []
+    for _ in range(4):
+        emitted += _drain_due_batches(s, s._next_batch_vt)
+    assert len(emitted) == 4
+    assert emitted[0] == 100.0
+    spacing = [b - a for a, b in zip(emitted, emitted[1:])]
+    assert spacing == pytest.approx([period] * 3)
+
+
+def test_stalled_host_emits_one_resynced_batch_not_a_backlog(tmp_path):
+    s = BeaconMcuStub(str(tmp_path / "pty"))
+    period = BeaconMcuStub.BATCH_PERIOD_S
+    s._next_batch_vt = 100.0
+    _drain_due_batches(s, 100.0)
+    stalled_now = 100.0 + 25 * period
+    emitted = _drain_due_batches(s, stalled_now)
+    assert emitted == [stalled_now]
+    assert s._next_batch_vt == pytest.approx(stalled_now + period)
+
+
+def test_batch_stamp_repeating_the_previous_clock_is_rejected(tmp_path):
+    s = BeaconMcuStub(str(tmp_path / "pty"))
+    s._next_batch_vt = 100.0
+    s._commit_batch_vt(s._due_batch_vt(100.0))
+    with pytest.raises(RuntimeError):
+        s._commit_batch_vt(100.0)
+
+
 def test_identify_dict_exposes_accelerometer_surface(stub):
     s, pty_path = stub
     parser = _parser_with_default_messages()

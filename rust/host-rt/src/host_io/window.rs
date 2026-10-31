@@ -14,53 +14,18 @@ pub struct UnackedEntry {
     pub retry_count: u32,
 }
 
-#[derive(Debug, Default)]
-pub struct UnackedWindow {
-    entries: VecDeque<UnackedEntry>,
+pub type UnackedWindow = VecDeque<UnackedEntry>;
+
+pub fn is_full(window: &UnackedWindow) -> bool {
+    window.len() >= MAX_PENDING_BLOCKS
 }
 
-impl UnackedWindow {
-    pub fn len(&self) -> usize {
-        self.entries.len()
+pub fn pop_acked(window: &mut UnackedWindow, rseq: u64) -> Vec<UnackedEntry> {
+    let mut popped = Vec::new();
+    while window.front().is_some_and(|f| f.seq < rseq) {
+        popped.push(window.pop_front().expect("front checked above"));
     }
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-    pub fn is_full(&self) -> bool {
-        self.entries.len() >= MAX_PENDING_BLOCKS
-    }
-    pub fn front(&self) -> Option<&UnackedEntry> {
-        self.entries.front()
-    }
-
-    pub fn push(&mut self, entry: UnackedEntry) {
-        debug_assert!(!self.is_full(), "UnackedWindow overflow");
-        self.entries.push_back(entry);
-    }
-
-    pub fn pop_acked(&mut self, rseq: u64) -> Vec<UnackedEntry> {
-        let mut popped = Vec::new();
-        while let Some(front) = self.entries.front() {
-            if front.seq < rseq {
-                popped.push(self.entries.pop_front().unwrap());
-            } else {
-                break;
-            }
-        }
-        popped
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &UnackedEntry> {
-        self.entries.iter()
-    }
-
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut UnackedEntry> {
-        self.entries.iter_mut()
-    }
-
-    pub fn clear(&mut self) {
-        self.entries.clear();
-    }
+    popped
 }
 
 #[derive(Debug)]

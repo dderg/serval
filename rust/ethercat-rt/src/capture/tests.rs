@@ -191,26 +191,26 @@ fn header_is_one_json_line_describing_the_record() {
         "\"started_mono_ns\":7",
         "\"name\":\"x\"",
         "\"counts_per_mm\":3276.8",
-        "\"rotation_distance\":40",
+        "\"rotation_distance\":40.0",
         "\"invert\":false",
-        "{\"name\":\"cycle_index\",\"dtype\":\"u64\",\"offset\":0}",
-        "{\"name\":\"flags\",\"dtype\":\"u8\",\"offset\":8}",
-        "{\"name\":\"skip_count\",\"dtype\":\"u32\",\"offset\":9}",
-        "{\"name\":\"late_frames\",\"dtype\":\"u32\",\"offset\":13}",
-        "{\"name\":\"frame_lateness_ns\",\"dtype\":\"i32\",\"offset\":17}",
-        "{\"name\":\"target_counts\",\"dtype\":\"i32\",\"offset\":21}",
-        "{\"name\":\"position_actual\",\"dtype\":\"i32\",\"offset\":25}",
-        "{\"name\":\"following_error\",\"dtype\":\"i32\",\"offset\":29}",
-        "{\"name\":\"torque_actual\",\"dtype\":\"i16\",\"offset\":33}",
-        "{\"name\":\"statusword\",\"dtype\":\"u16\",\"offset\":35}",
-        "{\"name\":\"error_code\",\"dtype\":\"u16\",\"offset\":37}",
-        "{\"name\":\"velocity_offset\",\"dtype\":\"i32\",\"offset\":39}",
-        "{\"name\":\"torque_offset\",\"dtype\":\"i16\",\"offset\":43}",
-        "{\"name\":\"velocity_actual\",\"dtype\":\"i32\",\"offset\":45}",
-        "{\"name\":\"accel_cmd\",\"dtype\":\"f32\",\"offset\":49}",
-        "{\"name\":\"vel_cmd\",\"dtype\":\"f32\",\"offset\":53}",
-        "{\"name\":\"pin_res_re\",\"dtype\":\"f32\",\"offset\":57}",
-        "{\"name\":\"pin_res_im\",\"dtype\":\"f32\",\"offset\":61}",
+        "{\"dtype\":\"u64\",\"name\":\"cycle_index\",\"offset\":0}",
+        "{\"dtype\":\"u8\",\"name\":\"flags\",\"offset\":8}",
+        "{\"dtype\":\"u32\",\"name\":\"skip_count\",\"offset\":9}",
+        "{\"dtype\":\"u32\",\"name\":\"late_frames\",\"offset\":13}",
+        "{\"dtype\":\"i32\",\"name\":\"frame_lateness_ns\",\"offset\":17}",
+        "{\"dtype\":\"i32\",\"name\":\"target_counts\",\"offset\":21}",
+        "{\"dtype\":\"i32\",\"name\":\"position_actual\",\"offset\":25}",
+        "{\"dtype\":\"i32\",\"name\":\"following_error\",\"offset\":29}",
+        "{\"dtype\":\"i16\",\"name\":\"torque_actual\",\"offset\":33}",
+        "{\"dtype\":\"u16\",\"name\":\"statusword\",\"offset\":35}",
+        "{\"dtype\":\"u16\",\"name\":\"error_code\",\"offset\":37}",
+        "{\"dtype\":\"i32\",\"name\":\"velocity_offset\",\"offset\":39}",
+        "{\"dtype\":\"i16\",\"name\":\"torque_offset\",\"offset\":43}",
+        "{\"dtype\":\"i32\",\"name\":\"velocity_actual\",\"offset\":45}",
+        "{\"dtype\":\"f32\",\"name\":\"accel_cmd\",\"offset\":49}",
+        "{\"dtype\":\"f32\",\"name\":\"vel_cmd\",\"offset\":53}",
+        "{\"dtype\":\"f32\",\"name\":\"pin_res_re\",\"offset\":57}",
+        "{\"dtype\":\"f32\",\"name\":\"pin_res_im\",\"offset\":61}",
     ] {
         assert!(h.contains(needle), "header missing {needle}: {h}");
     }
@@ -511,14 +511,6 @@ fn failed_validation_does_not_consume_the_spare_channel() {
     assert_eq!(c.stop().result, 0);
     let _ = std::fs::remove_file(&path);
 }
-/// Little-endian bytes of the zstd magic number 0xFD2FB528.
-const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
-
-/// The `.scap.zst` sibling of a `tmp_path` tag.
-fn tmp_zst_path(tag: &str) -> PathBuf {
-    tmp_path(tag).with_extension("scap.zst")
-}
-
 /// The exact byte stream today's raw writer would emit for `cfg` + `records`:
 /// the JSON header line followed by each fixed-layout record, back to back.
 fn expected_raw_bytes(cfg: &CaptureConfig, records: &[CaptureRecord]) -> Vec<u8> {
@@ -555,40 +547,17 @@ fn raw_scap_is_byte_identical_to_the_documented_writer_format() {
 }
 
 #[test]
-fn zst_scap_decodes_to_exactly_the_raw_writer_bytes() {
-    let records: Vec<CaptureRecord> = (0..50u64).map(record).collect();
-
-    let raw_path = tmp_path("zst-vs-raw");
-    let raw_bytes = capture_to(&raw_path, &records);
-
-    let zst_path = tmp_zst_path("zst-vs-raw");
-    let zbytes = capture_to(&zst_path, &records);
-
-    assert_eq!(
-        &zbytes[..4],
-        &ZSTD_MAGIC,
-        "compressed capture is a zstd frame"
-    );
-    let decoded = zstd::decode_all(&zbytes[..]).expect("valid zstd frame");
-    assert_eq!(
-        decoded, raw_bytes,
-        "zst stream decodes to the raw writer bytes"
-    );
-}
-
-#[test]
-fn failed_capture_on_zst_path_keeps_the_zst_name() {
-    let path = tmp_zst_path("zst-fail");
+fn overflowed_capture_is_renamed_out_of_the_live_name() {
+    let path = tmp_path("overflow-rename");
     let _ = std::fs::remove_file(&path);
     let failed = super::failed_capture_path(&path);
     let _ = std::fs::remove_file(&failed);
     assert_eq!(
         failed.file_name().unwrap().to_str().unwrap(),
         format!(
-            "kalico-capture-zst-fail-{}.failed.scap.zst",
+            "kalico-capture-overflow-rename-{}.failed.scap",
             std::process::id()
         ),
-        "renamed capture preserves the .scap.zst suffix"
     );
 
     let (gate_tx, gate_rx) = sync_channel::<()>(1);
@@ -601,18 +570,13 @@ fn failed_capture_on_zst_path_keeps_the_zst_name() {
     let out = cap.stop();
     assert_eq!(out.result, ERR_CAPTURE_OVERFLOW);
     assert!(!path.exists(), "failed capture must not keep the live name");
-    assert!(
-        failed.exists(),
-        "failed capture renamed with .zst preserved"
-    );
+    assert!(failed.exists(), "failed capture is renamed aside");
     std::fs::remove_file(&failed).unwrap();
 }
 
 #[test]
-fn encoder_error_surfaces_as_capture_file_error() {
-    // A read-only handle to the .zst target makes the encoder's underlying
-    // flush fail on finalize; the failure must map to the capture-file path.
-    let path = tmp_zst_path("zst-encerr");
+fn writer_error_surfaces_as_capture_file_error() {
+    let path = tmp_path("write-err");
     let _ = std::fs::remove_file(&path);
     File::create(&path).unwrap();
     let ro = File::open(&path).unwrap();
@@ -621,11 +585,8 @@ fn encoder_error_surfaces_as_capture_file_error() {
     tx.push(record(0)).unwrap();
     drop(tx);
 
-    let written = super::run_session(ro, &path, header_json(&cfg(&path)), WriterHook::None, rx);
-    assert!(
-        written.is_err(),
-        "encoder finalize on a read-only file must fail"
-    );
+    let written = super::run_session(ro, header_json(&cfg(&path)), WriterHook::None, rx);
+    assert!(written.is_err(), "writing to a read-only file must fail");
 
     let outcome = super::compose_outcome(&path, written, None);
     assert_eq!(outcome.result, ERR_CAPTURE_FILE);

@@ -1,5 +1,3 @@
-use crate::marker::MarkerKind;
-
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Params {
     words: [Option<f64>; 26],
@@ -41,26 +39,6 @@ impl Params {
     pub fn f(&self) -> Option<f64> {
         self.get(b'F')
     }
-    #[must_use]
-    pub fn i(&self) -> Option<f64> {
-        self.get(b'I')
-    }
-    #[must_use]
-    pub fn j(&self) -> Option<f64> {
-        self.get(b'J')
-    }
-    #[must_use]
-    pub fn r(&self) -> Option<f64> {
-        self.get(b'R')
-    }
-    #[must_use]
-    pub fn p(&self) -> Option<f64> {
-        self.get(b'P')
-    }
-    #[must_use]
-    pub fn q(&self) -> Option<f64> {
-        self.get(b'Q')
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -72,14 +50,6 @@ pub enum Token {
         major: u32,
         minor: Option<u32>,
         params: Params,
-        line_no: u32,
-    },
-    Comment {
-        text: Box<str>,
-        line_no: u32,
-    },
-    Marker {
-        kind: MarkerKind,
         line_no: u32,
     },
     Extended {

@@ -368,9 +368,12 @@ stats_update(uint32_t start, uint32_t cur)
     if (!timer_has_elapsed(stats_send_time, cur, timer_from_us(5000000)))
         return;
     sendf("stats count=%u sum=%u sumsq=%u", count, sum, sumsq);
+    // ISR readers widen off this pair; a torn epoch bump double-counts a wrap.
+    irqstatus_t flag = irq_save();
     if (cur < stats_send_time)
         stats_send_time_high++;
     stats_send_time = cur;
+    irq_restore(flag);
     count = sum = sumsq = 0;
 }
 

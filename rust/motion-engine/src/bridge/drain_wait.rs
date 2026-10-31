@@ -12,7 +12,7 @@ use std::time::Instant;
 /// already works ahead by — is the slack that covers that round trip plus the
 /// pump loop's publish; anything still unretired beyond it is the drain
 /// genuinely lagging.
-const OVERDUE_GRACE_SECS: f64 = crate::anchor::DEFAULT_LEAD_SECS;
+const OVERDUE_GRACE_SECS: f64 = motion_core::anchor::DEFAULT_LEAD_SECS;
 const REPORT_PERIOD_SECS: f64 = 5.0;
 
 pub(crate) struct DrainOverdue {

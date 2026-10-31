@@ -64,20 +64,3 @@ fn try_new_rejects_degenerate_knot_range() {
     let result = ScalarNurbs::try_new(1, vec![0.0, 0.0, 0.0, 0.0], vec![0.0, 1.0]);
     assert!(matches!(result, Err(ConstructError::DegenerateKnotRange)));
 }
-
-#[test]
-fn as_view_provides_borrowed_access() {
-    let owned = linear_curve();
-    let view = owned.as_view();
-    assert_eq!(view.degree(), 1);
-    assert_eq!(view.knots(), &[0.0, 0.0, 1.0, 1.0]);
-    assert_eq!(view.control_points(), &[0.0, 1.0]);
-}
-
-#[test]
-fn ref_try_new_accepts_valid_data() {
-    let knots = [0.0_f64, 0.0, 1.0, 1.0];
-    let cps = [0.0_f64, 1.0];
-    let r = ScalarNurbsRef::try_new(1, &knots, &cps).unwrap();
-    assert_eq!(r.degree(), 1);
-}

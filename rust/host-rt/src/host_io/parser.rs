@@ -471,43 +471,18 @@ pub fn encode_field_int(out: &mut Vec<u8>, ty: FieldType, value: i64) -> Result<
     }
 }
 
-pub fn encode_field_value<'a>(
+fn encode_byte_field(
     out: &mut Vec<u8>,
-    ty: FieldType,
-    value: &FieldValue<'a>,
+    bytes: &[u8],
+    range: &'static str,
 ) -> Result<(), ParseError> {
-    match (ty, value) {
-        (FieldType::U32, FieldValue::U32(v)) => encode_vlq(out, i64::from(*v)),
-        (FieldType::I32, FieldValue::I32(v)) => encode_vlq(out, i64::from(*v)),
-        (FieldType::U16, FieldValue::U16(v)) => encode_vlq(out, i64::from(*v)),
-        (FieldType::I16, FieldValue::I16(v)) => encode_vlq(out, i64::from(*v)),
-        (FieldType::Byte, FieldValue::Byte(v)) => encode_vlq(out, i64::from(*v)),
-        (FieldType::String, FieldValue::String(s)) => {
-            let bytes = s.as_bytes();
-            if bytes.len() > u8::MAX as usize {
-                return Err(ParseError::OutOfRange {
-                    value: bytes.len() as i64,
-                    range: "string len 0..=255",
-                });
-            }
-            out.push(bytes.len() as u8);
-            out.extend_from_slice(bytes);
-            Ok(())
-        }
-        (FieldType::Buffer, FieldValue::Buffer(b))
-        | (FieldType::ProgmemBuffer, FieldValue::Buffer(b)) => {
-            if b.len() > u8::MAX as usize {
-                return Err(ParseError::OutOfRange {
-                    value: b.len() as i64,
-                    range: "buffer len 0..=255",
-                });
-            }
-            out.push(b.len() as u8);
-            out.extend_from_slice(b);
-            Ok(())
-        }
-        _ => Err(ParseError::MalformedField),
-    }
+    let len = u8::try_from(bytes.len()).map_err(|_| ParseError::OutOfRange {
+        value: bytes.len() as i64,
+        range,
+    })?;
+    out.push(len);
+    out.extend_from_slice(bytes);
+    Ok(())
 }
 
 pub fn parse_hex_buffer(s: &str) -> Result<Vec<u8>, ParseError> {
@@ -534,7 +509,7 @@ pub fn encode_field_num(out: &mut Vec<u8>, ty: FieldType, v: i64) -> Result<(), 
     encode_vlq(out, v_for_vlq)
 }
 
-pub fn encode_field_str<'a>(
+pub fn encode_field_str(
     out: &mut Vec<u8>,
     wrapped: &WrappedField,
     value_str: &str,
@@ -546,29 +521,10 @@ pub fn encode_field_str<'a>(
                 let v: i64 = value_str.parse().map_err(|_| ParseError::MalformedField)?;
                 encode_field_num(out, *ty, v)
             }
-            FieldType::String => {
-                let bytes = value_str.as_bytes();
-                if bytes.len() > u8::MAX as usize {
-                    return Err(ParseError::OutOfRange {
-                        value: bytes.len() as i64,
-                        range: "string len 0..=255",
-                    });
-                }
-                out.push(bytes.len() as u8);
-                out.extend_from_slice(bytes);
-                Ok(())
-            }
+            FieldType::String => encode_byte_field(out, value_str.as_bytes(), "string len 0..=255"),
             FieldType::Buffer | FieldType::ProgmemBuffer => {
                 let bytes = parse_hex_buffer(value_str)?;
-                if bytes.len() > u8::MAX as usize {
-                    return Err(ParseError::OutOfRange {
-                        value: bytes.len() as i64,
-                        range: "buffer len 0..=255",
-                    });
-                }
-                out.push(bytes.len() as u8);
-                out.extend_from_slice(&bytes);
-                Ok(())
+                encode_byte_field(out, &bytes, "buffer len 0..=255")
             }
         },
         WrappedField::Enumerated { inner, enum_name } => {
@@ -584,34 +540,6 @@ pub fn encode_field_str<'a>(
                 })?;
             encode_field_int(out, *inner, i64::from(*int))
         }
-    }
-}
-
-pub fn encode_wrapped_field_typed<'a>(
-    out: &mut Vec<u8>,
-    wrapped: &WrappedField,
-    value: &FieldValue<'a>,
-    enums: &IndexMap<String, EnumTable>,
-) -> Result<(), ParseError> {
-    match wrapped {
-        WrappedField::Plain(ty) => encode_field_value(out, *ty, value),
-        WrappedField::Enumerated { inner, enum_name } => match value {
-            FieldValue::EnumName(name) => {
-                let table = enums
-                    .get(enum_name)
-                    .ok_or_else(|| ParseError::UnknownEnumName(enum_name.clone()))?;
-                let int = table
-                    .by_name
-                    .get(*name)
-                    .ok_or_else(|| ParseError::UnknownEnumValue {
-                        enum_name: enum_name.clone(),
-                        value: (*name).to_string(),
-                    })?;
-                encode_field_int(out, *inner, i64::from(*int))
-            }
-            FieldValue::EnumIntOverride(i) => encode_field_int(out, *inner, i64::from(*i)),
-            _ => Err(ParseError::MalformedField),
-        },
     }
 }
 
@@ -679,45 +607,27 @@ fn encode_wrapped_field_arg(
                 }
             }
             FieldType::String => match value {
-                ArgValue::Str(s) => {
-                    encode_field_value(out, FieldType::String, &FieldValue::String(s))
-                }
+                ArgValue::Str(s) => encode_byte_field(out, s.as_bytes(), "string len 0..=255"),
                 ArgValue::Int(v) => {
-                    encode_field_value(out, FieldType::String, &FieldValue::String(&v.to_string()))
+                    encode_byte_field(out, v.to_string().as_bytes(), "string len 0..=255")
                 }
                 ArgValue::Bytes(_) => Err(mismatch()),
             },
             FieldType::Buffer | FieldType::ProgmemBuffer => match value {
-                ArgValue::Bytes(b) => encode_field_value(out, *ty, &FieldValue::Buffer(b)),
+                ArgValue::Bytes(b) => encode_byte_field(out, b, "buffer len 0..=255"),
                 ArgValue::Str(s) => {
                     let b = parse_hex_buffer(s)?;
-                    encode_field_value(out, *ty, &FieldValue::Buffer(&b))
+                    encode_byte_field(out, &b, "buffer len 0..=255")
                 }
                 ArgValue::Int(_) => Err(mismatch()),
             },
         },
-        WrappedField::Enumerated { .. } => {
-            let name = match value {
-                ArgValue::Str(s) => s.clone(),
-                ArgValue::Int(v) => v.to_string(),
-                ArgValue::Bytes(_) => return Err(mismatch()),
-            };
-            encode_field_str(out, wrapped, &name, enums)
-        }
+        WrappedField::Enumerated { .. } => match value {
+            ArgValue::Str(s) => encode_field_str(out, wrapped, s, enums),
+            ArgValue::Int(v) => encode_field_str(out, wrapped, &v.to_string(), enums),
+            ArgValue::Bytes(_) => Err(mismatch()),
+        },
     }
-}
-
-#[derive(Debug, Clone)]
-pub enum FieldValue<'a> {
-    U32(u32),
-    I32(i32),
-    U16(u16),
-    I16(i16),
-    Byte(u8),
-    String(&'a str),
-    Buffer(&'a [u8]),
-    EnumName(&'a str),
-    EnumIntOverride(i32),
 }
 
 impl MsgProtoParser {
@@ -748,17 +658,17 @@ impl MsgProtoParser {
 
     /// Encode a command from caller-typed args, byte-identical to what
     /// `encode` produces for the equivalent rendered text command.
-    pub fn encode_args(
+    pub fn encode_args<K: AsRef<str>>(
         &self,
         name: &str,
-        args: &[(String, ArgValue)],
+        args: &[(K, ArgValue)],
     ) -> Result<Vec<u8>, ParseError> {
         let spec = self
             .by_command_name
             .get(name)
             .ok_or_else(|| ParseError::UnknownCommand(name.to_string()))?;
         let provided: HashMap<&str, &ArgValue> =
-            args.iter().map(|(k, v)| (k.as_str(), v)).collect();
+            args.iter().map(|(k, v)| (k.as_ref(), v)).collect();
 
         let mut payload = Vec::new();
         encode_vlq(&mut payload, i64::from(spec.msgid))?;
@@ -767,28 +677,6 @@ impl MsgProtoParser {
                 .get(field_name.as_str())
                 .ok_or_else(|| ParseError::MissingField(field_name.clone()))?;
             encode_wrapped_field_arg(&mut payload, field_name, wrapped, value, &self.enumerations)?;
-        }
-        Ok(payload)
-    }
-
-    pub fn encode_typed<'a>(
-        &self,
-        name: &str,
-        args: &[(&str, FieldValue<'a>)],
-    ) -> Result<Vec<u8>, ParseError> {
-        let spec = self
-            .by_command_name
-            .get(name)
-            .ok_or_else(|| ParseError::UnknownCommand(name.to_string()))?;
-        let provided: HashMap<&str, &FieldValue> = args.iter().map(|(k, v)| (*k, v)).collect();
-
-        let mut payload = Vec::new();
-        encode_vlq(&mut payload, i64::from(spec.msgid))?;
-        for (field_name, wrapped) in &spec.fields {
-            let value = provided
-                .get(field_name.as_str())
-                .ok_or_else(|| ParseError::MissingField(field_name.clone()))?;
-            encode_wrapped_field_typed(&mut payload, wrapped, value, &self.enumerations)?;
         }
         Ok(payload)
     }

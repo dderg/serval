@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use host_rt::passthrough_queue::{McuHandle, PassthroughRouter};
-use runtime::piece_ring::{MAX_PIECE_COEFFS, PieceEntry};
+use trajectory::{ClockedMotorSpan, ContinuousError, Pva};
 
 use crate::kinematics::{KinematicsKind, KinematicsModule};
 use crate::types::AxisKey;
@@ -10,16 +10,12 @@ pub const HISTORY_CAPACITY: usize = 4096;
 
 pub const AXIS_NAMES: [&str; 4] = ["x", "y", "z", "e"];
 
-/// Position-domain tolerance (mm) for treating a piece as a held rest: every
-/// Chebyshev coefficient above the constant term must fall within it.
-const REST_COEFF_EPS: f64 = 1e-6;
-
 #[derive(Debug, thiserror::Error)]
 pub enum HistoryError {
     #[error(
         "query host time {queried:.6}s precedes retained motion history for axis \
-         {key:?} (window {window_start:.6}..{window_end:.6}s, {ring_len} pieces \
-         retained, {evicted} evicted, first piece {first_dur_s:.6}s)"
+         {key:?} (window {window_start:.6}..{window_end:.6}s, {ring_len} spans \
+         retained, {evicted} evicted, first span {first_dur_s:.6}s)"
     )]
     BeforeRetainedWindow {
         key: AxisKey,
@@ -46,64 +42,94 @@ pub enum HistoryError {
 
     #[error("no motion history recorded for axis {0:?}")]
     NoHistoryForAxis(AxisKey),
+
+    #[error("continuous evaluation failed for axis {key:?}")]
+    Evaluation {
+        key: AxisKey,
+        #[source]
+        source: ContinuousError,
+    },
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct HistoryPiece {
-    pub start_host: f64,
-    pub start_clock: u64,
-    pub end_clock: u64,
-    pub duration_secs: f32,
-    pub coeff_count: u8,
-    pub coeffs: [f32; MAX_PIECE_COEFFS],
+#[derive(Debug, Clone)]
+pub struct HistorySpan {
+    pub span: ClockedMotorSpan,
+    start_position: f64,
+    end_position: f64,
 }
 
-impl HistoryPiece {
-    pub fn from_entry(entry: &PieceEntry, clock_freq_hz: f64, host_secs: f64) -> Self {
-        #[allow(clippy::cast_possible_truncation)]
-        let end_clock = entry.end_time(clock_freq_hz as f32);
-        Self {
-            start_host: host_secs,
-            start_clock: entry.start_time,
-            end_clock,
-            duration_secs: entry.duration,
-            coeff_count: entry.coeff_count,
-            coeffs: entry.coeffs,
-        }
+impl HistorySpan {
+    pub fn try_new(span: ClockedMotorSpan) -> Result<Self, ContinuousError> {
+        let start_position = span.signal.position(span.stream_t_start)?;
+        let end_position = span.signal.position(span.stream_t_end)?;
+        Ok(Self {
+            span,
+            start_position,
+            end_position,
+        })
+    }
+
+    fn start_host(&self) -> f64 {
+        self.span.start_host
     }
 
     fn end_host(&self) -> f64 {
-        self.start_host + f64::from(self.duration_secs)
+        self.span.end_host
     }
 
-    fn live_coeffs(&self) -> &[f32] {
-        let n = (self.coeff_count as usize).clamp(1, MAX_PIECE_COEFFS);
-        &self.coeffs[..n]
-    }
-
-    fn end_position(&self) -> f64 {
-        self.live_coeffs().iter().map(|&a| f64::from(a)).sum()
+    fn duration_secs(&self) -> f64 {
+        self.span.end_host - self.span.start_host
     }
 
     fn endpoint(&self) -> AxisEndpoint {
         AxisEndpoint {
             host: self.end_host(),
-            position: self.end_position(),
+            position: self.end_position,
         }
     }
+
     fn startpoint(&self) -> AxisEndpoint {
         AxisEndpoint {
-            host: self.start_host,
-            position: eval_chebyshev(self.live_coeffs(), -1.0),
+            host: self.start_host(),
+            position: self.start_position,
         }
     }
 
     fn is_rest_at(&self, position: f64) -> bool {
-        let coeffs = self.live_coeffs();
-        let constant = coeffs[1..]
-            .iter()
-            .all(|&c| f64::from(c).abs() <= REST_COEFF_EPS);
-        constant && (self.end_position() - position).abs() <= REST_COEFF_EPS
+        self.span.signal.is_explicit_hold
+            && self.start_position.to_bits() == self.end_position.to_bits()
+            && self.end_position.to_bits() == position.to_bits()
+    }
+
+    /// The host anchors carry the clock↔host estimate captured when the view
+    /// was dispatched; interpolating between them reproduces `eval_at_clock`'s
+    /// affine map with the host-domain skew that map had at send time.
+    fn stream_time_at_host(&self, host_t: f64) -> f64 {
+        let host_span = self.end_host() - self.start_host();
+        if host_span <= 0.0 {
+            return self.span.stream_t_start;
+        }
+        let fraction = ((host_t - self.start_host()) / host_span).clamp(0.0, 1.0);
+        self.span.stream_t_start + fraction * (self.span.stream_t_end - self.span.stream_t_start)
+    }
+
+    fn state_at_host(&self, host_t: f64) -> Result<AxisState, ContinuousError> {
+        self.span
+            .signal
+            .eval_pva(self.stream_time_at_host(host_t))
+            .map(axis_state)
+    }
+
+    fn state_at_clock(&self, clock: u64) -> Result<AxisState, ContinuousError> {
+        self.span.eval_at_clock(clock).map(axis_state)
+    }
+}
+
+fn axis_state(value: Pva) -> AxisState {
+    AxisState {
+        position: value.position,
+        velocity: value.velocity,
+        acceleration: value.acceleration,
     }
 }
 
@@ -180,13 +206,14 @@ impl AxisEndpoint {
     }
 }
 
-/// The rest an axis provably held before a restarted ring: pieces are the only
-/// way an axis moves, so the span `[from, until]` answers with the endpoint
-/// position. `from` is the start of the trailing run of rest pieces preceding
-/// the drop — not the last piece's scheduled end — so a dwell that straddled
-/// the re-anchor stays answerable; anything earlier was real motion and must
-/// fail. Kept separate from the ring because capacity eviction moves the ring's
-/// front past `until`, and queries in that evicted gap must still fail.
+/// The rest an axis provably held before a restarted ring: spans are the only
+/// way an axis moves, so the interval `[from, until]` answers with the endpoint
+/// position. `from` is the start of the trailing run of explicit-hold spans
+/// preceding the drop — not the last span's scheduled end — so a dwell that
+/// straddled the re-anchor stays answerable; anything earlier was real motion
+/// and must fail. Kept separate from the ring because capacity eviction moves
+/// the ring's front past `until`, and queries in that evicted gap must still
+/// fail.
 #[derive(Debug, Clone, Copy)]
 struct HoldBeforeRing {
     endpoint: AxisEndpoint,
@@ -194,100 +221,20 @@ struct HoldBeforeRing {
     until: f64,
 }
 
-/// f64 Clenshaw over the Chebyshev series at `cu ∈ [−1, 1]`.
-#[inline]
-fn clenshaw_f64<I: DoubleEndedIterator<Item = f64>>(coeffs: I, cu: f64) -> f64 {
-    let mut coeffs = coeffs;
-    let Some(a0) = coeffs.next() else {
-        return 0.0;
-    };
-    let mut b1 = 0.0_f64;
-    let mut b2 = 0.0_f64;
-    for ak in coeffs.rev() {
-        let b0 = ak + 2.0 * cu * b1 - b2;
-        b2 = b1;
-        b1 = b0;
-    }
-    a0 + cu * b1 - b2
-}
-
-#[inline]
-pub fn eval_chebyshev(coeffs: &[f32], cu: f64) -> f64 {
-    clenshaw_f64(coeffs.iter().map(|&c| f64::from(c)), cu)
-}
-
-fn chebyshev_derivative(a: &[f64]) -> Vec<f64> {
-    let n = a.len();
-    if n <= 1 {
-        return vec![0.0];
-    }
-    let mut d = vec![0.0; n - 1];
-    d[n - 2] = 2.0 * (n - 1) as f64 * a[n - 1];
-    for j in (0..n.saturating_sub(2)).rev() {
-        let d_j2 = d.get(j + 2).copied().unwrap_or(0.0);
-        d[j] = d_j2 + 2.0 * (j + 1) as f64 * a[j + 1];
-    }
-    d[0] *= 0.5;
-    d
-}
-
-fn eval_at_u(piece: &HistoryPiece, u: f64) -> AxisState {
-    let cu = 2.0 * u - 1.0;
-    let a: Vec<f64> = piece.live_coeffs().iter().map(|&c| f64::from(c)).collect();
-    let t = f64::from(piece.duration_secs);
-    let position = eval_chebyshev(piece.live_coeffs(), cu);
-    let (velocity, acceleration) = if t > 0.0 {
-        let du_dt = 2.0 / t;
-        let dv = chebyshev_derivative(&a);
-        let da = chebyshev_derivative(&dv);
-        (
-            clenshaw_f64(dv.iter().copied(), cu) * du_dt,
-            clenshaw_f64(da.iter().copied(), cu) * du_dt * du_dt,
-        )
-    } else {
-        (0.0, 0.0)
-    };
-    AxisState {
-        position,
-        velocity,
-        acceleration,
-    }
-}
-
-fn eval_state(piece: &HistoryPiece, host_t: f64) -> AxisState {
-    let span = f64::from(piece.duration_secs);
-    let u = if span > 0.0 {
-        ((host_t - piece.start_host) / span).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    eval_at_u(piece, u)
-}
-
-fn eval_state_at_clock(piece: &HistoryPiece, clock: u64) -> AxisState {
-    let span = piece.end_clock.saturating_sub(piece.start_clock);
-    let u = if span > 0 {
-        (clock.saturating_sub(piece.start_clock) as f64 / span as f64).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    eval_at_u(piece, u)
-}
-
-fn trailing_rest_start(ring: &VecDeque<HistoryPiece>, endpoint: AxisEndpoint) -> f64 {
+fn trailing_rest_start(ring: &VecDeque<HistorySpan>, endpoint: AxisEndpoint) -> f64 {
     let mut start = endpoint.host;
-    for piece in ring.iter().rev() {
-        if !piece.is_rest_at(endpoint.position) {
+    for span in ring.iter().rev() {
+        if !span.is_rest_at(endpoint.position) {
             break;
         }
-        start = piece.start_host;
+        start = span.start_host();
     }
     start
 }
 
 #[derive(Debug, Default)]
 pub struct HistoryStore {
-    rings: HashMap<AxisKey, VecDeque<HistoryPiece>>,
+    rings: HashMap<AxisKey, VecDeque<HistorySpan>>,
     endpoints: HashMap<AxisKey, AxisEndpoint>,
     evicted: HashMap<AxisKey, u64>,
     holds_before_ring: HashMap<AxisKey, HoldBeforeRing>,
@@ -303,53 +250,49 @@ impl HistoryStore {
             .find(|boundary| boundary.host <= host_t)
             .copied()
     }
-    pub fn record(&mut self, key: AxisKey, entry: &PieceEntry, clock_freq_hz: f64, host_secs: f64) {
-        if !host_secs.is_finite() {
-            tracing::error!(
-                subsystem = "motion",
-                event = "history_non_finite_host",
-                mcu = key.mcu_id,
-                axis = key.axis,
-                start_clock = entry.start_time,
-                "[history] non-finite host time for piece — skipping record"
-            );
-            return;
-        }
-        let piece = HistoryPiece::from_entry(entry, clock_freq_hz, host_secs);
+    /// Records one absolute main-trajectory view at the moment its endpoint
+    /// takes ownership. Base-relative nudge and buzz overlays are never
+    /// recorded: logical lane history stays in absolute coordinates.
+    pub fn record(&mut self, key: AxisKey, span: ClockedMotorSpan) -> Result<(), HistoryError> {
+        let clock_freq_hz = span.clock_freq_hz;
+        let recorded = HistorySpan::try_new(span)
+            .map_err(|source| HistoryError::Evaluation { key, source })?;
+        let start_host = recorded.start_host();
+        let start_clock = recorded.span.start_clock;
         let ring = self.rings.entry(key).or_default();
         if ring.is_empty() {
             if let Some(hold) = self.holds_before_ring.get_mut(&key) {
-                if piece.start_host < hold.endpoint.host {
+                if start_host < hold.endpoint.host {
                     tracing::warn!(
                         subsystem = "motion",
                         event = "history_hold_rewound",
                         mcu = key.mcu_id,
                         axis = key.axis,
-                        start_host = piece.start_host,
+                        start_host,
                         endpoint_host = hold.endpoint.host,
-                        "[history] first piece after re-anchor precedes the held endpoint — clamping hold coverage"
+                        "[history] first span after re-anchor precedes the held endpoint — clamping hold coverage"
                     );
                 }
-                hold.until = piece.start_host;
+                hold.until = start_host;
             } else if let Some(endpoint) = self.endpoints.get(&key).copied() {
-                if endpoint.host <= piece.start_host {
+                if endpoint.host <= start_host {
                     self.holds_before_ring.insert(
                         key,
                         HoldBeforeRing {
                             endpoint,
                             from: endpoint.host,
-                            until: piece.start_host,
+                            until: start_host,
                         },
                     );
                 }
             }
         }
-        let prev = ring.back().map(|p| (p.start_clock, p.start_host));
+        let prev = ring.back().map(|s| (s.span.start_clock, s.start_host()));
         if let Some((last_clock, last_host)) = prev {
-            if piece.start_clock < last_clock {
-                let regress_ticks = last_clock - piece.start_clock;
+            if start_clock < last_clock {
+                let regress_ticks = last_clock - start_clock;
                 let regress_us = regress_ticks as f64 * 1.0e6 / clock_freq_hz;
-                let host_delta_us = (piece.start_host - last_host) * 1.0e6;
+                let host_delta_us = (start_host - last_host) * 1.0e6;
                 tracing::warn!(
                     subsystem = "motion",
                     event = "history_order_jitter",
@@ -361,17 +304,17 @@ impl HistoryStore {
                     "[history-jitter] projected MCU tick regressed; host schedule time delta"
                 );
             }
-            if piece.start_host < last_host {
+            if start_host < last_host {
                 tracing::warn!(
                     subsystem = "motion",
                     event = "history_host_out_of_order",
                     mcu = key.mcu_id,
                     axis = key.axis,
-                    start_host = piece.start_host,
+                    start_host,
                     last_start_host = last_host,
-                    "[history] host schedule time regressed vs previous piece — superseding stale tail"
+                    "[history] host schedule time regressed vs previous span — superseding stale tail"
                 );
-                while ring.back().is_some_and(|p| p.start_host > piece.start_host) {
+                while ring.back().is_some_and(|s| s.start_host() > start_host) {
                     ring.pop_back();
                 }
             }
@@ -380,8 +323,9 @@ impl HistoryStore {
             ring.pop_front();
             *self.evicted.entry(key).or_default() += 1;
         }
-        self.endpoints.insert(key, piece.endpoint());
-        ring.push_back(piece);
+        self.endpoints.insert(key, recorded.endpoint());
+        ring.push_back(recorded);
+        Ok(())
     }
 
     /// Endpoints are kept, so an axis the re-anchored segment does not re-record
@@ -394,7 +338,7 @@ impl HistoryStore {
             subsystem = "motion",
             event = "history_drop_on_reanchor",
             dropped,
-            "[history] stream re-anchored — dropped retained pieces, endpoints held"
+            "[history] stream re-anchored — dropped retained spans, endpoints held"
         );
         for (key, ring) in self.rings.iter_mut() {
             if ring.is_empty() {
@@ -427,7 +371,7 @@ impl HistoryStore {
         self.rings
             .entry(key)
             .or_default()
-            .retain(|piece| piece.start_host < host);
+            .retain(|recorded| recorded.start_host() < host);
         let boundary = AxisEndpoint { host, position };
         let boundaries = self.rebase_boundaries.entry(key).or_default();
         while boundaries.back().is_some_and(|prior| prior.host >= host) {
@@ -451,7 +395,7 @@ impl HistoryStore {
     /// True only when nothing recorded for `key` precedes `clock` (axis MCU
     /// clock domain — host projections drift and cannot gate this): no
     /// eviction, no pre-ring hold (both imply older motion existed), and
-    /// `clock` lies before the ring's first piece — or the axis was never
+    /// `clock` lies before the ring's first span — or the axis was never
     /// recorded at all.
     pub fn predates_all_recorded_motion(&self, key: AxisKey, clock: u64) -> bool {
         if self.evicted.get(&key).copied().unwrap_or(0) != 0 {
@@ -465,7 +409,7 @@ impl HistoryStore {
             .get(&key)
             .and_then(std::collections::VecDeque::front)
         {
-            Some(front) => clock < front.start_clock,
+            Some(front) => clock < front.span.start_clock,
             None => !self.endpoints.contains_key(&key),
         }
     }
@@ -478,18 +422,17 @@ impl HistoryStore {
         self.rings
             .get(&key)?
             .front()
-            .map(|piece| piece.startpoint().hold_state())
+            .map(|recorded| recorded.startpoint().hold_state())
     }
 
-    /// Axis state at an MCU clock reading from the same MCU the pieces were
-    /// sent to. Pieces execute at exactly their wire start clock, so
-    /// evaluating by clock is exact where `state_at_host` goes through the
-    /// clock↔host mapping twice (once keying the piece at send, once
-    /// converting the query) and inherits the sync estimate's jitter between
-    /// those two moments — an error that scales with axis velocity and, in
-    /// the simulator, with `VTIME_SPEED`. `host_t` is the clock's host-time
-    /// projection, used only for the hold fallbacks, where the position is
-    /// constant and mapping jitter cannot bias it.
+    /// Axis state at an MCU clock reading from the same MCU the spans were
+    /// sent to. A view's exact fractional clock anchor inverts straight back
+    /// to stream time, where `state_at_host` interpolates the two host
+    /// anchors captured at send and inherits the sync estimate's jitter
+    /// between those two moments — an error that scales with axis velocity
+    /// and, in the simulator, with `VTIME_SPEED`. `host_t` is the clock's
+    /// host-time projection, used only for the hold fallbacks, where the
+    /// position is constant and mapping jitter cannot bias it.
     pub fn state_at_clock(
         &self,
         key: AxisKey,
@@ -504,17 +447,19 @@ impl HistoryStore {
         // projections and may regress a few ticks across re-syncs
         // (`history_order_jitter`), which would break a sorted-ring
         // precondition. Trip queries are rare, so O(len) is fine.
-        let piece = ring.iter().rev().find(|p| p.start_clock <= clock);
+        let found = ring.iter().rev().find(|s| s.span.start_clock <= clock);
         if let Some(boundary) = self.rebase_boundary_at(key, host_t) {
-            if piece.is_none_or(|piece| boundary.host > piece.start_host) {
+            if found.is_none_or(|recorded| boundary.host > recorded.start_host()) {
                 return Ok(boundary.hold_state());
             }
         }
-        let Some(piece) = piece else {
+        let Some(recorded) = found else {
             return self.state_at_host(key, host_t, now_host);
         };
-        if clock < piece.end_clock {
-            return Ok(eval_state_at_clock(piece, clock));
+        if clock < recorded.span.end_clock {
+            return recorded
+                .state_at_clock(clock)
+                .map_err(|source| HistoryError::Evaluation { key, source });
         }
         if let Some(now_host) = now_host {
             if host_t > now_host {
@@ -525,7 +470,7 @@ impl HistoryStore {
                 });
             }
         }
-        Ok(piece.endpoint().hold_state())
+        Ok(recorded.endpoint().hold_state())
     }
 
     pub fn state_at_host(
@@ -544,9 +489,9 @@ impl HistoryStore {
         let ring = self.rings.get(&key).filter(|r| !r.is_empty());
         let hold = match ring {
             Some(ring) => {
-                let idx = ring.partition_point(|p| p.start_host <= host_t);
+                let idx = ring.partition_point(|s| s.start_host() <= host_t);
                 if let Some(boundary) = boundary {
-                    if idx == 0 || boundary.host > ring[idx - 1].start_host {
+                    if idx == 0 || boundary.host > ring[idx - 1].start_host() {
                         return Ok(boundary.hold_state());
                     }
                 }
@@ -561,18 +506,20 @@ impl HistoryStore {
                     return Err(HistoryError::BeforeRetainedWindow {
                         key,
                         queried: host_t,
-                        window_start: ring.front().map_or(0.0, |p| p.start_host),
-                        window_end: ring.back().map_or(0.0, |p| p.end_host()),
+                        window_start: ring.front().map_or(0.0, HistorySpan::start_host),
+                        window_end: ring.back().map_or(0.0, HistorySpan::end_host),
                         ring_len: ring.len(),
                         evicted: self.evicted.get(&key).copied().unwrap_or(0),
-                        first_dur_s: ring.front().map_or(0.0, |p| f64::from(p.duration_secs)),
+                        first_dur_s: ring.front().map_or(0.0, HistorySpan::duration_secs),
                     });
                 }
-                let piece = &ring[idx - 1];
-                if host_t < piece.end_host() {
-                    return Ok(eval_state(piece, host_t));
+                let recorded = &ring[idx - 1];
+                if host_t < recorded.end_host() {
+                    return recorded
+                        .state_at_host(host_t)
+                        .map_err(|source| HistoryError::Evaluation { key, source });
                 }
-                piece.endpoint()
+                recorded.endpoint()
             }
             None => {
                 if let Some(boundary) = boundary {
@@ -639,4 +586,4 @@ pub(crate) fn clock_between_mcus(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

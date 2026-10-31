@@ -8,20 +8,14 @@ HomingInfo = collections.namedtuple(
         "retract_speed",
         "retract_dist",
         "positive_dir",
-        "second_homing_speed",
-        "use_sensorless_homing",
         "min_home_dist",
-        "accel",
     ],
 )
 
 
 class BaseRail:
     def __init__(self):
-        self.second_homing_speed = 0.0
-        self.use_sensorless_homing = False
         self.min_home_dist = 0.0
-        self.homing_accel = None
 
     def _parse_position_range(self, config):
         self.position_min = config.getfloat("position_min", 0.0)
@@ -50,24 +44,11 @@ class BaseRail:
                 "position_endstop in section '%s' must be between"
                 " position_min and position_max" % config.get_name()
             )
-        self.use_sensorless_homing = config.getboolean(
-            "use_sensorless_homing", endstop_is_virtual
-        )
-
         self._parse_homing_speeds(config)
 
-        default_second_homing_speed = self.homing_speed / 2.0
-        if self.use_sensorless_homing:
-            default_second_homing_speed = self.homing_speed
-
-        self.second_homing_speed = config.getfloat(
-            "second_homing_speed", default_second_homing_speed, above=0.0
-        )
         self.homing_positive_dir = config.getboolean(
             "homing_positive_dir", None
         )
-
-        self.homing_accel = config.getfloat("homing_accel", None, above=0.0)
 
         if self.homing_positive_dir is None:
             axis_len = self.position_max - self.position_min
@@ -106,8 +87,5 @@ class BaseRail:
             retract_speed=self.homing_retract_speed,
             retract_dist=self.homing_retract_dist,
             positive_dir=self.homing_positive_dir,
-            second_homing_speed=self.second_homing_speed,
-            use_sensorless_homing=self.use_sensorless_homing,
             min_home_dist=self.min_home_dist,
-            accel=self.homing_accel,
         )

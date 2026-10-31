@@ -22,6 +22,7 @@ from tmc_wire_harness import (
     FakeGcode,
     FakeMCU,
     FakeMcuTmc,
+    FakeMotionEngine,
     FakePins,
     FakePrinter,
     FakeStepperEnable,
@@ -54,6 +55,8 @@ class Rig:
         self.printer.add_object(
             "stepper_enable", FakeStepperEnable(FakeEnableLine())
         )
+        self.engine = FakeMotionEngine(self.wire)
+        self.printer.add_object("motion_engine", self.engine)
         self.sections = {}
         self.mcu_tmcs = []
 
@@ -105,12 +108,18 @@ def test_enter_sequence_chopconf_before_direct_mode_checks_stopped_last(rig):
         ("read", "MSCNT"),
         ("write", "XTARGET"),
         ("query", "kalico_get_phase_state"),
+        ("cmd", "kalico_set_axis_mode"),
+        ("query", "kalico_get_phase_state"),
         ("cmd", "kalico_phase_align_to"),
         ("cmd", "kalico_phase_stepping_enable_spi"),
-        ("cmd", "kalico_set_axis_mode"),
+        ("transport", "switch_axis_transport"),
         ("timer-", "_do_periodic_check"),
     ]
     assert tmc_obj.phase_stepping_active()
+    assert rig.engine.switches == [(0, 0, 1)], (
+        "the mcu executes in phase mode before the host adopts the phase "
+        "transport - an anchored lane with a Pulse mode byte is a fault"
+    )
 
 
 def test_enter_sets_direct_mode_and_forces_spreadcycle(rig):
@@ -158,6 +167,7 @@ def test_exit_jogs_back_to_cached_mscnt_then_flips_mode_then_restarts_checks(
     tmc_obj.exit_phase_mode()
     assert ops(rig.wire) == [
         ("query", "kalico_get_phase_state"),
+        ("transport", "switch_axis_transport"),
         ("cmd", "kalico_phase_jog_to"),
         ("query", "kalico_get_phase_state"),
         ("cmd", "kalico_phase_stepping_disable_spi"),
@@ -175,6 +185,10 @@ def test_exit_jogs_back_to_cached_mscnt_then_flips_mode_then_restarts_checks(
         "direct_mode cleared"
     )
     assert not tmc_obj.phase_stepping_active()
+    assert rig.engine.switches[-1] == (0, 0, 0), (
+        "the host drains the sample stream and adopts the pulse transport "
+        "before the mcu stops executing phase mode"
+    )
 
 
 def test_exit_polls_until_the_jog_settles(rig):
@@ -183,6 +197,7 @@ def test_exit_polls_until_the_jog_settles(rig):
         "kalico_get_phase_state",
         [
             phase_state(phase=300),  # consumed by enter (axis_idx lookup)
+            phase_state(phase=300),  # consumed by enter (mode confirm)
             phase_state(phase=300),  # exit mode check
             phase_state(phase=120, settled=0),
             phase_state(phase=280, settled=0),

@@ -43,6 +43,7 @@ def sim_world(request, tmp_path):
         expect_boot_error: str = None,
         spawn_mcus: bool = True,
         ready_timeout: float = 120.0,
+        vtime_speed: float = 1.0,
     ) -> SimWorld:
         world = SimWorld(
             tmp_path / f"world{len(worlds)}",
@@ -50,6 +51,7 @@ def sim_world(request, tmp_path):
             sc_mcu=sc_mcu,
             beacon=beacon,
             cartographer=cartographer,
+            vtime_speed=vtime_speed,
         )
         worlds.append(world)
         world.boot(

@@ -21,11 +21,16 @@ class FakeToolhead(FakeToolheadBase):
             position=[150.0, 150.0, 30.0, 0.0], max_axis_accel=max_accel
         )
         self.wait_moves_called = 0
+        self.flush_step_generation_called = 0
         self.set_position_calls = []
 
     def wait_moves(self):
         super().wait_moves()
         self.wait_moves_called += 1
+
+    def flush_step_generation(self):
+        super().flush_step_generation()
+        self.flush_step_generation_called += 1
 
     def set_position(self, newpos, homing_axes=()):
         super().set_position(newpos, homing_axes)
@@ -98,10 +103,11 @@ def test_z_tilt_adjust_steppers_rebases_z_by_negative_reference():
     assert toolhead.set_position_calls == [[150.0, 150.0, 37.80, 0.0]]
 
 
-def test_z_tilt_adjust_steppers_wait_moves_called_once():
+def test_z_tilt_adjust_steppers_drains_to_mcu_execution_once():
     helper, fm, toolhead = make_z_tilt_helper(z_names=["z", "z1", "z2"])
     helper.adjust_steppers([5.0, 5.001, 5.002], speed=10.0)
-    assert toolhead.wait_moves_called == 1
+    assert toolhead.flush_step_generation_called == 1
+    assert toolhead.wait_moves_called == 0
 
 
 def test_z_tilt_ng_adjust_steppers_calls_force_move_per_nonzero_delta():
@@ -128,7 +134,8 @@ def test_z_tilt_ng_adjust_steppers_rebases_z_by_negative_reference():
     assert toolhead.set_position_calls == [[150.0, 150.0, 37.80, 0.0]]
 
 
-def test_z_tilt_ng_adjust_steppers_wait_moves_called_once():
+def test_z_tilt_ng_adjust_steppers_drains_to_mcu_execution_once():
     helper, fm, toolhead = make_z_tilt_ng_helper(z_names=["z", "z1", "z2"])
     helper.adjust_steppers([5.0, 5.001, 5.002], speed=10.0)
-    assert toolhead.wait_moves_called == 1
+    assert toolhead.flush_step_generation_called == 1
+    assert toolhead.wait_moves_called == 0

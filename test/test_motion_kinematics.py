@@ -155,7 +155,6 @@ def make_kin(sections):
 def test_corexy_section_parses_roles_and_motors():
     kin = make_kin(corexy_sections())
     assert kin.kind == "corexy"
-    assert kin.claimed_axes() == ["x", "y", "z"]
     assert kin.lanes()[0] == (0, "x", ["a"])
     assert kin.lanes()[1] == (1, "y", ["b"])
     assert kin.lanes()[2] == (2, "z", ["z0", "z1"])
@@ -166,7 +165,6 @@ def test_corexy_section_parses_roles_and_motors():
 def test_cartesian_uses_xyz_motor_roles():
     kin = make_kin(cartesian_sections())
     assert kin.kind == "cartesian"
-    assert kin.claimed_axes() == ["x", "y", "z"]
     assert kin.lanes()[0] == (0, "x", ["x"])
     assert kin.lanes()[1] == (1, "y", ["y"])
     assert kin.lanes()[2] == (2, "z", ["z"])

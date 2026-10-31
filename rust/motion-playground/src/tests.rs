@@ -4,7 +4,7 @@ const CONFIG: &str = r#"{
     "max_velocity": 300,
     "max_accel": 3000,
     "square_corner_velocity": 5,
-    "max_jerk": 100000
+    "max_jerk": 0
 }"#;
 
 fn zigzag_gcode() -> String {
@@ -39,13 +39,10 @@ fn partials_are_schema_complete_snapshots() {
     for partial in &partials {
         let snap: serde_json::Value = serde_json::from_str(partial).unwrap();
         for key in [
+            "schema_version",
             "raw_x",
             "raw_y",
-            "traj_x_pieces",
-            "traj_y_pieces",
-            "traj_z_pieces",
-            "traj_e_pieces",
-            "traj_t_end",
+            "trajectory",
             "traversal_time_s",
             "seam_max_dp",
             "seam_max_dv",
@@ -54,11 +51,21 @@ fn partials_are_schema_complete_snapshots() {
         ] {
             assert!(snap.get(key).is_some(), "partial missing {key}");
         }
+        assert_eq!(
+            snap["schema_version"],
+            pipeline_snapshot::SNAPSHOT_SCHEMA_VERSION
+        );
+        for key in ["spans", "curves", "axes", "t_end"] {
+            assert!(
+                snap["trajectory"].get(key).is_some(),
+                "partial trajectory missing {key}"
+            );
+        }
         assert_eq!(snap["raw_x"], final_snap["raw_x"]);
-        let partial_pieces = snap["traj_x_pieces"].as_array().unwrap();
-        let final_pieces = final_snap["traj_x_pieces"].as_array().unwrap();
-        assert!(partial_pieces.len() <= final_pieces.len());
-        assert_eq!(partial_pieces[..], final_pieces[..partial_pieces.len()]);
+        let partial_rows = snap["trajectory"]["axes"][0].as_array().unwrap();
+        let final_rows = final_snap["trajectory"]["axes"][0].as_array().unwrap();
+        assert!(partial_rows.len() <= final_rows.len());
+        assert_eq!(partial_rows[..], final_rows[..partial_rows.len()]);
     }
 }
 
@@ -74,7 +81,7 @@ fn corner_deviation_replaces_scv_with_identical_output() {
         "max_velocity": 300,
         "max_accel": 3000,
         "corner_deviation": {budget},
-        "max_jerk": 100000
+        "max_jerk": 0
     }}"#
     );
     assert_eq!(
@@ -90,7 +97,7 @@ fn scv_and_corner_deviation_together_are_rejected() {
         "max_accel": 3000,
         "square_corner_velocity": 5,
         "corner_deviation": 0.01,
-        "max_jerk": 100000
+        "max_jerk": 0
     }"#;
     let err = plan_json("G90\nG1 X10 F6000\n", config).unwrap_err();
     assert!(err.contains("set exactly one"), "got: {err}");
@@ -101,7 +108,7 @@ fn missing_corner_budget_is_rejected() {
     let config = r#"{
         "max_velocity": 300,
         "max_accel": 3000,
-        "max_jerk": 100000
+        "max_jerk": 0
     }"#;
     let err = plan_json("G90\nG1 X10 F6000\n", config).unwrap_err();
     assert!(

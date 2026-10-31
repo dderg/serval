@@ -89,7 +89,6 @@ pythonpath = [".", "klippy", "scripts"]
 # directories, so unrelated helper scripts are not swept into this job.
 testpaths = [
   "test",
-  "tests",
   "snapshots/test_harness.py",
 ]
 markers = [

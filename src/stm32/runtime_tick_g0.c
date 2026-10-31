@@ -136,33 +136,4 @@ MOTION_TIM_IRQHandler(void)
 // (TIM7_LPTIM2_IRQHandler etc.) — the actual vector the chosen basic timer raises.
 DECL_ARMCM_IRQ(MOTION_TIM_IRQHandler, MOTION_TIM_IRQn);
 
-// Step-output timer NOT implemented on G0: the motion timer is a basic timer
-// (TIM6/TIM7, no output channels so hard_pwm can't steal it), which has no
-// compare channel for the F4/H7 CC1 one-shot pattern; step emission is deferred.
-// The trio is referenced unconditionally from kalico_kick_step_output() (every
-// arch), so it must link — these are no-ops. is_running() returns 0 so the kick
-// treats every call as a first-arm. used,externally_visible: Rust-only callers.
-static uint32_t step_out_target_g0;
-
-__attribute__((used, externally_visible))
-void
-step_output_timer_arm(uint32_t cycle_abs)
-{
-    step_out_target_g0 = cycle_abs;
-}
-
-__attribute__((used, externally_visible))
-uint32_t
-step_output_timer_armed_target(void)
-{
-    return step_out_target_g0;
-}
-
-__attribute__((used, externally_visible))
-uint8_t
-step_output_timer_is_running(void)
-{
-    return 0;
-}
-
 #endif

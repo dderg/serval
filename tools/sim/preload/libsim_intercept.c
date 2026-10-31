@@ -81,7 +81,7 @@ static pthread_mutex_t iio_state_mtx = PTHREAD_MUTEX_INITIALIZER;
 // that crossing was ordinary motion (e.g. a pre-homing z-hop), not an
 // endstop hit — the latch is released and re-arms once the position
 // returns inside the window.
-#define MAX_AUTO_ENDSTOPS 8
+#define MAX_AUTO_ENDSTOPS 64
 #define AUTO_ENDSTOP_OVERRUN_SLOP_FACTOR 4
 struct auto_endstop {
     int active;
@@ -99,15 +99,122 @@ struct auto_endstop {
     unsigned long long sum_step_cycles;
     unsigned long long sum_index_cycles;
     long min_pos, max_pos;
-    int dir_chip, dir_line;
+    int dir_chip, dir_line, dir_invert;
+    int both_edge;
+    int configured;
 };
 static struct auto_endstop auto_endstops[MAX_AUTO_ENDSTOPS];
 static pthread_mutex_t auto_endstop_mtx = PTHREAD_MUTEX_INITIALIZER;
-// Classic-stepping (CONFIG_CLASSIC_STEPPING) firmware pulses the real step
-// GPIO instead of notifying the tick hook, so step tracking has to come off
-// the ioctl path. Opt-in per process: piece-mode builds write dir pins that
-// collide with the tracked step lines.
+// Step/dir firmware pulses the real step GPIO instead of notifying the tick
+// hook, so step tracking has to come off the ioctl path. Opt-in per process:
+// builds that drive dir pins from the runtime write lines that collide with
+// the tracked step lines.
 static int gpio_step_tracking;
+
+static void add_configured_step_track(int step_chip, int step_line,
+                                      int dir_chip, int dir_line,
+                                      int dir_invert,
+                                      int endstop_chip, int endstop_line,
+                                      int both_edge) {
+    if (step_chip < 0 || step_chip >= MAX_GPIO_CHIPS
+        || dir_chip < 0 || dir_chip >= MAX_GPIO_CHIPS
+        || endstop_chip < 0 || endstop_chip >= MAX_GPIO_CHIPS
+        || step_line < 0 || step_line >= MAX_GPIO_LINES
+        || dir_line < 0 || dir_line >= MAX_GPIO_LINES
+        || endstop_line < 0 || endstop_line >= MAX_GPIO_LINES) {
+        fprintf(stderr, "invalid MCU_SIM_STEP_TRACKS GPIO\n");
+        _exit(2);
+    }
+    for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
+        struct auto_endstop *ae = &auto_endstops[i];
+        if (ae->active && ae->step_chip == step_chip
+            && ae->step_line == step_line
+            && ae->endstop_chip == endstop_chip
+            && ae->endstop_line == endstop_line) {
+            ae->dir_chip = dir_chip;
+            ae->dir_line = dir_line;
+            ae->dir_invert = dir_invert;
+            ae->both_edge = both_edge;
+            ae->configured = 1;
+            return;
+        }
+    }
+    for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
+        struct auto_endstop *ae = &auto_endstops[i];
+        if (ae->active) continue;
+        *ae = (struct auto_endstop){
+            .active = 1,
+            .step_chip = step_chip,
+            .step_line = step_line,
+            .endstop_chip = endstop_chip,
+            .endstop_line = endstop_line,
+            .wall_steps = endstop_line == 210 ? 1000000000L : 50,
+            .latch_armed = 1,
+            .dir_chip = dir_chip,
+            .dir_line = dir_line,
+            .dir_invert = dir_invert,
+            .both_edge = both_edge,
+            .configured = 1,
+        };
+        return;
+    }
+    fprintf(stderr, "too many MCU_SIM_STEP_TRACKS entries\n");
+    _exit(2);
+}
+
+static void load_configured_step_tracks(void) {
+    const char *tracks = getenv("MCU_SIM_STEP_TRACKS");
+    if (!tracks || !tracks[0]) return;
+    char *copy = strdup(tracks);
+    if (!copy) _exit(2);
+    char *saveptr = NULL;
+    for (char *entry = strtok_r(copy, ";", &saveptr); entry;
+         entry = strtok_r(NULL, ";", &saveptr)) {
+        int values[8];
+        int consumed = 0;
+        int parsed = sscanf(entry, "%d,%d,%d,%d,%d,%d,%d,%d%n",
+                            &values[0], &values[1], &values[2],
+                            &values[3], &values[4], &values[5],
+                            &values[6], &values[7], &consumed);
+        if (parsed != 8 || entry[consumed] != '\0') {
+            fprintf(stderr, "invalid MCU_SIM_STEP_TRACKS entry: %s\n", entry);
+            free(copy);
+            _exit(2);
+        }
+        add_configured_step_track(values[0], values[1], values[2],
+                                  values[3], values[4], values[5],
+                                  values[6], values[7]);
+    }
+    free(copy);
+}
+
+static struct auto_endstop *find_step_tracker(int line) {
+    int endstop_line = line == 18 ? 200
+                       : line == 7 ? 201
+                       : line == 15 ? 202
+                       : line == 20 ? 210
+                       : -1;
+    struct auto_endstop *furthest = NULL;
+    if (endstop_line >= 0) {
+        for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
+            struct auto_endstop *ae = &auto_endstops[i];
+            if (!ae->active || !ae->configured
+                || ae->endstop_line != endstop_line) continue;
+            if (!furthest || labs(ae->pos) > labs(furthest->pos))
+                furthest = ae;
+        }
+        if (furthest) return furthest;
+    }
+    for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
+        struct auto_endstop *ae = &auto_endstops[i];
+        if (ae->active && ae->configured && ae->step_line == line) return ae;
+    }
+    for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
+        struct auto_endstop *ae = &auto_endstops[i];
+        if (ae->active && ae->step_line == line) return ae;
+    }
+    return NULL;
+}
 
 // Polled by the runtime tick thread (src/linux/runtime_tick_host.c) to decide
 // whether to drive the real per-stepper step/dir pins. Default off: the
@@ -142,6 +249,7 @@ static void iio_init(void) {
     auto_endstops[2].dir_line = 16;
     auto_endstops[3].dir_line = 16;
     auto_endstops[4].dir_line = 21;
+    load_configured_step_tracks();
     gpio_step_tracking = getenv("MCU_SIM_GPIO_STEP_TRACKING") != NULL;
 }
 
@@ -283,6 +391,39 @@ static void control_handle_line(int client_fd, char *line) {
         send_resp(client_fd, "ok\n");
         return;
     }
+    if (strncmp(line, "set_endstop_wall", 16) == 0) {
+        long line_off, steps;
+        if (parse_kv(line, "line", &line_off) < 0
+            || parse_kv(line, "steps", &steps) < 0) {
+            send_resp(client_fd, "error: parse error\n");
+            return;
+        }
+        if (line_off < 0 || line_off >= MAX_GPIO_LINES || steps <= 0) {
+            send_resp(client_fd, "error: line or steps out of range\n");
+            return;
+        }
+        int hit = 0;
+        pthread_mutex_lock(&auto_endstop_mtx);
+        pthread_mutex_lock(&gpio_state_mtx);
+        for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
+            struct auto_endstop *ae = &auto_endstops[i];
+            if (!ae->active || ae->endstop_line != line_off) continue;
+            ae->wall_steps = steps;
+            ae->toward_sign = 0;
+            ae->latch_armed = labs(ae->pos) < steps;
+            ae->triggered = 0;
+            gpio_lines[ae->endstop_chip][ae->endstop_line].value = 0;
+            hit = 1;
+        }
+        pthread_mutex_unlock(&gpio_state_mtx);
+        pthread_mutex_unlock(&auto_endstop_mtx);
+        if (!hit) {
+            send_resp(client_fd, "error: no endstop wall for line\n");
+            return;
+        }
+        send_resp(client_fd, "ok\n");
+        return;
+    }
     if (strncmp(line, "get_gpio_edges", 14) == 0) {
         long chip, line_off;
         if (parse_kv(line, "chip", &chip) < 0
@@ -315,18 +456,15 @@ static void control_handle_line(int client_fd, char *line) {
         unsigned long long sum_ns = 0, sum_cycles = 0, sum_index_cycles = 0;
         int hit = 0;
         pthread_mutex_lock(&auto_endstop_mtx);
-        for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
-            if (auto_endstops[i].active
-                && auto_endstops[i].step_line == (int)line_off) {
-                count = auto_endstops[i].step_count;
-                first_ns = auto_endstops[i].first_step_vtime_ns;
-                last_ns = auto_endstops[i].last_step_vtime_ns;
-                sum_ns = auto_endstops[i].sum_step_vtime_ns;
-                sum_cycles = auto_endstops[i].sum_step_cycles;
-                sum_index_cycles = auto_endstops[i].sum_index_cycles;
-                hit = 1;
-                break;
-            }
+        struct auto_endstop *ae = find_step_tracker((int)line_off);
+        if (ae) {
+            count = ae->step_count;
+            first_ns = ae->first_step_vtime_ns;
+            last_ns = ae->last_step_vtime_ns;
+            sum_ns = ae->sum_step_vtime_ns;
+            sum_cycles = ae->sum_step_cycles;
+            sum_index_cycles = ae->sum_index_cycles;
+            hit = 1;
         }
         pthread_mutex_unlock(&auto_endstop_mtx);
         if (!hit) {
@@ -351,18 +489,15 @@ static void control_handle_line(int client_fd, char *line) {
         }
         int hit = 0;
         pthread_mutex_lock(&auto_endstop_mtx);
-        for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
-            struct auto_endstop *ae = &auto_endstops[i];
-            if (ae->active && ae->step_line == (int)line_off) {
-                ae->step_count = 0;
-                ae->first_step_vtime_ns = 0;
-                ae->last_step_vtime_ns = 0;
-                ae->sum_step_vtime_ns = 0;
-                ae->sum_step_cycles = 0;
-                ae->sum_index_cycles = 0;
-                hit = 1;
-                break;
-            }
+        struct auto_endstop *ae = find_step_tracker((int)line_off);
+        if (ae) {
+            ae->step_count = 0;
+            ae->first_step_vtime_ns = 0;
+            ae->last_step_vtime_ns = 0;
+            ae->sum_step_vtime_ns = 0;
+            ae->sum_step_cycles = 0;
+            ae->sum_index_cycles = 0;
+            hit = 1;
         }
         pthread_mutex_unlock(&auto_endstop_mtx);
         send_resp(client_fd, hit ? "ok\n" : "error: no step tracker for line\n");
@@ -376,25 +511,27 @@ static void control_handle_line(int client_fd, char *line) {
         }
         long pos = 0, min_pos = 0, max_pos = 0;
         int hit = 0;
+        unsigned long long vt_ns = 0;
         pthread_mutex_lock(&auto_endstop_mtx);
-        for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
-            if (auto_endstops[i].active
-                && auto_endstops[i].step_line == (int)line_off) {
-                pos = auto_endstops[i].pos;
-                min_pos = auto_endstops[i].min_pos;
-                max_pos = auto_endstops[i].max_pos;
-                hit = 1;
-                break;
-            }
+        struct auto_endstop *ae = find_step_tracker((int)line_off);
+        if (ae) {
+            pos = ae->pos;
+            min_pos = ae->min_pos;
+            max_pos = ae->max_pos;
+            hit = 1;
+            struct timespec vt;
+            clock_gettime(CLOCK_MONOTONIC, &vt);
+            vt_ns = (unsigned long long)vt.tv_sec * 1000000000ULL
+                    + (unsigned long long)vt.tv_nsec;
         }
         pthread_mutex_unlock(&auto_endstop_mtx);
         if (!hit) {
             send_resp(client_fd, "error: no step tracker for line\n");
             return;
         }
-        char buf[96];
-        snprintf(buf, sizeof(buf), "steps=%ld min=%ld max=%ld\n",
-                 pos, min_pos, max_pos);
+        char buf[128];
+        snprintf(buf, sizeof(buf), "steps=%ld min=%ld max=%ld vt=%llu\n",
+                 pos, min_pos, max_pos, vt_ns);
         send_resp(client_fd, buf);
         return;
     }
@@ -707,7 +844,6 @@ static int gpio_handle_get_linehandle(int chip_fd, struct gpiohandle_request *re
 
 static void auto_endstop_advance(int chip_id, int offset, long delta,
                                  uint64_t step_ns, uint64_t step_cycle) {
-    static long last_log_pos[MAX_AUTO_ENDSTOPS];
     uint64_t now_ns = step_ns;
     pthread_mutex_lock(&auto_endstop_mtx);
     for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
@@ -726,11 +862,6 @@ static void auto_endstop_advance(int chip_id, int offset, long delta,
         ae->pos += delta;
         if (ae->pos < ae->min_pos) ae->min_pos = ae->pos;
         if (ae->pos > ae->max_pos) ae->max_pos = ae->pos;
-        if (labs(ae->pos - last_log_pos[i]) >= 800) {
-            last_log_pos[i] = ae->pos;
-            fprintf(stderr, "[auto-endstop] line=%d pos=%ld (moving)\n",
-                    ae->endstop_line, ae->pos);
-        }
         if (labs(ae->pos) < ae->wall_steps)
             ae->latch_armed = 1;
         if (ae->toward_sign == 0 && ae->latch_armed
@@ -750,14 +881,6 @@ static void auto_endstop_advance(int chip_id, int offset, long delta,
             pthread_mutex_lock(&gpio_state_mtx);
             gpio_lines[ae->endstop_chip][ae->endstop_line].value = trig;
             pthread_mutex_unlock(&gpio_state_mtx);
-            struct timespec vt;
-            clock_gettime(CLOCK_MONOTONIC, &vt);
-            fprintf(stderr,
-                    "[auto-endstop] line=%d pos=%ld toward=%d trig=%d"
-                    " vt_ns=%llu\n",
-                    ae->endstop_line, ae->pos, ae->toward_sign, trig,
-                    (unsigned long long)vt.tv_sec * 1000000000ULL
-                        + (unsigned long long)vt.tv_nsec);
         }
     }
     pthread_mutex_unlock(&auto_endstop_mtx);
@@ -790,13 +913,14 @@ static int gpio_handle_set_values(int line_fd, struct gpiohandle_data *data) {
     gpio_lines[chip_id][offset].value = v;
     if (v != prev) gpio_lines[chip_id][offset].edges++;
     slot->u.gpioline.last_value = v;
-    if (gpio_step_tracking && v && !prev) {
+    if (gpio_step_tracking && v != prev) {
         for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
             struct auto_endstop *ae = &auto_endstops[i];
-            if (!ae->active || ae->dir_line <= 0) continue;
+            if (!ae->active || ae->dir_line < 0) continue;
             if (ae->step_chip != chip_id || ae->step_line != offset) continue;
-            step_delta =
-                gpio_lines[ae->dir_chip][ae->dir_line].value ? 1 : -1;
+            if (!ae->both_edge && !v) break;
+            int dir_value = gpio_lines[ae->dir_chip][ae->dir_line].value;
+            step_delta = (dir_value != ae->dir_invert) ? 1 : -1;
             break;
         }
     }

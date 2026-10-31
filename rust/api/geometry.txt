@@ -1,0 +1,884 @@
+pub mod geometry
+pub mod geometry::curve
+pub fn geometry::curve::to_collinear_bezier([f64; 3], [f64; 3]) -> [[f64; 3]; 4]
+pub mod geometry::error
+pub enum geometry::error::GeometryError
+pub geometry::error::GeometryError::DegenerateArc
+pub geometry::error::GeometryError::DegenerateArc::reason: &'static str
+pub geometry::error::GeometryError::DegenerateClothoid
+pub geometry::error::GeometryError::DegenerateClothoid::reason: &'static str
+pub geometry::error::GeometryError::FollowerInvariantViolation
+pub geometry::error::GeometryError::FollowerInvariantViolation::reason: &'static str
+pub geometry::error::GeometryError::InvalidLowering
+pub geometry::error::GeometryError::InvalidLowering::reason: &'static str
+pub geometry::error::GeometryError::NonPlanarBasis
+pub geometry::error::GeometryError::NonPlanarBasis::reason: &'static str
+pub geometry::error::GeometryError::NotSinglePieceCubic
+pub geometry::error::GeometryError::NotSinglePieceCubic::reason: &'static str
+pub geometry::error::GeometryError::ZeroMotion
+pub mod geometry::fitter
+pub enum geometry::fitter::FitError
+pub geometry::fitter::FitError::Internal
+pub geometry::fitter::FitError::Internal::line_no: u32
+pub geometry::fitter::FitError::Internal::source: geometry::error::GeometryError
+pub geometry::fitter::FitError::OverTrimmedLine
+pub geometry::fitter::FitError::OverTrimmedLine::excess_mm: f64
+pub geometry::fitter::FitError::OverTrimmedLine::line_no: u32
+pub enum geometry::fitter::JunctionPlan
+pub geometry::fitter::JunctionPlan::Blend(geometry::fitter::JunctionBlend)
+pub geometry::fitter::JunctionPlan::Unblended(geometry::fitter::UnblendReason)
+pub enum geometry::fitter::UnblendReason
+pub geometry::fitter::UnblendReason::ArcIncident
+pub geometry::fitter::UnblendReason::Collinear
+pub geometry::fitter::UnblendReason::ExtrusionRampInfeasible
+pub geometry::fitter::UnblendReason::ExtrusionStep
+pub geometry::fitter::UnblendReason::NearReversal
+pub geometry::fitter::UnblendReason::NoBudget
+pub geometry::fitter::UnblendReason::NonSpatial
+pub geometry::fitter::UnblendReason::StreamCut
+pub geometry::fitter::UnblendReason::ZeroDeviation
+pub struct geometry::fitter::CornerFitConfig
+pub geometry::fitter::CornerFitConfig::extrusion_ramp_rel_tol: f64
+pub geometry::fitter::CornerFitConfig::ramp_accel_budget_mm_s2: f64
+pub geometry::fitter::CornerFitConfig::theta_max_rad: f64
+pub geometry::fitter::CornerFitConfig::theta_min_rad: f64
+impl core::default::Default for geometry::CornerFitConfig
+pub fn geometry::CornerFitConfig::default() -> Self
+pub struct geometry::fitter::FacetConsumption(_)
+impl geometry::fitter::FacetConsumption
+pub fn geometry::fitter::FacetConsumption::trim_in(&self) -> f64
+pub fn geometry::fitter::FacetConsumption::trim_out(&self) -> f64
+pub struct geometry::fitter::JunctionBlend(_)
+impl geometry::fitter::JunctionBlend
+pub fn geometry::fitter::JunctionBlend::trim_in(&self) -> f64
+pub fn geometry::fitter::JunctionBlend::trim_out(&self) -> f64
+pub struct geometry::fitter::RunFit
+impl geometry::fitter::RunFit
+pub fn geometry::fitter::RunFit::blend_head_with_line(&mut self, &geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig) -> core::result::Result<alloc::vec::Vec<geometry::frontend::Move>, geometry::fitter::FitError>
+pub fn geometry::fitter::RunFit::blend_tail_with_line(&mut self, &geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig) -> core::result::Result<alloc::vec::Vec<geometry::frontend::Move>, geometry::fitter::FitError>
+pub fn geometry::fitter::RunFit::blend_tail_with_run(&mut self, &mut geometry::fitter::RunFit, &geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig) -> core::result::Result<alloc::vec::Vec<geometry::frontend::Move>, geometry::fitter::FitError>
+pub fn geometry::fitter::RunFit::fit(&[geometry::frontend::Move], core::option::Option<&geometry::frontend::Move>, core::option::Option<&geometry::frontend::Move>, geometry::CornerFitConfig) -> core::result::Result<core::option::Option<geometry::fitter::RunFit>, geometry::fitter::FitError>
+pub fn geometry::fitter::RunFit::head_boundary_trim(&self) -> f64
+pub fn geometry::fitter::RunFit::head_consumption(&self) -> f64
+pub fn geometry::fitter::RunFit::head_line_trim(&self) -> f64
+pub fn geometry::fitter::RunFit::pieces(&self, &geometry::frontend::Move, &geometry::frontend::Move) -> core::result::Result<alloc::vec::Vec<geometry::frontend::Move>, geometry::fitter::FitError>
+pub fn geometry::fitter::RunFit::tail_boundary_trim(&self) -> f64
+pub fn geometry::fitter::RunFit::tail_consumption(&self) -> f64
+pub fn geometry::fitter::RunFit::tail_line_trim(&self) -> f64
+pub fn geometry::fitter::arc_candidate_fits(&[geometry::frontend::Move], geometry::CornerFitConfig) -> bool
+pub fn geometry::fitter::blend_moves(&geometry::fitter::JunctionBlend, &geometry::frontend::Move, &geometry::frontend::Move) -> core::result::Result<alloc::vec::Vec<geometry::frontend::Move>, geometry::fitter::FitError>
+pub fn geometry::fitter::consumption_moves(&geometry::fitter::FacetConsumption, &geometry::frontend::Move, &[&geometry::frontend::Move], &geometry::frontend::Move) -> core::result::Result<alloc::vec::Vec<geometry::frontend::Move>, geometry::fitter::FitError>
+pub fn geometry::fitter::facet_consumption_candidate(&geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig, f64) -> bool
+pub fn geometry::fitter::is_travel(&geometry::frontend::Move) -> bool
+pub fn geometry::fitter::merge_collinear_lines(&geometry::frontend::Move, &geometry::frontend::Move, &[[f64; 3]], geometry::CornerFitConfig) -> core::option::Option<geometry::frontend::Move>
+pub fn geometry::fitter::plan_facet_consumption(&geometry::frontend::Move, &[&geometry::frontend::Move], &geometry::frontend::Move, geometry::CornerFitConfig, f64) -> core::result::Result<core::option::Option<geometry::fitter::FacetConsumption>, geometry::fitter::FitError>
+pub fn geometry::fitter::plan_junction_reduced(&geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig, f64, f64) -> core::result::Result<geometry::fitter::JunctionPlan, geometry::fitter::FitError>
+pub fn geometry::fitter::seam_requires_stop(&geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig) -> bool
+pub fn geometry::fitter::spatial_end(&geometry::frontend::Move) -> core::option::Option<[f64; 3]>
+pub fn geometry::fitter::spatial_start(&geometry::frontend::Move) -> core::option::Option<[f64; 3]>
+pub fn geometry::fitter::trim_line_move(&geometry::frontend::Move, f64, f64) -> core::result::Result<core::option::Option<geometry::frontend::Move>, geometry::fitter::FitError>
+pub mod geometry::frontend
+pub enum geometry::frontend::FrontendError
+pub geometry::frontend::FrontendError::InvalidFeedrate
+pub geometry::frontend::FrontendError::InvalidFeedrate::line_no: u32
+pub geometry::frontend::FrontendError::InvalidLimits
+pub geometry::frontend::FrontendError::InvalidLimits::line_no: u32
+pub geometry::frontend::FrontendError::InvalidLimits::reason: &'static str
+pub geometry::frontend::FrontendError::NonFiniteInput
+pub geometry::frontend::FrontendError::NonFiniteInput::line_no: u32
+pub geometry::frontend::FrontendError::Segment
+pub geometry::frontend::FrontendError::Segment::line_no: u32
+pub geometry::frontend::FrontendError::Segment::source: geometry::error::GeometryError
+pub geometry::frontend::FrontendError::ZeroMotion
+pub geometry::frontend::FrontendError::ZeroMotion::line_no: u32
+pub struct geometry::frontend::Move
+pub geometry::frontend::Move::feedrate_mm_s: f64
+pub geometry::frontend::Move::limits: geometry::frontend::VelocityLimits
+pub geometry::frontend::Move::segment: geometry::path::PathSegment
+pub geometry::frontend::Move::source: geometry::segment::SourceRange
+pub struct geometry::frontend::MoveContext
+pub geometry::frontend::MoveContext::extruder_axis: usize
+pub geometry::frontend::MoveContext::feedrate_mm_s: f64
+pub geometry::frontend::MoveContext::limits: geometry::frontend::VelocityLimits
+pub geometry::frontend::MoveContext::source: geometry::segment::SourceRange
+pub struct geometry::frontend::VelocityLimits
+pub geometry::frontend::VelocityLimits::accel_mm_s2: f64
+pub geometry::frontend::VelocityLimits::corner_deviation_mm: f64
+pub geometry::frontend::VelocityLimits::max_jerk_mm_s3: f64
+pub geometry::frontend::VelocityLimits::max_velocity_mm_s: f64
+impl geometry::frontend::VelocityLimits
+pub fn geometry::frontend::VelocityLimits::try_new(f64, f64, f64, f64) -> core::result::Result<Self, &'static str>
+pub const geometry::frontend::CORNER_DEVIATION_SCV_FACTOR: f64
+pub fn geometry::frontend::corner_deviation_from_scv(f64, f64) -> f64
+pub fn geometry::frontend::line_move([f64; 3], [f64; 3], f64, geometry::frontend::MoveContext) -> core::result::Result<geometry::frontend::Move, geometry::frontend::FrontendError>
+pub fn geometry::frontend::scv_from_corner_deviation(f64, f64) -> f64
+pub mod geometry::path
+pub mod geometry::path::arc
+pub struct geometry::path::arc::Arc
+pub geometry::path::arc::Arc::origin: [f64; 3]
+pub geometry::path::arc::Arc::radius: f64
+pub geometry::path::arc::Arc::start_angle: f64
+pub geometry::path::arc::Arc::sweep: f64
+pub geometry::path::arc::Arc::u: [f64; 3]
+pub geometry::path::arc::Arc::v: [f64; 3]
+impl geometry::path::arc::Arc
+pub fn geometry::path::arc::Arc::try_new([f64; 3], [f64; 3], [f64; 3], f64, f64, f64) -> core::result::Result<Self, geometry::error::GeometryError>
+impl geometry::path::lowering::PositionProfile for geometry::path::arc::Arc
+pub fn geometry::path::arc::Arc::d2heading_ds2(&self, f64) -> [f64; 3]
+pub fn geometry::path::arc::Arc::dheading_ds(&self, f64) -> [f64; 3]
+pub fn geometry::path::arc::Arc::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::arc::Arc::point_at(&self, f64) -> [f64; 3]
+impl geometry::path::profile::CurvatureProfile for geometry::path::arc::Arc
+pub fn geometry::path::arc::Arc::dkappa_ds(&self, f64) -> f64
+pub fn geometry::path::arc::Arc::kappa(&self, f64) -> f64
+pub fn geometry::path::arc::Arc::kappa_endpoints(&self) -> (f64, f64)
+pub fn geometry::path::arc::Arc::kappa_peak(&self) -> (f64, f64)
+pub fn geometry::path::arc::Arc::s_len(&self) -> f64
+pub mod geometry::path::clothoid
+pub struct geometry::path::clothoid::Clothoid
+pub geometry::path::clothoid::Clothoid::kappa_0: f64
+pub geometry::path::clothoid::Clothoid::length: f64
+pub geometry::path::clothoid::Clothoid::sigma: f64
+pub geometry::path::clothoid::Clothoid::start_pose: [f64; 3]
+pub geometry::path::clothoid::Clothoid::u: [f64; 3]
+pub geometry::path::clothoid::Clothoid::v: [f64; 3]
+impl geometry::path::clothoid::Clothoid
+pub fn geometry::path::clothoid::Clothoid::try_new([f64; 3], [f64; 3], [f64; 3], f64, f64, f64) -> core::result::Result<Self, geometry::error::GeometryError>
+impl geometry::path::lowering::PositionProfile for geometry::path::clothoid::Clothoid
+pub fn geometry::path::clothoid::Clothoid::d2heading_ds2(&self, f64) -> [f64; 3]
+pub fn geometry::path::clothoid::Clothoid::dheading_ds(&self, f64) -> [f64; 3]
+pub fn geometry::path::clothoid::Clothoid::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::clothoid::Clothoid::point_at(&self, f64) -> [f64; 3]
+impl geometry::path::profile::CurvatureProfile for geometry::path::clothoid::Clothoid
+pub fn geometry::path::clothoid::Clothoid::dkappa_ds(&self, f64) -> f64
+pub fn geometry::path::clothoid::Clothoid::kappa(&self, f64) -> f64
+pub fn geometry::path::clothoid::Clothoid::kappa_endpoints(&self) -> (f64, f64)
+pub fn geometry::path::clothoid::Clothoid::kappa_peak(&self) -> (f64, f64)
+pub fn geometry::path::clothoid::Clothoid::s_len(&self) -> f64
+pub mod geometry::path::line
+pub struct geometry::path::line::Line
+pub geometry::path::line::Line::end: [f64; 3]
+pub geometry::path::line::Line::start: [f64; 3]
+impl geometry::path::line::Line
+pub fn geometry::path::line::Line::length(&self) -> f64
+pub fn geometry::path::line::Line::try_new([f64; 3], [f64; 3]) -> core::result::Result<Self, geometry::error::GeometryError>
+impl geometry::path::lowering::PositionProfile for geometry::path::line::Line
+pub fn geometry::path::line::Line::d2heading_ds2(&self, f64) -> [f64; 3]
+pub fn geometry::path::line::Line::dheading_ds(&self, f64) -> [f64; 3]
+pub fn geometry::path::line::Line::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::line::Line::point_at(&self, f64) -> [f64; 3]
+impl geometry::path::profile::CurvatureProfile for geometry::path::line::Line
+pub fn geometry::path::line::Line::dkappa_ds(&self, f64) -> f64
+pub fn geometry::path::line::Line::kappa(&self, f64) -> f64
+pub fn geometry::path::line::Line::kappa_endpoints(&self) -> (f64, f64)
+pub fn geometry::path::line::Line::kappa_peak(&self) -> (f64, f64)
+pub fn geometry::path::line::Line::s_len(&self) -> f64
+pub mod geometry::path::lowering
+pub trait geometry::path::lowering::PositionProfile
+pub fn geometry::path::lowering::PositionProfile::d2heading_ds2(&self, f64) -> [f64; 3]
+pub fn geometry::path::lowering::PositionProfile::dheading_ds(&self, f64) -> [f64; 3]
+pub fn geometry::path::lowering::PositionProfile::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::lowering::PositionProfile::point_at(&self, f64) -> [f64; 3]
+impl geometry::path::lowering::PositionProfile for geometry::path::Segment
+pub fn geometry::path::Segment::d2heading_ds2(&self, f64) -> [f64; 3]
+pub fn geometry::path::Segment::dheading_ds(&self, f64) -> [f64; 3]
+pub fn geometry::path::Segment::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::Segment::point_at(&self, f64) -> [f64; 3]
+impl geometry::path::lowering::PositionProfile for geometry::path::arc::Arc
+pub fn geometry::path::arc::Arc::d2heading_ds2(&self, f64) -> [f64; 3]
+pub fn geometry::path::arc::Arc::dheading_ds(&self, f64) -> [f64; 3]
+pub fn geometry::path::arc::Arc::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::arc::Arc::point_at(&self, f64) -> [f64; 3]
+impl geometry::path::lowering::PositionProfile for geometry::path::clothoid::Clothoid
+pub fn geometry::path::clothoid::Clothoid::d2heading_ds2(&self, f64) -> [f64; 3]
+pub fn geometry::path::clothoid::Clothoid::dheading_ds(&self, f64) -> [f64; 3]
+pub fn geometry::path::clothoid::Clothoid::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::clothoid::Clothoid::point_at(&self, f64) -> [f64; 3]
+impl geometry::path::lowering::PositionProfile for geometry::path::line::Line
+pub fn geometry::path::line::Line::d2heading_ds2(&self, f64) -> [f64; 3]
+pub fn geometry::path::line::Line::dheading_ds(&self, f64) -> [f64; 3]
+pub fn geometry::path::line::Line::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::line::Line::point_at(&self, f64) -> [f64; 3]
+pub mod geometry::path::profile
+pub trait geometry::path::profile::CurvatureProfile
+pub fn geometry::path::profile::CurvatureProfile::dkappa_ds(&self, f64) -> f64
+pub fn geometry::path::profile::CurvatureProfile::kappa(&self, f64) -> f64
+pub fn geometry::path::profile::CurvatureProfile::kappa_endpoints(&self) -> (f64, f64)
+pub fn geometry::path::profile::CurvatureProfile::kappa_peak(&self) -> (f64, f64)
+pub fn geometry::path::profile::CurvatureProfile::s_len(&self) -> f64
+impl geometry::path::profile::CurvatureProfile for geometry::path::Segment
+pub fn geometry::path::Segment::dkappa_ds(&self, f64) -> f64
+pub fn geometry::path::Segment::kappa(&self, f64) -> f64
+pub fn geometry::path::Segment::kappa_endpoints(&self) -> (f64, f64)
+pub fn geometry::path::Segment::kappa_peak(&self) -> (f64, f64)
+pub fn geometry::path::Segment::s_len(&self) -> f64
+impl geometry::path::profile::CurvatureProfile for geometry::path::arc::Arc
+pub fn geometry::path::arc::Arc::dkappa_ds(&self, f64) -> f64
+pub fn geometry::path::arc::Arc::kappa(&self, f64) -> f64
+pub fn geometry::path::arc::Arc::kappa_endpoints(&self) -> (f64, f64)
+pub fn geometry::path::arc::Arc::kappa_peak(&self) -> (f64, f64)
+pub fn geometry::path::arc::Arc::s_len(&self) -> f64
+impl geometry::path::profile::CurvatureProfile for geometry::path::clothoid::Clothoid
+pub fn geometry::path::clothoid::Clothoid::dkappa_ds(&self, f64) -> f64
+pub fn geometry::path::clothoid::Clothoid::kappa(&self, f64) -> f64
+pub fn geometry::path::clothoid::Clothoid::kappa_endpoints(&self) -> (f64, f64)
+pub fn geometry::path::clothoid::Clothoid::kappa_peak(&self) -> (f64, f64)
+pub fn geometry::path::clothoid::Clothoid::s_len(&self) -> f64
+impl geometry::path::profile::CurvatureProfile for geometry::path::line::Line
+pub fn geometry::path::line::Line::dkappa_ds(&self, f64) -> f64
+pub fn geometry::path::line::Line::kappa(&self, f64) -> f64
+pub fn geometry::path::line::Line::kappa_endpoints(&self) -> (f64, f64)
+pub fn geometry::path::line::Line::kappa_peak(&self) -> (f64, f64)
+pub fn geometry::path::line::Line::s_len(&self) -> f64
+pub enum geometry::path::Segment
+pub geometry::path::Segment::Arc(geometry::path::arc::Arc)
+pub geometry::path::Segment::Clothoid(geometry::path::clothoid::Clothoid)
+pub geometry::path::Segment::Line(geometry::path::line::Line)
+impl geometry::path::lowering::PositionProfile for geometry::path::Segment
+pub fn geometry::path::Segment::d2heading_ds2(&self, f64) -> [f64; 3]
+pub fn geometry::path::Segment::dheading_ds(&self, f64) -> [f64; 3]
+pub fn geometry::path::Segment::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::Segment::point_at(&self, f64) -> [f64; 3]
+impl geometry::path::profile::CurvatureProfile for geometry::path::Segment
+pub fn geometry::path::Segment::dkappa_ds(&self, f64) -> f64
+pub fn geometry::path::Segment::kappa(&self, f64) -> f64
+pub fn geometry::path::Segment::kappa_endpoints(&self) -> (f64, f64)
+pub fn geometry::path::Segment::kappa_peak(&self) -> (f64, f64)
+pub fn geometry::path::Segment::s_len(&self) -> f64
+pub struct geometry::path::Arc
+pub geometry::path::Arc::origin: [f64; 3]
+pub geometry::path::Arc::radius: f64
+pub geometry::path::Arc::start_angle: f64
+pub geometry::path::Arc::sweep: f64
+pub geometry::path::Arc::u: [f64; 3]
+pub geometry::path::Arc::v: [f64; 3]
+impl geometry::path::arc::Arc
+pub fn geometry::path::arc::Arc::try_new([f64; 3], [f64; 3], [f64; 3], f64, f64, f64) -> core::result::Result<Self, geometry::error::GeometryError>
+impl geometry::path::lowering::PositionProfile for geometry::path::arc::Arc
+pub fn geometry::path::arc::Arc::d2heading_ds2(&self, f64) -> [f64; 3]
+pub fn geometry::path::arc::Arc::dheading_ds(&self, f64) -> [f64; 3]
+pub fn geometry::path::arc::Arc::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::arc::Arc::point_at(&self, f64) -> [f64; 3]
+impl geometry::path::profile::CurvatureProfile for geometry::path::arc::Arc
+pub fn geometry::path::arc::Arc::dkappa_ds(&self, f64) -> f64
+pub fn geometry::path::arc::Arc::kappa(&self, f64) -> f64
+pub fn geometry::path::arc::Arc::kappa_endpoints(&self) -> (f64, f64)
+pub fn geometry::path::arc::Arc::kappa_peak(&self) -> (f64, f64)
+pub fn geometry::path::arc::Arc::s_len(&self) -> f64
+pub struct geometry::path::Clothoid
+pub geometry::path::Clothoid::kappa_0: f64
+pub geometry::path::Clothoid::length: f64
+pub geometry::path::Clothoid::sigma: f64
+pub geometry::path::Clothoid::start_pose: [f64; 3]
+pub geometry::path::Clothoid::u: [f64; 3]
+pub geometry::path::Clothoid::v: [f64; 3]
+impl geometry::path::clothoid::Clothoid
+pub fn geometry::path::clothoid::Clothoid::try_new([f64; 3], [f64; 3], [f64; 3], f64, f64, f64) -> core::result::Result<Self, geometry::error::GeometryError>
+impl geometry::path::lowering::PositionProfile for geometry::path::clothoid::Clothoid
+pub fn geometry::path::clothoid::Clothoid::d2heading_ds2(&self, f64) -> [f64; 3]
+pub fn geometry::path::clothoid::Clothoid::dheading_ds(&self, f64) -> [f64; 3]
+pub fn geometry::path::clothoid::Clothoid::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::clothoid::Clothoid::point_at(&self, f64) -> [f64; 3]
+impl geometry::path::profile::CurvatureProfile for geometry::path::clothoid::Clothoid
+pub fn geometry::path::clothoid::Clothoid::dkappa_ds(&self, f64) -> f64
+pub fn geometry::path::clothoid::Clothoid::kappa(&self, f64) -> f64
+pub fn geometry::path::clothoid::Clothoid::kappa_endpoints(&self) -> (f64, f64)
+pub fn geometry::path::clothoid::Clothoid::kappa_peak(&self) -> (f64, f64)
+pub fn geometry::path::clothoid::Clothoid::s_len(&self) -> f64
+pub struct geometry::path::Line
+pub geometry::path::Line::end: [f64; 3]
+pub geometry::path::Line::start: [f64; 3]
+impl geometry::path::line::Line
+pub fn geometry::path::line::Line::length(&self) -> f64
+pub fn geometry::path::line::Line::try_new([f64; 3], [f64; 3]) -> core::result::Result<Self, geometry::error::GeometryError>
+impl geometry::path::lowering::PositionProfile for geometry::path::line::Line
+pub fn geometry::path::line::Line::d2heading_ds2(&self, f64) -> [f64; 3]
+pub fn geometry::path::line::Line::dheading_ds(&self, f64) -> [f64; 3]
+pub fn geometry::path::line::Line::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::line::Line::point_at(&self, f64) -> [f64; 3]
+impl geometry::path::profile::CurvatureProfile for geometry::path::line::Line
+pub fn geometry::path::line::Line::dkappa_ds(&self, f64) -> f64
+pub fn geometry::path::line::Line::kappa(&self, f64) -> f64
+pub fn geometry::path::line::Line::kappa_endpoints(&self) -> (f64, f64)
+pub fn geometry::path::line::Line::kappa_peak(&self) -> (f64, f64)
+pub fn geometry::path::line::Line::s_len(&self) -> f64
+pub struct geometry::path::PathSegment
+pub geometry::path::PathSegment::followers: alloc::vec::Vec<geometry::segment::FollowerDemand>
+pub geometry::path::PathSegment::spatial: core::option::Option<geometry::path::Segment>
+pub geometry::path::PathSegment::virtual_path_mm: core::option::Option<f64>
+impl geometry::path::PathSegment
+pub fn geometry::path::PathSegment::s_len(&self) -> f64
+pub fn geometry::path::PathSegment::try_new(geometry::path::Segment, alloc::vec::Vec<geometry::segment::FollowerDemand>) -> core::result::Result<Self, geometry::error::GeometryError>
+pub fn geometry::path::PathSegment::try_new_virtual(alloc::vec::Vec<geometry::segment::FollowerDemand>, f64) -> core::result::Result<Self, geometry::error::GeometryError>
+pub trait geometry::path::CurvatureProfile
+pub fn geometry::path::CurvatureProfile::dkappa_ds(&self, f64) -> f64
+pub fn geometry::path::CurvatureProfile::kappa(&self, f64) -> f64
+pub fn geometry::path::CurvatureProfile::kappa_endpoints(&self) -> (f64, f64)
+pub fn geometry::path::CurvatureProfile::kappa_peak(&self) -> (f64, f64)
+pub fn geometry::path::CurvatureProfile::s_len(&self) -> f64
+impl geometry::path::profile::CurvatureProfile for geometry::path::Segment
+pub fn geometry::path::Segment::dkappa_ds(&self, f64) -> f64
+pub fn geometry::path::Segment::kappa(&self, f64) -> f64
+pub fn geometry::path::Segment::kappa_endpoints(&self) -> (f64, f64)
+pub fn geometry::path::Segment::kappa_peak(&self) -> (f64, f64)
+pub fn geometry::path::Segment::s_len(&self) -> f64
+impl geometry::path::profile::CurvatureProfile for geometry::path::arc::Arc
+pub fn geometry::path::arc::Arc::dkappa_ds(&self, f64) -> f64
+pub fn geometry::path::arc::Arc::kappa(&self, f64) -> f64
+pub fn geometry::path::arc::Arc::kappa_endpoints(&self) -> (f64, f64)
+pub fn geometry::path::arc::Arc::kappa_peak(&self) -> (f64, f64)
+pub fn geometry::path::arc::Arc::s_len(&self) -> f64
+impl geometry::path::profile::CurvatureProfile for geometry::path::clothoid::Clothoid
+pub fn geometry::path::clothoid::Clothoid::dkappa_ds(&self, f64) -> f64
+pub fn geometry::path::clothoid::Clothoid::kappa(&self, f64) -> f64
+pub fn geometry::path::clothoid::Clothoid::kappa_endpoints(&self) -> (f64, f64)
+pub fn geometry::path::clothoid::Clothoid::kappa_peak(&self) -> (f64, f64)
+pub fn geometry::path::clothoid::Clothoid::s_len(&self) -> f64
+impl geometry::path::profile::CurvatureProfile for geometry::path::line::Line
+pub fn geometry::path::line::Line::dkappa_ds(&self, f64) -> f64
+pub fn geometry::path::line::Line::kappa(&self, f64) -> f64
+pub fn geometry::path::line::Line::kappa_endpoints(&self) -> (f64, f64)
+pub fn geometry::path::line::Line::kappa_peak(&self) -> (f64, f64)
+pub fn geometry::path::line::Line::s_len(&self) -> f64
+pub mod geometry::segment
+pub struct geometry::segment::CubicSegment
+pub geometry::segment::CubicSegment::feedrate_mm_s: f64
+pub geometry::segment::CubicSegment::followers: alloc::vec::Vec<geometry::segment::FollowerDemand>
+pub geometry::segment::CubicSegment::source: geometry::segment::SourceRange
+pub geometry::segment::CubicSegment::virtual_path_mm: core::option::Option<f64>
+pub geometry::segment::CubicSegment::xyz: nurbs::vector::VectorNurbs<3>
+impl geometry::segment::CubicSegment
+pub fn geometry::segment::CubicSegment::try_new(nurbs::vector::VectorNurbs<3>, alloc::vec::Vec<geometry::segment::FollowerDemand>, f64, geometry::segment::SourceRange) -> core::result::Result<Self, geometry::error::GeometryError>
+pub fn geometry::segment::CubicSegment::try_new_virtual(nurbs::vector::VectorNurbs<3>, alloc::vec::Vec<geometry::segment::FollowerDemand>, f64, geometry::segment::SourceRange, f64) -> core::result::Result<Self, geometry::error::GeometryError>
+pub struct geometry::segment::FollowerDemand
+pub geometry::segment::FollowerDemand::axis_index: usize
+pub geometry::segment::FollowerDemand::ratio: f64
+pub geometry::segment::FollowerDemand::ratio_end: f64
+impl geometry::segment::FollowerDemand
+pub fn geometry::segment::FollowerDemand::constant(usize, f64) -> Self
+pub fn geometry::segment::FollowerDemand::delta_over(&self, f64) -> f64
+pub fn geometry::segment::FollowerDemand::is_ramped(&self) -> bool
+pub fn geometry::segment::FollowerDemand::max_abs_ratio(&self) -> f64
+pub fn geometry::segment::FollowerDemand::offset_at(&self, f64, f64) -> f64
+pub fn geometry::segment::FollowerDemand::ramp(usize, f64, f64) -> Self
+pub fn geometry::segment::FollowerDemand::ratio_at(&self, f64, f64) -> f64
+pub fn geometry::segment::FollowerDemand::ratio_slope(&self, f64) -> f64
+pub fn geometry::segment::FollowerDemand::span(&self, f64, f64, f64) -> Self
+pub struct geometry::segment::SourceRange
+pub geometry::segment::SourceRange::end_line: u32
+pub geometry::segment::SourceRange::start_line: u32
+pub mod geometry::space
+pub struct geometry::space::GcodePos(pub [f64; 3])
+impl geometry::space::GcodePos
+pub fn geometry::space::GcodePos::to_machine(self, core::option::Option<&geometry::surface::SurfaceTransform>) -> geometry::space::MachinePos
+pub fn geometry::space::GcodePos::x(&self) -> f64
+pub fn geometry::space::GcodePos::y(&self) -> f64
+pub fn geometry::space::GcodePos::z(&self) -> f64
+pub struct geometry::space::MachinePos(pub [f64; 3])
+impl geometry::space::MachinePos
+pub fn geometry::space::MachinePos::to_gcode(self, core::option::Option<&geometry::surface::SurfaceTransform>) -> geometry::space::GcodePos
+pub fn geometry::space::MachinePos::x(&self) -> f64
+pub fn geometry::space::MachinePos::y(&self) -> f64
+pub fn geometry::space::MachinePos::z(&self) -> f64
+pub mod geometry::surface
+pub enum geometry::surface::SurfaceContinuity
+pub geometry::surface::SurfaceContinuity::C0
+pub geometry::surface::SurfaceContinuity::C1
+pub enum geometry::surface::SurfaceError
+pub geometry::surface::SurfaceError::FadeBandInverted
+pub geometry::surface::SurfaceError::FadeBandInverted::end: f64
+pub geometry::surface::SurfaceError::FadeBandInverted::start: f64
+pub geometry::surface::SurfaceError::GridTooSmall
+pub geometry::surface::SurfaceError::GridTooSmall::nx: usize
+pub geometry::surface::SurfaceError::GridTooSmall::ny: usize
+pub geometry::surface::SurfaceError::NonFinitePoint
+pub geometry::surface::SurfaceError::NonFinitePoint::index: usize
+pub geometry::surface::SurfaceError::NonPositiveSpacing
+pub geometry::surface::SurfaceError::NonPositiveSpacing::dx: f64
+pub geometry::surface::SurfaceError::NonPositiveSpacing::dy: f64
+pub geometry::surface::SurfaceError::PointCountMismatch
+pub geometry::surface::SurfaceError::PointCountMismatch::expected: usize
+pub geometry::surface::SurfaceError::PointCountMismatch::got: usize
+impl core::error::Error for geometry::surface::SurfaceError
+impl core::fmt::Display for geometry::surface::SurfaceError
+pub fn geometry::surface::SurfaceError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum geometry::surface::SurfaceTransitionError
+pub geometry::surface::SurfaceTransitionError::NonFiniteSegment
+pub geometry::surface::SurfaceTransitionError::UnresolvedCrossing
+pub geometry::surface::SurfaceTransitionError::UnresolvedCrossing::axis: usize
+pub geometry::surface::SurfaceTransitionError::UnresolvedCrossing::boundary: f64
+impl core::error::Error for geometry::surface::SurfaceTransitionError
+impl core::fmt::Display for geometry::surface::SurfaceTransitionError
+pub fn geometry::surface::SurfaceTransitionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct geometry::surface::Fade
+pub geometry::surface::Fade::target: f64
+impl geometry::surface::Fade
+pub fn geometry::surface::Fade::band(&self) -> (f64, f64)
+pub fn geometry::surface::Fade::dfactor(&self, f64) -> f64
+pub fn geometry::surface::Fade::disabled() -> Self
+pub fn geometry::surface::Fade::factor(&self, f64) -> f64
+pub fn geometry::surface::Fade::is_disabled(&self) -> bool
+pub fn geometry::surface::Fade::new(f64, f64, f64) -> core::result::Result<Self, geometry::surface::SurfaceError>
+pub struct geometry::surface::MeshGrid
+impl geometry::surface::MeshGrid
+pub fn geometry::surface::MeshGrid::bounds(&self) -> geometry::surface::SurfaceBounds
+pub fn geometry::surface::MeshGrid::contains(&self, f64, f64) -> bool
+pub fn geometry::surface::MeshGrid::new(geometry::surface::MeshGridSpec, alloc::vec::Vec<f64>) -> core::result::Result<Self, geometry::surface::SurfaceError>
+pub fn geometry::surface::MeshGrid::sample(&self, f64, f64) -> geometry::surface::SurfaceSample
+pub fn geometry::surface::MeshGrid::x_range(&self) -> (f64, f64)
+pub fn geometry::surface::MeshGrid::y_range(&self) -> (f64, f64)
+pub fn geometry::surface::MeshGrid::z_spread_over(&self, f64, f64, f64, f64, f64) -> f64
+pub fn geometry::surface::MeshGrid::zero_at(&mut self, f64, f64)
+pub struct geometry::surface::MeshGridSpec
+pub geometry::surface::MeshGridSpec::dx: f64
+pub geometry::surface::MeshGridSpec::dy: f64
+pub geometry::surface::MeshGridSpec::nx: usize
+pub geometry::surface::MeshGridSpec::ny: usize
+pub geometry::surface::MeshGridSpec::tension: f64
+pub geometry::surface::MeshGridSpec::x_min: f64
+pub geometry::surface::MeshGridSpec::y_min: f64
+pub struct geometry::surface::SurfaceBounds
+pub geometry::surface::SurfaceBounds::max_curvature: f64
+pub geometry::surface::SurfaceBounds::max_gradient: f64
+pub geometry::surface::SurfaceBounds::z_max: f64
+pub geometry::surface::SurfaceBounds::z_min: f64
+pub struct geometry::surface::SurfaceSample
+pub geometry::surface::SurfaceSample::z: f64
+pub geometry::surface::SurfaceSample::zx: f64
+pub geometry::surface::SurfaceSample::zxx: f64
+pub geometry::surface::SurfaceSample::zxy: f64
+pub geometry::surface::SurfaceSample::zy: f64
+pub geometry::surface::SurfaceSample::zyy: f64
+pub struct geometry::surface::SurfaceTransform
+impl geometry::surface::SurfaceTransform
+pub fn geometry::surface::SurfaceTransform::bounds(&self) -> geometry::surface::SurfaceBounds
+pub fn geometry::surface::SurfaceTransform::correction_at(&self, f64, f64, f64) -> f64
+pub fn geometry::surface::SurfaceTransform::correction_spread_over(&self, f64, f64, f64, f64, f64, f64) -> f64
+pub fn geometry::surface::SurfaceTransform::fade(&self) -> &geometry::surface::Fade
+pub fn geometry::surface::SurfaceTransform::gcode_z(&self, f64, f64, f64) -> f64
+pub fn geometry::surface::SurfaceTransform::mesh(&self) -> &geometry::surface::MeshGrid
+pub fn geometry::surface::SurfaceTransform::new(geometry::surface::MeshGrid, geometry::surface::Fade) -> Self
+pub fn geometry::surface::SurfaceTransform::path_transition_distances(&self, &geometry::path::Segment) -> core::result::Result<alloc::vec::Vec<geometry::surface::SurfaceTransition>, geometry::surface::SurfaceTransitionError>
+pub fn geometry::surface::SurfaceTransform::unwarp_z_state(&self, [f64; 2], [f64; 2], [f64; 2], (f64, f64, f64)) -> (f64, f64, f64)
+pub fn geometry::surface::SurfaceTransform::warp(&self, f64, f64, f64) -> geometry::surface::WarpSample
+pub struct geometry::surface::SurfaceTransition
+pub geometry::surface::SurfaceTransition::continuity: geometry::surface::SurfaceContinuity
+pub geometry::surface::SurfaceTransition::s: f64
+pub struct geometry::surface::WarpSample
+pub geometry::surface::WarpSample::w: f64
+pub geometry::surface::WarpSample::wx: f64
+pub geometry::surface::WarpSample::wxx: f64
+pub geometry::surface::WarpSample::wxy: f64
+pub geometry::surface::WarpSample::wxz: f64
+pub geometry::surface::WarpSample::wy: f64
+pub geometry::surface::WarpSample::wyy: f64
+pub geometry::surface::WarpSample::wyz: f64
+pub geometry::surface::WarpSample::wz: f64
+pub mod geometry::vec3
+pub fn geometry::vec3::dist([f64; 3], [f64; 3]) -> f64
+pub mod geometry::velocity
+pub mod geometry::velocity::law
+pub enum geometry::velocity::law::ScalarLaw
+pub geometry::velocity::law::ScalarLaw::ConstAccel
+pub geometry::velocity::law::ScalarLaw::ConstAccel::a0: f64
+pub geometry::velocity::law::ScalarLaw::DiskRail
+pub geometry::velocity::law::ScalarLaw::DiskRail::accel: f64
+pub geometry::velocity::law::ScalarLaw::DiskRail::brake: bool
+pub geometry::velocity::law::ScalarLaw::DiskRail::kappa0: f64
+pub geometry::velocity::law::ScalarLaw::DiskRail::sigma: f64
+pub struct geometry::velocity::law::LawSegment
+pub geometry::velocity::law::LawSegment::dt: f64
+pub geometry::velocity::law::LawSegment::law: geometry::velocity::law::ScalarLaw
+pub geometry::velocity::law::LawSegment::s0: f64
+pub geometry::velocity::law::LawSegment::t0: f64
+pub geometry::velocity::law::LawSegment::v0: f64
+impl geometry::velocity::law::LawSegment
+pub fn geometry::velocity::law::LawSegment::brake_to(f64, f64, geometry::velocity::law::ScalarLaw, f64, f64) -> core::option::Option<(geometry::velocity::law::LawSegment, f64)>
+pub fn geometry::velocity::law::LawSegment::cut_at_arc(&self, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
+pub fn geometry::velocity::law::LawSegment::cut_at_speed(&self, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
+pub fn geometry::velocity::law::LawSegment::end_distance(&self) -> f64
+pub fn geometry::velocity::law::LawSegment::end_state(&self) -> (f64, f64, f64)
+pub fn geometry::velocity::law::LawSegment::end_time(&self) -> f64
+pub fn geometry::velocity::law::LawSegment::flipped_cut(&self, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<(geometry::velocity::law::LawSegment, f64)>
+pub fn geometry::velocity::law::LawSegment::min_velocity(&self) -> f64
+pub fn geometry::velocity::law::LawSegment::new(f64, f64, f64, f64, geometry::velocity::law::ScalarLaw) -> Self
+pub fn geometry::velocity::law::LawSegment::reach_over(geometry::velocity::law::ScalarLaw, f64, f64) -> core::option::Option<f64>
+pub fn geometry::velocity::law::LawSegment::state_at(&self, f64) -> (f64, f64, f64)
+pub fn geometry::velocity::law::LawSegment::time_at_distance(&self, f64) -> core::option::Option<f64>
+pub fn geometry::velocity::law::LawSegment::until_arc(f64, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
+impl core::cmp::PartialEq for geometry::velocity::law::LawSegment
+pub fn geometry::velocity::law::LawSegment::eq(&self, &Self) -> bool
+pub enum geometry::velocity::ScalarLaw
+pub geometry::velocity::ScalarLaw::ConstAccel
+pub geometry::velocity::ScalarLaw::ConstAccel::a0: f64
+pub geometry::velocity::ScalarLaw::DiskRail
+pub geometry::velocity::ScalarLaw::DiskRail::accel: f64
+pub geometry::velocity::ScalarLaw::DiskRail::brake: bool
+pub geometry::velocity::ScalarLaw::DiskRail::kappa0: f64
+pub geometry::velocity::ScalarLaw::DiskRail::sigma: f64
+pub enum geometry::velocity::VelocityError
+pub geometry::velocity::VelocityError::Diverged
+pub geometry::velocity::VelocityError::Diverged::line_no: u32
+pub geometry::velocity::VelocityError::FiniteJerkUnsupported
+pub geometry::velocity::VelocityError::FiniteJerkUnsupported::jerk: f64
+pub geometry::velocity::VelocityError::FiniteJerkUnsupported::line_no: u32
+pub geometry::velocity::VelocityError::Inconsistent
+pub geometry::velocity::VelocityError::Inconsistent::line_no: u32
+pub geometry::velocity::VelocityError::Infeasible
+pub geometry::velocity::VelocityError::Infeasible::entry_v: f64
+pub geometry::velocity::VelocityError::Infeasible::exit_v: f64
+pub geometry::velocity::VelocityError::Infeasible::line_no: u32
+pub geometry::velocity::VelocityError::Infeasible::member: usize
+pub geometry::velocity::VelocityError::InvalidConfig
+pub geometry::velocity::VelocityError::NegativeVelocity
+pub geometry::velocity::VelocityError::NegativeVelocity::line_no: u32
+pub geometry::velocity::VelocityError::NegativeVelocity::v: f64
+pub geometry::velocity::VelocityError::NonAlphabet
+pub geometry::velocity::VelocityError::NonAlphabet::line_no: u32
+pub geometry::velocity::VelocityError::NonFinite
+pub geometry::velocity::VelocityError::NonFinite::line_no: u32
+pub geometry::velocity::VelocityError::OverCommitted
+pub geometry::velocity::VelocityError::OverCommitted::line_no: u32
+impl core::error::Error for geometry::velocity::VelocityError
+impl core::fmt::Display for geometry::velocity::VelocityError
+pub fn geometry::velocity::VelocityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct geometry::velocity::LawSegment
+pub geometry::velocity::LawSegment::dt: f64
+pub geometry::velocity::LawSegment::law: geometry::velocity::law::ScalarLaw
+pub geometry::velocity::LawSegment::s0: f64
+pub geometry::velocity::LawSegment::t0: f64
+pub geometry::velocity::LawSegment::v0: f64
+impl geometry::velocity::law::LawSegment
+pub fn geometry::velocity::law::LawSegment::brake_to(f64, f64, geometry::velocity::law::ScalarLaw, f64, f64) -> core::option::Option<(geometry::velocity::law::LawSegment, f64)>
+pub fn geometry::velocity::law::LawSegment::cut_at_arc(&self, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
+pub fn geometry::velocity::law::LawSegment::cut_at_speed(&self, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
+pub fn geometry::velocity::law::LawSegment::end_distance(&self) -> f64
+pub fn geometry::velocity::law::LawSegment::end_state(&self) -> (f64, f64, f64)
+pub fn geometry::velocity::law::LawSegment::end_time(&self) -> f64
+pub fn geometry::velocity::law::LawSegment::flipped_cut(&self, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<(geometry::velocity::law::LawSegment, f64)>
+pub fn geometry::velocity::law::LawSegment::min_velocity(&self) -> f64
+pub fn geometry::velocity::law::LawSegment::new(f64, f64, f64, f64, geometry::velocity::law::ScalarLaw) -> Self
+pub fn geometry::velocity::law::LawSegment::reach_over(geometry::velocity::law::ScalarLaw, f64, f64) -> core::option::Option<f64>
+pub fn geometry::velocity::law::LawSegment::state_at(&self, f64) -> (f64, f64, f64)
+pub fn geometry::velocity::law::LawSegment::time_at_distance(&self, f64) -> core::option::Option<f64>
+pub fn geometry::velocity::law::LawSegment::until_arc(f64, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
+impl core::cmp::PartialEq for geometry::velocity::law::LawSegment
+pub fn geometry::velocity::law::LawSegment::eq(&self, &Self) -> bool
+pub struct geometry::velocity::MoveVelocity
+pub geometry::velocity::MoveVelocity::accel: f64
+pub geometry::velocity::MoveVelocity::entry_v: f64
+pub geometry::velocity::MoveVelocity::exit_v: f64
+pub geometry::velocity::MoveVelocity::length: f64
+pub geometry::velocity::MoveVelocity::peak_v: f64
+pub geometry::velocity::MoveVelocity::phases: alloc::vec::Vec<geometry::velocity::law::LawSegment>
+pub geometry::velocity::MoveVelocity::samples: alloc::vec::Vec<geometry::velocity::VelSample>
+pub geometry::velocity::MoveVelocity::source: geometry::segment::SourceRange
+pub struct geometry::velocity::VelSample
+pub geometry::velocity::VelSample::a: f64
+pub geometry::velocity::VelSample::s: f64
+pub geometry::velocity::VelSample::v: f64
+pub struct geometry::velocity::VelocityPlanParams
+pub geometry::velocity::VelocityPlanParams::entry_v: f64
+pub geometry::velocity::VelocityPlanParams::integration_tol: f64
+pub geometry::velocity::VelocityPlanParams::max_extrude_only_accel_mm_s2: f64
+pub geometry::velocity::VelocityPlanParams::max_extrude_only_velocity_mm_s: f64
+pub struct geometry::velocity::VelocityProfile
+pub geometry::velocity::VelocityProfile::barrier: usize
+pub geometry::velocity::VelocityProfile::boundary_speeds: alloc::vec::Vec<f64>
+pub geometry::velocity::VelocityProfile::moves: alloc::vec::Vec<geometry::velocity::MoveVelocity>
+pub geometry::velocity::VelocityProfile::report: geometry::velocity::VelocityReport
+pub geometry::velocity::VelocityProfile::v_barrier: f64
+pub struct geometry::velocity::VelocityReport
+pub geometry::velocity::VelocityReport::curvature_bound: u32
+pub geometry::velocity::VelocityReport::feedrate_bound: u32
+pub geometry::velocity::VelocityReport::limit_ride: u32
+pub geometry::velocity::VelocityReport::stops: u32
+pub geometry::velocity::VelocityReport::traversal_time_s: f64
+pub fn geometry::velocity::plan_velocity_stops(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
+pub fn geometry::velocity::plan_velocity_stops_reconstruct_prefix(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams, usize) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
+pub fn geometry::velocity::plan_velocity_stops_select_prefix<F>(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams, F) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError> where F: core::ops::function::FnOnce(usize) -> usize
+pub enum geometry::FitError
+pub geometry::FitError::Internal
+pub geometry::FitError::Internal::line_no: u32
+pub geometry::FitError::Internal::source: geometry::error::GeometryError
+pub geometry::FitError::OverTrimmedLine
+pub geometry::FitError::OverTrimmedLine::excess_mm: f64
+pub geometry::FitError::OverTrimmedLine::line_no: u32
+pub enum geometry::FrontendError
+pub geometry::FrontendError::InvalidFeedrate
+pub geometry::FrontendError::InvalidFeedrate::line_no: u32
+pub geometry::FrontendError::InvalidLimits
+pub geometry::FrontendError::InvalidLimits::line_no: u32
+pub geometry::FrontendError::InvalidLimits::reason: &'static str
+pub geometry::FrontendError::NonFiniteInput
+pub geometry::FrontendError::NonFiniteInput::line_no: u32
+pub geometry::FrontendError::Segment
+pub geometry::FrontendError::Segment::line_no: u32
+pub geometry::FrontendError::Segment::source: geometry::error::GeometryError
+pub geometry::FrontendError::ZeroMotion
+pub geometry::FrontendError::ZeroMotion::line_no: u32
+pub enum geometry::GeometryError
+pub geometry::GeometryError::DegenerateArc
+pub geometry::GeometryError::DegenerateArc::reason: &'static str
+pub geometry::GeometryError::DegenerateClothoid
+pub geometry::GeometryError::DegenerateClothoid::reason: &'static str
+pub geometry::GeometryError::FollowerInvariantViolation
+pub geometry::GeometryError::FollowerInvariantViolation::reason: &'static str
+pub geometry::GeometryError::InvalidLowering
+pub geometry::GeometryError::InvalidLowering::reason: &'static str
+pub geometry::GeometryError::NonPlanarBasis
+pub geometry::GeometryError::NonPlanarBasis::reason: &'static str
+pub geometry::GeometryError::NotSinglePieceCubic
+pub geometry::GeometryError::NotSinglePieceCubic::reason: &'static str
+pub geometry::GeometryError::ZeroMotion
+pub enum geometry::ScalarLaw
+pub geometry::ScalarLaw::ConstAccel
+pub geometry::ScalarLaw::ConstAccel::a0: f64
+pub geometry::ScalarLaw::DiskRail
+pub geometry::ScalarLaw::DiskRail::accel: f64
+pub geometry::ScalarLaw::DiskRail::brake: bool
+pub geometry::ScalarLaw::DiskRail::kappa0: f64
+pub geometry::ScalarLaw::DiskRail::sigma: f64
+pub enum geometry::SurfaceContinuity
+pub geometry::SurfaceContinuity::C0
+pub geometry::SurfaceContinuity::C1
+pub enum geometry::SurfaceError
+pub geometry::SurfaceError::FadeBandInverted
+pub geometry::SurfaceError::FadeBandInverted::end: f64
+pub geometry::SurfaceError::FadeBandInverted::start: f64
+pub geometry::SurfaceError::GridTooSmall
+pub geometry::SurfaceError::GridTooSmall::nx: usize
+pub geometry::SurfaceError::GridTooSmall::ny: usize
+pub geometry::SurfaceError::NonFinitePoint
+pub geometry::SurfaceError::NonFinitePoint::index: usize
+pub geometry::SurfaceError::NonPositiveSpacing
+pub geometry::SurfaceError::NonPositiveSpacing::dx: f64
+pub geometry::SurfaceError::NonPositiveSpacing::dy: f64
+pub geometry::SurfaceError::PointCountMismatch
+pub geometry::SurfaceError::PointCountMismatch::expected: usize
+pub geometry::SurfaceError::PointCountMismatch::got: usize
+impl core::error::Error for geometry::surface::SurfaceError
+impl core::fmt::Display for geometry::surface::SurfaceError
+pub fn geometry::surface::SurfaceError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum geometry::SurfaceTransitionError
+pub geometry::SurfaceTransitionError::NonFiniteSegment
+pub geometry::SurfaceTransitionError::UnresolvedCrossing
+pub geometry::SurfaceTransitionError::UnresolvedCrossing::axis: usize
+pub geometry::SurfaceTransitionError::UnresolvedCrossing::boundary: f64
+impl core::error::Error for geometry::surface::SurfaceTransitionError
+impl core::fmt::Display for geometry::surface::SurfaceTransitionError
+pub fn geometry::surface::SurfaceTransitionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum geometry::UnblendReason
+pub geometry::UnblendReason::ArcIncident
+pub geometry::UnblendReason::Collinear
+pub geometry::UnblendReason::ExtrusionRampInfeasible
+pub geometry::UnblendReason::ExtrusionStep
+pub geometry::UnblendReason::NearReversal
+pub geometry::UnblendReason::NoBudget
+pub geometry::UnblendReason::NonSpatial
+pub geometry::UnblendReason::StreamCut
+pub geometry::UnblendReason::ZeroDeviation
+pub enum geometry::VelocityError
+pub geometry::VelocityError::Diverged
+pub geometry::VelocityError::Diverged::line_no: u32
+pub geometry::VelocityError::FiniteJerkUnsupported
+pub geometry::VelocityError::FiniteJerkUnsupported::jerk: f64
+pub geometry::VelocityError::FiniteJerkUnsupported::line_no: u32
+pub geometry::VelocityError::Inconsistent
+pub geometry::VelocityError::Inconsistent::line_no: u32
+pub geometry::VelocityError::Infeasible
+pub geometry::VelocityError::Infeasible::entry_v: f64
+pub geometry::VelocityError::Infeasible::exit_v: f64
+pub geometry::VelocityError::Infeasible::line_no: u32
+pub geometry::VelocityError::Infeasible::member: usize
+pub geometry::VelocityError::InvalidConfig
+pub geometry::VelocityError::NegativeVelocity
+pub geometry::VelocityError::NegativeVelocity::line_no: u32
+pub geometry::VelocityError::NegativeVelocity::v: f64
+pub geometry::VelocityError::NonAlphabet
+pub geometry::VelocityError::NonAlphabet::line_no: u32
+pub geometry::VelocityError::NonFinite
+pub geometry::VelocityError::NonFinite::line_no: u32
+pub geometry::VelocityError::OverCommitted
+pub geometry::VelocityError::OverCommitted::line_no: u32
+impl core::error::Error for geometry::velocity::VelocityError
+impl core::fmt::Display for geometry::velocity::VelocityError
+pub fn geometry::velocity::VelocityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct geometry::CornerFitConfig
+pub geometry::CornerFitConfig::extrusion_ramp_rel_tol: f64
+pub geometry::CornerFitConfig::ramp_accel_budget_mm_s2: f64
+pub geometry::CornerFitConfig::theta_max_rad: f64
+pub geometry::CornerFitConfig::theta_min_rad: f64
+impl core::default::Default for geometry::CornerFitConfig
+pub fn geometry::CornerFitConfig::default() -> Self
+pub struct geometry::CubicSegment
+pub geometry::CubicSegment::feedrate_mm_s: f64
+pub geometry::CubicSegment::followers: alloc::vec::Vec<geometry::segment::FollowerDemand>
+pub geometry::CubicSegment::source: geometry::segment::SourceRange
+pub geometry::CubicSegment::virtual_path_mm: core::option::Option<f64>
+pub geometry::CubicSegment::xyz: nurbs::vector::VectorNurbs<3>
+impl geometry::segment::CubicSegment
+pub fn geometry::segment::CubicSegment::try_new(nurbs::vector::VectorNurbs<3>, alloc::vec::Vec<geometry::segment::FollowerDemand>, f64, geometry::segment::SourceRange) -> core::result::Result<Self, geometry::error::GeometryError>
+pub fn geometry::segment::CubicSegment::try_new_virtual(nurbs::vector::VectorNurbs<3>, alloc::vec::Vec<geometry::segment::FollowerDemand>, f64, geometry::segment::SourceRange, f64) -> core::result::Result<Self, geometry::error::GeometryError>
+pub struct geometry::Fade
+pub geometry::Fade::target: f64
+impl geometry::surface::Fade
+pub fn geometry::surface::Fade::band(&self) -> (f64, f64)
+pub fn geometry::surface::Fade::dfactor(&self, f64) -> f64
+pub fn geometry::surface::Fade::disabled() -> Self
+pub fn geometry::surface::Fade::factor(&self, f64) -> f64
+pub fn geometry::surface::Fade::is_disabled(&self) -> bool
+pub fn geometry::surface::Fade::new(f64, f64, f64) -> core::result::Result<Self, geometry::surface::SurfaceError>
+pub struct geometry::FollowerDemand
+pub geometry::FollowerDemand::axis_index: usize
+pub geometry::FollowerDemand::ratio: f64
+pub geometry::FollowerDemand::ratio_end: f64
+impl geometry::segment::FollowerDemand
+pub fn geometry::segment::FollowerDemand::constant(usize, f64) -> Self
+pub fn geometry::segment::FollowerDemand::delta_over(&self, f64) -> f64
+pub fn geometry::segment::FollowerDemand::is_ramped(&self) -> bool
+pub fn geometry::segment::FollowerDemand::max_abs_ratio(&self) -> f64
+pub fn geometry::segment::FollowerDemand::offset_at(&self, f64, f64) -> f64
+pub fn geometry::segment::FollowerDemand::ramp(usize, f64, f64) -> Self
+pub fn geometry::segment::FollowerDemand::ratio_at(&self, f64, f64) -> f64
+pub fn geometry::segment::FollowerDemand::ratio_slope(&self, f64) -> f64
+pub fn geometry::segment::FollowerDemand::span(&self, f64, f64, f64) -> Self
+pub struct geometry::FollowerWord
+pub geometry::FollowerWord::axis_index: usize
+pub geometry::FollowerWord::letter: u8
+pub struct geometry::GcodePos(pub [f64; 3])
+impl geometry::space::GcodePos
+pub fn geometry::space::GcodePos::to_machine(self, core::option::Option<&geometry::surface::SurfaceTransform>) -> geometry::space::MachinePos
+pub fn geometry::space::GcodePos::x(&self) -> f64
+pub fn geometry::space::GcodePos::y(&self) -> f64
+pub fn geometry::space::GcodePos::z(&self) -> f64
+pub struct geometry::LawSegment
+pub geometry::LawSegment::dt: f64
+pub geometry::LawSegment::law: geometry::velocity::law::ScalarLaw
+pub geometry::LawSegment::s0: f64
+pub geometry::LawSegment::t0: f64
+pub geometry::LawSegment::v0: f64
+impl geometry::velocity::law::LawSegment
+pub fn geometry::velocity::law::LawSegment::brake_to(f64, f64, geometry::velocity::law::ScalarLaw, f64, f64) -> core::option::Option<(geometry::velocity::law::LawSegment, f64)>
+pub fn geometry::velocity::law::LawSegment::cut_at_arc(&self, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
+pub fn geometry::velocity::law::LawSegment::cut_at_speed(&self, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
+pub fn geometry::velocity::law::LawSegment::end_distance(&self) -> f64
+pub fn geometry::velocity::law::LawSegment::end_state(&self) -> (f64, f64, f64)
+pub fn geometry::velocity::law::LawSegment::end_time(&self) -> f64
+pub fn geometry::velocity::law::LawSegment::flipped_cut(&self, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<(geometry::velocity::law::LawSegment, f64)>
+pub fn geometry::velocity::law::LawSegment::min_velocity(&self) -> f64
+pub fn geometry::velocity::law::LawSegment::new(f64, f64, f64, f64, geometry::velocity::law::ScalarLaw) -> Self
+pub fn geometry::velocity::law::LawSegment::reach_over(geometry::velocity::law::ScalarLaw, f64, f64) -> core::option::Option<f64>
+pub fn geometry::velocity::law::LawSegment::state_at(&self, f64) -> (f64, f64, f64)
+pub fn geometry::velocity::law::LawSegment::time_at_distance(&self, f64) -> core::option::Option<f64>
+pub fn geometry::velocity::law::LawSegment::until_arc(f64, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
+impl core::cmp::PartialEq for geometry::velocity::law::LawSegment
+pub fn geometry::velocity::law::LawSegment::eq(&self, &Self) -> bool
+pub struct geometry::MachinePos(pub [f64; 3])
+impl geometry::space::MachinePos
+pub fn geometry::space::MachinePos::to_gcode(self, core::option::Option<&geometry::surface::SurfaceTransform>) -> geometry::space::GcodePos
+pub fn geometry::space::MachinePos::x(&self) -> f64
+pub fn geometry::space::MachinePos::y(&self) -> f64
+pub fn geometry::space::MachinePos::z(&self) -> f64
+pub struct geometry::MeshGrid
+impl geometry::surface::MeshGrid
+pub fn geometry::surface::MeshGrid::bounds(&self) -> geometry::surface::SurfaceBounds
+pub fn geometry::surface::MeshGrid::contains(&self, f64, f64) -> bool
+pub fn geometry::surface::MeshGrid::new(geometry::surface::MeshGridSpec, alloc::vec::Vec<f64>) -> core::result::Result<Self, geometry::surface::SurfaceError>
+pub fn geometry::surface::MeshGrid::sample(&self, f64, f64) -> geometry::surface::SurfaceSample
+pub fn geometry::surface::MeshGrid::x_range(&self) -> (f64, f64)
+pub fn geometry::surface::MeshGrid::y_range(&self) -> (f64, f64)
+pub fn geometry::surface::MeshGrid::z_spread_over(&self, f64, f64, f64, f64, f64) -> f64
+pub fn geometry::surface::MeshGrid::zero_at(&mut self, f64, f64)
+pub struct geometry::MeshGridSpec
+pub geometry::MeshGridSpec::dx: f64
+pub geometry::MeshGridSpec::dy: f64
+pub geometry::MeshGridSpec::nx: usize
+pub geometry::MeshGridSpec::ny: usize
+pub geometry::MeshGridSpec::tension: f64
+pub geometry::MeshGridSpec::x_min: f64
+pub geometry::MeshGridSpec::y_min: f64
+pub struct geometry::Move
+pub geometry::Move::feedrate_mm_s: f64
+pub geometry::Move::limits: geometry::frontend::VelocityLimits
+pub geometry::Move::segment: geometry::path::PathSegment
+pub geometry::Move::source: geometry::segment::SourceRange
+pub struct geometry::MoveContext
+pub geometry::MoveContext::extruder_axis: usize
+pub geometry::MoveContext::feedrate_mm_s: f64
+pub geometry::MoveContext::limits: geometry::frontend::VelocityLimits
+pub geometry::MoveContext::source: geometry::segment::SourceRange
+pub struct geometry::MoveVelocity
+pub geometry::MoveVelocity::accel: f64
+pub geometry::MoveVelocity::entry_v: f64
+pub geometry::MoveVelocity::exit_v: f64
+pub geometry::MoveVelocity::length: f64
+pub geometry::MoveVelocity::peak_v: f64
+pub geometry::MoveVelocity::phases: alloc::vec::Vec<geometry::velocity::law::LawSegment>
+pub geometry::MoveVelocity::samples: alloc::vec::Vec<geometry::velocity::VelSample>
+pub geometry::MoveVelocity::source: geometry::segment::SourceRange
+pub struct geometry::SourceRange
+pub geometry::SourceRange::end_line: u32
+pub geometry::SourceRange::start_line: u32
+pub struct geometry::SurfaceBounds
+pub geometry::SurfaceBounds::max_curvature: f64
+pub geometry::SurfaceBounds::max_gradient: f64
+pub geometry::SurfaceBounds::z_max: f64
+pub geometry::SurfaceBounds::z_min: f64
+pub struct geometry::SurfaceSample
+pub geometry::SurfaceSample::z: f64
+pub geometry::SurfaceSample::zx: f64
+pub geometry::SurfaceSample::zxx: f64
+pub geometry::SurfaceSample::zxy: f64
+pub geometry::SurfaceSample::zy: f64
+pub geometry::SurfaceSample::zyy: f64
+pub struct geometry::SurfaceTransform
+impl geometry::surface::SurfaceTransform
+pub fn geometry::surface::SurfaceTransform::bounds(&self) -> geometry::surface::SurfaceBounds
+pub fn geometry::surface::SurfaceTransform::correction_at(&self, f64, f64, f64) -> f64
+pub fn geometry::surface::SurfaceTransform::correction_spread_over(&self, f64, f64, f64, f64, f64, f64) -> f64
+pub fn geometry::surface::SurfaceTransform::fade(&self) -> &geometry::surface::Fade
+pub fn geometry::surface::SurfaceTransform::gcode_z(&self, f64, f64, f64) -> f64
+pub fn geometry::surface::SurfaceTransform::mesh(&self) -> &geometry::surface::MeshGrid
+pub fn geometry::surface::SurfaceTransform::new(geometry::surface::MeshGrid, geometry::surface::Fade) -> Self
+pub fn geometry::surface::SurfaceTransform::path_transition_distances(&self, &geometry::path::Segment) -> core::result::Result<alloc::vec::Vec<geometry::surface::SurfaceTransition>, geometry::surface::SurfaceTransitionError>
+pub fn geometry::surface::SurfaceTransform::unwarp_z_state(&self, [f64; 2], [f64; 2], [f64; 2], (f64, f64, f64)) -> (f64, f64, f64)
+pub fn geometry::surface::SurfaceTransform::warp(&self, f64, f64, f64) -> geometry::surface::WarpSample
+pub struct geometry::SurfaceTransition
+pub geometry::SurfaceTransition::continuity: geometry::surface::SurfaceContinuity
+pub geometry::SurfaceTransition::s: f64
+pub struct geometry::VelSample
+pub geometry::VelSample::a: f64
+pub geometry::VelSample::s: f64
+pub geometry::VelSample::v: f64
+pub struct geometry::VelocityLimits
+pub geometry::VelocityLimits::accel_mm_s2: f64
+pub geometry::VelocityLimits::corner_deviation_mm: f64
+pub geometry::VelocityLimits::max_jerk_mm_s3: f64
+pub geometry::VelocityLimits::max_velocity_mm_s: f64
+impl geometry::frontend::VelocityLimits
+pub fn geometry::frontend::VelocityLimits::try_new(f64, f64, f64, f64) -> core::result::Result<Self, &'static str>
+pub struct geometry::VelocityPlanParams
+pub geometry::VelocityPlanParams::entry_v: f64
+pub geometry::VelocityPlanParams::integration_tol: f64
+pub geometry::VelocityPlanParams::max_extrude_only_accel_mm_s2: f64
+pub geometry::VelocityPlanParams::max_extrude_only_velocity_mm_s: f64
+pub struct geometry::VelocityProfile
+pub geometry::VelocityProfile::barrier: usize
+pub geometry::VelocityProfile::boundary_speeds: alloc::vec::Vec<f64>
+pub geometry::VelocityProfile::moves: alloc::vec::Vec<geometry::velocity::MoveVelocity>
+pub geometry::VelocityProfile::report: geometry::velocity::VelocityReport
+pub geometry::VelocityProfile::v_barrier: f64
+pub struct geometry::VelocityReport
+pub geometry::VelocityReport::curvature_bound: u32
+pub geometry::VelocityReport::feedrate_bound: u32
+pub geometry::VelocityReport::limit_ride: u32
+pub geometry::VelocityReport::stops: u32
+pub geometry::VelocityReport::traversal_time_s: f64
+pub const geometry::CORNER_DEVIATION_SCV_FACTOR: f64
+pub fn geometry::corner_deviation_from_scv(f64, f64) -> f64
+pub fn geometry::line_move([f64; 3], [f64; 3], f64, geometry::frontend::MoveContext) -> core::result::Result<geometry::frontend::Move, geometry::frontend::FrontendError>
+pub fn geometry::plan_velocity_stops_reconstruct_prefix(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams, usize) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
+pub fn geometry::plan_velocity_stops_select_prefix<F>(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams, F) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError> where F: core::ops::function::FnOnce(usize) -> usize
+pub fn geometry::scv_from_corner_deviation(f64, f64) -> f64
+pub fn geometry::seam_requires_stop(&geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig) -> bool

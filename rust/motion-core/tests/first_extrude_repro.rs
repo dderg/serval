@@ -41,7 +41,7 @@ fn trident_extruder_chain_set() -> trajectory::AxisChainSet {
 #[test]
 fn first_move_extrude_only_has_no_step_burst() {
     let mut cfg = default_stream_config();
-    cfg.limits = geometry::VelocityLimits::try_new(2800.0, 50000.0, 0.05, 4_000_000.0)
+    cfg.limits = geometry::VelocityLimits::try_new(2800.0, 50000.0, 0.05, f64::INFINITY)
         .expect("trident bench limits are valid");
     let moves = parse_gcode_to_moves("G1 E0\nG1 E1 F60\n", cfg.limits);
     assert_eq!(moves.len(), 1, "expected exactly one extrude-only move");
@@ -50,7 +50,10 @@ fn first_move_extrude_only_has_no_step_burst() {
     assert!(!segs.is_empty(), "pipeline emitted no segments");
 
     let first_seg = segs.first().expect("checked non-empty");
-    let track_start = nurbs::eval::eval(&first_seg.axes[EXTRUDER_AXIS], first_seg.t_start);
+    let track_start = first_seg
+        .eval_axis(EXTRUDER_AXIS, first_seg.t_start)
+        .expect("extruder axis evaluates at segment start")
+        .position;
     eprintln!(
         "track start = {:.7} mm = {:.1} steps above the seeded position",
         track_start,
@@ -63,7 +66,10 @@ fn first_move_extrude_only_has_no_step_burst() {
     for seg in &segs {
         let mut t = seg.t_start;
         while t < seg.t_end {
-            let pos = nurbs::eval::eval(&seg.axes[EXTRUDER_AXIS], t);
+            let pos = seg
+                .eval_axis(EXTRUDER_AXIS, t)
+                .expect("extruder axis evaluates inside the segment")
+                .position;
             if let Some(p) = prev {
                 let steps = (pos - p).abs() * STEPS_PER_MM;
                 if steps > worst_steps {

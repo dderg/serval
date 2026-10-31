@@ -1,12 +1,12 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use super::dispatch::SegmentSink;
 use super::*;
 use geometry::segment::SourceRange;
 use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
-use motion_pipeline::StreamConfig;
-use nurbs::eval::eval;
-use trajectory::ShapedSegment;
+use motion_pipeline::{Control, DispatchCommand, StreamConfig};
+use trajectory::{ContinuousSegment, NudgeProfile};
 
 #[derive(Clone, Default)]
 struct Capture {
@@ -15,22 +15,23 @@ struct Capture {
 }
 
 impl SegmentSink for Capture {
-    fn dispatch(&mut self, seg: &ShapedSegment) -> Result<(), DispatchError> {
-        let x_end = eval(&seg.axes[0], seg.t_end);
-        self.segs
-            .lock()
-            .unwrap()
-            .push((seg.t_start, seg.t_end, x_end));
+    fn dispatch(&mut self, seg: &ContinuousSegment) -> Result<(), DispatchError> {
+        let x_end = seg
+            .eval_axis(0, seg.t_end)
+            .expect("axis 0 evaluates")
+            .position;
+        self.segs.lock_ok().push((seg.t_start, seg.t_end, x_end));
         Ok(())
     }
     fn dispatch_nudge(
         &mut self,
         _mcu_id: u32,
-        piece: &motion_pipeline::NudgePiece,
+        axis: u8,
+        _motor_mask: u8,
+        profile: &NudgeProfile,
     ) -> Result<(), DispatchError> {
-        let bp = &piece.piece;
-        let travel = bp.evaluate(bp.u_end) - bp.evaluate(bp.u_start);
-        self.nudges.lock_ok().push((piece.axis, travel));
+        let travel = profile.position(profile.t_end()) - profile.position(profile.t_start());
+        self.nudges.lock_ok().push((axis, travel));
         Ok(())
     }
 }
@@ -52,7 +53,348 @@ impl Capture {
     }
 }
 
-fn cfg() -> StreamConfig {
+struct TestWorker {
+    worker: StreamWorkerHandle,
+    control: Sender<crate::pump::PumpMsg>,
+    execution: Option<JoinHandle<()>>,
+}
+
+impl std::ops::Deref for TestWorker {
+    type Target = StreamWorkerHandle;
+    fn deref(&self) -> &Self::Target {
+        &self.worker
+    }
+}
+
+impl std::ops::DerefMut for TestWorker {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.worker
+    }
+}
+
+impl Drop for TestWorker {
+    fn drop(&mut self) {
+        self.worker.shutdown();
+        let _ = self.control.send(crate::pump::PumpMsg::Shutdown);
+        if let Some(execution) = self.execution.take() {
+            execution.join().unwrap();
+        }
+    }
+}
+
+fn spawn_capture(
+    config: StreamConfig,
+    chains: AxisChainSet,
+    home: Vec<f64>,
+    mut sink: impl SegmentSink + Send + 'static,
+    frontier: Arc<CommittedFrontier>,
+) -> TestWorker {
+    struct NoEndpoint;
+    impl crate::pump::SpanSink for NoEndpoint {
+        fn send_frame(
+            &self,
+            _: crate::types::AxisKey,
+            _: &[trajectory::ClockedMotorSpan],
+            _: u32,
+            _: u32,
+        ) -> Result<i32, crate::pump::SendError> {
+            panic!("ingress capture must not send endpoint frames");
+        }
+    }
+    let (control, control_rx) = crossbeam_channel::unbounded();
+    let (output, trajectory_rx) = crossbeam_channel::bounded(TRAJECTORY_CHANNEL_CAP);
+    let links = Arc::new(WorkerLinks::default());
+    let mut dispatcher = Dispatcher::new(Arc::clone(&links), Arc::clone(&frontier));
+    let admission = Arc::clone(&links);
+    let execution = std::thread::spawn(move || {
+        let mut pump = crate::pump::Pump::new(
+            NoEndpoint,
+            crate::pump::PumpCallbacks::noop(0),
+            None,
+            Arc::new(crate::drain::DrainLedger::new()),
+        );
+        pump.run(
+            &control_rx,
+            &trajectory_rx,
+            |item, pump| {
+                pump.publish_ledger();
+                if let Some(reason) = &pump.fatal_reason {
+                    dispatcher.halt(reason);
+                }
+                dispatcher.feed(item, &mut sink);
+            },
+            |item, cohort_active| admission.bypasses_capacity(item, cohort_active),
+        );
+    });
+    let worker = StreamWorkerHandle::spawn(
+        config,
+        chains,
+        home,
+        output,
+        links,
+        frontier,
+        control.clone(),
+    );
+    TestWorker {
+        worker,
+        control,
+        execution: Some(execution),
+    }
+}
+
+#[test]
+fn finite_homing_admission_and_cancellation_preserve_backpressure() {
+    struct BlockedEndpoint;
+    impl crate::pump::SpanSink for BlockedEndpoint {
+        fn send_frame(
+            &self,
+            _: crate::types::AxisKey,
+            _: &[trajectory::ClockedMotorSpan],
+            _: u32,
+            _: u32,
+        ) -> Result<i32, crate::pump::SendError> {
+            panic!("a ring with zero room must not receive frames");
+        }
+    }
+    let key = crate::types::AxisKey { mcu_id: 1, axis: 0 };
+    let signal = trajectory::MotorSpan::try_new(
+        Arc::from(vec![trajectory::MotorGroup::Independent(
+            trajectory::MotorTerm {
+                source_axis: 0,
+                axis: trajectory::ContinuousAxis::Hold {
+                    position: 0.0,
+                    t_start: 0.0,
+                    t_end: 200.0,
+                },
+                scale: 1.0,
+            },
+        )]),
+        0.0,
+        200.0,
+        0,
+        0,
+        false,
+    )
+    .unwrap();
+    let view = trajectory::ClockedMotorSpan::try_new(
+        Arc::new(signal),
+        0.0,
+        200.0,
+        1.0,
+        201.0,
+        1_000_000.0,
+        1_000_000.0,
+    )
+    .unwrap();
+    let ledger = Arc::new(crate::drain::DrainLedger::new());
+    let mut pump = crate::pump::Pump::new(
+        BlockedEndpoint,
+        crate::pump::PumpCallbacks::noop(0),
+        None,
+        Arc::clone(&ledger),
+    );
+    pump.enqueue(crate::pump::LaneProjection {
+        key,
+        spans: view.split_max_duration().unwrap(),
+        epoch: crate::anchor::StreamEpoch::Reposition,
+        lead_secs: crate::pump::MAX_LEAD_SECS,
+        source_line: 0,
+        epoch_freq: None,
+    });
+    let (control, control_rx) = crossbeam_channel::unbounded();
+    let (output, trajectory_rx) = crossbeam_channel::bounded(TRAJECTORY_CHANNEL_CAP);
+    let observe_output = output.clone();
+    let links = Arc::new(WorkerLinks::default());
+    let frontier = Arc::new(CommittedFrontier::default());
+    let mut dispatcher = Dispatcher::new(Arc::clone(&links), Arc::clone(&frontier));
+    let admission = Arc::clone(&links);
+    let mut capture = Capture::default();
+    let observed_capture = capture.clone();
+    let execution = std::thread::spawn(move || {
+        pump.run(
+            &control_rx,
+            &trajectory_rx,
+            |item, pump| {
+                pump.publish_ledger();
+                dispatcher.feed(item, &mut capture);
+            },
+            |item, cohort_active| admission.bypasses_capacity(item, cohort_active),
+        );
+    });
+    output.send(TrajectoryItem::Parked).unwrap();
+    let (reply, barrier) = crossbeam_channel::bounded(1);
+    output
+        .send(TrajectoryItem::Control(Control::Dispatch(
+            DispatchCommand::Barrier(reply),
+        )))
+        .unwrap();
+    let ack = barrier
+        .recv_timeout(Duration::from_secs(2))
+        .expect("an admission barrier waited for playback of previously staged spans");
+    assert!(ack.result.is_ok());
+    assert!(ledger.staged_total() > 4096);
+    assert!(
+        !ledger.drained(),
+        "admission must not pretend the endpoint played the backlog"
+    );
+    output
+        .send(TrajectoryItem::Control(Control::Dispatch(
+            DispatchCommand::Nudge {
+                mcu_id: key.mcu_id,
+                axis: key.axis,
+                motor_mask: 0,
+                profile: crate::nudge::plan_nudge_profile(0, 1.0, 1.0, 1.0, 0.0).unwrap(),
+            },
+        )))
+        .unwrap();
+    let (reply, after_motion) = crossbeam_channel::bounded(1);
+    output
+        .send(TrajectoryItem::Control(Control::Dispatch(
+            DispatchCommand::Barrier(reply),
+        )))
+        .unwrap();
+    let (inspected, inspection) = std::sync::mpsc::sync_channel(1);
+    control
+        .send(crate::pump::PumpMsg::Barrier(inspected))
+        .unwrap();
+    inspection.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(
+        matches!(
+            after_motion.try_recv(),
+            Err(crossbeam_channel::TryRecvError::Empty)
+        ),
+        "an admission barrier overtook unadmitted motion"
+    );
+    links.discard.store(true, Ordering::Release);
+    output
+        .send(TrajectoryItem::Control(Control::Reset {
+            pos: vec![0.0; 3],
+        }))
+        .unwrap();
+    let (reply, reset) = crossbeam_channel::bounded(1);
+    output
+        .send(TrajectoryItem::Control(Control::Dispatch(
+            DispatchCommand::Barrier(reply),
+        )))
+        .unwrap();
+    assert!(
+        after_motion
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .result
+            .is_ok()
+    );
+    assert!(
+        reset
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .result
+            .is_ok()
+    );
+    assert_eq!(
+        observed_capture.nudge_count(),
+        0,
+        "discarded pending motion was executed"
+    );
+    assert!(ledger.staged_total() > 4096);
+    let worker = StreamWorkerHandle::spawn(
+        cfg_cap(1),
+        AxisChainSet::default(),
+        vec![0.0; 3],
+        output,
+        links,
+        frontier,
+        control.clone(),
+    );
+    let mut h = TestWorker {
+        worker,
+        control,
+        execution: Some(execution),
+    };
+    h.control
+        .send(crate::pump::PumpMsg::DripArm(crate::pump::DripArm {
+            cohort: 7,
+            participants: vec![key],
+            timeout: Duration::from_secs(5),
+        }))
+        .unwrap();
+    let homing = h
+        .home_drip(HomeDripParams {
+            home_pos: [0.0; 4],
+            start: [0.0; 3],
+            axis: 0,
+            direction: 1.0,
+            speed_mm_s: 1.0,
+            max_travel_mm: 500.0,
+        })
+        .unwrap();
+    homing
+        .recv_timeout(Duration::from_secs(2))
+        .expect("finite homing stroke admission waited for the unplayed backlog")
+        .unwrap();
+    let admitted = observed_capture.snapshot();
+    assert!(
+        (admitted.last().unwrap().2 - 500.0).abs() < 1e-7,
+        "homing admission omitted the final brake-to-rest segment"
+    );
+    assert!(ledger.staged_total() > 4096);
+    assert!(!ledger.drained());
+    h.reset(vec![0.0; 3]).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut index = 0u32;
+    let mut start = [0.0; 3];
+    while !observe_output.is_full() {
+        assert!(
+            Instant::now() < deadline,
+            "planning did not fill the blocked trajectory queue"
+        );
+        let end = [
+            f64::from(index + 1) * 10.0,
+            f64::from(index % 2) * 10.0,
+            0.0,
+        ];
+        match h.submit_move(line(index, start, end)) {
+            Ok(()) => {
+                index += 1;
+                start = end;
+            }
+            Err(StreamWorkerError::ChannelFull) => std::thread::yield_now(),
+            Err(error) => panic!("planning submission failed: {error}"),
+        }
+    }
+    h.discard_pending();
+    let (ack, halted) = std::sync::mpsc::sync_channel(1);
+    h.control
+        .send(crate::pump::PumpMsg::Halt {
+            keys: vec![key],
+            ack,
+        })
+        .unwrap();
+    halted
+        .recv_timeout(Duration::from_secs(2))
+        .expect("full trajectory intake blocked Halt");
+    assert_eq!(ledger.staged_total(), 0);
+    h.control.send(crate::pump::PumpMsg::DripDisarm(7)).unwrap();
+    h.control
+        .send(crate::pump::PumpMsg::Resume(vec![key]))
+        .unwrap();
+    h.flush().unwrap();
+    assert_eq!(
+        observed_capture.snapshot(),
+        admitted,
+        "cancellation released pending motion after halt/disarm/resume"
+    );
+    h.shutdown();
+    let execution = h.execution.take().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !execution.is_finished() {
+        assert!(Instant::now() < deadline, "execution owner did not stop");
+        std::thread::yield_now();
+    }
+    execution.join().unwrap();
+}
+
+pub(super) fn cfg() -> StreamConfig {
     cfg_cap(64)
 }
 
@@ -65,7 +407,7 @@ fn cfg_cap(max_buffer_moves: usize) -> StreamConfig {
         fit_tol_mm: 1e-3,
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves,
-        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
+        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, f64::INFINITY).unwrap(),
     }
 }
 
@@ -73,7 +415,7 @@ fn ctx(line_no: u32) -> MoveContext {
     MoveContext {
         extruder_axis: 3,
         feedrate_mm_s: 80.0,
-        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
+        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, f64::INFINITY).unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -122,13 +464,12 @@ fn nonstop_flood_of_real_perimeter_drains_without_crashing() {
     // the process on any commit error, so reaching the flush and seeing a
     // contiguous, complete trajectory is the pass condition.
     let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
+    let mut h = spawn_capture(
         cfg(),
         AxisChainSet::default(),
         vec![99.158, 99.158, 0.2, 0.0],
         cap.clone(),
         Arc::default(),
-        None,
     );
 
     let mut prev = [99.158, 99.158, 0.2];
@@ -184,13 +525,12 @@ fn nonstop_flood_of_real_perimeter_drains_without_crashing() {
 #[test]
 fn streams_collinear_moves_to_a_contiguous_trajectory() {
     let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
+    let mut h = spawn_capture(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
         cap.clone(),
         Arc::default(),
-        None,
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -215,20 +555,52 @@ fn streams_collinear_moves_to_a_contiguous_trajectory() {
         (last.2 - 90.0).abs() < 1e-6,
         "trajectory reaches the final x"
     );
-    assert!(h.commit_fire_count() >= 1);
     h.shutdown();
 }
 
 #[test]
+fn endpoint_fatal_is_terminal_and_flush_reports_it_after_resume() {
+    let capture = Capture::default();
+    let mut h = spawn_capture(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0; 3],
+        capture.clone(),
+        Arc::default(),
+    );
+    h.control
+        .send(crate::pump::PumpMsg::StepcompressFatal {
+            mcu_id: 1,
+            error: "endpoint rejected a stale step clock".to_string(),
+        })
+        .unwrap();
+    assert!(matches!(
+        h.flush(),
+        Err(StreamWorkerError::ExecutionHalted(_))
+    ));
+    h.control
+        .send(crate::pump::PumpMsg::Resume(vec![crate::types::AxisKey {
+            mcu_id: 1,
+            axis: 0,
+        }]))
+        .unwrap();
+    h.submit_move(line(1, [0.0; 3], [30.0, 0.0, 0.0])).unwrap();
+    assert!(matches!(
+        h.flush(),
+        Err(StreamWorkerError::ExecutionHalted(_))
+    ));
+    assert!(capture.snapshot().is_empty());
+    h.shutdown();
+}
+#[test]
 fn dwell_inserts_a_time_gap_then_resumes() {
     let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
+    let mut h = spawn_capture(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
         cap.clone(),
         Arc::default(),
-        None,
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -254,13 +626,12 @@ fn dwell_inserts_a_time_gap_then_resumes() {
 #[test]
 fn dwell_after_a_dispatched_segment_advances_last_move_time_and_dispatched_through() {
     let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
+    let mut h = spawn_capture(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
         cap.clone(),
         Arc::default(),
-        None,
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -290,13 +661,12 @@ fn dwell_after_a_dispatched_segment_advances_last_move_time_and_dispatched_throu
 #[test]
 fn dwell_with_no_prior_dispatch_leaves_last_move_time_and_dispatched_through_unset() {
     let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
+    let mut h = spawn_capture(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
         cap.clone(),
         Arc::default(),
-        None,
     );
 
     h.dwell(1.0).unwrap();
@@ -322,13 +692,12 @@ fn dwell_with_no_prior_dispatch_leaves_last_move_time_and_dispatched_through_uns
 #[test]
 fn two_consecutive_dwells_accumulate_into_last_move_time() {
     let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
+    let mut h = spawn_capture(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
         cap.clone(),
         Arc::default(),
-        None,
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -348,15 +717,14 @@ fn two_consecutive_dwells_accumulate_into_last_move_time() {
 }
 
 #[test]
-fn stream_open_restarts_the_timeline_at_zero() {
+fn reset_restarts_the_timeline_at_zero() {
     let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
+    let mut h = spawn_capture(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
         cap.clone(),
         Arc::default(),
-        None,
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -364,16 +732,15 @@ fn stream_open_restarts_the_timeline_at_zero() {
     h.flush().unwrap();
     let before = cap.snapshot().len();
 
-    h.stream_open(vec![0.0, 0.0, 0.0]).unwrap();
+    h.reset(vec![0.0, 0.0, 0.0]).unwrap();
     h.submit_move(line(2, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
         .unwrap();
     h.flush().unwrap();
 
     let post = cap.snapshot();
-    assert!(post.len() > before);
     assert!(
         (post[before].0 - 0.0).abs() < 1e-9,
-        "post-stream-open timeline must restart at 0, got {}",
+        "post-reset timeline must restart at 0, got {}",
         post[before].0
     );
     h.shutdown();
@@ -382,13 +749,12 @@ fn stream_open_restarts_the_timeline_at_zero() {
 #[test]
 fn home_drip_moves_to_the_travel_endpoint_on_the_new_pipeline() {
     let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
+    let mut h = spawn_capture(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0, 0.0],
         cap.clone(),
         Arc::default(),
-        None,
     );
     let rx = h
         .home_drip(HomeDripParams {
@@ -398,8 +764,6 @@ fn home_drip_moves_to_the_travel_endpoint_on_the_new_pipeline() {
             direction: 1.0,
             speed_mm_s: 50.0,
             max_travel_mm: 20.0,
-            cohort: 0,
-            participants: Vec::new(),
         })
         .unwrap();
     assert!(rx.recv().unwrap().is_ok());
@@ -413,15 +777,14 @@ fn home_drip_moves_to_the_travel_endpoint_on_the_new_pipeline() {
 }
 
 #[test]
-fn nudge_dispatches_pieces_and_advances_time() {
+fn nudge_dispatches_the_profile_and_advances_time() {
     let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
+    let mut h = spawn_capture(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0, 0.0],
         cap.clone(),
         Arc::default(),
-        None,
     );
     let rx = h
         .submit_nudge(NudgeParams {
@@ -434,7 +797,7 @@ fn nudge_dispatches_pieces_and_advances_time() {
         })
         .unwrap();
     assert!(rx.recv().unwrap().is_ok());
-    assert!(cap.nudge_count() > 0, "no nudge pieces dispatched");
+    assert!(cap.nudge_count() > 0, "no nudge profile dispatched");
     assert!(
         h.last_move_time() > 0.0,
         "time did not advance past the nudge"
@@ -445,13 +808,12 @@ fn nudge_dispatches_pieces_and_advances_time() {
 #[test]
 fn nudge_on_the_extruder_lane_travels_the_requested_distance() {
     let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
+    let mut h = spawn_capture(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0, 0.0],
         cap.clone(),
         Arc::default(),
-        None,
     );
     let rx = h
         .submit_nudge(NudgeParams {
@@ -464,7 +826,10 @@ fn nudge_on_the_extruder_lane_travels_the_requested_distance() {
         })
         .unwrap();
     assert!(rx.recv().unwrap().is_ok(), "extruder nudge was rejected");
-    assert!(cap.nudge_count() > 0, "no extruder nudge pieces dispatched");
+    assert!(
+        cap.nudge_count() > 0,
+        "no extruder nudge profile dispatched"
+    );
     assert!(
         (cap.nudge_travel(3) - 5.0).abs() < 1e-6,
         "extruder lane travelled {} mm, expected 5",
@@ -537,13 +902,12 @@ fn continuous_blend_run_dispatches_continuously_without_flush() {
     let cap = Capture::default();
     // Generous cap so the buffer-cap backstop never fires: the continuity commit
     // alone must drain the run.
-    let mut h = StreamWorkerHandle::spawn(
+    let mut h = spawn_capture(
         cfg_cap(256),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
         cap.clone(),
         Arc::default(),
-        None,
     );
 
     // A gentle zig-zag: every vertex blends (no unblended seam). The old
@@ -589,29 +953,34 @@ fn co_move(line_no: u32, start: [f64; 3], end: [f64; 3], e_delta: f64) -> geomet
 fn live_retune_pressure_advance_applies_to_plans_after_the_swap() {
     struct ExtruderDeltaSink(Arc<Mutex<Vec<f64>>>);
     impl SegmentSink for ExtruderDeltaSink {
-        fn dispatch(&mut self, seg: &ShapedSegment) -> Result<(), DispatchError> {
+        fn dispatch(&mut self, seg: &ContinuousSegment) -> Result<(), DispatchError> {
             let t_mid = 0.5 * (seg.t_start + seg.t_end);
-            let de = eval(&seg.axes[3], t_mid) - eval(&seg.axes[3], seg.t_start);
-            self.0.lock().unwrap().push(de);
+            let at = |t: f64| {
+                seg.eval_axis(3, t)
+                    .expect("the extruder lane evaluates")
+                    .position
+            };
+            self.0.lock_ok().push(at(t_mid) - at(seg.t_start));
             Ok(())
         }
         fn dispatch_nudge(
             &mut self,
             _mcu_id: u32,
-            _piece: &motion_pipeline::NudgePiece,
+            _axis: u8,
+            _motor_mask: u8,
+            _profile: &NudgeProfile,
         ) -> Result<(), DispatchError> {
             Ok(())
         }
     }
     let deltas: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let mut h = StreamWorkerHandle::spawn(
+    let mut h = spawn_capture(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0, 0.0],
         ExtruderDeltaSink(Arc::clone(&deltas)),
         Arc::default(),
-        None,
     );
 
     h.submit_move(co_move(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 4.0))
@@ -621,9 +990,12 @@ fn live_retune_pressure_advance_applies_to_plans_after_the_swap() {
     assert_eq!(before.len(), 1, "first move should emit one segment");
 
     let mut chains = vec![trajectory::CompiledChain::default(); 4];
-    chains[3] = trajectory::CompiledChain {
-        stages: vec![trajectory::ChainStage::DerivativeGains { k1: 0.2, k2: 0.0 }],
-    };
+    chains[3] = trajectory::CompiledChain::compile(&[trajectory::PostProcessorInstance::new(
+        "pa",
+        &trajectory::algos::LinearPressureAdvance,
+        vec![0.2],
+    )])
+    .unwrap();
     h.update_axis_chains(AxisChainSet {
         chains,
         followers: Vec::new(),
@@ -649,13 +1021,12 @@ fn live_retune_pressure_advance_applies_to_plans_after_the_swap() {
 #[test]
 fn flush_returns_after_commit_without_sleeping_until_playout() {
     let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
+    let mut h = spawn_capture(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0, 0.0],
         cap.clone(),
         Arc::default(),
-        None,
     );
     h.submit_move(line_e(1, 5.0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0))
         .unwrap();
@@ -691,13 +1062,12 @@ fn poll_fence(h: &StreamWorkerHandle, id: u64, timeout: Duration) -> Option<f64>
 #[test]
 fn forcing_fence_resolves_to_the_end_of_submitted_motion() {
     let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
+    let mut h = spawn_capture(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
         cap.clone(),
         Arc::default(),
-        None,
     );
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
         .unwrap();
@@ -719,13 +1089,12 @@ fn forcing_fence_resolves_to_the_end_of_submitted_motion() {
 #[test]
 fn fence_on_an_idle_pipe_resolves_without_new_motion() {
     let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
+    let mut h = spawn_capture(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
         cap.clone(),
         Arc::default(),
-        None,
     );
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
         .unwrap();
@@ -745,13 +1114,12 @@ fn fence_on_an_idle_pipe_resolves_without_new_motion() {
 #[test]
 fn passive_fence_resolves_as_the_stream_commits_past_it() {
     let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
+    let mut h = spawn_capture(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
         cap.clone(),
         Arc::default(),
-        None,
     );
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
         .unwrap();
@@ -773,13 +1141,12 @@ fn passive_fence_resolves_as_the_stream_commits_past_it() {
 #[test]
 fn startup_prime_defers_drain_until_pipeline_fills() {
     let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
+    let mut h = spawn_capture(
         cfg_cap(256),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
         cap.clone(),
         Arc::default(),
-        None,
     );
 
     let n: u32 = 80;
@@ -822,13 +1189,12 @@ fn startup_prime_defers_drain_until_pipeline_fills() {
 #[test]
 fn startup_prime_drains_after_timeout_for_sparse_input() {
     let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
+    let mut h = spawn_capture(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
         cap.clone(),
         Arc::default(),
-        None,
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -877,67 +1243,54 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
         overspeed: Arc<std::sync::atomic::AtomicUsize>,
     }
     impl SegmentSink for MaxV {
-        fn dispatch(&mut self, seg: &ShapedSegment) -> Result<(), DispatchError> {
+        fn dispatch(&mut self, seg: &ContinuousSegment) -> Result<(), DispatchError> {
             // The corexy_fast world's exact motor config: CoreXY mixing, the
-            // 2083 mm/s per-motor step ceiling from its pulse timing. The
-            // wire-piece build panics on any -307-class overspeed track,
+            // 2083 mm/s per-motor step ceiling from its pulse timing.
+            // The enqueue path rejects any -307-class overspeed track,
             // exactly like the live dispatch stage.
             let cfg = vec![crate::mcu_config::McuAxisConfig {
                 ethercat: false,
                 mcu_id: 0,
                 axes: vec![0, 1, 2],
-                kinematics: crate::mcu_config::KINEMATICS_COREXY,
-                caps: crate::mcu_config::McuCaps {
-                    total_piece_memory: 62 * 1024,
+                hw: crate::mcu_config::McuHardware {
+                    kinematics: crate::mcu_config::KINEMATICS_COREXY,
+                    max_motor_velocity: vec![2083.3, 2083.3, 208.3],
+                    ..Default::default()
                 },
-                max_motor_velocity: vec![2083.3, 2083.3, 208.3],
                 ..Default::default()
             }];
-            let seg_clone = seg.clone();
-            let cfg_clone = cfg.clone();
-            let result = std::panic::catch_unwind(move || {
-                crate::enqueue::enqueue_segment(
-                    &seg_clone,
-                    &cfg_clone,
-                    &crate::enqueue::EnqueueCtx {
-                        epoch_freq: &|_| None,
-                        t0: seg_clone.t_start,
-                        epoch: crate::anchor::StreamEpoch::Reposition,
-                        host_now: 0.0,
-                        lead_secs: crate::pump::MAX_LEAD_SECS,
-                        project: |_mcu, hs| (hs * 1_000_000.0) as u64,
-                        max_piece_secs: None,
-                    },
-                )
-            });
-            if result.is_err() {
+            let enqueued = crate::enqueue::enqueue_segment(
+                seg,
+                &cfg,
+                &crate::enqueue::EnqueueCtx {
+                    epoch_freq: &|_| None,
+                    clock_freq_hz: &|_| 1_000_000.0,
+                    lane_is_phase: &|_| false,
+                    t0: 1.0,
+                    epoch: crate::anchor::StreamEpoch::Reposition,
+                    host_now: 0.0,
+                    lead_secs: crate::pump::MAX_LEAD_SECS,
+                    project_exact: |_mcu, hs: f64| hs * 1_000_000.0,
+                },
+            );
+            if let Err(e) = enqueued {
                 eprintln!(
-                    "OVERSPEED seg line={} t=[{}..{}]",
+                    "OVERSPEED seg line={} t=[{}..{}]: {e}",
                     seg.source_line, seg.t_start, seg.t_end
                 );
-                for (axis, curve) in seg.axes.iter().enumerate().take(2) {
-                    for bp in nurbs::bezier::extract_bezier_pieces(curve) {
-                        let dur = bp.u_end - bp.u_start;
-                        let c1 = bp.coeffs.get(1).copied().unwrap_or(0.0);
-                        if dur < 1e-3 || c1.abs() / dur.max(1e-12) > 4000.0 {
-                            eprintln!(
-                                "  axis{axis} piece u=[{:.9}..{:.9}] dur={dur:.3e} coeffs={:?}",
-                                bp.u_start, bp.u_end, bp.coeffs
-                            );
-                        }
-                    }
-                }
                 self.overspeed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            let mut worst = self.worst.lock().unwrap();
+            let mut worst = self.worst.lock_ok();
             for axis in 0..seg.axes.len().min(2) {
-                let h = 1e-5;
                 let steps = 64;
                 for i in 0..steps {
-                    let t = seg.t_start
-                        + (seg.t_end - seg.t_start - h) * f64::from(i) / f64::from(steps);
-                    let v = (eval(&seg.axes[axis], t + h) - eval(&seg.axes[axis], t)) / h;
+                    let t =
+                        seg.t_start + (seg.t_end - seg.t_start) * f64::from(i) / f64::from(steps);
+                    let v = seg
+                        .eval_axis(axis, t)
+                        .expect("a dispatched lane evaluates on its own domain")
+                        .velocity;
                     if v.abs() > worst.0.abs() {
                         *worst = (v, t, axis);
                     }
@@ -948,7 +1301,9 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
         fn dispatch_nudge(
             &mut self,
             _mcu_id: u32,
-            _piece: &motion_pipeline::NudgePiece,
+            _axis: u8,
+            _motor_mask: u8,
+            _profile: &NudgeProfile,
         ) -> Result<(), DispatchError> {
             Ok(())
         }
@@ -969,7 +1324,7 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
         .expect("compiles"),
         trajectory::CompiledChain::default(),
     );
-    let limits = VelocityLimits::try_new(2800.0, 100000.0, 0.695, 1_000_000.0).unwrap();
+    let limits = VelocityLimits::try_new(2800.0, 100000.0, 0.695, f64::INFINITY).unwrap();
     let config = StreamConfig {
         corner: CornerFitConfig::default(),
         integration_tol: 1e-4,
@@ -989,13 +1344,12 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
         .collect();
 
     let sink = MaxV::default();
-    let mut h = StreamWorkerHandle::spawn(
+    let mut h = spawn_capture(
         config,
         chains,
         vec![pts[0].0, pts[0].1, 2.0, 0.0],
         sink.clone(),
         Arc::default(),
-        None,
     );
 
     let mut prev = [pts[0].0, pts[0].1, 2.0];

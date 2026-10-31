@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 fn make_dispatcher() -> EventDispatcher {
     let snap = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
-    EventDispatcher::new(snap, 256, 64)
+    EventDispatcher::new(snap)
 }
 
 fn fault_status(engine_status: u8, last_fault: u16, segment_id: u32) -> RuntimeEvent {
@@ -142,23 +142,27 @@ fn status_watermark_regression_does_not_synthesize() {
 }
 
 #[test]
-fn heartbeat_callback_fires_with_retired_counts() {
+fn heartbeat_callback_fires_with_retired_counts_and_playback_clocks() {
     let status = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
-    let mut d = EventDispatcher::new(status, 16, 8);
+    let mut d = EventDispatcher::new(status);
 
-    let recorder: Arc<Mutex<Vec<Vec<u32>>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder: Arc<Mutex<Vec<(Vec<u32>, Vec<u64>)>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder2 = Arc::clone(&recorder);
-    d.heartbeat_callback = Some(Arc::new(move |counts: &[u32]| {
-        recorder2.lock().unwrap().push(counts.to_vec());
+    d.heartbeat_callback = Some(Arc::new(move |counts: &[u32], clocks: &[u64]| {
+        recorder2
+            .lock()
+            .unwrap()
+            .push((counts.to_vec(), clocks.to_vec()));
     }));
 
     d.dispatch(RuntimeEvent::Heartbeat {
         retired_counts: vec![5, 1],
+        playback_clocks: vec![4_000, 900],
     });
 
     let got = recorder.lock().unwrap();
     assert_eq!(got.len(), 1, "callback must fire exactly once");
-    assert_eq!(got[0], vec![5, 1]);
+    assert_eq!(got[0], (vec![5, 1], vec![4_000, 900]));
 }
 
 #[test]
@@ -166,7 +170,7 @@ fn heartbeat_is_not_forwarded_to_runtime_rx() {
     use std::sync::mpsc::sync_channel;
 
     let status = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
-    let mut d = EventDispatcher::new(status, 16, 8);
+    let mut d = EventDispatcher::new(status);
 
     let (tx, rx) = sync_channel::<RuntimeEvent>(8);
     let (bulk_tx, _bulk_rx) = sync_channel::<RuntimeEvent>(8);
@@ -174,6 +178,7 @@ fn heartbeat_is_not_forwarded_to_runtime_rx() {
 
     d.dispatch(RuntimeEvent::Heartbeat {
         retired_counts: vec![3, 7],
+        playback_clocks: vec![0, 0],
     });
 
     assert!(
@@ -188,7 +193,7 @@ fn mcu_log_hook_is_called_on_mcu_log_event() {
     use std::time::Instant;
 
     let snapshot = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
-    let mut dispatcher = EventDispatcher::new(snapshot, 16, 8);
+    let mut dispatcher = EventDispatcher::new(snapshot);
 
     let received: Arc<Mutex<Vec<McuLogEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let received_clone = received.clone();
@@ -219,7 +224,7 @@ fn mcu_log_without_hook_does_not_panic() {
     use std::time::Instant;
 
     let snapshot = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
-    let mut dispatcher = EventDispatcher::new(snapshot, 16, 8);
+    let mut dispatcher = EventDispatcher::new(snapshot);
     dispatcher.dispatch(RuntimeEvent::McuLog(McuLogEvent {
         mcu_tick: 0,
         level: 0,
@@ -239,7 +244,7 @@ fn mcu_log_also_forwarded_to_runtime_rx() {
     use std::time::Instant;
 
     let snapshot = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
-    let mut dispatcher = EventDispatcher::new(snapshot, 16, 8);
+    let mut dispatcher = EventDispatcher::new(snapshot);
 
     let (tx, rx) = sync_channel::<RuntimeEvent>(8);
     let (bulk_tx, _bulk_rx) = sync_channel::<RuntimeEvent>(8);
@@ -313,4 +318,41 @@ fn clock_reaches_priority_lane_even_when_bulk_dispatched_first() {
         Ok(RuntimeEvent::PassthroughResponse { name, .. }) => assert_eq!(name, "beacon_data"),
         other => panic!("expected accel on bulk lane, got {other:?}"),
     }
+}
+
+#[test]
+fn a_stalled_bulk_subscriber_bounds_the_queue_without_stalling_the_reactor() {
+    use crate::transport::MessageParams;
+    use std::sync::mpsc::sync_channel;
+
+    const BULK_CAPACITY: usize = 8;
+    let mut d = make_dispatcher();
+    let (priority_tx, _priority_rx) = sync_channel::<RuntimeEvent>(1);
+    let (bulk_tx, bulk_rx) = sync_channel::<RuntimeEvent>(BULK_CAPACITY);
+    d.runtime_event_dispatcher
+        .subscribe(priority_tx, bulk_tx)
+        .unwrap();
+
+    for _ in 0..1024 {
+        d.dispatch(RuntimeEvent::PassthroughResponse {
+            name: "beacon_data".into(),
+            params: MessageParams::new(),
+        });
+    }
+
+    assert_eq!(
+        bulk_rx.try_iter().count(),
+        BULK_CAPACITY,
+        "a subscriber that never reads must not accumulate more than the lane's bound"
+    );
+
+    d.dispatch(RuntimeEvent::PassthroughResponse {
+        name: "beacon_data".into(),
+        params: MessageParams::new(),
+    });
+    assert_eq!(
+        bulk_rx.try_iter().count(),
+        1,
+        "the lane must resume delivering once the subscriber drains"
+    );
 }

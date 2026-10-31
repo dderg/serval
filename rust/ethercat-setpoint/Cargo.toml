@@ -1,0 +1,15 @@
+[package]
+name = "ethercat-setpoint"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "DC-grid playback and feedforward kernels without a trajectory producer or hardware endpoint."
+license.workspace = true
+
+[dependencies]
+runtime-contract = { path = "../runtime-contract" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[lints]
+workspace = true

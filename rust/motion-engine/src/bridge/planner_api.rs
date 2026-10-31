@@ -1,15 +1,24 @@
 use super::{
-    Arc, DRAIN_TIMEOUT, FieldValue, HashSet, McuTopologyInput, Ordering, PyMotionEngine, PyResult,
-    PyRuntimeError, PyValueError, Python, classify, config, planner_err, pymethods,
-    require_positive,
+    Arc, ArgValue, DRAIN_TIMEOUT, HashSet, McuTopologyInput, Ordering, PyMotionEngine, PyResult,
+    PyRuntimeError, PyValueError, Python, classify, planner_err, pymethods, require_positive,
 };
-use crate::lock_ext::LockExt;
-use config::from_doc::{planner_config_from_settings, read_motion_settings};
+use motion_core::lock_ext::LockExt;
+use planner_config::from_doc::{planner_config_from_settings, read_motion_settings};
 use pyo3::FromPyObject;
 
 fn unsupported_curve(py: Python<'_>, message: &'static str) -> PyResult<()> {
     py.detach(|| Err(PyRuntimeError::new_err(message)))
 }
+
+pub(super) fn require_single_motor_mask(motor_mask: u8) -> Result<(), String> {
+    if motor_mask.count_ones() > 1 {
+        return Err(format!(
+            "submit_nudge: multi-bit motor_mask {motor_mask:#010b} not supported"
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn motion_history_host_now() -> f64 {
     host_rt::clock::instant_to_f64(std::time::Instant::now())
 }
@@ -20,13 +29,17 @@ struct McuTopology {
     axes: Vec<u8>,
     kinematics: u8,
     max_motor_velocity: Vec<f64>,
-    stepping_mode: u8,
+    lane_kinds: Vec<u8>,
+    motor_counts: Vec<u8>,
     microstep_distance: Vec<f64>,
     invert_dir: Vec<bool>,
     stepper_oids: Vec<u32>,
-    stepcompress_sample_rate: f64,
     move_queue_slots: u32,
     step_pulse_seconds: Vec<f64>,
+    high_precision_step_compress: Vec<bool>,
+    stepcompress_max_error_secs: f64,
+    phase_sample_rate: f64,
+    phase_ring_depth: u32,
 }
 
 impl McuTopology {
@@ -34,58 +47,118 @@ impl McuTopology {
         McuTopologyInput {
             mcu_id: self.mcu_id,
             axes: self.axes,
-            kinematics: self.kinematics,
-            max_motor_velocity: self.max_motor_velocity,
-            stepping_mode: self.stepping_mode,
-            microstep_distance: self.microstep_distance,
-            invert_dir: self.invert_dir,
-            stepper_oids: self.stepper_oids,
-            stepcompress_sample_rate: self.stepcompress_sample_rate,
-            move_queue_slots: self.move_queue_slots,
-            step_pulse_seconds: self.step_pulse_seconds,
+            lane_kinds: self.lane_kinds,
+            high_precision_step_compress: self.high_precision_step_compress,
+            hw: motion_core::mcu_config::McuHardware {
+                kinematics: self.kinematics,
+                max_motor_velocity: self.max_motor_velocity,
+                motor_counts: self.motor_counts,
+                microstep_distance: self.microstep_distance,
+                invert_dir: self.invert_dir,
+                stepper_oids: self.stepper_oids,
+                move_queue_slots: self.move_queue_slots,
+                step_pulse_seconds: self.step_pulse_seconds,
+                stepcompress_max_error_secs: self.stepcompress_max_error_secs,
+                phase_sample_rate: self.phase_sample_rate,
+                phase_ring_depth: self.phase_ring_depth,
+            },
         }
     }
 }
 
+/// One bed mesh as klippy hands it over: the probed grid, the datum the mesh
+/// is zeroed at, the fade band, and the Z envelope the mesh-following demand
+/// is judged against.
+#[derive(FromPyObject)]
+#[pyo3(from_item_all)]
+struct BedMeshRequest {
+    points: Vec<f64>,
+    x_min: f64,
+    y_min: f64,
+    dx: f64,
+    dy: f64,
+    nx: usize,
+    ny: usize,
+    tension: f64,
+    fade: Option<(f64, f64, f64)>,
+    zero_ref_x: f64,
+    zero_ref_y: f64,
+    z_velocity_limit: Option<f64>,
+    z_accel_limit: Option<f64>,
+}
+
+/// The one motor a nudge acts on.
+#[derive(Debug, Clone, Copy, FromPyObject)]
+#[pyo3(from_item_all)]
+struct NudgeTarget {
+    mcu_id: u32,
+    axis_idx: u8,
+    motor_mask: u8,
+}
+
+/// How far and how fast a nudge runs.
+#[derive(Debug, Clone, Copy, FromPyObject)]
+#[pyo3(from_item_all)]
+struct NudgeMotion {
+    delta_mm: f64,
+    speed: f64,
+    accel: f64,
+}
+
+/// A G5 cubic's control handles: the incoming pair (absent on a chained
+/// segment, which reflects the previous one) and the outgoing pair.
+#[derive(Debug, Clone, Copy, FromPyObject)]
+#[pyo3(from_item_all)]
+struct CurveHandles {
+    i: Option<f64>,
+    j: Option<f64>,
+    p: f64,
+    q: f64,
+}
+
+/// One curve segment's endpoint displacement, spatial plus extrusion.
+#[derive(Debug, Clone, Copy, FromPyObject)]
+#[pyo3(from_item_all)]
+struct CurveDisplacement {
+    dx: f64,
+    dy: f64,
+    dz: f64,
+    de: f64,
+}
+
 #[pymethods]
 impl PyMotionEngine {
-    #[pyo3(signature = (mcu_id, axis_idx, motor_mask, delta_mm, speed, accel))]
+    #[pyo3(signature = (target, motion))]
     fn submit_nudge(
         &self,
-        _py: Python<'_>,
-        mcu_id: u32,
-        axis_idx: u8,
-        motor_mask: u8,
-        delta_mm: f64,
-        speed: f64,
-        accel: f64,
+        py: Python<'_>,
+        target: NudgeTarget,
+        motion: NudgeMotion,
     ) -> PyResult<f64> {
-        if runtime::piece_ring::stepper_sel_from_mask(motor_mask).is_err() {
-            return Err(PyRuntimeError::new_err(format!(
-                "submit_nudge: multi-bit motor_mask {motor_mask:#010b} not supported"
-            )));
-        }
+        require_single_motor_mask(target.motor_mask).map_err(PyRuntimeError::new_err)?;
+        let profile =
+            trajectory::NudgeProfile::try_new(motion.delta_mm, motion.speed, motion.accel, 0.0)
+                .map_err(|e| PyRuntimeError::new_err(format!("submit_nudge: {e}")))?;
         let rx = {
             let guard = self.planner.lock_ok();
             let planner = guard.as_ref().ok_or_else(|| {
                 PyRuntimeError::new_err("planner not initialized — call init_planner first")
             })?;
             planner
-                .submit_nudge(crate::worker::NudgeParams {
-                    mcu_id,
-                    axis: axis_idx,
-                    motor_mask,
-                    delta_mm,
-                    speed,
-                    accel,
+                .submit_nudge(motion_core::worker::NudgeParams {
+                    mcu_id: target.mcu_id,
+                    axis: target.axis_idx,
+                    motor_mask: target.motor_mask,
+                    delta_mm: motion.delta_mm,
+                    speed: motion.speed,
+                    accel: motion.accel,
                 })
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
         };
-        rx.recv()
+        py.detach(|| rx.recv())
             .map_err(|_| PyRuntimeError::new_err("nudge notify dropped"))?
             .map_err(PyRuntimeError::new_err)?;
-        let (accel_t, cruise_t, _v) = crate::nudge::calc_move_time(delta_mm, speed, accel);
-        Ok(accel_t + cruise_t + accel_t)
+        Ok(profile.duration())
     }
     /// `config_text` is the serialized config document; the motion-owned
     /// sections are re-read here with the same reader
@@ -107,29 +180,16 @@ impl PyMotionEngine {
         let machine = self.machine_from_gcode(*self.commanded_pos.lock_ok());
         self.rebase_motion_history_after_position_set(machine);
 
-        let (ethercat_mcu_ids, host_ios, ring_depth_table) =
-            self.build_transport_maps(&mcu_configs)?;
+        let (ethercat_mcu_ids, host_ios) = self.build_transport_maps(&mcu_configs)?;
         self.seed_ethercat_clock_estimates(&ethercat_mcu_ids);
 
         host_rt::memory_lock::HOST_MEMORY_LOCK
             .start_pipeline_threads(|| {
-                let pump_control = self.spawn_pipeline(
-                    &cfg,
-                    &mcu_configs,
-                    &host_ios,
-                    &ec_conns,
-                    ring_depth_table,
-                )?;
+                let pump_control = self.spawn_pipeline(&cfg, &mcu_configs, &host_ios, &ec_conns)?;
 
                 self.spawn_live_position_poll_thread();
 
-                self.wire_mcu_supervision(
-                    &mcu_configs,
-                    &ethercat_mcu_ids,
-                    &ec_conns,
-                    &host_ios,
-                    pump_control,
-                );
+                self.wire_mcu_supervision(&mcu_configs, &ethercat_mcu_ids, &ec_conns, pump_control);
 
                 Ok(())
             })
@@ -172,7 +232,7 @@ impl PyMotionEngine {
                 }
             };
             let pos = self.commanded_pos.lock_ok().0;
-            let (max_v, max_a, corner_deviation, jerk) = {
+            let (max_v, max_a, corner_deviation) = {
                 let cfg = self.planner_config.lock_ok();
                 let (mut v, mut a) = cfg.cartesian.for_move(dx, dy, dz);
                 if let Some(rv) = cfg.runtime_caps.velocity {
@@ -181,14 +241,11 @@ impl PyMotionEngine {
                 if let Some(ra) = cfg.runtime_caps.accel {
                     a = a.min(ra);
                 }
-                let j = cfg
-                    .runtime_caps
-                    .jerk_override
-                    .unwrap_or(cfg.cartesian.max_jerk);
-                (v, a, cfg.corner_deviation(), j)
+                (v, a, cfg.corner_deviation())
             };
-            let limits = geometry::VelocityLimits::try_new(max_v, max_a, corner_deviation, jerk)
-                .map_err(PyRuntimeError::new_err)?;
+            let limits =
+                geometry::VelocityLimits::try_new(max_v, max_a, corner_deviation, f64::INFINITY)
+                    .map_err(PyRuntimeError::new_err)?;
             let line_no = self.move_seq.fetch_add(1, Ordering::Relaxed) as u32;
             let m = classify::build_move(
                 pos,
@@ -208,7 +265,7 @@ impl PyMotionEngine {
                 })?;
                 match planner.submit_move(m) {
                     Ok(()) => {}
-                    Err(crate::worker::StreamWorkerError::ChannelFull) => return Ok(false),
+                    Err(motion_core::worker::StreamWorkerError::ChannelFull) => return Ok(false),
                     Err(e) => return Err(planner_err(e)),
                 }
                 tracing::trace!(
@@ -229,31 +286,25 @@ impl PyMotionEngine {
         })
     }
 
-    #[pyo3(signature = (i, j, p, q, dx, dy, dz, de, feedrate))]
+    #[pyo3(signature = (handles, displacement, feedrate))]
     fn submit_bezier(
         &self,
         py: Python<'_>,
-        i: Option<f64>,
-        j: Option<f64>,
-        p: f64,
-        q: f64,
-        dx: f64,
-        dy: f64,
-        dz: f64,
-        de: f64,
+        handles: CurveHandles,
+        displacement: CurveDisplacement,
         feedrate: f64,
     ) -> PyResult<()> {
         tracing::debug!(
             subsystem = "motion",
             event = "submit_bezier_enter",
-            i = ?i,
-            j = ?j,
-            p,
-            q,
-            dx,
-            dy,
-            dz,
-            de,
+            i = ?handles.i,
+            j = ?handles.j,
+            p = handles.p,
+            q = handles.q,
+            dx = displacement.dx,
+            dy = displacement.dy,
+            dz = displacement.dz,
+            de = displacement.de,
             feedrate,
             "engine.submit_bezier enter"
         );
@@ -264,16 +315,13 @@ impl PyMotionEngine {
              faceting is a follow-up. Slice without G5.",
         )
     }
-    #[pyo3(signature = (i, j, dx, dy, dz, de, feedrate))]
+    #[pyo3(signature = (i, j, displacement, feedrate))]
     fn submit_quadratic(
         &self,
         py: Python<'_>,
         i: f64,
         j: f64,
-        dx: f64,
-        dy: f64,
-        dz: f64,
-        de: f64,
+        displacement: CurveDisplacement,
         feedrate: f64,
     ) -> PyResult<()> {
         tracing::debug!(
@@ -281,10 +329,10 @@ impl PyMotionEngine {
             event = "submit_quadratic_enter",
             i,
             j,
-            dx,
-            dy,
-            dz,
-            de,
+            dx = displacement.dx,
+            dy = displacement.dy,
+            dz = displacement.dz,
+            de = displacement.de,
             feedrate,
             "engine.submit_quadratic enter"
         );
@@ -339,47 +387,11 @@ impl PyMotionEngine {
         self.planner_config.lock_ok().runtime_caps.accel = accel;
         Ok(())
     }
-    /// Replace the static `[printer] max_jerk` for subsequent moves —
-    /// unlike the velocity/accel caps this may RAISE the limit (infinity
-    /// disables jerk limiting entirely). Calibration transients
-    /// (SERVO_MEASURE_RINGDOWN) use it so the stop excites the raw plant.
-    /// `None` restores the configured limit.
-    #[pyo3(signature = (jerk))]
-    fn set_jerk_override(&self, jerk: Option<f64>) -> PyResult<()> {
-        if let Some(j) = jerk {
-            if !(j > 0.0) {
-                return Err(PyValueError::new_err(
-                    "jerk override must be positive (infinity disables jerk limiting)",
-                ));
-            }
-        }
-        self.planner_config.lock_ok().runtime_caps.jerk_override = jerk;
-        Ok(())
-    }
-    /// Swap the live pipeline chains between the configured post-processors
-    /// and identity (no shaping). Fails without touching the flag when the
-    /// restored chains no longer compile — the caller must hear that
-    /// shaping did NOT come back.
-    fn set_post_processor_bypass(&self, enabled: bool) -> PyResult<()> {
-        let axis_chains = {
-            let mut cfg = self.planner_config.lock_ok();
-            let previous = cfg.post_processor_bypass;
-            cfg.post_processor_bypass = enabled;
-            let axis_chains = match cfg.compile_active_chains() {
-                Ok(chains) => chains,
-                Err(e) => {
-                    cfg.post_processor_bypass = previous;
-                    return Err(PyValueError::new_err(e.to_string()));
-                }
-            };
-            axis_chains
-        };
-        if let Some(handle) = self.planner.lock_ok().as_ref() {
-            handle
-                .update_axis_chains(axis_chains)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        }
-        Ok(())
+    pub(super) fn set_post_processor_bypass(&self, enabled: bool) -> PyResult<()> {
+        self.publish_post_processors(|_, bypass| {
+            *bypass = enabled;
+            Ok(())
+        })
     }
     #[pyo3(signature = (corner_deviation))]
     fn set_corner_deviation(&self, corner_deviation: Option<f64>) -> PyResult<()> {
@@ -393,21 +405,8 @@ impl PyMotionEngine {
         self.planner_config.lock_ok().runtime_corner_deviation = corner_deviation;
         Ok(())
     }
-    fn update_post_processor(&self, name: &str, key: &str, value: f64) -> PyResult<()> {
-        let axis_chains = {
-            let mut cfg = self.planner_config.lock_ok();
-            cfg.post_processors
-                .set_param(name, key, value)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cfg.compile_active_chains()
-                .map_err(|e| PyValueError::new_err(e.to_string()))?
-        };
-        if let Some(handle) = self.planner.lock_ok().as_ref() {
-            handle
-                .update_axis_chains(axis_chains)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        }
-        Ok(())
+    pub(super) fn update_post_processor(&self, name: &str, key: &str, value: f64) -> PyResult<()> {
+        self.publish_post_processors(|processors, _| processors.set_param(name, key, value))
     }
 
     fn post_processor_param(&self, name: &str, key: &str) -> Option<f64> {
@@ -417,25 +416,35 @@ impl PyMotionEngine {
             .param(name, key)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn set_bed_mesh(
-        &self,
-        points: Vec<f64>,
-        x_min: f64,
-        y_min: f64,
-        dx: f64,
-        dy: f64,
-        nx: usize,
-        ny: usize,
-        tension: f64,
-        fade: Option<(f64, f64, f64)>,
-        zero_ref_x: f64,
-        zero_ref_y: f64,
-        z_velocity_limit: Option<f64>,
-        z_accel_limit: Option<f64>,
-    ) -> PyResult<(f64, (f64, f64, f64, f64, f64))> {
-        let mut mesh = geometry::MeshGrid::new(x_min, y_min, dx, dy, nx, ny, points, tension)
-            .map_err(|e| PyValueError::new_err(format!("set_bed_mesh: {e}")))?;
+    fn set_bed_mesh(&self, request: BedMeshRequest) -> PyResult<(f64, (f64, f64, f64, f64, f64))> {
+        let BedMeshRequest {
+            points,
+            x_min,
+            y_min,
+            dx,
+            dy,
+            nx,
+            ny,
+            tension,
+            fade,
+            zero_ref_x,
+            zero_ref_y,
+            z_velocity_limit,
+            z_accel_limit,
+        } = request;
+        let mut mesh = geometry::MeshGrid::new(
+            geometry::MeshGridSpec {
+                x_min,
+                y_min,
+                dx,
+                dy,
+                nx,
+                ny,
+                tension,
+            },
+            points,
+        )
+        .map_err(|e| PyValueError::new_err(format!("set_bed_mesh: {e}")))?;
         if !mesh.contains(zero_ref_x, zero_ref_y) {
             return Err(PyValueError::new_err(format!(
                 "set_bed_mesh: zero reference ({zero_ref_x}, {zero_ref_y}) is outside the \
@@ -525,6 +534,30 @@ impl PyMotionEngine {
 }
 
 impl PyMotionEngine {
+    fn publish_post_processors(
+        &self,
+        update: impl FnOnce(
+            &mut planner_config::PostProcessorSet,
+            &mut bool,
+        ) -> Result<(), planner_config::PostProcessorConfigError>,
+    ) -> PyResult<()> {
+        let mut cfg = self.planner_config.lock_ok();
+        let mut processors = cfg.post_processors.clone();
+        let mut bypass = cfg.post_processor_bypass;
+        update(&mut processors, &mut bypass).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let axis_chains = processors
+            .compile_active_chains(&cfg.axis_registry, bypass)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if let Some(handle) = self.planner.lock_ok().as_ref() {
+            handle
+                .update_axis_chains(axis_chains)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        }
+        cfg.post_processors = processors;
+        cfg.post_processor_bypass = bypass;
+        Ok(())
+    }
+
     /// Re-anchor every serial MCU's step counters at a machine-space rest
     /// position. The MCU-side `runtime_seed_position` also zeroes all
     /// non-spatial motor positions, so this is the counterpart of any
@@ -543,7 +576,7 @@ impl PyMotionEngine {
                 })
                 .map(|c| c.mcu_id)
                 .collect();
-            crate::mcu_config::build_serial_seed_sends(&configs, &ethercat_mcu_ids, pos)
+            motion_core::mcu_config::build_serial_seed_sends(&configs, &ethercat_mcu_ids, pos)
         };
         let mcus = self.mcus.lock_ok();
         for s in sends {
@@ -561,12 +594,12 @@ impl PyMotionEngine {
                     s.mcu_id
                 )
             });
-            io.send_typed(
+            io.send_args(
                 "runtime_seed_position",
                 &[
-                    ("x_q16", FieldValue::I32(s.x_q16)),
-                    ("y_q16", FieldValue::I32(s.y_q16)),
-                    ("z_q16", FieldValue::I32(s.z_q16)),
+                    ("x_q16", ArgValue::Int(i64::from(s.x_q16))),
+                    ("y_q16", ArgValue::Int(i64::from(s.y_q16))),
+                    ("z_q16", ArgValue::Int(i64::from(s.z_q16))),
                 ],
             )
             .map_err(|e| {
@@ -576,35 +609,13 @@ impl PyMotionEngine {
                 ))
             })?;
         }
-        self.seed_stepcompress_shims(pos)
-    }
-
-    /// Classic stepping keeps the step counter on the host: re-anchor each
-    /// stepcompress motor's shim counter so the next drain re-emits
-    /// `reset_step_clock` from the new position.
-    fn seed_stepcompress_shims(&self, pos: geometry::MachinePos) -> PyResult<()> {
+        drop(mcus);
         let configs = self.mcu_axis_configs.lock_ok().clone();
-        let endpoints = self.stepcompress_endpoints.lock_ok().clone();
-        for cfg in configs
-            .iter()
-            .filter(|c| c.stepping_mode == crate::mcu_config::SteppingMode::Stepcompress)
-        {
-            let counts = crate::mcu_config::stepcompress_seed_counts(cfg, pos)
-                .map_err(PyRuntimeError::new_err)?;
-            let endpoint = endpoints.get(&cfg.mcu_id).ok_or_else(|| {
-                PyRuntimeError::new_err(format!(
-                    "position seed: no shim endpoint registered for stepcompress mcu {}",
-                    cfg.mcu_id
-                ))
-            })?;
-            endpoint.lock_ok().reset_position(&counts).map_err(|e| {
-                PyRuntimeError::new_err(format!(
-                    "position seed: shim reseed failed for mcu {}: {e:?}",
-                    cfg.mcu_id
-                ))
-            })?;
-        }
-        Ok(())
+        self.endpoint_command(motion_core::pump::EndpointCommand::SeedPosition {
+            configs,
+            position: pos,
+        })
+        .map_err(PyRuntimeError::new_err)
     }
 
     /// Swap the active surface transform behind a pipeline drain, keeping the
@@ -638,13 +649,15 @@ impl PyMotionEngine {
         gcode: geometry::GcodePos,
         machine: geometry::MachinePos,
     ) -> PyResult<()> {
-        {
+        let flushed = py.detach(|| {
             let planner_guard = self.planner.lock_ok();
-            if let Some(planner) = planner_guard.as_ref() {
-                py.detach(|| planner.flush()).map_err(planner_err)?;
-            } else {
-                return Ok(());
+            match planner_guard.as_ref() {
+                Some(planner) => planner.flush().map(|()| true),
+                None => Ok(false),
             }
+        });
+        if !flushed.map_err(planner_err)? {
+            return Ok(());
         }
         {
             let drain = self.drain.clone();
@@ -656,7 +669,7 @@ impl PyMotionEngine {
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("planner disappeared during position reseed"))?;
         planner
-            .stream_open(crate::mcu_config::reanchor_stream_pos(gcode))
+            .reset(motion_core::mcu_config::reanchor_stream_pos(gcode))
             .map_err(planner_err)?;
         self.send_serial_position_seeds(machine)?;
         Ok(())
@@ -664,10 +677,10 @@ impl PyMotionEngine {
 
     fn rebase_motion_history_after_position_set(&self, machine: geometry::MachinePos) {
         let host_now = motion_history_host_now();
-        let configs: Vec<crate::mcu_config::McuAxisConfig> =
+        let configs: Vec<motion_core::mcu_config::McuAxisConfig> =
             self.mcu_axis_configs.lock_ok().clone();
         let mut store = self.motion_history.lock_ok();
-        for (key, pos) in crate::mcu_config::reanchor_axis_targets(&configs, machine) {
+        for (key, pos) in motion_core::mcu_config::reanchor_axis_targets(&configs, machine) {
             store.rebase_axis(key, host_now, pos);
         }
     }

@@ -31,10 +31,6 @@ extern "C" {
 #define RT_PHASE_CLENSHAW      7
 #define RT_PHASE_STEP_ENQ      8
 #define RT_PHASE_ISR_EXIT      9
-#define RT_PHASE_STEPOUT_ENTER 10
-#define RT_PHASE_STEPOUT_POP   11
-#define RT_PHASE_STEPOUT_EMIT  12
-#define RT_PHASE_STEPOUT_EXIT  13
 
 void diag_ring_push(uint8_t tag, uint32_t a, uint32_t b);
 

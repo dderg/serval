@@ -10,7 +10,6 @@ from fakes import (
 )
 
 from klippy.extras.homing import Homing
-from klippy.mcu import STEPPING_MODE_PIECE, STEPPING_MODE_STEPCOMPRESS
 from klippy.motion_endstop import entry_endstops
 
 
@@ -52,15 +51,18 @@ class VirtualEndstop:
         return 0
 
 
-def _mcu(printer, name="mcu", stepping_mode=STEPPING_MODE_PIECE):
-    return FakeMcu(printer=printer, name=name, stepping_mode=stepping_mode)
+def _mcu(printer, name="mcu"):
+    return FakeMcu(printer=printer, name=name)
 
 
 def _kin(mcu, motor_names, axis="x", kind="cartesian", second_mcu=None):
     mcus = [mcu] * len(motor_names)
     if second_mcu is not None:
         mcus[-1] = second_mcu
-    steppers = [FakeStepper(name=n, mcu=m) for n, m in zip(motor_names, mcus)]
+    steppers = [
+        FakeStepper(name=n, mcu=m, oid=21 + i)
+        for i, (n, m) in enumerate(zip(motor_names, mcus))
+    ]
     axis_index = "xyz".index(axis)
     rails = [FakeRail(name="rail_" + a) for a in "xyz"]
     rails[axis_index] = FakeRail(name="rail_" + axis, steppers=steppers)
@@ -92,13 +94,12 @@ def _resolve(endstop_pin, kin, pins, printer=None):
 def _keyed_setup(
     endstop_pin,
     motor_names=("stepper_x", "stepper_x1"),
-    stepping_mode=STEPPING_MODE_PIECE,
     kind="cartesian",
     pin_chips=None,
     lane_second_mcu=False,
 ):
     printer = FakePrinter()
-    mcu = _mcu(printer, stepping_mode=stepping_mode)
+    mcu = _mcu(printer)
     second = _mcu(printer, name="mcu2") if lane_second_mcu else None
     kin = _kin(mcu, list(motor_names), kind=kind, second_mcu=second)
     chips = pin_chips if pin_chips is not None else {}
@@ -120,8 +121,8 @@ def test_keyed_endstops_bind_each_motor_to_its_lane_slot():
     assert all(e.binding.lane_idx == 0 for e in endstops)
     handle = mcu.get_engine_handle()
     assert [e.remote_freeze() for e in endstops] == [
-        (handle, 0, 0),
-        (handle, 0, 1),
+        (handle, 0, 0, 21),
+        (handle, 0, 1, 22),
     ]
     assert all(e.group for e in endstops)
     assert [name for _, name in query_endstops.registered] == [
@@ -172,8 +173,8 @@ def test_keyed_endstop_pin_on_a_foreign_mcu_freezes_the_motor_mcu():
     assert [e.mcu for e in endstops] == [mcu, other]
     handle = mcu.get_engine_handle()
     assert [e.remote_freeze() for e in endstops] == [
-        (handle, 0, 0),
-        (handle, 0, 1),
+        (handle, 0, 0, 21),
+        (handle, 0, 1, 22),
     ]
     assert all(e.group for e in endstops)
 
@@ -194,18 +195,6 @@ def test_keyed_endstop_with_virtual_provider_chip_is_rejected():
         FakeConfigError, match="virtual endstops drive one switch per axis"
     ):
         _resolve(pin_text, kin, pins, printer)
-
-
-def test_keyed_endstop_on_classic_stepcompress_mcu_is_rejected():
-    printer, mcu, kin, pins, pin_text = _keyed_setup(
-        KEYED_PINS, stepping_mode=STEPPING_MODE_STEPCOMPRESS
-    )
-    with pytest.raises(
-        FakeConfigError, match="requires motion-runtime stepping"
-    ):
-        _resolve(pin_text, kin, pins, printer)
-    assert mcu.config_cmds == []
-    assert mcu.config_callbacks == []
 
 
 def test_single_endstop_entry_carries_both_shapes():

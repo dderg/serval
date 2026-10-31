@@ -53,38 +53,21 @@ fn arc_fitted_corpus_lexes_without_panic() {
     let text = gen_arc_corpus(26_000, 2_000);
 
     let mut commands = 0u64;
-    let mut comments = 0u64;
-    let mut markers = 0u64;
     let mut errors = 0u64;
-    let mut layer_changes = 0u64;
 
     for item in lex(&text) {
         match item {
             Ok(Token::Command { .. }) => commands += 1,
-            Ok(Token::Comment { .. }) => comments += 1,
-            Ok(Token::Marker { kind, .. }) => {
-                markers += 1;
-                if matches!(kind, gcode::MarkerKind::LayerChange { .. }) {
-                    layer_changes += 1;
-                }
-            }
             Err(_) => errors += 1,
             Ok(_) => {}
         }
     }
 
-    eprintln!(
-        "arc_fitted: commands={commands} comments={comments} markers={markers} \
-         errors={errors} layer_changes={layer_changes}"
-    );
+    eprintln!("arc_fitted: commands={commands} errors={errors}");
 
     assert!(
         commands > 100_000,
         "expected > 100k Command tokens, got {commands}"
-    );
-    assert!(
-        layer_changes >= 1,
-        "expected at least one LayerChange marker, got {layer_changes}"
     );
     assert!(
         errors < commands / 100,

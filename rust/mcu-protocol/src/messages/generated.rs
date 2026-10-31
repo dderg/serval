@@ -5,13 +5,11 @@ use crate::codec::Cursor;
 use crate::codec::Decode;
 use crate::codec::DecodeError;
 use crate::codec::Encode;
-use crate::codec::get_f32;
 use crate::codec::get_i32;
 use crate::codec::get_u8;
 use crate::codec::get_u16;
 use crate::codec::get_u32;
 use crate::codec::get_u64;
-use crate::codec::put_f32;
 use crate::codec::put_i32;
 use crate::codec::put_u8;
 use crate::codec::put_u16;
@@ -23,16 +21,16 @@ use crate::codec::put_u64;
 pub enum MessageKind {
     Identify = 0x0001,
     IdentifyResponse = 0x0002,
-    ConfigureAxes = 0x0030,
-    ConfigureAxesResponse = 0x0031,
     QueryRuntimeCaps = 0x0040,
     RuntimeCapsResponse = 0x0041,
     ClaimHandshake = 0x0042,
     ClaimHandshakeReply = 0x0043,
     QueryMotorState = 0x0044,
     MotorStateResponse = 0x0045,
-    PushPieces = 0x0060,
-    PushPiecesResponse = 0x0061,
+    PushSampleRuns = 0x0062,
+    PushSampleRunsResponse = 0x0063,
+    QuerySampleGrid = 0x0064,
+    SampleGridResponse = 0x0065,
     StartCapture = 0x0068,
     StartCaptureResponse = 0x0069,
     StopCapture = 0x006A,
@@ -80,16 +78,16 @@ impl MessageKind {
         Some(match v {
             0x0001 => Self::Identify,
             0x0002 => Self::IdentifyResponse,
-            0x0030 => Self::ConfigureAxes,
-            0x0031 => Self::ConfigureAxesResponse,
             0x0040 => Self::QueryRuntimeCaps,
             0x0041 => Self::RuntimeCapsResponse,
             0x0042 => Self::ClaimHandshake,
             0x0043 => Self::ClaimHandshakeReply,
             0x0044 => Self::QueryMotorState,
             0x0045 => Self::MotorStateResponse,
-            0x0060 => Self::PushPieces,
-            0x0061 => Self::PushPiecesResponse,
+            0x0062 => Self::PushSampleRuns,
+            0x0063 => Self::PushSampleRunsResponse,
+            0x0064 => Self::QuerySampleGrid,
+            0x0065 => Self::SampleGridResponse,
             0x0068 => Self::StartCapture,
             0x0069 => Self::StartCaptureResponse,
             0x006A => Self::StopCapture,
@@ -150,58 +148,6 @@ impl MessageKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ConfigureAxes {
-    pub kinematics: u8,
-    pub present_mask: u8,
-    pub awd_mask: u8,
-    pub invert_mask: u8,
-    pub steps_per_mm: [f32; 4],
-}
-
-impl Encode for ConfigureAxes {
-    fn encode(&self, out: &mut Vec<u8>) {
-        put_u8(out, self.kinematics);
-        put_u8(out, self.present_mask);
-        put_u8(out, self.awd_mask);
-        put_u8(out, self.invert_mask);
-        for v in &self.steps_per_mm {
-            put_f32(out, *v);
-        }
-    }
-}
-
-impl Decode for ConfigureAxes {
-    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        Ok(Self {
-            kinematics: get_u8(c)?,
-            present_mask: get_u8(c)?,
-            awd_mask: get_u8(c)?,
-            invert_mask: get_u8(c)?,
-            steps_per_mm: [get_f32(c)?, get_f32(c)?, get_f32(c)?, get_f32(c)?],
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConfigureAxesResponse {
-    pub result: i32,
-}
-
-impl Encode for ConfigureAxesResponse {
-    fn encode(&self, out: &mut Vec<u8>) {
-        put_i32(out, self.result);
-    }
-}
-
-impl Decode for ConfigureAxesResponse {
-    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        Ok(Self {
-            result: get_i32(c)?,
-        })
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryRuntimeCaps;
 
@@ -216,21 +162,15 @@ impl Decode for QueryRuntimeCaps {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RuntimeCapsResponse {
-    pub total_piece_memory: u32,
-}
+pub struct RuntimeCapsResponse;
 
 impl Encode for RuntimeCapsResponse {
-    fn encode(&self, out: &mut Vec<u8>) {
-        put_u32(out, self.total_piece_memory);
-    }
+    fn encode(&self, _out: &mut Vec<u8>) {}
 }
 
 impl Decode for RuntimeCapsResponse {
-    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        Ok(Self {
-            total_piece_memory: get_u32(c)?,
-        })
+    fn decode_from(_c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self)
     }
 }
 
@@ -257,6 +197,50 @@ impl Encode for QueryMotorState {
 impl Decode for QueryMotorState {
     fn decode_from(_c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         Ok(Self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuerySampleGrid;
+
+impl Encode for QuerySampleGrid {
+    fn encode(&self, _out: &mut Vec<u8>) {}
+}
+
+impl Decode for QuerySampleGrid {
+    fn decode_from(_c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SampleGridResponse {
+    pub executor: u8,
+    pub cycle_ticks: u32,
+    pub ring_depth_cycles: u32,
+    pub grid_index: u64,
+    pub grid_clock: u64,
+}
+
+impl Encode for SampleGridResponse {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_u8(out, self.executor);
+        put_u32(out, self.cycle_ticks);
+        put_u32(out, self.ring_depth_cycles);
+        put_u64(out, self.grid_index);
+        put_u64(out, self.grid_clock);
+    }
+}
+
+impl Decode for SampleGridResponse {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            executor: get_u8(c)?,
+            cycle_ticks: get_u32(c)?,
+            ring_depth_cycles: get_u32(c)?,
+            grid_index: get_u64(c)?,
+            grid_clock: get_u64(c)?,
+        })
     }
 }
 
@@ -1008,6 +992,7 @@ pub struct StepperSuppress {
     pub motor: u8,
     pub stepper: u8,
     pub engage: u8,
+    pub stepper_oid: u8,
 }
 
 impl Encode for StepperSuppress {
@@ -1015,6 +1000,7 @@ impl Encode for StepperSuppress {
         put_u8(out, self.motor);
         put_u8(out, self.stepper);
         put_u8(out, self.engage);
+        put_u8(out, self.stepper_oid);
     }
 }
 
@@ -1024,6 +1010,7 @@ impl Decode for StepperSuppress {
             motor: get_u8(c)?,
             stepper: get_u8(c)?,
             engage: get_u8(c)?,
+            stepper_oid: get_u8(c)?,
         })
     }
 }

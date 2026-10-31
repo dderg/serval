@@ -14,8 +14,6 @@ fn snapshot_returns_published_records_in_sequence_order() {
         send_started_ns: marker,
         send_elapsed_ns: 13,
         host_front_start_time: 17,
-        mcu_front_start_time: 19,
-        arrival_clock: 23,
         result: -308,
     });
 
@@ -33,8 +31,6 @@ fn snapshot_returns_published_records_in_sequence_order() {
     assert_eq!(record.guard_mcu_clock, 29);
     assert_eq!(record.send_elapsed_ns, 13);
     assert_eq!(record.host_front_start_time, 17);
-    assert_eq!(record.mcu_front_start_time, 19);
-    assert_eq!(record.arrival_clock, 23);
     assert_eq!(record.result, -308);
     assert!(
         records

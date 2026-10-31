@@ -1,10 +1,9 @@
 pub const ERR_PIECES_WHILE_HALTED: i32 = -315;
 pub const ERR_RESUME_STREAM_NOT_HALTED: i32 = -316;
 
-/// Mirrors the MCU runtime's piece gate (`gate_pieces`/`ungate_pieces`): an
-/// endstop trip or host `Stop` halts the stream, and only `ResumeStream`
-/// reopens it. While halted every `PushPieces` is rejected, so setpoints the
-/// pump drips during the trip→Stop round-trip cannot restart motion.
+/// An endstop trip or host `Stop` halts the stream, and only `ResumeStream`
+/// reopens it. While halted every `PushSampleRuns` is rejected, so setpoints
+/// the pump drips during the trip→Stop round-trip cannot restart motion.
 #[derive(Debug, Default)]
 pub struct StreamHalt {
     halted: bool,

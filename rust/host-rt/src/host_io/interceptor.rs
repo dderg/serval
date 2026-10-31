@@ -3,14 +3,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::transport::MessageParams;
 
-pub struct InterceptorCallback(pub Box<dyn Fn(&MessageParams) + Send + Sync>);
-
-impl std::fmt::Debug for InterceptorCallback {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("InterceptorCallback(<fn>)")
-    }
-}
-
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -48,14 +40,14 @@ impl InterceptorTable {
         &mut self,
         msg_name: String,
         oid: Option<u32>,
-        callback: InterceptorCallback,
+        callback: Box<dyn Fn(&MessageParams) + Send + Sync>,
     ) -> InterceptorId {
         let id = InterceptorId::next();
         let key = InterceptorKey { msg_name, oid };
-        self.entries.entry(key).or_default().push(InterceptorEntry {
-            id,
-            callback: callback.0,
-        });
+        self.entries
+            .entry(key)
+            .or_default()
+            .push(InterceptorEntry { id, callback });
         id
     }
 

@@ -23,6 +23,22 @@ EthercatDrive = namedtuple(
     ],
 )
 
+# The endpoint-process half of the claim, extracted by attribute on the Rust
+# side exactly like EthercatDrive.
+EthercatNodeClaim = namedtuple(
+    "EthercatNodeClaim",
+    [
+        "label",
+        "socket_path",
+        "interface",
+        "endpoint_binary",
+        "cycle_us",
+        "dynamics_profile",
+        "late_tolerance_us",
+        "group_delay_us",
+    ],
+)
+
 # Default endpoint binary: ethercat_node.py lives at
 # <repo>/klippy/extras/, so three os.path.dirname hops reach <repo>.
 _REPO_ROOT = os.path.dirname(
@@ -232,15 +248,17 @@ class EtherCatNode:
         engine = self.printer.lookup_object("motion_engine")
         try:
             self.engine_handle = engine.claim_ethercat_node(
-                self.name,
-                self.socket_path,
-                self.interface,
-                self.endpoint,
-                self.cycle_us,
-                self.dynamics_profile,
+                EthercatNodeClaim(
+                    label=self.name,
+                    socket_path=self.socket_path,
+                    interface=self.interface,
+                    endpoint_binary=self.endpoint,
+                    cycle_us=self.cycle_us,
+                    dynamics_profile=self.dynamics_profile,
+                    late_tolerance_us=self.late_tolerance_us,
+                    group_delay_us=self.group_delay_us,
+                ),
                 drives,
-                late_tolerance_us=self.late_tolerance_us,
-                group_delay_us=self.group_delay_us,
             )
         except RuntimeError as e:
             raise self.printer.config_error(str(e))

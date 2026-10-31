@@ -1,5 +1,5 @@
-use crate::kinematics::KinematicsModule;
-use crate::mcu_config::{AXIS_X, AXIS_Y, KINEMATICS_COREXY};
+use motion_core::kinematics::KinematicsModule;
+use motion_core::mcu_config::{AXIS_X, AXIS_Y, KINEMATICS_COREXY};
 
 #[test]
 fn corexy_inverse_maps_motor_to_axes() {

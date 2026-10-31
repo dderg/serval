@@ -1,20 +1,33 @@
-use motion_core::lock_ext::LockExt;
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::{Map, Value};
 use time::OffsetDateTime;
 
 use host_rt::host_io::runtime_events::McuLogEvent;
 use host_rt::passthrough_queue::{McuHandle, PassthroughRouter};
-use runtime::error::FaultCode;
-use runtime::log_codes::{compose_msg, event_info, subsystem_name};
+use runtime_contract::error::FaultCode;
+use runtime_contract::log_codes::{event_info, subsystem_name};
 
 use crate::logging::context::load_context;
 use crate::logging::schema::format_time;
 use crate::logging::writer::RotatingJsonlWriter;
+
+fn compose_msg(template: &str, arg0: u32, arg1: u32) -> String {
+    template
+        .replace("{arg0:i32}", &format!("{}", arg0 as i32))
+        .replace("{arg1:i32}", &format!("{}", arg1 as i32))
+        .replace("{arg0:hex}", &format!("{arg0:#x}"))
+        .replace("{arg1:hex}", &format!("{arg1:#x}"))
+        .replace("{arg0:hi16}", &format!("{}", arg0 >> 16))
+        .replace("{arg1:hi16}", &format!("{}", arg1 >> 16))
+        .replace("{arg0:lo16}", &format!("{}", arg0 & 0xffff))
+        .replace("{arg1:lo16}", &format!("{}", arg1 & 0xffff))
+        .replace("{arg0}", &format!("{arg0}"))
+        .replace("{arg1}", &format!("{arg1}"))
+}
 
 fn mcu_level_str(level: u8) -> &'static str {
     match level {
@@ -70,7 +83,7 @@ pub fn build_mcu_log_hook(
     let dropped = AtomicU64::new(0);
     move |e: McuLogEvent| {
         let (time_str, time_estimated) = {
-            let guard = router.lock_ok();
+            let guard = router.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some((dt, estimated)) = guard.wall_time_at_mcu(mcu, e.mcu_tick) {
                 (format_time(dt), estimated)
             } else {
@@ -169,3 +182,7 @@ pub fn build_mcu_log_hook(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "mcu_log_tests.rs"]
+mod tests;

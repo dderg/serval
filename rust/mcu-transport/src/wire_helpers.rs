@@ -1,6 +1,25 @@
 use mcu_protocol::{MessageKind, PER_MESSAGE_HEADER_LEN};
 
+use crate::frame::{CHANNEL_CONTROL, encode_frame};
+
 pub const MESSAGE_VERSION_DEFAULT: u8 = 0x01;
+
+#[must_use]
+pub fn frame_payload(kind: MessageKind, correlation_id: u32, body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(PER_MESSAGE_HEADER_LEN + body.len());
+    out.extend_from_slice(&encode_message_header(
+        kind,
+        MESSAGE_VERSION_DEFAULT,
+        correlation_id,
+    ));
+    out.extend_from_slice(body);
+    out
+}
+
+#[must_use]
+pub fn control_frame(kind: MessageKind, correlation_id: u32, body: &[u8]) -> Vec<u8> {
+    encode_frame(CHANNEL_CONTROL, &frame_payload(kind, correlation_id, body))
+}
 
 #[must_use]
 pub fn encode_message_header(kind: MessageKind, version: u8, correlation_id: u32) -> [u8; 7] {

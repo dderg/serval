@@ -22,9 +22,19 @@ class FakeEngine(_FakeEngine):
         super().__init__()
         self.trims = []
 
-    def set_diff_trim(self, *args):
-        self.calls.append(("set_diff_trim",) + args)
-        self.trims.append(args)
+    def set_diff_trim(self, handle, slot_a, slot_b, gains):
+        self.calls.append(("set_diff_trim", handle, slot_a, slot_b, gains))
+        self.trims.append(
+            (
+                handle,
+                slot_a,
+                slot_b,
+                gains["gain_micro"],
+                gains["clamp_um"],
+                gains["lpf_millihz"],
+                gains["settle_ms"],
+            )
+        )
 
 
 def _motor(name, node_name, chain_index, invert=False):

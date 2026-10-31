@@ -72,19 +72,19 @@ fn render_line_hoists_subsystem_out_of_the_field_map() {
 
 #[test]
 fn a_full_channel_drops_instead_of_blocking() {
-    let (sender, receiver) = crossbeam_channel::bounded::<LogRecord>(1);
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<LogRecord>(1);
     sender.try_send(record(Map::new())).unwrap();
     let started = std::time::Instant::now();
     let verdict = sender.try_send(record(Map::new()));
     assert!(matches!(
         verdict,
-        Err(crossbeam_channel::TrySendError::Full(_))
+        Err(std::sync::mpsc::TrySendError::Full(_))
     ));
     assert!(started.elapsed() < std::time::Duration::from_millis(10));
     drop(receiver);
     let verdict = sender.try_send(record(Map::new()));
     assert!(matches!(
         verdict,
-        Err(crossbeam_channel::TrySendError::Disconnected(_))
+        Err(std::sync::mpsc::TrySendError::Disconnected(_))
     ));
 }

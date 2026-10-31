@@ -76,55 +76,6 @@ fn from_bernstein_to_monomial_for_known_case() {
     assert!((p.coeffs[1] - 1.0).abs() < 1e-12);
 }
 
-#[test]
-fn add_two_pieces_same_support() {
-    let a = BezierPiece {
-        u_start: 0.0,
-        u_end: 1.0,
-        coeffs: vec![1.0, 2.0],
-    };
-    let b = BezierPiece {
-        u_start: 0.0,
-        u_end: 1.0,
-        coeffs: vec![3.0, 4.0],
-    };
-    let sum = (&a + &b).unwrap();
-    assert_eq!(sum.coeffs, vec![4.0, 6.0]);
-    assert_eq!(sum.u_start, 0.0);
-    assert_eq!(sum.u_end, 1.0);
-}
-
-#[test]
-fn add_two_pieces_mismatched_degrees_pads_with_zero() {
-    let a = BezierPiece {
-        u_start: 0.0,
-        u_end: 1.0,
-        coeffs: vec![1.0, 2.0, 3.0],
-    };
-    let b = BezierPiece {
-        u_start: 0.0,
-        u_end: 1.0,
-        coeffs: vec![1.0],
-    };
-    let sum = (&a + &b).unwrap();
-    assert_eq!(sum.coeffs, vec![2.0, 2.0, 3.0]);
-}
-
-#[test]
-fn add_two_pieces_mismatched_support_errors() {
-    let a = BezierPiece {
-        u_start: 0.0,
-        u_end: 1.0,
-        coeffs: vec![1.0],
-    };
-    let b = BezierPiece {
-        u_start: 0.5,
-        u_end: 1.0,
-        coeffs: vec![1.0],
-    };
-    assert!(matches!(&a + &b, Err(AlgebraError::SupportMismatch)));
-}
-
 use crate::ScalarNurbs;
 
 #[test]
@@ -139,7 +90,7 @@ fn extract_single_bezier_piece_from_clamped_curve() {
     assert_eq!(p.u_end, 1.0);
     assert_eq!(p.degree(), 2);
     for u in [0.0, 0.25, 0.5, 0.75, 1.0] {
-        let exp = crate::eval::eval(&curve.as_view(), u);
+        let exp = crate::eval::eval(&curve, u);
         let got = p.evaluate(u);
         assert!((exp - got).abs() < 1e-12, "u={u}: exp={exp}, got={got}");
     }
@@ -164,12 +115,12 @@ fn extract_two_bezier_pieces_from_curve_with_interior_knot() {
     let mid_right = pieces[1].evaluate(0.5);
     assert!((mid_left - mid_right).abs() < 1e-12);
     for u in [0.0, 0.25, 0.5] {
-        let exp = crate::eval::eval(&curve.as_view(), u);
+        let exp = crate::eval::eval(&curve, u);
         let got = pieces[0].evaluate(u);
         assert!((exp - got).abs() < 1e-12);
     }
     for u in [0.5, 0.75, 1.0] {
-        let exp = crate::eval::eval(&curve.as_view(), u);
+        let exp = crate::eval::eval(&curve, u);
         let got = pieces[1].evaluate(u);
         assert!((exp - got).abs() < 1e-12);
     }
@@ -214,8 +165,8 @@ fn bezier_pieces_to_nurbs_round_trips_extraction() {
     let recomposed = bezier_pieces_to_nurbs(&pieces);
 
     for u in [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0] {
-        let exp = crate::eval::eval(&original.as_view(), u);
-        let got = crate::eval::eval(&recomposed.as_view(), u);
+        let exp = crate::eval::eval(&original, u);
+        let got = crate::eval::eval(&recomposed, u);
         assert!((exp - got).abs() < 1e-10, "u={u}: exp={exp}, got={got}");
     }
 }
