@@ -204,8 +204,14 @@ timer_dispatch(void)
         }
 
         // Next timer in the past or near future - wait for it to be ready
-        while (unlikely(diff > 0))
+        while (unlikely(diff > 0)) {
+#if CONFIG_MCU_SIM
+            struct timespec due = timespec_from_time(next);
+            sim_vtime_pacer_wait_until(
+                (uint64_t)due.tv_sec * NSECS + due.tv_nsec);
+#endif
             diff = next - timer_read_time();
+        }
     }
 
     // Schedule SIGALRM signal

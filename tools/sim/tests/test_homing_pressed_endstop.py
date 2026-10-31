@@ -15,10 +15,10 @@ import pytest
 from tools.sim import configs
 from tools.sim.tests.test_homing_min_dist_corexy import (
     Y_ENDSTOP,
-    EndstopWall,
     XyTracker,
     _needs_rehome_records,
 )
+from tools.sim.world import EndstopWall
 
 pytestmark = pytest.mark.needs_elf
 
@@ -35,7 +35,9 @@ def test_pressed_endstop_recovers_via_rehome(sim_world):
 
     world.mark_log()
     y0 = tracker.xy()[1]
-    with EndstopWall(tracker, control, 1, Y_ENDSTOP, wall_mm=y0 - 0.2):
+    with EndstopWall(
+        tracker, control, 1, Y_ENDSTOP, wall_mm=y0 - 0.2, clock=world.vclock
+    ):
         time.sleep(0.3)
         resp = world.gcode("G28 Y", timeout=300)
 

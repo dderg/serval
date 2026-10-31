@@ -25,6 +25,7 @@ block.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import struct
 import time
@@ -35,6 +36,7 @@ from tools.sim.emulators.cartographer_identify_dict import (
     IDENTIFY_BLOB,
     SENSOR_FREQ,
 )
+from tools.sim.world import HarnessPacer
 
 TRIGGER_METHOD_SCAN = 0
 TRIGGER_METHOD_TOUCH = 1
@@ -51,6 +53,7 @@ class CartographerMcuStub(BeaconMcuStub):
     IDENTIFY_BLOB = IDENTIFY_BLOB
     CLOCK_FREQ = CLOCK_FREQ
     STUB_NAME = "cartographer-stub"
+    SAMPLE_PERIOD_S = 1.0 / 200.0
 
     def _build_handlers(self) -> dict:
         return {
@@ -155,38 +158,59 @@ class CartographerMcuStub(BeaconMcuStub):
         )
 
     def _sample_loop(self) -> None:
-        SAMPLE_HZ = 200.0
-        period = 1.0 / SAMPLE_HZ
-        RESYNC_GAP_S = 0.5
-        next_sample = self._monotonic()
-
-        while not self._stop.is_set() and self._stream_en:
-            now_vt = self._monotonic()
-            if now_vt < next_sample:
-                time.sleep(0.001)
-                continue
-            if now_vt - next_sample > RESYNC_GAP_S:
-                next_sample = now_vt
-            sample_vt = next_sample
-            next_sample += period
-
-            if self._home_active and not self._step_tracking:
-                elapsed = sample_vt - self._homing_start_time
-                self._z_current = max(
-                    0.0,
-                    self._homing_start_z
-                    - elapsed * self._homing_approach_speed,
-                )
-                z_at_sample = self._z_current
-            else:
-                z_at_sample = self._project_z(sample_vt)
-
-            freq = self._z_to_frequency(z_at_sample)
-            data_value = self._freq_to_count(freq)
-            self._send_msg(
-                "cartographer_data clock=%u data=%u temp=%u",
-                clock=self._clock_at(sample_vt),
-                data=data_value,
-                temp=TEMP_RAW_25C,
+        """One sample every SAMPLE_PERIOD_S of printer time. With a world
+        clock the loop holds a pacer seat, so virtual time cannot run past
+        a sample before it is taken, and each sample reads Z from the step
+        counter at that instant: extrapolating from the step poll mid-move
+        reported positions an MCU-load-dependent distance off the bed."""
+        with contextlib.ExitStack() as stack:
+            pacer = (
+                stack.enter_context(HarnessPacer(self._clock))
+                if self._clock is not None
+                else None
             )
-            self.tx_sample_count += 1
+            batch_sock = None
+            while not self._stop.is_set() and self._stream_en:
+                if pacer is not None:
+                    if not pacer.sleep(self.SAMPLE_PERIOD_S, self._stop):
+                        return
+                else:
+                    time.sleep(self.SAMPLE_PERIOD_S)
+                sample_vt = self._monotonic()
+                z_at_sample = None
+                if self._step_tracking:
+                    try:
+                        if batch_sock is None:
+                            batch_sock = self._batch_sock()
+                        steps, sample_vt = self._query_steps_now(batch_sock)
+                        z_at_sample = (
+                            self._z_anchor_mm
+                            + self._z_step_sign
+                            * (steps - self._z_anchor_steps)
+                            / self._z_steps_per_mm
+                        )
+                    except OSError:
+                        if batch_sock is not None:
+                            batch_sock.close()
+                            batch_sock = None
+                if z_at_sample is None:
+                    if self._home_active and not self._step_tracking:
+                        elapsed = sample_vt - self._homing_start_time
+                        self._z_current = max(
+                            0.0,
+                            self._homing_start_z
+                            - elapsed * self._homing_approach_speed,
+                        )
+                        z_at_sample = self._z_current
+                    else:
+                        z_at_sample = self._project_z(sample_vt)
+
+                freq = self._z_to_frequency(z_at_sample)
+                data_value = self._freq_to_count(freq)
+                self._send_msg(
+                    "cartographer_data clock=%u data=%u temp=%u",
+                    clock=self._clock_at(sample_vt),
+                    data=data_value,
+                    temp=TEMP_RAW_25C,
+                )
+                self.tx_sample_count += 1

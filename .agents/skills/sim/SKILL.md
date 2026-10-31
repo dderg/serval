@@ -40,7 +40,9 @@ def test_my_scenario(sim_world):
     assert world.shutdown_line() is None
 ```
 
-`SimWorld` (tools/sim/world.py) essentials: `gcode_ok()` / `gcode()` (dict with "error" key), `status()`, `toolhead_position()/toolhead_z()`, `print_file()`, `mark_log()` + `log_tail()` (incremental klippy.log reads), `events_text()` (structured events/*.jsonl), `wait_for_log_text()`, `sim_control(mcu)` (GPIO/ADC injection), `EndstopPulser` (fake switch cycling). Config generators are in `tools/sim/configs.py` (minimal, multi-Z + motor_adjust, phase stepping, sensorless-phase, beacon CoreXY, probe variants). On failure the fixture dumps klippy/MCU/event log tails automatically.
+`SimWorld` (tools/sim/world.py) essentials: `gcode_ok()` / `gcode()` (dict with "error" key), `status()`, `toolhead_position()/toolhead_z()`, `print_file()`, `mark_log()` + `log_tail()` (incremental klippy.log reads), `events_text()` (structured events/*.jsonl), `wait_for_log_text()`, `wait_until(pred, timeout, what)` (poll a condition on printer time), `sim_control(mcu)` (GPIO/ADC injection), `EndstopPulser` / `EndstopWall` (emulated switches). Config generators are in `tools/sim/configs.py` (minimal, multi-Z + motor_adjust, phase stepping, sensorless-phase, beacon CoreXY, probe variants). On failure the fixture dumps klippy/MCU/event log tails automatically.
+
+Timing rule for test code: anything that watches or pokes the printer *while it moves* (toggling a pin when an axis reaches a point, waiting for step counts) must use `world.wait_until`, `EndstopWall`, `EndstopPulser`, or a `HarnessPacer` for a new emulator thread. Inside world waits virtual time runs much faster than real time, so a `time.sleep` polling loop samples the printer at an arbitrary, load-dependent cadence.
 
 Run one test: `tools/sim/run.sh test -k my_scenario`.
 
@@ -50,8 +52,8 @@ Run one test: `tools/sim/run.sh test -k my_scenario`.
 ┌──────────────────── Docker container ────────────────────┐
 │  ┌──────────┐  PTY  ┌────────┐  PTY  ┌──────────┐       │
 │  │ MCU H7   │◄─────►│ klippy │◄─────►│ MCU F4   │       │
-│  │ elf      │       │ (real  │       │ elf      │       │
-│  └──────────┘       │  time) │       └──────────┘       │
+│  │ elf      │       │ (same  │       │ elf      │       │
+│  └──────────┘       │  clock)│       └──────────┘       │
 │  LD_PRELOAD:        └───┬────┘       LD_PRELOAD:        │
 │  vtime+intercept        │ PTY        vtime+intercept    │
 │                    ┌────┴─────┐                          │
@@ -61,11 +63,11 @@ Run one test: `tools/sim/run.sh test -k my_scenario`.
 └───────────────────────────────────────────────────────────┘
 ```
 
-- klippy preloads libvtime as well, so host and MCUs share one virtual clock: a virtual-time stall freezes everyone, and clock sync sees the nominal MCU frequency. Harness timeouts (`gcode_ok(timeout=…)`, `print_file`, log waits) are virtual seconds; a run whose virtual clock stops for 60 s of real time fails as wedged. `logs/vtime.csv` records virtual vs real time per world.
+- One event-driven virtual clock for every process (klippy preloads libvtime too). Each timed wait publishes its wake time and is woken the moment the clock reaches it; virtual time stands still while any klippy thread is busy and never passes a klippy wait deadline, so host compute costs no printer time. Between world calls (test code running) time is paced at real time; inside world waits it runs free (~7-15x on prints). Harness timeouts (`gcode_ok(timeout=…)`, `print_file`, log waits) are virtual seconds; a run whose virtual clock stops for 60 s of real time fails as wedged. `logs/vtime.csv` records virtual vs real time per world. `host_gated=False` (print-pressure test) runs free at `vtime_speed` so klippy must keep up like a real host.
 - `CONFIG_MCU_SIM=y` firmware: motion tick registers as a vtime pacer (virtual time never skips a sample period), step queues notify the shim. Timer-too-close and timer-in-past checks stay live; only the tick-gap fault is compiled out (rust/runtime tick.rs), since the sim's tick is a paced thread, not an interrupt.
 - Auto-endstops: step-queue lines X=18/Y=7/Z=15 count toward a 50-step wall → endstop lines gpio200/201/202/203. Direct injection via each MCU's `sim_control` unix socket (`set_gpio_input`, `set_adc`, `get_gpio_output`, `get_steps`).
 - Beacon: `emulators/beacon_mcu.py` speaks full msgproto (identify, streaming, trsync, contact, NVM, accel) and tracks Z via the shim's step counter. The klippy-side plugin is the `dderg/beacon_klipper` fork branch `motion-stack-rename`, pinned in `fetch_plugins.sh` — NOT upstream beacon3d (incompatible with the motion rewrite).
-- One virtual clock per container (`/dev/shm/vtime`) → e2e tests run sequentially inside a container; parallelism = multiple `docker run`s (fully namespace-isolated, safe for concurrent agents).
+- Each SimWorld has its own virtual clock (`/dev/shm/vtime-<pid>-<n>`, handed to the shims via `VTIME_SHM_NAME`). Local `run.sh test` runs 4 pytest-xdist workers by default, CI shards run sequentially; `SIM_TEST_JOBS=N` overrides (0 = sequential), `SIM_TEST_TARGETS` picks test files. Separate `docker run`s remain fully isolated for concurrent agents.
 
 ## Build caching
 

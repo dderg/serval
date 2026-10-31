@@ -1,20 +1,22 @@
 from __future__ import annotations
 
 import logging
-import mmap
 import os
 import pty
 import select
 import struct
 import threading
 import time
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from klippy import msgproto
 from tools.sim.emulators.beacon_identify_dict import (
     CLOCK_FREQ,
     IDENTIFY_BLOB,
 )
+
+if TYPE_CHECKING:
+    from tools.sim.world import VirtualClock
 
 
 def _build_nvm_image() -> bytes:
@@ -59,7 +61,7 @@ class BeaconMcuStub:
         z_steps_per_mm: float = 800.0,
         z_step_line: int = 15,
         z_step_sign: int = 1,
-        vtime_shm_name: Optional[str] = None,
+        clock: Optional[VirtualClock] = None,
     ) -> None:
         # The stub's MCU clock must tick with the world's virtual clock,
         # not the wall clock: virtual time legally slips against real time
@@ -67,10 +69,7 @@ class BeaconMcuStub:
         # clock is what klippy's clocksync maps trigger clocks through. A
         # wall-clock stub drifts against the steppers by the accumulated
         # slip, which lands reconstructed contact positions seconds away.
-        self._vtime_map: Optional[mmap.mmap] = None
-        if vtime_shm_name:
-            with open("/dev/shm" + vtime_shm_name, "r+b") as f:
-                self._vtime_map = mmap.mmap(f.fileno(), 8)
+        self._clock = clock
         self._pty_path = pty_path
         self._log_path = log_path
         self._step_sock_path = step_sock_path
@@ -329,8 +328,8 @@ class BeaconMcuStub:
         return prev_t + (sampled_at - prev_t) * prev_z / (prev_z - z)
 
     def _monotonic(self) -> float:
-        if self._vtime_map is not None:
-            return struct.unpack_from("<Q", self._vtime_map, 0)[0] / 1e9
+        if self._clock is not None:
+            return self._clock.now_ns() / 1e9
         return time.monotonic()
 
     def _start_virtual_timer(self, delay_s: float, fn) -> threading.Event:

@@ -5,5 +5,6 @@
 
 void sim_vtime_pacer_init(void);
 void sim_vtime_pacer_set_floor(uint64_t ns);
+void sim_vtime_pacer_wait_until(uint64_t ns);
 
 #endif // sim_vtime_pacer.h

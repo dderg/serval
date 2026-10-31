@@ -8,7 +8,9 @@ klippy host process. Tests and the CLI drive it over klippy's API socket.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import functools
 import itertools
 import json
 import mmap
@@ -24,8 +26,8 @@ from typing import Optional
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 VTIME_SHM_DIR = "/dev/shm"
-VTIME_SHM_SIZE = 256
-VTIME_STRUCT_FMT = "<QIIII"
+VTIME_SHM_SIZE = 4096
+UNBOUNDED_VTIME_SPEED = 1000.0
 
 READY_POLL_S = 0.05
 PRINT_POLL_S = 0.2
@@ -162,11 +164,25 @@ def vtime_shm_name_alloc() -> str:
     return f"/vtime-{os.getpid()}-{next(_vtime_shm_counter)}"
 
 
+# struct vtime_shm (tools/sim/preload/vtime.h): harness_paced u32 at 8, pace
+# anchors (virtual ns, real CLOCK_MONOTONIC ns) at 16 and 24, pacer slot
+# count u32 at 32, pacer slots {u32 active, u32, u64 floor, u64 slack} from 40.
+_HARNESS_PACED_OFFSET = 8
+_HARNESS_PACE_ANCHOR_OFFSET = 16
+_PACER_SLOTS_USED_OFFSET = 32
+_PACERS_OFFSET = 40
+_PACER_SLOT_SIZE = 24
+# Pacer slots the harness reserves before any MCU process claims one.
+HARNESS_PACER_SLOTS = 3
+
+
 def vtime_create(shm_name: str, start_ns: int = 1_000_000_000) -> None:
     path = VTIME_SHM_DIR + shm_name
+    shm = bytearray(VTIME_SHM_SIZE)
+    struct.pack_into("<Q", shm, 0, start_ns)
+    struct.pack_into("<I", shm, _PACER_SLOTS_USED_OFFSET, HARNESS_PACER_SLOTS)
     with open(path, "wb") as f:
-        header = struct.pack(VTIME_STRUCT_FMT, start_ns, 0, 0, 1, 0)
-        f.write(header + b"\x00" * (VTIME_SHM_SIZE - len(header)))
+        f.write(shm)
     os.chmod(path, 0o666)
 
 
@@ -178,17 +194,105 @@ def vtime_destroy(shm_name: str) -> None:
 
 
 class VirtualClock:
-    """The world's virtual clock as seen from the harness."""
+    """The world's virtual clock as seen from the harness.
+
+    While test code runs between calls into the world, the printer idles at
+    real-time pace, the way it would while an operator types; inside a world
+    wait (`running_free`) virtual time runs as fast as the processes allow.
+    """
 
     def __init__(self, shm_name: str):
         with open(VTIME_SHM_DIR + shm_name, "r+b") as f:
-            self._shm = mmap.mmap(f.fileno(), 8)
+            self._shm = mmap.mmap(f.fileno(), VTIME_SHM_SIZE)
+        self._lock = threading.Lock()
+        self._free_depth = 0
+        self._free_pacers = list(range(HARNESS_PACER_SLOTS))
 
     def now_ns(self) -> int:
         return struct.unpack_from("<Q", self._shm)[0]
 
     def deadline(self, timeout: float) -> "VirtualDeadline":
         return VirtualDeadline(self, timeout)
+
+    def pace(self) -> None:
+        struct.pack_into(
+            "<QQ",
+            self._shm,
+            _HARNESS_PACE_ANCHOR_OFFSET,
+            self.now_ns(),
+            time.monotonic_ns(),
+        )
+        struct.pack_into("<I", self._shm, _HARNESS_PACED_OFFSET, 1)
+
+    @contextlib.contextmanager
+    def running_free(self):
+        with self._lock:
+            if self._free_depth == 0:
+                struct.pack_into("<I", self._shm, _HARNESS_PACED_OFFSET, 0)
+            self._free_depth += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._free_depth -= 1
+                if self._free_depth == 0:
+                    self.pace()
+
+    def claim_pacer(self) -> int:
+        with self._lock:
+            if not self._free_pacers:
+                raise SimError(
+                    f"more than {HARNESS_PACER_SLOTS} harness threads pace "
+                    "the virtual clock at once"
+                )
+            return self._free_pacers.pop()
+
+    def hold_at(self, slot: int, vtime_ns: int) -> None:
+        base = _PACERS_OFFSET + slot * _PACER_SLOT_SIZE
+        struct.pack_into("<QQ", self._shm, base + 8, vtime_ns, 0)
+        struct.pack_into("<I", self._shm, base, 1)
+
+    def release_pacer(self, slot: int) -> None:
+        base = _PACERS_OFFSET + slot * _PACER_SLOT_SIZE
+        struct.pack_into("<I", self._shm, base, 0)
+        with self._lock:
+            self._free_pacers.append(slot)
+
+
+class HarnessPacer:
+    """A harness thread's seat on the virtual clock.
+
+    Virtual time cannot pass the instant the thread sleeps toward until the
+    thread has woken, so code that watches and pokes the printer while it
+    moves (an emulated switch, a test reacting to motion) observes it at its
+    own cadence of printer time however fast the world runs.
+    """
+
+    POLL_REAL_S = 0.0002
+
+    def __init__(self, clock: VirtualClock):
+        self._clock = clock
+        self._slot = clock.claim_pacer()
+        clock.hold_at(self._slot, clock.now_ns())
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._clock.release_pacer(self._slot)
+
+    def sleep(
+        self, seconds: float, stop: Optional[threading.Event] = None
+    ) -> bool:
+        """Sleep `seconds` of printer time; False if `stop` was set."""
+        target = self._clock.now_ns() + int(seconds * 1e9)
+        self._clock.hold_at(self._slot, target)
+        while self._clock.now_ns() < target:
+            if stop is None:
+                time.sleep(self.POLL_REAL_S)
+            elif stop.wait(self.POLL_REAL_S):
+                return False
+        return True
 
 
 class VirtualDeadline:
@@ -223,11 +327,8 @@ class VtimeRecorder:
 
     PERIOD_S = 0.05
 
-    def __init__(
-        self, clock: VirtualClock, speed: float, csv_path: pathlib.Path
-    ):
+    def __init__(self, clock: VirtualClock, csv_path: pathlib.Path):
         self._clock = clock
-        self.speed = speed
         self.csv_path = csv_path
         self.samples: list[tuple[int, int]] = []
         self._stop = threading.Event()
@@ -249,23 +350,15 @@ class VtimeRecorder:
             self.samples.append((time.monotonic_ns(), self._clock.now_ns()))
             self._stop.wait(self.PERIOD_S)
 
-    def rate_summary(self, window_s: float = 1.0) -> str:
-        """Worst and best virtual/real rate over sliding windows, as a
-        fraction of the configured speed."""
+    def rate_summary(self) -> str:
         s = self.samples
-        step = max(1, round(window_s / self.PERIOD_S))
-        ratios = [
-            (s[i + step][1] - s[i][1])
-            / ((s[i + step][0] - s[i][0]) * self.speed)
-            for i in range(len(s) - step)
-            if s[i][1] != s[0][1]
-        ]
-        if not ratios:
-            return "vtime: no samples after first advance"
+        if len(s) < 2 or s[-1][0] == s[0][0]:
+            return "vtime: too few samples"
+        virtual = (s[-1][1] - s[0][1]) / 1e9
+        real = (s[-1][0] - s[0][0]) / 1e9
         return (
-            f"vtime rate/speed over {window_s:.0f}s windows: "
-            f"min={min(ratios):.2f} max={max(ratios):.2f} "
-            f"(speed={self.speed}, {len(ratios)} windows)"
+            f"vtime: {virtual:.1f}s of printer time in {real:.1f}s real "
+            f"({virtual / real:.2f}x); per-sample trace in {self.csv_path}"
         )
 
 
@@ -394,26 +487,17 @@ class SimControl:
             raise SimError(f"reset_step_times failed: {response!r}")
 
 
-class EndstopPulser:
-    """Cycles endstop GPIO lines low/high so a homing move always sees a
-    trigger within ~1s and a clear retract window, mimicking a switch."""
+class _EmulatorThread:
+    """A background thread emulating hardware against the printer, paced on
+    the world's virtual clock."""
 
-    def __init__(
-        self,
-        control: SimControl,
-        endstop_pins: list,
-        initial_delay: float = 0.5,
-        low_duration: float = 1.0,
-    ):
-        self.control = control
-        self.endstop_pins = endstop_pins
-        self.initial_delay = initial_delay
-        self.low_duration = low_duration
+    def __init__(self, clock: VirtualClock):
+        self.clock = clock
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
     def __enter__(self):
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread = threading.Thread(target=self._paced_run, daemon=True)
         self._thread.start()
         return self
 
@@ -421,21 +505,96 @@ class EndstopPulser:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2)
+        self._released()
+
+    def _paced_run(self) -> None:
+        with HarnessPacer(self.clock) as pacer:
+            self._run(lambda seconds: pacer.sleep(seconds, self._stop))
+
+    def _run(self, sleep) -> None:
+        raise NotImplementedError
+
+    def _released(self) -> None:
+        raise NotImplementedError
+
+
+class EndstopPulser(_EmulatorThread):
+    """Cycles endstop GPIO lines low/high so a homing move always sees a
+    trigger within ~1s of printer time and a clear retract window,
+    mimicking a switch."""
+
+    def __init__(
+        self,
+        control: SimControl,
+        endstop_pins: list,
+        clock: VirtualClock,
+        initial_delay: float = 0.5,
+        low_duration: float = 1.0,
+    ):
+        super().__init__(clock)
+        self.control = control
+        self.endstop_pins = endstop_pins
+        self.initial_delay = initial_delay
+        self.low_duration = low_duration
+
+    def _run(self, sleep) -> None:
+        # The MCU must be fully up before GPIO commands stick.
+        if not sleep(self.initial_delay):
+            return
+        while True:
+            for chip, line in self.endstop_pins:
+                self.control.set_gpio_input(chip, line, 0)
+            if not sleep(self.low_duration):
+                return
+            for chip, line in self.endstop_pins:
+                self.control.set_gpio_input(chip, line, 1)
+            if not sleep(0.1):
+                return
+
+    def _released(self) -> None:
         for chip, line in self.endstop_pins:
             self.control.set_gpio_input(chip, line, 0)
 
-    def _run(self):
-        # The MCU must be fully up before GPIO commands stick.
-        time.sleep(self.initial_delay)
-        while not self._stop.is_set():
-            for chip, line in self.endstop_pins:
-                self.control.set_gpio_input(chip, line, 0)
-            if self._stop.wait(self.low_duration):
-                break
-            for chip, line in self.endstop_pins:
-                self.control.set_gpio_input(chip, line, 1)
-            if self._stop.wait(0.1):
-                break
+
+class EndstopWall(_EmulatorThread):
+    """Drive an endstop GPIO like a switch mounted at `wall_mm` on one
+    cartesian axis: high at/past the wall, low below it. `tracker.xy()`
+    reports the physical position from the shim's step counters."""
+
+    POLL_S = 0.005
+
+    def __init__(self, tracker, control, axis_idx, pin, wall_mm, clock):
+        super().__init__(clock)
+        self.tracker = tracker
+        self.control = control
+        self.axis_idx = axis_idx
+        self.pin = pin
+        self.wall_mm = wall_mm
+
+    def _run(self, sleep) -> None:
+        level = None
+        while True:
+            pos = self.tracker.xy()[self.axis_idx]
+            want = 1 if pos >= self.wall_mm else 0
+            if want != level:
+                self.control.set_gpio_input(*self.pin, want)
+                level = want
+            if not sleep(self.POLL_S):
+                return
+
+    def _released(self) -> None:
+        self.control.set_gpio_input(*self.pin, 0)
+
+
+def _runs_free(method):
+    """A world call that waits on the printer lets virtual time run free."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self.vclock.running_free():
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class SimWorld:
@@ -454,7 +613,8 @@ class SimWorld:
         beacon: bool = False,
         cartographer: bool = False,
         verbose: bool = False,
-        vtime_speed: float = 1.0,
+        vtime_speed: float = UNBOUNDED_VTIME_SPEED,
+        host_gated: bool = True,
     ):
         self.workdir = pathlib.Path(workdir)
         self.repo_root = repo_root
@@ -463,10 +623,13 @@ class SimWorld:
         self.want_beacon = beacon
         self.want_cartographer = cartographer
         self.verbose = verbose
-        # Upper bound on virtual seconds per real second. Klippy shares the
-        # virtual clock, so a lower speed only buys every process more real
-        # CPU time per virtual second.
+        # Upper bound on virtual seconds per real second. With host_gated,
+        # virtual time stands still while klippy computes, so the cap only
+        # matters for runs a human watches; without it (throughput tests),
+        # klippy must keep up with the cap like a real host must keep up
+        # with real time.
         self.vtime_speed = float(os.environ.get("VTIME_SPEED", vtime_speed))
+        self.host_gated = host_gated
         self.vtime_shm_name = vtime_shm_name_alloc()
         self.vclock: Optional[VirtualClock] = None
         self.vtime_recorder: Optional[VtimeRecorder] = None
@@ -530,7 +693,7 @@ class SimWorld:
         vtime_create(self.vtime_shm_name)
         self.vclock = VirtualClock(self.vtime_shm_name)
         self.vtime_recorder = VtimeRecorder(
-            self.vclock, self.vtime_speed, self.log_dir / "vtime.csv"
+            self.vclock, self.log_dir / "vtime.csv"
         )
         self.vtime_recorder.start()
 
@@ -723,7 +886,7 @@ class SimWorld:
             log_path=str(self.log_dir / "beacon_traffic.log"),
             step_sock_path=z_mcu.sim_control,
             z_step_line=z_step_line,
-            vtime_shm_name=self.vtime_shm_name,
+            clock=self.vclock,
         )
         self.beacon.start_sample_stream(z_target_mm=10.0, rate_hz=200)
 
@@ -737,7 +900,7 @@ class SimWorld:
             log_path=str(self.log_dir / "cartographer_traffic.log"),
             step_sock_path=z_mcu.sim_control,
             z_step_line=z_step_line,
-            vtime_shm_name=self.vtime_shm_name,
+            clock=self.vclock,
         )
         self.cartographer.start_sample_stream(z_target_mm=10.0, rate_hz=200)
 
@@ -749,6 +912,8 @@ class SimWorld:
         _, vtime_so = self._ensure_shims_built()
         env["LD_PRELOAD"] = str(vtime_so)
         env["VTIME_SPEED"] = str(self.vtime_speed)
+        if self.host_gated:
+            env["VTIME_HOST"] = "1"
         if self.mcus:
             env["MCU_SIM_SOCK_DIR"] = str(self.mcus[0].sock_dir)
         env["VTIME_SHM_NAME"] = self.vtime_shm_name
@@ -777,6 +942,7 @@ class SimWorld:
         )
         stdout_log.close()
 
+    @_runs_free
     def _wait_ready(self, timeout: float) -> bool:
         deadline = self.vclock.deadline(timeout)
         while not deadline.expired():
@@ -796,6 +962,7 @@ class SimWorld:
             time.sleep(READY_POLL_S)
         return False
 
+    @_runs_free
     def _wait_clock_sync(self, timeout: float) -> None:
         try:
             resp = _api_request(
@@ -829,6 +996,7 @@ class SimWorld:
 
     # ------------------------------------------------------------ drive
 
+    @_runs_free
     def gcode(self, script: str, timeout: float = 30.0) -> dict:
         return _api_request(
             self.api_socket,
@@ -845,6 +1013,7 @@ class SimWorld:
             raise SimError(f"{script}: {resp['error']}")
         return resp
 
+    @_runs_free
     def status(
         self, objects: Optional[dict] = None, timeout: float = 5.0
     ) -> dict:
@@ -873,6 +1042,7 @@ class SimWorld:
         pos = self.toolhead_position()
         return float(pos[2]) if pos and len(pos) >= 3 else None
 
+    @_runs_free
     def wait_print_done(self, timeout: float = 600.0) -> None:
         deadline = self.vclock.deadline(timeout)
         log_offset = (
@@ -939,6 +1109,7 @@ class SimWorld:
     def mark_log(self) -> None:
         self.log_tail()
 
+    @_runs_free
     def expect_log(self, needle: str, timeout: float = 10.0) -> str:
         """Wait for `needle` to appear in klippy.log after the last
         mark_log()/log_tail() call; returns everything appended since the
@@ -968,6 +1139,7 @@ class SimWorld:
                 return line.strip()
         return None
 
+    @_runs_free
     def wait_for_log_text(
         self, needle: str, timeout: float = 60.0
     ) -> Optional[str]:
@@ -981,6 +1153,20 @@ class SimWorld:
             if deadline.expired():
                 return None
             time.sleep(0.2)
+
+    @_runs_free
+    def wait_until(
+        self, pred, timeout: float, what: str, poll: float = 0.005
+    ) -> None:
+        """Poll `pred` every `poll` seconds of printer time — the cadence a
+        test reacting to motion (poking a pin the moment the axis reaches a
+        point) needs however fast the world runs."""
+        deadline = self.vclock.deadline(timeout)
+        with HarnessPacer(self.vclock) as pacer:
+            while not pred():
+                if deadline.expired():
+                    raise SimError(f"timeout waiting for {what}")
+                pacer.sleep(poll)
 
     def events_text(self) -> str:
         events_dir = self.log_dir / "events"

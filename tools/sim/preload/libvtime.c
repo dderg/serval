@@ -16,6 +16,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -61,6 +62,25 @@ static int (*real_timer_create)(clockid_t, struct sigevent *,
 static int (*real_timer_settime)(timer_t, int, const struct itimerspec *,
                                   struct itimerspec *) = NULL;
 static int (*real_usleep)(useconds_t) = NULL;
+static int (*real_pthread_cond_wait)(pthread_cond_t *, pthread_mutex_t *);
+static int (*real_sem_wait)(sem_t *);
+static int (*real_sem_timedwait)(sem_t *, const struct timespec *);
+static ssize_t (*real_read)(int, void *, size_t);
+static ssize_t (*real_recv)(int, void *, size_t, int);
+static ssize_t (*real_recvfrom)(int, void *, size_t, int, struct sockaddr *,
+                                socklen_t *);
+static ssize_t (*real_recvmsg)(int, struct msghdr *, int);
+static int (*real_accept4)(int, struct sockaddr *, socklen_t *, int);
+static int (*real_pthread_join)(pthread_t, void **);
+static int (*real_pthread_create)(pthread_t *, const pthread_attr_t *,
+                                  void *(*)(void *), void *);
+static void (*real_pthread_exit)(void *);
+
+// Resolves on first use: these can run before the constructor (another
+// preloaded library's init, or a thread started before it).
+#define REAL(fn) \
+    (real_##fn ? real_##fn \
+               : (real_##fn = (__typeof__(real_##fn))dlsym(RTLD_NEXT, #fn)))
 
 static uint64_t
 real_monotonic_ns(void)
@@ -153,6 +173,49 @@ pacer_floor_min(void)
     return floor;
 }
 
+#define VTIME_KICK_SIGNAL (SIGRTMIN + 7)
+
+// The kick exists only to cut a real-time sleep short. Its EINTR goes back
+// to the caller like any other: every participant already retries on EINTR
+// (CPython PEP 475, Rust std, the firmware's irq_wait), and a kick can land
+// in the same wait as a real signal, so swallowing it would swallow that
+// signal's EINTR too.
+static void
+kick_handler(int sig)
+{
+    (void)sig;
+}
+
+static uint32_t
+waiter_slots_used(void)
+{
+    uint32_t used = atomic_load_explicit(&vshm->waiter_slots_used,
+                                         memory_order_acquire);
+    return used > VTIME_MAX_WAITERS ? VTIME_MAX_WAITERS : used;
+}
+
+// Wake every waiter whose target virtual time has reached: it would
+// otherwise notice only when its real-time sleep slice expires, leaving the
+// clock parked on its target until then.
+static void
+kick_due_waiters(uint64_t now)
+{
+    uint32_t used = waiter_slots_used();
+    for (uint32_t i = 0; i < used; i++) {
+        uint64_t target = atomic_load_explicit(&vshm->waiter_target[i],
+                                               memory_order_acquire);
+        uint32_t idle = 0;
+        if (!target || target > now
+            || !atomic_compare_exchange_strong(&vshm->waiter_kicked[i],
+                                               &idle, 1))
+            continue;
+        uint64_t who = atomic_load_explicit(&vshm->waiter_thread[i],
+                                            memory_order_acquire);
+        real_syscall(SYS_tgkill, (long)(who >> 32), (long)(uint32_t)who,
+                     (long)VTIME_KICK_SIGNAL);
+    }
+}
+
 static void
 vtime_raise_to(uint64_t bounded_target)
 {
@@ -164,6 +227,148 @@ vtime_raise_to(uint64_t bounded_target)
     } while (!atomic_compare_exchange_weak_explicit(
         &vshm->nanos, &cur, bounded_target,
         memory_order_acq_rel, memory_order_acquire));
+    kick_due_waiters(bounded_target);
+}
+
+static int is_host;
+
+// A host thread woken by a message still counts as idle until its wait
+// returns; in that window virtual time can only reach the next pacer floor
+// or host deadline, which bounds the error to sub-millisecond lateness.
+static int
+host_holds_time(void)
+{
+    return atomic_load_explicit(&vshm->host_present, memory_order_acquire)
+           && atomic_load_explicit(&vshm->host_running,
+                                   memory_order_acquire) > 0;
+}
+
+static uint64_t
+host_wait_floor(void)
+{
+    uint64_t floor = UINT64_MAX;
+    uint32_t used = waiter_slots_used();
+    for (uint32_t i = 0; i < used; i++) {
+        if (!atomic_load_explicit(&vshm->waiter_is_floor[i],
+                                  memory_order_acquire))
+            continue;
+        uint64_t target = atomic_load_explicit(&vshm->waiter_target[i],
+                                               memory_order_acquire);
+        if (target && target < floor)
+            floor = target;
+    }
+    return floor;
+}
+
+static int
+harness_paced(void)
+{
+    return atomic_load_explicit(&vshm->harness_paced, memory_order_acquire);
+}
+
+// The speed cap, tightened to real time while the harness is paced.
+static uint64_t
+vtime_cap(void)
+{
+    uint64_t cap = vtime_speed_cap();
+    if (!harness_paced())
+        return cap;
+    uint64_t paced = atomic_load_explicit(&vshm->harness_pace_vtime,
+                                          memory_order_acquire)
+                     + real_monotonic_ns()
+                     - atomic_load_explicit(&vshm->harness_pace_real,
+                                            memory_order_acquire);
+    return paced < cap ? paced : cap;
+}
+
+// How far virtual time may advance right now: the cap, every pacer floor,
+// the earliest host wait deadline, and nowhere at all while the host is
+// busy.
+static uint64_t
+vtime_bound(void)
+{
+    uint64_t bound = vtime_cap();
+    uint64_t floor = pacer_floor_min();
+    if (floor < bound)
+        bound = floor;
+    floor = host_wait_floor();
+    if (floor < bound)
+        bound = floor;
+    if (host_holds_time()) {
+        uint64_t now = vtime_now();
+        if (now < bound)
+            bound = now;
+    }
+    return bound;
+}
+
+static __thread int waiter_slot = -1;
+
+static int
+own_waiter_slot(void)
+{
+    if (waiter_slot < 0) {
+        uint32_t slot = atomic_fetch_add_explicit(&vshm->waiter_slots_used, 1,
+                                                  memory_order_acq_rel);
+        if (slot >= VTIME_MAX_WAITERS) {
+            fprintf(stderr, "[vtime] more than %d threads wait on the virtual "
+                            "clock\n", VTIME_MAX_WAITERS);
+            abort();
+        }
+        atomic_store_explicit(&vshm->waiter_thread[slot],
+                              (uint64_t)getpid() << 32 | (uint32_t)gettid(),
+                              memory_order_release);
+        atomic_store_explicit(&vshm->waiter_is_floor[slot], is_host,
+                              memory_order_release);
+        waiter_slot = (int)slot;
+    }
+    return waiter_slot;
+}
+
+static uint64_t wait_target(uint64_t deadline);
+
+// Entering a blocking wait: publish the virtual time it waits for so
+// whoever reaches it can wake this thread, and stop counting a host thread
+// as running.
+static void
+thread_blocks(uint64_t deadline)
+{
+    if (!vshm)
+        return;
+    uint64_t target = wait_target(deadline);
+    if (target != UINT64_MAX) {
+        int slot = own_waiter_slot();
+        atomic_store_explicit(&vshm->waiter_kicked[slot], 0,
+                              memory_order_release);
+        atomic_store_explicit(&vshm->waiter_target[slot], target,
+                              memory_order_release);
+    }
+    if (is_host)
+        atomic_fetch_sub_explicit(&vshm->host_running, 1,
+                                  memory_order_acq_rel);
+}
+
+static void
+thread_runs(void)
+{
+    if (!vshm)
+        return;
+    if (is_host)
+        atomic_fetch_add_explicit(&vshm->host_running, 1,
+                                  memory_order_acq_rel);
+    if (waiter_slot >= 0)
+        atomic_store_explicit(&vshm->waiter_target[waiter_slot], 0,
+                              memory_order_release);
+}
+
+// Host thread creation and exit: a host thread counts as running from the
+// moment its creator spawns it until it exits.
+static void
+host_threads_add(int delta)
+{
+    if (is_host)
+        atomic_fetch_add_explicit(&vshm->host_running, delta,
+                                  memory_order_acq_rel);
 }
 
 static void
@@ -172,10 +377,7 @@ vtime_advance_to(uint64_t target_ns)
     for (;;) {
         if (vtime_now() >= target_ns)
             return;
-        uint64_t bound = vtime_speed_cap();
-        uint64_t floor = pacer_floor_min();
-        if (floor < bound)
-            bound = floor;
+        uint64_t bound = vtime_bound();
         if (bound > vtime_now()) {
             uint64_t step = target_ns < bound ? target_ns : bound;
             vtime_raise_to(step);
@@ -189,20 +391,9 @@ vtime_advance_to(uint64_t target_ns)
 
 static void vtimer_check_and_fire(void);
 
-// Non-blocking: raise virtual time toward `target` as far as the speed cap
-// and every pacer floor allow.
-static void
-vtime_nudge(uint64_t target)
-{
-    uint64_t bound = vtime_speed_cap();
-    uint64_t floor = pacer_floor_min();
-    if (floor < bound)
-        bound = floor;
-    vtime_raise_to(target < bound ? target : bound);
-}
-
 #define WAIT_SLICE_MIN_NS 50000ULL
 #define WAIT_SLICE_MAX_NS 20000000ULL
+#define WAIT_SLICE_HELD_NS WAIT_SLICE_MIN_NS
 #define NO_DEADLINE UINT64_MAX
 
 // A timed wait in the thread that owns the virtual timer (the MCU main
@@ -222,17 +413,22 @@ wait_target(uint64_t deadline)
 // time toward it, fire a due virtual timer, and return how long to block in
 // real time before re-checking — 0 once the deadline has passed. Virtual time
 // moves at most vtime_speed x real, so blocking remaining/speed never sleeps
-// past the deadline.
+// past the deadline; time held by the host or a pacer is re-checked soon.
 static uint64_t
 wait_step(uint64_t deadline)
 {
     uint64_t target = wait_target(deadline);
-    vtime_nudge(target);
+    uint64_t cap = vtime_cap();
+    uint64_t bound = vtime_bound();
+    vtime_raise_to(target < bound ? target : bound);
     vtimer_check_and_fire();
     uint64_t now = vtime_now();
     if (now >= deadline)
         return 0;
-    double slice = target > now ? (double)(target - now) / vtime_speed : 0;
+    if (bound < cap)
+        return WAIT_SLICE_HELD_NS;
+    double rate = harness_paced() ? 1.0 : vtime_speed;
+    double slice = target > now ? (double)(target - now) / rate : 0;
     if (slice < WAIT_SLICE_MIN_NS)
         return WAIT_SLICE_MIN_NS;
     if (slice > WAIT_SLICE_MAX_NS)
@@ -262,12 +458,10 @@ is_monotonic(clockid_t clk)
            || clk == CLOCK_MONOTONIC_COARSE;
 }
 
-// Steady wall driver: raises virtual time toward the speed cap every 1ms
-// so vtime is a linear function of real time (speed x real) instead of
-// demand-driven. Demand-driven advancement stalls while nothing sleeps
-// and then leaps to the cap, which klippy's clocksync tracks as a wildly
-// nonuniform MCU clock — projections made across a leap land seconds off
-// (PieceStartInPast, trip-time resolution failures).
+// Backstop advancer: every 1 ms of real time, raise virtual time as far as
+// the cap and every floor allow, in case no waiter is awake to do it.
+// Waiters normally advance the clock themselves; this only keeps it from
+// stalling when all of them sleep in long real-time slices.
 // Time the floor held back is folded into vtime_stall_offset_ns so the
 // cap resumes at the configured speed instead of chasing.
 static void *
@@ -275,12 +469,12 @@ vtime_driver_main(void *arg)
 {
     (void)arg;
     for (;;) {
-        uint64_t cap = vtime_speed_cap();
-        uint64_t floor = pacer_floor_min();
-        if (floor < cap && cap != UINT64_MAX)
-            atomic_fetch_add_explicit(&vtime_stall_offset_ns, cap - floor,
+        uint64_t cap = vtime_cap();
+        uint64_t bound = vtime_bound();
+        if (bound < cap && cap != UINT64_MAX)
+            atomic_fetch_add_explicit(&vtime_stall_offset_ns, cap - bound,
                                       memory_order_acq_rel);
-        vtime_raise_to(floor < cap ? floor : cap);
+        vtime_raise_to(bound);
         vtimer_check_and_fire();
         struct timespec w = { 0, 1000000 };
         real_nanosleep(&w, NULL);
@@ -353,6 +547,8 @@ vtime_pacer_cleanup(void)
 {
     if (!vshm)
         return;
+    if (is_host)
+        atomic_store_explicit(&vshm->host_present, 0, memory_order_release);
     for (int i = 0; i < VTIME_MAX_PACERS; i++)
         if (owned_pacer_slots[i])
             atomic_store_explicit(&vshm->pacers[i].active, 0,
@@ -436,8 +632,31 @@ vtime_init(void)
     vtime_real_t0_ns = real_monotonic_ns();
     atomic_fetch_add(&vshm->num_participants, 1);
 
+    struct sigaction kick = { .sa_handler = kick_handler,
+                              .sa_flags = SA_RESTART };
+    sigemptyset(&kick.sa_mask);
+    sigaction(VTIME_KICK_SIGNAL, &kick, NULL);
+
+    // Only this process is the host: children it spawns inherit the
+    // preload but not the role.
+    const char *host = getenv("VTIME_HOST");
+    if (host && host[0] == '1') {
+        unsetenv("VTIME_HOST");
+        is_host = 1;
+        // A restarted host's threads are gone: retire their slots so a
+        // deadline left behind by a killed waiter cannot hold the clock.
+        for (uint32_t i = 0; i < waiter_slots_used(); i++)
+            if (atomic_load(&vshm->waiter_is_floor[i])) {
+                atomic_store(&vshm->waiter_is_floor[i], 0);
+                atomic_store(&vshm->waiter_target[i], 0);
+            }
+        atomic_store(&vshm->host_running, 1);
+        atomic_store(&vshm->host_present, 1);
+    }
+
+    // The driver is clock infrastructure, not host work: never counted.
     pthread_t driver;
-    if (pthread_create(&driver, NULL, vtime_driver_main, NULL) == 0)
+    if (REAL(pthread_create)(&driver, NULL, vtime_driver_main, NULL) == 0)
         pthread_detach(driver);
     else {
         fprintf(stderr, "[vtime] driver thread create failed\n");
@@ -460,7 +679,7 @@ clock_gettime(clockid_t clk_id, struct timespec *tp)
 
 // A signal interrupts a virtual sleep exactly as it would a real one.
 static int
-sleep_until(uint64_t deadline)
+sleep_loop(uint64_t deadline)
 {
     for (;;) {
         uint64_t slice = wait_step(deadline);
@@ -472,6 +691,15 @@ sleep_until(uint64_t deadline)
         if (ret)
             return ret;
     }
+}
+
+static int
+sleep_until(uint64_t deadline)
+{
+    thread_blocks(deadline);
+    int ret = sleep_loop(deadline);
+    thread_runs();
+    return ret;
 }
 
 static void
@@ -529,13 +757,10 @@ deadline_from_ts(const struct timespec *timeout)
     return timeout ? deadline_after(ts_to_ns(timeout)) : NO_DEADLINE;
 }
 
-int
-ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout,
-      const sigset_t *sigmask)
+static int
+ppoll_loop(struct pollfd *fds, nfds_t nfds, uint64_t deadline,
+           const sigset_t *sigmask)
 {
-    if (!vshm)
-        return real_ppoll(fds, nfds, timeout, sigmask);
-    uint64_t deadline = deadline_from_ts(timeout);
     for (;;) {
         uint64_t slice = wait_step(deadline);
         struct timespec ts;
@@ -544,6 +769,19 @@ ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout,
         if (ret || !slice)
             return ret;
     }
+}
+
+int
+ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout,
+      const sigset_t *sigmask)
+{
+    if (!vshm)
+        return real_ppoll(fds, nfds, timeout, sigmask);
+    uint64_t deadline = deadline_from_ts(timeout);
+    thread_blocks(deadline);
+    int ret = ppoll_loop(fds, nfds, deadline, sigmask);
+    thread_runs();
+    return ret;
 }
 
 int
@@ -557,8 +795,8 @@ poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
 }
 
 static int
-pselect_until(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
-              uint64_t deadline, const sigset_t *sigmask)
+pselect_loop(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
+             uint64_t deadline, const sigset_t *sigmask)
 {
     fd_set r0, w0, e0;
     if (readfds)
@@ -582,6 +820,17 @@ pselect_until(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
         if (exceptfds)
             *exceptfds = e0;
     }
+}
+
+static int
+pselect_until(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
+              uint64_t deadline, const sigset_t *sigmask)
+{
+    thread_blocks(deadline);
+    int ret = pselect_loop(nfds, readfds, writefds, exceptfds, deadline,
+                           sigmask);
+    thread_runs();
+    return ret;
 }
 
 int
@@ -616,13 +865,10 @@ pselect(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
                          deadline_from_ts(timeout), sigmask);
 }
 
-int
-epoll_pwait2(int epfd, struct epoll_event *events, int maxevents,
-             const struct timespec *timeout, const sigset_t *sigmask)
+static int
+epoll_loop(int epfd, struct epoll_event *events, int maxevents,
+           uint64_t deadline, const sigset_t *sigmask)
 {
-    if (!vshm)
-        return real_epoll_pwait2(epfd, events, maxevents, timeout, sigmask);
-    uint64_t deadline = deadline_from_ts(timeout);
     for (;;) {
         uint64_t slice = wait_step(deadline);
         int ret;
@@ -638,6 +884,19 @@ epoll_pwait2(int epfd, struct epoll_event *events, int maxevents,
         if (ret || !slice)
             return ret;
     }
+}
+
+int
+epoll_pwait2(int epfd, struct epoll_event *events, int maxevents,
+             const struct timespec *timeout, const sigset_t *sigmask)
+{
+    if (!vshm)
+        return real_epoll_pwait2(epfd, events, maxevents, timeout, sigmask);
+    uint64_t deadline = deadline_from_ts(timeout);
+    thread_blocks(deadline);
+    int ret = epoll_loop(epfd, events, maxevents, deadline, sigmask);
+    thread_runs();
+    return ret;
 }
 
 int
@@ -663,8 +922,8 @@ epoll_wait(int epfd, struct epoll_event *events, int maxevents,
 // raw futex syscalls; the bitset form takes an absolute CLOCK_MONOTONIC
 // deadline that Rust computed from the virtual clock.
 static long
-futex_wait_until(uint32_t *uaddr, int op, uint32_t val, uint64_t deadline,
-                 uint32_t bitset)
+futex_wait_loop(uint32_t *uaddr, int op, uint32_t val, uint64_t deadline,
+                uint32_t bitset)
 {
     int bitset_op = (op & ~FUTEX_CMD_MASK) | FUTEX_WAIT_BITSET;
     for (;;) {
@@ -691,26 +950,32 @@ syscall(long number, ...)
     va_end(ap);
     if (!real_syscall)
         real_syscall = dlsym(RTLD_NEXT, "syscall");
-    if (vshm && number == SYS_futex) {
-        int op = (int)a2, cmd = op & FUTEX_CMD_MASK;
-        const struct timespec *timeout = (const struct timespec *)a4;
-        if (timeout && !(op & FUTEX_CLOCK_REALTIME)
-            && (cmd == FUTEX_WAIT || cmd == FUTEX_WAIT_BITSET)) {
-            uint64_t deadline = cmd == FUTEX_WAIT
-                                    ? deadline_after(ts_to_ns(timeout))
-                                    : ts_to_ns(timeout);
-            uint32_t bitset = cmd == FUTEX_WAIT ? FUTEX_BITSET_MATCH_ANY
-                                                : (uint32_t)a6;
-            return futex_wait_until((uint32_t *)a1, op, (uint32_t)a3,
-                                    deadline, bitset);
-        }
+    int op = (int)a2, cmd = op & FUTEX_CMD_MASK;
+    if (!vshm || number != SYS_futex
+        || (cmd != FUTEX_WAIT && cmd != FUTEX_WAIT_BITSET))
+        return real_syscall(number, a1, a2, a3, a4, a5, a6);
+    const struct timespec *timeout = (const struct timespec *)a4;
+    long ret;
+    if (timeout && !(op & FUTEX_CLOCK_REALTIME)) {
+        uint64_t deadline = cmd == FUTEX_WAIT
+                                ? deadline_after(ts_to_ns(timeout))
+                                : ts_to_ns(timeout);
+        uint32_t bitset = cmd == FUTEX_WAIT ? FUTEX_BITSET_MATCH_ANY
+                                            : (uint32_t)a6;
+        thread_blocks(deadline);
+        ret = futex_wait_loop((uint32_t *)a1, op, (uint32_t)a3, deadline,
+                              bitset);
+    } else {
+        thread_blocks(NO_DEADLINE);
+        ret = real_syscall(number, a1, a2, a3, a4, a5, a6);
     }
-    return real_syscall(number, a1, a2, a3, a4, a5, a6);
+    thread_runs();
+    return ret;
 }
 
 static int
-cond_wait_until(pthread_cond_t *cond, pthread_mutex_t *mutex,
-                uint64_t deadline)
+cond_wait_loop(pthread_cond_t *cond, pthread_mutex_t *mutex,
+               uint64_t deadline)
 {
     for (;;) {
         uint64_t slice = wait_step(deadline);
@@ -724,33 +989,45 @@ cond_wait_until(pthread_cond_t *cond, pthread_mutex_t *mutex,
     }
 }
 
+int
+pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex)
+{
+    thread_blocks(NO_DEADLINE);
+    int ret = REAL(pthread_cond_wait)(cond, mutex);
+    thread_runs();
+    return ret;
+}
+
 // CPython's GIL hand-off waits on a CLOCK_MONOTONIC condvar; glibc records
 // the condvar's clock in bit 1 of __wrefs.
 int
 pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
                        const struct timespec *abstime)
 {
-    if (!vshm || !(cond->__data.__wrefs & 2))
-        return real_pthread_cond_timedwait(cond, mutex, abstime);
-    return cond_wait_until(cond, mutex, ts_to_ns(abstime));
+    int monotonic = vshm && (cond->__data.__wrefs & 2);
+    thread_blocks(monotonic ? ts_to_ns(abstime) : NO_DEADLINE);
+    int ret = monotonic ? cond_wait_loop(cond, mutex, ts_to_ns(abstime))
+                        : REAL(pthread_cond_timedwait)(cond, mutex, abstime);
+    thread_runs();
+    return ret;
 }
 
 int
 pthread_cond_clockwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
                        clockid_t clockid, const struct timespec *abstime)
 {
-    if (!vshm || !is_monotonic(clockid))
-        return real_pthread_cond_clockwait(cond, mutex, clockid, abstime);
-    return cond_wait_until(cond, mutex, ts_to_ns(abstime));
+    int monotonic = vshm && is_monotonic(clockid);
+    thread_blocks(monotonic ? ts_to_ns(abstime) : NO_DEADLINE);
+    int ret = monotonic ? cond_wait_loop(cond, mutex, ts_to_ns(abstime))
+                        : REAL(pthread_cond_clockwait)(cond, mutex, clockid,
+                                                       abstime);
+    thread_runs();
+    return ret;
 }
 
-// CPython's timed lock acquire (queue.get, Event.wait, Lock.acquire).
-int
-sem_clockwait(sem_t *sem, clockid_t clockid, const struct timespec *abstime)
+static int
+sem_wait_loop(sem_t *sem, uint64_t deadline)
 {
-    if (!vshm || !is_monotonic(clockid))
-        return real_sem_clockwait(sem, clockid, abstime);
-    uint64_t deadline = ts_to_ns(abstime);
     for (;;) {
         uint64_t slice = wait_step(deadline);
         if (!slice) {
@@ -760,10 +1037,164 @@ sem_clockwait(sem_t *sem, clockid_t clockid, const struct timespec *abstime)
             return -1;
         }
         struct timespec ts = real_deadline_after(slice);
-        int ret = real_sem_clockwait(sem, CLOCK_MONOTONIC, &ts);
+        int ret = REAL(sem_clockwait)(sem, CLOCK_MONOTONIC, &ts);
         if (ret == 0 || errno != ETIMEDOUT)
             return ret;
     }
+}
+
+// CPython's timed lock acquire (queue.get, Event.wait, Lock.acquire).
+int
+sem_clockwait(sem_t *sem, clockid_t clockid, const struct timespec *abstime)
+{
+    int monotonic = vshm && is_monotonic(clockid);
+    thread_blocks(monotonic ? ts_to_ns(abstime) : NO_DEADLINE);
+    int ret = monotonic ? sem_wait_loop(sem, ts_to_ns(abstime))
+                        : REAL(sem_clockwait)(sem, clockid, abstime);
+    thread_runs();
+    return ret;
+}
+
+int
+sem_timedwait(sem_t *sem, const struct timespec *abstime)
+{
+    thread_blocks(NO_DEADLINE);
+    int ret = REAL(sem_timedwait)(sem, abstime);
+    thread_runs();
+    return ret;
+}
+
+int
+sem_wait(sem_t *sem)
+{
+    thread_blocks(NO_DEADLINE);
+    int ret = REAL(sem_wait)(sem);
+    thread_runs();
+    return ret;
+}
+
+static int
+fd_blocks(int fd)
+{
+    int flags = fcntl(fd, F_GETFL);
+    return flags >= 0 && !(flags & O_NONBLOCK);
+}
+
+ssize_t
+read(int fd, void *buf, size_t count)
+{
+    if (!is_host || !fd_blocks(fd))
+        return REAL(read)(fd, buf, count);
+    thread_blocks(NO_DEADLINE);
+    ssize_t ret = REAL(read)(fd, buf, count);
+    thread_runs();
+    return ret;
+}
+
+ssize_t
+recv(int fd, void *buf, size_t len, int flags)
+{
+    if (!is_host || (flags & MSG_DONTWAIT) || !fd_blocks(fd))
+        return REAL(recv)(fd, buf, len, flags);
+    thread_blocks(NO_DEADLINE);
+    ssize_t ret = REAL(recv)(fd, buf, len, flags);
+    thread_runs();
+    return ret;
+}
+
+ssize_t
+recvfrom(int fd, void *buf, size_t len, int flags, struct sockaddr *addr,
+         socklen_t *addrlen)
+{
+    if (!is_host || (flags & MSG_DONTWAIT) || !fd_blocks(fd))
+        return REAL(recvfrom)(fd, buf, len, flags, addr, addrlen);
+    thread_blocks(NO_DEADLINE);
+    ssize_t ret = REAL(recvfrom)(fd, buf, len, flags, addr, addrlen);
+    thread_runs();
+    return ret;
+}
+
+ssize_t
+recvmsg(int fd, struct msghdr *msg, int flags)
+{
+    if (!is_host || (flags & MSG_DONTWAIT) || !fd_blocks(fd))
+        return REAL(recvmsg)(fd, msg, flags);
+    thread_blocks(NO_DEADLINE);
+    ssize_t ret = REAL(recvmsg)(fd, msg, flags);
+    thread_runs();
+    return ret;
+}
+
+int
+accept4(int fd, struct sockaddr *addr, socklen_t *addrlen, int flags)
+{
+    if (!is_host || !fd_blocks(fd))
+        return REAL(accept4)(fd, addr, addrlen, flags);
+    thread_blocks(NO_DEADLINE);
+    int ret = REAL(accept4)(fd, addr, addrlen, flags);
+    thread_runs();
+    return ret;
+}
+
+int
+accept(int fd, struct sockaddr *addr, socklen_t *addrlen)
+{
+    return accept4(fd, addr, addrlen, 0);
+}
+
+int
+pthread_join(pthread_t thread, void **retval)
+{
+    thread_blocks(NO_DEADLINE);
+    int ret = REAL(pthread_join)(thread, retval);
+    thread_runs();
+    return ret;
+}
+
+struct host_thread_start {
+    void *(*fn)(void *);
+    void *arg;
+};
+
+static void *
+host_thread_main(void *p)
+{
+    struct host_thread_start start = *(struct host_thread_start *)p;
+    free(p);
+    void *ret = start.fn(start.arg);
+    host_threads_add(-1);
+    return ret;
+}
+
+// Every host thread counts as running from creation until it exits; the
+// creator counts it before it can start so the host never looks idle in
+// between.
+int
+pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+               void *(*fn)(void *), void *arg)
+{
+    if (!is_host)
+        return REAL(pthread_create)(thread, attr, fn, arg);
+    struct host_thread_start *start = malloc(sizeof(*start));
+    if (!start)
+        return EAGAIN;
+    start->fn = fn;
+    start->arg = arg;
+    host_threads_add(1);
+    int ret = REAL(pthread_create)(thread, attr, host_thread_main, start);
+    if (ret) {
+        host_threads_add(-1);
+        free(start);
+    }
+    return ret;
+}
+
+void
+pthread_exit(void *retval)
+{
+    host_threads_add(-1);
+    REAL(pthread_exit)(retval);
+    __builtin_unreachable();
 }
 
 int

@@ -35,7 +35,7 @@ def test_symmetric_force_move_pairs_return_to_base(sim_world):
         world.gcode_ok(
             "FORCE_MOVE STEPPER=x DISTANCE=-0.373 VELOCITY=80 ACCEL=4000"
         )
-    assert _wait_steps_settled(control, X_STEP_LINE, pairs * 2 * 29) >= (
+    assert _wait_steps_settled(world, control, X_STEP_LINE, pairs * 2 * 29) >= (
         pairs * 2 * 29
     )
     net = control.step_position(X_STEP_LINE)["steps"] - x_base
@@ -62,7 +62,7 @@ def test_symmetric_force_move_pairs_return_to_base_awd(sim_world):
     world.gcode_ok("FORCE_MOVE STEPPER=a1 DISTANCE=1.0 VELOCITY=80 ACCEL=4000")
     world.gcode_ok("FORCE_MOVE STEPPER=a1 DISTANCE=-1.0 VELOCITY=80 ACCEL=4000")
     counts = {
-        line: _wait_steps_settled(control, line, 1, timeout=6.0)
+        line: _wait_steps_settled(world, control, line, 1, timeout=6.0)
         for line in (18, 7, 15, 20)
     }
     a1_line = max(counts, key=counts.get)
@@ -77,7 +77,7 @@ def test_symmetric_force_move_pairs_return_to_base_awd(sim_world):
         world.gcode_ok(
             "FORCE_MOVE STEPPER=a1 DISTANCE=-0.373 VELOCITY=80 ACCEL=4000"
         )
-    assert _wait_steps_settled(control, a1_line, pairs * 2 * 29) >= (
+    assert _wait_steps_settled(world, control, a1_line, pairs * 2 * 29) >= (
         pairs * 2 * 29
     )
     net = control.step_position(a1_line)["steps"] - base

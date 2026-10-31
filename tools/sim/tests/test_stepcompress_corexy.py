@@ -14,12 +14,10 @@ SET_KINEMATIC_POSITION X=60 Y=60 Z=20 / G28 X / G28 Y.
 
 from __future__ import annotations
 
-import threading
-import time
-
 import pytest
 
 from tools.sim import configs
+from tools.sim.world import EndstopWall
 
 pytestmark = pytest.mark.needs_elf
 
@@ -47,40 +45,6 @@ class XyTracker:
         a = self._lane_mm(configs.STEPCOMPRESS_COREXY_STEP_LINES["a"])
         b = self._lane_mm(configs.STEPCOMPRESS_COREXY_STEP_LINES["b"])
         return (self.origin[0] + (a + b) / 2.0, self.origin[1] + (a - b) / 2.0)
-
-
-class EndstopWall:
-    """Drive an endstop GPIO like a switch mounted at `wall_mm` on one
-    cartesian axis: high at/past the wall, low below it."""
-
-    def __init__(self, tracker, control, axis_idx, pin, wall_mm):
-        self.tracker = tracker
-        self.control = control
-        self.axis_idx = axis_idx
-        self.pin = pin
-        self.wall_mm = wall_mm
-        self._stop = threading.Event()
-        self._thread = None
-
-    def __enter__(self):
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-        return self
-
-    def __exit__(self, *exc):
-        self._stop.set()
-        self._thread.join(timeout=2)
-        self.control.set_gpio_input(*self.pin, 0)
-
-    def _run(self):
-        level = None
-        while not self._stop.is_set():
-            pos = self.tracker.xy()[self.axis_idx]
-            want = 1 if pos >= self.wall_mm else 0
-            if want != level:
-                self.control.set_gpio_input(*self.pin, want)
-                level = want
-            time.sleep(0.005)
 
 
 def _boot(sim_world):
@@ -115,6 +79,7 @@ def test_stepcompress_corexy_consecutive_homes(sim_world):
             axis_idx,
             configs.STEPCOMPRESS_COREXY_ENDSTOPS[axis],
             WALLS_MM[axis],
+            clock=world.vclock,
         )
         for axis_idx, axis in enumerate(("x", "y"))
     ]
