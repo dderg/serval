@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import json
+import mmap
 import os
 import pathlib
 import signal
@@ -174,6 +175,58 @@ def vtime_destroy(shm_name: str) -> None:
         os.unlink(VTIME_SHM_DIR + shm_name)
     except FileNotFoundError:
         pass
+
+
+class VtimeRecorder:
+    """Samples (real, virtual) clock pairs so a run shows whether virtual
+    time held the configured rate or stalled against klippy's real clock."""
+
+    PERIOD_S = 0.05
+
+    def __init__(self, shm_name: str, speed: float, csv_path: pathlib.Path):
+        self._path = VTIME_SHM_DIR + shm_name
+        self.speed = speed
+        self.csv_path = csv_path
+        self.samples: list[tuple[int, int]] = []
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=1)
+        self.csv_path.write_text(
+            "real_ns,vtime_ns\n"
+            + "".join(f"{r},{v}\n" for r, v in self.samples)
+        )
+
+    def _run(self) -> None:
+        with open(self._path, "r+b") as f, mmap.mmap(f.fileno(), 8) as shm:
+            while not self._stop.is_set():
+                (vtime_ns,) = struct.unpack_from("<Q", shm)
+                self.samples.append((time.monotonic_ns(), vtime_ns))
+                self._stop.wait(self.PERIOD_S)
+
+    def rate_summary(self, window_s: float = 1.0) -> str:
+        """Worst and best virtual/real rate over sliding windows, as a
+        fraction of the configured speed."""
+        s = self.samples
+        step = max(1, round(window_s / self.PERIOD_S))
+        ratios = [
+            (s[i + step][1] - s[i][1])
+            / ((s[i + step][0] - s[i][0]) * self.speed)
+            for i in range(len(s) - step)
+            if s[i][1] != s[0][1]
+        ]
+        if not ratios:
+            return "vtime: no samples after first advance"
+        return (
+            f"vtime rate/speed over {window_s:.0f}s windows: "
+            f"min={min(ratios):.2f} max={max(ratios):.2f} "
+            f"(speed={self.speed}, {len(ratios)} windows)"
+        )
 
 
 @dataclasses.dataclass
@@ -372,8 +425,9 @@ class SimWorld:
         # world runs slower than reality, inflating every host-side latency
         # budget (drip windows, trsync timeouts) by 1/speed — the margin that
         # keeps timing-sensitive scenarios deterministic under CPU load.
-        self.vtime_speed = vtime_speed
+        self.vtime_speed = float(os.environ.get("VTIME_SPEED", vtime_speed))
         self.vtime_shm_name = vtime_shm_name_alloc()
+        self.vtime_recorder: Optional[VtimeRecorder] = None
 
         self.log_dir = self.workdir / "logs"
         self.gcode_dir = self.workdir / "gcodes"
@@ -432,6 +486,10 @@ class SimWorld:
 
         shim_so, vtime_so = self._ensure_shims_built()
         vtime_create(self.vtime_shm_name)
+        self.vtime_recorder = VtimeRecorder(
+            self.vtime_shm_name, self.vtime_speed, self.log_dir / "vtime.csv"
+        )
+        self.vtime_recorder.start()
 
         if spawn_mcus:
             self._spawn_mcus(shim_so, vtime_so)
@@ -536,9 +594,7 @@ class SimWorld:
         # vtime first, intercept second (constructor/interpose ordering).
         env["LD_PRELOAD"] = f"{vtime_so}:{shim_so}"
         env["VTIME_SHM_NAME"] = self.vtime_shm_name
-        env["VTIME_SPEED"] = os.environ.get(
-            "VTIME_SPEED", str(self.vtime_speed)
-        )
+        env["VTIME_SPEED"] = str(self.vtime_speed)
         env["MCU_SIM_SOCK_DIR"] = str(sock_dir)
         env["MCU_SIM_GPIO_STEP_TRACKING"] = "1"
         tracks = self._step_tracks.get(name, [])
@@ -896,6 +952,8 @@ class SimWorld:
 
     def dump_diagnostics(self) -> None:
         print("=== sim diagnostics ===")
+        if self.vtime_recorder:
+            print(self.vtime_recorder.rate_summary())
         tail = self.klippy_log_text()[-6000:]
         if tail:
             print("--- klippy.log tail ---")
@@ -938,4 +996,6 @@ class SimWorld:
             self.beacon.stop()
         if self.cartographer:
             self.cartographer.stop()
+        if self.vtime_recorder:
+            self.vtime_recorder.stop()
         vtime_destroy(self.vtime_shm_name)
