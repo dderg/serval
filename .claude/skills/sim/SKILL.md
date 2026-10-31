@@ -20,6 +20,7 @@ tools/sim/run.sh serve              # long-lived printer for Moonraker/Mainsail
 tools/sim/run.sh shell              # bash inside the image
 tools/sim/run.sh test --branch X    # mode first, then --branch: any mode against another branch
 tools/sim/run.sh --no-cache         # force full rebuild
+SIM_JITTER=3 tools/sim/run.sh test # pin the container + 3 bursty burners to one cpuset (CI-runner jitter repro)
 ```
 
 Every build is tagged `kalico-sim-<branch>` (the worktree's branch, or `--branch`'s argument), so agents/sessions on different worktrees build and test in parallel without clobbering each other's images.
@@ -84,6 +85,7 @@ Run one test: `tools/sim/run.sh test -k my_scenario`.
 ```
 
 - One event-driven virtual clock for every process (klippy preloads libvtime too). Each timed wait publishes its wake time and is woken the moment the clock reaches it; virtual time stands still while any klippy thread is busy and never passes a klippy wait deadline, so host compute costs no printer time. Between world calls (test code running) time is paced at real time; inside world waits it runs free (~7-15x on prints). Harness timeouts (`gcode_ok(timeout=…)`, `print_file`, log waits) are virtual seconds; a run whose virtual clock stops for 60 s of real time fails as wedged. `logs/vtime.csv` records virtual vs real time per world. `host_gated=False` (print-pressure test) runs free at `vtime_speed` so klippy must keep up like a real host.
+- A klippy thread woken by another (futex/condvar/semaphore/pipe/eventfd) holds the clock until the kernel actually runs it: each such wake makes the next clock advance scan `/proc` for runnable klippy threads first. Clock advances and floor drops (an MCU arming an earlier timer, a klippy thread starting to run) share one lock, so a preempted advancer cannot step past a floor that dropped under it. A wedge (`virtual clock stuck … wedged`) names what holds the clock. To reproduce scheduling-dependent flakes use `SIM_JITTER=N` (cpuset `SIM_JITTER_CPUS`, default `0,1`; burners removed on exit), not a flat `SIM_DOCKER_CPUS` quota; `tools/sim/tests/test_vtime_wake_holds.py` forces the starved-woken-thread case deterministically via `VTIME_TEST_WOKEN_SPIN_US`.
 - `CONFIG_MCU_SIM=y` firmware: motion tick registers as a vtime pacer (virtual time never skips a sample period), step queues notify the shim. Timer-too-close and timer-in-past checks stay live; only the tick-gap fault is compiled out (rust/runtime tick.rs), since the sim's tick is a paced thread, not an interrupt.
 - Auto-endstops: step-queue lines X=18/Y=7/Z=15 count toward a 50-step wall → endstop lines gpio200/201/202/203. Direct injection via each MCU's `sim_control` unix socket (`set_gpio_input`, `set_adc`, `get_gpio_output`, `get_steps`).
 - Beacon: `emulators/beacon_mcu.py` speaks full msgproto (identify, streaming, trsync, contact, NVM, accel) and tracks Z via the shim's step counter. The klippy-side plugin is the `dderg/beacon_klipper` fork branch `motion-stack-rename`, pinned in `fetch_plugins.sh` — NOT upstream beacon3d (incompatible with the motion rewrite).

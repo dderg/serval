@@ -17,6 +17,7 @@ tools/sim/run.sh test -k probe      # subset
 tools/sim/run.sh serve              # long-lived printer for Moonraker
 tools/sim/run.sh shell              # poke around inside the image
 tools/sim/run.sh test --branch X    # any mode for another branch; the mode comes first
+SIM_JITTER=3 tools/sim/run.sh test  # share a cpuset with 3 bursty CPU burners
 ```
 
 ## Layout
@@ -52,6 +53,17 @@ tools/sim/run.sh test --branch X    # any mode for another branch; the mode come
   - Virtual time stands still while any klippy thread is outside a
     blocking wait, and cannot pass a klippy wait deadline, so host
     computation costs no printer time and klippy can never be late.
+  - A klippy thread that another thread woke (futex, condvar, semaphore,
+    pipe or eventfd) is runnable before its wait returns. Every such wake
+    makes the next advance first check `/proc` for runnable klippy
+    threads, so a woken thread holds the clock until the kernel actually
+    runs it. Without this, a thread starved for tens of milliseconds let
+    the 1 ms-stepping reactor carry virtual time seconds ahead of it.
+  - Every clock advance computes its bound and stores the new time under
+    one shared lock, which every floor drop (an MCU arming an earlier
+    timer, a klippy thread starting to run) also takes: an advancer
+    preempted between the two can no longer step past a floor that
+    dropped meanwhile.
   - While test code runs between world calls, virtual time is paced at
     real time (the printer idles while its "operator" thinks); inside a
     world wait (`gcode`, `print_file`, log/status waits, `wait_until`) it
@@ -62,8 +74,16 @@ tools/sim/run.sh test --branch X    # any mode for another branch; the mode come
     `time.sleep` polling loop running beside a free-running wait samples
     the printer at an arbitrary, load-dependent cadence.
 - Harness timeouts are virtual seconds (`VirtualDeadline`); a run whose
-  virtual clock stops advancing for 60 s of real time fails as wedged.
+  virtual clock stops advancing for 60 s of real time fails as wedged, and
+  the error names what holds the clock (host threads, floors, the lock).
   `logs/vtime.csv` records virtual against real time for every world.
+- `SIM_JITTER=N` pins the test container and N burner containers (50 ms
+  spin / 20 ms sleep) to one cpuset (`SIM_JITTER_CPUS`, default `0,1`),
+  reproducing the uneven preemption of a loaded CI runner that a flat
+  `SIM_DOCKER_CPUS` quota does not; the burners are removed on exit.
+  `tools/sim/tests/test_vtime_wake_holds.py` is the deterministic version:
+  `VTIME_TEST_WOKEN_SPIN_US` keeps every early-woken klippy thread runnable
+  without running, and the clock must not move meanwhile.
 - Auto-endstops (libsim_intercept): `SimWorld` passes each rendered classic
   motor's step/dir pins into the shim. GPIO edges advance 50-step walls that
   assert gpio200/201/202/203. Sample lanes retain runtime notifications on

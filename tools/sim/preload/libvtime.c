@@ -19,6 +19,7 @@
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -75,6 +76,15 @@ static int (*real_pthread_join)(pthread_t, void **);
 static int (*real_pthread_create)(pthread_t *, const pthread_attr_t *,
                                   void *(*)(void *), void *);
 static void (*real_pthread_exit)(void *);
+static ssize_t (*real_write)(int, const void *, size_t);
+static ssize_t (*real_writev)(int, const struct iovec *, int);
+static ssize_t (*real_send)(int, const void *, size_t, int);
+static ssize_t (*real_sendto)(int, const void *, size_t, int,
+                              const struct sockaddr *, socklen_t);
+static ssize_t (*real_sendmsg)(int, const struct msghdr *, int);
+static int (*real_pthread_cond_signal)(pthread_cond_t *);
+static int (*real_pthread_cond_broadcast)(pthread_cond_t *);
+static int (*real_sem_post)(sem_t *);
 
 // Resolves on first use: these can run before the constructor (another
 // preloaded library's init, or a thread started before it).
@@ -216,31 +226,127 @@ kick_due_waiters(uint64_t now)
     }
 }
 
-static void
-vtime_raise_to(uint64_t bounded_target)
-{
-    uint64_t cur;
-    do {
-        cur = atomic_load_explicit(&vshm->nanos, memory_order_acquire);
-        if (bounded_target <= cur)
-            return;
-    } while (!atomic_compare_exchange_weak_explicit(
-        &vshm->nanos, &cur, bounded_target,
-        memory_order_acq_rel, memory_order_acquire));
-    kick_due_waiters(bounded_target);
-}
-
 static int is_host;
 
-// A host thread woken by a message still counts as idle until its wait
-// returns; in that window virtual time can only reach the next pacer floor
-// or host deadline, which bounds the error to sub-millisecond lateness.
 static int
-host_holds_time(void)
+process_gone(uint32_t pid)
 {
-    return atomic_load_explicit(&vshm->host_present, memory_order_acquire)
-           && atomic_load_explicit(&vshm->host_running,
-                                   memory_order_acquire) > 0;
+    return kill((pid_t)pid, 0) < 0 && errno == ESRCH;
+}
+
+static void
+clock_lock(void)
+{
+    int saved_errno = errno;
+    uint32_t self = (uint32_t)getpid();
+    for (unsigned spins = 1;; spins++) {
+        uint32_t owner = 0;
+        if (atomic_compare_exchange_weak_explicit(&vshm->clock_lock_owner,
+                                                  &owner, self,
+                                                  memory_order_acquire,
+                                                  memory_order_relaxed))
+            break;
+        if (owner && spins % 1024 == 0 && process_gone(owner))
+            atomic_compare_exchange_strong(&vshm->clock_lock_owner, &owner,
+                                           0);
+        sched_yield();
+    }
+    errno = saved_errno;
+}
+
+static void
+clock_unlock(void)
+{
+    atomic_store_explicit(&vshm->clock_lock_owner, 0, memory_order_release);
+}
+
+static uint32_t stat_cache_pid;
+static uint32_t stat_cache_tid[VTIME_MAX_HOST_THREADS];
+static int stat_cache_fd[VTIME_MAX_HOST_THREADS];
+
+static void
+reset_stat_cache(uint32_t pid)
+{
+    for (int i = 0; i < VTIME_MAX_HOST_THREADS; i++) {
+        if (stat_cache_tid[i] && stat_cache_fd[i] >= 0)
+            close(stat_cache_fd[i]);
+        stat_cache_tid[i] = 0;
+    }
+    stat_cache_pid = pid;
+}
+
+static int
+host_thread_runnable(int slot, uint32_t pid, uint32_t tid)
+{
+    if (stat_cache_tid[slot] != tid) {
+        if (stat_cache_tid[slot] && stat_cache_fd[slot] >= 0)
+            close(stat_cache_fd[slot]);
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%u/task/%u/stat", pid, tid);
+        stat_cache_fd[slot] = open(path, O_RDONLY | O_CLOEXEC);
+        stat_cache_tid[slot] = tid;
+    }
+    if (stat_cache_fd[slot] < 0)
+        return 0;
+    char stat[512];
+    ssize_t n = pread(stat_cache_fd[slot], stat, sizeof(stat) - 1, 0);
+    if (n <= 0)
+        return 0;
+    stat[n] = '\0';
+    char *comm_end = strrchr(stat, ')');
+    return comm_end && comm_end[1] == ' ' && comm_end[2] == 'R';
+}
+
+static int
+host_has_runnable_waiter(void)
+{
+    uint32_t pid = atomic_load_explicit(&vshm->host_pid, memory_order_acquire);
+    if (pid != stat_cache_pid)
+        reset_stat_cache(pid);
+    uint32_t self = is_host ? (uint32_t)gettid() : 0;
+    for (int i = 0; i < VTIME_MAX_HOST_THREADS; i++) {
+        uint32_t tid = atomic_load_explicit(&vshm->host_tid[i],
+                                            memory_order_acquire);
+        if (tid && tid != self && host_thread_runnable(i, pid, tid))
+            return 1;
+    }
+    return 0;
+}
+
+static int
+host_idle(void)
+{
+    if (!atomic_load_explicit(&vshm->host_present, memory_order_acquire))
+        return 1;
+    if (atomic_load_explicit(&vshm->host_running, memory_order_acquire) > 0)
+        return 0;
+    uint64_t epoch = atomic_load_explicit(&vshm->host_wake_epoch,
+                                          memory_order_acquire);
+    if (epoch == atomic_load_explicit(&vshm->host_idle_epoch,
+                                      memory_order_acquire))
+        return 1;
+    if (host_has_runnable_waiter())
+        return 0;
+    atomic_store_explicit(&vshm->host_idle_epoch, epoch, memory_order_release);
+    return 1;
+}
+
+static void
+host_may_have_woken_a_thread(void)
+{
+    if (is_host && vshm)
+        atomic_fetch_add_explicit(&vshm->host_wake_epoch, 1,
+                                  memory_order_acq_rel);
+}
+
+static void
+host_wrote(int fd)
+{
+    int saved_errno = errno;
+    struct stat st;
+    if (fstat(fd, &st) == 0 && !S_ISREG(st.st_mode))
+        host_may_have_woken_a_thread();
+    errno = saved_errno;
 }
 
 static uint64_t
@@ -281,11 +387,8 @@ vtime_cap(void)
     return paced < cap ? paced : cap;
 }
 
-// How far virtual time may advance right now: the cap, every pacer floor,
-// the earliest host wait deadline, and nowhere at all while the host is
-// busy.
 static uint64_t
-vtime_bound(void)
+locked_vtime_bound(void)
 {
     uint64_t bound = vtime_cap();
     uint64_t floor = pacer_floor_min();
@@ -294,12 +397,41 @@ vtime_bound(void)
     floor = host_wait_floor();
     if (floor < bound)
         bound = floor;
-    if (host_holds_time()) {
-        uint64_t now = vtime_now();
-        if (now < bound)
-            bound = now;
-    }
+    uint64_t now = vtime_now();
+    if (bound > now && !host_idle())
+        return now;
     return bound;
+}
+
+static uint64_t
+raise_toward(uint64_t target)
+{
+    clock_lock();
+    uint64_t bound = locked_vtime_bound();
+    uint64_t step = target < bound ? target : bound;
+    int raised = step > vtime_now();
+    if (raised)
+        atomic_store_explicit(&vshm->nanos, step, memory_order_release);
+    clock_unlock();
+    if (raised)
+        kick_due_waiters(step);
+    return bound;
+}
+
+static void
+store_pacer_floor(int slot, uint64_t floor_ns)
+{
+    uint64_t old = atomic_load_explicit(&vshm->pacers[slot].floor_ns,
+                                        memory_order_acquire);
+    if (floor_ns >= old) {
+        atomic_store_explicit(&vshm->pacers[slot].floor_ns, floor_ns,
+                              memory_order_release);
+        return;
+    }
+    clock_lock();
+    atomic_store_explicit(&vshm->pacers[slot].floor_ns, floor_ns,
+                          memory_order_release);
+    clock_unlock();
 }
 
 static __thread int waiter_slot = -1;
@@ -327,14 +459,23 @@ own_waiter_slot(void)
 
 static uint64_t wait_target(uint64_t deadline);
 
-// Entering a blocking wait: publish the virtual time it waits for so
-// whoever reaches it can wake this thread, and stop counting a host thread
-// as running.
+static __thread uint64_t blocked_until;
+static uint64_t test_woken_spin_ns;
+
+static void
+spin_real(uint64_t ns)
+{
+    uint64_t end = real_monotonic_ns() + ns;
+    while (real_monotonic_ns() < end)
+        ;
+}
+
 static void
 thread_blocks(uint64_t deadline)
 {
     if (!vshm)
         return;
+    blocked_until = deadline;
     uint64_t target = wait_target(deadline);
     if (target != UINT64_MAX) {
         int slot = own_waiter_slot();
@@ -353,9 +494,14 @@ thread_runs(void)
 {
     if (!vshm)
         return;
-    if (is_host)
+    if (is_host) {
+        if (test_woken_spin_ns && vtime_now() < blocked_until)
+            spin_real(test_woken_spin_ns);
+        clock_lock();
         atomic_fetch_add_explicit(&vshm->host_running, 1,
                                   memory_order_acq_rel);
+        clock_unlock();
+    }
     if (waiter_slot >= 0)
         atomic_store_explicit(&vshm->waiter_target[waiter_slot], 0,
                               memory_order_release);
@@ -374,16 +520,10 @@ host_threads_add(int delta)
 static void
 vtime_advance_to(uint64_t target_ns)
 {
-    for (;;) {
+    while (vtime_now() < target_ns) {
+        raise_toward(target_ns);
         if (vtime_now() >= target_ns)
             return;
-        uint64_t bound = vtime_bound();
-        if (bound > vtime_now()) {
-            uint64_t step = target_ns < bound ? target_ns : bound;
-            vtime_raise_to(step);
-            if (step >= target_ns)
-                return;
-        }
         struct timespec w = { 0, 100000 };
         real_nanosleep(&w, NULL);
     }
@@ -394,6 +534,7 @@ static void vtimer_check_and_fire(void);
 #define WAIT_SLICE_MIN_NS 50000ULL
 #define WAIT_SLICE_MAX_NS 20000000ULL
 #define WAIT_SLICE_HELD_NS WAIT_SLICE_MIN_NS
+#define HOST_WAIT_SLICE_HELD_NS 1000000ULL
 #define NO_DEADLINE UINT64_MAX
 
 // A timed wait in the thread that owns the virtual timer (the MCU main
@@ -419,14 +560,13 @@ wait_step(uint64_t deadline)
 {
     uint64_t target = wait_target(deadline);
     uint64_t cap = vtime_cap();
-    uint64_t bound = vtime_bound();
-    vtime_raise_to(target < bound ? target : bound);
+    uint64_t bound = raise_toward(target);
     vtimer_check_and_fire();
     uint64_t now = vtime_now();
     if (now >= deadline)
         return 0;
     if (bound < cap)
-        return WAIT_SLICE_HELD_NS;
+        return is_host ? HOST_WAIT_SLICE_HELD_NS : WAIT_SLICE_HELD_NS;
     double rate = harness_paced() ? 1.0 : vtime_speed;
     double slice = target > now ? (double)(target - now) / rate : 0;
     if (slice < WAIT_SLICE_MIN_NS)
@@ -470,11 +610,10 @@ vtime_driver_main(void *arg)
     (void)arg;
     for (;;) {
         uint64_t cap = vtime_cap();
-        uint64_t bound = vtime_bound();
+        uint64_t bound = raise_toward(UINT64_MAX);
         if (bound < cap && cap != UINT64_MAX)
             atomic_fetch_add_explicit(&vtime_stall_offset_ns, cap - bound,
                                       memory_order_acq_rel);
-        vtime_raise_to(bound);
         vtimer_check_and_fire();
         struct timespec w = { 0, 1000000 };
         real_nanosleep(&w, NULL);
@@ -493,12 +632,14 @@ vtime_pacer_register_slack(uint64_t period_ns, uint64_t slack_ns)
                                               memory_order_acq_rel);
     if (slot >= VTIME_MAX_PACERS)
         return -1;
+    clock_lock();
     atomic_store_explicit(&vshm->pacers[slot].slack_ns, slack_ns,
                           memory_order_release);
     atomic_store_explicit(&vshm->pacers[slot].floor_ns,
                           vtime_now() + period_ns, memory_order_release);
     atomic_store_explicit(&vshm->pacers[slot].active, 1,
                           memory_order_release);
+    clock_unlock();
     owned_pacer_slots[slot] = 1;
     VLOG("pacer %u registered, period=%lu ns, slack=%lu ns", slot,
          (unsigned long)period_ns, (unsigned long)slack_ns);
@@ -517,11 +658,7 @@ vtime_pacer_advance(int slot, uint64_t target_ns, uint64_t period_ns)
     if (!vshm || slot < 0 || slot >= VTIME_MAX_PACERS)
         return;
     (void)period_ns;
-    // Floor equals the tick target exactly: virtual time may never outrun
-    // the tick the pacer is about to execute, so the engine's clock read at
-    // tick N is at most one period past any piece start it adopts.
-    atomic_store_explicit(&vshm->pacers[slot].floor_ns, target_ns,
-                          memory_order_release);
+    store_pacer_floor(slot, target_ns);
     vtime_advance_to(target_ns);
     vtimer_check_and_fire();
     sched_yield();
@@ -537,8 +674,36 @@ vtime_pacer_set_floor(int slot, uint64_t target_ns)
 {
     if (!vshm || slot < 0 || slot >= VTIME_MAX_PACERS)
         return;
-    atomic_store_explicit(&vshm->pacers[slot].floor_ns, target_ns,
+    store_pacer_floor(slot, target_ns);
+}
+
+static __thread int host_tid_slot = -1;
+
+static void
+register_host_thread(void)
+{
+    uint32_t tid = (uint32_t)gettid();
+    for (int i = 0; i < VTIME_MAX_HOST_THREADS; i++) {
+        uint32_t free_slot = 0;
+        if (atomic_compare_exchange_strong(&vshm->host_tid[i], &free_slot,
+                                           tid)) {
+            host_tid_slot = i;
+            return;
+        }
+    }
+    fprintf(stderr, "[vtime] more than %d host threads\n",
+            VTIME_MAX_HOST_THREADS);
+    abort();
+}
+
+static void
+unregister_host_thread(void)
+{
+    if (host_tid_slot < 0)
+        return;
+    atomic_store_explicit(&vshm->host_tid[host_tid_slot], 0,
                           memory_order_release);
+    host_tid_slot = -1;
 }
 
 __attribute__((destructor))
@@ -602,6 +767,9 @@ vtime_init(void)
     real_timer_create = dlsym(RTLD_NEXT, "timer_create");
     real_timer_settime = dlsym(RTLD_NEXT, "timer_settime");
     real_usleep = dlsym(RTLD_NEXT, "usleep");
+    const char *spin_env = getenv("VTIME_TEST_WOKEN_SPIN_US");
+    if (spin_env)
+        test_woken_spin_ns = strtoull(spin_env, NULL, 10) * 1000ULL;
 
     const char *shm_name = getenv("VTIME_SHM_NAME");
     if (!shm_name || !shm_name[0])
@@ -650,6 +818,11 @@ vtime_init(void)
                 atomic_store(&vshm->waiter_is_floor[i], 0);
                 atomic_store(&vshm->waiter_target[i], 0);
             }
+        for (int i = 0; i < VTIME_MAX_HOST_THREADS; i++)
+            atomic_store(&vshm->host_tid[i], 0);
+        atomic_store(&vshm->host_pid, (uint32_t)getpid());
+        atomic_fetch_add(&vshm->host_wake_epoch, 1);
+        register_host_thread();
         atomic_store(&vshm->host_running, 1);
         atomic_store(&vshm->host_present, 1);
     }
@@ -952,8 +1125,15 @@ syscall(long number, ...)
         real_syscall = dlsym(RTLD_NEXT, "syscall");
     int op = (int)a2, cmd = op & FUTEX_CMD_MASK;
     if (!vshm || number != SYS_futex
-        || (cmd != FUTEX_WAIT && cmd != FUTEX_WAIT_BITSET))
-        return real_syscall(number, a1, a2, a3, a4, a5, a6);
+        || (cmd != FUTEX_WAIT && cmd != FUTEX_WAIT_BITSET)) {
+        long woke = real_syscall(number, a1, a2, a3, a4, a5, a6);
+        if (vshm && number == SYS_futex && woke > 0
+            && (cmd == FUTEX_WAKE || cmd == FUTEX_WAKE_BITSET
+                || cmd == FUTEX_WAKE_OP || cmd == FUTEX_REQUEUE
+                || cmd == FUTEX_CMP_REQUEUE))
+            host_may_have_woken_a_thread();
+        return woke;
+    }
     const struct timespec *timeout = (const struct timespec *)a4;
     long ret;
     if (timeout && !(op & FUTEX_CLOCK_REALTIME)) {
@@ -996,6 +1176,27 @@ pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex)
     int ret = REAL(pthread_cond_wait)(cond, mutex);
     thread_runs();
     return ret;
+}
+
+int
+pthread_cond_signal(pthread_cond_t *cond)
+{
+    host_may_have_woken_a_thread();
+    return REAL(pthread_cond_signal)(cond);
+}
+
+int
+pthread_cond_broadcast(pthread_cond_t *cond)
+{
+    host_may_have_woken_a_thread();
+    return REAL(pthread_cond_broadcast)(cond);
+}
+
+int
+sem_post(sem_t *sem)
+{
+    host_may_have_woken_a_thread();
+    return REAL(sem_post)(sem);
 }
 
 // CPython's GIL hand-off waits on a CLOCK_MONOTONIC condvar; glibc records
@@ -1092,6 +1293,52 @@ read(int fd, void *buf, size_t count)
 }
 
 ssize_t
+write(int fd, const void *buf, size_t count)
+{
+    ssize_t ret = REAL(write)(fd, buf, count);
+    if (is_host && vshm && ret > 0)
+        host_wrote(fd);
+    return ret;
+}
+
+ssize_t
+writev(int fd, const struct iovec *iov, int iovcnt)
+{
+    ssize_t ret = REAL(writev)(fd, iov, iovcnt);
+    if (is_host && vshm && ret > 0)
+        host_wrote(fd);
+    return ret;
+}
+
+ssize_t
+send(int fd, const void *buf, size_t len, int flags)
+{
+    ssize_t ret = REAL(send)(fd, buf, len, flags);
+    if (is_host && vshm && ret > 0)
+        host_may_have_woken_a_thread();
+    return ret;
+}
+
+ssize_t
+sendto(int fd, const void *buf, size_t len, int flags,
+       const struct sockaddr *addr, socklen_t addrlen)
+{
+    ssize_t ret = REAL(sendto)(fd, buf, len, flags, addr, addrlen);
+    if (is_host && vshm && ret > 0)
+        host_may_have_woken_a_thread();
+    return ret;
+}
+
+ssize_t
+sendmsg(int fd, const struct msghdr *msg, int flags)
+{
+    ssize_t ret = REAL(sendmsg)(fd, msg, flags);
+    if (is_host && vshm && ret > 0)
+        host_may_have_woken_a_thread();
+    return ret;
+}
+
+ssize_t
 recv(int fd, void *buf, size_t len, int flags)
 {
     if (!is_host || (flags & MSG_DONTWAIT) || !fd_blocks(fd))
@@ -1161,7 +1408,9 @@ host_thread_main(void *p)
 {
     struct host_thread_start start = *(struct host_thread_start *)p;
     free(p);
+    register_host_thread();
     void *ret = start.fn(start.arg);
+    unregister_host_thread();
     host_threads_add(-1);
     return ret;
 }
@@ -1192,6 +1441,8 @@ pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 void
 pthread_exit(void *retval)
 {
+    if (is_host)
+        unregister_host_thread();
     host_threads_add(-1);
     REAL(pthread_exit)(retval);
     __builtin_unreachable();
