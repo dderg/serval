@@ -144,14 +144,16 @@ jobs:
           sudo apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=15 update
           sudo apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=15 install -y libudev-dev
       - uses: dtolnay/rust-toolchain@stable
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-30
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
           key: public-api
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-public-api
+          tool: cargo-public-api@0.52.0
       - name: public API matches baselines
         run: ./scripts/ci.sh public-api
 

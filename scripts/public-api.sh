@@ -6,16 +6,22 @@
 #
 # A contract change is a reviewed diff of rust/api/<crate>.txt, in the same
 # commit as the code that needs it. Requires `cargo install cargo-public-api
-# --locked` and the nightly toolchain (rustdoc JSON).
+# --locked` and the pinned nightly below (rustdoc JSON); std's internal paths
+# such as `alloc::sync::Arc` move between nightlies, so CI pins the same one.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST="$ROOT/rust"
 API_DIR="$RUST/api"
 CRATES=(geometry trajectory motion-pipeline planner-config)
+export RUSTUP_TOOLCHAIN=nightly-2026-10-30
 
 command -v cargo-public-api >/dev/null 2>&1 || {
     echo "cargo-public-api missing: cargo install cargo-public-api --locked" >&2
+    exit 2
+}
+rustup run "$RUSTUP_TOOLCHAIN" rustc --version >/dev/null 2>&1 || {
+    echo "$RUSTUP_TOOLCHAIN missing: rustup toolchain install $RUSTUP_TOOLCHAIN --profile minimal" >&2
     exit 2
 }
 

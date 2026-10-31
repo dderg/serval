@@ -174,21 +174,21 @@ pub mod trajectory::continuous
 pub enum trajectory::continuous::ContinuousAxis
 pub trajectory::continuous::ContinuousAxis::Analytic
 pub trajectory::continuous::ContinuousAxis::Analytic::axis: usize
-pub trajectory::continuous::ContinuousAxis::Analytic::span: alloc::sync::Arc<trajectory::continuous::AnalyticMoveSpan>
+pub trajectory::continuous::ContinuousAxis::Analytic::span: alloc::rcs::arc::Arc<trajectory::continuous::AnalyticMoveSpan>
 pub trajectory::continuous::ContinuousAxis::Buzz
 pub trajectory::continuous::ContinuousAxis::Buzz::base_position: f64
-pub trajectory::continuous::ContinuousAxis::Buzz::profile: alloc::sync::Arc<trajectory::BuzzProfile>
+pub trajectory::continuous::ContinuousAxis::Buzz::profile: alloc::rcs::arc::Arc<trajectory::BuzzProfile>
 pub trajectory::continuous::ContinuousAxis::Buzz::sign: f64
 pub trajectory::continuous::ContinuousAxis::Hold
 pub trajectory::continuous::ContinuousAxis::Hold::position: f64
 pub trajectory::continuous::ContinuousAxis::Hold::t_end: f64
 pub trajectory::continuous::ContinuousAxis::Hold::t_start: f64
 pub trajectory::continuous::ContinuousAxis::Nudge(trajectory::NudgeProfile)
-pub trajectory::continuous::ContinuousAxis::PiecewiseRelativeSpline(alloc::sync::Arc<[trajectory::continuous::RelativeSplinePiece]>)
+pub trajectory::continuous::ContinuousAxis::PiecewiseRelativeSpline(alloc::rcs::arc::Arc<[trajectory::continuous::RelativeSplinePiece]>)
 pub trajectory::continuous::ContinuousAxis::RelativeSpline
 pub trajectory::continuous::ContinuousAxis::RelativeSpline::base_position: f64
-pub trajectory::continuous::ContinuousAxis::RelativeSpline::curve: alloc::sync::Arc<nurbs::scalar::ScalarNurbs>
-pub trajectory::continuous::ContinuousAxis::Spline(alloc::sync::Arc<nurbs::scalar::ScalarNurbs>)
+pub trajectory::continuous::ContinuousAxis::RelativeSpline::curve: alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>
+pub trajectory::continuous::ContinuousAxis::Spline(alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>)
 impl trajectory::continuous::ContinuousAxis
 pub fn trajectory::continuous::ContinuousAxis::append_breakpoints(&self, &mut alloc::vec::Vec<f64>)
 pub fn trajectory::continuous::ContinuousAxis::breakpoints(&self) -> alloc::vec::Vec<f64>
@@ -197,7 +197,7 @@ pub fn trajectory::continuous::ContinuousAxis::eval_pva(&self, f64) -> core::res
 pub fn trajectory::continuous::ContinuousAxis::eval_pvaj(&self, f64) -> core::result::Result<trajectory::continuous::Pvaj, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::ContinuousAxis::position(&self, f64) -> core::result::Result<f64, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::ContinuousAxis::pva_bounds(&self, f64, f64) -> core::result::Result<trajectory::continuous::PvaBounds, trajectory::continuous::ContinuousError>
-pub fn trajectory::continuous::ContinuousAxis::try_piecewise_relative_spline(alloc::sync::Arc<[trajectory::continuous::RelativeSplinePiece]>) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ContinuousAxis::try_piecewise_relative_spline(alloc::rcs::arc::Arc<[trajectory::continuous::RelativeSplinePiece]>) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
 pub enum trajectory::continuous::ContinuousError
 pub trajectory::continuous::ContinuousError::AxisOutsideMove
 pub trajectory::continuous::ContinuousError::AxisOutsideMove::axis: usize
@@ -236,15 +236,15 @@ pub trajectory::continuous::ContinuousError::TimeOutsideSpan::t_start: f64
 pub trajectory::continuous::ContinuousError::VariableSurfaceBeforeDispatch
 pub enum trajectory::continuous::MotorGroup
 pub trajectory::continuous::MotorGroup::Analytic
-pub trajectory::continuous::MotorGroup::Analytic::span: alloc::sync::Arc<trajectory::continuous::AnalyticMoveSpan>
-pub trajectory::continuous::MotorGroup::Analytic::terms: alloc::sync::Arc<[trajectory::continuous::MotorTerm]>
+pub trajectory::continuous::MotorGroup::Analytic::span: alloc::rcs::arc::Arc<trajectory::continuous::AnalyticMoveSpan>
+pub trajectory::continuous::MotorGroup::Analytic::terms: alloc::rcs::arc::Arc<[trajectory::continuous::MotorTerm]>
 pub trajectory::continuous::MotorGroup::Independent(trajectory::continuous::MotorTerm)
 pub trajectory::continuous::MotorGroup::RelativeSpline
 pub trajectory::continuous::MotorGroup::RelativeSpline::base_position: f64
-pub trajectory::continuous::MotorGroup::RelativeSpline::curve: alloc::sync::Arc<nurbs::scalar::ScalarNurbs>
+pub trajectory::continuous::MotorGroup::RelativeSpline::curve: alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>
 pub trajectory::continuous::MotorGroup::RelativeSpline::summed_scale: f64
 pub trajectory::continuous::MotorGroup::Spline
-pub trajectory::continuous::MotorGroup::Spline::curve: alloc::sync::Arc<nurbs::scalar::ScalarNurbs>
+pub trajectory::continuous::MotorGroup::Spline::curve: alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>
 pub trajectory::continuous::MotorGroup::Spline::summed_scale: f64
 pub enum trajectory::continuous::ProfileError
 pub trajectory::continuous::ProfileError::NegativeAcceleration
@@ -257,10 +257,10 @@ pub trajectory::continuous::ProfileError::ZeroSpeed
 pub enum trajectory::continuous::SurfaceMode
 pub trajectory::continuous::SurfaceMode::Constant(f64)
 pub trajectory::continuous::SurfaceMode::None
-pub trajectory::continuous::SurfaceMode::Variable(alloc::sync::Arc<geometry::surface::SurfaceTransform>)
+pub trajectory::continuous::SurfaceMode::Variable(alloc::rcs::arc::Arc<geometry::surface::SurfaceTransform>)
 pub struct trajectory::continuous::AnalyticMoveSpan
-pub trajectory::continuous::AnalyticMoveSpan::axis_start_positions: alloc::sync::Arc<[f64]>
-pub trajectory::continuous::AnalyticMoveSpan::phases: alloc::sync::Arc<[geometry::velocity::law::LawSegment]>
+pub trajectory::continuous::AnalyticMoveSpan::axis_start_positions: alloc::rcs::arc::Arc<[f64]>
+pub trajectory::continuous::AnalyticMoveSpan::phases: alloc::rcs::arc::Arc<[geometry::velocity::law::LawSegment]>
 pub trajectory::continuous::AnalyticMoveSpan::source: geometry::frontend::Move
 pub trajectory::continuous::AnalyticMoveSpan::source_distance_origin: f64
 pub trajectory::continuous::AnalyticMoveSpan::surface: trajectory::continuous::SurfaceMode
@@ -272,7 +272,7 @@ pub fn trajectory::continuous::AnalyticMoveSpan::eval_axis_pvaj(&self, usize, f6
 pub fn trajectory::continuous::AnalyticMoveSpan::has_variable_surface(&self) -> bool
 pub fn trajectory::continuous::AnalyticMoveSpan::phase_seam_times(&self) -> impl core::iter::traits::iterator::Iterator<Item = f64> + '_
 pub fn trajectory::continuous::AnalyticMoveSpan::surface_seam_times(&self) -> core::option::Option<alloc::vec::Vec<f64>>
-pub fn trajectory::continuous::AnalyticMoveSpan::try_new(geometry::frontend::Move, alloc::sync::Arc<[geometry::velocity::law::LawSegment]>, f64, f64, f64, alloc::sync::Arc<[f64]>, trajectory::continuous::SurfaceMode) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::AnalyticMoveSpan::try_new(geometry::frontend::Move, alloc::rcs::arc::Arc<[geometry::velocity::law::LawSegment]>, f64, f64, f64, alloc::rcs::arc::Arc<[f64]>, trajectory::continuous::SurfaceMode) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
 pub struct trajectory::continuous::BuzzProfile
 impl trajectory::BuzzProfile
 pub fn trajectory::BuzzProfile::acceleration(&self, f64) -> f64
@@ -297,7 +297,7 @@ pub struct trajectory::continuous::ClockedMotorSpan
 pub trajectory::continuous::ClockedMotorSpan::clock_freq_hz: f64
 pub trajectory::continuous::ClockedMotorSpan::end_clock: u64
 pub trajectory::continuous::ClockedMotorSpan::end_host: f64
-pub trajectory::continuous::ClockedMotorSpan::signal: alloc::sync::Arc<trajectory::continuous::MotorSpan>
+pub trajectory::continuous::ClockedMotorSpan::signal: alloc::rcs::arc::Arc<trajectory::continuous::MotorSpan>
 pub trajectory::continuous::ClockedMotorSpan::start_clock: u64
 pub trajectory::continuous::ClockedMotorSpan::start_clock_exact: f64
 pub trajectory::continuous::ClockedMotorSpan::start_host: f64
@@ -309,10 +309,10 @@ pub fn trajectory::continuous::ClockedMotorSpan::eval_at_clock(&self, u64) -> co
 pub fn trajectory::continuous::ClockedMotorSpan::position_at_clock(&self, u64) -> core::result::Result<f64, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::ClockedMotorSpan::split_max_duration(&self) -> core::result::Result<alloc::vec::Vec<Self>, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::ClockedMotorSpan::stream_time_at_clock(&self, u64) -> core::result::Result<f64, trajectory::continuous::ContinuousError>
-pub fn trajectory::continuous::ClockedMotorSpan::try_new(alloc::sync::Arc<trajectory::continuous::MotorSpan>, f64, f64, f64, f64, f64, f64) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ClockedMotorSpan::try_new(alloc::rcs::arc::Arc<trajectory::continuous::MotorSpan>, f64, f64, f64, f64, f64, f64) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
 pub struct trajectory::continuous::ContinuousSegment
-pub trajectory::continuous::ContinuousSegment::axes: alloc::sync::Arc<[trajectory::continuous::ContinuousAxis]>
-pub trajectory::continuous::ContinuousSegment::followers: alloc::sync::Arc<[geometry::segment::FollowerDemand]>
+pub trajectory::continuous::ContinuousSegment::axes: alloc::rcs::arc::Arc<[trajectory::continuous::ContinuousAxis]>
+pub trajectory::continuous::ContinuousSegment::followers: alloc::rcs::arc::Arc<[geometry::segment::FollowerDemand]>
 pub trajectory::continuous::ContinuousSegment::motor_mask: u8
 pub trajectory::continuous::ContinuousSegment::rest_at_end: bool
 pub trajectory::continuous::ContinuousSegment::source_line: u32
@@ -333,8 +333,8 @@ pub fn trajectory::continuous::LocalPolynomial::valid_until(&self) -> f64
 pub fn trajectory::continuous::LocalPolynomial::velocity(&self, f64) -> f64
 pub fn trajectory::continuous::LocalPolynomial::velocity_range(&self, f64, f64) -> (f64, f64)
 pub struct trajectory::continuous::MotorSpan
-pub trajectory::continuous::MotorSpan::breakpoints: alloc::sync::Arc<[f64]>
-pub trajectory::continuous::MotorSpan::groups: alloc::sync::Arc<[trajectory::continuous::MotorGroup]>
+pub trajectory::continuous::MotorSpan::breakpoints: alloc::rcs::arc::Arc<[f64]>
+pub trajectory::continuous::MotorSpan::groups: alloc::rcs::arc::Arc<[trajectory::continuous::MotorGroup]>
 pub trajectory::continuous::MotorSpan::is_explicit_hold: bool
 pub trajectory::continuous::MotorSpan::motor_mask: u8
 pub trajectory::continuous::MotorSpan::source_line: u32
@@ -345,7 +345,7 @@ pub fn trajectory::continuous::MotorSpan::eval_pva(&self, f64) -> core::result::
 pub fn trajectory::continuous::MotorSpan::first_source_axis(&self) -> usize
 pub fn trajectory::continuous::MotorSpan::position(&self, f64) -> core::result::Result<f64, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::MotorSpan::pva_bounds(&self, f64, f64) -> core::result::Result<trajectory::continuous::PvaBounds, trajectory::continuous::ContinuousError>
-pub fn trajectory::continuous::MotorSpan::try_new(alloc::sync::Arc<[trajectory::continuous::MotorGroup]>, f64, f64, u8, u32, bool) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::MotorSpan::try_new(alloc::rcs::arc::Arc<[trajectory::continuous::MotorGroup]>, f64, f64, u8, u32, bool) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
 impl trajectory::continuous::MotorSpan
 pub fn trajectory::continuous::MotorSpan::local_polynomial(&self, f64) -> core::option::Option<trajectory::continuous::LocalPolynomial>
 pub struct trajectory::continuous::MotorTerm
@@ -391,7 +391,7 @@ pub trajectory::continuous::Pvaj::position: f64
 pub trajectory::continuous::Pvaj::velocity: f64
 pub struct trajectory::continuous::RelativeSplinePiece
 pub trajectory::continuous::RelativeSplinePiece::base_position: f64
-pub trajectory::continuous::RelativeSplinePiece::curve: alloc::sync::Arc<nurbs::scalar::ScalarNurbs>
+pub trajectory::continuous::RelativeSplinePiece::curve: alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>
 pub trajectory::continuous::RelativeSplinePiece::t_end: f64
 pub trajectory::continuous::RelativeSplinePiece::t_start: f64
 pub const trajectory::continuous::MAX_SPAN_SECS: f64
@@ -414,21 +414,21 @@ pub fn trajectory::chain::ChainStage::kernel_variance_s2(&self) -> f64
 pub enum trajectory::ContinuousAxis
 pub trajectory::ContinuousAxis::Analytic
 pub trajectory::ContinuousAxis::Analytic::axis: usize
-pub trajectory::ContinuousAxis::Analytic::span: alloc::sync::Arc<trajectory::continuous::AnalyticMoveSpan>
+pub trajectory::ContinuousAxis::Analytic::span: alloc::rcs::arc::Arc<trajectory::continuous::AnalyticMoveSpan>
 pub trajectory::ContinuousAxis::Buzz
 pub trajectory::ContinuousAxis::Buzz::base_position: f64
-pub trajectory::ContinuousAxis::Buzz::profile: alloc::sync::Arc<trajectory::BuzzProfile>
+pub trajectory::ContinuousAxis::Buzz::profile: alloc::rcs::arc::Arc<trajectory::BuzzProfile>
 pub trajectory::ContinuousAxis::Buzz::sign: f64
 pub trajectory::ContinuousAxis::Hold
 pub trajectory::ContinuousAxis::Hold::position: f64
 pub trajectory::ContinuousAxis::Hold::t_end: f64
 pub trajectory::ContinuousAxis::Hold::t_start: f64
 pub trajectory::ContinuousAxis::Nudge(trajectory::NudgeProfile)
-pub trajectory::ContinuousAxis::PiecewiseRelativeSpline(alloc::sync::Arc<[trajectory::continuous::RelativeSplinePiece]>)
+pub trajectory::ContinuousAxis::PiecewiseRelativeSpline(alloc::rcs::arc::Arc<[trajectory::continuous::RelativeSplinePiece]>)
 pub trajectory::ContinuousAxis::RelativeSpline
 pub trajectory::ContinuousAxis::RelativeSpline::base_position: f64
-pub trajectory::ContinuousAxis::RelativeSpline::curve: alloc::sync::Arc<nurbs::scalar::ScalarNurbs>
-pub trajectory::ContinuousAxis::Spline(alloc::sync::Arc<nurbs::scalar::ScalarNurbs>)
+pub trajectory::ContinuousAxis::RelativeSpline::curve: alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>
+pub trajectory::ContinuousAxis::Spline(alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>)
 impl trajectory::continuous::ContinuousAxis
 pub fn trajectory::continuous::ContinuousAxis::append_breakpoints(&self, &mut alloc::vec::Vec<f64>)
 pub fn trajectory::continuous::ContinuousAxis::breakpoints(&self) -> alloc::vec::Vec<f64>
@@ -437,7 +437,7 @@ pub fn trajectory::continuous::ContinuousAxis::eval_pva(&self, f64) -> core::res
 pub fn trajectory::continuous::ContinuousAxis::eval_pvaj(&self, f64) -> core::result::Result<trajectory::continuous::Pvaj, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::ContinuousAxis::position(&self, f64) -> core::result::Result<f64, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::ContinuousAxis::pva_bounds(&self, f64, f64) -> core::result::Result<trajectory::continuous::PvaBounds, trajectory::continuous::ContinuousError>
-pub fn trajectory::continuous::ContinuousAxis::try_piecewise_relative_spline(alloc::sync::Arc<[trajectory::continuous::RelativeSplinePiece]>) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ContinuousAxis::try_piecewise_relative_spline(alloc::rcs::arc::Arc<[trajectory::continuous::RelativeSplinePiece]>) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
 pub enum trajectory::ContinuousError
 pub trajectory::ContinuousError::AxisOutsideMove
 pub trajectory::ContinuousError::AxisOutsideMove::axis: usize
@@ -476,15 +476,15 @@ pub trajectory::ContinuousError::TimeOutsideSpan::t_start: f64
 pub trajectory::ContinuousError::VariableSurfaceBeforeDispatch
 pub enum trajectory::MotorGroup
 pub trajectory::MotorGroup::Analytic
-pub trajectory::MotorGroup::Analytic::span: alloc::sync::Arc<trajectory::continuous::AnalyticMoveSpan>
-pub trajectory::MotorGroup::Analytic::terms: alloc::sync::Arc<[trajectory::continuous::MotorTerm]>
+pub trajectory::MotorGroup::Analytic::span: alloc::rcs::arc::Arc<trajectory::continuous::AnalyticMoveSpan>
+pub trajectory::MotorGroup::Analytic::terms: alloc::rcs::arc::Arc<[trajectory::continuous::MotorTerm]>
 pub trajectory::MotorGroup::Independent(trajectory::continuous::MotorTerm)
 pub trajectory::MotorGroup::RelativeSpline
 pub trajectory::MotorGroup::RelativeSpline::base_position: f64
-pub trajectory::MotorGroup::RelativeSpline::curve: alloc::sync::Arc<nurbs::scalar::ScalarNurbs>
+pub trajectory::MotorGroup::RelativeSpline::curve: alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>
 pub trajectory::MotorGroup::RelativeSpline::summed_scale: f64
 pub trajectory::MotorGroup::Spline
-pub trajectory::MotorGroup::Spline::curve: alloc::sync::Arc<nurbs::scalar::ScalarNurbs>
+pub trajectory::MotorGroup::Spline::curve: alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>
 pub trajectory::MotorGroup::Spline::summed_scale: f64
 pub enum trajectory::PostProcessorError
 pub trajectory::PostProcessorError::AccelGainNeedsPrecedingKernel
@@ -502,10 +502,10 @@ pub trajectory::PostProcessorError::UnsupportedComposition::detail: alloc::strin
 pub enum trajectory::SurfaceMode
 pub trajectory::SurfaceMode::Constant(f64)
 pub trajectory::SurfaceMode::None
-pub trajectory::SurfaceMode::Variable(alloc::sync::Arc<geometry::surface::SurfaceTransform>)
+pub trajectory::SurfaceMode::Variable(alloc::rcs::arc::Arc<geometry::surface::SurfaceTransform>)
 pub struct trajectory::AnalyticMoveSpan
-pub trajectory::AnalyticMoveSpan::axis_start_positions: alloc::sync::Arc<[f64]>
-pub trajectory::AnalyticMoveSpan::phases: alloc::sync::Arc<[geometry::velocity::law::LawSegment]>
+pub trajectory::AnalyticMoveSpan::axis_start_positions: alloc::rcs::arc::Arc<[f64]>
+pub trajectory::AnalyticMoveSpan::phases: alloc::rcs::arc::Arc<[geometry::velocity::law::LawSegment]>
 pub trajectory::AnalyticMoveSpan::source: geometry::frontend::Move
 pub trajectory::AnalyticMoveSpan::source_distance_origin: f64
 pub trajectory::AnalyticMoveSpan::surface: trajectory::continuous::SurfaceMode
@@ -517,7 +517,7 @@ pub fn trajectory::continuous::AnalyticMoveSpan::eval_axis_pvaj(&self, usize, f6
 pub fn trajectory::continuous::AnalyticMoveSpan::has_variable_surface(&self) -> bool
 pub fn trajectory::continuous::AnalyticMoveSpan::phase_seam_times(&self) -> impl core::iter::traits::iterator::Iterator<Item = f64> + '_
 pub fn trajectory::continuous::AnalyticMoveSpan::surface_seam_times(&self) -> core::option::Option<alloc::vec::Vec<f64>>
-pub fn trajectory::continuous::AnalyticMoveSpan::try_new(geometry::frontend::Move, alloc::sync::Arc<[geometry::velocity::law::LawSegment]>, f64, f64, f64, alloc::sync::Arc<[f64]>, trajectory::continuous::SurfaceMode) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::AnalyticMoveSpan::try_new(geometry::frontend::Move, alloc::rcs::arc::Arc<[geometry::velocity::law::LawSegment]>, f64, f64, f64, alloc::rcs::arc::Arc<[f64]>, trajectory::continuous::SurfaceMode) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
 pub struct trajectory::AxisChainSet
 pub trajectory::AxisChainSet::chains: alloc::vec::Vec<trajectory::chain::CompiledChain>
 pub trajectory::AxisChainSet::followers: alloc::vec::Vec<(usize, alloc::vec::Vec<usize>)>
@@ -560,7 +560,7 @@ pub struct trajectory::ClockedMotorSpan
 pub trajectory::ClockedMotorSpan::clock_freq_hz: f64
 pub trajectory::ClockedMotorSpan::end_clock: u64
 pub trajectory::ClockedMotorSpan::end_host: f64
-pub trajectory::ClockedMotorSpan::signal: alloc::sync::Arc<trajectory::continuous::MotorSpan>
+pub trajectory::ClockedMotorSpan::signal: alloc::rcs::arc::Arc<trajectory::continuous::MotorSpan>
 pub trajectory::ClockedMotorSpan::start_clock: u64
 pub trajectory::ClockedMotorSpan::start_clock_exact: f64
 pub trajectory::ClockedMotorSpan::start_host: f64
@@ -572,7 +572,7 @@ pub fn trajectory::continuous::ClockedMotorSpan::eval_at_clock(&self, u64) -> co
 pub fn trajectory::continuous::ClockedMotorSpan::position_at_clock(&self, u64) -> core::result::Result<f64, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::ClockedMotorSpan::split_max_duration(&self) -> core::result::Result<alloc::vec::Vec<Self>, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::ClockedMotorSpan::stream_time_at_clock(&self, u64) -> core::result::Result<f64, trajectory::continuous::ContinuousError>
-pub fn trajectory::continuous::ClockedMotorSpan::try_new(alloc::sync::Arc<trajectory::continuous::MotorSpan>, f64, f64, f64, f64, f64, f64) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ClockedMotorSpan::try_new(alloc::rcs::arc::Arc<trajectory::continuous::MotorSpan>, f64, f64, f64, f64, f64, f64) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
 pub struct trajectory::CompiledChain
 impl trajectory::chain::CompiledChain
 pub fn trajectory::chain::CompiledChain::compile(&[trajectory::chain::PostProcessorInstance]) -> core::result::Result<Self, trajectory::chain::PostProcessorError>
@@ -588,8 +588,8 @@ pub fn trajectory::chain::CompiledChain::max_input_window(&self) -> (f64, f64)
 pub fn trajectory::chain::CompiledChain::trailing_transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
 pub fn trajectory::chain::CompiledChain::transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
 pub struct trajectory::ContinuousSegment
-pub trajectory::ContinuousSegment::axes: alloc::sync::Arc<[trajectory::continuous::ContinuousAxis]>
-pub trajectory::ContinuousSegment::followers: alloc::sync::Arc<[geometry::segment::FollowerDemand]>
+pub trajectory::ContinuousSegment::axes: alloc::rcs::arc::Arc<[trajectory::continuous::ContinuousAxis]>
+pub trajectory::ContinuousSegment::followers: alloc::rcs::arc::Arc<[geometry::segment::FollowerDemand]>
 pub trajectory::ContinuousSegment::motor_mask: u8
 pub trajectory::ContinuousSegment::rest_at_end: bool
 pub trajectory::ContinuousSegment::source_line: u32
@@ -610,8 +610,8 @@ pub fn trajectory::continuous::LocalPolynomial::valid_until(&self) -> f64
 pub fn trajectory::continuous::LocalPolynomial::velocity(&self, f64) -> f64
 pub fn trajectory::continuous::LocalPolynomial::velocity_range(&self, f64, f64) -> (f64, f64)
 pub struct trajectory::MotorSpan
-pub trajectory::MotorSpan::breakpoints: alloc::sync::Arc<[f64]>
-pub trajectory::MotorSpan::groups: alloc::sync::Arc<[trajectory::continuous::MotorGroup]>
+pub trajectory::MotorSpan::breakpoints: alloc::rcs::arc::Arc<[f64]>
+pub trajectory::MotorSpan::groups: alloc::rcs::arc::Arc<[trajectory::continuous::MotorGroup]>
 pub trajectory::MotorSpan::is_explicit_hold: bool
 pub trajectory::MotorSpan::motor_mask: u8
 pub trajectory::MotorSpan::source_line: u32
@@ -622,7 +622,7 @@ pub fn trajectory::continuous::MotorSpan::eval_pva(&self, f64) -> core::result::
 pub fn trajectory::continuous::MotorSpan::first_source_axis(&self) -> usize
 pub fn trajectory::continuous::MotorSpan::position(&self, f64) -> core::result::Result<f64, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::MotorSpan::pva_bounds(&self, f64, f64) -> core::result::Result<trajectory::continuous::PvaBounds, trajectory::continuous::ContinuousError>
-pub fn trajectory::continuous::MotorSpan::try_new(alloc::sync::Arc<[trajectory::continuous::MotorGroup]>, f64, f64, u8, u32, bool) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::MotorSpan::try_new(alloc::rcs::arc::Arc<[trajectory::continuous::MotorGroup]>, f64, f64, u8, u32, bool) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
 impl trajectory::continuous::MotorSpan
 pub fn trajectory::continuous::MotorSpan::local_polynomial(&self, f64) -> core::option::Option<trajectory::continuous::LocalPolynomial>
 pub struct trajectory::MotorTerm
@@ -682,7 +682,7 @@ pub trajectory::Pvaj::position: f64
 pub trajectory::Pvaj::velocity: f64
 pub struct trajectory::RelativeSplinePiece
 pub trajectory::RelativeSplinePiece::base_position: f64
-pub trajectory::RelativeSplinePiece::curve: alloc::sync::Arc<nurbs::scalar::ScalarNurbs>
+pub trajectory::RelativeSplinePiece::curve: alloc::rcs::arc::Arc<nurbs::scalar::ScalarNurbs>
 pub trajectory::RelativeSplinePiece::t_end: f64
 pub trajectory::RelativeSplinePiece::t_start: f64
 pub struct trajectory::RestSupport

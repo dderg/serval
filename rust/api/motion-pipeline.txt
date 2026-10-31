@@ -31,7 +31,7 @@ pub motion_pipeline::types::Control::Reset::pos: alloc::vec::Vec<f64>
 pub motion_pipeline::types::Control::SetAxisChains(trajectory::chain::AxisChainSet)
 pub motion_pipeline::types::Control::SetMesh
 pub motion_pipeline::types::Control::SetMesh::gcode_z_rebase: f64
-pub motion_pipeline::types::Control::SetMesh::mesh: core::option::Option<alloc::sync::Arc<geometry::surface::SurfaceTransform>>
+pub motion_pipeline::types::Control::SetMesh::mesh: core::option::Option<alloc::rcs::arc::Arc<geometry::surface::SurfaceTransform>>
 pub enum motion_pipeline::types::DispatchCommand
 pub motion_pipeline::types::DispatchCommand::Barrier(crossbeam_channel::channel::Sender<motion_pipeline::types::BarrierAck>)
 pub motion_pipeline::types::DispatchCommand::Nudge
@@ -92,7 +92,7 @@ pub motion_pipeline::Control::Reset::pos: alloc::vec::Vec<f64>
 pub motion_pipeline::Control::SetAxisChains(trajectory::chain::AxisChainSet)
 pub motion_pipeline::Control::SetMesh
 pub motion_pipeline::Control::SetMesh::gcode_z_rebase: f64
-pub motion_pipeline::Control::SetMesh::mesh: core::option::Option<alloc::sync::Arc<geometry::surface::SurfaceTransform>>
+pub motion_pipeline::Control::SetMesh::mesh: core::option::Option<alloc::rcs::arc::Arc<geometry::surface::SurfaceTransform>>
 pub enum motion_pipeline::DispatchCommand
 pub motion_pipeline::DispatchCommand::Barrier(crossbeam_channel::channel::Sender<motion_pipeline::types::BarrierAck>)
 pub motion_pipeline::DispatchCommand::Nudge
