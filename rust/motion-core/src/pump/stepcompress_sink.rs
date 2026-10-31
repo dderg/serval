@@ -800,10 +800,14 @@ impl StepcompressEndpoint {
                     .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
             }
         }
+        let cycles_per_second = self.shim.motor_cycles_per_second(0);
         self.buzz = Some(StepBuzz {
             signals,
-            anchor_clock_exact: start_clock as f64,
-            cycles_per_second: self.shim.motor_cycles_per_second(0),
+            anchor_clock_exact: buzz_anchor_clock(
+                start_clock,
+                (profile.t_end() - profile.t_start()) * cycles_per_second,
+            ),
+            cycles_per_second,
             stream_t_origin: profile.t_start(),
             next_stream_t: profile.t_start(),
             stream_t_end: profile.t_end(),
@@ -1855,6 +1859,14 @@ impl StepcompressEndpoint {
                     ))
                 })?;
                 let chunk_end_clock = view.end_clock;
+                let last_sample_t = view.stream_time_at_clock(chunk_end_clock);
+                if chunk_end == buzz.stream_t_end && last_sample_t != Ok(chunk_end) {
+                    return Err(self.fatal(&format!(
+                        "resonance buzz ends at {chunk_end} s but its last clock \
+                         {chunk_end_clock} samples {last_sample_t:?}: the motor would rest off \
+                         the base the buzz closes on"
+                    )));
+                }
                 self.shim
                     .push_spans(motor, &[view])
                     .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
@@ -2216,6 +2228,13 @@ impl StepcompressEndpoint {
             rest = tail;
         }
     }
+}
+
+const BUZZ_LAST_CLOCK_PAST_END: f64 = 0.25;
+
+fn buzz_anchor_clock(start_clock: u64, duration_clocks: f64) -> f64 {
+    let last_clock = (start_clock as f64 + duration_clocks + BUZZ_LAST_CLOCK_PAST_END).ceil();
+    last_clock - BUZZ_LAST_CLOCK_PAST_END - duration_clocks
 }
 
 fn buzz_signal(

@@ -2924,6 +2924,9 @@ fn a_cut_barrier_that_never_reaches_the_wire_trips_the_deadline() {
 #[test]
 fn host_buzz_returns_to_base_without_advancing_retirement() {
     let mut h = harness(1024);
+    h.endpoint
+        .reset_position(&[0])
+        .expect("seed the lane on a lattice level");
     let profile = buzz_profile(50_000, 50_000, 100_000, 20, 2);
     h.endpoint
         .arm_buzz(0b001, 0, &profile, buzz_start(&h))
@@ -2984,6 +2987,89 @@ fn host_buzz_rejects_a_lane_with_queued_trajectory() {
         .arm_buzz(0b001, 0, &profile, buzz_start(&h))
         .expect_err("queued trajectory must reject a buzz");
     assert!(error.to_string().contains("trajectory remains queued"));
+}
+
+fn replayed_step_clocks(frames: &[StepFrame]) -> (i64, Vec<u64>) {
+    let mut clock = 0_u64;
+    let mut dir = 1_i64;
+    let mut net = 0_i64;
+    let mut steps = Vec::new();
+    for frame in frames {
+        match *frame {
+            StepFrame::ResetStepClock { clock: at, .. } => clock = u64::from(at),
+            StepFrame::SetNextStepDir { dir: next, .. } => dir = if next == 1 { 1 } else { -1 },
+            StepFrame::QueueStep {
+                interval,
+                count,
+                add,
+                ..
+            } => {
+                let mut step_interval = i64::from(interval);
+                for _ in 0..count {
+                    clock = clock
+                        .checked_add_signed(step_interval)
+                        .expect("a queue_step lands on a representable clock");
+                    steps.push(clock);
+                    step_interval += i64::from(add);
+                    net += dir;
+                }
+            }
+            StepFrame::QueueStepHp { .. } => panic!("the harness lane is a classic encoder"),
+        }
+    }
+    (net, steps)
+}
+
+#[test]
+fn a_host_buzz_grazing_the_lattice_closes_on_its_base_at_every_clock_phase() {
+    const BASE_STEPS: i64 = 12_500;
+    const PEAK_STEPS: u32 = 4;
+    const DURATION_MS: u32 = 100;
+    const PHASES: u32 = 64;
+    let amplitude_nm = PEAK_STEPS * (MICROSTEP * 1e6) as u32;
+    let profile = buzz_profile(40_000, 40_000, amplitude_nm, DURATION_MS, 10);
+    let hz_per_end_clock_phase = 1.0 / (f64::from(PHASES) * f64::from(DURATION_MS) * 1e-3);
+    for sign_mask in [0b0, 0b1] {
+        for phase in 0..PHASES {
+            let mut h = harness(1024);
+            h.endpoint
+                .reset_position(&[BASE_STEPS])
+                .expect("seed the lane on a lattice level");
+            let freq = CYCLES_PER_SECOND + f64::from(phase) * hz_per_end_clock_phase;
+            h.endpoint.shim.set_motor_cycles_per_second(0, freq);
+            h.endpoint
+                .arm_buzz(
+                    0b001,
+                    sign_mask,
+                    &profile,
+                    buzz_start(&h) + u64::from(phase),
+                )
+                .expect("idle pulse lane accepts a buzz");
+            for tick in 1..=60 {
+                h.now
+                    .store(tick * (CYCLES_PER_SECOND as u64 / 100), Ordering::Relaxed);
+                h.endpoint.tick().expect("buzz tick");
+            }
+            assert!(h.endpoint.buzz.is_none());
+            let (net, steps) = replayed_step_clocks(&h.sent.lock_ok());
+            let context = format!("sign_mask {sign_mask} phase {phase} freq {freq}");
+            assert!(
+                steps.len() >= 2 * 2 * PEAK_STEPS as usize,
+                "{context}: the buzz barely moved ({} steps)",
+                steps.len()
+            );
+            assert!(
+                steps.windows(2).all(|pair| pair[0] < pair[1]),
+                "{context}: step clocks regress {steps:?}"
+            );
+            assert_eq!(net, 0, "{context}: the wire leaves the motor off base");
+            assert_eq!(
+                h.endpoint.shim.commanded_steps(0),
+                BASE_STEPS,
+                "{context}: the shim leaves the lattice off base"
+            );
+        }
+    }
 }
 
 const H7_FREQ: f64 = 520_000_000.0;
