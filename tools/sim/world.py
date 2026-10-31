@@ -177,14 +177,56 @@ def vtime_destroy(shm_name: str) -> None:
         pass
 
 
+class VirtualClock:
+    """The world's virtual clock as seen from the harness."""
+
+    def __init__(self, shm_name: str):
+        with open(VTIME_SHM_DIR + shm_name, "r+b") as f:
+            self._shm = mmap.mmap(f.fileno(), 8)
+
+    def now_ns(self) -> int:
+        return struct.unpack_from("<Q", self._shm)[0]
+
+    def deadline(self, timeout: float) -> "VirtualDeadline":
+        return VirtualDeadline(self, timeout)
+
+
+class VirtualDeadline:
+    """A harness timeout measured in the printer's time, so a slow host
+    machine never fails a test. Virtual time that stops advancing for
+    WEDGE_REAL_S of real time is a wedged simulator and fails loudly."""
+
+    WEDGE_REAL_S = 60.0
+
+    def __init__(self, clock: VirtualClock, timeout: float):
+        self._clock = clock
+        self._last_ns = clock.now_ns()
+        self._end_ns = self._last_ns + int(timeout * 1e9)
+        self._last_progress = time.monotonic()
+
+    def expired(self) -> bool:
+        now_ns = self._clock.now_ns()
+        if now_ns != self._last_ns:
+            self._last_ns = now_ns
+            self._last_progress = time.monotonic()
+        elif time.monotonic() - self._last_progress > self.WEDGE_REAL_S:
+            raise SimError(
+                f"virtual clock stuck at {now_ns / 1e9:.6f}s for "
+                f"{self.WEDGE_REAL_S:.0f}s of real time: simulator wedged"
+            )
+        return now_ns >= self._end_ns
+
+
 class VtimeRecorder:
-    """Samples (real, virtual) clock pairs so a run shows whether virtual
-    time held the configured rate or stalled against klippy's real clock."""
+    """Samples (real, virtual) clock pairs so a run shows how fast virtual
+    time advanced and where it stalled."""
 
     PERIOD_S = 0.05
 
-    def __init__(self, shm_name: str, speed: float, csv_path: pathlib.Path):
-        self._path = VTIME_SHM_DIR + shm_name
+    def __init__(
+        self, clock: VirtualClock, speed: float, csv_path: pathlib.Path
+    ):
+        self._clock = clock
         self.speed = speed
         self.csv_path = csv_path
         self.samples: list[tuple[int, int]] = []
@@ -203,11 +245,9 @@ class VtimeRecorder:
         )
 
     def _run(self) -> None:
-        with open(self._path, "r+b") as f, mmap.mmap(f.fileno(), 8) as shm:
-            while not self._stop.is_set():
-                (vtime_ns,) = struct.unpack_from("<Q", shm)
-                self.samples.append((time.monotonic_ns(), vtime_ns))
-                self._stop.wait(self.PERIOD_S)
+        while not self._stop.is_set():
+            self.samples.append((time.monotonic_ns(), self._clock.now_ns()))
+            self._stop.wait(self.PERIOD_S)
 
     def rate_summary(self, window_s: float = 1.0) -> str:
         """Worst and best virtual/real rate over sliding windows, as a
@@ -242,22 +282,24 @@ class McuProcess:
         return str(self.sock_dir / "sim_control")
 
 
+API_POLL_REAL_S = 0.2
+
+
 def _api_request(
-    api_socket: str, method: str, params: dict, timeout: float
+    api_socket: str, method: str, params: dict, deadline: VirtualDeadline
 ) -> dict:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
+    sock.settimeout(API_POLL_REAL_S)
     buf = b""
     with sock:
         sock.connect(api_socket)
         req = {"id": 1, "method": method, "params": params}
         sock.sendall(json.dumps(req).encode() + b"\x03")
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        while not deadline.expired():
             try:
                 chunk = sock.recv(4096)
             except socket.timeout:
-                break
+                continue
             if not chunk:
                 break
             buf += chunk
@@ -421,12 +463,12 @@ class SimWorld:
         self.want_beacon = beacon
         self.want_cartographer = cartographer
         self.verbose = verbose
-        # Virtual-clock speed relative to real time. Below 1.0 the simulated
-        # world runs slower than reality, inflating every host-side latency
-        # budget (drip windows, trsync timeouts) by 1/speed — the margin that
-        # keeps timing-sensitive scenarios deterministic under CPU load.
+        # Upper bound on virtual seconds per real second. Klippy shares the
+        # virtual clock, so a lower speed only buys every process more real
+        # CPU time per virtual second.
         self.vtime_speed = float(os.environ.get("VTIME_SPEED", vtime_speed))
         self.vtime_shm_name = vtime_shm_name_alloc()
+        self.vclock: Optional[VirtualClock] = None
         self.vtime_recorder: Optional[VtimeRecorder] = None
 
         self.log_dir = self.workdir / "logs"
@@ -486,8 +528,9 @@ class SimWorld:
 
         shim_so, vtime_so = self._ensure_shims_built()
         vtime_create(self.vtime_shm_name)
+        self.vclock = VirtualClock(self.vtime_shm_name)
         self.vtime_recorder = VtimeRecorder(
-            self.vtime_shm_name, self.vtime_speed, self.log_dir / "vtime.csv"
+            self.vclock, self.vtime_speed, self.log_dir / "vtime.csv"
         )
         self.vtime_recorder.start()
 
@@ -700,14 +743,14 @@ class SimWorld:
 
     def _spawn_klippy(self, cfg_path: pathlib.Path) -> None:
         env = os.environ.copy()
-        # Klippy deliberately does NOT load vtime: it runs at real CPU
-        # speed while the MCU processes live on the virtual clock; loading
-        # vtime in klippy deadlocks (both sides block on I/O and neither
-        # advances time).
+        # Klippy shares the MCUs' virtual clock: a host clock that slipped
+        # against the MCU clock whenever virtual time stalled made every
+        # MCU look like a wandering crystal to clock sync.
+        _, vtime_so = self._ensure_shims_built()
+        env["LD_PRELOAD"] = str(vtime_so)
+        env["VTIME_SPEED"] = str(self.vtime_speed)
         if self.mcus:
             env["MCU_SIM_SOCK_DIR"] = str(self.mcus[0].sock_dir)
-        # No preload, but sim-only extras (sim_remote_endstop) read the
-        # virtual clock word directly to time emulated physical events.
         env["VTIME_SHM_NAME"] = self.vtime_shm_name
         third_party = self.repo_root / "tools" / "sim" / "third_party_repos"
         for plugin_dir in ("beacon_klipper", "cartographer_klipper"):
@@ -735,12 +778,14 @@ class SimWorld:
         stdout_log.close()
 
     def _wait_ready(self, timeout: float) -> bool:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        deadline = self.vclock.deadline(timeout)
+        while not deadline.expired():
             if self.klippy_proc.poll() is not None:
                 return False
             try:
-                info = _api_request(self.api_socket, "info", {}, timeout=3.0)
+                info = _api_request(
+                    self.api_socket, "info", {}, self.vclock.deadline(3.0)
+                )
             except OSError:
                 info = {}
             state = (info.get("result") or {}).get("state")
@@ -754,7 +799,7 @@ class SimWorld:
     def _wait_clock_sync(self, timeout: float) -> None:
         try:
             resp = _api_request(
-                self.api_socket, "objects/list", {}, timeout=5.0
+                self.api_socket, "objects/list", {}, self.vclock.deadline(5.0)
             )
         except OSError as err:
             raise SimError(f"objects/list failed after ready: {err}") from err
@@ -763,7 +808,7 @@ class SimWorld:
             for name in resp.get("result", {}).get("objects", [])
             if name == "mcu" or name.startswith("mcu ")
         ]
-        deadline = time.monotonic() + timeout
+        deadline = self.vclock.deadline(timeout)
         while pending:
             status = self.status({name: None for name in pending})
             pending = [
@@ -775,7 +820,7 @@ class SimWorld:
                 return
             if self.klippy_proc.poll() is not None:
                 raise SimError("klippy exited while waiting for clock sync")
-            if time.monotonic() > deadline:
+            if deadline.expired():
                 raise SimError(
                     f"MCU clock sync did not converge within {timeout:.0f}s"
                     f" after ready (mcu: {', '.join(pending)})"
@@ -789,7 +834,7 @@ class SimWorld:
             self.api_socket,
             "gcode/script",
             {"script": script},
-            timeout=timeout,
+            self.vclock.deadline(timeout),
         )
 
     def gcode_ok(self, script: str, timeout: float = 30.0) -> dict:
@@ -814,7 +859,7 @@ class SimWorld:
                 self.api_socket,
                 "objects/query",
                 {"objects": objects},
-                timeout=timeout,
+                self.vclock.deadline(timeout),
             )
         except OSError:
             return {}
@@ -829,12 +874,12 @@ class SimWorld:
         return float(pos[2]) if pos and len(pos) >= 3 else None
 
     def wait_print_done(self, timeout: float = 600.0) -> None:
-        deadline = time.monotonic() + timeout
+        deadline = self.vclock.deadline(timeout)
         log_offset = (
             self.klippy_log.stat().st_size if self.klippy_log.exists() else 0
         )
         log_remainder = ""
-        while time.monotonic() < deadline:
+        while not deadline.expired():
             if self.klippy_proc.poll() is not None:
                 raise SimError("klippy exited during print")
             if self.klippy_log.exists():
@@ -899,7 +944,7 @@ class SimWorld:
         mark_log()/log_tail() call; returns everything appended since the
         mark. klippy's log writer is async, so response text can land in
         the file a moment after the API response returns."""
-        deadline = time.monotonic() + timeout
+        deadline = self.vclock.deadline(timeout)
         while True:
             data = (
                 self.klippy_log.read_bytes()
@@ -910,7 +955,7 @@ class SimWorld:
             if needle in appended:
                 self._log_offset = len(data)
                 return appended
-            if time.monotonic() >= deadline:
+            if deadline.expired():
                 raise SimError(
                     f"{needle!r} did not appear in klippy.log within "
                     f"{timeout}s; appended:\n{appended[-2000:]}"
@@ -926,14 +971,14 @@ class SimWorld:
     def wait_for_log_text(
         self, needle: str, timeout: float = 60.0
     ) -> Optional[str]:
-        deadline = time.monotonic() + timeout
+        deadline = self.vclock.deadline(timeout)
         while True:
             for line in self.klippy_log_text().splitlines():
                 if needle in line:
                     return line.strip()
             if self.klippy_proc.poll() is not None:
                 return None
-            if time.monotonic() >= deadline:
+            if deadline.expired():
                 return None
             time.sleep(0.2)
 

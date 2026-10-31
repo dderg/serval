@@ -38,36 +38,36 @@ tools/sim/run.sh test --branch X    # any mode for another branch; the mode come
 - The firmware is built with `CONFIG_MCU_SIM=y`. Motion sampling and
   command handling share the Linux scheduler thread; no background thread
   mutates the runtime. The next scheduler deadline bounds virtual time
-  with 400 µs slack. The preload clock driver advances time and sends
-  `SIGALRM` to the timer-owning thread; firmware `ppoll` waits never advance
-  the clock themselves. Step queues notify the shim (auto-endstops, Beacon
-  Z tracking), and the
-  timer-in-past/timer-too-close/tick-gap checks that only exist to police
-  real-time hardware are compiled out. No source patching happens at image
-  build — the sim is a first-class build config.
-- klippy runs at real CPU speed; only MCU processes live on the virtual
-  clock. Loading vtime into klippy deadlocks — don't.
+  with 400 µs slack. Every timed wait in a preloaded process (sleeps,
+  `poll`/`epoll`/`select`, futexes, condvars, semaphores) nudges virtual
+  time toward its deadline within the speed cap and pacer floors, and the
+  thread owning the virtual timer gets `SIGALRM` when it comes due. Step
+  queues notify the shim (auto-endstops, Beacon Z tracking). The
+  timer-in-past and timer-too-close checks stay live; only the tick-gap
+  fault is compiled out, because the sim's tick is a paced thread rather
+  than an interrupt. No source patching happens at image build — the sim
+  is a first-class build config.
+- klippy preloads `libvtime` too and shares the MCUs' virtual clock, so a
+  virtual-time stall freezes host and MCU together and clock sync sees the
+  nominal MCU frequency. The harness measures its timeouts on the same
+  clock (`VirtualDeadline`) and fails a run whose virtual clock stops
+  advancing for 60 s of real time. `logs/vtime.csv` records virtual
+  against real time for every world.
 - Auto-endstops (libsim_intercept): `SimWorld` passes each rendered classic
   motor's step/dir pins into the shim. GPIO edges advance 50-step walls that
   assert gpio200/201/202/203. Sample lanes retain runtime notifications on
   X=18/Y=7/Z=15.
 - Each SimWorld allocates its own virtual-clock segment
   (`/dev/shm/vtime-<pid>-<n>`, passed to the shims via `VTIME_SHM_NAME`),
-  so worlds never share state. `run.sh test` still runs tests
-  sequentially by default — klippy lives on the real clock, and CPU
-  contention from concurrent worlds flakes its timing budgets.
-  `SIM_TEST_JOBS=N` opts into pytest-xdist parallelism;
-  `SIM_TEST_TARGETS` narrows the run to specific test files (how the CI
-  shards split the suite across separate runners).
-- `VTIME_SPEED=0.1 tools/sim/run.sh test -k cross_mcu` provides more
-  scheduling headroom when MCU pacers cannot sustain the default rate.
-  Pacer stalls change virtual clock speed relative to the real host clock;
-  independent MCU clock estimates can then disagree and distort cross-MCU
-  trip positions. Preserve the failing logs and compare clock-projection
-  skew before attributing a failure to pacing. A slower-rate pass is not
-  proof of hardware timing accuracy; do not widen position tolerances.
+  so worlds never share state. Local `run.sh test` runs 4 pytest-xdist
+  workers by default and CI shards run sequentially; `SIM_TEST_JOBS=N`
+  overrides (0 = sequential), and `SIM_TEST_TARGETS` narrows the run to
+  specific test files (how the CI shards split the suite across runners).
+- `VTIME_SPEED` caps virtual seconds per real second (default 1.0). Every
+  process shares the virtual clock, so a lower speed only buys more real
+  CPU time per virtual second; it never changes the printer's timing.
   Tests that require a minimum elapsed MCU-clock window must still reach
-  that window; lowering the rate can invalidate their stimulus.
+  that window.
 
 ## CI
 

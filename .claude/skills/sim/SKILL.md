@@ -81,11 +81,11 @@ Run one test: `tools/sim/run.sh test -k my_scenario`.
 └───────────────────────────────────────────────────────────┘
 ```
 
-- klippy runs at real CPU speed; only MCU processes live on the virtual clock (loading vtime into klippy deadlocks).
-- `CONFIG_MCU_SIM=y` firmware: motion tick registers as a vtime pacer (virtual time never skips a sample period), step queues notify the shim, and the timer-in-past / timer-too-close / tick-gap checks that police real-time hardware are compiled out (gated in src/linux/timer.c, src/sched.c, rust/runtime tick.rs + motion_core.rs).
+- klippy preloads libvtime as well, so host and MCUs share one virtual clock: a virtual-time stall freezes everyone, and clock sync sees the nominal MCU frequency. Harness timeouts (`gcode_ok(timeout=…)`, `print_file`, log waits) are virtual seconds; a run whose virtual clock stops for 60 s of real time fails as wedged. `logs/vtime.csv` records virtual vs real time per world.
+- `CONFIG_MCU_SIM=y` firmware: motion tick registers as a vtime pacer (virtual time never skips a sample period), step queues notify the shim. Timer-too-close and timer-in-past checks stay live; only the tick-gap fault is compiled out (rust/runtime tick.rs), since the sim's tick is a paced thread, not an interrupt.
 - Auto-endstops: step-queue lines X=18/Y=7/Z=15 count toward a 50-step wall → endstop lines gpio200/201/202/203. Direct injection via each MCU's `sim_control` unix socket (`set_gpio_input`, `set_adc`, `get_gpio_output`, `get_steps`).
 - Beacon: `emulators/beacon_mcu.py` speaks full msgproto (identify, streaming, trsync, contact, NVM, accel) and tracks Z via the shim's step counter. The klippy-side plugin is the `dderg/beacon_klipper` fork branch `motion-stack-rename`, pinned in `fetch_plugins.sh` — NOT upstream beacon3d (incompatible with the motion rewrite).
-- Each SimWorld has its own virtual clock (`/dev/shm/vtime-<pid>-<n>`, handed to the shims via `VTIME_SHM_NAME`), but `run.sh test` runs tests sequentially by default: klippy lives on the real clock, and CPU contention from concurrent worlds flakes its timing budgets. `SIM_TEST_JOBS=N` opts into pytest-xdist parallelism; `SIM_TEST_TARGETS` picks test files (used by the CI shards, which parallelize across separate runners instead). Separate `docker run`s remain fully isolated for concurrent agents.
+- Each SimWorld has its own virtual clock (`/dev/shm/vtime-<pid>-<n>`, handed to the shims via `VTIME_SHM_NAME`). Local `run.sh test` runs 4 pytest-xdist workers by default, CI shards run sequentially; `SIM_TEST_JOBS=N` overrides (0 = sequential), `SIM_TEST_TARGETS` picks test files. Separate `docker run`s remain fully isolated for concurrent agents.
 
 ## Build caching
 
