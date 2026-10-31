@@ -800,14 +800,10 @@ impl StepcompressEndpoint {
                     .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
             }
         }
-        let cycles_per_second = self.shim.motor_cycles_per_second(0);
         self.buzz = Some(StepBuzz {
             signals,
-            anchor_clock_exact: buzz_anchor_clock(
-                start_clock,
-                (profile.t_end() - profile.t_start()) * cycles_per_second,
-            ),
-            cycles_per_second,
+            anchor_clock_exact: start_clock as f64,
+            cycles_per_second: self.shim.motor_cycles_per_second(0),
             stream_t_origin: profile.t_start(),
             next_stream_t: profile.t_start(),
             stream_t_end: profile.t_end(),
@@ -1858,15 +1854,13 @@ impl StepcompressEndpoint {
                          {error}"
                     ))
                 })?;
-                let chunk_end_clock = view.end_clock;
-                let last_sample_t = view.stream_time_at_clock(chunk_end_clock);
-                if chunk_end == buzz.stream_t_end && last_sample_t != Ok(chunk_end) {
+                if chunk_end == buzz.stream_t_end && !view.ends_at_rest() {
                     return Err(self.fatal(&format!(
-                        "resonance buzz ends at {chunk_end} s but its last clock \
-                         {chunk_end_clock} samples {last_sample_t:?}: the motor would rest off \
-                         the base the buzz closes on"
+                        "resonance buzz closes at {chunk_end} s still moving: the shim would \
+                         not sample its end, and the motor would rest off the base it closes on"
                     )));
                 }
+                let chunk_end_clock = view.end_clock;
                 self.shim
                     .push_spans(motor, &[view])
                     .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
@@ -2143,16 +2137,16 @@ impl StepcompressEndpoint {
         let Some(view) = spans.iter().rev().find(|view| view.signal.motor_mask == 0) else {
             return Ok(());
         };
-        let pva = view.eval_at_clock(view.end_clock).map_err(|error| {
+        let end = view.signal.position(view.stream_t_end).map_err(|error| {
             self.motor_fatal(
                 motor,
                 &format!(
-                    "queued view does not evaluate at its own end clock {}: {error}",
-                    view.end_clock
+                    "queued view does not evaluate at its own end {} s: {error}",
+                    view.stream_t_end
                 ),
             )
         })?;
-        self.lanes[motor].commanded_base = pva.position;
+        self.lanes[motor].commanded_base = end;
         Ok(())
     }
 
@@ -2228,13 +2222,6 @@ impl StepcompressEndpoint {
             rest = tail;
         }
     }
-}
-
-const BUZZ_LAST_CLOCK_PAST_END: f64 = 0.25;
-
-fn buzz_anchor_clock(start_clock: u64, duration_clocks: f64) -> f64 {
-    let last_clock = (start_clock as f64 + duration_clocks + BUZZ_LAST_CLOCK_PAST_END).ceil();
-    last_clock - BUZZ_LAST_CLOCK_PAST_END - duration_clocks
 }
 
 fn buzz_signal(

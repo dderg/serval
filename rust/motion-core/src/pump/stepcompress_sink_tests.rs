@@ -2,7 +2,9 @@ use super::*;
 use crate::mcu_config::{LaneKind, McuAxisConfig, McuHardware};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicU64};
-use trajectory::{ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm};
+use trajectory::{
+    ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm, NudgeProfile,
+};
 
 const MCU_ID: u32 = 3;
 const OID: u32 = 7;
@@ -2924,9 +2926,6 @@ fn a_cut_barrier_that_never_reaches_the_wire_trips_the_deadline() {
 #[test]
 fn host_buzz_returns_to_base_without_advancing_retirement() {
     let mut h = harness(1024);
-    h.endpoint
-        .reset_position(&[0])
-        .expect("seed the lane on a lattice level");
     let profile = buzz_profile(50_000, 50_000, 100_000, 20, 2);
     h.endpoint
         .arm_buzz(0b001, 0, &profile, buzz_start(&h))
@@ -3069,6 +3068,106 @@ fn a_host_buzz_grazing_the_lattice_closes_on_its_base_at_every_clock_phase() {
                 "{context}: the shim leaves the lattice off base"
             );
         }
+    }
+}
+
+const RESTING_MOVE_SPEED_MM_S: f64 = 1.0;
+const RESTING_MOVE_ACCEL_MM_S2: f64 = 50.0;
+
+fn resting_move(start_clock: u64, delta_mm: f64, freq: f64) -> ClockedMotorSpan {
+    let t_start = start_clock as f64 / freq;
+    let profile = NudgeProfile::try_new(
+        delta_mm,
+        RESTING_MOVE_SPEED_MM_S,
+        RESTING_MOVE_ACCEL_MM_S2,
+        t_start,
+    )
+    .expect("a move that decelerates to rest");
+    let t_end = profile.t_end();
+    let signal = MotorSpan::try_new(
+        Arc::from([MotorGroup::Independent(MotorTerm {
+            source_axis: 0,
+            axis: ContinuousAxis::Nudge(profile),
+            scale: 1.0,
+        })]),
+        t_start,
+        t_end,
+        0,
+        u32::MAX,
+        false,
+    )
+    .expect("a single-term motor span is dispatchable");
+    ClockedMotorSpan::try_new(
+        Arc::new(signal),
+        t_start,
+        t_end,
+        t_start,
+        t_end,
+        start_clock as f64,
+        freq,
+    )
+    .expect("the move spans at least one clock")
+}
+
+#[test]
+fn a_buzz_after_a_move_resting_on_a_lattice_level_closes_on_that_level() {
+    const LEVELS: i64 = 5;
+    const PHASES: u32 = 16;
+    let delta = LEVELS as f64 * MICROSTEP;
+    let move_duration = NudgeProfile::try_new(
+        delta,
+        RESTING_MOVE_SPEED_MM_S,
+        RESTING_MOVE_ACCEL_MM_S2,
+        0.0,
+    )
+    .expect("a move that decelerates to rest")
+    .duration();
+    let profile = buzz_profile(40_000, 40_000, 4 * (MICROSTEP * 1e6) as u32, 100, 10);
+    for phase in 0..PHASES {
+        let mut h = harness(1024);
+        h.endpoint
+            .reset_position(&[0])
+            .expect("seed the lane on a lattice level");
+        let freq = CYCLES_PER_SECOND + f64::from(phase) / (f64::from(PHASES) * move_duration);
+        h.endpoint.shim.set_motor_cycles_per_second(0, freq);
+        h.endpoint
+            .send_frames(
+                MCU_ID,
+                &[axis_frame(vec![resting_move(100_000, delta, freq)])],
+            )
+            .and_then(|()| h.endpoint.tick())
+            .expect("stage the move");
+        let settled = 2 * CYCLES_PER_SECOND as u64;
+        h.now.store(settled, Ordering::Relaxed);
+        h.endpoint.tick().expect("drain the move");
+        h.ack_sent_barriers();
+        let context = format!("phase {phase} freq {freq}");
+        let (moved, _) = replayed_step_clocks(&h.sent.lock_ok());
+        assert_eq!(
+            moved, LEVELS,
+            "{context}: the move rests a step short of its level"
+        );
+        h.endpoint
+            .arm_buzz(0b001, 0, &profile, buzz_start(&h))
+            .expect("idle pulse lane accepts a buzz");
+        for tick in 1..=60 {
+            h.now.store(
+                settled + tick * (CYCLES_PER_SECOND as u64 / 100),
+                Ordering::Relaxed,
+            );
+            h.endpoint.tick().expect("buzz tick");
+        }
+        assert!(h.endpoint.buzz.is_none());
+        let (net, steps) = replayed_step_clocks(&h.sent.lock_ok());
+        assert!(
+            steps.windows(2).all(|pair| pair[0] < pair[1]),
+            "{context}: step clocks regress {steps:?}"
+        );
+        assert_eq!(
+            net, LEVELS,
+            "{context}: the buzz left the motor off the level the move rested on"
+        );
+        assert_eq!(h.endpoint.shim.commanded_steps(0), LEVELS, "{context}");
     }
 }
 

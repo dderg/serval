@@ -73,13 +73,12 @@ struct Overlay {
     lattice: Lattice,
 }
 
-/// The lane a drain emits into: which motor, its config, and the span view
-/// the roots are read from.
 #[derive(Clone, Copy)]
 struct Lane<'a> {
     motor: usize,
     cfg: &'a MotorConfig,
     view: &'a ClockedMotorSpan,
+    rests_at_end: bool,
 }
 
 const BISECTION_SAFEGUARD_PERIOD: u32 = 3;
@@ -222,6 +221,7 @@ impl StepRootCursor {
                 motor,
                 cfg,
                 view: &view,
+                rests_at_end: view.ends_at_rest(),
             };
             self.enter(lane, signal_start, begin)?;
             self.emit_roots(lane, begin, last_clock, out)?;
@@ -811,8 +811,10 @@ impl StepRootCursor {
 
     fn eval(&self, lane: Lane, clock: u64) -> Result<Pva, ShimError> {
         EVAL_COUNT.with(|c| c.set(c.get() + 1));
+        let t = self.stream_time(lane, clock)?;
         lane.view
-            .eval_at_clock(clock)
+            .signal
+            .eval_pva(t)
             .map_err(|error| ShimError::SpanEval {
                 motor: lane.motor,
                 error,
@@ -821,8 +823,10 @@ impl StepRootCursor {
 
     fn position_at(&self, lane: Lane, clock: u64) -> Result<f64, ShimError> {
         EVAL_COUNT.with(|c| c.set(c.get() + 1));
+        let t = self.stream_time(lane, clock)?;
         lane.view
-            .position_at_clock(clock)
+            .signal
+            .position(t)
             .map_err(|error| ShimError::SpanEval {
                 motor: lane.motor,
                 error,
@@ -830,6 +834,9 @@ impl StepRootCursor {
     }
 
     fn stream_time(&self, lane: Lane, clock: u64) -> Result<f64, ShimError> {
+        if lane.rests_at_end && clock == lane.view.end_clock {
+            return Ok(lane.view.stream_t_end);
+        }
         lane.view
             .stream_time_at_clock(clock)
             .map_err(|error| ShimError::SpanEval {

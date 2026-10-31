@@ -628,7 +628,7 @@ impl<S: SpanSink> Pump<S> {
         let ring_depth = (self.callbacks.ring_depth_of)(key);
         let lane_seam_track = spans
             .last()
-            .map(|last| (last.end_clock, super::sched::span_ends_at_rest(last)));
+            .map(|last| (last.end_clock, last.ends_at_rest()));
         // Hold merging is off during drip cohorts: their release floor is
         // view-count-based and coalescing would starve it.
         let merge_holds = self.cohort.is_none();

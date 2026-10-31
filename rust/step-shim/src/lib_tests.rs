@@ -1299,3 +1299,111 @@ fn an_overlay_keeps_the_travel_of_its_first_clock() {
         "an overlay walks its own lattice and never moves the commanded lane"
     );
 }
+
+const END_CLOCK_PHASES: u32 = 16;
+const RESTING_LEVELS: i64 = 5;
+
+fn freq_ending_at_phase(duration: f64, phase: u32) -> f64 {
+    CYCLES_PER_SECOND + f64::from(phase) / (f64::from(END_CLOCK_PHASES) * duration)
+}
+
+fn nudge_on(
+    start_clock: u64,
+    delta_mm: f64,
+    speed_mm_s: f64,
+    accel_mm_s2: f64,
+    motor_mask: u8,
+    freq: f64,
+) -> ClockedMotorSpan {
+    let t_start = start_clock as f64 / freq;
+    let profile =
+        NudgeProfile::try_new(delta_mm, speed_mm_s, accel_mm_s2, t_start).expect("a nudge profile");
+    let t_end = profile.t_end();
+    let groups = vec![MotorGroup::Independent(MotorTerm {
+        source_axis: 0,
+        axis: ContinuousAxis::Nudge(profile),
+        scale: 1.0,
+    })];
+    clocked(
+        signal(groups, t_start, t_end, motor_mask),
+        start_clock,
+        freq,
+    )
+}
+
+#[test]
+fn a_move_resting_on_a_lattice_level_steps_onto_it_before_its_stream_closes() {
+    let (speed, accel) = (1.0, 50.0);
+    for direction in [1_i64, -1] {
+        let target = direction * RESTING_LEVELS;
+        let delta = target as f64 * MICROSTEP;
+        let duration = NudgeProfile::try_new(delta, speed, accel, 0.0)
+            .expect("a resting move")
+            .duration();
+        for phase in 0..END_CLOCK_PHASES {
+            let freq = freq_ending_at_phase(duration, phase);
+            let view = nudge_on(1_000, delta, speed, accel, 0, freq);
+            let mut shim = seeded(
+                MotorConfig {
+                    cycles_per_second: freq,
+                    ..cfg()
+                },
+                8,
+            );
+            shim.push_spans(0, std::slice::from_ref(&view)).unwrap();
+            let frames = shim.drain(view.end_clock).unwrap();
+            let context = format!("direction {direction} phase {phase}");
+            let steps = replayed_step_clocks(&frames);
+            assert!(
+                steps.windows(2).all(|pair| pair[0] < pair[1]),
+                "{context}: step clocks regress {steps:?}"
+            );
+            assert_eq!(
+                net_steps(&frames),
+                target,
+                "{context}: the stream drained to rest a step short of its level"
+            );
+            shim.detach_span_seam(0).expect("a drained queue detaches");
+            let (executed, _) = shim.halt_at(0, view.end_clock + 1_000).unwrap();
+            assert_eq!(
+                executed, target,
+                "{context}: a cut after the rest forgot the closing step"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_constant_velocity_retract_after_a_cut_closes_on_the_extend_it_reverses() {
+    let delta = 5.37 * MICROSTEP;
+    let speed = 0.1;
+    let duration = delta / speed;
+    for extend_phase in 0..END_CLOCK_PHASES {
+        for retract_phase in 0..END_CLOCK_PHASES {
+            let extend_freq = freq_ending_at_phase(duration, extend_phase);
+            let retract_freq = freq_ending_at_phase(duration, retract_phase);
+            let mut shim = seeded(
+                MotorConfig {
+                    cycles_per_second: extend_freq,
+                    ..cfg()
+                },
+                8,
+            );
+            let extend = nudge_on(1_000, delta, speed, 0.0, 1, extend_freq);
+            shim.push_spans(0, std::slice::from_ref(&extend)).unwrap();
+            let extended = net_steps(&shim.drain(extend.end_clock).unwrap());
+            let cut_at = extend.end_clock + 1_000;
+            shim.halt_at(0, cut_at).unwrap();
+            shim.set_motor_cycles_per_second(0, retract_freq);
+            let retract = nudge_on(cut_at + 1_000, -delta, speed, 0.0, 1, retract_freq);
+            shim.push_spans(0, std::slice::from_ref(&retract)).unwrap();
+            let retracted = net_steps(&shim.drain(retract.end_clock).unwrap());
+            let context = format!("extend phase {extend_phase} retract phase {retract_phase}");
+            assert_eq!(extended, 5, "{context}");
+            assert_eq!(
+                retracted, -extended,
+                "{context}: the retract closed a step short of the extend it reverses"
+            );
+        }
+    }
+}
