@@ -16,7 +16,7 @@ tools/sim/run.sh test               # full e2e pytest suite (homing, probe, beac
 tools/sim/run.sh test -k probe      # subset by pytest -k expression
 tools/sim/run.sh serve              # long-lived printer for Moonraker/Mainsail
 tools/sim/run.sh shell              # bash inside the image
-tools/sim/run.sh --branch X test    # any mode against another branch
+tools/sim/run.sh test --branch X    # mode first, then --branch: any mode against another branch
 tools/sim/run.sh --no-cache         # force full rebuild
 ```
 

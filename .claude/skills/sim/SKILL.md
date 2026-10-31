@@ -18,7 +18,7 @@ tools/sim/run.sh test --keep-logs   # leave every world's logs in .sim-logs/
 tools/sim/run.sh test --verbose     # stream the image build (hidden by default)
 tools/sim/run.sh serve              # long-lived printer for Moonraker/Mainsail
 tools/sim/run.sh shell              # bash inside the image
-tools/sim/run.sh --branch X test    # any mode against another branch
+tools/sim/run.sh test --branch X    # mode first, then --branch: any mode against another branch
 tools/sim/run.sh --no-cache         # force full rebuild
 ```
 

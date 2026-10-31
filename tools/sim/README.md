@@ -16,7 +16,7 @@ tools/sim/run.sh test               # full e2e pytest suite
 tools/sim/run.sh test -k probe      # subset
 tools/sim/run.sh serve              # long-lived printer for Moonraker
 tools/sim/run.sh shell              # poke around inside the image
-tools/sim/run.sh --branch X ...     # any of the above for another branch
+tools/sim/run.sh test --branch X    # any mode for another branch; the mode comes first
 ```
 
 ## Layout
