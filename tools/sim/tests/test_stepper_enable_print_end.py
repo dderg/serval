@@ -35,8 +35,8 @@ def _boot(sim_world):
     return world
 
 
-def _assert_clean(world, print_time):
-    assert print_time > 0
+def _assert_clean(world):
+    world.gcode_ok("M400", timeout=60)
     events = world.events_text()
     for fatal in FATAL_EVENTS:
         assert fatal not in events, (
@@ -68,8 +68,8 @@ def test_print_end_per_motor_disable(sim_world):
         "M106 S0",
     ]
     gcode.write_text("\n".join(lines) + "\n")
-    print_time = world.print_file(gcode, timeout=600)
-    _assert_clean(world, print_time)
+    world.print_file(gcode, timeout=600)
+    _assert_clean(world)
 
 
 def test_disable_mid_print_then_more_motion(sim_world):
@@ -89,8 +89,8 @@ def test_disable_mid_print_then_more_motion(sim_world):
         "M84",
     ]
     gcode.write_text("\n".join(lines) + "\n")
-    print_time = world.print_file(gcode, timeout=600)
-    _assert_clean(world, print_time)
+    world.print_file(gcode, timeout=600)
+    _assert_clean(world)
 
 
 def test_print_end_disable_corexy_tmc(sim_world):
@@ -119,8 +119,8 @@ def test_print_end_disable_corexy_tmc(sim_world):
         "SET_STEPPER_ENABLE STEPPER=z ENABLE=0",
     ]
     gcode.write_text("\n".join(lines) + "\n")
-    print_time = world.print_file(gcode, timeout=600)
-    _assert_clean(world, print_time)
+    world.print_file(gcode, timeout=600)
+    _assert_clean(world)
 
 
 def test_print_end_disable_stepcompress_secondary_mcu(sim_world):
@@ -153,9 +153,8 @@ def test_print_end_disable_stepcompress_secondary_mcu(sim_world):
         "SET_STEPPER_ENABLE STEPPER=z ENABLE=0",
     ]
     gcode.write_text("\n".join(lines) + "\n")
-    print_time = world.print_file(gcode, timeout=600)
-    world.gcode_ok("M400", timeout=60)
-    _assert_clean(world, print_time)
+    world.print_file(gcode, timeout=600)
+    _assert_clean(world)
     x, y = tracker.xy()
     assert abs(x - 10.0) < 0.1 and abs(y - 110.0) < 0.1, (
         f"executed motor tracks ended at ({x:.3f}, {y:.3f}), commanded park"
@@ -189,9 +188,8 @@ def _sc_print(world, name, tail):
         *tail,
     ]
     gcode.write_text("\n".join(lines) + "\n")
-    print_time = world.print_file(gcode, timeout=600)
-    world.gcode_ok("M400", timeout=60)
-    _assert_clean(world, print_time)
+    world.print_file(gcode, timeout=600)
+    _assert_clean(world)
 
 
 def test_stepcompress_m84_control(sim_world):
@@ -227,9 +225,8 @@ def test_stepcompress_midprint_disable_then_m84(sim_world):
         "M84",
     ]
     gcode.write_text("\n".join(lines) + "\n")
-    print_time = world.print_file(gcode, timeout=600)
-    world.gcode_ok("M400", timeout=60)
-    _assert_clean(world, print_time)
+    world.print_file(gcode, timeout=600)
+    _assert_clean(world)
 
 
 def test_stepcompress_g4_mid_print(sim_world):
@@ -247,6 +244,5 @@ def test_stepcompress_g4_mid_print(sim_world):
         "M84",
     ]
     gcode.write_text("\n".join(lines) + "\n")
-    print_time = world.print_file(gcode, timeout=600)
-    world.gcode_ok("M400", timeout=60)
-    _assert_clean(world, print_time)
+    world.print_file(gcode, timeout=600)
+    _assert_clean(world)
