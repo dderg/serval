@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc aa74adf1a0ffc00e149e15b0e9a17fbc8c912dde7623ff90635e99c0c0dae126 # shrinks to a Line of length 0.7917582521114406 under three rail phases (brake on the 2nd/3rd, arc_fraction 0.02/0.49990439430812894/0.8929359460548175), accel_budget 264.1991032008853, entry_speed_fraction 0.8676284666171895, t_start 749.096254582604, sample fraction 0.4796479182923681
