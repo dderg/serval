@@ -22,7 +22,7 @@ get_monotonic(void)
         report_errno("clock_gettime", ret);
         return 0.;
     }
-    return (double)ts.tv_sec + (double)ts.tv_nsec * .000000001;
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
 static void

@@ -64,7 +64,12 @@ fn last_dispatched_func() -> u32 {
     }
 }
 
+// mcu-sim: tick gaps reflect host scheduling of the sim process, not a
+// blocked ISR — effectively disable the gap fault there.
+#[cfg(not(feature = "mcu-sim"))]
 const TICK_GAP_FAULT_MULT: u64 = 2;
+#[cfg(feature = "mcu-sim")]
+const TICK_GAP_FAULT_MULT: u64 = 1_000_000;
 
 pub fn isr_sample_tick(isr: &mut crate::state::IsrState, shared: &SharedState, raw_cyccnt: u32) {
     let body_start = unsafe { cyccnt_read() };

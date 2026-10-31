@@ -28,7 +28,7 @@ pub fn monotonic_raw_secs() -> f64 {
         unsafe {
             let mut ts: libc::timespec = std::mem::zeroed();
             libc::clock_gettime(libc::CLOCK_MONOTONIC_RAW, &mut ts);
-            ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
+            ts.tv_sec as f64 + ts.tv_nsec as f64 / 1e9
         }
     }
     #[cfg(not(target_os = "linux"))]
