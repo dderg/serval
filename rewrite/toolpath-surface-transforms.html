@@ -2011,13 +2011,13 @@ refinement (<code>refine_span</code>); a mesh-warped Z just yields a few more pi
 Mesh-active moves bypass the closed-form straight fast path
 (<code>lower_straight_from_phases</code>) and take the sampled path, the same gating
 that already exists for ramped followers.</p>
-<p><strong>Fast path preserved for flat regions:</strong> per move, bound the mesh
-variation over the move's XY extent. If it is below epsilon — flat cell, or
-gcode Z past <code>fade_end</code> — treat the correction as a constant offset and
-keep the closed-form path. This is mainline's <code>split_delta_z</code> insight
-reincarnated as a warp-or-don't-bother decision instead of a splitting
-loop, and it keeps wire bandwidth and MCU eval cost at baseline for the
-overwhelmingly common case.</p>
+<p><strong>Fast path preserved only for exact constants:</strong> a move keeps the closed-form
+path when the correction is exactly constant — a flat mesh, motion above
+<code>fade_end</code>, or no spatial motion. Any nonzero variation takes the sampled
+path, even when it is below the position-fit tolerance. Freezing each short
+move at its own start correction makes adjacent moves disagree at their
+shared endpoint; those sub-microstep position jumps accumulate in the step
+lattice and eventually demand several roots at one clock.</p>
 <h2 id="surface-representation">Surface representation<a class="headerlink" href="#surface-representation" title="Permanent link">&para;</a></h2>
 <p>Bicubic cardinal spline over the probed points (mainline's build-time
 interpolant, tension 0.2), <strong>evaluated directly at runtime</strong> — not

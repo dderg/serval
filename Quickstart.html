@@ -2235,9 +2235,9 @@ was OOM-killed after 12 minutes, and <code>CARGO_BUILD_JOBS=1</code> completed. 
 <code>2</code> if the host has 2 GB. The three artifacts total about 130 MB on disk,
 most of it debug info that is never mapped into klippy's memory.</p>
 <h2 id="4-rebuild-and-flash-the-mcu-firmware">4. Rebuild and flash the MCU firmware<a class="headerlink" href="#4-rebuild-and-flash-the-mcu-firmware" title="Permanent link">&para;</a></h2>
-<p>The firmware speaks a different protocol than mainline (it executes
-trajectory pieces, not a step queue), so every MCU must be reflashed from
-this branch:</p>
+<p>The firmware speaks a different protocol than mainline (its planner,
+shapers and kinematics all live on the host), so every MCU must be
+reflashed from this branch:</p>
 <div class="highlight"><pre><span></span><code>make<span class="w"> </span>clean
 make<span class="w"> </span>menuconfig<span class="w">   </span><span class="c1"># select your board as usual</span>
 make
@@ -2248,9 +2248,9 @@ make
 for your board's flash method. Repeat for every MCU in the printer.</p>
 <p>The motion sample rate is a per-target build option; the default is right
 for typical boards. It lives under "Enable extra low-level configuration
-options" in <code>make menuconfig</code>, alongside the piece-ring and <code>rt_storage</code>
-size ceilings. All three are derived from the processor model, so you
-should not need to touch them.</p>
+options" in <code>make menuconfig</code>, alongside the <code>rt_storage</code> size ceiling.
+Both are derived from the processor model, so you should not need to touch
+them.</p>
 <h2 id="5-migrate-the-configuration">5. Migrate the configuration<a class="headerlink" href="#5-migrate-the-configuration" title="Permanent link">&para;</a></h2>
 <p>The config model is intentionally different: <code>[kinematics]</code>,
 <code>[motor &lt;name&gt;]</code>, <code>[axis &lt;name&gt;]</code>, and <code>[post_processor &lt;name&gt;]</code> replace

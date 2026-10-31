@@ -1925,7 +1925,7 @@ disagreed with the workflows — that is exactly the failure mode this prevents)
 ./scripts/ci.sh<span class="w"> </span>sim<span class="w">        </span><span class="c1"># sim unit tests (tools/sim, no ELF)</span>
 </code></pre></div>
 
-<p>Jobs: <code>ruff rust-host rust-build rust-test rust-clippy rust-fmt rust-loom
+<p>Jobs: <code>ruff rust-test rust-clippy rust-fmt rust-loom
 rust-mcu-h7 rust-mcu-f4 cbindgen-drift c-smoke deny miri panic-grep
 watchdog-canary py docs sim</code>.</p>
 <p>One-time prerequisites for the full run:</p>
@@ -2016,10 +2016,7 @@ CI-gated, so they stay fast. The contract is: <strong>red on a PR means a real
 problem.</strong> When you want assurance before a direct commit, run <code>./scripts/ci.sh</code>
 locally (above).</p>
 <p>Branch protection is <strong>not</strong> used and not needed for a solo direct-commit
-workflow. If collaborators are ever added, the optional
-<a href="https://github.com/KalicoCrew/kalico//blob/main/../scripts/setup-branch-protection.sh"><code>scripts/setup-branch-protection.sh</code></a>
-can require these checks on others' PRs — it sets <code>enforce_admins: false</code>, so it
-never blocks direct maintainer pushes.</p>
+workflow.</p>
 
 
 

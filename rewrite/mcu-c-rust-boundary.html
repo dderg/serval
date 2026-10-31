@@ -1975,15 +1975,15 @@
 <h2 id="the-boundary-discipline">The boundary discipline<a class="headerlink" href="#the-boundary-discipline" title="Permanent link">&para;</a></h2>
 <p>These rules apply to every new piece of shared state added to the MCU. If you find yourself wanting to violate one, the answer is almost always "redefine the structure on the C side" or "narrow the surface to a single entry point."</p>
 <h3 id="b1-entry-points-are-explicit-logical-entry-point-count-is-small">B1. Entry points are explicit; logical entry-point count is small<a class="headerlink" href="#b1-entry-points-are-explicit-logical-entry-point-count-is-small" title="Permanent link">&para;</a></h3>
-<p>The C side calls Rust through a small, named list of <em>logical</em> entry points. The count of <em>physical</em> <code>extern "C"</code> symbols is larger (~40 today, after the 2026-07 dead-export sweep) because of the opaque-handle API pattern: many functions sharing one handle constitute one cohesive seam. New seams require justification; new methods on an existing handle do not. Current inventory:</p>
+<p>The C side calls Rust through a small, named list of <em>logical</em> entry points. The count of <em>physical</em> <code>extern "C"</code> symbols is larger (32 today, after the 2026-07 dead-export sweep and the step-output path deletion) because of the opaque-handle API pattern: many functions sharing one handle constitute one cohesive seam. New seams require justification; new methods on an existing handle do not. Current inventory:</p>
 <ul>
 <li><strong><code>runtime_tick</code></strong> — scheduled by the C timer. The per-sample motion path hangs off this one call. Reentrant-safe by being non-reentrant (the C scheduler serializes calls).</li>
-<li><strong><code>runtime_handle_create</code> + the <code>Runtime</code> opaque-handle API.</strong> One init-once function plus the family of accessor / operation functions taking <code>*mut Runtime</code> (see <code>rust/c-api/src/runtime_ffi.rs</code> for the full inventory — currently 33 entries). Counted as one logical seam for the discipline this rule is enforcing.</li>
+<li><strong><code>runtime_handle_create</code> + the <code>Runtime</code> opaque-handle API.</strong> One init-once function plus the family of accessor / operation functions taking <code>*mut Runtime</code> (see <code>rust/c-api/src/runtime_ffi/exports/</code> for the full inventory — currently 31 entries). Counted as one logical seam for the discipline this rule is enforcing.</li>
 <li>(Add new entries above this line, with a one-sentence justification. A new accessor on the existing handle is not a new entry; a fundamentally new seam is.)</li>
 </ul>
 <p>Anything else — heater readback, pin events, USB byte arrival, command-table dispatch — stays inside C and is <strong>not</strong> routed through Rust. The motion engine is a tenant on the MCU, not the MCU's main loop.</p>
 <h3 id="b2-shared-state-lives-in-c-in-c-owned-sections">B2. Shared state lives in C, in C-owned sections<a class="headerlink" href="#b2-shared-state-lives-in-c-in-c-owned-sections" title="Permanent link">&para;</a></h3>
-<p>Anything visible to both languages — the segment SPSC queue, <code>.persistent_diag</code>, <code>RT_CELL</code>, future telemetry rings, future step-output queues — is <strong>defined in a <code>.c</code> file, placed via the C linker script, with a sized symbol the Rust side imports via <code>extern "C"</code> and a <code>#[repr(C)]</code> mirror.</strong></p>
+<p>Anything visible to both languages — the segment SPSC queue, <code>.persistent_diag</code>, <code>RT_CELL</code>, future telemetry rings — is <strong>defined in a <code>.c</code> file, placed via the C linker script, with a sized symbol the Rust side imports via <code>extern "C"</code> and a <code>#[repr(C)]</code> mirror.</strong></p>
 <p>Operational consequences:</p>
 <ul>
 <li>Linker sections (<code>.axi_bss</code>, <code>.persistent_diag</code>, custom regions) are <em>named in the linker script</em>, with start/end symbols. Rust never <code>#[link_section]</code>s into them to introduce a new section. This eliminates "Rust struct moved" / "section silently grew" failure modes.</li>
@@ -2040,9 +2040,14 @@
 <td>Petted from the scheduler; pacing actuals are Step 7-D scope.</td>
 </tr>
 <tr>
-<td>Motion engine — per-sample NURBS eval, kinematics, step output</td>
+<td>Motion engine — per-sample NURBS eval, kinematics, phase-stepping coil synthesis</td>
 <td>Rust</td>
 <td>The reason the boundary exists.</td>
+</tr>
+<tr>
+<td>Step/dir pulse output</td>
+<td>C</td>
+<td>Classic <code>queue_step</code> (<code>src/stepper_classic.c</code>). The Rust-side step-output queue and its per-axis timer were deleted once the buzz generator moved host-side.</td>
 </tr>
 <tr>
 <td>Segment queue (host → MCU)</td>

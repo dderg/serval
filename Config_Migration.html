@@ -2108,7 +2108,7 @@
 
 
 <h1 id="migrating-a-printer-configuration">Migrating a printer configuration<a class="headerlink" href="#migrating-a-printer-configuration" title="Permanent link">&para;</a></h1>
-<p>This guide covers the configuration changes required to run a mainline Klipper/Kalico printer configuration on this fork. The motion planner was replaced with a Rust jerk-limited streaming planner. Its motion topology is declared explicitly with <code>[kinematics]</code>, <code>[motor &lt;name&gt;]</code>, <code>[axis &lt;name&gt;]</code>, and <code>[post_processor &lt;name&gt;]</code> sections.</p>
+<p>This guide covers the configuration changes required to run a mainline Klipper/Kalico printer configuration on this fork. The motion planner was replaced with a Rust streaming planner. Its motion topology is declared explicitly with <code>[kinematics]</code>, <code>[motor &lt;name&gt;]</code>, <code>[axis &lt;name&gt;]</code>, and <code>[post_processor &lt;name&gt;]</code> sections.</p>
 <p>The old role-encoded <code>[stepper_x]</code>, <code>[stepper_y]</code>, and similar sections are rejected. <code>[printer] kinematics</code> is also rejected. A configuration with either form must be converted rather than carried forward.</p>
 <h2 id="worked-cartesian-example">Worked cartesian example<a class="headerlink" href="#worked-cartesian-example" title="Permanent link">&para;</a></h2>
 <p>The following is intentionally a motion-only example. Keep your existing heater, fan, probe, driver, and other non-motion sections as appropriate for your machine. Pin names and dimensions are examples and must be replaced with the values for your printer.</p>
@@ -2303,12 +2303,10 @@ name comes from the driver section:</p>
 <span class="na">endstop_pin</span><span class="o">:</span><span class="w"> </span><span class="s">tmc2209_a_motor:virtual_endstop</span><span class="w">     </span><span class="c1"># fork, on [axis x]</span>
 </code></pre></div>
 
-<p><code>use_sensorless_homing</code> still defaults to true when the endstop is
-virtual, and the homing keys it interacts with — <code>homing_retract_dist</code>,
-<code>homing_retract_speed</code>, <code>min_home_dist</code>, <code>homing_positive_dir</code>,
-<code>second_homing_speed</code> — all belong on <code>[axis &lt;name&gt;]</code>. Putting any of
-them on a <code>[motor &lt;name&gt;]</code> is rejected with a message naming the axis
-they belong to.</p>
+<p>The homing keys — <code>homing_retract_dist</code>, <code>homing_retract_speed</code>,
+<code>min_home_dist</code>, <code>homing_positive_dir</code> — all belong on <code>[axis &lt;name&gt;]</code>.
+Putting any of them on a <code>[motor &lt;name&gt;]</code> is rejected with a message
+naming the axis they belong to.</p>
 <h2 id="option-mapping">Option mapping<a class="headerlink" href="#option-mapping" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -2340,7 +2338,7 @@ they belong to.</p>
 </tr>
 <tr>
 <td><code>[printer] max_jerk</code></td>
-<td><code>[printer] max_jerk</code></td>
+<td>Still parsed, but only <code>max_jerk: 0</code> (unlimited) is accepted; a finite jerk limit is rejected at config load.</td>
 </tr>
 <tr>
 <td><code>[printer] max_path_deviation</code></td>
@@ -2387,8 +2385,8 @@ they belong to.</p>
 <td><code>endstop_pin: tmc2209_&lt;motor&gt;:virtual_endstop</code> on <code>[axis &lt;name&gt;]</code>.</td>
 </tr>
 <tr>
-<td><code>high_precision_step_compress</code> (any section)</td>
-<td><strong>No equivalent.</strong> Delete it. The MCU plays trajectory pieces, so there is no step compression to tune.</td>
+<td><code>[stepper_*] high_precision_step_compress</code></td>
+<td>Same opt-in, moved with the stepper fields to <code>[motor &lt;name&gt;] high_precision_step_compress: True</code>. Motors default to classic compression.</td>
 </tr>
 <tr>
 <td><code>[extruder] pressure_advance</code></td>

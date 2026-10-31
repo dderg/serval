@@ -1838,6 +1838,15 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#acceptance-is-not-playback" class="md-nav__link">
+    <span class="md-ellipsis">
+      Acceptance is not playback
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#the-rules" class="md-nav__link">
     <span class="md-ellipsis">
       The rules
@@ -1935,7 +1944,24 @@ rules here exist because we shipped a season of timing bugs by breaking them.</p
   (<code>clocksync.py</code>); every update is mirrored into the Rust
   <code>PassthroughRouter</code> record (<code>set_clock_est_rebased</code>), so both sides project
   with the same numbers. The router is the Rust-side authority; do not carry
-  your own <code>(freq, offset, last_clock)</code> anywhere else.</li>
+  your own <code>(freq, offset, last_clock)</code> anywhere else.
+  The record belongs to one MCU boot epoch: every <code>_mcu_identify</code> calls
+  <code>invalidate_clock_est</code>, and until a <em>converged</em> estimate arrives every
+  projection is a loud error (<code>RouterError::NoClockEstimate</code>) and the
+  stepcompress anchor refuses to run (<code>DispatchError::ClockRecordUnusable</code>).
+  A record surviving a reflash would project clocks ahead of the restarted
+  MCU counter by the previous boot's uptime.
+  Two different quantities describe that record, and confusing them costs
+  hours: <code>clock_offset</code> is the regression's decay-weighted sample <strong>centroid</strong>,
+  which on a perfectly live record trails now by up to <code>1/DECAY</code> get_clock
+  periods (~30 s), so <code>host_now - clock_offset</code> (<code>centroid_lag_secs</code>) is the
+  projection's lever arm, not staleness. The record's <strong>age</strong> is
+  <code>host_now - updated_at</code>: how long since the router last accepted an estimate.
+  Both are on every <code>reanchor_record</code> event. The anchor warns past
+  <code>DEGRADED_CLOCK_RECORD_AGE_SECS</code> (3 periods; measured healthy worlds gap up
+  to ~10 s, so this is not a stop) and refuses past
+  <code>MAX_CLOCK_RECORD_AGE_SECS</code> (the full regression window) with
+  <code>DispatchError::ClockRecordStale</code>.</li>
 <li>print_time ↔ MCU clock: multiply/divide by <strong>nominal</strong> <code>CLOCK_FREQ</code>
   (secondary MCUs additionally go through <code>SecondarySync.clock_adj</code>,
   Python-side).</li>
@@ -1964,6 +1990,21 @@ rules here exist because we shipped a season of timing bugs by breaking them.</p
 <p><code>mcu_handle</code> is the primary MCU's engine handle: print_time is <em>defined</em> by
 the primary's clock. Passing a secondary's handle gives you that MCU's
 <code>clock/nominal</code>, which is not the shared timeline.</p>
+<h2 id="acceptance-is-not-playback">Acceptance is not playback<a class="headerlink" href="#acceptance-is-not-playback" title="Permanent link">&para;</a></h2>
+<p>The pump transfers each trajectory view to its endpoint once. A successful
+<code>send_mcu_frames</code> means acceptance; <code>progress_mcu</code> advances delivery without
+transferring those views again. Backpressure after acceptance leaves the
+endpoint responsible for its pending output.</p>
+<p>Drain accounting distinguishes accepted (<code>pushed</code>), playback-retired, and
+abandoned views. A halt cuts pending output and accounts for abandonment;
+it does not prove that the discarded motion played. Cut receipts reconcile
+the endpoint's odometers without letting delayed pre-cut reports undo that
+accounting.</p>
+<p>EtherCAT's wire progress counts are cycles, not trajectory views. The host
+filler retires views from playback clocks, using the slowest motor of a
+logical axis. Its retained, unsent window cannot earn playback credit.
+Synchronous endpoint calls must not hold the filler mutex: the socket reader
+also needs it to process heartbeat playback observations.</p>
 <h2 id="the-rules">The rules<a class="headerlink" href="#the-rules" title="Permanent link">&para;</a></h2>
 <ol>
 <li><strong>Absolute results only.</strong> Never return or store "seconds from now".
@@ -1973,8 +2014,13 @@ the primary's clock. Passing a secondary's handle gives you that MCU's
 <li><strong>Never compose <code>estimated_print_time(now) + lead</code>.</strong> That sum samples
    "now" through one clock path and the lead through another. The one
    sanctioned composition is the <em>schedule floor</em> in
-   <code>Motion.get_last_move_time</code> — a <code>max()</code> of absolutes over all engine
-   MCUs, which is drift-safe because max cannot accumulate error.</li>
+   <code>Motion.get_last_move_time</code> — a <code>max()</code> of absolutes over every connected
+   MCU, which is drift-safe because max cannot accumulate error. It must
+   span every MCU, not just the ones running kinematic lanes: a follower
+   lane's enable pin, a fan, or a heater on a secondary MCU is validated
+   against <em>that</em> MCU's estimate, and <code>SecondarySync</code> deliberately skews its
+   frequency to converge seconds ahead, so its estimate at <code>now</code> can sit
+   over a second away from the primary's.</li>
 <li><strong>Scheduling after motion</strong>: call <code>toolhead.get_last_move_time()</code> if you
    also want mainline's flush-to-rest semantics (most G-code handlers do),
    or <code>engine.frontier_print_time(...)</code> if committed motion is the right
@@ -1989,16 +2035,26 @@ the primary's clock. Passing a secondary's handle gives you that MCU's
    and correlate positions via <code>motion_engine.motion_state_at</code>. Both ride
    the same clocksync estimates; do not mix in wall-clock or host time.</li>
 <li><strong>The engine's timeline is complete.</strong> Dwells and nudges advance the
-   frontier like segments do (the dispatcher publishes them). If you catch
+   frontier like segments do (the execution owner publishes them). If you catch
    yourself adding host-side compensation for something the engine "forgot",
    the engine is where the fix goes.</li>
+<li><strong>One execution owner.</strong> <code>kalico-execution</code> owns anchoring, clock projection,
+   trajectory admission, transport scheduling, pulse/sample endpoint commands,
+   and EtherCAT filler changes. Planning hands it complete <code>TrajectoryItem</code>s,
+   not per-axis transactions. Hardware pacers and wire I/O remain independent.
+   Admission barriers fence prior intake, not physical playback: once earlier
+   motion is admitted, a full staging queue must not block its trailing barrier.
+   A finite homing stroke may complete admission above the staging cap under an
+   armed cohort; physical drip windows and transport credits still limit egress.</li>
 </ol>
 <h2 id="why-this-exists-the-bugs-the-old-model-shipped">Why this exists (the bugs the old model shipped)<a class="headerlink" href="#why-this-exists-the-bugs-the-old-model-shipped" title="Permanent link">&para;</a></h2>
 <ul>
 <li><code>get_last_move_time</code> returned <code>est_main(now₁) + max(lead(now₂), 0.25)</code> —
   two nows, two clock paths, and only the main MCU's estimate while callers
   scheduled on secondary MCUs → sporadic "scheduled with stale print_time"
-  shutdowns.</li>
+  shutdowns. The floor later became a <code>max()</code> of absolutes, but over
+  kinematic-stepper MCUs only, which still excluded follower-lane and
+  peripheral-only MCUs.</li>
 <li>Lookahead callbacks fired with <code>est(now)+lead</code> at resolution time, which
   could be behind moves queued after registration → out-of-order pin/LED
   scheduling.</li>

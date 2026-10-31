@@ -2037,7 +2037,7 @@
 </tr>
 <tr>
 <td>Explicit <code>max_jerk</code> as a first-class limit</td>
-<td><strong>exploratory</strong> — enforced, but whether it earns its keep next to smoothing kernels is open</td>
+<td><strong>not implemented</strong> — the option still parses, but only <code>max_jerk: 0</code> (unlimited) is accepted; a finite jerk limit is rejected at config load</td>
 </tr>
 <tr>
 <td>Kinematics beyond cartesian / corexy</td>
@@ -2118,11 +2118,10 @@
 </table>
 <h2 id="known-limits">Known limits<a class="headerlink" href="#known-limits" title="Permanent link">&para;</a></h2>
 <ul>
-<li><strong>Jerk on corner blends: enforced, with one soft spot.</strong> The jerk limit
-  applies through clothoid blends, including the rotating acceleration's
-  normal component. Where blend geometry makes the jerk budget infeasible
-  outright, the planner follows the hard acceleration limit instead and
-  jerk goes soft there (<code>rust/geometry/src/velocity/ride.rs</code>).</li>
+<li><strong>No jerk limit.</strong> The planner is second-order: velocity and
+  acceleration along the path, with the acceleration limit applied through
+  clothoid corner blends including the rotating acceleration's normal
+  component. Smoothness beyond that is the post-processor chains' job.</li>
 <li><strong>No per-axis XY limits.</strong> Global limits plus Z-only caps, nothing
   finer.</li>
 <li><strong>Kinematics:</strong> cartesian and corexy only.</li>

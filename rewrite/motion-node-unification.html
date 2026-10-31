@@ -2020,9 +2020,8 @@ boundary honest.</p>
   miscompile). The generic type parameter surfaces only at the <code>EngineImpl</code> alias.</li>
 <li><strong>The timer call-path is not abstracted.</strong> C scheduler timer (MCU) vs. RT-Linux
   cyclic loop (EtherCAT) are different event models; unifying them buys nothing.</li>
-<li><strong><code>seed_position</code>, <code>set_axis_mode</code>, <code>step_queue</code> reset, <code>TickCaches</code>/<code>last_motors</code>/
-  <code>StepMotorState</code></strong> are stepper-specific — kept concrete / <code>#[cfg]</code>-gated, never in
-  a shared trait.</li>
+<li><strong><code>seed_position</code>, <code>set_axis_mode</code>, <code>last_motors</code>/<code>StepMotorState</code></strong> are
+  stepper-specific — kept concrete / <code>#[cfg]</code>-gated, never in a shared trait.</li>
 </ul>
 <h2 id="kconfig-dispatch-module-selection">Kconfig dispatch-module selection<a class="headerlink" href="#kconfig-dispatch-module-selection" title="Permanent link">&para;</a></h2>
 <p>Mirror the existing <code>mcu-h7</code> / <code>mcu-sim</code> passthrough exactly:</p>
@@ -2042,8 +2041,8 @@ boundary honest.</p>
 <h2 id="performance-gate-mandatory-before-every-walkerdispatch-touching-commit">Performance gate (mandatory, before every walker/dispatch-touching commit)<a class="headerlink" href="#performance-gate-mandatory-before-every-walkerdispatch-touching-commit" title="Permanent link">&para;</a></h2>
 <p>Verified runnable on macOS (<code>thumbv7em-none-eabi</code> installed, <code>/usr/bin/objdump</code>
 Apple LLVM 21 is Thumb-capable). Baseline captured to <code>/tmp/mnu-disasm/before_*</code>.</p>
-<div class="highlight"><pre><span></span><code># build (H7); STORAGE/RING/RATE env are mandatory on bare-metal targets
-cd rust &amp;&amp; RUNTIME_STORAGE_SIZE=122880 RUNTIME_PIECE_RING_SIZE=63488 \
+<div class="highlight"><pre><span></span><code># build (H7); STORAGE/RATE env are mandatory on bare-metal targets
+cd rust &amp;&amp; RUNTIME_STORAGE_SIZE=32768 \
   RUNTIME_SAMPLE_RATE_HZ=40000 cargo build -p c-api \
   --no-default-features --features mcu-h7,header-nurbs,header-runtime \
   --target thumbv7em-none-eabi --release

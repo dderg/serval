@@ -1817,6 +1817,21 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Why continuous kernels instead of impulse trains">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#oscillation-property-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      Oscillation property tests
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1923,6 +1938,10 @@ clothoid corner blending — and turns it into what each motor should actually
 be commanded to do. Everything the classic Klipper stack does after the
 trapezoid generator (input shaping, smoothers, pressure advance) lives here,
 unified under one model, plus things that stack cannot express.</p>
+<p>In the live host, <code>motion_pipeline::Pipeline</code> runs these four stages
+synchronously on <code>kalico-planning</code>. Snapshot generation uses the same
+coordinator. There are no interstage queues or dedicated stage threads;
+numerical parallel work within a stage remains.</p>
 <p>The core idea: <strong>resonance suppression and mechanical compensation are
 per-axis linear operators on the planned trajectory</strong>, and there are exactly
 two kinds worth having:</p>
@@ -2013,12 +2032,50 @@ explicit tolerance.</p>
   transformed signal (<code>apply_nonlinear_advance_to_track</code>) under the same
   ladder budgets the convolution refit uses, and a move carrying one
   pre-kernel takes the sampled lowering path rather than the closed-form
-  per-piece one.</li>
+  per-piece one.
+  Piece boundaries retain their exact times; derivatives are sampled from
+  inside each fit interval, with deterministic left ownership at a shared
+  knot. On constant-acceleration input, the nonlinear law also certifies
+  acceleration monotonicity: tanh changes direction at
+  <code>v = ±linearization_velocity·atanh(1/√3)</code>, while reciprocal has fixed
+  direction on each side of zero velocity. The fitter seeds those
+  transitions and classifies intervals using those same root times, avoiding
+  endpoint-velocity roundoff that could remove the certificate. Candidates'
+  Bernstein jerk controls must prove the certified sign within the floating-point
+  basis-conversion error bound, not the physical fit budget. Nonconstant certified
+  spans use endpoint-P/V/A Hermite rungs, so a low-order plateau cannot spend the
+  acceleration budget as a jump between pieces. A bounded adaptive interval check
+  bounds acceleration error between probes using the candidate's Bernstein hull
+  and the monotone signal's endpoint values; inconclusive intervals request
+  refinement. The span floor cannot bypass this check. General polynomial input
+  supplies no such certificate and retains the ordinary fitting contract.</li>
 <li><code>mode_inverse</code> (<code>frequency_hz</code>, <code>damping_ratio</code>) —
   <code>DerivativeGains { k1: 2ζ/ω, k2: 1/ω² }</code> with <code>ω = 2πf</code>.</li>
 </ul>
 <p>A kernel's <em>variance</em> (second moment, <code>kernel_variance_s2</code>) is its one
 number the planner needs — see the corner budget section.</p>
+<p>Moment convolution differentiates the input polynomials, not the kernel. At
+input joins, position jumps contribute <code>Δp·k(t−b)</code> to output velocity and
+<code>Δp·k'(t−b)</code> to acceleration; slope jumps contribute <code>Δv·k(t−b)</code> to
+acceleration. All three terms are required when derivative gains produce
+genuine discontinuities. Preserving their polynomial pieces without these
+terms would make the convolved position, velocity, and acceleration inconsistent.</p>
+<h3 id="oscillation-property-tests">Oscillation property tests<a class="headerlink" href="#oscillation-property-tests" title="Permanent link">&para;</a></h3>
+<p><code>motion-pipeline/src/phase_ripple_fuzz.rs</code> checks flat cruise velocity and
+acceleration before a changing phase, through both the shared axis fitter and
+nonlinear advance. <code>nonlinear_ripple_fuzz.rs</code> checks analytic ramp fit budgets,
+acceleration direction inside pieces, and velocity/acceleration behavior at joins.
+The generators vary axis labels, flow direction, phase durations, time origins,
+velocity scales, and tanh/reciprocal parameters, including velocity-zero crossings.
+The oracles differentiate native Bernstein controls rather than unstable
+position-power conversions; the ramp oracle searches jerk extrema independently
+of the fitter's sign certificate.</p>
+<p>Both modules retain shrinking/replay seeds in <code>motion-pipeline/proptest-regressions/</code>.
+Normal Rust tests run 128 cases per property; <code>./scripts/ci.sh rust-fuzz</code> includes
+them at <code>PROPTEST_CASES</code> (20,000 by default). Axis labels exercise shared scalar
+fitting, not full kinematic routing or physical resonance response. These tests
+reject invented oscillations where the analytic signal supplies a shape contract;
+they do not forbid legitimate oscillatory motion.</p>
 <h2 id="composition-rules">Composition rules<a class="headerlink" href="#composition-rules" title="Permanent link">&para;</a></h2>
 <p><code>CompiledChain::compile</code> enforces the v1 composition contract, failing
 loudly at config time rather than producing silently wrong motion:</p>
@@ -2152,6 +2209,16 @@ of dividing by a near-zero duration. Finally
 <code>pad_segment_axes_to_uniform_degree</code> zero-pads so kinematics lane mixing
 sees one degree per segment. Matching endpoint <code>(p, v, a)</code> per span keeps
 the emitted track C² at every seam by construction.</p>
+<p>Leader refits use ordered parallel work without changing the fitted signal.
+Axes run concurrently. Ordinary windows distribute whole target segments;
+a target with at least 512 exact cut spans distributes those spans instead.
+If the parallel spans exceed the global refinement budget, that target is
+rerun serially so failure behavior stays deterministic.</p>
+<p>Follower projection may evaluate a leader through cached local Bezier power
+polynomials. Every cache candidate is checked against the original NURBS at
+interior points before use. An ill-conditioned conversion falls back to direct
+NURBS evaluation; it must never inject false velocity or acceleration into the
+follower source.</p>
 <h2 id="corner-deviation-and-kernel-smoothing-are-separate-knobs">Corner deviation and kernel smoothing are separate knobs<a class="headerlink" href="#corner-deviation-and-kernel-smoothing-are-separate-knobs" title="Permanent link">&para;</a></h2>
 <p>Kernels round corners: convolving a corner traversed at accel <code>a</code> with a
 kernel of variance <code>σ²</code> pulls the path inward by <code>≈ ½·σ²·a</code>. That smoothing
