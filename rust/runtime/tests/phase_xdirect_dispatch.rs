@@ -7,8 +7,9 @@ use heapless::Vec;
 use runtime::dispatch_stepper::write_phase_coils;
 use runtime::phase_lut::PHASE_LUT;
 use runtime::state::{MAX_STEPPER_OIDS, SharedState};
-use runtime::stepping_state::{AxisState, MAX_STEPPERS_PER_AXIS, StepMode, StepperRef};
+use runtime::stepping_state::{AxisState, StepperRef};
 use runtime::test_xdirect_capture;
+use runtime_contract::axes::{MAX_STEPPERS_PER_AXIS, StepMode};
 
 fn make_phase_stepper(stepper_oid: u8, tmc_cs_oid: u8) -> StepperRef {
     StepperRef::new(stepper_oid, Some(tmc_cs_oid))
@@ -189,7 +190,7 @@ fn phase_dispatch_empty_slot_table_latches_phase_motor_unmapped() {
     );
     assert_eq!(
         shared.last_error.load(Ordering::Acquire),
-        runtime::error::FaultCode::PhaseMotorUnmapped.as_i32(),
+        runtime_contract::error::FaultCode::PhaseMotorUnmapped.as_i32(),
         "unmapped phase motor must latch PhaseMotorUnmapped"
     );
     let detail = shared.fault_detail.load(Ordering::Acquire);

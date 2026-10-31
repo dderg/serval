@@ -9,12 +9,12 @@ use trajectory::{AxisChainSet, ClockedMotorSpan, ContinuousSegment};
 
 use crate::classify::build_move;
 use crate::enqueue::enqueue_segment;
-use crate::mcu_config::McuAxisConfig;
+use crate::mcu_config::{McuAxisConfig, McuHardware};
 use crate::pump::{
     JUNCTION_POSITION_FATAL_MM, JUNCTION_POSITION_LOG_MM, JunctionTracker, MAX_LEAD_SECS,
 };
 use crate::types::AxisKey;
-use motion_pipeline::{StreamConfig, TrajectoryItem, setup_stages};
+use motion_pipeline::{Pipeline, StreamConfig, TrajectoryItem};
 
 const HARNESS_MCU_ID: u32 = 0;
 const HARNESS_MCU_FREQ_HZ: f64 = 64.0e6;
@@ -46,8 +46,11 @@ fn harness_mcu_configs() -> Vec<McuAxisConfig> {
         ethercat: false,
         mcu_id: HARNESS_MCU_ID,
         axes: vec![0, 1, 2],
-        kinematics: 1,
-        max_motor_velocity: vec![f64::INFINITY; 3],
+        hw: McuHardware {
+            kinematics: 1,
+            max_motor_velocity: vec![f64::INFINITY; 3],
+            ..Default::default()
+        },
         ..Default::default()
     }]
 }
@@ -351,12 +354,6 @@ pub fn run_moves_with_chains(
     report
 }
 
-/// Feed the moves through the full streaming pipeline and return the shaped
-/// segments it emits — the trajectory enqueue would dispatch.
-pub fn collect_shaped_segments(moves: &[Move], config: StreamConfig) -> Vec<ContinuousSegment> {
-    collect_shaped_segments_scripted(moves, config, AxisChainSet::default(), None)
-}
-
 pub fn collect_shaped_segments_scripted(
     moves: &[Move],
     config: StreamConfig,
@@ -390,25 +387,19 @@ pub fn collect_shaped_segments_from_script(
         .map_or([0.0, 0.0, 0.0], |seg| seg.point_at(0.0));
     let mut home = spatial_home.to_vec();
     home.push(0.0);
-    let handle = setup_stages(config, chains, home, 0.0);
-    let output = handle.output;
-    let collector = std::thread::spawn(move || {
-        let mut segs: Vec<ContinuousSegment> = Vec::new();
-        while let Ok(item) = output.recv() {
-            if let TrajectoryItem::Seg(seg) = item {
-                segs.push(seg);
-            }
+    let mut pipeline = Pipeline::new(config, chains, home, 0.0);
+    let mut segs = Vec::new();
+    let mut output = |item| {
+        if let TrajectoryItem::Seg(seg) = item {
+            segs.push(seg);
         }
-        segs
-    });
+        true
+    };
     for item in script {
-        handle
-            .input
-            .send(item)
-            .expect("pipeline input closed while feeding — a stage died");
+        assert!(pipeline.feed(item, &mut output));
     }
-    drop(handle.input);
-    collector.join().expect("pipeline collector panicked")
+    assert!(pipeline.finish(&mut output));
+    segs
 }
 
 #[cfg(test)]

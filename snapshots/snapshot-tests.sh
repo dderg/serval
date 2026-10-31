@@ -107,15 +107,21 @@ if [ "$view_baselines" = 1 ]; then
   exec "$PYTHON" "$SCRIPT_DIR/web/server.py" --mode baselines --port "$PORT"
 fi
 
-if [ "$ci" = 1 ]; then
-  exec "$PYTHON" "$SCRIPT_DIR/run.py" "${run_args[@]}"
+RESULTS_DIR="${SNAPSHOT_RESULTS_DIR:-$(mktemp -d -t snapshot-results)}"
+if [ -n "${SNAPSHOT_RESULTS_DIR:-}" ]; then
+  mkdir -p "$RESULTS_DIR"
+else
+  trap 'rm -rf "$RESULTS_DIR"' EXIT
 fi
 
-RESULTS_DIR="$(mktemp -d -t snapshot-results)"
-trap 'rm -rf "$RESULTS_DIR"' EXIT
+if [ "$ci" = 1 ]; then
+  exec "$PYTHON" "$SCRIPT_DIR/run.py" --results-dir "$RESULTS_DIR" "${run_args[@]}"
+fi
 
-if "$PYTHON" "$SCRIPT_DIR/run.py" --results-dir "$RESULTS_DIR" "${run_args[@]}"; then
-  exit 0
+"$PYTHON" "$SCRIPT_DIR/run.py" --results-dir "$RESULTS_DIR" "${run_args[@]}"
+status=$?
+if [ "$status" -ne 1 ]; then
+  exit "$status"
 fi
 
 url="http://127.0.0.1:$PORT"

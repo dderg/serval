@@ -11,7 +11,6 @@ use arc_swap::ArcSwap;
 use serialport::SerialPort;
 
 use crate::clock::{Clock, MockClock};
-use crate::host_io::McuHostIoConfig;
 use crate::host_io::ReactorCommand;
 use crate::host_io::identify::IdentifySeqState;
 use crate::host_io::parser::MsgProtoParser;
@@ -175,15 +174,8 @@ impl ReactorHarness {
         let parser = Arc::new(MsgProtoParser::new_empty());
         let (submission_tx, submission_rx) = std::sync::mpsc::channel();
         let status_snapshot = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
-        let config = McuHostIoConfig::default();
-        let reactor = Reactor::new_for_tests(
-            port,
-            parser,
-            submission_rx,
-            status_snapshot,
-            config,
-            clock.clone(),
-        );
+        let reactor =
+            Reactor::new_for_tests(port, parser, submission_rx, status_snapshot, clock.clone());
         Self {
             reactor,
             clock,
@@ -197,15 +189,8 @@ impl ReactorHarness {
         let clock = MockClock::new();
         let (submission_tx, submission_rx) = std::sync::mpsc::channel();
         let status_snapshot = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
-        let config = McuHostIoConfig::default();
-        let reactor = Reactor::new_for_tests(
-            port,
-            parser,
-            submission_rx,
-            status_snapshot,
-            config,
-            clock.clone(),
-        );
+        let reactor =
+            Reactor::new_for_tests(port, parser, submission_rx, status_snapshot, clock.clone());
         Self {
             reactor,
             clock,
@@ -220,17 +205,21 @@ impl ReactorHarness {
         let parser = Arc::new(MsgProtoParser::new_empty());
         let (submission_tx, submission_rx) = std::sync::mpsc::channel();
         let status_snapshot = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
-        let config = McuHostIoConfig::default();
         let clock_dyn: Arc<dyn Clock> = clock.clone();
         let reactor = Reactor::new_with_clock(
             SerialFrameIo::new(port),
-            parser,
-            submission_rx,
-            status_snapshot,
-            seq,
-            config,
+            crate::host_io::reactor::ReactorSetup {
+                parser,
+                submission_rx,
+                status_snapshot,
+                seq,
+                mcu_label: "test".into(),
+                link_health: Arc::new(crate::host_io::link_health::LinkHealth::default()),
+                fire_and_forget_depth: Arc::new(
+                    crate::host_io::fire_and_forget_depth::FireAndForgetDepth::default(),
+                ),
+            },
             clock_dyn,
-            Arc::new(crate::host_io::fire_and_forget_depth::FireAndForgetDepth::default()),
         );
         Self {
             reactor,
@@ -301,7 +290,7 @@ impl ReactorHarness {
             .send(crate::host_io::ReactorCommand::RegisterInterceptor {
                 msg_name: msg_name.to_owned(),
                 oid,
-                callback: crate::host_io::interceptor::InterceptorCallback(callback),
+                callback,
                 reply: reply_tx,
             })
             .expect("submission_tx send failed in register_interceptor");

@@ -7,7 +7,8 @@
 
 use geometry::path::{Arc, Clothoid, Line, PathSegment, Segment};
 use geometry::velocity::law::{LawSegment, ScalarLaw};
-use geometry::{BoundaryState, Move, SourceRange, VelocityLimits, plan_velocity_stops};
+use geometry::velocity::plan_velocity_stops;
+use geometry::{Move, SourceRange, VelocityLimits};
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 
@@ -214,7 +215,7 @@ fn arb_planner_segment() -> impl Strategy<Value = Segment> {
 struct PlanCase {
     moves: Vec<Move>,
     stop_before: Vec<bool>,
-    entry: BoundaryState,
+    entry: f64,
 }
 
 impl PlanCase {
@@ -244,10 +245,12 @@ impl PlanCase {
         plan_velocity_stops(
             &self.moves,
             &self.stop_before,
-            INTEGRATION_TOL,
-            EXTRUDE_ONLY_V,
-            EXTRUDE_ONLY_A,
-            self.entry,
+            geometry::VelocityPlanParams {
+                integration_tol: INTEGRATION_TOL,
+                max_extrude_only_velocity_mm_s: EXTRUDE_ONLY_V,
+                max_extrude_only_accel_mm_s2: EXTRUDE_ONLY_A,
+                entry_v: self.entry,
+            },
         )
     }
 }
@@ -298,10 +301,7 @@ fn arb_plan_case() -> impl Strategy<Value = PlanCase> {
             PlanCase {
                 moves,
                 stop_before,
-                entry: BoundaryState {
-                    v: entry_fraction * entry_ceiling,
-                    a: 0.0,
-                },
+                entry: entry_fraction * entry_ceiling,
             }
         })
 }

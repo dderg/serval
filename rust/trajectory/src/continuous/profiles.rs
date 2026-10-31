@@ -293,6 +293,16 @@ pub struct BuzzProfile {
     acceleration_bounds: (f64, f64),
 }
 
+/// A sub-interval `[x0, x1]` of a zero search with the derivative values at
+/// its ends.
+#[derive(Clone, Copy)]
+struct ZeroBracket {
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+}
+
 impl BuzzProfile {
     pub fn try_new(
         amplitude_mm: f64,
@@ -579,7 +589,13 @@ impl BuzzProfile {
             if y0 == 0.0 {
                 push_distinct(roots, self.t_start + x0);
             }
-            self.isolate_zeros_within(x0, y0, x1, y1, interval, derivative, 0, roots);
+            self.isolate_zeros_within(
+                ZeroBracket { x0, y0, x1, y1 },
+                interval,
+                derivative,
+                0,
+                roots,
+            );
             x0 = x1;
             y0 = y1;
         }
@@ -588,18 +604,15 @@ impl BuzzProfile {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn isolate_zeros_within(
         &self,
-        x0: f64,
-        y0: f64,
-        x1: f64,
-        y1: f64,
+        bracket: ZeroBracket,
         interval: EnvelopeInterval,
         derivative: Derivative,
         depth: u32,
         roots: &mut Vec<f64>,
     ) {
+        let ZeroBracket { x0, y0, x1, y1 } = bracket;
         if y0.signum() != y1.signum() {
             let root = self.bisect_zero(x0, x1, y0, interval, derivative);
             push_distinct(roots, self.t_start + root);
@@ -619,8 +632,30 @@ impl BuzzProfile {
         if ym == 0.0 {
             push_distinct(roots, self.t_start + mid);
         }
-        self.isolate_zeros_within(x0, y0, mid, ym, interval, derivative, depth + 1, roots);
-        self.isolate_zeros_within(mid, ym, x1, y1, interval, derivative, depth + 1, roots);
+        self.isolate_zeros_within(
+            ZeroBracket {
+                x0,
+                y0,
+                x1: mid,
+                y1: ym,
+            },
+            interval,
+            derivative,
+            depth + 1,
+            roots,
+        );
+        self.isolate_zeros_within(
+            ZeroBracket {
+                x0: mid,
+                y0: ym,
+                x1,
+                y1,
+            },
+            interval,
+            derivative,
+            depth + 1,
+            roots,
+        );
     }
 
     /// A bound on `|d/dt derivative|` over `[x0, x1]`. The carrier

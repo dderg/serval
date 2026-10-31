@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use host_rt::passthrough_queue::PassthroughRouter;
+use host_rt::passthrough_queue::{McuHandle, PassthroughRouter};
 use nurbs::ScalarNurbs;
 use trajectory::{ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm};
 
@@ -30,8 +30,8 @@ fn clock_between_mcus_round_trips_through_host_secs() {
     let router = stub_router_two_mcus();
     let got = crate::motion_history::clock_between_mcus(
         &router,
-        crate::types::mcu_handle_from_raw(1),
-        crate::types::mcu_handle_from_raw(2),
+        McuHandle::from_raw(1),
+        McuHandle::from_raw(2),
         1_000_000,
     )
     .unwrap();
@@ -581,9 +581,9 @@ fn axis_key(axis: u8) -> AxisKey {
 
 #[test]
 fn assemble_cartesian_state_corexy_inverts_motor_frame() {
+    use crate::kinematics::KinematicsKind;
     use crate::kinematics::KinematicsModule;
     use crate::motion_history::{AxisState, assemble_cartesian_state};
-    use runtime::segment::KinematicTag;
 
     let expected_x = 10.0;
     let expected_y = 4.0;
@@ -607,7 +607,7 @@ fn assemble_cartesian_state_corexy_inverts_motor_frame() {
         }),
         None,
     ];
-    let kin = KinematicsModule::from_tag(KinematicTag::CoreXy as u8).unwrap();
+    let kin = KinematicsModule::from_tag(KinematicsKind::CoreXy as u8).unwrap();
     let out = assemble_cartesian_state(motor_state, &kin);
     assert!(
         (out["x"].0 - expected_x).abs() < 1e-9,
@@ -625,9 +625,9 @@ fn assemble_cartesian_state_corexy_inverts_motor_frame() {
 
 #[test]
 fn assemble_cartesian_state_cartesian_is_passthrough() {
+    use crate::kinematics::KinematicsKind;
     use crate::kinematics::KinematicsModule;
     use crate::motion_history::{AxisState, assemble_cartesian_state};
-    use runtime::segment::KinematicTag;
 
     let motor_state = [
         Some(AxisState {
@@ -651,7 +651,7 @@ fn assemble_cartesian_state_cartesian_is_passthrough() {
             acceleration: 0.0,
         }),
     ];
-    let kin = KinematicsModule::from_tag(KinematicTag::Cartesian as u8).unwrap();
+    let kin = KinematicsModule::from_tag(KinematicsKind::Cartesian as u8).unwrap();
     let out = assemble_cartesian_state(motor_state, &kin);
     assert_eq!(out["x"], (10.0, 1.0, 0.1));
     assert_eq!(out["y"], (20.0, -1.0, 0.2));
@@ -661,9 +661,9 @@ fn assemble_cartesian_state_cartesian_is_passthrough() {
 
 #[test]
 fn assemble_cartesian_state_corexy_omits_xy_when_one_motor_missing() {
+    use crate::kinematics::KinematicsKind;
     use crate::kinematics::KinematicsModule;
     use crate::motion_history::{AxisState, assemble_cartesian_state};
-    use runtime::segment::KinematicTag;
 
     // Only motor0 resolved; motor1's history is unanswerable. Reporting x/y
     // from a single motor would silently invent a position the axis never
@@ -682,7 +682,7 @@ fn assemble_cartesian_state_corexy_omits_xy_when_one_motor_missing() {
         }),
         None,
     ];
-    let kin = KinematicsModule::from_tag(KinematicTag::CoreXy as u8).unwrap();
+    let kin = KinematicsModule::from_tag(KinematicsKind::CoreXy as u8).unwrap();
     let out = assemble_cartesian_state(motor_state, &kin);
     assert!(!out.contains_key("x"));
     assert!(!out.contains_key("y"));
@@ -692,12 +692,12 @@ fn assemble_cartesian_state_corexy_omits_xy_when_one_motor_missing() {
 #[test]
 fn corexy_history_round_trip_reproduces_bench_symptom() {
     // Reproduces the trident-bench beacon scan: motor0/motor1 spans recorded
-    // through the ring (as commit_sent_bundle does) must invert to the
+    // through the ring (as commit_accepted_bundle does) must invert to the
     // commanded cartesian XY, not the raw CoreXY A/B sum/difference that
     // motion_state_at_clock used to leak straight through.
+    use crate::kinematics::KinematicsKind;
     use crate::kinematics::KinematicsModule;
     use crate::motion_history::assemble_cartesian_state;
-    use runtime::segment::KinematicTag;
 
     let cart_x0 = 25.0;
     let cart_y0 = 25.0;
@@ -722,7 +722,7 @@ fn corexy_history_round_trip_reproduces_bench_symptom() {
             .state_at_host(axis_key(axis), mid, Some(f64::INFINITY))
             .ok();
     }
-    let kin = KinematicsModule::from_tag(KinematicTag::CoreXy as u8).unwrap();
+    let kin = KinematicsModule::from_tag(KinematicsKind::CoreXy as u8).unwrap();
     let out = assemble_cartesian_state(motor_state, &kin);
 
     let expected_x = (cart_x0 + cart_x1) / 2.0;
@@ -749,17 +749,20 @@ fn rebase_after_probe_trip_round_trips_through_cartesian_inversion() {
     // through assemble_cartesian_state's kinematics inversion afterward
     // double-transformed an already-correct position into garbage (the
     // bench's "probe at 197.500,-47.500" from a real (150,245) point).
+    use crate::kinematics::KinematicsKind;
     use crate::kinematics::KinematicsModule;
-    use crate::mcu_config::{McuAxisConfig, reanchor_axis_targets};
+    use crate::mcu_config::{McuAxisConfig, McuHardware, reanchor_axis_targets};
     use crate::motion_history::assemble_cartesian_state;
-    use runtime::segment::KinematicTag;
 
     let configs = vec![McuAxisConfig {
         ethercat: false,
-        max_motor_velocity: Vec::new(),
         mcu_id: 1,
         axes: vec![0, 1, 2],
-        kinematics: KinematicTag::CoreXy as u8,
+        hw: McuHardware {
+            max_motor_velocity: Vec::new(),
+            kinematics: KinematicsKind::CoreXy as u8,
+            ..Default::default()
+        },
         ..Default::default()
     }];
     let cart_x = 150.0;
@@ -779,7 +782,7 @@ fn rebase_after_probe_trip_round_trips_through_cartesian_inversion() {
             .state_at_host(AxisKey { mcu_id: 1, axis }, 0.0, Some(f64::INFINITY))
             .ok();
     }
-    let kin = KinematicsModule::from_tag(KinematicTag::CoreXy as u8).unwrap();
+    let kin = KinematicsModule::from_tag(KinematicsKind::CoreXy as u8).unwrap();
     let out = assemble_cartesian_state(motor_state, &kin);
 
     assert!(
@@ -798,7 +801,7 @@ fn rebase_after_probe_trip_round_trips_through_cartesian_inversion() {
 #[test]
 fn host_clock_round_trip_is_identity() {
     let router = stub_router_two_mcus();
-    let h = crate::types::mcu_handle_from_raw(1);
+    let h = McuHandle::from_raw(1);
     let clock = 12_345_678_u64;
     let host = router.clock_to_host_secs(h, clock).expect("synced mcu");
     let back = router

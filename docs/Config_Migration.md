@@ -1,6 +1,6 @@
 # Migrating a printer configuration
 
-This guide covers the configuration changes required to run a mainline Klipper/Kalico printer configuration on this fork. The motion planner was replaced with a Rust jerk-limited streaming planner. Its motion topology is declared explicitly with `[kinematics]`, `[motor <name>]`, `[axis <name>]`, and `[post_processor <name>]` sections.
+This guide covers the configuration changes required to run a mainline Klipper/Kalico printer configuration on this fork. The motion planner was replaced with a Rust streaming planner. Its motion topology is declared explicitly with `[kinematics]`, `[motor <name>]`, `[axis <name>]`, and `[post_processor <name>]` sections.
 
 The old role-encoded `[stepper_x]`, `[stepper_y]`, and similar sections are rejected. `[printer] kinematics` is also rejected. A configuration with either form must be converted rather than carried forward.
 
@@ -215,12 +215,10 @@ endstop_pin: tmc2209_stepper_x:virtual_endstop   # mainline, on [stepper_x]
 endstop_pin: tmc2209_a_motor:virtual_endstop     # fork, on [axis x]
 ```
 
-`use_sensorless_homing` still defaults to true when the endstop is
-virtual, and the homing keys it interacts with — `homing_retract_dist`,
-`homing_retract_speed`, `min_home_dist`, `homing_positive_dir`,
-`second_homing_speed` — all belong on `[axis <name>]`. Putting any of
-them on a `[motor <name>]` is rejected with a message naming the axis
-they belong to.
+The homing keys — `homing_retract_dist`, `homing_retract_speed`,
+`min_home_dist`, `homing_positive_dir` — all belong on `[axis <name>]`.
+Putting any of them on a `[motor <name>]` is rejected with a message
+naming the axis they belong to.
 
 ## Option mapping
 
@@ -231,7 +229,7 @@ they belong to.
 | `[printer] max_z_velocity` | `[printer] max_z_velocity` (must be `<= max_velocity`) |
 | `[printer] max_z_accel` | `[printer] max_z_accel` (must be `<= max_accel`) |
 | `[printer] square_corner_velocity` | Still accepted as a legacy alias. The canonical option is `[printer] corner_deviation` (= `scv² · (√2 − 1) / max_accel`). Set exactly one. |
-| `[printer] max_jerk` | `[printer] max_jerk` |
+| `[printer] max_jerk` | Still parsed, but only `max_jerk: 0` (unlimited) is accepted; a finite jerk limit is rejected at config load. |
 | `[printer] max_path_deviation` | Same option; fitter path-deviation tolerance. |
 | `[printer] max_accel_deviation` | Same option; fitter acceleration-deviation tolerance. |
 | `[extruder] max_extrude_only_velocity` | Same option. |

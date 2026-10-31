@@ -7,7 +7,7 @@
 
 use motion_core::classify::build_move;
 use motion_core::enqueue::{EnqueueCtx, enqueue_segment};
-use motion_core::mcu_config::McuAxisConfig;
+use motion_core::mcu_config::{McuAxisConfig, McuHardware};
 use motion_core::seam_test_harness::{collect_shaped_segments_from_script, default_stream_config};
 use motion_pipeline::{Control, StreamInput};
 use std::collections::BTreeMap;
@@ -141,8 +141,11 @@ fn corexy_lane_spans(segs: &[ContinuousSegment]) -> BTreeMap<u8, Vec<ClockedMoto
         ethercat: false,
         mcu_id: 0,
         axes: vec![0, 1],
-        kinematics: 0,
-        max_motor_velocity: vec![f64::INFINITY; 2],
+        hw: McuHardware {
+            kinematics: 0,
+            max_motor_velocity: vec![f64::INFINITY; 2],
+            ..Default::default()
+        },
         ..Default::default()
     }];
     let mut lanes: BTreeMap<u8, Vec<ClockedMotorSpan>> = BTreeMap::new();

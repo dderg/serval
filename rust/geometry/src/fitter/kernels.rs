@@ -13,7 +13,7 @@ mod follower;
 pub(super) use circle::arc_candidate;
 #[cfg(test)]
 pub(super) use circle::center_through_endpoints;
-pub(super) use ease::{ease_run, neighbor};
+pub(super) use ease::{RunEnd, ease_run, neighbor};
 pub(super) use follower::arc_len;
 
 const ANGLE_EPS_RAD: f64 = 1e-9;
@@ -77,15 +77,28 @@ pub(super) fn reconstruct(
     let last = lines[lines.len() - 1];
     let p0 = lines[0].start;
     let p1 = last.point_at(last.s_len());
-    let welded =
-        |travel_len: Option<f64>| travel_len.is_some_and(|len| len > fit.residual + BUDGET_EPS_MM);
-    let head_welded = welded(head_travel_len);
-    let tail_welded = welded(tail_travel_len);
-    let anchored = match (head_welded, tail_welded) {
-        (true, true) => Some((fit.origin, fit.radius)),
-        (false, true) => circle::center_through_vertex(p0, fit.origin, fit.radius),
-        (true, false) => circle::center_through_vertex(p1, fit.origin, fit.radius),
-        (false, false) => circle::center_through_endpoints(p0, p1, fit.origin, plane_normal),
+    let welded = |travel_len: Option<f64>| {
+        if travel_len.is_some_and(|len| len > fit.residual + BUDGET_EPS_MM) {
+            EndAnchor::Welded
+        } else {
+            EndAnchor::Bound
+        }
+    };
+    let anchors = EndAnchors {
+        head: welded(head_travel_len),
+        tail: welded(tail_travel_len),
+    };
+    let anchored = match (anchors.head, anchors.tail) {
+        (EndAnchor::Welded, EndAnchor::Welded) => Some((fit.origin, fit.radius)),
+        (EndAnchor::Bound, EndAnchor::Welded) => {
+            circle::center_through_vertex(p0, fit.origin, fit.radius)
+        }
+        (EndAnchor::Welded, EndAnchor::Bound) => {
+            circle::center_through_vertex(p1, fit.origin, fit.radius)
+        }
+        (EndAnchor::Bound, EndAnchor::Bound) => {
+            circle::center_through_endpoints(p0, p1, fit.origin, plane_normal)
+        }
     };
     let Some((origin, rho)) = anchored else {
         return Ok(None);
@@ -93,9 +106,7 @@ pub(super) fn reconstruct(
     if circle::max_radial_dev(&lines, origin, rho) > tol {
         return Ok(None);
     }
-    let Some(plane_normal) =
-        anchored_plane_normal(plane_normal, origin, p0, p1, head_welded, tail_welded)
-    else {
+    let Some(plane_normal) = anchored_plane_normal(plane_normal, origin, p0, p1, anchors) else {
         return Ok(None);
     };
 
@@ -109,7 +120,7 @@ pub(super) fn reconstruct(
         sweep += libm::atan2(dot(cross(prev, cur), plane_normal), dot(prev, cur));
         prev = cur;
     }
-    if !tail_welded {
+    if anchors.tail == EndAnchor::Bound {
         let r1 = sub(p1, origin);
         let theta = libm::atan2(dot(r1, v), dot(r1, u));
         let tau = 2.0 * std::f64::consts::PI;
@@ -140,23 +151,36 @@ pub(super) fn reconstruct(
 
 const PLANE_TILT_COS_MIN: f64 = 1.0 - 1e-6;
 
+/// Whether a run end keeps the least-squares circle (its neighbor travel
+/// absorbs the weld) or anchors it through the boundary vertex.
+#[derive(Clone, Copy, PartialEq)]
+enum EndAnchor {
+    Welded,
+    Bound,
+}
+
+#[derive(Clone, Copy)]
+struct EndAnchors {
+    head: EndAnchor,
+    tail: EndAnchor,
+}
+
 fn anchored_plane_normal(
     n: [f64; 3],
     origin: [f64; 3],
     p0: [f64; 3],
     p1: [f64; 3],
-    head_welded: bool,
-    tail_welded: bool,
+    anchors: EndAnchors,
 ) -> Option<[f64; 3]> {
     let reject = |r: [f64; 3]| {
         let rr = normalize(r);
         normalize(sub(n, scale(rr, dot(n, rr))))
     };
-    let candidate = match (head_welded, tail_welded) {
-        (true, true) => return Some(n),
-        (true, false) => reject(sub(p1, origin)),
-        (false, true) => reject(sub(p0, origin)),
-        (false, false) => {
+    let candidate = match (anchors.head, anchors.tail) {
+        (EndAnchor::Welded, EndAnchor::Welded) => return Some(n),
+        (EndAnchor::Welded, EndAnchor::Bound) => reject(sub(p1, origin)),
+        (EndAnchor::Bound, EndAnchor::Welded) => reject(sub(p0, origin)),
+        (EndAnchor::Bound, EndAnchor::Bound) => {
             let c = cross(sub(p0, origin), sub(p1, origin));
             if norm(c) == 0.0 {
                 return None;

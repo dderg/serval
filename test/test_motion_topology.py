@@ -8,6 +8,7 @@ from fakes import (
     FakeStepper,
 )
 
+from klippy import motion_setup
 from klippy.mcu import STEPCOMPRESS_MAX_ERROR_DEFAULT
 from klippy.motion import Motion
 from klippy.motion_kinematics import _LinearKinematics
@@ -44,7 +45,6 @@ def pulse_topology(handle, axes, kin, move_queue_slots=0, max_error=0.0):
 class FakeKin(FakeKinBase):
     coupled_xy = _LinearKinematics.coupled_xy
     mcu_tag = _LinearKinematics.mcu_tag
-    claimed_axes = _LinearKinematics.claimed_axes
 
     def __init__(self, kind, lane_handles):
         lanes = [
@@ -93,9 +93,9 @@ def make_motion(kind, lane_handles, follower=None, fm_present=True):
 
 def test_one_mcu_corexy_topology():
     motion = make_motion("corexy", SPATIAL_AXES, follower=("e", "extruder", 11))
-    a2h = motion._build_axis_to_handle()
+    a2h = motion_setup.build_axis_to_handle(motion)
     assert a2h == {0: 11, 1: 11, 2: 11, 3: 11}
-    assert motion._derive_mcu_topology(a2h) == [
+    assert motion_setup.derive_mcu_topology(motion, a2h) == [
         pulse_topology(11, [0, 1, 2, 3], 0)
     ]
 
@@ -103,7 +103,9 @@ def test_one_mcu_corexy_topology():
 def test_high_precision_step_compress_is_opted_in_per_motor():
     motion = make_motion("corexy", SPATIAL_AXES)
     motion.kin.rails[0].get_steppers()[0].high_precision_step_compress = True
-    topology = motion._derive_mcu_topology(motion._build_axis_to_handle())
+    topology = motion_setup.derive_mcu_topology(
+        motion, motion_setup.build_axis_to_handle(motion)
+    )
     expected = list(pulse_topology(11, [0, 1, 2], 0))
     expected[11] = [True, False, False]
     assert topology == [tuple(expected)]
@@ -112,15 +114,15 @@ def test_high_precision_step_compress_is_opted_in_per_motor():
 def test_two_mcu_corexy_topology():
     lanes = [("x", 100), ("y", 100), ("z", 200)]
     motion = make_motion("corexy", lanes, follower=("e", "extruder", 200))
-    a2h = motion._build_axis_to_handle()
+    a2h = motion_setup.build_axis_to_handle(motion)
     assert a2h == {0: 100, 1: 100, 2: 200, 3: 200}
-    assert motion._derive_mcu_topology(a2h) == [
+    assert motion_setup.derive_mcu_topology(motion, a2h) == [
         pulse_topology(100, [0, 1], 0),
         pulse_topology(200, [2, 3], 1),
     ]
 
 
-def test_init_planner_records_axis_mcu_ownership():
+def test_init_planner_records_axis_mcu_ownership(monkeypatch):
     motion = make_motion(
         "corexy",
         [("x", 100), ("y", 100), ("z", 200)],
@@ -138,10 +140,14 @@ def test_init_planner_records_axis_mcu_ownership():
     motion.printer.lookup_objects = lambda module=None: (
         [("mcu", primary), ("toolboard", toolboard)] if module == "mcu" else []
     )
-    motion._configure_axes_per_mcu = lambda engine_mcus: None
     motion._register_engine_wakeup = lambda: None
+    monkeypatch.setattr(
+        motion_setup,
+        "configure_axes_per_mcu",
+        lambda motion, engine_mcus: None,
+    )
 
-    motion._init_planner()
+    motion_setup.init_planner(motion)
 
     assert motion.get_axis_mcu("x") is primary
     assert motion.get_axis_mcu("y") is primary
@@ -153,8 +159,8 @@ def test_cartesian_topology_tag_is_cartesian():
     motion = make_motion(
         "cartesian", SPATIAL_AXES, follower=("e", "extruder", 11)
     )
-    a2h = motion._build_axis_to_handle()
-    assert motion._derive_mcu_topology(a2h) == [
+    a2h = motion_setup.build_axis_to_handle(motion)
+    assert motion_setup.derive_mcu_topology(motion, a2h) == [
         pulse_topology(11, [0, 1, 2, 3], 1)
     ]
 
@@ -163,9 +169,9 @@ def test_follower_slot_sourced_from_force_move_extruder():
     motion = make_motion(
         "cartesian", SPATIAL_AXES, follower=("e", "extruder", 42)
     )
-    a2h = motion._build_axis_to_handle()
+    a2h = motion_setup.build_axis_to_handle(motion)
     assert a2h[3] == 42
-    slot_steppers = motion._build_slot_steppers()
+    slot_steppers = motion_setup.build_slot_steppers(motion)
     assert [name for name, _ in slot_steppers[3]] == ["extruder"]
 
 
@@ -181,7 +187,7 @@ def test_follower_declared_before_spatial_axes_does_not_clobber_lane_slot():
     fm = FakeForceMove({"extruder": FakeStepper(name="extruder", handle=11)})
     motion.printer = FakePrinter(objects={"force_move": fm})
 
-    slot_steppers = motion._build_slot_steppers()
+    slot_steppers = motion_setup.build_slot_steppers(motion)
 
     assert [name for name, _ in slot_steppers[0]] == ["stepper_x"]
 
@@ -206,10 +212,10 @@ def _motion_with_follower_first(follower_handle):
 
 
 def test_follower_declared_before_spatial_axes_maps_handle_to_free_slot():
-    # _build_axis_to_handle must agree with _build_slot_steppers: a follower
+    # build_axis_to_handle must agree with build_slot_steppers: a follower
     # declared first lands in the free slot (3), not lane slot 0.
     motion = _motion_with_follower_first(42)
-    a2h = motion._build_axis_to_handle()
+    a2h = motion_setup.build_axis_to_handle(motion)
     assert a2h == {0: 11, 1: 11, 2: 11, 3: 42}
 
 
@@ -224,7 +230,7 @@ class CaptureEngine:
         }
 
 
-def test_init_planner_passes_config_text_and_topology():
+def test_init_planner_passes_config_text_and_topology(monkeypatch):
     motion = make_motion("corexy", SPATIAL_AXES, follower=("e", "extruder", 11))
     motion._motion_config_text = (
         "[printer]\nmax_velocity: 300\nmax_accel: 3000\n"
@@ -241,10 +247,14 @@ def test_init_planner_passes_config_text_and_topology():
         return []
 
     motion.printer.lookup_objects = lookup_objects
-    motion._configure_axes_per_mcu = lambda engine_mcus: None
     motion._register_engine_wakeup = lambda: None
+    monkeypatch.setattr(
+        motion_setup,
+        "configure_axes_per_mcu",
+        lambda motion, engine_mcus: None,
+    )
 
-    motion._init_planner()
+    motion_setup.init_planner(motion)
     assert engine.init_planner_args["config_text"] == motion._motion_config_text
     assert engine.init_planner_args["topology"] == [
         pulse_topology(

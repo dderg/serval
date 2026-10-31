@@ -39,6 +39,25 @@ pub fn monotonic_raw_secs() -> f64 {
     }
 }
 
+/// CLOCK_MONOTONIC_RAW in nanoseconds — the domain the EtherCAT endpoint
+/// stamps its grid clocks in, so host seeds pair with endpoint clocks exactly.
+pub fn monotonic_raw_ns() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: clock_gettime is a safe POSIX syscall; we only read the result.
+        #[allow(unsafe_code)]
+        unsafe {
+            let mut ts: libc::timespec = std::mem::zeroed();
+            libc::clock_gettime(libc::CLOCK_MONOTONIC_RAW, &mut ts);
+            ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        (monotonic_raw_secs() * 1e9) as u64
+    }
+}
+
 /// Convert an `Instant` to seconds relative to a stable process-lifetime anchor.
 ///
 /// The anchor is initialised on first call and shared across all callers in the

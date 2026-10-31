@@ -3,6 +3,19 @@ use super::*;
 const CYCLE_NS: i64 = 250_000;
 const CYCLE_S: f64 = 250e-6;
 
+fn pair(a: u8, b: u8) -> SlotPair {
+    SlotPair { a, b }
+}
+
+fn gains(gain_milli: u32, clamp_tenths: u16, lpf_millihz: u32, lead_us: u16) -> DamperGains {
+    DamperGains {
+        gain_milli,
+        clamp_tenths,
+        lpf_millihz,
+        lead_us,
+    }
+}
+
 fn armed_bank(gain_milli: u32, clamp_tenths: u16, lpf_millihz: u32) -> DiffDamperBank {
     armed_bank_with_lead(gain_milli, clamp_tenths, lpf_millihz, 0)
 }
@@ -15,7 +28,11 @@ fn armed_bank_with_lead(
 ) -> DiffDamperBank {
     let mut bank = DiffDamperBank::new(CYCLE_NS);
     assert_eq!(
-        bank.set(4, 0, 1, gain_milli, clamp_tenths, lpf_millihz, lead_us),
+        bank.set(
+            4,
+            pair(0, 1),
+            gains(gain_milli, clamp_tenths, lpf_millihz, lead_us)
+        ),
         0
     );
     bank
@@ -39,26 +56,50 @@ fn settle(bank: &mut DiffDamperBank, vel_mm_s: &[f64], cycles: usize) -> Vec<f32
 #[test]
 fn set_rejects_bad_slots() {
     let mut bank = DiffDamperBank::new(CYCLE_NS);
-    assert_eq!(bank.set(4, 2, 2, 1000, 50, 300_000, 0), ERR_DAMPER_BAD_SLOT);
-    assert_eq!(bank.set(4, 0, 4, 1000, 50, 300_000, 0), ERR_DAMPER_BAD_SLOT);
+    assert_eq!(
+        bank.set(4, pair(2, 2), gains(1000, 50, 300_000, 0)),
+        ERR_DAMPER_BAD_SLOT
+    );
+    assert_eq!(
+        bank.set(4, pair(0, 4), gains(1000, 50, 300_000, 0)),
+        ERR_DAMPER_BAD_SLOT
+    );
     assert!(!bank.active());
 }
 
 #[test]
 fn set_rejects_bad_clamp_lpf_and_lead() {
     let mut bank = DiffDamperBank::new(CYCLE_NS);
-    assert_eq!(bank.set(4, 0, 1, 1000, 0, 300_000, 0), ERR_DAMPER_BAD_CLAMP);
     assert_eq!(
-        bank.set(4, 0, 1, 1000, MAX_DAMPER_CLAMP_TENTHS + 1, 300_000, 0),
+        bank.set(4, pair(0, 1), gains(1000, 0, 300_000, 0)),
         ERR_DAMPER_BAD_CLAMP
     );
-    assert_eq!(bank.set(4, 0, 1, 1000, 50, 500, 0), ERR_DAMPER_BAD_LPF);
     assert_eq!(
-        bank.set(4, 0, 1, 1000, 50, MAX_DAMPER_LPF_MILLIHZ + 1, 0),
+        bank.set(
+            4,
+            pair(0, 1),
+            gains(1000, MAX_DAMPER_CLAMP_TENTHS + 1, 300_000, 0)
+        ),
+        ERR_DAMPER_BAD_CLAMP
+    );
+    assert_eq!(
+        bank.set(4, pair(0, 1), gains(1000, 50, 500, 0)),
         ERR_DAMPER_BAD_LPF
     );
     assert_eq!(
-        bank.set(4, 0, 1, 1000, 50, 300_000, MAX_DAMPER_LEAD_US + 1),
+        bank.set(
+            4,
+            pair(0, 1),
+            gains(1000, 50, MAX_DAMPER_LPF_MILLIHZ + 1, 0)
+        ),
+        ERR_DAMPER_BAD_LPF
+    );
+    assert_eq!(
+        bank.set(
+            4,
+            pair(0, 1),
+            gains(1000, 50, 300_000, MAX_DAMPER_LEAD_US + 1)
+        ),
         ERR_DAMPER_BAD_LEAD
     );
     assert!(!bank.active());
@@ -68,16 +109,16 @@ fn set_rejects_bad_clamp_lpf_and_lead() {
 fn set_rejects_slot_shared_with_another_pair() {
     let mut bank = armed_bank(1000, 50, 300_000);
     assert_eq!(
-        bank.set(4, 1, 2, 1000, 50, 300_000, 0),
+        bank.set(4, pair(1, 2), gains(1000, 50, 300_000, 0)),
         ERR_DAMPER_SLOT_IN_USE
     );
-    assert_eq!(bank.set(4, 2, 3, 1000, 50, 300_000, 0), 0);
+    assert_eq!(bank.set(4, pair(2, 3), gains(1000, 50, 300_000, 0)), 0);
 }
 
 #[test]
 fn set_replaces_the_same_pair_in_either_slot_order() {
     let mut bank = armed_bank(1000, 50, 300_000);
-    assert_eq!(bank.set(4, 1, 0, 2000, 50, 300_000, 0), 0);
+    assert_eq!(bank.set(4, pair(1, 0), gains(2000, 50, 300_000, 0)), 0);
     let out = settle(&mut bank, &[1.0, -1.0, 0.0, 0.0], 4000);
     assert!(
         (f64::from(out[1]) - 4.0).abs() < 0.05,
@@ -88,7 +129,7 @@ fn set_replaces_the_same_pair_in_either_slot_order() {
 #[test]
 fn zero_gain_disarms_the_pair() {
     let mut bank = armed_bank(1000, 50, 300_000);
-    assert_eq!(bank.set(4, 1, 0, 0, 0, 0, 0), 0);
+    assert_eq!(bank.set(4, pair(1, 0), gains(0, 0, 0, 0)), 0);
     assert!(!bank.active());
 }
 

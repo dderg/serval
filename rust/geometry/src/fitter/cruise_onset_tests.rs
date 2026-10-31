@@ -1,5 +1,5 @@
 use super::fit_corners;
-use crate::velocity::plan_velocity_warm_start;
+use crate::velocity::{plan_velocity_warm_start, warm_start_params};
 use crate::{CornerFitConfig, Move, MoveContext, SourceRange, VelocityLimits, line_move};
 
 const MAX_V: f64 = 100.0;
@@ -39,14 +39,7 @@ fn run_samples(max_v: f64, accel: f64, waypoints: &[[f64; 3]]) -> Vec<Sample> {
         .map(|(i, w)| line_move(w[0], w[1], 0.0, ctx(max_v, accel, i as u32)).unwrap())
         .collect();
     let outcome = fit_corners(&moves, CornerFitConfig::default()).unwrap();
-    let profile = plan_velocity_warm_start(
-        &outcome,
-        1e-7,
-        f64::INFINITY,
-        f64::INFINITY,
-        crate::velocity::BoundaryState::REST,
-    )
-    .unwrap();
+    let profile = plan_velocity_warm_start(&outcome, warm_start_params(1e-7)).unwrap();
     let mut out = Vec::new();
     let mut s_off = 0.0;
     for m in &profile.moves {

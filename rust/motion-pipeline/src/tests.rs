@@ -1,8 +1,8 @@
+use crate::lowering::FitTol;
 use crate::types::*;
 use crate::*;
-use crossbeam_channel::unbounded;
 use geometry::segment::SourceRange;
-use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
+use geometry::{CornerFitConfig, MeshGridSpec, MoveContext, VelocityLimits, line_move};
 use nurbs::eval::eval;
 use std::sync::Arc;
 
@@ -151,11 +151,6 @@ fn line_bench(line_no: u32, start: [f64; 3], end: [f64; 3]) -> geometry::Move {
     line_move(start, end, 0.0, ctx).unwrap()
 }
 
-/// Deterministic synchronous replay: each stage runs to completion over a
-/// pre-filled, closed channel, so no stage ever observes a transient-empty
-/// input. The output is the full-look-ahead trajectory with exactly one
-/// terminal brake-to-rest — the reference the live threaded pipeline
-/// approaches as backpressure keeps its channels full.
 fn replay(
     config: StreamConfig,
     chains: AxisChainSet,
@@ -187,32 +182,17 @@ fn replay_stream(
     t_start: f64,
     items: Vec<StreamInput>,
 ) -> Vec<TrajectoryItem> {
-    let (raw_tx, raw_rx) = unbounded();
+    let mut pipeline = Pipeline::new(config, chains, home.to_vec(), t_start);
+    let mut out = Vec::new();
+    let mut collect = |item| {
+        out.push(item);
+        true
+    };
     for item in items {
-        raw_tx.send(item).unwrap();
+        assert!(pipeline.feed(item, &mut collect));
     }
-    drop(raw_tx);
-
-    let (fitted_tx, fitted_rx) = unbounded();
-    FitStage::new(config.corner).run(raw_rx, fitted_tx);
-
-    let (planned_tx, planned_rx) = unbounded();
-    Planner::new(config).run(fitted_rx, planned_tx);
-
-    let fit_tol = fit_tol(config);
-    let (lowered_tx, lowered_rx) = unbounded();
-    run_lowerer(
-        planned_rx,
-        lowered_tx,
-        chains.clone(),
-        home.to_vec(),
-        t_start,
-    );
-
-    let (shaped_tx, shaped_rx) = unbounded();
-    Shaper::new(chains, fit_tol).run(lowered_rx, shaped_tx);
-
-    shaped_rx.into_iter().collect()
+    assert!(pipeline.finish(&mut collect));
+    out
 }
 
 fn boundary_speed(prev: &ContinuousSegment, next: &ContinuousSegment) -> f64 {
@@ -404,7 +384,7 @@ fn cold_run_infill_replays_without_overcommit() {
     let mut moves = Vec::new();
     for (i, (x, y)) in pts.into_iter().enumerate() {
         let end = [x, y, 0.0];
-        if dist3(prev, end) < 1e-9 {
+        if geometry::vec3::dist(prev, end) < 1e-9 {
             continue;
         }
         moves.push(line_bench(i as u32 + 1, prev, end));
@@ -766,9 +746,9 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
     let shaped = &shaped[1..shaped.len() - 1];
 
     let oracle_chains = smooth_x_chains(0.044583333333333336);
-    let trajectory::ChainStage::SmoothKernel(kernel) = &oracle_chains.chains[0].stages[0] else {
-        panic!("expected smooth kernel");
-    };
+    let kernel = oracle_chains.chains[0]
+        .kernel()
+        .expect("expected smooth kernel");
     let first = base.first().unwrap().t_start;
     let last = base.last().unwrap().t_end;
     let input_degree = base
@@ -855,10 +835,12 @@ impl MomentSamplerInput {
         breaks.extend_from_slice(second_track.knots());
         let signal_degree = crate::shaper::AxisSignalTable::from_tracks(
             [&first_track, &second_track],
-            first_t,
-            last_t,
-            true,
-            true,
+            crate::shaper::SignalBounds {
+                first_t,
+                last_t,
+                boundary: crate::shaper::FitBoundary::StreamBoundary,
+                lookahead: crate::shaper::Lookahead::Forced,
+            },
         )
         .max_degree();
         Self {
@@ -875,10 +857,12 @@ impl MomentSamplerInput {
     fn table(&self) -> crate::shaper::AxisSignalTable {
         crate::shaper::AxisSignalTable::from_tracks(
             [&self.tracks[0], &self.tracks[1]],
-            self.first_t,
-            self.last_t,
-            true,
-            true,
+            crate::shaper::SignalBounds {
+                first_t: self.first_t,
+                last_t: self.last_t,
+                boundary: crate::shaper::FitBoundary::StreamBoundary,
+                lookahead: crate::shaper::Lookahead::Forced,
+            },
         )
     }
 
@@ -971,8 +955,16 @@ fn moment_convolution_preserves_position_and_slope_jump_derivatives() {
             },
         ]);
         let table = std::rc::Rc::new(
-            crate::shaper::AxisSignalTable::from_tracks([&track], -4.0, 4.0, true, true)
-                .with_piece_moments(4),
+            crate::shaper::AxisSignalTable::from_tracks(
+                [&track],
+                crate::shaper::SignalBounds {
+                    first_t: -4.0,
+                    last_t: 4.0,
+                    boundary: crate::shaper::FitBoundary::StreamBoundary,
+                    lookahead: crate::shaper::Lookahead::Forced,
+                },
+            )
+            .with_piece_moments(4),
         );
         let input_jumps = table.input_jumps().to_vec();
         let moments = std::rc::Rc::clone(&table);
@@ -1121,21 +1113,18 @@ fn smooth_shaper_second_batch_window_before_stream_start_clamps() {
         rest_at_end: true,
     };
 
-    let (lowered_tx, lowered_rx) = unbounded();
+    let mut lowered = Vec::new();
     for i in 0..8 {
         let (a, b) = (i as f64, (i + 1) as f64);
-        lowered_tx
-            .send(BaseItem::Seg(BaseSegment {
-                segment: constant_seg(a.mul_add(step, t0), b.mul_add(step, t0)),
-            }))
-            .unwrap();
+        lowered.push(BaseItem::Seg(constant_seg(
+            a.mul_add(step, t0),
+            b.mul_add(step, t0),
+        )));
     }
-    drop(lowered_tx);
 
-    let (shaped_tx, shaped_rx) = unbounded();
-    Shaper::new(chains, fit_tol(cfg())).run(lowered_rx, shaped_tx);
+    let shaped = shape_one_at_a_time(chains, fit_tol(cfg()), lowered);
 
-    let segs: Vec<ContinuousSegment> = shaped_rx
+    let segs: Vec<ContinuousSegment> = shaped
         .into_iter()
         .filter_map(|item| match item {
             TrajectoryItem::Seg(seg) => Some(seg),
@@ -1279,25 +1268,11 @@ fn replay_inputs(
     home: &[f64],
     inputs: Vec<StreamInput>,
 ) -> Vec<ContinuousSegment> {
-    let (raw_tx, raw_rx) = unbounded();
-    for item in inputs {
-        raw_tx.send(item).unwrap();
-    }
-    drop(raw_tx);
-    let (fitted_tx, fitted_rx) = unbounded();
-    FitStage::new(config.corner).run(raw_rx, fitted_tx);
-    let (planned_tx, planned_rx) = unbounded();
-    Planner::new(config).run(fitted_rx, planned_tx);
-    let fit_tol = fit_tol(config);
-    let (lowered_tx, lowered_rx) = unbounded();
-    run_lowerer(planned_rx, lowered_tx, chains.clone(), home.to_vec(), 0.0);
-    let (shaped_tx, shaped_rx) = unbounded();
-    Shaper::new(chains, fit_tol).run(lowered_rx, shaped_tx);
-    shaped_rx
+    replay_stream(config, chains, home, 0.0, inputs)
         .into_iter()
         .filter_map(|item| match item {
             TrajectoryItem::Seg(seg) => Some(seg),
-            TrajectoryItem::Parked | TrajectoryItem::Control(_) => None,
+            _ => None,
         })
         .collect()
 }
@@ -1305,7 +1280,19 @@ fn replay_inputs(
 #[test]
 fn mesh_warp_tracks_across_a_fenced_move_sequence() {
     let z = vec![0.10, 0.00, -0.10, 0.05, 0.00, -0.05, -0.10, 0.00, 0.10];
-    let mut mesh = geometry::MeshGrid::new(20.0, 20.0, 100.0, 100.0, 3, 3, z, 0.2).unwrap();
+    let mut mesh = geometry::MeshGrid::new(
+        MeshGridSpec {
+            x_min: 20.0,
+            y_min: 20.0,
+            dx: 100.0,
+            dy: 100.0,
+            nx: 3,
+            ny: 3,
+            tension: 0.2,
+        },
+        z,
+    )
+    .unwrap();
     mesh.zero_at(120.0, 120.0);
     let transform = std::sync::Arc::new(geometry::SurfaceTransform::new(
         mesh,
@@ -1364,9 +1351,19 @@ fn mesh_warp_tracks_across_a_fenced_move_sequence() {
 
 #[test]
 fn small_mesh_variations_stay_continuous_across_move_boundaries() {
-    let mut mesh =
-        geometry::MeshGrid::new(0.0, 0.0, 100.0, 100.0, 2, 2, vec![0.0, 0.1, 0.0, 0.1], 0.2)
-            .unwrap();
+    let mut mesh = geometry::MeshGrid::new(
+        MeshGridSpec {
+            x_min: 0.0,
+            y_min: 0.0,
+            dx: 100.0,
+            dy: 100.0,
+            nx: 2,
+            ny: 2,
+            tension: 0.2,
+        },
+        vec![0.0, 0.1, 0.0, 0.1],
+    )
+    .unwrap();
     mesh.zero_at(0.0, 0.0);
     let transform = std::sync::Arc::new(geometry::SurfaceTransform::new(
         mesh,
@@ -1755,24 +1752,18 @@ fn follower_frontier_waits_for_exact_kernel_lookahead() {
         source_line: 1,
         rest_at_end: false,
     };
-    let (lowered_tx, lowered_rx) = unbounded();
+    let mut lowered = Vec::new();
     for (t_start, t_end) in [
         (target_end - 0.005, target_end),
         (target_end, frontier_end),
         (frontier_end, buffered_end),
         (buffered_end, last_end),
     ] {
-        lowered_tx
-            .send(BaseItem::Seg(BaseSegment {
-                segment: segment(t_start, t_end),
-            }))
-            .unwrap();
+        lowered.push(BaseItem::Seg(segment(t_start, t_end)));
     }
-    drop(lowered_tx);
 
-    let (shaped_tx, shaped_rx) = unbounded();
-    Shaper::new(chains, fit_tol(cfg())).run(lowered_rx, shaped_tx);
-    let emitted = shaped_rx
+    let shaped = shape_one_at_a_time(chains, fit_tol(cfg()), lowered);
+    let emitted = shaped
         .into_iter()
         .filter(|item| matches!(item, TrajectoryItem::Seg(_)))
         .count();
@@ -2412,16 +2403,21 @@ fn the_ladder_fits_a_resolution_scale_span_without_high_degree_amplification() {
     );
     let attempt = crate::lowering::ladder_fit(
         &base,
-        h,
-        tolerance,
-        &truth_p,
-        &truth_a,
-        &truth_v,
-        truth_p(1.0) - truth_p(-1.0),
-        f64::INFINITY,
+        crate::lowering::LadderSpan {
+            h,
+            endpoint_delta: truth_p(1.0) - truth_p(-1.0),
+        },
+        &crate::lowering::LadderTruth {
+            position: &truth_p,
+            velocity: &truth_v,
+            acceleration: &truth_a,
+        },
+        crate::lowering::LadderBudget {
+            tol: tolerance,
+            velocity: f64::INFINITY,
+        },
         crate::lowering::LadderPolicy {
-            endpoint_anchored: true,
-            enforce_velocity_sign: true,
+            velocity_sign: crate::lowering::VelocitySign::Certified,
             acceleration_monotonicity: None,
             high_degree_span_floor: 0.0,
         },
@@ -2431,7 +2427,7 @@ fn the_ladder_fits_a_resolution_scale_span_without_high_degree_amplification() {
         Err(failure) => panic!(
             "a resolution-scale span must fit without midpoint shortcuts: u={}, \
              position error {}, acceleration error {}",
-            failure.u, failure.position_error, failure.acceleration_error
+            failure.u, failure.error.position, failure.error.acceleration
         ),
     };
     let track =
@@ -2510,16 +2506,21 @@ fn a_smooth_cusp_fits_below_the_high_degree_floor_without_bump_corrections() {
         );
         let attempt = crate::lowering::ladder_fit(
             &base,
-            h,
-            tolerance,
-            &truth_p,
-            &truth_a,
-            &truth_v,
-            truth_p(1.0) - truth_p(-1.0),
-            f64::INFINITY,
+            crate::lowering::LadderSpan {
+                h,
+                endpoint_delta: truth_p(1.0) - truth_p(-1.0),
+            },
+            &crate::lowering::LadderTruth {
+                position: &truth_p,
+                velocity: &truth_v,
+                acceleration: &truth_a,
+            },
+            crate::lowering::LadderBudget {
+                tol: tolerance,
+                velocity: f64::INFINITY,
+            },
             crate::lowering::LadderPolicy {
-                endpoint_anchored: true,
-                enforce_velocity_sign: true,
+                velocity_sign: crate::lowering::VelocitySign::Certified,
                 acceleration_monotonicity: None,
                 high_degree_span_floor,
             },
@@ -2532,7 +2533,7 @@ fn a_smooth_cusp_fits_below_the_high_degree_floor_without_bump_corrections() {
                     "the cusp must fit by the 3e-8 decade, still failing at h={h}: \
                      u={}, acceleration error {} > {}",
                     failure.u,
-                    failure.acceleration_error,
+                    failure.error.acceleration,
                     tolerance.accel_mm_s2
                 );
                 span_start = 0.5 * (span_start + span_end);
@@ -2621,16 +2622,21 @@ fn a_constant_acceleration_resolution_span_fits_the_anchored_quadratic() {
     );
     let fit = crate::lowering::ladder_fit(
         &base,
-        h,
-        tolerance,
-        &truth_p,
-        &truth_a,
-        &truth_v,
-        truth_p(1.0) - truth_p(-1.0),
-        velocity_budget,
+        crate::lowering::LadderSpan {
+            h,
+            endpoint_delta: truth_p(1.0) - truth_p(-1.0),
+        },
+        &crate::lowering::LadderTruth {
+            position: &truth_p,
+            velocity: &truth_v,
+            acceleration: &truth_a,
+        },
+        crate::lowering::LadderBudget {
+            tol: tolerance,
+            velocity: velocity_budget,
+        },
         crate::lowering::LadderPolicy {
-            endpoint_anchored: true,
-            enforce_velocity_sign: true,
+            velocity_sign: crate::lowering::VelocitySign::Certified,
             acceleration_monotonicity: None,
             high_degree_span_floor: 3.6e-7,
         },
@@ -2640,9 +2646,9 @@ fn a_constant_acceleration_resolution_span_fits_the_anchored_quadratic() {
             "a constant-acceleration resolution span must fit: u={}, position error {}, \
              velocity error {}, acceleration error {} > {}",
             failure.u,
-            failure.position_error,
-            failure.velocity_error,
-            failure.acceleration_error,
+            failure.error.position,
+            failure.error.velocity,
+            failure.error.acceleration,
             tolerance.accel_mm_s2
         )
     });
@@ -2755,16 +2761,21 @@ fn an_endpoint_anchored_fit_never_steps_the_right_seam() {
     );
     let fit = crate::lowering::ladder_fit(
         &base,
-        h,
-        tolerance,
-        &truth_p,
-        &truth_a,
-        &truth_v,
-        truth_p(1.0) - truth_p(-1.0),
-        f64::INFINITY,
+        crate::lowering::LadderSpan {
+            h,
+            endpoint_delta: truth_p(1.0) - truth_p(-1.0),
+        },
+        &crate::lowering::LadderTruth {
+            position: &truth_p,
+            velocity: &truth_v,
+            acceleration: &truth_a,
+        },
+        crate::lowering::LadderBudget {
+            tol: tolerance,
+            velocity: f64::INFINITY,
+        },
         crate::lowering::LadderPolicy {
-            endpoint_anchored: true,
-            enforce_velocity_sign: true,
+            velocity_sign: crate::lowering::VelocitySign::Certified,
             acceleration_monotonicity: None,
             high_degree_span_floor: 0.0,
         },
@@ -2772,7 +2783,7 @@ fn an_endpoint_anchored_fit_never_steps_the_right_seam() {
     .unwrap_or_else(|failure| {
         panic!(
             "a smooth jerk span must fit: u={}, position error {}, acceleration error {}",
-            failure.u, failure.position_error, failure.acceleration_error
+            failure.u, failure.error.position, failure.error.acceleration
         )
     });
     assert_eq!(
@@ -2796,14 +2807,13 @@ struct SineTrackSignal {
 }
 
 impl crate::shaper::TrackSignal for SineTrackSignal {
-    fn eval(&self, t: f64) -> f64 {
-        self.amplitude * libm::sin(self.omega * t)
-    }
-    fn deriv(&self, t: f64) -> f64 {
-        self.amplitude * self.omega * libm::cos(self.omega * t)
-    }
-    fn second_deriv(&self, t: f64) -> f64 {
-        -self.amplitude * self.omega * self.omega * libm::sin(self.omega * t)
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let sin = libm::sin(self.omega * t);
+        (
+            self.amplitude * sin,
+            self.amplitude * self.omega * libm::cos(self.omega * t),
+            -self.amplitude * self.omega * self.omega * sin,
+        )
     }
 }
 
@@ -2827,8 +2837,18 @@ fn accepted_seed_intervals_do_not_spend_the_split_budget() {
             .collect()
     };
     let fit = |t_start: f64, t_end: f64, seeds: &[f64]| {
-        crate::shaper::fit_axis_from_signal(0, t_start, t_end, seeds, &sig, tolerance, "test fit")
-            .expect("the sine track must fit")
+        crate::shaper::fit_axis_from_signal(
+            crate::shaper::AxisFit {
+                axis: 0,
+                t_start,
+                t_end,
+                seed_breakpoints: seeds,
+                fit_tol: tolerance,
+                fit_context: "test fit",
+            },
+            &sig,
+        )
+        .expect("the sine track must fit")
     };
     let pieces_in = |track: &nurbs::ScalarNurbs, from: f64, to: f64| -> usize {
         let mut boundaries: Vec<f64> = track
@@ -2935,16 +2955,17 @@ fn extruder_gain_kernel_chains(
     k2: f64,
     e_smooth_time: f64,
 ) -> AxisChainSet {
-    let kernel = e_chain(None, e_smooth_time).stages[0].clone();
+    let kernel = e_chain(None, e_smooth_time).kernel().cloned();
     let gain = trajectory::ChainStage::DerivativeGains { k1, k2 };
-    let stages = if gain_first {
-        vec![gain, kernel]
+    let placement = if gain_first {
+        trajectory::chain::TransformPlacement::BeforeKernel
     } else {
-        vec![kernel, gain]
+        trajectory::chain::TransformPlacement::AfterKernel
     };
     let mut chains =
         leader_smooth_time.map_or_else(follower_chains_without_kernels, xy_shaper_follower_chains);
-    chains.chains[3] = trajectory::CompiledChain { stages };
+    chains.chains[3] =
+        trajectory::CompiledChain::from_kernel_and_transform(kernel, Some((placement, gain)));
     chains
 }
 
@@ -3596,64 +3617,42 @@ fn lower_to_base_items(
     home: &[f64],
     items: Vec<StreamInput>,
 ) -> Vec<BaseItem> {
-    let (raw_tx, raw_rx) = unbounded();
+    let mut fit = FitStage::new(config.corner).into_driver();
+    let mut planner = Planner::new(config);
+    let mut lowerer = Lowerer::new(chains.rest_support(), home.to_vec(), 0.0);
+    let mut out = Vec::new();
+    let mut collect = |item| {
+        out.push(item);
+        true
+    };
     for item in items {
-        raw_tx.send(item).unwrap();
+        assert!(fit.feed(item, &mut |item| {
+            planner.feed(item, &mut |item| lowerer.feed(item, &mut collect))
+        }));
     }
-    drop(raw_tx);
-
-    let (fitted_tx, fitted_rx) = unbounded();
-    FitStage::new(config.corner).run(raw_rx, fitted_tx);
-
-    let (planned_tx, planned_rx) = unbounded();
-    Planner::new(config).run(fitted_rx, planned_tx);
-
-    let (lowered_tx, lowered_rx) = unbounded();
-    run_lowerer(planned_rx, lowered_tx, chains.clone(), home.to_vec(), 0.0);
-    lowered_rx.into_iter().collect()
+    assert!(
+        fit.finish(&mut |item| planner.feed(item, &mut |item| lowerer.feed(item, &mut collect)))
+    );
+    assert!(planner.finish(&mut |item| lowerer.feed(item, &mut collect)));
+    out
 }
 
-/// `Shaper::run` over a pre-filled closed channel: the loop's `try_recv`
-/// burst buffers up to `STAGE_CHANNEL_CAP` lowered segments before each emit,
-/// so every emit window covers many segments at once.
-fn shape_in_bursts(
-    chains: AxisChainSet,
-    fit_tol: FitTol,
-    items: Vec<BaseItem>,
-) -> Vec<TrajectoryItem> {
-    let (in_tx, in_rx) = unbounded();
-    for item in items {
-        in_tx.send(item).unwrap();
-    }
-    drop(in_tx);
-    let (out_tx, out_rx) = unbounded();
-    Shaper::new(chains, fit_tol).run(in_rx, out_tx);
-    out_rx.into_iter().collect()
-}
-
-/// `Shaper::feed` per item — the single-threaded host driver, which forces an
-/// emit decision after every single lowered segment.
 fn shape_one_at_a_time(
     chains: AxisChainSet,
     fit_tol: FitTol,
     items: Vec<BaseItem>,
 ) -> Vec<TrajectoryItem> {
-    let (out_tx, out_rx) = unbounded();
+    let mut out = Vec::new();
+    let mut collect = |item| {
+        out.push(item);
+        true
+    };
     let mut shaper = Shaper::new(chains, fit_tol);
     for item in items {
-        assert!(shaper.feed(item, &out_tx), "the collector never hangs up");
+        assert!(shaper.feed(item, &mut collect));
     }
-    shaper.finish(&out_tx);
-    drop(out_tx);
-    out_rx.into_iter().collect()
-}
-
-fn item_kind(item: &TrajectoryItem) -> (&'static str, f64, f64) {
-    match item {
-        TrajectoryItem::Seg(seg) => ("seg", seg.t_start, seg.t_end),
-        TrajectoryItem::Parked => ("parked", 0.0, 0.0),
-        TrajectoryItem::Control(_) => ("control", 0.0, 0.0),
-    }
+    assert!(shaper.finish(&mut collect));
+    out
 }
 
 fn trajectory_segments(items: &[TrajectoryItem]) -> Vec<&ContinuousSegment> {
@@ -3666,240 +3665,23 @@ fn trajectory_segments(items: &[TrajectoryItem]) -> Vec<&ContinuousSegment> {
         .collect()
 }
 
-/// Every knot / phase boundary the emitted tracks carry, summed over all axes
-/// — the quantity that explodes when a fit ladder bisects away or when an
-/// emit window is re-fitted per batch instead of reused.
-fn total_track_breakpoints(items: &[TrajectoryItem]) -> usize {
-    trajectory_segments(items)
-        .iter()
-        .map(|seg| {
-            seg.axes
-                .iter()
-                .map(|axis| axis_breakpoints(axis).0.len())
-                .sum::<usize>()
-        })
-        .sum()
-}
-
-const KNOT_MERGE_S: f64 = 1e-9;
-const SAMPLABLE_GAP_S: f64 = 1e-6;
-
-/// Both arms' knot times inside one segment on one axis, plus interior
-/// samples strictly inside every gap wide enough to belong to one fitted
-/// piece in both arms.
-///
-/// Knots are where a refit first shows up. Position and velocity are
-/// continuous across a fitted piece boundary, so they are comparable at the
-/// knots themselves; acceleration steps there and `eval_axis` resolves a knot
-/// to one side of the step, so two arms that partition the column differently
-/// are only comparable on acceleration away from either partition's knots —
-/// hence the gap floor, three orders of magnitude above the merge radius and
-/// two below the fitted piece spacing this fixture produces.
-fn batching_comparison_times(
-    burst: &ContinuousSegment,
-    single: &ContinuousSegment,
-    axis: usize,
-) -> (Vec<f64>, Vec<f64>) {
-    let mut knots = axis_breakpoints(&burst.axes[axis]).0;
-    knots.extend(axis_breakpoints(&single.axes[axis]).0);
-    knots.retain(|t| *t > burst.t_start && *t < burst.t_end);
-    knots.push(burst.t_start);
-    knots.push(burst.t_end);
-    knots.sort_by(f64::total_cmp);
-    knots.dedup_by(|later, earlier| *later - *earlier <= KNOT_MERGE_S);
-
-    let mut interior = Vec::with_capacity(3 * knots.len());
-    for pair in knots.windows(2) {
-        let gap = pair[1] - pair[0];
-        if gap > SAMPLABLE_GAP_S {
-            interior.extend([0.25, 0.5, 0.75].map(|fraction| pair[0] + gap * fraction));
-        }
-    }
-    (knots, interior)
-}
-
-/// Chunking the shaper's input must be a scheduling detail, never a semantic
-/// one: the burst driver and the one-item-at-a-time driver group the same
-/// lowered segments into different emit windows, and the trajectory they
-/// produce must have the same structure, the same motion, and the same
-/// fitted piece count on every axis.
-///
-/// Motion is compared at the union of both arms' knot times plus interior
-/// samples: position everywhere, acceleration strictly inside the pieces both
-/// partitions share, since a fitted piece boundary is an acceleration step.
-///
-/// The piece bound is per axis so a failure names the cache that broke. A
-/// leader axis spreading means the shaped-leader cache stopped being reused
-/// across emit windows; the follower axis spreading means its post-kernel
-/// fit is being redone over each committed prefix instead of reusing the
-/// already fitted target. The latter is what this test was written for: the
-/// follower cost 16_578 pieces bursted against 45_882 one-at-a-time, a 2.77x
-/// multiplication, while x and y were bit-identical at 1540 and 1296 and z
-/// spread 692 to 712 (2.9%) — measured before the Z column here was given
-/// the bench's own limits, which moves the counts but not the mechanism.
-///
-/// The one-at-a-time arm is the production-representative one, not a
-/// pessimistic one. The live pipeline runs `Shaper::run`, but segments
-/// trickle in rather than arriving pre-filled, so its real commits are a
-/// handful of segments: the sim-e2e run of this very sequence logged
-/// `follower_projection` at 6.7 s for a 4-segment commit and 3.3 s for a
-/// 2-segment one, pinning the shape thread until playback outran the
-/// producer and the stream died on anchor underrun. Piece count is the
-/// cause; timing is not asserted here.
-///
-/// A relative spread bound alone is satisfied by both arms becoming equally
-/// expensive, so the follower axes also carry an absolute ceiling of 30_000
-/// pieces. That number sits between the two measured populations of this
-/// fixture: healthy and burst-driven follower fits ran 16_578-21_348 pieces,
-/// while the one-at-a-time refit pathology ran 45_882-50_670. A converged
-/// pair above the ceiling is a structural regression even when the two arms
-/// agree, and the failure names every axis so the counts identify which
-/// cache stopped being reused.
 #[test]
-fn voron0_shaper_output_is_independent_of_input_batching() {
+fn voron0_follower_fit_reuses_supported_targets() {
     let config = voron0_config();
     let chains = voron0_chains();
     let (home, items) = voron0_stream();
-
-    let burst = shape_in_bursts(
-        chains.clone(),
-        fit_tol(config),
-        lower_to_base_items(config, &chains, &home, items),
-    );
-    let single = shape_one_at_a_time(
-        chains.clone(),
-        fit_tol(config),
-        lower_to_base_items(config, &chains, &home, voron0_stream().1),
-    );
-
-    let burst_segs = trajectory_segments(&burst);
-    let single_segs = trajectory_segments(&single);
-    assert!(
-        !burst_segs.is_empty(),
-        "the voron0 sequence must produce a trajectory"
-    );
-
-    let burst_kinds: Vec<_> = burst.iter().map(item_kind).collect();
-    let single_kinds: Vec<_> = single.iter().map(item_kind).collect();
-    assert_eq!(
-        burst_kinds.len(),
-        single_kinds.len(),
-        "batching changed the emitted item count: {} vs {}",
-        burst_kinds.len(),
-        single_kinds.len()
-    );
-    for (i, (b, s)) in burst_kinds.iter().zip(&single_kinds).enumerate() {
-        assert_eq!(b.0, s.0, "item {i} kind changed with batching");
-        assert!(
-            (b.1 - s.1).abs() < 1e-12 && (b.2 - s.2).abs() < 1e-12,
-            "item {i} time span changed with batching: [{}, {}] vs [{}, {}]",
-            b.1,
-            b.2,
-            s.1,
-            s.2
-        );
+    let shaped = replay_stream(config, chains.clone(), &home, 0.0, items);
+    for segment in trajectory_segments(&shaped) {
+        assert_segment_axes_finite(segment);
     }
-
-    let pos_budget_mm = 4.0 * config.fit_tol_mm;
-    let accel_budget_mm_s2 = 4.0 * config.fit_tol_accel_mm_s2;
-    for (i, (b, s)) in burst_segs.iter().zip(&single_segs).enumerate() {
-        assert_eq!(b.axes.len(), s.axes.len(), "segment {i} axis count changed");
-        for axis in 0..b.axes.len() {
-            let (knots, interior) = batching_comparison_times(b, s, axis);
-            for t in knots.iter().chain(&interior) {
-                let pb = b.eval_axis(axis, *t).expect("bursted axis evaluates");
-                let ps = s.eval_axis(axis, *t).expect("one-at-a-time axis evaluates");
-                assert!(
-                    (pb.position - ps.position).abs() <= pos_budget_mm,
-                    "segment {i} axis {axis} position moved with batching at t={t}: {} vs {}",
-                    pb.position,
-                    ps.position
-                );
-            }
-            for t in interior {
-                let burst_accel = b
-                    .eval_axis(axis, t)
-                    .expect("bursted axis evaluates")
-                    .acceleration;
-                let single_accel = s
-                    .eval_axis(axis, t)
-                    .expect("one-at-a-time axis evaluates")
-                    .acceleration;
-                assert!(
-                    (burst_accel - single_accel).abs() <= accel_budget_mm_s2,
-                    "segment {i} axis {axis} acceleration moved with batching at t={t}: \
-                     {burst_accel} vs {single_accel}"
-                );
-            }
-        }
-        assert_segment_axes_finite(b);
-        assert_segment_axes_finite(s);
-    }
-
-    let axis_pieces = |items: &[TrajectoryItem], axis: usize| -> usize {
-        trajectory_segments(items)
+    for (axis, _) in &chains.followers {
+        let pieces: usize = trajectory_segments(&shaped)
             .iter()
-            .map(|seg| axis_breakpoints(&seg.axes[axis]).0.len())
-            .sum()
-    };
-    let axis_role = |axis: usize| {
-        if chains.followers.iter().any(|(target, _)| *target == axis) {
-            "follower"
-        } else {
-            "leader"
-        }
-    };
-    let per_axis_counts = || {
-        (0..chains.chains.len())
-            .map(|axis| {
-                format!(
-                    "{} axis {axis} {}/{}",
-                    axis_role(axis),
-                    axis_pieces(&burst, axis),
-                    axis_pieces(&single, axis)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-
-    const PIECE_SPREAD_PERCENT: usize = 12;
-    for axis in 0..chains.chains.len() {
-        let (b, s) = (axis_pieces(&burst, axis), axis_pieces(&single, axis));
-        let (lo, hi) = (b.min(s), b.max(s));
+            .map(|seg| axis_breakpoints(&seg.axes[*axis]).0.len())
+            .sum();
         assert!(
-            hi * 100 <= lo * (100 + PIECE_SPREAD_PERCENT),
-            "{} axis {axis} was refitted per emit window: {b} pieces bursted vs {s} \
-             one-at-a-time ({:.2}x, allowed {PIECE_SPREAD_PERCENT}% spread) — a fitted \
-             target must be cached under its own support times and reused once a later \
-             emit commits a wider prefix. Totals across all axes: {} bursted, {} \
-             one-at-a-time",
-            axis_role(axis),
-            hi as f64 / lo.max(1) as f64,
-            total_track_breakpoints(&burst),
-            total_track_breakpoints(&single)
-        );
-    }
-
-    const FOLLOWER_PIECE_CEILING: usize = 40_000;
-    for axis in 0..chains.chains.len() {
-        if axis_role(axis) != "follower" {
-            continue;
-        }
-        let (b, s) = (axis_pieces(&burst, axis), axis_pieces(&single, axis));
-        assert!(
-            b.max(s) <= FOLLOWER_PIECE_CEILING,
-            "follower axis {axis} fit is structurally too fine: {b} pieces bursted vs \
-             {s} one-at-a-time, ceiling {FOLLOWER_PIECE_CEILING}. This fixture measured \
-             ~19_700 follower pieces before disk-sag grid refinement and ~35_900 with \
-             it (corner blends legitimately carry up to 4x the seed grid so their \
-             scalar acceleration stays on the accel disk); the one-at-a-time refit \
-             pathology measured 45_882-50_670, which the ceiling still excludes. \
-             Per-axis counts (bursted/one-at-a-time): {}. Totals across all axes: {} \
-             bursted, {} one-at-a-time",
-            per_axis_counts(),
-            total_track_breakpoints(&burst),
-            total_track_breakpoints(&single)
+            pieces <= 40_000,
+            "follower axis {axis} fit is structurally too fine: {pieces}"
         );
     }
 }
@@ -3930,7 +3712,7 @@ fn worst_segment_seam_step(segs: &[ContinuousSegment], axis: usize) -> ((f64, f6
     (position, velocity)
 }
 
-fn projected_follower_arms(chains: &AxisChainSet) -> (Vec<TrajectoryItem>, Vec<TrajectoryItem>) {
+fn projected_follower_output(chains: &AxisChainSet) -> Vec<TrajectoryItem> {
     let config = cfg();
     let moves = [
         line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5),
@@ -3942,10 +3724,7 @@ fn projected_follower_arms(chains: &AxisChainSet) -> (Vec<TrajectoryItem>, Vec<T
     let home = [0.0, 0.0, 0.0, 0.0];
     let items = || -> Vec<StreamInput> { moves.iter().map(|m| m.clone().into()).collect() };
     let lowered = || lower_to_base_items(config, chains, &home, items());
-    (
-        shape_in_bursts(chains.clone(), fit_tol(config), lowered()),
-        shape_one_at_a_time(chains.clone(), fit_tol(config), lowered()),
-    )
+    shape_one_at_a_time(chains.clone(), fit_tol(config), lowered())
 }
 
 fn leader_zero_support_chains(advance_s: f64) -> AxisChainSet {
@@ -3976,8 +3755,8 @@ fn leader_zero_support_chains(advance_s: f64) -> AxisChainSet {
 /// bit-identical to the untransformed baseline, every sample.
 #[test]
 fn follower_observes_a_zero_support_leader_transform() {
-    let (_, baseline) = projected_follower_arms(&follower_chains_without_kernels());
-    let (_, gained) = projected_follower_arms(&leader_zero_support_chains(0.004));
+    let baseline = projected_follower_output(&follower_chains_without_kernels());
+    let gained = projected_follower_output(&leader_zero_support_chains(0.004));
     let owned = |items: &[TrajectoryItem]| -> Vec<ContinuousSegment> {
         trajectory_segments(items)
             .iter()
@@ -4029,44 +3808,17 @@ fn follower_observes_a_zero_support_leader_transform() {
 #[test]
 fn projected_follower_seams_hold_velocity_across_emit_batches() {
     let chains = follower_kernel_chains(Some(0.044583333333333336), None, 0.02675);
-    let (burst, single) = projected_follower_arms(&chains);
-    for (label, items) in [("bursted", &burst), ("one-at-a-time", &single)] {
-        let segs: Vec<ContinuousSegment> = trajectory_segments(items)
-            .iter()
-            .map(|seg| (*seg).clone())
-            .collect();
-        assert!(segs.len() >= 5, "{label}: the fixture must emit a chain");
-        let ((position_step, position_t), (step, t)) = worst_segment_seam_step(&segs, 3);
-        assert!(
-            position_step < 1e-9,
-            "{label}: the follower position seam at t={position_t} steps by \
-             {position_step} mm"
-        );
-        assert!(
-            step < 1e-9,
-            "{label}: the follower velocity seam at t={t} steps by {step} mm/s — a \
-             position-only weld leaves the fit residual's slope behind"
-        );
-    }
-    let (burst_total, single_total) = (
-        extruder_end(
-            &trajectory_segments(&burst)
-                .iter()
-                .map(|seg| (*seg).clone())
-                .collect::<Vec<_>>(),
-        ),
-        extruder_end(
-            &trajectory_segments(&single)
-                .iter()
-                .map(|seg| (*seg).clone())
-                .collect::<Vec<_>>(),
-        ),
-    );
+    let items = projected_follower_output(&chains);
+    let segs: Vec<ContinuousSegment> = trajectory_segments(&items)
+        .iter()
+        .map(|seg| (*seg).clone())
+        .collect();
+    let ((position_step, position_t), (step, t)) = worst_segment_seam_step(&segs, 3);
     assert!(
-        (burst_total - single_total).abs() <= fit_tol(cfg()).pos_mm,
-        "the weld moved the settled total with the batching: {burst_total} vs \
-         {single_total}"
+        position_step < 1e-9,
+        "follower position seam at {position_t}: {position_step} mm"
     );
+    assert!(step < 1e-9, "follower velocity seam at {t}: {step} mm/s");
 }
 
 /// A follower that never extrudes must not inherit the kernel-shaped leader

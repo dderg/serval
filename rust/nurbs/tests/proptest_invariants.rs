@@ -31,18 +31,18 @@ fn arb_curve() -> impl Strategy<Value = nurbs::ScalarNurbs> {
 proptest! {
     #[test]
     fn eval_at_first_knot_returns_first_cp(curve in arb_curve()) {
-        let view = curve.as_view();
+        let view = &curve;
         let u_start = view.knots()[0];
-        let result = nurbs::eval::eval(&view, u_start);
+        let result = nurbs::eval::eval(view, u_start);
         let expected = view.control_points()[0];
         prop_assert!((result - expected).abs() < 1e-9, "got {result}, expected {expected}");
     }
 
     #[test]
     fn eval_at_last_knot_returns_last_cp(curve in arb_curve()) {
-        let view = curve.as_view();
+        let view = &curve;
         let u_end = view.knots()[view.knots().len() - 1];
-        let result = nurbs::eval::eval(&view, u_end);
+        let result = nurbs::eval::eval(view, u_end);
         let expected = view.control_points()[view.control_points().len() - 1];
         prop_assert!((result - expected).abs() < 1e-9, "got {result}, expected {expected}");
     }
@@ -62,7 +62,7 @@ proptest! {
         let curve = nurbs::ScalarNurbs::try_new(p, knots, cps).unwrap();
         let d = nurbs::eval::derivative(&curve);
         for u in [0.0, 0.25, 0.5, 0.75, 1.0] {
-            let val = nurbs::eval::eval(&d.as_view(), u);
+            let val = nurbs::eval::eval(&d, u);
             prop_assert!(val.abs() < 1e-9, "constant curve derivative at {u} = {val}");
         }
     }

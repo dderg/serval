@@ -6,10 +6,10 @@ use super::{discard_motion, respond_fault_heartbeat, EndpointCtx};
 use crate::capture::{CaptureRecord, DriveSample, FLAG_MOTION_ACTIVE, FLAG_TORQUE_ENABLED};
 use crate::claim::{eval_wkc, WkcDecision};
 use crate::clock::raw_from_monotonic_ns;
-use crate::dynamics::{clamp_torque, DynamicsModel};
-use crate::setpoint::{GridPhaseError, Played, SetpointEntry};
 use crate::torque::{TickAction, TorqueState};
 use crate::wire::{endstop_trip_frame, status_heartbeat_frame, ENGINE_STATE_FAULT};
+use ethercat_setpoint::dynamics::{clamp_torque, DynamicsModel};
+use ethercat_setpoint::setpoint::{GridPhaseError, Played, SetpointEntry};
 
 macro_rules! log_slot_drive_telemetry {
     ($level:ident, $event:literal, $msg:literal, $ctx:expr, $slot:expr, $t:expr,
@@ -37,6 +37,50 @@ macro_rules! log_slot_drive_telemetry {
     };
 }
 
+/// One stage duration: this cycle's value and the worst seen since the last
+/// telemetry beat.
+pub(super) struct Span {
+    pub(super) last: i64,
+    max: i64,
+}
+
+impl Default for Span {
+    fn default() -> Self {
+        Self {
+            last: 0,
+            max: i64::MIN,
+        }
+    }
+}
+
+impl Span {
+    fn record(&mut self, ns: i64) {
+        self.last = ns;
+        self.max = self.max.max(ns);
+    }
+
+    fn take_max(&mut self) -> i64 {
+        std::mem::replace(&mut self.max, i64::MIN)
+    }
+}
+
+/// Every stage the DC cycle clocks, in loop order.
+#[derive(Default)]
+pub(super) struct CycleSpans {
+    pub(super) wake_late: Span,
+    pub(super) recv: Span,
+    pub(super) process: Span,
+    pub(super) send: Span,
+    pub(super) pre_cycle: Span,
+    pub(super) post_cycle: Span,
+    pub(super) inter_exchange: Span,
+    pub(super) fault: Span,
+    pub(super) capture: Span,
+    pub(super) wkc: Span,
+    pub(super) heartbeat: Span,
+    pub(super) telemetry: Span,
+}
+
 pub(super) fn run_cycle(ctx: &mut EndpointCtx) -> ControlFlow<()> {
     let cycle_start = std::time::Instant::now();
     let apply_mono_ns = ctx.drive.cycle_time_ns() + ctx.cycle_ns as u64;
@@ -59,26 +103,23 @@ pub(super) fn run_cycle(ctx: &mut EndpointCtx) -> ControlFlow<()> {
     handle_ring_fault(ctx);
 
     let exchange = std::time::Instant::now();
-    ctx.last_pre_cycle_ns = (exchange - cycle_start).as_nanos() as i64;
-    ctx.last_inter_exchange_ns = ctx
+    ctx.spans
+        .pre_cycle
+        .record((exchange - cycle_start).as_nanos() as i64);
+    let inter_exchange_ns = ctx
         .prev_exchange_return
         .map_or(0, |t| (exchange - t).as_nanos() as i64);
-    ctx.pre_cycle_max_ns = ctx.pre_cycle_max_ns.max(ctx.last_pre_cycle_ns);
-    ctx.inter_exchange_max_ns = ctx.inter_exchange_max_ns.max(ctx.last_inter_exchange_ns);
+    ctx.spans.inter_exchange.record(inter_exchange_ns);
     let (wkc, toff) = ctx.drive.cycle();
     let exchange_return = std::time::Instant::now();
     let exchange_ns = (exchange_return - exchange).as_nanos() as i64;
     ctx.prev_exchange_return = Some(exchange_return);
 
     let (wake_late_ns, recv_ns, process_ns, send_ns) = ctx.drive.cycle_stage_ns();
-    ctx.last_wake_late_ns = wake_late_ns;
-    ctx.last_recv_ns = recv_ns;
-    ctx.last_process_ns = process_ns;
-    ctx.last_send_ns = send_ns;
-    ctx.wake_late_max_ns = ctx.wake_late_max_ns.max(wake_late_ns);
-    ctx.recv_max_ns = ctx.recv_max_ns.max(recv_ns);
-    ctx.process_max_ns = ctx.process_max_ns.max(process_ns);
-    ctx.send_max_ns = ctx.send_max_ns.max(send_ns);
+    ctx.spans.wake_late.record(wake_late_ns);
+    ctx.spans.recv.record(recv_ns);
+    ctx.spans.process.record(process_ns);
+    ctx.spans.send.record(send_ns);
     ctx.last_lateness_ns = toff;
     police_frame_timing(ctx, toff);
     ctx.prev_exchange_ns = exchange_ns;
@@ -100,19 +141,24 @@ pub(super) fn run_cycle(ctx: &mut EndpointCtx) -> ControlFlow<()> {
     emit_periodic_telemetry(ctx, wkc, toff);
     let post_end = std::time::Instant::now();
 
-    ctx.last_fault_ns = (capture_start - fault_start).as_nanos() as i64;
-    ctx.last_capture_ns = (wkc_start - capture_start).as_nanos() as i64;
-    ctx.last_wkc_ns = (heartbeat_start - wkc_start).as_nanos() as i64;
-    ctx.last_heartbeat_ns = (telemetry_start - heartbeat_start).as_nanos() as i64;
-    ctx.last_telemetry_ns = (post_end - telemetry_start).as_nanos() as i64;
-    ctx.fault_max_ns = ctx.fault_max_ns.max(ctx.last_fault_ns);
-    ctx.capture_max_ns = ctx.capture_max_ns.max(ctx.last_capture_ns);
-    ctx.wkc_max_ns = ctx.wkc_max_ns.max(ctx.last_wkc_ns);
-    ctx.heartbeat_max_ns = ctx.heartbeat_max_ns.max(ctx.last_heartbeat_ns);
-    ctx.telemetry_max_ns = ctx.telemetry_max_ns.max(ctx.last_telemetry_ns);
-
-    ctx.last_post_cycle_ns = (post_end - exchange_return).as_nanos() as i64;
-    ctx.post_cycle_max_ns = ctx.post_cycle_max_ns.max(ctx.last_post_cycle_ns);
+    ctx.spans
+        .fault
+        .record((capture_start - fault_start).as_nanos() as i64);
+    ctx.spans
+        .capture
+        .record((wkc_start - capture_start).as_nanos() as i64);
+    ctx.spans
+        .wkc
+        .record((heartbeat_start - wkc_start).as_nanos() as i64);
+    ctx.spans
+        .heartbeat
+        .record((telemetry_start - heartbeat_start).as_nanos() as i64);
+    ctx.spans
+        .telemetry
+        .record((post_end - telemetry_start).as_nanos() as i64);
+    ctx.spans
+        .post_cycle
+        .record((post_end - exchange_return).as_nanos() as i64);
 
     ControlFlow::Continue(())
 }
@@ -543,8 +589,6 @@ pub(super) struct DriveScratch {
 }
 
 impl DriveScratch {
-    /// Only bringup (hw) and the test harness build an `EndpointCtx`.
-    #[cfg(any(feature = "hw", test))]
     pub(super) fn new(num_slaves: usize) -> Self {
         Self {
             acc: vec![0.0; num_slaves],
@@ -665,18 +709,18 @@ pub(super) fn police_frame_timing(ctx: &mut EndpointCtx, lateness_ns: i64) {
             dispatch_ns = ctx.last_dispatch_ns,
             pre_work_ns = ctx.last_pre_work_ns,
             prev_exchange_ns = ctx.prev_exchange_ns,
-            wake_late_ns = ctx.last_wake_late_ns,
-            recv_ns = ctx.last_recv_ns,
-            process_ns = ctx.last_process_ns,
-            send_ns = ctx.last_send_ns,
-            pre_cycle_ns = ctx.last_pre_cycle_ns,
-            post_cycle_ns = ctx.last_post_cycle_ns,
-            inter_exchange_ns = ctx.last_inter_exchange_ns,
-            fault_ns = ctx.last_fault_ns,
-            capture_ns = ctx.last_capture_ns,
-            wkc_ns = ctx.last_wkc_ns,
-            heartbeat_ns = ctx.last_heartbeat_ns,
-            telemetry_ns = ctx.last_telemetry_ns,
+            wake_late_ns = ctx.spans.wake_late.last,
+            recv_ns = ctx.spans.recv.last,
+            process_ns = ctx.spans.process.last,
+            send_ns = ctx.spans.send.last,
+            pre_cycle_ns = ctx.spans.pre_cycle.last,
+            post_cycle_ns = ctx.spans.post_cycle.last,
+            inter_exchange_ns = ctx.spans.inter_exchange.last,
+            fault_ns = ctx.spans.fault.last,
+            capture_ns = ctx.spans.capture.last,
+            wkc_ns = ctx.spans.wkc.last,
+            heartbeat_ns = ctx.spans.heartbeat.last,
+            telemetry_ns = ctx.spans.telemetry.last,
             "cycle overran a full period and skipped forward on the grid — \
              the drives coasted on a stale target for the missed cycles \
              (behind_ns is the true stall magnitude; inter_exchange_ns spans \
@@ -717,18 +761,18 @@ pub(super) fn police_frame_timing(ctx: &mut EndpointCtx, lateness_ns: i64) {
         dispatch_ns = ctx.last_dispatch_ns,
         pre_work_ns = ctx.last_pre_work_ns,
         prev_exchange_ns = ctx.prev_exchange_ns,
-        wake_late_ns = ctx.last_wake_late_ns,
-        recv_ns = ctx.last_recv_ns,
-        process_ns = ctx.last_process_ns,
-        send_ns = ctx.last_send_ns,
-        pre_cycle_ns = ctx.last_pre_cycle_ns,
-        post_cycle_ns = ctx.last_post_cycle_ns,
-        inter_exchange_ns = ctx.last_inter_exchange_ns,
-        fault_ns = ctx.last_fault_ns,
-        capture_ns = ctx.last_capture_ns,
-        wkc_ns = ctx.last_wkc_ns,
-        heartbeat_ns = ctx.last_heartbeat_ns,
-        telemetry_ns = ctx.last_telemetry_ns,
+        wake_late_ns = ctx.spans.wake_late.last,
+        recv_ns = ctx.spans.recv.last,
+        process_ns = ctx.spans.process.last,
+        send_ns = ctx.spans.send.last,
+        pre_cycle_ns = ctx.spans.pre_cycle.last,
+        post_cycle_ns = ctx.spans.post_cycle.last,
+        inter_exchange_ns = ctx.spans.inter_exchange.last,
+        fault_ns = ctx.spans.fault.last,
+        capture_ns = ctx.spans.capture.last,
+        wkc_ns = ctx.spans.wkc.last,
+        heartbeat_ns = ctx.spans.heartbeat.last,
+        telemetry_ns = ctx.spans.telemetry.last,
         "frame timing exceeded the configured late tolerance — parking"
     );
     ctx.gate.on_drive_fault();
@@ -909,34 +953,22 @@ fn emit_periodic_telemetry(ctx: &mut EndpointCtx, wkc: i32, toff: i64) {
             subsystem = "ethercat",
             event = "cycle_stage_max",
             retired_total = ctx.last_sent_retired,
-            wake_late_max_ns = ctx.wake_late_max_ns,
-            recv_max_ns = ctx.recv_max_ns,
-            process_max_ns = ctx.process_max_ns,
-            send_max_ns = ctx.send_max_ns,
-            pre_cycle_max_ns = ctx.pre_cycle_max_ns,
-            post_cycle_max_ns = ctx.post_cycle_max_ns,
-            inter_exchange_max_ns = ctx.inter_exchange_max_ns,
-            fault_max_ns = ctx.fault_max_ns,
-            capture_max_ns = ctx.capture_max_ns,
-            wkc_max_ns = ctx.wkc_max_ns,
-            heartbeat_max_ns = ctx.heartbeat_max_ns,
-            telemetry_max_ns = ctx.telemetry_max_ns,
+            wake_late_max_ns = ctx.spans.wake_late.take_max(),
+            recv_max_ns = ctx.spans.recv.take_max(),
+            process_max_ns = ctx.spans.process.take_max(),
+            send_max_ns = ctx.spans.send.take_max(),
+            pre_cycle_max_ns = ctx.spans.pre_cycle.take_max(),
+            post_cycle_max_ns = ctx.spans.post_cycle.take_max(),
+            inter_exchange_max_ns = ctx.spans.inter_exchange.take_max(),
+            fault_max_ns = ctx.spans.fault.take_max(),
+            capture_max_ns = ctx.spans.capture.take_max(),
+            wkc_max_ns = ctx.spans.wkc.take_max(),
+            heartbeat_max_ns = ctx.spans.heartbeat.take_max(),
+            telemetry_max_ns = ctx.spans.telemetry.take_max(),
             nonvoluntary_ctx_switches = nivcsw - ctx.last_nivcsw,
             "worst exchange stage durations since the last telemetry beat"
         );
         ctx.last_nivcsw = nivcsw;
-        ctx.wake_late_max_ns = i64::MIN;
-        ctx.recv_max_ns = i64::MIN;
-        ctx.process_max_ns = i64::MIN;
-        ctx.send_max_ns = i64::MIN;
-        ctx.pre_cycle_max_ns = i64::MIN;
-        ctx.post_cycle_max_ns = i64::MIN;
-        ctx.inter_exchange_max_ns = i64::MIN;
-        ctx.fault_max_ns = i64::MIN;
-        ctx.capture_max_ns = i64::MIN;
-        ctx.wkc_max_ns = i64::MIN;
-        ctx.heartbeat_max_ns = i64::MIN;
-        ctx.telemetry_max_ns = i64::MIN;
         if ctx.gate.state() == TorqueState::Faulted {
             let latched_drive_err = ctx.latched_drive_err;
             respond_fault_heartbeat(ctx, 0, latched_drive_err);

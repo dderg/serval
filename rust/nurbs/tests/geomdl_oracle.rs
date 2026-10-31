@@ -49,7 +49,7 @@ fn oracle_matches_for_corpus_curves() {
         for sample in curve_v["samples"].as_array().unwrap() {
             let u = sample["u"].as_f64().unwrap();
             let expected = sample["point"].as_array().unwrap();
-            let result = nurbs::eval::vector_eval(&curve.as_view(), u);
+            let result = nurbs::eval::vector_eval(&curve, u);
             for axis in 0..3 {
                 let exp = expected[axis].as_f64().unwrap();
                 let diff = (result[axis] - exp).abs();

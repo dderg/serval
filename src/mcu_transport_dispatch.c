@@ -8,6 +8,7 @@
 #include "board/irq.h"
 #include "sched.h"
 #include "autoconf.h"
+#include "generic/runtime_tick.h" // runtime_widened_host_clock
 #include "stepper.h"
 
 #if CONFIG_MOTION_RUNTIME
@@ -19,7 +20,6 @@ extern void *runtime_handle;
 int32_t runtime_sample_halt(struct Runtime *rt, uint64_t halt_clock);
 #endif
 
-extern uint64_t runtime_widened_host_clock(void);
 
 extern int kalico_console_write_raw(const uint8_t *buf, uint16_t len);
 
@@ -457,20 +457,27 @@ static void
 handle_stepper_suppress(uint32_t correlation_id, const uint8_t *body,
                         uint16_t body_len)
 {
-    if (body_len < 3)
+    if (body_len != 4)
         shutdown("bad suppress");
-    if (body[0] == 0xFF && body[1] == 0xFF && !body[2])
-        stepper_suppress_clear_all();
-    else
-        stepper_suppress_set(body[0], body[1]);
-    send_stepper_suppress_response(
-        correlation_id, (uint32_t)runtime_widened_host_clock());
+    uint64_t effective_clock;
+    if (body[0] == 0xFF && body[1] == 0xFF && !body[2]
+        && body[3] == 0xFF) {
+        effective_clock = runtime_widened_host_clock();
+    } else {
+        if (body[2] != 1)
+            shutdown("bad suppress");
+#if CONFIG_HAVE_GPIO
+        effective_clock = stepper_halt_oid(body[3]);
+#else
+        shutdown("suppress without classic steppers");
+#endif
+    }
+    send_stepper_suppress_response(correlation_id, (uint32_t)effective_clock);
 }
 
 static void
 handle_resume_stream(uint32_t correlation_id)
 {
-    stepper_suppress_clear_all();
 #if CONFIG_HAVE_GPIO
     irqstatus_t flag = irq_save();
     stop_gated = 0;

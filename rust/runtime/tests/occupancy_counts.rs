@@ -3,9 +3,9 @@
 use core::sync::atomic::Ordering;
 
 use runtime::engine::Engine;
-use runtime::sample_run::encode_deltas;
 use runtime::state::SharedState;
-use runtime::stepping_state::{MAX_AXES, StepMode, StepperBindingRust, TMC_CS_OID_NONE};
+use runtime_contract::axes::{MAX_AXES, StepMode, StepperBindingRust, TMC_CS_OID_NONE};
+use runtime_contract::sample_run::encode_deltas;
 
 const INTERVAL: u32 = 1_000;
 const ANCHOR: u64 = 1_000_000;

@@ -3,21 +3,34 @@ use super::{
     Python, RemoteFreeze, TripDeps, TripMember, dispatch_endstop_trip, drip_cohort_participants,
     planner_err, pymethods,
 };
-use crate::lock_ext::LockExt;
+use motion_core::lock_ext::LockExt;
 
 struct ResolvedHomingTarget {
-    all_axis_keys: Vec<crate::types::AxisKey>,
-    axis_key: crate::types::AxisKey,
+    all_axis_keys: Vec<motion_core::types::AxisKey>,
+    axis_key: motion_core::types::AxisKey,
 }
 
-struct AbortContext {
-    all_axis_keys: Vec<crate::types::AxisKey>,
-    cohort: u64,
-    axis_key: crate::types::AxisKey,
-    pending_suppresses: Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>,
+pub(super) fn validate_trip_members(members: &[TripMember]) -> Result<(), String> {
+    for (index, member) in members.iter().enumerate() {
+        let Some(freeze) = member.remote_freeze else {
+            continue;
+        };
+        if members[..index].iter().any(|previous| {
+            previous.remote_freeze.is_some_and(|previous| {
+                previous.motor_mcu == freeze.motor_mcu && previous.stepper_oid == freeze.stepper_oid
+            })
+        }) {
+            return Err(format!(
+                "home_axis: duplicate motor binding for mcu {} oid {}",
+                freeze.motor_mcu, freeze.stepper_oid
+            ));
+        }
+    }
+    Ok(())
 }
+
 pub(super) fn required_motor_axes(
-    kind: crate::kinematics::KinematicsKind,
+    kind: motion_core::kinematics::KinematicsKind,
     requested_axis: Option<u8>,
 ) -> Result<[bool; 4], u8> {
     let Some(axis) = requested_axis else {
@@ -28,7 +41,7 @@ pub(super) fn required_motor_axes(
     }
     let mut required = [false; 4];
     match (kind, axis) {
-        (crate::kinematics::KinematicsKind::CoreXy, 0 | 1) => {
+        (motion_core::kinematics::KinematicsKind::CoreXy, 0 | 1) => {
             required[0] = true;
             required[1] = true;
         }
@@ -38,13 +51,13 @@ pub(super) fn required_motor_axes(
 }
 
 pub(super) fn history_state_at_query(
-    store: &crate::motion_history::HistoryStore,
-    key: crate::types::AxisKey,
+    store: &motion_core::motion_history::HistoryStore,
+    key: motion_core::types::AxisKey,
     source_mcu: u32,
     clock: u64,
     query_host: f64,
     host_now: f64,
-) -> Result<crate::motion_history::AxisState, crate::motion_history::HistoryError> {
+) -> Result<motion_core::motion_history::AxisState, motion_core::motion_history::HistoryError> {
     if key.mcu_id == source_mcu {
         store.state_at_clock(key, clock, query_host, Some(host_now))
     } else {
@@ -61,7 +74,6 @@ fn next_homing_cohort() -> u64 {
 #[pymethods]
 impl PyMotionEngine {
     #[pyo3(signature = (axis, direction, speed_mm_s, max_travel_mm, endstops))]
-    #[allow(clippy::too_many_arguments)]
     fn home_axis_start(
         &self,
         py: Python<'_>,
@@ -91,6 +103,7 @@ impl PyMotionEngine {
                 }),
             })
             .collect();
+        validate_trip_members(&remaining_trips).map_err(PyRuntimeError::new_err)?;
 
         if self.planner.lock_ok().is_none() {
             return Err(PyRuntimeError::new_err(
@@ -105,83 +118,110 @@ impl PyMotionEngine {
         let cohort = next_homing_cohort();
         let start_pos = *self.commanded_pos.lock_ok();
 
+        self.homing
+            .begin(cohort, axis_key.mcu_id)
+            .map_err(PyRuntimeError::new_err)?;
         self.latched.drive.lock_ok().remove(&axis_key.mcu_id);
+        let startup: PyResult<()> = (|| {
+            self.quiesce_pump_and_drain(py)?;
 
-        self.quiesce_pump_and_drain(py)?;
+            // The counters are machine space, so the gcode rest point crosses
+            // the warp here; the follower lanes take the same origin home_drip
+            // restarts the stream odometer's follower coordinate at.
+            let machine_start = self.machine_from_gcode(start_pos);
+            self.send_serial_position_seeds(machine_start)?;
 
-        // The counters are machine space, so the gcode rest point crosses
-        // the warp here; the follower lanes take the same origin home_drip
-        // restarts the stream odometer's follower coordinate at.
-        let machine_start = self.machine_from_gcode(start_pos);
-        self.send_serial_position_seeds(machine_start)?;
+            let window_start_host = self
+                .homing
+                .take_arm_window_start(
+                    &remaining_trips
+                        .iter()
+                        .map(|t| (t.endstop_mcu, t.endstop_id))
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap_or_else(|| self.router.lock_ok().host_now_secs());
 
-        let window_start_host = self
-            .homing
-            .take_arm_window_start(
-                &remaining_trips
-                    .iter()
-                    .map(|t| (t.endstop_mcu, t.endstop_id))
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap_or_else(|| self.router.lock_ok().host_now_secs());
+            self.homing.arm(cohort).map_err(PyRuntimeError::new_err)?;
+            self.homing_pump_tx()?
+                .send(motion_core::pump::PumpMsg::DripArm(
+                    motion_core::pump::DripArm {
+                        cohort,
+                        participants: all_axis_keys.clone(),
+                        timeout: Duration::from_secs(5),
+                    },
+                ))
+                .map_err(|_| PyRuntimeError::new_err("home_axis: pump channel closed"))?;
 
-        *self.homing.active_drip_cohort.lock_ok() = Some(cohort);
+            // The guard must not outlive this block: `await_homing_dispatch`
+            // re-attaches the GIL, and a pymethod on another thread that holds
+            // the GIL while contending `self.planner` (frontier_print_time)
+            // would deadlock the process — observed on the Trident bench
+            // 2026-08-20 as a silent full-klippy wedge during G28 X.
+            let planner_done_rx = {
+                let guard = self.planner.lock_ok();
+                let planner = guard
+                    .as_ref()
+                    .ok_or_else(|| PyRuntimeError::new_err("home_axis: planner not initialized"))?;
+                planner
+                    .home_drip(motion_core::worker::HomeDripParams {
+                        home_pos: motion_core::mcu_config::reanchor_home_pos(start_pos),
+                        start: start_pos.0,
+                        axis,
+                        direction,
+                        speed_mm_s,
+                        max_travel_mm,
+                    })
+                    .map_err(planner_err)?
+            };
+            self.await_homing_dispatch(py, &planner_done_rx)?;
 
-        self.homing_pump_tx()?
-            .send(crate::pump::PumpMsg::DripArm(crate::pump::DripArm {
-                cohort,
-                participants: all_axis_keys.clone(),
-                timeout: Duration::from_secs(5),
-            }))
-            .map_err(|_| PyRuntimeError::new_err("home_axis: pump channel closed"))?;
-
-        let (result_tx, result_rx) = crossbeam_channel::bounded::<
-            Result<(geometry::MachinePos, geometry::MachinePos, u64), String>,
-        >(1);
-
-        *self.homing.run.lock_ok() = Some(HomingRun {
-            frozen_oids: Vec::new(),
-            cohort,
-            remaining_trips,
-            axis_key,
-            all_axis_keys: all_axis_keys.clone(),
-            window_start_host,
-            start_pos: machine_start,
-            notify: result_tx,
-            pending_suppresses: Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new())),
-        });
-
-        // The guard must not outlive this block: `await_homing_dispatch`
-        // re-attaches the GIL, and a pymethod on another thread that holds
-        // the GIL while contending `self.planner` (frontier_print_time)
-        // would deadlock the process — observed on the Trident bench
-        // 2026-08-20 as a silent full-klippy wedge during G28 X.
-        let planner_done_rx = {
-            let guard = self.planner.lock_ok();
-            let planner = guard
-                .as_ref()
-                .ok_or_else(|| PyRuntimeError::new_err("home_axis: planner not initialized"))?;
-            planner
-                .home_drip(crate::worker::HomeDripParams {
-                    home_pos: crate::mcu_config::reanchor_home_pos(start_pos),
-                    start: start_pos.0,
-                    axis,
-                    direction,
-                    speed_mm_s,
-                    max_travel_mm,
+            self.homing
+                .register(HomingRun {
                     cohort,
-                    participants: all_axis_keys,
+                    remaining_trips,
+                    axis_key,
+                    all_axis_keys: all_axis_keys.clone(),
+                    window_start_host,
+                    start_pos: machine_start,
                 })
-                .map_err(|e| {
-                    self.finish_homing();
-                    planner_err(e)
-                })?
-        };
-        self.await_homing_dispatch(py, &planner_done_rx)?;
+                .map_err(PyRuntimeError::new_err)?;
 
-        *self.homing.result.lock_ok() = Some(result_rx);
-
-        self.consume_buffered_early_trips();
+            self.consume_buffered_early_trips();
+            Ok(())
+        })();
+        if let Err(startup_error) = startup {
+            self.homing.cancel_registration();
+            if let Some(planner) = self.planner.lock_ok().as_ref() {
+                planner.discard_pending();
+            }
+            let cancellation: Result<(), String> = (|| {
+                let tx = self.pump.tx.lock_ok().clone().ok_or_else(|| {
+                    "home_axis: execution owner unavailable during cancellation".to_string()
+                })?;
+                let (ack, halted) = std::sync::mpsc::sync_channel(1);
+                tx.send(motion_core::pump::PumpMsg::Halt {
+                    keys: all_axis_keys,
+                    ack,
+                })
+                .map_err(|_| "home_axis: execution owner closed during cancellation".to_string())?;
+                py.detach(move || halted.recv_timeout(Duration::from_secs(1)))
+                    .map_err(|_| {
+                        "home_axis: execution owner did not acknowledge cancellation halt"
+                            .to_string()
+                    })?;
+                tx.send(motion_core::pump::PumpMsg::DripDisarm(cohort))
+                    .map_err(|_| {
+                        "home_axis: execution owner closed before cancelling cohort".to_string()
+                    })?;
+                Ok(())
+            })();
+            if let Err(cancellation_error) = cancellation {
+                return Err(PyRuntimeError::new_err(format!(
+                    "{startup_error}; homing cancellation failed: {cancellation_error}"
+                )));
+            }
+            return Err(startup_error);
+        }
         Ok(())
     }
     fn motion_drained(&self) -> bool {
@@ -192,27 +232,9 @@ impl PyMotionEngine {
         self.homing.note_arm(endstop_mcu, endstop_id, host_now);
     }
     fn home_axis_poll(&self) -> PyResult<Option<([f64; 3], [f64; 3], u64)>> {
-        let rx = {
-            let guard = self.homing.result.lock_ok();
-            match guard.as_ref() {
-                Some(rx) => rx.clone(),
-                None => {
-                    return Err(PyRuntimeError::new_err(
-                        "home_axis_poll: no homing in progress",
-                    ));
-                }
-            }
-        };
-        match rx.try_recv() {
-            Err(crossbeam_channel::TryRecvError::Empty) => Ok(None),
-            Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                self.finish_homing();
-                Err(PyRuntimeError::new_err(
-                    "home_axis_poll: homing result channel closed",
-                ))
-            }
-            Ok(result) => {
-                self.finish_homing();
+        match self.homing.poll().map_err(PyRuntimeError::new_err)? {
+            None => Ok(None),
+            Some(result) => {
                 let (trip_pos, final_pos, trip_clock) = result.map_err(PyRuntimeError::new_err)?;
                 let trip_pos = self.gcode_from_machine(trip_pos);
                 let final_pos = self.gcode_from_machine(final_pos);
@@ -253,11 +275,11 @@ impl PyMotionEngine {
                 "trsync_state",
                 Some(trsync_oid),
                 Box::new(move |params| {
-                    let decision = crate::remote_trigger::relay_decision(
+                    let decision = motion_services::remote_trigger::relay_decision(
                         params.try_get_u32("can_trigger"),
                         fired.load(Ordering::SeqCst),
                     );
-                    if decision != crate::remote_trigger::RelayAction::Fire {
+                    if decision != motion_services::remote_trigger::RelayAction::Fire {
                         return;
                     }
                     fired.store(true, Ordering::SeqCst);
@@ -268,7 +290,8 @@ impl PyMotionEngine {
                             mcu_handle,
                         ))
                         .unwrap_or(0);
-                    let clock64 = crate::remote_trigger::relay_trip_clock(clock32, reference);
+                    let clock64 =
+                        motion_services::remote_trigger::relay_trip_clock(clock32, reference);
                     tracing::info!(
                         subsystem = "trip-relay",
                         event = "remote_trigger_fired",
@@ -317,48 +340,11 @@ impl PyMotionEngine {
     /// not be reconciled — commanded_pos is then stale and the caller must
     /// treat the position as unknown.
     fn home_abort(&self, py: Python<'_>) -> Option<[f64; 3]> {
-        let Some(ctx) = self.abort_context() else {
-            self.finish_homing();
-            return None;
-        };
-
-        if !self.flush_aborted_cohort(py, ctx.all_axis_keys, ctx.cohort) {
-            self.finish_homing();
-            return None;
-        }
-        if super::endstop::wait_for_pending_suppresses(&ctx.pending_suppresses).is_err() {
-            self.finish_homing();
-            return None;
-        }
-
-        self.finish_homing();
-
-        if !self.clear_all_suppress_masks() {
-            return None;
-        }
-
-        let machine = self.reconcile_aborted_position(ctx.axis_key).ok()?;
-
-        let drain = self.drain.clone();
-        let drain_result = py.detach(|| drain.wait_drained(DRAIN_TIMEOUT));
-        if let Err(e) = drain_result {
-            tracing::error!(
-                event = "home_abort_drain_timeout",
-                error = %e,
-                "home_abort: drain timed out after aborted homing move — \
-                 commanded_pos is STALE; a firmware restart is required: {e}"
-            );
-            return None;
-        }
-
-        let gcode = self.gcode_from_machine(machine);
-        if !self.reopen_stream_at(gcode) {
-            return None;
-        }
-
-        *self.commanded_pos.lock_ok() = gcode;
-        *self.last_g5_pq.lock_ok() = None;
-        Some([gcode.x(), gcode.y(), gcode.z()])
+        let ctx = self.homing.abort()?;
+        let result = self.recover_aborted_home(py, &ctx);
+        self.homing
+            .complete(ctx.cohort, Err("homing aborted".into()));
+        result
     }
     #[pyo3(signature = (source_mcu, clock, host_now, axis=None))]
     fn motion_state_at_clock(
@@ -368,7 +354,7 @@ impl PyMotionEngine {
         host_now: f64,
         axis: Option<u8>,
     ) -> PyResult<std::collections::HashMap<String, (f64, f64, f64)>> {
-        let configs: Vec<crate::mcu_config::McuAxisConfig> =
+        let configs: Vec<motion_core::mcu_config::McuAxisConfig> =
             self.mcu_axis_configs.lock_ok().clone();
         if configs.is_empty() {
             return Err(PyRuntimeError::new_err(
@@ -377,9 +363,9 @@ impl PyMotionEngine {
         }
         let query_host = {
             let router = self.router.lock_ok();
-            crate::motion_history::clock_to_host(
+            motion_core::motion_history::clock_to_host(
                 &router,
-                crate::types::mcu_handle_from_raw(source_mcu),
+                host_rt::passthrough_queue::McuHandle::from_raw(source_mcu),
                 clock,
             )
             .map_err(PyRuntimeError::new_err)?
@@ -391,24 +377,24 @@ impl PyMotionEngine {
         let kin_tag = configs
             .iter()
             .find(|c| c.axes.contains(&0usize))
-            .map(|c| c.kinematics)
-            .unwrap_or(runtime::segment::KinematicTag::Cartesian as u8);
-        let kin = crate::kinematics::KinematicsModule::from_tag(kin_tag)
+            .map(|c| c.hw.kinematics)
+            .unwrap_or(motion_core::kinematics::KinematicsKind::Cartesian as u8);
+        let kin = motion_core::kinematics::KinematicsModule::from_tag(kin_tag)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let required = required_motor_axes(kin.kind(), axis).map_err(|axis| {
             PyRuntimeError::new_err(format!("motion_state_at: unnamed axis {axis}"))
         })?;
-        let resolved: Vec<crate::types::AxisKey> = configs
+        let resolved: Vec<motion_core::types::AxisKey> = configs
             .iter()
             .flat_map(|cfg| {
-                cfg.axes.iter().map(|&axis| crate::types::AxisKey {
+                cfg.axes.iter().map(|&axis| motion_core::types::AxisKey {
                     mcu_id: cfg.mcu_id,
                     axis: axis as u8,
                 })
             })
             .collect();
         let store = self.motion_history.lock_ok();
-        let mut motor_state: [Option<crate::motion_history::AxisState>; 4] = [None; 4];
+        let mut motor_state: [Option<motion_core::motion_history::AxisState>; 4] = [None; 4];
         for key in resolved {
             let axis = key.axis as usize;
             if axis >= motor_state.len() {
@@ -422,8 +408,8 @@ impl PyMotionEngine {
             }
             match history_state_at_query(&store, key, source_mcu, clock, query_host, host_now) {
                 Ok(st) => motor_state[axis] = Some(st),
-                Err(crate::motion_history::HistoryError::NoHistoryForAxis(_)) => {}
-                Err(e @ crate::motion_history::HistoryError::BeforeRetainedWindow { .. }) => {
+                Err(motion_core::motion_history::HistoryError::NoHistoryForAxis(_)) => {}
+                Err(e @ motion_core::motion_history::HistoryError::BeforeRetainedWindow { .. }) => {
                     let Some(initial) = store.initial_hold_state(key) else {
                         return Err(PyRuntimeError::new_err(e.to_string()));
                     };
@@ -433,7 +419,7 @@ impl PyMotionEngine {
             }
         }
         drop(store);
-        let machine = crate::motion_history::assemble_cartesian_state(motor_state, &kin);
+        let machine = motion_core::motion_history::assemble_cartesian_state(motor_state, &kin);
         self.cartesian_state_to_gcode(machine)
     }
 }
@@ -459,11 +445,11 @@ impl PyMotionEngine {
             })?;
         Ok(ResolvedHomingTarget {
             all_axis_keys,
-            axis_key: crate::types::AxisKey { mcu_id, axis },
+            axis_key: motion_core::types::AxisKey { mcu_id, axis },
         })
     }
 
-    fn homing_pump_tx(&self) -> PyResult<crossbeam_channel::Sender<crate::pump::PumpMsg>> {
+    fn homing_pump_tx(&self) -> PyResult<crossbeam_channel::Sender<motion_core::pump::PumpMsg>> {
         self.pump
             .tx
             .lock_ok()
@@ -477,7 +463,7 @@ impl PyMotionEngine {
         py.detach(|| {
             let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
             pump_tx
-                .send(crate::pump::PumpMsg::Barrier(ack_tx))
+                .send(motion_core::pump::PumpMsg::Barrier(ack_tx))
                 .map_err(|_| "home_axis: pump control channel closed".to_string())?;
             ack_rx
                 .recv_timeout(Duration::from_secs(5))
@@ -499,7 +485,6 @@ impl PyMotionEngine {
                 .and_then(|r| r)
         });
         if let Err(e) = dispatch {
-            self.finish_homing();
             return Err(PyRuntimeError::new_err(e));
         }
         Ok(())
@@ -507,7 +492,7 @@ impl PyMotionEngine {
 
     fn consume_buffered_early_trips(&self) {
         let pending: Vec<(u32, u8, u64)> =
-            std::mem::take(&mut *self.homing.pending_trips.lock_ok());
+            std::mem::take(&mut self.homing.lifecycle.lock_ok().pending_trips);
         if pending.is_empty() {
             return;
         }
@@ -525,29 +510,19 @@ impl PyMotionEngine {
         }
     }
 
-    fn abort_context(&self) -> Option<AbortContext> {
-        let guard = self.homing.run.lock_ok();
-        guard.as_ref().map(|r| AbortContext {
-            all_axis_keys: r.all_axis_keys.clone(),
-            cohort: r.cohort,
-            axis_key: r.axis_key,
-            pending_suppresses: Arc::clone(&r.pending_suppresses),
-        })
-    }
-
     fn flush_aborted_cohort(
         &self,
         py: Python<'_>,
-        all_axis_keys: Vec<crate::types::AxisKey>,
+        all_axis_keys: Vec<motion_core::types::AxisKey>,
         cohort: u64,
     ) -> bool {
         let Some(tx) = self.pump.tx.lock_ok().clone() else {
             return true;
         };
-        let _ = tx.send(crate::pump::PumpMsg::Flush(all_axis_keys));
-        let _ = tx.send(crate::pump::PumpMsg::DripDisarm(cohort));
+        let _ = tx.send(motion_core::pump::PumpMsg::Flush(all_axis_keys));
+        let _ = tx.send(motion_core::pump::PumpMsg::DripDisarm(cohort));
         let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
-        let _ = tx.send(crate::pump::PumpMsg::Barrier(ack_tx));
+        let _ = tx.send(motion_core::pump::PumpMsg::Barrier(ack_tx));
         let barrier = py.detach(move || ack_rx.recv_timeout(std::time::Duration::from_secs(1)));
         if barrier.is_err() {
             tracing::error!(
@@ -562,11 +537,11 @@ impl PyMotionEngine {
 
     fn reconcile_aborted_position(
         &self,
-        axis_key: crate::types::AxisKey,
+        axis_key: motion_core::types::AxisKey,
     ) -> Result<geometry::MachinePos, ()> {
         let final_cartesian = {
             let configs = self.mcu_axis_configs.lock_ok();
-            crate::homing::final_cartesian_position(&configs, &self.motion_history)
+            motion_core::homing::final_cartesian_position(&configs, &self.motion_history)
         };
         final_cartesian.map_err(|e| {
             tracing::error!(
@@ -586,12 +561,12 @@ impl PyMotionEngine {
         let Some(planner) = planner_guard.as_ref() else {
             return true;
         };
-        let open_result = planner.stream_open(crate::mcu_config::reanchor_stream_pos(gcode));
-        if let Err(e) = open_result {
+        let reset_result = planner.reset(motion_core::mcu_config::reanchor_stream_pos(gcode));
+        if let Err(e) = reset_result {
             tracing::error!(
-                event = "home_abort_stream_open_failed",
+                event = "home_abort_stream_reset_failed",
                 error = ?e,
-                "home_abort: runtime_stream_open failed after drain — \
+                "home_abort: stream reset failed after drain — \
                  commanded_pos is STALE; a firmware restart is required: {e:?}"
             );
             return false;
@@ -599,33 +574,23 @@ impl PyMotionEngine {
         true
     }
 
-    /// A partial trip may have engaged suppress masks on motor MCUs before
-    /// the run aborted; ResumeStream never reaches them on this path, so the
-    /// masks must be cleared explicitly or a stepper stays silently frozen.
     fn clear_all_suppress_masks(&self) -> bool {
         use mcu_protocol::codec::{Decode as _, Encode as _};
         let transports: Vec<(u32, Arc<dyn host_rt::mcu_call::McuCall>)> = {
             let mcus = self.mcus.lock_ok();
             mcus.iter()
                 .filter(|(_, conn)| conn.endpoint_conn.is_some() || conn.runtime_caps.is_some())
-                .filter_map(|(&id, conn)| {
-                    if let Some(io) = conn.host_io.as_ref() {
-                        Some((id, Arc::clone(io) as Arc<dyn host_rt::mcu_call::McuCall>))
-                    } else {
-                        conn.endpoint_conn
-                            .as_ref()
-                            .map(|ec| (id, Arc::clone(ec) as Arc<dyn host_rt::mcu_call::McuCall>))
-                    }
-                })
+                .filter_map(|(&id, conn)| conn.homing_transport().map(|transport| (id, transport)))
                 .collect()
         };
         let mut ok = true;
         for (mcu_id, transport) in transports {
-            let mut body = Vec::with_capacity(3);
+            let mut body = Vec::with_capacity(4);
             mcu_protocol::messages::StepperSuppress {
                 motor: 0xFF,
                 stepper: 0xFF,
                 engage: 0,
+                stepper_oid: 0xFF,
             }
             .encode(&mut body);
             let outcome = transport
@@ -653,8 +618,32 @@ impl PyMotionEngine {
         ok
     }
 
-    fn finish_homing(&self) {
-        self.homing.finish();
+    fn recover_aborted_home(&self, py: Python<'_>, ctx: &HomingRun) -> Option<[f64; 3]> {
+        if !self.flush_aborted_cohort(py, ctx.all_axis_keys.clone(), ctx.cohort) {
+            return None;
+        }
+        py.detach(|| self.homing.wait_for_pending_suppresses(ctx.cohort))
+            .ok()?;
+        if !self.clear_all_suppress_masks() {
+            return None;
+        }
+        let machine = self.reconcile_aborted_position(ctx.axis_key).ok()?;
+        let drain = self.drain.clone();
+        if let Err(e) = py.detach(|| drain.wait_drained(DRAIN_TIMEOUT)) {
+            tracing::error!(
+                event = "home_abort_drain_timeout",
+                error = %e,
+                "home_abort: commanded position is stale; a firmware restart is required"
+            );
+            return None;
+        }
+        let gcode = self.gcode_from_machine(machine);
+        if !self.reopen_stream_at(gcode) {
+            return None;
+        }
+        *self.commanded_pos.lock_ok() = gcode;
+        *self.last_g5_pq.lock_ok() = None;
+        Some([gcode.x(), gcode.y(), gcode.z()])
     }
     /// Motion history answers in machine space (the lowerer's output frame);
     /// this is the bridge crossing for full kinematic states returned to
@@ -691,7 +680,6 @@ impl PyMotionEngine {
             router: Arc::clone(&self.router),
             motion_history: Arc::clone(&self.motion_history),
             mcu_axis_configs: Arc::clone(&self.mcu_axis_configs),
-            stepcompress_endpoints: Arc::clone(&self.stepcompress_endpoints),
             axis_transports: Arc::clone(&self.axis_transports.lock_ok()),
         }
     }

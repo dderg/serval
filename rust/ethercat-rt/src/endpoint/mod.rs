@@ -2,32 +2,53 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::capture::{Capture, PendingStart, PendingStop};
 use crate::damper::DiffDamperBank;
-use crate::dynamics::DynamicsModel;
 use crate::live_tap::LiveTap;
 use crate::mailbox::MailboxWorker;
 use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
-use crate::setpoint::{SampleGrid, SetpointEntry, SetpointRing};
 use crate::strain_comp::StrainCompBank;
 use crate::stream_halt::StreamHalt;
 use crate::torque::TorqueGate;
 use crate::trim::DiffTrimBank;
 use crate::wire::status_heartbeat_frame;
+use ethercat_setpoint::dynamics::DynamicsModel;
+use ethercat_setpoint::setpoint::{SampleGrid, SetpointEntry, SetpointRing};
 
 #[cfg(feature = "hw")]
 mod bringup;
 mod commands;
 mod cycle;
 mod drive;
+mod sim;
 #[cfg(test)]
 mod tests;
 
 #[cfg(feature = "hw")]
 pub use bringup::bringup;
+pub use sim::{sim_endpoint, SimConfig, SimDrive};
 
 use drive::DriveChain;
 
-static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
+/// The DC loop's exit latch. Public so a no-hardware endpoint can share it
+/// with the claim wait before `run` takes over.
+pub static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_sigterm(_: libc::c_int) {
+    SIGTERM_RECEIVED.store(true, Ordering::Release);
+}
+
+/// Latch SIGTERM so the DC loop disables the drives and exits cleanly.
+#[allow(unsafe_code)]
+pub fn install_sigterm_handler() {
+    // SAFETY: on_sigterm only touches a static AtomicBool; SA_RESTART (and no
+    // SA_RESETHAND) keeps a second SIGTERM on the clean-shutdown path too.
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = on_sigterm as *const () as libc::sighandler_t;
+        sa.sa_flags = libc::SA_RESTART;
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+    }
+}
 
 pub struct EndpointCtx {
     server: FrameServer,
@@ -114,37 +135,15 @@ pub struct EndpointCtx {
     last_dispatch_ns: i64,
     last_pre_work_ns: i64,
     prev_exchange_ns: i64,
-    last_wake_late_ns: i64,
-    last_recv_ns: i64,
-    last_process_ns: i64,
-    last_send_ns: i64,
-    wake_late_max_ns: i64,
-    recv_max_ns: i64,
-    process_max_ns: i64,
-    send_max_ns: i64,
     /// Instant the previous DC exchange returned; the span from here to the
     /// next exchange entry is every non-exchange nanosecond of the loop —
-    /// the region the stage clocks above do not cover.
+    /// the region the stage clocks do not cover.
     prev_exchange_return: Option<std::time::Instant>,
-    last_pre_cycle_ns: i64,
-    last_post_cycle_ns: i64,
-    last_inter_exchange_ns: i64,
-    pre_cycle_max_ns: i64,
-    post_cycle_max_ns: i64,
-    inter_exchange_max_ns: i64,
     last_nivcsw: i64,
-    /// Sub-spans of the post-exchange region — reported on the next cycle's
-    /// fault events so an overrun names the exact call that ate the time.
-    last_fault_ns: i64,
-    last_capture_ns: i64,
-    last_wkc_ns: i64,
-    last_heartbeat_ns: i64,
-    last_telemetry_ns: i64,
-    fault_max_ns: i64,
-    capture_max_ns: i64,
-    wkc_max_ns: i64,
-    heartbeat_max_ns: i64,
-    telemetry_max_ns: i64,
+    /// Per-cycle stage durations and their worst values since the last
+    /// telemetry beat, reported on fault events so an overrun names the
+    /// exact call that ate the time.
+    spans: cycle::CycleSpans,
 }
 
 pub fn run(ctx: &mut EndpointCtx) {

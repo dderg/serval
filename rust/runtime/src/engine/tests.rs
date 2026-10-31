@@ -7,8 +7,8 @@
 use core::sync::atomic::Ordering;
 
 use crate::engine::Engine;
-use crate::error::RUNTIME_OK;
-use crate::stepping_state::{StepMode, StepperBindingRust, TMC_CS_OID_NONE};
+use runtime_contract::axes::{StepMode, StepperBindingRust, TMC_CS_OID_NONE};
+use runtime_contract::error::FaultCode;
 
 fn engine_with_z_axis(mode: StepMode) -> Engine {
     let mut engine = Engine::default();
@@ -30,7 +30,7 @@ fn engine_with_z_axis(mode: StepMode) -> Engine {
         },
     ];
     let rc = engine.configure_axis(2, mode, 0.00125, &bindings);
-    assert_eq!(rc, RUNTIME_OK);
+    assert_eq!(rc, FaultCode::None.as_i32());
     engine
 }
 
@@ -43,7 +43,7 @@ fn configure_pulse_axis(engine: &mut Engine, axis: usize, mstep: f32) {
     }];
     assert_eq!(
         engine.configure_axis(axis as u8, StepMode::Pulse, mstep, &bindings),
-        RUNTIME_OK
+        FaultCode::None.as_i32()
     );
 }
 

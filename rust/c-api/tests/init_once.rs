@@ -24,10 +24,6 @@ pub extern "C" fn runtime_widened_host_clock() -> u64 {
     0
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn runtime_host_now_us() -> u64 {
-    0
-}
-#[unsafe(no_mangle)]
 pub extern "C" fn runtime_irq_save() -> u32 {
     0
 }
@@ -57,5 +53,5 @@ fn second_init_returns_null() {
 #[test]
 fn null_handle_returns_null_ptr_error() {
     let r = unsafe { c_api::runtime_set_axis_mode(std::ptr::null_mut(), 0, 0) };
-    assert_eq!(r, c_api::RUNTIME_ERR_NULL_PTR);
+    assert_eq!(r, c_api::FaultCode::NullPtr.as_i32());
 }

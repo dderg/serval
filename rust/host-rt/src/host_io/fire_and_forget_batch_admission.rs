@@ -9,7 +9,7 @@ use crate::host_io::window::MAX_PENDING_BLOCKS;
 use crate::host_io::wire::{
     MESSAGE_HEADER_SIZE, MESSAGE_TRAILER_SIZE, extract_packet, pack_blocks,
 };
-use crate::host_io::{McuHostIo, McuHostIoConfig, ReactorCommand};
+use crate::host_io::{McuHostIo, ReactorCommand};
 use crate::transport::TransportError;
 
 const DRAIN_TICK_LIMIT: usize = 500;
@@ -28,7 +28,7 @@ fn fill_window(h: &mut ReactorHarness) -> Vec<Vec<u8>> {
             )
             .expect("submission dispatches into an empty window");
     }
-    assert!(h.reactor.unacked_window.is_full());
+    assert!(crate::host_io::window::is_full(&h.reactor.unacked_window));
     payloads
 }
 
@@ -147,7 +147,7 @@ fn the_published_depth_reopens_once_the_backlog_drains() {
 #[test]
 fn a_batch_is_refused_whole_while_the_reactor_is_at_its_high_water_mark() {
     let (port, _handles) = FakeSerialPort::new();
-    let io = McuHostIo::from_port_skip_identify(port, McuHostIoConfig::default());
+    let io = McuHostIo::from_port_skip_identify(port, "test");
     let frames: Vec<(&str, Vec<(String, ArgValue)>)> =
         vec![("queue_step", vec![("oid".to_string(), ArgValue::Int(7))])];
 

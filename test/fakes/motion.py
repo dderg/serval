@@ -43,9 +43,6 @@ class FakeKin:
     def lanes(self):
         return self._lanes
 
-    def claimed_axes(self):
-        return [axis for _, axis, _ in self._lanes]
-
     def mcu_tag(self, lanes_on_mcu):
         on_mcu = set(lanes_on_mcu)
         if self.coupled_xy() and 0 in on_mcu and 1 in on_mcu:
@@ -146,8 +143,6 @@ class FakeEngine:
         self._returns.setdefault("sdo_write", (2, 100))
         self._returns.setdefault("stop_servo_capture", (0, 1234, None))
         self._returns.setdefault("engine_call", {})
-        self._returns.setdefault("queued_motion_secs", 0.0)
-        self._returns.setdefault("dispatched_lead_secs", 0.0)
         self._returns.setdefault("get_last_move_time", 0.0)
 
     def _call(self, name, *args):
@@ -199,14 +194,8 @@ class FakeEngine:
     def frontier_print_time(self, mcu_handle):
         return self._call("frontier_print_time", mcu_handle)
 
-    def queued_motion_secs(self):
-        return self._call("queued_motion_secs")
-
     def submit_move(self, dx, dy, dz, de, feedrate):
         return self._call("submit_move", dx, dy, dz, de, feedrate)
-
-    def dispatched_lead_secs(self):
-        return self._call("dispatched_lead_secs")
 
     def get_last_move_time(self):
         return self._call("get_last_move_time")
@@ -228,8 +217,8 @@ class FakeEngine:
             "sdo_write", handle, slot, index, subindex, size, value
         )
 
-    def set_strain_comp(self, handle, slot_a, slot_b, *args):
-        return self._call("set_strain_comp", handle, slot_a, slot_b, *args)
+    def set_strain_comp(self, handle, pair, grid):
+        return self._call("set_strain_comp", handle, pair, grid)
 
     def set_drive_limits(self, handle, drives):
         return self._call("set_drive_limits", handle, drives)
@@ -288,11 +277,15 @@ class FakeEngine:
     def submit_dwell(self, delay):
         return self._call("submit_dwell", delay)
 
-    def submit_nudge(
-        self, mcu_id, axis_idx, motor_mask, delta_mm, speed, accel
-    ):
+    def submit_nudge(self, target, motion):
         return self._call(
-            "submit_nudge", mcu_id, axis_idx, motor_mask, delta_mm, speed, accel
+            "submit_nudge",
+            target["mcu_id"],
+            target["axis_idx"],
+            target["motor_mask"],
+            motion["delta_mm"],
+            motion["speed"],
+            motion["accel"],
         )
 
 
@@ -363,9 +356,6 @@ class FakeToolhead:
     def wait_moves(self):
         self.calls.append(("wait_moves",))
 
-    def wait_moves_and_mcu(self):
-        self.calls.append(("wait_moves_and_mcu",))
-
     def wait_until_print_time(self, print_time):
         self.calls.append(("wait_until_print_time", print_time))
 
@@ -376,9 +366,6 @@ class FakeToolhead:
         self.calls.append(("get_last_move_time",))
         self._last_move_time += self._move_time_step
         return self._last_move_time
-
-    def get_max_velocity(self):
-        return self.max_velocity, self.max_accel
 
     def get_max_axis_accel(self, axis_idx):
         return self._max_axis_accel

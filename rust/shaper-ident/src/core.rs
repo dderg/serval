@@ -6,7 +6,6 @@ use std::f64::consts::PI;
 
 use realfft::RealFftPlanner;
 
-pub const MIN_FREQ: f64 = 5.0;
 pub const MAX_FREQ: f64 = 1000.0;
 pub const WINDOW_T_SEC: f64 = 0.5;
 pub const MAX_SHAPER_FREQ: f64 = 1000.0;
@@ -387,22 +386,32 @@ pub enum ShaperFreqs {
     List(Vec<f64>),
 }
 
+/// The tuning knobs shared by `fit_shaper` and `fit_smoother`.
+#[derive(Clone, Default)]
+pub struct FitParams {
+    pub damping_ratio: Option<f64>,
+    pub scv: f64,
+    pub max_smoothing: Option<f64>,
+    pub test_damping_ratios: Option<Vec<f64>>,
+    pub max_freq: Option<f64>,
+}
+
 /// Port of `fit_shaper` for a single shaper family. Returns `None` only when
 /// no frequency was tested.
-#[allow(clippy::too_many_arguments)]
 pub fn fit_shaper(
     cfg: &ShaperCfg,
     freq_bins_in: &[f64],
     psd_in: &[f64],
     shaper_freqs: &ShaperFreqs,
-    damping_ratio: Option<f64>,
-    scv: f64,
-    max_smoothing: Option<f64>,
-    test_damping_ratios: Option<Vec<f64>>,
-    max_freq: Option<f64>,
+    params: &FitParams,
 ) -> Option<FitResult> {
-    let damping_ratio = damping_ratio.unwrap_or(DEFAULT_DAMPING_RATIO);
-    let test_damping_ratios = test_damping_ratios.unwrap_or_else(|| TEST_DAMPING_RATIOS.to_vec());
+    let damping_ratio = params.damping_ratio.unwrap_or(DEFAULT_DAMPING_RATIO);
+    let scv = params.scv;
+    let max_smoothing = params.max_smoothing;
+    let test_damping_ratios = params
+        .test_damping_ratios
+        .clone()
+        .unwrap_or_else(|| TEST_DAMPING_RATIOS.to_vec());
 
     let test_freqs: Vec<f64> = match shaper_freqs {
         ShaperFreqs::List(v) => v.clone(),
@@ -417,7 +426,7 @@ pub fn fit_shaper(
         return None;
     }
     let test_max = test_freqs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let base = max_freq.filter(|&m| m != 0.0).unwrap_or(MAX_FREQ);
+    let base = params.max_freq.filter(|&m| m != 0.0).unwrap_or(MAX_FREQ);
     let max_freq = base.max(test_max);
 
     let mut freq_bins = Vec::new();
@@ -651,12 +660,14 @@ pub fn fit_smoother(
     freq_bins_in: &[f64],
     psd_in: &[f64],
     shaper_freqs: &ShaperFreqs,
-    scv: f64,
-    max_smoothing: Option<f64>,
-    test_damping_ratios: Option<Vec<f64>>,
-    max_freq: Option<f64>,
+    params: &FitParams,
 ) -> Option<FitResult> {
-    let test_damping_ratios = test_damping_ratios.unwrap_or_else(|| TEST_DAMPING_RATIOS.to_vec());
+    let scv = params.scv;
+    let max_smoothing = params.max_smoothing;
+    let test_damping_ratios = params
+        .test_damping_ratios
+        .clone()
+        .unwrap_or_else(|| TEST_DAMPING_RATIOS.to_vec());
 
     let test_freqs: Vec<f64> = match shaper_freqs {
         ShaperFreqs::List(v) => v.clone(),
@@ -671,7 +682,7 @@ pub fn fit_smoother(
         return None;
     }
     let test_max = test_freqs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let base = max_freq.filter(|&m| m != 0.0).unwrap_or(MAX_FREQ);
+    let base = params.max_freq.filter(|&m| m != 0.0).unwrap_or(MAX_FREQ);
     let max_freq = base.max(test_max);
 
     let mut freq_bins = Vec::new();

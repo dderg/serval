@@ -1,8 +1,8 @@
 use super::*;
-use crate::mcu_config::{LaneKind, McuAxisConfig, StepcompressEncoder};
+use crate::mcu_config::{LaneKind, McuAxisConfig, McuHardware, StepcompressEncoder};
 use crate::pump::pump_past_guard_secs;
 use host_rt::clock::{Clock, MockClock};
-use host_rt::passthrough_queue::PassthroughRouter;
+use host_rt::passthrough_queue::{McuHandle, PassthroughRouter};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -21,38 +21,34 @@ fn stepcompress_cfg() -> McuAxisConfig {
     McuAxisConfig {
         mcu_id: MCU_ID,
         axes: vec![0],
-        kinematics: 0,
-        max_motor_velocity: vec![200.0],
         ethercat: false,
         lane_kinds: vec![LaneKind::Pulse],
-        motor_counts: vec![1],
-        microstep_distance: vec![0.01],
-        invert_dir: vec![false],
-        stepper_oids: vec![7],
-        move_queue_slots: 128,
-        step_pulse_seconds: vec![0.000_002],
         stepcompress_encoders: vec![StepcompressEncoder::HighPrecision],
-        phase_sample_rate: 0.0,
-        phase_ring_depth: 0,
-        stepcompress_max_error_secs: 0.0,
+        hw: McuHardware {
+            kinematics: 0,
+            max_motor_velocity: vec![200.0],
+            motor_counts: vec![1],
+            microstep_distance: vec![0.01],
+            invert_dir: vec![false],
+            stepper_oids: vec![7],
+            move_queue_slots: 128,
+            step_pulse_seconds: vec![0.000_002],
+            phase_sample_rate: 0.0,
+            phase_ring_depth: 0,
+            stepcompress_max_error_secs: 0.0,
+        },
     }
 }
 
-fn pump_sink(router: PassthroughRouter) -> PumpSink {
-    let (tx, _rx) = crossbeam_channel::unbounded();
-    PumpSink {
+fn pump_sink(router: PassthroughRouter) -> Projection {
+    Projection {
         transports: Arc::new(crate::axis_transport::AxisTransports::from_configs(&[])),
         router: Arc::new(Mutex::new(router)),
         anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
         mcu_configs: vec![stepcompress_cfg()],
-        pump_tx: tx,
-        pump_control: None,
         counter: Arc::new(AtomicU64::new(0)),
-        active_drip_cohort: Arc::new(Mutex::new(None)),
-        motion_history: Arc::new(Mutex::new(crate::motion_history::HistoryStore::default())),
         frontier: Arc::new(super::super::CommittedFrontier::default()),
-        frozen_projection: Mutex::new(std::collections::HashMap::new()),
-        transport_fatal: Arc::default(),
+        frozen_projection: std::collections::HashMap::new(),
     }
 }
 
@@ -66,12 +62,7 @@ fn seed_clock_for(
     last_clock: u64,
 ) {
     router
-        .set_clock_est(
-            crate::types::mcu_handle_from_raw(mcu_id),
-            freq,
-            offset_est,
-            last_clock,
-        )
+        .set_clock_est(McuHandle::from_raw(mcu_id), freq, offset_est, last_clock)
         .unwrap();
 }
 
@@ -84,7 +75,7 @@ fn seed_clock(router: &mut PassthroughRouter, freq: f64, offset_est: f64, last_c
 /// reanchor seeds the frozen projection from the live record at
 /// `seam_host = host_now + lead`, and the first piece's start clock IS that
 /// projection (piece u_start = 0 lands exactly on the seam).
-fn first_volley_clock(sink: &PumpSink, host_now: f64) -> u64 {
+fn first_volley_clock(sink: &mut Projection, host_now: f64) -> u64 {
     let seam_host = host_now + crate::anchor::DEFAULT_LEAD_SECS;
     sink.reanchor_projection(MCU_ID, seam_host)
         .expect("a synced clocksync must anchor the projection");
@@ -95,7 +86,7 @@ fn first_volley_clock(sink: &PumpSink, host_now: f64) -> u64 {
 /// every frame's start clock against.
 fn egress_guard_passes(router: &PassthroughRouter, first_clock: u64, freq: f64) -> bool {
     let (live_now, live_freq) = router
-        .ack_clock_and_freq(crate::types::mcu_handle_from_raw(MCU_ID))
+        .ack_clock_and_freq(McuHandle::from_raw(MCU_ID))
         .expect("synced");
     let guard_ticks = (pump_past_guard_secs() * live_freq) as u64;
     let _ = freq;
@@ -140,12 +131,12 @@ fn a_healthy_clocksync_lands_the_first_volley_lead_seconds_ahead_of_the_true_clo
     // fired at counter 536880068 = 3.196 s of uptime).
     clock.advance(Duration::from_secs_f64(3.2 - host_at));
     let host_now = router.host_now_secs();
-    let sink = pump_sink(router);
-    let first_clock = first_volley_clock(&sink, host_now);
+    let mut sink = pump_sink(router);
+    let first_clock = first_volley_clock(&mut sink, host_now);
     let live_freq = sink
         .router
         .lock_ok()
-        .ack_clock_and_freq(crate::types::mcu_handle_from_raw(MCU_ID))
+        .ack_clock_and_freq(McuHandle::from_raw(MCU_ID))
         .unwrap()
         .1;
 
@@ -204,12 +195,12 @@ fn a_clock_record_lagging_the_true_mcu_puts_the_first_volley_past_and_blinds_the
 
     clock.advance(Duration::from_secs_f64(3.2 - sample_host));
     let host_now = router.host_now_secs();
-    let sink = pump_sink(router);
-    let first_clock = first_volley_clock(&sink, host_now);
+    let mut sink = pump_sink(router);
+    let first_clock = first_volley_clock(&mut sink, host_now);
     let live_freq = sink
         .router
         .lock_ok()
-        .ack_clock_and_freq(crate::types::mcu_handle_from_raw(MCU_ID))
+        .ack_clock_and_freq(McuHandle::from_raw(MCU_ID))
         .unwrap()
         .1;
 
@@ -284,20 +275,22 @@ fn a_retimed_reanchor_reseeds_moving_lanes_but_never_idle_hold_lanes() {
     sink.mcu_configs.push(crate::mcu_config::McuAxisConfig {
         mcu_id: 1,
         axes: vec![3],
-        kinematics: 0,
-        max_motor_velocity: vec![200.0],
         ethercat: false,
         lane_kinds: vec![LaneKind::Pulse],
-        motor_counts: vec![1],
-        microstep_distance: vec![0.01],
-        invert_dir: vec![false],
-        stepper_oids: vec![8],
-        move_queue_slots: 128,
-        step_pulse_seconds: vec![0.000_002],
         stepcompress_encoders: vec![StepcompressEncoder::HighPrecision],
-        phase_sample_rate: 0.0,
-        phase_ring_depth: 0,
-        stepcompress_max_error_secs: 0.0,
+        hw: McuHardware {
+            kinematics: 0,
+            max_motor_velocity: vec![200.0],
+            motor_counts: vec![1],
+            microstep_distance: vec![0.01],
+            invert_dir: vec![false],
+            stepper_oids: vec![8],
+            move_queue_slots: 128,
+            step_pulse_seconds: vec![0.000_002],
+            phase_sample_rate: 0.0,
+            phase_ring_depth: 0,
+            stepcompress_max_error_secs: 0.0,
+        },
     });
     let segment = segment_with_axes(vec![
         moving_axis(5.0, 10.0),
@@ -381,7 +374,7 @@ fn a_reanchor_reseeds_from_the_live_clock_not_the_drifted_frozen_slope() {
     let freq_est1 = F_TRUE * (1.0 - 200e-6);
     seed_clock(&mut router, freq_est1, 1.0, true_clock(1.0) as u64);
     clock.advance(Duration::from_secs_f64(1.0));
-    let sink = pump_sink(router);
+    let mut sink = pump_sink(router);
     let seam1 = sink.router.lock_ok().host_now_secs() + crate::anchor::DEFAULT_LEAD_SECS;
     sink.reanchor_projection(MCU_ID, seam1).unwrap();
 
@@ -400,7 +393,6 @@ fn a_reanchor_reseeds_from_the_live_clock_not_the_drifted_frozen_slope() {
     let seam2 = host_now + crate::anchor::DEFAULT_LEAD_SECS;
     let chained_would_be = sink
         .frozen_projection
-        .lock_ok()
         .get(&MCU_ID)
         .copied()
         .expect("anchor 1 must have frozen a projection")
@@ -408,7 +400,7 @@ fn a_reanchor_reseeds_from_the_live_clock_not_the_drifted_frozen_slope() {
     let live_now_at_reanchor = sink
         .router
         .lock_ok()
-        .host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(MCU_ID), seam2)
+        .host_time_to_mcu_clock(McuHandle::from_raw(MCU_ID), seam2)
         .unwrap();
 
     let drift_secs = (chained_would_be as f64 - live_now_at_reanchor as f64) / F_TRUE;
@@ -442,7 +434,7 @@ fn a_parked_hold_lane_rebases_once_its_frozen_slope_drifts_past_the_floor() {
     let _handle = router.claim_mcu("stepcompress");
     seed_clock(&mut router, F_TRUE, 0.0, true_clock(0.0) as u64);
 
-    let sink = pump_sink(router);
+    let mut sink = pump_sink(router);
     let hold_segment = segment_with_axes(vec![
         hold_axis(0.0),
         hold_axis(0.0),
@@ -451,7 +443,7 @@ fn a_parked_hold_lane_rebases_once_its_frozen_slope_drifts_past_the_floor() {
     ]);
     let cfg = sink.mcu_configs[0].clone();
     sink.reanchor_projection(MCU_ID, 0.25).unwrap();
-    let prev = sink.frozen_projection.lock_ok().get(&MCU_ID).copied();
+    let prev = sink.frozen_projection.get(&MCU_ID).copied();
 
     assert!(
         !sink.needs_rebase(&cfg, &hold_segment, true, prev, 0.25),

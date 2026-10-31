@@ -101,7 +101,7 @@ def build(phase_slots=(), tmcs=None):
         printer.add_object("tmc5160 %s" % (name,), tmc)
     motion = FakeMotion(printer, engine)
     motion_setup._configure_one_mcu(
-        motion, "mcu", mcu, 7, slot_steppers, False, 0, 1
+        motion, "mcu", mcu, 7, slot_steppers, False, 1
     )
     return motion, printer, engine, mcu
 

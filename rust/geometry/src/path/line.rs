@@ -10,7 +10,7 @@ pub struct Line {
 
 impl Line {
     pub fn try_new(start: [f64; 3], end: [f64; 3]) -> Result<Self, GeometryError> {
-        let len = euclidean_distance(start, end);
+        let len = crate::vec3::dist(start, end);
         if len == 0.0 {
             return Err(GeometryError::ZeroMotion);
         }
@@ -18,15 +18,8 @@ impl Line {
     }
 
     pub fn length(&self) -> f64 {
-        euclidean_distance(self.start, self.end)
+        crate::vec3::dist(self.start, self.end)
     }
-}
-
-fn euclidean_distance(a: [f64; 3], b: [f64; 3]) -> f64 {
-    let dx = b[0] - a[0];
-    let dy = b[1] - a[1];
-    let dz = b[2] - a[2];
-    (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
 impl CurvatureProfile for Line {

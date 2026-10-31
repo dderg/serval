@@ -2,12 +2,11 @@
 //! exactly on the curvature ceiling (disk rail = 0) and tiny debris features
 //! whose curvature spikes collapse the feasible speed at printing feeds.
 
-use crossbeam_channel::unbounded;
 use geometry::path::lowering::PositionProfile;
 use motion_pipeline::fit_stage::FitStage;
 use motion_pipeline::planner::Planner;
 use motion_pipeline::types::PlannedMove;
-use motion_pipeline::{BaseItem, Lowerer, PlannedItem, StreamConfig, StreamInput};
+use motion_pipeline::{BaseItem, Lowerer, PlannedItem, StreamConfig};
 use pipeline_snapshot::waypoints::parse_gcode;
 use pipeline_snapshot::{
     ExactTrajectory, SNAPSHOT_MAX_BUFFER_MOVES, SampleSide, TRAJECTORY_FIT_TOL_ACCEL_MM_S2,
@@ -42,29 +41,21 @@ fn stream_case(
         max_buffer_moves: SNAPSHOT_MAX_BUFFER_MOVES,
         limits,
     };
-    let (fitted_tx, fitted_rx) = unbounded();
-    let (planned_tx, planned_rx) = unbounded();
-    let mut fit = FitStage::new(config.corner).into_driver(fitted_tx);
+    let mut fit = FitStage::new(config.corner).into_driver();
     let mut planner = Planner::new(config);
-    let mut planned: Vec<PlannedMove> = Vec::new();
-    let pump = |planner: &mut Planner, planned: &mut Vec<PlannedMove>| {
-        while let Ok(item) = fitted_rx.try_recv() {
-            assert!(planner.feed(item, &planned_tx), "planner rejected input");
+    let mut planned = Vec::new();
+    let mut collect = |item| {
+        if let PlannedItem::Move(m) = item {
+            planned.push(m);
         }
-        while let Ok(item) = planned_rx.try_recv() {
-            if let PlannedItem::Move(m) = item {
-                planned.push(m);
-            }
-        }
+        true
     };
     for m in moves {
-        assert!(fit.feed(StreamInput::from(m)));
-        pump(&mut planner, &mut planned);
+        assert!(fit.feed(m.into(), &mut |item| planner.feed(item, &mut collect)));
     }
-    assert!(fit.finish());
-    pump(&mut planner, &mut planned);
-    assert!(planner.finish(&planned_tx), "planner failed to finish");
-    pump(&mut planner, &mut planned);
+    assert!(fit.finish(&mut |item| planner.feed(item, &mut collect)));
+    assert!(planner.finish(&mut collect));
+
     assert!(!planned.is_empty());
     planned
 }
@@ -138,20 +129,27 @@ fn lower_run(planned: &[PlannedMove]) -> Vec<trajectory::ContinuousSegment> {
     {
         home[..3].copy_from_slice(&seg.point_at(0.0));
     }
-    let (lowered_tx, lowered_rx) = unbounded();
-    let mut lowerer = Lowerer::new(trajectory::AxisChainSet::default(), home, 0.0);
+    let mut lowered = Vec::new();
+    let mut collect = |item| {
+        lowered.push(item);
+        true
+    };
+    let mut lowerer = Lowerer::new(
+        trajectory::AxisChainSet::default().rest_support(),
+        home,
+        0.0,
+    );
     for pm in planned {
         let item = PlannedItem::Move(PlannedMove {
             geometry: pm.geometry.clone(),
             velocity: pm.velocity.clone(),
         });
-        assert!(lowerer.feed(item, &lowered_tx), "lowerer rejected input");
+        assert!(lowerer.feed(item, &mut collect), "lowerer rejected input");
     }
-    drop(lowered_tx);
-    lowered_rx
+    lowered
         .into_iter()
         .filter_map(|item| match item {
-            BaseItem::Seg(seg) => Some(seg.segment),
+            BaseItem::Seg(seg) => Some(seg),
             _ => None,
         })
         .collect()

@@ -1,10 +1,8 @@
 /// A curvature (or boundary) speed limit this close to the flat ceiling is
 /// the fitter's own blend sizing — it solves the corner radius so the apex
 /// speed lands *at* the feedrate, to float tolerance. Taking the raw `min`
-/// would notch the cap by ~1e-6 mm/s at every blend, and the jerk-limited
-/// pass would dutifully dip into each notch with a nanosecond full-rail
-/// bang whose phase joints then ring through the lowering as absurd
-/// acceleration slivers. Snap such limits up to the ceiling instead.
+/// would notch the cap by ~1e-6 mm/s at every blend. Snap such limits up to
+/// the ceiling instead.
 pub(super) const CAP_NOTCH_REL: f64 = 1e-6;
 
 pub(super) fn notch_free_min(flat_ceiling: f64, limit: f64) -> f64 {
@@ -20,7 +18,6 @@ const KAPPA_EPS: f64 = 1e-9;
 pub(super) struct Kinematics {
     pub length: f64,
     pub accel: f64,
-    pub jerk: f64,
     pub kappa0: f64,
     pub sigma: f64,
     pub flat_ceiling: f64,
@@ -31,7 +28,6 @@ impl Kinematics {
         Kinematics {
             length: self.length,
             accel: self.accel,
-            jerk: self.jerk,
             kappa0: self.kappa0 + self.sigma * self.length,
             sigma: -self.sigma,
             flat_ceiling: self.flat_ceiling,

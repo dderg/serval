@@ -1,16 +1,8 @@
 #![allow(unsafe_code)]
 
 // Phase constants — must match src/generic/fault_handler.h exactly.
-#[allow(dead_code)]
-pub(crate) const RT_PHASE_IDLE: u32 = 0;
 pub(crate) const RT_PHASE_ISR_ENTER: u32 = 1;
-#[allow(dead_code)]
-pub(crate) const RT_PHASE_WIDEN: u32 = 2;
-#[allow(dead_code)]
-pub(crate) const RT_PHASE_GUARD: u32 = 3;
 pub(crate) const RT_PHASE_TICK: u32 = 4;
-#[allow(dead_code)]
-pub(crate) const RT_PHASE_STEP_ENQ: u32 = 8;
 pub(crate) const RT_PHASE_ISR_EXIT: u32 = 9;
 
 #[cfg(not(any(test, feature = "host")))]

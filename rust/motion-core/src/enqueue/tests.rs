@@ -1,6 +1,6 @@
 use super::*;
 use crate::kinematics::KinematicsModule;
-use crate::mcu_config::{AXIS_X, AXIS_Y, KINEMATICS_COREXY};
+use crate::mcu_config::{AXIS_X, AXIS_Y, KINEMATICS_COREXY, McuHardware};
 use geometry::path::{Line, PathSegment, Segment};
 use geometry::{LawSegment, Move, ScalarLaw, SourceRange, VelocityLimits};
 use trajectory::{MAX_SPAN_SECS, SurfaceMode};
@@ -120,8 +120,11 @@ fn cartesian_cfg(mcu_id: u32, axes: Vec<usize>, ceiling: f64) -> Vec<McuAxisConf
         ethercat: false,
         mcu_id,
         axes,
-        kinematics: 1,
-        max_motor_velocity: vec![ceiling; count],
+        hw: McuHardware {
+            kinematics: 1,
+            max_motor_velocity: vec![ceiling; count],
+            ..Default::default()
+        },
         ..Default::default()
     }]
 }
@@ -131,8 +134,11 @@ fn ec_cfg() -> Vec<McuAxisConfig> {
         ethercat: true,
         mcu_id: 9,
         axes: vec![AXIS_X, AXIS_Y],
-        kinematics: 1,
-        max_motor_velocity: vec![f64::INFINITY; 2],
+        hw: McuHardware {
+            kinematics: 1,
+            max_motor_velocity: vec![f64::INFINITY; 2],
+            ..Default::default()
+        },
         ..Default::default()
     }]
 }
@@ -145,7 +151,7 @@ fn cartesian_x_axis_yields_views_anchored_on_the_exact_projection() {
     let x = msgs
         .iter()
         .find(|m| m.key == AxisKey { mcu_id: 7, axis: 0 })
-        .expect("X axis EnqueueMsg must be present");
+        .expect("X axis projection must be present");
 
     let first = x.spans.first().expect("X must have at least one view");
     assert_eq!(
@@ -166,15 +172,6 @@ fn cartesian_x_axis_yields_views_anchored_on_the_exact_projection() {
     assert!(
         msgs.iter().any(|m| m.key == AxisKey { mcu_id: 7, axis: 2 }),
         "Z axis must be emitted"
-    );
-    assert!(
-        msgs.last().expect("at least one msg").batch_end,
-        "only the last message closes the batch"
-    );
-    assert_eq!(
-        msgs.iter().filter(|m| m.batch_end).count(),
-        1,
-        "exactly one batch_end per dispatch"
     );
 }
 
@@ -255,8 +252,11 @@ fn corexy_motor_lanes_are_the_sum_and_difference_of_the_axes() {
         ethercat: false,
         mcu_id: 1,
         axes: vec![AXIS_X, AXIS_Y],
-        kinematics: KINEMATICS_COREXY,
-        max_motor_velocity: vec![f64::INFINITY; 2],
+        hw: McuHardware {
+            kinematics: KINEMATICS_COREXY,
+            max_motor_velocity: vec![f64::INFINITY; 2],
+            ..Default::default()
+        },
         ..Default::default()
     }];
     let seg = analytic_seg([10.0, 4.0, 0.0], 1.0, 0);

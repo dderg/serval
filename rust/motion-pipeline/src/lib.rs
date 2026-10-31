@@ -1,98 +1,120 @@
 #![allow(clippy::result_large_err)]
 
-use std::thread;
-
-use crossbeam_channel::bounded;
-use trajectory::AxisChainSet;
+use crossbeam_channel::Sender;
+use trajectory::{AxisChainSet, ContinuousSegment};
 
 pub mod fit_stage;
 mod follower_projection;
-pub mod lower_stage;
-pub mod lowering;
+mod lower_stage;
+mod lowering;
 pub mod planner;
-pub mod shaper;
+mod shaper;
 pub mod timing;
 pub mod types;
 
-use fit_stage::FitStage;
+use fit_stage::{FitDriver, FitStage};
 use planner::Planner;
-use types::PipelineHandle;
+use shaper::Shaper;
 
-pub use fit_stage::FitDriver;
-pub use lower_stage::{Lowerer, advance_odometer, dist3, run_lowerer};
-pub use lowering::FitTol;
-pub use shaper::Shaper;
+pub use lower_stage::Lowerer;
 pub use types::{
-    BarrierAck, BaseItem, BaseSegment, CONTIGUITY_EPS_MM, Control, PlannedItem, StreamConfig,
-    StreamError, StreamInput, TrajectoryItem,
+    BarrierAck, BaseItem, CONTIGUITY_EPS_MM, Control, DispatchCommand, PlannedItem, StreamConfig,
+    StreamError, StreamInput, TrajectoryItem, advance_odometer,
 };
 
-/// Inter-stage channels only smooth scheduling jitter between stage threads;
-/// throughput is set by the slowest stage regardless of depth, while every
-/// buffered slot is queued-command latency (a fan change waits behind it).
-/// Depth therefore covers a consumer's longest single-item stall, nothing
-/// more. The pipe's time-depth safety margin lives downstream, in the pump's
-/// staged pieces and the MCU rings.
-const STAGE_CHANNEL_CAP: usize = 16;
-/// The ingress is a µs-per-item pass-through sitting directly behind the
-/// input channel, so its outbox needs no burst absorption of its own.
-const RAW_CHANNEL_CAP: usize = 8;
+pub struct Pipeline {
+    fit: FitDriver,
+    planner: Planner,
+    lowerer: Lowerer,
+    shaper: Shaper,
+    fitted_tap: Option<Sender<geometry::Move>>,
+}
 
-/// Wires the pure stream stages (fit stage → planner → lowerer → shaper) into
-/// OS threads. Production goes through `motion_engine::worker::setup_pipeline`,
-/// which wraps these stages with the dispatcher and pump; this stage-only
-/// wiring is also used standalone by offline consumers (seam harness,
-/// trajectory dump) that have no hardware behind them.
-pub fn setup_stages(
-    config: StreamConfig,
-    axis_chains: AxisChainSet,
-    home_pos: Vec<f64>,
-    t_start: f64,
-) -> PipelineHandle {
-    let (raw_tx, raw_rx) = bounded::<StreamInput>(RAW_CHANNEL_CAP);
-    let (fitted_tx, fitted_rx) = bounded::<StreamInput>(STAGE_CHANNEL_CAP);
-    let (planned_tx, planned_rx) = bounded::<PlannedItem>(STAGE_CHANNEL_CAP);
-    let (lowered_tx, lowered_rx) = bounded::<BaseItem>(STAGE_CHANNEL_CAP);
-    let (shaped_tx, shaped_rx) = bounded::<TrajectoryItem>(STAGE_CHANNEL_CAP);
+impl Pipeline {
+    pub fn new(
+        config: StreamConfig,
+        chains: AxisChainSet,
+        home_pos: Vec<f64>,
+        t_start: f64,
+    ) -> Self {
+        Self {
+            fit: FitStage::new(config.corner).into_driver(),
+            planner: Planner::new(config),
+            lowerer: Lowerer::new(chains.rest_support(), home_pos, t_start),
+            shaper: Shaper::new(chains, config.fit_tol()),
+            fitted_tap: None,
+        }
+    }
 
-    let mut corner = config.corner;
-    corner.ramp_accel_budget_mm_s2 = config.max_extrude_only_accel_mm_s2;
-    let fit_stage = FitStage::new(corner);
-    let fit_thread = spawn_stage("kalico-fit", move || fit_stage.run(raw_rx, fitted_tx));
+    #[must_use]
+    pub fn with_fitted_tap(mut self, tap: Sender<geometry::Move>) -> Self {
+        self.fitted_tap = Some(tap);
+        self
+    }
 
-    let planner = Planner::new(config);
-    let planner_thread = spawn_stage("kalico-plan", move || planner.run(fitted_rx, planned_tx));
+    #[must_use]
+    pub fn with_toolhead_tap(mut self, tap: Sender<ContinuousSegment>) -> Self {
+        self.shaper = self.shaper.with_toolhead_tap(tap);
+        self
+    }
 
-    let fit_tol = FitTol {
-        pos_mm: config.fit_tol_mm,
-        accel_mm_s2: config.fit_tol_accel_mm_s2,
-    };
-    let lower_chains = axis_chains.clone();
-    let lower_thread = spawn_stage("kalico-lower", move || {
-        run_lowerer(planned_rx, lowered_tx, lower_chains, home_pos, t_start);
-    });
+    pub fn feed(
+        &mut self,
+        item: StreamInput,
+        output: &mut impl FnMut(TrajectoryItem) -> bool,
+    ) -> bool {
+        let Self {
+            fit,
+            planner,
+            lowerer,
+            shaper,
+            fitted_tap,
+        } = self;
+        fit.feed(item, &mut |item| {
+            if let (Some(tap), StreamInput::Move(m)) = (fitted_tap.as_ref(), &item) {
+                tap.send(m.clone())
+                    .expect("pipeline fitted observer disconnected");
+            }
+            planner.feed(item, &mut |item| {
+                lowerer.feed(item, &mut |item| shaper.feed(item, output))
+            })
+        })
+    }
 
-    let shaper = Shaper::new(axis_chains, fit_tol);
-    let shaper_thread = spawn_stage("kalico-shape", move || shaper.run(lowered_rx, shaped_tx));
+    pub fn idle(&mut self, output: &mut impl FnMut(TrajectoryItem) -> bool) -> bool {
+        let Self {
+            planner,
+            lowerer,
+            shaper,
+            ..
+        } = self;
+        planner.idle(&mut |item| lowerer.feed(item, &mut |item| shaper.feed(item, output)))
+    }
 
-    PipelineHandle {
-        input: raw_tx,
-        output: shaped_rx,
-        threads: vec![fit_thread, planner_thread, lower_thread, shaper_thread],
+    pub fn finish(&mut self, output: &mut impl FnMut(TrajectoryItem) -> bool) -> bool {
+        let Self {
+            fit,
+            planner,
+            lowerer,
+            shaper,
+            fitted_tap,
+        } = self;
+        fit.finish(&mut |item| {
+            if let (Some(tap), StreamInput::Move(m)) = (fitted_tap.as_ref(), &item) {
+                tap.send(m.clone())
+                    .expect("pipeline fitted observer disconnected");
+            }
+            planner.feed(item, &mut |item| {
+                lowerer.feed(item, &mut |item| shaper.feed(item, output))
+            })
+        }) && planner.finish(&mut |item| lowerer.feed(item, &mut |item| shaper.feed(item, output)))
+            && shaper.finish(output)
     }
 }
-
-fn spawn_stage(name: &str, f: impl FnOnce() + Send + 'static) -> thread::JoinHandle<()> {
-    thread::Builder::new()
-        .name(name.to_string())
-        .spawn(f)
-        .unwrap_or_else(|e| panic!("spawn {name}: {e}"))
-}
-
-#[cfg(test)]
-mod tests;
 
 #[cfg(test)]
 mod nonlinear_ripple_fuzz;
 #[cfg(test)]
 mod phase_ripple_fuzz;
+#[cfg(test)]
+mod tests;

@@ -6,7 +6,6 @@
 use super::*;
 use crate::lock_ext::LockExt;
 use crossbeam_channel::unbounded;
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use trajectory::{
@@ -118,14 +117,17 @@ fn moving_span(start_clock: u64, secs: f64) -> ClockedMotorSpan {
 }
 
 fn with_pump(
-    body: impl FnOnce(&crossbeam_channel::Sender<PumpMsg>, &crossbeam_channel::Sender<EnqueueMsg>),
+    body: impl FnOnce(
+        &crossbeam_channel::Sender<PumpMsg>,
+        &crossbeam_channel::Sender<Vec<LaneProjection>>,
+    ),
 ) -> MarkRecordingSink {
     let sink = MarkRecordingSink::default();
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let sink_clone = sink.clone();
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink_clone,
@@ -135,7 +137,6 @@ fn with_pump(
             },
             None,
             Arc::new(crate::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         );
     });
     body(&ctl, &data);
@@ -146,20 +147,19 @@ fn with_pump(
 }
 
 fn enqueue(
-    data: &crossbeam_channel::Sender<EnqueueMsg>,
+    data: &crossbeam_channel::Sender<Vec<LaneProjection>>,
     key: AxisKey,
     spans: Vec<ClockedMotorSpan>,
     epoch: crate::anchor::StreamEpoch,
 ) {
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
         spans,
         epoch,
         lead_secs: MAX_LEAD_SECS,
         source_line: SOURCE_LINE,
-        batch_end: true,
-    })
+    }])
     .unwrap();
 }
 

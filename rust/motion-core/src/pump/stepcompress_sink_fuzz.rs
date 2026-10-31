@@ -121,6 +121,7 @@ fn drive(scenario: &Scenario) -> Result<Run, String> {
                 h7_ramp(old_start, scenario.old_views, 0.0, 1.0),
             )],
         )
+        .and_then(|()| h.endpoint.tick())
         .map_err(|e| format!("the first epoch was refused: {e:?}"))?;
 
     let lead_oid = scenario.oids()[0];
@@ -172,13 +173,17 @@ fn drive(scenario: &Scenario) -> Result<Run, String> {
         let direction = if scenario.reverse { -1.0 } else { 1.0 };
         let position = h.endpoint.shim.commanded_position(0);
         h.endpoint.mark_reanchor(AXIS, resume_at, Some(H7_FREQ));
-        if let Err(error) = h.endpoint.send_frames(
-            MCU_ID,
-            &[frame_for_axis(
-                AXIS,
-                h7_ramp(resume_at, scenario.resume_views, position, direction),
-            )],
-        ) {
+        if let Err(error) = h
+            .endpoint
+            .send_frames(
+                MCU_ID,
+                &[frame_for_axis(
+                    AXIS,
+                    h7_ramp(resume_at, scenario.resume_views, position, direction),
+                )],
+            )
+            .and_then(|()| h.endpoint.tick())
+        {
             return refusal(mcu, error);
         }
     }

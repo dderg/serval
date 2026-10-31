@@ -4,8 +4,8 @@
 // emission boundaries) where the batch harness used to sweep commit caps.
 //
 // Point VORON_GCODE at the exact print file, then:
-//   VORON_GCODE=/path/voron_cube.gcode cargo test -p _motion_engine \
-//       --release --test seam_voron_repro -- --ignored --nocapture
+//   VORON_GCODE=/path/voron_cube.gcode cargo nextest run -p motion-core \
+//       --release --test seam_voron_repro --run-ignored only --no-capture
 
 use motion_core::seam_test_harness::{default_stream_config, parse_gcode_to_moves, run_moves};
 

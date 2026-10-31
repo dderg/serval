@@ -5,32 +5,6 @@ fn args(parts: &[&str]) -> Vec<String> {
 }
 
 #[test]
-fn no_slave_flag_falls_back_to_one_drive_at_position_zero() {
-    let a = args(&[
-        "ethercat-rt",
-        "eth0",
-        "--counts-per-mm",
-        "1000",
-        "--rotation-distance",
-        "50",
-    ]);
-    let slaves = parse_slaves(&a).expect("legacy parse");
-    assert_eq!(slaves.len(), 1);
-    assert_eq!(slaves[0].pos, 0);
-    assert_eq!(slaves[0].counts_per_mm, 1000.0);
-    assert_eq!(slaves[0].rotation_distance, 50.0);
-}
-
-#[test]
-fn legacy_defaults_when_no_per_drive_flags() {
-    let slaves = parse_slaves(&args(&["ethercat-rt", "eth0"])).expect("defaults");
-    assert_eq!(slaves.len(), 1);
-    assert_eq!(slaves[0].pos, 0);
-    assert_eq!(slaves[0].counts_per_mm, 3276.8);
-    assert_eq!(slaves[0].following_error_counts, None);
-}
-
-#[test]
 fn two_groups_parse_per_drive_params() {
     let a = args(&[
         "ethercat-rt",
@@ -146,23 +120,8 @@ fn velocity_ff_and_clamp_bind_per_slave_group() {
 }
 
 #[test]
-fn legacy_form_reads_velocity_ff_and_clamp_globally() {
-    let a = args(&[
-        "ethercat-rt",
-        "eth0",
-        "--velocity-ff",
-        "--torque-clamp-pct",
-        "45",
-    ]);
-    let slaves = parse_slaves(&a).expect("legacy ff");
-    assert_eq!(slaves.len(), 1);
-    assert!(slaves[0].velocity_ff);
-    assert_eq!(slaves[0].torque_clamp_tenths, 450);
-}
-
-#[test]
 fn clamp_default_is_thirty_percent() {
-    let slaves = parse_slaves(&args(&["ethercat-rt", "eth0"])).expect("defaults");
+    let slaves = parse_slaves(&args(&["ethercat-rt", "eth0", "--slave", "0"])).expect("defaults");
     assert!(!slaves[0].velocity_ff);
     assert_eq!(slaves[0].torque_clamp_tenths, 300);
 }
@@ -199,15 +158,8 @@ fn invert_binds_per_slave_group() {
 }
 
 #[test]
-fn legacy_form_reads_invert_globally() {
-    let slaves = parse_slaves(&args(&["ethercat-rt", "eth0", "--invert"])).expect("legacy invert");
-    assert_eq!(slaves.len(), 1);
-    assert!(slaves[0].invert);
-}
-
-#[test]
 fn invert_defaults_off() {
-    let slaves = parse_slaves(&args(&["ethercat-rt", "eth0"])).expect("defaults");
+    let slaves = parse_slaves(&args(&["ethercat-rt", "eth0", "--slave", "0"])).expect("defaults");
     assert!(!slaves[0].invert);
 }
 
@@ -278,23 +230,13 @@ fn slave_dynamics_profile_binds_per_slave_group() {
 }
 
 #[test]
-fn legacy_form_reads_slave_dynamics_profile() {
-    let a = args(&[
-        "ethercat-rt",
-        "eth0",
-        "--slave-dynamics-profile",
-        "/cfg/only.toml",
-    ]);
-    let slaves = parse_slaves(&a).expect("legacy profile");
-    assert_eq!(slaves.len(), 1);
-    assert_eq!(
-        slaves[0].dynamics_profile.as_deref(),
-        Some("/cfg/only.toml")
-    );
+fn slave_dynamics_profile_defaults_none() {
+    let slaves = parse_slaves(&args(&["ethercat-rt", "eth0", "--slave", "0"])).expect("defaults");
+    assert_eq!(slaves[0].dynamics_profile, None);
 }
 
 #[test]
-fn slave_dynamics_profile_defaults_none() {
-    let slaves = parse_slaves(&args(&["ethercat-rt", "eth0"])).expect("defaults");
-    assert_eq!(slaves[0].dynamics_profile, None);
+fn no_slave_group_is_rejected() {
+    let err = parse_slaves(&args(&["ethercat-rt", "eth0"])).expect_err("no group must fail");
+    assert!(err.contains("no --slave group"), "got: {err}");
 }

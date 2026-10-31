@@ -1,7 +1,8 @@
 use core::sync::atomic::Ordering;
 
 use crate::state::SharedState;
-use crate::stepping_state::{AxisState, StepMode, StepperRef};
+use crate::stepping_state::{AxisState, StepperRef};
+use runtime_contract::axes::StepMode;
 
 pub const PHASE_PERIOD: i32 = 1024;
 pub const PHASE_MASK: i32 = PHASE_PERIOD - 1;

@@ -1,8 +1,6 @@
 use std::time::Instant;
 
-use crate::host_io::mcu_session::{
-    PendingMcuCall, build_kalico_frame, build_kalico_identify_frame,
-};
+use crate::host_io::mcu_session::{PendingMcuCall, build_kalico_identify_frame};
 use crate::host_io::reactor::{Reactor, ReactorState};
 use crate::transport::TransportError;
 
@@ -10,20 +8,13 @@ impl Reactor {
     pub(super) fn handle_command(&mut self, cmd: crate::host_io::ReactorCommand) {
         use crate::host_io::ReactorCommand;
         match cmd {
-            ReactorCommand::Submit {
-                call_id,
-                cmd,
-                expected_response_name,
-                completion,
-                deadline,
-            } => self.handle_submit(call_id, cmd, expected_response_name, completion, deadline),
-            ReactorCommand::SubmitTyped {
+            ReactorCommand::Call {
                 call_id,
                 payload,
                 expected_response_name,
                 completion,
                 deadline,
-            } => self.handle_submit_typed(
+            } => self.handle_call(
                 call_id,
                 payload,
                 expected_response_name,
@@ -38,19 +29,14 @@ impl Reactor {
                 self.closed_via_shutdown = true;
             }
             ReactorCommand::MarkExpectedDisconnect => self.handle_mark_expected_disconnect(),
-            ReactorCommand::AttachHeartbeatCallback(wrapper) => {
-                self.event_dispatcher.heartbeat_callback = Some(wrapper.0);
+            ReactorCommand::AttachHeartbeatCallback(cb) => {
+                self.event_dispatcher.heartbeat_callback = Some(cb);
             }
-            ReactorCommand::SetMcuLogHook(wrapper) => {
-                self.event_dispatcher
-                    .set_mcu_log_hook(move |e| (wrapper.0)(e));
+            ReactorCommand::SetMcuLogHook(hook) => {
+                self.event_dispatcher.set_mcu_log_hook(hook);
             }
             ReactorCommand::SubscribeFault { sender, reply } => {
                 let result = self.event_dispatcher.fault_latch.subscribe(sender);
-                let _ = reply.send(result);
-            }
-            ReactorCommand::SubscribeTrace { sender, reply } => {
-                let result = self.event_dispatcher.trace_ring.subscribe(sender);
                 let _ = reply.send(result);
             }
             ReactorCommand::SubscribeRuntimeEvents {
@@ -58,17 +44,7 @@ impl Reactor {
                 bulk,
                 reply,
             } => self.handle_subscribe_runtime_events(priority, bulk, reply),
-            ReactorCommand::SubscribeHostEvents { sender, reply } => {
-                let result = self
-                    .event_dispatcher
-                    .host_event_dispatcher
-                    .subscribe(sender);
-                let _ = reply.send(result);
-            }
-            ReactorCommand::FireAndForget { cmd } => self.handle_fire_and_forget(cmd),
-            ReactorCommand::FireAndForgetTyped { payload } => {
-                self.handle_fire_and_forget_typed(payload)
-            }
+            ReactorCommand::FireAndForget { payload } => self.handle_fire_and_forget(payload),
             ReactorCommand::FireAndForgetBatch {
                 payloads,
                 reserved_blocks,
@@ -117,36 +93,7 @@ impl Reactor {
         }
     }
 
-    fn handle_submit(
-        &mut self,
-        call_id: u64,
-        cmd: String,
-        expected_response_name: String,
-        completion: std::sync::mpsc::SyncSender<
-            Result<crate::transport::MessageParams, TransportError>,
-        >,
-        deadline: Instant,
-    ) {
-        match self.parser.encode(&cmd) {
-            Ok(payload) => {
-                if let Err(e) = self.dispatch_submission(
-                    call_id,
-                    payload,
-                    expected_response_name,
-                    completion.clone(),
-                    deadline,
-                ) {
-                    self.close_if_io_fault("handle_command/submit", &e);
-                    let _ = completion.send(Err(e));
-                }
-            }
-            Err(e) => {
-                let _ = completion.send(Err(TransportError::Parse(format!("{e:?}"))));
-            }
-        }
-    }
-
-    fn handle_submit_typed(
+    fn handle_call(
         &mut self,
         call_id: u64,
         payload: Vec<u8>,
@@ -158,14 +105,14 @@ impl Reactor {
     ) {
         tracing::debug!(
             subsystem = "mcu-comms",
-            event = "submit_typed",
+            event = "call",
             call_id,
             resp = %expected_response_name,
             payload_len = payload.len(),
             unacked = self.unacked_window.len(),
             pending_sub = self.outbound.pending_submissions.len(),
             state = ?self.state,
-            "SubmitTyped"
+            "Call"
         );
         if let Err(e) = self.dispatch_submission(
             call_id,
@@ -174,7 +121,7 @@ impl Reactor {
             completion.clone(),
             deadline,
         ) {
-            self.close_if_io_fault("handle_command/submit_typed", &e);
+            self.close_if_io_fault("handle_command/call", &e);
             let _ = completion.send(Err(e));
         }
     }
@@ -204,59 +151,15 @@ impl Reactor {
         let _ = reply.send(result);
     }
 
-    fn handle_fire_and_forget(&mut self, cmd: String) {
-        match self.parser.encode(&cmd) {
-            Ok(payload) => {
-                let cmd_disp = if cmd.len() > 120 {
-                    &cmd[..120]
-                } else {
-                    cmd.as_str()
-                };
-                let head: Vec<String> = payload
-                    .iter()
-                    .take(16)
-                    .map(|b| format!("{b:02x}"))
-                    .collect();
-                tracing::debug!(
-                    subsystem = "mcu-comms",
-                    event = "fire_and_forget_sent",
-                    cmd = %cmd_disp,
-                    payload_len = payload.len(),
-                    head = %head.join(","),
-                    "FireAndForget encoded OK"
-                );
-                if let Err(e) = self.dispatch_fire_and_forget(payload, false) {
-                    tracing::error!(
-                        subsystem = "mcu-comms",
-                        event = "fire_and_forget_send_error",
-                        cmd = %cmd_disp,
-                        error = %e,
-                        "FireAndForget dispatch failed"
-                    );
-                    self.close_if_io_fault("handle_command/fire_and_forget", &e);
-                }
-            }
-            Err(e) => {
-                tracing::error!(
-                    subsystem = "mcu-comms",
-                    event = "fire_and_forget_encode_error",
-                    cmd = ?cmd,
-                    error = ?e,
-                    "FireAndForget encode failed"
-                );
-            }
-        }
-    }
-
-    fn handle_fire_and_forget_typed(&mut self, payload: Vec<u8>) {
+    fn handle_fire_and_forget(&mut self, payload: Vec<u8>) {
         if let Err(e) = self.dispatch_fire_and_forget(payload, false) {
-            tracing::warn!(
+            tracing::error!(
                 subsystem = "mcu-comms",
-                event = "fire_and_forget_typed_send_error",
+                event = "fire_and_forget_send_error",
                 error = %e,
-                "FireAndForgetTyped: send error"
+                "FireAndForget: send error"
             );
-            self.close_if_io_fault("handle_command/fire_and_forget_typed", &e);
+            self.close_if_io_fault("handle_command/fire_and_forget", &e);
         }
     }
 
@@ -328,7 +231,7 @@ impl Reactor {
             return;
         }
         let cid = self.transport_state.allocate_correlation_id();
-        let frame = build_kalico_frame(mcu_transport::CHANNEL_CONTROL, kind, cid, &body);
+        let frame = mcu_transport::wire_helpers::control_frame(kind, cid, &body);
         self.transport_state.pending.insert(
             cid,
             PendingMcuCall {

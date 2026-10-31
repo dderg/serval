@@ -2,7 +2,7 @@ use crate::host_io::mcu_session::{McuDispatchResult, dispatch_mcu_frame};
 use crate::host_io::reactor::{READ_TIMEOUT, Reactor, ZERO_BYTE_DEBOUNCE};
 use crate::transport::TransportError;
 use mcu_transport::demux::{Frame, KlipperFrame, PollOutcome};
-use runtime::error::FaultCode;
+use runtime_contract::error::FaultCode;
 
 impl Reactor {
     pub(crate) fn handle_inbound_frame(

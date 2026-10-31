@@ -1,6 +1,6 @@
 mod common;
 
-use std::process::{Child, Command};
+use common::{spawn_and_claim, wait_for_exit};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -8,91 +8,13 @@ use ethercat_rt::stream_halt::{ERR_PIECES_WHILE_HALTED, ERR_RESUME_STREAM_NOT_HA
 use ethercat_rt::torque::{ERR_BAD_TORQUE_STATE, ERR_PIECES_WHILE_FAULTED};
 use host_rt::mcu_call::McuCall;
 use host_rt::mcu_serial_conn::McuSerialConn;
-use mcu_protocol::codec::{Cursor, Decode, Encode};
+use mcu_protocol::codec::{Decode, Encode};
 use mcu_protocol::messages::{
-    ClaimHandshakeReply, DriveLimitEntry, LaneRun, MessageKind, PushSampleRuns,
-    PushSampleRunsResponse, RestoreDriveLimits, RestoreDriveLimitsResponse, ResumeStreamResponse,
-    SampleGridResponse, SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse,
-    SetpointSample, StopResponse, LANE_RUN_FLAG_REANCHOR, LANE_RUN_FLAG_TAIL,
+    DriveLimitEntry, LaneRun, MessageKind, PushSampleRuns, PushSampleRunsResponse,
+    RestoreDriveLimits, RestoreDriveLimitsResponse, ResumeStreamResponse, SampleGridResponse,
+    SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse, SetpointSample,
+    StopResponse, LANE_RUN_FLAG_REANCHOR, LANE_RUN_FLAG_TAIL,
 };
-
-const STUB_BIN: &str = env!("CARGO_BIN_EXE_ethercat-rt-stub");
-
-struct ChildGuard {
-    child: Option<Child>,
-}
-
-impl ChildGuard {
-    fn new(child: Child) -> Self {
-        Self { child: Some(child) }
-    }
-
-    fn defuse(&mut self) -> Child {
-        self.child.take().expect("already defused")
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(mut c) = self.child.take() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-    }
-}
-
-fn socket_path(tag: &str) -> String {
-    format!("/tmp/kalico-tq-{}-{}.sock", tag, std::process::id())
-}
-
-fn wait_for_socket(path: &str, deadline: Instant) {
-    loop {
-        if std::path::Path::new(path).exists() {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "stub socket {path:?} did not appear within deadline"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn do_handshake(conn: &McuSerialConn) -> ClaimHandshakeReply {
-    let (kind, body) = conn
-        .mcu_call(
-            MessageKind::ClaimHandshake,
-            Vec::new(),
-            Duration::from_secs(5),
-        )
-        .expect("ClaimHandshake mcu_call must succeed");
-
-    assert_eq!(
-        kind,
-        MessageKind::ClaimHandshakeReply,
-        "expected ClaimHandshakeReply (0x{:04x}), got kind 0x{:04x}",
-        MessageKind::ClaimHandshakeReply.as_u16(),
-        kind.as_u16(),
-    );
-
-    ClaimHandshakeReply::decode_from(&mut Cursor::new(&body))
-        .expect("ClaimHandshakeReply must decode from response body")
-}
-
-fn wait_for_exit(child: &mut Child, deadline: Instant) -> std::process::ExitStatus {
-    loop {
-        match child.try_wait().expect("try_wait must not fail") {
-            Some(status) => return status,
-            None => {
-                assert!(
-                    Instant::now() < deadline,
-                    "stub process did not exit within deadline — orphan process"
-                );
-                thread::sleep(Duration::from_millis(10));
-            }
-        }
-    }
-}
 
 fn send_stop(conn: &McuSerialConn) -> (i32, u64) {
     let (kind, resp) = conn
@@ -197,25 +119,6 @@ fn push_run_with_lead(conn: &McuSerialConn, lead_cycles: u64) -> i32 {
     PushSampleRunsResponse::decode(&resp)
         .expect("PushSampleRunsResponse must decode")
         .result
-}
-
-fn spawn_and_claim(tag: &str, extra_args: &[&str]) -> (ChildGuard, McuSerialConn, String) {
-    let path = socket_path(tag);
-    let _ = std::fs::remove_file(&path);
-
-    let child = Command::new(STUB_BIN)
-        .args(["--socket", &path])
-        .args(extra_args)
-        .spawn()
-        .expect("stub binary must spawn");
-    let guard = ChildGuard::new(child);
-
-    wait_for_socket(&path, Instant::now() + Duration::from_secs(5));
-
-    let conn = common::connect_until(&path, Instant::now() + Duration::from_secs(5));
-    let _reply = do_handshake(&conn);
-
-    (guard, conn, path)
 }
 
 #[test]

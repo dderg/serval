@@ -21,8 +21,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
-use crossbeam_channel::{bounded, Sender, TrySendError};
 use serde_json::{Map, Value};
+use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use time::format_description::FormatItem;
 use time::macros::format_description;
 use time::OffsetDateTime;
@@ -185,7 +185,7 @@ fn render_line(record: LogRecord) -> String {
 }
 
 struct JsonlLayer {
-    sender: Sender<LogRecord>,
+    sender: SyncSender<LogRecord>,
 }
 
 impl<S: Subscriber> Layer<S> for JsonlLayer {
@@ -209,8 +209,8 @@ impl<S: Subscriber> Layer<S> for JsonlLayer {
     }
 }
 
-fn spawn_writer(file: std::fs::File) -> Sender<LogRecord> {
-    let (sender, receiver) = bounded::<LogRecord>(CHANNEL_CAPACITY);
+fn spawn_writer(file: std::fs::File) -> SyncSender<LogRecord> {
+    let (sender, receiver) = sync_channel::<LogRecord>(CHANNEL_CAPACITY);
     std::thread::Builder::new()
         .name("obs-writer".into())
         .spawn(move || {

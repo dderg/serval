@@ -42,7 +42,7 @@ fn arb_anchor() -> impl Strategy<Value = f64> {
 }
 
 fn rounded_product(freq: f64, secs: f64) -> f64 {
-    libm::round(freq * secs)
+    f64::round(freq * secs)
 }
 
 proptest! {
@@ -150,8 +150,8 @@ proptest! {
     ) {
         let start = origin + chunk as f64 * MAX_SPAN_SECS;
         let end = start + MAX_SPAN_SECS;
-        let start_clock = libm::round(buzz_clock_at(anchor, cycles_per_second, origin, start));
-        let end_clock = libm::round(buzz_clock_at(anchor, cycles_per_second, origin, end));
+        let start_clock = f64::round(buzz_clock_at(anchor, cycles_per_second, origin, start));
+        let end_clock = f64::round(buzz_clock_at(anchor, cycles_per_second, origin, end));
         prop_assert!(
             end_clock > start_clock,
             "chunk {chunk} spans no tick: {start_clock} -> {end_clock} at {cycles_per_second} Hz \
@@ -174,8 +174,8 @@ proptest! {
         let start = origin + chunk as f64 * MAX_SPAN_SECS;
         let next = origin + (chunk + 1) as f64 * MAX_SPAN_SECS;
         let start_exact = buzz_clock_at(anchor, cycles_per_second, origin, start);
-        let end_clock = libm::round(start_exact + (next - start) * cycles_per_second);
-        let next_clock = libm::round(buzz_clock_at(anchor, cycles_per_second, origin, next));
+        let end_clock = f64::round(start_exact + (next - start) * cycles_per_second);
+        let next_clock = f64::round(buzz_clock_at(anchor, cycles_per_second, origin, next));
         prop_assert!(
             (end_clock - next_clock).abs() <= SEAM_ROUNDING_CYCLES as f64,
             "chunk {} ends at {} but chunk {} starts at {}, past the {} tick seam budget",

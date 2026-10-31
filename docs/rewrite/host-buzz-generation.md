@@ -16,7 +16,7 @@ Classic `queue_step` (`src/stepper_classic.c`) is the only MCU pulse path.
 EtherCAT already solved this the right way: the endpoint **rejects**
 `ResonanceBuzz` (`ERR_BUZZ_IN_RING_MODE`, `ethercat-rt/src/endpoint/commands.rs`)
 and the host's setpoint filler generates the buzz as ordinary sample runs
-(`BuzzOsc` in `ethercat-rt/src/buzz.rs`, armed via
+(`BuzzOsc` in `ethercat-setpoint-fill/src/buzz.rs`, armed via
 `setpoint_fill.rs::arm_buzz`). The buzz is "a sample source like any other".
 
 Plan: do the same for step/dir MCUs. The buzz becomes a host-generated
@@ -63,9 +63,9 @@ graph LR
 
 ### 1. Shared generator
 
-Extract/generalize `ethercat-rt/src/buzz.rs::BuzzOsc` into a transport-neutral
-module (likely `motion-core`, since both the pump's stepcompress sink and the
-EtherCAT filler are host-side; `ethercat-rt` can depend on it or re-export).
+The EtherCAT sampler's `ethercat-setpoint-fill/src/buzz.rs::BuzzOsc` uses the
+transport-neutral `trajectory::BuzzProfile`, shared with the pulse pump.
+Both consumers depend directly on their shared libraries, not on `ethercat-rt`.
 It produces **absolute lane positions** `x(t) = base + sign·A(t)·sin(ω(t)·t)`
 sampled on a uniform grid:
 

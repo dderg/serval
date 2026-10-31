@@ -41,12 +41,6 @@ int32_t runtime_axis_head_window(struct Runtime *rt,
 
 int32_t runtime_bind_phase_motor(struct Runtime *rt, uint8_t motor_idx, uint8_t slot_idx);
 
-int32_t runtime_clock_sync_request(struct Runtime *rt,
-                                   uint32_t request_id,
-                                   uint32_t host_send_time_lo,
-                                   uint32_t host_send_time_hi,
-                                   uint64_t *out_mcu_clock);
-
 int32_t runtime_configure_axis(struct Runtime *rt,
                                uint8_t axis_idx,
                                uint8_t mode,

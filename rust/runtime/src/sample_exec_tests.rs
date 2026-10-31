@@ -6,10 +6,10 @@
     clippy::integer_division
 )]
 
-use crate::error::FaultCode;
 use crate::sample_exec::{LaneOutput, SampleLane, SampleLaneFault, widen_wire_clock};
-use crate::sample_run::{SampleRunError, encode_deltas};
 use crate::state::SharedState;
+use runtime_contract::error::FaultCode;
+use runtime_contract::sample_run::{SampleRunError, encode_deltas};
 
 use core::sync::atomic::Ordering;
 

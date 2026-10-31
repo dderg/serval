@@ -3,11 +3,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use runtime::RT_STORAGE_SIZE;
 use runtime::engine::RuntimeStatus;
-use runtime::error::{
-    RUNTIME_ERR_INVALID_ARG, RUNTIME_ERR_INVALID_HANDLE, RUNTIME_ERR_NOT_INIT,
-    RUNTIME_ERR_NULL_PTR, RUNTIME_OK,
-};
 use runtime::state::{IsrState, RuntimeContext, SharedState};
+use runtime_contract::error::FaultCode;
 
 mod diag;
 mod lifecycle;

@@ -1,8 +1,8 @@
 //! Drained-ness of the motion pipeline, observed rather than re-counted.
 //!
 //! The pump is the single owner of every per-axis counter that matters here
-//! (`pending` staged pieces, `pushed` wire pieces, MCU-confirmed `retired`)
-//! and publishes a snapshot of them after every loop iteration. Readers only
+//! (`pending` staged pieces, accepted `pushed`, playback `retired`, and `abandoned`)
+//! and publishes one snapshot per loop before barrier acknowledgements. Readers only
 //! ever compare counters that were written together, in the same unit, by the
 //! same thread — there is no parallel ledger to drift out of sync.
 //!
@@ -23,6 +23,7 @@ pub struct AxisDrainState {
     pub pending: u32,
     pub pushed: u32,
     pub retired: u32,
+    pub abandoned: u32,
     /// Pieces still staged in the pump must reach their endpoint before a
     /// reseed can reset endpoint state. This includes holds because a fresh
     /// hold can carry the seam mark that sanctions its new clock epoch.
@@ -37,7 +38,11 @@ impl AxisDrainState {
     fn drained(&self) -> bool {
         self.pending == 0
             && self.staged_motion == 0
-            && self.pushed.wrapping_sub(self.retired) <= self.hold_tail
+            && self
+                .pushed
+                .wrapping_sub(self.retired)
+                .wrapping_sub(self.abandoned)
+                <= self.hold_tail
     }
 }
 
@@ -60,6 +65,14 @@ impl DrainLedger {
         *axes = snapshot;
         drop(axes);
         self.cv.notify_all();
+    }
+
+    pub fn staged_total(&self) -> u64 {
+        self.axes
+            .lock_ok()
+            .values()
+            .map(|axis| u64::from(axis.pending))
+            .sum()
     }
 
     pub fn drained(&self) -> bool {
@@ -86,8 +99,8 @@ impl DrainLedger {
                     .filter(|(_, s)| !s.drained())
                     .map(|(&(mcu, axis), s)| {
                         format!(
-                            "mcu{mcu} axis{axis}: pending {} pushed {} retired {}",
-                            s.pending, s.pushed, s.retired
+                            "mcu{mcu} axis{axis}: pending {} pushed {} retired {} abandoned {}",
+                            s.pending, s.pushed, s.retired, s.abandoned
                         )
                     })
                     .collect();

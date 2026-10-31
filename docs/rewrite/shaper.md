@@ -9,6 +9,11 @@ be commanded to do. Everything the classic Klipper stack does after the
 trapezoid generator (input shaping, smoothers, pressure advance) lives here,
 unified under one model, plus things that stack cannot express.
 
+In the live host, `motion_pipeline::Pipeline` runs these four stages
+synchronously on `kalico-planning`. Snapshot generation uses the same
+coordinator. There are no interstage queues or dedicated stage threads;
+numerical parallel work within a stage remains.
+
 The core idea: **resonance suppression and mechanical compensation are
 per-axis linear operators on the planned trajectory**, and there are exactly
 two kinds worth having:

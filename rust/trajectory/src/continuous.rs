@@ -288,6 +288,43 @@ impl AnalyticMoveSpan {
         })
     }
 
+    pub fn has_variable_surface(&self) -> bool {
+        matches!(self.surface, SurfaceMode::Variable(_))
+    }
+
+    /// Absolute times of the interior seams between velocity phases, each
+    /// nudged past its seam so a knot placed there belongs to the phase it
+    /// enters.
+    pub fn phase_seam_times(&self) -> impl Iterator<Item = f64> + '_ {
+        self.phases
+            .iter()
+            .take(self.phases.len().saturating_sub(1))
+            .map(|phase| analytic_phase_boundary(self.t_start, phase.end_time()))
+    }
+
+    /// Absolute times at which a variable bed surface changes its piecewise
+    /// definition along the path; empty without a variable surface or a
+    /// spatial body, `None` when a transition cannot be located in the phases.
+    pub fn surface_seam_times(&self) -> Option<Vec<f64>> {
+        let SurfaceMode::Variable(surface) = &self.surface else {
+            return Some(Vec::new());
+        };
+        let Some(spatial) = self.source.segment.spatial.as_ref() else {
+            return Some(Vec::new());
+        };
+        surface
+            .path_transition_distances(spatial)
+            .ok()?
+            .into_iter()
+            .map(|transition| {
+                let phase = self.phases.iter().find(|phase| {
+                    transition.s >= phase.s0 && transition.s <= phase.end_distance()
+                })?;
+                Some(self.t_start + phase.time_at_distance(transition.s)?)
+            })
+            .collect()
+    }
+
     pub fn eval_axis(&self, axis: usize, t: f64) -> Result<Pva, ContinuousError> {
         if axis == 2 {
             if let SurfaceMode::Variable(surface) = &self.surface {
@@ -565,19 +602,19 @@ impl ContinuousAxis {
             Self::Analytic { span, axis } => span.eval_axis(*axis, t)?.position,
             Self::Spline(curve) => {
                 let t = spline_evaluation_time(curve, t)?;
-                nurbs::eval::eval(&curve.as_view(), t)
+                nurbs::eval::eval(curve, t)
             }
             Self::RelativeSpline {
                 base_position,
                 curve,
             } => {
                 let t = spline_evaluation_time(curve, t)?;
-                base_position + nurbs::eval::eval(&curve.as_view(), t)
+                base_position + nurbs::eval::eval(curve, t)
             }
             Self::PiecewiseRelativeSpline(pieces) => {
                 let piece = owning_piece(pieces, t)?;
                 let t = spline_evaluation_time(&piece.curve, t)?;
-                piece.base_position + nurbs::eval::eval(&piece.curve.as_view(), t)
+                piece.base_position + nurbs::eval::eval(&piece.curve, t)
             }
             Self::Hold {
                 position,
@@ -893,7 +930,7 @@ impl MotorGroup {
                 summed_scale,
             } => {
                 let t = spline_evaluation_time(curve, t).map_err(|error| (error, 0))?;
-                Ok(summed_scale * nurbs::eval::eval(&curve.as_view(), t))
+                Ok(summed_scale * nurbs::eval::eval(curve, t))
             }
             Self::RelativeSpline {
                 curve,
@@ -901,7 +938,7 @@ impl MotorGroup {
                 summed_scale,
             } => {
                 let t = spline_evaluation_time(curve, t).map_err(|error| (error, 0))?;
-                Ok(summed_scale * (base_position + nurbs::eval::eval(&curve.as_view(), t)))
+                Ok(summed_scale * (base_position + nurbs::eval::eval(curve, t)))
             }
             Self::Independent(term) => term
                 .axis
@@ -1251,14 +1288,41 @@ impl ClockedMotorSpan {
         Ok(views)
     }
 }
-fn next_toward(value: f64, toward: f64) -> f64 {
+/// The first time strictly after `span_start + local_boundary` in absolute
+/// time, so a seam computed in span-local time never lands on the phase it
+/// leaves once rounded into the absolute frame.
+pub fn analytic_phase_boundary(span_start: f64, local_boundary: f64) -> f64 {
+    let mut boundary = span_start + local_boundary;
+    loop {
+        let previous = next_toward(boundary, f64::NEG_INFINITY);
+        if previous - span_start > local_boundary {
+            boundary = previous;
+        } else {
+            break;
+        }
+    }
+    while boundary - span_start <= local_boundary {
+        boundary = next_toward(boundary, f64::INFINITY);
+    }
+    boundary
+}
+
+pub fn next_toward(value: f64, toward: f64) -> f64 {
     if value == toward {
         return value;
     }
-    if (toward > value) == (value >= 0.0) {
-        f64::from_bits(value.to_bits() + 1)
+    if value == 0.0 {
+        return if toward > 0.0 {
+            f64::from_bits(1)
+        } else {
+            f64::from_bits((1_u64 << 63) | 1)
+        };
+    }
+    let bits = value.to_bits();
+    if (toward > value) == (value > 0.0) {
+        f64::from_bits(bits + 1)
     } else {
-        f64::from_bits(value.to_bits() - 1)
+        f64::from_bits(bits - 1)
     }
 }
 

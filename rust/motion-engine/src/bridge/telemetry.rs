@@ -1,37 +1,44 @@
 use super::{
-    DRAIN_TIMEOUT, FlushWait, HashMap, Ordering, PyMotionEngine, PyResult, PyRuntimeError, Python,
+    HashMap, Ordering, PyMotionEngine, PyResult, PyRuntimeError, Python,
     collect_motor_positions_inner, planner_err, pymethods,
 };
-use crate::lock_ext::LockExt;
-use crate::types::mcu_handle_from_raw;
 use host_rt::clock::{HostSecs, PrintTime};
+use host_rt::passthrough_queue::McuHandle;
+use motion_core::lock_ext::LockExt;
+use motion_core::worker::StreamWorkerError;
+
+struct PhaseRegisterCall<'a> {
+    op: &'a str,
+    mcu_handle: u32,
+    request: &'a str,
+    response: &'a str,
+    timeout_s: f64,
+    err_ctx: &'a str,
+}
 
 #[pymethods]
 impl PyMotionEngine {
     #[pyo3(signature = (mcu_handle, bus_id, rate, timeout_s = 5.0))]
     fn register_phase_bus(
         &self,
-        py: Python<'_>,
         mcu_handle: u32,
         bus_id: u8,
         rate: u32,
         timeout_s: f64,
     ) -> PyResult<()> {
         let msg = format!("runtime_register_phase_bus bus_id={bus_id} rate={rate}");
-        self.phase_register_call(
-            py,
-            "register_phase_bus",
+        self.phase_register_call(PhaseRegisterCall {
+            op: "register_phase_bus",
             mcu_handle,
-            &msg,
-            "kalico_register_phase_bus_response",
+            request: &msg,
+            response: "kalico_register_phase_bus_response",
             timeout_s,
-            &format!("(bus_id={bus_id})"),
-        )
+            err_ctx: &format!("(bus_id={bus_id})"),
+        })
     }
     #[pyo3(signature = (mcu_handle, motor_idx, bus_id, cs_pin_id, slot_idx, timeout_s = 5.0))]
     fn register_phase_motor(
         &self,
-        py: Python<'_>,
         mcu_handle: u32,
         motor_idx: u8,
         bus_id: u8,
@@ -43,89 +50,14 @@ impl PyMotionEngine {
             "runtime_register_phase_motor motor_idx={motor_idx} \
              bus_id={bus_id} cs_pin_id={cs_pin_id} slot_idx={slot_idx}"
         );
-        self.phase_register_call(
-            py,
-            "register_phase_motor",
+        self.phase_register_call(PhaseRegisterCall {
+            op: "register_phase_motor",
             mcu_handle,
-            &msg,
-            "kalico_register_phase_motor_response",
+            request: &msg,
+            response: "kalico_register_phase_motor_response",
             timeout_s,
-            &format!("(motor_idx={motor_idx} bus_id={bus_id} cs_pin_id={cs_pin_id})"),
-        )
-    }
-    /// Blocking on the planner mutex while the GIL is held deadlocks against
-    /// any path that holds the mutex across a GIL re-attach, so the lock is
-    /// only ever taken inside the detached closure.
-    fn wait_moves(&self, py: Python<'_>) -> PyResult<()> {
-        py.detach(|| flush_planner_detached(&self.planner))
-    }
-    fn drain_motion(&self, py: Python<'_>) -> PyResult<()> {
-        py.detach(|| flush_planner_detached(&self.planner))?;
-        let drain = self.drain.clone();
-        py.detach(|| drain.wait_drained(DRAIN_TIMEOUT))
-            .map_err(PyRuntimeError::new_err)
-    }
-    fn wait_moves_start(&self) -> PyResult<u64> {
-        let rx = self.flush_try_start_inner()?;
-        let mut pending = self.flush.pending.lock_ok();
-        let id = self.flush.next_id.fetch_add(1, Ordering::Relaxed);
-        pending.insert(id, FlushWait { rx, deadline: None });
-        Ok(id)
-    }
-
-    fn wait_moves_poll(&self, flush_id: u64) -> PyResult<bool> {
-        let started_rx = {
-            let pending = self.flush.pending.lock_ok();
-            let Some(wait) = pending.get(&flush_id) else {
-                return Err(PyRuntimeError::new_err(format!(
-                    "wait_moves_poll: unknown flush id {flush_id}"
-                )));
-            };
-            wait.rx.is_some()
-        };
-        let late_rx = if started_rx {
-            None
-        } else {
-            match self.flush_try_start_inner()? {
-                Some(rx) => Some(rx),
-                None => return Ok(false),
-            }
-        };
-        let mut pending = self.flush.pending.lock_ok();
-        let Some(wait) = pending.get_mut(&flush_id) else {
-            return Err(PyRuntimeError::new_err(format!(
-                "wait_moves_poll: unknown flush id {flush_id}"
-            )));
-        };
-        if let Some(rx) = late_rx {
-            wait.rx = Some(rx);
-        }
-        if wait.deadline.is_none() {
-            let rx = wait
-                .rx
-                .as_ref()
-                .expect("flush receiver present past the try-start gate");
-            match rx.try_recv() {
-                Ok(finish) => {
-                    wait.deadline = Some(finish.unwrap_or_else(std::time::Instant::now));
-                }
-                Err(crossbeam_channel::TryRecvError::Empty) => return Ok(false),
-                Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                    pending.remove(&flush_id);
-                    return Err(PyRuntimeError::new_err(
-                        "wait_moves_poll: planner channel closed",
-                    ));
-                }
-            }
-        }
-        let done = wait
-            .deadline
-            .map(|d| std::time::Instant::now() >= d)
-            .unwrap_or(false);
-        if done {
-            pending.remove(&flush_id);
-        }
-        Ok(done)
+            err_ctx: &format!("(motor_idx={motor_idx} bus_id={bus_id} cs_pin_id={cs_pin_id})"),
+        })
     }
     fn motion_drain_poll(&self) -> PyResult<bool> {
         self.report_lagging_drain_wait();
@@ -140,8 +72,9 @@ impl PyMotionEngine {
             .as_ref()
             .expect("drain flush receiver just installed");
         match rx.try_recv() {
-            Ok(_committed_through) => {
+            Ok(result) => {
                 *pending = None;
+                result.map_err(|error| planner_err(StreamWorkerError::ExecutionHalted(error)))?;
                 let drained = self.drain.drained();
                 if drained {
                     self.report_drain_wait_done();
@@ -168,7 +101,7 @@ impl PyMotionEngine {
             .map_or(0, |p| p.pending_channel_moves() as u64)
     }
     fn input_channel_capacity(&self) -> u64 {
-        crate::worker::INPUT_CHANNEL_CAP as u64
+        motion_core::worker::INPUT_CHANNEL_CAP as u64
     }
     /// Fd the host reactor registers for engine readiness: it becomes
     /// readable when input-channel space frees after a refused submit, and
@@ -189,7 +122,7 @@ impl PyMotionEngine {
         })?;
         match planner.fence_start(force) {
             Ok(id) => Ok(Some(id)),
-            Err(crate::worker::StreamWorkerError::ChannelFull) => Ok(None),
+            Err(motion_core::worker::StreamWorkerError::ChannelFull) => Ok(None),
             Err(e) => Err(planner_err(e)),
         }
     }
@@ -250,7 +183,7 @@ impl PyMotionEngine {
     fn print_time_now(&self, mcu_handle: u32) -> Option<f64> {
         self.router
             .lock_ok()
-            .print_time_now(mcu_handle_from_raw(mcu_handle))
+            .print_time_now(McuHandle::from_raw(mcu_handle))
             .map(PrintTime::get)
     }
     fn get_last_move_time(&self) -> f64 {
@@ -281,10 +214,19 @@ impl PyMotionEngine {
         (t0 + last_move_time - host_now).max(0.0)
     }
     fn pump_backlog(&self) -> u64 {
-        self.pump.backlog.load(Ordering::Acquire)
+        if self
+            .pump
+            .thread
+            .lock_ok()
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished)
+        {
+            return 0;
+        }
+        self.drain.staged_total()
     }
     fn motion_lead_secs(&self) -> f64 {
-        crate::anchor::DEFAULT_LEAD_SECS
+        motion_core::anchor::DEFAULT_LEAD_SECS
     }
     fn dispatched_segment_count(&self) -> u64 {
         self.dispatched_segments.load(Ordering::Relaxed)
@@ -328,7 +270,7 @@ impl PyMotionEngine {
         t0: Option<f64>,
         what: &str,
     ) -> PyResult<f64> {
-        let mcu = mcu_handle_from_raw(mcu_handle);
+        let mcu = McuHandle::from_raw(mcu_handle);
         let router = self.router.lock_ok();
         let now = router.print_time_now(mcu).ok_or_else(|| {
             PyRuntimeError::new_err(format!(
@@ -372,17 +314,15 @@ impl PyMotionEngine {
         Ok(map)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn phase_register_call(
-        &self,
-        py: Python<'_>,
-        op: &str,
-        mcu_handle: u32,
-        request: &str,
-        response: &str,
-        timeout_s: f64,
-        err_ctx: &str,
-    ) -> PyResult<()> {
+    fn phase_register_call(&self, call: PhaseRegisterCall<'_>) -> PyResult<()> {
+        let PhaseRegisterCall {
+            op,
+            mcu_handle,
+            request,
+            response,
+            timeout_s,
+            err_ctx,
+        } = call;
         let io = {
             let mcus = self.mcus.lock_ok();
             let conn = mcus.get(&mcu_handle).ok_or_else(|| {
@@ -401,10 +341,11 @@ impl PyMotionEngine {
                 .clone()
         };
         let timeout = std::time::Duration::from_secs_f64(timeout_s);
-        let params = py.detach(|| -> PyResult<_> {
-            use host_rt::transport::Transport;
-            io.call(request, response, timeout)
-                .map_err(|e| PyRuntimeError::new_err(format!("{op}: transport error: {e:?}")))
+        let params = Python::attach(|py| {
+            py.detach(|| -> PyResult<_> {
+                io.call(request, response, timeout)
+                    .map_err(|e| PyRuntimeError::new_err(format!("{op}: transport error: {e:?}")))
+            })
         })?;
         let result = params.try_get_i32("result").ok_or_else(|| {
             PyRuntimeError::new_err(format!(
@@ -473,25 +414,15 @@ impl PyMotionEngine {
 
     fn flush_try_start_inner(
         &self,
-    ) -> PyResult<Option<crossbeam_channel::Receiver<Option<std::time::Instant>>>> {
+    ) -> PyResult<Option<crossbeam_channel::Receiver<Result<(), String>>>> {
         let guard = self.planner.lock_ok();
         let planner = guard.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("planner not initialized — call init_planner first")
         })?;
         match planner.flush_try_start() {
             Ok(rx) => Ok(Some(rx)),
-            Err(crate::worker::StreamWorkerError::ChannelFull) => Ok(None),
+            Err(motion_core::worker::StreamWorkerError::ChannelFull) => Ok(None),
             Err(e) => Err(planner_err(e)),
         }
     }
-}
-
-fn flush_planner_detached(
-    planner: &std::sync::Mutex<Option<motion_core::worker::StreamWorkerHandle>>,
-) -> PyResult<()> {
-    let guard = planner.lock_ok();
-    let handle = guard.as_ref().ok_or_else(|| {
-        PyRuntimeError::new_err("planner not initialized — call init_planner first")
-    })?;
-    handle.flush().map_err(planner_err)
 }

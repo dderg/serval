@@ -1,47 +1,8 @@
 use super::{PyMotionEngine, PyResult, PyRuntimeError, Python, pymethods};
-use crate::axis_transport::{TRANSPORT_PHASE, TRANSPORT_PULSE, transport_name};
-use crate::lock_ext::LockExt;
-use crate::types::AxisKey;
+use motion_core::axis_transport::{TRANSPORT_PHASE, TRANSPORT_PULSE, transport_name};
+use motion_core::lock_ext::LockExt;
+use motion_core::types::AxisKey;
 use std::sync::Arc;
-
-/// One transport's side of a handover: read the position it actually executed,
-/// and hand a position back to the transport taking over.
-enum Side {
-    Pulse(Arc<std::sync::Mutex<crate::pump::StepcompressEndpoint>>),
-    Phase(Arc<std::sync::Mutex<crate::pump::SampleEndpoint>>),
-}
-
-impl Side {
-    fn transport(&self) -> u8 {
-        match self {
-            Self::Pulse(_) => TRANSPORT_PULSE,
-            Self::Phase(_) => TRANSPORT_PHASE,
-        }
-    }
-
-    fn quiescent(&self) -> Result<bool, String> {
-        match self {
-            Self::Pulse(e) => Ok(e.lock_ok().transport_quiescent()),
-            Self::Phase(e) => e.lock_ok().transport_quiescent().map_err(|e| e.to_string()),
-        }
-    }
-
-    fn executed_position(&self, axis: u8) -> Result<i64, String> {
-        match self {
-            Self::Pulse(e) => e.lock_ok().executed_position(axis),
-            Self::Phase(e) => e.lock_ok().executed_position(axis),
-        }
-        .map_err(|e| e.to_string())
-    }
-
-    fn adopt_position(&self, axis: u8, position: i64) -> Result<(), String> {
-        match self {
-            Self::Pulse(e) => e.lock_ok().reset_axis_position(axis, position),
-            Self::Phase(e) => e.lock_ok().reset_axis_position(axis, position),
-        }
-        .map_err(|e| e.to_string())
-    }
-}
 
 #[pymethods]
 impl PyMotionEngine {
@@ -94,32 +55,35 @@ impl PyMotionEngine {
             );
             return Ok(());
         }
-        let outgoing = self.transport_side(key, from)?;
-        let incoming = self.transport_side(key, mode)?;
 
         self.quiesce_pump_and_drain(py)?;
 
         let position = py
             .detach(|| -> Result<i64, String> {
-                // The outgoing side may still be playing its buffered lead
-                // (the mcu retires sample runs asynchronously after the
-                // pump drains); wait it out instead of failing on a race,
-                // but never unboundedly.
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                while !outgoing.quiescent()? {
+                loop {
+                    let (position_tx, position_rx) = std::sync::mpsc::sync_channel(1);
+                    self.endpoint_command(motion_core::pump::EndpointCommand::Handover {
+                        key,
+                        from,
+                        to: mode,
+                        position: position_tx,
+                    })?;
+                    if let Some(position) = position_rx
+                        .recv()
+                        .map_err(|e| format!("switch_axis_transport: result channel closed: {e}"))?
+                    {
+                        return Ok(position);
+                    }
                     if std::time::Instant::now() >= deadline {
                         return Err(format!(
                             "switch_axis_transport: mcu {mcu_handle} axis {axis_idx} still has \
                              motion in flight on its {} transport after a 5s drain wait",
-                            transport_name(outgoing.transport())
+                            transport_name(from)
                         ));
                     }
                     std::thread::sleep(std::time::Duration::from_millis(2));
                 }
-                let position = outgoing.executed_position(axis_idx)?;
-                transports.adopt(key, mode)?;
-                incoming.adopt_position(axis_idx, position)?;
-                Ok(position)
             })
             .map_err(PyRuntimeError::new_err)?;
 
@@ -138,27 +102,29 @@ impl PyMotionEngine {
 }
 
 impl PyMotionEngine {
-    fn transport_side(&self, key: AxisKey, mode: u8) -> PyResult<Side> {
-        let missing = |what: &str| {
-            PyRuntimeError::new_err(format!(
-                "switch_axis_transport: mcu {} axis {} claims a {what} binding but no {what} \
-                 endpoint is registered for that mcu",
-                key.mcu_id, key.axis
-            ))
-        };
-        match mode {
-            TRANSPORT_PULSE => self
-                .stepcompress_endpoints
-                .lock_ok()
-                .get(&key.mcu_id)
-                .map(|e| Side::Pulse(Arc::clone(e)))
-                .ok_or_else(|| missing("pulse")),
-            _ => self
-                .sample_endpoints
-                .lock_ok()
-                .get(&key.mcu_id)
-                .map(|e| Side::Phase(Arc::clone(e)))
-                .ok_or_else(|| missing("phase")),
-        }
+    pub(super) fn endpoint_command(
+        &self,
+        command: motion_core::pump::EndpointCommand,
+    ) -> Result<(), String> {
+        let tx = self
+            .pump
+            .tx
+            .lock_ok()
+            .clone()
+            .ok_or_else(|| "endpoint command: execution owner is not running".to_string())?;
+        endpoint_command(&tx, command)
     }
+}
+
+pub(super) fn endpoint_command(
+    tx: &crossbeam_channel::Sender<motion_core::pump::PumpMsg>,
+    command: motion_core::pump::EndpointCommand,
+) -> Result<(), String> {
+    let (reply, response) = std::sync::mpsc::sync_channel(1);
+    tx.send(motion_core::pump::PumpMsg::Endpoint { command, reply })
+        .map_err(|_| "endpoint command: execution owner channel closed".to_string())?;
+    response
+        .recv()
+        .map_err(|e| format!("endpoint command: execution owner reply failed: {e}"))??;
+    Ok(())
 }

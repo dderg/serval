@@ -1,5 +1,4 @@
 use super::*;
-use crate::eval::eval;
 
 #[test]
 fn single_poly_kernel_constructs_one_piece() {
@@ -14,30 +13,6 @@ fn single_poly_kernel_constructs_one_piece() {
 fn kernel_support_returns_endpoints() {
     let k = PiecewisePolynomialKernel::single_poly(vec![1.0_f64], (-0.5, 0.5));
     assert_eq!(k.support(), (-0.5, 0.5));
-}
-
-#[test]
-fn scalar_multiply_doubles_evaluation() {
-    let curve = crate::ScalarNurbs::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![0.0, 1.0]).unwrap();
-    let doubled = scalar_multiply(&curve, 2.0_f64);
-    assert!((eval(&doubled.as_view(), 0.5_f64) - 1.0).abs() < 1e-12);
-}
-
-#[test]
-fn add_two_compatible_curves() {
-    let a = crate::ScalarNurbs::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![0.0, 1.0]).unwrap();
-    let b = crate::ScalarNurbs::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![2.0, 3.0]).unwrap();
-    let sum = add(&a, &b).unwrap();
-    assert!((eval(&sum.as_view(), 0.5_f64) - 3.0).abs() < 1e-12);
-}
-
-#[test]
-fn add_rejects_mismatched_degree() {
-    let a = crate::ScalarNurbs::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![0.0, 1.0]).unwrap();
-    let b = crate::ScalarNurbs::try_new(2, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], vec![0.0, 0.5, 1.0])
-        .unwrap();
-    let result = add(&a, &b);
-    assert!(matches!(result, Err(crate::AlgebraError::KnotMismatch)));
 }
 
 #[test]
@@ -107,89 +82,6 @@ fn single_poly_from_absolute_round_trips_via_evaluate() {
             "t={t}: absolute={absolute_val}, pascal={pascal_val}"
         );
     }
-}
-
-#[test]
-fn add_with_knot_union_identical_knots_fast_path() {
-    let a = crate::ScalarNurbs::try_new(1, vec![0.0_f64, 0.0, 1.0, 1.0], vec![0.0, 1.0]).unwrap();
-    let b = crate::ScalarNurbs::try_new(1, vec![0.0_f64, 0.0, 1.0, 1.0], vec![2.0, 3.0]).unwrap();
-    let sum = add_with_knot_union(&a, &b).unwrap();
-    assert!(
-        (eval(&sum.as_view(), 0.0_f64) - 2.0).abs() < 1e-12,
-        "fast-path u=0"
-    );
-    assert!(
-        (eval(&sum.as_view(), 0.5_f64) - 3.0).abs() < 1e-12,
-        "fast-path u=0.5"
-    );
-    assert!(
-        (eval(&sum.as_view(), 1.0_f64) - 4.0).abs() < 1e-12,
-        "fast-path u=1"
-    );
-}
-
-#[test]
-fn add_with_knot_union_mismatched_knots_union_path() {
-    use crate::bezier::{BezierPiece, bezier_pieces_to_nurbs};
-
-    let a = bezier_pieces_to_nurbs(&[
-        BezierPiece {
-            u_start: 0.0,
-            u_end: 0.5,
-            coeffs: vec![0.0, 10.0],
-        },
-        BezierPiece {
-            u_start: 0.5,
-            u_end: 1.0,
-            coeffs: vec![5.0, 10.0],
-        },
-    ]);
-    let b = crate::ScalarNurbs::try_new(1, vec![0.0_f64, 0.0, 1.0, 1.0], vec![20.0, 20.0]).unwrap();
-
-    let sum = add_with_knot_union(&a, &b).unwrap();
-    let cases = [
-        (0.0_f64, 20.0),
-        (0.25, 22.5),
-        (0.5, 25.0),
-        (0.75, 27.5),
-        (1.0, 30.0),
-    ];
-    for (u, expected) in cases {
-        let got = eval(&sum.as_view(), u);
-        assert!(
-            (got - expected).abs() < 1e-10,
-            "union-path u={u}: expected {expected}, got {got}",
-        );
-    }
-}
-
-#[test]
-fn add_with_knot_union_doc_example() {
-    use crate::ScalarNurbs;
-    let x =
-        ScalarNurbs::try_new(1, vec![0.0_f64, 0.0, 0.5, 1.0, 1.0], vec![0.0, 5.0, 10.0]).unwrap();
-    let y = ScalarNurbs::try_new(1, vec![0.0_f64, 0.0, 1.0, 1.0], vec![20.0, 20.0]).unwrap();
-    let sum = add_with_knot_union(&x, &y).unwrap();
-    let v0 = crate::eval::eval(&sum.as_view(), 0.0_f64);
-    let v1 = crate::eval::eval(&sum.as_view(), 1.0_f64);
-    assert!((v0 - 20.0).abs() < 1e-12);
-    assert!((v1 - 30.0).abs() < 1e-12);
-}
-
-#[test]
-fn add_with_knot_union_rejects_degree_mismatch() {
-    let a = crate::ScalarNurbs::try_new(1, vec![0.0_f64, 0.0, 1.0, 1.0], vec![0.0, 1.0]).unwrap();
-    let b = crate::ScalarNurbs::try_new(
-        2,
-        vec![0.0_f64, 0.0, 0.0, 1.0, 1.0, 1.0],
-        vec![0.0, 0.5, 1.0],
-    )
-    .unwrap();
-    let result = add_with_knot_union(&a, &b);
-    assert!(
-        matches!(result, Err(crate::AlgebraError::KnotMismatch)),
-        "expected KnotMismatch, got {result:?}",
-    );
 }
 
 #[test]

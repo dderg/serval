@@ -1,6 +1,6 @@
 use crate::host_io::reactor::{Reactor, ReactorState};
 use crate::transport::TransportError;
-use runtime::error::FaultCode;
+use runtime_contract::error::FaultCode;
 
 impl Reactor {
     pub(crate) fn close_with_host_fault(&mut self, fault_code: FaultCode, fault_detail: u32) {

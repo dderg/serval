@@ -1,13 +1,10 @@
-//! Production [`SegmentSink`]: anchors committed motion to the MCU clock,
-//! splits it into per-axis clocked spans, and hands each span to the pump.
-
 use crate::lock_ext::LockExt;
+use host_rt::passthrough_queue::McuHandle;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::Sender;
 use trajectory::{
     ContinuousAxis, ContinuousSegment, MotorGroup, MotorSpan, MotorTerm, NudgeProfile,
 };
@@ -15,34 +12,14 @@ use trajectory::{
 use super::CommittedFrontier;
 use super::dispatch::{DispatchError, SegmentSink};
 
-/// State a committed `ContinuousSegment` needs to reach the pump: per-MCU
-/// clock anchoring/projection, the axis-lane split, and the motion-history
-/// store whose retained spans a re-anchor invalidates.
-pub(crate) struct PumpSink {
+pub(crate) struct Projection {
     pub(crate) transports: Arc<crate::axis_transport::AxisTransports>,
     pub(crate) router: Arc<Mutex<host_rt::passthrough_queue::PassthroughRouter>>,
     pub(crate) anchor: Arc<Mutex<crate::anchor::Anchor>>,
     pub(crate) mcu_configs: Vec<crate::mcu_config::McuAxisConfig>,
-    pub(crate) pump_tx: Sender<crate::pump::EnqueueMsg>,
-    pub(crate) pump_control: Option<Sender<crate::pump::PumpMsg>>,
     pub(crate) counter: Arc<AtomicU64>,
-    pub(crate) active_drip_cohort: Arc<Mutex<Option<u64>>>,
-    pub(crate) motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
     pub(crate) frontier: Arc<CommittedFrontier>,
-    pub(crate) frozen_projection: Mutex<std::collections::HashMap<u32, FrozenProjection>>,
-    /// Set by the pump's fatal-transport action before the pump thread exits,
-    /// so a closed enqueue channel is reported as the endpoint fatal it is
-    /// rather than as a vanished thread.
-    pub(crate) transport_fatal: Arc<Mutex<Option<String>>>,
-}
-
-impl PumpSink {
-    fn pump_gone(&self) -> DispatchError {
-        match self.transport_fatal.lock_ok().clone() {
-            Some(reason) => DispatchError::TransportFatal(reason),
-            None => DispatchError::PumpGone,
-        }
-    }
+    pub(crate) frozen_projection: std::collections::HashMap<u32, FrozenProjection>,
 }
 
 #[derive(Clone, Copy)]
@@ -67,7 +44,7 @@ struct AnchorPoint {
     lead_secs: f64,
 }
 
-impl PumpSink {
+impl Projection {
     fn host_now(&self) -> f64 {
         self.router.lock_ok().host_now_secs()
     }
@@ -92,7 +69,7 @@ impl PumpSink {
         cfg: &crate::mcu_config::McuAxisConfig,
         seg: &ContinuousSegment,
     ) -> bool {
-        let module = crate::kinematics::KinematicsModule::from_tag(cfg.kinematics)
+        let module = crate::kinematics::KinematicsModule::from_tag(cfg.hw.kinematics)
             .expect("mcu_configs were validated at build");
         cfg.axes.iter().any(|&axis_idx| {
             if axis_idx >= seg.axes.len() {
@@ -106,7 +83,7 @@ impl PumpSink {
     fn live_clock_record(&self, mcu_id: u32) -> host_rt::passthrough_queue::ClockRecordSnapshot {
         self.router
             .lock_ok()
-            .clock_record(crate::types::mcu_handle_from_raw(mcu_id))
+            .clock_record(McuHandle::from_raw(mcu_id))
             .unwrap_or_else(|| {
                 panic!(
                     "mcu {mcu_id} projected a span with no valid clocksync record — \
@@ -125,8 +102,8 @@ impl PumpSink {
         record.last_clock as f64 + ((host_secs - record.clock_offset) * record.clock_freq).max(0.0)
     }
 
-    fn reanchor_projection(&self, mcu_id: u32, host_now: f64) -> Result<(), DispatchError> {
-        let handle = crate::types::mcu_handle_from_raw(mcu_id);
+    fn reanchor_projection(&mut self, mcu_id: u32, host_now: f64) -> Result<(), DispatchError> {
+        let handle = McuHandle::from_raw(mcu_id);
         let record = self
             .router
             .lock_ok()
@@ -182,7 +159,7 @@ impl PumpSink {
         // clock's error to the clocksync's own — the guards then hold it to
         // the floor margin — and the reanchor cut re-bases the MCU step
         // clock anyway, so nothing downstream depends on continuity.
-        let mut frozen = self.frozen_projection.lock_ok();
+        let frozen = &mut self.frozen_projection;
         let mcu_ref = self
             .router
             .lock_ok()
@@ -263,7 +240,6 @@ impl PumpSink {
 
     fn frozen_epoch(&self, mcu_id: u32) -> FrozenProjection {
         self.frozen_projection
-            .lock_ok()
             .get(&mcu_id)
             .copied()
             .unwrap_or_else(|| {
@@ -302,7 +278,7 @@ impl PumpSink {
         if self.mcu_has_motion(cfg, seg) {
             return true;
         }
-        let handle = crate::types::mcu_handle_from_raw(cfg.mcu_id);
+        let handle = McuHandle::from_raw(cfg.mcu_id);
         let live = self
             .router
             .lock_ok()
@@ -328,52 +304,35 @@ impl PumpSink {
         }
     }
 
-    /// A nudge-path projection rebase moved this MCU's host→mcu map for
-    /// every lane, but only the nudged lane carries spans (and so a cut)
-    /// through the pump. Cut every sibling lane at the same clock via the
-    /// pump's control channel — otherwise their shim seams keep the previous
-    /// epoch's slope and the next spans (projected on the new map) miss the
-    /// seam by `freq_delta × span` plus the rebase's offset jump.
-    fn cut_sibling_lanes_after_rebase(
+    fn cut_sibling_lanes_after_rebase<S: crate::pump::SpanSink>(
         &self,
+        pump: &mut crate::pump::Pump<S>,
         mcu_id: u32,
         nudged_axis: u8,
         seam_host: f64,
-    ) -> Result<(), DispatchError> {
-        let Some(control) = &self.pump_control else {
-            return Ok(());
-        };
+    ) {
         let at_start_clock = self.project(mcu_id, seam_host);
-        let epoch_freq = self
-            .frozen_projection
-            .lock_ok()
-            .get(&mcu_id)
-            .map(|f| f.freq);
+        let epoch_freq = self.frozen_projection.get(&mcu_id).map(|f| f.freq);
         for cfg in self.mcu_configs.iter().filter(|c| c.mcu_id == mcu_id) {
             for &axis_idx in &cfg.axes {
                 let axis = axis_idx as u8;
-                if axis == nudged_axis {
-                    continue;
-                }
-                control
-                    .send(crate::pump::PumpMsg::MarkReanchor {
-                        key: crate::types::AxisKey { mcu_id, axis },
+                if axis != nudged_axis {
+                    pump.cut_lane_at(
+                        crate::types::AxisKey { mcu_id, axis },
                         at_start_clock,
                         epoch_freq,
-                    })
-                    .map_err(|_| self.pump_gone())?;
+                    );
+                }
             }
         }
-        Ok(())
     }
 
-    fn anchor(&self, t_start: f64, t_end: f64) -> AnchorPoint {
+    fn anchor(&self, t_start: f64, t_end: f64, drip_active: bool) -> AnchorPoint {
         let host_now = self.host_now();
         let (t0, epoch) = self
             .anchor
             .lock_ok()
             .anchor_segment(t_start, t_end, host_now);
-        let drip_active = self.active_drip_cohort.lock_ok().is_some();
         AnchorPoint {
             t0,
             epoch,
@@ -389,14 +348,21 @@ impl PumpSink {
     fn log_seg0_lead(&self, mcu_ids: impl Iterator<Item = u32>, seg_start_host: f64, t0: f64) {
         let r = self.router.lock_ok();
         for mcu_id in mcu_ids {
-            let h = crate::types::mcu_handle_from_raw(mcu_id);
+            let h = McuHandle::from_raw(mcu_id);
             r.log_seg0_lead(h, seg_start_host, t0);
         }
     }
 }
 
-impl SegmentSink for PumpSink {
-    fn dispatch(&mut self, seg: &ContinuousSegment) -> Result<(), DispatchError> {
+impl Projection {
+    fn dispatch<S: crate::pump::SpanSink>(
+        &mut self,
+        seg: &ContinuousSegment,
+        pump: &mut crate::pump::Pump<S>,
+    ) -> Result<(), DispatchError> {
+        if let Some(reason) = &pump.fatal_reason {
+            return Err(DispatchError::ExecutionHalted(reason.clone()));
+        }
         tracing::debug!(
             subsystem = "engine",
             event = "dispatch_entered",
@@ -405,7 +371,7 @@ impl SegmentSink for PumpSink {
             "[engine-trace] dispatch entered"
         );
 
-        let at = self.anchor(seg.t_start, seg.t_end);
+        let at = self.anchor(seg.t_start, seg.t_end, pump.drip_active());
 
         let runway_s = at.t0 + seg.t_end - at.host_now;
         if runway_s > 0.0 {
@@ -414,9 +380,9 @@ impl SegmentSink for PumpSink {
         }
 
         let seam_host = at.t0 + seg.t_start;
-        if at.epoch.retimed() || self.frozen_projection.lock_ok().is_empty() {
+        if at.epoch.retimed() || self.frozen_projection.is_empty() {
             let reanchor = {
-                let frozen = self.frozen_projection.lock_ok();
+                let frozen = &self.frozen_projection;
                 self.mcu_configs
                     .iter()
                     .filter(|cfg| self.freezes_projection(cfg.mcu_id))
@@ -451,7 +417,7 @@ impl SegmentSink for PumpSink {
             if !fresh {
                 return None;
             }
-            frozen_for_ctx.lock_ok().get(&mcu_id).map(|f| f.freq)
+            frozen_for_ctx.get(&mcu_id).map(|f| f.freq)
         };
         let msgs = crate::enqueue::enqueue_segment(
             seg,
@@ -469,17 +435,19 @@ impl SegmentSink for PumpSink {
         )?;
 
         if at.epoch.retimed() {
-            self.motion_history.lock_ok().drop_pieces_on_reanchor();
+            if let Some(history) = &pump.history {
+                history.lock_ok().drop_pieces_on_reanchor();
+            }
         }
         for m in msgs {
-            self.pump_tx.send(m).map_err(|_| self.pump_gone())?;
+            pump.enqueue(m);
         }
 
         tracing::trace!(
             subsystem = "motion",
             event = "pipe_pump_in",
             line = seg.source_line,
-            t_us = crate::timing::mono_us(),
+            t_us = motion_pipeline::timing::mono_us(),
             "[pipe] handed to pump"
         );
 
@@ -488,13 +456,17 @@ impl SegmentSink for PumpSink {
     }
 
     /// The single-axis, planner-bypassing sibling of `dispatch`.
-    fn dispatch_nudge(
+    fn dispatch_nudge<S: crate::pump::SpanSink>(
         &mut self,
         mcu_id: u32,
         axis: u8,
         motor_mask: u8,
         profile: &NudgeProfile,
+        pump: &mut crate::pump::Pump<S>,
     ) -> Result<(), DispatchError> {
+        if let Some(reason) = &pump.fatal_reason {
+            return Err(DispatchError::ExecutionHalted(reason.clone()));
+        }
         let axis_idx = axis as usize;
         let lane_present = self
             .mcu_configs
@@ -505,15 +477,15 @@ impl SegmentSink for PumpSink {
             return Err(DispatchError::NudgeTargetMissing { mcu_id, axis });
         }
 
-        let at = self.anchor(profile.t_start(), profile.t_end());
+        let at = self.anchor(profile.t_start(), profile.t_end(), pump.drip_active());
         self.anchor.lock_ok().mark_parked();
 
         let seam_host = at.t0 + profile.t_start();
         let fresh_projection = self.freezes_projection(mcu_id)
-            && (at.epoch.retimed() || !self.frozen_projection.lock_ok().contains_key(&mcu_id));
+            && (at.epoch.retimed() || !self.frozen_projection.contains_key(&mcu_id));
         if fresh_projection {
             self.reanchor_projection(mcu_id, seam_host)?;
-            self.cut_sibling_lanes_after_rebase(mcu_id, axis, seam_host)?;
+            self.cut_sibling_lanes_after_rebase(pump, mcu_id, axis, seam_host);
         }
 
         if at.epoch.is_fresh() {
@@ -551,17 +523,14 @@ impl SegmentSink for PumpSink {
 
         if !spans.is_empty() {
             let key = crate::types::AxisKey { mcu_id, axis };
-            self.pump_tx
-                .send(crate::pump::EnqueueMsg {
-                    epoch_freq,
-                    key,
-                    spans,
-                    epoch: at.epoch,
-                    lead_secs: at.lead_secs,
-                    source_line: u32::MAX,
-                    batch_end: true,
-                })
-                .map_err(|_| self.pump_gone())?;
+            pump.enqueue(crate::pump::LaneProjection {
+                epoch_freq,
+                key,
+                spans,
+                epoch: at.epoch,
+                lead_secs: at.lead_secs,
+                source_line: u32::MAX,
+            });
         }
 
         self.counter.fetch_add(1, Ordering::Relaxed);
@@ -575,6 +544,32 @@ impl SegmentSink for PumpSink {
     /// acceleration still applied.
     fn mark_parked(&mut self) {
         self.anchor.lock_ok().mark_parked();
+    }
+}
+
+pub(crate) struct PumpSink<'a, S> {
+    pub(crate) projection: &'a mut Projection,
+    pub(crate) pump: &'a mut crate::pump::Pump<S>,
+}
+
+impl<S: crate::pump::SpanSink> SegmentSink for PumpSink<'_, S> {
+    fn dispatch(&mut self, seg: &ContinuousSegment) -> Result<(), DispatchError> {
+        self.projection.dispatch(seg, self.pump)
+    }
+
+    fn dispatch_nudge(
+        &mut self,
+        mcu_id: u32,
+        axis: u8,
+        motor_mask: u8,
+        profile: &NudgeProfile,
+    ) -> Result<(), DispatchError> {
+        self.projection
+            .dispatch_nudge(mcu_id, axis, motor_mask, profile, self.pump)
+    }
+
+    fn mark_parked(&mut self) {
+        self.projection.mark_parked();
     }
 }
 

@@ -18,7 +18,6 @@ nurbs = { path = "../nurbs" }
 crossbeam-channel = "0.5"
 thiserror = { workspace = true }
 tracing = "0.1"
-libc = "0.2"
 
 [dev-dependencies]
 proptest = "1"

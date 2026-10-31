@@ -33,11 +33,3 @@ fn try_new_rejects_knot_count_mismatch() {
         Err(crate::ConstructError::KnotCountMismatch { .. })
     ));
 }
-
-#[test]
-fn as_view_provides_borrowed_access() {
-    let owned = linear_3d_curve();
-    let view = owned.as_view();
-    assert_eq!(view.degree(), 1);
-    assert_eq!(view.control_points()[1], [1.0, 2.0, 3.0]);
-}

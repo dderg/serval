@@ -1,4 +1,5 @@
-use crate::lock_ext::LockExt;
+use motion_core::kinematics::KinematicsModule;
+use motion_core::lock_ext::LockExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -7,6 +8,7 @@ use pyo3::prelude::*;
 
 use host_rt::host_io::McuHostIo;
 use host_rt::mcu_serial_conn::McuSerialConn;
+use runtime_contract::axes::MAX_AXES;
 
 use super::state::McuConnection;
 
@@ -120,7 +122,7 @@ pub(crate) fn place_motor_response(
 }
 
 pub(crate) fn collect_motor_positions_inner(
-    mcu_axis_configs: &Mutex<Vec<crate::mcu_config::McuAxisConfig>>,
+    mcu_axis_configs: &Mutex<Vec<motion_core::mcu_config::McuAxisConfig>>,
     mcus: &Mutex<HashMap<u32, McuConnection>>,
     timeout: std::time::Duration,
 ) -> Result<HashMap<String, (f64, f64)>, String> {
@@ -128,7 +130,6 @@ pub(crate) fn collect_motor_positions_inner(
     use mcu_protocol::MessageKind;
     use mcu_protocol::codec::{Cursor, Decode};
     use mcu_protocol::messages::MotorStateResponse;
-    use runtime::stepping_state::MAX_AXES;
 
     let configs = mcu_axis_configs.lock_ok().clone();
     if configs.is_empty() {
@@ -137,8 +138,8 @@ pub(crate) fn collect_motor_positions_inner(
     let kin_tag = configs
         .iter()
         .find(|c| c.axes.contains(&0usize))
-        .map(|c| c.kinematics)
-        .unwrap_or(runtime::segment::KinematicTag::Cartesian as u8);
+        .map(|c| c.hw.kinematics)
+        .unwrap_or(motion_core::kinematics::KinematicsKind::Cartesian as u8);
 
     let mut motors: [Option<f64>; MAX_AXES] = [None; MAX_AXES];
     let mut vmotors: [Option<f64>; MAX_AXES] = [None; MAX_AXES];
@@ -200,7 +201,7 @@ pub(crate) fn collect_motor_positions_inner(
             &mut vmotors,
         );
     }
-    crate::position_query::assemble_cartesian(&motors, &vmotors, kin_tag)
+    assemble_cartesian(&motors, &vmotors, kin_tag)
 }
 
 pub(crate) fn query_ethercat_runtime_caps(
@@ -217,3 +218,41 @@ pub(crate) fn query_ethercat_runtime_caps(
     }
     decode_runtime_caps_body(&body)
 }
+
+const AXIS_NAMES: [&str; 4] = ["x", "y", "z", "e"];
+
+fn assemble_cartesian(
+    motors: &[Option<f64>; MAX_AXES],
+    vmotors: &[Option<f64>; MAX_AXES],
+    kin_tag: u8,
+) -> Result<HashMap<String, (f64, f64)>, String> {
+    let kin = KinematicsModule::from_tag(kin_tag).map_err(|e| e.to_string())?;
+    let spat = |arr: &[Option<f64>; MAX_AXES]| {
+        [
+            arr[0].unwrap_or(0.0),
+            arr[1].unwrap_or(0.0),
+            arr[2].unwrap_or(0.0),
+        ]
+    };
+    let pos_cart = kin.inverse(spat(motors));
+    let vel_cart = kin.inverse(spat(vmotors));
+    let mut out = HashMap::new();
+    for axis in 0..3 {
+        if motors[axis].is_some() || vmotors[axis].is_some() {
+            out.insert(
+                AXIS_NAMES[axis].to_string(),
+                (pos_cart[axis], vel_cart[axis]),
+            );
+        }
+    }
+    if motors[3].is_some() || vmotors[3].is_some() {
+        out.insert(
+            "e".to_string(),
+            (motors[3].unwrap_or(0.0), vmotors[3].unwrap_or(0.0)),
+        );
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests;

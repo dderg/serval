@@ -1,15 +1,11 @@
+use crate::kinematics::KinematicsKind;
 use crate::kinematics::SPATIAL_AXES;
 use crate::types::AxisKey;
-use runtime::segment::KinematicTag;
 use std::collections::HashSet;
 
-pub const KINEMATICS_COREXY: u8 = KinematicTag::CoreXy as u8;
+pub const KINEMATICS_COREXY: u8 = KinematicsKind::CoreXy as u8;
 
-const _: () = assert!(
-    KinematicTag::CoreXy as u8 == 0,
-    "KinematicTag::CoreXy discriminant must be 0 — the Python↔Rust init_planner \
-     topology tuples mirror it numerically (see segment.rs); renumbering breaks that contract",
-);
+const _: () = assert!(KinematicsKind::CoreXy as u8 == 0);
 
 /// How one lane's motion reaches its motor: step/dir pulses the host
 /// compresses into `queue_step` frames, or absolute sample runs the mcu's
@@ -75,24 +71,36 @@ pub const AXIS_X: usize = 0;
 pub const AXIS_Y: usize = 1;
 pub const AXIS_Z: usize = 2;
 
+/// The board facts klippy reads off one mcu and the host never derives: the
+/// kinematics tag, the per-lane motor ceilings, the per-motor step hardware,
+/// and the firmware-advertised queue and sample rates. Carried verbatim from
+/// the wire input into the validated config, so it is defined once here.
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct McuTopologyInput {
-    pub mcu_id: u32,
-    pub axes: Vec<u8>,
+pub struct McuHardware {
     pub kinematics: u8,
+    /// Motor-frame velocity ceiling (mm/s) per lane: the fastest that lane's
+    /// MCU can physically emit steps. Tracks are validated against it at
+    /// enqueue so an overspeed track fails loud on the host instead of
+    /// latching -310 on the MCU.
     pub max_motor_velocity: Vec<f64>,
-    pub lane_kinds: Vec<u8>,
     pub motor_counts: Vec<u8>,
     pub microstep_distance: Vec<f64>,
     pub invert_dir: Vec<bool>,
     pub stepper_oids: Vec<u32>,
     pub move_queue_slots: u32,
+    /// Per motor: the settle the mcu enforces around every pulse
+    /// (`config_stepper step_pulse_ticks`, in seconds). The step shim keeps
+    /// consecutive runs at least this far apart so a re-armed classic
+    /// stepper never loads a move behind its own pending unstep.
     pub step_pulse_seconds: Vec<f64>,
-    pub high_precision_step_compress: Vec<bool>,
+    /// Only meaningful with `StepcompressEncoder::Classic`: the max_error
+    /// budget in seconds the encoder may introduce per sub-sample step time.
+    /// `build_endpoint` converts it to ticks with the measured clock
+    /// frequency it alone holds.
     pub stepcompress_max_error_secs: f64,
     /// The mcu's own sample-executor rate (Hz), as klippy read it from the
-    /// firmware's advertised `MOTION_SAMPLE_RATE_HZ`. Zero when the mcu has no
-    /// phase lane to run at it.
+    /// firmware's advertised `MOTION_SAMPLE_RATE_HZ`. Zero when the mcu has
+    /// no phase lane to run at it.
     pub phase_sample_rate: f64,
     /// Runs each phase lane's mcu-side ring holds, as klippy read it from the
     /// firmware's advertised `SAMPLE_RUNS_PER_LANE`. Zero when the mcu has no
@@ -100,47 +108,28 @@ pub struct McuTopologyInput {
     pub phase_ring_depth: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct McuTopologyInput {
+    pub mcu_id: u32,
+    pub axes: Vec<u8>,
+    pub lane_kinds: Vec<u8>,
+    pub high_precision_step_compress: Vec<bool>,
+    pub hw: McuHardware,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct McuAxisConfig {
     pub mcu_id: u32,
     pub axes: Vec<usize>,
-    pub kinematics: u8,
     /// How each entry of `axes` reaches its motor. Same indexing as
-    /// `max_motor_velocity`.
+    /// `hw.max_motor_velocity`.
     pub lane_kinds: Vec<LaneKind>,
-    /// Motor-frame velocity ceiling (mm/s) per entry of `axes`: the fastest
-    /// this axis's MCU can physically emit steps. Tracks are validated
-    /// against it at enqueue so an overspeed track fails loud on the host
-    /// instead of latching -310 on the MCU.
-    pub max_motor_velocity: Vec<f64>,
     /// Slots served by the ethercat-rt endpoint: torque-gated drives whose
     /// rings must stay empty while parked, so pure-hold lanes are never
     /// enqueued for them.
     pub ethercat: bool,
-    pub motor_counts: Vec<u8>,
-    pub microstep_distance: Vec<f64>,
-    pub invert_dir: Vec<bool>,
-    pub stepper_oids: Vec<u32>,
-    pub move_queue_slots: u32,
-    /// Per entry of `axes`: the settle the mcu enforces around every pulse
-    /// (`config_stepper step_pulse_ticks`, in seconds). The step shim keeps
-    /// consecutive runs at least this far apart so a re-armed classic
-    /// stepper never loads a move behind its own pending unstep.
-    pub step_pulse_seconds: Vec<f64>,
     pub stepcompress_encoders: Vec<StepcompressEncoder>,
-    /// Rate the mcu's sample executor consumes phase-lane runs at, firmware
-    /// truth rather than a host choice. Positive whenever a lane is
-    /// [`LaneKind::Phase`].
-    pub phase_sample_rate: f64,
-    /// Runs one phase lane's mcu-side ring holds — the ceiling the host's
-    /// in-flight window must never cross, firmware truth rather than a host
-    /// choice. Positive whenever a lane is [`LaneKind::Phase`].
-    pub phase_ring_depth: u32,
-    /// Only meaningful with `StepcompressEncoder::Classic`: the max_error
-    /// budget in seconds the encoder may introduce per sub-sample step time.
-    /// `build_endpoint` converts it to ticks with the measured clock
-    /// frequency it alone holds.
-    pub stepcompress_max_error_secs: f64,
+    pub hw: McuHardware,
 }
 
 impl McuAxisConfig {
@@ -157,6 +146,7 @@ impl McuAxisConfig {
                 )
             });
         *self
+            .hw
             .max_motor_velocity
             .get(configured_index)
             .unwrap_or_else(|| {
@@ -193,20 +183,24 @@ impl McuAxisConfig {
     }
     #[must_use]
     pub fn motor_range(&self, lane: usize) -> std::ops::Range<usize> {
-        let start = self.motor_counts[..lane]
+        let start = self.hw.motor_counts[..lane]
             .iter()
             .map(|&count| usize::from(count))
             .sum();
-        start..start + usize::from(self.motor_counts[lane])
+        start..start + usize::from(self.hw.motor_counts[lane])
     }
 
     #[must_use]
     pub fn motor_axis(&self, motor: usize) -> Option<usize> {
-        self.motor_counts.iter().enumerate().find_map(|(lane, _)| {
-            self.motor_range(lane)
-                .contains(&motor)
-                .then_some(self.axes[lane])
-        })
+        self.hw
+            .motor_counts
+            .iter()
+            .enumerate()
+            .find_map(|(lane, _)| {
+                self.motor_range(lane)
+                    .contains(&motor)
+                    .then_some(self.axes[lane])
+            })
     }
 
     #[must_use]
@@ -308,14 +302,14 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
 ) -> Result<Vec<McuAxisConfig>, KinematicsConfigError> {
     mcus.iter()
         .map(|topology| {
-            crate::kinematics::KinematicsModule::from_tag(topology.kinematics).map_err(|_| {
-                KinematicsConfigError::UnknownTag {
+            crate::kinematics::KinematicsModule::from_tag(topology.hw.kinematics).map_err(
+                |_| KinematicsConfigError::UnknownTag {
                     handle: topology.mcu_id,
-                    tag: topology.kinematics,
-                }
-            })?;
+                    tag: topology.hw.kinematics,
+                },
+            )?;
             let axes: Vec<usize> = topology.axes.iter().map(|&a| a as usize).collect();
-            if topology.kinematics == KINEMATICS_COREXY
+            if topology.hw.kinematics == KINEMATICS_COREXY
                 && !(axes.contains(&AXIS_X) && axes.contains(&AXIS_Y))
             {
                 return Err(KinematicsConfigError::CorexyMissingXy {
@@ -323,16 +317,16 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                     axes,
                 });
             }
-            if topology.max_motor_velocity.len() != axes.len() {
+            if topology.hw.max_motor_velocity.len() != axes.len() {
                 return Err(KinematicsConfigError::VelocityCeilingCount {
                     handle: topology.mcu_id,
                     axis_count: axes.len(),
-                    ceiling_count: topology.max_motor_velocity.len(),
+                    ceiling_count: topology.hw.max_motor_velocity.len(),
                 });
             }
             for (field, got) in [
                 ("lane_kinds", topology.lane_kinds.len()),
-                ("motor_counts", topology.motor_counts.len()),
+                ("motor_counts", topology.hw.motor_counts.len()),
             ] {
                 if got != axes.len() {
                     return Err(KinematicsConfigError::PerAxisVectorLength {
@@ -343,7 +337,7 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                     });
                 }
             }
-            for (&axis, &count) in axes.iter().zip(&topology.motor_counts) {
+            for (&axis, &count) in axes.iter().zip(&topology.hw.motor_counts) {
                 if count == 0 {
                     return Err(KinematicsConfigError::EmptyMotorGroup {
                         handle: topology.mcu_id,
@@ -351,12 +345,17 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                     });
                 }
             }
-            let motor_count = topology.motor_counts.iter().map(|&n| usize::from(n)).sum();
+            let motor_count = topology
+                .hw
+                .motor_counts
+                .iter()
+                .map(|&n| usize::from(n))
+                .sum();
             for (field, got) in [
-                ("microstep_distance", topology.microstep_distance.len()),
-                ("invert_dir", topology.invert_dir.len()),
-                ("stepper_oids", topology.stepper_oids.len()),
-                ("step_pulse_seconds", topology.step_pulse_seconds.len()),
+                ("microstep_distance", topology.hw.microstep_distance.len()),
+                ("invert_dir", topology.hw.invert_dir.len()),
+                ("stepper_oids", topology.hw.stepper_oids.len()),
+                ("step_pulse_seconds", topology.hw.step_pulse_seconds.len()),
                 (
                     "high_precision_step_compress",
                     topology.high_precision_step_compress.len(),
@@ -382,14 +381,14 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                 })
                 .collect::<Result<_, _>>()?;
             let ethercat = ethercat_mcu_ids.contains(&topology.mcu_id);
-            let move_queue_slots = topology.move_queue_slots;
+            let move_queue_slots = topology.hw.move_queue_slots;
             let pulse_capable = lane_kinds.iter().any(|k| k.pulse_capable());
             if !ethercat && pulse_capable && move_queue_slots == 0 {
                 return Err(KinematicsConfigError::PulseLaneMoveQueueSlots {
                     handle: topology.mcu_id,
                 });
             }
-            let phase_sample_rate = topology.phase_sample_rate;
+            let phase_sample_rate = topology.hw.phase_sample_rate;
             let phase_capable = lane_kinds.iter().any(|k| k.phase_capable());
             if phase_capable && (!phase_sample_rate.is_finite() || phase_sample_rate <= 0.0) {
                 return Err(KinematicsConfigError::PhaseLaneSampleRate {
@@ -397,7 +396,7 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                     rate: phase_sample_rate,
                 });
             }
-            let phase_ring_depth = topology.phase_ring_depth;
+            let phase_ring_depth = topology.hw.phase_ring_depth;
             if phase_capable && phase_ring_depth == 0 {
                 return Err(KinematicsConfigError::PhaseLaneRingDepth {
                     handle: topology.mcu_id,
@@ -406,16 +405,8 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
             Ok(McuAxisConfig {
                 mcu_id: topology.mcu_id,
                 axes,
-                kinematics: topology.kinematics,
                 lane_kinds,
-                max_motor_velocity: topology.max_motor_velocity.clone(),
                 ethercat,
-                motor_counts: topology.motor_counts.clone(),
-                microstep_distance: topology.microstep_distance.clone(),
-                invert_dir: topology.invert_dir.clone(),
-                stepper_oids: topology.stepper_oids.clone(),
-                move_queue_slots,
-                step_pulse_seconds: topology.step_pulse_seconds.clone(),
                 stepcompress_encoders: topology
                     .high_precision_step_compress
                     .iter()
@@ -427,16 +418,14 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                         }
                     })
                     .collect(),
-                phase_sample_rate,
-                phase_ring_depth,
-                stepcompress_max_error_secs: topology.stepcompress_max_error_secs,
+                hw: topology.hw.clone(),
             })
         })
         .collect()
 }
 
 pub fn motor_frame(cfg: &McuAxisConfig, axes: [f64; SPATIAL_AXES]) -> [f64; SPATIAL_AXES] {
-    crate::kinematics::KinematicsModule::from_tag(cfg.kinematics)
+    crate::kinematics::KinematicsModule::from_tag(cfg.hw.kinematics)
         .expect("build_mcu_configs validated the kinematics tag")
         .forward(axes)
 }
@@ -547,7 +536,7 @@ fn seed_counts(
                 .map(move |motor_index| (axis, motor_index))
         })
         .map(|(axis, motor_index)| {
-            let quantum = *cfg.microstep_distance.get(motor_index).ok_or_else(|| {
+            let quantum = *cfg.hw.microstep_distance.get(motor_index).ok_or_else(|| {
                 format!(
                     "position seed: mcu {} axis {axis} motor {motor_index} is a {what} lane \
                      with no microstep distance",

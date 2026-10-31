@@ -1,6 +1,6 @@
 mod common;
 
-use std::process::{Child, Command};
+use common::spawn_and_claim;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -9,56 +9,14 @@ use std::time::{Duration, Instant};
 use ethercat_rt::stream_halt::ERR_PIECES_WHILE_HALTED;
 use host_rt::mcu_call::McuCall;
 use host_rt::mcu_serial_conn::McuSerialConn;
-use mcu_protocol::codec::{Cursor, Decode, Encode};
+use mcu_protocol::codec::{Decode, Encode};
 use mcu_protocol::messages::{
-    ArmSensorlessEndstop, ArmSensorlessEndstopResponse, ClaimHandshakeReply, LaneRun, MessageKind,
-    PushSampleRuns, PushSampleRunsResponse, ResumeStreamResponse, SampleGridResponse, SdoWrite,
-    SdoWriteResponse, SetTorque, SetTorqueResponse, SetpointSample, LANE_RUN_FLAG_REANCHOR,
-    LANE_RUN_FLAG_TAIL,
+    ArmSensorlessEndstop, ArmSensorlessEndstopResponse, LaneRun, MessageKind, PushSampleRuns,
+    PushSampleRunsResponse, ResumeStreamResponse, SampleGridResponse, SdoWrite, SdoWriteResponse,
+    SetTorque, SetTorqueResponse, SetpointSample, LANE_RUN_FLAG_REANCHOR, LANE_RUN_FLAG_TAIL,
 };
 
-const STUB_BIN: &str = env!("CARGO_BIN_EXE_ethercat-rt-stub");
 const TORQUE_ACTUAL_INDEX: u16 = 0x6077;
-
-struct ChildGuard {
-    child: Option<Child>,
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(mut c) = self.child.take() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-    }
-}
-
-fn socket_path(tag: &str) -> String {
-    format!("/tmp/kalico-sl-{}-{}.sock", tag, std::process::id())
-}
-
-fn wait_for_socket(path: &str, deadline: Instant) {
-    while !std::path::Path::new(path).exists() {
-        assert!(
-            Instant::now() < deadline,
-            "stub socket {path:?} did not appear within deadline"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn do_handshake(conn: &McuSerialConn) {
-    let (kind, body) = conn
-        .mcu_call(
-            MessageKind::ClaimHandshake,
-            Vec::new(),
-            Duration::from_secs(5),
-        )
-        .expect("ClaimHandshake mcu_call must succeed");
-    assert_eq!(kind, MessageKind::ClaimHandshakeReply);
-    ClaimHandshakeReply::decode_from(&mut Cursor::new(&body))
-        .expect("ClaimHandshakeReply must decode");
-}
 
 fn arm_sensorless(conn: &McuSerialConn, endstop_id: u8, torque_trip_tenth_pct: u16, enable: bool) {
     let body = ArmSensorlessEndstop {
@@ -95,20 +53,6 @@ fn inject_torque(conn: &McuSerialConn, value: i64) {
     assert_eq!(kind, MessageKind::SdoWriteResponse);
     let r = SdoWriteResponse::decode(&resp).expect("response decodes");
     assert_eq!(r.result, 0, "torque injection write must succeed");
-}
-
-fn spawn_stub(tag: &str) -> (ChildGuard, McuSerialConn) {
-    let socket = socket_path(tag);
-    let _ = std::fs::remove_file(&socket);
-    let child = Command::new(STUB_BIN)
-        .args(["--socket", &socket])
-        .spawn()
-        .expect("spawn ethercat-rt-stub");
-    let guard = ChildGuard { child: Some(child) };
-    wait_for_socket(&socket, Instant::now() + Duration::from_secs(5));
-    let conn = common::connect_until(&socket, Instant::now() + Duration::from_secs(5));
-    do_handshake(&conn);
-    (guard, conn)
 }
 
 /// Cycles of lead for the queued run. The stub's grid cycle is 1 ms, so the
@@ -183,7 +127,7 @@ fn enable_torque(conn: &McuSerialConn) {
 
 #[test]
 fn trip_halts_stream_until_resume() {
-    let (_guard, conn) = spawn_stub("trip-halt");
+    let (_guard, conn, _path) = spawn_and_claim("trip-halt", &[]);
     enable_torque(&conn);
 
     let fired = Arc::new(AtomicBool::new(false));
@@ -222,7 +166,7 @@ fn trip_halts_stream_until_resume() {
 
 #[test]
 fn armed_torque_cross_emits_endstop_trip() {
-    let (_guard, conn) = spawn_stub("trip");
+    let (_guard, conn, _path) = spawn_and_claim("trip", &[]);
 
     let fired = Arc::new(AtomicBool::new(false));
     let trip_id = Arc::new(AtomicU64::new(u64::MAX));
@@ -253,7 +197,7 @@ fn armed_torque_cross_emits_endstop_trip() {
 
 #[test]
 fn below_threshold_does_not_trip_and_disarm_silences() {
-    let (_guard, conn) = spawn_stub("quiet");
+    let (_guard, conn, _path) = spawn_and_claim("quiet", &[]);
 
     let fired = Arc::new(AtomicBool::new(false));
     let fired_w = Arc::clone(&fired);

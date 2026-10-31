@@ -9,10 +9,10 @@
 use core::sync::atomic::Ordering;
 
 use crate::engine::Engine;
-use crate::error::{FaultCode, RUNTIME_OK};
-use crate::sample_run::encode_deltas;
 use crate::state::{NO_HALT_REQUEST, SharedState};
-use crate::stepping_state::{StepMode, StepperBindingRust, TMC_CS_OID_NONE};
+use runtime_contract::axes::{StepMode, StepperBindingRust, TMC_CS_OID_NONE};
+use runtime_contract::error::FaultCode;
+use runtime_contract::sample_run::encode_deltas;
 
 const OID: u8 = 7;
 const LANE: usize = 0;
@@ -29,7 +29,7 @@ fn phase_engine() -> (Engine, SharedState) {
     }];
     assert_eq!(
         engine.configure_axis(0, StepMode::Phase, 0.00078125, &bindings),
-        RUNTIME_OK
+        FaultCode::None.as_i32()
     );
     (engine, shared)
 }
@@ -194,7 +194,7 @@ fn a_sample_lane_on_a_pulse_axis_is_a_loud_fault() {
     }];
     assert_eq!(
         engine.configure_axis(0, StepMode::Pulse, 0.00078125, &bindings),
-        RUNTIME_OK
+        FaultCode::None.as_i32()
     );
     engine.sample_anchor(&shared, OID, ANCHOR, 0);
     feed(&mut engine, &shared, 0, &[0, 4]);
@@ -299,7 +299,7 @@ fn a_barrier_ack_names_the_stepper_oid_that_submitted_it() {
     ];
     assert_eq!(
         engine.configure_axis(0, StepMode::Phase, 0.00078125, &bindings),
-        RUNTIME_OK
+        FaultCode::None.as_i32()
     );
     engine.sample_anchor(&shared, OID, ANCHOR, 0);
 

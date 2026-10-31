@@ -1,5 +1,5 @@
 use super::{
-    EndpointClaimError, EthercatDrive, endpoint_args, handshake_ethercat_endpoint,
+    EndpointClaimError, EndpointLaunch, EthercatDrive, endpoint_args, handshake_ethercat_endpoint,
     poll_socket_ready, slots_for_axis, spawn_ethercat_endpoint, verify_sample_grid,
 };
 use std::io::{Read, Write};
@@ -40,15 +40,17 @@ fn slots_for_axis_returns_every_awd_slot_in_order() {
 }
 
 #[test]
-fn endpoint_args_single_drive_uses_legacy_form() {
+fn endpoint_args_single_drive_still_emits_a_slave_group() {
     let args = endpoint_args(
-        "eth0",
-        "/tmp/x.sock",
-        250,
-        None,
-        None,
-        250.0,
-        None,
+        EndpointLaunch {
+            interface: "eth0",
+            socket_path: "/tmp/x.sock",
+            cycle_us: 250,
+            dynamics_profile: None,
+            late_tolerance_us: None,
+            group_delay_us: 250.0,
+            events_dir: None,
+        },
         &[EthercatDrive {
             chain_index: 1,
             counts_per_mm: 3276.8,
@@ -57,8 +59,8 @@ fn endpoint_args_single_drive_uses_legacy_form() {
             ..drive()
         }],
     );
-    assert!(!args.iter().any(|a| a == "--slave"));
-    assert!(!args.iter().any(|a| a == "--axis"));
+    assert_eq!(args.iter().filter(|a| *a == "--slave").count(), 1);
+    assert_eq!(args.iter().filter(|a| *a == "--axis").count(), 1);
     let cycle: Vec<&String> = args
         .iter()
         .enumerate()
@@ -76,13 +78,15 @@ fn endpoint_args_single_drive_uses_legacy_form() {
 #[test]
 fn endpoint_args_per_drive_ff_flags() {
     let args = endpoint_args(
-        "eth0",
-        "/tmp/x.sock",
-        250,
-        None,
-        None,
-        250.0,
-        None,
+        EndpointLaunch {
+            interface: "eth0",
+            socket_path: "/tmp/x.sock",
+            cycle_us: 250,
+            dynamics_profile: None,
+            late_tolerance_us: None,
+            group_delay_us: 250.0,
+            events_dir: None,
+        },
         &[
             EthercatDrive {
                 rotation_distance: 50.0,
@@ -116,13 +120,15 @@ fn endpoint_args_per_drive_ff_flags() {
 #[test]
 fn endpoint_args_multi_drive_emits_slave_and_axis_groups() {
     let args = endpoint_args(
-        "eth0",
-        "/tmp/x.sock",
-        250,
-        None,
-        None,
-        250.0,
-        None,
+        EndpointLaunch {
+            interface: "eth0",
+            socket_path: "/tmp/x.sock",
+            cycle_us: 250,
+            dynamics_profile: None,
+            late_tolerance_us: None,
+            group_delay_us: 250.0,
+            events_dir: None,
+        },
         &[
             EthercatDrive {
                 rotation_distance: 50.0,
@@ -156,13 +162,15 @@ fn endpoint_args_multi_drive_emits_slave_and_axis_groups() {
 #[test]
 fn endpoint_args_emits_per_slave_dynamics_profile() {
     let args = endpoint_args(
-        "eth0",
-        "/tmp/x.sock",
-        250,
-        None,
-        None,
-        250.0,
-        None,
+        EndpointLaunch {
+            interface: "eth0",
+            socket_path: "/tmp/x.sock",
+            cycle_us: 250,
+            dynamics_profile: None,
+            late_tolerance_us: None,
+            group_delay_us: 250.0,
+            events_dir: None,
+        },
         &[
             EthercatDrive {
                 rotation_distance: 50.0,
@@ -190,13 +198,15 @@ fn endpoint_args_emits_per_slave_dynamics_profile() {
 
 fn args_for() -> Vec<String> {
     endpoint_args(
-        "eth0",
-        "/tmp/x.sock",
-        250,
-        None,
-        None,
-        250.0,
-        None,
+        EndpointLaunch {
+            interface: "eth0",
+            socket_path: "/tmp/x.sock",
+            cycle_us: 250,
+            dynamics_profile: None,
+            late_tolerance_us: None,
+            group_delay_us: 250.0,
+            events_dir: None,
+        },
         &[drive()],
     )
 }
@@ -213,6 +223,10 @@ fn endpoint_args_emits_the_full_argv_for_a_single_drive() {
             "250",
             "--group-delay-us",
             "250",
+            "--slave",
+            "0",
+            "--axis",
+            "0",
             "--counts-per-mm",
             "1000",
             "--rotation-distance",
@@ -227,13 +241,15 @@ fn endpoint_args_emits_the_full_argv_for_a_single_drive() {
 fn spawn_nonexistent_binary_errors_with_binary_path() {
     let result = spawn_ethercat_endpoint(
         "/nonexistent/binary/kalico-ec",
-        "eth0",
-        "/tmp/test.sock",
-        250,
-        None,
-        None,
-        250.0,
-        None,
+        EndpointLaunch {
+            interface: "eth0",
+            socket_path: "/tmp/test.sock",
+            cycle_us: 250,
+            dynamics_profile: None,
+            late_tolerance_us: None,
+            group_delay_us: 250.0,
+            events_dir: None,
+        },
         &[],
     );
     assert!(result.is_err(), "expected Err for nonexistent binary");
@@ -476,7 +492,7 @@ fn serve_one_grid_reply(
 fn grid_reply_with_zero_depth(cid: u32) -> Vec<u8> {
     ethercat_rt::wire::sample_grid_response_frame(
         cid,
-        ethercat_rt::setpoint::EXECUTOR_SETPOINT_RING,
+        ethercat_setpoint::setpoint::EXECUTOR_SETPOINT_RING,
         250_000,
         0,
         (42, 10_500_000),

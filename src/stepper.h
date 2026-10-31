@@ -14,32 +14,11 @@
 
 #if CONFIG_MOTION_RUNTIME
 uint8_t runtime_motor_binding_count(uint8_t motor_idx);
-void stepper_suppress_set(uint8_t motor, uint8_t stepper);
-void stepper_suppress_clear_all(void);
-uint8_t stepper_suppress_mask(uint8_t motor);
 #else
 static inline uint8_t
 runtime_motor_binding_count(uint8_t motor_idx)
 {
     (void)motor_idx;
-    return 0;
-}
-
-static inline void
-stepper_suppress_set(uint8_t motor, uint8_t stepper)
-{
-    (void)motor;
-    (void)stepper;
-}
-static inline void
-stepper_suppress_clear_all(void)
-{
-}
-
-static inline uint8_t
-stepper_suppress_mask(uint8_t motor)
-{
-    (void)motor;
     return 0;
 }
 #endif
@@ -71,6 +50,7 @@ struct stepper {
 
 void command_config_stepper(uint32_t *args);
 struct stepper *stepper_oid_lookup(uint8_t oid);
+uint64_t stepper_halt_oid(uint8_t oid);
 
 struct stepper_move {
     struct move_node node;

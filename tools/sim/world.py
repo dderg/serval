@@ -534,8 +534,6 @@ class SimWorld:
         log_fd = open(log_path, "wb")
         env = os.environ.copy()
         # vtime first, intercept second (constructor/interpose ordering).
-        # The motion tick thread registers as a vtime pacer: virtual time
-        # can never advance past the tick the engine is about to execute.
         env["LD_PRELOAD"] = f"{vtime_so}:{shim_so}"
         env["VTIME_SHM_NAME"] = self.vtime_shm_name
         env["VTIME_SPEED"] = os.environ.get(

@@ -1,7 +1,6 @@
 #![allow(unsafe_code)]
 
 use std::ffi::CString;
-use std::sync::atomic::Ordering;
 
 use super::drive::{DriveChain, FfiDriveChain};
 use super::{EndpointCtx, SIGTERM_RECEIVED};
@@ -11,7 +10,7 @@ use crate::cli::{Args, SlaveCfg};
 use crate::damper::DiffDamperBank;
 use crate::ffi;
 use crate::live_tap::{self, LiveTap};
-use crate::mailbox::{MailboxWorker, WorkerScheduling};
+use crate::mailbox::MailboxWorker;
 use crate::sdo::SdoBus;
 use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
@@ -24,7 +23,6 @@ use mcu_protocol::messages::{SlaveState, ERR_SDO_TRANSPORT, ERR_SDO_UNSUPPORTED_
 /// Below the DC thread (default 80) so the cycle always preempts mailbox
 /// work, and below Linux threaded-IRQ handlers (50) so NIC frame delivery
 /// preempts the master's receive busy-poll.
-const MAILBOX_RT_PRIO: i32 = 40;
 
 /// A commanded target moving faster than this (2 m/s) is physically impossible
 /// for these axes — a trajectory discontinuity, the signature the drive latches
@@ -32,10 +30,6 @@ const MAILBOX_RT_PRIO: i32 = 40;
 /// the same velocity at any DC rate. Log the offending command so the jump is
 /// visible the cycle it happens, not inferred.
 const TARGET_JUMP_LOG_MM_S: f64 = 2000.0;
-
-extern "C" fn on_sigterm(_: libc::c_int) {
-    SIGTERM_RECEIVED.store(true, Ordering::Release);
-}
 
 /// Emit each slave's EtherCAT AL state so a failed bringup shows which slave is
 /// stuck and where (al_state: 0x01=Init 0x02=PreOp 0x04=SafeOp 0x08=Op,
@@ -257,7 +251,6 @@ pub fn bringup(args: Args) -> EndpointCtx {
         slaves,
         rt_cpu,
         rt_prio,
-        mailbox_cpu,
         dynamics,
         late_tolerance_ns,
         group_delay_ns,
@@ -272,10 +265,10 @@ pub fn bringup(args: Args) -> EndpointCtx {
         .map(|u| (500_000u64 / u).max(1))
         .unwrap_or(500);
 
-    let sp_rings: Vec<crate::setpoint::SetpointRing> = (0..num_slaves)
-        .map(|slot| crate::setpoint::SetpointRing::new(slot, cycle_ns as u32))
+    let sp_rings: Vec<ethercat_setpoint::setpoint::SetpointRing> = (0..num_slaves)
+        .map(|slot| ethercat_setpoint::setpoint::SetpointRing::new(slot, cycle_ns as u32))
         .collect();
-    let grid = crate::setpoint::SampleGrid::new(cycle_ns as u64);
+    let grid = ethercat_setpoint::setpoint::SampleGrid::new(cycle_ns as u64);
     let damper = DiffDamperBank::new(cycle_ns);
     let trim = DiffTrimBank::new(cycle_ns);
     let comp = crate::strain_comp::StrainCompBank::new(cycle_ns);
@@ -328,12 +321,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
         "endpoint starting bringup"
     );
 
-    unsafe {
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = on_sigterm as *const () as libc::sighandler_t;
-        sa.sa_flags = libc::SA_RESTART;
-        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
-    }
+    super::install_sigterm_handler();
 
     let cif = CString::new(ifname.clone()).expect("ifname must not contain NUL");
 
@@ -431,19 +419,9 @@ pub fn bringup(args: Args) -> EndpointCtx {
 
     let gate = TorqueGate::new();
     let cycle_index: u64 = 0;
-    let mailbox = MailboxWorker::spawn(
-        FfiSdoBus,
-        |slot, ferr_counts, torque_tenth_pct| unsafe {
-            ffi::ec_rt_write_limits(i32::from(slot), ferr_counts, torque_tenth_pct)
-        },
-        match mailbox_cpu {
-            Some(cpu) => WorkerScheduling::RealtimeCompanion {
-                cpu,
-                priority: MAILBOX_RT_PRIO,
-            },
-            None => WorkerScheduling::Normal,
-        },
-    );
+    let mailbox = MailboxWorker::spawn(FfiSdoBus, |slot, ferr_counts, torque_tenth_pct| unsafe {
+        ffi::ec_rt_write_limits(i32::from(slot), ferr_counts, torque_tenth_pct)
+    });
     let pending_starts: Vec<(u32, String, PendingStart)> = Vec::new();
     let pending_stops: Vec<(u32, PendingStop)> = Vec::new();
     let capture_slots: Vec<u8> = Vec::new();
@@ -501,7 +479,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
         grid,
         ring_origin: vec![None; num_slaves],
         sp_play_scratch: vec![None; num_slaves],
-        sp_fill_scratch: Vec::with_capacity(crate::setpoint::MAX_FILL_CYCLES),
+        sp_fill_scratch: Vec::with_capacity(ethercat_setpoint::setpoint::MAX_FILL_CYCLES),
         reclaim,
         last_grid_index: 0,
         last_grid_clock: 0,
@@ -542,31 +520,8 @@ pub fn bringup(args: Args) -> EndpointCtx {
         last_dispatch_ns: 0,
         last_pre_work_ns: 0,
         prev_exchange_ns: 0,
-        last_wake_late_ns: 0,
-        last_recv_ns: 0,
-        last_process_ns: 0,
-        last_send_ns: 0,
-        wake_late_max_ns: i64::MIN,
-        recv_max_ns: i64::MIN,
-        process_max_ns: i64::MIN,
-        send_max_ns: i64::MIN,
         prev_exchange_return: None,
-        last_pre_cycle_ns: 0,
-        last_post_cycle_ns: 0,
-        last_inter_exchange_ns: 0,
-        pre_cycle_max_ns: i64::MIN,
-        post_cycle_max_ns: i64::MIN,
-        inter_exchange_max_ns: i64::MIN,
         last_nivcsw: 0,
-        last_fault_ns: 0,
-        last_capture_ns: 0,
-        last_wkc_ns: 0,
-        last_heartbeat_ns: 0,
-        last_telemetry_ns: 0,
-        fault_max_ns: i64::MIN,
-        capture_max_ns: i64::MIN,
-        wkc_max_ns: i64::MIN,
-        heartbeat_max_ns: i64::MIN,
-        telemetry_max_ns: i64::MIN,
+        spans: super::cycle::CycleSpans::default(),
     }
 }

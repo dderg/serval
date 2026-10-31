@@ -24,11 +24,6 @@ proptest! {
                     prop_assert!(line_no >= 1 && line_no <= line_count,
                         "line_no {line_no} out of range 1..={line_count}");
                 }
-                Ok(gcode::Token::Comment { line_no, .. }
-                    | gcode::Token::Marker { line_no, .. }) => {
-                    prop_assert!(line_no >= 1 && line_no <= line_count,
-                        "line_no {line_no} out of range 1..={line_count}");
-                }
                 Ok(_) | Err(_) => {}
             }
         }

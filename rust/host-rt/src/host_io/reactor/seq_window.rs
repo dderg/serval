@@ -1,7 +1,7 @@
 use crate::host_io::reactor::RetransmitTrigger;
 use crate::host_io::reactor::{MAX_RETRY_COUNT, MCU_SILENCE_FOR_CLOSE, Reactor, ReactorState};
 use crate::transport::TransportError;
-use runtime::error::FaultCode;
+use runtime_contract::error::FaultCode;
 
 pub(crate) struct SeqWindow {
     pub(crate) send_seq: u64,
@@ -76,7 +76,7 @@ impl Reactor {
             self.seq_window.reset_to(rseq);
             return Ok(());
         }
-        let popped = self.unacked_window.pop_acked(rseq);
+        let popped = crate::host_io::window::pop_acked(&mut self.unacked_window, rseq);
         if let Some(oldest) = popped.first() {
             let now = self.clock.now();
             let age = now - oldest.sent_at;

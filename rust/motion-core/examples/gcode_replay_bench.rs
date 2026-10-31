@@ -14,58 +14,12 @@
 use std::env;
 use std::fs;
 use std::process;
-use std::thread;
 use std::time::Instant;
 
 use geometry::{CornerFitConfig, VelocityLimits};
-use motion_core::classify::build_move;
-use motion_pipeline::{StreamConfig, TrajectoryItem, setup_stages};
+use motion_core::seam_test_harness::parse_gcode_to_moves;
+use motion_pipeline::{Pipeline, StreamConfig, TrajectoryItem};
 use trajectory::{AxisChainSet, CompiledChain, PostProcessorInstance};
-
-struct Pos {
-    pos: [f64; 3],
-    feed: f64,
-    absolute: bool,
-    relative_e: bool,
-    established: bool,
-}
-
-impl Pos {
-    fn apply(
-        &mut self,
-        x: Option<f64>,
-        y: Option<f64>,
-        z: Option<f64>,
-        f: Option<f64>,
-    ) -> Option<([f64; 3], f64, f64, f64)> {
-        if let Some(f) = f {
-            self.feed = f / 60.0;
-        }
-        let target = |current: f64, word: Option<f64>, absolute: bool| match word {
-            Some(w) if absolute => w,
-            Some(w) => current + w,
-            None => current,
-        };
-        let next = [
-            target(self.pos[0], x, self.absolute),
-            target(self.pos[1], y, self.absolute),
-            target(self.pos[2], z, self.absolute),
-        ];
-        if !self.established {
-            self.pos = next;
-            self.established = x.is_some() && y.is_some();
-            return None;
-        }
-        let start = self.pos;
-        self.pos = next;
-        Some((
-            start,
-            next[0] - start[0],
-            next[1] - start[1],
-            next[2] - start[2],
-        ))
-    }
-}
 
 fn trident_chains() -> AxisChainSet {
     let bell = |name: &str, smooth: f64| {
@@ -131,84 +85,24 @@ fn main() {
     };
 
     let wall = Instant::now();
-    let handle = setup_stages(cfg, trident_chains(), vec![0.0; 4], 0.0);
-    let output = handle.output;
-    let collector = thread::spawn(move || {
-        let started = Instant::now();
-        let mut arrivals: Vec<(f64, f64)> = Vec::new();
-        while let Ok(item) = output.recv() {
-            if let TrajectoryItem::Seg(seg) = item {
-                arrivals.push((started.elapsed().as_secs_f64(), seg.t_end));
-            }
+    let mut pipeline = Pipeline::new(cfg, trident_chains(), vec![0.0; 4], 0.0);
+    let mut arrivals: Vec<(f64, f64)> = Vec::new();
+    let mut output = |item| {
+        if let TrajectoryItem::Seg(seg) = item {
+            arrivals.push((wall.elapsed().as_secs_f64(), seg.t_end));
         }
-        arrivals
-    });
-
-    let mut p = Pos {
-        pos: [0.0; 3],
-        feed: 80.0,
-        absolute: true,
-        relative_e: false,
-        established: false,
+        true
     };
+
     let mut submitted = 0u64;
-    for tok in gcode::lex(&source) {
-        let Ok(t) = tok else { continue };
-        let gcode::Token::Command {
-            letter,
-            major,
-            params,
-            ..
-        } = t
-        else {
-            continue;
-        };
-        match (letter, major) {
-            (b'G', 0) | (b'G', 1) => {
-                let e_word = params.e();
-                let Some((start, dx, dy, dz)) =
-                    p.apply(params.x(), params.y(), params.z(), params.f())
-                else {
-                    continue;
-                };
-                let de = if p.relative_e {
-                    e_word.unwrap_or(0.0)
-                } else {
-                    0.0
-                };
-                if dx.abs() < 1e-9 && dy.abs() < 1e-9 && dz.abs() < 1e-9 && de.abs() < 1e-9 {
-                    continue;
-                }
-                let m = match build_move(
-                    start,
-                    [dx, dy, dz],
-                    3,
-                    de,
-                    limits,
-                    p.feed,
-                    submitted as u32,
-                ) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        eprintln!("build_move line {submitted}: {e:?}");
-                        continue;
-                    }
-                };
-                if handle.input.send(m.into()).is_err() {
-                    eprintln!("pipeline input closed at line {submitted}");
-                    process::exit(1);
-                }
-                submitted += 1;
-            }
-            (b'G', 90) => p.absolute = true,
-            (b'G', 91) => p.absolute = false,
-            (b'M', 82) => p.relative_e = false,
-            (b'M', 83) => p.relative_e = true,
-            _ => {}
+    for m in parse_gcode_to_moves(&source, limits) {
+        if !pipeline.feed(m.into(), &mut output) {
+            eprintln!("pipeline input closed at move {submitted}");
+            process::exit(1);
         }
+        submitted += 1;
     }
-    drop(handle.input);
-    let arrivals = collector.join().expect("pipeline collector panicked");
+    assert!(pipeline.finish(&mut output));
     let wall_s = wall.elapsed().as_secs_f64();
     let stream_s = arrivals.last().map_or(0.0, |&(_, t)| t);
     println!(

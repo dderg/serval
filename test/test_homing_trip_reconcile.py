@@ -44,10 +44,13 @@ class StepcompressLaneEngine:
     def motion_drain_finalize(self):
         return None
 
-    def wait_moves(self):
-        return None
-
     def frontier_print_time(self, mcu_handle):
+        return 0.0
+
+    def fence_start(self, force):
+        return 1
+
+    def fence_print_time_poll(self, fence_id, mcu_handle):
         return 0.0
 
     def home_axis_start(self, axis, direction, speed, max_travel, endstops):
@@ -63,9 +66,6 @@ class StepcompressLaneEngine:
 
 
 def production_toolhead(engine, position):
-    """The real reconciliation bridge: Motion.set_position ->
-    kinematics.set_position -> engine.set_position. Only the engine and the
-    mcu clock are faked, so dropping any host link breaks these tests."""
     printer = FakePrinter(reactor=FakeReactor())
     toolhead = motion_mod.Motion.__new__(motion_mod.Motion)
     kin = motion_kinematics._LinearKinematics.__new__(
@@ -80,6 +80,7 @@ def production_toolhead(engine, position):
     toolhead.mcu = FakeMcu(printer=printer, handle=1, est_print_time=1.0)
     toolhead.motion_lead = 0.25
     toolhead.engine = engine
+    toolhead._engine_wakeup = None
     toolhead.kin = kin
     toolhead.commanded_pos = list(position)
     return toolhead

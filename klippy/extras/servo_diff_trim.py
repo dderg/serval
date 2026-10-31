@@ -61,10 +61,12 @@ class ServoDiffTrim:
             handle,
             slots[0],
             slots[1],
-            int(round(self.gain * 1e6)),
-            int(round(max_offset_um)),
-            int(round(self.lpf_hz * 1000.0)),
-            self.settle_ms,
+            {
+                "gain_micro": int(round(self.gain * 1e6)),
+                "clamp_um": int(round(max_offset_um)),
+                "lpf_millihz": int(round(self.lpf_hz * 1000.0)),
+                "settle_ms": self.settle_ms,
+            },
         )
         return pair_names
 

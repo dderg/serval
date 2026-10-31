@@ -23,7 +23,7 @@ fn fill_window(h: &mut ReactorHarness) {
         submit_one(h, i as u8);
     }
     assert_eq!(h.unacked_depth(), MAX_PENDING_BLOCKS);
-    assert!(h.reactor.unacked_window.is_full());
+    assert!(crate::host_io::window::is_full(&h.reactor.unacked_window));
 }
 
 #[test]

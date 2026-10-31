@@ -267,7 +267,11 @@ class GCodeMove:
     def _submit_bezier_to_engine(self, i, j, p, q, dx, dy, dz, de, fr):
         motion = self.printer.lookup_object("motion")
         try:
-            motion.engine.submit_bezier(i, j, p, q, dx, dy, dz, de, fr)
+            motion.engine.submit_bezier(
+                {"i": i, "j": j, "p": p, "q": q},
+                {"dx": dx, "dy": dy, "dz": dz, "de": de},
+                fr,
+            )
         except ValueError as e:
             raise self.printer.command_error(str(e))
 
@@ -300,7 +304,9 @@ class GCodeMove:
 
     def _submit_quadratic_to_engine(self, i, j, dx, dy, dz, de, fr):
         motion = self.printer.lookup_object("motion")
-        motion.engine.submit_quadratic(i, j, dx, dy, dz, de, fr)
+        motion.engine.submit_quadratic(
+            i, j, {"dx": dx, "dy": dy, "dz": dz, "de": de}, fr
+        )
 
     # G-Code coordinate manipulation
     def cmd_G20(self, gcmd):

@@ -25,10 +25,3 @@ fn conversion_preserves_intervals() {
         "interval={interval} expected~{step_ns}"
     );
 }
-
-#[test]
-fn monotonic_ns_advances() {
-    let a = monotonic_ns();
-    let b = monotonic_ns();
-    assert!(b >= a);
-}

@@ -156,14 +156,7 @@ impl Iterator for Lexer<'_> {
                 continue;
             }
             if trimmed_full.starts_with(';') {
-                if let Some(kind) = crate::marker::match_comment(trimmed_full) {
-                    return Some(Ok(Token::Marker { kind, line_no }));
-                }
-                let stripped = trimmed_full.trim_start_matches(';').trim();
-                return Some(Ok(Token::Comment {
-                    text: stripped.to_string().into_boxed_str(),
-                    line_no,
-                }));
+                continue;
             }
             let no_inline = strip_inline_comment(trimmed_full).trim();
             if no_inline.is_empty() {

@@ -1,6 +1,13 @@
 import concurrent.futures
 
 
+def wait_call(reactor, executor, call):
+    future = executor.submit(call)
+    while not future.done():
+        reactor.pause(reactor.monotonic() + 0.001)
+    return future.result()
+
+
 class EngineMcu:
     """Owns the (engine, handle) pair for one MCU.
 
@@ -25,10 +32,7 @@ class EngineMcu:
         self._calls.shutdown(wait=False, cancel_futures=True)
 
     def _wait_call(self, call):
-        future = self._calls.submit(call)
-        while not future.done():
-            self._reactor.pause(self._reactor.monotonic() + 0.001)
-        return future.result()
+        return wait_call(self._reactor, self._calls, call)
 
     def available(self):
         return self._engine is not None

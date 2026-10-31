@@ -17,6 +17,14 @@
 //! lag (EtherCAT transport plus the drive's torque-command filters and
 //! notches) is compensated by an explicit first-order lead term.
 
+/// The slot pair every differential feature (damper, trim, strain comp) is
+/// configured against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlotPair {
+    pub a: u8,
+    pub b: u8,
+}
+
 pub const ERR_DAMPER_BAD_SLOT: i32 = -831;
 pub const ERR_DAMPER_BAD_CLAMP: i32 = -832;
 pub const ERR_DAMPER_BAD_LPF: i32 = -833;
@@ -27,6 +35,14 @@ pub const MAX_DAMPER_CLAMP_TENTHS: u16 = 1000;
 pub const MIN_DAMPER_LPF_MILLIHZ: u32 = 1_000;
 pub const MAX_DAMPER_LPF_MILLIHZ: u32 = 2_000_000;
 pub const MAX_DAMPER_LEAD_US: u16 = 5_000;
+
+#[derive(Clone, Copy, Debug)]
+pub struct DamperGains {
+    pub gain_milli: u32,
+    pub clamp_tenths: u16,
+    pub lpf_millihz: u32,
+    pub lead_us: u16,
+}
 
 struct PairDamper {
     slot_a: usize,
@@ -54,17 +70,14 @@ impl DiffDamperBank {
         }
     }
 
-    pub fn set(
-        &mut self,
-        num_slaves: usize,
-        slot_a: u8,
-        slot_b: u8,
-        gain_milli: u32,
-        clamp_tenths: u16,
-        lpf_millihz: u32,
-        lead_us: u16,
-    ) -> i32 {
-        let (a, b) = (usize::from(slot_a), usize::from(slot_b));
+    pub fn set(&mut self, num_slaves: usize, pair: SlotPair, gains: DamperGains) -> i32 {
+        let DamperGains {
+            gain_milli,
+            clamp_tenths,
+            lpf_millihz,
+            lead_us,
+        } = gains;
+        let (a, b) = (usize::from(pair.a), usize::from(pair.b));
         if a == b || a >= num_slaves || b >= num_slaves {
             return ERR_DAMPER_BAD_SLOT;
         }

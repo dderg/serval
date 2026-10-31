@@ -6,9 +6,7 @@ use mcu_protocol::{
     Decode, EndstopTrip as KEndstopTrip, FaultEvent as KFaultEvent, McuLog as KMcuLog, MessageKind,
     PROTO_VERSION, SCHEMA_HASH, StatusHeartbeat as KStatusHeartbeat,
 };
-use mcu_transport::wire_helpers::{
-    MESSAGE_VERSION_DEFAULT, decode_message_header, encode_message_header,
-};
+use mcu_transport::wire_helpers::decode_message_header;
 use mcu_transport::{
     BOOTSTRAP_IDENTIFY_RESPONSE_LEN, CHANNEL_CONTROL, decode_identify_response, encode_frame,
     encode_identify,
@@ -71,26 +69,6 @@ impl McuTransportState {
         self.next_correlation_id = if next == 0 { 1 } else { next };
         cid
     }
-}
-
-pub fn build_kalico_frame(
-    channel: u8,
-    kind: MessageKind,
-    correlation_id: u32,
-    body: &[u8],
-) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(7 + body.len());
-    payload.extend_from_slice(&encode_message_header(
-        kind,
-        MESSAGE_VERSION_DEFAULT,
-        correlation_id,
-    ));
-    payload.extend_from_slice(body);
-    encode_frame(channel, &payload)
-}
-
-pub fn build_kalico_control_frame(kind: MessageKind, correlation_id: u32, body: &[u8]) -> Vec<u8> {
-    build_kalico_frame(CHANNEL_CONTROL, kind, correlation_id, body)
 }
 
 pub fn build_kalico_identify_frame(correlation_id: u32) -> Vec<u8> {

@@ -3,7 +3,9 @@ use crate::path::CurvatureProfile;
 use crate::segment::FollowerDemand;
 
 use super::emit::{SeamSide, blend_followers};
+use super::kernels::RunEnd;
 use super::move_ops::{is_travel, line_of};
+use super::overlap::ArcSide;
 use super::{CornerFitConfig, FitError, causal, kernels, overlap, ramps_admitted, span_tolerance};
 
 /// A sealed arc run's reconstruction: the arc, its easing clothoids into the
@@ -55,8 +57,8 @@ impl RunFit {
             return Ok(None);
         }
         let bare = recon.clone();
-        let head_nb = head.and_then(|m| kernels::neighbor(m, true));
-        let tail_nb = tail.and_then(|m| kernels::neighbor(m, false));
+        let head_nb = head.and_then(|m| kernels::neighbor(m, RunEnd::Head));
+        let tail_nb = tail.and_then(|m| kernels::neighbor(m, RunEnd::Tail));
         kernels::ease_run(&mut recon, facets, head_nb.as_ref(), tail_nb.as_ref(), tol)?;
         if !construct_admitted(&recon, facets, corner.ramp_accel_budget_mm_s2) {
             recon = bare;
@@ -122,7 +124,8 @@ impl RunFit {
         let Some(line) = line_of(neighbor) else {
             return Ok(Vec::new());
         };
-        let Some(blend) = overlap::resolve_arc_line(&self.recon.arc, line, false, corner, self.tol)
+        let Some(blend) =
+            overlap::resolve_arc_line(&self.recon.arc, line, ArcSide::Outbound, corner, self.tol)
         else {
             return Ok(Vec::new());
         };
@@ -163,7 +166,8 @@ impl RunFit {
         let Some(line) = line_of(neighbor) else {
             return Ok(Vec::new());
         };
-        let Some(blend) = overlap::resolve_arc_line(&self.recon.arc, line, true, corner, self.tol)
+        let Some(blend) =
+            overlap::resolve_arc_line(&self.recon.arc, line, ArcSide::Inbound, corner, self.tol)
         else {
             return Ok(Vec::new());
         };

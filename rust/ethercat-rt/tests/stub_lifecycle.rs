@@ -1,108 +1,14 @@
 mod common;
 
-use std::process::{Child, Command};
-use std::thread;
+use common::{handshake, spawn_stub_unclaimed, wait_for_exit};
 use std::time::{Duration, Instant};
 
-use host_rt::mcu_call::McuCall;
-use host_rt::mcu_serial_conn::McuSerialConn;
-use mcu_protocol::codec::{Cursor, Decode};
-use mcu_protocol::messages::{ClaimHandshakeReply, MessageKind, SlaveState};
-
-const STUB_BIN: &str = env!("CARGO_BIN_EXE_ethercat-rt-stub");
-
-struct ChildGuard {
-    child: Option<Child>,
-}
-
-impl ChildGuard {
-    fn new(child: Child) -> Self {
-        Self { child: Some(child) }
-    }
-
-    /// Consume without killing — caller takes responsibility for the child.
-    fn defuse(&mut self) -> Child {
-        self.child.take().expect("already defused")
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(mut c) = self.child.take() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-    }
-}
-
-fn socket_path(tag: &str) -> String {
-    format!("/tmp/kalico-stub-{}-{}.sock", tag, std::process::id())
-}
-
-fn wait_for_socket(path: &str, deadline: Instant) {
-    loop {
-        if std::path::Path::new(path).exists() {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "stub socket {path:?} did not appear within deadline"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn do_handshake(conn: &McuSerialConn) -> ClaimHandshakeReply {
-    let (kind, body) = conn
-        .mcu_call(
-            MessageKind::ClaimHandshake,
-            Vec::new(),
-            Duration::from_secs(5),
-        )
-        .expect("ClaimHandshake mcu_call must succeed");
-
-    assert_eq!(
-        kind,
-        MessageKind::ClaimHandshakeReply,
-        "expected ClaimHandshakeReply (0x{:04x}), got kind 0x{:04x}",
-        MessageKind::ClaimHandshakeReply.as_u16(),
-        kind.as_u16(),
-    );
-
-    ClaimHandshakeReply::decode_from(&mut Cursor::new(&body))
-        .expect("ClaimHandshakeReply must decode from response body")
-}
-
-fn wait_for_exit(child: &mut Child, deadline: Instant) -> std::process::ExitStatus {
-    loop {
-        match child.try_wait().expect("try_wait must not fail") {
-            Some(status) => return status,
-            None => {
-                assert!(
-                    Instant::now() < deadline,
-                    "stub process did not exit within deadline — orphan process"
-                );
-                thread::sleep(Duration::from_millis(10));
-            }
-        }
-    }
-}
+use mcu_protocol::messages::SlaveState;
 
 #[test]
 fn stub_claim_succeeds_and_disconnect_terminates_process() {
-    let path = socket_path("claim");
-    let _ = std::fs::remove_file(&path);
-
-    let child = Command::new(STUB_BIN)
-        .args(["--socket", &path])
-        .spawn()
-        .expect("stub binary must spawn");
-    let mut guard = ChildGuard::new(child);
-
-    wait_for_socket(&path, Instant::now() + Duration::from_secs(5));
-
-    let conn = common::connect_until(&path, Instant::now() + Duration::from_secs(5));
-    let reply = do_handshake(&conn);
+    let (mut guard, conn, path) = spawn_stub_unclaimed("claim", &["--slave", "0"]);
+    let reply = handshake(&conn);
 
     assert_eq!(
         reply.slave_statuses.len(),
@@ -127,19 +33,11 @@ fn stub_claim_succeeds_and_disconnect_terminates_process() {
 
 #[test]
 fn stub_fail_bringup_propagates_offline_error() {
-    let path = socket_path("fail-bringup");
-    let _ = std::fs::remove_file(&path);
-
-    let child = Command::new(STUB_BIN)
-        .args(["--socket", &path, "--fail-bringup", "slave=1"])
-        .spawn()
-        .expect("stub binary must spawn");
-    let mut guard = ChildGuard::new(child);
-
-    wait_for_socket(&path, Instant::now() + Duration::from_secs(5));
-
-    let conn = common::connect_until(&path, Instant::now() + Duration::from_secs(5));
-    let reply = do_handshake(&conn);
+    let (mut guard, conn, path) = spawn_stub_unclaimed(
+        "fail-bringup",
+        &["--slave", "0", "--fail-bringup", "slave=1"],
+    );
+    let reply = handshake(&conn);
 
     assert_eq!(
         reply.slave_statuses.len(),

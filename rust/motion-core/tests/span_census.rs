@@ -6,7 +6,7 @@
 
 use geometry::path::lowering::PositionProfile;
 use motion_core::seam_test_harness::{default_stream_config, parse_gcode_to_moves};
-use motion_pipeline::{StreamInput, TrajectoryItem, setup_stages};
+use motion_pipeline::{Pipeline, StreamInput, TrajectoryItem};
 use trajectory::ContinuousSegment;
 
 const AXIS_NAMES: [&str; 4] = ["x", "y", "z", "e"];
@@ -83,27 +83,20 @@ fn span_duration_census() {
         .map_or([0.0, 0.0, 0.0], |seg| seg.point_at(0.0));
     let mut home = spatial_home.to_vec();
     home.push(0.0);
-    let handle = setup_stages(cfg, trident_chain_set(), home, 0.0);
-    let output = handle.output;
-    let collector = std::thread::spawn(move || {
-        let mut segs: Vec<ContinuousSegment> = Vec::new();
-        while let Ok(item) = output.recv() {
-            if let TrajectoryItem::Seg(seg) = item {
-                segs.push(seg);
-            }
+    let mut pipeline = Pipeline::new(cfg, trident_chain_set(), home, 0.0);
+    let mut segs: Vec<ContinuousSegment> = Vec::new();
+    let mut output = |item| {
+        if let TrajectoryItem::Seg(seg) = item {
+            segs.push(seg);
         }
-        segs
-    });
+        true
+    };
     let mut fed = 0usize;
     for item in script {
-        if handle.input.send(item).is_err() {
-            eprintln!("pipeline stage died after {fed} inputs — censusing what was emitted");
-            break;
-        }
+        assert!(pipeline.feed(item, &mut output));
         fed += 1;
     }
-    drop(handle.input);
-    let segs = collector.join().expect("collector panicked");
+    assert!(pipeline.finish(&mut output));
     eprintln!(
         "pipeline emitted {} segments (fed {fed} inputs)",
         segs.len()

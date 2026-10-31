@@ -11,9 +11,9 @@ fn dispatch_fires_matching_callback() {
     table.register(
         "trsync_state".into(),
         Some(0),
-        InterceptorCallback(Box::new(move |_| {
+        Box::new(move |_| {
             count_clone.fetch_add(1, Ordering::Relaxed);
-        })),
+        }),
     );
 
     let mut params = MessageParams::new();
@@ -33,9 +33,9 @@ fn dispatch_ignores_wrong_oid() {
     table.register(
         "trsync_state".into(),
         Some(0),
-        InterceptorCallback(Box::new(move |_| {
+        Box::new(move |_| {
             count_clone.fetch_add(1, Ordering::Relaxed);
-        })),
+        }),
     );
 
     let params = MessageParams::new();
@@ -52,9 +52,9 @@ fn dispatch_ignores_wrong_name() {
     table.register(
         "trsync_state".into(),
         Some(0),
-        InterceptorCallback(Box::new(move |_| {
+        Box::new(move |_| {
             count_clone.fetch_add(1, Ordering::Relaxed);
-        })),
+        }),
     );
 
     let params = MessageParams::new();
@@ -71,9 +71,9 @@ fn unregister_removes_callback() {
     let id = table.register(
         "trsync_state".into(),
         Some(0),
-        InterceptorCallback(Box::new(move |_| {
+        Box::new(move |_| {
             count_clone.fetch_add(1, Ordering::Relaxed);
-        })),
+        }),
     );
 
     let params = MessageParams::new();
@@ -98,9 +98,9 @@ fn callback_receives_params() {
     table.register(
         "trsync_state".into(),
         Some(0),
-        InterceptorCallback(Box::new(move |params| {
+        Box::new(move |params| {
             seen_clone.store(params.get_u32("can_trigger"), Ordering::Relaxed);
-        })),
+        }),
     );
 
     let mut params = MessageParams::new();

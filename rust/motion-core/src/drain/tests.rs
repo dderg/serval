@@ -5,6 +5,7 @@ fn axis(pending: u32, pushed: u32, retired: u32) -> AxisDrainState {
         pending,
         pushed,
         retired,
+        abandoned: 0,
         staged_motion: pending,
         hold_tail: 0,
     }
@@ -65,6 +66,7 @@ fn trailing_hold_coverage_does_not_gate_drain() {
         pending: 0,
         pushed: 10,
         retired: 9,
+        abandoned: 0,
         staged_motion: 0,
         hold_tail: 1,
     };
@@ -91,6 +93,7 @@ fn staged_holds_gate_reseed_until_the_pump_hands_them_to_the_endpoint() {
         pending: 3,
         pushed: 5,
         retired: 5,
+        abandoned: 0,
         staged_motion: 0,
         hold_tail: 0,
     };

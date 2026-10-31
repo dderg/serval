@@ -1,4 +1,4 @@
-use crate::mcu_config::McuAxisConfig;
+use motion_core::mcu_config::McuAxisConfig;
 
 pub(crate) fn require_events_dir_for_mcu_transport(
     mcu_transport: bool,
@@ -18,11 +18,13 @@ pub(crate) fn require_events_dir_for_mcu_transport(
     Ok(())
 }
 
-pub(crate) fn drip_cohort_participants(configs: &[McuAxisConfig]) -> Vec<crate::types::AxisKey> {
+pub(crate) fn drip_cohort_participants(
+    configs: &[McuAxisConfig],
+) -> Vec<motion_core::types::AxisKey> {
     configs
         .iter()
         .flat_map(|cfg| {
-            cfg.axes.iter().map(move |&a| crate::types::AxisKey {
+            cfg.axes.iter().map(move |&a| motion_core::types::AxisKey {
                 mcu_id: cfg.mcu_id,
                 axis: a as u8,
             })

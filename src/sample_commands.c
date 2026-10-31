@@ -1,7 +1,7 @@
 // Sample-stream transport commands for phase-stepped lanes.
 //
 // The argstrings come from src/sample_wire.h, which mirrors
-// rust/runtime/src/sample_wire.rs — a runtime test parses the header and
+// rust/runtime-contract/src/sample_wire.rs — a contract test parses the header and
 // asserts the two agree, so neither side can drift.
 //
 // Every command is a thin decode-and-forward: the Rust executor owns abutment,

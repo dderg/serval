@@ -154,17 +154,29 @@ fn locate(coord: f64, min: f64, spacing: f64, count: usize) -> (usize, f64, bool
     (cell, clamped - cell as f64, inside)
 }
 
+/// The grid's extent and interpolation stiffness, without its samples.
+#[derive(Debug, Clone, Copy)]
+pub struct MeshGridSpec {
+    pub x_min: f64,
+    pub y_min: f64,
+    pub dx: f64,
+    pub dy: f64,
+    pub nx: usize,
+    pub ny: usize,
+    pub tension: f64,
+}
+
 impl MeshGrid {
-    pub fn new(
-        x_min: f64,
-        y_min: f64,
-        dx: f64,
-        dy: f64,
-        nx: usize,
-        ny: usize,
-        z: Vec<f64>,
-        tension: f64,
-    ) -> Result<Self, SurfaceError> {
+    pub fn new(spec: MeshGridSpec, z: Vec<f64>) -> Result<Self, SurfaceError> {
+        let MeshGridSpec {
+            x_min,
+            y_min,
+            dx,
+            dy,
+            nx,
+            ny,
+            tension,
+        } = spec;
         if nx < 2 || ny < 2 {
             return Err(SurfaceError::GridTooSmall { nx, ny });
         }

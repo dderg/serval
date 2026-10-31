@@ -9,11 +9,11 @@
 // C owns the linker-section placement (docs/rewrite/mcu-c-rust-boundary.md
 // rule B2), so no `#[link_section]` appears here.
 
-use crate::sample_run::{
-    LaneCursor, SAMPLE_RUN_COUNT_MAX, SampleRunBuf, SampleRunError, SampleRunHeader, decode_deltas,
-};
 use crate::sizing::{SAMPLE_OVERLAY_RUNS_PER_LANE, SAMPLE_RUNS_PER_LANE};
 use crate::state::SharedState;
+use runtime_contract::sample_run::{
+    LaneCursor, SAMPLE_RUN_COUNT_MAX, SampleRunBuf, SampleRunError, SampleRunHeader, decode_deltas,
+};
 
 const _: () = assert!(
     SAMPLE_RUNS_PER_LANE > 0 && SAMPLE_OVERLAY_RUNS_PER_LANE > 0,

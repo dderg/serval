@@ -12,7 +12,19 @@ fn wavy_grid() -> MeshGrid {
             })
         })
         .collect();
-    MeshGrid::new(10.0, 20.0, 25.0, 30.0, nx, ny, z, TENSION).unwrap()
+    MeshGrid::new(
+        MeshGridSpec {
+            x_min: 10.0,
+            y_min: 20.0,
+            dx: 25.0,
+            dy: 30.0,
+            nx,
+            ny,
+            tension: TENSION,
+        },
+        z,
+    )
+    .unwrap()
 }
 
 fn transform(fade: Fade) -> SurfaceTransform {
@@ -41,7 +53,19 @@ fn interpolates_probed_points_exactly_at_nodes() {
 fn matches_mainline_cardinal_spline_along_one_axis() {
     let row = [0.10, -0.05, 0.20, 0.08];
     let z: Vec<f64> = row.iter().chain(row.iter()).copied().collect();
-    let g = MeshGrid::new(0.0, 0.0, 10.0, 10.0, 4, 2, z, TENSION).unwrap();
+    let g = MeshGrid::new(
+        MeshGridSpec {
+            x_min: 0.0,
+            y_min: 0.0,
+            dx: 10.0,
+            dy: 10.0,
+            nx: 4,
+            ny: 2,
+            tension: TENSION,
+        },
+        z,
+    )
+    .unwrap();
     for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
         let m1 = TENSION * (row[2] - row[0]);
         let m2 = TENSION * (row[3] - row[1]);
@@ -257,27 +281,62 @@ fn correction_spread_bounds_true_correction_variation() {
 #[test]
 fn constructor_rejects_bad_grids() {
     assert!(matches!(
-        MeshGrid::new(0.0, 0.0, 1.0, 1.0, 1, 3, vec![0.0; 3], TENSION),
+        MeshGrid::new(
+            MeshGridSpec {
+                x_min: 0.0,
+                y_min: 0.0,
+                dx: 1.0,
+                dy: 1.0,
+                nx: 1,
+                ny: 3,
+                tension: TENSION,
+            },
+            vec![0.0; 3],
+        ),
         Err(SurfaceError::GridTooSmall { .. })
     ));
     assert!(matches!(
-        MeshGrid::new(0.0, 0.0, 1.0, 1.0, 2, 2, vec![0.0; 3], TENSION),
+        MeshGrid::new(
+            MeshGridSpec {
+                x_min: 0.0,
+                y_min: 0.0,
+                dx: 1.0,
+                dy: 1.0,
+                nx: 2,
+                ny: 2,
+                tension: TENSION,
+            },
+            vec![0.0; 3],
+        ),
         Err(SurfaceError::PointCountMismatch { .. })
     ));
     assert!(matches!(
-        MeshGrid::new(0.0, 0.0, 0.0, 1.0, 2, 2, vec![0.0; 4], TENSION),
+        MeshGrid::new(
+            MeshGridSpec {
+                x_min: 0.0,
+                y_min: 0.0,
+                dx: 0.0,
+                dy: 1.0,
+                nx: 2,
+                ny: 2,
+                tension: TENSION,
+            },
+            vec![0.0; 4],
+        ),
         Err(SurfaceError::NonPositiveSpacing { .. })
     ));
     assert!(matches!(
         MeshGrid::new(
-            0.0,
-            0.0,
-            1.0,
-            1.0,
-            2,
-            2,
+            MeshGridSpec {
+                x_min: 0.0,
+                y_min: 0.0,
+                dx: 1.0,
+                dy: 1.0,
+                nx: 2,
+                ny: 2,
+                tension: TENSION,
+            },
             vec![0.0, 1.0, f64::NAN, 0.0],
-            TENSION
         ),
         Err(SurfaceError::NonFinitePoint { index: 2 })
     ));
@@ -285,7 +344,19 @@ fn constructor_rejects_bad_grids() {
 
 fn transition_transform(fade: Fade) -> SurfaceTransform {
     SurfaceTransform::new(
-        MeshGrid::new(0.0, 0.0, 10.0, 10.0, 3, 3, vec![0.0; 9], TENSION).unwrap(),
+        MeshGrid::new(
+            MeshGridSpec {
+                x_min: 0.0,
+                y_min: 0.0,
+                dx: 10.0,
+                dy: 10.0,
+                nx: 3,
+                ny: 3,
+                tension: TENSION,
+            },
+            vec![0.0; 9],
+        )
+        .unwrap(),
         fade,
     )
 }
@@ -350,7 +421,19 @@ fn clothoid_transition_distance_is_solved_against_the_curve() {
     use crate::path::lowering::PositionProfile;
 
     let surface = SurfaceTransform::new(
-        MeshGrid::new(0.0, -10.0, 1.0, 20.0, 3, 2, vec![0.0; 6], TENSION).unwrap(),
+        MeshGrid::new(
+            MeshGridSpec {
+                x_min: 0.0,
+                y_min: -10.0,
+                dx: 1.0,
+                dy: 20.0,
+                nx: 3,
+                ny: 2,
+                tension: TENSION,
+            },
+            vec![0.0; 6],
+        )
+        .unwrap(),
         Fade::disabled(),
     );
     let segment = crate::path::Segment::Clothoid(
@@ -376,7 +459,19 @@ fn clothoid_transition_distance_is_solved_against_the_curve() {
 #[test]
 fn fade_boundaries_are_c0_transitions() {
     let surface = SurfaceTransform::new(
-        MeshGrid::new(10.0, 10.0, 10.0, 10.0, 2, 2, vec![0.0; 4], TENSION).unwrap(),
+        MeshGrid::new(
+            MeshGridSpec {
+                x_min: 10.0,
+                y_min: 10.0,
+                dx: 10.0,
+                dy: 10.0,
+                nx: 2,
+                ny: 2,
+                tension: TENSION,
+            },
+            vec![0.0; 4],
+        )
+        .unwrap(),
         Fade::new(0.0, 2.0, 0.0).unwrap(),
     );
     let segment = crate::path::Segment::Line(

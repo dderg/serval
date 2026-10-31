@@ -1,42 +1,14 @@
-//! Terminal pipeline stage: consumes shaped segments and control tokens from
-//! the shaper and drives a [`SegmentSink`]. Follows the same stage pattern as
-//! the pure stages in `motion_pipeline` — a struct owning its state with a
-//! `run(input)` loop — except its output is the sink rather than a channel,
-//! because dispatch is where the stream leaves the pure-stage world.
-
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crossbeam_channel::Receiver;
 use trajectory::{ContinuousSegment, NudgeProfile};
 
-use motion_pipeline::{BarrierAck, Control, TrajectoryItem};
+use motion_pipeline::{BarrierAck, Control, DispatchCommand, TrajectoryItem};
 
 use super::{CommittedFrontier, fatal};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DispatchError {
-    #[error(
-        "motion-engine: curve for mcu {mcu_id} exceeds caps \
-         (pieces {pieces} > {max_pieces}); \
-         logical-move splitting not yet implemented (Task 13 follow-up)."
-    )]
-    CapsExceeded {
-        mcu_id: u32,
-        pieces: usize,
-        max_pieces: usize,
-    },
-    #[error("compute_ack_clock: {0}")]
-    ComputeAckClock(String),
-    #[error(
-        "compute_ack_clock returned 0 after 5s — \
-         clock-sync didn't establish for mcu {mcu_id} (mcu_h={mcu_handle:?})"
-    )]
-    ClockSyncTimeout {
-        mcu_id: u32,
-        mcu_handle: host_rt::passthrough_queue::McuHandle,
-    },
     #[error(
         "mcu {mcu_id} (mcu_h={mcu_handle:?}) has no converged clocksync record — \
          refusing to anchor a step stream on it. The record is invalidated by every \
@@ -60,12 +32,8 @@ pub enum DispatchError {
         age_secs: f64,
         max_age_secs: f64,
     },
-    #[error("MCU {0}: connection dropped during dispatch")]
-    ConnectionDropped(u32),
-    #[error("piece pump thread is gone; cannot dispatch")]
-    PumpGone,
-    #[error("pump stopped on a fatal endpoint condition, latched for klippy: {0}")]
-    TransportFatal(String),
+    #[error("execution halted on a fatal endpoint condition: {0}")]
+    ExecutionHalted(String),
     #[error("nudge target mcu_id={mcu_id} axis={axis} not present in mcu_configs")]
     NudgeTargetMissing { mcu_id: u32, axis: u8 },
     #[error("enqueue: {0}")]
@@ -75,7 +43,7 @@ pub enum DispatchError {
 /// Where committed motion goes when it reaches the end of the pipeline.
 /// Production uses [`super::pump_sink::PumpSink`] (clock anchoring + per-axis
 /// span enqueue into the pump); tests substitute a capture.
-pub trait SegmentSink: Send + 'static {
+pub(crate) trait SegmentSink {
     fn dispatch(&mut self, seg: &ContinuousSegment) -> Result<(), DispatchError>;
     fn dispatch_nudge(
         &mut self,
@@ -89,23 +57,32 @@ pub trait SegmentSink: Send + 'static {
     fn mark_parked(&mut self) {}
 }
 
-/// State the ingress, dispatcher, and worker handle share. Everything here is
-/// either a gate the ingress raises out-of-band (`discard`, `capture_errors`)
-/// or progress telemetry the dispatcher publishes.
 #[derive(Default)]
 pub(crate) struct WorkerLinks {
     /// Raised out-of-band by reset paths so segments already past the shaper
     /// are dropped immediately; the in-band `Reset` token lowers it when it
     /// catches up.
     pub(crate) discard: AtomicBool,
-    /// While set (homing paths), a dispatch error is captured and reported at
-    /// the next `Barrier` instead of aborting the process.
-    pub(crate) capture_errors: AtomicBool,
+    pub(crate) finite_homing_admission: AtomicBool,
     pub(crate) shutting_down: AtomicBool,
     pub(crate) last_move_time_bits: AtomicU64,
-    pub(crate) commit_fire_count: AtomicU32,
     pub(crate) fences: crate::fence::FenceRegistry,
     pub(crate) wakeup: crate::feed_wakeup::FeedWakeup,
+}
+
+impl WorkerLinks {
+    pub(crate) fn bypasses_capacity(&self, item: &TrajectoryItem, cohort_active: bool) -> bool {
+        self.discard.load(Ordering::Acquire)
+            || self.shutting_down.load(Ordering::Acquire)
+            || (cohort_active
+                && self.finite_homing_admission.load(Ordering::Acquire)
+                && matches!(item, TrajectoryItem::Seg(_)))
+            || !matches!(
+                item,
+                TrajectoryItem::Seg(_)
+                    | TrajectoryItem::Control(Control::Dispatch(DispatchCommand::Nudge { .. }))
+            )
+    }
 }
 
 /// Final pipeline stage: dispatches shaped segments into the sink and
@@ -113,53 +90,53 @@ pub(crate) struct WorkerLinks {
 /// is acknowledged here — everything ahead of it has been dispatched or
 /// discarded. Segments behind a captured error are dropped until the error
 /// is reported at the next `Barrier`.
-pub(crate) struct Dispatcher<S> {
-    sink: S,
+pub(crate) struct Dispatcher {
     links: Arc<WorkerLinks>,
     frontier: Arc<CommittedFrontier>,
-    /// Host instant of the first dispatch since the last reset, for
-    /// projecting stream time onto the wall clock.
-    sync_instant: Option<Instant>,
     dispatched_through: Option<f64>,
     pending_error: Option<String>,
-    /// The pump died on an endpoint fatal that klippy has been handed; every
-    /// later segment is dropped while the host runs its clean shutdown.
-    transport_halted: bool,
+    terminal_halt: Option<String>,
 }
 
-impl<S: SegmentSink> Dispatcher<S> {
-    pub(crate) fn new(sink: S, links: Arc<WorkerLinks>, frontier: Arc<CommittedFrontier>) -> Self {
+impl Dispatcher {
+    pub(crate) fn new(links: Arc<WorkerLinks>, frontier: Arc<CommittedFrontier>) -> Self {
         Self {
-            sink,
             links,
             frontier,
-            sync_instant: None,
             dispatched_through: None,
             pending_error: None,
-            transport_halted: false,
+            terminal_halt: None,
         }
     }
 
-    pub(crate) fn run(mut self, input: &Receiver<TrajectoryItem>) {
-        while let Ok(item) = input.recv() {
-            match item {
-                TrajectoryItem::Seg(seg) => self.handle_segment(&seg),
-                TrajectoryItem::Parked => self.sink.mark_parked(),
-                TrajectoryItem::Control(ctrl) => self.handle_control(ctrl),
-            }
+    pub(crate) fn halt(&mut self, reason: &str) {
+        if self.terminal_halt.is_none() {
+            self.terminal_halt = Some(reason.to_string());
+            self.dispatched_through = None;
+            self.frontier.clear();
+            self.links.fences.on_reset();
+            self.links.wakeup.notify_fence_resolved();
         }
     }
 
-    fn handle_segment(&mut self, seg: &ContinuousSegment) {
+    pub(crate) fn feed(&mut self, item: TrajectoryItem, sink: &mut impl SegmentSink) {
+        match item {
+            TrajectoryItem::Seg(seg) => self.handle_segment(&seg, sink),
+            TrajectoryItem::Parked => sink.mark_parked(),
+            TrajectoryItem::Control(ctrl) => self.handle_control(ctrl, sink),
+        }
+    }
+
+    fn handle_segment(&mut self, seg: &ContinuousSegment, sink: &mut impl SegmentSink) {
         if self.links.discard.load(Ordering::Acquire)
             || self.links.shutting_down.load(Ordering::Acquire)
             || self.pending_error.is_some()
-            || self.transport_halted
+            || self.terminal_halt.is_some()
         {
             return;
         }
         log_dispatch(seg);
-        match self.sink.dispatch(seg) {
+        match sink.dispatch(seg) {
             Ok(()) => {
                 self.dispatched_through = Some(seg.t_end);
                 self.publish_progress(seg.t_end);
@@ -175,40 +152,32 @@ impl<S: SegmentSink> Dispatcher<S> {
                     "dispatch stopped after shutdown closed the pump"
                 );
             }
-            Err(e) if self.links.capture_errors.load(Ordering::Acquire) => {
+            Err(e) if self.links.finite_homing_admission.load(Ordering::Acquire) => {
                 self.pending_error = Some(format!("dispatch failed: {e}"));
             }
-            Err(DispatchError::TransportFatal(reason)) => {
-                tracing::error!(
-                    subsystem = "motion",
-                    event = "dispatch_halted_by_transport_fatal",
-                    error = %reason,
-                    "the pump died on an endpoint fatal — dropping further segments while \
-                     klippy shuts down on the latched cause"
-                );
-                self.transport_halted = true;
+            Err(DispatchError::ExecutionHalted(reason)) => {
+                self.halt(&reason);
             }
             Err(e) => fatal(&format!("dispatch failed: {e}")),
         }
     }
 
     fn publish_progress(&mut self, t_end: f64) {
-        if self.sync_instant.is_none() {
-            self.sync_instant = Some(Instant::now());
-        }
         self.links
             .last_move_time_bits
             .store(t_end.to_bits(), Ordering::Release);
-        self.links.commit_fire_count.fetch_add(1, Ordering::AcqRel);
     }
 
-    fn handle_control(&mut self, ctrl: Control) {
+    fn handle_control(&mut self, ctrl: Control, sink: &mut impl SegmentSink) {
         match ctrl {
-            Control::Barrier(tx) => {
+            Control::Dispatch(DispatchCommand::Barrier(tx)) => {
                 let ack = BarrierAck {
                     dispatched_through: self.dispatched_through,
-                    sync_instant: self.sync_instant,
-                    result: self.pending_error.take().map_or(Ok(()), Err),
+                    result: self
+                        .terminal_halt
+                        .clone()
+                        .or_else(|| self.pending_error.take())
+                        .map_or(Ok(()), Err),
                 };
                 let _ = tx.send(ack);
             }
@@ -220,7 +189,6 @@ impl<S: SegmentSink> Dispatcher<S> {
                 self.links
                     .last_move_time_bits
                     .store(0.0_f64.to_bits(), Ordering::Release);
-                self.sync_instant = None;
             }
             Control::Dwell { secs } => {
                 if let Some(t) = &mut self.dispatched_through {
@@ -230,23 +198,34 @@ impl<S: SegmentSink> Dispatcher<S> {
                         .store(t.to_bits(), Ordering::Release);
                 }
             }
-            Control::Nudge {
+            Control::Dispatch(DispatchCommand::Nudge {
                 mcu_id,
                 axis,
                 motor_mask,
                 profile,
-            } => self.handle_nudge(mcu_id, axis, motor_mask, &profile),
+            }) => self.handle_nudge(mcu_id, axis, motor_mask, &profile, sink),
             Control::SetAxisChains(_) | Control::SetMesh { .. } => {}
         }
     }
 
     /// Nudge errors are never fatal: the sender always follows a nudge with a
     /// `Barrier`, so the error reaches the caller through the ack.
-    fn handle_nudge(&mut self, mcu_id: u32, axis: u8, motor_mask: u8, profile: &NudgeProfile) {
-        if self.pending_error.is_some() {
+    fn handle_nudge(
+        &mut self,
+        mcu_id: u32,
+        axis: u8,
+        motor_mask: u8,
+        profile: &NudgeProfile,
+        sink: &mut impl SegmentSink,
+    ) {
+        if self.pending_error.is_some()
+            || self.terminal_halt.is_some()
+            || self.links.discard.load(Ordering::Acquire)
+            || self.links.shutting_down.load(Ordering::Acquire)
+        {
             return;
         }
-        if let Err(e) = self.sink.dispatch_nudge(mcu_id, axis, motor_mask, profile) {
+        if let Err(e) = sink.dispatch_nudge(mcu_id, axis, motor_mask, profile) {
             self.pending_error = Some(format!("nudge dispatch: {e}"));
             return;
         }
@@ -270,7 +249,7 @@ fn log_dispatch(seg: &ContinuousSegment) {
         subsystem = "motion",
         event = "pipe_dispatch",
         line = seg.source_line,
-        t_us = crate::timing::mono_us(),
+        t_us = motion_pipeline::timing::mono_us(),
         seg_t_start = seg.t_start,
         seg_t_end = seg.t_end,
         x_end = end_of(0),

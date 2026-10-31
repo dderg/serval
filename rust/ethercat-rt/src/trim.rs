@@ -20,6 +20,8 @@
 //! part of the command anchor, and a torque drop (SERVO_SYNC, M84, idle
 //! timeout) resets the trim outright — the sync release is the new zero.
 
+use crate::damper::SlotPair;
+
 pub const ERR_TRIM_BAD_SLOT: i32 = -851;
 pub const ERR_TRIM_BAD_CLAMP: i32 = -852;
 pub const ERR_TRIM_BAD_LPF: i32 = -853;
@@ -36,6 +38,14 @@ pub const MAX_TRIM_SETTLE_MS: u32 = 60_000;
 /// Hard cap on the offset slew regardless of how hard the pair fights, so a
 /// torque transient (crash, rail) cannot yank the targets.
 const MAX_TRIM_SLEW_MM_S: f64 = 2.0;
+
+#[derive(Clone, Copy, Debug)]
+pub struct TrimGains {
+    pub gain_micro: u32,
+    pub clamp_um: u16,
+    pub lpf_millihz: u32,
+    pub settle_ms: u32,
+}
 
 struct PairTrim {
     slot_a: usize,
@@ -77,17 +87,14 @@ impl DiffTrimBank {
     /// `gain_micro == 0` freezes the pair: the offset stays applied and the
     /// filter keeps tracking, only the integrator stops. `clamp_um == 0`
     /// removes the pair outright (its offset disappears from the targets).
-    pub fn set(
-        &mut self,
-        num_slaves: usize,
-        slot_a: u8,
-        slot_b: u8,
-        gain_micro: u32,
-        clamp_um: u16,
-        lpf_millihz: u32,
-        settle_ms: u32,
-    ) -> i32 {
-        let (a, b) = (usize::from(slot_a), usize::from(slot_b));
+    pub fn set(&mut self, num_slaves: usize, pair: SlotPair, gains: TrimGains) -> i32 {
+        let TrimGains {
+            gain_micro,
+            clamp_um,
+            lpf_millihz,
+            settle_ms,
+        } = gains;
+        let (a, b) = (usize::from(pair.a), usize::from(pair.b));
         if a == b || a >= num_slaves || b >= num_slaves {
             return ERR_TRIM_BAD_SLOT;
         }

@@ -1,6 +1,6 @@
 use super::place_motor_response;
 use mcu_protocol::messages::{MotorSample, MotorStateResponse};
-use runtime::stepping_state::MAX_AXES;
+use runtime_contract::axes::MAX_AXES;
 
 fn sample(slot: u8, pos_q16: i32, vel_q16: i32) -> MotorSample {
     MotorSample {

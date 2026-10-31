@@ -1,6 +1,6 @@
 use super::fit_corners;
 use crate::path::CurvatureProfile;
-use crate::velocity::plan_velocity_warm_start;
+use crate::velocity::{plan_velocity_warm_start, warm_start_params};
 use crate::{CornerFitConfig, Move, MoveContext, SourceRange, VelocityLimits, line_move};
 
 const MAX_V: f64 = 150.0;
@@ -43,14 +43,7 @@ struct Sample {
 fn plan_samples() -> Vec<Sample> {
     let moves = serpentine();
     let outcome = fit_corners(&moves, CornerFitConfig::default()).unwrap();
-    let profile = plan_velocity_warm_start(
-        &outcome,
-        1e-7,
-        f64::INFINITY,
-        f64::INFINITY,
-        crate::velocity::BoundaryState::REST,
-    )
-    .unwrap();
+    let profile = plan_velocity_warm_start(&outcome, warm_start_params(1e-7)).unwrap();
     let mut out = Vec::new();
     let mut s_off = 0.0;
     for m in &profile.moves {
@@ -118,14 +111,7 @@ fn c2_accel_within_envelope() {
 fn c2_tangential_within_acceleration_disk() {
     let moves = serpentine();
     let outcome = fit_corners(&moves, CornerFitConfig::default()).unwrap();
-    let profile = plan_velocity_warm_start(
-        &outcome,
-        1e-7,
-        f64::INFINITY,
-        f64::INFINITY,
-        crate::velocity::BoundaryState::REST,
-    )
-    .unwrap();
+    let profile = plan_velocity_warm_start(&outcome, warm_start_params(1e-7)).unwrap();
     for (gm, vm) in outcome.moves.iter().zip(profile.moves.iter()) {
         let seg = gm.segment.spatial.as_ref().unwrap();
         for (sample_index, smp) in vm.samples.iter().enumerate() {

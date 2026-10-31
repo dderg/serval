@@ -28,71 +28,19 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 
-use crate::host_io::events::HostEvent;
 use crate::host_io::fire_and_forget_depth::FireAndForgetDepth;
+use crate::host_io::link_health::LinkHealth;
 use crate::host_io::parser::MsgProtoParser;
-use crate::host_io::runtime_events::{
-    FaultEvent, McuLogEvent, RuntimeEvent, StatusEvent, TraceEvent,
-};
-use crate::transport::{MessageParams, SubscribeError, Transport, TransportError};
+use crate::host_io::runtime_events::{FaultEvent, McuLogEvent, RuntimeEvent, StatusEvent};
+use crate::transport::{MessageParams, SubscribeError, TransportError};
 
 const DEFAULT_BAUD: u32 = 250_000;
+const IDENTIFY_TIMEOUT: Duration = Duration::from_millis(15_000);
+const RUNTIME_EVENT_CAPACITY: usize = 512;
+const RUNTIME_EVENT_BULK_CAPACITY: usize = 4096;
 
-#[derive(Debug, Clone)]
-pub struct McuHostIoConfig {
-    pub trace_capacity: usize,
-    pub host_event_capacity: usize,
-    pub runtime_event_capacity: usize,
-    pub runtime_event_bulk_capacity: usize,
-    pub default_call_timeout: Duration,
-    pub identify_timeout: Duration,
-    pub default_dispatcher_timeout: Duration,
-    pub mcu_label: Option<String>,
-    pub link_health: Arc<crate::host_io::link_health::LinkHealth>,
-}
-
-impl Default for McuHostIoConfig {
-    fn default() -> Self {
-        Self {
-            trace_capacity: 256,
-            host_event_capacity: 64,
-            runtime_event_capacity: 512,
-            runtime_event_bulk_capacity: 4096,
-            default_call_timeout: Duration::from_millis(100),
-            identify_timeout: Duration::from_millis(15_000),
-            default_dispatcher_timeout: Duration::from_secs(30),
-            mcu_label: None,
-            link_health: Arc::new(crate::host_io::link_health::LinkHealth::default()),
-        }
-    }
-}
-
-pub struct HeartbeatCallback(pub Arc<dyn Fn(&[u32], &[u64]) + Send + Sync>);
-
-impl std::fmt::Debug for HeartbeatCallback {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("HeartbeatCallback(<fn>)")
-    }
-}
-
-pub struct McuLogHook(pub Box<dyn Fn(McuLogEvent) + Send + Sync>);
-
-impl std::fmt::Debug for McuLogHook {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("McuLogHook(<fn>)")
-    }
-}
-
-#[derive(Debug)]
 pub enum ReactorCommand {
-    Submit {
-        call_id: u64,
-        cmd: String,
-        expected_response_name: String,
-        completion: SyncSender<Result<MessageParams, TransportError>>,
-        deadline: std::time::Instant,
-    },
-    SubmitTyped {
+    Call {
         call_id: u64,
         payload: Vec<u8>,
         expected_response_name: String,
@@ -100,14 +48,10 @@ pub enum ReactorCommand {
         deadline: std::time::Instant,
     },
     Abandon(u64),
-    AttachHeartbeatCallback(HeartbeatCallback),
-    SetMcuLogHook(McuLogHook),
+    AttachHeartbeatCallback(Arc<dyn Fn(&[u32], &[u64]) + Send + Sync>),
+    SetMcuLogHook(Box<dyn Fn(McuLogEvent) + Send + Sync>),
     SubscribeFault {
         sender: SyncSender<FaultEvent>,
-        reply: SyncSender<Result<(), SubscribeError>>,
-    },
-    SubscribeTrace {
-        sender: SyncSender<TraceEvent>,
         reply: SyncSender<Result<(), SubscribeError>>,
     },
     SubscribeRuntimeEvents {
@@ -115,14 +59,7 @@ pub enum ReactorCommand {
         bulk: SyncSender<RuntimeEvent>,
         reply: SyncSender<Result<(), SubscribeError>>,
     },
-    SubscribeHostEvents {
-        sender: SyncSender<HostEvent>,
-        reply: SyncSender<Result<(), SubscribeError>>,
-    },
     FireAndForget {
-        cmd: String,
-    },
-    FireAndForgetTyped {
         payload: Vec<u8>,
     },
     /// A burst of encoded commands to pack into as few Klipper message
@@ -159,7 +96,7 @@ pub enum ReactorCommand {
     RegisterInterceptor {
         msg_name: String,
         oid: Option<u32>,
-        callback: crate::host_io::interceptor::InterceptorCallback,
+        callback: Box<dyn Fn(&MessageParams) + Send + Sync>,
         reply: SyncSender<crate::host_io::InterceptorId>,
     },
     UnregisterInterceptor {
@@ -174,7 +111,7 @@ pub struct McuHostIo {
     reactor_handle: Option<JoinHandle<()>>,
     status_snapshot: Arc<ArcSwap<StatusEvent>>,
     parser: Arc<MsgProtoParser>,
-    config: McuHostIoConfig,
+    link_health: Arc<LinkHealth>,
     clock: Arc<dyn crate::clock::Clock>,
     raw_identify_bytes: Vec<u8>,
     is_critical: Arc<AtomicBool>,
@@ -200,7 +137,7 @@ impl Drop for McuHostIo {
 
 impl McuHostIo {
     pub fn open(path: &str, baud: u32) -> Result<Self, TransportError> {
-        Self::open_with_config(path, baud, McuHostIoConfig::default())
+        Self::open_with_label(path, baud, path)
     }
 
     pub fn open_default(path: &str) -> Result<Self, TransportError> {
@@ -209,16 +146,12 @@ impl McuHostIo {
 
     #[cfg(target_family = "unix")]
     pub fn open_pipe(path: &str) -> Result<Self, TransportError> {
-        Self::open_pipe_with_config(path, McuHostIoConfig::default())
+        Self::open_pipe_with_label(path, path)
     }
 
     #[cfg(target_family = "unix")]
-    pub fn open_pipe_with_config(
-        path: &str,
-        mut config: McuHostIoConfig,
-    ) -> Result<Self, TransportError> {
+    pub fn open_pipe_with_label(path: &str, label: &str) -> Result<Self, TransportError> {
         use std::os::unix::io::FromRawFd;
-        config.mcu_label.get_or_insert_with(|| path.to_owned());
 
         // SAFETY: `libc::open` and `TTYPort::from_raw_fd` are both unsafe FFI
         // boundaries. We check the return value of `open` before using the fd.
@@ -303,15 +236,10 @@ impl McuHostIo {
             }
             port
         };
-        Self::open_with_port(port_box, config)
+        Self::open_with_port(port_box, label)
     }
 
-    pub fn open_with_config(
-        path: &str,
-        baud: u32,
-        mut config: McuHostIoConfig,
-    ) -> Result<Self, TransportError> {
-        config.mcu_label.get_or_insert_with(|| path.to_owned());
+    pub fn open_with_label(path: &str, baud: u32, label: &str) -> Result<Self, TransportError> {
         let port_box: Box<dyn serialport::SerialPort> = serialport::new(path, baud)
             .timeout(Duration::from_millis(100))
             .open()
@@ -320,42 +248,38 @@ impl McuHostIo {
                     "serialport::open({path}@{baud}): {e}"
                 )))
             })?;
-        Self::open_with_port(port_box, config)
+        Self::open_with_port(port_box, label)
     }
 
     pub fn open_with_port(
         mut port_box: Box<dyn serialport::SerialPort>,
-        config: McuHostIoConfig,
+        label: &str,
     ) -> Result<Self, TransportError> {
         let _ = serialport::SerialPort::set_timeout(&mut *port_box, Duration::from_millis(100));
-        Self::open_with_link(Box::new(port_box), config)
+        Self::open_with_link(Box::new(port_box), label)
     }
 
     #[cfg(target_os = "linux")]
-    pub fn open_canbus_with_config(
+    pub fn open_canbus_with_label(
         interface: &str,
         uuid: u64,
-        mut config: McuHostIoConfig,
+        label: &str,
     ) -> Result<Self, TransportError> {
-        config
-            .mcu_label
-            .get_or_insert_with(|| format!("{interface}:{uuid:012x}"));
-        let link =
-            crate::host_io::can_link::CanLink::open(interface, uuid, config.identify_timeout)
-                .map_err(|e| {
-                    TransportError::Io(std::io::Error::new(
-                        e.kind(),
-                        format!("canbus open({interface}, uuid={uuid:012x}): {e}"),
-                    ))
-                })?;
-        Self::open_with_link(Box::new(link), config)
+        let link = crate::host_io::can_link::CanLink::open(interface, uuid, IDENTIFY_TIMEOUT)
+            .map_err(|e| {
+                TransportError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("canbus open({interface}, uuid={uuid:012x}): {e}"),
+                ))
+            })?;
+        Self::open_with_link(Box::new(link), label)
     }
 
     #[cfg(not(target_os = "linux"))]
-    pub fn open_canbus_with_config(
+    pub fn open_canbus_with_label(
         interface: &str,
         uuid: u64,
-        _config: McuHostIoConfig,
+        _label: &str,
     ) -> Result<Self, TransportError> {
         Err(TransportError::Io(std::io::Error::other(format!(
             "canbus transport requires SocketCAN (Linux); cannot open {interface} uuid={uuid:012x}"
@@ -364,12 +288,12 @@ impl McuHostIo {
 
     pub fn open_with_link(
         link: Box<dyn crate::host_io::byte_link::ByteLink>,
-        config: McuHostIoConfig,
+        label: &str,
     ) -> Result<Self, TransportError> {
         let mut io = crate::host_io::serial_frame_io::SerialFrameIo::new_boxed(link);
 
         let (parser_owned, raw_identify_bytes, identify_seq) =
-            identify::identify_handshake(&mut io, config.identify_timeout)?;
+            identify::identify_handshake(&mut io, IDENTIFY_TIMEOUT)?;
 
         let mcu_can_data_rate = parser_owned
             .numeric_constant("CANBUS_DATA_FREQUENCY")
@@ -384,7 +308,9 @@ impl McuHostIo {
         let clock: Arc<dyn crate::clock::Clock> = Arc::new(crate::clock::RealClock);
         let reactor_parser = Arc::clone(&parser);
         let reactor_status = Arc::clone(&status_snapshot);
-        let reactor_config = config.clone();
+        let link_health = Arc::new(LinkHealth::default());
+        let reactor_link_health = Arc::clone(&link_health);
+        let reactor_label: Arc<str> = label.into();
         let reactor_clock = Arc::clone(&clock);
         let is_critical = Arc::new(AtomicBool::new(true));
         let reactor_is_critical = Arc::clone(&is_critical);
@@ -399,13 +325,16 @@ impl McuHostIo {
             );
             let mut reactor = crate::host_io::reactor::Reactor::new_with_clock(
                 io,
-                reactor_parser,
-                submission_rx,
-                reactor_status,
-                identify_seq,
-                reactor_config,
+                crate::host_io::reactor::ReactorSetup {
+                    parser: reactor_parser,
+                    submission_rx,
+                    status_snapshot: reactor_status,
+                    seq: identify_seq,
+                    mcu_label: reactor_label,
+                    link_health: reactor_link_health,
+                    fire_and_forget_depth: reactor_fire_and_forget_depth,
+                },
                 reactor_clock,
-                reactor_fire_and_forget_depth,
             );
             reactor.run();
             if !reactor.exited_gracefully() {
@@ -442,7 +371,7 @@ impl McuHostIo {
             reactor_handle: Some(reactor_handle),
             status_snapshot,
             parser,
-            config,
+            link_health,
             clock,
             raw_identify_bytes,
             is_critical,
@@ -455,10 +384,7 @@ impl McuHostIo {
     /// faithful seam for teardown tests (Drop must send Shutdown, join the
     /// reactor, and close the fd) without needing a wire-protocol responder.
     #[cfg(any(test, feature = "test-harness"))]
-    pub fn from_port_skip_identify(
-        port_box: Box<dyn serialport::SerialPort>,
-        config: McuHostIoConfig,
-    ) -> Self {
+    pub fn from_port_skip_identify(port_box: Box<dyn serialport::SerialPort>, label: &str) -> Self {
         use crate::host_io::identify::IdentifySeqState;
 
         let io = crate::host_io::serial_frame_io::SerialFrameIo::new(port_box);
@@ -473,7 +399,9 @@ impl McuHostIo {
 
         let reactor_parser = Arc::clone(&parser);
         let reactor_status = Arc::clone(&status_snapshot);
-        let reactor_config = config.clone();
+        let link_health = Arc::new(LinkHealth::default());
+        let reactor_link_health = Arc::clone(&link_health);
+        let reactor_label: Arc<str> = label.into();
         let reactor_clock = Arc::clone(&clock);
         let is_critical = Arc::new(AtomicBool::new(false));
         let fire_and_forget_depth = Arc::new(FireAndForgetDepth::default());
@@ -481,13 +409,16 @@ impl McuHostIo {
         let reactor_handle = std::thread::spawn(move || {
             let mut reactor = crate::host_io::reactor::Reactor::new_with_clock(
                 io,
-                reactor_parser,
-                submission_rx,
-                reactor_status,
-                identify_seq,
-                reactor_config,
+                crate::host_io::reactor::ReactorSetup {
+                    parser: reactor_parser,
+                    submission_rx,
+                    status_snapshot: reactor_status,
+                    seq: identify_seq,
+                    mcu_label: reactor_label,
+                    link_health: reactor_link_health,
+                    fire_and_forget_depth: reactor_fire_and_forget_depth,
+                },
                 reactor_clock,
-                reactor_fire_and_forget_depth,
             );
             reactor.run();
         });
@@ -498,7 +429,7 @@ impl McuHostIo {
             reactor_handle: Some(reactor_handle),
             status_snapshot,
             parser,
-            config,
+            link_health,
             clock,
             raw_identify_bytes: Vec::new(),
             is_critical,
@@ -511,60 +442,32 @@ impl McuHostIo {
     }
 }
 
-impl Transport for McuHostIo {
-    fn call(
+impl McuHostIo {
+    pub fn call(
         &self,
         cmd: &str,
         expected_response_name: &str,
         timeout: Duration,
     ) -> Result<MessageParams, TransportError> {
-        let call_id = self.next_call_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let deadline = self.clock.now() + timeout;
-
-        self.submission_tx
-            .send(ReactorCommand::Submit {
-                call_id,
-                cmd: cmd.to_string(),
-                expected_response_name: expected_response_name.to_string(),
-                completion: tx,
-                deadline,
-            })
-            .map_err(|_| TransportError::Closed)?;
-
-        let handle = crate::host_io::call_handle::CallHandle {
-            call_id,
-            submission_tx: self.submission_tx.clone(),
-        };
-
-        match rx.recv_timeout(timeout) {
-            Ok(r) => {
-                handle.defuse();
-                r
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(TransportError::Timeout),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(TransportError::Closed),
-        }
+        let payload = self
+            .parser
+            .encode(cmd)
+            .map_err(|e| TransportError::Parse(format!("{e:?}")))?;
+        self.call_payload(payload, expected_response_name, timeout)
     }
 
-    fn call_typed(
+    fn call_payload(
         &self,
-        name: &str,
-        args: &[(&str, crate::host_io::parser::FieldValue<'_>)],
+        payload: Vec<u8>,
         expected_response_name: &str,
         timeout: Duration,
     ) -> Result<MessageParams, TransportError> {
-        let payload = self
-            .parser
-            .encode_typed(name, args)
-            .map_err(|e| TransportError::Parse(format!("{e:?}")))?;
-
         let call_id = self.next_call_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let deadline = self.clock.now() + timeout;
 
         self.submission_tx
-            .send(ReactorCommand::SubmitTyped {
+            .send(ReactorCommand::Call {
                 call_id,
                 payload,
                 expected_response_name: expected_response_name.to_string(),
@@ -588,16 +491,6 @@ impl Transport for McuHostIo {
         }
     }
 
-    fn send_typed(
-        &self,
-        name: &str,
-        args: &[(&str, crate::host_io::parser::FieldValue<'_>)],
-    ) -> Result<(), TransportError> {
-        McuHostIo::send_typed(self, name, args)
-    }
-}
-
-impl McuHostIo {
     pub fn is_alive(&self) -> bool {
         self.submission_tx.send(ReactorCommand::Noop).is_ok()
     }
@@ -610,22 +503,18 @@ impl McuHostIo {
         self.is_critical.load(Ordering::Acquire)
     }
 
-    pub fn link_health(&self) -> Arc<crate::host_io::link_health::LinkHealth> {
-        Arc::clone(&self.config.link_health)
+    pub fn link_health(&self) -> Arc<LinkHealth> {
+        Arc::clone(&self.link_health)
     }
 
     pub fn attach_heartbeat_callback(&self, cb: Arc<dyn Fn(&[u32], &[u64]) + Send + Sync>) {
         let _ = self
             .submission_tx
-            .send(ReactorCommand::AttachHeartbeatCallback(HeartbeatCallback(
-                cb,
-            )));
+            .send(ReactorCommand::AttachHeartbeatCallback(cb));
     }
 
     pub fn set_mcu_log_hook(&self, hook: Box<dyn Fn(McuLogEvent) + Send + Sync>) {
-        let _ = self
-            .submission_tx
-            .send(ReactorCommand::SetMcuLogHook(McuLogHook(hook)));
+        let _ = self.submission_tx.send(ReactorCommand::SetMcuLogHook(hook));
     }
 
     pub fn subscribe_fault(&self) -> Result<std::sync::mpsc::Receiver<FaultEvent>, SubscribeError> {
@@ -633,21 +522,6 @@ impl McuHostIo {
         let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
         self.submission_tx
             .send(ReactorCommand::SubscribeFault {
-                sender,
-                reply: reply_tx,
-            })
-            .map_err(|_| SubscribeError::Closed)?;
-        reply_rx.recv().map_err(|_| SubscribeError::Closed)??;
-        Ok(receiver)
-    }
-
-    pub fn take_trace_subscription(
-        &self,
-    ) -> Result<std::sync::mpsc::Receiver<TraceEvent>, SubscribeError> {
-        let (sender, receiver) = std::sync::mpsc::sync_channel(self.config.trace_capacity);
-        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-        self.submission_tx
-            .send(ReactorCommand::SubscribeTrace {
                 sender,
                 reply: reply_tx,
             })
@@ -665,10 +539,8 @@ impl McuHostIo {
         ),
         SubscribeError,
     > {
-        let cap = self.config.runtime_event_capacity;
-        let (priority_tx, priority_rx) = std::sync::mpsc::sync_channel(cap);
-        let (bulk_tx, bulk_rx) =
-            std::sync::mpsc::sync_channel(self.config.runtime_event_bulk_capacity);
+        let (priority_tx, priority_rx) = std::sync::mpsc::sync_channel(RUNTIME_EVENT_CAPACITY);
+        let (bulk_tx, bulk_rx) = std::sync::mpsc::sync_channel(RUNTIME_EVENT_BULK_CAPACITY);
         let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
         self.submission_tx
             .send(ReactorCommand::SubscribeRuntimeEvents {
@@ -679,21 +551,6 @@ impl McuHostIo {
             .map_err(|_| SubscribeError::Closed)?;
         reply_rx.recv().map_err(|_| SubscribeError::Closed)??;
         Ok((priority_rx, bulk_rx))
-    }
-
-    pub fn take_host_event_subscription(
-        &self,
-    ) -> Result<std::sync::mpsc::Receiver<HostEvent>, SubscribeError> {
-        let (sender, receiver) = std::sync::mpsc::sync_channel(self.config.host_event_capacity);
-        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-        self.submission_tx
-            .send(ReactorCommand::SubscribeHostEvents {
-                sender,
-                reply: reply_tx,
-            })
-            .map_err(|_| SubscribeError::Closed)?;
-        reply_rx.recv().map_err(|_| SubscribeError::Closed)??;
-        Ok(receiver)
     }
 
     pub fn status(&self) -> std::sync::Arc<crate::host_io::runtime_events::StatusEvent> {
@@ -724,7 +581,7 @@ impl McuHostIo {
             .send(ReactorCommand::RegisterInterceptor {
                 msg_name: msg_name.to_owned(),
                 oid,
-                callback: crate::host_io::interceptor::InterceptorCallback(callback),
+                callback,
                 reply: reply_tx,
             })
             .map_err(|_| TransportError::Closed)?;
@@ -738,10 +595,12 @@ impl McuHostIo {
     }
 
     pub fn send_fire_and_forget(&self, cmd: &str) -> Result<(), TransportError> {
+        let payload = self
+            .parser
+            .encode(cmd)
+            .map_err(|e| TransportError::Parse(format!("{e:?}")))?;
         self.submission_tx
-            .send(ReactorCommand::FireAndForget {
-                cmd: cmd.to_owned(),
-            })
+            .send(ReactorCommand::FireAndForget { payload })
             .map_err(|_| TransportError::Closed)
     }
 
@@ -764,31 +623,17 @@ impl McuHostIo {
             .map_err(|_| TransportError::Closed)
     }
 
-    pub fn send_typed(
+    pub fn send_args<K: AsRef<str>>(
         &self,
         name: &str,
-        args: &[(&str, crate::host_io::parser::FieldValue<'_>)],
-    ) -> Result<(), TransportError> {
-        let payload = self
-            .parser
-            .encode_typed(name, args)
-            .map_err(|e| TransportError::Parse(format!("{e:?}")))?;
-        self.submission_tx
-            .send(ReactorCommand::FireAndForgetTyped { payload })
-            .map_err(|_| TransportError::Closed)
-    }
-
-    pub fn send_args(
-        &self,
-        name: &str,
-        args: &[(String, crate::host_io::parser::ArgValue)],
+        args: &[(K, crate::host_io::parser::ArgValue)],
     ) -> Result<(), TransportError> {
         let payload = self
             .parser
             .encode_args(name, args)
             .map_err(|e| TransportError::Parse(format!("{name}: {e:?}")))?;
         self.submission_tx
-            .send(ReactorCommand::FireAndForgetTyped { payload })
+            .send(ReactorCommand::FireAndForget { payload })
             .map_err(|_| TransportError::Closed)
     }
 
@@ -834,10 +679,10 @@ impl McuHostIo {
             })
     }
 
-    pub fn call_args(
+    pub fn call_args<K: AsRef<str>>(
         &self,
         name: &str,
-        args: &[(String, crate::host_io::parser::ArgValue)],
+        args: &[(K, crate::host_io::parser::ArgValue)],
         expected_response_name: &str,
         timeout: Duration,
     ) -> Result<MessageParams, TransportError> {
@@ -845,34 +690,7 @@ impl McuHostIo {
             .parser
             .encode_args(name, args)
             .map_err(|e| TransportError::Parse(format!("{name}: {e:?}")))?;
-
-        let call_id = self.next_call_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let deadline = self.clock.now() + timeout;
-
-        self.submission_tx
-            .send(ReactorCommand::SubmitTyped {
-                call_id,
-                payload,
-                expected_response_name: expected_response_name.to_string(),
-                completion: tx,
-                deadline,
-            })
-            .map_err(|_| TransportError::Closed)?;
-
-        let handle = crate::host_io::call_handle::CallHandle {
-            call_id,
-            submission_tx: self.submission_tx.clone(),
-        };
-
-        match rx.recv_timeout(timeout) {
-            Ok(r) => {
-                handle.defuse();
-                r
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(TransportError::Timeout),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(TransportError::Closed),
-        }
+        self.call_payload(payload, expected_response_name, timeout)
     }
 
     pub fn kalico_identify(
@@ -938,7 +756,7 @@ impl McuHostIo {
                 crate::host_io::runtime_events::StatusEvent::default(),
             )),
             parser: Arc::new(crate::host_io::parser::MsgProtoParser::new_empty()),
-            config: McuHostIoConfig::default(),
+            link_health: Arc::new(LinkHealth::default()),
             clock: Arc::new(crate::clock::RealClock),
             raw_identify_bytes: Vec::new(),
             is_critical: Arc::new(AtomicBool::new(false)),

@@ -3,8 +3,10 @@ pub use crate::types::AxisKey;
 mod barrier_ledger;
 mod diag;
 mod drip;
+mod endpoint_control;
+pub mod execution_credit;
+pub use endpoint_control::{EndpointBuzzSpec, EndpointCommand, buzz_axis_bits, buzz_lanes};
 mod junction;
-mod memstat;
 mod messages;
 mod pump_loop;
 mod sample_sink;
@@ -21,12 +23,15 @@ pub use junction::{
 };
 pub use messages::{
     BundleLimits, BuzzLane, BuzzParams, BuzzRoute, BuzzStart, BuzzToken, BuzzTransport, BuzzWave,
-    DrainTick, EnqueueMsg, HeartbeatMsg, HistoryRecorder, PumpCallbacks, PumpMsg, RetiredBy,
+    CutCredit, DrainTick, HeartbeatMsg, LaneProjection, PumpCallbacks, PumpMsg, RetiredBy,
     SendError, SpanSink,
 };
+pub use pump_loop::MAX_LEAD_SECS;
+pub(crate) use pump_loop::Pump;
 #[cfg(test)]
 pub(crate) use pump_loop::pump_past_guard_secs;
-pub use pump_loop::{MAX_LEAD_SECS, PUMP_DATA_CHANNEL_CAP, run_pump};
+#[cfg(any(test, feature = "test-support"))]
+pub use pump_loop::run_projection_batches;
 pub use sample_sink::{
     RetiredRuns, SAMPLE_BACKLOG_CEILING_RUNS, SAMPLE_LANE_PIECE_WINDOW, SampleEndpoint,
     SampleLaneConfig, SamplePacer, SamplePositionQuery, build_sample_endpoint,
@@ -38,8 +43,8 @@ pub use sched::{
 #[cfg(any(test, feature = "test-support"))]
 pub use stepcompress_sink::clock_probe;
 pub use stepcompress_sink::{
-    BACKLOG_CEILING_FRAMES, ClockSource, FrameEgress, MOVE_SLOT_RESERVE, StepLaneConfig,
-    StepcompressEndpoint, StepcompressPacer, build_endpoint,
+    BACKLOG_CEILING_FRAMES, ClockSource, EndpointSpec, FrameEgress, MOVE_SLOT_RESERVE,
+    StepLaneConfig, StepcompressEndpoint, StepcompressPacer, build_endpoint,
 };
 pub use transit_trace::emit_fault_snapshot;
 pub use wire_sink::{EtherCatRing, LANE_GROUP_PHASE, LANE_GROUP_PULSE, RingFiller, WireSink};
@@ -53,8 +58,6 @@ mod heartbeat_credit_tests;
 mod hold_merge_seam_tests;
 #[cfg(test)]
 mod lane_rejoin_tests;
-#[cfg(test)]
-mod memstat_tests;
 #[cfg(test)]
 mod sched_tests;
 #[cfg(test)]

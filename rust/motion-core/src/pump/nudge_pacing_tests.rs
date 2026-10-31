@@ -75,19 +75,21 @@ fn bench() -> Bench {
     };
     let (tx, _rx) = crossbeam_channel::unbounded();
     let endpoint = StepcompressEndpoint::new(
-        MCU_ID,
-        StepShim::new(vec![motor], SHIM_RING_DEPTH),
+        EndpointSpec {
+            mcu_id: MCU_ID,
+            shim: StepShim::new(vec![motor], SHIM_RING_DEPTH),
+            egress,
+            pump_control: tx,
+            clock_of,
+            budget: 1024,
+            step_count_query: Arc::new(|_| Ok(0)),
+            link_health: None,
+            barrier_ack_deadline_secs: BARRIER_ACK_DEADLINE_SECONDS,
+        },
         &[StepLaneConfig {
             axis: AXIS as usize,
             oid: OID,
         }],
-        egress,
-        tx,
-        clock_of,
-        1024,
-        Arc::new(|_| Ok(0)),
-        None,
-        BARRIER_ACK_DEADLINE_SECONDS,
     )
     .expect("one motor on one axis builds a stepcompress endpoint");
     Bench {
@@ -273,17 +275,19 @@ fn worst_step_load_late(frames: &[StepFrame]) -> i64 {
 
 impl Bench {
     fn push(&mut self, spans: Vec<ClockedMotorSpan>) -> Result<(), SendError> {
-        self.endpoint.send_frames(
-            MCU_ID,
-            &[AxisFrame {
-                axis: AXIS,
-                spans,
-                new_head: 0,
-                room: SHIM_RING_DEPTH,
-                guard_recorded_ns: 0,
-                guard_mcu_clock: 0,
-            }],
-        )
+        self.endpoint
+            .send_frames(
+                MCU_ID,
+                &[AxisFrame {
+                    axis: AXIS,
+                    spans,
+                    new_head: 0,
+                    room: SHIM_RING_DEPTH,
+                    guard_recorded_ns: 0,
+                    guard_mcu_clock: 0,
+                }],
+            )
+            .and_then(|()| self.endpoint.tick())
     }
 
     fn advance_to(&mut self, clock: u64) -> Result<(), SendError> {

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 
-use crate::clock::{Clock, RealClock};
+use crate::clock::Clock;
 use crate::host_io::ReactorCommand;
 use crate::host_io::events::EventDispatcher;
 use crate::host_io::fire_and_forget_depth::FireAndForgetDepth;
@@ -74,45 +74,29 @@ pub enum ReactorState {
     Closed,
 }
 
+/// Everything a reactor needs besides its transport and clock.
+pub struct ReactorSetup {
+    pub parser: Arc<MsgProtoParser>,
+    pub submission_rx: Receiver<ReactorCommand>,
+    pub status_snapshot: Arc<ArcSwap<StatusEvent>>,
+    pub seq: IdentifySeqState,
+    pub mcu_label: Arc<str>,
+    pub link_health: Arc<crate::host_io::link_health::LinkHealth>,
+    pub fire_and_forget_depth: Arc<FireAndForgetDepth>,
+}
+
 impl Reactor {
-    pub fn new(
-        io: SerialFrameIo,
-        parser: Arc<MsgProtoParser>,
-        submission_rx: Receiver<ReactorCommand>,
-        status_snapshot: Arc<ArcSwap<StatusEvent>>,
-        seq: IdentifySeqState,
-        config: crate::host_io::McuHostIoConfig,
-        fire_and_forget_depth: Arc<FireAndForgetDepth>,
-    ) -> Self {
-        Self::new_with_clock(
-            io,
+    pub fn new_with_clock(io: SerialFrameIo, setup: ReactorSetup, clock: Arc<dyn Clock>) -> Self {
+        let ReactorSetup {
             parser,
             submission_rx,
             status_snapshot,
             seq,
-            config,
-            Arc::new(RealClock),
+            mcu_label,
+            link_health,
             fire_and_forget_depth,
-        )
-    }
-
-    pub fn new_with_clock(
-        io: SerialFrameIo,
-        parser: Arc<MsgProtoParser>,
-        submission_rx: Receiver<ReactorCommand>,
-        status_snapshot: Arc<ArcSwap<StatusEvent>>,
-        seq: IdentifySeqState,
-        config: crate::host_io::McuHostIoConfig,
-        clock: Arc<dyn Clock>,
-        fire_and_forget_depth: Arc<FireAndForgetDepth>,
-    ) -> Self {
-        let link_health = Arc::clone(&config.link_health);
-        let mcu_label: Arc<str> = config.mcu_label.as_deref().unwrap_or("unknown").into();
-        let event_dispatcher = EventDispatcher::new(
-            Arc::clone(&status_snapshot),
-            config.trace_capacity,
-            config.host_event_capacity,
-        );
+        } = setup;
+        let event_dispatcher = EventDispatcher::new(Arc::clone(&status_snapshot));
         Self {
             io,
             parser,
@@ -154,21 +138,23 @@ impl Reactor {
         parser: Arc<MsgProtoParser>,
         submission_rx: Receiver<ReactorCommand>,
         status_snapshot: Arc<ArcSwap<StatusEvent>>,
-        config: crate::host_io::McuHostIoConfig,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self::new_with_clock(
             SerialFrameIo::new(port),
-            parser,
-            submission_rx,
-            status_snapshot,
-            IdentifySeqState {
-                next_send_seq_abs: 1,
-                mcu_receive_seq_abs: 1,
+            ReactorSetup {
+                parser,
+                submission_rx,
+                status_snapshot,
+                seq: IdentifySeqState {
+                    next_send_seq_abs: 1,
+                    mcu_receive_seq_abs: 1,
+                },
+                mcu_label: "test".into(),
+                link_health: Arc::new(crate::host_io::link_health::LinkHealth::default()),
+                fire_and_forget_depth: Arc::new(FireAndForgetDepth::default()),
             },
-            config,
             clock,
-            Arc::new(FireAndForgetDepth::default()),
         )
     }
 }
@@ -286,8 +272,6 @@ impl Reactor {
             self.event_dispatcher.fault_latch.dispatch(fault);
         }
 
-        self.event_dispatcher.host_event_dispatcher.drain_pending();
-
         let now = self.clock.now();
         let evicted = self.awaiting_response.evict_expired(now);
         for entry in evicted {
@@ -339,7 +323,7 @@ mod a3_awaiting_response_gc;
 mod a8_fire_and_forget_backpressure;
 
 #[cfg(test)]
-mod fire_and_forget_typed_routing;
+mod fire_and_forget_routing;
 
 #[cfg(test)]
 mod io_fault_propagation;

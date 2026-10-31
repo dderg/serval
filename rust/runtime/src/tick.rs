@@ -75,7 +75,7 @@ pub fn isr_sample_tick(isr: &mut crate::state::IsrState, shared: &SharedState, r
     let body_start = unsafe { cyccnt_read() };
     crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_ISR_ENTER);
 
-    bump_relaxed(isr.engine.tick_counter.inner_atomic());
+    isr.engine.tick_counter.increment();
 
     let now = isr.widen_state.widen(raw_cyccnt);
 
@@ -148,12 +148,6 @@ pub(crate) fn update_max(slot: &portable_atomic::AtomicU32, val: u32) {
     if val > prev {
         slot.store(val, Ordering::Relaxed);
     }
-}
-
-#[inline]
-pub(crate) fn bump_relaxed(slot: &portable_atomic::AtomicU32) {
-    let prev = slot.load(Ordering::Relaxed);
-    slot.store(prev.wrapping_add(1), Ordering::Relaxed);
 }
 
 #[cfg(test)]

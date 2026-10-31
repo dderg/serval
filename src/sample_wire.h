@@ -1,8 +1,8 @@
 #ifndef __SAMPLE_WIRE_H
 #define __SAMPLE_WIRE_H
 // Wire contract for the sample-stream transport, mirrored from
-// rust/runtime/src/sample_wire.rs. Use these macros in the DECL_COMMAND /
-// DECL_ENCODER strings so the two sides cannot drift; runtime's
+// rust/runtime-contract/src/sample_wire.rs. Use these macros in the DECL_COMMAND /
+// DECL_ENCODER strings so the two sides cannot drift; runtime-contract's
 // sample_wire_tests.rs parses this header and asserts they match.
 
 #define SAMPLE_ANCHOR_ARGS "sample_anchor oid=%c clock=%u position=%i"

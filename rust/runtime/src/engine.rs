@@ -2,7 +2,8 @@ use core::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 
 use crate::clock::TickCounter;
 use crate::state::SharedState;
-use crate::stepping_state::{AxisState, MAX_AXES};
+use crate::stepping_state::AxisState;
+use runtime_contract::axes::MAX_AXES;
 
 mod config;
 mod manual;
@@ -91,13 +92,6 @@ impl Engine {
             addr_of_mut!((*ptr).sample_lanes)
                 .write([const { crate::sample_exec::SampleLane::new() }; MAX_AXES]);
         }
-    }
-
-    /// # Safety
-    /// See [`init_in_place`].
-    #[allow(unsafe_code)]
-    pub unsafe fn init_in_place_production(ptr: *mut Self, clock_freq: u32, sample_rate_hz: u32) {
-        unsafe { Self::init_in_place(ptr, clock_freq, sample_rate_hz) }
     }
 }
 

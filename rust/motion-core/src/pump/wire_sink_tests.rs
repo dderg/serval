@@ -1,6 +1,6 @@
 use super::{EtherCatRing, WireSink};
 use crate::pump::{AxisFrame, AxisKey, SendError, SpanSink};
-use ethercat_rt::setpoint_fill::CLOCK_FREQ_HZ;
+use ethercat_setpoint_fill::setpoint_fill::CLOCK_FREQ_HZ;
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
@@ -72,7 +72,7 @@ fn frame() -> AxisFrame {
 }
 
 fn ring_filler() -> super::RingFiller {
-    use ethercat_rt::setpoint_fill::{ChainFiller, LaneSpec};
+    use ethercat_setpoint_fill::setpoint_fill::{ChainFiller, LaneSpec};
     Arc::new(Mutex::new(ChainFiller::new(
         &[LaneSpec {
             axis: key().axis,

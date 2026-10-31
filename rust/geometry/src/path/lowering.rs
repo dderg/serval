@@ -16,13 +16,6 @@ pub trait PositionProfile {
     fn d2heading_ds2(&self, s: f64) -> [f64; 3];
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct LoweredSample {
-    pub t_s: f64,
-    pub position: Option<[f64; 3]>,
-    pub followers: Vec<f64>,
-}
-
 fn axpby(a: f64, u: [f64; 3], b: f64, v: [f64; 3]) -> [f64; 3] {
     [
         a * u[0] + b * v[0],

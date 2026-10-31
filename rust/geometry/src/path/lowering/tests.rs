@@ -6,21 +6,7 @@ const UNIT_U: [f64; 3] = [1.0, 0.0, 0.0];
 const UNIT_V: [f64; 3] = [0.0, 1.0, 0.0];
 const ORIGIN: [f64; 3] = [0.0, 0.0, 0.0];
 
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn norm(a: [f64; 3]) -> f64 {
-    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
-}
+use crate::vec3::{cross, norm, sub};
 
 fn numeric_kappa(profile: &impl PositionProfile, s: f64, h: f64) -> f64 {
     let p_plus = profile.point_at(s + h);

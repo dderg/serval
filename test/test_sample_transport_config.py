@@ -9,7 +9,7 @@ from klippy.mcu import MCU, SAMPLE_COMMANDS, STEPCOMPRESS_MAX_ERROR_DEFAULT
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 WIRE_HEADER = REPO / "src" / "sample_wire.h"
-WIRE_RUST = REPO / "rust" / "runtime" / "src" / "sample_wire.rs"
+WIRE_RUST = REPO / "rust" / "runtime-contract" / "src" / "sample_wire.rs"
 
 
 class FakeConfigError(Exception):

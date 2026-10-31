@@ -21,4 +21,4 @@ sort_by = "Name"
 
 [parse]
 parse_deps = true
-include = ["runtime", "c-api"]
+include = ["runtime", "runtime-contract", "c-api"]

@@ -134,8 +134,10 @@ fn run_waypoints(
     let params = SnapshotParams {
         max_velocity: limits.max_velocity,
         max_accel: limits.max_accel,
-        square_corner_velocity: limits.square_corner_velocity,
-        corner_deviation: None,
+        corner_deviation: geometry::corner_deviation_from_scv(
+            limits.square_corner_velocity,
+            limits.max_accel,
+        ),
         max_jerk: f64::INFINITY,
         max_extrude_only_velocity: None,
         max_extrude_only_accel: None,

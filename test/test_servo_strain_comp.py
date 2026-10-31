@@ -27,14 +27,14 @@ class FakeEngine(_FakeEngine):
         self.uploads = []
         self.applied_um = {}
 
-    def set_strain_comp(self, handle, slot_a, slot_b, *args):
-        values = args[-1]
-        nx, ny = args[3], args[4]
-        self.uploads.append((handle, slot_a, slot_b) + args)
+    def set_strain_comp(self, handle, pair, grid):
+        slots = (pair["slot_a"], pair["slot_b"])
+        nx, ny = grid["nx"], grid["ny"]
+        self.uploads.append((handle, slots[0], slots[1], grid))
         if nx == 0 or ny == 0:
-            self.applied_um.pop((slot_a, slot_b), None)
+            self.applied_um.pop(slots, None)
         elif nx == 1 and ny == 1:
-            self.applied_um[(slot_a, slot_b)] = values[0]
+            self.applied_um[slots] = grid["values_um"][0]
 
     def sdo_read(self, handle, slot, index, subindex):
         mine = (0, 1) if slot in (0, 1) else (2, 3)
@@ -112,7 +112,7 @@ def make_comp(tmp_path, engine=None):
 def test_disable_clears_both_pairs(tmp_path):
     sc, engine = make_comp(tmp_path)
     sc.cmd_SERVO_STRAIN_COMP(FakeGcmd(ENABLE="0"))
-    assert [(u[1], u[2], u[6]) for u in engine.uploads] == [
+    assert [(u[1], u[2], u[3]["nx"]) for u in engine.uploads] == [
         (0, 1, 0),
         (2, 3, 0),
     ]

@@ -4,7 +4,7 @@ use core::sync::atomic::Ordering;
 
 use runtime::engine::Engine;
 use runtime::state::SharedState;
-use runtime::stepping_state::{StepMode, StepperBindingRust};
+use runtime_contract::axes::{StepMode, StepperBindingRust};
 
 const CLOCK_FREQ: u32 = 520_000_000;
 const SAMPLE_RATE: u32 = 40_000;

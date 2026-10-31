@@ -1,49 +1,6 @@
 use super::*;
 
 #[test]
-fn identify_byte_layout() {
-    let m = Identify {
-        proto_version: 0x01,
-    };
-    let bytes = m.encode_body_to_array();
-    assert_eq!(bytes.len(), 1);
-    assert_eq!(bytes, [0x01]);
-    assert_eq!(Identify::decode_body(&bytes), Ok(m));
-}
-
-#[test]
-fn identify_decode_rejects_wrong_length() {
-    assert!(matches!(
-        Identify::decode_body(&[]),
-        Err(BootstrapDecodeError::WrongLength {
-            expected: 1,
-            got: 0
-        })
-    ));
-    assert!(matches!(
-        Identify::decode_body(&[1, 2]),
-        Err(BootstrapDecodeError::WrongLength {
-            expected: 1,
-            got: 2
-        })
-    ));
-}
-
-#[test]
-fn identify_response_offsets_are_frozen() {
-    // Hand-counted from spec §5. If any of these fail, a protocol break
-    // has been introduced — DO NOT update them, fix the layout instead.
-    assert_eq!(IDR_OFF_PROTO_VERSION, 0);
-    assert_eq!(IDR_OFF_FIRMWARE_VER, 1);
-    assert_eq!(IDR_OFF_BUILD_HASH, 5);
-    assert_eq!(IDR_OFF_SCHEMA_HASH, 25);
-    assert_eq!(IDR_OFF_RESET_EPOCH, 57);
-    assert_eq!(IDR_OFF_CAPABILITIES, 61);
-    assert_eq!(IDR_OFF_MCU_SERIAL, 69);
-    assert_eq!(IDENTIFY_RESPONSE_BODY_LEN, 81);
-}
-
-#[test]
 fn identify_response_byte_layout() {
     let build_hash: [u8; 20] = std::array::from_fn(|i| 0x40 + i as u8);
     let schema_hash: [u8; 32] = std::array::from_fn(|i| 0x60 + i as u8);

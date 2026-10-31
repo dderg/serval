@@ -1,6 +1,6 @@
 use super::*;
 use nurbs::ScalarNurbs;
-use runtime::sample_run::decode_deltas;
+use runtime_contract::sample_run::decode_deltas;
 use std::sync::atomic::AtomicU64;
 use trajectory::{MotorGroup, MotorSpan};
 
@@ -46,6 +46,7 @@ struct Harness {
     sent: Arc<Mutex<Vec<Sent>>>,
     control: crossbeam_channel::Receiver<PumpMsg>,
     readback: Arc<Mutex<Option<(u64, i32)>>>,
+    fail_sends: Arc<AtomicBool>,
 }
 
 impl Harness {
@@ -88,7 +89,12 @@ fn harness(lanes: &[SampleLaneConfig]) -> Harness {
         Arc::new(move |_| Some((now_for_clock.load(Ordering::Relaxed), CYCLES_PER_SECOND)));
     let sent = Arc::new(Mutex::new(Vec::new()));
     let sent_for_egress = Arc::clone(&sent);
+    let fail_sends = Arc::new(AtomicBool::new(false));
+    let fail_sends_for_egress = Arc::clone(&fail_sends);
     let egress: FrameEgress = Arc::new(move |burst| {
+        if fail_sends_for_egress.load(Ordering::Relaxed) {
+            return Err(SendError::Transient("injected egress backpressure".into()));
+        }
         let mut log = sent_for_egress.lock_ok();
         for (name, args) in burst {
             log.push(Sent {
@@ -99,8 +105,6 @@ fn harness(lanes: &[SampleLaneConfig]) -> Harness {
         Ok(())
     });
     let (tx, control) = crossbeam_channel::unbounded();
-    let mut endpoint = SampleEndpoint::new(MCU_ID, lanes, egress, clock_of, tx)
-        .expect("lane config is representable");
     let readback = Arc::new(Mutex::new(None));
     let readback_for_query = Arc::clone(&readback);
     let query: SamplePositionQuery = Arc::new(move |_| {
@@ -108,7 +112,8 @@ fn harness(lanes: &[SampleLaneConfig]) -> Harness {
             .lock_ok()
             .ok_or_else(|| "no readback armed".to_string())
     });
-    endpoint.set_position_query(query);
+    let mut endpoint = SampleEndpoint::new(MCU_ID, lanes, egress, clock_of, tx, query)
+        .expect("lane config is representable");
     endpoint
         .reset_position(&vec![0; lanes.len()])
         .expect("seed matches the lane count");
@@ -118,6 +123,7 @@ fn harness(lanes: &[SampleLaneConfig]) -> Harness {
         sent,
         control,
         readback,
+        fail_sends,
     }
 }
 
@@ -216,6 +222,7 @@ fn a_lane_anchors_once_then_streams_abutting_runs() {
     let mut h = harness(&[lane_cfg(0, OID)]);
     h.endpoint
         .send_frames(MCU_ID, &[frame(0, vec![span(0, 0.0, 10.0, 0.05)])])
+        .and_then(|()| h.endpoint.tick())
         .expect("spans accepted");
     h.advance((CYCLES_PER_SECOND * 0.1) as u64);
     h.endpoint.tick().expect("tick");
@@ -258,6 +265,7 @@ fn runs_abut_exactly_on_the_wire() {
                 ],
             )],
         )
+        .and_then(|()| h.endpoint.tick())
         .expect("spans accepted");
     h.advance((CYCLES_PER_SECOND * 0.2) as u64);
     h.endpoint.tick().expect("tick");
@@ -291,6 +299,7 @@ fn samples_land_on_the_lane_quantum_and_track_the_trajectory() {
     let mut h = harness(&[lane_cfg(0, OID)]);
     h.endpoint
         .send_frames(MCU_ID, &[frame(0, vec![span(0, 0.0, 10.0, 0.05)])])
+        .and_then(|()| h.endpoint.tick())
         .expect("spans accepted");
     h.advance((CYCLES_PER_SECOND * 0.1) as u64);
     h.endpoint.tick().expect("tick");
@@ -335,6 +344,7 @@ fn the_lane_never_outruns_the_advertised_ring_depth_and_resumes_on_retirement() 
     }
     h.endpoint
         .send_frames(MCU_ID, &[frame(0, spans)])
+        .and_then(|()| h.endpoint.tick())
         .expect("spans accepted");
     for _ in 0..8 {
         h.endpoint.tick().expect("tick");
@@ -382,8 +392,15 @@ fn a_stalled_lane_never_outruns_the_send_lead() {
         start += (CYCLES_PER_SECOND * 0.05) as u64;
         from += 5.0;
     }
+    let oversized = [frame(0, spans)];
+    assert!(matches!(
+        h.endpoint.send_frames(MCU_ID, &oversized),
+        Err(SendError::Transient(_))
+    ));
+    assert!(h.taken().is_empty());
     h.endpoint
-        .send_frames(MCU_ID, &[frame(0, spans)])
+        .send_frames(MCU_ID, &[frame(0, oversized[0].spans[..64].to_vec())])
+        .and_then(|()| h.endpoint.tick())
         .expect("spans accepted");
     let sent = h.taken();
     let lead_ticks = (CYCLES_PER_SECOND * SEND_LEAD_SECONDS) as u64;
@@ -404,6 +421,7 @@ fn an_overlay_span_rides_its_own_relativized_run() {
     let mut h = harness(&[lane_cfg(0, OID)]);
     h.endpoint
         .send_frames(MCU_ID, &[frame(0, vec![span(0, 0.0, 10.0, 0.05)])])
+        .and_then(|()| h.endpoint.tick())
         .expect("kinematic spans accepted");
     let before = h.endpoint.lane_positions();
     h.taken();
@@ -414,6 +432,7 @@ fn an_overlay_span_rides_its_own_relativized_run() {
             MCU_ID,
             &[frame(0, vec![overlay_span(overlay_start, 0.5, 0.02)])],
         )
+        .and_then(|()| h.endpoint.tick())
         .expect("overlay accepted");
     h.endpoint.tick().expect("tick");
 
@@ -448,6 +467,7 @@ fn a_seam_gap_re_anchors_the_lane() {
     let mut h = harness(&[lane_cfg(0, OID)]);
     h.endpoint
         .send_frames(MCU_ID, &[frame(0, vec![span(0, 0.0, 10.0, 0.05)])])
+        .and_then(|()| h.endpoint.tick())
         .expect("spans accepted");
     h.taken();
 
@@ -455,6 +475,7 @@ fn a_seam_gap_re_anchors_the_lane() {
     h.endpoint.mark_seam_gap(0, rejoin).expect("axis exists");
     h.endpoint
         .send_frames(MCU_ID, &[frame(0, vec![span(rejoin, 10.0, 20.0, 0.05)])])
+        .and_then(|()| h.endpoint.tick())
         .expect("spans past the gap accepted");
     h.endpoint.tick().expect("tick");
 
@@ -484,6 +505,7 @@ fn an_unsent_reanchor_cut_needs_no_barrier() {
         .expect("axis exists");
     h.endpoint
         .send_frames(MCU_ID, &[frame(0, vec![span(cut_at, 0.0, 10.0, 0.05)])])
+        .and_then(|()| h.endpoint.tick())
         .expect("spans accepted");
     let sent = h.taken();
     assert!(
@@ -511,6 +533,7 @@ fn a_fresh_epoch_cut_stages_the_spans_past_it_exactly_once() {
                 ],
             )],
         )
+        .and_then(|()| h.endpoint.tick())
         .expect("spans accepted");
     assert_eq!(
         h.endpoint.consumed_counts(),
@@ -526,6 +549,7 @@ fn a_sent_reanchor_cut_parks_the_lane_until_the_barrier_reconciles() {
     let mut h = harness(&[lane_cfg(0, OID)]);
     h.endpoint
         .send_frames(MCU_ID, &[frame(0, vec![span(0, 0.0, 10.0, 0.05)])])
+        .and_then(|()| h.endpoint.tick())
         .expect("spans accepted");
     let parked_at = h.endpoint.lane_positions()[0];
     h.taken();
@@ -536,6 +560,7 @@ fn a_sent_reanchor_cut_parks_the_lane_until_the_barrier_reconciles() {
         .expect("axis exists");
     h.endpoint
         .send_frames(MCU_ID, &[frame(0, vec![span(cut_at, 10.0, 30.0, 0.05)])])
+        .and_then(|()| h.endpoint.tick())
         .expect("spans held behind the cut");
     let sent = h.taken();
     let barrier = sent
@@ -571,6 +596,7 @@ fn a_readback_disagreeing_with_the_host_is_fatal() {
     let mut h = harness(&[lane_cfg(0, OID)]);
     h.endpoint
         .send_frames(MCU_ID, &[frame(0, vec![span(0, 0.0, 10.0, 0.05)])])
+        .and_then(|()| h.endpoint.tick())
         .expect("spans accepted");
     let parked_at = h.endpoint.lane_positions()[0];
     h.taken();
@@ -581,6 +607,7 @@ fn a_readback_disagreeing_with_the_host_is_fatal() {
         .expect("axis exists");
     h.endpoint
         .send_frames(MCU_ID, &[frame(0, vec![span(cut_at, 10.0, 30.0, 0.05)])])
+        .and_then(|()| h.endpoint.tick())
         .expect("spans held");
     let seq = h
         .taken()
@@ -628,6 +655,7 @@ fn frames_for_a_foreign_mcu_are_fatal() {
     let error = h
         .endpoint
         .send_frames(MCU_ID + 1, &[frame(0, vec![span(0, 0.0, 1.0, 0.01)])])
+        .and_then(|()| h.endpoint.tick())
         .expect_err("a misaddressed bundle is never silently absorbed");
     assert!(matches!(error, SendError::Fatal(_)));
     h.drain_control();
@@ -639,6 +667,7 @@ fn an_unconfigured_axis_is_fatal() {
     let error = h
         .endpoint
         .send_frames(MCU_ID, &[frame(3, vec![span(0, 0.0, 1.0, 0.01)])])
+        .and_then(|()| h.endpoint.tick())
         .expect_err("an unknown lane is never guessed at");
     let SendError::Fatal(message) = error else {
         panic!("an unknown axis must be fatal");
@@ -658,6 +687,7 @@ fn a_move_faster_than_the_lane_cap_is_fatal() {
     let error = h
         .endpoint
         .send_frames(MCU_ID, &[frame(0, vec![span(0, 0.0, 100.0, 0.05)])])
+        .and_then(|()| h.endpoint.tick())
         .expect_err("a lane never quietly drops motion it cannot represent");
     let SendError::Fatal(message) = error else {
         panic!("exceeding the lane cap must be fatal");
@@ -680,6 +710,7 @@ fn duplicate_axes_are_rejected_at_construction() {
         egress,
         clock_of,
         tx,
+        Arc::new(|_| panic!("invalid config must not query the MCU")),
     ) else {
         panic!("two lanes cannot own one axis");
     };
@@ -699,7 +730,14 @@ fn an_unrepresentable_sample_rate_is_rejected_at_construction() {
     let egress: FrameEgress = Arc::new(|_| Ok(()));
     let mut cfg = lane_cfg(0, OID);
     cfg.sample_rate_hz = 4_000_000;
-    let Err(error) = SampleEndpoint::new(MCU_ID, &[cfg], egress, clock_of, tx) else {
+    let Err(error) = SampleEndpoint::new(
+        MCU_ID,
+        &[cfg],
+        egress,
+        clock_of,
+        tx,
+        Arc::new(|_| panic!("invalid config must not query the MCU")),
+    ) else {
         panic!("a sample rate faster than the clock is not representable");
     };
     let SendError::Fatal(message) = error else {
@@ -722,6 +760,7 @@ fn two_lanes_stream_independently() {
                 frame(1, vec![span(0, 0.0, -4.0, 0.05)]),
             ],
         )
+        .and_then(|()| h.endpoint.tick())
         .expect("both lanes accepted");
     h.advance((CYCLES_PER_SECOND * 0.1) as u64);
     h.endpoint.tick().expect("tick");
@@ -758,6 +797,7 @@ fn consumption_counts_converted_views_and_retirement_waits_for_playback() {
                 ],
             )],
         )
+        .and_then(|()| h.endpoint.tick())
         .expect("spans accepted");
     h.advance((CYCLES_PER_SECOND * 0.1) as u64);
     h.endpoint.tick().expect("tick");
@@ -797,6 +837,7 @@ fn every_payload_fits_one_wire_block() {
     }
     h.endpoint
         .send_frames(MCU_ID, &[frame(0, spans)])
+        .and_then(|()| h.endpoint.tick())
         .expect("spans accepted");
     for _ in 0..6 {
         h.advance((CYCLES_PER_SECOND * 0.05) as u64);
@@ -818,11 +859,13 @@ fn a_stream_hole_without_a_seam_marker_is_fatal() {
     let mut h = harness(&[lane_cfg(0, OID)]);
     h.endpoint
         .send_frames(MCU_ID, &[frame(0, vec![span(0, 0.0, 10.0, 0.05)])])
+        .and_then(|()| h.endpoint.tick())
         .expect("spans accepted");
     let hole = (CYCLES_PER_SECOND * 0.2) as u64;
     let error = h
         .endpoint
         .send_frames(MCU_ID, &[frame(0, vec![span(hole, 10.0, 20.0, 0.05)])])
+        .and_then(|()| h.endpoint.tick())
         .expect_err("an unsanctioned hole is never padded over");
     let SendError::Fatal(message) = error else {
         panic!("a stream hole must be fatal");
@@ -858,6 +901,7 @@ fn a_moving_lane_packs_runs_by_payload_bytes_not_by_the_sample_cap() {
     }
     h.endpoint
         .send_frames(MCU_ID, &[frame(0, spans)])
+        .and_then(|()| h.endpoint.tick())
         .expect("spans accepted");
     let runs = h.runs();
     assert!(
@@ -877,4 +921,143 @@ fn a_moving_lane_packs_runs_by_payload_bytes_not_by_the_sample_cap() {
          revisiting"
     );
     h.drain_control();
+}
+
+#[test]
+fn accepted_phase_views_survive_transient_progress_without_replay() {
+    let mut h = harness(&[lane_cfg(0, OID)]);
+    let mut reference = harness(&[lane_cfg(0, OID)]);
+    let frames = [frame(0, vec![span(0, 0.0, 10.0, 0.05)])];
+    reference.endpoint.send_frames(MCU_ID, &frames).unwrap();
+    reference.endpoint.tick().unwrap();
+    let expected = reconstruct(&reference.runs(), 0);
+
+    h.fail_sends.store(true, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &frames)
+        .expect("accepted once");
+    assert!(matches!(h.endpoint.tick(), Err(SendError::Transient(_))));
+    assert!(h.taken().is_empty());
+    h.fail_sends.store(false, Ordering::Relaxed);
+    h.endpoint.tick().expect("retained output progresses");
+    assert_eq!(reconstruct(&h.runs(), 0), expected);
+    h.endpoint.tick().unwrap();
+    assert!(h.runs().is_empty(), "accepted views cannot execute twice");
+}
+
+#[test]
+fn halt_before_phase_progress_abandons_acceptance_and_resume_retires_only_new_work() {
+    let mut h = harness(&[lane_cfg(0, OID)]);
+    let mut queue = crate::pump::AxisQueue::new(64);
+    h.endpoint
+        .send_frames(MCU_ID, &[frame(0, vec![span(0, 0.0, 10.0, 0.05)])])
+        .unwrap();
+    *h.readback.lock_ok() = Some((0, 0));
+    queue.credit.accept(1);
+    assert_eq!(
+        queue
+            .credit
+            .interrupt(h.endpoint.abort_axes(&[0]).unwrap().into_iter().map(|cut| {
+                crate::pump::execution_credit::Cut {
+                    source: cut.by as usize,
+                    before: crate::pump::execution_credit::Progress {
+                        consumed: cut.before.0,
+                        retired: cut.before.1,
+                    },
+                    after: crate::pump::execution_credit::Progress {
+                        consumed: cut.after.0,
+                        retired: cut.after.1,
+                    },
+                }
+            })),
+        1
+    );
+    assert_eq!(
+        (
+            queue.credit.snapshot().retired,
+            queue.credit.snapshot().abandoned,
+            queue.credit.outstanding()
+        ),
+        (0, 1, 0)
+    );
+    h.endpoint.tick().unwrap();
+    assert!(h.runs().is_empty());
+
+    h.endpoint
+        .send_frames(MCU_ID, &[frame(0, vec![span(0, 0.0, 2.0, 0.05)])])
+        .unwrap();
+    queue.credit.accept(1);
+    h.endpoint.tick().unwrap();
+    let sent = h.taken();
+    let anchors: Vec<&Sent> = sent
+        .iter()
+        .filter(|s| s.name == SAMPLE_ANCHOR_NAME)
+        .collect();
+    assert_eq!(
+        anchors.len(),
+        1,
+        "resume establishes one fresh position frame"
+    );
+    let anchor = anchors[0];
+    assert_eq!(anchor.int("clock"), 500);
+    assert_eq!(anchor.int("position"), 2);
+    let anchor_position = i32::try_from(anchor.int("position")).unwrap();
+    let runs: Vec<Sent> = sent
+        .into_iter()
+        .filter(|s| s.name == SAMPLE_RUN_NAME)
+        .collect();
+    assert!(runs.iter().all(|run| run.int("interval") == 500));
+    assert_eq!(
+        reconstruct(&runs, anchor_position),
+        (1..=100).map(|sample| sample * 2).collect::<Vec<i32>>(),
+        "every 500-cycle sample follows only the resumed 2 mm ramp through its endpoint"
+    );
+    queue.credit.observe(
+        crate::pump::RetiredBy::Phase as usize,
+        crate::pump::execution_credit::Progress {
+            consumed: h.endpoint.consumed_counts()[0],
+            retired: h.endpoint.retired_counts()[0],
+        },
+    );
+    assert_eq!(queue.credit.outstanding(), 1);
+    h.endpoint.mcu_retired().record(&[0], &[49_999]);
+    h.endpoint.tick().unwrap();
+    queue.credit.observe(
+        crate::pump::RetiredBy::Phase as usize,
+        crate::pump::execution_credit::Progress {
+            consumed: h.endpoint.consumed_counts()[0],
+            retired: h.endpoint.retired_counts()[0],
+        },
+    );
+    assert_eq!(
+        (
+            queue.credit.snapshot().retired,
+            queue.credit.snapshot().abandoned,
+            queue.credit.outstanding()
+        ),
+        (0, 1, 1),
+        "the resumed view cannot retire before playback reaches its endpoint"
+    );
+    h.endpoint.mcu_retired().record(&[0], &[50_000]);
+    h.endpoint.tick().unwrap();
+    queue.credit.observe(
+        crate::pump::RetiredBy::Phase as usize,
+        crate::pump::execution_credit::Progress {
+            consumed: h.endpoint.consumed_counts()[0],
+            retired: h.endpoint.retired_counts()[0],
+        },
+    );
+    assert_eq!(
+        (
+            queue.credit.snapshot().retired,
+            queue.credit.snapshot().abandoned,
+            queue.credit.outstanding()
+        ),
+        (1, 1, 0)
+    );
+    assert_eq!(queue.room(), 64);
+    assert!(
+        h.runs().is_empty(),
+        "playback receipts cannot replay either view"
+    );
 }

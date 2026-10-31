@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 fn make_dispatcher() -> EventDispatcher {
     let snap = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
-    EventDispatcher::new(snap, 256, 64)
+    EventDispatcher::new(snap)
 }
 
 fn fault_status(engine_status: u8, last_fault: u16, segment_id: u32) -> RuntimeEvent {
@@ -144,7 +144,7 @@ fn status_watermark_regression_does_not_synthesize() {
 #[test]
 fn heartbeat_callback_fires_with_retired_counts_and_playback_clocks() {
     let status = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
-    let mut d = EventDispatcher::new(status, 16, 8);
+    let mut d = EventDispatcher::new(status);
 
     let recorder: Arc<Mutex<Vec<(Vec<u32>, Vec<u64>)>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder2 = Arc::clone(&recorder);
@@ -170,7 +170,7 @@ fn heartbeat_is_not_forwarded_to_runtime_rx() {
     use std::sync::mpsc::sync_channel;
 
     let status = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
-    let mut d = EventDispatcher::new(status, 16, 8);
+    let mut d = EventDispatcher::new(status);
 
     let (tx, rx) = sync_channel::<RuntimeEvent>(8);
     let (bulk_tx, _bulk_rx) = sync_channel::<RuntimeEvent>(8);
@@ -193,7 +193,7 @@ fn mcu_log_hook_is_called_on_mcu_log_event() {
     use std::time::Instant;
 
     let snapshot = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
-    let mut dispatcher = EventDispatcher::new(snapshot, 16, 8);
+    let mut dispatcher = EventDispatcher::new(snapshot);
 
     let received: Arc<Mutex<Vec<McuLogEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let received_clone = received.clone();
@@ -224,7 +224,7 @@ fn mcu_log_without_hook_does_not_panic() {
     use std::time::Instant;
 
     let snapshot = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
-    let mut dispatcher = EventDispatcher::new(snapshot, 16, 8);
+    let mut dispatcher = EventDispatcher::new(snapshot);
     dispatcher.dispatch(RuntimeEvent::McuLog(McuLogEvent {
         mcu_tick: 0,
         level: 0,
@@ -244,7 +244,7 @@ fn mcu_log_also_forwarded_to_runtime_rx() {
     use std::time::Instant;
 
     let snapshot = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
-    let mut dispatcher = EventDispatcher::new(snapshot, 16, 8);
+    let mut dispatcher = EventDispatcher::new(snapshot);
 
     let (tx, rx) = sync_channel::<RuntimeEvent>(8);
     let (bulk_tx, _bulk_rx) = sync_channel::<RuntimeEvent>(8);

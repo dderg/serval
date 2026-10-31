@@ -1,4 +1,5 @@
-use super::servo::{buzz_axis_bits, buzz_lanes, validate_dynamics_pairs};
+use super::servo::validate_dynamics_pairs;
+use motion_core::pump::{buzz_axis_bits, buzz_lanes};
 
 #[test]
 fn axis_bits_keep_only_the_endpoint_own_masked_axes() {

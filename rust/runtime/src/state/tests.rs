@@ -37,7 +37,7 @@ fn bind_phase_motor_rejects_out_of_range() {
         Err(super::SetStepModeError::OutOfRange)
     );
     assert_eq!(
-        super::bind_phase_motor(&shared, 0, crate::stepping_state::MAX_AXES as u8),
+        super::bind_phase_motor(&shared, 0, runtime_contract::axes::MAX_AXES as u8),
         Err(super::SetStepModeError::OutOfRange)
     );
 }

@@ -20,9 +20,6 @@ DECL_CONSTANT("STEPPER_STEP_BOTH_EDGE", 1);
 #if HAVE_EDGE_OPTIMIZATION
  DECL_CONSTANT("STEPPER_OPTIMIZED_EDGE", EDGE_STEP_TICKS);
 #endif
-#if HAVE_AVR_OPTIMIZATION
- DECL_CONSTANT("STEPPER_OPTIMIZED_UNSTEP", AVR_STEP_TICKS);
-#endif
 
 static struct task_wake barrier_ack_wake;
 
@@ -127,11 +124,8 @@ stepper_load_next(struct stepper *s)
     s->interval = move_interval + move_add;
 #endif
     if (HAVE_OPTIMIZED_PATH && s->flags & SF_OPTIMIZED_PATH) {
-        // Using optimized stepper_event_edge() or stepper_event_avr()
+        // Using optimized stepper_event_edge()
         s->time.waketime += move_first_interval;
-        if (HAVE_AVR_OPTIMIZATION)
-            s->flags = (move_add ? s->flags | SF_HAVE_ADD
-                        : s->flags & ~SF_HAVE_ADD);
         s->count = move_count;
     } else {
         // Using fully scheduled stepper_event_full() code (the scheduler
@@ -222,30 +216,6 @@ stepper_event_edge(struct timer *t)
     return stepper_load_next(s);
 }
 
-// AVR optimized step function
-static uint_fast8_t
-stepper_event_avr(struct timer *t)
-{
-    struct stepper *s = container_of(t, struct stepper, time);
-    gpio_out_toggle_noirq(s->step_pin);
-    uint16_t *pcount = (void*)&s->count, count = *pcount - 1;
-    if (likely(count)) {
-        *pcount = count;
-        s->time.waketime += s->interval;
-        gpio_out_toggle_noirq(s->step_pin);
-        if (s->flags & SF_HAVE_ADD)
-            s->interval += s->add;
-        return SF_RESCHEDULE;
-    }
-    if (stepper_next_is_barrier(s)) {
-        gpio_out_toggle_noirq(s->step_pin);
-        return stepper_load_next(s);
-    }
-    uint_fast8_t ret = stepper_load_next(s);
-    gpio_out_toggle_noirq(s->step_pin);
-    return ret;
-}
-
 // Regular "fully scheduled" step function
 uint_fast8_t
 stepper_event_full(struct timer *t)
@@ -296,8 +266,6 @@ stepper_event(struct timer *t)
 {
     if (HAVE_EDGE_OPTIMIZATION)
         return stepper_event_edge(t);
-    if (HAVE_AVR_OPTIMIZATION)
-        return stepper_event_avr(t);
     return stepper_event_full(t);
 }
 

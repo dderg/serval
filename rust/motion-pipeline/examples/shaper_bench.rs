@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use geometry::segment::SourceRange;
 use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
-use motion_pipeline::{StreamConfig, StreamInput, TrajectoryItem, setup_stages};
+use motion_pipeline::{Pipeline, StreamConfig, StreamInput, TrajectoryItem};
 use trajectory::{AxisChainSet, PostProcessorInstance};
 
 fn limits() -> VelocityLimits {
@@ -162,27 +162,20 @@ fn move_duration_estimate(m: &geometry::Move) -> f64 {
     len / feed
 }
 
-/// Returns per-emit (wall_secs, stream_t_end) samples, or None if a stage
-/// died on this input (harness move construction differs from klippy's
-/// preprocessing; a failed chunk is skipped, not fatal).
-fn run_case(name: &str, chains: AxisChainSet, inputs: Vec<StreamInput>) -> Option<Vec<(f64, f64)>> {
+/// Returns per-emit (wall_secs, stream_t_end) samples.
+fn run_case(name: &str, chains: AxisChainSet, inputs: Vec<StreamInput>) -> Vec<(f64, f64)> {
     let n_moves = inputs.len();
-    let pipeline = setup_stages(config(), chains, vec![100.0, 100.0, 0.2, 0.0], 0.0);
+    let mut pipeline = Pipeline::new(config(), chains, vec![100.0, 100.0, 0.2, 0.0], 0.0);
     let started = Instant::now();
-    let output = pipeline.output;
-    let consumer = std::thread::spawn(move || {
-        let mut emits: Vec<(f64, f64)> = Vec::new();
-        let t0 = Instant::now();
-        for item in output.iter() {
-            if let TrajectoryItem::Seg(seg) = item {
-                emits.push((t0.elapsed().as_secs_f64(), seg.t_end));
-            }
+    let mut emits: Vec<(f64, f64)> = Vec::new();
+    let mut collect = |item| {
+        if let TrajectoryItem::Seg(seg) = item {
+            emits.push((started.elapsed().as_secs_f64(), seg.t_end));
         }
-        emits
-    });
+        true
+    };
     let pace = std::env::var("SHAPER_BENCH_PACE").is_ok();
     let mut est_stream = 0.0f64;
-    let mut poisoned = false;
     for item in inputs {
         if pace {
             if let StreamInput::Move(m) = &item {
@@ -193,23 +186,9 @@ fn run_case(name: &str, chains: AxisChainSet, inputs: Vec<StreamInput>) -> Optio
                 std::thread::sleep(std::time::Duration::from_secs_f64(lead - 2.0));
             }
         }
-        if pipeline.input.send(item).is_err() {
-            poisoned = true;
-            break;
-        }
+        assert!(pipeline.feed(item, &mut collect));
     }
-    if !poisoned {
-        poisoned = pipeline.input.send(StreamInput::Drain).is_err();
-    }
-    drop(pipeline.input);
-    let emits = consumer.join().expect("consumer");
-    if poisoned {
-        println!("{name}: SKIPPED (stage died on this input)");
-        for t in pipeline.threads {
-            let _ = t.join();
-        }
-        return None;
-    }
+    assert!(pipeline.finish(&mut collect));
     let wall = started.elapsed().as_secs_f64();
     let n_segs = emits.len();
     let stream_secs = emits.iter().fold(0.0f64, |m, &(_, t)| m.max(t));
@@ -234,7 +213,7 @@ fn run_case(name: &str, chains: AxisChainSet, inputs: Vec<StreamInput>) -> Optio
     for (t, cost) in worst.iter().take(5) {
         println!("    worst window: stream-t {t:.0}s cost {cost:.2} wall-s");
     }
-    Some(emits)
+    emits
 }
 
 fn gcode_moves(path: &str) -> Vec<StreamInput> {
@@ -316,12 +295,10 @@ fn main() {
                 .skip(start)
                 .take(count)
                 .collect();
-            if let Some(emits) = run_case(&format!("{label} moves {start}+{count}"), chains, moves)
-            {
-                let wall = emits.last().map_or(0.0, |&(w, _)| w);
-                let stream = emits.iter().fold(0.0f64, |m, &(_, t)| m.max(t));
-                println!("CHUNK_RESULT {wall:.4} {stream:.4}");
-            }
+            let emits = run_case(&format!("{label} moves {start}+{count}"), chains, moves);
+            let wall = emits.last().map_or(0.0, |&(w, _)| w);
+            let stream = emits.iter().fold(0.0f64, |m, &(_, t)| m.max(t));
+            println!("CHUNK_RESULT {wall:.4} {stream:.4}");
             return;
         }
         let n_moves = gcode_moves(path).len();

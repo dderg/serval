@@ -12,13 +12,13 @@ use geometry::path::{Line, PathSegment, Segment};
 use geometry::{LawSegment, Move, ScalarLaw, SourceRange, VelocityLimits};
 use motion_core::anchor::StreamEpoch;
 use motion_core::enqueue::{EnqueueCtx, enqueue_segment};
-use motion_core::mcu_config::McuAxisConfig;
-use motion_core::pump::{EnqueueMsg, MAX_LEAD_SECS};
+use motion_core::kinematics::KinematicsKind;
+use motion_core::mcu_config::{McuAxisConfig, McuHardware};
+use motion_core::pump::{LaneProjection, MAX_LEAD_SECS};
 use motion_core::types::AxisKey;
 use nurbs::ScalarNurbs;
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
-use runtime::segment::KinematicTag;
 use step_shim::ring::SEAM_ROUNDING_CYCLES;
 use trajectory::{
     AnalyticMoveSpan, ClockedMotorSpan, ContinuousAxis, ContinuousError, ContinuousSegment,
@@ -256,9 +256,9 @@ impl Scenario {
 
     fn kinematics(&self) -> u8 {
         if self.corexy && self.shapes.len() >= 2 {
-            KinematicTag::CoreXy as u8
+            KinematicsKind::CoreXy as u8
         } else {
-            KinematicTag::Cartesian as u8
+            KinematicsKind::Cartesian as u8
         }
     }
 
@@ -301,8 +301,11 @@ impl Scenario {
                 ethercat: self.ethercat,
                 mcu_id: index as u32,
                 axes: axes.clone(),
-                kinematics: self.kinematics(),
-                max_motor_velocity: max_motor_velocity.clone(),
+                hw: McuHardware {
+                    kinematics: self.kinematics(),
+                    max_motor_velocity: max_motor_velocity.clone(),
+                    ..Default::default()
+                },
                 ..Default::default()
             })
             .collect()
@@ -315,7 +318,7 @@ impl Scenario {
             .collect()
     }
 
-    fn enqueue(&self, ceilings: &[Vec<f64>]) -> Result<Vec<EnqueueMsg>, ContinuousError> {
+    fn enqueue(&self, ceilings: &[Vec<f64>]) -> Result<Vec<LaneProjection>, ContinuousError> {
         let freq = self.clock_freq_hz;
         let phase = self.clock_phase;
         let clock_freq_hz = move |_: u32| freq;
@@ -469,7 +472,7 @@ fn window_demand(signal: &MotorSpan) -> f64 {
         .fold(0.0_f64, f64::max)
 }
 
-fn lane_signals(messages: &[EnqueueMsg]) -> Vec<(u32, u8, Arc<MotorSpan>)> {
+fn lane_signals(messages: &[LaneProjection]) -> Vec<(u32, u8, Arc<MotorSpan>)> {
     messages
         .iter()
         .filter_map(|msg| {
@@ -482,7 +485,7 @@ fn lane_signals(messages: &[EnqueueMsg]) -> Vec<(u32, u8, Arc<MotorSpan>)> {
 
 /// Per-lane ceilings sitting one relative ulp above each lane's own demand, so
 /// a ceiling looked up against the wrong lane trips the guard.
-fn snug_ceilings(scenario: &Scenario, messages: &[EnqueueMsg]) -> Vec<Vec<f64>> {
+fn snug_ceilings(scenario: &Scenario, messages: &[LaneProjection]) -> Vec<Vec<f64>> {
     let signals = lane_signals(messages);
     scenario
         .lane_lists

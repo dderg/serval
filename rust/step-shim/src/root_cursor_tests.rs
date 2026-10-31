@@ -5,7 +5,7 @@ use trajectory::{
     ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm, NudgeProfile,
 };
 
-use super::{EVAL_COUNT, Slope, StepRootCursor};
+use super::{EVAL_COUNT, Lane, Slope, StepRootCursor};
 use crate::ring::SpanQueue;
 use crate::{MotorConfig, ShimError, StepEncoder};
 
@@ -47,9 +47,14 @@ fn endpoint_roundoff_does_not_hide_a_monotonic_spline() {
     };
     let cursor = StepRootCursor::new(&config);
 
+    let lane = Lane {
+        motor: 0,
+        cfg: &config,
+        view: &view,
+    };
     assert_eq!(
         cursor
-            .certified_slope(0, &view, view.start_clock, view.end_clock, None)
+            .certified_slope(lane, view.start_clock, view.end_clock, None)
             .unwrap(),
         Some(Slope::Rising)
     );

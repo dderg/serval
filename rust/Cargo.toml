@@ -8,6 +8,7 @@ members = [
     "geometry",
     "trajectory",
     "runtime",
+    "runtime-contract",
     "host-rt",
     "planner-config",
     "motion-core",
@@ -18,6 +19,8 @@ members = [
     "mcu-transport",
     "mcu-protocol",
     "ethercat-rt",
+    "ethercat-setpoint",
+    "ethercat-setpoint-fill",
     "shaper-ident",
     "step-shim",
 ]
@@ -141,7 +144,6 @@ no_effect_underscore_binding = "allow"
 option_as_ref_cloned = "allow"
 manual_assert = "allow"
 range_plus_one = "allow"
-too_many_arguments = "allow"
 inefficient_to_string = "allow"
 iter_cloned_collect = "allow"
 needless_borrows_for_generic_args = "allow"

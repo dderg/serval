@@ -2,8 +2,8 @@ use super::{
     homing_api::{history_state_at_query, required_motor_axes},
     planner_api::motion_history_host_now,
 };
-use crate::kinematics::KinematicsKind;
-use crate::{motion_history::HistoryStore, types::AxisKey};
+use motion_core::kinematics::KinematicsKind;
+use motion_core::{motion_history::HistoryStore, types::AxisKey};
 use std::sync::Arc;
 use trajectory::{
     ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm, NudgeProfile,

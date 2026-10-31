@@ -1,102 +1,13 @@
 mod common;
 
-use std::process::{Child, Command};
+use common::{spawn_and_claim, wait_for_exit};
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use host_rt::mcu_call::McuCall;
 use host_rt::mcu_serial_conn::McuSerialConn;
-use mcu_protocol::messages::MessageKind;
-
-const STUB_BIN: &str = env!("CARGO_BIN_EXE_ethercat-rt-stub");
-
-struct ChildGuard {
-    child: Option<Child>,
-}
-
-impl ChildGuard {
-    fn new(child: Child) -> Self {
-        Self { child: Some(child) }
-    }
-
-    fn defuse(&mut self) -> Child {
-        self.child.take().expect("already defused")
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(mut c) = self.child.take() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-    }
-}
-
-fn socket_path(tag: &str) -> String {
-    format!(
-        "/tmp/kalico-supervision-{}-{}.sock",
-        tag,
-        std::process::id()
-    )
-}
-
-fn wait_for_socket(path: &str, deadline: Instant) {
-    loop {
-        if std::path::Path::new(path).exists() {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "stub socket {path:?} did not appear within deadline"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn do_handshake(conn: &McuSerialConn) {
-    conn.mcu_call(
-        MessageKind::ClaimHandshake,
-        Vec::new(),
-        Duration::from_secs(5),
-    )
-    .expect("ClaimHandshake must succeed");
-}
-
-fn spawn_and_connect(tag: &str) -> (ChildGuard, McuSerialConn, String) {
-    let path = socket_path(tag);
-    let _ = std::fs::remove_file(&path);
-
-    let child = Command::new(STUB_BIN)
-        .args(["--socket", &path])
-        .spawn()
-        .expect("stub must spawn");
-    let guard = ChildGuard::new(child);
-
-    wait_for_socket(&path, Instant::now() + Duration::from_secs(5));
-
-    let conn = common::connect_until(&path, Instant::now() + Duration::from_secs(5));
-    do_handshake(&conn);
-
-    (guard, conn, path)
-}
-
-fn wait_for_child_exit(child: &mut Child, deadline: Instant) {
-    loop {
-        match child.try_wait().expect("try_wait must not fail") {
-            Some(_) => return,
-            None => {
-                assert!(
-                    Instant::now() < deadline,
-                    "stub did not exit within deadline"
-                );
-                thread::sleep(Duration::from_millis(10));
-            }
-        }
-    }
-}
 
 fn spawn_supervision_thread(
     conn: Arc<McuSerialConn>,
@@ -143,12 +54,12 @@ fn assert_detected_within(detected: &AtomicBool, deadline: Instant) {
 
 #[test]
 fn peer_closed_set_when_server_side_closes() {
-    let (mut guard, conn, path) = spawn_and_connect("peer-closed");
+    let (mut guard, conn, path) = spawn_and_claim("peer-closed", &[]);
 
     {
         let mut child = guard.defuse();
         child.kill().expect("SIGKILL must succeed");
-        wait_for_child_exit(&mut child, Instant::now() + Duration::from_secs(3));
+        wait_for_exit(&mut child, Instant::now() + Duration::from_secs(3));
     }
 
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -172,12 +83,12 @@ fn detects_child_exit_on_sigkill() {
     let detected_reason: Arc<std::sync::Mutex<Option<String>>> =
         Arc::new(std::sync::Mutex::new(None));
 
-    let (mut guard, conn, path) = spawn_and_connect("sigkill");
+    let (mut guard, conn, path) = spawn_and_claim("sigkill", &[]);
     let conn_arc = Arc::new(conn);
     let mut child = guard.defuse();
 
     child.kill().expect("SIGKILL must succeed");
-    wait_for_child_exit(&mut child, Instant::now() + Duration::from_secs(3));
+    wait_for_exit(&mut child, Instant::now() + Duration::from_secs(3));
 
     let detected_clone = Arc::clone(&detected);
     let reason_clone = Arc::clone(&detected_reason);

@@ -16,7 +16,8 @@ const SOURCE_LINE: u32 = 11;
 const MAX_FRAME_VIEWS: usize = u8::MAX as usize;
 const HOST_SLOTS: u8 = 4;
 
-fn view(
+#[derive(Clone, Copy)]
+struct ViewParams {
     start_clock: u64,
     ticks: u64,
     stream_t_start: f64,
@@ -25,7 +26,19 @@ fn view(
     motor_mask: u8,
     freq: f64,
     explicit_hold: bool,
-) -> ClockedMotorSpan {
+}
+
+fn view(params: ViewParams) -> ClockedMotorSpan {
+    let ViewParams {
+        start_clock,
+        ticks,
+        stream_t_start,
+        start_host,
+        position,
+        motor_mask,
+        freq,
+        explicit_hold,
+    } = params;
     let t_start = stream_t_start;
     let t_end = t_start + ticks as f64 / freq;
     let groups: Arc<[MotorGroup]> = Arc::from(vec![MotorGroup::Independent(MotorTerm {
@@ -66,16 +79,16 @@ struct ViewSpec {
 
 impl ViewSpec {
     fn build(self) -> ClockedMotorSpan {
-        view(
-            self.start_clock,
-            1_000,
-            0.0,
-            f64::from(self.host_slot) * 0.5,
-            0.0,
-            0,
-            FREQ,
-            true,
-        )
+        view(ViewParams {
+            start_clock: self.start_clock,
+            ticks: 1_000,
+            stream_t_start: 0.0,
+            start_host: f64::from(self.host_slot) * 0.5,
+            position: 0.0,
+            motor_mask: 0,
+            freq: FREQ,
+            explicit_hold: true,
+        })
     }
 }
 
@@ -91,8 +104,14 @@ struct LaneSpec {
 impl LaneSpec {
     fn build(&self) -> AxisQueue {
         let mut queue = AxisQueue::new(self.ring_depth);
-        queue.pushed = self.pushed;
-        queue.consumed = self.consumed;
+        queue.credit.accept(self.pushed);
+        queue.credit.observe(
+            motion_core::pump::RetiredBy::Pulse as usize,
+            motion_core::pump::execution_credit::Progress {
+                consumed: self.consumed,
+                retired: 0,
+            },
+        );
         for spec in &self.views {
             queue.spans.push_back(spec.build());
         }
@@ -383,16 +402,16 @@ fn build_chain(specs: &[MergeSpec], first_clock: u64) -> Vec<ClockedMotorSpan> {
         clock += spec.gap_ticks;
         let freq = spec.freq();
         let stream_t_start = (clock - first_clock) as f64 / freq;
-        let span = view(
-            clock,
-            spec.ticks,
+        let span = view(ViewParams {
+            start_clock: clock,
+            ticks: spec.ticks,
             stream_t_start,
-            stream_t_start,
-            spec.position(),
-            spec.mask_slot,
+            start_host: stream_t_start,
+            position: spec.position(),
+            motor_mask: spec.mask_slot,
             freq,
-            spec.explicit_hold,
-        );
+            explicit_hold: spec.explicit_hold,
+        });
         clock = span.end_clock;
         built.push(span);
     }
@@ -473,7 +492,7 @@ proptest! {
         };
         for frame in &frames {
             let queue = &staged.queues[&frame.key];
-            let in_flight = queue.pushed.wrapping_sub(queue.consumed);
+            let in_flight = queue.credit.awaiting_consumption();
             if in_flight > queue.ring_depth {
                 continue;
             }

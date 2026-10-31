@@ -1,8 +1,8 @@
 use core::sync::atomic::Ordering;
 
-use crate::error::{RUNTIME_ERR_INVALID_ARG, RUNTIME_OK};
-use crate::state::SharedState;
-use crate::stepping_state::{AxisState, MAX_AXES, StepMode, StepperBindingRust, TMC_CS_OID_NONE};
+use crate::stepping_state::AxisState;
+use runtime_contract::axes::{MAX_AXES, StepMode, StepperBindingRust, TMC_CS_OID_NONE};
+use runtime_contract::error::FaultCode;
 
 use super::Engine;
 
@@ -15,10 +15,10 @@ impl Engine {
         bindings: &[StepperBindingRust],
     ) -> i32 {
         if (axis_idx as usize) >= MAX_AXES {
-            return RUNTIME_ERR_INVALID_ARG;
+            return FaultCode::InvalidArg.as_i32();
         }
         if !microstep_distance.is_finite() || microstep_distance <= 0.0 {
-            return RUNTIME_ERR_INVALID_ARG;
+            return FaultCode::InvalidArg.as_i32();
         }
 
         let idx = axis_idx as usize;
@@ -48,24 +48,7 @@ impl Engine {
             }
         }
 
-        RUNTIME_OK
-    }
-
-    pub fn configure_kinematics(&mut self, k_xy: f32) -> i32 {
-        if !k_xy.is_finite() || k_xy <= 0.0 {
-            return -1;
-        }
-        0
-    }
-
-    pub fn configure_pressure_advance(&mut self, advance_accel: f32, advance_decel: f32) -> i32 {
-        if !advance_accel.is_finite() || !advance_decel.is_finite() {
-            return -1;
-        }
-        if advance_accel < 0.0 || advance_decel < 0.0 {
-            return -1;
-        }
-        0
+        FaultCode::None.as_i32()
     }
 
     pub fn set_axis_mode(&mut self, axis_idx: u8, new_mode_byte: u8) -> i32 {
@@ -114,12 +97,11 @@ impl Engine {
 
     pub fn set_stepper_offset(
         &mut self,
-        shared: &SharedState,
+        shared: &crate::state::SharedState,
         stepper_idx: u8,
         delta_microsteps: i32,
         max_microsteps_per_sample: u16,
     ) -> i32 {
-        use core::sync::atomic::Ordering;
         if delta_microsteps == 0 {
             return 0;
         }

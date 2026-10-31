@@ -1,22 +1,8 @@
-use runtime::stepping_state::MAX_AXES;
+use runtime_contract::axes::MAX_AXES;
 use trajectory::NudgeProfile;
 
 #[cfg(test)]
 mod tests;
-
-pub fn calc_move_time(dist: f64, speed: f64, accel: f64) -> (f64, f64, f64) {
-    let dist = dist.abs();
-    if accel <= 0.0 || dist == 0.0 {
-        let cruise_t = if speed > 0.0 { dist / speed } else { 0.0 };
-        return (0.0, cruise_t, speed);
-    }
-    let max_cruise_v2 = dist * accel;
-    let cruise_v = speed.min(max_cruise_v2.sqrt());
-    let accel_t = cruise_v / accel;
-    let accel_decel_d = accel_t * cruise_v;
-    let cruise_t = (dist - accel_decel_d) / cruise_v;
-    (accel_t, cruise_t.max(0.0), cruise_v)
-}
 
 pub fn plan_nudge_profile(
     axis_idx: u8,

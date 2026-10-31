@@ -231,29 +231,48 @@ pub(crate) fn ladder_candidate(
     c
 }
 
-pub(crate) struct LadderFailure {
-    pub u: f64,
-    pub position_error: f64,
-    pub velocity_error: f64,
-    pub acceleration_error: f64,
-    pub source_position: f64,
-    pub source_velocity: f64,
-    pub source_acceleration: f64,
-    pub candidate_position: f64,
-    pub candidate_acceleration: f64,
-    pub left_position: f64,
-    pub left_velocity: f64,
-    pub left_acceleration: f64,
-    pub right_position: f64,
-    pub right_velocity: f64,
-    pub right_acceleration: f64,
-    pub candidate_velocity: f64,
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LadderPva {
+    pub position: f64,
+    pub velocity: f64,
+    pub acceleration: f64,
 }
 
-/// `endpoint_anchored` forbids the midpoint constant/quadratic shortcuts:
-/// those match `(p, v, a)` at `u = 0` only, so accepting one spends the fit
-/// budget as a position/velocity jump at the span seams. Callers that own the
-/// seam continuity of the piece they receive must set it.
+pub(crate) struct LadderFailure {
+    pub u: f64,
+    pub error: LadderPva,
+    pub source: LadderPva,
+    pub candidate: LadderPva,
+    pub left: LadderPva,
+    pub right: LadderPva,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccelerationTrend {
+    Increasing,
+    Decreasing,
+}
+
+impl AccelerationTrend {
+    pub(crate) fn of_direction(direction: f64) -> Self {
+        if direction > 0.0 {
+            Self::Increasing
+        } else {
+            Self::Decreasing
+        }
+    }
+}
+
+/// Only the ladder's own tests certify a span's velocity sign today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VelocitySign {
+    #[cfg(test)]
+    Certified,
+    Unconstrained,
+}
+
+/// Every rung is endpoint-anchored: it reproduces the span's own endpoint
+/// positions, so the span seams stay C0 whichever rung wins.
 ///
 /// `high_degree_span_floor` is the shortest span whose endpoint data still
 /// carries enough signal for a rung solved from endpoint *acceleration* to
@@ -262,12 +281,12 @@ pub(crate) struct LadderFailure {
 /// touches endpoint acceleration — is attempted.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LadderPolicy {
-    pub endpoint_anchored: bool,
-    pub enforce_velocity_sign: bool,
-    pub acceleration_monotonicity: Option<bool>,
+    pub velocity_sign: VelocitySign,
+    pub acceleration_monotonicity: Option<AccelerationTrend>,
     pub high_degree_span_floor: f64,
 }
 
+#[cfg(test)]
 fn preserves_certified_velocity_sign(mono_u: &[f64], truth_v: &dyn Fn(f64) -> f64) -> bool {
     let nonnegative = LADDER_PROBES_U.iter().all(|&u| truth_v(u) >= 0.0);
     let nonpositive = LADDER_PROBES_U.iter().all(|&u| truth_v(u) <= 0.0);
@@ -297,7 +316,28 @@ fn preserves_certified_velocity_sign(mono_u: &[f64], truth_v: &dyn Fn(f64) -> f6
     })
 }
 
-fn preserves_acceleration_monotonicity(mono_u: &[f64], increasing: bool) -> bool {
+/// The span's own convolution truth, read by ladder node `u ∈ [-1, 1]`.
+pub(crate) struct LadderTruth<'a> {
+    pub position: &'a dyn Fn(f64) -> f64,
+    pub velocity: &'a dyn Fn(f64) -> f64,
+    pub acceleration: &'a dyn Fn(f64) -> f64,
+}
+
+/// The span geometry the rungs are solved over: its duration and the travel
+/// the signal itself measures across it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LadderSpan {
+    pub h: f64,
+    pub endpoint_delta: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LadderBudget {
+    pub tol: FitTol,
+    pub velocity: f64,
+}
+
+fn preserves_acceleration_monotonicity(mono_u: &[f64], trend: AccelerationTrend) -> bool {
     if mono_u.len() <= 3 {
         return true;
     }
@@ -326,12 +366,9 @@ fn preserves_acceleration_monotonicity(mono_u: &[f64], increasing: bool) -> bool
     }
     .to_bernstein()
     .iter()
-    .all(|&value| {
-        if increasing {
-            value >= -roundoff
-        } else {
-            value <= roundoff
-        }
+    .all(|&value| match trend {
+        AccelerationTrend::Increasing => value >= -roundoff,
+        AccelerationTrend::Decreasing => value <= roundoff,
     })
 }
 
@@ -342,97 +379,46 @@ fn preserves_acceleration_monotonicity(mono_u: &[f64], increasing: bool) -> bool
 fn candidate_ok(
     mono_u: &[f64],
     h: f64,
-    tol: FitTol,
-    truth_p: &dyn Fn(f64) -> f64,
-    truth_v: &dyn Fn(f64) -> f64,
-    truth_a: &dyn Fn(f64) -> f64,
-    velocity_budget: f64,
+    truth: &LadderTruth,
+    budget: LadderBudget,
     policy: LadderPolicy,
 ) -> bool {
     let dd_scale = (2.0 / h) * (2.0 / h);
-    let endpoint_velocity_anchored = !policy.endpoint_anchored
-        || [-1.0, 1.0]
-            .into_iter()
-            .all(|u| (eval_mono_d(mono_u, u) * (2.0 / h) - truth_v(u)).abs() <= velocity_budget);
-    endpoint_velocity_anchored
-        && (!policy.enforce_velocity_sign || preserves_certified_velocity_sign(mono_u, truth_v))
-        && policy
-            .acceleration_monotonicity
-            .is_none_or(|increasing| preserves_acceleration_monotonicity(mono_u, increasing))
+    [-1.0, 1.0].into_iter().all(|u| {
+        (eval_mono_d(mono_u, u) * (2.0 / h) - (truth.velocity)(u)).abs() <= budget.velocity
+    }) && (match policy.velocity_sign {
+        #[cfg(test)]
+        VelocitySign::Certified => preserves_certified_velocity_sign(mono_u, truth.velocity),
+        VelocitySign::Unconstrained => true,
+    }) && policy
+        .acceleration_monotonicity
+        .is_none_or(|trend| preserves_acceleration_monotonicity(mono_u, trend))
         && LADDER_PROBES_U.iter().all(|&u| {
-            (eval_mono(mono_u, u) - truth_p(u)).abs() <= tol.pos_mm
-                && (eval_mono_dd(mono_u, u) * dd_scale - truth_a(u)).abs() <= tol.accel_mm_s2
+            (eval_mono(mono_u, u) - (truth.position)(u)).abs() <= budget.tol.pos_mm
+                && (eval_mono_dd(mono_u, u) * dd_scale - (truth.acceleration)(u)).abs()
+                    <= budget.tol.accel_mm_s2
         })
 }
 
 pub(crate) fn ladder_fit(
     base: &[f64],
-    h: f64,
-    tol: FitTol,
-    truth_p: &dyn Fn(f64) -> f64,
-    truth_a: &dyn Fn(f64) -> f64,
-    truth_v: &dyn Fn(f64) -> f64,
-    endpoint_delta: f64,
-    velocity_budget: f64,
+    span: LadderSpan,
+    truth: &LadderTruth,
+    budget: LadderBudget,
     policy: LadderPolicy,
 ) -> Result<Vec<f64>, LadderFailure> {
-    if !policy.endpoint_anchored {
-        let constant = vec![truth_p(0.0)];
-        if candidate_ok(
-            &constant,
-            h,
-            tol,
-            truth_p,
-            truth_v,
-            truth_a,
-            velocity_budget,
-            policy,
-        ) {
-            return Ok(constant);
-        }
-        let s = 0.5 * h;
-        let quadratic = vec![truth_p(0.0), truth_v(0.0) * s, 0.5 * truth_a(0.0) * s * s];
-        if candidate_ok(
-            &quadratic,
-            h,
-            tol,
-            truth_p,
-            truth_v,
-            truth_a,
-            velocity_budget,
-            policy,
-        ) {
-            return Ok(quadratic);
-        }
-    }
-    if policy.endpoint_anchored
-        && (policy.acceleration_monotonicity.is_none() || truth_a(-1.0) == truth_a(1.0))
-    {
+    let LadderSpan { h, endpoint_delta } = span;
+    let truth_p = truth.position;
+    let truth_v = truth.velocity;
+    let truth_a = truth.acceleration;
+    if policy.acceleration_monotonicity.is_none() || truth_a(-1.0) == truth_a(1.0) {
         let anchored_acceleration_quadratic =
             anchored_acceleration_quadratic_in_u(truth_p(-1.0), truth_a(0.0), h, endpoint_delta);
-        if candidate_ok(
-            &anchored_acceleration_quadratic,
-            h,
-            tol,
-            truth_p,
-            truth_v,
-            truth_a,
-            velocity_budget,
-            policy,
-        ) {
+        if candidate_ok(&anchored_acceleration_quadratic, h, truth, budget, policy) {
             return Ok(anchored_acceleration_quadratic);
         }
         let anchored_quadratic = quadratic_in_u(truth_p(-1.0), truth_v(-1.0), h, endpoint_delta);
-        if candidate_ok(
-            &anchored_quadratic,
-            h,
-            tol,
-            truth_p,
-            truth_v,
-            truth_a,
-            velocity_budget,
-            policy,
-        ) {
+        if candidate_ok(&anchored_quadratic, h, truth, budget, policy) {
             return Ok(anchored_quadratic);
         }
         let cubic = cubic_in_u(
@@ -441,46 +427,19 @@ pub(crate) fn ladder_fit(
             h,
             endpoint_delta,
         );
-        if candidate_ok(
-            &cubic,
-            h,
-            tol,
-            truth_p,
-            truth_v,
-            truth_a,
-            velocity_budget,
-            policy,
-        ) {
+        if candidate_ok(&cubic, h, truth, budget, policy) {
             return Ok(cubic);
         }
     }
     let quintic = ladder_candidate(base, 5, truth_p);
-    if candidate_ok(
-        &quintic,
-        h,
-        tol,
-        truth_p,
-        truth_v,
-        truth_a,
-        velocity_budget,
-        policy,
-    ) {
+    if candidate_ok(&quintic, h, truth, budget, policy) {
         return Ok(quintic);
     }
     let mut last = quintic;
     if h >= policy.high_degree_span_floor {
         for degree in [6, 7, 9, 11, 13] {
             let candidate = ladder_candidate(base, degree, truth_p);
-            if candidate_ok(
-                &candidate,
-                h,
-                tol,
-                truth_p,
-                truth_v,
-                truth_a,
-                velocity_budget,
-                policy,
-            ) {
+            if candidate_ok(&candidate, h, truth, budget, policy) {
                 return Ok(candidate);
             }
             last = candidate;
@@ -491,39 +450,45 @@ pub(crate) fn ladder_fit(
         .iter()
         .max_by(|&&left, &&right| {
             let score = |probe| {
-                let position = (eval_mono(&last, probe) - truth_p(probe)).abs() / tol.pos_mm;
+                let position = (eval_mono(&last, probe) - truth_p(probe)).abs() / budget.tol.pos_mm;
                 let velocity = (eval_mono_d(&last, probe) * (2.0 / h) - truth_v(probe)).abs()
-                    / velocity_budget;
+                    / budget.velocity;
                 let acceleration = (eval_mono_dd(&last, probe) * dd_scale - truth_a(probe)).abs()
-                    / tol.accel_mm_s2;
+                    / budget.tol.accel_mm_s2;
                 position.max(velocity).max(acceleration)
             };
             score(left).total_cmp(&score(right))
         })
         .expect("ladder probes are empty");
-    let source_position = truth_p(u);
-    let source_velocity = truth_v(u);
-    let source_acceleration = truth_a(u);
-    let candidate_position = eval_mono(&last, u);
-    let candidate_velocity = eval_mono_d(&last, u) * (2.0 / h);
-    let candidate_acceleration = eval_mono_dd(&last, u) * dd_scale;
+    let source = LadderPva {
+        position: truth_p(u),
+        velocity: truth_v(u),
+        acceleration: truth_a(u),
+    };
+    let candidate = LadderPva {
+        position: eval_mono(&last, u),
+        velocity: eval_mono_d(&last, u) * (2.0 / h),
+        acceleration: eval_mono_dd(&last, u) * dd_scale,
+    };
     Err(LadderFailure {
         u,
-        position_error: (candidate_position - source_position).abs(),
-        velocity_error: (candidate_velocity - source_velocity).abs(),
-        acceleration_error: (candidate_acceleration - source_acceleration).abs(),
-        source_position,
-        source_velocity,
-        source_acceleration,
-        candidate_position,
-        candidate_velocity,
-        candidate_acceleration,
-        left_position: truth_p(-1.0),
-        left_velocity: truth_v(-1.0),
-        left_acceleration: truth_a(-1.0),
-        right_position: truth_p(1.0),
-        right_velocity: truth_v(1.0),
-        right_acceleration: truth_a(1.0),
+        error: LadderPva {
+            position: (candidate.position - source.position).abs(),
+            velocity: (candidate.velocity - source.velocity).abs(),
+            acceleration: (candidate.acceleration - source.acceleration).abs(),
+        },
+        source,
+        candidate,
+        left: LadderPva {
+            position: truth_p(-1.0),
+            velocity: truth_v(-1.0),
+            acceleration: truth_a(-1.0),
+        },
+        right: LadderPva {
+            position: truth_p(1.0),
+            velocity: truth_v(1.0),
+            acceleration: truth_a(1.0),
+        },
     })
 }
 

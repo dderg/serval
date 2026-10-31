@@ -174,6 +174,23 @@ impl PostProcessorSet {
         inst.set_param(key, value)?;
         Ok(())
     }
+
+    pub fn compile_active_chains(
+        &self,
+        registry: &AxisRegistry,
+        bypass: bool,
+    ) -> Result<AxisChainSet, PostProcessorConfigError> {
+        if bypass {
+            let chains = (0..registry.n_axes())
+                .map(|_| CompiledChain::compile(&[]).map_err(PostProcessorConfigError::Param))
+                .collect::<Result<_, _>>()?;
+            return Ok(AxisChainSet {
+                chains,
+                followers: registry.follower_index_map(),
+            });
+        }
+        self.compile(registry)
+    }
 }
 
 fn build_instance(
@@ -341,11 +358,6 @@ impl AxisRegistry {
     }
 
     #[must_use]
-    pub fn is_spatial(&self, index: usize) -> bool {
-        index < SPATIAL.len()
-    }
-
-    #[must_use]
     pub fn axis_name(&self, index: usize) -> &str {
         &self.ordered[index].name
     }
@@ -368,19 +380,6 @@ impl AxisRegistry {
                     .map(|t| self.axis_index(t).expect("follows validated in try_new"))
                     .collect();
                 (idx, followed)
-            })
-            .collect()
-    }
-
-    #[must_use]
-    pub fn follower_words(&self) -> Vec<geometry::FollowerWord> {
-        self.ordered
-            .iter()
-            .enumerate()
-            .skip(SPATIAL.len())
-            .map(|(axis_index, d)| geometry::FollowerWord {
-                letter: d.name.as_bytes()[0].to_ascii_uppercase(),
-                axis_index,
             })
             .collect()
     }
@@ -419,30 +418,12 @@ pub struct PlannerConfig {
     pub max_extrude_only_accel: Option<f64>,
     pub fit_tolerance_mm: f64,
     pub fit_tolerance_accel_mm_s2: f64,
-    /// `[printer] pieces_wire_budget` — bytes one serial `PushPieces`
-    /// transaction may carry. The UART-sized 1 KiB default is ~20 ms of wire
-    /// at 500 kbaud; USB CDC moves ~1 MB/s, so raising it amortizes the
-    /// per-transaction round trip over more pieces.
-    pub pieces_wire_budget: usize,
-    /// `[printer] pieces_inflight` — serial `PushPieces` bundles the pump
-    /// keeps in flight per MCU before waiting for the oldest response.
-    /// 1 = classic stop-and-wait; higher values make delivery
-    /// bandwidth-bound instead of round-trip-bound. The default is measured:
-    /// at 4 the Trident bench still spent ~90 s of a 1109 s print waiting on
-    /// window credit (16.4k waits); at 12 that falls to 186 and the send
-    /// margin floor rises from 32 ms to 40 ms.
-    pub pieces_inflight: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct RuntimeCaps {
     pub velocity: Option<f64>,
     pub accel: Option<f64>,
-    /// REPLACES the static `[printer] max_jerk` while set — unlike
-    /// velocity/accel this is not a min-cap, because calibration
-    /// (SERVO_MEASURE_RINGDOWN) needs to RAISE jerk (to infinity) so the
-    /// stop transient excites the plant unsmoothed.
-    pub jerk_override: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -513,22 +494,9 @@ impl PlannerConfig {
             .unwrap_or(self.cartesian.corner_deviation)
     }
 
-    /// The chains the pipeline should run right now: the configured
-    /// post-processors, or identity chains while `post_processor_bypass`
-    /// is set. Every live chain push must come through here so a
-    /// parameter update during a bypass window cannot silently re-arm
-    /// shaping.
     pub fn compile_active_chains(&self) -> Result<AxisChainSet, PostProcessorConfigError> {
-        if self.post_processor_bypass {
-            let chains = (0..self.axis_registry.n_axes())
-                .map(|_| CompiledChain::compile(&[]).map_err(PostProcessorConfigError::Param))
-                .collect::<Result<_, _>>()?;
-            return Ok(AxisChainSet {
-                chains,
-                followers: self.axis_registry.follower_index_map(),
-            });
-        }
-        self.post_processors.compile(&self.axis_registry)
+        self.post_processors
+            .compile_active_chains(&self.axis_registry, self.post_processor_bypass)
     }
 
     #[must_use]
@@ -559,8 +527,6 @@ impl Default for PlannerConfig {
             max_extrude_only_accel: None,
             fit_tolerance_mm: 0.005,
             fit_tolerance_accel_mm_s2: 50.0,
-            pieces_wire_budget: 1024,
-            pieces_inflight: 12,
         }
     }
 }

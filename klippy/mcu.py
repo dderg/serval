@@ -29,7 +29,7 @@ from .mcu_pins import (  # noqa: F401
 
 STEPCOMPRESS_MAX_ERROR_DEFAULT = 0.000025
 
-# Mirrors src/sample_wire.h / rust/runtime/src/sample_wire.rs. The wire
+# Mirrors src/sample_wire.h / rust/runtime-contract/src/sample_wire.rs. The wire
 # contract lives in one place per language and test_sample_wire.py asserts the
 # three copies agree.
 SAMPLE_ANCHOR_CMD = "sample_anchor oid=%c clock=%u position=%i"
@@ -63,7 +63,7 @@ MIN_SCHEDULE_TIME = 0.100
 # Directly caused by the limitation of MAX_SCHEDULE_TICKS.
 MAX_NOMINAL_DURATION = 3.0
 
-# Wire-stable runtime fault codes; mirrors rust/runtime/src/error.rs FaultCode
+# Wire-stable runtime fault codes; mirrors rust/runtime-contract/src/error.rs FaultCode
 RUNTIME_FAULT_NAMES = {
     -29: "PhaseModeNotAvailable",
     -301: "SpiQueueOverflow",

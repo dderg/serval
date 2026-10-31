@@ -35,9 +35,13 @@ tools/sim/run.sh --branch X ...     # any of the above for another branch
 
 ## How the pieces fit
 
-- The firmware is built with `CONFIG_MCU_SIM=y`: the motion tick registers
-  as a vtime pacer (virtual time can never skip a sample period), step
-  queues notify the shim (auto-endstops, Beacon Z tracking), and the
+- The firmware is built with `CONFIG_MCU_SIM=y`. Motion sampling and
+  command handling share the Linux scheduler thread; no background thread
+  mutates the runtime. The next scheduler deadline bounds virtual time
+  with 400 µs slack. The preload clock driver advances time and sends
+  `SIGALRM` to the timer-owning thread; firmware `ppoll` waits never advance
+  the clock themselves. Step queues notify the shim (auto-endstops, Beacon
+  Z tracking), and the
   timer-in-past/timer-too-close/tick-gap checks that only exist to police
   real-time hardware are compiled out. No source patching happens at image
   build — the sim is a first-class build config.
@@ -55,6 +59,15 @@ tools/sim/run.sh --branch X ...     # any of the above for another branch
   `SIM_TEST_JOBS=N` opts into pytest-xdist parallelism;
   `SIM_TEST_TARGETS` narrows the run to specific test files (how the CI
   shards split the suite across separate runners).
+- `VTIME_SPEED=0.1 tools/sim/run.sh test -k cross_mcu` provides more
+  scheduling headroom when MCU pacers cannot sustain the default rate.
+  Pacer stalls change virtual clock speed relative to the real host clock;
+  independent MCU clock estimates can then disagree and distort cross-MCU
+  trip positions. Preserve the failing logs and compare clock-projection
+  skew before attributing a failure to pacing. A slower-rate pass is not
+  proof of hardware timing accuracy; do not widen position tolerances.
+  Tests that require a minimum elapsed MCU-clock window must still reach
+  that window; lowering the rate can invalidate their stimulus.
 
 ## CI
 

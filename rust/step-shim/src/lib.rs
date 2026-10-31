@@ -1,5 +1,6 @@
 pub mod compress;
 pub mod compress_hp;
+pub mod quantize;
 pub mod ring;
 pub mod root_cursor;
 
@@ -633,6 +634,10 @@ impl StepShim {
 
     pub fn queue_depth(&self) -> u32 {
         self.queue_depth
+    }
+
+    pub fn free_span_slots(&self, motor: usize) -> usize {
+        self.queue_depth as usize - self.motors[motor].queue.len()
     }
 
     pub fn halt_at(

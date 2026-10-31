@@ -1,7 +1,6 @@
 use super::{
-    INIT_DONE, IsrState, Ordering, RUNTIME_ERR_INVALID_ARG, RUNTIME_ERR_INVALID_HANDLE,
-    RUNTIME_ERR_NOT_INIT, RUNTIME_ERR_NULL_PTR, RUNTIME_OK, Runtime, RuntimeContext, SharedState,
-    UnsafeCell, guarded_ctx,
+    FaultCode, INIT_DONE, IsrState, Ordering, Runtime, RuntimeContext, SharedState, UnsafeCell,
+    guarded_ctx,
 };
 
 #[unsafe(no_mangle)]
@@ -10,14 +9,18 @@ pub unsafe extern "C" fn runtime_bind_phase_motor(
     motor_idx: u8,
     slot_idx: u8,
 ) -> i32 {
-    let ctx = guarded_ctx!(rt, RUNTIME_ERR_INVALID_HANDLE, RUNTIME_ERR_NOT_INIT);
+    let ctx = guarded_ctx!(
+        rt,
+        FaultCode::InvalidHandle.as_i32(),
+        FaultCode::NotInit.as_i32()
+    );
     // SAFETY: phase_slot_idx/phase_motor_count/step_modes are atomics in
     // SharedState; shared &SharedState, no &mut. Foreground-only caller.
     unsafe {
         let shared: &SharedState = &*core::ptr::addr_of!((*ctx).shared);
         match runtime::state::bind_phase_motor(shared, motor_idx, slot_idx) {
-            Ok(()) => RUNTIME_OK,
-            Err(_) => RUNTIME_ERR_INVALID_ARG,
+            Ok(()) => FaultCode::None.as_i32(),
+            Err(_) => FaultCode::InvalidArg.as_i32(),
         }
     }
 }
@@ -29,7 +32,7 @@ pub unsafe extern "C" fn runtime_phase_jog_to(
     target_phase: u16,
     max_microsteps_per_sample: u16,
 ) -> i32 {
-    let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
+    let ctx = guarded_ctx!(rt, FaultCode::NullPtr.as_i32(), FaultCode::NotInit.as_i32());
     // SAFETY: foreground-only; &SharedState borrow is independent of &mut IsrState — SharedState is atomics-only.
     unsafe {
         let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
@@ -47,7 +50,7 @@ pub unsafe extern "C" fn runtime_phase_align_to(
     stepper_oid: u8,
     target_phase: u16,
 ) -> i32 {
-    let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
+    let ctx = guarded_ctx!(rt, FaultCode::NullPtr.as_i32(), FaultCode::NotInit.as_i32());
     // SAFETY: foreground-only; §11.2 raw-pointer projection.
     unsafe {
         let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
@@ -61,7 +64,7 @@ pub unsafe extern "C" fn runtime_seed_axis_count(
     axis_idx: u8,
     count: i32,
 ) -> i32 {
-    let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
+    let ctx = guarded_ctx!(rt, FaultCode::NullPtr.as_i32(), FaultCode::NotInit.as_i32());
     // SAFETY: foreground-only; §11.2 raw-pointer projection.
     unsafe {
         let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
@@ -79,28 +82,28 @@ pub unsafe extern "C" fn runtime_get_phase_state(
     out_settled: *mut u8,
 ) -> i32 {
     if rt.is_null() {
-        return RUNTIME_ERR_NULL_PTR;
+        return FaultCode::NullPtr.as_i32();
     }
     if out_axis_idx.is_null() || out_mode.is_null() || out_phase.is_null() || out_settled.is_null()
     {
-        return RUNTIME_ERR_NULL_PTR;
+        return FaultCode::NullPtr.as_i32();
     }
     if !INIT_DONE.load(Ordering::Acquire) {
-        return RUNTIME_ERR_NOT_INIT;
+        return FaultCode::NotInit.as_i32();
     }
     let ctx = rt.cast::<RuntimeContext>();
     // SAFETY: foreground-only; §11.2 raw-pointer projection.
     unsafe {
         let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
         let Some(q) = (*isr_ptr).engine.phase_state(stepper_oid) else {
-            return RUNTIME_ERR_INVALID_ARG;
+            return FaultCode::InvalidArg.as_i32();
         };
         *out_axis_idx = q.axis_idx;
         *out_mode = q.mode;
         *out_phase = q.phase;
         *out_settled = u8::from(q.settled);
     }
-    RUNTIME_OK
+    FaultCode::None.as_i32()
 }
 
 #[unsafe(no_mangle)]

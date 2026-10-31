@@ -1,8 +1,7 @@
 mod common;
 
-use std::process::{Child, Command};
-use std::thread;
-use std::time::{Duration, Instant};
+use common::spawn_and_claim;
+use std::time::Duration;
 
 use ethercat_rt::sdo::{COE_ABORT_NOT_FOUND, COE_ABORT_READ_ONLY};
 use host_rt::mcu_call::McuCall;
@@ -12,50 +11,6 @@ use mcu_protocol::messages::{
     MessageKind, SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, ERR_SDO_VALUE_RANGE,
     ERR_SDO_VERIFY_MISMATCH, SDO_SIZE_PROBE,
 };
-
-const STUB_BIN: &str = env!("CARGO_BIN_EXE_ethercat-rt-stub");
-
-struct ChildGuard {
-    child: Option<Child>,
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(mut c) = self.child.take() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-    }
-}
-
-fn spawn_and_claim(tag: &str) -> (ChildGuard, McuSerialConn) {
-    let path = format!("/tmp/kalico-sdo-{}-{}.sock", tag, std::process::id());
-    let _ = std::fs::remove_file(&path);
-    let child = Command::new(STUB_BIN)
-        .args(["--socket", &path])
-        .spawn()
-        .expect("stub binary must spawn");
-    let guard = ChildGuard { child: Some(child) };
-
-    let socket_deadline = Instant::now() + Duration::from_secs(5);
-    while !std::path::Path::new(&path).exists() {
-        assert!(
-            Instant::now() < socket_deadline,
-            "stub socket did not appear"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-    let conn = common::connect_until(&path, Instant::now() + Duration::from_secs(5));
-    let (kind, _) = conn
-        .mcu_call(
-            MessageKind::ClaimHandshake,
-            Vec::new(),
-            Duration::from_secs(5),
-        )
-        .expect("ClaimHandshake must succeed");
-    assert_eq!(kind, MessageKind::ClaimHandshakeReply);
-    (guard, conn)
-}
 
 fn sdo_read(conn: &McuSerialConn, index: u16, subindex: u8) -> SdoReadResponse {
     let body = SdoRead {
@@ -101,14 +56,14 @@ fn probe_count(conn: &McuSerialConn) -> u32 {
 
 #[test]
 fn read_returns_preloaded_value() {
-    let (_guard, conn) = spawn_and_claim("read");
+    let (_guard, conn, _path) = spawn_and_claim("read", &[]);
     let r = sdo_read(&conn, 0x2002, 0);
     assert_eq!((r.result, r.size, r.data), (0, 2, [100, 0, 0, 0]));
 }
 
 #[test]
 fn typed_write_skips_probe_untyped_probes() {
-    let (_guard, conn) = spawn_and_claim("probe");
+    let (_guard, conn, _path) = spawn_and_claim("probe", &[]);
     let before = probe_count(&conn);
     let r = sdo_write(&conn, 0x2002, 0, 2, 250);
     assert_eq!(r.result, 0);
@@ -127,7 +82,7 @@ fn typed_write_skips_probe_untyped_probes() {
 
 #[test]
 fn clamping_object_fails_verify_with_settled_value() {
-    let (_guard, conn) = spawn_and_claim("clamp");
+    let (_guard, conn, _path) = spawn_and_claim("clamp", &[]);
     let r = sdo_write(&conn, 0x2003, 0, 2, 600);
     assert_eq!(r.result, ERR_SDO_VERIFY_MISMATCH);
     assert_eq!((r.readback_size, r.readback_data), (2, [0xF4, 0x01, 0, 0]));
@@ -135,7 +90,7 @@ fn clamping_object_fails_verify_with_settled_value() {
 
 #[test]
 fn read_only_and_unknown_objects_surface_abort_codes() {
-    let (_guard, conn) = spawn_and_claim("abort");
+    let (_guard, conn, _path) = spawn_and_claim("abort", &[]);
     assert_eq!(
         sdo_write(&conn, 0x6041, 0, 2, 1).result,
         COE_ABORT_READ_ONLY

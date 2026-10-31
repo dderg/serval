@@ -2,8 +2,9 @@
 
 use super::*;
 use crate::state::SharedState;
-use crate::stepping_state::{AxisState, StepMode, StepperRef};
+use crate::stepping_state::{AxisState, StepperRef};
 use core::sync::atomic::Ordering;
+use runtime_contract::axes::StepMode;
 
 fn axis_with_stepper(mode: StepMode, oid: u8) -> AxisState {
     let mut axis = AxisState::new_unconfigured();

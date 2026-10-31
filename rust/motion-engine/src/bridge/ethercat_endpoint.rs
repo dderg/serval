@@ -1,4 +1,4 @@
-use crate::lock_ext::LockExt;
+use motion_core::lock_ext::LockExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -27,7 +27,7 @@ pub(crate) fn report_endpoint_death(
     mcu_id: u32,
     reason: &str,
 ) -> bool {
-    let code = runtime::error::FaultCode::EthercatEndpointDied.as_i32();
+    let code = runtime_contract::error::FaultCode::EthercatEndpointDied.as_i32();
     let message = format!("motion endpoint died mid-session (fault {code}): {reason}");
     let mut guard = latch.lock_ok();
     // First cause wins for BOTH the latched (operator-surfaced) message and the
@@ -141,7 +141,7 @@ pub(crate) fn message_for_claim_error(
                 "ethercat {label}: executor mismatch — endpoint reports executor code {code}, \
                  expected {expected} (setpoint ring) — this endpoint still runs a deleted \
                  executor, rebuild rust/ethercat-rt, then FIRMWARE_RESTART",
-                expected = ethercat_rt::setpoint::EXECUTOR_SETPOINT_RING
+                expected = ethercat_setpoint::setpoint::EXECUTOR_SETPOINT_RING
             ),
             ReportedExecutor::Unsupported(detail) => format!(
                 "ethercat {label}: executor mismatch — the endpoint could not report its \
@@ -206,72 +206,56 @@ fn push_drive_flags(args: &mut Vec<String>, d: &EthercatDrive) {
     }
 }
 
-pub(crate) fn endpoint_args(
-    interface: &str,
-    socket_path: &str,
-    cycle_us: u32,
-    dynamics_profile: Option<&str>,
-    late_tolerance_us: Option<f64>,
-    group_delay_us: f64,
-    events_dir: Option<&std::path::Path>,
-    drives: &[EthercatDrive],
-) -> Vec<String> {
+/// How the endpoint process is launched, independent of the drives it serves.
+#[derive(Clone, Copy)]
+pub(crate) struct EndpointLaunch<'a> {
+    pub(crate) interface: &'a str,
+    pub(crate) socket_path: &'a str,
+    pub(crate) cycle_us: u32,
+    pub(crate) dynamics_profile: Option<&'a str>,
+    pub(crate) late_tolerance_us: Option<f64>,
+    pub(crate) group_delay_us: f64,
+    pub(crate) events_dir: Option<&'a std::path::Path>,
+}
+
+pub(crate) fn endpoint_args(launch: EndpointLaunch<'_>, drives: &[EthercatDrive]) -> Vec<String> {
     let mut args = vec![
-        interface.to_string(),
+        launch.interface.to_string(),
         "--socket".into(),
-        socket_path.to_string(),
+        launch.socket_path.to_string(),
         "--cycle-us".into(),
-        cycle_us.to_string(),
+        launch.cycle_us.to_string(),
     ];
-    if let Some(p) = dynamics_profile {
+    if let Some(p) = launch.dynamics_profile {
         args.push("--dynamics-profile".into());
         args.push(p.to_string());
     }
-    if let Some(tol) = late_tolerance_us {
+    if let Some(tol) = launch.late_tolerance_us {
         args.push("--late-tolerance-us".into());
         args.push(tol.to_string());
     }
     args.push("--group-delay-us".into());
-    args.push(group_delay_us.to_string());
-    if let Some(dir) = events_dir {
+    args.push(launch.group_delay_us.to_string());
+    if let Some(dir) = launch.events_dir {
         args.push("--events-dir".into());
         args.push(dir.to_string_lossy().into_owned());
     }
-    if drives.len() == 1 {
-        push_drive_flags(&mut args, &drives[0]);
-    } else {
-        for d in drives {
-            args.push("--slave".into());
-            args.push(d.chain_index.to_string());
-            args.push("--axis".into());
-            args.push(d.axis.to_string());
-            push_drive_flags(&mut args, d);
-        }
+    for d in drives {
+        args.push("--slave".into());
+        args.push(d.chain_index.to_string());
+        args.push("--axis".into());
+        args.push(d.axis.to_string());
+        push_drive_flags(&mut args, d);
     }
     args
 }
 
 pub(crate) fn spawn_ethercat_endpoint(
     binary: &str,
-    interface: &str,
-    socket_path: &str,
-    cycle_us: u32,
-    dynamics_profile: Option<&str>,
-    late_tolerance_us: Option<f64>,
-    group_delay_us: f64,
-    events_dir: Option<&std::path::Path>,
+    launch: EndpointLaunch<'_>,
     drives: &[EthercatDrive],
 ) -> Result<std::process::Child, String> {
-    let args = endpoint_args(
-        interface,
-        socket_path,
-        cycle_us,
-        dynamics_profile,
-        late_tolerance_us,
-        group_delay_us,
-        events_dir,
-        drives,
-    );
+    let args = endpoint_args(launch, drives);
     std::process::Command::new(binary)
         .args(&args)
         .spawn()
@@ -422,7 +406,7 @@ pub(crate) fn verify_sample_grid(
     let reply = SampleGridResponse::decode_from(&mut Cursor::new(&body))
         .map_err(|e| EndpointClaimError::Protocol(format!("decode SampleGridResponse: {e:?}")))?;
 
-    if reply.executor != ethercat_rt::setpoint::EXECUTOR_SETPOINT_RING {
+    if reply.executor != ethercat_setpoint::setpoint::EXECUTOR_SETPOINT_RING {
         return Err(mismatch(ReportedExecutor::Code(reply.executor)));
     }
 
@@ -451,15 +435,15 @@ pub(crate) fn build_ring_filler(
     grid: SampleGrid,
     dynamics_profile: Option<&str>,
     drives: &[EthercatDrive],
-) -> Result<crate::pump::RingFiller, String> {
-    use ethercat_rt::setpoint_fill::{ChainFiller, LaneSpec};
+) -> Result<motion_core::pump::RingFiller, String> {
+    use ethercat_setpoint_fill::setpoint_fill::{ChainFiller, LaneSpec};
 
     if grid.cycle_ticks == 0 {
         return Err("endpoint reported a zero-length DC cycle".to_owned());
     }
     let interval_ns = u64::from(grid.cycle_ticks);
     let per_slot: Vec<Option<String>> = drives.iter().map(|d| d.dynamics_profile.clone()).collect();
-    let dynamics = ethercat_rt::dynamics::chain_model_from_profiles(
+    let dynamics = ethercat_setpoint::dynamics::chain_model_from_profiles(
         dynamics_profile,
         &per_slot,
         drives.len(),
@@ -481,7 +465,8 @@ pub(crate) fn build_ring_filler(
             ff_lead_ns,
         });
     }
-    let lead_cycles = (crate::pump::DRIP_WINDOW_SECS * 1e9 / interval_ns as f64).ceil() as u64;
+    let lead_cycles =
+        (motion_core::pump::DRIP_WINDOW_SECS * 1e9 / interval_ns as f64).ceil() as u64;
     let mut filler = ChainFiller::new(&specs, dynamics, interval_ns, lead_cycles);
     filler
         .observe_grid(grid.grid_index, grid.grid_clock)

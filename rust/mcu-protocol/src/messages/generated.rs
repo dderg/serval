@@ -5,13 +5,11 @@ use crate::codec::Cursor;
 use crate::codec::Decode;
 use crate::codec::DecodeError;
 use crate::codec::Encode;
-use crate::codec::get_f32;
 use crate::codec::get_i32;
 use crate::codec::get_u8;
 use crate::codec::get_u16;
 use crate::codec::get_u32;
 use crate::codec::get_u64;
-use crate::codec::put_f32;
 use crate::codec::put_i32;
 use crate::codec::put_u8;
 use crate::codec::put_u16;
@@ -23,8 +21,6 @@ use crate::codec::put_u64;
 pub enum MessageKind {
     Identify = 0x0001,
     IdentifyResponse = 0x0002,
-    ConfigureAxes = 0x0030,
-    ConfigureAxesResponse = 0x0031,
     QueryRuntimeCaps = 0x0040,
     RuntimeCapsResponse = 0x0041,
     ClaimHandshake = 0x0042,
@@ -82,8 +78,6 @@ impl MessageKind {
         Some(match v {
             0x0001 => Self::Identify,
             0x0002 => Self::IdentifyResponse,
-            0x0030 => Self::ConfigureAxes,
-            0x0031 => Self::ConfigureAxesResponse,
             0x0040 => Self::QueryRuntimeCaps,
             0x0041 => Self::RuntimeCapsResponse,
             0x0042 => Self::ClaimHandshake,
@@ -151,58 +145,6 @@ impl MessageKind {
             self,
             Self::FaultEvent | Self::StatusHeartbeat | Self::McuLog | Self::EndstopTrip
         )
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ConfigureAxes {
-    pub kinematics: u8,
-    pub present_mask: u8,
-    pub awd_mask: u8,
-    pub invert_mask: u8,
-    pub steps_per_mm: [f32; 4],
-}
-
-impl Encode for ConfigureAxes {
-    fn encode(&self, out: &mut Vec<u8>) {
-        put_u8(out, self.kinematics);
-        put_u8(out, self.present_mask);
-        put_u8(out, self.awd_mask);
-        put_u8(out, self.invert_mask);
-        for v in &self.steps_per_mm {
-            put_f32(out, *v);
-        }
-    }
-}
-
-impl Decode for ConfigureAxes {
-    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        Ok(Self {
-            kinematics: get_u8(c)?,
-            present_mask: get_u8(c)?,
-            awd_mask: get_u8(c)?,
-            invert_mask: get_u8(c)?,
-            steps_per_mm: [get_f32(c)?, get_f32(c)?, get_f32(c)?, get_f32(c)?],
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConfigureAxesResponse {
-    pub result: i32,
-}
-
-impl Encode for ConfigureAxesResponse {
-    fn encode(&self, out: &mut Vec<u8>) {
-        put_i32(out, self.result);
-    }
-}
-
-impl Decode for ConfigureAxesResponse {
-    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        Ok(Self {
-            result: get_i32(c)?,
-        })
     }
 }
 
@@ -1050,6 +992,7 @@ pub struct StepperSuppress {
     pub motor: u8,
     pub stepper: u8,
     pub engage: u8,
+    pub stepper_oid: u8,
 }
 
 impl Encode for StepperSuppress {
@@ -1057,6 +1000,7 @@ impl Encode for StepperSuppress {
         put_u8(out, self.motor);
         put_u8(out, self.stepper);
         put_u8(out, self.engage);
+        put_u8(out, self.stepper_oid);
     }
 }
 
@@ -1066,6 +1010,7 @@ impl Decode for StepperSuppress {
             motor: get_u8(c)?,
             stepper: get_u8(c)?,
             engage: get_u8(c)?,
+            stepper_oid: get_u8(c)?,
         })
     }
 }

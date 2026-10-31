@@ -1,5 +1,11 @@
 # Ride pass: known defects and redesign notes
 
+> **Historical.** The jerk-limited ride pass (`rust/geometry/src/velocity/ride.rs`,
+> `scurve.rs`) was removed in `1824069b0`; the planner is second-order now and
+> `max_jerk` accepts only `0`. Kept as a record of what the jerk-limited design ran
+> into, for whoever revisits it.
+
+
 Status as of 2026-07-09, from the fuzz/audit investigation (see
 `rust/pipeline-snapshot/src/audit.rs` and the pinned `#[ignore]` regressions
 in `rust/pipeline-snapshot/tests/planner_fuzz.rs`). Shipped so far:

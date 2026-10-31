@@ -6,7 +6,7 @@ use super::*;
 use crate::lock_ext::LockExt;
 use crossbeam_channel::unbounded;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -103,15 +103,14 @@ fn make_enqueue(
     key: AxisKey,
     spans: Vec<ClockedMotorSpan>,
     epoch: crate::anchor::StreamEpoch,
-) -> EnqueueMsg {
-    EnqueueMsg {
+) -> LaneProjection {
+    LaneProjection {
         epoch_freq: None,
         key,
         spans,
         epoch,
         lead_secs: MAX_LEAD_SECS,
         source_line: u32::MAX,
-        batch_end: true,
     }
 }
 
@@ -119,28 +118,46 @@ fn make_enqueue(
 fn room_full_then_drains() {
     let mut q = AxisQueue::new(4);
     assert_eq!(q.room(), 4);
-    q.pushed = 4;
+    q.credit.accept(4);
     assert_eq!(q.room(), 0);
-    q.consumed = 1;
+    q.credit.observe(
+        RetiredBy::Pulse as usize,
+        crate::pump::execution_credit::Progress {
+            consumed: 1,
+            retired: 0,
+        },
+    );
     assert_eq!(q.room(), 1);
 }
 
 #[test]
 fn consumed_spans_reopen_capacity_before_execution_retires_them() {
     let mut q = AxisQueue::new(64);
-    q.pushed = 64;
-    q.consumed = 64;
-    q.retired = 0;
+    q.credit.accept(64);
+    q.credit.observe(
+        RetiredBy::Pulse as usize,
+        crate::pump::execution_credit::Progress {
+            consumed: 64,
+            retired: 0,
+        },
+    );
 
     assert_eq!(q.room(), 64);
-    assert_ne!(q.pushed, q.retired);
+    assert_ne!(q.credit.snapshot().pushed, q.credit.snapshot().retired);
 }
 
 #[test]
 fn room_correct_across_u32_wrap() {
     let mut q = AxisQueue::new(8);
-    q.pushed = 2;
-    q.consumed = u32::MAX;
+    q.credit.accept(u32::MAX);
+    q.credit.observe(
+        RetiredBy::Pulse as usize,
+        crate::pump::execution_credit::Progress {
+            consumed: u32::MAX,
+            retired: u32::MAX,
+        },
+    );
+    q.credit.accept(3);
     assert_eq!(
         q.room(),
         5,
@@ -153,8 +170,14 @@ fn room_correct_across_u32_wrap() {
 #[test]
 fn room_recovers_when_consumed_overtakes_pushed() {
     let mut q = AxisQueue::new(4);
-    q.pushed = 100;
-    q.consumed = 101;
+    q.credit.accept(100);
+    q.credit.observe(
+        RetiredBy::Pulse as usize,
+        crate::pump::execution_credit::Progress {
+            consumed: 101,
+            retired: 0,
+        },
+    );
     assert_eq!(
         q.room(),
         4,
@@ -167,8 +190,14 @@ fn room_recovers_when_consumed_overtakes_pushed() {
 fn schedule_resends_orphan_when_consumed_overtook_pushed() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let mut q = AxisQueue::new(8);
-    q.pushed = 100;
-    q.consumed = 101;
+    q.credit.accept(100);
+    q.credit.observe(
+        RetiredBy::Pulse as usize,
+        crate::pump::execution_credit::Progress {
+            consumed: 101,
+            retired: 0,
+        },
+    );
     q.spans.push_back(make_span(101));
     let mut queues: BTreeMap<AxisKey, AxisQueue> = BTreeMap::new();
     queues.insert(key, q);
@@ -201,31 +230,30 @@ fn schedule_resends_orphan_when_consumed_overtook_pushed() {
 }
 
 #[test]
-fn run_pump_delivers_span_despite_retired_over_pushed_inversion() {
+fn owner_delivers_span_despite_retired_over_pushed_inversion() {
     const RING_DEPTH: u32 = 8;
     let key = AxisKey { mcu_id: 1, axis: 0 };
 
     let sink = RecordingSink::new();
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let sink_clone = sink.clone();
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink_clone,
             PumpCallbacks::noop(RING_DEPTH),
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         );
     });
 
-    data.send(make_enqueue(
+    data.send(vec![make_enqueue(
         key,
         vec![make_span(0)],
         crate::anchor::StreamEpoch::Continuation,
-    ))
+    )])
     .unwrap();
     wait_until(
         || sink.recorded().len() == 1,
@@ -247,11 +275,11 @@ fn run_pump_delivers_span_despite_retired_over_pushed_inversion() {
         .recv()
         .expect("barrier acks only after the retired=2 heartbeat ahead of it applies");
 
-    data.send(make_enqueue(
+    data.send(vec![make_enqueue(
         key,
         vec![moving_span(SPAN_TICKS, SPAN_SECS, FREQ, 0.0, 1.0, 0)],
         crate::anchor::StreamEpoch::Continuation,
-    ))
+    )])
     .unwrap();
     wait_until(
         || sink.recorded().len() == 2,
@@ -269,34 +297,31 @@ fn history_records_spans_at_send_time_not_enqueue_time() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
 
     let store = Arc::new(Mutex::new(crate::motion_history::HistoryStore::default()));
-    let history = HistoryRecorder {
-        store: Arc::clone(&store),
-    };
+    let history = Arc::clone(&store);
 
     let sink = RecordingSink::new();
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let sink_clone = sink.clone();
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink_clone,
             PumpCallbacks::noop(RING_DEPTH),
             Some(history),
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         );
     });
 
     let host_t = 2.5_f64;
     let span = hold_span((host_t * FREQ) as u64, SPAN_SECS, FREQ, 0.0, 0);
     assert!((span.start_host - host_t).abs() < 1e-12);
-    data.send(make_enqueue(
+    data.send(vec![make_enqueue(
         key,
         vec![span],
         crate::anchor::StreamEpoch::Continuation,
-    ))
+    )])
     .unwrap();
     wait_until(|| sink.recorded().len() == 1, "span sent to the MCU");
     wait_until(
@@ -411,10 +436,10 @@ fn overlay_span_after_move_is_exempt_from_junction_continuity() {
     const JUNCTION_FREQ: f64 = 180_000_000.0;
     let sink = RecordingSink::new();
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let sink_clone = sink.clone();
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink_clone,
@@ -424,17 +449,16 @@ fn overlay_span_after_move_is_exempt_from_junction_continuity() {
             },
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         );
     });
     let key = AxisKey { mcu_id: 1, axis: 2 };
     let move_ticks = (SPAN_SECS * JUNCTION_FREQ) as u64;
 
-    data.send(make_enqueue(
+    data.send(vec![make_enqueue(
         key,
         vec![moving_span(0, SPAN_SECS, JUNCTION_FREQ, 0.0, 11.0, 0)],
         crate::anchor::StreamEpoch::Continuation,
-    ))
+    )])
     .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while sink.recorded().is_empty() {
@@ -447,7 +471,7 @@ fn overlay_span_after_move_is_exempt_from_junction_continuity() {
 
     // The overlay restarts from 0.0 while the move ended at 11.0: an 11 mm
     // position jump that would be fatal on a bare (mask 0) seam.
-    data.send(make_enqueue(
+    data.send(vec![make_enqueue(
         key,
         vec![moving_span(
             move_ticks,
@@ -458,7 +482,7 @@ fn overlay_span_after_move_is_exempt_from_junction_continuity() {
             0b10,
         )],
         crate::anchor::StreamEpoch::Continuation,
-    ))
+    )])
     .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while sink.recorded().len() < 2 {
@@ -494,7 +518,8 @@ fn junction_jumps_math() {
     assert!((host_us3 - 500.0).abs() < 1e-3, "host_jump_us={host_us3}");
 }
 
-struct NullSink;
+#[derive(Clone, Copy, Default)]
+pub(super) struct NullSink;
 
 impl SpanSink for NullSink {
     fn send_frame(
@@ -525,11 +550,11 @@ impl SpanSink for HaltedSink {
 #[test]
 fn endpoint_fatal_hands_its_reason_to_the_fatal_transport_action() {
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (_data, data_rx) = unbounded::<EnqueueMsg>();
+    let (_data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let latched: Arc<Mutex<Vec<(AxisKey, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let latched_pump = Arc::clone(&latched);
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             NullSink,
@@ -541,7 +566,6 @@ fn endpoint_fatal_hands_its_reason_to_the_fatal_transport_action() {
             },
             None,
             Arc::new(crate::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         );
     });
     let error = "queue_step oid 9 is 2077 us behind the projected mcu clock".to_string();
@@ -550,6 +574,7 @@ fn endpoint_fatal_hands_its_reason_to_the_fatal_transport_action() {
         error: error.clone(),
     })
     .unwrap();
+    ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
     assert_eq!(
         *latched.lock_ok(),
@@ -571,7 +596,7 @@ fn gated_spans(gated_tick: u64, freq: f64) -> Vec<ClockedMotorSpan> {
 fn flush_clears_queued_spans_and_junctions() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
 
     let freq: f64 = 1_000.0;
     let lead_secs: f64 = 0.001;
@@ -583,7 +608,7 @@ fn flush_clears_queued_spans_and_junctions() {
     let sink_pump = sink.clone();
 
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink_pump,
@@ -593,19 +618,17 @@ fn flush_clears_queued_spans_and_junctions() {
             },
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         );
     });
 
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
         spans: gated_spans(gated_tick, freq),
         epoch: crate::anchor::StreamEpoch::Reposition,
         lead_secs,
         source_line: u32::MAX,
-        batch_end: true,
-    })
+    }])
     .unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(30));
@@ -615,7 +638,7 @@ fn flush_clears_queued_spans_and_junctions() {
 
     *clock.lock_ok() = Some((gated_tick + 1_000, freq));
 
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
         // A deliverable "now" probe (== the advanced clock), not a stale past
@@ -624,8 +647,7 @@ fn flush_clears_queued_spans_and_junctions() {
         epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs,
         source_line: u32::MAX,
-        batch_end: true,
-    })
+    }])
     .unwrap();
     {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -656,7 +678,7 @@ fn flush_clears_queued_spans_and_junctions() {
 fn on_abandon_reports_flushed_not_pushed_spans() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
 
     let freq: f64 = 1_000.0;
     let lead_secs: f64 = 0.001;
@@ -670,7 +692,7 @@ fn on_abandon_reports_flushed_not_pushed_spans() {
     let abandoned_pump = Arc::clone(&abandoned_total);
 
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink_pump,
@@ -683,19 +705,17 @@ fn on_abandon_reports_flushed_not_pushed_spans() {
             },
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         );
     });
 
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
         spans: gated_spans(gated_tick, freq),
         epoch: crate::anchor::StreamEpoch::Reposition,
         lead_secs,
         source_line: u32::MAX,
-        batch_end: true,
-    })
+    }])
     .unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(30));
@@ -703,15 +723,14 @@ fn on_abandon_reports_flushed_not_pushed_spans() {
     std::thread::sleep(std::time::Duration::from_millis(20));
     *clock.lock_ok() = Some((gated_tick + 1_000, freq));
 
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key,
         spans: vec![hold_span(gated_tick + 1_000, 1.0 / freq, freq, 0.0, 0)],
         epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs,
         source_line: u32::MAX,
-        batch_end: true,
-    })
+    }])
     .unwrap();
     {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -737,16 +756,15 @@ fn on_abandon_reports_flushed_not_pushed_spans() {
 #[test]
 fn flush_unknown_key_is_noop() {
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (_data, data_rx) = unbounded::<EnqueueMsg>();
+    let (_data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             NullSink,
             PumpCallbacks::noop(64),
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -765,31 +783,30 @@ fn barrier_ack_means_flushed_axes_emit_nothing() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let sink = RecordingSink::new();
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
-    let backlog = Arc::new(AtomicU64::new(0));
-    let backlog_pump = Arc::clone(&backlog);
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
+    let ledger = Arc::new(crate::drain::DrainLedger::new());
+    let ledger_pump = Arc::clone(&ledger);
 
     let sink_clone = sink.clone();
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink_clone,
             PumpCallbacks::noop(0),
             None,
-            std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            backlog_pump,
+            ledger_pump,
         );
     });
 
-    data.send(make_enqueue(
+    data.send(vec![make_enqueue(
         key,
         (0..3).map(make_span).collect(),
         crate::anchor::StreamEpoch::Continuation,
-    ))
+    )])
     .unwrap();
     poll_until(
-        || backlog.load(Ordering::Acquire) == 3,
+        || ledger.staged_total() == 3,
         "ring-full pump never staged the 3 un-pushed spans",
     );
 
@@ -801,10 +818,7 @@ fn barrier_ack_means_flushed_axes_emit_nothing() {
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("barrier must be acknowledged");
 
-    poll_until(
-        || backlog.load(Ordering::Acquire) == 0,
-        "Flush must clear the staged backlog",
-    );
+    assert_eq!(ledger.staged_total(), 0);
 
     ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
@@ -819,16 +833,15 @@ fn barrier_ack_means_flushed_axes_emit_nothing() {
 #[test]
 fn barrier_acks_on_idle_pump() {
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (_data, data_rx) = unbounded::<EnqueueMsg>();
+    let (_data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             RecordingSink::new(),
             PumpCallbacks::noop(8),
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         );
     });
     let (ack_tx, ack_rx) = mpsc::sync_channel(1);
@@ -849,69 +862,37 @@ fn poll_until<F: Fn() -> bool>(pred: F, what: &str) {
 }
 
 #[test]
-fn pump_backlog_reflects_unpushed_spans() {
-    let backlog = Arc::new(AtomicU64::new(0));
-    let backlog_thread = Arc::clone(&backlog);
-    let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
-    let handle = std::thread::spawn(move || {
-        run_pump(
-            control_rx,
-            data_rx,
-            RecordingSink::new(),
-            PumpCallbacks::noop(0),
-            None,
-            std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            backlog_thread,
-        );
-    });
-
-    data.send(make_enqueue(
-        AxisKey { mcu_id: 1, axis: 0 },
-        (0..3).map(make_span).collect(),
-        crate::anchor::StreamEpoch::Continuation,
-    ))
-    .unwrap();
-
-    poll_until(
-        || backlog.load(Ordering::Acquire) == 3,
-        "ring-full pump never reported the 3 unpushed spans",
-    );
-
-    ctl.send(PumpMsg::Shutdown).unwrap();
-    handle.join().unwrap();
-}
-
-#[test]
 fn pump_backlog_drains_to_zero_when_pushed() {
-    let backlog = Arc::new(AtomicU64::new(0));
-    let backlog_thread = Arc::clone(&backlog);
+    let ledger = Arc::new(crate::drain::DrainLedger::new());
+    let ledger_thread = Arc::clone(&ledger);
     let sink = RecordingSink::new();
     let sink_clone = sink.clone();
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink_clone,
             PumpCallbacks::noop(8),
             None,
-            std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            backlog_thread,
+            ledger_thread,
         );
     });
 
-    data.send(make_enqueue(
+    data.send(vec![make_enqueue(
         AxisKey { mcu_id: 1, axis: 0 },
         (0..3).map(make_span).collect(),
         crate::anchor::StreamEpoch::Continuation,
-    ))
+    )])
     .unwrap();
 
-    poll_until(|| !sink.recorded().is_empty(), "pump never pushed spans");
     poll_until(
-        || backlog.load(Ordering::Acquire) == 0,
+        || sink.recorded().last() == Some(&3),
+        "pump never pushed all spans",
+    );
+    poll_until(
+        || ledger.staged_total() == 0,
         "backlog never returned to zero after the ring consumed the spans",
     );
 
@@ -927,30 +908,20 @@ fn queue_pump<S: SpanSink>(
 ) -> Pump<S> {
     let mut queues = BTreeMap::new();
     let mut q = AxisQueue::new(1);
-    q.pushed = 1;
-    q.retired = 0;
     q.spans.push_back(make_span(0));
     queues.insert(key, q);
-    Pump {
-        queues,
-        junctions: JunctionTracker::default(),
-        cohort: None,
-        halted: BTreeMap::new(),
+    let mut pump = Pump::new(
         sink,
-        callbacks: PumpCallbacks {
+        PumpCallbacks {
             on_drip_stall: Box::new(on_drip_stall),
             ..PumpCallbacks::noop(1)
         },
-        history: None,
-        ledger: Arc::new(crate::drain::DrainLedger::new()),
-        pending_barrier_acks: Vec::new(),
-        backlog: Arc::new(AtomicU64::new(0)),
-        release_plan: crate::pump::ReleasePlan::default(),
-        data_open: true,
-        intake_batch_open: false,
-        consumption_stall: super::stall::ConsumptionStallWatch::new(consumption_stall_fatal),
-        mem_probe: super::memstat::MemPressureProbe::new(),
-    }
+        None,
+        Arc::new(crate::drain::DrainLedger::new()),
+    );
+    pump.queues = queues;
+    pump.consumption_stall = super::stall::ConsumptionStallWatch::new(consumption_stall_fatal);
+    pump
 }
 
 fn stalled_queue_pump(
@@ -958,7 +929,9 @@ fn stalled_queue_pump(
     consumption_stall_fatal: Duration,
     on_drip_stall: impl Fn(String) + Send + 'static,
 ) -> Pump<NullSink> {
-    queue_pump(key, consumption_stall_fatal, on_drip_stall, NullSink)
+    let mut pump = queue_pump(key, consumption_stall_fatal, on_drip_stall, NullSink);
+    pump.queues.get_mut(&key).unwrap().credit.accept(1);
+    pump
 }
 
 #[test]
@@ -967,7 +940,6 @@ fn send_pass_deadline_yields_with_work_pending() {
     let sink = RecordingSink::new();
     let mut pump = queue_pump(key, Duration::from_secs(1), |_| {}, sink.clone());
     let q = pump.queues.get_mut(&key).unwrap();
-    q.pushed = 0;
     q.spans.clear();
     q.ring_depth = 4_000;
     let queued: u64 = 3_000;
@@ -1038,16 +1010,9 @@ fn halt_drops_queued_and_new_spans_until_resume() {
     assert_eq!(pump.queues[&key].spans.len(), 1);
 }
 
-/// A halted axis' motion is discarded on the endpoint, so a transport that
-/// keeps a host-side stage (the setpoint ring) must be told to drop it in the
-/// same breath. The pump owns that hand-off, so it is asserted here rather
-/// than at the sink.
-#[derive(Clone)]
-struct CutRecordingSink {
-    cut: Arc<Mutex<Vec<AxisKey>>>,
-}
+struct CutRejectingSink;
 
-impl SpanSink for CutRecordingSink {
+impl SpanSink for CutRejectingSink {
     fn send_frame(
         &self,
         _key: AxisKey,
@@ -1058,32 +1023,33 @@ impl SpanSink for CutRecordingSink {
         Ok(mcu_protocol::result_codes::OK)
     }
 
-    fn cut_staged(&self, keys: &[AxisKey]) -> Result<(), SendError> {
-        self.cut.lock_ok().extend_from_slice(keys);
-        Ok(())
+    fn cut_staged(&self, _keys: &[AxisKey]) -> Result<Vec<CutCredit>, SendError> {
+        Err(SendError::Transient("cut transport unavailable".into()))
     }
 }
 
 #[test]
-fn halting_an_axis_cuts_the_transport_s_staged_motion() {
+fn rejected_multi_axis_halt_reports_once_and_does_not_acknowledge() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
-    let cut = Arc::new(Mutex::new(Vec::new()));
-    let sink = CutRecordingSink {
-        cut: Arc::clone(&cut),
-    };
-    let mut pump = queue_pump(key, Duration::from_secs(1), |_| {}, sink);
-    let (ack_tx, _ack_rx) = mpsc::sync_channel(1);
+    let sibling = AxisKey { mcu_id: 1, axis: 1 };
+    let mut pump = queue_pump(key, Duration::from_secs(1), |_| {}, CutRejectingSink);
+    pump.queues.get_mut(&key).unwrap().credit.accept(1);
+    let (fatal_tx, fatal_rx) = mpsc::channel();
+    pump.callbacks.on_fatal_transport = Box::new(move |key, _| fatal_tx.send(key).unwrap());
+    let (ack_tx, ack_rx) = mpsc::sync_channel(1);
 
     pump.handle_control_msg(PumpMsg::Halt {
-        keys: vec![key],
+        keys: vec![key, sibling],
         ack: ack_tx,
     });
 
-    assert_eq!(
-        *cut.lock_ok(),
-        vec![key],
-        "the halted key must reach the sink's stage-cut hook"
-    );
+    assert_eq!(fatal_rx.try_iter().collect::<Vec<_>>(), vec![key]);
+    assert!(matches!(
+        ack_rx.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected)
+    ));
+    assert_eq!(pump.queues[&key].spans.len(), 1);
+    assert_eq!(pump.queues[&key].credit.snapshot().abandoned, 0);
 }
 
 #[test]
@@ -1104,7 +1070,6 @@ fn send_rejected_while_halted_discards_bundle_and_infers_halt() {
     let mut pump = queue_pump(key, Duration::from_secs(1), |_| {}, HaltedSink);
     let queue = pump.queues.get_mut(&key).unwrap();
     queue.ring_depth = 4;
-    queue.pushed = 0;
     let (abandoned_tx, abandoned_rx) = mpsc::channel();
     pump.callbacks.on_abandon =
         Box::new(move |abandoned_key, count| abandoned_tx.send((abandoned_key, count)).unwrap());
@@ -1117,6 +1082,68 @@ fn send_rejected_while_halted_discards_bundle_and_infers_halt() {
     ));
     assert!(pump.queues[&key].spans.is_empty());
     assert_eq!(abandoned_rx.recv().unwrap(), (key, 1));
+}
+
+struct OwnershipSink {
+    accepted: Mutex<Vec<u8>>,
+    reject_phase: std::sync::atomic::AtomicBool,
+}
+
+impl SpanSink for OwnershipSink {
+    fn send_frame(
+        &self,
+        key: AxisKey,
+        _spans: &[ClockedMotorSpan],
+        _new_head: u32,
+        _room: u32,
+    ) -> Result<i32, SendError> {
+        if key.axis == 1 && self.reject_phase.load(Ordering::Relaxed) {
+            return Err(SendError::Transient("phase staging full".into()));
+        }
+        self.accepted.lock_ok().push(key.axis);
+        Ok(mcu_protocol::result_codes::OK)
+    }
+
+    fn lane_group(&self, key: AxisKey) -> u8 {
+        key.axis
+    }
+
+    fn progress_mcu(&self, _mcu_id: u32, group: u8) -> Result<(), SendError> {
+        if group == 0 {
+            Err(SendError::Transient(
+                "pulse wire full after acceptance".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[test]
+fn mixed_endpoint_groups_commit_acceptance_not_wire_progress() {
+    let pulse = AxisKey { mcu_id: 1, axis: 0 };
+    let phase = AxisKey { mcu_id: 1, axis: 1 };
+    let sink = OwnershipSink {
+        accepted: Mutex::new(Vec::new()),
+        reject_phase: std::sync::atomic::AtomicBool::new(true),
+    };
+    let mut pump = queue_pump(pulse, Duration::from_secs(1), |_| {}, sink);
+    let mut phase_queue = AxisQueue::new(1);
+    phase_queue.spans.push_back(make_span(0));
+    pump.queues.insert(phase, phase_queue);
+
+    pump.send_ready().unwrap();
+    assert!(pump.queues[&pulse].spans.is_empty());
+    assert_eq!(pump.queues[&pulse].credit.snapshot().pushed, 1);
+    assert_eq!(pump.queues[&pulse].credit.snapshot().retired, 0);
+    pump.send_ready().unwrap();
+    assert_eq!(pump.queues[&phase].spans.len(), 1);
+    assert_eq!(pump.queues[&phase].credit.snapshot().pushed, 0);
+    pump.sink.reject_phase.store(false, Ordering::Relaxed);
+    pump.send_ready().unwrap();
+    assert!(pump.queues[&phase].spans.is_empty());
+    assert_eq!(pump.queues[&phase].credit.snapshot().pushed, 1);
+    assert_eq!(*pump.sink.accepted.lock_ok(), vec![0, 1]);
 }
 
 #[test]
@@ -1185,7 +1212,7 @@ fn consumption_stall_resets_when_heartbeat_advances_counter() {
         escalated_cb.lock_ok().push(msg)
     });
     pump.queues.get_mut(&key).unwrap().ring_depth = 2;
-    pump.queues.get_mut(&key).unwrap().pushed = 2;
+    pump.queues.get_mut(&key).unwrap().credit.accept(1);
 
     pump.send_ready().unwrap();
     let (_, consumed_at_onset, _) = pump
@@ -1202,7 +1229,7 @@ fn consumption_stall_resets_when_heartbeat_advances_counter() {
         retired_counts: vec![0],
         retired_by: RetiredBy::Pulse,
     }));
-    pump.queues.get_mut(&key).unwrap().pushed = 3;
+    pump.queues.get_mut(&key).unwrap().credit.accept(1);
 
     let result = pump.send_ready();
     assert!(
@@ -1278,15 +1305,27 @@ fn run_loop_re_observes_a_wedged_ring_with_both_channels_silent() {
     let mut pump = stalled_queue_pump(key, Duration::from_millis(50), move |msg: String| {
         escalated_tx.send(msg).unwrap();
     });
-    let (_ctl, control_rx) = unbounded::<PumpMsg>();
-    let (_data, data_rx) = unbounded::<EnqueueMsg>();
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (_data, data_rx) = unbounded::<Vec<LaneProjection>>();
 
-    let pumping = std::thread::spawn(move || pump.run(control_rx, data_rx));
+    let pumping = std::thread::spawn(move || {
+        pump.run(
+            &control_rx,
+            &data_rx,
+            |batch, pump| {
+                for projection in batch {
+                    pump.enqueue(projection);
+                }
+            },
+            |_, _| false,
+        )
+    });
 
     let message = escalated_rx
         .recv_timeout(Duration::from_secs(2))
         .expect("the pump must re-observe a wedged ring on a timer instead of parking");
     assert!(message.contains("pump consumption stall"), "{message}");
+    ctl.send(PumpMsg::Shutdown).unwrap();
     pumping.join().unwrap();
 }
 
@@ -1305,13 +1344,9 @@ struct BuzzFixture {
 fn buzz_fixture() -> BuzzFixture {
     let clock_queries: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
     let queries_for_clock = Arc::clone(&clock_queries);
-    let pump = Pump {
-        queues: BTreeMap::new(),
-        junctions: JunctionTracker::default(),
-        cohort: None,
-        halted: BTreeMap::new(),
-        sink: NullSink,
-        callbacks: PumpCallbacks {
+    let pump = Pump::new(
+        NullSink,
+        PumpCallbacks {
             mcu_clock_of: Box::new(move |mcu_id| {
                 let mut queries = queries_for_clock.lock_ok();
                 queries.push(mcu_id);
@@ -1321,16 +1356,9 @@ fn buzz_fixture() -> BuzzFixture {
             }),
             ..PumpCallbacks::noop(super::stepcompress_sink::SHIM_RING_DEPTH)
         },
-        history: None,
-        ledger: Arc::new(crate::drain::DrainLedger::new()),
-        pending_barrier_acks: Vec::new(),
-        backlog: Arc::new(AtomicU64::new(0)),
-        release_plan: crate::pump::ReleasePlan::default(),
-        data_open: true,
-        intake_batch_open: false,
-        consumption_stall: super::stall::ConsumptionStallWatch::new(Duration::from_secs(60)),
-        mem_probe: super::memstat::MemPressureProbe::new(),
-    };
+        None,
+        Arc::new(crate::drain::DrainLedger::new()),
+    );
     let (control, control_rx) = crossbeam_channel::unbounded();
     BuzzFixture {
         pump,
@@ -1369,16 +1397,18 @@ fn pulse_endpoint(
     }];
     Arc::new(Mutex::new(
         StepcompressEndpoint::new(
-            BUZZ_MCU,
-            step_shim::StepShim::new(motors, super::stepcompress_sink::SHIM_RING_DEPTH),
+            EndpointSpec {
+                mcu_id: BUZZ_MCU,
+                shim: step_shim::StepShim::new(motors, super::stepcompress_sink::SHIM_RING_DEPTH),
+                egress,
+                pump_control: control.clone(),
+                clock_of,
+                budget: 4,
+                step_count_query: Arc::new(|_| Ok(0)),
+                link_health: None,
+                barrier_ack_deadline_secs: super::stepcompress_sink::BARRIER_ACK_DEADLINE_SECONDS,
+            },
             &[crate::pump::StepLaneConfig { axis, oid }],
-            egress,
-            control.clone(),
-            clock_of,
-            4,
-            Arc::new(|_| Ok(0)),
-            None,
-            super::stepcompress_sink::BARRIER_ACK_DEADLINE_SECONDS,
         )
         .expect("one motor on one axis builds a stepcompress endpoint"),
     ))
@@ -1400,8 +1430,15 @@ fn phase_endpoint(
         max_units_per_sample: 4_096,
         ring_depth: 64,
     }];
-    let endpoint = SampleEndpoint::new(BUZZ_MCU, &lanes, egress, clock_of, control.clone())
-        .expect("the lane config is representable");
+    let endpoint = SampleEndpoint::new(
+        BUZZ_MCU,
+        &lanes,
+        egress,
+        clock_of,
+        control.clone(),
+        Arc::new(|_| Ok((0, 0))),
+    )
+    .expect("the lane config is representable");
     Arc::new(Mutex::new(endpoint))
 }
 

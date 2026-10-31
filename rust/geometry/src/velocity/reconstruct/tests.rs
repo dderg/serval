@@ -7,7 +7,6 @@ fn straight(length: f64, ceiling: f64, accel: f64) -> Kinematics {
     Kinematics {
         length,
         accel,
-        jerk: f64::INFINITY,
         kappa0: 0.0,
         sigma: 0.0,
         flat_ceiling: ceiling,
@@ -18,7 +17,6 @@ fn clothoid(length: f64, kappa0: f64, sigma: f64, ceiling: f64, accel: f64) -> K
     Kinematics {
         length,
         accel,
-        jerk: f64::INFINITY,
         kappa0,
         sigma,
         flat_ceiling: ceiling,

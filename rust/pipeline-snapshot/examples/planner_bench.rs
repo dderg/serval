@@ -9,7 +9,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use crossbeam_channel::{bounded, unbounded};
 use geometry::MoveVelocity;
 use motion_pipeline::fit_stage::FitStage;
 use motion_pipeline::planner::Planner;
@@ -146,14 +145,17 @@ fn stream_config() -> StreamConfig {
 }
 
 fn run_fitter(moves: &[geometry::Move], config: &StreamConfig) -> Vec<StreamInput> {
-    let (raw_tx, raw_rx) = unbounded();
+    let mut fitted = Vec::new();
+    let mut collect = |item| {
+        fitted.push(item);
+        true
+    };
+    let mut fit = FitStage::new(config.corner).into_driver();
     for m in moves.iter().cloned() {
-        raw_tx.send(m.into()).expect("unbounded send");
+        assert!(fit.feed(m.into(), &mut collect));
     }
-    drop(raw_tx);
-    let (fitted_tx, fitted_rx) = unbounded();
-    FitStage::new(config.corner).run(raw_rx, fitted_tx);
-    fitted_rx.into_iter().collect()
+    assert!(fit.finish(&mut collect));
+    fitted
 }
 
 struct BenchResult {
@@ -166,25 +168,25 @@ struct BenchResult {
 }
 
 fn run_planner(items: Vec<StreamInput>, config: StreamConfig, trickle: bool) -> BenchResult {
-    let (in_tx, in_rx) = if trickle { bounded(1) } else { unbounded() };
-    let (out_tx, out_rx) = unbounded();
+    let mut planned = Vec::new();
+    let mut collect = |item| {
+        planned.push(item);
+        true
+    };
     let plans_before = PLAN_COUNT.load(Ordering::Relaxed);
     let plan_us_before = PLAN_US_TOTAL.load(Ordering::Relaxed);
     PLAN_US_MAX.store(0, Ordering::Relaxed);
 
-    let feeder = std::thread::spawn(move || {
-        for item in items {
-            if in_tx.send(item).is_err() {
-                return;
-            }
-        }
-    });
     let start = Instant::now();
-    Planner::new(config).run(in_rx, out_tx);
+    let mut planner = Planner::new(config);
+    for item in items {
+        assert!(planner.feed(item, &mut collect));
+        if trickle {
+            assert!(planner.idle(&mut collect));
+        }
+    }
+    assert!(planner.finish(&mut collect));
     let wall_s = start.elapsed().as_secs_f64();
-    feeder.join().expect("feeder thread");
-
-    let planned: Vec<PlannedItem> = out_rx.into_iter().collect();
     let motion_s: f64 = planned
         .iter()
         .map(|item| match item {

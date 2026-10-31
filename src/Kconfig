@@ -407,12 +407,10 @@ config MOTION_SAMPLE_RATE_HZ
       but cost more CPU. Defaults to 40 kHz on H7 (520 MHz) and 20 kHz
       on F4 (180 MHz). Defaults to 2 kHz on G0B1 (64 MHz Cortex-M0+,
       soft-float): this is a low-rate bring-up target, not a throughput
-      target. Defaults to 1 kHz on MACH_LINUX: the host tick
-      (linux/runtime_tick_host.c) drives the ISR from a clock_nanosleep loop
-      whose resolution floor on a stock (non-PREEMPT_RT) kernel is ~1 ms, and
-      this rate MUST equal the tick rate or the runtime's TickIntervalExceeded
-      guard fires on the first active tick. Raising it requires a PREEMPT_RT
-      kernel and a SCHED_FIFO launch (klipper_mcu -r).
+      target. Defaults to 1 kHz on MACH_LINUX, where the motion tick runs
+      on the same scheduler thread as foreground commands. Higher rates
+      require sufficient scheduler latency headroom; a PREEMPT_RT kernel
+      and SCHED_FIFO launch (klipper_mcu -r) can improve that headroom.
 
 # Motion-engine ISR timer selection. The physical timer is chosen per
 # architecture via the alias in src/stm32/runtime_tick_timer.h: H7/F4 use

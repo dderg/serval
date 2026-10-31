@@ -210,14 +210,14 @@ def _home_with_staggered_trips(
 
         switch_control.set_gpio_input(*first_switch, 1)
         deadline = time.monotonic() + SUPPRESS_LATENCY_TIMEOUT_S
-        while True:
-            bound_post, peer_post = _sample_while_peer_advances(
-                control, watched, MOVING_STEPS
+        while "keyed_freeze_cut" not in world.events_text():
+            assert time.monotonic() < deadline, (
+                f"{axis}: first motor was not frozen before the deadline"
             )
-            if bound_post <= SUPPRESSED_EDGE_SLOP:
-                break
-            if time.monotonic() >= deadline:
-                break
+            time.sleep(0.01)
+        bound_post, peer_post = _sample_while_peer_advances(
+            control, watched, MOVING_STEPS
+        )
         _assert_split_after_trip(
             f"G28 {axis}",
             first_switch,

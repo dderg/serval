@@ -116,6 +116,25 @@ fn grid_span_um(values_um: &[i32]) -> i32 {
     hi - lo
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct CompPair {
+    pub slot_a: u8,
+    pub slot_b: u8,
+    pub lane_a: u8,
+    pub lane_b: u8,
+    pub kinematics: u8,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CompGrid {
+    pub nx: u16,
+    pub ny: u16,
+    pub x0: f64,
+    pub y0: f64,
+    pub dx: f64,
+    pub dy: f64,
+}
+
 /// Everything O(nx*ny) about a SetStrainComp — grid validation and the
 /// um -> mm conversion — done on the socket reader thread at decode time.
 /// A 113x109 map measured ~500 us when this ran in the RT dispatch (two
@@ -142,36 +161,34 @@ pub struct PreparedStrainComp {
 impl PreparedStrainComp {
     pub fn prepare(msg: &SetStrainComp) -> Self {
         Self::from_values(
-            msg.slot_a,
-            msg.slot_b,
-            msg.lane_a,
-            msg.lane_b,
-            msg.kinematics,
-            msg.nx,
-            msg.ny,
-            f64::from(msg.x0),
-            f64::from(msg.y0),
-            f64::from(msg.dx),
-            f64::from(msg.dy),
+            CompPair {
+                slot_a: msg.slot_a,
+                slot_b: msg.slot_b,
+                lane_a: msg.lane_a,
+                lane_b: msg.lane_b,
+                kinematics: msg.kinematics,
+            },
+            CompGrid {
+                nx: msg.nx,
+                ny: msg.ny,
+                x0: f64::from(msg.x0),
+                y0: f64::from(msg.y0),
+                dx: f64::from(msg.dx),
+                dy: f64::from(msg.dy),
+            },
             &msg.values_um,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn from_values(
-        slot_a: u8,
-        slot_b: u8,
-        lane_a: u8,
-        lane_b: u8,
-        kinematics: u8,
-        nx: u16,
-        ny: u16,
-        x0: f64,
-        y0: f64,
-        dx: f64,
-        dy: f64,
-        values_um: &[i32],
-    ) -> Self {
+    fn from_values(pair: CompPair, grid: CompGrid, values_um: &[i32]) -> Self {
+        let CompGrid {
+            nx,
+            ny,
+            x0,
+            y0,
+            dx,
+            dy,
+        } = grid;
         let (nxu, nyu) = (usize::from(nx), usize::from(ny));
         let clearing = nxu == 0 || nyu == 0;
         let grid_ok = !clearing
@@ -198,11 +215,11 @@ impl PreparedStrainComp {
             Vec::new()
         };
         Self {
-            slot_a,
-            slot_b,
-            lane_a,
-            lane_b,
-            kinematics,
+            slot_a: pair.slot_a,
+            slot_b: pair.slot_b,
+            lane_a: pair.lane_a,
+            lane_b: pair.lane_b,
+            kinematics: pair.kinematics,
             nx,
             ny,
             x0,
@@ -231,29 +248,17 @@ impl StrainCompBank {
     }
 
     #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
     pub fn set(
         &mut self,
         num_slaves: usize,
-        slot_a: u8,
-        slot_b: u8,
-        lane_a: u8,
-        lane_b: u8,
-        kinematics: u8,
-        nx: u16,
-        ny: u16,
-        x0: f64,
-        y0: f64,
-        dx: f64,
-        dy: f64,
+        pair: CompPair,
+        grid: CompGrid,
         values_um: &[i16],
     ) -> i32 {
         let values: Vec<i32> = values_um.iter().map(|&v| i32::from(v)).collect();
         self.install(
             num_slaves,
-            PreparedStrainComp::from_values(
-                slot_a, slot_b, lane_a, lane_b, kinematics, nx, ny, x0, y0, dx, dy, &values,
-            ),
+            PreparedStrainComp::from_values(pair, grid, &values),
         )
     }
 

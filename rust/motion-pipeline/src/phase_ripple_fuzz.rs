@@ -4,7 +4,7 @@ use proptest::test_runner::FileFailurePersistence;
 use trajectory::{AdvanceModel, NonlinearAdvance};
 
 use crate::lowering::FitTol;
-use crate::shaper::{TrackSignal, apply_nonlinear_advance_to_track, fit_axis_from_signal};
+use crate::shaper::{AxisFit, TrackSignal, apply_nonlinear_advance_to_track, fit_axis_from_signal};
 
 #[derive(Clone, Debug)]
 struct CruiseRamp {
@@ -17,23 +17,19 @@ struct CruiseRamp {
 }
 
 impl TrackSignal for CruiseRamp {
-    fn eval(&self, t: f64) -> f64 {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let ramp_time = (t - self.boundary).max(0.0);
-        self.position
-            + self.velocity * (t - self.start)
-            + 0.5 * self.acceleration * ramp_time * ramp_time
-    }
-
-    fn deriv(&self, t: f64) -> f64 {
-        self.velocity + self.acceleration * (t - self.boundary).max(0.0)
-    }
-
-    fn second_deriv(&self, t: f64) -> f64 {
-        if t <= self.boundary {
-            0.0
-        } else {
-            self.acceleration
-        }
+        (
+            self.position
+                + self.velocity * (t - self.start)
+                + 0.5 * self.acceleration * ramp_time * ramp_time,
+            self.velocity + self.acceleration * ramp_time,
+            if t <= self.boundary {
+                0.0
+            } else {
+                self.acceleration
+            },
+        )
     }
 }
 
@@ -196,13 +192,15 @@ proptest! {
         signal in cruise_ramp(),
     ) {
         let output = fit_axis_from_signal(
-            axis,
-            signal.start,
-            signal.end,
-            &[signal.boundary],
+            AxisFit {
+                axis,
+                t_start: signal.start,
+                t_end: signal.end,
+                seed_breakpoints: &[signal.boundary],
+                fit_tol: FitTol { pos_mm: 0.005, accel_mm_s2: 50.0 },
+                fit_context: "phase_ripple_fuzz",
+            },
             &signal,
-            FitTol { pos_mm: 0.005, accel_mm_s2: 50.0 },
-            "phase_ripple_fuzz",
         ).map_err(|error| TestCaseError::fail(format!("{signal:?}: {error:?}")))?;
         assert_flat_cruise(&output, &signal, 0.0)?;
     }

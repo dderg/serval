@@ -1,4 +1,4 @@
-use crate::{AlgebraError, ScalarNurbs};
+use crate::ScalarNurbs;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BezierPiece {
@@ -88,28 +88,6 @@ impl BezierPiece {
             u_end,
             coeffs,
         }
-    }
-}
-
-impl std::ops::Add<&BezierPiece> for &BezierPiece {
-    type Output = Result<BezierPiece, AlgebraError>;
-    fn add(self, rhs: &BezierPiece) -> Self::Output {
-        if self.u_start != rhs.u_start || self.u_end != rhs.u_end {
-            return Err(AlgebraError::SupportMismatch);
-        }
-        let max_len = self.coeffs.len().max(rhs.coeffs.len());
-        let mut coeffs = vec![0.0; max_len];
-        for (i, c) in self.coeffs.iter().enumerate() {
-            coeffs[i] += *c;
-        }
-        for (i, c) in rhs.coeffs.iter().enumerate() {
-            coeffs[i] += *c;
-        }
-        Ok(BezierPiece {
-            u_start: self.u_start,
-            u_end: self.u_end,
-            coeffs,
-        })
     }
 }
 

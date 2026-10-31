@@ -4,10 +4,11 @@
 use super::ramp_phase_offset;
 use super::write_phase_coils;
 use crate::state::SharedState;
-use crate::stepping_state::{AxisState, StepMode, StepperRef};
+use crate::stepping_state::{AxisState, StepperRef};
 use crate::test_xdirect_capture;
 use core::sync::atomic::{AtomicU8, Ordering};
 use heapless::Vec;
+use runtime_contract::axes::StepMode;
 
 fn make_axis(mode: StepMode, microstep_distance: f32, tmc_cs_oid: Option<u8>) -> AxisState {
     let mut steppers: Vec<StepperRef, 4> = Vec::new();

@@ -115,8 +115,8 @@ proptest! {
         let mut probes = samples;
         probes.extend(distinct_knots(&curve));
         for u in probes {
-            let before = nurbs::eval::eval(&curve.as_view(), u);
-            let after = nurbs::eval::eval(&recomposed.as_view(), u);
+            let before = nurbs::eval::eval(&curve, u);
+            let after = nurbs::eval::eval(&recomposed, u);
             prop_assert!(
                 (before - after).abs() <= budget,
                 "u={u}: {before} vs {after} (budget {budget}), knots {:?}",

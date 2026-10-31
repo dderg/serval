@@ -8,6 +8,13 @@ fn sha256(s: &str) -> [u8; 32] {
     h.finalize().into()
 }
 
+fn first_with_fields() -> usize {
+    SCHEMA_MESSAGES
+        .iter()
+        .position(|m| !m.fields.is_empty())
+        .expect("schema must contain a message with fields")
+}
+
 #[test]
 fn schema_hash_is_deterministic_and_matches_published_constant() {
     let text = canonicalize_schema(SCHEMA_MESSAGES);
@@ -24,25 +31,16 @@ fn schema_hash_is_deterministic_and_matches_published_constant() {
 
 #[test]
 fn schema_hash_changes_when_a_field_type_changes() {
-    let mut mutated_fields: Vec<SchemaField> = SCHEMA_MESSAGES[0].fields.to_vec();
-    // Change `kinematics:u8` to `kinematics:u32` on ConfigureAxes — wire-incompatible.
-    mutated_fields[0] = SchemaField {
-        name: "kinematics",
-        ty: "u32",
-    };
-    let mutated_msg = SchemaMessage {
-        type_tag: SCHEMA_MESSAGES[0].type_tag,
-        name: SCHEMA_MESSAGES[0].name,
-        version: SCHEMA_MESSAGES[0].version,
-        channel: SCHEMA_MESSAGES[0].channel,
-        fields: Box::leak(mutated_fields.into_boxed_slice()),
-    };
-    let mut messages: Vec<SchemaMessage> = SCHEMA_MESSAGES.to_vec();
-    messages[0] = mutated_msg;
-
-    let mutated_hash = sha256(&canonicalize_schema(&messages));
+    let f = SCHEMA_MESSAGES[first_with_fields()].fields[0];
+    let text = canonicalize_schema(SCHEMA_MESSAGES);
+    let mutated = text.replacen(
+        &format!("[{}:{}", f.name, f.ty),
+        &format!("[{}:u64", f.name),
+        1,
+    );
+    assert_ne!(mutated, text, "the mutation must have landed");
     assert_ne!(
-        mutated_hash,
+        sha256(&mutated),
         mcu_protocol::SCHEMA_HASH,
         "a field-type change must produce a different schema_hash"
     );
@@ -50,23 +48,19 @@ fn schema_hash_changes_when_a_field_type_changes() {
 
 #[test]
 fn schema_hash_changes_when_a_field_is_added() {
-    let mut extra_fields: Vec<SchemaField> = SCHEMA_MESSAGES[0].fields.to_vec();
-    extra_fields.push(SchemaField {
-        name: "new_field",
-        ty: "u32",
-    });
-    let mutated_msg = SchemaMessage {
-        type_tag: SCHEMA_MESSAGES[0].type_tag,
-        name: SCHEMA_MESSAGES[0].name,
-        version: SCHEMA_MESSAGES[0].version,
-        channel: SCHEMA_MESSAGES[0].channel,
-        fields: Box::leak(extra_fields.into_boxed_slice()),
-    };
-    let mut messages: Vec<SchemaMessage> = SCHEMA_MESSAGES.to_vec();
-    messages[0] = mutated_msg;
-
-    let mutated_hash = sha256(&canonicalize_schema(&messages));
-    assert_ne!(mutated_hash, mcu_protocol::SCHEMA_HASH);
+    let i = first_with_fields();
+    let mut lines: Vec<String> = canonicalize_schema(SCHEMA_MESSAGES)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    lines[i] = format!(
+        "{},new_field:u32]",
+        lines[i]
+            .strip_suffix(']')
+            .expect("canonical line ends with ]")
+    );
+    let mutated = lines.join("\n") + "\n";
+    assert_ne!(sha256(&mutated), mcu_protocol::SCHEMA_HASH);
 }
 
 #[test]

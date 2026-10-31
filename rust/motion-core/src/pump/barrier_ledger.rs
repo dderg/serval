@@ -33,7 +33,7 @@ pub fn barrier_seq_before(candidate: u32, reference: u32) -> bool {
     barrier_seq_after(reference, candidate)
 }
 
-pub fn barrier_seq_covers(high_water: u32, seq: u32) -> bool {
+fn barrier_seq_covers(high_water: u32, seq: u32) -> bool {
     high_water == seq || barrier_seq_after(high_water, seq)
 }
 
@@ -43,12 +43,17 @@ struct SentBarrier {
     sent_clock: u64,
 }
 
+#[derive(Debug)]
+struct ReceiptSequence {
+    next: u32,
+    acked: Option<u32>,
+}
+
 /// Issue, track and retire barrier receipts for one mcu's lanes.
 #[derive(Debug)]
 pub struct BarrierLedger {
     seed: u32,
-    next_seq: HashMap<u32, u32>,
-    acked_seq: HashMap<u32, u32>,
+    sequences: HashMap<u32, ReceiptSequence>,
     sent: VecDeque<SentBarrier>,
 }
 
@@ -66,44 +71,101 @@ impl BarrierLedger {
     pub fn with_seed(seed: u32) -> Self {
         Self {
             seed,
-            next_seq: HashMap::new(),
-            acked_seq: HashMap::new(),
+            sequences: HashMap::new(),
             sent: VecDeque::new(),
         }
     }
 
+    pub fn with_capacity(lanes: usize) -> Self {
+        let mut ledger = Self::new();
+        ledger.sequences.reserve(lanes);
+        ledger
+    }
+
     pub fn issue(&mut self, oid: u32) -> BarrierId {
-        let seed = self.seed;
-        let slot = self.next_seq.entry(oid).or_insert(seed);
-        let seq = *slot;
-        *slot = seq.wrapping_add(1);
+        let slot = self.sequences.entry(oid).or_insert(ReceiptSequence {
+            next: self.seed,
+            acked: None,
+        });
+        let seq = slot.next;
+        slot.next = seq.wrapping_add(1);
         BarrierId { oid, seq }
     }
 
     pub fn is_acked(&self, id: BarrierId) -> bool {
-        self.acked_seq
+        self.sequences
             .get(&id.oid)
-            .is_some_and(|&high_water| barrier_seq_covers(high_water, id.seq))
+            .and_then(|lane| lane.acked)
+            .is_some_and(|high_water| barrier_seq_covers(high_water, id.seq))
     }
 
     /// Adopt an ack from the mcu. A receipt the host never issued, or one that
     /// walks the high-water mark backwards, means the two sides disagree about
     /// the stream — the caller escalates.
     pub fn record_ack(&mut self, oid: u32, seq: u32) -> Result<(), AckFault> {
-        let issued = self.next_seq.get(&oid).copied().ok_or(AckFault::Unknown)?;
+        let lane = self.sequences.get_mut(&oid).ok_or(AckFault::Unknown)?;
+        let issued = lane.next;
         if !barrier_seq_before(seq, issued) {
             return Err(AckFault::Unissued { issued });
         }
-        match self.acked_seq.get(&oid).copied() {
+        match lane.acked {
             Some(high_water) if !barrier_seq_after(seq, high_water) => {
                 return Err(AckFault::Regressed { high_water });
             }
             _ => {}
         }
-        self.acked_seq.insert(oid, seq);
+        lane.acked = Some(seq);
         self.sent
             .retain(|entry| !barrier_seq_covers(seq, entry.id.seq) || entry.id.oid != oid);
         Ok(())
+    }
+
+    pub fn record_ordered_ack(&mut self, oid: u32, seq: u32) -> Result<bool, AckFault> {
+        let lane = self.sequences.get_mut(&oid).ok_or(AckFault::Unknown)?;
+        let issued = lane.next;
+        let expected = lane.acked.map_or(self.seed, |seq| seq.wrapping_add(1));
+        if barrier_seq_before(seq, expected) {
+            return Ok(false);
+        }
+        if !barrier_seq_before(seq, issued) {
+            return Err(AckFault::Unissued { issued });
+        }
+        if seq != expected {
+            return Err(AckFault::OutOfOrder { expected });
+        }
+        lane.acked = Some(seq);
+        self.prune_acked();
+        Ok(true)
+    }
+
+    pub fn cancel(&mut self, id: BarrierId) {
+        let lane = self
+            .sequences
+            .get_mut(&id.oid)
+            .expect("only issued barriers can be cancelled");
+        let acked = lane.acked.get_or_insert(id.seq);
+        if barrier_seq_after(id.seq, *acked) {
+            *acked = id.seq;
+        }
+    }
+
+    pub fn forget_sent(&mut self, oid: u32) {
+        self.sent.retain(|entry| entry.id.oid != oid);
+    }
+
+    pub fn clear_sent(&mut self) {
+        self.sent.clear();
+    }
+
+    pub fn has_sent(&self) -> bool {
+        !self.sent.is_empty()
+    }
+
+    pub fn sent_clock_of(&self, id: BarrierId) -> Option<u64> {
+        self.sent
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.sent_clock)
     }
 
     pub fn note_sent(&mut self, id: BarrierId, sent_clock: u64) {
@@ -128,7 +190,11 @@ impl BarrierLedger {
     }
 
     pub fn ledger_line(&self) -> String {
-        let mut acked: Vec<(u32, u32)> = self.acked_seq.iter().map(|(&k, &v)| (k, v)).collect();
+        let mut acked: Vec<(u32, u32)> = self
+            .sequences
+            .iter()
+            .filter_map(|(&oid, lane)| lane.acked.map(|seq| (oid, seq)))
+            .collect();
         acked.sort_unstable();
         let acked: Vec<String> = acked
             .into_iter()
@@ -146,6 +212,7 @@ pub enum AckFault {
     Unknown,
     Unissued { issued: u32 },
     Regressed { high_water: u32 },
+    OutOfOrder { expected: u32 },
 }
 
 #[cfg(test)]

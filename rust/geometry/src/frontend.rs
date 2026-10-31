@@ -98,7 +98,7 @@ pub fn line_move(
         return Err(FrontendError::NonFiniteInput { line_no });
     }
 
-    let spatial_distance = euclidean_distance(start, end);
+    let spatial_distance = crate::vec3::dist(start, end);
     let has_spatial = spatial_distance > DISPLACEMENT_EPSILON;
     let has_extrusion = e_delta.abs() > DISPLACEMENT_EPSILON;
 
@@ -162,13 +162,6 @@ fn segment_err(line_no: u32) -> impl Fn(GeometryError) -> FrontendError {
 
 fn coords_finite(points: &[[f64; 3]]) -> bool {
     points.iter().flatten().all(|c| c.is_finite())
-}
-
-fn euclidean_distance(a: [f64; 3], b: [f64; 3]) -> f64 {
-    let dx = b[0] - a[0];
-    let dy = b[1] - a[1];
-    let dz = b[2] - a[2];
-    dx.mul_add(dx, dy.mul_add(dy, dz * dz)).sqrt()
 }
 
 #[cfg(test)]

@@ -40,7 +40,9 @@ container deletes them.
 
 Run `./scripts/ci.sh quick` and get it fully green — it bundles ruff
 (check + format) over the whole repo, the Rust workspace tests, clippy
-with `-D warnings`, `cargo fmt --check`, and the watchdog canary. This is
+with `-D warnings`, `cargo fmt --check`, the public-API baseline diff
+(`rust/api/*.txt`, refresh with `scripts/public-api.sh --update` when a
+contract change is intended), and the watchdog canary. This is
 the same set CI runs first, so a red gate here is a red PR. `quick` does
 NOT include the Python host tests — if the change touches `klippy/`, also
 run `./scripts/ci.sh py`. Individual jobs: `./scripts/ci.sh <job>` (see
@@ -51,7 +53,7 @@ the header of `scripts/ci.sh` for the full list, e.g. `ruff`,
 
 Log via the structured pipeline (`event_log_emit` → `events/*.jsonl`), not
 `printf`/`output()` — it replaces `klippy.log` for MCU/structured diagnostics;
-the wire-stable event table is `rust/runtime/src/log_codes.rs`. To read or add
+the wire-stable event table is `rust/runtime-contract/src/log_codes.rs`. To read or add
 logs — `DIAG_DUMP`, crash forensics, filtering — use the `mcu-diagnostics`
 and `query-logs` skills.
 

@@ -53,7 +53,6 @@ endstop_event(struct timer *t)
             if (binding_count) {
                 if (e->stepper >= binding_count)
                     shutdown("bad endstop binding");
-                stepper_suppress_set(e->motor, e->stepper);
             }
             e->trip_clock = now64;
         }

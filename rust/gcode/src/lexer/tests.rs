@@ -15,25 +15,17 @@ fn whitespace_only_yields_nothing() {
 }
 
 #[test]
-fn pure_comment_yields_comment_token() {
-    let toks = collect("; just a comment\n");
-    assert_eq!(toks.len(), 1);
-    match &toks[0] {
-        Ok(Token::Comment { text, line_no }) => {
-            assert_eq!(text.as_ref(), "just a comment");
-            assert_eq!(*line_no, 1);
-        }
-        other => panic!("expected Comment, got {other:?}"),
-    }
+fn comment_lines_yield_no_tokens() {
+    assert!(collect("; just a comment\n").is_empty());
 }
 
 #[test]
 fn line_numbers_are_one_indexed() {
-    let toks = collect("\n\n; third line\n");
+    let toks = collect("\n\n G1 X1\n");
     assert_eq!(toks.len(), 1);
     match &toks[0] {
-        Ok(Token::Comment { line_no, .. }) => assert_eq!(*line_no, 3),
-        other => panic!("expected Comment, got {other:?}"),
+        Ok(Token::Command { line_no, .. }) => assert_eq!(*line_no, 3),
+        other => panic!("expected Command, got {other:?}"),
     }
 }
 
@@ -220,22 +212,6 @@ fn parses_t0() {
             assert_eq!(*major, 0);
         }
         other => panic!("expected Command, got {other:?}"),
-    }
-}
-
-#[test]
-fn layer_change_comment_is_marker_token() {
-    let toks = collect(";LAYER:5\n");
-    assert_eq!(toks.len(), 1);
-    match &toks[0] {
-        Ok(Token::Marker { kind, line_no }) => {
-            assert_eq!(
-                *kind,
-                crate::marker::MarkerKind::LayerChange { layer: Some(5) }
-            );
-            assert_eq!(*line_no, 1);
-        }
-        other => panic!("expected Marker, got {other:?}"),
     }
 }
 

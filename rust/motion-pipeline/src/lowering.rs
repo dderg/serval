@@ -1,7 +1,8 @@
 mod ladder;
 
 pub(crate) use ladder::{
-    LADDER_PROBES_U, LadderFailure, LadderPolicy, exact_piece, ladder_fit, quintic_in_u,
+    AccelerationTrend, LADDER_PROBES_U, LadderBudget, LadderFailure, LadderPolicy, LadderPva,
+    LadderSpan, LadderTruth, VelocitySign, exact_piece, ladder_fit, quintic_in_u,
 };
 
 use geometry::FollowerDemand;

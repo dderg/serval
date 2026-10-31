@@ -14,9 +14,9 @@ use mcu_transport::demux::{Demuxer, Frame};
 use mcu_transport::frame::CHANNEL_EVENTS;
 use mcu_transport::wire_helpers::decode_message_header;
 
-use crate::host_io::mcu_session::{build_kalico_control_frame, build_kalico_frame};
 use crate::mcu_call::McuCall;
 use crate::transport::TransportError;
+use mcu_transport::wire_helpers::{control_frame, frame_payload};
 
 type CallResult = Result<(MessageKind, Vec<u8>), TransportError>;
 type HeartbeatCallback = Arc<dyn Fn(&StatusHeartbeat) + Send + Sync>;
@@ -216,7 +216,7 @@ impl McuSerialConn {
         timeout: Duration,
     ) -> CallResult {
         let cid = self.next_cid.fetch_add(1, Ordering::Relaxed);
-        let frame = build_kalico_frame(channel, kind, cid, &body);
+        let frame = mcu_transport::encode_frame(channel, &frame_payload(kind, cid, &body));
         self.call(&frame, cid, timeout)
     }
 }
@@ -224,7 +224,7 @@ impl McuSerialConn {
 impl McuCall for McuSerialConn {
     fn mcu_call(&self, kind: MessageKind, body: Vec<u8>, timeout: Duration) -> CallResult {
         let cid = self.next_cid.fetch_add(1, Ordering::Relaxed);
-        let frame = build_kalico_control_frame(kind, cid, &body);
+        let frame = control_frame(kind, cid, &body);
         self.call(&frame, cid, timeout)
     }
 }

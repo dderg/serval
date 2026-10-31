@@ -12,43 +12,47 @@ fn build_mcu_configs_two_mcu_corexy_with_e() {
         McuTopologyInput {
             mcu_id: 7,
             axes: vec![AXIS_X as u8, AXIS_Y as u8, FOLLOWER_E as u8],
-            kinematics: 0,
-            max_motor_velocity: vec![f64::INFINITY; 3],
             lane_kinds: vec![LANE_KIND_PULSE, LANE_KIND_PHASE, LANE_KIND_PULSE],
-            motor_counts: vec![1; 3],
-            microstep_distance: vec![0.0125; 3],
-            invert_dir: vec![false; 3],
-            stepper_oids: vec![1, 2, 3],
-            move_queue_slots: 128,
-            step_pulse_seconds: vec![2e-6; 3],
             high_precision_step_compress: vec![true; 3],
-            stepcompress_max_error_secs: 0.0,
-            phase_sample_rate: 10_000.0,
-            phase_ring_depth: 12,
+            hw: McuHardware {
+                kinematics: 0,
+                max_motor_velocity: vec![f64::INFINITY; 3],
+                motor_counts: vec![1; 3],
+                microstep_distance: vec![0.0125; 3],
+                invert_dir: vec![false; 3],
+                stepper_oids: vec![1, 2, 3],
+                move_queue_slots: 128,
+                step_pulse_seconds: vec![2e-6; 3],
+                stepcompress_max_error_secs: 0.0,
+                phase_sample_rate: 10_000.0,
+                phase_ring_depth: 12,
+            },
         },
         McuTopologyInput {
             mcu_id: 9,
             axes: vec![AXIS_Z as u8],
-            kinematics: 1,
-            max_motor_velocity: vec![f64::INFINITY],
             lane_kinds: vec![LANE_KIND_PULSE],
-            motor_counts: vec![1],
-            microstep_distance: vec![0.0025],
-            invert_dir: vec![true],
-            stepper_oids: vec![4],
-            move_queue_slots: 128,
-            step_pulse_seconds: vec![2e-6; 1],
             high_precision_step_compress: vec![true],
-            stepcompress_max_error_secs: 0.0,
-            phase_sample_rate: 0.0,
-            phase_ring_depth: 0,
+            hw: McuHardware {
+                kinematics: 1,
+                max_motor_velocity: vec![f64::INFINITY],
+                motor_counts: vec![1],
+                microstep_distance: vec![0.0025],
+                invert_dir: vec![true],
+                stepper_oids: vec![4],
+                move_queue_slots: 128,
+                step_pulse_seconds: vec![2e-6; 1],
+                stepcompress_max_error_secs: 0.0,
+                phase_sample_rate: 0.0,
+                phase_ring_depth: 0,
+            },
         },
     ];
     let cfgs = build_mcu_configs(&mcus, &no_ethercat()).unwrap();
     assert_eq!(cfgs.len(), 2);
     assert_eq!(cfgs[0].mcu_id, 7);
     assert_eq!(cfgs[0].axes, vec![AXIS_X, AXIS_Y, FOLLOWER_E]);
-    assert_eq!(cfgs[0].kinematics, 0);
+    assert_eq!(cfgs[0].hw.kinematics, 0);
     assert_eq!(
         cfgs[0].lane_kinds,
         vec![LaneKind::Pulse, LaneKind::Phase, LaneKind::Pulse],
@@ -58,12 +62,12 @@ fn build_mcu_configs_two_mcu_corexy_with_e() {
     assert_eq!(cfgs[0].phase_capable_axes(), vec![AXIS_Y]);
     assert_eq!(cfgs[0].pulse_capable_axes(), vec![AXIS_X, FOLLOWER_E]);
     assert!(cfgs[0].has_pulse_lanes());
-    assert_eq!(cfgs[0].stepper_oids, vec![1, 2, 3]);
+    assert_eq!(cfgs[0].hw.stepper_oids, vec![1, 2, 3]);
     assert_eq!(cfgs[1].mcu_id, 9);
     assert_eq!(cfgs[1].axes, vec![AXIS_Z]);
-    assert_eq!(cfgs[1].kinematics, 1);
+    assert_eq!(cfgs[1].hw.kinematics, 1);
     assert_eq!(cfgs[1].lane_kinds, vec![LaneKind::Pulse]);
-    assert_eq!(cfgs[1].invert_dir, vec![true]);
+    assert_eq!(cfgs[1].hw.invert_dir, vec![true]);
 }
 
 #[test]
@@ -71,19 +75,21 @@ fn build_mcu_configs_stamps_ethercat_from_the_claimed_handles() {
     let mcus = vec![McuTopologyInput {
         mcu_id: 7,
         axes: vec![AXIS_X as u8],
-        kinematics: 1,
-        max_motor_velocity: vec![f64::INFINITY],
         lane_kinds: vec![LANE_KIND_PULSE],
-        motor_counts: vec![1],
-        microstep_distance: vec![0.0125],
-        invert_dir: vec![false],
-        stepper_oids: vec![1],
-        move_queue_slots: 0,
-        step_pulse_seconds: vec![2e-6],
         high_precision_step_compress: vec![true],
-        stepcompress_max_error_secs: 0.0,
-        phase_sample_rate: 0.0,
-        phase_ring_depth: 0,
+        hw: McuHardware {
+            kinematics: 1,
+            max_motor_velocity: vec![f64::INFINITY],
+            motor_counts: vec![1],
+            microstep_distance: vec![0.0125],
+            invert_dir: vec![false],
+            stepper_oids: vec![1],
+            move_queue_slots: 0,
+            step_pulse_seconds: vec![2e-6],
+            stepcompress_max_error_secs: 0.0,
+            phase_sample_rate: 0.0,
+            phase_ring_depth: 0,
+        },
     }];
     let ethercat: HashSet<u32> = [7u32].into_iter().collect();
     let cfgs = build_mcu_configs(&mcus, &ethercat).unwrap();
@@ -98,8 +104,11 @@ fn build_mcu_configs_unknown_tag_is_loud() {
     let mcus = vec![McuTopologyInput {
         mcu_id: 7,
         axes: vec![AXIS_X as u8],
-        kinematics: 9,
-        max_motor_velocity: vec![f64::INFINITY],
+        hw: McuHardware {
+            kinematics: 9,
+            max_motor_velocity: vec![f64::INFINITY],
+            ..Default::default()
+        },
         ..Default::default()
     }];
     let err = build_mcu_configs(&mcus, &no_ethercat()).unwrap_err();
@@ -114,8 +123,11 @@ fn build_mcu_configs_corexy_without_xy_is_loud() {
     let mcus = vec![McuTopologyInput {
         mcu_id: 7,
         axes: vec![AXIS_X as u8, FOLLOWER_E as u8],
-        kinematics: 0,
-        max_motor_velocity: vec![f64::INFINITY; 2],
+        hw: McuHardware {
+            kinematics: 0,
+            max_motor_velocity: vec![f64::INFINITY; 2],
+            ..Default::default()
+        },
         ..Default::default()
     }];
     let err = build_mcu_configs(&mcus, &no_ethercat()).unwrap_err();
@@ -130,8 +142,11 @@ fn build_mcu_configs_requires_one_velocity_ceiling_per_axis() {
     let mcus = vec![McuTopologyInput {
         mcu_id: 7,
         axes: vec![AXIS_X as u8, AXIS_Y as u8],
-        kinematics: KINEMATICS_COREXY,
-        max_motor_velocity: vec![100.0],
+        hw: McuHardware {
+            kinematics: KINEMATICS_COREXY,
+            max_motor_velocity: vec![100.0],
+            ..Default::default()
+        },
         ..Default::default()
     }];
     let err = build_mcu_configs(&mcus, &no_ethercat()).unwrap_err();
@@ -150,19 +165,21 @@ fn pulse_topology(lane_kinds: Vec<u8>, move_queue_slots: u32) -> Vec<McuTopology
     vec![McuTopologyInput {
         mcu_id: 7,
         axes: (0..n as u8).collect(),
-        kinematics: KINEMATICS_COREXY,
-        max_motor_velocity: vec![100.0; n],
         lane_kinds,
-        motor_counts: vec![1; n],
-        microstep_distance: vec![0.0125; n],
-        invert_dir: vec![false; n],
-        stepper_oids: (1..=n as u32).collect(),
-        move_queue_slots,
-        step_pulse_seconds: vec![2e-6; n],
         high_precision_step_compress: vec![true; n],
-        stepcompress_max_error_secs: 0.0,
-        phase_sample_rate: 10_000.0,
-        phase_ring_depth: 12,
+        hw: McuHardware {
+            kinematics: KINEMATICS_COREXY,
+            max_motor_velocity: vec![100.0; n],
+            motor_counts: vec![1; n],
+            microstep_distance: vec![0.0125; n],
+            invert_dir: vec![false; n],
+            stepper_oids: (1..=n as u32).collect(),
+            step_pulse_seconds: vec![2e-6; n],
+            stepcompress_max_error_secs: 0.0,
+            phase_sample_rate: 10_000.0,
+            phase_ring_depth: 12,
+            move_queue_slots,
+        },
     }]
 }
 
@@ -175,19 +192,19 @@ fn build_mcu_configs_requires_one_entry_per_axis_in_every_lane_vector() {
                 as fn(&mut McuTopologyInput),
         ),
         ("motor_counts", |m: &mut McuTopologyInput| {
-            m.motor_counts.pop().map(|_| ()).unwrap()
+            m.hw.motor_counts.pop().map(|_| ()).unwrap()
         }),
         ("microstep_distance", |m: &mut McuTopologyInput| {
-            m.microstep_distance.pop().map(|_| ()).unwrap()
+            m.hw.microstep_distance.pop().map(|_| ()).unwrap()
         }),
         ("invert_dir", |m: &mut McuTopologyInput| {
-            m.invert_dir.pop().map(|_| ()).unwrap()
+            m.hw.invert_dir.pop().map(|_| ()).unwrap()
         }),
         ("stepper_oids", |m: &mut McuTopologyInput| {
-            m.stepper_oids.pop().map(|_| ()).unwrap()
+            m.hw.stepper_oids.pop().map(|_| ()).unwrap()
         }),
         ("step_pulse_seconds", |m: &mut McuTopologyInput| {
-            m.step_pulse_seconds.pop().map(|_| ()).unwrap()
+            m.hw.step_pulse_seconds.pop().map(|_| ()).unwrap()
         }),
         (
             "high_precision_step_compress",
@@ -250,7 +267,7 @@ fn a_phase_only_mcu_needs_no_move_queue_slots() {
     let cfgs =
         build_mcu_configs(&pulse_topology(vec![LANE_KIND_PHASE; 2], 0), &no_ethercat()).unwrap();
     assert!(!cfgs[0].has_pulse_lanes());
-    assert_eq!(cfgs[0].move_queue_slots, 0);
+    assert_eq!(cfgs[0].hw.move_queue_slots, 0);
 }
 
 #[test]
@@ -264,7 +281,7 @@ fn an_ethercat_handle_needs_no_move_queue_slots() {
 fn a_phase_lane_requires_the_firmwares_sample_rate() {
     for rate in [0.0, -1.0, f64::NAN] {
         let mut mcus = pulse_topology(vec![LANE_KIND_PULSE, LANE_KIND_PHASE], 128);
-        mcus[0].phase_sample_rate = rate;
+        mcus[0].hw.phase_sample_rate = rate;
         let err = build_mcu_configs(&mcus, &no_ethercat()).unwrap_err();
         assert!(
             matches!(
@@ -275,10 +292,10 @@ fn a_phase_lane_requires_the_firmwares_sample_rate() {
         );
     }
     let mut pulse_only = pulse_topology(vec![LANE_KIND_PULSE; 2], 128);
-    pulse_only[0].phase_sample_rate = 0.0;
+    pulse_only[0].hw.phase_sample_rate = 0.0;
     let cfgs = build_mcu_configs(&pulse_only, &no_ethercat()).unwrap();
     assert_eq!(
-        cfgs[0].phase_sample_rate, 0.0,
+        cfgs[0].hw.phase_sample_rate, 0.0,
         "an mcu with no phase lane needs no sample rate"
     );
 }
@@ -286,17 +303,17 @@ fn a_phase_lane_requires_the_firmwares_sample_rate() {
 #[test]
 fn a_phase_lane_requires_the_firmwares_ring_depth() {
     let mut mcus = pulse_topology(vec![LANE_KIND_PULSE, LANE_KIND_PHASE], 128);
-    mcus[0].phase_ring_depth = 0;
+    mcus[0].hw.phase_ring_depth = 0;
     let err = build_mcu_configs(&mcus, &no_ethercat()).unwrap_err();
     assert!(
         matches!(err, KinematicsConfigError::PhaseLaneRingDepth { handle: 7 }),
         "the host cannot pace a phase lane without the mcu's advertised ring depth, got {err}"
     );
     let mut pulse_only = pulse_topology(vec![LANE_KIND_PULSE; 2], 128);
-    pulse_only[0].phase_ring_depth = 0;
+    pulse_only[0].hw.phase_ring_depth = 0;
     let cfgs = build_mcu_configs(&pulse_only, &no_ethercat()).unwrap();
     assert_eq!(
-        cfgs[0].phase_ring_depth, 0,
+        cfgs[0].hw.phase_ring_depth, 0,
         "an mcu with no phase lane needs no ring depth"
     );
 }
@@ -304,7 +321,7 @@ fn a_phase_lane_requires_the_firmwares_ring_depth() {
 fn encoder_topology(high_precision: Vec<bool>, max_error_secs: f64) -> Vec<McuTopologyInput> {
     let mut mcus = pulse_topology(vec![LANE_KIND_PULSE; 2], 128);
     mcus[0].high_precision_step_compress = high_precision;
-    mcus[0].stepcompress_max_error_secs = max_error_secs;
+    mcus[0].hw.stepcompress_max_error_secs = max_error_secs;
     mcus
 }
 
@@ -319,7 +336,7 @@ fn per_motor_encoder_choices_and_max_error_reach_axis_config() {
             StepcompressEncoder::HighPrecision
         ]
     );
-    assert_eq!(cfgs[0].stepcompress_max_error_secs, 1e-5);
+    assert_eq!(cfgs[0].hw.stepcompress_max_error_secs, 1e-5);
 }
 
 fn corexy_cfg() -> McuAxisConfig {
@@ -327,9 +344,12 @@ fn corexy_cfg() -> McuAxisConfig {
         ethercat: false,
         mcu_id: 1,
         axes: vec![AXIS_X, AXIS_Y, FOLLOWER_E],
-        kinematics: KINEMATICS_COREXY,
-        max_motor_velocity: Vec::new(),
         lane_kinds: vec![LaneKind::Phase; 3],
+        hw: McuHardware {
+            kinematics: KINEMATICS_COREXY,
+            max_motor_velocity: Vec::new(),
+            ..Default::default()
+        },
         ..Default::default()
     }
 }
@@ -338,9 +358,12 @@ fn cartesian_z_cfg() -> McuAxisConfig {
         ethercat: false,
         mcu_id: 2,
         axes: vec![AXIS_Z],
-        kinematics: 1,
-        max_motor_velocity: Vec::new(),
         lane_kinds: vec![LaneKind::Phase],
+        hw: McuHardware {
+            kinematics: 1,
+            max_motor_velocity: Vec::new(),
+            ..Default::default()
+        },
         ..Default::default()
     }
 }
@@ -366,7 +389,7 @@ fn reanchor_axis_targets_are_motor_frame_not_cartesian() {
     // A homing/probe trip's stop position (e.g. bed-mesh or z_tilt's
     // per-point probe descend, both ending in toolhead.set_position) is
     // cartesian. On CoreXY the rebased axis-0/1 values must be A/B motor
-    // positions — the same frame commit_sent_bundle records live pieces
+    // positions — the same frame commit_accepted_bundle records live pieces
     // in — not the raw x/y, or a later cartesian-inverting reader (like
     // motion_state_at_clock) double-transforms an already-correct value.
     let configs = vec![corexy_cfg(), cartesian_z_cfg()];
@@ -421,18 +444,24 @@ fn build_serial_seed_sends_skips_ethercat_node() {
         ethercat: false,
         mcu_id: 1,
         axes: vec![AXIS_X],
-        kinematics: KINEMATICS_COREXY,
-        max_motor_velocity: Vec::new(),
         lane_kinds: vec![LaneKind::Phase],
+        hw: McuHardware {
+            kinematics: KINEMATICS_COREXY,
+            max_motor_velocity: Vec::new(),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let serial_cfg = McuAxisConfig {
         ethercat: false,
         mcu_id: 2,
         axes: vec![AXIS_Y, AXIS_Z],
-        kinematics: 1,
-        max_motor_velocity: Vec::new(),
         lane_kinds: vec![LaneKind::Phase; 2],
+        hw: McuHardware {
+            kinematics: 1,
+            max_motor_velocity: Vec::new(),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let configs = vec![ec_cfg, serial_cfg];
@@ -466,18 +495,24 @@ fn build_serial_seed_sends_skips_a_pulse_only_mcu() {
         ethercat: false,
         mcu_id: 1,
         axes: vec![AXIS_X],
-        kinematics: 1,
-        max_motor_velocity: Vec::new(),
         lane_kinds: vec![LaneKind::Pulse],
+        hw: McuHardware {
+            kinematics: 1,
+            max_motor_velocity: Vec::new(),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let phase_cfg = McuAxisConfig {
         ethercat: false,
         mcu_id: 2,
         axes: vec![AXIS_Y, AXIS_Z],
-        kinematics: 1,
-        max_motor_velocity: Vec::new(),
         lane_kinds: vec![LaneKind::Phase; 2],
+        hw: McuHardware {
+            kinematics: 1,
+            max_motor_velocity: Vec::new(),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let sends = build_serial_seed_sends(
@@ -495,9 +530,12 @@ fn build_serial_seed_sends_covers_a_dual_transport_only_mcu() {
         ethercat: false,
         mcu_id: 7,
         axes: vec![AXIS_Y, AXIS_Z],
-        kinematics: 1,
-        max_motor_velocity: Vec::new(),
         lane_kinds: vec![LaneKind::PhaseWithPulse; 2],
+        hw: McuHardware {
+            kinematics: 1,
+            max_motor_velocity: Vec::new(),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let sends = build_serial_seed_sends(
@@ -539,18 +577,24 @@ fn build_serial_seed_sends_all_ethercat_returns_empty() {
         ethercat: false,
         mcu_id: 1,
         axes: vec![AXIS_X],
-        kinematics: KINEMATICS_COREXY,
-        max_motor_velocity: Vec::new(),
         lane_kinds: vec![LaneKind::Phase],
+        hw: McuHardware {
+            kinematics: KINEMATICS_COREXY,
+            max_motor_velocity: Vec::new(),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let ec_cfg_2 = McuAxisConfig {
         ethercat: false,
         mcu_id: 3,
         axes: vec![AXIS_Y],
-        kinematics: 1,
-        max_motor_velocity: Vec::new(),
         lane_kinds: vec![LaneKind::Phase],
+        hw: McuHardware {
+            kinematics: 1,
+            max_motor_velocity: Vec::new(),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let configs = vec![ec_cfg_1, ec_cfg_2];
@@ -571,19 +615,21 @@ fn stepcompress_toolhead_cfg() -> McuAxisConfig {
         ethercat: false,
         mcu_id: 1,
         axes: vec![FOLLOWER_E],
-        kinematics: 1,
-        max_motor_velocity: Vec::new(),
         lane_kinds: vec![LaneKind::Pulse],
-        motor_counts: vec![1],
-        microstep_distance: vec![7.73 / (200.0 * 16.0)],
-        invert_dir: vec![true],
-        stepper_oids: vec![4],
-        move_queue_slots: 128,
-        step_pulse_seconds: vec![2e-6; 1],
         stepcompress_encoders: vec![StepcompressEncoder::HighPrecision],
-        phase_sample_rate: 0.0,
-        phase_ring_depth: 0,
-        stepcompress_max_error_secs: 0.0,
+        hw: McuHardware {
+            kinematics: 1,
+            max_motor_velocity: Vec::new(),
+            motor_counts: vec![1],
+            microstep_distance: vec![7.73 / (200.0 * 16.0)],
+            invert_dir: vec![true],
+            stepper_oids: vec![4],
+            move_queue_slots: 128,
+            step_pulse_seconds: vec![2e-6; 1],
+            phase_sample_rate: 0.0,
+            phase_ring_depth: 0,
+            stepcompress_max_error_secs: 0.0,
+        },
     }
 }
 
@@ -592,19 +638,21 @@ fn stepcompress_corexy_cfg() -> McuAxisConfig {
         ethercat: false,
         mcu_id: 2,
         axes: vec![AXIS_X, AXIS_Y, FOLLOWER_E],
-        kinematics: KINEMATICS_COREXY,
-        max_motor_velocity: Vec::new(),
         lane_kinds: vec![LaneKind::Pulse; 3],
-        motor_counts: vec![1; 3],
-        microstep_distance: vec![0.0125, 0.0125, 0.0025],
-        invert_dir: vec![false; 3],
-        stepper_oids: vec![1, 2, 3],
-        move_queue_slots: 128,
-        step_pulse_seconds: vec![2e-6; 3],
         stepcompress_encoders: vec![StepcompressEncoder::HighPrecision; 3],
-        phase_sample_rate: 0.0,
-        phase_ring_depth: 0,
-        stepcompress_max_error_secs: 0.0,
+        hw: McuHardware {
+            kinematics: KINEMATICS_COREXY,
+            max_motor_velocity: Vec::new(),
+            motor_counts: vec![1; 3],
+            microstep_distance: vec![0.0125, 0.0125, 0.0025],
+            invert_dir: vec![false; 3],
+            stepper_oids: vec![1, 2, 3],
+            move_queue_slots: 128,
+            step_pulse_seconds: vec![2e-6; 3],
+            phase_sample_rate: 0.0,
+            phase_ring_depth: 0,
+            stepcompress_max_error_secs: 0.0,
+        },
     }
 }
 

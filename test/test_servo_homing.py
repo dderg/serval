@@ -157,7 +157,6 @@ def test_no_endstop_pin_means_zero_retract():
     rail = make_servo_rail(drop=("endstop_pin", "position_endstop"))
     hi = rail.get_homing_info()
     assert hi.retract_dist == 0.0
-    assert rail.second_homing_speed == 0.0
 
 
 def test_rail_accepts_endstop_past_the_travel_range():

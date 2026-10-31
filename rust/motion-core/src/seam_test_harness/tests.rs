@@ -153,37 +153,8 @@ fn voron_cube_with_extruder_kernel_survives_pacer_drains() {
             .any(|m| m.segment.spatial.is_none() && !m.segment.followers.is_empty()),
         "gcode must contain extrude-only moves for this test to mean anything"
     );
-    let handle = setup_stages(
-        config,
-        extruder_pa_smooth_chain_set(),
-        vec![0.0, 0.0, 0.0, 0.0],
-        0.0,
-    );
-    let output = handle.output;
-    let collector = std::thread::spawn(move || {
-        let mut segs: Vec<ContinuousSegment> = Vec::new();
-        while let Ok(item) = output.recv() {
-            if let TrajectoryItem::Seg(seg) = item {
-                segs.push(seg);
-            }
-        }
-        segs
-    });
-    for (i, m) in moves.into_iter().enumerate() {
-        handle.input.send(m.into()).expect("pipeline accepts move");
-        if i % 40 == 39 {
-            handle
-                .input
-                .send(motion_pipeline::StreamInput::Drain)
-                .expect("pipeline accepts drain");
-        }
-    }
-    drop(handle.input);
-    let segs = collector.join().expect("collector thread");
-    assert!(
-        segs.len() > 100,
-        "expected a full print's worth of segments"
-    );
+    let segs =
+        collect_shaped_segments_scripted(&moves, config, extruder_pa_smooth_chain_set(), Some(40));
     for axis in 0..4 {
         let worst = worst_track_seam(&segs, axis);
         assert!(
@@ -201,36 +172,11 @@ fn voron_cube_with_extruder_kernel_survives_pacer_drains() {
 fn voron_cube_with_smooth_pa_on_extruder_survives_pacer_drains() {
     let config = bench_config();
     let moves = parse_gcode_to_moves(CRASH_VORON_CUBE, config.limits);
-    let handle = setup_stages(
+    let segs = collect_shaped_segments_scripted(
+        &moves,
         config,
         smooth_pa_on_extruder_chain_set(),
-        vec![0.0, 0.0, 0.0, 0.0],
-        0.0,
-    );
-    let output = handle.output;
-    let collector = std::thread::spawn(move || {
-        let mut segs: Vec<ContinuousSegment> = Vec::new();
-        while let Ok(item) = output.recv() {
-            if let TrajectoryItem::Seg(seg) = item {
-                segs.push(seg);
-            }
-        }
-        segs
-    });
-    for (i, m) in moves.into_iter().enumerate() {
-        handle.input.send(m.into()).expect("pipeline accepts move");
-        if i % 40 == 39 {
-            handle
-                .input
-                .send(motion_pipeline::StreamInput::Drain)
-                .expect("pipeline accepts drain");
-        }
-    }
-    drop(handle.input);
-    let segs = collector.join().expect("collector thread");
-    assert!(
-        segs.len() > 100,
-        "expected a full print's worth of segments"
+        Some(40),
     );
     for axis in 0..4 {
         let worst = worst_track_seam(&segs, axis);
@@ -276,46 +222,21 @@ fn extruder_track_is_continuous_across_a_pressure_advance_change() {
         .expect("band move builds")
     };
 
-    let handle = setup_stages(
-        config,
-        extruder_chain_set_with_k(0.03),
-        vec![0.0, 0.0, 0.0, 0.0],
-        0.0,
-    );
-    let output = handle.output;
-    let collector = std::thread::spawn(move || {
-        let mut segs: Vec<ContinuousSegment> = Vec::new();
-        while let Ok(item) = output.recv() {
-            if let TrajectoryItem::Seg(seg) = item {
-                segs.push(seg);
-            }
-        }
-        segs
-    });
+    let mut script = Vec::new();
     let mut x0 = 0.0;
     for (i, k) in [0.03, 0.042, 0.054, 0.066].into_iter().enumerate() {
         if i > 0 {
-            handle
-                .input
-                .send(motion_pipeline::StreamInput::Drain)
-                .expect("pipeline accepts drain");
-            handle
-                .input
-                .send(motion_pipeline::StreamInput::Control(
-                    motion_pipeline::Control::SetAxisChains(extruder_chain_set_with_k(k)),
-                ))
-                .expect("pipeline accepts chain swap");
+            script.push(motion_pipeline::StreamInput::Drain);
+            script.push(motion_pipeline::StreamInput::Control(
+                motion_pipeline::Control::SetAxisChains(extruder_chain_set_with_k(k)),
+            ));
         }
         for _ in 0..3 {
-            handle
-                .input
-                .send(band(x0, (i * 3) as u32).into())
-                .expect("pipeline accepts move");
+            script.push(band(x0, (i * 3) as u32).into());
             x0 += 10.0;
         }
     }
-    drop(handle.input);
-    let segs = collector.join().expect("collector thread");
+    let segs = collect_shaped_segments_from_script(script, config, extruder_chain_set_with_k(0.03));
     let worst = worst_track_seam(&segs, EXTRUDER_AXIS);
     assert!(
         worst < 1e-3,
@@ -377,42 +298,21 @@ G1 X20 Y0 E6.12
     let moves = parse_gcode_to_moves(gcode, config.limits);
     assert_eq!(moves.len(), 9, "nine extruding perimeter sides");
 
-    let handle = setup_stages(
-        config,
-        bell_leader_extruder_chain_set(0.022),
-        vec![0.0, 0.0, 0.0, 0.0],
-        0.0,
-    );
-    let output = handle.output;
-    let collector = std::thread::spawn(move || {
-        let mut segs: Vec<ContinuousSegment> = Vec::new();
-        while let Ok(item) = output.recv() {
-            if let TrajectoryItem::Seg(seg) = item {
-                segs.push(seg);
-            }
-        }
-        segs
-    });
+    let mut script = Vec::new();
     let swaps = [0.017, 0.03];
     for (i, m) in moves.into_iter().enumerate() {
         if i > 0 && i % 3 == 0 {
-            handle
-                .input
-                .send(motion_pipeline::StreamInput::Drain)
-                .expect("pipeline accepts drain");
-            handle
-                .input
-                .send(motion_pipeline::StreamInput::Control(
-                    motion_pipeline::Control::SetAxisChains(bell_leader_extruder_chain_set(
-                        swaps[i / 3 - 1],
-                    )),
-                ))
-                .expect("pipeline accepts chain swap");
+            script.push(motion_pipeline::StreamInput::Drain);
+            script.push(motion_pipeline::StreamInput::Control(
+                motion_pipeline::Control::SetAxisChains(bell_leader_extruder_chain_set(
+                    swaps[i / 3 - 1],
+                )),
+            ));
         }
-        handle.input.send(m.into()).expect("pipeline accepts move");
+        script.push(m.into());
     }
-    drop(handle.input);
-    let segs = collector.join().expect("collector thread");
+    let segs =
+        collect_shaped_segments_from_script(script, config, bell_leader_extruder_chain_set(0.022));
     for axis in 0..4 {
         let worst = worst_track_seam(&segs, axis);
         assert!(
@@ -449,31 +349,11 @@ fn extruder_kernel_track_is_continuous_across_a_drain() {
     )
     .expect("unretract-like move builds");
 
-    let handle = setup_stages(
+    let segs = collect_shaped_segments_from_script(
+        vec![m1.into(), motion_pipeline::StreamInput::Drain, m2.into()],
         config,
         extruder_pa_smooth_chain_set(),
-        vec![0.0, 0.0, 0.0, 0.0],
-        0.0,
     );
-    let output = handle.output;
-    let collector = std::thread::spawn(move || {
-        let mut segs: Vec<ContinuousSegment> = Vec::new();
-        while let Ok(item) = output.recv() {
-            if let TrajectoryItem::Seg(seg) = item {
-                segs.push(seg);
-            }
-        }
-        segs
-    });
-    handle.input.send(m1.into()).expect("pipeline accepts m1");
-    handle
-        .input
-        .send(motion_pipeline::StreamInput::Drain)
-        .expect("pipeline accepts drain");
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    handle.input.send(m2.into()).expect("pipeline accepts m2");
-    drop(handle.input);
-    let segs = collector.join().expect("collector thread");
 
     assert!(
         segs.len() >= 2,

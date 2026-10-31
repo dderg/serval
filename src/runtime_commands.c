@@ -18,25 +18,6 @@
 extern void *runtime_handle;
 
 void
-command_runtime_query_status(uint32_t *args)
-{
-    if (!runtime_handle) {
-        sendf("runtime_status status=%c last_err=%i phase_spi_skip_count=%u",
-              (uint8_t)255, -7, 0u);
-        return;
-    }
-    uint8_t status = runtime_handle_status(runtime_handle);
-    int32_t last_err = runtime_handle_last_error(runtime_handle);
-    uint32_t phase_skip = 0;
-#if CONFIG_MACH_STM32 || CONFIG_MACH_LINUX
-    phase_skip = phase_spi_get_skip_count();
-#endif
-    sendf("runtime_status status=%c last_err=%i phase_spi_skip_count=%u",
-          status, last_err, phase_skip);
-}
-DECL_COMMAND(command_runtime_query_status, "runtime_query_status");
-
-void
 command_runtime_seed_position(uint32_t *args)
 {
     int32_t x_q16 = (int32_t)args[0];
@@ -48,23 +29,6 @@ command_runtime_seed_position(uint32_t *args)
 }
 DECL_COMMAND(command_runtime_seed_position,
     "runtime_seed_position x_q16=%i y_q16=%i z_q16=%i");
-
-extern uint32_t stats_send_time;
-extern uint32_t stats_send_time_high;
-void
-command_runtime_clock_sync_request(uint32_t *args)
-{
-    uint32_t request_id = args[0];
-    // host_send_time_{lo,hi} (args[1]/[2]) are unused but retained on the wire.
-    uint32_t low = timer_read_time();
-    uint32_t high = stats_send_time_high + (low < stats_send_time);
-    sendf(
-        "kalico_clock_sync_response request_id=%u mcu_clock_lo=%u mcu_clock_hi=%u",
-        request_id, low, high);
-}
-DECL_COMMAND(command_runtime_clock_sync_request,
-    "runtime_clock_sync_request request_id=%u "
-    "host_send_time_lo=%u host_send_time_hi=%u");
 
 enum { TMC_SPI_MODE = 3 };
 

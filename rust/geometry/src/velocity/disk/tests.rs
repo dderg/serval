@@ -4,7 +4,6 @@ fn kin(length: f64, accel: f64, kappa0: f64, sigma: f64, ceiling: f64) -> Kinema
     Kinematics {
         length,
         accel,
-        jerk: f64::INFINITY,
         kappa0,
         sigma,
         flat_ceiling: ceiling,

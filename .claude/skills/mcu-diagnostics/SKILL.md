@@ -112,8 +112,7 @@ carry `code` + `code_name`. Canonical table: `rust/runtime/src/log_codes.rs`.
 | `diag.engine_xition` | arg0=(prev<<8\|new), arg1=samples | engine state change |
 | `diag.rust_fault` | arg0=err, arg1=detail | rust fault in the ring |
 | `motion.piece_start_past` / `motion.ring_full` | … | motion engine |
-| `tick.interval_exceeded` / `tick.underrun` | … | tick ISR |
-| `endstop.trip` / `endstop.arm_timeout` | … | endstop |
+| `endstop.trsync_trigger_cmd` / `endstop.trsync_do_trigger` | arg0=oid/flags, arg1=reason | endstop |
 
 ## Reading the raw files (fallback — when VL/Vector is down)
 

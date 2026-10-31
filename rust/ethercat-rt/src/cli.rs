@@ -42,27 +42,6 @@ fn parse_clamp_tenths(v: &str) -> Result<i16, String> {
 }
 
 pub fn parse_slaves(args: &[String]) -> Result<Vec<SlaveCfg>, String> {
-    if !args.iter().any(|a| a == "--slave") {
-        let mut cfg = default_cfg(0);
-        if let Some(v) = arg_val(args, "--counts-per-mm").and_then(|s| s.parse().ok()) {
-            cfg.counts_per_mm = v;
-        }
-        if let Some(v) = arg_val(args, "--rotation-distance").and_then(|s| s.parse().ok()) {
-            cfg.rotation_distance = v;
-        }
-        cfg.following_error_counts =
-            arg_val(args, "--following-error-counts").and_then(|s| s.parse().ok());
-        cfg.max_torque_tenth_pct =
-            arg_val(args, "--max-torque-tenth-pct").and_then(|s| s.parse().ok());
-        cfg.velocity_ff = args.iter().any(|a| a == "--velocity-ff");
-        cfg.invert = args.iter().any(|a| a == "--invert");
-        if let Some(v) = arg_val(args, "--torque-clamp-pct") {
-            cfg.torque_clamp_tenths = parse_clamp_tenths(&v)?;
-        }
-        cfg.dynamics_profile = arg_val(args, "--slave-dynamics-profile");
-        return Ok(vec![cfg]);
-    }
-
     let mut slaves: Vec<SlaveCfg> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -145,6 +124,9 @@ pub fn parse_slaves(args: &[String]) -> Result<Vec<SlaveCfg>, String> {
         }
     }
 
+    if slaves.is_empty() {
+        return Err("no --slave group configured".to_string());
+    }
     if slaves.len() > EC_RT_MAX_SLAVES {
         return Err(format!(
             "{} slaves configured, endpoint supports at most {EC_RT_MAX_SLAVES}",
@@ -174,8 +156,7 @@ pub struct Args {
     pub slaves: Vec<SlaveCfg>,
     pub rt_cpu: i32,
     pub rt_prio: i32,
-    pub mailbox_cpu: Option<usize>,
-    pub dynamics: Option<crate::dynamics::DynamicsModel>,
+    pub dynamics: Option<ethercat_setpoint::dynamics::DynamicsModel>,
     pub late_tolerance_ns: Option<i64>,
     pub group_delay_ns: u64,
 }
@@ -184,13 +165,17 @@ fn resolve_dynamics(
     slaves: &[SlaveCfg],
     node_profile: Option<String>,
     num_slaves: usize,
-) -> Option<crate::dynamics::DynamicsModel> {
+) -> Option<ethercat_setpoint::dynamics::DynamicsModel> {
     let per_slot: Vec<Option<String>> = slaves.iter().map(|s| s.dynamics_profile.clone()).collect();
-    crate::dynamics::chain_model_from_profiles(node_profile.as_deref(), &per_slot, num_slaves)
-        .unwrap_or_else(|e| {
-            eprintln!("ec-rt: {e}");
-            std::process::exit(1);
-        })
+    ethercat_setpoint::dynamics::chain_model_from_profiles(
+        node_profile.as_deref(),
+        &per_slot,
+        num_slaves,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("ec-rt: {e}");
+        std::process::exit(1);
+    })
 }
 
 impl Args {
@@ -219,8 +204,6 @@ impl Args {
         let rt_prio: i32 = arg_val(&raw, "--rt-prio")
             .and_then(|s| s.parse().ok())
             .unwrap_or(80);
-        let mailbox_cpu: Option<usize> =
-            arg_val(&raw, "--mailbox-cpu").and_then(|s| s.parse().ok());
         let node_profile = arg_val(&raw, "--dynamics-profile");
         let dynamics = resolve_dynamics(&slaves, node_profile, num_slaves);
         let late_tolerance_ns = arg_val(&raw, "--late-tolerance-us").map(|v| {
@@ -251,7 +234,6 @@ impl Args {
             slaves,
             rt_cpu,
             rt_prio,
-            mailbox_cpu,
             dynamics,
             late_tolerance_ns,
             group_delay_ns,

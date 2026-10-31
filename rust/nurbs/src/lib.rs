@@ -1,7 +1,5 @@
 pub mod error;
-pub use error::{AlgebraError, ConstructError, KnotError, NurbsError};
-
-pub mod view;
+pub use error::{AlgebraError, ConstructError};
 
 pub mod scalar;
 pub use scalar::ScalarNurbs;
@@ -25,10 +23,7 @@ pub const MAX_DEGREE: usize = 20;
 
 pub const WORKSPACE_SIZE: usize = MAX_DEGREE + 1;
 
-pub const MIN_PARAMETRIC_SPEED: f64 = 1e-9;
-
 const _: () = assert!(WORKSPACE_SIZE == MAX_DEGREE + 1);
-const _: () = assert!(MIN_PARAMETRIC_SPEED > 0.0);
 
 /// `a * b + c` contracted the fastest way the target allows. Hot numeric
 /// loops must use this instead of `f64::mul_add`: wasm32 has no fma

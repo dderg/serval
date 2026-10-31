@@ -42,9 +42,7 @@ def test_both_corner_keys_is_a_config_error():
 
 def test_neither_key_defaults_to_converted_default_scv():
     assert corner_deviation() == pytest.approx(
-        motion_setup.corner_deviation_from_scv(
-            motion_setup.DEFAULT_SQUARE_CORNER_VELOCITY, 3000.0
-        )
+        motion_setup.corner_deviation_from_scv(5.0, 3000.0)
     )
 
 

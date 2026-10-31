@@ -6,12 +6,11 @@
 
 use super::pump_loop::Pump;
 use super::sched::append_spans_merging_holds;
-use super::stall::ConsumptionStallWatch;
-use super::{AxisKey, AxisQueue, EnqueueMsg, PumpCallbacks, PumpMsg, SendError, SpanSink};
+use super::tests::NullSink;
+use super::{AxisKey, AxisQueue, LaneProjection, PumpCallbacks, PumpMsg};
 use crate::pump::MAX_LEAD_SECS;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use trajectory::{
     ClockedMotorSpan, ContinuousAxis, MAX_SPAN_SECS, MotorGroup, MotorSpan, MotorTerm,
 };
@@ -164,39 +163,13 @@ fn a_fresh_epoch_is_fenced_from_the_staged_tail() {
     assert_eq!(queue[1].end_clock, hold(2).end_clock);
 }
 
-#[derive(Clone, Copy)]
-struct NullSink;
-
-impl SpanSink for NullSink {
-    fn send_frame(
-        &self,
-        _key: AxisKey,
-        _spans: &[ClockedMotorSpan],
-        _new_head: u32,
-        _room: u32,
-    ) -> Result<i32, SendError> {
-        Ok(mcu_protocol::result_codes::OK)
-    }
-}
-
 fn pump_with(callbacks: PumpCallbacks) -> Pump<NullSink> {
-    Pump {
-        queues: BTreeMap::new(),
-        junctions: super::JunctionTracker::default(),
-        cohort: None,
-        halted: BTreeMap::new(),
-        sink: NullSink,
+    Pump::new(
+        NullSink,
         callbacks,
-        history: None,
-        ledger: Arc::new(crate::drain::DrainLedger::new()),
-        pending_barrier_acks: Vec::new(),
-        backlog: Arc::new(AtomicU64::new(0)),
-        release_plan: crate::pump::ReleasePlan::default(),
-        data_open: true,
-        intake_batch_open: false,
-        consumption_stall: ConsumptionStallWatch::new(std::time::Duration::from_secs(60)),
-        mem_probe: super::memstat::MemPressureProbe::new(),
-    }
+        None,
+        Arc::new(crate::drain::DrainLedger::new()),
+    )
 }
 
 fn synced_pump() -> Pump<NullSink> {
@@ -208,14 +181,13 @@ fn synced_pump() -> Pump<NullSink> {
 
 fn enqueue_run(pump: &mut Pump<NullSink>, key: AxisKey, count: u64) {
     for index in 0..count {
-        pump.enqueue(EnqueueMsg {
+        pump.enqueue(LaneProjection {
             key,
             spans: vec![hold(index)],
             epoch: crate::anchor::StreamEpoch::Continuation,
             lead_secs: MAX_LEAD_SECS,
             source_line: SOURCE_LINE,
             epoch_freq: None,
-            batch_end: true,
         });
     }
 }

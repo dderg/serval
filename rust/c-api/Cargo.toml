@@ -41,6 +41,7 @@ sample-stepping = ["runtime/sample-stepping"]
 
 [dependencies]
 runtime = { path = "../runtime", default-features = false }
+runtime-contract = { path = "../runtime-contract" }
 cbindgen = { version = "0.29", optional = true, package = "cbindgen" }
 # Required for RMW atomic operations on MCU targets: on thumbv7em lowers to
 # native LDREX/STREX; on thumbv6m (STM32G0) uses interrupt-masking fallback.

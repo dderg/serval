@@ -29,7 +29,7 @@ fn submit_then_nak_in_same_tick_keeps_state_consistent() {
 
     let (tx_new, _rx_new) = sync_channel(1);
     h.submission_tx
-        .send(ReactorCommand::SubmitTyped {
+        .send(ReactorCommand::Call {
             call_id: 3,
             payload: vec![3u8],
             expected_response_name: "noop".into(),

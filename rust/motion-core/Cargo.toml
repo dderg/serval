@@ -13,25 +13,24 @@ mcu-protocol = { path = "../mcu-protocol" }
 trajectory = { path = "../trajectory" }
 geometry = { path = "../geometry" }
 motion-pipeline = { path = "../motion-pipeline" }
-gcode = { path = "../gcode" }
+gcode = { path = "../gcode", optional = true }
 nurbs = { path = "../nurbs" }
-runtime = { path = "../runtime" }
-planner-config = { path = "../planner-config" }
+runtime-contract = { path = "../runtime-contract" }
 step-shim = { path = "../step-shim" }
-ethercat-rt = { path = "../ethercat-rt" }
+ethercat-setpoint = { path = "../ethercat-setpoint" }
+ethercat-setpoint-fill = { path = "../ethercat-setpoint-fill" }
 crossbeam-channel = "0.5"
 tracing = "0.1"
 thiserror = { workspace = true }
 
 [features]
-test-support = []
+test-support = ["gcode"]
 
 [dev-dependencies]
+ethercat-rt = { path = "../ethercat-rt" }
 proptest = "1"
-libm = { version = "0.2", default-features = false }
 host-rt = { path = "../host-rt", features = ["test-harness"] }
 motion-core = { path = ".", features = ["test-support"] }
-serialport = "4"
 
 [lints]
 workspace = true

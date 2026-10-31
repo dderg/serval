@@ -27,13 +27,6 @@ pub struct StatusEvent {
 }
 
 #[derive(Debug, Clone)]
-pub struct TraceEvent {
-    pub count: u32,
-    pub data: Vec<u8>,
-    pub flags: u32,
-}
-
-#[derive(Debug, Clone)]
 pub struct McuLogEvent {
     pub mcu_tick: u64,
     pub level: u8,
@@ -56,7 +49,6 @@ pub enum RuntimeEvent {
     CreditFreed(CreditFreedEvent),
     Fault(FaultEvent),
     Status(StatusEvent),
-    Trace(TraceEvent),
     EndstopTrip(EndstopTripEvent),
     McuLog(McuLogEvent),
     Heartbeat {
@@ -97,14 +89,6 @@ impl RuntimeEvent {
                 last_fault: params.get_u32("last_fault") as u16,
                 fault_detail: params.get_u32("fault_detail"),
                 retired_through_segment_id: params.get_u32("retired_through_segment_id"),
-            }),
-            "kalico_trace" => Self::Trace(TraceEvent {
-                count: params.get_u32("count"),
-                data: params
-                    .get_bytes("data")
-                    .map(<[u8]>::to_vec)
-                    .unwrap_or_default(),
-                flags: 0,
             }),
             _ => {
                 let msg = params.try_get_str("#msg").unwrap_or("").to_string();

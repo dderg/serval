@@ -125,7 +125,7 @@ impl Reactor {
         >,
         deadline: Instant,
     ) -> Result<(), TransportError> {
-        if self.unacked_window.is_full() {
+        if crate::host_io::window::is_full(&self.unacked_window) {
             if self.outbound.pending_submissions.len() >= PENDING_SUBMISSION_CEILING {
                 let _ = completion.send(Err(TransportError::Backpressure));
                 return Ok(());
@@ -149,7 +149,7 @@ impl Reactor {
 
         let now = self.clock.now();
         self.unacked_window
-            .push(crate::host_io::window::UnackedEntry {
+            .push_back(crate::host_io::window::UnackedEntry {
                 seq,
                 frame_bytes: frame,
                 sent_at: now,
@@ -187,7 +187,7 @@ impl Reactor {
         payload: Vec<u8>,
         is_get_clock: bool,
     ) -> Result<(), TransportError> {
-        if self.unacked_window.is_full() {
+        if crate::host_io::window::is_full(&self.unacked_window) {
             if self.outbound.pending_fire_and_forget.len() == FIRE_AND_FORGET_HIGH_WATER {
                 tracing::warn!(
                     subsystem = "mcu-comms",
@@ -220,7 +220,7 @@ impl Reactor {
 
         let now = self.clock.now();
         self.unacked_window
-            .push(crate::host_io::window::UnackedEntry {
+            .push_back(crate::host_io::window::UnackedEntry {
                 seq,
                 frame_bytes: frame,
                 sent_at: now,
@@ -230,7 +230,7 @@ impl Reactor {
     }
 
     pub(crate) fn drain_pending_submissions(&mut self) {
-        while !self.unacked_window.is_full() {
+        while !crate::host_io::window::is_full(&self.unacked_window) {
             let Some(kind) = self.outbound.pending_outbound_order.pop_front() else {
                 break;
             };

@@ -9,10 +9,6 @@ license.workspace = true
 name = "ethercat_rt"
 crate-type = ["rlib"]
 
-# `hw` gates the EtherCAT FFI (`ffi` module) and the build.rs compile + link of the
-# IgH master backend (csrc/libecrt_igh.c, -lethercat) over the ec_rt_* surface. OFF
-# by default so the pure scale/wire/setpoint unit tests build and run on any machine
-# (and in CI) without a master library installed.
 [features]
 default = []
 hw = []
@@ -30,28 +26,25 @@ name = "ethercat-rt-stub"
 path = "src/bin/ethercat-rt-stub.rs"
 
 [dependencies]
-libm = { version = "0.2", default-features = false }
-runtime = { path = "../runtime", default-features = false, features = ["host"] }  # servo node: no stepper dispatch
+libm = { version = "0.2", default-features = false }   # bit-reproducible transcendentals; std's are per-platform (see clippy.toml)
+ethercat-setpoint = { path = "../ethercat-setpoint" }
+runtime-contract = { path = "../runtime-contract" }
 mcu-protocol = { path = "../mcu-protocol" }
 mcu-transport = { path = "../mcu-transport" }
-trajectory = { path = "../trajectory" }
 libc = "0.2"                                       # raw clock_gettime(CLOCK_MONOTONIC)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter", "std"] }
-crossbeam-channel = "0.5"                           # lossy bounded record channel: field capture on the emitter, formatting + file I/O on the obs-writer thread
 time = { version = "0.3", default-features = false, features = ["formatting", "macros", "std"] }
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
-zstd = "0.13"                                       # inline capture compression (level 3) on the writer thread; no workspace crate uses zstd yet
 rtrb = "0.3.4"
 
 [build-dependencies]
 cc = "1"                                            # compiles csrc/libecrt_igh.c under `hw`
 
 [dev-dependencies]
+ethercat-setpoint-fill = { path = "../ethercat-setpoint-fill" }
+trajectory = { path = "../trajectory" }
 host-rt = { path = "../host-rt" }
-parking_lot = "0.12"
 nurbs = { path = "../nurbs" }                       # spline test spans: exact quadratic position laws
 
 [lints]

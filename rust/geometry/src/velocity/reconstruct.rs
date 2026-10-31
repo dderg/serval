@@ -34,7 +34,14 @@ pub(super) enum ReconstructError {
     Diverged,
 }
 
-fn member_law(kin: &Kinematics, local: f64, brake: bool) -> ScalarLaw {
+#[derive(Clone, Copy)]
+enum RailSense {
+    Forward,
+    Braking,
+}
+
+fn member_law(kin: &Kinematics, local: f64, sense: RailSense) -> ScalarLaw {
+    let brake = matches!(sense, RailSense::Braking);
     if kin.is_straight() {
         ScalarLaw::ConstAccel {
             a0: if brake { -kin.accel } else { kin.accel },
@@ -74,7 +81,6 @@ pub(super) fn member_profile(
     let reversed = Kinematics {
         length: kin.length,
         accel: kin.accel,
-        jerk: kin.jerk,
         kappa0: kin.kappa0 + kin.sigma * kin.length,
         sigma: -kin.sigma,
         flat_ceiling: kin.flat_ceiling,
@@ -84,12 +90,24 @@ pub(super) fn member_profile(
         None
     } else {
         Some(
-            LawSegment::until_arc(0.0, 0.0, entry_v, member_law(kin, 0.0, false), len)
-                .ok_or(ReconstructError::Diverged)?,
+            LawSegment::until_arc(
+                0.0,
+                0.0,
+                entry_v,
+                member_law(kin, 0.0, RailSense::Forward),
+                len,
+            )
+            .ok_or(ReconstructError::Diverged)?,
         )
     };
-    let backward = LawSegment::until_arc(0.0, 0.0, exit_v, member_law(&reversed, 0.0, false), len)
-        .ok_or(ReconstructError::Diverged)?;
+    let backward = LawSegment::until_arc(
+        0.0,
+        0.0,
+        exit_v,
+        member_law(&reversed, 0.0, RailSense::Forward),
+        len,
+    )
+    .ok_or(ReconstructError::Diverged)?;
     let forward_at = |x: f64| -> Option<f64> {
         let Some(forward) = &forward else {
             return Some(ceiling);
@@ -186,7 +204,12 @@ pub(super) fn member_profile(
     }
     if onset < len {
         let (seg, v0) = backward
-            .flipped_cut(t, onset, member_law(kin, onset, true), len - onset)
+            .flipped_cut(
+                t,
+                onset,
+                member_law(kin, onset, RailSense::Braking),
+                len - onset,
+            )
             .ok_or(ReconstructError::Diverged)?;
         if (v0 - v).abs() > joint_tol(v) {
             return Err(infeasible());

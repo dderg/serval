@@ -6,8 +6,6 @@ fn message_kind_round_trips_via_u16() {
     for &k in &[
         MessageKind::Identify,
         MessageKind::IdentifyResponse,
-        MessageKind::ConfigureAxes,
-        MessageKind::ConfigureAxesResponse,
         MessageKind::QueryRuntimeCaps,
         MessageKind::RuntimeCapsResponse,
         MessageKind::FaultEvent,
@@ -41,22 +39,8 @@ fn message_kind_round_trips_via_u16() {
     assert_eq!(MessageKind::from_u16(0x0090), None); // ClaimHandshakeReply (old, relocated to 0x0043)
     assert_eq!(MessageKind::from_u16(0x0091), None); // ClaimHandshake (old, relocated to 0x0042)
     assert_eq!(MessageKind::from_u16(0xFFFF), None);
-}
-
-#[test]
-fn configure_axes_roundtrip() {
-    let v = ConfigureAxes {
-        kinematics: 0,
-        present_mask: 0b1111,
-        awd_mask: 0b0011,
-        invert_mask: 0b0010,
-        steps_per_mm: [80.0, 80.0, 400.0, 415.0],
-    };
-    assert_eq!(roundtrip(&v), v);
-    assert_eq!(v.encoded_to_vec().len(), 20);
-    let r = ConfigureAxesResponse { result: -7 };
-    assert_eq!(roundtrip(&r), r);
-    assert_eq!(r.encoded_to_vec().len(), 4);
+    assert_eq!(MessageKind::from_u16(0x0030), None); // ConfigureAxes
+    assert_eq!(MessageKind::from_u16(0x0031), None); // ConfigureAxesResponse
 }
 
 #[test]

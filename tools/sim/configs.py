@@ -1634,7 +1634,6 @@ position_min: -5
 position_endstop: 116.100
 position_max: 120
 homing_speed: 40
-second_homing_speed: 3.0
 homing_retract_dist: 3.0
 post_processors: z_shaping
 

@@ -1,11 +1,23 @@
 use crate::space::{GcodePos, MachinePos};
-use crate::surface::{Fade, MeshGrid, SurfaceTransform};
+use crate::surface::{Fade, MeshGrid, MeshGridSpec, SurfaceTransform};
 
 fn tilted_mesh() -> SurfaceTransform {
     let points: Vec<f64> = (0..9)
         .map(|i| 0.05 * (i % 3) as f64 + 0.02 * (i / 3) as f64)
         .collect();
-    let mesh = MeshGrid::new(0.0, 0.0, 50.0, 50.0, 3, 3, points, 0.5).unwrap();
+    let mesh = MeshGrid::new(
+        MeshGridSpec {
+            x_min: 0.0,
+            y_min: 0.0,
+            dx: 50.0,
+            dy: 50.0,
+            nx: 3,
+            ny: 3,
+            tension: 0.5,
+        },
+        points,
+    )
+    .unwrap();
     SurfaceTransform::new(mesh, Fade::new(1.0, 10.0, 0.0).unwrap())
 }
 

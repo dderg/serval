@@ -1,12 +1,11 @@
 use crossbeam_channel::unbounded;
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use motion_core::drain::DrainLedger;
 use motion_core::pump::{
-    AxisKey, EnqueueMsg, HeartbeatMsg, PumpCallbacks, PumpMsg, RetiredBy, SendError, SpanSink,
-    WireSink, run_pump,
+    AxisKey, HeartbeatMsg, LaneProjection, PumpCallbacks, PumpMsg, RetiredBy, SendError, SpanSink,
+    WireSink, run_projection_batches,
 };
 use trajectory::{ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm};
 
@@ -110,38 +109,35 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
     let counts = Arc::clone(&sink.calls);
 
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink,
             PumpCallbacks::noop(8),
             None,
             std::sync::Arc::new(motion_core::drain::DrainLedger::new()),
-            Arc::new(AtomicU64::new(0)),
         );
     });
 
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key: AxisKey { mcu_id: 1, axis: 0 },
         spans: vec![span(0)],
         epoch: motion_core::anchor::StreamEpoch::Continuation,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: SOURCE_LINE,
-        batch_end: true,
-    })
+    }])
     .unwrap();
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key: AxisKey { mcu_id: 2, axis: 0 },
         spans: vec![span(SPAN_TICKS)],
         epoch: motion_core::anchor::StreamEpoch::Continuation,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: SOURCE_LINE,
-        batch_end: true,
-    })
+    }])
     .unwrap();
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -180,16 +176,15 @@ fn heartbeat_retirement_drains_pump_ledger() {
     let ledger_pump = Arc::clone(&ledger);
 
     let (ctl, control_rx) = unbounded::<PumpMsg>();
-    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let (data, data_rx) = unbounded::<Vec<LaneProjection>>();
     let handle = std::thread::spawn(move || {
-        run_pump(
+        run_projection_batches(
             control_rx,
             data_rx,
             sink,
             PumpCallbacks::noop(8),
             None,
             ledger_pump,
-            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -203,7 +198,7 @@ fn heartbeat_retirement_drains_pump_ledger() {
 
     assert!(ledger.drained(), "empty pump is trivially drained");
 
-    data.send(EnqueueMsg {
+    data.send(vec![LaneProjection {
         epoch_freq: None,
         key: AxisKey {
             mcu_id: 42,
@@ -213,8 +208,7 @@ fn heartbeat_retirement_drains_pump_ledger() {
         epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: SOURCE_LINE,
-        batch_end: true,
-    })
+    }])
     .unwrap();
     barrier(&ctl);
     assert!(

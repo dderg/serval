@@ -11,7 +11,7 @@
 use core::sync::atomic::Ordering;
 
 use runtime::engine::Engine;
-use runtime::stepping_state::{MAX_AXES, StepMode, StepperBindingRust, TMC_CS_OID_NONE};
+use runtime_contract::axes::{MAX_AXES, StepMode, StepperBindingRust, TMC_CS_OID_NONE};
 
 const _ASSERT_MAX_AXES: () = assert!(MAX_AXES == 8);
 
@@ -59,38 +59,4 @@ fn configure_axis_rejects_invalid_inputs() {
     assert_ne!(e.configure_axis(0, StepMode::Pulse, 0.0, &[b]), 0);
     assert_ne!(e.configure_axis(0, StepMode::Pulse, -0.01, &[b]), 0);
     assert_eq!(e.configure_axis(0, StepMode::Phase, 0.01, &[b]), 0);
-}
-
-#[test]
-fn configure_kinematics_returns_ok_for_valid_inputs() {
-    let mut e = new_engine();
-    assert_eq!(e.configure_kinematics(1.0), 0);
-    let inv_sqrt2 = 1.0_f32 / 2.0_f32.sqrt();
-    assert_eq!(e.configure_kinematics(inv_sqrt2), 0);
-}
-
-#[test]
-fn configure_kinematics_rejects_invalid_inputs() {
-    let mut e = new_engine();
-    assert_ne!(e.configure_kinematics(0.0), 0);
-    assert_ne!(e.configure_kinematics(-1.0), 0);
-    assert_ne!(e.configure_kinematics(f32::NAN), 0);
-    assert_ne!(e.configure_kinematics(f32::INFINITY), 0);
-}
-
-#[test]
-fn configure_pressure_advance_returns_ok_for_valid_inputs() {
-    let mut e = new_engine();
-    assert_eq!(e.configure_pressure_advance(0.05, 0.05), 0);
-    assert_eq!(e.configure_pressure_advance(0.08, 0.04), 0);
-    assert_eq!(e.configure_pressure_advance(0.0, 0.0), 0);
-}
-
-#[test]
-fn configure_pressure_advance_rejects_invalid_inputs() {
-    let mut e = new_engine();
-    assert_ne!(e.configure_pressure_advance(f32::NAN, 0.0), 0);
-    assert_ne!(e.configure_pressure_advance(0.0, f32::INFINITY), 0);
-    assert_ne!(e.configure_pressure_advance(-0.01, 0.0), 0);
-    assert_ne!(e.configure_pressure_advance(0.0, -0.01), 0);
 }

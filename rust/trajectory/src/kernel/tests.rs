@@ -79,9 +79,7 @@ fn smooth_bell_support_width() {
         vec![smooth_time],
     )])
     .expect("single post-processor always compiles");
-    let crate::ChainStage::SmoothKernel(kernel) = &chain.stages[0] else {
-        panic!("expected smooth kernel stage");
-    };
+    let kernel = chain.kernel().expect("expected smooth kernel");
     let (lo, hi) = kernel.support();
     assert!((hi - lo - smooth_time).abs() < 1e-12);
     assert!((lo + smooth_time / 2.0).abs() < 1e-12);
@@ -259,9 +257,7 @@ fn smooth_triangle_support_width() {
         vec![smooth_time],
     )])
     .expect("single post-processor always compiles");
-    let crate::ChainStage::SmoothKernel(kernel) = &chain.stages[0] else {
-        panic!("expected smooth kernel stage");
-    };
+    let kernel = chain.kernel().expect("expected smooth kernel");
     let (lo, hi) = kernel.support();
     assert!((hi - lo - smooth_time).abs() < 1e-12);
     assert!((lo + smooth_time / 2.0).abs() < 1e-12);

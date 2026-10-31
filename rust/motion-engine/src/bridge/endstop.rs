@@ -1,23 +1,89 @@
-use crate::lock_ext::LockExt;
+use motion_core::lock_ext::LockExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::{
-    HomingRun, HomingState, McuAxisConfig, McuConnection, PassthroughRouter, RemoteFreeze,
+    HomingRun, HomingState, McuAxisConfig, McuConnection, McuHandle, PassthroughRouter,
+    RemoteFreeze,
 };
 
 #[derive(Clone)]
 pub(super) struct TripDeps {
     pub(super) homing: Arc<HomingState>,
-    pub(super) pump_tx: Arc<Mutex<Option<crossbeam_channel::Sender<crate::pump::PumpMsg>>>>,
+    pub(super) pump_tx: Arc<Mutex<Option<crossbeam_channel::Sender<motion_core::pump::PumpMsg>>>>,
     pub(super) mcus: Arc<Mutex<HashMap<u32, McuConnection>>>,
     pub(super) router: Arc<Mutex<PassthroughRouter>>,
-    pub(super) motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
+    pub(super) motion_history: Arc<Mutex<motion_core::motion_history::HistoryStore>>,
     pub(super) mcu_axis_configs: Arc<Mutex<Vec<McuAxisConfig>>>,
-    pub(super) stepcompress_endpoints:
-        Arc<Mutex<HashMap<u32, Arc<Mutex<crate::pump::StepcompressEndpoint>>>>>,
-    pub(super) axis_transports: Arc<crate::axis_transport::AxisTransports>,
+    pub(super) axis_transports: Arc<motion_core::axis_transport::AxisTransports>,
+}
+
+impl McuConnection {
+    pub(super) fn homing_transport(&self) -> Option<Arc<dyn host_rt::mcu_call::McuCall>> {
+        self.host_io
+            .as_ref()
+            .map(|io| Arc::clone(io) as Arc<dyn host_rt::mcu_call::McuCall>)
+            .or_else(|| {
+                self.endpoint_conn
+                    .as_ref()
+                    .map(|conn| Arc::clone(conn) as Arc<dyn host_rt::mcu_call::McuCall>)
+            })
+    }
+}
+
+impl TripDeps {
+    fn endpoint_command(&self, command: motion_core::pump::EndpointCommand) -> Result<(), String> {
+        let tx = self
+            .pump_tx
+            .lock_ok()
+            .clone()
+            .ok_or_else(|| "endpoint command: execution owner is not running".to_string())?;
+        super::axis_transport_api::endpoint_command(&tx, command)
+    }
+
+    fn transport(&self, mcu_id: u32) -> Option<Arc<dyn host_rt::mcu_call::McuCall>> {
+        self.mcus
+            .lock_ok()
+            .get(&mcu_id)
+            .and_then(McuConnection::homing_transport)
+    }
+
+    fn step_count(&self, lane: &motion_core::homing::StepcompressLane) -> Result<i64, String> {
+        let io = self
+            .mcus
+            .lock_ok()
+            .get(&lane.mcu_id)
+            .and_then(|conn| conn.host_io.clone())
+            .ok_or_else(|| {
+                format!(
+                    "stepper_get_position: no host_io for stepcompress mcu {}",
+                    lane.mcu_id
+                )
+            })?;
+        let params = io
+            .call_args(
+                "stepper_get_position",
+                &[(
+                    "oid",
+                    host_rt::host_io::parser::ArgValue::Int(i64::from(lane.oid)),
+                )],
+                "stepper_position",
+                Duration::from_secs(3),
+            )
+            .map_err(|e| {
+                format!(
+                    "stepper_get_position failed for mcu {} oid {}: {e:?}",
+                    lane.mcu_id, lane.oid
+                )
+            })?;
+        params.try_get_i32("pos").map(i64::from).ok_or_else(|| {
+            format!(
+                "stepper_position from mcu {} oid {} carries no `pos` field",
+                lane.mcu_id, lane.oid
+            )
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -27,9 +93,6 @@ pub(super) enum TripMatch {
     Final(Option<RemoteFreeze>),
 }
 
-/// Pure verdict for an inbound trip report: which member of the run it is,
-/// whether the run continues (partial), and which remote motor to freeze.
-/// A partial match removes the member from `remaining_trips`.
 pub(super) fn match_trip(run: &mut HomingRun, event_mcu: u32, endstop_id: u8) -> TripMatch {
     let Some(member_idx) = run
         .remaining_trips
@@ -51,133 +114,47 @@ pub(super) fn dispatch_endstop_trip(
     endstop_id: u8,
     trip_clock: u64,
 ) {
-    let run_opt: Option<HomingRun> = {
-        let mut guard = deps.homing.run.lock_ok();
-        guard.take()
-    };
-    let mut run = match run_opt {
-        None => {
-            tracing::warn!(
-                subsystem = "trip-relay",
-                event = "early_trip_buffered",
-                mcu = event_mcu,
-                endstop_id,
-                trip_clock,
-                "terminal report arrived before the homing run was registered — buffered"
-            );
-            deps.homing
-                .pending_trips
-                .lock_ok()
-                .push((event_mcu, endstop_id, trip_clock));
+    let (run, final_freeze) = {
+        let mut state = deps.homing.lifecycle.lock_ok();
+        let Some(run) = state.trip_run((event_mcu, endstop_id, trip_clock)) else {
             return;
-        }
-        Some(r) => r,
-    };
-    let final_freeze = match match_trip(&mut run, event_mcu, endstop_id) {
-        TripMatch::Unmatched => {
-            tracing::warn!(
-                subsystem = "trip-relay",
-                event = "trip_identity_mismatch",
-                mcu = event_mcu,
-                endstop_id,
-                expected = ?run.remaining_trips,
-                trip_clock,
-                "terminal report does not match the active homing run — ignored"
-            );
-            let mut guard = deps.homing.run.lock_ok();
-            *guard = Some(run);
-            return;
-        }
-        TripMatch::Partial(freeze_opt) => {
-            tracing::info!(
-                subsystem = "trip-relay",
-                event = "partial_trip",
-                mcu = event_mcu,
-                endstop_id,
-                trip_clock,
-                remaining = run.remaining_trips.len(),
-                "endstop tripped ahead of its group — motor frozen, run continues"
-            );
-            let notify = run.notify.clone();
-            if let Some(freeze) = freeze_opt {
-                if let Err(e) = cut_frozen_motor_stream(deps, &mut run, freeze) {
-                    tracing::error!(
-                        subsystem = "trip-relay",
-                        event = "keyed_freeze_cut_failed",
-                        mcu = event_mcu,
-                        endstop_id,
-                        motor_mcu = freeze.motor_mcu,
-                        oid = freeze.stepper_oid,
-                        error = %e,
-                        "keyed trip could not cut the frozen motor's stream — the homing move \
-                         is aborted"
-                    );
-                    let _ = notify.send(Err(e));
-                    return;
-                }
-            }
-            let remote = freeze_opt.filter(|f| f.motor_mcu != event_mcu);
-            let pending = Arc::clone(&run.pending_suppresses);
-            if remote.is_some() {
-                let (count, _) = &*pending;
-                *count.lock_ok() += 1;
-            }
-            {
-                let mut guard = deps.homing.run.lock_ok();
-                *guard = Some(run);
-            }
-            if let Some(freeze) = remote {
-                send_remote_freeze(deps, notify, pending, freeze, event_mcu, endstop_id);
-            }
-            return;
-        }
-        TripMatch::Final(freeze) => freeze,
-    };
-
-    {
-        let mut cohort_guard = deps.homing.active_drip_cohort.lock_ok();
-        *cohort_guard = None;
-    }
-
-    let pump_tx_opt = deps.pump_tx.lock_ok().clone();
-
-    let transports: HashMap<u32, Arc<dyn host_rt::mcu_call::McuCall>> = {
-        let mcus = deps.mcus.lock_ok();
-        mcus.iter()
-            .filter_map(|(&id, conn)| {
-                if let Some(io) = conn.host_io.as_ref() {
-                    Some((id, Arc::clone(io) as Arc<dyn host_rt::mcu_call::McuCall>))
+        };
+        match match_trip(run, event_mcu, endstop_id) {
+            TripMatch::Unmatched => return,
+            TripMatch::Partial(freeze) => {
+                let Some(freeze) = freeze else { return };
+                let cohort = run.cohort;
+                state.pending_suppresses += 1;
+                drop(state);
+                if freeze.motor_mcu != event_mcu {
+                    send_remote_freeze(deps, cohort, freeze, event_mcu, endstop_id);
                 } else {
-                    conn.endpoint_conn
-                        .as_ref()
-                        .map(|ec| (id, Arc::clone(ec) as Arc<dyn host_rt::mcu_call::McuCall>))
+                    let outcome = cut_frozen_motor_stream(deps, freeze);
+                    finish_partial_work(deps, cohort, outcome.err());
                 }
-            })
-            .collect()
+                return;
+            }
+            TripMatch::Final(freeze) => {
+                let run = state.take_terminal(|_| true).unwrap();
+                (run, freeze)
+            }
+        }
     };
 
-    let router_arc = Arc::clone(&deps.router);
-    let history_arc = Arc::clone(&deps.motion_history);
-    let configs: Vec<McuAxisConfig> = deps.mcu_axis_configs.lock_ok().clone();
-    let host_ios: HashMap<u32, Arc<host_rt::host_io::McuHostIo>> = {
-        let mcus = deps.mcus.lock_ok();
-        mcus.iter()
-            .filter_map(|(&id, conn)| conn.host_io.as_ref().map(|io| (id, Arc::clone(io))))
-            .collect()
-    };
-    let endpoints = deps.stepcompress_endpoints.lock_ok().clone();
-
-    let axis_transports = Arc::clone(&deps.axis_transports);
+    let deps = deps.clone();
     std::thread::Builder::new()
         .name("homing-trip-handler".into())
         .spawn(move || {
+            let pump_tx_opt = deps.pump_tx.lock_ok().clone();
+            let configs = deps.mcu_axis_configs.lock_ok().clone();
+            let homing = &deps.homing;
             let stop_timeout = Duration::from_secs(3);
 
             let stepper_mcu_ids: std::collections::HashSet<u32> =
                 run.all_axis_keys.iter().map(|k| k.mcu_id).collect();
 
             let mut terminal_errors = Vec::new();
-            if let Err(e) = wait_for_pending_suppresses(&run.pending_suppresses) {
+            if let Err(e) = homing.wait_for_pending_suppresses(run.cohort) {
                 terminal_errors.push(e);
             }
 
@@ -186,23 +163,24 @@ pub(super) fn dispatch_endstop_trip(
                 if freeze.motor_mcu == event_mcu {
                     suppression_clock = Some((event_mcu, trip_clock));
                 } else {
-                    let outcome = transports
-                        .get(&freeze.motor_mcu)
+                    let outcome = deps
+                        .transport(freeze.motor_mcu)
                         .ok_or_else(|| {
                             format!("StepperSuppress: no transport for mcu {}", freeze.motor_mcu)
                         })
                         .and_then(|t| suppress_call(t.as_ref(), freeze));
                     match outcome {
                         Ok(clock32) => {
-                            let reference = router_arc
+                            let reference = deps
+                                .router
                                 .lock_ok()
-                                .compute_ack_clock(crate::types::mcu_handle_from_raw(
-                                    freeze.motor_mcu,
-                                ))
+                                .compute_ack_clock(McuHandle::from_raw(freeze.motor_mcu))
                                 .unwrap_or(0);
                             suppression_clock = Some((
                                 freeze.motor_mcu,
-                                crate::remote_trigger::relay_trip_clock(clock32, reference),
+                                motion_services::remote_trigger::relay_trip_clock(
+                                    clock32, reference,
+                                ),
                             ));
                         }
                         Err(e) => {
@@ -221,10 +199,10 @@ pub(super) fn dispatch_endstop_trip(
                 }
             }
             if let Some(tx) = pump_tx_opt.as_ref() {
-                let _ = tx.send(crate::pump::PumpMsg::DripDisarm(run.cohort));
+                let _ = tx.send(motion_core::pump::PumpMsg::DripDisarm(run.cohort));
                 let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
                 if tx
-                    .send(crate::pump::PumpMsg::Halt {
+                    .send(motion_core::pump::PumpMsg::Halt {
                         keys: run.all_axis_keys.clone(),
                         ack: ack_tx,
                     })
@@ -238,8 +216,8 @@ pub(super) fn dispatch_endstop_trip(
 
             use mcu_protocol::codec::Decode as _;
             let stop_call = |mcu_id: u32| -> Result<mcu_protocol::messages::StopResponse, String> {
-                let transport = transports
-                    .get(&mcu_id)
+                let transport = deps
+                    .transport(mcu_id)
                     .ok_or_else(|| format!("Stop: no transport for mcu {mcu_id}"))?;
                 let (_kind, body) = transport
                     .mcu_call(mcu_protocol::MessageKind::Stop, Vec::new(), stop_timeout)
@@ -248,7 +226,7 @@ pub(super) fn dispatch_endstop_trip(
                     .map_err(|e| format!("Stop decode failed for mcu {mcu_id}: {e:?}"))
             };
 
-            let discard_clock = match crate::homing::broadcast_stop(
+            let discard_clock = match motion_core::homing::broadcast_stop(
                 &stepper_mcu_ids,
                 run.axis_key.mcu_id,
                 stop_call,
@@ -260,7 +238,7 @@ pub(super) fn dispatch_endstop_trip(
                 }
             };
             if !terminal_errors.is_empty() {
-                let _ = run.notify.send(Err(terminal_errors.join("; ")));
+                homing.complete(run.cohort, Err(terminal_errors.join("; ")));
                 return;
             }
             let discard_clock = discard_clock.expect("successful Stop has a discard clock");
@@ -269,74 +247,40 @@ pub(super) fn dispatch_endstop_trip(
             let run_start = run.start_pos;
             let reconstruct_cartesian =
                 |source_mcu: u32, clock: u64| -> Result<geometry::MachinePos, String> {
-                    crate::homing::reconstruct_cartesian_position(
+                    motion_core::homing::reconstruct_cartesian_position(
                         source_mcu,
                         clock,
                         &configs,
-                        &router_arc,
-                        &history_arc,
+                        &deps.router,
+                        &deps.motion_history,
                         run.window_start_host,
                         run_start,
                     )
                 };
 
-            let query_step_count = |lane: &crate::homing::StepcompressLane| -> Result<i64, String> {
-                let io = host_ios.get(&lane.mcu_id).ok_or_else(|| {
-                    format!(
-                        "stepper_get_position: no host_io for stepcompress mcu {}",
-                        lane.mcu_id
-                    )
-                })?;
-                let params = io
-                    .call_args(
-                        "stepper_get_position",
-                        &[(
-                            "oid".to_string(),
-                            host_rt::host_io::parser::ArgValue::Int(i64::from(lane.oid)),
-                        )],
-                        "stepper_position",
-                        stop_timeout,
-                    )
-                    .map_err(|e| {
-                        format!(
-                            "stepper_get_position failed for mcu {} oid {}: {e:?}",
-                            lane.mcu_id, lane.oid
-                        )
-                    })?;
-                params.try_get_i32("pos").map(i64::from).ok_or_else(|| {
-                    format!(
-                        "stepper_position from mcu {} oid {} carries no `pos` field",
-                        lane.mcu_id, lane.oid
-                    )
-                })
-            };
             let reseed_step_counter =
-                |lane: &crate::homing::StepcompressLane, count: i64| -> Result<(), String> {
-                    let endpoint = endpoints.get(&lane.mcu_id).ok_or_else(|| {
-                        format!(
-                            "stepcompress reconcile: no shim endpoint registered for mcu {}",
-                            lane.mcu_id
-                        )
-                    })?;
-                    let mut guard = endpoint.lock_ok();
-                    guard.abort_outbound();
-                    guard.reset_motor_position(lane.motor, count)
+                |lane: &motion_core::homing::StepcompressLane, count: i64| -> Result<(), String> {
+                    deps.endpoint_command(motion_core::pump::EndpointCommand::ReseedMotor {
+                        mcu_id: lane.mcu_id,
+                        motor: lane.motor,
+                        count,
+                    })
                 };
 
             let (final_source_mcu, final_clock) =
                 suppression_clock.unwrap_or((axis_key.mcu_id, discard_clock));
-            let lane_starts = crate::mcu_config::reanchor_axis_targets(&configs, run_start);
+            let lane_starts = motion_core::mcu_config::reanchor_axis_targets(&configs, run_start);
             let outcome = reconstruct_cartesian(event_mcu, trip_clock).and_then(|trip| {
-                crate::homing::reconcile_stepcompress_lanes(
+                motion_core::homing::reconcile_stepcompress_lanes(
                     &configs,
-                    &axis_transports,
+                    &deps.axis_transports,
                     |key| {
-                        crate::homing::reconstruct_axis_position(
+                        motion_core::homing::reconstruct_axis_position(
                             final_source_mcu,
                             final_clock,
                             key,
-                            &router_arc,
-                            &history_arc,
+                            &deps.router,
+                            &deps.motion_history,
                             run.window_start_host,
                             lane_starts
                                 .iter()
@@ -344,16 +288,19 @@ pub(super) fn dispatch_endstop_trip(
                                 .map(|(_, position)| *position),
                         )
                     },
-                    &query_step_count,
+                    &|lane| deps.step_count(lane),
                     &reseed_step_counter,
                 )
                 .map(|final_pos| (trip, final_pos, trip_clock))
             });
 
             let outcome = outcome.and_then(|positions| {
+                if let Some(error) = homing.lifecycle.lock_ok().failure.clone() {
+                    return Err(error);
+                }
                 for &mcu_id in &stepper_mcu_ids {
-                    let transport = transports
-                        .get(&mcu_id)
+                    let transport = deps
+                        .transport(mcu_id)
                         .ok_or_else(|| format!("ResumeStream: no transport for mcu {mcu_id}"))?;
                     let (_kind, body) = transport
                         .mcu_call(
@@ -374,10 +321,12 @@ pub(super) fn dispatch_endstop_trip(
                     }
                 }
                 if let Some(tx) = pump_tx_opt.as_ref() {
-                    tx.send(crate::pump::PumpMsg::Resume(run.all_axis_keys.clone()))
-                        .map_err(|_| "EndstopTrip: pump channel closed before resume")?;
+                    tx.send(motion_core::pump::PumpMsg::Resume(
+                        run.all_axis_keys.clone(),
+                    ))
+                    .map_err(|_| "EndstopTrip: pump channel closed before resume")?;
                     let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
-                    tx.send(crate::pump::PumpMsg::Barrier(ack_tx))
+                    tx.send(motion_core::pump::PumpMsg::Barrier(ack_tx))
                         .map_err(|_| "EndstopTrip: pump channel closed before resume barrier")?;
                     ack_rx.recv_timeout(Duration::from_secs(1)).map_err(|_| {
                         "EndstopTrip: pump did not acknowledge resume after endpoint ResumeStream"
@@ -396,87 +345,23 @@ pub(super) fn dispatch_endstop_trip(
                     "endstop trip handling failed — the homing move is aborted"
                 );
             }
-            let _ = run.notify.send(outcome);
+            homing.complete(run.cohort, outcome);
         })
         .expect("spawn homing-trip-handler");
 }
 
-/// Cut and reseed exactly the motor a keyed endstop froze, leaving every peer
-/// motor of the run streaming to its own trip. The MCU stops that stepper oid;
-/// the host must stop feeding it and adopt the steps it actually executed, or
-/// the lane's counter and the shim's idea of it diverge for the rest of the run.
-fn cut_frozen_motor_stream(
-    deps: &TripDeps,
-    run: &mut HomingRun,
-    freeze: RemoteFreeze,
-) -> Result<(), String> {
-    if run.frozen_oids.contains(&freeze.stepper_oid) {
-        return Err(format!(
-            "keyed trip named stepper oid {} on mcu {}, whose stream this run already cut — \
-             two endstops are armed against one motor",
-            freeze.stepper_oid, freeze.motor_mcu
-        ));
-    }
-    let configs = deps.mcu_axis_configs.lock_ok().clone();
-    let lane =
-        crate::homing::stepcompress_lane_of_oid(&configs, freeze.motor_mcu, freeze.stepper_oid)?;
-    let io = {
-        let mcus = deps.mcus.lock_ok();
-        mcus.get(&lane.mcu_id)
-            .and_then(|conn| conn.host_io.as_ref().map(Arc::clone))
-            .ok_or_else(|| {
-                format!(
-                    "keyed trip: no host transport for mcu {} to read back oid {}",
-                    lane.mcu_id, lane.oid
-                )
-            })?
-    };
-    let params = io
-        .call_args(
-            "stepper_get_position",
-            &[(
-                "oid".to_string(),
-                host_rt::host_io::parser::ArgValue::Int(i64::from(lane.oid)),
-            )],
-            "stepper_position",
-            Duration::from_secs(3),
-        )
-        .map_err(|e| {
-            format!(
-                "keyed trip: stepper_get_position failed for mcu {} oid {}: {e:?}",
-                lane.mcu_id, lane.oid
-            )
-        })?;
-    let executed = params.try_get_i32("pos").map(i64::from).ok_or_else(|| {
-        format!(
-            "keyed trip: stepper_position from mcu {} oid {} carries no `pos` field",
-            lane.mcu_id, lane.oid
-        )
+fn cut_frozen_motor_stream(deps: &TripDeps, freeze: RemoteFreeze) -> Result<(), String> {
+    let lane = motion_core::homing::stepcompress_lane_of_oid(
+        &deps.mcu_axis_configs.lock_ok(),
+        freeze.motor_mcu,
+        freeze.stepper_oid,
+    )?;
+    let executed = deps.step_count(&lane)?;
+    deps.endpoint_command(motion_core::pump::EndpointCommand::FreezeMotor {
+        mcu_id: lane.mcu_id,
+        motor: lane.motor,
+        count: lane.trajectory_steps(executed),
     })?;
-    let endpoint = deps
-        .stepcompress_endpoints
-        .lock_ok()
-        .get(&lane.mcu_id)
-        .cloned()
-        .ok_or_else(|| {
-            format!(
-                "keyed trip: no shim endpoint registered for mcu {}, so oid {}'s stream cannot \
-                 be cut",
-                lane.mcu_id, lane.oid
-            )
-        })?;
-    {
-        let mut guard = endpoint.lock_ok();
-        guard
-            .freeze_motor(lane.motor, lane.trajectory_steps(executed))
-            .map_err(|e| {
-                format!(
-                    "keyed trip: freezing mcu {} axis {} motor {}: {e}",
-                    lane.mcu_id, lane.axis, lane.motor
-                )
-            })?;
-    }
-    run.frozen_oids.push(freeze.stepper_oid);
     tracing::info!(
         subsystem = "trip-relay",
         event = "keyed_freeze_cut",
@@ -492,26 +377,13 @@ fn cut_frozen_motor_stream(
 
 fn send_remote_freeze(
     deps: &TripDeps,
-    notify: crossbeam_channel::Sender<
-        Result<(geometry::MachinePos, geometry::MachinePos, u64), String>,
-    >,
-    pending_suppresses: Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>,
+    cohort: u64,
     freeze: RemoteFreeze,
     event_mcu: u32,
     endstop_id: u8,
 ) {
-    let transport: Option<Arc<dyn host_rt::mcu_call::McuCall>> = {
-        let mcus = deps.mcus.lock_ok();
-        mcus.get(&freeze.motor_mcu).and_then(|conn| {
-            if let Some(io) = conn.host_io.as_ref() {
-                Some(Arc::clone(io) as Arc<dyn host_rt::mcu_call::McuCall>)
-            } else {
-                conn.endpoint_conn
-                    .as_ref()
-                    .map(|ec| Arc::clone(ec) as Arc<dyn host_rt::mcu_call::McuCall>)
-            }
-        })
-    };
+    let transport = deps.transport(freeze.motor_mcu);
+    let deps = deps.clone();
     std::thread::Builder::new()
         .name("homing-suppress".into())
         .spawn(move || {
@@ -520,7 +392,7 @@ fn send_remote_freeze(
                     format!("StepperSuppress: no transport for mcu {}", freeze.motor_mcu)
                 })
                 .and_then(|t| suppress_call(t.as_ref(), freeze));
-            if let Err(e) = outcome {
+            if let Err(e) = &outcome {
                 tracing::error!(
                     subsystem = "trip-relay",
                     event = "cross_mcu_suppress_failed",
@@ -532,41 +404,41 @@ fn send_remote_freeze(
                     error = %e,
                     "cross-MCU stepper suppress failed — the homing move is aborted"
                 );
-                let _ = notify.send(Err(e));
             }
-            let (count, ready) = &*pending_suppresses;
-            let mut count = count.lock_ok();
-            *count -= 1;
-            ready.notify_all();
+            let outcome = outcome.and_then(|_| cut_frozen_motor_stream(&deps, freeze));
+            finish_partial_work(&deps, cohort, outcome.err());
         })
         .expect("spawn homing-suppress");
 }
-pub(super) fn wait_for_pending_suppresses(
-    pending: &Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>,
-) -> Result<(), String> {
-    let (count, ready) = &**pending;
-    let count = count.lock_ok();
-    let (count, timeout) = ready
-        .wait_timeout_while(count, Duration::from_secs(4), |count| *count != 0)
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if timeout.timed_out() && *count != 0 {
-        return Err(format!(
-            "StepperSuppress: {} partial call(s) did not finish before terminal Stop",
-            *count
-        ));
+
+fn finish_partial_work(deps: &TripDeps, cohort: u64, error: Option<String>) {
+    let terminal = deps.homing.retire_partial(cohort, error);
+    if let Some(run) = terminal {
+        if let Some(tx) = deps.pump_tx.lock_ok().clone() {
+            let _ = tx.send(motion_core::pump::PumpMsg::Flush(run.all_axis_keys));
+            let _ = tx.send(motion_core::pump::PumpMsg::DripDisarm(cohort));
+        }
+        deps.homing
+            .complete(cohort, Err("partial homing freeze failed".into()));
     }
-    Ok(())
 }
 fn suppress_call(
     transport: &dyn host_rt::mcu_call::McuCall,
     freeze: RemoteFreeze,
 ) -> Result<u32, String> {
     use mcu_protocol::codec::{Decode as _, Encode as _};
-    let mut body = Vec::with_capacity(3);
+    let stepper_oid = u8::try_from(freeze.stepper_oid).map_err(|_| {
+        format!(
+            "StepperSuppress: stepper oid {} on mcu {} exceeds u8",
+            freeze.stepper_oid, freeze.motor_mcu
+        )
+    })?;
+    let mut body = Vec::with_capacity(4);
     mcu_protocol::messages::StepperSuppress {
         motor: freeze.motor_idx,
         stepper: freeze.stepper_idx,
         engage: 1,
+        stepper_oid,
     }
     .encode(&mut body);
     let (_kind, resp_body) = transport

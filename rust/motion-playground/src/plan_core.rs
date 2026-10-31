@@ -63,8 +63,12 @@ fn parse_inputs(
         SnapshotParams {
             max_velocity: cfg.max_velocity,
             max_accel: cfg.max_accel,
-            square_corner_velocity: cfg.square_corner_velocity.unwrap_or(0.0),
-            corner_deviation: cfg.corner_deviation,
+            corner_deviation: cfg.corner_deviation.unwrap_or_else(|| {
+                pipeline_snapshot::corner_deviation_from_scv(
+                    cfg.square_corner_velocity.expect("validated above"),
+                    cfg.max_accel,
+                )
+            }),
             max_jerk,
             max_extrude_only_velocity: cfg.max_extrude_only_velocity,
             max_extrude_only_accel: cfg.max_extrude_only_accel,

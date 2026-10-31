@@ -1,7 +1,7 @@
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 use runtime::phase_lut::{COIL_AMPLITUDE, PHASE_LUT, PHASE_LUT_SIZE};
-use runtime::sample_run::{
+use runtime_contract::sample_run::{
     SAMPLE_RUN_COUNT_MAX, SAMPLE_RUN_DATA_MAX, decode_deltas, encode_deltas,
 };
 

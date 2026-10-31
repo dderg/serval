@@ -6,7 +6,7 @@ mod runtime_ffi;
 #[cfg(feature = "header-runtime")]
 pub use runtime_ffi::exports::*;
 
-pub use runtime::error::*;
+pub use runtime_contract::error::*;
 
 #[cfg(not(feature = "host"))]
 #[panic_handler]

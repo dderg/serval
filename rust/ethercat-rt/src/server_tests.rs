@@ -2,7 +2,7 @@ use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
+use std::sync::Mutex;
 
 use super::{FrameServer, MAX_PENDING_BYTES};
 
@@ -35,7 +35,7 @@ impl MockWriter {
 
 impl Write for MockWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut s = self.state.lock();
+        let mut s = self.state.lock().expect("mock state lock");
         if let Some(kind) = s.fail {
             return Err(io::Error::new(kind, "mock failure"));
         }
@@ -66,21 +66,24 @@ fn wouldblock_midframe_preserves_byte_exact_ordering() {
     let (mut server, state) = server_with(3);
 
     server.respond(&[0, 1, 2, 3, 4]);
-    assert_eq!(state.lock().sink, vec![0, 1, 2]);
+    assert_eq!(state.lock().expect("mock state lock").sink, vec![0, 1, 2]);
     assert_eq!(server.pending_len(), 2);
     assert!(!server.session_ended());
 
-    state.lock().accept_budget = 0;
+    state.lock().expect("mock state lock").accept_budget = 0;
     server.respond(&[5, 6, 7]);
-    assert_eq!(state.lock().sink, vec![0, 1, 2]);
+    assert_eq!(state.lock().expect("mock state lock").sink, vec![0, 1, 2]);
     assert_eq!(server.pending_len(), 5);
 
-    state.lock().accept_budget = usize::MAX;
+    state.lock().expect("mock state lock").accept_budget = usize::MAX;
     server.pump();
     assert_eq!(server.pending_len(), 0);
     server.respond(&[8, 9]);
 
-    assert_eq!(state.lock().sink, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(
+        state.lock().expect("mock state lock").sink,
+        vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    );
     assert!(!server.session_ended());
     assert!(!server.backpressure_active());
 }
@@ -88,7 +91,7 @@ fn wouldblock_midframe_preserves_byte_exact_ordering() {
 #[test]
 fn real_write_error_ends_session_immediately() {
     let (mut server, state) = server_with(usize::MAX);
-    state.lock().fail = Some(io::ErrorKind::BrokenPipe);
+    state.lock().expect("mock state lock").fail = Some(io::ErrorKind::BrokenPipe);
 
     server.respond(&[1, 2, 3]);
 
@@ -133,13 +136,13 @@ fn recovery_clears_the_stall_clock() {
     assert_eq!(server.pending_len(), 3);
     assert!(!server.session_ended());
 
-    state.lock().accept_budget = usize::MAX;
+    state.lock().expect("mock state lock").accept_budget = usize::MAX;
     server.pump();
 
     assert!(!server.backpressure_active());
     assert_eq!(server.pending_len(), 0);
     assert!(!server.session_ended());
-    assert_eq!(state.lock().sink, vec![0, 1, 2]);
+    assert_eq!(state.lock().expect("mock state lock").sink, vec![0, 1, 2]);
 }
 
 /// The command ring is bounded; when the RT side stops popping, the reader

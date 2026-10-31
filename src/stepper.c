@@ -95,6 +95,28 @@ stepper_oid_lookup(uint8_t oid)
     return oid_lookup(oid, command_config_stepper);
 }
 
+uint64_t
+stepper_halt_oid(uint8_t oid)
+{
+    struct stepper *s = stepper_oid_lookup(oid);
+    extern uint64_t runtime_widened_host_clock(void);
+    irqstatus_t flag = irq_save();
+#if CONFIG_MOTION_RUNTIME
+    extern void *runtime_handle;
+    uint8_t axis_idx, mode, settled;
+    uint16_t phase;
+    if (runtime_handle
+        && runtime_get_phase_state(runtime_handle, oid, &axis_idx, &mode,
+                                   &phase, &settled) == 0
+        && mode != 0)
+        shutdown("suppress requires classic stepper");
+#endif
+    uint64_t halt_clock = runtime_widened_host_clock();
+    stepper_classic_halt(s);
+    irq_restore(flag);
+    return halt_clock;
+}
+
 static void
 stepper_stop(struct trsync_signal *tss, uint8_t reason)
 {
@@ -163,15 +185,14 @@ stepper_shutdown(void)
     uint8_t i;
     struct stepper *s;
     foreach_oid(i, s, command_config_stepper) {
+        move_queue_clear(&s->mq);
+        move_queue_clear(&s->completed_barriers);
         stepper_stop(&s->stop_signal, 0);
     }
-    stepper_suppress_clear_all();
 }
 DECL_SHUTDOWN(stepper_shutdown);
 
 #if CONFIG_MOTION_RUNTIME
-
-static volatile uint8_t runtime_motor_suppress_mask[RUNTIME_MOTOR_COUNT];
 
 struct runtime_motor_stepper {
     struct stepper *stepper;
@@ -188,31 +209,6 @@ runtime_motor_binding_count(uint8_t motor_idx)
 {
     if (motor_idx >= RUNTIME_MOTOR_COUNT) return 0;
     return runtime_motor_stepper_count[motor_idx];
-}
-
-void
-stepper_suppress_set(uint8_t motor, uint8_t stepper)
-{
-    if (motor >= RUNTIME_MOTOR_COUNT
-        || stepper >= RUNTIME_MAX_STEPPERS_PER_MOTOR)
-        shutdown("suppress index");
-    runtime_motor_suppress_mask[motor] |= (uint8_t)(1u << stepper);
-}
-
-__attribute__((used, externally_visible))
-uint8_t
-stepper_suppress_mask(uint8_t motor)
-{
-    if (motor >= RUNTIME_MOTOR_COUNT)
-        shutdown("suppress index");
-    return runtime_motor_suppress_mask[motor];
-}
-
-void
-stepper_suppress_clear_all(void)
-{
-    for (uint8_t i = 0; i < RUNTIME_MOTOR_COUNT; i++)
-        runtime_motor_suppress_mask[i] = 0;
 }
 
 extern void *runtime_handle;
@@ -293,7 +289,6 @@ command_kalico_configure_axis(uint32_t *args)
         runtime_motor_steppers[axis_idx][i].stepper = staged[i].stepper;
         runtime_motor_steppers[axis_idx][i].invert_dir = staged[i].invert_dir;
     }
-    runtime_motor_suppress_mask[axis_idx] = 0;
     (void)extrusion_bits;
 
     // Guard the motor's physical step cadence: half the sample window (the

@@ -1,7 +1,6 @@
 //! The commit horizon: how far into its window the streaming planner may cut,
 //! and whether cutting there still reproduces a single-window plan.
 
-use crossbeam_channel::unbounded;
 use geometry::segment::SourceRange;
 use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
 
@@ -66,19 +65,25 @@ fn stopping_distance_mm(v: f64) -> f64 {
 }
 
 fn stream(moves: &[geometry::Move], drain: bool) -> Vec<PlannedMove> {
-    let (tx, rx) = unbounded();
+    let mut out = Vec::new();
+    let mut collect = |item| {
+        out.push(item);
+        true
+    };
     let mut planner = Planner::new(config(4096));
     for m in moves {
         assert!(
-            planner.feed(StreamInput::Move(m.clone()), &tx),
-            "planner output channel closed"
+            planner.feed(StreamInput::Move(m.clone()), &mut collect),
+            "collector rejected planner output"
         );
     }
     if drain {
-        assert!(planner.finish(&tx), "planner output channel closed");
+        assert!(
+            planner.finish(&mut collect),
+            "collector rejected planner output"
+        );
     }
-    drop(tx);
-    rx.into_iter()
+    out.into_iter()
         .filter_map(|item| match item {
             PlannedItem::Move(m) => Some(m),
             PlannedItem::Drain | PlannedItem::Control(_) => None,
@@ -113,18 +118,24 @@ fn streamed_commits_reproduce_a_single_window_plan() {
     let whole = {
         // One window: no move is committed until the terminal rest is real,
         // so every body is planned against the true end of the stream.
-        let (tx, rx) = unbounded();
+        let mut out = Vec::new();
+        let mut collect = |item| {
+            out.push(item);
+            true
+        };
         let mut planner = Planner::new(config(4096));
         for m in &moves {
-            assert!(planner.feed(StreamInput::Move(m.clone()), &tx), "closed");
+            assert!(
+                planner.feed(StreamInput::Move(m.clone()), &mut collect),
+                "closed"
+            );
             // Never let the batch trigger fire: `absorb` re-plans every
             // `REPLAN_BATCH_MOVES` arrivals, and the whole point here is to
             // compare against a plan that never cut.
             planner.moves_since_plan = 0;
         }
-        assert!(planner.finish(&tx), "closed");
-        drop(tx);
-        rx.into_iter()
+        assert!(planner.finish(&mut collect), "closed");
+        out.into_iter()
             .filter_map(|item| match item {
                 PlannedItem::Move(m) => Some(m),
                 PlannedItem::Drain | PlannedItem::Control(_) => None,
@@ -194,15 +205,21 @@ fn ramp_config() -> StreamConfig {
 }
 
 fn plan_one_window(moves: &[geometry::Move]) -> Vec<PlannedMove> {
-    let (tx, rx) = unbounded();
+    let mut out = Vec::new();
+    let mut collect = |item| {
+        out.push(item);
+        true
+    };
     let mut planner = Planner::new(ramp_config());
     for m in moves {
-        assert!(planner.feed(StreamInput::Move(m.clone()), &tx), "closed");
+        assert!(
+            planner.feed(StreamInput::Move(m.clone()), &mut collect),
+            "closed"
+        );
         planner.moves_since_plan = 0;
     }
-    assert!(planner.finish(&tx), "closed");
-    drop(tx);
-    rx.into_iter()
+    assert!(planner.finish(&mut collect), "closed");
+    out.into_iter()
         .filter_map(|item| match item {
             PlannedItem::Move(m) => Some(m),
             PlannedItem::Drain | PlannedItem::Control(_) => None,
@@ -211,14 +228,20 @@ fn plan_one_window(moves: &[geometry::Move]) -> Vec<PlannedMove> {
 }
 
 fn stream_ramp(moves: &[geometry::Move]) -> Vec<PlannedMove> {
-    let (tx, rx) = unbounded();
+    let mut out = Vec::new();
+    let mut collect = |item| {
+        out.push(item);
+        true
+    };
     let mut planner = Planner::new(ramp_config());
     for m in moves {
-        assert!(planner.feed(StreamInput::Move(m.clone()), &tx), "closed");
+        assert!(
+            planner.feed(StreamInput::Move(m.clone()), &mut collect),
+            "closed"
+        );
     }
-    assert!(planner.finish(&tx), "closed");
-    drop(tx);
-    rx.into_iter()
+    assert!(planner.finish(&mut collect), "closed");
+    out.into_iter()
         .filter_map(|item| match item {
             PlannedItem::Move(m) => Some(m),
             PlannedItem::Drain | PlannedItem::Control(_) => None,

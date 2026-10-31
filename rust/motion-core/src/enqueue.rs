@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
 use crate::mcu_config::McuAxisConfig;
-use crate::pump::EnqueueMsg;
+use crate::pump::LaneProjection;
 use crate::types::AxisKey;
 use nurbs::ScalarNurbs;
 use trajectory::{
@@ -221,14 +221,14 @@ pub fn enqueue_segment<P>(
     seg: &ContinuousSegment,
     mcu_configs: &[McuAxisConfig],
     ctx: &EnqueueCtx<'_, P>,
-) -> Result<Vec<EnqueueMsg>, ContinuousError>
+) -> Result<Vec<LaneProjection>, ContinuousError>
 where
     P: Fn(u32, f64) -> f64,
 {
     let mut out = Vec::new();
 
     for cfg in mcu_configs {
-        let module = KinematicsModule::from_tag(cfg.kinematics)
+        let module = KinematicsModule::from_tag(cfg.hw.kinematics)
             .expect("build_mcu_configs validated the kinematics tag");
 
         for &axis_idx in &cfg.axes {
@@ -261,14 +261,13 @@ where
             }
             if cfg.ethercat && span.is_explicit_hold {
                 if ctx.epoch.position_redefined() {
-                    out.push(EnqueueMsg {
+                    out.push(LaneProjection {
                         epoch_freq: (ctx.epoch_freq)(cfg.mcu_id),
                         key,
                         spans: Vec::new(),
                         epoch: ctx.epoch,
                         lead_secs: ctx.lead_secs,
                         source_line: seg.source_line,
-                        batch_end: false,
                     });
                 }
                 continue;
@@ -276,20 +275,16 @@ where
 
             let spans = clock_span(Arc::new(span), cfg.mcu_id, axis_idx, ctx)?;
             if !spans.is_empty() {
-                out.push(EnqueueMsg {
+                out.push(LaneProjection {
                     epoch_freq: (ctx.epoch_freq)(cfg.mcu_id),
                     key,
                     spans,
                     epoch: ctx.epoch,
                     lead_secs: ctx.lead_secs,
                     source_line: seg.source_line,
-                    batch_end: false,
                 });
             }
         }
-    }
-    if let Some(last) = out.last_mut() {
-        last.batch_end = true;
     }
 
     Ok(out)

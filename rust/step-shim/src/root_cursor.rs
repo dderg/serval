@@ -73,6 +73,15 @@ struct Overlay {
     lattice: Lattice,
 }
 
+/// The lane a drain emits into: which motor, its config, and the span view
+/// the roots are read from.
+#[derive(Clone, Copy)]
+struct Lane<'a> {
+    motor: usize,
+    cfg: &'a MotorConfig,
+    view: &'a ClockedMotorSpan,
+}
+
 const BISECTION_SAFEGUARD_PERIOD: u32 = 3;
 
 thread_local! {
@@ -209,8 +218,13 @@ impl StepRootCursor {
             if last_clock < begin {
                 return Ok(());
             }
-            self.enter(motor, &view, signal_start, begin)?;
-            self.emit_roots(motor, cfg, &view, begin, last_clock, out)?;
+            let lane = Lane {
+                motor,
+                cfg,
+                view: &view,
+            };
+            self.enter(lane, signal_start, begin)?;
+            self.emit_roots(lane, begin, last_clock, out)?;
             if self.drain_halted {
                 self.drain_deadline = None;
                 return Ok(());
@@ -221,7 +235,7 @@ impl StepRootCursor {
             }
             if let Some(overlay) = &self.overlay {
                 let nominal = overlay.lattice.nominal_position(self.microstep_mm);
-                let end_position = self.position_at(motor, &view, view.end_clock)?;
+                let end_position = self.position_at(lane, view.end_clock)?;
                 self.overlay_carry_mm = end_position - nominal;
             }
             queue.release_active();
@@ -230,13 +244,8 @@ impl StepRootCursor {
         Ok(())
     }
 
-    fn enter(
-        &mut self,
-        motor: usize,
-        view: &ClockedMotorSpan,
-        signal_start: u64,
-        begin: u64,
-    ) -> Result<(), ShimError> {
+    fn enter(&mut self, lane: Lane, signal_start: u64, begin: u64) -> Result<(), ShimError> {
+        let view = lane.view;
         if view.signal.motor_mask == 0 {
             self.overlay = None;
         } else {
@@ -245,7 +254,7 @@ impl StepRootCursor {
                 .as_ref()
                 .is_some_and(|overlay| Arc::ptr_eq(&overlay.signal, &view.signal));
             if !continues_signal {
-                let position = self.position_at(motor, view, signal_start)?;
+                let position = self.position_at(lane, signal_start)?;
                 self.overlay = Some(Overlay {
                     signal: Arc::clone(&view.signal),
                     lattice: Lattice {
@@ -257,7 +266,7 @@ impl StepRootCursor {
         }
         if self.origin_clock.is_none() {
             if !self.positioned {
-                let position = self.position_at(motor, view, begin)?;
+                let position = self.position_at(lane, begin)?;
                 self.lane.origin_mm = position - self.lane.step_count as f64 * self.microstep_mm;
                 self.positioned = true;
             }
@@ -268,15 +277,14 @@ impl StepRootCursor {
 
     fn emit_roots(
         &mut self,
-        motor: usize,
-        cfg: &MotorConfig,
-        view: &ClockedMotorSpan,
+        lane: Lane,
         begin: u64,
         last_clock: u64,
         out: &mut Vec<StepRoot>,
     ) -> Result<(), ShimError> {
+        let view = lane.view;
         if begin == last_clock {
-            return self.emit_window(motor, cfg, view, begin, last_clock, None, out);
+            return self.emit_window(lane, begin, last_clock, None, out);
         }
         let mut boundaries = vec![begin, last_clock];
         let breakpoints = &view.signal.breakpoints;
@@ -304,16 +312,14 @@ impl StepRootCursor {
         let mut index = 0;
         while index + 1 < boundaries.len() {
             let from = boundaries[index];
-            let model = self.window_model(motor, view, &boundaries, &mut models, index)?;
-            match self.certified_slope(motor, view, from, boundaries[index + 1], model.as_ref())? {
+            let model = self.window_model(lane, &boundaries, &mut models, index)?;
+            match self.certified_slope(lane, from, boundaries[index + 1], model.as_ref())? {
                 Some(slope) => {
                     let mut end_index = index + 1;
                     while end_index + 1 < boundaries.len() {
-                        let next =
-                            self.window_model(motor, view, &boundaries, &mut models, end_index)?;
+                        let next = self.window_model(lane, &boundaries, &mut models, end_index)?;
                         let piece = self.certified_slope(
-                            motor,
-                            view,
+                            lane,
                             boundaries[end_index],
                             boundaries[end_index + 1],
                             next.as_ref(),
@@ -324,9 +330,7 @@ impl StepRootCursor {
                         end_index += 1;
                     }
                     self.emit_run(
-                        motor,
-                        cfg,
-                        view,
+                        lane,
                         from,
                         boundaries[end_index],
                         slope,
@@ -336,15 +340,7 @@ impl StepRootCursor {
                     index = end_index;
                 }
                 None => {
-                    self.subdivide(
-                        motor,
-                        cfg,
-                        view,
-                        from,
-                        boundaries[index + 1],
-                        model.as_ref(),
-                        out,
-                    )?;
+                    self.subdivide(lane, from, boundaries[index + 1], model.as_ref(), out)?;
                     index += 1;
                 }
             }
@@ -359,8 +355,7 @@ impl StepRootCursor {
     /// and kept for the merge probes and the run that follow.
     fn window_model(
         &self,
-        motor: usize,
-        view: &ClockedMotorSpan,
+        lane: Lane,
         boundaries: &[u64],
         models: &mut [WindowModel],
         index: usize,
@@ -368,16 +363,14 @@ impl StepRootCursor {
         if let WindowModel::Built(model) = models[index] {
             return Ok(model);
         }
-        let model = self.model_at(motor, view, boundaries[index])?;
+        let model = self.model_at(lane, boundaries[index])?;
         models[index] = WindowModel::Built(model);
         Ok(model)
     }
 
     fn emit_run(
         &mut self,
-        motor: usize,
-        cfg: &MotorConfig,
-        view: &ClockedMotorSpan,
+        lane: Lane,
         lo: u64,
         hi: u64,
         slope: Slope,
@@ -387,11 +380,17 @@ impl StepRootCursor {
         if self.halt_if_past_deadline(lo) {
             return Ok(());
         }
-        let run_end = self.position_at(motor, view, hi)?;
+        let run_end = self.position_at(lane, hi)?;
         let mut search_from = lo;
-        let mut search_position = self.position_at(motor, view, lo)?;
-        let mut predictor =
-            Predictor::for_run(view, lo, search_position, run_end, self.microstep_mm, model);
+        let mut search_position = self.position_at(lane, lo)?;
+        let mut predictor = Predictor::for_run(
+            lane.view,
+            lo,
+            search_position,
+            run_end,
+            self.microstep_mm,
+            model,
+        );
         let mut roots_since_check = 0_u32;
         loop {
             let level = self.frame().threshold(self.microstep_mm, slope);
@@ -405,37 +404,35 @@ impl StepRootCursor {
                     opposite_level + f64::from(opposite.advance()) * self.microstep_mm;
                 if opposite.reached(run_end, level_after_one_step) {
                     return Err(ShimError::LatticeDrift {
-                        motor,
-                        source_line: view.signal.source_line,
+                        motor: lane.motor,
+                        source_line: lane.view.signal.source_line,
                         clock: hi,
                         position: run_end,
                         nominal: self.frame().nominal_position(self.microstep_mm),
                     });
                 }
                 let (clock, position) = self.solve_crossing(
-                    motor,
-                    view,
+                    lane,
                     (search_from, search_position),
                     (hi, run_end),
                     opposite_level,
                     opposite,
                     None,
                 )?;
-                self.push_root(motor, cfg, view, clock, opposite, out)?;
+                self.push_root(lane, clock, opposite, out)?;
                 search_from = clock;
                 search_position = position;
                 continue;
             }
             let (clock, position) = self.solve_crossing(
-                motor,
-                view,
+                lane,
                 (search_from, search_position),
                 (hi, run_end),
                 level,
                 slope,
                 predictor.as_mut(),
             )?;
-            self.push_root(motor, cfg, view, clock, slope, out)?;
+            self.push_root(lane, clock, slope, out)?;
             search_from = clock;
             search_position = position;
             roots_since_check += 1;
@@ -464,8 +461,7 @@ impl StepRootCursor {
     /// prediction is available.
     fn solve_crossing(
         &self,
-        motor: usize,
-        view: &ClockedMotorSpan,
+        lane: Lane,
         (lo, lo_position): (u64, f64),
         (hi, hi_position): (u64, f64),
         level: f64,
@@ -510,7 +506,7 @@ impl StepRootCursor {
                     low + ((fraction * span as f64).ceil() as u64).clamp(1, span - 1)
                 }
             };
-            let position = self.position_at(motor, view, candidate)?;
+            let position = self.position_at(lane, candidate)?;
             last_probe = (candidate, position);
             let reached = slope.reached(position, level);
             if reached {
@@ -535,9 +531,7 @@ impl StepRootCursor {
 
     fn push_root(
         &mut self,
-        motor: usize,
-        cfg: &MotorConfig,
-        view: &ClockedMotorSpan,
+        lane: Lane,
         clock: u64,
         slope: Slope,
         out: &mut Vec<StepRoot>,
@@ -545,8 +539,8 @@ impl StepRootCursor {
         let advance = slope.advance();
         if let Some(previous_clock) = self.last_root_clock.filter(|&last| clock <= last) {
             return Err(ShimError::StepClockRegression {
-                motor,
-                source_line: view.signal.source_line,
+                motor: lane.motor,
+                source_line: lane.view.signal.source_line,
                 previous_clock,
                 clock,
                 step_count: self.frame().step_count,
@@ -555,7 +549,7 @@ impl StepRootCursor {
         }
         self.last_root_clock = Some(clock);
         let forward = advance > 0;
-        let dir = u8::from(forward != cfg.invert_dir);
+        let dir = u8::from(forward != lane.cfg.invert_dir);
         self.frame_mut().step_count += i64::from(advance);
         out.push(StepRoot {
             clock,
@@ -567,20 +561,18 @@ impl StepRootCursor {
 
     fn emit_window(
         &mut self,
-        motor: usize,
-        cfg: &MotorConfig,
-        view: &ClockedMotorSpan,
+        lane: Lane,
         lo: u64,
         hi: u64,
         model: Option<&LocalPolynomial>,
         out: &mut Vec<StepRoot>,
     ) -> Result<(), ShimError> {
         if lo == hi {
-            return self.emit_single_clock(motor, cfg, view, lo, out);
+            return self.emit_single_clock(lane, lo, out);
         }
-        match self.certified_slope(motor, view, lo, hi, model)? {
-            Some(slope) => self.emit_run(motor, cfg, view, lo, hi, slope, model, out),
-            None => self.subdivide(motor, cfg, view, lo, hi, model, out),
+        match self.certified_slope(lane, lo, hi, model)? {
+            Some(slope) => self.emit_run(lane, lo, hi, slope, model, out),
+            None => self.subdivide(lane, lo, hi, model, out),
         }
     }
 
@@ -589,13 +581,11 @@ impl StepRootCursor {
     /// lattice threshold the position has reached is the only thing that can.
     fn emit_single_clock(
         &mut self,
-        motor: usize,
-        cfg: &MotorConfig,
-        view: &ClockedMotorSpan,
+        lane: Lane,
         clock: u64,
         out: &mut Vec<StepRoot>,
     ) -> Result<(), ShimError> {
-        let position = self.position_at(motor, view, clock)?;
+        let position = self.position_at(lane, clock)?;
         let lattice = self.frame();
         let slope = if position >= lattice.threshold(self.microstep_mm, Slope::Rising) {
             Slope::Rising
@@ -604,16 +594,14 @@ impl StepRootCursor {
         } else {
             return Ok(());
         };
-        self.emit_run(motor, cfg, view, clock, clock, slope, None, out)
+        self.emit_run(lane, clock, clock, slope, None, out)
     }
 
     /// The window carries no certified slope, so it is halved until one half
     /// does — or until a single clock is left and the rise decides.
     fn subdivide(
         &mut self,
-        motor: usize,
-        cfg: &MotorConfig,
-        view: &ClockedMotorSpan,
+        lane: Lane,
         lo: u64,
         hi: u64,
         model: Option<&LocalPolynomial>,
@@ -623,45 +611,45 @@ impl StepRootCursor {
             return Ok(());
         }
         CERT_NONE_COUNT.with(|c| c.set(c.get() + 1));
-        if !self.interval_can_reach_next_lattice(motor, view, lo, hi, model)? {
+        if !self.interval_can_reach_next_lattice(lane, lo, hi, model)? {
             PRUNE_COUNT.with(|c| c.set(c.get() + 1));
             return Ok(());
         }
         if hi - lo <= 1 {
-            let rise = self.position_at(motor, view, hi)? - self.position_at(motor, view, lo)?;
+            let rise = self.position_at(lane, hi)? - self.position_at(lane, lo)?;
             let slope = if rise >= 0.0 {
                 Slope::Rising
             } else {
                 Slope::Falling
             };
-            return self.emit_run(motor, cfg, view, lo, hi, slope, model, out);
+            return self.emit_run(lane, lo, hi, slope, model, out);
         }
         let mid = lo + (hi - lo) / 2;
-        self.emit_window(motor, cfg, view, lo, mid, model, out)?;
+        self.emit_window(lane, lo, mid, model, out)?;
         if self.drain_halted {
             return Ok(());
         }
-        self.emit_window(motor, cfg, view, mid, hi, model, out)
+        self.emit_window(lane, mid, hi, model, out)
     }
 
     fn interval_can_reach_next_lattice(
         &self,
-        motor: usize,
-        view: &ClockedMotorSpan,
+        lane: Lane,
         from: u64,
         to: u64,
         model: Option<&LocalPolynomial>,
     ) -> Result<bool, ShimError> {
         BOUNDS_COUNT.with(|c| c.set(c.get() + 1));
-        let t_from = self.stream_time(motor, view, from)?;
-        let t_to = self.stream_time(motor, view, to)?;
+        let view = lane.view;
+        let t_from = self.stream_time(lane, from)?;
+        let t_to = self.stream_time(lane, to)?;
         let nominal = self.frame().nominal_position(self.microstep_mm);
         if let Some((hull_from, hull_to)) = clocks_covered(model, view, t_from, t_to) {
             let (mut lower, mut upper) = model
                 .expect("a covered window has a model")
                 .position_range(hull_from, hull_to);
             if hull_from > t_from {
-                let from_position = self.position_at(motor, view, from)?;
+                let from_position = self.position_at(lane, from)?;
                 lower = lower.min(from_position);
                 upper = upper.max(from_position);
             }
@@ -670,9 +658,12 @@ impl StepRootCursor {
         let bounds = view
             .signal
             .pva_bounds(t_from, t_to)
-            .map_err(|error| ShimError::SpanEval { motor, error })?;
-        let from_position = self.position_at(motor, view, from)?;
-        let to_position = self.position_at(motor, view, to)?;
+            .map_err(|error| ShimError::SpanEval {
+                motor: lane.motor,
+                error,
+            })?;
+        let from_position = self.position_at(lane, from)?;
+        let to_position = self.position_at(lane, to)?;
         let duration = (to - from) as f64 / view.clock_freq_hz;
         let scale = from_position
             .abs()
@@ -693,15 +684,15 @@ impl StepRootCursor {
 
     fn certified_slope(
         &self,
-        motor: usize,
-        view: &ClockedMotorSpan,
+        lane: Lane,
         from: u64,
         to: u64,
         model: Option<&LocalPolynomial>,
     ) -> Result<Option<Slope>, ShimError> {
         BOUNDS_COUNT.with(|c| c.set(c.get() + 1));
-        let t_from = self.stream_time(motor, view, from)?;
-        let t_to = self.stream_time(motor, view, to)?;
+        let view = lane.view;
+        let t_from = self.stream_time(lane, from)?;
+        let t_to = self.stream_time(lane, to)?;
         let duration = (to - from) as f64 / view.clock_freq_hz;
         if let Some((hull_from, hull_to)) = clocks_covered(model, view, t_from, t_to) {
             let model = model.expect("a covered window has a model");
@@ -719,7 +710,7 @@ impl StepRootCursor {
                 .max(1.0);
             let tolerance = 256.0 * f64::EPSILON * velocity_scale;
             let first_rise = if hull_from > t_from {
-                self.position_at(motor, view, from + 1)? - self.position_at(motor, view, from)?
+                self.position_at(lane, from + 1)? - self.position_at(lane, from)?
             } else {
                 0.0
             };
@@ -735,9 +726,12 @@ impl StepRootCursor {
         let bounds = view
             .signal
             .pva_bounds(t_from, t_to)
-            .map_err(|error| ShimError::SpanEval { motor, error })?;
-        let from_pva = self.eval(motor, view, from)?;
-        let to_pva = self.eval(motor, view, to)?;
+            .map_err(|error| ShimError::SpanEval {
+                motor: lane.motor,
+                error,
+            })?;
+        let from_pva = self.eval(lane, from)?;
+        let to_pva = self.eval(lane, to)?;
         let position_scale = from_pva
             .position
             .abs()
@@ -778,13 +772,9 @@ impl StepRootCursor {
     /// its carriers admit one. A window cut at a breakpoint starts on the
     /// last clock before it, so a polynomial ending within one clock is the
     /// previous piece and the one beginning at that breakpoint is taken.
-    fn model_at(
-        &self,
-        motor: usize,
-        view: &ClockedMotorSpan,
-        clock: u64,
-    ) -> Result<Option<LocalPolynomial>, ShimError> {
-        let t = self.stream_time(motor, view, clock)?;
+    fn model_at(&self, lane: Lane, clock: u64) -> Result<Option<LocalPolynomial>, ShimError> {
+        let view = lane.view;
+        let t = self.stream_time(lane, clock)?;
         let Some(model) = view.signal.local_polynomial(t) else {
             return Ok(None);
         };
@@ -819,31 +809,33 @@ impl StepRootCursor {
         }
     }
 
-    fn eval(&self, motor: usize, view: &ClockedMotorSpan, clock: u64) -> Result<Pva, ShimError> {
+    fn eval(&self, lane: Lane, clock: u64) -> Result<Pva, ShimError> {
         EVAL_COUNT.with(|c| c.set(c.get() + 1));
-        view.eval_at_clock(clock)
-            .map_err(|error| ShimError::SpanEval { motor, error })
+        lane.view
+            .eval_at_clock(clock)
+            .map_err(|error| ShimError::SpanEval {
+                motor: lane.motor,
+                error,
+            })
     }
 
-    fn position_at(
-        &self,
-        motor: usize,
-        view: &ClockedMotorSpan,
-        clock: u64,
-    ) -> Result<f64, ShimError> {
+    fn position_at(&self, lane: Lane, clock: u64) -> Result<f64, ShimError> {
         EVAL_COUNT.with(|c| c.set(c.get() + 1));
-        view.position_at_clock(clock)
-            .map_err(|error| ShimError::SpanEval { motor, error })
+        lane.view
+            .position_at_clock(clock)
+            .map_err(|error| ShimError::SpanEval {
+                motor: lane.motor,
+                error,
+            })
     }
 
-    fn stream_time(
-        &self,
-        motor: usize,
-        view: &ClockedMotorSpan,
-        clock: u64,
-    ) -> Result<f64, ShimError> {
-        view.stream_time_at_clock(clock)
-            .map_err(|error| ShimError::SpanEval { motor, error })
+    fn stream_time(&self, lane: Lane, clock: u64) -> Result<f64, ShimError> {
+        lane.view
+            .stream_time_at_clock(clock)
+            .map_err(|error| ShimError::SpanEval {
+                motor: lane.motor,
+                error,
+            })
     }
 }
 

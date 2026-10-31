@@ -2,13 +2,16 @@
 
 use super::pump_loop::Pump;
 use super::*;
+use crate::lock_ext::LockExt;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 use trajectory::ClockedMotorSpan;
 
-struct NullSink;
+#[derive(Default)]
+struct NullSink {
+    cuts: std::sync::Mutex<Vec<CutCredit>>,
+}
 
 impl SpanSink for NullSink {
     fn send_frame(
@@ -20,6 +23,10 @@ impl SpanSink for NullSink {
     ) -> Result<i32, SendError> {
         Ok(mcu_protocol::result_codes::OK)
     }
+
+    fn flush_keys(&self, _keys: &[AxisKey]) -> Result<Vec<CutCredit>, SendError> {
+        Ok(std::mem::take(&mut *self.cuts.lock_ok()))
+    }
 }
 
 const DUAL: AxisKey = AxisKey { mcu_id: 0, axis: 2 };
@@ -27,25 +34,16 @@ const DUAL: AxisKey = AxisKey { mcu_id: 0, axis: 2 };
 fn pump_with_pushed(pushed: u32) -> Pump<NullSink> {
     let mut queues = BTreeMap::new();
     let mut q = AxisQueue::new(64);
-    q.pushed = pushed;
+    q.credit.accept(pushed);
     queues.insert(DUAL, q);
-    Pump {
-        queues,
-        junctions: JunctionTracker::default(),
-        cohort: None,
-        halted: BTreeMap::new(),
-        sink: NullSink,
-        callbacks: PumpCallbacks::noop(64),
-        history: None,
-        ledger: Arc::new(crate::drain::DrainLedger::new()),
-        pending_barrier_acks: Vec::new(),
-        backlog: Arc::new(AtomicU64::new(0)),
-        release_plan: crate::pump::ReleasePlan::default(),
-        data_open: true,
-        intake_batch_open: false,
-        consumption_stall: super::stall::ConsumptionStallWatch::new(Duration::from_secs(60)),
-        mem_probe: super::memstat::MemPressureProbe::new(),
-    }
+    let mut pump = Pump::new(
+        NullSink::default(),
+        PumpCallbacks::noop(64),
+        None,
+        Arc::new(crate::drain::DrainLedger::new()),
+    );
+    pump.queues = queues;
+    pump
 }
 
 fn report(pump: &mut Pump<NullSink>, retired_by: RetiredBy, retired: u32) {
@@ -85,7 +83,7 @@ fn a_transport_switch_mid_drain_carries_the_credit_already_earned() {
     report(&mut pump, RetiredBy::Phase, 3);
     assert!(pump.ledger.drained());
 
-    pump.queues.get_mut(&DUAL).unwrap().pushed = 5;
+    pump.queues.get_mut(&DUAL).unwrap().credit.accept(2);
     report(&mut pump, RetiredBy::Pulse, 0);
     assert!(
         !pump.ledger.drained(),
@@ -104,7 +102,10 @@ fn a_transport_switch_mid_drain_carries_the_credit_already_earned() {
         pump.ledger.lagging_axes()
     );
     let q = &pump.queues[&DUAL];
-    assert_eq!((q.retired, q.consumed), (5, 5));
+    assert_eq!(
+        (q.credit.snapshot().retired, q.credit.snapshot().consumed),
+        (5, 5)
+    );
 }
 
 /// An endpoint counts a view consumed when it releases it — it has converted
@@ -118,7 +119,7 @@ fn consumption_frees_the_ring_while_only_playback_drains_the_lane() {
     report_split(&mut pump, RetiredBy::Pulse, 4, 0);
     let q = &pump.queues[&DUAL];
     assert_eq!(
-        (q.consumed, q.retired),
+        (q.credit.snapshot().consumed, q.credit.snapshot().retired),
         (4, 0),
         "release credit must not imply playback"
     );
@@ -138,23 +139,108 @@ fn consumption_frees_the_ring_while_only_playback_drains_the_lane() {
 }
 
 #[test]
-fn halt_keeps_pushed_views_until_the_endpoint_publishes_abandonment() {
+fn halt_abandonment_preserves_playback_truth_across_delayed_reports_and_resume() {
     let mut pump = pump_with_pushed(100);
     report(&mut pump, RetiredBy::Pulse, 36);
+    pump.sink.cuts.lock_ok().push(CutCredit {
+        key: DUAL,
+        by: RetiredBy::Pulse,
+        before: (36, 36),
+        after: (100, 100),
+    });
     let (ack, _) = std::sync::mpsc::sync_channel(1);
-
     pump.handle_control_msg(PumpMsg::Halt {
         keys: vec![DUAL],
         ack,
     });
-    assert_eq!(pump.queues[&DUAL].pushed, 100);
-
+    pump.publish_ledger();
+    assert!(pump.ledger.drained());
+    assert_eq!(pump.queues[&DUAL].credit.snapshot().pushed, 100);
+    assert_eq!(pump.queues[&DUAL].credit.snapshot().retired, 36);
+    assert_eq!(pump.queues[&DUAL].credit.snapshot().abandoned, 64);
+    report(&mut pump, RetiredBy::Pulse, 70);
     report(&mut pump, RetiredBy::Pulse, 100);
-    assert!(
-        pump.ledger.drained(),
-        "the endpoint abandonment must close every view retained in the pump odometer: {:?}",
-        pump.ledger.lagging_axes()
+    assert_eq!(
+        pump.queues[&DUAL].credit.snapshot().retired,
+        36,
+        "discard and old receipts are not playback"
     );
+    pump.handle_control_msg(PumpMsg::Resume(vec![DUAL]));
+    pump.queues.get_mut(&DUAL).unwrap().credit.accept(1);
+    pump.publish_ledger();
+    assert!(!pump.ledger.drained());
+    report(&mut pump, RetiredBy::Pulse, 101);
+    assert!(pump.ledger.drained());
+    assert_eq!(pump.queues[&DUAL].credit.snapshot().retired, 37);
+    report(&mut pump, RetiredBy::Pulse, 100);
+    assert_eq!(
+        pump.queues[&DUAL].credit.snapshot().retired,
+        37,
+        "a delayed cut heartbeat cannot undo resumed playback"
+    );
+    assert_eq!(pump.queues[&DUAL].room(), 64);
+}
+
+#[test]
+fn repeated_cuts_keep_mixed_transport_progress_separate_across_wraparound() {
+    let mut pump = pump_with_pushed(u32::MAX);
+    report_split(&mut pump, RetiredBy::Pulse, u32::MAX - 4, u32::MAX - 6);
+    report_split(&mut pump, RetiredBy::Phase, 2, 1);
+    pump.sink.cuts.lock_ok().push(CutCredit {
+        key: DUAL,
+        by: RetiredBy::Pulse,
+        before: (u32::MAX - 3, u32::MAX - 5),
+        after: (1, 1),
+    });
+    let (ack, _) = std::sync::mpsc::sync_channel(1);
+    pump.handle_control_msg(PumpMsg::Halt {
+        keys: vec![DUAL],
+        ack,
+    });
+    pump.publish_ledger();
+    assert!(pump.ledger.drained());
+    assert_eq!(pump.queues[&DUAL].credit.snapshot().abandoned, 4);
+    assert_eq!(pump.queues[&DUAL].room(), 64);
+
+    pump.handle_control_msg(PumpMsg::Resume(vec![DUAL]));
+    pump.queues.get_mut(&DUAL).unwrap().credit.accept(4);
+    report_split(&mut pump, RetiredBy::Pulse, u32::MAX, u32::MAX);
+    assert_eq!(pump.queues[&DUAL].room(), 60);
+    assert_eq!(pump.queues[&DUAL].credit.outstanding(), 4);
+    report_split(&mut pump, RetiredBy::Pulse, 3, 2);
+    assert_eq!(pump.queues[&DUAL].room(), 62);
+    assert_eq!(pump.queues[&DUAL].credit.outstanding(), 3);
+    report_split(&mut pump, RetiredBy::Phase, 4, 3);
+    assert_eq!(pump.queues[&DUAL].room(), 64);
+    assert!(!pump.ledger.drained());
+
+    pump.sink.cuts.lock_ok().push(CutCredit {
+        key: DUAL,
+        by: RetiredBy::Pulse,
+        before: (3, 2),
+        after: (5, 5),
+    });
+    let (ack, _) = std::sync::mpsc::sync_channel(1);
+    pump.handle_control_msg(PumpMsg::Halt {
+        keys: vec![DUAL],
+        ack,
+    });
+    pump.publish_ledger();
+    assert!(pump.ledger.drained());
+    assert_eq!(pump.queues[&DUAL].credit.snapshot().abandoned, 5);
+    assert_eq!(pump.queues[&DUAL].credit.snapshot().retired, u32::MAX - 1);
+
+    pump.handle_control_msg(PumpMsg::Resume(vec![DUAL]));
+    pump.queues.get_mut(&DUAL).unwrap().credit.accept(2);
+    report_split(&mut pump, RetiredBy::Pulse, 3, 2);
+    assert_eq!(pump.queues[&DUAL].room(), 62);
+    assert_eq!(pump.queues[&DUAL].credit.outstanding(), 2);
+    report_split(&mut pump, RetiredBy::Pulse, 6, 6);
+    assert_eq!(pump.queues[&DUAL].credit.outstanding(), 1);
+    report_split(&mut pump, RetiredBy::Pulse, 7, 7);
+    assert!(pump.ledger.drained());
+    assert_eq!(pump.queues[&DUAL].credit.snapshot().retired, 0);
+    assert_eq!(pump.queues[&DUAL].room(), 64);
 }
 
 #[test]
@@ -170,4 +256,25 @@ fn an_axis_no_endpoint_speaks_for_never_drains() {
         error.contains("mcu0 axis2: pending 0 pushed 5 retired 0"),
         "{error}"
     );
+}
+
+#[test]
+fn duplicate_flush_keys_reconcile_each_receipt_once() {
+    let mut pump = pump_with_pushed(5);
+    report_split(&mut pump, RetiredBy::Pulse, 2, 1);
+    pump.sink.cuts.lock_ok().push(CutCredit {
+        key: DUAL,
+        by: RetiredBy::Pulse,
+        before: (2, 1),
+        after: (5, 5),
+    });
+
+    pump.handle_control_msg(PumpMsg::Flush(vec![DUAL, DUAL]));
+    pump.publish_ledger();
+    assert!(pump.ledger.drained());
+
+    pump.queues.get_mut(&DUAL).unwrap().credit.accept(3);
+    report(&mut pump, RetiredBy::Pulse, 8);
+    assert!(pump.ledger.drained());
+    assert_eq!(pump.queues[&DUAL].credit.snapshot().retired, 4);
 }

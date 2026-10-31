@@ -1,6 +1,5 @@
 // C-side mirror of rust/mcu-transport/src/demux.rs — keep in sync.
 
-#include <stdio.h>
 #include <string.h>
 #include "mcu_demux.h"
 #include "board/misc.h"
@@ -67,11 +66,6 @@ finalize_kalico_frame(void)
                           | ((uint16_t)kalico_buf[payload_end + 1] << 8);
     uint16_t crc_actual = crc16_ccitt(&kalico_buf[1], payload_end - 1);
     if (crc_actual != crc_expected) {
-#if CONFIG_MACH_LINUX
-        fprintf(stderr, "[mcu] crc mismatch: expected 0x%04x, got 0x%04x, kalico_pos=%u\n",
-                crc_expected, crc_actual, kalico_pos);
-        fflush(stderr);
-#endif
         mcu_demux_crc_mismatch_total++;
         return MCU_DEMUX_OUT_ERROR;
     }

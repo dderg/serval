@@ -31,7 +31,6 @@ McuTopology = namedtuple(
 )
 
 CORNER_DEVIATION_SCV_FACTOR = math.sqrt(2.0) - 1.0
-DEFAULT_SQUARE_CORNER_VELOCITY = 5.0
 
 
 def corner_deviation_from_scv(scv, max_accel):
@@ -145,7 +144,7 @@ def build_axis_to_handle(motion):
         axis_ceiling[lane_idx] = ceiling
 
     fm = motion.printer.lookup_object("force_move", None)
-    for _name, motors, slot_idx in motion._follower_slots():
+    for _name, motors, slot_idx in follower_slots(motion):
         if fm is None:
             continue
         followers = [fm.steppers.get(m) for m in motors]
@@ -256,7 +255,7 @@ def derive_mcu_topology(motion, axis_to_handle):
     ceilings = getattr(motion, "_axis_velocity_ceiling", {})
     mcu_by_handle = engine_mcus_by_handle(motion)
     endpoint_handles = ethercat_handles(motion)
-    slot_steppers = motion._build_slot_steppers()
+    slot_steppers = build_slot_steppers(motion)
     topo = []
     for handle in sorted(by_handle):
         axes = sorted(by_handle[handle])
@@ -265,20 +264,16 @@ def derive_mcu_topology(motion, axis_to_handle):
         max_error_secs = (
             0.0 if mcu_obj is None else mcu_obj.get_stepcompress_max_error()
         )
-        (
-            _present_mask,
-            _invert_mask,
-            _steps_per_mm,
-            step_modes,
-            bind_list,
-            slot_microstep_distance,
-            slot_invert_dir,
-            slot_oids,
-            slot_step_pulse_seconds,
-            slot_dual_transport,
-        ) = _build_slot_masks(
+        masks = _build_slot_masks(
             motion.printer, mcu_obj, slot_steppers, len(mcu_by_handle)
         )
+        step_modes = masks.step_modes
+        bind_list = masks.bind_list
+        slot_microstep_distance = masks.microstep_distance
+        slot_invert_dir = masks.invert_dir
+        slot_oids = masks.stepper_oids
+        slot_step_pulse_seconds = masks.step_pulse_seconds
+        slot_dual_transport = masks.dual_transport
         lane_kinds = [
             lane_kind_of(step_modes[a], slot_dual_transport[a]) for a in axes
         ]
@@ -395,8 +390,8 @@ def init_planner(motion):
         )
         return
 
-    axis_to_handle = motion._build_axis_to_handle()
-    topology = motion._derive_mcu_topology(axis_to_handle)
+    axis_to_handle = build_axis_to_handle(motion)
+    topology = derive_mcu_topology(motion, axis_to_handle)
     if not topology:
         logging.warning(
             "Motion: no axis->MCU assignment resolved; skipping init_planner"
@@ -411,7 +406,7 @@ def init_planner(motion):
     slots_by_name.update(
         {
             axis_name: slot_idx
-            for axis_name, _motors, slot_idx in motion._follower_slots()
+            for axis_name, _motors, slot_idx in follower_slots(motion)
         }
     )
     motion._axis_mcus = {}
@@ -422,7 +417,7 @@ def init_planner(motion):
 
     try:
         motion.engine.init_planner(motion._motion_config_text, topology)
-        motion._configure_axes_per_mcu(engine_mcus)
+        configure_axes_per_mcu(motion, engine_mcus)
         motion._planner_ready = True
         motion._register_engine_wakeup()
 
@@ -443,7 +438,7 @@ def build_slot_steppers(motion):
             (s.get_name(), s) for s in motion.kin.rails[lane_idx].get_steppers()
         ]
     fm = motion.printer.lookup_object("force_move", None)
-    for _name, motors, slot_idx in motion._follower_slots():
+    for _name, motors, slot_idx in follower_slots(motion):
         entries = []
         for motor_name in motors:
             s = None if fm is None else fm.steppers.get(motor_name)
@@ -451,6 +446,23 @@ def build_slot_steppers(motion):
                 entries.append((motor_name, s))
         slot_steppers[slot_idx] = entries
     return slot_steppers
+
+
+_SlotMasks = namedtuple(
+    "_SlotMasks",
+    [
+        "present_mask",
+        "invert_mask",
+        "steps_per_mm",
+        "step_modes",
+        "bind_list",
+        "microstep_distance",
+        "invert_dir",
+        "stepper_oids",
+        "step_pulse_seconds",
+        "dual_transport",
+    ],
+)
 
 
 def _build_slot_masks(printer, mcu_obj, slot_steppers, num_engine_mcus):
@@ -495,7 +507,7 @@ def _build_slot_masks(printer, mcu_obj, slot_steppers, num_engine_mcus):
         for sname, s in on_this_mcu:
             inv = 1 if getattr(s, "_invert_dir", False) else 0
             bind_list.append((i, sname, s.get_oid(), inv))
-    return (
+    return _SlotMasks(
         present_mask,
         invert_mask,
         steps_per_mm,
@@ -747,23 +759,15 @@ def _configure_one_mcu(
     mcu_handle,
     slot_steppers,
     coupled,
-    awd_default,
     num_engine_mcus,
 ):
-    (
-        present_mask,
-        invert_mask,
-        steps_per_mm,
-        step_modes,
-        bind_list,
-        microstep_distance,
-        _invert_dir,
-        _stepper_oids,
-        _step_pulse_seconds,
-        dual_transport,
-    ) = _build_slot_masks(
+    masks = _build_slot_masks(
         motion.printer, mcu_obj, slot_steppers, num_engine_mcus
     )
+    present_mask = masks.present_mask
+    step_modes = masks.step_modes
+    bind_list = masks.bind_list
+    dual_transport = masks.dual_transport
     phase_binds = [
         b for b in bind_list if step_modes[b[0]] == STEP_MODE_MODULATED
     ]
@@ -782,14 +786,13 @@ def _configure_one_mcu(
         mcu_handle,
         pulse_mask,
         pulse_binds,
-        microstep_distance,
+        masks.microstep_distance,
     )
     if not phase_binds:
         return
     phase_configs, any_phase_stepping = _configure_phase_stepping_groups(
         motion, slot_steppers, step_modes, coupled
     )
-    awd_mask = awd_default & present_mask
     mcu_caps = _validate_firmware_capabilities(
         motion, mcu_handle, name, slot_steppers, step_modes
     )
@@ -825,23 +828,22 @@ def _configure_one_mcu(
         name,
         configure_axis_cmd,
         phase_binds,
-        steps_per_mm,
+        masks.steps_per_mm,
         step_modes,
         phase_configs,
         any_phase_stepping,
     )
     logging.info(
         "Motion: configure_axes mcu=%s kin=%s "
-        "present=0x%x awd=0x%x invert=0x%x steps_per_mm=%s "
+        "present=0x%x invert=0x%x steps_per_mm=%s "
         "step_modes=%s mcu_caps=0x%x runtime_bindings=%s "
         "phase_configs=%s any_phase_stepping=%s "
         "phase_motor_count=%d",
         name,
         motion.kin.kind,
         present_mask,
-        awd_mask,
-        invert_mask,
-        steps_per_mm,
+        masks.invert_mask,
+        masks.steps_per_mm,
         step_modes,
         mcu_caps,
         phase_binds,
@@ -853,9 +855,7 @@ def _configure_one_mcu(
 
 def configure_axes_per_mcu(motion, engine_mcus):
     coupled = motion.kin.coupled_xy()
-    awd_default = 0b0011 if coupled else 0b0000
-
-    slot_steppers = motion._build_slot_steppers()
+    slot_steppers = build_slot_steppers(motion)
 
     for name, mcu_obj, mcu_handle in engine_mcus:
         _configure_one_mcu(
@@ -865,6 +865,5 @@ def configure_axes_per_mcu(motion, engine_mcus):
             mcu_handle,
             slot_steppers,
             coupled,
-            awd_default,
             len(engine_mcus),
         )

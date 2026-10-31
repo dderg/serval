@@ -1,6 +1,6 @@
 use core::sync::atomic::Ordering;
 
-use crate::stepping_state::MAX_AXES;
+use runtime_contract::axes::MAX_AXES;
 
 use super::{Engine, RuntimeStatus};
 

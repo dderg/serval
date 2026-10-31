@@ -17,11 +17,11 @@ fn parser_with_one_command() -> MsgProtoParser {
 }
 
 #[test]
-fn string_and_typed_encode_to_same_bytes() {
+fn string_and_args_encode_to_same_bytes() {
     let p = parser_with_one_command();
     let bytes_str = p.encode("ping val=100").unwrap();
     let bytes_typed = p
-        .encode_typed("ping", &[("val", FieldValue::U32(100))])
+        .encode_args("ping", &[("val", ArgValue::Int(100))])
         .unwrap();
     assert_eq!(bytes_str, bytes_typed);
 }
@@ -166,7 +166,7 @@ fn args_encode_range_checks_like_string_path() {
 #[test]
 fn args_encode_rejects_missing_field_and_type_mismatch() {
     let p = args_parity_parser();
-    match p.encode_args("mix", &[]) {
+    match p.encode_args::<&str>("mix", &[]) {
         Err(ParseError::MissingField(_)) => {}
         other => panic!("expected MissingField, got {:?}", other),
     }
@@ -179,5 +179,44 @@ fn args_encode_rejects_missing_field_and_type_mismatch() {
             assert_eq!(got, "int");
         }
         other => panic!("expected ArgTypeMismatch, got {:?}", other),
+    }
+}
+
+#[test]
+fn byte_fields_enforce_wire_length_boundary() {
+    for format in ["%s", "%*s", "%.*s"] {
+        let mut d = dict();
+        d.commands.insert(format!("bytes value={format}"), 1);
+        let p = MsgProtoParser::from_dictionary(d).unwrap();
+        for len in [255, 256] {
+            let bytes = vec![0xff; len];
+            let (text, arg) = if format == "%s" {
+                let text = "x".repeat(len);
+                (text.clone(), ArgValue::Str(text))
+            } else {
+                ("ff".repeat(len), ArgValue::Bytes(bytes.clone()))
+            };
+            let text_result = p.encode(&format!("bytes value={text}"));
+            let arg_result = p.encode_args("bytes", &[("value", arg)]);
+            if len == 255 {
+                let mut expected = vec![1, 255];
+                expected.extend_from_slice(if format == "%s" {
+                    text.as_bytes()
+                } else {
+                    &bytes
+                });
+                assert_eq!(text_result.unwrap(), expected);
+                assert_eq!(arg_result.unwrap(), expected);
+            } else {
+                assert!(matches!(
+                    text_result,
+                    Err(ParseError::OutOfRange { value: 256, .. })
+                ));
+                assert!(matches!(
+                    arg_result,
+                    Err(ParseError::OutOfRange { value: 256, .. })
+                ));
+            }
+        }
     }
 }

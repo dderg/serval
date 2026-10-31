@@ -119,7 +119,14 @@ impl ChainStage {
 
 #[derive(Debug, Clone, Default)]
 pub struct CompiledChain {
-    pub stages: Vec<ChainStage>,
+    kernel: Option<PiecewisePolynomialKernel>,
+    transform: Option<(TransformPlacement, ChainStage)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransformPlacement {
+    BeforeKernel,
+    AfterKernel,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -221,10 +228,7 @@ impl CompiledChain {
                 continue;
             };
             if let ChainStage::DerivativeGains { k2, .. } = stage {
-                let after_kernel = compiled
-                    .stages
-                    .iter()
-                    .any(|s| matches!(s, ChainStage::SmoothKernel(_)));
+                let after_kernel = compiled.kernel.is_some();
                 if k2 != 0.0 && !after_kernel {
                     return Err(PostProcessorError::AccelGainNeedsPrecedingKernel {
                         name: inst.name().to_string(),
@@ -242,14 +246,24 @@ impl CompiledChain {
                 });
             }
             slot_sources[slot] = Some(inst.name());
-            compiled.stages.push(stage);
+            match stage {
+                ChainStage::SmoothKernel(kernel) => compiled.kernel = Some(kernel),
+                transform => {
+                    let placement = if compiled.kernel.is_some() {
+                        TransformPlacement::AfterKernel
+                    } else {
+                        TransformPlacement::BeforeKernel
+                    };
+                    compiled.transform = Some((placement, transform));
+                }
+            }
         }
         Ok(compiled)
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.stages.is_empty()
+        self.kernel.is_none() && self.transform.is_none()
     }
 
     /// Whether this chain ends in derivative-gain stages after a smoothing
@@ -257,14 +271,7 @@ impl CompiledChain {
     /// intentionally departs from the toolhead signal.
     #[must_use]
     pub fn has_motor_side_gains(&self) -> bool {
-        let mut seen_kernel = false;
-        self.stages.iter().any(|stage| match stage {
-            ChainStage::SmoothKernel(_) => {
-                seen_kernel = true;
-                false
-            }
-            ChainStage::DerivativeGains { .. } | ChainStage::NonlinearAdvance(_) => seen_kernel,
-        })
+        self.trailing_transform().is_some()
     }
 
     /// Whether this chain transforms its axis with zero-support stages alone.
@@ -274,28 +281,69 @@ impl CompiledChain {
     /// see it by comparing raw against shaped.
     #[must_use]
     pub fn is_zero_support_only(&self) -> bool {
-        !self.stages.is_empty()
-            && self
-                .stages
-                .iter()
-                .all(|stage| !matches!(stage, ChainStage::SmoothKernel(_)))
+        self.kernel.is_none() && self.transform.is_some()
     }
 
     #[must_use]
     pub fn kernel_variance_s2(&self) -> f64 {
-        self.stages
-            .iter()
-            .map(ChainStage::kernel_variance_s2)
-            .fold(0.0, f64::max)
+        self.kernel
+            .as_ref()
+            .map_or(0.0, |kernel| kernel.second_moment().max(0.0))
     }
 
     #[must_use]
     pub fn max_input_window(&self) -> (f64, f64) {
-        self.stages.iter().fold((0.0, 0.0), |(lo, hi), stage| {
-            let (stage_lo, stage_hi) = stage.input_window();
-            (lo.min(stage_lo), hi.max(stage_hi))
+        self.kernel.as_ref().map_or((0.0, 0.0), |kernel| {
+            let (lo, hi) = kernel.support();
+            ((-hi).min(0.0), (-lo).max(0.0))
         })
     }
+
+    pub fn from_kernel_and_transform(
+        kernel: Option<PiecewisePolynomialKernel>,
+        transform: Option<(TransformPlacement, ChainStage)>,
+    ) -> Self {
+        assert!(
+            !matches!(transform, Some((_, ChainStage::SmoothKernel(_)))),
+            "zero-support transform cannot contain a kernel"
+        );
+        assert!(
+            kernel.is_some() || !matches!(transform, Some((TransformPlacement::AfterKernel, _))),
+            "a trailing transform requires a kernel"
+        );
+        Self { kernel, transform }
+    }
+
+    pub fn kernel(&self) -> Option<&PiecewisePolynomialKernel> {
+        self.kernel.as_ref()
+    }
+
+    pub fn leading_transform(&self) -> Option<&ChainStage> {
+        self.transform.as_ref().and_then(|(placement, transform)| {
+            (*placement == TransformPlacement::BeforeKernel).then_some(transform)
+        })
+    }
+
+    pub fn trailing_transform(&self) -> Option<&ChainStage> {
+        self.transform.as_ref().and_then(|(placement, transform)| {
+            (*placement == TransformPlacement::AfterKernel).then_some(transform)
+        })
+    }
+
+    pub fn follower_linear_transform(&self) -> bool {
+        self.kernel.is_some()
+            && !matches!(self.transform, Some((_, ChainStage::NonlinearAdvance(_))))
+    }
+
+    pub fn transform(&self) -> Option<&ChainStage> {
+        self.transform.as_ref().map(|(_, transform)| transform)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RestSupport {
+    pub before_motion: f64,
+    pub after_motion: f64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -324,7 +372,8 @@ impl AxisChainSet {
             chains: kernels[..3]
                 .iter()
                 .map(|k| CompiledChain {
-                    stages: k.iter().cloned().map(ChainStage::SmoothKernel).collect(),
+                    kernel: k.clone(),
+                    transform: None,
                 })
                 .collect(),
             followers: Vec::new(),
@@ -382,10 +431,7 @@ impl AxisChainSet {
 
     #[must_use]
     pub fn has_own_kernel(&self, axis: usize) -> bool {
-        self.chains[axis]
-            .stages
-            .iter()
-            .any(|s| matches!(s, ChainStage::SmoothKernel(_)))
+        self.chains[axis].kernel().is_some()
     }
 
     #[must_use]
@@ -400,6 +446,18 @@ impl AxisChainSet {
         (0..self.n_axes())
             .map(|axis| self.axis_support(axis).0.abs())
             .fold(0.0, f64::max)
+    }
+
+    /// The rest the post-processors demand around motion: `before_motion`
+    /// is the widest forward kernel support, `after_motion` the widest back
+    /// support. This pair is the only thing the lowerer needs from a chain
+    /// set to size its rest-holds.
+    #[must_use]
+    pub fn rest_support(&self) -> RestSupport {
+        RestSupport {
+            before_motion: self.forward_support(),
+            after_motion: self.back_support(),
+        }
     }
 
     /// The widest forward support among directly-convolved (non-follower)

@@ -1,4 +1,5 @@
 use crate::lock_ext::LockExt;
+use host_rt::passthrough_queue::McuHandle;
 use std::sync::{Arc, Mutex};
 
 use crate::axis_transport::AxisTransports;
@@ -41,7 +42,7 @@ pub fn reconstruct_axis_position(
         let router_guard = router.lock_ok();
         crate::motion_history::clock_to_host(
             &router_guard,
-            crate::types::mcu_handle_from_raw(endstop_mcu),
+            McuHandle::from_raw(endstop_mcu),
             trip_clock,
         )
         .map_err(|description| {
@@ -110,7 +111,7 @@ pub fn reconstruct_axis_position(
     } else {
         router
             .lock_ok()
-            .host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(axis_mcu), trip_host)
+            .host_time_to_mcu_clock(McuHandle::from_raw(axis_mcu), trip_host)
             .map_err(|e| format!("host_time_to_mcu_clock failed for axis mcu {axis_mcu}: {e:?}"))?
     };
 
@@ -184,7 +185,7 @@ fn cartesian_from_motor_lanes(
     let kin_tag = configs
         .iter()
         .find(|c| c.axes.contains(&0usize))
-        .map(|c| c.kinematics)
+        .map(|c| c.hw.kinematics)
         .expect("lane 0 owner exists: checked above");
     Ok(KinematicsModule::from_tag(kin_tag)
         .map_err(|e| e.to_string())?
@@ -198,7 +199,7 @@ pub fn motor_frame_start(
     let kin_tag = configs
         .iter()
         .find(|c| c.axes.contains(&0usize))
-        .map(|c| c.kinematics)
+        .map(|c| c.hw.kinematics)
         .ok_or_else(|| {
             "spatial lane 0 is not configured on any mcu — cannot assemble \
              a cartesian position"
@@ -343,23 +344,25 @@ pub fn stepcompress_lane(
         return Ok(None);
     }
     let motor = cfg.motor_range(lane).start;
-    let oid = *cfg.stepper_oids.get(motor).ok_or_else(|| {
+    let oid = *cfg.hw.stepper_oids.get(motor).ok_or_else(|| {
         format!(
             "stepcompress mcu {mcu_id} axis {axis}: motor {motor} has no stepper oid \
              (stepper_oids has {} entries for {} motors)",
-            cfg.stepper_oids.len(),
-            cfg.motor_counts
+            cfg.hw.stepper_oids.len(),
+            cfg.hw
+                .motor_counts
                 .iter()
                 .map(|&count| usize::from(count))
                 .sum::<usize>()
         )
     })?;
-    let microstep_distance = *cfg.microstep_distance.get(motor).ok_or_else(|| {
+    let microstep_distance = *cfg.hw.microstep_distance.get(motor).ok_or_else(|| {
         format!(
             "stepcompress mcu {mcu_id} axis {axis}: motor {motor} has no microstep distance \
              (microstep_distance has {} entries for {} motors)",
-            cfg.microstep_distance.len(),
-            cfg.motor_counts
+            cfg.hw.microstep_distance.len(),
+            cfg.hw
+                .motor_counts
                 .iter()
                 .map(|&count| usize::from(count))
                 .sum::<usize>()
@@ -371,12 +374,13 @@ pub fn stepcompress_lane(
              is not a positive length"
         ));
     }
-    let invert_dir = *cfg.invert_dir.get(motor).ok_or_else(|| {
+    let invert_dir = *cfg.hw.invert_dir.get(motor).ok_or_else(|| {
         format!(
             "stepcompress mcu {mcu_id} axis {axis}: motor {motor} has no direction polarity \
              (invert_dir has {} entries for {} motors)",
-            cfg.invert_dir.len(),
-            cfg.motor_counts
+            cfg.hw.invert_dir.len(),
+            cfg.hw
+                .motor_counts
                 .iter()
                 .map(|&count| usize::from(count))
                 .sum::<usize>()
@@ -392,31 +396,6 @@ pub fn stepcompress_lane(
     }))
 }
 
-pub fn reconcile_stepcompress_axis(
-    cfg: &McuAxisConfig,
-    axis_key: AxisKey,
-    history_position: f64,
-    query_step_count: &dyn Fn(&StepcompressLane) -> Result<i64, String>,
-    reseed_step_counter: &dyn Fn(&StepcompressLane, i64) -> Result<(), String>,
-) -> Result<f64, String> {
-    let Some(lane) = stepcompress_lane(cfg, axis_key)? else {
-        return Ok(history_position);
-    };
-    let reconciliation = StepcompressReconciliation {
-        lane,
-        history_position,
-        executed_steps: query_step_count(&lane)?,
-    };
-    reconciliation.emit_discrepancy();
-    reseed_step_counter(
-        &reconciliation.lane,
-        reconciliation
-            .lane
-            .trajectory_steps(reconciliation.executed_steps),
-    )?;
-    Ok(reconciliation.executed_position())
-}
-
 /// The pulse lane driving `oid` on `mcu_id`. A keyed endstop trip names the
 /// stepper it froze, and only that motor's stream is cut and reseeded, so the
 /// oid — not the lane index — is the identity the host resolves against.
@@ -426,7 +405,7 @@ pub fn stepcompress_lane_of_oid(
     oid: u32,
 ) -> Result<StepcompressLane, String> {
     for cfg in configs.iter().filter(|cfg| cfg.mcu_id == mcu_id) {
-        for (motor, &motor_oid) in cfg.stepper_oids.iter().enumerate() {
+        for (motor, &motor_oid) in cfg.hw.stepper_oids.iter().enumerate() {
             if motor_oid != oid {
                 continue;
             }
@@ -444,7 +423,7 @@ pub fn stepcompress_lane_of_oid(
             if !cfg.pulse_capable(lane) {
                 continue;
             }
-            let microstep_distance = cfg.microstep_distance[motor];
+            let microstep_distance = cfg.hw.microstep_distance[motor];
             if microstep_distance <= 0.0 || !microstep_distance.is_finite() {
                 return Err(format!(
                     "stepcompress mcu {mcu_id} axis {axis} motor {motor}: microstep distance \
@@ -457,7 +436,7 @@ pub fn stepcompress_lane_of_oid(
                 motor,
                 oid,
                 microstep_distance,
-                invert_dir: cfg.invert_dir[motor],
+                invert_dir: cfg.hw.invert_dir[motor],
             });
         }
     }
@@ -465,21 +444,6 @@ pub fn stepcompress_lane_of_oid(
         "stepcompress_lane_of_oid: mcu {mcu_id} has no pulse lane driving stepper oid {oid}; \
          a keyed trip froze a motor this host does not stream to"
     ))
-}
-
-/// The pulse lane driving `axis_key` right now. A dual-transport lane owns a
-/// classic step queue that only holds the motor's truth while the lane is
-/// routed through it; reading its counter mid-phase-mode would adopt a
-/// position the motor left long ago.
-pub fn active_stepcompress_lane(
-    cfg: &McuAxisConfig,
-    transports: &AxisTransports,
-    axis_key: AxisKey,
-) -> Result<Option<StepcompressLane>, String> {
-    if !transports.is_pulse(axis_key) {
-        return Ok(None);
-    }
-    stepcompress_lane(cfg, axis_key)
 }
 
 pub fn reconcile_stepcompress_lanes(
@@ -501,7 +465,8 @@ pub fn reconcile_stepcompress_lanes(
             }
             let history_position = history_lane_position(axis_key)?;
             for motor in cfg.motor_range(lane_index) {
-                let lane = stepcompress_lane_of_oid(configs, cfg.mcu_id, cfg.stepper_oids[motor])?;
+                let lane =
+                    stepcompress_lane_of_oid(configs, cfg.mcu_id, cfg.hw.stepper_oids[motor])?;
                 reconciliations.push(StepcompressReconciliation {
                     lane,
                     history_position,

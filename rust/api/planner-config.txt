@@ -1,0 +1,101 @@
+pub mod planner_config
+pub enum planner_config::AxisConfigError
+pub planner_config::AxisConfigError::BadName
+pub planner_config::AxisConfigError::BadName::name: alloc::string::String
+pub planner_config::AxisConfigError::Duplicate
+pub planner_config::AxisConfigError::Duplicate::name: alloc::string::String
+pub planner_config::AxisConfigError::MissingSpatialAxis
+pub planner_config::AxisConfigError::MissingSpatialAxis::name: alloc::string::String
+pub planner_config::AxisConfigError::MotorMappingDuplicate
+pub planner_config::AxisConfigError::MotorMappingDuplicate::axis: alloc::string::String
+pub planner_config::AxisConfigError::MotorMappingMissing
+pub planner_config::AxisConfigError::MotorMappingMissing::axis: alloc::string::String
+pub planner_config::AxisConfigError::ReservedLetter
+pub planner_config::AxisConfigError::ReservedLetter::name: alloc::string::String
+pub planner_config::AxisConfigError::SpatialAxisCannotFollow
+pub planner_config::AxisConfigError::SpatialAxisCannotFollow::name: alloc::string::String
+pub planner_config::AxisConfigError::UnknownClaimedAxis
+pub planner_config::AxisConfigError::UnknownClaimedAxis::axis: alloc::string::String
+pub planner_config::AxisConfigError::UnknownFollowTarget
+pub planner_config::AxisConfigError::UnknownFollowTarget::axis: alloc::string::String
+pub planner_config::AxisConfigError::UnknownFollowTarget::target: alloc::string::String
+pub enum planner_config::PostProcessorConfigError
+pub planner_config::PostProcessorConfigError::Duplicate
+pub planner_config::PostProcessorConfigError::Duplicate::name: alloc::string::String
+pub planner_config::PostProcessorConfigError::LeaderGainBeforeKernel
+pub planner_config::PostProcessorConfigError::LeaderGainBeforeKernel::axis: alloc::string::String
+pub planner_config::PostProcessorConfigError::LeaderGainBeforeKernel::name: alloc::string::String
+pub planner_config::PostProcessorConfigError::MissingParam
+pub planner_config::PostProcessorConfigError::MissingParam::key: alloc::string::String
+pub planner_config::PostProcessorConfigError::MissingParam::name: alloc::string::String
+pub planner_config::PostProcessorConfigError::Param(trajectory::chain::PostProcessorError)
+pub planner_config::PostProcessorConfigError::UnknownAxisReference
+pub planner_config::PostProcessorConfigError::UnknownAxisReference::axis: alloc::string::String
+pub planner_config::PostProcessorConfigError::UnknownAxisReference::name: alloc::string::String
+pub planner_config::PostProcessorConfigError::UnknownInstance
+pub planner_config::PostProcessorConfigError::UnknownInstance::name: alloc::string::String
+pub planner_config::PostProcessorConfigError::UnsupportedKind
+pub planner_config::PostProcessorConfigError::UnsupportedKind::kind: alloc::string::String
+pub planner_config::PostProcessorConfigError::UnsupportedKind::name: alloc::string::String
+pub planner_config::PostProcessorConfigError::UnsupportedKind::supported: alloc::string::String
+pub struct planner_config::AxisDecl
+pub planner_config::AxisDecl::follows: alloc::vec::Vec<alloc::string::String>
+pub planner_config::AxisDecl::motors: alloc::vec::Vec<alloc::string::String>
+pub planner_config::AxisDecl::name: alloc::string::String
+pub planner_config::AxisDecl::post_processors: alloc::vec::Vec<alloc::string::String>
+pub struct planner_config::AxisRegistry
+impl planner_config::AxisRegistry
+pub fn planner_config::AxisRegistry::axis_index(&self, &str) -> core::result::Result<usize, planner_config::AxisConfigError>
+pub fn planner_config::AxisRegistry::axis_name(&self, usize) -> &str
+pub fn planner_config::AxisRegistry::decls(&self) -> &[planner_config::AxisDecl]
+pub fn planner_config::AxisRegistry::follower_index_map(&self) -> alloc::vec::Vec<(usize, alloc::vec::Vec<usize>)>
+pub fn planner_config::AxisRegistry::n_axes(&self) -> usize
+pub fn planner_config::AxisRegistry::try_new(alloc::vec::Vec<planner_config::AxisDecl>) -> core::result::Result<Self, planner_config::AxisConfigError>
+pub fn planner_config::AxisRegistry::validate_motor_mapping(&self, &[alloc::string::String]) -> core::result::Result<(), planner_config::AxisConfigError>
+impl core::default::Default for planner_config::AxisRegistry
+pub fn planner_config::AxisRegistry::default() -> Self
+pub struct planner_config::CartesianLimits
+pub planner_config::CartesianLimits::corner_deviation: f64
+pub planner_config::CartesianLimits::max_accel: f64
+pub planner_config::CartesianLimits::max_jerk: f64
+pub planner_config::CartesianLimits::max_velocity: f64
+pub planner_config::CartesianLimits::max_z_accel: f64
+pub planner_config::CartesianLimits::max_z_velocity: f64
+impl planner_config::CartesianLimits
+pub fn planner_config::CartesianLimits::for_move(&self, f64, f64, f64) -> (f64, f64)
+pub fn planner_config::CartesianLimits::validate(&self) -> core::result::Result<(), &'static str>
+impl core::default::Default for planner_config::CartesianLimits
+pub fn planner_config::CartesianLimits::default() -> Self
+pub struct planner_config::PlannerConfig
+pub planner_config::PlannerConfig::axis_registry: planner_config::AxisRegistry
+pub planner_config::PlannerConfig::cartesian: planner_config::CartesianLimits
+pub planner_config::PlannerConfig::corner: geometry::fitter::config::CornerFitConfig
+pub planner_config::PlannerConfig::fit_tolerance_accel_mm_s2: f64
+pub planner_config::PlannerConfig::fit_tolerance_mm: f64
+pub planner_config::PlannerConfig::max_extrude_only_accel: core::option::Option<f64>
+pub planner_config::PlannerConfig::max_extrude_only_velocity: core::option::Option<f64>
+pub planner_config::PlannerConfig::post_processor_bypass: bool
+pub planner_config::PlannerConfig::post_processors: planner_config::PostProcessorSet
+pub planner_config::PlannerConfig::runtime_caps: planner_config::RuntimeCaps
+pub planner_config::PlannerConfig::runtime_corner_deviation: core::option::Option<f64>
+impl planner_config::PlannerConfig
+pub fn planner_config::PlannerConfig::compile_active_chains(&self) -> core::result::Result<trajectory::chain::AxisChainSet, planner_config::PostProcessorConfigError>
+pub fn planner_config::PlannerConfig::corner_deviation(&self) -> f64
+pub fn planner_config::PlannerConfig::effective_limits(&self) -> (f64, f64, f64)
+impl core::default::Default for planner_config::PlannerConfig
+pub fn planner_config::PlannerConfig::default() -> Self
+pub struct planner_config::PostProcessorDecl
+pub planner_config::PostProcessorDecl::name: alloc::string::String
+pub planner_config::PostProcessorDecl::params: alloc::vec::Vec<(alloc::string::String, f64)>
+pub planner_config::PostProcessorDecl::ty: alloc::string::String
+pub struct planner_config::PostProcessorSet
+impl planner_config::PostProcessorSet
+pub fn planner_config::PostProcessorSet::compile(&self, &planner_config::AxisRegistry) -> core::result::Result<trajectory::chain::AxisChainSet, planner_config::PostProcessorConfigError>
+pub fn planner_config::PostProcessorSet::compile_active_chains(&self, &planner_config::AxisRegistry, bool) -> core::result::Result<trajectory::chain::AxisChainSet, planner_config::PostProcessorConfigError>
+pub fn planner_config::PostProcessorSet::param(&self, &str, &str) -> core::option::Option<f64>
+pub fn planner_config::PostProcessorSet::set_param(&mut self, &str, &str, f64) -> core::result::Result<(), planner_config::PostProcessorConfigError>
+pub fn planner_config::PostProcessorSet::try_new(&planner_config::AxisRegistry, &[planner_config::PostProcessorDecl]) -> core::result::Result<Self, planner_config::PostProcessorConfigError>
+pub struct planner_config::RuntimeCaps
+pub planner_config::RuntimeCaps::accel: core::option::Option<f64>
+pub planner_config::RuntimeCaps::velocity: core::option::Option<f64>
+pub const planner_config::DEFAULT_SQUARE_CORNER_VELOCITY_MM_S: f64

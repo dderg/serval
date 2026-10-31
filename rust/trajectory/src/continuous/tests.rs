@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use geometry::path::{Arc as PathArc, Clothoid, CurvatureProfile, Line, PathSegment, Segment};
 use geometry::{
-    Fade, FollowerDemand, LawSegment, MeshGrid, Move, ScalarLaw, SourceRange, SurfaceTransform,
-    VelocityLimits,
+    Fade, FollowerDemand, LawSegment, MeshGrid, MeshGridSpec, Move, ScalarLaw, SourceRange,
+    SurfaceTransform, VelocityLimits,
 };
 
 use super::*;
@@ -78,16 +78,18 @@ fn phase_bounds_remain_finite_at_a_rounded_span_endpoint() {
 
 fn variable_surface() -> Arc<SurfaceTransform> {
     let mesh = MeshGrid::new(
-        0.0,
-        0.0,
-        1.0,
-        1.0,
-        4,
-        4,
+        MeshGridSpec {
+            x_min: 0.0,
+            y_min: 0.0,
+            dx: 1.0,
+            dy: 1.0,
+            nx: 4,
+            ny: 4,
+            tension: 0.5,
+        },
         vec![
             0.0, 0.2, 1.1, 0.4, 0.3, 1.4, -0.2, 2.0, 1.2, -0.7, 2.3, 0.1, -0.4, 1.8, 0.5, 3.0,
         ],
-        0.5,
     )
     .unwrap();
     Arc::new(SurfaceTransform::new(
@@ -502,7 +504,19 @@ fn variable_surface_z_reports_one_sided_mesh_transition_values() {
 
 #[test]
 fn variable_surface_is_rejected_before_motor_dispatch() {
-    let mesh = MeshGrid::new(0.0, 0.0, 1.0, 1.0, 2, 2, vec![0.0; 4], 0.0).unwrap();
+    let mesh = MeshGrid::new(
+        MeshGridSpec {
+            x_min: 0.0,
+            y_min: 0.0,
+            dx: 1.0,
+            dy: 1.0,
+            nx: 2,
+            ny: 2,
+            tension: 0.0,
+        },
+        vec![0.0; 4],
+    )
+    .unwrap();
     let surface = Arc::new(SurfaceTransform::new(mesh, Fade::disabled()));
     let span = analytic_span(
         Segment::Line(Line::try_new([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]).unwrap()),

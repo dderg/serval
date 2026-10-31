@@ -16,12 +16,6 @@ from .kinematics import extruder
 
 REACTOR_YIELD_INTERVAL = 0.020
 
-_AXIS_UNIT_DELTAS = {
-    "x": (1.0, 0.0, 0.0),
-    "y": (0.0, 1.0, 0.0),
-    "z": (0.0, 0.0, 1.0),
-}
-
 
 class EngineWakeup:
     """Parks waiters on the engine's readiness fd. The fd becomes readable
@@ -118,24 +112,14 @@ class Motion:
         self._engine_wakeup = None
         self._load_motion_config(config)
         self.print_stall = 0
-        _deprecated_buffer_time_high = config.getfloat(
-            "buffer_time_high", 2.0, above=0.0
-        )
-        _deprecated_buffer_time_low = config.getfloat(
-            "buffer_time_low", 1.0, minval=0.0
-        )
-        self._drip_active = False
         self._clock_sync_confirmed = False
         self._last_reactor_yield = 0.0
         gcode = printer.lookup_object("gcode")
         self.Coord = gcode.Coord
         self.extruder = extruder.DummyExtruder(printer)
-        self._build_follower_steppers(config)
-        self.kin = self._load_kinematics(config)
-        if (
-            config.has_section("dual_carriage")
-            and not self.kin.supports_dual_carriage
-        ):
+        motion_setup.build_follower_steppers(self, config)
+        self.kin = motion_kinematics.load_kinematics(config, self)
+        if config.has_section("dual_carriage"):
             raise config.error(
                 "dual_carriage not compatible with '%s' kinematics system"
                 % (self.kin.kind,)
@@ -173,7 +157,9 @@ class Motion:
         ):
             printer.load_object(config, module_name)
 
-        printer.register_event_handler("klippy:connect", self._init_planner)
+        printer.register_event_handler(
+            "klippy:connect", lambda: motion_setup.init_planner(self)
+        )
         printer.register_event_handler(
             "klippy:disconnect", self._handle_disconnect
         )
@@ -187,13 +173,8 @@ class Motion:
 
     def _handle_disconnect(self):
         logging.info("Motion: _handle_disconnect called")
-        if self.engine is not None:
-            logging.info("Motion: calling engine.shutdown()")
-            self.engine.shutdown()
-            logging.info("Motion: engine.shutdown() returned")
-
-    def _load_kinematics(self, config):
-        return motion_kinematics.load_kinematics(config, self)
+        self.engine.shutdown()
+        logging.info("Motion: engine.shutdown() returned")
 
     def get_position(self):
         return list(self.commanded_pos)
@@ -222,7 +203,12 @@ class Motion:
     def submit_nudge(self, mcu_id, axis_idx, motor_idx, delta_mm, speed, accel):
         motor_mask = 1 << motor_idx
         return self.engine.submit_nudge(
-            mcu_id, axis_idx, motor_mask, delta_mm, speed, accel
+            {
+                "mcu_id": mcu_id,
+                "axis_idx": axis_idx,
+                "motor_mask": motor_mask,
+            },
+            {"delta_mm": delta_mm, "speed": speed, "accel": accel},
         )
 
     def submit_resonance_buzz(self, axis_mask, sign_mask, wave):
@@ -243,15 +229,6 @@ class Motion:
     def get_kinematics(self):
         return self.kin
 
-    def get_active_rails_for_axis(self, axis):
-        if axis not in _AXIS_UNIT_DELTAS:
-            raise ValueError("Invalid axis %s" % (axis,))
-        dx, dy, dz = _AXIS_UNIT_DELTAS[axis]
-        return self.kin.active_rails(dx, dy, dz)
-
-    def get_engine(self):
-        return self.engine
-
     def get_motor_binding(self, stepper_name):
         binding = self._motor_bindings.get(stepper_name)
         if binding is None:
@@ -271,7 +248,7 @@ class Motion:
         return mcu
 
     def get_max_axis_accel(self, axis_idx):
-        axis_name = self._declared_axis_order()[axis_idx]
+        axis_name = motion_setup.declared_axis_order(self)[axis_idx]
         if axis_name == "z":
             return min(self.max_accel, self.max_z_accel)
         return self.max_accel
@@ -302,10 +279,6 @@ class Motion:
         _velocity, accel, corner_deviation = self._effective_limits()
         return motion_setup.scv_from_corner_deviation(corner_deviation, accel)
 
-    def get_max_velocity(self):
-        velocity, accel, _corner_deviation = self._effective_limits()
-        return velocity, accel
-
     def get_status(self, eventtime):
         print_time = (
             self.engine.frontier_print_time(self.mcu.get_engine_handle())
@@ -324,7 +297,7 @@ class Motion:
                 "position": self.Coord(*self.commanded_pos),
                 "max_velocity": velocity,
                 "max_accel": accel,
-                "minimum_cruise_ratio": self.min_cruise_ratio,
+                "minimum_cruise_ratio": 0.0,
                 "square_corner_velocity": motion_setup.scv_from_corner_deviation(
                     corner_deviation, accel
                 ),
@@ -374,7 +347,7 @@ class Motion:
     def _await_clock_sync(self):
         if self._clock_sync_confirmed:
             return
-        if self.mcu is None or self.mcu.is_fileoutput():
+        if self.mcu.is_fileoutput():
             self._clock_sync_confirmed = True
             return
 
@@ -498,15 +471,6 @@ class Motion:
                 followup()
         return fired
 
-    def drip_move(self, newpos, speed, drip_completion):
-        if drip_completion is not None and drip_completion.test():
-            return
-        self._drip_active = True
-        try:
-            self.move(newpos, speed)
-        finally:
-            self._drip_active = False
-
     def dwell(self, delay):
         self.engine.submit_dwell(delay)
         if delay > 0.0:
@@ -515,16 +479,11 @@ class Motion:
     def wait_moves(self):
         self._wait_mcu_drained()
 
-    def wait_moves_and_mcu(self):
-        self._wait_mcu_drained()
-
     def wait_until_print_time(self, print_time):
         """Block (reactor-yielding) until the MCU clock has really passed
         print_time. This is the sequencing primitive for anything scheduled
         on the MCU clock (scheduled torque changes, pin pulses): a wall
         clock pause can finish before the schedule fires and race it."""
-        if self.mcu is None:
-            return
 
         def _caught_up():
             est = self.mcu.estimated_print_time(self.reactor.monotonic())
@@ -553,14 +512,11 @@ class Motion:
         # on the MCU clock; the frontier includes queued dwells. The
         # motion_lead slice is the standing scheduling margin, not queued
         # time — waiting for it would tax every wait_moves.
-        if self.mcu is not None:
-            frontier = self.engine.frontier_print_time(
-                self.mcu.get_engine_handle()
-            )
-            self.wait_until_print_time(frontier - self.motion_lead)
+        frontier = self.engine.frontier_print_time(self.mcu.get_engine_handle())
+        self.wait_until_print_time(frontier - self.motion_lead)
 
     def cmd_M400(self, gcmd):
-        self.wait_moves_and_mcu()
+        self.wait_moves()
 
     def _engine_mcus(self):
         if not hasattr(self, "_cached_engine_mcus"):
@@ -597,8 +553,7 @@ class Motion:
         self._drain_to_mcu_execution()
 
     def _drain_to_mcu_execution(self):
-        self.engine.wait_moves()
-        frontier = self.engine.frontier_print_time(self.mcu.get_engine_handle())
+        frontier = self._fence_wait_blocking()
         for mcu in self._engine_mcus():
 
             def _mcu_caught_up(mcu=mcu):
@@ -634,8 +589,6 @@ class Motion:
         return max(fence_print_time, self._schedule_floor())
 
     def _fence_wait_blocking(self):
-        if self.mcu is None:
-            return 0.0
         fence_id = [None]
 
         def _fence_print_time():
@@ -657,9 +610,6 @@ class Motion:
         )
 
     def register_lookahead_callback(self, callback):
-        if self.mcu is None:
-            callback(self.motion_lead)
-            return
         fence_id = self.engine.fence_start(False)
         self._lookahead_fences.append([fence_id, callback])
         if len(self._lookahead_fences) == 1:
@@ -704,13 +654,6 @@ class Motion:
         return now
 
     def _submit_paced(self, submit, *args):
-        if self.mcu is None or self._drip_active:
-            if not submit(*args):
-                raise self.printer.command_error(
-                    "motion pipe reported full on an unpaced submit "
-                    "(drip move or no mcu)"
-                )
-            return
         self._yield_to_reactor_if_due(self.reactor.monotonic())
         if submit(*args):
             return
@@ -745,7 +688,7 @@ class Motion:
             (
                 self._max_velocity,
                 self._max_accel,
-                self.max_jerk,
+                _max_jerk,
                 self.max_z_velocity,
                 self.max_z_accel,
                 self._corner_deviation,
@@ -758,15 +701,8 @@ class Motion:
         )
         for section, option, value in consumed:
             config.access_tracking[(section.lower(), option.lower())] = value
-        self.min_cruise_ratio = 0.0
-        self.orig_cfg = {}
-
-    def _build_follower_steppers(self, config):
-        return motion_setup.build_follower_steppers(self, config)
 
     def _sync_print_time(self):
-        if self.mcu is None:
-            return
         curtime = self.reactor.monotonic()
         est_print_time = self.mcu.estimated_print_time(curtime)
         frontier = (
@@ -784,9 +720,6 @@ class Motion:
     def set_accel(self, accel):
         if accel is not None and accel > 0.0:
             self.engine.set_accel_cap(accel)
-
-    def reset_accel(self):
-        self.engine.set_accel_cap(None)
 
     cmd_SET_VELOCITY_LIMIT_help = "Set printer velocity limits"
 
@@ -878,12 +811,9 @@ class Motion:
             if getattr(m, "non_critical_disconnected", False):
                 continue
             m.check_active(frontier, eventtime)
-        buffer_time = 0.0
-        pump_backlog = 0
-        if self.mcu is not None:
-            est = self.mcu.estimated_print_time(eventtime)
-            buffer_time = frontier - est
-            pump_backlog = self.engine.pump_backlog()
+        est = self.mcu.estimated_print_time(eventtime)
+        buffer_time = frontier - est
+        pump_backlog = self.engine.pump_backlog()
         return (
             False,
             "print_time=%.3f buffer_time=%.3f pump_backlog=%d print_stall=%d"
@@ -894,27 +824,6 @@ class Motion:
                 self.print_stall,
             ),
         )
-
-    def _declared_axis_order(self):
-        return motion_setup.declared_axis_order(self)
-
-    def _build_axis_to_handle(self):
-        return motion_setup.build_axis_to_handle(self)
-
-    def _derive_mcu_topology(self, axis_to_handle):
-        return motion_setup.derive_mcu_topology(self, axis_to_handle)
-
-    def _init_planner(self):
-        return motion_setup.init_planner(self)
-
-    def _follower_slots(self):
-        return motion_setup.follower_slots(self)
-
-    def _build_slot_steppers(self):
-        return motion_setup.build_slot_steppers(self)
-
-    def _configure_axes_per_mcu(self, engine_mcus):
-        return motion_setup.configure_axes_per_mcu(self, engine_mcus)
 
 
 class ToolheadShim:

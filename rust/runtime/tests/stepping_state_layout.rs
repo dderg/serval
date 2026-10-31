@@ -1,4 +1,5 @@
-use runtime::stepping_state::{AxisState, MAX_AXES, MAX_STEPPERS_PER_AXIS, StepMode, StepperRef};
+use runtime::stepping_state::{AxisState, StepperRef};
+use runtime_contract::axes::{MAX_AXES, MAX_STEPPERS_PER_AXIS, StepMode};
 
 #[test]
 fn step_mode_discriminants_are_stable() {

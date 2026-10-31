@@ -1,106 +1,24 @@
 mod common;
 
+use common::spawn_and_claim;
 use std::fs;
 use std::io::Read as IoRead;
-use std::process::{Child, Command};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use host_rt::mcu_call::McuCall;
 use host_rt::mcu_serial_conn::McuSerialConn;
 use mcu_protocol::codec::{Cursor, Decode, Encode};
 use mcu_protocol::messages::{
-    CaptureDrive, ClaimHandshakeReply, MessageKind, StartCapture, StartCaptureResponse,
-    StopCapture, StopCaptureResponse,
+    CaptureDrive, MessageKind, StartCapture, StartCaptureResponse, StopCapture, StopCaptureResponse,
 };
 
 use ethercat_rt::capture::{
     record_size, ERR_CAPTURE_ACTIVE, ERR_CAPTURE_FILE, ERR_CAPTURE_NOT_ACTIVE,
 };
 
-const STUB_BIN: &str = env!("CARGO_BIN_EXE_ethercat-rt-stub");
-
-struct ChildGuard {
-    child: Option<Child>,
-}
-
-impl ChildGuard {
-    fn new(child: Child) -> Self {
-        Self { child: Some(child) }
-    }
-
-    fn defuse(&mut self) -> Child {
-        self.child.take().expect("already defused")
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(mut c) = self.child.take() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-    }
-}
-
-fn socket_path(tag: &str) -> String {
-    format!("/tmp/kalico-cap-{}-{}.sock", tag, std::process::id())
-}
-
 fn capture_file(tag: &str) -> String {
     format!("/tmp/kalico-capture-it-{}-{}.scap", tag, std::process::id())
-}
-
-fn wait_for_socket(path: &str, deadline: Instant) {
-    loop {
-        if std::path::Path::new(path).exists() {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "stub socket {path:?} did not appear within deadline"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn do_handshake(conn: &McuSerialConn) -> ClaimHandshakeReply {
-    let (kind, body) = conn
-        .mcu_call(
-            MessageKind::ClaimHandshake,
-            Vec::new(),
-            Duration::from_secs(5),
-        )
-        .expect("ClaimHandshake mcu_call must succeed");
-
-    assert_eq!(
-        kind,
-        MessageKind::ClaimHandshakeReply,
-        "expected ClaimHandshakeReply (0x{:04x}), got kind 0x{:04x}",
-        MessageKind::ClaimHandshakeReply.as_u16(),
-        kind.as_u16(),
-    );
-
-    ClaimHandshakeReply::decode_from(&mut Cursor::new(&body))
-        .expect("ClaimHandshakeReply must decode from response body")
-}
-
-fn spawn_and_claim(tag: &str) -> (ChildGuard, McuSerialConn, String) {
-    let path = socket_path(tag);
-    let _ = fs::remove_file(&path);
-
-    let child = Command::new(STUB_BIN)
-        .args(["--socket", &path])
-        .spawn()
-        .expect("stub binary must spawn");
-    let guard = ChildGuard::new(child);
-
-    wait_for_socket(&path, Instant::now() + Duration::from_secs(5));
-
-    let conn = common::connect_until(&path, Instant::now() + Duration::from_secs(5));
-    let _reply = do_handshake(&conn);
-
-    (guard, conn, path)
 }
 
 fn start_capture_drives(conn: &McuSerialConn, path: &str, drives: Vec<CaptureDrive>) -> i32 {
@@ -154,7 +72,7 @@ fn stop_capture(conn: &McuSerialConn) -> StopCaptureResponse {
 
 #[test]
 fn capture_start_records_stop_produces_consistent_file() {
-    let (mut guard, conn, sock) = spawn_and_claim("cap-basic");
+    let (mut guard, conn, sock) = spawn_and_claim("cap-basic", &[]);
     let path = capture_file("basic");
     let _ = fs::remove_file(&path);
 
@@ -224,7 +142,7 @@ fn capture_start_records_stop_produces_consistent_file() {
 
 #[test]
 fn double_start_rejected_without_killing_first_capture() {
-    let (mut guard, conn, sock) = spawn_and_claim("cap-dbl");
+    let (mut guard, conn, sock) = spawn_and_claim("cap-dbl", &[]);
     let path1 = capture_file("dbl-1");
     let path2 = capture_file("dbl-2");
     let _ = fs::remove_file(&path1);
@@ -259,7 +177,7 @@ fn double_start_rejected_without_killing_first_capture() {
 
 #[test]
 fn stop_without_start_rejected() {
-    let (mut guard, conn, sock) = spawn_and_claim("cap-no-start");
+    let (mut guard, conn, sock) = spawn_and_claim("cap-no-start", &[]);
 
     let resp = stop_capture(&conn);
     assert_eq!(
@@ -281,7 +199,7 @@ fn stop_without_start_rejected() {
 
 #[test]
 fn unwritable_path_reports_file_error() {
-    let (mut guard, conn, sock) = spawn_and_claim("cap-bad-path");
+    let (mut guard, conn, sock) = spawn_and_claim("cap-bad-path", &[]);
 
     let rc = start_capture(&conn, "/dev/null/nope/x.scap");
     assert_eq!(
@@ -297,7 +215,7 @@ fn unwritable_path_reports_file_error() {
 
 #[test]
 fn two_drive_capture_writes_distinct_blocks_per_record() {
-    let (mut guard, conn, sock) = spawn_and_claim("cap-2drv");
+    let (mut guard, conn, sock) = spawn_and_claim("cap-2drv", &[]);
     let path = capture_file("2drv");
     let _ = fs::remove_file(&path);
 
@@ -377,7 +295,7 @@ fn two_drive_capture_writes_distinct_blocks_per_record() {
 
 #[test]
 fn rejected_second_start_keeps_running_capture_stride() {
-    let (mut guard, conn, sock) = spawn_and_claim("cap-stride");
+    let (mut guard, conn, sock) = spawn_and_claim("cap-stride", &[]);
     let path1 = capture_file("stride-1");
     let path2 = capture_file("stride-2");
     let _ = fs::remove_file(&path1);

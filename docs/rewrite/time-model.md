@@ -76,6 +76,25 @@ Two frequencies exist per MCU and they are not interchangeable:
 the primary's clock. Passing a secondary's handle gives you that MCU's
 `clock/nominal`, which is not the shared timeline.
 
+## Acceptance is not playback
+
+The pump transfers each trajectory view to its endpoint once. A successful
+`send_mcu_frames` means acceptance; `progress_mcu` advances delivery without
+transferring those views again. Backpressure after acceptance leaves the
+endpoint responsible for its pending output.
+
+Drain accounting distinguishes accepted (`pushed`), playback-retired, and
+abandoned views. A halt cuts pending output and accounts for abandonment;
+it does not prove that the discarded motion played. Cut receipts reconcile
+the endpoint's odometers without letting delayed pre-cut reports undo that
+accounting.
+
+EtherCAT's wire progress counts are cycles, not trajectory views. The host
+filler retires views from playback clocks, using the slowest motor of a
+logical axis. Its retained, unsent window cannot earn playback credit.
+Synchronous endpoint calls must not hold the filler mutex: the socket reader
+also needs it to process heartbeat playback observations.
+
 ## The rules
 
 1. **Absolute results only.** Never return or store "seconds from now".
@@ -106,9 +125,17 @@ the primary's clock. Passing a secondary's handle gives you that MCU's
    and correlate positions via `motion_engine.motion_state_at`. Both ride
    the same clocksync estimates; do not mix in wall-clock or host time.
 6. **The engine's timeline is complete.** Dwells and nudges advance the
-   frontier like segments do (the dispatcher publishes them). If you catch
+   frontier like segments do (the execution owner publishes them). If you catch
    yourself adding host-side compensation for something the engine "forgot",
    the engine is where the fix goes.
+7. **One execution owner.** `kalico-execution` owns anchoring, clock projection,
+   trajectory admission, transport scheduling, pulse/sample endpoint commands,
+   and EtherCAT filler changes. Planning hands it complete `TrajectoryItem`s,
+   not per-axis transactions. Hardware pacers and wire I/O remain independent.
+   Admission barriers fence prior intake, not physical playback: once earlier
+   motion is admitted, a full staging queue must not block its trailing barrier.
+   A finite homing stroke may complete admission above the staging cap under an
+   armed cohort; physical drip windows and transport credits still limit egress.
 
 ## Why this exists (the bugs the old model shipped)
 

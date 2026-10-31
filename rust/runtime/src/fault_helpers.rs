@@ -2,10 +2,10 @@
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use crate::error::FaultCode;
-#[allow(unused_imports)] // used only in the gated MCU/mcu-linux extern block
-use crate::log_codes::{EVENT_RUNTIME_FAULT_LATCHED, SUBSYSTEM_RUNTIME};
 use crate::state::SharedState;
+use runtime_contract::error::FaultCode;
+#[allow(unused_imports)] // used only in the gated MCU/mcu-linux extern block
+use runtime_contract::log_codes::{EVENT_RUNTIME_FAULT_LATCHED, SUBSYSTEM_RUNTIME};
 
 /// Wire log levels — must match motion-engine's mcu_level_str (0=trace,1=debug,2=warn,3=error).
 const LOG_LEVEL_ERROR: u8 = 3;

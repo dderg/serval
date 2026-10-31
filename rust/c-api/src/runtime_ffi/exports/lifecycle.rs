@@ -1,6 +1,6 @@
 use super::{
-    INIT_DONE, IsrState, Ordering, RUNTIME_ERR_NOT_INIT, RUNTIME_ERR_NULL_PTR, RUNTIME_OK, Runtime,
-    RuntimeContext, SharedState, UnsafeCell, guarded_ctx, rt_storage, runtime_cyccnt_read,
+    FaultCode, INIT_DONE, IsrState, Ordering, Runtime, RuntimeContext, SharedState, UnsafeCell,
+    guarded_ctx, rt_storage, runtime_cyccnt_read,
 };
 
 #[unsafe(no_mangle)]
@@ -48,7 +48,7 @@ pub unsafe extern "C" fn runtime_handle_seed_widen(rt: *mut Runtime, baseline_wi
     let ctx = rt.cast::<RuntimeContext>();
     unsafe {
         let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
-        (*isr_ptr).widen_state.seed_high(baseline_widened_clock);
+        (*isr_ptr).widen_state.seed(baseline_widened_clock);
     }
 }
 
@@ -76,10 +76,10 @@ pub unsafe extern "C" fn runtime_seed_position(
     z_q16: i32,
 ) -> i32 {
     if rt.is_null() {
-        return RUNTIME_ERR_NULL_PTR;
+        return FaultCode::NullPtr.as_i32();
     }
     if !INIT_DONE.load(Ordering::Acquire) {
-        return RUNTIME_ERR_NOT_INIT;
+        return FaultCode::NotInit.as_i32();
     }
     let x = x_q16 as f32 / 65536.0;
     let y = y_q16 as f32 / 65536.0;
@@ -90,44 +90,12 @@ pub unsafe extern "C" fn runtime_seed_position(
         let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
         (*isr_ptr).engine.seed_position([x, y, z]);
     }
-    RUNTIME_OK
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn runtime_clock_sync_request(
-    rt: *mut Runtime,
-    request_id: u32,
-    host_send_time_lo: u32,
-    host_send_time_hi: u32,
-    out_mcu_clock: *mut u64,
-) -> i32 {
-    if rt.is_null() {
-        return RUNTIME_ERR_NULL_PTR;
-    }
-    if !INIT_DONE.load(Ordering::Acquire) {
-        return RUNTIME_ERR_NOT_INIT;
-    }
-    // SAFETY: single u32 reads of Klipper globals, safe from non-ISR context.
-    let mcu_clock = unsafe {
-        unsafe extern "C" {
-            fn timer_read_time() -> u32;
-            static stats_send_time: u32;
-            static stats_send_time_high: u32;
-        }
-        let low = timer_read_time();
-        let high = stats_send_time_high + ((low < stats_send_time) as u32);
-        ((high as u64) << 32) | (low as u64)
-    };
-    let _ = (request_id, host_send_time_lo, host_send_time_hi);
-    if !out_mcu_clock.is_null() {
-        unsafe { *out_mcu_clock = mcu_clock };
-    }
-    RUNTIME_OK
+    FaultCode::None.as_i32()
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn runtime_reset(rt: *mut Runtime) -> i32 {
-    let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
+    let ctx = guarded_ctx!(rt, FaultCode::NullPtr.as_i32(), FaultCode::NotInit.as_i32());
     // SAFETY: foreground under C-side IRQ guard; §11.2 raw-pointer projection.
     unsafe {
         let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
@@ -141,7 +109,7 @@ pub unsafe extern "C" fn runtime_reset(rt: *mut Runtime) -> i32 {
             m.store(runtime::state::StepMode::StepTime as u8, Ordering::Release);
         }
     }
-    RUNTIME_OK
+    FaultCode::None.as_i32()
 }
 
 #[unsafe(no_mangle)]

@@ -2,11 +2,22 @@
 # link time.  Python's dlopen will satisfy them when it loads the .so at
 # runtime.  Without this flag the static linker rejects _Py_* symbols as
 # "undefined".  This flag is a no-op on non-Darwin hosts.
+#
+# -platform_version stamps the build SDK as 26.0. Xcode 27's ld (ld-27106)
+# leaves the LINKEDIT string pool 4-byte aligned after an odd-sized indirect
+# symbol table, and dyld rejects that ("mis-aligned LINKEDIT string pool")
+# only for images built against SDK >= 27. TODO: drop once ld pads it.
 [target.aarch64-apple-darwin]
-rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+rustflags = [
+    "-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup",
+    "-C", "link-arg=-Wl,-platform_version,macos,11.0,26.0",
+]
 
 [target.x86_64-apple-darwin]
-rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+rustflags = [
+    "-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup",
+    "-C", "link-arg=-Wl,-platform_version,macos,10.12,26.0",
+]
 
 # Klipper's H7 build uses soft-float ABI (no -mfloat-abi=hard in CFLAGS),
 # so the kalico staticlib must match or the linker rejects archive merge

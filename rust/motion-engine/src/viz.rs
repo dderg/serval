@@ -1,32 +1,23 @@
-use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
-use serde_json::Value;
 
-use snapshot_core::SnapshotParams;
+use snapshot_core::{SampleSide, Snapshot, SnapshotParams};
 
-use crate::config::from_doc::read_motion_settings;
+use planner_config::from_doc::read_motion_settings;
 
-/// Snapshot the pipeline for `waypoints` under the motion config parsed
-/// from `config_text` — the same section reader (defaults, bounds,
-/// scv→corner_deviation conversion) the live printer uses.
-#[pyfunction]
-pub(crate) fn pipeline_snapshot(
-    py: Python<'_>,
-    waypoints: Vec<(f64, f64, f64, f64, f64, f64)>,
+fn snapshot_from_config(
+    waypoints: &[snapshot_core::waypoints::Waypoint],
     config_text: &str,
-) -> PyResult<Py<PyDict>> {
+) -> PyResult<Snapshot> {
     let doc = config_doc::Document::parse(config_text, "<config>")
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
     let (settings, _consumed) =
         read_motion_settings(&doc).map_err(pyo3::exceptions::PyValueError::new_err)?;
-    let snap = snapshot_core::pipeline_snapshot(
-        &waypoints,
+    snapshot_core::pipeline_snapshot(
+        waypoints,
         SnapshotParams {
             max_velocity: settings.cartesian.max_velocity,
             max_accel: settings.cartesian.max_accel,
-            square_corner_velocity: 0.0,
-            corner_deviation: Some(settings.cartesian.corner_deviation),
+            corner_deviation: settings.cartesian.corner_deviation,
             max_jerk: settings.cartesian.max_jerk,
             max_extrude_only_velocity: settings.max_extrude_only_velocity,
             max_extrude_only_accel: settings.max_extrude_only_accel,
@@ -36,52 +27,64 @@ pub(crate) fn pipeline_snapshot(
             post_processor_decls: settings.post_processors,
         },
     )
-    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-
-    let value = serde_json::to_value(&snap)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    let Value::Object(fields) = value else {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "snapshot must serialize as a JSON object",
-        ));
-    };
-    let dict = PyDict::new(py);
-    for (key, field) in &fields {
-        dict.set_item(key, json_to_py(py, field)?)?;
-    }
-    Ok(dict.into())
+    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
-/// The snapshot schema lives in `pipeline-snapshot`; the binding mirrors
-/// whatever it serializes, so a schema change never needs a field list here.
-fn json_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
-    Ok(match value {
-        Value::Null => py.None(),
-        Value::Bool(b) => b.into_py_any(py)?,
-        Value::Number(n) => match (n.as_i64(), n.as_u64()) {
-            (Some(i), _) => i.into_py_any(py)?,
-            (_, Some(u)) => u.into_py_any(py)?,
-            _ => n
-                .as_f64()
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyValueError::new_err(format!("unrepresentable number {n}"))
-                })?
-                .into_py_any(py)?,
-        },
-        Value::String(s) => s.into_py_any(py)?,
-        Value::Array(items) => {
-            let list = PyList::empty(py);
-            for item in items {
-                list.append(json_to_py(py, item)?)?;
-            }
-            list.into_py_any(py)?
+/// Snapshot the pipeline for `waypoints` under the motion config parsed
+/// from `config_text` — the same section reader (defaults, bounds) the live
+/// printer uses — and return the snapshot as a JSON string for `json.loads`.
+#[pyfunction]
+pub(crate) fn pipeline_snapshot(
+    waypoints: Vec<snapshot_core::waypoints::Waypoint>,
+    config_text: &str,
+) -> PyResult<String> {
+    let snap = snapshot_from_config(&waypoints, config_text)?;
+    serde_json::to_string(&snap).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+}
+
+/// G-code text → absolute `(x, y, z, e, feedrate, accel)` waypoints.
+#[pyfunction]
+pub(crate) fn parse_gcode(
+    text: &str,
+    max_velocity: f64,
+    max_accel: f64,
+) -> PyResult<Vec<snapshot_core::waypoints::Waypoint>> {
+    snapshot_core::waypoints::parse_gcode(text, max_velocity, max_accel)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+}
+
+/// Plan `waypoints` under `config_text` and evaluate the exact carriers of
+/// each axis in `axes` at `samples` times spread over the trajectory. Returns
+/// the snapshot JSON alongside per-axis `(position, velocity, acceleration)`
+/// rows so a plotting consumer never re-derives the carriers itself.
+#[pyfunction]
+pub(crate) fn pipeline_snapshot_axis_samples(
+    waypoints: Vec<snapshot_core::waypoints::Waypoint>,
+    config_text: &str,
+    axes: Vec<usize>,
+    samples: usize,
+) -> PyResult<(String, Vec<Vec<(f64, f64, f64)>>)> {
+    if samples < 2 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "samples must be at least 2",
+        ));
+    }
+    let snap = snapshot_from_config(&waypoints, config_text)?;
+    let t_end = snap.trajectory.t_end();
+    let mut out = Vec::with_capacity(axes.len());
+    for axis in axes {
+        let mut rows = Vec::with_capacity(samples);
+        for i in 0..samples {
+            let t = t_end * i as f64 / (samples - 1) as f64;
+            let pvaj = snap
+                .trajectory
+                .eval_axis(axis, t, SampleSide::Right)
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+            rows.push((pvaj.position, pvaj.velocity, pvaj.acceleration));
         }
-        Value::Object(map) => {
-            let dict = PyDict::new(py);
-            for (key, field) in map {
-                dict.set_item(key, json_to_py(py, field)?)?;
-            }
-            dict.into_py_any(py)?
-        }
-    })
+        out.push(rows);
+    }
+    let json = serde_json::to_string(&snap)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    Ok((json, out))
 }

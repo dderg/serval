@@ -59,7 +59,12 @@ fn raw_path_starts_at_origin() {
 fn fitted_outcome_has_spatial_segments() {
     let limits = default_limits();
     let moves = build_moves(&square_waypoints(), limits).unwrap();
-    let (fitted, _, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
+    let (fitted, _, _) = run_pipeline_streaming(
+        &moves,
+        default_config(limits),
+        AxisChainSet::default(),
+        |_, _| {},
+    );
     let spatial_count = fitted
         .iter()
         .filter(|fm| fm.segment.spatial.is_some())
@@ -118,7 +123,12 @@ fn assert_axis_tiles_the_run(traj: &ExactTrajectory, axis: usize, lane: &str) {
 fn trajectory_carriers_tile_the_run_on_every_spatial_axis() {
     let limits = default_limits();
     let moves = build_moves(&square_waypoints(), limits).unwrap();
-    let (_, shaped, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
+    let (_, shaped, _) = run_pipeline_streaming(
+        &moves,
+        default_config(limits),
+        AxisChainSet::default(),
+        |_, _| {},
+    );
     let traj = exact(&shaped);
     assert_axis_tiles_the_run(&traj, 0, "x");
     assert_axis_tiles_the_run(&traj, 1, "y");
@@ -139,7 +149,12 @@ fn trajectory_carriers_tile_the_run_on_every_spatial_axis() {
 fn carriers_are_position_continuous_across_their_shared_instant() {
     let limits = default_limits();
     let moves = build_moves(&square_waypoints(), limits).unwrap();
-    let (_, shaped, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
+    let (_, shaped, _) = run_pipeline_streaming(
+        &moves,
+        default_config(limits),
+        AxisChainSet::default(),
+        |_, _| {},
+    );
     let traj = exact(&shaped);
     for axis in [0, 1] {
         for w in traj.rows(axis).windows(2) {
@@ -161,7 +176,12 @@ fn single_move_skips_fitting() {
         (10.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
     ];
     let moves = build_moves(&waypoints, limits).unwrap();
-    let (fitted, _, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
+    let (fitted, _, _) = run_pipeline_streaming(
+        &moves,
+        default_config(limits),
+        AxisChainSet::default(),
+        |_, _| {},
+    );
     assert_eq!(fitted.len(), 1, "single move must pass through unchanged");
 }
 
@@ -258,7 +278,12 @@ fn extrusion_lowers_to_a_moving_e_track() {
         (10.0, 10.0, 0.0, 2.0, 100.0, 3000.0),
     ];
     let moves = build_moves(&waypoints, limits).unwrap();
-    let (_, shaped, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
+    let (_, shaped, _) = run_pipeline_streaming(
+        &moves,
+        default_config(limits),
+        AxisChainSet::default(),
+        |_, _| {},
+    );
     let traj = exact(&shaped);
     let e_rows = traj.rows(3);
     assert!(!e_rows.is_empty(), "E lane must carry rows");
@@ -368,7 +393,12 @@ fn seam_metrics_flag_a_known_discontinuity() {
 fn continuous_carriers_report_no_seam_jumps() {
     let limits = default_limits();
     let moves = build_moves(&square_waypoints(), limits).unwrap();
-    let (_, shaped, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
+    let (_, shaped, _) = run_pipeline_streaming(
+        &moves,
+        default_config(limits),
+        AxisChainSet::default(),
+        |_, _| {},
+    );
     let m = seam_metrics(&exact(&shaped));
     for axis in 0..4 {
         assert!(m.max_dp[axis] < 1e-6, "axis {axis} position jump");
@@ -383,8 +413,7 @@ fn snapshot_serializes_to_the_baseline_schema() {
         SnapshotParams {
             max_velocity: 300.0,
             max_accel: 3000.0,
-            square_corner_velocity: 5.0,
-            corner_deviation: None,
+            corner_deviation: geometry::corner_deviation_from_scv(5.0, 3000.0),
             max_jerk: f64::INFINITY,
             max_extrude_only_velocity: None,
             max_extrude_only_accel: None,
@@ -557,7 +586,7 @@ fn clothoid_disk_ride_tracks_scalar_acceleration_without_phase_steps() {
     let mut params = default_axis_snapshot_params();
     params.max_velocity = 300.0;
     params.max_accel = 1000.0;
-    params.square_corner_velocity = 5.0;
+    params.corner_deviation = geometry::corner_deviation_from_scv(5.0, 1000.0);
     let snap = pipeline_snapshot(&waypoints, params).unwrap();
     let clothoids: Vec<(f64, f64)> = snap
         .trajectory
@@ -622,7 +651,7 @@ fn low_feed_corner_from_rest_rides_the_disk() {
     let mut params = default_axis_snapshot_params();
     params.max_velocity = 4.5;
     params.max_accel = 1000.0;
-    params.square_corner_velocity = 5.0;
+    params.corner_deviation = geometry::corner_deviation_from_scv(5.0, 1000.0);
     let snap = pipeline_snapshot(&waypoints, params).unwrap();
     let clothoids: Vec<(f64, f64)> = snap
         .trajectory
@@ -686,8 +715,7 @@ fn finite_max_jerk_is_rejected_by_the_pipeline() {
         SnapshotParams {
             max_velocity: 300.0,
             max_accel: 3000.0,
-            square_corner_velocity: 5.0,
-            corner_deviation: None,
+            corner_deviation: geometry::corner_deviation_from_scv(5.0, 3000.0),
             max_jerk: 100_000.0,
             max_extrude_only_velocity: None,
             max_extrude_only_accel: None,
@@ -703,8 +731,7 @@ fn default_axis_snapshot_params() -> SnapshotParams {
     SnapshotParams {
         max_velocity: 300.0,
         max_accel: 3000.0,
-        square_corner_velocity: 5.0,
-        corner_deviation: None,
+        corner_deviation: geometry::corner_deviation_from_scv(5.0, 3000.0),
         max_jerk: f64::INFINITY,
         max_extrude_only_velocity: None,
         max_extrude_only_accel: None,
@@ -1144,7 +1171,12 @@ fn default_gcode_circle_loops_stay_concentric_across_corner_deviation() {
         let waypoints = waypoints::parse_gcode(&text, 300.0, 3000.0).unwrap();
         let limits = geometry::VelocityLimits::try_new(300.0, 3000.0, cd, f64::INFINITY).unwrap();
         let moves = build_moves(&waypoints, limits).unwrap();
-        let (fitted, _, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
+        let (fitted, _, _) = run_pipeline_streaming(
+            &moves,
+            default_config(limits),
+            AxisChainSet::default(),
+            |_, _| {},
+        );
         let loops: Vec<&geometry::path::Arc> = fitted
             .iter()
             .filter_map(|m| match &m.segment.spatial {

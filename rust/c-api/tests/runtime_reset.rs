@@ -40,7 +40,11 @@ fn reset_allows_reconfiguring_axis_repeatedly() {
     for i in 0..128 {
         unsafe {
             let rc = c_api::runtime_reset(handle);
-            assert_eq!(rc, c_api::RUNTIME_OK, "reset failed at iter {i}");
+            assert_eq!(
+                rc,
+                c_api::FaultCode::None.as_i32(),
+                "reset failed at iter {i}"
+            );
             let rc = c_api::runtime_configure_axis(
                 handle,
                 0,
@@ -49,7 +53,11 @@ fn reset_allows_reconfiguring_axis_repeatedly() {
                 core::ptr::null(),
                 0,
             );
-            assert_eq!(rc, c_api::RUNTIME_OK, "configure failed at iter {i}");
+            assert_eq!(
+                rc,
+                c_api::FaultCode::None.as_i32(),
+                "configure failed at iter {i}"
+            );
         }
     }
 }
@@ -59,6 +67,6 @@ fn reset_null_rt_is_null_ptr_error() {
     let _g = TEST_LOCK.lock().unwrap();
     unsafe {
         let rc = c_api::runtime_reset(core::ptr::null_mut());
-        assert_eq!(rc, c_api::RUNTIME_ERR_NULL_PTR);
+        assert_eq!(rc, c_api::FaultCode::NullPtr.as_i32());
     }
 }

@@ -1,5 +1,5 @@
 use runtime::engine::{Engine, RuntimeStatus};
-use runtime::stepping_state::{StepMode, StepperBindingRust, TMC_CS_OID_NONE};
+use runtime_contract::axes::{StepMode, StepperBindingRust, TMC_CS_OID_NONE};
 
 fn new_engine() -> Engine {
     Engine::new(520_000_000, 40_000)

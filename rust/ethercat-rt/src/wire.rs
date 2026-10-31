@@ -1,18 +1,15 @@
 use mcu_protocol::bootstrap::{IdentifyResponse, IDENTIFY_RESPONSE_BODY_LEN};
 use mcu_protocol::codec::{Decode, Encode};
 use mcu_protocol::messages::{
-    ArmSensorlessEndstop, ArmSensorlessEndstopResponse, ClaimHandshakeReply, EndstopTrip,
-    LaneDepth, MessageKind, MotorSample, MotorStateResponse, PushSampleRuns,
-    PushSampleRunsResponse, ResonanceBuzz, ResonanceBuzzResponse, RestoreDriveLimits,
-    RestoreDriveLimitsResponse, ResumeStreamResponse, SampleGridResponse, SdoRead, SdoReadResponse,
-    SdoWrite, SdoWriteResponse, SeedServoHome, SeedServoHomeResponse, SetDiffDamper,
-    SetDiffDamperResponse, SetDiffTrim, SetDiffTrimResponse, SetDriveLimits,
-    SetDriveLimitsResponse, SetDynamicsModel, SetDynamicsModelResponse, SetFfLead,
-    SetFfLeadResponse, SetStrainComp, SetStrainCompResponse, SetTorque, SetTorqueResponse,
-    StartCapture, StartCaptureResponse, StatusHeartbeat, StepperSuppress, StepperSuppressResponse,
+    ArmSensorlessEndstop, ClaimHandshakeReply, EndstopTrip, LaneDepth, MessageKind, MotorSample,
+    MotorStateResponse, PushSampleRuns, PushSampleRunsResponse, ResonanceBuzz, RestoreDriveLimits,
+    SampleGridResponse, SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome,
+    SetDiffDamper, SetDiffTrim, SetDriveLimits, SetDynamicsModel, SetFfLead, SetStrainComp,
+    SetTorque, StartCapture, StatusHeartbeat, StepperSuppress, StepperSuppressResponse,
     StopCaptureResponse, StopResponse,
 };
-use mcu_transport::frame::{encode_frame, CHANNEL_CONTROL, CHANNEL_EVENTS};
+use mcu_transport::frame::{encode_frame, CHANNEL_EVENTS};
+pub use mcu_transport::wire_helpers::{control_frame, frame_payload};
 use mcu_transport::wire_helpers::{
     decode_message_header, encode_message_header, MESSAGE_VERSION_DEFAULT,
 };
@@ -278,19 +275,10 @@ pub fn decode_command(payload: &[u8]) -> Result<Command, DecodeCmdError> {
     }
 }
 
-pub fn frame_payload(kind: MessageKind, correlation_id: u32, body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(7 + body.len());
-    out.extend_from_slice(&encode_message_header(
-        kind,
-        MESSAGE_VERSION_DEFAULT,
-        correlation_id,
-    ));
-    out.extend_from_slice(body);
-    out
-}
-
-pub fn control_frame(kind: MessageKind, correlation_id: u32, body: &[u8]) -> Vec<u8> {
-    encode_frame(CHANNEL_CONTROL, &frame_payload(kind, correlation_id, body))
+/// Every `*Response { result: i32 }` body on the control channel: one i32,
+/// little-endian, which is exactly what the generated codec emits.
+pub fn result_frame(kind: MessageKind, cid: u32, result: i32) -> Vec<u8> {
+    control_frame(kind, cid, &result.to_le_bytes())
 }
 
 pub fn stop_response_frame(cid: u32, result: i32, discard_clock: u64) -> Vec<u8> {
@@ -300,21 +288,6 @@ pub fn stop_response_frame(cid: u32, result: i32, discard_clock: u64) -> Vec<u8>
     }
     .encoded_to_vec();
     control_frame(MessageKind::StopResponse, cid, &body)
-}
-
-pub fn resume_stream_response_frame(cid: u32, result: i32) -> Vec<u8> {
-    let body = ResumeStreamResponse { result }.encoded_to_vec();
-    control_frame(MessageKind::ResumeStreamResponse, cid, &body)
-}
-
-pub fn set_torque_response_frame(cid: u32, result: i32) -> Vec<u8> {
-    let body = SetTorqueResponse { result }.encoded_to_vec();
-    control_frame(MessageKind::SetTorqueResponse, cid, &body)
-}
-
-pub fn start_capture_response_frame(cid: u32, result: i32) -> Vec<u8> {
-    let body = StartCaptureResponse { result }.encoded_to_vec();
-    control_frame(MessageKind::StartCaptureResponse, cid, &body)
 }
 
 pub fn stop_capture_response_frame(
@@ -386,26 +359,6 @@ pub fn sample_grid_response_frame(
     control_frame(MessageKind::SampleGridResponse, cid, &body)
 }
 
-pub fn set_drive_limits_response_frame(cid: u32, result: i32) -> Vec<u8> {
-    let body = SetDriveLimitsResponse { result }.encoded_to_vec();
-    control_frame(MessageKind::SetDriveLimitsResponse, cid, &body)
-}
-
-pub fn restore_drive_limits_response_frame(cid: u32, result: i32) -> Vec<u8> {
-    let body = RestoreDriveLimitsResponse { result }.encoded_to_vec();
-    control_frame(MessageKind::RestoreDriveLimitsResponse, cid, &body)
-}
-
-pub fn seed_servo_home_response_frame(cid: u32, result: i32) -> Vec<u8> {
-    let body = SeedServoHomeResponse { result }.encoded_to_vec();
-    control_frame(MessageKind::SeedServoHomeResponse, cid, &body)
-}
-
-pub fn arm_sensorless_endstop_response_frame(cid: u32, result: i32) -> Vec<u8> {
-    let body = ArmSensorlessEndstopResponse { result }.encoded_to_vec();
-    control_frame(MessageKind::ArmSensorlessEndstopResponse, cid, &body)
-}
-
 pub fn endstop_trip_frame(endstop_id: u8, trip_clock: u64) -> Vec<u8> {
     let body = EndstopTrip {
         endstop_id,
@@ -416,36 +369,6 @@ pub fn endstop_trip_frame(endstop_id: u8, trip_clock: u64) -> Vec<u8> {
         encode_message_header(MessageKind::EndstopTrip, MESSAGE_VERSION_DEFAULT, 0).to_vec();
     payload.extend_from_slice(&body);
     encode_frame(CHANNEL_EVENTS, &payload)
-}
-
-pub fn resonance_buzz_response_frame(cid: u32, result: i32) -> Vec<u8> {
-    let body = ResonanceBuzzResponse { result }.encoded_to_vec();
-    control_frame(MessageKind::ResonanceBuzzResponse, cid, &body)
-}
-
-pub fn set_diff_damper_response_frame(cid: u32, result: i32) -> Vec<u8> {
-    let body = SetDiffDamperResponse { result }.encoded_to_vec();
-    control_frame(MessageKind::SetDiffDamperResponse, cid, &body)
-}
-
-pub fn set_strain_comp_response_frame(cid: u32, result: i32) -> Vec<u8> {
-    let body = SetStrainCompResponse { result }.encoded_to_vec();
-    control_frame(MessageKind::SetStrainCompResponse, cid, &body)
-}
-
-pub fn set_dynamics_model_response_frame(cid: u32, result: i32) -> Vec<u8> {
-    let body = SetDynamicsModelResponse { result }.encoded_to_vec();
-    control_frame(MessageKind::SetDynamicsModelResponse, cid, &body)
-}
-
-pub fn set_diff_trim_response_frame(cid: u32, result: i32) -> Vec<u8> {
-    let body = SetDiffTrimResponse { result }.encoded_to_vec();
-    control_frame(MessageKind::SetDiffTrimResponse, cid, &body)
-}
-
-pub fn set_ff_lead_response_frame(cid: u32, result: i32) -> Vec<u8> {
-    let body = SetFfLeadResponse { result }.encoded_to_vec();
-    control_frame(MessageKind::SetFfLeadResponse, cid, &body)
 }
 
 pub fn stepper_suppress_response_frame(cid: u32, effective_clock: u32) -> Vec<u8> {
@@ -504,15 +427,6 @@ pub fn motor_state_response_frame_multi(
             })
             .collect(),
     };
-    control_frame(
-        MessageKind::MotorStateResponse,
-        correlation_id,
-        &resp.encoded_to_vec(),
-    )
-}
-
-pub fn motor_state_empty_frame(correlation_id: u32) -> Vec<u8> {
-    let resp = MotorStateResponse { motors: vec![] };
     control_frame(
         MessageKind::MotorStateResponse,
         correlation_id,

@@ -8,7 +8,7 @@ use super::Engine;
 impl Engine {
     #[cfg(feature = "motion-module-stepper")]
     fn phase_slew_dispatch(&mut self, i: usize, shared: &SharedState) -> bool {
-        use crate::stepping_state::StepMode;
+        use runtime_contract::axes::StepMode;
 
         let Some(axis) = self.stepping_axes.get_mut(i).and_then(|s| s.as_mut()) else {
             return false;

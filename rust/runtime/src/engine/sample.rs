@@ -174,7 +174,7 @@ impl Engine {
             return true;
         };
         if axis.mode.load(core::sync::atomic::Ordering::Acquire)
-            != crate::stepping_state::StepMode::Phase as u8
+            != runtime_contract::axes::StepMode::Phase as u8
         {
             if only_holding_a_halt {
                 return false;

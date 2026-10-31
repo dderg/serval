@@ -127,6 +127,36 @@ jobs:
       - name: fmt --check
         run: ./scripts/ci.sh rust-fmt
 
+  # Public surface of the planner contract crates, diffed against the
+  # committed rust/api/<crate>.txt baselines. A contract change lands as a
+  # reviewed baseline diff, never as an unnoticed signature drift.
+  public-api:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          printf 'https://archive.ubuntu.com/ubuntu/\tpriority:1\n' \
+            | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=15 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=15 install -y libudev-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-30
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: public-api
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-public-api@0.52.0
+      - name: public API matches baselines
+        run: ./scripts/ci.sh public-api
+
   # Step-6 §11.4 / §11.3 loom tests for half-split SPSC, widened-clock
   # seqlock, force_idle handshake, and curve-pool alloc race. Loom
   # exhaustively explores the model-checked thread interleavings; it

@@ -12,7 +12,6 @@ use crate::segment::SourceRange;
 mod disk;
 pub mod law;
 mod reconstruct;
-mod scurve;
 
 pub use law::{LawSegment, ScalarLaw};
 
@@ -39,7 +38,6 @@ pub struct MoveVelocity {
     pub samples: Vec<VelSample>,
     pub phases: Vec<LawSegment>,
     pub accel: f64,
-    pub jerk: f64,
     pub length: f64,
     pub source: SourceRange,
 }
@@ -49,7 +47,6 @@ pub struct VelocityReport {
     pub stops: u32,
     pub curvature_bound: u32,
     pub feedrate_bound: u32,
-    pub jerk_bound: u32,
     pub limit_ride: u32,
     pub traversal_time_s: f64,
 }
@@ -71,30 +68,9 @@ pub struct VelocityProfile {
     pub barrier: usize,
     /// Velocity at `barrier`, used to size the flush-trigger watermark.
     pub v_barrier: f64,
-    /// Reconstructed profile state at every move boundary (`n + 1` entries,
-    /// `boundaries[0]` mirrors the given entry). A streaming caller that cuts
-    /// the window at seam `k` warm-starts the re-plan from `boundaries[k]`:
-    /// the carried `(v, a)` is the profile's state at the seam (velocity
-    /// clamped to the analytic node bound so a re-plan's entry checks accept
-    /// it by construction), so the next window continues the same
-    /// jerk-limited curve instead of re-anchoring at zero acceleration —
-    /// which both bends the trajectory (an acceleration discontinuity at the
-    /// cut) and can be outright infeasible when the profile crosses the seam
-    /// mid-brake.
-    pub boundaries: Vec<BoundaryState>,
-}
-
-/// The `(v, a)` state of a velocity profile at a move boundary: the full
-/// state of the jerk-limited forward reconstruction, and therefore everything
-/// a re-plan needs to continue the profile across a window cut.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BoundaryState {
-    pub v: f64,
-    pub a: f64,
-}
-
-impl BoundaryState {
-    pub const REST: Self = Self { v: 0.0, a: 0.0 };
+    /// Continuation speed at each reconstructed move boundary, clamped to
+    /// the analytic seam bound so it remains a valid warm-start entry.
+    pub boundary_speeds: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -116,9 +92,6 @@ pub enum VelocityError {
         line_no: u32,
     },
     OverCommitted {
-        line_no: u32,
-    },
-    RestAnchorAccel {
         line_no: u32,
     },
     NegativeVelocity {
@@ -150,20 +123,10 @@ impl std::fmt::Display for VelocityError {
 
 impl std::error::Error for VelocityError {}
 
-const REST_ANCHOR_ACCEL_EPS: f64 = 1e-3;
-
-fn pin_rest_anchor(
-    sample: Option<&mut VelSample>,
-    line_no: u32,
-    jerk: f64,
-) -> Result<(), VelocityError> {
+fn pin_rest_anchor(sample: Option<&mut VelSample>) {
     if let Some(s) = sample {
-        if jerk.is_finite() && s.a.abs() > REST_ANCHOR_ACCEL_EPS {
-            return Err(VelocityError::RestAnchorAccel { line_no });
-        }
         s.a = 0.0;
     }
-    Ok(())
 }
 
 struct MoveCaps {
@@ -171,13 +134,28 @@ struct MoveCaps {
     kappa_peak: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VelocityPlanParams {
+    pub integration_tol: f64,
+    pub max_extrude_only_velocity_mm_s: f64,
+    pub max_extrude_only_accel_mm_s2: f64,
+    pub entry_v: f64,
+}
+
+#[cfg(test)]
+pub(crate) fn warm_start_params(integration_tol: f64) -> VelocityPlanParams {
+    VelocityPlanParams {
+        integration_tol,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
+        entry_v: 0.0,
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn plan_velocity_warm_start(
     outcome: &FitOutcome,
-    integration_tol: f64,
-    max_extrude_only_velocity_mm_s: f64,
-    max_extrude_only_accel_mm_s2: f64,
-    entry: BoundaryState,
+    params: VelocityPlanParams,
 ) -> Result<VelocityProfile, VelocityError> {
     let stop_lines: HashSet<u32> = outcome
         .report
@@ -194,78 +172,42 @@ pub(crate) fn plan_velocity_warm_start(
                 && !matches!(m.segment.spatial, Some(Segment::Clothoid(_)))
         })
         .collect();
-    plan_velocity_stops(
-        &outcome.moves,
-        &stop_before,
-        integration_tol,
-        max_extrude_only_velocity_mm_s,
-        max_extrude_only_accel_mm_s2,
-        entry,
-    )
+    plan_velocity_stops(&outcome.moves, &stop_before, params)
 }
 
 /// Plan over an already-fitted move sequence with explicit per-seam stop
 /// anchors: `stop_before[k]` forces rest at the seam entering `moves[k]`.
-/// `stop_before[0]` is ignored — the entry seam is anchored at `entry`, the
-/// profile state a streaming cut carried out of the previous window.
+/// `stop_before[0]` is ignored — the entry seam is anchored at
+/// `params.entry_v`.
 pub fn plan_velocity_stops(
     moves: &[crate::Move],
     stop_before: &[bool],
-    integration_tol: f64,
-    max_extrude_only_velocity_mm_s: f64,
-    max_extrude_only_accel_mm_s2: f64,
-    entry: BoundaryState,
+    params: VelocityPlanParams,
 ) -> Result<VelocityProfile, VelocityError> {
-    plan_velocity_stops_reconstruct_prefix(
-        moves,
-        stop_before,
-        integration_tol,
-        max_extrude_only_velocity_mm_s,
-        max_extrude_only_accel_mm_s2,
-        entry,
-        moves.len(),
-    )
+    plan_velocity_stops_reconstruct_prefix(moves, stop_before, params, moves.len())
 }
 
 pub fn plan_velocity_stops_reconstruct_prefix(
     moves: &[crate::Move],
     stop_before: &[bool],
-    integration_tol: f64,
-    max_extrude_only_velocity_mm_s: f64,
-    max_extrude_only_accel_mm_s2: f64,
-    entry: BoundaryState,
+    params: VelocityPlanParams,
     reconstruct_count: usize,
 ) -> Result<VelocityProfile, VelocityError> {
-    plan_velocity_stops_select_prefix(
-        moves,
-        stop_before,
-        integration_tol,
-        max_extrude_only_velocity_mm_s,
-        max_extrude_only_accel_mm_s2,
-        entry,
-        |_| reconstruct_count,
-    )
+    plan_velocity_stops_select_prefix(moves, stop_before, params, |_| reconstruct_count)
 }
 
 pub fn plan_velocity_stops_select_prefix<F>(
     moves: &[crate::Move],
     stop_before: &[bool],
-    integration_tol: f64,
-    max_extrude_only_velocity_mm_s: f64,
-    max_extrude_only_accel_mm_s2: f64,
-    entry: BoundaryState,
+    params: VelocityPlanParams,
     select_prefix: F,
 ) -> Result<VelocityProfile, VelocityError>
 where
     F: FnOnce(usize) -> usize,
 {
-    let tol = integration_tol;
-    validate_config(
-        tol,
-        entry,
-        max_extrude_only_velocity_mm_s,
-        max_extrude_only_accel_mm_s2,
-    )?;
+    let tol = params.integration_tol;
+    let entry_v = params.entry_v;
+    validate_config(params)?;
 
     let n = moves.len();
     assert_eq!(stop_before.len(), n, "one stop flag per move");
@@ -281,23 +223,17 @@ where
             report: VelocityReport::default(),
             barrier: 0,
             v_barrier: 0.0,
-            boundaries: vec![entry],
+            boundary_speeds: vec![entry_v],
         });
     }
 
     let mut report = VelocityReport::default();
-    let caps = build_move_caps(
-        moves,
-        max_extrude_only_velocity_mm_s,
-        max_extrude_only_accel_mm_s2,
-        &mut report,
-    )?;
-    check_entry_ceiling(moves, &caps, entry, tol)?;
-    let mut plan = seed_seam_velocities(&caps, stop_before, entry, &mut report);
-    let geo = compute_run_geometry(&caps, &plan, entry.a);
-    forward_pass(moves, &caps, &geo, &mut plan.v, tol)?;
-    let (barrier, v_barrier) = reverse_brake_envelope(moves, &caps, &geo, &mut plan.v, tol)?;
-    check_entry_brake(moves, &caps, &geo, &plan.v, entry, tol)?;
+    let caps = build_move_caps(moves, params, &mut report)?;
+    check_entry_ceiling(moves, &caps, entry_v, tol)?;
+    let mut plan = seed_seam_velocities(&caps, stop_before, entry_v, &mut report);
+    forward_pass(moves, &caps, &mut plan.v, tol)?;
+    let (barrier, v_barrier) = reverse_brake_envelope(moves, &caps, &mut plan.v, tol)?;
+    check_entry_brake(moves, &caps, &plan.v, entry_v, tol)?;
     let reconstruct_count = select_prefix(barrier);
     assert!(
         reconstruct_count <= n,
@@ -307,9 +243,7 @@ where
         &moves[..reconstruct_count],
         &caps[..reconstruct_count],
         &plan,
-        &geo,
-        entry,
-        tol,
+        entry_v,
         &mut report,
     )?;
 
@@ -318,20 +252,21 @@ where
         report,
         barrier,
         v_barrier,
-        boundaries,
+        boundary_speeds: boundaries,
     })
 }
 
-fn validate_config(
-    tol: f64,
-    entry: BoundaryState,
-    max_extrude_only_velocity_mm_s: f64,
-    max_extrude_only_accel_mm_s2: f64,
-) -> Result<(), VelocityError> {
-    if !(tol.is_finite() && tol >= MIN_INTEGRATION_TOL) {
+fn validate_config(params: VelocityPlanParams) -> Result<(), VelocityError> {
+    let VelocityPlanParams {
+        integration_tol,
+        max_extrude_only_velocity_mm_s,
+        max_extrude_only_accel_mm_s2,
+        entry_v,
+    } = params;
+    if !(integration_tol.is_finite() && integration_tol >= MIN_INTEGRATION_TOL) {
         return Err(VelocityError::InvalidConfig);
     }
-    if !(entry.v.is_finite() && entry.v >= 0.0 && entry.a.is_finite()) {
+    if !(entry_v.is_finite() && entry_v >= 0.0) {
         return Err(VelocityError::InvalidConfig);
     }
     if !(max_extrude_only_velocity_mm_s > 0.0 && max_extrude_only_accel_mm_s2 > 0.0) {
@@ -342,8 +277,7 @@ fn validate_config(
 
 fn build_move_caps(
     moves: &[crate::Move],
-    max_extrude_only_velocity_mm_s: f64,
-    max_extrude_only_accel_mm_s2: f64,
+    params: VelocityPlanParams,
     report: &mut VelocityReport,
 ) -> Result<Vec<MoveCaps>, VelocityError> {
     let mut caps = Vec::with_capacity(moves.len());
@@ -368,8 +302,8 @@ fn build_move_caps(
                 if !(length.is_finite() && length > LENGTH_EPS_MM) {
                     return Err(VelocityError::NonFinite { line_no });
                 }
-                accel = accel.min(max_extrude_only_accel_mm_s2);
-                extrude_only_velocity_cap = max_extrude_only_velocity_mm_s;
+                accel = accel.min(params.max_extrude_only_accel_mm_s2);
+                extrude_only_velocity_cap = params.max_extrude_only_velocity_mm_s;
                 (length, 0.0, 0.0, 0.0)
             }
         };
@@ -387,7 +321,6 @@ fn build_move_caps(
             kin: Kinematics {
                 length,
                 accel,
-                jerk: m.limits.max_jerk_mm_s3,
                 kappa0,
                 sigma,
                 flat_ceiling,
@@ -401,7 +334,7 @@ fn build_move_caps(
 fn check_entry_ceiling(
     moves: &[crate::Move],
     caps: &[MoveCaps],
-    entry: BoundaryState,
+    entry_v: f64,
     tol: f64,
 ) -> Result<(), VelocityError> {
     let entry_ceiling = {
@@ -409,7 +342,7 @@ fn check_entry_ceiling(
         kin0.flat_ceiling
             .min(disk::limit_speed(kin0.kappa0.abs(), kin0.accel))
     };
-    if entry.v > entry_ceiling + tol * (1.0 + entry_ceiling) {
+    if entry_v > entry_ceiling + tol * (1.0 + entry_ceiling) {
         return Err(VelocityError::OverCommitted {
             line_no: moves[0].source.start_line,
         });
@@ -425,12 +358,12 @@ struct SeamPlan {
 fn seed_seam_velocities(
     caps: &[MoveCaps],
     stop_before: &[bool],
-    entry: BoundaryState,
+    entry_v: f64,
     report: &mut VelocityReport,
 ) -> SeamPlan {
     let n = caps.len();
     let mut v = vec![0.0_f64; n + 1];
-    v[0] = entry.v;
+    v[0] = entry_v;
     let mut is_anchor = vec![false; n + 1];
     is_anchor[0] = true;
     is_anchor[n] = true;
@@ -452,57 +385,9 @@ fn seed_seam_velocities(
     SeamPlan { v, is_anchor }
 }
 
-struct RunGeometry {
-    run_start_v: Vec<f64>,
-    run_start_a: Vec<f64>,
-    arc_from_run_start: Vec<f64>,
-    arc_to_run_end: Vec<f64>,
-}
-
-fn compute_run_geometry(caps: &[MoveCaps], plan: &SeamPlan, entry_a: f64) -> RunGeometry {
-    let n = caps.len();
-    let mut run_start_v = vec![0.0_f64; n];
-    let mut run_start_a = vec![0.0_f64; n];
-    let mut arc_from_run_start = vec![0.0_f64; n];
-    {
-        let mut anchor_v = plan.v[0];
-        let mut anchor_a = entry_a;
-        let mut cum = 0.0;
-        for j in 0..n {
-            if plan.is_anchor[j] {
-                anchor_v = plan.v[j];
-                anchor_a = if j == 0 { entry_a } else { 0.0 };
-                cum = 0.0;
-            }
-            run_start_v[j] = anchor_v;
-            run_start_a[j] = anchor_a;
-            arc_from_run_start[j] = cum;
-            cum += caps[j].kin.length;
-        }
-    }
-    let mut arc_to_run_end = vec![0.0_f64; n];
-    {
-        let mut cum = 0.0;
-        for j in (0..n).rev() {
-            if plan.is_anchor[j + 1] {
-                cum = 0.0;
-            }
-            arc_to_run_end[j] = cum;
-            cum += caps[j].kin.length;
-        }
-    }
-    RunGeometry {
-        run_start_v,
-        run_start_a,
-        arc_from_run_start,
-        arc_to_run_end,
-    }
-}
-
 fn forward_pass(
     moves: &[crate::Move],
     caps: &[MoveCaps],
-    geo: &RunGeometry,
     v: &mut [f64],
     tol: f64,
 ) -> Result<(), VelocityError> {
@@ -513,16 +398,10 @@ fn forward_pass(
         let kin = &caps[j].kin;
         let disk = disk::disk_reach_v(kin, v[j], kin.length, tol)
             .ok_or(VelocityError::Diverged { line_no })?;
-        let jerk = scurve::reach_velocity_with_accel(
-            geo.run_start_v[j],
-            geo.run_start_a[j].clamp(-kin.accel, kin.accel),
-            geo.arc_from_run_start[j] + kin.length,
-            kin.accel,
-            kin.jerk,
-        )
-        .map(|(v, _)| v)
-        .map_err(|_| VelocityError::Diverged { line_no })?;
-        v[k] = v[k].min(disk).min(jerk);
+        if moves[j].limits.max_jerk_mm_s3 != f64::INFINITY {
+            return Err(VelocityError::Diverged { line_no });
+        }
+        v[k] = v[k].min(disk);
     }
     Ok(())
 }
@@ -530,25 +409,20 @@ fn forward_pass(
 fn reverse_brake_envelope(
     moves: &[crate::Move],
     caps: &[MoveCaps],
-    geo: &RunGeometry,
     v: &mut [f64],
     tol: f64,
 ) -> Result<(usize, f64), VelocityError> {
     let n = caps.len();
-    let v_forward_ceiling = v.to_vec();
+    let mut barrier = 0usize;
     for k in (1..n).rev() {
         let j = k;
         let line_no = moves[j].source.start_line;
         let kin = &caps[j].kin;
         let disk = disk::disk_reach_v_rev(kin, v[k + 1], kin.length, tol)
             .ok_or(VelocityError::Diverged { line_no })?;
-        let jerk = scurve::reach_v(0.0, geo.arc_to_run_end[j] + kin.length, kin.accel, kin.jerk)
-            .ok_or(VelocityError::Diverged { line_no })?;
-        v[k] = v[k].min(disk).min(jerk);
-    }
-    let mut barrier = 0usize;
-    for k in 1..n {
-        if !(v[k] < v_forward_ceiling[k]) {
+        let forward_ceiling = v[k];
+        v[k] = v[k].min(disk);
+        if barrier == 0 && !(v[k] < forward_ceiling) {
             barrier = k;
         }
     }
@@ -559,25 +433,17 @@ fn reverse_brake_envelope(
 fn check_entry_brake(
     moves: &[crate::Move],
     caps: &[MoveCaps],
-    geo: &RunGeometry,
     v: &[f64],
-    entry: BoundaryState,
+    entry_v: f64,
     tol: f64,
 ) -> Result<(), VelocityError> {
     let entry_line_no = moves[0].source.start_line;
-    let entry_brake = {
-        let kin = &caps[0].kin;
-        let disk =
-            disk::disk_reach_v_rev(kin, v[1], kin.length, tol).ok_or(VelocityError::Diverged {
-                line_no: entry_line_no,
-            })?;
-        let jerk = scurve::reach_v(0.0, geo.arc_to_run_end[0] + kin.length, kin.accel, kin.jerk)
-            .ok_or(VelocityError::Diverged {
-                line_no: entry_line_no,
-            })?;
-        disk.min(jerk)
-    };
-    if entry.v > entry_brake + tol * (1.0 + entry_brake) {
+    let kin = &caps[0].kin;
+    let entry_brake =
+        disk::disk_reach_v_rev(kin, v[1], kin.length, tol).ok_or(VelocityError::Diverged {
+            line_no: entry_line_no,
+        })?;
+    if entry_v > entry_brake + tol * (1.0 + entry_brake) {
         return Err(VelocityError::OverCommitted {
             line_no: entry_line_no,
         });
@@ -589,17 +455,15 @@ fn reconstruct_runs(
     moves: &[crate::Move],
     caps: &[MoveCaps],
     plan: &SeamPlan,
-    geo: &RunGeometry,
-    entry: BoundaryState,
-    tol: f64,
+    entry_v: f64,
     report: &mut VelocityReport,
-) -> Result<(Vec<MoveVelocity>, Vec<BoundaryState>), VelocityError> {
+) -> Result<(Vec<MoveVelocity>, Vec<f64>), VelocityError> {
     let n = caps.len();
     let v = &plan.v;
     let is_anchor = &plan.is_anchor;
     let mut out: Vec<MoveVelocity> = Vec::with_capacity(n);
-    let mut boundaries: Vec<BoundaryState> = Vec::with_capacity(n + 1);
-    boundaries.push(entry);
+    let mut boundaries: Vec<f64> = Vec::with_capacity(n + 1);
+    boundaries.push(entry_v);
     let mut run_start = 0;
     while run_start < n {
         let mut run_end = run_start + 1;
@@ -613,15 +477,6 @@ fn reconstruct_runs(
             })
             .collect();
         let run_start_line = moves[run_start].source.start_line;
-        let entries = (0..run_members.len())
-            .map(|idx| {
-                if idx == 0 {
-                    geo.run_start_v[run_start]
-                } else {
-                    run_members[idx - 1].exit_v
-                }
-            })
-            .collect::<Vec<_>>();
         let workers = if cfg!(not(target_arch = "wasm32")) {
             std::thread::available_parallelism()
                 .map_or(1, |cores| cores.get())
@@ -649,7 +504,7 @@ fn reconstruct_runs(
                                     reconstruct::member_profile(
                                         idx,
                                         member,
-                                        entries[idx],
+                                        v[run_start + idx],
                                         member.exit_v,
                                     ),
                                 ));
@@ -673,7 +528,7 @@ fn reconstruct_runs(
                 .map(|(idx, member)| {
                     (
                         idx,
-                        reconstruct::member_profile(idx, member, entries[idx], member.exit_v),
+                        reconstruct::member_profile(idx, member, v[run_start + idx], member.exit_v),
                     )
                 })
                 .collect()
@@ -704,28 +559,14 @@ fn reconstruct_runs(
             .enumerate()
             .map(|(idx, segments)| {
                 let mut samples = sample_segments(segments);
-                let entry = if idx == 0 {
-                    geo.run_start_v[run_start]
-                } else {
-                    run_members[idx - 1].exit_v
-                };
+                let entry_v = v[run_start + idx];
                 if let Some(first) = samples.first_mut() {
-                    first.1 = entry;
+                    first.1 = entry_v;
                 }
                 if let Some(last) = samples.last_mut() {
                     last.1 = run_members[idx].exit_v;
                 }
                 samples
-            })
-            .collect();
-        let run_exit_states: Vec<(f64, f64)> = reconstructed_phases
-            .iter()
-            .map(|segments| {
-                let (_, v, a) = segments
-                    .last()
-                    .expect("a member profile always carries at least one segment")
-                    .end_state();
-                (v, a)
             })
             .collect();
 
@@ -738,10 +579,10 @@ fn reconstruct_runs(
                 .map(|&(s, v, a)| VelSample { s, v, a })
                 .collect();
             if is_anchor[j] && v[j] <= VELOCITY_EPS_MM_S {
-                pin_rest_anchor(samples.first_mut(), line_no, kin.jerk)?;
+                pin_rest_anchor(samples.first_mut());
             }
             if is_anchor[j + 1] && v[j + 1] <= VELOCITY_EPS_MM_S {
-                pin_rest_anchor(samples.last_mut(), line_no, kin.jerk)?;
+                pin_rest_anchor(samples.last_mut());
             }
             let entry_v = samples.first().map_or(v[j], |s| s.v);
             let exit_v = samples.last().map_or(v[j + 1], |s| s.v);
@@ -756,31 +597,19 @@ fn reconstruct_runs(
             );
             report.traversal_time_s += phases.iter().map(|p| p.dt).sum::<f64>();
 
-            let disk_only = disk::disk_reach_v(kin, entry_v, kin.length, tol)
-                .ok_or(VelocityError::Diverged { line_no })?;
-            let jerk_only = scurve::reach_v(entry_v, kin.length, kin.accel, kin.jerk)
-                .ok_or(VelocityError::Diverged { line_no })?;
-            if jerk_only + VELOCITY_EPS_MM_S < disk_only {
-                report.jerk_bound += 1;
-            }
             let curvature_ceiling = disk::limit_speed(caps[j].kappa_peak, kin.accel);
             if caps[j].kappa_peak > 0.0 && peak_v > curvature_ceiling + VELOCITY_EPS_MM_S {
                 report.limit_ride += 1;
             }
 
             boundaries.push(if is_anchor[j + 1] && v[j + 1] <= VELOCITY_EPS_MM_S {
-                BoundaryState::REST
+                0.0
             } else {
-                let (bv, ba) = run_exit_states[idx];
-                // Grid integration can land the sample a hair above the
-                // analytic node bound; a re-plan re-derives that bound (or a
-                // looser one, by append monotonicity) as its entry check, so
-                // clamping here is what makes every boundary a valid warm
-                // start.
-                BoundaryState {
-                    v: bv.min(v[j + 1]),
-                    a: ba,
-                }
+                let (_, boundary_v, _) = phases
+                    .last()
+                    .expect("a member profile always carries at least one segment")
+                    .end_state();
+                boundary_v.min(v[j + 1])
             });
             out.push(MoveVelocity {
                 entry_v,
@@ -789,7 +618,6 @@ fn reconstruct_runs(
                 samples,
                 phases,
                 accel: kin.accel,
-                jerk: kin.jerk,
                 length: kin.length,
                 source: m.source,
             });

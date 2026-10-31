@@ -11,10 +11,10 @@
 
 use mcu_protocol::Encode;
 use mcu_protocol::messages::{
-    CaptureDrive, ClaimHandshakeReply, ConfigureAxes, DriveLimitEntry, DynamicsPair, LaneDepth,
-    LaneRun, McuLog, MotorSample, MotorStateResponse, PushSampleRuns, PushSampleRunsResponse,
-    SdoReadResponse, SdoWrite, SetDriveLimits, SetDynamicsModel, SetStrainComp, SetpointSample,
-    SlaveState, SlaveStatus, StartCapture, StatusHeartbeat,
+    CaptureDrive, ClaimHandshakeReply, DriveLimitEntry, DynamicsPair, LaneDepth, LaneRun, McuLog,
+    MotorSample, MotorStateResponse, PushSampleRuns, PushSampleRunsResponse, SdoReadResponse,
+    SdoWrite, SetDriveLimits, SetDynamicsModel, SetStrainComp, SetpointSample, SlaveState,
+    SlaveStatus, StartCapture, StatusHeartbeat,
 };
 
 include!("../schema_def.rs");
@@ -469,15 +469,6 @@ fn claim_handshake_reply_matches_schema_layout() {
 
 #[test]
 fn generated_flat_codecs_match_schema_layout() {
-    let configure = ConfigureAxes {
-        kinematics: 1,
-        present_mask: 3,
-        awd_mask: 0,
-        invert_mask: 2,
-        steps_per_mm: [80.0, 80.0, 400.0, 693.0],
-    };
-    reference_decode("ConfigureAxes", &configure.encoded_to_vec()).unwrap();
-
     let sdo_write = SdoWrite {
         slot: 1,
         index: 0x6060,

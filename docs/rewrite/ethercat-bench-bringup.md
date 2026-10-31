@@ -8,7 +8,7 @@
 
 ## What's already proven without hardware
 - MCU stepper hot-path codegen is **byte-identical** to pristine main (disasm-verified). Flashing this branch will not change stepper behavior.
-- The servo consumes a **pre-sampled setpoint ring** — one entry per DC cycle, filled host-side by `ChainFiller` (position plus its torque/velocity feedforward). Unit-tested in `rust/ethercat-rt/src/setpoint/tests.rs` and `src/setpoint_fill/tests.rs`: ring fill/drain and run abutment (runs abut by construction — a hole, an overlap, a late run, or a ring drained while still moving is a latched fault, never a pad or a clamp), per-lane free-cycle headroom accounting (the pump's only pacing signal), grid-phase observation (`observe_grid` rejects index/clock regression), and origin anchoring (a lane's counts frame latches at the first played entry of an anchor epoch; a shift without a re-anchor is `OriginShift`).
+- The servo consumes a **pre-sampled setpoint ring** — one entry per DC cycle, filled host-side by `ChainFiller` (position plus its torque/velocity feedforward). Unit-tested in `rust/ethercat-setpoint/src/setpoint/tests.rs` and `rust/ethercat-setpoint-fill/src/setpoint_fill/tests.rs`: ring fill/drain and run abutment (runs abut by construction — a hole, an overlap, a late run, or a ring drained while still moving is a latched fault, never a pad or a clamp), per-lane free-cycle headroom accounting (the pump's only pacing signal), grid-phase observation (`observe_grid` rejects index/clock regression), and origin anchoring (a lane's counts frame latches at the first played entry of an anchor epoch; a shift without a re-anchor is `OriginShift`).
 - Sustained streaming past one ring depth works over the real `McuSerialConn ↔ FrameServer` socket (no stall — the "stopped after first move" class is covered).
 - `klippy → motion-engine → endpoint` host wiring is ported and the stepper-path tests still pass.
 
@@ -358,11 +358,11 @@ on the drive's retained state. A failure to write that remap is `rc=-6`
 60B1h/60B2h) that the FF entries feed.
 
 ## Fault-response reference
-- The endpoint has **no fixed millisecond lateness window**. Every fault below is a `RingFault` variant in `rust/ethercat-rt/src/setpoint.rs`; each latches into the same allocation-free atomic and reports `engine_state=Fault` in the `StatusHeartbeat`. Response is host-coordinated shutdown (mirrors the MCU model); the hw binary additionally disables the drive as a local backstop. None of them silently holds the last position.
+- The endpoint has **no fixed millisecond lateness window**. Every fault below is a `RingFault` variant in `rust/ethercat-setpoint/src/setpoint.rs`; each latches into the same allocation-free atomic and reports `engine_state=Fault` in the `StatusHeartbeat`. Response is host-coordinated shutdown (mirrors the MCU model); the hw binary additionally disables the drive as a local backstop. None of them silently holds the last position.
 - Pacing faults:
-  - **`Underrun { tail_vel_counts_s }`** (`RUNTIME_ERR_SAMPLE_RING_UNDERRUN`) — the ring drained while the last played entry still carried velocity: the host fell behind mid-motion. This is the real "pump too slow" signal.
-  - **`RunLate { deficit_us }`** (`RUNTIME_ERR_SAMPLE_RUN_LATE`) — a delivered run covers cycles the ring has already played; `deficit_us` is how late it was.
-  - **`RingFull { free_cycles, asked }`** (`RUNTIME_ERR_SAMPLE_RING_FULL`) — the host pushed past the ring's headroom, i.e. ran too far ahead.
+  - **`Underrun { tail_vel_counts_s }`** (`FaultCode::SampleRingUnderrun`) — the ring drained while the last played entry still carried velocity: the host fell behind mid-motion. This is the real "pump too slow" signal.
+  - **`RunLate { deficit_us }`** (`FaultCode::SampleRunLate`) — a delivered run covers cycles the ring has already played; `deficit_us` is how late it was.
+  - **`RingFull { free_cycles, asked }`** (`FaultCode::SampleRingFull`) — the host pushed past the ring's headroom, i.e. ran too far ahead.
 - Divergence guards (loud, not pacing):
   - **`OriginShift { expected_nm, got_nm }`** — a lane's `pos_counts == 0` reference moved without a re-anchor.
   - **`GridRegression`** — the playback grid index went backwards.
@@ -373,4 +373,4 @@ on the drive's retained state. A failure to write that remap is `rc=-6`
 ## If something's off
 - Re-run `cargo test -p ethercat-rt -p motion-engine` on the Pi — these are the host-path regression tests.
 - The stub-level path (step 2) isolates host bugs from drive/EtherCAT bugs — always confirm it green before blaming the drive.
-- Per-piece dispatch projection diagnostics (`[dispatch-margin]` and `[project]`) are emitted at **trace** level to avoid flooding production logs. Enable them with `RUST_LOG=trace` (or a targeted filter such as `RUST_LOG=motion_engine=trace,host_rt=trace`). `RUST_LOG` is read by the `EnvFilter` in `rust/motion-engine/src/logging/mod.rs` at bridge startup.
+- Per-piece dispatch projection diagnostics (`[dispatch-margin]` and `[project]`) are emitted at **trace** level to avoid flooding production logs. Enable them with `RUST_LOG=trace`. `RUST_LOG` is read by the `EnvFilter` in `rust/motion-services/src/logging/mod.rs` at bridge startup.
