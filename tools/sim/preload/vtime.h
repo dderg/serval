@@ -7,6 +7,8 @@
 #define VTIME_SHM_NAME "/vtime"
 #define VTIME_MAX_PACERS 8
 #define VTIME_MAX_WAITERS 128
+#define VTIME_MAX_HOST_THREADS 64
+#define VTIME_SHM_BYTES 4096
 
 // A pacer is a thread that must observe every period of virtual time
 // (an MCU motion-tick thread). While any pacer is active, no participant
@@ -57,6 +59,16 @@ struct vtime_shm {
     _Atomic uint64_t waiter_thread[VTIME_MAX_WAITERS];
     _Atomic uint32_t waiter_kicked[VTIME_MAX_WAITERS];
     _Atomic uint32_t waiter_is_floor[VTIME_MAX_WAITERS];
+    _Atomic uint32_t clock_lock_owner;
+    _Atomic uint32_t host_pid;
+    _Atomic uint64_t host_wake_epoch;
+    _Atomic uint64_t host_idle_epoch;
+    _Atomic uint32_t host_tid[VTIME_MAX_HOST_THREADS];
 };
+
+_Static_assert(sizeof(struct vtime_shm) <= VTIME_SHM_BYTES,
+               "tools/sim/world.py VTIME_SHM_SIZE must cover struct vtime_shm");
+_Static_assert(__builtin_offsetof(struct vtime_shm, host_tid) == 3344,
+               "tools/sim/world.py _HOST_TID_OFFSET");
 
 #endif

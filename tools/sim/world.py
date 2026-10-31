@@ -172,6 +172,16 @@ _HARNESS_PACE_ANCHOR_OFFSET = 16
 _PACER_SLOTS_USED_OFFSET = 32
 _PACERS_OFFSET = 40
 _PACER_SLOT_SIZE = 24
+_HOST_PRESENT_OFFSET = 232
+_WAITER_SLOTS_USED_OFFSET = 240
+_WAITER_TARGET_OFFSET = 248
+_WAITER_THREAD_OFFSET = 1272
+_WAITER_IS_FLOOR_OFFSET = 2808
+_CLOCK_LOCK_OWNER_OFFSET = 3320
+_HOST_TID_OFFSET = 3344
+_MAX_PACERS = 8
+_MAX_WAITERS = 128
+_MAX_HOST_THREADS = 64
 # Pacer slots the harness reserves before any MCU process claims one.
 HARNESS_PACER_SLOTS = 3
 
@@ -258,6 +268,61 @@ class VirtualClock:
         with self._lock:
             self._free_pacers.append(slot)
 
+    def holds(self) -> str:
+        """What currently stops virtual time: the shm state a wedge leaves."""
+        shm = self._shm
+        now = self.now_ns()
+        host_present, host_running = struct.unpack_from(
+            "<Ii", shm, _HOST_PRESENT_OFFSET
+        )
+        lock_owner, host_pid, wake_epoch, idle_epoch = struct.unpack_from(
+            "<IIQQ", shm, _CLOCK_LOCK_OWNER_OFFSET
+        )
+        parts = [
+            f"host_present={host_present} host_running={host_running} "
+            f"host_pid={host_pid} wake_epoch={wake_epoch} "
+            f"idle_epoch={idle_epoch} clock_lock_owner={lock_owner}"
+        ]
+        used = struct.unpack_from("<I", shm, _PACER_SLOTS_USED_OFFSET)[0]
+        for i in range(min(used, _MAX_PACERS)):
+            active, _, floor, slack = struct.unpack_from(
+                "<IIQQ", shm, _PACERS_OFFSET + i * _PACER_SLOT_SIZE
+            )
+            if active:
+                parts.append(
+                    f"pacer{i} floor+slack={(floor + slack - now) / 1e6:+.3f}ms"
+                )
+        used = struct.unpack_from("<I", shm, _WAITER_SLOTS_USED_OFFSET)[0]
+        for i in range(min(used, _MAX_WAITERS)):
+            target = struct.unpack_from(
+                "<Q", shm, _WAITER_TARGET_OFFSET + i * 8
+            )[0]
+            is_floor = struct.unpack_from(
+                "<I", shm, _WAITER_IS_FLOOR_OFFSET + i * 4
+            )[0]
+            if target and is_floor:
+                who = struct.unpack_from(
+                    "<Q", shm, _WAITER_THREAD_OFFSET + i * 8
+                )[0]
+                parts.append(
+                    f"host waiter tid {who & 0xFFFFFFFF} "
+                    f"floor={(target - now) / 1e6:+.3f}ms"
+                )
+        for i in range(_MAX_HOST_THREADS):
+            tid = struct.unpack_from("<I", shm, _HOST_TID_OFFSET + i * 4)[0]
+            if not tid:
+                continue
+            try:
+                stat = pathlib.Path(
+                    f"/proc/{host_pid}/task/{tid}/stat"
+                ).read_text()
+            except OSError:
+                continue
+            comm, _, rest = stat.partition("(")[2].rpartition(")")
+            if rest.split()[0] == "R":
+                parts.append(f"host thread {tid} ({comm}) runnable")
+        return "; ".join(parts)
+
 
 class HarnessPacer:
     """A harness thread's seat on the virtual clock.
@@ -316,7 +381,8 @@ class VirtualDeadline:
         elif time.monotonic() - self._last_progress > self.WEDGE_REAL_S:
             raise SimError(
                 f"virtual clock stuck at {now_ns / 1e9:.6f}s for "
-                f"{self.WEDGE_REAL_S:.0f}s of real time: simulator wedged"
+                f"{self.WEDGE_REAL_S:.0f}s of real time: simulator wedged; "
+                f"{self._clock.holds()}"
             )
         return now_ns >= self._end_ns
 
