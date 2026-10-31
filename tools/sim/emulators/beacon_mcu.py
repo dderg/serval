@@ -90,6 +90,7 @@ class BeaconMcuStub:
         self._sample_thread: Optional[threading.Thread] = None
         self._master_fd: Optional[int] = None
         self._slave_fd: Optional[int] = None
+        self._link = None
         self._t0: float = time.monotonic()
         self._send_lock = threading.Lock()
         self._host_recv_seq: int = 1
@@ -167,6 +168,8 @@ class BeaconMcuStub:
         os.symlink(slave_name, self._pty_path)
         self._slave_fd = slave_fd
         self._master_fd = master_fd
+        if self._clock is not None:
+            self._link = self._clock.claim_link(slave_fd)
         # Non-blocking master: a slow/absent slave reader must not deadlock
         # the reactor.
         import fcntl as _fcntl
@@ -198,6 +201,9 @@ class BeaconMcuStub:
 
     def stop(self) -> None:
         self._stop.set()
+        if self._link is not None:
+            self._clock.release_link(self._link)
+            self._link = None
         # Closing the master fd unblocks the select() in the reactor.
         if self._master_fd is not None:
             try:
@@ -410,6 +416,7 @@ class BeaconMcuStub:
 
     def _reactor_loop(self) -> None:
         master_fd = self._master_fd
+        link = self._link
         while not self._stop.is_set():
             if master_fd is None:
                 break
@@ -428,7 +435,11 @@ class BeaconMcuStub:
             self.rx_byte_count += len(chunk)
             self._log("rx-raw", bytes(chunk))
             self._inbuf.extend(chunk)
-            self._drain_inbuf()
+            try:
+                self._drain_inbuf()
+            finally:
+                if link is not None:
+                    link.consumed(len(chunk))
 
     def _drain_inbuf(self) -> None:
         while True:
@@ -1059,7 +1070,7 @@ class BeaconMcuStub:
             if log_dir:
                 os.makedirs(log_dir, exist_ok=True)
             with open(self._log_path, "ab") as f:
-                ts = f"{time.monotonic() - self._t0:.6f}"
+                ts = f"{time.monotonic() - self._t0:.6f}][vt={self._monotonic():.6f}"
                 trailer = ""
                 if msgformat is not None:
                     name = msgformat.split()[0]
@@ -1090,7 +1101,7 @@ class BeaconMcuStub:
             if log_dir:
                 os.makedirs(log_dir, exist_ok=True)
             with open(self._log_path, "ab") as f:
-                ts = f"{time.monotonic() - self._t0:.6f}"
+                ts = f"{time.monotonic() - self._t0:.6f}][vt={self._monotonic():.6f}"
                 light = {
                     k: (
                         f"<{len(v)} bytes>"

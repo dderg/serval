@@ -15,10 +15,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/uio.h>
 #include <sys/syscall.h>
 #include <time.h>
@@ -85,6 +87,8 @@ static ssize_t (*real_sendmsg)(int, const struct msghdr *, int);
 static int (*real_pthread_cond_signal)(pthread_cond_t *);
 static int (*real_pthread_cond_broadcast)(pthread_cond_t *);
 static int (*real_sem_post)(sem_t *);
+static int (*real_openpty)(int *, int *, char *, const struct termios *,
+                           const struct winsize *);
 
 // Resolves on first use: these can run before the constructor (another
 // preloaded library's init, or a thread started before it).
@@ -339,14 +343,122 @@ host_may_have_woken_a_thread(void)
                                   memory_order_acq_rel);
 }
 
+static uint32_t
+link_slots_used(void)
+{
+    uint32_t used = atomic_load_explicit(&vshm->link_slots_used,
+                                         memory_order_acquire);
+    return used > VTIME_MAX_LINKS ? VTIME_MAX_LINKS : used;
+}
+
+static int device_link_fd = -1;
+static int device_link_slot = -1;
+static __thread int device_handling;
+static __thread int stepping_own_timer;
+
+static int
+device_input_pending(void)
+{
+    if (atomic_load_explicit(&vshm->devices_handling, memory_order_acquire))
+        return 1;
+    uint32_t used = link_slots_used();
+    for (uint32_t i = 0; i < used; i++) {
+        struct vtime_device_link *link = &vshm->links[i];
+        if (stepping_own_timer && (int)i == device_link_slot)
+            continue;
+        if (atomic_load_explicit(&link->pts_plus_one, memory_order_acquire)
+            && atomic_load_explicit(&link->written, memory_order_acquire)
+                   > atomic_load_explicit(&link->consumed,
+                                          memory_order_acquire))
+            return 1;
+    }
+    return 0;
+}
+
+static int
+pts_of(const struct stat *st, uint32_t *pts)
+{
+    unsigned int major_num = major(st->st_rdev);
+    if (!S_ISCHR(st->st_mode) || major_num < 136 || major_num > 143)
+        return 0;
+    *pts = (major_num - 136) * 256 + minor(st->st_rdev);
+    return 1;
+}
+
 static void
-host_wrote(int fd)
+host_wrote(int fd, uint64_t bytes)
 {
     int saved_errno = errno;
     struct stat st;
-    if (fstat(fd, &st) == 0 && !S_ISREG(st.st_mode))
-        host_may_have_woken_a_thread();
+    uint32_t pts;
+    if (fstat(fd, &st) == 0) {
+        if (pts_of(&st, &pts)) {
+            uint32_t used = link_slots_used();
+            for (uint32_t i = 0; i < used; i++)
+                if (atomic_load_explicit(&vshm->links[i].pts_plus_one,
+                                         memory_order_acquire)
+                    == pts + 1) {
+                    atomic_fetch_add_explicit(&vshm->links[i].written, bytes,
+                                              memory_order_acq_rel);
+                    VLOG("host fd %d wrote %lu bytes to device pts%u", fd,
+                         (unsigned long)bytes, pts);
+                }
+        } else if (!S_ISREG(st.st_mode)) {
+            host_may_have_woken_a_thread();
+        }
+    }
     errno = saved_errno;
+}
+
+static void
+register_device_link(int master_fd)
+{
+    if (device_link_fd >= 0) {
+        fprintf(stderr, "[vtime] device process opened a second pty\n");
+        abort();
+    }
+    unsigned int pts;
+    if (ioctl(master_fd, TIOCGPTN, &pts)) {
+        fprintf(stderr, "[vtime] TIOCGPTN failed: %s\n", strerror(errno));
+        abort();
+    }
+    uint32_t slot = atomic_fetch_add_explicit(&vshm->link_slots_used, 1,
+                                              memory_order_acq_rel);
+    if (slot >= VTIME_MAX_LINKS) {
+        fprintf(stderr, "[vtime] more than %d device links\n",
+                VTIME_MAX_LINKS);
+        abort();
+    }
+    struct vtime_device_link *link = &vshm->links[slot];
+    atomic_store_explicit(&link->written, 0, memory_order_release);
+    atomic_store_explicit(&link->consumed, 0, memory_order_release);
+    atomic_store_explicit(&link->pts_plus_one, pts + 1, memory_order_release);
+    device_link_fd = master_fd;
+    device_link_slot = (int)slot;
+    VLOG("device link: master fd %d is pts%u, slot %u", master_fd, pts, slot);
+}
+
+static void
+device_read(uint64_t bytes)
+{
+    if (!device_handling) {
+        device_handling = 1;
+        atomic_fetch_add_explicit(&vshm->devices_handling, 1,
+                                  memory_order_acq_rel);
+    }
+    atomic_fetch_add_explicit(&vshm->links[device_link_slot].consumed, bytes,
+                              memory_order_acq_rel);
+    VLOG("device read %lu bytes", (unsigned long)bytes);
+}
+
+static void
+finish_device_handling(void)
+{
+    if (!device_handling)
+        return;
+    device_handling = 0;
+    atomic_fetch_sub_explicit(&vshm->devices_handling, 1,
+                              memory_order_acq_rel);
 }
 
 static uint64_t
@@ -398,7 +510,7 @@ locked_vtime_bound(void)
     if (floor < bound)
         bound = floor;
     uint64_t now = vtime_now();
-    if (bound > now && !host_idle())
+    if (bound > now && (device_input_pending() || !host_idle()))
         return now;
     return bound;
 }
@@ -475,6 +587,7 @@ thread_blocks(uint64_t deadline)
 {
     if (!vshm)
         return;
+    finish_device_handling();
     blocked_until = deadline;
     uint64_t target = wait_target(deadline);
     if (target != UINT64_MAX) {
@@ -520,13 +633,16 @@ host_threads_add(int delta)
 static void
 vtime_advance_to(uint64_t target_ns)
 {
+    finish_device_handling();
+    stepping_own_timer = 1;
     while (vtime_now() < target_ns) {
         raise_toward(target_ns);
         if (vtime_now() >= target_ns)
-            return;
+            break;
         struct timespec w = { 0, 100000 };
         real_nanosleep(&w, NULL);
     }
+    stepping_own_timer = 0;
 }
 
 static void vtimer_check_and_fire(void);
@@ -658,6 +774,7 @@ vtime_pacer_advance(int slot, uint64_t target_ns, uint64_t period_ns)
     if (!vshm || slot < 0 || slot >= VTIME_MAX_PACERS)
         return;
     (void)period_ns;
+    finish_device_handling();
     store_pacer_floor(slot, target_ns);
     vtime_advance_to(target_ns);
     vtimer_check_and_fire();
@@ -718,6 +835,23 @@ vtime_pacer_cleanup(void)
         if (owned_pacer_slots[i])
             atomic_store_explicit(&vshm->pacers[i].active, 0,
                                   memory_order_release);
+    finish_device_handling();
+    if (device_link_slot >= 0)
+        atomic_store_explicit(&vshm->links[device_link_slot].pts_plus_one, 0,
+                              memory_order_release);
+}
+
+static void
+forked_child(void)
+{
+    is_host = 0;
+    waiter_slot = -1;
+    host_tid_slot = -1;
+    blocked_until = 0;
+    device_handling = 0;
+    device_link_fd = -1;
+    device_link_slot = -1;
+    memset(owned_pacer_slots, 0, sizeof(owned_pacer_slots));
 }
 
 static void
@@ -804,6 +938,7 @@ vtime_init(void)
                               .sa_flags = SA_RESTART };
     sigemptyset(&kick.sa_mask);
     sigaction(VTIME_KICK_SIGNAL, &kick, NULL);
+    pthread_atfork(NULL, NULL, forked_child);
 
     // Only this process is the host: children it spawns inherit the
     // preload but not the role.
@@ -955,6 +1090,25 @@ ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout,
     int ret = ppoll_loop(fds, nfds, deadline, sigmask);
     thread_runs();
     return ret;
+}
+
+extern void __chk_fail(void) __attribute__((noreturn));
+
+int
+__ppoll_chk(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout,
+            const sigset_t *sigmask, size_t fdslen)
+{
+    if (fdslen / sizeof(*fds) < nfds)
+        __chk_fail();
+    return ppoll(fds, nfds, timeout, sigmask);
+}
+
+int
+__poll_chk(struct pollfd *fds, nfds_t nfds, int timeout_ms, size_t fdslen)
+{
+    if (fdslen / sizeof(*fds) < nfds)
+        __chk_fail();
+    return poll(fds, nfds, timeout_ms);
 }
 
 int
@@ -1284,7 +1438,13 @@ fd_blocks(int fd)
 ssize_t
 read(int fd, void *buf, size_t count)
 {
-    if (!is_host || !fd_blocks(fd))
+    if (!is_host) {
+        ssize_t ret = REAL(read)(fd, buf, count);
+        if (ret > 0 && fd == device_link_fd)
+            device_read((uint64_t)ret);
+        return ret;
+    }
+    if (!fd_blocks(fd))
         return REAL(read)(fd, buf, count);
     thread_blocks(NO_DEADLINE);
     ssize_t ret = REAL(read)(fd, buf, count);
@@ -1293,11 +1453,19 @@ read(int fd, void *buf, size_t count)
 }
 
 ssize_t
+__read_chk(int fd, void *buf, size_t count, size_t buflen)
+{
+    if (count > buflen)
+        __chk_fail();
+    return read(fd, buf, count);
+}
+
+ssize_t
 write(int fd, const void *buf, size_t count)
 {
     ssize_t ret = REAL(write)(fd, buf, count);
     if (is_host && vshm && ret > 0)
-        host_wrote(fd);
+        host_wrote(fd, (uint64_t)ret);
     return ret;
 }
 
@@ -1306,7 +1474,7 @@ writev(int fd, const struct iovec *iov, int iovcnt)
 {
     ssize_t ret = REAL(writev)(fd, iov, iovcnt);
     if (is_host && vshm && ret > 0)
-        host_wrote(fd);
+        host_wrote(fd, (uint64_t)ret);
     return ret;
 }
 
@@ -1335,6 +1503,16 @@ sendmsg(int fd, const struct msghdr *msg, int flags)
     ssize_t ret = REAL(sendmsg)(fd, msg, flags);
     if (is_host && vshm && ret > 0)
         host_may_have_woken_a_thread();
+    return ret;
+}
+
+int
+openpty(int *amaster, int *aslave, char *name, const struct termios *termp,
+        const struct winsize *winp)
+{
+    int ret = REAL(openpty)(amaster, aslave, name, termp, winp);
+    if (ret == 0 && vshm && !is_host)
+        register_device_link(*amaster);
     return ret;
 }
 
