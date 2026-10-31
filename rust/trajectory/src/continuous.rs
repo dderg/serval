@@ -1236,6 +1236,9 @@ impl ClockedMotorSpan {
         self.signal.position(self.stream_time_at_clock(clock)?)
     }
 
+    // TODO(#424): a pressure-advance extruder stop parks with commanded velocity k·ë above
+    // REST_VELOCITY_MM_S. The drain knows it parked (Projection::mark_parked) but never tells
+    // the view, so this reports motion and the cursor samples that stop's end clock short of t_end.
     #[must_use]
     pub fn ends_at_rest(&self) -> bool {
         self.signal.is_explicit_hold

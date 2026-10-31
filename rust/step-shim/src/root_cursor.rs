@@ -254,7 +254,12 @@ impl StepRootCursor {
                 .as_ref()
                 .is_some_and(|overlay| Arc::ptr_eq(&overlay.signal, &view.signal));
             if !continues_signal {
-                let position = self.position_at(lane, signal_start)?;
+                let opening_t = if view.stream_t_start == view.signal.t_start {
+                    view.stream_t_start
+                } else {
+                    self.stream_time(lane, signal_start)?
+                };
+                let position = self.position_at_time(lane, opening_t)?;
                 self.overlay = Some(Overlay {
                     signal: Arc::clone(&view.signal),
                     lattice: Lattice {
@@ -822,8 +827,12 @@ impl StepRootCursor {
     }
 
     fn position_at(&self, lane: Lane, clock: u64) -> Result<f64, ShimError> {
-        EVAL_COUNT.with(|c| c.set(c.get() + 1));
         let t = self.stream_time(lane, clock)?;
+        self.position_at_time(lane, t)
+    }
+
+    fn position_at_time(&self, lane: Lane, t: f64) -> Result<f64, ShimError> {
+        EVAL_COUNT.with(|c| c.set(c.get() + 1));
         lane.view
             .signal
             .position(t)

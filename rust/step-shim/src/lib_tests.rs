@@ -1407,3 +1407,64 @@ fn a_constant_velocity_retract_after_a_cut_closes_on_the_extend_it_reverses() {
         }
     }
 }
+
+#[test]
+fn an_extend_and_retract_opened_on_their_epoch_cut_clocks_step_the_same_count() {
+    const MICROSTEP_MM: f64 = 7.73 / 3200.0;
+    const DISTANCE_MM: f64 = 5.0;
+    const SPEED_MM_S: f64 = 5.0;
+    const ACCEL_MM_S2: f64 = 1_000.0;
+    const NOMINAL_FREQ: f64 = 50_000_000.0;
+    const EPOCH_FREQ_STEP: f64 = 173e-6;
+    const EPOCH_FREQS: u32 = 12;
+    const EXTEND_CUT: u64 = 1_487_429_227;
+    let epoch_freq = |step: u32| NOMINAL_FREQ * (1.0 + f64::from(step) * EPOCH_FREQ_STEP);
+    let mut mismatches = Vec::new();
+    for extend_step in 0..EPOCH_FREQS {
+        for retract_step in 0..EPOCH_FREQS {
+            let (extend_freq, retract_freq) = (epoch_freq(extend_step), epoch_freq(retract_step));
+            let mut shim = seeded(
+                MotorConfig {
+                    cycles_per_second: extend_freq,
+                    microstep_distance: MICROSTEP_MM,
+                    ..cfg()
+                },
+                8,
+            );
+            shim.halt_at(0, EXTEND_CUT).unwrap();
+            let extend = nudge_on(
+                EXTEND_CUT,
+                DISTANCE_MM,
+                SPEED_MM_S,
+                ACCEL_MM_S2,
+                1,
+                extend_freq,
+            );
+            shim.push_spans(0, std::slice::from_ref(&extend)).unwrap();
+            let extended = net_steps(&shim.drain(extend.end_clock).unwrap());
+            let retract_cut = extend.end_clock + 60_000_000;
+            shim.halt_at(0, retract_cut).unwrap();
+            shim.set_motor_cycles_per_second(0, retract_freq);
+            let retract = nudge_on(
+                retract_cut,
+                -DISTANCE_MM,
+                SPEED_MM_S,
+                ACCEL_MM_S2,
+                1,
+                retract_freq,
+            );
+            shim.push_spans(0, std::slice::from_ref(&retract)).unwrap();
+            let retracted = net_steps(&shim.drain(retract.end_clock).unwrap());
+            if retracted != -extended {
+                mismatches.push((extend_freq, retract_freq, extended, retracted));
+            }
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "{} of {} epoch pairs retract a different count than they extend \
+         (extend freq, retract freq, extended, retracted): {mismatches:?}",
+        mismatches.len(),
+        EPOCH_FREQS * EPOCH_FREQS
+    );
+}
