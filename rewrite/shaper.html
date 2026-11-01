@@ -1938,10 +1938,13 @@ clothoid corner blending — and turns it into what each motor should actually
 be commanded to do. Everything the classic Klipper stack does after the
 trapezoid generator (input shaping, smoothers, pressure advance) lives here,
 unified under one model, plus things that stack cannot express.</p>
-<p>In the live host, <code>motion_pipeline::Pipeline</code> runs these four stages
-synchronously on <code>kalico-planning</code>. Snapshot generation uses the same
-coordinator. There are no interstage queues or dedicated stage threads;
-numerical parallel work within a stage remains.</p>
+<p>In the live host, fitting, planning and lowering run on <code>kalico-planning</code>,
+and the shaper runs on its own <code>kalico-shaper</code> thread
+(<code>motion_pipeline::StagedPipeline</code>). Lowered items reach it in order through
+a bounded inbox (<code>SHAPER_INBOX_CAP</code>), so a slow shaper backpressures planning
+and a barrier still acknowledges only after everything ahead of it has been
+shaped. Snapshot generation runs the same four stages synchronously through
+<code>motion_pipeline::Pipeline</code>; numerical parallel work within a stage remains.</p>
 <p>The core idea: <strong>resonance suppression and mechanical compensation are
 per-axis linear operators on the planned trajectory</strong>, and there are exactly
 two kinds worth having:</p>
