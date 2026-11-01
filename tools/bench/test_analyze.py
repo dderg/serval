@@ -30,11 +30,12 @@ G1 X10 E0.4 F3000
 
 
 def _block_alignments(
-    reference: analyze.Reference,
+    reference: analyze.Reference, idles_s: list[float] | None = None
 ) -> list[analyze.Alignment]:
     alignments = []
     capture_start = FIRST_EPOCH_CAPTURE_START_S
-    for block in reference.blocks:
+    idles = idles_s or [INTER_EPOCH_IDLE_S] * len(reference.blocks)
+    for block, idle_s in zip(reference.blocks, idles):
         first_step = min(
             ev.time[ev.time >= block.stream_offset_s].min()
             for ev in reference.events.values()
@@ -47,7 +48,7 @@ def _block_alignments(
         alignments.append(alignment)
         capture_start = (
             alignment.to_capture(block.stream_offset_s + block.duration_s)
-            + INTER_EPOCH_IDLE_S
+            + idle_s
         )
     return alignments
 
@@ -67,6 +68,7 @@ def _synthesize_capture(
     job: analyze.Job,
     reference: analyze.Reference,
     alignments: list[analyze.Alignment],
+    stalled: bool = True,
 ) -> np.ndarray:
     rng = np.random.default_rng(7)
     times = {}
@@ -74,7 +76,7 @@ def _synthesize_capture(
         events = reference.events[motor.role]
         t = _true_capture_times(reference, alignments, events)
         t = t + rng.uniform(-JITTER_US, JITTER_US, t.size) * 1e-6
-        if motor.role == "z":
+        if motor.role == "z" and stalled:
             t[STALLED_Z_STEPS] += STALL_S
         times[motor.role] = t
     last = max(t.max() for t in times.values())
@@ -412,3 +414,35 @@ def test_dropped_final_step_past_the_line_still_fails(tmp_path_factory):
     assert motor["unmatched_reference_steps"] == 1
     assert not verdict["checks"]["net_steps_match"]
     assert not verdict["checks"]["all_steps_matched"]
+
+
+def test_blocks_split_by_drain_commands_stay_separate_epochs_across_short_rests(
+    tmp_path,
+):
+    _require_snapshot_engine()
+    gcode = (BENCH_DIR / "gcode" / "epochs.gcode").read_text()
+    shutil.copy(BENCH_DIR / "printer.cfg", tmp_path / "printer.cfg")
+    (tmp_path / "print.gcode").write_text(
+        "SET_KINEMATIC_POSITION X=0 Y=0 Z=0\nG92 E0\n" + gcode
+    )
+    job = analyze.load_job(tmp_path)
+    reference = analyze.build_reference(job)
+    assert len(reference.blocks) == 6
+    rests_s = [0.32, 1.52, 0.02, 0.03, 0.12, 0.02]
+    assert min(rests_s[2:5]) < analyze.DEFAULT_EPOCH_GAP_S
+    alignments = _block_alignments(reference, rests_s)
+    _synthesize_capture(job, reference, alignments, stalled=False).tofile(
+        tmp_path / "capture.bin"
+    )
+    (tmp_path / "capture.json").write_text(
+        json.dumps({"tick_hz": TICK_HZ, "channel_count": 4})
+    )
+    verdict, _ = analyze.analyze(analyze.load_run(tmp_path))
+    assert verdict["ok"], verdict["checks"]
+    assert len(verdict["epochs"]) == 6
+    for epoch, truth in zip(verdict["epochs"], alignments):
+        recovered = analyze.Alignment(epoch["offset_s"], epoch["ppm"], True)
+        start = epoch["stream_start_s"]
+        assert recovered.to_capture(start) == pytest.approx(
+            truth.to_capture(start), abs=20e-6
+        )

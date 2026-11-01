@@ -719,6 +719,38 @@ def find_epochs(events: dict[str, StepEvents], gap_s: float) -> list[Epoch]:
     return [Epoch(float(s), float(e)) for s, e in zip(starts, ends)]
 
 
+def split_epochs_by_reference_counts(
+    capture_events: dict[str, StepEvents],
+    capture_epochs: list[Epoch],
+    reference_events: dict[str, StepEvents],
+    reference_epochs: list[Epoch],
+) -> list[Epoch]:
+    if len(capture_epochs) >= len(reference_epochs):
+        return capture_epochs
+    capture_times = np.sort(
+        np.concatenate([e.time for e in capture_events.values()])
+    )
+    reference_times = np.concatenate(
+        [e.time for e in reference_events.values()]
+    )
+    counts = [
+        int(
+            np.count_nonzero(
+                (reference_times >= ref.start_s)
+                & (reference_times <= ref.end_s)
+            )
+        )
+        for ref in reference_epochs
+    ]
+    if sum(counts) != capture_times.size:
+        return capture_epochs
+    bounds = np.concatenate(([0], np.cumsum(counts)))
+    return [
+        Epoch(float(capture_times[lo]), float(capture_times[hi - 1]))
+        for lo, hi in zip(bounds[:-1], bounds[1:])
+    ]
+
+
 def _describe_epochs(epochs: list[Epoch]) -> str:
     return ", ".join(f"[{e.start_s:.3f}s +{e.duration_s:.3f}s]" for e in epochs)
 
@@ -1175,8 +1207,15 @@ def align_all(
     reference: Reference,
     gap_s: float,
 ) -> list[EpochResult]:
+    reference_epochs = find_epochs(reference.events, gap_s)
     pairs = pair_epochs(
-        find_epochs(capture_events, gap_s), find_epochs(reference.events, gap_s)
+        split_epochs_by_reference_counts(
+            capture_events,
+            find_epochs(capture_events, gap_s),
+            reference.events,
+            reference_epochs,
+        ),
+        reference_epochs,
     )
     steps = [
         epoch_steps(capture_events, reference.events, cap, ref)
