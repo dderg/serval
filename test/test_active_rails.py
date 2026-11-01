@@ -61,6 +61,7 @@ def test_cartesian_rails_are_independent():
 
 class FakeToolhead(FakeToolheadBase):
     _fire_active_callbacks = Motion._fire_active_callbacks
+    _enable_window = Motion._enable_window
 
     def __init__(self, kin, follower_steppers=()):
         super().__init__(
@@ -70,16 +71,24 @@ class FakeToolhead(FakeToolheadBase):
             move_time_step=0.090,
         )
 
+    def _schedule_floor(self):
+        return self._last_move_time
+
+    def _earliest_move_start(self):
+        self.calls.append(("_earliest_move_start",))
+        self._last_move_time += self._move_time_step
+        return self._last_move_time
+
     @property
     def move_time_calls(self):
-        return sum(1 for c in self.calls if c[0] == "get_last_move_time")
+        return sum(1 for c in self.calls if c[0] == "_earliest_move_start")
 
 
 def arm_callbacks(steppers):
     fired = []
     for stepper in steppers:
         name = stepper.get_name()
-        stepper.add_active_callback(lambda print_time, n=name: fired.append(n))
+        stepper.add_active_callback(lambda *window, n=name: fired.append(n))
     return fired
 
 
@@ -91,7 +100,7 @@ def test_all_enable_callbacks_share_one_print_time():
     kin = make_kin("corexy")
     fired = []
     for s in all_steppers(kin):
-        s.add_active_callback(fired.append)
+        s.add_active_callback(lambda *window: fired.append(window))
     th = FakeToolhead(kin)
     th._fire_active_callbacks((5.0, 5.0, 5.0, 0.0))
     assert len(fired) == 6

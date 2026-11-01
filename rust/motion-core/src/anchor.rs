@@ -93,10 +93,19 @@ enum AnchorClass {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StartBeforeClaim {
+    pub start_host: f64,
+    pub claimed_host: f64,
+}
+
 pub struct Anchor {
     t0: Option<f64>,
     last_t_end: f64,
     parked: bool,
+    stream_end: f64,
+    claimed_start_host: f64,
+    held_start_host: f64,
 }
 
 impl Anchor {
@@ -105,7 +114,50 @@ impl Anchor {
             t0: None,
             last_t_end: 0.0,
             parked: true,
+            stream_end: 0.0,
+            claimed_start_host: f64::NEG_INFINITY,
+            held_start_host: f64::NEG_INFINITY,
         }
+    }
+
+    fn epoch_of(class: AnchorClass) -> Option<StreamEpoch> {
+        match class {
+            AnchorClass::Reposition => Some(StreamEpoch::Reposition),
+            AnchorClass::Continuation { .. } => Some(StreamEpoch::Continuation),
+            AnchorClass::IdleResume { .. } => Some(StreamEpoch::Reanchor),
+            AnchorClass::Rejoin { .. } => Some(StreamEpoch::Rejoin),
+            AnchorClass::HoleMidMotionFatal { .. }
+            | AnchorClass::UnderrunFatal { .. }
+            | AnchorClass::LowMarginFatal { .. } => None,
+        }
+    }
+
+    pub fn planned_start(&self, seg_t_start: f64, host_now: f64) -> Option<(f64, StreamEpoch)> {
+        let epoch = Self::epoch_of(self.classify(seg_t_start, host_now))?;
+        let natural_t0 = if epoch.retimed() {
+            host_now + DEFAULT_LEAD_SECS - seg_t_start
+        } else {
+            self.t0.expect("a continuing stream is anchored")
+        };
+        if natural_t0 + seg_t_start >= self.held_start_host {
+            return Some((natural_t0, epoch));
+        }
+        let held_epoch = if epoch.position_redefined() {
+            StreamEpoch::Reposition
+        } else {
+            StreamEpoch::Reanchor
+        };
+        Some((self.held_start_host - seg_t_start, held_epoch))
+    }
+
+    pub fn start_verdict(&self, start_host: f64) -> Result<(), StartBeforeClaim> {
+        if start_host + CONTIGUITY_EPS < self.claimed_start_host {
+            return Err(StartBeforeClaim {
+                start_host,
+                claimed_host: self.claimed_start_host,
+            });
+        }
+        Ok(())
     }
 
     /// The anchor's verdict for a segment, before any side effect (logging,
@@ -169,9 +221,10 @@ impl Anchor {
         seg_t_end: f64,
         host_now: f64,
     ) -> (f64, StreamEpoch) {
-        let epoch = match self.classify(seg_t_start, host_now) {
-            AnchorClass::Reposition => StreamEpoch::Reposition,
-            AnchorClass::Continuation { .. } => StreamEpoch::Continuation,
+        match self.classify(seg_t_start, host_now) {
+            AnchorClass::Reposition
+            | AnchorClass::Continuation { .. }
+            | AnchorClass::Rejoin { .. } => {}
             AnchorClass::IdleResume { margin_s } => {
                 tracing::info!(
                     subsystem = "motion",
@@ -181,20 +234,6 @@ impl Anchor {
                     lead_secs = DEFAULT_LEAD_SECS,
                     "[anchor] resuming from rest across an idle gap — re-anchoring forward"
                 );
-                StreamEpoch::Reanchor
-            }
-            AnchorClass::Rejoin { hole_s, margin_s } => {
-                tracing::info!(
-                    subsystem = "motion",
-                    event = "anchor_rejoin",
-                    hole_s,
-                    margin_s,
-                    seg_t_start,
-                    "[anchor] stream time jumped a drained-to-rest hole \
-                     (dwell) — keeping the standing anchor, cutting \
-                     downstream seams"
-                );
-                StreamEpoch::Rejoin
             }
             AnchorClass::HoleMidMotionFatal { hole_s } => {
                 tracing::error!(
@@ -249,15 +288,26 @@ impl Anchor {
                      transport floor at seg_t_start={seg_t_start:.6}"
                 ));
             }
-        };
-
+        }
+        let (t0, epoch) = self
+            .planned_start(seg_t_start, host_now)
+            .expect("every non-fatal class plans a start");
+        if epoch == StreamEpoch::Rejoin {
+            tracing::info!(
+                subsystem = "motion",
+                event = "anchor_rejoin",
+                hole_s = seg_t_start - self.last_t_end,
+                seg_t_start,
+                "[anchor] stream time jumped a drained-to-rest hole \
+                 (dwell) — keeping the standing anchor, cutting \
+                 downstream seams"
+            );
+        }
         if epoch.retimed() {
             let condition = match self.t0 {
                 None => "first",
                 Some(_) => "reanchor",
             };
-            self.t0 = Some(host_now + DEFAULT_LEAD_SECS - seg_t_start);
-            let t0 = self.t0.unwrap();
             tracing::info!(
                 subsystem = "motion",
                 event = "anchor_decision",
@@ -266,14 +316,74 @@ impl Anchor {
                 seg_t_start,
                 seg_t_end,
                 lead_secs = DEFAULT_LEAD_SECS,
+                held_start_host = self.held_start_host,
                 last_t_end = self.last_t_end,
                 condition,
                 "[anchor-decision] fresh anchor"
             );
         }
+        if let Err(StartBeforeClaim {
+            start_host,
+            claimed_host,
+        }) = self.start_verdict(t0 + seg_t_start)
+        {
+            tracing::error!(
+                subsystem = "motion",
+                event = "anchor_start_before_claim",
+                start_host,
+                claimed_host,
+                seg_t_start,
+                "[anchor] segment starts before a claimed earliest start"
+            );
+            crate::worker::fatal(&format!(
+                "segment starts at host {start_host:.6}, {:.6}s before the claimed \
+                 earliest start {claimed_host:.6}: a motor energized for it would \
+                 step before its enable",
+                claimed_host - start_host
+            ));
+        }
+        self.t0 = Some(t0);
         self.last_t_end = seg_t_end;
+        self.stream_end = seg_t_end;
         self.parked = false;
-        (self.t0.unwrap(), epoch)
+        self.held_start_host = f64::NEG_INFINITY;
+        (t0, epoch)
+    }
+
+    pub fn claim_earliest_start(&mut self, host_now: f64) -> Result<f64, String> {
+        let natural = match self.classify(self.stream_end, host_now) {
+            AnchorClass::Reposition | AnchorClass::IdleResume { .. } => {
+                host_now + DEFAULT_LEAD_SECS
+            }
+            AnchorClass::Continuation { .. } | AnchorClass::Rejoin { .. } => {
+                self.t0.expect("a continuing stream is anchored") + self.stream_end
+            }
+            lost => {
+                return Err(format!(
+                    "no move can be scheduled: the stream already lost continuous \
+                     motion at stream time {:.6} ({lost:?})",
+                    self.stream_end
+                ));
+            }
+        };
+        let earliest = natural.max(self.held_start_host);
+        self.claimed_start_host = self.claimed_start_host.max(earliest);
+        Ok(earliest)
+    }
+
+    pub fn hold_start_until(&mut self, host_s: f64) -> Result<(), String> {
+        if !self.parked {
+            return Err(format!(
+                "cannot hold the next start until host {host_s:.6}: the stream is in motion"
+            ));
+        }
+        self.held_start_host = self.held_start_host.max(host_s);
+        self.claimed_start_host = self.claimed_start_host.max(host_s);
+        Ok(())
+    }
+
+    pub fn follow_stream_to(&mut self, stream_t: f64) {
+        self.stream_end = stream_t;
     }
 
     /// The stream drained: everything committed is planned to rest and the

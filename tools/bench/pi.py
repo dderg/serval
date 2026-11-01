@@ -101,6 +101,34 @@ def firmware_restart() -> None:
     wait_ready()
 
 
+DEPLOY_RECORD = "klipper/.bench-deploy.json"
+
+
+def write_deployed(identity: dict) -> None:
+    result = subprocess.run(
+        ["ssh", PI_SSH, f"cat > {DEPLOY_RECORD}"],
+        input=json.dumps(identity, indent=2),
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise BenchError(f"writing {DEPLOY_RECORD} failed:\n{result.stderr}")
+
+
+def read_deployed() -> dict:
+    return json.loads(ssh(f"cat {DEPLOY_RECORD}"))
+
+
+def klipper_pid() -> int:
+    return int(ssh("systemctl show -p MainPID --value klipper").strip())
+
+
+def restart_klipper() -> None:
+    ssh("sudo systemctl restart klipper")
+    time.sleep(2)
+    wait_ready()
+
+
 def ssh(command: str) -> str:
     result = subprocess.run(
         ["ssh", PI_SSH, command], capture_output=True, text=True
@@ -132,22 +160,20 @@ def validate_config(text: str) -> None:
             reason = FORBIDDEN_PINS.get(pin.upper())
             if reason:
                 raise BenchError(
-                    f"printer.cfg line {number}: pin {pin.upper()} is forbidden ({reason})"
+                    f"config line {number}: pin {pin.upper()} is forbidden ({reason})"
                 )
 
 
-def push_config() -> bool:
-    text = REPO_CFG.read_text()
+def push_config(config: Path = REPO_CFG) -> bool:
+    text = config.read_text()
     validate_config(text)
     if ssh(f"cat {PI_CONFIG}") == text:
         return False
-    scp_to_pi(REPO_CFG, PI_CONFIG)
+    scp_to_pi(config, PI_CONFIG)
     return True
 
 
-def prepare_printer() -> None:
-    state = printer_state()
-    if state != "ready":
-        raise BenchError(f"printer state is {state!r}, expected 'ready'")
-    push_config()
+def prepare_printer(config: Path = REPO_CFG) -> None:
+    wait_ready()
+    push_config(config)
     firmware_restart()

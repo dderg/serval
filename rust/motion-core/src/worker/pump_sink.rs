@@ -307,8 +307,8 @@ impl Projection {
     }
 
     fn anchor(&self, t_start: f64, t_end: f64, drip_active: bool) -> AnchorPoint {
-        let host_now = self.host_now();
         let mut anchor = self.anchor.lock_ok();
+        let host_now = self.host_now();
         let rest_from_host = anchor.committed_end_host();
         let (t0, epoch) = anchor.anchor_segment(t_start, t_end, host_now);
         AnchorPoint {
@@ -540,6 +540,10 @@ impl<S: crate::pump::SpanSink> SegmentSink for PumpSink<'_, S> {
 
     fn mark_parked(&mut self) {
         self.projection.mark_parked();
+    }
+
+    fn follow_stream_to(&mut self, stream_t: f64) {
+        self.projection.anchor.lock_ok().follow_stream_to(stream_t);
     }
 }
 

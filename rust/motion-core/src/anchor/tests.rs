@@ -323,3 +323,154 @@ fn parked_continuation_with_ample_margin_keeps_the_standing_anchor() {
         "no pause is inserted while the margin is healthy"
     );
 }
+
+struct NextSegment {
+    seg_t_start: f64,
+    host_now: f64,
+}
+
+fn claim_then_dispatch(mut a: Anchor, claim_host: f64, next: NextSegment) -> (f64, f64) {
+    let claimed = a
+        .claim_earliest_start(claim_host)
+        .expect("a healthy stream answers the claim");
+    let (t0, _) = a.anchor_segment(next.seg_t_start, next.seg_t_start + 1.0, next.host_now);
+    (claimed, t0 + next.seg_t_start)
+}
+
+#[test]
+fn a_claimed_start_never_follows_the_next_dispatched_segment() {
+    let primed_end_host = 100.0 + DEFAULT_LEAD_SECS + 1.0;
+    let after_dwell = {
+        let mut a = primed(true);
+        a.follow_stream_to(1.5);
+        a
+    };
+    let after_reset = {
+        let mut a = Anchor::new();
+        a.anchor_segment(0.0, 5.0, 100.0);
+        a.follow_stream_to(0.0);
+        a
+    };
+    let cases = [
+        (
+            "never anchored",
+            Anchor::new(),
+            100.0,
+            NextSegment {
+                seg_t_start: 0.0,
+                host_now: 100.01,
+            },
+        ),
+        (
+            "mid-motion",
+            primed(false),
+            100.5,
+            NextSegment {
+                seg_t_start: 1.0,
+                host_now: 100.6,
+            },
+        ),
+        (
+            "parked, margin decays below the rest floor before the resume",
+            primed(true),
+            primed_end_host - 0.2,
+            NextSegment {
+                seg_t_start: 1.0,
+                host_now: primed_end_host - 0.1,
+            },
+        ),
+        (
+            "parked inside the rest floor",
+            primed(true),
+            primed_end_host - 0.1,
+            NextSegment {
+                seg_t_start: 1.0,
+                host_now: primed_end_host - 0.09,
+            },
+        ),
+        (
+            "dwell after a park",
+            after_dwell,
+            100.3,
+            NextSegment {
+                seg_t_start: 1.5,
+                host_now: 100.35,
+            },
+        ),
+        (
+            "reset discarded a timeline far ahead of the playhead",
+            after_reset,
+            101.0,
+            NextSegment {
+                seg_t_start: 0.0,
+                host_now: 101.01,
+            },
+        ),
+    ];
+    for (name, anchor, claim_host, next) in cases {
+        let (claimed, start) = claim_then_dispatch(anchor, claim_host, next);
+        assert!(
+            claimed <= start + CONTIGUITY_EPS,
+            "{name}: claimed earliest start {claimed} follows the next segment's start {start}"
+        );
+        assert!(
+            claimed >= claim_host + LOW_MARGIN_WARN_SECS,
+            "{name}: claimed start {claimed} is not ahead of the playhead {claim_host}"
+        );
+    }
+}
+
+#[test]
+fn a_claim_on_a_stream_already_too_late_to_continue_is_an_error() {
+    let mut a = primed(false);
+    let committed_end_host = 100.0 + DEFAULT_LEAD_SECS + 1.0;
+    let claim = a.claim_earliest_start(committed_end_host - 0.5 * LOW_MARGIN_WARN_SECS);
+    assert!(
+        claim.is_err(),
+        "a mid-motion stream inside the transport floor cannot start anything \
+         on time, got {claim:?}"
+    );
+}
+
+#[test]
+fn a_segment_starting_before_a_claim_is_rejected_by_the_verdict() {
+    let mut a = primed(true);
+    a.follow_stream_to(1.5);
+    let claimed = a
+        .claim_earliest_start(100.3)
+        .expect("parked stream answers");
+    let (t0, _) = a
+        .planned_start(1.0, 100.35)
+        .expect("a parked continuation is plannable");
+    assert_eq!(
+        a.start_verdict(t0 + 1.0),
+        Err(StartBeforeClaim {
+            start_host: t0 + 1.0,
+            claimed_host: claimed,
+        })
+    );
+    assert_eq!(a.start_verdict(claimed), Ok(()));
+}
+
+#[test]
+fn a_hold_moves_a_parked_resume_forward_to_the_held_instant() {
+    let mut a = primed(true);
+    let committed_end_host = 100.0 + DEFAULT_LEAD_SECS + 1.0;
+    let held = committed_end_host + 0.5;
+    a.hold_start_until(held)
+        .expect("a parked stream can be held");
+    assert!(a.claim_earliest_start(100.3).unwrap() >= held);
+    let (t0, epoch) = a.anchor_segment(1.0, 2.0, 100.35);
+    assert_eq!(epoch, StreamEpoch::Reanchor);
+    assert!(
+        (t0 + 1.0 - held).abs() < 1e-9,
+        "start {} vs hold {held}",
+        t0 + 1.0
+    );
+}
+
+#[test]
+fn a_hold_on_a_stream_in_motion_is_refused() {
+    let mut a = primed(false);
+    assert!(a.hold_start_until(100.0 + DEFAULT_LEAD_SECS + 2.0).is_err());
+}

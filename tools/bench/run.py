@@ -1,6 +1,8 @@
 """Run one sanitized gcode print on the bench while capturing STEP/DIR.
 
 uv run python tools/bench/run.py <gcode> [--runs-dir ~/bench/runs]
+    [--config tools/bench/configs/fast.cfg]
+    [--host-cpus N] [--host-max-mhz M]
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 import lock
+import throttle
 from capture import Capture
 from pi import (
     PI_LOGS,
@@ -21,6 +24,8 @@ from pi import (
     BenchError,
     http,
     prepare_printer,
+    printer_state,
+    read_deployed,
     scp_from_pi,
     upload,
 )
@@ -39,6 +44,11 @@ ALLOWED = {
     "M82",
     "M83",
     "M400",
+    "M18",
+    "M84",
+    "FORCE_MOVE",
+    "SET_STEPPER_ENABLE",
+    "SET_KINEMATIC_POSITION",
 }
 DROPPED = {"M104", "M109", "M140", "M190", "M106", "M107", "M73", "G28"}
 PREAMBLE = ["SET_KINEMATIC_POSITION X=0 Y=0 Z=0", "G92 E0"]
@@ -77,6 +87,9 @@ def poll_print(capture: Capture, timeout_s: float) -> dict:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         capture.check()
+        state = printer_state()
+        if state != "ready":
+            raise BenchError(f"klippy entered state {state!r} during the print")
         stats = print_stats()
         if stats["state"] in TERMINAL_STATES:
             return stats
@@ -84,24 +97,41 @@ def poll_print(capture: Capture, timeout_s: float) -> dict:
     raise BenchError(f"print did not finish within {timeout_s}s")
 
 
-def run(gcode: Path, runs_dir: Path, timeout_s: float) -> Path:
+def run(
+    gcode: Path,
+    runs_dir: Path,
+    timeout_s: float,
+    config: Path = REPO_CFG,
+    host_throttle: throttle.Throttle | None = None,
+) -> Path:
     lines, stats = sanitize(gcode.read_text())
     run_dir = runs_dir / datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir(parents=True)
     sanitized = ("\n".join(lines) + "\n").encode()
     (run_dir / "print.gcode").write_bytes(sanitized)
-    (run_dir / "printer.cfg").write_text(REPO_CFG.read_text())
+    (run_dir / "printer.cfg").write_text(config.read_text())
 
-    prepare_printer()
+    deployed = read_deployed()
+    prepare_printer(config)
     remote_name = f"bench_{run_dir.name}.gcode"
     upload(remote_name, sanitized)
-
-    capture = Capture(run_dir, both_edges_mask=0)
     summary: dict = {
         "source_gcode": str(gcode.resolve()),
+        "config": str(config.resolve()),
+        "deployed": deployed,
         "sanitized_lines": len(lines),
         **stats,
     }
+    with throttle.throttled(host_throttle) as applied_throttle:
+        summary["host_throttle"] = applied_throttle
+        execute(run_dir, remote_name, summary, timeout_s)
+    return run_dir
+
+
+def execute(
+    run_dir: Path, remote_name: str, summary: dict, timeout_s: float
+) -> None:
+    capture = Capture(run_dir, both_edges_mask=0)
     final: dict = {}
     failure: BaseException | None = None
     started = time.time()
@@ -139,7 +169,6 @@ def run(gcode: Path, runs_dir: Path, timeout_s: float) -> Path:
         raise BenchError(
             f"print ended in state {final['state']!r}: {final.get('message')}"
         )
-    return run_dir
 
 
 def main() -> None:
@@ -149,10 +178,21 @@ def main() -> None:
         "--runs-dir", type=Path, default=Path("~/bench/runs").expanduser()
     )
     parser.add_argument("--timeout", type=float, default=1800.0)
+    parser.add_argument("--config", type=Path, default=REPO_CFG)
+    parser.add_argument("--host-cpus", type=int)
+    parser.add_argument("--host-max-mhz", type=int)
     lock.add_timeout_argument(parser)
     args = parser.parse_args()
     with lock.bench_lock(args.lock_timeout):
-        print(run(args.gcode, args.runs_dir.expanduser(), args.timeout))
+        print(
+            run(
+                args.gcode,
+                args.runs_dir.expanduser(),
+                args.timeout,
+                args.config,
+                throttle.Throttle(args.host_cpus, args.host_max_mhz),
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -5,32 +5,48 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
 
+from klippy.gcode import CommandError
+
 DISABLE_STALL_TIME = 0.100
 
 
-# Tracking of shared stepper enable pins
 class StepperEnablePin:
     def __init__(self, mcu_enable, enable_count):
         self.mcu_enable = mcu_enable
         self.enable_count = enable_count
         self.is_dedicated = True
+        self.last_switch_time = float("-inf")
+
+    def _switch(self, print_time, value):
+        if print_time < self.last_switch_time:
+            raise CommandError(
+                "stepper enable pin switched to %d at print_time %.6f,"
+                " before its pending %s at %.6f"
+                % (
+                    value,
+                    print_time,
+                    "disable" if value else "enable",
+                    self.last_switch_time,
+                )
+            )
+        self.last_switch_time = print_time
+        return self.mcu_enable.set_digital(print_time, value)
 
     def set_enable(self, print_time):
         wait = None
         if not self.enable_count:
-            wait = self.mcu_enable.set_digital(print_time, 1)
+            wait = self._switch(print_time, 1)
         self.enable_count += 1
         return wait
 
     def set_disable(self, print_time):
+        if self.enable_count == 1:
+            self._switch(print_time, 0)
         self.enable_count -= 1
-        if not self.enable_count:
-            self.mcu_enable.set_digital(print_time, 0)
 
 
 def setup_enable_pin(printer, pin):
     if pin is None:
-        # No enable line (stepper always enabled)
         enable = StepperEnablePin(None, 9999)
         enable.is_dedicated = False
         return enable
@@ -40,7 +56,6 @@ def setup_enable_pin(printer, pin):
     )
     enable = pin_params.get("class")
     if enable is not None:
-        # Shared enable line
         enable.is_dedicated = False
         return enable
     mcu_enable = pin_params["chip"].setup_pin("digital_out", pin_params)
@@ -49,7 +64,6 @@ def setup_enable_pin(printer, pin):
     return enable
 
 
-# Enable line tracking for each stepper motor
 class EnableTracking:
     def __init__(self, stepper, enable):
         self.stepper = stepper
@@ -61,9 +75,16 @@ class EnableTracking:
     def register_state_callback(self, callback):
         self.callbacks.append(callback)
 
-    def energize(self, print_time):
+    def energize(self, earliest, latest):
         if self.is_enabled:
             return None
+        print_time = max(earliest, self.enable.last_switch_time)
+        if print_time > latest:
+            raise CommandError(
+                "%s cannot be enabled before its move: the enable pin's last"
+                " switch is at print_time %.6f, the move may start at %.6f"
+                % (self.stepper.get_name(), print_time, latest)
+            )
         wait = self.enable.set_enable(print_time)
         self.is_enabled = True
 
@@ -76,13 +97,12 @@ class EnableTracking:
         return notify_state_callbacks
 
     def motor_enable(self, print_time):
-        notify = self.energize(print_time)
+        notify = self.energize(print_time, print_time)
         if notify is not None:
             notify()
 
     def motor_disable(self, print_time):
         if self.is_enabled:
-            # Enable stepper on future stepper movement
             for cb in self.callbacks:
                 cb(print_time, False)
             self.enable.set_disable(print_time)
@@ -96,7 +116,6 @@ class EnableTracking:
         return self.enable.is_dedicated
 
 
-# Global stepper enable line tracking
 class PrinterStepperEnable:
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -104,7 +123,6 @@ class PrinterStepperEnable:
         self.printer.register_event_handler(
             "gcode:request_restart", self._handle_request_restart
         )
-        # Register M18/M84 commands
         gcode = self.printer.lookup_object("gcode")
         gcode.register_command("M18", self.cmd_M18)
         gcode.register_command("M84", self.cmd_M18)
@@ -128,7 +146,7 @@ class PrinterStepperEnable:
         for el in self.enable_lines.values():
             el.motor_disable(print_time)
         self.printer.send_event("stepper_enable:motor_off", print_time)
-        toolhead.dwell(DISABLE_STALL_TIME)
+        toolhead.dwell_until(print_time + DISABLE_STALL_TIME)
 
     def motor_debug_enable(self, stepper, enable):
         toolhead = self.printer.lookup_object("toolhead")
@@ -143,7 +161,7 @@ class PrinterStepperEnable:
             print_time = toolhead.get_last_move_time()
             el.motor_disable(print_time)
             logging.info("%s has been manually disabled", stepper)
-        toolhead.dwell(DISABLE_STALL_TIME)
+        toolhead.dwell_until(print_time + DISABLE_STALL_TIME)
 
     def motor_enable_group(self, stepper_names):
         toolhead = self.printer.lookup_object("toolhead")
@@ -152,13 +170,15 @@ class PrinterStepperEnable:
         shared_print_time = toolhead.get_last_move_time()
         notifiers = []
         for name in stepper_names:
-            notify = self.enable_lines[name].energize(shared_print_time)
+            notify = self.enable_lines[name].energize(
+                shared_print_time, shared_print_time
+            )
             if notify is not None:
                 notifiers.append(notify)
             logging.info("%s enabled", name)
         for notify in notifiers:
             notify()
-        toolhead.dwell(DISABLE_STALL_TIME)
+        toolhead.dwell_until(shared_print_time + DISABLE_STALL_TIME)
 
     def get_status(self, eventtime):
         steppers = {
@@ -171,7 +191,6 @@ class PrinterStepperEnable:
         self.motor_off()
 
     def cmd_M18(self, gcmd):
-        # Turn off motors
         self.motor_off()
 
     cmd_SET_STEPPER_ENABLE_help = "Enable/disable individual stepper by name"

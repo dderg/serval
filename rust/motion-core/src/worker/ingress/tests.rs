@@ -16,7 +16,7 @@ fn a_slow_drain_reserves_runway_for_repeating_it_even_after_a_faster_drain() {
         ),
         output: output_tx,
         links: Arc::default(),
-        frontier: Arc::default(),
+        timeline: crate::worker::tests::idle_timeline(Arc::default()),
         undrained_since: Some(Instant::now()),
         worst_drain_s: 0.0,
         last_line: 0,
@@ -50,6 +50,7 @@ fn a_slow_drain_reserves_runway_for_repeating_it_even_after_a_faster_drain() {
     assert!(ingress.reserve_secs() >= widened);
 
     ingress
+        .timeline
         .frontier
         .advance_to(Instant::now() + Duration::from_millis(250));
     ingress.undrained_since = Some(Instant::now() - Duration::from_secs(1));

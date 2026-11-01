@@ -157,6 +157,44 @@ impl PyMotionEngine {
         )?))
     }
 
+    fn claim_earliest_start(&self) -> PyResult<Option<u64>> {
+        let guard = self.planner.lock_ok();
+        let planner = guard.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("planner not initialized — call init_planner first")
+        })?;
+        match planner.claim_earliest_start() {
+            Ok(id) => Ok(Some(id)),
+            Err(motion_core::worker::StreamWorkerError::ChannelFull) => Ok(None),
+            Err(e) => Err(planner_err(e)),
+        }
+    }
+
+    fn earliest_start_print_time_poll(&self, id: u64, mcu_handle: u32) -> PyResult<Option<f64>> {
+        let taken = {
+            let guard = self.planner.lock_ok();
+            let planner = guard.as_ref().ok_or_else(|| {
+                PyRuntimeError::new_err("planner not initialized — call init_planner first")
+            })?;
+            planner.take_earliest_start(id)
+        };
+        let Some(claim) = taken else {
+            return Ok(None);
+        };
+        let earliest_host = claim.map_err(PyRuntimeError::new_err)?;
+        let mcu = McuHandle::from_raw(mcu_handle);
+        let print_time = self
+            .router
+            .lock_ok()
+            .print_time_at_host(mcu, HostSecs::from_anchor_frame(earliest_host))
+            .ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "earliest_start_print_time_poll: no clock estimate established for \
+                     mcu_handle {mcu_handle}"
+                ))
+            })?;
+        Ok(Some(print_time.get()))
+    }
+
     /// Absolute print_time at which everything committed to the MCUs ends —
     /// segments, dwells, and nudges alike. This is the engine's own frontier;
     /// it replaces the host-side shadow clock that used to approximate it.

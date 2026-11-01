@@ -55,6 +55,7 @@ pub(crate) trait SegmentSink {
     /// The committed trajectory is planned to rest through its end; a resume
     /// across the idle gap that follows may re-anchor the timeline forward.
     fn mark_parked(&mut self) {}
+    fn follow_stream_to(&mut self, stream_t: f64);
 }
 
 #[derive(Default)]
@@ -67,6 +68,7 @@ pub(crate) struct WorkerLinks {
     pub(crate) shutting_down: AtomicBool,
     pub(crate) last_move_time_bits: AtomicU64,
     pub(crate) fences: crate::fence::FenceRegistry,
+    pub(crate) start_claims: super::StartClaims,
     pub(crate) wakeup: crate::feed_wakeup::FeedWakeup,
 }
 
@@ -94,6 +96,7 @@ pub(crate) struct Dispatcher {
     links: Arc<WorkerLinks>,
     frontier: Arc<CommittedFrontier>,
     dispatched_through: Option<f64>,
+    stream_time: f64,
     pending_error: Option<String>,
     terminal_halt: Option<String>,
 }
@@ -104,6 +107,7 @@ impl Dispatcher {
             links,
             frontier,
             dispatched_through: None,
+            stream_time: 0.0,
             pending_error: None,
             terminal_halt: None,
         }
@@ -139,6 +143,7 @@ impl Dispatcher {
         match sink.dispatch(seg) {
             Ok(()) => {
                 self.dispatched_through = Some(seg.t_end);
+                self.stream_time = seg.t_end;
                 self.publish_progress(seg.t_end);
                 if self.links.fences.on_dispatch(seg.source_line, seg.t_end) {
                     self.links.wakeup.notify_fence_resolved();
@@ -189,8 +194,12 @@ impl Dispatcher {
                 self.links
                     .last_move_time_bits
                     .store(0.0_f64.to_bits(), Ordering::Release);
+                self.stream_time = 0.0;
+                sink.follow_stream_to(self.stream_time);
             }
             Control::Dwell { secs } => {
+                self.stream_time += secs;
+                sink.follow_stream_to(self.stream_time);
                 if let Some(t) = &mut self.dispatched_through {
                     *t += secs;
                     self.links
