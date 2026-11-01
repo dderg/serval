@@ -596,7 +596,9 @@ stepper_classic_halt(struct stepper *s)
     }
     sched_wake_task(&barrier_ack_wake);
     gpio_out_write(s->dir_pin, 0);
-    gpio_out_write(s->step_pin, s->step_idle_level);
+    if (!(s->flags & SF_SINGLE_SCHED)
+        || (HAVE_AVR_OPTIMIZATION && s->flags & SF_OPTIMIZED_PATH))
+        gpio_out_write(s->step_pin, s->step_idle_level);
 }
 
 uint8_t
