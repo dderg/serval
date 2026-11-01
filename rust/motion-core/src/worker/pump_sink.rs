@@ -460,7 +460,9 @@ impl Projection {
             self.log_seg0_lead(std::iter::once(mcu_id), seam_host, at.t0);
         }
 
-        let epoch_freq = fresh_projection.then(|| self.frozen_epoch(mcu_id).freq);
+        let epoch_freq = (fresh_projection
+            || (at.epoch.is_fresh() && self.freezes_projection(mcu_id)))
+        .then(|| self.frozen_epoch(mcu_id).freq);
         let signal = MotorSpan::try_new(
             Arc::from(vec![MotorGroup::Independent(MotorTerm {
                 source_axis: axis_idx,
