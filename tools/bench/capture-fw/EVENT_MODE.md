@@ -1,6 +1,6 @@
 # Event mode: sub-µs step timestamps
 
-Status: design only, nothing implemented. Count mode (`SVC1`, 40 kHz i8 deltas) stays as it is. Event mode is a second mode, chosen per run with the start command.
+Status: firmware event mode, `capture.py --events` / `run.py --events`, the SVE1 decoder (`tools/bench/capture_events.py`), analyzer ingest and `tools/bench/buzz.py` are implemented and passed Gates 0 and 1 (results below). The host step tap is designed but not built. Count mode (`SVC1`, 40 kHz i8 deltas) is unchanged; event mode is a second mode, chosen per run with the start command (`E` + both-edges mask).
 
 ## Goal
 
@@ -8,7 +8,7 @@ Timestamp every STEP and DIR edge on all four channels at ≤100 ns resolution, 
 
 ## The reference problem: precise capture alone is not enough
 
-The F401 does not execute the ideal trajectory. It executes the classic `queue_step` schedule. That schedule is compressed with `stepcompress_max_error` = 25 µs (`klippy/mcu.py:30`; `max_error_ticks` in `rust/motion-core/src/pump/stepcompress_sink.rs:150-169`). Measured against `analyze.py`'s ideal reference, a perfect capture therefore still shows up to ±25 µs error. That is design, and it is most of the 13–25 µs p99 we see today. To see MCU errors of 0.2–7 µs, the capture must be compared with the **commanded** step clocks:
+The F401 does not execute the ideal trajectory. It executes the classic `queue_step` schedule. That schedule is compressed with `stepcompress_max_error` = 25 µs (`klippy/mcu.py:30`; `max_error_ticks` in `rust/motion-core/src/pump/stepcompress_sink.rs:150-169`). Measured against `analyze.py`'s ideal reference, a perfect capture still shows compression error. Gate 1 measured how much: with exact timestamps, error against the ideal reference is p99 2.6–6 µs and abs_max 23–29 µs. The 25 µs budget sets the tail; the 13–25 µs p99 of count mode was mostly the 25 µs tick. Compression error and the 0.2–7 µs MCU execution errors are the same order of magnitude, so separating them needs the **commanded** step clocks:
 
 - **Commanded-schedule tap (recommended).** Add an opt-in host tap to the stepcompress sink that records every `queue_step`/`set_next_step_dir`/`reset_step_clock` per oid, in send order, to `step_tap.bin` in the run dir. The analyzer replays it into exact F401-clock step times. Pairing then goes by index per motor: the i-th commanded step against the i-th captured step. Lattice keys are not needed for this comparison, and a count mismatch is a hard failure.
 - **Stopgap.** Use a bench config with a tiny `stepcompress_max_error` (≥1 F401 tick). This is cheap, but it multiplies `queue_step` traffic at 113 kHz, so it measures a different operating point.
@@ -41,11 +41,11 @@ Changes from count mode (`capture.rs::arm_counter`):
 | z | TIM4_CH1 | DMA1 | S0 | 2 |
 | e | TIM8_CH1 | DMA2 | S2 | 7 |
 
-Each stream runs peripheral-to-memory in circular mode. It uses **direct mode**, not FIFO: a FIFO would hold captures back until a threshold. Transfers are half-word from CCR1 into a 4096-entry ring in SRAM1, not CCM, which the DMA cannot reach. 4 × 8 KB = 32 KB total. The DMA read of CCR1 clears CC1IF, so a second capture before that read sets **CC1OF**, which is sticky and is checked every tick.
+Each stream runs peripheral-to-memory in circular mode. It uses **direct mode**, not FIFO: a FIFO would hold captures back until a threshold. Transfers are half-word from CCR1 into a 1024-entry ring in SRAM, not CCM, which the DMA cannot reach (4 × 2 KB). The DMA read of CCR1 clears CC1IF, so a second capture before that read sets **CC1OF**, which is sticky and is checked every tick.
 
 ### DIR: interrupt, not DMA
 
-TIM1_CH2's only DMA paths are DMA2 S2 ch6, which collides with TIM8_CH1 on S2, and S6 ch0. S6 ch0 is the OR of TIM1_CH1/2/3, so a STEP request would also fire S6. Mapping the inputs the other way round (CCxS=10) cannot clear the collision either. Rather than mix DMA and ISR, all four DIR captures use the CC2 interrupt at the **highest** priority. The interrupt reads CCR2, then CNT, CYCCNT and the DIR pin level, pushes `(ccr2, cnt, level)` onto a per-channel SPSC queue, and treats CC2OF as a fault. DIR edges are rare. Even ripple reversals come at most once per step, so ISR load is negligible. Nothing in the firmware may mask this interrupt (no global `interrupt::free`). Shared state uses BASEPRI or lock-free queues instead.
+TIM1_CH2's only DMA paths are DMA2 S2 ch6, which collides with TIM8_CH1 on S2, and S6 ch0. S6 ch0 is the OR of TIM1_CH1/2/3, so a STEP request would also fire S6. Mapping the inputs the other way round (CCxS=10) cannot clear the collision either. Rather than mix DMA and ISR, all four DIR captures use the CC2 interrupt at the **highest** priority. The interrupt reads CCR2, then CNT and the DIR pin level. It checks that the level actually toggled (**DirDesync** otherwise), pushes `(ccr2, cnt, level)` onto a per-channel SPSC queue, and treats CC2OF as a fault. DIR edges are rare. Even ripple reversals come at most once per step, so ISR load is negligible. The only interrupt mask in event mode is a few cycles around the snapshot's clock reads.
 
 ## Extending 16-bit captures without ambiguity
 
@@ -65,11 +65,11 @@ A 10 kHz tick ISR (TIM6, lower priority than DIR) takes a snapshot in this fixed
   That bounds the window at 200 µs or less, well under 780 µs.
 - **DIR:** the ISR's own CNT read is a time inside (snapshot k−1, snapshot k], so it is extended against `E_k`. CCR2 is then extended against the ISR's read. The ISR's latency is bounded by **DirIsrLate**: CC2IF still set at two consecutive snapshots means the interrupt was masked for over 100 µs, which is a fault.
 
-**Ring laps.** At most 25 edges fit in one 100 µs tick at the 4 µs minimum edge spacing. That is far below the 4096-entry ring, so each snapshot's NDTR advance is exact. The consumer (main loop) tracks how far it lags the producer from those advances. Getting within 512 entries of a lap faults with **ConsumerBehind**. HT/TC interrupts are not needed.
+**Ring laps.** Snapshot processing (unwrap and encoding) runs inside the tick ISR, so the consumer is always at the last snapshot. An advance of half the ring or more faults with **DmaLap**. The stream's HT/TC flags are checked against the boundaries the advance predicts. A predicted crossing whose flag is missing, or a raised flag the advance doesn't explain (except a crossing within 4 entries of the NDTR read, which is kept for the next tick), is also DmaLap. So any lap, however many, is caught.
 
-**Consistency check.** At every snapshot, the TIM3, TIM4 and TIM8 CNT must sit at a constant offset (±2 ticks) from TIM1. Anything else faults with **TimebaseDesync**, which catches a timer that stopped or never started.
+**Consistency check.** At every snapshot, the CYCCNT delta must equal twice the TIM1 tick delta within 128 cycles, and the TIM3, TIM4 and TIM8 CNT must sit at their start offset from TIM1 within 32 ticks. Anything else faults with **TimebaseDesync**, which catches a timer that stopped or slipped. Every anchor record carries the worst value of both since the previous anchor. On the bench they peaked at 5 cycles and 5 ticks, which is read-to-read bus jitter. A first build used a 4-tick slack and faulted spuriously.
 
-Faults are latched and sent exactly as in count mode. The new codes are TickLate, DmaStall, DirIsrLate, ConsumerBehind, TimebaseDesync and OutputOverflow; StepOvercapture and DirOvercapture already have a slot in the fault scheme. Counts are exact by construction: every edge that passes the input filter is either delivered or raises a fault.
+Faults are latched and sent exactly as in count mode. Codes 5–14: StepOvercapture, TickLate, DmaStall, DirIsrLate, DmaLap, TimebaseDesync, OutputOverflow, DmaError (DMA TE/DME), DirQueueFull, NonMonotonic (an extended time not after the previous one on its channel). DirOvercapture and DirDesync reuse codes 1 and 3. Counts are exact by construction: every edge that passes the input filter is either delivered or raises a fault.
 
 ## DIR ordering
 
@@ -92,26 +92,20 @@ Plan: per-channel second-difference varints, which are lossless and cost about 2
 
 ## Wire and run-dir format
 
-Frames reuse the `SVC1` header layout with magic `SVE1`. The `ticks` field carries the payload length, and status/detail carry faults as today. Payload is a series of 1 ms blocks:
+Frames reuse the `SVC1` header layout with magic `SVE1`. `position` is the payload's offset in one continuous byte stream, `length` its size, and status/detail carry faults as today. The stream starts with the initial DIR level mask and the both-edges mask, then one block per 100 µs snapshot: a channel mask, then for each active channel a step count, a DIR count, the steps as zigzag varints of the interval's change, and the DIR edges as a varint delta plus the new level. An anchor (u64 master time, plus the drift/skew diagnostics) is added every 1000 blocks. The exact grammar is the docstring of `tools/bench/capture_events.py`, which decodes it.
 
-```
-block:   u32 block_index | per channel: u8 n_step | u8 n_dir
-         | step deltas (first: varint Δ from that channel's previous step, rest: zigzag-varint 2nd diff)
-         | dir records (varint Δ from that channel's previous DIR edge, 1 byte new level)
-```
-
-Full 64-bit extension happens on the F407, where the proof lives. The host only adds deltas, starting from 0 at timer start, and checks that `seq`, `block_index` and the per-block counts are continuous. `capture.py` writes `events.npz` (per channel: `step_t` int64 ticks, `dir_t` int64, `dir_level` int8), and `capture.json` gets `mode: "event"` and `tick_hz: 84e6`. Count-mode runs are unchanged.
+Full 64-bit extension happens on the F407, where the proof lives. The host only adds deltas starting from 0 at timer start, and checks that `seq` and `position` are continuous. The decoder checks monotonic intervals, alternating DIR levels, edges before their block's anchor, and STEP/DIR separation of at least 9 ticks. A tail cut mid-block at stop is reported as `truncated_tail_bytes`. `capture.py --events` writes the raw stream to `events.bin`, with `capture.json` `mode: "events"` and `tick_hz: 84000000`. Count-mode runs are unchanged.
 
 ## Analyzer changes
 
-- `capture_steps` gets an event-mode loader: exact times, levels signed by the merged DIR. The epoch, alignment and matching code already works on continuous times and stays as it is. Existing checks keep judging against the ideal reference, so compression error still counts there.
-- New `mcu_execution` section, present when `step_tap.bin` exists:
+- **Done:** `load_capture` decodes `events.bin`. It builds the 25 µs binned deltas, so every count-based check works unchanged, and `capture_steps` uses the exact times and DIR-signed levels. Existing checks keep judging against the ideal reference, so compression error still counts there.
+- **Next (needs the tap):** a `mcu_execution` section, present when `step_tap.bin` exists:
   - index-paired lateness, captured − commanded mapped into capture time;
   - p50/p99/max relative to the run minimum (the constant ISR entry latency is not observable, see below);
   - step-interval jitter;
   - DIR→STEP separations;
   - a cross-reference to `STEP_LOAD_LATE` events. Informational first; thresholds come after the first runs.
-- Calibration: `diag_stepper_buzz` (`src/stepper.c`) produces busy-waited steps at a known `period_ticks`. That validates resolution, inter-channel skew and the ppm fit with no planner involved.
+- **Done:** `tools/bench/buzz.py` runs `DIAG_STEPPER_BUZZ` (`src/stepper.c`; `[diag_stepper]` is now in the bench `printer.cfg`), which makes busy-waited steps at a known `period_ticks`. That checks resolution and the crystal ratio with no planner involved.
 
 ## Time alignment to the F401 clock
 
@@ -126,13 +120,27 @@ Full 64-bit extension happens on the F407, where the proof lives. The host only 
 
 It does not give absolute latency, because the counter origin is still unknown. This needs a small F401 change to enable MCO1 on PA8 (config validation already reserves the pin), plus the wire, which the user must add.
 
+## Host step tap (proposed, awaiting review; no production code yet)
+
+What it must give the analyzer: for every stepcompress oid, the exact F401 clock of every commanded step and the DIR in force, in the order the MCU executes them.
+
+- **Where.** Every classic step frame leaves the host through one closure per MCU: `host_io_egress` (`rust/motion-core/src/pump/stepcompress_sink.rs:117-125`), a `FrameEgress` that receives `(&'static str, args)` batches and calls `McuHostIo::send_args_batch`. The tap wraps that closure (`tapped_egress(inner, tap)`) and records a batch only after `inner` returns `Ok`, so it logs exactly what reached the wire. The sink's logic is untouched; with the tap off, the closure is not wrapped at all.
+- **What.** Fixed-size binary records `{u8 kind, u8 mcu, u16 oid, u64 host_monotonic_ns, payload}` for `queue_step` (interval u32, count u16, add i16), `queue_step_hp` (+add2, shift), `set_next_step_dir` (dir u8), `reset_step_clock` (clock u32), and the cut barrier (seq). A header record maps each oid to its motor (mcu id, axis, motor index, stepper name). The analyzer replays these with Klipper's semantics: `reset_step_clock` sets the oid's last clock, low 32 bits extended against the previous clock; then each `queue_step` emits `count` steps, `t += interval; interval += add`.
+- **Halts.** Reanchor cuts are already exact: `complete_cut` reads the MCU's executed count and fails on any mismatch (`stepcompress_sink.rs:1282-1316`), so every sent step executes. Halts that drop queued steps (homing trips, `stepper_halt_oid`, `abort_outbound`) are not replayable from the wire alone. The tap records them as `halt` records, and the analyzer fails loudly on any it finds. Bench prints don't home, so this covers the scope.
+- **Enable.** An env var, `SERVAL_STEP_TAP_DIR`, read once when the endpoint is built. `run.py --events` sets it through a klipper systemd drop-in, the same mechanism `--host-cpus` already uses, and fetches `step_tap.bin` with the logs. An unwritable dir fails at startup.
+- **Never blocks the pump.** Records go through a bounded channel to a writer thread. A full channel is a fatal `SendError` ("step tap fell behind"), never a drop. Load is about 10³–10⁴ frames/s at 24 B each, well under 1 MB/s to local disk.
+- **Analyzer.** Pair commanded and captured steps by index per motor; any count mismatch is fatal. Fit the F401→F407 map (piecewise linear, see below). Report execution lateness relative to its minimum, interval jitter, DIR setup times, and cross-check against `STEP_LOAD_LATE` events.
+
+Open questions for review: is an env var acceptable, or should it be a `[mcu]` option; and is the oid→stepper-name header enough, or should klippy's `config_stepper` lines be parsed instead?
+
 ## Risks and gates
 
 1. **Gate 0: USB throughput** (above).
-2. **Gate 1: on-bench capture validation.** Buzz-calibration intervals must show ≤24 ns spread. An A/B run of the same gcode in count mode and event mode must give identical per-tick counts once the event stream is binned to 25 µs.
-3. RM0090 behavior to confirm on the board, not just from the manual:
-   - a DMA read of CCR1 clears CC1IF;
-   - the trigger-mode start skew is constant from run to run.
+2. **Gate 1: on-bench capture validation — passed.**
+   - **Buzz** (`buzz.py --motor a --steps 2000 --period-us 100`, run `buzz-20261101-225557`): 2000 of 2000 steps captured. Intervals fall in two clusters, {8396, 8397} and {8401, 8402} ticks. Each cluster is two adjacent 11.9 ns ticks wide, which is the instrument's quantization. The 60 ns gap between clusters is the F401 busy-wait loop's granularity (about 5 F401 cycles). The planned "≤24 ns spread" criterion was ill-posed, because the source itself has 60 ns steps. The mean interval gives the crystal ratio: −69.7 ppm against nominal.
+   - **A/B, `epochs.gcode`:** the count-mode run (`20261101-230523`) and the event-mode runs (`230256`, `230715`) match the same number of steps on every motor (a 100591, b 78249, z 1040, e 14227), with the same rest ties. All three are ok. Event mode gives timing against the ideal reference of p99 3.2–6.0 µs and abs_p50 0.9–1.9 µs. Count mode gives p99 14–18 µs and abs_p50 6.4–7.3 µs.
+   - **Peak rates:** `speed_ladder` in event mode (default config `230331` and `fast.cfg` `230753`) captured 1.6 M steps each on a and b at a 114 kHz peak. The stream peaked at 212 KB/s per 100 ms (about 0.93 B per step), a quarter of the measured 830 KB/s. `extrude_ladder` (`230929`) peaked e at 57 kHz. Every run was ok, with no faults, no truncated tail, timebase drift ≤5 cycles, skew wander ≤5 ticks, and minimum DIR↔STEP separation ≥407 ticks (4.8 µs).
+3. RM0090 behavior seen on the board: a DMA read of CCR1 clears CC1IF, since no StepOvercapture fired over 3.3 M steps. The start skew is stable within a run (wander ≤5 ticks, which is read jitter). Its absolute value between channels is still not measured.
 4. Host step tap: production code in the stepcompress sink, opt-in, writing raw frames. It must never block the pump; on backpressure it fails loudly.
 
 ## Effort
@@ -150,4 +158,4 @@ It does not give absolute latency, because the counter origin is still unknown. 
 
 ## Recommendation
 
-**GO**, staged. Do Gate 0 first: if CDC sustains <600 KB/s, stop and revisit the encoding before writing capture code. Build the commanded-schedule tap together with the firmware, not after it. Without the tap, event mode mostly re-measures the ±25 µs compression budget and cannot isolate the 0.2–7 µs MCU errors that motivate this work. The clock wire is worth adding once event mode works. It improves trend and long-rest fidelity, but it is not needed for jitter.
+**GO**, staged. Gates 0 and 1 passed. Build the commanded-schedule tap next. Without it, event mode mixes compression error (p99 µs-level, tail to 25 µs) with the 0.2–7 µs MCU execution errors that motivate this work. The clock wire is worth adding once the tap works. It improves trend and long-rest fidelity, but it is not needed for jitter.
