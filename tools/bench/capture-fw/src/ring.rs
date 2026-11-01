@@ -38,7 +38,8 @@ impl TickRing {
 
     pub fn pop_into(&self, out: &mut [u8]) {
         let consumed = self.consumed.load(Ordering::Relaxed);
-        let (chunks, _) = out.as_chunks_mut::<4>();
+        let (chunks, remainder) = out.as_chunks_mut::<4>();
+        assert!(remainder.is_empty());
         for (i, chunk) in chunks.iter_mut().enumerate() {
             let tick = unsafe { (*self.slots.get())[(consumed + i) % RING_TICKS] };
             *chunk = tick.to_le_bytes();
