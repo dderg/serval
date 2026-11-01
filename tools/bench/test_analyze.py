@@ -13,7 +13,7 @@ TICK_HZ = 40_000.0
 INJECTED_PPM = 37.0
 FIRST_EPOCH_CAPTURE_START_S = 0.4
 INTER_EPOCH_IDLE_S = 0.8
-JITTER_US = 5.0
+JITTER_US = 0.5e6 / TICK_HZ
 STALLED_Z_STEPS = slice(150, 210)
 STALL_S = 15e-3
 GCODE = """\
@@ -302,7 +302,7 @@ def test_reversal_apex_step_the_reference_lacks(apex_steps, tie):
 
 
 class _RippleReference:
-    def trajectory_end_s(self, t_stream: float):
+    def trajectory_span_s(self, t_stream: float):
         return None
 
     def positions(self, role: str, start_s: float, end_s: float):
@@ -326,9 +326,9 @@ def test_ripple_bursts_beyond_the_pair_window_are_not_timing_errors():
     assert match.unmatched_capture + match.edge_ties >= len(capture)
 
 
-def _end_positions(final_steps: float):
+def _resting_positions(rest_steps: float):
     def positions(start_s: float, end_s: float) -> np.ndarray:
-        return np.full(2, final_steps)
+        return np.full(2, rest_steps)
 
     return positions
 
@@ -341,17 +341,67 @@ def test_final_step_the_capture_lacks_is_a_tie_only_on_the_lattice_line(
 ):
     reference = _events([0.8, 1.0], [9, 10], [1, 1])
     capture = _events([0.8], [9], [1])
-    capture_tie, reference_tie, end_ties = analyze.edge_ties(
+    capture_tie, reference_tie, rest_ties = analyze.edge_ties(
         capture,
         capture.time,
         np.array([False]),
         reference,
         np.array([False, True]),
-        _end_positions(final_steps),
-        1.2,
+        _resting_positions(final_steps),
+        (0.0, 1.2),
     )
     assert reference_tie.tolist() == [False, tie]
-    assert end_ties == (1 if tie else 0)
+    assert rest_ties == (1 if tie else 0)
+    assert not capture_tie.any()
+
+
+class _RestingReference:
+    def __init__(self, rest_steps: float):
+        self.positions_at_rest = _resting_positions(rest_steps)
+
+    def trajectory_span_s(self, t_stream: float):
+        return 0.9, 1.2
+
+    def positions(self, role: str, start_s: float, end_s: float):
+        return self.positions_at_rest(start_s, end_s)
+
+
+@pytest.mark.parametrize(
+    ("start_steps", "tie"), [(10.0, True), (10.001, False)]
+)
+def test_step_withheld_at_rest_and_taken_on_resume_is_a_tie(start_steps, tie):
+    reference = _events([1.0, 1.1], [9, 8], [-1, -1])
+    capture = _events([0.95, 1.0, 1.1], [10, 9, 8], [1, -1, -1])
+    match = analyze.measure_epoch(
+        analyze.EpochSteps({"a": capture}, {"a": reference}),
+        analyze.Alignment(0.0, 0.0, True),
+        _RestingReference(start_steps),
+    )["a"]
+    assert match.late_s.tolist() == [0.0, 0.0]
+    assert match.unmatched_reference == 0
+    assert match.unmatched_capture == (0 if tie else 1)
+    assert match.rest_ties == (1 if tie else 0)
+
+
+@pytest.mark.parametrize(
+    ("start_steps", "tie"), [(10.0, True), (10.001, False)]
+)
+def test_step_withheld_at_rest_and_cancelled_by_reversal_is_a_tie(
+    start_steps, tie
+):
+    reference = _events([1.0, 1.1], [9, 8], [-1, -1])
+    capture = _events([1.1], [8], [-1])
+    capture_tie, reference_tie, rest_ties = analyze.edge_ties(
+        capture,
+        capture.time,
+        np.array([False]),
+        reference,
+        np.array([True, False]),
+        _resting_positions(start_steps),
+        (0.9, 1.2),
+    )
+    assert reference_tie.tolist() == [tie, False]
+    assert rest_ties == (1 if tie else 0)
     assert not capture_tie.any()
 
 
@@ -446,6 +496,38 @@ def test_blocks_split_by_drain_commands_stay_separate_epochs_across_short_rests(
         assert recovered.to_capture(start) == pytest.approx(
             truth.to_capture(start), abs=20e-6
         )
+
+
+DRAIN_GCODE = """\
+SET_KINEMATIC_POSITION X=0 Y=0 Z=0
+G92 E0
+M83
+G1 X20 Y5 E0.501 F3000
+M400
+G1 X40 Y20 E0.5 F3000
+"""
+
+
+def _e_steps_at(reference: analyze.Reference, t_stream: float) -> float:
+    return float(reference.positions("e", t_stream, t_stream)[-1])
+
+
+def test_extruder_lattice_carries_its_fraction_across_a_drain(tmp_path):
+    _require_snapshot_engine()
+    shutil.copy(BENCH_DIR / "printer.cfg", tmp_path / "printer.cfg")
+    (tmp_path / "print.gcode").write_text(DRAIN_GCODE)
+    reference = analyze.build_reference(analyze.load_job(tmp_path))
+    first, second = reference.blocks
+    parked = _e_steps_at(reference, first.stream_offset_s + first.duration_s)
+    assert 0.2 < parked % 1.0 < 0.8
+    assert _e_steps_at(reference, second.stream_offset_s) == pytest.approx(
+        parked, abs=1e-5
+    )
+    e = reference.events["e"]
+    resumed = int(np.flatnonzero(e.time >= second.stream_offset_s)[0])
+    assert _e_steps_at(reference, e.time[resumed]) == pytest.approx(
+        e.level[resumed], abs=1e-3
+    )
 
 
 def test_merged_epoch_is_cut_at_the_rest_nearest_the_reference_count():

@@ -62,6 +62,7 @@ REFERENCE_SAMPLE_PERIOD_S = 0.5e-3
 REFERENCE_FINE_FACTOR = 50
 REFERENCE_CHUNK_INTERVALS = 20_000
 REFERENCE_BLOCK_SEPARATION_S = 100.0
+BLOCK_EDGE_SLACK_S = 1e-9
 LATTICE_SNAP_STEPS = 1e-6
 DEFAULT_EPOCH_GAP_S = 0.15
 OFFSET_SEARCH_S = 1.0
@@ -104,7 +105,7 @@ class Motor:
         return ROLE_AXIS_WEIGHTS[self.role]
 
     @property
-    def lattice_resets_per_block(self) -> bool:
+    def track_restarts_per_block(self) -> bool:
         return self.role in FOLLOWER_ROLES
 
 
@@ -175,14 +176,11 @@ class Reference:
     final_counts: dict[str, int]
     level_offsets: dict[str, list[float]]
 
-    def trajectory_end_s(self, t_stream: float) -> float | None:
+    def trajectory_span_s(self, t_stream: float) -> tuple[float, float] | None:
         for block in self.blocks:
-            if (
-                block.stream_offset_s
-                <= t_stream
-                <= (block.stream_offset_s + block.duration_s)
-            ):
-                return block.stream_offset_s + block.duration_s
+            end_s = block.stream_offset_s + block.duration_s
+            if block.stream_offset_s <= t_stream <= end_s:
+                return block.stream_offset_s, end_s
         return None
 
     def positions(
@@ -191,7 +189,10 @@ class Reference:
         for block, offset in zip(self.blocks, self.level_offsets[role]):
             local_start = start_s - block.stream_offset_s
             local_end = end_s - block.stream_offset_s
-            if local_start < 0.0 or local_end > block.duration_s:
+            if (
+                local_start < -BLOCK_EDGE_SLACK_S
+                or local_end > block.duration_s + BLOCK_EDGE_SLACK_S
+            ):
                 continue
             times = block.sample_times
             lo = min(
@@ -256,7 +257,7 @@ class MatchedSteps:
     unmatched_capture: int
     unmatched_reference: int
     edge_ties: int
-    end_ties: int = 0
+    rest_ties: int = 0
 
 
 @dataclass
@@ -631,27 +632,28 @@ def block_steps(
     return StepEvents.concat(parts)
 
 
-def _motor_steps(
-    motor: Motor, blocks: list[ReferenceBlock], start_count: int
-) -> tuple[StepEvents, int, list[float]]:
-    if not motor.lattice_resets_per_block:
-        state = PlayState.resting_at(
-            blocks[0].motor_pva_steps[motor.role][0, 0]
-        )
-        parts = [block_steps(b, motor.role, state, 0.0) for b in blocks]
-        return StepEvents.concat(parts), state.count, [0.0] * len(blocks)
-    base = start_count
-    parts = []
-    level_offsets = []
+def _lattice_origins(motor: Motor, blocks: list[ReferenceBlock]) -> list[float]:
+    if not motor.track_restarts_per_block:
+        return [0.0] * len(blocks)
+    origins = []
+    live_position = blocks[0].motor_pva_steps[motor.role][0, 0]
     for block in blocks:
-        block_start = block.motor_pva_steps[motor.role][0, 0]
-        level_offsets.append(block_start - base)
-        state = PlayState.resting_at(0.0)
-        part = block_steps(block, motor.role, state, block_start)
-        part.level += base
-        base += state.count
-        parts.append(part)
-    return StepEvents.concat(parts), base, level_offsets
+        track = block.motor_pva_steps[motor.role][:, 0]
+        origins.append(track[0] - live_position)
+        live_position += track[-1] - track[0]
+    return origins
+
+
+def _motor_steps(
+    motor: Motor, blocks: list[ReferenceBlock]
+) -> tuple[StepEvents, int, list[float]]:
+    origins = _lattice_origins(motor, blocks)
+    state = PlayState.resting_at(blocks[0].motor_pva_steps[motor.role][0, 0])
+    parts = [
+        block_steps(block, motor.role, state, origin)
+        for block, origin in zip(blocks, origins)
+    ]
+    return StepEvents.concat(parts), state.count, origins
 
 
 def build_reference(job: Job) -> Reference:
@@ -673,7 +675,7 @@ def build_reference(job: Job) -> Reference:
             events[motor.role],
             final_counts[motor.role],
             level_offsets[motor.role],
-        ) = _motor_steps(motor, blocks, start_counts[motor.role])
+        ) = _motor_steps(motor, blocks)
     return Reference(
         start_xyz=start_xyz,
         final_xyze=final_xyze,
@@ -794,8 +796,7 @@ def pair_epochs(
 
 
 def _step_keys(events: StepEvents) -> np.ndarray:
-    relative = events.level - events.start_count()
-    return relative * 2 + (events.direction > 0)
+    return events.level * 2 + (events.direction > 0)
 
 
 def nearest_same_key(
@@ -1006,14 +1007,25 @@ def edge_ties(
     reference: StepEvents,
     reference_unmatched: np.ndarray,
     positions: PositionWindow,
-    trajectory_end_s: float | None,
+    trajectory_s: tuple[float, float] | None,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     capture_tie = np.zeros(len(capture), bool)
     reference_tie = np.zeros(len(reference), bool)
-    end_ties = 0
-    times = np.union1d(capture_stream_s, reference.time)
-    capture_counts = _counts_after(capture, capture_stream_s, times)
-    reference_counts = _counts_after(reference, reference.time, times)
+    rest_ties = 0
+    event_times = np.union1d(capture_stream_s, reference.time)
+    times = np.concatenate(([-math.inf], event_times))
+    capture_counts = np.concatenate(
+        (
+            [capture.start_count()],
+            _counts_after(capture, capture_stream_s, event_times),
+        )
+    )
+    reference_counts = np.concatenate(
+        (
+            [reference.start_count()],
+            _counts_after(reference, reference.time, event_times),
+        )
+    )
     disagreement = capture_counts - reference_counts
     capture_open = np.flatnonzero(capture_unmatched)
     reference_open = np.flatnonzero(reference_unmatched)
@@ -1036,15 +1048,17 @@ def edge_ties(
             continue
         if np.any(np.abs(disagreement[lo:hi]) > 1):
             continue
-        if hi == times.size:
+        if lo == 0 or hi == times.size:
             if (
-                trajectory_end_s is not None
+                trajectory_s is not None
                 and in_capture.size + in_reference.size == 1
-                and _ends_on_lattice_line(positions, trajectory_end_s)
+                and _rests_on_lattice_line(
+                    positions, trajectory_s[0 if lo == 0 else 1]
+                )
             ):
                 capture_tie[in_capture] = True
                 reference_tie[in_reference] = True
-                end_ties += 1
+                rest_ties += 1
             continue
         band_holds = all(
             _stays_in_count_band(
@@ -1062,13 +1076,11 @@ def edge_ties(
         ):
             capture_tie[in_capture] = True
             reference_tie[in_reference] = True
-    return capture_tie, reference_tie, end_ties
+    return capture_tie, reference_tie, rest_ties
 
 
-def _ends_on_lattice_line(
-    positions: PositionWindow, trajectory_end_s: float
-) -> bool:
-    path = positions(trajectory_end_s, trajectory_end_s)
+def _rests_on_lattice_line(positions: PositionWindow, rest_s: float) -> bool:
+    path = positions(rest_s, rest_s)
     return path is not None and bool(
         abs(path[-1] - round(path[-1])) < LATTICE_SNAP_STEPS
     )
@@ -1157,14 +1169,14 @@ def measure_epoch(
             reference_rivals,
             capture_rivals[np.maximum(reverse_nearest, 0)],
         )
-        capture_tie, reference_tie, end_ties = edge_ties(
+        capture_tie, reference_tie, rest_ties = edge_ties(
             cap,
             alignment.to_stream(cap.time),
             ~matched,
             ref,
             reference_unmatched,
             lambda lo, hi, role=role: reference.positions(role, lo, hi),
-            reference.trajectory_end_s(float(ref.time[-1])),
+            reference.trajectory_span_s(float(ref.time[0])),
         )
         matches[role] = MatchedSteps(
             late_s=late[matched],
@@ -1177,7 +1189,7 @@ def measure_epoch(
             edge_ties=int(
                 np.count_nonzero(capture_tie) + np.count_nonzero(reference_tie)
             ),
-            end_ties=end_ties,
+            rest_ties=rest_ties,
         )
     return matches
 
@@ -1508,7 +1520,7 @@ def analyze(
                 e.matches[role].unmatched_reference for e in epochs
             ),
             "edge_tie_steps": sum(e.matches[role].edge_ties for e in epochs),
-            "end_tie_steps": sum(e.matches[role].end_ties for e in epochs),
+            "rest_tie_steps": sum(e.matches[role].rest_ties for e in epochs),
             "timing_error_capture_minus_reference_us": _timing_stats(
                 late[conditioned], late_at[conditioned]
             ),
@@ -1546,7 +1558,7 @@ def analyze(
     )
     checks = {
         "net_steps_match": all(
-            abs(r["net_steps_capture_minus_expected"]) <= r["end_tie_steps"]
+            abs(r["net_steps_capture_minus_expected"]) <= r["rest_tie_steps"]
             for r in motors_report.values()
         ),
         "no_stalls": not stalls,
