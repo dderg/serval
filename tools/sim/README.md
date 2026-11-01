@@ -91,6 +91,26 @@ SIM_JITTER=3 tools/sim/run.sh test  # share a cpuset with 3 bursty CPU burners
     written, and the clock estimate converged to only ±1–3 ppm with a
     +0.3 ms offset bias. Now it tracks a skewed crystal exactly
     (`test_clock_estimate.py`).
+  - The reverse direction holds too: bytes an MCU writes to its pty hold
+    the clock while a klippy thread is waiting on that pty (in `ppoll` or
+    a blocking `read`), until klippy has read them, so a reply reaches
+    klippy at the virtual instant the MCU sent it (`get_clock` was read
+    0–1.4 ms late, median 0.4 ms). The MCU counts a reply before its
+    `write` returns: klippy wakes in real time the moment the bytes land,
+    and until it marks itself running only that count keeps the clock
+    still. The hold needs a waiting reader, so an MCU writing while klippy
+    has no reader on its pty (boot output, a restart) cannot wedge.
+  - `world.inject(mcu, ...)` faults one MCU's host→MCU link in virtual
+    time, without touching klippy: `delay_command="queue_digital_out",
+    by_s=0.34` holds the next frame carrying that command, and everything
+    klippy sends behind it, for `by_s`; `drop_command=...` discards the
+    next `count` such frames (klippy retransmits); `stall_s=0.05` holds the
+    whole link. The MCU's libvtime walks the incoming Klipper frames with
+    each command's parameter kinds from its data dictionary
+    (`out/klipper-<board>-sim.dict`, passed as `MCU_SIM_CMD_SHAPES`), wakes
+    the MCU when held bytes come due, and logs each fault to the MCU log
+    (`[vtime] fault: delaying frame carrying msgid ...`). Held bytes still
+    count as read, so a fault never holds the clock.
   - `sim_world(..., crystal_ppm={"f4": 30.0})` gives an MCU its own
     oscillator (`VTIME_CRYSTAL_PPM`): every clock that process reads runs
     that many ppm off the shared timeline, and the deadlines it sets map

@@ -401,10 +401,15 @@ device_input_floor(uint64_t now)
     uint32_t used = link_slots_used();
     for (uint32_t i = 0; i < used; i++) {
         struct vtime_device_link *link = &vshm->links[i];
-        if (!atomic_load_explicit(&link->pts_plus_one, memory_order_acquire)
-            || atomic_load_explicit(&link->written, memory_order_acquire)
-                   <= atomic_load_explicit(&link->consumed,
-                                           memory_order_acquire))
+        if (!atomic_load_explicit(&link->pts_plus_one, memory_order_acquire))
+            continue;
+        if (atomic_load_explicit(&link->host_waiting, memory_order_acquire)
+            && atomic_load_explicit(&link->reply_written, memory_order_acquire)
+                   > atomic_load_explicit(&link->reply_consumed,
+                                          memory_order_acquire))
+            return now;
+        if (atomic_load_explicit(&link->written, memory_order_acquire)
+            <= atomic_load_explicit(&link->consumed, memory_order_acquire))
             continue;
         if (stepping_own_timer && (int)i == device_link_slot
             && !atomic_load_explicit(&device_link_read_yet,
@@ -452,6 +457,282 @@ host_wrote(int fd, uint64_t bytes)
         }
     }
     errno = saved_errno;
+}
+
+static struct vtime_device_link *
+host_link_of_fd(int fd)
+{
+    int saved_errno = errno;
+    struct stat st;
+    uint32_t pts;
+    struct vtime_device_link *found = NULL;
+    if (fstat(fd, &st) == 0 && pts_of(&st, &pts)) {
+        uint32_t used = link_slots_used();
+        for (uint32_t i = 0; i < used && !found; i++)
+            if (atomic_load_explicit(&vshm->links[i].pts_plus_one,
+                                     memory_order_acquire)
+                == pts + 1)
+                found = &vshm->links[i];
+    }
+    errno = saved_errno;
+    return found;
+}
+
+// A device reply is counted before the write: once the bytes reach the pty
+// the waiting host wakes in real time, and until it marks itself running
+// only this count keeps the clock from moving under the reply.
+static _Atomic uint64_t *
+announce_reply(int fd, size_t count)
+{
+    if (is_host || !vshm || fd != device_link_fd || device_link_slot < 0)
+        return NULL;
+    _Atomic uint64_t *reply_written =
+        &vshm->links[device_link_slot].reply_written;
+    atomic_fetch_add_explicit(reply_written, count, memory_order_acq_rel);
+    return reply_written;
+}
+
+static void
+settle_write(int fd, _Atomic uint64_t *reply_written, size_t count,
+             ssize_t ret)
+{
+    size_t landed = ret > 0 ? (size_t)ret : 0;
+    if (reply_written)
+        atomic_fetch_sub_explicit(reply_written, count - landed,
+                                  memory_order_acq_rel);
+    else if (is_host && vshm && landed)
+        host_wrote(fd, landed);
+}
+
+// Fault injection on the device side of a link. The harness posts a
+// request in shm (struct vtime_link_fault); the device process applies it
+// to the host→device byte stream as its console reads it. Klipper frames
+// are [len seq payload crc16 0x7e] with a payload of commands, each a VLQ
+// message id followed by VLQ ints and length-prefixed buffers; Kalico
+// frames are 0x55 len16 ... and are never matched. MCU_SIM_CMD_SHAPES maps
+// each command id to its parameter kinds ("n" int, "b" buffer) so a frame
+// can be walked past commands that do not match.
+#define FAULT_STREAM_BYTES (1 << 16)
+#define FAULT_MSGID_MIN (-32)
+#define FAULT_MSGID_SPAN 1024
+#define KLIPPER_LEN_MIN 5
+#define KLIPPER_LEN_MAX 64
+#define KALICO_SYNC 0x55
+
+static char *cmd_shapes[FAULT_MSGID_SPAN];
+
+static const char *
+cmd_shape(int32_t msgid)
+{
+    int64_t index = (int64_t)msgid - FAULT_MSGID_MIN;
+    return index >= 0 && index < FAULT_MSGID_SPAN ? cmd_shapes[index] : NULL;
+}
+
+static struct {
+    uint32_t seen_generation;
+    uint32_t kind, count;
+    int32_t msgid;
+    uint64_t delay_ns;
+    uint64_t release_ns;
+    enum { FRAME_WAIT, FRAME_KLIPPER, FRAME_KALICO_HDR, FRAME_KALICO } state;
+    uint8_t frame[KLIPPER_LEN_MAX];
+    uint32_t frame_len, frame_need;
+    uint8_t held[FAULT_STREAM_BYTES];
+    size_t held_len;
+    uint8_t out[FAULT_STREAM_BYTES];
+    size_t out_len;
+} fault;
+
+static void
+load_cmd_shapes(void)
+{
+    const char *env = getenv("MCU_SIM_CMD_SHAPES");
+    if (!env)
+        return;
+    char *copy = strdup(env), *save = NULL;
+    for (char *entry = strtok_r(copy, ";", &save); entry;
+         entry = strtok_r(NULL, ";", &save)) {
+        char *eq = strchr(entry, '=');
+        long id = strtol(entry, NULL, 10);
+        if (!eq || id < FAULT_MSGID_MIN
+            || id - FAULT_MSGID_MIN >= FAULT_MSGID_SPAN) {
+            fprintf(stderr, "[vtime] bad MCU_SIM_CMD_SHAPES entry %s\n", entry);
+            abort();
+        }
+        cmd_shapes[id - FAULT_MSGID_MIN] = strdup(eq + 1);
+    }
+    free(copy);
+}
+
+static uint32_t
+frame_vlq(const uint8_t **pp, const uint8_t *end)
+{
+    const uint8_t *p = *pp;
+    uint8_t c = *p++;
+    uint32_t v = c & 0x7f;
+    if ((c & 0x60) == 0x60)
+        v |= -0x20;
+    while ((c & 0x80) && p < end) {
+        c = *p++;
+        v = (v << 7) | (c & 0x7f);
+    }
+    *pp = p;
+    return v;
+}
+
+static int
+frame_carries(const uint8_t *frame, uint32_t len, int32_t msgid)
+{
+    const uint8_t *p = frame + 2, *end = frame + len - 3;
+    while (p < end) {
+        int32_t id = (int32_t)frame_vlq(&p, end);
+        if (id == msgid)
+            return 1;
+        const char *shape = cmd_shape(id);
+        if (!shape)
+            return 0;
+        for (; *shape && p < end; shape++) {
+            uint32_t v = frame_vlq(&p, end);
+            if (*shape == 'b')
+                p += v;
+        }
+    }
+    return 0;
+}
+
+static void
+fault_route(const uint8_t *bytes, size_t n)
+{
+    int holding = fault.release_ns != 0;
+    uint8_t *dst = holding ? fault.held : fault.out;
+    size_t *len = holding ? &fault.held_len : &fault.out_len;
+    if (*len + n > FAULT_STREAM_BYTES) {
+        fprintf(stderr, "[vtime] fault injection buffer overflow\n");
+        abort();
+    }
+    memcpy(dst + *len, bytes, n);
+    *len += n;
+}
+
+static void
+fault_frame_done(void)
+{
+    int matched = fault.count
+        && (fault.kind == VTIME_FAULT_DELAY || fault.kind == VTIME_FAULT_DROP)
+        && frame_carries(fault.frame, fault.frame_len, fault.msgid);
+    if (matched) {
+        fault.count--;
+        fprintf(stderr, "[vtime] fault: %s frame carrying msgid %d at %lu ns\n",
+                fault.kind == VTIME_FAULT_DROP ? "dropping" : "delaying",
+                fault.msgid, (unsigned long)vtime_now());
+        if (fault.kind == VTIME_FAULT_DROP)
+            return;
+        if (!fault.release_ns)
+            fault.release_ns = vtime_now() + fault.delay_ns;
+    }
+    fault_route(fault.frame, fault.frame_len);
+}
+
+static void
+fault_feed(const uint8_t *bytes, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        uint8_t b = bytes[i];
+        switch (fault.state) {
+        case FRAME_WAIT:
+            if (b >= KLIPPER_LEN_MIN && b <= KLIPPER_LEN_MAX) {
+                fault.frame[0] = b;
+                fault.frame_len = 1;
+                fault.frame_need = b;
+                fault.state = FRAME_KLIPPER;
+            } else if (b == KALICO_SYNC) {
+                fault.frame[0] = b;
+                fault.frame_len = 1;
+                fault.state = FRAME_KALICO_HDR;
+            } else {
+                fault_route(&b, 1);
+            }
+            break;
+        case FRAME_KLIPPER:
+            fault.frame[fault.frame_len++] = b;
+            if (fault.frame_len == fault.frame_need) {
+                fault_frame_done();
+                fault.state = FRAME_WAIT;
+            }
+            break;
+        case FRAME_KALICO_HDR:
+            fault.frame[fault.frame_len++] = b;
+            if (fault.frame_len == 3) {
+                fault.frame_need = 1u + ((uint32_t)fault.frame[1]
+                                         | ((uint32_t)fault.frame[2] << 8));
+                fault_route(fault.frame, 3);
+                fault.state = fault.frame_need > 3 ? FRAME_KALICO : FRAME_WAIT;
+            }
+            break;
+        case FRAME_KALICO:
+            fault_route(&b, 1);
+            if (++fault.frame_len == fault.frame_need)
+                fault.state = FRAME_WAIT;
+            break;
+        }
+    }
+}
+
+static ssize_t
+fault_filter(void *buf, size_t count, ssize_t got)
+{
+    struct vtime_link_fault *req = &vshm->link_faults[device_link_slot];
+    uint32_t generation = atomic_load_explicit(&req->generation,
+                                               memory_order_acquire);
+    if (generation != fault.seen_generation) {
+        fault.seen_generation = generation;
+        fault.kind = req->kind;
+        fault.msgid = req->msgid;
+        fault.count = req->count;
+        fault.delay_ns = req->delay_ns;
+        if (fault.kind == VTIME_FAULT_STALL && !fault.release_ns) {
+            fault.release_ns = vtime_now() + fault.delay_ns;
+            fprintf(stderr, "[vtime] fault: stalling the link at %lu ns\n",
+                    (unsigned long)vtime_now());
+        }
+    }
+    int saved_errno = errno;
+    if (got > 0)
+        fault_feed(buf, (size_t)got);
+    if (fault.release_ns && vtime_now() >= fault.release_ns) {
+        fault.release_ns = 0;
+        fault_route(fault.held, fault.held_len);
+        fault.held_len = 0;
+    }
+    if (!fault.out_len) {
+        if (got == 0)
+            return 0;
+        errno = got < 0 ? saved_errno : EAGAIN;
+        return -1;
+    }
+    size_t n = fault.out_len < count ? fault.out_len : count;
+    memcpy(buf, fault.out, n);
+    memmove(fault.out, fault.out + n, fault.out_len - n);
+    fault.out_len -= n;
+    return (ssize_t)n;
+}
+
+static int
+fault_poll_index(const struct pollfd *fds, nfds_t nfds)
+{
+    if (is_host || device_link_fd < 0 || !(fault.out_len || fault.release_ns))
+        return -1;
+    for (nfds_t i = 0; i < nfds; i++)
+        if (fds[i].fd == device_link_fd && (fds[i].events & POLLIN))
+            return (int)i;
+    return -1;
+}
+
+static int
+fault_bytes_due(void)
+{
+    return fault.out_len
+        || (fault.release_ns && vtime_now() >= fault.release_ns);
 }
 
 static void
@@ -955,6 +1236,7 @@ vtime_init(void)
     const char *crystal_ppm = getenv("VTIME_CRYSTAL_PPM");
     if (crystal_ppm)
         crystal_scale = 1.0 + atof(crystal_ppm) * 1e-6;
+    load_cmd_shapes();
 
     real_clock_gettime = dlsym(RTLD_NEXT, "clock_gettime");
     real_clock_nanosleep = dlsym(RTLD_NEXT, "clock_nanosleep");
@@ -1160,12 +1442,39 @@ ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout,
         return real_ppoll(fds, nfds, timeout, sigmask);
     struct timespec ready_now = { 0, 0 };
     int ready = real_ppoll(fds, nfds, &ready_now, sigmask);
+    int held_link = fault_poll_index(fds, nfds);
+    if (held_link >= 0 && fault_bytes_due()) {
+        if (!fds[held_link].revents)
+            ready++;
+        fds[held_link].revents |= POLLIN;
+    }
     if (ready)
         return ready;
+    struct vtime_device_link *watched[VTIME_MAX_LINKS];
+    int watching = 0;
+    for (nfds_t i = 0; is_host && i < nfds && watching < VTIME_MAX_LINKS; i++) {
+        if (!(fds[i].events & POLLIN))
+            continue;
+        struct vtime_device_link *link = host_link_of_fd(fds[i].fd);
+        if (link) {
+            atomic_fetch_add_explicit(&link->host_waiting, 1,
+                                      memory_order_acq_rel);
+            watched[watching++] = link;
+        }
+    }
     uint64_t deadline = deadline_from_ts(timeout);
+    if (held_link >= 0 && fault.release_ns && fault.release_ns < deadline)
+        deadline = fault.release_ns;
     thread_blocks(deadline);
     int ret = ppoll_loop(fds, nfds, deadline, sigmask);
     thread_runs();
+    if (!ret && held_link >= 0 && fault_bytes_due()) {
+        fds[held_link].revents |= POLLIN;
+        ret = 1;
+    }
+    for (int i = 0; i < watching; i++)
+        atomic_fetch_sub_explicit(&watched[i]->host_waiting, 1,
+                                  memory_order_acq_rel);
     return ret;
 }
 
@@ -1541,15 +1850,30 @@ read(int fd, void *buf, size_t count)
 {
     if (!is_host) {
         ssize_t ret = REAL(read)(fd, buf, count);
-        if (ret > 0 && fd == device_link_fd)
+        if (!vshm || fd != device_link_fd)
+            return ret;
+        if (ret > 0)
             device_read((uint64_t)ret);
-        return ret;
+        return fault_filter(buf, count, ret);
     }
-    if (!fd_blocks(fd))
-        return REAL(read)(fd, buf, count);
-    thread_blocks(NO_DEADLINE);
-    ssize_t ret = REAL(read)(fd, buf, count);
-    thread_runs();
+    struct vtime_device_link *link = vshm ? host_link_of_fd(fd) : NULL;
+    ssize_t ret;
+    if (!fd_blocks(fd)) {
+        ret = REAL(read)(fd, buf, count);
+    } else {
+        if (link)
+            atomic_fetch_add_explicit(&link->host_waiting, 1,
+                                      memory_order_acq_rel);
+        thread_blocks(NO_DEADLINE);
+        ret = REAL(read)(fd, buf, count);
+        thread_runs();
+        if (link)
+            atomic_fetch_sub_explicit(&link->host_waiting, 1,
+                                      memory_order_acq_rel);
+    }
+    if (link && ret > 0)
+        atomic_fetch_add_explicit(&link->reply_consumed, (uint64_t)ret,
+                                  memory_order_acq_rel);
     return ret;
 }
 
@@ -1564,18 +1888,21 @@ __read_chk(int fd, void *buf, size_t count, size_t buflen)
 ssize_t
 write(int fd, const void *buf, size_t count)
 {
+    _Atomic uint64_t *reply_written = announce_reply(fd, count);
     ssize_t ret = REAL(write)(fd, buf, count);
-    if (is_host && vshm && ret > 0)
-        host_wrote(fd, (uint64_t)ret);
+    settle_write(fd, reply_written, count, ret);
     return ret;
 }
 
 ssize_t
 writev(int fd, const struct iovec *iov, int iovcnt)
 {
+    size_t count = 0;
+    for (int i = 0; i < iovcnt; i++)
+        count += iov[i].iov_len;
+    _Atomic uint64_t *reply_written = announce_reply(fd, count);
     ssize_t ret = REAL(writev)(fd, iov, iovcnt);
-    if (is_host && vshm && ret > 0)
-        host_wrote(fd, (uint64_t)ret);
+    settle_write(fd, reply_written, count, ret);
     return ret;
 }
 
