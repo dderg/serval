@@ -1,0 +1,85 @@
+# Hardware bench
+
+Pi 5 runs klippy against an STM32F401 printer MCU. An STM32F407 capture board on this box records the F401's STEP/DIR lines. Print a gcode, capture, analyze, unattended.
+
+## Parts
+
+| | Host | Link | Flashed by |
+|---|---|---|---|
+| Pi 5 | `ssh bench-pi` (pi@192.168.1.149, key `~/.ssh/bench_pi_ed25519`), Raspberry Pi OS Lite trixie, service `klipper`, Moonraker :7125 | | |
+| F401 (STM32F401RCT6, black-pill, 25 MHz) | Pi USB | no bootloader, flash at 0x08000000 | Pi GPIO SWD via openocd |
+| F407 (DevEBox STM32F4XX_M, F407VGT6, 8 MHz HSE) | this box USB | | ST-Link V2 clone on this box |
+
+## Wiring
+
+Pi → F401 (SWD):
+
+| Pi pin | GPIO | F401 |
+|---|---|---|
+| 18 | GPIO24 | SWDIO |
+| 22 | GPIO25 | SWCLK |
+| 16 | GPIO23 | R (NRST) |
+| 20 | GND | GND |
+
+ST-Link → F407: SWDIO→DIO, SWCLK→CLK, GND→GND. No NRST (header has none); reset is SYSRESETREQ.
+
+F401 → F407 (capture):
+
+| Channel | STEP | DIR |
+|---|---|---|
+| 0 a | PB12→PE9 (TIM1 CH1) | PB13→PE11 (CH2) |
+| 1 b | PB14→PA6 (TIM3) | PB15→PA7 |
+| 2 z | PB6→PD12 (TIM4) | PB7→PD13 |
+| 3 e | PB8→PC6 (TIM8) | PB9→PC7 |
+
+Plus 2× GND.
+
+## Commands
+
+Run from the repo root.
+
+```
+uv run python tools/bench/deploy.py sync           # rsync tree to Pi ~/klipper, delete stale, build-native.sh if rust/ changed
+uv run python tools/bench/deploy.py flash-target   # build F401 fw (f401.config), flash via Pi SWD, restart klippy
+uv run python tools/bench/deploy.py flash-capture  # build capture-fw, flash F407 via ST-Link
+uv run python tools/bench/deploy.py config         # validate + push printer.cfg, FIRMWARE_RESTART
+uv run python tools/bench/run.py <gcode> [--runs-dir ~/bench/runs] [--timeout 1800]
+uv run python tools/bench/analyze.py <run_dir> [--gap S]
+uv run python tools/bench/capture.py --help        # standalone capture
+```
+
+`run.py` sanitizes the gcode (allowlist; unknown commands raise), pushes config, restarts, uploads, captures, prints, fetches logs. Test gcodes: `tools/bench/gcode/`.
+
+## Run dir (`~/bench/runs/<YYYYmmdd-HHMMSS>/`)
+
+`print.gcode`, `printer.cfg`, `capture.bin` (int8, N×4, one row per 25 µs tick; channels a b z e; + = DIR high), `capture.json`, `klippy.log`, `events/` (structured logs), `run.json`, and after analysis `analysis.json`, `*.png`.
+
+## Capture
+
+40 kHz snapshots, i8 step delta per channel. Wire protocol: docstring of `capture.py`. Latched faults (DIR overcapture, delta overflow, DIR desync, ring overflow) are raised by the host reader; host stall timeout 1 s.
+
+## Analyzer
+
+Reference is offline `_motion_engine.pipeline_snapshot_axis_samples`; needs local `make -f Makefile.rust motion-engine-fast`. Extruder total is shorter than gcode E by design (`docs/rewrite/shaper.md`, "Followers").
+
+## Recovery
+
+- F401: hard reset via NRST from the Pi always works. `uhubctl` does NOT power-cycle it (Pi 5 port power stays on).
+- F407: if its firmware ever disables the SWD pins, set BOOT0=1 and press reset (manual).
+- Config validation forbids PA13/PA14 (SWD) and PA8 (reserved for clock output).
+
+Any tool that touches the Pi or the boards (`run.py`, every `deploy.py` subcommand) takes an exclusive lock on `~/bench/.lock` and waits up to `--lock-timeout` seconds (default 1800), reporting the holder every 30 s, so several agents can share the bench safely.
+
+## Limits
+
+- No endstops, heaters or TMC wired: no homing (`run.py` uses `SET_KINEMATIC_POSITION`).
+- klippy takes the non-TMC single-edge 2 µs step path, not the TMC both-edge path real printers use.
+- 25 µs time resolution.
+- Pi 5 is faster than the Pi 4 printers.
+
+## Planned wiring (not done)
+
+- Endstops: F407 PD8–PD11 → F401 via 1 kΩ.
+- Thermistor DAC: F407 PA4/PA5 → F401 ADC via 1 kΩ.
+- Clock: F401 PA8 → F407 PA15.
+- TMC UART emulation: F407 PA2 ↔ F401 via 1 kΩ (F401 pin to be chosen from the black-pill header).
