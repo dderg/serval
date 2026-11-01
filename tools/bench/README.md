@@ -55,6 +55,27 @@ uv run python tools/bench/cdc_throughput.py --seconds 60  # capture-board USB th
 
 `run.py` sanitizes the gcode (allowlist; unknown commands raise), pushes config, restarts, uploads, captures, prints, fetches logs, and cancels the print if the capture or the print fails. Test gcodes: `tools/bench/gcode/` (`gen_speed_ladder.py` regenerates the speed/extrude ladders). `--config tools/bench/configs/<name>.cfg` runs with an alternate printer config. `--host-cpus N --host-max-mhz M` emulate a weaker host (klipper CPUAffinity drop-in + cpufreq `scaling_max_freq`), always restored afterwards, and are recorded in `run.json`. `--events` captures in event mode. `--step-tap` (with `--events`) sets `SERVAL_STEP_TAP_DIR` for klipper through a systemd drop-in (removed afterwards) and fetches `step_tap_mcu<N>_p<pid>_s<session>.bin`; `analyze.py` then adds an `mcu_execution` section with per-step MCU lateness against the commanded schedule (`capture-fw/EVENT_MODE.md`, "Host step tap").
 
+## Helpers
+
+Offline (no lock, read run dirs under `~/bench/runs`):
+
+```
+uv run python tools/bench/summarize.py '~/bench/runs/20261101-22*' [--json]   # one line per run: verdict, stalls, abs_max/p99 us per motor, epochs (span delta, ppm), mcu lateness p99, deployed head
+uv run python tools/bench/events.py <run_dir> [--around T --window S] [--names a,b] [--tail N]   # event counts by source/level/name in the run window, error/fatal records verbatim, klippy Stats print_time/buffer_time/sysload trend
+```
+
+Hardware (take the lock; re-entrant inside `lock.py hold`):
+
+```
+uv run python tools/bench/gcode.py "G1 X10" "M400"      # lines sent in order through Moonraker; reply printed, any error exits non-zero (--dry-run prints the requests)
+uv run python tools/bench/state.py [--json]              # printer state, deployed identity, klipper pid, MCU serial, capture board (--dry-run lists the queries; read-only, no lock)
+uv run python tools/bench/ab.py --ref origin/main --ref HEAD --gcode G [--config C] [--runs 3] [--host-cpus N --host-max-mhz M] [--dry-run]
+```
+
+`ab.py` builds a clean detached worktree per ref (committed content only), `sync --tree`s it, runs and analyzes the gcode N times, prints per-run lines and a per-ref table (ok count, errors, stalls, worst abs_max per motor), and always removes the worktrees. One lock hold covers all refs; the Pi is left on the last ref.
+
+Repo dev tooling: `scripts/land-pr.sh <branch> [--title T --body B] [--dry-run]` pushes, opens the PR if missing, waits for the checks (prints the failed-log tail and exits non-zero on red), merges with a merge commit, then `git branch -f main origin/main` and removes the branch's worktree.
+
 ## Run dir (`~/bench/runs/<YYYYmmdd-HHMMSS>/`)
 
 `print.gcode`, `printer.cfg`, `capture.bin` (count mode: int8, N×4, one row per 25 µs tick; channels a b z e; + = DIR high) or `events.bin` (event mode), `capture.json` (`mode`, `tick_hz`), `klippy.log`, `events/` (structured logs), `run.json`, and after analysis `analysis.json`, `*.png`.

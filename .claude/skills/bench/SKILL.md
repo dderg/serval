@@ -41,6 +41,12 @@ uv run python tools/bench/analyze.py ~/bench/runs/<dir> [--gap S]       # writes
 
 Run dirs: `~/bench/runs/<YYYYmmdd-HHMMSS>/` — `print.gcode`, `printer.cfg` (the one used), `capture.bin/json`, `klippy.log`, `events/*.jsonl` (structured logs; query with the query-logs/mcu-diagnostics skills, files hold the Pi's whole history so filter by the run's time window), `run.json`, `analysis.json`.
 
+## Helpers
+
+Offline, on run dirs under `~/bench/runs`: `uv run python tools/bench/summarize.py '<run_dir|glob>'... [--json]` (one diffable line per run: verdict, failed checks, stalls, abs_max/p99 per motor, epochs, mcu lateness, deployed head) and `uv run python tools/bench/events.py <run_dir> [--around T] [--names a,b]` (event counts in the run's time window, errors verbatim, klippy Stats trend for crashes). Use these instead of ad-hoc /tmp scripts.
+
+On hardware (lock-taking, re-entrant under `lock.py hold`): `gcode.py "G1 X10" ...` sends lines and fails on error; `state.py` reports printer state, deployed identity, klipper pid, MCU serial and capture board (read-only); `ab.py --ref A --ref B --gcode G [--runs 3] [--config C] [--host-cpus N --host-max-mhz M] [--dry-run]` runs the same gcode on clean worktrees of each ref in one lock hold and prints a side-by-side table. Landing a PR: `scripts/land-pr.sh <branch>`.
+
 ## Reading analysis.json
 
 `ok` = all four `checks`:
