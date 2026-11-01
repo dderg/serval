@@ -9,10 +9,13 @@ be commanded to do. Everything the classic Klipper stack does after the
 trapezoid generator (input shaping, smoothers, pressure advance) lives here,
 unified under one model, plus things that stack cannot express.
 
-In the live host, `motion_pipeline::Pipeline` runs these four stages
-synchronously on `kalico-planning`. Snapshot generation uses the same
-coordinator. There are no interstage queues or dedicated stage threads;
-numerical parallel work within a stage remains.
+In the live host, fitting, planning and lowering run on `kalico-planning`,
+and the shaper runs on its own `kalico-shaper` thread
+(`motion_pipeline::StagedPipeline`). Lowered items reach it in order through
+a bounded inbox (`SHAPER_INBOX_CAP`), so a slow shaper backpressures planning
+and a barrier still acknowledges only after everything ahead of it has been
+shaped. Snapshot generation runs the same four stages synchronously through
+`motion_pipeline::Pipeline`; numerical parallel work within a stage remains.
 
 The core idea: **resonance suppression and mechanical compensation are
 per-axis linear operators on the planned trajectory**, and there are exactly

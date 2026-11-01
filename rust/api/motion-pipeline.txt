@@ -16,7 +16,27 @@ pub fn motion_pipeline::planner::Planner::finish(&mut self, &mut impl core::ops:
 pub fn motion_pipeline::planner::Planner::idle(&mut self, &mut impl core::ops::function::FnMut(motion_pipeline::types::PlannedItem) -> bool) -> bool
 pub fn motion_pipeline::planner::Planner::new(motion_pipeline::types::StreamConfig) -> Self
 pub mod motion_pipeline::timing
+pub enum motion_pipeline::timing::Stage
+pub motion_pipeline::timing::Stage::FollowerBreakpoints
+pub motion_pipeline::timing::Stage::FollowerIngest
+pub motion_pipeline::timing::Stage::FollowerKernelFit
+pub motion_pipeline::timing::Stage::FollowerProjection
+pub motion_pipeline::timing::Stage::FollowerSourceFit
+pub motion_pipeline::timing::Stage::LeaderFit
+pub motion_pipeline::timing::Stage::MaterializeSource
+pub motion_pipeline::timing::Stage::MotorSide
+pub motion_pipeline::timing::Stage::PlanningBlockedOnShaper
+pub motion_pipeline::timing::Stage::ShaperBusy
+pub motion_pipeline::timing::Stage::VelocityPlan
+impl motion_pipeline::timing::Stage
+pub const motion_pipeline::timing::Stage::ALL: [Self; 11]
+pub fn motion_pipeline::timing::Stage::name(self) -> &'static str
+pub struct motion_pipeline::timing::StageTotal
+pub motion_pipeline::timing::StageTotal::calls: u64
+pub motion_pipeline::timing::StageTotal::stage: motion_pipeline::timing::Stage
+pub motion_pipeline::timing::StageTotal::total_us: u64
 pub fn motion_pipeline::timing::mono_us() -> u64
+pub fn motion_pipeline::timing::stage_totals() -> [motion_pipeline::timing::StageTotal; 11]
 pub mod motion_pipeline::types
 pub enum motion_pipeline::types::BaseItem
 pub motion_pipeline::types::BaseItem::Control(motion_pipeline::types::Control)
@@ -138,6 +158,14 @@ pub fn motion_pipeline::Pipeline::idle(&mut self, &mut impl core::ops::function:
 pub fn motion_pipeline::Pipeline::new(motion_pipeline::types::StreamConfig, trajectory::chain::AxisChainSet, alloc::vec::Vec<f64>, f64) -> Self
 pub fn motion_pipeline::Pipeline::with_fitted_tap(self, crossbeam_channel::channel::Sender<geometry::frontend::Move>) -> Self
 pub fn motion_pipeline::Pipeline::with_toolhead_tap(self, crossbeam_channel::channel::Sender<trajectory::continuous::ContinuousSegment>) -> Self
+impl motion_pipeline::Pipeline
+pub fn motion_pipeline::Pipeline::into_staged(self, impl core::ops::function::FnMut(motion_pipeline::types::TrajectoryItem) -> bool + core::marker::Send + 'static) -> motion_pipeline::StagedPipeline
+pub struct motion_pipeline::StagedPipeline
+impl motion_pipeline::StagedPipeline
+pub fn motion_pipeline::StagedPipeline::feed(&mut self, motion_pipeline::types::StreamInput) -> bool
+pub fn motion_pipeline::StagedPipeline::finish(&mut self) -> bool
+pub fn motion_pipeline::StagedPipeline::idle(&mut self) -> bool
+pub fn motion_pipeline::StagedPipeline::segments_planned(&self) -> u64
 pub struct motion_pipeline::StreamConfig
 pub motion_pipeline::StreamConfig::corner: geometry::fitter::config::CornerFitConfig
 pub motion_pipeline::StreamConfig::fit_tol_accel_mm_s2: f64
@@ -148,4 +176,5 @@ pub motion_pipeline::StreamConfig::max_buffer_moves: usize
 pub motion_pipeline::StreamConfig::max_extrude_only_accel_mm_s2: f64
 pub motion_pipeline::StreamConfig::max_extrude_only_velocity_mm_s: f64
 pub const motion_pipeline::CONTIGUITY_EPS_MM: f64
+pub const motion_pipeline::SHAPER_INBOX_CAP: usize
 pub fn motion_pipeline::advance_odometer(&mut [f64], &geometry::frontend::Move)

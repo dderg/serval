@@ -114,3 +114,97 @@ pub(crate) fn log_slow_phase(
         "shaper phase exceeded the slow-phase threshold"
     );
 }
+
+/// Pipeline stages whose cumulative wall time the process keeps, so a
+/// replay can report where its planning budget went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    VelocityPlan,
+    PlanningBlockedOnShaper,
+    ShaperBusy,
+    MaterializeSource,
+    LeaderFit,
+    FollowerProjection,
+    FollowerIngest,
+    FollowerSourceFit,
+    FollowerBreakpoints,
+    FollowerKernelFit,
+    MotorSide,
+}
+
+impl Stage {
+    pub const ALL: [Self; 11] = [
+        Self::VelocityPlan,
+        Self::PlanningBlockedOnShaper,
+        Self::ShaperBusy,
+        Self::MaterializeSource,
+        Self::LeaderFit,
+        Self::FollowerProjection,
+        Self::FollowerIngest,
+        Self::FollowerSourceFit,
+        Self::FollowerBreakpoints,
+        Self::FollowerKernelFit,
+        Self::MotorSide,
+    ];
+
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::VelocityPlan => "velocity_plan",
+            Self::PlanningBlockedOnShaper => "planning_blocked_on_shaper",
+            Self::ShaperBusy => "shaper_busy",
+            Self::MaterializeSource => "materialize_source",
+            Self::LeaderFit => "leader_fit",
+            Self::FollowerProjection => "follower_projection",
+            Self::FollowerIngest => "follower_ingest",
+            Self::FollowerSourceFit => "follower_source_fit",
+            Self::FollowerBreakpoints => "follower_breakpoints",
+            Self::FollowerKernelFit => "follower_kernel_fit",
+            Self::MotorSide => "motor_side",
+        }
+    }
+}
+
+/// Cumulative time and entry count of one [`Stage`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StageTotal {
+    pub stage: Stage,
+    pub total_us: u64,
+    pub calls: u64,
+}
+
+struct StageCounter {
+    total_us: std::sync::atomic::AtomicU64,
+    calls: std::sync::atomic::AtomicU64,
+}
+
+static STAGE_COUNTERS: [StageCounter; Stage::ALL.len()] = [const {
+    StageCounter {
+        total_us: std::sync::atomic::AtomicU64::new(0),
+        calls: std::sync::atomic::AtomicU64::new(0),
+    }
+}; Stage::ALL.len()];
+
+pub(crate) fn record_stage(stage: Stage, elapsed_us: u128) {
+    let counter = &STAGE_COUNTERS[stage as usize];
+    counter.total_us.fetch_add(
+        u64::try_from(elapsed_us).unwrap_or(u64::MAX),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    counter
+        .calls
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Every stage's totals since the process started.
+#[must_use]
+pub fn stage_totals() -> [StageTotal; Stage::ALL.len()] {
+    Stage::ALL.map(|stage| {
+        let counter = &STAGE_COUNTERS[stage as usize];
+        StageTotal {
+            stage,
+            total_us: counter.total_us.load(std::sync::atomic::Ordering::Relaxed),
+            calls: counter.calls.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    })
+}

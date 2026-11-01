@@ -13,8 +13,8 @@ fn a_slow_drain_reserves_runway_for_repeating_it_even_after_a_faster_drain() {
             trajectory::AxisChainSet::default(),
             vec![0.0; 4],
             0.0,
-        ),
-        output: output_tx,
+        )
+        .into_staged(move |item| output_tx.send(item).is_ok()),
         links: Arc::default(),
         timeline: crate::worker::tests::idle_timeline(Arc::default()),
         undrained_since: Some(Instant::now()),

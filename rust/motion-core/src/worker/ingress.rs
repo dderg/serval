@@ -57,8 +57,7 @@ pub(super) struct Ingress {
     /// Stream time the dispatched timeline has reached, mirrored from barrier
     /// acks; nudge profiles are planned from it.
     pub(super) t_next: f64,
-    pub(super) pipeline: motion_pipeline::Pipeline,
-    pub(super) output: crossbeam_channel::Sender<motion_pipeline::TrajectoryItem>,
+    pub(super) pipeline: motion_pipeline::StagedPipeline,
     pub(super) links: Arc<WorkerLinks>,
     pub(super) timeline: ExecutionTimeline,
     pub(super) undrained_since: Option<Instant>,
@@ -84,8 +83,7 @@ impl Ingress {
                 match rx.try_recv() {
                     Ok(msg) => Some(msg),
                     Err(crossbeam_channel::TryRecvError::Empty) => {
-                        let output = &self.output;
-                        if !self.pipeline.idle(&mut |item| output.send(item).is_ok()) {
+                        if !self.pipeline.idle() {
                             if self.links.shutting_down.load(Ordering::Acquire) {
                                 return;
                             }
@@ -128,12 +126,7 @@ impl Ingress {
         if self.links.shutting_down.load(Ordering::Acquire) {
             return;
         }
-        let output = &self.output;
-        if !self
-            .pipeline
-            .feed(item, &mut |item| output.send(item).is_ok())
-            && !self.links.shutting_down.load(Ordering::Acquire)
-        {
+        if !self.pipeline.feed(item) && !self.links.shutting_down.load(Ordering::Acquire) {
             fatal("execution owner closed during planning");
         }
     }

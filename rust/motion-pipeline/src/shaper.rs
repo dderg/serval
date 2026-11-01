@@ -209,6 +209,7 @@ impl Shaper {
         let rebuilt = materialize_changed_sources(&mut segment, &self.chains, self.fit_tol)
             .unwrap_or_else(|error| panic!("shaper: {error}"));
         let elapsed_us = started.elapsed_us();
+        crate::timing::record_stage(crate::timing::Stage::MaterializeSource, elapsed_us);
         if crate::timing::is_slow_phase(elapsed_us) {
             crate::timing::log_slow_phase(
                 "materialize_source",
@@ -613,6 +614,7 @@ fn apply_axis_chains(
         &mut projection_timing,
     )?;
     let projection_us = projection_started.elapsed_us();
+    projection_timing.record_stages(projection_us);
     if crate::timing::is_slow_phase(projection_us) {
         crate::timing::log_slow_phase(
             "follower_projection",
@@ -633,6 +635,7 @@ fn apply_axis_chains(
     let motor_started = crate::timing::stopwatch();
     let (motor_axes, motor_pieces) = apply_motor_side_stages(&mut out, chains, fit_tol)?;
     let motor_us = motor_started.elapsed_us();
+    crate::timing::record_stage(crate::timing::Stage::MotorSide, motor_us);
     if crate::timing::is_slow_phase(motor_us) {
         crate::timing::log_slow_phase(
             "motor_side",
@@ -1264,6 +1267,7 @@ fn fit_leader_axes(
             .collect()
     };
     let fit_elapsed_us = fit_started.elapsed_us();
+    crate::timing::record_stage(crate::timing::Stage::LeaderFit, fit_elapsed_us);
     if crate::timing::is_slow_phase(fit_elapsed_us) {
         let per_axis: Vec<String> = columns
             .iter()
