@@ -48,7 +48,7 @@ uv run python tools/bench/analyze.py <run_dir> [--gap S]
 uv run python tools/bench/capture.py --help        # standalone capture
 ```
 
-`run.py` sanitizes the gcode (allowlist; unknown commands raise), pushes config, restarts, uploads, captures, prints, fetches logs. Test gcodes: `tools/bench/gcode/`.
+`run.py` sanitizes the gcode (allowlist; unknown commands raise), pushes config, restarts, uploads, captures, prints, fetches logs. Test gcodes: `tools/bench/gcode/` (`gen_speed_ladder.py` regenerates the speed/extrude ladders). `--config tools/bench/configs/<name>.cfg` runs with an alternate printer config. `--host-cpus N --host-max-mhz M` emulate a weaker host (klipper CPUAffinity drop-in + cpufreq `scaling_max_freq`), always restored afterwards, and are recorded in `run.json`.
 
 ## Run dir (`~/bench/runs/<YYYYmmdd-HHMMSS>/`)
 

@@ -142,22 +142,22 @@ def validate_config(text: str) -> None:
             reason = FORBIDDEN_PINS.get(pin.upper())
             if reason:
                 raise BenchError(
-                    f"printer.cfg line {number}: pin {pin.upper()} is forbidden ({reason})"
+                    f"config line {number}: pin {pin.upper()} is forbidden ({reason})"
                 )
 
 
-def push_config() -> bool:
-    text = REPO_CFG.read_text()
+def push_config(config: Path = REPO_CFG) -> bool:
+    text = config.read_text()
     validate_config(text)
     if ssh(f"cat {PI_CONFIG}") == text:
         return False
-    scp_to_pi(REPO_CFG, PI_CONFIG)
+    scp_to_pi(config, PI_CONFIG)
     return True
 
 
-def prepare_printer() -> None:
+def prepare_printer(config: Path = REPO_CFG) -> None:
     state = printer_state()
     if state != "ready":
         raise BenchError(f"printer state is {state!r}, expected 'ready'")
-    push_config()
+    push_config(config)
     firmware_restart()
