@@ -49,6 +49,7 @@ uv run python tools/bench/deploy.py config         # validate + push printer.cfg
 uv run python tools/bench/run.py <gcode> [--runs-dir ~/bench/runs] [--timeout 1800]
 uv run python tools/bench/analyze.py <run_dir> [--gap S]
 uv run python tools/bench/capture.py --help        # standalone capture
+uv run python tools/bench/cdc_throughput.py --seconds 60  # capture-board USB throughput probe (firmware mode "T"; Gate 0 of capture-fw/EVENT_MODE.md)
 ```
 
 `run.py` sanitizes the gcode (allowlist; unknown commands raise), pushes config, restarts, uploads, captures, prints, fetches logs. Test gcodes: `tools/bench/gcode/` (`gen_speed_ladder.py` regenerates the speed/extrude ladders). `--config tools/bench/configs/<name>.cfg` runs with an alternate printer config. `--host-cpus N --host-max-mhz M` emulate a weaker host (klipper CPUAffinity drop-in + cpufreq `scaling_max_freq`), always restored afterwards, and are recorded in `run.json`.

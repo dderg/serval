@@ -88,7 +88,7 @@ USB FS bulk tops out at 1.216 MB/s (19 × 64 B per frame). The polled `usbd-seri
 
 Plan: per-channel second-difference varints, which are lossless and cost about 20 cycles per event. Add a 64 KB output ring that rides out a 0.3 s burst even at a 200 KB/s deficit. **No intra-run hybrid.** Counts come from the same complete event stream. If the output ring overflows, the run faults with **OutputOverflow**. It does not drop timestamps behind a "counts only" marker, because that would silently create a second truth. Count mode remains the run-level fallback for anything event mode cannot carry.
 
-**Gate 0** (half a day): a throughput probe built into the same firmware streams a counter flat out while the host measures. Go if ≥600 KB/s is sustained for 60 s.
+**Gate 0: passed.** Firmware mode `T` streams SVT1 frames (528 B, payload byte = low byte of seq) through the stock `usbd-serial` 128 B buffer; `tools/bench/cdc_throughput.py` checks every frame. Measured 830.8 KB/s sustained over 60 s (94,412 frames, every second 830.0–831.6 KB, no seq gap, no corruption), 1.4× the all-axes peak with u16 intervals and ~1.9× with second-difference varints.
 
 ## Wire and run-dir format
 

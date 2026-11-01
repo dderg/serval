@@ -23,6 +23,7 @@ use capture::{Fault, Sampler, CHANNEL_COUNT};
 use ring::TickRing;
 
 const FRAME_MAGIC: [u8; 4] = *b"SVC1";
+const THROUGHPUT_MAGIC: [u8; 4] = *b"SVT1";
 const FRAME_HEADER_LEN: usize = 16;
 const TICKS_PER_FRAME: usize = 128;
 const TICK_BYTES: usize = CHANNEL_COUNT;
@@ -30,6 +31,7 @@ const FRAME_MAX_LEN: usize = FRAME_HEADER_LEN + TICKS_PER_FRAME * TICK_BYTES;
 const STATUS_DATA: u8 = 0;
 const CMD_START: u8 = b'S';
 const CMD_STOP: u8 = b'X';
+const CMD_THROUGHPUT: u8 = b'T';
 const NO_FAULT: u16 = 0;
 const USB_VID_ST: u16 = 0x0483;
 const USB_PID_VCP: u16 = 0x5740;
@@ -73,6 +75,7 @@ struct Stream {
     sent: usize,
     seq: u32,
     fault_reported: bool,
+    throughput: bool,
     command: [u8; 2],
     command_len: usize,
 }
@@ -85,6 +88,7 @@ impl Stream {
             sent: 0,
             seq: 0,
             fault_reported: true,
+            throughput: false,
             command: [0; 2],
             command_len: 0,
         }
@@ -95,7 +99,18 @@ impl Stream {
     }
 
     fn write_header(&mut self, first_tick: u32, ticks: u16, status: u8, detail: u8) {
-        self.frame[0..4].copy_from_slice(&FRAME_MAGIC);
+        self.write_header_with(FRAME_MAGIC, first_tick, ticks, status, detail);
+    }
+
+    fn write_header_with(
+        &mut self,
+        magic: [u8; 4],
+        first_tick: u32,
+        ticks: u16,
+        status: u8,
+        detail: u8,
+    ) {
+        self.frame[0..4].copy_from_slice(&magic);
         self.frame[4..8].copy_from_slice(&self.seq.to_le_bytes());
         self.frame[8..12].copy_from_slice(&first_tick.to_le_bytes());
         self.frame[12..14].copy_from_slice(&ticks.to_le_bytes());
@@ -120,7 +135,19 @@ impl Stream {
         self.fault_reported = true;
     }
 
+    fn stage_throughput(&mut self) {
+        let pattern = self.seq as u8;
+        let payload_len = (FRAME_MAX_LEN - FRAME_HEADER_LEN) as u16;
+        self.write_header_with(THROUGHPUT_MAGIC, 0, payload_len, STATUS_DATA, 0);
+        self.frame[FRAME_HEADER_LEN..].fill(pattern);
+        self.frame_len = FRAME_MAX_LEN;
+    }
+
     fn stage_next(&mut self) {
+        if self.throughput {
+            self.stage_throughput();
+            return;
+        }
         let available = RING.available();
         if available >= TICKS_PER_FRAME {
             self.stage_data(TICKS_PER_FRAME);
@@ -158,7 +185,14 @@ impl Stream {
         capture::start_snapshot_timer();
     }
 
+    fn start_throughput(&mut self) {
+        self.stop();
+        self.seq = 0;
+        self.throughput = true;
+    }
+
     fn stop(&mut self) {
+        self.throughput = false;
         capture::stop_snapshot_timer();
         cortex_m::interrupt::free(|cs| SAMPLER.borrow(cs).replace(None));
         RING.reset();
@@ -182,6 +216,7 @@ impl Stream {
             self.command_len = 0;
             match self.command {
                 [CMD_START, mask] => self.start(mask),
+                [CMD_THROUGHPUT, _] => self.start_throughput(),
                 [CMD_STOP, _] => self.stop(),
                 _ => panic!("unknown command"),
             }
