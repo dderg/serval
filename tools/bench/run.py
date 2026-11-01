@@ -24,6 +24,7 @@ from pi import (
     BenchError,
     http,
     prepare_printer,
+    printer_state,
     read_deployed,
     scp_from_pi,
     upload,
@@ -81,6 +82,9 @@ def poll_print(capture: Capture, timeout_s: float) -> dict:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         capture.check()
+        state = printer_state()
+        if state != "ready":
+            raise BenchError(f"klippy entered state {state!r} during the print")
         stats = print_stats()
         if stats["state"] in TERMINAL_STATES:
             return stats

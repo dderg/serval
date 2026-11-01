@@ -96,7 +96,8 @@ def rsync_changes(tree: Path, files: list[str]) -> list[str]:
     result = subprocess.run(
         [
             "rsync",
-            "-a",
+            "-rlpgoD",
+            "--checksum",
             "-i",
             "--from0",
             "--files-from=-",
