@@ -15,7 +15,7 @@ Pin positions: F401 = header side + position counted from the top of the pinout 
 | 7 | Extruder heater duty | F401→F407 | PB4 (R, 9) | PD14 (H2, 13) | no |
 | 8 | Bed heater duty | F401→F407 | PB5 (R, 8) | PD15 (H2, 16) | no |
 | 9 | Part fan duty | F401→F407 | PB3 (R, 10) | PE8 (H1, 21) | no |
-| 10 | Clock reference | F401→F407 | PA8 (R, 16) MCO1 | PE5 (H1, 41) TIM9_CH1 (proposed; see below) | no |
+| 10 | Clock reference | F401→F407 | PA8 (R, 16) MCO1 | PE5 (H1, 41) TIM9_CH1 | no |
 | 11 | TMC UART, single wire | F401↔F407 | PB10 (L, 17) | PA2 (H1, 32) USART2_TX half-duplex | yes |
 | 12 | Extra GND (analog return) | — | G (L, 19) | GND (H1, 3) | no |
 
@@ -28,8 +28,18 @@ Pin positions: F401 = header side + position counted from the top of the pinout 
 
 ## Pins I would change or flag
 
-1. **Clock: PE5 instead of PA15 (recommended).** PA15 is the DevEBox W25Q16BV flash /CS. It works only if the F407 keeps the flash idle (PB3 SCK driven low, PB5 low, PB4 input) because /CS would toggle at the MCO rate. PE5 is TIM9_CH1 (external-clock mode on a free timer, 16-bit is enough: at 40 kHz sampling, 6.25 MHz is ~156 counts per tick) and has nothing on the board. If you keep PA15, use TIM2_CH1/ETR there.
-2. **MCO needs firmware, not just a wire.** Klipper has no MCO1 setup (`grep MCO src/stm32` is empty); the F401 build needs a small addition (RCC_CFGR MCO1 = HSE 25 MHz, prescaler /4 → 6.25 MHz on PA8). `pi.py` already forbids PA8 in configs.
+1. **Clock: PE5 instead of PA15 (approved).** PA15 is the DevEBox W25Q16BV flash /CS and would toggle it at the MCO rate. PE5 is TIM9_CH1 (external-clock mode on a free timer; 16-bit is enough: at 40 kHz sampling, 6.25 MHz is ~156 counts per tick) and has nothing on the board.
+2. **MCO1 is enabled by the bench, not by Kalico.** Production firmware stays untouched and klippy must never configure PA8 (`pi.py` already forbids it). After every F401 reset or flash (reset clears RCC and GPIO state, including the reset caused by FIRMWARE_RESTART), the Pi writes the registers over SWD with openocd:
+
+   ```
+   mmw 0x40023830 0x00000001 0x00000000   # RCC_AHB1ENR |= GPIOAEN
+   mmw 0x40023808 0x06400000 0x07600000   # RCC_CFGR: MCO1=HSE (10), MCO1PRE=/4 (110) -> 25 MHz / 4 = 6.25 MHz
+   mmw 0x40020008 0x00030000 0x00030000   # GPIOA_OSPEEDR PA8 = very high
+   mmw 0x40020024 0x00000000 0x0000000F   # GPIOA_AFRH PA8 = AF0 (MCO1)
+   mmw 0x40020000 0x00020000 0x00030000   # GPIOA_MODER PA8 = alternate function
+   ```
+
+   (`mmw addr setbits clearbits`.) `openocd-target.cfg` uses `connect_assert_srst`, which would reset the MCU on every connect, so the live write needs its own config without that option (attach without halting or resetting). Wiring this into `deploy.py` (`flash-target`, `reset-target`) and `run.py` is a separate tooling change; until it exists the clock row stays unused.
 3. **TMC UART is bit-banged.** The F401 has no USART3, so PB10 is not a hardware UART pin; Klipper's `tmc_uart` bit-bangs any GPIO at 40 kbaud (`TMC_BAUD_RATE`), so PB10 is fine with `uart_pin: PB10` and no `tx_pin`. The F407 side uses USART2 with `HDSEL` and PA2 as open-drain with the internal pull-up; the 1 kΩ keeps the two push-pull drivers from fighting.
 4. **DAC/ADC reference.** F407 DAC uses VREF+ and the F401 ADC uses VDDA, both 3.3 V from separate regulators: a ~1 % rail difference is a ~1 % ratio error. Calibrate once or treat thermistor temperature as ±1 °C. Add the extra GND (row 12) next to PA4/PA5.
 5. **TIM6_DAC shares a vector.** The capture tick uses `TIM6_DAC`; enable the DAC with software writes only (no DAC DMA/underrun interrupt), so the shared vector stays a pure TIM6 tick.
