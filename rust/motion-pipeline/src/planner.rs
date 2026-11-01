@@ -198,34 +198,23 @@ impl Planner {
     /// Furthest-forward seam whose emitted bodies are terminal-independent.
     ///
     /// The lowering reconstructs each move's velocity body against its run
-    /// terminal, so a move within one braking distance of the window's
-    /// fictional rest has its body shaped by that fiction and an appended
-    /// move would change it. That braking rides the *open tail* — the moves
-    /// beyond the seam — so the tail's own peak feedrate and tightest
-    /// acceleration budget are what set its length. Reading them off the whole
-    /// window instead makes one already-passed travel move dictate the
-    /// setback for every seam behind it, which on a print that interleaves
-    /// 600 mm/s travels with 300 mm/s extrusions inflates the held-back tail
-    /// ~3x and, with it, the re-plan window every arriving move is charged
-    /// for. `v · t_brake` still over-bounds the true `∫v dt`, so the held-back
-    /// tail keeps its safety factor; it is now just measured where it applies.
+    /// terminal, so a move within braking reach of the window's fictional
+    /// rest has its body shaped by that fiction and an appended move would
+    /// change it. Walking the open tail backward from that rest, each move
+    /// widens the speed the rest still allows by its own length and its own
+    /// acceleration budget; once that speed covers a move's own speed cap,
+    /// the rest can no longer reach anything ahead of that move, whatever
+    /// arrives later. Charging every move its own budget keeps one
+    /// Z-limited layer change (`max_z_accel`) from setting the braking
+    /// distance of every 1000 mm/s travel around it. `a · len` instead of
+    /// `2 · a · len` keeps the bound's 2x safety factor.
     fn terminal_independent_seam(&self) -> usize {
-        let mut arc = 0.0_f64;
-        let mut v_peak = 0.0_f64;
-        let mut accel = f64::INFINITY;
+        let mut rest_reach_v2 = 0.0_f64;
         for i in (1..self.moves.len()).rev() {
             let m = &self.moves[i];
-            arc += m.segment.s_len();
-            v_peak = v_peak.max(m.feedrate_mm_s.min(m.limits.max_velocity_mm_s));
-            accel = accel.min(m.limits.accel_mm_s2);
-            let brake_time = if v_peak <= 0.0 {
-                0.0
-            } else if accel <= 0.0 {
-                f64::INFINITY
-            } else {
-                v_peak / accel
-            };
-            if arc >= v_peak * brake_time {
+            let speed_cap = m.feedrate_mm_s.min(m.limits.max_velocity_mm_s);
+            rest_reach_v2 += m.limits.accel_mm_s2.max(0.0) * m.segment.s_len();
+            if rest_reach_v2 >= speed_cap.max(0.0).powi(2) {
                 return i;
             }
         }
