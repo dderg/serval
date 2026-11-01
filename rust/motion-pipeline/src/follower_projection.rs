@@ -1729,7 +1729,7 @@ impl<'a> FollowerSignal<'a> {
                     self.grid[self.grid.len() - 1]
                 );
                 let index = insertion - 1;
-                self.dense_s[index] + integrate(&|u| self.shaped_speed(u), self.dense_t[index], t)
+                self.dense_s[index] + gauss_legendre_3(&|u| self.shaped_speed(u), self.dense_t[index], t)
             }
         }
     }
@@ -2295,6 +2295,16 @@ fn assert_piece_seams(axis: usize, label: &str, pieces: &[nurbs::bezier::BezierP
         );
     }
 }
+fn gauss_legendre_3(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
+    if b - a <= 0.0 {
+        return 0.0;
+    }
+    let half = 0.5 * (b - a);
+    let mid = 0.5 * (a + b);
+    let node = half * 0.774_596_669_241_483_4;
+    half * (5.0 / 9.0 * (f(mid - node) + f(mid + node)) + 8.0 / 9.0 * f(mid))
+}
+
 fn integrate(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
     if b - a <= 0.0 {
         return 0.0;
