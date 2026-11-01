@@ -1,13 +1,15 @@
-"""Replay a host step tap (step_tap_mcu<N>.bin) into commanded step clocks.
+"""Replay a host step tap (step_tap_mcu<N>_p<pid>_s<session>.bin) into
+commanded step clocks.
 
-The host writes the tap when SERVAL_STEP_TAP_DIR is set
-(rust/motion-core/src/pump/step_tap.rs): an 8-byte magic, then 32-byte
+The host writes one tap file per endpoint session when SERVAL_STEP_TAP_DIR is
+set (rust/motion-core/src/pump/step_tap.rs): an 8-byte magic, then 32-byte
 records `kind u8 | flags u8 | u16 | oid u32 | mcu clock now u64 | payload`,
-one per frame the mcu was sent, in send order. Replay follows
+one per frame the mcu was sent, in send order, plus halts. Replay follows
 src/stepper_classic.c: `reset_step_clock` sets an oid's last step clock,
 `set_next_step_dir` the direction of its next move, and `queue_step` emits
 `count` steps at `last + interval`, then each further step `interval + add`
-later than the previous interval.
+later than the previous interval. A halt clears both, as the mcu does, so
+steps sent after it without a fresh reset and dir are refused.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-MAGIC = b"SVTAP1\0\0"
+MAGIC = b"SVTAP2\0\0"
 RECORD_LEN = 32
 HEADER = struct.Struct("<BBHIQ")
 CLOCK_WRAP = 1 << 32
@@ -31,8 +33,7 @@ KIND_QUEUE_STEP = 5
 KIND_QUEUE_STEP_HP = 6
 KIND_BARRIER = 7
 KIND_SET_POSITION = 8
-KIND_PROJECTION = 9
-KIND_HALT = 10
+KIND_HALT = 9
 
 
 class TapError(RuntimeError):
@@ -61,18 +62,10 @@ class Lane:
 
 
 @dataclass
-class Projection:
-    oid: int
-    freq: float
-    offset: float
-
-
-@dataclass
 class Tap:
     mcu_id: int
     clock_freq: float
     lanes: dict[int, Lane]
-    projections: list[Projection]
 
 
 def _extend(low: int, near: int) -> int:
@@ -96,7 +89,6 @@ def replay(data: bytes) -> Tap:
     mcu_id = None
     clock_freq = None
     lanes: dict[int, Lane] = {}
-    projections: list[Projection] = []
     states: dict[int, _OidState] = {}
     for index in range(len(body) // RECORD_LEN):
         record = body[index * RECORD_LEN : (index + 1) * RECORD_LEN]
@@ -120,6 +112,10 @@ def replay(data: bytes) -> Tap:
             state.next_dir = payload[0]
         elif kind == KIND_QUEUE_STEP:
             interval, count, add = struct.unpack_from("<IHh", payload)
+            if count == 0:
+                raise TapError(
+                    f"record {index}: oid {oid} queue_step with count 0"
+                )
             if state.last_clock is None or state.next_dir is None:
                 raise TapError(
                     f"record {index}: oid {oid} queue_step before its "
@@ -136,20 +132,18 @@ def replay(data: bytes) -> Tap:
             raise TapError(
                 f"record {index}: high-precision queue_step is not replayed"
             )
-        elif kind == KIND_PROJECTION:
-            freq, offset = struct.unpack_from("<dd", payload)
-            projections.append(Projection(oid, freq, offset))
         elif kind == KIND_HALT:
             if state.last_clock is not None and state.last_clock > now:
                 raise TapError(
                     f"record {index}: oid {oid} halted at clock {now} with steps "
                     f"queued to {state.last_clock}; the discarded tail is unknown"
                 )
+            states[oid] = _OidState()
         elif kind not in (KIND_BARRIER, KIND_SET_POSITION):
             raise TapError(f"record {index}: unknown kind {kind}")
     if mcu_id is None or clock_freq is None:
         raise TapError("step tap has no mcu header")
-    return Tap(mcu_id, clock_freq, lanes, projections)
+    return Tap(mcu_id, clock_freq, lanes)
 
 
 def load(path: Path) -> Tap:

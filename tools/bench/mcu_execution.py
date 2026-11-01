@@ -1,6 +1,6 @@
 """MCU execution error: captured step edges against the commanded schedule.
 
-Needs an event-mode capture and the host step tap (step_tap_mcu<N>.bin, see
+Needs an event-mode capture and the host step tap (step_tap_*.bin, see
 step_tap.py). Commanded and captured steps pair by index per motor; a count
 mismatch is fatal. One robust piecewise-linear map from the mcu clock to
 capture time (knots every KNOT_SECONDS) absorbs both crystals and the
@@ -157,7 +157,8 @@ def report(
         )
     if len(taps) != 1:
         raise ExecutionError(
-            f"expected one step tap, found {[t.name for t in taps]}"
+            f"expected one step tap session, found {[t.name for t in taps]}; "
+            "klippy rebuilt its endpoint (an in-process restart) during the run"
         )
     tap = step_tap.load(taps[0])
     channel_of = {m.role: m.channel for m in motors}
@@ -266,5 +267,4 @@ def report(
         "step_load_late_events": len(load_late),
         "step_load_late_matched": sum(1 for e in load_late if e["matched"]),
         "step_load_late_examples": load_late[:REPORTED_LOAD_LATE],
-        "projections": len(tap.projections),
     }

@@ -84,10 +84,51 @@ def test_a_halt_with_steps_still_queued_is_unreplayable():
         step_tap.replay(_tap(_reset(1_000), _dir(1), _steps(100, 3, 0), halt))
 
 
-def test_a_halt_after_the_last_step_is_harmless():
-    halt = _record(step_tap.KIND_HALT, OID, 5_000, b"")
+@pytest.mark.parametrize("halt_clock", [1_300, 5_000])
+def test_a_halt_at_or_after_the_last_step_is_harmless(halt_clock):
+    halt = _record(step_tap.KIND_HALT, OID, halt_clock, b"")
     tap = step_tap.replay(_tap(_reset(1_000), _dir(1), _steps(100, 3, 0), halt))
     assert tap.lanes[OID].step_clocks().size == 3
+
+
+@pytest.mark.parametrize(
+    "resent", [(), (_reset(6_000),), (_dir(1),)], ids=["none", "reset", "dir"]
+)
+def test_steps_after_a_halt_need_a_fresh_reset_and_dir(resent):
+    halt = _record(step_tap.KIND_HALT, OID, 5_000, b"")
+    with pytest.raises(step_tap.TapError, match="before its"):
+        step_tap.replay(
+            _tap(
+                _reset(1_000),
+                _dir(1),
+                _steps(100, 3, 0),
+                halt,
+                *resent,
+                _steps(100, 1, 0),
+            )
+        )
+
+
+def test_steps_after_a_halt_resume_from_the_fresh_reset():
+    halt = _record(step_tap.KIND_HALT, OID, 5_000, b"")
+    tap = step_tap.replay(
+        _tap(
+            _reset(1_000),
+            _dir(1),
+            _steps(100, 1, 0),
+            halt,
+            _reset(6_000),
+            _dir(0),
+            _steps(50, 1, 0),
+        )
+    )
+    assert tap.lanes[OID].step_clocks().tolist() == [1_100, 6_050]
+    assert tap.lanes[OID].step_dirs().tolist() == [1, 0]
+
+
+def test_a_queue_step_with_no_steps_fails():
+    with pytest.raises(step_tap.TapError, match="count 0"):
+        step_tap.replay(_tap(_reset(0), _dir(1), _steps(100, 0, 0)))
 
 
 def test_steps_before_a_clock_reset_fail():
