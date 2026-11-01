@@ -156,8 +156,6 @@ def push_config(config: Path = REPO_CFG) -> bool:
 
 
 def prepare_printer(config: Path = REPO_CFG) -> None:
-    state = printer_state()
-    if state != "ready":
-        raise BenchError(f"printer state is {state!r}, expected 'ready'")
+    wait_ready()
     push_config(config)
     firmware_restart()

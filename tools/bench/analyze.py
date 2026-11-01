@@ -955,6 +955,8 @@ def align_all(
 def reference_counts_at(
     events: StepEvents, start_count: int, t_stream: np.ndarray
 ) -> np.ndarray:
+    if events.time.size == 0:
+        return np.full(t_stream.shape, start_count)
     index = np.searchsorted(events.time, t_stream, "right") - 1
     return np.where(index >= 0, events.level[np.maximum(index, 0)], start_count)
 
