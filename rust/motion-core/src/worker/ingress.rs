@@ -1,4 +1,5 @@
-//! Owns ingress continuity, synchronous numerical planning, and measured runway pacing.
+//! Owns ingress continuity, fitting, velocity planning and lowering (the
+//! shaper runs behind them on its own thread), and measured runway pacing.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
