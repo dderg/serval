@@ -186,7 +186,7 @@ _MAX_WAITERS = 128
 _MAX_HOST_THREADS = 64
 _LINK_SLOTS_USED_OFFSET = 3600
 _LINKS_OFFSET = 3608
-_LINK_SLOT_SIZE = 24
+_LINK_SLOT_SIZE = 32
 _MAX_LINKS = 8
 # Pacer and device-link slots the harness reserves before any MCU process
 # claims one.

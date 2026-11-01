@@ -386,27 +386,37 @@ static int device_link_slot = -1;
 static __thread int device_handling;
 static __thread int stepping_own_timer;
 static __thread int reads_device_link;
+static _Atomic int device_link_read_yet;
 
-static int
-device_input_pending(void)
+// How far time may run while devices hold unread host bytes: not past now,
+// except that a device whose reading thread is itself stepping to its own
+// timer cannot read before time reaches that timer, so its input lets time
+// run exactly that far and no further.
+static uint64_t
+device_input_floor(uint64_t now)
 {
     if (atomic_load_explicit(&vshm->devices_handling, memory_order_acquire))
-        return 1;
+        return now;
+    uint64_t floor = NO_DEADLINE;
     uint32_t used = link_slots_used();
     for (uint32_t i = 0; i < used; i++) {
         struct vtime_device_link *link = &vshm->links[i];
-        if (stepping_own_timer && (int)i == device_link_slot)
+        if (!atomic_load_explicit(&link->pts_plus_one, memory_order_acquire)
+            || atomic_load_explicit(&link->written, memory_order_acquire)
+                   <= atomic_load_explicit(&link->consumed,
+                                           memory_order_acquire))
             continue;
-        if (atomic_load_explicit(&link->owner_stepping_own_timer,
-                                 memory_order_acquire))
+        if (stepping_own_timer && (int)i == device_link_slot
+            && !atomic_load_explicit(&device_link_read_yet,
+                                     memory_order_acquire))
             continue;
-        if (atomic_load_explicit(&link->pts_plus_one, memory_order_acquire)
-            && atomic_load_explicit(&link->written, memory_order_acquire)
-                   > atomic_load_explicit(&link->consumed,
-                                          memory_order_acquire))
-            return 1;
+        uint64_t reader_target = atomic_load_explicit(
+            &link->owner_stepping_to_ns, memory_order_acquire);
+        uint64_t link_floor = reader_target > now ? reader_target : now;
+        if (link_floor < floor)
+            floor = link_floor;
     }
-    return 0;
+    return floor;
 }
 
 static int
@@ -476,6 +486,7 @@ static void
 device_read(uint64_t bytes)
 {
     reads_device_link = 1;
+    atomic_store_explicit(&device_link_read_yet, 1, memory_order_release);
     if (!device_handling) {
         device_handling = 1;
         atomic_fetch_add_explicit(&vshm->devices_handling, 1,
@@ -545,9 +556,10 @@ locked_vtime_bound(void)
     if (floor < bound)
         bound = floor;
     uint64_t now = vtime_now();
-    if (bound > now && (device_input_pending() || !host_idle()))
+    if (bound > now && !host_idle())
         return now;
-    return bound;
+    uint64_t input_floor = device_input_floor(now);
+    return input_floor < bound ? input_floor : bound;
 }
 
 static uint64_t
@@ -674,7 +686,7 @@ vtime_advance_to(uint64_t target_ns)
             ? &vshm->links[device_link_slot]
             : NULL;
     if (own_link)
-        atomic_store_explicit(&own_link->owner_stepping_own_timer, 1,
+        atomic_store_explicit(&own_link->owner_stepping_to_ns, target_ns,
                               memory_order_release);
     stepping_own_timer = 1;
     while (vtime_now() < target_ns) {
@@ -686,7 +698,7 @@ vtime_advance_to(uint64_t target_ns)
     }
     stepping_own_timer = 0;
     if (own_link)
-        atomic_store_explicit(&own_link->owner_stepping_own_timer, 0,
+        atomic_store_explicit(&own_link->owner_stepping_to_ns, 0,
                               memory_order_release);
 }
 
@@ -905,6 +917,8 @@ forked_child(void)
     device_handling = 0;
     device_link_fd = -1;
     device_link_slot = -1;
+    reads_device_link = 0;
+    atomic_store_explicit(&device_link_read_yet, 0, memory_order_relaxed);
     memset(owned_pacer_slots, 0, sizeof(owned_pacer_slots));
 }
 
@@ -1144,6 +1158,10 @@ ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout,
 {
     if (!vshm)
         return real_ppoll(fds, nfds, timeout, sigmask);
+    struct timespec ready_now = { 0, 0 };
+    int ready = real_ppoll(fds, nfds, &ready_now, sigmask);
+    if (ready)
+        return ready;
     uint64_t deadline = deadline_from_ts(timeout);
     thread_blocks(deadline);
     int ret = ppoll_loop(fds, nfds, deadline, sigmask);
@@ -1212,6 +1230,24 @@ static int
 pselect_until(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
               uint64_t deadline, const sigset_t *sigmask)
 {
+    fd_set r0, w0, e0;
+    if (readfds)
+        r0 = *readfds;
+    if (writefds)
+        w0 = *writefds;
+    if (exceptfds)
+        e0 = *exceptfds;
+    struct timespec ready_now = { 0, 0 };
+    int ready = real_pselect(nfds, readfds, writefds, exceptfds, &ready_now,
+                             sigmask);
+    if (ready)
+        return ready;
+    if (readfds)
+        *readfds = r0;
+    if (writefds)
+        *writefds = w0;
+    if (exceptfds)
+        *exceptfds = e0;
     thread_blocks(deadline);
     int ret = pselect_loop(nfds, readfds, writefds, exceptfds, deadline,
                            sigmask);
@@ -1278,6 +1314,10 @@ epoll_pwait2(int epfd, struct epoll_event *events, int maxevents,
 {
     if (!vshm)
         return real_epoll_pwait2(epfd, events, maxevents, timeout, sigmask);
+    struct timespec ready_now = { 0, 0 };
+    int ready = real_epoll_pwait2(epfd, events, maxevents, &ready_now, sigmask);
+    if (ready)
+        return ready;
     uint64_t deadline = deadline_from_ts(timeout);
     thread_blocks(deadline);
     int ret = epoll_loop(epfd, events, maxevents, deadline, sigmask);

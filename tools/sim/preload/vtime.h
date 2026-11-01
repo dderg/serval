@@ -13,9 +13,10 @@
 
 struct vtime_device_link {
     _Atomic uint32_t pts_plus_one;
-    _Atomic uint32_t owner_stepping_own_timer;
+    uint32_t reserved;
     _Atomic uint64_t written;
     _Atomic uint64_t consumed;
+    _Atomic uint64_t owner_stepping_to_ns;
 };
 
 // A pacer is a thread that must observe every period of virtual time
@@ -83,5 +84,7 @@ _Static_assert(__builtin_offsetof(struct vtime_shm, host_tid) == 3344,
                "tools/sim/world.py _HOST_TID_OFFSET");
 _Static_assert(__builtin_offsetof(struct vtime_shm, links) == 3608,
                "tools/sim/world.py _LINKS_OFFSET");
+_Static_assert(sizeof(struct vtime_device_link) == 32,
+               "tools/sim/world.py _LINK_SLOT_SIZE");
 
 #endif
