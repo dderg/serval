@@ -138,6 +138,15 @@ pub fn motion_pipeline::Pipeline::idle(&mut self, &mut impl core::ops::function:
 pub fn motion_pipeline::Pipeline::new(motion_pipeline::types::StreamConfig, trajectory::chain::AxisChainSet, alloc::vec::Vec<f64>, f64) -> Self
 pub fn motion_pipeline::Pipeline::with_fitted_tap(self, crossbeam_channel::channel::Sender<geometry::frontend::Move>) -> Self
 pub fn motion_pipeline::Pipeline::with_toolhead_tap(self, crossbeam_channel::channel::Sender<trajectory::continuous::ContinuousSegment>) -> Self
+impl motion_pipeline::Pipeline
+pub fn motion_pipeline::Pipeline::into_staged(self, impl core::ops::function::FnMut(motion_pipeline::types::TrajectoryItem) -> bool + core::marker::Send + 'static) -> motion_pipeline::StagedPipeline
+pub struct motion_pipeline::StagedPipeline
+impl motion_pipeline::StagedPipeline
+pub fn motion_pipeline::StagedPipeline::feed(&mut self, motion_pipeline::types::StreamInput) -> bool
+pub fn motion_pipeline::StagedPipeline::finish(&mut self) -> bool
+pub fn motion_pipeline::StagedPipeline::idle(&mut self) -> bool
+impl core::ops::drop::Drop for motion_pipeline::StagedPipeline
+pub fn motion_pipeline::StagedPipeline::drop(&mut self)
 pub struct motion_pipeline::StreamConfig
 pub motion_pipeline::StreamConfig::corner: geometry::fitter::config::CornerFitConfig
 pub motion_pipeline::StreamConfig::fit_tol_accel_mm_s2: f64
@@ -148,4 +157,5 @@ pub motion_pipeline::StreamConfig::max_buffer_moves: usize
 pub motion_pipeline::StreamConfig::max_extrude_only_accel_mm_s2: f64
 pub motion_pipeline::StreamConfig::max_extrude_only_velocity_mm_s: f64
 pub const motion_pipeline::CONTIGUITY_EPS_MM: f64
+pub const motion_pipeline::SHAPER_INBOX_CAP: usize
 pub fn motion_pipeline::advance_odometer(&mut [f64], &geometry::frontend::Move)

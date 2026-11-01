@@ -209,6 +209,7 @@ impl Shaper {
         let rebuilt = materialize_changed_sources(&mut segment, &self.chains, self.fit_tol)
             .unwrap_or_else(|error| panic!("shaper: {error}"));
         let elapsed_us = started.elapsed_us();
+        crate::timing::record_stage(crate::timing::Stage::MaterializeSource, elapsed_us);
         if crate::timing::is_slow_phase(elapsed_us) {
             crate::timing::log_slow_phase(
                 "materialize_source",
@@ -613,6 +614,7 @@ fn apply_axis_chains(
         &mut projection_timing,
     )?;
     let projection_us = projection_started.elapsed_us();
+    projection_timing.record_stages(projection_us);
     if crate::timing::is_slow_phase(projection_us) {
         crate::timing::log_slow_phase(
             "follower_projection",
@@ -633,6 +635,7 @@ fn apply_axis_chains(
     let motor_started = crate::timing::stopwatch();
     let (motor_axes, motor_pieces) = apply_motor_side_stages(&mut out, chains, fit_tol)?;
     let motor_us = motor_started.elapsed_us();
+    crate::timing::record_stage(crate::timing::Stage::MotorSide, motor_us);
     if crate::timing::is_slow_phase(motor_us) {
         crate::timing::log_slow_phase(
             "motor_side",
@@ -1264,6 +1267,7 @@ fn fit_leader_axes(
             .collect()
     };
     let fit_elapsed_us = fit_started.elapsed_us();
+    crate::timing::record_stage(crate::timing::Stage::LeaderFit, fit_elapsed_us);
     if crate::timing::is_slow_phase(fit_elapsed_us) {
         let per_axis: Vec<String> = columns
             .iter()
@@ -1361,6 +1365,29 @@ fn differentiate_into(coefficients: &[f64], order: usize, out: &mut [f64]) -> us
     length
 }
 
+/// `TRANSLATION_BINOMIALS[m][p]` is the weight of a source moment of power
+/// `p` in a translated moment of power `m`, built by the same running
+/// product a per-term update would compute, so a lookup reproduces it bit
+/// for bit without a division in the translation's inner loop.
+const TRANSLATION_BINOMIALS: [[f64; MOMENT_POWER_CAPACITY]; MOMENT_POWER_CAPACITY] =
+    translation_binomials();
+
+const fn translation_binomials() -> [[f64; MOMENT_POWER_CAPACITY]; MOMENT_POWER_CAPACITY] {
+    let mut table = [[0.0; MOMENT_POWER_CAPACITY]; MOMENT_POWER_CAPACITY];
+    let mut moment_power = 0;
+    while moment_power < MOMENT_POWER_CAPACITY {
+        let mut choose = 1.0;
+        let mut source_power = 0;
+        while source_power <= moment_power {
+            table[moment_power][source_power] = choose;
+            choose *= (moment_power - source_power) as f64 / (source_power + 1) as f64;
+            source_power += 1;
+        }
+        moment_power += 1;
+    }
+    table
+}
+
 fn accumulate_translated_moments(
     source_origin: f64,
     source: &[f64],
@@ -1375,12 +1402,11 @@ fn accumulate_translated_moments(
         delta_powers[power] = delta_powers[power - 1] * delta;
     }
     for (moment_power, moment) in target.iter_mut().enumerate() {
-        let mut choose = 1.0;
+        let binomials = &TRANSLATION_BINOMIALS[moment_power];
         for source_power in 0..=moment_power {
-            *moment += choose * delta_powers[moment_power - source_power] * source[source_power];
-            if source_power < moment_power {
-                choose *= (moment_power - source_power) as f64 / (source_power + 1) as f64;
-            }
+            *moment += binomials[source_power]
+                * delta_powers[moment_power - source_power]
+                * source[source_power];
         }
     }
 }
@@ -1390,14 +1416,11 @@ fn taylor_shift(coefficients: &[f64], shift: f64, shifted: &mut [f64]) {
     assert!(coefficients.len() <= MOMENT_POWER_CAPACITY);
     let mut work = [0.0; MOMENT_POWER_CAPACITY];
     work[..coefficients.len()].copy_from_slice(coefficients);
-    let mut remaining = coefficients.len();
-    for target in shifted.iter_mut() {
-        for power in (1..remaining).rev() {
+    for (lowest, target) in shifted.iter_mut().enumerate() {
+        for power in (lowest + 1..coefficients.len()).rev() {
             work[power - 1] = nurbs::fmadd(shift, work[power], work[power - 1]);
         }
-        *target = work[0];
-        work.copy_within(1..remaining, 0);
-        remaining -= 1;
+        *target = work[lowest];
     }
 }
 
@@ -2864,3 +2887,7 @@ pub(crate) fn apply_derivative_gains_to_track(
     }
     nurbs::bezier::bezier_pieces_to_discontinuous_nurbs(&out_pieces)
 }
+
+#[cfg(test)]
+#[path = "shaper_moment_tests.rs"]
+mod shaper_moment_tests;

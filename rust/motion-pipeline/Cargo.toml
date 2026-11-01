@@ -19,6 +19,9 @@ crossbeam-channel = "0.5"
 thiserror = { workspace = true }
 tracing = "0.1"
 
+[features]
+bench-metrics = []
+
 [dev-dependencies]
 proptest = "1"
 

@@ -146,6 +146,8 @@ impl Planner {
             select_prefix,
         )
         .unwrap_or_else(|e| panic!("planner: velocity plan failed: {e:?}"));
+        let plan_us = clock.elapsed_us();
+        crate::timing::record_stage(crate::timing::Stage::VelocityPlan, plan_us);
         tracing::debug!(
             subsystem = "motion",
             event = "pipe_plan",
@@ -156,7 +158,7 @@ impl Planner {
             barrier = profile.barrier,
             v_barrier = profile.v_barrier,
             entry_v = self.entry_v,
-            plan_us = clock.elapsed_us(),
+            plan_us,
             t_us = crate::timing::mono_us(),
             "[pipe] plan"
         );

@@ -28,6 +28,7 @@ thiserror = { workspace = true }
 test-support = ["gcode"]
 
 [dev-dependencies]
+motion-pipeline = { path = "../motion-pipeline", features = ["bench-metrics"] }
 config-doc = { path = "../config-doc" }
 planner-config = { path = "../planner-config", features = ["doc"] }
 ethercat-rt = { path = "../ethercat-rt" }

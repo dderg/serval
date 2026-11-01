@@ -301,13 +301,13 @@ impl StreamWorkerHandle {
         pump: Sender<crate::pump::PumpMsg>,
     ) -> Self {
         let (tx, rx) = bounded(INPUT_CHANNEL_CAP);
-        let pipeline = Pipeline::new(config, axis_chains, home_pos.clone(), 0.0);
+        let pipeline = Pipeline::new(config, axis_chains, home_pos.clone(), 0.0)
+            .into_staged(move |item| output.send(item).is_ok());
         let ingress = ingress::Ingress {
             config,
             odometer: home_pos,
             t_next: 0.0,
             pipeline,
-            output,
             links: Arc::clone(&links),
             timeline,
             undrained_since: None,

@@ -1,8 +1,9 @@
 // Replays a gcode file through the production streaming pipeline, built from
 // a printer.cfg exactly as the live path builds it (stream config, post-
-// processor chains, per-move limits including the Z caps), and reports
-// producer throughput as a sliding-window realtime factor over stream time
-// plus the deepest run of moves absorbed without the planner committing.
+// processor chains, per-move limits including the Z caps, shaper on its own
+// thread), and reports producer throughput as a sliding-window realtime
+// factor over stream time, the deepest run of moves absorbed without the
+// planner committing, and where the wall time went stage by stage.
 //
 //   cargo run --release -p motion-core --example gcode_replay_bench -- \
 //       <file.gcode> --config <printer.cfg> [t_lo t_hi] \
@@ -19,6 +20,7 @@ use std::time::Instant;
 
 use motion_core::live_config;
 use motion_core::seam_test_harness::parse_gcode_to_moves_with;
+use motion_pipeline::timing::stage_totals;
 use motion_pipeline::{Pipeline, TrajectoryItem};
 
 fn take_flag(args: &mut Vec<String>, flag: &str) -> Option<String> {
@@ -88,42 +90,53 @@ fn main() {
     });
 
     let wall = Instant::now();
-    let mut pipeline = Pipeline::new(cfg, chains, vec![0.0; 4], 0.0);
-    let mut arrivals: Vec<(f64, f64)> = Vec::new();
-    let emitted = std::cell::Cell::new(0usize);
-    let mut output = |item| {
+    let (arrival_tx, arrival_rx) = crossbeam_channel::unbounded::<(f64, f64)>();
+    let mut pipeline = Pipeline::new(cfg, chains, vec![0.0; 4], 0.0).into_staged(move |item| {
         if let TrajectoryItem::Seg(seg) = item {
-            emitted.set(emitted.get() + 1);
-            arrivals.push((wall.elapsed().as_secs_f64(), seg.t_end));
+            arrival_tx
+                .send((wall.elapsed().as_secs_f64(), seg.t_end))
+                .expect("bench collects every arrival");
         }
         true
-    };
+    });
 
     let mut submitted = 0u64;
     let mut held = 0u64;
     let mut deepest_held = 0u64;
     for m in moves {
-        let emitted_before = emitted.get();
-        if !pipeline.feed(m.into(), &mut output) {
+        let planned_before = pipeline.segments_planned();
+        if !pipeline.feed(m.into()) {
             eprintln!("pipeline input closed at move {submitted}");
             process::exit(1);
         }
         submitted += 1;
-        held = if emitted.get() > emitted_before {
+        held = if pipeline.segments_planned() > planned_before {
             0
         } else {
             held + 1
         };
         deepest_held = deepest_held.max(held);
     }
-    assert!(pipeline.finish(&mut output));
+    assert!(pipeline.finish());
     let wall_s = wall.elapsed().as_secs_f64();
+    let arrivals: Vec<(f64, f64)> = arrival_rx.try_iter().collect();
     let stream_s = arrivals.last().map_or(0.0, |&(_, t)| t);
     println!(
         "moves={submitted} segments={} stream_secs={stream_s:.1} wall_secs={wall_s:.1} overall_x={:.2} deepest_held_moves={deepest_held}",
         arrivals.len(),
         stream_s / wall_s
     );
+    println!("stage breakdown (wall share, calls, per move):");
+    for total in stage_totals() {
+        let secs = total.total_us as f64 * 1e-6;
+        println!(
+            "  {:<28} {secs:8.3}s {:6.1}%  calls={:<8} {:7.1} us/move",
+            total.stage.name(),
+            100.0 * secs / wall_s,
+            total.calls,
+            total.total_us as f64 / submitted as f64
+        );
+    }
 
     // Sliding stream-time windows: wall time the producer spent emitting each.
     const WINDOW_S: f64 = 5.0;

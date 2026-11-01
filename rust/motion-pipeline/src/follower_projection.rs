@@ -75,6 +75,15 @@ pub(crate) struct ProjectionTiming {
 }
 
 impl ProjectionTiming {
+    pub fn record_stages(&self, projection_us: u128) {
+        use crate::timing::{Stage, record_stage};
+        record_stage(Stage::FollowerProjection, projection_us);
+        record_stage(Stage::FollowerIngest, self.ingest_us);
+        record_stage(Stage::FollowerSourceFit, self.source_fit_us);
+        record_stage(Stage::FollowerBreakpoints, self.breakpoints_us);
+        record_stage(Stage::FollowerKernelFit, self.kernel_fit_us);
+    }
+
     pub fn detail(&self) -> String {
         format!(
             "ingest_us={} ingests={} source_fit_us={} source_fits={} breakpoints_us={} \
