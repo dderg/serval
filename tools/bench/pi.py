@@ -101,6 +101,16 @@ def firmware_restart() -> None:
     wait_ready()
 
 
+def klipper_pid() -> int:
+    return int(ssh("systemctl show -p MainPID --value klipper").strip())
+
+
+def restart_klipper() -> None:
+    ssh("sudo systemctl restart klipper")
+    time.sleep(2)
+    wait_ready()
+
+
 def ssh(command: str) -> str:
     result = subprocess.run(
         ["ssh", PI_SSH, command], capture_output=True, text=True

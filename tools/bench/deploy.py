@@ -114,6 +114,10 @@ def cmd_sync() -> None:
             raise pi.BenchError(
                 f"build-native.sh failed with exit code {build.returncode}"
             )
+    if changed or stale:
+        before = pi.klipper_pid()
+        pi.restart_klipper()
+        print(f"klipper restarted: pid {before} -> {pi.klipper_pid()}")
 
 
 def wait_pi_serial() -> None:
