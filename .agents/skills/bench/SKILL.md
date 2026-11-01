@@ -51,7 +51,7 @@ Crash triage: `journalctl -u klipper` on the Pi (`ssh bench-pi`) and `events/hos
 
 - klippy aborted: systemd restarts it after ~10 s; `prepare_printer` waits for ready.
 - MCU latched in shutdown (survives klippy restarts; `prepare_printer` times out "printer did not become ready"): `deploy.py reset-target`. Full reflash: `deploy.py flash-target` (F401 fw from `f401.config` via Pi SWD). Capture board: `deploy.py flash-capture`.
-- F407 whose firmware disabled SWD: set BOOT0=1 and press reset (manual). Bench wiring is fixed; no extra wires can be added.
+- F407 whose firmware disabled SWD: set BOOT0=1 and press reset (manual). Ask the user for wiring changes (endstops, TMC UART, clock wire are planned, see README).
 
 ## Limits
 
