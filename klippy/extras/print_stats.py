@@ -12,6 +12,9 @@ class PrintStats:
         self.printer = config.get_printer()
         self.gcode_move = self.printer.load_object(config, "gcode_move")
         self.reactor = self.printer.get_reactor()
+        self.print_start_time = None
+        self.total_duration = 0.0
+        self.filament_used = 0.0
         self.reset()
         # Register commands
         self.gcode = self.printer.lookup_object("gcode")
