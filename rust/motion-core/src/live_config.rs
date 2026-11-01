@@ -9,9 +9,9 @@ use planner_config::PlannerConfig;
 ///
 /// It must sit well above the open tail a *legitimate* dense stream carries,
 /// or the backstop stops being a backstop: the open tail is the re-plan batch
-/// plus the brake-to-rest setback measured in moves, and at 600 mm/s with a
-/// `max_jerk` of 2·max_accel that setback is ~150 mm — about 300 moves
-/// of half-millimetre slicer output. At 128 the Voron 0 motion repro tripped
+/// plus the brake-to-rest tail past the finality barrier, measured in moves.
+/// Braking 600 mm/s at 1200 mm/s² takes 150 mm — about 300 moves of
+/// half-millimetre slicer output. At 128 the Voron 0 motion repro tripped
 /// it 41 times in 4673 moves, i.e. once per window: every look-ahead ended in
 /// a full stop. A `Move` is 192 bytes, so this ceiling costs 200 kB of window.
 pub const STREAM_MAX_BUFFER_MOVES: usize = 1024;

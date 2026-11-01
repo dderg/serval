@@ -289,9 +289,11 @@ job_sim_e2e() { "$ROOT/tools/sim/run.sh" test "$@"; }
 # (Z-limited layer changes included). The 1.3x floor is deliberately loose —
 # a healthy pipeline clears 2.5x on the slowest CI runner while the underrun
 # class lands under 1x — so a red gate means "this would crash a print", not
-# "the runner was busy". The held-moves ceiling is machine-independent: a
-# healthy planner commits once per re-plan batch (~650 slicer moves here);
-# a commit horizon that cannot clear a layer change holds thousands.
+# "the runner was busy". The held-moves ceiling is machine-independent: the
+# fitter merges ~10 slicer moves into each planned move here and the planner
+# re-plans every 64 planned moves, so a healthy stream goes ~650 slicer moves
+# without output; a planner that cannot commit past a layer change holds
+# thousands (3480 before the finality barrier alone gated commits).
 job_replay_budget() {
     cd "$RUST" && cargo run --release -p motion-core --example gcode_replay_bench -- \
         "$ROOT/tools/sim/gcode/voron_dense_top_layers.gcode" \

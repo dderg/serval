@@ -175,50 +175,23 @@ impl Planner {
         self.emit(n, &profile, output)
     }
 
-    /// Emit the prefix up to the furthest-forward clean seam that is inside
-    /// the finality barrier and clear of the brake-to-rest setback.
+    /// Emit the prefix up to the furthest-forward clean seam inside the
+    /// finality barrier. Seams at or before the barrier sit on their forward
+    /// ceiling, which appended moves can only leave unchanged, and every
+    /// committed body is reconstructed from its own two seam speeds, so the
+    /// committed prefix is the one a single window would plan.
     fn emit_committable(&mut self, output: &mut impl FnMut(PlannedItem) -> bool) -> bool {
-        let horizon = self.terminal_independent_seam();
         let profile = self.plan_selected(|barrier| {
-            let mut chosen = 0usize;
-            for i in 1..=barrier.min(horizon) {
-                if self.is_clean_seam(i) {
-                    chosen = i;
-                }
-            }
-            chosen
+            (1..=barrier)
+                .rev()
+                .find(|&i| self.is_clean_seam(i))
+                .unwrap_or(0)
         });
         let chosen = profile.moves.len();
         if chosen == 0 {
             return true;
         }
         self.emit(chosen, &profile, output)
-    }
-
-    /// Furthest-forward seam whose emitted bodies are terminal-independent.
-    ///
-    /// The lowering reconstructs each move's velocity body against its run
-    /// terminal, so a move within braking reach of the window's fictional
-    /// rest has its body shaped by that fiction and an appended move would
-    /// change it. Walking the open tail backward from that rest, each move
-    /// widens the speed the rest still allows by its own length and its own
-    /// acceleration budget; once that speed covers a move's own speed cap,
-    /// the rest can no longer reach anything ahead of that move, whatever
-    /// arrives later. Charging every move its own budget keeps one
-    /// Z-limited layer change (`max_z_accel`) from setting the braking
-    /// distance of every 1000 mm/s travel around it. `a · len` instead of
-    /// `2 · a · len` keeps the bound's 2x safety factor.
-    fn terminal_independent_seam(&self) -> usize {
-        let mut rest_reach_v2 = 0.0_f64;
-        for i in (1..self.moves.len()).rev() {
-            let m = &self.moves[i];
-            let speed_cap = m.feedrate_mm_s.min(m.limits.max_velocity_mm_s);
-            rest_reach_v2 += m.limits.accel_mm_s2.max(0.0) * m.segment.s_len();
-            if rest_reach_v2 >= speed_cap.max(0.0).powi(2) {
-                return i;
-            }
-        }
-        0
     }
 
     fn emit(
