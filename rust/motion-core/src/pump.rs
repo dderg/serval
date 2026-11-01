@@ -12,6 +12,7 @@ mod pump_loop;
 mod sample_sink;
 mod sched;
 mod stall;
+mod step_tap;
 mod stepcompress_sink;
 mod transit_trace;
 mod wire_sink;
@@ -62,6 +63,8 @@ mod lane_rejoin_tests;
 mod sched_tests;
 #[cfg(test)]
 mod skew_monitor_tests;
+#[cfg(test)]
+mod step_tap_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
