@@ -2292,11 +2292,12 @@ fn shaped_ladder<S: TrackSignal>(
     let fit_tol = policy.fit_tol;
     let h = t1 - t0;
     let t_of = |u: f64| nurbs::fmadd(0.5 * (u + 1.0), h, t0);
+    let coalesced_sliver = policy.floors.cubic.min(0.25 * h);
     let interior_t_of = |u: f64| {
         if u == -1.0 {
-            next_toward(t0, t1)
+            (t0 + coalesced_sliver).max(next_toward(t0, t1))
         } else if u == 1.0 {
-            next_toward(t1, t0)
+            (t1 - coalesced_sliver).min(next_toward(t1, t0))
         } else {
             t_of(u)
         }
