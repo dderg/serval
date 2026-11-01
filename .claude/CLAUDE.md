@@ -57,6 +57,13 @@ the wire-stable event table is `rust/runtime-contract/src/log_codes.rs`. To read
 logs — `DIAG_DUMP`, crash forensics, filtering — use the `mcu-diagnostics`
 and `query-logs` skills.
 
+# Landing a PR
+
+`scripts/land-pr.sh <branch>` pushes the branch, opens the PR if needed, waits for
+the checks, merges with a merge commit and moves local `main` to `origin/main`
+without checking anything out. Red checks print the failed-run log tail and
+exit non-zero. `--dry-run` prints the plan.
+
 # Reference docs
 
 - **MCU C/Rust boundary — architectural invariant:** [`docs/rewrite/mcu-c-rust-boundary.md`](docs/rewrite/mcu-c-rust-boundary.md). Read this before adding shared state between C and Rust on the MCU, or before reaching for `#[link_section]` on a Rust static. Rules: C owns boot, safety-critical paths, and all shared-memory placement; Rust owns the motion engine; the seam is `extern "C"` + `#[repr(C)]` only.
