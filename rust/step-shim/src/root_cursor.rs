@@ -138,6 +138,20 @@ impl StepRootCursor {
         self.lane.step_count
     }
 
+    /// The step a rotor at rest at `steps` microsteps is on. A seeded lattice
+    /// already holds it: the last threshold the motor crossed, within one
+    /// step of the rest on the side the motor arrived from. Rounding instead
+    /// relabels the rotor a step off whenever it stopped past a half step.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    pub fn count_resting_at(&self, steps: f64) -> i64 {
+        let seeded_lattice = self.positioned && self.lane.origin_mm == 0.0;
+        let held = self.lane.step_count;
+        if seeded_lattice && (steps - held as f64).abs() < 1.0 {
+            return held;
+        }
+        steps.round() as i64
+    }
+
     pub fn position(&self) -> f64 {
         self.lane.nominal_position(self.microstep_mm)
     }

@@ -490,18 +490,20 @@ pub fn reanchor_axis_targets(
         .collect()
 }
 
-/// Per-motor step-counter seeds for one mcu's pulse-capable lanes at a
-/// re-anchor, in the order its stepcompress endpoint holds them. Spatial
-/// motors take the motor-frame stop position; followers take
-/// [`FOLLOWER_REANCHOR_ORIGIN_MM`], the origin the stream odometer restarts
-/// them at. A phase-only lane keeps no host step counter, so it contributes
-/// nothing; a dual-transport lane does, because its classic counter must stay
-/// aligned for the next switch into pulse mode.
-pub fn stepcompress_seed_counts(
+/// Per-motor step-counter positions, in microsteps, for one mcu's
+/// pulse-capable lanes at a re-anchor, in the order its stepcompress endpoint
+/// holds them. Spatial motors take the motor-frame stop position; followers
+/// take [`FOLLOWER_REANCHOR_ORIGIN_MM`], the origin the stream odometer
+/// restarts them at. A phase-only lane keeps no host step counter, so it
+/// contributes nothing; a dual-transport lane does, because its classic
+/// counter must stay aligned for the next switch into pulse mode. Left
+/// unrounded: which step a resting rotor is on is the endpoint's call, since
+/// only its step lattice knows the direction the rotor arrived from.
+pub fn stepcompress_seed_steps(
     cfg: &McuAxisConfig,
     pos: geometry::MachinePos,
-) -> Result<Vec<i64>, String> {
-    seed_counts(cfg, pos, McuAxisConfig::pulse_capable, "pulse")
+) -> Result<Vec<f64>, String> {
+    seed_steps(cfg, pos, McuAxisConfig::pulse_capable, "pulse")
 }
 
 /// The sample-endpoint counterpart: one seed per phase-capable lane, in the
@@ -510,15 +512,19 @@ pub fn sample_seed_counts(
     cfg: &McuAxisConfig,
     pos: geometry::MachinePos,
 ) -> Result<Vec<i64>, String> {
-    seed_counts(cfg, pos, McuAxisConfig::phase_capable, "phase")
+    #[allow(clippy::cast_possible_truncation)]
+    Ok(seed_steps(cfg, pos, McuAxisConfig::phase_capable, "phase")?
+        .into_iter()
+        .map(|steps| steps.round() as i64)
+        .collect())
 }
 
-fn seed_counts(
+fn seed_steps(
     cfg: &McuAxisConfig,
     pos: geometry::MachinePos,
     capable: fn(&McuAxisConfig, usize) -> bool,
     what: &str,
-) -> Result<Vec<i64>, String> {
+) -> Result<Vec<f64>, String> {
     let motor = motor_frame(cfg, pos.0);
     cfg.axes
         .iter()
@@ -550,9 +556,7 @@ fn seed_counts(
                     cfg.mcu_id
                 ));
             }
-            let mm = reanchor_axis_mm(&motor, axis);
-            #[allow(clippy::cast_possible_truncation)]
-            Ok((mm / quantum).round() as i64)
+            Ok(reanchor_axis_mm(&motor, axis) / quantum)
         })
         .collect()
 }

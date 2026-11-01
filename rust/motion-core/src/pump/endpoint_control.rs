@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, mpsc::SyncSender};
 
 use crate::axis_transport::{TRANSPORT_PHASE, TRANSPORT_PULSE, transport_name};
 use crate::lock_ext::LockExt;
-use crate::mcu_config::{McuAxisConfig, sample_seed_counts, stepcompress_seed_counts};
+use crate::mcu_config::{McuAxisConfig, sample_seed_counts, stepcompress_seed_steps};
 use crate::types::AxisKey;
 
 use super::{BuzzLane, BuzzRoute, SampleEndpoint, StepcompressEndpoint, WireSink};
@@ -171,14 +171,14 @@ impl WireSink {
             EndpointCommand::SeedPosition { configs, position } => {
                 for cfg in configs.iter().filter(|cfg| !cfg.ethercat) {
                     if cfg.has_pulse_lanes() {
-                        let counts = stepcompress_seed_counts(cfg, position)?;
+                        let steps = stepcompress_seed_steps(cfg, position)?;
                         self.stepcompress
                             .get(&cfg.mcu_id)
                             .ok_or_else(|| {
                                 format!("position seed: no pulse endpoint for mcu {}", cfg.mcu_id)
                             })?
                             .lock_ok()
-                            .reset_position(&counts)
+                            .reset_position(&steps)
                             .map_err(|e| e.to_string())?;
                     }
                     if cfg.has_phase_lanes() {
