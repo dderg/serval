@@ -190,7 +190,7 @@ _LINK_SLOT_SIZE = 24
 _MAX_LINKS = 8
 # Pacer and device-link slots the harness reserves before any MCU process
 # claims one.
-HARNESS_PACER_SLOTS = 3
+HARNESS_PACER_SLOTS = 4
 HARNESS_LINK_SLOTS = 4
 
 

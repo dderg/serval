@@ -127,7 +127,10 @@ class CartographerMcuStub(BeaconMcuStub):
             step_tracking_will_fire_at_bed_contact = (
                 self._step_thread is not None
             )
-            if not step_tracking_will_fire_at_bed_contact:
+            if step_tracking_will_fire_at_bed_contact:
+                if self._clock is not None:
+                    self._start_contact_monitor()
+            else:
                 self._homing_trigger_timer = self._start_virtual_timer(
                     self._homing_trigger_delay, self._fire_contact_trigger
                 )
