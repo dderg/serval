@@ -902,7 +902,7 @@ impl StepcompressEndpoint {
         self.lane_of_oid(oid).is_some()
     }
 
-    pub fn reset_position(&mut self, pos_steps: &[i64]) -> Result<(), SendError> {
+    pub fn reset_position(&mut self, pos_steps: &[f64]) -> Result<(), SendError> {
         if pos_steps.len() != self.lanes.len() {
             return Err(self.fatal(&format!(
                 "position seed has {} entries for {} configured axes",
@@ -910,8 +910,13 @@ impl StepcompressEndpoint {
                 self.lanes.len()
             )));
         }
+        let counts: Vec<i64> = pos_steps
+            .iter()
+            .enumerate()
+            .map(|(motor, &steps)| self.shim.count_resting_at(motor, steps))
+            .collect();
         self.abort_outbound();
-        for (motor, &count) in pos_steps.iter().enumerate() {
+        for (motor, count) in counts.into_iter().enumerate() {
             self.reset_motor_position(motor, count)
                 .map_err(SendError::Fatal)?;
             let mcu_count = if self.shim.invert_dir(motor) {

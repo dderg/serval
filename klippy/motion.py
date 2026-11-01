@@ -807,10 +807,11 @@ class Motion:
             if self._planner_ready
             else 0.0
         )
+        scheduled_through = min(frontier, self._schedule_floor())
         for m in self.all_mcus:
             if getattr(m, "non_critical_disconnected", False):
                 continue
-            m.check_active(frontier, eventtime)
+            m.check_active(scheduled_through, eventtime)
         est = self.mcu.estimated_print_time(eventtime)
         buffer_time = frontier - est
         pump_backlog = self.engine.pump_backlog()

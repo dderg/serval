@@ -27,6 +27,10 @@ pub struct AxisQueue {
     /// at rest.
     pub seam_end_clock: Option<u64>,
     pub seam_end_at_rest: bool,
+    /// The host→mcu slope the last enqueued view was cut against. A dwell
+    /// that re-synced the map hands the next views a new one; a forward
+    /// seam gap cannot carry the change, so the lane takes a full cut.
+    pub seam_slope_hz: Option<f64>,
 }
 
 /// A view whose every contributing term holds one position: dwell / idle-blanket
@@ -53,6 +57,7 @@ impl AxisQueue {
             wire_end_clock: None,
             seam_end_clock: None,
             seam_end_at_rest: false,
+            seam_slope_hz: None,
         }
     }
 

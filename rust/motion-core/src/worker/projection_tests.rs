@@ -227,135 +227,89 @@ fn a_clock_record_lagging_the_true_mcu_puts_the_first_volley_past_and_blinds_the
     );
 }
 
-fn hold_axis(position: f64) -> trajectory::ContinuousAxis {
-    trajectory::ContinuousAxis::Hold {
-        position,
-        t_start: 0.0,
-        t_end: 1.0,
+fn two_mcu_sink(router: PassthroughRouter) -> Projection {
+    let mut sink = pump_sink(router);
+    let mut second = stepcompress_cfg();
+    second.mcu_id = 1;
+    second.axes = vec![1];
+    second.hw.stepper_oids = vec![8];
+    sink.mcu_configs.push(second);
+    sink
+}
+
+/// Both mcus' records claim the counter read `true_clock(host)` at `host`,
+/// with the estimator's current frequency guess.
+fn seed_both(sink: &Projection, host: f64, freq_est: f64) {
+    let mut router = sink.router.lock_ok();
+    for mcu_id in [0, 1] {
+        seed_clock_for(&mut router, mcu_id, freq_est, host, true_clock(host) as u64);
     }
 }
 
-fn moving_axis(from: f64, to: f64) -> trajectory::ContinuousAxis {
-    trajectory::ContinuousAxis::Spline(Arc::new(
-        nurbs::ScalarNurbs::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![from, to])
-            .expect("a linear lane curve is valid"),
-    ))
+fn seam_error_secs(sink: &Projection, mcu_id: u32, seam_host: f64) -> f64 {
+    (sink.project_exact(mcu_id, seam_host) - true_clock(seam_host)) / F_TRUE
 }
 
-fn segment_with_axes(axes: Vec<trajectory::ContinuousAxis>) -> trajectory::ContinuousSegment {
-    trajectory::ContinuousSegment {
-        axes: axes.into(),
-        followers: Arc::from([]),
-        spatial_path: false,
-        t_start: 0.0,
-        t_end: 1.0,
-        motor_mask: 0,
-        source_line: 0,
-        rest_at_end: true,
-    }
-}
-
-/// The re-anchor refinement: at a retimed epoch only lanes with REAL motion
-/// are re-based on the live clock; hold-only (idle) lanes keep their frozen
-/// domain so their step-clock stream never jumps by the projection's drift.
+/// The frozen slope carries the estimator's error at anchor time for as long
+/// as it stays frozen: 400 ppm over the first minute is 24 ms. A dwell's
+/// rejoin starts every lane from rest, so both mcus — including one whose
+/// first segment after the dwell would only hold — must re-sync there.
 #[test]
-fn a_retimed_reanchor_reseeds_moving_lanes_but_never_idle_hold_lanes() {
+fn a_dwell_resyncs_every_mcu_on_the_live_clock() {
     let clock = MockClock::new();
     let mut router =
         PassthroughRouter::with_clock(Arc::clone(&clock) as Arc<dyn Clock + Send + Sync>);
-    let handle = router.claim_mcu("stepcompress");
-    router.claim_mcu("extruder");
-    seed_clock(&mut router, F_TRUE, 0.0, true_clock(0.0) as u64);
-    seed_clock_for(&mut router, 1, F_TRUE, 0.0, true_clock(0.0) as u64);
+    router.claim_mcu("main");
+    router.claim_mcu("toolhead");
+    let mut sink = two_mcu_sink(router);
+    seed_both(&sink, 0.0, F_TRUE * (1.0 + 400e-6));
+    let first = sink.anchor_segment(0.0, 100.0, false).unwrap();
+    assert_eq!(first.epoch, crate::anchor::StreamEpoch::Reposition);
 
-    // The segment's lanes: axis 0 moves, axis 3 holds. The extruder mcu's
-    // lane curve is constant, so mcu_has_motion must be false for it and
-    // true for the spatial mcu.
-    let mut sink = pump_sink(router);
-    sink.mcu_configs.push(crate::mcu_config::McuAxisConfig {
-        mcu_id: 1,
-        axes: vec![3],
-        ethercat: false,
-        lane_kinds: vec![LaneKind::Pulse],
-        stepcompress_encoders: vec![StepcompressEncoder::HighPrecision],
-        hw: McuHardware {
-            kinematics: 0,
-            max_motor_velocity: vec![200.0],
-            motor_counts: vec![1],
-            microstep_distance: vec![0.01],
-            invert_dir: vec![false],
-            stepper_oids: vec![8],
-            move_queue_slots: 128,
-            step_pulse_seconds: vec![0.000_002],
-            phase_sample_rate: 0.0,
-            phase_ring_depth: 0,
-            stepcompress_max_error_secs: 0.0,
-        },
-    });
-    let segment = segment_with_axes(vec![
-        moving_axis(5.0, 10.0),
-        hold_axis(0.0),
-        hold_axis(0.0),
-        hold_axis(0.0),
-    ]);
+    clock.advance(Duration::from_secs_f64(60.0));
+    seed_both(&sink, 60.0, F_TRUE);
+    sink.mark_parked();
+    let dwell_end = 101.0;
+    let at = sink.anchor_segment(dwell_end, 102.0, false).unwrap();
+    assert_eq!(at.epoch, crate::anchor::StreamEpoch::Rejoin);
 
-    assert!(
-        sink.mcu_has_motion(&sink.mcu_configs[0].clone(), &segment),
-        "a lane that moves must re-anchor on the live clock"
-    );
-    assert!(
-        !sink.mcu_has_motion(&sink.mcu_configs[1].clone(), &segment),
-        "a constant (idle) lane must keep its frozen domain"
-    );
+    let seam = at.t0 + dwell_end;
+    for mcu_id in [0, 1] {
+        let err = seam_error_secs(&sink, mcu_id, seam);
+        assert!(
+            err.abs() < 2.0 / F_TRUE,
+            "mcu {mcu_id} must resume on the live clock after the dwell, off by {err:.6} s"
+        );
+    }
+}
 
-    // The live-record jump the moving lane re-anchor carries: seed the
-    // record, anchor once, then re-anchor with the record shifted; the
-    // moving lane's first clock follows the shift, the hold lane's domain
-    // stays put until ITS stream re-anchors.
-    let seam = 0.25;
-    sink.reanchor_projection(0, seam).unwrap();
-    sink.reanchor_projection(1, seam).unwrap();
-    let hold_clock_before = sink.project(1, seam);
+/// A correction that would pull the resume earlier than the rest began
+/// schedules it before the previous stream ended; it waits for a rest long
+/// enough to absorb it rather than landing inside motion.
+#[test]
+fn a_correction_longer_than_the_rest_waits_for_a_longer_rest() {
+    let clock = MockClock::new();
+    let mut router =
+        PassthroughRouter::with_clock(Arc::clone(&clock) as Arc<dyn Clock + Send + Sync>);
+    router.claim_mcu("main");
+    router.claim_mcu("toolhead");
+    let mut sink = two_mcu_sink(router);
+    seed_both(&sink, 0.0, F_TRUE * (1.0 + 400e-6));
+    sink.anchor_segment(0.0, 100.0, false).unwrap();
+    let frozen_before = sink.project_exact(1, 200.0);
 
-    clock.advance(Duration::from_secs_f64(30.0));
-    let host_now = sink.router.lock_ok().host_now_secs();
-    seed_clock(
-        &mut sink.router.lock_ok(),
-        F_TRUE,
-        host_now,
-        (true_clock(host_now) - 0.0183 * F_TRUE) as u64,
-    );
-    sink.reanchor_projection(0, host_now + crate::anchor::DEFAULT_LEAD_SECS)
-        .unwrap();
+    clock.advance(Duration::from_secs_f64(60.0));
+    seed_both(&sink, 60.0, F_TRUE);
+    sink.mark_parked();
+    let short_dwell_end = 100.01;
+    let at = sink.anchor_segment(short_dwell_end, 102.0, false).unwrap();
+    assert_eq!(at.epoch, crate::anchor::StreamEpoch::Rejoin);
 
-    let moving_clock = sink.project(0, host_now + crate::anchor::DEFAULT_LEAD_SECS);
-    let hold_clock_after = sink.project(1, host_now + crate::anchor::DEFAULT_LEAD_SECS);
-    let moving_expected = true_clock(host_now + crate::anchor::DEFAULT_LEAD_SECS) - 0.0183 * F_TRUE;
-    assert!(
-        (moving_clock as f64 - moving_expected).abs() <= 2.0,
-        "the moving lane's re-anchor must track the live record, got {moving_clock} \
-         vs {moving_expected:.0}"
+    assert_eq!(
+        sink.project_exact(1, 200.0),
+        frozen_before,
+        "a 10 ms rest cannot absorb a ~40 ms backward correction"
     );
-    // The hold lane was never re-anchored: its domain is still the original
-    // seed extrapolated with the ORIGINAL freq. Re-basing it on the live
-    // record would put its next piece 18.3 ms behind — the jump that moves
-    // an idle lane.
-    let hold_unmoved =
-        true_clock(seam) + (host_now + crate::anchor::DEFAULT_LEAD_SECS - seam) * F_TRUE;
-    assert!(
-        (hold_clock_after as f64 - hold_unmoved).abs() < 1.0,
-        "the hold lane's domain must not jump with the live record — it re-anchors only \
-         when it moves: got {hold_clock_after}, unmoved domain {hold_unmoved:.0}"
-    );
-    assert!(
-        (hold_clock_after as f64
-            - (true_clock(host_now + crate::anchor::DEFAULT_LEAD_SECS) - 0.0183 * F_TRUE))
-            .abs()
-            > 0.017 * F_TRUE,
-        "the hold lane must NOT have adopted the shifted live record"
-    );
-    let _ = hold_clock_before;
-    let _ = handle;
 }
 
 /// The fix: a reanchor re-seeds the frozen projection from the LIVE clock
@@ -417,59 +371,5 @@ fn a_reanchor_reseeds_from_the_live_clock_not_the_drifted_frozen_slope() {
         err_secs.abs() < 0.001,
         "the reanchored first clock must land on the live record (within 1 ms of the true \
          clock), got {err_secs:.6} s of error — the chained drift must not survive"
-    );
-}
-
-/// The bench fault of 2026-08-20: an idle (hold-only) mcu keeps its frozen
-/// slope across retimed epochs, so after hours parked the crystal-ppm drift
-/// exceeds the piece lead and the first hold piece lands in the mcu's past
-/// (pump-guard -308). Once the frozen slope's drift from the live record
-/// crosses the margin floor, a retimed dispatch must re-base the hold lane
-/// too; below the floor it must keep the frozen domain.
-#[test]
-fn a_parked_hold_lane_rebases_once_its_frozen_slope_drifts_past_the_floor() {
-    let clock = MockClock::new();
-    let mut router =
-        PassthroughRouter::with_clock(Arc::clone(&clock) as Arc<dyn Clock + Send + Sync>);
-    let _handle = router.claim_mcu("stepcompress");
-    seed_clock(&mut router, F_TRUE, 0.0, true_clock(0.0) as u64);
-
-    let mut sink = pump_sink(router);
-    let hold_segment = segment_with_axes(vec![
-        hold_axis(0.0),
-        hold_axis(0.0),
-        hold_axis(0.0),
-        hold_axis(0.0),
-    ]);
-    let cfg = sink.mcu_configs[0].clone();
-    sink.reanchor_projection(MCU_ID, 0.25).unwrap();
-    let prev = sink.frozen_projection.get(&MCU_ID).copied();
-
-    assert!(
-        !sink.needs_rebase(&cfg, &hold_segment, true, prev, 0.25),
-        "a freshly anchored hold lane keeps its frozen domain"
-    );
-
-    // Park for 2 h with the mcu crystal running 60 ppm fast relative to the
-    // frozen slope: the live record's clock pulls ahead of the frozen
-    // extrapolation by ~432 ms — far past the 20 ms floor.
-    clock.advance(Duration::from_secs_f64(7200.0));
-    let host_now = sink.router.lock_ok().host_now_secs();
-    let drift_secs = 60e-6 * 7200.0;
-    seed_clock(
-        &mut sink.router.lock_ok(),
-        F_TRUE,
-        host_now,
-        (true_clock(host_now) + drift_secs * F_TRUE) as u64,
-    );
-
-    assert!(
-        sink.needs_rebase(&cfg, &hold_segment, true, prev, host_now + 0.25),
-        "a parked hold lane whose frozen slope drifted past the margin floor \
-         must re-base on the live clock"
-    );
-    assert!(
-        !sink.needs_rebase(&cfg, &hold_segment, false, prev, host_now + 0.25),
-        "a continuation (non-retimed) dispatch never re-bases"
     );
 }

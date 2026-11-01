@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import pty
@@ -14,6 +15,7 @@ from tools.sim.emulators.beacon_identify_dict import (
     CLOCK_FREQ,
     IDENTIFY_BLOB,
 )
+from tools.sim.world import HarnessPacer
 
 if TYPE_CHECKING:
     from tools.sim.world import VirtualClock
@@ -52,6 +54,8 @@ class BeaconMcuStub:
     IDENTIFY_BLOB = IDENTIFY_BLOB
     CLOCK_FREQ = CLOCK_FREQ
     STUB_NAME = "beacon-stub"
+    CONTACT_POLL_S = 0.0005
+    HOMING_CHECK_S = 1.0 / 200.0
 
     def __init__(
         self,
@@ -90,6 +94,7 @@ class BeaconMcuStub:
         self._sample_thread: Optional[threading.Thread] = None
         self._master_fd: Optional[int] = None
         self._slave_fd: Optional[int] = None
+        self._link = None
         self._t0: float = time.monotonic()
         self._send_lock = threading.Lock()
         self._host_recv_seq: int = 1
@@ -131,6 +136,7 @@ class BeaconMcuStub:
         self._contact_trigger_freq: int = 0
         self._contact_triggered: bool = False
         self.contact_latch_commit_delay: float = 0.0
+        self.contact_heights: list[float] = []
         self._contact_latch_timer: Optional[threading.Event] = None
 
         self._z_current: float = 10.0
@@ -167,6 +173,8 @@ class BeaconMcuStub:
         os.symlink(slave_name, self._pty_path)
         self._slave_fd = slave_fd
         self._master_fd = master_fd
+        if self._clock is not None:
+            self._link = self._clock.claim_link(slave_fd)
         # Non-blocking master: a slow/absent slave reader must not deadlock
         # the reactor.
         import fcntl as _fcntl
@@ -198,6 +206,9 @@ class BeaconMcuStub:
 
     def stop(self) -> None:
         self._stop.set()
+        if self._link is not None:
+            self._clock.release_link(self._link)
+            self._link = None
         # Closing the master fd unblocks the select() in the reactor.
         if self._master_fd is not None:
             try:
@@ -298,14 +309,14 @@ class BeaconMcuStub:
                     self._step_tracking = True
                     self._z_anchor_steps = steps
                 if self._step_tracking:
-                    z = (
-                        self._z_anchor_mm
-                        + self._z_step_sign
-                        * (steps - self._z_anchor_steps)
-                        / self._z_steps_per_mm
-                    )
+                    z = self._z_at_steps(steps)
                     self._z_current = z
-                    if self._contact_homing_active and z <= 0.0:
+                    paced_monitor_fires = self._clock is not None
+                    if (
+                        self._contact_homing_active
+                        and z <= 0.0
+                        and not paced_monitor_fires
+                    ):
                         self._fire_contact_trigger(
                             self._bed_crossing_time(sampled_at, z)
                         )
@@ -326,6 +337,58 @@ class BeaconMcuStub:
         if prev_t is None or prev_z <= 0.0 or prev_z <= z:
             return sampled_at
         return prev_t + (sampled_at - prev_t) * prev_z / (prev_z - z)
+
+    def _z_at_steps(self, steps: int) -> float:
+        return (
+            self._z_anchor_mm
+            + self._z_step_sign
+            * (steps - self._z_anchor_steps)
+            / self._z_steps_per_mm
+        )
+
+    def _start_contact_monitor(self) -> None:
+        threading.Thread(
+            target=self._contact_monitor_loop,
+            name="beacon-stub-contact",
+            daemon=True,
+        ).start()
+
+    def _contact_monitor_loop(self) -> None:
+        """Bed contact checked every CONTACT_POLL_S of printer time from
+        the step counter at that instant. When a single step crossed the
+        bed since the last check, its own timestamp is the contact time;
+        a faster descent interpolates between the two exact checks."""
+        sock = self._batch_sock()
+        try:
+            with HarnessPacer(self._clock) as pacer:
+                prev_t, prev_z, prev_steps = None, None, None
+                while self._contact_homing_active:
+                    if not self._step_tracking:
+                        if not pacer.sleep(self.CONTACT_POLL_S, self._stop):
+                            return
+                        continue
+                    steps, sampled_at = self._query_steps_now(sock)
+                    z = self._z_at_steps(steps)
+                    if z <= 0.0:
+                        crossing = sampled_at
+                        if (
+                            prev_steps is not None
+                            and abs(steps - prev_steps) == 1
+                        ):
+                            crossing = self._query_last_step_vt(sock)
+                        elif prev_z is not None and prev_z > 0.0:
+                            crossing = prev_t + (sampled_at - prev_t) * (
+                                prev_z / (prev_z - z)
+                            )
+                        self._steps_now = steps
+                        self._z_current = z
+                        self._fire_contact_trigger(crossing)
+                        return
+                    prev_t, prev_z, prev_steps = sampled_at, z, steps
+                    if not pacer.sleep(self.CONTACT_POLL_S, self._stop):
+                        return
+        finally:
+            sock.close()
 
     def _monotonic(self) -> float:
         if self._clock is not None:
@@ -410,6 +473,7 @@ class BeaconMcuStub:
 
     def _reactor_loop(self) -> None:
         master_fd = self._master_fd
+        link = self._link
         while not self._stop.is_set():
             if master_fd is None:
                 break
@@ -428,7 +492,11 @@ class BeaconMcuStub:
             self.rx_byte_count += len(chunk)
             self._log("rx-raw", bytes(chunk))
             self._inbuf.extend(chunk)
-            self._drain_inbuf()
+            try:
+                self._drain_inbuf()
+            finally:
+                if link is not None:
+                    link.consumed(len(chunk))
 
     def _drain_inbuf(self) -> None:
         while True:
@@ -603,38 +671,45 @@ class BeaconMcuStub:
         t.start()
 
     def _homing_monitor_loop(self) -> None:
-        CHECK_HZ = 200.0
-        period = 1.0 / CHECK_HZ
-        iter_count = 0
-        while not self._stop.is_set() and self._home_active:
-            time.sleep(period)
-            if not self._step_tracking:
-                elapsed = self._monotonic() - self._homing_start_time
-                self._z_current = max(
-                    0.0,
-                    self._homing_start_z
-                    - elapsed * self._homing_approach_speed,
+        """Threshold checked every HOMING_CHECK_S of printer time. With a
+        world clock the loop holds a pacer seat and reads Z from the step
+        counter at each check, so the trigger fires within one check of
+        the true crossing however fast the world runs."""
+        with contextlib.ExitStack() as stack:
+            pacer = None
+            sock = None
+            if self._clock is not None:
+                pacer = stack.enter_context(HarnessPacer(self._clock))
+                sock = stack.enter_context(
+                    contextlib.closing(self._batch_sock())
                 )
-            freq = self._z_to_frequency(self._z_current)
-            count = self._freq_to_count(freq)
-            iter_count += 1
-            if iter_count % 40 == 0:
-                logging.info(
-                    "beacon-stub: homing monitor z=%.2f freq=%d "
-                    "count=%d threshold=%d",
-                    self._z_current,
-                    freq,
-                    count,
-                    self._threshold_trigger,
+            while not self._stop.is_set() and self._home_active:
+                if pacer is None:
+                    time.sleep(self.HOMING_CHECK_S)
+                elif not pacer.sleep(self.HOMING_CHECK_S, self._stop):
+                    return
+                if sock is not None and self._step_tracking:
+                    steps, _ = self._query_steps_now(sock)
+                    self._z_current = self._z_at_steps(steps)
+                elif not self._step_tracking:
+                    elapsed = self._monotonic() - self._homing_start_time
+                    self._z_current = max(
+                        0.0,
+                        self._homing_start_z
+                        - elapsed * self._homing_approach_speed,
+                    )
+                count = self._freq_to_count(
+                    self._z_to_frequency(self._z_current)
                 )
-            if self._threshold_trigger > 0:
+                if self._threshold_trigger <= 0:
+                    continue
                 if self._home_trigger_invert:
                     triggered = count <= self._threshold_untrigger
                 else:
                     triggered = count >= self._threshold_trigger
                 if triggered:
                     logging.info(
-                        "beacon-stub: TRIGGER z=%.2f count=%d threshold=%d",
+                        "beacon-stub: TRIGGER z=%.3f count=%d threshold=%d",
                         self._z_current,
                         count,
                         self._threshold_trigger,
@@ -666,7 +741,10 @@ class BeaconMcuStub:
         if self._homing_trigger_timer is not None:
             self._homing_trigger_timer.set()
         step_tracking_will_fire_at_bed_contact = self._step_thread is not None
-        if not step_tracking_will_fire_at_bed_contact:
+        if step_tracking_will_fire_at_bed_contact:
+            if self._clock is not None:
+                self._start_contact_monitor()
+        else:
             self._homing_trigger_timer = self._start_virtual_timer(
                 self._homing_trigger_delay, self._fire_contact_trigger
             )
@@ -697,6 +775,7 @@ class BeaconMcuStub:
         if self._log_path:
             with open(self._log_path, "a") as f:
                 f.write(contact_line)
+        self.contact_heights.append(self._z_current)
         self._contact_trigger_sample = self._sample_index
         self._contact_trigger_freq = self._z_to_frequency(0.0)
         self._trsync_can_trigger[self._contact_trsync_oid] = False
@@ -850,6 +929,20 @@ class BeaconMcuStub:
             raise OSError("bad get_steps response")
         fields = dict(kv.split(b"=", 1) for kv in resp.split() if b"=" in kv)
         return int(fields[b"steps"]), int(fields[b"vt"]) / 1e9
+
+    def _query_last_step_vt(self, sock) -> float:
+        sock.sendall(b"get_step_times line=%d\n" % self._z_step_line)
+        buf = b""
+        while b"\n" not in buf:
+            chunk = sock.recv(512)
+            if not chunk:
+                raise OSError("closed")
+            buf += chunk
+        resp, _, _ = buf.partition(b"\n")
+        fields = dict(kv.split(b"=", 1) for kv in resp.split() if b"=" in kv)
+        if b"last_ns" not in fields:
+            raise OSError(f"bad get_step_times response {resp!r}")
+        return int(fields[b"last_ns"]) / 1e9
 
     def _batch_sock(self):
         import socket as _socket
@@ -1059,7 +1152,7 @@ class BeaconMcuStub:
             if log_dir:
                 os.makedirs(log_dir, exist_ok=True)
             with open(self._log_path, "ab") as f:
-                ts = f"{time.monotonic() - self._t0:.6f}"
+                ts = f"{time.monotonic() - self._t0:.6f}][vt={self._monotonic():.6f}"
                 trailer = ""
                 if msgformat is not None:
                     name = msgformat.split()[0]
@@ -1090,7 +1183,7 @@ class BeaconMcuStub:
             if log_dir:
                 os.makedirs(log_dir, exist_ok=True)
             with open(self._log_path, "ab") as f:
-                ts = f"{time.monotonic() - self._t0:.6f}"
+                ts = f"{time.monotonic() - self._t0:.6f}][vt={self._monotonic():.6f}"
                 light = {
                     k: (
                         f"<{len(v)} bytes>"

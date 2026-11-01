@@ -2,7 +2,6 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include "sched.h"
 #include "sim_vtime_pacer.h"
 
 #define PACER_PERIOD_NS 100000ULL
@@ -28,9 +27,7 @@ sim_vtime_pacer_init(void)
         fprintf(stderr, "sim_vtime_pacer: no free libvtime pacer slot\n");
         abort();
     }
-    set_floor(pacer_slot, UINT64_MAX - PACER_SLACK_NS);
 }
-DECL_INIT(sim_vtime_pacer_init);
 
 void
 sim_vtime_pacer_set_floor(uint64_t ns)

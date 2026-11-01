@@ -1,4 +1,4 @@
-name: Sim e2e (advisory)
+name: Sim e2e
 
 on:
   workflow_dispatch:
@@ -15,18 +15,11 @@ jobs:
   sim-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Advisory gate: surfaces regressions the unit suites can't see (full
-    # firmware + host under the virtual clock) without blocking merges.
-    # Keep this job OUT of the branch-protection required checks.
-    continue-on-error: true
     strategy:
       fail-fast: false
-      # Shards run on separate runners, so tests inside each shard stay
-      # sequential (klippy's real-clock timing budgets flake under CPU
-      # contention) while the suite parallelizes across machines. Shards
-      # are balanced by measured test-file duration. The fallback "rest"
-      # shard ignores every pinned file, so new test files run there without
-      # touching this matrix.
+      # Shards run on separate runners, balanced by measured test-file
+      # duration. The fallback "rest" shard ignores every pinned file, so
+      # new test files run there without touching this matrix.
       matrix:
         include:
           - shard: probe

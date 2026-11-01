@@ -9,6 +9,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tools.sim.emulators import beacon_mcu, cartographer_mcu  # noqa: E402,F401
 from tools.sim.world import UNBOUNDED_VTIME_SPEED, SimWorld  # noqa: E402
 
 
@@ -45,6 +46,7 @@ def sim_world(request, tmp_path):
         ready_timeout: float = 120.0,
         vtime_speed: float = UNBOUNDED_VTIME_SPEED,
         host_gated: bool = True,
+        crystal_ppm: dict = None,
     ) -> SimWorld:
         world = SimWorld(
             tmp_path / f"world{len(worlds)}",
@@ -54,6 +56,7 @@ def sim_world(request, tmp_path):
             cartographer=cartographer,
             vtime_speed=vtime_speed,
             host_gated=host_gated,
+            crystal_ppm=crystal_ppm,
         )
         worlds.append(world)
         world.boot(

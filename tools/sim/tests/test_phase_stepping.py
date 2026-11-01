@@ -27,11 +27,18 @@ def test_sensorless_homing_switches_phase_mode(sim_world):
     )
     world.gcode_ok("G28 Z", timeout=120)
 
+    enter_marker = "phase mode entered"
+    exit_marker = "phase mode exited (pulse stepping)"
+
+    def reentry_logged():
+        log = world.klippy_log_text()
+        exit_at = log.find(exit_marker)
+        return exit_at >= 0 and log.find(enter_marker, exit_at) >= 0
+
+    world.wait_until(reentry_logged, 10, "phase mode re-entry in klippy.log")
     log = world.klippy_log_text()
     assert world.shutdown_line() is None
 
-    enter_marker = "phase mode entered"
-    exit_marker = "phase mode exited (pulse stepping)"
     first_enter = log.find(enter_marker)
     exit_idx = log.find(exit_marker)
     re_enter = log.find(
@@ -101,6 +108,11 @@ def test_corexy_phase_group_homes_x_through_pulse_mode(sim_world):
     toolhead = world.status().get("toolhead", {})
     assert "x" in toolhead.get("homed_axes", "")
 
+    world.wait_until(
+        lambda: world.klippy_log_text().count("phase mode entered") >= 8,
+        10,
+        "all four motors' phase mode re-entry in klippy.log",
+    )
     log = world.klippy_log_text()
     assert log.count("phase mode entered") >= 8, (
         "all four motors must re-enter phase mode after the trip move"

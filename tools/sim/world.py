@@ -26,7 +26,7 @@ from typing import Optional
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 VTIME_SHM_DIR = "/dev/shm"
-VTIME_SHM_SIZE = 4096
+VTIME_SHM_SIZE = 8192
 UNBOUNDED_VTIME_SPEED = 1000.0
 
 READY_POLL_S = 0.05
@@ -75,6 +75,26 @@ def _parse_gpio_pin(pin: str) -> tuple[str, int, int]:
     ):
         raise SimError(f"unsupported simulated motor pin {pin!r}")
     return mcu, int(chip[8:]), int(line[4:])
+
+
+def command_shapes(dict_path: pathlib.Path) -> tuple[dict[str, int], str]:
+    """Host→MCU command ids from an MCU data dictionary, and each command's
+    parameter kinds for libvtime's frame walker: "n" for a VLQ integer, "b"
+    for a length-prefixed buffer."""
+    if not dict_path.exists():
+        raise SimError(f"missing {dict_path}: rebuild the sim image")
+    commands = json.loads(dict_path.read_text())["commands"]
+    ids = {}
+    shapes = []
+    for fmt, msgid in commands.items():
+        name, *params = fmt.split()
+        ids[name] = msgid
+        kinds = "".join(
+            "b" if param.split("=", 1)[1] in ("%s", "%*s", "%.*s") else "n"
+            for param in params
+        )
+        shapes.append(f"{msgid}={kinds}")
+    return ids, ";".join(shapes)
 
 
 def configured_step_tracks(
@@ -166,14 +186,35 @@ def vtime_shm_name_alloc() -> str:
 
 # struct vtime_shm (tools/sim/preload/vtime.h): harness_paced u32 at 8, pace
 # anchors (virtual ns, real CLOCK_MONOTONIC ns) at 16 and 24, pacer slot
-# count u32 at 32, pacer slots {u32 active, u32, u64 floor, u64 slack} from 40.
+# count u32 at 32, pacer slots {u32 active, u32, u64 floor, u64 slack} from 40,
+# device link slot count u32 at 3600, devices_handling i32 at 3604, device
+# links {u32 pts + 1, u32, u64 written, u64 consumed} from 3608.
 _HARNESS_PACED_OFFSET = 8
 _HARNESS_PACE_ANCHOR_OFFSET = 16
 _PACER_SLOTS_USED_OFFSET = 32
 _PACERS_OFFSET = 40
 _PACER_SLOT_SIZE = 24
-# Pacer slots the harness reserves before any MCU process claims one.
-HARNESS_PACER_SLOTS = 3
+_HOST_PRESENT_OFFSET = 232
+_WAITER_SLOTS_USED_OFFSET = 240
+_WAITER_TARGET_OFFSET = 248
+_WAITER_THREAD_OFFSET = 1272
+_WAITER_IS_FLOOR_OFFSET = 2808
+_CLOCK_LOCK_OWNER_OFFSET = 3320
+_HOST_TID_OFFSET = 3344
+_MAX_PACERS = 8
+_MAX_WAITERS = 128
+_MAX_HOST_THREADS = 64
+_LINK_SLOTS_USED_OFFSET = 3600
+_LINKS_OFFSET = 3608
+_LINK_SLOT_SIZE = 48
+_MAX_LINKS = 8
+_LINK_FAULTS_OFFSET = 3992
+_LINK_FAULT_SIZE = 24
+FAULT_DELAY, FAULT_DROP, FAULT_STALL, FAULT_LATE = 1, 2, 3, 4
+# Pacer and device-link slots the harness reserves before any MCU process
+# claims one.
+HARNESS_PACER_SLOTS = 4
+HARNESS_LINK_SLOTS = 4
 
 
 def vtime_create(shm_name: str, start_ns: int = 1_000_000_000) -> None:
@@ -181,6 +222,7 @@ def vtime_create(shm_name: str, start_ns: int = 1_000_000_000) -> None:
     shm = bytearray(VTIME_SHM_SIZE)
     struct.pack_into("<Q", shm, 0, start_ns)
     struct.pack_into("<I", shm, _PACER_SLOTS_USED_OFFSET, HARNESS_PACER_SLOTS)
+    struct.pack_into("<I", shm, _LINK_SLOTS_USED_OFFSET, HARNESS_LINK_SLOTS)
     with open(path, "wb") as f:
         f.write(shm)
     os.chmod(path, 0o666)
@@ -207,6 +249,7 @@ class VirtualClock:
         self._lock = threading.Lock()
         self._free_depth = 0
         self._free_pacers = list(range(HARNESS_PACER_SLOTS))
+        self._free_links = list(range(HARNESS_LINK_SLOTS))
 
     def now_ns(self) -> int:
         return struct.unpack_from("<Q", self._shm)[0]
@@ -257,6 +300,132 @@ class VirtualClock:
         struct.pack_into("<I", self._shm, base, 0)
         with self._lock:
             self._free_pacers.append(slot)
+
+    def claim_link(self, slave_fd: int) -> "DeviceLink":
+        rdev = os.fstat(slave_fd).st_rdev
+        pts = (os.major(rdev) - 136) * 256 + os.minor(rdev)
+        with self._lock:
+            if not self._free_links:
+                raise SimError(
+                    f"more than {HARNESS_LINK_SLOTS} emulated devices read "
+                    "from klippy at once"
+                )
+            slot = self._free_links.pop()
+        base = _LINKS_OFFSET + slot * _LINK_SLOT_SIZE
+        struct.pack_into("<I5Q", self._shm, base + 4, 0, 0, 0, 0, 0, 0)
+        struct.pack_into("<I", self._shm, base, pts + 1)
+        return DeviceLink(self._shm, base)
+
+    def release_link(self, link: "DeviceLink") -> None:
+        struct.pack_into("<I", self._shm, link.base, 0)
+        with self._lock:
+            self._free_links.append(
+                (link.base - _LINKS_OFFSET) // _LINK_SLOT_SIZE
+            )
+
+    def link_slot_of_pts(self, pts: int) -> int:
+        used = struct.unpack_from("<I", self._shm, _LINK_SLOTS_USED_OFFSET)[0]
+        for slot in range(min(used, _MAX_LINKS)):
+            base = _LINKS_OFFSET + slot * _LINK_SLOT_SIZE
+            if struct.unpack_from("<I", self._shm, base)[0] == pts + 1:
+                return slot
+        raise SimError(f"no device link registered for pts{pts}")
+
+    def post_link_fault(
+        self, slot: int, kind: int, msgid: int, count: int, delay_ns: int
+    ) -> None:
+        base = _LINK_FAULTS_OFFSET + slot * _LINK_FAULT_SIZE
+        generation = struct.unpack_from("<I", self._shm, base)[0]
+        struct.pack_into(
+            "<IiIQ", self._shm, base + 4, kind, msgid, count, delay_ns
+        )
+        struct.pack_into("<I", self._shm, base, (generation + 1) & 0xFFFFFFFF)
+
+    def holds(self) -> str:
+        """What currently stops virtual time: the shm state a wedge leaves."""
+        shm = self._shm
+        now = self.now_ns()
+        host_present, host_running = struct.unpack_from(
+            "<Ii", shm, _HOST_PRESENT_OFFSET
+        )
+        lock_owner, host_pid, wake_epoch, idle_epoch = struct.unpack_from(
+            "<IIQQ", shm, _CLOCK_LOCK_OWNER_OFFSET
+        )
+        links_used, devices_handling = struct.unpack_from(
+            "<Ii", shm, _LINK_SLOTS_USED_OFFSET
+        )
+        parts = [
+            f"host_present={host_present} host_running={host_running} "
+            f"host_pid={host_pid} wake_epoch={wake_epoch} "
+            f"idle_epoch={idle_epoch} clock_lock_owner={lock_owner} "
+            f"devices_handling={devices_handling}"
+        ]
+        for i in range(min(links_used, _MAX_LINKS)):
+            pts, _, written, consumed = struct.unpack_from(
+                "<IIQQ", shm, _LINKS_OFFSET + i * _LINK_SLOT_SIZE
+            )
+            if pts and written != consumed:
+                parts.append(
+                    f"device pts{pts - 1} unread={written - consumed}B"
+                )
+        used = struct.unpack_from("<I", shm, _PACER_SLOTS_USED_OFFSET)[0]
+        for i in range(min(used, _MAX_PACERS)):
+            active, _, floor, slack = struct.unpack_from(
+                "<IIQQ", shm, _PACERS_OFFSET + i * _PACER_SLOT_SIZE
+            )
+            if active:
+                parts.append(
+                    f"pacer{i} floor+slack={(floor + slack - now) / 1e6:+.3f}ms"
+                )
+        used = struct.unpack_from("<I", shm, _WAITER_SLOTS_USED_OFFSET)[0]
+        for i in range(min(used, _MAX_WAITERS)):
+            target = struct.unpack_from(
+                "<Q", shm, _WAITER_TARGET_OFFSET + i * 8
+            )[0]
+            is_floor = struct.unpack_from(
+                "<I", shm, _WAITER_IS_FLOOR_OFFSET + i * 4
+            )[0]
+            if target and is_floor:
+                who = struct.unpack_from(
+                    "<Q", shm, _WAITER_THREAD_OFFSET + i * 8
+                )[0]
+                parts.append(
+                    f"host waiter tid {who & 0xFFFFFFFF} "
+                    f"floor={(target - now) / 1e6:+.3f}ms"
+                )
+        for i in range(_MAX_HOST_THREADS):
+            tid = struct.unpack_from("<I", shm, _HOST_TID_OFFSET + i * 4)[0]
+            if not tid:
+                continue
+            try:
+                stat = pathlib.Path(
+                    f"/proc/{host_pid}/task/{tid}/stat"
+                ).read_text()
+            except OSError:
+                continue
+            comm, _, rest = stat.partition("(")[2].rpartition(")")
+            if rest.split()[0] == "R":
+                parts.append(f"host thread {tid} ({comm}) runnable")
+        return "; ".join(parts)
+
+
+class DeviceLink:
+    """An emulated device's input from klippy, on the virtual clock.
+
+    klippy's libvtime counts every byte it writes to the device's pty and
+    virtual time stands still until the emulator reports them handled, so
+    a request is answered at the instant klippy sent it however late the
+    emulator thread gets scheduled.
+    """
+
+    def __init__(self, shm: mmap.mmap, base: int):
+        self._shm = shm
+        self.base = base
+
+    def consumed(self, nbytes: int) -> None:
+        offset = self.base + 16
+        total = struct.unpack_from("<Q", self._shm, offset)[0] + nbytes
+        struct.pack_into("<Q", self._shm, offset, total)
 
 
 class HarnessPacer:
@@ -316,7 +485,8 @@ class VirtualDeadline:
         elif time.monotonic() - self._last_progress > self.WEDGE_REAL_S:
             raise SimError(
                 f"virtual clock stuck at {now_ns / 1e9:.6f}s for "
-                f"{self.WEDGE_REAL_S:.0f}s of real time: simulator wedged"
+                f"{self.WEDGE_REAL_S:.0f}s of real time: simulator wedged; "
+                f"{self._clock.holds()}"
             )
         return now_ns >= self._end_ns
 
@@ -615,6 +785,7 @@ class SimWorld:
         verbose: bool = False,
         vtime_speed: float = UNBOUNDED_VTIME_SPEED,
         host_gated: bool = True,
+        crystal_ppm: Optional[dict[str, float]] = None,
     ):
         self.workdir = pathlib.Path(workdir)
         self.repo_root = repo_root
@@ -630,6 +801,7 @@ class SimWorld:
         # with real time.
         self.vtime_speed = float(os.environ.get("VTIME_SPEED", vtime_speed))
         self.host_gated = host_gated
+        self.crystal_ppm = crystal_ppm or {}
         self.vtime_shm_name = vtime_shm_name_alloc()
         self.vclock: Optional[VirtualClock] = None
         self.vtime_recorder: Optional[VtimeRecorder] = None
@@ -655,6 +827,7 @@ class SimWorld:
             str, list[tuple[int, int, int, int, int, int, int, int]]
         ] = {}
         self._z_step_lines: dict[str, int] = {}
+        self._command_ids: dict[str, dict[str, int]] = {}
 
     # ------------------------------------------------------------- boot
 
@@ -708,18 +881,12 @@ class SimWorld:
         cfg_path = self.workdir / "printer.cfg"
         if "[danger_options]" not in config_text:
             # Homing trip deadlines are wall-clock budgets sized for
-            # real-time motion, and the 5ppm clock-sync stability gate is
-            # sized for hardware oscillators. Virtual time legally runs
-            # slower than real time under load (pacer floors) and jitters
-            # far beyond real crystal drift, so give every sim world the
-            # slack to keep both guards without becoming a host-scheduling
+            # real-time motion; virtual time legally runs slower than real
+            # time under load (pacer floors), so give every sim world the
+            # slack to keep the guard without becoming a host-scheduling
             # lottery. Inserted before any autosave block — that section
             # must stay at the end of the file.
-            danger = (
-                "\n[danger_options]\n"
-                "homing_trip_deadline_margin: 30\n"
-                "clock_sync_stable_ppm: 1000\n"
-            )
+            danger = "\n[danger_options]\nhoming_trip_deadline_margin: 30\n"
             marker = config_text.find("#*#")
             if marker == -1:
                 config_text += danger
@@ -803,6 +970,11 @@ class SimWorld:
         env["VTIME_SPEED"] = str(self.vtime_speed)
         env["MCU_SIM_SOCK_DIR"] = str(sock_dir)
         env["MCU_SIM_GPIO_STEP_TRACKING"] = "1"
+        if name in self.crystal_ppm:
+            env["VTIME_CRYSTAL_PPM"] = repr(self.crystal_ppm[name])
+        command_ids, shapes = command_shapes(elf.with_suffix(".dict"))
+        self._command_ids[name] = command_ids
+        env["MCU_SIM_CMD_SHAPES"] = shapes
         tracks = self._step_tracks.get(name, [])
         env["MCU_SIM_STEP_TRACKS"] = ";".join(
             ",".join(str(value) for value in track) for track in tracks
@@ -934,6 +1106,8 @@ class SimWorld:
                 str(self.klippy_log),
                 "-a",
                 self.api_socket,
+                "-I",
+                str(self.workdir / "printer_input"),
             ],
             env=env,
             stdout=stdout_log,
@@ -1132,6 +1306,52 @@ class SimWorld:
                     f"{timeout}s; appended:\n{appended[-2000:]}"
                 )
             time.sleep(READY_POLL_S)
+
+    def inject(
+        self,
+        mcu: str,
+        *,
+        delay_command: Optional[str] = None,
+        drop_command: Optional[str] = None,
+        late_command: Optional[str] = None,
+        by_s: float = 0.0,
+        count: int = 1,
+        stall_s: Optional[float] = None,
+    ) -> None:
+        """Fault the host→MCU link of process `mcu` ("h7", "f4"), applied by
+        the MCU as it reads, in virtual time: hold the next `count` frames
+        carrying `delay_command` (and everything behind them) for `by_s`,
+        drop the next `count` frames carrying `drop_command`, hold only the
+        next `count` `late_command` commands for `by_s` (as if the host
+        produced them late; they ride the first frame klippy sends after
+        that, while every other frame passes on time), or hold the whole
+        link for `stall_s`. Klippy is not touched."""
+        commands = {
+            FAULT_DELAY: delay_command,
+            FAULT_DROP: drop_command,
+            FAULT_LATE: late_command,
+        }
+        chosen = {k: c for k, c in commands.items() if c is not None}
+        if len(chosen) + (stall_s is not None) != 1:
+            raise SimError(
+                "inject takes exactly one of delay_command, drop_command,"
+                " late_command, stall_s"
+            )
+        pty_path = {"h7": self.h7_pty, "f4": self.f4_pty}[mcu]
+        pts = int(os.readlink(pty_path).rsplit("/", 1)[1])
+        slot = self.vclock.link_slot_of_pts(pts)
+        if stall_s is not None:
+            self.vclock.post_link_fault(
+                slot, FAULT_STALL, 0, 0, int(stall_s * 1e9)
+            )
+            return
+        ((kind, command),) = chosen.items()
+        ids = self._command_ids[mcu]
+        if command not in ids:
+            raise SimError(f"{mcu} has no command {command!r}")
+        self.vclock.post_link_fault(
+            slot, kind, ids[command], count, int(by_s * 1e9)
+        )
 
     def shutdown_line(self) -> Optional[str]:
         for line in self.klippy_log_text().splitlines():

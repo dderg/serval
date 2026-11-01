@@ -539,6 +539,10 @@ impl StepShim {
         self.motors[motor].cursor.step_count()
     }
 
+    pub fn count_resting_at(&self, motor: usize, steps: f64) -> i64 {
+        self.motors[motor].cursor.count_resting_at(steps)
+    }
+
     pub fn commanded_position(&self, motor: usize) -> f64 {
         self.motors[motor].cursor.position()
     }

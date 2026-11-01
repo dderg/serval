@@ -233,6 +233,9 @@ timer_signal(int signal)
 void
 timer_init(void)
 {
+#if CONFIG_MCU_SIM
+    sim_vtime_pacer_init();
+#endif
     // Initialize ss_alarm signal set
     int ret = sigemptyset(&TimerInfo.ss_alarm);
     if (ret < 0) {
